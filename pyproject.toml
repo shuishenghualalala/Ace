@@ -1,7 +1,7 @@
 [project]
 name = "crew"
 version = "0.1.0"
-description = "Crew - 可独立部署的本地多智能体工作台"
+description = "Crew - A local-first multi-agent workbench that lives on your computer"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]

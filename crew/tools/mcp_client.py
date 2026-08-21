@@ -1091,6 +1091,11 @@ class _ServerWorker:
 
     def _make_handler(self, tool_name: str):
         async def handler(args: dict[str, Any]) -> str:
+            qualified_name = f"{self.name}__{tool_name}"
+            # Per-call launch re-check: a host network worker is spawned under a
+            # non-managed context, but tool calls arrive from whatever conversation
+            # invokes them. A later managed dialog must not route side-effects through
+            # this host worker (H-21).
             if self._host_network_spawn:
                 from crew.security.launch import current_process_launch
 
@@ -1099,7 +1104,36 @@ class _ServerWorker:
                     return tool_error(
                         f"MCP server {self.name} 为宿主 HTTP/SSE 客户端，缺少 disabled 安全上下文"
                     )
-            if self._closing or self._error is not None or self._task is None or self._task.done():
+            configured_url = str(self.cfg.get("url") or "").strip()
+            if configured_url:
+                from crew.security.launch import current_process_launch
+                from crew.tools.security_guard import authorize_configured_mcp_call
+
+                launch = current_process_launch.get()
+                if (
+                    launch is None
+                    or launch.security_context is None
+                    or launch.approval_service is None
+                ):
+                    return tool_error(
+                        f"MCP server {self.name} 缺少当前会话安全上下文，已拒绝远程调用"
+                    )
+                try:
+                    await authorize_configured_mcp_call(
+                        configured_url,
+                        tool_name=qualified_name,
+                        args=args,
+                        security_service=launch.approval_service,
+                        security_context=launch.security_context,
+                    )
+                except ToolError as exc:
+                    return tool_error(str(exc))
+            if (
+                self._closing
+                or self._error is not None
+                or self._task is None
+                or self._task.done()
+            ):
                 return tool_error(f"MCP server {self.name} 连接已断开")
             loop = asyncio.get_running_loop()
             future: asyncio.Future[str] = loop.create_future()

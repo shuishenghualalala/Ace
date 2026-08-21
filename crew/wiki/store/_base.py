@@ -7,7 +7,6 @@ from typing import Any
 
 from crew.wiki.schemas import (
     HomeIntro,
-    KBSummary,
     KnowledgeBase,
     LintIssue,
     RawSource,
@@ -48,30 +47,6 @@ class WikiStore(ABC):
             if kb.id == kb_id:
                 return kb.vault_path
         return ""
-
-    # ---- kb summary ----
-    def get_kb_summary(
-        self,
-        owner_account_id: str = "",
-        kb_id: str = "default",
-    ) -> KBSummary:
-        """读取知识库摘要元数据；默认实现从 list_kbs 中查找。"""
-        for kb in self.list_kbs(owner_account_id):
-            if kb.id == kb_id:
-                return kb.summary
-        return KBSummary()
-
-    def set_kb_summary(
-        self,
-        summary: KBSummary,
-        owner_account_id: str = "",
-        kb_id: str = "default",
-    ) -> None:
-        """写入知识库摘要元数据；子类可覆盖以优化写入路径。"""
-        for kb in self.list_kbs(owner_account_id):
-            if kb.id == kb_id:
-                kb.summary = summary
-                return
 
     # ---- home intro ----
     def get_home_intro(
@@ -276,6 +251,27 @@ class WikiStore(ABC):
         offset: int = 0,
         brief: bool = False,
     ) -> list[WikiPage]: ...
+
+    def count_pages(
+        self,
+        owner_account_id: str = "",
+        kb_id: str = "default",
+    ) -> int:
+        """返回知识库中的页面总数。默认通过 list_all(brief=True) 计数，子类应覆盖为高效实现。"""
+        return len(self.list_all(owner_account_id=owner_account_id, kb_id=kb_id, limit=100000, brief=True))
+
+    def list_pages_by_source(
+        self,
+        source_id: str,
+        owner_account_id: str = "",
+        kb_id: str = "default",
+    ) -> list[WikiPage]:
+        """返回引用了指定 source 的页面列表（brief 模式，不含正文）。默认通过 list_all 过滤。"""
+        return [
+            page
+            for page in self.list_all(owner_account_id=owner_account_id, kb_id=kb_id, limit=100000, brief=True)
+            if source_id in page.sources
+        ]
 
     @abstractmethod
     def search(

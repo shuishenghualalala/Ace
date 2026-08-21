@@ -20,6 +20,28 @@ _ECHO = os.path.abspath(
 )
 
 
+@pytest.fixture(autouse=True)
+def _allow_host_stdio(monkeypatch):
+    """显式批准 host stdio spawn：安全默认关闭后，起真子进程的测试需显式 opt-in。
+
+    与 tests/test_mcp.py 的 stdio 用例同一 idioms：env 开关 + 非 managed launch。
+    """
+    from types import SimpleNamespace
+
+    from crew.security.launch import current_process_launch
+    from crew.security.models import PermissionProfile, PermissionProfileKind
+
+    monkeypatch.setenv("ACE_ALLOW_HOST_MCP_STDIO", "1")
+    token = current_process_launch.set(SimpleNamespace(
+        managed=False,
+        profile=PermissionProfile(PermissionProfileKind.DISABLED),
+    ))
+    try:
+        yield
+    finally:
+        current_process_launch.reset(token)
+
+
 def _echo_cfg(name: str = "echo") -> dict:
     return {"command": sys.executable, "args": [_ECHO]}
 

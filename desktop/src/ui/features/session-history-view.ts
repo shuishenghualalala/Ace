@@ -13,6 +13,7 @@ import { sessionStore } from '../stores/session-store';
 import { workspaceStore } from '../stores/workspace-store';
 import { isChannelSessionId } from './channel-sessions';
 import { isSessionVisibleWithExternalAgentsFlag } from './external-agents-feature';
+import { externalAgentInitial, externalAgentTone } from './external-agent-avatar';
 import { openSessionActionsMenu, togglePin } from './session-actions';
 
 const SEARCH_DEBOUNCE_MS = 150;
@@ -91,18 +92,18 @@ function sessionIdentity(session: SessionRow, workspace?: Workspace): string {
   const name = session.agentLabel?.name?.trim();
   if (provider === 'team') return `Team${name ? ` · ${name}` : ''}`;
   if (provider && !['crew', 'builtin', 'client'].includes(provider)) {
-    return `Agent${name ? ` · ${name}` : ''}`;
+    return name ? `${name} · Agent` : 'Agent';
   }
   if (workspace) return workspace.name;
   return session.workspaceId === 'default' ? '通用助手' : session.workspaceId;
 }
 
-function sessionIcon(session: SessionRow): IconId {
+function sessionIcon(session: SessionRow): IconId | null {
   if (session.channelPlatform) return 'icon-task';
   const provider = String(session.agentLabel?.provider || '').toLocaleLowerCase();
   if (provider === 'sites') return 'icon-inspiration';
   if (provider === 'team') return 'icon-team';
-  if (provider && !['crew', 'builtin', 'client'].includes(provider)) return 'icon-agent';
+  if (provider && !['crew', 'builtin', 'client'].includes(provider)) return null;
   return 'icon-task';
 }
 
@@ -310,9 +311,23 @@ export function createSessionHistoryView(
     else open.removeAttribute('aria-current');
     const identityIcon = open.querySelector<HTMLElement>('[data-session-identity-icon]')!;
     const desiredIcon = sessionIcon(session);
-    if (identityIcon.dataset.icon !== desiredIcon) {
-      identityIcon.dataset.icon = desiredIcon;
-      identityIcon.replaceChildren(createIcon(desiredIcon, { size: 16 }));
+    const provider = String(session.agentLabel?.provider || '').trim();
+    const providerInitial = externalAgentInitial(provider, session.agentLabel?.display_badge);
+    const desiredIdentity = desiredIcon
+      ? `icon:${desiredIcon}`
+      : `provider:${provider.toLocaleLowerCase()}:${providerInitial}`;
+    if (identityIcon.dataset.icon !== desiredIdentity) {
+      identityIcon.dataset.icon = desiredIdentity;
+      identityIcon.className = 'mw-session-history__identity-icon';
+      if (desiredIcon) {
+        identityIcon.replaceChildren(createIcon(desiredIcon, { size: 16 }));
+      } else {
+        identityIcon.classList.add(
+          'session__external-agent-icon',
+          `agent-provider-tone-${externalAgentTone(provider)}`,
+        );
+        identityIcon.textContent = providerInitial;
+      }
     }
     const title = open.querySelector<HTMLElement>('[data-session-title]')!;
     title.textContent = session.title;

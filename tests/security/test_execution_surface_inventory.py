@@ -71,6 +71,7 @@ INDIRECT_SURFACES = {
     "crew/browser/manager.py",
     "crew/cron/scheduler.py",
     "crew/sites/manager.py",
+
     "crew/team/team_manager.py",
     "crew/tools/builtin.py",
     "crew/tools/managed_tools.py",

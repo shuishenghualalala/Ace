@@ -9,6 +9,11 @@ from pathlib import Path
 from uuid import uuid4
 
 from crew.security.actions import ActionKind, NormalizedAction, normalize_exec_action
+from crew.security.models import (
+    EMPTY_ADDITIONAL_PERMISSIONS,
+    AdditionalPermissionProfile,
+    SandboxPermissions,
+)
 
 
 class RuleScope(StrEnum):
@@ -36,6 +41,9 @@ class ActionRule:
     # Redacted, user-facing provenance. These fields never participate in matching.
     action_summary: str = ""
     action_detail: str = ""
+    additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS
+    allow_prefix_authority: bool = False
+    tool_name: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.scope, RuleScope):
@@ -97,6 +105,8 @@ class ActionRule:
         *,
         scope: RuleScope,
         decision: RuleDecision = RuleDecision.ALLOW,
+        additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
+        tool_name: str = "",
     ) -> ActionRule:
         """Create an exact digest rule; safe for shell exec because raw+final argv are bound."""
         return cls(
@@ -104,6 +114,8 @@ class ActionRule:
             decision=decision,
             kind=action.kind,
             exact_digest=action.digest,
+            additional_permissions=additional_permissions,
+            tool_name=str(tool_name).strip(),
         )
 
     @classmethod
@@ -113,6 +125,9 @@ class ActionRule:
         *,
         cwd: str | Path,
         decision: RuleDecision = RuleDecision.ALLOW,
+        additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
+        allow_authority: bool = False,
+        tool_name: str = "",
     ) -> ActionRule:
         action = normalize_exec_action(argv_prefix, cwd)
         return cls(
@@ -121,6 +136,9 @@ class ActionRule:
             kind=ActionKind.EXEC,
             argv_prefix=action.argv,
             cwd=action.cwd,
+            additional_permissions=additional_permissions,
+            allow_prefix_authority=allow_authority,
+            tool_name=str(tool_name).strip(),
         )
 
     def matches(self, action: NormalizedAction) -> bool:
@@ -128,12 +146,21 @@ class ActionRule:
             return False
         if self.exact_digest:
             return action.digest == self.exact_digest
-        if self.kind is not ActionKind.EXEC or not self.argv_prefix:
-            return False
-        return (
-            action.cwd == self.cwd
-            and len(action.argv) >= len(self.argv_prefix)
-            and action.argv[: len(self.argv_prefix)] == self.argv_prefix
+        # Only host-validated, newly persisted allow prefixes carry authority.
+        # Legacy prefixes remain inert while deny prefixes stay active.
+        if self.decision is not RuleDecision.DENY:
+            if not self.allow_prefix_authority or self.tool_name != "terminal":
+                return False
+            if (
+                self.additional_permissions.sandbox_permissions
+                is not SandboxPermissions.REQUIRE_ESCALATED
+            ):
+                return False
+        candidates = action.parsed_commands or (action.argv,)
+        return action.cwd == self.cwd and any(
+            len(candidate) >= len(self.argv_prefix)
+            and tuple(candidate[: len(self.argv_prefix)]) == self.argv_prefix
+            for candidate in candidates
         )
 
     @property

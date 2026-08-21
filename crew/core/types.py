@@ -14,6 +14,11 @@ from typing import Any, Literal
 
 Role = Literal["system", "user", "assistant", "tool"]
 
+IMAGE_INPUT_UNAVAILABLE_NOTICE = (
+    "[图片未传入：当前模型不支持视觉输入。网页任务请优先使用 snapshot/DOM 等文本方式；"
+    "无法用文本替代时，请明确告知用户需要切换到视觉模型。]"
+)
+
 
 _FILE_WRITE_UI_ARG_KEYS = ("path", "file_path", "append")
 _BROWSER_REF_RE = re.compile(r"^p[1-9]\d*:[es][1-9]\d*$")

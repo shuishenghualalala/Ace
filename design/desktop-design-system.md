@@ -6,10 +6,105 @@
 >
 > Scope: `Ace/desktop` and its preview mode.
 >
-> Visual reference: [crew-ui-design-system.html](../desktop/crew-ui-design-system.html).
+> Visual reference: [ace-ui-design-system.html](./ace-ui-design-system.html).
 >
 > This document defines the target contract. It does not claim that the current
 > `desktop` CSS or `gemini_v3` preview already complies with it.
+
+## 0.1 Brand assets, external-agent identity, and system menu bar
+
+The approved visual source files are preserved in `design/reference-assets/`.
+Production consumers use the following small, stable set of assets:
+
+| Surface | Asset | Rule |
+| --- | --- | --- |
+| Desktop/Web product logo and Crew assistant avatar | `crew-logo-trans.png` | Use the supplied brand mark; preserve its transparent background and aspect ratio. |
+| 外援 navigation/mode entry | `external-agent.png` | Use this standalone monochrome mark for the 外援 navigation and mode entry only. Session, Composer-agent, and “我的外援” identity surfaces use the pixel initial button below. |
+| Desktop running-intro character | `crew-jump-agent.png` | Use the approved small yellow assistant with its white face and generous transparent canvas for the Composer running hint. Keep the restrained hop animation and DOM reuse; do not crop or enlarge the character; load the production copy through a bundle-relative path. |
+| macOS/desktop menu bar | `desktop/assets/menubar/{default,working,notification,done,rest}.png` | Default and rest use transparent black-line Template Image assets; working, notification, and done retain their supplied color. Never use a white-only or filled color mascot directly as a Template Image. |
+
+The menu-bar status contract is shared by Desktop Renderer and the main-process
+tray service:
+
+1. Priority is `有通知 > 工作中 > 完成 > 休眠 > 默认`.
+2. A new Work notification latches `有通知` until the user clicks the menu-bar
+   icon. The same click clears notification and completion indicators and opens
+   Crew.
+3. A session that finishes in the background shows `完成` until that click;
+   active-session completion is not treated as an unread completion.
+4. When there is no active task, no pending attention, and no completion state
+   for five continuous minutes, the icon changes to `休眠`. Otherwise it remains
+   `默认`.
+5. Renderer reports only the semantic state through IPC; image paths, scaling,
+   tooltip text, and raster/template policy remain main-process owned. The
+   default/rest production PNGs use solid black primary linework and state marks
+   on transparency so macOS can recolor them by theme. The active default source
+   is `design/reference-assets/crew-menubar-default-template-2.png`; the active
+   rest source is `design/reference-assets/crew-menubar-rest-template-2.png`.
+6. macOS assets render as a 44x44 physical-pixel representation with scale
+   factor 2, producing a 22pt Retina status item. Do not resize directly to a
+   single-density 22x22 bitmap; that path visibly pixelates line art.
+7. State artwork is normalized optically, not only by source-canvas dimensions.
+   Default/rest stay at the canonical scale; the smaller `done` mascot is
+   enlarged 1.16x before the final 44x44 crop, while its celebratory decoration
+   remains secondary. Working receives only a restrained 1.02x correction.
+
+External-agent session identity is rendered as `kimi · Agent` (agent name first)
+wherever the session identity label is shown. The supplied external-agent mark
+is only used for navigation and mode entry; session identity surfaces use the
+provider/display badge initial so the label and avatar follow the same rule.
+
+The default Composer mode uses the supplied Crew black-line mark from
+`crew-menubar-default-template-2.png` in both its trigger chip and the
+“智能体” popover row. The Composer 外援 entry uses the
+standalone `external-agent.png` mark; after a specific external agent is
+selected, the trigger changes to that provider's initial avatar. Icons keep the
+existing 16–18px optical size and do not change selection, disabled, or popover
+behavior.
+When “新建对话” is invoked from an external Agent or Team session, the new
+normal Crew draft resets to the configured Crew default model. External runtime
+model ids are session-owned and must never leak into a new Crew draft.
+
+In “我的外援” cards, Composer external-agent lists, session history, and ACP
+conversation turns, the identity is a single pixel-cute initial button. The
+letter uses the existing `display_badge` rule when supplied (for example kimi
+→ `K`); if the field is absent, it falls back to the first uppercase character
+of `provider`. These identity buttons use a chunky rounded outline, muted
+surface, compact monospace letter, and restrained inset depth; they do not
+combine `external-agent.png` with a provider badge. The standalone
+`external-agent.png` remains reserved for the 外援 navigation/entry icon.
+Long Composer lists must keep the mode switch and search field fixed while the
+agent/team list owns the scroll viewport.
+
+Provider tone is deterministic: known providers use a stable pattern slot and
+other providers use a normalized-name hash across six slots. All provider
+avatars use the current theme's black/white surface and ink; the provider is
+distinguished only by a quiet hard-edged pixel pattern (checker, grid, stripe,
+or cross). The same initial, slot, and full-surface pattern are shared across
+session, Composer, and Hub avatar sizes so the provider remains recognizable
+without introducing a provider color palette.
+The stable slots are: Kimi diagonal stair, Codex checker, Hermes vertical bars,
+Claude horizontal bars, Gemini double dots, and Sites compact plus.
+The tile repeats from the avatar's top-left corner across the complete surface
+at a 4–8px rhythm and uses 10% theme ink. This keeps the full avatar visually
+intentional while the initial remains the strongest element. The pattern must
+not introduce provider-specific color or high-contrast decoration.
+
+Runtime cards under “发现外援” use the same standalone `external-agent.png`
+mark as the Sidebar 外援 navigation item. They do not use the provider initial
+avatar, because they identify an external runtime integration rather than a
+configured agent identity.
+
+In the main conversation, every assistant turn (built-in Crew, an external
+provider, or an external team) is inset by 16px so its avatar center aligns
+with the running-intro assistant below while preserving the avatar-to-name and
+avatar-to-body spacing. User turns are inset by the same 16px from the right,
+forming a symmetric conversation gutter without changing bubble padding. The
+running-intro slot uses the same 920px centered content track and 16px inner
+gutter as messages, with a 38px avatar axis and 12px text gap. Alignment must be
+derived from that shared responsive geometry; fixed negative translations are
+not allowed. The approved yellow assistant retains its small subject scale and
+white face inside the transparent source canvas.
 
 ## 1. Purpose
 
@@ -42,7 +137,7 @@ Behavior and appearance have different authorities:
 4. Focused behavior documents in `Ace/docs/desktop` and
    `Ace/docs/frontend` define already implemented feature details.
 5. The historical Soft Pixel direction in
-   `Ace/docs/desktop/crew-soft-pixel-ui-design.html` is visual reference.
+   `Ace/doc/desktop/crew-soft-pixel-ui-design.html` is visual reference.
 6. Existing production behavior and verified accessibility wins are preserved
    unless an approved specification changes them.
 7. Existing production styling and the current `gemini_v3` appearance are
@@ -479,10 +574,12 @@ Rules:
 10. Yellow/amber is reserved for warning state or an explicitly documented
     entity illustration. It is not the default folder, security, or navigation
     color.
-11. The application rail uses `22px` navigation and footer-command icons in
-    both compact and expanded states. Rail instances use `2px` primary strokes
-    and `1.75px` secondary strokes; their outline follows row text color while
-    entity fills retain the restrained product symbol palette.
+11. The `128px` application rail uses `22px` navigation and footer-command icons
+    beside centered labels. At viewports below `1180px`, the rail uses the
+    `56px` compact token and hides labels while retaining accessible titles and
+    the Crew mark. Rail instances use `2px` primary strokes and `1.75px`
+    secondary strokes; their outline follows row text color while entity fills
+    retain the restrained product symbol palette.
 
 ### 9.1 Icon families
 
@@ -829,7 +926,7 @@ authoritative:
 - The model selector opens a compact flat list below its trigger. Optional model
   descriptions belong to hover help rather than permanent nested cards.
 - The security selector offers only the policy-supported Crew modes:
-  `请求批准`, `替我审批`, and `完全访问权限`. It does not expose a
+  `每次询问`, `替我审批`, and `完全访问权限`. It does not expose a
   free-form or custom policy editor.
 - Busy, queued, offline, and permission-blocked states are explicit.
 - Preview controls must never overlap the composer.
@@ -964,7 +1061,9 @@ state model, Team status model, browser host, or file-action implementation.
 - Default application window: `1280 x 800`.
 - Supported minimum: `960 x 640`.
 - Primary verification: `1440 x 1000`, `1280 x 800`, and `960 x 640`.
-- The navigation rail collapses before content becomes unusable.
+- The application rail is `128px` at normal desktop widths and uses a `56px`
+  compact column below `1180px`. The compact mode hides primary labels after
+  preserving their accessible names and title tooltips.
 - Page content must not cause body-level horizontal scrolling.
 - Tables, code, graphs, and boards may own local scrolling.
 - Shell columns are route-owned. A chat history column exists only for a chat
@@ -1004,33 +1103,39 @@ Rules:
 - Card grids use responsive grid tracks, not fixed card widths followed by empty
   space.
 
-### 12.4 Product mode selector
+### 12.4 Sidebar brand and shell owner
 
-The selector replaces the static product name in the top-left identity area.
+Crew uses one full-height application rail. The brand sits at its top; the
+title bar starts to the right and owns only the drag region and native window
+commands. The rail is `128px` in the normal layout and `56px` in compact mode;
+the compact brand keeps the Logo icon and hides the text label.
 
 ```text
-[product icon] Crew 办公助手 [chevron]
-               ┌──────────────────────────────┐
-               │ [agent] Crew 通用助手  │
-               │         通用对话、Agent 与项目│
-               │ [task]  Crew 办公助手 ✓│
-               │         事项、文件与办公知识 │
-               └──────────────────────────────┘
+[ Crew product mark ]
+        Crew
+
+  [icon]  对话
+  [icon]  外援
+  [icon]  技能
+  [icon]  灵感
+          ...
 ```
 
-- It is a menu button, not a select styled as a large pill.
-- The trigger uses the compact application icon asset without an added tile or
-  decorative container. Its chevron rotates only while the menu is open.
-- Each option uses the existing Agent or Task symbol to make the two modes
-  scannable. The menu remains a compact two-row list rather than a large card.
-- The current item uses the standard check symbol, selected-row background,
-  `aria-current`, and `aria-checked`; it never relies on color or a text glyph
-  alone.
+- The brand mark and `Crew` label use a vertical identity stack without an
+  added tile, border, shadow, menu, or chevron.
+- Navigation rows keep icon and label side by side. A fixed `22px` icon track,
+  restrained gap, and bounded label track are centered as one unit so icons do
+  not shift when labels have different lengths.
+- Selected, hover, focus, disabled, account, update, and settings rows reuse the
+  same centered geometry. Long account names truncate visibly instead of
+  clipping raw characters.
+- The rail and its brand span the title-bar and page rows. The title bar never
+  paints a duplicate product mark.
 - Switching does not convert the active record to the other mode.
 - Restoring the assistant mode's active session must not navigate away from
   that mode's saved `lastPosition` when asynchronous session hydration finishes.
-- At constrained width, the product icon and current assistant label remain
-  visible; supporting descriptions exist only in the menu.
+- At constrained width the rail keeps both icons and labels; the context track
+  narrows or collapses first.
 - `product-mode-store.ts` owns the `productMode` field and separate
   `lastPosition`, `navigationCollapsed`, and `historyFilter` snapshots for each
   product mode. It must not read or write Agent execution `mode`, session
@@ -1054,14 +1159,13 @@ The office assistant uses three stable regions, following the product flow in
 `docs/frontend/work-mode-panel.html`:
 
 ```text
-172px shared application rail | 260px context list | minmax(0, 1fr) work area
+128px shared application rail | 260px context list | minmax(0, 1fr) work area
 ```
 
-Work and General Assistant use the same expanded `172px` application rail,
-row geometry, labels, footer commands, and responsive collapse behavior. The
-rail collapses to the same `56px` icon presentation below `1180px`. The context
-list narrows to `240px` on constrained viewports and may be removed entirely by
-its collapse command.
+Work and General Assistant use the same application rail, row geometry, labels,
+and footer commands. Below `1180px`, the rail becomes `56px` and switches to
+icon-only rows while the context list narrows to `240px` and may be removed
+entirely by its collapse command.
 
 The Work navigation starts with three Work destinations: 工作, 计划, and 知识.
 It then reuses the shared 专家, 技能, Wiki, 任务, 审计, and 系统 destinations
@@ -1506,10 +1610,22 @@ failed. These are not interchangeable:
 The welcome view is the general assistant's quiet start state, not a marketing
 hero and not a Work dashboard.
 
-- Brand identity, the existing `Hi, 我是 Crew` / `今天想从哪里开始？`
-  greeting, the shared Composer, and
+- Brand identity, the daily Crew greeting, the shared Composer, and
   scenario commands form one centered vertical reading order. The Composer is
   the dominant action and scenario commands remain secondary.
+- Welcome copy rotates through the six approved colloquial title/subtitle pairs
+  by local calendar date. One day keeps one stable pair, including across
+  rerenders; invalid dates fall back to the first pair. The greeting is the
+  centered, large, bold primary line; its prompt is a smaller regular-weight
+  secondary line. This hierarchy remains stable for all six copy pairs.
+- The transparent Crew product mark is enlarged above the Composer without the
+  old circular tile, border, or raised shadow. Two large rounded doodle paws
+  use a bold `4px` rounded outline and three matching toe marks. They belong
+  to the primary Composer project-context strip, straddle its upper edge, and
+  sit wider than the mascot body. Mascot, paws, and Composer share one
+  responsive center axis; paws are decorative and never receive pointer events.
+- The mascot may breathe by at most `2px`. Reduced-motion disables this motion,
+  and short or narrow windows scale the complete mascot-hand unit together.
 - The welcome state reuses the production Composer in the centered composition;
   it does not create a second textarea or event path. Once conversation content
   exists, the same Composer returns to the chat workspace's stable bottom
@@ -1655,23 +1771,24 @@ office reminders.
 Legal documents have a bounded dialog shell and one scroll owner in the document body.
 At short viewport heights the final section must remain reachable without scrolling the page.
 
-The General Assistant welcome topology uses a centered 64px Crew product
-mark above the existing `Hi, 我是 Crew` / `今天想从哪里开始？` greeting,
-the shared Composer immediately below, and a compact horizontal
-scenario-command row beneath the Composer. Current theme tokens and responsive
-stacking remain authoritative.
+The General Assistant welcome topology uses a centered daily greeting followed
+by a `120px` Crew mascot unit whose two doodle hands overlap the shared Composer
+top edge. Short windows reduce the unit to `88px`; narrow windows use `96px`.
+A compact horizontal scenario-command row remains beneath the Composer. Current
+theme tokens and responsive stacking remain authoritative.
 
 Session selection updates active rows in place. Store refreshes must not detach and reinsert
 unchanged rows in a way that replays hover/focus motion after a click.
-  backend text is never forced into a single-line status pill or allowed to
+- Backend text is never forced into a single-line status pill or allowed to
   collide with actions.
 - Model rows use a bounded responsive grid. `Default model`, `Built in`, and
   other short states are content-sized badges, never full-width colored bars.
 - These presentation rules do not change selection, edit, default, reconnect,
   delete, install, or channel connect/disconnect behavior.
 
-The application title bar contains the product-mode trigger and native window
-commands. Approval, sandbox, and network state stay in the Composer and Security
+The application title bar begins after the full-height Sidebar brand and
+contains only the drag region and native window commands. Approval, sandbox,
+and network state stay in the Composer and Security
 surfaces; a permanent three-badge status strip is not shown in either mode.
 
 Office assistant adds Workbench, Work items, Workspace, Knowledge, Templates,
@@ -1692,7 +1809,8 @@ At or above `1180px`:
 
 Between `960px` and `1179px`:
 
-- navigation rail collapses to icons;
+- the `56px` navigation rail keeps centered icon rows, accessible names, and the
+  compact Crew Logo;
 - header actions may wrap;
 - grids reduce columns;
 - side summaries move below primary content;
@@ -1702,7 +1820,7 @@ Between `960px` and `1179px`:
 
 Office assistant behavior at the minimum window:
 
-- the function rail remains as icons with tooltips;
+- the function rail remains labeled, with tooltips as supplemental help;
 - the context list can collapse and is restored without losing selection;
 - the collapsed context action rail keeps restore and new-conversation commands
   reachable without moving them into primary navigation;
@@ -2187,9 +2305,9 @@ The Desktop design system is maintained as a connected set of artifacts:
 | --- | --- | --- |
 | Approved feature specification | behavior, permissions, data and workflow contract | only when it explicitly changes product behavior |
 | `docs/specs/desktop-ui-reconstruction.md` | Renderer replacement scope, boundaries and completion criteria | no |
-| `docs/frontend/desktop-design-system.md` | single normative UI standard | yes |
+| `design/desktop-design-system.md` | single normative UI standard | yes |
 | `docs/frontend/desktop-ui-parity-acceptance-manual.md` | legacy capability, interaction, IPC and security parity baseline | no |
-| `docs/desktop/crew-ui-design-system.html` | executable visual reference and acceptance surface | no |
+| `design/ace-ui-design-system.html` | executable visual reference and acceptance surface | no |
 | `desktop` production source | implementation | no |
 | preview fixtures and visual snapshots | state coverage and regression evidence | no |
 
@@ -2286,7 +2404,7 @@ enforce repository policy.
 | 2026-07-26 | The office assistant uses a function rail, context list, and dominant work area. |
 | 2026-07-26 | Agent conversations are read-only in the office assistant and enter Work context as explicit snapshots. |
 | 2026-07-26 | Work item business, execution, and synchronization states are independent. |
-| 2026-07-26 | `docs/frontend/desktop-design-system.md` is the single normative Desktop UI standard; the Living HTML is its executable visual reference. |
+| 2026-07-26 | `design/desktop-design-system.md` is the single normative Desktop UI standard; `design/ace-ui-design-system.html` is its executable visual reference. |
 | 2026-07-26 | The master-merge baseline adds Agent Hub, Wiki, Team collaboration, chat approval/media patterns, revised Skills/Plugins, history identity, and Usage provenance to the migration inventory. |
 | 2026-07-26 | Desktop UI governance uses the normative standard, Living HTML, repository-level `开发约束.md`, automated checks, and human review as complementary enforcement layers. |
 | 2026-07-26 | Process timelines preserve semantic icons for thinking, tool families, delegation, status, and errors; generic dots are not an acceptable replacement. |
@@ -2341,6 +2459,10 @@ enforce repository policy.
 | 2026-07-28 | A Work route owns exactly one main surface: Workbench shows Dashboard, a Work session shows Conversation, and neither may coexist with Welcome. Knowledge uses a bounded master list plus flexible detail; create/edit forms are progressive states triggered by explicit actions, never permanent empty-page furniture. |
 | 2026-07-28 | G-W19 Work planning uses one WorkItem source for the dashboard, date-grouped item history, office conversations, calendar/list/board views, and lifecycle actions. The create dialog uses visible labels and native date controls. New Work CSS may use only semantic tokens; preview data stays fixture-only. |
 | 2026-07-30 | Workbench presentation now follows the representative daily-work layout: a compact greeting header, one continuous four-metric brief, a primary attention list with a secondary template rail, and office-source detail below the first-viewport work summary. Item conversations expose an explicit keyboard-accessible return to Workbench in the stable context header. Existing Work API, template, item, archive, and shared Composer ownership remain unchanged. |
+| 2026-08-09 | macOS menu-bar default/rest use transparent black-line Template Images; working, notification, and done remain supplied color states. All five macOS states use a 44px @2x representation for a crisp 22pt status item. |
+| 2026-08-10 | New Crew drafts reset external runtime models to the configured Crew default. Running-intro and Agent avatars share one responsive content axis without fixed offsets; the approved yellow assistant keeps its small white-face artwork. Menu-bar color states use restrained optical normalization, with `done` enlarged 1.16x before the final 44px crop. |
+| 2026-08-10 | The static Crew brand moves from the title bar into the responsive full-height Sidebar: 128px in regular windows and a 56px icon-only rail below 1180px. Its expanded-state top spacing matches the 40px title-bar track so the brand aligns optically with the adjacent context heading. Welcome restores one centered reading order: a large bold greeting, smaller regular prompt, and enlarged transparent Crew mark. Two larger three-toe doodle paws are owned by the primary Composer and straddle the project-context strip's upper edge at a wider stance. Reduced-motion support and six approved daily greetings remain intact. |
+| 2026-08-11 | The shared application rail adopts `--mw-app-rail-width` (`128px`) and `--mw-app-rail-width-compact` (`56px`); below 1180px the rail, title-bar offset, no-context pages, restore control, navigation labels, account details, and Crew brand label switch together to compact icon-only presentation. |
 | 2026-07-31 | Workbench office detail uses compact inbox/todo lists above paired schedule/meeting month calendars. Calendar dates expose event labels and selected-day detail; every source keeps a non-expanding `查看全部` search and pagination dialog. |
 | 2026-07-30 | WorkItem and chat are separate: item creation never creates a conversation, item routes open details first, and one processing conversation can be created explicitly. Linked conversations are item-owned navigation, receive trusted owner-scoped item context, and do not duplicate in top-level history. The Work shell now follows example 09 directly and removes both the legacy top row and collapsed context placeholder track. |
 | 2026-07-28 | G-W19 completion keeps date items and linked processing conversations as separate projections of the same WorkItem. Plan position restores across product-mode switches; item-aware sessions retain their context bar. Work text sizes use typography tokens, and both approved viewports pass the production interaction and overflow matrix. |

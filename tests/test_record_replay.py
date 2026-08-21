@@ -470,7 +470,9 @@ def test_workflow_artifact_is_canonical_owner_bound_and_atomic(
 
     published = publish_workflow(OWNER, first)
     assert published.created is True
-    assert stat.S_IMODE(os.lstat(published.path).st_mode) == 0o600
+    # 0600 只有 POSIX 能表达；Windows 创建时已尽力传 0o600（NTFS 按扩展属性近似）。
+    if os.name == "posix":
+        assert stat.S_IMODE(os.lstat(published.path).st_mode) == 0o600
     loaded = read_workflow(OWNER, first.workflow_id, expected_digest=first.digest)
     assert loaded.raw == first.raw
     same = publish_workflow(OWNER, first)
@@ -1548,12 +1550,17 @@ async def test_replay_upload_completes_exact_pending_filechooser(
         workdir=str(tmp_path),
     )
     assert result == "post-upload-snapshot"
-    assert calls == [{
-        "trigger_selector": "#styled-upload-button",
-        "input_selector": "#attachment",
-        "files": [str(upload.resolve())],
-        "workdir": str(tmp_path),
-    }]
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["trigger_selector"] == "#styled-upload-button"
+    assert call["input_selector"] == "#attachment"
+    assert call["workdir"] == str(tmp_path)
+    # 本分支加固：上传先复制进 approved-uploads 暂存区（文件身份校验防 TOCTOU），
+    # Host 只见暂存副本（0000-<原名>），不见宿主机原始路径。
+    assert len(call["files"]) == 1
+    staged = Path(call["files"][0])
+    assert staged.is_relative_to(tmp_path / "approved-uploads")
+    assert staged.name == "0000-report.pdf"
 
 
 async def test_replay_upload_delegates_trigger_fallback_to_one_host_transaction(
@@ -1625,12 +1632,15 @@ async def test_replay_upload_delegates_trigger_fallback_to_one_host_transaction(
         workdir=str(tmp_path),
     )
     assert result == "post-upload-snapshot"
-    assert calls == [{
-        "trigger_selector": "#reveal-upload",
-        "input_selector": "#attachment",
-        "files": [str(upload.resolve())],
-        "workdir": str(tmp_path),
-    }]
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["trigger_selector"] == "#reveal-upload"
+    assert call["input_selector"] == "#attachment"
+    assert call["workdir"] == str(tmp_path)
+    assert len(call["files"]) == 1
+    staged = Path(call["files"][0])
+    assert staged.is_relative_to(tmp_path / "approved-uploads")
+    assert staged.name == "0000-report.pdf"
 
 
 class _ReplayManager:

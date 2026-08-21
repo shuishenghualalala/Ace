@@ -14,6 +14,7 @@ def test_cron_and_team_reenter_app_security_context() -> None:
     assert "current_process_launch.reset(" in runtime
 
 
+
 def test_mcp_stdio_requires_authenticated_bounded_native_transport() -> None:
     mcp = (ROOT / "crew/tools/mcp_client.py").read_text(encoding="utf-8")
     assert "MCP stdio requires an authenticated managed launch context" in mcp

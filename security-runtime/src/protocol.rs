@@ -7,21 +7,27 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const MAX_REQUEST_FRAME_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_STDIN_BYTES: usize = 1024 * 1024;
 pub const MAX_ENV_BYTES: usize = 256 * 1024;
+pub const MAX_HOME_FILE_BYTES: usize = 1024 * 1024;
+pub const MAX_HOME_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_HOME_FILES: usize = 64;
 pub const MAX_RESPONSE_FRAME_BYTES: usize = 128 * 1024;
 pub const MAX_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_STDIO_INPUT_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_STDIO_INPUT_BYTES: usize = 16 * 1024 * 1024;
-pub const READY_CAPABILITIES: [&str; 4] = [
+pub const READY_CAPABILITIES: [&str; 7] = [
     "deny_read_glob_v1",
     "stdin_once",
     "stream_output",
     "duplex_stdio_v1",
+    "stdin_bidirectional",
+    "readonly_roots",
+    "full_disk_read",
 ];
 const STDIO_MAC_CONTEXT: &[u8] = b"ace-runtime-stdio-v1\0";
 
@@ -104,9 +110,13 @@ pub enum RuntimeRequest {
         #[serde(default)]
         readable_roots: Vec<String>,
         #[serde(default)]
+        readonly_roots: Vec<String>,
+        #[serde(default)]
         denied_roots: Vec<String>,
         #[serde(default)]
         filesystem_globs: Vec<FilesystemGlobRule>,
+        #[serde(default)]
+        full_disk_read: bool,
         #[serde(default)]
         network_enabled: bool,
         #[serde(default)]
@@ -119,6 +129,8 @@ pub enum RuntimeRequest {
         stdin_b64: Option<String>,
         #[serde(default)]
         env_overrides: BTreeMap<String, String>,
+        #[serde(default)]
+        home_files: BTreeMap<String, String>,
     },
     RunStdio {
         command: Vec<String>,
@@ -144,6 +156,42 @@ pub enum RuntimeRequest {
         #[serde(default)]
         env_overrides: BTreeMap<String, String>,
     },
+    InteractiveOpen {
+        command: Vec<String>,
+        cwd: String,
+        #[serde(default)]
+        writable_roots: Vec<String>,
+        #[serde(default)]
+        readable_roots: Vec<String>,
+        #[serde(default)]
+        readonly_roots: Vec<String>,
+        #[serde(default)]
+        denied_roots: Vec<String>,
+        #[serde(default)]
+        full_disk_read: bool,
+        #[serde(default)]
+        network_enabled: bool,
+        #[serde(default)]
+        network_rules: Vec<NetworkRule>,
+        #[serde(default)]
+        allow_local_binding: bool,
+        #[serde(default = "default_max_output_bytes")]
+        max_output_bytes: usize,
+        #[serde(default)]
+        env_overrides: BTreeMap<String, String>,
+        #[serde(default)]
+        home_files: BTreeMap<String, String>,
+    },
+    InteractiveWrite {
+        data_b64: String,
+    },
+    InteractiveClose,
+}
+
+#[derive(Debug)]
+pub enum RuntimeControl {
+    Write(Vec<u8>),
+    Close,
 }
 
 #[derive(Debug, Serialize)]
@@ -151,7 +199,7 @@ pub struct ReadyFrame {
     #[serde(rename = "type")]
     pub frame_type: &'static str,
     pub version: u16,
-    pub capabilities: [&'static str; 4],
+    pub capabilities: [&'static str; 7],
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,6 +285,7 @@ pub enum RuntimeMessage {
 pub struct ProcessInput {
     pub stdin: Option<Vec<u8>>,
     pub env_overrides: BTreeMap<String, String>,
+    pub home_files: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,6 +300,7 @@ pub struct RuntimeCapabilities {
     pub filesystem_sandbox: bool,
     pub process_tree_cleanup: bool,
     pub managed_network: bool,
+    pub full_disk_read: bool,
     pub system_bwrap: bool,
     pub bundled_bwrap: bool,
     pub wsl_version: Option<u8>,
@@ -278,9 +328,18 @@ fn default_escalatable() -> bool {
     true
 }
 
+#[cfg(test)]
 pub fn validate_process_inputs(
     stdin_b64: Option<&str>,
     env_overrides: &BTreeMap<String, String>,
+) -> Result<ProcessInput, InputValidationError> {
+    validate_process_inputs_with_home_files(stdin_b64, env_overrides, &BTreeMap::new())
+}
+
+pub fn validate_process_inputs_with_home_files(
+    stdin_b64: Option<&str>,
+    env_overrides: &BTreeMap<String, String>,
+    home_files: &BTreeMap<String, String>,
 ) -> Result<ProcessInput, InputValidationError> {
     let stdin = match stdin_b64 {
         Some(encoded) => {
@@ -333,9 +392,61 @@ pub fn validate_process_inputs(
         }
     }
 
+    if home_files.len() > MAX_HOME_FILES {
+        return Err(InputValidationError {
+            code: "sandbox_denied",
+            message: "projected HOME has too many files",
+        });
+    }
+    let mut decoded_home_files = BTreeMap::new();
+    let mut total_home_bytes = 0usize;
+    for (relative_path, encoded) in home_files {
+        let components: Vec<&str> = relative_path.split('/').collect();
+        if relative_path.is_empty()
+            || relative_path.starts_with('/')
+            || relative_path.contains('\\')
+            || relative_path.contains(':')
+            || components
+                .iter()
+                .any(|part| part.is_empty() || *part == "." || *part == "..")
+        {
+            return Err(InputValidationError {
+                code: "sandbox_denied",
+                message: "projected HOME path must be relative",
+            });
+        }
+        let decoded = BASE64_STANDARD
+            .decode(encoded)
+            .map_err(|_| InputValidationError {
+                code: "sandbox_denied",
+                message: "invalid projected HOME file encoding",
+            })?;
+        if decoded.len() > MAX_HOME_FILE_BYTES {
+            return Err(InputValidationError {
+                code: "sandbox_denied",
+                message: "projected HOME file exceeds the size limit",
+            });
+        }
+        total_home_bytes =
+            total_home_bytes
+                .checked_add(decoded.len())
+                .ok_or(InputValidationError {
+                    code: "sandbox_denied",
+                    message: "projected HOME exceeds the size limit",
+                })?;
+        if total_home_bytes > MAX_HOME_TOTAL_BYTES {
+            return Err(InputValidationError {
+                code: "sandbox_denied",
+                message: "projected HOME exceeds the size limit",
+            });
+        }
+        decoded_home_files.insert(relative_path.clone(), decoded);
+    }
+
     Ok(ProcessInput {
         stdin,
         env_overrides: env_overrides.clone(),
+        home_files: decoded_home_files,
     })
 }
 
@@ -343,6 +454,8 @@ pub fn validate_process_inputs(
 /// Platform modules enforce OS policy; this boundary owns the protocol-level
 /// memory and output limits so malformed requests cannot reach them with an
 /// unbounded command, path list, or capture budget.
+static INTERACTIVE_EMPTY_GLOBS: Vec<FilesystemGlobRule> = Vec::new();
+
 pub fn validate_request_limits(request: &RuntimeRequest) -> Result<(), InputValidationError> {
     let (
         command,
@@ -426,6 +539,41 @@ pub fn validate_request_limits(request: &RuntimeRequest) -> Result<(), InputVali
             &None,
             env_overrides,
         ),
+        RuntimeRequest::InteractiveOpen {
+            command,
+            cwd,
+            writable_roots,
+            readable_roots,
+            denied_roots,
+            network_rules,
+            max_output_bytes,
+            env_overrides,
+            ..
+        } => (
+            command,
+            cwd,
+            writable_roots,
+            readable_roots,
+            denied_roots,
+            &INTERACTIVE_EMPTY_GLOBS,
+            network_rules,
+            max_output_bytes,
+            &0,
+            &None,
+            env_overrides,
+        ),
+        RuntimeRequest::InteractiveWrite { data_b64 } => {
+            // The decoded-size ceiling is enforced where the payload is
+            // consumed; here we only bound the frame itself.
+            if data_b64.len() > MAX_REQUEST_FRAME_BYTES {
+                return Err(InputValidationError {
+                    code: "sandbox_denied",
+                    message: "interactive write payload exceeds the size limit",
+                });
+            }
+            return Ok(());
+        }
+        RuntimeRequest::InteractiveClose => return Ok(()),
     };
 
     let command_bytes = command
@@ -632,6 +780,7 @@ mod tests {
             filesystem_sandbox: true,
             process_tree_cleanup: true,
             managed_network: false,
+            full_disk_read: false,
             system_bwrap: false,
             bundled_bwrap: false,
             wsl_version: None,
@@ -646,7 +795,7 @@ mod tests {
 
     #[test]
     fn protocol_limits_match_the_public_contract() {
-        assert_eq!(PROTOCOL_VERSION, 2);
+        assert_eq!(PROTOCOL_VERSION, 3);
         assert_eq!(MAX_REQUEST_FRAME_BYTES, 2 * 1024 * 1024);
         assert_eq!(MAX_STDIN_BYTES, 1024 * 1024);
         assert_eq!(MAX_ENV_BYTES, 256 * 1024);
@@ -803,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn events_serialize_to_the_v2_ndjson_shape() {
+    fn events_serialize_to_the_v3_ndjson_shape() {
         let started = RuntimeEvent::Started {
             version: PROTOCOL_VERSION,
             nonce: "nonce".to_string(),

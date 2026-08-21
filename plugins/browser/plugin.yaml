@@ -13,6 +13,7 @@ capabilities:
   - filesystem
 provides_tools:
   - browser_use
+  - browser_use_advanced
   - record_compile
   - record_install
   - record_replay

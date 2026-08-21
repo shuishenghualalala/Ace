@@ -69,6 +69,7 @@ function riskClassLabel(riskClass: string, toolName: string): string {
   if (riskClass === 'external_file_write') return '修改项目外文件';
   if (riskClass === 'dangerous_command') return '执行高风险命令';
   if (riskClass === 'shell_command') return '执行命令';
+  if (riskClass === 'external_agent_network') return '启动外部智能体并允许其访问模型服务';
   return riskClass || '需要人工确认';
 }
 
@@ -86,6 +87,8 @@ export function formatApprovalSummary(request: Record<string, unknown>): string 
   const intent = channelFileIntent(toolName);
   const riskClass = String(request['risk_class'] ?? action['risk_class'] ?? '');
   const argv = Array.isArray(action['argv']) ? action['argv'].map(String) : [];
+  const additional = (request['additional_permissions'] ?? {}) as Record<string, unknown>;
+  const sandboxPermissions = String(additional['sandbox_permissions'] ?? 'use_default');
   const lines = [
     // gateway schema 吐的是 risk_class（非 risk_level）；两层都兜一层以防上游变动。
     `风险：${riskClassLabel(riskClass, toolName)}`,
@@ -93,6 +96,14 @@ export function formatApprovalSummary(request: Record<string, unknown>): string 
     `操作：${actionKindLabel(kind)}`,
   ];
   if (kind === 'exec') {
+    if (sandboxPermissions === 'require_escalated') {
+      lines.push('执行边界：请求当前完整命令使用宿主用户权限');
+      lines.push('警告：该命令将离开沙箱，可访问宿主用户能访问的文件和网络，包括 Ace 自身数据。');
+    } else if (sandboxPermissions === 'with_additional_permissions') {
+      lines.push('执行边界：留在沙箱内，并增加下方明确权限');
+    } else {
+      lines.push('执行边界：仅在当前沙箱内执行');
+    }
     const rawCommand = String(action['raw_command'] ?? '');
     // raw_command 是用户/模型提交的原始命令，也是用户真正要确认的内容；argv 是系统最终执行
     // 详情（Windows 可能含 UTF-8 初始化前导）。两者都显示，避免内部前导淹没具体命令或隐藏执行差异。
@@ -126,6 +137,10 @@ export function formatApprovalSummary(request: Record<string, unknown>): string 
         lines.push(`网络目标：${targets.join('；')}`);
       }
     }
+    const proposedPrefix = Array.isArray(request['proposed_argv_prefix'])
+      ? request['proposed_argv_prefix'].map(String)
+      : [];
+    if (proposedPrefix.length) lines.push(`可保存的命令前缀：${proposedPrefix.join(' ')}`);
     lines.push('未知副作用：命令可能组合已授权文件/网络能力；审批只绑定显示的完整命令与运行边界。');
   } else if (kind === 'file') {
     if (action['path']) lines.push(`文件：${String(action['path'])}`);
@@ -159,6 +174,7 @@ export function formatApprovalSummary(request: Record<string, unknown>): string 
   lines.push(kind === 'permission'
     ? '授权仅覆盖上面列出的额外权限；未列出的能力仍会被拒绝。'
     : '授权只匹配上面显示的完整动作；任一字符变化都会重新判断。');
+  if (request['preview'] && kind === 'exec') lines.push(`申请说明：${String(request['preview'])}`);
   return lines.join('\n');
 }
 
@@ -167,8 +183,25 @@ const sessionModes = new Map<string, ConversationSecurityMode>();
 // 新对话必须再次确认（决策 #95），避免一次确认后静默继承最高权限。
 const nextConversationModes = new Map<string, ConversationSecurityMode>();
 
+function acknowledgedMode(
+  result: { body?: unknown } | undefined,
+  fallback: ConversationSecurityMode,
+): ConversationSecurityMode {
+  const value = String((result?.body as { mode?: unknown } | undefined)?.mode ?? '');
+  return value === 'request_approval' || value === 'auto_review' || value === 'full_access'
+    ? value
+    : fallback;
+}
+
+function configuredDefaultMode(): ConversationSecurityMode {
+  const configured = state.config?.security?.default_mode;
+  return configured === 'request_approval' || configured === 'auto_review' || configured === 'full_access'
+    ? configured
+    : 'request_approval';
+}
+
 function presetForWorkspace(workspaceId: string): ConversationSecurityMode {
-  return nextConversationModes.get(workspaceId) ?? 'request_approval';
+  return nextConversationModes.get(workspaceId) ?? configuredDefaultMode();
 }
 
 function announceModeChange(): void {
@@ -210,18 +243,20 @@ export async function selectNextConversationMode(
       notify('安全模式切换失败：Desktop 安全桥不可用');
       return false;
     }
+    let effectiveMode = mode;
     try {
       const result = await setMode({ workspaceId, sessionId: sid, mode });
       if (!result?.ok) {
         notify(`安全模式切换失败：${String((result?.body as { detail?: string })?.detail ?? '未知错误')}`);
         return false;
       }
+      effectiveMode = acknowledgedMode(result, mode);
     } catch (err) {
       notify(`安全模式切换失败：${String((err as Error)?.message ?? err)}`);
       return false;
     }
     // Gateway ACK 后才更新 renderer 状态，避免 UI 显示 full_access 但后端仍在 managed（或相反）。
-    sessionModes.set(sid, mode);
+    sessionModes.set(sid, effectiveMode);
   }
   if (mode !== 'full_access') {
     nextConversationModes.set(workspaceId, mode);
@@ -250,6 +285,9 @@ export async function assignSecurityMode(
           notify(`安全模式初始化失败：${String((result?.body as { detail?: string })?.detail ?? '未知错误')}，已回退到逐次审批`);
           return 'request_approval';
         }
+        const effective = acknowledgedMode(result, preset);
+        sessionModes.set(sessionId, effective);
+        return effective;
       } catch (err) {
         notify(`安全模式初始化失败：${String((err as Error)?.message ?? err)}，已回退到逐次审批`);
         return 'request_approval';
@@ -261,14 +299,67 @@ export async function assignSecurityMode(
 }
 
 export function securityModeForSession(sessionId: string): ConversationSecurityMode {
-  return sessionModes.get(sessionId) ?? 'request_approval';
+  return sessionModes.get(sessionId) ?? configuredDefaultMode();
 }
 
 function decisionLabel(decision: SecurityApprovalChoice): string {
   if (decision === 'once') return '（仅这一次）';
   if (decision === 'session') return '（本次对话）';
-  if (decision === 'always') return '（始终允许此命令）';
+  if (decision === 'always') return '（始终允许此操作）';
   return '';
+}
+
+export function approvalBoundaryLabel(request: Record<string, unknown>): string {
+  const additional = (request['additional_permissions'] ?? {}) as Record<string, unknown>;
+  const sandboxPermissions = String(additional['sandbox_permissions'] ?? 'use_default');
+  if (sandboxPermissions === 'require_escalated') return '脱离沙箱执行';
+  const filesystem = Array.isArray(additional['filesystem']) ? additional['filesystem'] : [];
+  if (filesystem.length) {
+    const first = filesystem[0] as Record<string, unknown>;
+    const access = String(first['access'] ?? '') === 'read_write' ? '读写' : '只读';
+    const suffix = filesystem.length > 1 ? ` 等 ${filesystem.length} 项` : '';
+    return `沙箱内增加${access}权限：${String(first['root'] ?? '')}${suffix}`;
+  }
+  const network = Array.isArray(additional['network']) ? additional['network'] : [];
+  if (network.length || additional['allow_local_binding'] === true) return '沙箱内增加网络权限';
+  return '仅在当前沙箱内执行';
+}
+
+// Wiki Agent 会话固定归属 workspace=wiki（与 wiki-agent.ts 的 WIKI_AGENT_WORKSPACE_ID 一致，
+// 后端契约）；在独立 Wiki tab 里对话，state.activeSessionId 永远指向主聊天会话。
+const WIKI_AGENT_WORKSPACE_ID = 'wiki';
+// 轮询的会话上限：主聊天 + 本次运行打开过的少量 Wiki 会话，避免轮询扇出失控。
+const MAX_POLL_SESSIONS = 5;
+
+/**
+ * 审批轮询覆盖的会话：主聊天活跃会话 + Wiki Agent 会话。
+ *
+ * Wiki 会话在独立视图里运行，activeSessionId 不会指向它；只看活跃会话时，wiki 回合里
+ * 需要审批的工具调用（写文件、跑命令）在 UI 上无从批准，只能挂到 300s TTL 超时按拒绝
+ * 处理（实测一次「生成 PDF」连撞三次审批墙，25 分钟耗在等待上）。
+ */
+function approvalPollCandidates(): Array<{ sessionId: string; workspaceId: string }> {
+  const seen = new Set<string>();
+  const candidates: Array<{ sessionId: string; workspaceId: string }> = [];
+  const push = (sessionId: string | null | undefined, workspaceId: string | undefined): void => {
+    const id = String(sessionId ?? '').trim();
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    candidates.push({ sessionId: id, workspaceId: workspaceId ?? 'default' });
+  };
+  const active = state.activeSessionId;
+  if (active) {
+    push(
+      active,
+      state.sessions.find((item) => item.id === active)?.workspaceId
+        ?? state.currentWorkspaceId
+        ?? 'default',
+    );
+  }
+  for (const row of state.sessions) {
+    if (row.workspaceId === WIKI_AGENT_WORKSPACE_ID) push(row.id, row.workspaceId);
+  }
+  return candidates.slice(0, MAX_POLL_SESSIONS);
 }
 
 export function bindSecurityApprovalUi(): () => void {
@@ -278,6 +369,9 @@ export function bindSecurityApprovalUi(): () => void {
   const decisionButtons = Array.from(
     panel?.querySelectorAll<HTMLButtonElement>('[data-security-decision]') ?? [],
   );
+  // 面板在主 Composer 内的原始挂载位（approval 槽位）：全局浮动展示时要临时
+  // 挂到 body 下，收回时需归位，否则主聊天的本地 overlay 模式会找不到面板。
+  const panelHome = panel?.parentElement ?? null;
   let visibleRequest: Record<string, unknown> | null = null;
   let polling = false;
   let submitting = false;
@@ -286,29 +380,61 @@ export function bindSecurityApprovalUi(): () => void {
   const REFETCH_INTERVAL_MS = 5000;
   let lastPollAt = 0;
 
-  const showOverlay = (): void => {
-    container?.classList.add('is-approving');
-    panel?.setAttribute('aria-hidden', 'false');
+  const showOverlay = (request: Record<string, unknown>): void => {
+    if (!panel) return;
+    const requestSession = String(request['session_id'] ?? '').trim();
+    const isActiveSession = Boolean(requestSession) && requestSession === state.activeSessionId;
+    if (isActiveSession || !panelHome) {
+      // 主聊天会话的审批：盖在其输入框上层（既有行为）。
+      if (panel.parentElement !== panelHome) panelHome?.appendChild(panel);
+      panel.classList.remove('composer-approval-panel--global');
+      container?.classList.add('is-approving');
+    } else {
+      // 其他会话（如 Wiki 问答，独立 tab、主聊天输入框整体不可见）的审批：
+      // 面板挂到 body 下浮动展示，否则会随隐藏的 tab 一起消失，
+      // 用户永远看不到审批请求，工具只能干等 300s 超时按拒绝处理。
+      container?.classList.remove('is-approving');
+      if (panel.parentElement !== document.body) document.body.appendChild(panel);
+      panel.classList.add('composer-approval-panel--global');
+    }
+    panel.setAttribute('aria-hidden', 'false');
   };
   const hideOverlay = (): void => {
     container?.classList.remove('is-approving');
+    if (panel) {
+      panel.classList.remove('composer-approval-panel--global');
+      if (panelHome && panel.parentElement !== panelHome) panelHome.appendChild(panel);
+    }
     panel?.setAttribute('aria-hidden', 'true');
   };
 
   const poll = async (): Promise<void> => {
-    if (polling || submitting || !state.activeSessionId || !window.Crew?.securityPending) return;
+    if (polling || submitting || !window.Crew?.securityPending) return;
     // 已有可见请求时，节流到 5s 重拉一次以检测后端作废；无可见请求时每秒轮询照旧。
     if (visibleRequest && Date.now() - lastPollAt < REFETCH_INTERVAL_MS) return;
+    const candidates = approvalPollCandidates();
+    if (!candidates.length) return;
     polling = true;
     lastPollAt = Date.now();
     try {
-      const workspaceId = state.sessions.find((item) => item.id === state.activeSessionId)?.workspaceId
-        ?? state.currentWorkspaceId
-        ?? 'default';
-      const result = await window.Crew.securityPending({ workspaceId, sessionId: state.activeSessionId });
-      const body = result?.body as { requests?: Array<Record<string, unknown>> } | undefined;
-      const request = body?.requests?.[0];
-      if (!result?.ok || !request) {
+      // 后端 pending 按 (owner, workspace, session) 过滤，必须逐会话查询。
+      const results = await Promise.all(
+        candidates.map((candidate) =>
+          window.Crew.securityPending({
+            workspaceId: candidate.workspaceId,
+            sessionId: candidate.sessionId,
+          }).catch(() => null)),
+      );
+      let request: Record<string, unknown> | null = null;
+      for (const result of results) {
+        const body = result?.body as { requests?: Array<Record<string, unknown>> } | undefined;
+        const first = body?.requests?.[0];
+        if (result?.ok && first) {
+          request = first;
+          break;
+        }
+      }
+      if (!request) {
         // 之前有可见请求但现在拉不到了 -> 后端已作废或已处理，撤掉 overlay。
         if (visibleRequest) {
           visibleRequest = null;
@@ -335,7 +461,7 @@ export function bindSecurityApprovalUi(): () => void {
         sessionButton.disabled = requiresFreshConfirmation;
       }
       if (summary) summary.textContent = formatApprovalSummary(request);
-      showOverlay();
+      showOverlay(request);
     } catch {
       // Gateway unavailable is reported by the existing backend status guard.
     } finally {
@@ -345,38 +471,41 @@ export function bindSecurityApprovalUi(): () => void {
 
   decisionButtons.forEach((button) => {
     button.addEventListener('click', async () => {
-      if (submitting || !visibleRequest || !state.activeSessionId) return;
+      if (submitting || !visibleRequest) return;
       const decision = button.dataset['securityDecision'] as SecurityApprovalChoice;
       if (!SECURITY_APPROVAL_CHOICES.includes(decision)) return;
-      // always 会持久保存上面展示的完整动作；shell wrapper 只按完整命令精确匹配，
-      // 不允许用 pwsh/bash 固定前缀泛化为未来任意脚本。
+      const proposedPrefix = Array.isArray(visibleRequest['proposed_argv_prefix'])
+        ? visibleRequest['proposed_argv_prefix'].map(String)
+        : [];
       if (decision === 'always'
-        && !window.confirm('「始终允许」会持久保存上面展示的完整动作。只有命令、工作目录和执行参数完全一致时才会自动放行；任何变化都会重新询问。确定要持久授权吗？')) {
+        && !window.confirm(proposedPrefix.length
+          ? `「始终允许」会在当前项目和工作目录保存命令前缀：${proposedPrefix.join(' ')}。后续匹配此前缀的命令会自动放行。确定要持久授权吗？`
+          : '「始终允许」会持久保存上面展示的完整动作。只有命令、工作目录和执行参数完全一致时才会自动放行；任何变化都会重新询问。确定要持久授权吗？')) {
         return;
       }
       const workspaceId = String(visibleRequest['workspace_id'] ?? 'default');
       const requestId = String(visibleRequest['request_id'] ?? '');
       const taskId = typeof visibleRequest['task_id'] === 'string' ? String(visibleRequest['task_id']) : '';
-      const action = visibleRequest['action'] as { argv?: unknown[] } | undefined;
-      const argvPrefix = (action?.argv ?? []).map(String);
       const requestType = String(visibleRequest['request_type'] ?? 'action');
       const requestedPermissions = visibleRequest['permissions'] as Record<string, unknown> | undefined;
-      const sessionId = state.activeSessionId;
+      // 决策必须回传到发起请求的会话（pending 按 session 过滤、decide 校验上下文匹配），
+      // 不能用主聊天活跃会话——Wiki 会话的审批用 activeSessionId 会被后端判为上下文不匹配。
+      const sessionId = String(visibleRequest['session_id'] ?? '').trim() || state.activeSessionId;
+      if (!sessionId) return;
       submitting = true;
       decisionButtons.forEach((item) => { item.disabled = true; });
       try {
         // task_id 必须回传：Gateway decide 校验 request.task_id == ctx.task_id，
         // 缺失会被判为上下文不匹配返回 409，并触发 main 侧删除 nonce，之后所有按钮都报"已过期"。
-        // alwaysArgvPrefix 仅在 exec 动作（argv 非空）时携带：文件/网络动作 argv 为空，
-        // 带空数组会被 IPC schema 判为非法（must be a non-empty string array）并 reject，
-        // 这正是历史 bug——文件类"始终允许"点了没反应、框还挂着（决策见变更记录）。
         const result = await window.Crew.securityDecide({
           workspaceId,
           sessionId,
           requestId,
           taskId,
           decision,
-          ...(decision === 'always' && argvPrefix.length ? { alwaysArgvPrefix: argvPrefix } : {}),
+          ...(decision === 'always' && proposedPrefix.length
+            ? { alwaysArgvPrefix: proposedPrefix }
+            : {}),
           ...(requestType === 'permission' && decision !== 'reject' && requestedPermissions
             ? { permissions: requestedPermissions }
             : {}),
@@ -393,7 +522,7 @@ export function bindSecurityApprovalUi(): () => void {
         // 写回对话流：不带 activity 的 status 消息会持久保留（带 activity 的才被回合折叠/清掉）。
         const note = decision === 'reject'
           ? `✕ 已拒绝，命令未执行`
-          : `✔ 已批准${decisionLabel(decision)}`;
+          : `✔ 已批准${decisionLabel(decision)} · ${approvalBoundaryLabel(visibleRequest)}`;
         appendMessage(sessionId, 'status', note);
         renderChat();
         visibleRequest = null;

@@ -9,12 +9,14 @@
  *
  * 右栏面板（mountWikiAgentPanel）：面板头（标题 + 新建/历史/展开）是 wiki 自己的 DOM；
  * 对话区是**主对话面板本体**（conversation-panel.mountConversationPanel：同一套增量 diff
- * 渲染、scroll anchor 软钉底、完整 Composer）。wiki 特有扩展经面板槽位注入：模型 chip +
- * 附件按钮走 contextStaging toolbar-left、附件预览走 before-input、空态走 emptyState、
- * followup 走 followupHandlers、todo 走 Composer todo 槽位。
+ * 渲染、scroll anchor 软钉底、完整 Composer）。Composer 工具栏与主对话同一套实例级实现：
+ * 模型 chip（model-picker.createComposerModelControl）、上下文环（composer-context-ring）、
+ * 附件「+」（composer-context-view 工厂内聚触发文件选择）；wiki 特有扩展经面板槽位注入：
+ * 附件预览走 before-input、空态走 emptyState、followup 走 followupHandlers、todo 走 Composer todo 槽位。
  * wiki 页 renderShell 重建时，KB 未变则保留面板活节点（不重挂载）；真正重挂载时
  * （切 KB / 上传入口显式触发）草稿（embeddedDrafts）、宽度档位（embeddedExpanded）、
- * 模型缓存（embeddedModelByKb）、焦点（embeddedInputFocused）由模块状态存活并恢复。
+ * 焦点（embeddedInputFocused）由模块状态存活并恢复；会话模型绑定走共享的
+ * session-model.bindingsBySession（按 sessionId 隔离，天然不怕会话切换竞争）。
  *
  * 会话状态：本地内存 Map（sessionId → { kbId, kbName }），
  * 每条消息显式携带 wiki_kb_id；登录态变化时清空。
@@ -53,9 +55,18 @@ import {
   mountConversationPanel,
   type ConversationPanel,
 } from './conversation-panel';
-import { openModelSelectPopover } from './model-picker';
+import { createComposerModelControl, type ComposerModelControl } from './model-picker';
+import { createComposerContextView } from './composer-context-view';
+import {
+  createContextRingController,
+  type ContextRingController,
+} from './composer-context-ring';
 import { showConfirmDialog } from '../ui-feedback';
-import { applySessionModelBinding, loadSessionModel, modelLabelForId } from './session-model';
+import {
+  activeComposerModelId,
+  loadSessionModel,
+  modelContextWindow,
+} from './session-model';
 import {
   appendMessage,
   bookFor,
@@ -70,10 +81,19 @@ import {
 } from './chat-controller';
 import { ensureFileChangesDelegation } from './conversation-renderer';
 import { openInspectorToTab } from './inspector';
+import {
+  bindBrowserPanel,
+  hideBrowserPanelView,
+  renderBrowserPanel,
+  setBrowserPanelSession,
+} from './browser-panel';
 import { resumeSessionGeneration } from './session-busy';
 import { loadBackendHistory } from './session-controller';
 import {
   openWikiPageInHub,
+  closeWikiBrowserSurface,
+  openWikiBrowserSurface,
+  setWikiBrowserSurfaceRenderer,
   setWikiAgentPanelRenderer,
   toggleWikiBrowser,
   type WikiAgentEntryRequest,
@@ -107,7 +127,6 @@ export function forgetWikiAgentKb(kbId: string): void {
   embeddedAttachments.delete(normalized);
   embeddedDrafts.delete(normalized);
   embeddedExpanded.delete(normalized);
-  embeddedModelByKb.delete(normalized);
   if (activeEmbeddedKbId === normalized) {
     // 同名 KB 重建时不能让 wiki-page 复用旧面板 DOM，否则不会重新创建/加载会话。
     activePanel?.dispose();
@@ -208,16 +227,15 @@ function bindPaneSash(
 }
 
 const agentWidthStore = createPaneWidthStore({ key: 'crew.desktop.wikiAgentWidth.v1', min: 280, max: 760, vwFactor: 0.6 });
-/** 会话级模型展示缓存（kbId → { id, label }），chip 高亮与浮层选中态共用。 */
-const embeddedModelByKb = new Map<string, { id: string; label: string }>();
 let activeEmbeddedRoot: HTMLElement | null = null;
 let activeEmbeddedKbId = '';
 /** 当前挂载的对话面板实例（mountConversationPanel）；重挂载 / 登录态变化时 dispose。 */
 let activePanel: ConversationPanel | null = null;
 /** 面板每次挂载递增；异步会话加载只允许更新发起它的那次挂载。 */
 let embeddedMountVersion = 0;
-/** 当前打开的模型浮层关闭函数（面板重建 / 登录态变化时收回）。 */
-let embeddedModelPopoverClose: (() => void) | null = null;
+/** 当前挂载实例的模型 chip / 上下文环控制器（面板 DOM 重建 / 登录态变化时收回）。 */
+let activeModelControl: ComposerModelControl | null = null;
+let activeRingControl: ContextRingController | null = null;
 /** 面板输入框是否持有焦点（focusin/focusout 全局追踪，重挂载后恢复焦点用）。 */
 let embeddedInputFocused = false;
 
@@ -261,10 +279,11 @@ function clearEmbeddedPanelState(): void {
   embeddedAttachments.clear();
   embeddedDrafts.clear();
   embeddedExpanded.clear();
-  embeddedModelByKb.clear();
   embeddedAttachmentListeners.clear();
-  embeddedModelPopoverClose?.();
-  embeddedModelPopoverClose = null;
+  activeModelControl?.dispose();
+  activeModelControl = null;
+  activeRingControl?.dispose();
+  activeRingControl = null;
   embeddedInputFocused = false;
   activeEmbeddedRoot = null;
   activeEmbeddedKbId = '';
@@ -307,9 +326,6 @@ async function activateEmbeddedSession(
   sessionId: string,
   kbName = kbId,
 ): Promise<EmbeddedWikiAgentState> {
-  // 会话一旦切换就立即失效旧模型缓存；放在异步历史/Todo 加载之后会与面板重建
-  // 并发，出现 chip 已显示新模型但高亮 id 又被迟到清空的竞争。
-  embeddedModelByKb.delete(kbId);
   const item: EmbeddedWikiAgentState = {
     sessionId,
     kbId,
@@ -323,7 +339,11 @@ async function activateEmbeddedSession(
   await loadEmbeddedTodos(sessionId);
   ensureWikiSessionRow(sessionId);
   scheduleEmbeddedRender();
-  void loadEmbeddedModel(kbId, sessionId);
+  // 会话级模型绑定写入共享缓存（按 sessionId 隔离），chip/上下文环经控制器自动刷新。
+  void loadSessionModel(sessionId).then(() => {
+    activeModelControl?.refresh();
+    activeRingControl?.refresh();
+  });
   return item;
 }
 
@@ -475,11 +495,13 @@ async function addEmbeddedFiles(
   kbId = activeEmbeddedKbId,
 ): Promise<void> {
   if (!files?.length || !kbId) return;
+  // 附件随 wiki 会话上传：后端据此把附件收入当前知识库（而非 default）。
+  const sessionId = embeddedByKb.get(kbId)?.sessionId;
   // 多文件并行上传（单个失败只提示、不阻断其余），成功结果保持原顺序追加。
   const uploaded = await Promise.all(
     Array.from(files).map(async (file) => {
       try {
-        return await backendApi.upload(file.name, await readFileAsBase64(file));
+        return await backendApi.upload(file.name, await readFileAsBase64(file), { kbId, sessionId });
       } catch (err) {
         notify(`上传失败：${file.name} · ${(err as Error).message}`);
         return null;
@@ -494,60 +516,14 @@ async function addEmbeddedFiles(
   notifyEmbeddedAttachmentsChanged();
 }
 
-// ── 右栏 Composer 扩展（模型 chip / 附件按钮走面板 contextStaging 槽位） ──
+// ── 右栏 Composer 扩展（附件预览走面板 contextStaging 槽位） ──
 
 const WIKI_VOID_ICON = `<svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/><circle cx="8.5" cy="11.5" r=".4" fill="currentColor"/><circle cx="12" cy="11.5" r=".4" fill="currentColor"/><circle cx="15.5" cy="11.5" r=".4" fill="currentColor"/></svg>`;
 const WIKI_EXPAND_ICON = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg>`;
 const WIKI_NEW_CHAT_ICON = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h6"/><path d="M18 2v6"/><path d="M15 5h6"/></svg>`;
 const WIKI_HISTORY_ICON = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>`;
+const WIKI_BROWSER_ICON = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>`;
 const WIKI_HISTORY_DELETE_ICON = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`;
-const WIKI_MODEL_ICON = `<svg class="composer-chip__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" aria-hidden="true"><path d="M12 2a10 10 0 1 0 10 10 4 4 0 0 1-5-5 4 4 0 0 1-5-5"/><path d="M8.5 8.5v.01"/><path d="M16 15.5v.01"/><path d="M12 12v.01"/></svg>`;
-const WIKI_CHIP_CHEVRON = `<svg class="composer-chip__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="11" height="11" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>`;
-const WIKI_ATTACH_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>`;
-
-/** 同步模型 chip 文案（面板可能已被 renderShell 重建，只在仍是当前 KB 时写）。 */
-function syncEmbeddedModelChip(kbId: string): void {
-  const root = activeEmbeddedRoot;
-  if (!root?.isConnected || root.dataset.kbId !== kbId) return;
-  const label = root.querySelector<HTMLElement>('[data-wiki-agent-model-label]');
-  if (label) label.textContent = embeddedModelByKb.get(kbId)?.label || '模型';
-}
-
-/** 加载 Wiki 会话的会话级模型绑定（loadSessionModel 只写缓存；非活跃会话不会动主 Composer）。 */
-async function loadEmbeddedModel(kbId: string, sessionId: string): Promise<void> {
-  if (embeddedModelByKb.has(kbId)) {
-    syncEmbeddedModelChip(kbId);
-    return;
-  }
-  const binding = await loadSessionModel(sessionId);
-  // 历史会话快速切换时，迟到的旧请求不能覆盖当前会话的模型展示。
-  if (embeddedByKb.get(kbId)?.sessionId !== sessionId) return;
-  const id = binding?.model_profile_id || state.config?.active_model_id || '';
-  const label = binding?.model_label || modelLabelForId(id);
-  embeddedModelByKb.set(kbId, { id, label });
-  syncEmbeddedModelChip(kbId);
-}
-
-/** 切换 Wiki 会话模型：走会话级接口（与主对话同一 PUT /api/session/{id}/model），只影响本会话。 */
-async function pickEmbeddedModel(kbId: string, modelId: string): Promise<void> {
-  const panel = embeddedByKb.get(kbId);
-  if (!panel) return;
-  try {
-    const binding = await backendApi.setSessionModel(panel.sessionId, modelId, {
-      workspace_id: WIKI_AGENT_WORKSPACE_ID,
-    });
-    applySessionModelBinding(panel.sessionId, binding);
-    const label = binding.pending_label || binding.model_label || modelLabelForId(modelId);
-    embeddedModelByKb.set(kbId, {
-      id: binding.pending_model_profile_id || binding.model_profile_id || modelId,
-      label,
-    });
-    syncEmbeddedModelChip(kbId);
-    notify(binding.pending || isBusy(panel.sessionId) ? `模型将在下条消息生效：${label}` : `已切换模型：${label}`);
-  } catch {
-    notify('切换模型失败');
-  }
-}
 
 function formatWikiHistoryTime(value: number): string {
   if (!value) return '';
@@ -657,6 +633,9 @@ async function switchEmbeddedConversation(root: HTMLElement, req: WikiAgentEntry
   notifyEmbeddedAttachmentsChanged();
   embeddedDrafts.set(req.kbId, '');
   await activateEmbeddedSession(req.kbId, sessionId, req.kbName || req.kbId);
+  if (document.querySelector('[data-wiki-browser-surface]')) {
+    setBrowserPanelSession(sessionId);
+  }
   const input = root.querySelector<HTMLTextAreaElement>('[data-composer-input]');
   if (input) {
     input.value = '';
@@ -687,11 +666,35 @@ async function createEmbeddedConversation(root: HTMLElement, req: WikiAgentEntry
   }
 }
 
+function mountWikiBrowserSurface(root: HTMLElement, sessionId: string): void {
+  setBrowserPanelSession(sessionId);
+  root.innerHTML = renderBrowserPanel();
+  bindBrowserPanel(root);
+}
+
+function toggleEmbeddedBrowser(kbId: string): void {
+  const current = embeddedByKb.get(kbId);
+  if (!current) {
+    void embeddedState(kbId).then(({ sessionId }) => openWikiBrowserSurface(sessionId));
+    return;
+  }
+  if (document.querySelector('[data-wiki-browser-surface]')) {
+    hideBrowserPanelView();
+    setBrowserPanelSession(null);
+    closeWikiBrowserSurface();
+  } else {
+    setBrowserPanelSession(current.sessionId);
+    openWikiBrowserSurface(current.sessionId);
+  }
+}
+
 /** 把指定知识库的持久化 Wiki Agent 会话挂到 Wiki 右栏。 */
 export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryRequest): void {
-  // 面板 DOM 随 wiki 页 renderShell 整体重建：先收回挂在旧锚点上的模型浮层。
-  embeddedModelPopoverClose?.();
-  embeddedModelPopoverClose = null;
+  // 面板 DOM 随 wiki 页 renderShell 整体重建：收回旧实例的控制器（模型 chip 浮层 / 上下文环）。
+  activeModelControl?.dispose();
+  activeModelControl = null;
+  activeRingControl?.dispose();
+  activeRingControl = null;
   activeEmbeddedRoot = root;
   activeEmbeddedKbId = req.kbId;
   const mountVersion = ++embeddedMountVersion;
@@ -706,6 +709,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
     <header class="wiki-agent-pane__header">
       <span class="wiki-agent-pane__title" title="${escapeHtml(kbName)}">Wiki 问答 · ${escapeHtml(kbName)}</span>
       <div class="wiki-agent-pane__header-actions">
+        <button type="button" class="wiki-agent-pane__icon-btn" data-wiki-agent-browser title="打开内置浏览器" aria-label="打开或关闭 Wiki 内置浏览器">${WIKI_BROWSER_ICON}</button>
         <button type="button" class="wiki-agent-pane__icon-btn" data-wiki-agent-new title="新建对话" aria-label="新建 Wiki 对话">${WIKI_NEW_CHAT_ICON}</button>
         <button type="button" class="wiki-agent-pane__icon-btn" data-wiki-agent-history title="查看历史" aria-label="查看 Wiki 对话历史" aria-haspopup="dialog" aria-expanded="false">${WIKI_HISTORY_ICON}</button>
         <button type="button" class="wiki-agent-pane__icon-btn${expanded ? ' is-active' : ''}" data-wiki-agent-expand title="展开 / 收窄对话栏" aria-label="展开或收窄对话栏">${WIKI_EXPAND_ICON}</button>
@@ -737,25 +741,19 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
     });
   }, true);
   // ── 对话面板本体：与主对话同一个 mountConversationPanel ──
-  // wiki 扩展经槽位注入：模型 chip + 附件按钮 → toolbar-left；文件选择 + 附件预览 → before-input。
+  // wiki 扩展经槽位注入：文件选择 + 附件预览 → before-input；工具栏控件（附件「+」/
+  // 模型 chip / 上下文环）由 composer-context-view 的 wiki 表面统一构建。
   const conversationHost = root.querySelector<HTMLElement>('[data-wiki-agent-conversation]')!;
   const staging = document.createElement('div');
   staging.innerHTML = `
     <div data-composer-context-source="before-input">
       <input type="file" data-wiki-agent-file multiple hidden />
       <div class="mw-attachment-list" data-attachment-preview hidden></div>
-    </div>
-    <div data-composer-context-source="toolbar-left">
-      <button type="button" class="composer-chip wiki-agent-pane__model" data-wiki-agent-model title="选择模型" aria-haspopup="listbox" aria-expanded="false">
-        ${WIKI_MODEL_ICON}
-        <span class="composer-chip__label" data-wiki-agent-model-label>${escapeHtml(embeddedModelByKb.get(req.kbId)?.label || '模型')}</span>
-        ${WIKI_CHIP_CHEVRON}
-      </button>
-      <button type="button" class="chat-action-btn chat-attach-inline" data-wiki-agent-attach title="添加附件" aria-label="添加附件">${WIKI_ATTACH_ICON}</button>
     </div>`;
+  const getEmbeddedSessionId = (): string | null => embeddedByKb.get(req.kbId)?.sessionId ?? null;
   const panel = mountConversationPanel(conversationHost, {
     containerId: 'wiki-agent-messages',
-    getSessionId: () => embeddedByKb.get(req.kbId)?.sessionId ?? null,
+    getSessionId: getEmbeddedSessionId,
     attachments: createEmbeddedPanelAttachments(req.kbId),
     actions: {
       submit: (text) => sendEmbeddedPrompt(text, '', req.kbId),
@@ -789,16 +787,32 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
   // 布局沿用旧 .wiki-agent-pane__messages 的 flex/overflow 规则。
   panel.messagesEl?.classList.add('wiki-agent-pane__messages');
   panel.messagesEl?.setAttribute('data-wiki-agent-messages', '');
+  // ── Composer 工具栏：与主对话同一套实例级实现（composer-context-view 构建控件，
+  //    model-picker / composer-context-ring 控制器驱动行为，按嵌入会话 id 解析状态） ──
+  const contextView = createComposerContextView(panel.composerRoot, { surface: 'wiki' });
+  activeModelControl = createComposerModelControl(contextView.controls.modelChip, {
+    getSessionId: getEmbeddedSessionId,
+    workspaceId: WIKI_AGENT_WORKSPACE_ID,
+  });
+  activeRingControl = createContextRingController(contextView.controls.ring, {
+    getSessionId: getEmbeddedSessionId,
+    resolveWindow: () => modelContextWindow(activeComposerModelId(getEmbeddedSessionId())),
+    // 切走 Wiki 页后不再为看不见的面板拉取；回到 Wiki 页时 renderShell 重挂载会重建并刷新。
+    isActive: () => state.activeTab === 'wiki',
+  });
+  activeRingControl.refresh();
   const input = panel.composerRoot.querySelector<HTMLTextAreaElement>('[data-composer-input]');
   const fileInput = panel.composerRoot.querySelector<HTMLInputElement>('[data-wiki-agent-file]');
-  const modelBtn = panel.composerRoot.querySelector<HTMLElement>('[data-wiki-agent-model]');
   root.querySelector('[data-wiki-agent-new]')?.addEventListener('click', () => {
     void createEmbeddedConversation(root, req);
   });
   root.querySelector('[data-wiki-agent-history]')?.addEventListener('click', () => {
     void openWikiHistory(root, req.kbId);
   });
-  root.querySelector('[data-wiki-agent-attach]')?.addEventListener('click', () => fileInput?.click());
+  root.querySelector('[data-wiki-agent-browser]')?.addEventListener('click', () => {
+    toggleEmbeddedBrowser(req.kbId);
+  });
+  // 附件「+」→ file input 的触发由 composer-context-view 工厂内聚；这里只管选中后的上传。
   fileInput?.addEventListener('change', () => {
     void addEmbeddedFiles(fileInput.files);
     fileInput.value = '';
@@ -850,26 +864,6 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
       },
     });
   }
-  modelBtn?.addEventListener('click', (event) => {
-    event.stopPropagation();
-    if (embeddedModelPopoverClose) {
-      embeddedModelPopoverClose();
-      return;
-    }
-    modelBtn.classList.add('is-open');
-    modelBtn.setAttribute('aria-expanded', 'true');
-    embeddedModelPopoverClose = openModelSelectPopover({
-      anchor: modelBtn,
-      activeId: embeddedModelByKb.get(req.kbId)?.id || state.config?.active_model_id || '',
-      width: 300,
-      onPick: (id) => void pickEmbeddedModel(req.kbId, id),
-      onClose: () => {
-        embeddedModelPopoverClose = null;
-        modelBtn.classList.remove('is-open');
-        modelBtn.setAttribute('aria-expanded', 'false');
-      },
-    });
-  });
   root.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target : null;
     // 消息复制按钮的全局委托绑在 #chat-messages 上，够不到本面板，这里补一份。
@@ -926,7 +920,11 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
     ) return;
     loaded.kbName = req.kbName || req.kbId;
     scheduleEmbeddedRender();
-    void loadEmbeddedModel(req.kbId, loaded.sessionId);
+    // 缓存路径（会话已激活）不再过 activateEmbeddedSession，这里兜底确保模型绑定已加载。
+    void loadSessionModel(loaded.sessionId).then(() => {
+      activeModelControl?.refresh();
+      activeRingControl?.refresh();
+    });
   }).catch((err) => {
     if (
       mountVersion === embeddedMountVersion
@@ -983,6 +981,7 @@ export function initWikiAgent(): void {
     return { wikiKbId: session.kbId };
   });
   setWikiAgentPanelRenderer(mountWikiAgentPanel);
+  setWikiBrowserSurfaceRenderer(mountWikiBrowserSurface);
 
   if (listenersBound) return;
   listenersBound = true;
@@ -1008,7 +1007,18 @@ export function initWikiAgent(): void {
   // 登录态变化：重置专用 Wiki Agent 会话状态。
   window.addEventListener('user:login-changed', () => {
     wikiAgentSessions.clear();
+    hideBrowserPanelView();
+    setBrowserPanelSession(null);
+    closeWikiBrowserSurface();
     clearEmbeddedPanelState();
+  });
+
+  window.addEventListener('browser-workbench:command', (event) => {
+    const action = (event as CustomEvent<{ action?: string }>).detail?.action;
+    if (action !== 'close' || !document.querySelector('[data-wiki-browser-surface]')) return;
+    hideBrowserPanelView();
+    setBrowserPanelSession(null);
+    closeWikiBrowserSurface();
   });
 
   window.addEventListener('messages:changed', (event) => {
@@ -1053,4 +1063,5 @@ export function __resetWikiAgentForTest(): void {
   clearEmbeddedPanelState();
   setWikiSendExtrasResolver(null);
   setWikiAgentPanelRenderer(null);
+  setWikiBrowserSurfaceRenderer(null);
 }

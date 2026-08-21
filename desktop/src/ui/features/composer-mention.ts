@@ -21,7 +21,7 @@
  *  - **发送守卫**：popup 打开时，index.ts 的 Enter→发送 必须让位（见 isMentionOpen）。
  */
 
-import { backendApi, type CompleteItem, type Skill, type WorkPreference } from '../backend-client';
+import { backendApi, type BrowserPageState, type CompleteItem, type Skill, type WorkPreference } from '../backend-client';
 import { createIcon, type IconId } from '../components/icon';
 import { setRuntimeStyle, clearRuntimeStyle } from '../components/runtime-style';
 import { $, state } from '../state';
@@ -30,7 +30,9 @@ import { sessionStore } from '../stores/session-store';
 import { workStore } from '../stores/work-store';
 import { composerWorkspaceId } from './workspaces';
 import { queryPrimaryComposer } from './composer-scope';
+import { tabTitle } from './browser-inspector';
 import {
+  MENTION_KINDS,
   removeMentionTag,
   renderMentionTags,
   searchMentions,
@@ -54,8 +56,10 @@ interface MentionItem {
   text: string;
   display: string;
   meta: string;
-  /** 图标类型：slash / folder / image / file。 */
-  sig: 'slash' | 'folder' | 'image' | 'file';
+  /** 图标类型：slash / folder / image / file / tab（浏览器标签页）。 */
+  sig: 'slash' | 'folder' | 'image' | 'file' | 'tab';
+  /** 弹窗候选左侧图标。 */
+  icon: IconId;
   workResult?: MentionResult;
 }
 
@@ -297,6 +301,7 @@ function filterSkills(query: string): MentionItem[] {
       display: x.s.display_name || x.s.name || x.s.slug,
       meta: x.s.description_zh || x.s.description || '',
       sig: 'slash' as const,
+      icon: 'skill-badge' as const,
     }));
 }
 
@@ -322,24 +327,93 @@ function activeWorkspaceId(): string {
     : composerWorkspaceId();
 }
 
+
+/** 按 query 过滤浏览器标签页并映射为提及候选（title/url 子串匹配）。纯函数，可单测。 */
+export function filterBrowserTabs(tabs: BrowserPageState['tabs'], query: string): MentionResult[] {
+  const q = query.trim().toLowerCase();
+  return tabs
+    .filter((tab) => !q || tab.title.toLowerCase().includes(q) || tab.url.toLowerCase().includes(q))
+    .map((tab) => ({
+      entity_type: 'browser_tab' as const,
+      id: tab.id,
+      title: tabTitle(tab),
+      source_link: tab.url,
+    }));
+}
+
+/**
+ * 标签页列表按 sessionId 短 TTL 缓存：browserState 的返回与 query 无关（过滤在本地
+ * filterBrowserTabs 做），120ms 防抖的每次击键都拉一次纯属浪费；进行中的请求去重，
+ * 连发击键共享同一次拉取。TTL 内标签页开关最多 ~2s 后才反映到补全候选，可接受。
+ */
+const BROWSER_TABS_TTL_MS = 2000;
+let browserTabsCache: { sessionId: string; fetchedAt: number; tabs: BrowserPageState['tabs'] } | null = null;
+let browserTabsInflight: { sessionId: string; promise: Promise<BrowserPageState['tabs']> } | null = null;
+
+function loadBrowserTabs(sessionId: string): Promise<BrowserPageState['tabs']> {
+  const cached = browserTabsCache;
+  if (cached && cached.sessionId === sessionId && Date.now() - cached.fetchedAt < BROWSER_TABS_TTL_MS) {
+    return Promise.resolve(cached.tabs);
+  }
+  if (browserTabsInflight?.sessionId === sessionId) return browserTabsInflight.promise;
+  const promise: Promise<BrowserPageState['tabs']> = backendApi
+    .browserState(sessionId)
+    .then((result) => {
+      const tabs = result.state?.tabs ?? [];
+      browserTabsCache = { sessionId, fetchedAt: Date.now(), tabs };
+      return tabs;
+    })
+    .catch(() => {
+      // 失败不写缓存（同 skills 的「失败不缓存」），避免一次抖动把补全锁空 2s
+      return [] as BrowserPageState['tabs'];
+    })
+    .finally(() => {
+      if (browserTabsInflight?.promise === promise) browserTabsInflight = null;
+    });
+  browserTabsInflight = { sessionId, promise };
+  return promise;
+}
+
+/**
+ * 浏览器标签页本地 provider（不走 /api/work/mentions）：取当前会话的标签页列表
+ * （带短 TTL 缓存，见 loadBrowserTabs），击键只按 query 做本地过滤。
+ * 无浏览器会话 / 接口未就绪 / 失败时静默返回空数组，不影响文件与 work 候选。
+ */
+export async function fetchBrowserTabMentions(query: string): Promise<MentionResult[]> {
+  const sessionId = state.activeSessionId;
+  if (!sessionId) return [];
+  const tabs = await loadBrowserTabs(sessionId);
+  return filterBrowserTabs(tabs, query);
+}
+
+/** 文件候选（/api/complete 来源）各 sig 的图标；work 提及类型的图标在 MENTION_KINDS 注册表。 */
+const FILE_ROW_ICON: Record<'folder' | 'image' | 'file', IconId> = {
+  folder: 'icon-folder',
+  image: 'icon-image',
+  file: 'icon-file',
+};
+
 async function fetchFileItems(token: string): Promise<MentionItem[]> {
   const rowsPromise = backendApi.complete(token, { workspaceId: activeWorkspaceId() });
   const workPromise = productModeStore.get().productMode === 'work'
     ? searchMentions(token.slice(1), activeWorkspaceId())
     : Promise.resolve([]);
-  const [rows, workResults] = await Promise.all([rowsPromise, workPromise]);
-  return (rows as CompleteItem[]).map<MentionItem>((r) => ({
-    text: r.text,
-    display: r.display,
-    meta: r.meta,
-    sig: r.type === 'folder' ? 'folder' : r.type === 'image' ? 'image' : 'file',
-  })).concat(workResults.map((result) => ({
-    text: workMentionText(result),
-    display: result.title,
-    meta: result.entity_type === 'agent_session' ? 'Agent 会话快照' : result.entity_type === 'work_session' ? 'Work 会话' : ENTITY_META[result.entity_type],
-    sig: 'file' as const,
-    workResult: result,
-  })));
+  const browserPromise = fetchBrowserTabMentions(token.slice(1));
+  const [rows, workResults, browserResults] = await Promise.all([rowsPromise, workPromise, browserPromise]);
+  return (rows as CompleteItem[]).map<MentionItem>((r) => {
+    const sig = r.type === 'folder' ? 'folder' as const : r.type === 'image' ? 'image' as const : 'file' as const;
+    return { text: r.text, display: r.display, meta: r.meta, sig, icon: FILE_ROW_ICON[sig] };
+  }).concat(workResults.concat(browserResults).map((result) => {
+    const kind = MENTION_KINDS[result.entity_type];
+    return {
+      text: workMentionText(result),
+      display: result.title,
+      meta: kind.meta,
+      sig: kind.sig,
+      icon: kind.icon,
+      workResult: result,
+    };
+  }));
 }
 
 export function compactMentionText(item: MentionItem): string {
@@ -425,18 +499,12 @@ export function workMentionText(result: MentionResult): string {
   return `@${result.entity_type}:${result.id}`;
 }
 
-const ENTITY_META: Record<MentionResult['entity_type'], string> = {
-  work_item: '事项',
-  work_session: 'Work 会话',
-  agent_session: 'Agent 会话快照',
-  personal_knowledge: '个人知识',
-  source_record: '来源记录',
-};
-
 // ---------------- chip token 识别（覆盖层 + 整段删共用） ----------------
 
-// 已解析的 @ 提及：必须是 @file:/@folder:/@image: 前缀（complete_path 的回填格式）
-const AT_RE = /(?:^|\s)(@(?:file|folder|image|work_item|work_session|agent_session|personal_knowledge|source_record):[^\s@]+)/g;
+// 已解析的 @ 提及：必须是 @file:/@folder:/@image: 或注册表里的 work 提及前缀
+// （@work_item:/@browser_tab: 等）。新增提及类型只需在 MENTION_KINDS 加一行，此处随之派生。
+const AT_KINDS = ['file', 'folder', 'image', ...Object.keys(MENTION_KINDS)];
+const AT_RE = new RegExp(`(?:^|\\s)(@(?:${AT_KINDS.join('|')}):[^\\s@]+)`, 'g');
 
 function compactCanonicalMentionsInInput(): void {
   if (!input) return;
@@ -599,16 +667,10 @@ export function buildChippedNodes(text: string, slashTokens?: Set<string>): Node
 
 // ---------------- 浮层渲染 ----------------
 
-function createSig(sig: MentionItem['sig']): HTMLElement {
-  const iconBySig: Record<MentionItem['sig'], IconId> = {
-    slash: 'skill-badge',
-    folder: 'icon-folder',
-    image: 'icon-image',
-    file: 'icon-file',
-  };
+function createSig(item: MentionItem): HTMLElement {
   const element = document.createElement('span');
-  element.className = `mention-pop__sig mention-pop__sig--${sig}`;
-  element.append(createIcon(iconBySig[sig], { size: 20 }));
+  element.className = `mention-pop__sig mention-pop__sig--${item.sig}`;
+  element.append(createIcon(item.icon, { size: 20 }));
   return element;
 }
 
@@ -641,7 +703,7 @@ function renderPopup(): void {
       meta.textContent = item.meta;
       body.append(meta);
     }
-    button.append(createSig(item.sig), body);
+    button.append(createSig(item), body);
     button.addEventListener('mousedown', (event) => {
       event.preventDefault();
       selectedIndex = index;

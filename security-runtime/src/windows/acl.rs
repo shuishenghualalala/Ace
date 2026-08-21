@@ -314,6 +314,12 @@ impl AclLease {
         for sid in self.capability_sids.clone() {
             self.push_record(&executable, &sid, AclAccess::Read, false)?;
         }
+        if let Some(command) = canonical_command_executable(request)? {
+            self.push_record(&command, account_sid, AclAccess::Read, false)?;
+            for sid in self.capability_sids.clone() {
+                self.push_record(&command, &sid, AclAccess::Read, false)?;
+            }
+        }
         for root in &request.readable_roots {
             let root = canonical_existing(root)?;
             self.push_record(&root, account_sid, AclAccess::Read, false)?;
@@ -323,13 +329,17 @@ impl AclLease {
                 self.push_record(&root, &sid, AclAccess::DenyWrite, false)?;
             }
         }
-        for (index, root) in request.writable_roots.iter().enumerate() {
-            let root = canonical_existing(root)?;
-            self.push_record(&root, account_sid, AclAccess::Write, false)?;
-            self.push_record(&root, account_sid, AclAccess::DenyDeleteChild, false)?;
+        let writable = request
+            .writable_roots
+            .iter()
+            .map(|root| canonical_existing(root))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (index, root) in writable.iter().enumerate() {
+            self.push_record(root, account_sid, AclAccess::Write, false)?;
+            self.push_record(root, account_sid, AclAccess::DenyDeleteChild, false)?;
             let capability_sid = self.capability_sids[index].clone();
-            self.push_record(&root, &capability_sid, AclAccess::Write, false)?;
-            self.push_record(&root, &capability_sid, AclAccess::DenyDeleteChild, false)?;
+            self.push_record(root, &capability_sid, AclAccess::Write, false)?;
+            self.push_record(root, &capability_sid, AclAccess::DenyDeleteChild, false)?;
             for name in PROTECTED_NAMES {
                 let protected = root.join(name);
                 reject_reparse_point(&protected)?;
@@ -352,6 +362,24 @@ impl AclLease {
                 }
                 self.push_record(&protected, account_sid, AclAccess::DenyWrite, synthetic)?;
                 self.push_record(&protected, &capability_sid, AclAccess::DenyWrite, synthetic)?;
+            }
+        }
+        for (protected, writable_index) in readonly_targets(&writable, &request.readonly_roots)? {
+            if !protected.exists() {
+                fs::create_dir(&protected).map_err(|error| {
+                    format!(
+                        "cannot create protected ACL mount point {}: {error}",
+                        protected.display()
+                    )
+                })?;
+                self.synthetic_protected.push(protected.clone());
+            }
+            let synthetic = self.synthetic_protected.contains(&protected);
+            reject_reparse_point(&protected)?;
+            let capability_sid = self.capability_sids[writable_index].clone();
+            for sid in [account_sid, capability_sid.as_str()] {
+                self.push_record(&protected, sid, AclAccess::Read, synthetic)?;
+                self.push_record(&protected, sid, AclAccess::DenyWrite, synthetic)?;
             }
         }
         let temp_dir = self.temp_dir.clone();
@@ -1026,6 +1054,16 @@ fn canonical_existing(path: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
+fn canonical_command_executable(request: &WindowsRunRequest) -> Result<Option<PathBuf>, String> {
+    let Some(path) = request.command.first().map(Path::new) else {
+        return Ok(None);
+    };
+    if !path.is_absolute() {
+        return Ok(None);
+    }
+    canonical_existing(path).map(Some)
+}
+
 fn canonical_optional(path: &Path) -> Result<Option<PathBuf>, String> {
     super::path::reject_reparse_components(path)?;
     match path.canonicalize() {
@@ -1097,6 +1135,53 @@ fn reject_reparse_point(path: &Path) -> Result<(), String> {
     }
 }
 
+fn readonly_targets(
+    writable: &[PathBuf],
+    explicit: &[PathBuf],
+) -> Result<std::collections::BTreeMap<PathBuf, usize>, String> {
+    let mut targets = std::collections::BTreeMap::new();
+    for (index, root) in writable.iter().enumerate() {
+        for name in PROTECTED_NAMES {
+            targets.insert(root.join(name), index);
+        }
+    }
+    for path in explicit {
+        reject_reparse_point(path)?;
+        let root = match canonical_optional(path)? {
+            Some(root) => root,
+            None if path.is_absolute()
+                && !path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir)) =>
+            {
+                path.clone()
+            }
+            None => {
+                return Err(format!(
+                    "read-only root must be absolute and cannot contain '..': {}",
+                    path.display()
+                ));
+            }
+        };
+        let Some((index, _)) = writable
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| root.starts_with(candidate))
+            .max_by_key(|(_, candidate)| candidate.components().count())
+        else {
+            return Err(format!(
+                "read-only root must be inside an explicit writable root: {}",
+                root.display()
+            ));
+        };
+        targets.insert(root, index);
+    }
+    for path in targets.keys() {
+        reject_reparse_point(path)?;
+    }
+    Ok(targets)
+}
+
 fn acquire_mutex() -> Result<AclMutex, String> {
     let name = super::identity::wide("Local\\AceWindowsSandboxAcl");
     let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr()) };
@@ -1128,6 +1213,49 @@ mod tests {
             canonical_optional(&path).expect("not a permission error"),
             None
         );
+    }
+
+    #[test]
+    fn absolute_command_executable_is_part_of_the_acl_plan() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("tool.exe");
+        fs::write(&executable, b"test").unwrap();
+        let request = WindowsRunRequest {
+            command: vec![executable.to_string_lossy().into_owned()],
+            cwd: directory.path().to_path_buf(),
+            writable_roots: vec![],
+            readable_roots: vec![],
+            readonly_roots: vec![],
+            denied_roots: vec![],
+            full_disk_read: false,
+            network_enabled: false,
+            network_rules: vec![],
+            allow_local_binding: false,
+            max_output_bytes: 1024,
+            stdin: None,
+            stdin_stream: None,
+            env_overrides: Default::default(),
+            home_files: Default::default(),
+        };
+
+        assert_eq!(
+            canonical_command_executable(&request).unwrap(),
+            Some(executable.canonicalize().unwrap()),
+        );
+    }
+
+    #[test]
+    fn readonly_root_outside_writable_roots_is_rejected() {
+        let writable = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        let error = readonly_targets(
+            &[writable.path().canonicalize().unwrap()],
+            &[outside.path().to_path_buf()],
+        )
+        .unwrap_err();
+
+        assert!(error.contains("read-only root must be inside"), "{error}");
     }
 
     #[test]

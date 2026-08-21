@@ -24,8 +24,10 @@ mod linux {
         pub cwd: PathBuf,
         pub writable_roots: Vec<PathBuf>,
         pub readable_roots: Vec<PathBuf>,
+        pub readonly_roots: Vec<PathBuf>,
         pub denied_roots: Vec<PathBuf>,
         pub filesystem_globs: Vec<FilesystemGlobRule>,
+        pub full_disk_read: bool,
         pub network_enabled: bool,
         pub network_rules: Vec<()>,
         pub allow_local_binding: bool,
@@ -34,6 +36,7 @@ mod linux {
         pub stdin: Option<Vec<u8>>,
         pub stdin_stream: Option<()>,
         pub env_overrides: BTreeMap<String, String>,
+        pub home_files: BTreeMap<String, Vec<u8>>,
     }
 
     pub mod proxy_routing {
@@ -54,8 +57,10 @@ fn request(
         cwd: cwd.to_path_buf(),
         writable_roots,
         readable_roots: vec![],
+        readonly_roots: vec![],
         denied_roots: vec![],
         filesystem_globs: vec![],
+        full_disk_read: false,
         network_enabled: false,
         network_rules: vec![],
         allow_local_binding: false,
@@ -64,6 +69,7 @@ fn request(
         stdin: None,
         stdin_stream: None,
         env_overrides: Default::default(),
+        home_files: Default::default(),
     }
 }
 
@@ -149,7 +155,7 @@ fn missing_deny_root_with_parent_traversal_is_rejected_before_mount_planning() {
         .err()
         .expect("ambiguous missing deny roots must fail closed");
 
-    assert!(error.contains("normalized absolute"), "{error}");
+    assert!(error.contains("'..'"), "{error}");
 }
 
 #[test]

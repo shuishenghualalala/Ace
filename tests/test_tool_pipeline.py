@@ -233,8 +233,29 @@ def test_grant_session_allow_persists_across_calls(monkeypatch):
         [{"tool": "terminal", "match": "git push:*", "behavior": "ask"}]
     )
     monkeypatch.setattr(pipeline, "get_permission_config", lambda: shared_cfg)
-    grant_session_allow("s9", "terminal", "git push:*")
+    grant_session_allow("s9", "terminal", "git push origin")
     assert check_permission("terminal", {"command": "git push origin"}, session_id="s9")[0] == "allow"
+    assert check_permission("terminal", {"command": "git push origin main"}, session_id="s9")[0] == "ask"
+
+
+def test_ui_session_allow_is_exact_and_rejects_prefix_scope(monkeypatch):
+    shared_cfg = load_permission_config(
+        [{"tool": "terminal", "match": "*", "behavior": "ask"}]
+    )
+    monkeypatch.setattr(pipeline, "get_permission_config", lambda: shared_cfg)
+
+    grant_session_allow("s-exact", "terminal", "git push origin main")
+    grant_session_allow("s-exact", "terminal", "rm:*")
+
+    assert check_permission(
+        "terminal", {"command": "git push origin main"}, session_id="s-exact"
+    )[0] == "allow"
+    assert check_permission(
+        "terminal", {"command": "git push origin main --force"}, session_id="s-exact"
+    )[0] == "ask"
+    assert check_permission(
+        "terminal", {"command": "rm /tmp/x"}, session_id="s-exact"
+    )[0] == "ask"
 
 
 def _unused_config() -> PermissionConfig:

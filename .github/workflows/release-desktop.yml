@@ -1,0 +1,279 @@
+name: release-desktop
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要打包的 Git tag（例如 v1.1.0）
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-desktop-${{ github.event_name == 'push' && github.ref || github.event.inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  mac-arm64:
+    name: macOS arm64 DMG
+    runs-on: macos-15
+    timeout-minutes: 180
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${TAG_INPUT#v}"
+            if [ -z "$VERSION" ]; then
+              echo "手动触发时必须填写 tag（例如 v1.1.0）" >&2
+              exit 1
+            fi
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG_INPUT: ${{ github.event.inputs.tag || '' }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          python-version: "3.11"
+      - name: Prepare Python environment
+        run: uv sync --extra dev
+      - name: Build DMG
+        run: ./deb-package/pack_mac.sh "${{ steps.version.outputs.version }}" arm64
+      - name: Stage release assets
+        run: |
+          mkdir -p release-output
+          mv "crew-desktop_${{ steps.version.outputs.version }}_arm64.dmg" release-output/
+          mv package-size-report-mac.txt release-output/package-size-report-mac-arm64.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-mac-arm64
+          path: release-output/*
+
+  mac-x64:
+    name: macOS x64 DMG
+    runs-on: macos-15-intel
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${TAG_INPUT#v}"
+            if [ -z "$VERSION" ]; then
+              echo "手动触发时必须填写 tag（例如 v1.1.0）" >&2
+              exit 1
+            fi
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG_INPUT: ${{ github.event.inputs.tag || '' }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          python-version: "3.11"
+      - name: Prepare Python environment
+        run: uv sync --extra dev
+      - name: Build DMG
+        run: ./deb-package/pack_mac.sh "${{ steps.version.outputs.version }}" x64
+      - name: Stage release assets
+        run: |
+          mkdir -p release-output
+          mv "crew-desktop_${{ steps.version.outputs.version }}_x64.dmg" release-output/
+          mv package-size-report-mac.txt release-output/package-size-report-mac-x64.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-mac-x64
+          path: release-output/*
+
+  linux:
+    name: Linux UOS + Kylin deb
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${TAG_INPUT#v}"
+            if [ -z "$VERSION" ]; then
+              echo "手动触发时必须填写 tag（例如 v1.1.0）" >&2
+              exit 1
+            fi
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG_INPUT: ${{ github.event.inputs.tag || '' }}
+      - name: Build UOS and Kylin packages
+        shell: bash
+        run: pwsh ./deb-package/pack_deb.ps1 -Version "$VERSION"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+      - name: Stage release assets
+        run: |
+          mkdir -p release-output
+          mv "crew-desktop_${{ steps.version.outputs.version }}_uos_amd64.deb" release-output/
+          mv "crew-desktop_${{ steps.version.outputs.version }}_kylin_amd64.deb" release-output/
+          mv package-size-report-uos.txt release-output/
+          mv package-size-report-kylin.txt release-output/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-linux
+          path: release-output/*
+
+  windows:
+    name: Windows x64 installer
+    runs-on: windows-2025
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${TAG_INPUT#v}"
+            if [ -z "$VERSION" ]; then
+              echo "手动触发时必须填写 tag（例如 v1.1.0）" >&2
+              exit 1
+            fi
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG_INPUT: ${{ github.event.inputs.tag || '' }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          python-version: "3.11"
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress --yes
+      - name: Install Inno Setup Chinese language
+        shell: pwsh
+        run: |
+          $langs = "C:\Program Files (x86)\Inno Setup 6\Languages"
+          if (-not (Test-Path $langs)) { New-Item -ItemType Directory -Force $langs | Out-Null }
+          Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" -OutFile (Join-Path $langs "ChineseSimplified.isl")
+          if (-not (Test-Path (Join-Path $langs "ChineseSimplified.isl"))) { throw "ChineseSimplified.isl was not downloaded" }
+      - name: Build Windows installer
+        shell: pwsh
+        run: ./deb-package/pack_exe.ps1 -Version "$env:VERSION"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+      - name: Stage release assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-output | Out-Null
+          Copy-Item "dist\Crew_Setup_v$env:VERSION.exe" release-output\
+          Copy-Item "dist\package-size-report-windows.txt" release-output\
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-windows
+          path: release-output/*
+
+  release:
+    name: Publish GitHub release
+    needs: [mac-arm64, mac-x64, linux, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Create checksums
+        working-directory: release-assets
+        run: sha256sum * > SHA256SUMS
+      - name: Generate release notes
+        env:
+          RELEASE_VERSION: ${{ needs.mac-arm64.outputs.version }}
+        run: |
+          cat > RELEASE_NOTES.md <<EOF
+          # Crew Desktop v${RELEASE_VERSION}
+
+          ## 如何选择安装包（按你的系统选择对应文件）
+
+          | 你的系统 | 下载文件 |
+          | --- | --- |
+          | macOS（Apple 芯片 M 系列） | \`crew-desktop_${RELEASE_VERSION}_arm64.dmg\` |
+          | macOS（Intel） | \`crew-desktop_${RELEASE_VERSION}_x64.dmg\` |
+          | Linux 统信 UOS（amd64） | \`crew-desktop_${RELEASE_VERSION}_uos_amd64.deb\` |
+          | Linux 麒麟 Kylin（amd64） | \`crew-desktop_${RELEASE_VERSION}_kylin_amd64.deb\` |
+          | Windows 10/11（x64） | \`Crew_Setup_v${RELEASE_VERSION}.exe\` |
+
+          > 桌面端「更新」按钮会自动按当前系统/架构匹配对应安装包，也可在此手动下载。
+
+          ## 校验和
+
+          每个安装包都附有 SHA256 校验值。下载后可在本机核对：
+
+          \`\`\`bash
+          # Linux / macOS
+          sha256sum -c SHA256SUMS
+          # Windows (PowerShell)
+          Get-FileHash .\\Crew_Setup_v${RELEASE_VERSION}.exe -Algorithm SHA256
+          \`\`\`
+          EOF
+          # 校验说明文件已生成且包含版本号
+          grep -q "v${RELEASE_VERSION}" RELEASE_NOTES.md
+          echo "RELEASE_NOTES.md ready"
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v${{ needs.mac-arm64.outputs.version }}
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --prerelease --notes-file RELEASE_NOTES.md
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber

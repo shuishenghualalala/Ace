@@ -32,7 +32,8 @@ from crew.browser.driver import (
 )
 from crew.browser.electron_driver import ElectronBrowserDriver
 from crew.browser.security import BrowserNetworkPolicy, LoopbackPolicyProxy, path_is_within
-from crew.browser.types import BrowserConfig, BrowserPageState, BrowserRef
+from crew.browser.tab_reading import PAGE_TEXT_LIMIT, PAGE_TEXT_SCRIPT, parse_page_text_result
+from crew.browser.types import BATCH_STEP_TOOLS, BrowserConfig, BrowserPageState, BrowserRef
 from crew.core.types import MediaPart, ToolOutput, ToolPermissionDecision
 from crew.security.local_path import LocalPathReference, LocalPathReferenceKind
 from crew.state.home import get_owner_runtime_home
@@ -60,11 +61,8 @@ _SNAPSHOT_REF_TOKEN = re.compile(r"(?<!\S)\[ref=(@?e[1-9]\d*)\](?=$|\s)")
 _REF_TAIL_PATTERN = re.compile(r"\[ref=p?\d*:?e?\d*$")
 _INVALID_KEY_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 # Product-level action caps used to reject otherwise valid Playwright inputs
-# before Chromium saw them.  The Python layer now validates only wire shape and
-# numeric sanity; actionability and browser-specific constraints belong to
-# Playwright.  The download RPC is still encoded as a signed 32-bit byte budget
-# by the current Electron protocol, so use its protocol ceiling rather than the
-# old configurable product quota.
+# before Chromium saw them. The download RPC is encoded as a signed 32-bit byte
+# budget, so configured limits are clamped to this transport ceiling.
 _WIRE_MAX_TRANSFER_BYTES = 2_147_483_647
 _MAX_UPLOAD_FILES = 256
 _CLICK_BUTTONS = frozenset({"left", "right", "middle"})
@@ -94,6 +92,9 @@ _PAGE_TRANSITION_POLL_SECONDS = 0.04
 # BrowserManager 的兼容代码不设置 lease，保持原 API 兼容。
 _EXPECTED_CAPABILITY: ContextVar[tuple[str, int] | None] = ContextVar(
     "browser_expected_capability", default=None
+)
+_POST_OBSERVATION_DEFERRED: ContextVar[bool] = ContextVar(
+    "browser_post_observation_deferred", default=False
 )
 _ACTIVE_REPLAY_CONTEXT: ContextVar[
     tuple[str, str, str, str, str, int, str] | None
@@ -197,9 +198,23 @@ def _escape_wrapper_markers(text: str) -> str:
 _OUTPUT_GUARD_MULTIPLIER = 20
 # 护栏的绝对下限：不论调用方传什么，低于这个量都不截断。
 _OUTPUT_GUARD_FLOOR = 600_000
+# `snapshot(full=true)` is an explicit request for a larger observation. Keep
+# an absolute ceiling so a pathological document still cannot consume the
+# whole model context.
+_FULL_SNAPSHOT_GUARD = 4_000_000
+
+# 批量模式（browser_use batch）中间步骤跳过后置观察时的占位结果文本。
+# 批量调用方只用它拼每步一行的简报；最终观察由末步或显式 snapshot 提供。
+DEFERRED_OBSERVATION_NOTE = "已执行（批量中间步骤，跳过中间观察）"
+DEFERRED_SINGLE_OBSERVATION_NOTE = "已执行（按请求跳过后置观察；如需页面状态请调用 snapshot）"
 
 
-def _truncate_snapshot_at_line(text: str, limit: int) -> tuple[str, str]:
+def _truncate_snapshot_at_line(
+    text: str,
+    limit: int,
+    *,
+    full: bool = False,
+) -> tuple[str, str]:
     """只在远超期望规模时按行截断，并如实报出截断原因。
 
     截断必须**按行**：快照是一行一个元素，从中间切断会产出一个残缺的
@@ -209,7 +224,11 @@ def _truncate_snapshot_at_line(text: str, limit: int) -> tuple[str, str]:
     #
     # 旧的 `limit` 是"期望规模"，历史调用点会传各种值（甚至 0）。按 limit × 倍数
     # 直接算，limit=0 时护栏退化成 0，正常快照全被截断——实测踩过。
-    guard = max(_OUTPUT_GUARD_FLOOR, max(0, int(limit)) * _OUTPUT_GUARD_MULTIPLIER)
+    guard = (
+        _FULL_SNAPSHOT_GUARD
+        if full
+        else max(_OUTPUT_GUARD_FLOOR, max(0, int(limit)) * _OUTPUT_GUARD_MULTIPLIER)
+    )
     if len(text) <= guard:
         return text, ""
     cut = text.rfind("\n", 0, guard)
@@ -361,6 +380,10 @@ class _Session:
     mode: str = "ai"
     last_action: str = ""
     last_error: str = ""
+    # 批量执行（browser_use batch）的中间步骤置 True：跳过后置 snapshot。
+    # 每次 snapshot 都会换 generation、重铸 ref——中间观察会让后续预规划步骤的
+    # ref 全部失效，所以批量模式只在末步观察一次。由 set_observation_deferred 维护。
+    defer_post_observation: bool = False
     screenshot_id: str = ""
     screenshot_host_epoch: str = ""
     screenshot_generation: int = 0
@@ -378,12 +401,62 @@ class _Session:
     downloads: list[dict[str, Any]] = field(default_factory=list)
 
 
+class _OwnerOperationLock(asyncio.Lock):
+    """Owner lock with bounded queue waiting and low-cost runtime metrics."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.queue_timeout_seconds = 30.0
+        self.queue_depth = 0
+        self.last_queue_wait_ms = 0.0
+        self.last_operation_ms = 0.0
+        self.queue_timeouts = 0
+        self._acquired_at = 0.0
+
+    async def acquire(self) -> bool:
+        queued = self.locked()
+        started = time.monotonic()
+        if queued:
+            self.queue_depth += 1
+        try:
+            timeout = float(self.queue_timeout_seconds or 0)
+            if timeout > 0:
+                acquired = await asyncio.wait_for(super().acquire(), timeout)
+            else:
+                acquired = await super().acquire()
+        except asyncio.TimeoutError:
+            if queued:
+                self.queue_depth = max(0, self.queue_depth - 1)
+            self.queue_timeouts += 1
+            raise BrowserDriverError(
+                f"浏览器动作排队超过 {timeout:g} 秒，请稍后重试",
+                code="browser_queue_timeout",
+            ) from None
+        except BaseException:
+            if queued:
+                self.queue_depth = max(0, self.queue_depth - 1)
+            raise
+        if queued:
+            self.queue_depth = max(0, self.queue_depth - 1)
+        self.last_queue_wait_ms = max(0.0, (time.monotonic() - started) * 1000)
+        self._acquired_at = time.monotonic()
+        return acquired
+
+    def release(self) -> None:
+        if self._acquired_at:
+            self.last_operation_ms = max(
+                0.0, (time.monotonic() - self._acquired_at) * 1000
+            )
+            self._acquired_at = 0.0
+        super().release()
+
+
 @dataclass
 class _Owner:
     owner: str
     runtime_key: str
     profile_dir: Path
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    lock: "_OwnerOperationLock" = field(default_factory=lambda: _OwnerOperationLock())
     control_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     sessions: dict[str, _Session] = field(default_factory=dict)
@@ -401,6 +474,54 @@ class _Owner:
     actions_blocked: bool = False
     downloads_locked: bool = False
     closed_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+@dataclass(frozen=True)
+class _ApprovalGrant:
+    """一次 ask 审批签发的待确认授权（一次性、限时有效）。
+
+    digest 绑定「工具名 + 参数」，generation/ref 绑定审批那一刻的页面观察；
+    任一漂移都说明审批到的已经不是要执行的东西，授权作废（防 TOCTOU）。
+    """
+
+    owner: str
+    session_id: str
+    digest: str
+    generation: int
+    ref: str
+    expires_at: float
+
+
+# 一次性审批令牌有效期：审批卡挂着期间页面随时可能变，超过即要求重新观察。
+_APPROVAL_TOKEN_TTL_SECONDS = 120.0
+
+# 写交互动作：confirm_writes 档升级为 ask，read_only 档直接 deny。
+# keydown/keyup/mouse_* 是构不成完整语义的低层原语，不在此列（Enter 按下
+# 由敏感分类单独兜住）。
+_GOVERNANCE_WRITES = frozenset(
+    {
+        "browser_click",
+        "browser_type",
+        "browser_press",
+        "browser_select",
+        "browser_check",
+        "browser_drag",
+        "browser_fill_form",
+        "browser_drop",
+    }
+)
+
+# 页面内执行代码：ask 时禁止「本次对话允许」复用，每次都必须单独确认。
+# evaluate/run_code 高危不可"总是允许"；upload/download 跨 Browser↔host 文件
+# 边界，每次传输的路径/内容都不同，同样只允许逐次审批。
+_GOVERNANCE_NO_ALLOW_ALWAYS = frozenset(
+    {
+        "browser_evaluate",
+        "browser_run_code_unsafe",
+        "browser_upload",
+        "browser_download",
+    }
+)
 
 
 class BrowserManager:
@@ -425,10 +546,19 @@ class BrowserManager:
         # 能力代次：用户关闭/重开 Browser 能力时单调递增。旧代次的
         # ref、截图与标签页句柄一律不可复用（见 revoke_owner）。
         self._capability_generations: dict[str, int] = {}
+        # 一次性审批令牌：token -> 授权记录。发 ask 时签发，confirm_approval
+        # 弹出并校验页面代次/ref 未变；插入时惰性清理过期项，表不会无界增长。
+        self._approval_tokens: dict[str, _ApprovalGrant] = {}
         self._closed = False
 
     def available(self) -> bool:
         return bool(self.config.enabled and self.driver.available())
+
+    def _configure_owner_lock(self, owner: _Owner) -> None:
+        owner.lock.queue_timeout_seconds = max(
+            0.0,
+            float(getattr(self.config, "queue_timeout_seconds", 30.0) or 0.0),
+        )
 
     async def startup(self) -> None:
         if self._idle_task is None and self.config.enabled:
@@ -489,6 +619,32 @@ class BrowserManager:
     def capability_generation(self, owner_account_id: str) -> int:
         """该 owner 当前的 Browser 能力代次（未撤销过为 0，单调递增）。"""
         return self._capability_generations.get(str(owner_account_id or ""), 0)
+
+    async def set_observation_deferred(
+        self, owner_account_id: str, session_id: str, deferred: bool
+    ) -> None:
+        """批量执行开关：中间步骤跳过后置观察（见 _Session.defer_post_observation）。
+
+        批量调用方负责 try/finally 复位；会话级标志，不影响其它会话。
+        """
+        owner = await self._owner(owner_account_id)
+        async with owner.lock:
+            session = self._session(owner, session_id)
+            session.defer_post_observation = deferred
+
+    @contextmanager
+    def defer_post_observation(self) -> Iterator[None]:
+        """Skip one action's automatic snapshot without changing session state.
+
+        Batch already uses the session flag because all of its steps share one
+        observation boundary.  Individual calls use this task-local switch so
+        concurrent sessions and callers cannot inherit a performance choice.
+        """
+        token = _POST_OBSERVATION_DEFERRED.set(True)
+        try:
+            yield
+        finally:
+            _POST_OBSERVATION_DEFERRED.reset(token)
 
     def _bump_capability_generation(self, owner_account_id: str) -> int:
         owner_id = str(owner_account_id or "")
@@ -821,6 +977,7 @@ class BrowserManager:
                             runtime_key=f"crew_{_hash(owner_id)}",
                             profile_dir=home / "browser" / "profile",
                         )
+                        self._configure_owner_lock(current)
                         self._owners[owner_id] = current
                     # Claiming an owner cancels a not-yet-started idle retire
                     # before the caller waits on its per-account lock.
@@ -869,6 +1026,9 @@ class BrowserManager:
 
     async def _start_owner_proxy(self, owner: _Owner) -> None:
         """Start the authenticated final egress boundary before any Browser RPC."""
+        if not self.driver.requires_policy_proxy():
+            owner.initialized = True
+            return
         if owner.proxy is not None and self._proxy_endpoint(owner):
             owner.initialized = True
             return
@@ -1438,6 +1598,11 @@ class BrowserManager:
             if expected_dialogs
             else None
         )
+        staged_files, upload_stage = await asyncio.to_thread(
+            self._stage_approved_uploads,
+            owner,
+            files,
+        )
         try:
             download_root = self._prepare_download_dir(session, workdir)
             if wire_expected_dialogs:
@@ -1451,7 +1616,7 @@ class BrowserManager:
                     payload={
                         "trigger_selector": trigger_selector,
                         "input_selector": input_selector,
-                        "files": files,
+                        "files": staged_files,
                     },
                     timeout=timeout,
                     proxy_url=self._proxy_endpoint(owner),
@@ -1464,7 +1629,7 @@ class BrowserManager:
                     target_id=self._active_tab(session).target_id,
                     trigger_selector=trigger_selector,
                     input_selector=input_selector,
-                    files=files,
+                    files=staged_files,
                     timeout=timeout,
                     proxy_url=self._proxy_endpoint(owner),
                     download_dir=download_root,
@@ -1479,6 +1644,12 @@ class BrowserManager:
         except BrowserOperationCancelled as exc:
             await self._apply_driver_lifecycle_failure(owner, session, exc)
             raise
+        finally:
+            await asyncio.to_thread(
+                self._cleanup_approved_upload_stage,
+                upload_stage,
+                owner.profile_dir.parent / "approved-uploads",
+            )
 
     def _new_tab(self, session: _Session) -> _Tab:
         session.counter += 1
@@ -3221,6 +3392,17 @@ class BrowserManager:
         *,
         workdir: str,
     ) -> str:
+        if session.defer_post_observation or _POST_OBSERVATION_DEFERRED.get():
+            # 批量中间步骤：不重新 snapshot（换代会让后续预规划 ref 全部失效）。
+            # 仍做一次 _select 对齐弹窗/活动标签页；坐标截图随页面变化失效照旧。
+            # 对话框等待等异常会推迟到下一个动作或末步观察时暴露，不会丢。
+            await self._select(owner, session)
+            self._clear_screenshot(session)
+            return (
+                DEFERRED_OBSERVATION_NOTE
+                if session.defer_post_observation
+                else DEFERRED_SINGLE_OBSERVATION_NOTE
+            )
         try:
             # Navigation/click/input events can synchronously open and activate
             # an unlabeled popup. Reconcile against native tab state before any
@@ -6981,7 +7163,9 @@ class BrowserManager:
         title = _escape_wrapper_markers(self._active_tab(session).title)
         url = _escape_tag_markers(_public_url(self._active_tab(session).url))
         boundary_safe, truncation = _truncate_snapshot_at_line(
-            _escape_wrapper_markers(bounded), self.config.max_output_chars
+            _escape_wrapper_markers(bounded),
+            self.config.max_output_chars,
+            full=full,
         )
         # 截断说明走 Crew 独占的头部位置（与 page_generation 同级），不混进正文——
         # 混进正文页面就能用元素名伪造同样的句子来制造「什么都没看全」的假象。
@@ -9292,6 +9476,134 @@ class BrowserManager:
         return Path(os.path.abspath(candidate))
 
     @staticmethod
+    def _is_reparse_point(info: os.stat_result) -> bool:
+        """Return whether a Windows entry is a junction or other reparse point."""
+        attributes = int(getattr(info, "st_file_attributes", 0) or 0)
+        marker = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0) or 0)
+        return bool(marker and attributes & marker)
+
+    def _stage_approved_uploads(
+        self,
+        owner: _Owner,
+        paths: list[str],
+    ) -> tuple[list[str], Path | None]:
+        """Snapshot authorized upload inputs into the Host-owned staging root."""
+        if not paths:
+            return [], None
+
+        approved_root = owner.profile_dir.parent / "approved-uploads"
+        approved_root.mkdir(parents=True, exist_ok=True)
+        try:
+            root = approved_root.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise BrowserDriverError("无法创建浏览器上传审批暂存目录") from exc
+        if root != approved_root.absolute() or root.is_symlink():
+            raise BrowserDriverError("浏览器上传审批暂存目录不安全")
+
+        stage = root / uuid.uuid4().hex
+        try:
+            stage.mkdir(mode=0o700)
+        except OSError as exc:
+            raise BrowserDriverError("无法创建浏览器上传暂存区") from exc
+
+        limit = int(getattr(self.config, "max_transfer_bytes", 0) or 0)
+        copied_bytes = 0
+        copied_entries = 0
+
+        def reserve(info: os.stat_result) -> None:
+            nonlocal copied_bytes, copied_entries
+            copied_entries += 1
+            if copied_entries > 10_000:
+                raise BrowserDriverError("上传目录包含过多文件")
+            copied_bytes += max(0, int(info.st_size))
+            if limit > 0 and copied_bytes > limit:
+                raise BrowserDriverError(
+                    f"上传内容超过 {limit} 字节传输上限；请缩小范围后重试",
+                    code="transfer_too_large",
+                )
+
+        def copy_file(source: Path, destination: Path, info: os.stat_result) -> None:
+            if not stat.S_ISREG(info.st_mode) or self._is_reparse_point(info):
+                raise BrowserDriverError("上传内容包含符号链接或特殊文件")
+            reserve(info)
+            flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+            flags |= int(getattr(os, "O_NOFOLLOW", 0))
+            try:
+                descriptor = os.open(source, flags)
+                with os.fdopen(descriptor, "rb", closefd=True) as reader:
+                    opened = os.fstat(reader.fileno())
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or self._is_reparse_point(opened)
+                        or (
+                            getattr(info, "st_ino", 0)
+                            and getattr(opened, "st_ino", 0)
+                            and (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino)
+                        )
+                    ):
+                        raise BrowserDriverError("上传文件在审批后发生变化")
+                    with destination.open("xb") as writer:
+                        shutil.copyfileobj(reader, writer, length=1024 * 1024)
+                    finished = os.fstat(reader.fileno())
+                    if (
+                        opened.st_size != finished.st_size
+                        or opened.st_mtime_ns != finished.st_mtime_ns
+                    ):
+                        raise BrowserDriverError("上传文件在复制期间发生变化")
+            except BrowserDriverError:
+                raise
+            except OSError as exc:
+                raise BrowserDriverError("上传文件无法安全读取") from exc
+
+        def copy_entry(source: Path, destination: Path) -> None:
+            try:
+                info = source.lstat()
+            except OSError as exc:
+                raise BrowserDriverError("上传文件不存在或不可读取") from exc
+            if stat.S_ISLNK(info.st_mode) or self._is_reparse_point(info):
+                raise BrowserDriverError("上传内容包含符号链接或特殊文件")
+            if stat.S_ISREG(info.st_mode):
+                copy_file(source, destination, info)
+                return
+            if not stat.S_ISDIR(info.st_mode):
+                raise BrowserDriverError("上传内容包含符号链接或特殊文件")
+            destination.mkdir(mode=0o700)
+            try:
+                children = sorted(source.iterdir(), key=lambda item: item.name)
+            except OSError as exc:
+                raise BrowserDriverError("上传目录无法读取") from exc
+            for child in children:
+                copy_entry(child, destination / child.name)
+
+        staged: list[str] = []
+        try:
+            for index, raw in enumerate(paths):
+                source = Path(raw)
+                # Indexing prevents duplicate basenames from colliding while the
+                # original basename remains visible to the browser upload API.
+                destination = stage / f"{index:03d}" / source.name
+                destination.parent.mkdir(mode=0o700)
+                copy_entry(source, destination)
+                staged.append(str(destination))
+            return staged, stage
+        except BaseException:
+            self._cleanup_approved_upload_stage(stage, root)
+            raise
+
+    @staticmethod
+    def _cleanup_approved_upload_stage(stage: Path | None, approved_root: Path) -> None:
+        if stage is None:
+            return
+        try:
+            root = approved_root.resolve(strict=True)
+            candidate = stage.resolve(strict=True)
+            if candidate.parent != root or not re.fullmatch(r"[0-9a-f]{32}", candidate.name):
+                return
+            shutil.rmtree(candidate)
+        except OSError:
+            log.warning("failed to clean browser upload staging directory: %s", stage)
+
+    @staticmethod
     def _validated_drop_data(data: Any) -> dict[str, str] | None:
         if data is None:
             return None
@@ -9373,6 +9685,38 @@ class BrowserManager:
                 session,
                 workdir=workdir,
             )
+            try:
+                drop_args = [native]
+                for path in staged:
+                    drop_args.extend(["--path", path])
+                if checked_data is not None:
+                    if checked_data:
+                        for mime, value in checked_data.items():
+                            drop_args.extend(["--data", mime, value])
+                    else:
+                        # The argv wire otherwise cannot distinguish official
+                        # ``data: {}`` from an entirely absent payload.
+                        drop_args.append("--empty-data")
+                await self._run(
+                    owner,
+                    session,
+                    "drop",
+                    drop_args,
+                    mutating=True,
+                    workdir=workdir,
+                )
+                session.last_action = f"拖放到 {ref}"
+                return await self._observe_after_mutation(
+                    owner,
+                    session,
+                    workdir=workdir,
+                )
+            finally:
+                await asyncio.to_thread(
+                    self._cleanup_approved_upload_stage,
+                    upload_stage,
+                    owner.profile_dir.parent / "approved-uploads",
+                )
 
     async def upload(
         self, owner_id: str, session_id: str, ref: str, paths: list[str], *, workdir: str = ""
@@ -9420,7 +9764,38 @@ class BrowserManager:
                 if resolved
                 else ("清空文件输入" if ref else "取消文件选择")
             )
-            return await self._observe_after_mutation(owner, session, workdir=workdir)
+            try:
+                if ref:
+                    native = self._native_ref(session, ref)
+                    await self._run(
+                        owner,
+                        session,
+                        "upload",
+                        [native, *staged],
+                        mutating=True,
+                        workdir=workdir,
+                    )
+                else:
+                    await self._run(
+                        owner,
+                        session,
+                        "file_upload",
+                        staged if staged else ["--cancel"],
+                        mutating=True,
+                        workdir=workdir,
+                    )
+                session.last_action = (
+                    f"上传 {len(resolved)} 个文件"
+                    if resolved
+                    else ("清空文件输入" if ref else "取消文件选择")
+                )
+                return await self._observe_after_mutation(owner, session, workdir=workdir)
+            finally:
+                await asyncio.to_thread(
+                    self._cleanup_approved_upload_stage,
+                    upload_stage,
+                    owner.profile_dir.parent / "approved-uploads",
+                )
 
     async def download(
         self, owner_id: str, session_id: str, ref: str, filename: str = "", *, workdir: str = ""
@@ -10046,6 +10421,7 @@ class BrowserManager:
                             runtime_key=f"crew_{_hash(owner_key)}",
                             profile_dir=home / "browser" / "profile",
                         )
+                        self._configure_owner_lock(owner)
                         self._owners[owner_key] = owner
                     # Leave this owner as a tombstone until Session clear,
                     # Host close and artifact cleanup finish; other accounts do
@@ -10377,6 +10753,143 @@ class BrowserManager:
         )
         return True
 
+    def _governance_session(self, owner_id: str, session_id: str) -> _Session | None:
+        owner = self._owners.get(str(owner_id or ""))
+        return owner.sessions.get(str(session_id or "")) if owner else None
+
+    def _sensitive_reason(
+        self, tool_name: str, args: dict[str, Any], owner_id: str, session_id: str
+    ) -> str | None:
+        """传/高危动作的审批原因（confirm_sensitive 档）；普通动作返回 None。"""
+        if tool_name == "browser_type":
+            if args.get("submit") is True:
+                return "将输入文本并自动提交（模拟回车），可能直接发出搜索、订单或表单"
+            return None
+        if tool_name in {"browser_press", "browser_keydown"}:
+            if str(args.get("key") or "").strip().lower() in {"enter", "numpadenter"}:
+                return "将按下回车键，可能提交表单或确认页面上的操作"
+            return None
+        if tool_name == "browser_click":
+            # submit 型点击：经 ref 查本代 snapshot 里宿主显式标注的提交控件。
+            # 查不到元素信息时按普通点击放行，不误伤。
+            session = self._governance_session(owner_id, session_id)
+            stored = session.refs.get(str(args.get("ref") or "")) if session else None
+            native = stored.split("\n", 1)[0] if stored else ""
+            if native and session is not None and session.ref_actions.get(native) == "submit":
+                return "将点击页面上的提交按钮，可能直接提交表单或触发确认"
+            return None
+        if tool_name == "browser_upload":
+            return "将向当前网站上传本地文件"
+        if tool_name == "browser_drop":
+            if args.get("paths"):
+                return "将把本地文件拖放到当前网站（等同于上传）"
+            return None
+        if tool_name == "browser_download":
+            return "将从当前网站下载文件到本地磁盘"
+        if tool_name == "browser_dialog":
+            if str(args.get("action") or "") == "accept":
+                return "将接受页面弹出的对话框（等同点击“确认”）"
+            return None
+        if tool_name == "browser_evaluate":
+            return "将在页面内执行任意 JavaScript，可读取并改写页面全部内容"
+        if tool_name == "browser_run_code_unsafe":
+            return "将执行任意 Playwright 自动化代码（最高危动作）"
+        if tool_name == "browser_batch":
+            # 整批取最高危级别：任一敏感步骤则整批 ask。未登记的 action 不影响
+            # 敏感判定（执行时插件会拒绝），但写判定按 fail-closed 处理。
+            steps = args.get("steps")
+            if isinstance(steps, list):
+                for step in steps:
+                    if not isinstance(step, dict):
+                        continue
+                    sub_name = BATCH_STEP_TOOLS.get(str(step.get("action") or ""))
+                    if not sub_name:
+                        continue
+                    reason = self._sensitive_reason(sub_name, step, owner_id, session_id)
+                    if reason is not None:
+                        return f"批量操作包含敏感步骤 {step.get('action')}：{reason}"
+            return None
+        return None
+
+    def _batch_has_write(self, args: dict[str, Any]) -> bool:
+        steps = args.get("steps")
+        if not isinstance(steps, list):
+            return False
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            sub_name = BATCH_STEP_TOOLS.get(str(step.get("action") or ""))
+            # 未登记的 action 按写操作保守处理（fail-closed）：它本会被插件执行侧
+            # 拒绝，治理侧绝不能静默放行（read_only 档的底线）。
+            if sub_name is None or sub_name in _GOVERNANCE_WRITES:
+                return True
+        return False
+
+    @staticmethod
+    def _approval_digest(tool_name: str, args: dict[str, Any]) -> str:
+        try:
+            payload = json.dumps(
+                [tool_name, args], ensure_ascii=False, sort_keys=True, default=str
+            )
+        except (TypeError, ValueError):
+            payload = repr([tool_name, args])
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _issue_approval_token(
+        self, tool_name: str, args: dict[str, Any], owner_id: str, session_id: str
+    ) -> str:
+        now = time.monotonic()
+        for token, grant in list(self._approval_tokens.items()):
+            if grant.expires_at <= now:
+                del self._approval_tokens[token]
+        session = self._governance_session(owner_id, session_id)
+        token = uuid.uuid4().hex
+        self._approval_tokens[token] = _ApprovalGrant(
+            owner=str(owner_id or ""),
+            session_id=str(session_id or ""),
+            digest=self._approval_digest(tool_name, args),
+            generation=session.generation if session else -1,
+            ref=str(args.get("ref") or ""),
+            expires_at=now + _APPROVAL_TOKEN_TTL_SECONDS,
+        )
+        return token
+
+    def _governance_gate(
+        self, tool_name: str, args: dict[str, Any], owner_id: str, session_id: str
+    ) -> ToolPermissionDecision | None:
+        """动作治理：各分支参数/ref 校验通过后，按 governance_mode 决定放行/审批/拒绝。"""
+        mode = self.config.governance_mode or "confirm_sensitive"
+        if mode == "off":
+            return None
+        sensitive = self._sensitive_reason(tool_name, args, owner_id, session_id)
+        if tool_name == "browser_batch":
+            is_write = self._batch_has_write(args)
+        else:
+            is_write = tool_name in _GOVERNANCE_WRITES
+        if mode == "read_only":
+            if sensitive is not None or is_write:
+                return ToolPermissionDecision(
+                    "deny",
+                    "浏览器当前为只读模式（governance_mode=read_only），"
+                    "写交互与高危动作被拒绝",
+                )
+            return None
+        if sensitive is None and not (mode == "confirm_writes" and is_write):
+            return None
+        reason = sensitive or (
+            "批量操作包含写交互步骤，可能改变页面状态"
+            if tool_name == "browser_batch"
+            else f"将执行写交互 {tool_name.removeprefix('browser_')}，可能改变页面状态"
+        )
+        # 无交互环境（子 agent 等无 push_fn）下 ask 会被 fail-closed 成拒绝。
+        reason += "（子任务等无法弹审批的环境会被直接拒绝，可改用 takeover 交还用户操作）"
+        return ToolPermissionDecision(
+            "ask",
+            reason,
+            allow_always=tool_name not in _GOVERNANCE_NO_ALLOW_ALWAYS,
+            approval_token=self._issue_approval_token(tool_name, args, owner_id, session_id),
+        )
+
     def permission_for(
         self, tool_name: str, args: dict[str, Any], owner_id: str, session_id: str
     ) -> ToolPermissionDecision | None:
@@ -10409,8 +10922,8 @@ class BrowserManager:
                     )
             # fill_form never submits. Strict schema, latest-generation refs
             # and Host-side per-field exact-Locator checks are sufficient for
-            # ordinary form completion; no extra confirmation round-trip.
-            return None
+            # ordinary form completion; confirm_sensitive 档不额外审批，
+            # confirm_writes/read_only 档由末尾治理门统一处理。
         elif tool_name in {
             "browser_select",
             "browser_check",
@@ -10424,30 +10937,22 @@ class BrowserManager:
                 return ToolPermissionDecision(
                     "deny", "表单目标的 ref 不属于当前页面或已失效"
                 )
-            if tool_name in {"browser_hover", "browser_drop"}:
-                return None
             if tool_name == "browser_select":
                 try:
                     self._validated_select_values(args.get("values"))
                 except BrowserDriverError as exc:
                     return ToolPermissionDecision("deny", _safe_browser_error(exc))
                 return None
-            if type(args.get("checked")) is not bool:
+            if tool_name == "browser_check" and type(args.get("checked")) is not bool:
+                # checked 只属于 check；select/hover/drop 无此参数，不能因缺省被拒。
                 return ToolPermissionDecision("deny", "check checked 必须是 boolean")
             return None
-        elif tool_name in {"browser_upload", "browser_download"}:
-            # Upload/download cross the Browser↔host file boundary. Require a
-            # one-shot user decision; the concrete handler still revalidates
-            # paths, size, ref and target identity after the decision.
-            return ToolPermissionDecision(
-                "ask",
-                "浏览器文件传输需要本次操作的用户确认",
-                allow_always=False,
-            )
-        elif tool_name == "browser_dialog":
-            return None
+        # browser_upload/browser_download 不做参数级校验（具体 handler 在审批
+        # 通过后还会复核路径、大小、ref 与目标身份），敏感性统一交给末尾治理门：
+        # 两者均在 _sensitive_reason 里，走门才会签发绑定 owner/session/digest 的
+        # 一次性审批令牌，confirm_approval 才有令牌可消费。
         elif tool_name == "browser_click" and args.get("screenshot_id"):
-            return None
+            pass  # 截图坐标点击无 ref，跳过 ref 校验；治理在末尾统一判定
         elif tool_name == "browser_click":
             owner = self._owners.get(owner_id)
             session = owner.sessions.get(session_id) if owner else None
@@ -10466,8 +10971,8 @@ class BrowserManager:
             except BrowserDriverError as exc:
                 return ToolPermissionDecision("deny", _safe_browser_error(exc))
             # Element clicks always dispatch the real Playwright Locator action.
-            # There is no href-direct-open substitution and no approval pause.
-            return None
+            # There is no href-direct-open substitution; 提交型点击由治理层
+            # 按需加一次性审批。
         elif tool_name == "browser_drag":
             owner = self._owners.get(owner_id)
             session = owner.sessions.get(session_id) if owner else None
@@ -10481,7 +10986,6 @@ class BrowserManager:
                 return ToolPermissionDecision(
                     "deny", "drag 的 start_ref/end_ref 不属于当前页面或已失效"
                 )
-            return None
         elif tool_name == "browser_type":
             owner = self._owners.get(owner_id)
             session = owner.sessions.get(session_id) if owner else None
@@ -10497,7 +11001,6 @@ class BrowserManager:
                 or type(args.get("slowly", False)) is not bool
             ):
                 return ToolPermissionDecision("deny", "type 参数无效")
-            return None
         elif tool_name in {"browser_press", "browser_keydown", "browser_keyup"}:
             key = args.get("key")
             ref = str(args.get("ref") or "")
@@ -10516,7 +11019,6 @@ class BrowserManager:
                     return ToolPermissionDecision(
                         "deny", "press 的 ref 不属于当前页面或已失效"
                     )
-            return None
         elif tool_name == "browser_wait":
             try:
                 self._validated_wait(
@@ -10526,12 +11028,10 @@ class BrowserManager:
                 )
             except BrowserDriverError as exc:
                 return ToolPermissionDecision("deny", _safe_browser_error(exc))
-            return None
-        elif tool_name == "browser_navigate":
-            return None
-        elif tool_name == "browser_tabs" and args.get("action") == "new":
-            return None
-        return None
+        # 所有工具统一过治理门：上面的分支只做参数/ref 校验，治理不再是各分支
+        # 自觉调用的可选项（新增分支忘了 return 也不会绕过档位）。wait/navigate/
+        # tabs:new 等无写无敏感语义的动作经门判定后照常放行。
+        return self._governance_gate(tool_name, args, owner_id, session_id)
 
     @staticmethod
     def _tool_call_id() -> str:
@@ -10547,10 +11047,25 @@ class BrowserManager:
         owner_id: str,
         session_id: str,
     ) -> bool:
-        # The functional resolver never issues approval challenges. Keep this
-        # callback only because the generic tool-runner interface expects one.
-        del token, tool_name, args, owner_id, session_id
-        return False
+        """确认一次性审批令牌：无论成败都弹出，杜绝重放。"""
+        grant = self._approval_tokens.pop(str(token or ""), None)
+        if grant is None:
+            return False
+        if (
+            grant.expires_at <= time.monotonic()
+            or grant.owner != str(owner_id or "")
+            or grant.session_id != str(session_id or "")
+            or grant.digest != self._approval_digest(tool_name, args)
+        ):
+            return False
+        # 防 TOCTOU：审批之后页面换代或目标 ref 失效，授权自动作废。
+        session = self._governance_session(owner_id, session_id)
+        current_generation = session.generation if session else -1
+        if current_generation != grant.generation:
+            return False
+        if grant.ref and (session is None or grant.ref not in session.refs):
+            return False
+        return True
 
     def state(self, owner_id: str, session_id: str) -> dict[str, Any]:
         owner = self._owners.get(str(owner_id or ""))
@@ -10566,6 +11081,47 @@ class BrowserManager:
                 )
             return state.public_dict()
         return self._page_state(owner, session).public_dict()
+
+    async def read_tab_content(
+        self,
+        owner_id: str,
+        session_id: str,
+        tab_id: str,
+        *,
+        max_chars: int = PAGE_TEXT_LIMIT,
+    ) -> dict[str, str]:
+        """读取指定标签页的 {title, url, text}（只读 eval）；任何失败抛 BrowserDriverError。
+
+        只读观察：不加 owner.lock（Host 按 owner 串行执行 RPC，读不与其他动作互相
+        破坏），不触碰 session 观察状态。与 state() 一致：只 peek 已存在的 owner，
+        不为一次只读访问创建 owner / 启动 policy proxy。
+        """
+        limit = max(1, min(int(max_chars), PAGE_TEXT_LIMIT))
+        owner = self._owners.get(str(owner_id or ""))
+        if owner is None:
+            raise BrowserDriverError("当前账号没有浏览器会话")
+        session = owner.sessions.get(str(session_id or ""))
+        if session is None:
+            raise BrowserDriverError("当前会话没有浏览器标签页")
+        tab = session.tabs.get(str(tab_id or ""))
+        if tab is None:
+            raise BrowserDriverError("标签页不存在或已关闭")
+        if session.mode != "ai":
+            # Host 同样拒绝（control_mode_blocked）；这里提前给出面向用户的明确原因。
+            raise BrowserDriverError("人工接管或暂停期间不可读取标签页内容；请先交还 AI")
+        if not tab.target_id:
+            raise BrowserDriverError("标签页尚未就绪，缺少不可伪造的 targetId")
+        result = await self.driver.execute_targeted(
+            owner.runtime_key,
+            owner.profile_dir,
+            "eval",
+            [PAGE_TEXT_SCRIPT],
+            target_id=tab.target_id,
+            timeout=float(self.config.command_timeout_seconds),
+            proxy_url=owner.proxy.url if owner.proxy else "",
+            mutating=False,
+        )
+        return parse_page_text_result(result, limit)
 
     def _page_state(self, owner: _Owner, session: _Session) -> BrowserPageState:
         tab = session.tabs.get(session.active_label) or _Tab("", "")
@@ -10586,6 +11142,10 @@ class BrowserManager:
             viewport_height=session.viewport_height,
             can_go_back=session.can_go_back,
             can_go_forward=session.can_go_forward,
+            queue_depth=owner.lock.queue_depth,
+            last_queue_wait_ms=round(owner.lock.last_queue_wait_ms, 2),
+            last_operation_ms=round(owner.lock.last_operation_ms, 2),
+            queue_timeouts=owner.lock.queue_timeouts,
             tabs=[self._public_tab(value) for value in session.tabs.values()],
             downloads=_safe_public_value(list(session.downloads)),
         )

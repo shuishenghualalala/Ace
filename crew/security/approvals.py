@@ -16,7 +16,12 @@ from uuid import uuid4
 from crew.security.actions import ActionKind, ActionScope, NormalizedAction, security_context_digest
 from crew.security.context import SecurityContext
 from crew.security.grants import ExecutionGrant, GrantRegistry
-from crew.security.models import AdditionalPermissionProfile, PermissionProfile
+from crew.security.models import (
+    EMPTY_ADDITIONAL_PERMISSIONS,
+    AdditionalPermissionProfile,
+    PermissionProfile,
+    SandboxPermissions,
+)
 from crew.security.policy import normalize_additional_permissions
 from crew.security.rules import ActionRule, RuleScope
 
@@ -80,6 +85,7 @@ class ApprovalRequest:
     effective_profile: PermissionProfile | None = None
     action_scope_digest: str = ""
     context_digest: str = ""
+    proposed_argv_prefix: tuple[str, ...] = ()
 
     @property
     def scope_digest(self) -> str:
@@ -127,6 +133,7 @@ class ApprovalManager:
         additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
         effective_profile: PermissionProfile | None = None,
         action_scope: ActionScope | None = None,
+        proposed_argv_prefix: Sequence[str] | None = None,
     ) -> ApprovalRequest:
         now = self._clock()
         request = _new_request(
@@ -141,6 +148,7 @@ class ApprovalManager:
             effective_profile=effective_profile,
             action_scope=action_scope,
             now=now,
+            proposed_argv_prefix=proposed_argv_prefix,
         )
         with self._lock:
             self._ensure_capacity(context, now)
@@ -161,9 +169,17 @@ class ApprovalManager:
         additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
         effective_profile: PermissionProfile | None = None,
         action_scope: ActionScope | None = None,
+        proposed_argv_prefix: Sequence[str] | None = None,
     ) -> tuple[ApprovalRequest, bool]:
         """Atomically reuse one live session/tool/action request or create it."""
         now = self._clock()
+        if ttl_seconds <= 0:
+            raise ValueError("approval TTL 必须大于 0")
+        _validate_prefix_tool(
+            str(tool_name).strip(),
+            proposed_argv_prefix,
+            additional_permissions,
+        )
         candidate = _new_request(
             context,
             action,
@@ -176,6 +192,7 @@ class ApprovalManager:
             effective_profile=effective_profile,
             action_scope=action_scope,
             now=now,
+            proposed_argv_prefix=proposed_argv_prefix,
         )
         with self._lock:
             existing = next(
@@ -192,6 +209,8 @@ class ApprovalManager:
                     and request.risk_class == candidate.risk_class
                     and request.preview == candidate.preview
                     and request.action_scope_digest == candidate.action_scope_digest
+                    and request.proposed_argv_prefix
+                    == candidate.proposed_argv_prefix
                     and _request_context_matches(request, context)
                 ),
                 None,
@@ -266,8 +285,16 @@ class ApprovalManager:
                 or request.additional_permissions.allow_local_binding
             ):
                 raise ApprovalError("带额外权限的请求只能批准一次或本次对话", status=ApprovalStatus.DENIED)
+                raise ApprovalError("批准请求动作完整性校验失败")
+            if always_argv_prefix is not None and tuple(always_argv_prefix) != request.proposed_argv_prefix:
+                raise ApprovalError("始终允许前缀与审批时展示的建议不一致")
             persistent_rule = (
-                _always_rule(request.action, always_argv_prefix)
+                _always_rule(
+                    request.action,
+                    always_argv_prefix,
+                    request.additional_permissions,
+                    request.tool_name,
+                )
                 if decision is ApprovalDecision.ALWAYS
                 else None
             )
@@ -290,6 +317,7 @@ class ApprovalManager:
                 grant_scope,
                 expires_monotonic=expires,
                 additional_permissions=request.additional_permissions,
+                tool_name=request.tool_name,
             )
             return ApprovalOutcome(
                 request=request,
@@ -452,18 +480,27 @@ class ApprovalManager:
         return len(pending) + self._grants.revoke_owner(owner)
 
 
-def _always_rule(action: NormalizedAction, prefix: Sequence[str] | None) -> ActionRule:
-    if action.kind is not ActionKind.EXEC or action.raw_command:
-        # Shell wrappers (pwsh -Command / bash -lc) make argv-prefix authority unsafe:
-        # the wrapper prefix is identical for every future script. Bind the complete
-        # user-visible command + final argv digest instead; direct argv may still use
-        # the narrower structured prefix path below.
-        return ActionRule.exact(action, scope=RuleScope.ALWAYS)
-    chosen = tuple(prefix) if prefix is not None else action.argv
-    rule = ActionRule.exec_prefix(chosen, cwd=action.cwd)
-    if not rule.matches(action):
-        raise ApprovalError("always argv prefix 不是已批准命令的 token prefix")
-    return rule
+def _always_rule(
+    action: NormalizedAction,
+    prefix: Sequence[str] | None,
+    additional_permissions: AdditionalPermissionProfile,
+    tool_name: str,
+) -> ActionRule:
+    validated_prefix = _validated_exec_prefix(action, prefix)
+    if validated_prefix:
+        return ActionRule.exec_prefix(
+            validated_prefix,
+            cwd=action.cwd,
+            additional_permissions=additional_permissions,
+            allow_authority=True,
+            tool_name=tool_name,
+        )
+    return ActionRule.exact(
+        action,
+        scope=RuleScope.ALWAYS,
+        additional_permissions=additional_permissions,
+        tool_name=tool_name,
+    )
 
 
 def _new_request(
@@ -479,6 +516,7 @@ def _new_request(
     effective_profile: PermissionProfile | None,
     now: float,
     action_scope: ActionScope | None = None,
+    proposed_argv_prefix: Sequence[str] | None = None,
 ) -> ApprovalRequest:
     if (
         isinstance(ttl_seconds, bool)
@@ -509,6 +547,11 @@ def _new_request(
         _MAX_TOOL_NAME_LENGTH,
         allow_empty=False,
         strip=True,
+    )
+    _validate_prefix_tool(
+        normalized_tool,
+        proposed_argv_prefix,
+        additional_permissions,
     )
     normalized_risk = _bounded_text(
         risk_class,
@@ -564,6 +607,7 @@ def _new_request(
         effective_profile=effective_profile,
         action_scope_digest=action_scope.digest if action_scope is not None else "",
         context_digest=security_context_digest(context),
+        proposed_argv_prefix=_validated_exec_prefix(action, proposed_argv_prefix),
     )
 
 
@@ -585,6 +629,70 @@ def _bounded_text(
     ):
         raise ValueError(f"{field} 无效或超过 {maximum} 字符")
     return normalized
+
+
+def _validate_prefix_tool(
+    tool_name: str,
+    prefix: Sequence[str] | None,
+    additional_permissions: AdditionalPermissionProfile,
+) -> None:
+    """Ace exposes prefix authority only for terminal host-escalation requests."""
+    if prefix is None:
+        return
+    if tool_name != "terminal":
+        raise ValueError("只有 terminal 工具可以申请命令前缀规则")
+    if (
+        additional_permissions.sandbox_permissions
+        is not SandboxPermissions.REQUIRE_ESCALATED
+    ):
+        raise ValueError("prefix_rule 只能与 require_escalated 一起使用")
+
+
+_UNSAFE_PREFIX_EXECUTABLES = frozenset(
+    {
+        "bash",
+        "cmd",
+        "cmd.exe",
+        "del",
+        "erase",
+        "node",
+        "perl",
+        "powershell",
+        "powershell.exe",
+        "pwsh",
+        "python",
+        "python3",
+        "remove-item",
+        "rm",
+        "rmdir",
+        "ruby",
+        "sh",
+        "sudo",
+        "unlink",
+        "zsh",
+    }
+)
+
+
+def _validated_exec_prefix(
+    action: NormalizedAction,
+    prefix: Sequence[str] | None,
+) -> tuple[str, ...]:
+    """Validate a persistent prefix against one statically parsed command."""
+    if prefix is None:
+        return ()
+    if action.kind is not ActionKind.EXEC:
+        raise ApprovalError("只有命令执行支持前缀规则")
+    values = tuple(str(token) for token in prefix)
+    if len(values) < 2 or any(not token or "\x00" in token for token in values):
+        raise ApprovalError("命令前缀至少需要两个非空参数")
+    candidates = action.parsed_commands or (action.argv,)
+    if len(candidates) != 1 or tuple(candidates[0][: len(values)]) != values:
+        raise ApprovalError("命令前缀必须匹配唯一且静态解析的完整命令")
+    executable = values[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if executable in _UNSAFE_PREFIX_EXECUTABLES:
+        raise ApprovalError("通用解释器、提权器和删除命令不能保存为始终允许前缀")
+    return values
 
 
 def _request_context_matches(request: ApprovalRequest, context: SecurityContext) -> bool:

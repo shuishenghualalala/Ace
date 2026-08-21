@@ -22,9 +22,10 @@ fn managed_profile_blocks_outside_and_protected_writes() {
     let workspace = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::fs::create_dir(workspace.path().join(".git")).unwrap();
+    std::fs::write(workspace.path().join(".git/config"), "original").unwrap();
     std::fs::write(outside.path().join("host-secret"), "secret").unwrap();
     let script = format!(
-        "echo allowed > allowed.txt && ! test -r '{}/host-secret' && ! echo denied > '{}/denied.txt' && ! echo denied > .git/config",
+        "echo allowed > allowed.txt && test \"$(cat .git/config)\" = original && ! test -r '{}/host-secret' && ! echo denied > '{}/denied.txt' && ! echo denied > .git/config",
         outside.path().display(),
         outside.path().display()
     );
@@ -33,6 +34,7 @@ fn managed_profile_blocks_outside_and_protected_writes() {
         "command": ["/bin/sh", "-c", script],
         "cwd": workspace.path(),
         "writable_roots": [workspace.path()],
+        "readonly_roots": [workspace.path().join(".git")],
         "denied_roots": [outside.path()],
         "network_enabled": false,
         "max_output_bytes": 65536
@@ -45,7 +47,10 @@ fn managed_profile_blocks_outside_and_protected_writes() {
         "allowed\n"
     );
     assert!(!outside.path().join("denied.txt").exists());
-    assert!(!workspace.path().join(".git/config").exists());
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join(".git/config")).unwrap(),
+        "original"
+    );
 }
 
 #[test]
@@ -133,7 +138,7 @@ fn run_request(request: serde_json::Value) -> Vec<serde_json::Value> {
     stdout.read_line(&mut line).unwrap();
     assert!(line.contains("\"stdin_once\""));
     let envelope = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "token": token,
         "nonce": format!("linux-adversarial-{}", std::process::id()),
         "request": request,

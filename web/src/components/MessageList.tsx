@@ -7,6 +7,7 @@ import AgentTurnBubble from "./AgentTurnBubble";
 import MessageItem from "./MessageItem";
 import FollowupQuestionCard from "./FollowupQuestionCard";
 import AgentAvatarLogo from "./AgentAvatarLogo";
+import { externalAgentInitial, externalAgentTone } from "./ExternalAgentAvatar";
 
 interface Props {
   messages: UiMessage[];
@@ -25,6 +26,8 @@ interface Props {
   teamMembers?: TeamMemberView[];
   showEmptyState?: boolean;
   currentAgentLabel?: Session["agent_label"];
+  /** 传入后回答正文中的 [[Wiki 页面名]] 引用渲染为可点击链接（Wiki 问答场景）。 */
+  onWikiLink?: (title: string) => void;
 }
 
 export default function MessageList({
@@ -41,6 +44,7 @@ export default function MessageList({
   teamMembers,
   showEmptyState = true,
   currentAgentLabel,
+  onWikiLink,
 }: Props) {
   const messagesRef = useRef<HTMLDivElement>(null);
   const followOutputRef = useRef(true);
@@ -133,8 +137,12 @@ export default function MessageList({
               key={turn.turnId}
               identity={{
                 name: currentAgentLabel?.name || currentAgentLabel?.provider || "Agent",
-                badge: currentAgentLabel?.display_badge || "?",
-                tone: 0,
+                badge: externalAgentInitial({
+                  provider: currentAgentLabel?.provider || "external",
+                  display_badge: currentAgentLabel?.display_badge,
+                }),
+                tone: externalAgentTone(currentAgentLabel?.provider || "external"),
+                external: true,
               }}
               state={buildAgentTurnState(turn.messages, busy && idx === activeAgentTurnIdx)}
               isStreaming={busy && idx === activeAgentTurnIdx}
@@ -151,6 +159,7 @@ export default function MessageList({
               onRejectPlan={onRejectPlan}
               onRejectAndExitPlan={onRejectAndExitPlan}
               onAsk={onAsk}
+              onWikiLink={onWikiLink}
             />
           ),
         )}

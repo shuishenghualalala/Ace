@@ -564,9 +564,9 @@ function editablePptxShadowStyles(): string {
     .inspector-office-page-editor__svg-source-text.is-editing,
     .inspector-office-page-editor__svg-source-text.is-dirty{opacity:0}
     .inspector-office-page-editor__ppt-layer{position:absolute;inset:0;z-index:2;overflow:hidden;pointer-events:none}
-    .inspector-office-page-editor__ppt-textbox{position:absolute;box-sizing:border-box;min-height:20px;padding:0;border:1px solid transparent;border-radius:var(--mw-radius-1);background:transparent;color:transparent!important;caret-color:var(--mw-action-primary);cursor:text;line-height:normal;outline:none;overflow:hidden;pointer-events:auto;resize:none;white-space:pre}
+    .inspector-office-page-editor__ppt-textbox{position:absolute;box-sizing:border-box;min-height:20px;padding:0;border:1px solid transparent;border-radius:var(--mw-radius-1);background:transparent;color:transparent;caret-color:var(--mw-action-primary);cursor:text;line-height:normal;outline:none;overflow:hidden;pointer-events:auto;resize:none;white-space:pre}
     .inspector-office-page-editor__ppt-textbox.is-editing,
-    .inspector-office-page-editor__ppt-textbox.is-dirty{color:var(--ppt-text-color,currentColor)!important}
+    .inspector-office-page-editor__ppt-textbox.is-dirty{color:var(--mw-runtime-color,currentColor)}
     .inspector-office-page-editor__ppt-textbox:hover{border-color:var(--mw-focus-ring)}
     .inspector-office-page-editor__ppt-textbox:focus{border-color:var(--mw-focus-ring);box-shadow:var(--mw-action-glow)}`;
 }

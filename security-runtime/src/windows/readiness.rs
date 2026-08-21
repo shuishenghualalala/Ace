@@ -98,7 +98,9 @@ fn probe_acl_and_token(state_dir: &Path, account: &str) -> Result<(), String> {
         cwd: probe_writable.clone(),
         writable_roots: vec![probe_writable.clone()],
         readable_roots: Vec::new(),
+        readonly_roots: vec![probe_writable.join(".git")],
         denied_roots: Vec::new(),
+        full_disk_read: false,
         network_enabled: false,
         network_rules: Vec::new(),
         allow_local_binding: false,
@@ -106,6 +108,7 @@ fn probe_acl_and_token(state_dir: &Path, account: &str) -> Result<(), String> {
         stdin: None,
         stdin_stream: None,
         env_overrides: Default::default(),
+        home_files: Default::default(),
     };
     let lease = AclLease::prepare(&probe_state, account, &request)?;
     let capability_sids = lease.capability_sids().to_vec();

@@ -96,7 +96,7 @@ describe('Security Center view', () => {
     });
 
     expect(view.element.textContent).toContain('每条命令都问我');
-    expect(view.element.textContent).toContain('宽权限受管');
+    expect(view.element.textContent).toContain('宽权限受管：安全控制面仍隔离');
     expect(view.element.textContent).toContain('D:/work/<img src=x onerror=alert(1)>');
     expect(view.element.querySelector('.security-center__rule-detail')?.textContent)
       .toContain('操作：读取文件');
@@ -273,6 +273,12 @@ describe('Security Center view', () => {
     expect(view.element.textContent).toContain('共 1 条');
 
     const actionType = view.element.querySelector<HTMLSelectElement>('[data-security-audit-filter="action-type"]');
+    expect(Array.from(actionType!.options).map((option) => option.value)).toEqual(expect.arrayContaining([
+      'approval_requested',
+      'approval_decision',
+      'exec_decision',
+      'file_decision',
+    ]));
     actionType!.value = 'approval_decision';
     actionType!.dispatchEvent(new Event('change', { bubbles: true }));
     expect(onAuditQueryChange).toHaveBeenCalledWith(expect.objectContaining({

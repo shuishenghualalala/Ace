@@ -650,6 +650,33 @@ class ExternalAgentStore:
             self._refresh_profiles_for_runtime(runtime_id, self.get_runtime(runtime_id))
         return self.list_runtimes()
 
+    def delete_runtime(self, runtime_id: str) -> None:
+        """Delete an unused runtime and discard native-session resume metadata.
+
+        Crew chat history lives in the sessions tables and is not removed here.
+        Once no Agent references this Runtime, its native resume bindings cannot
+        be used again and must not keep a stale discovery record undeletable.
+        """
+
+        with self._conn() as conn:
+            runtime = conn.execute(
+                "SELECT id FROM external_runtime WHERE id = ?",
+                (runtime_id,),
+            ).fetchone()
+            if runtime is None:
+                raise KeyError(runtime_id)
+            agent = conn.execute(
+                "SELECT name FROM external_agent WHERE runtime_id = ? LIMIT 1",
+                (runtime_id,),
+            ).fetchone()
+            if agent is not None:
+                raise ValueError(f"运行时仍被智能体「{agent['name']}」使用，请先删除对应智能体")
+            conn.execute(
+                "DELETE FROM external_runtime_session_binding WHERE runtime_id = ?",
+                (runtime_id,),
+            )
+            conn.execute("DELETE FROM external_runtime WHERE id = ?", (runtime_id,))
+
     def _refresh_profiles_for_runtime(self, runtime_id: str, runtime: dict[str, Any] | None = None) -> None:
         """Refresh current AgentProfile snapshots after Runtime facts change."""
 
@@ -1147,6 +1174,13 @@ class ExternalAgentStore:
             conn.execute(
                 """
                 DELETE FROM external_agent_profile_observation
+                WHERE owner_account_id = ? AND external_agent_id = ?
+                """,
+                (owner_account_id, agent_id),
+            )
+            conn.execute(
+                """
+                DELETE FROM external_runtime_session_binding
                 WHERE owner_account_id = ? AND external_agent_id = ?
                 """,
                 (owner_account_id, agent_id),

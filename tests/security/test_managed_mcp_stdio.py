@@ -350,14 +350,14 @@ async def test_replayed_or_mismatched_output_frame_terminates_runtime() -> None:
     nonce = "nonce-for-managed-mcp"
     frames = [
         {
-            "version": 2,
+            "version": 3,
             "nonce": nonce,
             "seq": 1,
             "type": "stdout",
             "data_b64": base64.b64encode(b"first").decode(),
         },
         {
-            "version": 2,
+            "version": 3,
             "nonce": nonce,
             "seq": 1,
             "type": "stdout",

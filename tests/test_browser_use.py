@@ -301,6 +301,9 @@ class FakeElectronDriver(FakeBrowserDriver, ElectronBrowserDriver):
         # 避免任何残留路径读取 self.config 时 AttributeError。
         self.config = BrowserConfig()
 
+    def requires_policy_proxy(self) -> bool:
+        return False
+
     # 显式拉回基类默认，绕开 ElectronBrowserDriver 的 bridge 实现（MRO 中它在基类前）。
     configure_proxy = BrowserDriver.configure_proxy
     execute_targeted = BrowserDriver.execute_targeted
@@ -515,6 +518,27 @@ async def test_vision_returns_media_and_page_bound_metadata(browser):
     assert "--settled" not in screenshot
 
 
+async def test_owner_action_queue_exposes_metrics_and_times_out(browser):
+    _unused_manager, _unused_driver = browser
+    driver = FakeBrowserDriver()
+    manager = BrowserManager(BrowserConfig(queue_timeout_seconds=0.01), driver)
+    try:
+        await manager.navigate("owner", "session", "https://example.com")
+        owner = manager._owners["owner"]
+        await owner.lock.acquire()
+        try:
+            with pytest.raises(BrowserDriverError, match="排队超过"):
+                await manager.snapshot("owner", "session")
+        finally:
+            owner.lock.release()
+        state = manager.state("owner", "session")
+        assert state["queue_timeouts"] == 1
+        assert state["queue_depth"] == 0
+        assert state["last_queue_wait_ms"] >= 0
+    finally:
+        await manager.aclose()
+
+
 def test_snapshot_compatibility_shim_never_truncates_content_or_refs():
     """Configured output limits are legacy inputs; snapshots remain complete."""
     body = "\n".join(f'- button "b{i}" [ref=p1:e{i}]' for i in range(200))
@@ -526,6 +550,16 @@ def test_snapshot_compatibility_shim_never_truncates_content_or_refs():
         ("short body", 30_000),
     ):
         assert _truncate_snapshot_at_line(text, legacy_limit) == (text, "")
+
+
+def test_full_snapshot_uses_a_larger_but_bounded_output_guard():
+    body = "\n".join(f"- button \"b{i}\"" for i in range(250_000))
+    compact, compact_reason = _truncate_snapshot_at_line(body, 30_000)
+    full, full_reason = _truncate_snapshot_at_line(body, 30_000, full=True)
+
+    assert len(compact) < len(full) < len(body)
+    assert "护栏" in compact_reason
+    assert "护栏" in full_reason
 
 
 async def test_all_drivers_use_the_same_functional_ref_dispatch_path(tmp_path, monkeypatch):
@@ -546,8 +580,13 @@ async def test_all_drivers_use_the_same_functional_ref_dispatch_path(tmp_path, m
         try:
             await manager.navigate("o", "s", "https://example.com")
             args = {"ref": "p1:e17"}
+            # p1:e17 是宿主标注的提交按钮：默认治理档下弹一次性审批，
+            # 确认后仍走同一 functional ref 派发路径。
             decision = manager.permission_for("browser_click", args, "o", "s")
-            assert decision is None
+            assert decision is not None and decision.behavior == "ask"
+            assert manager.confirm_approval(
+                decision.approval_token, "browser_click", args, "o", "s"
+            )
             return await manager.click("o", "s", "p1:e17")
         finally:
             current_tool_call_id.reset(token)
@@ -630,15 +669,18 @@ async def _electron_manager(tmp_path, monkeypatch):
     return manager, driver
 
 
-async def test_type_submit_is_atomic_without_an_approval_round_trip(tmp_path, monkeypatch):
-    """搜索首选 type+submit：同一 RPC 内填词并按 Enter，无审批等待窗口。"""
+async def test_type_submit_asks_once_then_executes_atomically(tmp_path, monkeypatch):
+    """搜索首选 type+submit：治理层弹一次性审批，确认后仍在同一 RPC 内填词并按 Enter。"""
     manager, driver = await _electron_manager(tmp_path, monkeypatch)
     token = current_tool_call_id.set("tc-submit")
     try:
         await manager.navigate("o", "s", "https://baidu.com")
         args = {"ref": "p1:e18", "text": "世界杯赛况", "submit": True}
         decision = manager.permission_for("browser_type", args, "o", "s")
-        assert decision is None
+        assert decision is not None and decision.behavior == "ask"
+        assert manager.confirm_approval(
+            decision.approval_token, "browser_type", args, "o", "s"
+        )
         driver.calls.clear()
         result = await manager.fill("o", "s", "p1:e18", "世界杯赛况", submit=True)
         fill_args = [a for command, a in driver.calls if command == "fill"]
@@ -700,15 +742,22 @@ async def test_click_is_not_blocked_by_observational_marker_changes(browser):
     await manager.navigate("owner", "session", "https://example.com")
     token = current_tool_call_id.set("tool-approve")
     try:
+        # p1:e17 是提交按钮：治理层弹一次性审批，审批与 marker 变化无关。
         args = {"ref": "p1:e17"}
         decision = manager.permission_for("browser_click", args, "owner", "session")
-        assert decision is None
+        assert decision is not None and decision.behavior == "ask"
+        assert manager.confirm_approval(
+            decision.approval_token, "browser_click", args, "owner", "session"
+        )
         clicked = await manager.click("owner", "session", "p1:e17")
         assert "p2:e17" in clicked
 
         args = {"ref": "p2:e17"}
         decision = manager.permission_for("browser_click", args, "owner", "session")
-        assert decision is None
+        assert decision is not None and decision.behavior == "ask"
+        assert manager.confirm_approval(
+            decision.approval_token, "browser_click", args, "owner", "session"
+        )
         driver.time_origin = "2000"
         clicked_again = await manager.click("owner", "session", "p2:e17")
         assert "p3:e17" in clicked_again
@@ -781,6 +830,9 @@ def test_blocked_hosts_use_dns_idna_canonicalization():
             policy.validate_hostname(hostname)
     with pytest.raises(BrowserNetworkDenied):
         policy.validate_ip("mapped.example", "::ffff:127.0.0.1")
+    with pytest.raises(BrowserNetworkDenied, match="userinfo_forbidden"):
+        policy.validate_navigation_url("https://user:password@example.com/")
+
 
     explicitly_allowed = BrowserNetworkPolicy(
         BrowserConfig(allowed_private_hosts=["internal.example"])
@@ -854,7 +906,14 @@ async def test_browser_manager_fails_closed_before_driver_when_proxy_start_fails
         raise OSError("proxy failed with password=must-not-leak")
 
     monkeypatch.setattr(LoopbackPolicyProxy, "start", fail_start)
-    driver = FakeBrowserDriver()
+
+    class ProxyRequiringDriver(FakeBrowserDriver):
+        # 合并后仅 requires_policy_proxy()=True 的驱动（生产 Electron 驱动）强制
+        # 走策略代理；基类默认 False 会整体跳过代理启动。
+        def requires_policy_proxy(self) -> bool:
+            return True
+
+    driver = ProxyRequiringDriver()
     manager = BrowserManager(BrowserConfig(), driver)
     try:
         with pytest.raises(BrowserDriverError) as denied:

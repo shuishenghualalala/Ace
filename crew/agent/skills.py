@@ -1213,15 +1213,17 @@ def _package_description_from_frontmatter(frontmatter: dict, fallback: str) -> s
     return fallback if _contains_cjk(fallback) else ""
 
 
-def _parse_package_md(package_md: Path) -> dict[str, Any] | None:
+def _parse_package_md(package_md: Path, package_root: Path) -> dict[str, Any] | None:
     """解析 PACKAGE.md，返回 package info dict；解析失败返回 None。"""
     try:
-        content = read_skill_text(package_md, package_md.parent)
+        safe_package_root = resolve_skill_path(package_root, package_root)
+        safe_package_md = resolve_skill_path(package_md, safe_package_root)
+        content = read_skill_text(safe_package_md, safe_package_root)
         fm, body = _parse_frontmatter(content)
-        name = str(fm.get("name") or package_md.parent.name).strip()
+        name = str(fm.get("name") or safe_package_md.parent.name).strip()
         if not name:
             return None
-        slug = _slugify(name) or _slugify(package_md.parent.name)
+        slug = _slugify(name) or _slugify(safe_package_md.parent.name)
         if not slug:
             return None
         description = str(fm.get("description") or "").strip()
@@ -1239,8 +1241,8 @@ def _parse_package_md(package_md: Path) -> dict[str, Any] | None:
             "description": description or f"激活 {name} package",
             "description_zh": zh_description,
             "category": display_category,
-            "package_md_path": str(package_md),
-            "package_dir": str(package_md.parent),
+            "package_md_path": str(safe_package_md),
+            "package_dir": str(safe_package_md.parent),
             "content": body.strip(),
         }
     except Exception as exc:
@@ -1313,7 +1315,7 @@ def _iter_package_skills(skills_dir: Path):
                 raise SkillDiscoveryLimitError(
                     f"Skill 发现 bundle 数量超过上限 {_DISCOVERY_MAX_BUNDLES}"
                 )
-            package_info = _parse_package_md(package_md)
+            package_info = _parse_package_md(package_md, entry)
             if package_info is None:
                 continue
             # package 内的 skills：只扫描直接子目录
@@ -1488,7 +1490,8 @@ def _mtime_key() -> tuple:
                 )
             except (OSError, SkillPathError, ValueError):
                 key.append((str(skill_md), 0, 0, ""))
-        # PACKAGE.md
+        # PACKAGE.md follows the same contained traversal and before/after
+        # validation as SKILL.md; cache invalidation must not become a read oracle.
         for _root, files in _walk_contained(
             d,
             max_depth=_DISCOVERY_MAX_DEPTH,
@@ -1500,19 +1503,21 @@ def _mtime_key() -> tuple:
                 if pkg_md.name != "PACKAGE.md":
                     continue
                 try:
+                    package_root = resolve_skill_path(pkg_md.parent, d)
+                    safe_pkg_md = resolve_skill_path(pkg_md, package_root)
                     version = snapshot_file(
-                        pkg_md,
+                        safe_pkg_md,
                         max_bytes=_DISCOVERY_MAX_FILE_BYTES,
                     )
                     key.append(
                         (
-                            str(pkg_md),
+                            str(safe_pkg_md),
                             version.mtime_ns,
                             version.size,
                             version.digest,
                         )
                     )
-                except (OSError, ValueError):
+                except (OSError, SkillPathError, ValueError):
                     key.append((str(pkg_md), 0, 0, ""))
     return tuple(key)
 
@@ -1901,6 +1906,31 @@ def skill_activations_from_params(params: dict[str, Any] | None) -> tuple[SkillA
             )
         )
     return tuple(activations)
+
+
+def trusted_skill_roots_from_params(params: dict[str, Any] | None) -> tuple[Path, ...]:
+    """Revalidate explicitly activated Skill roots before sandbox exposure.
+
+    直接校验原始 params 而不是复用 ``skill_activations_from_params`` 的过滤
+    结果：过滤层对不匹配条目静默跳过（适合恢复不可信的模型输入），但暴露
+    沙箱根目录这一步必须 fail-loud——篡改过的 activation 在这里直接抛错。
+    """
+    roots: list[Path] = []
+    for raw in (dict(params or {}).get("active_skills") or []):
+        if not isinstance(raw, dict):
+            continue
+        activation = SkillActivation.from_dict(raw)
+        if not (activation.skill_id and activation.skill_root and activation.instruction):
+            continue
+        info = resolve_skill_any(activation.skill_id)
+        if info is None:
+            raise ValueError(f"当前 Skill 已不存在：{activation.skill_id}")
+        root = _registered_skill_dir(Path(str(info.get("skill_dir") or "")))
+        if root != Path(activation.skill_root).expanduser().resolve():
+            raise ValueError(f"Skill 在当前执行期间发生变化：{activation.skill_id}")
+        if root not in roots:
+            roots.append(root)
+    return tuple(roots)
 
 
 def resolve_skill_activation_entrypoint(

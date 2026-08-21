@@ -108,6 +108,20 @@ describe('GatewayFetchArgs', () => {
   });
 });
 
+describe('SecurityAuditArgs', () => {
+  it('accepts every emitted execution and lifecycle filter', () => {
+    expect(SecurityAuditArgs.parse({ actionType: 'network_decision', decision: 'allow' }).ok).toBe(true);
+    expect(SecurityAuditArgs.parse({ actionType: 'exec_result', decision: 'completed' }).ok).toBe(true);
+    expect(SecurityAuditArgs.parse({ actionType: 'rule_disabled', decision: 'disabled' }).ok).toBe(true);
+    expect(SecurityAuditArgs.parse({ actionType: 'audit_purged', decision: 'deleted' }).ok).toBe(true);
+  });
+
+  it('rejects unknown audit filters', () => {
+    expect(SecurityAuditArgs.parse({ actionType: 'unknown' }).ok).toBe(false);
+    expect(SecurityAuditArgs.parse({ decision: 'unknown' }).ok).toBe(false);
+  });
+});
+
 describe('ShellOpenExternalArgs', () => {
   it('accepts https url', () => {
     expect(ShellOpenExternalArgs.parse({ url: 'https://example.com' }).ok).toBe(true);

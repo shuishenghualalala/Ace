@@ -32,6 +32,7 @@ const runtimeRecords = manifest.files.filter((item) => item && item.name === exp
 if (runtimeRecords.length !== 1) {
   throw new Error(`required ${expectedRuntime} missing from manifest`);
 }
+const expectedRecord = runtimeRecords[0];
 if (manifest.binary_name !== expectedRuntime || !digestPattern.test(manifest.binary_sha256)) {
   throw new Error('security runtime manifest binary integrity metadata missing');
 }
@@ -57,7 +58,7 @@ for (const item of manifest.files) {
   }
   const digest = createHash('sha256').update(readFileSync(file)).digest('hex');
   if (digest !== item.sha256) throw new Error(`security runtime digest mismatch: ${item.name}`);
-  if (item.name === expectedRuntime && digest !== manifest.binary_sha256) {
+  if (item.name === expectedRuntime && digest !== expectedRecord.sha256) {
     throw new Error(`security runtime binary metadata mismatch: ${item.name}`);
   }
 }

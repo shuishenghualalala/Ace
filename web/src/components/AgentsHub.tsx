@@ -13,6 +13,8 @@ import type {
   RuntimeModelProfile,
 } from "../types";
 import MarkdownContent from "./MarkdownContent";
+import ExternalAgentAvatar from "./ExternalAgentAvatar";
+import externalAgentIcon from "../assets/external-agent.png";
 
 type TabKey = "mine" | "runtime" | "create-agent" | "create-team";
 type AgentsGuideMode = "hidden" | "welcome" | "tour";
@@ -152,6 +154,7 @@ const AGENTS_GUIDE_STORAGE_KEY = "crew.externalAgents.guideDismissed.v1";
 const AGENTS_GUIDE_HIGHLIGHT_PADDING = 6;
 const AGENTS_GUIDE_TOOLTIP_GAP = 12;
 const AGENTS_GUIDE_VIEWPORT_MARGIN = 12;
+
 
 type AgentsGuideLayout = {
   highlight: { left: number; top: number; width: number; height: number } | null;
@@ -1351,6 +1354,7 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
         <div className="agents-list">
           {runtimes.map((runtime) => (
             <article className="agent-card" key={runtime.id}>
+              <img className="runtime-external-agent-icon" src={externalAgentIcon} alt="" />
               <div className="agent-card__main">
                 <div className="agent-card__title">
                   <span
@@ -1918,9 +1922,7 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
                     ×
                   </button>
                 </div>
-                <div className="pixel-avatar" aria-hidden="true">
-                  <span>{agent.display_badge || "?"}</span>
-                </div>
+                <ExternalAgentAvatar agent={agent} />
                 <div className="mine-agent-card__body">
                   <div className="mine-agent-card__head">
                     <strong>{agent.name}</strong>

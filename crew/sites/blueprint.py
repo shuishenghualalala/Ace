@@ -7,10 +7,11 @@ import json
 import threading
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urljoin, urlparse
+from urllib.parse import parse_qsl, urlparse
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -20,6 +21,11 @@ from jsonschema import Draft202012Validator
 
 from crew.core.errors import ToolError
 from crew.cron.jobs import BJ_TZ, parse_duration
+from crew.security.outbound import (
+    PublicRedirectApprovalRequired,
+    parse_public_http_target,
+    request_public_http,
+)
 from crew.state.home import get_owner_runtime_home, safe_path_segment
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 from crew.tools.redact import safe_public_error
@@ -590,9 +596,9 @@ class BlueprintManager:
                                      result: dict[str, Any]) -> None:
         if execution.get("kind") != "http_json":
             raise ValueError("当前仅支持 http_json Automation")
-        parsed = urlparse(str(execution.get("url") or ""))
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("http_json execution.url 必须是 HTTP/HTTPS URL")
+        raw_url = str(execution.get("url") or "")
+        parse_public_http_target(raw_url)
+        parsed = urlparse(raw_url)
         self._assert_no_url_secrets(parsed.query)
         headers = execution.get("headers") if isinstance(execution.get("headers"), dict) else {}
         sensitive = {str(name).lower() for name in headers} & {
@@ -617,12 +623,11 @@ class BlueprintManager:
         if names & secret_names:
             raise ValueError("一期公开接口模式不允许在 URL 查询参数中保存密钥")
 
-    async def _fetch_json(self, execution: dict[str, Any], run_input: Any) -> tuple[dict[str, Any], str]:
-        if self.workspace_store is None or self.security_service is None:
-            raise ToolError(
-                '{"code":"SECURITY_OUTBOUND_DENIED",'
-                '"reason":"authorization_unavailable"}'
-            )
+    @staticmethod
+    def _normalized_http_request(
+        execution: dict[str, Any],
+    ) -> tuple[str, str, dict[str, str], float]:
+        """归一化 http_json 请求参数：方法、鉴权头过滤、超时钳制。"""
         raw_url = str(execution.get("url") or "").strip()
         method = str(execution.get("method") or "GET").upper()
         if method not in {"GET", "POST"}:
@@ -635,6 +640,15 @@ class BlueprintManager:
             raise ValueError("一期公开接口模式不允许鉴权请求头")
         safe_headers = {str(k): str(v) for k, v in headers.items() if str(k).lower() not in {"host", "content-length"}}
         timeout = max(1.0, min(float(execution.get("timeoutSeconds") or 15), 60.0))
+        return raw_url, method, safe_headers, timeout
+
+    async def _fetch_json(self, execution: dict[str, Any], run_input: Any) -> tuple[dict[str, Any], str]:
+        if self.workspace_store is None or self.security_service is None:
+            raise ToolError(
+                '{"code":"SECURITY_OUTBOUND_DENIED",'
+                '"reason":"authorization_unavailable"}'
+            )
+        raw_url, method, safe_headers, timeout = self._normalized_http_request(execution)
         current = raw_url
         for redirect in range(self.MAX_REDIRECTS + 1):
             authorized_plan = await authorize_network_url(
@@ -681,8 +695,55 @@ class BlueprintManager:
             return value, f"{method} {parsed_current.scheme}://{parsed_current.netloc} -> {response.status}"
         raise RuntimeError("接口请求未产生响应")
 
+    async def _request_json(
+        self,
+        execution: dict[str, Any],
+        run_input: Any,
+        allowed_targets: set[tuple[str, int, str]] | None,
+    ) -> tuple[dict[str, Any], str]:
+        raw_url, method, safe_headers, timeout = self._normalized_http_request(execution)
+        self._assert_no_url_secrets(urlparse(raw_url).query)
+        response = await asyncio.to_thread(
+            request_public_http,
+            raw_url,
+            method=method,
+            timeout=timeout,
+            max_bytes=self.MAX_RESPONSE_BYTES,
+            headers=safe_headers,
+            json_body=run_input if method == "POST" else None,
+            allowed_targets=allowed_targets,
+        )
+        try:
+            value = json.loads(response.body.decode(response.charset, errors="strict"))
+        except (LookupError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("接口响应不是有效 JSON") from exc
+        if not isinstance(value, dict):
+            value = {"items": value}
+        parsed = urlparse(response.url)
+        return value, f"{method} {parsed.scheme}://{parsed.netloc} -> {response.status}"
+
+    async def _fetch_json_authorized(
+        self,
+        execution: dict[str, Any],
+        run_input: Any,
+        authorize_network: Callable[[str], Awaitable[None]],
+    ) -> tuple[dict[str, Any], str]:
+        raw_url = str(execution.get("url") or "").strip()
+        next_target = raw_url
+        allowed: set[tuple[str, int, str]] = set()
+        for _attempt in range(self.MAX_REDIRECTS + 2):
+            await authorize_network(next_target)
+            allowed.add(parse_public_http_target(next_target).authority)
+            try:
+                return await self._request_json(execution, run_input, allowed)
+            except PublicRedirectApprovalRequired as exc:
+                next_target = exc.url
+        raise ValueError("接口重定向次数过多")
+
     async def run_automation(self, owner: str, automation_id: str, *, run_input: Any = None,
-                             trigger_kind: str = "manual") -> dict[str, Any]:
+                             trigger_kind: str = "manual",
+                             authorize_network: Callable[[str], Awaitable[None]] | None = None,
+                             ) -> dict[str, Any]:
         automation = self.store.get_automation(owner, automation_id)
         input_spec = automation.get("input") or {"kind": "none"}
         resolved_input = run_input
@@ -697,7 +758,12 @@ class BlueprintManager:
             execution = automation.get("execution") or {}
             if execution.get("kind") != "http_json":
                 raise ValueError("当前仅支持 http_json Automation")
-            artifact, logs = await self._fetch_json(execution, resolved_input)
+            if authorize_network is None:
+                artifact, logs = await self._fetch_json(execution, resolved_input)
+            else:
+                artifact, logs = await self._fetch_json_authorized(
+                    execution, resolved_input, authorize_network,
+                )
             schema = (automation.get("result") or {}).get("schema") or {"type": "object"}
             errors = sorted(Draft202012Validator(schema).iter_errors(artifact), key=lambda item: list(item.path))
             if errors:

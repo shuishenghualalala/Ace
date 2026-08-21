@@ -116,6 +116,10 @@ class GatewayJSONStructureBudgetMiddleware:
                 message = messages[position]
                 position += 1
                 return message
-            return {"type": "http.request", "body": b"", "more_body": False}
+            # 缓冲耗尽后再被调用只可能是断连探测（StreamingResponse 的
+            # listen_for_disconnect）。必须转发原始 receive 而不是立刻返回伪造
+            # 消息：不 await 的 receive 会让探测循环变成忙循环，饿死事件循环，
+            # 流式响应永远发不完（测试 ASGITransport 下即死锁）。
+            return await receive()
 
         await self.app(scope, replay_receive, send)

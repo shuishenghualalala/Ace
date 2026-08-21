@@ -100,14 +100,17 @@ def test_acl_changes_preserve_existing_dacl_and_have_crash_manifest():
     assert '".git", ".agents", ".crew"' in acl
 
 
+
 def test_acl_enforces_read_only_and_protected_child_delete_precedence():
     acl = _read("acl.rs")
 
     assert "DenyDeleteChild" in acl
+    # 合并后 writable 循环改为先 canonical 收集再迭代：
+    # for (index, root) in writable.iter().enumerate()
     readable = acl[acl.index("for root in &request.readable_roots") :]
-    readable = readable[: readable.index("for (index, root) in request.writable_roots")]
+    readable = readable[: readable.index("for (index, root) in writable.iter().enumerate()")]
     assert "AclAccess::DenyWrite" in readable
-    writable = acl[acl.index("for (index, root) in request.writable_roots") :]
+    writable = acl[acl.index("for (index, root) in writable.iter().enumerate()") :]
     writable = writable[: writable.index("for root in &request.denied_roots")]
     assert "AclAccess::DenyDeleteChild" in writable
 

@@ -81,14 +81,20 @@ function inspirationCard(item: InspirationItem): string {
 }
 
 function renderGallery(el: HTMLElement): void {
-  el.innerHTML = `<div class="sites-page inspiration-page">
-    <header class="sites-head inspiration-head">
-      <div><p class="sites-eyebrow">YOUR APPS</p><h1>灵感</h1><p>你和 Agent 一起设计、使用和继续完善的 App。</p></div>
-      <div class="sites-head-actions"><button class="sites-refresh" data-inspirations-refresh aria-label="刷新灵感" title="刷新">↻</button><button class="sites-create" data-sites-create>＋ 新建灵感</button></div>
+  el.innerHTML = `<div class="page-shell page-shell--sites sites-page inspiration-page">
+    <header class="page-header page-header--hub">
+      <div class="page-header__copy">
+        <h1 class="page-header__title">灵感</h1>
+        <p class="page-header__desc">和 Crew 一起，把灵光一闪变成每天都能用的小工具。</p>
+      </div>
+      <div class="page-header__actions">
+        <button type="button" class="hub-refresh-btn" data-inspirations-refresh title="刷新" aria-label="刷新灵感"><svg class="mw-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><use href="#icon-refresh"></use></svg></button>
+        <button type="button" class="mw-button mw-button--primary" data-sites-create><svg class="mw-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><use href="#icon-plus"></use></svg>新建灵感</button>
+      </div>
     </header>
-    <label class="inspiration-search"><span aria-hidden="true">⌕</span><input type="search" data-inspiration-search placeholder="搜索灵感" autocomplete="off"></label>
+    <label class="inspiration-search"><svg class="mw-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><use href="#icon-search"></use></svg><input type="search" data-inspiration-search placeholder="搜索灵感" autocomplete="off"></label>
     <main class="inspiration-gallery" data-inspiration-gallery>
-      ${inspirations.map(inspirationCard).join('') || '<div class="inspiration-empty"><strong>把一个想法变成 App</strong><span>点击“新建灵感”，直接描述你想做什么。</span></div>'}
+      ${inspirations.map(inspirationCard).join('') || '<div class="inspiration-empty"><strong>把一个想法变成小工具</strong><span>点击“新建灵感”，直接描述你想做什么。</span></div>'}
       <div class="inspiration-empty inspiration-empty--search" data-search-empty hidden><strong>没有匹配的灵感</strong><span>换个关键词试试。</span></div>
     </main>
   </div>`;
@@ -96,7 +102,7 @@ function renderGallery(el: HTMLElement): void {
 }
 
 function renderDetail(el: HTMLElement, item: InspirationItem): void {
-  el.innerHTML = `<div class="sites-page inspiration-page inspiration-detail">
+  el.innerHTML = `<div class="page-shell page-shell--sites sites-page inspiration-page inspiration-detail">
     <header class="inspiration-detail__toolbar">
       <button class="sites-button" data-inspiration-back>‹ 灵感</button>
       <div><strong>${escapeHtml(item.title)}</strong>${item.description ? `<span>${escapeHtml(item.description)}</span>` : ''}</div>

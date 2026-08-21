@@ -63,6 +63,9 @@ gateway:
   admin_accounts: []
   max_active_runs: 4
   max_queue_depth_per_session: 20
+# 安全模块总开关。false 表示默认使用当前宿主用户的完全访问权限，不启用沙箱和审批。
+security:
+  enabled: false
 # 默认使用邮箱区分本机租户（不验证邮箱所有权）。local 为免登录，remote 为验证码登录。
 auth:
   mode: email  # local | email | remote
@@ -84,6 +87,9 @@ team:
 # 外部智能体与外部 Team 的产品入口开关。关闭时仅隐藏/禁用，历史数据仍保留。
 external_agents:
   enabled: true
+  # true: 外援经过 Ace native runtime；false: 外援按旧 runtime 直联。
+  # 默认 false；该开关不影响内建工具的会话安全边界。
+  security_enabled: false
 
 subagent:
   max_concurrent: 3
@@ -118,10 +124,17 @@ tools:
     idle_timeout_seconds: 600
     command_timeout_seconds: 30
     navigation_timeout_seconds: 60
-    max_tabs_per_session: 8
+    queue_timeout_seconds: 30
     max_output_chars: 30000
     max_transfer_bytes: 104857600
     artifact_ttl_hours: 24
+    # 动作治理档位：
+    # - off：全部放行，不弹任何审批
+    # - confirm_sensitive：默认。提交表单/回车/上传/下载/接受弹窗/页面内执行代码等
+    #   传「或高危」动作在桌面端弹一次性审批卡（allow once）；普通读写动作不打扰
+    # - confirm_writes：所有写交互（click/type/press/select/check/drag/fill_form/drop）都弹审批
+    # - read_only：写交互与高危动作直接拒绝
+    governance_mode: confirm_sensitive
     allowed_private_hosts: []
     allowed_private_cidrs: []
     blocked_hosts: []
@@ -202,3 +215,16 @@ wiki:
   # Wiki 提取需要稳定、快速的结构化输出，独立于主对话模型。
   # 可填 llm.models 下的 profile key；留空时跟随主模型。
   model: ""
+
+# 进程内 HTTP 边界（web_search/web_extract/Wiki 抓取）的上游代理。
+# 安全意味着“经过策略判断”，判断通过后把流量级联到用户已有的上游代理，
+# 而不是强制直连。留空时回退到环境变量
+# HTTP_PROXY / HTTPS_PROXY / ALL_PROXY（大小写都读）。
+# 能直连外网的服务器留空即可；需要代理的开发机设 HTTPS_PROXY 即可，
+# 也可在此直接填，如 http://127.0.0.1:7890 或 socks5h://127.0.0.1:7890。
+network:
+  # 上游代理地址。支持 http:// https:// socks5:// socks5h://，可带 user:pass@。
+  # 留空 = 读环境变量（推荐，跨环境零配置）。
+  upstream_proxy: ""
+  # 是否允许代理本身监听在 127.0.0.1/::1（本地 Clash 等场景）。
+  allow_loopback_proxy: true

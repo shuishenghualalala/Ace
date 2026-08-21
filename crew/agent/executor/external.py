@@ -35,7 +35,11 @@ from crew.agent.external.runtime_adapter import (
     get_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import canonical_runtime_model_id
-from crew.agent.external.runtime_registry import resolve_runtime_adapter_id
+from crew.agent.external.runtime_registry import (
+    resolve_runtime_adapter_id,
+    resolve_runtime_credential_home_paths,
+    resolve_runtime_network_endpoints,
+)
 from crew.agent.file_changes import (
     TurnFileChangeTracker,
     persist_file_changes,
@@ -47,6 +51,7 @@ from crew.core.followup import drain_followup_answer_messages
 from crew.core.runctx import current_owner_account_id
 from crew.core.types import Message, ToolCall
 from crew.state.home import get_owner_runtime_home
+from crew.security.models import AdditionalPermissionProfile
 from crew.team.workspace_guard import check_workspace_guard, classify_external_permission
 from crew.tools.redact import redact_sensitive_display_text
 
@@ -664,6 +669,8 @@ def _permission_question(
     normalized = str(tool_name or "").strip().lower()
     if operation == "read":
         action = "读取文件"
+    elif normalized == "file_delete":
+        action = "删除文件"
     elif operation == "write":
         action = "写入或修改文件"
     elif operation == "network":
@@ -952,6 +959,14 @@ class ExternalExecutor(AgentExecutor):
         prompt = ctx.query
         protocol = str(runtime.get("protocol") or "").lower()
         runtime_metadata = runtime.get("metadata") if isinstance(runtime.get("metadata"), dict) else {}
+        credential_home_paths = resolve_runtime_credential_home_paths(
+            provider=provider,
+            metadata=runtime_metadata,
+        )
+        network_endpoints = resolve_runtime_network_endpoints(
+            provider=provider,
+            metadata=runtime_metadata,
+        )
         adapter_id = resolve_runtime_adapter_id(
             provider=provider,
             protocol=protocol,
@@ -1123,6 +1138,13 @@ class ExternalExecutor(AgentExecutor):
                             else []
                         )
                     )
+                    additional_permissions = (
+                        bridge.local_callback_permissions(interaction_binding)
+                        if mcp_servers
+                        and interaction_binding is not None
+                        and callable(getattr(bridge, "local_callback_permissions", None))
+                        else None
+                    )
                     dynamic_tools = (
                         bridge.dynamic_tool_specs(interaction_binding)
                         if use_dynamic_control_tools
@@ -1172,6 +1194,9 @@ class ExternalExecutor(AgentExecutor):
                         system_prompt=adapter_system_prompt,
                         custom_args=agent.get("custom_args") or self.config.args,
                         custom_env=agent.get("custom_env") or self.config.env,
+                        credential_home_paths=credential_home_paths,
+                        network_endpoints=network_endpoints,
+                        additional_permissions=additional_permissions or AdditionalPermissionProfile(),
                         mcp_servers=mcp_servers,
                         dynamic_tools=dynamic_tools,
                         dynamic_tool_handler=dynamic_tool_handler,
@@ -1283,6 +1308,8 @@ class ExternalExecutor(AgentExecutor):
                         system_prompt=_external_system_prompt(agent, runtime, effective_model),
                         custom_args=agent.get("custom_args") or self.config.args,
                         custom_env=agent.get("custom_env") or self.config.env,
+                        credential_home_paths=credential_home_paths,
+                        network_endpoints=network_endpoints,
                         timeout=self.config.timeout,
                     )
                 ))
@@ -1322,10 +1349,12 @@ class ExternalExecutor(AgentExecutor):
                     return
             append_pending_followup_answers()
             provider_name = _provider_display_name(provider)
+            # AcpAdapterError 的文本由本仓 adapter 构造（超时阶段、JSONL 行上限
+            # 等控制面诊断），不含宿主路径与凭据，需原样透出给用户定位问题。
             if "模型响应空闲超时" in str(exc):
-                yield ResponseChunk.error(ctx.request_id, f"{provider_name} 模型响应空闲超时")
+                yield ResponseChunk.error(ctx.request_id, f"{provider_name} 模型响应空闲超时：{exc}")
             else:
-                yield ResponseChunk.error(ctx.request_id, f"{provider_name} ACP 调用失败：内部错误")
+                yield ResponseChunk.error(ctx.request_id, f"{provider_name} ACP 调用失败：{exc}")
             return
         except (ExternalCliError, CodexAdapterError) as exc:
             if runtime_failure_binding_key is not None and runtime_failure_session_id:

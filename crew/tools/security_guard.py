@@ -5,9 +5,11 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from crew.core.errors import ToolError
 from crew.security.actions import normalize_file_action, normalize_network_action
@@ -348,3 +350,234 @@ async def authorize_network_url(
         url,
         method=method,
     )
+
+
+async def authorize_network_tool(
+    url: str,
+    *,
+    tool_name: str,
+    workspace_store: Any | None,
+    security_service: Any | None,
+) -> None:
+    """Authorize a public HTTP(S) target and wait for an owner decision if needed."""
+    from crew.security.outbound import parse_public_http_target
+
+    try:
+        parse_public_http_target(url)
+    except ValueError as exc:
+        raise ToolError(f"联网目标无效: {exc}") from exc
+    if workspace_store is None or security_service is None:
+        return
+    try:
+        context = build_security_context(workspace_store)
+    except (SecurityContextError, TypeError, ValueError) as exc:
+        raise ToolError(f"安全联网上下文无效: {exc}") from exc
+    await authorize_network_target(
+        url,
+        tool_name=tool_name,
+        security_service=security_service,
+        security_context=context,
+    )
+
+
+async def authorize_network_target(
+    url: str,
+    *,
+    tool_name: str,
+    security_service: Any,
+    security_context: Any,
+) -> None:
+    """Authorize an exact public target for a host-built security context."""
+    from crew.security.outbound import parse_public_http_target
+
+    try:
+        target = parse_public_http_target(url)
+        action = normalize_network_action(target.host, target.port, target.protocol)
+        result = security_service.authorize_network_action(
+            security_context,
+            action,
+            tool_name=tool_name,
+            public_target=True,
+        )
+    except (SecurityContextError, TypeError, ValueError) as exc:
+        raise ToolError(f"安全联网上下文无效: {exc}") from exc
+    if result.allowed:
+        return
+    if result.request is None:
+        raise ToolError("联网请求已被安全策略拒绝")
+    outcome = await security_service.await_decision(result.request["request_id"])
+    if outcome is None:
+        raise ToolError(
+            '{"error_code":"approval_expired","error":"联网审批已过期或会话已变更"}'
+        )
+    if outcome.decision is ApprovalDecision.REJECT:
+        raise ToolError(
+            '{"error_code":"approval_rejected","error":"用户拒绝了该联网请求"}'
+        )
+    result2 = security_service.authorize_network_action(
+        security_context,
+        action,
+        tool_name=tool_name,
+        public_target=True,
+    )
+    if not result2.allowed:
+        raise ToolError("批准后联网授权校验失败，请重试")
+
+
+async def authorize_configured_mcp_call(
+    url: str,
+    *,
+    tool_name: str,
+    args: dict[str, Any],
+    security_service: Any,
+    security_context: Any,
+) -> None:
+    """Bind one remote MCP call and its configured network target to one approval."""
+    from crew.security.actions import normalize_exec_action
+    from crew.security.models import (
+        AdditionalPermissionProfile,
+        NetworkEntry,
+        SandboxPermissions,
+    )
+
+    value = str(url or "").strip()
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise ToolError("MCP URL 包含控制字符")
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ToolError("MCP 远程端点仅支持 http/https")
+    if parsed.username is not None or parsed.password is not None:
+        raise ToolError("MCP URL 不允许内嵌用户名或密码")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        additional = AdditionalPermissionProfile(
+            network=(NetworkEntry(
+                parsed.hostname.rstrip(".").lower(),
+                port,
+                parsed.scheme,
+                allow_private=True,
+            ),),
+            sandbox_permissions=SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS,
+        )
+        canonical_args = json.dumps(
+            args,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        action = normalize_exec_action(
+            ("mcp-call", tool_name, hashlib.sha256(canonical_args.encode("utf-8")).hexdigest()),
+            security_context.workspace_root or Path.cwd(),
+        )
+        result = security_service.authorize_exec_action(
+            security_context,
+            action,
+            tool_name=tool_name,
+            risk_class="mcp_remote_tool",
+            requires_approval=True,
+            additional_permissions=additional,
+            preview=f"远程 MCP 工具：{tool_name}\n端点：{parsed.scheme}://{parsed.hostname}:{port}",
+        )
+    except (SecurityContextError, TypeError, ValueError) as exc:
+        raise ToolError(f"安全联网上下文无效: {exc}") from exc
+    if result.allowed:
+        return
+    if result.request is None:
+        raise ToolError("MCP 联网请求已被安全策略拒绝")
+    outcome = await security_service.await_decision(result.request["request_id"])
+    if outcome is None:
+        raise ToolError(
+            '{"error_code":"approval_expired","error":"MCP 联网审批已过期或会话已变更"}'
+        )
+    if outcome.decision is ApprovalDecision.REJECT:
+        raise ToolError(
+            '{"error_code":"approval_rejected","error":"用户拒绝了该 MCP 联网请求"}'
+        )
+    result2 = security_service.authorize_exec_action(
+        security_context,
+        action,
+        tool_name=tool_name,
+        risk_class="mcp_remote_tool",
+        requires_approval=True,
+        additional_permissions=additional,
+        preview=f"远程 MCP 工具：{tool_name}\n端点：{parsed.scheme}://{parsed.hostname}:{port}",
+    )
+    if not result2.allowed:
+        raise ToolError("批准后 MCP 联网授权校验失败，请重试")
+
+
+async def authorize_exec_tool(
+    argv: Sequence[str],
+    *,
+    cwd: str | Path,
+    tool_name: str,
+    workspace_store: Any | None,
+    security_service: Any | None,
+    security_context: Any | None = None,
+    preview: str = "",
+) -> None:
+    """Authorize one exact direct-argv build command and wait when required."""
+    if workspace_store is None or security_service is None:
+        return
+    from crew.security.actions import normalize_exec_action
+
+    try:
+        context = security_context or build_security_context(workspace_store)
+        action = normalize_exec_action(tuple(argv), Path(cwd))
+        result = security_service.authorize_exec_action(
+            context,
+            action,
+            tool_name=tool_name,
+            risk_class="site_build",
+            requires_approval=False,
+            preview=preview,
+        )
+    except (SecurityContextError, TypeError, ValueError) as exc:
+        raise ToolError(f"安全构建上下文无效: {exc}") from exc
+    if result.allowed:
+        return
+    if result.request is None:
+        raise ToolError("站点构建已被安全策略拒绝")
+    outcome = await security_service.await_decision(result.request["request_id"])
+    if outcome is None:
+        raise ToolError(
+            '{"error_code":"approval_expired","error":"站点构建审批已过期或会话已变更"}'
+        )
+    if outcome.decision is ApprovalDecision.REJECT:
+        raise ToolError(
+            '{"error_code":"approval_rejected","error":"用户拒绝了站点构建"}'
+        )
+    result2 = security_service.authorize_exec_action(
+        context,
+        action,
+        tool_name=tool_name,
+        risk_class="site_build",
+        requires_approval=True,
+        preview=preview,
+    )
+    if not result2.allowed:
+        raise ToolError("批准后构建授权校验失败，请重试")
+
+
+def authorize_user_initiated_exec(
+    argv: Sequence[str],
+    *,
+    cwd: str | Path,
+    tool_name: str,
+    security_service: Any,
+    security_context: Any,
+) -> None:
+    """Apply rules and audit an authenticated Desktop command without a second prompt."""
+    from crew.security.actions import normalize_exec_action
+
+    try:
+        action = normalize_exec_action(tuple(argv), Path(cwd))
+        result = security_service.authorize_user_initiated_exec_action(
+            security_context,
+            action,
+            tool_name=tool_name,
+        )
+    except (SecurityContextError, TypeError, ValueError) as exc:
+        raise ToolError(f"安全构建上下文无效: {exc}") from exc
+    if not result.allowed:
+        raise ToolError("站点构建已被安全规则拒绝")

@@ -1,8 +1,8 @@
 /**
  * 首次模型配置导览。
  *
- * 只在当前账号没有自建模型时自动出现一次；视觉与 Wiki 导览共用同一套
- * spotlight 样式。步骤只负责打开现有设置入口，不会代替用户填写或保存凭据。
+ * 只在当前账号没有自建模型时自动出现一次；视觉与 Wiki、外援导览共用
+ * mw-tour-card Spotlight 样式。步骤只负责打开现有设置入口，不会代替用户填写或保存凭据。
  */
 
 import type { BackendConfig } from '../backend-client';
@@ -29,7 +29,7 @@ const openSettings = (): void => {
   }
 };
 
-const openModelPane = (): void => {
+export const openModelPane = (): void => {
   openSettings();
   const modelNav = document.querySelector<HTMLElement>('[data-settings-pane="model"]');
   if (!modelNav?.classList.contains('is-active')) modelNav?.click();
@@ -157,7 +157,7 @@ function layoutStep(step: ModelTourStep): void {
   tooltip.querySelector('.wiki-tour__progress')!.textContent = `${current + 1} / ${MODEL_TOUR_STEPS.length}`;
   const previous = tooltip.querySelector<HTMLButtonElement>('[data-tour-prev]')!;
   const next = tooltip.querySelector<HTMLButtonElement>('[data-tour-next]')!;
-  previous.disabled = current === 0;
+  previous.hidden = current === 0;
   next.textContent = current === MODEL_TOUR_STEPS.length - 1 ? '完成' : '下一步';
   placeTooltip(tooltip, rect);
 }
@@ -200,18 +200,18 @@ export function startModelTour(): void {
   container.innerHTML = `
     <div class="wiki-tour__mask"></div>
     <div class="wiki-tour__highlight" hidden></div>
-    <div class="wiki-tour__tooltip" role="dialog" aria-label="模型配置导览" hidden>
-      <div class="wiki-tour__title"></div>
+    <aside class="wiki-tour__tooltip mw-tour-card" role="dialog" aria-label="模型配置导览" hidden>
+      <div class="mw-tour-card__top"><span class="mw-tour-card__spark" aria-hidden="true"></span><span class="wiki-tour__progress"></span></div>
+      <strong class="wiki-tour__title"></strong>
       <p class="wiki-tour__desc"></p>
-      <div class="wiki-tour__foot">
-        <span class="wiki-tour__progress"></span>
-        <div class="wiki-tour__actions">
-          <button type="button" class="wiki-tour__btn wiki-tour__btn--ghost" data-tour-skip>跳过</button>
-          <button type="button" class="wiki-tour__btn wiki-tour__btn--ghost" data-tour-prev>上一步</button>
-          <button type="button" class="wiki-tour__btn wiki-tour__btn--primary" data-tour-next>下一步</button>
+      <div class="mw-tour-card__actions">
+        <button type="button" class="mw-tour-card__quiet" data-tour-skip>跳过</button>
+        <div class="mw-tour-card__steps">
+          <button type="button" class="mw-tour-card__secondary" data-tour-prev>上一步</button>
+          <button type="button" class="mw-tour-card__primary" data-tour-next>下一步</button>
         </div>
       </div>
-    </div>`;
+    </aside>`;
   container.querySelector('[data-tour-skip]')?.addEventListener('click', finishModelTour);
   container.querySelector('[data-tour-prev]')?.addEventListener('click', () => showStep(current - 1));
   container.querySelector('[data-tour-next]')?.addEventListener('click', () => showStep(current + 1));

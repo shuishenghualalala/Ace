@@ -38,6 +38,17 @@ async def api(tmp_path, monkeypatch):
     old_entries = list(platform_registry.all_entries())
     platform_registry._entries.clear()
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    # 显式批准 host stdio spawn（安全默认关闭，测试起真 echo 子进程需 opt-in）
+    monkeypatch.setenv("ACE_ALLOW_HOST_MCP_STDIO", "1")
+    from types import SimpleNamespace
+
+    from crew.security.launch import current_process_launch
+    from crew.security.models import PermissionProfile, PermissionProfileKind
+
+    launch_token = current_process_launch.set(SimpleNamespace(
+        managed=False,
+        profile=PermissionProfile(PermissionProfileKind.DISABLED),
+    ))
     config_yaml = tmp_path / "config.yaml"
     config_yaml.write_text("llm:\n  active: default\nmcp_servers: {}\n", encoding="utf-8")
     cfg = Config(
@@ -61,6 +72,7 @@ async def api(tmp_path, monkeypatch):
                 await crew.mcp_manager.aclose()
         except Exception:
             pass
+        current_process_launch.reset(launch_token)
         _restore_platform_entries(old_entries)
 
 

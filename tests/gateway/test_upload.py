@@ -211,3 +211,86 @@ async def test_upload_skips_wiki_capture_when_disabled(crew_home, auth_headers):
         if r.title == "no-capture.txt"
     ]
     assert raws == []
+
+
+# ---------------- 附件按会话/显式 kb_id 收入对应知识库 ----------------
+
+async def _wait_raw_parsed(crew, owner: str, kb_id: str, title: str):
+    """轮询后台 capture 任务，直到指定 KB 中该来源解析完成。"""
+    saved = None
+    for _ in range(50):
+        raws = [
+            r for r in crew._wiki_store.list_raws(owner, kb_id)
+            if r.title == title
+        ]
+        if raws and raws[0].parse_status == "parsed":
+            saved = raws[0]
+            break
+        await asyncio.sleep(0.1)
+    return saved
+
+
+@pytest.mark.asyncio
+async def test_upload_captures_into_explicit_kb(crew_home, auth_headers):
+    """上传带 kb_id 时附件收入该知识库，而不是 default。"""
+    crew = build_app(enable_team=False)
+    crew._wiki_store.create_kb("proj-x", name="Proj X", owner_account_id="A:uid-a")
+    app = create_app(crew)
+    content = base64.b64encode(b"explicit kb").decode()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.post(
+            "/api/upload",
+            json={"filename": "explicit-kb.txt", "content": content, "kb_id": "proj-x"},
+        )
+    assert resp.status_code == 200
+
+    saved = await _wait_raw_parsed(crew, "A:uid-a", "proj-x", "explicit-kb.txt")
+    assert saved is not None
+    assert "explicit kb" in Path(saved.parsed_path).read_text(encoding="utf-8")
+    # 不应落入 default
+    default_raws = [
+        r for r in crew._wiki_store.list_raws("A:uid-a", "default")
+        if r.title == "explicit-kb.txt"
+    ]
+    assert default_raws == []
+
+
+@pytest.mark.asyncio
+async def test_upload_captures_into_session_bound_kb(crew_home, auth_headers):
+    """上传带 session_id 且会话已绑定知识库时，附件收入绑定的知识库。"""
+    crew = build_app(enable_team=False)
+    crew._wiki_store.create_kb("kb-y", name="KB Y", owner_account_id="A:uid-a")
+    crew.wiki_manager.set_kb_id("sess-1", "kb-y", owner_account_id="A:uid-a")
+    app = create_app(crew)
+    content = base64.b64encode(b"session kb").decode()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.post(
+            "/api/upload",
+            json={"filename": "session-kb.txt", "content": content, "session_id": "sess-1"},
+        )
+    assert resp.status_code == 200
+
+    saved = await _wait_raw_parsed(crew, "A:uid-a", "kb-y", "session-kb.txt")
+    assert saved is not None
+    assert "session kb" in Path(saved.parsed_path).read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_upload_unknown_kb_falls_back_to_default(crew_home, auth_headers):
+    """上传带不存在的 kb_id 时回落 default 知识库。"""
+    crew = build_app(enable_team=False)
+    app = create_app(crew)
+    content = base64.b64encode(b"fallback kb").decode()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.post(
+            "/api/upload",
+            json={"filename": "fallback-kb.txt", "content": content, "kb_id": "no-such-kb"},
+        )
+    assert resp.status_code == 200
+
+    saved = await _wait_raw_parsed(crew, "A:uid-a", "default", "fallback-kb.txt")
+    assert saved is not None
+    assert "fallback kb" in Path(saved.parsed_path).read_text(encoding="utf-8")

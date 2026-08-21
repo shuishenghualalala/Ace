@@ -204,6 +204,23 @@ async def test_queue_full_fails_immediately_without_displacing_existing_requests
 
 
 @pytest.mark.asyncio
+async def test_remote_handler_fails_closed_without_conversation_security_context():
+    worker = _ServerWorker(
+        "remote",
+        {"url": "https://mcp.example.com/api"},
+        Registry(),
+    )
+    worker._task = asyncio.create_task(asyncio.Event().wait())
+
+    result = await worker._make_handler("mutate")({"value": 1})
+
+    assert "缺少当前会话安全上下文" in _error(result)
+    assert worker._queue.empty()
+    worker.force_abort("test cleanup")
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
 async def test_expired_queued_request_never_calls_remote(monkeypatch):
     worker, session = await _started_worker(monkeypatch, call_timeout=0.2)
     first = asyncio.create_task(worker._make_handler("first")({}))

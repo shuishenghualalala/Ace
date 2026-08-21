@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from crew.security.runtime_client import (
     RuntimeCapabilities,
     RuntimeErrorCode,
     ShellVerdict,
+    is_likely_sandbox_denied,
     set_runtime_diagnostic_auditor,
 )
 from crew.security.snapshot import issue_authorization_snapshot
@@ -39,11 +41,18 @@ from crew.security.snapshot import issue_authorization_snapshot
 _FAKE_HELPER = r'''
 import base64, json, os, sys, time
 mode = sys.argv[1]
-version = 999 if mode == "bad-ready" else 2
+version = 999 if mode == "bad-ready" else 3
 ready = {
     "type":"ready",
     "version":version,
-    "capabilities":["deny_read_glob_v1", "stdin_once", "stream_output", "duplex_stdio_v1"],
+    "capabilities":[
+        "deny_read_glob_v1",
+        "stdin_once",
+        "stream_output",
+        "readonly_roots",
+        "full_disk_read",
+        "duplex_stdio_v1",
+    ],
 }
 if mode == "missing-ready-capability":
     ready["capabilities"] = ["stdin_once"]
@@ -71,24 +80,29 @@ if request["request"].get("op") == "classify_shell":
         "reason": "test",
     }
     print(json.dumps({
-        "version": 2, "nonce": request["nonce"], "seq": 0,
+        "version": 3, "nonce": request["nonce"], "seq": 0,
         "type": "classified", "classification": classification,
     }), flush=True)
     raise SystemExit
 if mode == "crash":
     raise SystemExit(4)
+payload = request["request"]
 if mode == "assert-request":
-    payload = request["request"]
     if base64.b64decode(payload["stdin_b64"]) != b"\x00prompt\xff":
         raise SystemExit(5)
     if payload["env_overrides"] != {"CODEX_API_KEY": "secret"}:
         raise SystemExit(6)
+    if payload["readonly_roots"] != [os.path.join(payload["cwd"], ".agents")]:
+        raise SystemExit(9)
 if mode == "assert-glob-request":
     if request["request"].get("filesystem_globs") != [{
         "access": "deny_read",
         "pattern": "**/*.pem",
         "root": request["request"]["cwd"],
     }]:
+        raise SystemExit(9)
+if mode == "assert-home-files":
+    if payload["home_files"] != {".agent/auth": base64.b64encode(b"token").decode()}:
         raise SystemExit(9)
 if mode == "assert-no-stdin" and "stdin_b64" in request["request"]:
     raise SystemExit(7)
@@ -103,6 +117,7 @@ capabilities = {
     "filesystem_sandbox": mode != "missing-capability",
     "process_tree_cleanup": True,
     "managed_network": mode in {"network-ok", "windows-network-ok"},
+    "full_disk_read": bool(payload.get("full_disk_read")),
     "local_binding_control": mode == "local-binding-ok",
     "explicit_handle_inheritance": mode in {"windows-ok", "windows-network-ok"},
     "windows_restricted_token": mode in {"windows-ok", "windows-network-ok"},
@@ -112,7 +127,7 @@ capabilities = {
 }
 frames = [
     {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 0,
         "type": "started",
@@ -120,21 +135,21 @@ frames = [
         "capabilities": capabilities,
     },
     {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 1,
         "type": "stdout",
         "data_b64": base64.b64encode(b"sandboxed").decode(),
     },
     {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 2,
         "type": "stderr",
         "data_b64": base64.b64encode(b"notice").decode(),
     },
     {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 3,
         "type": "completed",
@@ -159,7 +174,7 @@ elif mode == "premature-eof":
     frames = frames[:1]
 elif mode == "extra-after-terminal":
     frames.append({
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 4,
         "type": "completed",
@@ -167,7 +182,7 @@ elif mode == "extra-after-terminal":
     })
 elif mode == "error-before-start":
     frames = [{
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 0,
         "type": "error",
@@ -176,7 +191,7 @@ elif mode == "error-before-start":
     }]
 elif mode == "repeated-output":
     frames.insert(2, {
-        "version": 2,
+        "version": 3,
         "nonce": nonce,
         "seq": 2,
         "type": "stdout",
@@ -208,6 +223,82 @@ class _ProtocolTestRuntimeClient(NativeRuntimeClient):
                 token,
                 expected_helper_digest=expected_helper_digest,
             )
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "output", "backend", "expected"),
+    [
+        (1, "Permission denied", "macos_seatbelt", True),
+        (101, "Read-only file system", "linux_bwrap", True),
+        (159, "", "linux_bwrap", True),
+        (127, "command not found", "linux_bwrap", False),
+        (1, "Permission denied", "host_unconfined", False),
+        (0, "Permission denied", "windows_sandbox_account", False),
+    ],
+)
+def test_sandbox_denial_detection_is_conservative(
+    exit_code: int,
+    output: str,
+    backend: str,
+    expected: bool,
+) -> None:
+    assert (
+        is_likely_sandbox_denied(
+            exit_code,
+            "",
+            output,
+            backend=backend,
+        )
+        is expected
+    )
+
+
+_INTERACTIVE_HELPER = r'''
+import base64, json, sys
+
+print(json.dumps({
+    "type": "ready",
+    "version": 3,
+    "capabilities": ["stdin_once", "stream_output", "stdin_bidirectional", "readonly_roots", "full_disk_read"],
+}), flush=True)
+open_request = json.loads(sys.stdin.readline())
+print(json.dumps({
+    "version": 3,
+    "nonce": open_request["nonce"],
+    "seq": 0,
+    "type": "started",
+    "pid": 123,
+    "capabilities": {
+        "backend": "fake",
+        "filesystem_sandbox": True,
+        "process_tree_cleanup": True,
+        "managed_network": False,
+        "full_disk_read": bool(open_request["request"].get("full_disk_read")),
+    },
+}), flush=True)
+seq = 1
+for line in sys.stdin:
+    request = json.loads(line)["request"]
+    if request["op"] == "interactive_write":
+        data = base64.b64decode(request["data_b64"])
+        print(json.dumps({
+            "version": 3,
+            "nonce": open_request["nonce"],
+            "seq": seq,
+            "type": "stdout",
+            "data_b64": base64.b64encode(data).decode(),
+        }), flush=True)
+        seq += 1
+    elif request["op"] == "interactive_close":
+        print(json.dumps({
+            "version": 3,
+            "nonce": open_request["nonce"],
+            "seq": seq,
+            "type": "completed",
+            "exit_code": 0,
+        }), flush=True)
+        break
+'''
 
 
 def _helper(tmp_path: Path, mode: str) -> NativeRuntimeClient:
@@ -273,6 +364,27 @@ def _authorized_request(
     )
 
 
+def _interactive_helper(tmp_path: Path) -> NativeRuntimeClient:
+    script = tmp_path / "fake_interactive_runtime.py"
+    script.write_text(_INTERACTIVE_HELPER, encoding="utf-8")
+    return _ProtocolTestRuntimeClient((sys.executable, str(script)), startup_timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_interactive_session_forwards_bidirectional_stdio(tmp_path):
+    session = await _interactive_helper(tmp_path).open_interactive(
+        command=("ignored",),
+        cwd=tmp_path,
+        timeout=1,
+    )
+    await session.write(b"hello\n")
+    assert await session.read_chunk() == b"hello\n"
+
+    await session.close_child_stdin()
+    assert await session.read_chunk() is None
+    await session.close()
+
+
 @pytest.mark.asyncio
 async def test_large_helper_stderr_is_drained_without_deadlock(tmp_path):
     result = await _helper(tmp_path, "stderr-flood").execute(
@@ -294,7 +406,7 @@ async def test_runtime_diagnostic_auditor_receives_ready_and_failure(tmp_path):
         assert result.stdout == "sandboxed"
         ready = [event for event in events if event["status"] == "ready"]
         assert ready
-        assert ready[0]["version"] == "2"
+        assert ready[0]["version"] == "3"
         assert "duplex_stdio_v1" in ready[0]["capabilities"]
 
         with pytest.raises(NativeRuntimeError):
@@ -989,6 +1101,7 @@ async def test_request_carries_binary_stdin_and_environment_overrides(tmp_path):
     result = await _helper(tmp_path, "assert-request").execute(
         command=("ignored",),
         cwd=tmp_path,
+        readonly_roots=(tmp_path / ".agents",),
         stdin=b"\x00prompt\xff",
         env_overrides={"CODEX_API_KEY": "secret"},
         timeout=1,
@@ -1010,7 +1123,17 @@ async def test_request_carries_canonical_deny_read_glob_rules(tmp_path):
         ),
         timeout=1,
     )
+    assert result.stdout == "sandboxed"
 
+
+@pytest.mark.asyncio
+async def test_request_carries_projected_home_files(tmp_path):
+    result = await _helper(tmp_path, "assert-home-files").execute(
+        command=("ignored",),
+        cwd=tmp_path,
+        home_files={".agent/auth": b"token"},
+        timeout=1,
+    )
     assert result.stdout == "sandboxed"
 
 
@@ -1065,6 +1188,7 @@ async def test_callback_failure_does_not_change_command_result(tmp_path):
         (None, {"VALID_NAME": "nul\x00value"}),
         (None, {"HTTP_PROXY": "http://attacker"}),
         (None, {"ACE_SANDBOX": "attacker"}),
+        (None, {"PATH": "/tmp/attacker"}),
         (None, {"ACE_SECURITY_RUNTIME_TOKEN": "attacker"}),
         (None, {"PATH": "/attacker/bin"}),
         (None, {"LD_PRELOAD": "/attacker/hook.so"}),
@@ -1078,6 +1202,7 @@ async def test_callback_failure_does_not_change_command_result(tmp_path):
         "env-nul",
         "proxy-env-reserved",
         "sandbox-marker-reserved",
+        "sandbox-env-reserved",
         "runtime-env-reserved",
         "path-env-reserved",
         "loader-env-reserved",
@@ -1130,6 +1255,17 @@ async def test_invalid_deny_read_glob_is_rejected_before_helper_spawn(
 
     assert not reached_spawn
 
+
+@pytest.mark.asyncio
+async def test_host_trusted_path_has_a_separate_validated_channel(tmp_path, monkeypatch):
+    client = NativeRuntimeClient((str(tmp_path / "must-not-spawn"),))
+    with pytest.raises(ValueError, match="absolute directories"):
+        await client.execute(
+            command=("ignored",),
+            cwd=tmp_path,
+            trusted_path=f"relative{os.pathsep}{tmp_path}",
+            timeout=1,
+        )
 
 @pytest.mark.asyncio
 async def test_oversized_request_is_rejected_before_spawn(tmp_path):
@@ -1250,11 +1386,7 @@ async def test_broker_does_not_forward_runtime_owned_protected_read_roots(
         kind=PermissionProfileKind.MANAGED,
         filesystem=(
             FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),
-            FilesystemEntry(
-                tmp_path / ".agents",
-                FilesystemAccess.READ,
-                escalatable=False,
-            ),
+            FilesystemEntry(tmp_path / ".agents", FilesystemAccess.READ, escalatable=False),
         ),
     )
     runtime, request = _authorized_request(
@@ -1273,6 +1405,157 @@ async def test_broker_does_not_forward_runtime_owned_protected_read_roots(
 
     assert captured["writable_roots"] == (tmp_path,)
     assert captured["readable_roots"] == ()
+
+
+@pytest.mark.asyncio
+async def test_broker_derives_readonly_roots_for_host_python_venv_entrypoint(tmp_path):
+    class RecordingRuntime:
+        async def open_interactive(self, **kwargs):
+            self.kwargs = kwargs
+            return "session"
+
+    environment = tmp_path / "external-agent" / "venv"
+    interpreter = environment / "bin" / "python"
+    entrypoint = environment / "bin" / "external-agent"
+    base_python = tmp_path / "python-base" / "bin" / "python3.12"
+    base_stdlib = tmp_path / "python-base" / "lib" / "python3.12"
+    interpreter.parent.mkdir(parents=True)
+    base_python.parent.mkdir(parents=True)
+    base_stdlib.mkdir(parents=True)
+    base_python.write_text("", encoding="utf-8")
+    # Windows lacks the symlink privilege by default; the venv resolver only
+    # resolves paths, so a real file exercises the same contract.
+    interpreter.write_text("", encoding="utf-8")
+    (environment / "pyvenv.cfg").write_text(
+        f"home = {base_python.parent}\n", encoding="utf-8"
+    )
+    entrypoint.write_text(f"#!{interpreter}\n", encoding="utf-8")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = RecordingRuntime()
+    broker = SecurityExecutionBroker(runtime)  # type: ignore[arg-type]
+    profile = PermissionProfile(
+        kind=PermissionProfileKind.MANAGED,
+        filesystem=(FilesystemEntry(workspace, FilesystemAccess.READ_WRITE),),
+    )
+
+    await broker.open_interactive(
+        ExecutionRequest(
+            command=(str(entrypoint), "--version"),
+            cwd=workspace,
+            permission_profile=profile,
+        )
+    )
+
+    assert runtime.kwargs["readable_roots"] == [
+        environment.resolve(),
+        (tmp_path / "python-base" / "lib").resolve(),
+        base_stdlib.resolve(),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_broker_does_not_derive_venv_roots_for_workspace_script(tmp_path):
+    workspace = tmp_path / "workspace"
+    environment = tmp_path / "external-agent" / "venv"
+    workspace.mkdir()
+    (environment / "bin").mkdir(parents=True)
+    (environment / "bin" / "python").write_text("", encoding="utf-8")
+    (environment / "pyvenv.cfg").write_text(
+        f"home = {tmp_path / 'python-base' / 'bin'}\n", encoding="utf-8"
+    )
+    entrypoint = workspace / "entrypoint"
+    entrypoint.write_text(f"#!{environment / 'bin' / 'python'}\n", encoding="utf-8")
+
+    class RecordingRuntime:
+        async def open_interactive(self, **kwargs):
+            self.kwargs = kwargs
+            return "session"
+
+    runtime = RecordingRuntime()
+    broker = SecurityExecutionBroker(runtime)  # type: ignore[arg-type]
+    profile = PermissionProfile(
+        kind=PermissionProfileKind.MANAGED,
+        filesystem=(FilesystemEntry(workspace, FilesystemAccess.READ_WRITE),),
+    )
+    await broker.open_interactive(
+        ExecutionRequest(
+            command=(str(entrypoint),),
+            cwd=workspace,
+            permission_profile=profile,
+        )
+    )
+
+    assert runtime.kwargs["readable_roots"] == []
+
+
+@pytest.mark.asyncio
+async def test_broker_forwards_immutable_read_roots_to_the_native_runtime(tmp_path):
+    """Missing metadata guards use the native read-only carve-out contract."""
+
+    class RecordingRuntime:
+        async def open_interactive(self, **kwargs):
+            self.kwargs = kwargs
+            return "session"
+
+    runtime = RecordingRuntime()
+    broker = SecurityExecutionBroker(runtime)  # type: ignore[arg-type]
+    profile = PermissionProfile(
+        kind=PermissionProfileKind.MANAGED,
+        filesystem=(
+            FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),
+            FilesystemEntry(
+                tmp_path / ".agents",
+                FilesystemAccess.READ,
+                escalatable=False,
+            ),
+        ),
+    )
+
+    await broker.open_interactive(
+        ExecutionRequest(
+            command=("test",),
+            cwd=tmp_path,
+            permission_profile=profile,
+            trusted_readable_roots=(tmp_path / "runtime-skills",),
+        )
+    )
+
+    assert runtime.kwargs["writable_roots"] == [tmp_path]
+    assert runtime.kwargs["readable_roots"] == []
+    assert runtime.kwargs["readonly_roots"] == [tmp_path / ".agents"]
+
+
+@pytest.mark.asyncio
+async def test_broker_carves_workspace_from_protected_runtime_home(tmp_path):
+    class RecordingRuntime:
+        async def open_interactive(self, **kwargs):
+            self.kwargs = kwargs
+            return "session"
+
+    runtime_home = tmp_path / "runtime-home"
+    workspace = runtime_home / "accounts" / "owner" / "task_workspaces" / "default"
+    workspace.mkdir(parents=True)
+    database = runtime_home / "crew.db"
+    database.write_text("protected", encoding="utf-8")
+    runtime = RecordingRuntime()
+    profile = PermissionProfile(
+        kind=PermissionProfileKind.MANAGED,
+        filesystem=(
+            FilesystemEntry(workspace, FilesystemAccess.READ_WRITE),
+            FilesystemEntry(runtime_home, FilesystemAccess.DENY, escalatable=False),
+            FilesystemEntry(database, FilesystemAccess.DENY, escalatable=False),
+        ),
+    )
+
+    await SecurityExecutionBroker(runtime).open_interactive(  # type: ignore[arg-type]
+        ExecutionRequest(command=("test",), cwd=workspace, permission_profile=profile)
+    )
+
+    assert runtime.kwargs["writable_roots"] == [workspace]
+    assert runtime.kwargs["denied_roots"] == [database]
+
 
 
 @pytest.mark.asyncio
@@ -1354,6 +1637,47 @@ async def test_broker_passes_process_data_and_activity_callbacks_once(tmp_path, 
     assert captured["max_output_bytes"] == 1234
     assert captured["on_started"] is started
     assert captured["on_output"] is output
+
+
+@pytest.mark.asyncio
+async def test_broker_merges_system_callback_network_permission(tmp_path):
+    class RecordingRuntime:
+        async def open_interactive(self, **kwargs):
+            self.kwargs = kwargs
+            return "session"
+
+    runtime = RecordingRuntime()
+    broker = SecurityExecutionBroker(runtime)  # type: ignore[arg-type]
+    request = ExecutionRequest(
+        command=("test",),
+        cwd=tmp_path,
+        permission_profile=PermissionProfile(PermissionProfileKind.MANAGED),
+        additional_permissions=AdditionalPermissionProfile(
+            network=(
+                NetworkEntry(
+                    "127.0.0.1",
+                    8123,
+                    "http",
+                    NetworkAccess.ALLOW,
+                    allow_private=True,
+                    escalatable=False,
+                ),
+            ),
+        ),
+    )
+
+    assert await broker.open_interactive(request) == "session"
+    assert runtime.kwargs["network_enabled"] is True
+    assert runtime.kwargs["network_rules"] == [
+        {
+            "host": "127.0.0.1",
+            "port": 8123,
+            "protocol": "http",
+            "allow": True,
+            "allow_private": True,
+            "escalatable": False,
+        }
+    ]
 
 
 @pytest.mark.asyncio

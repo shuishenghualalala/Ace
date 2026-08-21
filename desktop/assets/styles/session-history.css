@@ -124,6 +124,9 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  /* 负边距抵消面板 12px 右内边距，让滚动条贴面板右边线；列表项与滚动条之间留 4px */
+  margin-right: calc(-1 * var(--mw-space-3));
+  padding-right: var(--mw-space-1);
 }
 
 .mw-session-history__section + .mw-session-history__section {
@@ -317,6 +320,10 @@
   height: 18px;
   place-items: center;
   color: var(--mw-text-secondary);
+}
+
+.mw-session-history__identity-icon.session__external-agent-icon {
+  color: var(--mw-text-primary);
 }
 
 .mw-session-history__copy {

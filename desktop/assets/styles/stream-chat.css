@@ -503,10 +503,10 @@
   width: 100%;
   max-width: 100%;
   margin: 0 0 calc(var(--mw-space-1) * -1);
-  min-height: 28px;
+  min-height: 38px;
   display: flex;
   align-items: center;
-  gap: var(--mw-space-2);
+  gap: var(--mw-space-3);
   color: var(--mw-text-secondary);
   font-size: var(--mw-type-caption-size);
   line-height: 1.5;
@@ -514,14 +514,24 @@
 }
 
 .running-intro__logo {
-  width: 24px;
-  height: 24px;
+  width: 38px;
+  height: 38px;
   display: grid;
   place-items: center;
   flex-shrink: 0;
   color: var(--mw-text-primary);
   animation: chat-running-logo-hop 1.05s ease-in-out infinite;
   transform-origin: 50% 100%;
+}
+
+.running-intro__agent-logo {
+  width: 38px;
+  height: 38px;
+  max-width: none;
+  display: block;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
 }
 
 .nav-agent-logo {
@@ -604,6 +614,12 @@
   0%, 100% { transform: translateY(0) scaleY(1); }
   35% { transform: translateY(-4px) scaleY(1.03); }
   65% { transform: translateY(1px) scaleY(.97); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .running-intro__logo {
+    animation: none;
+  }
 }
 
 .queue-card {

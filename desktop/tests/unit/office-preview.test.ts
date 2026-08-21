@@ -119,14 +119,15 @@ describe('Office previews', () => {
     const container = document.getElementById('preview') as HTMLElement;
     await renderPptxPreview('ZHVtbXk=', container);
     const surface = container.querySelector<HTMLElement>('.inspector-office-preview__zoom-surface');
-    await vi.waitFor(() => expect(Number.parseFloat(surface?.style.zoom ?? '')).toBeCloseTo(364 / 960));
+    const surfaceZoom = () => surface?.style.getPropertyValue('--mw-runtime-zoom') ?? '';
+    await vi.waitFor(() => expect(Number.parseFloat(surfaceZoom())).toBeCloseTo(364 / 960));
     expect(container.querySelector('.inspector-office-preview__zoom-label')?.textContent).toBe('100%');
 
     const previous = button(container, '上一页幻灯片');
     const next = button(container, '下一页幻灯片');
     expect(container.textContent).toContain('第 1 / 3 页');
     expect(container.querySelectorAll('iframe')).toHaveLength(1);
-    expect(container.querySelector<HTMLElement>('.inspector-office-preview__slide')?.style.width).toBe('960px');
+    expect(container.querySelector<HTMLElement>('.inspector-office-preview__slide')?.style.getPropertyValue('--mw-runtime-width')).toBe('960px');
     expect(renderSlideSvg).toHaveBeenLastCalledWith(0);
     expect(previous.disabled).toBe(true);
     expect(next.disabled).toBe(false);
@@ -145,14 +146,14 @@ describe('Office previews', () => {
     expect(container.textContent).toContain('第 2 / 3 页');
     button(container, '放大').click();
     expect(container.querySelector('.inspector-office-preview__zoom-label')?.textContent).toBe('110%');
-    expect(Number.parseFloat(surface?.style.zoom ?? '')).toBeCloseTo((364 / 960) * 1.1);
+    expect(Number.parseFloat(surfaceZoom())).toBeCloseTo((364 / 960) * 1.1);
     button(container, '缩小').click();
     expect(container.querySelector('.inspector-office-preview__zoom-label')?.textContent).toBe('100%');
     button(container, '放大').click();
     expect(container.querySelector('.inspector-office-preview__zoom-label')?.textContent).toBe('110%');
     viewportWidth = 700;
     window.dispatchEvent(new CustomEvent('inspector:layout-changed'));
-    await vi.waitFor(() => expect(Number.parseFloat(surface?.style.zoom ?? '')).toBeCloseTo((664 / 960) * 1.1));
+    await vi.waitFor(() => expect(Number.parseFloat(surfaceZoom())).toBeCloseTo((664 / 960) * 1.1));
     expect(container.querySelector('.inspector-office-preview__zoom-label')?.textContent).toBe('110%');
     const fitWidth = button(container, '适应宽度');
     fitWidth.click();
@@ -202,6 +203,14 @@ describe('Office previews', () => {
         </text>
       </svg>`
     ));
+    // happy-dom 把 shadow 的 :host{width/height:100%} 应用到宿主 computed style，
+    // 真实浏览器里 960px 由 runtime.css 的 .mw-runtime-style 规则承接，这里 mock 布局尺寸。
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(function clientWidth() {
+      return this.classList.contains('inspector-office-preview__slide') ? 960 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function clientHeight() {
+      return this.classList.contains('inspector-office-preview__slide') ? 540 : 0;
+    });
     const container = document.getElementById('preview') as HTMLElement;
     await renderPptxPreview('ZHVtbXk=', container, { editable: true });
 
@@ -213,15 +222,16 @@ describe('Office previews', () => {
     expect(sourceTspan?.getAttribute('font-size')).toBe('40');
     expect(sourceTspan?.getAttribute('font-weight')).toBe('700');
     expect(sourceTspan?.getAttribute('fill')).toBe('rgb(30,60,80)');
-    expect(shadowStyles).toContain('color:transparent!important');
+    expect(shadowStyles).toContain('color:transparent');
+    expect(shadowStyles).not.toContain('color:transparent!important');
     expect(shadowStyles).toContain('resize:none');
-    expect(shadowStyles).toContain('ppt-textbox.is-dirty{color:var(--ppt-text-color,currentColor)!important}');
+    expect(shadowStyles).toContain('ppt-textbox.is-dirty{color:var(--mw-runtime-color,currentColor)}');
     expect(shadowStyles).not.toContain('ppt-edit-preview');
     expect(overlay?.value).toContain('产品招聘看板平台');
-    expect(overlay?.style.fontFamily).toContain('Microsoft YaHei');
-    expect(overlay?.style.fontSize).toBe('40px');
-    expect(overlay?.style.fontWeight).toBe('700');
-    expect(overlay?.style.getPropertyValue('--ppt-text-color')).toBe('rgb(30,60,80)');
+    expect(overlay?.style.getPropertyValue('--mw-runtime-font-family')).toContain('Microsoft YaHei');
+    expect(overlay?.style.getPropertyValue('--mw-runtime-font-size')).toBe('40px');
+    expect(overlay?.style.getPropertyValue('--mw-runtime-font-weight')).toBe('700');
+    expect(overlay?.style.getPropertyValue('--mw-runtime-color')).toBe('rgb(30,60,80)');
   });
 
   it('scales SVG text box metadata and pt units into the PPT editing layer', async () => {
@@ -230,17 +240,25 @@ describe('Office previews', () => {
         <text x="590" y="415" data-width="260" data-height="22" text-anchor="middle" font-family="Microsoft YaHei" font-size="12pt" fill="#334E5C">BOSS直聘 35%</text>
       </svg>`
     ));
+    // happy-dom 把 shadow 的 :host{width/height:100%} 应用到宿主 computed style，
+    // 真实浏览器里 960px 由 runtime.css 的 .mw-runtime-style 规则承接，这里 mock 布局尺寸。
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(function clientWidth() {
+      return this.classList.contains('inspector-office-preview__slide') ? 960 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function clientHeight() {
+      return this.classList.contains('inspector-office-preview__slide') ? 540 : 0;
+    });
     const container = document.getElementById('preview') as HTMLElement;
     await renderPptxPreview('ZHVtbXk=', container, { editable: true });
 
     const overlay = container.querySelector<HTMLElement>('.inspector-office-preview__slide')
       ?.shadowRoot
       ?.querySelector<HTMLTextAreaElement>('.inspector-office-page-editor__ppt-textbox[data-office-block]');
-    expect(overlay?.style.fontSize).toBe('12px');
-    expect(overlay?.style.width).toBe('195px');
-    expect(overlay?.style.height).toBe('16.5px');
+    expect(overlay?.style.getPropertyValue('--mw-runtime-font-size')).toBe('12px');
+    expect(overlay?.style.getPropertyValue('--mw-runtime-width')).toBe('195px');
+    expect(overlay?.style.getPropertyValue('--mw-runtime-height')).toBe('16.5px');
     expect(Number.parseFloat(overlay?.dataset.minWidthPx ?? '')).toBeGreaterThanOrEqual(195);
-    expect(overlay?.style.fontFamily).toContain('Microsoft YaHei');
+    expect(overlay?.style.getPropertyValue('--mw-runtime-font-family')).toContain('Microsoft YaHei');
   });
 
   it('shows one Excel worksheet at a time and switches sheets without stacking them', async () => {
@@ -262,8 +280,8 @@ describe('Office previews', () => {
 
     button(container, '缩小').click();
     expect(container.querySelector('.inspector-office-preview__zoom-label')?.textContent).toBe('90%');
-    expect(container.querySelector<HTMLElement>('.inspector-office-preview__xlsx-content')?.style.transform).toBe('scale(0.9)');
-    expect(container.querySelector<HTMLElement>('.inspector-office-preview__xlsx-sizer')?.style.width).not.toBe('');
+    expect(container.querySelector<HTMLElement>('.inspector-office-preview__xlsx-content')?.style.getPropertyValue('--mw-runtime-transform')).toBe('scale(0.9)');
+    expect(container.querySelector<HTMLElement>('.inspector-office-preview__xlsx-sizer')?.style.getPropertyValue('--mw-runtime-width')).not.toBe('');
     expect(button(container, '适应宽度')).not.toBeNull();
     expect(container.querySelector<HTMLElement>('.inspector-office-preview__zoom-surface')).toBeNull();
   });
@@ -280,7 +298,9 @@ describe('Office previews', () => {
     });
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function getBoundingClientRect() {
       const content = this.closest<HTMLElement>('.inspector-office-preview__xlsx-content');
-      const scale = Number.parseFloat(content?.style.transform.match(/scale\(([^)]+)\)/)?.[1] ?? '1');
+      const scale = Number.parseFloat(
+        content?.style.getPropertyValue('--mw-runtime-transform').match(/scale\(([^)]+)\)/)?.[1] ?? '1',
+      );
       const width = this.classList.contains('inspector-xlsx-preview__table') ? 300 * scale : 0;
       return {
         x: 0,
@@ -299,24 +319,26 @@ describe('Office previews', () => {
     await renderXlsxPreview(await createXlsxBase64(), container);
     const sizer = container.querySelector<HTMLElement>('.inspector-office-preview__xlsx-sizer');
     const content = container.querySelector<HTMLElement>('.inspector-office-preview__xlsx-content');
+    const sizerWidth = () => sizer?.style.getPropertyValue('--mw-runtime-width');
+    const contentTransform = () => content?.style.getPropertyValue('--mw-runtime-transform');
 
-    await vi.waitFor(() => expect(sizer?.style.width).toBe('300px'));
+    await vi.waitFor(() => expect(sizerWidth()).toBe('300px'));
     button(container, '放大').click();
     button(container, '放大').click();
     expect(container.querySelector('.inspector-office-preview__zoom-label')?.textContent).toBe('120%');
-    expect(content?.style.transform).toBe('scale(1.2)');
-    expect(sizer?.style.width).toBe('360px');
+    expect(contentTransform()).toBe('scale(1.2)');
+    expect(sizerWidth()).toBe('360px');
 
     button(container, '放大').click();
     button(container, '放大').click();
     expect(container.querySelector('.inspector-office-preview__zoom-label')?.textContent).toBe('140%');
-    expect(content?.style.transform).toBe('scale(1.4)');
-    expect(sizer?.style.width).toBe('420px');
+    expect(contentTransform()).toBe('scale(1.4)');
+    expect(sizerWidth()).toBe('420px');
 
     button(container, '适应宽度').click();
-    await vi.waitFor(() => expect(content?.style.transform).toBe('scale(1)'));
+    await vi.waitFor(() => expect(contentTransform()).toBe('scale(1)'));
     expect(container.querySelector('.inspector-office-preview__zoom-label')?.textContent).toBe('100%');
-    expect(sizer?.style.width).toBe('300px');
+    expect(sizerWidth()).toBe('300px');
     expect(button(container, '适应宽度').getAttribute('aria-pressed')).toBe('true');
   });
 });

@@ -1,9 +1,10 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{FromRawHandle, RawHandle};
@@ -34,8 +35,8 @@ use super::job::KillOnCloseJob;
 use super::token::create_restricted_token;
 use super::WindowsRunRequest;
 use crate::protocol::{
-    RuntimeCapabilities, RuntimeMessage, StdioInputMessage, MAX_OUTPUT_CHUNK_BYTES,
-    MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES,
+    RuntimeCapabilities, RuntimeControl, RuntimeMessage, StdioInputMessage,
+    MAX_OUTPUT_CHUNK_BYTES, MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES,
 };
 
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
@@ -54,6 +55,17 @@ struct RunnerRequest {
     stdin_b64: Option<String>,
     stream_stdin: bool,
     env_overrides: BTreeMap<String, String>,
+    home_files: BTreeMap<String, String>,
+    full_disk_read: bool,
+    host_home: Option<PathBuf>,
+    interactive: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RunnerControl {
+    Write { data_b64: String },
+    Close,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,6 +108,7 @@ pub fn run_via_account<F>(
     request: &WindowsRunRequest,
     context: RunViaAccountContext<'_>,
     verify_authorized_paths: F,
+    control_rx: Option<Receiver<RuntimeControl>>,
 ) -> Result<i32, String>
 where
     F: FnOnce() -> Result<(), String>,
@@ -124,6 +137,18 @@ where
             .map(|value| BASE64_STANDARD.encode(value)),
         stream_stdin: stdin_stream.is_some(),
         env_overrides: request.env_overrides.clone(),
+        home_files: request
+            .home_files
+            .iter()
+            .map(|(path, content)| (path.clone(), BASE64_STANDARD.encode(content)))
+            .collect(),
+        full_disk_read: request.full_disk_read,
+        host_home: if request.full_disk_read && request.home_files.is_empty() {
+            host_home()
+        } else {
+            None
+        },
+        interactive: control_rx.is_some(),
     };
     let executable = std::env::current_exe()
         .and_then(|path| path.canonicalize())
@@ -217,13 +242,37 @@ where
         .and_then(|_| child_stdin.parent_file.write_all(b"\n"))
         .map_err(|error| format!("cannot send Windows runner request: {error}"))?;
     let input_finished = Arc::new(AtomicBool::new(false));
-    let input_writer = match stdin_stream {
-        Some(stream) => Some(spawn_runner_input_writer(
+    let input_writer = match (stdin_stream, control_rx) {
+        (Some(stream), _) => Some(spawn_runner_input_writer(
             child_stdin.into_parent_file_after_child_close(),
             stream,
             Arc::clone(&input_finished),
         )),
-        None => {
+        (None, Some(control_rx)) => {
+            let mut child_stdin = child_stdin.into_parent_file_after_child_close();
+            thread::spawn(move || {
+                for control in control_rx {
+                    let message = match control {
+                        RuntimeControl::Write(data) => RunnerControl::Write {
+                            data_b64: BASE64_STANDARD.encode(data),
+                        },
+                        RuntimeControl::Close => RunnerControl::Close,
+                    };
+                    let Ok(mut encoded) = serde_json::to_vec(&message) else {
+                        break;
+                    };
+                    encoded.push(b'\n');
+                    if child_stdin.write_all(&encoded).is_err() {
+                        break;
+                    }
+                    if matches!(message, RunnerControl::Close) {
+                        break;
+                    }
+                }
+            });
+            None
+        }
+        (None, None) => {
             drop(child_stdin);
             None
         }
@@ -314,17 +363,16 @@ where
 }
 
 pub fn runner_main() -> ! {
+    let mut reader = BufReader::new(std::io::stdin());
     let mut line = String::new();
-    let request = BufReader::new(std::io::stdin())
-        .read_line(&mut line)
-        .and_then(|_| {
-            serde_json::from_str::<RunnerRequest>(&line)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-        });
+    let request = reader.read_line(&mut line).and_then(|_| {
+        serde_json::from_str::<RunnerRequest>(&line)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    });
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
     let result = match request {
-        Ok(request) => run_restricted(request, &mut output),
+        Ok(request) => run_restricted(request, &mut output, reader),
         Err(_) => RunnerWriter::new(&mut output)
             .write(RunnerMessage::Error("invalid runner request".to_string())),
     };
@@ -335,12 +383,17 @@ pub fn runner_main() -> ! {
     std::process::exit(0);
 }
 
-fn run_restricted<W: Write>(request: RunnerRequest, output: &mut W) -> Result<(), String> {
+fn run_restricted<W: Write, R: BufRead + Send + 'static>(
+    request: RunnerRequest,
+    output: &mut W,
+    reader: R,
+) -> Result<(), String> {
     let token = OwnedHandle(create_restricted_token(&request.capability_sids)?);
     // Keep the GUI-capable child off the user's interactive desktop. A failure
     // to create or ACL the private Desktop is a sandbox failure, never a
-    // fallback to Winsta0\\Default.
+    // fallback to Winsta0\Default.
     let desktop = LaunchDesktop::prepare()?;
+    let staged_home = stage_home_files(&request.home_files)?;
     let child_stdin = Pipe::new(/*parent_reads*/ false)?;
     let child_stdout = Pipe::new(/*parent_reads*/ true)?;
     let child_stderr = Pipe::new(/*parent_reads*/ true)?;
@@ -364,13 +417,42 @@ fn run_restricted<W: Write>(request: RunnerRequest, output: &mut W) -> Result<()
                 .to_string(),
         );
     }
-    let mut environment = environment_block(restricted_environment(
+    let mut child_environment = restricted_environment(
         request.network_enabled,
         request.proxy_url.as_deref(),
         request.env_overrides,
         &request.temp_dir,
         Some(&request.username),
-    )?);
+    )?;
+    if let Some(home) = &staged_home {
+        child_environment.insert("HOME".to_string(), home.0.to_string_lossy().to_string());
+        child_environment.insert(
+            "USERPROFILE".to_string(),
+            home.0.to_string_lossy().to_string(),
+        );
+        child_environment.insert(
+            "APPDATA".to_string(),
+            home.0
+                .join("AppData")
+                .join("Roaming")
+                .to_string_lossy()
+                .to_string(),
+        );
+    } else if request.full_disk_read {
+        if let Some(home) = request.host_home.as_ref().filter(|path| path.is_absolute()) {
+            let value = home.to_string_lossy().to_string();
+            child_environment.insert("HOME".to_string(), value.clone());
+            child_environment.insert("USERPROFILE".to_string(), value);
+            child_environment.insert(
+                "APPDATA".to_string(),
+                home.join("AppData")
+                    .join("Roaming")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+    }
+    let mut environment = environment_block(child_environment);
     let flags = CREATE_NO_WINDOW
         | CREATE_SUSPENDED
         | CREATE_UNICODE_ENVIRONMENT
@@ -417,7 +499,56 @@ fn run_restricted<W: Write>(request: RunnerRequest, output: &mut W) -> Result<()
     let budget = Arc::new(Mutex::new(request.max_output_bytes));
     let (sender, receiver) = mpsc::sync_channel(64);
     let (failure_sender, failure_receiver) = mpsc::channel();
-    if let Some(encoded) = request.stdin_b64 {
+    let control_rx = if request.interactive {
+        let (control_tx, control_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut reader = reader;
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+                if line.len() > MAX_RESPONSE_FRAME_BYTES {
+                    break;
+                }
+                let Ok(control) = serde_json::from_slice::<RunnerControl>(&line) else {
+                    break;
+                };
+                let close = matches!(control, RunnerControl::Close);
+                if control_tx.send(control).is_err() {
+                    break;
+                }
+                if close {
+                    break;
+                }
+            }
+        });
+        Some(control_rx)
+    } else {
+        None
+    };
+
+    if let Some(control_rx) = control_rx {
+        thread::spawn(move || {
+            let mut stdin = stdin;
+            for control in control_rx {
+                match control {
+                    RunnerControl::Write { data_b64 } => {
+                        let Ok(data) = BASE64_STANDARD.decode(data_b64) else {
+                            break;
+                        };
+                        if stdin.write_all(&data).is_err() {
+                            break;
+                        }
+                    }
+                    RunnerControl::Close => break,
+                }
+            }
+        });
+    } else if let Some(encoded) = request.stdin_b64 {
         let value = BASE64_STANDARD
             .decode(encoded)
             .map_err(|_| "invalid runner stdin payload".to_string())?;
@@ -470,6 +601,60 @@ fn run_restricted<W: Write>(request: RunnerRequest, output: &mut W) -> Result<()
         return writer.write(RunnerMessage::Error(error));
     }
     writer.write(RunnerMessage::Completed(exit_code as i32))
+}
+
+fn host_home() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+struct StagedHome(PathBuf);
+
+impl Drop for StagedHome {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn stage_home_files(files: &BTreeMap<String, String>) -> Result<Option<StagedHome>, String> {
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let mut suffix = [0_u8; 16];
+    rand::thread_rng().fill_bytes(&mut suffix);
+    let name = suffix
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let root = std::env::temp_dir().join(format!("ace-sandbox-home-files-{name}"));
+    fs::create_dir(&root).map_err(|error| format!("cannot create projected HOME: {error}"))?;
+    for (relative_path, encoded) in files {
+        let components: Vec<&str> = relative_path.split('/').collect();
+        if relative_path.is_empty()
+            || relative_path.starts_with('/')
+            || relative_path.contains('\\')
+            || relative_path.contains(':')
+            || components
+                .iter()
+                .any(|part| part.is_empty() || *part == "." || *part == "..")
+        {
+            let _ = fs::remove_dir_all(&root);
+            return Err("projected HOME path must be relative".to_string());
+        }
+        let destination = root.join(relative_path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("cannot create projected HOME directory: {error}"))?;
+        }
+        let content = BASE64_STANDARD
+            .decode(encoded)
+            .map_err(|_| "invalid projected HOME file encoding".to_string())?;
+        fs::write(&destination, content)
+            .map_err(|error| format!("cannot stage projected HOME file: {error}"))?;
+    }
+    Ok(Some(StagedHome(root)))
 }
 
 fn forward_runner_output(

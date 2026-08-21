@@ -317,7 +317,7 @@ fn run_request(cwd: &std::path::Path, request: serde_json::Value) -> Vec<serde_j
     assert!(line.contains("\"stdin_once\""));
     assert!(line.contains("\"deny_read_glob_v1\""));
     let envelope = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "token": token,
         "nonce": format!("linux-native-{}", std::process::id()),
         "request": request,

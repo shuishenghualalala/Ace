@@ -1,7 +1,7 @@
 /**
  * 追问选择框（ask_followup_question）— desktop 端渲染与事件绑定。
  *
- * 普通追问对齐 web 端 FollowupQuestionCard；权限请求使用居中阻断式对话框。
+ * 普通追问对齐 web 端 FollowupQuestionCard；权限请求使用不阻断页面的浮层。
  * 取消时通知后端（followup_cancel），与 web 行为一致。
  */
 
@@ -176,6 +176,14 @@ function permissionPresentation(question: PendingFollowup): PermissionPresentati
   const toolName = permissionToolName(question.title);
   const parts = permissionPromptParts(question.questions[0]?.question ?? '');
   const actionObject = parseActionObject(parts.action);
+  if (toolName.startsWith('wiki_')) {
+    return {
+      title: '允许执行 Wiki 操作？',
+      context: 'Wiki 知识库',
+      summary: clipped(parts.action, 160) || '执行知识库变更操作',
+      note: '',
+    };
+  }
   if ((toolName === 'browser_use' || toolName.startsWith('browser_')) && actionObject) {
     return browserPermissionPresentation(normalizedBrowserAction(toolName, actionObject), parts.reason);
   }
@@ -206,8 +214,8 @@ function permissionPresentation(question: PendingFollowup): PermissionPresentati
 
 function permissionButtonClass(label: string, value: string): string {
   const choice = `${label} ${value}`.toLowerCase();
-  if (/allow_once|允许一次|允许本次/.test(choice)) return ' permission-dialog__button--primary';
-  if (/always|始终允许/.test(choice)) return ' permission-dialog__button--persistent';
+  if (/allow_once|允许一次|允许本次|确认执行/.test(choice)) return ' permission-dialog__button--primary';
+  if (/always|session_exact|始终允许|本次对话|allow_batch|本批次/.test(choice)) return ' permission-dialog__button--persistent';
   return ' permission-dialog__button--secondary';
 }
 
@@ -262,8 +270,8 @@ function permissionDialogHtml(question: PendingFollowup): string {
   const options = firstQuestion?.options ?? [];
   const rank = (label: string, value: string): number => {
     const choice = `${label} ${value}`.toLowerCase();
-    if (/deny|拒绝/.test(choice)) return 0;
-    if (/always|始终允许/.test(choice)) return 1;
+    if (/deny|拒绝|取消/.test(choice)) return 0;
+    if (/always|session_exact|始终允许|本次对话|allow_batch|本批次/.test(choice)) return 1;
     return 2;
   };
   const orderedOptions = [...options].sort(
@@ -272,7 +280,7 @@ function permissionDialogHtml(question: PendingFollowup): string {
   const actions = orderedOptions.map((option) => `
       <button type="button" class="permission-dialog__button${permissionButtonClass(option.label, option.value)}" data-permission-qid="${escapeHtml(firstQuestion?.id ?? '')}" data-permission-value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</button>`).join('');
   return `
-    <div class="followup-card followup-card--permission" data-followup-id="${escapeHtml(question.questionId)}" role="alertdialog" aria-modal="true" aria-labelledby="${dialogId}-title" aria-describedby="${dialogId}-description" tabindex="-1">
+    <div class="followup-card followup-card--permission" data-followup-id="${escapeHtml(question.questionId)}" role="dialog" aria-modal="false" aria-labelledby="${dialogId}-title" aria-describedby="${dialogId}-description" tabindex="-1">
       ${followupSourceHtml(question)}
       <div class="followup-card__header">
         <span class="followup-card__header-icon">${PERMISSION_ICON}</span>
@@ -453,22 +461,9 @@ export function bindFollowupCard(root: HTMLElement, bindings: FollowupBindings):
         resolved = true;
         buttons.forEach((item) => { item.disabled = true; });
         bindings.onCancel(questionId);
-        return;
-      }
-      if (event.key !== 'Tab' || buttons.length === 0) return;
-      const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-      if (event.shiftKey && index <= 0) {
-        event.preventDefault();
-        buttons.at(-1)?.focus();
-      } else if (!event.shiftKey && index === buttons.length - 1) {
-        event.preventDefault();
-        buttons[0]?.focus();
       }
     });
-    const safestAction = buttons.find((button) => /deny|拒绝/i.test(
-      `${button.textContent ?? ''} ${button.dataset.permissionValue ?? ''}`,
-    ));
-    (safestAction ?? buttons[0] ?? card).focus({ preventScroll: true });
+    // 这是非模态浮层：不抢占当前页面焦点，也不把 Tab 键限制在浮层内。
     return;
   }
 

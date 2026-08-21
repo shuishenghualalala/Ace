@@ -13,6 +13,7 @@ import { workspaceStore } from '../stores/workspace-store';
 
 type Availability =
   | 'default'
+  | 'builtin'
   | 'unbound'
   | 'checking'
   | 'available'
@@ -58,6 +59,7 @@ const availabilityPresentation: Record<
   { label: string; tone: StatusTone; icon: IconId }
 > = {
   default: { label: '默认空间', tone: 'neutral', icon: 'icon-check' },
+  builtin: { label: '内置空间', tone: 'neutral', icon: 'icon-check' },
   unbound: { label: '未绑定目录', tone: 'warning', icon: 'icon-warning' },
   checking: { label: '正在检查', tone: 'running', icon: 'status-running' },
   available: { label: '目录可用', tone: 'success', icon: 'status-complete' },
@@ -67,6 +69,7 @@ const availabilityPresentation: Record<
 };
 
 const availabilityHelp: Partial<Record<Availability, string>> = {
+  builtin: '知识库会话不访问本地文件系统，无需关联目录。',
   unbound: '关联一个本地目录后即可使用此工作空间。',
   unavailable: '保存的目录当前不存在或无法访问，请重新关联。',
   error: '应用暂时无法确认该目录是否可访问。可重新关联目录后重试。',
@@ -180,6 +183,8 @@ export function createWorkspaceView(
 
   function stateFor(workspace: Workspace): Availability {
     if (workspace.id === 'default') return 'default';
+    // 内置 wiki 空间 root_path 恒空（crew/state/workspace_store.py），属预期而非异常。
+    if (workspace.id === 'wiki') return 'builtin';
     const path = workspacePath(workspace);
     if (!path) return 'unbound';
     const cached = availability.get(workspace.id);
@@ -388,6 +393,7 @@ export function createWorkspaceView(
     const fields = document.createElement('div');
     const actions = document.createElement('div');
     const isDefault = workspace.id === 'default';
+    const isWiki = workspace.id === 'wiki';
 
     titleRow.className = 'mw-workspace__detail-heading';
     name.textContent = workspace.name;
@@ -399,7 +405,9 @@ export function createWorkspaceView(
     rootLabel.textContent = '本地目录';
     rootValue.textContent = isDefault
       ? '默认工作空间不绑定本地目录'
-      : workspacePath(workspace) || '尚未绑定本地目录';
+      : isWiki
+        ? 'Wiki 知识库不绑定本地目录'
+        : workspacePath(workspace) || '尚未绑定本地目录';
     status.dataset.workspaceAvailability = workspace.id;
     status.setAttribute('role', 'status');
     status.setAttribute('aria-live', 'polite');
@@ -435,17 +443,22 @@ export function createWorkspaceView(
     fields.append(nameField.element, instructionsField.element);
     actions.className = 'mw-workspace__detail-actions';
 
+    // 内置 wiki 空间不可关联本地目录（root_path 恒空），不提供「重新关联」。
+    if (!isWiki) {
+      actions.append(
+        actionButton(
+          relinkLabel(stateFor(workspace)),
+          'secondary',
+          'workspaceRelink',
+          workspace.id,
+          async () => {
+            const nextId = await options.relinkWorkspace(workspace.id);
+            if (typeof nextId === 'string') selectedId = nextId;
+          },
+        ),
+      );
+    }
     actions.append(
-      actionButton(
-        relinkLabel(stateFor(workspace)),
-        'secondary',
-        'workspaceRelink',
-        workspace.id,
-        async () => {
-          const nextId = await options.relinkWorkspace(workspace.id);
-          if (typeof nextId === 'string') selectedId = nextId;
-        },
-      ),
       actionButton(
         workspace.hidden ? '取消隐藏' : '隐藏',
         'ghost',

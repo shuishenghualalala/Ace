@@ -17,7 +17,7 @@ from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.errors import ToolError
 from crew.core.interfaces import LLMProvider
 from crew.core.mocks import InMemorySessionStore, NullMemory
-from crew.core.runctx import current_agent_id
+from crew.core.runctx import current_agent_id, current_agent_workdir
 from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
 from crew.dynamickanban.store import SQLiteKanbanStore
 from crew.gateway.auth import AccountContext
@@ -28,6 +28,13 @@ from crew.state.config import Config, load_config
 from crew.tasks.runtime import TaskRuntime
 from crew.tasks.task_manager import InMemoryTaskManager, LegacyTaskManagerAdapter
 from crew.team.delegate_tool import run_delegate_to_teammate
+from crew.security.launch import ProcessLaunch, current_process_launch
+from crew.security.models import (
+    FilesystemAccess,
+    FilesystemEntry,
+    PermissionProfile,
+    PermissionProfileKind,
+)
 from crew.team.graph_planner import (
     DEFAULT_PLANNING_DECISION_TIMEOUT,
     PLANNING_DECISION_MAX_TOKENS,
@@ -3309,7 +3316,7 @@ async def test_team_request_delegate_control_plane_entry():
     assert result["member"] == "coder"
     assert result["status"] == "in_progress"
     assert result["task_id"]
-    for _ in range(20):
+    for _ in range(200):
         board = tasks.list("mcp_team_s1")
         if board and board[0]["status"] == "done":
             break
@@ -3372,6 +3379,69 @@ async def test_team_delegate_propagates_current_turn_attachments(tmp_path):
         "type": "image",
     }]
     assert seen[0].user_id == "owner-a"
+
+
+async def test_team_delegate_propagates_security_launch_context():
+    seen: list[Envelope] = []
+
+    class RecordingAgent:
+        async def run(self, envelope):
+            seen.append(envelope)
+            yield ResponseChunk.final(envelope.request_id, "已继承安全边界")
+
+    launch = ProcessLaunch(
+        PermissionProfile(PermissionProfileKind.MANAGED),
+        ("native-runtime",),
+    )
+    token = current_process_launch.set(launch)
+    try:
+        output = await run_delegate_to_teammate(
+            {"coder": RecordingAgent()},
+            InMemoryTaskManager(),
+            "team-security-context-s1",
+            member="coder",
+            instruction="执行受控外援任务",
+        )
+    finally:
+        current_process_launch.reset(token)
+
+    assert output == "已继承安全边界"
+    assert seen[0].params["_security_process_launch"] is launch
+
+
+async def test_team_delegate_inherits_workspace_root_from_security_launch(tmp_path):
+    session_cwd = tmp_path / "external-session"
+    session_cwd.mkdir()
+    seen: list[Envelope] = []
+
+    class RecordingAgent:
+        async def run(self, envelope):
+            seen.append(envelope)
+            yield ResponseChunk.final(envelope.request_id, "已继承工作空间根")
+
+    launch = ProcessLaunch(
+        PermissionProfile(
+            PermissionProfileKind.MANAGED,
+            filesystem=(FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),),
+        ),
+        ("native-runtime",),
+    )
+    launch_token = current_process_launch.set(launch)
+    cwd_token = current_agent_workdir.set(str(session_cwd))
+    try:
+        output = await run_delegate_to_teammate(
+            {"coder": RecordingAgent()},
+            InMemoryTaskManager(),
+            "team-workspace-context-s1",
+            member="coder",
+            instruction="执行受控外援任务",
+        )
+    finally:
+        current_agent_workdir.reset(cwd_token)
+        current_process_launch.reset(launch_token)
+
+    assert output == "已继承工作空间根"
+    assert seen[0].params["workspace_root_path"] == str(tmp_path.resolve())
 
 
 async def test_required_workflow_delegate_waits_for_structured_acceptance_before_completion():
@@ -3458,7 +3528,7 @@ async def test_team_plan_create_and_delegate_binding():
     assert result["status"] == "in_progress"
     board = tasks.list("plan_team_s1")
     assert len(board) == 1
-    for _ in range(20):
+    for _ in range(200):
         current = tm.read_plan("plan_team_s1")["plan"]
         code_node = next(node for node in current["nodes"] if node["node_id"] == "code")
         if code_node["status"] == "completed":

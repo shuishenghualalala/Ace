@@ -322,6 +322,22 @@ def test_lightweight_prompt_skips_global_context():
     assert "组织规则X" in full["user_reminder"]
 
 
+def test_prompt_marks_runtime_cwd_as_authoritative_workspace(tmp_path):
+    parts = build_prompt_parts(cwd=str(tmp_path), lightweight=True)
+
+    assert f"当前工作目录：`{tmp_path.resolve()}`" in parts["user_reminder"]
+    assert "不要用它推导、验证或重建当前工作空间路径" in parts["user_reminder"]
+
+
+def test_workspace_prompt_explains_managed_host_paths_and_file_expansion(tmp_path):
+    reminder = build_prompt_parts(cwd=str(tmp_path), lightweight=True)["user_reminder"]
+
+    assert "宿主用户目录" in reminder
+    assert "with_additional_permissions" in reminder
+    assert "不需要 `require_escalated`" in reminder
+    assert "不要把文件工具称为绕过沙箱" in reminder
+
+
 def test_active_subagents_interrupt_cascade():
     """🔴 中断级联：CrewApp.interrupt 经 ActiveSubagents 下发到运行中的子 agent。"""
     class _FakeChild:

@@ -82,6 +82,8 @@ export const IPC_INVOKE_CHANNELS = [
   'browser-view:set-panel',
   'browser-view:hide',
   'browser-view:get-navigation',
+  'tray:set-status',
+  'release:open-latest-download',
 ] as const;
 
 export type IpcInvokeChannel = (typeof IPC_INVOKE_CHANNELS)[number];
@@ -108,6 +110,7 @@ export const IPC_MAIN_TO_RENDERER_EVENT_CHANNELS = [
   'main:uncaught-error',
   'backend:status',
   'backend:suppress-overlay',
+  'tray:activated',
 ] as const;
 
 export type IpcMainToRendererEventChannel =

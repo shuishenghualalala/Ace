@@ -17,10 +17,14 @@ dispatch 不改写 user_id）可显式传入鉴权账号，语义等价。
 
 from __future__ import annotations
 
+import time
 from typing import Any, AsyncIterator, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.gateway.outbound import format_outbound_payload
+from crew.state.logging import get_logger
+
+log = get_logger("gateway.broadcast")
 
 
 async def _broadcast_stream(
@@ -45,15 +49,36 @@ async def _broadcast_stream(
     # owner 一次确定后固定复用（不每帧重读 envelope.user_id，避免 dispatch 内后续误改导致同轮帧分到不同桶）：
     # WS 显式传 → 全程用它、dispatch 前清缓存；渠道待定 → 首帧取 dispatch 改写后的真实 owner（binder）再清同桶。
     owner = owner_account_id
+    stream_started_at = time.perf_counter()
+    first_chunk_seen = False
+    first_push_logged = False
     if owner is not None:
         connections.clear_buffer(envelope.session_id, owner_account_id=owner)
     async for chunk in crew.dispatch(envelope):
+        if not first_chunk_seen:
+            first_chunk_seen = True
+            log.info(
+                "[PERF] gateway_first_chunk request_id=%s session=%s elapsed=%.3fs kind=%s",
+                envelope.request_id,
+                envelope.session_id,
+                time.perf_counter() - stream_started_at,
+                chunk.kind,
+            )
         if owner is None:
             owner = str(envelope.user_id or "")
             connections.clear_buffer(envelope.session_id, owner_account_id=owner)
         payload = format_outbound_payload(chunk, session_id=envelope.session_id, context=render_context)
         if payload is not None:
             await connections.push_payload(envelope.session_id, payload, owner_account_id=owner)
+            if not first_push_logged:
+                first_push_logged = True
+                log.info(
+                    "[PERF] gateway_first_push request_id=%s session=%s elapsed=%.3fs kind=%s",
+                    envelope.request_id,
+                    envelope.session_id,
+                    time.perf_counter() - stream_started_at,
+                    payload.get("kind"),
+                )
         yield chunk
 
 

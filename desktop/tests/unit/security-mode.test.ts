@@ -1,11 +1,25 @@
 // @vitest-environment happy-dom
 
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import type { BackendConfig } from '../../src/ui/backend-client';
 import {
   detectedRuntimePlatform,
   formatCapabilitySummary,
   isWindowsPlatform,
+  securityModuleEnabled,
 } from '../../src/ui/features/security-mode';
+import { __resetAllStoresForTest, configStore } from '../../src/ui/stores/stores';
+
+function configWithSecurity(security: BackendConfig['security']): BackendConfig {
+  return {
+    model: 'craft',
+    has_key: false,
+    base_url: '',
+    active_model_id: 'craft',
+    models: [],
+    security,
+  };
+}
 
 describe('security capability summary', () => {
   it('does not claim protection when the native helper is absent', () => {
@@ -28,5 +42,23 @@ describe('security capability summary', () => {
   it('uses the desktop runtime platform when the gateway has not reported one', () => {
     Object.assign(window, { Crew: { runtimePlatform: 'darwin' } });
     expect(detectedRuntimePlatform()).toBe('darwin');
+  });
+});
+
+describe('security module switch', () => {
+  beforeEach(() => {
+    __resetAllStoresForTest();
+  });
+
+  it('treats a missing config as disabled', () => {
+    expect(securityModuleEnabled()).toBe(false);
+  });
+
+  it('is enabled only when the backend reports security.enabled === true', () => {
+    configStore.set({ config: configWithSecurity({ enabled: true }) });
+    expect(securityModuleEnabled()).toBe(true);
+
+    configStore.set({ config: configWithSecurity({ enabled: false }) });
+    expect(securityModuleEnabled()).toBe(false);
   });
 });

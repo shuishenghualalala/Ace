@@ -46,6 +46,11 @@ current_model_capabilities: ContextVar[tuple[str, ...] | None] = ContextVar(
     "current_model_capabilities", default=None
 )
 
+# 当前 Agent 实际生效的 LLM Provider。子 Agent ``model=inherit`` 必须继承它：
+# 父会话可能绑定 owner 级模型，而 app 级 self.provider 在无全局 Key 时是 FakeProvider。
+# 子 Agent 只借用、不持有（关闭仍由父 Agent 负责）。
+current_provider: ContextVar[Any | None] = ContextVar("current_provider", default=None)
+
 # 当前 Agent 本轮最终授权工具快照。子 Agent 必须在此基础上继续收窄，
 # 不能仅凭 user_type 重新计算，否则会绕过父 Agent 的 Expert/会话级限制。
 current_authorized_tool_names: ContextVar[frozenset[str] | None] = ContextVar(

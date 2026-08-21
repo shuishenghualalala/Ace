@@ -132,6 +132,24 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   transform: none;
   pointer-events: auto;
 }
+/* 非主聊天会话（如 Wiki 问答，独立 tab）的审批：主聊天输入框整体不可见，
+   面板改挂 body 下底部居中浮动，否则审批请求随隐藏的 tab 一起消失。 */
+.composer-approval-panel--global {
+  position: fixed;
+  left: 50%;
+  right: auto;
+  bottom: var(--mw-space-6);
+  width: min(640px, calc(100vw - 48px));
+  z-index: 1000;
+  box-shadow: var(--mw-shadow-overlay);
+  transform: translateX(-50%) translateY(8px);
+}
+.composer-approval-panel--global[aria-hidden="false"] {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
 .composer-approval-panel__head {
   display: flex;
   align-items: baseline;
@@ -186,7 +204,8 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
 
 .chat-messages.web-flow .messages__inner {
   box-sizing: border-box;
-  width: min(var(--mw-chat-content-max-width), 100%);
+  /* 外层多容纳两侧安全间距，宽屏内容基线不动，窄屏头像不贴分隔线。 */
+  width: min(calc(var(--mw-chat-content-max-width) + var(--mw-space-8)), 100%);
   max-width: 100%;
   margin-inline: auto;
   /* 左右留边：对话区窄于 920px 上限时内层 = 100%，不留边头像会贴到侧栏分隔线 */
@@ -219,10 +238,21 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
 }
 
 .chat-messages.web-flow .msg {
+  box-sizing: border-box;
   display: flex;
   gap: var(--mw-space-3);
   min-width: 0;
   width: 100%;
+}
+
+/* 所有智能体回合与 Composer 上方运行助手共用一条头像视觉轴线。 */
+.chat-messages.web-flow .msg.msg--agent-turn {
+  padding-left: var(--mw-space-4);
+}
+
+/* 用户气泡从右侧等量收进，与智能体回合形成对称安全间距。 */
+.chat-messages.web-flow .msg.user {
+  padding-right: var(--mw-space-4);
 }
 
 /* agent 消息右侧留出用户头像+间距的宽度，与用户消息头像左边缘对齐 */
@@ -270,12 +300,20 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
 }
 
 .chat-messages.web-flow .msg__avatar--external {
-  border: 1.5px solid var(--mw-text-primary);
-  border-radius: var(--mw-radius-4);
-  background: var(--mw-bg-app);
+  border: 2px solid var(--mw-border-strong);
+  border-radius: var(--mw-radius-3);
+  background-color: var(--mw-agent-fill, var(--mw-bg-app));
+  background-image: var(--mw-agent-pattern);
+  background-repeat: repeat;
+  background-position: 0 0;
+  background-size: var(--mw-agent-pattern-size, 8px 8px);
   color: var(--mw-text-primary);
-  font-size: var(--mw-font-xl);
-  font-weight: 650;
+  font-family: var(--mw-font-mono);
+  font-size: var(--mw-type-body-size);
+  font-weight: 800;
+  line-height: 1;
+  image-rendering: pixelated;
+  box-shadow: inset -3px -3px color-mix(in srgb, var(--mw-text-primary) 10%, transparent);
 }
 
 .chat-messages.web-flow .msg__avatar--team {

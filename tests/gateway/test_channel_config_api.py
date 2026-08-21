@@ -17,7 +17,7 @@ from crew.gateway import channel_config
 from crew.gateway.platform_registry import PlatformConfig, PlatformEntry, platform_registry
 from crew.gateway.routers.channels import _platform_error_kind
 from crew.gateway.server import create_app
-from crew.state.config import load_config, owner_overlay_config_path, resolve_writable_env_path, write_env_key
+from crew.state.config import load_config, owner_overlay_config_path, resolve_writable_env_path, write_env_key, write_secret_env_key
 
 OWNER_A = "A:uid-a"
 
@@ -481,7 +481,8 @@ async def test_owner_env_secret_can_be_reused_when_completing_securechat_config(
     platform_registry._entries.clear()
     platform_registry.register(_dummy_securechat_entry())
     try:
-        write_env_key(resolve_writable_env_path("A:uid-a"), "SECURECHAT_SECRET_KEY", "existing-secret", sync_process_env=False)
+        # 合并后敏感变量只允许平台密钥库 + 标记写入（明文 .env 落盘被拒）。
+        write_secret_env_key(resolve_writable_env_path("A:uid-a"), "SECURECHAT_SECRET_KEY", "existing-secret", sync_process_env=False)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
             before = await client.get("/api/platforms/securechat/config")

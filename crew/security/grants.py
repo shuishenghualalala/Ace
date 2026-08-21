@@ -13,9 +13,13 @@ from uuid import uuid4
 from crew.security.actions import ActionKind, ActionScope, NormalizedAction, security_context_digest
 from crew.security.context import SecurityContext
 from crew.security.models import (
+    EMPTY_ADDITIONAL_PERMISSIONS,
     AdditionalPermissionProfile,
     FilesystemEntry,
     PermissionGrantScope,
+    SandboxPermissions,
+    additional_permissions_cover,
+    merge_additional_permissions,
 )
 from crew.security.policy import normalize_additional_permissions
 from crew.security.rules import RuleScope
@@ -30,6 +34,7 @@ class ExecutionGrant:
     grant_id: str
     scope: RuleScope
     action_digest: str
+    action_kind: ActionKind
     os_user: str
     owner_account_id: str
     workspace_id: str
@@ -41,6 +46,7 @@ class ExecutionGrant:
     permission_grant_id: str | None = None
     action_scope_digest: str = ""
     context_digest: str = ""
+    tool_name: str = ""
 
     @property
     def scope_digest(self) -> str:
@@ -59,6 +65,7 @@ class PermissionGrant:
     session_id: str
     task_id: str
     expires_monotonic: float | None
+    tool_name: str = ""
 
 
 class GrantRegistry:
@@ -80,6 +87,7 @@ class GrantRegistry:
         additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
         action_scope: ActionScope | None = None,
         ttl_seconds: float | None = None,
+        tool_name: str = "",
     ) -> ExecutionGrant:
         if scope not in {RuleScope.ONCE, RuleScope.SESSION}:
             raise ValueError("execution grant 只支持 once/session")
@@ -121,6 +129,7 @@ class GrantRegistry:
             grant_id=grant_id,
             scope=scope,
             action_digest=action.digest,
+            action_kind=action.kind,
             os_user=context.os_user,
             owner_account_id=context.owner_account_id,
             workspace_id=context.workspace_id,
@@ -132,6 +141,7 @@ class GrantRegistry:
             permission_grant_id=permission_grant_id,
             action_scope_digest=action_scope.digest if action_scope is not None else "",
             context_digest=security_context_digest(context),
+            tool_name=str(tool_name).strip(),
         )
         with self._lock:
             self._grants[grant.grant_id] = grant
@@ -360,6 +370,8 @@ class GrantRegistry:
         action: NormalizedAction,
         *,
         action_scope: ActionScope | None = None,
+        additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS,
+        tool_name: str = "",
     ) -> ExecutionGrant | None:
         """Authorize by exact action when a tool retry does not carry a grant ID."""
         with self._lock:
@@ -368,7 +380,27 @@ class GrantRegistry:
                 if grant.expires_monotonic is not None and now >= grant.expires_monotonic:
                     self._remove_execution_grant_locked(grant_id)
                     continue
-                if grant.action_digest != action.digest or not _context_matches(grant, context):
+                if not _context_matches(grant, context):
+                    continue
+                if tool_name and grant.tool_name and grant.tool_name != tool_name:
+                    continue
+                exact_action_required = (
+                    grant.scope is RuleScope.ONCE
+                    or grant.additional_permissions.empty
+                    or additional_permissions.empty
+                    or grant.additional_permissions.sandbox_permissions
+                    is SandboxPermissions.REQUIRE_ESCALATED
+                )
+                if exact_action_required and grant.action_digest != action.digest:
+                    continue
+                if exact_action_required and grant.additional_permissions != additional_permissions:
+                    continue
+                if not exact_action_required and grant.action_kind is not action.kind:
+                    continue
+                if not additional_permissions_cover(
+                    grant.additional_permissions,
+                    additional_permissions,
+                ):
                     continue
                 if grant.context_digest != security_context_digest(context):
                     continue
@@ -380,6 +412,33 @@ class GrantRegistry:
                     self._remove_execution_grant_locked(grant_id)
                 return grant
         return None
+
+    def session_permissions(self, context: SecurityContext) -> AdditionalPermissionProfile:
+        """Return sandbox permissions approved for the rest of this conversation.
+
+        Unlike an execution approval, a filesystem/network permission describes
+        a reusable capability.  Keep it independent from the original action so
+        later commands can consume the approved scope without asking the model to
+        repeat the same ``additional_permissions`` payload.  Unsandboxed grants
+        remain exact-command only and are never included here.
+        """
+        with self._lock:
+            now = self._clock()
+            profiles: list[AdditionalPermissionProfile] = []
+            for grant_id, grant in list(self._grants.items()):
+                if grant.expires_monotonic is not None and now > grant.expires_monotonic:
+                    self._grants.pop(grant_id, None)
+                    continue
+                if grant.scope is not RuleScope.SESSION or not _same_session(grant, context):
+                    continue
+                if (
+                    grant.additional_permissions.empty
+                    or grant.additional_permissions.sandbox_permissions
+                    is SandboxPermissions.REQUIRE_ESCALATED
+                ):
+                    continue
+                profiles.append(grant.additional_permissions)
+        return merge_additional_permissions(*profiles)
 
     def revoke(self, grant_id: str) -> bool:
         """Revoke one grant during fail-closed coordination rollback."""

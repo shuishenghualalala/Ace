@@ -16,14 +16,18 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, SyncSender};
 
-use crate::protocol::{RuntimeCapabilities, RuntimeMessage, StdioInputMessage};
+use crate::protocol::{
+    RuntimeCapabilities, RuntimeControl, RuntimeMessage, StdioInputMessage,
+};
 
 pub struct WindowsRunRequest {
     pub command: Vec<String>,
     pub cwd: PathBuf,
     pub writable_roots: Vec<PathBuf>,
     pub readable_roots: Vec<PathBuf>,
+    pub readonly_roots: Vec<PathBuf>,
     pub denied_roots: Vec<PathBuf>,
+    pub full_disk_read: bool,
     pub network_enabled: bool,
     pub network_rules: Vec<crate::protocol::NetworkRule>,
     pub allow_local_binding: bool,
@@ -31,6 +35,7 @@ pub struct WindowsRunRequest {
     pub stdin: Option<Vec<u8>>,
     pub stdin_stream: Option<Receiver<StdioInputMessage>>,
     pub env_overrides: BTreeMap<String, String>,
+    pub home_files: BTreeMap<String, Vec<u8>>,
 }
 
 pub struct WindowsRuntimeError {
@@ -39,7 +44,23 @@ pub struct WindowsRuntimeError {
 }
 
 pub fn run(
+    request: WindowsRunRequest,
+    sender: &SyncSender<RuntimeMessage>,
+) -> Result<(), WindowsRuntimeError> {
+    run_with_control(request, None, sender)
+}
+
+pub fn run_interactive(
+    request: WindowsRunRequest,
+    control_rx: Receiver<RuntimeControl>,
+    sender: &SyncSender<RuntimeMessage>,
+) -> Result<(), WindowsRuntimeError> {
+    run_with_control(request, Some(control_rx), sender)
+}
+
+fn run_with_control(
     mut request: WindowsRunRequest,
+    control_rx: Option<Receiver<RuntimeControl>>,
     sender: &SyncSender<RuntimeMessage>,
 ) -> Result<(), WindowsRuntimeError> {
     if request.allow_local_binding {
@@ -140,6 +161,7 @@ pub fn run(
         filesystem_sandbox: true,
         process_tree_cleanup: true,
         managed_network: request.network_enabled,
+        full_disk_read: request.full_disk_read,
         system_bwrap: false,
         bundled_bwrap: false,
         wsl_version: None,
@@ -169,6 +191,7 @@ pub fn run(
             sender,
         },
         || lease.verify_pins(),
+        control_rx,
     )
     .map_err(|message| {
         if message.starts_with("OUTPUT_TRUNCATED:") {

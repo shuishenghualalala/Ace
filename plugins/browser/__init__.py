@@ -1,7 +1,7 @@
 """内置浏览器插件：Browser 能力包与生命周期边界。
 
 - 创建并持有 BrowserManager（crew/browser/ 作为安全运行时库，不搬迁）。
-- 注册单一 browser_use 工具（替代原 15 个 deferred browser_* 工具）。
+- 注册 browser_use 与按需加载的 browser_use_advanced（替代原 15 个 deferred browser_* 工具）。
 - register_disposer 保证系统级卸载时关闭全部 Browser owner。
 - 用户级热开关不走卸载：由 browser_use 的 permission_resolver 每次执行重查
   有效状态（crew.state.plugin_preferences），配合 BrowserManager.revoke_owner

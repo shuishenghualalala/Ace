@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Awaitable, Callable
 
+from crew.core.errors import ToolError
+from crew.core.followup import send_followup_question, wait_for_answer
 from crew.core.runctx import (
     current_attachment_files,
     current_attachment_paths,
@@ -28,8 +31,10 @@ from crew.tools.file_utils import (
     read_verified_bytes,
     snapshot_file,
 )
-from crew.tools.security_guard import NetworkAuthorization, authorize_network_origin
+from crew.tools.security_guard import NetworkAuthorization, authorize_network_tool
+from crew.security.outbound import PublicRedirectApprovalRequired, parse_public_http_target
 
+from .capture import capture_text_source, save_parsed_source
 from .compiler import WikiCompiler
 from .config import WikiConfig
 from .manager import WikiSessionManager
@@ -550,6 +555,10 @@ _WIKI_CAPTURE_TEXT_SCHEMA = {
                 "type": "string",
                 "description": "可选来源平台，如 wechat、zhihu、x、xiaohongshu",
             },
+            "source_url": {
+                "type": "string",
+                "description": "可选来源 URL（如网页地址），写入 RawSource.source_url 供溯源",
+            },
             **_KB_ID_PARAM,
         },
         "required": ["title", "content"],
@@ -715,53 +724,20 @@ def register_wiki_tools(
         log_message: str,
     ) -> tuple[str, Any | None, Any | None]:
         """统一保存解析文本，并在发布 Source 页面前完成内容去重。"""
-        text = validate_parsed_text(content, str(raw.title or raw.id))
-        parsed_path = str(
-            store.save_parsed_markdown(
-                raw.id,
-                text,
-                owner_account_id=_owner(),
-                kb_id=kb_id,
-            )
-        )
-        raw.parsed_path = parsed_path
-        raw.parse_status = "parsed"
-        raw.parse_error = None
-        saved_raw = store.load_raw(raw.id, owner_account_id=_owner(), kb_id=kb_id)
-        if saved_raw is not None:
-            raw.content_sha256 = saved_raw.content_sha256
-        duplicate = store.check_source_duplicate(
+        parsed_path, page, duplicate = save_parsed_source(
+            store,
+            compiler,
             raw,
-            owner_account_id=_owner(),
-            kb_id=kb_id,
-        )
-        from .schemas import RawSource
-
-        if not isinstance(duplicate, RawSource):
-            duplicate = None
-        raw.is_duplicate = duplicate is not None
-        store.save_raw(raw, owner_account_id=_owner(), kb_id=kb_id)
-        if duplicate is not None:
-            _finish_write(
-                kb_id,
-                f"解析 source {raw.id}，内容与 {duplicate.id} 重复，跳过 Source 页面发布",
-                "source_duplicate",
-                source_ids=[raw.id],
-            )
-            return parsed_path, None, duplicate
-        page = compiler.publish_source_page(
-            raw.id,
-            owner_account_id=_owner(),
-            kb_id=kb_id,
-        )
-        _finish_write(
+            content,
+            _owner(),
             kb_id,
-            log_message,
-            "source_parsed",
-            source_ids=[raw.id],
-            page_ids=[page.id],
+            log_message=log_message,
         )
-        return parsed_path, page, None
+        if duplicate is not None:
+            _mark_changed(kb_id, "source_duplicate", source_ids=[raw.id])
+        elif page is not None:
+            _mark_changed(kb_id, "source_parsed", source_ids=[raw.id], page_ids=[page.id])
+        return parsed_path, page, duplicate
 
     def _issue_confirmation(
         *,
@@ -801,6 +777,82 @@ def register_wiki_tools(
             kb_id=kb_id,
             owner_account_id=_owner(),
         )
+
+    async def _ask_blocking_confirmation(
+        *,
+        action: str,
+        kb_id: str,
+        summary: str,
+        impact: dict[str, Any],
+    ) -> str:
+        """阻塞式确认：弹窗挂起等待用户答复，期间 agent 无法执行其他动作。
+
+        返回：
+          confirmed   —— 用户允许（含「本批次全部允许」，已登记会话级授权）
+          cancelled   —— 用户取消
+          timeout     —— 等待超时（默认 300s，无人应答）
+          unavailable —— 无交互通道（cron/CLI/无 WS push），调用方回退被动确认卡
+        """
+        sid = current_session_id.get()
+        owner = _owner()
+        if manager.has_action_grant(sid, action=action, kb_id=kb_id, owner_account_id=owner):
+            return "confirmed"
+        question_text = f"即将执行：{summary}"
+        if impact:
+            question_text += f"\n\n影响：{json.dumps(impact, ensure_ascii=False)}"
+        try:
+            session_id, question_id = await send_followup_question(
+                [
+                    {
+                        "id": "wiki_confirm",
+                        "question": question_text,
+                        "options": [
+                            {"label": "确认执行", "value": "allow_once"},
+                            {"label": "本批次全部允许", "value": "allow_batch"},
+                            {"label": "取消", "value": "deny"},
+                        ],
+                        "allowFreeText": False,
+                    }
+                ],
+                title=f"Wiki 操作确认·wiki_{action}",
+                record_history=False,
+            )
+        except ToolError:
+            return "unavailable"
+        answers = await wait_for_answer(session_id, question_id, timeout=300)
+        if not answers:
+            return "timeout"
+        first = answers[0] if isinstance(answers[0], dict) else {}
+        values = first.get("answers") or []
+        value = str(values[0]).strip() if values else ""
+        if value == "allow_batch":
+            manager.grant_action(sid, action=action, kb_id=kb_id, owner_account_id=owner)
+            return "confirmed"
+        if value == "allow_once":
+            return "confirmed"
+        return "cancelled"
+
+    def _confirmation_result(
+        decision: str,
+        *,
+        action: str,
+        kb_id: str,
+        payload: dict[str, Any],
+        summary: str,
+        impact: dict[str, Any],
+        cancel_message: str,
+    ) -> str | None:
+        """把 _ask_blocking_confirmation 的决定翻译成工具返回；confirmed 时返回 None（继续执行）。"""
+        if decision == "confirmed":
+            return None
+        if decision == "unavailable":
+            return _issue_confirmation(
+                action=action, kb_id=kb_id, payload=payload, summary=summary, impact=impact,
+            )
+        if decision == "timeout":
+            return tool_error("等待确认超时，操作未执行，请重试")
+        return tool_result(cancelled=True, message=cancel_message)
+
 
     def _capture_bytes(
         path_reference: LocalPathReference,
@@ -929,53 +981,37 @@ def register_wiki_tools(
         kb_id: str,
         session_id: str = "",
         source_platform: str = "",
+        source_url: str = "",
     ) -> str:
-        import time
-        import uuid
-
-        from .schemas import RawSource
-
-        if not title.strip() or not content.strip():
-            return tool_error("标题和内容不能为空")
-        source_id = f"{source_type}_{uuid.uuid4().hex[:12]}"
-        material_kind = (
-            "session"
-            if source_type == "session"
-            else "article"
-            if source_platform in {"web", "wechat", "zhihu", "x", "xiaohongshu"}
-            else "note"
-        )
-        raw = RawSource(
-            id=source_id,
-            title=title.strip(),
-            source_type=source_type,  # type: ignore[arg-type]
-            parsed_path="",
-            file_type="text/markdown",
-            size=len(content.encode("utf-8")),
-            created_at=time.time(),
-            session_id=session_id or None,
-            source_kind=material_kind,
-            source_platform="crew" if source_type == "session" else source_platform,
-            adapter_name="builtin-session" if source_type == "session" else "builtin-text",
-        )
-        store.save_raw(raw, owner_account_id=_owner(), kb_id=kb_id)
-        parsed_path, page, duplicate = _save_parsed_source(
-            raw,
-            content,
-            kb_id,
-            log_message=f"捕获文本并发布全文 Source 页面 {source_id} ({title.strip()})",
-        )
-        if duplicate is not None:
+        try:
+            outcome = capture_text_source(
+                store,
+                compiler,
+                title=title,
+                content=content,
+                owner_account_id=_owner(),
+                kb_id=kb_id,
+                source_type=source_type,
+                source_platform=source_platform,
+                source_url=source_url,
+                session_id=session_id,
+            )
+        except ValueError as exc:  # 标题/内容为空，或解析文本校验失败
+            return tool_error(str(exc))
+        raw = outcome.raw
+        if outcome.duplicate is not None:
+            _mark_changed(kb_id, "source_duplicate", source_ids=[raw.id])
             return tool_result(
                 source=raw.to_dict(),
-                parsed_path=parsed_path,
+                parsed_path=outcome.parsed_path,
                 duplicate=True,
-                duplicate_of=duplicate.id,
+                duplicate_of=outcome.duplicate.id,
                 message="文本已保存为 RawSource，但内容与已有来源重复，未发布重复 Source 页面。",
             )
+        _mark_changed(kb_id, "source_parsed", source_ids=[raw.id], page_ids=[outcome.page.id])
         return tool_result(
             source=raw.to_dict(),
-            source_page=page.to_dict(brief=True),
+            source_page=outcome.page.to_dict(brief=True),
             message="文本已保存为不可变 RawSource，全文 Source 页面已发布并可搜索。",
         )
 
@@ -987,6 +1023,7 @@ def register_wiki_tools(
             _kb_id(args),
             current_session_id.get(),
             str(args.get("source_platform") or ""),
+            str(args.get("source_url") or ""),
         )
 
     def _handle_capture_session(args: dict[str, Any]) -> str:
@@ -1079,20 +1116,52 @@ def register_wiki_tools(
             )
             return tool_result(**result, auto_applied=True)
         planned_ids = list(result["succeeded"])
-        confirmation = manager.issue_confirmation(
-            current_session_id.get(),
+        decision = await _ask_blocking_confirmation(
             action="apply_batch_ingest",
             kb_id=kb_id,
-            payload={"source_ids": planned_ids},
             summary=f"应用 {len(planned_ids)} 份素材的 Wiki 批量计划",
             impact={
                 "source_ids": planned_ids,
                 "skipped": result["skipped"],
                 "failed": result["failed"],
             },
-            owner_account_id=_owner(),
         )
-        return tool_result(**result, auto_applied=False, **confirmation)
+        if decision == "unavailable":
+            confirmation = manager.issue_confirmation(
+                current_session_id.get(),
+                action="apply_batch_ingest",
+                kb_id=kb_id,
+                payload={"source_ids": planned_ids},
+                summary=f"应用 {len(planned_ids)} 份素材的 Wiki 批量计划",
+                impact={
+                    "source_ids": planned_ids,
+                    "skipped": result["skipped"],
+                    "failed": result["failed"],
+                },
+                owner_account_id=_owner(),
+            )
+            return tool_result(**result, auto_applied=False, **confirmation)
+        if decision == "timeout":
+            return tool_error("等待确认超时，批量计划未应用，可重试")
+        if decision != "confirmed":
+            return tool_result(cancelled=True, message="用户已取消，批量计划未应用")
+        # 阻塞确认通过：直接应用本批计划（planned_ids 即待应用集合）
+        apply_result = await compiler.batch_ingest(
+            source_ids=planned_ids,
+            cursor=0,
+            batch_size=min(len(planned_ids), 5) or 1,
+            apply=True,
+            use_existing_plans=True,
+            owner_account_id=_owner(),
+            kb_id=kb_id,
+        )
+        _mark_changed(
+            kb_id,
+            "batch_ingest_applied",
+            source_ids=apply_result["succeeded"],
+            page_ids=apply_result["page_ids"],
+        )
+        return tool_result(**apply_result, auto_applied=False, confirmed=True)
 
     def _handle_check_duplicate(args: dict[str, Any]) -> str:
         source_id = str(args.get("source_id", "")).strip()
@@ -1171,6 +1240,34 @@ def register_wiki_tools(
             neighbor_count=len(neighbors),
         )
 
+    async def _apply_lint_fixes(fixes: list[dict[str, str]], kb_id: str) -> str:
+        """应用 lint 安全修复（确认通过后调用；apply_fixes 确认路径与阻塞确认路径共用）。"""
+        completed: list[str] = []
+        failed: list[dict[str, str]] = []
+        for fix in fixes:
+            page_id = str(fix.get("page_id") or "")
+            page = store.get(page_id, owner_account_id=_owner(), kb_id=kb_id)
+            if page is None:
+                failed.append({"page_id": page_id, "error": "页面不存在"})
+                continue
+            expected_title = str(fix.get("title") or "")
+            if page.title != expected_title:
+                failed.append({"page_id": page_id, "error": "页面标题已变化，请重新 lint"})
+                continue
+            page.content = f"# {page.title}\n\n{page.content.lstrip()}"
+            if store.update(page, owner_account_id=_owner(), kb_id=kb_id) is None:
+                failed.append({"page_id": page_id, "error": "写入失败"})
+            else:
+                completed.append(page_id)
+        if completed:
+            _finish_write(
+                kb_id,
+                f"应用 lint 安全修复: {', '.join(completed)}",
+                "lint_fixed",
+                page_ids=completed,
+            )
+        return tool_result(completed=completed, failed=failed)
+
     async def _handle_lint(args: dict[str, Any]) -> str:
         deep = bool(args.get("deep", False))
         kb_id = _kb_id(args)
@@ -1178,31 +1275,7 @@ def register_wiki_tools(
             confirmed = _consume_confirmation(args, action="lint_apply", kb_id=kb_id)
             if confirmed is None:
                 return tool_error("缺少有效的 lint 修复确认；请重新生成修复计划")
-            completed: list[str] = []
-            failed: list[dict[str, str]] = []
-            for fix in confirmed.get("fixes") or []:
-                page_id = str(fix.get("page_id") or "")
-                page = store.get(page_id, owner_account_id=_owner(), kb_id=kb_id)
-                if page is None:
-                    failed.append({"page_id": page_id, "error": "页面不存在"})
-                    continue
-                expected_title = str(fix.get("title") or "")
-                if page.title != expected_title:
-                    failed.append({"page_id": page_id, "error": "页面标题已变化，请重新 lint"})
-                    continue
-                page.content = f"# {page.title}\n\n{page.content.lstrip()}"
-                if store.update(page, owner_account_id=_owner(), kb_id=kb_id) is None:
-                    failed.append({"page_id": page_id, "error": "写入失败"})
-                else:
-                    completed.append(page_id)
-            if completed:
-                _finish_write(
-                    kb_id,
-                    f"应用 lint 安全修复: {', '.join(completed)}",
-                    "lint_fixed",
-                    page_ids=completed,
-                )
-            return tool_result(completed=completed, failed=failed)
+            return await _apply_lint_fixes(confirmed.get("fixes") or [], kb_id)
 
         issues = await compiler.lint(owner_account_id=_owner(), kb_id=kb_id, deep=deep)
         if not bool(args.get("plan_fixes")):
@@ -1219,16 +1292,28 @@ def register_wiki_tools(
                 seen.add(page_id)
         if not fixes:
             return tool_result(issues=issues, repair_plan=[], message="没有可安全自动修复的项目")
-        confirmation = manager.issue_confirmation(
-            current_session_id.get(),
+        decision = await _ask_blocking_confirmation(
             action="lint_apply",
             kb_id=kb_id,
-            payload={"fixes": fixes},
             summary=f"应用 {len(fixes)} 项 Wiki lint 安全修复",
             impact={"pages": fixes, "other_issues_require_manual_review": len(issues) - len(fixes)},
-            owner_account_id=_owner(),
         )
-        return tool_result(issues=issues, repair_plan=fixes, **confirmation)
+        if decision == "unavailable":
+            confirmation = manager.issue_confirmation(
+                current_session_id.get(),
+                action="lint_apply",
+                kb_id=kb_id,
+                payload={"fixes": fixes},
+                summary=f"应用 {len(fixes)} 项 Wiki lint 安全修复",
+                impact={"pages": fixes, "other_issues_require_manual_review": len(issues) - len(fixes)},
+                owner_account_id=_owner(),
+            )
+            return tool_result(issues=issues, repair_plan=fixes, **confirmation)
+        if decision == "timeout":
+            return tool_error("等待确认超时，lint 修复未应用，可重试")
+        if decision != "confirmed":
+            return tool_result(cancelled=True, message="用户已取消，lint 修复未应用")
+        return await _apply_lint_fixes(fixes, kb_id)
 
     def _handle_create_kb(args: dict[str, Any]) -> str:
         kb_id = str(args.get("kb_id", "")).strip()
@@ -1242,7 +1327,7 @@ def register_wiki_tools(
         _finish_write(kb_id, f"创建知识库 {kb_id}", "kb_created", kb_ids=[kb_id])
         return tool_result(kb=kb.to_dict())
 
-    def _handle_delete_kb(args: dict[str, Any]) -> str:
+    async def _handle_delete_kb(args: dict[str, Any]) -> str:
         kb_id = str(args.get("kb_id", "")).strip()
         if not kb_id:
             return tool_error("缺少 kb_id")
@@ -1250,22 +1335,37 @@ def register_wiki_tools(
             return tool_error("禁止删除 default 知识库")
 
         owner = _owner()
-        pages = store.list_all(owner_account_id=owner, kb_id=kb_id, limit=10000)
+        page_count = store.count_pages(owner_account_id=owner, kb_id=kb_id)
         raws = store.list_raws(owner_account_id=owner, kb_id=kb_id)
 
         confirmed = _consume_confirmation(args, action="delete_kb", kb_id=kb_id)
         if confirmed is None:
-            return _issue_confirmation(
+            decision = await _ask_blocking_confirmation(
                 action="delete_kb",
                 kb_id=kb_id,
-                payload={"kb_id": kb_id},
                 summary=f"删除知识库 {kb_id}",
                 impact={
-                    "pages": len(pages),
+                    "pages": page_count,
                     "raw_sources": len(raws),
                     "cannot_undo": True,
                 },
             )
+            if decision == "unavailable":
+                return _issue_confirmation(
+                    action="delete_kb",
+                    kb_id=kb_id,
+                    payload={"kb_id": kb_id},
+                    summary=f"删除知识库 {kb_id}",
+                    impact={
+                        "pages": page_count,
+                        "raw_sources": len(raws),
+                        "cannot_undo": True,
+                    },
+                )
+            if decision == "timeout":
+                return tool_error("等待确认超时，知识库未删除，可重试")
+            if decision != "confirmed":
+                return tool_result(cancelled=True, message=f"用户已取消，未删除知识库: {kb_id}")
 
         try:
             store.append_log([f"删除知识库 {kb_id}"], owner_account_id=owner, kb_id=kb_id)
@@ -1277,7 +1377,7 @@ def register_wiki_tools(
         _mark_changed(kb_id, "kb_deleted", kb_ids=[kb_id])
         return tool_result(message=f"已删除知识库: {kb_id}")
 
-    def _handle_delete_source(args: dict[str, Any]) -> str:
+    async def _handle_delete_source(args: dict[str, Any]) -> str:
         source_id = str(args.get("source_id", "")).strip()
         if not source_id:
             return tool_error("缺少 source_id")
@@ -1286,17 +1386,13 @@ def register_wiki_tools(
         if raw is None:
             return tool_error(f"Raw source 不存在: {source_id}")
 
-        linked_pages = [
-            page for page in store.list_all(owner_account_id=_owner(), kb_id=kb_id, limit=10000)
-            if source_id in page.sources
-        ]
+        linked_pages = store.list_pages_by_source(source_id, owner_account_id=_owner(), kb_id=kb_id)
 
         confirmed = _consume_confirmation(args, action="delete_source", kb_id=kb_id)
         if confirmed is None:
-            return _issue_confirmation(
+            decision = await _ask_blocking_confirmation(
                 action="delete_source",
                 kb_id=kb_id,
-                payload={"source_id": source_id},
                 summary=f"删除 RawSource {source_id} 及关联页面",
                 impact={
                     "linked_pages": len(linked_pages),
@@ -1304,7 +1400,23 @@ def register_wiki_tools(
                     "cannot_undo": True,
                 },
             )
-        if str(confirmed.get("source_id") or "") != source_id:
+            if decision == "unavailable":
+                return _issue_confirmation(
+                    action="delete_source",
+                    kb_id=kb_id,
+                    payload={"source_id": source_id},
+                    summary=f"删除 RawSource {source_id} 及关联页面",
+                    impact={
+                        "linked_pages": len(linked_pages),
+                        "linked_page_titles": [p.title for p in linked_pages[:20]],
+                        "cannot_undo": True,
+                    },
+                )
+            if decision == "timeout":
+                return tool_error("等待确认超时，RawSource 未删除，可重试")
+            if decision != "confirmed":
+                return tool_result(cancelled=True, message=f"用户已取消，未删除 RawSource: {source_id}")
+        elif str(confirmed.get("source_id") or "") != source_id:
             return tool_error("确认内容与当前 source 参数不一致，请重新生成确认卡")
 
         ok = store.delete_raw(source_id, owner_account_id=_owner(), kb_id=kb_id)
@@ -1385,14 +1497,25 @@ def register_wiki_tools(
 
         confirmed = _consume_confirmation(args, action="describe_video", kb_id=kb_id)
         if confirmed is None:
-            return _issue_confirmation(
+            decision = await _ask_blocking_confirmation(
                 action="describe_video",
                 kb_id=kb_id,
-                payload={"source_id": source_id},
                 summary=f"将视频 {raw.title} 上传到外部云端进行理解",
                 impact={"external_service": "configured_media_provider", "privacy_risk": True},
             )
-        if str(confirmed.get("source_id") or "") != source_id:
+            if decision == "unavailable":
+                return _issue_confirmation(
+                    action="describe_video",
+                    kb_id=kb_id,
+                    payload={"source_id": source_id},
+                    summary=f"将视频 {raw.title} 上传到外部云端进行理解",
+                    impact={"external_service": "configured_media_provider", "privacy_risk": True},
+                )
+            if decision == "timeout":
+                return tool_error("等待确认超时，视频理解未执行，可重试")
+            if decision != "confirmed":
+                return tool_result(cancelled=True, message="用户已取消，视频理解未执行")
+        elif str(confirmed.get("source_id") or "") != source_id:
             return tool_error("确认内容与当前视频参数不一致，请重新生成确认卡")
         prompt = str(args.get("prompt") or config.multimodal.prompt_video or "")
         try:
@@ -1544,14 +1667,15 @@ def register_wiki_tools(
         )
 
     def _handle_list_kbs(args: dict[str, Any]) -> str:
-        kbs = store.list_kbs(owner_account_id=_owner())
+        owner = _owner()
+        kbs = store.list_kbs(owner_account_id=owner)
         return tool_result(
             kbs=[
                 {
                     "kb_id": kb.id,
                     "name": kb.name,
-                    "page_count": kb.summary.page_count,
-                    "source_count": kb.summary.source_count,
+                    "page_count": store.count_pages(owner_account_id=owner, kb_id=kb.id),
+                    "source_count": len(store.list_raws(owner_account_id=owner, kb_id=kb.id)),
                     "vault_path": kb.vault_path,
                 }
                 for kb in kbs
@@ -1946,13 +2070,50 @@ def register_wiki_tools(
             issues=result.issues,
         )
 
-    def _capture_url(
+    async def _authorized_web_fetch(url: str) -> tuple[str, str]:
+        """Authorize the initial authority and every cross-authority redirect."""
+        next_target = url
+        allowed: set[tuple[str, int, str]] = set()
+        for _attempt in range(6):
+            await authorize_network_tool(
+                next_target,
+                tool_name="wiki_fetch_url",
+                workspace_store=workspace_store,
+                security_service=security_service,
+            )
+            allowed.add(parse_public_http_target(next_target).authority)
+            try:
+                return await asyncio.to_thread(
+                    fetch_url_to_markdown,
+                    url,
+                    15.0,
+                    allowed,
+                )
+            except PublicRedirectApprovalRequired as exc:
+                next_target = exc.url
+        raise ValueError("网页重定向次数过多")
+
+    async def _authorized_youtube_fetch(url: str) -> tuple[str, str]:
+        """Authorize both a shared short URL and the fixed transcript service host."""
+        targets = [url]
+        original = parse_public_http_target(url)
+        if original.host not in {"youtube.com", "www.youtube.com"}:
+            targets.append("https://www.youtube.com/")
+        for target in targets:
+            await authorize_network_tool(
+                target,
+                tool_name="wiki_fetch_url",
+                workspace_store=workspace_store,
+                security_service=security_service,
+            )
+        return await asyncio.to_thread(fetch_youtube_transcript, url)
+
+    async def _capture_url(
         url: str,
         title: str,
         kb_id: str,
         *,
         refresh_from: Any | None = None,
-        network_authorizations: tuple[NetworkAuthorization, ...] = (),
     ) -> str:
         import hashlib
         import time
@@ -2025,19 +2186,9 @@ def register_wiki_tools(
         for _attempt in range(2):
             try:
                 if platform == "youtube":
-                    markdown_text, video_id = fetch_youtube_transcript(
-                        url,
-                        authorizations=network_authorizations,
-                    )
+                    markdown_text, video_id = await _authorized_youtube_fetch(url)
                 else:
-                    markdown_text, final_url = fetch_url_to_markdown(
-                        url,
-                        authorization=(
-                            network_authorizations[0]
-                            if network_authorizations
-                            else None
-                        ),
-                    )
+                    markdown_text, final_url = await _authorized_web_fetch(url)
                 markdown_text = validate_parsed_text(markdown_text, url)
                 last_error = None
                 break
@@ -2155,51 +2306,16 @@ def register_wiki_tools(
             message="URL 内容已抓取、通过质量检查并发布为可搜索的全文 Source 页面。",
         )
 
-    async def _authorize_url(
-        url: str,
-        tool_name: str,
-    ) -> tuple[NetworkAuthorization, ...]:
-        # Tests and standalone Wiki registries do not have host authority. The
-        # application assembly always injects both dependencies, so only the
-        # production path enters the approval boundary.
-        if workspace_store is None or security_service is None:
-            return ()
-        authorizations = [
-            await authorize_network_origin(
-                url,
-                tool_name=tool_name,
-                workspace_store=workspace_store,
-                security_service=security_service,
-            )
-        ]
-        # youtube-transcript-api fetches both the submitted URL's video page and
-        # the fixed YouTube player endpoint. A short URL must not implicitly
-        # authorize that second host without showing it to the owner.
-        if classify_url(url)[1] == "youtube":
-            from urllib.parse import urlsplit
-
-            if (urlsplit(url).hostname or "").lower().rstrip(".") != "www.youtube.com":
-                authorizations.append(
-                    await authorize_network_origin(
-                        "https://www.youtube.com/",
-                        tool_name=tool_name,
-                        workspace_store=workspace_store,
-                        security_service=security_service,
-                    )
-                )
-        return tuple(authorizations)
-
     async def _handle_fetch_url(args: dict[str, Any]) -> str:
         url = str(args.get("url", "")).strip()
         if not url:
             return tool_error("缺少 url")
-        authorizations = await _authorize_url(url, "wiki_fetch_url")
-        return await asyncio.to_thread(
-            _capture_url,
+        # 授权在 _capture_url 内部逐跳执行（_authorized_web_fetch 对初始 URL 与
+        # 每个跨源重定向分别 authorize_network_tool），调用侧无需预授权。
+        return await _capture_url(
             url,
             str(args.get("title", "")).strip(),
             _kb_id(args),
-            network_authorizations=authorizations,
         )
 
     async def _handle_refresh_source(args: dict[str, Any]) -> str:
@@ -2212,15 +2328,7 @@ def register_wiki_tools(
             return tool_error(f"Raw source 不存在: {source_id}")
         if raw.source_type != "url" or not raw.source_url:
             return tool_error("只有带 source_url 的 URL RawSource 可以刷新")
-        authorizations = await _authorize_url(raw.source_url, "wiki_refresh_source")
-        return await asyncio.to_thread(
-            _capture_url,
-            raw.source_url,
-            raw.title,
-            kb_id,
-            refresh_from=raw,
-            network_authorizations=authorizations,
-        )
+        return await _capture_url(raw.source_url, raw.title, kb_id, refresh_from=raw)
 
     async def _handle_digest(args: dict[str, Any]) -> str:
         topic = str(args.get("topic") or "").strip()
@@ -2256,8 +2364,8 @@ def register_wiki_tools(
         (_WIKI_LIST_KBS_SCHEMA, _handle_list_kbs, False, "📚", "列出知识库", "列出知识库", "wiki list knowledge bases kbs"),
         (_WIKI_LIST_INBOX_SCHEMA, _handle_list_inbox, False, "📥", "列出待整理素材", "列出待整理素材", "wiki list inbox pending sources recommend ingest"),
         (_WIKI_UPDATE_PAGE_SCHEMA, _handle_update_page, False, "✏️", "更新 Wiki 页面", "更新页面 {page_id}", "wiki update page edit content tags related aliases"),
-        (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "计划变更 {source_id}", "wiki plan ingest preview changes proposed pages"),
-        (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "执行变更 {source_id}", "wiki apply ingest write pages confirm plan"),
+        (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "盘算 {source_id} 该写进哪些页面", "wiki plan ingest preview changes proposed pages"),
+        (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "把 {source_id} 的改动写进知识库", "wiki apply ingest write pages confirm plan"),
         (_WIKI_FETCH_URL_SCHEMA, _handle_fetch_url, True, "🌐", "抓取网页", "抓取网页 {url}", "wiki fetch url webpage scrape crawl import"),
         (_WIKI_REFRESH_SOURCE_SCHEMA, _handle_refresh_source, True, "🔄", "刷新网页来源", "刷新来源 {source_id}", "wiki refresh url source drift version"),
         (_WIKI_DIGEST_SCHEMA, _handle_digest, True, "🧠", "生成跨来源报告", "综合 {topic}", "wiki digest synthesis comparison multi source"),

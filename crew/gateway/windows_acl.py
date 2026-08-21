@@ -288,6 +288,18 @@ class _WindowsAclApi:
                 dacl,
                 None,
             )
+            if status == 5:  # ERROR_ACCESS_DENIED：卷继承 ACL 只给 Modify（无 WRITE_OWNER）
+                # 时无法显式设置 owner。创建者本就是 owner，回退为仅写 DACL；
+                # 随后 path_is_secure 仍会独立校验 owner SID，保证同等安全语义。
+                status = self._advapi32.SetNamedSecurityInfoW(
+                    path_buffer,
+                    _SE_FILE_OBJECT,
+                    _DACL_SECURITY_INFORMATION | _PROTECTED_DACL_SECURITY_INFORMATION,
+                    None,
+                    None,
+                    dacl,
+                    None,
+                )
             _ = keepalive
         finally:
             self._kernel32.LocalFree(dacl)

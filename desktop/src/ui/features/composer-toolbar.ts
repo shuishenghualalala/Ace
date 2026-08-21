@@ -10,7 +10,7 @@ import {
   type Skill,
 } from '../backend-client';
 import { setRuntimeStyle } from '../components/runtime-style';
-import { MONOCHROME_ICON_CLASS } from '../components/icon';
+import { createIcon, MONOCHROME_ICON_CLASS } from '../components/icon';
 import { getSkills, onSkillsChange } from './skill-store';
 import { queryPrimaryComposer } from './composer-scope';
 import { $, $$, ensureSessionBook, escapeHtml, notify, patchBook, state, type ComposerMode } from '../state';
@@ -25,8 +25,7 @@ import {
   workspaceForSessionDispatch,
   workspaceLabel,
 } from './workspaces';
-import { composerModelOptions, setSessionModel, activeComposerModelId, resolveComposerModelLabel } from './session-model';
-import { syncModelUi } from './model-picker';
+import { createComposerModelControl, syncModelUi, type ComposerModelControl } from './model-picker';
 import {
   loadExternalConversationCatalog,
   useAgent,
@@ -48,8 +47,40 @@ import {
   selectNextConversationMode,
   type ConversationSecurityMode,
 } from './security-approval';
+import {
+  externalAgentAvatarMarkup,
+  externalAgentInitial,
+  externalAgentTone,
+} from './external-agent-avatar';
+import { securityModuleEnabled } from './security-mode';
 
 type ComposerEntry = ComposerMode | 'external';
+
+function createComposerTeamLogoElement(): HTMLSpanElement {
+  const logo = document.createElement('span');
+  logo.className = 'session__team-logo';
+  logo.setAttribute('aria-hidden', 'true');
+  logo.append(document.createElement('i'), document.createElement('i'));
+  return logo;
+}
+
+function createComposerTeamChipIcon(): HTMLSpanElement {
+  const icon = document.createElement('span');
+  icon.className = 'mw-context-chip__icon mw-context-chip__external-agent-avatar';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.append(createComposerTeamLogoElement());
+  return icon;
+}
+
+function createComposerAgentChipIcon(provider: string, displayBadge?: string): HTMLSpanElement {
+  const icon = document.createElement('span');
+  icon.className = `mw-context-chip__icon mw-context-chip__external-agent-avatar mw-context-chip__external-agent-avatar--provider agent-provider-tone-${externalAgentTone(provider)}`;
+  icon.setAttribute('aria-hidden', 'true');
+  const initial = document.createElement('span');
+  initial.textContent = externalAgentInitial(provider, displayBadge);
+  icon.append(initial);
+  return icon;
+}
 
 const CRAFT_OPTIONS: { value: ComposerEntry; label: string; desc: string }[] = [
   { value: 'craft', label: '智能体', desc: '默认单 Agent 创作' },
@@ -64,7 +95,8 @@ function visibleCraftOptions(): typeof CRAFT_OPTIONS {
     : CRAFT_OPTIONS.filter((option) => option.value !== 'external');
 }
 
-let modelPopoverOpen = false;
+/** 模型 chip 控制器（model-picker 提供的实例级实现）；行为委托给它，这里只持句柄。 */
+let modelControl: ComposerModelControl | null = null;
 let skillsPopoverOpen = false;
 let craftPopoverOpen = false;
 let workspacePopoverOpen = false;
@@ -170,9 +202,7 @@ function closeCraftPopover(): void {
 }
 
 function closeModelPopover(): void {
-  modelPopoverOpen = false;
-  $('#chat-model-inline-popover')?.remove();
-  $('#chat-model-picker-inline-btn')?.classList.remove('is-open');
+  modelControl?.close();
 }
 
 function closeSecurityModeInline(): void {
@@ -224,7 +254,7 @@ function syncComposerWorkspaceLabel(): void {
 
   const id = composerWorkspaceId();
   const isDefault = id === 'default';
-  label.textContent = isDefault ? '工作空间' : workspaceLabel(id);
+  label.textContent = isDefault ? '不在项目中工作' : workspaceLabel(id);
   btn.title = isDefault ? '选择项目' : `项目：${label.textContent}`;
   btn.classList.toggle('is-named', !isDefault);
   btn.classList.remove('is-locked');
@@ -283,7 +313,7 @@ function renderWorkspacePopover(): void {
       <button type="button" class="composer-select-item${current === 'default' ? ' is-selected' : ''}" data-workspace-id="default">
         <span class="composer-select-item__plain-icon"><svg class="mw-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><use href="#icon-close"></use></svg></span>
         <span class="composer-select-item__body">
-          <span class="composer-select-item__title">工作空间</span>
+          <span class="composer-select-item__title">不在项目中工作</span>
         </span>
         ${current === 'default' ? selectChevron() : '<span class="composer-select-item__spacer"></span>'}
       </button>
@@ -359,13 +389,16 @@ export function syncCraftLabel(): void {
   if (!label) return;
   const externalDisplay = getSessionAgentDisplay(state.activeSessionId);
   const externalKind = externalDisplay?.agentBinding?.kind;
+  const externalProvider = String(externalDisplay?.agentLabel?.provider || 'external').trim() || 'external';
   const externalName = String(externalDisplay?.agentLabel?.name || '').trim();
+  const externalSelected = Boolean(
+    externalName
+    && (externalKind === 'external_agent' || externalKind === 'external_team'),
+  );
+  const externalTeamSelected = externalKind === 'external_team' || externalProvider.toLowerCase() === 'team';
   let title = 'Craft · Plan · Ask';
   // 选中外援后，按钮直接显示外援名，不再带模式前缀
-  if (
-    externalName
-    && (externalKind === 'external_agent' || externalKind === 'external_team')
-  ) {
+  if (externalSelected) {
     label.textContent = externalName;
     title = `外援：${externalName}`;
   } else {
@@ -374,6 +407,19 @@ export function syncCraftLabel(): void {
   }
   if (btn) {
     btn.title = title;
+    const icon = btn.querySelector<HTMLElement>('.mw-context-chip__icon');
+    if (externalSelected) {
+      const nextIcon = externalTeamSelected
+        ? createComposerTeamChipIcon()
+        : createComposerAgentChipIcon(externalProvider, externalDisplay?.agentLabel?.display_badge);
+      if (icon) icon.replaceWith(nextIcon);
+      else btn?.prepend(nextIcon);
+    } else if (icon?.classList.contains('mw-context-chip__external-agent-avatar')) {
+      icon.replaceWith(createIcon('icon-crew-agent', {
+        className: `mw-context-chip__icon ${MONOCHROME_ICON_CLASS}`,
+        size: 16,
+      }));
+    }
   }
   const activeEntry = activeComposerEntry();
   const selected = activeEntry !== 'craft';
@@ -423,7 +469,16 @@ function renderComposerModeSwitch(activeMode: ComposerEntry): string {
 
 function spriteIcon(id: string, className?: string): string {
   const viewBox = id === 'skill-badge' ? '0 0 32 32' : '0 0 24 24';
-  const classes = ['mw-icon', className].filter(Boolean).join(' ');
+  const classes = ['mw-icon', id === 'icon-crew-agent' ? 'mw-icon--template-image' : '', className]
+    .filter(Boolean)
+    .join(' ');
+  if (id === 'icon-external-agent' || id === 'icon-crew-agent') {
+    const isCrewAgent = id === 'icon-crew-agent';
+    const href = isCrewAgent ? './menubar/default.png' : './external-agent.png';
+    const inset = isCrewAgent ? 0 : 1;
+    const size = isCrewAgent ? 24 : 22;
+    return `<svg class="${classes}" viewBox="${viewBox}" width="18" height="18" aria-hidden="true"><image href="${href}" x="${inset}" y="${inset}" width="${size}" height="${size}" preserveAspectRatio="xMidYMid meet"></image></svg>`;
+  }
   return `<svg class="${classes}" viewBox="${viewBox}" width="18" height="18" aria-hidden="true"><use href="#${id}"></use></svg>`;
 }
 
@@ -436,10 +491,10 @@ function renderCraftPopover(): void {
 
   const popover = document.createElement('div');
   popover.id = 'chat-craft-popover';
-  const craftIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>`;
+  const craftIcon = spriteIcon('icon-crew-agent', MONOCHROME_ICON_CLASS);
   const planIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>`;
   const askIcon = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
-  const externalIcon = `<span class="composer-external-agent-logo">${spriteIcon('icon-agent', MONOCHROME_ICON_CLASS)}</span>`;
+  const externalIcon = spriteIcon('icon-external-agent', MONOCHROME_ICON_CLASS);
   const modeIcons: Record<ComposerEntry, string> = {
     craft: craftIcon,
     plan: planIcon,
@@ -491,63 +546,6 @@ function renderCraftPopover(): void {
       applyComposerMode(m);
       notify(m === 'plan' ? 'Plan：下条消息先出方案' : 'Craft：单 Agent 创作');
       closeCraftPopover();
-    });
-  });
-}
-
-function renderModelPopover(): void {
-  closeAllPopovers();
-  const anchor = $('#chat-model-picker-inline-btn') as HTMLButtonElement | null;
-  if (!anchor || anchor.disabled || !state.config) return;
-
-  const models = composerModelOptions();
-  const active = activeComposerModelId();
-  const popover = document.createElement('div');
-  popover.id = 'chat-model-inline-popover';
-  popover.setAttribute('role', 'listbox');
-  popover.setAttribute('aria-label', '选择模型');
-  const modelTourHelp = `
-    <div class="composer-select-popover__header">
-      <span>选择模型</span>
-      <button type="button" class="composer-select-popover__help" data-model-tour-open aria-label="打开模型配置引导" title="打开模型配置引导">?</button>
-    </div>`;
-  popover.innerHTML = models.length
-    ? `
-      ${modelTourHelp}
-      <div class="composer-select-popover__section">可用模型</div>
-      <div class="composer-select-popover__list">
-        ${models
-          .map(
-            (m) => `
-          <button type="button" class="composer-select-item composer-select-item--model${m.id === active ? ' is-selected' : ''}" data-model-id="${escapeHtml(m.id)}" title="${escapeHtml(m.description)}" aria-label="${escapeHtml(`${m.label}${m.description ? `，${m.description}` : ''}`)}"${m.selectable ? '' : ' disabled'}>
-            <span class="composer-select-item__body composer-select-item__body--model">
-              <span class="composer-select-item__title">${escapeHtml(m.label)}${m.default ? ' · 默认' : ''}</span>
-              ${m.warning ? `<span class="composer-select-item__meta composer-select-item__meta--warn">${escapeHtml(m.description)}</span>` : ''}
-            </span>
-            ${m.id === active ? selectChevron() : '<span class="composer-select-item__spacer"></span>'}
-          </button>
-        `,
-          )
-          .join('')}
-      </div>
-    `
-    : `${modelTourHelp}<div class="composer-select-popover__empty">暂无模型，请前往配置页</div>`;
-
-  mountSelectPopover(anchor, popover, 300, 'end');
-  modelPopoverOpen = true;
-  anchor.classList.add('is-open');
-
-  popover.querySelector<HTMLButtonElement>('[data-model-tour-open]')?.addEventListener('click', (event) => {
-    event.stopPropagation();
-    closeModelPopover();
-    startModelTour();
-  });
-
-  $$('.composer-select-item[data-model-id]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const id = btn.getAttribute('data-model-id');
-      if (id) void setSessionModel(id);
-      closeModelPopover();
     });
   });
 }
@@ -624,14 +622,18 @@ async function renderSkillsPopover(): Promise<void> {
 }
 
 function syncComposerModelChip(): void {
-  const label = document.getElementById('chat-model-picker-inline-label');
-  if (label) label.textContent = resolveComposerModelLabel() || '模型';
+  modelControl?.refresh();
 }
 
 /** 安全模式 chip 标签：据当前生效模式（会话绑定优先，否则新对话预设）渲染。 */
 function syncSecurityModeChip(): void {
   const label = document.getElementById('chat-security-mode-btn-label');
   if (label) label.textContent = modeLabel(currentSecurityMode());
+  const btn = document.getElementById('chat-security-mode-btn') as HTMLButtonElement | null;
+  if (!btn) return;
+  const enabled = securityModuleEnabled();
+  btn.disabled = !enabled;
+  btn.title = enabled ? '请求批准' : '功能正在开发中，敬请期待';
 }
 
 function renderSecurityModePopover(): void {
@@ -731,12 +733,6 @@ function externalTeamLeaderLabel(
   return /\bleader$/i.test(leaderName) ? leaderName : `${leaderName} Leader`;
 }
 
-function externalAgentTone(value: string): number {
-  let hash = 0;
-  for (const char of value) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
-  return Math.abs(hash) % 6;
-}
-
 function bindExternalModeSwitch(
   popover: HTMLElement,
   anchor: HTMLElement,
@@ -804,7 +800,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
       : '暂时不可用，请到外援页面再找找';
     return `
       <button type="button" class="composer-select-item${ready ? '' : ' is-unavailable'}" data-external-agent-id="${escapeHtml(agent.id)}" data-external-filterable aria-disabled="${ready ? 'false' : 'true'}">
-        <span class="composer-agent-badge composer-agent-pixel-icon composer-agent-pixel-icon--tone-${externalAgentTone(agent.id || agent.name)}" aria-hidden="true">${escapeHtml(agent.display_badge || '?')}</span>
+        ${externalAgentAvatarMarkup(agent.provider || 'external', agent.display_badge)}
         <span class="composer-select-item__body">
           <span class="composer-select-item__title">${escapeHtml(agent.name || '未命名外援')}</span>
           <span class="composer-select-item__desc${ready ? '' : ' composer-select-item__desc--warn'}">${escapeHtml(description)}</span>
@@ -930,6 +926,19 @@ export function bindComposerToolbar(): () => void {
   toolbarBoundTrigger = trigger;
   const { signal } = toolbarController;
 
+  // 模型 chip：与 Wiki 问答面板共用 model-picker 的实例级控制器（浮层/文案/会话级切换）。
+  const modelAnchor = $('#chat-model-picker-inline-btn') as HTMLButtonElement | null;
+  modelControl?.dispose();
+  modelControl = modelAnchor
+    ? createComposerModelControl(modelAnchor, {
+      getSessionId: () => state.activeSessionId,
+      onBeforeOpen: closeAllPopovers,
+      onModelTour: () => {
+        startModelTour();
+      },
+    })
+    : null;
+
   $('#chat-craft-btn')?.addEventListener('click', (e) => {
     e.stopPropagation();
     if (craftPopoverOpen) closeAllPopovers();
@@ -941,12 +950,6 @@ export function bindComposerToolbar(): () => void {
     closeAllPopovers();
     applyComposerMode('craft');
     notify('已切回默认主智能体');
-  }, { signal });
-
-  $('#chat-model-picker-inline-btn')?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (modelPopoverOpen) closeModelPopover();
-    else renderModelPopover();
   }, { signal });
 
   $('#chat-security-mode-btn')?.addEventListener('click', (e) => {
@@ -984,7 +987,6 @@ export function bindComposerToolbar(): () => void {
       && !t.closest('#chat-craft-popover')
       && !t.closest('#chat-craft-btn')
     ) closeCraftPopover();
-    if (modelPopoverOpen && !t.closest('#chat-model-inline-popover') && !t.closest('#chat-model-picker-inline-btn')) closeModelPopover();
     if (securityModePopoverOpen && !t.closest('#chat-security-mode-inline-popover') && !t.closest('#chat-security-mode-btn')) closeSecurityModeInline();
     if (skillsPopoverOpen && !t.closest('#chat-skills-inline-popover') && !t.closest('#chat-skills-btn')) closeSkillsPopover();
     if (externalPopoverOpen && !t.closest('#chat-external-inline-popover') && !t.closest('#chat-craft-btn')) closeExternalPopover();
@@ -1001,6 +1003,7 @@ export function bindComposerToolbar(): () => void {
   syncSecurityModeChip();
   window.addEventListener('craft:mode-change', () => syncCraftLabel(), { signal });
   window.addEventListener('security:mode-change', () => syncSecurityModeChip(), { signal });
+  window.addEventListener('security:config-change', () => syncSecurityModeChip(), { signal });
   window.addEventListener('workspace:context-changed', () => syncComposerWorkspaceLabel(), { signal });
   window.addEventListener('session:changed', () => {
     syncComposerWorkspaceLabel();
@@ -1027,6 +1030,8 @@ export function bindComposerToolbar(): () => void {
     toolbarController?.abort();
     toolbarController = null;
     toolbarBoundTrigger = null;
+    modelControl?.dispose();
+    modelControl = null;
     unsubscribeSkills();
     unsubscribeSession();
     closeAllPopovers();

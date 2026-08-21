@@ -7,6 +7,7 @@
 import { workApi } from '../../backend-client';
 import type { WorkDashboard, WorkItem } from '../../backend-client';
 import { loadWorkDashboard, loadWorkItems, workStore } from '../../stores/work-store';
+import { markSystemTrayNotification } from '../system-tray';
 
 /** 通知设置快照（来自 /api/work/settings）。 */
 export interface NotificationSettings {
@@ -131,6 +132,7 @@ export function showNotification(
   if (notificationPermission() !== 'granted') return false;
   if (!shouldNotify(settings, sourceKey)) return false;
   const n = new Notification(title, { body, tag: itemId ?? title });
+  markSystemTrayNotification();
   n.addEventListener('click', () => {
     if (itemId) openItem?.(itemId);
   });

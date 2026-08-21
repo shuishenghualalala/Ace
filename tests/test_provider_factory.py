@@ -14,6 +14,22 @@ def test_build_provider_for_profile_dispatches_anthropic():
     profile = ModelProfile(id="claude", provider="anthropic", api_key="sk", model="claude-test")
     provider = build_provider_for_profile(profile)
     assert isinstance(provider, AnthropicProvider)
+    assert provider.vision is False
+
+
+def test_build_provider_uses_profile_capabilities_for_vision():
+    profile = ModelProfile(
+        id="vision",
+        api_key="sk",
+        model="vision-model",
+        vision=False,
+        capabilities=["text", "tools", "vision"],
+    )
+
+    provider = build_provider_for_profile(profile)
+
+    assert isinstance(provider, OpenAIProvider)
+    assert provider.vision is True
 
 
 def test_build_provider_defaults_openai():

@@ -27,11 +27,9 @@ def test_linux_profile_uses_codex_shaped_boundaries():
         assert required in source
     for protected in ('".git"', '".agents"', '".crew"'):
         assert protected in source
-    assert '"--tmpfs".to_string(),\n        "/".to_string(),' in source
-    assert (
-        '"--ro-bind".to_string(),\n        "/".to_string(),\n        "/".to_string(),'
-        not in source
-    )
+    assert '"--tmpfs".to_string(), "/".to_string()' in source
+    assert '"--ro-bind".to_string()' in source
+    assert "request.full_disk_read" in source
     assert "writable.push(cwd.clone())" not in source
     assert "sandbox cwd must be inside an explicit authorized root" in source
 
@@ -58,9 +56,11 @@ def test_macos_profile_uses_seatbelt_and_exact_managed_proxy_route():
     )
     assert 'SANDBOX_EXECUTABLE: &str = "/usr/bin/sandbox-exec"' in source
     assert "(deny default)" in source
-    assert "DENIED_ROOT_" in source
-    assert 'allow_rule("file-write*"' in source
-    assert 'remote ip \\"127.0.0.1:{port}\\"' in source
+    assert "READONLY_ROOT" in source
+    assert "DENIED_READ_ROOT" in source
+    assert '"deny file-write*"' in source
+    assert "allow file-write*" in source
+    assert 'remote ip \\"localhost:{port}\\"' in source
     assert 'backend: "macos_seatbelt"' in source
     assert '.env_clear()' in source
     assert "ACTIVE_PROCESS_GROUP" in source

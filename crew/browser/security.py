@@ -207,6 +207,42 @@ class ProxyAttributionEnvelope:
         return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
+_METADATA_ADDRESSES = frozenset(
+    {
+        ipaddress.ip_address("168.63.129.16"),
+        ipaddress.ip_address("169.254.169.253"),
+        ipaddress.ip_address("169.254.169.254"),
+        ipaddress.ip_address("100.100.100.200"),
+        ipaddress.ip_address("fd00:ec2::254"),
+    }
+)
+_NAT64_PREFIXES = (
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+)
+
+
+def _embedded_ipv4(value: ipaddress.IPv6Address) -> tuple[ipaddress.IPv4Address, ...]:
+    candidates: list[ipaddress.IPv4Address] = []
+    if value.ipv4_mapped is not None:
+        candidates.append(value.ipv4_mapped)
+    if value.sixtofour is not None:
+        candidates.append(value.sixtofour)
+    if value.teredo is not None:
+        candidates.extend(value.teredo)
+    if any(value in network for network in _NAT64_PREFIXES) or int(value) >> 32 == 0:
+        candidates.append(ipaddress.IPv4Address(int(value) & 0xFFFFFFFF))
+    return tuple(dict.fromkeys(candidates))
+
+
+def _is_sensitive_address(value: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if value in _METADATA_ADDRESSES or not value.is_global or getattr(value, "is_site_local", False):
+        return True
+    if isinstance(value, ipaddress.IPv6Address):
+        return any(_is_sensitive_address(item) for item in _embedded_ipv4(value))
+    return False
+
+
 def _normalized_host(host: str) -> str:
     raw = str(host or "").strip()
     if not raw:

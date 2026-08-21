@@ -41,6 +41,46 @@
   flex: 0 0 auto;
 }
 
+.mw-context-chip__external-agent-avatar {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  place-items: center;
+  color: var(--mw-text-primary);
+}
+
+.mw-context-chip__external-agent-avatar--provider {
+  position: relative;
+  border: 1px solid var(--mw-border-strong);
+  border-radius: var(--mw-radius-1);
+  background-color: var(--mw-agent-fill, var(--mw-bg-surface));
+  background-image: var(--mw-agent-pattern);
+  background-repeat: repeat;
+  background-position: 0 0;
+  background-size: var(--mw-agent-pattern-size, 8px 8px);
+  font-family: var(--mw-font-mono);
+  font-size: var(--mw-type-caption-size);
+  font-weight: 800;
+  line-height: 1;
+  image-rendering: pixelated;
+  box-shadow: inset -1px -1px color-mix(in srgb, var(--mw-text-primary) 10%, transparent);
+}
+
+.mw-context-chip__external-agent-avatar--provider > span {
+  display: grid;
+  place-items: center;
+}
+
+.mw-context-chip__external-agent-avatar .session__team-logo {
+  transform: scale(1.05);
+  color: var(--mw-text-primary);
+}
+
+.mw-context-chip__external-agent-avatar .session__team-logo i:last-child {
+  color: var(--mw-text-muted);
+}
+
 .mw-context-chip__chevron {
   width: 12px;
 }
@@ -170,57 +210,6 @@
 
 .mw-context-ring.is-critical .mw-context-ring__progress {
   stroke: var(--mw-status-danger);
-}
-
-.mw-context-notice {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: var(--mw-space-2);
-  padding: var(--mw-space-2) var(--mw-space-3);
-  border: 1px solid var(--mw-status-warning);
-  border-radius: var(--mw-radius-3);
-  background: var(--mw-status-warning-bg);
-  color: var(--mw-text-secondary);
-  font-size: var(--mw-type-caption-size);
-  line-height: var(--mw-type-caption-line);
-}
-
-.mw-context-notice__icon {
-  color: var(--mw-status-warning);
-}
-
-.mw-context-notice__copy {
-  min-width: 0;
-}
-
-.mw-context-notice__action,
-.mw-context-notice__close {
-  border: 0;
-  border-radius: var(--mw-radius-2);
-  background: transparent;
-  color: var(--mw-text-secondary);
-}
-
-.mw-context-notice__action {
-  min-height: 28px;
-  padding: 0 var(--mw-space-2);
-  font-weight: var(--mw-type-label-weight);
-}
-
-.mw-context-notice__close {
-  display: inline-grid;
-  width: 28px;
-  height: 28px;
-  place-items: center;
-  padding: 0;
-}
-
-.mw-context-notice__action:hover,
-.mw-context-notice__close:hover {
-  background: var(--mw-bg-selected);
-  color: var(--mw-text-primary);
 }
 
 .mw-attachment-list,
@@ -571,7 +560,7 @@
   color: var(--mw-status-warning);
 }
 
-#chat-model-inline-popover {
+.composer-select-popover--model {
   display: grid;
   min-height: 0;
   grid-template-rows: auto minmax(0, 1fr);
@@ -579,18 +568,18 @@
   padding: var(--mw-space-1);
 }
 
-#chat-model-inline-popover .composer-select-popover__list {
+.composer-select-popover--model .composer-select-popover__list {
   gap: 0;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 
-#chat-model-inline-popover .composer-select-popover__section {
+.composer-select-popover--model .composer-select-popover__section {
   padding: var(--mw-space-1) var(--mw-space-2);
 }
 
-#chat-model-inline-popover .composer-select-item {
+.composer-select-popover--model .composer-select-item {
   min-height: 34px;
   padding: var(--mw-space-1) var(--mw-space-2);
 }
@@ -650,13 +639,13 @@
   opacity: 1;
 }
 
-#chat-model-inline-popover .composer-select-item__body--model {
+.composer-select-popover--model .composer-select-item__body--model {
   display: flex;
   align-items: baseline;
   gap: var(--mw-space-2);
 }
 
-#chat-model-inline-popover .composer-select-item__meta {
+.composer-select-popover--model .composer-select-item__meta {
   flex: 0 1 auto;
   overflow: hidden;
   color: var(--mw-text-muted);
@@ -665,7 +654,7 @@
   white-space: nowrap;
 }
 
-#chat-model-inline-popover .composer-select-item__meta--warn {
+.composer-select-popover--model .composer-select-item__meta--warn {
   color: var(--mw-status-warning);
 }
 
@@ -689,7 +678,7 @@
   stroke-width: 1.8;
 }
 
-.composer-agent-badge,
+.composer-agent-avatar,
 .composer-agent-team-logo {
   display: inline-grid;
   width: 32px;
@@ -698,14 +687,26 @@
   place-items: center;
 }
 
-.composer-agent-badge {
-  border: 1px solid var(--mw-symbol-line);
+.composer-agent-avatar {
+  position: relative;
+  border: 2px solid var(--mw-border-strong);
   border-radius: var(--mw-radius-2);
-  background: var(--mw-symbol-face);
-  color: var(--mw-symbol-line);
-  font-size: var(--mw-type-caption-size);
-  font-weight: var(--mw-type-item-weight);
+  background-color: var(--mw-agent-fill, var(--mw-bg-surface));
+  background-image: var(--mw-agent-pattern);
+  background-repeat: repeat;
+  background-position: 0 0;
+  background-size: var(--mw-agent-pattern-size, 8px 8px);
+  color: var(--mw-text-primary);
+  font-family: var(--mw-font-mono);
+  font-size: var(--mw-type-label-size);
+  font-weight: 800;
   line-height: 1;
+  image-rendering: pixelated;
+  box-shadow: inset -2px -2px color-mix(in srgb, var(--mw-text-primary) 10%, transparent);
+}
+
+.composer-agent-avatar > span {
+  position: static;
 }
 
 .composer-select-item[hidden] {
@@ -714,17 +715,29 @@
 
 .composer-agent-team-logo .session__team-logo {
   transform: scale(1.55);
+  color: var(--mw-text-primary);
+}
+
+.composer-agent-team-logo .session__team-logo i:last-child {
+  color: var(--mw-text-primary);
 }
 
 #chat-external-inline-popover {
-  display: flex;
+  display: grid;
+  min-height: 0;
   max-height: calc(100vh - var(--mw-space-4));
-  flex-direction: column;
+  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
 }
 
 #chat-external-inline-popover .composer-select-popover__search {
-  flex: 0 0 auto;
+  min-height: 0;
+}
+
+#chat-external-inline-popover .composer-select-popover__list {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .composer-mode-switch {
@@ -861,15 +874,6 @@
 }
 
 @media (max-width: 700px) {
-  .mw-context-notice {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-  }
-
-  .mw-context-notice__action {
-    grid-column: 2;
-    justify-self: start;
-  }
-
   .mw-context-chip {
     max-width: 132px;
   }

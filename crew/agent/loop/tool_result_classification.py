@@ -7,7 +7,7 @@ from typing import Any
 
 
 # 写文件工具及可选别名；未注册的别名不会命中。
-FILE_MUTATING_TOOL_NAMES = frozenset({"file_write", "write_file", "patch"})
+FILE_MUTATING_TOOL_NAMES = frozenset({"file_write", "file_delete", "write_file", "patch"})
 
 
 def file_mutation_result_landed(tool_name: str, result: Any) -> bool:
@@ -24,4 +24,6 @@ def file_mutation_result_landed(tool_name: str, result: Any) -> bool:
         return "bytes_written" in data
     if tool_name == "patch":
         return data.get("success") is True
+    if tool_name == "file_delete":
+        return data.get("success") is True and data.get("deleted") is True
     return False

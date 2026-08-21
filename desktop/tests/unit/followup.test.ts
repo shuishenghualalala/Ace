@@ -89,8 +89,8 @@ describe('follow-up permission presentation', () => {
     expect(html).not.toContain('{&quot;action&quot;');
     expect(html).not.toContain('为什么需要确认');
     expect(html).not.toContain('role="radiogroup"');
-    expect(html).toContain('role="alertdialog"');
-    expect(html).toContain('aria-modal="true"');
+    expect(html).toContain('role="dialog"');
+    expect(html).toContain('aria-modal="false"');
     expect(html).not.toContain('其他（自定义输入）');
     expect(html).not.toContain('__free_text__');
   });
@@ -103,7 +103,7 @@ describe('follow-up permission presentation', () => {
     bindFollowupCard(root, { onSubmit, onCancel: () => undefined });
 
     const deny = root.querySelector<HTMLButtonElement>('[data-permission-value="deny"]')!;
-    expect(document.activeElement).toBe(deny);
+    expect(document.activeElement).not.toBe(deny);
     deny.click();
     deny.click();
 
@@ -114,7 +114,7 @@ describe('follow-up permission presentation', () => {
     root.remove();
   });
 
-  it('translates browser type arguments into readable copy and centers through the modal wrapper', () => {
+  it('translates browser type arguments into readable copy and renders through the floating wrapper', () => {
     const question = permissionQuestion();
     question.questions[0]!.question = '即将执行：{"action":"type","ref":"p1:e27","submit":true,"text":"云南旅游视频"}\n\n原因：填写后按 Enter 可能提交表单，需要一次性确认';
 
@@ -245,5 +245,45 @@ describe('runtime staffing follow-up presentation', () => {
     expect(html).not.toContain('followup-card--permission');
     expect(html).toContain('data-action="cancel"');
     expect(html).toContain('>提交</button>');
+  });
+});
+
+function wikiConfirmQuestion(): PendingFollowup {
+  return {
+    questionId: 'wiki-confirm-1',
+    title: 'Wiki 操作确认·wiki_delete_source',
+    recordHistory: false,
+    questions: [{
+      id: 'wiki_confirm',
+      question: '即将执行：删除 RawSource upload_x 及关联页面\n\n影响：{"linked_pages": 2, "cannot_undo": true}',
+      options: [
+        { label: '确认执行', value: 'allow_once' },
+        { label: '本批次全部允许', value: 'allow_batch' },
+        { label: '取消', value: 'deny' },
+      ],
+      allowFreeText: false,
+      multiSelect: false,
+    }],
+  };
+}
+
+describe('wiki confirmation presentation', () => {
+  it('renders as a permission dialog with wiki copy', () => {
+    const html = renderFollowupCard(wikiConfirmQuestion());
+    expect(html).toContain('followup-card--permission');
+    expect(html).toContain('允许执行 Wiki 操作？');
+    expect(html).toContain('Wiki 知识库');
+    expect(html).toContain('删除 RawSource upload_x 及关联页面');
+  });
+
+  it('styles 本批次全部允许 as persistent and orders 取消 first', () => {
+    const html = renderFollowupCard(wikiConfirmQuestion());
+    expect(html).toContain('permission-dialog__button--persistent');
+    const denyIdx = html.indexOf('取消');
+    const batchIdx = html.indexOf('本批次全部允许');
+    const onceIdx = html.indexOf('确认执行');
+    expect(denyIdx).toBeGreaterThan(-1);
+    expect(denyIdx).toBeLessThan(batchIdx);
+    expect(batchIdx).toBeLessThan(onceIdx);
   });
 });

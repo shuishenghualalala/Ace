@@ -202,11 +202,16 @@ _DISPLAY_HEADER_SECRET_RE = re.compile(
 )
 
 # 已知前缀合并成一个 alternation。
-# ponytail: 不用 lookbehind/lookaround -- 贪婪量词 {10,} 已保证匹配到 token 边界，
-# 而 lookbehind (?<![A-Za-z0-9_-]) 会在 ANSI 转义包裹密钥时漏报（[31m 的 m、
-# 033[31m 的 1 都是 alphanumeric，阻断匹配）。安全脱敏宁可多打码也不漏报。
+# 边界要求：字母/数字/下划线后不匹配——否则 ask_followup_question（sk_ 前缀）
+# 这类外部 runtime 提示词与回复里的普通词会被误判成凭据，导致 argv 拒绝门
+# fail-closed、输出被脱敏成 "a[REDACTED]"。连字符不拦截：不可信诊断字段里
+# 密钥常以 "detail-sk-..." 这类前缀拼接出现。例外保留 ANSI SGR 转义后的匹配
+# （(?<=\d[mM])，如 [31m 紧跟密钥）：终端日志里密钥常被颜色码包裹，"31m" 的
+# m 是 alphanumeric，纯 lookbehind 会漏报。
 _PREFIX_RE = re.compile(
-    r"(" + "|".join(_PREFIX_PATTERNS) + r")"
+    r"(?:(?<![A-Za-z0-9_])|(?<=\d[mM]))("
+    + "|".join(_PREFIX_PATTERNS)
+    + r")"
 )
 
 

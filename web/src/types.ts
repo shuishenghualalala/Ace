@@ -67,6 +67,7 @@ export type ChunkKind =
   | "workflow_progress"
   | "wiki_cards"
   | "wiki_ingest_progress"
+  | "wiki_changed"
   | "team_internal";
 
 export interface TodoItem {
@@ -353,15 +354,6 @@ export interface WikiUploadResult {
   needs_confirmation?: boolean;
   pages?: WikiPage[];
   issues?: string[];
-}
-
-export interface WikiSummary {
-  summary: string;
-  kb_id: string;
-  page_count?: number;
-  source_count?: number;
-  generated_at?: number;
-  status: "ready" | "generating" | "empty" | "stale";
 }
 
 export interface ExternalRuntime {

@@ -9,8 +9,8 @@ Stage 8（消息发射）。本模块补齐 Crew 缺的三个阶段：
   - Stage 6 结果处理：``truncate_or_persist`` —— 大结果落盘 + 路径回灌
 
 三者都是纯函数（check_permission 的 ask 分支由调用方走 followup 交互），不持有可变
-全局状态，便于单测；唯一的进程内状态是「会话级始终允许」规则缓存，按 session_id 隔离，
-对应 Crew ``session`` 权限来源（用户在弹窗里选「始终允许」时生成）。
+全局状态，便于单测；唯一的进程内状态是“本次对话允许完整操作”规则缓存，按 session_id 隔离，
+对应 ``session`` 权限来源（用户在旧工具确认框里选择本次对话授权时生成）。
 """
 
 from __future__ import annotations
@@ -210,7 +210,7 @@ def _key_startswith(key: str, prefix: str) -> bool:
 
 @dataclass
 class PermissionConfig:
-    """权限规则集合 + 会话级「始终允许」缓存。
+    """权限规则集合 + 会话级完整动作授权缓存。
 
     规则来源：
       config 规则（userSettings/projectSettings 合并）→ 进程内 session allows
@@ -219,7 +219,7 @@ class PermissionConfig:
     """
 
     rules: list[PermissionRule] = field(default_factory=list)
-    # session_id -> rules；用户在 ask 弹窗选「始终允许」时动态追加
+    # session_id -> rules；旧工具确认框只保存完整动作的本次对话授权
     _session_allows: dict[str, list[PermissionRule]] = field(default_factory=dict)
 
     def add_session_allow(self, session_id: str, rule: PermissionRule) -> None:
@@ -276,28 +276,20 @@ class PermissionConfig:
 
 
 def _suggest_rule(tool_name: str, key: str) -> str:
-    """从命令/路径里提取一个稳定的 2 段前缀，作为「始终允许」建议规则。"""
-    if tool_name == "terminal":
-        parts = key.split()
-        if len(parts) >= 2 and parts[0] not in {"bash", "sh", "sudo", "env", "source", "."}:
-            return f"{parts[0]} {parts[1]}:*"
-        if parts:
-            return f"{parts[0]}:*"
-        return "*"
-    if tool_name in {"file_write", "file_read", "patch"}:
-        # 路径不便于生成稳定前缀规则，回退到精确
-        return key or "*"
+    """建议的 session 授权范围：UI 授权只收敛到完整动作，绝不前缀扩权。"""
     if "__" in tool_name and key:
         # MCP names are qualified as server__tool. Persist only a digest so
         # one approval cannot widen to different arguments or retain secrets.
         return f"sha256:{hashlib.sha256(key.encode('utf-8')).hexdigest()}"
-    return "*"
+    return key or ""
+
 
 
 # 按工具提取「匹配键」。
 _PRIMARY_ARG: dict[str, str] = {
     "terminal": "command",
     "file_write": "path",
+    "file_delete": "path",
     "file_read": "path",
     "patch": "path",
     "glob": "pattern",
@@ -397,9 +389,11 @@ def grant_session_allow(
     tool_name: str,
     match: str,
     *,
-    reason: str = "用户选择始终允许",
+    reason: str = "用户选择本次对话允许此完整操作",
 ) -> None:
-    """用户在 ask 弹窗选「始终允许」时调用：写一条 session 级 allow 规则。"""
+    """Store one exact session-scoped allow; empty/wildcard scopes are rejected."""
+    if not str(match or "").strip() or match == "*" or match.endswith((":*", " *")):
+        return
     cfg = get_permission_config()
     cfg.add_session_allow(session_id, PermissionRule(
         tool=tool_name, match=match, behavior="allow", reason=reason,
@@ -429,4 +423,4 @@ def should_block_for_tool_call(tc: ToolCall) -> bool:
 
     只读工具默认 allow，不进 ask 流程，避免对 file_read/grep 等频繁打扰。
     """
-    return tc.name in {"terminal", "file_write", "patch"}
+    return tc.name in {"terminal", "file_write", "file_delete", "patch"}

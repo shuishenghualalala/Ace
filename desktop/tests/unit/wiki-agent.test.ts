@@ -48,12 +48,10 @@ import {
 import { __resetAllStoresForTest, authStore, configStore, messageStore, sessionStore, uiStore, workspaceStore } from '../../src/ui/stores/stores';
 import { patchBook, setBookTodos, setBusy, type Bookkeeping } from '../../src/ui/state';
 
-const { mockOpenSession, mockLoadBackendHistory, mockShowConfirmDialog, mockOpenModelSelectPopover } = vi.hoisted(() => ({
+const { mockOpenSession, mockLoadBackendHistory, mockShowConfirmDialog } = vi.hoisted(() => ({
   mockOpenSession: vi.fn(),
   mockLoadBackendHistory: vi.fn(async () => undefined),
   mockShowConfirmDialog: vi.fn(async () => true),
-  // 模型浮层只验证调用与回调，真实浮层行为在 model-picker-sync.test.ts 覆盖。
-  mockOpenModelSelectPopover: vi.fn(() => vi.fn()),
 }));
 
 vi.mock('../../src/ui/backend-client', async (importOriginal) => {
@@ -67,7 +65,6 @@ vi.mock('../../src/ui/backend-client', async (importOriginal) => {
       wikiKBs: vi.fn(),
       wikiInit: vi.fn(),
       wikiPages: vi.fn(),
-      wikiSummary: vi.fn(),
       wikiUpload: vi.fn(),
       wikiIngest: vi.fn(),
       sessionTodos: vi.fn(),
@@ -107,10 +104,6 @@ vi.mock('../../src/ui/features/composer-toolbar', () => ({
   syncComposerModelLabel: vi.fn(),
   syncComposerWorkspaceLabel: vi.fn(),
 }));
-vi.mock('../../src/ui/features/model-picker', () => ({
-  syncModelUi: vi.fn(),
-  openModelSelectPopover: mockOpenModelSelectPopover,
-}));
 vi.mock('../../src/ui/features/system-page', () => ({ renderSystemOverview: vi.fn() }));
 vi.mock('../../src/ui/features/attachments', () => ({
   takeAttachmentsForSend: vi.fn(() => []),
@@ -133,7 +126,6 @@ const api = backendApi as unknown as {
   wikiKBs: ReturnType<typeof vi.fn>;
   wikiInit: ReturnType<typeof vi.fn>;
   wikiPages: ReturnType<typeof vi.fn>;
-  wikiSummary: ReturnType<typeof vi.fn>;
   wikiUpload: ReturnType<typeof vi.fn>;
   wikiIngest: ReturnType<typeof vi.fn>;
   sessionTodos: ReturnType<typeof vi.fn>;
@@ -273,7 +265,6 @@ beforeEach(() => {
   });
   api.wikiInit.mockResolvedValue({ ok: true });
   api.wikiPages.mockResolvedValue({ ok: true, pages: [], source_titles: {}, source_files: {} });
-  api.wikiSummary.mockResolvedValue({ ok: true, summary: '', kb_id: 'default', status: 'empty' });
   api.sessionTodos.mockResolvedValue({ ok: true, todos: [] });
   api.getSessionModel.mockResolvedValue({ ok: true, model_profile_id: 'glm-fast', model_label: 'GLM 快速' });
   api.setSessionModel.mockImplementation(async (_sid: string, id: string) => ({
@@ -764,28 +755,42 @@ describe('wiki-page 入口挂点', () => {
   });
 
   it('模型 chip：加载会话模型绑定，选择后走会话级接口切换（不影响主对话）', async () => {
+    // active_model_id 故意与绑定不同：chip 初始文案来自 config 兜底，
+    // 显示「GLM 快速」即可证明绑定已落缓存（排除与切换后文案竞争的迟到加载）。
+    configStore.set({
+      config: {
+        model: 'minimax-m3',
+        has_key: true,
+        base_url: '',
+        active_model_id: 'minimax-m3',
+        models: [
+          { id: 'glm-fast', name: 'GLM 快速', model: 'glm-4-flash', has_key: true, loaded: true },
+          { id: 'minimax-m3', name: 'MiniMax M3', model: 'MiniMax-M3', has_key: true, loaded: true },
+        ],
+      },
+    });
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
 
-    // 绑定加载后 chip 显示后端返回的模型名
+    // 绑定加载后 chip 显示后端返回的模型名（与主对话同一个 mw-context-chip）
+    const chip = () => document.querySelector<HTMLElement>('[data-wiki-agent-panel] .mw-context-chip');
     await vi.waitFor(() => {
-      expect(document.querySelector('[data-wiki-agent-model-label]')?.textContent).toBe('GLM 快速');
+      expect(chip()?.querySelector('.mw-context-chip__label')?.textContent).toBe('GLM 快速');
     });
     expect(api.getSessionModel).toHaveBeenCalledWith(WIKI_SID);
+    // 挂载链路里并发的重复加载全部落定，避免迟到的旧绑定覆盖切换结果
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
-    // 点击 chip 打开模型浮层（复用 model-picker 的通用浮层），高亮当前绑定
-    document.querySelector<HTMLElement>('[data-wiki-agent-model]')!.click();
-    expect(mockOpenModelSelectPopover).toHaveBeenCalledTimes(1);
-    const opts = mockOpenModelSelectPopover.mock.calls[0]?.[0] as {
-      activeId: string;
-      onPick: (id: string) => void;
-    };
-    expect(opts.activeId).toBe('glm-fast');
+    // 点击 chip 打开模型浮层（与主对话同一个 openModelSelectPopover 实现），高亮当前绑定
+    chip()!.click();
+    const popover = document.querySelector('.composer-select-popover');
+    expect(popover).not.toBeNull();
+    expect(popover?.querySelector('.composer-select-item.is-selected')?.getAttribute('data-model-id')).toBe('glm-fast');
 
     // 选择新模型 → PUT 会话级接口（workspace=wiki）→ chip 更新
-    opts.onPick('minimax-m3');
+    popover?.querySelector<HTMLElement>('[data-model-id="minimax-m3"]')!.click();
     await vi.waitFor(() => {
-      expect(document.querySelector('[data-wiki-agent-model-label]')?.textContent).toBe('模型-minimax-m3');
+      expect(chip()?.querySelector('.mw-context-chip__label')?.textContent).toBe('模型-minimax-m3');
     });
     expect(api.setSessionModel).toHaveBeenCalledWith(WIKI_SID, 'minimax-m3', { workspace_id: 'wiki' });
     expect(mockOpenSession).not.toHaveBeenCalled();

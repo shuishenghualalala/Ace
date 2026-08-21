@@ -534,7 +534,7 @@ function translatePreDispatch(error: unknown): never {
   if (NOT_ACTIONABLE_EVIDENCE.test(callLog)) {
     throw new ActionError(
       `元素存在但当前不可点击（动画未停、被遮挡或在视口外）：${message}`,
-      'stale_ref',
+      'element_not_actionable',
     );
   }
   // strict mode violation 同时用于「解析到 0 个」和「解析到 N 个」。

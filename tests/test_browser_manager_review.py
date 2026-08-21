@@ -642,7 +642,7 @@ async def test_ref_descriptions_are_bound_to_exact_snapshot_lines(browser_env):
         await manager.aclose()
 
 
-async def test_ordinary_ref_click_and_page_level_enter_are_automatic(
+async def test_ordinary_ref_click_is_automatic_and_page_level_enter_asks(
     browser_env,
 ):
     driver = ReviewDriver()
@@ -655,13 +655,22 @@ async def test_ordinary_ref_click_and_page_level_enter_are_automatic(
         output = await manager.click("owner", "session", "p1:e170")
         assert "p2:e170" in output
 
+        # 页面级回车可能提交表单：默认治理档弹一次性审批，确认后照常执行。
+        enter_args = {"key": "Enter"}
         enter_permission = manager.permission_for(
             "browser_press",
-            {"key": "Enter"},
+            enter_args,
             "owner",
             "session",
         )
-        assert enter_permission is None
+        assert enter_permission is not None and enter_permission.behavior == "ask"
+        assert manager.confirm_approval(
+            enter_permission.approval_token,
+            "browser_press",
+            enter_args,
+            "owner",
+            "session",
+        )
         output = await manager.press("owner", "session", "Enter")
         assert "p3:e170" in output
         assert ("press", ("Enter",)) in driver.calls
@@ -892,25 +901,30 @@ async def test_close_session_keeps_file_transfer_permissions_scoped(browser_env)
     manager = BrowserManager(BrowserConfig(), driver)
     try:
         await manager.navigate("owner", "session", "https://example.com")
+        # 上传在默认治理档下弹一次性审批，逐次签发独立令牌。
         first_upload = {"ref": "p1:e18", "paths": ["/tmp/file-one"]}
-        upload_decision = manager.permission_for(
+        first = manager.permission_for(
             "browser_upload", first_upload, "owner", "session"
         )
-        assert upload_decision is not None
-        assert upload_decision.behavior == "ask"
-        assert upload_decision.allow_always is False
-        second_decision = manager.permission_for(
+        assert first is not None
+        assert first.behavior == "ask"
+        assert first.allow_always is False
+        second = manager.permission_for(
             "browser_upload",
             {"ref": "p1:e18", "paths": ["/tmp/file-two"]},
             "owner",
             "session",
         )
-        assert second_decision is not None
-        assert second_decision.behavior == "ask"
-        assert second_decision.allow_always is False
+        assert second is not None
+        assert second.behavior == "ask"
+        assert second.allow_always is False
 
         await manager.close_session("owner", "session")
 
+        # 会话关闭后，未消费的审批令牌随会话失效，不可重放。
+        assert not manager.confirm_approval(
+            first.approval_token, "browser_upload", first_upload, "owner", "session"
+        )
         assert not hasattr(manager, "_pending_approvals")
         assert not hasattr(manager, "_granted_approvals")
     finally:
@@ -933,7 +947,7 @@ async def test_non_enter_safe_key_does_not_require_approval(browser_env):
         await manager.aclose()
 
 
-async def test_searchbox_enter_is_ref_bound_and_executes_directly(browser_env):
+async def test_searchbox_enter_asks_then_executes_ref_bound(browser_env):
     driver = ReviewDriver()
     driver.snapshot_text = '- searchbox "搜索" [ref=e7]'
     driver.element_security = {"searchbox\0搜索\0#1": "search-security"}
@@ -942,7 +956,10 @@ async def test_searchbox_enter_is_ref_bound_and_executes_directly(browser_env):
         await manager.navigate("owner", "session", "https://example.com")
         args = {"key": "Enter", "ref": "p1:e7"}
         decision = manager.permission_for("browser_press", args, "owner", "session")
-        assert decision is None
+        assert decision is not None and decision.behavior == "ask"
+        assert manager.confirm_approval(
+            decision.approval_token, "browser_press", args, "owner", "session"
+        )
 
         output = await manager.press("owner", "session", "Enter", ref="p1:e7")
 
@@ -952,20 +969,24 @@ async def test_searchbox_enter_is_ref_bound_and_executes_directly(browser_env):
         await manager.aclose()
 
 
-async def test_non_search_enter_executes_without_an_approval_round_trip(browser_env):
+async def test_non_search_enter_executes_after_one_shot_approval(browser_env):
     driver = ReviewDriver()
     driver.snapshot_text = '- textbox "备注" [ref=e8]'
     driver.element_security = {"textbox\0备注\0#1": "note-security"}
     manager = BrowserManager(BrowserConfig(), driver)
     try:
         await manager.navigate("owner", "session", "https://example.com")
+        args = {"key": "Enter", "ref": "p1:e8"}
         decision = manager.permission_for(
             "browser_press",
-            {"key": "Enter", "ref": "p1:e8"},
+            args,
             "owner",
             "session",
         )
-        assert decision is None
+        assert decision is not None and decision.behavior == "ask"
+        assert manager.confirm_approval(
+            decision.approval_token, "browser_press", args, "owner", "session"
+        )
         output = await manager.press("owner", "session", "Enter", ref="p1:e8")
         assert ("press", ("Enter", "@e8")) in driver.calls
         assert "p2:e8" in output
@@ -1546,7 +1567,7 @@ async def test_duplicate_named_elements_each_keep_their_exact_native_ref(browser
 
 
 async def test_submit_click_uses_the_same_real_locator_action(browser_env):
-    """Submit metadata is observational; it never substitutes for click()."""
+    """Submit metadata never substitutes for click(); 治理层只据此加一次性审批。"""
     driver = ReviewDriver()
     driver.snapshot_text = (
         '- link "下一页" [ref=e1]\n'
@@ -1557,9 +1578,14 @@ async def test_submit_click_uses_the_same_real_locator_action(browser_env):
     try:
         await manager.navigate("owner", "session", "https://example.com")
 
-        assert manager.permission_for(
-            "browser_click", {"ref": "p1:e2"}, "owner", "session"
-        ) is None
+        submit_args = {"ref": "p1:e2"}
+        decision = manager.permission_for(
+            "browser_click", submit_args, "owner", "session"
+        )
+        assert decision is not None and decision.behavior == "ask"
+        assert manager.confirm_approval(
+            decision.approval_token, "browser_click", submit_args, "owner", "session"
+        )
 
         assert manager.permission_for(
             "browser_click", {"ref": "p1:e1"}, "owner", "session"
@@ -2203,6 +2229,70 @@ def test_upload_boundary_rejects_hardlinked_regular_file(tmp_path):
             [str(upload)],
             workdir=str(tmp_path),
         )
+
+@pytest.mark.asyncio
+async def test_upload_staging_snapshots_files_and_directories_then_cleans(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "crew.browser.manager.get_owner_runtime_home",
+        lambda owner: tmp_path / "accounts" / str(owner),
+    )
+    source = tmp_path / "source"
+    nested = source / "nested"
+    nested.mkdir(parents=True)
+    (nested / "payload.txt").write_text("approved payload", encoding="utf-8")
+    manager = BrowserManager(BrowserConfig(), ReviewDriver())
+    try:
+        owner = await manager._owner("owner")
+        staged, stage = await asyncio.to_thread(
+            manager._stage_approved_uploads,
+            owner,
+            [str(source)],
+        )
+        staged_directory = Path(staged[0])
+        assert staged_directory.is_dir()
+        assert (staged_directory / "nested" / "payload.txt").read_text(
+            encoding="utf-8"
+        ) == "approved payload"
+        assert "approved-uploads" in staged_directory.parts
+        await asyncio.to_thread(
+            manager._cleanup_approved_upload_stage,
+            stage,
+            owner.profile_dir.parent / "approved-uploads",
+        )
+        assert stage is not None and not stage.exists()
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_upload_staging_rejects_symlinks_inside_directory(tmp_path, monkeypatch):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks unavailable")
+    monkeypatch.setattr(
+        "crew.browser.manager.get_owner_runtime_home",
+        lambda owner: tmp_path / "accounts" / str(owner),
+    )
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        (source / "linked.txt").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    manager = BrowserManager(BrowserConfig(), ReviewDriver())
+    try:
+        owner = await manager._owner("owner")
+        with pytest.raises(BrowserDriverError, match="符号链接或特殊文件"):
+            await asyncio.to_thread(
+                manager._stage_approved_uploads,
+                owner,
+                [str(source)],
+            )
+        approved_root = owner.profile_dir.parent / "approved-uploads"
+        assert not list(approved_root.iterdir())
+    finally:
+        await manager.aclose()
 
 
 def test_recording_is_sealed_only_for_exact_persisted_host_sequence(
@@ -4389,35 +4479,25 @@ async def test_cancelled_owner_initialization_cannot_return_orphan(browser_env, 
         await manager.aclose()
 
 
-async def test_browser_file_transfers_require_one_shot_approval(browser_env):
+async def test_mutating_permissions_issue_one_shot_approvals(browser_env):
     manager = BrowserManager(BrowserConfig(), ReviewDriver())
     token = current_tool_call_id.set("approval-prune")
     try:
         await manager.navigate("owner", "session", "https://example.com")
-        upload_decision = manager.permission_for(
-            "browser_upload",
-            {"ref": "p1:e18", "paths": ["/tmp/file"]},
-            "owner",
-            "session",
-        )
-        download_decision = manager.permission_for(
-            "browser_download",
-            {"ref": "p1:e18", "filename": "file.bin"},
-            "owner",
-            "session",
-        )
-        assert upload_decision is not None
-        assert upload_decision.behavior == "ask"
-        assert upload_decision.allow_always is False
-        assert download_decision is not None
-        assert download_decision.behavior == "ask"
-        assert download_decision.allow_always is False
-        assert manager.permission_for(
-            "browser_dialog",
-            {"action": "accept", "text": ""},
-            "owner",
-            "session",
-        ) is None
+        # 上传/下载/接受弹窗在默认治理档下各弹一次性审批，令牌确认后即失效。
+        for tool_name, args in (
+            ("browser_upload", {"ref": "p1:e18", "paths": ["/tmp/file"]}),
+            ("browser_download", {"ref": "p1:e18", "filename": "file.bin"}),
+            ("browser_dialog", {"action": "accept", "text": ""}),
+        ):
+            decision = manager.permission_for(tool_name, args, "owner", "session")
+            assert decision is not None and decision.behavior == "ask", tool_name
+            assert manager.confirm_approval(
+                decision.approval_token, tool_name, args, "owner", "session"
+            )
+            assert not manager.confirm_approval(
+                decision.approval_token, tool_name, args, "owner", "session"
+            )
         assert not hasattr(manager, "_pending_approvals")
         assert not hasattr(manager, "_granted_approvals")
     finally:
@@ -4577,8 +4657,10 @@ async def _approve_download(
 ) -> None:
     args = {"ref": "p1:e170", "filename": filename}
     decision = manager.permission_for("browser_download", args, "owner", "session")
-    assert decision is not None
-    assert decision.behavior == "ask"
+    assert decision is not None and decision.behavior == "ask"
+    assert manager.confirm_approval(
+        decision.approval_token, "browser_download", args, "owner", "session"
+    )
 
 
 async def test_download_completes_without_global_deny_restoration(browser_env):

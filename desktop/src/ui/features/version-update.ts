@@ -32,6 +32,7 @@ interface VersionUpdateBridge {
   getUpdateState?: () => Promise<UpdateStateSnapshot>;
   appQuit?: () => Promise<void>;
   getAppVersion?: () => Promise<{ version?: string; label?: string }>;
+  openLatestReleaseDownload?: () => Promise<{ ok: boolean; url?: string }>;
   heartbeat?: (version?: string) => Promise<{
     success?: boolean;
     message?: string;
@@ -384,8 +385,11 @@ export function bindVersionUpdateUi(): void {
     void bridge()?.appQuit?.();
   });
 
-  document.getElementById('set-check-update')?.addEventListener('click', () => {
-    void window.Crew?.openExternal?.('https://github.com/shuishenghualalala/Ace/releases');
+  document.getElementById('set-check-update')?.addEventListener('click', async () => {
+    // 下载最新版本：由主进程按当前系统/架构匹配 GitHub Releases 对应安装包并打开下载页
+    const result = await bridge()?.openLatestReleaseDownload?.();
+    const url = result?.url || 'https://github.com/shuishenghualalala/Ace/releases';
+    void window.Crew?.openExternal?.(url);
   });
   renderUpdateButton();
 }

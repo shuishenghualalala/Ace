@@ -264,11 +264,6 @@
           "primitive": "os.open"
         },
         {
-          "path": "crew/tools/skills_tools.py",
-          "kind": "python-file",
-          "primitive": "Path.read_text"
-        },
-        {
           "path": "crew/wiki/archive_security.py",
           "kind": "python-file",
           "primitive": "Path.open"
@@ -573,6 +568,16 @@
           "path": "security-runtime/src/windows/state.rs",
           "kind": "rust-file",
           "primitive": "fs.read"
+        },
+        {
+          "path": "security-runtime/src/linux/bwrap.rs",
+          "kind": "rust-file",
+          "primitive": "fs.mutate"
+        },
+        {
+          "path": "security-runtime/src/linux/bwrap.rs",
+          "kind": "rust-file",
+          "primitive": "fs.write"
         }
       ],
       "covered_routes": []
@@ -695,6 +700,11 @@
           "path": "crew/wiki/sources.py",
           "kind": "python-network",
           "primitive": "requests.Session"
+        },
+        {
+          "path": "crew/security/outbound.py",
+          "kind": "python-network",
+          "primitive": "socket.create_connection"
         }
       ],
       "covered_routes": []
@@ -739,11 +749,6 @@
       "exception_expiry": null,
       "review_trigger": "Vendor domain, HTTP client, ambient proxy behavior, TLS connector, polling, upload/download, account storage, or reconnect changes",
       "primitive_refs": [
-        {
-          "path": "plugins/feishu/__init__.py",
-          "kind": "python-network",
-          "primitive": "urllib.request.urlopen"
-        },
         {
           "path": "plugins/platforms/feishu/adapter.py",
           "kind": "python-network",
@@ -1039,11 +1044,6 @@
           "primitive": "Path.write_bytes"
         },
         {
-          "path": "plugins/platforms/feishu/files.py",
-          "kind": "python-file",
-          "primitive": "builtins.open"
-        },
-        {
           "path": "plugins/platforms/weixin/adapter.py",
           "kind": "python-file",
           "primitive": "Path.read_bytes"
@@ -1182,7 +1182,13 @@
       "review_deadline": "2027-12-31",
       "exception_expiry": null,
       "review_trigger": "Update origin, redirect policy, signature format, package type, download sink, installer helper, or IPC route changes",
-      "primitive_refs": [],
+      "primitive_refs": [
+        {
+          "path": "desktop/src/main/update/github-release.ts",
+          "kind": "javascript-file",
+          "primitive": "fs.readFileSync"
+        }
+      ],
       "covered_routes": []
     },
     {
@@ -1260,6 +1266,18 @@
         {
           "path": "desktop/src/shared/ipc-channels.ts",
           "route": "invoke:app:quit"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:release:open-latest-download"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "invoke:tray:set-status"
+        },
+        {
+          "path": "desktop/src/shared/ipc-channels.ts",
+          "route": "main-event:tray:activated"
         },
         {
           "path": "desktop/src/shared/ipc-channels.ts",
@@ -1748,6 +1766,10 @@
         },
         {
           "path": "crew/gateway/routers/browser.py",
+          "route": "POST /api/browser/{session_id}/read-tab"
+        },
+        {
+          "path": "crew/gateway/routers/browser.py",
           "route": "WEBSOCKET /ws/browser-host"
         },
         {
@@ -1993,6 +2015,10 @@
         {
           "path": "crew/gateway/routers/runtimes.py",
           "route": "DELETE /api/external-teams/{team_id}"
+        },
+        {
+          "path": "crew/gateway/routers/runtimes.py",
+          "route": "DELETE /api/runtimes/{runtime_id}"
         },
         {
           "path": "crew/gateway/routers/runtimes.py",
@@ -2368,6 +2394,10 @@
         },
         {
           "path": "crew/gateway/routers/wiki.py",
+          "route": "POST /capture"
+        },
+        {
+          "path": "crew/gateway/routers/wiki.py",
           "route": "GET /agent-sessions"
         },
         {
@@ -2401,10 +2431,6 @@
         {
           "path": "crew/gateway/routers/wiki.py",
           "route": "GET /sources/{source_id}/file"
-        },
-        {
-          "path": "crew/gateway/routers/wiki.py",
-          "route": "GET /summary"
         },
         {
           "path": "crew/gateway/routers/wiki.py",
@@ -2667,6 +2693,44 @@
           "route": "WEBSOCKET /ws"
         }
       ]
+    },
+    {
+      "id": "ACE-SURF-PROC-DIRECT-HTML-PDF",
+      "categories": [
+        "process-direct",
+        "dev-only"
+      ],
+      "path": "crew/skills/html-to-pdf/scripts/convert.cjs",
+      "symbol_or_route": "html-to-pdf skill converter delegating to a managed Chromium",
+      "owner": "Skills maintainers",
+      "trust_source": "Trusted checkout skill script plus repository-managed Chromium candidates",
+      "final_enforcement_point": "convert.cjs fixed argv construction, byte/DOM/style budgets, per-stage timeouts, and Chromium process caps",
+      "fail_closed_behavior": "Oversized input or output, malformed options, budget breach, launch or render timeout, or leftover Chromium process fails the conversion",
+      "tests": [
+        {
+          "id": "EXECUTION-SURFACE-INVENTORY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Skills maintainers and release CI",
+      "status": "dev-only",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Chromium candidate roots, argv construction, budget constants, or cleanup logic changes",
+      "primitive_refs": [],
+      "covered_routes": []
     },
     {
       "id": "ACE-SURF-PROC-INDIRECT-ACP",
@@ -3386,7 +3450,13 @@
       "review_deadline": "2027-12-31",
       "exception_expiry": null,
       "review_trigger": "Background spawn, bridge, checkpoint, process identity, recovery, environment, output, timeout, or cleanup changes",
-      "primitive_refs": [],
+      "primitive_refs": [
+        {
+          "path": "crew/tools/process_registry.py",
+          "kind": "python-file",
+          "primitive": "Path.read_text"
+        }
+      ],
       "covered_routes": []
     },
     {
@@ -4251,6 +4321,44 @@
       "covered_routes": []
     },
     {
+      "id": "ACE-SURF-PROC-DIRECT-DEV-E2E-BATCH",
+      "categories": [
+        "process-direct",
+        "dev-only"
+      ],
+      "path": "scripts/run_e2e_batch.py",
+      "symbol_or_route": "batch E2E scenario runner spawning one subprocess per case",
+      "owner": "Release Security maintainers",
+      "trust_source": "Trusted checkout, repository scenario manifest, fixed case runner, and repository .venv interpreter",
+      "final_enforcement_point": "run_e2e_batch.py fixed argv from scenarios.yaml, per-case subprocess isolation, and repository-local output roots",
+      "fail_closed_behavior": "Missing scenario manifest, unknown case, interpreter resolution failure, or child failure aborts the batch with a nonzero exit",
+      "tests": [
+        {
+          "id": "EXECUTION-SURFACE-INVENTORY",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "evidence": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "lifecycle_revocation_owner": "Release CI job and E2E artifact owner",
+      "status": "dev-only",
+      "artifact_refs": [
+        {
+          "type": "pytest",
+          "path": "tests/security/test_execution_surface_inventory.py"
+        }
+      ],
+      "review_deadline": "2027-12-31",
+      "exception_expiry": null,
+      "review_trigger": "Scenario manifest, case runner, interpreter resolution, subprocess argv, or output root changes",
+      "primitive_refs": [],
+      "covered_routes": []
+    },
+    {
       "id": "ACE-SURF-PROC-DIRECT-DEV-PARSER-FUZZ",
       "categories": [
         "process-direct",
@@ -4524,7 +4632,13 @@
       "review_deadline": "2027-12-31",
       "exception_expiry": null,
       "review_trigger": "Seatbelt profile, sandbox-exec path, probe, filesystem rule, network rule, resource, spawn, or cleanup changes",
-      "primitive_refs": [],
+      "primitive_refs": [
+        {
+          "path": "security-runtime/src/macos/mod.rs",
+          "kind": "rust-file",
+          "primitive": "fs.write"
+        }
+      ],
       "covered_routes": []
     },
     {
@@ -4604,7 +4718,18 @@
       "review_deadline": "2027-12-31",
       "exception_expiry": null,
       "review_trigger": "Windows token, logon fallback, executable descriptor, inherited handle, environment, private Desktop, UserList visibility, Job, readiness, spawn, or cleanup changes",
-      "primitive_refs": [],
+      "primitive_refs": [
+        {
+          "path": "security-runtime/src/windows/process.rs",
+          "kind": "rust-file",
+          "primitive": "fs.mutate"
+        },
+        {
+          "path": "security-runtime/src/windows/process.rs",
+          "kind": "rust-file",
+          "primitive": "fs.write"
+        }
+      ],
       "covered_routes": []
     }
   ]

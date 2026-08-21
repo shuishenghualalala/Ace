@@ -3621,7 +3621,9 @@ def _write_immutable(path: Path, raw: bytes) -> None:
         while offset < len(raw):
             offset += os.write(fd, raw[offset:])
         os.fsync(fd)
-        os.fchmod(fd, 0o600)
+        # Windows 无 os.fchmod；create 时的 0o600 已尽力（NTFS 按扩展属性近似）。
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
     finally:
         os.close(fd)
 

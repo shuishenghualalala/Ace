@@ -14,11 +14,12 @@ import shutil
 import stat
 import sys
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, Sequence
 
 from crew.security.actions import (
     NormalizedAction,
@@ -38,6 +39,8 @@ from crew.security.models import (
     PermissionProfileKind,
     SandboxablePreference,
     resolve_sandboxable_preference,
+    SandboxPermissions,
+    merge_additional_permissions,
 )
 from crew.security.policy import settings_for_mode
 from crew.security.process_lifecycle import isolated_process_kwargs, terminate_process_tree
@@ -161,23 +164,35 @@ class ProcessLaunch:
     sandbox_system_surface: str = ""
     helper_argv: tuple[str, ...] = ()
     trusted_readable_roots: tuple[Path, ...] = ()
+    # External runtimes stay on the legacy host path unless Config explicitly
+    # enables the managed security boundary. Built-in tools remain managed
+    # according to ``profile`` and do not use this flag.
+    external_security_enabled: bool = False
+    security_context: SecurityContext | None = None
+    audit: Any | None = None
+    approval_service: Any | None = None
     additional_permissions: AdditionalPermissionProfile = field(
         default_factory=AdditionalPermissionProfile
     )
-    os_user: str = ""
-    owner_account_id: str = ""
-    workspace_id: str = ""
-    session_id: str = ""
-    task_id: str = ""
+    os_user: str = ''
+    owner_account_id: str = ''
+    workspace_id: str = ''
+    session_id: str = ''
+    task_id: str = ''
     approved_action: NormalizedAction | None = None
     authority_version: int = 0
-    authority_nonce: str = ""
-    authority_digest: str = ""
-    authority_mac: str = ""
+    authority_nonce: str = ''
+    authority_digest: str = ''
+    authority_mac: str = ''
 
     @property
     def managed(self) -> bool:
         return self.sandboxed
+
+    @property
+    def external_managed(self) -> bool:
+        """Whether external runtimes must cross the native managed boundary."""
+        return self.managed and self.external_security_enabled
 
 
 current_process_launch: ContextVar[ProcessLaunch | None] = ContextVar(
@@ -185,17 +200,29 @@ current_process_launch: ContextVar[ProcessLaunch | None] = ContextVar(
 )
 
 
-def host_stream_launch_block_reason() -> str | None:
+@contextmanager
+def use_process_launch(launch: ProcessLaunch | None) -> Iterator[None]:
+    """Install one trusted launch decision for a bounded host call path."""
+    token = current_process_launch.set(launch)
+    try:
+        yield
+    finally:
+        current_process_launch.reset(token)
+
+
+def host_stream_launch_block_reason(*, external: bool = False) -> str | None:
     """Return why a bidirectional host subprocess must be refused, if any.
 
     Long-lived stdio adapters cannot currently cross the native runtime transport.
-    A missing or managed launch boundary therefore always fails closed. Compatibility
-    mode may relax transport and approval policy, but it cannot turn managed execution
-    into an unconfined host subprocess.
+    A missing or managed launch boundary therefore fails closed for built-in
+    execution. External adapters may explicitly opt into the legacy host path
+    through the trusted ``Config`` switch; that exception does not affect built-ins.
     """
     launch = current_process_launch.get()
     if launch is None:
         return "security launch context missing"
+    if external and not launch.external_security_enabled:
+        return None
     try:
         validate_process_launch(launch)
     except Exception:  # noqa: BLE001 - any malformed launch state must fail closed
@@ -219,10 +246,14 @@ async def execute_captured(
     timeout: float,
     env: dict[str, str] | None = None,
     stdin: bytes | None = None,
+    home_files: Mapping[str, bytes] | None = None,
+    additional_permissions: AdditionalPermissionProfile = AdditionalPermissionProfile(),
     env_overrides: Mapping[str, str] | None = None,
     max_output_bytes: int = 2 * 1024 * 1024,
     on_started: Callable[[int | None], None] | None = None,
     on_output: Callable[[Literal["stdout", "stderr"]], None] | None = None,
+    external: bool = False,
+    tool_name: str = "captured_process",
 ) -> CapturedProcessResult:
     """Run an adapter under the current conversation boundary.
 
@@ -251,9 +282,29 @@ async def execute_captured(
     def _redact(text: str) -> str:
         return redact_sensitive_text(redact_secret_values(text, secret_values), force=True)
 
+    if external and not launch.external_security_enabled:
+        launch = _resign_process_launch(
+            replace(
+                launch,
+                profile=PermissionProfile(PermissionProfileKind.DISABLED),
+                sandboxed=False,
+                helper_argv=(),
+                trusted_readable_roots=(),
+                external_security_enabled=False,
+            )
+        )
+    host_env = env
+    if env_overrides:
+        host_env = {**(env if env is not None else os.environ), **env_overrides}
+
+    action = _execution_action(argv, cwd)
+    effective_permissions = merge_additional_permissions(
+        launch.additional_permissions,
+        additional_permissions,
+    )
     if launch.managed:
         from crew.security.broker import ExecutionRequest, SecurityExecutionBroker
-        from crew.security.runtime_client import NativeRuntimeClient
+        from crew.security.runtime_client import NativeRuntimeClient, NativeRuntimeError
 
         managed_environment = dict(env_overrides or {})
         authorization = finalize_process_launch(
@@ -262,18 +313,44 @@ async def execute_captured(
             cwd=cwd,
             environment=managed_environment,
         )
-        result = await SecurityExecutionBroker(
-            NativeRuntimeClient(authorization.snapshot.helper_argv)
-        ).execute(
-            ExecutionRequest(
-                authorization_snapshot=authorization,
-                stdin=stdin,
-                env_overrides=managed_environment,
-                timeout_seconds=timeout,
-                max_output_bytes=max_output_bytes,
+        try:
+            result = await SecurityExecutionBroker(
+                NativeRuntimeClient(authorization.snapshot.helper_argv)
+            ).execute(
+                ExecutionRequest(
+                    authorization_snapshot=authorization,
+                    stdin=stdin,
+                    env_overrides=managed_environment,
+                    timeout_seconds=timeout,
+                    max_output_bytes=max_output_bytes,
+                ),
+                on_started=on_started,
+                on_output=on_output,
+            )
+        except NativeRuntimeError as exc:
+            audit_execution_result(
+                launch,
+                action,
+                tool_name=tool_name,
+                decision="error",
+                stable_error_code=exc.code.value,
+            )
+            raise
+        runtime_capabilities = getattr(result, "capabilities", None)
+        audit_execution_result(
+            launch,
+            action,
+            tool_name=tool_name,
+            decision="completed" if result.exit_code == 0 else "failed",
+            sandbox_backend=(
+                str(runtime_capabilities.backend) if runtime_capabilities is not None else ""
             ),
-            on_started=on_started,
-            on_output=on_output,
+            capabilities=(
+                _enabled_capabilities(runtime_capabilities)
+                if runtime_capabilities is not None
+                else ()
+            ),
+            exit_code=result.exit_code,
         )
         return CapturedProcessResult(
             result.exit_code, _redact(result.stdout), _redact(result.stderr)
@@ -342,20 +419,132 @@ async def execute_captured(
                 pass
         if process is not None:
             await terminate_process_tree(process)
+        audit_execution_result(
+            launch,
+            action,
+            tool_name=tool_name,
+            decision="cancelled",
+            sandbox_backend="host_unconfined",
+            stable_error_code="cancelled",
+        )
         raise
     except TimeoutError:
         if process is not None:
             await terminate_process_tree(process)
+        audit_execution_result(
+            launch,
+            action,
+            tool_name=tool_name,
+            decision="error",
+            sandbox_backend="host_unconfined",
+            stable_error_code="timeout",
+        )
         raise
     except Exception:
         if process is not None:
             await terminate_process_tree(process)
+        audit_execution_result(
+            launch,
+            action,
+            tool_name=tool_name,
+            decision="error",
+            sandbox_backend="host_unconfined",
+            stable_error_code="host_spawn_failed",
+        )
         raise
-    return CapturedProcessResult(
+    completed = CapturedProcessResult(
         int(process.returncode or 0),
         _redact(stdout.decode("utf-8", errors="replace")),
         _redact(stderr.decode("utf-8", errors="replace")),
     )
+    audit_execution_result(
+        launch,
+        action,
+        tool_name=tool_name,
+        decision="completed" if completed.returncode == 0 else "failed",
+        sandbox_backend="host_unconfined",
+        exit_code=completed.returncode,
+    )
+    return completed
+
+
+def execute_captured_sync(
+    argv: tuple[str, ...],
+    *,
+    cwd: Path,
+    timeout: float,
+    env: dict[str, str] | None = None,
+    env_overrides: Mapping[str, str] | None = None,
+    tool_name: str = "captured_process",
+) -> CapturedProcessResult:
+    """Run a captured adapter from a worker thread while preserving its context."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(
+            execute_captured(
+                argv,
+                cwd=cwd,
+                timeout=timeout,
+                env=env,
+                env_overrides=env_overrides,
+                tool_name=tool_name,
+            )
+        )
+    raise RuntimeError("execute_captured_sync must run outside an active event loop")
+
+
+def _execution_action(argv: tuple[str, ...], cwd: Path):
+    from crew.security.actions import normalize_exec_action
+
+    return normalize_exec_action(argv, cwd)
+
+
+def _enabled_capabilities(capabilities: object) -> tuple[str, ...]:
+    values = asdict(capabilities)  # RuntimeCapabilities is a frozen dataclass.
+    return tuple(
+        key
+        for key, value in values.items()
+        if key != "backend" and (value is True or key == "wsl_version" and value is not None)
+    )
+
+
+def audit_execution_result(
+    launch: ProcessLaunch,
+    action: object,
+    *,
+    tool_name: str,
+    decision: str,
+    sandbox_backend: str = "",
+    capabilities: tuple[str, ...] = (),
+    exit_code: int | None = None,
+    stable_error_code: str = "",
+) -> None:
+    """Persist one execution outcome using the action authorized for this launch."""
+    if launch.security_context is None or launch.audit is None:
+        return
+    from crew.security.audit import AuditEvent
+
+    try:
+        launch.audit.record(
+            AuditEvent.for_action(
+                launch.security_context,
+                action,
+                action_type="exec_result",
+                decision=decision,
+                decision_source="native_runtime" if launch.managed else "compatibility_host",
+                sandbox_backend=sandbox_backend,
+                capabilities=capabilities,
+                exit_code=exit_code,
+                stable_error_code=stable_error_code,
+                tool_name=tool_name,
+                additional_permissions_summary=_additional_permissions_summary(launch),
+            )
+        )
+    except Exception:
+        # exec_result is operational evidence, not the authorization decision itself.
+        # A saturated optional audit buffer must not strand an already-completed child.
+        _LOGGER.warning("execution result audit write failed", exc_info=True)
 
 
 async def _collect_host_output(
@@ -433,6 +622,10 @@ def issue_process_launch(
     trusted_readable_roots: tuple[Path, ...] = (),
     additional_permissions: AdditionalPermissionProfile | None = None,
     approved_action: NormalizedAction | None = None,
+    external_security_enabled: bool = False,
+    security_context: SecurityContext | None = None,
+    audit: Any | None = None,
+    approval_service: Any | None = None,
 ) -> ProcessLaunch:
     """Issue a host-authenticated launch capability; direct dataclass construction has no authority."""
     if not isinstance(context, SecurityContext):
@@ -482,6 +675,10 @@ def issue_process_launch(
         session_id=str(context.session_id),
         task_id=str(context.task_id),
         approved_action=approved_action,
+        external_security_enabled=external_security_enabled if sandboxed else False,
+        security_context=security_context,
+        audit=audit,
+        approval_service=approval_service,
         authority_version=PROCESS_LAUNCH_AUTHORITY_VERSION,
         authority_nonce=secrets.token_hex(16),
     )
@@ -499,6 +696,19 @@ def issue_process_launch(
             "authority_mac": mac,
         }
     )
+
+
+def _resign_process_launch(launch: ProcessLaunch) -> ProcessLaunch:
+    """Re-sign trusted host-side field replacement of one launch decision."""
+    unsigned = replace(
+        launch,
+        authority_version=PROCESS_LAUNCH_AUTHORITY_VERSION,
+        authority_nonce=secrets.token_hex(16),
+        authority_digest="",
+        authority_mac="",
+    )
+    digest = hashlib.sha256(_process_launch_authority_bytes(unsigned)).hexdigest()
+    return replace(unsigned, authority_digest=digest, authority_mac=_process_launch_mac(digest))
 
 
 def bind_process_launch_task(launch: ProcessLaunch, task_id: str) -> ProcessLaunch:
@@ -527,6 +737,10 @@ def bind_process_launch_task(launch: ProcessLaunch, task_id: str) -> ProcessLaun
         trusted_readable_roots=launch.trusted_readable_roots,
         additional_permissions=launch.additional_permissions,
         approved_action=launch.approved_action,
+        external_security_enabled=launch.external_security_enabled,
+        security_context=launch.security_context,
+        audit=launch.audit,
+        approval_service=launch.approval_service,
     )
 
 
@@ -665,6 +879,10 @@ def delegate_process_launch_to_private_directory(
         # The private helper action is bound to its exact argv/cwd by
         # execute_captured; it must never inherit an unrelated terminal approval.
         approved_action=None,
+        external_security_enabled=launch.external_security_enabled,
+        security_context=launch.security_context,
+        audit=launch.audit,
+        approval_service=launch.approval_service,
     )
 
 
@@ -792,10 +1010,19 @@ def compile_process_launch(
     *,
     db_path: Path,
     sandbox_preference: SandboxablePreference = SandboxablePreference.REQUIRE,
-    additional_permissions: AdditionalPermissionProfile | None = None,
     approved_action: NormalizedAction | None = None,
+    external_security_enabled: bool = False,
+    audit: Any | None = None,
+    approval_service: Any | None = None,
+    additional_permissions: AdditionalPermissionProfile | None = None,
+    trusted_readable_roots: Sequence[str | Path] = (),
 ) -> ProcessLaunch:
-    """Build filesystem/profile facts and locate only the packaged native helper."""
+    """Build the host launch decision from trusted config and security state.
+
+    ``external_security_enabled`` is supplied by ``Config`` for Gateway requests.
+    Lower-level callers default external runtimes to the legacy host path.
+    Built-in tools remain managed whenever ``profile`` is managed.
+    """
     protected = (
         *_protected_entries(context, db_path),
         *_discovered_sensitive_entries(context),
@@ -806,14 +1033,33 @@ def compile_process_launch(
         deny_entries=protected,
         deny_globs=_protected_globs(context),
     ).profile
+    if (
+        additional_permissions is not None
+        and additional_permissions.sandbox_permissions
+        is SandboxPermissions.REQUIRE_ESCALATED
+    ):
+        profile = PermissionProfile(
+            kind=PermissionProfileKind.DISABLED,
+            network=profile.network,
+        )
+        # The approved escalation is host-bound; a REQUIRE preference would
+        # contradict the disabled profile and always fail resolution.
+        sandbox_preference = SandboxablePreference.AUTO
     from crew.agent.skills import get_builtin_skills_dir
-    from crew.state.home import bundled_runtime_roots
+    from crew.state.home import managed_runtime_read_roots
 
     builtin_skills = get_builtin_skills_dir()
     trusted_roots = [
         *((builtin_skills.resolve(strict=True),) if builtin_skills.is_dir() else ()),
-        *bundled_runtime_roots(),
+        *managed_runtime_read_roots(),
+        *(
+            root.resolve(strict=True)
+            for value in trusted_readable_roots
+            if (root := Path(value).expanduser()).exists()
+        ),
     ]
+    if os.name == "nt" and profile.full_disk_read:
+        trusted_roots.extend(_windows_full_disk_read_roots())
     trusted_roots = list(dict.fromkeys(trusted_roots))
     return issue_process_launch(
         context,
@@ -827,6 +1073,70 @@ def compile_process_launch(
         trusted_readable_roots=(
             tuple(trusted_roots) if profile.kind is PermissionProfileKind.MANAGED else ()
         ),
+        external_security_enabled=(
+            external_security_enabled
+            if profile.kind is PermissionProfileKind.MANAGED
+            else False
+        ),
+        security_context=context,
+        audit=audit,
+        approval_service=approval_service,
+    )
+
+
+_WINDOWS_SENSITIVE_TOP_LEVEL = frozenset(
+    {
+        ".ssh",
+        ".tsh",
+        ".brev",
+        ".gnupg",
+        ".aws",
+        ".azure",
+        ".kube",
+        ".docker",
+        ".config",
+        ".npm",
+        ".pki",
+        ".terraform.d",
+        ".crew",
+        ".ace",
+    }
+)
+
+
+def _windows_full_disk_read_roots() -> tuple[Path, ...]:
+    """Enumerate precise Windows read roots without recursive drive ACL changes."""
+    roots: list[Path] = []
+    for name in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
+        value = os.environ.get(name)
+        if value:
+            root = Path(value).expanduser().resolve(strict=False)
+            if root.exists() and root not in roots:
+                roots.append(root)
+    home = Path.home().expanduser().resolve(strict=False)
+    try:
+        children = tuple(home.iterdir())
+    except OSError:
+        children = ()
+    for child in children:
+        if child.name.lower() in _WINDOWS_SENSITIVE_TOP_LEVEL:
+            continue
+        resolved = child.resolve(strict=False)
+        if resolved.exists() and resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
+def _additional_permissions_summary(launch: ProcessLaunch) -> str:
+    if launch.additional_permissions.empty:
+        return ""
+    from crew.security.models import serialize_additional_permissions
+
+    return json.dumps(
+        serialize_additional_permissions(launch.additional_permissions),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 
@@ -875,7 +1185,10 @@ def shell_argv(command: str) -> tuple[str, ...]:
             script,
         )
     executable = shutil.which("bash") or "/bin/sh"
-    return (str(Path(executable).resolve()), "-lc", command)
+    # Managed runtimes intentionally set HOME to the host user directory so
+    # paths such as ~/Desktop resolve correctly. A non-login shell prevents
+    # that UX improvement from implicitly sourcing host profile scripts.
+    return (str(Path(executable).resolve()), "-c", command)
 
 
 def runtime_platform_key(
@@ -908,7 +1221,6 @@ def packaged_runtime_candidates(repo_root: Path, name: str) -> tuple[Path, ...]:
     platform_key = runtime_platform_key()
     if platform_key:
         candidates.append(repo_root / "security-runtime" / "prebuilt" / platform_key / name)
-    candidates.append(repo_root / "security-runtime" / "bin" / name)
     return tuple(candidates)
 
 
@@ -1100,7 +1412,7 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
         if declared_key is None or current_key is None or declared_key != current_key:
             raise HelperIntegrityError("native security runtime targets a different platform")
     expected_name = str(manifest.get("binary_name", "")).strip()
-    if expected_name != path.name:
+    if expected_name and expected_name != path.name:
         raise HelperIntegrityError("native security runtime manifest names a different binary")
     expected = str(manifest.get("binary_sha256", "")).strip()
     if not expected or len(expected) != 64 or any(
@@ -1330,7 +1642,14 @@ def runtime_source_stale(helper_path: str | Path | None = None) -> bool | None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    expected = str(manifest.get("source_hash", ""))
+    runtime_name = "ace-security-runtime.exe" if os.name == "nt" else "ace-security-runtime"
+    expected = ""
+    for entry in manifest.get("files", []):
+        if isinstance(entry, dict) and entry.get("name") == runtime_name:
+            expected = str(entry.get("source_hash", ""))
+            break
+    if not expected and manifest.get("binary_name") == runtime_name:
+        expected = str(manifest.get("source_hash", ""))
     if not expected:
         return None
     files = sorted(

@@ -29,6 +29,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -43,9 +44,11 @@ import crew as _crew_pkg
 from crew.core.runctx import current_owner_account_id
 from crew.security.launch import (
     ProcessLaunch,
+    audit_execution_result,
     finalize_process_launch,
     minimal_inherited_environment,
     minimal_native_helper_environment,
+    serialize_profile,
     shell_argv,
     validate_process_launch,
 )
@@ -53,6 +56,7 @@ from crew.security.models import (
     HOST_FIXED_SANDBOX_FORBID_SURFACES,
     PermissionProfileKind,
     SandboxablePreference,
+    serialize_additional_permissions,
 )
 from crew.security.process_lifecycle import windows_system_executable
 from crew.tools.output_filters import strip_ansi
@@ -780,6 +784,12 @@ class ProcessSession:
     started_monotonic: float = field(default_factory=time.monotonic, repr=False)
     last_activity_monotonic: float = field(default_factory=time.monotonic, repr=False)
     _watchdog_thread: threading.Thread | None = field(default=None, repr=False)
+    _security_launch: ProcessLaunch | None = field(default=None, repr=False)
+    _security_action: Any | None = field(default=None, repr=False)
+    _security_result_path: Path | None = field(default=None, repr=False)
+    _security_result_nonce: str = field(default="", repr=False)
+    stable_error_code: str = ""
+    sandbox_backend: str = ""
 
 
 class ProcessRegistry:
@@ -1187,6 +1197,8 @@ class ProcessRegistry:
         timeout: float | None = None,
         inactivity_timeout: float | None = None,
         max_output_chars: int = MAX_OUTPUT_CHARS,
+        _security_launch: ProcessLaunch | None = None,
+        _security_action: Any | None = None,
     ) -> ProcessSession:
         """本地后台启动一条命令，立即返回（非阻塞）。
 
@@ -1287,6 +1299,8 @@ class ProcessRegistry:
             sandbox_system_surface=launch.sandbox_system_surface,
             max_output_chars=max_output_chars,
             execution_timeout=execution_timeout,
+            _security_launch=_security_launch,
+            _security_action=_security_action,
             inactivity_timeout=idle_timeout,
         )
 
@@ -1403,6 +1417,14 @@ class ProcessRegistry:
     ) -> ProcessSession:
         """Start through the host-owned security decision; managed never uses a user argv."""
         validate_process_launch(launch)
+        from crew.security.actions import normalize_exec_action
+
+        # Keep this non-fatal: an unavailable cwd must surface as the
+        # launch-identity denial below (or the spawn-local validation),
+        # not as a bare host FileNotFoundError.
+        resolved_cwd = Path(cwd or os.getcwd()).expanduser().resolve(strict=False)
+        command_argv = shell_argv(command)
+        action = normalize_exec_action(command_argv, resolved_cwd)
         if not launch.sandboxed:
             return self.spawn_local(
                 command,
@@ -1412,6 +1434,8 @@ class ProcessRegistry:
                 timeout=timeout,
                 inactivity_timeout=inactivity_timeout,
                 max_output_chars=min(MAX_OUTPUT_CHARS, max_output_bytes),
+                _security_launch=launch,
+                _security_action=action,
                 **session_options,
             )
         owner_account_id = (
@@ -1473,6 +1497,8 @@ class ProcessRegistry:
             authorization_snapshot=signed_snapshot,
             workspace_id=launch.workspace_id,
             execution_timeout=bridge_timeout,
+            security_launch=launch,
+            security_action=action,
             inactivity_timeout=bridge_idle_timeout or None,
             **session_options,
         )
@@ -1495,6 +1521,8 @@ class ProcessRegistry:
         authorization_snapshot: Any = None,
         execution_timeout: float = MAX_PROCESS_TIMEOUT_SECONDS,
         inactivity_timeout: float | None = None,
+        security_launch: ProcessLaunch | None = None,
+        security_action: Any | None = None,
     ) -> ProcessSession:
         """Launch only the fixed Ace bridge; command is sent through stdin."""
         environment = payload.get("env_overrides")
@@ -1538,6 +1566,21 @@ class ProcessRegistry:
             output_ref=str(output_ref or ""),
             authorization_snapshot=authorization_snapshot,
         )
+        result_dir = _checkpoint_path().parent
+        result_dir.mkdir(parents=True, exist_ok=True)
+        result_fd, result_name = tempfile.mkstemp(
+            prefix=".security-result-",
+            suffix=".json",
+            dir=result_dir,
+        )
+        os.close(result_fd)
+        result_path = Path(result_name)
+        result_nonce = uuid.uuid4().hex
+        payload = {
+            **payload,
+            "result_path": str(result_path),
+            "result_nonce": result_nonce,
+        }
         session = ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}", command=command, session_key=session_key,
             owner_account_id=owner_account_id, workspace_id=workspace_id,
@@ -1563,6 +1606,10 @@ class ProcessRegistry:
                 "managed process inactivity timeout",
                 allow_zero=True,
             ),
+            _security_launch=security_launch,
+            _security_action=security_action,
+            _security_result_path=result_path,
+            _security_result_nonce=result_nonce,
         )
         flags = _WINDOWS_PROCESS_FLAGS if _IS_WINDOWS else 0
         from crew.security.background_runner import BRIDGE_BOOTSTRAP_VERSION
@@ -1868,7 +1915,54 @@ class ProcessRegistry:
                 pass
             session.exited = True
             session.exit_code = session.process.returncode
+            self._audit_process_result(session)
             self._move_to_finished(session)
+
+    @staticmethod
+    def _audit_process_result(session: ProcessSession) -> None:
+        launch = session._security_launch
+        action = session._security_action
+        if launch is None or action is None:
+            return
+        result: dict[str, Any] = {}
+        if session._security_result_path is not None:
+            try:
+                candidate = json.loads(session._security_result_path.read_text(encoding="utf-8"))
+                if candidate.get("nonce") == session._security_result_nonce:
+                    result = candidate
+            except (OSError, json.JSONDecodeError):
+                pass
+            finally:
+                try:
+                    session._security_result_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        stable_error_code = str(result.get("stable_error_code") or "")
+        exit_code = result.get("exit_code", session.exit_code)
+        try:
+            parsed_exit_code = int(exit_code) if exit_code is not None else None
+        except (TypeError, ValueError):
+            parsed_exit_code = session.exit_code
+        if launch.managed and not result:
+            stable_error_code = "runtime_crashed"
+        session.stable_error_code = stable_error_code
+        session.sandbox_backend = str(result.get("sandbox_backend") or "")
+        audit_execution_result(
+            launch,
+            action,
+            tool_name="terminal",
+            decision=(
+                "error"
+                if stable_error_code
+                else "completed" if parsed_exit_code == 0 else "failed"
+            ),
+            sandbox_backend=str(
+                result.get("sandbox_backend") or ("" if launch.managed else "host_unconfined")
+            ),
+            capabilities=tuple(str(value) for value in result.get("capabilities", ())),
+            exit_code=parsed_exit_code,
+            stable_error_code=stable_error_code,
+        )
 
     def _check_watch_patterns(self, session: ProcessSession, new_text: str) -> None:
         """扫描新输出中的 watch_patterns 并按限流排队通知。

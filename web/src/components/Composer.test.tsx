@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import Composer from "./Composer";
+import ExternalAgentAvatar from "./ExternalAgentAvatar";
 import type { AppConfig } from "../types";
 
 const noop = () => {};
@@ -78,6 +79,19 @@ describe("Composer team execution tier picker", () => {
     expect(enabledHtml).toContain("agents-picker");
     expect(pendingHtml).toContain("agents-picker");
     expect(enabledHtml).toContain(">外援</button>");
+    expect(enabledHtml).toContain("external-agent-avatar");
     expect(enabledHtml).not.toContain(">Agents</button>");
+  });
+});
+
+describe("shared external-agent avatar", () => {
+  it("keeps the external-agent mark above the provider badge", () => {
+    const html = renderToStaticMarkup(
+      <ExternalAgentAvatar agent={{ provider: "kimi", display_badge: "K" }} size="compact" />,
+    );
+
+    expect(html).not.toContain("external-agent.png");
+    expect(html).toContain(">K</span>");
+    expect(html).toContain("external-agent-avatar--compact");
   });
 });

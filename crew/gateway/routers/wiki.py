@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import getpass
 import uuid
 from typing import Any
 
@@ -15,6 +16,7 @@ from crew.gateway.auth import account_from_request
 from crew.gateway.helpers import safe_public_error
 from crew.state.logging import get_logger
 from crew.wiki._utils import is_wiki_agent_session
+from crew.wiki.capture import CaptureError, CaptureValidationError, capture_text_source
 from crew.wiki.parser import (
     MissingDependencyError,
     guess_mime_type,
@@ -758,23 +760,6 @@ def create_wiki_router(crew) -> APIRouter:
         )
         return {"ok": True, **result}
 
-    @router.get("/summary")
-    async def wiki_summary(request: Request):
-        summarizer = getattr(crew, "_wiki_summarizer", None)
-        if summarizer is None:
-            return JSONResponse({"ok": False, "error": "Wiki 未启用"}, status_code=503)
-        owner = _owner(request)
-        kb_id = _kb_id(request)
-        force = request.query_params.get("force", "").lower() in ("1", "true", "yes")
-        # 普通读取只返回缓存，打开/刷新 Wiki 不能绕过 Agent 隐式调用 LLM。
-        # force=true 是保留给显式管理调用的兼容入口，不参与上传主链路。
-        summary = (
-            await summarizer.generate_kb_summary(owner, kb_id, force=True)
-            if force
-            else summarizer.get_summary(owner, kb_id)
-        )
-        return {"ok": True, **summary.to_dict(), "kb_id": kb_id}
-
     @router.post("/lint")
     async def wiki_lint(request: Request):
         compiler = getattr(crew, "_wiki_compiler", None)
@@ -996,5 +981,65 @@ def create_wiki_router(crew) -> APIRouter:
         store.save_raw(raw, _owner(request), kb_id)
 
         return {"ok": True, "source_id": source_id, "title": filename}
+
+    @router.post("/capture")
+    async def wiki_capture(request: Request):
+        """把一段文本（如浏览器标签页正文）存为不可变 RawSource 并发布 Source 页面。
+
+        与 wiki_capture_text 工具共用 crew.wiki.capture 的入库流水线，
+        这里只做 HTTP 参数解析与响应包装，供面板「存入 Wiki」使用。
+        """
+        store = getattr(crew, "_wiki_store", None)
+        compiler = getattr(crew, "_wiki_compiler", None)
+        if store is None or compiler is None:
+            return JSONResponse({"ok": False, "error": "Wiki 未启用"}, status_code=503)
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": "请求体必须是 JSON"}, status_code=400)
+        if not isinstance(payload, dict):
+            return JSONResponse({"ok": False, "error": "请求体必须是 JSON 对象"}, status_code=400)
+        owner = _owner(request)
+        try:
+            kb_id = normalize_kb_id(payload.get("kb_id"))
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        title = str(payload.get("title") or "")
+        content = str(payload.get("content") or "")
+        source_url = str(payload.get("source_url") or "").strip()
+
+        # 面板文本一律按 web 来源归类（material_kind=article），source_url 供溯源。
+        try:
+            outcome = capture_text_source(
+                store,
+                compiler,
+                title=title,
+                content=content,
+                owner_account_id=owner,
+                kb_id=kb_id,
+                source_type="paste",
+                source_platform="web",
+                source_url=source_url,
+            )
+        except CaptureValidationError as exc:
+            body: dict[str, Any] = {"ok": False, "error": str(exc)}
+            if exc.source_id:
+                body["source_id"] = exc.source_id
+            return JSONResponse(body, status_code=400)
+        except CaptureError as exc:  # raw 已落库，可让 Wiki Agent 挽救
+            log.warning("Wiki 文本捕获失败 source=%s: %s", exc.source_id, exc)
+            return JSONResponse(
+                {"ok": False, "error": f"捕获失败: {exc}", "source_id": exc.source_id},
+                status_code=500,
+            )
+        if outcome.duplicate is not None:
+            return {
+                "ok": True,
+                "source_id": outcome.raw.id,
+                "pages": [],
+                "duplicate": True,
+                "duplicate_of": outcome.duplicate.id,
+            }
+        return {"ok": True, "source_id": outcome.raw.id, "pages": [outcome.page.to_dict(brief=True)]}
 
     return router

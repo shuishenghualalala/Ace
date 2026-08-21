@@ -13,7 +13,7 @@ from datetime import datetime
 import pytest
 
 from crew.core.types import ToolCall
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import current_owner_account_id, current_session_source
 from crew.cron import CronJobStore, CronService, parse_schedule
 from crew.cron.jobs import BJ_TZ, format_bj_timestamp, parse_duration
 from crew.cron.scheduler import IntervalScheduler
@@ -1108,6 +1108,59 @@ async def test_cron_service_run_now_returns_none_for_missing_job(tmp_path):
     svc.mount_owner(OWNER)
     assert await svc.run_now("not_exists", owner_account_id=OWNER) is None
     await svc.stop()
+
+
+async def test_cron_runner_reuses_delivery_session_across_fires():
+    """同一任务多次触发复用固定投递会话（<job_id>_feed），不再每次刷同名新会话。"""
+    async with _cron_runner_app(auto_start=False) as (app, dispatched_envs, notified_payloads):
+        job = app.cron_store.create(
+            name="测试提醒",
+            schedule="every 1h",
+            query="提醒我开会",
+            session_id="source_session_123",
+            workspace_id="default",
+            owner_account_id="u1",
+        )
+        await app.cron_service.start()
+        app.cron_service.mount_owner("u1")
+        await app.cron_service.run_now(job["id"], owner_account_id="u1")
+        await app.cron_service.run_now(job["id"], owner_account_id="u1")
+
+        assert len(dispatched_envs) == 2
+        assert dispatched_envs[0].session_id == f"{job['id']}_feed"
+        assert dispatched_envs[1].session_id == f"{job['id']}_feed"
+        kinds = [payload["kind"] for _, payload in notified_payloads]
+        assert kinds == ["cron_session_created", "cron_session_updated"]
+        # 侧栏只出现一个投递会话
+        sessions = app.session_store.list_sessions(owner_account_id="u1")
+        feed_sessions = [s for s in sessions if s["session_id"] == f"{job['id']}_feed"]
+        assert len(feed_sessions) == 1
+        assert feed_sessions[0]["title"] == "[定时] 测试提醒"
+
+
+async def test_cron_create_origin_on_local_source_rewritten_with_note(tmp_path):
+    """本地会话来源指定 deliver=origin 时，创建期就改写为 new_session 并附带说明。"""
+    store = CronJobStore(str(tmp_path / "c.db"))
+    reg = Registry()
+    register_cron_tools(reg, store)
+
+    token = current_session_source.set({"platform": "local", "chat_id": "s1", "chat_type": "private"})
+    try:
+        res = await reg.execute(
+            ToolCall(
+                "c1",
+                "cron_create",
+                {"name": "提醒", "schedule": "每天9点", "query": "总结", "session_id": "s1", "deliver": "origin"},
+            )
+        )
+    finally:
+        current_session_source.reset(token)
+
+    assert not res.is_error
+    payload = json.loads(res.content)
+    assert payload["deliver"] == "new_session"
+    assert "origin 不可用" in payload["note"]
+    assert store.list()[0]["deliver"] == "new_session"
 
 
 async def test_cron_service_run_now_creates_manual_fire_and_new_session():

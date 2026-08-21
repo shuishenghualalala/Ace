@@ -21,7 +21,7 @@ from crew.security.models import (
     FilesystemOperation,
 )
 from crew.security.policy import filesystem_operation_allowed, settings_for_mode
-from crew.state.home import get_crew_home
+from crew.state.home import get_crew_home, get_owner_runtime_home
 
 
 class FilePolicyResult(StrEnum):
@@ -91,6 +91,32 @@ def assess_file_action(
     return FilePolicyAssessment(FilePolicyResult.REQUIRE_APPROVAL, "项目外路径需要额外授权")
 
 
+def approvable_file_permission_root(
+    context: SecurityContext,
+    target: str | Path,
+    *,
+    db_path: str | Path,
+) -> Path:
+    """Return the native permission boundary that must be shown to the user.
+
+    Protected project metadata is enforced as a directory-level read-only
+    carve-out on every native backend.  A write to one child therefore needs an
+    explicit grant for that displayed directory; silently approving a child and
+    opening the parent would make the UI scope dishonest.
+    """
+    resolved = Path(target).expanduser().resolve(strict=False)
+    candidates = [
+        entry.root
+        for entry in _protected_entries(context, db_path)
+        if entry.access is FilesystemAccess.READ
+        and entry.escalatable
+        and _contains(entry.root, resolved)
+    ]
+    if not candidates:
+        return resolved
+    return max(candidates, key=lambda root: len(root.parts))
+
+
 def _protected_entries(
     context: SecurityContext, db_path: str | Path
 ) -> tuple[FilesystemEntry, ...]:
@@ -99,15 +125,40 @@ def _protected_entries(
         FilesystemEntry(Path(f"{db_path}-wal"), FilesystemAccess.DENY, escalatable=False),
         FilesystemEntry(Path(f"{db_path}-shm"), FilesystemAccess.DENY, escalatable=False),
         FilesystemEntry(Path(f"{db_path}-journal"), FilesystemAccess.DENY, escalatable=False),
-        FilesystemEntry(get_crew_home(), FilesystemAccess.DENY, escalatable=False),
     ]
+    # CREW_HOME also contains the explicitly writable owner task workspaces.
+    # Denying the whole parent makes macOS Seatbelt reject getcwd() even when
+    # the task root itself is present in writable_roots. Protect only the
+    # host-owned stores and credentials that must never be exposed to a child.
+    crew_home = get_crew_home().expanduser().resolve(strict=False)
+    protected_home_paths = (
+        crew_home / ".auth",
+        crew_home / ".env",
+        crew_home / ".gateway-instance",
+        crew_home / "config.yaml",
+        crew_home / "crew_data",
+        crew_home / "logs",
+    )
+    denied.extend(
+        FilesystemEntry(path, FilesystemAccess.DENY, escalatable=False)
+        for path in protected_home_paths
+    )
+    try:
+        owner_home = get_owner_runtime_home(context.owner_account_id, create=False)
+    except (OSError, RuntimeError, ValueError):
+        owner_home = None
+    if owner_home is not None:
+        denied.extend(
+            FilesystemEntry(owner_home / name, FilesystemAccess.DENY, escalatable=False)
+            for name in (".env", "config.yaml")
+        )
     if context.workspace_root is not None:
         workspace_root = context.workspace_root.resolve(strict=False)
         denied.extend(
             FilesystemEntry(
                 workspace_root / name,
                 FilesystemAccess.READ,
-                escalatable=False,
+                escalatable=True,
             )
             for name in (".git", ".agents", ".crew")
         )

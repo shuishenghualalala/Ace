@@ -1,0 +1,78 @@
+name: ci
+
+# PR 门禁：Python 测试 + ruff、Web 构建与测试、Desktop 完整检查。
+# 安全运行时（Rust）的专项门禁见 security-*.yml，Playwright 协议契约见
+# playwright-core-contract.yml，本 workflow 不重复覆盖。
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: pytest + ruff
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          python-version: '3.11'
+      # wiki extra 与 README「验证安装」一节保持一致；e2e 标记默认跳过
+      - run: uv sync --extra dev --extra wiki
+      - run: uv run ruff check .
+      # tests/security 需要构建 Rust 原生运行时，由 security-*.yml 专门覆盖
+      - run: uv run pytest -q --ignore=tests/security
+
+  web:
+    name: web build + test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci--ignore-scripts
+      # build 内含 typecheck（tsc）
+      - run: npm run build
+      - run: npm test
+
+  desktop:
+    name: desktop check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci--ignore-scripts
+      # check = playwright 边界 + typecheck + eslint + vitest + 安全静态门禁
+      #       + stylelint + 重复选择器检测（见 desktop/package.json）
+      - run: npm run check

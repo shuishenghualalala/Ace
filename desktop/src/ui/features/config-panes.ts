@@ -451,9 +451,10 @@ export function bindModelConfigModal(): void {
   });
 }
 
-function modelStatusText(m: ModelOption, isDefault: boolean): string {
-  if (isDefault) return '默认模型';
-  if (m.builtin) return '内置';
+/** 模型卡片状态文案。active/内置 标识不能吞掉「缺少 Key」警示——无 Key 才是用户最需要看到的。 */
+export function modelStatusText(m: ModelOption, isDefault: boolean): string {
+  if (isDefault) return m.has_key ? '默认模型' : '默认模型 · 缺少 Key';
+  if (m.builtin) return m.has_key ? '内置' : '内置 · 缺少 Key';
   if (!m.has_key) return '缺少 Key';
   if (!m.loaded) return '未加载';
   return '已配置';
@@ -525,7 +526,7 @@ export async function renderConfigModels(): Promise<void> {
         ? model.model
         : `${model.model}${model.base_url ? ` · ${model.base_url}` : ''}`,
       status: modelStatusText(model, active),
-      tone: active ? 'success' : !model.has_key ? 'danger' : model.loaded ? 'info' : 'warning',
+      tone: !model.has_key ? 'danger' : active ? 'success' : model.loaded ? 'info' : 'warning',
       selectable: !model.builtin,
       icon: 'process-thinking',
       active,

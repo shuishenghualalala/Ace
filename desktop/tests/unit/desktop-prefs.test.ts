@@ -21,6 +21,17 @@ beforeEach(() => {
 });
 
 describe('desktop prefs', () => {
+  it('keeps strict security mandatory and rejects compatibility opt-out', () => {
+    expect(isStrictSecurityEnabled()).toBe(true);
+
+    // O 基线：严格安全不可关闭，save(false) 直接抛错且不落盘。
+    expect(() => saveStrictSecurityPreference(false)).toThrow('strict security cannot be disabled');
+    expect(isStrictSecurityEnabled()).toBe(true);
+
+    expect(saveStrictSecurityPreference(true).strictSecurityEnabled).toBe(true);
+    expect(isStrictSecurityEnabled()).toBe(true);
+  });
+
   it('preserves unrelated preferences when saving close behavior', () => {
     fs.writeFileSync(
       desktopPrefsPath(),

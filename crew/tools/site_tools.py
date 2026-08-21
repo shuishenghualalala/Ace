@@ -10,7 +10,6 @@ from crew.core.runctx import (
 )
 from crew.tools.registry import Registry, tool_result
 
-
 PUBLISH_SITE_SCHEMA = {
     "name": "publish_site",
     "description": (

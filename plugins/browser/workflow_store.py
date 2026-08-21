@@ -2347,7 +2347,9 @@ def publish_workflow(owner: str, artifact: WorkflowArtifact) -> PublishedWorkflo
                 if written <= 0:
                     raise OSError("short workflow write")
                 offset += written
-            os.fchmod(fd, 0o600)
+            # Windows 无 os.fchmod；create 时的 0o600 已尽力（NTFS 按扩展属性近似）。
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
             os.fsync(fd)
             written_stat = os.fstat(fd)
             stage_identity = (written_stat.st_dev, written_stat.st_ino)

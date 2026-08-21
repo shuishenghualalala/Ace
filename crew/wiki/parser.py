@@ -648,25 +648,39 @@ def _parse_html(path: Path) -> str:
 def fetch_url_to_markdown(
     url: str,
     timeout: float = 15.0,
+    allowed_targets: set[tuple[str, int, str]] | None = None,
     *,
     authorization: Any | None = None,
 ) -> tuple[str, str]:
-    """抓取 URL 并将 HTML 转为 Markdown。返回 (markdown_text, final_url)。"""
-    from crew.tools.security_guard import fetch_authorized_url, fetch_public_url
+    """抓取 URL 并将 HTML 转为 Markdown。返回 (markdown_text, final_url)。
 
-    if authorization is None:
-        response = fetch_public_url(url, timeout=timeout, max_bytes=10_000_000)
-    else:
+    ``authorization`` 走已授权连接计划（O 契约）；``allowed_targets`` 走公共
+    HTTP 且重定向必须落在预先授权的目标集合内（D 契约）。
+    """
+    if authorization is not None:
+        from crew.tools.security_guard import fetch_authorized_url
+
         plan = authorization.plan(url, method="GET")
         response = fetch_authorized_url(
             plan,
             timeout=timeout,
             max_bytes=10_000_000,
         )
-    raw = response.body
-    content_type = response.content_type.split(";", 1)[0].strip().lower()
-    final_url = response.final_url
-    charset = response.charset
+        raw = response.body
+        content_type = response.content_type.split(";", 1)[0].strip().lower()
+        final_url = response.final_url
+        charset = response.charset
+    else:
+        from crew.security.outbound import fetch_public_http
+
+        final_url, raw, content_type, charset = fetch_public_http(
+            url,
+            timeout=timeout,
+            max_bytes=10_000_000,
+            headers={"User-Agent": "Ace/1.0"},
+            allowed_targets=allowed_targets,
+        )
+        content_type = content_type.split(";", 1)[0].strip().lower()
 
     if "html" in content_type:
         try:
@@ -1136,6 +1150,7 @@ async def parse_document_from_bytes_async(content: bytes, filename: str) -> str:
 
     ext = _preflight_document_content(content, filename)
     from tempfile import TemporaryDirectory
+    from crew.security.launch import current_process_launch
 
     with TemporaryDirectory(prefix="ace-wiki-parse-") as tmp:
         tmp_path = _write_private_document_copy(Path(tmp), content, ext)

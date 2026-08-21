@@ -1328,17 +1328,22 @@ async def test_network_context_failure_does_not_echo_host_exception(
 async def test_web_extract_consumes_the_plan_returned_by_authorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    authorized_plan = object()
+    # 合并取舍：web_extract 走本分支的 authorize_network_tool + allowed-targets
+    # 契约（plan 消费契约保留在 wiki/blueprint 路径），这里验证同一意图：
+    # 授权发生在抓取前，且授权过的 authority 集合传给 fetch。
+    authorized: list[tuple[str, str]] = []
 
-    async def authorize(*_args, **_kwargs):
-        return authorized_plan
+    async def authorize(url, *, tool_name, workspace_store, security_service):
+        del workspace_store, security_service
+        authorized.append((url, tool_name))
 
-    def fetch(plan, timeout=10.0):
-        assert plan is authorized_plan
+    def fetch(url, timeout=10.0, allowed_targets=None):
+        assert url == "https://example.test/article"
         assert timeout == 10.0
+        assert allowed_targets is not None
         return "https://example.test/article", "<title>Safe</title><p>Body</p>"
 
-    monkeypatch.setattr(web_tools, "authorize_network_url", authorize)
+    monkeypatch.setattr(web_tools, "authorize_network_tool", authorize)
     monkeypatch.setattr(web_tools, "_fetch_url", fetch)
 
     result = await web_tools.handle_web_extract(
@@ -1348,6 +1353,7 @@ async def test_web_extract_consumes_the_plan_returned_by_authorization(
     )
 
     assert '"title": "Safe"' in result
+    assert authorized == [("https://example.test/article", "web_extract")]
 
 
 async def test_blueprint_http_consumes_each_hop_authorization_plan(

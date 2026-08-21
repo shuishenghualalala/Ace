@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, Protocol
 
 from crew.agent.external.process_lifecycle import (
     ExternalProcessBoundaryError,
@@ -22,10 +23,12 @@ from crew.agent.external.runtime_adapter import (
     RuntimeAdapterProbe,
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
+    NativeInteractiveLineTransport,
+    build_external_runtime_env,
+    open_managed_external_interactive,
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
-
 
 CODEX_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 CODEX_INPUT_LIMIT_BYTES = 1024 * 1024
@@ -39,9 +42,47 @@ class CodexAppServerUnsupported(CodexAdapterError):
     pass
 
 
-class _CodexRpcClient:
+class _CodexLineTransport(Protocol):
+    process: asyncio.subprocess.Process
+
+    async def read_line(self) -> bytes: ...
+
+    async def write(self, data: bytes) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def abort(self) -> None: ...
+
+
+class _SubprocessCodexTransport:
+    """Line transport for the legacy direct path used when external security is off."""
+
     def __init__(self, proc: asyncio.subprocess.Process) -> None:
-        self.proc = proc
+        self.process = proc
+
+    async def read_line(self) -> bytes:
+        if self.process.stdout is None:
+            return b""
+        return await self.process.stdout.readline()
+
+    async def write(self, data: bytes) -> None:
+        if self.process.stdin is None:
+            raise CodexAdapterError("Codex app-server stdin 不可用")
+        self.process.stdin.write(data)
+        await self.process.stdin.drain()
+
+    async def close(self) -> None:
+        if self.process.stdin is not None and not self.process.stdin.is_closing():
+            self.process.stdin.close()
+
+    async def abort(self) -> None:
+        await terminate_process_tree(self.process)
+
+
+class _CodexRpcClient:
+    def __init__(self, transport: _CodexLineTransport) -> None:
+        self.transport = transport
+        self.proc = transport.process
         self.next_id = 1
         self.pending: dict[int, asyncio.Future[Any]] = {}
         self.events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -52,13 +93,11 @@ class _CodexRpcClient:
         self.reader_task = asyncio.create_task(self._read())
 
     async def _read(self) -> None:
-        if self.proc.stdout is None:
-            return
         reader_error: CodexAdapterError | None = None
         try:
             while True:
                 try:
-                    line = await self.proc.stdout.readline()
+                    line = await self.transport.read_line()
                 except ValueError as exc:
                     reader_error = CodexAdapterError("Codex app-server 单行输出超过大小上限")
                     reader_error.__cause__ = exc
@@ -99,15 +138,16 @@ class _CodexRpcClient:
                     future.set_exception(error)
             self.pending.clear()
             await self.events.put({"_crew_error": str(error)})
+            await self.events.put({
+                "method": "$/processExited",
+                "params": {"exitCode": self.proc.returncode},
+            })
 
     async def send(self, payload: dict[str, Any]) -> None:
-        if self.proc.stdin is None:
-            raise CodexAdapterError("Codex app-server stdin 不可用")
         data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
         if len(data) > CODEX_INPUT_LIMIT_BYTES:
             raise CodexAdapterError("Codex app-server 协议输入超过大小上限")
-        self.proc.stdin.write(data)
-        await self.proc.stdin.drain()
+        await self.transport.write(data)
 
     async def request(
         self,
@@ -238,13 +278,39 @@ async def _spawn_app_server(
     request: RuntimeExecutionRequest,
     *,
     trusted_probe: bool = False,
-) -> tuple[asyncio.subprocess.Process, _CodexRpcClient, list[bytes], asyncio.Task[None]]:
-    from crew.security.launch import host_stream_launch_block_reason
+) -> tuple[
+    asyncio.subprocess.Process,
+    _CodexRpcClient,
+    list[bytes],
+    asyncio.Task[None] | None,
+]:
+    from crew.security.launch import (
+        current_process_launch,
+        host_stream_launch_block_reason,
+    )
 
+    launch = current_process_launch.get()
+    if launch is None and not trusted_probe:
+        raise CodexAdapterError("Codex app-server 缺少安全启动上下文")
     if not trusted_probe:
         blocked = host_stream_launch_block_reason()
         if blocked:
             raise CodexAdapterError(f"严格安全约束已拒绝 Codex 宿主流式启动：{blocked}")
+    command = (request.executable_path, "app-server", "--listen", "stdio://")
+    if launch is not None and launch.external_managed:
+        try:
+            session = await open_managed_external_interactive(request, command)
+        except Exception as exc:  # noqa: BLE001 - preserve adapter-level diagnostics
+            raise CodexAdapterError(f"Codex managed runtime 启动失败: {exc}") from exc
+        if session is None:
+            raise CodexAdapterError("Codex managed runtime 未建立 interactive session")
+        transport = NativeInteractiveLineTransport(
+            session,
+            max_line_bytes=CODEX_STREAM_LIMIT_BYTES,
+        )
+        client = _CodexRpcClient(transport)
+        await client.start()
+        return session.process, client, [], None
     cwd = str(Path(request.cwd or ".").expanduser().resolve())
     try:
         spawn = spawn_trusted_probe_process if trusted_probe else spawn_authorized_external_process
@@ -278,9 +344,16 @@ async def _spawn_app_server(
                 stderr_parts[:] = [b"".join(stderr_parts)[-64 * 1024 :]]
 
     stderr_task = asyncio.create_task(_drain())
-    client = _CodexRpcClient(proc)
+    client = _CodexRpcClient(_SubprocessCodexTransport(proc))
     await client.start()
     return proc, client, stderr_parts, stderr_task
+
+
+def _stderr_text(client: _CodexRpcClient, stderr_parts: list[bytes]) -> str:
+    native_lines = getattr(client.transport, "stderr_lines", ())
+    if native_lines:
+        return "\n".join(str(line) for line in native_lines)
+    return b"".join(stderr_parts).decode("utf-8", errors="replace")
 
 
 async def _initialize(client: _CodexRpcClient, timeout: float) -> None:
@@ -343,7 +416,7 @@ async def _stream_codex_app_server(
                     await asyncio.wait_for(proc.wait(), timeout=0.2)
                 except asyncio.TimeoutError:
                     pass
-            stderr = b"".join(stderr_parts).decode("utf-8", errors="replace").lower()
+            stderr = _stderr_text(client, stderr_parts).lower()
             if proc.returncode is not None or "unrecognized subcommand" in stderr:
                 raise CodexAppServerUnsupported(str(exc)) from exc
             raise
@@ -418,6 +491,12 @@ async def _stream_codex_app_server(
             method = str(payload.get("method") or "")
             params = payload.get("params")
             params = params if isinstance(params, dict) else {}
+            if method == "$/processExited":
+                stderr = _stderr_text(client, stderr_parts).strip()
+                detail = f"Codex app-server 已退出（exit={params.get('exitCode')}）"
+                if stderr:
+                    detail = f"{detail}: {stderr[-2000:]}"
+                raise CodexAdapterError(detail)
             event_thread, event_turn = _event_scope(params)
             if not event_thread or not event_turn:
                 continue
@@ -521,7 +600,7 @@ async def _stream_codex_app_server(
                             "toolCallId": tool.tool_call_id,
                             "title": tool.name,
                             "rawInput": {
-                                "name": tool.name,
+                            "name": tool.name,
                                 # 权限分类器从 arguments 里取 command/path 做判定；
                                 # 审批请求的参数嵌套在 item 里（如 item.command），
                                 # 直接给 params 会让分类器看不到命令内容而一律 deny。
@@ -584,30 +663,51 @@ async def _stream_codex_app_server(
                     raise CodexAdapterError(detail or "Codex turn 执行失败")
                 break
     except asyncio.CancelledError:
-        await terminate_process_tree(proc)
+        await client.transport.abort()
         raise
     except CodexAppServerUnsupported:
         raise
     except Exception:
         if not thread_created and proc.returncode is not None:
-            stderr = b"".join(stderr_parts).decode("utf-8", errors="replace")
+            stderr = _stderr_text(client, stderr_parts)
             if "unrecognized subcommand" in stderr.lower():
                 raise CodexAppServerUnsupported(stderr.strip())
         raise
     finally:
         await client.close()
         if terminal_received:
-            await finish_process_after_terminal(proc, stdin=proc.stdin)
+            await client.transport.close()
+            await finish_process_after_terminal(proc)
         else:
-            if proc.stdin is not None and not proc.stdin.is_closing():
-                proc.stdin.close()
-            await terminate_process_tree(proc)
-        await asyncio.gather(stderr_task, return_exceptions=True)
+            await client.transport.abort()
+        if stderr_task is not None:
+            await asyncio.gather(stderr_task, return_exceptions=True)
 
 
 async def stream_codex_events(
     request: RuntimeExecutionRequest,
 ) -> AsyncIterator[ExternalStreamEvent]:
+    from crew.security.launch import current_process_launch
+
+    launch = current_process_launch.get()
+    if launch is not None and launch.managed:
+        from crew.agent.external.cli_adapter import ExternalCliConfig, run_external_cli
+
+        output = await run_external_cli(
+            ExternalCliConfig(
+                provider="codex",
+                executable_path=request.executable_path,
+                prompt=request.prompt,
+                model=request.model if request.model != "default" else "",
+                cwd=request.cwd,
+                system_prompt=request.system_prompt,
+                custom_env=request.custom_env,
+                timeout=request.timeout,
+            )
+        )
+        if output:
+            yield ExternalStreamEvent(kind="text", text=output)
+        return
     try:
         async for event in _stream_codex_app_server(request):
             yield event
@@ -628,6 +728,8 @@ async def stream_codex_events(
                 cwd=request.cwd,
                 system_prompt=request.system_prompt,
                 custom_env=request.custom_env,
+                credential_home_paths=request.credential_home_paths,
+                network_endpoints=request.network_endpoints,
                 timeout=request.timeout,
             )
         )
@@ -670,8 +772,9 @@ class CodexAppServerAdapter:
                     app_server_supported = False
             finally:
                 await client.close()
-                await terminate_process_tree(proc)
-                await asyncio.gather(stderr_task, return_exceptions=True)
+                await client.transport.abort()
+                if stderr_task is not None:
+                    await asyncio.gather(stderr_task, return_exceptions=True)
 
         try:
             from crew.agent.external.cli_adapter import probe_cli_runtime

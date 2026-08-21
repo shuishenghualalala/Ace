@@ -1015,14 +1015,17 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
         async def execute(self, **kwargs):
             network_enabled = kwargs["network_enabled"]
             calls.append(network_enabled)
+            # 合并后的探测契约：marker 写入 + exit 0 + stdout 含探测回显 + full_disk_read。
             Path(kwargs["cwd"]).joinpath("probe-marker").write_text("ok", encoding="ascii")
             return SimpleNamespace(
-                exit_code=1,
+                exit_code=0,
+                stdout="probe",
                 capabilities=RuntimeCapabilities(
                     backend="windows_sandbox_account",
                     filesystem_sandbox=True,
                     process_tree_cleanup=True,
                     managed_network=network_enabled,
+                    full_disk_read=True,
                     explicit_handle_inheritance=True,
                     windows_restricted_token=True,
                     windows_acl=True,
@@ -1067,16 +1070,20 @@ async def test_capabilities_probe_macos_runtime(api, tmp_path, monkeypatch):
             assert command[:3] == (
                 "/bin/sh",
                 "-c",
-                'printf ok > "$1"; cat "$2" >/dev/null',
+                'printf ok > "$1"; printf changed > "$2" 2>/dev/null || true; '
+                'printf changed > "$3" 2>/dev/null || true; cat "$4"',
             )
+            # command[4]=marker（$1）；metadata sentinel 与 outside marker 由真实探测逻辑核验。
             Path(command[4]).write_text("ok", encoding="ascii")
             return SimpleNamespace(
-                exit_code=1,
+                exit_code=0,
+                stdout="probe",
                 capabilities=RuntimeCapabilities(
                     backend="macos_seatbelt",
                     filesystem_sandbox=True,
                     process_tree_cleanup=True,
                     managed_network=network_enabled,
+                    full_disk_read=True,
                     local_binding_control=True,
                 ),
             )
@@ -1214,3 +1221,99 @@ def test_proof_one_time_nonce_rejects_replay(tmp_path, monkeypatch):
     assert verify_desktop_security_proof(proof, method="POST", path=path, body=body) is True
     # Replay of the exact same proof is refused.
     assert verify_desktop_security_proof(proof, method="POST", path=path, body=body) is False
+
+
+@pytest.mark.asyncio
+async def test_conversation_mode_is_set_by_authenticated_desktop_runtime(
+    api,
+):
+    transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await _put_json(
+            client,
+            "/api/security/mode",
+            # 合并取舍：严格安全下 auto_review 需 live probe（ours 的
+            # test_strict_auto_review_requires_live_native_runtime 已覆盖），
+            # 本用例改用 request_approval 验证同一意图：已认证 desktop 可设置模式。
+            {"workspace_id": "default", "session_id": "s1", "mode": "request_approval"},
+        )
+    assert response.status_code == 200
+    assert response.json() == {"mode": "request_approval"}
+
+
+# 合并取舍：dev 的 security_enabled=False 强制 full_access 与本分支
+# strict_security_enabled() 恒 True 的安全模型冲突（安全以本分支为主），
+# 该用例不保留。
+@pytest.mark.asyncio
+async def test_live_probe_checks_broad_read_and_narrow_write_boundaries(monkeypatch):
+    from crew.gateway.routers import security as security_router
+
+    captured: dict[str, object] = {}
+    capabilities = RuntimeCapabilities(
+        backend="test",
+        filesystem_sandbox=True,
+        process_tree_cleanup=True,
+        managed_network=False,
+        full_disk_read=True,
+    )
+
+    class FakeRuntimeClient:
+        def __init__(self, helper_argv):
+            captured["helper_argv"] = helper_argv
+
+        async def execute(self, **kwargs):
+            captured.update(kwargs)
+            workspace = Path(kwargs["cwd"])
+            (workspace / "probe-marker").write_text("ok", encoding="ascii")
+            return SimpleNamespace(
+                exit_code=0,
+                stdout="probe",
+                stderr="",
+                capabilities=capabilities,
+            )
+
+    monkeypatch.setattr(security_router, "NativeRuntimeClient", FakeRuntimeClient)
+
+    result = await security_router._probe_runtime(
+        ("runtime",),
+        system="darwin",
+        network_enabled=False,
+    )
+
+    assert result is capabilities
+    assert captured["full_disk_read"] is True
+    assert captured["writable_roots"] == (captured["cwd"],)
+
+
+@pytest.mark.asyncio
+async def test_full_access_selection_does_not_depend_on_native_runtime(api, monkeypatch):
+    async def unavailable_runtime():
+        raise AssertionError("full access must not probe the managed runtime")
+
+    monkeypatch.setattr(
+        "crew.gateway.routers.security._live_filesystem_runtime",
+        unavailable_runtime,
+    )
+    challenge_path = "/api/security/full-access-challenge"
+    transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 合并后 full_access 需要服务端单次确认 nonce（ours 语义），
+        # 但不得因此探测 managed runtime —— dev 用例的原意。
+        challenge = await client.get(
+            f"{challenge_path}?workspace_id=default&session_id=s1",
+            headers=_headers("GET", challenge_path),
+        )
+        assert challenge.status_code == 200
+        response = await _put_json(
+            client,
+            "/api/security/mode",
+            {
+                "workspace_id": "default",
+                "session_id": "s1",
+                "mode": "full_access",
+                "confirmation_nonce": challenge.json()["nonce"],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"mode": "full_access"}

@@ -370,6 +370,9 @@ class SessionDispatcher:
     async def shutdown(self, *, timeout: float = 10.0) -> None:
         """Stop new admissions, cancel every admitted turn, and wait for cleanup."""
         self._closed = True
+        # hook_registry 是全局单例：实例销毁前必须注销，否则跨实例累积，
+        # 之后每次 session:end 都会扇出到所有已失效 dispatcher
+        hook_registry.unregister("session:end", self._on_session_end)
         tasks = self.active_tasks_snapshot()
         for task in tasks:
             task.cancel()

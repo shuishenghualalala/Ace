@@ -11,18 +11,19 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import platform
 import re
 import tempfile
 import time
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 from crew.agent.external.process_lifecycle import (
     ExternalProcessBoundaryError,
     external_runtime_environment,
     finish_process_after_terminal,
-    resolve_external_executable,
     run_trusted_external_probe,
     spawn_authorized_external_process,
     terminate_process_tree,
@@ -35,12 +36,16 @@ from crew.agent.external.runtime_adapter import (
     RuntimeAdapterProbe,
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
+    NativeInteractiveLineTransport,
+    build_external_runtime_home_files,
+    build_external_runtime_network_permissions,
+    build_external_runtime_env,
+    open_managed_external_interactive,
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
 from crew.security.runtime_client import NativeRuntimeError, RuntimeErrorCode
 from crew.state.logging import get_logger
-
 
 log = get_logger("agent.cli")
 MAX_EXTERNAL_STREAM_OUTPUT_BYTES = 64 * 1024 * 1024
@@ -71,6 +76,299 @@ _CLI_ERROR_MARKERS = (
     "未授权",
     "拒绝",
 )
+
+_PROVIDER_NETWORK_HOSTS = {
+    "codex": (
+        "api.openai.com",
+        "chatgpt.com",
+        "chat.openai.com",
+        "auth.openai.com",
+        "auth.api.openai.org",
+    ),
+    "claude": ("api.anthropic.com", "claude.ai", "statsig.anthropic.com"),
+}
+
+_RUNTIME_CONTROLLED_ENV = frozenset(
+    {
+        "ALL_PROXY",
+        "COMSPEC",
+        "HOME",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "PATH",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "WINDIR",
+    }
+)
+_COMMON_MANAGED_ENV_NAMES = frozenset(
+    {
+        "CURL_CA_BUNDLE",
+        "LANG",
+        "LANGUAGE",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+    }
+)
+_PROVIDER_ENV_PREFIXES = {
+    "codex": ("AZURE_OPENAI_", "CODEX_", "OPENAI_"),
+    "claude": (
+        "ANTHROPIC_",
+        "AWS_",
+        "AZURE_",
+        "CLAUDE_",
+        "GOOGLE_",
+        "VERTEX_",
+    ),
+}
+
+
+def _provider_key(provider: str) -> str:
+    value = provider.strip().lower()
+    if value in {"codex", "openai"}:
+        return "codex"
+    if value in {"claude", "claude-code", "anthropic"}:
+        return "claude"
+    return value
+
+
+def _managed_runtime_env(
+    provider: str,
+    env: dict[str, str],
+    explicit_env: dict[str, str],
+) -> dict[str, str]:
+    """Pass provider-scoped settings while preserving Native Runtime's OS boundary."""
+    explicit_names = {str(name).upper() for name in explicit_env}
+    prefixes = _PROVIDER_ENV_PREFIXES.get(_provider_key(provider), ())
+    result: dict[str, str] = {}
+    for name, value in env.items():
+        normalized = str(name).upper()
+        if normalized in _RUNTIME_CONTROLLED_ENV:
+            continue
+        if (
+            normalized in explicit_names
+            or normalized in _COMMON_MANAGED_ENV_NAMES
+            or normalized.startswith("LC_")
+            or any(normalized.startswith(prefix) for prefix in prefixes)
+        ):
+            result[str(name)] = str(value)
+    return result
+
+
+def _codex_native_executable(executable_path: str) -> Path:
+    """Resolve the npm launcher to its packaged native binary on every supported OS."""
+    source = Path(executable_path).expanduser()
+    try:
+        resolved = source.resolve(strict=True)
+    except OSError:
+        return source.resolve(strict=False)
+    if resolved.suffix.lower() not in {".js", ".cmd", ".bat"}:
+        return resolved
+
+    package_roots: list[Path] = []
+    if resolved.name.lower() == "codex.js" and resolved.parent.name == "bin":
+        package_roots.append(resolved.parent.parent)
+    package_roots.extend(
+        (
+            source.parent / "node_modules" / "@openai" / "codex",
+            resolved.parent / "node_modules" / "@openai" / "codex",
+        )
+    )
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        architecture = "arm64"
+    elif machine in {"amd64", "x64", "x86_64"}:
+        architecture = "x64"
+    else:
+        return resolved
+    if system == "darwin":
+        package_name = f"codex-darwin-{architecture}"
+        target = f"{'aarch64' if architecture == 'arm64' else 'x86_64'}-apple-darwin"
+        executable_name = "codex"
+    elif system == "linux":
+        package_name = f"codex-linux-{architecture}"
+        target = f"{'aarch64' if architecture == 'arm64' else 'x86_64'}-unknown-linux-musl"
+        executable_name = "codex"
+    elif system == "windows":
+        package_name = f"codex-win32-{architecture}"
+        target = f"{'aarch64' if architecture == 'arm64' else 'x86_64'}-pc-windows-msvc"
+        executable_name = "codex.exe"
+    else:
+        return resolved
+    for package_root in dict.fromkeys(package_roots):
+        candidates = (
+            package_root
+            / "node_modules"
+            / "@openai"
+            / package_name
+            / "vendor"
+            / target
+            / "bin"
+            / executable_name,
+            package_root / "vendor" / target / "bin" / executable_name,
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate.resolve(strict=True)
+    return resolved
+
+
+def _claude_native_executable(executable_path: str) -> Path:
+    """Resolve Windows npm command shims without weakening the executable boundary."""
+    source = Path(executable_path).expanduser()
+    try:
+        resolved = source.resolve(strict=True)
+    except OSError:
+        return source.resolve(strict=False)
+    if resolved.suffix.lower() not in {".bat", ".cmd", ".ps1"}:
+        return resolved
+    for root in dict.fromkeys((source.parent, resolved.parent)):
+        candidate = (
+            root
+            / "node_modules"
+            / "@anthropic-ai"
+            / "claude-code"
+            / "bin"
+            / "claude.exe"
+        )
+        if candidate.is_file():
+            return candidate.resolve(strict=True)
+    return resolved
+
+
+def _managed_external_executable(provider: str, executable_path: str) -> Path:
+    provider = _provider_key(provider)
+    if provider == "codex":
+        return _codex_native_executable(executable_path)
+    if provider == "claude":
+        return _claude_native_executable(executable_path)
+    return Path(executable_path).expanduser().resolve(strict=False)
+
+
+def _managed_default_args(provider: str, args: list[str]) -> list[str]:
+    """Delegate prompts to the outer sandbox and disable nested interactive policy."""
+    provider = _provider_key(provider)
+    if provider == "codex" and args[:1] == ["exec"]:
+        return [
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--color",
+            "never",
+            *args[1:],
+        ]
+    if provider == "claude":
+        result = list(args)
+        try:
+            output_index = result.index("--output-format") + 1
+            result[output_index] = "json"
+        except (ValueError, IndexError):
+            result.extend(("--output-format", "json"))
+        result.extend(
+            (
+                "--permission-mode",
+                "bypassPermissions",
+                "--safe-mode",
+                "--no-session-persistence",
+            )
+        )
+        return result
+    return args
+
+
+async def _authorized_external_launch(
+    *,
+    provider: str,
+    executable_path: str,
+    cwd: Path,
+    custom_env: dict[str, str],
+):
+    """Return a launch with an approved, provider-scoped public network overlay."""
+    from crew.security.actions import normalize_exec_action
+    from crew.security.approvals import ApprovalDecision
+    from crew.security.launch import current_process_launch
+    from crew.security.models import (
+        AdditionalPermissionProfile,
+        NetworkEntry,
+        SandboxPermissions,
+    )
+    from crew.security.outbound import parse_public_http_target
+
+    launch = current_process_launch.get()
+    if launch is None or not launch.managed:
+        return launch
+    provider = _provider_key(provider)
+    targets = [
+        NetworkEntry(host, 443, "https")
+        for host in _PROVIDER_NETWORK_HOSTS.get(provider, ())
+    ]
+    base_url_names = {
+        "codex": ("OPENAI_BASE_URL",),
+        "claude": ("ANTHROPIC_BASE_URL",),
+    }.get(provider, ())
+    for name in base_url_names:
+        value = str(custom_env.get(name) or "").strip()
+        if value:
+            target = parse_public_http_target(value)
+            targets.append(NetworkEntry(target.host, target.port, target.protocol))
+    if not targets:
+        return launch
+    if launch.security_context is None or launch.approval_service is None:
+        raise NativeRuntimeError(
+            RuntimeErrorCode.SANDBOX_UNAVAILABLE,
+            "external agent network approval context is missing",
+        )
+    network = tuple(
+        dict.fromkeys(
+            (
+                *launch.additional_permissions.network,
+                *targets,
+            )
+        )
+    )
+    additional = AdditionalPermissionProfile(
+        filesystem=launch.additional_permissions.filesystem,
+        network=network,
+        allow_local_binding=launch.additional_permissions.allow_local_binding,
+        sandbox_permissions=SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS,
+    )
+    action = normalize_exec_action(
+        (str(Path(executable_path).expanduser().resolve(strict=False)), "external-agent", provider),
+        cwd,
+    )
+    service = launch.approval_service
+    authorization = service.authorize_exec_action(
+        launch.security_context,
+        action,
+        tool_name="external_agent",
+        risk_class="external_agent_network",
+        requires_approval=True,
+        additional_permissions=additional,
+    )
+    if not authorization.allowed:
+        if authorization.request is None:
+            raise ExternalCliError("外部智能体联网已被安全策略拒绝")
+        outcome = await service.await_decision(authorization.request["request_id"])
+        if outcome is None or outcome.decision is ApprovalDecision.REJECT:
+            raise ExternalCliError("用户未批准外部智能体联网")
+        authorization = service.authorize_exec_action(
+            launch.security_context,
+            action,
+            tool_name="external_agent",
+            risk_class="external_agent_network",
+            requires_approval=True,
+            additional_permissions=additional,
+        )
+        if not authorization.allowed:
+            raise ExternalCliError("批准后外部智能体联网授权校验失败，请重试")
+    return replace(launch, additional_permissions=additional)
 
 
 def _compact_cli_error(
@@ -124,6 +422,8 @@ class ExternalCliConfig:
     system_prompt: str = ""
     custom_args: list[str] = field(default_factory=list)
     custom_env: dict[str, str] = field(default_factory=dict)
+    credential_home_paths: tuple[str, ...] = ()
+    network_endpoints: tuple[str, ...] = ()
     timeout: float = 120.0
 
 
@@ -186,7 +486,11 @@ def _write_claude_mcp_config(request: RuntimeExecutionRequest) -> str:
             for server in request.mcp_servers
         }
     }
-    fd, path = tempfile.mkstemp(prefix="crew-claude-mcp-", suffix=".json")
+    fd, path = tempfile.mkstemp(
+        prefix=".crew-claude-mcp-",
+        suffix=".json",
+        dir=str(Path(request.cwd or ".").expanduser().resolve(strict=True)),
+    )
     try:
         if hasattr(os, "fchmod"):
             os.fchmod(fd, 0o600)
@@ -203,6 +507,31 @@ def _write_claude_mcp_config(request: RuntimeExecutionRequest) -> str:
             pass
         raise
     return path
+
+
+class _SubprocessClaudeLineTransport:
+    """Line transport for the legacy direct path used when external security is off."""
+
+    def __init__(self, proc: asyncio.subprocess.Process) -> None:
+        self.process = proc
+
+    async def read_line(self) -> bytes:
+        if self.process.stdout is None:
+            return b""
+        return await self.process.stdout.readline()
+
+    async def write(self, data: bytes) -> None:
+        if self.process.stdin is None:
+            raise ExternalCliError("Claude CLI stdin 不可用")
+        self.process.stdin.write(data)
+        await self.process.stdin.drain()
+
+    async def close(self) -> None:
+        if self.process.stdin is not None and not self.process.stdin.is_closing():
+            self.process.stdin.close()
+
+    async def abort(self) -> None:
+        await terminate_process_tree(self.process)
 
 
 def default_cli_args(provider: str, prompt: str, model: str = "") -> tuple[list[str], str | None]:
@@ -552,11 +881,11 @@ def _claude_control_response(request_id: str, allow: bool, tool_input: Any) -> d
 async def _stream_claude_once(
     request: RuntimeExecutionRequest,
 ) -> AsyncIterator[ExternalStreamEvent]:
-    from crew.security.launch import host_stream_launch_block_reason
+    from crew.security.launch import current_process_launch
 
-    blocked = host_stream_launch_block_reason()
-    if blocked:
-        raise ExternalCliError(f"严格安全约束已拒绝 Claude Code 宿主流式启动：{blocked}")
+    launch = current_process_launch.get()
+    if launch is None:
+        raise ExternalCliError("Claude Code 缺少安全启动上下文")
     cwd = str(Path(request.cwd or ".").expanduser().resolve())
     try:
         custom_env = validate_external_env_overrides(request.custom_env)
@@ -581,26 +910,42 @@ async def _stream_claude_once(
     if mcp_config_path:
         args.extend(["--mcp-config", mcp_config_path])
     args.extend(_filtered_claude_custom_args(request.custom_args))
-    try:
-        proc = await spawn_authorized_external_process(
-            request.executable_path,
-            *args,
-            cwd=cwd,
-            custom_env=custom_env,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=64 * 1024 * 1024,
+    command = (request.executable_path, *args)
+    native_session = None
+    if launch.external_managed:
+        try:
+            native_session = await open_managed_external_interactive(request, command)
+        except Exception as exc:  # noqa: BLE001 - preserve adapter-level diagnostics
+            raise ExternalCliError(f"Claude Code managed runtime 启动失败: {exc}") from exc
+        if native_session is None:
+            raise ExternalCliError("Claude Code managed runtime 未建立 interactive session")
+        proc = native_session.process
+        transport = NativeInteractiveLineTransport(
+            native_session,
+            max_line_bytes=64 * 1024 * 1024,
         )
-    except (OSError, ExternalProcessBoundaryError) as exc:
-        if mcp_config_path:
-            try:
-                os.remove(mcp_config_path)
-            except OSError:
-                pass
-        if isinstance(exc, FileNotFoundError):
-            raise ExternalCliError(f"找不到可执行文件: {request.executable_path}") from exc
-        raise ExternalCliError(f"Claude Code 启动失败: {exc}") from exc
+    else:
+        try:
+            proc = await spawn_authorized_external_process(
+                request.executable_path,
+                *args,
+                cwd=cwd,
+                custom_env=custom_env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=64 * 1024 * 1024,
+            )
+        except (OSError, ExternalProcessBoundaryError) as exc:
+            if mcp_config_path:
+                try:
+                    os.remove(mcp_config_path)
+                except OSError:
+                    pass
+            if isinstance(exc, FileNotFoundError):
+                raise ExternalCliError(f"找不到可执行文件: {request.executable_path}") from exc
+            raise ExternalCliError(f"Claude Code 启动失败: {exc}") from exc
+        transport = _SubprocessClaudeLineTransport(proc)
 
     stderr_parts: list[bytes] = []
 
@@ -615,7 +960,7 @@ async def _stream_claude_once(
             if sum(map(len, stderr_parts)) > 64 * 1024:
                 stderr_parts[:] = [b"".join(stderr_parts)[-64 * 1024 :]]
 
-    stderr_task = asyncio.create_task(_drain_stderr())
+    stderr_task = None if native_session is not None else asyncio.create_task(_drain_stderr())
     emitted_output = False
     saw_partial_text = False
     session_emitted = False
@@ -629,13 +974,8 @@ async def _stream_claude_once(
             "content": [{"type": "text", "text": request.prompt}],
         },
     }
-    if proc.stdin is None or proc.stdout is None:
-        await terminate_process_tree(proc)
-        raise ExternalCliError("Claude CLI 未建立 stdin/stdout 管道")
-
     async def _write_initial_prompt() -> None:
-        proc.stdin.write(_bounded_json_line(initial))
-        await proc.stdin.drain()
+        await transport.write(_bounded_json_line(initial))
 
     # Multica-compatible ordering: start the writer as a task and immediately
     # drain stdout. Some Claude builds emit startup JSON before reading stdin.
@@ -651,7 +991,7 @@ async def _stream_claude_once(
                 raise ExternalCliError("Claude Code 调用总时长超时")
             try:
                 line = await asyncio.wait_for(
-                    proc.stdout.readline(),
+                    transport.read_line(),
                     timeout=min(request.timeout, hard_remaining),
                 )
             except asyncio.TimeoutError as exc:
@@ -729,8 +1069,7 @@ async def _stream_claude_once(
                 )
                 response = _claude_control_response(request_id, decision == "allow", tool_input)
                 await writer_task
-                proc.stdin.write(_bounded_json_line(response))
-                await proc.stdin.drain()
+                await transport.write(_bounded_json_line(response))
             elif event_type == "result":
                 terminal_received = True
                 usage = _claude_usage(payload)
@@ -747,7 +1086,6 @@ async def _stream_claude_once(
                 break
         if terminal_received:
             await writer_task
-            await finish_process_after_terminal(proc, stdin=proc.stdin)
         else:
             remaining = hard_deadline - loop.time()
             if remaining <= 0:
@@ -759,7 +1097,12 @@ async def _stream_claude_once(
                 )
             except asyncio.TimeoutError as exc:
                 raise ExternalCliError("Claude Code 进程退出超时") from exc
-        stderr = b"".join(stderr_parts).decode("utf-8", errors="replace").strip()
+        native_stderr = getattr(transport, "stderr_lines", ())
+        stderr = (
+            "\n".join(str(line) for line in native_stderr)
+            if native_stderr
+            else b"".join(stderr_parts).decode("utf-8", errors="replace")
+        ).strip()
         if proc.returncode and not terminal_received:
             compact = _compact_cli_error(
                 stderr,
@@ -782,16 +1125,18 @@ async def _stream_claude_once(
             )
         await writer_task
     except asyncio.CancelledError:
-        await terminate_process_tree(proc)
+        await transport.abort()
         raise
     finally:
         if terminal_received:
-            await finish_process_after_terminal(proc, stdin=proc.stdin)
+            await transport.close()
+            await finish_process_after_terminal(proc)
         else:
-            if proc.stdin is not None and not proc.stdin.is_closing():
-                proc.stdin.close()
-            await terminate_process_tree(proc)
-        await asyncio.gather(stderr_task, writer_task, return_exceptions=True)
+            await transport.abort()
+        tasks: list[asyncio.Task[Any]] = [writer_task]
+        if stderr_task is not None:
+            tasks.append(stderr_task)
+        await asyncio.gather(*tasks, return_exceptions=True)
         if mcp_config_path:
             try:
                 os.remove(mcp_config_path)
@@ -803,6 +1148,26 @@ async def stream_claude_events(
     request: RuntimeExecutionRequest,
 ) -> AsyncIterator[ExternalStreamEvent]:
     """Stream one Claude Code turn as protocol-neutral external events."""
+
+    from crew.security.launch import current_process_launch
+
+    launch = current_process_launch.get()
+    if launch is not None and launch.managed:
+        output = await run_external_cli(
+            ExternalCliConfig(
+                provider="claude",
+                executable_path=request.executable_path,
+                prompt=request.prompt,
+                model=request.model if request.model != "default" else "",
+                cwd=request.cwd,
+                system_prompt=request.system_prompt,
+                custom_env=request.custom_env,
+                timeout=request.timeout,
+            )
+        )
+        if output:
+            yield ExternalStreamEvent(kind="text", text=output)
+        return
 
     async for event in _stream_claude_once(request):
         yield event
@@ -883,6 +1248,7 @@ async def run_external_cli(config: ExternalCliConfig) -> str:
         prompt = f"{config.system_prompt}\n\n---\n\n{config.prompt}"
 
     args = list(config.custom_args)
+    using_default_args = not args
     stdin_text: str | None = None
     if not args:
         args, stdin_text = default_cli_args(config.provider, prompt, config.model)
@@ -914,32 +1280,65 @@ async def run_external_cli(config: ExternalCliConfig) -> str:
             config.model or "default",
             process_id,
         )
-
+    # 宿主路径快照 fail-closed 拒绝未声明的凭据环境：基础 env 必须走
+    # 白名单净化（external_runtime_environment），owner 的 provider 凭据只
+    # 允许经 managed native runtime 通道（env_overrides/runtime_env）下发。
+    env = external_runtime_environment(config.custom_env)
     try:
-        from crew.security.launch import execute_captured
-
-        custom_env = validate_external_env_overrides(config.custom_env)
-        env = external_runtime_environment(custom_env)
-        executable = resolve_external_executable(
-            config.executable_path,
-            environment=env,
+        from crew.security.launch import (
+            current_process_launch,
+            execute_captured,
+            use_process_launch,
         )
-        argv_size = sum(len(str(part).encode("utf-8")) for part in (executable, *args))
+
+        projected_home_files = build_external_runtime_home_files(config.credential_home_paths)
+        additional_permissions = build_external_runtime_network_permissions(
+            projected_home_files,
+            config.network_endpoints,
+        )
+
+        launch = current_process_launch.get()
+        managed = launch is not None and launch.managed
+        executable_path = (
+            _managed_external_executable(config.provider, config.executable_path)
+            if managed
+            else Path(config.executable_path)
+        )
+        if managed and using_default_args:
+            args = _managed_default_args(config.provider, args)
+        effective_launch = await _authorized_external_launch(
+            provider=config.provider,
+            executable_path=str(executable_path),
+            cwd=Path(cwd),
+            custom_env=env,
+        )
+        runtime_env = (
+            _managed_runtime_env(config.provider, env, config.custom_env)
+            if managed
+            else config.custom_env
+        )
+        argv_size = sum(len(str(part).encode("utf-8")) for part in (str(executable_path), *args))
         stdin_bytes = stdin_text.encode("utf-8") if stdin_text is not None else None
         if argv_size > MAX_EXTERNAL_INPUT_BYTES or (
             stdin_bytes is not None and len(stdin_bytes) > MAX_EXTERNAL_INPUT_BYTES
         ):
             raise ExternalCliError(f"{config.provider} CLI 输入超过大小上限")
-        result = await execute_captured(
-            (executable, *args),
-            cwd=Path(cwd),
-            env=env,
-            stdin=stdin_bytes,
-            env_overrides=custom_env,
-            timeout=config.timeout,
-            on_started=_mark_started,
-            on_output=_mark_first_io,
-        )
+
+        with use_process_launch(effective_launch):
+            result = await execute_captured(
+                (str(executable_path), *args),
+                cwd=Path(cwd),
+                env=env,
+                stdin=stdin_text.encode("utf-8") if stdin_text is not None else None,
+                home_files=projected_home_files,
+                additional_permissions=additional_permissions,
+                env_overrides=runtime_env,
+                timeout=config.timeout,
+                on_started=_mark_started,
+                on_output=_mark_first_io,
+                tool_name="external_agent_cli",
+                external=not managed,
+            )
     except FileNotFoundError as exc:
         raise ExternalCliError(f"找不到可执行文件: {config.executable_path}") from exc
     except ExternalProcessBoundaryError as exc:

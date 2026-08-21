@@ -24,6 +24,7 @@ describe('global capability management copy', () => {
 
   it('surfaces local skills with a local badge and symlink install note', () => {
     expect(source).toContain("source: 'local'");
+    expect(source).toContain("badges: ['local']");
     expect(source).toContain("badge === 'local' ? '本地'");
     expect(source).toContain('~/.agents/skills');
     expect(source).toContain('将以软链方式安装');

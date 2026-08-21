@@ -887,7 +887,7 @@ def register_subagent_tools(
             display_name="运行子智能体",
             ui_label_template="运行子智能体 {agent_type}",
             should_defer=True,
-            search_hint="run preset subagent specialist background task",
+            search_hint="run preset subagent specialist background task 运行 预设 子智能体 委派 知识库 wiki",
         )
         # collect 仅在支持后台时才有意义
         if tasks is not None:

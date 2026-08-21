@@ -19,8 +19,9 @@ from crew.security.models import (
     NetworkAccess,
     NetworkEntry,
     NetworkPolicy,
-    PermissionProfile,
+    PermissionProfile,
     PermissionProfileKind,
+    SandboxPermissions,
     SecurityModeSettings,
 )
 from crew.state.home import get_crew_home
@@ -54,13 +55,8 @@ def settings_for_mode(
         else ()
     )
     if mode is ConversationPermissionMode.FULL_ACCESS:
-        # “完全访问”是宽权限受管模式，不再等同宿主裸跑。开放 workspace 与
-        # 当前用户 home，随后由更具体、不可升级的 deny_entries 覆盖 Ace
-        # DB/proof/identity/审计和 protected metadata；home 外仍需精确批准。
-        user_home = Path.home().resolve(strict=False)
-        broad_roots = {entry.root for entry in filesystem}
-        if user_home != get_crew_home().resolve(strict=False) and user_home not in broad_roots:
-            filesystem = (*filesystem, FilesystemEntry(user_home, FilesystemAccess.READ_WRITE))
+        # 完全访问权限明确选择宿主用户权限，不再编译文件或网络沙箱。
+        # 不可逾越的破坏性红线仍由终端 hardline 与结构化文件根目录检查负责。
         return SecurityModeSettings(
             profile=PermissionProfile(
                 kind=PermissionProfileKind.MANAGED,
@@ -68,11 +64,12 @@ def settings_for_mode(
                 filesystem_globs=deny_globs,
                 network=NetworkPolicy.RESTRICTED,
             ),
-            approval_policy=ApprovalPolicy.REQUEST,
+            approval_policy=ApprovalPolicy.NEVER,
         )
 
     profile = PermissionProfile(
         kind=PermissionProfileKind.MANAGED,
+        full_disk_read=True,
         filesystem=(*filesystem, *deny_entries),
         filesystem_globs=deny_globs,
         network=NetworkPolicy.RESTRICTED,
@@ -117,7 +114,7 @@ def filesystem_operation_allowed(
         if _contains(entry.root, resolved)
     ]
     if not matches:
-        return False
+        return operation is FilesystemOperation.READ and profile.full_disk_read
     specificity = max(len(entry.root.parts) for entry in matches)
     selected = [entry for entry in matches if len(entry.root.parts) == specificity]
     if any(entry.access is FilesystemAccess.DENY for entry in selected):
@@ -306,6 +303,7 @@ def normalize_additional_permissions(
         filesystem=tuple(filesystem),
         network=tuple(network),
         allow_local_binding=bool(value.allow_local_binding),
+        sandbox_permissions=value.sandbox_permissions,
     )
 
 
@@ -313,7 +311,12 @@ def deserialize_additional_permissions(value: object) -> AdditionalPermissionPro
     """Parse an untrusted API/UI capability payload with a strict schema."""
     if not isinstance(value, Mapping):
         raise ValueError("额外权限必须是对象")
-    unknown = set(value) - {"filesystem", "network", "allow_local_binding"}
+    unknown = set(value) - {
+        "filesystem",
+        "network",
+        "allow_local_binding",
+        "sandbox_permissions",
+    }
     if unknown:
         raise ValueError(f"额外权限包含未知字段: {sorted(map(str, unknown))}")
 
@@ -398,11 +401,19 @@ def deserialize_additional_permissions(value: object) -> AdditionalPermissionPro
     local_binding = value.get("allow_local_binding", False)
     if not isinstance(local_binding, bool):
         raise ValueError("allow_local_binding 必须是布尔值")
+    raw_sandbox = value.get(
+        "sandbox_permissions", SandboxPermissions.USE_DEFAULT.value
+    )
+    try:
+        sandbox_permissions = SandboxPermissions(str(raw_sandbox))
+    except ValueError as exc:
+        raise ValueError("sandbox_permissions 无效") from exc
     return normalize_additional_permissions(
         AdditionalPermissionProfile(
             filesystem=tuple(filesystem),
             network=tuple(network),
             allow_local_binding=local_binding,
+            sandbox_permissions=sandbox_permissions,
         )
     )
 

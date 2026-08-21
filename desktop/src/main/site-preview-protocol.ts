@@ -4,6 +4,21 @@ import { protocol } from 'electron';
 
 export const SITE_PREVIEW_SCHEME = 'ace-site';
 
+export const SITE_PREVIEW_CSP = [
+  "default-src 'none'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "media-src 'self' data: blob:",
+  "connect-src 'none'",
+  'frame-src ace-site:',
+  "worker-src 'self' blob:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join('; ');
+
 type GatewayResolver = () => Promise<{
   baseUrl: string;
   headers: (pathname: string) => Record<string, string>;
@@ -87,9 +102,14 @@ export function registerSitePreviewProtocol(resolveGateway: GatewayResolver): vo
         if (!resolved.assetPath) {
           return new Response(previewErrorDocument(PREVIEW_UPSTREAM_FAILURE), {
             status: 200,
-            headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'no-store',
+              'Content-Security-Policy': SITE_PREVIEW_CSP,
+            },
           });
         }
+        // 上游失败：固定文案 + 502，不回显上游错误体（可能包含网关内部信息）。
         return new Response(PREVIEW_UPSTREAM_FAILURE, {
           status: 502,
           headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
@@ -100,7 +120,11 @@ export function registerSitePreviewProtocol(resolveGateway: GatewayResolver): vo
         console.warn(`[ace-site] ${resolved.assetId}/index.html -> ${message}`);
         return new Response(previewErrorDocument(message), {
           status: 200,
-          headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'Content-Security-Policy': SITE_PREVIEW_CSP,
+          },
         });
       }
       console.log(`[ace-site] ${resolved.assetId}/${resolved.assetPath || 'index.html'} -> 200 ${contentType}`);
@@ -111,6 +135,7 @@ export function registerSitePreviewProtocol(resolveGateway: GatewayResolver): vo
           'Content-Type': contentType,
           'Cache-Control': 'no-store',
           'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': SITE_PREVIEW_CSP,
         },
       });
     } catch (error) {
@@ -120,7 +145,11 @@ export function registerSitePreviewProtocol(resolveGateway: GatewayResolver): vo
       );
       return new Response(previewErrorDocument(PREVIEW_UPSTREAM_FAILURE), {
         status: 200,
-        headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Content-Security-Policy': SITE_PREVIEW_CSP,
+        },
       });
     }
   });

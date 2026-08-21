@@ -40,7 +40,11 @@ from crew.agent.external.acp_adapter import (
 from crew.agent.external.cli_adapter import (
     ClaudeStreamJsonAdapter,
     ExternalCliConfig,
+    _authorized_external_launch,
+    _claude_native_executable,
+    _codex_native_executable,
     _compact_cli_error,
+    _managed_default_args,
     run_external_cli,
     stream_claude_events,
 )
@@ -57,6 +61,8 @@ from crew.agent.external.runtime_adapter import (
     ExternalStreamEvent,
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
+    build_external_runtime_home_files,
+    build_external_runtime_network_permissions,
     runtime_adapter_ids,
 )
 from crew.agent.external.store import ExternalAgentStore
@@ -67,8 +73,9 @@ from crew.core.envelope import ResponseChunk
 from crew.core.types import Message, ToolCall
 from crew.gateway.helpers import role_markdown, suggest_role_description, with_session_agent_labels
 from crew.security.context import SecurityContext
-from crew.security.launch import current_process_launch, issue_process_launch
+from crew.security.launch import ProcessLaunch, current_process_launch, issue_process_launch
 from crew.security.models import PermissionProfile, PermissionProfileKind
+from crew.security.service import ExecAuthorization
 from crew.state.config import Config
 from crew.team.formation import build_agent_profile, fast_team_suggestion
 from crew.team.roles import CREW_BUILTIN_AGENT_ID, all_role_public_payloads
@@ -144,6 +151,320 @@ def test_external_runtime_env_allows_only_host_basics_and_explicit_settings(monk
     assert "CREW_INTERNAL_SECRET" not in env
     assert "CREW_ENV_FILE" not in env
     assert "CREW_RUNTIME_SECRET" not in env
+
+
+def test_external_runtime_projects_only_declared_home_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".kimi-code" / "oauth").mkdir(parents=True)
+    (tmp_path / ".kimi-code" / "oauth" / "kimi-code").write_text("token", encoding="utf-8")
+    (tmp_path / "unlisted-secret").write_text("must-not-project", encoding="utf-8")
+
+    projected = build_external_runtime_home_files(
+        (".kimi-code/oauth/kimi-code", "../escape")
+    )
+
+    assert projected == {".kimi-code/oauth/kimi-code": b"token"}
+
+
+def test_external_runtime_network_permissions_come_from_host_declarations():
+    permissions = build_external_runtime_network_permissions({
+        ".runtime/config.toml": b'''\
+base_url = "https://api.example.test/v1"
+backup_url = "https://api.example.test/v2"
+local_url = "http://127.0.0.1:8765/v1"
+insecure_remote = "http://insecure.example.test/v1"
+wildcard = "https://*.example.test/v1"
+''',
+    }, (
+        "https://auth.example.test/oauth/token",
+        "https://api.example.test/duplicate",
+        "http://insecure-declared.example.test",
+        "https://*.invalid.example.test",
+    ))
+
+    assert [
+        (entry.host, entry.port, entry.protocol, entry.allow_private, entry.escalatable)
+        for entry in permissions.network
+    ] == [
+        ("auth.example.test", 443, "https", False, False),
+        ("api.example.test", 443, "https", False, False),
+        ("127.0.0.1", 8765, "http", True, False),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+async def test_managed_codex_and_claude_use_captured_one_shot_instead_of_host_stream(
+    monkeypatch,
+    tmp_path,
+    provider,
+):
+    from crew.agent.external import cli_adapter, codex_adapter
+
+    calls: list[ExternalCliConfig] = []
+
+    async def captured(config: ExternalCliConfig) -> str:
+        calls.append(config)
+        return "managed result"
+
+    monkeypatch.setattr(cli_adapter, "run_external_cli", captured)
+    token = current_process_launch.set(
+        # 本分支语义：managed = 实际进入沙箱（sandboxed），仅 MANAGED profile 不算。
+        ProcessLaunch(
+            PermissionProfile(PermissionProfileKind.MANAGED), sandboxed=True
+        )
+    )
+    request = RuntimeExecutionRequest(
+        executable_path=str(tmp_path / provider),
+        provider=provider,
+        prompt="hello",
+        cwd=str(tmp_path),
+    )
+    try:
+        stream = (
+            codex_adapter.stream_codex_events(request)
+            if provider == "codex"
+            else cli_adapter.stream_claude_events(request)
+        )
+        events = [event async for event in stream]
+    finally:
+        current_process_launch.reset(token)
+
+    assert [event.text for event in events] == ["managed result"]
+    assert len(calls) == 1
+    assert calls[0].provider == provider
+
+
+def test_managed_external_default_args_delegate_policy_to_native_runtime():
+    codex = _managed_default_args("codex", ["exec", "--skip-git-repo-check", "hello"])
+    assert codex[:2] == ["exec", "--dangerously-bypass-approvals-and-sandbox"]
+    assert "--ephemeral" in codex
+    assert "--ignore-user-config" in codex
+
+    claude = _managed_default_args(
+        "claude-code",
+        ["-p", "hello", "--output-format", "stream-json"],
+    )
+    assert claude[claude.index("--output-format") + 1] == "json"
+    assert claude[claude.index("--permission-mode") + 1] == "bypassPermissions"
+    assert "--safe-mode" in claude
+    assert "--no-session-persistence" in claude
+
+
+def test_codex_npm_launcher_resolves_packaged_windows_native_binary(monkeypatch, tmp_path):
+    launcher = tmp_path / "bin" / "codex.cmd"
+    launcher.parent.mkdir()
+    launcher.write_text("@node codex.js", encoding="utf-8")
+    native = (
+        launcher.parent
+        / "node_modules"
+        / "@openai"
+        / "codex"
+        / "node_modules"
+        / "@openai"
+        / "codex-win32-x64"
+        / "vendor"
+        / "x86_64-pc-windows-msvc"
+        / "bin"
+        / "codex.exe"
+    )
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"native")
+    monkeypatch.setattr("crew.agent.external.cli_adapter.platform.system", lambda: "Windows")
+    monkeypatch.setattr("crew.agent.external.cli_adapter.platform.machine", lambda: "AMD64")
+
+    assert _codex_native_executable(str(launcher)) == native.resolve()
+
+
+@pytest.mark.parametrize(
+    ("system", "machine", "package_name", "target"),
+    [
+        ("Darwin", "arm64", "codex-darwin-arm64", "aarch64-apple-darwin"),
+        ("Linux", "x86_64", "codex-linux-x64", "x86_64-unknown-linux-musl"),
+    ],
+)
+def test_codex_npm_launcher_resolves_packaged_posix_native_binary(
+    monkeypatch,
+    tmp_path,
+    system,
+    machine,
+    package_name,
+    target,
+):
+    package_root = tmp_path / "codex-package"
+    launcher = package_root / "bin" / "codex.js"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/usr/bin/env node", encoding="utf-8")
+    native = (
+        package_root
+        / "node_modules"
+        / "@openai"
+        / package_name
+        / "vendor"
+        / target
+        / "bin"
+        / "codex"
+    )
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"native")
+    monkeypatch.setattr("crew.agent.external.cli_adapter.platform.system", lambda: system)
+    monkeypatch.setattr("crew.agent.external.cli_adapter.platform.machine", lambda: machine)
+
+    assert _codex_native_executable(str(launcher)) == native.resolve()
+
+
+def test_claude_npm_windows_shim_resolves_packaged_native_binary(tmp_path):
+    launcher = tmp_path / "bin" / "claude.cmd"
+    launcher.parent.mkdir()
+    launcher.write_text("@node claude.js", encoding="utf-8")
+    native = (
+        launcher.parent
+        / "node_modules"
+        / "@anthropic-ai"
+        / "claude-code"
+        / "bin"
+        / "claude.exe"
+    )
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"native")
+
+    assert _claude_native_executable(str(launcher)) == native.resolve()
+
+
+@pytest.mark.asyncio
+async def test_managed_external_launch_approves_exact_provider_network_overlay(tmp_path):
+    class ApprovalService:
+        def __init__(self):
+            self.calls = []
+            self.approved = False
+
+        def authorize_exec_action(self, context, action, **kwargs):
+            self.calls.append((context, action, kwargs))
+            if self.approved:
+                return ExecAuthorization(
+                    True,
+                    additional_permissions=kwargs["additional_permissions"],
+                )
+            return ExecAuthorization(False, {"request_id": "external-approval"})
+
+        async def await_decision(self, request_id):
+            from crew.security.approvals import ApprovalDecision
+
+            assert request_id == "external-approval"
+            self.approved = True
+            return SimpleNamespace(decision=ApprovalDecision.ONCE)
+
+    context = SecurityContext(
+        os_user="tester",
+        owner_account_id="owner",
+        workspace_id="workspace",
+        workspace_root=tmp_path,
+        session_id="session",
+        request_id="request",
+        task_id="task",
+        cwd=tmp_path,
+    )
+    service = ApprovalService()
+    token = current_process_launch.set(
+        ProcessLaunch(
+            PermissionProfile(PermissionProfileKind.MANAGED),
+            sandboxed=True,
+            security_context=context,
+            approval_service=service,
+        )
+    )
+    try:
+        launch = await _authorized_external_launch(
+            provider="codex",
+            executable_path=str(tmp_path / "codex"),
+            cwd=tmp_path,
+            custom_env={"OPENAI_BASE_URL": "https://models.example.test/v1"},
+        )
+    finally:
+        current_process_launch.reset(token)
+
+    assert len(service.calls) == 2
+    assert service.calls[0][2]["risk_class"] == "external_agent_network"
+    assert service.calls[0][2]["requires_approval"] is True
+    approved_targets = {
+        (entry.host, entry.port, entry.protocol)
+        for entry in launch.additional_permissions.network
+    }
+    assert approved_targets >= {
+        ("api.openai.com", 443, "https"),
+        ("chatgpt.com", 443, "https"),
+        ("models.example.test", 443, "https"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_managed_external_cli_passes_provider_env_but_not_runtime_control_env(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+
+    class ApprovalService:
+        @staticmethod
+        def authorize_exec_action(_context, _action, **kwargs):
+            return ExecAuthorization(
+                True,
+                additional_permissions=kwargs["additional_permissions"],
+            )
+
+    async def captured(argv, **kwargs):
+        calls.append((argv, kwargs, current_process_launch.get()))
+        return SimpleNamespace(returncode=0, stdout="managed", stderr="")
+
+    executable = tmp_path / "codex"
+    executable.write_bytes(b"native")
+    context = SecurityContext(
+        os_user="tester",
+        owner_account_id="owner",
+        workspace_id="workspace",
+        workspace_root=tmp_path,
+        session_id="session",
+        request_id="request",
+        task_id="task",
+        cwd=tmp_path,
+    )
+    monkeypatch.setattr("crew.security.launch.execute_captured", captured)
+    monkeypatch.setenv("HOME", "/private/owner")
+    monkeypatch.setenv("PATH", "/untrusted/bin")
+    monkeypatch.setenv("HTTP_PROXY", "http://untrusted.proxy")
+    monkeypatch.setenv("SEARCH_PROVIDER_API_KEY", "unrelated-secret")
+    token = current_process_launch.set(
+        ProcessLaunch(
+            PermissionProfile(PermissionProfileKind.MANAGED),
+            sandboxed=True,
+            security_context=context,
+            approval_service=ApprovalService(),
+        )
+    )
+    try:
+        output = await run_external_cli(
+            ExternalCliConfig(
+                provider="codex",
+                executable_path=str(executable),
+                prompt="hello",
+                cwd=str(tmp_path),
+                custom_env={"OPENAI_API_KEY": "provider-key"},
+            )
+        )
+    finally:
+        current_process_launch.reset(token)
+
+    assert output == "managed"
+    argv, kwargs, effective_launch = calls[0]
+    assert argv[0] == str(executable.resolve())
+    assert "--dangerously-bypass-approvals-and-sandbox" in argv
+    assert kwargs["env_overrides"]["OPENAI_API_KEY"] == "provider-key"
+    assert "HOME" not in kwargs["env_overrides"]
+    assert "PATH" not in kwargs["env_overrides"]
+    assert "HTTP_PROXY" not in kwargs["env_overrides"]
+    assert "SEARCH_PROVIDER_API_KEY" not in kwargs["env_overrides"]
+    assert effective_launch is not None
+    assert effective_launch.additional_permissions.network
 
 
 @pytest.mark.asyncio
@@ -1058,6 +1379,33 @@ def test_acp_adapter_accepts_direct_params_and_plain_thinking_text():
     assert event.text == "先检查运行环境。"
 
 
+async def test_acp_reader_translates_native_stream_timeout():
+    class TimeoutTransport:
+        async def read(self):
+            await asyncio.sleep(0)
+            raise asyncio.TimeoutError
+
+        async def write(self, _data):
+            return None
+
+        async def close(self):
+            return None
+
+        async def abort(self):
+            return None
+
+    client = _JsonRpcClient(TimeoutTransport())
+    future = asyncio.get_running_loop().create_future()
+    client.pending[1] = future
+    await client.start()
+    with pytest.raises(AcpAdapterError, match="protocol stream timed out"):
+        await asyncio.wait_for(future, timeout=1)
+    event = await asyncio.wait_for(client.event_queue.get(), timeout=1)
+    assert event.kind == "error"
+    assert "protocol stream timed out" in event.text
+    await client.close()
+
+
 def _fake_hermes(tmp_path):
     script = tmp_path / "hermes"
     return _write_fake_python_executable(
@@ -1140,6 +1488,8 @@ def test_scan_runtime_uses_env_path(
         assert runtime.name == "Codex"
         assert runtime.metadata["descriptor_id"] == "builtin:codex"
         assert runtime.metadata["adapter_id"] == "codex-app-server"
+    if provider == "kimi":
+        assert runtime.metadata["network_endpoints"] == ["https://auth.kimi.com"]
 
 
 def test_windows_runtime_search_dirs_and_executable_rules(tmp_path, monkeypatch):
@@ -1234,13 +1584,28 @@ def test_builtin_runtime_descriptors_preserve_existing_contracts_and_add_common_
     ]
     assert descriptors["kimi"].commands == ("kimi",)
     assert descriptors["kimi"].launch_args == ("acp",)
+    assert descriptors["kimi"].credential_home_paths == (
+        ".kimi-code/config.toml",
+        ".kimi-code/oauth/kimi-code",
+        ".kimi-code/credentials/kimi-code.json",
+    )
+    assert descriptors["kimi"].network_endpoints == ("https://auth.kimi.com",)
     assert descriptors["codex"].protocol == "cli"
     assert descriptors["codex"].launch_args == ()
+    assert descriptors["codex"].credential_home_paths == (
+        ".codex/auth.json",
+        ".codex/config.toml",
+    )
     assert descriptors["claude"].commands == ("claude-agent-acp",)
     assert descriptors["claude"].launch_args == ()
     assert descriptors["hermes"].commands == ("hermes",)
     assert descriptors["hermes"].launch_args == ("acp",)
     assert dict(descriptors["hermes"].probe_env) == {"HERMES_YOLO_MODE": "1"}
+    assert descriptors["hermes"].credential_home_paths == (
+        ".hermes/.env",
+        ".hermes/config.yaml",
+        ".hermes/auth.json",
+    )
     assert {
         provider: descriptor.launch_args
         for provider, descriptor in descriptors.items()
@@ -1260,7 +1625,27 @@ def test_builtin_runtime_descriptors_preserve_existing_contracts_and_add_common_
     }
     assert descriptors["claude-code"].commands == ("claude",)
     assert descriptors["claude-code"].adapter_id == "claude-stream-json"
+    assert descriptors["claude-code"].credential_home_paths == (
+        ".claude/.credentials.json",
+        ".claude.json",
+    )
     assert descriptors["codex"].adapter_id == "codex-app-server"
+    assert runtime_registry.resolve_runtime_credential_home_paths(
+        provider="codex",
+        metadata={"descriptor_id": "builtin:codex"},
+    ) == (".codex/auth.json", ".codex/config.toml")
+    assert runtime_registry.resolve_runtime_credential_home_paths(
+        provider="codex",
+        metadata={"credential_home_paths": []},
+    ) == ()
+    assert runtime_registry.resolve_runtime_network_endpoints(
+        provider="kimi",
+        metadata={"descriptor_id": "builtin:kimi"},
+    ) == ("https://auth.kimi.com",)
+    assert runtime_registry.resolve_runtime_network_endpoints(
+        provider="kimi",
+        metadata={"network_endpoints": ["https://custom.example.test"]},
+    ) == ("https://custom.example.test",)
     assert {
         provider: descriptors[provider].display_badge
         for provider in ("kimi", "codex", "hermes", "claude-code")
@@ -1478,7 +1863,43 @@ def test_kimi_acp_falls_back_to_local_cli_model_catalog(tmp_path, monkeypatch):
     assert profile.probe.source == "acp_session_new+kimi_provider_list"
 
 
-def test_scan_codex_runtime_does_not_execute_version_flags(tmp_path, monkeypatch):
+def test_scan_hermes_runtime_uses_env_path(tmp_path, monkeypatch):
+    hermes = _fake_hermes(tmp_path)
+    monkeypatch.setenv("CREW_HERMES_PATH", str(hermes))
+
+    runtime = scan_hermes_runtime()
+
+    assert runtime is not None
+    assert runtime.provider == "hermes"
+    assert runtime.executable_path == str(hermes)
+    assert runtime.protocol == "acp"
+
+
+def test_hermes_runtime_probe_allows_cold_start_timeout(monkeypatch):
+    captured: dict[str, float] = {}
+
+    async def fake_probe(*args, timeout, **kwargs):
+        del args, kwargs
+        captured["timeout"] = timeout
+        return acp_adapter.AcpRuntimeProbeResult(
+            models=[],
+            default_model_id="",
+            capabilities=acp_adapter.RuntimeCapabilities(),
+        )
+
+    monkeypatch.setattr(acp_adapter, "probe_acp_runtime", fake_probe)
+
+    asyncio.run(acp_adapter.AcpRuntimeAdapter().probe(
+        "/fixture/hermes",
+        provider="hermes",
+        launch_args=("acp",),
+    ))
+
+    assert captured["timeout"] == acp_adapter.HERMES_RUNTIME_PROBE_TIMEOUT_SECONDS
+    assert captured["timeout"] > acp_adapter.ACP_RUNTIME_PROBE_TIMEOUT_SECONDS
+
+
+def test_scan_codex_runtime_skips_warning_version_lines(tmp_path, monkeypatch):
     codex = _fake_cli(tmp_path, "codex", "codex 0.42.0", prefix="WARNING: path update failed")
     monkeypatch.setenv("CREW_CODEX_PATH", str(codex))
 
@@ -3064,6 +3485,68 @@ def test_external_store_saves_acp_session_binding(tmp_path):
     assert binding["acp_session_id"] == "h1"
 
 
+def test_delete_agent_removes_runtime_session_bindings(tmp_path):
+    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    runtime = store.upsert_runtime({
+        "id": "runtime-agent-cleanup",
+        "provider": "hermes",
+        "name": "Hermes",
+        "executable_path": "/bin/hermes",
+        "protocol": "acp",
+    })
+    agent = store.create_agent(name="待删除外援", runtime_id=runtime["id"])
+    binding_key = {
+        "crew_session_id": "crew-agent-cleanup",
+        "external_agent_id": agent["id"],
+        "runtime_id": runtime["id"],
+        "provider": "hermes",
+        "cwd": str(tmp_path),
+    }
+    store.save_acp_session_binding(acp_session_id="native-agent-cleanup", **binding_key)
+
+    store.delete_agent(agent["id"])
+
+    assert store.get_acp_session_binding(**binding_key) is None
+
+
+def test_delete_runtime_removes_orphaned_session_bindings(tmp_path):
+    db_path = tmp_path / "crew.db"
+    store = ExternalAgentStore(str(db_path))
+    runtime = store.upsert_runtime({
+        "id": "runtime-stale-binding",
+        "provider": "e2e",
+        "name": "Stale Runtime",
+        "executable_path": "",
+        "protocol": "acp",
+    })
+    agent = store.create_agent(name="旧外援", runtime_id=runtime["id"])
+    store.save_acp_session_binding(
+        crew_session_id="crew-stale-binding",
+        external_agent_id=agent["id"],
+        runtime_id=runtime["id"],
+        provider="e2e",
+        cwd=str(tmp_path),
+        acp_session_id="native-stale-binding",
+    )
+    # 模拟旧版本删除 Agent 后遗留的原生会话续接元数据。
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM external_agent WHERE id = ?", (agent["id"],))
+
+    store.delete_runtime(runtime["id"])
+
+    with sqlite3.connect(db_path) as conn:
+        binding_count = conn.execute(
+            "SELECT COUNT(*) FROM external_runtime_session_binding WHERE runtime_id = ?",
+            (runtime["id"],),
+        ).fetchone()[0]
+        runtime_count = conn.execute(
+            "SELECT COUNT(*) FROM external_runtime WHERE id = ?",
+            (runtime["id"],),
+        ).fetchone()[0]
+    assert binding_count == 0
+    assert runtime_count == 0
+
+
 def test_external_store_scopes_acp_session_binding_by_owner(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime(
@@ -3467,10 +3950,6 @@ async def test_codex_cli_detaches_inherited_stdin(tmp_path, monkeypatch):
         return FakeProcess()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    monkeypatch.setattr(
-        "crew.agent.external.cli_adapter.resolve_external_executable",
-        lambda executable, **_kwargs: executable,
-    )
     output = await run_external_cli(
         ExternalCliConfig(
             provider="codex",
@@ -4028,6 +4507,7 @@ async def test_acp_executor_marks_failed_acp_binding_unsafe_and_skips_resume(tmp
 
 async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch):
     from crew.agent.external.acp_adapter import AcpStreamEvent
+    from crew.security.models import AdditionalPermissionProfile, NetworkEntry
 
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime(
@@ -4045,6 +4525,7 @@ async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch
 
     async def fake_stream(_prompt, config):
         seen["mcp_servers"] = config.mcp_servers
+        seen["additional_permissions"] = config.additional_permissions
         yield AcpStreamEvent(kind="text", text="done")
 
     monkeypatch.setattr(acp_adapter, "stream_acp_events", fake_stream)
@@ -4059,6 +4540,12 @@ async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch
         def mcp_server_config(self, binding):
             assert binding.token == "bind-token"
             return {"name": "crew-interaction", "command": "python", "args": []}
+
+        def local_callback_permissions(self, binding):
+            assert binding.token == "bind-token"
+            return AdditionalPermissionProfile(
+                network=(NetworkEntry("127.0.0.1", 8123, "http"),),
+            )
 
         def remove_binding(self, token):
             self.removed.append(token)
@@ -4088,6 +4575,7 @@ async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch
     assert seen["binding"]["control_session_id"] == "main"
     assert seen["binding"]["origin_session_id"] == "main::child"
     assert seen["mcp_servers"][0]["name"] == "crew-interaction"
+    assert seen["additional_permissions"].network[0].port == 8123
     assert bridge.removed == ["bind-token"]
     assert chunks[-1].kind == "final"
 

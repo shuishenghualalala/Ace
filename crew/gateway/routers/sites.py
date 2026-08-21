@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -265,7 +266,8 @@ def create_sites_router(crew) -> APIRouter:
                 crew.workspace_store,
                 owner_account_id=owner(request),
                 workspace_id=current["workspace_id"],
-                session_id=current["session_id"],
+                session_id=current["session_id"] or f"site-{site_id}",
+                request_id=uuid4().hex,
                 cwd=workspace_root,
             )
             result = await manager().publish_async(

@@ -527,13 +527,13 @@ describe('toolReducer', () => {
     });
     const snap = makeSnapshot({ book: { ...emptyBook(), toolMap } });
     const r = toolReducer(
-      { kind: 'tool', body: { tool_call_id: 't1', phase: 'progress', text: '正在分析来源内容（2/5 块）…' }, sequence: 2 },
+      { kind: 'tool', body: { tool_call_id: 't1', phase: 'progress', text: '正在通读素材（2/5 段）…' }, sequence: 2 },
       { ...snap, now: 200 },
     );
     const updated = r.replaceBook?.toolMap.get('t1');
     // 进度帧不得把工具行提前标成完成
     expect(updated?.status).toBe('running');
-    expect(updated?.progressText).toBe('正在分析来源内容（2/5 块）…');
+    expect(updated?.progressText).toBe('正在通读素材（2/5 段）…');
     expect(updated?.duration).toBeUndefined();
   });
 
@@ -541,7 +541,7 @@ describe('toolReducer', () => {
     const toolMap = new Map();
     toolMap.set('t1', {
       toolCallId: 't1', name: 'wiki_plan_ingest', args: '{}', status: 'running' as const, startedAt: 100,
-      progressText: '正在分析来源内容（2/5 块）…',
+      progressText: '正在通读素材（2/5 段）…',
     });
     const snap = makeSnapshot({ book: { ...emptyBook(), toolMap } });
     const r = toolReducer(

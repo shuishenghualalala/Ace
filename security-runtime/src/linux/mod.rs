@@ -16,7 +16,8 @@ use std::{collections::BTreeMap, io::Read, io::Write, thread};
 
 pub use crate::protocol::{FilesystemGlobAccess, FilesystemGlobRule};
 use crate::protocol::{
-    RuntimeCapabilities, RuntimeMessage, StdioInputMessage, MAX_OUTPUT_CHUNK_BYTES,
+    RuntimeCapabilities, RuntimeControl, RuntimeMessage, StdioInputMessage,
+    MAX_OUTPUT_CHUNK_BYTES,
 };
 
 const INNER_READY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -47,8 +48,10 @@ pub struct LinuxRunRequest {
     pub cwd: PathBuf,
     pub writable_roots: Vec<PathBuf>,
     pub readable_roots: Vec<PathBuf>,
+    pub readonly_roots: Vec<PathBuf>,
     pub denied_roots: Vec<PathBuf>,
     pub filesystem_globs: Vec<FilesystemGlobRule>,
+    pub full_disk_read: bool,
     pub network_enabled: bool,
     pub network_rules: Vec<crate::protocol::NetworkRule>,
     pub allow_local_binding: bool,
@@ -57,6 +60,7 @@ pub struct LinuxRunRequest {
     pub stdin: Option<Vec<u8>>,
     pub stdin_stream: Option<Receiver<StdioInputMessage>>,
     pub env_overrides: BTreeMap<String, String>,
+    pub home_files: BTreeMap<String, Vec<u8>>,
 }
 
 pub struct LinuxRuntimeError {
@@ -122,6 +126,22 @@ pub fn run(
     request: LinuxRunRequest,
     sender: &SyncSender<RuntimeMessage>,
 ) -> Result<(), LinuxRuntimeError> {
+    run_with_control(request, None, sender)
+}
+
+pub fn run_interactive(
+    request: LinuxRunRequest,
+    control_rx: Receiver<RuntimeControl>,
+    sender: &SyncSender<RuntimeMessage>,
+) -> Result<(), LinuxRuntimeError> {
+    run_with_control(request, Some(control_rx), sender)
+}
+
+fn run_with_control(
+    request: LinuxRunRequest,
+    control_rx: Option<Receiver<RuntimeControl>>,
+    sender: &SyncSender<RuntimeMessage>,
+) -> Result<(), LinuxRuntimeError> {
     if wsl::detect() == Some(1) {
         return Err(unavailable(
             "WSL1 does not provide the required namespace boundary",
@@ -152,7 +172,10 @@ pub fn run(
     command.args(&plan.args);
     command
         .stdin(
-            if request.stdin.is_some() || request.stdin_stream.is_some() {
+            if request.stdin.is_some()
+                || request.stdin_stream.is_some()
+                || control_rx.is_some()
+            {
                 Stdio::piped()
             } else {
                 Stdio::null()
@@ -186,6 +209,7 @@ pub fn run(
                 filesystem_sandbox: true,
                 process_tree_cleanup: true,
                 managed_network: request.network_enabled,
+                full_disk_read: request.full_disk_read,
                 system_bwrap: source.is_system(),
                 bundled_bwrap: !source.is_system(),
                 wsl_version: wsl::detect(),
@@ -198,6 +222,22 @@ pub fn run(
             },
         })
         .map_err(|_| unavailable("protocol receiver disconnected"))?;
+
+    if let Some(control_rx) = control_rx {
+        let mut child_stdin = child.take_stdin().expect("piped stdin");
+        thread::spawn(move || {
+            for control in control_rx {
+                match control {
+                    RuntimeControl::Write(data) => {
+                        if child_stdin.write_all(&data).is_err() {
+                            break;
+                        }
+                    }
+                    RuntimeControl::Close => break,
+                }
+            }
+        });
+    }
 
     let budget = Arc::new(Mutex::new(request.max_output_bytes));
     let (failure_sender, failure_receiver) = mpsc::channel();

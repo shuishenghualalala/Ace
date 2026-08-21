@@ -4391,7 +4391,7 @@ describe('BrowserHost', () => {
     await host.dispose();
   });
 
-  it('does not treat mouse wheel over a mounted AI page as a takeover gesture', async () => {
+  it('allows mouse wheel over a mounted AI page without treating it as takeover', async () => {
     const host = new BrowserHost(() => fakeWindow());
     await createTab(host);
     host.setPanel({
@@ -4967,6 +4967,7 @@ describe('BrowserHost', () => {
       },
     });
 
+
     await expect(executeOnOpener('upload_with_trigger', [], {
       trigger_selector: '#opener-trigger',
       input_selector: '#opener-input',
@@ -5014,6 +5015,7 @@ describe('BrowserHost', () => {
         mutating: true,
       },
     });
+
 
     await expect(execute('click', ['@e1'])).rejects.toMatchObject({
       code: 'file_chooser_pending',

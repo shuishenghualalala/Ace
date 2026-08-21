@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -126,20 +125,12 @@ async def test_short_ingest_creates_source_summary_and_entities_only(store, comp
         ],
     }
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
-    compiler.summarizer = MagicMock()
-    compiler.summarizer.generate_kb_summary = AsyncMock(return_value=None)
 
     _save_paste_source(store, "src_1", "原始文档")
 
     result = await compiler.ingest("src_1", source_content=source_content)
 
     assert not result.issues
-    # 摘要走后台 fire-and-forget 刷新（_schedule_kb_summary_refresh），不阻塞 ingest；
-    # 等事件循环把后台任务跑完再断言。
-    await asyncio.sleep(0)
-    compiler.summarizer.generate_kb_summary.assert_awaited()
-    # mock 的 summarizer 不落盘，摘要状态保持初始 empty
-    assert store.get_kb_summary().status == "empty"
     assert len(result.pages) == 3
     titles = {p.title for p in result.pages}
     assert "原始文档" in titles
@@ -1274,7 +1265,7 @@ async def test_apply_skips_page_when_target_modified_externally(store, compiler)
     existing.content = "# AgentRuntime\n\n已被外部修改的新内容"
     store.update(existing)
 
-    result = await compiler.apply_ingest("s1")
+    await compiler.apply_ingest("s1")
     page_after = store.get(existing.id)
     assert "已被外部修改的新内容" in page_after.content
     assert "运行时描述" not in page_after.content  # 计划内容未覆盖
@@ -1326,10 +1317,10 @@ async def test_plan_ingest_reports_analysis_progress(store, compiler):
 
     await compiler.plan_ingest("src_prog", use_chunking=True, chunk_size=1000, progress=_progress)
 
-    assert events[0].startswith("正在分析来源内容")
-    # 分块进度：至少出现一次「已完成/总块数」形式
-    assert any("块）" in e and "/" in e for e in events)
-    assert any("生成页面变更计划" in e for e in events)
+    assert events[0].startswith("正在通读素材")
+    # 分段进度：至少出现一次「已完成/总段数」形式
+    assert any("段）" in e and "/" in e for e in events)
+    assert any("盘算要改哪些页面" in e for e in events)
 
 
 async def test_plan_ingest_without_progress_callback_still_works(store, compiler):

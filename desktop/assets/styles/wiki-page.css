@@ -49,8 +49,9 @@
   /* 面板间不留缝：分隔由单边 1px 发丝线承担（VSCode 风格，避免两条边框线并行） */
   gap: 0;
   /* 底部不留 padding：三条竖向分隔线（对话↔面板、目录↔详情）直接伸到窗口底边，
-     对齐主对话 mw-chat-template 整列通高的版式；对话栏底部留白由 disclaimer 自带 padding 承担 */
-  padding: var(--mw-space-5) var(--mw-space-8) 0;
+     对齐主对话 mw-chat-template 整列通高的版式；对话栏底部留白由 disclaimer 自带 padding 承担。
+     右侧同样不留 padding：知识库面板（自带背景色）直接顶到窗口右边，滚动条贴窗缘（VSCode 风格） */
+  padding: var(--mw-space-5) 0 0 var(--mw-space-8);
 }
 
 /* 右侧知识库面板：整体固定宽度（内联 width，拖拽可调），内部目录 + 详情横向排布 */
@@ -62,6 +63,22 @@
   min-height: 0;
   /* 与对话主区之间唯一的分隔线 */
   border-left: 1px solid var(--mw-border-subtle);
+}
+
+/* Wiki Agent 的浏览器沿用右侧固定工作区，不使用浮层。知识库面板打开时由该工作区替换。 */
+.wiki-browser-pane--surface {
+  min-width: 340px;
+  overflow: hidden;
+}
+
+.wiki-browser-surface {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.wiki-browser-surface > .browser-panel {
+  min-width: 0;
 }
 
 /* 收起知识库面板：DOM 保留（编辑器/详情保活不受影响），仅 CSS 隐藏 */
@@ -161,26 +178,106 @@
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  overflow-y: auto;
+  display: flex;
   /* 与目录之间唯一的分隔线 */
   border-left: 1px solid var(--mw-border-subtle);
   background: var(--mw-bg-surface);
-  padding: var(--mw-space-4) var(--mw-space-5);
 }
 
-/* ── 详情面板多 tab 栏（pill chip，视觉对齐 Inspector workspace tab，类名独立不耦合） ── */
+/* ── 详情编辑器组（VSCode 式双组拆分：最多 2 组，row/column 两方向） ── */
 
-#wiki-page-tabs {
+.wiki-detail-groups {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.wiki-detail-groups[data-orientation="column"] {
+  flex-direction: column;
+}
+
+.wiki-detail-group {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 组间 1px 发丝线（把手命中区骑缝，不额外占视觉空间） */
+.wiki-sash--group + .wiki-detail-group {
+  border-left: 1px solid var(--mw-border-subtle);
+}
+
+.wiki-detail-groups[data-orientation="column"] > .wiki-sash--group + .wiki-detail-group {
+  border-top: 1px solid var(--mw-border-subtle);
+  border-left: none;
+}
+
+/* 滚动与内边距下沉到各组内容区（tab 栏固定在组顶不随正文滚动） */
+.wiki-detail-group__content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--mw-space-5) var(--mw-space-4);
+}
+
+/* 聚焦组弱强调：激活 tab 描边带一点主题色（很轻，不破坏现有观感） */
+.wiki-detail-group.is-focused .wiki-tab.is-active {
+  border-color: color-mix(in srgb, var(--mw-action-primary) 45%, var(--mw-border-subtle));
+}
+
+/* tab 拖拽落点：组主体 = 移动落点；详情区四边缘 = 拆分落点（伪元素 overlay，不额外加 DOM） */
+.wiki-detail-group.is-drop-target::after,
+.wiki-detail-groups[data-drop-edge]::after {
+  position: absolute;
+  z-index: var(--mw-z-base);
+  border: 1px solid var(--mw-action-primary);
+  background: color-mix(in srgb, var(--mw-action-primary) 12%, transparent);
+  content: '';
+  pointer-events: none;
+}
+
+.wiki-detail-group.is-drop-target::after {
+  inset: 0;
+}
+
+.wiki-detail-groups[data-drop-edge="left"]::after {
+  inset: 0 50% 0 0;
+}
+
+.wiki-detail-groups[data-drop-edge="right"]::after {
+  inset: 0 0 0 50%;
+}
+
+.wiki-detail-groups[data-drop-edge="top"]::after {
+  inset: 0 0 50% 0;
+}
+
+.wiki-detail-groups[data-drop-edge="bottom"]::after {
+  inset: 50% 0 0 0;
+}
+
+/* ── 组内多 tab 栏（pill chip，视觉对齐 Inspector workspace tab，类名独立不耦合） ── */
+
+.wiki-tabs {
   display: flex;
   align-items: center;
   gap: var(--mw-space-1);
-  margin: 0 auto var(--mw-space-3);
-  max-width: 760px;
+  /* 固定栏高不参与纵向收缩：长文场景下正文 flex basis 巨大，收缩按 basis 比例分摊，
+     tab 栏会被挤掉十几 px，且 overflow-x:auto 使 overflow-y 也算作 auto（滚动条隐藏），
+     表现为 tab 底部被齐平裁掉（对齐 web 端 .wiki-tabs 的 flex-shrink: 0）。 */
+  flex-shrink: 0;
+  margin: 0 0 var(--mw-space-3);
+  padding: var(--mw-space-4) var(--mw-space-5) 0;
   overflow-x: auto;
   scrollbar-width: none;
 }
 
-#wiki-page-tabs::-webkit-scrollbar {
+.wiki-tabs::-webkit-scrollbar {
   display: none;
 }
 
@@ -531,26 +628,8 @@
   pointer-events: none;
 }
 
-/* 模型 chip：挂在对话面板 Composer 的 toolbar-left 槽位（复用 composer-chip 全局样式） */
-.wiki-agent-pane__model {
-  display: inline-flex;
-  min-width: 0;
-  max-width: 62%;
-  min-height: 28px;
-  align-items: center;
-  gap: var(--mw-space-1);
-  padding: 0 var(--mw-space-2);
-  border: 1px solid var(--mw-border-default);
-  border-radius: var(--mw-radius-2);
-  background: var(--mw-bg-surface);
-  color: var(--mw-text-primary);
-}
-
-.wiki-agent-pane__model .composer-chip__label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* 模型 chip / 附件按钮 / 上下文环：与主对话共用 mw-context-chip / mw-button--ghost /
+   mw-context-ring 全局样式（composer-context-view 工厂生成），本页不再单独覆盖。 */
 
 .wiki-agent-pane__disclaimer {
   flex: 0 0 auto;
@@ -584,6 +663,9 @@
   text-align: left;
   cursor: pointer;
   color: var(--mw-text-primary);
+  transition:
+    var(--mw-transition-interactive),
+    padding-inline-end var(--mw-duration-normal) var(--mw-ease-standard);
 }
 
 .wiki-item__main:hover {
@@ -913,30 +995,8 @@
   color: var(--mw-text-muted);
 }
 
-.wiki-overview {
-  width: 100%;
-  max-width: 640px;
-  padding: var(--mw-space-4) var(--mw-space-5);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-4);
-  background: var(--mw-bg-subtle);
-}
-
-.wiki-overview__title {
-  margin-bottom: var(--mw-space-2);
-  font-size: var(--mw-type-caption-size);
-  font-weight: 600;
-  color: var(--mw-text-primary);
-}
-
-.wiki-overview__body {
-  font-size: var(--mw-type-caption-size);
-  color: var(--mw-text-secondary);
-}
-
 .wiki-detail__header {
-  margin: 0 auto 28px;
-  max-width: 760px;
+  margin: 0 0 28px;
 }
 
 .wiki-detail__badges {
@@ -1049,21 +1109,18 @@
 }
 
 .wiki-editor {
-  max-width: 760px;
   min-height: 320px;
-  margin: 0 auto;
+  margin: 0;
   cursor: text;
 }
 
 /* Home.md 是阅读型首页，不沿用聊天消息的紧凑 Markdown 排版。 */
 .wiki-home-document {
-  max-width: 860px;
-  margin: 0 auto;
+  margin: 0;
   padding-bottom: 72px;
 }
 
 .wiki-home-document .wiki-detail__header {
-  max-width: 760px;
   margin-bottom: 22px;
   padding-bottom: 22px;
   border-bottom: 1px solid var(--mw-border-subtle);
@@ -1075,8 +1132,7 @@
 }
 
 .wiki-home-document .wiki-detail__content {
-  max-width: 760px;
-  margin: 0 auto;
+  margin: 0;
   color: var(--mw-text-primary);
   font-size: var(--mw-font-sm);
   line-height: 1.85;
@@ -1250,8 +1306,7 @@
 }
 
 .wiki-related-pages {
-  max-width: 760px;
-  margin: 32px auto 72px;
+  margin: 32px 0 72px;
   padding-top: 22px;
   border-top: 1px solid var(--mw-border-subtle);
 }
@@ -1438,15 +1493,15 @@
   background: var(--mw-bg-selected);
 }
 
-/* ── 条目删除按钮 ── */
+/* ── 条目 ⋯ 菜单按钮 ── */
 
-/* 时间线条目：× 绝对定位悬浮在条目右侧（不占文档流，否则会单起一行挤占列表高度），
+/* 时间线条目：⋯ 绝对定位悬浮在条目右侧（不占文档流，否则会单起一行挤占列表高度），
    默认禁用 pointer-events，悬停条目时才可点。 */
 .wiki-item {
   position: relative;
 }
 
-.wiki-item .wiki-item__delete {
+.wiki-item .wiki-item__menu {
   position: absolute;
   right: var(--mw-space-2);
   top: 50%;
@@ -1454,44 +1509,52 @@
   pointer-events: none;
 }
 
-.wiki-item:hover .wiki-item__delete {
+.wiki-item:hover .wiki-item__menu {
   pointer-events: auto;
 }
 
-.wiki-item__delete {
+/* 悬停/聚焦时条目内容右缩给 ⋯ 让位（对齐会话历史行的让位动画），
+   避免按钮直接覆盖标题、摘要或时间。批量选择模式不渲染 ⋯，无需让位。 */
+.wiki-item:not(.wiki-item--selecting):hover .wiki-item__main,
+.wiki-item:not(.wiki-item--selecting):focus-within .wiki-item__main {
+  padding-inline-end: calc(var(--mw-space-2) + 22px + var(--mw-space-1));
+}
+
+.wiki-item__menu {
   flex-shrink: 0;
-  width: 20px;
-  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
   padding: 0;
   border: none;
-  border-radius: 50%;
+  border-radius: var(--mw-radius-1);
   background: transparent;
   color: var(--mw-text-muted);
-  font-size: var(--mw-font-base);
-  line-height: 20px;
-  text-align: center;
   cursor: pointer;
   opacity: 0;
   transition: var(--mw-transition-interactive);
 }
 
-.wiki-item:hover .wiki-item__delete,
-.wiki-tree__item:hover .wiki-item__delete {
+.wiki-item:hover .wiki-item__menu,
+.wiki-tree__item:hover .wiki-item__menu,
+.wiki-item__menu:focus-visible {
   opacity: 1;
 }
 
-.wiki-item__delete:hover {
-  background: var(--mw-status-danger-bg);
-  color: var(--mw-status-danger);
+.wiki-item__menu:hover {
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
 }
 
-/* 文件树条目：删除按钮绝对定位到文件名左侧的缩进空隙（--tree-indent 由模板注入），
+/* 文件树条目：⋯ 菜单按钮绝对定位到文件名左侧的缩进空隙（--tree-indent 由模板注入），
    隐藏时禁用 pointer-events，避免挡住条目点击。 */
 .wiki-tree__item {
   position: relative;
 }
 
-.wiki-tree__item .wiki-item__delete {
+.wiki-tree__item .wiki-item__menu {
   position: absolute;
   left: max(2px, calc(var(--tree-indent, 6px) - 22px));
   top: 50%;
@@ -1499,7 +1562,7 @@
   pointer-events: none;
 }
 
-.wiki-tree__item:hover .wiki-item__delete {
+.wiki-tree__item:hover .wiki-item__menu {
   pointer-events: auto;
 }
 
@@ -1983,7 +2046,7 @@
 /* 窄窗口：目录区收窄，避免挤压详情区 */
 @media (max-width: 1100px) {
   .wiki-body {
-    padding: var(--mw-space-4) var(--mw-space-5) 0;
+    padding: var(--mw-space-4) 0 0 var(--mw-space-5);
   }
 
   .wiki-list-pane {
@@ -2026,12 +2089,35 @@
     border-left: none;
     border-top: 1px solid var(--mw-border-subtle);
   }
+
+  /* 窄窗口：详情双组强制上下堆叠（row 拆分的两组横向太挤），组间把手随之换横向 */
+  .wiki-detail-groups[data-orientation="row"] {
+    flex-direction: column;
+  }
+
+  .wiki-detail-groups[data-orientation="row"] > .wiki-sash--group {
+    width: auto;
+    height: 16px;
+    margin: calc(var(--mw-space-2) * -1) 0;
+    cursor: row-resize;
+  }
+
+  .wiki-detail-groups[data-orientation="row"] > .wiki-sash--group::after {
+    inset: 50% 0 auto;
+    width: auto;
+    height: 4px;
+    transform: translateY(-50%);
+  }
+
+  .wiki-detail-groups[data-orientation="row"] > .wiki-sash--group + .wiki-detail-group {
+    border-top: 1px solid var(--mw-border-subtle);
+    border-left: none;
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════
  * Phase 4：Wiki Agent 对话
  * - .wiki-cards-panel / .wiki-card：对话流 wiki_cards 帧的「Wiki 结果」卡片网格
- * - .wiki-summary-card：wiki_summary 帧的 KB 概览卡（含建议追问 chips）
  * - .wiki-overlay：卡片「查看」弹出的页面详情 overlay（复用 .wiki-detail 内部结构）
  * ══════════════════════════════════════════════════════════════════ */
 
@@ -2158,73 +2244,6 @@
 .wiki-card__btn:hover {
   border-color: var(--mw-action-primary);
   background: var(--mw-bg-selected);
-}
-
-/* ── KB 概览卡（wiki_summary 帧） ── */
-
-.wiki-summary-card {
-  margin: var(--mw-space-2) 0;
-  padding: var(--mw-space-3) var(--mw-space-3);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-4);
-  background: var(--mw-bg-surface);
-}
-
-.wiki-summary-card__header {
-  display: flex;
-  align-items: center;
-  gap: var(--mw-space-2);
-  color: var(--mw-action-primary);
-  font-size: var(--mw-type-caption-size);
-  font-weight: 600;
-}
-
-.wiki-summary-card__badge {
-  padding: var(--mw-space-1) var(--mw-space-2);
-  border-radius: var(--mw-radius-full);
-  background: var(--mw-status-warning-bg);
-  color: var(--mw-status-warning);
-  font-size: var(--mw-type-caption-size);
-  font-weight: 400;
-  line-height: 16px;
-}
-
-.wiki-summary-card__body {
-  margin-top: var(--mw-space-2);
-  color: var(--mw-text-primary);
-  font-size: var(--mw-type-caption-size);
-  line-height: 1.7;
-  white-space: pre-wrap;
-}
-
-.wiki-summary-card__suggestions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--mw-space-1);
-  margin-top: var(--mw-space-2);
-}
-
-.wiki-summary-card__chip {
-  padding: var(--mw-space-1) var(--mw-space-2);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-full);
-  background: var(--mw-bg-surface);
-  color: var(--mw-action-primary);
-  font-size: var(--mw-type-caption-size);
-  cursor: pointer;
-}
-
-.wiki-summary-card__chip:hover {
-  border-color: var(--mw-action-primary);
-  background: var(--mw-bg-selected);
-}
-
-.wiki-summary-card__meta {
-  display: flex;
-  gap: var(--mw-space-3);
-  margin-top: var(--mw-space-2);
-  color: var(--mw-text-muted);
-  font-size: var(--mw-type-caption-size);
 }
 
 /* ── 页面详情 overlay（wiki_cards「查看」） ── */
@@ -2474,9 +2493,29 @@
   margin: 0 calc(var(--mw-space-2) * -1);
 }
 
+/* 详情双组间把手：上下堆叠（column）时换横向几何与 row-resize 光标 */
+.wiki-detail-groups[data-orientation="column"] > .wiki-sash--group {
+  width: auto;
+  height: 16px;
+  margin: calc(var(--mw-space-2) * -1) 0;
+  cursor: row-resize;
+}
+
+.wiki-detail-groups[data-orientation="column"] > .wiki-sash--group::after {
+  inset: 50% 0 auto;
+  width: auto;
+  height: 4px;
+  transform: translateY(-50%);
+}
+
 body.wiki-resizing {
   user-select: none;
   cursor: col-resize;
+}
+
+body.wiki-resizing-y {
+  user-select: none;
+  cursor: row-resize;
 }
 
 /* ── Wiki 界面导览 ── */
@@ -2502,87 +2541,15 @@ body.wiki-resizing {
 .wiki-tour__tooltip {
   position: fixed;
   z-index: calc(var(--mw-z-dialog) + 3);
-  width: 300px;
+  width: 320px;
   max-width: calc(100vw - 24px);
-  padding: var(--mw-space-4);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-4);
-  background: var(--mw-bg-surface);
-  box-shadow: var(--mw-shadow-overlay);
+  pointer-events: auto;
   transition:
     var(--mw-transition-interactive);
 }
 
-.wiki-tour__title {
-  margin-bottom: var(--mw-space-2);
-  color: var(--mw-text-primary);
-  font-size: var(--mw-type-section-size);
-  font-weight: var(--mw-type-section-weight);
-}
-
-.wiki-tour__desc {
-  margin: 0;
-  color: var(--mw-text-secondary);
-  font-size: var(--mw-type-body-size);
-  line-height: var(--mw-type-body-line);
-}
-
-.wiki-tour__foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--mw-space-2);
-  margin-top: var(--mw-space-3);
-}
-
 .wiki-tour__progress {
-  color: var(--mw-text-muted);
-  font-size: var(--mw-type-caption-size);
   font-variant-numeric: tabular-nums;
-}
-
-.wiki-tour__actions {
-  display: flex;
-  gap: var(--mw-space-2);
-}
-
-.wiki-tour__btn {
-  padding: var(--mw-space-2) var(--mw-space-3);
-  border-radius: var(--mw-radius-2);
-  font-size: var(--mw-type-label-size);
-  font-weight: var(--mw-type-label-weight);
-  cursor: pointer;
-}
-
-.wiki-tour__btn--ghost {
-  border: 1px solid var(--mw-border-subtle);
-  background: transparent;
-  color: var(--mw-text-secondary);
-}
-
-.wiki-tour__btn--ghost:hover {
-  background: var(--mw-bg-selected);
-  color: var(--mw-text-primary);
-}
-
-.wiki-tour__btn--ghost:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.wiki-tour__btn--primary {
-  border: 1px solid var(--mw-action-primary);
-  background: var(--mw-action-primary);
-  color: var(--mw-action-primary-text);
-}
-
-.wiki-tour__btn--primary:hover {
-  background: var(--mw-action-primary-hover);
-}
-
-.wiki-tour__btn:focus-visible {
-  outline: 2px solid var(--mw-focus-ring);
-  outline-offset: 2px;
 }
 
 .hub-refresh-btn--help {

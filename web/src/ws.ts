@@ -85,17 +85,6 @@ export class ChatSocket {
         queueMicrotask(() => this.send({ kind: "pong" }));
         return;
       }
-      // 临时诊断：排查过程时间线文本错乱/换行丢失
-      const body = payload?.body || {};
-      const textPreview = body.text ? String(body.text).slice(0, 60).replace(/\n/g, "\\n") : "";
-      console.log(
-        "[ws chunk]",
-        payload.kind,
-        `seq=${payload.gateway_sequence ?? "-"}`,
-        `sid=${payload.session_id ?? "-"}`,
-        `text=${textPreview}`,
-        body.message ? `msg=${String(body.message).slice(0, 40)}` : "",
-      );
       this.onChunk(payload as Chunk);
     };
   }

@@ -9,23 +9,29 @@
   container-type: inline-size;
 }
 
-.mw-composer {
+.chat-composer.mw-composer {
   position: relative;
   z-index: 1;
   display: grid;
   min-width: 0;
   gap: var(--mw-space-2);
-  padding: var(--mw-space-4) var(--mw-space-5) var(--mw-space-3);
+  padding: var(--mw-space-4) var(--mw-space-4) var(--mw-space-3);
   background: var(--mw-bg-surface);
   color: var(--mw-text-primary);
 }
 
+.mw-composer__running-slot,
 .mw-composer__queue-slot,
 .chat-running-intro,
 .mw-composer__edit-banner,
 .mw-composer__input-shell {
   width: min(var(--mw-chat-content-max-width), 100%);
   margin-inline: auto;
+}
+
+.mw-composer__running-slot {
+  box-sizing: border-box;
+  padding-inline: var(--mw-space-4);
 }
 
 .mw-composer__input-shell {
@@ -339,17 +345,7 @@ body.welcome-active .mw-composer .mw-composer__input-row textarea {
   min-height: 40px;
 }
 
-@media (max-width: 1100px) {
-  .mw-composer {
-    padding-inline: var(--mw-space-3);
-  }
-}
-
 @media (max-width: 700px) {
-  .mw-composer {
-    padding-inline: var(--mw-space-2);
-  }
-
   .mw-composer-queue__item {
     grid-template-columns: 24px minmax(0, 1fr);
   }

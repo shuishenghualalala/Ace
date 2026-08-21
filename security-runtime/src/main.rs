@@ -13,20 +13,20 @@ mod windows;
 
 use std::collections::{HashSet, VecDeque};
 use std::env;
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use protocol::{
-    validate_process_inputs, validate_request_limits, validate_stdio_input_frame, ReadyFrame,
-    RequestEnvelope, RuntimeEvent, RuntimeMessage, RuntimeRequest, StdioInputFrame,
-    StdioInputMessage, MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES, MAX_STDIO_INPUT_BYTES,
-    PROTOCOL_VERSION, READY_CAPABILITIES,
+    validate_process_inputs_with_home_files, validate_request_limits, validate_stdio_input_frame,
+    ReadyFrame, RequestEnvelope, RuntimeControl, RuntimeEvent, RuntimeMessage, RuntimeRequest,
+    StdioInputFrame, StdioInputMessage, MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES,
+    MAX_STDIN_BYTES, MAX_STDIO_INPUT_BYTES, PROTOCOL_VERSION, READY_CAPABILITIES,
 };
 use subtle::ConstantTimeEq;
 
@@ -116,36 +116,63 @@ fn protocol_main() -> Result<(), String> {
         },
     )?;
 
+    // The interactive transport must keep reading control frames while the
+    // managed child is running. A dedicated reader thread lets the worker
+    // stream child output without blocking on the host's next write frame.
     let stdin = io::stdin();
+    let (input_tx, input_rx) = mpsc::sync_channel::<InputMessage>(128);
+    thread::spawn(move || {
+        let mut raw = String::new();
+        loop {
+            raw.clear();
+            match stdin.read_line(&mut raw) {
+                Ok(0) => {
+                    let _ = input_tx.send(InputMessage::Eof);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    let _ = input_tx.send(InputMessage::Invalid);
+                    break;
+                }
+            }
+            if raw.len() > MAX_REQUEST_FRAME_BYTES {
+                if input_tx.send(InputMessage::TooLarge).is_err() {
+                    break;
+                }
+                continue;
+            }
+            let message = match serde_json::from_str::<RequestEnvelope>(&raw) {
+                Ok(value) => InputMessage::Frame(Box::new(value)),
+                // Duplex stdio frames are not envelopes. Forward the raw line
+                // so the RunStdio reader can validate its HMAC in isolation;
+                // anything else is a protocol error.
+                Err(_) => serde_json::from_str::<StdioInputFrame>(&raw)
+                    .map(|_| InputMessage::Stdio(raw.clone()))
+                    .unwrap_or(InputMessage::Invalid),
+            };
+            if input_tx.send(message).is_err() {
+                break;
+            }
+        }
+    });
     // ponytail: FIFO-evicting nonce cache. Not a true LRU (no access-time
     // reordering), but replay protection only needs "recently seen" semantics;
     // a strict LRU would add bookkeeping for no security gain here.
     let mut seen_nonces = NonceCache::new(NONCE_CACHE_CAP);
-    let mut reader = stdin.lock();
-    let mut raw = String::new();
     loop {
-        raw.clear();
-        match reader.read_line(&mut raw) {
-            Ok(0) => break, // EOF: peer closed stdin
-            Ok(_) => {}
-            Err(error) => return Err(format!("failed to read protocol frame: {error}")),
-        }
-        // M5: reject oversized frames before parsing so a peer cannot drive
-        // unbounded allocation by streaming a single huge line.
-        if raw.len() > MAX_REQUEST_FRAME_BYTES {
-            write_error(
-                &mut output,
-                String::new(),
-                "runtime_protocol_mismatch",
-                "frame exceeds 2MiB limit",
-            )?;
-            continue;
-        }
-        // M6: do not reflect the serde error back to the peer — it can echo
-        // attacker-controlled bytes and leak parser internals. Fixed string.
-        let envelope: RequestEnvelope = match serde_json::from_str(&raw) {
-            Ok(value) => value,
-            Err(_) => {
+        let envelope = match input_rx.recv() {
+            Ok(InputMessage::Frame(value)) => *value,
+            Ok(InputMessage::Stdio(_)) => {
+                write_error(
+                    &mut output,
+                    String::new(),
+                    "runtime_protocol_mismatch",
+                    "stdio frame outside duplex session",
+                )?;
+                continue;
+            }
+            Ok(InputMessage::Invalid) => {
                 write_error(
                     &mut output,
                     String::new(),
@@ -154,6 +181,16 @@ fn protocol_main() -> Result<(), String> {
                 )?;
                 continue;
             }
+            Ok(InputMessage::TooLarge) => {
+                write_error(
+                    &mut output,
+                    String::new(),
+                    "runtime_protocol_mismatch",
+                    "frame exceeds 2MiB limit",
+                )?;
+                continue;
+            }
+            Ok(InputMessage::Eof) | Err(_) => break,
         };
         let nonce = envelope.nonce.clone();
         if envelope.version != PROTOCOL_VERSION {
@@ -202,22 +239,218 @@ fn protocol_main() -> Result<(), String> {
                 continue;
             }
             let max_input_bytes = *max_input_bytes;
-            // A duplex request exclusively owns this helper. The client waits
-            // for `started` before sending stream frames, so dropping the
-            // initial stdin lock cannot discard read-ahead bytes.
-            drop(reader);
+            // A duplex request owns the transport until process exit. stdin is
+            // already owned by the shared reader thread; it forwards stdio
+            // frames through input_rx, which the duplex reader drains below.
             stream_stdio_request(
                 envelope.request,
                 nonce,
                 startup_token,
                 max_input_bytes,
+                input_rx,
                 &mut output,
             )?;
             return Ok(());
         }
-        stream_request(envelope.request, nonce, &mut output)?;
+        match envelope.request {
+            request @ RuntimeRequest::InteractiveOpen { .. } => {
+                drop(output);
+                stream_interactive_request(
+                    request,
+                    nonce,
+                    &input_rx,
+                    &startup_token,
+                    &mut seen_nonces,
+                    Arc::new(Mutex::new(io::BufWriter::new(io::stdout()))),
+                )?;
+                output = stdout.lock();
+            }
+            RuntimeRequest::InteractiveWrite { .. } | RuntimeRequest::InteractiveClose => {
+                write_error(
+                    &mut output,
+                    nonce,
+                    "sandbox_denied",
+                    "interactive session is not open",
+                )?;
+            }
+            request => stream_request(request, nonce, &mut output)?,
+        }
     }
     Ok(())
+}
+
+enum InputMessage {
+    Frame(Box<RequestEnvelope>),
+    /// Raw duplex stdio frame line (parses as StdioInputFrame; HMAC unchecked).
+    Stdio(String),
+    Invalid,
+    TooLarge,
+    Eof,
+}
+
+type SharedOutput = Arc<Mutex<io::BufWriter<io::Stdout>>>;
+
+struct SharedOutputWriter(SharedOutput);
+
+impl Write for SharedOutputWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("native runtime output lock poisoned"))?
+            .write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("native runtime output lock poisoned"))?
+            .flush()
+    }
+}
+
+fn stream_interactive_request(
+    request: RuntimeRequest,
+    nonce: String,
+    input_rx: &Receiver<InputMessage>,
+    startup_token: &str,
+    seen_nonces: &mut NonceCache,
+    output: SharedOutput,
+) -> Result<(), String> {
+    let (sender, receiver) = mpsc::sync_channel(EVENT_CHANNEL_CAPACITY);
+    let (control_tx, control_rx) = mpsc::channel();
+    let worker = thread::spawn(move || execute_interactive_request(request, control_rx, sender));
+    let mut output_writer = SharedOutputWriter(output.clone());
+    let mut writer = EventWriter::new(&mut output_writer, nonce);
+    let mut close_sent = false;
+
+    loop {
+        while let Ok(message) = receiver.try_recv() {
+            writer.write_message(message)?;
+            if writer.terminal {
+                break;
+            }
+        }
+        if writer.terminal {
+            break;
+        }
+        match input_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+            Ok(InputMessage::Frame(envelope)) => {
+                if !authenticate_frame(&envelope, startup_token, seen_nonces, &mut writer)? {
+                    break;
+                }
+                match envelope.request {
+                    RuntimeRequest::InteractiveWrite { data_b64 } => {
+                        let data = match BASE64_STANDARD.decode(data_b64) {
+                            Ok(data) => data,
+                            Err(_) => {
+                                writer.write_message(RuntimeMessage::Error {
+                                    code: "runtime_protocol_mismatch",
+                                    message: "invalid interactive stdin payload".to_string(),
+                                })?;
+                                break;
+                            }
+                        };
+                        if data.len() > MAX_STDIN_BYTES {
+                            writer.write_message(RuntimeMessage::Error {
+                                code: "sandbox_denied",
+                                message: "interactive stdin payload exceeds the size limit"
+                                    .to_string(),
+                            })?;
+                            break;
+                        }
+                        control_tx
+                            .send(RuntimeControl::Write(data))
+                            .map_err(|_| "interactive worker closed".to_string())?;
+                    }
+                    RuntimeRequest::InteractiveClose => {
+                        if !close_sent {
+                            control_tx
+                                .send(RuntimeControl::Close)
+                                .map_err(|_| "interactive worker closed".to_string())?;
+                            close_sent = true;
+                        }
+                    }
+                    _ => {
+                        writer.write_message(RuntimeMessage::Error {
+                            code: "sandbox_denied",
+                            message: "interactive session accepts only write or close frames"
+                                .to_string(),
+                        })?;
+                        break;
+                    }
+                }
+            }
+            Ok(InputMessage::Stdio(_)) => {
+                writer.write_message(RuntimeMessage::Error {
+                    code: "runtime_protocol_mismatch",
+                    message: "interactive session accepts only write or close frames"
+                        .to_string(),
+                })?;
+                break;
+            }
+            Ok(InputMessage::Invalid) => {
+                writer.write_message(RuntimeMessage::Error {
+                    code: "runtime_protocol_mismatch",
+                    message: "frame is not valid JSON".to_string(),
+                })?;
+                break;
+            }
+            Ok(InputMessage::TooLarge) => {
+                writer.write_message(RuntimeMessage::Error {
+                    code: "runtime_protocol_mismatch",
+                    message: "frame exceeds 2MiB limit".to_string(),
+                })?;
+                break;
+            }
+            Ok(InputMessage::Eof) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if !close_sent {
+                    let _ = control_tx.send(RuntimeControl::Close);
+                }
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+
+    drop(control_tx);
+    while let Ok(message) = receiver.recv() {
+        writer.write_message(message)?;
+        if writer.terminal {
+            break;
+        }
+    }
+    let _ = worker.join();
+    Ok(())
+}
+
+fn authenticate_frame(
+    envelope: &RequestEnvelope,
+    startup_token: &str,
+    seen_nonces: &mut NonceCache,
+    writer: &mut EventWriter<'_, SharedOutputWriter>,
+) -> Result<bool, String> {
+    if envelope.version != PROTOCOL_VERSION {
+        writer.write_message(RuntimeMessage::Error {
+            code: "runtime_protocol_mismatch",
+            message: "unsupported protocol version".to_string(),
+        })?;
+        return Ok(false);
+    }
+    if !bool::from(startup_token.as_bytes().ct_eq(envelope.token.as_bytes())) {
+        writer.write_message(RuntimeMessage::Error {
+            code: "runtime_protocol_mismatch",
+            message: "invalid runtime authentication".to_string(),
+        })?;
+        return Ok(false);
+    }
+    if envelope.nonce.len() < 16 || !seen_nonces.check_and_insert(&envelope.nonce) {
+        writer.write_message(RuntimeMessage::Error {
+            code: "sandbox_denied",
+            message: "invalid or replayed nonce".to_string(),
+        })?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// Bounded replay-protection cache (M5).
@@ -261,6 +494,159 @@ impl NonceCache {
 struct RuntimeFailure {
     code: &'static str,
     message: String,
+}
+
+fn execute_interactive_request(
+    request: RuntimeRequest,
+    control_rx: Receiver<RuntimeControl>,
+    sender: SyncSender<RuntimeMessage>,
+) {
+    let result = match request {
+        RuntimeRequest::InteractiveOpen {
+            command,
+            cwd,
+            writable_roots,
+            readable_roots,
+            readonly_roots,
+            denied_roots,
+            full_disk_read,
+            network_enabled,
+            network_rules,
+            allow_local_binding,
+            max_output_bytes,
+            env_overrides,
+            home_files,
+        } => {
+            let process_input =
+                validate_process_inputs_with_home_files(None, &env_overrides, &home_files);
+            let process_input = match process_input {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = sender.send(RuntimeMessage::Error {
+                        code: error.code,
+                        message: error.message.to_string(),
+                    });
+                    return;
+                }
+            };
+            if command.is_empty() {
+                Err(RuntimeFailure {
+                    code: "sandbox_denied",
+                    message: "empty command".to_string(),
+                })
+            } else {
+                #[cfg(target_os = "linux")]
+                {
+                    let request = linux::LinuxRunRequest {
+                        command,
+                        cwd: PathBuf::from(cwd),
+                        writable_roots: writable_roots.into_iter().map(PathBuf::from).collect(),
+                        readable_roots: readable_roots.into_iter().map(PathBuf::from).collect(),
+                        readonly_roots: readonly_roots.into_iter().map(PathBuf::from).collect(),
+                        denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
+                        full_disk_read,
+                        network_enabled,
+                        network_rules,
+                        allow_local_binding,
+                        proxy_socket_dir: None,
+                        max_output_bytes,
+                        stdin: None,
+                        env_overrides: process_input.env_overrides,
+                        home_files: process_input.home_files,
+                    };
+                    linux::run_interactive(request, control_rx, &sender).map_err(|error| {
+                        RuntimeFailure {
+                            code: error.code,
+                            message: error.message,
+                        }
+                    })
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    let request = macos::MacOsRunRequest {
+                        command,
+                        cwd: PathBuf::from(cwd),
+                        writable_roots: writable_roots.into_iter().map(PathBuf::from).collect(),
+                        readable_roots: readable_roots.into_iter().map(PathBuf::from).collect(),
+                        readonly_roots: readonly_roots.into_iter().map(PathBuf::from).collect(),
+                        denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
+                        full_disk_read,
+                        network_enabled,
+                        network_rules,
+                        allow_local_binding,
+                        max_output_bytes,
+                        stdin: None,
+                        stdin_stream: None,
+                        env_overrides: process_input.env_overrides,
+                        home_files: process_input.home_files,
+                    };
+                    macos::run_interactive(request, control_rx, &sender).map_err(|error| {
+                        RuntimeFailure {
+                            code: error.code,
+                            message: error.message,
+                        }
+                    })
+                }
+                #[cfg(windows)]
+                {
+                    let request = windows::WindowsRunRequest {
+                        command,
+                        cwd: PathBuf::from(cwd),
+                        writable_roots: writable_roots.into_iter().map(PathBuf::from).collect(),
+                        readable_roots: readable_roots.into_iter().map(PathBuf::from).collect(),
+                        readonly_roots: readonly_roots.into_iter().map(PathBuf::from).collect(),
+                        denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
+                        full_disk_read,
+                        network_enabled,
+                        network_rules,
+                        allow_local_binding,
+                        max_output_bytes,
+                        stdin: None,
+                        stdin_stream: None,
+                        env_overrides: process_input.env_overrides,
+                        home_files: process_input.home_files,
+                    };
+                    windows::run_interactive(request, control_rx, &sender).map_err(|error| {
+                        RuntimeFailure {
+                            code: error.code,
+                            message: error.message,
+                        }
+                    })
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+                {
+                    let _ = (
+                        command,
+                        cwd,
+                        writable_roots,
+                        readable_roots,
+                        denied_roots,
+                        full_disk_read,
+                        network_enabled,
+                        network_rules,
+                        allow_local_binding,
+                        max_output_bytes,
+                        env_overrides,
+                        control_rx,
+                    );
+                    Err(RuntimeFailure {
+                        code: "sandbox_unavailable",
+                        message: "platform backend is unavailable".to_string(),
+                    })
+                }
+            }
+        }
+        _ => Err(RuntimeFailure {
+            code: "sandbox_denied",
+            message: "interactive request must open a session".to_string(),
+        }),
+    };
+    if let Err(error) = result {
+        let _ = sender.send(RuntimeMessage::Error {
+            code: error.code,
+            message: error.message,
+        });
+    }
 }
 
 fn handle_request(
@@ -326,12 +712,15 @@ fn handle_request(
                     readable_roots,
                     denied_roots,
                     filesystem_globs,
+                    readonly_roots: Vec::new(),
+                    full_disk_read: false,
                     network_enabled,
                     network_rules,
                     allow_local_binding,
                     max_output_bytes,
                     stdin_b64: None,
                     env_overrides,
+                    home_files: std::collections::BTreeMap::new(),
                 },
                 sender,
                 stdin_stream,
@@ -342,20 +731,27 @@ fn handle_request(
             cwd,
             writable_roots,
             readable_roots,
+            readonly_roots,
             denied_roots,
             filesystem_globs,
+            full_disk_read,
             network_enabled,
             network_rules,
             allow_local_binding,
             max_output_bytes,
             stdin_b64,
             env_overrides,
+            home_files,
         } => {
-            let process_input = validate_process_inputs(stdin_b64.as_deref(), &env_overrides)
-                .map_err(|error| RuntimeFailure {
-                    code: error.code,
-                    message: error.message.to_string(),
-                })?;
+            let process_input = validate_process_inputs_with_home_files(
+                stdin_b64.as_deref(),
+                &env_overrides,
+                &home_files,
+            )
+            .map_err(|error| RuntimeFailure {
+                code: error.code,
+                message: error.message.to_string(),
+            })?;
             if command.is_empty() {
                 return Err(RuntimeFailure {
                     code: "sandbox_denied",
@@ -377,8 +773,10 @@ fn handle_request(
                     cwd: PathBuf::from(cwd),
                     writable_roots: writable_roots.into_iter().map(PathBuf::from).collect(),
                     readable_roots: readable_roots.into_iter().map(PathBuf::from).collect(),
+                    readonly_roots: readonly_roots.into_iter().map(PathBuf::from).collect(),
                     denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
                     filesystem_globs,
+                    full_disk_read,
                     network_enabled,
                     network_rules,
                     allow_local_binding,
@@ -387,6 +785,7 @@ fn handle_request(
                     stdin: process_input.stdin,
                     stdin_stream,
                     env_overrides: process_input.env_overrides,
+                    home_files: process_input.home_files,
                 };
                 linux::run(request, sender).map_err(|error| RuntimeFailure {
                     code: error.code,
@@ -400,7 +799,9 @@ fn handle_request(
                     cwd: PathBuf::from(cwd),
                     writable_roots: writable_roots.into_iter().map(PathBuf::from).collect(),
                     readable_roots: readable_roots.into_iter().map(PathBuf::from).collect(),
+                    readonly_roots: readonly_roots.into_iter().map(PathBuf::from).collect(),
                     denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
+                    full_disk_read,
                     network_enabled,
                     network_rules,
                     allow_local_binding,
@@ -408,6 +809,7 @@ fn handle_request(
                     stdin: process_input.stdin,
                     stdin_stream,
                     env_overrides: process_input.env_overrides,
+                    home_files: process_input.home_files,
                 };
                 macos::run(request, sender).map_err(|error| RuntimeFailure {
                     code: error.code,
@@ -422,8 +824,10 @@ fn handle_request(
                     cwd,
                     writable_roots,
                     readable_roots,
+                    readonly_roots,
                     denied_roots,
                     filesystem_globs,
+                    full_disk_read,
                     network_enabled,
                     network_rules,
                     allow_local_binding,
@@ -443,7 +847,9 @@ fn handle_request(
                     cwd: PathBuf::from(cwd),
                     writable_roots: writable_roots.into_iter().map(PathBuf::from).collect(),
                     readable_roots: readable_roots.into_iter().map(PathBuf::from).collect(),
+                    readonly_roots: readonly_roots.into_iter().map(PathBuf::from).collect(),
                     denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
+                    full_disk_read,
                     network_enabled,
                     network_rules,
                     allow_local_binding,
@@ -451,6 +857,7 @@ fn handle_request(
                     stdin: process_input.stdin,
                     stdin_stream,
                     env_overrides: process_input.env_overrides,
+                    home_files: process_input.home_files,
                 };
                 windows::run(request, sender).map_err(|error| RuntimeFailure {
                     code: error.code,
@@ -458,6 +865,12 @@ fn handle_request(
                 })
             }
         }
+        RuntimeRequest::InteractiveOpen { .. }
+        | RuntimeRequest::InteractiveWrite { .. }
+        | RuntimeRequest::InteractiveClose => Err(RuntimeFailure {
+            code: "sandbox_denied",
+            message: "interactive request must open a session".to_string(),
+        }),
     }
 }
 
@@ -503,6 +916,7 @@ fn stream_stdio_request<W: Write>(
     nonce: String,
     startup_token: String,
     max_input_bytes: usize,
+    input_rx: Receiver<InputMessage>,
     output: &mut W,
 ) -> Result<(), String> {
     let (event_sender, event_receiver) = mpsc::sync_channel(EVENT_CHANNEL_CAPACITY);
@@ -517,6 +931,7 @@ fn stream_stdio_request<W: Write>(
             reader_nonce,
             max_input_bytes,
             reader_finished,
+            input_rx,
         )
     });
     let worker_finished = Arc::clone(&finished);
@@ -547,29 +962,21 @@ fn read_stdio_input(
     nonce: String,
     max_input_bytes: usize,
     finished: Arc<AtomicBool>,
+    input_rx: Receiver<InputMessage>,
 ) {
-    let stdin = io::stdin();
-    let mut reader = stdin.lock();
     let mut expected_seq = 0_u64;
     let mut retained = 0_usize;
-    let mut raw = String::new();
     while !finished.load(Ordering::Acquire) {
-        raw.clear();
-        match reader.read_line(&mut raw) {
-            Ok(0) => {
+        // stdin belongs to the shared reader thread; frames arrive pre-split.
+        // Any non-stdio message (envelope, invalid line, EOF) aborts the
+        // stream exactly like an unparseable line did before.
+        let raw = match input_rx.recv() {
+            Ok(InputMessage::Stdio(raw)) if raw.len() <= MAX_REQUEST_FRAME_BYTES => raw,
+            _ => {
                 let _ = sender.send(StdioInputMessage::Abort);
                 return;
             }
-            Ok(_) if raw.len() <= MAX_REQUEST_FRAME_BYTES => {}
-            Ok(_) => {
-                let _ = sender.send(StdioInputMessage::Abort);
-                return;
-            }
-            Err(_) => {
-                let _ = sender.send(StdioInputMessage::Abort);
-                return;
-            }
-        }
+        };
         let frame: StdioInputFrame = match serde_json::from_str(&raw) {
             Ok(value) => value,
             Err(_) => {
@@ -808,6 +1215,7 @@ mod tests {
             filesystem_sandbox: true,
             process_tree_cleanup: true,
             managed_network: false,
+            full_disk_read: false,
             system_bwrap: false,
             bundled_bwrap: false,
             wsl_version: None,
