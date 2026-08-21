@@ -622,4 +622,12 @@ graph TD
   <li><b>验证：</b>复用 Team 全量测试、产物命名/路径回归和 Python 编译检查。</li>
 </ul>
 
+<h2>172. 2026-08-21 Team 删除无调用代理方法</h2>
+<ul>
+  <li><b>清理范围：</b>删除未被 TeamManager 实际调用的 <code>_role_*</code>/<code>_goal_*</code> 转发方法，以及单点使用的 JSON、聊天噪声和共享工作区代理。</li>
+  <li><b>真实来源：</b>角色/目标能力继续由 <code>flow_builder.py</code> 提供，JSON 解析由 <code>crew/core/text_parsing.py</code> 提供，聊天展示判断由 <code>result_presenter.py</code> 提供。</li>
+  <li><b>边界：</b>不删除仍承担编排职责的 <code>_default_workflow_nodes</code>、workspace 路径校验和成员能力读取；不新增模块。</li>
+  <li><b>验证：</b>运行 Team 全量测试和 Python 编译检查，确认旧工作流节点、共享 workspace 和历史投影行为不变。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

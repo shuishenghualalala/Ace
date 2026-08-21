@@ -30,6 +30,7 @@ from crew.tasks.runtime import TaskRuntime
 from crew.tasks.task_manager import InMemoryTaskManager, LegacyTaskManagerAdapter
 from crew.team.delegate_tool import run_delegate_to_teammate
 from crew.team.bus import TeamBus
+from crew.team import flow_builder
 from crew.security.launch import ProcessLaunch, current_process_launch
 from crew.security.models import (
     FilesystemAccess,
@@ -2992,10 +2993,10 @@ def test_team_delegate_workspace_isolates_abstract_team_turns(tmp_path, monkeypa
     )
     tm, _ = _team()
 
-    assert tm._team_goal_uses_shared_workspace("测试一下之前开发的贪吃蛇是否可验收")
-    assert tm._team_goal_uses_shared_workspace("检查 snake.html 是否可验收")
-    assert not tm._team_goal_uses_shared_workspace("测试一下团队协作吧")
-    assert not tm._team_goal_uses_shared_workspace("测试一下团队协作是否正常运行")
+    assert flow_builder.team_goal_uses_shared_workspace("测试一下之前开发的贪吃蛇是否可验收")
+    assert flow_builder.team_goal_uses_shared_workspace("检查 snake.html 是否可验收")
+    assert not flow_builder.team_goal_uses_shared_workspace("测试一下团队协作吧")
+    assert not flow_builder.team_goal_uses_shared_workspace("测试一下团队协作是否正常运行")
 
     shared = tm._team_delegate_cwd(
         Envelope.of("测试一下之前开发的贪吃蛇是否可验收", session_id="web_a::turn::req_1", mode="team"),

@@ -131,12 +131,6 @@ _KANBAN_TO_TEAM_PLAN_STATUS = {
     "needs_info": "blocked",
     "cancelled": "cancelled",
 }
-def _is_team_chat_noise(text: str) -> bool:
-    """Return whether a persisted Team chat line is runtime/tool noise."""
-
-    return team_presenter.is_team_chat_noise(text)
-
-
 def _join_stream_fragments(parts: list[str]) -> str:
     """Join raw model deltas without changing their token boundaries."""
 
@@ -2852,7 +2846,7 @@ class InProcessTeamManager(TeamManager):
                     if communication_kind == "ask_lifecycle":
                         continue
                 text = str(payload.get("text") or "").strip()
-                if _is_team_chat_noise(text):
+                if team_presenter.is_team_chat_noise(text):
                     continue
                 items.append({
                     "role": "team_internal",
@@ -4719,10 +4713,6 @@ class InProcessTeamManager(TeamManager):
         }
 
     @staticmethod
-    def _json_object_from_text(text: str) -> dict[str, Any]:
-        return extract_json_object(text) or {}
-
-    @staticmethod
     def _clean_display_patch_value(value: Any, *, limit: int = 24) -> str:
         text = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n-—:：，,。；;")
         if not text:
@@ -4784,7 +4774,7 @@ class InProcessTeamManager(TeamManager):
         except Exception as exc:  # noqa: BLE001
             log.debug("final display metadata extraction skipped session=%s err=%s", plan.team_session_id, exc)
             return {}
-        data = self._json_object_from_text(str(getattr(response, "text", "") or ""))
+        data = extract_json_object(str(getattr(response, "text", "") or "")) or {}
         updates = data.get("updates") if isinstance(data.get("updates"), list) else []
         valid_ids = {item["node_id"] for item in candidates}
         patches: dict[str, dict[str, str]] = {}
@@ -5448,38 +5438,6 @@ class InProcessTeamManager(TeamManager):
             "不要展开完整团队计划，不要重复上游全文。"
         )
 
-    @staticmethod
-    def _role_hint(member: TeamMemberSpec) -> str:
-        return flow_builder.role_hint(member)
-
-    @staticmethod
-    def _workflow_lane(member: TeamMemberSpec) -> str:
-        return flow_builder.workflow_lane(member)
-
-    @staticmethod
-    def _role_key(member: TeamMemberSpec) -> str:
-        return flow_builder.role_key(member)
-
-    @staticmethod
-    def _role_label(member: TeamMemberSpec) -> str:
-        return flow_builder.role_label(member)
-
-    @staticmethod
-    def _role_slug(member: TeamMemberSpec, fallback: str) -> str:
-        return flow_builder.role_slug(member, fallback)
-
-    @staticmethod
-    def _verify_role_template(member: TeamMemberSpec, task_title: str, goal: str) -> dict[str, str]:
-        return flow_builder.verify_role_template(member, task_title, goal)
-
-    @staticmethod
-    def _goal_title(goal: str) -> str:
-        return flow_builder.goal_title(goal)
-
-    @staticmethod
-    def _goal_needs_build(goal: str) -> bool:
-        return flow_builder.goal_needs_build(goal)
-
     def _default_workflow_nodes(
         self,
         team: Team,
@@ -5803,12 +5761,6 @@ class InProcessTeamManager(TeamManager):
             lines.append(f"- [{status}] {node.title}（{node.assignee}）：{summary}")
         return "\n".join(lines)
 
-    @staticmethod
-    def _team_goal_uses_shared_workspace(goal: str) -> bool:
-        """Return whether a Team goal explicitly targets existing workspace files."""
-
-        return flow_builder.team_goal_uses_shared_workspace(goal)
-
     def _team_delegate_cwd(
         self,
         envelope: Envelope,
@@ -5819,7 +5771,7 @@ class InProcessTeamManager(TeamManager):
     ) -> str:
         """Give abstract Team tasks a per-turn workspace to avoid stale artifact bleed."""
 
-        if self._team_goal_uses_shared_workspace(goal):
+        if flow_builder.team_goal_uses_shared_workspace(goal):
             return ""
         try:
             session_dir = safe_path_segment(envelope.session_id, "team-turn")
