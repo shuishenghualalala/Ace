@@ -362,6 +362,22 @@ describe('Team Session history mapping', () => {
     expect(merged[0].communicationStatus).toBe('answered');
   });
 
+  it('does not deduplicate same-looking node results from different requests', () => {
+    const first = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '@leader 已完成',
+      agent_id: 'coder',
+      event_type: 'team_submit',
+      node_id: 'implement_core',
+      source_session_id: 'desktop_demo::turn::request_1::coder',
+      request_id: 'request_1',
+      display_mode: 'chat',
+    });
+    const second = { ...first, id: 'result-2', requestId: 'request_2' };
+
+    expect(mergeTeamInternalMessage([first], second)).toHaveLength(2);
+  });
+
   it('replaces a waiting direct mention with the terminal answer by request id', () => {
     const waiting = mapBackendHistoryItem({
       role: 'team_internal',

@@ -679,4 +679,16 @@ describe("mergeHistoryWithLiveMessages", () => {
     expect(merged[0].requestId).toBe("mention_req_2");
     expect(merged[0].communicationStatus).toBe("answered");
   });
+
+  it("does not deduplicate same-looking node results from different requests", () => {
+    const first = mapHistoryItems([teamItem({
+      content: "@leader 已完成",
+      event_type: "team_submit",
+      display_mode: "chat",
+      request_id: "request_1",
+    })])[0];
+    const second = { ...first, id: "result-2", requestId: "request_2" };
+
+    expect(mergeTeamInternalMessage([first], second)).toHaveLength(2);
+  });
 });

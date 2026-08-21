@@ -355,6 +355,19 @@ function matchesTeamNode(existing: ChatMessage, incoming: ChatMessage): boolean 
   );
 }
 
+function sameTeamRequest(existing: ChatMessage, incoming: ChatMessage): boolean {
+  const existingRequestId = String(existing.requestId || '').trim();
+  const incomingRequestId = String(incoming.requestId || '').trim();
+  if (existingRequestId || incomingRequestId) {
+    return Boolean(existingRequestId && incomingRequestId && existingRequestId === incomingRequestId);
+  }
+  return Boolean(
+    existing.sourceSessionId
+    && incoming.sourceSessionId
+    && existing.sourceSessionId === incoming.sourceSessionId,
+  );
+}
+
 function isDuplicateTeamEvent(existing: ChatMessage, incoming: ChatMessage): boolean {
   return existing.role === 'team_internal'
     && incoming.role === 'team_internal'
@@ -363,7 +376,7 @@ function isDuplicateTeamEvent(existing: ChatMessage, incoming: ChatMessage): boo
     && existing.eventType === incoming.eventType
     && existing.nodeId === incoming.nodeId
     && (existing.agentId || existing.mentionFrom) === (incoming.agentId || incoming.mentionFrom)
-    && existing.sourceSessionId === incoming.sourceSessionId
+    && sameTeamRequest(existing, incoming)
     && existing.content.trim() === incoming.content.trim();
 }
 

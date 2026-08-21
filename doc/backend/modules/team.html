@@ -557,4 +557,13 @@ graph TD
   <li><b>验证：</b>新增未知角色归一化回归，并运行 Web/Desktop 历史映射测试和 TypeScript 类型检查。</li>
 </ul>
 
+<h2>164. 2026-08-21 Team 事件去重按请求关联</h2>
+<ul>
+  <li><b>关联优先级：</b>Web 与 Desktop 合并 <code>team_internal</code> 节点结果时，若任一事件带有 <code>requestId</code>，必须双方 requestId 相同才允许去重。</li>
+  <li><b>旧数据兼容：</b>只有双方都没有 requestId 时，才回退到双方都存在且相同的 <code>sourceSessionId</code>；空 source 不再被当作同一请求。</li>
+  <li><b>用户可见行为：</b>不同回合即使成员、节点和文本完全相同，也会分别保留；历史恢复与实时事件属于同一请求时仍只展示一条。</li>
+  <li><b>范围：</b>仅收紧前端 Team 事件合并条件，不改变后端事件协议、节点执行或普通 Agent 消息合并。</li>
+  <li><b>验证：</b>Web 历史/消息/看板测试为 <code>41 passed</code>，Desktop 历史映射测试为 <code>21 passed</code>，两端 typecheck 通过。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

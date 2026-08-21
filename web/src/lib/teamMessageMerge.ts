@@ -59,6 +59,19 @@ function isUserMentionAnswer(message: UiMessage): boolean {
   return message.communicationKind === "user_mention_answer" && Boolean(message.requestId);
 }
 
+function sameTeamRequest(existing: UiMessage, incoming: UiMessage): boolean {
+  const existingRequestId = String(existing.requestId || "").trim();
+  const incomingRequestId = String(incoming.requestId || "").trim();
+  if (existingRequestId || incomingRequestId) {
+    return Boolean(existingRequestId && incomingRequestId && existingRequestId === incomingRequestId);
+  }
+  return Boolean(
+    existing.sourceSessionId
+    && incoming.sourceSessionId
+    && existing.sourceSessionId === incoming.sourceSessionId,
+  );
+}
+
 function isDuplicateTeamEvent(existing: UiMessage, incoming: UiMessage): boolean {
   return existing.role === "team_internal"
     && incoming.role === "team_internal"
@@ -67,7 +80,7 @@ function isDuplicateTeamEvent(existing: UiMessage, incoming: UiMessage): boolean
     && existing.eventType === incoming.eventType
     && existing.nodeId === incoming.nodeId
     && (existing.agentId || existing.mentionFrom) === (incoming.agentId || incoming.mentionFrom)
-    && existing.sourceSessionId === incoming.sourceSessionId
+    && sameTeamRequest(existing, incoming)
     && existing.text.trim() === incoming.text.trim();
 }
 
