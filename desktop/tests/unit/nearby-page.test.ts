@@ -157,6 +157,28 @@ describe('nearby page', () => {
     page.dispose();
   });
 
+  it('restores persisted rooms and does not leave when the page is disposed', () => {
+    const { command, page, root, emit } = setup();
+    emit({ type: 'ready', peer: { ...peer, peer_id: 'crew_local' } });
+    emit({
+      type: 'room_restored',
+      room_id: 'room_saved',
+      room_name: '历史群聊',
+      peer_ids: ['crew_local', 'crew_peer_a'],
+      messages: [{
+        message_id: 'saved_1',
+        sender: 'crew_peer_a',
+        message_type: 'room.message',
+        payload: { room_id: 'room_saved', text: '历史消息' },
+      }],
+    });
+
+    expect(root.querySelector('.nearby-room-list__item')?.textContent).toContain('历史群聊');
+    expect(root.querySelector('.nearby-room__messages')?.textContent).toContain('历史消息');
+    page.dispose();
+    expect(command).not.toHaveBeenCalledWith({ type: 'leave_room', room_id: 'room_saved' });
+  });
+
   it('sends file metadata and reassembles out-of-order file chunks', async () => {
     const { command, nearbySaveFile, nearbySelectFile, page, root, emit } = setup();
     nearbySelectFile.mockResolvedValue({

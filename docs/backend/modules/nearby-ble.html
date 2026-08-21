@@ -37,12 +37,12 @@
       <tr><td><code>nearby/src/identity.rs</code></td><td>peer ID 状态目录解析、持久化、加载和参数校验。</td></tr>
       <tr><td><code>nearby/src/protocol.rs</code></td><td>UUID、PeerInfo、Message、FrameCodec、Reassembler 和协议单元测试。</td></tr>
       <tr><td><code>nearby/src/runtime.rs</code></td><td>BLE Peripheral 广播、Central 扫描连接、GATT 交互和终端消息循环。</td></tr>
-      <tr><td><code>nearby/src/ipc.rs</code></td><td>Electron JSONL IPC、多个 PeerSession、房间邀请、群消息转发和事件输出。</td></tr>
+      <tr><td><code>nearby/src/ipc.rs</code></td><td>Electron JSONL IPC、多个 PeerSession、房间邀请、群消息转发、房间历史持久化和事件输出。</td></tr>
       <tr><td><code>nearby/build.rs</code> / <code>nearby/Info.plist</code></td><td>在 macOS 独立 BLE 进程中嵌入 CoreBluetooth 隐私用途声明，开发模式和打包模式共用。</td></tr>
       <tr><td><code>nearby/src/cli.rs</code></td><td>交互式 CLI 代理；复用 IPC 运行时验证发现、群聊、提及、回复和文件链路。</td></tr>
       <tr><td><code>nearby/src/main.rs</code></td><td>PoC CLI 参数解析和启动入口；<code>--ipc</code> 用于桌面端托管。</td></tr>
       <tr><td><code>desktop/src/main/nearby-service.ts</code></td><td>主进程启动、停止和管理跨平台 Rust Nearby 子进程。</td></tr>
-      <tr><td><code>desktop/src/ui/features/nearby-page.ts</code></td><td>发现列表、Agent 选择、群聊页面和群消息交互。</td></tr>
+      <tr><td><code>desktop/src/ui/features/nearby-page.ts</code></td><td>紧凑桌面聊天布局、发现列表、群聊会话列表、成员面板和群消息交互。</td></tr>
       <tr><td><code>desktop/src/main/index.ts</code> / <code>preload.ts</code></td><td>校验 Nearby 命令，并通过系统文件选择器读取与保存小文件。</td></tr>
     </tbody>
   </table>
@@ -71,7 +71,8 @@
   <p>Peripheral 通知在部分平台上会广播给所有订阅者，因此接收端还会按成员列表过滤邀请和群消息，未被选择的 Agent 不会自动加入房间。PeerSession 同时承担 Central 主动连接和 Peripheral 被动接收，避免桌面端暴露 BLE 库类型。</p>
 
   <h2>桌面 IPC</h2>
-  <p>Rust 子进程通过 stdin/stdout 交换一行一个 JSON 对象。Electron 主进程只接受受信 Renderer 的白名单命令：启动/停止发现、设置是否可被发现、创建房间、发送带提及/回复的房间消息、发送小文件、退出房间。Renderer 通过 Preload 暴露的系统文件选择器读取文件，接收端通过保存对话框落盘。Rust 输出 <code>ready</code>、<code>discoverability_changed</code>、<code>peer_discovered</code>、<code>peer_connected</code>、<code>room_created</code>、<code>room_joined</code>、<code>message</code> 和 <code>error</code> 事件。</p>
+  <p>Rust 子进程通过 stdin/stdout 交换一行一个 JSON 对象。Electron 主进程只接受受信 Renderer 的白名单命令：启动/停止发现、设置是否可被发现、创建房间、发送带提及/回复的房间消息、发送小文件、退出房间。Renderer 通过 Preload 暴露的系统文件选择器读取文件，接收端通过保存对话框落盘。Rust 输出 <code>ready</code>、<code>discoverability_changed</code>、<code>peer_discovered</code>、<code>peer_connected</code>、<code>room_created</code>、<code>room_joined</code>、<code>room_restored</code>、<code>message</code> 和 <code>error</code> 事件。</p>
+  <p>已加入的群聊和最近 200 条消息保存在状态目录的 <code>rooms.json</code>。Nearby 服务重启时会先发送 <code>room_restored</code>，桌面端恢复左侧群聊列表和历史消息；页面切换或窗口关闭只停止运行时，不会自动发送 <code>room.leave</code>，只有用户点击“退出”才会真正删除本机群聊。</p>
   <pre>npm run build:dev
 # 或直接启动独立 IPC 模式
 cargo run --manifest-path nearby/Cargo.toml -- --ipc</pre>
@@ -91,7 +92,7 @@ file test ./hello.txt
 save &lt;received-file-id&gt; ./received-hello.txt
 room leave test
 quit</pre>
-  <p>可用命令还包括 <code>rooms</code>、<code>status</code>、<code>discover on|off</code> 和 <code>advertise on|off</code>。发送消息时使用 <code>--</code> 分隔选项和正文；回复使用 <code>--reply &lt;message_id&gt; &lt;sender_peer_id&gt; &lt;quoted_text&gt;</code>。收到文件后，CLI 会先完成分片重组，再使用 <code>save</code> 按文件 ID 校验 SHA-256 后保存。</p>
+  <p>可用命令还包括 <code>rooms</code>、<code>room history &lt;id&gt;</code>、<code>status</code>、<code>discover on|off</code> 和 <code>advertise on|off</code>。发送消息时使用 <code>--</code> 分隔选项和正文；回复使用 <code>--reply &lt;message_id&gt; &lt;sender_peer_id&gt; &lt;quoted_text&gt;</code>。收到文件后，CLI 会先完成分片重组，再使用 <code>save</code> 按文件 ID 校验 SHA-256 后保存。</p>
   <h3>macOS 蓝牙权限</h3>
   <p>CoreBluetooth 的权限声明嵌入 <code>crew-nearby</code> 二进制的 <code>__TEXT,__info_plist</code> 段，因此 <code>npm run dev</code> 和 Electron 打包产物都使用同一份声明。首次打开“同伴”并启动 BLE 后，macOS 会显示蓝牙授权提示；如果之前拒绝过，需要在“系统设置 → 隐私与安全性 → 蓝牙”中重新允许，或使用 <code>tccutil reset BluetoothAlways com.crew.nearby</code> 清除该进程的授权记录后重试。</p>
   <h3>诊断日志</h3>
@@ -148,13 +149,13 @@ cargo run --manifest-path nearby/Cargo.toml -- --display-name "Linux One" --agen
       <tr><td>Windows GATT 写事件 deferral</td><td class="pass">源码检查通过</td><td>本地依赖补丁已为 WinRT 读写请求增加 <code>GetDeferral</code>/<code>Complete</code> 生命周期；Windows 实机消息回执仍待更新后验证。</td></tr>
       <tr><td>Windows → Mac 群聊消息</td><td class="pending">待 Windows 回执</td><td>Mac 端已保持 CLI 监听并多次请求 Windows 回发消息；当前尚未收到回执，不能据此宣称双向验收完成。</td></tr>
       <tr><td>完整 Nearby CLI</td><td class="pass">通过</td><td>CLI 复用 IPC 运行时，覆盖发现、广播开关、同伴列表、房间创建/加入/退出、群消息、@ 提及、回复、文件发送、文件分片接收和校验保存。</td></tr>
-      <tr><td><code>cargo test --manifest-path nearby/Cargo.toml</code></td><td class="pass">通过</td><td>库 21 个测试、CLI 6 个测试全部通过，包含发现开关持久化、IPC 标签、房间提及、回复、文件完整性、文件分片、成员过滤、CLI 被动回传和平台连接策略测试。</td></tr>
+      <tr><td><code>cargo test --manifest-path nearby/Cargo.toml</code></td><td class="pass">通过</td><td>库 22 个测试、CLI 7 个测试全部通过，包含发现开关持久化、房间历史持久化与上限、IPC 标签、房间提及、回复、文件完整性、文件分片、成员过滤、CLI 被动回传和平台连接策略测试。</td></tr>
       <tr><td><code>cargo check --manifest-path nearby/Cargo.toml --target x86_64-pc-windows-msvc</code></td><td class="pass">通过</td><td>Windows 目标编译检查通过。</td></tr>
       <tr><td><code>cargo build --manifest-path nearby/Cargo.toml --target x86_64-pc-windows-msvc</code></td><td class="pending">本机链接环境阻塞</td><td>源码检查通过，但 macOS 环境没有 Windows <code>link.exe</code>；需在 Windows 端拉取后构建实际可执行文件。</td></tr>
       <tr><td><code>cargo check --manifest-path nearby/Cargo.toml --target x86_64-unknown-linux-gnu</code></td><td class="pending">环境阻塞</td><td>当前 macOS 环境缺少 Linux sysroot/DBus 开发库，阻塞在 <code>libdbus-sys</code> 构建阶段；本机 Docker CLI 存在但 Docker daemon 未运行，暂不能用 Linux 容器补检。</td></tr>
       <tr><td>macOS BLE 启动烟测</td><td class="pass">通过</td><td>当前 Mac 已实际启动 Peripheral 广播与 Central 扫描并输出 <code>Advertising...</code>、<code>Scanning...</code>；随后手动停止进程。</td></tr>
       <tr><td><code>npm run typecheck</code></td><td class="pass">通过</td><td>Electron 主进程、Preload 和 Renderer 类型检查通过。</td></tr>
-      <tr><td>Nearby 定向桌面测试</td><td class="pass">通过</td><td>Nearby 页面、托盘入口、Shell 导航共 13 个测试通过，覆盖发现开关、工作目录隐私提示、群聊列表、成员面板、在线状态、输入区状态、提及、回复、文件分片重组和保存动作。</td></tr>
+      <tr><td>Nearby 定向桌面测试</td><td class="pass">通过</td><td>Nearby 页面、托盘入口、Shell 导航共 14 个测试通过，覆盖发现开关、工作目录隐私提示、群聊列表、历史群聊恢复、页面切换不退群、成员面板、在线状态、输入区状态、提及、回复、文件分片重组和保存动作。</td></tr>
       <tr><td><code>npm run build:dev</code></td><td class="pass">通过</td><td>Nearby debug runtime、Electron 主进程、Preload、Renderer 和 CSS Bundle 构建通过。</td></tr>
       <tr><td><code>npm run build</code></td><td class="pending">本轮未执行</td><td>按当前要求暂不执行 release 构建或打包。</td></tr>
       <tr><td>桌面全量单测</td><td class="pending">存在既有失败</td><td>147 个测试文件中 120 个通过；62 个失败来自当前分支既有未提交改动相关模块，需单独处理。</td></tr>

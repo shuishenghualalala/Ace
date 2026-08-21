@@ -37,6 +37,7 @@ struct PeerSummary {
 struct RoomSummary {
     room_name: String,
     peer_ids: Vec<String>,
+    messages: Vec<Value>,
 }
 
 #[derive(Debug)]
@@ -151,6 +152,8 @@ pub fn run(config: NearbyConfig) -> Result<()> {
                     print_peers(&state);
                 } else if command["type"] == "local_rooms" {
                     print_rooms(&state);
+                } else if command["type"] == "local_room_history" {
+                    print_room_history(&state, command["room_id"].as_str().unwrap_or_default());
                 } else if command["type"] == "local_status" {
                     print_status(&state);
                 } else if command["type"] == "local_save_file" {
@@ -276,7 +279,14 @@ fn parse_room_command(words: &[String]) -> Result<CliAction> {
                 "room_id": room_id,
             })))
         }
-        _ => bail!("usage: room create|leave ..."),
+        Some("history") => {
+            let room_id = words.get(2).context("usage: room history <room_id>")?;
+            Ok(CliAction::Command(json!({
+                "type": "local_room_history",
+                "room_id": room_id,
+            })))
+        }
+        _ => bail!("usage: room create|leave|history ..."),
     }
 }
 
@@ -486,7 +496,7 @@ fn print_event(line: &str, state: &Arc<Mutex<CliState>>) {
             }
             println!("peer_disconnected: {peer_id}");
         }
-        "room_created" | "room_joined" => {
+        "room_created" | "room_joined" | "room_restored" => {
             let room_id = event["room_id"].as_str().unwrap_or("unknown");
             let room_name = event["room_name"].as_str().unwrap_or(room_id);
             let peer_ids = event["peer_ids"]
@@ -498,12 +508,14 @@ fn print_event(line: &str, state: &Arc<Mutex<CliState>>) {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let messages = event["messages"].as_array().cloned().unwrap_or_default();
             if let Ok(mut state) = state.lock() {
                 state.rooms.insert(
                     room_id.to_owned(),
                     RoomSummary {
                         room_name: room_name.to_owned(),
                         peer_ids: peer_ids.clone(),
+                        messages,
                     },
                 );
             }
@@ -531,6 +543,13 @@ fn print_message_event(event: &Value, state: &Arc<Mutex<CliState>>) {
     let message_id = message["message_id"].as_str().unwrap_or("unknown");
     let sender = message["sender"].as_str().unwrap_or("unknown");
     if message_type == "room.message" {
+        if let Some(room_id) = message["payload"]["room_id"].as_str() {
+            if let Ok(mut state) = state.lock() {
+                if let Some(room) = state.rooms.get_mut(room_id) {
+                    room.messages.push(message.clone());
+                }
+            }
+        }
         println!(
             "message id={} room={} sender={} text={}",
             message_id,
@@ -583,6 +602,7 @@ fn print_help() {
         "Commands:\n\
   peers                                      List discovered peers\n\
   rooms                                      List active rooms\n\
+  room history <id>                          Show persisted room messages\n\
   status                                     Show local peer and current state\n\
   discover on|off                            Start or stop scanning\n\
   advertise on|off                           Start or stop BLE advertising\n\
@@ -630,6 +650,31 @@ fn print_rooms(state: &Arc<Mutex<CliState>>) {
     }
     for (room_id, room) in &state.rooms {
         println!("{room_id}: {} members={:?}", room.room_name, room.peer_ids);
+    }
+}
+
+fn print_room_history(state: &Arc<Mutex<CliState>>, room_id: &str) {
+    let Ok(state) = state.lock() else {
+        println!("room state unavailable");
+        return;
+    };
+    let Some(room) = state.rooms.get(room_id) else {
+        println!("No room found: {room_id}");
+        return;
+    };
+    if room.messages.is_empty() {
+        println!("No messages: {room_id}");
+        return;
+    }
+    for message in &room.messages {
+        println!(
+            "{} sender={} text={}",
+            message["message_id"].as_str().unwrap_or("unknown"),
+            message["sender"].as_str().unwrap_or("unknown"),
+            message["payload"]["text"]
+                .as_str()
+                .unwrap_or("[file or system message]")
+        );
     }
 }
 
@@ -715,6 +760,16 @@ mod tests {
             Some("set_discoverable")
         );
         assert!(matches!(parse_command("quit").unwrap(), CliAction::Quit));
+    }
+
+    #[test]
+    fn parses_room_history_command() {
+        let history = parse_command("room history saved_room").unwrap();
+        let CliAction::Command(history) = history else {
+            panic!("expected local room history command");
+        };
+        assert_eq!(history["type"], "local_room_history");
+        assert_eq!(history["room_id"], "saved_room");
     }
 
     #[test]
