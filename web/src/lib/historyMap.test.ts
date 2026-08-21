@@ -60,6 +60,16 @@ describe("preserveLocalProcessDetails", () => {
 });
 
 describe("mapHistoryItems", () => {
+  it("normalizes unknown backend roles to a safe status message", () => {
+    const [message] = mapHistoryItems([{
+      role: "unexpected_role",
+      content: "历史状态",
+    }]);
+
+    expect(message.role).toBe("status");
+    expect(message.text).toBe("历史状态");
+  });
+
   it("clamps non-finite file change counts at the history boundary", () => {
     expect(normalizeTurnFileChanges([
       { path: "/work/app.ts", added: "NaN", removed: Infinity },

@@ -549,4 +549,12 @@ graph TD
   <li><b>验证：</b>新增无 TeamPlan 的旧 delegate 兼容回归；本次未删除入口、未新增模块、接口或状态。</li>
 </ul>
 
+<h2>163. 2026-08-21 Web/Desktop 历史角色归一化对齐</h2>
+<ul>
+  <li><b>输入边界：</b>Web 历史投影不再把后端未知 <code>role</code> 直接强转为前端枚举，而是与 Desktop 一致归一为 <code>status</code>；已知 <code>user/assistant/error/team_internal</code> 保持原语义。</li>
+  <li><b>安全性：</b>异常历史数据不会进入错误的消息渲染分支，也不会被误识别为 Team 成员发言或用户消息。</li>
+  <li><b>范围：</b>只调整历史读取边界，不改变实时 WebSocket 事件、Team 内部消息合并和正常角色数据。</li>
+  <li><b>验证：</b>新增未知角色归一化回归，并运行 Web/Desktop 历史映射测试和 TypeScript 类型检查。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>
