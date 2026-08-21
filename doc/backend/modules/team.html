@@ -614,4 +614,12 @@ graph TD
   <li><b>验证：</b>新增同 node/source、不同 request 的流式帧回归；两端历史/消息/看板测试与 typecheck 均通过。</li>
 </ul>
 
+<h2>171. 2026-08-21 Team 展示职责去除管理器代理层</h2>
+<ul>
+  <li><b>职责边界：</b>结果摘要、验收标题、节点标签、产物卡片和产物文件名统一直接调用 <code>result_presenter.py</code>，不再经由 <code>team_manager.py</code> 的同名静态转发方法。</li>
+  <li><b>实现范围：</b>删除纯代理方法，保留 TeamManager 对 workspace、产物归属、文件变更和持久化的编排职责；未新增文件、接口或数据字段。</li>
+  <li><b>行为兼容：</b>展示函数实现没有改变，只收窄调用路径；原有产物命名、节点摘要、验收结论和看板卡片输出保持不变。</li>
+  <li><b>验证：</b>复用 Team 全量测试、产物命名/路径回归和 Python 编译检查。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

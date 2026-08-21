@@ -2814,25 +2814,6 @@ class InProcessTeamManager(TeamManager):
     def has_team_workflow_for_session(self, session_id: str, owner_account_id: str = "") -> bool:
         return bool(self._team_workflow_ids_for_session(session_id, owner_account_id))
 
-    @staticmethod
-    def _node_dict_is_review_submission(node: dict[str, Any]) -> bool:
-        return team_presenter.node_dict_is_review_submission(node)
-
-    @staticmethod
-    def _node_dict_is_verify_execution(node: dict[str, Any]) -> bool:
-        return team_presenter.node_dict_is_verify_execution(node)
-
-    @staticmethod
-    def _node_dict_assignment_text(node: dict[str, Any]) -> str:
-        return team_presenter.node_dict_assignment_text(node)
-
-    @staticmethod
-    def _node_dict_should_show_assignment(
-        node: dict[str, Any],
-        edges: list[dict[str, Any]],
-    ) -> bool:
-        return team_presenter.node_dict_should_show_assignment(node, edges)
-
     def event_history_for_session(self, session_id: str, owner_account_id: str = "") -> list[dict[str, Any]]:
         store = self._kanban_store_for_owner(owner_account_id)
         if store is None:
@@ -4765,7 +4746,7 @@ class InProcessTeamManager(TeamManager):
             display_title = str(metadata.get("display_title") or "").strip()
             if not display_title:
                 continue
-            result = self._node_result_digest(
+            result = team_presenter.node_result_digest(
                 self._dedupe_repeated_colon_prefix(node.result_summary or node.last_error or ""),
                 limit=520,
             )
@@ -4782,7 +4763,7 @@ class InProcessTeamManager(TeamManager):
             return {}
         payload = {
             "goal": plan.goal,
-            "leader_summary": self._node_result_digest(final_summary, limit=1000),
+            "leader_summary": team_presenter.node_result_digest(final_summary, limit=1000),
             "nodes": candidates[:20],
         }
         prompt = "\n".join([
@@ -5823,61 +5804,6 @@ class InProcessTeamManager(TeamManager):
         return "\n".join(lines)
 
     @staticmethod
-    def _node_result_digest(text: str, limit: int = 260) -> str:
-        return team_presenter.node_result_digest(text, limit=limit)
-
-    @staticmethod
-    def _clean_result_value(text: str, limit: int = 140) -> str:
-        return team_presenter.clean_result_value(text, limit=limit)
-
-    @staticmethod
-    def _extract_result_contract(text: str) -> dict[str, str]:
-        return team_presenter.extract_result_contract(text)
-
-    @staticmethod
-    def _business_result_summary(
-        node: TeamPlanNode,
-        text: str,
-        *,
-        is_review_submission: bool = False,
-        preserve_detail: bool = False,
-    ) -> str:
-        return team_presenter.business_result_summary(
-            node,
-            text,
-            is_review_submission=is_review_submission,
-            preserve_detail=preserve_detail,
-        )
-
-    @staticmethod
-    def _acceptance_headline(goal: str, summaries: list[str]) -> str:
-        return team_presenter.acceptance_headline(goal, summaries)
-
-    @staticmethod
-    def _summary_node_label(node: TeamPlanNode) -> str:
-        return team_presenter.summary_node_label(node)
-
-    @staticmethod
-    def _artifact_cards(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return team_presenter.artifact_cards(artifacts)
-
-    @staticmethod
-    def _is_review_submission_node(node: TeamPlanNode) -> bool:
-        return team_presenter.is_review_submission_node(node)
-
-    @staticmethod
-    def _is_verify_execution_node(node: TeamPlanNode) -> bool:
-        return team_presenter.is_verify_execution_node(node)
-
-    @staticmethod
-    def _assignment_text(node: TeamPlanNode) -> str:
-        return team_presenter.assignment_text(node)
-
-    @staticmethod
-    def _should_show_assignment(plan: TeamPlan, node: TeamPlanNode) -> bool:
-        return team_presenter.should_show_assignment(plan, node)
-
-    @staticmethod
     def _team_goal_uses_shared_workspace(goal: str) -> bool:
         """Return whether a Team goal explicitly targets existing workspace files."""
 
@@ -5931,26 +5857,6 @@ class InProcessTeamManager(TeamManager):
                 return str(path.resolve())
         return str(task_workspace_path(envelope.workspace_id or "default").resolve())
 
-    @staticmethod
-    def _artifact_title_head(title: str) -> str:
-        return team_presenter.artifact_title_head(title)
-
-    @staticmethod
-    def _markdown_document_title(content: str) -> str:
-        return team_presenter.markdown_document_title(content)
-
-    @staticmethod
-    def _artifact_label(node: TeamPlanNode, content: str = "") -> str:
-        return team_presenter.artifact_label(node, content)
-
-    @staticmethod
-    def _artifact_filename(node: TeamPlanNode, content: str = "") -> str:
-        return team_presenter.artifact_filename(node, content)
-
-    @staticmethod
-    def _unique_artifact_path(artifact_dir: Path, filename: str) -> Path:
-        return team_presenter.unique_artifact_path(artifact_dir, filename)
-
     def _write_node_markdown_artifact(
         self,
         envelope: Envelope,
@@ -5964,7 +5870,7 @@ class InProcessTeamManager(TeamManager):
         if not text:
             return None
         session_dir = safe_path_segment(envelope.session_id, "session")
-        filename = self._artifact_filename(node, text)
+        filename = team_presenter.artifact_filename(node, text)
         candidate_dirs: list[Path] = []
         try:
             candidate_dirs.append(task_workspace_path(envelope.workspace_id or "default") / "team_artifacts" / session_dir)
@@ -5976,7 +5882,7 @@ class InProcessTeamManager(TeamManager):
         for artifact_dir in candidate_dirs:
             try:
                 artifact_dir.mkdir(parents=True, exist_ok=True)
-                path = self._unique_artifact_path(artifact_dir, filename)
+                path = team_presenter.unique_artifact_path(artifact_dir, filename)
                 path.write_text(text, encoding="utf-8")
                 title = path.stem
                 artifact = team.bus.add_artifact(
@@ -6279,7 +6185,7 @@ class InProcessTeamManager(TeamManager):
             )
             target = "、".join(item.title for item in reviewed[:3]) if reviewed else "成员提交内容"
             prefix = f"{mentions} " if mentions else ""
-            if reviewed and all(InProcessTeamManager._is_review_submission_node(item) for item in reviewed):
+            if reviewed and all(team_presenter.is_review_submission_node(item) for item in reviewed):
                 return f"{prefix}方案已通过 Leader 审阅，开始验证。"
             return f"{prefix}{target} 已通过 Leader 审阅，继续推进后续节点。"
         if node.node_id.startswith("runtime_diagnosis_"):
@@ -6297,7 +6203,7 @@ class InProcessTeamManager(TeamManager):
                 if item.status == "completed" and item.assignee != "leader"
             ]
             if not completed:
-                error = InProcessTeamManager._node_result_digest(str(fallback_error or "").strip(), limit=180)
+                error = team_presenter.node_result_digest(str(fallback_error or "").strip(), limit=180)
                 lines = [
                     "团队最终汇总没有生成答案。",
                     f"- 用户问题：{goal}",
@@ -6310,15 +6216,15 @@ class InProcessTeamManager(TeamManager):
             summary_by_label: dict[str, str] = {}
             artifact_names: list[str] = []
             for item in completed:
-                label = InProcessTeamManager._summary_node_label(item)
+                label = team_presenter.summary_node_label(item)
                 summary_source = InProcessTeamManager._dedupe_repeated_colon_prefix(
                     str(item.result_summary or item.last_error or "").strip()
                 )
-                summary_source = InProcessTeamManager._node_result_digest(summary_source, limit=180)
-                business = InProcessTeamManager._business_result_summary(
+                summary_source = team_presenter.node_result_digest(summary_source, limit=180)
+                business = team_presenter.business_result_summary(
                     item,
                     summary_source,
-                    is_review_submission=InProcessTeamManager._is_review_submission_node(item),
+                    is_review_submission=team_presenter.is_review_submission_node(item),
                 )
                 body = business.split("：", 1)[-1] if "：" in business else business
                 if label not in summary_by_label and body:
@@ -6328,7 +6234,7 @@ class InProcessTeamManager(TeamManager):
                     if name and name not in artifact_names:
                         artifact_names.append(name)
             summaries = [f"{label}：{body}" for label, body in summary_by_label.items()]
-            lines = [InProcessTeamManager._acceptance_headline(goal, summaries)]
+            lines = [team_presenter.acceptance_headline(goal, summaries)]
             for line in summaries[:4]:
                 lines.append(f"- {line}")
             if artifact_names:
@@ -6714,14 +6620,14 @@ class InProcessTeamManager(TeamManager):
         upstream_artifact_refs: list[str] = []
         for item in completed_nodes:
             meta = dict(item.metadata or {})
-            summary = self._node_result_digest(
+            summary = team_presenter.node_result_digest(
                 self._dedupe_repeated_colon_prefix(item.result_summary or item.last_error or "已完成"),
                 limit=600,
             )
             contract = meta.get("result_contract") if isinstance(meta.get("result_contract"), dict) else {}
             contract_bits = []
             for label, key in (("结论", "answer"), ("依据", "evidence"), ("风险", "risk"), ("建议", "next_action")):
-                value = self._node_result_digest(str(contract.get(key) or "").strip(), limit=300)
+                value = team_presenter.node_result_digest(str(contract.get(key) or "").strip(), limit=300)
                 if value:
                     contract_bits.append(f"{label}：{value}")
             artifact_refs = [str(ref) for ref in item.artifact_refs if str(ref).strip()]
@@ -7372,7 +7278,7 @@ class InProcessTeamManager(TeamManager):
                     else "team_decision"
                 )
                 leader_artifacts = (
-                    self._artifact_cards(team.bus.list_artifacts(envelope.session_id))
+                    team_presenter.artifact_cards(team.bus.list_artifacts(envelope.session_id))
                     if node.node_id == "leader_summary"
                     else None
                 )
@@ -7686,7 +7592,7 @@ class InProcessTeamManager(TeamManager):
                             "上游产物路径（优先读取这些文件作为当前节点输入）：\n"
                             f"{upstream_artifact_text}"
                         )
-                    if self._is_verify_execution_node(node):
+                    if team_presenter.is_verify_execution_node(node):
                         instruction_detail = (
                             f"{instruction_detail}\n\n"
                             "验证执行要求：先根据上游产物路径复核并必要时补充测试方案，再执行功能验证、回归检查和缺陷记录；"
@@ -7773,7 +7679,7 @@ class InProcessTeamManager(TeamManager):
                         f"派发节点「{node.title}」给 {node.assignee}（第 {node.attempt_count + 1} 次）…",
                     )
                 for node in dispatch_nodes:
-                    if not self._should_show_assignment(plan, node):
+                    if not team_presenter.should_show_assignment(plan, node):
                         continue
                     yield self._recorded_team_internal_chunk(
                         envelope,
@@ -7781,7 +7687,7 @@ class InProcessTeamManager(TeamManager):
                         role="leader",
                         is_leader=True,
                         source_session_id=f"{envelope.session_id}::leader",
-                        text=self._assignment_text(node),
+                        text=team_presenter.assignment_text(node),
                         node_id=node.node_id,
                         event_type="team_assign",
                         mention_from="leader",
@@ -7865,7 +7771,7 @@ class InProcessTeamManager(TeamManager):
                     started_at = float((node.metadata or {}).get("execution_started_at") or node.updated_at or time.time())
                     finished_at = time.time()
                     output = str((result or {}).get("output") or "").strip()
-                    artifacts = self._artifact_cards(list((result or {}).get("artifacts") or []))
+                    artifacts = team_presenter.artifact_cards(list((result or {}).get("artifacts") or []))
                     turn_file_changes = [
                         dict(item)
                         for item in (result or {}).get("_workspace_file_changes") or []
@@ -7890,7 +7796,7 @@ class InProcessTeamManager(TeamManager):
                         )
                         or "当前节点已完成，详细过程可在看板中查看。"
                     )
-                    is_review_submission = self._is_review_submission_node(node)
+                    is_review_submission = team_presenter.is_review_submission_node(node)
                     for runtime_event in member_runtime_events.get(node.node_id, [])[-8:]:
                         self._append_plan_node_event(
                             plan,
@@ -7907,7 +7813,7 @@ class InProcessTeamManager(TeamManager):
                             content=node_result,
                         )
                         if auto_artifact:
-                            artifacts.extend(self._artifact_cards([auto_artifact]))
+                            artifacts.extend(team_presenter.artifact_cards([auto_artifact]))
                             artifact_ref = str(auto_artifact.get("path") or auto_artifact.get("artifact_id") or "")
                             if artifact_ref and artifact_ref not in artifact_refs:
                                 artifact_refs.append(artifact_ref)
@@ -7928,17 +7834,17 @@ class InProcessTeamManager(TeamManager):
                             workspace_root=str((result or {}).get("_workspace_root") or ""),
                         )
                         if auto_file_artifacts:
-                            artifacts.extend(self._artifact_cards(auto_file_artifacts))
+                            artifacts.extend(team_presenter.artifact_cards(auto_file_artifacts))
                             for artifact in auto_file_artifacts:
                                 artifact_ref = str(artifact.get("path") or artifact.get("artifact_id") or "")
                                 if artifact_ref and artifact_ref not in artifact_refs:
                                     artifact_refs.append(artifact_ref)
-                    result_summary = self._business_result_summary(
+                    result_summary = team_presenter.business_result_summary(
                         node,
                         node_result,
                         is_review_submission=is_review_submission,
                     )
-                    result_contract = self._extract_result_contract(node_result)
+                    result_contract = team_presenter.extract_result_contract(node_result)
                     result_contract["status_signal"] = (
                         self._runtime_result_status(
                             node,

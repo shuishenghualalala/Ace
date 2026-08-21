@@ -57,11 +57,13 @@ from crew.team.history_projection import (
 from crew.team.models import RuntimeStaffingRequest, TeamPlan, TeamPlanEdge, TeamPlanNode
 from crew.team.result_presenter import (
     assignment_text,
+    artifact_filename,
     node_dict_assignment_text,
     node_dict_should_show_assignment,
     node_display_progress,
     result_projection,
     should_show_assignment,
+    unique_artifact_path,
 )
 from crew.team.roles import CREW_BUILTIN_AGENT_ID
 from crew.team.team_manager import (
@@ -1452,11 +1454,11 @@ def test_team_markdown_artifact_uses_business_filename(tmp_path):
         ),
     ]
     for node, content, expected in cases:
-        assert InProcessTeamManager._artifact_filename(node, content) == expected
+        assert artifact_filename(node, content) == expected
 
     existing = tmp_path / "功能测试方案.md"
     existing.write_text("old", encoding="utf-8")
-    assert InProcessTeamManager._unique_artifact_path(tmp_path, "功能测试方案.md").name == "功能测试方案-2.md"
+    assert unique_artifact_path(tmp_path, "功能测试方案.md").name == "功能测试方案-2.md"
 
 
 def test_team_node_owned_artifacts_filters_concurrent_member_artifacts():
