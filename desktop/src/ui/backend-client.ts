@@ -873,7 +873,7 @@ export interface SystemMetrics {
   uptime_s: number;
   cpu_count: number;
   cpu_percent?: number;
-  memory?: { total_gb: number; used_gb: number; percent: number };
+  memory?: { total_gb: number; used_gb: number; available_gb: number; percent: number };
   disk?: { total_gb: number; used_gb: number; free_gb: number; percent: number };
   network?: { bytes_sent: number; bytes_recv: number };
   process?: { rss_mb: number; pid: number };

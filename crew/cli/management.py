@@ -1015,7 +1015,9 @@ def _system_metrics(args: Any, ctx: CliContext) -> CliResult:
         payload["cpu_percent"] = psutil.cpu_percent(interval=None)
         payload["memory"] = {
             "total_gb": _gb(vm.total),
-            "used_gb": _gb(vm.used),
+            # 与 vm.percent 保持同一“系统可用内存”口径；vm.used 可能排除可回收缓存。
+            "used_gb": _gb(vm.total - vm.available),
+            "available_gb": _gb(vm.available),
             "percent": round(vm.percent, 1),
         }
         net = psutil.net_io_counters()
