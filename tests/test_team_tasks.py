@@ -1870,6 +1870,63 @@ def test_team_child_tool_chunk_becomes_node_execution_event():
     assert "README.md" in event["event_text"]
 
 
+def test_team_live_execution_event_is_persisted_to_node_projection(tmp_path):
+    store = SQLiteKanbanStore(tmp_path / "team-live-events.db")
+    tm, _ = _team(kanban_store=store)
+    tm.create_plan(
+        "live-events",
+        goal="执行实时过程展示",
+        nodes=[{"id": "build", "title": "实现功能", "assignee": "coder"}],
+        owner_account_id="owner-live",
+    )
+    plan = tm._plans[("owner-live", "live-events")]
+    node = plan.nodes["build"]
+
+    tm._append_plan_node_event(
+        plan,
+        node,
+        owner_account_id="owner-live",
+        event={
+            "id": "build:tool:tool-1:start",
+            "event_type": "tool",
+            "kind": "tool",
+            "event_title": "coder 工具调用：file_write",
+            "event_text": "README.md",
+            "request_id": "live-request",
+            "attempt_id": "1",
+            "actor_id": "coder",
+            "timestamp": 123.0,
+        },
+    )
+
+    task = tm.task_projection_for_session("live-events", owner_account_id="owner-live")[0]
+    event = task["progress"]["execution_events"][0]
+    assert event["event_id"] == "build:tool:tool-1:start"
+    assert event["request_id"] == "live-request"
+    assert event["node_id"] == "build"
+    assert event["actor_id"] == "coder"
+    assert event["event_text"] == "README.md"
+
+
+def test_team_node_execution_event_update_is_idempotent():
+    tm, _ = _team()
+    plan = TeamPlan(team_session_id="event-idempotent", goal="事件幂等")
+    node = TeamPlanNode(node_id="build", title="实现功能", assignee="coder")
+    plan.nodes[node.node_id] = node
+
+    event = {
+        "id": "build:tool:tool-1:result",
+        "event_type": "tool",
+        "event_text": "第一次结果",
+    }
+    tm._append_plan_node_event(plan, node, event=event)
+    tm._append_plan_node_event(plan, node, event={**event, "event_text": "最终结果"})
+
+    events = node.metadata["execution_events"]
+    assert len(events) == 1
+    assert events[0]["event_text"] == "最终结果"
+
+
 def test_team_verify_node_receives_upstream_artifact_refs():
     plan = TeamPlan(team_session_id="team_1", goal="开发小游戏")
     build = TeamPlanNode(

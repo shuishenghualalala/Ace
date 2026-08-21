@@ -3246,15 +3246,34 @@ class InProcessTeamManager(TeamManager):
         metadata = dict(node.metadata or {})
         events = list(metadata.get("execution_events") or [])
         event_id = str(event.get("id") or f"{node.node_id}:runtime:{len(events) + 1}")
-        events.append({
+        normalized_event = {
             "id": event_id,
+            "event_id": event_id,
+            "plan_id": str(event.get("plan_id") or plan.plan_id),
+            "node_id": str(event.get("node_id") or node.node_id),
+            "request_id": str(event.get("request_id") or ""),
+            "attempt_id": str(event.get("attempt_id") or (node.metadata or {}).get("execution_attempt") or ""),
+            "actor_id": str(event.get("actor_id") or node.assignee or "team_runtime"),
+            "timestamp": float(event.get("timestamp") or time.time()),
             "kind": str(event.get("kind") or "status"),
             "event_type": str(event.get("event_type") or event.get("kind") or "status"),
             "event_icon": str(event.get("event_icon") or "spark"),
             "event_title": str(event.get("event_title") or "运行事件"),
             "event_text": str(event.get("event_text") or ""),
             "collapsed": bool(event.get("collapsed", False)),
-        })
+        }
+        existing_index = next(
+            (
+                index
+                for index, current in enumerate(events)
+                if str(current.get("id") or current.get("event_id") or "") == event_id
+            ),
+            None,
+        )
+        if existing_index is None:
+            events.append(normalized_event)
+        else:
+            events[existing_index] = normalized_event
         metadata["execution_events"] = events[-12:]
         node.metadata = metadata
         self._sync_kanban_node(plan, node, owner_account_id=owner_account_id)
@@ -7584,6 +7603,15 @@ class InProcessTeamManager(TeamManager):
                     return
                 runtime_event = self._child_chunk_execution_event(node, member, chunk)
                 if runtime_event is not None:
+                    runtime_event = {
+                        **runtime_event,
+                        "plan_id": plan.plan_id,
+                        "node_id": node.node_id,
+                        "request_id": envelope.request_id,
+                        "attempt_id": str((node.metadata or {}).get("execution_attempt") or ""),
+                        "actor_id": member,
+                        "timestamp": now,
+                    }
                     events = member_runtime_events.setdefault(node.node_id, [])
                     events.append(runtime_event)
                     # Thinking commonly arrives as many small chunks. Keeping only
@@ -7591,6 +7619,12 @@ class InProcessTeamManager(TeamManager):
                     # final team_submit was built, so the timeline disappeared on
                     # completion or refresh. Bound generously and compact below.
                     member_runtime_events[node.node_id] = events[-200:]
+                    self._append_plan_node_event(
+                        plan,
+                        node,
+                        owner_account_id=envelope.user_id,
+                        event=runtime_event,
+                    )
                     live_queue.put_nowait(self._recorded_team_internal_chunk(
                         envelope,
                         agent_id=member,

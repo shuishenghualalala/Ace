@@ -474,4 +474,13 @@ graph TD
   <li><b>验证：</b><code>tests/gateway/test_gateway_api.py tests/test_external_agents.py tests/test_team_tasks.py</code> 完整后端回归为 <code>364 passed, 1 skipped</code>；并完成涉及文件的 Python 编译检查。</li>
 </ul>
 
+<h2>154. 2026-08-21 Team 成员运行事件持久化基线</h2>
+<ul>
+  <li><b>事件来源：</b>TeamPlan 节点的 <code>execution_events</code> 继续作为节点日志投影，但运行事件补充 <code>event_id</code>、<code>plan_id</code>、<code>node_id</code>、<code>request_id</code>、<code>attempt_id</code>、<code>actor_id</code> 和 <code>timestamp</code>，不再只依赖展示文本。</li>
+  <li><b>实时过程：</b>成员执行中的结构化 tool/thinking/status 事件在产生时同步到节点 metadata；实时聊天仍通过 <code>team_stream</code> 推送，完成阶段不再依赖最后几条事件才补写看板。</li>
+  <li><b>幂等：</b>同一 <code>event_id</code> 重复到达时更新原事件，不追加重复节点日志，避免完成阶段重新投影时出现重复过程。</li>
+  <li><b>边界：</b>普通 delta 文本仍只走实时流，不逐 token 写入 Kanban；后续前端节点日志应优先读取结构化事件，不再从聊天文本猜测成员过程。</li>
+  <li><b>验证：</b>新增实时节点事件持久化、字段关联和同事件更新幂等测试；本次未新增模块、表或前端协议。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>
