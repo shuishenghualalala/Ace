@@ -814,9 +814,7 @@ mod tests {
             .iter()
             .find(|characteristic| characteristic.uuid == INCOMING_MESSAGE_UUID)
             .expect("IncomingMessage characteristic should exist");
-        assert!(incoming
-            .properties
-            .contains(&CharacteristicProperty::Write));
+        assert!(incoming.properties.contains(&CharacteristicProperty::Write));
         assert!(incoming
             .properties
             .contains(&CharacteristicProperty::WriteWithoutResponse));

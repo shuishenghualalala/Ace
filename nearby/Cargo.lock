@@ -40,8 +40,6 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 [[package]]
 name = "ble-peripheral-rust"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b7c90f0c7063d14ce00099efedc6b71058ae04e2b66bf61cbd222807777f4f6"
 dependencies = [
  "async-trait",
  "bluer",

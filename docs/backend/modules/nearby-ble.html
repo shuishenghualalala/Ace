@@ -127,7 +127,7 @@ cargo run --manifest-path nearby/Cargo.toml -- --display-name "Linux One" --agen
   <h2>依赖与平台</h2>
   <ul>
     <li><a href="https://github.com/deviceplug/btleplug">btleplug</a>：Central、扫描、连接、GATT 服务发现、读写、订阅和通知。</li>
-    <li><a href="https://github.com/rohitsangwan01/ble-peripheral-rust">ble-peripheral-rust</a>：Peripheral 广播和 GATT Server。</li>
+    <li><a href="https://github.com/rohitsangwan01/ble-peripheral-rust">ble-peripheral-rust</a>：Peripheral 广播和 GATT Server；项目在 <code>nearby/vendor</code> 保留了最小 WinRT 事件补丁，用于正确完成 GATT 读写请求的 deferral 生命周期。</li>
     <li>未将 AGPL 项目加入依赖；当前实现保持独立 Rust CLI，未引入 Swift/CoreBluetooth 原生桥接。</li>
     <li>运行时依赖各平台 BLE 后端和系统权限：macOS 需要蓝牙授权，Linux 需要 BlueZ/DBus，Windows 需要系统蓝牙权限。Linux 的多成员路径使用 Central→GATT Write 双向传输，避开当前 Peripheral 单 writer 限制。</li>
     <li>PeerInfo 特征使用静态 GATT 值直接提供完整身份 JSON；消息写入和通知仍由运行时事件处理，以兼容 Windows GATT Server 的读请求时序。</li>
@@ -145,6 +145,7 @@ cargo run --manifest-path nearby/Cargo.toml -- --display-name "Linux One" --agen
       <tr><td>BLE 分阶段诊断日志</td><td class="pass">已定位并修复读阶段</td><td>Mac CLI 已实测连接更新后的 Windows 设备并完成服务发现、静态 PeerInfo 读取、通知订阅、Hello 和 ready 会话。</td></tr>
       <tr><td>Mac → Windows 群聊写入调用</td><td class="pass">调用返回成功</td><td>CLI 已发现 Windows Agent、创建群聊；Mac Central 的 BLE 写入调用返回成功，但 Windows UI 尚未显示房间邀请或消息。</td></tr>
       <tr><td>跨平台 IncomingMessage 写入</td><td class="pending">待 Windows 更新</td><td>IncomingMessage 现同时声明 Write 与 WriteWithoutResponse，Central 优先采用无响应写；需要 Windows 拉取本次更新后复测 Windows Peripheral 的 WriteRequest 事件。</td></tr>
+      <tr><td>Windows GATT 写事件 deferral</td><td class="pass">源码检查通过</td><td>本地依赖补丁已为 WinRT 读写请求增加 <code>GetDeferral</code>/<code>Complete</code> 生命周期；Windows 实机消息回执仍待更新后验证。</td></tr>
       <tr><td>Windows → Mac 群聊消息</td><td class="pending">待 Windows 回执</td><td>Mac 端已保持 CLI 监听并多次请求 Windows 回发消息；当前尚未收到回执，不能据此宣称双向验收完成。</td></tr>
       <tr><td>完整 Nearby CLI</td><td class="pass">通过</td><td>CLI 复用 IPC 运行时，覆盖发现、广播开关、同伴列表、房间创建/加入/退出、群消息、@ 提及、回复、文件发送、文件分片接收和校验保存。</td></tr>
       <tr><td><code>cargo test --manifest-path nearby/Cargo.toml</code></td><td class="pass">通过</td><td>库 21 个测试、CLI 6 个测试全部通过，包含发现开关持久化、IPC 标签、房间提及、回复、文件完整性、文件分片、成员过滤、CLI 被动回传和平台连接策略测试。</td></tr>
