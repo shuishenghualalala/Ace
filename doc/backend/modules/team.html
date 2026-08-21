@@ -541,4 +541,12 @@ graph TD
   <li><b>验证：</b>新增状态别名和未知状态回归；Team 全量测试需保持通过，本原子不新增模块或接口。</li>
 </ul>
 
+<h2>162. 2026-08-21 Legacy delegate 兼容边界显式化</h2>
+<ul>
+  <li><b>命名：</b><code>allow_legacy_without_plan</code> 明确表达旧入口允许在无 TeamPlan 时执行；移除容易误读的 <code>require_plan=False</code> 布尔语义。</li>
+  <li><b>边界：</b>正式 <code>team_mention(assign)</code> 仍必须绑定现有 TeamPlan 节点；只有隐藏的旧 <code>delegate_to_teammate</code> 兼容入口允许无计划执行。</li>
+  <li><b>行为：</b>不改变旧入口的任务执行、成员校验和结果返回，也不把无节点的历史兼容调用伪造为 DAG 节点。</li>
+  <li><b>验证：</b>新增无 TeamPlan 的旧 delegate 兼容回归；本次未删除入口、未新增模块、接口或状态。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

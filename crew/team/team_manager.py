@@ -2667,7 +2667,6 @@ class InProcessTeamManager(TeamManager):
                 if isinstance(event.get("task_payload_meta"), dict)
                 else None
             ),
-            require_plan=True,
             source="mention",
         )
         return {
@@ -2691,13 +2690,13 @@ class InProcessTeamManager(TeamManager):
         on_task_created: Callable[[dict[str, Any]], None] | None = None,
         on_task_finished: Callable[[dict[str, Any]], None] | None = None,
         task_payload_meta: dict[str, Any] | None = None,
-        require_plan: bool = False,
+        allow_legacy_without_plan: bool = False,
         source: str = "mention",
     ) -> dict[str, Any]:
         node_id = str(plan_node_id or "").strip()
         plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
         if plan is None:
-            if require_plan:
+            if not allow_legacy_without_plan:
                 raise ToolError("当前 Team session 尚未创建 TeamPlan，不能通过 mention assign 任意派活。")
             delegate_payload_meta = {
                 **dict(task_payload_meta or {}),
@@ -8511,7 +8510,7 @@ class InProcessTeamManager(TeamManager):
                 bus=bus,
                 on_task_created=_mark_plan_from_delegate_task,
                 on_task_finished=_finish_plan_from_delegate_task,
-                require_plan=False,
+                allow_legacy_without_plan=True,
                 source="legacy_delegate",
             )
             return str(result.get("result") or "")

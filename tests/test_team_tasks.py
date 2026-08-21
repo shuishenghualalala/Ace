@@ -3243,6 +3243,27 @@ async def test_legacy_delegate_entry_uses_unified_assignment_events(tmp_path):
     assert submit["payload"]["mention_from"] == "coder"
 
 
+async def test_legacy_delegate_entry_without_plan_keeps_compatibility():
+    tm, tasks = _team()
+    team = tm._build_team("legacy_delegate_no_plan_s1")
+
+    token = current_agent_id.set("leader")
+    try:
+        result = await team.leader.registry.execute(
+            ToolCall(
+                "legacy-delegate-no-plan",
+                "delegate_to_teammate",
+                {"member": "coder", "instruction": "算 1+1"},
+            )
+        )
+    finally:
+        current_agent_id.reset(token)
+
+    assert not result.is_error
+    assert "coder算出：2" in result.content
+    assert [task["assignee"] for task in tasks.list("legacy_delegate_no_plan_s1")] == ["coder"]
+
+
 async def test_team_mention_tool_routes_and_guards_user_mentions():
     tm, tasks = _team()
     team = tm._build_team("mention_s1")
