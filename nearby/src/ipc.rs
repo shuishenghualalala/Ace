@@ -346,6 +346,7 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
     let mut discovered: HashMap<String, PeerInfo> = HashMap::new();
     let mut rooms = load_rooms(&state_dir)?;
     let mut connection_candidates = HashSet::new();
+    let scan_lock = Arc::new(Mutex::new(()));
     let mut server_clients: HashMap<String, String> = HashMap::new();
     let mut server_reassemblers: HashMap<String, Reassembler> = HashMap::new();
     let mut seen_messages = HashSet::new();
@@ -552,8 +553,22 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         .with_context(|| format!("failed to get BLE peripheral {key}"))?;
                     let local_peer = peer.clone();
                     let event_tx = session_event_tx.clone();
+                    let connection_adapter = adapter.clone();
+                    let connection_scan_lock = Arc::clone(&scan_lock);
                     tokio::spawn(async move {
-                        if let Err(error) = connect_to_peer(peripheral, local_peer, device.clone(), event_tx.clone()).await {
+                        let result = connect_to_peer(
+                            peripheral,
+                            local_peer,
+                            device.clone(),
+                            connection_adapter.clone(),
+                            connection_scan_lock,
+                            event_tx.clone(),
+                        ).await;
+                        if let Err(error) = result {
+                            connection_adapter
+                                .start_scan(ScanFilter { services: vec![SERVICE_UUID] })
+                                .await
+                                .ok();
                             eprintln!("[nearby][session] device={device} result=failed error={error}");
                             let _ = event_tx.send(SessionEvent::Failed { peer_id: key, error: error.to_string() }).await;
                         }
@@ -748,8 +763,16 @@ async fn connect_to_peer(
     peripheral: Peripheral,
     local_peer: PeerInfo,
     device: String,
+    adapter: btleplug::platform::Adapter,
+    scan_lock: Arc<Mutex<()>>,
     event_tx: mpsc::Sender<SessionEvent>,
 ) -> Result<()> {
+    let _scan_lock = scan_lock.lock().await;
+    adapter
+        .stop_scan()
+        .await
+        .context("failed to pause BLE scanning before connection")?;
+    eprintln!("[nearby][central] scanning_paused_for_connection device={device}");
     eprintln!(
         "[nearby][session] device={device} stage=connect_started local_peer_id={}",
         local_peer.peer_id
@@ -810,6 +833,14 @@ async fn connect_to_peer(
     if !should_initiate {
         eprintln!("[nearby][session] device={device} stage=duplicate_connection_close");
         peripheral.disconnect().await.ok();
+        adapter
+            .start_scan(ScanFilter {
+                services: vec![SERVICE_UUID],
+            })
+            .await
+            .context("failed to resume BLE scanning after duplicate connection")?;
+        eprintln!("[nearby][central] scanning_resumed_after_connection device={device}");
+        drop(_scan_lock);
         return Ok(());
     }
     peripheral
@@ -844,6 +875,14 @@ async fn connect_to_peer(
         })
         .await
         .context("failed to publish ready BLE session")?;
+    adapter
+        .start_scan(ScanFilter {
+            services: vec![SERVICE_UUID],
+        })
+        .await
+        .context("failed to resume BLE scanning after connection")?;
+    eprintln!("[nearby][central] scanning_resumed_after_connection device={device}");
+    drop(_scan_lock);
     eprintln!("[nearby][session] device={device} stage=ready");
     let mut transfer_id = 2_u32;
     let mut reassembler = Reassembler::default();
