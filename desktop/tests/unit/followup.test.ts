@@ -271,8 +271,8 @@ describe('wiki confirmation presentation', () => {
   it('renders as a permission dialog with wiki copy', () => {
     const html = renderFollowupCard(wikiConfirmQuestion());
     expect(html).toContain('followup-card--permission');
-    expect(html).toContain('允许执行 Wiki 操作？');
-    expect(html).toContain('Wiki 知识库');
+    expect(html).toContain('允许执行 Crew 笔记操作？');
+    expect(html).toContain('Crew 笔记（Wiki）');
     expect(html).toContain('删除 RawSource upload_x 及关联页面');
   });
 

@@ -263,8 +263,8 @@ function permissionPresentation(question: PendingFollowup): PermissionPresentati
   const actionObject = parseActionObject(parts.action);
   if (toolName.startsWith('wiki_')) {
     return {
-      title: '允许执行 Wiki 操作？',
-      context: 'Wiki 知识库',
+      title: '允许执行 Crew 笔记操作？',
+      context: 'Crew 笔记（Wiki）',
       summary: clipped(parts.action, 160) || '执行知识库变更操作',
       note: '',
     };
