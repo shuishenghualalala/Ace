@@ -582,4 +582,12 @@ graph TD
   <li><b>验证：</b>复用既有 legacy thinking 回归，并运行 Team 全量测试和 Python 编译检查。</li>
 </ul>
 
+<h2>167. 2026-08-21 Team 结果路径解析职责收敛</h2>
+<ul>
+  <li><b>解析边界：</b>结果文本中的绝对路径、相对路径和反引号路径由 <code>result_presenter.extract_result_paths</code> 统一提取并去重。</li>
+  <li><b>安全边界：</b>展示模块只返回候选字符串；当前 workspace、回合目录、文件存在性和目录穿越校验仍由 <code>team_manager.py</code> 负责。</li>
+  <li><b>收益：</b>移除管理器顶部的三组路径正则和重复提取循环，减少核心编排文件的文本解析噪声，不新增模块。</li>
+  <li><b>验证：</b>复用 Team 自动产物路径、越界路径和节点文件变更测试，并运行 Team 全量测试及 Python 编译检查。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

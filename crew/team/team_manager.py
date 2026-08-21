@@ -131,15 +131,6 @@ _KANBAN_TO_TEAM_PLAN_STATUS = {
     "needs_info": "blocked",
     "cancelled": "cancelled",
 }
-_RESULT_PATH_RE = re.compile(r"(?P<path>(?:/[^\s`'\"，。；、)\]]+)+\.(?:html?|md|txt|json|csv|js|ts|tsx|py|png|jpe?g|gif|svg|pdf))")
-_RESULT_RELATIVE_PATH_RE = re.compile(
-    r"(?<![\w/.-])(?P<path>(?:\.?/)?(?:[\w.-]+/)*[\w.-]+\.(?:html?|md|txt|json|csv|js|ts|tsx|py|png|jpe?g|gif|svg|pdf))(?![\w/.-])"
-)
-_RESULT_BACKTICK_PATH_RE = re.compile(
-    r"`(?P<path>(?:/|\.{0,2}/)?[\w.-]+(?:/[\w.-]+)+/?)`"
-)
-
-
 def _is_team_chat_noise(text: str) -> bool:
     """Return whether a persisted Team chat line is runtime/tool noise."""
 
@@ -6215,15 +6206,7 @@ class InProcessTeamManager(TeamManager):
     ) -> list[Path]:
         """Resolve file or directory mentions inside the current Team turn workspace."""
 
-        raw_paths: list[str] = []
-        seen_raw: set[str] = set()
-        for regex in (_RESULT_PATH_RE, _RESULT_RELATIVE_PATH_RE, _RESULT_BACKTICK_PATH_RE):
-            for match in regex.finditer(str(text or "")):
-                raw = match.group("path").strip().strip("`'\"")
-                if not raw or raw in seen_raw:
-                    continue
-                seen_raw.add(raw)
-                raw_paths.append(raw)
+        raw_paths = team_presenter.extract_result_paths(text)
 
         base_dirs: list[Path] = []
         if str(workspace_root or "").strip():

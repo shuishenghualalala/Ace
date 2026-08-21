@@ -22,6 +22,16 @@ WORKFLOW_LANE_ORDER = {
     "other": 90,
 }
 
+_RESULT_PATH_RE = re.compile(
+    r"(?P<path>(?:/[^\s`'\"，。；、)\]]+)+\.(?:html?|md|txt|json|csv|js|ts|tsx|py|png|jpe?g|gif|svg|pdf))"
+)
+_RESULT_RELATIVE_PATH_RE = re.compile(
+    r"(?<![\w/.-])(?P<path>(?:\.?/)?(?:[\w.-]+/)*[\w.-]+\.(?:html?|md|txt|json|csv|js|ts|tsx|py|png|jpe?g|gif|svg|pdf))(?![\w/.-])"
+)
+_RESULT_BACKTICK_PATH_RE = re.compile(
+    r"`(?P<path>(?:/|\.{0,2}/)?[\w.-]+(?:/[\w.-]+)+/?)`"
+)
+
 
 def workflow_lane_order(lane: str) -> int:
     return WORKFLOW_LANE_ORDER.get(str(lane or "").strip().lower(), WORKFLOW_LANE_ORDER["other"])
@@ -206,6 +216,20 @@ def node_result_digest(text: str, limit: int = 260) -> str:
     if normalized.startswith("[") and "的执行结果]" in normalized[:40]:
         normalized = normalized.split("]", 1)[-1].strip()
     return normalized if len(normalized) <= limit else f"{normalized[:limit].rstrip()}..."
+
+
+def extract_result_paths(text: str) -> list[str]:
+    """Extract unique file-like paths from a Team result without resolving them."""
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    for pattern in (_RESULT_PATH_RE, _RESULT_RELATIVE_PATH_RE, _RESULT_BACKTICK_PATH_RE):
+        for match in pattern.finditer(str(text or "")):
+            path = match.group("path").strip().strip("`'\"")
+            if path and path not in seen:
+                seen.add(path)
+                paths.append(path)
+    return paths
 
 
 def _compact_preserving_boundaries(value: str, limit: int) -> str:
