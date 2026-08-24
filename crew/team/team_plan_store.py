@@ -510,7 +510,7 @@ class TeamPlanStore:
                     "metadata": dict(node.metadata or {}),
                 },
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.warning(
                 "TeamPlan 节点同步到 kanban store 失败 session=%s node=%s",
                 plan.team_session_id,

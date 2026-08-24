@@ -687,4 +687,8 @@ graph TD
 <p>新增 <code>crew/team/team_builder.py</code>，集中负责 External Team 成员规格、Formation 职责投影、Session 级 <code>member_model_bindings</code> 物化、Registry 克隆、Runtime executor 配置和 Agent 实例装配。<code>TeamManager</code> 继续负责 TeamBus、mention、delegate、计划回调和最终 Team 组装；成员模型切换仍只影响当前 Session 的后续 Team 重建，不改变其他 Session、External Team 默认模型或既有 DAG。</p>
 <p>验证：<code>tests/test_team_tasks.py</code> 为 <code>236 passed, 1 skipped</code>，<code>tests/gateway/test_gateway_api.py</code> 为 <code>23 passed</code>，<code>tests/test_dynamic_kanban.py</code> 为 <code>70 passed</code>，相关 Python 文件编译检查通过。</p>
 
+<h2>2026-08-24 Team 重构第四阶段：Workflow Runtime 编排边界收口</h2>
+<p>新增 <code>crew/team/team_workflow_runtime.py</code>，集中承载规划进度、Leader 节点、成员节点调度、实时过程、补员/审阅回调和 WorkflowRun 最终收束。<code>TeamManager</code> 保留原有入口与兼容回调，只负责提供 Team、计划、持久化和运行服务，不再内嵌整段执行循环。</p>
+<p>本阶段不改变 DAG 节点状态、Runtime 补员确认、Leader 审阅、Team Bus 事件或 Web/Desktop 流式协议；追问交互仍通过 TeamManager 兼容入口注入，保持既有测试替身和运行时扩展边界。验证：Team <code>236 passed, 1 skipped</code>，Dynamic Kanban <code>70 passed</code>，Gateway Plan <code>11 passed</code>，Python 编译与 diff 检查通过。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>
