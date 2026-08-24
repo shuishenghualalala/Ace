@@ -679,4 +679,8 @@ graph TD
 <p>新增 <code>crew/team/team_plan_store.py</code>，集中负责 TeamPlan 与 Dynamic Kanban 的保存、节点同步、WorkflowPlan 恢复、事件索引和 Runtime 临时成员快照恢复。<code>TeamManager</code> 保留原有私有兼容入口，但不再直接实现 Kanban 遍历和快照解析；TeamPlan、节点状态、revision、事件类型和 Team/Session 外部协议均保持不变。本阶段只调整职责边界，不改变 DAG 规划、Runtime 补员、成员模型绑定或 Web/Desktop 展示行为。</p>
 <p>验证：<code>tests/test_team_tasks.py</code> 为 <code>236 passed, 1 skipped</code>，<code>tests/gateway/test_gateway_api.py</code> 为 <code>23 passed</code>，相关 Python 文件编译检查通过。</p>
 
+<h2>2026-08-24 Team 重构第二阶段：Runtime 补员策略边界收口</h2>
+<p>新增 <code>crew/team/runtime_staffing.py</code>，集中负责当前成员能力覆盖、Runtime/model 可用性准入、补员触发原因、现有成员改派判断、候选 Runtime/Agent 选择、补员选项文案和临时 <code>TeamMemberSpec</code> 编译。<code>TeamManager</code> 继续负责用户确认、节点状态更新、Team 重建和 revision 持久化；因此补员的业务时序、确认语义、WorkflowRun 作用域和 External Team 不变约束均保持不变。</p>
+<p>策略通过当前 External Agent Store 提供器读取成员事实，避免 Manager 初始化后 Store 绑定变化造成候选失效。验证：<code>tests/test_team_tasks.py</code> 为 <code>236 passed, 1 skipped</code>，<code>tests/gateway/test_gateway_api.py</code> 为 <code>23 passed</code>，<code>tests/test_dynamic_kanban.py</code> 为 <code>70 passed</code>，相关 Python 文件编译检查通过。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>
