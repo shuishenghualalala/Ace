@@ -675,6 +675,7 @@ flowchart LR
     <li><b>事件边界：</b>继续使用既有 <code>workflow_plan_revised</code> 与 <code>team_node_updated</code>；允许增加 event payload/delta 内容，但不修改 <code>kanban_events</code> schema。</li>
     <li><b>恢复边界：</b>进程重启或 Team 缓存淘汰后，从当前 WorkflowPlan 的 <code>runtime_members</code> 快照恢复临时成员；Session 团队配置变化会淘汰 Team 运行时缓存，临时成员只在匹配的 WorkflowRun/External Team 计划中恢复。</li>
   </ul>
+  <p><b>实现边界（2026-08-24）：</b>TeamPlan 与 Dynamic Kanban 的持久化、节点状态同步和 WorkflowPlan/runtime_members 恢复由 <code>crew/team/team_plan_store.py</code> 统一承载；TeamManager 只通过兼容入口调用，不改变 TeamPlan、WorkflowPlan revision 或 Runtime staffing 的数据语义。持久化适配器不参与能力判断、DAG 规划和成员选择，避免事实恢复逻辑反向影响业务决策。</p>
   <h3>21.1 WorkflowPlan 节点能力契约（2026-08-04）</h3>
   <p><code>required_capabilities</code> 是节点的工作需求，不是 assignee 的能力副本。Runtime 补员、执行实证和后续 AgentProfile 聚合只消费这一份契约。</p>
   <ul>

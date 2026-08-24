@@ -675,4 +675,8 @@ graph TD
 <h2>2026-08-24 Team 第四阶段：Runtime 临时成员恢复与 Team 缓存生命周期</h2>
 <p>WorkflowPlan 持久化的 <code>runtime_members</code> 现在会在进程重启或 Team 缓存 miss 后还原为本次 WorkflowRun 的临时 <code>TeamMemberSpec</code>，再参与 Team 构建和节点执行；恢复时按 <code>external_team_id</code> 匹配，避免旧团队临时成员串入新团队。Session Agent/Team 配置更新在淘汰普通 Agent 缓存的同时淘汰 Team 缓存，模型切换仍保持既有同一 Session 的 Team 重建语义。</p>
 
+<h2>2026-08-24 Team 重构第一阶段：TeamPlan 持久化边界收口</h2>
+<p>新增 <code>crew/team/team_plan_store.py</code>，集中负责 TeamPlan 与 Dynamic Kanban 的保存、节点同步、WorkflowPlan 恢复、事件索引和 Runtime 临时成员快照恢复。<code>TeamManager</code> 保留原有私有兼容入口，但不再直接实现 Kanban 遍历和快照解析；TeamPlan、节点状态、revision、事件类型和 Team/Session 外部协议均保持不变。本阶段只调整职责边界，不改变 DAG 规划、Runtime 补员、成员模型绑定或 Web/Desktop 展示行为。</p>
+<p>验证：<code>tests/test_team_tasks.py</code> 为 <code>236 passed, 1 skipped</code>，<code>tests/gateway/test_gateway_api.py</code> 为 <code>23 passed</code>，相关 Python 文件编译检查通过。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>
