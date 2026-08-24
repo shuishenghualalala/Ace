@@ -5565,6 +5565,64 @@ def test_team_member_profile_resolution_is_shared_by_build_and_runtime_coverage(
     ]
 
 
+def test_runtime_profile_cache_refreshes_when_profile_revision_changes(monkeypatch):
+    tm, _ = _team()
+    current = {
+        "agent": {
+            "id": "agent-kk",
+            "runtime_id": "runtime-kk",
+            "profile_version": 4,
+            "profile_updated_at": "2026-08-24T10:00:00Z",
+            "profile": {"capabilities": {"implementation": {"score": 0.2}}},
+        },
+        "runtime": {
+            "id": "runtime-kk",
+            "updated_at": "2026-08-24T10:00:00Z",
+            "metadata": {"availability_status": "ready"},
+        },
+    }
+    build_calls: list[str] = []
+
+    def fake_build(agent, *, runtime, model_id):
+        build_calls.append(str(agent.get("profile_updated_at") or ""))
+        score = float(
+            agent.get("profile", {})
+            .get("capabilities", {})
+            .get("implementation", {})
+            .get("score", 0.0)
+        )
+        return AgentProfile(
+            agent_id="agent-kk",
+            capabilities={"implementation": CapabilityAssessment(score=score, confidence=0.9)},
+        )
+
+    tm.external_store = SimpleNamespace(
+        agent_with_runtime=lambda *args, **kwargs: (current["agent"], current["runtime"]),
+    )
+    monkeypatch.setattr("crew.team.team_manager.build_agent_profile", fake_build)
+
+    first = tm._resolve_external_agent_profile(
+        "agent-kk",
+        owner_account_id="local",
+        model_id="model-kk",
+    )
+    current["agent"] = {
+        **current["agent"],
+        "profile_updated_at": "2026-08-24T10:00:01Z",
+        "profile": {"capabilities": {"implementation": {"score": 0.9}}},
+    }
+    second = tm._resolve_external_agent_profile(
+        "agent-kk",
+        owner_account_id="local",
+        model_id="model-kk",
+    )
+
+    assert first is not second
+    assert first.score("implementation") == 0.2
+    assert second.score("implementation") == 0.9
+    assert build_calls == ["2026-08-24T10:00:00Z", "2026-08-24T10:00:01Z"]
+
+
 def test_dag_admission_reassigns_existing_member_and_refreshes_role_metadata():
     nodes, _, _ = _normalize_nodes_with_graph(
         goal="执行测试",

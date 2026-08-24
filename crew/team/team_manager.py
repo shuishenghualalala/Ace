@@ -111,6 +111,19 @@ from crew.tools.registry import Registry
 
 log = get_logger("team")
 TeamKey = tuple[str, str]
+
+
+def _stable_json_fingerprint(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 # Keep the historical module-level name for callers importing this compatibility helper.
 _normalize_legacy_chunked_thinking = team_presenter.normalize_legacy_chunked_thinking
 _TEAM_PLAN_TO_KANBAN_STATUS = {
@@ -224,7 +237,7 @@ class InProcessTeamManager(TeamManager):
         self._plan_workflows: dict[TeamKey, str] = {}
         self._plan_node_tasks: dict[tuple[str, str, str], str] = {}
         self._planning_missing_info: dict[TeamKey, list[str]] = {}
-        self._runtime_profile_cache: dict[tuple[str, str, str, str, str], AgentProfile] = {}
+        self._runtime_profile_cache: dict[tuple[str, ...], AgentProfile] = {}
         self._active_lock = threading.Lock()
         self._member_locks_guard = threading.Lock()
         self._member_locks: dict[tuple[str, str, str], threading.RLock] = {}
@@ -288,12 +301,33 @@ class InProcessTeamManager(TeamManager):
             or ""
         )
         runtime_id = str(resolved_runtime.get("id") or resolved_agent.get("runtime_id") or "")
+        runtime_metadata = (
+            resolved_runtime.get("metadata")
+            if isinstance(resolved_runtime.get("metadata"), dict)
+            else {}
+        )
+        profile_revision = str(
+            resolved_agent.get("profile_updated_at")
+            or resolved_agent.get("updated_at")
+            or ""
+        )
+        profile_fingerprint = _stable_json_fingerprint(profile_payload)
+        runtime_fingerprint = runtime_model_fingerprint(
+            resolved_runtime,
+            str(model_id or "").strip(),
+        )
         cache_key = (
             str(owner_account_id or ""),
             str(agent_id or ""),
             runtime_id,
             str(model_id or "").strip(),
             profile_version,
+            profile_revision,
+            profile_fingerprint,
+            str(resolved_runtime.get("updated_at") or ""),
+            str(runtime_metadata.get("availability_status") or ""),
+            str(runtime_metadata.get("lifecycle_status") or ""),
+            runtime_fingerprint,
         )
         profile = self._runtime_profile_cache.get(cache_key)
         if profile is None:

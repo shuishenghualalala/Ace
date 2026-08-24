@@ -669,4 +669,7 @@ graph TD
 <h2>2026-08-24 Team 第二阶段：成员画像解析入口收口</h2>
 <p>TeamManager 新增单一的 <code>_resolve_member_profile()</code> 入口，统一处理 External Agent/model 绑定、AgentProfile 缓存解析和异常降级。Team 初始化写入 <code>member_profiles</code> 与 Runtime 节点 readiness 检查均复用该入口；DAG 仍只消费内存画像和已确认能力，不访问 Store。这样既保留规划与运行时的职责边界，也避免两条路径对成员模型绑定、画像失败语义和日志处理不一致。</p>
 
+<h2>2026-08-24 Team 第三阶段：AgentProfile 缓存修订边界</h2>
+<p>Runtime Profile cache 不再把 schema <code>profile_version</code> 当作唯一画像版本。缓存 key 现在同时包含 Agent 的 <code>profile_updated_at</code>、画像内容指纹、Runtime 状态修订和当前 model 的执行指纹；observation 聚合、Runtime 可用性变化或模型目录事实变化后，会自然生成新 key 并重新解析画像。缓存仍保留在 TeamManager 内，不新增存储表或跨模块缓存。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>
