@@ -683,4 +683,8 @@ graph TD
 <p>新增 <code>crew/team/runtime_staffing.py</code>，集中负责当前成员能力覆盖、Runtime/model 可用性准入、补员触发原因、现有成员改派判断、候选 Runtime/Agent 选择、补员选项文案和临时 <code>TeamMemberSpec</code> 编译。<code>TeamManager</code> 继续负责用户确认、节点状态更新、Team 重建和 revision 持久化；因此补员的业务时序、确认语义、WorkflowRun 作用域和 External Team 不变约束均保持不变。</p>
 <p>策略通过当前 External Agent Store 提供器读取成员事实，避免 Manager 初始化后 Store 绑定变化造成候选失效。验证：<code>tests/test_team_tasks.py</code> 为 <code>236 passed, 1 skipped</code>，<code>tests/gateway/test_gateway_api.py</code> 为 <code>23 passed</code>，<code>tests/test_dynamic_kanban.py</code> 为 <code>70 passed</code>，相关 Python 文件编译检查通过。</p>
 
+<h2>2026-08-24 Team 重构第三阶段：成员构建与模型绑定边界收口</h2>
+<p>新增 <code>crew/team/team_builder.py</code>，集中负责 External Team 成员规格、Formation 职责投影、Session 级 <code>member_model_bindings</code> 物化、Registry 克隆、Runtime executor 配置和 Agent 实例装配。<code>TeamManager</code> 继续负责 TeamBus、mention、delegate、计划回调和最终 Team 组装；成员模型切换仍只影响当前 Session 的后续 Team 重建，不改变其他 Session、External Team 默认模型或既有 DAG。</p>
+<p>验证：<code>tests/test_team_tasks.py</code> 为 <code>236 passed, 1 skipped</code>，<code>tests/gateway/test_gateway_api.py</code> 为 <code>23 passed</code>，<code>tests/test_dynamic_kanban.py</code> 为 <code>70 passed</code>，相关 Python 文件编译检查通过。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

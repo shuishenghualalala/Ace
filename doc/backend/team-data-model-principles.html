@@ -677,6 +677,7 @@ flowchart LR
   </ul>
   <p><b>实现边界（2026-08-24）：</b>TeamPlan 与 Dynamic Kanban 的持久化、节点状态同步和 WorkflowPlan/runtime_members 恢复由 <code>crew/team/team_plan_store.py</code> 统一承载；TeamManager 只通过兼容入口调用，不改变 TeamPlan、WorkflowPlan revision 或 Runtime staffing 的数据语义。持久化适配器不参与能力判断、DAG 规划和成员选择，避免事实恢复逻辑反向影响业务决策。</p>
   <p><b>Runtime 策略边界（2026-08-24）：</b>能力覆盖、Runtime/model 可用性门控和补员候选编译由 <code>crew/team/runtime_staffing.py</code> 统一承载；它只返回本轮运行决策和临时成员规格，不直接修改 Team、WorkflowPlan 或 External Team。用户确认、节点状态和 revision 仍由 TeamManager 的运行时编排负责。</p>
+  <p><b>成员构建边界（2026-08-24）：</b>External Team 成员规格、Formation 职责投影、Session 级模型绑定物化和执行 Agent 装配由 <code>crew/team/team_builder.py</code> 统一承载；TeamManager 只组合 TeamBus、通信和计划回调。TeamBuilder 不创建长期成员关系，也不修改 AgentProfile 能力事实。</p>
   <h3>21.1 WorkflowPlan 节点能力契约（2026-08-04）</h3>
   <p><code>required_capabilities</code> 是节点的工作需求，不是 assignee 的能力副本。Runtime 补员、执行实证和后续 AgentProfile 聚合只消费这一份契约。</p>
   <ul>
