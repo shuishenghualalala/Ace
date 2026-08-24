@@ -672,4 +672,7 @@ graph TD
 <h2>2026-08-24 Team 第三阶段：AgentProfile 缓存修订边界</h2>
 <p>Runtime Profile cache 不再把 schema <code>profile_version</code> 当作唯一画像版本。缓存 key 现在同时包含 Agent 的 <code>profile_updated_at</code>、画像内容指纹、Runtime 状态修订和当前 model 的执行指纹；observation 聚合、Runtime 可用性变化或模型目录事实变化后，会自然生成新 key 并重新解析画像。缓存仍保留在 TeamManager 内，不新增存储表或跨模块缓存。</p>
 
+<h2>2026-08-24 Team 第四阶段：Runtime 临时成员恢复与 Team 缓存生命周期</h2>
+<p>WorkflowPlan 持久化的 <code>runtime_members</code> 现在会在进程重启或 Team 缓存 miss 后还原为本次 WorkflowRun 的临时 <code>TeamMemberSpec</code>，再参与 Team 构建和节点执行；恢复时按 <code>external_team_id</code> 匹配，避免旧团队临时成员串入新团队。Session Agent/Team 配置更新在淘汰普通 Agent 缓存的同时淘汰 Team 缓存，模型切换仍保持既有同一 Session 的 Team 重建语义。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

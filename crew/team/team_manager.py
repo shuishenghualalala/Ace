@@ -236,6 +236,7 @@ class InProcessTeamManager(TeamManager):
         self._plans: dict[TeamKey, TeamPlan] = {}
         self._plan_workflows: dict[TeamKey, str] = {}
         self._plan_node_tasks: dict[tuple[str, str, str], str] = {}
+        self._runtime_member_snapshots: dict[TeamKey, dict[str, TeamMemberSpec]] = {}
         self._planning_missing_info: dict[TeamKey, list[str]] = {}
         self._runtime_profile_cache: dict[tuple[str, ...], AgentProfile] = {}
         self._active_lock = threading.Lock()
@@ -1033,6 +1034,7 @@ class InProcessTeamManager(TeamManager):
         session_id: str,
         *,
         node_id: str = "",
+        external_team_id: str = "",
         owner_account_id: str = "",
     ) -> TeamPlan | None:
         """从 Dynamic Kanban 恢复最近的 TeamPlan，供用户恢复阻塞节点。
@@ -1063,7 +1065,13 @@ class InProcessTeamManager(TeamManager):
         )
         target_node_id = str(node_id or "").strip()
         requested_session_id = str(session_id or "").strip()
+        requested_external_team_id = str(external_team_id or "").strip()
         for workflow in candidates:
+            workflow_context = getattr(workflow, "context", {}) or {}
+            if requested_external_team_id and str(
+                workflow_context.get("external_team_id") or ""
+            ).strip() != requested_external_team_id:
+                continue
             workflow_session_id = str(getattr(workflow, "session_id", "") or "").strip()
             if requested_session_id and workflow_session_id != requested_session_id \
                     and not workflow_session_id.startswith(f"{requested_session_id}::turn::"):
@@ -1188,6 +1196,9 @@ class InProcessTeamManager(TeamManager):
             key = self._key(plan.team_session_id, owner_account_id)
             self._plans[key] = plan
             self._plan_workflows[key] = str(workflow.id)
+            self._runtime_member_snapshots[key] = self._runtime_members_from_snapshot(
+                workflow_plan.get("runtime_members")
+            )
             for current_node_id, task in task_by_node.items():
                 task_id = str(task.get("id") or "").strip()
                 if task_id:
@@ -1196,6 +1207,39 @@ class InProcessTeamManager(TeamManager):
                 continue
             return plan
         return None
+
+    @staticmethod
+    def _runtime_members_from_snapshot(raw_members: Any) -> dict[str, TeamMemberSpec]:
+        if not isinstance(raw_members, list):
+            return {}
+        members: dict[str, TeamMemberSpec] = {}
+        for raw_member in raw_members:
+            if not isinstance(raw_member, dict):
+                continue
+            try:
+                member = TeamMemberSpec.from_config(raw_member)
+            except (TypeError, ValueError) as exc:
+                log.warning("忽略无效的 Runtime 临时成员快照 err=%s", exc)
+                continue
+            if member.member_id and member.member_id != "leader":
+                members[member.member_id] = member
+        return members
+
+    def _runtime_members_for_session(
+        self,
+        session_id: str,
+        *,
+        external_team_id: str = "",
+        owner_account_id: str = "",
+    ) -> list[TeamMemberSpec]:
+        key = self._key(session_id, owner_account_id)
+        if key not in self._runtime_member_snapshots:
+            self._hydrate_persisted_team_plan(
+                session_id,
+                external_team_id=external_team_id,
+                owner_account_id=owner_account_id,
+            )
+        return list(self._runtime_member_snapshots.get(key, {}).values())
 
     def read_plan(self, session_id: str, owner_account_id: str = "") -> dict[str, Any]:
         plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
@@ -2093,6 +2137,7 @@ class InProcessTeamManager(TeamManager):
                 "updated_node_metadata": {node.node_id: dict(node.metadata or {})},
             },
         )
+        self._refresh_plan_status(plan)
         self._sync_kanban_node(plan, node, owner_account_id=owner_account_id)
         return team
 
@@ -4032,6 +4077,10 @@ class InProcessTeamManager(TeamManager):
             node.metadata = dict(previous["metadata"])
             raise
         self._teams[self._key(plan.team_session_id, owner_account_id)] = rebuilt
+        self._runtime_member_snapshots[self._key(plan.team_session_id, owner_account_id)] = dict(
+            rebuilt.runtime_members
+        )
+        self._refresh_plan_status(plan)
         self._sync_kanban_node(plan, node, owner_account_id=owner_account_id)
         self._reopen_staffing_review_nodes(plan, node, owner_account_id=owner_account_id)
         return rebuilt
@@ -8333,10 +8382,16 @@ class InProcessTeamManager(TeamManager):
     def _get_or_create(self, session_id: str, *, external_team_id: str = "", owner_account_id: str = "") -> Team:
         key = self._key(session_id, owner_account_id)
         if key not in self._teams:
+            runtime_members = self._runtime_members_for_session(
+                session_id,
+                external_team_id=external_team_id,
+                owner_account_id=owner_account_id,
+            )
             self._teams[key] = self._build_team(
                 session_id,
                 external_team_id=external_team_id,
                 owner_account_id=owner_account_id,
+                runtime_members=runtime_members,
             )
         return self._teams[key]
 
@@ -8793,6 +8848,7 @@ class InProcessTeamManager(TeamManager):
         key = self._existing_team_key(session_id, owner_account_id)
         self._teams.pop(key, None)
         self._plans.pop(self._existing_plan_key(session_id, owner_account_id), None)
+        self._runtime_member_snapshots.pop(key, None)
         with self._active_lock:
             self._active_children.pop(self._key(session_id, owner_account_id), None)
         log.info("[Team] 已销毁团队 session=%s", session_id)
@@ -8814,11 +8870,13 @@ class InProcessTeamManager(TeamManager):
         ]
         for key in keys:
             self._teams.pop(key, None)
+            self._runtime_member_snapshots.pop(key, None)
         return bool(keys)
 
     def clear(self) -> None:
         self._teams.clear()
         self._plans.clear()
+        self._runtime_member_snapshots.clear()
         with self._active_lock:
             delegate_tasks = {
                 task
@@ -8841,6 +8899,7 @@ class InProcessTeamManager(TeamManager):
         keys = [key for key in self._teams if key[0] == owner]
         for key in keys:
             self._teams.pop(key, None)
+            self._runtime_member_snapshots.pop(key, None)
         return len(keys)
 
     def active_tasks_snapshot(self) -> set[asyncio.Task[Any]]:

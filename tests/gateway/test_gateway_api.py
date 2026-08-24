@@ -69,6 +69,45 @@ async def test_api_session_context(api, auth_headers):
 
 
 @pytest.mark.asyncio
+async def test_team_agent_config_update_evicts_team_cache(tmp_path, auth_headers):
+    crew = build_app(
+        config=Config(
+            db_path=str(tmp_path / "team-config-cache.db"),
+            cron_enabled=False,
+            team_config={
+                "members": [{
+                    "member_id": "kk",
+                    "name": "kk",
+                    "executor": "builtin",
+                    "capabilities": ["implementation"],
+                }],
+            },
+        ),
+        enable_team=True,
+    )
+    crew.session_store.ensure_session("team-config-cache", owner_account_id=OWNER_A)
+    cached = crew.team._get_or_create("team-config-cache", owner_account_id=OWNER_A)
+    assert cached is crew.team._teams[(OWNER_A, "team-config-cache")]
+
+    app = create_app(crew)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers=auth_headers,
+    ) as client:
+        response = await client.put(
+            "/api/session/team-config-cache/agent-config",
+            json={
+                "executor": "team",
+                "team": {},
+            },
+        )
+
+    assert response.status_code == 200
+    assert (OWNER_A, "team-config-cache") not in crew.team._teams
+
+
+@pytest.mark.asyncio
 async def test_external_session_model_switch_requires_idle_and_runtime_catalog(tmp_path, auth_headers, monkeypatch):
     crew = build_app(config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False), enable_team=False)
     runtime = crew.external_agents.upsert_runtime({

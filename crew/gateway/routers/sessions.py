@@ -1253,6 +1253,9 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             return JSONResponse({"ok": False, "error": "session agent config store 不可用"}, status_code=500)
         stored = setter(session_id, config, owner_account_id=owner)
         crew.agents.drop(session_id, owner_account_id=owner)
+        drop_team = getattr(crew.team, "drop_session_team", None)
+        if callable(drop_team):
+            drop_team(session_id, owner_account_id=owner)
         if title and is_placeholder_title(title):
             crew.session_store.set_title(session_id, title, owner_account_id=owner)
         return JSONResponse(stored)

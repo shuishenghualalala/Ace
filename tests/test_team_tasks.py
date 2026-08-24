@@ -56,7 +56,7 @@ from crew.team.history_projection import (
     team_internal_history_items,
     team_tasks_with_plan_projection,
 )
-from crew.team.models import RuntimeStaffingRequest, TeamPlan, TeamPlanEdge, TeamPlanNode
+from crew.team.models import RuntimeStaffingRequest, TeamMemberSpec, TeamPlan, TeamPlanEdge, TeamPlanNode
 from crew.team.result_presenter import (
     assignment_text,
     artifact_filename,
@@ -5916,6 +5916,39 @@ def test_runtime_staffing_reassigns_existing_member_before_prompting_user():
     assert trigger["replacement_assignee"] == "hh"
 
 
+def test_runtime_reassignment_refreshes_plan_status_after_reopening_node():
+    tm, _ = _team(config=_recovery_team_config())
+    team = tm._build_team("runtime-reassign-status")
+    node = TeamPlanNode(
+        node_id="verify",
+        title="验证",
+        assignee="kk",
+        status="blocked",
+        metadata={"required_capabilities": ["testing"]},
+    )
+    plan = TeamPlan(
+        team_session_id="runtime-reassign-status",
+        goal="验证",
+        status="blocked",
+        nodes={"verify": node},
+    )
+
+    tm._apply_existing_member_reassignment(
+        plan,
+        node,
+        team,
+        {
+            "replacement_assignee": "hh",
+            "required_capabilities": ["testing"],
+            "reason": "已有测试成员可以承担",
+        },
+        owner_account_id="local",
+    )
+
+    assert node.status == "pending"
+    assert plan.status == "active"
+
+
 def _recovery_team_config() -> Config:
     return Config(team_config={
         "members": [
@@ -6013,6 +6046,64 @@ def test_recover_plan_node_reassigns_persisted_blocked_node(tmp_path):
     verify = next(item for item in projected if item["progress"].get("plan_node_id") == "verify")
     assert verify["assignee"] == "hh"
     assert verify["status"] == "pending"
+
+
+def test_runtime_members_restore_from_persisted_workflow_after_team_cache_miss(tmp_path, monkeypatch):
+    store = SQLiteKanbanStore(tmp_path / "runtime-member-recovery.db")
+    tm, _ = _team(config=_recovery_team_config(), kanban_store=store)
+    runtime_member = TeamMemberSpec(
+        member_id="runtime-worker",
+        name="Runtime 外援·后端",
+        role="负责后端实现",
+        executor="external",
+        external_agent_id="agent-runtime-worker",
+        model="backend-model",
+        capabilities=["backend"],
+        metadata={"runtime_staffing": True},
+    )
+    plan = TeamPlan(
+        team_session_id="runtime-member-recovery",
+        goal="实现后端接口",
+        nodes={
+            "build": TeamPlanNode(
+                node_id="build",
+                title="实现接口",
+                assignee=runtime_member.member_id,
+                metadata={"required_capabilities": ["backend"]},
+            ),
+        },
+    )
+    tm._persist_team_plan(
+        plan,
+        owner_account_id="local",
+        workflow_plan={
+            "version": 1,
+            "revision": 2,
+            "task": {"goal": plan.goal},
+            "nodes": [{
+                "id": "build",
+                "title": "实现接口",
+                "assignee_id": runtime_member.member_id,
+                "required_capabilities": ["backend"],
+            }],
+            "edges": [],
+            "runtime_members": [runtime_member.to_dict()],
+        },
+    )
+
+    recovered_tm, _ = _team(config=_recovery_team_config(), kanban_store=store)
+    captured: dict[str, list[TeamMemberSpec]] = {}
+
+    def fake_build(session_id, **kwargs):
+        runtime_members = list(kwargs.get("runtime_members") or [])
+        captured[session_id] = runtime_members
+        return SimpleNamespace(runtime_members={item.member_id: item for item in runtime_members})
+
+    monkeypatch.setattr(recovered_tm, "_build_team", fake_build)
+    recovered_tm._get_or_create("runtime-member-recovery", owner_account_id="local")
+
+    assert [item.member_id for item in captured["runtime-member-recovery"]] == ["runtime-worker"]
+    assert recovered_tm._plans[recovered_tm._key("runtime-member-recovery", "local")].nodes["build"].assignee == "runtime-worker"
 
 
 def test_recover_plan_node_reuses_capability_coverage_and_rejects_invalid_member():
