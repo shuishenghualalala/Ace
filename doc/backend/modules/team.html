@@ -666,4 +666,7 @@ graph TD
 <h2>2026-08-24 Team 第一阶段：能力契约与 Runtime 可用性分离</h2>
 <p><code>evaluate_capability_coverage()</code> 新增显式的 Runtime 画像可用性门控。DAG 规划不访问外部 Store，继续使用已确认的 <code>TeamMemberSpec.capabilities</code>；Runtime 对外部成员同时校验能力契约与 AgentProfile 的 <code>availability</code>/<code>binding_status</code>。低置信画像不会抹掉确认能力，但画像解析失败或 Runtime/model 不可用会进入 <code>unknown</code>/<code>unavailable</code>，触发既有补员链路。Runtime 当前成员与现有成员改派候选均复用同一成员覆盖解析，避免两套判断漂移。</p>
 
+<h2>2026-08-24 Team 第二阶段：成员画像解析入口收口</h2>
+<p>TeamManager 新增单一的 <code>_resolve_member_profile()</code> 入口，统一处理 External Agent/model 绑定、AgentProfile 缓存解析和异常降级。Team 初始化写入 <code>member_profiles</code> 与 Runtime 节点 readiness 检查均复用该入口；DAG 仍只消费内存画像和已确认能力，不访问 Store。这样既保留规划与运行时的职责边界，也避免两条路径对成员模型绑定、画像失败语义和日志处理不一致。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

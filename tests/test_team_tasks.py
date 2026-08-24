@@ -5526,6 +5526,45 @@ def test_external_member_unavailability_is_not_hidden_by_assignment_contract():
     assert trigger["trigger_type"] == "agent_unavailable"
 
 
+def test_team_member_profile_resolution_is_shared_by_build_and_runtime_coverage():
+    tm, _ = _team()
+    member = SimpleNamespace(
+        member_id="kk",
+        external_agent_id="agent-kk",
+        executor="external",
+        capabilities=["implementation"],
+        model="model-kk",
+        metadata={},
+    )
+    profile = AgentProfile(
+        agent_id="agent-kk",
+        capabilities={"implementation": CapabilityAssessment(score=0.9, confidence=0.9)},
+    )
+    calls: list[tuple[str, str, str]] = []
+
+    def resolve(agent_id, *, owner_account_id, model_id, **kwargs):
+        calls.append((agent_id, owner_account_id, model_id))
+        return profile
+
+    tm._resolve_external_agent_profile = resolve
+    team = SimpleNamespace(members={"kk": member}, teammates={"kk": object()})
+
+    resolved = tm._resolve_team_member_profiles([member], None, owner_account_id="local")
+    coverage = tm._member_capability_coverage(
+        team,
+        "kk",
+        ["implementation"],
+        owner_account_id="local",
+    )
+
+    assert resolved == {"kk": profile}
+    assert coverage.status == "covered"
+    assert calls == [
+        ("agent-kk", "local", "model-kk"),
+        ("agent-kk", "local", "model-kk"),
+    ]
+
+
 def test_dag_admission_reassigns_existing_member_and_refreshes_role_metadata():
     nodes, _, _ = _normalize_nodes_with_graph(
         goal="执行测试",

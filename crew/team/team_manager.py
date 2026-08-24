@@ -305,6 +305,38 @@ class InProcessTeamManager(TeamManager):
             self._runtime_profile_cache[cache_key] = profile
         return profile
 
+    def _resolve_member_profile(
+        self,
+        member: TeamMemberSpec,
+        *,
+        owner_account_id: str,
+    ) -> AgentProfile | None:
+        """Resolve one external Team member's current model-aware profile.
+
+        Team construction and Runtime readiness must use the same member
+        binding. Keep Store access and profile-cache details behind this
+        boundary; DAG planning remains a pure consumer of ``member_profiles``.
+        """
+
+        if member.executor != "external" or not member.external_agent_id:
+            return None
+        agent_id = str(member.external_agent_id).strip()
+        try:
+            return self._resolve_external_agent_profile(
+                agent_id,
+                owner_account_id=owner_account_id,
+                model_id=str(getattr(member, "model", "") or "").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown profile is a runtime fact
+            log.debug(
+                "无法解析 Team 成员当前模型画像 member=%s agent=%s model=%s err=%s",
+                member.member_id,
+                agent_id,
+                str(getattr(member, "model", "") or "").strip(),
+                exc,
+            )
+            return None
+
     def _resolve_team_member_profiles(
         self,
         members: list[TeamMemberSpec],
@@ -315,21 +347,12 @@ class InProcessTeamManager(TeamManager):
         profiles: dict[str, AgentProfile] = {}
         candidates = [leader_spec] if leader_spec is not None else []
         for member in [*candidates, *members]:
-            if member.executor != "external" or not member.external_agent_id:
-                continue
-            try:
-                profiles[member.member_id] = self._resolve_external_agent_profile(
-                    member.external_agent_id,
-                    owner_account_id=owner_account_id,
-                    model_id=member.model,
-                )
-            except Exception as exc:  # noqa: BLE001 - static Formation remains a safe fallback
-                log.debug(
-                    "无法解析 Team 成员当前模型画像 agent=%s model=%s err=%s",
-                    member.external_agent_id,
-                    member.model,
-                    exc,
-                )
+            profile = self._resolve_member_profile(
+                member,
+                owner_account_id=owner_account_id,
+            )
+            if profile is not None:
+                profiles[member.member_id] = profile
         return profiles
 
     def member_model_lock(
@@ -2058,28 +2081,16 @@ class InProcessTeamManager(TeamManager):
             )
         if member.executor == "external" and member.external_agent_id:
             agent_id = str(member.external_agent_id).strip()
-            profiles: dict[str, Any] = {}
             assigned_capabilities = normalize_capabilities(member.capabilities)
             if not assigned_capabilities:
                 assigned_capabilities = normalize_capabilities(
                     flow_builder.member_node_metadata(member).get("required_capabilities") or []
                 )
-            if self.external_store is not None:
-                try:
-                    agent = self.external_store.get_agent(
-                        agent_id,
-                        owner_account_id=owner_account_id,
-                    )
-                    model_id = str(getattr(member, "model", "") or "").strip()
-                    profiles[agent_id] = self._resolve_external_agent_profile(
-                        agent_id,
-                        owner_account_id=owner_account_id,
-                        model_id=model_id,
-                        agent=agent,
-                        runtime=self.external_store.get_runtime(str(agent.get("runtime_id") or "")),
-                    )
-                except Exception as exc:  # noqa: BLE001 - unknown profile is a real runtime fact
-                    log.debug("无法解析 Team 成员 AgentProfile agent=%s err=%s", agent_id, exc)
+            profile = self._resolve_member_profile(
+                member,
+                owner_account_id=owner_account_id,
+            )
+            profiles = {agent_id: profile} if profile is not None else {}
             capability_sets = {agent_id: assigned_capabilities} if assigned_capabilities else None
             return evaluate_capability_coverage(
                 required_capabilities,
