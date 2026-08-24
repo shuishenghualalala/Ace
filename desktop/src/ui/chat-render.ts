@@ -1474,6 +1474,13 @@ export function renderTeamInternalMessage(
     const label = bubble.querySelector<HTMLElement>('.msg__fold-label');
     if (label) label.textContent = resolveTeamTurnFoldLabel(message, turnDurationMs, isStreaming);
   }
+  // 历史回放可能只留下一个没有正文、过程或产物的规划事件。不要把这个
+  // 空事件渲染成浅绿色气泡；流式中的空事件仍需保留，用于显示规划进度。
+  if (!isStreaming && bubble.childElementCount === 0) {
+    const empty = document.createElement('div');
+    empty.dataset.empty = 'true';
+    return empty;
+  }
   body.insertBefore(bubble, footer);
   return root;
 }

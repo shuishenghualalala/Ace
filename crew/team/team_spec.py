@@ -254,6 +254,34 @@ def build_team_spec(source: TeamSpecInput = None) -> TeamSpec:
     )
 
 
+def persisted_team_spec_for_turn(source: Mapping[str, Any], goal: str) -> dict[str, Any]:
+    """Project a persisted TeamSpec snapshot into the current turn contract.
+
+    External teams created before TeamSpec V3 may keep task semantics in
+    ``execution_profile``. That storage compatibility is handled only at the
+    persistence boundary; explicit runtime input still goes through the strict
+    ``build_team_spec`` validation above. The current user goal always wins.
+    """
+
+    raw = dict(source)
+    legacy_execution = _mapping(raw.get("execution_profile"))
+    task_profile = _mapping(raw.get("task_profile"))
+    for key in _TASK_PROFILE_KEYS:
+        if key not in task_profile and key in legacy_execution:
+            task_profile[key] = legacy_execution[key]
+
+    return {
+        **raw,
+        "goal": str(goal or "").strip(),
+        "task_profile": task_profile,
+        "execution_profile": {
+            key: legacy_execution[key]
+            for key in _RUNTIME_EXECUTION_KEYS
+            if key in legacy_execution
+        },
+    }
+
+
 def team_spec_from_planning_decision(
     base_spec: TeamSpec,
     decision: Any,

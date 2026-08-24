@@ -189,13 +189,17 @@ def evaluate_capability_coverage(
     capability_sets: Mapping[str, Iterable[object]] | None = None,
     assigned_agent_ids: Iterable[object] | None = None,
     min_score: float = 0.5,
+    require_profile_availability: bool = False,
 ) -> CapabilityCoverage:
     """Evaluate one capability requirement against the supplied members.
 
     Formation and Runtime pass resolved ``AgentProfile`` objects.  The DAG
     compiler passes the confirmed ``TeamMemberSpec.capabilities`` snapshot via
     ``capability_sets``; it is an assignment contract, not a second profile.
-    The function deliberately does not inspect candidates outside the supplied
+    Runtime can set ``require_profile_availability`` when that contract is
+    paired with a live external profile: the contract still supplies the
+    capability, while the profile gates current Runtime/model readiness. The
+    function deliberately does not inspect candidates outside the supplied
     members and never performs I/O or LLM calls.
     """
 
@@ -236,12 +240,19 @@ def evaluate_capability_coverage(
         unavailable_members: list[str] = []
         unknown_members: list[str] = []
         for agent_id in assigned:
+            profile = profile_map.get(agent_id)
+            if require_profile_availability:
+                if profile is None:
+                    unknown_members.append(agent_id)
+                    continue
+                if not is_agent_profile_available(profile):
+                    unavailable_members.append(agent_id)
+                    continue
             if capability_sets is not None and agent_id in capability_sets:
                 assigned_caps = normalize_capabilities(capability_sets.get(agent_id) or [])
                 if capability in assigned_caps:
                     capability_members.append(agent_id)
                 continue
-            profile = profile_map.get(agent_id)
             if profile is None:
                 unknown_members.append(agent_id)
                 continue

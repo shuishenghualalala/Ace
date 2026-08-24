@@ -81,6 +81,7 @@ from crew.team.formation import (
 )
 from crew.team.graph_planner import TeamGraphPlanner, schedule_planning_provider_warmup
 from crew.team.history_projection import project_team_event_history
+from crew.team.team_spec import persisted_team_spec_for_turn
 from crew.team.models import (
     RuntimeStaffingRequest,
     TeamMemberSpec,
@@ -157,6 +158,7 @@ class Team:
     bus: TeamBus
     communication_router: TeamCommunicationRouter
     external_team_id: str = ""
+    team_spec: dict[str, Any] = field(default_factory=dict)
     runtime_members: dict[str, TeamMemberSpec] = field(default_factory=dict)
     member_profiles: dict[str, AgentProfile] = field(default_factory=dict)
 
@@ -2057,13 +2059,18 @@ class InProcessTeamManager(TeamManager):
         if member.executor == "external" and member.external_agent_id:
             agent_id = str(member.external_agent_id).strip()
             profiles: dict[str, Any] = {}
+            assigned_capabilities = normalize_capabilities(member.capabilities)
+            if not assigned_capabilities:
+                assigned_capabilities = normalize_capabilities(
+                    flow_builder.member_node_metadata(member).get("required_capabilities") or []
+                )
             if self.external_store is not None:
                 try:
                     agent = self.external_store.get_agent(
                         agent_id,
                         owner_account_id=owner_account_id,
                     )
-                    model_id = str(member.model or "").strip()
+                    model_id = str(getattr(member, "model", "") or "").strip()
                     profiles[agent_id] = self._resolve_external_agent_profile(
                         agent_id,
                         owner_account_id=owner_account_id,
@@ -2073,10 +2080,13 @@ class InProcessTeamManager(TeamManager):
                     )
                 except Exception as exc:  # noqa: BLE001 - unknown profile is a real runtime fact
                     log.debug("无法解析 Team 成员 AgentProfile agent=%s err=%s", agent_id, exc)
+            capability_sets = {agent_id: assigned_capabilities} if assigned_capabilities else None
             return evaluate_capability_coverage(
                 required_capabilities,
                 profiles,
+                capability_sets=capability_sets,
                 assigned_agent_ids=[agent_id],
+                require_profile_availability=True,
             )
         capabilities = normalize_capabilities(member.capabilities)
         if not capabilities:
@@ -3487,59 +3497,21 @@ class InProcessTeamManager(TeamManager):
                 "reason": f"节点已连续失败 {node.attempt_count} 次，达到自动重试上限。",
             }
 
-        assigned = team.members.get(node.assignee)
-        profiles: dict[str, Any] = {}
-        capability_sets: dict[str, list[str]] = {}
-        assigned_agent_ids: list[str] = []
-        if assigned is not None and assigned.executor == "external" and assigned.external_agent_id:
-            assigned_agent_id = str(assigned.external_agent_id).strip()
-            assigned_agent_ids.append(assigned_agent_id)
-            try:
-                assigned_agent = self.external_store.get_agent(
-                    assigned_agent_id,
-                    owner_account_id=owner_account_id,
-                )
-                model_id = str(assigned.model or "").strip()
-                profiles[assigned_agent_id] = self._resolve_external_agent_profile(
-                    assigned_agent_id,
-                    owner_account_id=owner_account_id,
-                    model_id=model_id,
-                    agent=assigned_agent,
-                    runtime=self.external_store.get_runtime(str(assigned_agent.get("runtime_id") or "")),
-                )
-            except Exception as exc:  # noqa: BLE001 - 不可读取本身就是运行时不可用事实
-                log.debug(
-                    "无法解析当前节点成员 AgentProfile agent=%s err=%s",
-                    assigned_agent_id,
-                    exc,
-                )
-        elif assigned is not None:
-            assigned_agent_ids.append(node.assignee)
-            capability_sets[node.assignee] = normalize_capabilities(assigned.capabilities)
-            if not capability_sets[node.assignee]:
-                capability_sets[node.assignee] = normalize_capabilities(
-                    flow_builder.member_node_metadata(assigned).get("required_capabilities") or []
-                )
-
-        coverage = evaluate_capability_coverage(
+        coverage = self._member_capability_coverage(
+            team,
+            node.assignee,
             required,
-            profiles,
-            capability_sets=capability_sets,
-            assigned_agent_ids=assigned_agent_ids,
+            owner_account_id=owner_account_id,
         )
         if coverage.status != "covered":
             for member_id, member in team.members.items():
                 if member_id in {node.assignee, "leader"}:
                     continue
-                member_capabilities = normalize_capabilities(member.capabilities)
-                if not member_capabilities:
-                    member_capabilities = normalize_capabilities(
-                        flow_builder.member_node_metadata(member).get("required_capabilities") or []
-                    )
-                member_coverage = evaluate_capability_coverage(
+                member_coverage = self._member_capability_coverage(
+                    team,
+                    member_id,
                     required,
-                    capability_sets={member_id: member_capabilities},
-                    assigned_agent_ids=[member_id],
+                    owner_account_id=owner_account_id,
                 )
                 if member_coverage.status == "covered":
                     return {
@@ -6494,11 +6466,21 @@ class InProcessTeamManager(TeamManager):
                 )
             member_lines.append(f"- {spec.member_id} / {spec.name}: {role_label[:80]}")
         if node.node_id == "leader_summary":
+            member_nodes = [
+                item for item in plan.nodes.values()
+                if item.assignee and item.assignee != "leader"
+            ]
             leader_instruction = "\n".join([
                 "请作为团队 Leader 进行最终汇总，直接回答用户原始问题。",
                 "不要只说任务已完成；要对用户的问题给出可理解结论。",
                 "如果关键信息不足，请明确指出需要用户补充什么，并说明已确认的团队状态。",
                 "请概括成员输出，避免重复粘贴节点标题或原文。",
+                (
+                    "当前 DAG 没有成员执行节点，本轮没有发生成员派活；不要把 Team Bus 无成员消息、"
+                    "无成员产出或‘不再派发新任务’写成异常，也不要据此暗示成员未完成工作。"
+                    if not member_nodes else
+                    "仅根据实际存在的成员节点和已记录产出汇总，不要把未派发的成员当作缺失产出。"
+                ),
                 "不要再派发新任务。",
             ])
         elif node.node_id == "leader_review" or node.node_id.startswith("leader_review_"):
@@ -7974,6 +7956,7 @@ class InProcessTeamManager(TeamManager):
         external_team_id = str(external_team_id or team_cfg.get("external_team_id") or "").strip()
         display_name = str(team_cfg.get("name") or "团队").strip() or "团队"
         leader_spec: TeamMemberSpec | None = None
+        persisted_team_spec: dict[str, Any] = {}
         model_bindings: dict[str, Any] = {}
         if external_team_id and self.external_store is not None:
             try:
@@ -8011,6 +7994,9 @@ class InProcessTeamManager(TeamManager):
                     owner_account_id=owner_account_id,
                 )
                 display_name = str(external_team.get("name") or display_name).strip() or display_name
+                raw_persisted_team_spec = external_team.get("team_spec")
+                if isinstance(raw_persisted_team_spec, dict):
+                    persisted_team_spec = dict(raw_persisted_team_spec)
                 leader_agent_id = str(external_team.get("leader_agent_id") or "").strip()
                 if leader_agent_id and not is_crew_builtin_agent(leader_agent_id):
                     members, leader_spec = self._external_team_specs(
@@ -8294,6 +8280,7 @@ class InProcessTeamManager(TeamManager):
             bus=bus,
             communication_router=communication_router,
             external_team_id=external_team_id,
+            team_spec=persisted_team_spec,
             runtime_members=runtime_member_map,
             member_profiles=member_profiles,
         )
@@ -8563,6 +8550,11 @@ class InProcessTeamManager(TeamManager):
         required_workflow = bool(team_cfg.get("required_workflow", True))
         raw_team_spec = envelope.params.get("team_spec")
         team_spec = raw_team_spec if isinstance(raw_team_spec, dict) else None
+        if team_spec is None and team.team_spec:
+            team_spec = persisted_team_spec_for_turn(
+                team.team_spec,
+                str(envelope.query or ""),
+            )
         explicit_profile = envelope.params.get("team_execution_profile")
         route_team_spec = team_spec
         base_turn_decision = self.turn_router.route(

@@ -42,6 +42,7 @@ from crew.team.graph_planner import (
     DEFAULT_PLANNING_DECISION_TIMEOUT,
     PLANNING_DECISION_MAX_TOKENS,
     TeamGraphPlanner,
+    _member_capability_sets,
     _normalize_nodes_with_graph,
     schedule_planning_provider_warmup,
 )
@@ -73,7 +74,7 @@ from crew.team.team_manager import (
     _join_stream_fragments,
     _normalize_legacy_chunked_thinking,
 )
-from crew.team.team_spec import build_team_spec
+from crew.team.team_spec import build_team_spec, persisted_team_spec_for_turn
 from crew.team.turn_decision import (
     TeamTurnDecision,
     coerce_team_turn_decision,
@@ -5139,6 +5140,109 @@ def test_team_spec_rejects_legacy_execution_flags():
         })
 
 
+def test_persisted_team_spec_for_turn_projects_legacy_task_semantics():
+    projected = persisted_team_spec_for_turn(
+        {
+            "version": 3,
+            "goal": "旧团队目标",
+            "execution_profile": {
+                "intent": "implementation",
+                "complexity": "multi_role",
+                "needs_build": True,
+                "needs_verification": True,
+            },
+            "team_requirements": {
+                "roles": ["fullstack_developer"],
+                "workflow_lanes": ["build", "verify"],
+                "capabilities": ["implementation", "verification"],
+            },
+        },
+        "本轮用户目标",
+    )
+
+    assert projected["goal"] == "本轮用户目标"
+    assert projected["task_profile"] == {
+        "intent": "implementation",
+        "complexity": "multi_role",
+    }
+    assert projected["execution_profile"] == {}
+    assert projected["team_requirements"]["workflow_lanes"] == ["build", "verify"]
+
+
+async def test_team_interact_uses_persisted_external_team_spec_for_planning(monkeypatch):
+    class DummyExternalStore:
+        def get_team(self, team_id: str, *, owner_account_id: str = ""):
+            assert team_id == "team_persisted_spec"
+            assert owner_account_id == "local"
+            return {
+                "id": team_id,
+                "name": "像素小游戏开发团队",
+                "leader_agent_id": CREW_BUILTIN_AGENT_ID,
+                "team_spec": {
+                    "version": 3,
+                    "goal": "旧团队目标",
+                    "execution_profile": {
+                        "intent": "implementation",
+                        "complexity": "multi_role",
+                        "needs_build": True,
+                        "needs_docs": True,
+                    },
+                    "team_requirements": {
+                        "roles": ["fullstack_developer"],
+                        "workflow_lanes": ["design", "build", "docs", "verify"],
+                        "capabilities": ["synthesis", "design", "implementation", "documentation"],
+                    },
+                },
+                "members": [
+                    {
+                        "agent_id": CREW_BUILTIN_AGENT_ID,
+                        "agent_name": "Crew 内置智能体",
+                        "role": "项目经理",
+                        "workflow_lane": "lead",
+                        "capabilities": ["planning"],
+                    },
+                    {
+                        "agent_id": "agent_kk",
+                        "agent_name": "kk",
+                        "role": "全栈开发",
+                        "workflow_lane": "build",
+                        "capabilities": ["frontend", "backend", "implementation"],
+                    },
+                ],
+            }
+
+    tm, _ = _team()
+    tm.external_store = DummyExternalStore()
+    captured: dict[str, object] = {}
+
+    async def fake_required_workflow(envelope, *, team, external_team_id, execution_profile, team_spec):
+        captured["team"] = team
+        captured["team_spec"] = team_spec
+        yield ResponseChunk.final(envelope.request_id, "done")
+
+    monkeypatch.setattr(tm, "_run_required_workflow", fake_required_workflow)
+    goal = "帮我写一个拳王小游戏的游戏方案吧"
+    chunks = [chunk async for chunk in tm.interact(Envelope.of(
+        goal,
+        session_id="persisted-spec-session",
+        request_id="req-persisted-spec",
+        user_id="local",
+        mode="team",
+        params={"external_team_id": "team_persisted_spec"},
+    ))]
+
+    assert any(chunk.kind == "final" for chunk in chunks)
+    projected = captured["team_spec"]
+    assert isinstance(projected, dict)
+    assert projected["goal"] == goal
+    assert projected["team_requirements"]["workflow_lanes"] == ["design", "build", "docs", "verify"]
+    assert projected["execution_profile"] == {}
+
+    team = captured["team"]
+    plan = tm.graph_planner.plan(team, goal, team_spec=projected)
+    assert any(node["assignee"] == "kk" and node["id"].startswith("build") for node in plan.nodes)
+
+
 def test_team_spec_keeps_task_semantics_out_of_execution_profile():
     spec = build_team_spec({
         "goal": "输出研究方案",
@@ -5324,6 +5428,102 @@ def test_dag_admission_records_uncovered_node_instead_of_hiding_it_in_runtime():
     assert execute["metadata"]["capability_status"] == "missing"
     assert execute["metadata"]["capability_gap_source"] == "dag_admission"
     assert "testing" in execute["metadata"]["capability_coverage"]["missing"]
+
+
+def test_assigned_team_capabilities_survive_weak_model_profile():
+    member = SimpleNamespace(
+        member_id="kk",
+        capabilities=["frontend", "backend", "implementation"],
+        metadata={},
+    )
+    weak_profile = AgentProfile(
+        agent_id="agent-kk",
+        capabilities={
+            capability: CapabilityAssessment(score=0.2, confidence=0.15)
+            for capability in ("frontend", "backend", "implementation")
+        },
+    )
+    team = SimpleNamespace(
+        leader_spec=None,
+        members={"kk": member},
+        member_profiles={"kk": weak_profile},
+    )
+
+    assert _member_capability_sets(team)["kk"] == ["frontend", "backend", "implementation"]
+
+
+def test_external_member_assignment_contract_survives_weak_profile_for_runtime_coverage():
+    tm, _ = _team()
+    member = SimpleNamespace(
+        member_id="kk",
+        external_agent_id="agent-kk",
+        executor="external",
+        capabilities=["frontend", "backend", "implementation"],
+        metadata={},
+    )
+    weak_profile = AgentProfile(
+        agent_id="agent-kk",
+        capabilities={"implementation": CapabilityAssessment(score=0.2, confidence=0.15)},
+    )
+    team = SimpleNamespace(members={"kk": member}, teammates={"kk": object()})
+    tm._resolve_external_agent_profile = lambda *args, **kwargs: weak_profile
+    tm.external_store = SimpleNamespace(
+        get_agent=lambda *args, **kwargs: {"runtime_id": "runtime-kk"},
+        get_runtime=lambda *args, **kwargs: {},
+    )
+
+    coverage = tm._member_capability_coverage(
+        team,
+        "kk",
+        ["frontend", "backend", "implementation"],
+        owner_account_id="local",
+    )
+
+    assert coverage.status == "covered"
+
+
+def test_external_member_unavailability_is_not_hidden_by_assignment_contract():
+    tm, _ = _team()
+    member = SimpleNamespace(
+        member_id="kk",
+        external_agent_id="agent-kk",
+        executor="external",
+        capabilities=["implementation"],
+        metadata={},
+    )
+    unavailable_profile = AgentProfile(
+        agent_id="agent-kk",
+        availability="unavailable",
+        capabilities={"implementation": CapabilityAssessment(score=0.9, confidence=0.9)},
+    )
+    team = SimpleNamespace(members={"kk": member}, teammates={"kk": object()})
+    tm._resolve_external_agent_profile = lambda *args, **kwargs: unavailable_profile
+    tm.external_store = SimpleNamespace(
+        get_agent=lambda *args, **kwargs: {"runtime_id": "runtime-kk"},
+        get_runtime=lambda *args, **kwargs: {},
+    )
+
+    coverage = tm._member_capability_coverage(
+        team,
+        "kk",
+        ["implementation"],
+        owner_account_id="local",
+    )
+    trigger = tm._runtime_staffing_trigger(
+        team,
+        TeamPlanNode(
+            node_id="build",
+            title="实现",
+            assignee="kk",
+            metadata={"required_capabilities": ["implementation"]},
+        ),
+        owner_account_id="local",
+        max_attempts=2,
+    )
+
+    assert coverage.status == "unavailable"
+    assert trigger is not None
+    assert trigger["trigger_type"] == "agent_unavailable"
 
 
 def test_dag_admission_reassigns_existing_member_and_refreshes_role_metadata():

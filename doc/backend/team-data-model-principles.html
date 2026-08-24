@@ -651,9 +651,9 @@ flowchart LR
   </ul>
 
   <h2>20. Formation、DAG 与 Runtime 能力准入（2026-08-13）</h2>
-  <p>能力来源统一但生命周期不同：Formation 使用 TeamSpec 的长期团队要求；DAG 编译使用 Formation 已确认并落到 <code>TeamMemberSpec.capabilities</code> 的能力分配快照校验负责人；Runtime 只检查当前节点在计划生成后是否发生能力/Runtime 变化。Formation 与 Runtime 消费 Resolver 返回的标准 <code>AgentProfile</code>，DAG 不重新访问外部 Agent Store，而是消费由 Formation 形成的能力契约；三者共用同一个覆盖计算入口，不建立 <code>EffectiveAgentProfile</code> 或第二套能力评分。</p>
+  <p>能力来源统一但生命周期不同：Formation 使用 TeamSpec 的长期团队要求；DAG 编译使用 Formation 已确认并落到 <code>TeamMemberSpec.capabilities</code> 的能力分配快照校验负责人；Runtime 只检查当前节点在计划生成后是否发生能力/Runtime 变化。Formation 与 Runtime 消费 Resolver 返回的标准 <code>AgentProfile</code>，DAG 不重新访问外部 Agent Store，而是消费由 Formation 形成的能力契约；三者共用同一个覆盖计算入口，不建立 <code>EffectiveAgentProfile</code> 或第二套能力评分。Runtime 的能力契约与可执行性是两个维度：已确认能力可以抵抗低置信先验，但不能绕过外部 AgentProfile 的不可用或未知状态。</p>
   <ul>
-    <li><b>统一入口：</b><code>evaluate_capability_coverage()</code> 只做本地确定性计算，返回 required、covered、missing、unavailable、unknown 和 covered_by；不访问 Store、不调用 LLM。</li>
+    <li><b>统一入口：</b><code>evaluate_capability_coverage()</code> 只做本地确定性计算，返回 required、covered、missing、unavailable、unknown 和 covered_by；不访问 Store、不调用 LLM。DAG 仅传入能力契约；Runtime 同时传入已解析画像并开启可用性门控。</li>
     <li><b>DAG 硬准入：</b>节点生成后必须检查 assignee 是否完整覆盖节点能力。若现有其他成员完整覆盖，编译器只做本轮确定性改派并记录 <code>previous_assignee</code>、<code>assignment_source=existing_member_reassignment</code>；若无人覆盖，记录计划内能力缺口，不能伪装成已覆盖。</li>
     <li><b>Runtime 兜底：</b>节点执行前只检查当前 assignee，不把整个团队能力并集当作当前节点能力。无真实缺口不创建 RuntimeStaffingRequest、不发送补员确认。</li>
     <li><b>性能边界：</b>Runtime 按 owner、Agent、模型和 profile version 缓存已解析 AgentProfile；普通调度轮询不重新读取和解析全部成员，只有绑定、画像或计划变化时才失效。</li>

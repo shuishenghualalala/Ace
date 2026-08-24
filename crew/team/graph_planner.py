@@ -281,11 +281,12 @@ def _member_by_id(team: Any) -> dict[str, TeamMemberSpec]:
 
 
 def _member_capability_sets(team: Any) -> dict[str, list[str]]:
-    """Return the current model-backed capability set for DAG admission.
+    """Return the effective capability set for DAG admission.
 
-    External Team members carry their resolved ``AgentProfile`` on the in-memory
-    Team assembled from the Session binding.  Formation capabilities remain the
-    fallback for built-in members and legacy teams without a resolved profile.
+    A TeamMemberSpec is the user's confirmed assignment contract. A resolved
+    AgentProfile adds model/runtime evidence, but must not erase capabilities
+    already assigned to that member: a newly materialized profile commonly has
+    only weak priors before the first execution observation.
     """
 
     result: dict[str, list[str]] = {}
@@ -296,20 +297,21 @@ def _member_capability_sets(team: Any) -> dict[str, list[str]]:
     for member in members:
         if not member.member_id:
             continue
+        assigned = normalize_capabilities(member.capabilities or [])
+        if not assigned:
+            assigned = normalize_capabilities(
+                flow_builder.member_node_metadata(member).get("required_capabilities") or []
+            )
         profile = profiles.get(member.member_id) if isinstance(profiles, dict) else None
         if isinstance(profile, AgentProfile):
-            result[member.member_id] = [
+            profiled = [
                 capability
                 for capability, assessment in profile.capabilities.items()
                 if is_agent_profile_available(profile) and assessment.score >= 0.5
             ]
+            result[member.member_id] = normalize_capabilities([*assigned, *profiled])
             continue
-        capabilities = normalize_capabilities(member.capabilities or [])
-        if not capabilities:
-            capabilities = normalize_capabilities(
-                flow_builder.member_node_metadata(member).get("required_capabilities") or []
-            )
-        result[member.member_id] = capabilities
+        result[member.member_id] = assigned
     return result
 
 

@@ -656,4 +656,14 @@ graph TD
   <li><b>全量边界：</b>后端全量共 <code>3430 passed</code>、<code>37 skipped</code>、<code>25 failed</code>、<code>17 errors</code>；失败集中在沙箱禁止本地端口监听/连接、可选微信依赖和安全运行时，不属于 Team 回归，已用 Team 专项测试隔离确认。</li>
 </ul>
 
+<h2>2026-08-21 TeamSpec 持久化快照进入本轮规划</h2>
+<p>外部团队加载时会保留 <code>external_team.team_spec_json</code> 的 TeamSpec 快照；Team turn 未显式携带 <code>team_spec</code> 时，<code>TeamManager</code> 将当前用户目标覆盖到该快照后传给 Turn Router 与 <code>TeamGraphPlanner</code>。因此 PlanningDecision 超时回退 Standard 时仍保留团队的 <code>workflow_lanes</code>、能力和交付约束，不会因为空 TeamSpec 只生成 Leader 控制节点。</p>
+<p>旧持久化快照中若将 <code>intent</code>、<code>complexity</code> 等任务语义写在 <code>execution_profile</code>，仅在持久化边界投影回 <code>task_profile</code>；显式运行时输入仍由 <code>build_team_spec</code> 严格校验。回归测试覆盖快照投影、当前目标覆盖和成员 DAG 节点生成。</p>
+
+<h2>2026-08-21 已确认成员能力与模型画像合并</h2>
+<p>TeamMemberSpec 中已确认的成员能力是本轮 DAG 的 assignment contract；AgentProfile 只作为模型/runtime 证据补充，不能因新画像只有低置信先验就清空成员能力。DAG 直接消费能力契约；Runtime 则在保留该契约的同时，以当前 AgentProfile 的可用性和模型绑定作为执行门槛，因此“职责覆盖”不会再把 unavailable/unknown 外部成员误判成可执行。Desktop 完成态若收到没有正文、过程或产物的规划事件，不再渲染空的浅绿色气泡；流式规划仍保留进度展示。</p>
+
+<h2>2026-08-24 Team 第一阶段：能力契约与 Runtime 可用性分离</h2>
+<p><code>evaluate_capability_coverage()</code> 新增显式的 Runtime 画像可用性门控。DAG 规划不访问外部 Store，继续使用已确认的 <code>TeamMemberSpec.capabilities</code>；Runtime 对外部成员同时校验能力契约与 AgentProfile 的 <code>availability</code>/<code>binding_status</code>。低置信画像不会抹掉确认能力，但画像解析失败或 Runtime/model 不可用会进入 <code>unknown</code>/<code>unavailable</code>，触发既有补员链路。Runtime 当前成员与现有成员改派候选均复用同一成员覆盖解析，避免两套判断漂移。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>
