@@ -182,7 +182,7 @@
   max-height: min(42vh, 360px);
   margin: 0;
   overflow: auto;
-  color: var(--mw-text-primary);
+  color: var(--mw-code-text);
   font: var(--mw-type-code-weight) var(--mw-type-code-size) / var(--mw-type-code-line) var(--mw-font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
