@@ -18,6 +18,7 @@ PlanningMode = Literal["auto", "fast", "standard", "ai"]
 DependencyPattern = Literal["sequential", "parallel_merge", "staged"]
 QualityPolicy = Literal["none", "leader_review", "independent_review", "evaluator_optimizer"]
 Level = Literal["low", "medium", "high"]
+RequestedScope = Literal["plan_only", "execute", "uncertain"]
 
 WORKFLOW_PLAN_VERSION = 1
 _WORK_UNIT_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -85,6 +86,7 @@ class WorkUnit:
 @dataclass(frozen=True)
 class PlanningDecision:
     goal_clarity: Level = "medium"
+    requested_scope: RequestedScope = "uncertain"
     critical_missing_info: list[str] = field(default_factory=list)
     dependency_pattern: DependencyPattern = "sequential"
     quality_policy: QualityPolicy = "leader_review"
@@ -122,6 +124,7 @@ def planning_decision_messages(
     members: list[dict[str, Any]],
     requested_mode: PlanningMode,
     max_work_units: int = 8,
+    scope_confirmation: str = "",
 ) -> tuple[str, str]:
     payload = {
         "goal": goal,
@@ -130,20 +133,34 @@ def planning_decision_messages(
         "policy": {
             "requested_mode": requested_mode,
             "max_work_units": max(1, int(max_work_units)),
+            "scope_confirmation": str(scope_confirmation or "").strip() or None,
         },
     }
     system = (
         "你是 Crew Workflow PlanningDecision。只输出 JSON；不输出 Markdown/解释。"
-        "只拆 work_units、依赖形态、质量策略和缺失事实；不生成 DAG nodes/edges，"
+        "先识别用户本轮明确要求的交付范围，再拆 work_units、依赖形态、质量策略和缺失事实；"
+        "不生成 DAG nodes/edges，"
         "不选择/改派 Agent，不修改 Team/权限/预算。"
-        "members 中的 formation_responsibility 只表示常驻分工边界；先按任务需要拆工作，"
-        "不得为了让每个成员都有任务而生成重复或近义 work_unit。"
-        "Leader 的目标确认、TeamPlan 创建/调整、派活和最终汇总由执行器自动生成，"
-        "不得把这些控制动作重复写入 work_units，也不得使用 leader_ 前缀作为 work_unit id。"
-    )
+        "requested_scope 只表示本轮用户是否要求实际执行：plan_only=只写方案/设计/文档，"
+        "execute=明确要求开发、修改、运行或验证，uncertain=无法可靠判断。"
+        "用户本轮明确范围优先于 TeamSpec 的默认 intent 和 workflow_lanes；不要因为默认团队包含 build/verify"
+        "就把只写方案的请求自动扩展为实现和验证。"
+        + (
+            "用户已经确认本轮范围为 plan_only，只生成方案类工作，不生成 build/verify 工作。"
+            if scope_confirmation == "plan_only"
+            else "用户已经确认本轮范围为 execute，可以按用户目标规划实际开发和验证。"
+            if scope_confirmation == "execute"
+            else ""
+        )
+        + "members 中的 formation_responsibility 只表示常驻分工边界；先按任务需要拆工作，"
+        + "不得为了让每个成员都有任务而生成重复或近义 work_unit。"
+        + "Leader 的目标确认、TeamPlan 创建/调整、派活和最终汇总由执行器自动生成，"
+        + "不得把这些控制动作重复写入 work_units，也不得使用 leader_ 前缀作为 work_unit id。"
+        )
     user = (
         "JSON schema="
-        '{"goal_clarity":"low|medium|high","critical_missing_info":[],"dependency_pattern":"sequential|parallel_merge|staged",'
+        '{"goal_clarity":"low|medium|high","requested_scope":"plan_only|execute|uncertain",'
+        '"critical_missing_info":[],"dependency_pattern":"sequential|parallel_merge|staged",'
         '"quality_policy":"none|leader_review|independent_review|evaluator_optimizer","dynamic_discovery":false,'
         '"conditional_branching":false,"iteration_until_convergence":false,"risk_level":"low|medium|high",'
         '"semantic_uncertainty":"low|medium|high","work_units":[{"id":"snake_case","objective":"可执行目标",'
@@ -172,6 +189,11 @@ def _dependency_pattern(value: object) -> DependencyPattern:
 def _quality_policy(value: object) -> QualityPolicy:
     item = str(value or "").strip().lower()
     return item if item in {"none", "leader_review", "independent_review", "evaluator_optimizer"} else "leader_review"  # type: ignore[return-value]
+
+
+def _requested_scope(value: object) -> RequestedScope:
+    item = str(value or "").strip().lower()
+    return item if item in {"plan_only", "execute", "uncertain"} else "uncertain"  # type: ignore[return-value]
 
 
 def _has_cycle(units: list[WorkUnit]) -> bool:
@@ -263,6 +285,7 @@ def coerce_planning_decision(data: dict[str, Any], *, max_work_units: int = 12) 
     ][:6]
     return PlanningDecision(
         goal_clarity=_level(data.get("goal_clarity")),
+        requested_scope=_requested_scope(data.get("requested_scope")),
         critical_missing_info=missing,
         dependency_pattern=_dependency_pattern(data.get("dependency_pattern")),
         quality_policy=_quality_policy(data.get("quality_policy")),
@@ -337,6 +360,7 @@ def workflow_plan_from_graph(
     warnings: list[str],
     fallback_from: str | None = None,
     planning_decision: dict[str, Any] | None = None,
+    requested_scope: str | None = None,
 ) -> WorkflowPlan:
     deliverables = team_spec.get("deliverables") if isinstance(team_spec.get("deliverables"), list) else []
     task_deliverables = [
@@ -370,6 +394,8 @@ def workflow_plan_from_graph(
         "reason_codes": list(dict.fromkeys(str(item) for item in reasons if str(item))),
         "fallback_from": fallback_from,
     }
+    if requested_scope in {"plan_only", "execute", "uncertain"}:
+        planning_payload["requested_scope"] = requested_scope
     if planning_decision:
         planning_payload["planning_decision"] = dict(planning_decision)
     return WorkflowPlan(

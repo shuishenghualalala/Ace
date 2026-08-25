@@ -104,6 +104,86 @@ class TeamWorkflowRuntime:
             if planned is not None:
                 plan = planned
         planning_key = self.host._key(envelope.session_id, envelope.user_id)
+        scope_conflict = self.host._planning_scope_conflicts.pop(planning_key, {})
+        if plan is None and scope_conflict:
+            default_intent = str(scope_conflict.get("default_intent") or "implementation").strip()
+            default_lanes = [
+                str(item).strip()
+                for item in (scope_conflict.get("default_workflow_lanes") or [])
+                if str(item).strip()
+            ]
+            default_summary = "实际开发/验证"
+            if default_intent:
+                default_summary += f"（默认 intent：{default_intent}"
+                if default_lanes:
+                    default_summary += f"，泳道：{'、'.join(default_lanes)}"
+                default_summary += "）"
+            question = (
+                f"当前团队默认按{default_summary}执行，但你本轮请求更像是只输出开发方案。"
+                "这次是否需要继续实际开发和验证？"
+            )
+            try:
+                followup_session_id, question_id = await self.host._send_followup_question_to(
+                    _visible_session_id(envelope.session_id),
+                    [{
+                        "id": "workflow_planning_scope",
+                        "question": question,
+                        "options": [
+                            {
+                                "label": "仅输出开发方案",
+                                "value": "plan_only",
+                                "description": "只生成方案、设计和交付说明，不创建实现/验证节点。",
+                            },
+                            {
+                                "label": "方案并实际开发验证",
+                                "value": "execute",
+                                "description": "按团队默认流程继续生成开发和验证节点。",
+                            },
+                        ],
+                        "allowFreeText": False,
+                    }],
+                    title="确认本轮执行范围",
+                    origin={
+                        "agent_id": "leader",
+                        "agent_name": "Leader",
+                        "team_session_id": envelope.session_id,
+                        "mention_intent": "workflow_planning_scope",
+                    },
+                )
+                answers = await self.host._wait_for_answer(followup_session_id, question_id)
+            except Exception as exc:  # noqa: BLE001
+                log.info("Workflow scope followup failed session=%s err=%s", envelope.session_id, exc)
+                yield ResponseChunk.error(envelope.request_id, "Leader 追问本轮执行范围失败，请重新说明是只写方案还是继续开发验证。")
+                return
+            selected_scope = self.host._team_scope_from_followup_answers(answers)
+            if not selected_scope:
+                yield ResponseChunk.final(
+                    envelope.request_id,
+                    "未确认本轮执行范围，已暂停规划。请重新选择只输出方案，或继续实际开发和验证。",
+                    reason="planning_scope_confirmation",
+                )
+                return
+            scope_label = "仅输出开发方案" if selected_scope == "plan_only" else "方案并实际开发验证"
+            goal = f"{goal}\n\n用户已确认本轮执行范围：{scope_label}。"
+            confirmed_profile = dict(resolved_execution_profile or {})
+            confirmed_profile["scope_confirmation"] = selected_scope
+            confirmed_profile["profile_source"] = "user_scope_confirmation"
+            resolved_execution_profile = confirmed_profile
+            execution_profile = confirmed_profile
+            plan = None
+            async for planning_chunk, planned in self.stream_runtime_plan(
+                envelope,
+                team=team,
+                goal=goal,
+                external_team_id=external_team_id,
+                owner_account_id=envelope.user_id,
+                execution_profile=confirmed_profile,
+                team_spec=team_spec,
+            ):
+                if planning_chunk is not None:
+                    yield planning_chunk
+                if planned is not None:
+                    plan = planned
         missing_info = self.host._planning_missing_info.pop(planning_key, [])
         if plan is None and missing_info:
             question = "为了正确拆分本轮任务，请补充：" + "；".join(missing_info)

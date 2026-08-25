@@ -217,6 +217,7 @@ class InProcessTeamManager(TeamManager):
         self._plan_node_tasks: dict[tuple[str, str, str], str] = {}
         self._runtime_member_snapshots: dict[TeamKey, dict[str, TeamMemberSpec]] = {}
         self._planning_missing_info: dict[TeamKey, list[str]] = {}
+        self._planning_scope_conflicts: dict[TeamKey, dict[str, Any]] = {}
         self._runtime_profile_cache: dict[tuple[str, ...], AgentProfile] = {}
         self._active_lock = threading.Lock()
         self._member_locks_guard = threading.Lock()
@@ -4774,6 +4775,21 @@ class InProcessTeamManager(TeamManager):
         return "auto"
 
     @staticmethod
+    def _team_scope_from_followup_answers(answers: list[dict[str, Any]]) -> str:
+        allowed = {"plan_only", "execute"}
+        for item in answers or []:
+            if not isinstance(item, dict):
+                continue
+            raw_answers = item.get("answers")
+            if not isinstance(raw_answers, list):
+                continue
+            for value in raw_answers:
+                scope = str(value or "").strip().lower()
+                if scope in allowed:
+                    return scope
+        return ""
+
+    @staticmethod
     def _blocking_planning_missing_info(goal: str, missing_info: list[str]) -> list[str]:
         """只保留确实会阻塞执行、必须由用户补充的缺失事实。"""
         goal_text = str(goal or "").strip()
@@ -4935,6 +4951,12 @@ class InProcessTeamManager(TeamManager):
             )
         finally:
             self._end_team_planning(session_id, owner_account_id)
+        planning = graph_plan.workflow_plan.get("planning") if isinstance(graph_plan.workflow_plan, dict) else {}
+        if isinstance(planning, dict) and planning.get("scope_conflict"):
+            self._planning_scope_conflicts[plan_key] = dict(planning)
+            self._planning_missing_info.pop(plan_key, None)
+            return None
+        self._planning_scope_conflicts.pop(plan_key, None)
         blocking_missing = self._blocking_planning_missing_info(goal, list(graph_plan.critical_missing_info))
         if blocking_missing:
             self._planning_missing_info[plan_key] = blocking_missing

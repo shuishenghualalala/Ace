@@ -723,6 +723,47 @@ class StreamReasoningGracePlanningProvider(LLMProvider):
         yield StreamChunk(delta_text="", done=True, finish_reason="stop")
 
 
+class ScopePlanningProvider(LLMProvider):
+    def __init__(self):
+        self.calls = 0
+        self.messages = []
+
+    async def chat(self, messages, tools=None, *, max_tokens=None):
+        self.calls += 1
+        self.messages = list(messages)
+        confirmed_plan_only = any(
+            '"scope_confirmation":"plan_only"' in str(message.content or "")
+            for message in messages
+        )
+        unit_kind = "build" if confirmed_plan_only else "design"
+        return ChatResponse(text="""
+{
+  "goal_clarity": "high",
+  "requested_scope": "plan_only",
+  "critical_missing_info": [],
+  "dependency_pattern": "sequential",
+  "quality_policy": "none",
+  "dynamic_discovery": false,
+  "conditional_branching": false,
+  "iteration_until_convergence": false,
+  "risk_level": "low",
+  "semantic_uncertainty": "low",
+  "work_units": [{
+    "id": "snake_plan",
+    "objective": "形成贪吃蛇开发方案",
+    "display_title": "开发方案",
+    "kind": "__UNIT_KIND__",
+    "required_capabilities": ["implementation"],
+    "depends_on": [],
+    "expected_output": "开发方案"
+  }]
+}
+""".replace("__UNIT_KIND__", unit_kind))
+
+    async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+        yield StreamChunk(delta_text="", done=True)
+
+
 class CachePlanningProvider(SemanticPlanningProvider):
     pass
 
@@ -7720,6 +7761,62 @@ async def test_team_runtime_planning_defaultable_missing_info_still_creates_plan
 
 
 @pytest.mark.asyncio
+async def test_team_planning_pauses_when_plan_only_conflicts_with_default_execution():
+    provider = ScopePlanningProvider()
+    tm, _ = _team(provider, config=Config(
+        max_iterations=3,
+        team_config={
+            "members": [{
+                "member_id": "dev",
+                "name": "dev",
+                "role": "负责开发实现",
+                "executor": "builtin",
+                "metadata": {"workflow_lane": "build"},
+                "capabilities": ["implementation"],
+            }],
+        },
+    ))
+    team = tm._build_team("scope-conflict")
+
+    graph_plan = await TeamGraphPlanner().plan_async(
+        team,
+        "帮我写一个贪吃蛇游戏的开发方案",
+        execution_profile={"requested_mode": "standard"},
+        team_spec=_structured_team_spec(
+            "帮我写一个贪吃蛇游戏的开发方案",
+            capabilities=["implementation"],
+            intent="implementation",
+            workflow_lanes=("build", "verify"),
+        ),
+        provider=provider,
+    )
+
+    assert provider.calls == 1
+    assert graph_plan.nodes == []
+    planning = graph_plan.workflow_plan["planning"]
+    assert planning["scope_conflict"] is True
+    assert planning["requested_scope"] == "plan_only"
+    assert planning["default_execution_scope"] == "execute"
+
+    confirmed = await TeamGraphPlanner().plan_async(
+        team,
+        "帮我写一个贪吃蛇游戏的开发方案\n\n用户已确认本轮执行范围：仅输出开发方案。",
+        execution_profile={"requested_mode": "standard", "scope_confirmation": "plan_only"},
+        team_spec=_structured_team_spec(
+            "帮我写一个贪吃蛇游戏的开发方案",
+            capabilities=["implementation"],
+            intent="implementation",
+            workflow_lanes=("build", "verify"),
+        ),
+        provider=provider,
+    )
+    confirmed_ids = {node["id"] for node in confirmed.nodes}
+    assert {"leader_plan", "snake_plan", "leader_summary"} <= confirmed_ids
+    assert not {"build", "verify", "independent_review"} & confirmed_ids
+    assert next(node for node in confirmed.nodes if node["id"] == "snake_plan")["metadata"]["work_unit_kind"] == "design"
+
+
+@pytest.mark.asyncio
 async def test_team_runtime_planning_missing_info_uses_text_followup(monkeypatch):
     tm, _ = _team(MissingInfoPlanningProvider(), config=Config(
         max_iterations=3,
@@ -7800,6 +7897,53 @@ async def test_team_runtime_planning_missing_info_followup_failure_is_terminal(m
 
     assert chunks[-1].kind == "error"
     assert chunks[-1].is_final is True
+
+
+@pytest.mark.asyncio
+async def test_team_runtime_scope_conflict_asks_before_replanning(monkeypatch):
+    tm, _ = _team(config=Config(max_iterations=3))
+    session_id = "scope-runtime-followup"
+    team = tm._build_team(session_id)
+    calls: list[dict[str, object]] = []
+
+    async def fake_ensure(session_id, team, goal, external_team_id, **kwargs):
+        calls.append({"goal": goal, "execution_profile": kwargs.get("execution_profile")})
+        if len(calls) == 1:
+            tm._planning_scope_conflicts[("owner", session_id)] = {
+                "scope_conflict": True,
+                "default_intent": "implementation",
+                "default_workflow_lanes": ["build", "verify"],
+            }
+        return None
+
+    captured: dict[str, object] = {}
+
+    async def fake_send(session_id, questions, **kwargs):
+        captured["questions"] = questions
+        return session_id, "scope-question"
+
+    async def fake_wait(session_id, question_id):
+        return [{"id": "workflow_planning_scope", "answers": ["plan_only"]}]
+
+    monkeypatch.setattr(tm, "_ensure_runtime_plan_async", fake_ensure)
+    monkeypatch.setattr("crew.team.team_manager.send_followup_question_to", fake_send)
+    monkeypatch.setattr("crew.team.team_manager.wait_for_answer", fake_wait)
+
+    chunks = [
+        chunk async for chunk in tm._run_required_workflow(
+            Envelope.of("帮我写一个贪吃蛇游戏的开发方案", session_id=session_id, user_id="owner"),
+            team=team,
+            external_team_id="",
+            execution_profile={"requested_mode": "standard"},
+        )
+    ]
+
+    question = captured["questions"][0]
+    assert question["id"] == "workflow_planning_scope"
+    assert [item["value"] for item in question["options"]] == ["plan_only", "execute"]
+    assert calls[1]["execution_profile"]["scope_confirmation"] == "plan_only"
+    assert "用户已确认本轮执行范围" in calls[1]["goal"]
+    assert chunks[-1].kind == "final"
 
 
 async def test_team_graph_planner_ai_async_uses_llm_single_dag():

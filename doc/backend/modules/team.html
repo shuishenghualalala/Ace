@@ -695,4 +695,9 @@ graph TD
 <p><code>PlanningDecision</code> 的 chat/stream 竞速现在只有在返回通过 PlanningDecision schema 校验的结构化 JSON 时才允许某一路取消另一条传输；chat 路径返回说明性非 JSON 文本或结构不完整的 JSON 时继续等待 stream，若 stream 已输出 reasoning 则继续进入 grace，避免把合法的流式规划误判为 <code>invalid_json</code>/<code>schema_invalid</code> 并回退稳定 DAG。诊断保留 <code>chat_non_json</code>、<code>chat_schema_invalid</code>、<code>stream_non_json</code> 和实际 transport，便于区分模型内容问题与超时。</p>
 <p>必需 Workflow 在成员 <code>Agent.run()</code> 之前建立 Team 委派，因此在 <code>TeamManager._run_required_workflow()</code> 入口有界继承 envelope 中的 host-owned <code>ProcessLaunch</code>；ACP/CLI 子进程继续 fail-closed，不创建默认安全上下文、不放宽权限。新增 PlanningDecision 非 JSON 竞速、reasoning grace 和 Team Workflow 启动上下文回归。</p>
 
+<h2>2026-08-25 Team 本轮执行范围确认</h2>
+<p><code>PlanningDecision</code> 新增 <code>requested_scope</code>：<code>plan_only</code> 表示用户只要求方案/设计/文档，<code>execute</code> 表示用户明确要求开发、修改、运行或验证，<code>uncertain</code> 表示无法可靠判断。该字段只描述当前用户请求，不覆盖 TeamSpec 的长期任务语义。</p>
+<p>当用户请求为 <code>plan_only</code>，而当前 TeamSpec 的默认 intent 或 workflow lane 包含实际开发/验证时，GraphPlanner 在创建 DAG 前返回 <code>scope_conflict</code>，TeamManager 不创建 TeamPlan、不派发成员；Workflow Runtime 通过既有 follow-up 通道询问“仅输出开发方案”或“方案并实际开发验证”。用户选择写入当前回合的 <code>scope_confirmation</code>，再重跑本轮 PlanningDecision，不修改团队配置，也不影响其他 session。</p>
+<p>回归覆盖：冲突时无节点、追问选项和确认后的当前回合配置传递；实现复用现有 PlanningDecision、Team Workflow Runtime 和 follow-up 通道，未新增顶层模块、数据库表或 API。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

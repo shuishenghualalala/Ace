@@ -100,6 +100,7 @@ def _merged_execution_profile(spec: TeamSpec, execution_profile: dict[str, Any] 
         "turn_kind",
         "turn_decision_source",
         "profile_source",
+        "scope_confirmation",
     }
     unknown = sorted(set(incoming) - allowed_keys)
     if unknown:
@@ -130,8 +131,34 @@ def _runtime_execution_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "turn_kind",
         "turn_decision_source",
         "profile_source",
+        "scope_confirmation",
     }
     return {key: value for key, value in profile.items() if key in runtime_keys}
+
+
+def _default_execution_scope(spec: TeamSpec) -> str:
+    """Return the execution scope implied by the persisted TeamSpec."""
+
+    intent = str(spec.task_profile.get("intent") or "mixed").strip().lower()
+    lanes = {
+        str(item).strip().lower()
+        for item in (spec.team_requirements.get("workflow_lanes") or [])
+        if str(item).strip()
+    }
+    if intent in {"implementation", "testing"} or lanes & {"build", "verify", "release"}:
+        return "execute"
+    return "plan_only"
+
+
+def _limit_decision_to_plan_only(decision: PlanningDecision) -> PlanningDecision:
+    """Keep a confirmed plan-only turn from creating execution nodes."""
+
+    units = [
+        replace(unit, kind="design") if unit.kind == "build" else unit
+        for unit in decision.work_units
+        if unit.kind != "verify"
+    ]
+    return replace(decision, quality_policy="none", work_units=units)
 
 
 FastPrimary = TeamMemberSpec | str
@@ -919,6 +946,7 @@ def _planning_team_spec_summary(spec: TeamSpec, profile: dict[str, Any]) -> dict
     planning = spec.planning if isinstance(spec.planning, dict) else {}
     return {
         "intent": str(spec.task_profile.get("intent") or "mixed"),
+        "default_execution_scope": _default_execution_scope(spec),
         "complexity": str(spec.task_profile.get("complexity") or "focused"),
         "required_capabilities": normalize_capabilities(requirements.get("capabilities") or []),
         "workflow_lanes": [
@@ -935,6 +963,7 @@ def _planning_team_spec_summary(spec: TeamSpec, profile: dict[str, Any]) -> dict
         "risk_level": str(spec.risk_level or "low"),
         "uncertainty": str(spec.uncertainty or "low"),
         "missing_info": [_compact_text(item, 140) for item in (planning.get("missing_info") or [])][:6],
+        "scope_confirmation": str(profile.get("scope_confirmation") or "").strip() or None,
     }
 
 
@@ -1491,6 +1520,7 @@ async def _planning_decision_with_llm(
         members=member_summary,
         requested_mode=requested_mode,
         max_work_units=max_work_units,
+        scope_confirmation=str(profile.get("scope_confirmation") or "").strip(),
     )
     messages = [Message.system(system), Message.user(user)]
     prompt_bytes = len(system.encode("utf-8")) + len(user.encode("utf-8"))
@@ -2103,6 +2133,7 @@ def _result_with_workflow_plan(
     extra_warnings: list[str] | None = None,
     critical_missing_info: list[str] | None = None,
     planning_decision: dict[str, Any] | None = None,
+    requested_scope: str | None = None,
 ) -> TeamGraphPlan:
     _attach_policy_warnings(nodes, policy_report)
     warnings = [item.message for item in policy_report.warnings]
@@ -2123,6 +2154,7 @@ def _result_with_workflow_plan(
         warnings=warnings,
         fallback_from=fallback_from,
         planning_decision=planning_decision,
+        requested_scope=requested_scope,
     ).to_dict()
     return TeamGraphPlan(
         spec=spec,
@@ -2199,6 +2231,7 @@ class TeamGraphPlanner:
             quality_policy="none" if selected_mode == "fast" else "leader_review",
             confidence={"requirement": 0.68, "topology": 1.0, "capability": 1.0, "overall": 0.68},
             fallback_from=fallback_from,
+            requested_scope=str(profile.get("scope_confirmation") or "uncertain"),
         )
 
     async def plan_async(
@@ -2315,7 +2348,63 @@ class TeamGraphPlanner:
                 workflow_plan=fallback_plan,
             )
 
+        confirmed_scope = str(profile.get("scope_confirmation") or "").strip().lower()
+        if confirmed_scope not in {"plan_only", "execute"}:
+            confirmed_scope = ""
+        requested_scope = confirmed_scope or (decision.requested_scope if decision is not None else "uncertain")
+        default_scope = _default_execution_scope(base_spec)
+        if requested_scope == "plan_only" and default_scope == "execute" and not confirmed_scope:
+            await _notify_planning_progress(
+                planning_progress,
+                phase="scope_confirmation",
+                status="waiting",
+                label="本轮执行范围需要确认",
+                elapsed_ms=decision_elapsed_ms,
+                diagnostics={
+                    **decision_diagnostics,
+                    "requested_scope": requested_scope,
+                    "default_execution_scope": default_scope,
+                },
+            )
+            pending_spec = replace(
+                base_spec,
+                execution_profile=_runtime_execution_profile({
+                    **profile,
+                    "requested_mode": requested_mode,
+                    "selected_mode": selected_mode,
+                }),
+            )
+            policy_report = analyze_team_policy(spec=pending_spec, members=members)
+            return TeamGraphPlan(
+                spec=pending_spec,
+                nodes=[],
+                edges=[],
+                policy_report=policy_report,
+                planner_notes=["用户本轮请求只包含方案，但团队默认范围包含实际执行；等待用户确认。"],
+                workflow_plan={
+                    "task": {"turn_id": "", "goal": goal, "deliverables": [], "acceptance_criteria": []},
+                    "planning": {
+                        "requested_mode": requested_mode,
+                        "selected_mode": selected_mode,
+                        "requested_scope": requested_scope,
+                        "default_execution_scope": default_scope,
+                        "default_intent": str(base_spec.task_profile.get("intent") or "mixed"),
+                        "default_workflow_lanes": list(base_spec.team_requirements.get("workflow_lanes") or []),
+                        "scope_conflict": True,
+                        "planning_decision": {
+                            "status": "awaiting_user_confirmation",
+                            "elapsed_ms": decision_elapsed_ms,
+                            **decision_diagnostics,
+                        },
+                    },
+                    "nodes": [],
+                    "edges": [],
+                },
+            )
+
         if decision is not None:
+            if confirmed_scope == "plan_only":
+                decision = _limit_decision_to_plan_only(decision)
             base_spec = team_spec_from_planning_decision(base_spec, decision)
         profile.update({"requested_mode": requested_mode, "selected_mode": selected_mode})
         spec = replace(base_spec, execution_profile=_runtime_execution_profile(profile))
@@ -2377,6 +2466,7 @@ class TeamGraphPlanner:
                     "fallback_from": None,
                     **decision_diagnostics,
                 } if decision else None,
+                requested_scope=str(profile.get("scope_confirmation") or (decision.requested_scope if decision else "uncertain")),
             )
 
         if selected_mode == "standard" and decision is not None:
@@ -2426,6 +2516,7 @@ class TeamGraphPlanner:
                     "fallback_from": None,
                     **decision_diagnostics,
                 },
+                requested_scope=str(profile.get("scope_confirmation") or decision.requested_scope),
             )
 
         try:
@@ -2495,4 +2586,5 @@ class TeamGraphPlanner:
             confidence=ai_confidence,
             extra_warnings=list(decision.critical_missing_info) if decision else [],
             critical_missing_info=list(decision.critical_missing_info) if decision else [],
+            requested_scope=str(profile.get("scope_confirmation") or (decision.requested_scope if decision else "uncertain")),
         )
