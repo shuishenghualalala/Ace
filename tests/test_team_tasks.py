@@ -668,6 +668,43 @@ class ChatWinsPlanningProvider(LLMProvider):
         yield StreamChunk(delta_text="", done=True, finish_reason="stop")
 
 
+class ChatNonJsonStreamPlanningProvider(LLMProvider):
+    def __init__(self):
+        self.stream_calls = 0
+        self.chat_calls = 0
+
+    async def chat(self, messages, tools=None, *, max_tokens=None):
+        self.chat_calls += 1
+        return ChatResponse(text="我会先分析任务，再给出执行拆分。")
+
+    async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+        self.stream_calls += 1
+        await asyncio.sleep(0.01)
+        yield StreamChunk(delta_text=json.dumps(
+            P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"],
+            ensure_ascii=False,
+        ))
+        yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+
+
+class ChatNonJsonStreamReasoningPlanningProvider(ChatNonJsonStreamPlanningProvider):
+    async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+        self.stream_calls += 1
+        yield StreamChunk(reasoning_content="持续推演规划")
+        await asyncio.sleep(0.3)
+        yield StreamChunk(delta_text=json.dumps(
+            P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"],
+            ensure_ascii=False,
+        ))
+        yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+
+
+class ChatSchemaInvalidStreamPlanningProvider(ChatNonJsonStreamPlanningProvider):
+    async def chat(self, messages, tools=None, *, max_tokens=None):
+        self.chat_calls += 1
+        return ChatResponse(text=json.dumps({"work_units": []}, ensure_ascii=False))
+
+
 class StreamReasoningGracePlanningProvider(LLMProvider):
     def __init__(self):
         self.stream_calls = 0
@@ -4227,6 +4264,42 @@ async def test_team_delegate_propagates_security_launch_context():
     assert seen[0].params["_security_process_launch"] is launch
 
 
+@pytest.mark.asyncio
+async def test_required_workflow_binds_envelope_security_launch(monkeypatch):
+    tm, _ = _team()
+    team = tm._build_team("workflow-security-context")
+    launch = ProcessLaunch(
+        PermissionProfile(PermissionProfileKind.MANAGED),
+        ("native-runtime",),
+    )
+    observed: list[object] = []
+
+    async def fake_run_required_workflow(*args, **kwargs):
+        observed.append(current_process_launch.get())
+        if False:
+            yield ResponseChunk.final("unused", "unused")
+
+    monkeypatch.setattr(tm._workflow_runtime, "run_required_workflow", fake_run_required_workflow)
+    before = current_process_launch.get()
+    envelope = Envelope.of(
+        "执行一个团队任务",
+        session_id="workflow-security-context",
+        mode="team",
+        params={"_security_process_launch": launch},
+    )
+
+    _ = [
+        chunk async for chunk in tm._run_required_workflow(
+            envelope,
+            team=team,
+            external_team_id="",
+        )
+    ]
+
+    assert observed == [launch]
+    assert current_process_launch.get() is before
+
+
 async def test_team_delegate_inherits_workspace_root_from_security_launch(tmp_path):
     session_cwd = tmp_path / "external-session"
     session_cwd.mkdir()
@@ -7311,6 +7384,103 @@ async def test_team_graph_planner_uses_chat_when_chat_wins_planning_race():
     assert planning_decision["race_winner"] == "chat"
     assert planning_decision["cancelled_transport"] == "stream"
     assert graph_plan.nodes[1]["metadata"]["plan_strategy"] == "standard_semantic_dag"
+
+
+async def test_team_graph_planner_keeps_stream_when_chat_returns_non_json():
+    provider = ChatNonJsonStreamPlanningProvider()
+    tm, _ = _team(config=Config(
+        max_iterations=3,
+        team_config={
+            "members": [{
+                "member_id": "writer",
+                "name": "writer",
+                "role": "负责综合写作",
+                "executor": "builtin",
+                "metadata": {"workflow_lane": "docs"},
+                "capabilities": ["documentation", "synthesis"],
+            }]
+        },
+    ))
+
+    graph_plan = await TeamGraphPlanner().plan_async(
+        tm._build_team("chat-non-json-stream"),
+        "整理一份架构综述",
+        execution_profile={"requested_mode": "standard", "budget": {"planning_decision_timeout": 0.5}},
+        provider=provider,
+    )
+
+    planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
+    assert planning_decision["status"] == "success"
+    assert planning_decision["transport"] == "stream_race_won"
+    assert planning_decision["race_winner"] == "stream"
+    assert planning_decision["chat_non_json"] is True
+    assert not graph_plan.workflow_plan["planning"].get("fallback_from")
+
+
+async def test_team_graph_planner_keeps_stream_when_chat_schema_is_invalid():
+    provider = ChatSchemaInvalidStreamPlanningProvider()
+    tm, _ = _team(config=Config(
+        max_iterations=3,
+        team_config={
+            "members": [{
+                "member_id": "writer",
+                "name": "writer",
+                "role": "负责综合写作",
+                "executor": "builtin",
+                "metadata": {"workflow_lane": "docs"},
+                "capabilities": ["documentation", "synthesis"],
+            }]
+        },
+    ))
+
+    graph_plan = await TeamGraphPlanner().plan_async(
+        tm._build_team("chat-schema-invalid-stream"),
+        "整理一份架构综述",
+        execution_profile={"requested_mode": "standard", "budget": {"planning_decision_timeout": 0.5}},
+        provider=provider,
+    )
+
+    planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
+    assert planning_decision["status"] == "success"
+    assert planning_decision["transport"] == "stream_race_won"
+    assert planning_decision["race_winner"] == "stream"
+    assert planning_decision["chat_schema_invalid"] is True
+
+
+async def test_team_graph_planner_keeps_reasoning_grace_after_chat_non_json():
+    provider = ChatNonJsonStreamReasoningPlanningProvider()
+    tm, _ = _team(config=Config(
+        max_iterations=3,
+        team_config={
+            "members": [{
+                "member_id": "writer",
+                "name": "writer",
+                "role": "负责综合写作",
+                "executor": "builtin",
+                "metadata": {"workflow_lane": "docs"},
+                "capabilities": ["documentation", "synthesis"],
+            }]
+        },
+    ))
+
+    graph_plan = await TeamGraphPlanner().plan_async(
+        tm._build_team("chat-non-json-reasoning"),
+        "整理一份架构综述",
+        execution_profile={
+            "requested_mode": "standard",
+            "budget": {
+                "planning_decision_timeout": 0.001,
+                "planning_decision_reasoning_grace_timeout": 0.2,
+            },
+        },
+        provider=provider,
+    )
+
+    planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
+    assert planning_decision["status"] == "success"
+    assert planning_decision["transport"] == "stream_reasoning_grace"
+    assert planning_decision["reasoning_grace_used"] is True
+    assert planning_decision["chat_non_json"] is True
 
 
 async def test_team_graph_planner_keeps_waiting_stream_when_reasoning_after_chat_race_window():

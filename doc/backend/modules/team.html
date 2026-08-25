@@ -691,4 +691,8 @@ graph TD
 <p>新增 <code>crew/team/team_workflow_runtime.py</code>，集中承载规划进度、Leader 节点、成员节点调度、实时过程、补员/审阅回调和 WorkflowRun 最终收束。<code>TeamManager</code> 保留原有入口与兼容回调，只负责提供 Team、计划、持久化和运行服务，不再内嵌整段执行循环。</p>
 <p>本阶段不改变 DAG 节点状态、Runtime 补员确认、Leader 审阅、Team Bus 事件或 Web/Desktop 流式协议；追问交互仍通过 TeamManager 兼容入口注入，保持既有测试替身和运行时扩展边界。验证：Team <code>236 passed, 1 skipped</code>，Dynamic Kanban <code>70 passed</code>，Gateway Plan <code>11 passed</code>，Python 编译与 diff 检查通过。</p>
 
+<h2>2026-08-25 Team PlanningDecision 竞速与 Workflow 安全上下文修复</h2>
+<p><code>PlanningDecision</code> 的 chat/stream 竞速现在只有在返回通过 PlanningDecision schema 校验的结构化 JSON 时才允许某一路取消另一条传输；chat 路径返回说明性非 JSON 文本或结构不完整的 JSON 时继续等待 stream，若 stream 已输出 reasoning 则继续进入 grace，避免把合法的流式规划误判为 <code>invalid_json</code>/<code>schema_invalid</code> 并回退稳定 DAG。诊断保留 <code>chat_non_json</code>、<code>chat_schema_invalid</code>、<code>stream_non_json</code> 和实际 transport，便于区分模型内容问题与超时。</p>
+<p>必需 Workflow 在成员 <code>Agent.run()</code> 之前建立 Team 委派，因此在 <code>TeamManager._run_required_workflow()</code> 入口有界继承 envelope 中的 host-owned <code>ProcessLaunch</code>；ACP/CLI 子进程继续 fail-closed，不创建默认安全上下文、不放宽权限。新增 PlanningDecision 非 JSON 竞速、reasoning grace 和 Team Workflow 启动上下文回归。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

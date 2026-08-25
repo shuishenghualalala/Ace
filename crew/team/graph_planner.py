@@ -1155,6 +1155,7 @@ async def _race_provider_text(
     messages: list[Message],
     *,
     max_tokens: int,
+    max_work_units: int,
     timeout_s: float,
     reasoning_grace_s: float,
     progress: PlanningProgressCallback | None = None,
@@ -1162,6 +1163,8 @@ async def _race_provider_text(
     started = time.perf_counter()
     race_timeout_s = max(0.2, timeout_s)
     stream_chunks: list[str] = []
+    chat_text = ""
+    stream_text = ""
     stream_diag: dict[str, Any] = {
         "transport": "race",
         "first_token_ms": None,
@@ -1221,11 +1224,11 @@ async def _race_provider_text(
                 )
             stream_chunks.append(delta)
             stream_diag["partial_chars"] = sum(len(item) for item in stream_chunks)
-            try:
-                _json_from_text("".join(stream_chunks))
+            if _planning_decision_text_status(
+                "".join(stream_chunks),
+                max_work_units=max_work_units,
+            ) == "valid":
                 return "".join(stream_chunks)
-            except (TypeError, ValueError):
-                pass
         return "".join(stream_chunks)
 
     async def collect_chat() -> ChatResponse:
@@ -1251,6 +1254,7 @@ async def _race_provider_text(
             if chat_task in done:
                 response = chat_task.result()
                 text = str(response.text or "")
+                chat_text = text
                 chat_reasoning = str(getattr(response, "reasoning_content", "") or "")
                 diagnostics.update({
                     "chat_elapsed_ms": int((time.perf_counter() - started) * 1000),
@@ -1258,28 +1262,43 @@ async def _race_provider_text(
                     "chat_finish_reason": response.finish_reason,
                 })
                 if text.strip():
-                    stream_task.cancel()
-                    diagnostics.update(stream_diag)
-                    diagnostics.update({
-                        "transport": "chat_race_won",
-                        "race_winner": "chat",
-                        "partial_chars": len(text),
-                        "reasoning_chars": int(stream_diag.get("reasoning_chars") or 0) + len(chat_reasoning),
-                        "cancelled_transport": "stream",
-                    })
-                    return text, diagnostics
+                    text_status = _planning_decision_text_status(text, max_work_units=max_work_units)
+                    if text_status == "non_json":
+                        # A provider may return explanatory chat text while
+                        # stream_chat still produces the structured decision.
+                        diagnostics["chat_non_json"] = True
+                    elif text_status == "schema_invalid":
+                        diagnostics["chat_schema_invalid"] = True
+                    else:
+                        stream_task.cancel()
+                        diagnostics.update(stream_diag)
+                        diagnostics.update({
+                            "transport": "chat_race_won",
+                            "race_winner": "chat",
+                            "partial_chars": len(text),
+                            "reasoning_chars": int(stream_diag.get("reasoning_chars") or 0) + len(chat_reasoning),
+                            "cancelled_transport": "stream",
+                        })
+                        return text, diagnostics
             if stream_task in done:
                 text = stream_task.result()
+                stream_text = text
                 diagnostics.update({"stream_elapsed_ms": int((time.perf_counter() - started) * 1000)})
                 if text.strip():
-                    chat_task.cancel()
-                    diagnostics.update(stream_diag)
-                    diagnostics.update({
-                        "transport": "stream_race_won",
-                        "race_winner": "stream",
-                        "cancelled_transport": "chat",
-                    })
-                    return text, diagnostics
+                    text_status = _planning_decision_text_status(text, max_work_units=max_work_units)
+                    if text_status == "non_json":
+                        diagnostics["stream_non_json"] = True
+                    elif text_status == "schema_invalid":
+                        diagnostics["stream_schema_invalid"] = True
+                    else:
+                        chat_task.cancel()
+                        diagnostics.update(stream_diag)
+                        diagnostics.update({
+                            "transport": "stream_race_won",
+                            "race_winner": "stream",
+                            "cancelled_transport": "chat",
+                        })
+                        return text, diagnostics
 
         has_reasoning = int(stream_diag.get("reasoning_chars") or 0) > 0 or stream_diag.get("first_reasoning_ms") is not None
         if chat_task.done():
@@ -1290,6 +1309,20 @@ async def _race_provider_text(
             except Exception:
                 pass
         if not has_reasoning:
+            non_json_text = stream_text or chat_text
+            if non_json_text.strip():
+                text_status = _planning_decision_text_status(
+                    non_json_text,
+                    max_work_units=max_work_units,
+                )
+                diagnostics.update(stream_diag)
+                diagnostics.update({
+                    "transport": f"race_{text_status}",
+                    "race_winner": "",
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                    "partial_chars": len(non_json_text),
+                })
+                return non_json_text, diagnostics
             for task in tasks:
                 task.cancel()
             diagnostics.update(stream_diag)
@@ -1508,6 +1541,7 @@ async def _planning_decision_with_llm(
             provider,
             messages,
             max_tokens=PLANNING_DECISION_MAX_TOKENS,
+            max_work_units=max_work_units + 4,
             timeout_s=timeout_s,
             reasoning_grace_s=reasoning_grace_s,
             progress=progress,
@@ -1567,6 +1601,20 @@ def _json_from_text(text: str) -> dict[str, Any]:
         message = "empty LLM graph response" if not body else "invalid LLM graph JSON"
         raise ValueError(message)
     return parsed
+
+
+def _planning_decision_text_status(text: str, *, max_work_units: int) -> str:
+    """Classify a race candidate without treating arbitrary JSON as a winner."""
+
+    try:
+        data = _json_from_text(text)
+    except ValueError:
+        return "non_json"
+    try:
+        coerce_planning_decision(data, max_work_units=max_work_units)
+    except ValueError:
+        return "schema_invalid"
+    return "valid"
 
 
 def _team_members_for_prompt(members: list[TeamMemberSpec]) -> list[dict[str, Any]]:

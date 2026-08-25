@@ -52,6 +52,7 @@ from crew.core.interfaces import (
 from crew.core.text_parsing import extract_json_object
 from crew.core.types import Message
 from crew.plugins.manager import PluginManager
+from crew.security.launch import use_process_launch
 from crew.state.config import Config
 from crew.state.home import safe_path_segment, task_workspace_path
 from crew.state.logging import get_logger
@@ -6219,14 +6220,19 @@ class InProcessTeamManager(TeamManager):
         execution_profile: dict[str, Any] | None = None,
         team_spec: dict[str, Any] | None = None,
     ) -> AsyncIterator[ResponseChunk]:
-        async for chunk in self._workflow_runtime.run_required_workflow(
-            envelope,
-            team=team,
-            external_team_id=external_team_id,
-            execution_profile=execution_profile,
-            team_spec=team_spec,
-        ):
-            yield chunk
+        # Team Workflow starts dispatching before a member's Agent.run() can
+        # install the request launch in the ContextVar. Bind the host-owned
+        # decision for this bounded orchestration scope so ACP/CLI children
+        # inherit the same immutable security boundary.
+        with use_process_launch(envelope.params.get("_security_process_launch")):
+            async for chunk in self._workflow_runtime.run_required_workflow(
+                envelope,
+                team=team,
+                external_team_id=external_team_id,
+                execution_profile=execution_profile,
+                team_spec=team_spec,
+            ):
+                yield chunk
 
     async def _send_followup_question_to(self, *args: Any, **kwargs: Any) -> tuple[str, str]:
         return await send_followup_question_to(*args, **kwargs)
