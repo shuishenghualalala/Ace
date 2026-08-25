@@ -680,11 +680,6 @@ def _strip_bom(text: str) -> tuple[str, bool]:
     return text, False
 
 
-def _has_bom(text: Optional[str]) -> bool:
-    """True if ``text`` begins with a UTF-8 BOM."""
-    return bool(text) and text.startswith(_UTF8_BOM)
-
-
 # ---------------------------------------------------------------------------
 # 分页规范化（复制自 Hermes tools/file_operations.py）
 # ---------------------------------------------------------------------------
@@ -713,31 +708,6 @@ def _normalize_read_pagination(
         except (TypeError, ValueError):
             limit = total_lines
     offset = max(1, min(offset, total_lines + 1))
-    limit = max(0, limit)
-    return offset, limit
-
-
-def _normalize_search_pagination(
-    total_hits: int,
-    offset: Optional[int] = None,
-    limit: Optional[int] = None,
-) -> tuple[int, int]:
-    """Return validated (offset, limit) for glob/grep pagination."""
-    if offset is None:
-        offset = 1
-    else:
-        try:
-            offset = int(offset)
-        except (TypeError, ValueError):
-            offset = 1
-    if limit is None:
-        limit = total_hits
-    else:
-        try:
-            limit = int(limit)
-        except (TypeError, ValueError):
-            limit = total_hits
-    offset = max(1, offset)
     limit = max(0, limit)
     return offset, limit
 
