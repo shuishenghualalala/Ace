@@ -1788,6 +1788,7 @@ class CrewApp:
             getattr(getattr(self, "dynamic_kanban", None), "store", None),
             getattr(getattr(self, "sites", None), "store", None),
             self.work_service,
+            getattr(self, "_wiki_store", None),
         ]
         for store in stores:
             close = getattr(store, "close", None)

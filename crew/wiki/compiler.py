@@ -1282,70 +1282,72 @@ class WikiCompiler:
 
         await _notify_progress(progress, "analyze", {"source_id": source_id})
 
-        source_plan = next(
-            (page for page in pages_to_apply if page.page_type == "source"),
-            None,
-        )
-        for planned in pages_to_apply:
-            _check_cancelled(cancel_event)
-            if planned.page_type == "source":
-                continue
-            if planned.action == "skip":
-                existing = self.store.resolve_page(
-                    planned.title,
-                    planned.page_type,
-                    planned.aliases,
+        # save/update 会逐页写文件，但 FTS 索引在此范围内只提交一次事务。
+        with self.store.batch_index(owner_account_id, kb_id):
+            source_plan = next(
+                (page for page in pages_to_apply if page.page_type == "source"),
+                None,
+            )
+            for planned in pages_to_apply:
+                _check_cancelled(cancel_event)
+                if planned.page_type == "source":
+                    continue
+                if planned.action == "skip":
+                    existing = self.store.resolve_page(
+                        planned.title,
+                        planned.page_type,
+                        planned.aliases,
+                        owner_account_id,
+                        kb_id,
+                    )
+                    if existing is not None:
+                        linked_pages.append(existing)
+                    continue
+                else:
+                    page = self._apply_plan(planned, source_id, owner_account_id, kb_id)
+
+                if page is not None:
+                    applied_pages.append(page)
+                    linked_pages.append(page)
+                else:
+                    skipped_titles.append(planned.title)
+
+            if source_plan is not None:
+                entity_titles = [
+                    page.title for page in linked_pages if page.page_type == "entity"
+                ]
+                topic_titles = [
+                    page.title for page in linked_pages if page.page_type == "topic"
+                ]
+                source_content_filtered = _replace_source_page_links(
+                    source_plan.content,
+                    entity_titles,
+                    topic_titles,
+                )
+                source_page = self._ensure_source_page(
+                    source_id,
+                    raw,
+                    source_content,
                     owner_account_id,
                     kb_id,
+                    prepared_content=source_content_filtered,
                 )
-                if existing is not None:
-                    linked_pages.append(existing)
-                continue
-            else:
-                page = self._apply_plan(planned, source_id, owner_account_id, kb_id)
+                applied_pages.insert(0, source_page)
 
-            if page is not None:
-                applied_pages.append(page)
-                linked_pages.append(page)
-            else:
-                skipped_titles.append(planned.title)
-
-        if source_plan is not None:
-            entity_titles = [
-                page.title for page in linked_pages if page.page_type == "entity"
-            ]
-            topic_titles = [
-                page.title for page in linked_pages if page.page_type == "topic"
-            ]
-            source_content_filtered = _replace_source_page_links(
-                source_plan.content,
-                entity_titles,
-                topic_titles,
-            )
-            source_page = self._ensure_source_page(
-                source_id,
-                raw,
-                source_content,
-                owner_account_id,
-                kb_id,
-                prepared_content=source_content_filtered,
-            )
-            applied_pages.insert(0, source_page)
-
-        # 应用关系（只在实际写入的页面间）
-        _check_cancelled(cancel_event)
-        self._apply_relationships(applied_pages, plan.relationships, owner_account_id, kb_id)
-        source_page = next((page for page in applied_pages if page.page_type == "source"), None)
-        knowledge_pages = [page for page in linked_pages if page.page_type in {"entity", "topic"}]
-        if source_page is not None:
-            source_page.relations = [
-                WikiRelation(
-                    target_page_id=page.id,
-                    relation="describes" if page.page_type == "entity" else "covers",
-                )
-                for page in knowledge_pages
-            ]
-            self.store.update(source_page, owner_account_id, kb_id)
+            # 应用关系（只在实际写入的页面间）
+            _check_cancelled(cancel_event)
+            self._apply_relationships(applied_pages, plan.relationships, owner_account_id, kb_id)
+            source_page = next((page for page in applied_pages if page.page_type == "source"), None)
+            knowledge_pages = [page for page in linked_pages if page.page_type in {"entity", "topic"}]
+            if source_page is not None:
+                source_page.relations = [
+                    WikiRelation(
+                        target_page_id=page.id,
+                        relation="describes" if page.page_type == "entity" else "covers",
+                    )
+                    for page in knowledge_pages
+                ]
+                self.store.update(source_page, owner_account_id, kb_id)
 
         # 更新 index.md；批处理会在全部来源完成后统一更新一次。
         _check_cancelled(cancel_event)

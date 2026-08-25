@@ -8,6 +8,8 @@ import re
 import shutil
 import threading
 import time
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +132,25 @@ class FileSystemWikiStore(WikiStore):
             db_path = self._dir(owner_account_id, kb_id) / ".crew" / "index" / "fts.db"
             self._search_indexes[key] = SQLiteFTS5SearchIndex(db_path)
         return self._search_indexes[key]
+
+    @contextmanager
+    def batch_index(
+        self,
+        owner_account_id: str = "",
+        kb_id: str = "default",
+    ) -> Iterator[None]:
+        with self._search_index(owner_account_id, kb_id).batch():
+            yield
+
+    def close(self) -> None:
+        """关闭各知识库的 FTS 连接。"""
+        indexes = list(self._search_indexes.values())
+        self._search_indexes.clear()
+        for index in indexes:
+            try:
+                index.close()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("关闭 Wiki FTS 索引失败: %s", exc)
 
     def _source_dir(
         self,
@@ -306,12 +327,12 @@ class FileSystemWikiStore(WikiStore):
         base = self._kb_root(owner_account_id) / kb_id
         if not base.exists():
             return False
+        index_key = self._search_index_key(owner_account_id, kb_id)
+        index = self._search_indexes.pop(index_key, None)
+        if index is not None:
+            index.close()
         try:
             shutil.rmtree(base)
-            self._search_indexes.pop(
-                self._search_index_key(owner_account_id, kb_id),
-                None,
-            )
             return True
         except Exception as exc:  # noqa: BLE001
             log.warning("删除知识库失败 %s: %s", base, exc)
