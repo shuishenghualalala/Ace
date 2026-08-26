@@ -2,13 +2,16 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
+const MAX_CONCURRENT_AGENT_TURNS = 8;
+
 export type NearbyCommand =
   | { type: 'start_discovery' }
   | { type: 'stop_discovery' }
   | { type: 'set_discoverable'; enabled: boolean }
   | { type: 'connect_peer'; peer_id: string }
   | { type: 'disconnect_peer'; peer_id: string }
-  | { type: 'send_message'; peer_id: string; text: string }
+  | { type: 'send_agent_request'; peer_id: string; text: string }
+  | { type: 'send_agent_reply'; peer_id: string; request_id: string; text: string; error: boolean }
   | { type: 'create_room'; room_id: string; room_name: string; peer_ids: string[] }
   | {
     type: 'send_room_message';
@@ -49,6 +52,14 @@ export interface NearbyServiceOptions {
   isPackaged: boolean;
   crewHome: string;
   onEvent: (event: NearbyEvent) => void;
+  runAgentTurn?: (request: NearbyAgentTurnRequest, signal: AbortSignal) => Promise<string>;
+}
+
+export interface NearbyAgentTurnRequest {
+  peerId: string;
+  peerName: string;
+  requestId: string;
+  text: string;
 }
 
 interface NearbyProcessCommand {
@@ -62,6 +73,9 @@ export class NearbyService {
   private startPromise: Promise<void> | null = null;
   private stopping = false;
   private ready = false;
+  private localPeerId = '';
+  private readonly peers = new Map<string, string>();
+  private readonly agentRuns = new Map<string, AbortController>();
 
   public constructor(private readonly options: NearbyServiceOptions) {}
 
@@ -154,6 +168,7 @@ export class NearbyService {
   }
 
   public async stop(): Promise<void> {
+    this.abortAgentRuns();
     const child = this.child;
     if (!child) return;
     console.warn('[nearby] stopping runtime');
@@ -187,8 +202,19 @@ export class NearbyService {
     try {
       const event = JSON.parse(trimmed) as NearbyEvent;
       if (!event || typeof event.type !== 'string') return;
-      if (event.type === 'ready') onReady();
+      if (event.type === 'ready') {
+        const peer = this.eventPeer(event);
+        if (peer) {
+          this.localPeerId = peer.peerId;
+          this.peers.set(peer.peerId, peer.displayName);
+        }
+        onReady();
+      } else if (event.type === 'peer_discovered' || event.type === 'peer_connected') {
+        const peer = this.eventPeer(event);
+        if (peer) this.peers.set(peer.peerId, peer.displayName);
+      }
       this.options.onEvent(event);
+      this.maybeRunAgent(event);
     } catch (error) {
       console.warn('[nearby] ignored malformed event:', error);
     }
@@ -196,11 +222,87 @@ export class NearbyService {
 
   private finish(child: ChildProcessWithoutNullStreams): void {
     if (this.child !== child) return;
+    this.abortAgentRuns();
     this.child = null;
     this.ready = false;
     if (!this.stopping) {
       this.options.onEvent({ type: 'error', message: 'Nearby 服务已退出' });
     }
+  }
+
+  private abortAgentRuns(): void {
+    for (const controller of this.agentRuns.values()) controller.abort();
+    this.agentRuns.clear();
+  }
+
+  private eventPeer(event: NearbyEvent): { peerId: string; displayName: string } | null {
+    const value = event.peer;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const peer = value as Record<string, unknown>;
+    const peerId = typeof peer.peer_id === 'string' ? peer.peer_id : '';
+    if (!peerId) return null;
+    return {
+      peerId,
+      displayName: typeof peer.display_name === 'string' && peer.display_name.trim()
+        ? peer.display_name.trim()
+        : '附近的用户',
+    };
+  }
+
+  private maybeRunAgent(event: NearbyEvent): void {
+    if (event.type !== 'message' || !this.options.runAgentTurn) return;
+    const peerId = typeof event.peer_id === 'string' ? event.peer_id : '';
+    const value = event.message;
+    if (!peerId || !value || typeof value !== 'object' || Array.isArray(value)) return;
+    const message = value as Record<string, unknown>;
+    if (message.message_type !== 'agent.request' || message.sender === this.localPeerId) return;
+    const requestId = typeof message.message_id === 'string' ? message.message_id : '';
+    const payload = message.payload;
+    if (!requestId || !payload || typeof payload !== 'object' || Array.isArray(payload)) return;
+    const text = typeof (payload as Record<string, unknown>).text === 'string'
+      ? String((payload as Record<string, unknown>).text).trim()
+      : '';
+    const runKey = `${peerId}\0${requestId}`;
+    if (!text || this.agentRuns.has(runKey)) return;
+    if (this.agentRuns.size >= MAX_CONCURRENT_AGENT_TURNS) {
+      void this.sendAgentReply(peerId, requestId, 'Agent 当前忙碌，请稍后再试', true);
+      return;
+    }
+
+    const controller = new AbortController();
+    this.agentRuns.set(runKey, controller);
+    const request: NearbyAgentTurnRequest = {
+      peerId,
+      peerName: this.peers.get(peerId) ?? '附近的用户',
+      requestId,
+      text,
+    };
+    void this.options.runAgentTurn(request, controller.signal)
+      .then((reply) => this.sendAgentReply(peerId, requestId, reply, false))
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        const detail = error instanceof Error ? error.message : String(error);
+        return this.sendAgentReply(peerId, requestId, detail || 'Agent 暂时无法回复', true);
+      })
+      .finally(() => this.agentRuns.delete(runKey));
+  }
+
+  private async sendAgentReply(
+    peerId: string,
+    requestId: string,
+    rawText: string,
+    error: boolean,
+  ): Promise<void> {
+    const text = Array.from(String(rawText || '').trim()).slice(0, 8_000).join('');
+    if (!text || !this.ready || !this.child?.stdin.writable) return;
+    const command: NearbyCommand = {
+      type: 'send_agent_reply',
+      peer_id: peerId,
+      request_id: requestId,
+      text,
+      error,
+    };
+    this.child.stdin.write(`${JSON.stringify(command)}\n`);
   }
 
   private resolveCommand(): NearbyProcessCommand {

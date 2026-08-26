@@ -18,14 +18,14 @@
 </head>
 <body>
   <h1>Ace Nearby 蓝牙同伴</h1>
-  <p>Ace 的“同伴”模块通过 Bluetooth Low Energy 发现附近运行 Ace 的电脑。用户选择设备后建立一对一会话，文字消息直接通过 BLE GATT 传输，不要求两台电脑连接同一局域网，也不经过云端服务。</p>
+  <p>Ace 的“同伴”模块通过 Bluetooth Low Energy 发现附近运行 Ace 的电脑。用户选择设备后建立一对一会话，请求通过 BLE GATT 发送给对方的 Ace Agent，Agent 回复再沿原连接返回；两台电脑不需要连接同一局域网，消息传输也不经过云端中继。</p>
 
   <h2>产品流程</h2>
   <ol>
     <li>进入“同伴”页面后，Ace 发布 BLE GATT 服务并扫描附近使用相同服务 UUID 的设备。</li>
     <li>发现结果只作为候选设备展示，不会自动进入聊天状态。</li>
     <li>用户点击“连接”后发送 <code>peer.connect</code> 控制消息；双方界面同步显示已连接。</li>
-    <li>已连接的两台电脑使用 <code>chat.message</code> 双向发送文字；当前不提供群聊。</li>
+    <li>发起端发送 <code>agent.request</code>；接收端按对端隔离的会话调用本机 Agent，并返回 <code>agent.response</code> 或 <code>agent.error</code>。</li>
     <li>关闭“允许被发现”会停止本机 BLE 广播；停止查找只影响本机扫描。</li>
   </ol>
 
@@ -37,14 +37,16 @@
       <tr><td><code>nearby/src/protocol.rs</code></td><td>消息格式、控制消息、文字消息、分帧与重组。</td></tr>
       <tr><td><code>nearby/src/mock.rs</code></td><td>无需蓝牙硬件的双实例发现、连接和消息协议测试后端。</td></tr>
       <tr><td><code>nearby/vendor/ble-peripheral-rust</code></td><td>macOS 与 Windows BLE Peripheral/GATT Server；Windows 回调通过 Tokio 异步执行，避免阻塞 WinRT 事件线程。</td></tr>
+      <tr><td><code>desktop/src/main/nearby-service.ts</code></td><td>识别远端 Agent 请求、抑制请求/回复回环、限制并发，并把 Agent 结果写回 Nearby 运行时。</td></tr>
+      <tr><td><code>crew/gateway/routers/sessions.py</code></td><td>创建按 Owner 与 Peer 隔离的持久 Agent 会话；Nearby 会话固定为内置文本模式并禁用全部工具与 Skills。</td></tr>
       <tr><td><code>desktop/src/ui/features/nearby-page.ts</code></td><td>设备发现、手动连接、一对一会话状态和文字聊天交互。</td></tr>
       <tr><td><code>desktop/assets/styles/nearby.css</code></td><td>AirDrop 风格扫描层级、半透明材料、设备卡片和聊天布局，并适配减少动态效果与减少透明度。</td></tr>
     </tbody>
   </table>
 
   <h2>BLE 协议</h2>
-  <p>服务 UUID 为 <code>0000a0a0-0000-1000-8000-00805f9b34fb</code>。GATT 服务包含 PeerInfo、IncomingMessage 和 OutgoingMessage 三个特征。Central 订阅 OutgoingMessage 通知，并向 IncomingMessage 写入长度前缀 JSON 帧。</p>
-  <p>每个实例持久化一个随机 Peer ID。物理 BLE 会话完成 <code>hello</code> 身份握手后可用于发现；只有用户选择设备并交换 <code>peer.connect</code> 后，界面才进入已连接状态。主动断开使用 <code>peer.disconnect</code>，文字使用 <code>chat.message</code>，单条文字上限 8000 字符。</p>
+  <p>服务 UUID 为 <code>5957645b-4b06-49cf-bde2-366a593e73a7</code>。GATT 服务包含 PeerInfo、IncomingMessage 和 OutgoingMessage 三个特征。Central 订阅 OutgoingMessage 通知，并向 IncomingMessage 写入分片 JSON 帧。</p>
+  <p>每个实例持久化一个随机 Peer ID。物理 BLE 会话完成 <code>hello</code> 身份握手后可用于发现；只有用户选择设备并交换 <code>peer.connect</code> 后，界面才进入已连接状态。主动断开使用 <code>peer.disconnect</code>。Agent 对话协议版本为 <code>v2</code>：请求使用 <code>agent.request</code>，回复使用 <code>agent.response</code>，失败使用 <code>agent.error</code>；回复通过 <code>request_id</code> 关联原请求，单条文字上限 8000 字符。旧版普通消息协议不会被误认为兼容客户端。</p>
   <p>BLE 连接不依赖 Wi-Fi 或局域网。实际可发现距离、连接稳定性和吞吐受蓝牙适配器、系统权限、射频环境以及操作系统节能策略影响。</p>
 
   <h2>桌面 IPC</h2>
@@ -54,10 +56,11 @@
       <tr><td>Renderer → Rust</td><td><code>start_discovery</code> / <code>stop_discovery</code></td><td>开始或暂停 BLE 扫描。</td></tr>
       <tr><td>Renderer → Rust</td><td><code>set_discoverable</code></td><td>启用或停止本机 BLE 广播。</td></tr>
       <tr><td>Renderer → Rust</td><td><code>connect_peer</code> / <code>disconnect_peer</code></td><td>手动建立或断开指定 Peer 的逻辑会话。</td></tr>
-      <tr><td>Renderer → Rust</td><td><code>send_message</code></td><td>向已连接 Peer 发送文字。</td></tr>
+      <tr><td>Renderer → Rust</td><td><code>send_agent_request</code></td><td>向已连接 Peer 的 Ace Agent 发送请求。</td></tr>
+      <tr><td>Main → Rust</td><td><code>send_agent_reply</code></td><td>将本机 Agent 的回复或错误返回给请求方；Renderer 不能直接构造此命令。</td></tr>
       <tr><td>Rust → Renderer</td><td><code>peer_discovered</code> / <code>peer_unavailable</code></td><td>更新附近设备列表。</td></tr>
       <tr><td>Rust → Renderer</td><td><code>peer_connected</code> / <code>peer_disconnected</code> / <code>peer_connection_failed</code></td><td>更新一对一连接状态。</td></tr>
-      <tr><td>Rust → Renderer</td><td><code>message</code></td><td>传递本机已发送或远端收到的 <code>chat.message</code>。</td></tr>
+      <tr><td>Rust → Desktop</td><td><code>message</code></td><td>传递 <code>agent.request</code>、<code>agent.response</code> 或 <code>agent.error</code>。</td></tr>
     </tbody>
   </table>
 
@@ -79,20 +82,22 @@ cargo run --manifest-path nearby/Cargo.toml -- --ipc --transport mock</pre>
     <li>在两台电脑安装并启动同一版本 Ace，授予系统蓝牙权限后进入“同伴”。</li>
     <li>保持“允许被发现”开启，确认双方列表出现对方设备，未点击前状态为“可连接”。</li>
     <li>在 Mac 点击 Windows 设备的“连接”，确认双方都显示“已连接”。</li>
-    <li>Mac 发送消息并确认 Windows 收到；Windows 回复并确认 Mac 收到。</li>
+    <li>Mac 发送问题，确认 Windows 自动调用本机 Ace Agent，Mac 随后收到 Agent 回复；不需要 Windows 用户手工输入回复。</li>
+    <li>连续发送第二个问题，确认对方 Agent 保留该 Peer 的上一轮上下文；再换一台 Peer 时应使用独立上下文。</li>
     <li>点击“断开”，确认双方输入框被禁用；再次连接后重复双向发送。</li>
     <li>关闭一端“允许被发现”，另一端重新查找后不应再出现新的发现结果。</li>
   </ol>
 
-  <h2>验证记录（2026-08-21）</h2>
+  <h2>验证记录（2026-08-26）</h2>
   <table>
     <thead><tr><th>检查项</th><th>结果</th><th>说明</th></tr></thead>
     <tbody>
       <tr><td>Rust 单元与协议测试</td><td class="pass">通过</td><td><code>cargo test</code> 共 33 项通过，覆盖协议编码、IPC、被动身份握手和重复物理会话关闭竞争。</td></tr>
       <tr><td>Rust Clippy</td><td class="pass">通过</td><td><code>cargo clippy --all-targets -- -D warnings</code> 无警告。</td></tr>
       <tr><td>Windows MSVC 目标检查</td><td class="pass">通过</td><td><code>cargo check --target x86_64-pc-windows-msvc</code> 通过，包含 Windows BLE Peripheral 回调。</td></tr>
-      <tr><td>双实例协议端到端</td><td class="pass">通过</td><td>两个独立 Ace 实例完成发现、手动连接、Mac→Windows 与 Windows→Mac 双向文字以及断开。</td></tr>
-      <tr><td>桌面类型、定向单测与样式检查</td><td class="pass">通过</td><td>TypeScript、ESLint、Stylelint 和 Nearby/导航 11 项测试通过。</td></tr>
+      <tr><td>Gateway Agent 会话</td><td class="pass">通过</td><td>验证同一 Peer 复用上下文、不同 Peer 会话隔离、普通侧栏隐藏，以及工具/Skills 全部关闭。</td></tr>
+      <tr><td>双实例 Agent 端到端</td><td class="pass">通过</td><td>两个独立 Nearby 进程完成发现、连接、v2 <code>agent.request</code>、Ace Agent 执行和 <code>agent.response</code> 回传。</td></tr>
+      <tr><td>桌面类型与定向单测</td><td class="pass">通过</td><td>TypeScript 检查通过；Nearby 页面、托盘与主进程 Agent 路由及取消 8 项测试通过。</td></tr>
       <tr><td>桌面开发构建</td><td class="pass">通过</td><td><code>npm run build:dev</code> 完成 Nearby 二进制、主进程、Preload、Renderer 和样式构建。</td></tr>
       <tr><td>macOS + Windows 实机</td><td class="pending">待用户验收</td><td>需在两台真实设备上验证蓝牙权限、发现距离及双向消息。</td></tr>
     </tbody>
@@ -101,8 +106,11 @@ cargo run --manifest-path nearby/Cargo.toml -- --ipc --transport mock</pre>
   <h2>当前边界</h2>
   <ul>
     <li>只支持一对一文字消息；不提供群聊、文件、提及和回复。</li>
-    <li>聊天记录只保存在页面内存中，重新启动 Ace 后不会恢复。</li>
-    <li>对端消息由对端 Ace 用户查看和回复，不会自动调用对方的 AI Agent。</li>
+    <li>Nearby 页面记录只保存在页面内存中；对端 Agent 上下文会按 Peer ID 持久化，但当前没有单独的历史管理界面。</li>
+    <li>当前调用对端的默认内置 Ace Agent，不支持由请求方选择对端的其他 Agent。</li>
+    <li>Nearby Agent 会话固定禁用全部工具与 Skills，只能生成文字回复；附近设备不能借此访问对方电脑的文件、账号或连接工具。</li>
+    <li>Peer 间请求与回复不经过局域网或聊天中继；Agent 生成回复时，内容仍会按接收端现有模型配置提交给本机或外部模型服务。</li>
+    <li>接收端必须保持“同伴”页面打开，使 Nearby 服务继续运行，并且本机模型配置可用。</li>
     <li>当前未实现配对码与应用层端到端加密，不应发送敏感信息。</li>
     <li>BLE 通道吞吐有限，不适合大文件或高频消息。</li>
   </ul>

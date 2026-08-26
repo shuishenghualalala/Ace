@@ -90,9 +90,16 @@ pub(crate) enum IpcCommand {
     DisconnectPeer {
         peer_id: String,
     },
-    SendMessage {
+    SendAgentRequest {
         peer_id: String,
         text: String,
+    },
+    SendAgentReply {
+        peer_id: String,
+        request_id: String,
+        text: String,
+        #[serde(default)]
+        error: bool,
     },
     CreateRoom {
         room_id: String,
@@ -482,9 +489,9 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             sink.send(IpcEvent::PeerDisconnected { peer_id }).await?;
                         }
                     }
-                    IpcCommand::SendMessage { peer_id, text } => {
+                    IpcCommand::SendAgentRequest { peer_id, text } => {
                         let text = text.trim();
-                        if text.is_empty() || text.len() > 8_000 {
+                        if text.is_empty() || text.chars().count() > 8_000 {
                             sink.send(IpcEvent::Error { message: "消息不能为空且不能超过 8000 个字符".to_owned() }).await?;
                             continue;
                         }
@@ -503,7 +510,7 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             }).await?;
                             continue;
                         };
-                        let message = Message::chat(peer.peer_id.clone(), text);
+                        let message = Message::agent_request(peer.peer_id.clone(), text);
                         if outbound.send(message.clone()).await.is_err() {
                             active_peers.remove(&peer_id);
                             sink.send(IpcEvent::PeerConnectionFailed {
@@ -516,6 +523,38 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             peer_id,
                             message,
                         }).await?;
+                    }
+                    IpcCommand::SendAgentReply { peer_id, request_id, text, error } => {
+                        let text = text.trim();
+                        if request_id.trim().is_empty() || text.is_empty() || text.chars().count() > 8_000 {
+                            sink.send(IpcEvent::Error { message: "Agent 回复无效或超过 8000 个字符".to_owned() }).await?;
+                            continue;
+                        }
+                        if !active_peers.contains(&peer_id) {
+                            sink.send(IpcEvent::PeerConnectionFailed {
+                                peer_id,
+                                message: "无法回复：对方已经断开".to_owned(),
+                            }).await?;
+                            continue;
+                        }
+                        let Some(outbound) = sessions.get(&peer_id).cloned() else {
+                            active_peers.remove(&peer_id);
+                            sink.send(IpcEvent::PeerConnectionFailed {
+                                peer_id,
+                                message: "无法回复：BLE 会话已经断开".to_owned(),
+                            }).await?;
+                            continue;
+                        };
+                        let message = Message::agent_reply(peer.peer_id.clone(), request_id, text, error);
+                        if outbound.send(message.clone()).await.is_err() {
+                            active_peers.remove(&peer_id);
+                            sink.send(IpcEvent::PeerConnectionFailed {
+                                peer_id,
+                                message: "回复发送失败，BLE 会话已经断开".to_owned(),
+                            }).await?;
+                            continue;
+                        }
+                        sink.send(IpcEvent::Message { peer_id, message }).await?;
                     }
                     IpcCommand::CreateRoom { room_id, room_name, peer_ids } => {
                         let selected: Vec<String> = peer_ids.into_iter()
@@ -729,7 +768,7 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                                     sink.send(IpcEvent::PeerDisconnected { peer_id }).await?;
                                 }
                             }
-                            "chat.message" => {
+                            "agent.request" | "agent.response" | "agent.error" => {
                                 if !active_peers.contains(&peer_id)
                                     || !seen_messages.insert(message.message_id.clone())
                                 {
@@ -790,7 +829,8 @@ fn command_name(command: &IpcCommand) -> &'static str {
         IpcCommand::SetDiscoverable { .. } => "set_discoverable",
         IpcCommand::ConnectPeer { .. } => "connect_peer",
         IpcCommand::DisconnectPeer { .. } => "disconnect_peer",
-        IpcCommand::SendMessage { .. } => "send_message",
+        IpcCommand::SendAgentRequest { .. } => "send_agent_request",
+        IpcCommand::SendAgentReply { .. } => "send_agent_reply",
         IpcCommand::CreateRoom { .. } => "create_room",
         IpcCommand::SendRoomMessage { .. } => "send_room_message",
         IpcCommand::SendRoomFile { .. } => "send_room_file",
@@ -1555,13 +1595,23 @@ mod tests {
             command,
             IpcCommand::ConnectPeer { peer_id } if peer_id == "ace_peer"
         ));
-        let command: IpcCommand =
-            serde_json::from_str(r#"{"type":"send_message","peer_id":"ace_peer","text":"hello"}"#)
-                .unwrap();
+        let command: IpcCommand = serde_json::from_str(
+            r#"{"type":"send_agent_request","peer_id":"ace_peer","text":"hello"}"#,
+        )
+        .unwrap();
         assert!(matches!(
             command,
-            IpcCommand::SendMessage { peer_id, text }
+            IpcCommand::SendAgentRequest { peer_id, text }
                 if peer_id == "ace_peer" && text == "hello"
+        ));
+        let command: IpcCommand = serde_json::from_str(
+            r#"{"type":"send_agent_reply","peer_id":"ace_peer","request_id":"request","text":"hi","error":false}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            IpcCommand::SendAgentReply { peer_id, request_id, text, error: false }
+                if peer_id == "ace_peer" && request_id == "request" && text == "hi"
         ));
         let event = serde_json::to_value(IpcEvent::DiscoveryStarted).unwrap();
         assert_eq!(event["type"], "discovery_started");

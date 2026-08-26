@@ -138,6 +138,7 @@ import { resolveWorkspaceDirectoryInfo } from './workspace-directory';
 import { configurePptxWasmRuntime, PPTX_WASM_V8_FLAGS } from './wasm-runtime';
 import {
   NearbyService,
+  type NearbyAgentTurnRequest,
   type NearbyCommand,
   type NearbyEvent,
   type NearbyReplyReference,
@@ -948,11 +949,55 @@ function ensureNearbyService(): NearbyService {
     resourcesPath: process.resourcesPath,
     isPackaged: app.isPackaged,
     crewHome: activeGatewayCrewHome(),
+    runAgentTurn: runNearbyAgentTurn,
     onEvent: (event: NearbyEvent) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('nearby:event', event);
     },
   });
   return nearbyService;
+}
+
+async function runNearbyAgentTurn(
+  request: NearbyAgentTurnRequest,
+  signal: AbortSignal,
+): Promise<string> {
+  const usesRemoteAuth = usesGatewayRemoteAuth();
+  const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
+  const identityHeaders = usesRemoteAuth ? gatewayIdentityHeaders() : null;
+  if (usesRemoteAuth && (!jwt || !identityHeaders)) {
+    throw new Error('这台 Ace 尚未登录，Agent 暂时无法回复');
+  }
+
+  const ensured = await ensureGateway();
+  const targetUrl = new URL('/api/nearby/agent-turn', ensured.baseUrl);
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    ...gatewayAccessHeaders(targetUrl.pathname),
+  };
+  if (jwt && identityHeaders) {
+    headers.Authorization = `Bearer ${jwt}`;
+    Object.assign(headers, identityHeaders);
+  }
+  const response = await fetch(targetUrl, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      peer_id: request.peerId,
+      peer_name: request.peerName,
+      request_id: request.requestId,
+      query: request.text,
+    }),
+    signal,
+  });
+  const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok || payload.ok !== true) {
+    throw new Error(typeof payload.error === 'string' && payload.error
+      ? payload.error
+      : 'Agent 暂时无法回复');
+  }
+  const text = typeof payload.text === 'string' ? payload.text.trim() : '';
+  if (!text) throw new Error('Agent 没有生成回复');
+  return text;
 }
 
 function parseNearbyCommand(raw: unknown): NearbyCommand {
@@ -974,7 +1019,7 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
     }
     return { type, peer_id: value.peer_id };
   }
-  if (type === 'send_message') {
+  if (type === 'send_agent_request') {
     if (typeof value.peer_id !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(value.peer_id)) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby peer id`);
     }

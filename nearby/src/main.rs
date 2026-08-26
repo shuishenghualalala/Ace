@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
             .agent_name
             .unwrap_or_else(crew_nearby::default_agent_name),
         capabilities: if arguments.capabilities.is_empty() {
-            vec!["chat".to_owned()]
+            vec!["agent.chat".to_owned()]
         } else {
             arguments.capabilities
         },

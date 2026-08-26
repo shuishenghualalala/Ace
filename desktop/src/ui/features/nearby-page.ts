@@ -81,7 +81,7 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
   heading.className = 'nearby-page__heading';
   heading.append(
     textElement('h1', 'nearby-page__title', '同伴'),
-    textElement('p', 'nearby-page__subtitle', '通过蓝牙发现附近的 Ace，然后建立一对一连接。'),
+    textElement('p', 'nearby-page__subtitle', '通过蓝牙发现附近的 Ace，然后与对方的 Agent 对话。'),
   );
   const headerActions = document.createElement('div');
   headerActions.className = 'nearby-page__header-actions';
@@ -135,7 +135,7 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
   emptyState.append(
     textElement('span', 'nearby-empty-state__symbol', '⌁'),
     textElement('h2', 'nearby-empty-state__title', '选择一个附近的 Ace'),
-    textElement('p', 'nearby-empty-state__copy', '连接后，消息会通过蓝牙在两台电脑之间直接发送。'),
+    textElement('p', 'nearby-empty-state__copy', '连接后，消息会通过蓝牙发送给对方 Ace Agent。'),
   );
 
   const conversation = document.createElement('div');
@@ -188,7 +188,7 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
     const peer = activePeerId ? peers.get(activePeerId) : undefined;
     const connected = peer?.connection === 'connected';
     messageInput.disabled = !connected;
-    messageInput.placeholder = connected ? `发消息给 ${peerLabel(peer)}` : '连接后即可发送消息';
+    messageInput.placeholder = connected ? `发消息给 ${peerLabel(peer)} 的 Agent` : '连接后即可发送消息';
     sendButton.disabled = !connected || messageInput.value.trim().length === 0;
   };
 
@@ -203,7 +203,8 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
     for (const message of items) {
       const own = message.sender === localPeerId;
       const item = document.createElement('article');
-      item.className = `nearby-message${own ? ' nearby-message--own' : ''}`;
+      const failed = message.message_type === 'agent.error';
+      item.className = `nearby-message${own ? ' nearby-message--own' : ''}${failed ? ' nearby-message--error' : ''}`;
       item.dataset.messageId = message.message_id;
       const bubble = textElement('p', 'nearby-message__bubble', String(message.payload.text ?? ''));
       const time = textElement('time', 'nearby-message__time', messageTime());
@@ -382,14 +383,32 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
       case 'message': {
         const peerId = String(nearbyEvent.peer_id || '');
         const message = typeof nearbyEvent.message === 'object' ? nearbyEvent.message as NearbyMessage : undefined;
-        if (!peerId || !message || message.message_type !== 'chat.message') break;
+        if (
+          !peerId
+          || !message
+          || !['agent.request', 'agent.response', 'agent.error'].includes(message.message_type)
+        ) break;
         const history = messages.get(peerId) ?? [];
         if (!history.some((item) => item.message_id === message.message_id)) history.push(message);
         messages.set(peerId, history);
         if (!activePeerId || message.sender !== localPeerId) activePeerId = peerId;
         renderPeers();
         renderConversation();
-        setStatus(message.sender === localPeerId ? '消息已发送' : `收到 ${peerLabel(peers.get(peerId))} 的消息`);
+        if (message.message_type === 'agent.error') {
+          setStatus(`${peerLabel(peers.get(peerId))} 的 Agent 回复失败`, 'error');
+        } else if (message.message_type === 'agent.request') {
+          setStatus(
+            message.sender === localPeerId
+              ? '消息已发送，等待对方 Agent 回复…'
+              : `正在由本机 Agent 回复 ${peerLabel(peers.get(peerId))}…`,
+          );
+        } else {
+          setStatus(
+            message.sender === localPeerId
+              ? `本机 Agent 已回复 ${peerLabel(peers.get(peerId))}`
+              : `收到 ${peerLabel(peers.get(peerId))} Agent 的回复`,
+          );
+        }
         break;
       }
       case 'error':
@@ -439,7 +458,7 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
     messageInput.value = '';
     updateComposer();
     setStatus('正在发送…');
-    void bridge?.nearbyCommand?.({ type: 'send_message', peer_id: peer.peer_id, text })
+    void bridge?.nearbyCommand?.({ type: 'send_agent_request', peer_id: peer.peer_id, text })
       .catch((error: unknown) => setStatus(`发送失败：${error instanceof Error ? error.message : String(error)}`, 'error'));
   });
 

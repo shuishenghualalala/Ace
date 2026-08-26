@@ -56,7 +56,7 @@ impl Default for NearbyConfig {
         Self {
             display_name: default_display_name(),
             agent_name: default_agent_name(),
-            capabilities: vec!["chat".to_owned()],
+            capabilities: vec!["agent.chat".to_owned()],
             peer_id: None,
             state_dir: None,
             discoverable: None,
@@ -180,7 +180,7 @@ impl BleAdapter {
                 line = stdin.next_line() => {
                     match line.context("failed to read terminal input")? {
                         Some(line) if !line.trim().is_empty() => {
-                            let message = Message::chat(peer.peer_id.clone(), line.trim());
+                            let message = Message::agent_request(peer.peer_id.clone(), line.trim());
                             if let Some(current_session) = &session {
                                 current_session.send(message).await?;
                             } else if !subscriptions.is_empty() {
@@ -779,7 +779,10 @@ async fn notify_server(
 }
 
 fn print_peer_message(message: &Message) {
-    if message.message_type == "chat.message" {
+    if matches!(
+        message.message_type.as_str(),
+        "agent.request" | "agent.response" | "agent.error"
+    ) {
         if let Some(text) = message.payload.get("text").and_then(|value| value.as_str()) {
             println!("Peer: {text}");
             return;

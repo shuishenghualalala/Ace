@@ -16,6 +16,7 @@ from crew.agent.loop.tool_result_display import (
     SUBAGENT_FULL_RESULT_TOOLS,
     tool_result_detail_for_ui,
 )
+from crew.core.envelope import Envelope
 from crew.core.types import Message, ToolCall, tool_arguments_for_ui
 from crew.gateway.auth import account_from_request
 from crew.gateway.helpers import require_external_agents_enabled, with_session_agent_labels
@@ -323,6 +324,91 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 owner_account_id=owner,
             )
         )
+
+    @router.post("/api/nearby/agent-turn")
+    async def nearby_agent_turn(request: Request, payload: dict) -> JSONResponse:
+        """Run one text-only Agent turn for a directly connected Nearby peer."""
+        owner = _owner(request)
+        peer_id = str(payload.get("peer_id") or "").strip()
+        peer_name = " ".join(
+            str(payload.get("peer_name") or "附近的用户").split()
+        )[:120]
+        request_id = str(payload.get("request_id") or "").strip()
+        query = str(payload.get("query") or "").strip()
+        if not peer_id or len(peer_id) > 128 or not all(
+            char.isalnum() or char in "_.-" for char in peer_id
+        ):
+            return JSONResponse({"ok": False, "error": "无效的 Nearby 对端"}, status_code=400)
+        if not request_id or len(request_id) > 128 or not all(
+            char.isalnum() or char in "_.:-" for char in request_id
+        ):
+            return JSONResponse({"ok": False, "error": "无效的 Nearby 请求"}, status_code=400)
+        if not query or len(query) > 8_000:
+            return JSONResponse(
+                {"ok": False, "error": "消息不能为空且不能超过 8000 个字符"},
+                status_code=400,
+            )
+
+        session_hash = hashlib.sha256(f"{owner}\0{peer_id}".encode()).hexdigest()[:32]
+        session_id = f"agent:main:nearby:dm:{session_hash}"
+        try:
+            crew.session_store.ensure_session(
+                session_id,
+                workspace_id="default",
+                title=f"Nearby · {peer_name or '附近的用户'}",
+                owner_account_id=owner,
+            )
+            safe_config = {
+                "executor": "builtin",
+                "model_profile_id": "inherit",
+                "disabled_toolsets": ["*"],
+                "disabled_skills": ["*"],
+                "nearby_text_only": True,
+            }
+            stored_config = crew.session_store.get_agent_config(
+                session_id, owner_account_id=owner
+            ) or {}
+            if stored_config != safe_config:
+                crew.session_store.set_agent_config(
+                    session_id,
+                    safe_config,
+                    owner_account_id=owner,
+                )
+                crew.agents.drop(session_id, owner_account_id=owner)
+
+            envelope = Envelope.of(
+                query,
+                session_id=session_id,
+                request_id=request_id,
+                channel="web",
+                user_id=owner,
+                workspace_id="default",
+                mode="agent",
+            )
+            envelope.params["channel_system_hint"] = (
+                "这条消息来自通过 Bluetooth Nearby 直连的外部用户。"
+                "请直接回答对方当前的问题，不要声称访问或操作了本机资源；"
+                "此会话已禁用全部工具和 Skills。"
+            )
+            final_text = ""
+            error_text = ""
+            async for chunk in crew.dispatch(envelope):
+                if chunk.kind == "final":
+                    final_text = str(chunk.body.get("text") or "").strip()
+                elif chunk.kind == "error":
+                    error_text = str(chunk.body.get("message") or "").strip()
+            if error_text:
+                return JSONResponse({"ok": False, "error": error_text}, status_code=502)
+            if not final_text:
+                return JSONResponse(
+                    {"ok": False, "error": "Agent 没有生成回复"}, status_code=502
+                )
+            return JSONResponse({"ok": True, "text": final_text, "session_id": session_id})
+        except Exception:
+            log.exception("Nearby Agent 回合失败 session=%s", session_id)
+            return JSONResponse(
+                {"ok": False, "error": "Agent 暂时无法回复"}, status_code=500
+            )
 
     @router.post("/api/session/{session_id}/ensure")
     async def ensure_session(request: Request, session_id: str, payload: dict) -> JSONResponse:

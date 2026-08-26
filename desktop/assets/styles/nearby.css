@@ -542,6 +542,12 @@
   color: white;
 }
 
+.nearby-message--error .nearby-message__bubble {
+  border-color: color-mix(in srgb, var(--mw-danger, #d92d20) 62%, transparent);
+  background: color-mix(in srgb, var(--mw-danger, #d92d20) 10%, var(--mw-bg-elevated));
+  color: var(--mw-danger, #b42318);
+}
+
 .nearby-message__time {
   padding: 0 4px;
   font-size: 10px;

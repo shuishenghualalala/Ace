@@ -77,7 +77,7 @@ describe('nearby page', () => {
     input.dispatchEvent(new Event('input', { bubbles: true }));
     root.querySelector<HTMLFormElement>('.nearby-composer')!.requestSubmit();
     expect(command).toHaveBeenCalledWith({
-      type: 'send_message',
+      type: 'send_agent_request',
       peer_id: 'ace_peer_a',
       text: '来自 Mac 的消息',
     });
@@ -88,7 +88,7 @@ describe('nearby page', () => {
       message: {
         message_id: 'local_1',
         sender: 'ace_local',
-        message_type: 'chat.message',
+        message_type: 'agent.request',
         payload: { text: '来自 Mac 的消息' },
       },
     });
@@ -98,8 +98,8 @@ describe('nearby page', () => {
       message: {
         message_id: 'remote_1',
         sender: 'ace_peer_a',
-        message_type: 'chat.message',
-        payload: { text: 'Windows 已收到' },
+        message_type: 'agent.response',
+        payload: { request_id: 'local_1', text: 'Windows 已收到' },
       },
     });
     expect(root.querySelector('.nearby-chat__messages')?.textContent).toContain('来自 Mac 的消息');

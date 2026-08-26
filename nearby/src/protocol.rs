@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 pub const SERVICE_UUID: Uuid = uuid::uuid!("5957645b-4b06-49cf-bde2-366a593e73a7");
 pub const PEER_INFO_UUID: Uuid = uuid::uuid!("5957645b-4b06-49cf-bde2-366a593e73a8");
 pub const INCOMING_MESSAGE_UUID: Uuid = uuid::uuid!("5957645b-4b06-49cf-bde2-366a593e73a9");
@@ -78,13 +78,35 @@ impl Message {
         }
     }
 
-    pub fn chat(sender: impl Into<String>, text: impl Into<String>) -> Self {
+    pub fn agent_request(sender: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             version: PROTOCOL_VERSION,
-            message_type: "chat.message".to_owned(),
+            message_type: "agent.request".to_owned(),
             message_id: Uuid::new_v4().to_string(),
             sender: sender.into(),
             payload: serde_json::json!({ "text": text.into() }),
+        }
+    }
+
+    pub fn agent_reply(
+        sender: impl Into<String>,
+        request_id: impl Into<String>,
+        text: impl Into<String>,
+        error: bool,
+    ) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            message_type: if error {
+                "agent.error".to_owned()
+            } else {
+                "agent.response".to_owned()
+            },
+            message_id: Uuid::new_v4().to_string(),
+            sender: sender.into(),
+            payload: serde_json::json!({
+                "request_id": request_id.into(),
+                "text": text.into(),
+            }),
         }
     }
 
@@ -444,9 +466,17 @@ mod tests {
 
         let hello = Message::hello(&peer);
         assert_eq!(Message::decode(&hello.encode().unwrap()).unwrap(), hello);
-        let chat = Message::chat("crew_local", "hello");
-        assert_eq!(chat.message_type, "chat.message");
-        assert_eq!(chat.payload["text"], "hello");
+        let request = Message::agent_request("crew_local", "hello");
+        assert_eq!(request.message_type, "agent.request");
+        assert_eq!(request.payload["text"], "hello");
+
+        let response = Message::agent_reply("crew_local", &request.message_id, "hi", false);
+        assert_eq!(response.message_type, "agent.response");
+        assert_eq!(response.payload["request_id"], request.message_id);
+        assert_eq!(response.payload["text"], "hi");
+
+        let error = Message::agent_reply("crew_local", "request-id", "failed", true);
+        assert_eq!(error.message_type, "agent.error");
     }
 
     #[test]

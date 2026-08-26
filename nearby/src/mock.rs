@@ -338,9 +338,9 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                             sink.send(IpcEvent::PeerDisconnected { peer_id }).await?;
                         }
                     }
-                    IpcCommand::SendMessage { peer_id, text } => {
+                    IpcCommand::SendAgentRequest { peer_id, text } => {
                         let text = text.trim();
-                        if text.is_empty() || text.len() > 8_000 {
+                        if text.is_empty() || text.chars().count() > 8_000 {
                             sink.send(IpcEvent::Error { message: "消息不能为空且不能超过 8000 个字符".to_owned() }).await?;
                             continue;
                         }
@@ -353,7 +353,26 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                             sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "连接已经断开".to_owned() }).await?;
                             continue;
                         };
-                        let message = Message::chat(peer.peer_id.clone(), text);
+                        let message = Message::agent_request(peer.peer_id.clone(), text);
+                        session.send(message.clone()).await.ok();
+                        sink.send(IpcEvent::Message { peer_id, message }).await?;
+                    }
+                    IpcCommand::SendAgentReply { peer_id, request_id, text, error } => {
+                        let text = text.trim();
+                        if request_id.trim().is_empty() || text.is_empty() || text.chars().count() > 8_000 {
+                            sink.send(IpcEvent::Error { message: "Agent 回复无效或超过 8000 个字符".to_owned() }).await?;
+                            continue;
+                        }
+                        if !active_peers.contains(&peer_id) {
+                            sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "无法回复：对方已经断开".to_owned() }).await?;
+                            continue;
+                        }
+                        let Some(session) = sessions.get(&peer_id).cloned() else {
+                            active_peers.remove(&peer_id);
+                            sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "无法回复：BLE 会话已经断开".to_owned() }).await?;
+                            continue;
+                        };
+                        let message = Message::agent_reply(peer.peer_id.clone(), request_id, text, error);
                         session.send(message.clone()).await.ok();
                         sink.send(IpcEvent::Message { peer_id, message }).await?;
                     }
@@ -474,7 +493,7 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                                 sink.send(IpcEvent::PeerDisconnected { peer_id }).await?;
                             }
                         }
-                        "chat.message" => {
+                        "agent.request" | "agent.response" | "agent.error" => {
                             if !active_peers.contains(&peer_id) || !seen_messages.insert(message.message_id.clone()) { continue; }
                             sink.send(IpcEvent::Message { peer_id, message }).await?;
                         }

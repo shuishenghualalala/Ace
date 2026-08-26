@@ -13,7 +13,6 @@ from crew.gateway.server import create_app
 from crew.state.config import Config, ModelProfile
 from crew.team.roles import CREW_BUILTIN_AGENT_ID
 
-
 OWNER_A = "A:uid-a"
 
 
@@ -65,6 +64,65 @@ async def test_api_session_context(api, auth_headers):
     assert "used_tokens" in data
     assert "max_tokens" in data
     assert "ratio" in data
+
+
+@pytest.mark.asyncio
+async def test_nearby_agent_turn_is_text_only_and_isolated_per_peer(tmp_path):
+    crew = build_app(
+        config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False),
+        enable_team=False,
+    )
+    app = create_app(crew)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        first = await client.post(
+            "/api/nearby/agent-turn",
+            json={
+                "peer_id": "ace_windows",
+                "peer_name": "Windows 工作站",
+                "request_id": "request-1",
+                "query": "你好",
+            },
+        )
+        second = await client.post(
+            "/api/nearby/agent-turn",
+            json={
+                "peer_id": "ace_windows",
+                "peer_name": "Windows 工作站",
+                "request_id": "request-2",
+                "query": "还记得上一条消息吗？",
+            },
+        )
+        other = await client.post(
+            "/api/nearby/agent-turn",
+            json={
+                "peer_id": "ace_other",
+                "peer_name": "另一台电脑",
+                "request_id": "request-3",
+                "query": "你好",
+            },
+        )
+        visible_sessions = await client.get("/api/sessions")
+
+    assert first.status_code == 200
+    assert first.json()["text"] == "[fake] 收到: 你好"
+    assert second.status_code == 200
+    assert second.json()["session_id"] == first.json()["session_id"]
+    assert other.status_code == 200
+    assert other.json()["session_id"] != first.json()["session_id"]
+    assert visible_sessions.json() == []
+
+    config = crew.session_store.get_agent_config(
+        first.json()["session_id"], owner_account_id="local"
+    )
+    assert config["disabled_toolsets"] == ["*"]
+    assert config["disabled_skills"] == ["*"]
+    assert config["nearby_text_only"] is True
+    history = crew.session_store.load(first.json()["session_id"], owner_account_id="local")
+    assert [message.content for message in history if message.role == "user"] == [
+        "你好",
+        "还记得上一条消息吗？",
+    ]
 
 
 @pytest.mark.asyncio
