@@ -657,7 +657,7 @@ graph TD
 </ul>
 
 <h2>2026-08-21 TeamSpec 持久化快照进入本轮规划</h2>
-<p>外部团队加载时会保留 <code>external_team.team_spec_json</code> 的 TeamSpec 快照；该快照来自“外援—组建团队”的结构化表单，团队名称不会被当作任务语义。Team turn 未显式携带 <code>team_spec</code> 时，<code>TeamManager</code> 将当前用户目标投影到该快照后传给 Turn Router 与 <code>TeamGraphPlanner</code>；普通聊天 Prompt 不重新触发 FormationConstraints 或 FormationPlan。因而 PlanningDecision 超时回退 Standard 时仍保留已确认的团队边界，同时本轮任务仍由当前 turn 语义决定。</p>
+<p>外部团队加载时会保留 <code>external_team.team_spec_json</code> 的 TeamSpec 快照；该快照来自“外援—组建团队”的结构化表单，团队名称不会被当作任务语义。Team turn 未显式携带 <code>team_spec</code> 时，<code>TeamManager</code> 将当前用户目标投影到该快照后传给 Turn Router 与 <code>TeamGraphPlanner</code>；Turn Router 始终以当前 Prompt 覆盖 TeamSpec 的旧 goal，寒暄、确认等 direct chat 快路径也不受长期 execution 默认影响。普通聊天 Prompt 不重新触发 FormationConstraints 或 FormationPlan。因而 PlanningDecision 超时回退 Standard 时仍保留已确认的团队边界，同时本轮任务仍由当前 turn 语义决定。</p>
 <p>旧持久化快照中若将 <code>intent</code>、<code>complexity</code> 等任务语义写在 <code>execution_profile</code>，仅在持久化边界投影回 <code>task_profile</code>；显式运行时输入仍由 <code>build_team_spec</code> 严格校验。回归测试覆盖快照投影、当前目标覆盖和成员 DAG 节点生成。</p>
 
 <h2>2026-08-21 已确认成员能力与模型画像合并</h2>

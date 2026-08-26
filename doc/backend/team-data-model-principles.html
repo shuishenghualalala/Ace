@@ -443,7 +443,7 @@ sequenceDiagram
   </ul>
 
   <h2>11. Workflow 业务概念体系</h2>
-  <p>一个长期 Team 可以拥有多个 Team Session；Session 中每个实质性用户 turn 产生一次 WorkflowRun。PlanningDecision 理解本轮语义，WorkflowPlan 定义准备怎么完成，WorkflowRun 与 NodeAttempt 保存实际执行，WorkflowEvent 保存可解释、可恢复的时间线。</p>
+  <p>一个长期 Team 可以拥有多个 Team Session；Session 中每个实质性用户 turn 产生一次 WorkflowRun。Team turn 路由始终以当前用户 Prompt 为目标，已保存 TeamSpec 只提供本轮实质任务的默认上下文，不能覆盖当前目标；寒暄、确认等 direct chat 快路径先于长期任务画像生效。PlanningDecision 理解本轮语义，WorkflowPlan 定义准备怎么完成，WorkflowRun 与 NodeAttempt 保存实际执行，WorkflowEvent 保存可解释、可恢复的时间线。</p>
   <div class="mermaid-wrap"><div class="mermaid">
 flowchart TD
   Team["Team<br/>长期阵容"] --> Session["Team Session<br/>连续对话"]
@@ -457,7 +457,7 @@ flowchart TD
   Run --> Event["WorkflowEvent<br/>审计时间线"]
   Event -. "新增/删除/替换节点、依赖或负责人" .-> Plan
   </div></div>
-  <div class="note"><code>PlanningDecision</code> 是一次受约束的内部语义分析结果，不独立落库、不成为长期业务对象。它负责把自然语言编译为可校验的任务结构；最终模式、成员分配、预算和执行权限仍由确定性代码控制。</div>
+  <div class="note"><code>PlanningDecision</code> 是一次受约束的内部语义分析结果，不独立落库、不成为长期业务对象。它负责把当前 Prompt 编译为可校验的任务结构；已保存 TeamSpec 只提供默认上下文，当前 Prompt 始终优先，最终模式、成员分配、预算和执行权限仍由确定性代码控制。</div>
 
   <h2>12. WorkflowPlan V1 最小契约</h2>
   <p><code>version</code> 表示数据结构版本；<code>revision</code> 表示同一次任务计划发生了多少次结构性修订。节点普通状态变化和同节点重试不增加 revision；新增、删除、替换节点，修改依赖或负责人时 revision 递增。</p>

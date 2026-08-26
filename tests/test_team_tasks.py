@@ -6412,6 +6412,47 @@ def test_team_turn_router_returns_team_turn_decision():
     assert fast_decision.diagnostics["turn_source"] == "task_profile"
 
 
+def test_team_turn_router_current_prompt_overrides_persisted_team_spec_goal():
+    router = TeamTurnRouter()
+
+    decision = router.route(
+        "写一个贪吃蛇游戏的开发方案",
+        team_spec={
+            "goal": "开发一个带登录的管理后台",
+            "task_profile": {
+                "intent": "documentation",
+                "complexity": "focused",
+            },
+        },
+    )
+
+    assert decision.is_new_workflow is True
+    assert decision.diagnostics["team_spec"]["goal"] == "写一个贪吃蛇游戏的开发方案"
+
+
+def test_team_turn_router_simple_chat_ignores_persisted_execution_defaults():
+    router = TeamTurnRouter()
+
+    decision = router.route(
+        "你好",
+        team_spec={
+            "goal": "开发一个完整网页游戏",
+            "task_profile": {
+                "intent": "implementation",
+                "complexity": "multi_role",
+            },
+            "team_requirements": {
+                "workflow_lanes": ["build", "verify"],
+            },
+        },
+    )
+
+    assert decision.is_direct_chat is True
+    assert decision.execution_mode == "direct"
+    assert decision.diagnostics["turn_source"] == "simple_chat"
+    assert decision.diagnostics["team_spec_default_ignored"] is True
+
+
 async def test_ai_planner_uses_llm_single_dag():
     tm, _ = _team(JsonGraphProvider(), config=Config(
         max_iterations=5,
