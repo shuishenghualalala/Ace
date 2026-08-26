@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from crew.team.capabilities import normalize_capabilities, normalize_capability
 
@@ -340,6 +340,64 @@ def confidence_dimensions(
         "topology": round(topology, 4),
         "capability": round(capability, 4),
         "overall": round(min(requirement, topology, capability), 4),
+    }
+
+
+def node_execution_contract(
+    *,
+    goal: str,
+    node_id: str,
+    title: str,
+    lane: str,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the stable execution contract projected into a plan node."""
+
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    outputs = {
+        "lead": ["任务拆解", "依赖关系", "验收标准"],
+        "plan": ["方案", "约束", "验收标准"],
+        "design": ["设计说明", "关键状态", "实现约束"],
+        "build": ["实现产物", "变更说明", "自测结果"],
+        "verify": ["测试记录", "缺陷/风险", "验收结论"],
+        "docs": ["交付记录", "产物引用", "后续建议"],
+        "release": ["发布检查", "环境说明", "风险清单"],
+        "summary": ["最终结论", "产物清单", "风险与下一步"],
+    }.get(lane, ["执行结果", "风险说明", "下一步"])
+    expected_output = str(metadata.get("expected_output") or "").strip()
+    raw_expected_outputs = metadata.get("expected_outputs")
+    declared_outputs = (
+        [expected_output]
+        if expected_output
+        else [
+            str(item).strip()
+            for item in (
+                raw_expected_outputs
+                if isinstance(raw_expected_outputs, (list, tuple))
+                else []
+            )
+            if str(item).strip()
+        ]
+    )
+    if declared_outputs:
+        outputs = declared_outputs
+    acceptance_criteria = [
+        "输出必须具体可检查。",
+        "如需改变团队成员或补员，必须先提示用户并等待确认。",
+        f"结果必须服务于用户目标：{goal}",
+    ]
+    if declared_outputs:
+        acceptance_criteria.insert(
+            0,
+            f"必须交付本节点声明的输出：{'、'.join(declared_outputs)}。",
+        )
+    return {
+        "purpose": title,
+        "inputs": ["用户目标", "上游节点结果"],
+        "outputs": outputs,
+        "acceptance_criteria": acceptance_criteria,
+        "requires_leader_review": "review" in node_id or "方案" in title or "审阅" in title,
+        "conflict_scope": lane,
     }
 
 

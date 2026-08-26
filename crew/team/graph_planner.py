@@ -32,6 +32,7 @@ from crew.team.workflow_plan import (
     WorkUnit,
     coerce_planning_decision,
     confidence_dimensions,
+    node_execution_contract,
     normalize_planning_mode,
     planning_decision_messages,
     select_planning_mode,
@@ -1829,32 +1830,6 @@ async def _build_ai_workflow_nodes_with_llm(
     return nodes, edges, ["AI Planner 使用 LLM 生成单方案 DAG。", *notes]
 
 
-def _node_contract(goal: str, node: PlanNode, metadata: dict[str, Any]) -> dict[str, Any]:
-    lane = str(metadata.get("workflow_lane") or "other")
-    outputs = {
-        "lead": ["任务拆解", "依赖关系", "验收标准"],
-        "plan": ["方案", "约束", "验收标准"],
-        "design": ["设计说明", "关键状态", "实现约束"],
-        "build": ["实现产物", "变更说明", "自测结果"],
-        "verify": ["测试记录", "缺陷/风险", "验收结论"],
-        "docs": ["交付记录", "产物引用", "后续建议"],
-        "release": ["发布检查", "环境说明", "风险清单"],
-        "summary": ["最终结论", "产物清单", "风险与下一步"],
-    }.get(lane, ["执行结果", "风险说明", "下一步"])
-    return {
-        "purpose": node.title,
-        "inputs": ["用户目标", "上游节点结果"],
-        "outputs": outputs,
-        "acceptance_criteria": [
-            "输出必须具体可检查。",
-            "如需改变团队成员或补员，必须先提示用户并等待确认。",
-            f"结果必须服务于用户目标：{goal}",
-        ],
-        "requires_leader_review": "review" in node.id or "方案" in node.title or "审阅" in node.title,
-        "conflict_scope": lane,
-    }
-
-
 def _normalize_nodes_with_graph(
     *,
     goal: str,
@@ -2007,7 +1982,13 @@ def _normalize_nodes_with_graph(
             ),
             "agent_log_style": "agent_turn",
             "execution_events": list(metadata.get("execution_events") or []),
-            "execution_contract": _node_contract(goal, node, metadata),
+            "execution_contract": node_execution_contract(
+                goal=goal,
+                node_id=node.id,
+                title=node.title,
+                lane=lane,
+                metadata=metadata,
+            ),
         })
         if coverage is not None:
             metadata["capability_coverage"] = coverage.to_dict()

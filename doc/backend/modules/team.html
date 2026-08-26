@@ -705,4 +705,9 @@ graph TD
 <p>因此同一长期开发团队收到“只写贪吃蛇开发方案”时，确认后的 WorkflowPlan 只保留方案/设计节点；如果本轮确实要求实现和验证，PlanningDecision 的 build/verify work units 才会进入当前 TeamSpec 和 DAG。同步 Fast/显式 TeamSpec 规划仍保持原有结构化输入行为。本阶段未新增模块、数据库表或 API。</p>
 <p>验证：新增长期 TeamSpec 与本轮 plan-only 决策的隔离回归，覆盖当前目标、task_profile、能力、泳道、交付物、验收标准和 WorkflowPlan.task 投影；并运行 Team 全量测试、Python 编译检查。</p>
 
+<h2>2026-08-26 Team 第四阶段：WorkflowPlan 节点契约单向编译</h2>
+<p>节点执行契约统一由 <code>workflow_plan.py</code> 生成，<code>graph_planner.py</code> 只负责语义工作单元、负责人和 DAG 编译。PlanningDecision 的 <code>expected_output</code>、Formation 节点的 <code>expected_outputs</code> 会优先进入 WorkflowPlan 节点的 <code>expected_outputs</code> 与验收条件；没有显式声明时才使用泳道默认契约。</p>
+<p>这样 TeamSpec → WorkflowPlan → TeamPlan 的链路只有一个方向：WorkflowPlan 保存当前回合的稳定计划快照，TeamPlan/看板只保存其运行状态和投影，不重新解释任务语义，也不会把长期团队的默认输出带回当前回合。本阶段未新增模块、数据库表或 API。</p>
+<p>验证：补充方案节点实际输出进入 WorkflowPlan 的回归；Team 全量测试、ruff、Python 编译和 diff 检查通过后提交。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

@@ -7879,6 +7879,11 @@ async def test_team_planning_pauses_when_plan_only_conflicts_with_default_execut
     assert confirmed.spec.planning["verify_plan_mode"] == "skip"
     assert confirmed.workflow_plan["task"]["deliverables"] == ["开发方案"]
     assert confirmed.workflow_plan["task"]["acceptance_criteria"] == ["开发方案"]
+    plan_node = next(
+        node for node in confirmed.workflow_plan["nodes"] if node["id"] == "snake_plan"
+    )
+    assert plan_node["expected_outputs"] == ["开发方案"]
+    assert "必须交付本节点声明的输出：开发方案。" in plan_node["acceptance_criteria"]
 
 
 @pytest.mark.asyncio
