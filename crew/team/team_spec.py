@@ -254,6 +254,25 @@ def build_team_spec(source: TeamSpecInput = None) -> TeamSpec:
     )
 
 
+def team_spec_for_creation(
+    source: TeamSpecInput = None,
+    *,
+    description: str = "",
+) -> dict[str, Any]:
+    """Build the durable TeamSpec from the team-creation form.
+
+    Team creation is a structured UI flow, not a chat turn. When the form
+    does not provide a TeamSpec, only its explicit description is used as the
+    initial goal; the team name is intentionally not treated as task
+    semantics. The normalized snapshot is persisted once the user confirms
+    the roster.
+    """
+
+    if source is None:
+        source = {"goal": str(description or "").strip()}
+    return build_team_spec(source).to_dict()
+
+
 def persisted_team_spec_for_turn(source: Mapping[str, Any], goal: str) -> dict[str, Any]:
     """Project a persisted TeamSpec snapshot into the current turn contract.
 

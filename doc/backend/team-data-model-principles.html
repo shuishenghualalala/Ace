@@ -328,7 +328,7 @@ flowchart LR
   "risk_level": "medium",
   "uncertainty": "low"
 }</code></pre>
-  <p>当前创建 Team 时的快照位于 <code>external_team.team_spec_json</code>。运行阶段不得覆盖创建 Team 时的长期快照；本轮实际目标、交付物和验收条件保存于 WorkflowPlan 的 <code>task</code>，两者通过 Team 与 turn 上下文关联。</p>
+  <p>当前创建 Team 时的快照位于 <code>external_team.team_spec_json</code>。创建入口是“外援—组建团队”的结构化表单，不是聊天 Prompt；如果表单没有显式描述，只保存最小 TeamSpec，不从团队名称推断任务能力或工作流。运行阶段不得覆盖创建 Team 时的长期快照；本轮实际目标、交付物和验收条件保存于 WorkflowPlan 的 <code>task</code>，两者通过 Team 与 turn 上下文关联。</p>
 
   <h2>4. CapabilityCatalog：能力是共享词典，不是第五个数据对象</h2>
   <p><code>crew/team/capabilities.py</code> 是 TeamSpec、AgentProfile、FormationPlan 与角色目录共同使用的通用能力词典。它不独立落库、不增加领域标签，也不保存某次任务分工。能力覆盖计算由 <code>crew/team/agent_profile.py</code> 的 <code>CapabilityCoverage</code>/<code>evaluate_capability_coverage()</code> 统一完成；该结果是一次性计算结果，不是新的画像对象，也不引入 <code>EffectiveAgentProfile</code>。</p>
@@ -411,7 +411,7 @@ sequenceDiagram
   UI->>Store: TeamSpec + FormationPlan + 成员投影
   Store-->>UI: 已创建 Team
   </div></div>
-  <ul><li>创建页采用"定义团队 → 确认阵容"两阶段：第一阶段只要求团队名称，系统提供目标参考、默认 Leader 和常用约束选项。</li><li>点击"智能组队"生成候选 FormationPlan，不立即写数据库；前端不再提前要求用户编辑槽位或工作流。</li><li>Leader、目标或约束变化后，候选 FormationPlan 失效并重新求解。</li><li>确认阵容阶段展示成员、角色、assigned capabilities、覆盖率与置信度；完整职责按需展开编辑。</li><li>点击"创建/保存团队"后，持久化 TeamSpec、FormationPlan，并把成员应用到 <code>external_team_member</code>。</li><li>创建页展示的默认协作方式只是 FormationPlan 的可读说明；实际 WorkflowPlan / DAG 仍在每轮任务运行时生成。</li></ul>
+  <ul><li>创建页采用"定义团队 → 确认阵容"两阶段：第一阶段填写团队名称、可选的结构化目标和长期策略，名称本身不作为任务语义。</li><li>点击"智能组队"生成候选 FormationPlan，不立即写数据库；手动选择成员时不需要聊天式 PlanningDecision。</li><li>Leader、目标或约束变化后，候选 FormationPlan 失效并重新求解。</li><li>确认阵容阶段展示成员、角色、assigned capabilities、覆盖率与置信度；完整职责按需展开编辑。</li><li>点击"创建/保存团队"后，规范化并持久化 TeamSpec、FormationPlan，并把成员应用到 <code>external_team_member</code>。</li><li>创建页展示的默认协作方式只是 FormationPlan 的可读说明；实际 WorkflowPlan / DAG 仍在每轮任务运行时生成。</li></ul>
 
   <h2>9. 数据库落点</h2>
   <table><thead><tr><th>数据</th><th>当前权威落点</th><th>状态</th></tr></thead><tbody>

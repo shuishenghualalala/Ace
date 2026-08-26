@@ -43,6 +43,7 @@ from crew.team.roles import (
     intelligent_role_markdown,
     role_preset,
 )
+from crew.team.team_spec import team_spec_for_creation
 
 log = get_logger("gateway.runtimes")
 
@@ -683,13 +684,14 @@ def create_runtimes_router(crew) -> APIRouter:
     async def create_external_team(request: Request, payload: dict) -> JSONResponse:
         owner = account_from_request(request).owner_account_id
         store = _external_store()
+        team_description = str(payload.get("description") or "").strip()
+        raw_team_spec = payload.get("team_spec")
         members = [
             dict(member)
             for member in (payload.get("members") or [])
             if isinstance(member, dict)
         ]
         leader_agent_id = str(payload.get("leader_agent_id") or "").strip()
-        team_goal = str(payload.get("description") or payload.get("name") or "").strip()
         existing_plan = (
             copy.deepcopy(payload.get("formation_plan"))
             if isinstance(payload.get("formation_plan"), dict)
@@ -715,6 +717,13 @@ def create_runtimes_router(crew) -> APIRouter:
                     log.warning("回滚临时成员失败: agent_id=%s", agent_id)
 
         try:
+            if raw_team_spec is not None and not isinstance(raw_team_spec, dict):
+                raise ValueError("team_spec 必须是结构化对象")
+            team_spec = team_spec_for_creation(
+                raw_team_spec,
+                description=team_description,
+            )
+            team_goal = str(team_spec.get("goal") or team_description).strip()
             valid_role_keys = {
                 str(role.get("key") or "")
                 for role in all_role_public_payloads()
@@ -798,9 +807,9 @@ def create_runtimes_router(crew) -> APIRouter:
                 name=str(payload.get("name") or "").strip() or "未命名团队",
                 leader_agent_id=leader_agent_id,
                 members=members,
-                description=str(payload.get("description") or "").strip(),
+                description=team_description,
                 instructions=str(payload.get("instructions") or payload.get("workflow") or "").strip(),
-                team_spec=payload.get("team_spec") if isinstance(payload.get("team_spec"), dict) else None,
+                team_spec=team_spec,
                 formation_plan=formation_plan,
             )
         except KeyError as exc:
