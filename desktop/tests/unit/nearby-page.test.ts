@@ -88,7 +88,7 @@ describe('nearby page', () => {
       message: {
         message_id: 'local_1',
         sender: 'ace_local',
-        message_type: 'agent.request',
+        type: 'agent.request',
         payload: { text: '来自 Mac 的消息' },
       },
     });
@@ -98,7 +98,7 @@ describe('nearby page', () => {
       message: {
         message_id: 'remote_1',
         sender: 'ace_peer_a',
-        message_type: 'agent.response',
+        type: 'agent.response',
         payload: { request_id: 'local_1', text: 'Windows 已收到' },
       },
     });

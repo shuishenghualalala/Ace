@@ -31,7 +31,7 @@ describe('NearbyService Agent routing', () => {
       type: 'message',
       peer_id: 'ace_remote',
       message: {
-        message_type: 'agent.request',
+        type: 'agent.request',
         message_id: 'request-1',
         sender: 'ace_remote',
         payload: { text: 'hello' },
@@ -50,7 +50,7 @@ describe('NearbyService Agent routing', () => {
       type: 'message',
       peer_id: 'ace_remote',
       message: {
-        message_type: 'agent.response',
+        type: 'agent.response',
         message_id: 'response-1',
         sender: 'ace_remote',
         payload: { request_id: 'request-1', text: 'reply' },
@@ -60,7 +60,7 @@ describe('NearbyService Agent routing', () => {
       type: 'message',
       peer_id: 'ace_remote',
       message: {
-        message_type: 'agent.request',
+        type: 'agent.request',
         message_id: 'request-2',
         sender: 'ace_local',
         payload: { text: 'own echo' },
@@ -91,7 +91,7 @@ describe('NearbyService Agent routing', () => {
       type: 'message',
       peer_id: 'ace_remote',
       message: {
-        message_type: 'agent.request',
+        type: 'agent.request',
         message_id: 'request-pending',
         sender: 'ace_remote',
         payload: { text: 'wait' },

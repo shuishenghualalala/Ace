@@ -255,7 +255,7 @@ export class NearbyService {
     const value = event.message;
     if (!peerId || !value || typeof value !== 'object' || Array.isArray(value)) return;
     const message = value as Record<string, unknown>;
-    if (message.message_type !== 'agent.request' || message.sender === this.localPeerId) return;
+    if (message.type !== 'agent.request' || message.sender === this.localPeerId) return;
     const requestId = typeof message.message_id === 'string' ? message.message_id : '';
     const payload = message.payload;
     if (!requestId || !payload || typeof payload !== 'object' || Array.isArray(payload)) return;
@@ -271,6 +271,7 @@ export class NearbyService {
 
     const controller = new AbortController();
     this.agentRuns.set(runKey, controller);
+    console.warn(`[nearby][agent] request_received peer=${peerId} request=${requestId}`);
     const request: NearbyAgentTurnRequest = {
       peerId,
       peerName: this.peers.get(peerId) ?? '附近的用户',
@@ -278,10 +279,14 @@ export class NearbyService {
       text,
     };
     void this.options.runAgentTurn(request, controller.signal)
-      .then((reply) => this.sendAgentReply(peerId, requestId, reply, false))
+      .then((reply) => {
+        console.warn(`[nearby][agent] turn_completed peer=${peerId} request=${requestId}`);
+        return this.sendAgentReply(peerId, requestId, reply, false);
+      })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
         const detail = error instanceof Error ? error.message : String(error);
+        console.warn(`[nearby][agent] turn_failed peer=${peerId} request=${requestId} error=${detail}`);
         return this.sendAgentReply(peerId, requestId, detail || 'Agent 暂时无法回复', true);
       })
       .finally(() => this.agentRuns.delete(runKey));
@@ -302,6 +307,7 @@ export class NearbyService {
       text,
       error,
     };
+    console.warn(`[nearby][agent] reply_queued peer=${peerId} request=${requestId} error=${error}`);
     this.child.stdin.write(`${JSON.stringify(command)}\n`);
   }
 

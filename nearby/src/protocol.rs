@@ -469,6 +469,9 @@ mod tests {
         let request = Message::agent_request("crew_local", "hello");
         assert_eq!(request.message_type, "agent.request");
         assert_eq!(request.payload["text"], "hello");
+        let wire_request = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire_request["type"], "agent.request");
+        assert!(wire_request.get("message_type").is_none());
 
         let response = Message::agent_reply("crew_local", &request.message_id, "hi", false);
         assert_eq!(response.message_type, "agent.response");

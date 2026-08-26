@@ -9,8 +9,8 @@ interface NearbyPeer {
 interface NearbyMessage {
   message_id: string;
   sender: string;
-  message_type: string;
-  payload: { text?: string };
+  type: string;
+  payload: { request_id?: string; text?: string };
 }
 
 interface NearbyEvent {
@@ -203,7 +203,7 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
     for (const message of items) {
       const own = message.sender === localPeerId;
       const item = document.createElement('article');
-      const failed = message.message_type === 'agent.error';
+      const failed = message.type === 'agent.error';
       item.className = `nearby-message${own ? ' nearby-message--own' : ''}${failed ? ' nearby-message--error' : ''}`;
       item.dataset.messageId = message.message_id;
       const bubble = textElement('p', 'nearby-message__bubble', String(message.payload.text ?? ''));
@@ -386,7 +386,7 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
         if (
           !peerId
           || !message
-          || !['agent.request', 'agent.response', 'agent.error'].includes(message.message_type)
+          || !['agent.request', 'agent.response', 'agent.error'].includes(message.type)
         ) break;
         const history = messages.get(peerId) ?? [];
         if (!history.some((item) => item.message_id === message.message_id)) history.push(message);
@@ -394,9 +394,9 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
         if (!activePeerId || message.sender !== localPeerId) activePeerId = peerId;
         renderPeers();
         renderConversation();
-        if (message.message_type === 'agent.error') {
+        if (message.type === 'agent.error') {
           setStatus(`${peerLabel(peers.get(peerId))} 的 Agent 回复失败`, 'error');
-        } else if (message.message_type === 'agent.request') {
+        } else if (message.type === 'agent.request') {
           setStatus(
             message.sender === localPeerId
               ? '消息已发送，等待对方 Agent 回复…'
