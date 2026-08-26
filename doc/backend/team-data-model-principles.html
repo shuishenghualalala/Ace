@@ -500,7 +500,8 @@ flowchart TD
   "warnings": []
 }</code></pre>
   <p>WorkflowPlan 不保存节点实时状态、结果摘要、产物路径、retry count、模型思考、工具调用过程、完整 AgentProfile、完整 FormationPlan 或领域标签。这些数据分别属于 WorkflowRun、NodeAttempt、WorkflowEvent 或既有长期对象。</p>
-  <p><b>计划编译边界：</b>WorkflowPlan 只从当前回合 TeamSpec 和已编译 DAG 生成。任务级交付物与验收标准进入 <code>task</code>，节点级 <code>required_capabilities</code>、<code>expected_outputs</code> 和 <code>acceptance_criteria</code> 进入节点契约；如果 PlanningDecision 或 Formation 节点已经声明具体输出，优先保留该声明，不再用泳道默认文案覆盖。TeamPlan 只是该快照的可变运行投影。</p>
+  <p><b>计划编译边界：</b>WorkflowPlan 只从当前回合 TeamSpec 和已编译 DAG 生成。任务级交付物与验收标准进入 <code>task</code>，节点级 <code>required_capabilities</code>、<code>expected_outputs</code> 和 <code>acceptance_criteria</code> 进入节点契约；如果 PlanningDecision 或 Formation 节点已经声明具体输出，优先保留该声明，不再用泳道默认文案覆盖。TeamPlan 只是该快照的可变运行投影；运行时主路径只消费 WorkflowPlan 的节点与 edges，旧的独立图参数只服务于无快照的兼容入口。</p>
+  <p><b>运行投影边界（2026-08-26）：</b>恢复时以当前 <code>kanban_workflows.context.workflow_plan</code> 为静态事实源，<code>team_plan_created</code> 事件仅作为旧快照缺失节点时的兼容兜底；节点状态、结果、重试、产物、临时负责人和执行事件由 WorkflowRun/看板投影提供，不覆盖 WorkflowPlan 的任务语义。快照节点携带稳定展示字段与契约，避免 TeamPlan 在进程重启后重新解释任务。</p>
 
   <h2>13. Workflow 持久化与重启恢复</h2>
   <p>V1 不新建平行 Workflow 表。当前生效 WorkflowPlan 写入 <code>kanban_workflows.context.workflow_plan</code>；节点和 edges 分别投影到 <code>kanban_tasks</code> 与 <code>kanban_dependencies</code>；每次节点执行写入 <code>kanban_task_runs</code>；协作、决策和计划修订追加写入 <code>kanban_events</code>。</p>

@@ -2641,6 +2641,83 @@ async def test_team_plan_persists_to_kanban_store_and_history_events(tmp_path):
     assert created_nodes["build_1"]["metadata"]["workflow_lane"] == "build"
 
 
+def test_create_plan_uses_workflow_plan_graph_as_runtime_source():
+    tm, _ = _team()
+    result = tm.create_plan(
+        "workflow-plan-source",
+        goal="旧入口目标",
+        nodes=[{"id": "legacy", "title": "旧节点", "assignee": "coder"}],
+        edges=[],
+        workflow_plan={
+            "version": 1,
+            "revision": 1,
+            "task": {"goal": "当前计划目标"},
+            "nodes": [{"id": "canonical", "title": "当前节点", "assignee_id": "coder"}],
+            "edges": [],
+        },
+    )
+
+    assert [node["node_id"] for node in result["plan"]["nodes"]] == ["canonical"]
+    assert result["plan"]["nodes"][0]["title"] == "当前节点"
+
+
+def test_hydrate_keeps_workflow_plan_contract_when_creation_event_is_stale(tmp_path):
+    store = SQLiteKanbanStore(tmp_path / "workflow-plan-source.db")
+    owner_store = store.for_owner("local")
+    tm, _ = _team(kanban_store=store)
+    tm.create_plan(
+        "workflow-plan-recovery-source",
+        goal="任务",
+        nodes=[{"id": "legacy", "title": "旧节点", "assignee": "coder"}],
+        owner_account_id="local",
+        workflow_plan={
+            "version": 1,
+            "revision": 1,
+            "task": {"goal": "任务"},
+            "nodes": [{
+                "id": "canonical",
+                "title": "当前节点",
+                "kind": "build",
+                "assignee_id": "coder",
+                "required_capabilities": ["implementation"],
+                "inputs": ["task.goal"],
+                "expected_outputs": ["当前输出"],
+                "acceptance_criteria": ["必须检查当前输出"],
+            }],
+            "edges": [],
+        },
+    )
+    workflow = owner_store.get_latest_workflow_by_session("workflow-plan-recovery-source")
+    assert workflow is not None
+    owner_store.add_event(
+        workflow.id,
+        "team_plan_created",
+        actor="legacy_runtime",
+        payload={
+            "nodes": [{
+                "node_id": "canonical",
+                "title": "过期节点",
+                "metadata": {
+                    "required_capabilities": ["testing"],
+                    "execution_contract": {"outputs": ["过期输出"]},
+                },
+            }],
+        },
+    )
+
+    restored = tm._hydrate_persisted_team_plan(
+        "workflow-plan-recovery-source",
+        owner_account_id="local",
+    )
+
+    assert restored is not None
+    node = restored.nodes["canonical"]
+    assert node.title == "当前节点"
+    assert node.metadata["required_capabilities"] == ["implementation"]
+    assert node.metadata["execution_contract"]["outputs"] == ["当前输出"]
+    assert node.metadata["execution_contract"]["acceptance_criteria"] == ["必须检查当前输出"]
+
+
 def test_workflow_plan_revision_updates_snapshot_and_event_atomically(tmp_path):
     store = SQLiteKanbanStore(tmp_path / "workflow-revision.db").for_owner("local")
     workflow = store.create_workflow(

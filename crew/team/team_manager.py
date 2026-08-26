@@ -107,6 +107,7 @@ from crew.team.turn_decision import (
     new_workflow_decision,
 )
 from crew.team.turn_router import TeamTurnRouter
+from crew.team.workflow_plan import workflow_node_runtime_metadata, workflow_plan_graph
 from crew.tools.registry import Registry
 
 log = get_logger("team")
@@ -833,7 +834,7 @@ class InProcessTeamManager(TeamManager):
         session_id: str,
         *,
         goal: str,
-        nodes: list[dict[str, Any]],
+        nodes: list[dict[str, Any]] | None = None,
         edges: list[Any] | None = None,
         external_team_id: str = "",
         owner_account_id: str = "",
@@ -841,7 +842,8 @@ class InProcessTeamManager(TeamManager):
     ) -> dict[str, Any]:
         """创建或替换当前 Team session 的轻量 TeamPlan。
 
-        第一阶段保持内存实现；结构校验复用 Dynamic Kanban 的 PlanGraph。
+        带 WorkflowPlan 快照时，节点和依赖只从快照读取；``nodes``/
+        ``edges`` 仅保留给没有快照的旧入口，避免同一次规划维护两份图。
         """
         from crew.dynamickanban.models import PlanEdge, PlanNode, PlanResult
         from crew.dynamickanban.plan_graph import PlanGraph
@@ -852,6 +854,10 @@ class InProcessTeamManager(TeamManager):
             owner_account_id=owner_account_id,
         )
         default_member = next((m for m in valid_members if m != "leader"), valid_members[0])
+        if isinstance(workflow_plan, dict) and "nodes" in workflow_plan:
+            nodes, edges = workflow_plan_graph(workflow_plan)
+        if nodes is None:
+            raise ValueError("TeamPlan 需要 WorkflowPlan 快照或 nodes")
         raw_node_metadata: dict[str, dict[str, Any]] = {}
         plan_nodes = []
         for raw in nodes:
@@ -862,11 +868,17 @@ class InProcessTeamManager(TeamManager):
                 id=raw_id,
                 title=str(raw.get("title") or raw.get("content") or "").strip(),
                 detail=str(raw.get("detail") or raw.get("description") or "").strip(),
-                assignee=str(raw.get("assignee") or "").strip() or default_member,
+                assignee=str(raw.get("assignee") or raw.get("assignee_id") or "").strip() or default_member,
             ))
             raw_meta = raw.get("metadata")
             if raw_id and isinstance(raw_meta, dict):
                 raw_node_metadata[raw_id] = dict(raw_meta)
+            if raw_id and isinstance(workflow_plan, dict) and "nodes" in workflow_plan:
+                raw_node_metadata[raw_id] = workflow_node_runtime_metadata(
+                    workflow_plan,
+                    raw,
+                    runtime_metadata=raw_node_metadata.get(raw_id),
+                )
         if not plan_nodes:
             raise ValueError("TeamPlan 至少需要一个节点")
 
@@ -4901,14 +4913,11 @@ class InProcessTeamManager(TeamManager):
             )
         finally:
             self._end_team_planning(session_id, owner_account_id)
-        nodes, edges = graph_plan.nodes, graph_plan.edges
-        if not nodes:
+        if not graph_plan.nodes:
             return None
         created = self.create_plan(
             session_id,
             goal=goal,
-            nodes=nodes,
-            edges=edges,
             external_team_id=external_team_id,
             owner_account_id=owner_account_id,
             workflow_plan=graph_plan.workflow_plan,
@@ -4962,14 +4971,11 @@ class InProcessTeamManager(TeamManager):
             self._planning_missing_info[plan_key] = blocking_missing
             return None
         self._planning_missing_info.pop(plan_key, None)
-        nodes, edges = graph_plan.nodes, graph_plan.edges
-        if not nodes:
+        if not graph_plan.nodes:
             return None
         created = self.create_plan(
             session_id,
             goal=goal,
-            nodes=nodes,
-            edges=edges,
             external_team_id=external_team_id,
             owner_account_id=owner_account_id,
             workflow_plan=graph_plan.workflow_plan,
@@ -4980,7 +4986,9 @@ class InProcessTeamManager(TeamManager):
                 "[Team] Runtime 创建 TeamPlan session=%s nodes=%s strategy=%s policy_warnings=%s",
                 session_id,
                 [node.get("node_id") for node in plan_data.get("nodes") or []],
-                (nodes[0].get("metadata") or {}).get("plan_strategy") if nodes else "",
+                (graph_plan.nodes[0].get("metadata") or {}).get("plan_strategy")
+                if graph_plan.nodes
+                else "",
                 [item.message for item in graph_plan.policy_report.warnings],
             )
         return self._plans.get(plan_key)

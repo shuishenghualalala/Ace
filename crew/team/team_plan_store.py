@@ -13,6 +13,7 @@ from typing import Any
 
 from crew.state.logging import get_logger
 from crew.team.models import TeamMemberSpec, TeamPlan, TeamPlanEdge, TeamPlanNode
+from crew.team.workflow_plan import workflow_node_runtime_metadata
 
 log = get_logger("team.plan_store")
 TeamKey = tuple[str, str]
@@ -239,14 +240,18 @@ class TeamPlanStore:
                 if isinstance(raw, dict)
                 and str(raw.get("id") or raw.get("node_id") or "").strip()
             }
-            for event in sorted(events, key=lambda item: float(item.get("ts") or 0)):
-                if str(event.get("event_type") or "") != "team_plan_created":
-                    continue
-                for raw in (event.get("payload") or {}).get("nodes") or []:
-                    if isinstance(raw, dict):
-                        raw_id = str(raw.get("node_id") or raw.get("id") or "").strip()
-                        if raw_id:
-                            raw_nodes[raw_id] = {**raw_nodes.get(raw_id, {}), **dict(raw)}
+            # The current WorkflowPlan snapshot is the static source of truth.
+            # The creation event is retained as a legacy fallback for boards
+            # created before snapshots contained their graph nodes.
+            if not raw_nodes:
+                for event in sorted(events, key=lambda item: float(item.get("ts") or 0)):
+                    if str(event.get("event_type") or "") != "team_plan_created":
+                        continue
+                    for raw in (event.get("payload") or {}).get("nodes") or []:
+                        if isinstance(raw, dict):
+                            raw_id = str(raw.get("node_id") or raw.get("id") or "").strip()
+                            if raw_id:
+                                raw_nodes[raw_id] = dict(raw)
             node_ids = list(dict.fromkeys([*raw_nodes, *task_by_node]))
             if target_node_id and target_node_id not in node_ids:
                 continue
@@ -281,8 +286,12 @@ class TeamPlanStore:
                 event_payload = latest_node_events.get(current_node_id, {})
                 raw_metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
                 metadata = {**dict(raw_metadata), **dict(metadata_by_node.get(current_node_id) or {})}
-                if raw.get("required_capabilities") and "required_capabilities" not in metadata:
-                    metadata["required_capabilities"] = list(raw.get("required_capabilities") or [])
+                if workflow_plan.get("nodes") and raw:
+                    metadata = workflow_node_runtime_metadata(
+                        workflow_plan,
+                        raw,
+                        runtime_metadata=metadata,
+                    )
                 assignee = str(
                     task.get("assignee")
                     if task.get("assignee") is not None

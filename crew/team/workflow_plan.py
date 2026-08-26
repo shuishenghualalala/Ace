@@ -401,6 +401,105 @@ def node_execution_contract(
     }
 
 
+def workflow_plan_graph(
+    workflow_plan: Mapping[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    """Return the graph inputs carried by a WorkflowPlan snapshot.
+
+    WorkflowPlan is the persisted plan contract.  The runtime TeamPlan may
+    still be built from the legacy ``nodes``/``edges`` arguments, but callers
+    with a snapshot should not maintain a second graph definition beside it.
+    """
+
+    if not isinstance(workflow_plan, Mapping):
+        return [], []
+    nodes = [dict(node) for node in workflow_plan.get("nodes") or [] if isinstance(node, Mapping)]
+    edges = [
+        dict(edge) if isinstance(edge, Mapping) else edge
+        for edge in workflow_plan.get("edges") or []
+    ]
+    return nodes, edges
+
+
+def workflow_node_runtime_metadata(
+    workflow_plan: Mapping[str, Any],
+    node: Mapping[str, Any],
+    *,
+    runtime_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project stable WorkflowPlan node fields into runtime metadata.
+
+    Runtime metadata may contain status/attempt annotations from events, but
+    stable capability and output contract fields always come from the current
+    WorkflowPlan snapshot.  This prevents stale ``team_plan_created`` payloads
+    from silently changing the node contract during process recovery.
+    """
+
+    metadata = dict(runtime_metadata) if isinstance(runtime_metadata, Mapping) else {}
+    node_id = str(node.get("id") or node.get("node_id") or "").strip()
+    title = str(node.get("title") or node_id).strip()
+    lane = str(node.get("workflow_lane") or node.get("kind") or metadata.get("workflow_lane") or "other").strip() or "other"
+    required_capabilities = normalize_capabilities(node.get("required_capabilities") or [])
+    expected_outputs = [
+        str(item).strip()
+        for item in (node.get("expected_outputs") or [])
+        if str(item).strip()
+    ]
+    inputs = [
+        str(item).strip()
+        for item in (node.get("inputs") or [])
+        if str(item).strip()
+    ]
+    contract = node_execution_contract(
+        goal=str((workflow_plan.get("task") or {}).get("goal") or "").strip(),
+        node_id=node_id,
+        title=title,
+        lane=lane,
+        metadata={"expected_outputs": expected_outputs},
+    )
+    if inputs:
+        contract["inputs"] = inputs
+    if node.get("acceptance_criteria"):
+        contract["acceptance_criteria"] = [
+            str(item).strip()
+            for item in node.get("acceptance_criteria") or []
+            if str(item).strip()
+        ]
+    planning = workflow_plan.get("planning") if isinstance(workflow_plan.get("planning"), Mapping) else {}
+    execution_mode = str(
+        planning.get("selected_mode") or planning.get("requested_mode") or "standard"
+    ).strip()
+    execution_profile = dict(metadata.get("execution_profile") or {})
+    execution_profile.update({
+        "requested_mode": str(planning.get("requested_mode") or execution_mode),
+        "selected_mode": execution_mode,
+    })
+    execution_profile.setdefault("budget", dict(workflow_plan.get("budget_snapshot") or {}))
+    metadata.update({
+        "workflow_lane": lane,
+        "required_capabilities": required_capabilities,
+        "capability_source": str(node.get("capability_source") or metadata.get("capability_source") or ""),
+        "execution_contract": contract,
+        "planner": str(node.get("planner") or planning.get("engine") or metadata.get("planner") or "team_graph_planner"),
+        "execution_profile": execution_profile,
+        "execution_budget": dict(workflow_plan.get("budget_snapshot") or {}),
+        "execution_mode": execution_mode,
+        "agent_log_style": "agent_turn",
+    })
+    for key in (
+        "display_title",
+        "role_key",
+        "role_label",
+        "display_order",
+        "full_title",
+        "display_action",
+        "plan_strategy",
+    ):
+        if node.get(key) not in (None, ""):
+            metadata[key] = node[key]
+    return metadata
+
+
 def workflow_plan_from_graph(
     *,
     goal: str,
@@ -429,18 +528,30 @@ def workflow_plan_from_graph(
     for node in nodes:
         metadata = dict(node.get("metadata") or {})
         contract = dict(metadata.get("execution_contract") or {})
-        plan_nodes.append({
+        plan_node = {
             "id": str(node.get("id") or ""),
             "title": str(node.get("title") or ""),
+            "detail": str(node.get("detail") or ""),
             "display_title": str(metadata.get("display_title") or ""),
             "kind": str(metadata.get("work_unit_kind") or metadata.get("workflow_lane") or "other"),
+            "workflow_lane": str(metadata.get("workflow_lane") or ""),
             "assignee_id": str(node.get("assignee") or "leader"),
             "required_capabilities": normalize_capabilities(metadata.get("required_capabilities") or []),
             "capability_source": str(metadata.get("capability_source") or ""),
             "inputs": list(contract.get("inputs") or ["task.goal"]),
             "expected_outputs": list(contract.get("outputs") or []),
             "acceptance_criteria": list(contract.get("acceptance_criteria") or []),
-        })
+            "planner": str(metadata.get("planner") or ""),
+            "plan_strategy": str(metadata.get("plan_strategy") or ""),
+            "execution_profile": dict(metadata.get("execution_profile") or {}),
+            "execution_budget": dict(metadata.get("execution_budget") or {}),
+            "execution_mode": str(metadata.get("execution_mode") or ""),
+            "agent_log_style": str(metadata.get("agent_log_style") or ""),
+        }
+        for key in ("role_key", "role_label", "display_order", "full_title", "display_action"):
+            if key in metadata:
+                plan_node[key] = metadata[key]
+        plan_nodes.append(plan_node)
     planning_payload = {
         "requested_mode": requested_mode,
         "selected_mode": selected_mode,

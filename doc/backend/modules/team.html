@@ -710,4 +710,9 @@ graph TD
 <p>这样 TeamSpec → WorkflowPlan → TeamPlan 的链路只有一个方向：WorkflowPlan 保存当前回合的稳定计划快照，TeamPlan/看板只保存其运行状态和投影，不重新解释任务语义，也不会把长期团队的默认输出带回当前回合。本阶段未新增模块、数据库表或 API。</p>
 <p>验证：补充方案节点实际输出进入 WorkflowPlan 的回归；Team 全量测试、ruff、Python 编译和 diff 检查通过后提交。</p>
 
+<h2>2026-08-26 Team 重构第五阶段：WorkflowPlan 到 TeamPlan 单向运行投影</h2>
+<p><code>WorkflowPlan</code> 现在是本轮节点与依赖的唯一静态输入。TeamManager 的运行时主路径不再同时传入独立的 <code>nodes/edges</code> 和快照；旧参数仅保留给没有 WorkflowPlan 的兼容入口。恢复时当前快照优先，历史 <code>team_plan_created</code> 事件只在旧数据缺少节点时兜底，避免旧事件覆盖当前节点标题、负责人、能力和执行契约。</p>
+<p>WorkflowPlan 节点补充必要的展示字段与节点契约投影，TeamPlan/看板继续保存状态、结果、重试、产物和运行事件；运行态不会反写任务语义。修复同时兼容 <code>assignee</code>/<code>assignee_id</code>，保持旧入口、成员执行、Fast 模式、恢复和 Web/Desktop 看板展示不变。本阶段未新增模块、数据库表或接口。</p>
+<p>验证：<code>tests/test_team_tasks.py</code> 为 <code>246 passed, 1 skipped</code>，新增快照单源与旧事件恢复回归；相关 Python 编译检查、Ruff 和 <code>git diff --check</code> 通过。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>
