@@ -17,6 +17,7 @@ from crew.agent.loop.tool_result_display import (
     tool_result_detail_for_ui,
 )
 from crew.core.envelope import Envelope
+from crew.core.mocks import FakeProvider
 from crew.core.types import Message, ToolCall, tool_arguments_for_ui
 from crew.gateway.auth import account_from_request
 from crew.gateway.helpers import require_external_agents_enabled, with_session_agent_labels
@@ -375,6 +376,24 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     owner_account_id=owner,
                 )
                 crew.agents.drop(session_id, owner_account_id=owner)
+
+            agent = crew.agents.get(
+                session_id,
+                safe_config,
+                owner_account_id=owner,
+            )
+            if isinstance(agent.provider, FakeProvider):
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "code": "model_not_configured",
+                        "error": (
+                            "这台 Ace 尚未配置可用模型，"
+                            "请在“设置 → 模型”中配置 API Key"
+                        ),
+                    },
+                    status_code=503,
+                )
 
             envelope = Envelope.of(
                 query,

@@ -9,8 +9,9 @@ interface NearbyPeer {
 interface NearbyMessage {
   message_id: string;
   sender: string;
-  type: string;
+  type: 'agent.request' | 'agent.response' | 'agent.error';
   payload: { request_id?: string; text?: string };
+  received_at?: number;
 }
 
 interface NearbyEvent {
@@ -50,11 +51,22 @@ function connectionLabel(connection: NearbyPeer['connection']): string {
   }
 }
 
-function messageTime(): string {
+function messageTime(timestamp = Date.now()): string {
   return new Intl.DateTimeFormat(undefined, {
     hour: '2-digit',
     minute: '2-digit',
-  }).format(new Date());
+  }).format(new Date(timestamp));
+}
+
+function messageSenderLabel(
+  message: NearbyMessage,
+  peer: NearbyPeer | undefined,
+  own: boolean,
+): string {
+  if (message.type === 'agent.request') return own ? '我' : peerLabel(peer, '对方');
+  return own
+    ? '本机 Ace Agent'
+    : `${peerLabel(peer, '对方')} · ${peer?.agent_name?.trim() || 'Ace Agent'}`;
 }
 
 export interface NearbyPage {
@@ -200,15 +212,32 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
       messageList.append(textElement('p', 'nearby-chat__messages-empty', '连接已准备好，发一条消息开始交流。'));
       return;
     }
+    const peer = peers.get(activePeerId);
     for (const message of items) {
       const own = message.sender === localPeerId;
       const item = document.createElement('article');
       const failed = message.type === 'agent.error';
-      item.className = `nearby-message${own ? ' nearby-message--own' : ''}${failed ? ' nearby-message--error' : ''}`;
+      const fromAgent = message.type !== 'agent.request';
+      item.className = [
+        'nearby-message',
+        own ? 'nearby-message--own' : '',
+        fromAgent ? 'nearby-message--agent' : '',
+        failed ? 'nearby-message--error' : '',
+      ].filter(Boolean).join(' ');
       item.dataset.messageId = message.message_id;
+      item.dataset.messageType = message.type;
+      const meta = document.createElement('div');
+      meta.className = 'nearby-message__meta';
+      const sender = textElement(
+        'strong',
+        'nearby-message__sender',
+        messageSenderLabel(message, peer, own),
+      );
+      const time = textElement('time', 'nearby-message__time', messageTime(message.received_at));
+      time.dateTime = new Date(message.received_at ?? Date.now()).toISOString();
+      meta.append(sender, time);
       const bubble = textElement('p', 'nearby-message__bubble', String(message.payload.text ?? ''));
-      const time = textElement('time', 'nearby-message__time', messageTime());
-      item.append(bubble, time);
+      item.append(meta, bubble);
       messageList.append(item);
     }
     messageList.scrollTop = messageList.scrollHeight;
@@ -389,7 +418,9 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
           || !['agent.request', 'agent.response', 'agent.error'].includes(message.type)
         ) break;
         const history = messages.get(peerId) ?? [];
-        if (!history.some((item) => item.message_id === message.message_id)) history.push(message);
+        if (!history.some((item) => item.message_id === message.message_id)) {
+          history.push({ ...message, received_at: Date.now() });
+        }
         messages.set(peerId, history);
         if (!activePeerId || message.sender !== localPeerId) activePeerId = peerId;
         renderPeers();

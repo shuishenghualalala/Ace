@@ -104,7 +104,34 @@ describe('nearby page', () => {
     });
     expect(root.querySelector('.nearby-chat__messages')?.textContent).toContain('来自 Mac 的消息');
     expect(root.querySelector('.nearby-chat__messages')?.textContent).toContain('Windows 已收到');
+    expect(
+      [...root.querySelectorAll('.nearby-message__sender')].map((element) => element.textContent),
+    ).toEqual(['我', 'Windows 工作站 · Ace Agent']);
     expect(root.querySelectorAll('.nearby-message--own')).toHaveLength(1);
+    expect(root.querySelectorAll('.nearby-message--agent')).toHaveLength(1);
+    expect(root.querySelector('[data-message-type="agent.request"]')).not.toBeNull();
+    expect(root.querySelector('[data-message-type="agent.response"]')).not.toBeNull();
+    expect(root.querySelector<HTMLTimeElement>('.nearby-message__time')?.dateTime).toBeTruthy();
+    page.dispose();
+  });
+
+  it('labels local Agent errors without showing a fake reply', () => {
+    const { page, root, emit } = setup();
+    emit({ type: 'ready', peer: { ...peer, peer_id: 'ace_local' } });
+    emit({ type: 'peer_connected', peer });
+    emit({
+      type: 'message',
+      peer_id: 'ace_peer_a',
+      message: {
+        message_id: 'local_error_1',
+        sender: 'ace_local',
+        type: 'agent.error',
+        payload: { request_id: 'remote_1', text: '这台 Ace 尚未配置可用模型' },
+      },
+    });
+
+    expect(root.querySelector('.nearby-message__sender')?.textContent).toBe('本机 Ace Agent');
+    expect(root.querySelector('.nearby-message--error')?.textContent).toContain('尚未配置可用模型');
     page.dispose();
   });
 

@@ -8,12 +8,27 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from crew.app import build_app
-from crew.core.types import Message
+from crew.core.interfaces import LLMProvider
+from crew.core.types import ChatResponse, Message, StreamChunk
 from crew.gateway.server import create_app
 from crew.state.config import Config, ModelProfile
 from crew.team.roles import CREW_BUILTIN_AGENT_ID
 
 OWNER_A = "A:uid-a"
+
+
+class NearbyTestProvider(LLMProvider):
+    async def chat(self, messages, tools=None, *, max_tokens=None) -> ChatResponse:
+        last_user = next(
+            (message.content for message in reversed(messages) if message.role == "user"),
+            "",
+        )
+        return ChatResponse(text=f"已回复：{last_user}", finish_reason="stop")
+
+    async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+        response = await self.chat(messages, tools, max_tokens=max_tokens)
+        yield StreamChunk(delta_text=response.text)
+        yield StreamChunk(delta_text="", done=True, finish_reason="stop")
 
 
 @pytest.fixture
@@ -67,11 +82,36 @@ async def test_api_session_context(api, auth_headers):
 
 
 @pytest.mark.asyncio
+async def test_nearby_agent_turn_rejects_fake_provider(tmp_path):
+    crew = build_app(
+        config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False),
+        enable_team=False,
+    )
+    app = create_app(crew)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/nearby/agent-turn",
+            json={
+                "peer_id": "ace_windows",
+                "peer_name": "Windows 工作站",
+                "request_id": "request-1",
+                "query": "你好",
+            },
+        )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "model_not_configured"
+    assert "设置 → 模型" in response.json()["error"]
+
+
+@pytest.mark.asyncio
 async def test_nearby_agent_turn_is_text_only_and_isolated_per_peer(tmp_path):
     crew = build_app(
         config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False),
         enable_team=False,
     )
+    crew.provider = NearbyTestProvider()
     app = create_app(crew)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -105,7 +145,7 @@ async def test_nearby_agent_turn_is_text_only_and_isolated_per_peer(tmp_path):
         visible_sessions = await client.get("/api/sessions")
 
     assert first.status_code == 200
-    assert first.json()["text"] == "[fake] 收到: 你好"
+    assert first.json()["text"] == "已回复：你好"
     assert second.status_code == 200
     assert second.json()["session_id"] == first.json()["session_id"]
     assert other.status_code == 200
