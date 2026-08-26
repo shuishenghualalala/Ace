@@ -2181,6 +2181,8 @@ class TeamGraphPlanner:
         if isinstance(spec_source, dict) and not str(spec_source.get("goal") or "").strip():
             spec_source = {"goal": goal, **spec_source}
         base_spec = build_team_spec(spec_source)
+        if str(goal or "").strip() and base_spec.goal != str(goal).strip():
+            base_spec = replace(base_spec, goal=str(goal).strip())
         profile = _merged_execution_profile(base_spec, execution_profile)
         requested_mode = normalize_planning_mode(profile.get("requested_mode"))
         selected_mode: PlanningMode = "fast" if requested_mode == "fast" else "standard"
@@ -2248,6 +2250,8 @@ class TeamGraphPlanner:
         if isinstance(spec_source, dict) and not str(spec_source.get("goal") or "").strip():
             spec_source = {"goal": goal, **spec_source}
         base_spec = build_team_spec(spec_source)
+        if str(goal or "").strip() and base_spec.goal != str(goal).strip():
+            base_spec = replace(base_spec, goal=str(goal).strip())
         profile = _merged_execution_profile(base_spec, execution_profile)
         requested_mode = normalize_planning_mode(profile.get("requested_mode"))
         members: list[TeamMemberSpec] = list((getattr(team, "members", {}) or {}).values())

@@ -7818,17 +7818,27 @@ async def test_team_planning_pauses_when_plan_only_conflicts_with_default_execut
         },
     ))
     team = tm._build_team("scope-conflict")
+    durable_spec = {
+        "goal": "帮我写一个贪吃蛇游戏的开发方案",
+        "task_profile": {
+            "intent": "implementation",
+            "complexity": "multi_role",
+            "deliverable_shape": "artifact",
+        },
+        "team_requirements": {
+            "roles": ["fullstack_developer"],
+            "capabilities": ["implementation"],
+            "workflow_lanes": ["build", "verify"],
+        },
+        "deliverables": [{"type": "code", "description": "可运行游戏"}],
+        "success_criteria": ["游戏可运行"],
+    }
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
         "帮我写一个贪吃蛇游戏的开发方案",
         execution_profile={"requested_mode": "standard"},
-        team_spec=_structured_team_spec(
-            "帮我写一个贪吃蛇游戏的开发方案",
-            capabilities=["implementation"],
-            intent="implementation",
-            workflow_lanes=("build", "verify"),
-        ),
+        team_spec=durable_spec,
         provider=provider,
     )
 
@@ -7838,23 +7848,37 @@ async def test_team_planning_pauses_when_plan_only_conflicts_with_default_execut
     assert planning["scope_conflict"] is True
     assert planning["requested_scope"] == "plan_only"
     assert planning["default_execution_scope"] == "execute"
+    assert graph_plan.spec.team_requirements["workflow_lanes"] == ["build", "verify"]
+    assert graph_plan.spec.deliverables == [{"type": "code", "description": "可运行游戏"}]
 
     confirmed = await TeamGraphPlanner().plan_async(
         team,
         "帮我写一个贪吃蛇游戏的开发方案\n\n用户已确认本轮执行范围：仅输出开发方案。",
         execution_profile={"requested_mode": "standard", "scope_confirmation": "plan_only"},
-        team_spec=_structured_team_spec(
-            "帮我写一个贪吃蛇游戏的开发方案",
-            capabilities=["implementation"],
-            intent="implementation",
-            workflow_lanes=("build", "verify"),
-        ),
+        team_spec=durable_spec,
         provider=provider,
     )
     confirmed_ids = {node["id"] for node in confirmed.nodes}
     assert {"leader_plan", "snake_plan", "leader_summary"} <= confirmed_ids
     assert not {"build", "verify", "independent_review"} & confirmed_ids
     assert next(node for node in confirmed.nodes if node["id"] == "snake_plan")["metadata"]["work_unit_kind"] == "design"
+    assert confirmed.spec.task_profile == {
+        "intent": "documentation",
+        "complexity": "simple",
+        "deliverable_shape": "docs",
+    }
+    assert confirmed.spec.goal.endswith("用户已确认本轮执行范围：仅输出开发方案。")
+    assert confirmed.spec.team_requirements == {
+        "roles": [],
+        "capabilities": ["implementation"],
+        "workflow_lanes": ["design"],
+    }
+    assert confirmed.spec.deliverables == [{"type": "design", "description": "开发方案"}]
+    assert confirmed.spec.success_criteria == ["开发方案"]
+    assert confirmed.spec.planning["build_plan_mode"] == "skip"
+    assert confirmed.spec.planning["verify_plan_mode"] == "skip"
+    assert confirmed.workflow_plan["task"]["deliverables"] == ["开发方案"]
+    assert confirmed.workflow_plan["task"]["acceptance_criteria"] == ["开发方案"]
 
 
 @pytest.mark.asyncio

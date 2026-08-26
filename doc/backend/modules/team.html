@@ -700,4 +700,9 @@ graph TD
 <p>当用户请求为 <code>plan_only</code>，而当前 TeamSpec 的默认 intent 或 workflow lane 包含实际开发/验证时，GraphPlanner 在创建 DAG 前返回 <code>scope_conflict</code>，TeamManager 不创建 TeamPlan、不派发成员；Workflow Runtime 通过既有 follow-up 通道询问“仅输出开发方案”或“方案并实际开发验证”。用户选择写入当前回合的 <code>scope_confirmation</code>，再重跑本轮 PlanningDecision，不修改团队配置，也不影响其他 session。</p>
 <p>回归覆盖：冲突时无节点、追问选项和确认后的当前回合配置传递；实现复用现有 PlanningDecision、Team Workflow Runtime 和 follow-up 通道，未新增顶层模块、数据库表或 API。</p>
 
+<h2>2026-08-26 Team 第三阶段：PlanningDecision 生成当前回合 TeamSpec</h2>
+<p>PlanningDecision 成功后，<code>team_spec_from_planning_decision()</code> 将本轮 work units 作为当前任务 TeamSpec 的唯一需求来源：重新生成当前回合的 <code>task_profile</code>、能力、workflow lanes、planning 模式、deliverables 和 success criteria，并过滤 Leader 控制工作单元。持久化 TeamSpec 的角色、长期 build/verify 泳道和长期交付物仍只用于决策前的默认范围与策略判断，不再和本轮字段做并集。</p>
+<p>因此同一长期开发团队收到“只写贪吃蛇开发方案”时，确认后的 WorkflowPlan 只保留方案/设计节点；如果本轮确实要求实现和验证，PlanningDecision 的 build/verify work units 才会进入当前 TeamSpec 和 DAG。同步 Fast/显式 TeamSpec 规划仍保持原有结构化输入行为。本阶段未新增模块、数据库表或 API。</p>
+<p>验证：新增长期 TeamSpec 与本轮 plan-only 决策的隔离回归，覆盖当前目标、task_profile、能力、泳道、交付物、验收标准和 WorkflowPlan.task 投影；并运行 Team 全量测试、Python 编译检查。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

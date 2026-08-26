@@ -329,6 +329,7 @@ flowchart LR
   "uncertainty": "low"
 }</code></pre>
   <p>当前创建 Team 时的快照位于 <code>external_team.team_spec_json</code>。创建入口是“外援—组建团队”的结构化表单，不是聊天 Prompt；如果表单没有显式描述，只保存最小 TeamSpec，不从团队名称推断任务能力或工作流。运行阶段不得覆盖创建 Team 时的长期快照；本轮实际目标、交付物和验收条件保存于 WorkflowPlan 的 <code>task</code>，两者通过 Team 与 turn 上下文关联。</p>
+  <p><b>本轮 TeamSpec 投影：</b>PlanningDecision 是当前 Prompt 的唯一语义解释入口。决策成功后，当前回合 TeamSpec 只接收本轮 work units 派生的 <code>task_profile</code>、能力、工作泳道、交付物、验收标准和规划模式；创建 Team 的长期角色、build/verify 泳道和长期交付物只用于决策前的默认范围/策略判断，不与本轮字段做并集。这样“只写方案”不会因长期团队包含开发/验证职责而生成实现或验证节点。</p>
 
   <h2>4. CapabilityCatalog：能力是共享词典，不是第五个数据对象</h2>
   <p><code>crew/team/capabilities.py</code> 是 TeamSpec、AgentProfile、FormationPlan 与角色目录共同使用的通用能力词典。它不独立落库、不增加领域标签，也不保存某次任务分工。能力覆盖计算由 <code>crew/team/agent_profile.py</code> 的 <code>CapabilityCoverage</code>/<code>evaluate_capability_coverage()</code> 统一完成；该结果是一次性计算结果，不是新的画像对象，也不引入 <code>EffectiveAgentProfile</code>。</p>
