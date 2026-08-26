@@ -23,6 +23,14 @@ pub(crate) struct PeripheralManager {
     services: HashMap<Uuid, GattServiceProviderObject>,
 }
 
+fn is_started_advertising_status(status: GattServiceProviderAdvertisementStatus) -> bool {
+    matches!(
+        status,
+        GattServiceProviderAdvertisementStatus::Started
+            | GattServiceProviderAdvertisementStatus::StartedWithoutAllAdvertisementData
+    )
+}
+
 impl PeripheralManager {
     pub(crate) async fn new(sender_tx: Sender<PeripheralEvent>) -> Self {
         let manager = Self {
@@ -65,9 +73,7 @@ impl PeripheralManager {
 
         // TODO: add name and uuid in advertisement or change adapter name
         for gatt_object in self.services.values().into_iter() {
-            if gatt_object.obj.AdvertisementStatus()?
-                == GattServiceProviderAdvertisementStatus::Started
-            {
+            if is_started_advertising_status(gatt_object.obj.AdvertisementStatus()?) {
                 log::debug!("Already advertising");
                 continue;
             }
@@ -81,9 +87,7 @@ impl PeripheralManager {
 
     pub(crate) async fn stop_advertising(&self) -> windows::core::Result<()> {
         for gatt_object in self.services.values().into_iter() {
-            if gatt_object.obj.AdvertisementStatus()?
-                != GattServiceProviderAdvertisementStatus::Stopped
-            {
+            if is_started_advertising_status(gatt_object.obj.AdvertisementStatus()?) {
                 gatt_object.obj.StopAdvertising()?;
             }
         }
@@ -213,11 +217,34 @@ impl PeripheralManager {
 
     fn are_all_services_started(&self) -> windows::core::Result<bool> {
         for service in self.services.values() {
-            if service.obj.AdvertisementStatus()? != GattServiceProviderAdvertisementStatus::Started
-            {
+            if !is_started_advertising_status(service.obj.AdvertisementStatus()?) {
                 return Ok(false);
             }
         }
         return Ok(true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_started_states_are_treated_as_advertising() {
+        assert!(!is_started_advertising_status(
+            GattServiceProviderAdvertisementStatus::Created
+        ));
+        assert!(!is_started_advertising_status(
+            GattServiceProviderAdvertisementStatus::Stopped
+        ));
+        assert!(is_started_advertising_status(
+            GattServiceProviderAdvertisementStatus::Started
+        ));
+        assert!(is_started_advertising_status(
+            GattServiceProviderAdvertisementStatus::StartedWithoutAllAdvertisementData
+        ));
+        assert!(!is_started_advertising_status(
+            GattServiceProviderAdvertisementStatus::Aborted
+        ));
     }
 }
