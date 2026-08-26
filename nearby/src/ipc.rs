@@ -8,7 +8,7 @@ use crate::protocol::{
     FileChunk, FrameCodec, Message, PeerInfo, Reassembler, ReplyReference, INCOMING_MESSAGE_UUID,
     OUTGOING_MESSAGE_UUID, PEER_INFO_UUID, PROTOCOL_VERSION, SERVICE_UUID,
 };
-use crate::runtime::NearbyConfig;
+use crate::runtime::{subscribe_outgoing_message, NearbyConfig};
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ble_peripheral_rust::{
@@ -699,12 +699,13 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             event_tx.clone(),
                         ).await;
                         if let Err(error) = result {
+                            let detail = format!("{error:#}");
                             connection_adapter
                                 .start_scan(ScanFilter { services: vec![SERVICE_UUID] })
                                 .await
                                 .ok();
-                            eprintln!("[nearby][session] device={device} result=failed error={error}");
-                            let _ = event_tx.send(SessionEvent::Failed { peer_id: key, error: error.to_string() }).await;
+                            eprintln!("[nearby][session] device={device} result=failed error={detail}");
+                            let _ = event_tx.send(SessionEvent::Failed { peer_id: key, error: detail }).await;
                         }
                     });
                 }
@@ -999,33 +1000,81 @@ async fn connect_to_peer(
         .clone();
     let write_type = incoming_write_type(&incoming_characteristic)?;
     eprintln!("[nearby][session] device={device} incoming_write_type={write_type:?}");
-    let max_payload = FrameCodec::frame_payload_capacity(peripheral.mtu());
-    let mut notifications;
-    let mut reassembler = Reassembler::default();
-    let remote = if USE_PASSIVE_SESSIONS {
-        peripheral
-            .subscribe(&outgoing_characteristic)
-            .await
-            .context("failed to subscribe to remote OutgoingMessage")?;
-        eprintln!("[nearby][session] device={device} stage=notifications_subscribed");
-        notifications = peripheral
-            .notifications()
-            .await
-            .context("failed to open BLE notification stream")?;
-        let hello = Message::hello(&local_peer);
-        let hello_frames = FrameCodec::fragment(&hello.encode()?, max_payload, 1)?;
+    eprintln!("[nearby][session] device={device} stage=peer_info_read_started");
+    let peer_info_bytes = tokio::time::timeout(
+        Duration::from_secs(8),
+        peripheral.read(&peer_info_characteristic),
+    )
+    .await
+    .context("timed out reading remote PeerInfo")?
+    .context("failed to read remote PeerInfo")?;
+    let remote = PeerInfo::decode(&peer_info_bytes).context("remote PeerInfo is not valid JSON")?;
+    anyhow::ensure!(
+        remote.protocol_version == PROTOCOL_VERSION,
+        "remote protocol version {} is incompatible with local version {}",
+        remote.protocol_version,
+        PROTOCOL_VERSION
+    );
+    anyhow::ensure!(
+        remote.peer_id != local_peer.peer_id,
+        "remote PeerInfo unexpectedly contains the local peer id"
+    );
+    eprintln!(
+        "[nearby][session] device={device} stage=peer_info_read remote_peer_id={} remote_display_name={}",
+        remote.peer_id, remote.display_name
+    );
+    event_tx
+        .send(SessionEvent::Discovered(remote.clone()))
+        .await
+        .ok();
+    let should_initiate = should_start_central_session(&local_peer.peer_id, &remote.peer_id);
+    eprintln!(
+        "[nearby][session] device={device} stage=connection_policy should_initiate={} local_peer_id={} remote_peer_id={}",
+        should_initiate, local_peer.peer_id, remote.peer_id
+    );
+    if !should_initiate {
         eprintln!(
-            "[nearby][session] device={device} stage=peer_hello_write mtu={} frame_payload={} frame_count={}",
-            peripheral.mtu(),
-            max_payload,
-            hello_frames.len()
+            "[nearby][session] device={device} stage=duplicate_connection_close_before_subscribe"
         );
-        for frame in hello_frames {
-            peripheral
-                .write(&incoming_characteristic, &frame, write_type)
-                .await
-                .context("failed to send BLE peer hello")?;
-        }
+        peripheral.disconnect().await.ok();
+        adapter
+            .start_scan(ScanFilter {
+                services: vec![SERVICE_UUID],
+            })
+            .await
+            .context("failed to resume BLE scanning after duplicate connection")?;
+        eprintln!("[nearby][central] scanning_resumed_after_connection device={device}");
+        drop(_scan_lock);
+        return Ok(());
+    }
+
+    let max_payload = FrameCodec::frame_payload_capacity(peripheral.mtu());
+    if let Err(error) =
+        subscribe_outgoing_message(&peripheral, &outgoing_characteristic, &device).await
+    {
+        peripheral.disconnect().await.ok();
+        return Err(error);
+    }
+    let mut notifications = peripheral
+        .notifications()
+        .await
+        .context("failed to open BLE notification stream")?;
+    let mut reassembler = Reassembler::default();
+    let hello = Message::hello(&local_peer);
+    let hello_frames = FrameCodec::fragment(&hello.encode()?, max_payload, 1)?;
+    eprintln!(
+        "[nearby][session] device={device} stage=peer_hello_write mtu={} frame_payload={} frame_count={}",
+        peripheral.mtu(),
+        max_payload,
+        hello_frames.len()
+    );
+    for frame in hello_frames {
+        peripheral
+            .write(&incoming_characteristic, &frame, write_type)
+            .await
+            .context("failed to send BLE peer hello")?;
+    }
+    if USE_PASSIVE_SESSIONS {
         eprintln!("[nearby][session] device={device} stage=peer_hello_read_started");
         loop {
             let notification = tokio::time::timeout(Duration::from_secs(8), notifications.next())
@@ -1044,70 +1093,20 @@ async fn connect_to_peer(
                 if message.message_type != "peer.hello" {
                     continue;
                 }
-                if let Some(remote) = peer_info_from_hello(&message) {
-                    eprintln!(
-                        "[nearby][session] device={device} stage=peer_hello_received remote_peer_id={} remote_display_name={}",
-                        remote.peer_id, remote.display_name
-                    );
-                    break remote;
-                }
+                let hello_peer = peer_info_from_hello(&message)
+                    .context("remote PeerInfo handshake has an incompatible protocol")?;
+                anyhow::ensure!(
+                    hello_peer.peer_id == remote.peer_id
+                        && hello_peer.peer_token == remote.peer_token,
+                    "remote PeerInfo changed during the BLE handshake"
+                );
+                eprintln!(
+                    "[nearby][session] device={device} stage=peer_hello_received remote_peer_id={} remote_display_name={}",
+                    hello_peer.peer_id, hello_peer.display_name
+                );
+                break;
             }
         }
-    } else {
-        eprintln!("[nearby][session] device={device} stage=peer_info_read_started");
-        let peer_info_bytes = tokio::time::timeout(
-            Duration::from_secs(8),
-            peripheral.read(&peer_info_characteristic),
-        )
-        .await
-        .context("timed out reading remote PeerInfo")?
-        .context("failed to read remote PeerInfo")?;
-        let remote =
-            PeerInfo::decode(&peer_info_bytes).context("remote PeerInfo is not valid JSON")?;
-        eprintln!(
-            "[nearby][session] device={device} stage=peer_info_read remote_peer_id={} remote_display_name={}",
-            remote.peer_id, remote.display_name
-        );
-        peripheral
-            .subscribe(&outgoing_characteristic)
-            .await
-            .context("failed to subscribe to remote OutgoingMessage")?;
-        eprintln!("[nearby][session] device={device} stage=notifications_subscribed");
-        notifications = peripheral
-            .notifications()
-            .await
-            .context("failed to open BLE notification stream")?;
-        let hello = Message::hello(&local_peer);
-        let hello_frames = FrameCodec::fragment(&hello.encode()?, max_payload, 1)?;
-        for frame in hello_frames {
-            peripheral
-                .write(&incoming_characteristic, &frame, write_type)
-                .await
-                .context("failed to send BLE peer hello")?;
-        }
-        remote
-    };
-    event_tx
-        .send(SessionEvent::Discovered(remote.clone()))
-        .await
-        .ok();
-    let should_initiate = should_start_central_session(&local_peer.peer_id, &remote.peer_id);
-    eprintln!(
-        "[nearby][session] device={device} stage=connection_policy should_initiate={} local_peer_id={} remote_peer_id={}",
-        should_initiate, local_peer.peer_id, remote.peer_id
-    );
-    if !should_initiate {
-        eprintln!("[nearby][session] device={device} stage=duplicate_connection_close");
-        peripheral.disconnect().await.ok();
-        adapter
-            .start_scan(ScanFilter {
-                services: vec![SERVICE_UUID],
-            })
-            .await
-            .context("failed to resume BLE scanning after duplicate connection")?;
-        eprintln!("[nearby][central] scanning_resumed_after_connection device={device}");
-        drop(_scan_lock);
-        return Ok(());
     }
     let (outbound, mut outbound_rx) = mpsc::channel(64);
     event_tx

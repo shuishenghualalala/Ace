@@ -38,6 +38,9 @@ use tokio::{
     sync::{mpsc, Mutex},
 };
 
+const WINDOWS_OUTGOING_SUBSCRIBE_ATTEMPTS: usize = 3;
+const DEFAULT_OUTGOING_SUBSCRIBE_ATTEMPTS: usize = 1;
+
 #[derive(Debug, Clone)]
 pub struct NearbyConfig {
     pub display_name: String,
@@ -103,6 +106,49 @@ fn incoming_write_type(characteristic: &btleplug::api::Characteristic) -> Result
     } else {
         anyhow::bail!("remote IncomingMessage characteristic is not writable")
     }
+}
+
+fn outgoing_subscribe_attempts(is_windows: bool) -> usize {
+    if is_windows {
+        WINDOWS_OUTGOING_SUBSCRIBE_ATTEMPTS
+    } else {
+        DEFAULT_OUTGOING_SUBSCRIBE_ATTEMPTS
+    }
+}
+
+pub(crate) async fn subscribe_outgoing_message(
+    peripheral: &Peripheral,
+    characteristic: &btleplug::api::Characteristic,
+    device: &str,
+) -> Result<()> {
+    let attempts = outgoing_subscribe_attempts(cfg!(target_os = "windows"));
+    for attempt in 1..=attempts {
+        match peripheral.subscribe(characteristic).await {
+            Ok(()) => {
+                eprintln!(
+                    "[nearby][session] device={device} stage=notifications_subscribed attempt={attempt}/{attempts}"
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!(
+                    "[nearby][session] device={device} stage=notification_subscribe_failed attempt={attempt}/{attempts} error={error:?}"
+                );
+                if let Err(cleanup_error) = peripheral.unsubscribe(characteristic).await {
+                    eprintln!(
+                        "[nearby][session] device={device} stage=notification_subscription_cleanup_failed attempt={attempt}/{attempts} error={cleanup_error:?}"
+                    );
+                }
+                if attempt == attempts {
+                    return Err(anyhow::Error::new(error).context(format!(
+                        "failed to subscribe to remote OutgoingMessage after {attempts} attempt(s)"
+                    )));
+                }
+                tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
+            }
+        }
+    }
+    unreachable!("subscription attempts are always positive")
 }
 
 impl PeerSession {
@@ -212,8 +258,9 @@ impl BleAdapter {
                         let event_tx = session_event_tx.clone();
                         tokio::spawn(async move {
                             if let Err(error) = connect_to_peer(peripheral, local_peer, device.clone(), event_tx.clone()).await {
-                                eprintln!("[nearby][session] device={device} result=failed error={error}");
-                                let _ = event_tx.send(SessionEvent::Failed(error.to_string())).await;
+                                let detail = format!("{error:#}");
+                                eprintln!("[nearby][session] device={device} result=failed error={detail}");
+                                let _ = event_tx.send(SessionEvent::Failed(detail)).await;
                             }
                         });
                     }
@@ -476,11 +523,12 @@ async fn connect_to_peer(
         return Ok(());
     }
 
-    peripheral
-        .subscribe(&outgoing_characteristic)
-        .await
-        .context("failed to subscribe to remote OutgoingMessage")?;
-    eprintln!("[nearby][session] device={device} stage=notifications_subscribed");
+    if let Err(error) =
+        subscribe_outgoing_message(&peripheral, &outgoing_characteristic, &device).await
+    {
+        peripheral.disconnect().await.ok();
+        return Err(error);
+    }
     let mut notifications = peripheral
         .notifications()
         .await
@@ -844,5 +892,11 @@ mod tests {
         };
         let hello = Message::hello(&peer);
         assert_eq!(peer_info_from_hello(&hello), Some(peer));
+    }
+
+    #[test]
+    fn windows_retries_outgoing_notification_subscription() {
+        assert_eq!(outgoing_subscribe_attempts(true), 3);
+        assert_eq!(outgoing_subscribe_attempts(false), 1);
     }
 }

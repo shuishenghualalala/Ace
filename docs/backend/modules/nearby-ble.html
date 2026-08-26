@@ -46,7 +46,8 @@
 
   <h2>BLE 协议</h2>
   <p>服务 UUID 为 <code>5957645b-4b06-49cf-bde2-366a593e73a7</code>。GATT 服务包含 PeerInfo、IncomingMessage 和 OutgoingMessage 三个特征。Central 订阅 OutgoingMessage 通知，并向 IncomingMessage 写入分片 JSON 帧。</p>
-  <p>每个实例持久化一个随机 Peer ID。物理 BLE 会话完成 <code>hello</code> 身份握手后可用于发现；只有用户选择设备并交换 <code>peer.connect</code> 后，界面才进入已连接状态。主动断开使用 <code>peer.disconnect</code>。Agent 对话协议版本为 <code>v2</code>：请求使用 <code>agent.request</code>，回复使用 <code>agent.response</code>，失败使用 <code>agent.error</code>；回复通过 <code>request_id</code> 关联原请求，单条文字上限 8000 字符。旧版普通消息协议不会被误认为兼容客户端。</p>
+  <p>每个实例持久化一个随机 Peer ID。物理连接建立后，Central 先读取静态 PeerInfo，再按两个 Peer ID 确定唯一连接发起方；非发起方会在写入通知订阅前关闭重复物理连接，避免 macOS 与 Windows 同时扫描和广播时争用 GATT 会话。保留连接随后订阅 OutgoingMessage 并完成 <code>hello</code> 身份握手。Windows 写入 Notify 的 CCCD 失败时会清理监听器并最多重试 3 次，日志保留底层 WinRT 状态和完整错误链。</p>
+  <p>只有用户选择设备并交换 <code>peer.connect</code> 后，界面才进入已连接状态。主动断开使用 <code>peer.disconnect</code>。Agent 对话协议版本为 <code>v2</code>：请求使用 <code>agent.request</code>，回复使用 <code>agent.response</code>，失败使用 <code>agent.error</code>；回复通过 <code>request_id</code> 关联原请求，单条文字上限 8000 字符。旧版普通消息协议不会被误认为兼容客户端。</p>
   <p>BLE 连接不依赖 Wi-Fi 或局域网。实际可发现距离、连接稳定性和吞吐受蓝牙适配器、系统权限、射频环境以及操作系统节能策略影响。</p>
 
   <h2>桌面 IPC</h2>
@@ -92,9 +93,9 @@ cargo run --manifest-path nearby/Cargo.toml -- --ipc --transport mock</pre>
   <table>
     <thead><tr><th>检查项</th><th>结果</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td>Rust 单元与协议测试</td><td class="pass">通过</td><td><code>cargo test</code> 共 33 项通过，覆盖协议编码、IPC、被动身份握手和重复物理会话关闭竞争。</td></tr>
+      <tr><td>Rust 单元与协议测试</td><td class="pass">通过</td><td><code>cargo test</code> 共 34 项通过，覆盖协议编码、IPC、被动身份握手、订阅重试策略和重复物理会话关闭竞争。</td></tr>
       <tr><td>Rust Clippy</td><td class="pass">通过</td><td><code>cargo clippy --all-targets -- -D warnings</code> 无警告。</td></tr>
-      <tr><td>Windows MSVC 目标检查</td><td class="pass">通过</td><td><code>cargo check --target x86_64-pc-windows-msvc</code> 通过，包含 Windows BLE Peripheral 回调。</td></tr>
+      <tr><td>Windows MSVC 目标检查</td><td class="pass">通过</td><td><code>cargo check --target x86_64-pc-windows-msvc</code> 通过，包含 Windows BLE Peripheral 回调、订阅清理与 3 次退避重试路径。</td></tr>
       <tr><td>Gateway Agent 会话</td><td class="pass">通过</td><td>验证同一 Peer 复用上下文、不同 Peer 会话隔离、普通侧栏隐藏，以及工具/Skills 全部关闭。</td></tr>
       <tr><td>双实例 Agent 端到端</td><td class="pass">通过</td><td>两个独立 Nearby 进程完成发现、连接、v2 <code>agent.request</code>、Ace Agent 执行和 <code>agent.response</code> 回传。</td></tr>
       <tr><td>桌面类型与定向单测</td><td class="pass">通过</td><td>TypeScript 检查通过；Nearby 页面、托盘与主进程 Agent 路由及取消 8 项测试通过。</td></tr>
