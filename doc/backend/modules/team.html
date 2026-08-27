@@ -724,4 +724,13 @@ graph TD
   <li><b>验证：</b>Web 全量 <code>26 files / 177 passed</code>，Desktop 全量 <code>149 files / 1729 passed</code>；后端 Team/Gateway 回归 <code>274 passed, 1 skipped</code>，Ruff、Python 编译、Web/Desktop TypeScript、两端构建和 Desktop CSS lint 均通过。</li>
 </ul>
 
+<h2>2026-08-27 PlanningDecision 双阶段输出收敛</h2>
+<ul>
+  <li><b>首轮：</b>继续使用 <code>stream_chat()</code> 与 <code>chat()</code> 并发竞速，默认最多等待 30 秒；流式 reasoning 仍只用于进度展示，不当作规划结果。</li>
+  <li><b>重试：</b>首轮没有结构化结果时只进行一次最多 10 秒的短 <code>chat()</code> 重试，带 <code>response_format=json_object</code>、<code>reasoning_mode=disabled</code> 和 2048 token 上限；首轮与重试合计最多约 40 秒，成功后继续编译语义 DAG。</li>
+  <li><b>回退：</b>两次都失败才回退 <code>standard_role_dag</code>；首轮与重试的错误类型、耗时和 transport 分开记录，不增加用户确认步骤，也不在业务层复制语义规则。</li>
+  <li><b>进度：</b>规划气泡只展示“理解任务目标、识别工作单元、生成团队执行图”三段状态，移除没有实际动作含义的“准备团队执行：待执行”。</li>
+  <li><b>模块边界：</b>Provider 只负责把结构化输出和非思考模式映射到厂商请求；GraphPlanner 负责两阶段时序与校验；TeamManager 只负责进度协议。未新增顶层模块、数据库表或 API。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

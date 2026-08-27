@@ -5293,6 +5293,15 @@ cd web &amp;&amp; npm run build
     </ul>
   </section>
 
+  <section class="rounded-2xl border border-sky-700 bg-slate-900/70 p-6 mt-6">
+    <h2 class="text-xl font-bold mb-3">2026-08-27 PlanningDecision 双阶段输出收敛</h2>
+    <ul>
+      <li><b>实现：</b>首轮保持 stream/chat 竞速并以 30 秒为边界；结构化结果失败后增加一次 10 秒 JSON 重试，DeepSeek Provider 映射为 JSON Output 与非思考模式。</li>
+      <li><b>回归：</b><code>tests/test_team_tasks.py</code> 全量 <code>248 passed / 1 skipped</code>；PlanningDecision 定向回归通过；OpenAI Provider 结构化请求回归通过。</li>
+      <li><b>静态检查：</b>Ruff 与相关 Python 文件 <code>compileall</code> 通过；未新增顶层模块、数据库表或 API。</li>
+    </ul>
+  </section>
+
   <footer class="border-t border-slate-700 mt-12 pt-6 text-center text-sm text-slate-500">
     Crew 测试报告 · 后续每次开发交付前更新本报告
   </footer>

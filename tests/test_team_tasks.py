@@ -40,6 +40,8 @@ from crew.security.models import (
 )
 from crew.team.graph_planner import (
     DEFAULT_PLANNING_DECISION_TIMEOUT,
+    PLANNING_DECISION_RETRY_MAX_TOKENS,
+    PLANNING_DECISION_RETRY_TIMEOUT,
     PLANNING_DECISION_MAX_TOKENS,
     TeamGraphPlanner,
     _member_capability_sets,
@@ -163,7 +165,7 @@ def test_team_planning_progress_uses_agent_turn_timing_contract(monkeypatch):
     assert 'turn_duration' not in running.body
     assert done.body['display_mode'] == 'collapsible'
     assert done.body['collapsed_title'] == 'Crew 已生成团队执行图'
-    assert '- 准备团队执行：完成' in done.body['process_text']
+    assert '- 准备团队执行：' not in done.body['process_text']
     assert '进行中' not in done.body['process_text']
     assert done.body['turn_started_at'] == pytest.approx(1_700_000_005.8)
     assert done.body['turn_duration'] == pytest.approx(4.2)
@@ -649,6 +651,48 @@ class ReasoningOnlyPlanningProvider(LLMProvider):
     async def stream_chat(self, messages, tools=None, *, max_tokens=None):
         self.stream_calls += 1
         self.stream_max_tokens = max_tokens
+        yield StreamChunk(reasoning_content="先分析任务结构")
+        yield StreamChunk(delta_text="", done=True, finish_reason="length")
+
+
+class StructuredRetryPlanningProvider(LLMProvider):
+    def __init__(self):
+        self.stream_calls = 0
+        self.chat_calls = 0
+        self.retry_kwargs = None
+
+    async def chat(
+        self,
+        messages,
+        tools=None,
+        *,
+        max_tokens=None,
+        response_format=None,
+        reasoning_mode=None,
+    ):
+        self.chat_calls += 1
+        if reasoning_mode == "disabled":
+            self.retry_kwargs = {
+                "max_tokens": max_tokens,
+                "response_format": response_format,
+                "reasoning_mode": reasoning_mode,
+            }
+            return ChatResponse(
+                text=json.dumps(P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"], ensure_ascii=False),
+                finish_reason="stop",
+            )
+        return ChatResponse(text="", reasoning_content="继续推演但没有输出 JSON", finish_reason="length")
+
+    async def stream_chat(
+        self,
+        messages,
+        tools=None,
+        *,
+        max_tokens=None,
+        response_format=None,
+        reasoning_mode=None,
+    ):
+        self.stream_calls += 1
         yield StreamChunk(reasoning_content="先分析任务结构")
         yield StreamChunk(delta_text="", done=True, finish_reason="length")
 
@@ -7759,9 +7803,9 @@ async def test_team_graph_planner_classifies_reasoning_only_without_calling_stre
     planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
     labels = [str(event.get("label") or "") for event in events]
     assert provider.stream_calls == 1
-    assert provider.chat_calls == 1
+    assert provider.chat_calls == 2
     assert provider.stream_max_tokens == PLANNING_DECISION_MAX_TOKENS == 4096
-    assert provider.chat_max_tokens == PLANNING_DECISION_MAX_TOKENS == 4096
+    assert provider.chat_max_tokens == PLANNING_DECISION_RETRY_MAX_TOKENS == 2048
     assert planning_decision["status"] == "fallback"
     assert planning_decision["error_type"] == "reasoning_only_length"
     assert planning_decision["first_reasoning_ms"] is not None
@@ -7773,6 +7817,46 @@ async def test_team_graph_planner_classifies_reasoning_only_without_calling_stre
     assert graph_plan.nodes[0]["metadata"]["plan_strategy"] == "standard_role_dag"
     assert any("尚未输出结构化结果" in label for label in labels)
     assert all("流式结果为空" not in label for label in labels)
+
+
+async def test_team_graph_planner_uses_structured_non_reasoning_retry():
+    assert DEFAULT_PLANNING_DECISION_TIMEOUT == 30.0
+    assert PLANNING_DECISION_RETRY_TIMEOUT == 10.0
+    provider = StructuredRetryPlanningProvider()
+    tm, _ = _team(config=Config(
+        max_iterations=3,
+        team_config={
+            "members": [{
+                "member_id": "writer",
+                "name": "writer",
+                "role": "负责综合写作",
+                "executor": "builtin",
+                "metadata": {"workflow_lane": "docs"},
+                "capabilities": ["documentation", "synthesis"],
+            }]
+        },
+    ))
+
+    graph_plan = await TeamGraphPlanner().plan_async(
+        tm._build_team("structured-planning-retry"),
+        "整理一份架构综述",
+        execution_profile={"requested_mode": "standard"},
+        provider=provider,
+    )
+
+    planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
+    assert provider.stream_calls == 1
+    assert provider.chat_calls == 2
+    assert provider.retry_kwargs == {
+        "max_tokens": PLANNING_DECISION_RETRY_MAX_TOKENS,
+        "response_format": {"type": "json_object"},
+        "reasoning_mode": "disabled",
+    }
+    assert planning_decision["status"] == "success"
+    assert planning_decision["transport"] == "structured_retry"
+    assert planning_decision["attempts"] == 2
+    assert planning_decision["primary_error_type"] == "reasoning_only_length"
+    assert graph_plan.nodes[1]["metadata"]["plan_strategy"] == "standard_semantic_dag"
 
 
 async def test_team_graph_planner_reuses_planning_decision_cache_for_same_inputs():

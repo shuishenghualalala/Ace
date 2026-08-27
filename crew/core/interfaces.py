@@ -40,11 +40,16 @@ class LLMProvider(ABC):
         tools: list[dict[str, Any]] | None = None,
         *,
         max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
+        reasoning_mode: str | None = None,
     ) -> ChatResponse:
         """一次（非流式）补全。返回归一化的 ChatResponse。
 
         ``max_tokens`` 仅用于本次调用临时覆盖 provider 默认值（如截断重试时加大输出上限）；
         为 None 时使用 provider 自身配置。
+
+        ``response_format`` 和 ``reasoning_mode`` 是结构化短调用的可选能力；不支持的
+        provider 可以忽略它们，调用方会在兼容层降级到普通 JSON 提示。
         """
         raise NotImplementedError
 
@@ -55,11 +60,15 @@ class LLMProvider(ABC):
         tools: list[dict[str, Any]] | None = None,
         *,
         max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
+        reasoning_mode: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """流式补全，逐 token 返回增量文本。工具调用在流结束后以完整形式给出。
 
         ``max_tokens`` 仅用于本次调用临时覆盖 provider 默认值（如截断重试时加大输出上限）；
         为 None 时使用 provider 自身配置。
+
+        ``response_format`` 和 ``reasoning_mode`` 与 ``chat`` 保持相同的可选能力契约。
         """
         raise NotImplementedError
         yield  # pragma: no cover

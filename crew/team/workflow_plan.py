@@ -125,6 +125,7 @@ def planning_decision_messages(
     requested_mode: PlanningMode,
     max_work_units: int = 8,
     scope_confirmation: str = "",
+    structured_retry: bool = False,
 ) -> tuple[str, str]:
     payload = {
         "goal": goal,
@@ -136,26 +137,32 @@ def planning_decision_messages(
             "scope_confirmation": str(scope_confirmation or "").strip() or None,
         },
     }
-    system = (
-        "你是 Crew Workflow PlanningDecision。只输出 JSON；不输出 Markdown/解释。"
-        "先识别用户本轮明确要求的交付范围，再拆 work_units、依赖形态、质量策略和缺失事实；"
-        "不生成 DAG nodes/edges，"
-        "不选择/改派 Agent，不修改 Team/权限/预算。"
-        "requested_scope 只表示本轮用户是否要求实际执行：plan_only=只写方案/设计/文档，"
-        "execute=明确要求开发、修改、运行或验证，uncertain=无法可靠判断。"
-        "用户本轮明确范围优先于 TeamSpec 的默认 intent 和 workflow_lanes；不要因为默认团队包含 build/verify"
-        "就把只写方案的请求自动扩展为实现和验证。"
-        + (
-            "用户已经确认本轮范围为 plan_only，只生成方案类工作，不生成 build/verify 工作。"
-            if scope_confirmation == "plan_only"
-            else "用户已经确认本轮范围为 execute，可以按用户目标规划实际开发和验证。"
-            if scope_confirmation == "execute"
-            else ""
+    if structured_retry:
+        system = (
+            "你是 Crew Workflow PlanningDecision。直接输出完整 JSON，不输出推理、Markdown 或解释。"
+            "严格按用户本轮范围生成 work_units；不要生成 DAG nodes/edges、Leader 控制动作或改派 Agent。"
         )
-        + "members 中的 formation_responsibility 只表示常驻分工边界；先按任务需要拆工作，"
-        + "不得为了让每个成员都有任务而生成重复或近义 work_unit。"
-        + "Leader 的目标确认、TeamPlan 创建/调整、派活和最终汇总由执行器自动生成，"
-        + "不得把这些控制动作重复写入 work_units，也不得使用 leader_ 前缀作为 work_unit id。"
+    else:
+        system = (
+            "你是 Crew Workflow PlanningDecision。只输出 JSON；不输出 Markdown/解释。"
+            "先识别用户本轮明确要求的交付范围，再拆 work_units、依赖形态、质量策略和缺失事实；"
+            "不生成 DAG nodes/edges，"
+            "不选择/改派 Agent，不修改 Team/权限/预算。"
+            "requested_scope 只表示本轮用户是否要求实际执行：plan_only=只写方案/设计/文档，"
+            "execute=明确要求开发、修改、运行或验证，uncertain=无法可靠判断。"
+            "用户本轮明确范围优先于 TeamSpec 的默认 intent 和 workflow_lanes；不要因为默认团队包含 build/verify"
+            "就把只写方案的请求自动扩展为实现和验证。"
+            + (
+                "用户已经确认本轮范围为 plan_only，只生成方案类工作，不生成 build/verify 工作。"
+                if scope_confirmation == "plan_only"
+                else "用户已经确认本轮范围为 execute，可以按用户目标规划实际开发和验证。"
+                if scope_confirmation == "execute"
+                else ""
+            )
+            + "members 中的 formation_responsibility 只表示常驻分工边界；先按任务需要拆工作，"
+            + "不得为了让每个成员都有任务而生成重复或近义 work_unit。"
+            + "Leader 的目标确认、TeamPlan 创建/调整、派活和最终汇总由执行器自动生成，"
+            + "不得把这些控制动作重复写入 work_units，也不得使用 leader_ 前缀作为 work_unit id。"
         )
     user = (
         "JSON schema="

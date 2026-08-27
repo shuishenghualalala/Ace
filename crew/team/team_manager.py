@@ -6152,6 +6152,7 @@ class InProcessTeamManager(TeamManager):
             "reasoning": 1,
             "content": 1,
             "chat_fallback": 1,
+            "retry": 1,
             "parsed": 2,
             "compiled": 3,
             "fallback": 3,
@@ -6175,7 +6176,6 @@ class InProcessTeamManager(TeamManager):
             f"- 理解任务目标：{state(0)}",
             f"- 识别工作单元：{state(1)}",
             f"- 生成团队执行图：{state(2)}",
-            f"- 准备团队执行：{state(3)}",
         ]
         if detail:
             lines.append(f"- 说明：{detail}")

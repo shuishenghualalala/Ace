@@ -40,9 +40,12 @@ from crew.team.workflow_plan import (
 )
 
 DEFAULT_PLANNING_DECISION_TIMEOUT = 30.0
+PLANNING_DECISION_RETRY_TIMEOUT = 10.0
 PLANNING_DECISION_MAX_TOKENS = 4096
+PLANNING_DECISION_RETRY_MAX_TOKENS = 2048
 PLANNING_DECISION_CACHE_TTL_SECONDS = 600.0
 PLANNING_DECISION_WARMUP_TIMEOUT = 6.0
+PLANNING_DECISION_RESPONSE_FORMAT = {"type": "json_object"}
 
 _PLANNING_DECISION_CACHE: dict[str, tuple[float, PlanningDecision]] = {}
 _PLANNING_WARMUP_TASKS: dict[str, asyncio.Task[None]] = {}
@@ -1005,14 +1008,17 @@ def _planning_cache_key(
     members: list[dict[str, Any]],
     requested_mode: PlanningMode,
     max_work_units: int,
+    scope_confirmation: str = "",
 ) -> str:
     payload = {
+        "contract_version": 2,
         "provider": _provider_identity(provider),
         "goal": goal,
         "team_spec": team_spec,
         "members": members,
         "requested_mode": requested_mode,
         "max_work_units": max_work_units,
+        "scope_confirmation": scope_confirmation,
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -1067,13 +1073,51 @@ async def _notify_planning_progress(
         return
 
 
-async def _chat_provider_text(provider: Any, messages: list[Message], *, max_tokens: int) -> ChatResponse:
-    try:
-        return await provider.chat(messages, tools=None, max_tokens=max_tokens)
-    except TypeError as exc:
-        if "max_tokens" not in str(exc):
-            raise
-        return await provider.chat(messages, tools=None)
+def _optional_provider_kwargs(
+    *,
+    max_tokens: int | None,
+    response_format: dict[str, Any] | None,
+    reasoning_mode: str | None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"tools": None}
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+    if reasoning_mode is not None:
+        kwargs["reasoning_mode"] = reasoning_mode
+    return kwargs
+
+
+def _unsupported_provider_kwarg(exc: TypeError, kwargs: dict[str, Any]) -> str | None:
+    message = str(exc)
+    for name in ("response_format", "reasoning_mode", "max_tokens"):
+        if name in kwargs and name in message:
+            return name
+    return None
+
+
+async def _chat_provider_text(
+    provider: Any,
+    messages: list[Message],
+    *,
+    max_tokens: int,
+    response_format: dict[str, Any] | None = None,
+    reasoning_mode: str | None = None,
+) -> ChatResponse:
+    kwargs = _optional_provider_kwargs(
+        max_tokens=max_tokens,
+        response_format=response_format,
+        reasoning_mode=reasoning_mode,
+    )
+    while True:
+        try:
+            return await provider.chat(messages, **kwargs)
+        except TypeError as exc:
+            unsupported = _unsupported_provider_kwarg(exc, kwargs)
+            if unsupported is None:
+                raise
+            kwargs.pop(unsupported)
 
 
 async def _stream_provider_text(
@@ -1082,6 +1126,8 @@ async def _stream_provider_text(
     *,
     max_tokens: int,
     timeout_s: float,
+    response_format: dict[str, Any] | None = None,
+    reasoning_mode: str | None = None,
     progress: PlanningProgressCallback | None = None,
 ) -> tuple[str, dict[str, Any]]:
     started = time.perf_counter()
@@ -1096,12 +1142,20 @@ async def _stream_provider_text(
         "reasoning_chars": 0,
     }
 
-    try:
-        stream = provider.stream_chat(messages, tools=None, max_tokens=max_tokens)
-    except TypeError as exc:
-        if "max_tokens" not in str(exc):
-            raise
-        stream = provider.stream_chat(messages, tools=None)
+    kwargs = _optional_provider_kwargs(
+        max_tokens=max_tokens,
+        response_format=response_format,
+        reasoning_mode=reasoning_mode,
+    )
+    while True:
+        try:
+            stream = provider.stream_chat(messages, **kwargs)
+            break
+        except TypeError as exc:
+            unsupported = _unsupported_provider_kwarg(exc, kwargs)
+            if unsupported is None:
+                raise
+            kwargs.pop(unsupported)
 
     async def collect() -> None:
         nonlocal chunks
@@ -1188,6 +1242,8 @@ async def _race_provider_text(
     max_work_units: int,
     timeout_s: float,
     reasoning_grace_s: float,
+    response_format: dict[str, Any] | None = None,
+    reasoning_mode: str | None = None,
     progress: PlanningProgressCallback | None = None,
 ) -> tuple[str, dict[str, Any]]:
     started = time.perf_counter()
@@ -1205,12 +1261,20 @@ async def _race_provider_text(
         "reasoning_chars": 0,
     }
 
-    try:
-        stream = provider.stream_chat(messages, tools=None, max_tokens=max_tokens)
-    except TypeError as exc:
-        if "max_tokens" not in str(exc):
-            raise
-        stream = provider.stream_chat(messages, tools=None)
+    stream_kwargs = _optional_provider_kwargs(
+        max_tokens=max_tokens,
+        response_format=response_format,
+        reasoning_mode=reasoning_mode,
+    )
+    while True:
+        try:
+            stream = provider.stream_chat(messages, **stream_kwargs)
+            break
+        except TypeError as exc:
+            unsupported = _unsupported_provider_kwarg(exc, stream_kwargs)
+            if unsupported is None:
+                raise
+            stream_kwargs.pop(unsupported)
 
     async def collect_stream() -> str:
         async for chunk in stream:
@@ -1262,7 +1326,13 @@ async def _race_provider_text(
         return "".join(stream_chunks)
 
     async def collect_chat() -> ChatResponse:
-        return await _chat_provider_text(provider, messages, max_tokens=max_tokens)
+        return await _chat_provider_text(
+            provider,
+            messages,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            reasoning_mode=reasoning_mode,
+        )
 
     stream_task = asyncio.create_task(collect_stream())
     chat_task = asyncio.create_task(collect_chat())
@@ -1271,6 +1341,8 @@ async def _race_provider_text(
         "cache_hit": False,
         "transport": "race",
         "race_timeout_ms": int(race_timeout_s * 1000),
+        "structured_output_requested": response_format is not None,
+        "reasoning_mode": reasoning_mode or "default",
     }
 
     try:
@@ -1367,6 +1439,19 @@ async def _race_provider_text(
             elapsed_ms=int((time.perf_counter() - started) * 1000),
             diagnostics=stream_diag,
         )
+        if reasoning_grace_s <= 0:
+            diagnostics.update(stream_diag)
+            diagnostics.update({
+                "transport": "race_reasoning_only",
+                "race_winner": "",
+                "reasoning_grace_used": False,
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            })
+            raise PlanningDecisionFailure(
+                _empty_planning_response_error_type(diagnostics),
+                "PlanningDecision produced reasoning but no structured JSON content",
+                diagnostics,
+            )
         try:
             text = await asyncio.wait_for(stream_task, timeout=max(0.2, reasoning_grace_s))
         except asyncio.TimeoutError as exc:
@@ -1433,6 +1518,41 @@ def _empty_planning_response_error_type(diagnostics: dict[str, Any]) -> str:
     return "reasoning_only_empty"
 
 
+def _combine_planning_attempt_diagnostics(
+    primary: dict[str, Any],
+    retry: dict[str, Any],
+    *,
+    primary_elapsed_ms: int,
+    retry_elapsed_ms: int,
+) -> dict[str, Any]:
+    """Keep one flat diagnostic contract while preserving both attempts."""
+
+    combined = {**primary, **retry}
+    combined.update({
+        "attempts": 2,
+        "primary_elapsed_ms": primary_elapsed_ms,
+        "retry_elapsed_ms": retry_elapsed_ms,
+        "elapsed_ms": primary_elapsed_ms + retry_elapsed_ms,
+    })
+    for key in ("first_chunk_ms", "first_reasoning_ms", "first_content_ms", "partial_chars", "reasoning_chars"):
+        combined[f"primary_{key}"] = primary.get(key)
+        combined[f"retry_{key}"] = retry.get(key)
+    primary_content_ms = primary.get("first_content_ms")
+    retry_content_ms = retry.get("first_content_ms")
+    combined["first_content_ms"] = (
+        primary_content_ms
+        if primary_content_ms is not None
+        else primary_elapsed_ms + retry_content_ms
+        if retry_content_ms is not None
+        else None
+    )
+    combined["reasoning_chars"] = (
+        int(primary.get("reasoning_chars") or 0)
+        + int(retry.get("reasoning_chars") or 0)
+    )
+    return combined
+
+
 async def _planning_provider_warmup(provider: Any) -> None:
     key = _provider_identity(provider)
     started = time.perf_counter()
@@ -1494,17 +1614,24 @@ async def _planning_decision_with_llm(
     members: list[TeamMemberSpec],
     requested_mode: PlanningMode,
     profile: dict[str, Any],
+    retry: bool = False,
     progress: PlanningProgressCallback | None = None,
 ) -> PlanningDecisionCall:
     budget = profile.get("budget") if isinstance(profile.get("budget"), dict) else {}
     try:
-        timeout_s = float(budget.get("planning_decision_timeout") or DEFAULT_PLANNING_DECISION_TIMEOUT)
+        timeout_key = "planning_decision_retry_timeout" if retry else "planning_decision_timeout"
+        timeout_default = PLANNING_DECISION_RETRY_TIMEOUT if retry else DEFAULT_PLANNING_DECISION_TIMEOUT
+        timeout_s = float(budget.get(timeout_key) or timeout_default)
     except (TypeError, ValueError):
         timeout_s = DEFAULT_PLANNING_DECISION_TIMEOUT
     try:
-        reasoning_grace_s = float(budget.get("planning_decision_reasoning_grace_timeout") or timeout_s)
+        reasoning_grace_s = float(
+            budget["planning_decision_reasoning_grace_timeout"]
+            if "planning_decision_reasoning_grace_timeout" in budget
+            else 0
+        )
     except (TypeError, ValueError):
-        reasoning_grace_s = timeout_s
+        reasoning_grace_s = 0
     try:
         max_work_units = int(budget.get("standard_max_work_units") or 8)
     except (TypeError, ValueError):
@@ -1522,15 +1649,20 @@ async def _planning_decision_with_llm(
         requested_mode=requested_mode,
         max_work_units=max_work_units,
         scope_confirmation=str(profile.get("scope_confirmation") or "").strip(),
+        structured_retry=retry,
     )
     messages = [Message.system(system), Message.user(user)]
     prompt_bytes = len(system.encode("utf-8")) + len(user.encode("utf-8"))
     await _notify_planning_progress(
         progress,
-        phase="started",
-        label="正在理解任务目标",
+        phase="retry" if retry else "started",
+        label="正在进行结构化规划重试" if retry else "正在理解任务目标",
         elapsed_ms=0,
-        diagnostics={"prompt_bytes": prompt_bytes, "transport": "race"},
+        diagnostics={
+            "prompt_bytes": prompt_bytes,
+            "transport": "structured_retry" if retry else "race",
+            "retry": retry,
+        },
     )
     cache_key = _planning_cache_key(
         provider=provider,
@@ -1539,8 +1671,9 @@ async def _planning_decision_with_llm(
         members=member_summary,
         requested_mode=requested_mode,
         max_work_units=max_work_units,
+        scope_confirmation=str(profile.get("scope_confirmation") or "").strip(),
     )
-    cached = _cache_get(cache_key, cache_ttl)
+    cached = None if retry else _cache_get(cache_key, cache_ttl)
     if cached is not None:
         await _notify_planning_progress(
             progress,
@@ -1562,35 +1695,79 @@ async def _planning_decision_with_llm(
         )
 
     started = time.perf_counter()
+    max_tokens = PLANNING_DECISION_RETRY_MAX_TOKENS if retry else PLANNING_DECISION_MAX_TOKENS
     diagnostics: dict[str, Any] = {
         "cache_hit": False,
         "prompt_bytes": prompt_bytes,
-        "transport": "race",
+        "transport": "structured_retry" if retry else "race",
+        "retry": retry,
+        "retry_timeout_ms": int(timeout_s * 1000) if retry else None,
     }
-    try:
-        text, stream_diagnostics = await _race_provider_text(
-            provider,
-            messages,
-            max_tokens=PLANNING_DECISION_MAX_TOKENS,
-            max_work_units=max_work_units + 4,
-            timeout_s=timeout_s,
-            reasoning_grace_s=reasoning_grace_s,
-            progress=progress,
-        )
-        diagnostics.update(stream_diagnostics)
-    except PlanningDecisionFailure as exc:
-        diagnostics.update(exc.diagnostics)
-        raise
-    except asyncio.TimeoutError as exc:
-        diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
-        raise PlanningDecisionFailure(
-            "timeout",
-            f"PlanningDecision timed out after {timeout_s:.1f}s",
-            diagnostics,
-        ) from exc
-    except Exception as exc:
-        diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
-        raise PlanningDecisionFailure("provider_error", str(exc) or exc.__class__.__name__, diagnostics) from exc
+    if retry:
+        try:
+            response = await asyncio.wait_for(
+                _chat_provider_text(
+                    provider,
+                    messages,
+                    max_tokens=max_tokens,
+                    response_format=PLANNING_DECISION_RESPONSE_FORMAT,
+                    reasoning_mode="disabled",
+                ),
+                timeout=max(0.2, timeout_s),
+            )
+        except asyncio.TimeoutError as exc:
+            diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+            raise PlanningDecisionFailure(
+                "timeout",
+                f"PlanningDecision structured retry timed out after {timeout_s:.1f}s",
+                diagnostics,
+            ) from exc
+        except Exception as exc:
+            diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+            raise PlanningDecisionFailure("provider_error", str(exc) or exc.__class__.__name__, diagnostics) from exc
+        text = str(response.text or "")
+        reasoning = str(getattr(response, "reasoning_content", "") or "")
+        diagnostics.update({
+            "response_format": PLANNING_DECISION_RESPONSE_FORMAT,
+            "reasoning_mode": "disabled",
+            "partial_chars": len(text),
+            "reasoning_chars": len(reasoning),
+            "finish_reason": response.finish_reason,
+            "chat_finish_reason": response.finish_reason,
+            "first_content_ms": 0 if text else None,
+        })
+        if not text.strip():
+            diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+            raise PlanningDecisionFailure(
+                _empty_planning_response_error_type(diagnostics),
+                "PlanningDecision structured retry produced no JSON content",
+                diagnostics,
+            )
+    else:
+        try:
+            text, stream_diagnostics = await _race_provider_text(
+                provider,
+                messages,
+                max_tokens=max_tokens,
+                max_work_units=max_work_units + 4,
+                timeout_s=timeout_s,
+                reasoning_grace_s=reasoning_grace_s,
+                progress=progress,
+            )
+            diagnostics.update(stream_diagnostics)
+        except PlanningDecisionFailure as exc:
+            diagnostics.update(exc.diagnostics)
+            raise
+        except asyncio.TimeoutError as exc:
+            diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+            raise PlanningDecisionFailure(
+                "timeout",
+                f"PlanningDecision timed out after {timeout_s:.1f}s",
+                diagnostics,
+            ) from exc
+        except Exception as exc:
+            diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+            raise PlanningDecisionFailure("provider_error", str(exc) or exc.__class__.__name__, diagnostics) from exc
     try:
         data = _json_from_text(text)
     except ValueError as exc:
@@ -1621,7 +1798,8 @@ async def _planning_decision_with_llm(
         elapsed_ms=elapsed_ms,
         diagnostics=diagnostics,
     )
-    _cache_put(cache_key, decision, cache_ttl)
+    if not retry:
+        _cache_put(cache_key, decision, cache_ttl)
     return PlanningDecisionCall(decision=decision, elapsed_ms=elapsed_ms, diagnostics=diagnostics)
 
 
@@ -2268,6 +2446,71 @@ class TeamGraphPlanner:
                 decision_error_type = "unknown"
                 decision_diagnostics = {}
                 decision_elapsed_ms = int((time.perf_counter() - started) * 1000) if "started" in locals() else 0
+
+            if decision is None:
+                primary_elapsed_ms = decision_elapsed_ms
+                primary_diagnostics = dict(decision_diagnostics)
+                primary_error = decision_error
+                primary_error_type = decision_error_type
+                retry_started = time.perf_counter()
+                try:
+                    retry_call = await _planning_decision_with_llm(
+                        provider=provider,
+                        goal=goal,
+                        spec=base_spec,
+                        members=members,
+                        requested_mode=requested_mode,
+                        profile=profile,
+                        retry=True,
+                        progress=planning_progress,
+                    )
+                    decision = retry_call.decision
+                    retry_elapsed_ms = int((time.perf_counter() - retry_started) * 1000)
+                    decision_elapsed_ms = primary_elapsed_ms + retry_elapsed_ms
+                    decision_diagnostics = _combine_planning_attempt_diagnostics(
+                        primary_diagnostics,
+                        retry_call.diagnostics,
+                        primary_elapsed_ms=primary_elapsed_ms,
+                        retry_elapsed_ms=retry_elapsed_ms,
+                    )
+                    decision_diagnostics.update({
+                        "primary_error_type": primary_error_type,
+                        "primary_error": primary_error,
+                    })
+                except PlanningDecisionFailure as exc:
+                    retry_elapsed_ms = int((time.perf_counter() - retry_started) * 1000)
+                    decision_error = primary_error or str(exc)
+                    decision_error_type = primary_error_type or exc.error_type
+                    decision_elapsed_ms = primary_elapsed_ms + retry_elapsed_ms
+                    decision_diagnostics = _combine_planning_attempt_diagnostics(
+                        primary_diagnostics,
+                        exc.diagnostics,
+                        primary_elapsed_ms=primary_elapsed_ms,
+                        retry_elapsed_ms=retry_elapsed_ms,
+                    )
+                    decision_diagnostics.update({
+                        "primary_error_type": primary_error_type,
+                        "primary_error": primary_error,
+                        "retry_error_type": exc.error_type,
+                        "retry_error": str(exc),
+                    })
+                except Exception as exc:  # noqa: BLE001
+                    retry_elapsed_ms = int((time.perf_counter() - retry_started) * 1000)
+                    decision_error = primary_error or str(exc)
+                    decision_error_type = primary_error_type or "unknown"
+                    decision_elapsed_ms = primary_elapsed_ms + retry_elapsed_ms
+                    decision_diagnostics = _combine_planning_attempt_diagnostics(
+                        primary_diagnostics,
+                        {"transport": "structured_retry"},
+                        primary_elapsed_ms=primary_elapsed_ms,
+                        retry_elapsed_ms=retry_elapsed_ms,
+                    )
+                    decision_diagnostics.update({
+                        "primary_error_type": primary_error_type,
+                        "primary_error": primary_error,
+                        "retry_error_type": "unknown",
+                        "retry_error": str(exc),
+                    })
 
         if decision is not None:
             budget = profile.get("budget") if isinstance(profile.get("budget"), dict) else {}
