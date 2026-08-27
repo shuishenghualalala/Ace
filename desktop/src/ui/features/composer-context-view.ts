@@ -159,7 +159,7 @@ function createLeftControls(): DocumentFragment {
   const attach = createIconControl(
     'chat-attach-btn',
     '添加附件',
-    'icon-plus',
+    'icon-attachment',
     'mw-context-attach',
   );
   const mode = document.createElement('div');
