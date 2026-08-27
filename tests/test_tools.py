@@ -591,6 +591,60 @@ async def test_ask_followup_question_returns_user_answers():
         current_push_fn.reset(push_token)
 
 
+async def test_followup_question_uses_visible_session_for_sidechain():
+    import asyncio
+
+    from crew.core.followup import resolve_answer
+    from crew.core.runctx import (
+        current_display_session_id,
+        current_push_fn,
+        current_session_id,
+    )
+    from crew.tools.interaction import handle_ask_followup_question
+
+    visible_session_id = "team-session"
+    sid_token = current_session_id.set(f"{visible_session_id}::turn::req-1")
+    display_sid_token = current_display_session_id.set(visible_session_id)
+    pushed: list[tuple[str, dict]] = []
+
+    async def mock_push(sid: str, payload: dict) -> None:
+        pushed.append((sid, payload))
+
+    push_token = current_push_fn.set(mock_push)
+
+    async def answer_after_short_delay() -> None:
+        await asyncio.sleep(0.05)
+        question_id = pushed[0][1]["body"]["question_id"]
+        resolve_answer(
+            visible_session_id,
+            question_id,
+            [{"question_id": "permission", "answers": ["allow_once"]}],
+        )
+
+    try:
+        answerer = asyncio.create_task(answer_after_short_delay())
+        result = await handle_ask_followup_question({
+            "title": "权限确认",
+            "questions": [{
+                "id": "permission",
+                "question": "允许浏览器操作？",
+                "options": [{"label": "仅本次允许", "value": "allow_once"}],
+                "allowFreeText": False,
+            }],
+        })
+        await answerer
+
+        assert json.loads(result)["answers"] == [
+            {"question_id": "permission", "answers": ["allow_once"]}
+        ]
+        assert pushed[0][0] == visible_session_id
+        assert pushed[0][1]["session_id"] == visible_session_id
+    finally:
+        current_session_id.reset(sid_token)
+        current_display_session_id.reset(display_sid_token)
+        current_push_fn.reset(push_token)
+
+
 def test_followup_question_options_accept_label_value_objects():
     from crew.core.followup import FollowupWaiter, validate_questions
 

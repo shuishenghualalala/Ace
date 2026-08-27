@@ -133,6 +133,22 @@ class _CapturingExecutor(_FixedExecutor):
             yield chunk
 
 
+class _RunContextCapturingExecutor(_FixedExecutor):
+    """记录工具层看到的内部会话和用户可见会话。"""
+
+    def __init__(self) -> None:
+        self.task_session_id = ""
+        self.display_session_id = ""
+
+    async def execute(self, ctx: ExecutionContext):
+        from crew.core.runctx import current_display_session_id, current_session_id
+
+        self.task_session_id = current_session_id.get()
+        self.display_session_id = current_display_session_id.get()
+        async for chunk in super().execute(ctx):
+            yield chunk
+
+
 class _RecordingResultFileExecutor(_FixedExecutor):
     """模拟 sidechain 执行器按 task_session_id 记录终端生成的最终产物。"""
 
@@ -203,6 +219,18 @@ async def test_agent_uses_injected_executor_and_persists():
     assert final == "固定回答"
     saved = store.load("sx", owner_account_id="local")
     assert saved[-1].role == "assistant" and saved[-1].content == "固定回答"
+
+
+async def test_agent_maps_sidechain_interactions_to_visible_session():
+    executor = _RunContextCapturingExecutor()
+    agent = _agent(FakeProvider(), executor=executor)
+    envelope = Envelope.of("审阅", session_id="team-session::turn::req-1::leader")
+    envelope.params["task_session_id"] = "team-session::turn::req-1"
+
+    _ = [chunk async for chunk in agent.run(envelope)]
+
+    assert executor.task_session_id == "team-session::turn::req-1"
+    assert executor.display_session_id == "team-session"
 
 
 def test_sidechain_persists_result_files_recorded_under_task_session_id(tmp_path):
