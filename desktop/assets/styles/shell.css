@@ -95,7 +95,7 @@
   position: relative;
   grid-column: 1 / -1;
   grid-row: 1 / -1;
-  grid-template-columns: var(--mw-app-rail-width) 260px minmax(0, 1fr);
+  grid-template-columns: var(--mw-app-rail-width) var(--mw-app-context-width, 260px) minmax(0, 1fr);
   grid-template-rows: 40px minmax(0, 1fr);
 }
 
@@ -132,8 +132,41 @@
 }
 
 .mw-app-context {
+  position: relative;
   grid-column: 2;
   grid-row: 2;
+}
+
+/* 上下文栏（会话列表）右缘拖拽把手：命中区略溢出栏外，悬停/拖拽时显示指示条 */
+.mw-app-context__resize-handle {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+}
+
+.mw-app-context__resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 2px;
+  width: 2px;
+  height: 100%;
+  background: transparent;
+}
+
+.mw-app-context__resize-handle:hover::after,
+.mw-app-context__resize-handle.is-dragging::after {
+  background: var(--mw-action-primary);
+  opacity: 0.45;
+}
+
+body.context-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .mw-app-page-outlet {
@@ -446,7 +479,7 @@
 
   .mw-application-shell__body.mw-shell-template,
   .mw-application-shell[data-product-mode='work'] .mw-application-shell__body {
-    grid-template-columns: var(--mw-app-rail-width-compact) 240px minmax(0, 1fr);
+    grid-template-columns: var(--mw-app-rail-width-compact) var(--mw-app-context-width, 240px) minmax(0, 1fr);
   }
 
   /* 无上下文栏的页面（主对话以外的页面 has-context=false）也要收成紧凑栏——

@@ -1,4 +1,6 @@
 import { createIcon, MONOCHROME_ICON_CLASS } from '../components/icon';
+import { setRuntimeToken } from '../components/runtime-style';
+import { STORAGE_KEYS } from '../../shared/storage-keys';
 import {
   resolveShellNavigation,
   type FeatureState,
@@ -18,6 +20,11 @@ const PRODUCT_LABEL: Record<ProductMode, string> = {
   assistant: 'Crew',
   work: 'Crew 办公助手',
 };
+
+/** 上下文栏（会话列表）宽度：拖拽可调，范围与默认值。 */
+const CONTEXT_DEFAULT_WIDTH = 260;
+const CONTEXT_MIN_WIDTH = 200;
+const CONTEXT_MAX_WIDTH = 520;
 
 export interface ApplicationShellCommands {
   minimize?: () => void | Promise<void>;
@@ -193,6 +200,106 @@ export function createApplicationShell(
   historyActions.append(historyCollapseCommand, newChatCommand);
   contextHeader.append(contextTitle, contextCollapseCommand, historyActions);
   template.slots.context?.append(contextHeader, contextContent);
+
+  // ── 上下文栏宽度拖拽：把手在栏右缘，向右拖 = 变宽；松手才持久化 ──
+  const contextResize = document.createElement('div');
+  contextResize.id = 'app-context-resize-handle';
+  contextResize.className = 'mw-app-context__resize-handle';
+  contextResize.title = '拖拽调整侧栏宽度';
+  contextResize.tabIndex = 0;
+  contextResize.setAttribute('role', 'separator');
+  contextResize.setAttribute('aria-orientation', 'vertical');
+  contextResize.setAttribute('aria-label', '调整侧栏宽度');
+  template.slots.context?.append(contextResize);
+
+  const clampContextWidth = (width: number): number => {
+    if (!Number.isFinite(width)) return CONTEXT_DEFAULT_WIDTH;
+    return Math.max(CONTEXT_MIN_WIDTH, Math.min(CONTEXT_MAX_WIDTH, Math.round(width)));
+  };
+
+  const loadContextWidth = (): number => {
+    try {
+      const raw = storage.getItem(STORAGE_KEYS.contextWidth);
+      if (!raw) return CONTEXT_DEFAULT_WIDTH;
+      return clampContextWidth(parseInt(raw, 10));
+    } catch {
+      return CONTEXT_DEFAULT_WIDTH;
+    }
+  };
+
+  const applyContextWidth = (width: number, persist: boolean): void => {
+    const w = clampContextWidth(width);
+    setRuntimeToken(document.documentElement, '--mw-app-context-width', `${w}px`);
+    contextResize.setAttribute('aria-valuemin', String(CONTEXT_MIN_WIDTH));
+    contextResize.setAttribute('aria-valuemax', String(CONTEXT_MAX_WIDTH));
+    contextResize.setAttribute('aria-valuenow', String(w));
+    if (persist) {
+      try {
+        storage.setItem(STORAGE_KEYS.contextWidth, String(w));
+      } catch {
+        /* quota / disabled */
+      }
+    }
+  };
+
+  let contextPointerId: number | null = null;
+  let contextStartX = 0;
+  let contextStartWidth = 0;
+
+  const onContextResizeMove = (event: PointerEvent): void => {
+    if (contextPointerId !== event.pointerId) return;
+    applyContextWidth(contextStartWidth + (event.clientX - contextStartX), false);
+  };
+
+  const onContextResizeEnd = (event: PointerEvent): void => {
+    if (contextPointerId !== event.pointerId) return;
+    if (contextResize.hasPointerCapture(event.pointerId)) {
+      contextResize.releasePointerCapture(event.pointerId);
+    }
+    contextPointerId = null;
+    contextResize.classList.remove('is-dragging');
+    document.body.classList.remove('context-resizing');
+    const current = parseInt(
+      document.documentElement.style.getPropertyValue('--mw-app-context-width'),
+      10,
+    );
+    if (!isNaN(current)) applyContextWidth(current, true);
+  };
+
+  contextResize.addEventListener('pointerdown', (event: PointerEvent) => {
+    if (event.button !== 0 || !template.slots.context) return;
+    contextPointerId = event.pointerId;
+    contextResize.setPointerCapture(event.pointerId);
+    contextStartX = event.clientX;
+    contextStartWidth = template.slots.context.getBoundingClientRect().width;
+    contextResize.classList.add('is-dragging');
+    document.body.classList.add('context-resizing');
+    event.preventDefault();
+  });
+  contextResize.addEventListener('pointermove', onContextResizeMove);
+  contextResize.addEventListener('pointerup', onContextResizeEnd);
+  contextResize.addEventListener('pointercancel', onContextResizeEnd);
+
+  contextResize.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const current = template.slots.context?.getBoundingClientRect().width || loadContextWidth();
+    const next = event.key === 'Home'
+      ? CONTEXT_MIN_WIDTH
+      : event.key === 'End'
+        ? CONTEXT_MAX_WIDTH
+        : current + (event.key === 'ArrowRight' ? 24 : -24);
+    applyContextWidth(next, true);
+  });
+
+  // 双击复位到默认宽度
+  contextResize.addEventListener('dblclick', () => {
+    applyContextWidth(CONTEXT_DEFAULT_WIDTH, true);
+  });
+
+  // 启动时恢复用户上次拖出来的宽度
+  applyContextWidth(loadContextWidth(), false);
+
   template.element.append(restoreContextCommand);
   element.append(titlebar, template.element);
 

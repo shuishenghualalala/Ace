@@ -67,6 +67,7 @@ const RUNTIME_TOKENS = new Set([
   '--mw-font-sans',
   '--mw-inspector-width',
   '--mw-task-board-width',
+  '--mw-app-context-width',
 ]);
 
 function runtimeVariable(property: string): string {
