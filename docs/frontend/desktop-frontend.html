@@ -790,9 +790,10 @@
     <ul>
       <li><b>问题：</b>Team Leader 端到端审阅运行在 <code>::turn::</code> sidechain 中，浏览器工具的权限追问错误绑定到内部子会话；Desktop 当前停留在父 Session，因此没有显示确认卡，并在每次等待 300 秒后超时。</li>
       <li><b>修复：</b>Agent 运行时分别维护内部任务 Session 与用户可见 Session；历史、工作区和成员隔离继续使用内部 ID，权限确认和普通追问统一投递到父 Session 并在同一父 Session 等待答案。</li>
+      <li><b>Desktop 兜底：</b>收到旧后端或断线重放遗留的 sidechain Followup 时，仅把 <code>followup_question</code> 归并到可见父 Session，并丢弃子 Session 的序列水位；普通 Team 流式帧仍保持原有隔离。</li>
       <li><b>范围：</b>复用既有 Followup 协议、Gateway 推送和 Desktop 确认卡，不新增接口、模块、持久化字段或 Team DAG 逻辑。</li>
     </ul>
-    <p>验证：Followup 可见 Session 路由与 SingleAgent sidechain 上下文回归通过；Python E/F 静态门禁和差异检查通过。</p>
+    <p>验证：后端 Followup 可见 Session 路由与 SingleAgent sidechain 上下文回归、Desktop Team sidechain 权限卡归并回归通过；Python E/F 静态门禁、Desktop TypeScript typecheck、production build 和差异检查通过。</p>
   </section>
 </div>
 </body>

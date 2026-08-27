@@ -148,6 +148,38 @@ describe('dispatch turn gate', () => {
     expect(messages.some((message) => message.content.includes('更新 DAG'))).toBe(false);
   });
 
+  it('routes legacy sidechain permission followups to the visible Team session', () => {
+    openTurnForRequest('sid-1', 'req-team-approval');
+    applyChunk({
+      ...chunk('status', 'req-team-approval', { message: 'Leader 正在审阅' }),
+      gateway_sequence: 40,
+    });
+
+    applyChunk({
+      ...chunk('followup_question', 'req-team-approval', {
+        question_id: 'permission-1',
+        title: '权限确认 · browser_use',
+        record_history: false,
+        questions: [{
+          id: 'perm',
+          question: '允许浏览器操作？',
+          options: [{ label: '允许一次', value: 'allow_once' }],
+          multiSelect: false,
+          allowFreeText: false,
+        }],
+      }),
+      session_id: 'sid-1::turn::req-team-approval',
+      gateway_sequence: 1,
+    });
+
+    expect(sessionStore.get().books['sid-1']?.pendingFollowup).toMatchObject({
+      questionId: 'permission-1',
+      title: '权限确认 · browser_use',
+      recordHistory: false,
+    });
+    expect(sessionStore.get().books['sid-1::turn::req-team-approval']).toBeUndefined();
+  });
+
   it('reuses optimistic assistant and preserves turnStartedAt across first delta', () => {
     const t0 = 1_700_000_000_000;
     vi.spyOn(Date, 'now').mockReturnValue(t0);
