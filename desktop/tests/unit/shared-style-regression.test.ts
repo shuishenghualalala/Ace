@@ -118,6 +118,14 @@ describe('shared chat chrome styles', () => {
     expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .team-internal__bubble--tone-1:not(.is-crew)'))
       .toContain('var(--mw-status-info)');
   });
+
+  it('anchors the Team file count badge on the folder button corner', () => {
+    const badge = ruleBody(kanbanCss, '.team-collaboration-board .board-files-btn i');
+    expect(badge).toContain('top: 0');
+    expect(badge).toContain('right: 0');
+    expect(badge).toContain('transform: translate(50%, -50%)');
+    expect(badge).not.toMatch(/top:\s*-\d/);
+  });
 });
 
 describe('security center scroll contract', () => {

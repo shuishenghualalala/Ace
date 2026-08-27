@@ -1000,8 +1000,9 @@ body.inspector-open .task-board-toggle {
 
 .team-collaboration-board .board-files-btn i {
   position: absolute;
-  top: -6px;
-  right: -4px;
+  top: 0;
+  right: 0;
+  transform: translate(50%, -50%);
   display: grid;
   min-width: 14px;
   height: 14px;

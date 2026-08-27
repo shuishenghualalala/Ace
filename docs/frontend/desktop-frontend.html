@@ -775,6 +775,16 @@
     </ul>
     <p>验证：Desktop Team 回合渲染回归、CSS 引用扫描、TypeScript typecheck 与 production build 通过。</p>
   </section>
+  <section>
+    <h2>Team 文件数量角标定位与外援链路验收（2026-08-27）</h2>
+    <ul>
+      <li><b>角标修复：</b>Desktop Team 协作看板的文件数量角标改为以自身中心对齐文件按钮右上角；两位数及更长数量不再因固定负偏移悬浮到按钮上方。</li>
+      <li><b>实现范围：</b>仅调整既有 <code>kanban-board.css</code> 并补充共享样式回归，不新增模块、接口、资源或持久化字段。</li>
+      <li><b>外援验收：</b>复核外部单 Agent 与外部 Team Session 的绑定、Owner 隔离、模型映射、Desktop 入口及 Team 协作看板现有回归；同时移除 Team 默认流程构建中的一个未使用变量，使项目约定的 Python E/F 静态门禁恢复干净。</li>
+      <li><b>性能排查：</b><code>web_mtaturvo_9a7aa7</code> 的 35 分钟耗时来自外援实现约 12 分钟及 Leader 浏览器审阅中连续 4 次、每次 300 秒的权限追问超时；末尾另有模型代理 503，但仅占约 22 秒。</li>
+    </ul>
+    <p>验证：后端外援、Session、Team、Owner 隔离与模型链路专项测试 <code>442 passed / 1 skipped</code>；Desktop 外援入口、会话恢复、模型、团队协作看板、消息映射与样式专项测试 <code>173 passed</code>；Python E/F 静态门禁、Desktop TypeScript typecheck、CSS lint、ESLint（0 error，26 个存量 warning）和 production build 通过。</p>
+  </section>
 </div>
 </body>
 </html>
