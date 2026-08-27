@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from uuid import uuid4
 
-from crew.state.logging import get_logger
 from crew.state.home import get_owner_runtime_home, task_workspace_path
+from crew.state.logging import get_logger
 
 log = get_logger("context")
 
@@ -63,12 +64,14 @@ def save_upload(
     stem = Path(safe_name).stem or "untitled"
     suffix = Path(safe_name).suffix
     # 内嵌 uuid 消除 TOCTOU：并发同名上传落不同文件，互不覆盖
-    unique = f"{stem}_{uuid4().hex}{suffix}"
+    upload_id = uuid4().hex
+    unique = f"{stem}_{upload_id}{suffix}"
     dest = upload_dir / unique
     dest.write_bytes(content_bytes)
     log.info("附件已保存: %s", dest)
 
-    file_id = f"att_{dest.stem}"
+    # 附件身份与展示文件名解耦，传输协议始终拿到跨平台安全的不可读 ID。
+    file_id = f"att_{upload_id}"
     return {
         "id": file_id,
         "name": filename,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,13 @@ def test_save_upload_concurrent_same_name_distinct_ids(crew_home):
     assert Path(b["path"]).read_bytes() == b"bbb"
     # id 不同
     assert a["id"] != b["id"]
+
+
+def test_save_upload_uses_filename_independent_transport_safe_id(crew_home):
+    meta = save_upload("截屏 2026-08-24 (最终版).png", b"png")
+    assert re.fullmatch(r"att_[a-f0-9]{32}", meta["id"])
+    assert "截屏" not in meta["id"]
+    assert meta["name"] == "截屏 2026-08-24 (最终版).png"
 
 
 def test_save_upload_owner_scoped_paths(crew_home):

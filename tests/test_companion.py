@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 from pathlib import Path
 
 import pytest
@@ -168,6 +169,26 @@ def test_attachment_prepare_and_receive_are_owner_scoped(tmp_path, monkeypatch):
     received = _store_received_attachment("owner-a", prepared)
     assert received["name"] == "note.txt"
     assert Path(received["path"]).exists()
+
+
+def test_attachment_prepare_normalizes_legacy_unicode_file_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    uploads = get_owner_runtime_home("owner-a") / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    source = uploads / "截屏 2026-08-24_legacy.png"
+    source.write_bytes(b"image-bytes")
+
+    raw = {
+        "id": "att_截屏 2026-08-24_legacy",
+        "name": "截屏 2026-08-24.png",
+        "path": str(source),
+    }
+    first = _prepare_attachment("owner-a", raw)
+    second = _prepare_attachment("owner-a", raw)
+
+    assert first["file_id"] == second["file_id"]
+    assert re.fullmatch(r"file_[a-f0-9]{32}", first["file_id"])
+    assert first["name"] == "截屏 2026-08-24.png"
 
 
 def test_agent_can_only_send_to_existing_room(tmp_path):

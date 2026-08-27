@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import queue
+import re
 import socket
 import subprocess
 import threading
@@ -275,6 +277,74 @@ async def test_two_instances_exchange_and_restore_companion_history(tmp_path, au
                 json={"status": "delivered"},
             )
 
+            filename = "截屏 2026-08-24 (最终版).png"
+            file_bytes = b"companion-image-bytes"
+            uploaded_response = await alice.post("/api/upload", json={
+                "filename": filename,
+                "content": base64.b64encode(file_bytes).decode("ascii"),
+            })
+            assert uploaded_response.status_code == 200
+            uploaded = uploaded_response.json()
+            assert re.fullmatch(r"att_[a-f0-9]{32}", uploaded["id"])
+
+            prepared_response = await alice.post(
+                "/api/companion/files/prepare", json=uploaded
+            )
+            assert prepared_response.status_code == 200
+            prepared = prepared_response.json()["file"]
+            assert prepared["file_id"] == uploaded["id"]
+            assert prepared["name"] == filename
+
+            queued_file = await alice.post(
+                f"/api/companion/conversations/{session_a}/messages",
+                json={"text": "", "attachments": [uploaded]},
+            )
+            assert queued_file.status_code == 200
+            file_event_id = queued_file.json()["event_id"]
+            node_a.send({
+                "type": "send_peer_file",
+                "peer_id": "ace_bob",
+                "file_id": prepared["file_id"],
+                "name": prepared["name"],
+                "mime_type": prepared["mime_type"],
+                "size": prepared["size"],
+                "sha256": prepared["sha256"],
+                "data_base64": prepared["data_base64"],
+                "client_message_id": file_event_id,
+            })
+            incoming_file = await asyncio.to_thread(
+                node_b.wait_for,
+                "message",
+                lambda event: event.get("message", {}).get("type") == "peer.file",
+            )
+            incoming_payload = incoming_file["message"]["payload"]["file"]
+            projected_file = await bob.post("/api/companion/link-state", json={
+                "type": "file",
+                "kind": "nearby_dm",
+                "target_id": "ace_alice",
+                "conversation_title": "Alice",
+                "message_id": f"file:{incoming_payload['file_id']}",
+                "sender_id": "ace_alice",
+                "sender_name": "Alice",
+                "sender_kind": "human",
+                "file": incoming_payload,
+            })
+            assert projected_file.status_code == 200
+            received_attachment = projected_file.json()["attachment"]
+            assert received_attachment["name"] == filename
+            assert Path(received_attachment["path"]).read_bytes() == file_bytes
+
+            delivered_file = await asyncio.to_thread(
+                node_a.wait_for,
+                "message_delivered",
+                lambda event: event["message_id"] == file_event_id,
+            )
+            settled_file = await alice.post(
+                f"/api/companion/outbox/{delivered_file['message_id']}/settle",
+                json={"status": "delivered"},
+            )
+            assert settled_file.json()["status"] == "delivered"
+
             sessions_a = (await alice.get("/api/sessions", params={"workspace_id": "companion"})).json()
             sessions_b = (await bob.get("/api/sessions", params={"workspace_id": "companion"})).json()
             history_a = (await alice.get(f"/api/session/{session_a}")).json()
@@ -282,12 +352,14 @@ async def test_two_instances_exchange_and_restore_companion_history(tmp_path, au
 
         assert any(item["session_id"] == session_a for item in sessions_a)
         assert any(item["session_id"] == session_b for item in sessions_b)
-        assert [item["content"] for item in history_a] == ["Alice 发出的消息", "Bob 的回复"]
-        assert [item["content"] for item in history_b] == ["Alice 发出的消息", "Bob 的回复"]
+        assert [item["content"] for item in history_a[:2]] == ["Alice 发出的消息", "Bob 的回复"]
+        assert [item["content"] for item in history_b[:2]] == ["Alice 发出的消息", "Bob 的回复"]
+        assert filename in history_a[2]["content"]
+        assert filename in history_b[2]["content"]
         assert history_a[1]["origin"]["sender_name"] == "Bob"
         assert history_b[0]["origin"]["sender_name"] == "Alice"
-        assert len(crew_a.session_store.load(session_a, owner_account_id="A:uid-a")) == 2
-        assert len(crew_b.session_store.load(session_b, owner_account_id="A:uid-a")) == 2
+        assert len(crew_a.session_store.load(session_a, owner_account_id="A:uid-a")) == 3
+        assert len(crew_b.session_store.load(session_b, owner_account_id="A:uid-a")) == 3
     finally:
         if node_a is not None:
             node_a.close()

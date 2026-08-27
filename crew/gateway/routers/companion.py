@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import mimetypes
+import re
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +21,18 @@ from crew.gateway.auth import account_from_request
 from crew.gateway.context import save_upload
 from crew.state.home import get_owner_runtime_home
 
-
 MAX_COMPANION_FILE_BYTES = 4 * 1024 * 1024
+COMPANION_FILE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def _companion_file_id(raw_id: Any, *, path: Path, sha256: str) -> str:
+    """Return an opaque LinkAdapter-safe identity for one uploaded file."""
+    candidate = str(raw_id or "").strip()
+    if COMPANION_FILE_ID_RE.fullmatch(candidate):
+        return candidate
+    legacy_identity = candidate or f"{path}\0{sha256}"
+    digest = hashlib.sha256(legacy_identity.encode("utf-8")).hexdigest()[:32]
+    return f"file_{digest}"
 
 
 def _prepare_attachment(owner: str, raw: dict[str, Any]) -> dict[str, Any]:
@@ -42,14 +53,15 @@ def _prepare_attachment(owner: str, raw: dict[str, Any]) -> dict[str, Any]:
     if not name or name in {".", ".."}:
         raise ValueError("附件名无效")
     mime_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    sha256 = hashlib.sha256(data).hexdigest()
     return {
-        "file_id": str(raw.get("id") or f"file_{hashlib.sha256(data).hexdigest()[:24]}"),
+        "file_id": _companion_file_id(raw.get("id"), path=path, sha256=sha256),
         "name": name,
         "path": str(path),
         "type": "image" if mime_type.startswith("image/") else "file",
         "mime_type": mime_type,
         "size": size,
-        "sha256": hashlib.sha256(data).hexdigest(),
+        "sha256": sha256,
         "data_base64": base64.b64encode(data).decode("ascii"),
     }
 
