@@ -244,7 +244,11 @@ class InMemoryWorkspaceStore(WorkspaceStore):
     """内存工作空间存储。测试用，内置工作空间查不到时自动补建。"""
 
     # 镜像 crew/state/workspace_store.py 的 BUILTIN_WORKSPACES（core 不反向依赖 state）。
-    _BUILTIN_WORKSPACES = {"default": ("默认工作空间", False), "wiki": ("Wiki 知识库", True)}
+    _BUILTIN_WORKSPACES = {
+        "default": ("默认工作空间", False),
+        "wiki": ("Wiki 知识库", True),
+        "companion": ("同伴空间", False),
+    }
 
     def __init__(self) -> None:
         self._data: dict[tuple[str, str], dict] = {}

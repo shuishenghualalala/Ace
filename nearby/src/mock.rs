@@ -6,7 +6,9 @@ use crate::{
         remember_room_message, save_dms, save_rooms, unix_timestamp_seconds,
         validate_file_transfer, EventSink, IpcCommand, IpcEvent, RoomState,
     },
-    protocol::{is_valid_agent_mode, normalize_room_name, FileChunk, Message, PeerInfo, DEFAULT_AGENT_MODE},
+    protocol::{
+        is_valid_agent_mode, normalize_room_name, FileChunk, Message, PeerInfo, DEFAULT_AGENT_MODE,
+    },
     runtime::NearbyConfig,
 };
 use anyhow::{bail, Context, Result};
@@ -406,6 +408,31 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                         save_dms(&state_dir, &dms)?;
                         sink.send(IpcEvent::Message { peer_id, message }).await?;
                     }
+                    IpcCommand::SendPeerFile { peer_id, file_id, name, mime_type, size, sha256, data_base64 } => {
+                        if !active_peers.contains(&peer_id) {
+                            sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "请先连接这台 Ace".to_owned() }).await?;
+                            continue;
+                        }
+                        let Some(session) = sessions.get(&peer_id).cloned() else {
+                            active_peers.remove(&peer_id);
+                            sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "连接已经断开".to_owned() }).await?;
+                            continue;
+                        };
+                        if let Err(error) = validate_file_transfer(&file_id, &name, &mime_type, size, &sha256, &data_base64) {
+                            sink.send(IpcEvent::Error { message: error.to_string() }).await?;
+                            continue;
+                        }
+                        let chunks = if data_base64.is_empty() { vec![&[][..]] } else { data_base64.as_bytes().chunks(FILE_CHUNK_BASE64_BYTES).collect::<Vec<_>>() };
+                        let chunk_total = u32::try_from(chunks.len().max(1)).context("file has too many chunks")?;
+                        for (chunk_index, data) in chunks.into_iter().enumerate() {
+                            let file = FileChunk { file_id: file_id.clone(), name: name.clone(), mime_type: mime_type.clone(), size, sha256: sha256.clone(), chunk_index: u32::try_from(chunk_index)?, chunk_total, data_base64: String::from_utf8(data.to_vec())? };
+                            let message = Message::peer_file(peer.peer_id.clone(), file);
+                            session.send(message.clone()).await.ok();
+                            remember_dm_message(&mut dms, &peer_id, &message);
+                            sink.send(IpcEvent::Message { peer_id: peer_id.clone(), message }).await?;
+                        }
+                        save_dms(&state_dir, &dms)?;
+                    }
                     IpcCommand::CreateRoom { room_id, room_name, peer_ids, agent_mode } => {
                         let agent_mode = agent_mode.unwrap_or_else(|| DEFAULT_AGENT_MODE.to_owned());
                         if !is_valid_agent_mode(&agent_mode) {
@@ -617,6 +644,12 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                                 message_id: message.message_id.clone(),
                                 timestamp: unix_timestamp_seconds(),
                             }).await?;
+                        }
+                        "peer.file" => {
+                            if !active_peers.contains(&peer_id) || !seen_messages.insert(message.message_id.clone()) { continue; }
+                            remember_dm_message(&mut dms, &peer_id, &message);
+                            save_dms(&state_dir, &dms)?;
+                            sink.send(IpcEvent::Message { peer_id, message }).await?;
                         }
                         _ => {
                             handle_received_message(&peer.peer_id, &sessions, &mut rooms, &mut seen_messages, &discovered, &sink, peer_id, message).await?;

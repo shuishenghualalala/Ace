@@ -130,6 +130,7 @@ import { resolveChatRenderTargetId, openStudioChatPanel, isStudioView } from './
 import { isStreamDebugEnabled, logStream } from '../stream-debug';
 import { setDisabledWorkPreferenceIdsForTurn, takeDisabledWorkPreferenceIds } from './composer-mention';
 import { productModeStore } from '../stores/product-mode-store';
+import { conversationAdapters } from './conversation-adapters';
 
 // ---------- registry: 由 index.ts 在 init 时注入的回调（破循环） ----------
 
@@ -1462,6 +1463,42 @@ export async function dispatchWs(
   }
   // 新一轮发送：解除对该会话的「迟到分片屏蔽」
   removeSuppressedSession(sessionId);
+  const conversationAdapter = conversationAdapters.resolve(sessionId);
+  if (conversationAdapter) {
+    const abilities = conversationAdapter.abilities(sessionId);
+    const blocked = (query.trim() && !abilities.canSendText)
+      || (attachments.length > 0 && !abilities.canAttach);
+    if (blocked) {
+      appendMessage(
+        sessionId,
+        'error',
+        abilities.unavailableReason || '当前会话暂时不能发送消息',
+      );
+      renderChat();
+      return false;
+    }
+    const optimisticUserMessageId = dispatchOptions.optimisticUserMessageId;
+    const alreadyRendered = optimisticUserMessageId
+      ? getMessages(sessionId).some((message) => message.id === optimisticUserMessageId)
+      : false;
+    if (!alreadyRendered) {
+      appendMessage(sessionId, 'user', query, {
+        attachments,
+        ...(optimisticUserMessageId ? { id: optimisticUserMessageId } : {}),
+      });
+    }
+    renderChat();
+    jumpChatToBottom();
+    try {
+      await conversationAdapter.send({ sessionId, text: query, attachments });
+      return true;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      appendMessage(sessionId, 'error', detail || '同伴消息发送失败');
+      renderChat();
+      return false;
+    }
+  }
   if (!state.socket || !state.backendConnected) {
     appendMessage(sessionId, 'error', '服务未连接，请稍后重试。');
     setBusyWithUi(sessionId, false);

@@ -3,8 +3,8 @@ use crate::identity::{
     resolve_state_dir,
 };
 use crate::protocol::{
-    should_initiate, FrameCodec, Message, PeerInfo, Reassembler, INCOMING_MESSAGE_UUID,
-    OUTGOING_MESSAGE_UUID, PEER_INFO_UUID, PROTOCOL_VERSION, SERVICE_UUID,
+    should_initiate, FrameCodec, Message, PeerInfo, PublishedAgent, Reassembler,
+    INCOMING_MESSAGE_UUID, OUTGOING_MESSAGE_UUID, PEER_INFO_UUID, PROTOCOL_VERSION, SERVICE_UUID,
 };
 use crate::transport::TransportMode;
 use anyhow::{Context, Result};
@@ -46,6 +46,7 @@ pub struct NearbyConfig {
     pub display_name: String,
     pub agent_name: String,
     pub capabilities: Vec<String>,
+    pub published_agents: Vec<PublishedAgent>,
     pub peer_id: Option<String>,
     pub state_dir: Option<PathBuf>,
     /// `None` loads the persisted local preference; `Some` is a CLI override.
@@ -60,6 +61,14 @@ impl Default for NearbyConfig {
             display_name: default_display_name(),
             agent_name: default_agent_name(),
             capabilities: vec!["agent.chat".to_owned()],
+            published_agents: vec![PublishedAgent {
+                public_agent_id: "agent:crew".to_owned(),
+                display_name: default_agent_name(),
+                description: String::new(),
+                kind: "crew".to_owned(),
+                capabilities: vec!["chat".to_owned()],
+                revision: 1,
+            }],
             peer_id: None,
             state_dir: None,
             discoverable: None,
@@ -389,6 +398,7 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
         display_name: config.display_name,
         agent_name: config.agent_name,
         capabilities: config.capabilities,
+        published_agents: config.published_agents,
     };
     eprintln!(
         "[nearby][startup] mode=cli os={} arch={} peer_id={} discoverable={} service_uuid={}",
@@ -774,6 +784,12 @@ fn peer_info_from_hello(message: &Message) -> Option<PeerInfo> {
                     .collect()
             })
             .unwrap_or_default(),
+        published_agents: message
+            .payload
+            .get("published_agents")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -855,6 +871,7 @@ mod tests {
             display_name: "Local".to_owned(),
             agent_name: "Crew Agent".to_owned(),
             capabilities: vec!["chat".to_owned()],
+            published_agents: Vec::new(),
         };
         let service = nearby_service(&peer).unwrap();
         assert_eq!(service.uuid, SERVICE_UUID);
@@ -889,6 +906,7 @@ mod tests {
             display_name: "Remote".to_owned(),
             agent_name: "Crew Agent".to_owned(),
             capabilities: vec!["chat".to_owned()],
+            published_agents: Vec::new(),
         };
         let hello = Message::hello(&peer);
         assert_eq!(peer_info_from_hello(&hello), Some(peer));

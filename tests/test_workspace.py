@@ -69,6 +69,15 @@ def test_builtin_wiki_workspace_protected(tmp_path):
         store.delete("wiki")
 
 
+def test_builtin_companion_workspace_auto_created_and_protected(tmp_path):
+    store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
+    ws = store.get("companion", owner_account_id="owner-a")
+    assert ws["name"] == "同伴空间"
+    assert ws["hidden"] is False
+    with pytest.raises(ValueError):
+        store.delete("companion", owner_account_id="owner-a")
+
+
 def test_unknown_workspace_still_missing(tmp_path):
     """内置之外的 id 不放开校验：不存在仍抛 KeyError。"""
     store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
@@ -79,6 +88,7 @@ def test_unknown_workspace_still_missing(tmp_path):
 def test_inmemory_store_mirrors_builtin_workspaces():
     store = InMemoryWorkspaceStore()
     assert store.get("wiki")["hidden"] is True
+    assert store.get("companion")["name"] == "同伴空间"
     store.delete("wiki")  # mock 对齐既有 default 行为：内置空间删除被忽略
     assert store.get("wiki")["id"] == "wiki"
     with pytest.raises(KeyError):

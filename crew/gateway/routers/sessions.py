@@ -328,7 +328,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
 
     @router.post("/api/nearby/agent-turn")
     async def nearby_agent_turn(request: Request, payload: dict) -> JSONResponse:
-        """Run one text-only Agent turn for a directly connected Nearby peer."""
+        """Run one Agent turn for an explicitly published Agent seat in a room."""
         owner = _owner(request)
         peer_id = str(payload.get("peer_id") or "").strip()
         peer_name = " ".join(
@@ -336,9 +336,10 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         )[:120]
         request_id = str(payload.get("request_id") or "").strip()
         query = str(payload.get("query") or "").strip()
-        # 群聊上下文（可选）：携带 room_id 即视为群内触发，与直聊会话相互隔离
+        # Agent 只有群内席位；room_id 是必填的权限边界与会话隔离键。
         room_id = str(payload.get("room_id") or "").strip()
         room_name = " ".join(str(payload.get("room_name") or "").split())[:120]
+        public_agent_id = str(payload.get("public_agent_id") or "").strip()
         history_raw = payload.get("history")
         allowed_raw = payload.get("allowed_toolsets")
         if not peer_id or len(peer_id) > 128 or not all(
@@ -350,6 +351,15 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             or not all(char.isalnum() or char in "_.-" for char in room_id)
         ):
             return JSONResponse({"ok": False, "error": "无效的 Nearby 群聊"}, status_code=400)
+        if not room_id:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "code": "agent_dm_forbidden",
+                    "error": "Agent 不能参与同伴私聊，只能在主人所在的群聊中协作",
+                },
+                status_code=403,
+            )
         if not request_id or len(request_id) > 128 or not all(
             char.isalnum() or char in "_.:-" for char in request_id
         ):
@@ -396,32 +406,55 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             if allowed_toolsets:
                 disabled_toolsets = sorted(known_toolsets - allowed_toolsets)
 
-        if room_id:
-            session_hash = hashlib.sha256(
-                f"{owner}\0room:{room_id}".encode()
-            ).hexdigest()[:32]
-            session_id = f"agent:main:nearby:room:{session_hash}"
-            session_title = f"Nearby · {room_name or '群聊'}"
-        else:
-            session_hash = hashlib.sha256(f"{owner}\0{peer_id}".encode()).hexdigest()[:32]
-            session_id = f"agent:main:nearby:dm:{session_hash}"
-            session_title = f"Nearby · {peer_name or '附近的用户'}"
-        try:
-            crew.session_store.ensure_session(
-                session_id,
-                workspace_id="default",
-                title=session_title,
-                owner_account_id=owner,
+        companion = getattr(crew, "companion", None)
+        if companion is None:
+            return JSONResponse({"ok": False, "error": "同伴功能未启用"}, status_code=503)
+        companion.ensure_defaults(owner)
+        enabled_publications = companion.store.list_publications(owner, enabled_only=True)
+        publication = None
+        if public_agent_id:
+            publication = next(
+                (item for item in enabled_publications if item["public_agent_id"] == public_agent_id),
+                None,
             )
+        else:
+            publication = next(
+                (
+                    item
+                    for item in enabled_publications
+                    if item["source_kind"] == "builtin" and item["source_id"] == "crew"
+                ),
+                enabled_publications[0] if enabled_publications else None,
+            )
+        if publication is None:
+            return JSONResponse(
+                {"ok": False, "error": "目标 Agent 未公开或已被取消公开"}, status_code=403
+            )
+        binding = companion.open_conversation(
+            owner,
+            kind="nearby_room",
+            target_id=room_id,
+            workspace_id=str(payload.get("workspace_id") or "").strip() or None,
+            title=f"同伴 · {room_name or '群聊'}",
+        )
+        session_id = binding["session_id"]
+        session_title = binding["title"]
+        workspace_id = binding["workspace_id"]
+        try:
             # 白名单只收紧/放开 toolset 一项；executor、skills、text_only 等
             # 其余安全约束一律保持现状，不允许通过入参放宽。
-            safe_config = {
-                "executor": "builtin",
+            safe_config: dict[str, Any] = {
+                "executor": (
+                    "external" if publication["source_kind"] == "external" else "builtin"
+                ),
                 "model_profile_id": "inherit",
                 "disabled_toolsets": disabled_toolsets,
                 "disabled_skills": ["*"],
                 "nearby_text_only": True,
+                "companion_public_agent_id": publication["public_agent_id"],
             }
+            if publication["source_kind"] == "external":
+                safe_config["external_agent_id"] = publication["source_id"]
             stored_config = crew.session_store.get_agent_config(
                 session_id, owner_account_id=owner
             ) or {}
@@ -438,7 +471,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 safe_config,
                 owner_account_id=owner,
             )
-            if isinstance(agent.provider, FakeProvider):
+            if publication["source_kind"] == "builtin" and isinstance(agent.provider, FakeProvider):
                 return JSONResponse(
                     {
                         "ok": False,
@@ -457,7 +490,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 request_id=request_id,
                 channel="web",
                 user_id=owner,
-                workspace_id="default",
+                workspace_id=workspace_id,
                 mode="agent",
             )
             tools_hint = (
@@ -467,25 +500,26 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 + "、".join(sorted(allowed_toolsets))
                 + "。"
             )
-            if room_id:
-                hint_parts = [
-                    f"你正在名为「{room_name or '群聊'}」的蓝牙 Nearby 群聊中，消息来自群内的外部用户。",
-                ]
-                if history:
-                    hint_parts.append("最近消息如下：")
-                    hint_parts.extend(f"{sender}: {text}" for sender, text in history)
-                hint_parts.append(
-                    "只需回应 @ 你或直接问你的内容，保持简洁；"
-                    "不要声称访问或操作了本机资源；"
-                    f"{tools_hint}"
-                )
-                envelope.params["channel_system_hint"] = "\n".join(hint_parts)
-            else:
-                envelope.params["channel_system_hint"] = (
-                    "这条消息来自通过 Bluetooth Nearby 直连的外部用户。"
-                    "请直接回答对方当前的问题，不要声称访问或操作了本机资源；"
-                    f"{tools_hint}"
-                )
+            hint_parts = [
+                f"你正在名为「{room_name or '群聊'}」的同伴群聊中，消息来自群内的外部用户。",
+            ]
+            if history:
+                hint_parts.append("最近消息如下：")
+                hint_parts.extend(f"{sender}: {text}" for sender, text in history)
+            hint_parts.append(
+                "只需回应 @ 你或直接问你的内容，保持简洁；"
+                "不得公开本机工作空间路径、工具参数或执行过程；"
+                "对外只返回最终结论；"
+                f"{tools_hint}"
+            )
+            envelope.params["channel_system_hint"] = "\n".join(hint_parts)
+            run = companion.store.create_run(
+                owner,
+                room_id=room_id,
+                public_agent_id=publication["public_agent_id"],
+                source_message_id=request_id,
+                child_session_id=session_id,
+            )
             final_text = ""
             error_text = ""
             async for chunk in crew.dispatch(envelope):
@@ -494,12 +528,24 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 elif chunk.kind == "error":
                     error_text = str(chunk.body.get("message") or "").strip()
             if error_text:
+                companion.store.finish_run(owner, run["run_id"], error_text=error_text)
                 return JSONResponse({"ok": False, "error": error_text}, status_code=502)
             if not final_text:
+                companion.store.finish_run(
+                    owner, run["run_id"], error_text="Agent 没有生成回复"
+                )
                 return JSONResponse(
                     {"ok": False, "error": "Agent 没有生成回复"}, status_code=502
                 )
-            return JSONResponse({"ok": True, "text": final_text, "session_id": session_id})
+            companion.store.finish_run(owner, run["run_id"], final_text=final_text)
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "text": final_text,
+                    "session_id": session_id,
+                    "run_id": run["run_id"],
+                }
+            )
         except Exception:
             log.exception("Nearby Agent 回合失败 session=%s", session_id)
             return JSONResponse(

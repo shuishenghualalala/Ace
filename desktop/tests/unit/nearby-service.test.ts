@@ -5,7 +5,7 @@ import { NearbyService } from '../../src/main/nearby-service';
 type LineHandler = (line: string, onReady: () => void) => void;
 
 describe('NearbyService Agent routing', () => {
-  it('runs the Agent only for a remote agent.request', async () => {
+  it('rejects a remote direct Agent request instead of running an Agent in DM', async () => {
     const runAgentTurn = vi.fn().mockResolvedValue('reply');
     const onEvent = vi.fn();
     const service = new NearbyService({
@@ -38,13 +38,8 @@ describe('NearbyService Agent routing', () => {
       },
     });
 
-    await vi.waitFor(() => expect(runAgentTurn).toHaveBeenCalledTimes(1));
-    expect(runAgentTurn.mock.calls[0]?.[0]).toEqual({
-      peerId: 'ace_remote',
-      peerName: 'Windows',
-      requestId: 'request-1',
-      text: 'hello',
-    });
+    await Promise.resolve();
+    expect(runAgentTurn).not.toHaveBeenCalled();
 
     emit({
       type: 'message',
@@ -67,7 +62,7 @@ describe('NearbyService Agent routing', () => {
       },
     });
     await Promise.resolve();
-    expect(runAgentTurn).toHaveBeenCalledTimes(1);
+    expect(runAgentTurn).not.toHaveBeenCalled();
     expect(onEvent).toHaveBeenCalledTimes(5);
   });
 
@@ -99,12 +94,8 @@ describe('NearbyService Agent routing', () => {
     expect(runAgentTurn).not.toHaveBeenCalled();
   });
 
-  it('aborts an in-flight Agent turn when Nearby stops', async () => {
-    let requestSignal: AbortSignal | undefined;
-    const runAgentTurn = vi.fn((_request, signal: AbortSignal) => {
-      requestSignal = signal;
-      return new Promise<string>(() => undefined);
-    });
+  it('passes published Agent profiles to the pluggable runtime', () => {
+    const runAgentTurn = vi.fn();
     const service = new NearbyService({
       repoRoot: '/tmp/ace',
       resourcesPath: '/tmp/ace/resources',
@@ -113,23 +104,17 @@ describe('NearbyService Agent routing', () => {
       onEvent: vi.fn(),
       runAgentTurn,
     });
-    const handleLine = (service as unknown as { handleLine: LineHandler }).handleLine.bind(service);
-
-    handleLine(JSON.stringify({
-      type: 'message',
-      peer_id: 'ace_remote',
-      message: {
-        type: 'agent.request',
-        message_id: 'request-pending',
-        sender: 'ace_remote',
-        payload: { text: 'wait' },
-      },
-    }), () => undefined);
-
-    await vi.waitFor(() => expect(runAgentTurn).toHaveBeenCalledTimes(1));
-    expect(requestSignal?.aborted).toBe(false);
-    await service.stop();
-    expect(requestSignal?.aborted).toBe(true);
+    service.setPublishedAgents([{ public_agent_id: 'agent-1', display_name: 'Crew' }]);
+    const command = (service as unknown as {
+      resolveCommand: () => { args: string[] };
+    }).resolveCommand();
+    const flagIndex = command.args.indexOf('--published-agent');
+    expect(flagIndex).toBeGreaterThan(-1);
+    expect(JSON.parse(command.args[flagIndex + 1] ?? '{}')).toMatchObject({
+      public_agent_id: 'agent-1',
+      display_name: 'Crew',
+      revision: 1,
+    });
   });
 
   it('forwards room membership and settings events to onEvent unchanged', () => {

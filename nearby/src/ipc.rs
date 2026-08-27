@@ -6,7 +6,7 @@ use crate::identity::{
 use crate::protocol::should_initiate;
 use crate::protocol::{
     is_valid_agent_mode, normalize_room_name, FileChunk, FrameCodec, Message, PeerInfo,
-    Reassembler, ReplyReference, DEFAULT_AGENT_MODE, INCOMING_MESSAGE_UUID,
+    PublishedAgent, Reassembler, ReplyReference, DEFAULT_AGENT_MODE, INCOMING_MESSAGE_UUID,
     OUTGOING_MESSAGE_UUID, PEER_INFO_UUID, PROTOCOL_VERSION, SERVICE_UUID,
 };
 use crate::runtime::{subscribe_outgoing_message, NearbyConfig};
@@ -109,6 +109,15 @@ pub(crate) enum IpcCommand {
         text: String,
         #[serde(default)]
         mentions: Vec<String>,
+    },
+    SendPeerFile {
+        peer_id: String,
+        file_id: String,
+        name: String,
+        mime_type: String,
+        size: u64,
+        sha256: String,
+        data_base64: String,
     },
     CreateRoom {
         room_id: String,
@@ -380,16 +389,13 @@ fn save_state_file<T: Serialize>(state_dir: &Path, file_name: &str, value: &T) -
     })?;
     if let Err(error) = fs::rename(&temporary_path, &path) {
         if path.exists() {
-            fs::remove_file(&path).with_context(|| {
-                format!("failed to replace Nearby state {}", path.display())
-            })?;
-            fs::rename(&temporary_path, &path).with_context(|| {
-                format!("failed to finalize Nearby state {}", path.display())
-            })?;
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to replace Nearby state {}", path.display()))?;
+            fs::rename(&temporary_path, &path)
+                .with_context(|| format!("failed to finalize Nearby state {}", path.display()))?;
         } else {
-            return Err(error).with_context(|| {
-                format!("failed to finalize Nearby state {}", path.display())
-            });
+            return Err(error)
+                .with_context(|| format!("failed to finalize Nearby state {}", path.display()));
         }
     }
     Ok(())
@@ -411,7 +417,11 @@ pub(crate) fn remember_room_message(room: &mut RoomState, message: &Message) {
     }
 }
 
-pub(crate) fn remember_dm_message(dms: &mut HashMap<String, Vec<Message>>, peer_id: &str, message: &Message) {
+pub(crate) fn remember_dm_message(
+    dms: &mut HashMap<String, Vec<Message>>,
+    peer_id: &str,
+    message: &Message,
+) {
     let history = dms.entry(peer_id.to_owned()).or_default();
     history.push(message.clone());
     if history.len() > DM_HISTORY_LIMIT {
@@ -744,6 +754,44 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         save_dms(&state_dir, &dms)?;
                         sink.send(IpcEvent::Message { peer_id, message }).await?;
                     }
+                    IpcCommand::SendPeerFile { peer_id, file_id, name, mime_type, size, sha256, data_base64 } => {
+                        if !active_peers.contains(&peer_id) {
+                            sink.send(IpcEvent::PeerConnectionFailed {
+                                peer_id,
+                                message: "请先连接这台 Ace".to_owned(),
+                            }).await?;
+                            continue;
+                        }
+                        let Some(outbound) = sessions.get(&peer_id).cloned() else {
+                            active_peers.remove(&peer_id);
+                            sink.send(IpcEvent::PeerConnectionFailed {
+                                peer_id,
+                                message: "BLE 会话已经断开，请重新连接".to_owned(),
+                            }).await?;
+                            continue;
+                        };
+                        let chunks = match split_file_chunks(&file_id, &name, &mime_type, size, &sha256, &data_base64) {
+                            Ok(chunks) => chunks,
+                            Err(error) => {
+                                sink.send(IpcEvent::Error { message: error.to_string() }).await?;
+                                continue;
+                            }
+                        };
+                        for file in chunks {
+                            let message = Message::peer_file(peer.peer_id.clone(), file);
+                            if outbound.send(message.clone()).await.is_err() {
+                                active_peers.remove(&peer_id);
+                                sink.send(IpcEvent::PeerConnectionFailed {
+                                    peer_id: peer_id.clone(),
+                                    message: "文件发送失败，BLE 会话已经断开".to_owned(),
+                                }).await?;
+                                break;
+                            }
+                            remember_dm_message(&mut dms, &peer_id, &message);
+                            save_dms(&state_dir, &dms)?;
+                            sink.send(IpcEvent::Message { peer_id: peer_id.clone(), message }).await?;
+                        }
+                    }
                     IpcCommand::CreateRoom { room_id, room_name, peer_ids, agent_mode } => {
                         let agent_mode = agent_mode.unwrap_or_else(|| DEFAULT_AGENT_MODE.to_owned());
                         if !is_valid_agent_mode(&agent_mode) {
@@ -827,31 +875,18 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                     }
                     IpcCommand::SendRoomFile { room_id, file_id, name, mime_type, size, sha256, data_base64, mentions, reply_to } => {
                         if rooms.contains_key(&room_id) {
-                            if let Err(error) = validate_file_transfer(&file_id, &name, &mime_type, size, &sha256, &data_base64) {
-                                sink.send(IpcEvent::Error { message: error.to_string() }).await?;
-                                continue;
-                            }
+                            let chunks = match split_file_chunks(&file_id, &name, &mime_type, size, &sha256, &data_base64) {
+                                Ok(chunks) => chunks,
+                                Err(error) => {
+                                    sink.send(IpcEvent::Error { message: error.to_string() }).await?;
+                                    continue;
+                                }
+                            };
                             let mentions = rooms
                                 .get(&room_id)
                                 .map(|room| filter_room_mentions(mentions, room))
                                 .unwrap_or_default();
-                            let chunks = if data_base64.is_empty() {
-                                vec![&[][..]]
-                            } else {
-                                data_base64.as_bytes().chunks(FILE_CHUNK_BASE64_BYTES).collect::<Vec<_>>()
-                            };
-                            let chunk_total = u32::try_from(chunks.len().max(1)).context("file has too many chunks")?;
-                            for (chunk_index, data) in chunks.into_iter().enumerate() {
-                                let file = FileChunk {
-                                    file_id: file_id.clone(),
-                                    name: name.clone(),
-                                    mime_type: mime_type.clone(),
-                                    size,
-                                    sha256: sha256.clone(),
-                                    chunk_index: u32::try_from(chunk_index).context("file chunk index overflow")?,
-                                    chunk_total,
-                                    data_base64: String::from_utf8(data.to_vec()).context("file data is not valid base64 text")?,
-                                };
+                            for file in chunks {
                                 let message = Message::room_file(
                                     peer.peer_id.clone(),
                                     room_id.clone(),
@@ -1088,6 +1123,16 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                                     timestamp: unix_timestamp_seconds(),
                                 }).await?;
                             }
+                            "peer.file" => {
+                                if !active_peers.contains(&peer_id)
+                                    || !seen_messages.insert(message.message_id.clone())
+                                {
+                                    continue;
+                                }
+                                remember_dm_message(&mut dms, &peer_id, &message);
+                                save_dms(&state_dir, &dms)?;
+                                sink.send(IpcEvent::Message { peer_id, message }).await?;
+                            }
                             _ => {
                                 handle_received_message(
                                     &peer.peer_id,
@@ -1145,6 +1190,7 @@ fn command_name(command: &IpcCommand) -> &'static str {
         IpcCommand::SendAgentRequest { .. } => "send_agent_request",
         IpcCommand::SendAgentReply { .. } => "send_agent_reply",
         IpcCommand::SendPeerMessage { .. } => "send_peer_message",
+        IpcCommand::SendPeerFile { .. } => "send_peer_file",
         IpcCommand::CreateRoom { .. } => "create_room",
         IpcCommand::SendRoomMessage { .. } => "send_room_message",
         IpcCommand::SendRoomFile { .. } => "send_room_file",
@@ -1172,6 +1218,7 @@ pub(crate) fn create_peer(config: &NearbyConfig) -> Result<PeerInfo> {
             config.agent_name.clone()
         },
         capabilities: config.capabilities.clone(),
+        published_agents: config.published_agents.clone(),
     })
 }
 
@@ -1683,6 +1730,12 @@ fn peer_info_from_hello(message: &Message) -> Option<PeerInfo> {
                     .collect()
             })
             .unwrap_or_default(),
+        published_agents: message
+            .payload
+            .get("published_agents")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<Vec<PublishedAgent>>(value).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -2068,6 +2121,43 @@ pub(crate) fn validate_file_transfer(
     Ok(())
 }
 
+fn split_file_chunks(
+    file_id: &str,
+    name: &str,
+    mime_type: &str,
+    size: u64,
+    sha256: &str,
+    data_base64: &str,
+) -> Result<Vec<FileChunk>> {
+    validate_file_transfer(file_id, name, mime_type, size, sha256, data_base64)?;
+    let parts = if data_base64.is_empty() {
+        vec![&[][..]]
+    } else {
+        data_base64
+            .as_bytes()
+            .chunks(FILE_CHUNK_BASE64_BYTES)
+            .collect::<Vec<_>>()
+    };
+    let chunk_total = u32::try_from(parts.len().max(1)).context("file has too many chunks")?;
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(chunk_index, data)| {
+            Ok(FileChunk {
+                file_id: file_id.to_owned(),
+                name: name.to_owned(),
+                mime_type: mime_type.to_owned(),
+                size,
+                sha256: sha256.to_owned(),
+                chunk_index: u32::try_from(chunk_index).context("file chunk index overflow")?,
+                chunk_total,
+                data_base64: String::from_utf8(data.to_vec())
+                    .context("file data is not valid base64 text")?,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2194,6 +2284,7 @@ mod tests {
             display_name: "Agent A".to_owned(),
             agent_name: "Crew Agent".to_owned(),
             capabilities: vec!["chat".to_owned()],
+            published_agents: Vec::new(),
         };
         let hello = Message::hello(&peer);
         assert_eq!(peer_info_from_hello(&hello), Some(peer));
@@ -2354,6 +2445,18 @@ mod tests {
             IpcCommand::SendPeerMessage { mentions, .. } if mentions == ["ace_agent"]
         ));
         let command: IpcCommand = serde_json::from_str(
+            &format!(
+                r#"{{"type":"send_peer_file","peer_id":"ace_peer","file_id":"file_1","name":"note.txt","mime_type":"text/plain","size":5,"sha256":"{}","data_base64":"aGVsbG8="}}"#,
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            IpcCommand::SendPeerFile { peer_id, file_id, .. }
+                if peer_id == "ace_peer" && file_id == "file_1"
+        ));
+        let command: IpcCommand = serde_json::from_str(
             r#"{"type":"set_room_agent_mode","room_id":"room_1","agent_mode":"quiet"}"#,
         )
         .unwrap();
@@ -2394,7 +2497,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             command,
-            IpcCommand::CreateRoom { agent_mode: None, .. }
+            IpcCommand::CreateRoom {
+                agent_mode: None,
+                ..
+            }
         ));
     }
 
@@ -2411,12 +2517,42 @@ mod tests {
             },
         )]);
 
-        assert!(apply_room_settings(&mut rooms, "crew_local", "room_1", Some("quiet"), None));
+        assert!(apply_room_settings(
+            &mut rooms,
+            "crew_local",
+            "room_1",
+            Some("quiet"),
+            None
+        ));
         assert_eq!(rooms.get("room_1").unwrap().agent_mode, "quiet");
-        assert!(!apply_room_settings(&mut rooms, "crew_outsider", "room_1", Some("auto"), None));
-        assert!(!apply_room_settings(&mut rooms, "crew_local", "room_1", Some("loud"), None));
-        assert!(!apply_room_settings(&mut rooms, "crew_local", "room_missing", Some("auto"), None));
-        assert!(!apply_room_settings(&mut rooms, "crew_local", "room_1", None, None));
+        assert!(!apply_room_settings(
+            &mut rooms,
+            "crew_outsider",
+            "room_1",
+            Some("auto"),
+            None
+        ));
+        assert!(!apply_room_settings(
+            &mut rooms,
+            "crew_local",
+            "room_1",
+            Some("loud"),
+            None
+        ));
+        assert!(!apply_room_settings(
+            &mut rooms,
+            "crew_local",
+            "room_missing",
+            Some("auto"),
+            None
+        ));
+        assert!(!apply_room_settings(
+            &mut rooms,
+            "crew_local",
+            "room_1",
+            None,
+            None
+        ));
         assert_eq!(rooms.get("room_1").unwrap().agent_mode, "quiet");
     }
 
@@ -2433,11 +2569,23 @@ mod tests {
             },
         )]);
 
-        assert!(apply_room_settings(&mut rooms, "crew_local", "room_1", None, Some("  新群名  ")));
+        assert!(apply_room_settings(
+            &mut rooms,
+            "crew_local",
+            "room_1",
+            None,
+            Some("  新群名  ")
+        ));
         let room = rooms.get("room_1").unwrap();
         assert_eq!(room.room_name, "新群名");
         assert_eq!(room.agent_mode, "auto");
-        assert!(!apply_room_settings(&mut rooms, "crew_local", "room_1", None, Some("   ")));
+        assert!(!apply_room_settings(
+            &mut rooms,
+            "crew_local",
+            "room_1",
+            None,
+            Some("   ")
+        ));
         assert!(!apply_room_settings(
             &mut rooms,
             "crew_local",
@@ -2469,7 +2617,10 @@ mod tests {
         assert_eq!(snapshot["rooms"][0]["room_id"], "room_1");
         assert_eq!(snapshot["rooms"][0]["agent_mode"], "auto");
         assert_eq!(snapshot["rooms"][0]["owner_peer_id"], "crew_local");
-        assert_eq!(snapshot["rooms"][0]["messages"][0]["payload"]["text"], "hello");
+        assert_eq!(
+            snapshot["rooms"][0]["messages"][0]["payload"]["text"],
+            "hello"
+        );
         assert_eq!(snapshot["dms"][0]["peer_id"], "crew_peer");
         assert_eq!(snapshot["dms"][0]["messages"][0]["type"], "peer.message");
 

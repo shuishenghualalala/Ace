@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Ace 同伴功能技术方案：统一主对话、Agent 席位、蓝牙 LinkAdapter、流式文件与本机执行可见性。">
+  <title>Ace 同伴功能技术方案（待评审）</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #111827;
+      --muted: #5f6b7a;
+      --line: #d8dee8;
+      --soft: #f6f8fb;
+      --blue: #2563eb;
+      --blue-soft: #eff6ff;
+      --green: #16803c;
+      --green-soft: #f0fdf4;
+      --purple: #7c3aed;
+      --purple-soft: #f5f3ff;
+      --amber: #a16207;
+      --amber-soft: #fffbeb;
+      --red: #b42318;
+      --red-soft: #fff1f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; color: var(--ink); background: #fff; line-height: 1.68; }
+    a { color: var(--blue); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    code { padding: .12em .35em; border-radius: 5px; background: #eef1f5; font-size: .92em; }
+    pre { margin: 16px 0; padding: 18px 20px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; background: #111827; color: #e5e7eb; line-height: 1.52; }
+    .layout { display: grid; grid-template-columns: 240px minmax(0, 1100px); gap: 48px; width: min(1440px, calc(100% - 48px)); margin: 0 auto; }
+    nav { position: sticky; top: 0; align-self: start; max-height: 100vh; overflow: auto; padding: 34px 0 48px; }
+    nav strong { display: block; margin-bottom: 16px; font-size: 15px; }
+    nav a { display: block; padding: 7px 10px; border-radius: 8px; color: #4b5563; text-decoration: none; font-size: 14px; }
+    nav a:hover { color: var(--ink); background: var(--soft); }
+    main { min-width: 0; padding: 52px 0 100px; }
+    h1 { margin: 0 0 10px; font-size: clamp(32px, 4vw, 48px); letter-spacing: -.035em; line-height: 1.15; }
+    h2 { margin: 64px 0 14px; padding-top: 10px; font-size: 28px; letter-spacing: -.02em; }
+    h3 { margin: 34px 0 10px; font-size: 20px; }
+    h4 { margin: 24px 0 8px; font-size: 16px; }
+    p { margin: 10px 0; }
+    ul, ol { padding-left: 22px; }
+    li + li { margin-top: 6px; }
+    .eyebrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 18px; }
+    .badge { display: inline-flex; align-items: center; min-height: 27px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px; background: #fff; color: #475569; font-size: 12px; font-weight: 650; }
+    .badge.pending { border-color: #f4cf77; background: var(--amber-soft); color: var(--amber); }
+    .lead { max-width: 900px; color: #3f4a59; font-size: 19px; }
+    .hero-claim { margin: 28px 0; padding: 24px 28px; border-left: 4px solid var(--blue); border-radius: 0 14px 14px 0; background: var(--blue-soft); font-size: 20px; font-weight: 650; }
+    .notice { margin: 20px 0; padding: 15px 18px; border: 1px solid #f1cc70; border-radius: 12px; background: var(--amber-soft); color: #744c08; }
+    .danger { border-color: #f2b8b5; background: var(--red-soft); color: #7a271a; }
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin: 18px 0; }
+    .card { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
+    .card strong { display: block; margin-bottom: 6px; }
+    .card p { margin: 0; color: var(--muted); font-size: 14px; }
+    .figure { margin: 28px 0; padding: 16px; border: 1px solid var(--line); border-radius: 18px; background: var(--soft); }
+    .figure img { display: block; width: 100%; height: auto; border-radius: 12px; background: #fff; }
+    .figure figcaption { display: flex; justify-content: space-between; gap: 18px; padding: 12px 4px 0; color: var(--muted); font-size: 13px; }
+    table { width: 100%; margin: 18px 0; border-collapse: separate; border-spacing: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; font-size: 14px; }
+    th, td { padding: 11px 13px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th:last-child, td:last-child { border-right: 0; }
+    tr:last-child td { border-bottom: 0; }
+    th { background: var(--soft); font-weight: 700; }
+    .decision { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 14px; margin: 14px 0; padding: 18px; border: 1px solid var(--line); border-radius: 14px; }
+    .decision b:first-child { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: var(--blue-soft); color: var(--blue); }
+    .decision p { margin: 4px 0 0; color: var(--muted); }
+    .flow { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 24px; margin: 22px 0; padding: 0; list-style: none; counter-reset: step; }
+    .flow li { position: relative; min-height: 126px; padding: 17px; border: 1px solid var(--line); border-radius: 12px; background: #fff; counter-increment: step; }
+    .flow li::before { content: counter(step); display: grid; place-items: center; width: 27px; height: 27px; margin-bottom: 11px; border-radius: 999px; background: #111827; color: #fff; font-size: 13px; font-weight: 700; }
+    .flow li::after { content: "→"; position: absolute; right: -19px; top: 50%; color: #94a3b8; font-size: 20px; }
+    .flow li:last-child::after { display: none; }
+    .flow strong { display: block; font-size: 14px; }
+    .flow span { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; }
+    .private { color: var(--purple); font-weight: 700; }
+    .public { color: #0f766e; font-weight: 700; }
+    .phase { display: grid; grid-template-columns: 90px minmax(0, 1fr) 120px; gap: 18px; align-items: start; padding: 18px 0; border-bottom: 1px solid var(--line); }
+    .phase:last-child { border-bottom: 0; }
+    .phase-id { color: var(--blue); font-weight: 800; }
+    .phase p { margin: 3px 0 0; color: var(--muted); }
+    .gate { justify-self: end; padding: 4px 9px; border-radius: 999px; background: var(--soft); color: #475569; font-size: 12px; font-weight: 700; }
+    .review-box { margin-top: 26px; padding: 26px; border: 2px solid #111827; border-radius: 16px; background: #fff; }
+    .review-box h3 { margin-top: 0; }
+    .small { color: var(--muted); font-size: 13px; }
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; width: min(100% - 32px, 900px); }
+      nav { display: none; }
+      main { padding-top: 34px; }
+      .cards { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr; gap: 12px; }
+      .flow li::after { display: none; }
+      .phase { grid-template-columns: 70px 1fr; }
+      .gate { grid-column: 2; justify-self: start; }
+    }
+    @media print {
+      nav { display: none; }
+      .layout { display: block; width: auto; }
+      main { padding: 0; }
+      .figure, .card, .decision, table { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <nav aria-label="文档目录">
+      <strong>同伴技术方案</strong>
+      <a href="#summary">01 方案结论</a>
+      <a href="#baseline">02 现状与问题</a>
+      <a href="#architecture">03 总体架构</a>
+      <a href="#contracts">04 Adapter 契约</a>
+      <a href="#domain">05 领域与数据模型</a>
+      <a href="#protocol">06 协议 v3</a>
+      <a href="#agent">07 Agent 接入与发现</a>
+      <a href="#visibility">08 执行过程可见性</a>
+      <a href="#flows">09 关键消息流</a>
+      <a href="#ux">10 用户体验收口</a>
+      <a href="#security">11 安全与跨平台</a>
+      <a href="#delivery">12 分阶段实施</a>
+      <a href="#review">13 待确认决策</a>
+    </nav>
+
+    <main>
+      <header>
+        <div class="eyebrow">
+          <span class="badge pending">STATUS · 待 AHUAMAO 评审</span>
+          <span class="badge">VERSION · 0.1</span>
+          <span class="badge">2026-08-27</span>
+          <span class="badge">本轮未改业务代码</span>
+        </div>
+        <h1>Ace“同伴”功能技术方案</h1>
+        <p class="lead">本方案将现有 BLE 能力重构为可替换链路，把私聊和群聊接回主对话，并让 Ace 内置 Agent、通过外援连接的本地 Agent 都能以受控“群内席位”参与协作。</p>
+      </header>
+
+      <section id="summary">
+        <div class="hero-claim">推荐采用“统一会话入口 + Gateway 同伴领域 + AgentSeatRunner + LinkAdapter”的四层方案。蓝牙与 ACP 都使用注册式 Adapter 结构，但保留不同接口，避免把传输层和 Agent 运行时揉在一起。</div>
+        <div class="notice">这是一份目标架构，不代表当前代码已经具备这些能力。确认后再进入代码改造；现有 <a href="nearby-ble.html">Nearby BLE 文档</a>仍描述当前实现。</div>
+        <div class="cards">
+          <article class="card"><strong>消息与文件</strong><p>私聊、群聊统一用协议 v3 信封；文件改成 offer/accept/chunk/complete 流式传输，避免主进程一次性 Base64 整包。</p></article>
+          <article class="card"><strong>Agent 统一接入</strong><p>Ace 内置 Agent 与 ACP/CLI 外援都映射为公开 Agent Profile，再由群内 Agent 席位绑定到本机 RuntimeAdapter。</p></article>
+          <article class="card"><strong>隐私分层</strong><p>自己 Agent 的完整执行流只落本机并进入右侧看板；其他成员只收到脱敏后的最终输出。</p></article>
+        </div>
+      </section>
+
+      <section id="baseline">
+        <h2>02 · 现状与需要解决的问题</h2>
+        <p>现有功能链路已经能跑通，但模块边界仍围绕“BLE 页面”组织，和产品方案要求的“同伴页管理、主对话交流”存在差距。</p>
+        <table>
+          <thead><tr><th>现状</th><th>问题</th><th>目标调整</th></tr></thead>
+          <tbody>
+            <tr><td><code>nearby/src/transport.rs</code> 的 TransportBackend 只负责启动模式</td><td>无法表达发现、连接、发送、事件订阅等完整链路能力</td><td>升级为独立 <code>LinkAdapter</code> 契约，BLE 与 Mock 分别实现</td></tr>
+            <tr><td><code>nearby-chat.ts</code> 自带消息区和输入区</td><td>形成第二套聊天 UI，后续附件、草稿、执行卡都要重复维护</td><td>同伴页只做关系与群管理，实际交流全部进入主对话</td></tr>
+            <tr><td>私聊存在 <code>agent.request</code></td><td>违背“人不能私聊 Agent”的产品硬规则</td><td>Renderer 隐藏、Adapter 拒绝、Gateway 领域层再次拒绝</td></tr>
+            <tr><td>PeerInfo 只有单个 <code>agent_name</code></td><td>无法发现多个内置/外援 Agent，也没有公开信息与本地执行信息的隔离</td><td>引入可版本化 <code>PublicAgentProfile[]</code> 与本地映射表</td></tr>
+            <tr><td>群文件走完整 Base64 命令</td><td>占内存、IPC 放大，失败后难续传；私聊文件能力也不完整</td><td>文件状态机 + 临时文件 + 分块校验，DM 和 Room 共用</td></tr>
+            <tr><td>Rust JSON 同时承载历史与连接恢复</td><td>业务状态分散，主对话 Session 无法成为统一历史入口</td><td><code>crew.db</code> 保存领域状态；Rust 只保留链路缓存与未确认出站队列</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="architecture">
+        <h2>03 · 总体架构</h2>
+        <figure class="figure">
+          <img src="companion-architecture.svg" alt="Ace 同伴功能总体架构图">
+          <figcaption>
+            <span>图 1：会话、同伴领域、Agent 执行与 BLE 链路的职责边界。</span>
+            <a href="companion-architecture.excalidraw">打开可编辑 Excalidraw 文件</a>
+          </figcaption>
+        </figure>
+
+        <div class="decision"><b>1</b><div><strong>同伴页与主对话分工</strong><p>同伴页负责发现、人际关系、Agent 名片、群成员和授权；点击“私聊本人/进入群聊”后解析一个 ConversationBinding，并交给主对话。</p></div></div>
+        <div class="decision"><b>2</b><div><strong>会话 Adapter 决定“聊什么”</strong><p><code>GatewayConversationAdapter</code> 服务普通 Ace 会话；<code>NearbyConversationAdapter</code> 服务同伴私聊和群聊。主对话不直接识别 BLE 指令。</p></div></div>
+        <div class="decision"><b>3</b><div><strong>LinkAdapter 决定“怎么传”</strong><p>BLE、Mock 只提供发现、广播、连接、发送与事件。未来增加局域网或其他近场链路时，不需要改变同伴领域和 UI。</p></div></div>
+        <div class="decision"><b>4</b><div><strong>RuntimeAdapter 决定“Agent 怎么执行”</strong><p>AgentSeatRunner 复用现有 RuntimeAdapter 体系执行 Ace 内置、ACP 或 CLI Agent；LinkAdapter 不实现 RuntimeAdapter。</p></div></div>
+      </section>
+
+      <section id="contracts">
+        <h2>04 · Adapter 契约设计</h2>
+        <h3>4.1 主对话 ConversationAdapter</h3>
+        <pre><code>type ConversationBinding =
+  | { kind: 'gateway'; sessionId: string }
+  | { kind: 'nearby_dm'; sessionId: string; peerId: string }
+  | { kind: 'nearby_room'; sessionId: string; roomId: string };
+
+interface ConversationCapabilities {
+  canSendText: boolean;
+  canAttach: boolean;
+  canMentionPeople: boolean;
+  canMentionAgents: boolean;
+  showModelPicker: boolean;
+  showSkills: boolean;
+  showPlanMode: boolean;
+}
+
+interface ConversationAdapter {
+  load(binding, cursor?): Promise&lt;ConversationPage&gt;;
+  sendText(binding, draft): Promise&lt;SendReceipt&gt;;
+  sendFile(binding, file): Promise&lt;TransferReceipt&gt;;
+  subscribe(binding, onEvent): Unsubscribe;
+  capabilities(binding): ConversationCapabilities;
+}</code></pre>
+        <p>能力矩阵由 Adapter 提供，Composer 不散落 <code>if (nearby)</code> 判断。<code>nearby_dm</code> 固定关闭 Agent 候选、模型、Skills 和计划模式；<code>nearby_room</code> 只开放本群有效 Agent 席位。</p>
+
+        <h3>4.2 Rust LinkAdapter</h3>
+        <pre><code>#[async_trait]
+pub trait LinkAdapter: Send + Sync {
+    async fn start(&amp;self, config: LinkConfig) -&gt; Result&lt;()&gt;;
+    async fn set_discoverable(&amp;self, enabled: bool) -&gt; Result&lt;()&gt;;
+    async fn set_discovery(&amp;self, enabled: bool) -&gt; Result&lt;()&gt;;
+    async fn connect(&amp;self, peer: LinkPeerId) -&gt; Result&lt;LinkSessionId&gt;;
+    async fn send(&amp;self, session: LinkSessionId, frame: Bytes) -&gt; Result&lt;SendAck&gt;;
+    fn events(&amp;self) -&gt; LinkEventStream;
+    async fn shutdown(&amp;self) -&gt; Result&lt;()&gt;;
+}</code></pre>
+        <table>
+          <thead><tr><th>实现</th><th>职责</th><th>不负责</th></tr></thead>
+          <tbody>
+            <tr><td><code>BleLinkAdapter</code></td><td>平台 BLE 权限、发现、GATT 会话、MTU 分片、重连与链路事件</td><td>好友关系、房间规则、Agent 选择、消息历史</td></tr>
+            <tr><td><code>MockLinkAdapter</code></td><td>可控发现、丢包/乱序/断线注入、双实例联调</td><td>生产身份与权限</td></tr>
+            <tr><td><code>LinkAdapterRegistry</code></td><td>按配置注册实现、管理生命周期、输出统一事件</td><td>运行 Agent</td></tr>
+          </tbody>
+        </table>
+        <p>这与 ACP 的结构思想一致：都通过稳定契约和 Registry 隔离实现；但接口不能共用，因为 ACP 是 Agent 运行时协议，BLE 是字节链路。</p>
+      </section>
+
+      <section id="domain">
+        <h2>05 · 同伴领域与数据模型</h2>
+        <p>建议在 Gateway 新增 <code>companion</code> 领域模块作为业务状态唯一真相源。Desktop Main 只负责把本机 Gateway 和 Rust LinkAdapter 安全地桥接起来。</p>
+        <table>
+          <thead><tr><th>实体</th><th>关键字段</th><th>约束</th></tr></thead>
+          <tbody>
+            <tr><td><code>companion_peers</code></td><td>peer_id、identity_fingerprint、display_name、avatar、relationship、last_seen</td><td>关系只属于人，不属于 Agent</td></tr>
+            <tr><td><code>conversation_bindings</code></td><td>session_id、kind、target_id、revision</td><td>一个 DM/Room 稳定映射到一个主对话 Session</td></tr>
+            <tr><td><code>companion_rooms</code></td><td>room_id、name、owner_peer_id、revision、content_key_version</td><td>成员变更使用单调 revision</td></tr>
+            <tr><td><code>companion_room_members</code></td><td>room_id、member_type、member_id、owner_peer_id、state</td><td>Agent 必须指向仍在群的人类 owner</td></tr>
+            <tr><td><code>companion_agent_profiles</code></td><td>public_agent_id、owner_peer_id、display_name、kind、capabilities、revision</td><td>公开 ID 与本地 Runtime ID 分离</td></tr>
+            <tr><td><code>companion_messages</code></td><td>message_id、conversation_id、sender、kind、visibility、payload、delivery_state</td><td>event_id 幂等，消息不可触发隐式 Agent 互唤</td></tr>
+            <tr><td><code>companion_agent_runs</code></td><td>run_id、room_id、seat_id、source_message_id、owner_peer_id、status、result_message_id</td><td>完整执行流仅所有者可读</td></tr>
+          </tbody>
+        </table>
+
+        <h3>领域不变量</h3>
+        <ul>
+          <li>DM 只能包含两个人类身份；任何 <code>agent.invoke</code> 在 Gateway 领域层硬拒绝。</li>
+          <li>Agent 只能作为显式 <code>agent_seat</code> 存在于群中，不能成为好友、DM 成员或独立连接对象。</li>
+          <li>添加 Agent 时，Agent 所有者必须已在群，并且只能由所有者授权自己的 Agent。</li>
+          <li>所有者退出、被移除或撤权时，其 Agent 席位立即失效，进行中的任务进入 <code>paused_owner_left</code>。</li>
+          <li>普通 Agent 输出中的文本 <code>@</code> 只作为文本展示；只有结构化协作事件才能继续唤醒其他 Agent。</li>
+        </ul>
+      </section>
+
+      <section id="protocol">
+        <h2>06 · Nearby 协议 v3</h2>
+        <p>现有 v2 不能表达多 Agent Profile、显式 Agent 席位、DM 文件状态机和执行可见性，因此建议升级 v3。v2 节点只能进入“兼容私聊文本”模式，不允许加入带 Agent 的 v3 群。</p>
+        <table>
+          <thead><tr><th>消息族</th><th>事件</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td>身份与资料</td><td><code>profile.snapshot</code> / <code>profile.updated</code></td><td>人类公开资料与多个脱敏 Agent Profile，带 revision</td></tr>
+            <tr><td>关系</td><td><code>contact.invite</code> / <code>accept</code> / <code>reject</code> / <code>block</code></td><td>建立在人与人之间</td></tr>
+            <tr><td>消息</td><td><code>chat.message</code> / <code>chat.receipt</code></td><td>用 conversation kind 区分 DM 和 Room</td></tr>
+            <tr><td>文件</td><td><code>file.offer</code> / <code>accept</code> / <code>chunk</code> / <code>complete</code> / <code>cancel</code></td><td>私聊与群聊共用；SHA-256 校验；首版上限 4 MiB</td></tr>
+            <tr><td>群成员</td><td><code>room.member.add</code> / <code>remove</code></td><td>只操作人类成员</td></tr>
+            <tr><td>Agent 席位</td><td><code>room.agent_seat.grant</code> / <code>revoke</code></td><td>携带 owner、profile revision 与权限摘要</td></tr>
+            <tr><td>Agent 调用</td><td><code>agent.invoke</code> / <code>result</code> / <code>error</code></td><td>仅 Room；链路只承载最终结果，不承载内部 chunk</td></tr>
+            <tr><td>有界协作</td><td><code>collab.create</code> / <code>step</code> / <code>finish</code> / <code>cancel</code></td><td>默认 3 轮、最多 8 次 Agent 发言，并设置 deadline</td></tr>
+          </tbody>
+        </table>
+        <p>所有信封统一携带 <code>protocol_version</code>、<code>event_id</code>、<code>sender_peer_id</code>、<code>conversation</code>、<code>created_at</code>、<code>counter</code>、<code>payload</code>。群状态事件另带 <code>room_revision</code>，接收端拒绝旧 revision 和重复 event。</p>
+
+        <h3>文件传输状态机</h3>
+        <ol class="flow">
+          <li><strong>Offer</strong><span>名称、大小、MIME、SHA-256，不读完整文件进内存</span></li>
+          <li><strong>Accept</strong><span>接收端检查空间和策略，创建临时文件</span></li>
+          <li><strong>Chunk</strong><span>按 offset 写入；每块确认，可断点恢复</span></li>
+          <li><strong>Complete</strong><span>验证大小与摘要，原子移动到正式路径</span></li>
+          <li><strong>Receipt</strong><span>更新主对话文件卡状态，失败可重试</span></li>
+        </ol>
+      </section>
+
+      <section id="agent">
+        <h2>07 · Ace 与外援 Agent 的发现和接入</h2>
+        <p>发现的是“可公开的 Agent 名片”，不是本机 Runtime 的原始配置。每个 Profile 在本机保存一条私有映射：<code>public_agent_id → builtin/runtime_adapter + local_agent_id</code>。</p>
+        <table>
+          <thead><tr><th>公开给附近同伴</th><th>永不公开</th></tr></thead>
+          <tbody>
+            <tr><td>公开 Agent ID、显示名、头像、主人、能力描述、类型徽标（Ace/外援）、可用状态、资料 revision</td><td>供应商密钥、模型名、系统提示、工作目录、外援进程参数、工具调用细节、本地数据库 ID</td></tr>
+            <tr><td>授权结果摘要：可加入哪些共同群、纯文本/工具需审批</td><td>具体白名单内部结构、审批历史、文件路径、环境变量</td></tr>
+          </tbody>
+        </table>
+        <ul>
+          <li>Ace 默认只发布一个内置 Agent 名片；用户可关闭公开。</li>
+          <li>ACP/CLI 外援默认不公开，用户在“我的 Agent 名片”中逐个开启，并填写面向他人的能力描述。</li>
+          <li>加入群不等于可执行工具。Agent 席位只开放文本响应，工具仍按群级白名单和本机审批执行。</li>
+          <li>外援断开时 Profile 保留但状态变为不可用；群历史和 Agent 席位不被删除。</li>
+        </ul>
+      </section>
+
+      <section id="visibility">
+        <h2>08 · 群聊中的执行过程可见性</h2>
+        <div class="hero-claim">一个 Agent 运行产生两条投影：<span class="private">本机私有执行流</span>进入执行卡与右侧看板；<span class="public">群内公开结果</span>只包含最终文本、失败摘要和必要文件。</div>
+        <table>
+          <thead><tr><th>内容</th><th>Agent 所有者</th><th>其他群成员</th><th>是否通过 BLE</th></tr></thead>
+          <tbody>
+            <tr><td>排队 / 执行中状态</td><td>可见</td><td>可见简化状态</td><td>是，状态事件</td></tr>
+            <tr><td>模型增量 chunk</td><td>可见</td><td>不可见</td><td>否</td></tr>
+            <tr><td>工具名、参数、审批、命令输出</td><td>按普通 Agent 会话规则可见</td><td>不可见</td><td>否</td></tr>
+            <tr><td>本地路径、模型、Token/成本细节</td><td>按本机设置可见</td><td>不可见</td><td>否</td></tr>
+            <tr><td>最终回答</td><td>可见</td><td>可见</td><td>是，<code>agent.result</code></td></tr>
+            <tr><td>失败</td><td>完整本地错误</td><td>安全化失败摘要</td><td>是，<code>agent.error</code></td></tr>
+          </tbody>
+        </table>
+
+        <h3>主对话中的本机执行卡</h3>
+        <p>群消息流插入一张本地投影卡，字段包括 <code>run_id</code>、<code>source_message_id</code>、<code>agent_seat_id</code>、状态、耗时和最终结果状态。点击卡片后，右侧看板复用普通 Agent 会话的 chunk 渲染、工具卡和审批 UI。卡本身可以存在于本机 Session 历史，但标记为 <code>LOCAL_ONLY</code>，不得进入 Nearby 出站队列。</p>
+        <p>远端 Agent 的运行只渲染普通“Agent 正在处理”占位和最终消息，不生成可点击执行卡，因为本机没有也不应拥有它的执行记录。</p>
+      </section>
+
+      <section id="flows">
+        <h2>09 · 关键消息流</h2>
+        <h3>9.1 人与人私聊</h3>
+        <ol class="flow">
+          <li><strong>主对话发送</strong><span>NearbyConversationAdapter 校验 nearby_dm 能力</span></li>
+          <li><strong>Gateway 落库</strong><span>生成 event_id，状态为 queued</span></li>
+          <li><strong>Link 发送</strong><span>Desktop Bridge → BLE，加密并分帧</span></li>
+          <li><strong>对端入库</strong><span>幂等检查，写入同一 DM Session</span></li>
+          <li><strong>回执更新</strong><span>queued → sent → delivered；离线保留草稿/重试</span></li>
+        </ol>
+        <p>如果 payload 包含 Agent invoke，ConversationAdapter 和 Gateway 都拒绝，并返回“请创建有主人的群聊”。</p>
+
+        <h3>9.2 群内调用本机 Agent</h3>
+        <ol class="flow">
+          <li><strong>接收 @</strong><span>验证 room revision、成员身份和 Agent 席位</span></li>
+          <li><strong>创建 Run</strong><span>建立本机私有 child run，关联来源群消息</span></li>
+          <li><strong>执行 Runtime</strong><span>Ace/ACP/CLI 输出统一 RuntimeEvent 流</span></li>
+          <li><strong>本机投影</strong><span>完整事件进入执行卡与右侧看板</span></li>
+          <li><strong>公开结果</strong><span>仅最终结果经 Gateway 脱敏后发回群</span></li>
+        </ol>
+
+        <h3>9.3 多 Agent 有界协作</h3>
+        <p>协调器生成结构化 <code>collab.step</code>，每一步明确目标 Agent、输入摘要、round、speech_index 和 deadline。每台设备在执行前重新校验主人仍在群、席位仍有效、预算未超限。Agent 结果中的普通文本 @ 不会自动创建下一步，从协议层阻断无限互唤。</p>
+      </section>
+
+      <section id="ux">
+        <h2>10 · 对用户更好上手的收口方案</h2>
+        <table>
+          <thead><tr><th>场景</th><th>用户看到的方案</th><th>技术支撑</th></tr></thead>
+          <tbody>
+            <tr><td>进入同伴页</td><td>自动扫描；只显示“附近/较近/信号较弱”，不显示 UUID、RSSI 和协议版本</td><td>LinkEvent 映射为产品级距离状态；详细信息只进诊断</td></tr>
+            <tr><td>发起私聊</td><td>点击人物“私聊本人”回到主对话；标题显示“名字 · 同伴本人”，并明确不会调用随行 Agent</td><td>稳定 nearby_dm ConversationBinding</td></tr>
+            <tr><td>进入群聊</td><td>群头像 + 同伴群聊标识；@ 候选分“人/Agent”，Agent 行显示主人</td><td>会话能力矩阵 + 有效 Agent 席位查询</td></tr>
+            <tr><td>需要 Agent</td><td>私聊不出现 Agent；提供“一起建群”的明确下一步</td><td>UI、Adapter、领域三重硬限制</td></tr>
+            <tr><td>对方离线</td><td>历史可读、草稿保留、发送按钮显示等待连接，不伪装已发送</td><td>出站队列与 delivery_state</td></tr>
+            <tr><td>本机 Agent 执行</td><td>群里看到紧凑执行卡；点击在右侧看板查看普通 Agent 的完整过程</td><td>LOCAL_ONLY Run Projection</td></tr>
+            <tr><td>蓝牙异常</td><td>只在失败时显示平台对应修复动作</td><td>LinkError 统一错误码 + 平台 repair action</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="security">
+        <h2>11 · 安全、隐私与跨平台</h2>
+        <div class="notice danger"><strong>正式发布阻断项：</strong>现有 peer_token 不能当作身份认证或端到端加密。真实工作内容上线前应完成认证加密；否则只能以“可信近距离 Beta”提供，并明确风险。</div>
+        <h3>11.1 建议的链路安全</h3>
+        <ul>
+          <li>每台设备生成持久 X25519 静态身份密钥，私钥进入系统安全存储；首次配对使用 Noise XX 建立认证会话。</li>
+          <li>双方展示由握手 transcript 派生的短验证码，用户确认后保存对端 fingerprint，后续密钥变化必须重新确认。</li>
+          <li>消息使用 AEAD、单调 counter 和重放窗口；文件使用独立内容密钥。</li>
+          <li>群使用版本化 content key，并为每个成员单独封装；成员加入、退出或被移除后轮换密钥。</li>
+          <li>日志默认不记录明文消息、文件内容、Agent prompt、工具参数和密钥材料。</li>
+        </ul>
+
+        <h3>11.2 跨平台注意项</h3>
+        <table>
+          <thead><tr><th>平台</th><th>实现注意</th><th>必须验证</th></tr></thead>
+          <tbody>
+            <tr><td>macOS</td><td>CoreBluetooth 权限与 plist 文案；扫描/广播状态切换；应用休眠恢复</td><td>首次授权、拒绝后恢复、双机互连、长文件传输</td></tr>
+            <tr><td>Windows</td><td>WinRT GATT 回调不可阻塞；CCCD/Notify 失败清理；蓝牙适配器状态变化</td><td>重复连接争用、Notify 重试、休眠唤醒、路径与文件名</td></tr>
+            <tr><td>Linux</td><td>BlueZ/DBus 权限与发行版差异；当前 Peripheral 支持边界需要真实环境确认</td><td>Ubuntu 主验证矩阵、无图形权限提示、BlueZ 重启恢复</td></tr>
+          </tbody>
+        </table>
+        <p>跨平台实现不能只以编译通过为完成标准。BLE、文件名、临时目录、密钥存储和休眠恢复都需要真实设备矩阵。</p>
+      </section>
+
+      <section id="delivery">
+        <h2>12 · 分阶段实施与验收</h2>
+        <div class="phase"><span class="phase-id">P0</span><div><strong>契约与主对话接入</strong><p>ConversationBinding/Adapter、LinkAdapter、同伴 Hub 收口、DM Agent 三重拦截；保留现有文本链路。</p></div><span class="gate">先完成</span></div>
+        <div class="phase"><span class="phase-id">P1</span><div><strong>消息与流式文件</strong><p>协议 v3 信封、DM/Room 共用文件状态机、出站队列、回执和失败恢复。</p></div><span class="gate">可独立验收</span></div>
+        <div class="phase"><span class="phase-id">P2</span><div><strong>Agent Profile 与群内席位</strong><p>Ace/ACP/CLI 公开资料、群级授权、主人离群级联、工具审批边界。</p></div><span class="gate">安全规则</span></div>
+        <div class="phase"><span class="phase-id">P3</span><div><strong>本机执行看板</strong><p>Local Run Store、执行卡、主对话右侧看板；验证 BLE 永远收不到内部事件。</p></div><span class="gate">隐私验收</span></div>
+        <div class="phase"><span class="phase-id">P4</span><div><strong>有界多 Agent 协作</strong><p>结构化调度、轮次/次数/deadline、取消与主人离群暂停。</p></div><span class="gate">预算验收</span></div>
+        <div class="phase"><span class="phase-id">P5</span><div><strong>E2EE 与跨平台发布</strong><p>Noise 会话、群密钥轮换、密钥存储、macOS/Windows/Linux 真实设备矩阵。</p></div><span class="gate">发布门槛</span></div>
+
+        <h3>测试层级</h3>
+        <ul>
+          <li><strong>领域单测：</strong>DM Agent 拒绝、主人离群级联、Agent 授权、revision、幂等和协作预算。</li>
+          <li><strong>协议性质测试：</strong>分帧/乱序/重复/损坏、文件摘要、重放窗口、v2/v3 协商。</li>
+          <li><strong>Mock 双实例集成：</strong>好友、DM、群聊、文件、Agent 结果、断线恢复。</li>
+          <li><strong>隐私测试：</strong>抓取 Desktop↔Rust IPC 和 BLE frame，断言不存在 chunk、工具参数、路径和模型信息。</li>
+          <li><strong>UI E2E：</strong>同伴 Hub 跳主对话、头像与来源标识、能力矩阵、执行卡右侧看板。</li>
+          <li><strong>硬件矩阵：</strong>macOS↔macOS、Windows↔Windows、macOS↔Windows、Linux 组合与休眠恢复。</li>
+        </ul>
+      </section>
+
+      <section id="implementation">
+        <h2>13 · 实施记录（2026-08-27）</h2>
+        <div class="notice"><strong>本轮已完成：</strong>同伴领域服务、稳定 ConversationBinding、默认“同伴空间”、Agent 公开范围、BLE LinkAdapter、协议 v3 Agent 名片、主对话 ConversationAdapter、DM/Room 文本与文件传输，以及按产品 UI 稿重做的同伴管理中枢。</div>
+        <h3>UI 收口</h3>
+        <ul>
+          <li>删除旧 Nearby 页中的第二套消息流、输入框、雷达和大页面标题；同伴页只负责发现、人物资料、群管理和“我的名片”。</li>
+          <li>“私聊本人”和“进入群聊”先展示真实工作空间选择器，默认选中“同伴空间”，确认后切换到主对话；私聊标题带“同伴本人”标识。</li>
+          <li>发现页一次聚焦一张人物/随行 Agent 名片；建群第一步只选择人和群名，不自动添加任何 Agent。</li>
+          <li>个人页列出 Crew 与本机外援 Agent，Crew 首次默认公开，后续完全尊重用户保存的公开范围。</li>
+          <li>私聊仅在对方已连接时开放；群聊至少一位远端成员在线才能进入。离线资料和历史仍可查看，但按钮、主对话适配器与 Gateway 三层都会拒绝发送。</li>
+        </ul>
+        <h3>可插拔边界</h3>
+        <ul>
+          <li><code>LinkAdapter</code> 只负责 BLE/Mock 链路；同伴关系、会话绑定、Agent 名片、Outbox 与 Local Run 由 Gateway/CompanionService 管理。</li>
+          <li><code>ConversationAdapter</code> 把同伴会话接入主对话发送链，复用主对话附件、历史、Agent 执行过程和右侧看板。</li>
+          <li>文件在 Gateway 中校验当前账号 uploads 路径与 4 MiB 上限，链路使用统一分片函数；DM 使用 <code>peer.file</code>，群聊使用 <code>room.file</code>。</li>
+        </ul>
+        <p class="small">完整测试结果见同目录 <code>companion-test-report.html</code>。正式发布前仍以 E2EE 与真实蓝牙设备矩阵为阻断项。</p>
+      </section>
+
+      <section id="review">
+        <h2>14 · 已确认的 6 个决策</h2>
+        <div class="review-box">
+          <h3>产品确认结果</h3>
+          <ol>
+            <li>是否同意蓝牙采用独立 <code>LinkAdapter</code>，结构上与 ACP 一样注册化，但不共用 RuntimeAdapter 接口？</li>
+            <li>是否同意把同伴业务状态统一收口到 Gateway/crew.db，Rust 只保留链路与恢复缓存？</li>
+            <li>是否同意 Ace 内置 Agent 默认可发布名片、ACP/CLI 外援默认逐个手动公开？</li>
+            <li>是否同意 Agent 只作为“群内席位”，并由所有者按群授权，主人离群自动撤销？</li>
+            <li>是否同意自己 Agent 的执行卡和完整过程仅本机可见，群内其他人只收到最终输出？</li>
+            <li>是否把 E2EE 设为正式发布门槛；未完成前只允许可信近距离 Beta？</li>
+          </ol>
+          <p class="small">以上决策已进入实现；后续变更需要同时更新领域约束、Link/Conversation Adapter 能力矩阵和对应测试。</p>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

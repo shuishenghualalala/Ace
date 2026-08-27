@@ -558,6 +558,46 @@ export interface Attachment {
   size?: number;
 }
 
+export interface CompanionConversationBinding {
+  kind: 'nearby_dm' | 'nearby_room';
+  target_id: string;
+  session_id: string;
+  workspace_id: string;
+  title: string;
+  capabilities: {
+    can_send_text: boolean;
+    can_attach: boolean;
+    can_mention_people: boolean;
+    can_mention_agents: boolean;
+    show_model_picker: boolean;
+    show_skills: boolean;
+    show_plan_mode: boolean;
+  };
+}
+
+export interface CompanionAgentCandidate {
+  source_ref: string;
+  source_kind: 'builtin' | 'external';
+  source_id: string;
+  display_name: string;
+  description: string;
+  provider: string;
+  available: boolean;
+  published: boolean;
+  public_agent_id: string;
+}
+
+export interface CompanionPreparedFile {
+  file_id: string;
+  name: string;
+  path: string;
+  type: 'image' | 'file';
+  mime_type: string;
+  size: number;
+  sha256: string;
+  data_base64: string;
+}
+
 export interface Skill {
   name: string;
   slug: string;
@@ -1528,6 +1568,58 @@ export interface WikiSummary {
 }
 
 export const backendApi = {
+  companionProfile: () => getJSON<{
+    profile: Record<string, unknown>;
+    public_profile: Record<string, unknown>;
+    agent_candidates: CompanionAgentCandidate[];
+  }>('/api/companion/profile'),
+  companionUpdatePublications: (publishedAgentRefs: string[]) => getJSON<{
+    profile: Record<string, unknown>;
+    public_profile: Record<string, unknown>;
+    agent_candidates: CompanionAgentCandidate[];
+  }>('/api/companion/profile', {
+    method: 'PUT',
+    ...jsonBody({ published_agent_refs: publishedAgentRefs }),
+  }),
+  companionConversations: () => getJSON<{
+    conversations: CompanionConversationBinding[];
+    peers: Array<Record<string, unknown>>;
+    rooms: Array<Record<string, unknown>>;
+  }>('/api/companion/conversations'),
+  companionOpenConversation: (payload: {
+    kind: 'nearby_dm' | 'nearby_room';
+    target_id: string;
+    workspace_id?: string;
+    title?: string;
+  }) => getJSON<{ ok: boolean } & CompanionConversationBinding>(
+    '/api/companion/conversations/open',
+    { method: 'POST', ...jsonBody(payload) },
+  ),
+  companionSendMessage: (
+    sessionId: string,
+    text: string,
+    mentions: string[] = [],
+    attachments: Attachment[] = [],
+  ) =>
+    getJSON<{ ok: boolean; event_id: string; status: string }>(
+      `/api/companion/conversations/${encodeURIComponent(sessionId)}/messages`,
+      { method: 'POST', ...jsonBody({ text, mentions, attachments }) },
+    ),
+  companionPrepareFile: (attachment: Attachment) =>
+    getJSON<{ ok: boolean; file: CompanionPreparedFile }>(
+      '/api/companion/files/prepare',
+      { method: 'POST', ...jsonBody(attachment) },
+    ),
+  companionSettleOutbox: (eventId: string, delivered: boolean) =>
+    getJSON<{ ok: boolean }>(
+      `/api/companion/outbox/${encodeURIComponent(eventId)}/settle`,
+      { method: 'POST', ...jsonBody({ delivered }) },
+    ),
+  companionLinkState: (event: Record<string, unknown>) =>
+    getJSON<{ ok: boolean }>('/api/companion/link-state', {
+      method: 'POST',
+      ...jsonBody(event),
+    }),
   inspirations: () => getJSON<{ ok: boolean; inspirations: InspirationItem[] }>(
     '/api/sites/inspirations',
   ),

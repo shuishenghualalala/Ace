@@ -141,6 +141,7 @@ import {
   type NearbyAgentTurnRequest,
   type NearbyCommand,
   type NearbyEvent,
+  type NearbyPublishedAgent,
   type NearbyReplyReference,
   type NearbyRoomAgentMode,
 } from './nearby-service';
@@ -1037,6 +1038,44 @@ async function runNearbyAgentTurn(
   return text;
 }
 
+async function loadCompanionPublishedAgents(): Promise<NearbyPublishedAgent[]> {
+  const usesRemoteAuth = usesGatewayRemoteAuth();
+  const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
+  const identityHeaders = usesRemoteAuth ? gatewayIdentityHeaders() : null;
+  if (usesRemoteAuth && (!jwt || !identityHeaders)) return [];
+  const ensured = await ensureGateway();
+  const targetUrl = new URL('/api/companion/profile', ensured.baseUrl);
+  const headers: Record<string, string> = gatewayAccessHeaders(targetUrl.pathname);
+  if (jwt && identityHeaders) {
+    headers.Authorization = `Bearer ${jwt}`;
+    Object.assign(headers, identityHeaders);
+  }
+  const response = await fetch(targetUrl, { headers });
+  if (!response.ok) return [];
+  const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+  const publicProfile = payload.public_profile;
+  if (!publicProfile || typeof publicProfile !== 'object' || Array.isArray(publicProfile)) return [];
+  const agents = (publicProfile as Record<string, unknown>).agents;
+  if (!Array.isArray(agents)) return [];
+  return agents.flatMap((raw): NearbyPublishedAgent[] => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+    const item = raw as Record<string, unknown>;
+    const publicAgentId = typeof item.public_agent_id === 'string' ? item.public_agent_id : '';
+    const displayName = typeof item.display_name === 'string' ? item.display_name : '';
+    if (!publicAgentId || !displayName) return [];
+    return [{
+      public_agent_id: publicAgentId,
+      display_name: displayName,
+      description: typeof item.description === 'string' ? item.description : '',
+      kind: typeof item.kind === 'string' ? item.kind : 'external',
+      capabilities: Array.isArray(item.capabilities)
+        ? item.capabilities.filter((value): value is string => typeof value === 'string')
+        : [],
+      revision: typeof item.revision === 'number' ? item.revision : 1,
+    }];
+  });
+}
+
 function parseNearbyCommand(raw: unknown): NearbyCommand {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby command must be an object`);
@@ -1133,9 +1172,14 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
       ...(replyTo !== undefined ? { reply_to: replyTo } : {}),
     };
   }
-  if (type === 'send_room_file') {
-    if (typeof value.room_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(value.room_id)) {
+  if (type === 'send_room_file' || type === 'send_peer_file') {
+    if (type === 'send_room_file'
+      && (typeof value.room_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(value.room_id))) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby room_id`);
+    }
+    if (type === 'send_peer_file'
+      && (typeof value.peer_id !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(value.peer_id))) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby peer id`);
     }
     if (typeof value.file_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(value.file_id)) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby file_id`);
@@ -1170,17 +1214,23 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
     ) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby file data`);
     }
-    const mentions = parseNearbyMentions(value.mentions);
-    const replyTo = parseNearbyReply(value.reply_to);
-    return {
-      type,
-      room_id: value.room_id,
+    const file = {
       file_id: value.file_id,
       name: value.name.trim(),
       mime_type: value.mime_type,
       size: value.size,
       sha256: value.sha256.toLowerCase(),
       data_base64: value.data_base64,
+    };
+    if (type === 'send_peer_file') {
+      return { type, peer_id: value.peer_id as string, ...file };
+    }
+    const mentions = parseNearbyMentions(value.mentions);
+    const replyTo = parseNearbyReply(value.reply_to);
+    return {
+      type,
+      room_id: value.room_id as string,
+      ...file,
       ...(mentions !== undefined ? { mentions } : {}),
       ...(replyTo !== undefined ? { reply_to: replyTo } : {}),
     };
@@ -3233,12 +3283,16 @@ function registerIpc() {
     return { ok: true, canceled: false, path: result.filePath };
   });
   trustedHandle('nearby:start', async () => {
-    await ensureNearbyService().start();
+    const service = ensureNearbyService();
+    service.setPublishedAgents(await loadCompanionPublishedAgents());
+    await service.start();
     return { ok: true };
   });
   trustedHandle('nearby:stop', async () => {
     nearbyAgentBridge?.dispose();
     await nearbyService?.stop();
+    nearbyAgentBridge = null;
+    nearbyService = null;
     return { ok: true };
   });
   trustedHandle('nearby:get-settings', () => {

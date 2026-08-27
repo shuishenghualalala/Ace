@@ -118,6 +118,32 @@ describe('NearbyStore history hydration', () => {
       file: { file_id: 'file_1', name: 'notes.txt', complete: true, data_base64: 'aGVsbG8=Zm9v' },
     });
   });
+
+  it('reassembles chunked direct files in the human DM conversation', () => {
+    const store = readyStore();
+    store.applyEvent({ type: 'peer_connected', peer: remotePeer });
+    for (const [index, data] of ['aGVs', 'bG8='].entries()) {
+      store.applyEvent({
+        type: 'message',
+        peer_id: 'ace_remote',
+        message: {
+          type: 'peer.file',
+          message_id: `dm_file_${index}`,
+          sender: 'ace_remote',
+          payload: {
+            file: {
+              file_id: 'file_dm', name: 'hello.txt', mime_type: 'text/plain', size: 5,
+              sha256: 'abc', chunk_index: index, chunk_total: 2, data_base64: data,
+            },
+          },
+        },
+      });
+    }
+    expect(store.conversationMessages(dmConversationId('ace_remote')).at(-1)).toMatchObject({
+      kind: 'file',
+      file: { file_id: 'file_dm', complete: true, data_base64: 'aGVsbG8=' },
+    });
+  });
 });
 
 describe('NearbyStore unread counting', () => {
@@ -148,6 +174,28 @@ describe('NearbyStore unread counting', () => {
       message: { type: 'peer.message', message_id: 'own_1', sender: 'ace_local', payload: { text: '我发的', mentions: [] } },
     });
     expect(store.conversations.get(dmConversationId('ace_remote'))?.unread).toBe(0);
+  });
+});
+
+describe('NearbyStore conversation availability', () => {
+  it('requires a connected peer for direct and room conversations', () => {
+    const store = readyStore();
+    store.applyEvent({ type: 'peer_connected', peer: remotePeer });
+    store.applyEvent({
+      type: 'room_created',
+      room_id: 'room_1',
+      room_name: '项目群',
+      peer_ids: ['ace_local', 'ace_remote'],
+      agent_mode: 'mention',
+    });
+    const dm = store.conversations.get(dmConversationId('ace_remote'))!;
+    const room = store.conversations.get(roomConversationId('room_1'))!;
+    expect(store.isConversationOnline(dm)).toBe(true);
+    expect(store.isConversationOnline(room)).toBe(true);
+
+    store.applyEvent({ type: 'peer_disconnected', peer_id: 'ace_remote' });
+    expect(store.isConversationOnline(dm)).toBe(false);
+    expect(store.isConversationOnline(room)).toBe(false);
   });
 });
 

@@ -103,7 +103,7 @@ const api = {
   nearbyStart: () => ipcRenderer.invoke('nearby:start') as Promise<{ ok: true }>,
   nearbyStop: () => ipcRenderer.invoke('nearby:stop') as Promise<{ ok: true }>,
   nearbyCommand: (command: {
-    type: 'start_discovery' | 'stop_discovery' | 'set_discoverable' | 'connect_peer' | 'disconnect_peer' | 'send_agent_request' | 'send_peer_message' | 'create_room' | 'invite_to_room' | 'send_room_message' | 'send_room_file' | 'leave_room' | 'set_room_agent_mode' | 'shutdown';
+    type: 'start_discovery' | 'stop_discovery' | 'set_discoverable' | 'connect_peer' | 'disconnect_peer' | 'send_agent_request' | 'send_peer_message' | 'send_peer_file' | 'create_room' | 'invite_to_room' | 'send_room_message' | 'send_room_file' | 'leave_room' | 'set_room_agent_mode' | 'shutdown';
     enabled?: boolean;
     peer_id?: string;
     room_id?: string;

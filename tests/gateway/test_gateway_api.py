@@ -65,6 +65,64 @@ def test_gateway_wires_interaction_bridge_to_team_manager(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_companion_gateway_rejects_offline_open_and_send(api, auth_headers):
+    transport = ASGITransport(app=api)
+    peer = {"peer_id": "peer-offline", "display_name": "离线同伴"}
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers=auth_headers,
+    ) as client:
+        await client.post(
+            "/api/companion/link-state",
+            json={
+                "type": "peer",
+                "peer_id": peer["peer_id"],
+                "profile": peer,
+                "connection_state": "disconnected",
+            },
+        )
+        offline_open = await client.post(
+            "/api/companion/conversations/open",
+            json={"kind": "nearby_dm", "target_id": peer["peer_id"], "title": "离线同伴"},
+        )
+        await client.post(
+            "/api/companion/link-state",
+            json={
+                "type": "peer",
+                "peer_id": peer["peer_id"],
+                "profile": peer,
+                "connection_state": "connected",
+            },
+        )
+        opened = await client.post(
+            "/api/companion/conversations/open",
+            json={"kind": "nearby_dm", "target_id": peer["peer_id"], "title": "离线同伴"},
+        )
+        await client.post(
+            "/api/companion/link-state",
+            json={
+                "type": "peer",
+                "peer_id": peer["peer_id"],
+                "profile": peer,
+                "connection_state": "disconnected",
+            },
+        )
+        offline_send = await client.post(
+            f"/api/companion/conversations/{opened.json()['session_id']}/messages",
+            json={"text": "不能发送"},
+        )
+        outbox = await client.get("/api/companion/outbox")
+
+    assert offline_open.status_code == 400
+    assert "暂时离线" in offline_open.json()["error"]
+    assert opened.status_code == 200
+    assert offline_send.status_code == 400
+    assert "暂时离线" in offline_send.json()["error"]
+    assert outbox.json()["events"] == []
+
+
+@pytest.mark.asyncio
 async def test_api_usage(api, auth_headers):
     transport = ASGITransport(app=api)
     async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
@@ -109,6 +167,7 @@ async def test_nearby_agent_turn_rejects_fake_provider(tmp_path):
                 "peer_name": "Windows 工作站",
                 "request_id": "request-1",
                 "query": "你好",
+                "room_id": "room-fake-provider",
             },
         )
 
@@ -118,7 +177,7 @@ async def test_nearby_agent_turn_rejects_fake_provider(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_nearby_agent_turn_is_text_only_and_isolated_per_peer(tmp_path):
+async def test_nearby_agent_turn_rejects_dm_and_isolates_rooms(tmp_path):
     crew = build_app(
         config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False),
         enable_team=False,
@@ -134,6 +193,7 @@ async def test_nearby_agent_turn_is_text_only_and_isolated_per_peer(tmp_path):
                 "peer_name": "Windows 工作站",
                 "request_id": "request-1",
                 "query": "你好",
+                "room_id": "room-project-a",
             },
         )
         second = await client.post(
@@ -143,6 +203,7 @@ async def test_nearby_agent_turn_is_text_only_and_isolated_per_peer(tmp_path):
                 "peer_name": "Windows 工作站",
                 "request_id": "request-2",
                 "query": "还记得上一条消息吗？",
+                "room_id": "room-project-a",
             },
         )
         other = await client.post(
@@ -152,9 +213,18 @@ async def test_nearby_agent_turn_is_text_only_and_isolated_per_peer(tmp_path):
                 "peer_name": "另一台电脑",
                 "request_id": "request-3",
                 "query": "你好",
+                "room_id": "room-project-b",
             },
         )
         visible_sessions = await client.get("/api/sessions")
+        rejected_dm = await client.post(
+            "/api/nearby/agent-turn",
+            json={
+                "peer_id": "ace_windows",
+                "request_id": "request-dm",
+                "query": "私聊 Agent",
+            },
+        )
 
     assert first.status_code == 200
     assert first.json()["text"] == "已回复：你好"
@@ -162,6 +232,8 @@ async def test_nearby_agent_turn_is_text_only_and_isolated_per_peer(tmp_path):
     assert second.json()["session_id"] == first.json()["session_id"]
     assert other.status_code == 200
     assert other.json()["session_id"] != first.json()["session_id"]
+    assert rejected_dm.status_code == 403
+    assert rejected_dm.json()["code"] == "agent_dm_forbidden"
     assert visible_sessions.json() == []
 
     config = crew.session_store.get_agent_config(
@@ -191,15 +263,6 @@ async def test_nearby_agent_turn_room_session_isolated_and_history_truncated(tmp
         {"sender": f"成员{i:02d}", "text": f"消息{i:02d}"} for i in range(25)
     ] + [{"sender": "甲", "text": "长" * 600}]
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        dm = await client.post(
-            "/api/nearby/agent-turn",
-            json={
-                "peer_id": "ace_windows",
-                "peer_name": "Windows 工作站",
-                "request_id": "request-1",
-                "query": "你好",
-            },
-        )
         room = await client.post(
             "/api/nearby/agent-turn",
             json={
@@ -223,13 +286,10 @@ async def test_nearby_agent_turn_room_session_isolated_and_history_truncated(tmp
             },
         )
 
-    assert dm.status_code == 200
     assert room.status_code == 200
     assert other_room.status_code == 200
-    assert dm.json()["session_id"].startswith("agent:main:nearby:dm:")
     assert room.json()["session_id"].startswith("agent:main:nearby:room:")
-    # 同一对端的群聊会话与直聊会话相互隔离；不同群之间也相互隔离
-    assert room.json()["session_id"] != dm.json()["session_id"]
+    # Agent 只能在群里运行，不同群之间相互隔离。
     assert other_room.json()["session_id"] != room.json()["session_id"]
 
     # 群聊会话沿用同样的强制安全配置
@@ -254,15 +314,6 @@ async def test_nearby_agent_turn_room_session_isolated_and_history_truncated(tmp
     # 单条消息截断到 500 字符
     assert "长" * 500 in hint
     assert "长" * 501 not in hint
-
-    dm_hint = next(
-        str(message.content)
-        for call in provider.calls
-        for message in call["messages"]
-        if message.role == "user" and "Bluetooth Nearby 直连的外部用户" in str(message.content)
-    )
-    assert "此会话已禁用全部工具和 Skills" in dm_hint
-
 
 @pytest.mark.asyncio
 async def test_nearby_agent_turn_allowed_toolsets(tmp_path, monkeypatch):
@@ -294,6 +345,7 @@ async def test_nearby_agent_turn_allowed_toolsets(tmp_path, monkeypatch):
                 "peer_id": "peer_default",
                 "request_id": "request-1",
                 "query": "你好",
+                "room_id": "room-default",
             },
         )
         empty = await client.post(
@@ -302,6 +354,7 @@ async def test_nearby_agent_turn_allowed_toolsets(tmp_path, monkeypatch):
                 "peer_id": "peer_empty",
                 "request_id": "request-2",
                 "query": "你好",
+                "room_id": "room-empty",
                 "allowed_toolsets": [],
             },
         )
@@ -311,6 +364,7 @@ async def test_nearby_agent_turn_allowed_toolsets(tmp_path, monkeypatch):
                 "peer_id": "peer_web",
                 "request_id": "request-3",
                 "query": "帮我查一下今天的天气",
+                "room_id": "room-web",
                 "allowed_toolsets": ["web"],
             },
         )
@@ -320,6 +374,7 @@ async def test_nearby_agent_turn_allowed_toolsets(tmp_path, monkeypatch):
                 "peer_id": "peer_mixed",
                 "request_id": "request-4",
                 "query": "帮我查一下今天的天气",
+                "room_id": "room-mixed",
                 "allowed_toolsets": ["web", "bogus", "*", 42],
             },
         )
@@ -381,7 +436,7 @@ async def test_nearby_agent_turn_rejects_invalid_room_and_whitelist_payloads(tmp
         )
         bad_allowed = await client.post(
             "/api/nearby/agent-turn",
-            json={**base, "allowed_toolsets": "web"},
+            json={**base, "room_id": "room-1", "allowed_toolsets": "web"},
         )
 
     assert bad_room.status_code == 400

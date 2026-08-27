@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // 共享 mock 必须先于 chat-controller 加载，见 helpers/mock-chat-controller-deps.ts
 import './helpers/mock-chat-controller-deps';
 import { _resetQueueEditDraftForTests, dispatchWs, editQueueItem, sendMessage } from '../../src/ui/features/chat-controller';
+import { conversationAdapters } from '../../src/ui/features/conversation-adapters';
 import { enqueuePending, getPendingQueue } from '../../src/ui/state';
 import { __resetAllStoresForTest, configStore, messageStore, sessionStore, uiStore, workspaceStore } from '../../src/ui/stores/stores';
 
@@ -125,5 +126,38 @@ describe('sendMessage', () => {
       query: '按普通模式发送',
     });
     expect(socket.send.mock.calls.at(-1)?.[0]).not.toHaveProperty('plan_active');
+  });
+
+  it('does not render an optimistic user bubble when an adapter is unavailable', async () => {
+    const send = vi.fn(async () => undefined);
+    const unregister = conversationAdapters.register({
+      id: 'offline-test',
+      matches: (sessionId) => sessionId === 'offline-session',
+      abilities: () => ({
+        canSendText: false,
+        canAttach: false,
+        canMentionPeople: false,
+        canMentionAgents: false,
+        showModelPicker: false,
+        showSkills: false,
+        showPlanMode: false,
+        unavailableReason: '同伴暂时离线，重新连接后才能发消息',
+      }),
+      send,
+    });
+
+    try {
+      const sent = await dispatchWs('offline-session', '不能发送', []);
+      const messages = messageStore.get().messages['offline-session'] ?? [];
+      expect(sent).toBe(false);
+      expect(send).not.toHaveBeenCalled();
+      expect(messages.some((message) => message.role === 'user')).toBe(false);
+      expect(messages.at(-1)).toMatchObject({
+        role: 'error',
+        content: '同伴暂时离线，重新连接后才能发消息',
+      });
+    } finally {
+      unregister();
+    }
   });
 });

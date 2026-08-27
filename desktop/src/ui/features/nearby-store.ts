@@ -21,7 +21,16 @@ export interface NearbyPeer {
   display_name: string;
   agent_name: string;
   capabilities: string[];
+  published_agents: NearbyPublishedAgent[];
   connection: NearbyConnectionState;
+}
+
+export interface NearbyPublishedAgent {
+  public_agent_id: string;
+  display_name: string;
+  source_kind: string;
+  source_ref: string;
+  description?: string;
 }
 
 export interface NearbyFileCard {
@@ -113,6 +122,23 @@ function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
+function asPublishedAgents(value: unknown): NearbyPublishedAgent[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const record = asRecord(item);
+    const publicAgentId = asString(record?.public_agent_id);
+    const displayName = asString(record?.display_name);
+    if (!record || !publicAgentId || !displayName) return [];
+    return [{
+      public_agent_id: publicAgentId,
+      display_name: displayName,
+      source_kind: asString(record.source_kind, 'local'),
+      source_ref: asString(record.source_ref),
+      ...(asString(record.description) ? { description: asString(record.description) } : {}),
+    }];
+  });
+}
+
 function asPeer(value: unknown): Omit<NearbyPeer, 'connection'> | null {
   const record = asRecord(value);
   if (!record) return null;
@@ -123,6 +149,7 @@ function asPeer(value: unknown): Omit<NearbyPeer, 'connection'> | null {
     display_name: asString(record.display_name),
     agent_name: asString(record.agent_name),
     capabilities: asStringArray(record.capabilities),
+    published_agents: asPublishedAgents(record.published_agents),
   };
 }
 
@@ -170,6 +197,15 @@ export class NearbyStore {
 
   conversationMessages(conversationId: string): NearbyChatMessage[] {
     return this.messages.get(conversationId) ?? [];
+  }
+
+  isConversationOnline(conversation: NearbyConversation): boolean {
+    if (conversation.kind === 'dm') {
+      return this.peers.get(conversation.peerId)?.connection === 'connected';
+    }
+    return conversation.memberIds.some((peerId) => (
+      peerId !== this.localPeerId && this.peers.get(peerId)?.connection === 'connected'
+    ));
   }
 
   /** 正在等待哪些成员的 Agent 回复（渲染「思考中…」占位）。 */
@@ -305,18 +341,20 @@ export class NearbyStore {
     }, { countUnread: false });
   }
 
-  /** room.file 分片按 file_id 重组，收齐后落成一条文件消息。 */
-  private ingestFileChunk(raw: unknown, history: boolean): void {
+  /** peer.file / room.file 分片按 file_id 重组，收齐后落成一条文件消息。 */
+  private ingestFileChunk(raw: unknown, history: boolean, directPeerId = ''): void {
     const message = asRecord(raw);
     const payload = asRecord(message?.payload);
     const file = asRecord(payload?.file);
     const roomId = asString(payload?.room_id);
-    if (!message || !file || !roomId) return;
+    if (!message || !file || (!roomId && !directPeerId)) return;
     const fileId = asString(file.file_id);
     const chunkIndex = typeof file.chunk_index === 'number' ? file.chunk_index : -1;
     const chunkTotal = typeof file.chunk_total === 'number' ? file.chunk_total : 0;
     if (!fileId || chunkIndex < 0 || chunkTotal <= 0) return;
-    const conversationId = roomConversationId(roomId);
+    const conversationId = roomId
+      ? roomConversationId(roomId)
+      : this.ensureDmConversation(directPeerId).id;
     const conversation = this.conversations.get(conversationId);
     if (!conversation) return;
     const key = `${conversationId}:${fileId}`;
@@ -450,6 +488,7 @@ export class NearbyStore {
     const type = asString(asRecord(raw)?.type);
     if (type === 'room.message') this.ingestRoomMessage(raw, history);
     else if (type === 'room.file') this.ingestFileChunk(raw, history);
+    else if (type === 'peer.file') this.ingestFileChunk(raw, history, peerId);
     else this.ingestDmMessage(peerId, raw, history);
   }
 

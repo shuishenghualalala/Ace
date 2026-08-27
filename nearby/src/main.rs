@@ -5,6 +5,7 @@ use crew_nearby::ipc::run as run_ipc;
 use crew_nearby::mock::run_bus;
 use crew_nearby::runtime::{run, NearbyConfig};
 use crew_nearby::transport::TransportMode;
+use crew_nearby::PublishedAgent;
 use std::env;
 
 #[tokio::main]
@@ -15,18 +16,33 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let agent_name = arguments
+        .agent_name
+        .unwrap_or_else(crew_nearby::default_agent_name);
+    let capabilities = if arguments.capabilities.is_empty() {
+        vec!["agent.chat".to_owned()]
+    } else {
+        arguments.capabilities
+    };
+    let published_agents = if arguments.published_agents.is_empty() {
+        vec![PublishedAgent {
+            public_agent_id: "agent:crew".to_owned(),
+            display_name: agent_name.clone(),
+            description: String::new(),
+            kind: "crew".to_owned(),
+            capabilities: vec!["chat".to_owned()],
+            revision: 1,
+        }]
+    } else {
+        arguments.published_agents
+    };
     let config = NearbyConfig {
         display_name: arguments
             .display_name
             .unwrap_or_else(crew_nearby::default_display_name),
-        agent_name: arguments
-            .agent_name
-            .unwrap_or_else(crew_nearby::default_agent_name),
-        capabilities: if arguments.capabilities.is_empty() {
-            vec!["agent.chat".to_owned()]
-        } else {
-            arguments.capabilities
-        },
+        agent_name,
+        capabilities,
+        published_agents,
         peer_id: arguments.peer_id,
         state_dir: arguments.state_dir,
         discoverable: arguments.discoverable,
@@ -56,6 +72,7 @@ struct Arguments {
     display_name: Option<String>,
     agent_name: Option<String>,
     capabilities: Vec<String>,
+    published_agents: Vec<PublishedAgent>,
     peer_id: Option<String>,
     state_dir: Option<std::path::PathBuf>,
     discoverable: Option<bool>,
@@ -80,6 +97,13 @@ impl Arguments {
                 "--capability" => arguments
                     .capabilities
                     .push(next_value(&mut values, &argument)?),
+                "--published-agent" => {
+                    let raw = next_value(&mut values, &argument)?;
+                    let agent = serde_json::from_str::<PublishedAgent>(&raw).map_err(|error| {
+                        anyhow::anyhow!("invalid --published-agent JSON: {error}")
+                    })?;
+                    arguments.published_agents.push(agent);
+                }
                 "--peer-id" => arguments.peer_id = Some(next_value(&mut values, &argument)?),
                 "--state-dir" => {
                     arguments.state_dir = Some(next_value(&mut values, &argument)?.into())
@@ -116,7 +140,7 @@ fn next_value(values: &mut impl Iterator<Item = String>, argument: &str) -> Resu
 
 fn print_help() {
     println!(
-        "Ace Nearby BLE\n\nUsage:\n  cargo run --manifest-path nearby/Cargo.toml -- [options]\n\nOptions:\n  --display-name <name>      Local display name\n  --agent-name <name>        Local agent name\n  --capability <name>        Add a capability; may be repeated\n  --peer-id <id>             Override the persisted peer ID\n  --state-dir <path>         Override the nearby state directory\n  --discoverable             Enable BLE advertising\n  --no-discoverable          Disable BLE advertising\n  --transport <ble|mock>     Select the transport backend\n  --mock-endpoint <addr>     Mock Bus TCP endpoint\n  --mock-bus                 Run the Mock Bus coordinator\n  --ipc                      Use JSONL IPC mode for the desktop client\n  --cli                      Use the interactive Nearby CLI\n  -h, --help                 Show this help"
+        "Ace Nearby BLE\n\nUsage:\n  cargo run --manifest-path nearby/Cargo.toml -- [options]\n\nOptions:\n  --display-name <name>      Local display name\n  --agent-name <name>        Local agent name\n  --capability <name>        Add a capability; may be repeated\n  --published-agent <json>   Publish an Agent profile; may be repeated\n  --peer-id <id>             Override the persisted peer ID\n  --state-dir <path>         Override the nearby state directory\n  --discoverable             Enable BLE advertising\n  --no-discoverable          Disable BLE advertising\n  --transport <ble|mock>     Select the transport backend\n  --mock-endpoint <addr>     Mock Bus TCP endpoint\n  --mock-bus                 Run the Mock Bus coordinator\n  --ipc                      Use JSONL IPC mode for the desktop client\n  --cli                      Use the interactive Nearby CLI\n  -h, --help                 Show this help"
     );
 }
 

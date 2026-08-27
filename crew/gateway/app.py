@@ -40,6 +40,7 @@ from crew.gateway.logout import LogoutCoordinator
 from crew.gateway.platform_registry import platform_registry
 from crew.gateway.routers.auth_session import create_auth_session_router
 from crew.gateway.routers.channels import create_channels_router
+from crew.gateway.routers.companion import create_companion_router
 from crew.gateway.routers.browser import create_browser_router
 from crew.gateway.routers.config import create_config_router
 from crew.gateway.routers.cron import create_cron_router
@@ -374,6 +375,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     api.include_router(create_runtimes_router(crew))
     api.include_router(create_scenarios_router(crew))
     api.include_router(create_channels_router(crew, dispatcher, channel_manager))
+    api.include_router(create_companion_router(crew))
     api.include_router(create_misc_router(crew))
     api.include_router(create_plugins_router(crew))
     api.include_router(create_mcp_setup_router(crew))

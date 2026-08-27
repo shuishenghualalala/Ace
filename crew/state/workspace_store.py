@@ -23,6 +23,7 @@ DEFAULT_ID = "default"
 BUILTIN_WORKSPACES: dict[str, tuple[str, int]] = {
     DEFAULT_ID: ("默认工作空间", 0),
     "wiki": ("Wiki 知识库", 1),
+    "companion": ("同伴空间", 0),
 }
 
 

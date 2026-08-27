@@ -24,6 +24,7 @@ from crew.agent.compact import ContextCompactor, SummaryStore
 from crew.agent.executor import create_executor
 from crew.agent.external.store import ExternalAgentStore
 from crew.agent.external.tools import register_external_agent_tools
+from crew.companion import CompanionService, CompanionStore, register_companion_tools
 from crew.agent.runtime import SingleAgent
 from crew.agent.subagent.definition import build_preset_spec
 from crew.core.envelope import Envelope, ResponseChunk
@@ -439,6 +440,7 @@ class CrewApp:
 
         process_registry.configure_task_runtime(self.tasks)
         self.external_agents: ExternalAgentStore | None = None
+        self.companion: CompanionService | None = None
         # L2 摘要缓存：单实例共享给所有 agent 的 compactor（避免多开 SQLite 连接）
         self.summary_store = SummaryStore(config.db_path, wal_enabled=config.sqlite_wal)
 
@@ -2673,6 +2675,12 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     app.channel_bindings = channel_bindings
     app.plugin_prefs = plugin_prefs
     app.external_agents = external_agents
+    app.companion = CompanionService(
+        CompanionStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
+        session_store=session_store,
+        workspace_store=workspace_store,
+        external_agents=external_agents,
+    )
     from crew.gateway.channel_sessions import register_channel_session_tools
 
     register_channel_session_tools(registry, session_store)
@@ -2681,6 +2689,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         external_agents,
         interaction_bridge_getter=lambda: app.interaction_bridge,
     )
+    register_companion_tools(registry, app.companion)
     from crew.tasks.tools import register_task_tools
 
     register_task_tools(registry, app.tasks)

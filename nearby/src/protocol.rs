@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u8 = 2;
+pub const PROTOCOL_VERSION: u8 = 3;
 pub const DEFAULT_AGENT_MODE: &str = "mention";
 pub const AGENT_MODES: [&str; 3] = ["mention", "auto", "quiet"];
 pub const MAX_ROOM_NAME_CHARS: usize = 120;
@@ -28,6 +28,24 @@ pub fn normalize_room_name(value: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublishedAgent {
+    pub public_agent_id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default = "default_revision")]
+    pub revision: u64,
+}
+
+fn default_revision() -> u64 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PeerInfo {
     pub protocol_version: u8,
     pub peer_id: String,
@@ -35,6 +53,8 @@ pub struct PeerInfo {
     pub display_name: String,
     pub agent_name: String,
     pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub published_agents: Vec<PublishedAgent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -89,6 +109,7 @@ impl Message {
                 "display_name": peer.display_name,
                 "agent_name": peer.agent_name,
                 "capabilities": peer.capabilities.clone(),
+                "published_agents": peer.published_agents.clone(),
             }),
         }
     }
@@ -139,6 +160,16 @@ impl Message {
                 "text": text.into(),
                 "mentions": mentions,
             }),
+        }
+    }
+
+    pub fn peer_file(sender: impl Into<String>, file: FileChunk) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            message_type: "peer.file".to_owned(),
+            message_id: Uuid::new_v4().to_string(),
+            sender: sender.into(),
+            payload: serde_json::json!({ "file": file }),
         }
     }
 
@@ -531,6 +562,7 @@ mod tests {
             display_name: "Local".to_owned(),
             agent_name: "Agent".to_owned(),
             capabilities: vec!["chat".to_owned(), "tools".to_owned()],
+            published_agents: Vec::new(),
         }
     }
 
@@ -617,7 +649,8 @@ mod tests {
         assert_eq!(decoded.payload["agent_mode"], "auto");
         assert_eq!(decoded.payload["owner_peer_id"], "crew_local");
 
-        let legacy_invite = Message::room_invite("crew_local", "room_1", "项目群", vec![], None, None);
+        let legacy_invite =
+            Message::room_invite("crew_local", "room_1", "项目群", vec![], None, None);
         assert!(legacy_invite.payload.get("agent_mode").is_none());
         assert!(legacy_invite.payload.get("owner_peer_id").is_none());
 
@@ -650,7 +683,10 @@ mod tests {
 
         assert_eq!(normalize_room_name("  项目群  "), Some("项目群".to_owned()));
         assert_eq!(normalize_room_name("   "), None);
-        assert_eq!(normalize_room_name(&"长".repeat(MAX_ROOM_NAME_CHARS + 1)), None);
+        assert_eq!(
+            normalize_room_name(&"长".repeat(MAX_ROOM_NAME_CHARS + 1)),
+            None
+        );
     }
 
     #[test]
@@ -676,6 +712,25 @@ mod tests {
         assert_eq!(decoded.payload["file"]["chunk_index"], 1);
         assert_eq!(decoded.payload["file"]["chunk_total"], 3);
         assert_eq!(decoded.payload["file"]["data_base64"], "aGVsbG8=");
+    }
+
+    #[test]
+    fn peer_file_preserves_chunk_metadata() {
+        let message = Message::peer_file(
+            "crew_a",
+            FileChunk {
+                file_id: "file_dm".to_owned(),
+                name: "notes.txt".to_owned(),
+                mime_type: "text/plain".to_owned(),
+                size: 5,
+                sha256: "a".repeat(64),
+                chunk_index: 0,
+                chunk_total: 1,
+                data_base64: "aGVsbG8=".to_owned(),
+            },
+        );
+        assert_eq!(message.message_type, "peer.file");
+        assert_eq!(message.payload["file"]["file_id"], "file_dm");
     }
 
     #[test]

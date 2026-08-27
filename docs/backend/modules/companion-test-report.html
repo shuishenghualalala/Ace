@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ace 同伴功能测试报告</title>
+  <style>
+    :root{color-scheme:light dark;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{max-width:980px;margin:0 auto;padding:40px 24px;line-height:1.65;background:#f6f7f8;color:#202124}main{padding:30px;border:1px solid #dfe1e5;border-radius:14px;background:#fff}h1{margin:0 0 8px;font-size:28px}h2{margin-top:32px;font-size:18px}p{color:#5f6368}table{width:100%;border-collapse:collapse}th,td{padding:11px 12px;border:1px solid #e3e5e8;text-align:left;vertical-align:top}th{background:#f4f5f6}.pass{color:#137333;font-weight:700}.note{padding:12px 14px;border-left:3px solid #f9ab00;background:#fff8e1}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em}@media(prefers-color-scheme:dark){body{background:#17181a;color:#eee}main{border-color:#3b3d40;background:#222326}p{color:#b7babf}th{background:#2c2e31}th,td{border-color:#3b3d40}.note{background:#332b17}}</style>
+</head>
+<body><main>
+  <h1>同伴功能测试报告</h1>
+  <p>日期：2026-08-27 · 范围：Companion Domain、Gateway、Desktop 管理中枢、主对话适配器、Nearby Rust 协议与 Mock/BLE 链路。</p>
+  <h2>通过项</h2>
+  <table>
+    <thead><tr><th>层级</th><th>命令 / 用例</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Python 领域与 Gateway</td><td><code>.venv/bin/python -m pytest ... -k 'companion or nearby_agent_turn or companion_builtin'</code><br>默认 Crew、外援公开、工作空间绑定、Agent 私聊拒绝、离线 DM/群发送拒绝、Outbox 不入队、群隔离、运行记录筛选、附件路径/摘要校验。</td><td class="pass">17 passed</td></tr>
+      <tr><td>Rust 协议与链路</td><td><code>cargo test --manifest-path nearby/Cargo.toml</code><br>LinkAdapter、v3 Profile、peer.file / room.file、分片、Mock 与 BLE 状态。</td><td class="pass">47 passed</td></tr>
+      <tr><td>Desktop 类型</td><td><code>npm run typecheck</code></td><td class="pass">通过</td></tr>
+      <tr><td>Desktop 同伴回归</td><td>管理中枢无第二聊天、单卡发现、本人/Agent 入口语义、离线按钮、断线后主对话无乐观消息、真实工作空间选择、建群不带 Agent、公开范围、DM/Room 文件投影、IPC schema。</td><td class="pass">94 passed</td></tr>
+      <tr><td>Desktop CSS</td><td><code>npm run lint:css</code></td><td class="pass">通过</td></tr>
+      <tr><td>Desktop 构建</td><td><code>npm run build:dev</code></td><td class="pass">通过</td></tr>
+    </tbody>
+  </table>
+  <h2>全仓回归说明</h2>
+  <div class="note">Desktop 全量 Vitest 当前为 1648 通过、62 失败；失败分布在 backend-status、Office 预览、历史侧栏、Security、Browser 等既有模块，同伴相关测试全部通过。本轮没有修改这些失败模块，交付判断采用同伴模块定向测试、类型检查、CSS 检查和构建结果。</div>
+  <h2>仍需真实设备验证</h2>
+  <ul><li>macOS / Windows / Linux 的 BLE 权限、扫描、互连和休眠恢复。</li><li>跨系统文件名、4 MiB 边界、断线后的传输失败与重试。</li><li>正式发布前的 E2EE、身份指纹确认和群密钥轮换。</li></ul>
+</main></body>
+</html>

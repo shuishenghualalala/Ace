@@ -2,8 +2,6 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const MAX_CONCURRENT_AGENT_TURNS = 8;
-
 export type NearbyRoomAgentMode = 'mention' | 'auto' | 'quiet';
 
 export type NearbyCommand =
@@ -15,6 +13,16 @@ export type NearbyCommand =
   | { type: 'send_agent_request'; peer_id: string; text: string }
   | { type: 'send_agent_reply'; peer_id: string; request_id: string; text: string; error: boolean }
   | { type: 'send_peer_message'; peer_id: string; text: string; mentions?: string[] }
+  | {
+    type: 'send_peer_file';
+    peer_id: string;
+    file_id: string;
+    name: string;
+    mime_type: string;
+    size: number;
+    sha256: string;
+    data_base64: string;
+  }
   | { type: 'create_room'; room_id: string; room_name: string; peer_ids: string[]; agent_mode?: NearbyRoomAgentMode }
   | { type: 'invite_to_room'; room_id: string; peer_ids: string[] }
   | {
@@ -85,6 +93,15 @@ export interface NearbyAgentTurnRequest {
   allowedToolsets?: string[];
 }
 
+export interface NearbyPublishedAgent {
+  public_agent_id: string;
+  display_name: string;
+  description?: string;
+  kind?: string;
+  capabilities?: string[];
+  revision?: number;
+}
+
 interface NearbyProcessCommand {
   command: string;
   args: string[];
@@ -98,9 +115,21 @@ export class NearbyService {
   private ready = false;
   private localPeerId = '';
   private readonly peers = new Map<string, string>();
-  private readonly agentRuns = new Map<string, AbortController>();
+  private publishedAgents: NearbyPublishedAgent[] = [];
 
   public constructor(private readonly options: NearbyServiceOptions) {}
+
+  public setPublishedAgents(agents: NearbyPublishedAgent[]): void {
+    this.publishedAgents = agents
+      .filter((agent) => agent.public_agent_id.trim() && agent.display_name.trim())
+      .map((agent) => ({
+        ...agent,
+        public_agent_id: agent.public_agent_id.trim(),
+        display_name: agent.display_name.trim(),
+        capabilities: Array.isArray(agent.capabilities) ? [...new Set(agent.capabilities)] : [],
+        revision: Math.max(1, Math.trunc(agent.revision ?? 1)),
+      }));
+  }
 
   public async start(): Promise<void> {
     if (this.ready && this.child) return;
@@ -191,7 +220,6 @@ export class NearbyService {
   }
 
   public async stop(): Promise<void> {
-    this.abortAgentRuns();
     const child = this.child;
     if (!child) return;
     console.warn('[nearby] stopping runtime');
@@ -245,17 +273,11 @@ export class NearbyService {
 
   private finish(child: ChildProcessWithoutNullStreams): void {
     if (this.child !== child) return;
-    this.abortAgentRuns();
     this.child = null;
     this.ready = false;
     if (!this.stopping) {
       this.options.onEvent({ type: 'error', message: 'Nearby 服务已退出' });
     }
-  }
-
-  private abortAgentRuns(): void {
-    for (const controller of this.agentRuns.values()) controller.abort();
-    this.agentRuns.clear();
   }
 
   private eventPeer(event: NearbyEvent): { peerId: string; displayName: string } | null {
@@ -282,41 +304,12 @@ export class NearbyService {
     const requestId = typeof message.message_id === 'string' ? message.message_id : '';
     const payload = message.payload;
     if (!requestId || !payload || typeof payload !== 'object' || Array.isArray(payload)) return;
-    const text = typeof (payload as Record<string, unknown>).text === 'string'
-      ? String((payload as Record<string, unknown>).text).trim()
-      : '';
-    const runKey = `${peerId}\0${requestId}`;
-    if (!text || this.agentRuns.has(runKey)) return;
-    if (this.options.autoReplyEnabled && !this.options.autoReplyEnabled()) {
-      void this.sendAgentReply(peerId, requestId, '对方已关闭 Agent 自动回复', true);
-      return;
-    }
-    if (this.agentRuns.size >= MAX_CONCURRENT_AGENT_TURNS) {
-      void this.sendAgentReply(peerId, requestId, 'Agent 当前忙碌，请稍后再试', true);
-      return;
-    }
-
-    const controller = new AbortController();
-    this.agentRuns.set(runKey, controller);
-    console.warn(`[nearby][agent] request_received peer=${peerId} request=${requestId}`);
-    const request: NearbyAgentTurnRequest = {
+    void this.sendAgentReply(
       peerId,
-      peerName: this.peers.get(peerId) ?? '附近的用户',
       requestId,
-      text,
-    };
-    void this.options.runAgentTurn(request, controller.signal)
-      .then((reply) => {
-        console.warn(`[nearby][agent] turn_completed peer=${peerId} request=${requestId}`);
-        return this.sendAgentReply(peerId, requestId, reply, false);
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) return;
-        const detail = error instanceof Error ? error.message : String(error);
-        console.warn(`[nearby][agent] turn_failed peer=${peerId} request=${requestId} error=${detail}`);
-        return this.sendAgentReply(peerId, requestId, detail || 'Agent 暂时无法回复', true);
-      })
-      .finally(() => this.agentRuns.delete(runKey));
+      'Agent 不能参与私聊，请把 Agent 邀请到主人所在的群聊中协作',
+      true,
+    );
   }
 
   private async sendAgentReply(
@@ -347,13 +340,20 @@ export class NearbyService {
         ? [path.join(this.options.resourcesPath, 'crew-nearby', binaryName)]
         : [path.join(this.options.repoRoot, 'nearby', 'target', 'debug', binaryName)];
     const binary = candidates.find((candidate) => path.isAbsolute(candidate) && fs.existsSync(candidate));
-    if (binary) return { command: binary, args: ['--ipc'], cwd: path.dirname(binary) };
+    const runtimeArgs = [
+      '--ipc',
+      ...this.publishedAgents.flatMap((agent) => ['--published-agent', JSON.stringify(agent)]),
+    ];
+    if (binary) return { command: binary, args: runtimeArgs, cwd: path.dirname(binary) };
     if (this.options.isPackaged) {
       throw new Error(`找不到 Nearby 运行时：${candidates.join(', ')}`);
     }
     return {
       command: process.platform === 'win32' ? 'cargo.exe' : 'cargo',
-      args: ['run', '--quiet', '--manifest-path', path.join(this.options.repoRoot, 'nearby', 'Cargo.toml'), '--', '--ipc'],
+      args: [
+        'run', '--quiet', '--manifest-path', path.join(this.options.repoRoot, 'nearby', 'Cargo.toml'), '--',
+        ...runtimeArgs,
+      ],
       cwd: this.options.repoRoot,
     };
   }
