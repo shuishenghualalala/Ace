@@ -4,6 +4,8 @@ import * as path from 'path';
 
 const MAX_CONCURRENT_AGENT_TURNS = 8;
 
+export type NearbyRoomAgentMode = 'mention' | 'auto' | 'quiet';
+
 export type NearbyCommand =
   | { type: 'start_discovery' }
   | { type: 'stop_discovery' }
@@ -12,7 +14,9 @@ export type NearbyCommand =
   | { type: 'disconnect_peer'; peer_id: string }
   | { type: 'send_agent_request'; peer_id: string; text: string }
   | { type: 'send_agent_reply'; peer_id: string; request_id: string; text: string; error: boolean }
-  | { type: 'create_room'; room_id: string; room_name: string; peer_ids: string[] }
+  | { type: 'send_peer_message'; peer_id: string; text: string; mentions?: string[] }
+  | { type: 'create_room'; room_id: string; room_name: string; peer_ids: string[]; agent_mode?: NearbyRoomAgentMode }
+  | { type: 'invite_to_room'; room_id: string; peer_ids: string[] }
   | {
     type: 'send_room_message';
     room_id: string;
@@ -33,6 +37,12 @@ export type NearbyCommand =
     reply_to?: NearbyReplyReference;
   }
   | { type: 'leave_room'; room_id: string }
+  | {
+    type: 'set_room_agent_mode';
+    room_id: string;
+    agent_mode?: NearbyRoomAgentMode;
+    room_name?: string;
+  }
   | { type: 'shutdown' };
 
 export interface NearbyReplyReference {
@@ -53,6 +63,13 @@ export interface NearbyServiceOptions {
   crewHome: string;
   onEvent: (event: NearbyEvent) => void;
   runAgentTurn?: (request: NearbyAgentTurnRequest, signal: AbortSignal) => Promise<string>;
+  /** 本机主人可关闭 Agent 自动回复；缺省视为开启。 */
+  autoReplyEnabled?: () => boolean;
+}
+
+export interface NearbyAgentHistoryEntry {
+  sender: string;
+  text: string;
 }
 
 export interface NearbyAgentTurnRequest {
@@ -60,6 +77,12 @@ export interface NearbyAgentTurnRequest {
   peerName: string;
   requestId: string;
   text: string;
+  /** 群聊触发时携带；存在即后端按房间维度隔离会话。 */
+  roomId?: string;
+  roomName?: string;
+  history?: NearbyAgentHistoryEntry[];
+  /** 本机主人配置的工具白名单；空数组 = 全禁。 */
+  allowedToolsets?: string[];
 }
 
 interface NearbyProcessCommand {
@@ -264,6 +287,10 @@ export class NearbyService {
       : '';
     const runKey = `${peerId}\0${requestId}`;
     if (!text || this.agentRuns.has(runKey)) return;
+    if (this.options.autoReplyEnabled && !this.options.autoReplyEnabled()) {
+      void this.sendAgentReply(peerId, requestId, '对方已关闭 Agent 自动回复', true);
+      return;
+    }
     if (this.agentRuns.size >= MAX_CONCURRENT_AGENT_TURNS) {
       void this.sendAgentReply(peerId, requestId, 'Agent 当前忙碌，请稍后再试', true);
       return;

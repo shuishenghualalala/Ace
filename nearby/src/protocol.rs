@@ -5,12 +5,27 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: u8 = 2;
+pub const DEFAULT_AGENT_MODE: &str = "mention";
+pub const AGENT_MODES: [&str; 3] = ["mention", "auto", "quiet"];
+pub const MAX_ROOM_NAME_CHARS: usize = 120;
 pub const SERVICE_UUID: Uuid = uuid::uuid!("5957645b-4b06-49cf-bde2-366a593e73a7");
 pub const PEER_INFO_UUID: Uuid = uuid::uuid!("5957645b-4b06-49cf-bde2-366a593e73a8");
 pub const INCOMING_MESSAGE_UUID: Uuid = uuid::uuid!("5957645b-4b06-49cf-bde2-366a593e73a9");
 pub const OUTGOING_MESSAGE_UUID: Uuid = uuid::uuid!("5957645b-4b06-49cf-bde2-366a593e73aa");
 
 pub struct UuidSet;
+
+pub fn is_valid_agent_mode(value: &str) -> bool {
+    AGENT_MODES.contains(&value)
+}
+
+pub fn normalize_room_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > MAX_ROOM_NAME_CHARS {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PeerInfo {
@@ -110,6 +125,23 @@ impl Message {
         }
     }
 
+    pub fn peer_message(
+        sender: impl Into<String>,
+        text: impl Into<String>,
+        mentions: Vec<String>,
+    ) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            message_type: "peer.message".to_owned(),
+            message_id: Uuid::new_v4().to_string(),
+            sender: sender.into(),
+            payload: serde_json::json!({
+                "text": text.into(),
+                "mentions": mentions,
+            }),
+        }
+    }
+
     pub fn peer_connect(sender: impl Into<String>) -> Self {
         Self {
             version: PROTOCOL_VERSION,
@@ -135,17 +167,26 @@ impl Message {
         room_id: impl Into<String>,
         room_name: impl Into<String>,
         participants: Vec<String>,
+        agent_mode: Option<&str>,
+        owner_peer_id: Option<&str>,
     ) -> Self {
+        let mut payload = serde_json::json!({
+            "room_id": room_id.into(),
+            "room_name": room_name.into(),
+            "participants": participants,
+        });
+        if let Some(agent_mode) = agent_mode {
+            payload["agent_mode"] = serde_json::Value::String(agent_mode.to_owned());
+        }
+        if let Some(owner_peer_id) = owner_peer_id {
+            payload["owner_peer_id"] = serde_json::Value::String(owner_peer_id.to_owned());
+        }
         Self {
             version: PROTOCOL_VERSION,
             message_type: "room.invite".to_owned(),
             message_id: Uuid::new_v4().to_string(),
             sender: sender.into(),
-            payload: serde_json::json!({
-                "room_id": room_id.into(),
-                "room_name": room_name.into(),
-                "participants": participants,
-            }),
+            payload,
         }
     }
 
@@ -207,13 +248,47 @@ impl Message {
         }
     }
 
-    pub fn room_join(sender: impl Into<String>, room_id: impl Into<String>) -> Self {
+    pub fn room_join(
+        sender: impl Into<String>,
+        room_id: impl Into<String>,
+        agent_mode: Option<&str>,
+        owner_peer_id: Option<&str>,
+    ) -> Self {
+        let mut payload = serde_json::json!({ "room_id": room_id.into() });
+        if let Some(agent_mode) = agent_mode {
+            payload["agent_mode"] = serde_json::Value::String(agent_mode.to_owned());
+        }
+        if let Some(owner_peer_id) = owner_peer_id {
+            payload["owner_peer_id"] = serde_json::Value::String(owner_peer_id.to_owned());
+        }
         Self {
             version: PROTOCOL_VERSION,
             message_type: "room.join".to_owned(),
             message_id: Uuid::new_v4().to_string(),
             sender: sender.into(),
-            payload: serde_json::json!({ "room_id": room_id.into() }),
+            payload,
+        }
+    }
+
+    pub fn room_settings(
+        sender: impl Into<String>,
+        room_id: impl Into<String>,
+        agent_mode: Option<&str>,
+        room_name: Option<&str>,
+    ) -> Self {
+        let mut payload = serde_json::json!({ "room_id": room_id.into() });
+        if let Some(agent_mode) = agent_mode {
+            payload["agent_mode"] = serde_json::Value::String(agent_mode.to_owned());
+        }
+        if let Some(room_name) = room_name {
+            payload["room_name"] = serde_json::Value::String(room_name.to_owned());
+        }
+        Self {
+            version: PROTOCOL_VERSION,
+            message_type: "room.settings".to_owned(),
+            message_id: Uuid::new_v4().to_string(),
+            sender: sender.into(),
+            payload,
         }
     }
 
@@ -512,6 +587,70 @@ mod tests {
         assert_eq!(decoded.payload["mentions"][0], "crew_agent");
         assert_eq!(decoded.payload["reply_to"]["message_id"], "m_parent");
         assert_eq!(decoded.payload["reply_to"]["text"], "previous message");
+    }
+
+    #[test]
+    fn peer_message_carries_text_and_mentions() {
+        let message = Message::peer_message("crew_local", "你好", vec!["crew_agent".to_owned()]);
+        assert_eq!(message.message_type, "peer.message");
+        let decoded = Message::decode(&message.encode().unwrap()).unwrap();
+        assert_eq!(decoded, message);
+        assert_eq!(decoded.payload["text"], "你好");
+        assert_eq!(decoded.payload["mentions"][0], "crew_agent");
+        let wire = serde_json::to_value(&message).unwrap();
+        assert_eq!(wire["type"], "peer.message");
+    }
+
+    #[test]
+    fn room_invite_and_join_carry_optional_metadata() {
+        let invite = Message::room_invite(
+            "crew_local",
+            "room_1",
+            "项目群",
+            vec!["crew_peer".to_owned()],
+            Some("auto"),
+            Some("crew_local"),
+        );
+        assert_eq!(invite.payload["agent_mode"], "auto");
+        assert_eq!(invite.payload["owner_peer_id"], "crew_local");
+        let decoded = Message::decode(&invite.encode().unwrap()).unwrap();
+        assert_eq!(decoded.payload["agent_mode"], "auto");
+        assert_eq!(decoded.payload["owner_peer_id"], "crew_local");
+
+        let legacy_invite = Message::room_invite("crew_local", "room_1", "项目群", vec![], None, None);
+        assert!(legacy_invite.payload.get("agent_mode").is_none());
+        assert!(legacy_invite.payload.get("owner_peer_id").is_none());
+
+        let join = Message::room_join("crew_peer", "room_1", Some("quiet"), Some("crew_local"));
+        assert_eq!(join.payload["agent_mode"], "quiet");
+        assert_eq!(join.payload["owner_peer_id"], "crew_local");
+        let legacy_join = Message::room_join("crew_peer", "room_1", None, None);
+        assert!(legacy_join.payload.get("agent_mode").is_none());
+        assert!(legacy_join.payload.get("owner_peer_id").is_none());
+    }
+
+    #[test]
+    fn room_settings_round_trips_and_validates_fields() {
+        let message = Message::room_settings("crew_local", "room_1", Some("quiet"), Some("新群名"));
+        assert_eq!(message.message_type, "room.settings");
+        let decoded = Message::decode(&message.encode().unwrap()).unwrap();
+        assert_eq!(decoded.payload["room_id"], "room_1");
+        assert_eq!(decoded.payload["agent_mode"], "quiet");
+        assert_eq!(decoded.payload["room_name"], "新群名");
+
+        let rename_only = Message::room_settings("crew_local", "room_1", None, Some("改名"));
+        assert!(rename_only.payload.get("agent_mode").is_none());
+        assert_eq!(rename_only.payload["room_name"], "改名");
+
+        assert!(is_valid_agent_mode("mention"));
+        assert!(is_valid_agent_mode("auto"));
+        assert!(is_valid_agent_mode("quiet"));
+        assert!(!is_valid_agent_mode("loud"));
+        assert_eq!(DEFAULT_AGENT_MODE, "mention");
+
+        assert_eq!(normalize_room_name("  项目群  "), Some("项目群".to_owned()));
+        assert_eq!(normalize_room_name("   "), None);
+        assert_eq!(normalize_room_name(&"长".repeat(MAX_ROOM_NAME_CHARS + 1)), None);
     }
 
     #[test]

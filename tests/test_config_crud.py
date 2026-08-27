@@ -144,6 +144,71 @@ def test_load_config_reads_enabled_security(tmp_path: Path):
     assert loaded.security_enabled is True
 
 
+def test_load_config_without_models_keeps_catalog_empty(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("llm:\n  models: {}\n", encoding="utf-8")
+
+    loaded = load_config(config_path=str(config_path))
+
+    assert loaded.model_profiles == {}
+    assert loaded.active_model_id == ""
+    assert loaded.active_model.id == ""
+    assert loaded.active_model.model == ""
+    assert loaded.public_model_options() == []
+
+
+def test_load_config_legacy_scalar_uses_named_profile_without_default(tmp_path: Path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "llm:\n"
+        "  api_key_env: LEGACY_MODEL_KEY\n"
+        "  base_url: https://legacy.example/v1\n"
+        "  model: legacy-model\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LEGACY_MODEL_KEY", "sk-legacy")
+
+    loaded = load_config(config_path=str(config_path))
+
+    assert set(loaded.model_profiles) == {"configured"}
+    assert "default" not in loaded.model_profiles
+    assert loaded.active_model_id == "configured"
+
+
+def test_load_config_removes_legacy_default_placeholder(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "llm:\n"
+        "  active: default\n"
+        "  default: default\n"
+        "  models:\n"
+        "    default:\n"
+        "      name: Default\n"
+        "      base_url: https://api.example.com/v1\n"
+        "      model: your-model-name\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_config(config_path=str(config_path))
+
+    assert loaded.model_profiles == {}
+    assert loaded.active_model_id == ""
+    assert loaded.default_model_id == ""
+
+
+def test_persist_empty_catalog_does_not_write_default_or_active(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("llm:\n  models: {}\nruntime:\n  log_level: INFO\n", encoding="utf-8")
+    loaded = load_config(config_path=str(config_path))
+
+    loaded.persist_model_profiles()
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    assert data["llm"]["models"] == {}
+    assert "default" not in data["llm"]
+    assert "active" not in data["llm"]
+
+
 def test_add_model_rejects_empty_id(cfg: Config):
     with pytest.raises(ValueError, match="不能为空"):
         cfg.add_model({"id": "", "name": "x"})

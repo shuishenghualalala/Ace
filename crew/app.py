@@ -934,6 +934,26 @@ class CrewApp:
             tool_filter,
             provider_profile.capabilities if provider_profile is not None else None,
         )
+        # 会话级 toolset 禁用（如 Nearby 同伴会话的安全配置）叠加在全局访问控制
+        # 之上：只收窄、不放宽。
+        session_disabled_toolsets = resolved.get("disabled_toolsets")
+        if (
+            tool_filter is not None
+            and isinstance(session_disabled_toolsets, list)
+            and session_disabled_toolsets
+        ):
+            if "*" in session_disabled_toolsets:
+                tool_filter = []
+            else:
+                tool_filter = exclude_toolsets(
+                    self.registry,
+                    tool_filter,
+                    exact={
+                        str(item).strip()
+                        for item in session_disabled_toolsets
+                        if str(item).strip()
+                    },
+                )
 
         return self._build_single_agent(
             provider=provider,

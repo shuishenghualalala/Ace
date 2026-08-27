@@ -1,7 +1,7 @@
 /**
  * @vitest-environment happy-dom
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { resolveShellNavigation } from '../../src/ui/features/sidebar-nav';
 import { createApplicationShell } from '../../src/ui/layouts/application-shell';
 
@@ -67,6 +67,28 @@ describe('resolveShellNavigation', () => {
     expect(security?.title).toBe('功能正在开发中，敬请期待');
     expect(security?.querySelector('.mw-shell-nav-item__availability')).toBeNull();
 
+    shell.dispose();
+  });
+
+  it('keeps settings and exposes the user guide as the bottom help command', () => {
+    localStorage.clear();
+    const help = vi.fn();
+    const shell = createApplicationShell({
+      commands: { help },
+      storage: localStorage,
+    });
+    document.body.replaceChildren(shell.element);
+
+    const helpButton = shell.element.querySelector<HTMLButtonElement>('[data-shell-command="help"]');
+    expect(helpButton?.textContent).toContain('帮助');
+    expect(helpButton?.getAttribute('aria-label')).toBe('帮助');
+    expect(helpButton?.querySelector('use')?.getAttribute('href')).toBe('#icon-help');
+    expect(helpButton?.querySelector('.mw-app-command__icon')).not.toBeNull();
+    expect(shell.element.querySelector('[data-user-account-trigger]')).toBeNull();
+    expect(shell.element.querySelector('#settings-btn')).not.toBeNull();
+
+    helpButton?.click();
+    expect(help).toHaveBeenCalledTimes(1);
     shell.dispose();
   });
 });

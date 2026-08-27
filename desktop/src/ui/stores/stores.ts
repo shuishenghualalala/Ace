@@ -94,7 +94,7 @@ export function __resetAllStoresForTest(): void {
   taskStore.replace({ tasks: [], taskBoardOpen: false, taskBoardWidth: 320, kanbanBoard: null });
   configStore.replace({
     config: null,
-    configModel: '__default__',
+    configModel: '',
     mode: 'agent',
     composerMode: 'craft',
   });

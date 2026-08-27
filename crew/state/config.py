@@ -196,7 +196,7 @@ class Config:
     context_window: int | None = None
     timeout: float = 60.0
     vision: bool = True
-    active_model_id: str = "default"
+    active_model_id: str = ""
     default_model_id: str = ""  # 用户设定的默认模型；空=回落到 active_model_id
     model_profiles: dict[str, ModelProfile] = field(default_factory=dict)
     # 加载 config.yaml 的实际路径（load_config 填充），用于运行时 CRUD 写回。
@@ -338,22 +338,24 @@ class Config:
     @property
     def active_model(self) -> ModelProfile:
         if not self.model_profiles:
-            capabilities = ["text", "tools"]
-            if self.vision:
-                capabilities.append("vision")
-            self.model_profiles["default"] = ModelProfile(
-                id="default",
-                api_key=self.api_key,
+            # 空模型目录是合法的首次运行状态：设置页需要先展示“添加模型”，
+            # 不能为了满足旧调用方而把不可用的 default 占位项重新塞回目录。
+            return ModelProfile(
+                id="",
+                name="未配置模型",
+                api_key="",
                 api_key_env=self.api_key_env,
                 provider=self.provider,
                 base_url=self.base_url,
-                model=self.model,
+                model="",
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 context_window=self.context_window,
                 timeout=self.timeout,
-                vision=self.vision,
-                capabilities=capabilities,
+                vision=False,
+                loaded=False,
+                builtin=False,
+                capabilities=[],
             )
         return self.model_profiles.get(self.active_model_id) or next(iter(self.model_profiles.values()))
 
@@ -553,8 +555,12 @@ class Config:
                 llm = {}
                 data["llm"] = llm
             active = str(active_model_id or llm.get("active") or "").strip()
-            llm["active"] = active or self.active_model_id
-            llm["default"] = llm["active"]
+            if active or self.active_model_id:
+                llm["active"] = active or self.active_model_id
+                llm["default"] = llm["active"]
+            else:
+                llm.pop("active", None)
+                llm.pop("default", None)
             llm["models"] = {
                 model_id: _serialize_profile_for_yaml(profile)
                 for model_id, profile in model_profiles.items()
@@ -752,9 +758,14 @@ class Config:
         if not isinstance(llm, dict):
             llm = {}
             data["llm"] = llm
-        llm["active"] = self.active_model_id
+        if self.active_model_id:
+            llm["active"] = self.active_model_id
+        else:
+            llm.pop("active", None)
         if self.default_model_id:
             llm["default"] = self.default_model_id
+        else:
+            llm.pop("default", None)
         llm["models"] = {
             pid: _serialize_profile_for_yaml(p) for pid, p in self.model_profiles.items()
         }
@@ -1348,7 +1359,7 @@ def _refresh_model_profile_keys(cfg: Config) -> None:
 def _resolve_active_model_id(cfg: Config) -> str:
     """选择启动时可用于对话的 active profile。"""
     if not cfg.model_profiles:
-        raise ValueError("没有可用的模型配置")
+        return ""
     active = cfg.model_profiles.get(cfg.active_model_id)
     if active is not None and active.loaded:
         return active.id
@@ -1410,6 +1421,24 @@ def load_config(config_path: str | Path | None = None) -> Config:
             cfg.max_tokens = _as_int_or_none(llm.get("max_tokens", cfg.max_tokens))
             cfg.context_window = _as_int_or_none(llm.get("context_window", cfg.context_window))
             cfg.timeout = _as_float(llm.get("timeout", cfg.timeout), cfg.timeout)
+            # 兼容旧版单模型配置，但不再把它命名为 default。没有任何旧式
+            # 模型字段时保持空目录，让首次运行直接进入“添加模型”流程。
+            if any(key in llm for key in ("api_key_env", "provider", "base_url", "model")):
+                cfg.model_profiles["configured"] = _build_model_profile(
+                    "configured",
+                    {
+                        "name": llm.get("name") or "已配置模型",
+                        "api_key_env": cfg.api_key_env,
+                        "provider": cfg.provider,
+                        "base_url": cfg.base_url,
+                        "model": cfg.model,
+                        "temperature": cfg.temperature,
+                        "max_tokens": cfg.max_tokens,
+                        "context_window": cfg.context_window,
+                        "timeout": cfg.timeout,
+                        "vision": cfg.vision,
+                    },
+                )
         runtime = data.get("runtime", {})
         cfg.db_path = runtime.get("db_path", cfg.db_path)
         cfg.log_level = runtime.get("log_level", cfg.log_level)
@@ -1672,31 +1701,25 @@ def load_config(config_path: str | Path | None = None) -> Config:
         _load_crew_home_env_file(cfg.crew_home)
         _refresh_model_profile_keys(cfg)
 
-    # 2) 环境变量覆盖（敏感信息只从 env 取）
-    if not cfg.model_profiles:
-        cfg.model_profiles["default"] = _build_model_profile(
-            "default",
-            {
-                "name": "default",
-                "api_key_env": cfg.api_key_env,
-                "provider": cfg.provider,
-                "base_url": cfg.base_url,
-                "model": cfg.model,
-                "temperature": cfg.temperature,
-                "max_tokens": cfg.max_tokens,
-                "context_window": cfg.context_window,
-                "timeout": cfg.timeout,
-                "vision": cfg.vision,
-            },
-        )
+    legacy_placeholder = cfg.model_profiles.get("default")
+    if is_placeholder_model_profile(legacy_placeholder):
+        cfg.model_profiles.pop("default", None)
+        if cfg.active_model_id == "default":
+            cfg.active_model_id = ""
+        if cfg.default_model_id == "default":
+            cfg.default_model_id = ""
 
+    # 2) 环境变量覆盖（敏感信息只从 env 取）
     if os.getenv("CREW_MODEL_PROFILE"):
         cfg.active_model_id = os.environ["CREW_MODEL_PROFILE"]
-    if cfg.active_model_id not in cfg.model_profiles:
-        cfg.active_model_id = sorted(cfg.model_profiles)[0]
-    cfg.active_model_id = _resolve_active_model_id(cfg)
-
-    profile = cfg.activate_model(cfg.active_model_id)
+    if cfg.model_profiles:
+        if cfg.active_model_id not in cfg.model_profiles:
+            cfg.active_model_id = sorted(cfg.model_profiles)[0]
+        cfg.active_model_id = _resolve_active_model_id(cfg)
+        profile = cfg.activate_model(cfg.active_model_id)
+    else:
+        cfg.active_model_id = ""
+        profile = cfg.active_model
 
     # 旧式单模型配置保留 CREW_* 全局覆盖；多模型 profile 只读取自己的 api_key_env，
     # 避免 .env 里的 CREW_MODEL/CREW_BASE_URL 误覆盖已选择的命名模型。
@@ -1718,7 +1741,8 @@ def load_config(config_path: str | Path | None = None) -> Config:
     elif os.getenv("CREW_API_KEY") and not profile.api_key:
         # 命名模型缺少专属 key 时，允许回退到全局 key。
         profile.api_key = os.environ["CREW_API_KEY"]
-    cfg.activate_model(profile.id)
+    if profile.id:
+        cfg.activate_model(profile.id)
     if os.getenv("CREW_LOG_LEVEL"):
         cfg.log_level = os.environ["CREW_LOG_LEVEL"]
     if os.getenv("CREW_STREAM_READ_TIMEOUT"):

@@ -1,6 +1,6 @@
 {
   "name": "crew-desktop-ui",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "license": "Apache-2.0",
   "description": "Crew Desktop UI",
@@ -46,7 +46,6 @@
     "dompurify": "^3.4.11",
     "jszip": "3.10.1",
     "katex": "^0.17.0",
-    "mermaid": "^11.15.0",
     "micromark": "^4.0.2",
     "micromark-extension-gfm": "^3.0.0",
     "micromark-extension-math": "^3.1.0",
@@ -66,6 +65,7 @@
     "esbuild": "^0.28.1",
     "eslint": "^9.39.4",
     "happy-dom": "^20.10.6",
+    "mermaid": "^11.15.0",
     "postcss": "^8.5.26",
     "stylelint": "^17.13.0",
     "typescript": "^5.4.0",
@@ -75,5 +75,6 @@
   "overrides": {
     "@noble/hashes": "1.8.0",
     "brace-expansion@^5.0.0": "5.0.9"
-  }
+  },
+  "platform": "macOS / Windows / Linux"
 }

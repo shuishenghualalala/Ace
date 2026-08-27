@@ -94,6 +94,7 @@ import {
 import { resolveChatRenderTargetId, isStudioView } from './features/studio-chrome-state';
 import { bindScenarioHub } from './features/scenarios-hub';
 import { bindVersionUpdateUi } from './features/version-update';
+import { disposeUserGuide, maybeStartUserGuideOnce, startUserGuide } from './features/user-guide';
 import { armSubScenario, clearScenarioChip } from './features/scenario-arm';
 import { loadRunningIntroCopy } from './features/running-intro';
 import { installStreamDebugGlobal } from './stream-debug';
@@ -550,6 +551,7 @@ function bindGlobalEvents(): () => void {
     disposeComposerMention();
     disposeComposerToolbar();
     disposeAgentsPage();
+    disposeUserGuide();
     composerContextView?.dispose();
     conversationPanel?.dispose();
   };
@@ -581,6 +583,8 @@ async function init(
         notify(`初始化 ${name} 失败：${(err as Error).message}`);
       });
 
+  let loggedIn = false;
+
   // Phase 1: 同步骨架（必须先做完才能显示首屏）
   // 后端状态守卫：优先初始化，确保遮罩在首屏就能展示
   await safe('initBackendStatusGuard', initBackendStatusGuard);
@@ -589,7 +593,7 @@ async function init(
   });
   // 认证流程：email/remote 模式下在首屏前判定登录态，未登录则展示登录墙。
   // local/dev 模式下 isLoggedIn 恒为 true，不显示登录墙，直接放行。
-  await safe('initAuthFlow', async () => { await initAuthFlow(); });
+  await safe('initAuthFlow', async () => { loggedIn = await initAuthFlow(); });
   // 把 openSession / setTab 注入 chat-controller + session-controller，破除循环依赖
   // （语义等价于抽离前这些顶层函数直接互相调用）。
   await safe('setChatCallbacks', () => setChatCallbacks({ openSession, setTab }));
@@ -617,6 +621,7 @@ async function init(
   setSystemPanel('overview');
   renderWorkspaceHistory(openSession);
   renderChat();
+  if (loggedIn) maybeStartUserGuideOnce();
   updateGatewayDot();
   // 冷启动：当前会话若已有内存消息，补一次文件改动对账（清幽灵临时文件卡）
   const bootSid = state.activeSessionId;
@@ -849,6 +854,7 @@ function mountApplicationShell(
       maximize: () => adapter.bridge?.windowMaximize?.(),
       close: () => adapter.bridge?.windowClose?.(),
       newChat: startNewChat,
+      help: startUserGuide,
     },
     features: {
       agents: externalAgentsEnabled() ? 'available' : 'hidden',

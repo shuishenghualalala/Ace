@@ -142,7 +142,14 @@ import {
   type NearbyCommand,
   type NearbyEvent,
   type NearbyReplyReference,
+  type NearbyRoomAgentMode,
 } from './nearby-service';
+import {
+  NearbyAgentBridge,
+  loadNearbyAgentSettings,
+  saveNearbyAgentSettings,
+  type NearbyAgentSettings,
+} from './nearby-agent-bridge';
 
 // 必须早于 app.whenReady()/BrowserWindow 创建；该开关随同一安装包跨 Windows、macOS、Linux 生效。
 configurePptxWasmRuntime(app.commandLine);
@@ -187,6 +194,8 @@ const browserSockets = new Map<number, WebSocket>();
 const browserSocketGenerations = new Map<number, number>();
 let browserHost: BrowserHost | null = null;
 let nearbyService: NearbyService | null = null;
+let nearbyAgentBridge: NearbyAgentBridge | null = null;
+let nearbyAgentSettingsCache: NearbyAgentSettings | null = null;
 let browserHostSocket: WebSocket | null = null;
 let browserHostReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let browserHostConnectionGeneration = 0;
@@ -942,19 +951,43 @@ function createTray(): void {
   trayService.create();
 }
 
+function nearbyAgentSettings(): NearbyAgentSettings {
+  if (!nearbyAgentSettingsCache) {
+    nearbyAgentSettingsCache = loadNearbyAgentSettings(activeGatewayCrewHome());
+  }
+  return nearbyAgentSettingsCache;
+}
+
 function ensureNearbyService(): NearbyService {
   if (nearbyService) return nearbyService;
-  nearbyService = new NearbyService({
+  const service = new NearbyService({
     repoRoot: repoRoot(),
     resourcesPath: process.resourcesPath,
     isPackaged: app.isPackaged,
     crewHome: activeGatewayCrewHome(),
     runAgentTurn: runNearbyAgentTurn,
+    autoReplyEnabled: () => nearbyAgentSettings().autoReply,
     onEvent: (event: NearbyEvent) => {
+      nearbyAgentBridge?.handleEvent(event);
+      if (event.type === 'discoverability_changed') {
+        // 运行时切换可发现性会整体重写 settings.json 且只保留 discoverable 字段，
+        // 这里把本进程负责的 Agent 设置合并回去，避免被覆盖丢失。
+        nearbyAgentSettingsCache = saveNearbyAgentSettings(activeGatewayCrewHome(), nearbyAgentSettings());
+      }
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('nearby:event', event);
     },
   });
-  return nearbyService;
+  nearbyAgentBridge = new NearbyAgentBridge({
+    sendCommand: (command) => {
+      void service.send(command).catch((error: unknown) => {
+        console.warn('[nearby][agent] reply send failed:', error);
+      });
+    },
+    runAgentTurn: runNearbyAgentTurn,
+    getSettings: () => nearbyAgentSettings(),
+  });
+  nearbyService = service;
+  return service;
 }
 
 async function runNearbyAgentTurn(
@@ -986,6 +1019,10 @@ async function runNearbyAgentTurn(
       peer_name: request.peerName,
       request_id: request.requestId,
       query: request.text,
+      ...(request.roomId ? { room_id: request.roomId } : {}),
+      ...(request.roomName ? { room_name: request.roomName } : {}),
+      ...(request.history?.length ? { history: request.history } : {}),
+      ...(request.allowedToolsets?.length ? { allowed_toolsets: request.allowedToolsets } : {}),
     }),
     signal,
   });
@@ -1028,6 +1065,21 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
     }
     return { type, peer_id: value.peer_id, text: value.text.trim() };
   }
+  if (type === 'send_peer_message') {
+    if (typeof value.peer_id !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(value.peer_id)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby peer id`);
+    }
+    if (typeof value.text !== 'string' || value.text.trim().length === 0 || value.text.length > 8_000) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby message`);
+    }
+    const mentions = parseNearbyMentions(value.mentions);
+    return {
+      type,
+      peer_id: value.peer_id,
+      text: value.text.trim(),
+      ...(mentions !== undefined ? { mentions } : {}),
+    };
+  }
   if (type === 'create_room') {
     if (typeof value.room_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(value.room_id)) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby room_id`);
@@ -1042,7 +1094,27 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
     if (peerIds.length !== value.peer_ids.length || peerIds.some((peerId) => !/^[A-Za-z0-9_.:-]{1,128}$/.test(peerId))) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby peer id`);
     }
-    return { type, room_id: value.room_id, room_name: value.room_name.trim(), peer_ids: peerIds };
+    const agentMode = parseNearbyAgentMode(value.agent_mode);
+    return {
+      type,
+      room_id: value.room_id,
+      room_name: value.room_name.trim(),
+      peer_ids: peerIds,
+      ...(agentMode !== undefined ? { agent_mode: agentMode } : {}),
+    };
+  }
+  if (type === 'invite_to_room') {
+    if (typeof value.room_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(value.room_id)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby room_id`);
+    }
+    if (!Array.isArray(value.peer_ids) || value.peer_ids.length === 0 || value.peer_ids.length > 32) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby peer_ids`);
+    }
+    const peerIds = value.peer_ids.filter((peerId): peerId is string => typeof peerId === 'string');
+    if (peerIds.length !== value.peer_ids.length || peerIds.some((peerId) => !/^[A-Za-z0-9_.:-]{1,128}$/.test(peerId))) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby peer id`);
+    }
+    return { type, room_id: value.room_id, peer_ids: peerIds };
   }
   if (type === 'send_room_message') {
     if (typeof value.room_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(value.room_id)) {
@@ -1119,7 +1191,41 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
     }
     return { type, room_id: value.room_id };
   }
+  if (type === 'set_room_agent_mode') {
+    if (typeof value.room_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(value.room_id)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby room_id`);
+    }
+    const agentMode = parseNearbyAgentMode(value.agent_mode);
+    let roomName: string | undefined;
+    if (value.room_name !== undefined) {
+      if (
+        typeof value.room_name !== 'string'
+        || value.room_name.trim().length === 0
+        || value.room_name.length > 120
+      ) {
+        throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby room_name`);
+      }
+      roomName = value.room_name.trim();
+    }
+    if (agentMode === undefined && roomName === undefined) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby set_room_agent_mode needs agent_mode or room_name`);
+    }
+    return {
+      type,
+      room_id: value.room_id,
+      ...(agentMode !== undefined ? { agent_mode: agentMode } : {}),
+      ...(roomName !== undefined ? { room_name: roomName } : {}),
+    };
+  }
   throw new Error(`${IPC_ARG_VALIDATION_FAILED}: unsupported nearby command`);
+}
+
+function parseNearbyAgentMode(raw: unknown): NearbyRoomAgentMode | undefined {
+  if (raw === undefined) return undefined;
+  if (raw !== 'mention' && raw !== 'auto' && raw !== 'quiet') {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby agent_mode`);
+  }
+  return raw;
 }
 
 function parseNearbyMentions(raw: unknown): string[] | undefined {
@@ -3131,8 +3237,45 @@ function registerIpc() {
     return { ok: true };
   });
   trustedHandle('nearby:stop', async () => {
+    nearbyAgentBridge?.dispose();
     await nearbyService?.stop();
     return { ok: true };
+  });
+  trustedHandle('nearby:get-settings', () => {
+    const settings = nearbyAgentSettings();
+    return { ok: true, auto_reply: settings.autoReply, allowed_toolsets: settings.allowedToolsets };
+  });
+  trustedHandle('nearby:set-settings', (_e, raw: unknown) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby settings must be an object`);
+    }
+    const value = raw as Record<string, unknown>;
+    const patch: { autoReply?: boolean; allowedToolsets?: string[] } = {};
+    if (value.auto_reply !== undefined) {
+      if (typeof value.auto_reply !== 'boolean') {
+        throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby auto_reply expected boolean`);
+      }
+      patch.autoReply = value.auto_reply;
+    }
+    if (value.allowed_toolsets !== undefined) {
+      if (!Array.isArray(value.allowed_toolsets) || value.allowed_toolsets.length > 64) {
+        throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby allowed_toolsets`);
+      }
+      const toolsets = value.allowed_toolsets.filter((item): item is string => typeof item === 'string');
+      if (
+        toolsets.length !== value.allowed_toolsets.length
+        || toolsets.some((item) => !/^[A-Za-z0-9_.:-]{1,64}$/.test(item))
+      ) {
+        throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby allowed_toolsets`);
+      }
+      patch.allowedToolsets = [...new Set(toolsets)];
+    }
+    nearbyAgentSettingsCache = saveNearbyAgentSettings(activeGatewayCrewHome(), patch);
+    return {
+      ok: true,
+      auto_reply: nearbyAgentSettingsCache.autoReply,
+      allowed_toolsets: nearbyAgentSettingsCache.allowedToolsets,
+    };
   });
   trustedHandle('nearby:command', async (_e, raw: unknown) => {
     const command = parseNearbyCommand(raw);

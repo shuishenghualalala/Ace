@@ -1,20 +1,6 @@
 llm:
-  active: default   # 兼容字段；建议与 default 保持一致
-  default: default  # 新会话与辅助推理的默认兜底模型
-  models:
-    default:
-      name: Default
-      api_key_env: CREW_MODEL_API_KEY
-      base_url: https://api.example.com/v1
-      model: your-model-name
-      vision: false
-      temperature: 0.7
-      max_tokens: 40960
-      context_window: 256000
-      timeout: 60
-      # Browser Use 的 DOM/snapshot 路径不依赖视觉；仅在该网关模型已验证
-      # 支持图片输入后，才由管理员显式追加 vision。
-      capabilities: [text, tools]
+  # 首次运行不预置不可用的占位模型，请在“设置 → 模型”中添加真实模型。
+  models: {}
 runtime:
   crew_home: .Crew
   db_path: crew_data/crew.db

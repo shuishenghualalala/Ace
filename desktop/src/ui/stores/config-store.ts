@@ -7,7 +7,7 @@ import type { ComposerMode } from '../state';
 
 export interface ConfigStoreState {
   config: BackendConfig | null;
-  /** 模型 ID。`__default__` 占位由 gateway 返回填充。 */
+  /** 当前模型 ID；空字符串表示尚未配置模型。 */
   configModel: string;
   mode: Mode;
   composerMode: ComposerMode;
@@ -16,7 +16,7 @@ export interface ConfigStoreState {
 export const configStore: Store<ConfigStoreState> = createStore<ConfigStoreState>(
   {
     config: null,
-    configModel: '__default__',
+    configModel: '',
     mode: 'agent',
     composerMode: 'craft',
   },

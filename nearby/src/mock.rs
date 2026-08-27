@@ -1,11 +1,12 @@
 use crate::{
     identity::{load_nearby_settings, resolve_state_dir, save_nearby_settings, NearbySettings},
     ipc::{
-        broadcast_room_message, create_peer, filter_room_mentions, handle_received_message,
-        load_rooms, remember_room_message, save_rooms, validate_file_transfer, EventSink,
-        IpcCommand, IpcEvent, RoomState,
+        add_room_members, broadcast_room_message, build_history_snapshot, create_peer,
+        filter_room_mentions, handle_received_message, load_dms, load_rooms, remember_dm_message,
+        remember_room_message, save_dms, save_rooms, unix_timestamp_seconds,
+        validate_file_transfer, EventSink, IpcCommand, IpcEvent, RoomState,
     },
-    protocol::{FileChunk, Message, PeerInfo},
+    protocol::{is_valid_agent_mode, normalize_room_name, FileChunk, Message, PeerInfo, DEFAULT_AGENT_MODE},
     runtime::NearbyConfig,
 };
 use anyhow::{bail, Context, Result};
@@ -282,11 +283,15 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
     sink.send(IpcEvent::DiscoveryStarted).await?;
 
     let mut rooms = load_rooms(&state_dir)?;
+    let mut dms = load_dms(&state_dir)?;
+    sink.send(build_history_snapshot(&rooms, &dms)).await?;
     for (room_id, room) in rooms.clone() {
         sink.send(IpcEvent::RoomRestored {
             room_id,
             room_name: room.room_name,
             peer_ids: room.peer_ids.into_iter().collect(),
+            agent_mode: room.agent_mode,
+            owner_peer_id: room.owner_peer_id,
             messages: room.messages,
         })
         .await?;
@@ -355,6 +360,8 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                         };
                         let message = Message::agent_request(peer.peer_id.clone(), text);
                         session.send(message.clone()).await.ok();
+                        remember_dm_message(&mut dms, &peer_id, &message);
+                        save_dms(&state_dir, &dms)?;
                         sink.send(IpcEvent::Message { peer_id, message }).await?;
                     }
                     IpcCommand::SendAgentReply { peer_id, request_id, text, error } => {
@@ -374,21 +381,71 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                         };
                         let message = Message::agent_reply(peer.peer_id.clone(), request_id, text, error);
                         session.send(message.clone()).await.ok();
+                        remember_dm_message(&mut dms, &peer_id, &message);
+                        save_dms(&state_dir, &dms)?;
                         sink.send(IpcEvent::Message { peer_id, message }).await?;
                     }
-                    IpcCommand::CreateRoom { room_id, room_name, peer_ids } => {
-                        let selected = peer_ids.into_iter().filter(|peer_id| sessions.contains_key(peer_id)).collect::<Vec<_>>();
-                        if selected.is_empty() {
+                    IpcCommand::SendPeerMessage { peer_id, text, mentions } => {
+                        let text = text.trim();
+                        if text.is_empty() || text.chars().count() > 8_000 {
+                            sink.send(IpcEvent::Error { message: "消息不能为空且不能超过 8000 个字符".to_owned() }).await?;
+                            continue;
+                        }
+                        if !active_peers.contains(&peer_id) {
+                            sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "请先连接这台 Ace".to_owned() }).await?;
+                            continue;
+                        }
+                        let Some(session) = sessions.get(&peer_id).cloned() else {
+                            active_peers.remove(&peer_id);
+                            sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "连接已经断开".to_owned() }).await?;
+                            continue;
+                        };
+                        let message = Message::peer_message(peer.peer_id.clone(), text, mentions);
+                        session.send(message.clone()).await.ok();
+                        remember_dm_message(&mut dms, &peer_id, &message);
+                        save_dms(&state_dir, &dms)?;
+                        sink.send(IpcEvent::Message { peer_id, message }).await?;
+                    }
+                    IpcCommand::CreateRoom { room_id, room_name, peer_ids, agent_mode } => {
+                        let agent_mode = agent_mode.unwrap_or_else(|| DEFAULT_AGENT_MODE.to_owned());
+                        if !is_valid_agent_mode(&agent_mode) {
+                            sink.send(IpcEvent::Error { message: "无效的 Agent 触发模式".to_owned() }).await?;
+                            continue;
+                        }
+                        // Re-creating an existing room must not wipe its history; merge instead.
+                        let existed = rooms.contains_key(&room_id);
+                        if !existed {
+                            let mut participants = HashSet::new();
+                            participants.insert(peer.peer_id.clone());
+                            rooms.insert(room_id.clone(), RoomState { room_name: room_name.clone(), peer_ids: participants, agent_mode: agent_mode.clone(), owner_peer_id: Some(peer.peer_id.clone()), messages: Vec::new() });
+                        }
+                        let added = add_room_members(&sessions, &mut rooms, &peer.peer_id, &room_id, peer_ids).await;
+                        if added.is_empty() && !existed {
+                            rooms.remove(&room_id);
                             sink.send(IpcEvent::Error { message: "没有可用的同伴连接".to_owned() }).await?;
                             continue;
                         }
-                        let mut participants = selected.iter().cloned().collect::<HashSet<_>>();
-                        participants.insert(peer.peer_id.clone());
-                        rooms.insert(room_id.clone(), RoomState { room_name: room_name.clone(), peer_ids: participants.clone(), messages: Vec::new() });
                         save_rooms(&state_dir, &rooms)?;
-                        let invite = Message::room_invite(peer.peer_id.clone(), room_id.clone(), room_name.clone(), participants.iter().cloned().collect());
-                        send_messages(&sessions, &selected, invite).await;
-                        sink.send(IpcEvent::RoomCreated { room_id, room_name, peer_ids: participants.into_iter().collect() }).await?;
+                        let room = rooms.get(&room_id).expect("room was just inserted");
+                        sink.send(IpcEvent::RoomCreated { room_id, room_name: room.room_name.clone(), peer_ids: room.peer_ids.iter().cloned().collect(), agent_mode: room.agent_mode.clone(), owner_peer_id: room.owner_peer_id.clone() }).await?;
+                    }
+                    IpcCommand::InviteToRoom { room_id, peer_ids } => {
+                        let Some(room) = rooms.get(&room_id) else {
+                            sink.send(IpcEvent::Error { message: "群聊不存在或已退出".to_owned() }).await?;
+                            continue;
+                        };
+                        if room.owner_peer_id.as_deref() != Some(peer.peer_id.as_str()) {
+                            sink.send(IpcEvent::Error { message: "只有群主可以邀请新成员".to_owned() }).await?;
+                            continue;
+                        }
+                        let added = add_room_members(&sessions, &mut rooms, &peer.peer_id, &room_id, peer_ids).await;
+                        if added.is_empty() {
+                            sink.send(IpcEvent::Error { message: "没有可邀请的新成员".to_owned() }).await?;
+                            continue;
+                        }
+                        save_rooms(&state_dir, &rooms)?;
+                        let room = rooms.get(&room_id).expect("room exists");
+                        sink.send(IpcEvent::RoomCreated { room_id, room_name: room.room_name.clone(), peer_ids: room.peer_ids.iter().cloned().collect(), agent_mode: room.agent_mode.clone(), owner_peer_id: room.owner_peer_id.clone() }).await?;
                     }
                     IpcCommand::SendRoomMessage { room_id, text, mentions, reply_to } => {
                         if !rooms.contains_key(&room_id) {
@@ -431,6 +488,45 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                             send_messages(&sessions, &room.peer_ids.iter().filter(|id| *id != &peer.peer_id).cloned().collect::<Vec<_>>(), leave).await;
                             save_rooms(&state_dir, &rooms)?;
                             sink.send(IpcEvent::RoomLeft { room_id }).await?;
+                        }
+                    }
+                    IpcCommand::SetRoomAgentMode { room_id, agent_mode, room_name } => {
+                        if agent_mode.is_none() && room_name.is_none() {
+                            sink.send(IpcEvent::Error { message: "请至少提供 agent_mode 或 room_name".to_owned() }).await?;
+                            continue;
+                        }
+                        if let Some(mode) = agent_mode.as_deref() {
+                            if !is_valid_agent_mode(mode) {
+                                sink.send(IpcEvent::Error { message: "无效的 Agent 触发模式".to_owned() }).await?;
+                                continue;
+                            }
+                        }
+                        let room_name = match room_name.as_deref() {
+                            Some(name) => match normalize_room_name(name) {
+                                Some(name) => Some(name),
+                                None => {
+                                    sink.send(IpcEvent::Error { message: "群名无效".to_owned() }).await?;
+                                    continue;
+                                }
+                            },
+                            None => None,
+                        };
+                        let Some(room) = rooms.get_mut(&room_id) else {
+                            sink.send(IpcEvent::Error { message: "群聊不存在或已退出".to_owned() }).await?;
+                            continue;
+                        };
+                        if let Some(mode) = agent_mode.as_deref() {
+                            room.agent_mode = mode.to_owned();
+                        }
+                        if let Some(name) = room_name.as_deref() {
+                            room.room_name = name.to_owned();
+                        }
+                        save_rooms(&state_dir, &rooms)?;
+                        let settings = Message::room_settings(peer.peer_id.clone(), room_id.clone(), agent_mode.as_deref(), room_name.as_deref());
+                        seen_messages.insert(settings.message_id.clone());
+                        if let Some(room) = rooms.get(&room_id) { broadcast_room_message(&sessions, room, &settings).await; }
+                        if let Some(room) = rooms.get(&room_id) {
+                            sink.send(IpcEvent::RoomSettingsUpdated { room_id, agent_mode: room.agent_mode.clone(), room_name: room.room_name.clone() }).await?;
                         }
                     }
                     IpcCommand::Shutdown => break,
@@ -476,7 +572,12 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                     }
                 }
                 BusEvent::Message { peer_id, message } => {
-                    if message.version != crate::protocol::PROTOCOL_VERSION || message.sender != peer_id {
+                    // room.* 消息允许中继转发（sender 是原作者，与会话对端不同）；
+                    // 1:1 消息仍要求 sender 与会话对端一致，防止伪造。
+                    if message.version != crate::protocol::PROTOCOL_VERSION {
+                        continue;
+                    }
+                    if message.sender != peer_id && !message.message_type.starts_with("room.") {
                         continue;
                     }
                     match message.message_type.as_str() {
@@ -495,10 +596,30 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                         }
                         "agent.request" | "agent.response" | "agent.error" => {
                             if !active_peers.contains(&peer_id) || !seen_messages.insert(message.message_id.clone()) { continue; }
+                            remember_dm_message(&mut dms, &peer_id, &message);
+                            save_dms(&state_dir, &dms)?;
                             sink.send(IpcEvent::Message { peer_id, message }).await?;
                         }
+                        "peer.message" => {
+                            if !active_peers.contains(&peer_id) || !seen_messages.insert(message.message_id.clone()) { continue; }
+                            let text = message.payload.get("text").and_then(|value| value.as_str()).unwrap_or_default().to_owned();
+                            let mentions = message.payload.get("mentions").and_then(|value| value.as_array())
+                                .map(|items| items.iter().filter_map(|value| value.as_str().map(str::to_owned)).collect::<Vec<_>>())
+                                .unwrap_or_default();
+                            let display_name = discovered.get(&peer_id).map(|remote| remote.display_name.clone()).unwrap_or_else(|| peer_id.clone());
+                            remember_dm_message(&mut dms, &peer_id, &message);
+                            save_dms(&state_dir, &dms)?;
+                            sink.send(IpcEvent::PeerMessageReceived {
+                                peer_id,
+                                display_name,
+                                text,
+                                mentions,
+                                message_id: message.message_id.clone(),
+                                timestamp: unix_timestamp_seconds(),
+                            }).await?;
+                        }
                         _ => {
-                            handle_received_message(&peer.peer_id, &sessions, &mut rooms, &mut seen_messages, &sink, peer_id, message).await?;
+                            handle_received_message(&peer.peer_id, &sessions, &mut rooms, &mut seen_messages, &discovered, &sink, peer_id, message).await?;
                             save_rooms(&state_dir, &rooms)?;
                         }
                     }

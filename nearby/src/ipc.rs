@@ -5,7 +5,8 @@ use crate::identity::{
 #[cfg(not(target_os = "linux"))]
 use crate::protocol::should_initiate;
 use crate::protocol::{
-    FileChunk, FrameCodec, Message, PeerInfo, Reassembler, ReplyReference, INCOMING_MESSAGE_UUID,
+    is_valid_agent_mode, normalize_room_name, FileChunk, FrameCodec, Message, PeerInfo,
+    Reassembler, ReplyReference, DEFAULT_AGENT_MODE, INCOMING_MESSAGE_UUID,
     OUTGOING_MESSAGE_UUID, PEER_INFO_UUID, PROTOCOL_VERSION, SERVICE_UUID,
 };
 use crate::runtime::{subscribe_outgoing_message, NearbyConfig};
@@ -46,7 +47,9 @@ use tokio::{
 const FILE_CHUNK_BASE64_BYTES: usize = 8 * 1024;
 const MAX_NEARBY_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const ROOM_HISTORY_LIMIT: usize = 200;
+const DM_HISTORY_LIMIT: usize = 200;
 const ROOMS_FILE_NAME: &str = "rooms.json";
+const DMS_FILE_NAME: &str = "dms.json";
 
 fn diagnostic_device_id(value: &str) -> String {
     let suffix = value.chars().rev().take(8).collect::<String>();
@@ -101,9 +104,21 @@ pub(crate) enum IpcCommand {
         #[serde(default)]
         error: bool,
     },
+    SendPeerMessage {
+        peer_id: String,
+        text: String,
+        #[serde(default)]
+        mentions: Vec<String>,
+    },
     CreateRoom {
         room_id: String,
         room_name: String,
+        peer_ids: Vec<String>,
+        #[serde(default)]
+        agent_mode: Option<String>,
+    },
+    InviteToRoom {
+        room_id: String,
         peer_ids: Vec<String>,
     },
     SendRoomMessage {
@@ -129,6 +144,13 @@ pub(crate) enum IpcCommand {
     },
     LeaveRoom {
         room_id: String,
+    },
+    SetRoomAgentMode {
+        room_id: String,
+        #[serde(default)]
+        agent_mode: Option<String>,
+        #[serde(default)]
+        room_name: Option<String>,
     },
     Shutdown,
 }
@@ -161,24 +183,59 @@ pub(crate) enum IpcEvent {
         peer_id: String,
         message: String,
     },
+    PeerMessageReceived {
+        peer_id: String,
+        display_name: String,
+        text: String,
+        mentions: Vec<String>,
+        message_id: String,
+        timestamp: u64,
+    },
     RoomCreated {
         room_id: String,
         room_name: String,
         peer_ids: Vec<String>,
+        agent_mode: String,
+        owner_peer_id: Option<String>,
     },
     RoomJoined {
         room_id: String,
         room_name: String,
         peer_ids: Vec<String>,
+        agent_mode: String,
+        owner_peer_id: Option<String>,
     },
     RoomRestored {
         room_id: String,
         room_name: String,
         peer_ids: Vec<String>,
+        agent_mode: String,
+        owner_peer_id: Option<String>,
         messages: Vec<Message>,
+    },
+    RoomSettingsUpdated {
+        room_id: String,
+        agent_mode: String,
+        room_name: String,
+    },
+    RoomMemberJoined {
+        room_id: String,
+        peer_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+    },
+    RoomMemberLeft {
+        room_id: String,
+        peer_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
     },
     RoomLeft {
         room_id: String,
+    },
+    HistorySnapshot {
+        rooms: Vec<RoomSnapshot>,
+        dms: Vec<DmSnapshot>,
     },
     Message {
         peer_id: String,
@@ -189,11 +246,35 @@ pub(crate) enum IpcEvent {
     },
 }
 
+fn default_agent_mode() -> String {
+    DEFAULT_AGENT_MODE.to_owned()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RoomState {
     pub(crate) room_name: String,
     pub(crate) peer_ids: HashSet<String>,
+    #[serde(default = "default_agent_mode")]
+    pub(crate) agent_mode: String,
     #[serde(default)]
+    pub(crate) owner_peer_id: Option<String>,
+    #[serde(default)]
+    pub(crate) messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RoomSnapshot {
+    pub(crate) room_id: String,
+    pub(crate) room_name: String,
+    pub(crate) agent_mode: String,
+    pub(crate) owner_peer_id: Option<String>,
+    pub(crate) peer_ids: Vec<String>,
+    pub(crate) messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DmSnapshot {
+    pub(crate) peer_id: String,
     pub(crate) messages: Vec<Message>,
 }
 
@@ -255,6 +336,10 @@ fn rooms_path(state_dir: &Path) -> std::path::PathBuf {
     state_dir.join(ROOMS_FILE_NAME)
 }
 
+fn dms_path(state_dir: &Path) -> std::path::PathBuf {
+    state_dir.join(DMS_FILE_NAME)
+}
+
 pub(crate) fn load_rooms(state_dir: &Path) -> Result<HashMap<String, RoomState>> {
     let path = rooms_path(state_dir);
     if !path.exists() {
@@ -266,37 +351,56 @@ pub(crate) fn load_rooms(state_dir: &Path) -> Result<HashMap<String, RoomState>>
         .with_context(|| format!("failed to decode Nearby room history {}", path.display()))
 }
 
-pub(crate) fn save_rooms(state_dir: &Path, rooms: &HashMap<String, RoomState>) -> Result<()> {
+pub(crate) fn load_dms(state_dir: &Path) -> Result<HashMap<String, Vec<Message>>> {
+    let path = dms_path(state_dir);
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let bytes = fs::read(&path)
+        .with_context(|| format!("failed to read Nearby DM history {}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to decode Nearby DM history {}", path.display()))
+}
+
+fn save_state_file<T: Serialize>(state_dir: &Path, file_name: &str, value: &T) -> Result<()> {
     fs::create_dir_all(state_dir).with_context(|| {
         format!(
             "failed to create Nearby state directory {}",
             state_dir.display()
         )
     })?;
-    let path = rooms_path(state_dir);
+    let path = state_dir.join(file_name);
     let temporary_path = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(rooms).context("failed to encode Nearby room history")?;
+    let bytes = serde_json::to_vec_pretty(value).context("failed to encode Nearby state")?;
     fs::write(&temporary_path, bytes).with_context(|| {
         format!(
-            "failed to write temporary Nearby room history {}",
+            "failed to write temporary Nearby state {}",
             temporary_path.display()
         )
     })?;
     if let Err(error) = fs::rename(&temporary_path, &path) {
         if path.exists() {
             fs::remove_file(&path).with_context(|| {
-                format!("failed to replace Nearby room history {}", path.display())
+                format!("failed to replace Nearby state {}", path.display())
             })?;
             fs::rename(&temporary_path, &path).with_context(|| {
-                format!("failed to finalize Nearby room history {}", path.display())
+                format!("failed to finalize Nearby state {}", path.display())
             })?;
         } else {
             return Err(error).with_context(|| {
-                format!("failed to finalize Nearby room history {}", path.display())
+                format!("failed to finalize Nearby state {}", path.display())
             });
         }
     }
     Ok(())
+}
+
+pub(crate) fn save_rooms(state_dir: &Path, rooms: &HashMap<String, RoomState>) -> Result<()> {
+    save_state_file(state_dir, ROOMS_FILE_NAME, rooms)
+}
+
+pub(crate) fn save_dms(state_dir: &Path, dms: &HashMap<String, Vec<Message>>) -> Result<()> {
+    save_state_file(state_dir, DMS_FILE_NAME, dms)
 }
 
 pub(crate) fn remember_room_message(room: &mut RoomState, message: &Message) {
@@ -304,6 +408,48 @@ pub(crate) fn remember_room_message(room: &mut RoomState, message: &Message) {
     if room.messages.len() > ROOM_HISTORY_LIMIT {
         let excess = room.messages.len() - ROOM_HISTORY_LIMIT;
         room.messages.drain(0..excess);
+    }
+}
+
+pub(crate) fn remember_dm_message(dms: &mut HashMap<String, Vec<Message>>, peer_id: &str, message: &Message) {
+    let history = dms.entry(peer_id.to_owned()).or_default();
+    history.push(message.clone());
+    if history.len() > DM_HISTORY_LIMIT {
+        let excess = history.len() - DM_HISTORY_LIMIT;
+        history.drain(0..excess);
+    }
+}
+
+pub(crate) fn unix_timestamp_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+pub(crate) fn build_history_snapshot(
+    rooms: &HashMap<String, RoomState>,
+    dms: &HashMap<String, Vec<Message>>,
+) -> IpcEvent {
+    IpcEvent::HistorySnapshot {
+        rooms: rooms
+            .iter()
+            .map(|(room_id, room)| RoomSnapshot {
+                room_id: room_id.clone(),
+                room_name: room.room_name.clone(),
+                agent_mode: room.agent_mode.clone(),
+                owner_peer_id: room.owner_peer_id.clone(),
+                peer_ids: room.peer_ids.iter().cloned().collect(),
+                messages: room.messages.clone(),
+            })
+            .collect(),
+        dms: dms
+            .iter()
+            .map(|(peer_id, messages)| DmSnapshot {
+                peer_id: peer_id.clone(),
+                messages: messages.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -376,6 +522,7 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
     let mut active_peers = HashSet::new();
     let mut pending_peer_connections = HashSet::new();
     let mut rooms = load_rooms(&state_dir)?;
+    let mut dms = load_dms(&state_dir)?;
     let mut connection_candidates = HashSet::new();
     let scan_lock = Arc::new(Mutex::new(()));
     let mut server_clients: HashMap<String, (String, String)> = HashMap::new();
@@ -388,12 +535,15 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
     })
     .await?;
     sink.send(IpcEvent::DiscoveryStarted).await?;
+    sink.send(build_history_snapshot(&rooms, &dms)).await?;
     let restored_rooms = rooms
         .iter()
         .map(|(room_id, room)| IpcEvent::RoomRestored {
             room_id: room_id.clone(),
             room_name: room.room_name.clone(),
             peer_ids: room.peer_ids.iter().cloned().collect(),
+            agent_mode: room.agent_mode.clone(),
+            owner_peer_id: room.owner_peer_id.clone(),
             messages: room.messages.clone(),
         })
         .collect::<Vec<_>>();
@@ -519,6 +669,8 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             }).await?;
                             continue;
                         }
+                        remember_dm_message(&mut dms, &peer_id, &message);
+                        save_dms(&state_dir, &dms)?;
                         sink.send(IpcEvent::Message {
                             peer_id,
                             message,
@@ -554,35 +706,101 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             }).await?;
                             continue;
                         }
+                        remember_dm_message(&mut dms, &peer_id, &message);
+                        save_dms(&state_dir, &dms)?;
                         sink.send(IpcEvent::Message { peer_id, message }).await?;
                     }
-                    IpcCommand::CreateRoom { room_id, room_name, peer_ids } => {
-                        let selected: Vec<String> = peer_ids.into_iter()
-                            .filter(|peer_id| sessions.contains_key(peer_id))
-                            .collect();
-                        if selected.is_empty() {
+                    IpcCommand::SendPeerMessage { peer_id, text, mentions } => {
+                        let text = text.trim();
+                        if text.is_empty() || text.chars().count() > 8_000 {
+                            sink.send(IpcEvent::Error { message: "消息不能为空且不能超过 8000 个字符".to_owned() }).await?;
+                            continue;
+                        }
+                        if !active_peers.contains(&peer_id) {
+                            sink.send(IpcEvent::PeerConnectionFailed {
+                                peer_id,
+                                message: "请先连接这台 Ace".to_owned(),
+                            }).await?;
+                            continue;
+                        }
+                        let Some(outbound) = sessions.get(&peer_id).cloned() else {
+                            active_peers.remove(&peer_id);
+                            sink.send(IpcEvent::PeerConnectionFailed {
+                                peer_id,
+                                message: "BLE 会话已经断开，请重新连接".to_owned(),
+                            }).await?;
+                            continue;
+                        };
+                        let message = Message::peer_message(peer.peer_id.clone(), text, mentions);
+                        if outbound.send(message.clone()).await.is_err() {
+                            active_peers.remove(&peer_id);
+                            sink.send(IpcEvent::PeerConnectionFailed {
+                                peer_id,
+                                message: "消息发送失败，BLE 会话已经断开".to_owned(),
+                            }).await?;
+                            continue;
+                        }
+                        remember_dm_message(&mut dms, &peer_id, &message);
+                        save_dms(&state_dir, &dms)?;
+                        sink.send(IpcEvent::Message { peer_id, message }).await?;
+                    }
+                    IpcCommand::CreateRoom { room_id, room_name, peer_ids, agent_mode } => {
+                        let agent_mode = agent_mode.unwrap_or_else(|| DEFAULT_AGENT_MODE.to_owned());
+                        if !is_valid_agent_mode(&agent_mode) {
+                            sink.send(IpcEvent::Error { message: "无效的 Agent 触发模式".to_owned() }).await?;
+                            continue;
+                        }
+                        // Re-creating an existing room must not wipe its history; merge instead.
+                        let existed = rooms.contains_key(&room_id);
+                        if !existed {
+                            let mut participants = HashSet::new();
+                            participants.insert(peer.peer_id.clone());
+                            rooms.insert(room_id.clone(), RoomState {
+                                room_name: room_name.clone(),
+                                peer_ids: participants,
+                                agent_mode: agent_mode.clone(),
+                                owner_peer_id: Some(peer.peer_id.clone()),
+                                messages: Vec::new(),
+                            });
+                        }
+                        let added = add_room_members(&sessions, &mut rooms, &peer.peer_id, &room_id, peer_ids).await;
+                        if added.is_empty() && !existed {
+                            rooms.remove(&room_id);
                             sink.send(IpcEvent::Error { message: "没有可用的同伴连接".to_owned() }).await?;
                             continue;
                         }
-                        let mut participants = selected.iter().cloned().collect::<HashSet<_>>();
-                        participants.insert(peer.peer_id.clone());
-                        rooms.insert(room_id.clone(), RoomState {
-                            room_name: room_name.clone(),
-                            peer_ids: participants.clone(),
-                            messages: Vec::new(),
-                        });
                         save_rooms(&state_dir, &rooms)?;
-                        let invite = Message::room_invite(
-                            peer.peer_id.clone(),
-                            room_id.clone(),
-                            room_name.clone(),
-                            participants.iter().cloned().collect(),
-                        );
-                        send_to_peers(&sessions, &selected, &invite).await;
+                        let room = rooms.get(&room_id).expect("room was just inserted");
                         sink.send(IpcEvent::RoomCreated {
                             room_id,
-                            room_name,
-                            peer_ids: participants.into_iter().collect(),
+                            room_name: room.room_name.clone(),
+                            peer_ids: room.peer_ids.iter().cloned().collect(),
+                            agent_mode: room.agent_mode.clone(),
+                            owner_peer_id: room.owner_peer_id.clone(),
+                        }).await?;
+                    }
+                    IpcCommand::InviteToRoom { room_id, peer_ids } => {
+                        let Some(room) = rooms.get(&room_id) else {
+                            sink.send(IpcEvent::Error { message: "群聊不存在或已退出".to_owned() }).await?;
+                            continue;
+                        };
+                        if room.owner_peer_id.as_deref() != Some(peer.peer_id.as_str()) {
+                            sink.send(IpcEvent::Error { message: "只有群主可以邀请新成员".to_owned() }).await?;
+                            continue;
+                        }
+                        let added = add_room_members(&sessions, &mut rooms, &peer.peer_id, &room_id, peer_ids).await;
+                        if added.is_empty() {
+                            sink.send(IpcEvent::Error { message: "没有可邀请的新成员".to_owned() }).await?;
+                            continue;
+                        }
+                        save_rooms(&state_dir, &rooms)?;
+                        let room = rooms.get(&room_id).expect("room exists");
+                        sink.send(IpcEvent::RoomCreated {
+                            room_id,
+                            room_name: room.room_name.clone(),
+                            peer_ids: room.peer_ids.iter().cloned().collect(),
+                            agent_mode: room.agent_mode.clone(),
+                            owner_peer_id: room.owner_peer_id.clone(),
                         }).await?;
                     }
                     IpcCommand::SendRoomMessage { room_id, text, mentions, reply_to } => {
@@ -661,6 +879,54 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             send_to_peers(&sessions, &room.peer_ids.iter().filter(|id| *id != &peer.peer_id).cloned().collect::<Vec<_>>(), &leave).await;
                             save_rooms(&state_dir, &rooms)?;
                             sink.send(IpcEvent::RoomLeft { room_id }).await?;
+                        }
+                    }
+                    IpcCommand::SetRoomAgentMode { room_id, agent_mode, room_name } => {
+                        if agent_mode.is_none() && room_name.is_none() {
+                            sink.send(IpcEvent::Error { message: "请至少提供 agent_mode 或 room_name".to_owned() }).await?;
+                            continue;
+                        }
+                        if let Some(mode) = agent_mode.as_deref() {
+                            if !is_valid_agent_mode(mode) {
+                                sink.send(IpcEvent::Error { message: "无效的 Agent 触发模式".to_owned() }).await?;
+                                continue;
+                            }
+                        }
+                        let room_name = match room_name.as_deref() {
+                            Some(name) => match normalize_room_name(name) {
+                                Some(name) => Some(name),
+                                None => {
+                                    sink.send(IpcEvent::Error { message: "群名无效".to_owned() }).await?;
+                                    continue;
+                                }
+                            },
+                            None => None,
+                        };
+                        let Some(room) = rooms.get_mut(&room_id) else {
+                            sink.send(IpcEvent::Error { message: "群聊不存在或已退出".to_owned() }).await?;
+                            continue;
+                        };
+                        if let Some(mode) = agent_mode.as_deref() {
+                            room.agent_mode = mode.to_owned();
+                        }
+                        if let Some(name) = room_name.as_deref() {
+                            room.room_name = name.to_owned();
+                        }
+                        save_rooms(&state_dir, &rooms)?;
+                        let settings = Message::room_settings(
+                            peer.peer_id.clone(),
+                            room_id.clone(),
+                            agent_mode.as_deref(),
+                            room_name.as_deref(),
+                        );
+                        seen_messages.insert(settings.message_id.clone());
+                        if let Some(room) = rooms.get(&room_id) {
+                            broadcast_room_message(&sessions, room, &settings).await;
+                            sink.send(IpcEvent::RoomSettingsUpdated {
+                                room_id,
+                                agent_mode: room.agent_mode.clone(),
+                                room_name: room.room_name.clone(),
+                            }).await?;
                         }
                     }
                     IpcCommand::Shutdown => break,
@@ -748,7 +1014,12 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         }
                     }
                     SessionEvent::Received { peer_id, message } => {
-                        if message.version != PROTOCOL_VERSION || message.sender != peer_id {
+                        // room.* 消息允许中继转发（sender 是原作者，与会话对端不同）；
+                        // 1:1 消息仍要求 sender 与会话对端一致，防止伪造。
+                        if message.version != PROTOCOL_VERSION {
+                            continue;
+                        }
+                        if message.sender != peer_id && !message.message_type.starts_with("room.") {
                             continue;
                         }
                         match message.message_type.as_str() {
@@ -775,7 +1046,47 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                                 {
                                     continue;
                                 }
+                                remember_dm_message(&mut dms, &peer_id, &message);
+                                save_dms(&state_dir, &dms)?;
                                 sink.send(IpcEvent::Message { peer_id, message }).await?;
+                            }
+                            "peer.message" => {
+                                if !active_peers.contains(&peer_id)
+                                    || !seen_messages.insert(message.message_id.clone())
+                                {
+                                    continue;
+                                }
+                                let text = message
+                                    .payload
+                                    .get("text")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                let mentions = message
+                                    .payload
+                                    .get("mentions")
+                                    .and_then(|value| value.as_array())
+                                    .map(|items| {
+                                        items
+                                            .iter()
+                                            .filter_map(|value| value.as_str().map(str::to_owned))
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+                                let display_name = discovered
+                                    .get(&peer_id)
+                                    .map(|remote| remote.display_name.clone())
+                                    .unwrap_or_else(|| peer_id.clone());
+                                remember_dm_message(&mut dms, &peer_id, &message);
+                                save_dms(&state_dir, &dms)?;
+                                sink.send(IpcEvent::PeerMessageReceived {
+                                    peer_id,
+                                    display_name,
+                                    text,
+                                    mentions,
+                                    message_id: message.message_id.clone(),
+                                    timestamp: unix_timestamp_seconds(),
+                                }).await?;
                             }
                             _ => {
                                 handle_received_message(
@@ -783,6 +1094,7 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                                     &sessions,
                                     &mut rooms,
                                     &mut seen_messages,
+                                    &discovered,
                                     &sink,
                                     peer_id,
                                     message,
@@ -832,10 +1144,13 @@ fn command_name(command: &IpcCommand) -> &'static str {
         IpcCommand::DisconnectPeer { .. } => "disconnect_peer",
         IpcCommand::SendAgentRequest { .. } => "send_agent_request",
         IpcCommand::SendAgentReply { .. } => "send_agent_reply",
+        IpcCommand::SendPeerMessage { .. } => "send_peer_message",
         IpcCommand::CreateRoom { .. } => "create_room",
         IpcCommand::SendRoomMessage { .. } => "send_room_message",
         IpcCommand::SendRoomFile { .. } => "send_room_file",
         IpcCommand::LeaveRoom { .. } => "leave_room",
+        IpcCommand::SetRoomAgentMode { .. } => "set_room_agent_mode",
+        IpcCommand::InviteToRoom { .. } => "invite_to_room",
         IpcCommand::Shutdown => "shutdown",
     }
 }
@@ -1414,6 +1729,38 @@ async fn send_to_peers(
     }
 }
 
+/// Merges peers into an existing room and invites the newly added, currently
+/// connected members. Returns the peers that were actually added.
+pub(crate) async fn add_room_members(
+    sessions: &HashMap<String, mpsc::Sender<Message>>,
+    rooms: &mut HashMap<String, RoomState>,
+    local_peer_id: &str,
+    room_id: &str,
+    peer_ids: Vec<String>,
+) -> Vec<String> {
+    let Some(room) = rooms.get_mut(room_id) else {
+        return Vec::new();
+    };
+    let selected: Vec<String> = peer_ids
+        .into_iter()
+        .filter(|peer_id| sessions.contains_key(peer_id) && !room.peer_ids.contains(peer_id))
+        .collect();
+    if selected.is_empty() {
+        return selected;
+    }
+    room.peer_ids.extend(selected.iter().cloned());
+    let invite = Message::room_invite(
+        local_peer_id.to_owned(),
+        room_id.to_owned(),
+        room.room_name.clone(),
+        room.peer_ids.iter().cloned().collect(),
+        Some(&room.agent_mode),
+        room.owner_peer_id.as_deref(),
+    );
+    send_to_peers(sessions, &selected, &invite).await;
+    selected
+}
+
 pub(crate) async fn broadcast_room_message(
     sessions: &HashMap<String, mpsc::Sender<Message>>,
     room: &RoomState,
@@ -1433,6 +1780,7 @@ pub(crate) async fn handle_received_message(
     sessions: &HashMap<String, mpsc::Sender<Message>>,
     rooms: &mut HashMap<String, RoomState>,
     seen_messages: &mut HashSet<String>,
+    discovered: &HashMap<String, PeerInfo>,
     sink: &EventSink,
     peer_id: String,
     message: Message,
@@ -1454,6 +1802,19 @@ pub(crate) async fn handle_received_message(
                 .and_then(|v| v.as_str())
                 .unwrap_or("同伴群聊")
                 .to_owned();
+            let agent_mode = message
+                .payload
+                .get("agent_mode")
+                .and_then(|v| v.as_str())
+                .filter(|value| is_valid_agent_mode(value))
+                .unwrap_or(DEFAULT_AGENT_MODE)
+                .to_owned();
+            let owner_peer_id = message
+                .payload
+                .get("owner_peer_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .or_else(|| Some(peer_id.clone()));
             let peer_ids = message
                 .payload
                 .get("participants")
@@ -1469,31 +1830,127 @@ pub(crate) async fn handle_received_message(
                 let room = rooms.entry(room_id.clone()).or_insert_with(|| RoomState {
                     room_name: room_name.clone(),
                     peer_ids: HashSet::new(),
+                    agent_mode: agent_mode.clone(),
+                    owner_peer_id: owner_peer_id.clone(),
                     messages: Vec::new(),
                 });
                 room.room_name = room_name.clone();
+                room.agent_mode = agent_mode.clone();
+                if let Some(owner) = &owner_peer_id {
+                    room.owner_peer_id = Some(owner.clone());
+                }
                 room.peer_ids.extend(peer_ids.iter().cloned());
-                let join = Message::room_join(local_peer_id.to_owned(), room_id.clone());
+                let join = Message::room_join(
+                    local_peer_id.to_owned(),
+                    room_id.clone(),
+                    Some(&agent_mode),
+                    room.owner_peer_id.as_deref(),
+                );
                 send_to_peers(sessions, &[peer_id], &join).await;
                 sink.send(IpcEvent::RoomJoined {
                     room_id,
                     room_name,
                     peer_ids,
+                    agent_mode,
+                    owner_peer_id,
                 })
                 .await?;
             }
         }
         "room.join" => {
+            // 成员变更以消息原作者为准（中继转发时 peer_id 是转发者）。
+            let member_id = message.sender.clone();
             if let Some(room_id) = message.payload.get("room_id").and_then(|v| v.as_str()) {
+                let mut joined = false;
                 if let Some(room) = rooms.get_mut(room_id) {
-                    room.peer_ids.insert(peer_id);
+                    joined = room.peer_ids.insert(member_id.clone());
+                }
+                if joined {
+                    let display_name = discovered
+                        .get(&member_id)
+                        .map(|remote| remote.display_name.clone());
+                    sink.send(IpcEvent::RoomMemberJoined {
+                        room_id: room_id.to_owned(),
+                        peer_id: member_id.clone(),
+                        display_name,
+                    })
+                    .await?;
+                }
+                // 向其他成员转发加入消息，保证全员的成员列表一致。
+                if let Some(room) = rooms.get(room_id) {
+                    let targets: Vec<String> = room
+                        .peer_ids
+                        .iter()
+                        .filter(|id| *id != local_peer_id && *id != &member_id)
+                        .cloned()
+                        .collect();
+                    send_to_peers(sessions, &targets, &message).await;
                 }
             }
         }
         "room.leave" => {
+            let member_id = message.sender.clone();
             if let Some(room_id) = message.payload.get("room_id").and_then(|v| v.as_str()) {
+                let mut left = false;
                 if let Some(room) = rooms.get_mut(room_id) {
-                    room.peer_ids.remove(&peer_id);
+                    left = room.peer_ids.remove(&member_id);
+                }
+                if left {
+                    let display_name = discovered
+                        .get(&member_id)
+                        .map(|remote| remote.display_name.clone());
+                    sink.send(IpcEvent::RoomMemberLeft {
+                        room_id: room_id.to_owned(),
+                        peer_id: member_id.clone(),
+                        display_name,
+                    })
+                    .await?;
+                }
+                // 向其他成员转发退出消息，保证全员的成员列表一致。
+                if let Some(room) = rooms.get(room_id) {
+                    let targets: Vec<String> = room
+                        .peer_ids
+                        .iter()
+                        .filter(|id| *id != local_peer_id && *id != &member_id)
+                        .cloned()
+                        .collect();
+                    send_to_peers(sessions, &targets, &message).await;
+                }
+            }
+        }
+        "room.settings" => {
+            let room_id = message
+                .payload
+                .get("room_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            let agent_mode = message
+                .payload
+                .get("agent_mode")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            let room_name = message
+                .payload
+                .get("room_name")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            if apply_room_settings(
+                rooms,
+                local_peer_id,
+                &room_id,
+                agent_mode.as_deref(),
+                room_name.as_deref(),
+            ) {
+                if let Some(room) = rooms.get(&room_id) {
+                    sink.send(IpcEvent::RoomSettingsUpdated {
+                        room_id: room_id.clone(),
+                        agent_mode: room.agent_mode.clone(),
+                        room_name: room.room_name.clone(),
+                    })
+                    .await?;
+                    let room_snapshot = room.clone();
+                    broadcast_room_message(sessions, &room_snapshot, &message).await;
                 }
             }
         }
@@ -1527,6 +1984,43 @@ pub(crate) async fn handle_received_message(
 
 fn is_room_member(peer_ids: &[String], local_peer_id: &str) -> bool {
     peer_ids.iter().any(|peer_id| peer_id == local_peer_id)
+}
+
+pub(crate) fn apply_room_settings(
+    rooms: &mut HashMap<String, RoomState>,
+    local_peer_id: &str,
+    room_id: &str,
+    agent_mode: Option<&str>,
+    room_name: Option<&str>,
+) -> bool {
+    if agent_mode.is_none() && room_name.is_none() {
+        return false;
+    }
+    if let Some(mode) = agent_mode {
+        if !is_valid_agent_mode(mode) {
+            return false;
+        }
+    }
+    let normalized_name = match room_name {
+        Some(name) => match normalize_room_name(name) {
+            Some(name) => Some(name),
+            None => return false,
+        },
+        None => None,
+    };
+    let Some(room) = rooms.get_mut(room_id) else {
+        return false;
+    };
+    if !room.peer_ids.contains(local_peer_id) {
+        return false;
+    }
+    if let Some(mode) = agent_mode {
+        room.agent_mode = mode.to_owned();
+    }
+    if let Some(name) = normalized_name {
+        room.room_name = name;
+    }
+    true
 }
 
 pub(crate) fn filter_room_mentions(mentions: Vec<String>, room: &RoomState) -> Vec<String> {
@@ -1635,7 +2129,7 @@ mod tests {
         assert_eq!(message.payload["room_id"], "room_1");
         assert_eq!(message.payload["text"], "hello");
 
-        let join = Message::room_join("crew_a", "room_1");
+        let join = Message::room_join("crew_a", "room_1", None, None);
         assert_eq!(join.message_type, "room.join");
         assert_eq!(join.payload["room_id"], "room_1");
     }
@@ -1678,6 +2172,8 @@ mod tests {
             peer_ids: ["crew_host".to_owned(), "crew_agent".to_owned()]
                 .into_iter()
                 .collect(),
+            agent_mode: DEFAULT_AGENT_MODE.to_owned(),
+            owner_peer_id: Some("crew_host".to_owned()),
             messages: Vec::new(),
         };
         assert_eq!(
@@ -1754,6 +2250,8 @@ mod tests {
         let room = RoomState {
             room_name: "测试群".to_owned(),
             peer_ids: HashSet::from(["crew_alice".to_owned(), "crew_bob".to_owned()]),
+            agent_mode: DEFAULT_AGENT_MODE.to_owned(),
+            owner_peer_id: Some("crew_alice".to_owned()),
             messages: Vec::new(),
         };
         let message = Message::room_message("crew_alice", "room_1", "hello");
@@ -1774,6 +2272,8 @@ mod tests {
             RoomState {
                 room_name: "测试群".to_owned(),
                 peer_ids: HashSet::from(["crew_local".to_owned()]),
+                agent_mode: DEFAULT_AGENT_MODE.to_owned(),
+                owner_peer_id: Some("crew_local".to_owned()),
                 messages: Vec::new(),
             },
         )]);
@@ -1790,5 +2290,311 @@ mod tests {
         assert_eq!(room.messages.first().unwrap().payload["text"], "3");
 
         fs::remove_dir_all(state_dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_rooms_json_without_agent_mode_defaults_to_mention() {
+        let state_dir =
+            std::env::temp_dir().join(format!("crew-nearby-legacy-room-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(
+            state_dir.join(ROOMS_FILE_NAME),
+            r#"{"room_1":{"room_name":"旧群","peer_ids":["crew_local"],"messages":[]}}"#,
+        )
+        .unwrap();
+
+        let rooms = load_rooms(&state_dir).unwrap();
+        let room = rooms.get("room_1").unwrap();
+        assert_eq!(room.agent_mode, DEFAULT_AGENT_MODE);
+        assert_eq!(room.owner_peer_id, None);
+
+        fs::remove_dir_all(state_dir).unwrap();
+    }
+
+    #[test]
+    fn dm_history_is_bounded_and_persisted() {
+        let state_dir =
+            std::env::temp_dir().join(format!("crew-nearby-dm-test-{}", uuid::Uuid::new_v4()));
+        let mut dms: HashMap<String, Vec<Message>> = HashMap::new();
+        for index in 0..(DM_HISTORY_LIMIT + 2) {
+            let message = Message::peer_message("crew_peer", index.to_string(), Vec::new());
+            remember_dm_message(&mut dms, "crew_peer", &message);
+        }
+        let request = Message::agent_request("crew_peer", "ping");
+        remember_dm_message(&mut dms, "crew_peer", &request);
+
+        assert_eq!(dms.get("crew_peer").unwrap().len(), DM_HISTORY_LIMIT);
+        save_dms(&state_dir, &dms).unwrap();
+        let restored = load_dms(&state_dir).unwrap();
+        let history = restored.get("crew_peer").unwrap();
+        assert_eq!(history.len(), DM_HISTORY_LIMIT);
+        assert_eq!(history.first().unwrap().payload["text"], "3");
+        assert_eq!(history.last().unwrap().message_type, "agent.request");
+
+        fs::remove_dir_all(state_dir).unwrap();
+    }
+
+    #[test]
+    fn new_ipc_commands_use_stable_json_tags() {
+        let command: IpcCommand = serde_json::from_str(
+            r#"{"type":"send_peer_message","peer_id":"ace_peer","text":"hi"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            IpcCommand::SendPeerMessage { peer_id, text, mentions }
+                if peer_id == "ace_peer" && text == "hi" && mentions.is_empty()
+        ));
+        let command: IpcCommand = serde_json::from_str(
+            r#"{"type":"send_peer_message","peer_id":"ace_peer","text":"hi","mentions":["ace_agent"]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            IpcCommand::SendPeerMessage { mentions, .. } if mentions == ["ace_agent"]
+        ));
+        let command: IpcCommand = serde_json::from_str(
+            r#"{"type":"set_room_agent_mode","room_id":"room_1","agent_mode":"quiet"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            IpcCommand::SetRoomAgentMode { room_id, agent_mode, room_name }
+                if room_id == "room_1" && agent_mode.as_deref() == Some("quiet") && room_name.is_none()
+        ));
+        let command: IpcCommand = serde_json::from_str(
+            r#"{"type":"set_room_agent_mode","room_id":"room_1","room_name":"新群名"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            IpcCommand::SetRoomAgentMode { agent_mode, room_name, .. }
+                if agent_mode.is_none() && room_name.as_deref() == Some("新群名")
+        ));
+        let command: IpcCommand = serde_json::from_str(
+            r#"{"type":"invite_to_room","room_id":"room_1","peer_ids":["a","b"]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            IpcCommand::InviteToRoom { room_id, peer_ids }
+                if room_id == "room_1" && peer_ids == ["a", "b"]
+        ));
+        let command: IpcCommand = serde_json::from_str(
+            r#"{"type":"create_room","room_id":"room_1","room_name":"群","peer_ids":["a"],"agent_mode":"auto"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            IpcCommand::CreateRoom { agent_mode: Some(mode), .. } if mode == "auto"
+        ));
+        let command: IpcCommand = serde_json::from_str(
+            r#"{"type":"create_room","room_id":"room_1","room_name":"群","peer_ids":["a"]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            IpcCommand::CreateRoom { agent_mode: None, .. }
+        ));
+    }
+
+    #[test]
+    fn room_settings_apply_only_for_members_with_valid_mode() {
+        let mut rooms = HashMap::from([(
+            "room_1".to_owned(),
+            RoomState {
+                room_name: "测试群".to_owned(),
+                peer_ids: HashSet::from(["crew_local".to_owned()]),
+                agent_mode: DEFAULT_AGENT_MODE.to_owned(),
+                owner_peer_id: Some("crew_local".to_owned()),
+                messages: Vec::new(),
+            },
+        )]);
+
+        assert!(apply_room_settings(&mut rooms, "crew_local", "room_1", Some("quiet"), None));
+        assert_eq!(rooms.get("room_1").unwrap().agent_mode, "quiet");
+        assert!(!apply_room_settings(&mut rooms, "crew_outsider", "room_1", Some("auto"), None));
+        assert!(!apply_room_settings(&mut rooms, "crew_local", "room_1", Some("loud"), None));
+        assert!(!apply_room_settings(&mut rooms, "crew_local", "room_missing", Some("auto"), None));
+        assert!(!apply_room_settings(&mut rooms, "crew_local", "room_1", None, None));
+        assert_eq!(rooms.get("room_1").unwrap().agent_mode, "quiet");
+    }
+
+    #[test]
+    fn room_settings_can_rename_without_touching_agent_mode() {
+        let mut rooms = HashMap::from([(
+            "room_1".to_owned(),
+            RoomState {
+                room_name: "测试群".to_owned(),
+                peer_ids: HashSet::from(["crew_local".to_owned()]),
+                agent_mode: "auto".to_owned(),
+                owner_peer_id: Some("crew_local".to_owned()),
+                messages: Vec::new(),
+            },
+        )]);
+
+        assert!(apply_room_settings(&mut rooms, "crew_local", "room_1", None, Some("  新群名  ")));
+        let room = rooms.get("room_1").unwrap();
+        assert_eq!(room.room_name, "新群名");
+        assert_eq!(room.agent_mode, "auto");
+        assert!(!apply_room_settings(&mut rooms, "crew_local", "room_1", None, Some("   ")));
+        assert!(!apply_room_settings(
+            &mut rooms,
+            "crew_local",
+            "room_1",
+            None,
+            Some(&"长".repeat(crate::protocol::MAX_ROOM_NAME_CHARS + 1)),
+        ));
+        assert_eq!(rooms.get("room_1").unwrap().room_name, "新群名");
+    }
+
+    #[test]
+    fn history_snapshot_serializes_rooms_and_dms() {
+        let mut room = RoomState {
+            room_name: "测试群".to_owned(),
+            peer_ids: HashSet::from(["crew_local".to_owned()]),
+            agent_mode: "auto".to_owned(),
+            owner_peer_id: Some("crew_local".to_owned()),
+            messages: Vec::new(),
+        };
+        let room_message = Message::room_message("crew_local", "room_1", "hello");
+        remember_room_message(&mut room, &room_message);
+        let rooms = HashMap::from([("room_1".to_owned(), room)]);
+        let mut dms: HashMap<String, Vec<Message>> = HashMap::new();
+        let dm = Message::peer_message("crew_peer", "hi", Vec::new());
+        remember_dm_message(&mut dms, "crew_peer", &dm);
+
+        let snapshot = serde_json::to_value(build_history_snapshot(&rooms, &dms)).unwrap();
+        assert_eq!(snapshot["type"], "history_snapshot");
+        assert_eq!(snapshot["rooms"][0]["room_id"], "room_1");
+        assert_eq!(snapshot["rooms"][0]["agent_mode"], "auto");
+        assert_eq!(snapshot["rooms"][0]["owner_peer_id"], "crew_local");
+        assert_eq!(snapshot["rooms"][0]["messages"][0]["payload"]["text"], "hello");
+        assert_eq!(snapshot["dms"][0]["peer_id"], "crew_peer");
+        assert_eq!(snapshot["dms"][0]["messages"][0]["type"], "peer.message");
+
+        let event = serde_json::to_value(IpcEvent::PeerMessageReceived {
+            peer_id: "crew_peer".to_owned(),
+            display_name: "Peer".to_owned(),
+            text: "hi".to_owned(),
+            mentions: Vec::new(),
+            message_id: "m_1".to_owned(),
+            timestamp: 1_700_000_000,
+        })
+        .unwrap();
+        assert_eq!(event["type"], "peer_message_received");
+        assert_eq!(event["timestamp"], 1_700_000_000);
+        let event = serde_json::to_value(IpcEvent::RoomSettingsUpdated {
+            room_id: "room_1".to_owned(),
+            agent_mode: "quiet".to_owned(),
+            room_name: "新群名".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(event["type"], "room_settings_updated");
+        assert_eq!(event["agent_mode"], "quiet");
+        assert_eq!(event["room_name"], "新群名");
+    }
+
+    #[tokio::test]
+    async fn add_room_members_merges_without_wiping_history() {
+        let (bob_tx, mut bob_rx) = mpsc::channel(4);
+        let (carol_tx, mut carol_rx) = mpsc::channel(4);
+        let sessions = HashMap::from([
+            ("crew_bob".to_owned(), bob_tx),
+            ("crew_carol".to_owned(), carol_tx),
+        ]);
+        let mut room = RoomState {
+            room_name: "测试群".to_owned(),
+            peer_ids: HashSet::from(["crew_alice".to_owned(), "crew_bob".to_owned()]),
+            agent_mode: "auto".to_owned(),
+            owner_peer_id: Some("crew_alice".to_owned()),
+            messages: Vec::new(),
+        };
+        let history = Message::room_message("crew_alice", "room_1", "之前的消息");
+        remember_room_message(&mut room, &history);
+        let mut rooms = HashMap::from([("room_1".to_owned(), room)]);
+
+        // 既有成员不会重复收到邀请；新成员收到带完整成员列表的邀请。
+        let added = add_room_members(
+            &sessions,
+            &mut rooms,
+            "crew_alice",
+            "room_1",
+            vec!["crew_bob".to_owned(), "crew_carol".to_owned()],
+        )
+        .await;
+        assert_eq!(added, vec!["crew_carol".to_owned()]);
+        let room = rooms.get("room_1").unwrap();
+        assert!(room.peer_ids.contains("crew_carol"));
+        assert_eq!(room.messages.len(), 1);
+        assert_eq!(room.messages[0].payload["text"], "之前的消息");
+        assert!(bob_rx.try_recv().is_err());
+        let invite = carol_rx.recv().await.unwrap();
+        assert_eq!(invite.message_type, "room.invite");
+        assert_eq!(invite.payload["agent_mode"], "auto");
+        assert_eq!(invite.payload["owner_peer_id"], "crew_alice");
+        assert_eq!(invite.payload["participants"].as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn room_join_and_leave_update_membership_once() {
+        let mut rooms = HashMap::from([(
+            "room_1".to_owned(),
+            RoomState {
+                room_name: "测试群".to_owned(),
+                peer_ids: HashSet::from(["crew_local".to_owned()]),
+                agent_mode: DEFAULT_AGENT_MODE.to_owned(),
+                owner_peer_id: Some("crew_local".to_owned()),
+                messages: Vec::new(),
+            },
+        )]);
+        let sessions = HashMap::new();
+        let mut seen_messages = HashSet::new();
+        let discovered = HashMap::new();
+        let sink = EventSink::stdout();
+
+        let join = Message::room_join("crew_bob", "room_1", None, None);
+        handle_received_message(
+            "crew_local",
+            &sessions,
+            &mut rooms,
+            &mut seen_messages,
+            &discovered,
+            &sink,
+            "crew_bob".to_owned(),
+            join.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(rooms.get("room_1").unwrap().peer_ids.contains("crew_bob"));
+        // 重复的 join 事件按 message_id 去重，成员状态保持幂等。
+        handle_received_message(
+            "crew_local",
+            &sessions,
+            &mut rooms,
+            &mut seen_messages,
+            &discovered,
+            &sink,
+            "crew_bob".to_owned(),
+            join,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rooms.get("room_1").unwrap().peer_ids.len(), 2);
+
+        let leave = Message::room_leave("crew_bob", "room_1");
+        handle_received_message(
+            "crew_local",
+            &sessions,
+            &mut rooms,
+            &mut seen_messages,
+            &discovered,
+            &sink,
+            "crew_bob".to_owned(),
+            leave,
+        )
+        .await
+        .unwrap();
+        assert!(!rooms.get("room_1").unwrap().peer_ids.contains("crew_bob"));
     }
 }

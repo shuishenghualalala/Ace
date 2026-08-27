@@ -90,10 +90,6 @@ function renderAccount(): void {
   if (loggedOut) loggedOut.hidden = Boolean(visibleUser);
   if (visibleUser) {
     const name = user.displayName || user.email || user.phoneNumber || user.userId;
-    const navAvatar = document.querySelector('[data-user-avatar]');
-    const navName = document.querySelector('[data-user-name]');
-    if (navAvatar) navAvatar.textContent = Array.from(name)[0] || '我';
-    if (navName) navName.textContent = name;
     displayValue('set-account-name', name);
     displayValue('set-account-provider', currentState.mode === 'email' ? '本机邮箱租户' : currentState.mode === 'remote' ? currentState.providerId : '本机模式');
     displayValue('set-account-user-id', user.userId);
@@ -225,9 +221,6 @@ function bind(): void {
   document.getElementById('login-code')?.addEventListener('keydown', submitOnEnter);
   document.getElementById('login-quit')?.addEventListener('click', () => void window.Crew.appQuit());
   document.getElementById('set-account-go-login')?.addEventListener('click', () => showLoginWall(true));
-  document.querySelector('[data-user-account-trigger]')?.addEventListener('click', () => {
-    window.dispatchEvent(new CustomEvent('user:open-account'));
-  });
   document.getElementById('set-account-logout')?.addEventListener('click', () => {
     void window.Crew.authLogout()
       .then((result) => {

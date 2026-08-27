@@ -1,26 +1,59 @@
-interface NearbyPeer {
-  peer_id: string;
-  display_name: string;
-  agent_name: string;
-  capabilities: string[];
-  connection: 'discovered' | 'connecting' | 'connected' | 'disconnected' | 'unavailable';
+/**
+ * 同伴页（Nearby）页面壳：三栏布局 + Nearby 事件总线接线。
+ *
+ * - nearby-store.ts    状态中心（peers / 会话 / 消息 / 未读 / Agent 设置）
+ * - nearby-sidebar.ts  左栏：身份卡、发现面板、会话列表、弹层
+ * - nearby-chat.ts     主区聊天窗 + 群聊右侧成员/设置面板
+ *
+ * 本模块负责把 NearbyActions（指令出口）接到 window.Crew 的 preload 桥，
+ * 并把 onNearbyEvent 事件流转交给 store，再把 store 的变更扇出到两个子面板。
+ */
+
+import { createNearbyChat, type NearbyChatPane } from './nearby-chat';
+import { createNearbySidebar, type NearbySidebar } from './nearby-sidebar';
+import {
+  roomConversationId,
+  NearbyStore,
+  type NearbyAgentMode,
+  type NearbyAgentSettings,
+  type NearbyConversation,
+  type NearbyFileCard,
+} from './nearby-store';
+
+export interface NearbyPage {
+  activate(): void;
+  dispose(): void;
 }
 
-interface NearbyMessage {
-  message_id: string;
-  sender: string;
-  type: 'agent.request' | 'agent.response' | 'agent.error';
-  payload: { request_id?: string; text?: string };
-  received_at?: number;
+export interface NearbyMention {
+  peerId: string;
+  kind: 'person' | 'agent';
+  label: string;
 }
 
-interface NearbyEvent {
-  type: string;
-  peer?: NearbyPeer;
-  peer_id?: string;
-  discoverable?: boolean;
-  message?: NearbyMessage | string;
+export interface NearbyActions {
+  connectPeer(peerId: string): void;
+  disconnectPeer(peerId: string): void;
+  toggleDiscovery(): void;
+  setDiscoverable(enabled: boolean): void;
+  selectConversation(conversationId: string): void;
+  sendMessage(text: string, mentions: NearbyMention[]): void;
+  sendFile(): void;
+  createRoom(name: string, memberIds: string[], agentMode: NearbyAgentMode): void;
+  inviteToRoom(roomId: string, peerIds: string[]): void;
+  setRoomAgentMode(roomId: string, agentMode: NearbyAgentMode): void;
+  renameRoom(roomId: string, name: string): void;
+  leaveRoom(roomId: string): void;
+  saveFile(file: NearbyFileCard): Promise<void>;
+  getAgentSettings(): Promise<NearbyAgentSettings>;
+  saveAgentSettings(patch: Partial<NearbyAgentSettings>): Promise<NearbyAgentSettings | null>;
+  loadToolsets(): Promise<string[]>;
+  showStatus(text: string, tone?: 'normal' | 'error'): void;
 }
+
+const MAX_NEARBY_FILE_BYTES = 4 * 1024 * 1024;
+
+type NearbyCommandPayload = Parameters<NonNullable<Window['Crew']['nearbyCommand']>>[0];
 
 function textElement<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -33,56 +66,30 @@ function textElement<K extends keyof HTMLElementTagNameMap>(
   return element;
 }
 
-function peerLabel(peer: NearbyPeer | undefined, fallback = 'Ace Agent'): string {
-  return peer?.display_name?.trim() || peer?.agent_name?.trim() || fallback;
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-function peerInitial(peer: NearbyPeer | undefined): string {
-  return peerLabel(peer, '?').slice(0, 1).toLocaleUpperCase();
+function newRoomId(): string {
+  // 主进程校验规则：/^[A-Za-z0-9_.:-]{1,120}$/
+  return `room_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function connectionLabel(connection: NearbyPeer['connection']): string {
-  switch (connection) {
-    case 'connected': return '已连接';
-    case 'connecting': return '正在连接';
-    case 'disconnected': return '连接已断开';
-    case 'unavailable': return '已离开';
-    default: return '可连接';
+function bluetoothHelpText(): string {
+  switch (window.Crew?.runtimePlatform) {
+    case 'darwin':
+      return '请在「系统设置 → 隐私与安全性 → 蓝牙」中允许 Ace 使用蓝牙，并确认蓝牙已开启。';
+    case 'win32':
+      return '请在「设置 → 蓝牙和设备」中开启蓝牙，并允许 Ace 访问蓝牙。';
+    case 'linux':
+      return '请确认蓝牙服务已启动（例如 systemctl start bluetooth）且适配器可用。';
+    default:
+      return '请确认系统蓝牙已开启，并允许 Ace 使用蓝牙。';
   }
 }
 
-function messageTime(timestamp = Date.now()): string {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(timestamp));
-}
-
-function messageSenderLabel(
-  message: NearbyMessage,
-  peer: NearbyPeer | undefined,
-  own: boolean,
-): string {
-  if (message.type === 'agent.request') return own ? '我' : peerLabel(peer, '对方');
-  return own
-    ? '本机 Ace Agent'
-    : `${peerLabel(peer, '对方')} · ${peer?.agent_name?.trim() || 'Ace Agent'}`;
-}
-
-export interface NearbyPage {
-  activate(): void;
-  dispose(): void;
-}
-
 export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = window.Crew): NearbyPage {
-  const peers = new Map<string, NearbyPeer>();
-  const messages = new Map<string, NearbyMessage[]>();
-  let localPeerId = '';
-  let activePeerId: string | null = null;
-  let active = false;
-  let discovering = true;
-  let discoverabilityKnown = false;
-  let pendingDiscoverability: boolean | null = null;
+  const store = new NearbyStore();
 
   const page = document.createElement('div');
   page.className = 'nearby-page';
@@ -93,102 +100,27 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
   heading.className = 'nearby-page__heading';
   heading.append(
     textElement('h1', 'nearby-page__title', '同伴'),
-    textElement('p', 'nearby-page__subtitle', '通过蓝牙发现附近的 Ace，然后与对方的 Agent 对话。'),
+    textElement('p', 'nearby-page__subtitle', '通过蓝牙发现附近的 Ace，把人拉进一个群，人带着自己的 Agent 一起协同。'),
   );
-  const headerActions = document.createElement('div');
-  headerActions.className = 'nearby-page__header-actions';
   const status = textElement('span', 'nearby-page__status', '正在准备…');
-  const privacyToggle = document.createElement('input');
-  privacyToggle.type = 'checkbox';
-  privacyToggle.className = 'nearby-privacy__toggle';
-  privacyToggle.checked = true;
-  privacyToggle.disabled = true;
-  privacyToggle.setAttribute('aria-label', '允许附近的 Ace 发现我');
-  const privacyLabel = document.createElement('label');
-  privacyLabel.className = 'nearby-privacy';
-  privacyLabel.append(privacyToggle, textElement('span', 'nearby-privacy__text', '允许被发现'));
-  headerActions.append(status, privacyLabel);
-  header.append(heading, headerActions);
+  header.append(heading, status);
+
+  const banner = document.createElement('div');
+  banner.className = 'nearby-banner';
+  banner.hidden = true;
+  const bannerText = textElement('span', 'nearby-banner__text', '');
+  const bannerDismiss = document.createElement('button');
+  bannerDismiss.type = 'button';
+  bannerDismiss.className = 'nearby-banner__dismiss';
+  bannerDismiss.textContent = '知道了';
+  bannerDismiss.addEventListener('click', () => {
+    banner.hidden = true;
+  });
+  banner.append(bannerText, bannerDismiss);
 
   const workspace = document.createElement('div');
   workspace.className = 'nearby-workspace';
-  const discoveryPane = document.createElement('section');
-  discoveryPane.className = 'nearby-discovery';
-  const discoveryHeader = document.createElement('div');
-  discoveryHeader.className = 'nearby-discovery__header';
-  const discoveryCopy = document.createElement('div');
-  discoveryCopy.append(
-    textElement('h2', 'nearby-discovery__title', '附近的 Ace'),
-    textElement('p', 'nearby-discovery__hint', '选择一台设备并连接'),
-  );
-  const scanButton = document.createElement('button');
-  scanButton.type = 'button';
-  scanButton.className = 'nearby-scan-button';
-  scanButton.textContent = '停止查找';
-  discoveryHeader.append(discoveryCopy, scanButton);
-
-  const radar = document.createElement('div');
-  radar.className = 'nearby-radar';
-  radar.setAttribute('aria-hidden', 'true');
-  radar.append(
-    textElement('span', 'nearby-radar__ring nearby-radar__ring--outer', ''),
-    textElement('span', 'nearby-radar__ring nearby-radar__ring--middle', ''),
-    textElement('span', 'nearby-radar__ring nearby-radar__ring--inner', ''),
-    textElement('span', 'nearby-radar__core', 'A'),
-  );
-  const peerList = document.createElement('div');
-  peerList.className = 'nearby-peer-list';
-  discoveryPane.append(discoveryHeader, radar, peerList);
-
-  const conversationPane = document.createElement('section');
-  conversationPane.className = 'nearby-conversation';
-  const emptyState = document.createElement('div');
-  emptyState.className = 'nearby-empty-state';
-  emptyState.append(
-    textElement('span', 'nearby-empty-state__symbol', '⌁'),
-    textElement('h2', 'nearby-empty-state__title', '选择一个附近的 Ace'),
-    textElement('p', 'nearby-empty-state__copy', '连接后，消息会通过蓝牙发送给对方 Ace Agent。'),
-  );
-
-  const conversation = document.createElement('div');
-  conversation.className = 'nearby-chat';
-  conversation.hidden = true;
-  const chatHeader = document.createElement('header');
-  chatHeader.className = 'nearby-chat__header';
-  const chatIdentity = document.createElement('div');
-  chatIdentity.className = 'nearby-chat__identity';
-  const chatAvatar = textElement('span', 'nearby-chat__avatar', '?');
-  const chatCopy = document.createElement('div');
-  const chatName = textElement('h2', 'nearby-chat__name', 'Ace Agent');
-  const chatState = textElement('p', 'nearby-chat__state', '尚未连接');
-  chatCopy.append(chatName, chatState);
-  chatIdentity.append(chatAvatar, chatCopy);
-  const disconnectButton = document.createElement('button');
-  disconnectButton.type = 'button';
-  disconnectButton.className = 'nearby-secondary-action';
-  disconnectButton.textContent = '断开';
-  chatHeader.append(chatIdentity, disconnectButton);
-  const messageList = document.createElement('div');
-  messageList.className = 'nearby-chat__messages';
-  messageList.setAttribute('aria-live', 'polite');
-  const composer = document.createElement('form');
-  composer.className = 'nearby-composer';
-  const messageInput = document.createElement('textarea');
-  messageInput.className = 'nearby-composer__input';
-  messageInput.rows = 1;
-  messageInput.maxLength = 8_000;
-  messageInput.placeholder = '连接后即可发送消息';
-  messageInput.disabled = true;
-  const sendButton = document.createElement('button');
-  sendButton.type = 'submit';
-  sendButton.className = 'nearby-send-button';
-  sendButton.textContent = '发送';
-  sendButton.disabled = true;
-  composer.append(messageInput, sendButton);
-  conversation.append(chatHeader, messageList, composer);
-  conversationPane.append(emptyState, conversation);
-  workspace.append(discoveryPane, conversationPane);
-  page.append(header, workspace);
+  page.append(header, banner, workspace);
   root.replaceChildren(page);
 
   const setStatus = (text: string, tone: 'normal' | 'error' = 'normal'): void => {
@@ -196,317 +128,230 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
     status.dataset.tone = tone;
   };
 
-  const updateComposer = (): void => {
-    const peer = activePeerId ? peers.get(activePeerId) : undefined;
-    const connected = peer?.connection === 'connected';
-    messageInput.disabled = !connected;
-    messageInput.placeholder = connected ? `发消息给 ${peerLabel(peer)} 的 Agent` : '连接后即可发送消息';
-    sendButton.disabled = !connected || messageInput.value.trim().length === 0;
+  const showBluetoothBanner = (message: string): void => {
+    bannerText.textContent = `蓝牙不可用或权限未授予（${message}）。${bluetoothHelpText()}`;
+    banner.hidden = false;
   };
 
-  const renderMessages = (): void => {
-    messageList.replaceChildren();
-    if (!activePeerId) return;
-    const items = messages.get(activePeerId) ?? [];
-    if (items.length === 0) {
-      messageList.append(textElement('p', 'nearby-chat__messages-empty', '连接已准备好，发一条消息开始交流。'));
-      return;
-    }
-    const peer = peers.get(activePeerId);
-    for (const message of items) {
-      const own = message.sender === localPeerId;
-      const item = document.createElement('article');
-      const failed = message.type === 'agent.error';
-      const fromAgent = message.type !== 'agent.request';
-      item.className = [
-        'nearby-message',
-        own ? 'nearby-message--own' : '',
-        fromAgent ? 'nearby-message--agent' : '',
-        failed ? 'nearby-message--error' : '',
-      ].filter(Boolean).join(' ');
-      item.dataset.messageId = message.message_id;
-      item.dataset.messageType = message.type;
-      const meta = document.createElement('div');
-      meta.className = 'nearby-message__meta';
-      const sender = textElement(
-        'strong',
-        'nearby-message__sender',
-        messageSenderLabel(message, peer, own),
-      );
-      const time = textElement('time', 'nearby-message__time', messageTime(message.received_at));
-      time.dateTime = new Date(message.received_at ?? Date.now()).toISOString();
-      meta.append(sender, time);
-      const bubble = textElement('p', 'nearby-message__bubble', String(message.payload.text ?? ''));
-      item.append(meta, bubble);
-      messageList.append(item);
-    }
-    messageList.scrollTop = messageList.scrollHeight;
+  const command = (payload: NearbyCommandPayload): void => {
+    void Promise.resolve(bridge?.nearbyCommand?.(payload))
+      .catch((error: unknown) => setStatus(`操作失败：${errorMessage(error)}`, 'error'));
   };
 
-  const renderConversation = (): void => {
-    const peer = activePeerId ? peers.get(activePeerId) : undefined;
-    emptyState.hidden = Boolean(peer);
-    conversation.hidden = !peer;
-    if (!peer) return;
-    chatAvatar.textContent = peerInitial(peer);
-    chatName.textContent = peerLabel(peer);
-    chatState.textContent = `${peer.agent_name || 'Ace Agent'} · ${connectionLabel(peer.connection)}`;
-    chatState.dataset.connection = peer.connection;
-    disconnectButton.hidden = peer.connection !== 'connected';
-    renderMessages();
-    updateComposer();
+  const activeConversation = (): NearbyConversation | null => {
+    const id = store.activeConversationId;
+    return id ? store.conversations.get(id) ?? null : null;
   };
 
-  const connectPeer = (peerId: string): void => {
-    const peer = peers.get(peerId);
-    if (!peer || peer.connection === 'connecting' || peer.connection === 'unavailable') return;
-    activePeerId = peerId;
-    peers.set(peerId, { ...peer, connection: 'connecting' });
-    renderPeers();
-    renderConversation();
-    setStatus(`正在连接 ${peerLabel(peer)}…`);
-    void bridge?.nearbyCommand?.({ type: 'connect_peer', peer_id: peerId })
-      .catch((error: unknown) => {
-        peers.set(peerId, { ...peer, connection: 'discovered' });
-        renderPeers();
-        renderConversation();
-        setStatus(`连接失败：${error instanceof Error ? error.message : String(error)}`, 'error');
-      });
-  };
+  // actions 的方法体只在用户交互时执行；panes 在 actions 定义后构造、使用前必已就绪。
+  const panes: { sidebar?: NearbySidebar; chat?: NearbyChatPane } = {};
 
-  function renderPeers(): void {
-    peerList.replaceChildren();
-    const availablePeers = [...peers.values()];
-    if (availablePeers.length === 0) {
-      peerList.append(textElement(
-        'p',
-        'nearby-peer-list__empty',
-        discovering ? '正在通过蓝牙寻找附近的 Ace…' : '查找已暂停',
-      ));
-      return;
-    }
-    for (const peer of availablePeers) {
-      const card = document.createElement('article');
-      card.className = `nearby-peer-card${peer.peer_id === activePeerId ? ' nearby-peer-card--active' : ''}`;
-      card.dataset.connection = peer.connection;
-      card.addEventListener('click', () => {
-        activePeerId = peer.peer_id;
-        renderPeers();
-        renderConversation();
-      });
-      const avatar = textElement('span', 'nearby-peer-card__avatar', peerInitial(peer));
-      const copy = document.createElement('span');
-      copy.className = 'nearby-peer-card__copy';
-      copy.append(
-        textElement('strong', 'nearby-peer-card__name', peerLabel(peer)),
-        textElement('span', 'nearby-peer-card__agent', peer.agent_name || 'Ace Agent'),
-        textElement('span', 'nearby-peer-card__connection', connectionLabel(peer.connection)),
-      );
-      const action = document.createElement('button');
-      action.type = 'button';
-      action.className = 'nearby-peer-card__action';
-      action.textContent = peer.connection === 'connected'
-        ? '打开'
-        : peer.connection === 'connecting'
-          ? '连接中'
-          : peer.connection === 'unavailable'
-            ? '不可用'
-            : '连接';
-      action.addEventListener('click', (event) => {
-        event.stopPropagation();
-        if (peer.connection === 'connected') {
-          activePeerId = peer.peer_id;
-          renderPeers();
-          renderConversation();
+  const actions: NearbyActions = {
+    connectPeer(peerId) {
+      const peer = store.peers.get(peerId);
+      if (!peer || peer.connection === 'connected' || peer.connection === 'connecting') return;
+      store.peers.set(peerId, { ...peer, connection: 'connecting' });
+      setStatus(`正在连接 ${store.peerLabel(peerId)}…`);
+      command({ type: 'connect_peer', peer_id: peerId });
+      renderAll();
+    },
+    disconnectPeer(peerId) {
+      command({ type: 'disconnect_peer', peer_id: peerId });
+    },
+    toggleDiscovery() {
+      command({ type: store.discovering ? 'stop_discovery' : 'start_discovery' });
+    },
+    setDiscoverable(enabled) {
+      command({ type: 'set_discoverable', enabled });
+    },
+    selectConversation(conversationId) {
+      if (!store.conversations.has(conversationId)) return;
+      store.setActiveConversation(conversationId);
+      panes.chat?.focusComposer();
+    },
+    sendMessage(text, mentions) {
+      const conversation = activeConversation();
+      if (!conversation) return;
+      if (conversation.kind === 'dm') {
+        const peerId = conversation.peerId;
+        const agentMention = mentions.find((mention) => mention.kind === 'agent' && mention.peerId === peerId);
+        if (agentMention) {
+          command({ type: 'send_agent_request', peer_id: peerId, text });
+          store.expectAgentReply(conversation.id, [peerId]);
         } else {
-          connectPeer(peer.peer_id);
+          command({
+            type: 'send_peer_message',
+            peer_id: peerId,
+            text,
+            mentions: mentions.map((mention) => mention.peerId),
+          });
         }
+        return;
+      }
+      const mentionIds = [...new Set(mentions.map((mention) => mention.peerId))];
+      command({ type: 'send_room_message', room_id: conversation.roomId, text, mentions: mentionIds });
+      // 「思考中…」占位的预期集合：@触发 = 被 @ 的成员；全员响应 = 除我以外的成员；安静模式 = 无
+      if (conversation.agentMode === 'mention' && mentionIds.length > 0) {
+        store.expectAgentReply(conversation.id, mentionIds);
+      } else if (conversation.agentMode === 'auto') {
+        store.expectAgentReply(
+          conversation.id,
+          conversation.memberIds.filter((memberId) => memberId !== store.localPeerId),
+        );
+      }
+    },
+    sendFile() {
+      const conversation = activeConversation();
+      if (!conversation || conversation.kind !== 'room') return;
+      void Promise.resolve(bridge?.nearbySelectFile?.()).then((file) => {
+        if (!file) return;
+        if (file.size > MAX_NEARBY_FILE_BYTES) {
+          setStatus('文件超过 4 MiB，无法通过同伴通道发送', 'error');
+          return;
+        }
+        command({
+          type: 'send_room_file',
+          room_id: conversation.roomId,
+          file_id: file.file_id,
+          name: file.name,
+          mime_type: file.mime_type,
+          size: file.size,
+          sha256: file.sha256,
+          data_base64: file.data_base64,
+        });
+        setStatus(`正在发送文件「${file.name}」…`);
+      }).catch((error: unknown) => setStatus(`读取文件失败：${errorMessage(error)}`, 'error'));
+    },
+    createRoom(name, memberIds, agentMode) {
+      command({
+        type: 'create_room',
+        room_id: newRoomId(),
+        room_name: name,
+        peer_ids: memberIds,
+        agent_mode: agentMode,
       });
-      card.append(avatar, copy, action);
-      peerList.append(card);
-    }
+    },
+    inviteToRoom(roomId, peerIds) {
+      if (!store.conversations.has(roomConversationId(roomId)) || peerIds.length === 0) return;
+      command({ type: 'invite_to_room', room_id: roomId, peer_ids: [...new Set(peerIds)] });
+    },
+    setRoomAgentMode(roomId, agentMode) {
+      command({ type: 'set_room_agent_mode', room_id: roomId, agent_mode: agentMode });
+    },
+    renameRoom(roomId, name) {
+      const roomName = name.trim();
+      if (!roomName) return;
+      command({ type: 'set_room_agent_mode', room_id: roomId, room_name: roomName });
+    },
+    leaveRoom(roomId) {
+      command({ type: 'leave_room', room_id: roomId });
+    },
+    async saveFile(file) {
+      try {
+        const result = await bridge?.nearbySaveFile?.({
+          name: file.name,
+          mime_type: file.mime_type,
+          size: file.size,
+          sha256: file.sha256,
+          data_base64: file.data_base64,
+        });
+        if (result?.ok && result.path) setStatus(`已保存到 ${result.path}`);
+        else if (result?.ok) setStatus('文件已保存');
+      } catch (error) {
+        setStatus(`保存失败：${errorMessage(error)}`, 'error');
+      }
+    },
+    async getAgentSettings() {
+      try {
+        const result = await bridge?.nearbyGetSettings?.();
+        if (result?.ok) {
+          return {
+            autoReply: result.auto_reply,
+            allowedToolsets: Array.isArray(result.allowed_toolsets) ? result.allowed_toolsets : [],
+          };
+        }
+      } catch {
+        // 读取失败时回退到本地默认（自动回复开、白名单空）
+      }
+      return { autoReply: true, allowedToolsets: [] };
+    },
+    async saveAgentSettings(patch) {
+      try {
+        const result = await bridge?.nearbySetSettings?.({
+          ...(patch.autoReply !== undefined ? { auto_reply: patch.autoReply } : {}),
+          ...(patch.allowedToolsets !== undefined ? { allowed_toolsets: patch.allowedToolsets } : {}),
+        });
+        if (result?.ok) {
+          const next: NearbyAgentSettings = {
+            autoReply: result.auto_reply,
+            allowedToolsets: Array.isArray(result.allowed_toolsets) ? result.allowed_toolsets : [],
+          };
+          store.applySettings(next);
+          return next;
+        }
+      } catch (error) {
+        setStatus(`保存 Agent 设置失败：${errorMessage(error)}`, 'error');
+      }
+      return null;
+    },
+    async loadToolsets() {
+      try {
+        const { backendApi } = await import('../backend-client');
+        const toolsets = await backendApi.toolsets();
+        return Array.isArray(toolsets) ? toolsets.filter((item) => typeof item === 'string' && item) : [];
+      } catch {
+        return [];
+      }
+    },
+    showStatus: setStatus,
+  };
+
+  panes.sidebar = createNearbySidebar({ store, actions });
+  panes.chat = createNearbyChat({ store, actions, workspace });
+
+  function renderAll(): void {
+    panes.sidebar?.render();
+    panes.chat?.render();
   }
 
-  const onEvent = (event: { type: string; [key: string]: unknown }): void => {
-    const nearbyEvent = event as NearbyEvent;
-    switch (nearbyEvent.type) {
-      case 'ready': {
-        if (nearbyEvent.peer) localPeerId = nearbyEvent.peer.peer_id;
-        privacyToggle.checked = nearbyEvent.discoverable !== false;
-        privacyToggle.disabled = false;
-        discoverabilityKnown = true;
-        setStatus(nearbyEvent.discoverable === false ? '仅查找附近 Ace' : '正在查找附近 Ace');
-        break;
+  const disposeEvent = bridge?.onNearbyEvent?.((event: { type: string; [key: string]: unknown }) => {
+    const note = store.applyEvent(event);
+    if (note) {
+      setStatus(note.text, note.tone);
+      if (note.tone === 'error' && /蓝牙|bluetooth|BLE|Nearby 服务已退出|adapter/i.test(note.text)) {
+        showBluetoothBanner(note.text);
       }
-      case 'discovery_started':
-        discovering = true;
-        radar.dataset.scanning = 'true';
-        scanButton.textContent = '停止查找';
-        setStatus('正在查找附近 Ace');
-        renderPeers();
-        break;
-      case 'discovery_stopped':
-        discovering = false;
-        radar.dataset.scanning = 'false';
-        scanButton.textContent = '重新查找';
-        setStatus('查找已暂停');
-        renderPeers();
-        break;
-      case 'discoverability_changed':
-        privacyToggle.checked = nearbyEvent.discoverable !== false;
-        privacyToggle.disabled = false;
-        pendingDiscoverability = null;
-        setStatus(nearbyEvent.discoverable === false ? '已对附近设备隐藏' : '附近设备可以发现你');
-        break;
-      case 'peer_discovered': {
-        const peer = nearbyEvent.peer;
-        if (!peer || peer.peer_id === localPeerId) break;
-        const current = peers.get(peer.peer_id);
-        peers.set(peer.peer_id, {
-          ...peer,
-          connection: current?.connection === 'connected' || current?.connection === 'connecting'
-            ? current.connection
-            : 'discovered',
-        });
-        renderPeers();
-        renderConversation();
-        break;
-      }
-      case 'peer_connected': {
-        const peer = nearbyEvent.peer;
-        if (!peer) break;
-        peers.set(peer.peer_id, { ...peer, connection: 'connected' });
-        activePeerId = peer.peer_id;
-        setStatus(`已连接 ${peerLabel(peer)}`);
-        renderPeers();
-        renderConversation();
-        messageInput.focus();
-        break;
-      }
-      case 'peer_disconnected': {
-        const peerId = String(nearbyEvent.peer_id || '');
-        const peer = peers.get(peerId);
-        if (peer) peers.set(peerId, { ...peer, connection: 'disconnected' });
-        setStatus(peer ? `与 ${peerLabel(peer)} 的连接已断开` : '连接已断开');
-        renderPeers();
-        renderConversation();
-        break;
-      }
-      case 'peer_unavailable': {
-        const peerId = String(nearbyEvent.peer_id || '');
-        const peer = peers.get(peerId);
-        if (peer && peer.connection !== 'connected') peers.set(peerId, { ...peer, connection: 'unavailable' });
-        renderPeers();
-        renderConversation();
-        break;
-      }
-      case 'peer_connection_failed': {
-        const peerId = String(nearbyEvent.peer_id || '');
-        const peer = peers.get(peerId);
-        if (peer) peers.set(peerId, { ...peer, connection: 'discovered' });
-        setStatus(String(nearbyEvent.message || '连接失败'), 'error');
-        renderPeers();
-        renderConversation();
-        break;
-      }
-      case 'message': {
-        const peerId = String(nearbyEvent.peer_id || '');
-        const message = typeof nearbyEvent.message === 'object' ? nearbyEvent.message as NearbyMessage : undefined;
-        if (
-          !peerId
-          || !message
-          || !['agent.request', 'agent.response', 'agent.error'].includes(message.type)
-        ) break;
-        const history = messages.get(peerId) ?? [];
-        if (!history.some((item) => item.message_id === message.message_id)) {
-          history.push({ ...message, received_at: Date.now() });
-        }
-        messages.set(peerId, history);
-        if (!activePeerId || message.sender !== localPeerId) activePeerId = peerId;
-        renderPeers();
-        renderConversation();
-        if (message.type === 'agent.error') {
-          setStatus(`${peerLabel(peers.get(peerId))} 的 Agent 回复失败`, 'error');
-        } else if (message.type === 'agent.request') {
-          setStatus(
-            message.sender === localPeerId
-              ? '消息已发送，等待对方 Agent 回复…'
-              : `正在由本机 Agent 回复 ${peerLabel(peers.get(peerId))}…`,
-          );
-        } else {
-          setStatus(
-            message.sender === localPeerId
-              ? `本机 Agent 已回复 ${peerLabel(peers.get(peerId))}`
-              : `收到 ${peerLabel(peers.get(peerId))} Agent 的回复`,
-          );
-        }
-        break;
-      }
-      case 'error':
-        if (pendingDiscoverability !== null) {
-          privacyToggle.checked = !pendingDiscoverability;
-          pendingDiscoverability = null;
-          privacyToggle.disabled = !discoverabilityKnown;
-        }
-        setStatus(String(nearbyEvent.message || '同伴服务发生错误'), 'error');
-        break;
-      default: break;
     }
-  };
-
-  const disposeEvent = bridge?.onNearbyEvent?.(onEvent) ?? (() => undefined);
-  privacyToggle.addEventListener('change', () => {
-    const enabled = privacyToggle.checked;
-    pendingDiscoverability = enabled;
-    privacyToggle.disabled = true;
-    void Promise.resolve(bridge?.nearbyCommand?.({ type: 'set_discoverable', enabled }))
-      .catch((error: unknown) => {
-        privacyToggle.checked = !enabled;
-        privacyToggle.disabled = !discoverabilityKnown;
-        pendingDiscoverability = null;
-        setStatus(`更新发现设置失败：${error instanceof Error ? error.message : String(error)}`, 'error');
-      });
-  });
-  scanButton.addEventListener('click', () => {
-    void bridge?.nearbyCommand?.({ type: discovering ? 'stop_discovery' : 'start_discovery' });
-  });
-  disconnectButton.addEventListener('click', () => {
-    if (!activePeerId) return;
-    void bridge?.nearbyCommand?.({ type: 'disconnect_peer', peer_id: activePeerId });
-  });
-  messageInput.addEventListener('input', updateComposer);
-  messageInput.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault();
-      composer.requestSubmit();
+    if (event.type === 'ready') {
+      setStatus(store.discoverable ? '正在查找附近 Ace' : '仅查找附近 Ace');
     }
-  });
-  composer.addEventListener('submit', (event) => {
-    event.preventDefault();
-    const text = messageInput.value.trim();
-    const peer = activePeerId ? peers.get(activePeerId) : undefined;
-    if (!text || !peer || peer.connection !== 'connected') return;
-    messageInput.value = '';
-    updateComposer();
-    setStatus('正在发送…');
-    void bridge?.nearbyCommand?.({ type: 'send_agent_request', peer_id: peer.peer_id, text })
-      .catch((error: unknown) => setStatus(`发送失败：${error instanceof Error ? error.message : String(error)}`, 'error'));
-  });
+    if (event.type === 'peer_connected') panes.chat?.focusComposer();
+    renderAll();
+  }) ?? (() => undefined);
 
-  radar.dataset.scanning = 'true';
-  renderPeers();
-  renderConversation();
+  const sidebar = panes.sidebar;
+  const chat = panes.chat;
+  workspace.append(sidebar.element, chat.element, chat.panelElement);
+  const unsubscribeStore = store.subscribe(renderAll);
+  renderAll();
 
+  let active = false;
   return {
     activate(): void {
       active = true;
       void bridge?.nearbyStart?.()
-        .catch((error: unknown) => setStatus(`同伴服务启动失败：${error instanceof Error ? error.message : String(error)}`, 'error'));
+        .catch((error: unknown) => {
+          setStatus(`同伴服务启动失败：${errorMessage(error)}`, 'error');
+          showBluetoothBanner(errorMessage(error));
+        });
     },
     dispose(): void {
       const wasActive = active;
       active = false;
       disposeEvent();
+      unsubscribeStore();
+      sidebar.dispose();
+      chat.dispose();
       if (wasActive) void bridge?.nearbyStop?.();
       root.replaceChildren();
     },

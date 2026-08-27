@@ -41,8 +41,7 @@
 }
 
 .mw-window-command:focus-visible,
-.mw-app-command:focus-visible,
-.mw-app-account__trigger:focus-visible {
+.mw-app-command:focus-visible {
   outline: 2px solid var(--mw-focus-ring);
   outline-offset: -2px;
 }
@@ -249,67 +248,6 @@
   gap: var(--mw-space-1);
   padding: var(--mw-space-2);
   border-top: 1px solid var(--mw-border-subtle);
-}
-
-.mw-app-account {
-  min-width: 0;
-}
-
-.mw-app-account > .mw-app-command,
-.mw-app-account__trigger {
-  width: 100%;
-}
-
-.mw-app-account__trigger {
-  display: grid;
-  min-height: 38px;
-  grid-template-columns: 24px minmax(0, 32px);
-  align-items: center;
-  justify-content: center;
-  gap: var(--mw-space-2);
-  padding: var(--mw-space-2);
-  border: 0;
-  border-radius: var(--mw-radius-2);
-  background: transparent;
-  color: var(--mw-text-secondary);
-  cursor: pointer;
-  text-align: center;
-}
-
-.mw-app-account__trigger:hover {
-  background: var(--mw-bg-subtle);
-  color: var(--mw-text-primary);
-}
-
-.mw-app-account__trigger:focus-visible {
-  outline: 2px solid var(--mw-focus-ring);
-  outline-offset: 2px;
-}
-
-.mw-app-account__avatar {
-  display: grid;
-  width: 24px;
-  height: 24px;
-  flex: 0 0 auto;
-  place-items: center;
-  border: 1px solid var(--mw-border-default);
-  border-radius: var(--mw-radius-full);
-  background: var(--mw-bg-surface);
-  font-size: var(--mw-type-caption-size);
-  font-weight: var(--mw-type-label-weight);
-}
-
-.mw-app-account__details {
-  min-width: 0;
-  overflow: hidden;
-}
-
-.mw-app-account__name {
-  display: block;
-  overflow: hidden;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .mw-app-command__progress {
@@ -545,8 +483,7 @@
 
   .mw-sidebar-brand__label,
   .mw-shell-nav-item__label,
-  .mw-app-command__label,
-  .mw-app-account__details {
+  .mw-app-command__label {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -560,10 +497,6 @@
     grid-template-columns: 22px;
     justify-content: center;
     padding-inline: var(--mw-space-2);
-  }
-
-  .mw-app-account__trigger {
-    grid-template-columns: 24px;
   }
 
   .mw-shell-nav-item__availability {

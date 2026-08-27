@@ -31,6 +31,18 @@ class NearbyTestProvider(LLMProvider):
         yield StreamChunk(delta_text="", done=True, finish_reason="stop")
 
 
+class NearbyCaptureProvider(NearbyTestProvider):
+    """记录每次流式调用的消息与工具列表，用于断言 Nearby 会话注入的提示内容。"""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+        self.calls.append({"messages": list(messages), "tools": tools})
+        async for chunk in super().stream_chat(messages, tools=tools, max_tokens=max_tokens):
+            yield chunk
+
+
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
@@ -163,6 +175,219 @@ async def test_nearby_agent_turn_is_text_only_and_isolated_per_peer(tmp_path):
         "你好",
         "还记得上一条消息吗？",
     ]
+
+
+@pytest.mark.asyncio
+async def test_nearby_agent_turn_room_session_isolated_and_history_truncated(tmp_path):
+    crew = build_app(
+        config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False),
+        enable_team=False,
+    )
+    provider = NearbyCaptureProvider()
+    crew.provider = provider
+    app = create_app(crew)
+    transport = ASGITransport(app=app)
+    history = [
+        {"sender": f"成员{i:02d}", "text": f"消息{i:02d}"} for i in range(25)
+    ] + [{"sender": "甲", "text": "长" * 600}]
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        dm = await client.post(
+            "/api/nearby/agent-turn",
+            json={
+                "peer_id": "ace_windows",
+                "peer_name": "Windows 工作站",
+                "request_id": "request-1",
+                "query": "你好",
+            },
+        )
+        room = await client.post(
+            "/api/nearby/agent-turn",
+            json={
+                "peer_id": "ace_windows",
+                "peer_name": "Windows 工作站",
+                "request_id": "request-2",
+                "query": "@小助手 总结一下",
+                "room_id": "room-1",
+                "room_name": "项目群",
+                "history": history,
+            },
+        )
+        other_room = await client.post(
+            "/api/nearby/agent-turn",
+            json={
+                "peer_id": "ace_windows",
+                "peer_name": "Windows 工作站",
+                "request_id": "request-3",
+                "query": "在吗",
+                "room_id": "room-2",
+            },
+        )
+
+    assert dm.status_code == 200
+    assert room.status_code == 200
+    assert other_room.status_code == 200
+    assert dm.json()["session_id"].startswith("agent:main:nearby:dm:")
+    assert room.json()["session_id"].startswith("agent:main:nearby:room:")
+    # 同一对端的群聊会话与直聊会话相互隔离；不同群之间也相互隔离
+    assert room.json()["session_id"] != dm.json()["session_id"]
+    assert other_room.json()["session_id"] != room.json()["session_id"]
+
+    # 群聊会话沿用同样的强制安全配置
+    config = crew.session_store.get_agent_config(
+        room.json()["session_id"], owner_account_id="local"
+    )
+    assert config["executor"] == "builtin"
+    assert config["disabled_toolsets"] == ["*"]
+    assert config["disabled_skills"] == ["*"]
+    assert config["nearby_text_only"] is True
+
+    hint = next(
+        str(message.content)
+        for call in provider.calls
+        for message in call["messages"]
+        if message.role == "user" and "项目群" in str(message.content)
+    )
+    assert "只需回应 @ 你或直接问你的内容" in hint
+    # 最近消息只取最后 20 条：消息06 保留、消息05 被丢弃
+    assert "消息06" in hint
+    assert "消息05" not in hint
+    # 单条消息截断到 500 字符
+    assert "长" * 500 in hint
+    assert "长" * 501 not in hint
+
+    dm_hint = next(
+        str(message.content)
+        for call in provider.calls
+        for message in call["messages"]
+        if message.role == "user" and "Bluetooth Nearby 直连的外部用户" in str(message.content)
+    )
+    assert "此会话已禁用全部工具和 Skills" in dm_hint
+
+
+@pytest.mark.asyncio
+async def test_nearby_agent_turn_allowed_toolsets(tmp_path, monkeypatch):
+    cfg = Config(
+        db_path=str(tmp_path / "crew.db"),
+        cron_enabled=False,
+        active_model_id="m1",
+        default_model_id="m1",
+        model_profiles={
+            "m1": ModelProfile(id="m1", name="M1", api_key="test-key", model="m1-model"),
+        },
+    )
+    crew = build_app(config=cfg, enable_team=False)
+    provider = NearbyCaptureProvider()
+    crew.provider = provider
+    # 用捕获型 Provider 替换按 profile 创建的客户端，避免真实网络调用；
+    # 模型能力仍来自 profile（默认含 tools），保证工具过滤链路真实生效。
+    monkeypatch.setattr(
+        "crew.app.build_provider_for_profile",
+        lambda *_args, **_kwargs: provider,
+    )
+    app = create_app(crew)
+    transport = ASGITransport(app=app)
+    all_toolsets = set(crew.registry.toolsets())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        default = await client.post(
+            "/api/nearby/agent-turn",
+            json={
+                "peer_id": "peer_default",
+                "request_id": "request-1",
+                "query": "你好",
+            },
+        )
+        empty = await client.post(
+            "/api/nearby/agent-turn",
+            json={
+                "peer_id": "peer_empty",
+                "request_id": "request-2",
+                "query": "你好",
+                "allowed_toolsets": [],
+            },
+        )
+        allowed = await client.post(
+            "/api/nearby/agent-turn",
+            json={
+                "peer_id": "peer_web",
+                "request_id": "request-3",
+                "query": "帮我查一下今天的天气",
+                "allowed_toolsets": ["web"],
+            },
+        )
+        mixed = await client.post(
+            "/api/nearby/agent-turn",
+            json={
+                "peer_id": "peer_mixed",
+                "request_id": "request-4",
+                "query": "帮我查一下今天的天气",
+                "allowed_toolsets": ["web", "bogus", "*", 42],
+            },
+        )
+
+    for resp in (default, empty, allowed, mixed):
+        assert resp.status_code == 200
+
+    def stored(resp):
+        return crew.session_store.get_agent_config(
+            resp.json()["session_id"], owner_account_id="local"
+        )
+
+    # 缺省与空数组：维持全禁，行为与之前完全一致
+    assert stored(default)["disabled_toolsets"] == ["*"]
+    assert stored(empty)["disabled_toolsets"] == ["*"]
+    # 白名单生效：全集中减去白名单
+    expected_disabled = sorted(all_toolsets - {"web"})
+    assert stored(allowed)["disabled_toolsets"] == expected_disabled
+    # 非法条目（不存在的 toolset、"*" 通配、非字符串）被忽略，不会放大权限
+    assert stored(mixed)["disabled_toolsets"] == expected_disabled
+
+    # 运行时工具范围：全禁会话没有任何工具；白名单会话只剩 web 工具集
+    default_agent = crew.agents.get(
+        default.json()["session_id"], stored(default), owner_account_id="local"
+    )
+    assert default_agent.tool_filter == []
+    allowed_agent = crew.agents.get(
+        allowed.json()["session_id"], stored(allowed), owner_account_id="local"
+    )
+    assert set(allowed_agent.tool_filter) == set(crew.registry.names_for_toolset("web"))
+
+
+@pytest.mark.asyncio
+async def test_nearby_agent_turn_rejects_invalid_room_and_whitelist_payloads(tmp_path):
+    crew = build_app(
+        config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False),
+        enable_team=False,
+    )
+    crew.provider = NearbyTestProvider()
+    app = create_app(crew)
+    transport = ASGITransport(app=app)
+    base = {
+        "peer_id": "ace_windows",
+        "request_id": "request-1",
+        "query": "你好",
+    }
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        bad_room = await client.post(
+            "/api/nearby/agent-turn",
+            json={**base, "room_id": "room/../../etc"},
+        )
+        bad_history = await client.post(
+            "/api/nearby/agent-turn",
+            json={**base, "room_id": "room-1", "history": "not-a-list"},
+        )
+        bad_history_item = await client.post(
+            "/api/nearby/agent-turn",
+            json={**base, "room_id": "room-1", "history": ["oops"]},
+        )
+        bad_allowed = await client.post(
+            "/api/nearby/agent-turn",
+            json={**base, "allowed_toolsets": "web"},
+        )
+
+    assert bad_room.status_code == 400
+    assert bad_history.status_code == 400
+    assert bad_history_item.status_code == 400
+    assert bad_allowed.status_code == 400
 
 
 @pytest.mark.asyncio

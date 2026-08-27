@@ -71,6 +71,34 @@ describe('NearbyService Agent routing', () => {
     expect(onEvent).toHaveBeenCalledTimes(5);
   });
 
+  it('skips the Agent turn when auto reply is disabled', async () => {
+    const runAgentTurn = vi.fn().mockResolvedValue('reply');
+    const service = new NearbyService({
+      repoRoot: '/tmp/ace',
+      resourcesPath: '/tmp/ace/resources',
+      isPackaged: false,
+      crewHome: '/tmp/ace/home',
+      onEvent: vi.fn(),
+      runAgentTurn,
+      autoReplyEnabled: () => false,
+    });
+    const handleLine = (service as unknown as { handleLine: LineHandler }).handleLine.bind(service);
+
+    handleLine(JSON.stringify({
+      type: 'message',
+      peer_id: 'ace_remote',
+      message: {
+        type: 'agent.request',
+        message_id: 'request-muted',
+        sender: 'ace_remote',
+        payload: { text: 'hello' },
+      },
+    }), () => undefined);
+
+    await Promise.resolve();
+    expect(runAgentTurn).not.toHaveBeenCalled();
+  });
+
   it('aborts an in-flight Agent turn when Nearby stops', async () => {
     let requestSignal: AbortSignal | undefined;
     const runAgentTurn = vi.fn((_request, signal: AbortSignal) => {
@@ -102,5 +130,50 @@ describe('NearbyService Agent routing', () => {
     expect(requestSignal?.aborted).toBe(false);
     await service.stop();
     expect(requestSignal?.aborted).toBe(true);
+  });
+
+  it('forwards room membership and settings events to onEvent unchanged', () => {
+    const onEvent = vi.fn();
+    const service = new NearbyService({
+      repoRoot: '/tmp/ace',
+      resourcesPath: '/tmp/ace/resources',
+      isPackaged: false,
+      crewHome: '/tmp/ace/home',
+      onEvent,
+    });
+    const handleLine = (service as unknown as { handleLine: LineHandler }).handleLine.bind(service);
+    const emit = (event: Record<string, unknown>) => handleLine(JSON.stringify(event), () => undefined);
+
+    emit({
+      type: 'room_member_joined',
+      room_id: 'room_1',
+      peer_id: 'ace_remote',
+      display_name: 'Windows',
+    });
+    emit({ type: 'room_member_left', room_id: 'room_1', peer_id: 'ace_remote' });
+    emit({
+      type: 'room_settings_updated',
+      room_id: 'room_1',
+      agent_mode: 'auto',
+      room_name: '新群名',
+    });
+
+    expect(onEvent).toHaveBeenNthCalledWith(1, {
+      type: 'room_member_joined',
+      room_id: 'room_1',
+      peer_id: 'ace_remote',
+      display_name: 'Windows',
+    });
+    expect(onEvent).toHaveBeenNthCalledWith(2, {
+      type: 'room_member_left',
+      room_id: 'room_1',
+      peer_id: 'ace_remote',
+    });
+    expect(onEvent).toHaveBeenNthCalledWith(3, {
+      type: 'room_settings_updated',
+      room_id: 'room_1',
+      agent_mode: 'auto',
+      room_name: '新群名',
+    });
   });
 });

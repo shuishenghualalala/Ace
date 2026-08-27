@@ -31,6 +31,7 @@ export const ICON_IDS = [
   'icon-search',
   'icon-filter',
   'icon-settings',
+  'icon-help',
   'icon-more',
   'icon-attachment',
   'icon-file',

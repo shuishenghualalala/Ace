@@ -278,6 +278,7 @@
 
   <h2>4. 变更记录</h2>
   <p><b>当前配置：</b><code>external_agents.enabled=true</code>，Desktop 与 Web 的“外援”入口保持开放。</p>
+  <p><b>2026-08-17：</b>首次登录完成后，Desktop 会在当前租户/账号下显示一次全局用户指引：使用与 Wiki、外援一致的 Spotlight 遮罩、高亮、悬浮卡、步骤切换和键盘操作，第一步先引导用户进入“设置 → 模型 → 添加模型”。左下角移除重复的账户按钮，只保留“设置”和“帮助”；帮助按钮可随时重新打开指引。模型配置不再注入不可用的 <code>default</code> 占位 profile，空模型目录会直接显示“添加模型”流程；旧式单模型配置迁移为命名 profile，仍兼容已有用户配置。</p>
   <p><b>2026-08-17：</b>邮箱登录改为按账号维持 Gateway 会话：<code>auth-session.ts</code> 登录后用当前邮箱 Cookie 验证 <code>/api/auth/session</code>，验证失败仍清理无效 Cookie 和本地持久化会话，但完整透传 Gateway 的 <code>error</code>、<code>code</code> 与 HTTP 状态码，登录界面可显示真实原因（例如“Gateway 已由其他账号登录”）。A/B 邮箱会话不再共享全局 Active Owner。</p>
   <p><b>2026-08-10：</b>灵感成果体验收敛为单一“成果卡 → 右侧预览”路径：网站、看板和 HTML 产物统一使用可点击卡片，整卡作为唯一打开入口，移除“本地 HTML · 网站”“在 Crew 打开”和打开方式菜单；生成结果不再自动抢占 Inspector。右侧网站/看板工具栏合并为“指出要修改的位置”，隐藏运行时 revision、刷新和整体/元素批注等内部概念；成果卡与右侧预览继续复用既有 InspirationSurface、ace-site:// 和批注回写链路，无新增模块或 API。</p>
   <p><b>2026-07-30：</b>Desktop 将 Sidebar“智能体”正式收敛为“外援”，外援管理页同步改名“外援中心”，四个 Tab 调整为“我的阵容 / 发现外援 / 添加外援 / 组建团队”。Runtime 仍保留明确动作“使用”，已加入阵容的 Agent/Team 改为“派活”；扫描改为“再找找”，表单改为“可用外援 / 外援称呼 / 使用模型”，内置 Leader 显示为“MobileWork”并带“内置”小标签，约束成员改为“选择外援”。首次使用引导收敛为轻量邀请和固定三步导览，开始或页头“?”均从 1/3 重播；进度不再由 Runtime/Agent 业务状态推导。导览作为 <code>document.body</code> 固定浮层停靠窗口底部，不随滚动定位、不进入文档流，滚轮可继续驱动内容区；目标通过轻描边提示，用户需要时才点“定位到操作”。我的阵容空态取消大卡边框；“发现外援”卡片移除 ACP、adapter、路径、探测信息及整个“技术详情”折叠区，首次目录为空只自动扫描一次。Composer 外援浮层的“智能体”分区及跳转提示同步改为“外援”。本次只改 Electron renderer、样式、测试和本文档，没有新增 Gateway API、数据库或九大模块。</p>
@@ -298,6 +299,7 @@
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-08-17</td><td>移除不可用的 <code>default</code> 模型占位：空模型目录不再自动补 profile，配置写回也不生成 <code>active/default</code> 字段；首次登录增加按租户/账号隔离的一次性用户指引，第一步先进入模型配置；左下角账户按钮改为统一命令样式的“帮助”，设置入口保留为唯一配置入口。</td><td><code>crew/state/config.py</code>、<code>crew/state/session_model.py</code>、<code>desktop/src/ui/features/user-guide.ts</code>、<code>application-shell.ts</code>、<code>icon.ts</code>、Desktop 单测与本文档。</td></tr>
       <tr><td>2026-08-17</td><td>邮箱登录会话验证保留 Gateway 真实错误：无效 Cookie 仍清理，<code>ACTIVE_OWNER_CONFLICT</code> 等错误的文案、代码和 HTTP 状态码透传到登录 UI。</td><td><code>desktop/src/main/auth-session.ts</code>、<code>desktop/tests/unit/auth-session.test.ts</code>、桌面认证文档。</td></tr>
       <tr><td>2026-08-10</td><td>灵感成果卡与右侧预览体验收敛：网站、看板、HTML 统一为单一可点击成果卡；去除技术类型、Crew 品牌残留和次级打开按钮；生成完成不自动展开 Inspector；网站/看板批注入口统一为“指出要修改的位置”。</td><td>chat-render、conversation-renderer、blueprint-surface、sites-page、browser-panel.css、Desktop 单测与本文档；复用现有 Surface 协议，不新增模块。</td></tr>
       <tr><td>2026-08-08</td><td>普通对话消息轨道增加窄窗口 16px 安全间距，同时保持宽窗口正文基线不变。</td><td>既有 <code>web-messages.css</code>、共享样式回归测试与本文档；无新模块、文件、API 或数据结构。</td></tr>

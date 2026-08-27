@@ -24,6 +24,7 @@ files:
   - dist/**/*
   - package.json
   - "!**/.DS_Store"
+  - "!**/*.map"
 
 # 显式排除源码与开发产物，避免进包
 # （main 移除 Playwright-managed Chromium 的意图已天然满足：此处只打包

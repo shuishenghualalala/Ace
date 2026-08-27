@@ -336,10 +336,20 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         )[:120]
         request_id = str(payload.get("request_id") or "").strip()
         query = str(payload.get("query") or "").strip()
+        # 群聊上下文（可选）：携带 room_id 即视为群内触发，与直聊会话相互隔离
+        room_id = str(payload.get("room_id") or "").strip()
+        room_name = " ".join(str(payload.get("room_name") or "").split())[:120]
+        history_raw = payload.get("history")
+        allowed_raw = payload.get("allowed_toolsets")
         if not peer_id or len(peer_id) > 128 or not all(
             char.isalnum() or char in "_.-" for char in peer_id
         ):
             return JSONResponse({"ok": False, "error": "无效的 Nearby 对端"}, status_code=400)
+        if room_id and (
+            len(room_id) > 128
+            or not all(char.isalnum() or char in "_.-" for char in room_id)
+        ):
+            return JSONResponse({"ok": False, "error": "无效的 Nearby 群聊"}, status_code=400)
         if not request_id or len(request_id) > 128 or not all(
             char.isalnum() or char in "_.:-" for char in request_id
         ):
@@ -350,19 +360,65 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 status_code=400,
             )
 
-        session_hash = hashlib.sha256(f"{owner}\0{peer_id}".encode()).hexdigest()[:32]
-        session_id = f"agent:main:nearby:dm:{session_hash}"
+        # 群聊最近消息：最多取最近 20 条，单条截断 500 字符，防上下文爆炸
+        history: list[tuple[str, str]] = []
+        if history_raw is not None:
+            if not isinstance(history_raw, list):
+                return JSONResponse(
+                    {"ok": False, "error": "无效的群聊消息上下文"}, status_code=400
+                )
+            for item in history_raw[-20:]:
+                if not isinstance(item, dict):
+                    return JSONResponse(
+                        {"ok": False, "error": "无效的群聊消息上下文"}, status_code=400
+                    )
+                sender = " ".join(str(item.get("sender") or "").split())[:120]
+                text = str(item.get("text") or "").strip()[:500]
+                if sender and text:
+                    history.append((sender, text))
+
+        # 工具白名单：仅放行显式列出的 toolset；非法条目（含 "*" 通配）忽略并告警，
+        # 缺省/为空/全部非法时维持全禁。
+        allowed_toolsets: set[str] = set()
+        disabled_toolsets: list[str] = ["*"]
+        if allowed_raw is not None:
+            if not isinstance(allowed_raw, list):
+                return JSONResponse(
+                    {"ok": False, "error": "无效的工具白名单"}, status_code=400
+                )
+            known_toolsets = set(crew.registry.toolsets())
+            for item in allowed_raw:
+                name = str(item).strip()
+                if not name or name == "*" or name not in known_toolsets:
+                    log.warning("Nearby 工具白名单忽略非法条目: %r", item)
+                    continue
+                allowed_toolsets.add(name)
+            if allowed_toolsets:
+                disabled_toolsets = sorted(known_toolsets - allowed_toolsets)
+
+        if room_id:
+            session_hash = hashlib.sha256(
+                f"{owner}\0room:{room_id}".encode()
+            ).hexdigest()[:32]
+            session_id = f"agent:main:nearby:room:{session_hash}"
+            session_title = f"Nearby · {room_name or '群聊'}"
+        else:
+            session_hash = hashlib.sha256(f"{owner}\0{peer_id}".encode()).hexdigest()[:32]
+            session_id = f"agent:main:nearby:dm:{session_hash}"
+            session_title = f"Nearby · {peer_name or '附近的用户'}"
         try:
             crew.session_store.ensure_session(
                 session_id,
                 workspace_id="default",
-                title=f"Nearby · {peer_name or '附近的用户'}",
+                title=session_title,
                 owner_account_id=owner,
             )
+            # 白名单只收紧/放开 toolset 一项；executor、skills、text_only 等
+            # 其余安全约束一律保持现状，不允许通过入参放宽。
             safe_config = {
                 "executor": "builtin",
                 "model_profile_id": "inherit",
-                "disabled_toolsets": ["*"],
+                "disabled_toolsets": disabled_toolsets,
                 "disabled_skills": ["*"],
                 "nearby_text_only": True,
             }
@@ -404,11 +460,32 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 workspace_id="default",
                 mode="agent",
             )
-            envelope.params["channel_system_hint"] = (
-                "这条消息来自通过 Bluetooth Nearby 直连的外部用户。"
-                "请直接回答对方当前的问题，不要声称访问或操作了本机资源；"
+            tools_hint = (
                 "此会话已禁用全部工具和 Skills。"
+                if not allowed_toolsets
+                else "此会话已禁用全部 Skills，仅开放工具集："
+                + "、".join(sorted(allowed_toolsets))
+                + "。"
             )
+            if room_id:
+                hint_parts = [
+                    f"你正在名为「{room_name or '群聊'}」的蓝牙 Nearby 群聊中，消息来自群内的外部用户。",
+                ]
+                if history:
+                    hint_parts.append("最近消息如下：")
+                    hint_parts.extend(f"{sender}: {text}" for sender, text in history)
+                hint_parts.append(
+                    "只需回应 @ 你或直接问你的内容，保持简洁；"
+                    "不要声称访问或操作了本机资源；"
+                    f"{tools_hint}"
+                )
+                envelope.params["channel_system_hint"] = "\n".join(hint_parts)
+            else:
+                envelope.params["channel_system_hint"] = (
+                    "这条消息来自通过 Bluetooth Nearby 直连的外部用户。"
+                    "请直接回答对方当前的问题，不要声称访问或操作了本机资源；"
+                    f"{tools_hint}"
+                )
             final_text = ""
             error_text = ""
             async for chunk in crew.dispatch(envelope):

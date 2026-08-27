@@ -25,6 +25,7 @@ export interface ApplicationShellCommands {
   close?: () => void | Promise<void>;
   update?: () => void | Promise<void>;
   settings?: () => void | Promise<void>;
+  help?: () => void | Promise<void>;
   newChat?: () => void | Promise<void>;
 }
 
@@ -169,36 +170,15 @@ export function createApplicationShell(
   const updateCommand = createCommandButton('update', '检查更新', 'icon-refresh');
   const updatePercent = document.createElement('span');
   const settingsCommand = createCommandButton('settings', '设置', 'icon-settings');
-  // ponytail: 账户入口从对话页右上角迁到导航栏底部（参考 MobileMate）。
-  // 点击由 login.ts 监听 [data-user-account-trigger] 派发 user:open-account，CSS 复用 .mw-app-account*。
-  const accountSection = document.createElement('div');
-  const accountButton = document.createElement('button');
-  const accountAvatar = document.createElement('span');
-  const accountDetails = document.createElement('span');
-  const accountName = document.createElement('span');
-  accountSection.id = 'user-section';
-  accountSection.className = 'mw-app-account';
-  accountButton.type = 'button';
-  accountButton.className = 'mw-app-account__trigger';
-  accountButton.dataset.userAccountTrigger = '';
-  accountButton.setAttribute('aria-label', '账户');
-  accountAvatar.className = 'mw-app-account__avatar';
-  accountAvatar.dataset.userAvatar = '';
-  accountAvatar.textContent = '我';
-  accountDetails.className = 'mw-app-account__details';
-  accountName.className = 'mw-app-account__name';
-  accountName.dataset.userName = '';
-  accountDetails.append(accountName);
-  accountButton.append(accountAvatar, accountDetails);
-  accountSection.append(accountButton);
+  const helpCommand = createCommandButton('help', '帮助', 'icon-help');
   updateCommand.hidden = true;
   updatePercent.id = 'version-update-percent';
   updatePercent.className = 'mw-app-command__progress';
   updatePercent.hidden = true;
   updateCommand.append(updatePercent);
   navigationFooter.append(
-    accountSection,
     updateCommand,
+    helpCommand,
     settingsCommand,
   );
   navigation.append(productBrand, navigationList, navigationFooter);

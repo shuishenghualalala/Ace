@@ -29,10 +29,10 @@ def default_model_id(
 ) -> str:
     """新建会话与孤儿绑定的回退模型 id。"""
     catalog = _catalog(cfg, profiles)
-    preferred = str(preferred_model_id or cfg.default_model_id or cfg.active_model_id or "default")
+    preferred = str(preferred_model_id or cfg.default_model_id or cfg.active_model_id or "")
     if preferred in catalog and catalog[preferred].loaded:
         return preferred
-    active = str(cfg.active_model_id or "default")
+    active = str(cfg.active_model_id or "")
     if active in catalog and catalog[active].loaded:
         return active
     if catalog:
@@ -47,7 +47,7 @@ def resolve_profile_id(
     *,
     fallback_model_id: str | None = None,
 ) -> str:
-    """校验 profile 存在；无效则回退 default。"""
+    """校验 profile 存在；无效则回退当前可用模型。"""
     catalog = _catalog(cfg, profiles)
     mid = str(model_id or "").strip()
     if not mid or mid == "inherit":
