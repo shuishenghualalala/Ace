@@ -15,6 +15,17 @@ import { isPlanDocumentPath } from '../plan-document-path';
 import { newMessageId, state } from '../state';
 import { sessionDisplayModelLabel, sessionMessageModelLabel } from './session-model';
 
+export function backendDurationToMs(value: unknown): number {
+  const seconds = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return 0;
+  const now = Date.now();
+  if (
+    (seconds >= 1_000_000_000 && seconds <= now / 1000 + 366 * 24 * 60 * 60)
+    || (seconds >= 1_000_000_000_000 && seconds <= now + 366 * 24 * 60 * 60 * 1000)
+  ) return 0;
+  return Math.round(seconds * 1000);
+}
+
 export function makeSessionTitle(text: string): string {
   return text.trim().slice(0, 18) || '新对话';
 }
@@ -254,7 +265,7 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
       result: tc.result,
       status: normalizeHistoryToolStatus(tc.status, tc.result, tc.duration),
       startedAt: tc.started_at != null ? tc.started_at * 1000 : 0,
-      duration: tc.duration != null ? Math.round(tc.duration * 1000) : 0,
+      duration: tc.duration != null ? backendDurationToMs(tc.duration) : 0,
     })),
   };
   if (role === 'assistant' || role === 'team_internal') {

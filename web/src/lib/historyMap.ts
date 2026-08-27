@@ -87,7 +87,7 @@ function mapToolCalls(
     result: tc.result ?? "",
     status: tc.status ?? "done",
     startedAt: backendSecondsToMs(tc.started_at) ?? 0,
-    duration: backendDurationToMs(tc.duration),
+    duration: tc.duration == null ? undefined : backendDurationToMs(tc.duration) || undefined,
   }));
 }
 

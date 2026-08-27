@@ -2,7 +2,7 @@
  * Team Session「协作」看板测试。
  *
  * 覆盖 Desktop TypeScript DOM 对 Web TaskBoard 的核心数据与 UI 契约：
- * DAG 分层、状态归一、团队成员、节点摘要、产物、执行日志和运行态。
+ * DAG 分层、状态归一、团队成员、节点摘要、产物、消息定位和运行态。
  *
  * @vitest-environment happy-dom
  */
@@ -16,6 +16,7 @@ import {
   makeTeamFlowNodes,
   makeTeamFlowTurns,
   normalizeTeamFlowStatus,
+  nodeMessageId,
   primeTeamCollaborationIdentity,
   refreshTeamCollaborationBoard,
   resolveTeamCollaborationMember,
@@ -270,8 +271,15 @@ describe('协作看板 HTML', () => {
     const expandedHtml = buildTeamCollaborationBoardHtml(SESSION_ID);
     expect(expandedHtml).toContain('产物文件');
     expect(expandedHtml).toContain('data-team-open-path="/tmp/team-board.ts"');
-    expect(expandedHtml).toContain('执行详情');
-    expect(expandedHtml).toContain('工具调用：apply_patch');
+    expect(expandedHtml).not.toContain('执行详情');
+    expect(expandedHtml).not.toContain('工具调用：apply_patch');
+  });
+
+  it('为节点生成对应团队消息的定位目标', () => {
+    const node = makeTeamFlowNodes([tasks[1]])[0];
+    expect(nodeMessageId(node, [
+      { id: 'team-build', role: 'team_internal', content: '已完成', timestamp: 1, nodeId: 'build' },
+    ])).toBe('team-build');
   });
 
   it('在成员卡片提供按成员切换模型的入口', async () => {

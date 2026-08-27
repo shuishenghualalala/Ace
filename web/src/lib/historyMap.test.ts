@@ -7,6 +7,7 @@ import {
   type BackendHistoryItem,
 } from "./historyMap";
 import { mergeTeamInternalMessage } from "./teamMessageMerge";
+import { backendDurationToMs } from "./backendTime";
 import type { UiMessage } from "../types";
 
 const teamItem = (overrides: Partial<BackendHistoryItem>): BackendHistoryItem => ({
@@ -19,6 +20,13 @@ const teamItem = (overrides: Partial<BackendHistoryItem>): BackendHistoryItem =>
   display_mode: "stream",
   timestamp: 1,
   ...overrides,
+});
+
+describe("backendDurationToMs", () => {
+  it("does not render an epoch timestamp as an elapsed duration", () => {
+    expect(backendDurationToMs(Math.floor(Date.now() / 1000))).toBe(0);
+    expect(backendDurationToMs(1.2)).toBe(1200);
+  });
 });
 
 describe("preserveLocalProcessDetails", () => {

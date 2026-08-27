@@ -715,4 +715,13 @@ graph TD
 <p>WorkflowPlan 节点补充必要的展示字段与节点契约投影，TeamPlan/看板继续保存状态、结果、重试、产物和运行事件；运行态不会反写任务语义。修复同时兼容 <code>assignee</code>/<code>assignee_id</code>，保持旧入口、成员执行、Fast 模式、恢复和 Web/Desktop 看板展示不变。本阶段未新增模块、数据库表或接口。</p>
 <p>验证：<code>tests/test_team_tasks.py</code> 为 <code>246 passed, 1 skipped</code>，新增快照单源与旧事件恢复回归；相关 Python 编译检查、Ruff 和 <code>git diff --check</code> 通过。</p>
 
+<h2>2026-08-27 Team 真实验收：耗时、产物与看板定位收敛</h2>
+<ul>
+  <li><b>耗时边界：</b>工具/回合耗时统一按 elapsed seconds 传输；Gateway、Team 历史投影和 Web/Desktop 映射会丢弃误存为 Unix 时间戳的旧值，不再展示 <code>external_tool 496609h 13m</code> 这类异常数据。正常耗时保持不变，历史原始记录不被改写。</li>
+  <li><b>产物边界：</b>方案/设计节点先登记成员实际写出的具体文件；只有当前节点没有可打开的显式文件产物时，才生成兜底 Markdown。成员已生成 <code>拳皇街机小游戏Demo方案.md</code> 时，不再额外展示内容近似会话总结的 <code>端到端实现方案.md</code>。</li>
+  <li><b>看板边界：</b>Web/Desktop 移除节点内“执行详情”时间线，不再把 thinking/tool 的碎片直接展示给用户；结构化 <code>execution_events</code> 仍保留在后端用于审计和排查。节点展开区保留摘要、状态、耗时、产物和恢复动作，并增加“定位”按钮跳转到对应团队消息。</li>
+  <li><b>功能影响：</b>本次只调整历史展示、产物选择和看板信息层级，不改变 DAG、Runtime 补员、成员执行、TeamSpec 或模型切换语义；文件打开、节点取消和阻塞恢复继续沿用原入口。</li>
+  <li><b>验证：</b>Web 全量 <code>26 files / 177 passed</code>，Desktop 全量 <code>149 files / 1729 passed</code>；后端 Team/Gateway 回归 <code>274 passed, 1 skipped</code>，Ruff、Python 编译、Web/Desktop TypeScript、两端构建和 Desktop CSS lint 均通过。</li>
+</ul>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

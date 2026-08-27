@@ -60,6 +60,7 @@ from crew.team.models import RuntimeStaffingRequest, TeamMemberSpec, TeamPlan, T
 from crew.team.result_presenter import (
     assignment_text,
     artifact_filename,
+    has_explicit_file_artifact,
     node_dict_assignment_text,
     node_dict_should_show_assignment,
     node_display_progress,
@@ -1539,6 +1540,12 @@ def test_team_markdown_artifact_uses_business_filename(tmp_path):
     existing = tmp_path / "功能测试方案.md"
     existing.write_text("old", encoding="utf-8")
     assert unique_artifact_path(tmp_path, "功能测试方案.md").name == "功能测试方案-2.md"
+
+
+def test_review_node_does_not_add_summary_artifact_when_member_wrote_file():
+    assert has_explicit_file_artifact([{"path": "/tmp/拳皇街机小游戏Demo方案.md"}]) is True
+    assert has_explicit_file_artifact([{"artifact_id": "artifact-1"}]) is False
+    assert has_explicit_file_artifact([]) is False
 
 
 def test_team_node_owned_artifacts_filters_concurrent_member_artifacts():

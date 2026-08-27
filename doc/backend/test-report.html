@@ -5283,6 +5283,16 @@ cd web &amp;&amp; npm run build
     </ul>
   </section>
 
+  <section class="rounded-2xl border border-amber-700 bg-slate-900/70 p-6 mt-6">
+    <h2 class="text-xl font-bold mb-3">2026-08-27 Team 真实验收修复</h2>
+    <ul>
+      <li><b>回归范围：</b>异常工具耗时历史投影、方案节点显式文件产物优先、Web/Desktop 看板节点消息定位，以及移除内部执行详情时间线。</li>
+      <li><b>测试结果：</b>Web <code>26 files / 177 passed</code>；Desktop <code>149 files / 1729 passed</code>；后端 Team/Gateway <code>274 passed, 1 skipped</code>。</li>
+      <li><b>静态检查：</b>Ruff、Python 编译、Web/Desktop TypeScript、两端 production build、Desktop CSS lint 均通过。</li>
+      <li><b>环境说明：</b>Desktop 全量测试输出中的既有 <code>127.0.0.1:8000 EPERM</code> 是本机未开放本地 Gateway 的环境提示，对应测试仍通过。</li>
+    </ul>
+  </section>
+
   <footer class="border-t border-slate-700 mt-12 pt-6 text-center text-sm text-slate-500">
     Crew 测试报告 · 后续每次开发交付前更新本报告
   </footer>

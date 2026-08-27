@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from crew.core.types import Message
+from crew.core.types import Message, safe_duration_seconds
 from crew.team.result_presenter import (
     is_team_chat_noise,
     node_display_progress,
@@ -69,7 +69,7 @@ def project_team_event_history(store: Any, workflow_ids: list[str]) -> list[dict
                 "collapsed_title": str(payload.get("collapsed_title") or ""),
                 "process_text": str(payload.get("process_text") or ""),
                 "thinking": normalize_legacy_chunked_thinking(str(payload.get("thinking") or "")),
-                "tool_calls": list(payload.get("tool_calls") or []),
+                "tool_calls": _safe_tool_calls(payload.get("tool_calls")),
                 "artifacts": list(payload.get("artifacts") or []),
                 "turn_file_changes": list(payload.get("turn_file_changes") or []),
                 "mention_from": str(payload.get("mention_from") or ""),
@@ -81,7 +81,11 @@ def project_team_event_history(store: Any, workflow_ids: list[str]) -> list[dict
                 "communication_status": str(payload.get("communication_status") or ""),
                 "timestamp": float(event.ts or 0),
                 **({"turn_started_at": payload.get("turn_started_at")} if payload.get("turn_started_at") is not None else {}),
-                **({"turn_duration": payload.get("turn_duration")} if payload.get("turn_duration") is not None else {}),
+                **(
+                    {"turn_duration": turn_duration}
+                    if (turn_duration := safe_duration_seconds(payload.get("turn_duration"))) is not None
+                    else {}
+                ),
             })
     for item in items:
         request_id = str(item.get("request_id") or "").strip()
@@ -216,9 +220,33 @@ def _message_tool_calls(message) -> list[dict[str, Any]]:
             "status": tc.status,
             **({"ui_label": tc.ui_label} if tc.ui_label else {}),
             **({"started_at": tc.started_at} if tc.started_at is not None else {}),
-            **({"duration": tc.duration} if tc.duration is not None else {}),
+            **(
+                {"duration": duration}
+                if (duration := safe_duration_seconds(tc.duration)) is not None
+                else {}
+            ),
         })
     return tool_calls
+
+
+def _safe_tool_calls(value: Any) -> list[dict[str, Any]]:
+    """Normalize persisted Team tool calls before exposing them to history UI."""
+
+    if not isinstance(value, list):
+        return []
+    calls: list[dict[str, Any]] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        call = dict(raw)
+        if "duration" in call:
+            duration = safe_duration_seconds(call.get("duration"))
+            if duration is None:
+                call.pop("duration", None)
+            else:
+                call["duration"] = duration
+        calls.append(call)
+    return calls
 
 
 def _team_internal_member_profiles(

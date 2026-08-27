@@ -80,7 +80,7 @@ import {
 } from '../followup';
 import type { FollowupAnswer } from '../backend-client';
 import type { ChatChunk, WikiIngestProgress } from '../backend-client';
-import { makeSessionTitle, mergeTeamInternalMessage, normalizeTurnFileChanges } from './history-mapping';
+import { backendDurationToMs, makeSessionTitle, mergeTeamInternalMessage, normalizeTurnFileChanges } from './history-mapping';
 import { applyFoldState, createChatRenderCoalescer, createStreamingPatchCoalescer } from '../render-utils';
 import { getToolFold, setToolFold } from './fold-state';
 import { renderSecurityBanner } from './security-banner';
@@ -922,7 +922,9 @@ function normalizeTeamToolCalls(raw: unknown): ToolCallInfo[] | undefined {
       ...(typeof value.result === 'string' ? { result: value.result } : {}),
       status,
       startedAt: backendSecondsToMs(value.started_at, 0),
-      ...(typeof value.duration === 'number' ? { duration: value.duration * 1000 } : {}),
+      ...(typeof value.duration === 'number' && backendDurationToMs(value.duration) > 0
+        ? { duration: backendDurationToMs(value.duration) }
+        : {}),
     };
   });
   return calls.length ? calls : undefined;

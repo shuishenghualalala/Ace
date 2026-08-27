@@ -14,6 +14,7 @@ vi.mock('../../src/ui/features/session-model', () => ({
 }));
 
 import {
+  backendDurationToMs,
   filterExistingTurnFileChanges,
   inferTurnFileChangesFromToolCalls,
   mapBackendHistoryItem,
@@ -24,6 +25,11 @@ import type { BackendHistoryItem } from '../../src/ui/backend-client';
 import type { TurnFileChangeSummary } from '../../src/ui/chat-render';
 
 describe('mapBackendHistoryItem turnFileChanges', () => {
+  it('does not render an epoch timestamp as an elapsed duration', () => {
+    expect(backendDurationToMs(Math.floor(Date.now() / 1000))).toBe(0);
+    expect(backendDurationToMs(1.2)).toBe(1_200);
+  });
+
   it('历史消息优先保留生成当时的模型', () => {
     const msg = mapBackendHistoryItem({
       role: 'assistant',

@@ -450,6 +450,12 @@ def artifact_cards(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return cards
 
 
+def has_explicit_file_artifact(artifacts: list[dict[str, Any]]) -> bool:
+    """Whether a node already produced a concrete file that users can open."""
+
+    return any(str(item.get("path") or "").strip() for item in artifacts)
+
+
 def assignment_text(node: TeamPlanNode) -> str:
     return _assignment_text_for(
         node_id=node.node_id,

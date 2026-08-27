@@ -48,7 +48,7 @@ function normalizeChunkToolCalls(raw: unknown): ToolCallInfo[] | undefined {
       result: typeof value.result === "string" ? value.result : "",
       status: value.status === "running" || value.status === "error" ? value.status : "done",
       startedAt: typeof value.started_at === "number" ? value.started_at * 1000 : 0,
-      duration: typeof value.duration === "number" ? value.duration * 1000 : undefined,
+      duration: typeof value.duration === "number" ? backendDurationToMs(value.duration) || undefined : undefined,
     } satisfies ToolCallInfo;
   });
   return calls.length > 0 ? calls : undefined;

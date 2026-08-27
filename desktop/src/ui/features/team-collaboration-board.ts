@@ -87,14 +87,6 @@ interface TeamBoardSnapshot {
   loaded: boolean;
 }
 
-interface NodeLogEntry {
-  id: string;
-  kind: 'thinking' | 'tool' | 'assistant' | 'status';
-  title: string;
-  body: string;
-  icon?: string;
-}
-
 interface SessionFileItem {
   key: string;
   title: string;
@@ -172,7 +164,6 @@ const stableNodes = new Map<string, TeamFlowNode[]>();
 const expandedTurns = new Map<string, Set<string>>();
 const knownTurns = new Map<string, Set<string>>();
 const expandedNodes = new Map<string, Set<string>>();
-const openExecutions = new Map<string, Set<string>>();
 const filesOpen = new Set<string>();
 const stableProgress = new Map<string, { turnId: string; completed: number; total: number; percent: number }>();
 const refreshInFlight = new Set<string>();
@@ -422,6 +413,19 @@ function planNodeId(node: TeamFlowNode): string {
   return String(node.raw.progress?.plan_node_id || node.id || '').trim();
 }
 
+export function nodeMessageId(node: TeamFlowNode, messages: ChatMessage[]): string {
+  const nodeIds = new Set(
+    [planNodeId(node), node.raw.task_id, node.raw.id]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean),
+  );
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.nodeId && nodeIds.has(String(message.nodeId).trim())) return message.id;
+  }
+  return '';
+}
+
 function parentNodeIds(node: TeamFlowNode): string[] {
   return stringList(node.raw.progress?.parent_node_ids);
 }
@@ -560,47 +564,6 @@ function durationLabel(task: Task): string {
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   return seconds % 60 ? `${minutes}m ${seconds % 60}s` : `${minutes}m`;
-}
-
-function logText(value: unknown): string {
-  const text = String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n{4,}/g, '\n\n\n').trim();
-  return text.length > 1_600 ? `${text.slice(0, 1_600)}\n...` : text;
-}
-
-function nodeLogs(node: TeamFlowNode): NodeLogEntry[] {
-  const entries: NodeLogEntry[] = [];
-  const seen = new Set<string>();
-  const add = (entry: NodeLogEntry): void => {
-    const key = `${entry.kind}:${entry.title}:${entry.body.slice(0, 180)}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      entries.push(entry);
-    }
-  };
-  const events = Array.isArray(node.raw.progress?.execution_events)
-    ? node.raw.progress.execution_events as Record<string, unknown>[]
-    : [];
-  for (const event of events.slice(-6)) {
-    const rawKind = String(event.kind || event.event_type || 'status');
-    const title = String(event.event_title || event.title || '执行事件');
-    const body = logText(event.event_text || event.body || event.message);
-    if (title === '节点承接') continue;
-    const kind: NodeLogEntry['kind'] = rawKind === 'tool' || rawKind === 'thinking' || rawKind === 'assistant' ? rawKind : 'status';
-    add({ id: String(event.id || `${node.id}_event_${entries.length}`), kind, title, body, icon: String(event.event_icon || rawKind) });
-  }
-  if (!entries.length && node.raw.error) add({ id: `${node.id}_error`, kind: 'tool', title: '错误日志', body: logText(node.raw.error), icon: 'tool' });
-  return entries.slice(-8);
-}
-
-function logIcon(entry: NodeLogEntry): string {
-  const icon = String(entry.icon || entry.kind).toLowerCase();
-  if (entry.kind === 'thinking' || icon.includes('think')) return '思';
-  if (entry.kind === 'tool' || icon.includes('tool')) return '工';
-  if (entry.kind === 'assistant' || icon.includes('assistant')) return '答';
-  if (icon.includes('route') || icon.includes('replan')) return '路';
-  if (icon.includes('alert')) return '!';
-  if (icon.includes('spark') || icon.includes('reflection')) return '省';
-  return '态';
 }
 
 function compactRolePhrase(value: string, max = 10): string {
@@ -826,7 +789,6 @@ export function __resetTeamCollaborationBoardForTest(): void {
   expandedTurns.clear();
   knownTurns.clear();
   expandedNodes.clear();
-  openExecutions.clear();
   filesOpen.clear();
   stableProgress.clear();
   refreshInFlight.clear();
@@ -901,11 +863,9 @@ function renderNode(
   if (!isExpanded) {
     return `<article class="flow-node is-${node.status}"><div class="flow-node__card"><button class="flow-node__summary-btn" type="button" data-team-node="${htmlAttr(node.id)}" aria-expanded="false"><div class="flow-node__top"><span class="agent-chip">主责：${escapeHtml(displayAgent)}</span><span class="flow-status is-${node.status}">${statusLabel[node.status]}</span></div><strong class="flow-node__title" title="${htmlAttr(node.fullTitle || node.title)}">${escapeHtml(node.title)}</strong>${dependency ? `<span class="flow-node__dependency">依赖：${escapeHtml(dependency)}</span>` : ''}<span class="flow-node__hint">点击展开详情</span></button></div></article>`;
   }
-  const logs = nodeLogs(node);
   const paths = artifactPaths(node.raw);
   const duration = durationLabel(node.raw);
-  const toolCount = logs.filter((entry) => entry.kind === 'tool').length;
-  const executionOpen = openExecutions.get(sessionId)?.has(node.id) || false;
+  const messageId = nodeMessageId(node, messages);
   const summaryItems = node.summaryItems.length ? node.summaryItems : [node.summary];
   const recoveryMembers = members.filter((member) => !member.isLeader && member.name);
   const recoveryActions = node.status === 'blocked'
@@ -916,7 +876,7 @@ function renderNode(
     <div class="flow-node__detail">
       <section class="flow-node__brief" aria-label="节点摘要"><div class="flow-node__meta-line"><span>负责人 ${escapeHtml(displayAgent)}</span>${assignmentDetail}<span>${statusLabel[node.status]}</span>${duration ? `<span>${duration}</span>` : ''}</div>${node.fullTitle && node.fullTitle !== node.title ? `<p class="flow-node__full-title">节点任务：${escapeHtml(node.fullTitle)}</p>` : ''}<ul class="flow-node__brief-list">${summaryItems.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul></section>
       ${paths.length ? `<section class="flow-node__artifacts"><span>产物</span>${paths.map((path) => `<button type="button" data-team-open-path="${htmlAttr(path)}" title="${htmlAttr(path)}"><i class="flow-node__file-icon" aria-hidden="true"></i><strong>${escapeHtml(fileNameOf(path))}</strong></button>`).join('')}</section>` : ''}
-      <details class="flow-node__execution" data-team-execution="${htmlAttr(node.id)}"${executionOpen ? ' open' : ''}><summary><span>执行详情</span><em>${logs.length} 条事件${toolCount ? ` · ${toolCount} 个工具` : ''}</em></summary>${logs.length ? `<div class="flow-node__timeline">${logs.map((entry) => `<article class="flow-log is-${entry.kind}"><span class="flow-log__icon" aria-hidden="true">${logIcon(entry)}</span><div class="flow-log__body"><strong>${escapeHtml(entry.title)}</strong><pre>${escapeHtml(entry.body)}</pre></div></article>`).join('')}</div>` : '<p class="flow-node__log-empty">暂无执行日志</p>'}</details>
+      ${messageId ? `<div class="flow-node__actions flow-node__locate-actions"><button class="mini-cancel flow-node__locate" type="button" data-team-locate-message="${htmlAttr(messageId)}">定位</button></div>` : ''}
       ${recoveryActions}${['pending', 'running'].includes(node.raw.status) ? `<div class="flow-node__actions"><button class="mini-cancel" type="button" data-team-cancel-task="${htmlAttr(node.raw.task_id || node.raw.id)}">取消节点</button></div>` : ''}
     </div>
   </div></article>`;
@@ -1045,14 +1005,19 @@ export function activateTeamCollaborationBoard(sessionId: string | null | undefi
       window.dispatchEvent(new CustomEvent('team-collaboration:updated', { detail: { sessionId } }));
     });
   });
-  document.querySelectorAll<HTMLDetailsElement>('[data-team-execution]').forEach((details) => {
-    details.addEventListener('toggle', () => {
-      const id = details.dataset.teamExecution;
-      if (!id) return;
-      const values = openExecutions.get(sessionId) || new Set<string>();
-      if (details.open) values.add(id);
-      else values.delete(id);
-      openExecutions.set(sessionId, values);
+  document.querySelectorAll<HTMLButtonElement>('[data-team-locate-message]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const messageId = button.dataset.teamLocateMessage;
+      if (!messageId) return;
+      const target = Array.from(document.querySelectorAll<HTMLElement>('[data-message-id]'))
+        .find((element) => element.dataset.messageId === messageId);
+      if (!target) {
+        notify('暂时找不到对应的团队消息');
+        return;
+      }
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target.classList.add('msg--located');
+      window.setTimeout(() => target.classList.remove('msg--located'), 1_400);
     });
   });
   document.querySelectorAll<HTMLButtonElement>('[data-team-open-path]').forEach((button) => {

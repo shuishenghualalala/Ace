@@ -18,7 +18,7 @@ from crew.agent.loop.tool_result_display import (
     SUBAGENT_FULL_RESULT_TOOLS,
     tool_result_detail_for_ui,
 )
-from crew.core.types import Message, ToolCall, tool_arguments_for_ui
+from crew.core.types import Message, ToolCall, safe_duration_seconds, tool_arguments_for_ui
 from crew.gateway.auth import account_from_request
 from crew.gateway.helpers import require_external_agents_enabled, with_session_agent_labels
 from crew.gateway.hooks import hook_registry
@@ -109,8 +109,9 @@ def _session_messages_to_history_items(
                 item["timestamp"] = message.timestamp
             if message.turn_started_at is not None:
                 item["turn_started_at"] = message.turn_started_at
-            if message.turn_duration is not None:
-                item["turn_duration"] = message.turn_duration
+            turn_duration = safe_duration_seconds(message.turn_duration)
+            if turn_duration is not None:
+                item["turn_duration"] = turn_duration
             if message.turn_file_changes:
                 item["turn_file_changes"] = message.turn_file_changes
             if message.thinking is not None:
@@ -127,7 +128,11 @@ def _session_messages_to_history_items(
                         "status": tc.status,
                         **({"ui_label": tc.ui_label} if tc.ui_label else {}),
                         **({"started_at": tc.started_at} if tc.started_at is not None else {}),
-                        **({"duration": tc.duration} if tc.duration is not None else {}),
+                        **(
+                            {"duration": duration}
+                            if (duration := safe_duration_seconds(tc.duration)) is not None
+                            else {}
+                        ),
                     }
                     for tc in message.tool_calls
                 ]

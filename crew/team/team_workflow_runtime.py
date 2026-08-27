@@ -959,20 +959,7 @@ class TeamWorkflowRuntime:
                             owner_account_id=envelope.user_id,
                             event=runtime_event,
                         )
-                    if is_review_submission and node_result:
-                        auto_artifact = self.host._write_node_markdown_artifact(
-                            envelope,
-                            team=dispatch_team,
-                            node=node,
-                            task_id=task_id,
-                            content=node_result,
-                        )
-                        if auto_artifact:
-                            artifacts.extend(team_presenter.artifact_cards([auto_artifact]))
-                            artifact_ref = str(auto_artifact.get("path") or auto_artifact.get("artifact_id") or "")
-                            if artifact_ref and artifact_ref not in artifact_refs:
-                                artifact_refs.append(artifact_ref)
-                    elif node_result:
+                    if node_result:
                         runtime_artifact_text = "\n".join(
                             str(item.get("event_text") or "")
                             for item in member_runtime_events.get(node.node_id, [])
@@ -994,6 +981,23 @@ class TeamWorkflowRuntime:
                                 artifact_ref = str(artifact.get("path") or artifact.get("artifact_id") or "")
                                 if artifact_ref and artifact_ref not in artifact_refs:
                                     artifact_refs.append(artifact_ref)
+                    if (
+                        is_review_submission
+                        and node_result
+                        and not team_presenter.has_explicit_file_artifact(artifacts)
+                    ):
+                        auto_artifact = self.host._write_node_markdown_artifact(
+                            envelope,
+                            team=dispatch_team,
+                            node=node,
+                            task_id=task_id,
+                            content=node_result,
+                        )
+                        if auto_artifact:
+                            artifacts.extend(team_presenter.artifact_cards([auto_artifact]))
+                            artifact_ref = str(auto_artifact.get("path") or auto_artifact.get("artifact_id") or "")
+                            if artifact_ref and artifact_ref not in artifact_refs:
+                                artifact_refs.append(artifact_ref)
                     result_summary = team_presenter.business_result_summary(
                         node,
                         node_result,
