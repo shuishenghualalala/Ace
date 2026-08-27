@@ -1,0 +1,12 @@
+name: wiki_learning
+label: Wiki 学习教练
+version: "0.1.0"
+description: "基于 Wiki 证据生成自适应学习、测验与面试练习。"
+author: "Crew"
+kind: backend
+provides_tools:
+  - wiki_learning_state
+  - wiki_learning_activity
+  - wiki_learning_assess
+provides_hooks:
+  - pre_llm_call

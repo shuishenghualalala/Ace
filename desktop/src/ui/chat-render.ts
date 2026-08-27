@@ -24,6 +24,7 @@ import { imageDisplayUrl, isAbsoluteLocalPath, screenshotResultPath } from './to
 import { buildChippedNodes } from './features/composer-mention';
 import { isPlanDocumentPath } from './plan-document-path';
 import { createIcon, type IconId } from './components/icon';
+import { renderToolInteractionCard } from './components/interaction-card';
 
 export type MessageRole = 'user' | 'assistant' | 'status' | 'error' | 'team_internal';
 
@@ -1107,6 +1108,8 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
       for (const t of m.toolCalls) {
         const confirmation = parseWikiConfirmation(t);
         if (confirmation) textParts.push(renderWikiConfirmationCard(confirmation));
+        const interaction = renderToolInteractionCard(t);
+        if (interaction) textParts.push(interaction);
       }
     }
     if (m.planReview) {

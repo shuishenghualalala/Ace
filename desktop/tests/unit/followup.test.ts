@@ -245,6 +245,10 @@ describe('runtime staffing follow-up presentation', () => {
     expect(html).not.toContain('followup-card--permission');
     expect(html).toContain('data-action="cancel"');
     expect(html).toContain('>提交</button>');
+    const root = document.createElement('div');
+    root.innerHTML = html;
+    expect(Array.from(root.querySelectorAll('.followup-card__option-key'))
+      .map((item) => item.textContent)).toEqual(['A', 'B', 'C']);
   });
 });
 

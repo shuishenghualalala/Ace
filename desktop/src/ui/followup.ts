@@ -328,20 +328,23 @@ function followupOptionsHtml(
   includeFreeText = question.allowFreeText,
 ): string {
   const inputType = question.multiSelect ? 'checkbox' : 'radio';
-  const optionHtml = options.map((option) => {
+  const optionHtml = options.map((option, index) => {
     const description = option.description
       ? `<span class="followup-card__option-description">${escapeHtml(option.description)}</span>`
       : '';
+    const optionKey = index < 26 ? String.fromCharCode(65 + index) : String(index + 1);
     return `
       <label class="followup-card__option">
         <input type="${inputType}" name="followup_${escapeHtml(question.id)}" value="${escapeHtml(option.value)}" data-qid="${escapeHtml(question.id)}" />
+        <span class="followup-card__option-key" aria-hidden="true">${optionKey}</span>
         <span class="followup-card__option-copy"><span>${escapeHtml(option.label)}</span>${description}</span>
       </label>`;
   }).join('');
   const freeTextOption = includeFreeText ? `
       <label class="followup-card__option followup-card__option--free">
         <input type="${inputType}" name="followup_${escapeHtml(question.id)}" value="${FREE_TEXT_OPTION}" data-qid="${escapeHtml(question.id)}" data-free="1" />
-        <span>其他（自定义输入）</span>
+        <span class="followup-card__option-key" aria-hidden="true">＋</span>
+        <span class="followup-card__option-copy"><span>其他（自定义输入）</span></span>
       </label>
       <input type="text" class="followup-card__free-input" data-qid="${escapeHtml(question.id)}" placeholder="请输入你的回答…" hidden />`
     : '';

@@ -50,6 +50,38 @@ describe('toolIconKind（时间线工具图标分类）', () => {
 });
 
 describe('renderAgentTurn', () => {
+  it('renders Wiki learning activities outside the collapsed tool timeline', () => {
+    const root = renderAgentTurn(makeMessages({
+      toolCalls: [{
+        toolCallId: 'learning-1',
+        name: 'wiki_learning_activity',
+        status: 'done',
+        startedAt: 1,
+        args: JSON.stringify({ action: 'create' }),
+        result: JSON.stringify({
+          activity: {
+            id: 'activity-1',
+            activity_type: 'quiz',
+            prompt: '选择正确答案',
+            public_payload: {
+              schema: 'crew.interaction.v1',
+              interaction: { options: [{ id: 'A', label: '答案 A' }] },
+            },
+          },
+        }),
+      }],
+    }), {
+      isStreaming: false,
+      userPinnedOpen: null,
+      turnDurationMs: 1_000,
+    });
+
+    const card = root.querySelector('.interaction-card');
+    expect(card).not.toBeNull();
+    expect(card?.closest('.msg__foldable')).toBeNull();
+    expect(card?.textContent).toContain('选择正确答案');
+  });
+
   it('普通 Crew 回合与生成占位复用智能体页 Q 版耳机机器人头像', () => {
     const turn = renderAgentTurn(makeMessages({ thinking: undefined }), {
       isStreaming: false,
