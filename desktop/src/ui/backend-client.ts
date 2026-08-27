@@ -308,6 +308,16 @@ export interface BackendHistoryFileChange {
 export interface BackendHistoryItem {
   role: string;
   content: string;
+  name?: string;
+  message_id?: string;
+  origin?: {
+    source?: string;
+    sender_kind?: 'human' | 'agent';
+    sender_id?: string;
+    sender_name?: string;
+    is_self?: boolean;
+    delivery_state?: string;
+  };
   timestamp?: number;
   turn_started_at?: number;
   turn_duration?: number;
@@ -1610,13 +1620,21 @@ export const backendApi = {
       '/api/companion/files/prepare',
       { method: 'POST', ...jsonBody(attachment) },
     ),
-  companionSettleOutbox: (eventId: string, delivered: boolean) =>
-    getJSON<{ ok: boolean }>(
+  companionSettleOutbox: (
+    eventId: string,
+    status: 'queued' | 'sending' | 'sent' | 'delivered' | 'failed',
+  ) =>
+    getJSON<{ ok: boolean; status: string }>(
       `/api/companion/outbox/${encodeURIComponent(eventId)}/settle`,
-      { method: 'POST', ...jsonBody({ delivered }) },
+      { method: 'POST', ...jsonBody({ status }) },
     ),
   companionLinkState: (event: Record<string, unknown>) =>
-    getJSON<{ ok: boolean }>('/api/companion/link-state', {
+    getJSON<{
+      ok: boolean;
+      appended?: boolean;
+      binding?: CompanionConversationBinding;
+      attachment?: Attachment;
+    }>('/api/companion/link-state', {
       method: 'POST',
       ...jsonBody(event),
     }),

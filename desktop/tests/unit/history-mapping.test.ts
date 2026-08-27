@@ -24,6 +24,24 @@ import type { BackendHistoryItem } from '../../src/ui/backend-client';
 import type { TurnFileChangeSummary } from '../../src/ui/chat-render';
 
 describe('mapBackendHistoryItem turnFileChanges', () => {
+  it('restores Companion sender identity and stable message id', () => {
+    const msg = mapBackendHistoryItem({
+      role: 'user',
+      content: '来自同伴的消息',
+      name: '林墨',
+      message_id: 'remote-1',
+      origin: {
+        source: 'companion', sender_kind: 'human', sender_id: 'peer-1',
+        sender_name: '林墨', is_self: false, delivery_state: 'delivered',
+      },
+    });
+
+    expect(msg.id).toBe('remote-1');
+    expect(msg.companionAuthor).toEqual({
+      kind: 'human', id: 'peer-1', name: '林墨', isSelf: false, deliveryState: 'delivered',
+    });
+  });
+
   it('历史消息优先保留生成当时的模型', () => {
     const msg = mapBackendHistoryItem({
       role: 'assistant',

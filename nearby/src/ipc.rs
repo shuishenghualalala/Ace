@@ -108,6 +108,8 @@ pub(crate) enum IpcCommand {
         peer_id: String,
         text: String,
         #[serde(default)]
+        client_message_id: Option<String>,
+        #[serde(default)]
         mentions: Vec<String>,
     },
     SendPeerFile {
@@ -118,6 +120,8 @@ pub(crate) enum IpcCommand {
         size: u64,
         sha256: String,
         data_base64: String,
+        #[serde(default)]
+        client_message_id: Option<String>,
     },
     CreateRoom {
         room_id: String,
@@ -134,6 +138,8 @@ pub(crate) enum IpcCommand {
         room_id: String,
         text: String,
         #[serde(default)]
+        client_message_id: Option<String>,
+        #[serde(default)]
         mentions: Vec<String>,
         #[serde(default)]
         reply_to: Option<ReplyReference>,
@@ -146,6 +152,8 @@ pub(crate) enum IpcCommand {
         size: u64,
         sha256: String,
         data_base64: String,
+        #[serde(default)]
+        client_message_id: Option<String>,
         #[serde(default)]
         mentions: Vec<String>,
         #[serde(default)]
@@ -199,6 +207,10 @@ pub(crate) enum IpcEvent {
         mentions: Vec<String>,
         message_id: String,
         timestamp: u64,
+    },
+    MessageDelivered {
+        peer_id: String,
+        message_id: String,
     },
     RoomCreated {
         room_id: String,
@@ -720,7 +732,7 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         save_dms(&state_dir, &dms)?;
                         sink.send(IpcEvent::Message { peer_id, message }).await?;
                     }
-                    IpcCommand::SendPeerMessage { peer_id, text, mentions } => {
+                    IpcCommand::SendPeerMessage { peer_id, text, client_message_id, mentions } => {
                         let text = text.trim();
                         if text.is_empty() || text.chars().count() > 8_000 {
                             sink.send(IpcEvent::Error { message: "消息不能为空且不能超过 8000 个字符".to_owned() }).await?;
@@ -741,7 +753,8 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             }).await?;
                             continue;
                         };
-                        let message = Message::peer_message(peer.peer_id.clone(), text, mentions);
+                        let message = Message::peer_message(peer.peer_id.clone(), text, mentions)
+                            .with_client_message_id(client_message_id);
                         if outbound.send(message.clone()).await.is_err() {
                             active_peers.remove(&peer_id);
                             sink.send(IpcEvent::PeerConnectionFailed {
@@ -754,7 +767,7 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         save_dms(&state_dir, &dms)?;
                         sink.send(IpcEvent::Message { peer_id, message }).await?;
                     }
-                    IpcCommand::SendPeerFile { peer_id, file_id, name, mime_type, size, sha256, data_base64 } => {
+                    IpcCommand::SendPeerFile { peer_id, file_id, name, mime_type, size, sha256, data_base64, client_message_id } => {
                         if !active_peers.contains(&peer_id) {
                             sink.send(IpcEvent::PeerConnectionFailed {
                                 peer_id,
@@ -778,7 +791,8 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             }
                         };
                         for file in chunks {
-                            let message = Message::peer_file(peer.peer_id.clone(), file);
+                            let message = Message::peer_file(peer.peer_id.clone(), file)
+                                .with_client_message_id(client_message_id.clone());
                             if outbound.send(message.clone()).await.is_err() {
                                 active_peers.remove(&peer_id);
                                 sink.send(IpcEvent::PeerConnectionFailed {
@@ -851,7 +865,7 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             owner_peer_id: room.owner_peer_id.clone(),
                         }).await?;
                     }
-                    IpcCommand::SendRoomMessage { room_id, text, mentions, reply_to } => {
+                    IpcCommand::SendRoomMessage { room_id, text, client_message_id, mentions, reply_to } => {
                         if rooms.contains_key(&room_id) {
                             let mentions = rooms
                                 .get(&room_id)
@@ -859,7 +873,7 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                                 .unwrap_or_default();
                             let message = Message::room_message_with_context(
                                 peer.peer_id.clone(), room_id.clone(), text, mentions, reply_to,
-                            );
+                            ).with_client_message_id(client_message_id);
                             if let Some(room) = rooms.get_mut(&room_id) {
                                 remember_room_message(room, &message);
                             }
@@ -873,7 +887,7 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             sink.send(IpcEvent::Error { message: "群聊不存在或已退出".to_owned() }).await?;
                         }
                     }
-                    IpcCommand::SendRoomFile { room_id, file_id, name, mime_type, size, sha256, data_base64, mentions, reply_to } => {
+                    IpcCommand::SendRoomFile { room_id, file_id, name, mime_type, size, sha256, data_base64, client_message_id, mentions, reply_to } => {
                         if rooms.contains_key(&room_id) {
                             let chunks = match split_file_chunks(&file_id, &name, &mime_type, size, &sha256, &data_base64) {
                                 Ok(chunks) => chunks,
@@ -893,7 +907,7 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                                     file,
                                     mentions.clone(),
                                     reply_to.clone(),
-                                );
+                                ).with_client_message_id(client_message_id.clone());
                                 seen_messages.insert(message.message_id.clone());
                                 if let Some(room) = rooms.get_mut(&room_id) {
                                     remember_room_message(room, &message);
@@ -1085,6 +1099,12 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                                 save_dms(&state_dir, &dms)?;
                                 sink.send(IpcEvent::Message { peer_id, message }).await?;
                             }
+                            "message.ack" => {
+                                if !seen_messages.insert(message.message_id.clone()) {
+                                    continue;
+                                }
+                                emit_delivery_ack(&sink, peer_id, &message).await?;
+                            }
                             "peer.message" => {
                                 if !active_peers.contains(&peer_id)
                                     || !seen_messages.insert(message.message_id.clone())
@@ -1114,6 +1134,13 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                                     .unwrap_or_else(|| peer_id.clone());
                                 remember_dm_message(&mut dms, &peer_id, &message);
                                 save_dms(&state_dir, &dms)?;
+                                acknowledge_received_message(
+                                    &peer.peer_id,
+                                    &sessions,
+                                    &peer_id,
+                                    &message,
+                                )
+                                .await;
                                 sink.send(IpcEvent::PeerMessageReceived {
                                     peer_id,
                                     display_name,
@@ -1131,6 +1158,13 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                                 }
                                 remember_dm_message(&mut dms, &peer_id, &message);
                                 save_dms(&state_dir, &dms)?;
+                                acknowledge_received_message(
+                                    &peer.peer_id,
+                                    &sessions,
+                                    &peer_id,
+                                    &message,
+                                )
+                                .await;
                                 sink.send(IpcEvent::Message { peer_id, message }).await?;
                             }
                             _ => {
@@ -1838,6 +1872,12 @@ pub(crate) async fn handle_received_message(
     peer_id: String,
     message: Message,
 ) -> Result<()> {
+    if message.message_type == "message.ack" {
+        if seen_messages.insert(message.message_id.clone()) {
+            emit_delivery_ack(sink, peer_id, &message).await?;
+        }
+        return Ok(());
+    }
     if !seen_messages.insert(message.message_id.clone()) {
         return Ok(());
     }
@@ -2019,6 +2059,7 @@ pub(crate) async fn handle_received_message(
                     return Ok(());
                 }
                 remember_room_message(room, &message);
+                acknowledge_received_message(local_peer_id, sessions, &peer_id, &message).await;
                 sink.send(IpcEvent::Message {
                     peer_id: peer_id.clone(),
                     message: message.clone(),
@@ -2031,6 +2072,60 @@ pub(crate) async fn handle_received_message(
         _ => {
             sink.send(IpcEvent::Message { peer_id, message }).await?;
         }
+    }
+    Ok(())
+}
+
+fn client_message_id(message: &Message) -> Option<&str> {
+    message
+        .payload
+        .get("client_message_id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+}
+
+fn is_final_delivery_unit(message: &Message) -> bool {
+    if !matches!(message.message_type.as_str(), "peer.file" | "room.file") {
+        return true;
+    }
+    let Some(file) = message.payload.get("file") else {
+        return false;
+    };
+    let index = file.get("chunk_index").and_then(|value| value.as_u64());
+    let total = file.get("chunk_total").and_then(|value| value.as_u64());
+    matches!((index, total), (Some(index), Some(total)) if total > 0 && index + 1 == total)
+}
+
+pub(crate) async fn acknowledge_received_message(
+    local_peer_id: &str,
+    sessions: &HashMap<String, mpsc::Sender<Message>>,
+    transport_peer_id: &str,
+    message: &Message,
+) {
+    let Some(client_id) = client_message_id(message) else {
+        return;
+    };
+    if !is_final_delivery_unit(message) {
+        return;
+    }
+    let Some(session) = sessions.get(transport_peer_id) else {
+        return;
+    };
+    let ack = Message::delivery_ack(
+        local_peer_id.to_owned(),
+        client_id.to_owned(),
+        message.message_id.clone(),
+    );
+    session.send(ack).await.ok();
+}
+
+async fn emit_delivery_ack(sink: &EventSink, peer_id: String, message: &Message) -> Result<()> {
+    if let Some(message_id) = client_message_id(message) {
+        sink.send(IpcEvent::MessageDelivered {
+            peer_id,
+            message_id: message_id.to_owned(),
+        })
+        .await?;
     }
     Ok(())
 }
@@ -2433,7 +2528,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             command,
-            IpcCommand::SendPeerMessage { peer_id, text, mentions }
+            IpcCommand::SendPeerMessage { peer_id, text, mentions, .. }
                 if peer_id == "ace_peer" && text == "hi" && mentions.is_empty()
         ));
         let command: IpcCommand = serde_json::from_str(

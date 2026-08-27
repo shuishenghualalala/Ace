@@ -56,7 +56,9 @@ export async function loadChannelSessions(): Promise<void> {
 }
 
 export function isChannelSessionId(sessionId: string | null | undefined): boolean {
-  return !!sessionId && sessionId.startsWith('agent:main:');
+  return !!sessionId
+    && sessionId.startsWith('agent:main:')
+    && !sessionId.startsWith('agent:main:nearby:');
 }
 
 export function findChannelSession(sessionId: string): SessionRow | undefined {

@@ -254,6 +254,31 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   padding-right: var(--mw-space-4);
 }
 
+.chat-messages.web-flow .msg.companion-incoming {
+  align-items: flex-start;
+  padding-left: var(--mw-space-4);
+}
+
+.chat-messages.web-flow .companion-incoming__avatar {
+  border: 1px solid var(--mw-border-subtle);
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
+  font-size: var(--mw-type-caption-size);
+  font-weight: 700;
+}
+
+.chat-messages.web-flow .companion-incoming--agent .companion-incoming__avatar {
+  background: var(--mw-info-soft);
+  color: var(--mw-info);
+}
+
+.chat-messages.web-flow .msg.companion-incoming .msg__text {
+  width: fit-content;
+  max-width: 100%;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* agent 消息右侧留出用户头像+间距的宽度，与用户消息头像左边缘对齐 */
 
 .chat-messages.web-flow .msg__avatar {

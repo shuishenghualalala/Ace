@@ -10,9 +10,10 @@ import pytest
 
 from crew.companion import CompanionService, CompanionStore
 from crew.core.mocks import InMemoryWorkspaceStore
-from crew.state.session_store import SQLiteSessionStore
+from crew.core.types import Message
 from crew.gateway.routers.companion import _prepare_attachment, _store_received_attachment
 from crew.state.home import get_owner_runtime_home
+from crew.state.session_store import SQLiteSessionStore
 
 
 class _ExternalAgents:
@@ -85,9 +86,7 @@ def test_open_conversation_binds_workspace_and_uses_stable_session(tmp_path):
     assert first["session_id"] == second["session_id"]
     assert first["workspace_id"] == "companion"
     assert first["capabilities"]["can_mention_agents"] is True
-    listed = sessions.list_sessions(
-        "companion", owner_account_id="owner-a", exclude_channel_sessions=False
-    )
+    listed = sessions.list_sessions("companion", owner_account_id="owner-a")
     assert listed[0]["title"] == "设计群"
 
 
@@ -108,6 +107,16 @@ def test_dm_has_no_agent_capability_and_strips_mentions(tmp_path):
     assert event["event_id"] == receipt["event_id"]
     assert event["payload"]["mentions"] == []
     assert sessions.load(binding["session_id"], owner_account_id="owner-a")[0].content == "你好"
+    saved = sessions.load(binding["session_id"], owner_account_id="owner-a")[0]
+    assert saved.message_id == receipt["event_id"]
+    assert saved.origin == {
+        "source": "companion",
+        "sender_kind": "human",
+        "sender_id": "owner-a",
+        "sender_name": "我",
+        "is_self": True,
+        "delivery_state": "queued",
+    }
 
 
 def test_message_with_attachment_is_persisted_and_queued_without_local_path(tmp_path):
@@ -204,6 +213,55 @@ def test_outbox_failed_delivery_is_retryable(tmp_path):
     assert service.store.claim_outbox("owner-a") == []
     service.store.settle_outbox("owner-a", first[0]["event_id"], delivered=False)
     assert service.store.claim_outbox("owner-a")[0]["event_id"] == first[0]["event_id"]
+
+
+def test_outbox_tracks_sent_delivered_and_failed_states(tmp_path):
+    service, _, _ = _service(tmp_path)
+    receipt = service.store.enqueue(
+        "owner-a", kind="nearby_dm", target_id="peer-1", payload={"type": "message"}
+    )
+    for status in ("sent", "failed", "delivered"):
+        service.store.set_outbox_status(
+            "owner-a", receipt["event_id"], status=status
+        )
+        row = service.store._writer.execute(
+            lambda conn: conn.execute(
+                "SELECT status FROM companion_outbox WHERE owner_account_id = ? AND event_id = ?",
+                ("owner-a", receipt["event_id"]),
+            ).fetchone()
+        )
+        assert row[0] == status
+    service.store.set_outbox_status(
+        "owner-a", receipt["event_id"], status="sent"
+    )
+    row = service.store._writer.execute(
+        lambda conn: conn.execute(
+            "SELECT status FROM companion_outbox WHERE owner_account_id = ? AND event_id = ?",
+            ("owner-a", receipt["event_id"]),
+        ).fetchone()
+    )
+    assert row[0] == "delivered"
+
+
+def test_append_idempotent_preserves_remote_identity(tmp_path):
+    _, sessions, _ = _service(tmp_path)
+    message = Message.user("收到")
+    message.name = "小明"
+    message.message_id = "remote-message-1"
+    message.origin = {
+        "source": "companion",
+        "sender_kind": "human",
+        "sender_id": "peer-1",
+        "sender_name": "小明",
+        "is_self": False,
+        "delivery_state": "delivered",
+    }
+    assert sessions.append_idempotent("agent:main:nearby:dm:test", message, owner_account_id="owner-a")
+    assert not sessions.append_idempotent("agent:main:nearby:dm:test", message, owner_account_id="owner-a")
+    restored = sessions.load("agent:main:nearby:dm:test", owner_account_id="owner-a")
+    assert len(restored) == 1
+    assert restored[0].name == "小明"
+    assert restored[0].origin == message.origin
 
 
 def test_agent_runs_can_be_listed_globally_or_by_room(tmp_path):

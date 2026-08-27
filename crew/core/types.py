@@ -218,6 +218,10 @@ class Message:
     # 该字段只用于历史扫描与节流，不暴露给 provider。
     attachment_type: str | None = None
     attachment_data: dict[str, Any] | None = None
+    # 外部会话投影元数据。仅用于持久化和 UI，不会传给模型。
+    # 例如同伴消息会保存 source/message_id/sender/is_self，保证实时与历史一致。
+    message_id: str | None = None
+    origin: dict[str, Any] | None = None
 
     def to_openai(self) -> dict[str, Any]:
         """转换为 OpenAI Chat Completions 的 message 字典。

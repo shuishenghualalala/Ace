@@ -387,7 +387,7 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                         save_dms(&state_dir, &dms)?;
                         sink.send(IpcEvent::Message { peer_id, message }).await?;
                     }
-                    IpcCommand::SendPeerMessage { peer_id, text, mentions } => {
+                    IpcCommand::SendPeerMessage { peer_id, text, client_message_id, mentions } => {
                         let text = text.trim();
                         if text.is_empty() || text.chars().count() > 8_000 {
                             sink.send(IpcEvent::Error { message: "消息不能为空且不能超过 8000 个字符".to_owned() }).await?;
@@ -402,13 +402,14 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                             sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "连接已经断开".to_owned() }).await?;
                             continue;
                         };
-                        let message = Message::peer_message(peer.peer_id.clone(), text, mentions);
+                        let message = Message::peer_message(peer.peer_id.clone(), text, mentions)
+                            .with_client_message_id(client_message_id);
                         session.send(message.clone()).await.ok();
                         remember_dm_message(&mut dms, &peer_id, &message);
                         save_dms(&state_dir, &dms)?;
                         sink.send(IpcEvent::Message { peer_id, message }).await?;
                     }
-                    IpcCommand::SendPeerFile { peer_id, file_id, name, mime_type, size, sha256, data_base64 } => {
+                    IpcCommand::SendPeerFile { peer_id, file_id, name, mime_type, size, sha256, data_base64, client_message_id } => {
                         if !active_peers.contains(&peer_id) {
                             sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "请先连接这台 Ace".to_owned() }).await?;
                             continue;
@@ -426,7 +427,8 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                         let chunk_total = u32::try_from(chunks.len().max(1)).context("file has too many chunks")?;
                         for (chunk_index, data) in chunks.into_iter().enumerate() {
                             let file = FileChunk { file_id: file_id.clone(), name: name.clone(), mime_type: mime_type.clone(), size, sha256: sha256.clone(), chunk_index: u32::try_from(chunk_index)?, chunk_total, data_base64: String::from_utf8(data.to_vec())? };
-                            let message = Message::peer_file(peer.peer_id.clone(), file);
+                            let message = Message::peer_file(peer.peer_id.clone(), file)
+                                .with_client_message_id(client_message_id.clone());
                             session.send(message.clone()).await.ok();
                             remember_dm_message(&mut dms, &peer_id, &message);
                             sink.send(IpcEvent::Message { peer_id: peer_id.clone(), message }).await?;
@@ -474,20 +476,21 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                         let room = rooms.get(&room_id).expect("room exists");
                         sink.send(IpcEvent::RoomCreated { room_id, room_name: room.room_name.clone(), peer_ids: room.peer_ids.iter().cloned().collect(), agent_mode: room.agent_mode.clone(), owner_peer_id: room.owner_peer_id.clone() }).await?;
                     }
-                    IpcCommand::SendRoomMessage { room_id, text, mentions, reply_to } => {
+                    IpcCommand::SendRoomMessage { room_id, text, client_message_id, mentions, reply_to } => {
                         if !rooms.contains_key(&room_id) {
                             sink.send(IpcEvent::Error { message: "群聊不存在或已退出".to_owned() }).await?;
                             continue;
                         }
                         let mentions = filter_room_mentions(mentions, rooms.get(&room_id).unwrap());
-                        let message = Message::room_message_with_context(peer.peer_id.clone(), room_id.clone(), text, mentions, reply_to);
+                        let message = Message::room_message_with_context(peer.peer_id.clone(), room_id.clone(), text, mentions, reply_to)
+                            .with_client_message_id(client_message_id);
                         remember_room_message(rooms.get_mut(&room_id).unwrap(), &message);
                         save_rooms(&state_dir, &rooms)?;
                         if let Some(room) = rooms.get(&room_id) { broadcast_room_message(&sessions, room, &message).await; }
                         seen_messages.insert(message.message_id.clone());
                         sink.send(IpcEvent::Message { peer_id: peer.peer_id.clone(), message }).await?;
                     }
-                    IpcCommand::SendRoomFile { room_id, file_id, name, mime_type, size, sha256, data_base64, mentions, reply_to } => {
+                    IpcCommand::SendRoomFile { room_id, file_id, name, mime_type, size, sha256, data_base64, client_message_id, mentions, reply_to } => {
                         if !rooms.contains_key(&room_id) {
                             sink.send(IpcEvent::Error { message: "群聊不存在或已退出".to_owned() }).await?;
                             continue;
@@ -501,7 +504,8 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                         let chunk_total = u32::try_from(chunks.len().max(1)).context("file has too many chunks")?;
                         for (chunk_index, data) in chunks.into_iter().enumerate() {
                             let file = FileChunk { file_id: file_id.clone(), name: name.clone(), mime_type: mime_type.clone(), size, sha256: sha256.clone(), chunk_index: u32::try_from(chunk_index)?, chunk_total, data_base64: String::from_utf8(data.to_vec())? };
-                            let message = Message::room_file(peer.peer_id.clone(), room_id.clone(), file, mentions.clone(), reply_to.clone());
+                            let message = Message::room_file(peer.peer_id.clone(), room_id.clone(), file, mentions.clone(), reply_to.clone())
+                                .with_client_message_id(client_message_id.clone());
                             remember_room_message(rooms.get_mut(&room_id).unwrap(), &message);
                             if let Some(room) = rooms.get(&room_id) { broadcast_room_message(&sessions, room, &message).await; }
                             seen_messages.insert(message.message_id.clone());
@@ -627,6 +631,9 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                             save_dms(&state_dir, &dms)?;
                             sink.send(IpcEvent::Message { peer_id, message }).await?;
                         }
+                        "message.ack" => {
+                            handle_received_message(&peer.peer_id, &sessions, &mut rooms, &mut seen_messages, &discovered, &sink, peer_id, message).await?;
+                        }
                         "peer.message" => {
                             if !active_peers.contains(&peer_id) || !seen_messages.insert(message.message_id.clone()) { continue; }
                             let text = message.payload.get("text").and_then(|value| value.as_str()).unwrap_or_default().to_owned();
@@ -636,6 +643,12 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                             let display_name = discovered.get(&peer_id).map(|remote| remote.display_name.clone()).unwrap_or_else(|| peer_id.clone());
                             remember_dm_message(&mut dms, &peer_id, &message);
                             save_dms(&state_dir, &dms)?;
+                            super::ipc::acknowledge_received_message(
+                                &peer.peer_id,
+                                &sessions,
+                                &peer_id,
+                                &message,
+                            ).await;
                             sink.send(IpcEvent::PeerMessageReceived {
                                 peer_id,
                                 display_name,
@@ -649,6 +662,12 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                             if !active_peers.contains(&peer_id) || !seen_messages.insert(message.message_id.clone()) { continue; }
                             remember_dm_message(&mut dms, &peer_id, &message);
                             save_dms(&state_dir, &dms)?;
+                            super::ipc::acknowledge_received_message(
+                                &peer.peer_id,
+                                &sessions,
+                                &peer_id,
+                                &message,
+                            ).await;
                             sink.send(IpcEvent::Message { peer_id, message }).await?;
                         }
                         _ => {

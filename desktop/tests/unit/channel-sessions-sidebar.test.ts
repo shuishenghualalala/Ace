@@ -37,6 +37,11 @@ describe('isChannelSessionId', () => {
 });
 
 describe('渠道侧栏分区', () => {
+  it('同伴会话属于主对话，不进入渠道分区', () => {
+    expect(isChannelSessionId('agent:main:nearby:dm:peer-1')).toBe(false);
+    expect(isChannelSessionId('agent:main:nearby:room:room-1')).toBe(false);
+  });
+
   it('原生 DOM 分区头保留 dataset、ARIA、折叠态与 SVG 图标', () => {
     localStorage.setItem('crew.historyChannelsCollapsed', 'true');
     mountHistoryList();

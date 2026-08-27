@@ -1112,10 +1112,12 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby message`);
     }
     const mentions = parseNearbyMentions(value.mentions);
+    const clientMessageId = parseNearbyClientMessageId(value.client_message_id);
     return {
       type,
       peer_id: value.peer_id,
       text: value.text.trim(),
+      ...(clientMessageId !== undefined ? { client_message_id: clientMessageId } : {}),
       ...(mentions !== undefined ? { mentions } : {}),
     };
   }
@@ -1164,10 +1166,12 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
     }
     const mentions = parseNearbyMentions(value.mentions);
     const replyTo = parseNearbyReply(value.reply_to);
+    const clientMessageId = parseNearbyClientMessageId(value.client_message_id);
     return {
       type,
       room_id: value.room_id,
       text: value.text,
+      ...(clientMessageId !== undefined ? { client_message_id: clientMessageId } : {}),
       ...(mentions !== undefined ? { mentions } : {}),
       ...(replyTo !== undefined ? { reply_to: replyTo } : {}),
     };
@@ -1214,6 +1218,7 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
     ) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby file data`);
     }
+    const clientMessageId = parseNearbyClientMessageId(value.client_message_id);
     const file = {
       file_id: value.file_id,
       name: value.name.trim(),
@@ -1221,6 +1226,7 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
       size: value.size,
       sha256: value.sha256.toLowerCase(),
       data_base64: value.data_base64,
+      ...(clientMessageId !== undefined ? { client_message_id: clientMessageId } : {}),
     };
     if (type === 'send_peer_file') {
       return { type, peer_id: value.peer_id as string, ...file };
@@ -1274,6 +1280,14 @@ function parseNearbyAgentMode(raw: unknown): NearbyRoomAgentMode | undefined {
   if (raw === undefined) return undefined;
   if (raw !== 'mention' && raw !== 'auto' && raw !== 'quiet') {
     throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby agent_mode`);
+  }
+  return raw;
+}
+
+function parseNearbyClientMessageId(raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(raw)) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby client_message_id`);
   }
   return raw;
 }

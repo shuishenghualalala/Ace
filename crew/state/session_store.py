@@ -244,6 +244,8 @@ class SQLiteSessionStore(SessionStore):
                     content_parts=d.get("content_parts"),
                     attachment_type=d.get("attachment_type"),
                     attachment_data=d.get("attachment_data"),
+                    message_id=d.get("message_id"),
+                    origin=d.get("origin"),
                 )
             )
         return out
@@ -364,6 +366,59 @@ class SQLiteSessionStore(SessionStore):
         existing = self.load(session_id, owner_account_id=owner_account_id)
         existing.extend(messages)
         self.save(session_id, existing, owner_account_id=owner_account_id)
+
+    def append_idempotent(
+        self,
+        session_id: str,
+        message: Message,
+        owner_account_id: str = "",
+    ) -> bool:
+        """Append a message once by message_id, atomically on this SQLite connection."""
+        if not message.message_id:
+            self.append(session_id, [message], owner_account_id=owner_account_id)
+            return True
+
+        def _write(conn) -> bool:
+            row = conn.execute(
+                "SELECT messages FROM sessions WHERE session_id = ? AND owner_account_id = ?",
+                (session_id, owner_account_id),
+            ).fetchone()
+            existing = self._load(row[0]) if row else []
+            if any(item.message_id == message.message_id for item in existing):
+                return False
+            existing.append(message)
+            now = time.time()
+            if row:
+                conn.execute(
+                    "UPDATE sessions SET messages = ?, updated_at = ?, message_count = ?, token_count = ? "
+                    "WHERE session_id = ? AND owner_account_id = ?",
+                    (
+                        self._dump(existing),
+                        now,
+                        len(existing),
+                        self._estimate_tokens(existing),
+                        session_id,
+                        owner_account_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO sessions "
+                    "(session_id, owner_account_id, messages, updated_at, created_at, workspace_id, "
+                    "title, message_count, token_count) VALUES (?, ?, ?, ?, ?, 'default', '', ?, ?)",
+                    (
+                        session_id,
+                        owner_account_id,
+                        self._dump(existing),
+                        now,
+                        now,
+                        len(existing),
+                        self._estimate_tokens(existing),
+                    ),
+                )
+            return True
+
+        return bool(self._writer.execute(_write))
 
     def clear(self, session_id: str, owner_account_id: str = "") -> None:
         def _write(conn):
@@ -539,7 +594,10 @@ class SQLiteSessionStore(SessionStore):
         )
         params: list = [owner_account_id]
         if exclude_channel_sessions:
-            sql += " AND session_id NOT LIKE 'agent:main:%'"
+            sql += (
+                " AND (session_id NOT LIKE 'agent:main:%' "
+                "OR session_id LIKE 'agent:main:nearby:%')"
+            )
         if not include_archived:
             sql += " AND archived = 0"
         if workspace_id is not None:

@@ -123,6 +123,52 @@ async def test_companion_gateway_rejects_offline_open_and_send(api, auth_headers
 
 
 @pytest.mark.asyncio
+async def test_companion_incoming_message_is_idempotent_and_restored_from_main_history(
+    api, auth_headers
+):
+    transport = ASGITransport(app=api)
+    incoming = {
+        "type": "message",
+        "kind": "nearby_dm",
+        "target_id": "peer-history",
+        "conversation_title": "林墨",
+        "message_id": "remote-message-1",
+        "sender_id": "peer-history",
+        "sender_name": "林墨",
+        "sender_kind": "human",
+        "text": "双向消息已收到",
+    }
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=auth_headers
+    ) as client:
+        first = await client.post("/api/companion/link-state", json=incoming)
+        duplicate = await client.post("/api/companion/link-state", json=incoming)
+        sessions = await client.get("/api/sessions", params={"workspace_id": "companion"})
+        session_id = first.json()["binding"]["session_id"]
+        history = await client.get(f"/api/session/{session_id}")
+
+    assert first.status_code == 200
+    assert first.json()["appended"] is True
+    assert duplicate.json()["appended"] is False
+    assert any(item["session_id"] == session_id for item in sessions.json())
+    assert history.json() == [{
+        "role": "user",
+        "content": "双向消息已收到",
+        "name": "林墨",
+        "message_id": "remote-message-1",
+        "origin": {
+            "source": "companion",
+            "sender_kind": "human",
+            "sender_id": "peer-history",
+            "sender_name": "林墨",
+            "is_self": False,
+            "delivery_state": "delivered",
+        },
+        "source_session_id": session_id,
+    }]
+
+
+@pytest.mark.asyncio
 async def test_api_usage(api, auth_headers):
     transport = ASGITransport(app=api)
     async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
@@ -234,7 +280,12 @@ async def test_nearby_agent_turn_rejects_dm_and_isolates_rooms(tmp_path):
     assert other.json()["session_id"] != first.json()["session_id"]
     assert rejected_dm.status_code == 403
     assert rejected_dm.json()["code"] == "agent_dm_forbidden"
-    assert visible_sessions.json() == []
+    visible = visible_sessions.json()
+    assert {item["session_id"] for item in visible} == {
+        first.json()["session_id"],
+        other.json()["session_id"],
+    }
+    assert all(item["workspace_id"] == "companion" for item in visible)
 
     config = crew.session_store.get_agent_config(
         first.json()["session_id"], owner_account_id="local"

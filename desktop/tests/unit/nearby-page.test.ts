@@ -4,12 +4,57 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mountNearbyPage } from '../../src/ui/features/nearby-page';
 import { conversationAdapters } from '../../src/ui/features/conversation-adapters';
+import { __resetAllStoresForTest, messageStore, sessionStore } from '../../src/ui/stores/stores';
 
 describe('companion management hub', () => {
   function setup() {
+    __resetAllStoresForTest();
     let eventListener: ((event: { type: string; [key: string]: unknown }) => void) | null = null;
     const command = vi.fn(async () => ({ ok: true as const }));
     const gatewayFetch = vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/api/companion/link-state')) {
+        const payload = JSON.parse(init?.body ?? '{}') as Record<string, unknown>;
+        if (payload.type === 'message') {
+          return {
+            status: 200,
+            statusText: 'OK',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              ok: true,
+              appended: true,
+              binding: {
+                kind: 'nearby_dm', target_id: 'ace_peer_a',
+                session_id: 'agent:main:nearby:dm:test', workspace_id: 'companion', title: '林墨',
+                capabilities: {
+                  can_send_text: true, can_attach: true, can_mention_people: false,
+                  can_mention_agents: false, show_model_picker: false, show_skills: false, show_plan_mode: false,
+                },
+              },
+            }),
+          };
+        }
+      }
+      if (url.includes('/api/session/agent%3Amain%3Anearby%3Adm%3Atest')) {
+        const body = url.endsWith('/status')
+          ? { live: 'idle', last_status: '' }
+          : url.endsWith('/plan')
+            ? { has_plan: false, active: false }
+            : url.endsWith('/todos')
+              ? { todos: [] }
+              : [{
+                role: 'user', content: '实时收到', name: '林墨', message_id: 'remote-live-1',
+                origin: {
+                  source: 'companion', sender_kind: 'human', sender_id: 'ace_peer_a',
+                  sender_name: '林墨', is_self: false, delivery_state: 'delivered',
+                },
+              }];
+        return {
+          status: 200,
+          statusText: 'OK',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        };
+      }
       if (url.endsWith('/api/companion/conversations')) {
         return {
           status: 200,
@@ -350,7 +395,17 @@ describe('companion management hub', () => {
       mime_type: 'text/plain', size: 5,
       sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
       data_base64: 'aGVsbG8=',
+      client_message_id: 'event-1',
     });
+    expect(gatewayFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/companion/outbox/event-1/settle'),
+      expect.objectContaining({ body: JSON.stringify({ status: 'sent' }) }),
+    );
+    emit({ type: 'message_delivered', peer_id: 'ace_peer_a', message_id: 'event-1' });
+    await vi.waitFor(() => expect(gatewayFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/companion/outbox/event-1/settle'),
+      expect.objectContaining({ body: JSON.stringify({ status: 'delivered' }) }),
+    ));
     page.dispose();
   });
 
@@ -377,6 +432,33 @@ describe('companion management hub', () => {
       const body = JSON.parse(init.body) as { type?: string; file?: { file_id?: string } };
       return body.type === 'file' && body.file?.file_id === 'received-1';
     })).toBe(true));
+    page.dispose();
+  });
+
+  it('reloads the active main conversation when a remote message arrives', async () => {
+    const { page, emit } = setup();
+    emit({ type: 'ready', peer: localPeer, discoverable: true });
+    emit({ type: 'peer_connected', peer });
+    sessionStore.set({ activeSessionId: 'agent:main:nearby:dm:test' });
+
+    emit({
+      type: 'peer_message_received',
+      peer_id: 'ace_peer_a',
+      display_name: '林墨',
+      text: '实时收到',
+      message_id: 'remote-live-1',
+      timestamp: 1,
+    });
+
+    await vi.waitFor(() => {
+      const messages = messageStore.get().messages['agent:main:nearby:dm:test'] ?? [];
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({
+        id: 'remote-live-1',
+        content: '实时收到',
+        companionAuthor: { name: '林墨', isSelf: false },
+      });
+    });
     page.dispose();
   });
 });

@@ -12,7 +12,7 @@ export type NearbyCommand =
   | { type: 'disconnect_peer'; peer_id: string }
   | { type: 'send_agent_request'; peer_id: string; text: string }
   | { type: 'send_agent_reply'; peer_id: string; request_id: string; text: string; error: boolean }
-  | { type: 'send_peer_message'; peer_id: string; text: string; mentions?: string[] }
+  | { type: 'send_peer_message'; peer_id: string; text: string; client_message_id?: string; mentions?: string[] }
   | {
     type: 'send_peer_file';
     peer_id: string;
@@ -22,6 +22,7 @@ export type NearbyCommand =
     size: number;
     sha256: string;
     data_base64: string;
+    client_message_id?: string;
   }
   | { type: 'create_room'; room_id: string; room_name: string; peer_ids: string[]; agent_mode?: NearbyRoomAgentMode }
   | { type: 'invite_to_room'; room_id: string; peer_ids: string[] }
@@ -29,6 +30,7 @@ export type NearbyCommand =
     type: 'send_room_message';
     room_id: string;
     text: string;
+    client_message_id?: string;
     mentions?: string[];
     reply_to?: NearbyReplyReference;
   }
@@ -41,6 +43,7 @@ export type NearbyCommand =
     size: number;
     sha256: string;
     data_base64: string;
+    client_message_id?: string;
     mentions?: string[];
     reply_to?: NearbyReplyReference;
   }

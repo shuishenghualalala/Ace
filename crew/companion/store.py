@@ -558,13 +558,43 @@ class CompanionStore:
         ]
 
     def settle_outbox(self, owner_account_id: str, event_id: str, *, delivered: bool) -> None:
-        self._writer.execute(
-            lambda conn: conn.execute(
-                "UPDATE companion_outbox SET status = ?, updated_at = ? "
-                "WHERE owner_account_id = ? AND event_id = ?",
-                ("delivered" if delivered else "queued", time.time(), owner_account_id, event_id),
-            )
+        self.set_outbox_status(
+            owner_account_id,
+            event_id,
+            status="delivered" if delivered else "queued",
         )
+
+    def set_outbox_status(
+        self,
+        owner_account_id: str,
+        event_id: str,
+        *,
+        status: str,
+    ) -> str:
+        if status not in {"queued", "sending", "sent", "delivered", "failed"}:
+            raise ValueError("无效的同伴消息投递状态")
+        allowed_from = {
+            "queued": ("queued", "sending", "sent", "failed"),
+            "sending": ("queued",),
+            "sent": ("queued", "sending", "sent", "failed"),
+            "delivered": ("queued", "sending", "sent", "failed", "delivered"),
+            "failed": ("queued", "sending", "sent", "failed"),
+        }[status]
+
+        def _write(conn) -> str:
+            placeholders = ", ".join("?" for _ in allowed_from)
+            conn.execute(
+                "UPDATE companion_outbox SET status = ?, updated_at = ? "
+                f"WHERE owner_account_id = ? AND event_id = ? AND status IN ({placeholders})",
+                (status, time.time(), owner_account_id, event_id, *allowed_from),
+            )
+            row = conn.execute(
+                "SELECT status FROM companion_outbox WHERE owner_account_id = ? AND event_id = ?",
+                (owner_account_id, event_id),
+            ).fetchone()
+            return str(row[0]) if row else status
+
+        return self._writer.execute(_write)
 
     def create_run(
         self,

@@ -214,13 +214,18 @@ def create_companion_router(crew) -> APIRouter:
         event_id: str,
         payload: dict[str, Any],
     ) -> JSONResponse:
+        status = payload.get("status")
         delivered = payload.get("delivered")
-        if not isinstance(delivered, bool):
+        if status is None and isinstance(delivered, bool):
+            status = "delivered" if delivered else "queued"
+        if status not in {"queued", "sending", "sent", "delivered", "failed"}:
             return JSONResponse(
-                {"ok": False, "error": "delivered 必须是布尔值"}, status_code=400
+                {"ok": False, "error": "无效的投递状态"}, status_code=400
             )
-        _service().store.settle_outbox(_owner(request), event_id, delivered=delivered)
-        return JSONResponse({"ok": True})
+        actual_status = _service().store.set_outbox_status(
+            _owner(request), event_id, status=status
+        )
+        return JSONResponse({"ok": True, "status": actual_status})
 
     @router.post("/link-state")
     async def link_state(request: Request, payload: dict[str, Any]) -> JSONResponse:
@@ -267,7 +272,11 @@ def create_companion_router(crew) -> APIRouter:
                         title=str(payload.get("conversation_title") or ""),
                     )
                 sender_kind = str(payload.get("sender_kind") or "human")
+                sender_id = str(payload.get("sender_id") or "").strip()
                 sender_name = " ".join(str(payload.get("sender_name") or "同伴").split())[:120]
+                message_id = str(payload.get("message_id") or "").strip()
+                if not message_id:
+                    raise ValueError("同伴消息缺少 message_id")
                 if event_type == "file":
                     if sender_kind == "agent" and kind != "nearby_room":
                         raise ValueError("Agent 只能在群聊中发送附件")
@@ -277,10 +286,24 @@ def create_companion_router(crew) -> APIRouter:
                     saved = _store_received_attachment(owner, raw_file)
                     message = Message.user(f'附件「{saved["name"]}」位于: {saved["path"]}')
                     message.name = sender_name
-                    crew.session_store.append(
-                        binding["session_id"], [message], owner_account_id=owner
+                    message.message_id = message_id
+                    message.origin = {
+                        "source": "companion",
+                        "sender_kind": sender_kind,
+                        "sender_id": sender_id,
+                        "sender_name": sender_name,
+                        "is_self": False,
+                        "delivery_state": "delivered",
+                    }
+                    appended = crew.session_store.append_idempotent(
+                        binding["session_id"], message, owner_account_id=owner
                     )
-                    return JSONResponse({"ok": True, "attachment": saved})
+                    return JSONResponse({
+                        "ok": True,
+                        "attachment": saved,
+                        "appended": appended,
+                        "binding": binding,
+                    })
                 text = str(payload.get("text") or "").strip()
                 if not text or len(text) > 8_000:
                     raise ValueError("消息不能为空且不能超过 8000 个字符")
@@ -292,8 +315,17 @@ def create_companion_router(crew) -> APIRouter:
                 else:
                     message = Message.user(text)
                     message.name = sender_name
-                crew.session_store.append(
-                    binding["session_id"], [message], owner_account_id=owner
+                message.message_id = message_id
+                message.origin = {
+                    "source": "companion",
+                    "sender_kind": sender_kind,
+                    "sender_id": sender_id,
+                    "sender_name": sender_name,
+                    "is_self": False,
+                    "delivery_state": "delivered",
+                }
+                appended = crew.session_store.append_idempotent(
+                    binding["session_id"], message, owner_account_id=owner
                 )
             else:
                 raise ValueError("不支持的 LinkAdapter 事件")
@@ -301,7 +333,10 @@ def create_companion_router(crew) -> APIRouter:
             return JSONResponse({"ok": False, "error": "同伴会话不存在"}, status_code=404)
         except (TypeError, ValueError) as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-        return JSONResponse({"ok": True})
+        response: dict[str, Any] = {"ok": True}
+        if event_type in {"message", "file"}:
+            response.update({"appended": appended, "binding": binding})
+        return JSONResponse(response)
 
     @router.get("/runs")
     async def runs(request: Request, room_id: str | None = None) -> JSONResponse:

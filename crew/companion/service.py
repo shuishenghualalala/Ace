@@ -10,7 +10,6 @@ from crew.core.types import Message
 
 from .store import CompanionStore
 
-
 DEFAULT_WORKSPACE_ID = "companion"
 BUILTIN_CREW_SOURCE_ID = "crew"
 SOURCE_REF_RE = re.compile(r"^(builtin|external):([A-Za-z0-9_.:-]{1,160})$")
@@ -316,10 +315,18 @@ class CompanionService:
         history_text = "\n".join(markers)
         if body:
             history_text = f"{history_text}\n\n{body}" if history_text else body
-        self.session_store.append(
-            session_id,
-            [Message.user(history_text)],
-            owner_account_id=owner_account_id,
+        message = Message.user(history_text)
+        message.message_id = receipt["event_id"]
+        message.origin = {
+            "source": "companion",
+            "sender_kind": "human",
+            "sender_id": owner_account_id,
+            "sender_name": "我",
+            "is_self": True,
+            "delivery_state": "queued",
+        }
+        self.session_store.append_idempotent(
+            session_id, message, owner_account_id=owner_account_id
         )
         return receipt
 

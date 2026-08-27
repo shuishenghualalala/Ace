@@ -4,7 +4,8 @@
 
 import { backendApi, type CompanionConversationBinding } from '../backend-client';
 import { conversationAdapters } from './conversation-adapters';
-import { openSessionInChat } from './chat-controller';
+import { openSessionInChat, renderChat } from './chat-controller';
+import { loadBackendHistory } from './session-controller';
 import { sessionStore } from '../stores/stores';
 import { createCompanionHub, type CompanionHubActions } from './companion-hub';
 import { roomConversationId, NearbyStore, type NearbyAgentMode } from './nearby-store';
@@ -72,6 +73,39 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
   function showBluetoothBanner(message: string): void {
     bannerText.textContent = `蓝牙不可用或权限未授予（${message}）。${bluetoothHelpText()}`;
     banner.hidden = false;
+  }
+
+  function rememberBinding(binding: CompanionConversationBinding, preview = ''): void {
+    companionBindings.set(binding.session_id, binding);
+    const current = sessionStore.get().sessions;
+    const existing = current.find((item) => item.id === binding.session_id);
+    const session = {
+      id: binding.session_id,
+      title: binding.title,
+      updatedAt: Date.now(),
+      preview: preview || existing?.preview || '',
+      badge: '同伴',
+      workspaceId: binding.workspace_id,
+      agentLabel: { name: binding.title, provider: 'companion' },
+    };
+    sessionStore.set({
+      sessions: existing
+        ? current.map((item) => item.id === binding.session_id ? { ...item, ...session } : item)
+        : [session, ...current],
+    });
+  }
+
+  function syncIncomingProjection(
+    result: { appended?: boolean; binding?: CompanionConversationBinding },
+    preview: string,
+  ): void {
+    if (!result.binding) return;
+    rememberBinding(result.binding, preview);
+    if (result.appended && sessionStore.get().activeSessionId === result.binding.session_id) {
+      void loadBackendHistory(result.binding.session_id).then(() => {
+        if (sessionStore.get().activeSessionId === result.binding?.session_id) renderChat();
+      });
+    }
   }
 
   function command(payload: NearbyCommandPayload): void {
@@ -170,20 +204,7 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
       title: sessionTitle,
       workspace_id: requestedWorkspace,
     });
-    companionBindings.set(binding.session_id, binding);
-    if (!sessionStore.get().sessions.some((item) => item.id === binding.session_id)) {
-      sessionStore.set({
-        sessions: [{
-          id: binding.session_id,
-          title: binding.title,
-          updatedAt: Date.now(),
-          preview: '',
-          badge: '同伴',
-          workspaceId: binding.workspace_id,
-          agentLabel: { name: sessionTitle, provider: 'companion' },
-        }, ...sessionStore.get().sessions],
-      });
-    }
+    rememberBinding({ ...binding, title: binding.title || sessionTitle });
     await openSessionInChat(binding.session_id);
   }
 
@@ -286,9 +307,15 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
       const receipt = await backendApi.companionSendMessage(sessionId, text, mentions, attachments);
       try {
         if (text.trim() && binding.kind === 'nearby_dm') {
-          await bridge.nearbyCommand?.({ type: 'send_peer_message', peer_id: binding.target_id, text, mentions: [] });
+          await bridge.nearbyCommand?.({
+            type: 'send_peer_message', peer_id: binding.target_id, text,
+            client_message_id: receipt.event_id, mentions: [],
+          });
         } else if (text.trim()) {
-          await bridge.nearbyCommand?.({ type: 'send_room_message', room_id: binding.target_id, text, mentions });
+          await bridge.nearbyCommand?.({
+            type: 'send_room_message', room_id: binding.target_id, text,
+            client_message_id: receipt.event_id, mentions,
+          });
           if (room?.agentMode === 'mention' && mentions.length > 0) {
             store.expectAgentReply(room.id, mentions);
           } else if (room?.agentMode === 'auto') {
@@ -301,31 +328,40 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
               type: 'send_peer_file', peer_id: binding.target_id,
               file_id: file.file_id, name: file.name, mime_type: file.mime_type,
               size: file.size, sha256: file.sha256, data_base64: file.data_base64,
+              client_message_id: receipt.event_id,
             });
           } else {
             await bridge.nearbyCommand?.({
               type: 'send_room_file', room_id: binding.target_id,
               file_id: file.file_id, name: file.name, mime_type: file.mime_type,
               size: file.size, sha256: file.sha256, data_base64: file.data_base64,
+              client_message_id: receipt.event_id,
               mentions: [],
             });
           }
         }
-        await backendApi.companionSettleOutbox(receipt.event_id, true);
+        await backendApi.companionSettleOutbox(receipt.event_id, 'sent');
       } catch (error) {
-        await backendApi.companionSettleOutbox(receipt.event_id, false).catch(() => undefined);
+        await backendApi.companionSettleOutbox(receipt.event_id, 'failed').catch(() => undefined);
         throw error;
       }
     },
   });
   void backendApi.companionConversations().then((snapshot) => {
     for (const binding of snapshot.conversations ?? []) {
-      companionBindings.set(binding.session_id, binding);
+      rememberBinding(binding);
     }
   }).catch(() => undefined);
 
   function projectLinkEvent(event: { type: string; [key: string]: unknown }): void {
     if (!bridge?.gatewayFetch) return;
+    if (event.type === 'message_delivered') {
+      const messageId = typeof event.message_id === 'string' ? event.message_id : '';
+      if (messageId) {
+        void backendApi.companionSettleOutbox(messageId, 'delivered').catch(() => undefined);
+      }
+      return;
+    }
     const peer = event.peer && typeof event.peer === 'object' && !Array.isArray(event.peer)
       ? event.peer as Record<string, unknown>
       : null;
@@ -415,19 +451,27 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
           const conversation = store.conversations.get(conversationId);
           void backendApi.companionLinkState({
             type: 'file', kind, target_id: targetId,
-            sender_kind: 'human', sender_name: store.peerLabel(sender),
+            message_id: `file:${file.file_id}`,
+            sender_kind: 'human', sender_id: sender, sender_name: store.peerLabel(sender),
             conversation_title: conversation?.title ?? '', file,
-          }).catch(() => projectedFileIds.delete(file.file_id));
+          }).then((result) => syncIncomingProjection(result, `[文件] ${file.name}`))
+            .catch(() => projectedFileIds.delete(file.file_id));
         }
         return;
       }
     }
     if (kind && targetId && text.trim() && sender !== store.localPeerId) {
       const conversation = store.conversations.get(kind === 'nearby_dm' ? `dm:${targetId}` : roomConversationId(targetId));
+      const rawMessage = event.message && typeof event.message === 'object' && !Array.isArray(event.message)
+        ? event.message as Record<string, unknown> : null;
+      const messageId = typeof event.message_id === 'string'
+        ? event.message_id
+        : (typeof rawMessage?.message_id === 'string' ? rawMessage.message_id : '');
       void backendApi.companionLinkState({
-        type: 'message', kind, target_id: targetId, text, sender_kind: senderKind,
+        type: 'message', kind, target_id: targetId, text, message_id: messageId,
+        sender_kind: senderKind, sender_id: sender,
         sender_name: store.peerLabel(sender), conversation_title: conversation?.title ?? '',
-      }).catch(() => undefined);
+      }).then((result) => syncIncomingProjection(result, text)).catch(() => undefined);
     }
   }
 

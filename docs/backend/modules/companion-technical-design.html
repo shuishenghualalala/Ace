@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Ace 同伴功能技术方案：统一主对话、Agent 席位、蓝牙 LinkAdapter、流式文件与本机执行可见性。">
-  <title>Ace 同伴功能技术方案（待评审）</title>
+  <title>Ace 同伴功能技术方案与实施记录</title>
   <style>
     :root {
       color-scheme: light;
@@ -123,10 +123,10 @@
     <main>
       <header>
         <div class="eyebrow">
-          <span class="badge pending">STATUS · 待 AHUAMAO 评审</span>
-          <span class="badge">VERSION · 0.1</span>
+          <span class="badge">STATUS · 已实施并完成链路验收</span>
+          <span class="badge">VERSION · 0.2</span>
           <span class="badge">2026-08-27</span>
-          <span class="badge">本轮未改业务代码</span>
+          <span class="badge">主对话历史与双向回执已接通</span>
         </div>
         <h1>Ace“同伴”功能技术方案</h1>
         <p class="lead">本方案将现有 BLE 能力重构为可替换链路，把私聊和群聊接回主对话，并让 Ace 内置 Agent、通过外援连接的本地 Agent 都能以受控“群内席位”参与协作。</p>
@@ -134,7 +134,7 @@
 
       <section id="summary">
         <div class="hero-claim">推荐采用“统一会话入口 + Gateway 同伴领域 + AgentSeatRunner + LinkAdapter”的四层方案。蓝牙与 ACP 都使用注册式 Adapter 结构，但保留不同接口，避免把传输层和 Agent 运行时揉在一起。</div>
-        <div class="notice">这是一份目标架构，不代表当前代码已经具备这些能力。确认后再进入代码改造；现有 <a href="nearby-ble.html">Nearby BLE 文档</a>仍描述当前实现。</div>
+        <div class="notice">本文同时记录目标架构与当前实施状态。ConversationAdapter、Companion Domain、BLE/Mock LinkAdapter、主对话持久化和双向 ACK 已落地；E2EE 与真实设备矩阵仍是正式发布门槛。现有 <a href="nearby-ble.html">Nearby BLE 文档</a>补充链路实现细节。</div>
         <div class="cards">
           <article class="card"><strong>消息与文件</strong><p>私聊、群聊统一用协议 v3 信封；文件改成 offer/accept/chunk/complete 流式传输，避免主进程一次性 Base64 整包。</p></article>
           <article class="card"><strong>Agent 统一接入</strong><p>Ace 内置 Agent 与 ACP/CLI 外援都映射为公开 Agent Profile，再由群内 Agent 席位绑定到本机 RuntimeAdapter。</p></article>
@@ -416,6 +416,14 @@ pub trait LinkAdapter: Send + Sync {
           <li><code>LinkAdapter</code> 只负责 BLE/Mock 链路；同伴关系、会话绑定、Agent 名片、Outbox 与 Local Run 由 Gateway/CompanionService 管理。</li>
           <li><code>ConversationAdapter</code> 把同伴会话接入主对话发送链，复用主对话附件、历史、Agent 执行过程和右侧看板。</li>
           <li>文件在 Gateway 中校验当前账号 uploads 路径与 4 MiB 上限，链路使用统一分片函数；DM 使用 <code>peer.file</code>，群聊使用 <code>room.file</code>。</li>
+        </ul>
+        <h3>主对话消息闭环</h3>
+        <ul>
+          <li>同伴会话使用稳定的 <code>agent:main:nearby:*</code> Session，但不再被渠道会话过滤器隐藏；会话列表、重启恢复和普通主对话共用同一套 Session API。</li>
+          <li>入站 <code>message_id</code>、发送者身份与来源写入 <code>crew.db</code>；SQLite 在同一写事务内按消息 ID 幂等追加，实时投影和历史回放使用相同数据。</li>
+          <li>收到 LinkAdapter 入站事件后，Gateway 返回 ConversationBinding；Desktop 只在当前会话重新加载标准历史并重绘，不维护第二份同伴聊天状态。</li>
+          <li>出站消息携带 <code>client_message_id</code>，状态按 <code>queued → sent → delivered</code> 推进；对端接收文本或最后一个文件分片后返回 <code>message.ack</code>，异常记为 <code>failed</code>，不再把写入 Rust stdin 当作送达。</li>
+          <li>远端人的消息与远端 Agent 最终输出都保留来源头像和名称；远端执行过程不进入本机数据库，本机 Agent 执行过程仍复用普通对话与右侧看板。</li>
         </ul>
         <p class="small">完整测试结果见同目录 <code>companion-test-report.html</code>。正式发布前仍以 E2EE 与真实蓝牙设备矩阵为阻断项。</p>
       </section>

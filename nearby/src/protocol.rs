@@ -97,6 +97,31 @@ pub struct Message {
 }
 
 impl Message {
+    pub fn with_client_message_id(mut self, client_message_id: Option<String>) -> Self {
+        if let Some(client_message_id) = client_message_id.filter(|value| !value.trim().is_empty())
+        {
+            self.payload["client_message_id"] = Value::String(client_message_id);
+        }
+        self
+    }
+
+    pub fn delivery_ack(
+        sender: impl Into<String>,
+        client_message_id: impl Into<String>,
+        transport_message_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            message_type: "message.ack".to_owned(),
+            message_id: Uuid::new_v4().to_string(),
+            sender: sender.into(),
+            payload: serde_json::json!({
+                "client_message_id": client_message_id.into(),
+                "transport_message_id": transport_message_id.into(),
+            }),
+        }
+    }
+
     pub fn hello(peer: &PeerInfo) -> Self {
         Self {
             version: PROTOCOL_VERSION,
@@ -631,6 +656,19 @@ mod tests {
         assert_eq!(decoded.payload["mentions"][0], "crew_agent");
         let wire = serde_json::to_value(&message).unwrap();
         assert_eq!(wire["type"], "peer.message");
+    }
+
+    #[test]
+    fn delivery_ack_preserves_the_client_message_id() {
+        let outbound = Message::peer_message("ace_local", "你好", Vec::new())
+            .with_client_message_id(Some("evt_123".to_owned()));
+        assert_eq!(outbound.payload["client_message_id"], "evt_123");
+
+        let ack = Message::delivery_ack("ace_remote", "evt_123", &outbound.message_id);
+        let decoded = Message::decode(&ack.encode().unwrap()).unwrap();
+        assert_eq!(decoded.message_type, "message.ack");
+        assert_eq!(decoded.payload["client_message_id"], "evt_123");
+        assert_eq!(decoded.payload["transport_message_id"], outbound.message_id);
     }
 
     #[test]

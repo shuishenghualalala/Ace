@@ -356,7 +356,10 @@ function sigUserMessage(msg: ChatMessage, configModel: string): string {
   const att = msg.attachments
     ? msg.attachments.map((a) => `${a.type}|${a.path}|${a.name}`).join(',')
     : '';
-  return `u|${msg.id}|${msg.role}|${msg.content}|${msg.model ?? ''}|${configModel}|${msg.timestamp}|${att}`;
+  const author = msg.companionAuthor
+    ? `${msg.companionAuthor.kind}|${msg.companionAuthor.id}|${msg.companionAuthor.name}|${msg.companionAuthor.isSelf}`
+    : '';
+  return `u|${msg.id}|${msg.role}|${msg.content}|${msg.model ?? ''}|${configModel}|${msg.timestamp}|${att}|${author}`;
 }
 
 /** 带 agentName 的 status/assistant（Dynamic Kanban 角色卡片/最终结果）sig。 */
@@ -544,7 +547,11 @@ export function renderConversation(
     let trailingEmptyTypingBatch: ChatMessage[] | null = null;
     while (i < messages.length) {
       const msg = messages[i];
-      const isAgent = (msg.role === 'assistant' && !msg.agentName) || msg.role === 'error' || (msg.role === 'status' && !msg.agentName && !msg.workflowProgress);
+      const isAgent = !msg.companionAuthor && (
+        (msg.role === 'assistant' && !msg.agentName)
+        || msg.role === 'error'
+        || (msg.role === 'status' && !msg.agentName && !msg.workflowProgress)
+      );
       if (!isAgent) {
         // 用户消息 / 带 agentName 的 status 或 assistant（Dynamic Kanban 角色卡片/最终结果）/ workflow 进度面板：按 msg.id keyed。
         // sig 必须覆盖 renderMessageHtml 对该 role 实际依赖的字段：

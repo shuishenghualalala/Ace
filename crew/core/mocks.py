@@ -195,7 +195,11 @@ class InMemorySessionStore(SessionStore):
                 continue
             if "::" in sid:  # 排除 Team 内部子会话
                 continue
-            if exclude_channel_sessions and sid.startswith("agent:main:"):
+            if (
+                exclude_channel_sessions
+                and sid.startswith("agent:main:")
+                and not sid.startswith("agent:main:nearby:")
+            ):
                 continue
             key = self._key(sid, owner)
             archived = self._archived.get(key, False)

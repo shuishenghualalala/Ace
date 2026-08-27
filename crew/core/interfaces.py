@@ -159,6 +159,24 @@ class SessionStore(ABC):
     @abstractmethod
     def append(self, session_id: str, messages: list[Message], owner_account_id: str = "") -> None: ...
 
+    def append_idempotent(
+        self,
+        session_id: str,
+        message: Message,
+        owner_account_id: str = "",
+    ) -> bool:
+        """Append an externally identified message once.
+
+        Persistent stores should override this with an atomic implementation.
+        """
+        if message.message_id and any(
+            item.message_id == message.message_id
+            for item in self.load(session_id, owner_account_id=owner_account_id)
+        ):
+            return False
+        self.append(session_id, [message], owner_account_id=owner_account_id)
+        return True
+
     @abstractmethod
     def save(
         self,

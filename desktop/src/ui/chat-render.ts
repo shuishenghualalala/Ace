@@ -89,6 +89,13 @@ export interface ChatMessage {
   role: MessageRole;
   content: string;
   timestamp: number;
+  companionAuthor?: {
+    kind: 'human' | 'agent';
+    id: string;
+    name: string;
+    isSelf: boolean;
+    deliveryState?: string;
+  } | undefined;
   /** 多轮工具 loop 内该 assistant 段是过程还是最终答案；由 reducer 写入，历史回放可推断。 */
   segmentRole?: SegmentRole | undefined;
   thinking?: string | undefined;
@@ -1968,6 +1975,31 @@ export function renderMessageHtml(
   options?: { preview?: boolean },
 ): HTMLElement {
   const preview = options?.preview === true;
+  if (message.companionAuthor && !message.companionAuthor.isSelf) {
+    const author = message.companionAuthor;
+    const msg = document.createElement('div');
+    msg.className = `msg companion-incoming${author.kind === 'agent' ? ' companion-incoming--agent' : ''}`;
+    msg.dataset.messageId = message.id;
+    const avatar = document.createElement('div');
+    avatar.className = 'msg__avatar companion-incoming__avatar';
+    avatar.textContent = author.kind === 'agent' ? '同' : (author.name.trim().slice(0, 1) || '同');
+    const body = document.createElement('div');
+    body.className = 'msg__body';
+    const name = document.createElement('div');
+    name.className = 'msg__name';
+    name.textContent = author.kind === 'agent' ? `${author.name} · Agent` : `${author.name} · 同伴本人`;
+    body.append(name);
+    if (message.content) {
+      const text = document.createElement('div');
+      text.className = 'msg__text';
+      for (const node of buildChippedNodes(message.content)) text.appendChild(node);
+      body.append(text);
+    }
+    appendAttachments(body, message.attachments);
+    appendMsgFooter(body, [formatMessageTime(message.timestamp)], [renderCopyBtn(message.content)]);
+    msg.append(avatar, body);
+    return msg;
+  }
   if (message.role === 'user') {
     const msg = document.createElement('div');
     msg.className = 'msg user';

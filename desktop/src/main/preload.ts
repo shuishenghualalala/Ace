@@ -111,6 +111,7 @@ const api = {
     peer_ids?: string[];
     agent_mode?: 'mention' | 'auto' | 'quiet';
     text?: string;
+    client_message_id?: string;
     mentions?: string[];
     reply_to?: { message_id: string; sender: string; text: string };
     file_id?: string;

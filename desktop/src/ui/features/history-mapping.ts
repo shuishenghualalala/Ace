@@ -215,7 +215,7 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
       ? item.role
       : item.role === 'error' ? 'error' : 'status';
   const base: ChatMessage = {
-    id: newMessageId(role),
+    id: item.message_id || newMessageId(role),
     role,
     content: item.content,
     timestamp: item.timestamp != null ? item.timestamp * 1000 : Date.now(),
@@ -252,6 +252,15 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
       duration: tc.duration != null ? Math.round(tc.duration * 1000) : 0,
     })),
   };
+  if (item.origin?.source === 'companion') {
+    base.companionAuthor = {
+      kind: item.origin.sender_kind === 'agent' ? 'agent' : 'human',
+      id: item.origin.sender_id || '',
+      name: item.origin.sender_name || item.name || '同伴',
+      isSelf: item.origin.is_self === true,
+      ...(item.origin.delivery_state ? { deliveryState: item.origin.delivery_state } : {}),
+    };
+  }
   if (role === 'assistant' || role === 'team_internal') {
     // 落库摘要保留准确 +/-；terminal 结果用于补充未落库的最终文件。
     const persisted = normalizeTurnFileChanges(item.turn_file_changes);
