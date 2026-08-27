@@ -4880,8 +4880,8 @@ def test_team_uses_external_team_selected_leader():
     team = tm._build_team("team_selected_leader", external_team_id="team_ext")
 
     assert team.session.leader_member_id == "leader"
-    assert "hh" in team.teammates
-    assert "kk" not in team.teammates
+    assert "agent_hh" in team.teammates
+    assert "agent_kk" not in team.teammates
     assert isinstance(team.leader.executor, AcpExecutor)
     assert team.leader.executor.config.external_agent_id == "agent_kk"
     assert team.leader.executor.config.crew_session_id == "team_selected_leader::leader"
@@ -4894,11 +4894,44 @@ def test_team_uses_external_team_selected_leader():
         team_spec=_structured_team_spec("开发一个贪吃蛇游戏", capabilities=["implementation"], workflow_lanes=("build",)),
     )
     assert [node["id"] for node in nodes] == ["leader_plan", "build_design_1", "build_1", "leader_review", "leader_summary"]
-    assert nodes[1]["assignee"] == "hh"
+    assert nodes[1]["assignee"] == "agent_hh"
     assert nodes[1]["metadata"]["workflow_lane"] == "design"
     assert nodes[3]["title"] == "Leader 审阅方案：贪吃蛇游戏"
     assert ["build_design_1", "leader_review"] in edges
     assert ["leader_review", "build_1"] in edges
+
+
+def test_external_team_keeps_duplicate_display_names_distinct():
+    class DummyExternalStore:
+        def get_team(self, team_id: str, *, owner_account_id: str = ""):
+            assert team_id == "team_duplicate_names"
+            return {
+                "id": team_id,
+                "leader_agent_id": CREW_BUILTIN_AGENT_ID,
+                "members": [
+                    {
+                        "agent_id": "agent_a",
+                        "agent_name": "同名成员",
+                        "role": "负责前端实现",
+                    },
+                    {
+                        "agent_id": "agent_b",
+                        "agent_name": "同名成员",
+                        "role": "负责后端实现",
+                    },
+                ],
+            }
+
+    tm, _ = _team()
+    tm.external_store = DummyExternalStore()
+
+    team = tm._build_team("team_duplicate_names", external_team_id="team_duplicate_names")
+
+    assert set(team.members) == {"agent_a", "agent_b"}
+    assert set(team.teammates) == {"agent_a", "agent_b"}
+    assert [team.members[item].name for item in ("agent_a", "agent_b")] == ["同名成员", "同名成员"]
+    assert team.teammates["agent_a"].executor.config.external_agent_id == "agent_a"
+    assert team.teammates["agent_b"].executor.config.external_agent_id == "agent_b"
 
 
 def test_external_team_projects_confirmed_formation_responsibility_into_runtime():
@@ -4964,13 +4997,13 @@ def test_external_team_projects_confirmed_formation_responsibility_into_runtime(
     tm.external_store = DummyExternalStore()
 
     team = tm._build_team("formation-runtime", external_team_id="team_ext")
-    cc_spec = team.members["cc"]
+    cc_spec = team.members["agent_cc"]
     assert cc_spec.metadata["formation_plan_version"] == 1
     assert cc_spec.metadata["formation_responsibility"] == responsibility
     assert cc_spec.metadata["formation_locked"] is True
 
     nodes, _ = tm._default_workflow_nodes(team, "设计一个贪吃蛇游戏")
-    plan_node = next(node for node in nodes if node["assignee"] == "cc")
+    plan_node = next(node for node in nodes if node["assignee"] == "agent_cc")
     assert plan_node["title"].startswith("需求与验收：")
     assert plan_node["metadata"]["expected_outputs"] == ["需求范围", "玩法规则", "验收清单"]
 
@@ -5482,7 +5515,7 @@ async def test_team_interact_uses_persisted_external_team_spec_for_planning(monk
 
     team = captured["team"]
     plan = tm.graph_planner.plan(team, goal, team_spec=projected)
-    assert any(node["assignee"] == "kk" and node["id"].startswith("build") for node in plan.nodes)
+    assert any(node["assignee"] == "agent_kk" and node["id"].startswith("build") for node in plan.nodes)
 
 
 def test_team_spec_keeps_task_semantics_out_of_execution_profile():
@@ -6344,7 +6377,7 @@ def test_runtime_members_restore_from_persisted_workflow_after_team_cache_miss(t
     monkeypatch.setattr(recovered_tm, "_build_team", fake_build)
     recovered_tm._get_or_create("runtime-member-recovery", owner_account_id="local")
 
-    assert [item.member_id for item in captured["runtime-member-recovery"]] == ["runtime-worker"]
+    assert [item.member_id for item in captured["runtime-member-recovery"]] == ["agent-runtime-worker"]
     assert recovered_tm._plans[recovered_tm._key("runtime-member-recovery", "local")].nodes["build"].assignee == "runtime-worker"
 
 
@@ -9216,8 +9249,8 @@ async def test_runtime_staffing_e2e_reassigns_executes_and_learns_without_mutati
     assert "Runtime 补员" not in captured_questions[0]["question"]
     assert captured_questions[0]["options"][0]["value"] == "candidate:0"
     assert captured_questions[0]["options"][-1]["label"] == "这次先不添加"
-    assert delegated_members == [reserve["name"]]
-    assert node.assignee == reserve["name"]
+    assert delegated_members == [reserve["id"]]
+    assert node.assignee == reserve["id"]
     assert node.status == "completed"
     assert node.attempt_count == 1
     assert node.delegate_task_id == "staffed-attempt-1"
@@ -9235,7 +9268,7 @@ async def test_runtime_staffing_e2e_reassigns_executes_and_learns_without_mutati
     assert workflow.context["workflow_plan"]["revision"] == 2
     assert workflow.context["workflow_plan"]["runtime_members"][0]["external_agent_id"] == reserve["id"]
     board = owner_kanban.get_board_state(workflow.id)
-    assert board["tasks"][0]["assignee"] == reserve["name"]
+    assert board["tasks"][0]["assignee"] == reserve["id"]
     assert board["tasks"][0]["status"] == "done"
     _, _, recovered_metadata = tm._node_event_index(board["events"])
     assert recovered_metadata[node.node_id]["runtime_staffing"]["status"] == "applied"

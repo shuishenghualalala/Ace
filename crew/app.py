@@ -29,6 +29,7 @@ from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.interfaces import Agent, LLMProvider, MemoryProvider, SessionStore, WorkspaceStore
 from crew.evolution import EvolutionManager, EvolutionQueue
 from crew.gateway.dispatcher import BusyMode, SessionDispatcher
+from crew.gateway.helpers import session_external_agent_id
 from crew.memory.simple import SQLiteMemory
 from crew.plugins.builtin import LoggingPlugin
 from crew.plugins.manager import PluginManager
@@ -662,18 +663,9 @@ class CrewApp:
         """是否为“智能体”页创建的外部 Agent/Team 绑定。"""
         config = agent_config if isinstance(agent_config, dict) else {}
         executor = str(config.get("executor") or "").strip().lower()
-        external = config.get("external") if isinstance(config.get("external"), dict) else {}
-        acp = config.get("acp") if isinstance(config.get("acp"), dict) else {}
         team = config.get("team") if isinstance(config.get("team"), dict) else {}
         if executor in {"external", "acp"}:
-            return bool(
-                str(
-                    config.get("external_agent_id")
-                    or external.get("external_agent_id")
-                    or acp.get("external_agent_id")
-                    or ""
-                ).strip()
-            )
+            return bool(session_external_agent_id(config))
         if executor == "team":
             return bool(str(team.get("external_team_id") or "").strip())
         return False
@@ -888,7 +880,7 @@ class CrewApp:
         else:
             executor_config = {}
         if executor_kind in {"external", "acp", "client"}:
-            external_agent_id = str(resolved.get("external_agent_id") or "").strip()
+            external_agent_id = session_external_agent_id(resolved)
             if external_agent_id and not str(executor_config.get("external_agent_id") or "").strip():
                 executor_config["external_agent_id"] = external_agent_id
 

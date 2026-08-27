@@ -188,6 +188,66 @@ async def test_external_session_model_switch_requires_idle_and_runtime_catalog(t
     assert stored["executor"] == "external"
     assert stored["external"]["model"] == "gpt-alt"
 
+
+@pytest.mark.asyncio
+async def test_external_session_agent_config_requires_one_canonical_id(tmp_path, auth_headers):
+    crew = build_app(config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False), enable_team=False)
+    runtime = crew.external_agents.upsert_runtime({
+        "id": "external-config-runtime",
+        "provider": "custom",
+        "name": "External Config Runtime",
+        "executable_path": "/bin/sh",
+        "version": "test",
+        "protocol": "cli",
+        "metadata": {"availability_status": "ready"},
+    })
+    agent = crew.external_agents.create_agent(
+        owner_account_id=OWNER_A,
+        name="External Config Agent",
+        runtime_id=runtime["id"],
+        model="default",
+    )
+    app = create_app(crew)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers=auth_headers,
+    ) as client:
+        missing = await client.put(
+            "/api/session/external-config-missing/agent-config",
+            json={"executor": "external"},
+        )
+        conflict = await client.put(
+            "/api/session/external-config-conflict/agent-config",
+            json={
+                "executor": "external",
+                "external_agent_id": "agent-top-level",
+                "external": {"external_agent_id": agent["id"]},
+            },
+        )
+        equal = await client.put(
+            "/api/session/external-config-equal/agent-config",
+            json={
+                "executor": "acp",
+                "external_agent_id": agent["id"],
+                "external": {"external_agent_id": agent["id"], "model": "default"},
+                "acp": {"external_agent_id": agent["id"]},
+            },
+        )
+        loaded = await client.get("/api/session/external-config-equal/agent-config")
+
+    assert missing.status_code == 400
+    assert conflict.status_code == 400
+    assert equal.status_code == 200
+    assert equal.json()["executor"] == "external"
+    assert equal.json()["external"]["external_agent_id"] == agent["id"]
+    assert "acp" not in equal.json()
+    assert "external_agent_id" not in equal.json()
+    assert loaded.status_code == 200
+    assert loaded.json() == equal.json()
+
+
 @pytest.mark.asyncio
 async def test_external_session_model_resolves_adapter_declared_legacy_id(tmp_path, auth_headers):
     crew = build_app(config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False), enable_team=False)

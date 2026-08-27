@@ -130,7 +130,9 @@ class TeamMemberFactory:
                 else {}
             )
             is_builtin = is_crew_builtin_agent(agent_id)
-            member_id = CREW_BUILTIN_AGENT_ID if is_builtin else str(row.get("agent_name") or agent_id)
+            # External agent id is the stable runtime identity.  The display
+            # name remains available separately and may legitimately repeat.
+            member_id = CREW_BUILTIN_AGENT_ID if is_builtin else agent_id
             spec = TeamMemberSpec.from_config({
                 "member_id": member_id,
                 "name": str(row.get("agent_name") or ("Crew 内置智能体" if is_builtin else agent_id)),

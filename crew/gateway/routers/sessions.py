@@ -20,7 +20,12 @@ from crew.agent.loop.tool_result_display import (
 )
 from crew.core.types import Message, ToolCall, safe_duration_seconds, tool_arguments_for_ui
 from crew.gateway.auth import account_from_request
-from crew.gateway.helpers import require_external_agents_enabled, with_session_agent_labels
+from crew.gateway.helpers import (
+    normalize_external_session_config,
+    require_external_agents_enabled,
+    session_external_agent_id,
+    with_session_agent_labels,
+)
 from crew.gateway.hooks import hook_registry
 from crew.security.settings import strict_security_enabled
 from crew.state.session_store import SessionOwnershipError, is_placeholder_title
@@ -653,12 +658,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         config = {key: value for key, value in raw.items() if not key.startswith("_")}
         external = config.get("external") if isinstance(config.get("external"), dict) else {}
         acp = config.get("acp") if isinstance(config.get("acp"), dict) else {}
-        external_agent_id = str(
-            config.get("external_agent_id")
-            or external.get("external_agent_id")
-            or acp.get("external_agent_id")
-            or ""
-        ).strip()
+        external_agent_id = session_external_agent_id(config)
         if not external_agent_id:
             return None
         agent, runtime = crew.external_agents.agent_with_runtime(
@@ -784,14 +784,13 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 runtime_id = str(runtime.get("id") or agent.get("runtime_id") or "")
                 model_label = selected.label if selected is not None else selected_model_id
             is_leader = agent_id == leader_agent_id
-            # API/持久化用外部 agent id；Team 运行时则以 member_id 路由，
-            # 对外部普通成员该 id 优先是 agent_name。忙闲判断必须映射到后者。
+            # API、持久化和 Team 运行时统一使用稳定 external agent id。
             runtime_member_id = (
                 "leader"
                 if is_leader
                 else CREW_BUILTIN_AGENT_ID
                 if is_crew_builtin_agent(agent_id)
-                else str(team_member.get("agent_name") or agent_id)
+                else agent_id
             )
             state = (
                 team_member_state(
@@ -920,11 +919,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     {"ok": False, "code": "session_or_member_not_found", "error": "Team 成员不存在"},
                     status_code=404,
                 )
-            runtime_member_id = (
-                "leader"
-                if member.get("is_leader")
-                else str(member.get("member_name") or member_id)
-            )
+            runtime_member_id = "leader" if member.get("is_leader") else member_id
             if model_id == str(member.get("model_profile_id") or ""):
                 return JSONResponse({
                     "ok": True,
@@ -1174,15 +1169,8 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 {"ok": False, "error": "executor 必须是 builtin | client | external | team"},
                 status_code=400,
             )
-        external_config = config.get("external") if isinstance(config.get("external"), dict) else {}
-        acp_config = config.get("acp") if isinstance(config.get("acp"), dict) else {}
         team_config = config.get("team") if isinstance(config.get("team"), dict) else {}
-        external_agent_id = str(
-            config.get("external_agent_id")
-            or external_config.get("external_agent_id")
-            or acp_config.get("external_agent_id")
-            or ""
-        ).strip()
+        external_agent_id = ""
         external_team_id = str(team_config.get("external_team_id") or "").strip()
         if (
             executor in {"external", "acp"}
@@ -1190,7 +1178,14 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         ):
             require_external_agents_enabled(crew)
 
-        if executor in {"external", "acp"} and external_agent_id:
+        if executor in {"external", "acp"}:
+            try:
+                config = normalize_external_session_config(config)
+            except ValueError as exc:
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            external_agent_id = str(config["external"]["external_agent_id"])
+
+        if executor in {"external", "acp"}:
             try:
                 _, runtime = crew.external_agents.agent_with_runtime(
                     external_agent_id,

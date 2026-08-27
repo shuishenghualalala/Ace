@@ -122,6 +122,14 @@
   </ul>
   <p>验证：新增 direct mention 父任务与成员 canonical 回答的历史投影回归，确认用户消息和 kk 回复保留且不再生成 Crew 重复气泡。</p>
 
+  <h2>11. 外援身份一致性 P1 修复（2026-08-27）</h2>
+  <ul>
+    <li>外部 Team 成员的运行时 <code>member_id</code> 统一使用不可变的 <code>external_agent_id</code>，展示名称只作为 <code>name</code>；同名外援不会再因字典键覆盖而丢失。</li>
+    <li>单外援 Session 将 <code>external_agent_id</code> 归一到 <code>external.external_agent_id</code>。顶层、<code>acp</code> 和 canonical 字段的相同旧写法可兼容读取；缺失或互相冲突时在持久化前返回 400。</li>
+    <li>旧 Team 快照、计划节点和派活记录仍支持按唯一展示名称解析到稳定 ID；重复名称不会猜测改派，避免静默执行到错误成员。</li>
+  </ul>
+  <p>验证：外援/Team Gateway 与任务回归 <code>293 passed, 1 skipped</code>；新增覆盖单外援配置缺失/冲突/重复字段及 Team 同名成员身份隔离。本阶段未新增后端模块、数据库表或迁移。</p>
+
   <div class="nav">返回：<a href="../../index.html">Crew 文档总览</a></div>
 </div>
 </body>

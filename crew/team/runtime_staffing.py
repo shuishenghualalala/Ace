@@ -345,9 +345,9 @@ class RuntimeStaffingPolicy:
         external_agent_id = str(agent.get("id") or "").strip()
         if not external_agent_id:
             raise ToolError("补员候选缺少 External Agent id")
-        member_id = name
-        if member_id in team.members and team.members[member_id].external_agent_id != external_agent_id:
-            member_id = f"{name}_{external_agent_id[-6:]}"
+        # Runtime identity must not depend on a mutable or duplicate display
+        # name.  The name is retained for prompts and UI labels only.
+        member_id = external_agent_id
         role_markdown = intelligent_role_markdown(
             role_key=role_key,
             agent_name=name,

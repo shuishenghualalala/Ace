@@ -164,6 +164,10 @@ class TeamPlanStore:
             except (TypeError, ValueError) as exc:
                 log.warning("忽略无效的 Runtime 临时成员快照 err=%s", exc)
                 continue
+            if member.executor == "external" and member.external_agent_id:
+                # Older snapshots used the display name as member_id.  Keep
+                # the snapshot readable while restoring the stable identity.
+                member.member_id = member.external_agent_id
             if member.member_id and member.member_id != "leader":
                 members[member.member_id] = member
         return members

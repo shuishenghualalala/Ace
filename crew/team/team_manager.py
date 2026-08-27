@@ -684,9 +684,21 @@ class InProcessTeamManager(TeamManager):
         if not parent_session_id or not child_id:
             return
         member_id = str(record.get("member") or "").strip()
+        team = self._teams.get(self._existing_team_key(parent_session_id, owner_account_id))
+        if team is None:
+            external_team_id = self._session_external_team_id(parent_session_id, owner_account_id)
+            if external_team_id:
+                team = self._get_or_create(
+                    parent_session_id,
+                    external_team_id=external_team_id,
+                    owner_account_id=owner_account_id,
+                )
+        if team is not None and hasattr(team, "members"):
+            member_id = self._resolve_team_member_id(team, member_id)
         lock = self.member_model_lock(parent_session_id, member_id, owner_account_id)
         with lock:
             active_record = dict(record)
+            active_record["member"] = member_id
             active_record["execution_snapshot"] = self.execution_snapshot(
                 parent_session_id,
                 member_id,
@@ -829,6 +841,59 @@ class InProcessTeamManager(TeamManager):
         team = self._get_or_create(session_id, external_team_id=external_team_id, owner_account_id=owner_account_id)
         return list(dict.fromkeys(["leader", *team.teammates.keys()]))
 
+    @staticmethod
+    def _resolve_member_id_from_specs(member_specs: dict[str, TeamMemberSpec], value: str) -> str:
+        """Resolve a legacy display-name reference to the stable member id."""
+
+        candidate = str(value or "").strip()
+        if not candidate or candidate == "leader" or candidate in member_specs:
+            return candidate
+        matches = [
+            member_id
+            for member_id, spec in member_specs.items()
+            if str(spec.name or "").strip() == candidate
+        ]
+        # A legacy name is safe to translate only when it identifies one member.
+        return matches[0] if len(matches) == 1 else candidate
+
+    @classmethod
+    def _resolve_team_member_id(cls, team: Team, value: str) -> str:
+        return cls._resolve_member_id_from_specs(getattr(team, "members", {}) or {}, value)
+
+    def _team_member_display_name(
+        self,
+        session_id: str,
+        member_id: str,
+        owner_account_id: str = "",
+    ) -> str:
+        """Return a member's display name while keeping IDs in protocol fields."""
+
+        candidate = str(member_id or "").strip()
+        team = self._teams.get(self._existing_team_key(session_id, owner_account_id))
+        if team is None:
+            return candidate
+        spec = (
+            team.leader_spec
+            if candidate == "leader"
+            else (getattr(team, "members", {}) or {}).get(candidate)
+        )
+        return str(getattr(spec, "name", "") or candidate).strip() or candidate
+
+    @classmethod
+    def _normalize_plan_member_ids(cls, plan: TeamPlan, team: Team) -> None:
+        """Upgrade old name-based plan assignees without changing the user roster."""
+
+        for node in plan.nodes.values():
+            node.assignee = cls._resolve_team_member_id(team, node.assignee)
+            metadata = node.metadata if isinstance(node.metadata, dict) else {}
+            if metadata.get("previous_assignee"):
+                updated = dict(metadata)
+                updated["previous_assignee"] = cls._resolve_team_member_id(
+                    team,
+                    str(metadata["previous_assignee"]),
+                )
+                node.metadata = updated
+
     def create_plan(
         self,
         session_id: str,
@@ -853,6 +918,11 @@ class InProcessTeamManager(TeamManager):
             external_team_id=external_team_id,
             owner_account_id=owner_account_id,
         )
+        team = self._get_or_create(
+            session_id,
+            external_team_id=external_team_id,
+            owner_account_id=owner_account_id,
+        )
         default_member = next((m for m in valid_members if m != "leader"), valid_members[0])
         if isinstance(workflow_plan, dict) and "nodes" in workflow_plan:
             nodes, edges = workflow_plan_graph(workflow_plan)
@@ -868,7 +938,10 @@ class InProcessTeamManager(TeamManager):
                 id=raw_id,
                 title=str(raw.get("title") or raw.get("content") or "").strip(),
                 detail=str(raw.get("detail") or raw.get("description") or "").strip(),
-                assignee=str(raw.get("assignee") or raw.get("assignee_id") or "").strip() or default_member,
+                assignee=self._resolve_team_member_id(
+                    team,
+                    str(raw.get("assignee") or raw.get("assignee_id") or "").strip() or default_member,
+                ),
             ))
             raw_meta = raw.get("metadata")
             if raw_id and isinstance(raw_meta, dict):
@@ -1812,6 +1885,7 @@ class InProcessTeamManager(TeamManager):
             external_team_id=external_team_id,
             owner_account_id=owner_account_id,
         )
+        self._normalize_plan_member_ids(plan, team)
         required = normalize_capabilities((node.metadata or {}).get("required_capabilities") or [])
         previous_assignee = str(node.assignee or (node.metadata or {}).get("previous_assignee") or "").strip()
 
@@ -2050,10 +2124,15 @@ class InProcessTeamManager(TeamManager):
             if source_kind == "user_mention_request"
             else "ask_answer"
         )
+        target_display_name = self._team_member_display_name(
+            session_id,
+            target,
+            owner_account_id,
+        )
         payload = {
             "text": answer_text,
             "agent_id": CREW_BUILTIN_AGENT_ID if is_crew_builtin_display_id(target) else target,
-            "agent_name": "Crew" if is_crew_builtin_display_id(target) else target,
+            "agent_name": "Crew" if is_crew_builtin_display_id(target) else target_display_name,
             "agent_role": "leader" if target == "leader" else "",
             "source_session_id": f"{session_id}::{target}",
             "is_leader": target == "leader",
@@ -2123,10 +2202,15 @@ class InProcessTeamManager(TeamManager):
         }.get(intent, "team_decision")
         raw_from = str(event.get("from") or "agent")
         display_agent_id = CREW_BUILTIN_AGENT_ID if is_crew_builtin_display_id(raw_from) else raw_from
+        display_agent_name = self._team_member_display_name(
+            session_id,
+            raw_from,
+            owner_account_id,
+        )
         payload = {
             "text": str(event.get("text") or event.get("content") or ""),
             "agent_id": display_agent_id,
-            "agent_name": "Crew" if is_crew_builtin_display_id(raw_from) else raw_from,
+            "agent_name": "Crew" if is_crew_builtin_display_id(raw_from) else display_agent_name,
             "agent_role": "",
             "source_session_id": f"{session_id}::{raw_from}",
             "is_leader": str(event.get("from") or "") == "leader",
@@ -2231,6 +2315,9 @@ class InProcessTeamManager(TeamManager):
         if len(targets) != 1:
             raise ToolError("team_mention(assign) 必须且只能 @ 一个具体团队成员。")
         member = targets[0]
+        team = self._teams.get(self._existing_team_key(session_id, owner_account_id))
+        if team is not None:
+            member = self._resolve_team_member_id(team, member)
         node_id = str(event.get("node_id") or "").strip()
         if not node_id:
             raise ToolError("team_mention(assign) 必须绑定现有 TeamPlan node_id；如需新增工作，请先 request_plan_change(add_node)。")
@@ -2322,7 +2409,10 @@ class InProcessTeamManager(TeamManager):
             raise ToolError(f"未知或不可委派成员: {member}")
 
         assign_payload = {
-            "text": f"@{member} {effective_instruction}".strip(),
+            "text": (
+                f"@{self._team_member_display_name(session_id, member, owner_account_id)} "
+                f"{effective_instruction}"
+            ).strip(),
             "agent_id": "leader",
             "agent_name": "leader",
             "agent_role": "leader",
@@ -2373,7 +2463,7 @@ class InProcessTeamManager(TeamManager):
         submit_payload = {
             "text": f"@leader {final_text}".strip(),
             "agent_id": member,
-            "agent_name": member,
+            "agent_name": self._team_member_display_name(session_id, member, owner_account_id),
             "agent_role": node.title,
             "source_session_id": f"{session_id}::{member}",
             "is_leader": False,
@@ -6488,27 +6578,41 @@ class InProcessTeamManager(TeamManager):
                 )
 
         def _guard_delegate_from_plan(task: dict[str, Any]) -> None:
+            member = self._resolve_member_id_from_specs(
+                member_map,
+                str(task.get("member") or ""),
+            )
             self._guard_delegate_against_plan(
                 session_id,
                 owner_account_id=owner_account_id,
-                member=str(task.get("member") or ""),
+                member=member,
                 plan_node_id=str(task.get("plan_node_id") or ""),
             )
 
         def _apply_plan_change_from_leader(change: dict[str, Any]) -> dict[str, Any]:
+            normalized_change = dict(change)
+            if "assignee" in normalized_change:
+                normalized_change["assignee"] = self._resolve_member_id_from_specs(
+                    member_map,
+                    str(normalized_change.get("assignee") or ""),
+                )
             return self._apply_leader_plan_change(
                 session_id,
                 owner_account_id=owner_account_id,
-                change=change,
+                change=normalized_change,
                 valid_member_ids=set(teammates),
                 member_specs=member_map,
             )
 
         async def _execute_legacy_delegate_from_plan(task: dict[str, Any]) -> str:
+            member = self._resolve_member_id_from_specs(
+                member_map,
+                str(task.get("member") or ""),
+            )
             result = await self._execute_team_plan_assignment(
                 session_id,
                 owner_account_id=owner_account_id,
-                member=str(task.get("member") or ""),
+                member=member,
                 instruction=str(task.get("instruction") or ""),
                 plan_node_id=str(task.get("plan_node_id") or ""),
                 teammates=teammates,
@@ -6603,6 +6707,9 @@ class InProcessTeamManager(TeamManager):
                 owner_account_id=owner_account_id,
                 runtime_members=runtime_members,
             )
+            existing_plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
+            if existing_plan is not None and hasattr(self._teams[key], "members"):
+                self._normalize_plan_member_ids(existing_plan, self._teams[key])
         return self._teams[key]
 
     async def external_team_mention(
@@ -6629,9 +6736,16 @@ class InProcessTeamManager(TeamManager):
         """
 
         team = self._get_or_create(session_id, owner_account_id=owner_account_id)
+        resolved_member_id = self._resolve_team_member_id(team, member_id)
+        resolved_targets = [
+            self._resolve_team_member_id(team, str(target or ""))
+            if str(target or "").strip() not in {"leader", "all", "user"}
+            else str(target or "").strip()
+            for target in list(to or [])
+        ]
         event = {
-            "from": member_id,
-            "to": list(to or []),
+            "from": resolved_member_id,
+            "to": resolved_targets,
             "intent": str(intent or "broadcast"),
             "content": str(content or ""),
             "node_id": str(node_id or ""),
@@ -6671,6 +6785,10 @@ class InProcessTeamManager(TeamManager):
         与 Team Bus。
         """
         team = self._get_or_create(session_id, external_team_id=external_team_id, owner_account_id=owner_account_id)
+        member = self._resolve_team_member_id(team, member)
+        existing_plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
+        if existing_plan is not None:
+            self._normalize_plan_member_ids(existing_plan, team)
         delegate_payload_meta = {
             **dict(task_payload_meta or {}),
             "execution_snapshot": self.execution_snapshot(
