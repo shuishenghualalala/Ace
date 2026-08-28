@@ -795,6 +795,7 @@ class TeamWorkflowRuntime:
                         task_payload_meta=task_payload_meta,
                         finalize_plan_node=False,
                         attachments=envelope.attachments,
+                        preclaimed_node=True,
                     )
                     snapshot_changes = (
                         self.host._workspace_file_changes(delegate_cwd, workspace_snapshot)

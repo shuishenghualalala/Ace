@@ -130,6 +130,15 @@
   </ul>
   <p>验证：外援/Team Gateway 与任务回归 <code>293 passed, 1 skipped</code>；新增覆盖单外援配置缺失/冲突/重复字段及 Team 同名成员身份隔离。本阶段未新增后端模块、数据库表或迁移。</p>
 
+  <h2>12. TeamPlan 派活语义收口 P2-4（2026-08-28）</h2>
+  <ul>
+    <li><b>唯一派活入口：</b>内部 <code>delegate_to_teammate</code>、Team <code>team_mention(assign)</code> 和外部控制面 <code>request_delegate</code> 均必须绑定现有 <code>TeamPlan</code> 节点；无计划、缺少节点、成员不匹配或节点状态不允许时统一拒绝。</li>
+    <li><b>移除旧语义绕过：</b>删除 <code>allow_legacy_without_plan</code> 和无计划 Legacy Delegate 分支。Workflow Runtime 预先标记节点为 <code>in_progress</code> 时使用显式内部预占校验（<code>preclaimed_node</code>），仍不允许重复绑定已有任务。</li>
+    <li><b>兼容边界：</b>旧 TeamPlan/看板继续由 <code>TeamPlanStore.hydrate()</code> 恢复；旧事件仅用于读取和恢复，不再作为无计划派活入口。无法恢复计划的旧 session 返回明确错误，不静默执行旧逻辑。</li>
+    <li><b>结构清理：</b>TeamManager 删除重复的 Leader 解析 if/else，计划派活回调不再使用 <code>legacy_delegate</code> 运行语义。</li>
+  </ul>
+  <p>验证：Team 回归为 <code>251 passed, 1 skipped</code>，Gateway/Kanban 回归为 <code>94 passed</code>；覆盖有/无 TeamPlan 的内部与控制面派活、持久化计划恢复、重复派活拒绝和 Workflow Runtime 预占状态。同步完成 Python 编译、Ruff 的 E9/F 检查与 <code>git diff --check</code>；全量 Ruff 的历史遗留告警未在本阶段扩大范围。</p>
+
   <div class="nav">返回：<a href="../../index.html">Crew 文档总览</a></div>
 </div>
 </body>

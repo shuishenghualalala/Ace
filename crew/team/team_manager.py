@@ -2360,42 +2360,10 @@ class InProcessTeamManager(TeamManager):
         on_task_created: Callable[[dict[str, Any]], None] | None = None,
         on_task_finished: Callable[[dict[str, Any]], None] | None = None,
         task_payload_meta: dict[str, Any] | None = None,
-        allow_legacy_without_plan: bool = False,
         source: str = "mention",
     ) -> dict[str, Any]:
         node_id = str(plan_node_id or "").strip()
-        plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
-        if plan is None:
-            if not allow_legacy_without_plan:
-                raise ToolError("当前 Team session 尚未创建 TeamPlan，不能通过 mention assign 任意派活。")
-            delegate_payload_meta = {
-                **dict(task_payload_meta or {}),
-                "execution_snapshot": self.execution_snapshot(
-                    session_id,
-                    member,
-                    owner_account_id=owner_account_id,
-                    plan_node_id=node_id,
-                ),
-            }
-            final_text = await run_delegate_to_teammate(
-                teammates,
-                self.tasks,
-                session_id,
-                member=member,
-                instruction=instruction,
-                requester_member_id="leader",
-                plan_node_id=node_id,
-                bus=bus,
-                on_child_start=self._mark_child_active,
-                on_child_done=self._mark_child_done,
-                on_task_created=on_task_created,
-                on_task_finished=on_task_finished,
-                owner_account_id=owner_account_id,
-                task_payload_meta=delegate_payload_meta,
-            )
-            return {"result": final_text, "node_id": node_id, "member": member, "legacy": True}
-
-        self._guard_delegate_against_plan(
+        plan = self._guard_delegate_against_plan(
             session_id,
             owner_account_id=owner_account_id,
             member=member,
@@ -2484,7 +2452,7 @@ class InProcessTeamManager(TeamManager):
             node_id=node_id,
             payload=submit_payload,
         )
-        return {"result": final_text, "node_id": node_id, "member": member, "legacy": False}
+        return {"result": final_text, "node_id": node_id, "member": member}
 
     def _team_workflow_ids_for_session(self, session_id: str, owner_account_id: str = "") -> list[str]:
         store = self._kanban_store_for_owner(owner_account_id)
@@ -2573,12 +2541,26 @@ class InProcessTeamManager(TeamManager):
         session_id: str,
         *,
         owner_account_id: str = "",
+        external_team_id: str = "",
         member: str,
         plan_node_id: str,
-    ) -> None:
+        preclaimed_node: bool = False,
+    ) -> TeamPlan:
         plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
         if plan is None:
-            return
+            plan = self._hydrate_persisted_team_plan(
+                session_id,
+                node_id=plan_node_id,
+                external_team_id=external_team_id,
+                owner_account_id=owner_account_id,
+            )
+        if plan is None:
+            raise ToolError("当前 Team session 尚未创建 TeamPlan，不能派活。")
+
+        team = self._teams.get(self._existing_team_key(session_id, owner_account_id))
+        if team is not None:
+            self._normalize_plan_member_ids(plan, team)
+
         member_id = str(member or "").strip()
         node_id = str(plan_node_id or "").strip()
         if not node_id:
@@ -2596,11 +2578,20 @@ class InProcessTeamManager(TeamManager):
                 f"TeamPlan 节点 {node_id} 分配给 {node.assignee}，不能委派给 {member_id}；"
                 "如需调整负责人，请先变更 DAG。"
             )
-        if node.status not in {"pending", "failed"}:
+        allowed_statuses = {"pending", "failed"}
+        if preclaimed_node:
+            allowed_statuses.add("in_progress")
+        if node.status not in allowed_statuses:
             raise ToolError(
                 f"TeamPlan 节点 {node_id} 当前状态为 {node.status}，不能重复委派；"
                 "如需重跑或追加工作，请先变更 DAG。"
             )
+        if preclaimed_node and node.delegate_task_id:
+            raise ToolError(
+                f"TeamPlan 节点 {node_id} 已绑定派活任务，不能重复委派；"
+                "如需重跑或追加工作，请先变更 DAG。"
+            )
+        return plan
 
     def _unique_plan_node_id(self, plan: TeamPlan, *, raw_node_id: str, assignee: str, title: str) -> str:
         base = workflow_plan.safe_plan_node_id(raw_node_id) if raw_node_id else workflow_plan.safe_plan_node_id(f"{assignee}_{title}")
@@ -6391,20 +6382,12 @@ class InProcessTeamManager(TeamManager):
                 raw_persisted_team_spec = external_team.get("team_spec")
                 if isinstance(raw_persisted_team_spec, dict):
                     persisted_team_spec = dict(raw_persisted_team_spec)
-                leader_agent_id = str(external_team.get("leader_agent_id") or "").strip()
-                if leader_agent_id and not is_crew_builtin_agent(leader_agent_id):
-                    members, leader_spec = self._external_team_specs(
-                        external_team_id,
-                        owner_account_id=owner_account_id,
-                        model_bindings=model_bindings,
-                    )
-                else:
-                    members, leader_spec = self._external_team_specs(
-                        external_team_id,
-                        owner_account_id=owner_account_id,
-                        model_bindings=model_bindings,
-                    )
-            except Exception as exc:  # noqa: BLE001
+                members, leader_spec = self._external_team_specs(
+                    external_team_id,
+                    owner_account_id=owner_account_id,
+                    model_bindings=model_bindings,
+                )
+            except Exception as exc:
                 log.warning("读取外部团队失败 external_team_id=%s err=%s", external_team_id, exc)
                 raise ToolError(f"读取外部团队失败：{external_team_id}") from exc
         else:
@@ -6604,7 +6587,7 @@ class InProcessTeamManager(TeamManager):
                 member_specs=member_map,
             )
 
-        async def _execute_legacy_delegate_from_plan(task: dict[str, Any]) -> str:
+        async def _execute_plan_delegate(task: dict[str, Any]) -> str:
             member = self._resolve_member_id_from_specs(
                 member_map,
                 str(task.get("member") or ""),
@@ -6619,8 +6602,7 @@ class InProcessTeamManager(TeamManager):
                 bus=bus,
                 on_task_created=_mark_plan_from_delegate_task,
                 on_task_finished=_finish_plan_from_delegate_task,
-                allow_legacy_without_plan=True,
-                source="legacy_delegate",
+                source="delegate",
             )
             return str(result.get("result") or "")
 
@@ -6637,7 +6619,7 @@ class InProcessTeamManager(TeamManager):
             session_id,
             bus=bus,
             before_delegate=_guard_delegate_from_plan,
-            execute_delegate=_execute_legacy_delegate_from_plan,
+            execute_delegate=_execute_plan_delegate,
             on_child_start=self._mark_child_active,
             on_child_done=self._mark_child_done,
             on_task_created=_mark_plan_from_delegate_task,
@@ -6777,18 +6759,25 @@ class InProcessTeamManager(TeamManager):
         task_payload_meta: dict[str, Any] | None = None,
         finalize_plan_node: bool = True,
         attachments: list[dict[str, Any]] | None = None,
+        preclaimed_node: bool = False,
     ) -> dict[str, Any]:
         """受控派活入口：供 MCP/Gateway 等外部控制面调用。
 
         外部 agent 不直接调用 delegate_to_teammate；它们只能通过这个方法请求
         Crew Team Runtime 派活。真正执行仍在 Crew 内部完成，并写入 TaskManager
-        与 Team Bus。
+        与 Team Bus。``preclaimed_node`` 仅供 Workflow Runtime 在已记录节点预占
+        后继续派发使用，不对 MCP 参数暴露。
         """
         team = self._get_or_create(session_id, external_team_id=external_team_id, owner_account_id=owner_account_id)
         member = self._resolve_team_member_id(team, member)
-        existing_plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
-        if existing_plan is not None:
-            self._normalize_plan_member_ids(existing_plan, team)
+        self._guard_delegate_against_plan(
+            session_id,
+            owner_account_id=owner_account_id,
+            external_team_id=external_team_id,
+            member=member,
+            plan_node_id=plan_node_id,
+            preclaimed_node=preclaimed_node,
+        )
         delegate_payload_meta = {
             **dict(task_payload_meta or {}),
             "execution_snapshot": self.execution_snapshot(

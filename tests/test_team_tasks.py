@@ -3414,7 +3414,7 @@ async def test_delegate_tool_allows_pending_member_plan_node():
     assert len(tasks.list("guard_plan_s3")) == 1
 
 
-async def test_legacy_delegate_entry_uses_unified_assignment_events(tmp_path):
+async def test_delegate_entry_uses_unified_assignment_events(tmp_path):
     store = SQLiteKanbanStore(tmp_path / "legacy-delegate-kanban.db")
     owner_store = store.for_owner("local")
     tm, tasks = _team(kanban_store=store)
@@ -3451,13 +3451,13 @@ async def test_legacy_delegate_entry_uses_unified_assignment_events(tmp_path):
     events = owner_store.get_board_state(workflow.id)["events"]
     assign = next(event for event in events if event["event_type"] == "team_assign")
     submit = next(event for event in events if event["event_type"] == "team_submit")
-    assert assign["payload"]["assignment_source"] == "legacy_delegate"
-    assert submit["payload"]["assignment_source"] == "legacy_delegate"
+    assert assign["payload"]["assignment_source"] == "delegate"
+    assert submit["payload"]["assignment_source"] == "delegate"
     assert assign["payload"]["mention_to"] == ["coder"]
     assert submit["payload"]["mention_from"] == "coder"
 
 
-async def test_legacy_delegate_entry_without_plan_keeps_compatibility():
+async def test_delegate_entry_without_plan_is_rejected():
     tm, tasks = _team()
     team = tm._build_team("legacy_delegate_no_plan_s1")
 
@@ -3473,9 +3473,50 @@ async def test_legacy_delegate_entry_without_plan_keeps_compatibility():
     finally:
         current_agent_id.reset(token)
 
-    assert not result.is_error
-    assert "coder算出：2" in result.content
-    assert [task["assignee"] for task in tasks.list("legacy_delegate_no_plan_s1")] == ["coder"]
+    assert result.is_error
+    assert "尚未创建 TeamPlan" in result.content
+    assert tasks.list("legacy_delegate_no_plan_s1") == []
+
+
+async def test_request_delegate_without_plan_is_rejected():
+    tm, tasks = _team()
+
+    with pytest.raises(ToolError, match="尚未创建 TeamPlan"):
+        await tm.request_delegate(
+            "request_delegate_no_plan_s1",
+            member="coder",
+            instruction="算 1+1",
+            requester_member_id="external_agent",
+        )
+
+    assert tasks.list("request_delegate_no_plan_s1") == []
+
+
+async def test_request_delegate_hydrates_persisted_team_plan(tmp_path):
+    store = SQLiteKanbanStore(tmp_path / "persisted-plan-delegate.db")
+    writer, _ = _team(kanban_store=store)
+    writer._build_team("persisted-plan-delegate", owner_account_id="local")
+    writer.create_plan(
+        "persisted-plan-delegate",
+        goal="恢复后执行",
+        nodes=[{"id": "work", "title": "恢复任务", "assignee": "coder"}],
+        edges=[],
+        owner_account_id="local",
+    )
+
+    reader, tasks = _team(kanban_store=store)
+    result = await reader.request_delegate(
+        "persisted-plan-delegate",
+        member="coder",
+        instruction="算 1+1",
+        requester_member_id="external_agent",
+        plan_node_id="work",
+        owner_account_id="local",
+    )
+
+    assert result["ok"] is True
+    assert result["plan_node_id"] == "work"
+    assert tasks.list("persisted-plan-delegate")[0]["assignee"] == "coder"
 
 
 async def test_team_mention_tool_routes_and_guards_user_mentions():
@@ -4330,11 +4371,18 @@ async def test_external_team_mention_propagates_current_active_skill(monkeypatch
 
 async def test_team_request_delegate_control_plane_entry():
     tm, tasks = _team()
+    tm.create_plan(
+        "mcp_team_s1",
+        goal="执行受控派活",
+        nodes=[{"id": "work", "title": "执行任务", "assignee": "coder"}],
+        edges=[],
+    )
     result = await tm.request_delegate(
         "mcp_team_s1",
         member="coder",
         instruction="算 1+1",
         requester_member_id="external_agent",
+        plan_node_id="work",
     )
     assert result["ok"] is True
     assert result["member"] == "coder"
@@ -4355,11 +4403,18 @@ async def test_team_request_delegate_control_plane_entry():
 
 async def test_team_request_delegate_can_wait_for_result():
     tm, tasks = _team()
+    tm.create_plan(
+        "mcp_team_sync_s1",
+        goal="执行受控派活",
+        nodes=[{"id": "work", "title": "执行任务", "assignee": "coder"}],
+        edges=[],
+    )
     result = await tm.request_delegate(
         "mcp_team_sync_s1",
         member="coder",
         instruction="算 1+1",
         requester_member_id="external_agent",
+        plan_node_id="work",
         wait_for_result=True,
     )
     assert result["ok"] is True
@@ -4539,12 +4594,19 @@ async def test_team_request_delegate_returns_before_slow_worker_finishes():
             return ChatResponse(text="coder慢任务完成")
 
     tm, tasks = _team(SlowControlPlaneProvider())
+    tm.create_plan(
+        "mcp_team_async_s1",
+        goal="执行受控派活",
+        nodes=[{"id": "work", "title": "慢任务", "assignee": "coder"}],
+        edges=[],
+    )
     result = await asyncio.wait_for(
         tm.request_delegate(
             "mcp_team_async_s1",
             member="coder",
             instruction="慢任务",
             requester_member_id="external_agent",
+            plan_node_id="work",
         ),
         timeout=0.5,
     )
