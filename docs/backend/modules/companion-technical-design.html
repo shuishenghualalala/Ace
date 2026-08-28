@@ -415,13 +415,14 @@ pub trait LinkAdapter: Send + Sync {
         <ul>
           <li><code>LinkAdapter</code> 只负责 BLE/Mock 链路；同伴关系、会话绑定、Agent 名片、Outbox 与 Local Run 由 Gateway/CompanionService 管理。</li>
           <li><code>ConversationAdapter</code> 把同伴会话接入主对话发送链，复用主对话附件、历史、Agent 执行过程和右侧看板。</li>
-          <li>文件在 Gateway 中校验当前账号 uploads 路径与 4 MiB 上限并流式计算 SHA-256；Rust 直接读取受控绝对路径，文件字节不再 Base64 编码。接收完成后只把受控 <code>local_path</code> 投影为 <code>peer.file</code> / <code>room.file</code>。</li>
+          <li>文件在 Gateway 中校验当前账号 uploads 路径与 4 MiB 上限并流式计算 SHA-256；Rust 直接读取受控绝对路径，文件字节不再 Base64 编码。接收完成后，Gateway 校验受控 <code>local_path</code>，再将文件无覆盖地写入 ConversationBinding 对应的工作空间根目录。</li>
         </ul>
         <h3>主对话消息闭环</h3>
         <ul>
           <li>同伴会话使用稳定的 <code>agent:main:nearby:*</code> Session，但不再被渠道会话过滤器隐藏；会话列表、重启恢复和普通主对话共用同一套 Session API。</li>
           <li>入站 <code>message_id</code>、发送者身份与来源写入 <code>crew.db</code>；SQLite 在同一写事务内按消息 ID 幂等追加，实时投影和历史回放使用相同数据。</li>
           <li>收到 LinkAdapter 入站事件后，Gateway 返回 ConversationBinding；Desktop 只在当前会话重新加载标准历史并重绘，不维护第二份同伴聊天状态。</li>
+          <li>入站附件消息携带绑定的 <code>workspace_id</code>；主对话使用共享文件卡和 Files Inspector 预览，Renderer 的读取与另存为请求由 Main 进程按已认证工作空间根目录重新授权。</li>
           <li>出站消息携带 <code>client_message_id</code>，状态按 <code>queued → sent → delivered</code> 推进；文件仅在接收端完成 SHA-256 校验并通过 DataChannel 回 ACK 后记为 delivered，超时、拒绝、BLE 断开或校验失败均记为 failed。</li>
           <li>远端人的消息与远端 Agent 最终输出都保留来源头像和名称；远端执行过程不进入本机数据库，本机 Agent 执行过程仍复用普通对话与右侧看板。</li>
         </ul>

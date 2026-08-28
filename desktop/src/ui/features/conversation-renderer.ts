@@ -93,6 +93,39 @@ export function ensureFileChangesDelegation(container: HTMLElement): void {
   container.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target : null;
     if (!target) return;
+    const previewBtn = target.closest<HTMLElement>('[data-attachment-preview]');
+    if (previewBtn && container.contains(previewBtn)) {
+      event.preventDefault();
+      event.stopPropagation();
+      const filePath = previewBtn.dataset.attachmentPreview?.trim();
+      if (filePath) {
+        openInspectorToTab('files', {
+          expandFilePath: filePath,
+          filePaths: [filePath],
+          workspaceId: previewBtn.dataset.attachmentWorkspace || null,
+        });
+      }
+      return;
+    }
+    const downloadBtn = target.closest<HTMLButtonElement>('[data-attachment-download]');
+    if (downloadBtn && container.contains(downloadBtn)) {
+      event.preventDefault();
+      event.stopPropagation();
+      const filePath = downloadBtn.dataset.attachmentDownload?.trim();
+      const fileName = downloadBtn.dataset.attachmentName?.trim();
+      const workspaceId = downloadBtn.dataset.attachmentWorkspace?.trim() || state.currentWorkspaceId;
+      if (!filePath || !fileName || !workspaceId || !window.Crew?.saveAttachment) return;
+      downloadBtn.disabled = true;
+      void window.Crew.saveAttachment(filePath, fileName, workspaceId)
+        .then((result) => {
+          if (result.ok) notify('附件已保存');
+        })
+        .catch((error) => {
+          notify(`附件保存失败：${error instanceof Error ? error.message : String(error)}`);
+        })
+        .finally(() => { downloadBtn.disabled = false; });
+      return;
+    }
     const revealBtn = target.closest<HTMLElement>('[data-file-reveal]');
     if (revealBtn && container.contains(revealBtn)) {
       event.preventDefault();

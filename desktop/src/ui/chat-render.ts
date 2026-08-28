@@ -918,20 +918,47 @@ function appendAttachment(container: HTMLElement, a: Attachment): void {
     container.appendChild(buildInlineImage(a.path, a.name, a.path, 'attachment'));
     return;
   }
-  const link = document.createElement('a');
-  link.className = 'msg__attachment msg__attachment--file';
-  link.target = '_blank';
-  link.rel = 'noopener noreferrer';
-  link.href = a.path;
+  const card = document.createElement('article');
+  card.className = 'msg__attachment msg__attachment--file';
   const icon = document.createElement('span');
   icon.className = 'msg__attachment-icon';
-  icon.textContent = '📄';
+  icon.appendChild(createIcon('icon-file', { size: 20 }));
+  const copy = document.createElement('span');
+  copy.className = 'msg__attachment-copy';
   const name = document.createElement('span');
   name.className = 'msg__attachment-name';
   name.textContent = a.name;
-  link.appendChild(icon);
-  link.appendChild(name);
-  container.appendChild(link);
+  name.title = a.name;
+  const detail = document.createElement('span');
+  detail.className = 'msg__attachment-detail';
+  detail.textContent = a.size && a.size > 0
+    ? `${Math.max(1, Math.round(a.size / 1024))} KB`
+    : '文件';
+  copy.append(name, detail);
+  card.append(icon, copy);
+  if (isAbsoluteLocalPath(a.path)) {
+    const actions = document.createElement('span');
+    actions.className = 'msg__attachment-actions';
+    const preview = document.createElement('button');
+    preview.type = 'button';
+    preview.className = 'msg__attachment-action';
+    preview.textContent = '预览';
+    preview.dataset.attachmentPreview = a.path;
+    preview.dataset.attachmentName = a.name;
+    if (a.workspaceId) preview.dataset.attachmentWorkspace = a.workspaceId;
+    preview.setAttribute('aria-label', `预览 ${a.name}`);
+    const download = document.createElement('button');
+    download.type = 'button';
+    download.className = 'msg__attachment-action msg__attachment-action--download';
+    download.textContent = '下载';
+    download.dataset.attachmentDownload = a.path;
+    download.dataset.attachmentName = a.name;
+    if (a.workspaceId) download.dataset.attachmentWorkspace = a.workspaceId;
+    download.setAttribute('aria-label', `下载 ${a.name}`);
+    actions.append(preview, download);
+    card.appendChild(actions);
+  }
+  container.appendChild(card);
 }
 
 function appendAttachments(container: HTMLElement, attachments: Attachment[] | undefined): void {

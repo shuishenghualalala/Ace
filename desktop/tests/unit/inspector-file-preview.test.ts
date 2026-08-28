@@ -438,6 +438,20 @@ describe('Inspector HTML 文件预览', () => {
     expect(document.body.textContent).toContain('1 个文件');
     expect(document.body.textContent).toContain('最终结果.pptx');
   });
+
+  it('同伴文件预览把工作空间 ID 传给现有文件读取接口', async () => {
+    openInspectorToTab('files', {
+      expandFilePath: '/tmp/demo/received.html',
+      filePaths: ['/tmp/demo/received.html'],
+      workspaceId: 'project-workspace',
+    });
+
+    await vi.waitFor(() => expect(readTextFile).toHaveBeenCalledWith(
+      '/tmp/demo/received.html',
+      'project-workspace',
+    ));
+    expect(window.Crew.pathExists).toHaveBeenCalledWith('/tmp/demo/received.html', 'project-workspace');
+  });
 });
 
 describe('buildHtmlPreviewDocument', () => {

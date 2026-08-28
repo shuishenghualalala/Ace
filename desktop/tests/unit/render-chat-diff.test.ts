@@ -19,9 +19,11 @@ import {
 import { formatMessageTime, formatDuration, renderQueuePanelHtml, sessionStatusClass } from '../../src/ui/chat-render';
 import {
   disposeConversationRenderer,
+  ensureFileChangesDelegation,
   getConversationScrollAnchor,
   renderConversation,
 } from '../../src/ui/features/conversation-renderer';
+import { openInspectorToTab } from '../../src/ui/features/inspector';
 import { __resetAllStoresForTest } from '../../src/ui/stores/stores';
 import { appendSessionMessage } from '../../src/ui/state';
 
@@ -264,5 +266,37 @@ describe('conversation-renderer 双实例隔离', () => {
     expect(panelA.textContent).toContain('面板B消息');
     expect(panelA.textContent).not.toContain('面板A第二条');
     expect(panelB.querySelector('.msg')).toBe(bFirst);
+  });
+});
+
+describe('conversation-renderer 文件附件动作', () => {
+  beforeEach(() => {
+    __resetAllStoresForTest();
+    document.body.innerHTML = '<div id="file-actions"></div>';
+  });
+
+  it('预览进入共享 Files Inspector，下载调用工作空间范围的系统另存为', async () => {
+    const saveAttachment = vi.fn(async () => ({ ok: true, canceled: false, path: '/Downloads/report.html' }));
+    window.Crew = { saveAttachment } as unknown as typeof window.Crew;
+    const container = document.getElementById('file-actions')!;
+    container.innerHTML = `
+      <button data-attachment-preview="/project/report.html" data-attachment-workspace="project"></button>
+      <button data-attachment-download="/project/report.html" data-attachment-name="report.html" data-attachment-workspace="project"></button>
+    `;
+    ensureFileChangesDelegation(container);
+
+    container.querySelector<HTMLButtonElement>('[data-attachment-preview]')?.click();
+    expect(vi.mocked(openInspectorToTab)).toHaveBeenCalledWith('files', {
+      expandFilePath: '/project/report.html',
+      filePaths: ['/project/report.html'],
+      workspaceId: 'project',
+    });
+
+    container.querySelector<HTMLButtonElement>('[data-attachment-download]')?.click();
+    await vi.waitFor(() => expect(saveAttachment).toHaveBeenCalledWith(
+      '/project/report.html',
+      'report.html',
+      'project',
+    ));
   });
 });

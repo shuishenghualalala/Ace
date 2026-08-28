@@ -22,4 +22,27 @@ describe('chat image attachment rendering', () => {
     expect(root.querySelector('[data-image-copy-path]')?.getAttribute('aria-label')).toBe('复制图片');
     expect(root.querySelector('[data-image-copy-path]')?.textContent).toBe('');
   });
+
+  it('文件附件复用主对话文件卡，并携带工作空间范围的预览与下载动作', () => {
+    const path = 'C:\\Users\\ahuamao\\project\\report.html';
+    const root = renderMessageHtml({
+      id: 'm2',
+      role: 'user',
+      content: '',
+      timestamp: 1,
+      attachments: [{
+        id: 'a2',
+        name: 'report.html',
+        path,
+        type: 'file',
+        workspaceId: 'workspace-win',
+      }],
+    }, '');
+
+    expect(root.querySelector('.msg__attachment--file')?.textContent).toContain('report.html');
+    expect(root.querySelector('[data-attachment-preview]')?.getAttribute('data-attachment-preview')).toBe(path);
+    expect(root.querySelector('[data-attachment-preview]')?.getAttribute('data-attachment-workspace')).toBe('workspace-win');
+    expect(root.querySelector('[data-attachment-download]')?.getAttribute('data-attachment-download')).toBe(path);
+    expect(root.querySelector('[data-attachment-download]')?.getAttribute('data-attachment-workspace')).toBe('workspace-win');
+  });
 });

@@ -42,6 +42,29 @@ describe('mapBackendHistoryItem turnFileChanges', () => {
     });
   });
 
+  it('maps received Companion markers to the shared workspace file card', () => {
+    const path = 'C:\\Users\\ahuamao\\project\\photo.png';
+    const msg = mapBackendHistoryItem({
+      role: 'user',
+      content: `附件「photo.png」位于: ${path}`,
+      origin: {
+        source: 'companion',
+        sender_kind: 'human',
+        sender_id: 'peer-1',
+        sender_name: '林墨',
+        is_self: false,
+        workspace_id: 'win-project',
+      },
+    });
+
+    expect(msg.attachments).toEqual([expect.objectContaining({
+      name: 'photo.png',
+      path,
+      type: 'file',
+      workspaceId: 'win-project',
+    })]);
+  });
+
   it('历史消息优先保留生成当时的模型', () => {
     const msg = mapBackendHistoryItem({
       role: 'assistant',

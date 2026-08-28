@@ -14,11 +14,12 @@
   <table>
     <thead><tr><th>层级</th><th>命令 / 用例</th><th>结果</th></tr></thead>
     <tbody>
-      <tr><td>Python Companion</td><td><code>pytest -q tests/test_companion.py</code><br>附件只返回受控绝对路径，流式计算 SHA-256；接收路径限制在 <code>nearby/received</code>，兼容旧 Base64 历史。</td><td class="pass">13 passed</td></tr>
+      <tr><td>Python Companion</td><td><code>.venv/bin/python -m pytest -q tests/test_companion.py</code><br>WebRTC 暂存路径限制在 <code>nearby/received</code>；摘要校验通过后写入会话绑定的工作空间根目录，同名不覆盖，并兼容旧 Base64 历史。</td><td class="pass">14 passed</td></tr>
       <tr><td>双实例端到端</td><td><code>.venv/bin/python -m pytest -q tests/test_companion_e2e.py</code><br>启动 Mock Bus、两个独立 Rust Nearby 进程与两个 Gateway，验证新的 <code>file_path</code> 命令契约和文件投影。</td><td class="pass">1 passed</td></tr>
       <tr><td>Rust 协议与链路</td><td><code>cargo test --manifest-path nearby/Cargo.toml</code><br>协议 v3、<code>file.webrtc</code> 能力协商、接收决定、SDP 信令、超时与失败事件；测试内真实建立两个 webrtc-rs PeerConnection，经可靠有序 DataChannel 传普通文件和空文件、校验并落盘。</td><td class="pass">58 passed</td></tr>
       <tr><td>Desktop 类型</td><td><code>npm run typecheck</code></td><td class="pass">通过</td></tr>
       <tr><td>Desktop 同伴回归</td><td><code>nearby-store</code>、<code>nearby-page</code>、<code>nearby-service</code>、<code>nearby-agent-bridge</code>、<code>nearby-tray</code>；覆盖路径发送、WebRTC 完成文件投影、旧 BLE 文件历史兼容和旧 v3 同伴附件禁用。</td><td class="pass">48 passed</td></tr>
+      <tr><td>Desktop 附件集成</td><td>附件历史映射、共享文件卡、预览/下载事件、IPC Schema 与工作空间范围读取专项测试；覆盖 Windows 路径和自定义项目工作空间。</td><td class="pass">105 passed</td></tr>
       <tr><td>三实例 Mock E2E</td><td><code>.venv/bin/python tests/e2e/nearby_mock_bus_smoke.py</code><br>发现、连接、建群、追加成员、群设置、退群和重启快照。</td><td class="pass">14 passed</td></tr>
       <tr><td>跨版本双实例 E2E</td><td>WebRTC 改造前的 <code>9554b94</code> 节点与当前节点双向发现、连接、发文字；旧节点缺少 <code>file.webrtc</code> 时仅拒绝文件。</td><td class="pass">4 scenarios passed</td></tr>
       <tr><td>Rust 静态检查</td><td><code>cargo clippy --manifest-path nearby/Cargo.toml --all-targets -- -D warnings</code></td><td class="pass">通过</td></tr>

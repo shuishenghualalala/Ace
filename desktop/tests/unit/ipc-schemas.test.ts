@@ -20,6 +20,7 @@ import {
   FeedbackSubmitArgs,
   FeedbackListArgs,
   DialogSelectFileArgs,
+  DialogSaveAttachmentArgs,
   InspirationWindowArgs,
   SecurityAuditArgs,
   UpdateStartDownloadArgs,
@@ -124,6 +125,12 @@ describe('ShellOpenPathArgs', () => {
     if (r.ok) expect(r.value.path).toBe('/home/user/cache/foo.log');
   });
 
+  it('accepts an authenticated workspace id for scoped reads', () => {
+    const r = ShellOpenPathArgs.parse({ path: 'C:\\work\\report.html', workspaceId: 'win-project' });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.workspaceId).toBe('win-project');
+  });
+
   it('rejects raw string (positional-arg mismatch)', () => {
     expect(ShellOpenPathArgs.parse('/etc/passwd').ok).toBe(false);
   });
@@ -139,6 +146,24 @@ describe('ShellOpenPathArgs', () => {
 
   it('rejects non-string path', () => {
     expect(ShellOpenPathArgs.parse({ path: 123 }).ok).toBe(false);
+  });
+});
+
+describe('DialogSaveAttachmentArgs', () => {
+  it('accepts an absolute source, plain filename, and workspace id', () => {
+    expect(DialogSaveAttachmentArgs.parse({
+      sourcePath: '/home/user/project/report.pdf',
+      suggestedName: 'report.pdf',
+      workspaceId: 'project',
+    }).ok).toBe(true);
+  });
+
+  it('rejects filename path traversal', () => {
+    expect(DialogSaveAttachmentArgs.parse({
+      sourcePath: '/home/user/project/report.pdf',
+      suggestedName: '../report.pdf',
+      workspaceId: 'project',
+    }).ok).toBe(false);
   });
 });
 

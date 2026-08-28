@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as path from 'path';
 
 interface GatewayResponse {
   ok: boolean;
@@ -12,6 +13,19 @@ interface WorkspaceDirectoryInfo {
 }
 
 type DirectoryFileSystem = Pick<typeof fs.promises, 'realpath' | 'stat'>;
+type WorkspacePathApi = Pick<typeof path, 'isAbsolute' | 'relative'>;
+
+export interface ResolvedWorkspaceFile {
+  filePath: string;
+  identity: {
+    dev: number;
+    ino: number;
+    nlink: number;
+    size: number;
+    mtimeMs: number;
+    ctimeMs: number;
+  };
+}
 
 /** Resolves one authenticated Workspace ID to its canonical directory state. */
 export async function resolveWorkspaceDirectoryInfo(
@@ -40,5 +54,35 @@ export async function resolveWorkspaceDirectoryInfo(
     return { exists, canonicalPath: exists ? canonicalPath : null };
   } catch {
     return { exists: false, canonicalPath: null };
+  }
+}
+
+/** Resolve one existing regular file strictly inside a canonical Workspace root. */
+export async function resolveWorkspaceFilePath(
+  rawPath: string,
+  canonicalRoot: string,
+  fileSystem: DirectoryFileSystem = fs.promises,
+  pathApi: WorkspacePathApi = path,
+): Promise<ResolvedWorkspaceFile | null> {
+  if (!rawPath || rawPath.includes('\0') || !pathApi.isAbsolute(rawPath)) return null;
+  try {
+    const filePath = await fileSystem.realpath(rawPath);
+    const relative = pathApi.relative(canonicalRoot, filePath);
+    if (!relative || relative.startsWith('..') || pathApi.isAbsolute(relative)) return null;
+    const stat = await fileSystem.stat(filePath);
+    if (!stat.isFile() || stat.nlink !== 1) return null;
+    return {
+      filePath,
+      identity: {
+        dev: stat.dev,
+        ino: stat.ino,
+        nlink: stat.nlink,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        ctimeMs: stat.ctimeMs,
+      },
+    };
+  } catch {
+    return null;
   }
 }

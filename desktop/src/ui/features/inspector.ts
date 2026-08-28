@@ -530,17 +530,18 @@ async function hydrateFileDiffIfNeeded(filePath: string): Promise<void> {
   if (backendFile?.status === 'deleted') return;
   if (backendFile?.diff?.length) return;
   if (!window.Crew?.readTextFile) return;
+  const workspaceId = scopedWorkspaceId;
   fileDiffHydrateInflight.add(filePath);
   let listChanged = false;
   try {
     // 先静默探测，避免对已删临时文件调用 readTextFile 刷主进程 ENOENT
-    if (window.Crew?.pathExists && !(await window.Crew.pathExists(filePath))) {
+    if (typeof window.Crew?.pathExists === 'function' && !(await workspacePathExists(filePath, workspaceId))) {
       fileMissingOnDisk.add(filePath);
       fileDiffCache.set(filePath, []);
       expandedFiles.delete(filePath);
       listChanged = true;
     } else {
-      const text = await window.Crew.readTextFile(filePath);
+      const text = await readWorkspaceTextFile(filePath, workspaceId);
       if (typeof text !== 'string' || !text) {
         fileMissingOnDisk.add(filePath);
         fileDiffCache.set(filePath, []);
@@ -582,17 +583,18 @@ async function hydrateFileContentIfNeeded(filePath: string): Promise<void> {
   ) {
     return;
   }
+  const workspaceId = scopedWorkspaceId;
   fileContentHydrateInflight.add(filePath);
   fileContentErrors.delete(filePath);
   try {
-    if (window.Crew?.pathExists && !(await window.Crew.pathExists(filePath))) {
+    if (typeof window.Crew?.pathExists === 'function' && !(await workspacePathExists(filePath, workspaceId))) {
       fileContentErrors.set(filePath, '文件不存在，无法生成页面预览');
-    } else if (isTextPreviewKind(kind) && window.Crew?.readTextFile) {
-      const text = await window.Crew.readTextFile(filePath);
+    } else if (isTextPreviewKind(kind) && typeof window.Crew?.readTextFile === 'function') {
+      const text = await readWorkspaceTextFile(filePath, workspaceId);
       if (typeof text === 'string') fileContentCache.set(filePath, text);
       else fileContentErrors.set(filePath, '文件内容无法读取');
-    } else if (isBinaryPreviewKind(kind) && window.Crew?.readFileBase64) {
-      const payload = await window.Crew.readFileBase64(filePath);
+    } else if (isBinaryPreviewKind(kind) && typeof window.Crew?.readFileBase64 === 'function') {
+      const payload = await readWorkspaceFileBase64(filePath, workspaceId);
       if (payload?.base64) fileBinaryCache.set(filePath, payload);
       else fileContentErrors.set(filePath, '文件内容无法读取');
     } else {
@@ -710,6 +712,28 @@ let workspaceMenuMode: 'new' | 'open' = 'new';
 const expandedFiles = new Set<string>();
 let scopedFilePaths: string[] | null = null;
 let scopedFileChanges: FileChange[] | null = null;
+let scopedWorkspaceId: string | null = null;
+
+function workspacePathExists(filePath: string, workspaceId: string | null): Promise<boolean> {
+  return workspaceId
+    ? window.Crew.pathExists(filePath, workspaceId)
+    : window.Crew.pathExists(filePath);
+}
+
+function readWorkspaceTextFile(filePath: string, workspaceId: string | null): Promise<string> {
+  return workspaceId
+    ? window.Crew.readTextFile(filePath, workspaceId)
+    : window.Crew.readTextFile(filePath);
+}
+
+function readWorkspaceFileBase64(
+  filePath: string,
+  workspaceId: string | null,
+): ReturnType<typeof window.Crew.readFileBase64> {
+  return workspaceId
+    ? window.Crew.readFileBase64(filePath, workspaceId)
+    : window.Crew.readFileBase64(filePath);
+}
 /** 各文件 diff 折叠区已揭开行数（path → regionStart → {top,bottom}）。 */
 const diffExpandsByPath = new Map<string, DiffRegionExpandMap>();
 let expandedMsg: string | null = null;
@@ -731,6 +755,7 @@ function syncInspectorSessionUi(): void {
   for (const path of restored.expandedFiles) expandedFiles.add(path);
   expandedMsg = restored.expandedMessage;
   diffExpandsByPath.clear();
+  scopedWorkspaceId = null;
   inspectorUiSessionId = nextSessionId;
 }
 
@@ -1640,6 +1665,7 @@ function activateWorkspaceTab(id: string): void {
   if (tab === 'files') {
     scopedFilePaths = null;
     scopedFileChanges = null;
+    scopedWorkspaceId = null;
   }
   setTab(tab);
 }
@@ -2109,6 +2135,7 @@ export function openInspectorToTab(
     expandFilePath?: string | null;
     filePaths?: string[] | null;
     fileChanges?: InspectorFileSummary[] | null;
+    workspaceId?: string | null;
   },
 ): void {
   syncInspectorSessionUi();
@@ -2130,6 +2157,8 @@ export function openInspectorToTab(
   if (tab !== 'browser') document.body.classList.remove('browser-workbench-maximized');
   if (tab === 'files') {
     computeFileChanges();
+    const hadScopedFiles = Boolean(scopedFilePaths?.length || scopedFileChanges?.length);
+    scopedWorkspaceId = options?.workspaceId?.trim() || null;
     scopedFilePaths = options?.filePaths?.length
       ? Array.from(new Set(options.filePaths.filter((path) => typeof path === 'string' && path.trim()).map((path) => path.trim())))
       : null;
@@ -2143,6 +2172,11 @@ export function openInspectorToTab(
         diff: file.diff || [],
       }))
       : null;
+    const hasScopedFiles = Boolean(scopedFilePaths?.length || scopedFileChanges?.length);
+    if (hadScopedFiles || hasScopedFiles) {
+      expandedFiles.clear();
+      diffExpandsByPath.clear();
+    }
     const files = currentFileChanges();
     const wanted = options?.expandFilePath?.trim() || '';
     if (wanted) {
@@ -2154,6 +2188,7 @@ export function openInspectorToTab(
   } else {
     scopedFilePaths = null;
     scopedFileChanges = null;
+    scopedWorkspaceId = null;
   }
   document.body.classList.add('inspector-open');
   $('#chat-inspector')?.classList.add('is-open');

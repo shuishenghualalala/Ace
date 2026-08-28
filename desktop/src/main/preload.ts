@@ -31,12 +31,14 @@ const api = {
       path: p,
       allowedRoot: allowedRoot && allowedRoot.trim() ? allowedRoot : undefined,
     }),
-  readTextFile: (p: string) => ipcRenderer.invoke('shell:readTextFile', { path: p }) as Promise<string>,
+  readTextFile: (p: string, workspaceId?: string) =>
+    ipcRenderer.invoke('shell:readTextFile', { path: p, workspaceId }) as Promise<string>,
   /** 静默探测路径是否为可读文件；不存在时返回 false，不抛错、不刷主进程 ENOENT 日志。 */
-  pathExists: (p: string) => ipcRenderer.invoke('shell:pathExists', { path: p }) as Promise<boolean>,
+  pathExists: (p: string, workspaceId?: string) =>
+    ipcRenderer.invoke('shell:pathExists', { path: p, workspaceId }) as Promise<boolean>,
   /** 仅允许读取/覆盖当前账号已有的任务产物；主进程重新校验 canonical owner root。 */
-  readFileBase64: (p: string) =>
-    ipcRenderer.invoke('shell:readFileBase64', { path: p }) as Promise<{
+  readFileBase64: (p: string, workspaceId?: string) =>
+    ipcRenderer.invoke('shell:readFileBase64', { path: p, workspaceId }) as Promise<{
       base64: string;
       mimeType: string;
     }>,
@@ -63,6 +65,12 @@ const api = {
   selectFolder: () => ipcRenderer.invoke('dialog:selectFolder', {}),
   saveLocalExport: (sourcePath: string, suggestedName: string) =>
     ipcRenderer.invoke('dialog:saveLocalExport', { sourcePath, suggestedName }) as Promise<{ ok: boolean; canceled: boolean; path?: string }>,
+  saveAttachment: (sourcePath: string, suggestedName: string, workspaceId: string) =>
+    ipcRenderer.invoke('dialog:saveAttachment', { sourcePath, suggestedName, workspaceId }) as Promise<{
+      ok: boolean;
+      canceled: boolean;
+      path?: string;
+    }>,
   openInspirationWindow: (inspirationId: string, title: string) =>
     ipcRenderer.invoke('inspiration:open-window', { inspirationId, title }) as Promise<{ ok: boolean; open: boolean }>,
   closeInspirationWindow: (inspirationId: string) =>

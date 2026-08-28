@@ -317,6 +317,7 @@ export interface BackendHistoryItem {
     sender_name?: string;
     is_self?: boolean;
     delivery_state?: string;
+    workspace_id?: string;
   };
   timestamp?: number;
   turn_started_at?: number;
@@ -566,6 +567,8 @@ export interface Attachment {
   path: string;
   type: 'image' | 'file';
   size?: number;
+  /** Server-owned workspace used to authorize preview/download for project-root files. */
+  workspaceId?: string;
 }
 
 export interface CompanionConversationBinding {

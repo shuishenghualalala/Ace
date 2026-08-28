@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import re
 from pathlib import Path
@@ -12,7 +11,11 @@ import pytest
 from crew.companion import CompanionService, CompanionStore
 from crew.core.mocks import InMemoryWorkspaceStore
 from crew.core.types import Message
-from crew.gateway.routers.companion import _prepare_attachment, _store_received_attachment
+from crew.gateway.routers.companion import (
+    _binding_workspace_root,
+    _prepare_attachment,
+    _store_received_attachment,
+)
 from crew.state.home import get_owner_runtime_home
 from crew.state.session_store import SQLiteSessionStore
 
@@ -117,6 +120,7 @@ def test_dm_has_no_agent_capability_and_strips_mentions(tmp_path):
         "sender_name": "我",
         "is_self": True,
         "delivery_state": "queued",
+        "workspace_id": "companion",
     }
 
 
@@ -171,9 +175,41 @@ def test_attachment_prepare_and_receive_are_owner_scoped(tmp_path, monkeypatch):
     receive_root.mkdir(parents=True)
     received_path = receive_root / "transfer-note.txt"
     received_path.write_bytes(b"hello")
-    received = _store_received_attachment("owner-a", {**prepared, "local_path": str(received_path)})
+    workspace_root = tmp_path / "selected-workspace"
+    received = _store_received_attachment(
+        "owner-a",
+        {**prepared, "local_path": str(received_path)},
+        workspace_root=workspace_root,
+    )
     assert received["name"] == "note.txt"
-    assert Path(received["path"]).exists()
+    assert Path(received["path"]).parent == workspace_root
+    assert Path(received["path"]).read_bytes() == b"hello"
+
+    duplicate = _store_received_attachment(
+        "owner-a",
+        {**prepared, "local_path": str(received_path)},
+        workspace_root=workspace_root,
+    )
+    assert Path(duplicate["path"]).name == "note (2).txt"
+
+
+def test_received_attachment_uses_the_conversation_workspace_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    service, _, workspaces = _service(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    workspace = workspaces.create(
+        "项目",
+        root_path=str(project),
+        owner_account_id="owner-a",
+    )
+    binding = service.open_conversation(
+        "owner-a",
+        kind="nearby_dm",
+        target_id="peer-1",
+        workspace_id=workspace["id"],
+    )
+    assert _binding_workspace_root(service, "owner-a", binding) == project.resolve()
 
 
 def test_attachment_prepare_normalizes_legacy_unicode_file_id(tmp_path, monkeypatch):

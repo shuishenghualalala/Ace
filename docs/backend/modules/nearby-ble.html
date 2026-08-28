@@ -60,6 +60,7 @@
     <li>接受后，发送方创建 WebRTC Offer，接收方创建 Answer；两段 SDP 通过现有 BLE 会话交换，不需要中心信令服务器。</li>
     <li>ICE 优先选择可用直连路径；不同网络或严格 NAT 下直连失败时使用 TURN。DataChannel 使用 DTLS/SCTP，配置为可靠、有序传输。</li>
     <li>发送端按 12 KiB 流式读文件并做发送缓冲背压；接收端写入 <code>~/.Crew/nearby/received/*.part</code>，核对大小和 SHA-256 后原子改名，再回完成 ACK。</li>
+    <li>Gateway 收到完成事件后，把校验通过的文件写入该同伴会话当前绑定的工作空间根目录；同名文件自动追加 <code> (2)</code> 等序号且不覆盖。主对话文件卡复用 Files Inspector 预览，并通过受工作空间 ID 校验的系统另存为窗口下载。</li>
     <li>拒绝、120 秒超时、BLE 会话断开、WebRTC 关闭或摘要不匹配都会产生 <code>file_transfer_failed</code>，临时文件会被清理。</li>
   </ol>
   <pre>ACE_NEARBY_STUN_URLS=stun:stun.example.com:3478
@@ -182,7 +183,7 @@ cargo run --manifest-path nearby/Cargo.toml -- --transport mock --mock-bus</pre>
     <tbody>
       <tr><td>Rust 单元与本机 DataChannel E2E</td><td class="pass">通过</td><td><code>cargo test --manifest-path nearby/Cargo.toml</code>：58 项通过；其中真实建立两个 webrtc-rs PeerConnection，覆盖普通文件与空文件传输、SHA-256 校验、落盘及旧 v3 能力协商。</td></tr>
       <tr><td>Desktop 类型与同伴回归</td><td class="pass">通过</td><td><code>npm run typecheck</code>；Nearby Store/Page/Service/Agent Bridge/Tray 共 48 项通过，覆盖旧同伴可聊天但附件入口禁用。</td></tr>
-      <tr><td>Gateway 附件测试</td><td class="pass">通过</td><td><code>tests/test_companion.py</code> 13 项、<code>tests/test_companion_e2e.py</code> 1 项通过，覆盖受控路径和不再发送 Base64。</td></tr>
+      <tr><td>Gateway 附件测试</td><td class="pass">通过</td><td><code>tests/test_companion.py</code> 14 项、<code>tests/test_companion_e2e.py</code> 1 项通过，覆盖工作空间落盘、同名防覆盖、受控路径和不再发送 Base64。</td></tr>
       <tr><td>跨版本双实例 E2E</td><td class="pass">通过</td><td>构建 WebRTC 改造前的 <code>9554b94</code> 节点与当前节点，经 Mock Bus 验证双向发现、连接和文字；旧节点无 <code>file.webrtc</code> 时文件被明确拒绝，不影响同伴可见性。</td></tr>
       <tr><td>三实例与构建回归</td><td class="pass">通过</td><td>Mock Bus 建群/成员/设置/重启共 14 项；<code>cargo clippy --all-targets -- -D warnings</code>、CSS 检查和 <code>npm run build:dev</code> 均通过。</td></tr>
       <tr><td>Desktop 全仓测试基线</td><td>存在既有失败</td><td><code>npm test</code>：1661 项通过、62 项失败；失败分布在 27 个非 Nearby 测试文件，本轮修改文件未出现在失败列表中。Nearby 5 个测试文件单独复跑为 48/48。</td></tr>

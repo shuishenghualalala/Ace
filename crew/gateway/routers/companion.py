@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import mimetypes
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -18,8 +19,7 @@ from fastapi.responses import JSONResponse
 
 from crew.core.types import Message
 from crew.gateway.auth import account_from_request
-from crew.gateway.context import save_upload
-from crew.state.home import get_crew_home, get_owner_runtime_home
+from crew.state.home import get_crew_home, get_owner_runtime_home, task_workspace_path
 
 MAX_COMPANION_FILE_BYTES = 4 * 1024 * 1024
 COMPANION_FILE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
@@ -72,7 +72,65 @@ def _prepare_attachment(owner: str, raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _store_received_attachment(owner: str, raw: dict[str, Any]) -> dict[str, Any]:
+def _safe_workspace_filename(filename: str) -> str:
+    """Return one readable filename that is valid on macOS, Linux and Windows."""
+    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", Path(filename).name).strip(" .")
+    if not value:
+        value = "received-file"
+    stem = value.split(".", 1)[0].upper()
+    if stem in {"CON", "PRN", "AUX", "NUL"} or re.fullmatch(r"(?:COM|LPT)[1-9]", stem):
+        value = f"_{value}"
+    parsed = Path(value)
+    suffix = parsed.suffix[:32]
+    safe_stem = (parsed.stem or "received-file")[: max(1, 240 - len(suffix))]
+    return f"{safe_stem}{suffix}"
+
+
+def _write_workspace_attachment(root: Path, filename: str, data: bytes) -> Path:
+    """Write without replacing an existing workspace file, including concurrent receives."""
+    root.mkdir(parents=True, exist_ok=True)
+    canonical_root = root.resolve(strict=True)
+    safe_name = _safe_workspace_filename(filename)
+    parsed = Path(safe_name)
+    stem = parsed.stem or "received-file"
+    suffix = parsed.suffix
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    for index in range(1, 10_000):
+        name = safe_name if index == 1 else f"{stem} ({index}){suffix}"
+        destination = canonical_root / name
+        try:
+            descriptor = os.open(destination, flags, 0o600)
+        except FileExistsError:
+            continue
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as target:
+                target.write(data)
+                target.flush()
+                os.fsync(target.fileno())
+        finally:
+            os.close(descriptor)
+        return destination
+    raise ValueError("工作空间内同名附件过多")
+
+
+def _binding_workspace_root(service: Any, owner: str, binding: dict[str, Any]) -> Path:
+    workspace_id = str(binding.get("workspace_id") or "companion").strip() or "companion"
+    workspace = service.workspace_store.get(workspace_id, owner_account_id=owner)
+    configured_root = str(workspace.get("root_path") or "").strip()
+    if configured_root:
+        root = Path(configured_root).expanduser().resolve()
+        if not root.is_dir():
+            raise ValueError("当前会话选择的工作空间目录不存在")
+        return root
+    return task_workspace_path(workspace_id, owner_account_id=owner)
+
+
+def _store_received_attachment(
+    owner: str,
+    raw: dict[str, Any],
+    *,
+    workspace_root: Path,
+) -> dict[str, Any]:
     name = Path(str(raw.get("name") or "")).name
     if not name or name in {".", ".."}:
         raise ValueError("收到的同伴附件无效")
@@ -97,22 +155,30 @@ def _store_received_attachment(owner: str, raw: dict[str, Any]) -> dict[str, Any
             or actual_sha256 != expected_sha256.lower()
         ):
             raise ValueError("收到的同伴附件校验失败")
-        return save_upload(name, data, owner_account_id=owner)
-    encoded = str(raw.get("data_base64") or "")
-    if len(encoded) > MAX_COMPANION_FILE_BYTES * 2:
-        raise ValueError("收到的同伴附件无效")
-    try:
-        data = base64.b64decode(encoded, validate=True)
-    except (ValueError, TypeError) as exc:
-        raise ValueError("收到的同伴附件不是有效的 Base64") from exc
-    if len(data) > MAX_COMPANION_FILE_BYTES:
-        raise ValueError("收到的同伴附件超过 4 MiB")
-    expected_size = raw.get("size")
-    expected_sha256 = str(raw.get("sha256") or "")
-    actual_sha256 = hashlib.sha256(data).hexdigest()
-    if expected_size != len(data) or not expected_sha256 or actual_sha256 != expected_sha256.lower():
-        raise ValueError("收到的同伴附件校验失败")
-    return save_upload(name, data, owner_account_id=owner)
+    else:
+        encoded = str(raw.get("data_base64") or "")
+        if len(encoded) > MAX_COMPANION_FILE_BYTES * 2:
+            raise ValueError("收到的同伴附件无效")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("收到的同伴附件不是有效的 Base64") from exc
+        if len(data) > MAX_COMPANION_FILE_BYTES:
+            raise ValueError("收到的同伴附件超过 4 MiB")
+        expected_size = raw.get("size")
+        expected_sha256 = str(raw.get("sha256") or "")
+        actual_sha256 = hashlib.sha256(data).hexdigest()
+        if expected_size != len(data) or not expected_sha256 or actual_sha256 != expected_sha256.lower():
+            raise ValueError("收到的同伴附件校验失败")
+    destination = _write_workspace_attachment(workspace_root, name, data)
+    return {
+        "id": _companion_file_id(raw.get("file_id"), path=destination, sha256=actual_sha256),
+        "name": name,
+        "path": str(destination),
+        "type": "image" if (mimetypes.guess_type(name)[0] or "").startswith("image/") else "file",
+        "size": len(data),
+        "previewUrl": None,
+    }
 
 
 def create_companion_router(crew) -> APIRouter:
@@ -325,7 +391,11 @@ def create_companion_router(crew) -> APIRouter:
                     raw_file = payload.get("file")
                     if not isinstance(raw_file, dict):
                         raise ValueError("缺少同伴附件")
-                    saved = _store_received_attachment(owner, raw_file)
+                    saved = _store_received_attachment(
+                        owner,
+                        raw_file,
+                        workspace_root=_binding_workspace_root(service, owner, binding),
+                    )
                     message = Message.user(f'附件「{saved["name"]}」位于: {saved["path"]}')
                     message.name = sender_name
                     message.message_id = message_id
@@ -336,6 +406,7 @@ def create_companion_router(crew) -> APIRouter:
                         "sender_name": sender_name,
                         "is_self": False,
                         "delivery_state": "delivered",
+                        "workspace_id": binding["workspace_id"],
                     }
                     appended = crew.session_store.append_idempotent(
                         binding["session_id"], message, owner_account_id=owner

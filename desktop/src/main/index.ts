@@ -81,6 +81,7 @@ import {
   DialogSelectFileArgs,
   DialogSelectFolderArgs,
   DialogSaveLocalExportArgs,
+  DialogSaveAttachmentArgs,
   InspirationWindowArgs,
   UpdateStartDownloadArgs,
   SecurityPendingArgs,
@@ -134,7 +135,7 @@ import {
   resolveGithubReleaseTarget,
 } from './update/github-release';
 import { evaluateVersionUpdate } from './version-compare';
-import { resolveWorkspaceDirectoryInfo } from './workspace-directory';
+import { resolveWorkspaceDirectoryInfo, resolveWorkspaceFilePath } from './workspace-directory';
 import { configurePptxWasmRuntime, PPTX_WASM_V8_FLAGS } from './wasm-runtime';
 import {
   NearbyService,
@@ -403,6 +404,36 @@ function authorizeOwnedRendererFile(rawPath: string): ResolvedOwnedFile {
     : null;
   if (!resolved) {
     throw new Error(`${IPC_ARG_VALIDATION_FAILED}: file is outside the current account`);
+  }
+  return resolved;
+}
+
+/** Authorize an existing file through account ownership or an authenticated Workspace ID. */
+async function authorizeRendererWorkspaceFile(
+  rawPath: string,
+  workspaceId?: string,
+): Promise<ResolvedOwnedFile> {
+  try {
+    return authorizeOwnedRendererFile(rawPath);
+  } catch {
+    // Custom project workspaces live outside Crew Home and require server-owned root resolution.
+  }
+  if (!workspaceId) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: file is outside the current account`);
+  }
+  const workspace = await resolveWorkspaceDirectoryInfo(
+    workspaceId,
+    () => securityGatewayRequest('GET', '/api/workspaces'),
+  );
+  if (!workspace.exists || !workspace.canonicalPath) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: workspace directory is unavailable`);
+  }
+  if (isDeniedShellPath(rawPath)) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid workspace file path`);
+  }
+  const resolved = await resolveWorkspaceFilePath(rawPath, workspace.canonicalPath);
+  if (!resolved || isDeniedShellPath(resolved.filePath)) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: file is outside the selected workspace`);
   }
   return resolved;
 }
@@ -3004,9 +3035,16 @@ function registerIpc() {
 
   trustedHandle('shell:readTextFile', async (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenPathArgs.parse(raw), 'shell:readTextFile');
+    const maxBytes = 512 * 1024;
+    if (args.workspaceId) {
+      const resolved = await authorizeRendererWorkspaceFile(args.path, args.workspaceId);
+      if (resolved.identity.size > maxBytes) {
+        throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:readTextFile file too large`);
+      }
+      return (await readResolvedCrewFile(resolved) ?? Buffer.alloc(0)).toString('utf8');
+    }
     const resolved = resolveShellAllowedPath(args.path);
     const stat = await fs.promises.stat(resolved);
-    const maxBytes = 512 * 1024;
     if (!stat.isFile()) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:readTextFile target is not a file`);
     }
@@ -3030,7 +3068,7 @@ function registerIpc() {
 
   trustedHandle('shell:readFileBase64', async (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenPathArgs.parse(raw), 'shell:readFileBase64');
-    const resolved = authorizeOwnedRendererFile(args.path);
+    const resolved = await authorizeRendererWorkspaceFile(args.path, args.workspaceId);
     const maxBytes = 50 * 1024 * 1024;
     if (resolved.identity.size > maxBytes) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:readFileBase64 file too large`);
@@ -3061,6 +3099,14 @@ function registerIpc() {
   // 目录 / 不存在 / 无权限路径 → false（文件改动卡只认文件 path）。
   trustedHandle('shell:pathExists', async (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenPathArgs.parse(raw), 'shell:pathExists');
+    if (args.workspaceId) {
+      try {
+        await authorizeRendererWorkspaceFile(args.path, args.workspaceId);
+        return true;
+      } catch {
+        return false;
+      }
+    }
     let resolved: string;
     try {
       resolved = resolveShellAllowedPath(args.path);
@@ -3073,6 +3119,23 @@ function registerIpc() {
     } catch {
       return false;
     }
+  });
+
+  trustedHandle('dialog:saveAttachment', async (_e, raw: unknown) => {
+    const args = parseOrThrow(DialogSaveAttachmentArgs.parse(raw), 'dialog:saveAttachment');
+    const resolved = await authorizeRendererWorkspaceFile(args.sourcePath, args.workspaceId);
+    const maxBytes = 50 * 1024 * 1024;
+    if (resolved.identity.size > maxBytes) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: attachment file too large`);
+    }
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      title: '保存附件',
+      defaultPath: path.join(app.getPath('downloads'), args.suggestedName),
+    });
+    if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+    const content = await readResolvedCrewFile(resolved) ?? Buffer.alloc(0);
+    await fs.promises.writeFile(result.filePath, content, { flag: 'w' });
+    return { ok: true, canceled: false, path: result.filePath };
   });
 
   // Renderer 只能提交 Workspace ID；root 来自已鉴权 Gateway 记录，避免任意路径枚举。

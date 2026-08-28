@@ -278,7 +278,13 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
   if (role === 'user') {
     const parsed = parseAttachmentMarkers(item.content);
     base.content = parsed.content;
-    base.attachments = parsed.attachments;
+    base.attachments = parsed.attachments.map((attachment) => ({
+      ...attachment,
+      ...(item.origin?.workspace_id ? { workspaceId: item.origin.workspace_id } : {}),
+      // 同伴附件最终位于所选工作空间；统一走共享文件卡和 Inspector，
+      // 避免项目根目录图片误走只允许账号私有目录的 crew-file:// 协议。
+      ...(item.origin?.source === 'companion' ? { type: 'file' as const } : {}),
+    }));
   }
   return base;
 }

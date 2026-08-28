@@ -408,6 +408,7 @@ export const ShellOpenExternalArgs = {
 export interface ShellOpenPathArgs {
   path: string;
   allowedRoot?: string;
+  workspaceId?: string;
 }
 
 export const ShellOpenPathArgs = {
@@ -421,6 +422,12 @@ export const ShellOpenPathArgs = {
       const r = StringSchema.parse(allowedRoot, 'allowedRoot');
       if (!r.ok) return r;
       value.allowedRoot = r.value;
+    }
+    const workspaceId = raw['workspaceId'];
+    if (workspaceId !== undefined && workspaceId !== null) {
+      const r = StringSchema.parse(workspaceId, 'workspaceId');
+      if (!r.ok) return r;
+      value.workspaceId = r.value;
     }
     return { ok: true, value };
   },
@@ -827,6 +834,37 @@ export const DialogSaveLocalExportArgs = {
     }
     if (!suggestedName.value.toLowerCase().endsWith('.zip')) return fail('suggestedName', 'must end with .zip');
     return { ok: true, value: { sourcePath: sourcePath.value, suggestedName: suggestedName.value } };
+  },
+};
+
+export interface DialogSaveAttachmentArgs {
+  sourcePath: string;
+  suggestedName: string;
+  workspaceId: string;
+}
+
+/** 将当前工作空间内的现有附件另存到用户选择的位置。 */
+export const DialogSaveAttachmentArgs = {
+  parse(raw: unknown): ParseResult<DialogSaveAttachmentArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const sourcePath = StringSchema.parse(raw['sourcePath'], 'sourcePath');
+    if (!sourcePath.ok) return sourcePath;
+    const suggestedName = StringSchema.parse(raw['suggestedName'], 'suggestedName');
+    if (!suggestedName.ok) return suggestedName;
+    const workspaceId = StringSchema.parse(raw['workspaceId'], 'workspaceId');
+    if (!workspaceId.ok) return workspaceId;
+    if (!ABSOLUTE_PATH_RE.test(sourcePath.value)) return fail('sourcePath', 'must be an absolute path');
+    if (suggestedName.value.includes('/') || suggestedName.value.includes('\\') || suggestedName.value.includes('\0')) {
+      return fail('suggestedName', 'must be a plain filename');
+    }
+    return {
+      ok: true,
+      value: {
+        sourcePath: sourcePath.value,
+        suggestedName: suggestedName.value,
+        workspaceId: workspaceId.value,
+      },
+    };
   },
 };
 

@@ -324,6 +324,7 @@ class CompanionService:
             "sender_name": "我",
             "is_self": True,
             "delivery_state": "queued",
+            "workspace_id": binding["workspace_id"],
         }
         self.session_store.append_idempotent(
             session_id, message, owner_account_id=owner_account_id
