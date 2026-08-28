@@ -87,7 +87,7 @@
 
 /* 链接 */
 .md-body a {
-  color: var(--text);
+  color: #2439b8;
   text-decoration: underline;
   text-underline-offset: 3px;
 }
