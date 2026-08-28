@@ -1,3 +1,6 @@
+use crate::file_transfer::{
+    validate_metadata, FileTransferMetadata, TransferEvent, WebRtcTransfers,
+};
 use crate::identity::{
     default_agent_name, default_display_name, load_nearby_settings, load_or_create_peer_id,
     resolve_state_dir, save_nearby_settings, NearbySettings,
@@ -5,8 +8,8 @@ use crate::identity::{
 #[cfg(not(target_os = "linux"))]
 use crate::protocol::should_initiate;
 use crate::protocol::{
-    is_valid_agent_mode, normalize_room_name, FileChunk, FrameCodec, Message, PeerInfo,
-    PublishedAgent, Reassembler, ReplyReference, DEFAULT_AGENT_MODE, INCOMING_MESSAGE_UUID,
+    is_valid_agent_mode, normalize_room_name, FrameCodec, Message, PeerInfo, PublishedAgent,
+    Reassembler, ReplyReference, TransferredFile, DEFAULT_AGENT_MODE, INCOMING_MESSAGE_UUID,
     OUTGOING_MESSAGE_UUID, PEER_INFO_UUID, PROTOCOL_VERSION, SERVICE_UUID,
 };
 use crate::runtime::{subscribe_outgoing_message, NearbyConfig};
@@ -35,7 +38,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -43,8 +46,8 @@ use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
     sync::{mpsc, Mutex},
 };
+use uuid::Uuid;
 
-const FILE_CHUNK_BASE64_BYTES: usize = 8 * 1024;
 const MAX_NEARBY_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const ROOM_HISTORY_LIMIT: usize = 200;
 const DM_HISTORY_LIMIT: usize = 200;
@@ -67,13 +70,13 @@ fn diagnostic_characteristics(peripheral: &Peripheral) -> String {
 }
 
 fn incoming_write_type(characteristic: &btleplug::api::Characteristic) -> Result<WriteType> {
-    if characteristic
+    if characteristic.properties.contains(CharPropFlags::WRITE) {
+        Ok(WriteType::WithResponse)
+    } else if characteristic
         .properties
         .contains(CharPropFlags::WRITE_WITHOUT_RESPONSE)
     {
         Ok(WriteType::WithoutResponse)
-    } else if characteristic.properties.contains(CharPropFlags::WRITE) {
-        Ok(WriteType::WithResponse)
     } else {
         anyhow::bail!("remote IncomingMessage characteristic is not writable")
     }
@@ -119,7 +122,7 @@ pub(crate) enum IpcCommand {
         mime_type: String,
         size: u64,
         sha256: String,
-        data_base64: String,
+        file_path: String,
         #[serde(default)]
         client_message_id: Option<String>,
     },
@@ -151,13 +154,17 @@ pub(crate) enum IpcCommand {
         mime_type: String,
         size: u64,
         sha256: String,
-        data_base64: String,
+        file_path: String,
         #[serde(default)]
         client_message_id: Option<String>,
         #[serde(default)]
         mentions: Vec<String>,
         #[serde(default)]
         reply_to: Option<ReplyReference>,
+    },
+    RespondFileTransfer {
+        transfer_id: String,
+        accepted: bool,
     },
     LeaveRoom {
         room_id: String,
@@ -262,9 +269,39 @@ pub(crate) enum IpcEvent {
         peer_id: String,
         message: Message,
     },
+    FileTransferRequested {
+        peer_id: String,
+        transfer: FileTransferMetadata,
+    },
+    FileTransferProgress {
+        peer_id: String,
+        transfer_id: String,
+        sent: u64,
+        total: u64,
+        incoming: bool,
+    },
+    FileTransferFailed {
+        peer_id: String,
+        transfer_id: String,
+        message: String,
+    },
     Error {
         message: String,
     },
+}
+
+#[derive(Debug, Clone)]
+struct PendingOutgoingTransfer {
+    peer_id: String,
+    metadata: FileTransferMetadata,
+    source_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct PendingIncomingTransfer {
+    peer_id: String,
+    metadata: FileTransferMetadata,
+    accepted: bool,
 }
 
 fn default_agent_mode() -> String {
@@ -550,6 +587,14 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
     let mut server_clients: HashMap<String, (String, String)> = HashMap::new();
     let mut server_reassemblers: HashMap<String, Reassembler> = HashMap::new();
     let mut seen_messages = HashSet::new();
+    let (transfer_event_tx, mut transfer_event_rx) = mpsc::channel(256);
+    let transfers = WebRtcTransfers::new(
+        state_dir.join("received"),
+        MAX_NEARBY_FILE_BYTES,
+        transfer_event_tx.clone(),
+    );
+    let mut outgoing_transfers: HashMap<String, PendingOutgoingTransfer> = HashMap::new();
+    let mut incoming_transfers: HashMap<String, PendingIncomingTransfer> = HashMap::new();
 
     sink.send(IpcEvent::Ready {
         peer: peer.clone(),
@@ -767,7 +812,7 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         save_dms(&state_dir, &dms)?;
                         sink.send(IpcEvent::Message { peer_id, message }).await?;
                     }
-                    IpcCommand::SendPeerFile { peer_id, file_id, name, mime_type, size, sha256, data_base64, client_message_id } => {
+                    IpcCommand::SendPeerFile { peer_id, file_id, name, mime_type, size, sha256, file_path, client_message_id } => {
                         if !active_peers.contains(&peer_id) {
                             sink.send(IpcEvent::PeerConnectionFailed {
                                 peer_id,
@@ -783,27 +828,46 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             }).await?;
                             continue;
                         };
-                        let chunks = match split_file_chunks(&file_id, &name, &mime_type, size, &sha256, &data_base64) {
-                            Ok(chunks) => chunks,
-                            Err(error) => {
-                                sink.send(IpcEvent::Error { message: error.to_string() }).await?;
-                                continue;
-                            }
+                        let source_path = PathBuf::from(file_path);
+                        if !source_path.is_absolute() {
+                            sink.send(IpcEvent::Error { message: "文件路径必须是绝对路径".to_owned() }).await?;
+                            continue;
+                        }
+                        let metadata = FileTransferMetadata {
+                            transfer_id: Uuid::new_v4().to_string(),
+                            file_id,
+                            name,
+                            mime_type,
+                            size,
+                            sha256: sha256.to_ascii_lowercase(),
+                            room_id: None,
+                            client_message_id,
                         };
-                        for file in chunks {
-                            let message = Message::peer_file(peer.peer_id.clone(), file)
-                                .with_client_message_id(client_message_id.clone());
-                            if outbound.send(message.clone()).await.is_err() {
-                                active_peers.remove(&peer_id);
-                                sink.send(IpcEvent::PeerConnectionFailed {
-                                    peer_id: peer_id.clone(),
-                                    message: "文件发送失败，BLE 会话已经断开".to_owned(),
-                                }).await?;
-                                break;
-                            }
-                            remember_dm_message(&mut dms, &peer_id, &message);
-                            save_dms(&state_dir, &dms)?;
-                            sink.send(IpcEvent::Message { peer_id: peer_id.clone(), message }).await?;
+                        if let Err(error) = validate_metadata(&metadata, MAX_NEARBY_FILE_BYTES) {
+                            sink.send(IpcEvent::Error { message: error.to_string() }).await?;
+                            continue;
+                        }
+                        let offer = Message::file_offer(peer.peer_id.clone(), metadata.clone());
+                        outgoing_transfers.insert(metadata.transfer_id.clone(), PendingOutgoingTransfer {
+                            peer_id: peer_id.clone(),
+                            metadata: metadata.clone(),
+                            source_path,
+                        });
+                        if outbound.send(offer).await.is_err() {
+                            outgoing_transfers.remove(&metadata.transfer_id);
+                            active_peers.remove(&peer_id);
+                            sink.send(IpcEvent::PeerConnectionFailed {
+                                peer_id,
+                                message: "文件请求发送失败，BLE 会话已经断开".to_owned(),
+                            }).await?;
+                        } else {
+                            sink.send(IpcEvent::FileTransferProgress {
+                                peer_id,
+                                transfer_id: metadata.transfer_id,
+                                sent: 0,
+                                total: metadata.size,
+                                incoming: false,
+                            }).await?;
                         }
                     }
                     IpcCommand::CreateRoom { room_id, room_name, peer_ids, agent_mode } => {
@@ -887,39 +951,87 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             sink.send(IpcEvent::Error { message: "群聊不存在或已退出".to_owned() }).await?;
                         }
                     }
-                    IpcCommand::SendRoomFile { room_id, file_id, name, mime_type, size, sha256, data_base64, client_message_id, mentions, reply_to } => {
+                    IpcCommand::SendRoomFile { room_id, file_id, name, mime_type, size, sha256, file_path, client_message_id, mentions: _, reply_to: _ } => {
                         if rooms.contains_key(&room_id) {
-                            let chunks = match split_file_chunks(&file_id, &name, &mime_type, size, &sha256, &data_base64) {
-                                Ok(chunks) => chunks,
-                                Err(error) => {
-                                    sink.send(IpcEvent::Error { message: error.to_string() }).await?;
-                                    continue;
-                                }
-                            };
-                            let mentions = rooms
+                            let source_path = PathBuf::from(file_path);
+                            if !source_path.is_absolute() {
+                                sink.send(IpcEvent::Error { message: "文件路径必须是绝对路径".to_owned() }).await?;
+                                continue;
+                            }
+                            let recipients = rooms
                                 .get(&room_id)
-                                .map(|room| filter_room_mentions(mentions, room))
+                                .map(|room| room.peer_ids.iter()
+                                    .filter(|peer_id| *peer_id != &peer.peer_id && sessions.contains_key(*peer_id))
+                                    .cloned()
+                                    .collect::<Vec<_>>())
                                 .unwrap_or_default();
-                            for file in chunks {
-                                let message = Message::room_file(
-                                    peer.peer_id.clone(),
-                                    room_id.clone(),
-                                    file,
-                                    mentions.clone(),
-                                    reply_to.clone(),
-                                ).with_client_message_id(client_message_id.clone());
-                                seen_messages.insert(message.message_id.clone());
-                                if let Some(room) = rooms.get_mut(&room_id) {
-                                    remember_room_message(room, &message);
+                            if recipients.is_empty() {
+                                sink.send(IpcEvent::Error { message: "群内暂无可接收文件的在线同伴".to_owned() }).await?;
+                                continue;
+                            }
+                            for recipient in recipients {
+                                let metadata = FileTransferMetadata {
+                                    transfer_id: Uuid::new_v4().to_string(),
+                                    file_id: file_id.clone(),
+                                    name: name.clone(),
+                                    mime_type: mime_type.clone(),
+                                    size,
+                                    sha256: sha256.to_ascii_lowercase(),
+                                    room_id: Some(room_id.clone()),
+                                    client_message_id: client_message_id.clone(),
+                                };
+                                if let Err(error) = validate_metadata(&metadata, MAX_NEARBY_FILE_BYTES) {
+                                    sink.send(IpcEvent::Error { message: error.to_string() }).await?;
+                                    break;
                                 }
-                                save_rooms(&state_dir, &rooms)?;
-                                if let Some(room) = rooms.get(&room_id) {
-                                    broadcast_room_message(&sessions, room, &message).await;
+                                let Some(outbound) = sessions.get(&recipient).cloned() else { continue; };
+                                outgoing_transfers.insert(metadata.transfer_id.clone(), PendingOutgoingTransfer {
+                                    peer_id: recipient.clone(),
+                                    metadata: metadata.clone(),
+                                    source_path: source_path.clone(),
+                                });
+                                if outbound.send(Message::file_offer(peer.peer_id.clone(), metadata.clone())).await.is_err() {
+                                    outgoing_transfers.remove(&metadata.transfer_id);
+                                    sink.send(IpcEvent::FileTransferFailed {
+                                        peer_id: recipient,
+                                        transfer_id: metadata.transfer_id,
+                                        message: "文件请求发送失败".to_owned(),
+                                    }).await?;
                                 }
-                                sink.send(IpcEvent::Message { peer_id: peer.peer_id.clone(), message }).await?;
                             }
                         } else {
                             sink.send(IpcEvent::Error { message: "群聊不存在或已退出".to_owned() }).await?;
+                        }
+                    }
+                    IpcCommand::RespondFileTransfer { transfer_id, accepted } => {
+                        let Some(pending) = incoming_transfers.get_mut(&transfer_id) else {
+                            sink.send(IpcEvent::Error { message: "文件请求已失效".to_owned() }).await?;
+                            continue;
+                        };
+                        let peer_id = pending.peer_id.clone();
+                        let Some(outbound) = sessions.get(&peer_id).cloned() else {
+                            incoming_transfers.remove(&transfer_id);
+                            sink.send(IpcEvent::FileTransferFailed {
+                                peer_id,
+                                transfer_id,
+                                message: "对方已经离线".to_owned(),
+                            }).await?;
+                            continue;
+                        };
+                        pending.accepted = accepted;
+                        if outbound.send(Message::file_decision(
+                            peer.peer_id.clone(),
+                            transfer_id.clone(),
+                            accepted,
+                        )).await.is_err() {
+                            incoming_transfers.remove(&transfer_id);
+                            sink.send(IpcEvent::FileTransferFailed {
+                                peer_id,
+                                transfer_id,
+                                message: "无法回复文件请求".to_owned(),
+                            }).await?;
+                        } else if !accepted {
+                            incoming_transfers.remove(&transfer_id);
                         }
                     }
                     IpcCommand::LeaveRoom { room_id } => {
@@ -1105,6 +1217,140 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                                 }
                                 emit_delivery_ack(&sink, peer_id, &message).await?;
                             }
+                            "file.offer" => {
+                                if !active_peers.contains(&peer_id)
+                                    || !seen_messages.insert(message.message_id.clone())
+                                {
+                                    continue;
+                                }
+                                let transfer = message
+                                    .payload
+                                    .get("transfer")
+                                    .cloned()
+                                    .and_then(|value| serde_json::from_value::<FileTransferMetadata>(value).ok());
+                                let Some(transfer) = transfer else { continue; };
+                                let room_allowed = transfer.room_id.as_ref().is_none_or(|room_id| {
+                                    rooms
+                                        .get(room_id)
+                                        .is_some_and(|room| room.peer_ids.contains(&peer_id))
+                                });
+                                if !room_allowed
+                                    || validate_metadata(&transfer, MAX_NEARBY_FILE_BYTES).is_err()
+                                    || incoming_transfers.contains_key(&transfer.transfer_id)
+                                {
+                                    continue;
+                                }
+                                incoming_transfers.insert(transfer.transfer_id.clone(), PendingIncomingTransfer {
+                                    peer_id: peer_id.clone(),
+                                    metadata: transfer.clone(),
+                                    accepted: false,
+                                });
+                                sink.send(IpcEvent::FileTransferRequested {
+                                    peer_id,
+                                    transfer,
+                                }).await?;
+                            }
+                            "file.decision" => {
+                                if !seen_messages.insert(message.message_id.clone()) {
+                                    continue;
+                                }
+                                let transfer_id = message.payload.get("transfer_id")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                let accepted = message.payload.get("accepted")
+                                    .and_then(|value| value.as_bool())
+                                    .unwrap_or(false);
+                                let Some(pending) = outgoing_transfers.get(&transfer_id).cloned() else { continue; };
+                                if pending.peer_id != peer_id {
+                                    continue;
+                                }
+                                if !accepted {
+                                    outgoing_transfers.remove(&transfer_id);
+                                    sink.send(IpcEvent::FileTransferFailed {
+                                        peer_id,
+                                        transfer_id,
+                                        message: "对方拒绝了文件".to_owned(),
+                                    }).await?;
+                                    continue;
+                                }
+                                let manager = transfers.clone();
+                                let event_tx = transfer_event_tx.clone();
+                                tokio::spawn(async move {
+                                    if let Err(error) = manager.start_sender(
+                                        pending.peer_id.clone(),
+                                        pending.metadata.clone(),
+                                        pending.source_path,
+                                    ).await {
+                                        let _ = event_tx.send(TransferEvent::Failed {
+                                            peer_id: pending.peer_id,
+                                            transfer_id: pending.metadata.transfer_id,
+                                            message: format!("{error:#}"),
+                                        }).await;
+                                    }
+                                });
+                            }
+                            "file.webrtc_offer" => {
+                                if !seen_messages.insert(message.message_id.clone()) {
+                                    continue;
+                                }
+                                let transfer_id = message.payload.get("transfer_id")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                let sdp = message.payload.get("sdp")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                let Some(pending) = incoming_transfers.get(&transfer_id).cloned() else { continue; };
+                                if pending.peer_id != peer_id || !pending.accepted || sdp.is_empty() {
+                                    continue;
+                                }
+                                let manager = transfers.clone();
+                                let event_tx = transfer_event_tx.clone();
+                                tokio::spawn(async move {
+                                    if let Err(error) = manager.start_receiver(
+                                        pending.peer_id.clone(),
+                                        pending.metadata.clone(),
+                                        sdp,
+                                    ).await {
+                                        let _ = event_tx.send(TransferEvent::Failed {
+                                            peer_id: pending.peer_id,
+                                            transfer_id: pending.metadata.transfer_id,
+                                            message: format!("{error:#}"),
+                                        }).await;
+                                    }
+                                });
+                            }
+                            "file.webrtc_answer" => {
+                                if !seen_messages.insert(message.message_id.clone()) {
+                                    continue;
+                                }
+                                let transfer_id = message.payload.get("transfer_id")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                let sdp = message.payload.get("sdp")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                let Some(pending) = outgoing_transfers.get(&transfer_id) else { continue; };
+                                if pending.peer_id != peer_id || sdp.is_empty() {
+                                    continue;
+                                }
+                                let manager = transfers.clone();
+                                let event_tx = transfer_event_tx.clone();
+                                let failed_peer_id = peer_id.clone();
+                                tokio::spawn(async move {
+                                    if let Err(error) = manager.apply_answer(&transfer_id, &sdp).await {
+                                        let _ = event_tx.send(TransferEvent::Failed {
+                                            peer_id: failed_peer_id,
+                                            transfer_id,
+                                            message: format!("{error:#}"),
+                                        }).await;
+                                    }
+                                });
+                            }
                             "peer.message" => {
                                 if !active_peers.contains(&peer_id)
                                     || !seen_messages.insert(message.message_id.clone())
@@ -1191,6 +1437,27 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         }
                         sessions.remove(&peer_id);
                         pending_peer_connections.remove(&peer_id);
+                        let interrupted = outgoing_transfers
+                            .iter()
+                            .filter(|(_, transfer)| transfer.peer_id == peer_id)
+                            .map(|(transfer_id, _)| transfer_id.clone())
+                            .chain(
+                                incoming_transfers
+                                    .iter()
+                                    .filter(|(_, transfer)| transfer.peer_id == peer_id)
+                                    .map(|(transfer_id, _)| transfer_id.clone()),
+                            )
+                            .collect::<HashSet<_>>();
+                        outgoing_transfers.retain(|_, transfer| transfer.peer_id != peer_id);
+                        incoming_transfers.retain(|_, transfer| transfer.peer_id != peer_id);
+                        for transfer_id in interrupted {
+                            transfers.finish(&transfer_id).await;
+                            sink.send(IpcEvent::FileTransferFailed {
+                                peer_id: peer_id.clone(),
+                                transfer_id,
+                                message: "附近连接已断开，文件传输已停止".to_owned(),
+                            }).await?;
+                        }
                         if active_peers.remove(&peer_id) {
                             sink.send(IpcEvent::PeerDisconnected { peer_id }).await?;
                         } else if discovered.contains_key(&peer_id) {
@@ -1204,6 +1471,104 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         );
                         connection_candidates.remove(&peer_id);
                         sink.send(IpcEvent::Error { message: format!("BLE session {peer_id} failed: {error}") }).await?;
+                    }
+                }
+            }
+            Some(event) = transfer_event_rx.recv() => {
+                match event {
+                    TransferEvent::OfferReady { peer_id, transfer_id, sdp } => {
+                        let sent = if let Some(outbound) = sessions.get(&peer_id) {
+                            outbound.send(Message::file_webrtc_signal(
+                                peer.peer_id.clone(),
+                                transfer_id.clone(),
+                                sdp,
+                                false,
+                            )).await.is_ok()
+                        } else {
+                            false
+                        };
+                        if !sent {
+                            outgoing_transfers.remove(&transfer_id);
+                            transfers.finish(&transfer_id).await;
+                            sink.send(IpcEvent::FileTransferFailed {
+                                peer_id,
+                                transfer_id,
+                                message: "WebRTC 连接信息发送失败".to_owned(),
+                            }).await?;
+                        }
+                    }
+                    TransferEvent::AnswerReady { peer_id, transfer_id, sdp } => {
+                        let sent = if let Some(outbound) = sessions.get(&peer_id) {
+                            outbound.send(Message::file_webrtc_signal(
+                                peer.peer_id.clone(),
+                                transfer_id.clone(),
+                                sdp,
+                                true,
+                            )).await.is_ok()
+                        } else {
+                            false
+                        };
+                        if !sent {
+                            incoming_transfers.remove(&transfer_id);
+                            transfers.finish(&transfer_id).await;
+                            sink.send(IpcEvent::FileTransferFailed {
+                                peer_id,
+                                transfer_id,
+                                message: "WebRTC 连接信息回复失败".to_owned(),
+                            }).await?;
+                        }
+                    }
+                    TransferEvent::Progress { peer_id, transfer_id, sent, total, incoming } => {
+                        sink.send(IpcEvent::FileTransferProgress {
+                            peer_id,
+                            transfer_id,
+                            sent,
+                            total,
+                            incoming,
+                        }).await?;
+                    }
+                    TransferEvent::Sent { peer_id, metadata } => {
+                        outgoing_transfers.remove(&metadata.transfer_id);
+                        transfers.finish(&metadata.transfer_id).await;
+                        if let Some(message_id) = metadata.client_message_id {
+                            sink.send(IpcEvent::MessageDelivered { peer_id, message_id }).await?;
+                        }
+                    }
+                    TransferEvent::Received { peer_id, metadata, path } => {
+                        incoming_transfers.remove(&metadata.transfer_id);
+                        transfers.finish(&metadata.transfer_id).await;
+                        let file = TransferredFile {
+                            file_id: metadata.file_id,
+                            name: metadata.name,
+                            mime_type: metadata.mime_type,
+                            size: metadata.size,
+                            sha256: metadata.sha256,
+                            local_path: path.to_string_lossy().into_owned(),
+                            complete: true,
+                        };
+                        if let Some(room_id) = metadata.room_id {
+                            let message = Message::room_transferred_file(peer_id.clone(), room_id.clone(), file);
+                            if let Some(room) = rooms.get_mut(&room_id) {
+                                remember_room_message(room, &message);
+                                save_rooms(&state_dir, &rooms)?;
+                                sink.send(IpcEvent::Message { peer_id, message }).await?;
+                            }
+                        } else {
+                            let message = Message::peer_transferred_file(peer_id.clone(), file);
+                            remember_dm_message(&mut dms, &peer_id, &message);
+                            save_dms(&state_dir, &dms)?;
+                            sink.send(IpcEvent::Message { peer_id, message }).await?;
+                        }
+                    }
+                    TransferEvent::Failed { peer_id, transfer_id, message } => {
+                        outgoing_transfers.remove(&transfer_id);
+                        incoming_transfers.remove(&transfer_id);
+                        transfers.finish(&transfer_id).await;
+                        sink.send(IpcEvent::FileTransferFailed {
+                            peer_id,
+                            transfer_id,
+                            message,
+                        }).await?;
                     }
                 }
             }
@@ -1228,6 +1593,7 @@ fn command_name(command: &IpcCommand) -> &'static str {
         IpcCommand::CreateRoom { .. } => "create_room",
         IpcCommand::SendRoomMessage { .. } => "send_room_message",
         IpcCommand::SendRoomFile { .. } => "send_room_file",
+        IpcCommand::RespondFileTransfer { .. } => "respond_file_transfer",
         IpcCommand::LeaveRoom { .. } => "leave_room",
         IpcCommand::SetRoomAgentMode { .. } => "set_room_agent_mode",
         IpcCommand::InviteToRoom { .. } => "invite_to_room",
@@ -1251,7 +1617,13 @@ pub(crate) fn create_peer(config: &NearbyConfig) -> Result<PeerInfo> {
         } else {
             config.agent_name.clone()
         },
-        capabilities: config.capabilities.clone(),
+        capabilities: {
+            let mut capabilities = config.capabilities.clone();
+            if !capabilities.iter().any(|value| value == "file.webrtc") {
+                capabilities.push("file.webrtc".to_owned());
+            }
+            capabilities
+        },
         published_agents: config.published_agents.clone(),
     })
 }
@@ -1337,7 +1709,10 @@ fn nearby_service(peer: &PeerInfo) -> Result<Service> {
             },
             ServerCharacteristic {
                 uuid: OUTGOING_MESSAGE_UUID,
-                properties: vec![CharacteristicProperty::Notify],
+                properties: vec![
+                    CharacteristicProperty::Notify,
+                    CharacteristicProperty::Indicate,
+                ],
                 permissions: vec![],
                 value: None,
                 descriptors: vec![],
@@ -1799,6 +2174,7 @@ fn spawn_server_writer(
                 {
                     return;
                 }
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }
     });
@@ -2216,43 +2592,6 @@ pub(crate) fn validate_file_transfer(
     Ok(())
 }
 
-fn split_file_chunks(
-    file_id: &str,
-    name: &str,
-    mime_type: &str,
-    size: u64,
-    sha256: &str,
-    data_base64: &str,
-) -> Result<Vec<FileChunk>> {
-    validate_file_transfer(file_id, name, mime_type, size, sha256, data_base64)?;
-    let parts = if data_base64.is_empty() {
-        vec![&[][..]]
-    } else {
-        data_base64
-            .as_bytes()
-            .chunks(FILE_CHUNK_BASE64_BYTES)
-            .collect::<Vec<_>>()
-    };
-    let chunk_total = u32::try_from(parts.len().max(1)).context("file has too many chunks")?;
-    parts
-        .into_iter()
-        .enumerate()
-        .map(|(chunk_index, data)| {
-            Ok(FileChunk {
-                file_id: file_id.to_owned(),
-                name: name.to_owned(),
-                mime_type: mime_type.to_owned(),
-                size,
-                sha256: sha256.to_owned(),
-                chunk_index: u32::try_from(chunk_index).context("file chunk index overflow")?,
-                chunk_total,
-                data_base64: String::from_utf8(data.to_vec())
-                    .context("file data is not valid base64 text")?,
-            })
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2541,7 +2880,7 @@ mod tests {
         ));
         let command: IpcCommand = serde_json::from_str(
             &format!(
-                r#"{{"type":"send_peer_file","peer_id":"ace_peer","file_id":"file_1","name":"note.txt","mime_type":"text/plain","size":5,"sha256":"{}","data_base64":"aGVsbG8="}}"#,
+                r#"{{"type":"send_peer_file","peer_id":"ace_peer","file_id":"file_1","name":"note.txt","mime_type":"text/plain","size":5,"sha256":"{}","file_path":"/tmp/note.txt"}}"#,
                 "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
             ),
         )

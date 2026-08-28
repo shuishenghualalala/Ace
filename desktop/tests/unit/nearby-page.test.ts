@@ -84,7 +84,6 @@ describe('companion management hub', () => {
               file_id: 'file-1', name: 'note.txt', path: '/tmp/note.txt', type: 'file',
               mime_type: 'text/plain', size: 5,
               sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
-              data_base64: 'aGVsbG8=',
             },
           }),
         };
@@ -394,7 +393,7 @@ describe('companion management hub', () => {
       type: 'send_peer_file', peer_id: 'ace_peer_a', file_id: 'file-1', name: 'note.txt',
       mime_type: 'text/plain', size: 5,
       sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
-      data_base64: 'aGVsbG8=',
+      file_path: '/tmp/note.txt',
       client_message_id: 'event-1',
     });
     expect(gatewayFetch).toHaveBeenCalledWith(

@@ -47,6 +47,7 @@ struct CliFile {
     size: u64,
     sha256: String,
     chunks: Vec<Option<String>>,
+    local_path: Option<String>,
 }
 
 #[derive(Debug)]
@@ -215,6 +216,14 @@ fn parse_command(line: &str) -> Result<CliAction> {
                 "path": path,
             })))
         }
+        "accept" | "reject" => {
+            let transfer_id = words.get(1).context("usage: accept|reject <transfer_id>")?;
+            Ok(CliAction::Command(json!({
+                "type": "respond_file_transfer",
+                "transfer_id": transfer_id,
+                "accepted": command == "accept",
+            })))
+        }
         "quit" | "exit" => Ok(CliAction::Quit),
         "discover" => parse_toggle_command(&words, "start_discovery", "stop_discovery"),
         "advertise" => parse_toggle_command(&words, "set_discoverable", "set_discoverable"),
@@ -341,6 +350,8 @@ fn parse_file_command(words: &[String]) -> Result<CliAction> {
         .and_then(|value| value.to_str())
         .context("file name is not valid UTF-8")?;
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let canonical_path = std::fs::canonicalize(path)
+        .with_context(|| format!("failed to resolve file {}", path.display()))?;
     let mut command = json!({
         "type": "send_room_file",
         "room_id": room_id,
@@ -349,7 +360,7 @@ fn parse_file_command(words: &[String]) -> Result<CliAction> {
         "mime_type": "application/octet-stream",
         "size": size,
         "sha256": sha256,
-        "data_base64": BASE64.encode(bytes),
+        "file_path": canonical_path,
         "mentions": mentions,
     });
     if let Some(reply_to) = reply_to {
@@ -536,6 +547,37 @@ fn print_event(line: &str, state: &Arc<Mutex<CliState>>) {
             println!("room_left: {room_id}");
         }
         "message" => print_message_event(&event, state),
+        "file_transfer_requested" => println!(
+            "file_request: peer={} transfer={} name={} size={} (use: accept {} | reject {})",
+            event["peer_id"].as_str().unwrap_or("unknown"),
+            event["transfer"]["transfer_id"]
+                .as_str()
+                .unwrap_or("unknown"),
+            event["transfer"]["name"].as_str().unwrap_or("unknown"),
+            event["transfer"]["size"].as_u64().unwrap_or(0),
+            event["transfer"]["transfer_id"]
+                .as_str()
+                .unwrap_or("unknown"),
+            event["transfer"]["transfer_id"]
+                .as_str()
+                .unwrap_or("unknown"),
+        ),
+        "file_transfer_progress" => println!(
+            "file_progress: transfer={} {}/{} direction={}",
+            event["transfer_id"].as_str().unwrap_or("unknown"),
+            event["sent"].as_u64().unwrap_or(0),
+            event["total"].as_u64().unwrap_or(0),
+            if event["incoming"].as_bool().unwrap_or(false) {
+                "receive"
+            } else {
+                "send"
+            },
+        ),
+        "file_transfer_failed" => println!(
+            "file_failed: transfer={} error={}",
+            event["transfer_id"].as_str().unwrap_or("unknown"),
+            event["message"].as_str().unwrap_or("unknown"),
+        ),
         "error" => println!(
             "ERROR: {}",
             event["message"].as_str().unwrap_or("Nearby error")
@@ -564,9 +606,10 @@ fn print_message_event(event: &Value, state: &Arc<Mutex<CliState>>) {
             sender,
             message["payload"]["text"].as_str().unwrap_or("")
         );
-    } else if message_type == "room.file" {
+    } else if message_type == "room.file" || message_type == "peer.file" {
         let file = &message["payload"]["file"];
         let file_id = file["file_id"].as_str().unwrap_or("unknown");
+        let local_path = file["local_path"].as_str().map(str::to_owned);
         let chunk_index = file["chunk_index"].as_u64().unwrap_or(0) as usize;
         let chunk_total = file["chunk_total"].as_u64().unwrap_or(0) as usize;
         let name = file["name"].as_str().unwrap_or("unknown");
@@ -582,7 +625,15 @@ fn print_message_event(event: &Value, state: &Arc<Mutex<CliState>>) {
                     size,
                     sha256: sha256.to_owned(),
                     chunks: vec![None; chunk_total.max(1)],
+                    local_path,
                 });
+            if transfer.local_path.is_some() {
+                println!(
+                    "file_received message_id={} sender={} id={} name={} size={} (use: save {} <path>)",
+                    message_id, sender, file_id, transfer.name, transfer.size, file_id
+                );
+                return;
+            }
             if chunk_index < transfer.chunks.len() {
                 transfer.chunks[chunk_index] = Some(data_base64.to_owned());
             }
@@ -619,6 +670,8 @@ fn print_help() {
     --mention <peer>                         Add a peer mention (repeatable)\n\
     --reply <id> <sender> <quoted>            Add a reply reference\n\
   file <room> <path> [options]               Send a file up to 4 MiB\n\
+  accept <transfer_id>                       Accept an incoming file\n\
+  reject <transfer_id>                       Reject an incoming file\n\
   save <file_id> <path>                      Save a received file\n\
   quit                                       Stop the BLE runtime and exit\n\
 \nExamples:\n\
@@ -707,6 +760,18 @@ fn save_received_file(state: &Arc<Mutex<CliState>>, file_id: &str, path: &str) -
         .files
         .get(file_id)
         .context("received file is not complete or does not exist")?;
+    if let Some(source) = file.local_path.as_deref() {
+        let bytes = std::fs::read(source)
+            .with_context(|| format!("failed to read received file {source}"))?;
+        if u64::try_from(bytes.len()).ok() != Some(file.size)
+            || format!("{:x}", Sha256::digest(&bytes)) != file.sha256
+        {
+            bail!("received file verification failed");
+        }
+        std::fs::write(path, bytes).with_context(|| format!("failed to save file to {path}"))?;
+        println!("file_saved: {path}");
+        return Ok(());
+    }
     if file.chunks.iter().any(Option::is_none) {
         bail!("received file is still incomplete");
     }
@@ -777,6 +842,17 @@ mod tests {
         };
         assert_eq!(history["type"], "local_room_history");
         assert_eq!(history["room_id"], "saved_room");
+    }
+
+    #[test]
+    fn parses_file_transfer_decision() {
+        let accept = parse_command("accept transfer-1").unwrap();
+        let CliAction::Command(accept) = accept else {
+            panic!("expected file transfer command");
+        };
+        assert_eq!(accept["type"], "respond_file_transfer");
+        assert_eq!(accept["transfer_id"], "transfer-1");
+        assert_eq!(accept["accepted"], true);
     }
 
     #[test]

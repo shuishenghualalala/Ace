@@ -41,6 +41,8 @@ export interface NearbyFileCard {
   sha256: string;
   /** 完整文件才有内容；不完整的历史文件为 ''。 */
   data_base64: string;
+  /** WebRTC 接收完成后的本机受控路径；旧 BLE 历史消息为空。 */
+  local_path?: string;
   complete: boolean;
 }
 
@@ -349,6 +351,35 @@ export class NearbyStore {
     const roomId = asString(payload?.room_id);
     if (!message || !file || (!roomId && !directPeerId)) return;
     const fileId = asString(file.file_id);
+    const localPath = asString(file.local_path);
+    if (fileId && file.complete === true && localPath) {
+      const conversationId = roomId
+        ? roomConversationId(roomId)
+        : this.ensureDmConversation(directPeerId).id;
+      const conversation = this.conversations.get(conversationId);
+      if (!conversation) return;
+      const senderPeerId = asString(message.sender);
+      this.appendMessage(conversation, {
+        id: `file:${fileId}`,
+        kind: 'file',
+        senderPeerId,
+        text: asString(file.name, '未命名文件'),
+        timestamp: history ? 0 : Date.now(),
+        isOwn: senderPeerId === this.localPeerId,
+        isError: false,
+        file: {
+          file_id: fileId,
+          name: asString(file.name, '未命名文件'),
+          mime_type: asString(file.mime_type, 'application/octet-stream'),
+          size: typeof file.size === 'number' ? file.size : 0,
+          sha256: asString(file.sha256),
+          data_base64: '',
+          local_path: localPath,
+          complete: true,
+        },
+      }, { countUnread: !history });
+      return;
+    }
     const chunkIndex = typeof file.chunk_index === 'number' ? file.chunk_index : -1;
     const chunkTotal = typeof file.chunk_total === 'number' ? file.chunk_total : 0;
     if (!fileId || chunkIndex < 0 || chunkTotal <= 0) return;
@@ -606,6 +637,26 @@ export class NearbyStore {
           this.peers.set(peerId, { ...peer, connection: 'discovered' });
         }
         note = { text: asString(event.message, '连接失败'), tone: 'error' };
+        break;
+      }
+      case 'file_transfer_requested': {
+        const transfer = asRecord(event.transfer);
+        const name = asString(transfer?.name, '文件');
+        note = { text: `收到文件请求：${name}`, tone: 'normal' };
+        break;
+      }
+      case 'file_transfer_progress': {
+        const sent = typeof event.sent === 'number' ? event.sent : 0;
+        const total = typeof event.total === 'number' ? event.total : 0;
+        const percent = total > 0 ? Math.min(100, Math.round((sent / total) * 100)) : 0;
+        note = {
+          text: `${event.incoming === true ? '正在接收' : '正在发送'}文件 ${percent}%`,
+          tone: 'normal',
+        };
+        break;
+      }
+      case 'file_transfer_failed': {
+        note = { text: asString(event.message, '文件传输失败'), tone: 'error' };
         break;
       }
       case 'peer_message_received': {

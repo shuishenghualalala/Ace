@@ -2,3 +2,7 @@ Crew
 
 The Crew project gratefully acknowledges the original Crew team for its early
 development work and support.
+
+Ace Nearby uses the webrtc-rs project and its component crates for WebRTC
+DataChannel transport. Copyright the webrtc-rs contributors, licensed under
+the Apache License 2.0 or MIT License: https://github.com/webrtc-rs/webrtc

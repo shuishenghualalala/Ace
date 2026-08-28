@@ -19,10 +19,18 @@ from fastapi.responses import JSONResponse
 from crew.core.types import Message
 from crew.gateway.auth import account_from_request
 from crew.gateway.context import save_upload
-from crew.state.home import get_owner_runtime_home
+from crew.state.home import get_crew_home, get_owner_runtime_home
 
 MAX_COMPANION_FILE_BYTES = 4 * 1024 * 1024
 COMPANION_FILE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(64 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _companion_file_id(raw_id: Any, *, path: Path, sha256: str) -> str:
@@ -48,12 +56,11 @@ def _prepare_attachment(owner: str, raw: dict[str, Any]) -> dict[str, Any]:
     size = path.stat().st_size
     if size > MAX_COMPANION_FILE_BYTES:
         raise ValueError("同伴附件不能超过 4 MiB")
-    data = path.read_bytes()
     name = Path(str(raw.get("name") or path.name)).name
     if not name or name in {".", ".."}:
         raise ValueError("附件名无效")
     mime_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
-    sha256 = hashlib.sha256(data).hexdigest()
+    sha256 = _sha256_file(path)
     return {
         "file_id": _companion_file_id(raw.get("id"), path=path, sha256=sha256),
         "name": name,
@@ -62,14 +69,37 @@ def _prepare_attachment(owner: str, raw: dict[str, Any]) -> dict[str, Any]:
         "mime_type": mime_type,
         "size": size,
         "sha256": sha256,
-        "data_base64": base64.b64encode(data).decode("ascii"),
     }
 
 
 def _store_received_attachment(owner: str, raw: dict[str, Any]) -> dict[str, Any]:
     name = Path(str(raw.get("name") or "")).name
+    if not name or name in {".", ".."}:
+        raise ValueError("收到的同伴附件无效")
+    local_path = str(raw.get("local_path") or "").strip()
+    if local_path:
+        receive_root = (get_crew_home() / "nearby" / "received").expanduser().resolve()
+        path = Path(local_path).expanduser().resolve()
+        try:
+            path.relative_to(receive_root)
+        except ValueError as exc:
+            raise ValueError("收到的同伴附件路径无效") from exc
+        if not path.is_file():
+            raise ValueError("收到的同伴附件不存在")
+        data = path.read_bytes()
+        expected_size = raw.get("size")
+        expected_sha256 = str(raw.get("sha256") or "")
+        actual_sha256 = hashlib.sha256(data).hexdigest()
+        if (
+            len(data) > MAX_COMPANION_FILE_BYTES
+            or expected_size != len(data)
+            or not expected_sha256
+            or actual_sha256 != expected_sha256.lower()
+        ):
+            raise ValueError("收到的同伴附件校验失败")
+        return save_upload(name, data, owner_account_id=owner)
     encoded = str(raw.get("data_base64") or "")
-    if not name or name in {".", ".."} or len(encoded) > MAX_COMPANION_FILE_BYTES * 2:
+    if len(encoded) > MAX_COMPANION_FILE_BYTES * 2:
         raise ValueError("收到的同伴附件无效")
     try:
         data = base64.b64decode(encoded, validate=True)

@@ -85,14 +85,15 @@ const api = {
     mime_type: string;
     size: number;
     sha256: string;
-    data_base64: string;
+    file_path: string;
   } | null>,
   nearbySaveFile: (file: {
     name: string;
     mime_type: string;
     size: number;
     sha256: string;
-    data_base64: string;
+    local_path?: string;
+    data_base64?: string;
   }) =>
     ipcRenderer.invoke('nearby:save-file', file) as Promise<{ ok: boolean; canceled: boolean; path?: string }>,
   onTrayActivated: (cb: () => void) => {
@@ -103,7 +104,7 @@ const api = {
   nearbyStart: () => ipcRenderer.invoke('nearby:start') as Promise<{ ok: true }>,
   nearbyStop: () => ipcRenderer.invoke('nearby:stop') as Promise<{ ok: true }>,
   nearbyCommand: (command: {
-    type: 'start_discovery' | 'stop_discovery' | 'set_discoverable' | 'connect_peer' | 'disconnect_peer' | 'send_agent_request' | 'send_peer_message' | 'send_peer_file' | 'create_room' | 'invite_to_room' | 'send_room_message' | 'send_room_file' | 'leave_room' | 'set_room_agent_mode' | 'shutdown';
+    type: 'start_discovery' | 'stop_discovery' | 'set_discoverable' | 'connect_peer' | 'disconnect_peer' | 'send_agent_request' | 'send_peer_message' | 'send_peer_file' | 'create_room' | 'invite_to_room' | 'send_room_message' | 'send_room_file' | 'respond_file_transfer' | 'leave_room' | 'set_room_agent_mode' | 'shutdown';
     enabled?: boolean;
     peer_id?: string;
     room_id?: string;
@@ -119,7 +120,9 @@ const api = {
     mime_type?: string;
     size?: number;
     sha256?: string;
-    data_base64?: string;
+    file_path?: string;
+    transfer_id?: string;
+    accepted?: boolean;
   }) => ipcRenderer.invoke('nearby:command', command) as Promise<{ ok: true }>,
   nearbyGetSettings: () =>
     ipcRenderer.invoke('nearby:get-settings') as Promise<{

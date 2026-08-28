@@ -197,6 +197,7 @@ let browserHost: BrowserHost | null = null;
 let nearbyService: NearbyService | null = null;
 let nearbyAgentBridge: NearbyAgentBridge | null = null;
 let nearbyAgentSettingsCache: NearbyAgentSettings | null = null;
+const nearbyFilePrompts = new Set<string>();
 let browserHostSocket: WebSocket | null = null;
 let browserHostReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let browserHostConnectionGeneration = 0;
@@ -959,6 +960,47 @@ function nearbyAgentSettings(): NearbyAgentSettings {
   return nearbyAgentSettingsCache;
 }
 
+async function promptNearbyFileTransfer(event: NearbyEvent, service: NearbyService): Promise<void> {
+  const transfer = event.transfer;
+  if (!transfer || typeof transfer !== 'object' || Array.isArray(transfer)) return;
+  const value = transfer as Record<string, unknown>;
+  const transferId = typeof value.transfer_id === 'string' ? value.transfer_id : '';
+  const name = typeof value.name === 'string' ? value.name : '';
+  const size = typeof value.size === 'number' ? value.size : -1;
+  if (!transferId || !name || size < 0 || nearbyFilePrompts.has(transferId)) return;
+  nearbyFilePrompts.add(transferId);
+  try {
+    showMainWindow();
+    const options: Electron.MessageBoxOptions = {
+      type: 'question',
+      title: '接收同伴文件',
+      message: `是否接收“${name}”？`,
+      detail: `来自附近同伴 · ${(size / 1024 / 1024).toFixed(2)} MiB`,
+      buttons: ['接收', '拒绝'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    };
+    const result = mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showMessageBox(mainWindow, options)
+      : await dialog.showMessageBox(options);
+    await service.send({
+      type: 'respond_file_transfer',
+      transfer_id: transferId,
+      accepted: result.response === 0,
+    });
+  } catch (error) {
+    console.warn('[nearby] failed to answer file transfer request:', error);
+    await service.send({
+      type: 'respond_file_transfer',
+      transfer_id: transferId,
+      accepted: false,
+    }).catch(() => undefined);
+  } finally {
+    nearbyFilePrompts.delete(transferId);
+  }
+}
+
 function ensureNearbyService(): NearbyService {
   if (nearbyService) return nearbyService;
   const service = new NearbyService({
@@ -974,6 +1016,9 @@ function ensureNearbyService(): NearbyService {
         // 运行时切换可发现性会整体重写 settings.json 且只保留 discoverable 字段，
         // 这里把本进程负责的 Agent 设置合并回去，避免被覆盖丢失。
         nearbyAgentSettingsCache = saveNearbyAgentSettings(activeGatewayCrewHome(), nearbyAgentSettings());
+      }
+      if (event.type === 'file_transfer_requested') {
+        void promptNearbyFileTransfer(event, service);
       }
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('nearby:event', event);
     },
@@ -1211,12 +1256,8 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
     if (typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(value.sha256)) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby file SHA-256`);
     }
-    if (
-      typeof value.data_base64 !== 'string'
-      || value.data_base64.length > MAX_NEARBY_FILE_BYTES * 2
-      || !/^[A-Za-z0-9+/]*={0,2}$/.test(value.data_base64)
-    ) {
-      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby file data`);
+    if (typeof value.file_path !== 'string' || !path.isAbsolute(value.file_path) || value.file_path.length > 4096) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby file path`);
     }
     const clientMessageId = parseNearbyClientMessageId(value.client_message_id);
     const file = {
@@ -1225,7 +1266,7 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
       mime_type: value.mime_type,
       size: value.size,
       sha256: value.sha256.toLowerCase(),
-      data_base64: value.data_base64,
+      file_path: value.file_path,
       ...(clientMessageId !== undefined ? { client_message_id: clientMessageId } : {}),
     };
     if (type === 'send_peer_file') {
@@ -1240,6 +1281,15 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
       ...(mentions !== undefined ? { mentions } : {}),
       ...(replyTo !== undefined ? { reply_to: replyTo } : {}),
     };
+  }
+  if (type === 'respond_file_transfer') {
+    if (typeof value.transfer_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(value.transfer_id)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby transfer id`);
+    }
+    if (typeof value.accepted !== 'boolean') {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby transfer decision`);
+    }
+    return { type, transfer_id: value.transfer_id, accepted: value.accepted };
   }
   if (type === 'leave_room') {
     if (typeof value.room_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(value.room_id)) {
@@ -3239,7 +3289,7 @@ function registerIpc() {
       mime_type: mimeFromExt(path.extname(filePath).slice(1).toLowerCase()),
       size: buffer.byteLength,
       sha256: createHash('sha256').update(buffer).digest('hex'),
-      data_base64: buffer.toString('base64'),
+      file_path: filePath,
     };
   });
   trustedHandle('nearby:save-file', async (_e, raw: unknown) => {
@@ -3251,7 +3301,8 @@ function registerIpc() {
     const mimeType = value.mime_type;
     const size = value.size;
     const sha256 = value.sha256;
-    const data = value.data_base64;
+    const localPath = value.local_path;
+    const encoded = value.data_base64;
     if (
       typeof name !== 'string'
       || name.trim().length === 0
@@ -3267,14 +3318,27 @@ function registerIpc() {
       || size > MAX_NEARBY_FILE_BYTES
       || typeof sha256 !== 'string'
       || !/^[a-f0-9]{64}$/i.test(sha256)
-      || typeof data !== 'string'
-      || data.length % 4 !== 0
-      || data.length > MAX_NEARBY_FILE_BYTES * 2
-      || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)
     ) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby saved file`);
     }
-    const buffer = Buffer.from(data, 'base64');
+    let buffer: Buffer;
+    if (typeof localPath === 'string' && path.isAbsolute(localPath) && localPath.length <= 4096) {
+      const real = await fs.promises.realpath(localPath);
+      const receiveRoot = await fs.promises.realpath(path.join(activeGatewayCrewHome(), 'nearby', 'received'));
+      if (real !== receiveRoot && !real.startsWith(`${receiveRoot}${path.sep}`)) {
+        throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby saved file outside receive directory`);
+      }
+      buffer = await fs.promises.readFile(real);
+    } else if (
+      typeof encoded === 'string'
+      && encoded.length % 4 === 0
+      && encoded.length <= MAX_NEARBY_FILE_BYTES * 2
+      && /^[A-Za-z0-9+/]*={0,2}$/.test(encoded)
+    ) {
+      buffer = Buffer.from(encoded, 'base64');
+    } else {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby saved file has no valid local content`);
+    }
     if (buffer.byteLength !== size) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby saved file size does not match`);
     }
@@ -3347,6 +3411,18 @@ function registerIpc() {
   });
   trustedHandle('nearby:command', async (_e, raw: unknown) => {
     const command = parseNearbyCommand(raw);
+    if (command.type === 'send_peer_file' || command.type === 'send_room_file') {
+      const real = await fs.promises.realpath(command.file_path);
+      const crewHomeReal = await fs.promises.realpath(activeGatewayCrewHome());
+      if (real !== crewHomeReal && !real.startsWith(`${crewHomeReal}${path.sep}`)) {
+        throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby file outside CREW_HOME`);
+      }
+      const stat = await fs.promises.stat(real);
+      if (!stat.isFile() || stat.size !== command.size) {
+        throw new Error(`${IPC_ARG_VALIDATION_FAILED}: nearby file changed before transfer`);
+      }
+      command.file_path = real;
+    }
     await ensureNearbyService().send(command);
     return { ok: true };
   });

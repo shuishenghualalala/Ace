@@ -12,6 +12,7 @@ use crate::{
     runtime::NearbyConfig,
 };
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -409,7 +410,7 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                         save_dms(&state_dir, &dms)?;
                         sink.send(IpcEvent::Message { peer_id, message }).await?;
                     }
-                    IpcCommand::SendPeerFile { peer_id, file_id, name, mime_type, size, sha256, data_base64, client_message_id } => {
+                    IpcCommand::SendPeerFile { peer_id, file_id, name, mime_type, size, sha256, file_path, client_message_id } => {
                         if !active_peers.contains(&peer_id) {
                             sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "请先连接这台 Ace".to_owned() }).await?;
                             continue;
@@ -418,6 +419,13 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                             active_peers.remove(&peer_id);
                             sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "连接已经断开".to_owned() }).await?;
                             continue;
+                        };
+                        let data_base64 = match tokio::fs::read(&file_path).await {
+                            Ok(data) => BASE64.encode(data),
+                            Err(error) => {
+                                sink.send(IpcEvent::Error { message: format!("无法读取文件：{error}") }).await?;
+                                continue;
+                            }
                         };
                         if let Err(error) = validate_file_transfer(&file_id, &name, &mime_type, size, &sha256, &data_base64) {
                             sink.send(IpcEvent::Error { message: error.to_string() }).await?;
@@ -490,11 +498,18 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                         seen_messages.insert(message.message_id.clone());
                         sink.send(IpcEvent::Message { peer_id: peer.peer_id.clone(), message }).await?;
                     }
-                    IpcCommand::SendRoomFile { room_id, file_id, name, mime_type, size, sha256, data_base64, client_message_id, mentions, reply_to } => {
+                    IpcCommand::SendRoomFile { room_id, file_id, name, mime_type, size, sha256, file_path, client_message_id, mentions, reply_to } => {
                         if !rooms.contains_key(&room_id) {
                             sink.send(IpcEvent::Error { message: "群聊不存在或已退出".to_owned() }).await?;
                             continue;
                         }
+                        let data_base64 = match tokio::fs::read(&file_path).await {
+                            Ok(data) => BASE64.encode(data),
+                            Err(error) => {
+                                sink.send(IpcEvent::Error { message: format!("无法读取文件：{error}") }).await?;
+                                continue;
+                            }
+                        };
                         if let Err(error) = validate_file_transfer(&file_id, &name, &mime_type, size, &sha256, &data_base64) {
                             sink.send(IpcEvent::Error { message: error.to_string() }).await?;
                             continue;
@@ -512,6 +527,9 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                             sink.send(IpcEvent::Message { peer_id: peer.peer_id.clone(), message }).await?;
                         }
                         save_rooms(&state_dir, &rooms)?;
+                    }
+                    IpcCommand::RespondFileTransfer { .. } => {
+                        sink.send(IpcEvent::Error { message: "Mock 传输不支持文件接收确认".to_owned() }).await?;
                     }
                     IpcCommand::LeaveRoom { room_id } => {
                         if let Some(room) = rooms.remove(&room_id) {

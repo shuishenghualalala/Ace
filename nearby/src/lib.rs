@@ -1,5 +1,6 @@
 //! Ace Nearby cross-platform BLE peer discovery and chat.
 
+pub mod file_transfer;
 pub mod identity;
 pub mod ipc;
 pub mod mock;
@@ -13,8 +14,8 @@ pub use identity::{
 };
 pub use protocol::{
     should_initiate, FileChunk, Frame, FrameCodec, FrameError, Message, PeerInfo, PublishedAgent,
-    Reassembler, ReplyReference, UuidSet, INCOMING_MESSAGE_UUID, OUTGOING_MESSAGE_UUID,
-    PEER_INFO_UUID, PROTOCOL_VERSION, SERVICE_UUID,
+    Reassembler, ReplyReference, TransferredFile, UuidSet, INCOMING_MESSAGE_UUID,
+    OUTGOING_MESSAGE_UUID, PEER_INFO_UUID, PROTOCOL_VERSION, SERVICE_UUID,
 };
 pub use runtime::{BleAdapter, NearbyConfig, PeerSession};
 pub use transport::{adapter as link_adapter, LinkAdapter, TransportMode};

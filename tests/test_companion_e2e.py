@@ -309,7 +309,7 @@ async def test_two_instances_exchange_and_restore_companion_history(tmp_path, au
                 "mime_type": prepared["mime_type"],
                 "size": prepared["size"],
                 "sha256": prepared["sha256"],
-                "data_base64": prepared["data_base64"],
+                "file_path": prepared["path"],
                 "client_message_id": file_event_id,
             })
             incoming_file = await asyncio.to_thread(

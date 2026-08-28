@@ -327,14 +327,14 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
             await bridge.nearbyCommand?.({
               type: 'send_peer_file', peer_id: binding.target_id,
               file_id: file.file_id, name: file.name, mime_type: file.mime_type,
-              size: file.size, sha256: file.sha256, data_base64: file.data_base64,
+              size: file.size, sha256: file.sha256, file_path: file.path,
               client_message_id: receipt.event_id,
             });
           } else {
             await bridge.nearbyCommand?.({
               type: 'send_room_file', room_id: binding.target_id,
               file_id: file.file_id, name: file.name, mime_type: file.mime_type,
-              size: file.size, sha256: file.sha256, data_base64: file.data_base64,
+              size: file.size, sha256: file.sha256, file_path: file.path,
               client_message_id: receipt.event_id,
               mentions: [],
             });

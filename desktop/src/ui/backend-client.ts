@@ -605,7 +605,6 @@ export interface CompanionPreparedFile {
   mime_type: string;
   size: number;
   sha256: string;
-  data_base64: string;
 }
 
 export interface Skill {

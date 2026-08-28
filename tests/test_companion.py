@@ -161,12 +161,17 @@ def test_attachment_prepare_and_receive_are_owner_scoped(tmp_path, monkeypatch):
     source = uploads / "note.txt"
     source.write_bytes(b"hello")
     prepared = _prepare_attachment("owner-a", {"id": "file-1", "name": "note.txt", "path": str(source)})
-    assert prepared["data_base64"] == base64.b64encode(b"hello").decode("ascii")
+    assert prepared["path"] == str(source.resolve())
+    assert "data_base64" not in prepared
     assert prepared["sha256"] == hashlib.sha256(b"hello").hexdigest()
     with pytest.raises(ValueError, match="上传目录"):
         _prepare_attachment("owner-a", {"name": "escape.txt", "path": str(tmp_path / "escape.txt")})
 
-    received = _store_received_attachment("owner-a", prepared)
+    receive_root = tmp_path / ".crew" / "nearby" / "received"
+    receive_root.mkdir(parents=True)
+    received_path = receive_root / "transfer-note.txt"
+    received_path.write_bytes(b"hello")
+    received = _store_received_attachment("owner-a", {**prepared, "local_path": str(received_path)})
     assert received["name"] == "note.txt"
     assert Path(received["path"]).exists()
 

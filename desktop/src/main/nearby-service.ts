@@ -21,7 +21,7 @@ export type NearbyCommand =
     mime_type: string;
     size: number;
     sha256: string;
-    data_base64: string;
+    file_path: string;
     client_message_id?: string;
   }
   | { type: 'create_room'; room_id: string; room_name: string; peer_ids: string[]; agent_mode?: NearbyRoomAgentMode }
@@ -42,12 +42,13 @@ export type NearbyCommand =
     mime_type: string;
     size: number;
     sha256: string;
-    data_base64: string;
+    file_path: string;
     client_message_id?: string;
     mentions?: string[];
     reply_to?: NearbyReplyReference;
   }
   | { type: 'leave_room'; room_id: string }
+  | { type: 'respond_file_transfer'; transfer_id: string; accepted: boolean }
   | {
     type: 'set_room_agent_mode';
     room_id: string;

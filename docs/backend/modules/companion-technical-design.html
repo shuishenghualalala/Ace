@@ -110,7 +110,7 @@
       <a href="#architecture">03 总体架构</a>
       <a href="#contracts">04 Adapter 契约</a>
       <a href="#domain">05 领域与数据模型</a>
-      <a href="#protocol">06 协议 v3</a>
+      <a href="#protocol">06 协议 v4</a>
       <a href="#agent">07 Agent 接入与发现</a>
       <a href="#visibility">08 执行过程可见性</a>
       <a href="#flows">09 关键消息流</a>
@@ -124,9 +124,9 @@
       <header>
         <div class="eyebrow">
           <span class="badge">STATUS · 已实施并完成链路验收</span>
-          <span class="badge">VERSION · 0.2</span>
-          <span class="badge">2026-08-27</span>
-          <span class="badge">主对话历史与双向回执已接通</span>
+          <span class="badge">VERSION · 0.3</span>
+          <span class="badge">2026-08-28</span>
+          <span class="badge">BLE 授权 + WebRTC 文件通道已接通</span>
         </div>
         <h1>Ace“同伴”功能技术方案</h1>
         <p class="lead">本方案将现有 BLE 能力重构为可替换链路，把私聊和群聊接回主对话，并让 Ace 内置 Agent、通过外援连接的本地 Agent 都能以受控“群内席位”参与协作。</p>
@@ -134,9 +134,9 @@
 
       <section id="summary">
         <div class="hero-claim">推荐采用“统一会话入口 + Gateway 同伴领域 + AgentSeatRunner + LinkAdapter”的四层方案。蓝牙与 ACP 都使用注册式 Adapter 结构，但保留不同接口，避免把传输层和 Agent 运行时揉在一起。</div>
-        <div class="notice">本文同时记录目标架构与当前实施状态。ConversationAdapter、Companion Domain、BLE/Mock LinkAdapter、主对话持久化和双向 ACK 已落地；E2EE 与真实设备矩阵仍是正式发布门槛。现有 <a href="nearby-ble.html">Nearby BLE 文档</a>补充链路实现细节。</div>
+        <div class="notice">本文同时记录目标架构与当前实施状态。ConversationAdapter、Companion Domain、BLE/Mock LinkAdapter、主对话持久化、双向 ACK，以及“接收方确认后通过 WebRTC DataChannel 传文件”均已落地；跨公网稳定性仍依赖可用 TURN，真实设备矩阵仍是正式发布门槛。现有 <a href="nearby-ble.html">Nearby BLE 文档</a>补充链路实现细节。</div>
         <div class="cards">
-          <article class="card"><strong>消息与文件</strong><p>私聊、群聊统一用协议 v3 信封；文件改成 offer/accept/chunk/complete 流式传输，避免主进程一次性 Base64 整包。</p></article>
+          <article class="card"><strong>消息与文件</strong><p>私聊、群聊统一用协议 v4 信封；BLE 只传文件请求、授权和 SDP，文件字节由可靠有序的 WebRTC DataChannel 流式传输。</p></article>
           <article class="card"><strong>Agent 统一接入</strong><p>Ace 内置 Agent 与 ACP/CLI 外援都映射为公开 Agent Profile，再由群内 Agent 席位绑定到本机 RuntimeAdapter。</p></article>
           <article class="card"><strong>隐私分层</strong><p>自己 Agent 的完整执行流只落本机并进入右侧看板；其他成员只收到脱敏后的最终输出。</p></article>
         </div>
@@ -152,7 +152,7 @@
             <tr><td><code>nearby-chat.ts</code> 自带消息区和输入区</td><td>形成第二套聊天 UI，后续附件、草稿、执行卡都要重复维护</td><td>同伴页只做关系与群管理，实际交流全部进入主对话</td></tr>
             <tr><td>私聊存在 <code>agent.request</code></td><td>违背“人不能私聊 Agent”的产品硬规则</td><td>Renderer 隐藏、Adapter 拒绝、Gateway 领域层再次拒绝</td></tr>
             <tr><td>PeerInfo 只有单个 <code>agent_name</code></td><td>无法发现多个内置/外援 Agent，也没有公开信息与本地执行信息的隔离</td><td>引入可版本化 <code>PublicAgentProfile[]</code> 与本地映射表</td></tr>
-            <tr><td>群文件走完整 Base64 命令</td><td>占内存、IPC 放大，失败后难续传；私聊文件能力也不完整</td><td>文件状态机 + 临时文件 + 分块校验，DM 和 Room 共用</td></tr>
+            <tr><td>群文件走完整 Base64 命令和 BLE 分片</td><td>Base64 放大约 33%，4 MiB 文件会形成大量 ATT 写入，速度慢且容易中途失败</td><td>BLE 控制面 + WebRTC DataChannel 数据面；临时文件、SHA-256 和接收确认由 DM/Room 共用</td></tr>
             <tr><td>Rust JSON 同时承载历史与连接恢复</td><td>业务状态分散，主对话 Session 无法成为统一历史入口</td><td><code>crew.db</code> 保存领域状态；Rust 只保留链路缓存与未确认出站队列</td></tr>
           </tbody>
         </table>
@@ -170,7 +170,7 @@
 
         <div class="decision"><b>1</b><div><strong>同伴页与主对话分工</strong><p>同伴页负责发现、人际关系、Agent 名片、群成员和授权；点击“私聊本人/进入群聊”后解析一个 ConversationBinding，并交给主对话。</p></div></div>
         <div class="decision"><b>2</b><div><strong>会话 Adapter 决定“聊什么”</strong><p><code>GatewayConversationAdapter</code> 服务普通 Ace 会话；<code>NearbyConversationAdapter</code> 服务同伴私聊和群聊。主对话不直接识别 BLE 指令。</p></div></div>
-        <div class="decision"><b>3</b><div><strong>LinkAdapter 决定“怎么传”</strong><p>BLE、Mock 只提供发现、广播、连接、发送与事件。未来增加局域网或其他近场链路时，不需要改变同伴领域和 UI。</p></div></div>
+        <div class="decision"><b>3</b><div><strong>控制面与数据面分离</strong><p>BLE/Mock 提供发现、身份、授权和控制消息；文件数据面由 WebRTC DataChannel 负责。它可在不同局域网之间通过 ICE 建链，直连失败时使用配置的 TURN 中继，不要求两台电脑连接同一 LAN。</p></div></div>
         <div class="decision"><b>4</b><div><strong>RuntimeAdapter 决定“Agent 怎么执行”</strong><p>AgentSeatRunner 复用现有 RuntimeAdapter 体系执行 Ace 内置、ACP 或 CLI Agent；LinkAdapter 不实现 RuntimeAdapter。</p></div></div>
       </section>
 
@@ -250,15 +250,15 @@ pub trait LinkAdapter: Send + Sync {
       </section>
 
       <section id="protocol">
-        <h2>06 · Nearby 协议 v3</h2>
-        <p>现有 v2 不能表达多 Agent Profile、显式 Agent 席位、DM 文件状态机和执行可见性，因此建议升级 v3。v2 节点只能进入“兼容私聊文本”模式，不允许加入带 Agent 的 v3 群。</p>
+        <h2>06 · Nearby 协议 v4</h2>
+        <p><code>PROTOCOL_VERSION = 4</code>。v4 增加文件授权与 WebRTC SDP 信令；协议版本不一致的节点不会交换消息，避免旧客户端把新文件消息误当作 BLE 文件分片。</p>
         <table>
           <thead><tr><th>消息族</th><th>事件</th><th>说明</th></tr></thead>
           <tbody>
             <tr><td>身份与资料</td><td><code>profile.snapshot</code> / <code>profile.updated</code></td><td>人类公开资料与多个脱敏 Agent Profile，带 revision</td></tr>
             <tr><td>关系</td><td><code>contact.invite</code> / <code>accept</code> / <code>reject</code> / <code>block</code></td><td>建立在人与人之间</td></tr>
             <tr><td>消息</td><td><code>chat.message</code> / <code>chat.receipt</code></td><td>用 conversation kind 区分 DM 和 Room</td></tr>
-            <tr><td>文件</td><td><code>file.offer</code> / <code>accept</code> / <code>chunk</code> / <code>complete</code> / <code>cancel</code></td><td>私聊与群聊共用；SHA-256 校验；首版上限 4 MiB</td></tr>
+            <tr><td>文件</td><td><code>file.offer</code> / <code>file.decision</code> / <code>file.webrtc_offer</code> / <code>file.webrtc_answer</code></td><td>BLE 只承载元数据、用户决定和 SDP；文件内容不进入 BLE 与 JSONL IPC</td></tr>
             <tr><td>群成员</td><td><code>room.member.add</code> / <code>remove</code></td><td>只操作人类成员</td></tr>
             <tr><td>Agent 席位</td><td><code>room.agent_seat.grant</code> / <code>revoke</code></td><td>携带 owner、profile revision 与权限摘要</td></tr>
             <tr><td>Agent 调用</td><td><code>agent.invoke</code> / <code>result</code> / <code>error</code></td><td>仅 Room；链路只承载最终结果，不承载内部 chunk</td></tr>
@@ -270,10 +270,10 @@ pub trait LinkAdapter: Send + Sync {
         <h3>文件传输状态机</h3>
         <ol class="flow">
           <li><strong>Offer</strong><span>名称、大小、MIME、SHA-256，不读完整文件进内存</span></li>
-          <li><strong>Accept</strong><span>接收端检查空间和策略，创建临时文件</span></li>
-          <li><strong>Chunk</strong><span>按 offset 写入；每块确认，可断点恢复</span></li>
-          <li><strong>Complete</strong><span>验证大小与摘要，原子移动到正式路径</span></li>
-          <li><strong>Receipt</strong><span>更新主对话文件卡状态，失败可重试</span></li>
+          <li><strong>Decision</strong><span>原生确认框由用户选择接收或拒绝</span></li>
+          <li><strong>Connect</strong><span>BLE 交换 SDP；ICE 选择直连或 TURN</span></li>
+          <li><strong>Transfer</strong><span>DataChannel 流式写入临时文件</span></li>
+          <li><strong>Receipt</strong><span>校验摘要、原子改名并回完成 ACK</span></li>
         </ol>
       </section>
 
@@ -383,7 +383,7 @@ pub trait LinkAdapter: Send + Sync {
       <section id="delivery">
         <h2>12 · 分阶段实施与验收</h2>
         <div class="phase"><span class="phase-id">P0</span><div><strong>契约与主对话接入</strong><p>ConversationBinding/Adapter、LinkAdapter、同伴 Hub 收口、DM Agent 三重拦截；保留现有文本链路。</p></div><span class="gate">先完成</span></div>
-        <div class="phase"><span class="phase-id">P1</span><div><strong>消息与流式文件</strong><p>协议 v3 信封、DM/Room 共用文件状态机、出站队列、回执和失败恢复。</p></div><span class="gate">可独立验收</span></div>
+        <div class="phase"><span class="phase-id">P1</span><div><strong>消息与流式文件</strong><p>协议 v4 信封、BLE 授权与 SDP、WebRTC DataChannel、DM/Room 共用文件状态机和完成回执。</p></div><span class="gate">已实现</span></div>
         <div class="phase"><span class="phase-id">P2</span><div><strong>Agent Profile 与群内席位</strong><p>Ace/ACP/CLI 公开资料、群级授权、主人离群级联、工具审批边界。</p></div><span class="gate">安全规则</span></div>
         <div class="phase"><span class="phase-id">P3</span><div><strong>本机执行看板</strong><p>Local Run Store、执行卡、主对话右侧看板；验证 BLE 永远收不到内部事件。</p></div><span class="gate">隐私验收</span></div>
         <div class="phase"><span class="phase-id">P4</span><div><strong>有界多 Agent 协作</strong><p>结构化调度、轮次/次数/deadline、取消与主人离群暂停。</p></div><span class="gate">预算验收</span></div>
@@ -392,7 +392,7 @@ pub trait LinkAdapter: Send + Sync {
         <h3>测试层级</h3>
         <ul>
           <li><strong>领域单测：</strong>DM Agent 拒绝、主人离群级联、Agent 授权、revision、幂等和协作预算。</li>
-          <li><strong>协议性质测试：</strong>分帧/乱序/重复/损坏、文件摘要、重放窗口、v2/v3 协商。</li>
+          <li><strong>协议性质测试：</strong>BLE 分帧/乱序/重复/损坏、文件摘要、无效路径和 v4 版本隔离。</li>
           <li><strong>Mock 双实例集成：</strong>好友、DM、群聊、文件、Agent 结果、断线恢复。</li>
           <li><strong>隐私测试：</strong>抓取 Desktop↔Rust IPC 和 BLE frame，断言不存在 chunk、工具参数、路径和模型信息。</li>
           <li><strong>UI E2E：</strong>同伴 Hub 跳主对话、头像与来源标识、能力矩阵、执行卡右侧看板。</li>
@@ -401,8 +401,8 @@ pub trait LinkAdapter: Send + Sync {
       </section>
 
       <section id="implementation">
-        <h2>13 · 实施记录（2026-08-27）</h2>
-        <div class="notice"><strong>本轮已完成：</strong>同伴领域服务、稳定 ConversationBinding、默认“同伴空间”、Agent 公开范围、BLE LinkAdapter、协议 v3 Agent 名片、主对话 ConversationAdapter、DM/Room 文本与文件传输，以及按产品 UI 稿重做的同伴管理中枢。</div>
+        <h2>13 · 实施记录（更新于 2026-08-28）</h2>
+        <div class="notice"><strong>本轮已完成：</strong>同伴领域服务、稳定 ConversationBinding、默认“同伴空间”、Agent 公开范围、BLE LinkAdapter、协议 v4、主对话 ConversationAdapter、DM/Room 文本，以及带接收授权的 WebRTC 文件传输。</div>
         <h3>UI 收口</h3>
         <ul>
           <li>删除旧 Nearby 页中的第二套消息流、输入框、雷达和大页面标题；同伴页只负责发现、人物资料、群管理和“我的名片”。</li>
@@ -415,14 +415,14 @@ pub trait LinkAdapter: Send + Sync {
         <ul>
           <li><code>LinkAdapter</code> 只负责 BLE/Mock 链路；同伴关系、会话绑定、Agent 名片、Outbox 与 Local Run 由 Gateway/CompanionService 管理。</li>
           <li><code>ConversationAdapter</code> 把同伴会话接入主对话发送链，复用主对话附件、历史、Agent 执行过程和右侧看板。</li>
-          <li>文件在 Gateway 中校验当前账号 uploads 路径与 4 MiB 上限，链路使用统一分片函数；DM 使用 <code>peer.file</code>，群聊使用 <code>room.file</code>。</li>
+          <li>文件在 Gateway 中校验当前账号 uploads 路径与 4 MiB 上限并流式计算 SHA-256；Rust 直接读取受控绝对路径，文件字节不再 Base64 编码。接收完成后只把受控 <code>local_path</code> 投影为 <code>peer.file</code> / <code>room.file</code>。</li>
         </ul>
         <h3>主对话消息闭环</h3>
         <ul>
           <li>同伴会话使用稳定的 <code>agent:main:nearby:*</code> Session，但不再被渠道会话过滤器隐藏；会话列表、重启恢复和普通主对话共用同一套 Session API。</li>
           <li>入站 <code>message_id</code>、发送者身份与来源写入 <code>crew.db</code>；SQLite 在同一写事务内按消息 ID 幂等追加，实时投影和历史回放使用相同数据。</li>
           <li>收到 LinkAdapter 入站事件后，Gateway 返回 ConversationBinding；Desktop 只在当前会话重新加载标准历史并重绘，不维护第二份同伴聊天状态。</li>
-          <li>出站消息携带 <code>client_message_id</code>，状态按 <code>queued → sent → delivered</code> 推进；对端接收文本或最后一个文件分片后返回 <code>message.ack</code>，异常记为 <code>failed</code>，不再把写入 Rust stdin 当作送达。</li>
+          <li>出站消息携带 <code>client_message_id</code>，状态按 <code>queued → sent → delivered</code> 推进；文件仅在接收端完成 SHA-256 校验并通过 DataChannel 回 ACK 后记为 delivered，超时、拒绝、BLE 断开或校验失败均记为 failed。</li>
           <li>远端人的消息与远端 Agent 最终输出都保留来源头像和名称；远端执行过程不进入本机数据库，本机 Agent 执行过程仍复用普通对话与右侧看板。</li>
         </ul>
         <p class="small">完整测试结果见同目录 <code>companion-test-report.html</code>。正式发布前仍以 E2EE 与真实蓝牙设备矩阵为阻断项。</p>

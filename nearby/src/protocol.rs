@@ -1,10 +1,11 @@
+use crate::file_transfer::FileTransferMetadata;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u8 = 3;
+pub const PROTOCOL_VERSION: u8 = 4;
 pub const DEFAULT_AGENT_MODE: &str = "mention";
 pub const AGENT_MODES: [&str; 3] = ["mention", "auto", "quiet"];
 pub const MAX_ROOM_NAME_CHARS: usize = 120;
@@ -74,6 +75,17 @@ pub struct FileChunk {
     pub chunk_index: u32,
     pub chunk_total: u32,
     pub data_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferredFile {
+    pub file_id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub size: u64,
+    pub sha256: String,
+    pub local_path: String,
+    pub complete: bool,
 }
 
 impl PeerInfo {
@@ -195,6 +207,82 @@ impl Message {
             message_id: Uuid::new_v4().to_string(),
             sender: sender.into(),
             payload: serde_json::json!({ "file": file }),
+        }
+    }
+
+    pub fn file_offer(sender: impl Into<String>, transfer: FileTransferMetadata) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            message_type: "file.offer".to_owned(),
+            message_id: Uuid::new_v4().to_string(),
+            sender: sender.into(),
+            payload: serde_json::json!({ "transfer": transfer }),
+        }
+    }
+
+    pub fn file_decision(
+        sender: impl Into<String>,
+        transfer_id: impl Into<String>,
+        accepted: bool,
+    ) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            message_type: "file.decision".to_owned(),
+            message_id: Uuid::new_v4().to_string(),
+            sender: sender.into(),
+            payload: serde_json::json!({
+                "transfer_id": transfer_id.into(),
+                "accepted": accepted,
+            }),
+        }
+    }
+
+    pub fn file_webrtc_signal(
+        sender: impl Into<String>,
+        transfer_id: impl Into<String>,
+        sdp: impl Into<String>,
+        answer: bool,
+    ) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            message_type: if answer {
+                "file.webrtc_answer".to_owned()
+            } else {
+                "file.webrtc_offer".to_owned()
+            },
+            message_id: Uuid::new_v4().to_string(),
+            sender: sender.into(),
+            payload: serde_json::json!({
+                "transfer_id": transfer_id.into(),
+                "sdp": sdp.into(),
+            }),
+        }
+    }
+
+    pub fn peer_transferred_file(sender: impl Into<String>, file: TransferredFile) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            message_type: "peer.file".to_owned(),
+            message_id: Uuid::new_v4().to_string(),
+            sender: sender.into(),
+            payload: serde_json::json!({ "file": file }),
+        }
+    }
+
+    pub fn room_transferred_file(
+        sender: impl Into<String>,
+        room_id: impl Into<String>,
+        file: TransferredFile,
+    ) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            message_type: "room.file".to_owned(),
+            message_id: Uuid::new_v4().to_string(),
+            sender: sender.into(),
+            payload: serde_json::json!({
+                "room_id": room_id.into(),
+                "file": file,
+            }),
         }
     }
 
@@ -769,6 +857,48 @@ mod tests {
         );
         assert_eq!(message.message_type, "peer.file");
         assert_eq!(message.payload["file"]["file_id"], "file_dm");
+    }
+
+    #[test]
+    fn webrtc_file_control_messages_round_trip() {
+        let metadata = FileTransferMetadata {
+            transfer_id: "transfer_1".to_owned(),
+            file_id: "file_1".to_owned(),
+            name: "notes.txt".to_owned(),
+            mime_type: "text/plain".to_owned(),
+            size: 5,
+            sha256: "a".repeat(64),
+            room_id: Some("room_1".to_owned()),
+            client_message_id: Some("event_1".to_owned()),
+        };
+        let offer = Message::file_offer("crew_a", metadata.clone());
+        let decoded = Message::decode(&offer.encode().unwrap()).unwrap();
+        assert_eq!(decoded.message_type, "file.offer");
+        assert_eq!(decoded.payload["transfer"]["transfer_id"], "transfer_1");
+
+        let decision = Message::file_decision("crew_b", "transfer_1", true);
+        assert_eq!(decision.payload["accepted"], true);
+        let signal = Message::file_webrtc_signal("crew_a", "transfer_1", "offer-sdp", false);
+        assert_eq!(signal.message_type, "file.webrtc_offer");
+
+        let completed = Message::room_transferred_file(
+            "crew_a",
+            "room_1",
+            TransferredFile {
+                file_id: metadata.file_id,
+                name: metadata.name,
+                mime_type: metadata.mime_type,
+                size: metadata.size,
+                sha256: metadata.sha256,
+                local_path: "/controlled/received/notes.txt".to_owned(),
+                complete: true,
+            },
+        );
+        assert_eq!(completed.payload["file"]["complete"], true);
+        assert_eq!(
+            completed.payload["file"]["local_path"],
+            "/controlled/received/notes.txt"
+        );
     }
 
     #[test]
