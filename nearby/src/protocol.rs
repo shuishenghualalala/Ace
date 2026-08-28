@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u8 = 4;
+pub const PROTOCOL_VERSION: u8 = 3;
+pub const FILE_WEBRTC_CAPABILITY: &str = "file.webrtc";
 pub const DEFAULT_AGENT_MODE: &str = "mention";
 pub const AGENT_MODES: [&str; 3] = ["mention", "auto", "quiet"];
 pub const MAX_ROOM_NAME_CHARS: usize = 120;
@@ -682,6 +683,7 @@ mod tests {
     #[test]
     fn peer_info_and_messages_round_trip_as_json() {
         let peer = test_peer();
+        assert_eq!(PROTOCOL_VERSION, 3);
         assert_eq!(PeerInfo::decode(&peer.encode().unwrap()).unwrap(), peer);
 
         let hello = Message::hello(&peer);

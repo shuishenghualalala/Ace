@@ -118,7 +118,7 @@ export class NearbyService {
   private stopping = false;
   private ready = false;
   private localPeerId = '';
-  private readonly peers = new Map<string, string>();
+  private readonly peers = new Map<string, { displayName: string; capabilities: string[] }>();
   private publishedAgents: NearbyPublishedAgent[] = [];
 
   public constructor(private readonly options: NearbyServiceOptions) {}
@@ -219,6 +219,12 @@ export class NearbyService {
   public async send(command: NearbyCommand): Promise<void> {
     await this.start();
     if (!this.child?.stdin.writable) throw new Error('Nearby process is not available');
+    if (
+      command.type === 'send_peer_file'
+      && !this.peers.get(command.peer_id)?.capabilities.includes('file.webrtc')
+    ) {
+      throw new Error('对方版本不支持快速文件传输，请更新对方的 Ace');
+    }
     console.warn('[nearby] sending command type=' + command.type);
     this.child.stdin.write(`${JSON.stringify(command)}\n`);
   }
@@ -261,12 +267,20 @@ export class NearbyService {
         const peer = this.eventPeer(event);
         if (peer) {
           this.localPeerId = peer.peerId;
-          this.peers.set(peer.peerId, peer.displayName);
+          this.peers.set(peer.peerId, {
+            displayName: peer.displayName,
+            capabilities: peer.capabilities,
+          });
         }
         onReady();
       } else if (event.type === 'peer_discovered' || event.type === 'peer_connected') {
         const peer = this.eventPeer(event);
-        if (peer) this.peers.set(peer.peerId, peer.displayName);
+        if (peer) {
+          this.peers.set(peer.peerId, {
+            displayName: peer.displayName,
+            capabilities: peer.capabilities,
+          });
+        }
       }
       this.options.onEvent(event);
       this.maybeRunAgent(event);
@@ -284,7 +298,9 @@ export class NearbyService {
     }
   }
 
-  private eventPeer(event: NearbyEvent): { peerId: string; displayName: string } | null {
+  private eventPeer(
+    event: NearbyEvent,
+  ): { peerId: string; displayName: string; capabilities: string[] } | null {
     const value = event.peer;
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const peer = value as Record<string, unknown>;
@@ -295,6 +311,9 @@ export class NearbyService {
       displayName: typeof peer.display_name === 'string' && peer.display_name.trim()
         ? peer.display_name.trim()
         : '附近的用户',
+      capabilities: Array.isArray(peer.capabilities)
+        ? peer.capabilities.filter((value): value is string => typeof value === 'string')
+        : [],
     };
   }
 

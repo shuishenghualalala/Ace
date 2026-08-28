@@ -9,8 +9,8 @@ use crate::identity::{
 use crate::protocol::should_initiate;
 use crate::protocol::{
     is_valid_agent_mode, normalize_room_name, FrameCodec, Message, PeerInfo, PublishedAgent,
-    Reassembler, ReplyReference, TransferredFile, DEFAULT_AGENT_MODE, INCOMING_MESSAGE_UUID,
-    OUTGOING_MESSAGE_UUID, PEER_INFO_UUID, PROTOCOL_VERSION, SERVICE_UUID,
+    Reassembler, ReplyReference, TransferredFile, DEFAULT_AGENT_MODE, FILE_WEBRTC_CAPABILITY,
+    INCOMING_MESSAGE_UUID, OUTGOING_MESSAGE_UUID, PEER_INFO_UUID, PROTOCOL_VERSION, SERVICE_UUID,
 };
 use crate::runtime::{subscribe_outgoing_message, NearbyConfig};
 use anyhow::{Context, Result};
@@ -820,6 +820,15 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             }).await?;
                             continue;
                         }
+                        if !discovered
+                            .get(&peer_id)
+                            .is_some_and(peer_supports_webrtc_file)
+                        {
+                            sink.send(IpcEvent::Error {
+                                message: "对方版本不支持快速文件传输，请更新对方的 Ace".to_owned(),
+                            }).await?;
+                            continue;
+                        }
                         let Some(outbound) = sessions.get(&peer_id).cloned() else {
                             active_peers.remove(&peer_id);
                             sink.send(IpcEvent::PeerConnectionFailed {
@@ -967,6 +976,24 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                                 .unwrap_or_default();
                             if recipients.is_empty() {
                                 sink.send(IpcEvent::Error { message: "群内暂无可接收文件的在线同伴".to_owned() }).await?;
+                                continue;
+                            }
+                            let unsupported = recipients
+                                .iter()
+                                .filter(|peer_id| {
+                                    !discovered
+                                        .get(*peer_id)
+                                        .is_some_and(peer_supports_webrtc_file)
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            if !unsupported.is_empty() {
+                                sink.send(IpcEvent::Error {
+                                    message: format!(
+                                        "群内有同伴不支持快速文件传输，请先更新：{}",
+                                        unsupported.join(", ")
+                                    ),
+                                }).await?;
                                 continue;
                             }
                             for recipient in recipients {
@@ -1220,6 +1247,12 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             "file.offer" => {
                                 if !active_peers.contains(&peer_id)
                                     || !seen_messages.insert(message.message_id.clone())
+                                {
+                                    continue;
+                                }
+                                if !discovered
+                                    .get(&peer_id)
+                                    .is_some_and(peer_supports_webrtc_file)
                                 {
                                     continue;
                                 }
@@ -1619,13 +1652,22 @@ pub(crate) fn create_peer(config: &NearbyConfig) -> Result<PeerInfo> {
         },
         capabilities: {
             let mut capabilities = config.capabilities.clone();
-            if !capabilities.iter().any(|value| value == "file.webrtc") {
-                capabilities.push("file.webrtc".to_owned());
+            if !capabilities
+                .iter()
+                .any(|value| value == FILE_WEBRTC_CAPABILITY)
+            {
+                capabilities.push(FILE_WEBRTC_CAPABILITY.to_owned());
             }
             capabilities
         },
         published_agents: config.published_agents.clone(),
     })
+}
+
+pub(crate) fn peer_supports_webrtc_file(peer: &PeerInfo) -> bool {
+    peer.capabilities
+        .iter()
+        .any(|capability| capability == FILE_WEBRTC_CAPABILITY)
 }
 
 async fn configure_server(server: &Arc<Mutex<ServerPeripheral>>, peer: &PeerInfo) -> Result<()> {
@@ -1780,6 +1822,12 @@ async fn connect_to_peer(
     .context("timed out reading remote PeerInfo")?
     .context("failed to read remote PeerInfo")?;
     let remote = PeerInfo::decode(&peer_info_bytes).context("remote PeerInfo is not valid JSON")?;
+    if remote.protocol_version != PROTOCOL_VERSION {
+        eprintln!(
+            "[nearby][session] device={device} stage=peer_info_rejected reason=protocol_version remote={} local={}",
+            remote.protocol_version, PROTOCOL_VERSION
+        );
+    }
     anyhow::ensure!(
         remote.protocol_version == PROTOCOL_VERSION,
         "remote protocol version {} is incompatible with local version {}",
@@ -2722,6 +2770,46 @@ mod tests {
         };
         let hello = Message::hello(&peer);
         assert_eq!(peer_info_from_hello(&hello), Some(peer));
+    }
+
+    #[test]
+    fn legacy_v3_peer_stays_compatible_without_webrtc_file_capability() {
+        let peer = PeerInfo {
+            protocol_version: 3,
+            peer_id: "crew_legacy".to_owned(),
+            peer_token: "legacy-token".to_owned(),
+            display_name: "Legacy".to_owned(),
+            agent_name: "Legacy Agent".to_owned(),
+            capabilities: vec!["chat".to_owned()],
+            published_agents: Vec::new(),
+        };
+        assert_eq!(PROTOCOL_VERSION, 3);
+        assert!(!peer_supports_webrtc_file(&peer));
+        assert_eq!(peer_info_from_hello(&Message::hello(&peer)), Some(peer));
+    }
+
+    #[test]
+    fn new_peer_advertises_webrtc_file_capability_once() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "crew-nearby-capability-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config = NearbyConfig {
+            state_dir: Some(state_dir.clone()),
+            peer_id: Some("crew_modern".to_owned()),
+            capabilities: vec!["chat".to_owned(), FILE_WEBRTC_CAPABILITY.to_owned()],
+            ..NearbyConfig::default()
+        };
+        let peer = create_peer(&config).unwrap();
+        assert!(peer_supports_webrtc_file(&peer));
+        assert_eq!(
+            peer.capabilities
+                .iter()
+                .filter(|value| value.as_str() == FILE_WEBRTC_CAPABILITY)
+                .count(),
+            1
+        );
+        fs::remove_dir_all(state_dir).unwrap();
     }
 
     #[test]

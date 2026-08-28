@@ -264,9 +264,19 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
         )
         : null;
       const online = Boolean(conversation && store.isConversationOnline(conversation));
+      const fileRecipients = conversation
+        ? (conversation.kind === 'dm'
+          ? [conversation.peerId]
+          : conversation.memberIds.filter((peerId) => (
+            peerId !== store.localPeerId && store.peers.get(peerId)?.connection === 'connected'
+          )))
+        : [];
+      const supportsFastFile = fileRecipients.length > 0 && fileRecipients.every((peerId) => (
+        store.peers.get(peerId)?.capabilities.includes('file.webrtc') === true
+      ));
       return {
         canSendText: online && (capabilities?.can_send_text ?? true),
-        canAttach: online && (capabilities?.can_attach ?? true),
+        canAttach: online && supportsFastFile && (capabilities?.can_attach ?? true),
         canMentionPeople: capabilities?.can_mention_people ?? sessionId.includes(':room:'),
         canMentionAgents: capabilities?.can_mention_agents ?? sessionId.includes(':room:'),
         showModelPicker: capabilities?.show_model_picker ?? false,

@@ -9,22 +9,26 @@
 </head>
 <body><main>
   <h1>同伴功能测试报告</h1>
-  <p>日期：2026-08-28 · 范围：Companion Domain、Gateway、Desktop 接收授权、Nearby Rust 协议 v4、BLE 控制面与 WebRTC DataChannel 文件数据面。</p>
+  <p>日期：2026-08-28 · 范围：Companion Domain、Gateway、Desktop 接收授权、Nearby Rust 基础协议 v3、能力协商、BLE 控制面与 WebRTC DataChannel 文件数据面。</p>
   <h2>通过项</h2>
   <table>
     <thead><tr><th>层级</th><th>命令 / 用例</th><th>结果</th></tr></thead>
     <tbody>
       <tr><td>Python Companion</td><td><code>pytest -q tests/test_companion.py</code><br>附件只返回受控绝对路径，流式计算 SHA-256；接收路径限制在 <code>nearby/received</code>，兼容旧 Base64 历史。</td><td class="pass">13 passed</td></tr>
       <tr><td>双实例端到端</td><td><code>.venv/bin/python -m pytest -q tests/test_companion_e2e.py</code><br>启动 Mock Bus、两个独立 Rust Nearby 进程与两个 Gateway，验证新的 <code>file_path</code> 命令契约和文件投影。</td><td class="pass">1 passed</td></tr>
-      <tr><td>Rust 协议与链路</td><td><code>cargo test --manifest-path nearby/Cargo.toml</code><br>协议 v4、接收决定、SDP 信令、超时与失败事件；测试内真实建立两个 webrtc-rs PeerConnection，经可靠有序 DataChannel 传普通文件和空文件、校验并落盘。</td><td class="pass">56 passed</td></tr>
+      <tr><td>Rust 协议与链路</td><td><code>cargo test --manifest-path nearby/Cargo.toml</code><br>协议 v3、<code>file.webrtc</code> 能力协商、接收决定、SDP 信令、超时与失败事件；测试内真实建立两个 webrtc-rs PeerConnection，经可靠有序 DataChannel 传普通文件和空文件、校验并落盘。</td><td class="pass">58 passed</td></tr>
       <tr><td>Desktop 类型</td><td><code>npm run typecheck</code></td><td class="pass">通过</td></tr>
-      <tr><td>Desktop 同伴回归</td><td><code>nearby-store</code>、<code>nearby-page</code>、<code>nearby-service</code>；覆盖路径发送、WebRTC 完成文件投影和旧 BLE 文件历史兼容。</td><td class="pass">33 passed</td></tr>
+      <tr><td>Desktop 同伴回归</td><td><code>nearby-store</code>、<code>nearby-page</code>、<code>nearby-service</code>、<code>nearby-agent-bridge</code>、<code>nearby-tray</code>；覆盖路径发送、WebRTC 完成文件投影、旧 BLE 文件历史兼容和旧 v3 同伴附件禁用。</td><td class="pass">48 passed</td></tr>
+      <tr><td>三实例 Mock E2E</td><td><code>.venv/bin/python tests/e2e/nearby_mock_bus_smoke.py</code><br>发现、连接、建群、追加成员、群设置、退群和重启快照。</td><td class="pass">14 passed</td></tr>
+      <tr><td>跨版本双实例 E2E</td><td>WebRTC 改造前的 <code>9554b94</code> 节点与当前节点双向发现、连接、发文字；旧节点缺少 <code>file.webrtc</code> 时仅拒绝文件。</td><td class="pass">4 scenarios passed</td></tr>
+      <tr><td>Rust 静态检查</td><td><code>cargo clippy --manifest-path nearby/Cargo.toml --all-targets -- -D warnings</code></td><td class="pass">通过</td></tr>
       <tr><td>Desktop CSS</td><td><code>npm run lint:css</code></td><td class="pass">通过</td></tr>
       <tr><td>Desktop 构建</td><td><code>npm run build:dev</code></td><td class="pass">通过</td></tr>
+      <tr><td>Desktop 全仓测试基线</td><td><code>npm test</code><br>本轮修改文件对应的 Nearby 测试全部通过；全仓仍有 27 个非 Nearby 测试文件失败，主要涉及浏览器、旧 DOM 断言及未启动的本机 Gateway。</td><td>1661 passed / 62 failed</td></tr>
     </tbody>
   </table>
   <h2>验证说明</h2>
-  <div class="note">本机自动化已覆盖 WebRTC 的实际建链与文件字节传输，但无法代替两台真实设备的 BLE 权限和 NAT/防火墙矩阵。默认 Python 3.10 不满足项目既有 <code>enum.StrEnum</code> 要求，完整 E2E 使用仓库 <code>.venv</code> 的 Python 3.11.11 运行并通过。</div>
+  <div class="note">本机自动化已覆盖 WebRTC 的实际建链与文件字节传输，也覆盖新旧 v3 节点的发现和文字兼容；但 Mock Bus 无法代替两台真实设备的 BLE 广播/扫描权限、系统蓝牙栈和 NAT/防火墙矩阵。完整 Python E2E 使用仓库 <code>.venv</code> 运行并通过。</div>
   <h2>仍需真实设备验证</h2>
   <ul><li>macOS / Windows / Linux 的 BLE 权限、扫描、互连和休眠恢复。</li><li>两台电脑处于不同网络时的 STUN 直连、TURN 回退、企业防火墙与 4 MiB 边界。</li><li>跨系统文件名、接收弹窗、拒绝、BLE 断线和系统睡眠中的失败反馈。</li><li>正式发布前的 BLE 应用层 E2EE 与身份指纹确认。</li></ul>
 </main></body>

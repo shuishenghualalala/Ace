@@ -110,7 +110,7 @@
       <a href="#architecture">03 总体架构</a>
       <a href="#contracts">04 Adapter 契约</a>
       <a href="#domain">05 领域与数据模型</a>
-      <a href="#protocol">06 协议 v4</a>
+      <a href="#protocol">06 协议 v3 + 能力协商</a>
       <a href="#agent">07 Agent 接入与发现</a>
       <a href="#visibility">08 执行过程可见性</a>
       <a href="#flows">09 关键消息流</a>
@@ -136,7 +136,7 @@
         <div class="hero-claim">推荐采用“统一会话入口 + Gateway 同伴领域 + AgentSeatRunner + LinkAdapter”的四层方案。蓝牙与 ACP 都使用注册式 Adapter 结构，但保留不同接口，避免把传输层和 Agent 运行时揉在一起。</div>
         <div class="notice">本文同时记录目标架构与当前实施状态。ConversationAdapter、Companion Domain、BLE/Mock LinkAdapter、主对话持久化、双向 ACK，以及“接收方确认后通过 WebRTC DataChannel 传文件”均已落地；跨公网稳定性仍依赖可用 TURN，真实设备矩阵仍是正式发布门槛。现有 <a href="nearby-ble.html">Nearby BLE 文档</a>补充链路实现细节。</div>
         <div class="cards">
-          <article class="card"><strong>消息与文件</strong><p>私聊、群聊统一用协议 v4 信封；BLE 只传文件请求、授权和 SDP，文件字节由可靠有序的 WebRTC DataChannel 流式传输。</p></article>
+          <article class="card"><strong>消息与文件</strong><p>私聊、群聊保持协议 v3 兼容；WebRTC 文件能力通过 <code>file.webrtc</code> 协商。BLE 只传文件请求、授权和 SDP，文件字节由可靠有序的 WebRTC DataChannel 流式传输。</p></article>
           <article class="card"><strong>Agent 统一接入</strong><p>Ace 内置 Agent 与 ACP/CLI 外援都映射为公开 Agent Profile，再由群内 Agent 席位绑定到本机 RuntimeAdapter。</p></article>
           <article class="card"><strong>隐私分层</strong><p>自己 Agent 的完整执行流只落本机并进入右侧看板；其他成员只收到脱敏后的最终输出。</p></article>
         </div>
@@ -250,8 +250,8 @@ pub trait LinkAdapter: Send + Sync {
       </section>
 
       <section id="protocol">
-        <h2>06 · Nearby 协议 v4</h2>
-        <p><code>PROTOCOL_VERSION = 4</code>。v4 增加文件授权与 WebRTC SDP 信令；协议版本不一致的节点不会交换消息，避免旧客户端把新文件消息误当作 BLE 文件分片。</p>
+        <h2>06 · Nearby 协议 v3 与能力协商</h2>
+        <p><code>PROTOCOL_VERSION = 3</code>。文件授权与 WebRTC SDP 信令是增量消息族，由 PeerInfo 中的 <code>file.webrtc</code> 能力控制。新旧 v3 节点仍能发现、连接和交换文字；只有双方明确支持时才启用新文件链路，避免因单项功能升级破坏整个同伴兼容性。</p>
         <table>
           <thead><tr><th>消息族</th><th>事件</th><th>说明</th></tr></thead>
           <tbody>
@@ -383,7 +383,7 @@ pub trait LinkAdapter: Send + Sync {
       <section id="delivery">
         <h2>12 · 分阶段实施与验收</h2>
         <div class="phase"><span class="phase-id">P0</span><div><strong>契约与主对话接入</strong><p>ConversationBinding/Adapter、LinkAdapter、同伴 Hub 收口、DM Agent 三重拦截；保留现有文本链路。</p></div><span class="gate">先完成</span></div>
-        <div class="phase"><span class="phase-id">P1</span><div><strong>消息与流式文件</strong><p>协议 v4 信封、BLE 授权与 SDP、WebRTC DataChannel、DM/Room 共用文件状态机和完成回执。</p></div><span class="gate">已实现</span></div>
+        <div class="phase"><span class="phase-id">P1</span><div><strong>消息与流式文件</strong><p>协议 v3 能力协商、BLE 授权与 SDP、WebRTC DataChannel、DM/Room 共用文件状态机和完成回执。</p></div><span class="gate">已实现</span></div>
         <div class="phase"><span class="phase-id">P2</span><div><strong>Agent Profile 与群内席位</strong><p>Ace/ACP/CLI 公开资料、群级授权、主人离群级联、工具审批边界。</p></div><span class="gate">安全规则</span></div>
         <div class="phase"><span class="phase-id">P3</span><div><strong>本机执行看板</strong><p>Local Run Store、执行卡、主对话右侧看板；验证 BLE 永远收不到内部事件。</p></div><span class="gate">隐私验收</span></div>
         <div class="phase"><span class="phase-id">P4</span><div><strong>有界多 Agent 协作</strong><p>结构化调度、轮次/次数/deadline、取消与主人离群暂停。</p></div><span class="gate">预算验收</span></div>
@@ -392,7 +392,7 @@ pub trait LinkAdapter: Send + Sync {
         <h3>测试层级</h3>
         <ul>
           <li><strong>领域单测：</strong>DM Agent 拒绝、主人离群级联、Agent 授权、revision、幂等和协作预算。</li>
-          <li><strong>协议性质测试：</strong>BLE 分帧/乱序/重复/损坏、文件摘要、无效路径和 v4 版本隔离。</li>
+          <li><strong>协议性质测试：</strong>BLE 分帧/乱序/重复/损坏、文件摘要、无效路径、v3 旧节点兼容和 <code>file.webrtc</code> 能力隔离。</li>
           <li><strong>Mock 双实例集成：</strong>好友、DM、群聊、文件、Agent 结果、断线恢复。</li>
           <li><strong>隐私测试：</strong>抓取 Desktop↔Rust IPC 和 BLE frame，断言不存在 chunk、工具参数、路径和模型信息。</li>
           <li><strong>UI E2E：</strong>同伴 Hub 跳主对话、头像与来源标识、能力矩阵、执行卡右侧看板。</li>
@@ -402,7 +402,7 @@ pub trait LinkAdapter: Send + Sync {
 
       <section id="implementation">
         <h2>13 · 实施记录（更新于 2026-08-28）</h2>
-        <div class="notice"><strong>本轮已完成：</strong>同伴领域服务、稳定 ConversationBinding、默认“同伴空间”、Agent 公开范围、BLE LinkAdapter、协议 v4、主对话 ConversationAdapter、DM/Room 文本，以及带接收授权的 WebRTC 文件传输。</div>
+        <div class="notice"><strong>本轮已完成：</strong>同伴领域服务、稳定 ConversationBinding、默认“同伴空间”、Agent 公开范围、BLE LinkAdapter、协议 v3 能力协商、主对话 ConversationAdapter、DM/Room 文本，以及带接收授权的 WebRTC 文件传输。</div>
         <h3>UI 收口</h3>
         <ul>
           <li>删除旧 Nearby 页中的第二套消息流、输入框、雷达和大页面标题；同伴页只负责发现、人物资料、群管理和“我的名片”。</li>

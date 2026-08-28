@@ -161,4 +161,50 @@ describe('NearbyService Agent routing', () => {
       room_name: '新群名',
     });
   });
+
+  it('keeps legacy peers visible but rejects WebRTC files until they advertise support', async () => {
+    const service = new NearbyService({
+      repoRoot: '/tmp/ace',
+      resourcesPath: '/tmp/ace/resources',
+      isPackaged: false,
+      crewHome: '/tmp/ace/home',
+      onEvent: vi.fn(),
+    });
+    const handleLine = (service as unknown as { handleLine: LineHandler }).handleLine.bind(service);
+    const write = vi.fn();
+    const internals = service as unknown as {
+      start: () => Promise<void>;
+      child: { stdin: { writable: boolean; write: (value: string) => void } };
+    };
+    internals.start = vi.fn().mockResolvedValue(undefined);
+    internals.child = { stdin: { writable: true, write } };
+    const command = {
+      type: 'send_peer_file' as const,
+      peer_id: 'ace_legacy',
+      file_id: 'file-1',
+      name: 'note.txt',
+      mime_type: 'text/plain',
+      size: 5,
+      sha256: 'a'.repeat(64),
+      file_path: '/tmp/note.txt',
+    };
+
+    handleLine(JSON.stringify({
+      type: 'peer_discovered',
+      peer: { peer_id: 'ace_legacy', display_name: 'Legacy', capabilities: ['chat'] },
+    }), () => undefined);
+    await expect(service.send(command)).rejects.toThrow('不支持快速文件传输');
+    expect(write).not.toHaveBeenCalled();
+
+    handleLine(JSON.stringify({
+      type: 'peer_connected',
+      peer: {
+        peer_id: 'ace_legacy',
+        display_name: 'Updated',
+        capabilities: ['chat', 'file.webrtc'],
+      },
+    }), () => undefined);
+    await expect(service.send(command)).resolves.toBeUndefined();
+    expect(write).toHaveBeenCalledWith(`${JSON.stringify(command)}\n`);
+  });
 });

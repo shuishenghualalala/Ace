@@ -2,9 +2,10 @@ use crate::{
     identity::{load_nearby_settings, resolve_state_dir, save_nearby_settings, NearbySettings},
     ipc::{
         add_room_members, broadcast_room_message, build_history_snapshot, create_peer,
-        filter_room_mentions, handle_received_message, load_dms, load_rooms, remember_dm_message,
-        remember_room_message, save_dms, save_rooms, unix_timestamp_seconds,
-        validate_file_transfer, EventSink, IpcCommand, IpcEvent, RoomState,
+        filter_room_mentions, handle_received_message, load_dms, load_rooms,
+        peer_supports_webrtc_file, remember_dm_message, remember_room_message, save_dms,
+        save_rooms, unix_timestamp_seconds, validate_file_transfer, EventSink, IpcCommand,
+        IpcEvent, RoomState,
     },
     protocol::{
         is_valid_agent_mode, normalize_room_name, FileChunk, Message, PeerInfo, DEFAULT_AGENT_MODE,
@@ -415,6 +416,15 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                             sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "请先连接这台 Ace".to_owned() }).await?;
                             continue;
                         }
+                        if !discovered
+                            .get(&peer_id)
+                            .is_some_and(peer_supports_webrtc_file)
+                        {
+                            sink.send(IpcEvent::Error {
+                                message: "对方版本不支持快速文件传输，请更新对方的 Ace".to_owned(),
+                            }).await?;
+                            continue;
+                        }
                         let Some(session) = sessions.get(&peer_id).cloned() else {
                             active_peers.remove(&peer_id);
                             sink.send(IpcEvent::PeerConnectionFailed { peer_id, message: "连接已经断开".to_owned() }).await?;
@@ -501,6 +511,40 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                     IpcCommand::SendRoomFile { room_id, file_id, name, mime_type, size, sha256, file_path, client_message_id, mentions, reply_to } => {
                         if !rooms.contains_key(&room_id) {
                             sink.send(IpcEvent::Error { message: "群聊不存在或已退出".to_owned() }).await?;
+                            continue;
+                        }
+                        let recipients = rooms
+                            .get(&room_id)
+                            .map(|room| {
+                                room.peer_ids
+                                    .iter()
+                                    .filter(|candidate| {
+                                        *candidate != &peer.peer_id && sessions.contains_key(*candidate)
+                                    })
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        if recipients.is_empty() {
+                            sink.send(IpcEvent::Error { message: "群内暂无可接收文件的在线同伴".to_owned() }).await?;
+                            continue;
+                        }
+                        let unsupported = recipients
+                            .iter()
+                            .filter(|peer_id| {
+                                !discovered
+                                    .get(*peer_id)
+                                    .is_some_and(peer_supports_webrtc_file)
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if !unsupported.is_empty() {
+                            sink.send(IpcEvent::Error {
+                                message: format!(
+                                    "群内有同伴不支持快速文件传输，请先更新：{}",
+                                    unsupported.join(", ")
+                                ),
+                            }).await?;
                             continue;
                         }
                         let data_base64 = match tokio::fs::read(&file_path).await {

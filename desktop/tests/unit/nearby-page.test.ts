@@ -196,7 +196,7 @@ describe('companion management hub', () => {
     peer_id: 'ace_peer_a',
     display_name: '林墨',
     agent_name: 'Mori',
-    capabilities: ['chat', 'file'],
+    capabilities: ['chat', 'file.webrtc'],
     published_agents: [{
       public_agent_id: 'agent_mori',
       display_name: 'Mori',
@@ -405,6 +405,24 @@ describe('companion management hub', () => {
       expect.stringContaining('/api/companion/outbox/event-1/settle'),
       expect.objectContaining({ body: JSON.stringify({ status: 'delivered' }) }),
     ));
+    page.dispose();
+  });
+
+  it('keeps legacy v3 peers chat-capable while disabling unsupported file transfer', async () => {
+    const { gatewayFetch, page, emit } = setup();
+    emit({ type: 'ready', peer: localPeer, discoverable: true });
+    emit({
+      type: 'peer_connected',
+      peer: { ...peer, capabilities: ['chat'] },
+    });
+    await vi.waitFor(() => expect(
+      gatewayFetch.mock.calls.some(([url]) => url.endsWith('/api/companion/conversations')),
+    ).toBe(true));
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    const adapter = conversationAdapters.resolve('agent:main:nearby:dm:test');
+    const abilities = adapter?.abilities('agent:main:nearby:dm:test');
+    expect(abilities?.canSendText).toBe(true);
+    expect(abilities?.canAttach).toBe(false);
     page.dispose();
   });
 
