@@ -1066,20 +1066,31 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
     }
     if (m.role === 'status') {
       if (m.activity && (!isLive || i !== lastActivityIdx)) return;
+      // 纯文本状态项也走 row 结构：row min-height 28px 居中，保证文字行中心与左侧 28px 图标对齐。
       const content = createTrustedElement<HTMLElement>(
-        `<div class="process-timeline__content"></div>`,
+        `<div class="process-timeline__content">
+          <div class="process-timeline__row process-timeline__row--static">
+            <span class="process-timeline__text"></span>
+          </div>
+        </div>`,
       );
-      content.textContent = m.content; // escapeHtml 等价（textContent 自带转义语义）
+      // escapeHtml 等价（textContent 自带转义语义）
+      content.querySelector<HTMLElement>('.process-timeline__text')!.textContent = m.content;
       const item = renderTimelineItem(PROCESS_STATUS_ICON_SVG, '', content);
       item.dataset.messageId = m.id;
       processParts.push(item);
       return;
     }
     if (m.role === 'error') {
+      // 同 status：row 结构对齐图标；error 类挂在文本 span 上（row 自带 color 会覆盖继承）。
       const content = createTrustedElement<HTMLElement>(
-        `<div class="process-timeline__content process-timeline__error"></div>`,
+        `<div class="process-timeline__content">
+          <div class="process-timeline__row process-timeline__row--static">
+            <span class="process-timeline__text process-timeline__error"></span>
+          </div>
+        </div>`,
       );
-      content.textContent = m.content;
+      content.querySelector<HTMLElement>('.process-timeline__text')!.textContent = m.content;
       const item = renderTimelineItem(PROCESS_ERROR_ICON_SVG, 'process-timeline__icon--error', content);
       item.dataset.messageId = m.id;
       processParts.push(item);

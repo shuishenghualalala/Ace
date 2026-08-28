@@ -303,6 +303,13 @@
   color: var(--mw-status-danger);
 }
 
+/* status / error 纯文本项：包在 row 里与图标居中对齐，长文本允许换行 */
+.process-timeline__text {
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
 .msg__body {
   display: grid;
   gap: var(--mw-space-1);
