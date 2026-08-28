@@ -320,6 +320,13 @@ impl BleAdapter {
         server: &Arc<Mutex<ServerPeripheral>>,
         peer: &PeerInfo,
     ) -> Result<()> {
+        let bootstrap_bytes = peer
+            .encode_ble_bootstrap()
+            .context("failed to encode BLE PeerInfo bootstrap")?;
+        eprintln!(
+            "[nearby][peripheral] peer_info_bootstrap_bytes={}",
+            bootstrap_bytes.len()
+        );
         let service = nearby_service(peer)?;
         let mut server = server.lock().await;
         let mut powered = false;
@@ -353,10 +360,18 @@ impl BleAdapter {
         enabled: bool,
     ) -> Result<()> {
         let mut server = server.lock().await;
+        let currently_advertising = server
+            .is_advertising()
+            .await
+            .context("failed to query BLE advertising state")?;
         eprintln!(
-            "[nearby][peripheral] advertising_request enabled={} service_uuid={SERVICE_UUID}",
-            enabled
+            "[nearby][peripheral] advertising_request enabled={} current={} service_uuid={SERVICE_UUID}",
+            enabled, currently_advertising
         );
+        if currently_advertising == enabled {
+            eprintln!("[nearby][peripheral] advertising_unchanged enabled={enabled}");
+            return Ok(());
+        }
         if enabled {
             server
                 .start_advertising(name, &[SERVICE_UUID])
@@ -426,7 +441,7 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
 
 fn nearby_service(peer: &PeerInfo) -> Result<Service> {
     let peer_info = peer
-        .encode()
+        .encode_ble_bootstrap()
         .context("failed to encode static Nearby PeerInfo")?;
     Ok(Service {
         uuid: SERVICE_UUID,
@@ -512,6 +527,10 @@ async fn connect_to_peer(
     .await
     .context("timed out reading remote PeerInfo")?
     .context("failed to read remote PeerInfo")?;
+    eprintln!(
+        "[nearby][session] device={device} stage=peer_info_read_completed bytes={}",
+        peer_info_bytes.len()
+    );
     let remote_peer =
         PeerInfo::decode(&peer_info_bytes).context("remote PeerInfo is not valid JSON")?;
     eprintln!(
@@ -653,7 +672,7 @@ async fn handle_peripheral_event(
             );
             let response = if request.characteristic == PEER_INFO_UUID {
                 let bytes = peer
-                    .encode()
+                    .encode_ble_bootstrap()
                     .context("failed to encode PeerInfo for read")?;
                 let offset = usize::try_from(offset).unwrap_or(usize::MAX);
                 if offset <= bytes.len() {
@@ -881,7 +900,7 @@ mod tests {
             .iter()
             .find(|characteristic| characteristic.uuid == PEER_INFO_UUID)
             .expect("PeerInfo characteristic should exist");
-        assert_eq!(peer_info.value, Some(peer.encode().unwrap()));
+        assert_eq!(peer_info.value, Some(peer.encode_ble_bootstrap().unwrap()));
         let incoming = service
             .characteristics
             .iter()

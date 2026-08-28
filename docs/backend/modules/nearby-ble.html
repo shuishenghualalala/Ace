@@ -50,7 +50,7 @@
 
   <h2>BLE 协议</h2>
   <p>服务 UUID 为 <code>5957645b-4b06-49cf-bde2-366a593e73a7</code>。GATT 服务包含 PeerInfo、IncomingMessage 和 OutgoingMessage 三个特征。Central 订阅 OutgoingMessage 通知，并向 IncomingMessage 写入分片 JSON 帧。</p>
-  <p>每个实例持久化一个随机 Peer ID。物理连接建立后，Central 先读取静态 PeerInfo，再按两个 Peer ID 确定唯一连接发起方；非发起方会在写入通知订阅前关闭重复物理连接，避免 macOS 与 Windows 同时扫描和广播时争用 GATT 会话。保留连接随后订阅 OutgoingMessage 并完成 <code>hello</code> 身份握手。Windows 写入 Notify 的 CCCD 失败时会清理监听器并最多重试 3 次，日志保留底层 WinRT 状态和完整错误链。</p>
+  <p>每个实例持久化一个随机 Peer ID。物理连接建立后，Central 先读取静态 PeerInfo，再按两个 Peer ID 确定唯一连接发起方；非发起方会在写入通知订阅前关闭重复物理连接，避免 macOS 与 Windows 同时扫描和广播时争用 GATT 会话。静态特征只携带身份、名称和能力等精简 bootstrap，不携带可能很大的已发布 Agent 配置；保留连接随后订阅 OutgoingMessage，并通过已有的 BLE 分片 <code>hello</code> 补齐完整 PeerInfo。IncomingMessage 同时声明两种写属性时，Central 优先使用 <code>WriteWithoutResponse</code>，保持文字消息的原有行为。Windows 写入 Notify 的 CCCD 失败时会清理监听器并最多重试 3 次，日志保留底层 WinRT 状态和完整错误链。</p>
   <p>只有用户选择设备并交换 <code>peer.connect</code> 后，界面才进入已连接状态。主动断开使用 <code>peer.disconnect</code>。基础协议保持 <code>v3</code>（<code>PROTOCOL_VERSION = 3</code>），WebRTC 文件传输作为 <code>file.webrtc</code> 能力增量协商：旧 v3 客户端仍可被发现、连接并交换文字，新文件控制消息只会发给明确声明该能力的同伴。</p>
 
   <h2>文件传输链路</h2>
@@ -187,6 +187,19 @@ cargo run --manifest-path nearby/Cargo.toml -- --transport mock --mock-bus</pre>
       <tr><td>三实例与构建回归</td><td class="pass">通过</td><td>Mock Bus 建群/成员/设置/重启共 14 项；<code>cargo clippy --all-targets -- -D warnings</code>、CSS 检查和 <code>npm run build:dev</code> 均通过。</td></tr>
       <tr><td>Desktop 全仓测试基线</td><td>存在既有失败</td><td><code>npm test</code>：1661 项通过、62 项失败；失败分布在 27 个非 Nearby 测试文件，本轮修改文件未出现在失败列表中。Nearby 5 个测试文件单独复跑为 48/48。</td></tr>
       <tr><td>跨网络 TURN 与真实 BLE</td><td class="pending">待实机验收</td><td>需要两台真实电脑和已配置的 TURN 服务验证防火墙、NAT、权限、休眠及系统弹窗。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>验证记录（2026-08-28，BLE 文本通信回归修复）</h2>
+  <table>
+    <thead><tr><th>检查项</th><th>结果</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>Windows 日志根因定位</td><td class="pass">已确认</td><td>Windows 首次读到被截断的 PeerInfo，解析在第 526 列 EOF；服务和三个 Nearby 特征已发现，后续 <code>0x80000013</code> 是失败重试后的连接关闭。</td></tr>
+      <tr><td>BLE bootstrap 长度回归</td><td class="pass">通过</td><td>静态特征不再携带大段 <code>published_agents</code>；新增大配置超过 512 字节的测试，bootstrap 保持在安全范围，并由分片 hello 发送完整信息。</td></tr>
+      <tr><td>文本写入方式回归</td><td class="pass">通过</td><td>双属性特征恢复优先选择 <code>WriteWithoutResponse</code>，新增用例防止再次回退到 <code>WithResponse</code>。</td></tr>
+      <tr><td>广播生命周期</td><td class="pass">通过</td><td>重复设置相同广播状态时直接幂等返回；Windows 遇到 Aborted 状态会先清理再启动，并记录状态。</td></tr>
+      <tr><td>自动化回归</td><td class="pass">通过</td><td>Rust 60 项、Desktop Nearby 35 项、Python Companion 13 项、Mock Bus 三实例 14 项通过；Windows MSVC 目标检查因 macOS 环境缺少 Windows C 编译头在 ring 构建阶段受阻，待 Windows 主机或完整交叉工具链复核。</td></tr>
+      <tr><td>真实 macOS ↔ Windows BLE</td><td class="pending">待实机验收</td><td>需要重新构建两端运行时，验证双向发现、连接、文字双向发送、重复启停广播及休眠恢复。</td></tr>
     </tbody>
   </table>
 

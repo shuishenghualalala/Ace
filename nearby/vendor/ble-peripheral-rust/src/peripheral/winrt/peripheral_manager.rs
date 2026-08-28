@@ -73,9 +73,14 @@ impl PeripheralManager {
 
         // TODO: add name and uuid in advertisement or change adapter name
         for gatt_object in self.services.values().into_iter() {
-            if is_started_advertising_status(gatt_object.obj.AdvertisementStatus()?) {
+            let status = gatt_object.obj.AdvertisementStatus()?;
+            log::debug!("Advertising status before start: {:?}", status);
+            if is_started_advertising_status(status) {
                 log::debug!("Already advertising");
                 continue;
+            }
+            if status == GattServiceProviderAdvertisementStatus::Aborted {
+                gatt_object.obj.StopAdvertising()?;
             }
             gatt_object
                 .obj

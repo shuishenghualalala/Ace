@@ -94,6 +94,16 @@ impl PeerInfo {
         serde_json::to_vec(self)
     }
 
+    /// Encode only the identity needed before the BLE message channel is ready.
+    ///
+    /// Published agent profiles can be much larger than a BLE characteristic's
+    /// safe value size. They are sent again in the fragmented hello message.
+    pub fn encode_ble_bootstrap(&self) -> Result<Vec<u8>, serde_json::Error> {
+        let mut bootstrap = self.clone();
+        bootstrap.published_agents.clear();
+        serde_json::to_vec(&bootstrap)
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice(bytes)
     }
@@ -702,6 +712,30 @@ mod tests {
 
         let error = Message::agent_reply("crew_local", "request-id", "failed", true);
         assert_eq!(error.message_type, "agent.error");
+    }
+
+    #[test]
+    fn ble_bootstrap_omits_large_published_agent_profiles() {
+        let mut peer = test_peer();
+        peer.published_agents.push(PublishedAgent {
+            public_agent_id: "agent:large".to_owned(),
+            display_name: "Large Agent".to_owned(),
+            description: "x".repeat(1024),
+            kind: "crew".to_owned(),
+            capabilities: vec!["chat".to_owned()],
+            revision: 1,
+        });
+
+        let full = peer.encode().unwrap();
+        let bootstrap = peer.encode_ble_bootstrap().unwrap();
+        assert!(full.len() > 512);
+        assert!(bootstrap.len() < 512);
+
+        let decoded = PeerInfo::decode(&bootstrap).unwrap();
+        assert_eq!(decoded.peer_id, peer.peer_id);
+        assert_eq!(decoded.peer_token, peer.peer_token);
+        assert_eq!(decoded.capabilities, peer.capabilities);
+        assert!(decoded.published_agents.is_empty());
     }
 
     #[test]

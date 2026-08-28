@@ -70,13 +70,13 @@ fn diagnostic_characteristics(peripheral: &Peripheral) -> String {
 }
 
 fn incoming_write_type(characteristic: &btleplug::api::Characteristic) -> Result<WriteType> {
-    if characteristic.properties.contains(CharPropFlags::WRITE) {
-        Ok(WriteType::WithResponse)
-    } else if characteristic
+    if characteristic
         .properties
         .contains(CharPropFlags::WRITE_WITHOUT_RESPONSE)
     {
         Ok(WriteType::WithoutResponse)
+    } else if characteristic.properties.contains(CharPropFlags::WRITE) {
+        Ok(WriteType::WithResponse)
     } else {
         anyhow::bail!("remote IncomingMessage characteristic is not writable")
     }
@@ -1671,6 +1671,13 @@ pub(crate) fn peer_supports_webrtc_file(peer: &PeerInfo) -> bool {
 }
 
 async fn configure_server(server: &Arc<Mutex<ServerPeripheral>>, peer: &PeerInfo) -> Result<()> {
+    let bootstrap_bytes = peer
+        .encode_ble_bootstrap()
+        .context("failed to encode BLE PeerInfo bootstrap")?;
+    eprintln!(
+        "[nearby][peripheral] peer_info_bootstrap_bytes={}",
+        bootstrap_bytes.len()
+    );
     let service = nearby_service(peer)?;
     let mut server = server.lock().await;
     let mut powered = false;
@@ -1704,10 +1711,18 @@ async fn set_discoverable(
     enabled: bool,
 ) -> Result<()> {
     let mut server = server.lock().await;
+    let currently_advertising = server
+        .is_advertising()
+        .await
+        .context("failed to query BLE advertising state")?;
     eprintln!(
-        "[nearby][peripheral] advertising_request enabled={} service_uuid={}",
-        enabled, SERVICE_UUID
+        "[nearby][peripheral] advertising_request enabled={} current={} service_uuid={}",
+        enabled, currently_advertising, SERVICE_UUID
     );
+    if currently_advertising == enabled {
+        eprintln!("[nearby][peripheral] advertising_unchanged enabled={enabled}");
+        return Ok(());
+    }
     if enabled {
         server
             .start_advertising(name, &[SERVICE_UUID])
@@ -1726,7 +1741,7 @@ async fn set_discoverable(
 
 fn nearby_service(peer: &PeerInfo) -> Result<Service> {
     let peer_info = peer
-        .encode()
+        .encode_ble_bootstrap()
         .context("failed to encode static Nearby PeerInfo")?;
     Ok(Service {
         uuid: SERVICE_UUID,
@@ -1821,7 +1836,12 @@ async fn connect_to_peer(
     .await
     .context("timed out reading remote PeerInfo")?
     .context("failed to read remote PeerInfo")?;
-    let remote = PeerInfo::decode(&peer_info_bytes).context("remote PeerInfo is not valid JSON")?;
+    eprintln!(
+        "[nearby][session] device={device} stage=peer_info_read_completed bytes={}",
+        peer_info_bytes.len()
+    );
+    let mut remote =
+        PeerInfo::decode(&peer_info_bytes).context("remote PeerInfo is not valid JSON")?;
     if remote.protocol_version != PROTOCOL_VERSION {
         eprintln!(
             "[nearby][session] device={device} stage=peer_info_rejected reason=protocol_version remote={} local={}",
@@ -1923,6 +1943,7 @@ async fn connect_to_peer(
                     "[nearby][session] device={device} stage=peer_hello_received remote_peer_id={} remote_display_name={}",
                     hello_peer.peer_id, hello_peer.display_name
                 );
+                remote = hello_peer;
                 break;
             }
         }
@@ -2001,7 +2022,7 @@ async fn handle_server_event(
                 request.characteristic
             );
             let response = if request.characteristic == PEER_INFO_UUID {
-                let bytes = peer.encode()?;
+                let bytes = peer.encode_ble_bootstrap()?;
                 let offset = usize::try_from(offset).unwrap_or(usize::MAX);
                 if offset <= bytes.len() {
                     ReadRequestResponse {
@@ -2770,6 +2791,20 @@ mod tests {
         };
         let hello = Message::hello(&peer);
         assert_eq!(peer_info_from_hello(&hello), Some(peer));
+    }
+
+    #[test]
+    fn incoming_write_prefers_without_response_when_both_properties_exist() {
+        let characteristic = btleplug::api::Characteristic {
+            uuid: INCOMING_MESSAGE_UUID,
+            service_uuid: SERVICE_UUID,
+            properties: CharPropFlags::WRITE | CharPropFlags::WRITE_WITHOUT_RESPONSE,
+            descriptors: std::collections::BTreeSet::new(),
+        };
+        assert_eq!(
+            incoming_write_type(&characteristic).unwrap(),
+            WriteType::WithoutResponse
+        );
     }
 
     #[test]

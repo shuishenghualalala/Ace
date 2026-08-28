@@ -29,6 +29,16 @@
   </table>
   <h2>验证说明</h2>
   <div class="note">本机自动化已覆盖 WebRTC 的实际建链与文件字节传输，也覆盖新旧 v3 节点的发现和文字兼容；但 Mock Bus 无法代替两台真实设备的 BLE 广播/扫描权限、系统蓝牙栈和 NAT/防火墙矩阵。完整 Python E2E 使用仓库 <code>.venv</code> 运行并通过。</div>
+  <h2>2026-08-28 BLE 文本通信回归修复</h2>
+  <table>
+    <thead><tr><th>问题</th><th>修复与验证</th></tr></thead>
+    <tbody>
+      <tr><td>Windows 读 PeerInfo 得到 EOF</td><td>静态 GATT 特征改为精简 bootstrap，移除可能超过 BLE 单特征长度的已发布 Agent 配置；完整 PeerInfo 仍经已有分片 hello 传输。大配置超过 512 字节的 Rust 回归用例通过。</td></tr>
+      <tr><td>文本发送方式回退</td><td>恢复双属性 IncomingMessage 优先使用 <code>WriteWithoutResponse</code>，新增选择逻辑回归用例通过。</td></tr>
+      <tr><td>Windows 广播重复启动</td><td>应用层相同状态请求幂等返回；WinRT 遇 Aborted 状态先停止再启动，并增加状态日志。</td></tr>
+      <tr><td>测试结果</td><td>Rust 60 项、Desktop Nearby 35 项、Python Companion 13 项、Mock Bus 14 项通过；真实 macOS ↔ Windows BLE 仍需用户用新构建包验收。</td></tr>
+    </tbody>
+  </table>
   <h2>仍需真实设备验证</h2>
   <ul><li>macOS / Windows / Linux 的 BLE 权限、扫描、互连和休眠恢复。</li><li>两台电脑处于不同网络时的 STUN 直连、TURN 回退、企业防火墙与 4 MiB 边界。</li><li>跨系统文件名、接收弹窗、拒绝、BLE 断线和系统睡眠中的失败反馈。</li><li>正式发布前的 BLE 应用层 E2EE 与身份指纹确认。</li></ul>
 </main></body>
