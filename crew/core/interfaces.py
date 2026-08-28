@@ -14,6 +14,7 @@
   TeamManager   -> crew/team/           (E)
   TaskManager   -> crew/tasks/          (E)
   Scheduler     -> crew/cron/           (E)   含 CronService/CronJobStore 定时任务引擎
+  NotificationCenter -> crew/notifications/   站内通知中心（存储 + 推送）
 
   另：MCP Client（接外部 MCP server 当工具）-> crew/tools/mcp_client.py
 """
@@ -21,6 +22,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk
@@ -371,6 +373,70 @@ class TaskManager(ABC):
 
     @abstractmethod
     def list(self, session_id: str) -> list[dict[str, Any]]: ...
+
+
+# --------------------------------------------------------------------------- #
+# 通知中心
+# --------------------------------------------------------------------------- #
+@dataclass
+class Notification:
+    """一条站内通知。payload 为跳转上下文（如 session_id / request_id），read_at=None 表示未读。"""
+
+    owner_account_id: str
+    source: str
+    kind: str
+    title: str
+    body: str = ""
+    payload: dict[str, Any] | None = None
+    id: str = ""
+    created_at: float = 0.0
+    read_at: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "source": self.source,
+            "kind": self.kind,
+            "title": self.title,
+            "body": self.body,
+            "payload": self.payload,
+            "created_at": self.created_at,
+            "read_at": self.read_at,
+        }
+
+
+class NotificationCenter(ABC):
+    """通知中心契约：各来源只调 publish，持久化/未读数/推送由实现统一负责。"""
+
+    @abstractmethod
+    def publish(self, notification: Notification) -> Notification: ...
+
+    @abstractmethod
+    def list(
+        self,
+        owner_account_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        unread_only: bool = False,
+    ) -> list[Notification]: ...
+
+    @abstractmethod
+    def unread_count(self, owner_account_id: str) -> int: ...
+
+    @abstractmethod
+    def mark_read(self, owner_account_id: str, notification_id: str) -> bool: ...
+
+    @abstractmethod
+    def mark_all_read(self, owner_account_id: str) -> int: ...
+
+    @abstractmethod
+    def mark_read_by_payload(self, source: str, key: str, owner_account_id: str = "") -> int:
+        """把 payload 顶层任一值等于 key 的未读通知标记已读（如审批 request_id 被处理后自动已读）。"""
+        ...
+
+    @abstractmethod
+    def clear(self, owner_account_id: str) -> int: ...
 
 
 # --------------------------------------------------------------------------- #

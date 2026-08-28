@@ -410,6 +410,16 @@ class CrewApp:
             db_path=config.db_path,
             security_enabled=config.security_enabled,
         )
+        # 通知中心：core 契约的默认实现（SQLite + 可选 WS 推送，push_fn 由 gateway 延迟注入）
+        from crew.notifications import NotificationCenterService, NotificationStore
+
+        self.notifications = NotificationCenterService(
+            NotificationStore(config.db_path, wal_enabled=config.sqlite_wal)
+        )
+        self.security_service.set_notification_hooks(
+            on_created=self._on_approval_created,
+            on_decided=self._on_approval_decided,
+        )
         # Gateway 级单活登录事实源；HTTP/WS、Cron 与渠道只消费这一份租约。
         self.active_owner = ActiveOwnerLeaseStore(
             config.db_path,
@@ -553,6 +563,7 @@ class CrewApp:
         ):
             return
         self._on_task_event({**task, "phase": task.get("status", "completed")})
+        self._publish_task_notification(task)
         if (
             task.get("kind") in {"shell", "subagent"}
             and bool(task.get("backgrounded"))
@@ -565,6 +576,87 @@ class CrewApp:
             and self.tasks._loop.is_running()
         ):
             asyncio.create_task(self._resume_completed_task(task))
+
+    # ---- 通知中心来源：tasks / approval（cron 在 build_app 装配）----
+
+    def _publish_task_notification(self, task: dict[str, Any]) -> None:
+        """后台任务到达 completed/failed 终态时发一条站内通知。"""
+        status = str(task.get("status") or "")
+        if status not in {"completed", "failed"}:
+            return
+        from crew.core.interfaces import Notification
+
+        summary = str(task.get("result") or task.get("error") or "")[:200]
+        self.notifications.publish(
+            Notification(
+                owner_account_id=str(task.get("owner_account_id") or ""),
+                source="tasks",
+                kind=f"task_{status}",
+                title="后台任务已完成" if status == "completed" else "后台任务失败",
+                body=summary,
+                payload={
+                    "task_id": str(task.get("task_id") or ""),
+                    "session_id": str(task.get("session_id") or ""),
+                    "task_kind": str(task.get("kind") or ""),
+                },
+            )
+        )
+
+    def _on_approval_created(self, context: Any, request: dict) -> None:
+        """新审批请求创建时发一条待办性质通知（decide 后自动已读）。"""
+        from crew.core.interfaces import Notification
+
+        tool_name = str(request.get("tool_name") or "")
+        preview = str(request.get("preview") or "")[:200]
+        self.notifications.publish(
+            Notification(
+                owner_account_id=str(getattr(context, "owner_account_id", "") or ""),
+                source="approval",
+                kind="approval_pending",
+                title="有一个操作等待审批",
+                body=f"{tool_name}: {preview}" if preview else tool_name,
+                payload={
+                    "request_id": str(request.get("request_id") or ""),
+                    "session_id": str(getattr(context, "session_id", "") or ""),
+                    "tool_name": tool_name,
+                },
+            )
+        )
+
+    def _on_approval_decided(self, owner_account_id: str, request_id: str) -> None:
+        """审批被处理后，对应待办通知自动已读。"""
+        self.notifications.mark_read_by_payload(
+            "approval",
+            request_id,
+            owner_account_id=owner_account_id,
+        )
+
+    def _on_cron_run_finished(self, info: dict[str, Any]) -> None:
+        """定时任务 Fire 完成/失败时发一条站内通知。"""
+        status = str(info.get("status") or "")
+        if status not in {"completed", "failed"}:
+            return
+        from crew.core.interfaces import Notification
+
+        job_name = str(info.get("job_name") or "").strip() or "定时任务"
+        error = str(info.get("error_message") or "")[:200]
+        self.notifications.publish(
+            Notification(
+                owner_account_id=str(info.get("owner_account_id") or ""),
+                source="cron",
+                kind=f"cron_run_{status}",
+                title=(
+                    f"定时任务「{job_name}」执行完成"
+                    if status == "completed"
+                    else f"定时任务「{job_name}」执行失败"
+                ),
+                body=error,
+                payload={
+                    "job_id": str(info.get("job_id") or ""),
+                    "session_id": str(info.get("session_id") or ""),
+                },
+            )
+        )
 
     def _should_resume_completed_task(self, task: dict[str, Any]) -> bool:
         """Return whether a background task completion should trigger a resume turn."""
@@ -1349,6 +1441,10 @@ class CrewApp:
             self._push_payload_fn = push_payload_fn
         if notify_owner_fn is not None:
             self._notify_owner_fn = notify_owner_fn
+            # 通知中心的 WS 推送复用账号级广播；gateway 装配 ConnectionManager 后才可用
+            notifications = getattr(self, "notifications", None)
+            if notifications is not None:
+                notifications.set_push_fn(notify_owner_fn)
 
     def _active_children_snapshot(self, session_id: str | None = None, owner_account_id: str = "") -> object:
         team = self.team
@@ -2952,6 +3048,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
             _cron_runner,
             max_parallel_jobs=cfg.cron_max_parallel_jobs,
         )
+        app.cron_service.set_on_run_finished(app._on_cron_run_finished)
     register_cron_tools(registry, cron_store, app.cron_service)
 
     # MCP Client：连接外部 MCP server（在 startup 时实际连接）

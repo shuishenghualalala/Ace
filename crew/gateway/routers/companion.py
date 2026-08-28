@@ -25,6 +25,42 @@ MAX_COMPANION_FILE_BYTES = 4 * 1024 * 1024
 COMPANION_FILE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 
+def _notify_companion_message(
+    crew: Any,
+    owner: str,
+    binding: dict[str, Any],
+    *,
+    sender_kind: str,
+    sender_name: str,
+    text: str,
+    appended: bool,
+) -> None:
+    """同伴消息到达时发一条站内通知。通知失败不影响消息入库结果。"""
+    if not appended:
+        return
+    notifications = getattr(crew, "notifications", None)
+    if notifications is None:
+        return
+    from crew.core.interfaces import Notification
+
+    is_agent = sender_kind == "agent"
+    notifications.publish(
+        Notification(
+            owner_account_id=owner,
+            source="companion",
+            kind="companion_agent_result" if is_agent else "companion_message",
+            title=f"群内 Agent「{sender_name}」执行结果" if is_agent else f"{sender_name} 发来消息",
+            body=text[:200],
+            payload={
+                "session_id": str(binding.get("session_id") or ""),
+                "kind": str(binding.get("kind") or ""),
+                "target_id": str(binding.get("target_id") or ""),
+                "sender_name": sender_name,
+            },
+        )
+    )
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -411,6 +447,15 @@ def create_companion_router(crew) -> APIRouter:
                     appended = crew.session_store.append_idempotent(
                         binding["session_id"], message, owner_account_id=owner
                     )
+                    _notify_companion_message(
+                        crew,
+                        owner,
+                        binding,
+                        sender_kind=sender_kind,
+                        sender_name=sender_name,
+                        text=f'附件「{saved["name"]}」',
+                        appended=appended,
+                    )
                     return JSONResponse({
                         "ok": True,
                         "attachment": saved,
@@ -439,6 +484,15 @@ def create_companion_router(crew) -> APIRouter:
                 }
                 appended = crew.session_store.append_idempotent(
                     binding["session_id"], message, owner_account_id=owner
+                )
+                _notify_companion_message(
+                    crew,
+                    owner,
+                    binding,
+                    sender_kind=sender_kind,
+                    sender_name=sender_name,
+                    text=text,
+                    appended=appended,
                 )
             else:
                 raise ValueError("不支持的 LinkAdapter 事件")

@@ -30,6 +30,7 @@
 }
 
 .mw-sidebar-brand {
+  position: relative;
   display: flex;
   min-height: 136px;
   align-items: center;
@@ -62,6 +63,58 @@
 .mw-sidebar-brand__label {
   font: 700 var(--mw-type-compact-size) / var(--mw-type-compact-line) var(--mw-font-sans);
   letter-spacing: 0.01em;
+}
+
+/* 通知中心铃铛：绝对定位在 brand 块右上角，不挤占 logo/名称布局 */
+.mw-notification-bell {
+  position: absolute;
+  top: var(--mw-space-2);
+  right: var(--mw-space-2);
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--mw-radius-2);
+  background: transparent;
+  color: var(--mw-text-secondary);
+  cursor: pointer;
+}
+
+.mw-notification-bell:hover {
+  background: var(--mw-bg-subtle);
+  color: var(--mw-text-primary);
+}
+
+.mw-notification-bell:focus-visible {
+  outline: 2px solid var(--mw-focus-ring);
+  outline-offset: -2px;
+}
+
+.mw-notification-bell__icon {
+  --mw-symbol-line: currentColor;
+  --mw-symbol-line-width: 2;
+  width: 20px;
+  height: 20px;
+}
+
+.mw-notification-bell__badge {
+  position: absolute;
+  top: -3px;
+  right: -5px;
+  box-sizing: border-box;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--mw-radius-full);
+  background: var(--mw-status-danger);
+  color: var(--mw-white);
+  font-size: var(--mw-font-xxs);
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: none;
 }
 
 .mw-window-commands {

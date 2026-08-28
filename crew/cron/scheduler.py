@@ -97,6 +97,15 @@ class CronService:
         self._owner_tasks: dict[str, set[asyncio.Task]] = {}
         self._cancel_terminal_status: dict[asyncio.Task, str] = {}
         self._sem = asyncio.Semaphore(self._max_parallel_jobs)
+        # Fire 到达终态后的可选回调（由装配层注入，用于通知中心等；缺席时无影响）
+        self._on_run_finished: Callable[[dict], Awaitable[None] | None] | None = None
+
+    def set_on_run_finished(
+        self,
+        callback: Callable[[dict], Awaitable[None] | None] | None,
+    ) -> None:
+        """注入 Fire 终态回调。info 含 job_id/job_name/status/error_message/owner/session_id。"""
+        self._on_run_finished = callback
 
     @property
     def scheduler(self) -> AsyncIOScheduler | None:
@@ -324,6 +333,31 @@ class CronService:
                     error_message=error_message,
                 ):
                     self._store.mark_fire_finished(job_id, run_id, status)
+                self._emit_run_finished(row, status, error_message)
+
+    def _emit_run_finished(self, row: dict, status: str, error_message: str) -> None:
+        """向装配层回调 Fire 终态。任何回调异常只记日志，不影响 cron 引擎本身。"""
+        callback = self._on_run_finished
+        if callback is None:
+            return
+        info = {
+            "job_id": str(row.get("id") or ""),
+            "job_name": str(row.get("name") or ""),
+            "status": status,
+            "error_message": error_message,
+            "owner_account_id": str(row.get("owner_account_id") or ""),
+            "session_id": str(row.get("session_id") or ""),
+        }
+        try:
+            result = callback(info)
+        except Exception:  # noqa: BLE001
+            log.exception("cron 运行结束回调失败 job=%s", info["job_id"])
+            return
+        if asyncio.iscoroutine(result):
+            try:
+                asyncio.get_running_loop().create_task(result)
+            except RuntimeError:
+                result.close()
 
     @property
     def is_running(self) -> bool:

@@ -8,7 +8,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -175,6 +175,37 @@ class SecurityApprovalService:
         self._waiters = _ApprovalWaiter()
         self._session_modes: dict[tuple[str, str, str, str], ConversationPermissionMode] = {}
         self._recent_rejections: dict[tuple[str, str, str, str], float] = {}
+        # 通知钩子（由装配层注入）：新审批请求创建 / 请求被决策后触发；缺席时无影响
+        self._on_request_created: Callable[[SecurityContext, dict], None] | None = None
+        self._on_request_decided: Callable[[str, str], None] | None = None
+
+    def set_notification_hooks(
+        self,
+        *,
+        on_created: Callable[[SecurityContext, dict], None] | None = None,
+        on_decided: Callable[[str, str], None] | None = None,
+    ) -> None:
+        """注入通知钩子。on_created(context, public_request)；on_decided(owner, request_id)。"""
+        self._on_request_created = on_created
+        self._on_request_decided = on_decided
+
+    def _notify_request_created(self, context: SecurityContext, request: dict) -> None:
+        callback = self._on_request_created
+        if callback is None:
+            return
+        try:
+            callback(context, request)
+        except Exception:  # noqa: BLE001 - 通知失败不能影响审批主流程
+            log.exception("审批创建通知回调失败 request=%s", request.get("request_id"))
+
+    def _notify_request_decided(self, owner_account_id: str, request_id: str) -> None:
+        callback = self._on_request_decided
+        if callback is None:
+            return
+        try:
+            callback(owner_account_id, request_id)
+        except Exception:  # noqa: BLE001
+            log.exception("审批决策通知回调失败 request=%s", request_id)
 
     def set_mode(self, context: SecurityContext, mode: ConversationPermissionMode) -> bool:
         """Set one conversation mode without revoking prior SESSION grants.
@@ -317,6 +348,7 @@ class SecurityApprovalService:
         )
         public = _public_request(request, include_nonce=True)
         self._push_pending_approval(context, public)
+        self._notify_request_created(context, public)
         return public
 
     def authorize_file_action(
@@ -829,6 +861,7 @@ class SecurityApprovalService:
             )
         # 唤醒阻塞在 await_decision 的工具调用：批准则 outcome.grant 非 None，调用方据此继续执行。
         self._waiters.resolve(outcome.request.request_id, outcome)
+        self._notify_request_decided(context.owner_account_id, outcome.request.request_id)
         if outcome.request.tool_name == "security_fake_exec":
             return self._fake_result(context, outcome)
         return {

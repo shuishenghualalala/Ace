@@ -48,6 +48,7 @@ from crew.gateway.routers.dynamic_kanban import create_dynamic_kanban_router
 from crew.gateway.routers.misc import create_misc_router
 from crew.gateway.routers.mcp_servers import create_mcp_servers_router
 from crew.gateway.routers.mcp_setup import create_mcp_setup_router
+from crew.gateway.routers.notifications import create_notifications_router
 from crew.gateway.routers.plugins import create_plugins_router
 from crew.gateway.routers.remote_auth import create_remote_auth_router
 from crew.gateway.routers.runtimes import create_runtimes_router
@@ -376,6 +377,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     api.include_router(create_scenarios_router(crew))
     api.include_router(create_channels_router(crew, dispatcher, channel_manager))
     api.include_router(create_companion_router(crew))
+    api.include_router(create_notifications_router(crew))
     api.include_router(create_misc_router(crew))
     api.include_router(create_plugins_router(crew))
     api.include_router(create_mcp_setup_router(crew))

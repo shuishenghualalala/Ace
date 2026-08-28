@@ -94,6 +94,7 @@ import {
 import { resolveChatRenderTargetId, isStudioView } from './features/studio-chrome-state';
 import { bindScenarioHub } from './features/scenarios-hub';
 import { bindVersionUpdateUi } from './features/version-update';
+import { bindNotificationCenter } from './features/notification-center';
 import { disposeUserGuide, maybeStartUserGuideOnce, startUserGuide } from './features/user-guide';
 import { armSubScenario, clearScenarioChip } from './features/scenario-arm';
 import { loadRunningIntroCopy } from './features/running-intro';
@@ -533,6 +534,7 @@ function bindGlobalEvents(): () => void {
   const disposeHistoryToggle = bindHistoryPanelToggle();
   bindInspectorUi();
   const disposeSecurityApproval = bindSecurityApprovalUi();
+  const disposeNotificationCenter = bindNotificationCenter();
   setOpenSessionCallback(openSession);
 
   let disposed = false;
@@ -547,6 +549,7 @@ function bindGlobalEvents(): () => void {
     disposeHistoryToggle();
     disposeSystemTab();
     disposeSecurityApproval();
+    disposeNotificationCenter();
     disposeAttachments();
     disposeComposerMention();
     disposeComposerToolbar();

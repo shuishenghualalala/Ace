@@ -1031,6 +1031,14 @@ export function applyChunk(chunk: ChatChunk): void {
     void import('./security-center').then(({ activateSecurityPage }) => activateSecurityPage());
     return;
   }
+  // 通知中心推送：owner 级广播帧，与具体会话无关；只负责唤醒角标与轻提示，
+  // 列表数据仍以面板打开时的 REST 全量拉取为准。
+  if (chunk.kind === 'notification') {
+    void import('./notification-center').then(({ handleNotificationPush }) =>
+      handleNotificationPush(chunk.notification),
+    );
+    return;
+  }
   if (chunk.kind === 'work_event') {
     const body = (chunk.body ?? {}) as { entity?: string; action?: string; content?: string };
     if (body.entity === 'preference' && body.action === 'auto_enabled') {

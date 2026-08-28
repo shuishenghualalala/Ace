@@ -31,6 +31,7 @@ export type ChunkKind =
   | 'cron_session_created'
   | 'cron_session_updated'
   | 'audit_updated'
+  | 'notification'
   | 'work_event'
   | 'wiki_ingest_progress'
   | 'wiki_cards'
@@ -897,6 +898,8 @@ export interface ChatChunk {
   session_id?: string;
   /** Gateway 侧单调序号，用于断线 replay 与客户端去重。 */
   gateway_sequence?: number;
+  /** kind === 'notification' 时携带的通知对象（owner 级广播帧）。 */
+  notification?: BackendNotification;
 }
 
 /** 追问选择框：后端 ask_followup_question 工具推过来的交互内容。 */
@@ -3180,4 +3183,39 @@ export const officeApi = {
   // 会议
   meetingLatest: () => getJSON<OfficeSnapshot<MeetingData>>('/api/meeting/latest'),
   meetingPending: () => getJSON<MeetingPendingResponse>('/api/meeting/pending'),
+};
+
+
+// ---------------------------------------------------------------------------
+// 通知中心客户端：端点与 crew/gateway/routers/notifications.py 对齐。
+// 列表按 created_at 倒序；read_at 为 null 表示未读；created_at/read_at 为秒级时间戳。
+// ---------------------------------------------------------------------------
+
+/** 通知中心单条通知。payload 为跳转上下文（如 {"session_id": "..."}），可为 null。 */
+export interface BackendNotification {
+  id: string;
+  source: string;
+  kind: string;
+  title: string;
+  body: string;
+  payload: Record<string, unknown> | null;
+  created_at: number;
+  read_at: number | null;
+}
+
+export const notificationApi = {
+  list: (opts?: { limit?: number; offset?: number; unreadOnly?: boolean }) => {
+    const params = new URLSearchParams();
+    params.set('limit', String(opts?.limit ?? 50));
+    params.set('offset', String(opts?.offset ?? 0));
+    params.set('unread_only', String(opts?.unreadOnly ?? false));
+    return getJSON<{ notifications: BackendNotification[]; unread_count: number }>(
+      `/api/notifications?${params.toString()}`,
+    );
+  },
+  unreadCount: () => getJSON<{ unread_count: number }>('/api/notifications/unread-count'),
+  markRead: (id: string) =>
+    getJSON<{ ok: boolean }>(`/api/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' }),
+  markAllRead: () => getJSON<{ ok: boolean }>('/api/notifications/read-all', { method: 'POST' }),
+  clear: () => getJSON<{ ok: boolean }>('/api/notifications', { method: 'DELETE' }),
 };
