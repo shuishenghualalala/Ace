@@ -557,7 +557,7 @@ describe('playwright snapshot hardening', () => {
     const raw = '- button "Approve request" [ref=e1]';
     const page = {
       ariaSnapshot: async () => raw,
-      locator: (selector: string) => {
+      locator: (_selector: string) => {
         return {
           evaluate: async (callback: unknown) =>
             (callback as (element: Element) => unknown)(button as unknown as Element),

@@ -560,7 +560,7 @@
   color: var(--mw-status-warning);
 }
 
-#chat-model-inline-popover {
+.composer-select-popover--model {
   display: grid;
   min-height: 0;
   grid-template-rows: auto minmax(0, 1fr);
@@ -568,18 +568,18 @@
   padding: var(--mw-space-1);
 }
 
-#chat-model-inline-popover .composer-select-popover__list {
+.composer-select-popover--model .composer-select-popover__list {
   gap: 0;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 
-#chat-model-inline-popover .composer-select-popover__section {
+.composer-select-popover--model .composer-select-popover__section {
   padding: var(--mw-space-1) var(--mw-space-2);
 }
 
-#chat-model-inline-popover .composer-select-item {
+.composer-select-popover--model .composer-select-item {
   min-height: 34px;
   padding: var(--mw-space-1) var(--mw-space-2);
 }
@@ -639,13 +639,13 @@
   opacity: 1;
 }
 
-#chat-model-inline-popover .composer-select-item__body--model {
+.composer-select-popover--model .composer-select-item__body--model {
   display: flex;
   align-items: baseline;
   gap: var(--mw-space-2);
 }
 
-#chat-model-inline-popover .composer-select-item__meta {
+.composer-select-popover--model .composer-select-item__meta {
   flex: 0 1 auto;
   overflow: hidden;
   color: var(--mw-text-muted);
@@ -654,7 +654,7 @@
   white-space: nowrap;
 }
 
-#chat-model-inline-popover .composer-select-item__meta--warn {
+.composer-select-popover--model .composer-select-item__meta--warn {
   color: var(--mw-status-warning);
 }
 
@@ -801,6 +801,19 @@
   vertical-align: -0.12em;
 }
 
+/*
+ * Slash skill chips must occupy the same width as the literal "/" in the
+ * textarea.  The generic marker box is sized for @file/@folder icons; using
+ * it for a text slash makes the overlay a few pixels wider than the native
+ * textarea, which becomes visible as a caret drift at the end of the line.
+ */
+.mention-chip--slash .mention-chip__mark {
+  display: inline;
+  width: auto;
+  height: auto;
+  vertical-align: baseline;
+}
+
 .mention-chip__mark .mw-icon {
   width: 14px;
   height: 14px;
@@ -822,6 +835,13 @@
   border-radius: var(--mw-radius-3);
   background: var(--mw-bg-surface);
   box-shadow: var(--mw-shadow-overlay);
+}
+
+.mention-pop__section {
+  padding: var(--mw-space-1) var(--mw-space-2) 0;
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+  font-weight: var(--mw-type-label-weight);
 }
 
 .mention-pop__item {

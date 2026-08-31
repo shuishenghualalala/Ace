@@ -50,6 +50,38 @@ describe('toolIconKind（时间线工具图标分类）', () => {
 });
 
 describe('renderAgentTurn', () => {
+  it('renders Wiki learning activities outside the collapsed tool timeline', () => {
+    const root = renderAgentTurn(makeMessages({
+      toolCalls: [{
+        toolCallId: 'learning-1',
+        name: 'wiki_learning_activity',
+        status: 'done',
+        startedAt: 1,
+        args: JSON.stringify({ action: 'create' }),
+        result: JSON.stringify({
+          activity: {
+            id: 'activity-1',
+            activity_type: 'quiz',
+            prompt: '选择正确答案',
+            public_payload: {
+              schema: 'crew.interaction.v1',
+              interaction: { options: [{ id: 'A', label: '答案 A' }] },
+            },
+          },
+        }),
+      }],
+    }), {
+      isStreaming: false,
+      userPinnedOpen: null,
+      turnDurationMs: 1_000,
+    });
+
+    const card = root.querySelector('.interaction-card');
+    expect(card).not.toBeNull();
+    expect(card?.closest('.msg__foldable')).toBeNull();
+    expect(card?.textContent).toContain('选择正确答案');
+  });
+
   it('普通 Crew 回合与生成占位复用智能体页 Q 版耳机机器人头像', () => {
     const turn = renderAgentTurn(makeMessages({ thinking: undefined }), {
       isStreaming: false,
@@ -116,7 +148,7 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('.msg__avatar-media')).toBeNull();
   });
 
-  it('Team 内置成员使用新版 Crew SVG 头像并显示 leader 身份', () => {
+  it('Team 内置 Crew Leader 使用 Crew 自有头像并显示 leader 身份', () => {
     const root = renderTeamInternalMessage({
       id: 'team-leader',
       role: 'team_internal',
@@ -131,8 +163,9 @@ describe('renderAgentTurn', () => {
     expect(root.classList.contains('team-internal')).toBe(true);
     expect(root.querySelector('.team-internal__name strong')?.textContent).toBe('Crew');
     expect(root.querySelector('.team-internal__name em')?.textContent).toBe('leader');
-    expect(root.querySelector<SVGUseElement>('.team-internal__avatar .msg__avatar-symbol use')?.getAttribute('href'))
+    expect(root.querySelector('.team-internal__avatar .msg__avatar-symbol use')?.getAttribute('href'))
       .toBe('./crew-ui-symbols.svg#avatar-headphones');
+    expect(root.querySelector('.team-internal__avatar .session__team-logo')).toBeNull();
   });
 
   it('Team 外部成员展示成员气泡、执行过程和产物卡', () => {
@@ -164,6 +197,92 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('.msg__file-changes')?.textContent).toContain('已编辑 2 个文件');
     expect(root.querySelector('[data-file-status="deleted"] .msg__file-changes__reveal'))
       .toHaveProperty('disabled', true);
+  });
+
+  it('Team 外部成员标题压缩完整 Markdown 职责提示', () => {
+    const root = renderTeamInternalMessage({
+      id: 'team-mention-role',
+      role: 'team_internal',
+      content: '我现在使用 Kimi Code。',
+      timestamp: 1_700_000_000_000,
+      agentId: 'kk',
+      agentName: 'kk',
+      agentRole: '### 全栈开发 - kk ##### 工作原则 - 先确认目标、输入、输出和验收标准，再执行。 - 团队协作关系 - 向 Leader 汇报。',
+      communicationKind: 'user_mention_answer',
+      communicationStatus: 'answered',
+    });
+
+    expect(root.querySelector('.team-internal__name em')?.textContent).toBe('全栈开发 - kk');
+    expect(root.querySelector('.team-internal__name')?.textContent).not.toContain('工作原则');
+    expect(root.querySelector('.team-internal__communication-status')).toBeNull();
+  });
+
+  it('Team 通信回合不在成员名称行展示等待或进行中标签', () => {
+    for (const communicationStatus of ['waiting_reply', 'delivered']) {
+      const root = renderTeamInternalMessage({
+        id: `team-mention-${communicationStatus}`,
+        role: 'team_internal',
+        content: '正在处理请求',
+        timestamp: 1_700_000_000_000,
+        agentId: 'kk',
+        agentName: 'kk',
+        agentRole: '全栈开发 - kk',
+        communicationKind: 'user_mention_answer',
+        communicationStatus,
+      });
+
+      expect(root.querySelector('.team-internal__communication-status')).toBeNull();
+      expect(root.querySelector('.team-internal__name')?.textContent).not.toContain('等待回答');
+      expect(root.querySelector('.team-internal__name')?.textContent).not.toContain('回答中');
+    }
+  });
+
+  it('Team 成员通信标题优先展示结构化收件人', () => {
+    const root = renderTeamInternalMessage({
+      id: 'team-submit-to-leader',
+      role: 'team_internal',
+      content: '@leader 汇报当前执行状态',
+      timestamp: 1_700_000_000_000,
+      agentId: 'kk',
+      agentName: 'kk',
+      agentRole: '向 kk 征询执行意见与状态',
+      mentionFrom: 'kk',
+      mentionTo: ['leader'],
+      mentionIntent: 'submit',
+      eventType: 'team_submit',
+    });
+    expect(root.querySelector('.team-internal__name em')?.textContent)
+      .toBe('向 leader 征询执行意见与状态');
+  });
+
+  it('直接 mention 失败可重试，运行中可取消', () => {
+    const failed = renderTeamInternalMessage({
+      id: 'mention-failed',
+      role: 'team_internal',
+      content: '回答失败',
+      timestamp: 1_700_000_000_000,
+      agentId: 'coder',
+      agentName: 'coder',
+      communicationKind: 'user_mention_answer',
+      communicationStatus: 'failed',
+      requestId: 'mention-1',
+      communicationRequestText: '你使用的是什么模型？',
+    });
+    expect(failed.querySelector('[data-team-communication-action="retry"]')?.textContent).toBe('重试');
+
+    const waiting = renderTeamInternalMessage({
+      id: 'mention-waiting',
+      role: 'team_internal',
+      content: '正在询问 coder…',
+      timestamp: 1_700_000_000_000,
+      agentId: 'coder',
+      agentName: 'coder',
+      communicationKind: 'user_mention_answer',
+      communicationStatus: 'waiting_reply',
+      requestId: 'mention-2',
+      communicationRequestText: '你使用的是什么模型？',
+    });
+    expect(waiting.querySelector('[data-team-communication-action="cancel"]')?.textContent).toBe('取消');
   });
 
   it('Team 规划运行中复用 Agent Turn 实时计时，以团队名称和 Team Logo 展示', () => {
@@ -449,6 +568,27 @@ describe('renderAgentTurn', () => {
     const staticRow = root.querySelector('.process-timeline__row--static');
     expect(staticRow).not.toBeNull();
     expect(staticRow?.querySelector('.process-timeline__title')?.textContent).toBe('查看技能');
+  });
+
+  it('工具阶段进度按产生顺序渲染为独立过程行', () => {
+    const root = renderAgentTurn(
+      makeMessages({
+        thinking: undefined,
+        toolCalls: [{
+          toolCallId: 'wiki-1',
+          name: 'wiki_plan_ingest',
+          args: '{}',
+          status: 'running',
+          startedAt: 1_700_000_000_000,
+          progressText: '正在通读素材（2/2 段）…',
+          progressHistory: ['读取文档…', '正在通读素材（1/2 段）…', '正在通读素材（2/2 段）…'],
+        }],
+      }),
+      { isStreaming: true, userPinnedOpen: null, turnDurationMs: 5_000 },
+    );
+    const lines = Array.from(root.querySelectorAll('.process-timeline__stage')).map((node) => node.textContent);
+    expect(lines).toEqual(['读取文档…', '正在通读素材（1/2 段）…', '正在通读素材（2/2 段）…']);
+    expect(root.querySelector('.process-timeline__title')?.textContent).not.toContain('正在通读素材');
   });
 
   it('run_agent 渲染 subagent 专用卡片：中文标题 + 任务描述 + 执行摘要', () => {
@@ -998,13 +1138,14 @@ describe('renderAgentTurn', () => {
 
     const card = root.querySelector<HTMLElement>('.msg__artifact-card');
     expect(card?.tagName).toBe('ARTICLE');
-    expect(card?.getAttribute('data-browser-artifact')).toBe('site/index.html');
-    expect(card?.getAttribute('role')).toBe('button');
-    expect(card?.tabIndex).toBe(0);
     expect(card?.getAttribute('aria-label')).toContain('index');
-    expect(card?.textContent).toContain('灵感成果');
-    expect(root.querySelector('.msg__artifact-open')).toBeNull();
-    expect(root.querySelector('.msg__artifact-reveal')).toBeNull();
+    expect(card?.textContent).toContain('本地 HTML · 网站');
+    // data-browser-artifact 挂在内部「在 Crew 打开」按钮上，不再占整张卡
+    const open = root.querySelector<HTMLElement>('.msg__artifact-open');
+    expect(open?.getAttribute('data-browser-artifact')).toBe('site/index.html');
+    expect(open?.textContent).toContain('在 Crew 打开');
+    const reveal = root.querySelector<HTMLElement>('.msg__artifact-reveal');
+    expect(reveal?.getAttribute('data-file-reveal')).toBe('site/index.html');
   });
 
   it('本轮文件改动卡含查看入口、路径、单文件与合计红绿计数', () => {

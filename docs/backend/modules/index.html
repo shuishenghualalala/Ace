@@ -39,7 +39,7 @@
       <tr><td>8</td><td><code>app.py</code><span class="muted">待补充 · crew/app.py</span></td><td>App 装配：依赖注入、Agent 缓存、agent/team 路由。</td></tr>
       <tr><td>9</td><td><a href="auth.html"><code>gateway / auth</code></a> <span class="ok">✅</span><span class="muted">crew/gateway/ + crew/state/</span></td><td>Gateway 网关与认证：Web/API/WS 入口、按 Owner 的认证会话、退出清理、Cron 和渠道资源隔离。Runtime 路由提供列表、扫描、管理员注册与管理员删除；扫描为固定内置探测命令建立显式 host ProcessLaunch。删除仍被 Agent 引用的 Runtime 返回 409；只有历史原生会话续接绑定时由存储层安全清理后完成删除。认证模型详见 <a href="auth.html">Owner 会话与资源隔离</a>。</td></tr>
       <tr><td>10</td><td><a href="cli.html"><code>cli</code></a> <span class="ok">✅</span></td><td>CLI 入口：进程内命令树、非交互 run、管理子命令、JSON 输出与安全命令。</td></tr>
-      <tr><td>11</td><td><code>team</code><span class="muted">待补充 · crew/team/</span></td><td>Team 多智能体：Leader 委派 Teammate，复用 Agent 内核。</td></tr>
+      <tr><td>11</td><td><a href="../../../doc/backend/heterogeneous-agent-team-architecture.html"><code>team</code></a> <span class="ok">✅</span></td><td>Team 多智能体：Formation 负责创建期长期组队，Runtime staffing 负责 WorkflowRun 期间的确认式临时补员；两者候选池和持久化边界分离，复用 Agent 内核。</td></tr>
       <tr><td>12</td><td><code>tasks</code><span class="muted">待补充 · crew/tasks/</span></td><td>Tasks 任务：委派任务的状态流转和任务看板。</td></tr>
       <tr><td>13</td><td><code>cron</code><span class="muted">待补充 · crew/cron/</span></td><td>Cron 计划任务：定时自动化入口。</td></tr>
       <tr><td>14</td><td><code>scenarios</code><span class="muted">待补充 · crew/scenarios/</span></td><td>Scenarios 场景推荐：首页场景化引导。</td></tr>
@@ -64,6 +64,63 @@
 
   <h2>3. 与 Crew 的差异</h2>
   <p>本索引对应 Ace（Crew 开源版）实际代码。Ace 的 <code>sites</code> 模块对外提供“灵感”统一 App 库；内部继续保留网站 Release 与 Canvas/Widget 运行时。Ace 移除了 <code>api</code> 模块（开源版脱敏移除）。</p>
+
+  <h2>4. Team @Agent 直达入口第一阶段（2026-08-17）</h2>
+  <ul>
+    <li>WebSocket Gateway 只校验并透传结构化 <code>user_mentions</code>；它不解析用户输入中的 <code>@名称</code>，稳定 <code>member_id</code> 仍由 TeamManager 对当前团队名册校验。</li>
+    <li>带有合法结构化 mention 的 Team 回合在 TeamTurnRouter、TeamSpec 和 DAG 之前进入既有 <code>route_user_mention</code> / <code>TeamAskCoordinator</code> 直达链路；普通 Team prompt 的工作流路径不变。</li>
+    <li>Gateway 不接受非法 mention 结构并回送状态提示，避免错误数据静默回退成普通 DAG。</li>
+  </ul>
+  <p>验证：Gateway mention 结构回归与 Desktop composer mention 回归通过；本阶段没有新增后端模块或 Team 数据源。</p>
+
+  <h2>5. Team @Agent 直达生命周期第二阶段（2026-08-17）</h2>
+  <ul>
+    <li>直达回合统一使用 <code>user_mention_answer</code> 搭配 <code>waiting_reply</code>、<code>answered</code>、<code>failed</code>、<code>expired</code>、<code>cancelled</code> 状态。</li>
+    <li>失败、超时或取消先发带 <code>request_id</code>、<code>reply_to</code> 和原始请求文本的终态通信帧，再发错误帧，实时 UI 不会停留在“等待回答”。</li>
+    <li>历史仍复用直接 Agent 子会话作为 canonical transcript；终态通信元数据随子会话恢复，不创建 TeamPlan、DAG 或额外持久化模块。</li>
+  </ul>
+  <p>验证：成功与终态失败回合、历史通信字段和前端状态展示回归通过。</p>
+
+  <h2>6. Team @Agent 并发与取消竞态第三阶段（2026-08-18）</h2>
+  <ul>
+    <li>同一 <code>request_id</code> 继续复用既有幂等锁与终态历史，不重复发送 Team Bus 请求或唤醒成员；显式重试必须使用新的 <code>request_id</code>。</li>
+    <li>Agent/Provider 抛出未结构化异常时，通信层统一转换为 <code>failed</code> 终态，写回 Team Bus 与 Agent 子会话，避免只留下网关通用错误。</li>
+    <li>取消后迟到的旧请求帧由 Web 按 <code>request_id</code> 丢弃；重试回合仍走既有发送链路并使用全新的请求身份。</li>
+  </ul>
+  <p>验证：直接 mention 异常终态、幂等重放、取消/重试旧帧隔离、Web/ Desktop typecheck 与相关回归通过。本阶段没有新增后端模块或通信协议。</p>
+
+  <h2>7. Team mention 运行时安全启动上下文修复（2026-08-18）</h2>
+  <ul>
+    <li>问题：单 Agent 通过 Dispatcher 进入 <code>Agent.run</code> 时会携带已编译的 <code>ProcessLaunch</code>；Team 用户 @成员直接进入 <code>TeamAskCoordinator</code>，原链路绕过 Dispatcher，外部 ACP/Kimi 无法取得启动上下文。</li>
+    <li>修复：复用当前 Team 回合已经生成的不可变 <code>_security_process_launch</code>，由 <code>TeamManager → TeamCommunicationRouter → TeamAskCoordinator</code> 显式传入回答成员的子 Envelope。</li>
+    <li>边界：不放宽安全策略、不新增进程启动逻辑；若 Team 回合没有明确的 <code>ProcessLaunch</code>，ACP 仍按既有 fail-closed 规则拒绝启动。</li>
+  </ul>
+  <p>验证：Team 用户 mention、幂等/失败状态与 WebSocket 结构化 mention 回归通过。</p>
+
+  <h2>8. Team @Agent 直接通信流式 timeline（2026-08-18）</h2>
+  <ul>
+    <li>单独用户 mention 继续走 <code>TeamAskCoordinator</code> 的直达回答，不创建 TeamPlan、DAG、任务或产物；但现在通过 per-request callback 将 Agent 的 <code>delta</code>、<code>thinking</code> 和 <code>tool</code> 帧透传到 Team 内部消息协议。</li>
+    <li>流式帧使用既有 <code>team_internal</code> + <code>event_type=team_stream</code> + <code>communication_kind=user_mention_answer</code>，终态仍使用同一请求的 <code>answered/failed/expired/cancelled</code> 状态。</li>
+    <li>安全边界和 direct ask 的只读回答提示保持不变；一致的是 Agent 回答过程，不是把 direct mention 伪装成团队节点。</li>
+  </ul>
+  <p>验证：用户 mention 流式/思考/工具回归、Team Bus 状态与无 DAG 断言通过。</p>
+
+  <h2>9. Team 历史 mention 成员身份恢复（2026-08-18）</h2>
+  <ul>
+    <li>历史投影对 <code>user_mention_answer</code> / <code>ask_answer</code> 优先使用持久化的 <code>mention_from</code> 解析成员画像，而不是直接沿用旧事件里的 <code>agent_id</code>。</li>
+    <li>兼容旧事件中 <code>agent_id=crew::builtin</code> 但实际回答成员为 kk 的情况；历史回放恢复 kk 的成员名称、职责、色调和头像身份，Crew 头像只保留给真正的 Crew 成员或规划回合。</li>
+    <li>修复集中在既有 <code>team/history_projection.py</code>，不新增历史字段、迁移脚本或通信模块。</li>
+  </ul>
+  <p>验证：旧事件身份恢复、Crew 子会话身份映射与重复通信回归通过。</p>
+
+  <h2>10. Team direct mention 历史消息所有权（2026-08-18）</h2>
+  <ul>
+    <li><b>通信语义：</b>普通用户 Prompt 仍由 Leader 进入 TeamSpec / DAG；用户 <code>@Agent</code> 走“用户 → 目标 Agent → 用户”的直接通信；成员之间的 mention 只回复给发起成员。</li>
+    <li><b>唯一可见回复：</b>direct mention 的成员子回合是 canonical 对话消息；Dispatcher 创建的父 <code>agent_turn</code> 只作为运行时记录，不再被历史投影成第二条 Crew / Leader 回复。</li>
+    <li><b>关联方式：</b>历史投影使用 <code>request_id</code> 和 <code>communication_kind=user_mention_answer</code> 识别 direct mention，不解析 Prompt 文本，也不依赖关键词。</li>
+    <li><b>影响边界：</b>普通 Team workflow 的父任务结果和 <code>team_summary</code> 去重规则保持不变；本阶段不新增数据库表、迁移脚本或前端渲染模块。</li>
+  </ul>
+  <p>验证：新增 direct mention 父任务与成员 canonical 回答的历史投影回归，确认用户消息和 kk 回复保留且不再生成 Crew 重复气泡。</p>
 
   <div class="nav">返回：<a href="../../index.html">Crew 文档总览</a></div>
 </div>

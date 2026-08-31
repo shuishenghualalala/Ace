@@ -20,9 +20,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from crew.app import CrewApp, build_app
-from crew.core.envelope import Envelope, ResponseChunk
-from crew.state.config import load_config
+from crew.app import CrewApp, build_app  # noqa: E402
+from crew.core.envelope import Envelope, ResponseChunk  # noqa: E402
+from crew.state.config import load_config  # noqa: E402
 
 OWNER = "local"
 

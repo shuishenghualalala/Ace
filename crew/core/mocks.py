@@ -79,6 +79,8 @@ class InMemorySessionStore(SessionStore):
         self._status: dict[tuple[str, str], tuple[str, str]] = {}
         self._archived: dict[tuple[str, str], bool] = {}
         self._pinned: dict[tuple[str, str], bool] = {}
+        self._last_prompt_tokens: dict[tuple[str, str], int | None] = {}
+        self._last_prompt_tokens_source: dict[tuple[str, str], str | None] = {}
 
     @staticmethod
     def _key(session_id: str, owner_account_id: str = "") -> tuple[str, str]:
@@ -116,9 +118,13 @@ class InMemorySessionStore(SessionStore):
         owner_account_id: str = "",
         *,
         title_fallback: str | None = None,
+        last_prompt_tokens: int | None = None,
+        last_prompt_tokens_source: str | None = None,
     ) -> None:
         key = self._key(session_id, owner_account_id)
         self._data[key] = list(messages)
+        self._last_prompt_tokens[key] = last_prompt_tokens
+        self._last_prompt_tokens_source[key] = last_prompt_tokens_source
         # workspace_id 仅在首次创建时写入，后续 save 不覆盖（与 SQLiteSessionStore 对齐：
         # 会话归属在创建时确定，避免每轮回写把归属冲掉）。
         if key not in self._ws:
@@ -128,6 +134,10 @@ class InMemorySessionStore(SessionStore):
         self._fallback_titles[key] = (
             title_fallback if title_fallback is not None else self._first_user_title(messages)
         )
+
+    def clear_prompt_usage(self, session_id: str, owner_account_id: str = "") -> None:
+        self._last_prompt_tokens[self._key(session_id, owner_account_id)] = None
+        self._last_prompt_tokens_source[self._key(session_id, owner_account_id)] = None
 
     def clear(self, session_id: str, owner_account_id: str = "") -> None:
         key = self._key(session_id, owner_account_id)
@@ -139,6 +149,8 @@ class InMemorySessionStore(SessionStore):
         self._status.pop(key, None)
         self._archived.pop(key, None)
         self._pinned.pop(key, None)
+        self._last_prompt_tokens.pop(key, None)
+        self._last_prompt_tokens_source.pop(key, None)
 
     def set_title(self, session_id: str, title: str, owner_account_id: str = "") -> None:
         key = self._key(session_id, owner_account_id)

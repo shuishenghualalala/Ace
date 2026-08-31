@@ -478,9 +478,11 @@ class BlueprintStore:
                "FROM site_bindings WHERE owner_account_id=?")
         params: list[Any] = [owner]
         if automation_id:
-            sql += " AND automation_id=?"; params.append(automation_id)
+            sql += " AND automation_id=?"
+            params.append(automation_id)
         if widget_id:
-            sql += " AND widget_id=?"; params.append(widget_id)
+            sql += " AND widget_id=?"
+            params.append(widget_id)
         sql += " ORDER BY created_at DESC"
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()

@@ -10,9 +10,8 @@
  *     + 构成饼图 + 成本 + 系统提示 + **原始消息 JSON**
  *
  * 数据来源：当前会话（state.messages / state.config / state.backendSessions）。
- * 当后端未返回真实 token 计数时，按字符长度 4 字符 ≈ 1 token 的近似值推算，
- * 让 UI 在没有 usage 接口的情况下也能显示有意义的数据；
- * 后端如提供 usage 接口，调用 setUsageSnapshot 覆盖即可。
+ * 上下文用量优先使用 Provider 返回的真实 prompt_tokens；打开 session 且尚无
+ * 实际 usage 时显示明确标记的 request-view preview，不把预估冒充真实上下文。
  */
 
 import DOMPurify from 'dompurify';
@@ -110,7 +109,8 @@ interface ContextStats {
   startedAt: string;
   lastActiveAt: string;
   contextWindow: number;
-  usedTokens: number;
+  usedTokens: number | null;
+  usedTokensSource: 'provider' | 'request_view' | 'preview' | 'unavailable';
   inputTokens: number;
   outputTokens: number;
   cacheRead: number;
@@ -138,6 +138,7 @@ interface OriginalMessage {
 
 interface UsageSnapshot {
   promptTokens?: number | undefined;
+  promptTokensSource?: 'provider' | 'request_view' | undefined;
   completionTokens?: number | undefined;
   cacheRead?: number | undefined;
   cacheWrite?: number | undefined;
@@ -168,7 +169,14 @@ function formatTimestamp(ts: number): string {
 }
 
 const usageBySession = new Map<string, UsageSnapshot>();
-const contextBySession = new Map<string, { used_tokens: number; max_tokens: number; ratio: number }>();
+const contextBySession = new Map<string, {
+  available: boolean;
+  used_tokens: number | null;
+  max_tokens: number;
+  ratio: number | null;
+  source: 'provider' | 'request_view' | 'preview' | 'unavailable';
+  warning?: string;
+}>();
 
 /** 从网关拉取会话真实上下文用量（/api/session/{id}/context）。 */
 export async function loadInspectorContext(sessionId: string | null): Promise<void> {
@@ -185,6 +193,17 @@ export async function loadInspectorContext(sessionId: string | null): Promise<vo
 /** 外部（usage API / WebSocket）写入真实用量时调用，刷新右侧 Inspector。 */
 export function setUsageSnapshot(sessionId: string, snap: UsageSnapshot): void {
   usageBySession.set(sessionId, snap);
+  // Composer 上下文圆环需要显示模型本次实际收到的 prompt 大小。
+  // 通过事件解耦 Inspector 与 Composer，避免圆环重新按 canonical history 估算。
+  if (typeof snap.promptTokens === 'number' && Number.isFinite(snap.promptTokens)) {
+    window.dispatchEvent(new CustomEvent('context:usage', {
+      detail: {
+        sessionId,
+        promptTokens: Math.max(0, Math.round(snap.promptTokens)),
+        promptTokensSource: snap.promptTokensSource === 'request_view' ? 'request_view' : 'provider',
+      },
+    }));
+  }
   refreshInspector();
 }
 
@@ -224,7 +243,7 @@ function getLastActiveAt(): string {
   return formatTimestamp(maxTs).slice(0, 16);
 }
 
-/** 计算当前会话的 ContextStats。无后端 usage 时按 4 字符 ≈ 1 token 估算。 */
+/** 计算当前会话的 ContextStats。上下文用量没有真实 usage 时保持不可用。 */
 function computeContextStats(): ContextStats {
   const messages = getActiveMessages();
   const modelId = resolveSessionModelId() || '—';
@@ -260,12 +279,22 @@ function computeContextStats(): ContextStats {
   const toolTokens = estimateTokens(toolText);
   const otherTokens = estimateTokens(otherText);
 
-  const inputTokens = usage?.promptTokens ?? (userTokens + toolTokens + otherTokens);
-  const outputTokens = usage?.completionTokens ?? assistantTokens;
-  const usedTokens = apiCtx?.used_tokens
-    ?? (usage?.promptTokens != null && usage?.completionTokens != null
-      ? usage.promptTokens + usage.completionTokens
-      : userTokens + assistantTokens + toolTokens + otherTokens);
+  const inputTokens = usage?.promptTokens ?? (
+    apiCtx?.source === 'preview' && typeof apiCtx.used_tokens === 'number'
+      ? apiCtx.used_tokens
+      : 0
+  );
+  const outputTokens = usage?.completionTokens ?? 0;
+  const usedTokens = usage?.promptTokens != null
+    ? usage.promptTokens
+    : apiCtx?.available && typeof apiCtx.used_tokens === 'number'
+      ? apiCtx.used_tokens
+      : null;
+  const usedTokensSource = usage?.promptTokens != null
+    ? (usage.promptTokensSource ?? 'provider')
+    : apiCtx?.available && typeof apiCtx.used_tokens === 'number'
+      ? apiCtx.source
+      : 'unavailable';
   const cacheRead = usage?.cacheRead ?? 0;
   const cacheWrite = usage?.cacheWrite ?? 0;
 
@@ -282,6 +311,7 @@ function computeContextStats(): ContextStats {
     lastActiveAt: getLastActiveAt(),
     contextWindow,
     usedTokens,
+    usedTokensSource,
     inputTokens,
     outputTokens,
     cacheRead,
@@ -788,12 +818,14 @@ function renderInspectorHeader(): string {
   const msgs = getActiveMessages();
   const userCount = msgs.filter((m) => m.role === 'user').length;
   const assistantCount = msgs.filter((m) => m.role === 'assistant').length;
-  const pct = c.contextWindow > 0 ? Math.round((c.usedTokens / c.contextWindow) * 100) : 0;
+  const pct = c.usedTokens != null && c.contextWindow > 0
+    ? Math.round((c.usedTokens / c.contextWindow) * 100)
+    : null;
   return `
     <div class="inspector-section">
       <div class="inspector-section__head">
         <h4 class="inspector-section__title">会话信息</h4>
-        <span class="inspector-stat-pill">使用率 ${pct}%</span>
+        <span class="inspector-stat-pill">使用率 ${pct == null ? '?' : `${pct}%`}</span>
       </div>
       <div class="inspector-context-grid">
         <div class="inspector-context__row inspector-context__row--full">
@@ -806,7 +838,7 @@ function renderInspectorHeader(): string {
         <div class="inspector-context__row"><span class="inspector-context__row-label">供应商</span><span class="inspector-context__row-value">${escapeHtml(c.provider)}</span></div>
         <div class="inspector-context__row"><span class="inspector-context__row-label">模型</span><span class="inspector-context__row-value">${escapeHtml(c.model)}</span></div>
         <div class="inspector-context__row"><span class="inspector-context__row-label">上下文限制</span><span class="inspector-context__row-value">${fmtNum(c.contextWindow)}</span></div>
-        <div class="inspector-context__row"><span class="inspector-context__row-label">总 token</span><span class="inspector-context__row-value">${fmtNum(c.usedTokens)}</span></div>
+        <div class="inspector-context__row"><span class="inspector-context__row-label">总 token</span><span class="inspector-context__row-value">${c.usedTokens == null ? '不可用' : fmtNum(c.usedTokens)}</span></div>
         <div class="inspector-context__row"><span class="inspector-context__row-label">输入 token</span><span class="inspector-context__row-value">${fmtNum(c.inputTokens)}</span></div>
         <div class="inspector-context__row"><span class="inspector-context__row-label">输出 token</span><span class="inspector-context__row-value">${fmtNum(c.outputTokens)}</span></div>
         <div class="inspector-context__row"><span class="inspector-context__row-label">缓存读/写</span><span class="inspector-context__row-value">${fmtNum(c.cacheRead)} / ${fmtNum(c.cacheWrite)}</span></div>
@@ -820,18 +852,26 @@ function renderInspectorHeader(): string {
 
 function renderContextUsage(): string {
   const c = computeContextStats();
-  const pct = Math.min(100, (c.usedTokens / c.contextWindow) * 100);
-  const fillClass = pct > 80 ? 'is-warn' : '';
+  const pct = c.usedTokens == null ? null : Math.min(100, (c.usedTokens / c.contextWindow) * 100);
+  const fillClass = pct != null && pct > 80 ? 'is-warn' : '';
+  const unavailableNotice = c.usedTokens == null
+    ? '<div class="inspector-context-warning">当前上下文用量不可用。</div>'
+    : c.usedTokensSource === 'preview'
+      ? '<div class="inspector-context-warning">当前为打开会话时按下一次请求视图计算的预估值，发送后将以实际 usage 更新。</div>'
+      : c.usedTokensSource === 'request_view'
+        ? '<div class="inspector-context-warning">当前数值按本次实际请求视图（system、消息、工具 schema）本地计算。</div>'
+      : '';
   return `
     <div class="inspector-section">
       <h4 class="inspector-section__title">上下文用量</h4>
+      ${unavailableNotice}
       <div class="inspector-meter">
         <div class="inspector-meter__head">
           <span>已用 / 窗口</span>
-          <span><strong>${fmtNum(c.usedTokens)}</strong> / ${fmtNum(c.contextWindow)}</span>
+          <span><strong>${c.usedTokens == null ? '?' : fmtNum(c.usedTokens)}</strong> / ${fmtNum(c.contextWindow)}</span>
         </div>
         <div class="inspector-bar">
-          <div class="inspector-bar__fill ${fillClass}" data-inspector-width="${pct.toFixed(1)}"></div>
+          <div class="inspector-bar__fill ${fillClass}" data-inspector-width="${pct == null ? '0' : pct.toFixed(1)}"></div>
         </div>
         <div class="inspector-bar-legend">
           <span class="inspector-bar-legend__item"><span class="inspector-bar-legend__dot inspector-bar-legend__dot--input"></span>输入 ${fmtNum(c.inputTokens)}</span>
@@ -850,7 +890,7 @@ function renderContextUsage(): string {
       <div class="inspector-meter">
         <div class="inspector-meter__head">
           <span>使用率</span>
-          <span><strong>${pct.toFixed(0)}%</strong></span>
+          <span><strong>${pct == null ? '?' : `${pct.toFixed(0)}%`}</strong></span>
         </div>
       </div>
     </div>
@@ -2591,7 +2631,10 @@ function bindInspector(): void {
     if (!canOpenInspector() && !(activeTab === 'browser' && state.activeSessionId) && inspectorOpen) closeInspector();
   });
   // 会话级模型切换 → 重拉网关用量并刷新「上下文」页（供应商/模型/上下文限制随会话模型变化）
-  window.addEventListener('session:model-changed', () => {
+  window.addEventListener('session:model-changed', (ev) => {
+    // 只响应当前活跃会话：wiki 内嵌等会话的模型事件与本面板无关，不白白重拉。
+    const sid = (ev as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
+    if (sid && sid !== state.activeSessionId) return;
     void loadInspectorContext(state.activeSessionId);
   });
   // 设置中心里的「检查器开关」改了 —— 同步 UI 状态

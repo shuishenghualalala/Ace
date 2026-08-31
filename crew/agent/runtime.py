@@ -47,6 +47,7 @@ from crew.agent.loop.control import TurnControl
 from crew.agent.plan import get_plan_mode_attachment_messages
 from crew.wiki.attachments import get_wiki_agent_attachment_messages
 from crew.agent.prompt_builder import DEFAULT_AGENT_IDENTITY, build_prompt_parts
+from crew.gateway.context import REFERENCE_INJECTORS
 from crew.gateway.session_context import (
     SessionContext,
     SessionSource,
@@ -137,6 +138,32 @@ def _read_attachment(path: str) -> str:
     # xlsx/docx 等二进制文件：返回摘要（含完整路径，方便 Agent 用工具进一步读取）
     size = p.stat().st_size
     return f"[二进制文件: {p.name}, 大小: {size} 字节, 类型: {ext or '未知'}, 完整路径: {path}]"
+
+
+def _format_browser_tab_references(refs: object) -> str:
+    """把 @browser_tab 引用的标签页正文格式化为可注入上下文的块。"""
+    if not isinstance(refs, list) or not refs:
+        return ""
+    lines = [
+        "# 用户引用的浏览器标签页",
+        "用户在消息中通过 @browser_tab 显式引用了以下标签页，正文为发送时的只读快照：",
+    ]
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        tab_id = str(ref.get("tab_id") or "")
+        error = str(ref.get("error") or "").strip()
+        if error:
+            lines.append(f"\n## 标签页 {tab_id}\n（浏览器标签页内容不可用：{error}）")
+            continue
+        title = str(ref.get("title") or "").strip() or "(无标题)"
+        url = str(ref.get("url") or "").strip()
+        text = str(ref.get("text") or "").strip() or "(页面正文为空)"
+        header = f"\n## {title}"
+        if url:
+            header += f"\nURL: {url}"
+        lines.append(f"{header}\n{text}")
+    return "\n".join(lines)
 
 
 def _format_subagent_notifications(pending: object) -> str:
@@ -500,6 +527,13 @@ class SingleAgent(Agent):
         task_block = _format_task_notifications(envelope.params.get("task_notifications"))
         if task_block:
             reminder_parts.append(task_block)
+        # 对话 @引用：发送时解析注入的正文快照块（含失败占位），按注册表顺序拼接
+        for injector in REFERENCE_INJECTORS:
+            if injector.formatter is None:
+                continue
+            ref_block = injector.formatter(envelope.params.get(injector.params_key))
+            if ref_block:
+                reminder_parts.append(ref_block)
         client_intent_block = _format_client_intent(envelope)
         if client_intent_block:
             reminder_parts.append(client_intent_block)
@@ -620,6 +654,101 @@ class SingleAgent(Agent):
 
         return str(task_workspace_path(envelope.workspace_id, owner_account_id=envelope.user_id))
 
+    async def preview_context(
+        self,
+        session_id: str,
+        *,
+        owner_account_id: str = "",
+        workspace_id: str = "default",
+        workspace_instructions: str = "",
+        workspace_root_path: str = "",
+    ) -> dict[str, Any] | None:
+        """计算会话打开时的 builtin 下一次请求视图预览。
+
+        预览只使用当前已持久化历史、当前 system prompt 和工具 schema；它不添加
+        尚未输入的用户消息，也不发起模型请求。返回值明确标记为 ``preview``，
+        不能被当作 provider 的实际 usage。
+        """
+        if self._closed or not isinstance(self.executor, BuiltinExecutor):
+            return None
+
+        owner = str(owner_account_id or "").strip()
+        envelope = Envelope(
+            session_id=session_id,
+            params={
+                "query": "",
+                "workspace_instructions": workspace_instructions,
+                "workspace_root_path": workspace_root_path,
+            },
+            user_id=owner,
+            workspace_id=workspace_id or "default",
+        )
+        cwd = self._resolve_agent_workdir(envelope, task_session_id=session_id)
+
+        owner_token = current_owner_account_id.set(owner)
+        session_token = current_session_id.set(session_id)
+        workspace_token = current_workspace_id.set(envelope.workspace_id)
+        try:
+            history = self.session_store.load(session_id, owner_account_id=owner)
+            system_static, user_reminder = await self._build_prompts(
+                envelope, [], cwd, task_sid=session_id
+            )
+
+            view_messages = list(history)
+            if self.plan_manager is not None:
+                view_messages.extend(
+                    get_plan_mode_attachment_messages(
+                        view_messages,
+                        session_id,
+                        self.plan_manager,
+                        owner_account_id=owner,
+                    )
+                )
+            if self.wiki_manager is not None:
+                view_messages.extend(
+                    get_wiki_agent_attachment_messages(
+                        session_id,
+                        self.wiki_manager,
+                        owner_account_id=owner,
+                    )
+                )
+            # 与真实发送保持同一顺序：canonical history 先走无需 LLM 的 L1
+            # compact，再注入本轮动态 reminder。否则旧 browser/tool 结果会被全量
+            # 计入打开会话预览，出现 190% 但发送前已降到低水位的假象。
+            if self.compactor is not None:
+                view_messages = self.compactor.compact_preview_view(view_messages)
+            if user_reminder:
+                view_messages = [Message.system_reminder(user_reminder), *view_messages]
+
+            effective_tool_filter = self._effective_tool_filter(
+                session_id, owner_account_id=owner
+            )
+            tool_schemas = self.registry.list_schemas(effective_tool_filter)
+            request_view = self.executor.build_request_view(
+                system_static,
+                view_messages,
+                tool_schemas,
+                session_id,
+                self.tool_disclosure_mode,
+                consume_transient=False,
+            )
+            request_view, _ = await self.executor.finalize_request_view(
+                request_view,
+                session_id=session_id,
+                request_id=f"context-preview:{session_id}",
+                provider=self.provider,
+            )
+            tokens = request_view.estimated_prompt_tokens()
+            return {
+                "used_tokens": tokens,
+                "source": "preview",
+                "warning": "当前为统一请求视图的发送前预估；运行期 hook 仍可能调整，发送后将以实际 usage 更新",
+            }
+        finally:
+            current_workspace_id.reset(workspace_token)
+            current_session_id.reset(session_token)
+            current_owner_account_id.reset(owner_token)
+
     async def run(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
         if self._closed:
             raise RuntimeError("SingleAgent 已关闭，不能继续执行")
@@ -712,6 +841,11 @@ class SingleAgent(Agent):
         t = time.perf_counter()
         owner = envelope.user_id
         history = self.session_store.load(sid, owner_account_id=owner)
+        # usage 只代表最近一次 Provider 请求；新回合开始时先清掉旧值，
+        # 否则在本回合尚未收到 usage 时，UI 会把上一回合的真实值误认为当前值。
+        clear_prompt_usage = getattr(self.session_store, "clear_prompt_usage", None)
+        if callable(clear_prompt_usage):
+            clear_prompt_usage(sid, owner_account_id=owner)
         log.info("[PERF] history_load       %.3fs  (msgs=%d)", time.perf_counter() - t, len(history))
         is_new = not history
         if is_new:
@@ -738,6 +872,8 @@ class SingleAgent(Agent):
         history.append(user_message)
 
         if is_new and self.enable_title and not self.lightweight:
+            # 只落占位标题，让会话立刻出现在列表里；标题生成延后到主响应结束后
+            # 由 finally 块调度（见下方 _spawn_title_task 调用），不抢占主推理窗口。
             if not self._session_needs_title(task_sid, owner):
                 try:
                     self.session_store.save(
@@ -749,16 +885,6 @@ class SingleAgent(Agent):
                     )
                 except Exception:  # noqa: BLE001
                     log.debug("创建会话标题占位失败 session=%s", task_sid)
-            from crew.core.runctx import current_push_fn
-
-            if self._session_needs_title(task_sid, owner):
-                self._spawn_title_task(
-                    task_sid,
-                    owner,
-                    history,
-                    current_push_fn.get(),
-                    user_only=True,
-                )
 
         # Skill 展开内容写入 canonical history（is_meta=True，前端不渲染但模型可见）
         skill_meta = envelope.params.get("skill_meta")
@@ -859,11 +985,23 @@ class SingleAgent(Agent):
         interrupted = False
         terminal_outcome: TerminalOutcome = "failed"
         terminal_error_summary = "Executor ended without a terminal response"
+        last_prompt_tokens: int | None = None
+        last_prompt_tokens_source: str | None = None
         # 拦截 final 帧：进化 visible 模式下需在 final 之前 yield evolution_footer，
         # 因此先把 final 暂存，等进化流程跑完再投递。
         _held_final = None
         try:
             async for chunk in self.executor.execute(ctx):
+                usage = chunk.body.get("usage") if isinstance(chunk.body, dict) else None
+                if isinstance(usage, dict):
+                    raw_prompt_tokens = usage.get("prompt_tokens")
+                    if isinstance(raw_prompt_tokens, (int, float)) and raw_prompt_tokens >= 0:
+                        last_prompt_tokens = int(raw_prompt_tokens)
+                        last_prompt_tokens_source = (
+                            "request_view"
+                            if usage.get("prompt_tokens_source") == "request_view"
+                            else "provider"
+                        )
                 if chunk.kind == "error" or chunk.status == "failed":
                     terminal_outcome = "failed"
                     terminal_error_summary = str(
@@ -899,7 +1037,10 @@ class SingleAgent(Agent):
             try:
                 await self._persist_turn(
                     envelope, history, ctx, prefix_len, turn_started_at,
-                    interrupted=interrupted, task_sid=task_sid
+                    interrupted=interrupted,
+                    task_sid=task_sid,
+                    last_prompt_tokens=last_prompt_tokens,
+                    last_prompt_tokens_source=last_prompt_tokens_source,
                 )
                 persisted = True
             finally:
@@ -1230,13 +1371,11 @@ class SingleAgent(Agent):
         owner: str,
         history: list[Message],
         push_fn,
-        *,
-        user_only: bool = False,
     ) -> None:
         """后台生成会话标题并推送，不阻塞主推理或 final 帧发送。
 
-        首轮开始时使用 ``user_only`` 与主回答并发；回合结束后的兜底调用可携带
-        assistant snippet。同一 (owner, title_sid) 在途任务去重，避免重复 LLM 调用。
+        仅在主响应结束后调度（见 run 的 finally 块），history 已含本轮 assistant
+        内容。同一 (owner, title_sid) 在途任务去重，避免重复 LLM 调用。
         """
         inflight_key = (owner, title_sid)
         if inflight_key in self._title_inflight:
@@ -1248,13 +1387,11 @@ class SingleAgent(Agent):
                 title = await generate_session_title(
                     self.provider,
                     history,
-                    user_only=user_only,
                 )
                 if not title and self._session_needs_title(title_sid, owner):
                     title = await generate_session_title(
                         self.provider,
                         history,
-                        user_only=user_only,
                     )
                 if not title:
                     return
@@ -1298,6 +1435,8 @@ class SingleAgent(Agent):
         *,
         interrupted: bool,
         task_sid: str | None = None,
+        last_prompt_tokens: int | None = None,
+        last_prompt_tokens_source: str | None = None,
     ) -> None:
         """把 executor 本轮新增消息回灌 canonical 历史并持久化。
 
@@ -1377,6 +1516,8 @@ class SingleAgent(Agent):
                     workspace_id=envelope.workspace_id,
                     owner_account_id=envelope.user_id,
                     title_fallback="" if self.enable_title else None,
+                    last_prompt_tokens=last_prompt_tokens,
+                    last_prompt_tokens_source=last_prompt_tokens_source,
                 )
             except Exception:  # noqa: BLE001
                 log.exception("会话落库失败 session=%s", sid)

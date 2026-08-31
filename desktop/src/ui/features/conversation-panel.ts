@@ -32,16 +32,21 @@ import {
   stopGeneration,
 } from './chat-controller';
 import { createComposerView, type ComposerView } from './composer-view';
+import type { UserAgentMention } from './composer-mention';
 import {
   disposeConversationRenderer,
   renderConversation,
   type ConversationRenderHooks,
 } from './conversation-renderer';
 import { getToolFold, setToolFold } from './fold-state';
+import {
+  markInteractionSubmitted,
+  syncInteractionCards,
+} from '../components/interaction-card';
 
 /** Composer 动作组：submit/stop/edit/queue（app.ts 主对话原接线逻辑的参数化形态）。 */
 export interface ConversationPanelActions {
-  submit(text: string): void | Promise<void>;
+  submit(text: string, userMentions?: UserAgentMention[]): void | Promise<void>;
   stop(): void;
   cancelEdit(): void;
   editQueueItem(sessionId: string, index: number): void;
@@ -96,7 +101,7 @@ export function createMainComposerActions(
   isCompletionOpen?: () => boolean,
 ): ConversationPanelActions {
   return {
-    submit: async (text) => {
+    submit: async (text, userMentions) => {
       if (!requireRendererLogin()) return;
       const sessionId = state.activeSessionId;
       if (sessionId && state.editFromIdx[sessionId] != null) {
@@ -107,7 +112,7 @@ export function createMainComposerActions(
           state.userUnfoldedTurns.delete(message.id);
         }
       }
-      await sendMessage(text);
+      await sendMessage(text, userMentions);
     },
     stop: () => stopGeneration(),
     cancelEdit,
@@ -136,7 +141,7 @@ export function mountConversationPanel(
   if (messagesEl) host.append(messagesEl, composerHost);
   else if (ownComposerHost) host.append(composerHost);
   const composer: ComposerView = createComposerView(composerHost, {
-    submit: (text) => opts.actions.submit(text),
+    submit: (text, userMentions) => opts.actions.submit(text, userMentions),
     stop: () => opts.actions.stop(),
     cancelEdit: () => opts.actions.cancelEdit(),
     editQueueItem: opts.actions.editQueueItem,
@@ -149,6 +154,19 @@ export function mountConversationPanel(
   }, opts.contextStaging);
   const composerRoot = composerHost.querySelector<HTMLElement>('[data-composer-view]');
   if (!composerRoot) throw new Error('ConversationPanel: Composer root 缺失');
+
+  const handleInteractionSubmit = (event: Event): void => {
+    if (!(event instanceof CustomEvent)) return;
+    const detail = event.detail as { interactionId?: unknown; text?: unknown } | null;
+    const interactionId = typeof detail?.interactionId === 'string' ? detail.interactionId.trim() : '';
+    const text = typeof detail?.text === 'string' ? detail.text.trim() : '';
+    if (!interactionId || !text || text.length > 2_000) return;
+    markInteractionSubmitted(interactionId);
+    const target = opts.resolveMessages?.()?.container ?? messagesEl;
+    if (target) syncInteractionCards(target);
+    void opts.actions.submit(text);
+  };
+  host.addEventListener('crew:interaction-submit', handleInteractionSubmit);
 
   // ── 附件预览：渲染进 Composer 的 [data-attachment-preview]（before-input 槽位内，
   //    主对话由 composer-context-view 创建，Wiki 面板由自己的 contextStaging 提供）──
@@ -200,6 +218,7 @@ export function mountConversationPanel(
       ...(opts.emptyState ? { emptyState: opts.emptyState } : {}),
       ...(opts.followupHandlers ? { followupHandlers: opts.followupHandlers } : {}),
       afterRender: (sessionId) => {
+        syncInteractionCards(target.container);
         renderPanelTodo(sessionId);
         opts.afterRender?.(sessionId);
       },
@@ -244,6 +263,7 @@ export function mountConversationPanel(
       if (disposed) return;
       disposed = true;
       unsubscribeAttachments();
+      host.removeEventListener('crew:interaction-submit', handleInteractionSubmit);
       for (const unsubscribe of unsubscribeStores) unsubscribe();
       composer.dispose();
       for (const containerId of renderedContainerIds) disposeConversationRenderer(containerId);

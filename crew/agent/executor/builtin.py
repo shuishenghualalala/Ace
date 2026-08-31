@@ -20,7 +20,8 @@ import time
 from dataclasses import replace
 from typing import Any, AsyncIterator
 
-from crew.agent.executor.base import AgentExecutor, ExecutionContext
+from crew.agent.executor.base import AgentExecutor, ExecutionContext, FinalRequestView
+from crew.agent.compact.tokens import estimate_tokens
 from crew.agent.loop import (
     CONTINUATION_PROMPT,
     EMPTY_RETRY_NUDGE,
@@ -187,6 +188,97 @@ class BuiltinExecutor(AgentExecutor):
         # 用于检测 plan 模式是否刚退出，以便注入一次性 exit reminder。
         self._plan_was_active = False
 
+    def build_request_view(
+        self,
+        system_prompt: str,
+        messages: list[Message],
+        tool_schemas: list[dict[str, Any]],
+        session_id: str,
+        tool_disclosure_mode: ToolDisclosureMode = ToolDisclosureMode.PROGRESSIVE,
+        *,
+        tool_search_assembly: Any = None,
+        discovered_tool_names: Any = None,
+        consume_transient: bool = True,
+        vision_downgraded: bool = False,
+        max_output_tokens: int | None = None,
+    ) -> FinalRequestView:
+        """唯一的 builtin request-view 装配入口。
+
+        实际发送与 session preview 都调用这里。compact 负责先选择 ``messages``
+        视图；本方法负责把 system、tool-search、动态 schema、todo reminder 与
+        vision recovery 收敛成一个 ``FinalRequestView``。
+        """
+        system_msg = Message.system(system_prompt)
+        assembly = tool_search_assembly
+        if assembly is None:
+            ts_config = (
+                ToolSearchConfig(enabled="off")
+                if tool_disclosure_mode is ToolDisclosureMode.DIRECT
+                else None
+            )
+            assembly = assemble_tool_schemas(tool_schemas, config=ts_config)
+        deferred_tools_message = available_deferred_tools_message(assembly)
+        if discovered_tool_names is None:
+            discovered_tool_names = extract_discovered_tool_names(
+                messages,
+                original_tool_schemas=assembly.original_tool_schemas,
+                config=assembly.config,
+            )
+        tools = expand_discovered_tool_schemas(assembly, discovered_tool_names) or None
+        api_messages = [system_msg]
+        if deferred_tools_message:
+            api_messages.append(Message.user(deferred_tools_message, is_meta=True))
+        api_messages.extend(messages)
+        todo_reminder = self._todo_reminder(session_id, consume=consume_transient)
+        if todo_reminder:
+            api_messages.append(Message.system_reminder(todo_reminder))
+        if vision_downgraded:
+            api_messages = _without_image_inputs(api_messages)
+            api_messages.append(Message.system_reminder(VISION_CAPABILITY_RECOVERY_PROMPT))
+        return FinalRequestView.create(
+            api_messages,
+            tools,
+            max_output_tokens=max_output_tokens,
+        )
+
+    async def finalize_request_view(
+        self,
+        view: FinalRequestView,
+        *,
+        session_id: str,
+        request_id: str,
+        provider_index: int = 0,
+        provider: Any = None,
+    ) -> tuple[FinalRequestView, Any]:
+        """应用 request middleware，返回 Provider 前的最终统一快照。"""
+        active_provider = provider or self.provider
+        model = str(getattr(active_provider, "model", "") or "")
+        provider_name = type(active_provider).__name__
+        base_url = str(getattr(active_provider, "base_url", "") or "")
+        request = view.to_payload()
+        middleware_result = await self.plugins.apply_llm_request_middleware(
+            request,
+            session_id=session_id,
+            request_id=request_id,
+            provider_index=provider_index,
+            model=model,
+            provider=provider_name,
+            base_url=base_url,
+        )
+        payload = (
+            middleware_result.payload
+            if isinstance(middleware_result.payload, dict)
+            else request
+        )
+        return FinalRequestView.from_payload(
+            payload,
+            view,
+            model=model,
+            provider=provider_name,
+            base_url=base_url,
+            provider_index=provider_index,
+        ), middleware_result
+
     def _pre_final_chunks(
         self,
         rid: str,
@@ -253,7 +345,6 @@ class BuiltinExecutor(AgentExecutor):
             seq += 1
             return seq
 
-        system_msg = Message.system(ctx.system_prompt)
         original_tools = ctx.tool_schemas or []
         # 披露模式不改变授权范围。DIRECT 直接发送全部已授权 schema；
         # PROGRESSIVE 才按全局 ToolSearch 配置装配。
@@ -263,16 +354,11 @@ class BuiltinExecutor(AgentExecutor):
             else None
         )
         tool_search_assembly = assemble_tool_schemas(original_tools, config=ts_config)
-        deferred_tools_message = available_deferred_tools_message(tool_search_assembly)
         discovered_tool_names = extract_discovered_tool_names(
             ctx.messages,
             original_tool_schemas=tool_search_assembly.original_tool_schemas,
             config=tool_search_assembly.config,
         )
-        tools = expand_discovered_tool_schemas(
-            tool_search_assembly,
-            discovered_tool_names,
-        ) or None
         # 0 = 无限；靠 auto-compact 管上下文 + guardrail 防失控。
         # 用 None 判而非 `or`，避免 0 被 `or` 当 falsy 跳过。
         max_iter = ctx.max_iterations if ctx.max_iterations is not None else self.max_iterations
@@ -361,10 +447,6 @@ class BuiltinExecutor(AgentExecutor):
 
         grace = False  # 预算耗尽后允许的最后一轮宽限（用于收尾文本）
         while budget.consume() or grace:
-            tools = expand_discovered_tool_schemas(
-                tool_search_assembly,
-                runner.discovered_tool_names,
-            ) or None
             used_grace = grace
             grace = False
 
@@ -387,6 +469,22 @@ class BuiltinExecutor(AgentExecutor):
             # ---- 组装发给 LLM 的视图 ----
             #   每轮 compact_view 做水位压缩，未触水位时近乎零成本。
             #   overflow_mode 是 provider 报溢出后的紧急兜底，从全量 ctx.messages 重新激进压缩。
+            provisional_view = self.build_request_view(
+                ctx.system_prompt,
+                view_messages,
+                original_tools,
+                ctx.session_id,
+                ctx.tool_disclosure_mode,
+                tool_search_assembly=tool_search_assembly,
+                discovered_tool_names=runner.discovered_tool_names,
+                consume_transient=False,
+                vision_downgraded=vision_downgraded,
+                max_output_tokens=max_output_tokens_override,
+            )
+            prompt_overhead_tokens = max(
+                0,
+                provisional_view.estimated_prompt_tokens() - estimate_tokens(view_messages),
+            )
             if overflow_mode and self.compactor is not None:
                 yield ResponseChunk.compaction_event(rid, True, next_seq())
                 try:
@@ -411,11 +509,15 @@ class BuiltinExecutor(AgentExecutor):
                     yield ResponseChunk.compaction_event(rid, False, next_seq())
             elif self.compactor is not None:
                 will_compact_view = getattr(self.compactor, "will_compact_view", None)
-                show_compaction = bool(will_compact_view and will_compact_view(
-                    view_messages,
-                    ctx.session_id,
-                    owner_account_id=owner_account_id,
-                ))
+                show_compaction = bool(
+                    will_compact_view
+                    and will_compact_view(
+                        view_messages,
+                        ctx.session_id,
+                        owner_account_id=owner_account_id,
+                        prompt_overhead_tokens=prompt_overhead_tokens,
+                    )
+                )
                 if show_compaction:
                     yield ResponseChunk.compaction_event(rid, True, next_seq())
                 try:
@@ -423,19 +525,26 @@ class BuiltinExecutor(AgentExecutor):
                         view_messages,
                         ctx.session_id,
                         owner_account_id=owner_account_id,
+                        prompt_overhead_tokens=prompt_overhead_tokens,
                     )
                 finally:
                     if show_compaction:
                         yield ResponseChunk.compaction_event(rid, False, next_seq())
             view = view_messages
-            api_messages = [system_msg]
-            if deferred_tools_message:
-                api_messages.append(Message.user(deferred_tools_message, is_meta=True))
-            api_messages.extend(view)
-            api_messages = self._maybe_append_todo_reminder(api_messages, ctx.session_id)
-            if vision_downgraded:
-                api_messages = _without_image_inputs(api_messages)
-                api_messages.append(Message.system_reminder(VISION_CAPABILITY_RECOVERY_PROMPT))
+            request_view = self.build_request_view(
+                ctx.system_prompt,
+                view,
+                original_tools,
+                ctx.session_id,
+                ctx.tool_disclosure_mode,
+                tool_search_assembly=tool_search_assembly,
+                discovered_tool_names=runner.discovered_tool_names,
+                consume_transient=True,
+                vision_downgraded=vision_downgraded,
+                max_output_tokens=max_output_tokens_override,
+            )
+            api_messages = list(request_view.messages)
+            tools = list(request_view.tools) if request_view.tools is not None else None
             hook_started = time.perf_counter()
             pre_llm_result = await self.plugins.pre_llm_call(ctx.session_id, api_messages)
             log.info(
@@ -455,24 +564,27 @@ class BuiltinExecutor(AgentExecutor):
                     yield _fc
                 return
 
+            request_view = request_view.with_messages(api_messages)
+
             _dump_prompt(ctx, view, tools, budget.used)
 
             # ---- 调模型（流式重试 + 溢出压缩 + provider 故障转移 + 流式中途中断）----
             result: dict[str, Any] = {}
             async for ev in self._call_model(
-                api_messages,
-                tools,
+                request_view,
                 rid,
                 next_seq,
                 result,
                 control,
                 runner,
                 ctx.session_id,
-                max_tokens=max_output_tokens_override,
             ):
                 yield ev
-            # 估算 prompt 固定开销（系统/技能·上下文/工具定义），并入 usage 透传到前端 breakdown
-            result.setdefault("usage", {})["prompt_breakdown"] = _estimate_prompt_overhead(ctx, view, tools)
+            usage = result.get("usage")
+            if not isinstance(usage, dict):
+                usage = {}
+                result["usage"] = usage
+            usage["prompt_breakdown"] = _estimate_prompt_overhead(ctx, view, tools)
             unsupported_capability = str(result.get("unsupported_capability") or "")
             if unsupported_capability:
                 if unsupported_capability == "vision" and not vision_downgraded:
@@ -779,30 +891,30 @@ class BuiltinExecutor(AgentExecutor):
         ):
             yield _fc
 
-    def _maybe_append_todo_reminder(self, api_messages: list, session_id: str) -> list:
-        """审批通过后的内部 todo_reminder 末尾注入；不进入历史，不渲染给用户。"""
+    def _todo_reminder(self, session_id: str, *, consume: bool) -> str | None:
+        """读取本 step 的 todo reminder；preview 只读，实际发送才消费。"""
         if self.plan_manager is None:
-            return api_messages
+            return None
         from crew.core.runctx import current_owner_account_id
 
         owner = current_owner_account_id.get()
-        text = self.plan_manager.take_todo_reminder(session_id, owner_account_id=owner)
-        if not text:
-            return api_messages
-        return [*api_messages, Message.system_reminder(text)]
+        if consume:
+            return self.plan_manager.take_todo_reminder(
+                session_id, owner_account_id=owner
+            )
+        peek = getattr(self.plan_manager, "peek_todo_reminder", None)
+        return peek(session_id, owner_account_id=owner) if callable(peek) else None
 
     # ------------------------------------------------------------------ #
     async def _call_model(
         self,
-        api_messages: list,
-        tools: list | None,
+        request_view: FinalRequestView,
         rid: str,
         next_seq,
         result: dict,
         control=None,
         runner=None,
         session_id: str = "",
-        max_tokens: int | None = None,
     ) -> AsyncIterator[ResponseChunk]:
         """调模型一轮：流式 yield delta，结果写入 result。
 
@@ -845,25 +957,29 @@ class BuiltinExecutor(AgentExecutor):
                 _prov_name = type(provider).__name__
                 _prov_base_url = getattr(provider, "base_url", "") or ""
 
-                request = {"messages": api_messages, "tools": tools}
-                if max_tokens is not None:
-                    request["max_tokens"] = max_tokens
-                mw = await self.plugins.apply_llm_request_middleware(
-                    request,
+                middleware_view, mw = await self.finalize_request_view(
+                    request_view,
                     session_id=session_id,
                     request_id=rid,
                     provider_index=prov_idx,
-                    model=_prov_model,
-                    provider=_prov_name,
-                    base_url=_prov_base_url,
+                    provider=provider,
                 )
-                effective_request = mw.payload if isinstance(mw.payload, dict) else request
-                effective_tools = effective_request.get("tools", tools)
+                effective_request = middleware_view.to_payload()
+                sent_view_holder = [middleware_view]
 
                 def _stream(req, active_provider=provider):
-                    messages_arg = req["messages"] if "messages" in req else api_messages
-                    tools_arg = req["tools"] if "tools" in req else tools
-                    max_tokens_arg = req.get("max_tokens", max_tokens)
+                    final_view = FinalRequestView.from_payload(
+                        req if isinstance(req, dict) else {},
+                        middleware_view,
+                        model=_prov_model,
+                        provider=_prov_name,
+                        base_url=_prov_base_url,
+                        provider_index=prov_idx,
+                    )
+                    sent_view_holder[0] = final_view
+                    messages_arg = list(final_view.messages)
+                    tools_arg = list(final_view.tools) if final_view.tools is not None else None
+                    max_tokens_arg = final_view.max_output_tokens
                     if max_tokens_arg is None:
                         return active_provider.stream_chat(messages_arg, tools=tools_arg)
                     try:
@@ -981,7 +1097,11 @@ class BuiltinExecutor(AgentExecutor):
                         if chunk.usage:
                             result["usage"] = chunk.usage
                 elapsed = time.perf_counter() - t0
-                message_chars = sum(len(message.text_content) for message in api_messages)
+                sent_view = sent_view_holder[0]
+                sent_messages = list(sent_view.messages)
+                sent_tools = list(sent_view.tools) if sent_view.tools is not None else None
+                request_view_tokens = sent_view.estimated_prompt_tokens()
+                message_chars = sum(len(message.text_content) for message in sent_messages)
                 log.info(
                     "[PERF] llm prov=%d  middleware=%.3fs  first_event=%.3fs  "
                     "first_reasoning=%.3fs  first_text=%.3fs  ttft=%.3fs  total=%.3fs  "
@@ -994,9 +1114,9 @@ class BuiltinExecutor(AgentExecutor):
                     first_text if first_text is not None else -1.0,
                     first_text or 0.0,
                     elapsed,
-                    len(api_messages),
+                    len(sent_messages),
                     message_chars,
-                    len(tools or []),
+                    len(sent_tools or []),
                     len(accumulated) // 4,
                     rid,
                     session_id,
@@ -1010,6 +1130,16 @@ class BuiltinExecutor(AgentExecutor):
                     started_tool_call_ids=started_tool_call_ids,
                     model=str(getattr(provider, "model", "") or ""),
                 )
+                usage = result.get("usage")
+                if not isinstance(usage, dict):
+                    usage = {}
+                    result["usage"] = usage
+                usage["request_view_tokens"] = request_view_tokens
+                if not isinstance(usage.get("prompt_tokens"), (int, float)):
+                    usage["prompt_tokens"] = request_view_tokens
+                    usage["prompt_tokens_source"] = "request_view"
+                else:
+                    usage["prompt_tokens_source"] = "provider"
                 await self.plugins.post_api_request(
                     session_id=session_id,
                     model=getattr(provider, "model", ""),

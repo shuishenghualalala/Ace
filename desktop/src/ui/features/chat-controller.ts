@@ -84,6 +84,7 @@ import { makeSessionTitle, mergeTeamInternalMessage, normalizeTurnFileChanges } 
 import { applyFoldState, createChatRenderCoalescer, createStreamingPatchCoalescer } from '../render-utils';
 import { getToolFold, setToolFold } from './fold-state';
 import { renderSecurityBanner } from './security-banner';
+import { renderModelFallbackBanner } from './model-fallback-banner';
 import {
   chunkRequestId,
   isPlanControlStatus,
@@ -128,7 +129,7 @@ import { messageStore, sessionStore } from '../stores/stores';
 import type { TabKey } from '../state';
 import { resolveChatRenderTargetId, openStudioChatPanel, isStudioView } from './studio-chrome-state';
 import { isStreamDebugEnabled, logStream } from '../stream-debug';
-import { setDisabledWorkPreferenceIdsForTurn, takeDisabledWorkPreferenceIds } from './composer-mention';
+import { setDisabledWorkPreferenceIdsForTurn, takeDisabledWorkPreferenceIds, type UserAgentMention } from './composer-mention';
 import { productModeStore } from '../stores/product-mode-store';
 
 // ---------- registry: 由 index.ts 在 init 时注入的回调（破循环） ----------
@@ -148,6 +149,7 @@ interface DispatchOptions {
   optimisticUserMessageId?: string;
   wikiConfirmationId?: string;
   workDisabledPreferenceIds?: string[];
+  userMentions?: UserAgentMention[];
 }
 /**
  * index.ts init 时调用，把 openSession / setTab 等顶层入口注入本模块。
@@ -247,6 +249,7 @@ export function updateGatewayDot(): void {
 export function updateComposerControls(): void {
   // ComposerView subscribes to stores and owns the execution controls.
   renderSecurityBanner();
+  renderModelFallbackBanner();
 }
 
 export function scrollChatToBottom(): void {
@@ -531,7 +534,11 @@ function patchStreamingTurn(sid: string, assistantId: string): boolean {
   }
   const thinkingEl = turnEl.querySelector<HTMLElement>(`[data-thinking-for="${assistantId}"] .process-timeline__thinking`);
   if (thinkingEl && msg.thinking != null) {
+    const followThinkingOutput = (
+      thinkingEl.scrollHeight - thinkingEl.scrollTop - thinkingEl.clientHeight
+    ) <= 24;
     thinkingEl.textContent = msg.thinking;
+    if (followThinkingOutput) thinkingEl.scrollTop = thinkingEl.scrollHeight;
   }
   // 实时计时：以整回合 batch 为准（工具阶段可能无正文 data-text-for，但仍需刷新 label）。
   patchStreamingTurnLabel(sid, assistantId);
@@ -634,6 +641,19 @@ export function renderChat(): void {
         void state.socket?.send({ action: 'followup_cancel', session_id: sid, question_id: questionId });
         patchBook(sid, { pendingFollowup: null });
         renderChat();
+      },
+    },
+    teamCommunicationHandlers: {
+      onRetry: (message) => {
+        const query = String(message.communicationRequestText || '').trim();
+        const memberId = String(message.agentId || (message.isLeader ? 'leader' : '')).trim();
+        if (!sessionId || !query || !memberId) return;
+        void dispatchWs(sessionId, query, [], {
+          userMentions: [{ kind: 'team_member', member_id: memberId }],
+        });
+      },
+      onCancel: () => {
+        if (sessionId) stopGeneration(sessionId);
       },
     },
     afterRender: (renderedSessionId) => {
@@ -954,6 +974,11 @@ function applyTeamInternalChunk(sessionId: string, chunk: TeamInternalChunk): vo
     ...(typeof body.mention_from === 'string' ? { mentionFrom: body.mention_from } : {}),
     ...(Array.isArray(body.mention_to) ? { mentionTo: body.mention_to.map(String) } : {}),
     ...(typeof body.mention_intent === 'string' ? { mentionIntent: body.mention_intent } : {}),
+    ...(typeof body.communication_kind === 'string' ? { communicationKind: body.communication_kind } : {}),
+    ...(typeof body.communication_status === 'string' ? { communicationStatus: body.communication_status } : {}),
+    ...(typeof body.request_id === 'string' ? { requestId: body.request_id } : {}),
+    ...(typeof body.reply_to === 'string' ? { replyTo: body.reply_to } : {}),
+    ...(typeof body.communication_request_text === 'string' ? { communicationRequestText: body.communication_request_text } : {}),
     ...(typeof body.display_mode === 'string' ? { displayMode: body.display_mode } : {}),
     ...(typeof body.collapsed_title === 'string' ? { collapsedTitle: body.collapsed_title } : {}),
     ...(typeof body.process_text === 'string' ? { processText: body.process_text } : {}),
@@ -997,10 +1022,31 @@ export function applyChunk(chunk: ChatChunk): void {
     return;
   }
   if (chunk.kind === 'channel_session_updated') {
-    const body = (chunk.body ?? {}) as { platform?: string };
+    const body = (chunk.body ?? {}) as { platform?: string; event?: string; query?: string };
     // 渠道会话开始/结束时都确保前端已订阅：开始订阅后才能收到实时 delta，
     // 结束订阅后也能通过 replay 补到可能错过的帧。
     subscribeSessions([sid]);
+    if (body.event === 'agent:start') {
+      // 渠道入站的用户消息不作为 WS 帧广播，先把原文补插到本地，
+      // 否则实时流出的回答会直接接在上一轮尾部，看起来像「串轮」。
+      // 去重：桌面本地发送的渠道会话消息已有乐观用户消息，不重复补插。
+      // 注意本地发送时尾部是乐观 assistant 占位，要向前找最后一条 user 消息比较。
+      const query = typeof body.query === 'string' ? body.query.trim() : '';
+      if (query) {
+        const msgs = getMessages(sid);
+        const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
+        const alreadyLocal = !!lastUser
+          && (lastUser.content === query || lastUser.content.startsWith(query));
+        if (!alreadyLocal) {
+          appendSessionMessage(sid, {
+            id: newMessageId('user'),
+            role: 'user',
+            content: query,
+            timestamp: Date.now(),
+          });
+        }
+      }
+    }
     void import('./channel-sessions').then(({ refreshChannelSessionsOnEvent }) =>
       refreshChannelSessionsOnEvent(body.platform, sid).then(() => renderWorkspaceHistory(openSessionFn)),
     );
@@ -1407,6 +1453,7 @@ export function consumePending(sessionId: string): void {
   if (head.clientIntent) dispatchOptions.clientIntent = head.clientIntent;
   if (head.optimisticUserMessageId) dispatchOptions.optimisticUserMessageId = head.optimisticUserMessageId;
   if (head.workDisabledPreferenceIds) dispatchOptions.workDisabledPreferenceIds = head.workDisabledPreferenceIds;
+  if (head.userMentions) dispatchOptions.userMentions = head.userMentions;
   void dispatchWs(sessionId, head.query, head.attachments ?? [], dispatchOptions);
 }
 
@@ -1423,6 +1470,7 @@ export function sendQueueItemNow(sessionId: string, id: string): void {
     ...(item.workDisabledPreferenceIds
       ? { workDisabledPreferenceIds: item.workDisabledPreferenceIds }
       : {}),
+    ...(item.userMentions?.length ? { userMentions: item.userMentions } : {}),
   });
 }
 
@@ -1502,6 +1550,9 @@ export async function dispatchWs(
   const requestId = newTurnRequestId();
   openTurnForRequest(sessionId, requestId);
   // 乐观置 running + 立刻渲染「正在思考」：覆盖后续 await socket.send 与长 TTFT 空白。
+  window.dispatchEvent(new CustomEvent('context:usage-cleared', {
+    detail: { sessionId },
+  }));
   setBusyWithUi(sessionId, true);
   setStatusWithUi(sessionId, 'running');
   renderChat();
@@ -1533,6 +1584,7 @@ export async function dispatchWs(
     ...(wikiExtras ? { wiki_kb_id: wikiExtras.wikiKbId } : {}),
     ...(dispatchOptions.wikiConfirmationId ? { wiki_confirmation_id: dispatchOptions.wikiConfirmationId } : {}),
     ...(workDisabledPreferenceIds.length > 0 ? { work_disabled_preference_ids: workDisabledPreferenceIds } : {}),
+    ...(dispatchOptions.userMentions?.length ? { user_mentions: dispatchOptions.userMentions } : {}),
   });
   if (!ok) {
     logStream('dispatch', 'send-ws-failed', { sessionId, requestId });
@@ -1552,7 +1604,7 @@ export async function dispatchWs(
   return true;
 }
 
-export async function sendMessage(text: string): Promise<void> {
+export async function sendMessage(text: string, userMentions: UserAgentMention[] = []): Promise<void> {
   if (!requireRendererLogin()) return;
   const plainContent = text.trim();
   const attachments = state.attachments;
@@ -1580,6 +1632,7 @@ export async function sendMessage(text: string): Promise<void> {
       workDisabledPreferenceIds: productModeStore.get().productMode === 'work'
         ? takeDisabledWorkPreferenceIds()
         : [],
+      ...(userMentions.length > 0 ? { userMentions } : {}),
     };
     if (queueEditDraft?.sessionId === sessionId) {
       queueEditDraft = null;
@@ -1608,7 +1661,10 @@ export async function sendMessage(text: string): Promise<void> {
     queueEditDraft = null;
   }
 
-  const sent = await dispatchWs(sessionId, content, takeAttachmentsForSend(), takeArmedSubScenario());
+  const sent = await dispatchWs(sessionId, content, takeAttachmentsForSend(), {
+    subScenario: takeArmedSubScenario(),
+    ...(userMentions.length > 0 ? { userMentions } : {}),
+  });
   if (sent) {
     clearSiteAnnotationDraft(sessionId);
     clearBlueprintAnnotationDraft(sessionId);
@@ -1654,6 +1710,11 @@ export function finalizeStreamingTurn(sessionId: string): void {
       turnDurationMs: startedAt != null ? Date.now() - startedAt : 0,
       timestamp: Date.now(),
     });
+  }
+  for (const message of list) {
+    if (message.role !== 'team_internal' || message.communicationKind !== 'user_mention_answer') continue;
+    if (!['published', 'waiting_reply', 'queued', 'delivered'].includes(message.communicationStatus || '')) continue;
+    patchMessage(sessionId, message.id, { communicationStatus: 'cancelled' });
   }
 }
 

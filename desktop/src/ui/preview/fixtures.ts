@@ -205,12 +205,6 @@ const commonResponses = {
     source_titles: {},
     source_files: {},
   }),
-  '/api/wiki/summary': ok({
-    ok: true,
-    kb_id: 'default',
-    status: 'ready',
-    summary: '产品知识库收录设计规范、功能说明与迭代记录。',
-  }),
   '/api/wiki/agent-session': ok({
     ok: true,
     session_id: 'fixture-wiki-agent',
@@ -234,7 +228,7 @@ const commonResponses = {
     uptime_s: 132_300,
     cpu_count: 12,
     cpu_percent: 36,
-    memory: { total_gb: 32, used_gb: 13.4, percent: 42 },
+    memory: { total_gb: 32, used_gb: 13.4, available_gb: 18.6, percent: 42 },
     disk: { total_gb: 512, used_gb: 238, free_gb: 274, percent: 46 },
     network: { bytes_sent: 28_300_000, bytes_recv: 91_700_000 },
     process: { rss_mb: 286, pid: 12_580 },
@@ -346,9 +340,11 @@ function sessionResponses(
       model_switchable: true,
     }),
     [`/api/session/${SESSION_ID}/context`]: ok({
+      available: true,
       used_tokens: 4_096,
       max_tokens: 32_768,
       ratio: 0.125,
+      source: 'provider',
     }),
     [`/api/session/${SESSION_ID}/plan`]: ok({
       active: Boolean(extras.plan),

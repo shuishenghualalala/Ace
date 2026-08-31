@@ -45,6 +45,7 @@
     <li>代码结构以模块边界为先：同一功能尽量收敛在已有 feature 子模块、样式模块和 typed API 封装内，避免临时脚本式调用和跨层循环依赖。</li>
     <li>可以参考 Hermes 等架构的交互和分层，但实现需按本仓库 Electron + Vanilla TypeScript 结构落地，不直接堆叠不合栈的代码。</li>
   </ul>
+  <p><b>2026-08-14：</b>修复新建对话 Welcome 中“画布”层级错误：文件/技能补全列表原本虽然自身为高层浮层，但被 Composer 根和 Shell 的 <code>z-index: 1</code> stacking context 限制，仍会被 <code>z-index: 2</code> 的 Crew Header、Logo 与爪子压住。现在仅在 <code>.mention-pop</code> 打开期间解除这两层局部 stacking context，并将承载浮层的输入面板提升到 Header 上方；项目浅灰条继续处在 Crew 主视觉下方，不改变 Welcome 原有趴伏关系。窗口高度不超过 <code>680px</code> 时，Crew 主体缩为 <code>140px</code> 并在 Header 底部保留 <code>16px</code> 安全间距，把主体与项目条的重叠从 <code>32px</code> 收至 <code>16px</code>；爪子仍独立锚定灰线上边缘。</p>
   <p><b>2026-08-10：</b>Desktop Shell 将左上角 Crew 品牌从标题栏移入贯穿窗口全高的 Sidebar：普通窗口使用 <code>128px</code>，窄窗口（<code>&lt;1180px</code>）压缩为 <code>56px</code>；品牌 Logo 与 Crew 字样在普通窗口上下排列，窄窗口保留 Logo 图标并隐藏文字，主导航同步切换为图标模式。顶部留白与右侧 <code>40px</code> 标题栏轨道一致，使品牌和上下文标题形成稳定的视觉对齐。新建对话 Welcome 去掉 Logo 圆形卡片并恢复单一居中阅读顺序：问候语粗且大，提示句细小克制，透明 Crew Logo 放大后作为独立主视觉。两只更大、使用 <code>4px</code> 圆角外框及同粗三趾线的“猛虎爪”不再跟随 Logo 猜偏移，而是由主 Composer 持有并直接跨在浅灰项目条的上边缘，向两侧拉开；窄窗仍同步缩放并响应 <code>prefers-reduced-motion</code>。欢迎语继续使用 6 组已确认文案并按本地自然日稳定轮换；没有新增后端 API 或业务模块。</p>
   <p><b>2026-08-09：</b>Composer 外援选择器统一使用黑白双框 Team Logo：外援 Agent、外援团队和已选中的顶部外援 chip 复用同一 <code>.session__team-logo</code> 结构，不再在 Composer 内按 provider 显示彩色首字母头像；外援中心其他页面继续保留 provider 头像。</p>
   <p><b>2026-08-08：</b>修复普通对话在窄窗口下 Crew Logo 贴近主内容左侧分隔线：共享 Conversation Surface 的消息轨道将 16px 左右安全间距计入外层最大宽度，小窗口收窄时仍保留稳定留白；宽窗口的 920px 正文基线和居中位置保持不变。Wiki、Studio 与会话预览继续使用各自既有局部覆盖。</p>
@@ -208,7 +209,7 @@
     <li>Gateway 的 <code>agent_label</code> 为 ACP 会话附带外部 <code>model</code>；外部 agent 未显式配置 model 时按 <code>provider/name</code> 回退。Desktop 将它作为消息 footer 与 Composer 的展示模型，且 draft 的展示模型优先于首发时持久化的 Crew 内部模型绑定。</li>
     <li>外部单 Agent 复用 Composer 底部 Model 按钮和现有弹层样式，但选项来自其 RuntimeProfile 模型目录；空闲时切换当前 Session 的 <code>external.model</code>，运行/排队/等待交互时按钮置灰禁用、关闭已展开弹层，后端同样拒绝。GET/PUT 使用同一字段恢复，避免 Codex 实际执行 5.5 而刷新后显示 Agent 默认模型。会话列表刷新不会再用 MobileWork 模型摘要覆盖已加载的外部 Runtime 目录；MobileWork 的模型目录、pending 切换和视觉样式保持原逻辑。</li>
     <li>外部单 Agent 复用 Composer 底部 Model 按钮和现有弹层样式，但选项来自其 RuntimeProfile 模型目录；空闲时切换当前 Session 的 <code>external.model</code>，运行/排队/等待交互时按钮置灰禁用、关闭已展开弹层，后端同样拒绝。GET/PUT 使用同一字段恢复，避免 Codex 实际执行 5.5 而刷新后显示 Agent 默认模型。Claude Code 不再展示笼统的“CLI 默认模型”：目录提供 <code>Claude Sonnet（当前）</code> 与固定版本项，气泡由消息 model id 在同一 Runtime 目录映射 label，不读取回答正文。会话列表刷新不会再用 MobileWork 模型摘要覆盖已加载的外部 Runtime 目录；MobileWork 的模型目录、pending 切换和视觉样式保持原逻辑。</li>
-    <li>外部 Team Session 不展示 Composer 模型按钮：团队成员模型由团队配置分别决定，聊天区不提供含义不明确的会话级统一切换；切回普通或外部单 Agent Session 时按钮恢复原逻辑。</li>
+    <li>外部 Team Session 不展示 Composer 模型按钮：团队成员模型由团队配置分别决定，聊天区不提供含义不明确的会话级统一切换；模型切换入口位于协作看板的成员卡片内，按成员调用会话模型 API；切回普通或外部单 Agent Session 时按钮恢复原逻辑。</li>
     <li>Composer 模式按钮标签与展开菜单使用同一选中优先级：当前会话显式选择的专家或专家团优先于历史保留的外援 <code>agent_binding</code>；因此从外援会话改选专家团后，按钮名称与菜单勾选都会落在“专家”，不会残留勾选“外援”。</li>
     <li>历史气泡优先展示消息自身持久化的实际模型：MobileWork 记录真正成功的 Provider 模型（包含 fallback），外部 Agent 记录 Session 生效模型；旧消息没有该字段时才回退当前 Session 模型。</li>
     <li>消息回合渲染采用真实发言者身份：外部单 Agent 使用 Agent 名称和头像；Team 内 <code>crew::builtin</code> Leader 使用 Q 版耳机机器人 SVG + <code>MobileWork</code>，Hermes 等成员使用各自成员头像。唯一例外是团队规划 Turn：它表示整个 Team 的 DAG 规划阶段，固定复用侧栏同款黑白双 Agent Logo，聊天区只等比缩放。</li>
@@ -239,9 +240,9 @@
   <h3>3.11 Wiki 知识库（只读浏览）</h3>
   <ul>
     <li>模块结构：单文件功能页 <code>features/wiki-page.ts</code>（模块级 view 状态 + render 拼 HTML 写 <code>#wiki-page-root</code> + bind 事件，与 skills/cron 页同构）；样式 <code>assets/styles/wiki-page.css</code>；入口 <code>index.html</code> 侧边栏 <code>data-tab="wiki"</code>（技能之后、任务之前）+ <code>#wiki-tab</code> 容器，<code>index.ts</code> 经 <code>bindWikiTab(() =&gt; setTab('wiki'))</code> 绑定，切入 tab 时首次刷新数据。</li>
-    <li>数据链路：renderer 不直连后端——<code>backendApi.wikiKBs / wikiPages / wikiPage / wikiSummary</code> → <code>getJSON()</code> → IPC <code>gateway:fetch</code>（主进程注入 JWT，<code>/api/</code> 前缀白名单内）→ crew gateway <code>/api/wiki/*</code>。列表走 <code>limit/offset/brief=1</code> 分页，详情按 <code>GET /api/wiki/pages/{id}</code> 懒加载并缓存于 <code>view.pageDetails</code>。</li>
+    <li>数据链路：renderer 不直连后端——<code>backendApi.wikiKBs / wikiPages / wikiPage</code> → <code>getJSON()</code> → IPC <code>gateway:fetch</code>（主进程注入 JWT，<code>/api/</code> 前缀白名单内）→ crew gateway <code>/api/wiki/*</code>。列表走 <code>limit/offset/brief=1</code> 分页，详情按 <code>GET /api/wiki/pages/{id}</code> 懒加载并缓存于 <code>view.pageDetails</code>。</li>
     <li>三视图语义（行为对齐 web 端，vanilla TS 重写）：<b>时间线</b>按更新时间分桶（今天/昨天/本周/本月/更早）；<b>文件树</b>按 <code>file_path</code> 构目录树（逻辑移植自 <code>web/src/lib/wikiTree.ts</code>），目录可折叠/展开；<b>类型</b>按 <code>page_type</code> 分组（人物/对象 → 术语/概念 → 主题/话题 → 原始资料）。</li>
-    <li>详情栏：类型/状态徽标 + 更新时间 + <code>file_path</code> + 标签 + Markdown 正文（<code>renderMarkdownHtml</code>，自带 DOMPurify）；来源经 <code>source_titles</code> 解析为标题；相关页面按标题匹配列表页并可点击跳转。未选中页面时显示 KB 概览（<code>/api/wiki/summary</code> 只读缓存，不因打开/刷新页面调用 LLM，失败静默）+ 空态提示。</li>
+    <li>详情栏：类型/状态徽标 + 更新时间 + <code>file_path</code> + 标签 + Markdown 正文（<code>renderMarkdownHtml</code>，自带 DOMPurify）；来源经 <code>source_titles</code> 解析为标题；相关页面按标题匹配列表页并可点击跳转。未选中页面时显示空态提示。</li>
     <li>分栏把手：列表 | 详情之间 <code>.wiki-sash</code> 可拖拽调宽（对齐 web <code>ResizablePanels</code>，实现模式同 inspector 宽度拖拽）——宽度存 <code>localStorage</code>（<code>mm.desktop.wikiListWidth.v1</code>，240–640px 钳制 + 50vw 上限），拖动中只改 DOM 样式不重渲染，mouseup 才持久化，双击复位 340px；图谱模式无把手（图谱占整栏）。</li>
     <li>Phase 1 边界：只读——上传、删除、编译进度见 3.12；不含图谱与 Wiki Agent 对话；刷新按钮前走 <code>requireRendererLogin</code> 拦截，加载失败统一 <code>notify()</code> 提示。</li>
     <li>边界态（2026-07-20 断点修复）：未登录显示登录引导态、<b>不发任何请求</b>（登录成功且当前停在 Wiki tab 时自动拉取）；没有任何 KB 时<b>自动初始化 default</b>（<code>backendApi.wikiInit('default')</code> → POST /api/wiki/init，对齐 web WikiHub，后端幂等；只自动试一次，失败落入失败空态由「刷新」手动重试）。</li>
@@ -452,6 +453,10 @@
   <table>
     <thead><tr><th>日期</th><th>范围</th><th>验证</th><th>结果</th></tr></thead>
     <tbody>
+      <tr><td>2026-08-17</td><td>修复 <code>960×640</code> 最小窗口 Welcome 仍有装饰遮挡：短窗 mascot 增加完整底部安全间距，双爪收进项目浅灰条内部，不再跨在灰条上沿。</td><td><code>shared-style-regression.test.ts</code>：新增短窗边界回归；TypeScript typecheck、变更范围 ESLint、全量 CSS lint、production build 与范围 <code>git diff --check</code> 通过。</td><td>通过；短窗保留 Crew 与双爪视觉，但 mascot、双爪和项目条各自落在清晰层级内；宽窗口定位不变。</td></tr>
+      <tr><td>2026-08-17</td><td>修正最小窗口 Welcome 的处理方向：不再通过移动爪子或继续压缩 Header 消除遮挡，而是让 Welcome 面板在 <code>960×640</code> 下成为真实纵向滚动容器；Composer 保持独立固定在底部，标题、Crew 文案和场景内容可完整上下查看，双爪恢复原有上沿构图。</td><td><code>shared-style-regression.test.ts</code>：新增短窗滚动链回归；TypeScript typecheck、变更范围 ESLint、全量 CSS lint、production build 与范围 <code>git diff --check</code> 通过。</td><td>通过。</td></tr>
+      <tr><td>2026-08-17</td><td>修正短窗滚动布局的 Composer 位置：保留 Welcome 原有“上 / Composer / 下”三行网格，只让第一行的 Welcome 面板承担纵向滚动，避免对话框被推到窗口最底部。</td><td><code>shared-style-regression.test.ts</code>：增加 Composer 中间轨道回归；TypeScript typecheck、变更范围 ESLint、全量 CSS lint、production build 与范围 <code>git diff --check</code> 通过。</td><td>通过。</td></tr>
+      <tr><td>2026-08-14</td><td>Welcome 文件/技能补全画布层级，以及最小高度窗口下 Crew Logo、猛虎爪与项目浅灰条的遮挡修复。</td><td><code>shared-style-regression.test.ts</code>：<code>11 passed</code>；TypeScript typecheck、变更范围 ESLint、全量 CSS lint、production/visual build 与范围 <code>git diff --check</code> 通过。<code>900×720</code> 视觉夹具输入 <code>/</code> 打开真实补全画布：Composer Root/Shell 为 <code>auto</code>、输入面板为 <code>3</code>、画布为 <code>400</code>；Logo 重叠采样点的首层元素为 <code>mention-pop</code> 条目。Escape 关闭后 Root/面板恢复 <code>1</code>。<code>960×640</code> 短窗中 mascot 为 <code>140px</code>，与项目条重叠由 <code>32px</code> 收至 <code>16px</code>，双爪垂直中心仍精确锚定项目条顶边；回到 <code>1280×800</code> 后 mascot 保持 <code>184px</code>。</td><td>通过；补全画布完整覆盖 Crew 主视觉，最小窗口不再遮住项目文字，普通窗口原有趴伏构图不变。</td></tr>
       <tr><td>2026-08-11</td><td>合并远端 Desktop Shell 响应式侧栏：普通窗口 <code>128px</code>、窄窗口 <code>56px</code>，Crew Logo 保留在侧边栏并在窄窗保留图标；同步远端 Wiki 进度与 Tooltip 改动。</td><td>Desktop 相关定向单测 <code>81 passed</code>；Python 安全、外援、Wiki 定向测试 <code>315 passed</code>；TypeScript typecheck、Desktop build、全量 CSS lint、Python compileall、<code>git diff --check</code> 通过。</td><td>本次合并范围通过。全量 Desktop 仍有工作区已有 Browser/Skills/Gateway 环境类失败；<code>tests/test_workspace.py</code> 另有 1 项旧路径断言与当前 owner runtime workspace 语义不一致，未归因于侧栏合并。</td></tr>
       <tr><td>2026-08-10</td><td>响应式全高 Sidebar 品牌区、Welcome 居中文案层级、放大 Crew 主视觉与 Composer 边线猛虎爪。</td><td><code>sidebar-nav.test.ts</code>、<code>welcome-scenarios.test.ts</code>、<code>shared-style-regression.test.ts</code>、<code>composer-dual-instance.test.ts</code>：<code>4 files / 18 passed</code>；TypeScript typecheck、变更范围 ESLint、全量 CSS lint、production build、visual fixture build 和范围 <code>git diff --check</code> 通过。最终视觉 Fixture 在 <code>1280×800</code> 验收：Sidebar 为 <code>128px</code> 全高展开态且品牌区高 <code>136px</code>；问候语粗大、副标题细小，mascot 为 <code>184px</code>；浅灰项目条上边缘与两只 <code>38×29px</code>、<code>4px</code> 粗线猛虎爪的垂直中心同为 <code>y=354</code>，无需依赖 Logo 偏移。</td><td>本次范围通过。全量 Desktop 基线为 <code>1547 passed / 69 failed</code>；失败集中在工作区已有 Browser 上传审批、Skills 页面改造及本地 Gateway 连接等非本模块在制项，未纳入本次 UI 交付。</td></tr>
       <tr><td>2026-08-08</td><td>Composer 外援列表独立滚动、Desktop/Web 组合头像与 provider 首字母像素化。</td><td>Desktop <code>composer-external-assistance.test.ts</code>：<code>9 passed</code>；Desktop typecheck、CSS lint、production build 通过。Web <code>AgentsHub.test.ts</code>、<code>Composer.test.tsx</code>、<code>Sidebar.test.tsx</code>：<code>19 passed</code>；Web typecheck、production build 通过。</td><td>通过；测试环境仍会输出未启动 <code>127.0.0.1:8000</code> 的 EPERM，但不影响 mock 覆盖用例。</td></tr>
@@ -577,6 +582,200 @@
       <li>黄小助手恢复为确认的小主体、白脸、圆润粗线版本，并保留完整透明画布留白；生产和设计参考素材同步，不再裁切放大。</li>
     </ul>
     <p>验证：新增模型隔离、Tray 光学比例和响应式样式回归测试；定向 4 个测试文件共 <code>36 passed</code>，TypeScript、CSS lint 与 production build 通过。真实 Renderer 在 1280px 和 900px 两种视口测得黄助手、图片画布与 Agent 头像均为 38px，中心线分别同为 439px 和 347px；Electron <code>nativeImage</code> 实际导出的默认/完成态均为非空 44×44 位图，完成态主体与默认态光学尺寸一致且庆祝星光保留。</p>
+  </section>
+  <section>
+    <h2>Team 看板模型入口、工作流文案与产物降噪（2026-08-11）</h2>
+    <ul>
+      <li>外部 Team 的 Composer 统一模型按钮继续隐藏；真实模型切换入口移动到协作看板“团队成员”卡片，每个成员显示自己的 Runtime 模型下拉框，并以 <code>member_id</code> 调用既有会话模型接口。成员运行中或 Runtime 不支持切换时，选择器置灰并展示原因。</li>
+      <li>团队成员卡恢复之前的像素小旗帜 Leader 标识；成员头像槽放大到 24px，Crew 头像和外部成员徽标保持同一视觉重量。Kimi ACP 在通过本地 provider catalog 补回模型后同步恢复 <code>model_switch</code> 能力，模型下拉框不再因能力漏标而置灰。</li>
+      <li>看板标题统一使用“团队工作流”，Hero 左侧 Team Logo 使用一黑一白双标记；节点展开详情改用浅色中性表面，移除深灰色遮罩式背景，保留执行过程层级和状态色。</li>
+      <li>看板不再把 Gateway 为每次 <code>agent_turn</code> 创建的 <code>.crew/tasks/task_*.json</code> 运行记录当作用户产物；仍保留真实的 <code>artifact_paths</code> 和有效输出文件。</li>
+      <li>改动收敛在既有 <code>team-collaboration-board</code>、<code>kanban-board.css</code>、<code>backend-client</code> 和前端 TaskBoard 模块，没有新增顶层模块或零散文件。</li>
+    </ul>
+    <p>验证：Desktop Team 看板定向测试 <code>7 passed</code>，Web TaskBoard 定向测试 <code>11 passed</code>；Desktop/Web TypeScript typecheck 与 Desktop CSS lint 通过。</p>
+  </section>
+  <section>
+    <h2>Team Logo 统一到外援阵容与对话（2026-08-11）</h2>
+    <ul>
+      <li>Desktop/Web“外援 → 我的阵容 → 我的团队”的团队卡片和团队详情头部直接复用 Team Session 的基础 <code>session__team-logo</code>，不再维护独立的 <code>team-card</code> 尺寸或样式，确保附件中的 Team Logo 完全一致。</li>
+      <li>对话中的 Team 规划回合使用黑白双 Agent Logo；内置 Crew Leader 回合恢复 Crew 自有头像，外部成员回合仍展示真实成员头像，保持团队身份与成员身份边界。</li>
+      <li>新版会话历史中的 Team 会话也直接渲染同一 Logo，不再回退到三人群组 <code>icon-team</code>；卡片与列表只复用现有 DOM/CSS，不新增图片资源或顶层模块。</li>
+    </ul>
+    <p>验证：Desktop 外援阵容、Team 会话历史与 Team 回归，以及 Web Team 消息回归通过；Desktop/Web TypeScript 和 Desktop CSS lint 通过。</p>
+  </section>
+  <section>
+    <h2>Team Composer @ 成员联想与结构化发送（2026-08-16）</h2>
+    <ul>
+      <li><b>候选分类：</b>Team 会话输入 <code>@</code> 时复用现有 Composer 补全，在同一浮层先展示当前团队成员，再展示文件/工作区引用；普通单 Agent 会话仍只展示原有文件候选。</li>
+      <li><b>协议边界：</b>选择成员后保留可读的 <code>@agent_id</code> 文本，同时通过 <code>user_mentions</code> 发送 <code>{kind: "team_member", member_id}</code>；成员 mention 不创建附件，也不进入 TeamSpec/DAG。</li>
+      <li><b>排队一致性：</b>忙碌会话的本地待发队列、立即发送和自动消费均保留结构化 mention，避免消息排队后退化为普通文本。</li>
+      <li><b>复用范围：</b>复用现有 <code>composer-mention.ts</code>、Team 目录、队列和 WebSocket dispatch，不新增业务模块；Wiki Composer 不主动生成 Team 成员候选。</li>
+    </ul>
+    <p>验证：Desktop <code>composer-mention.test.ts 45 passed</code>，Desktop/Web TypeScript typecheck 通过；Web Composer 定向测试 <code>5 passed</code>。</p>
+  </section>
+  <section>
+    <h2>用户 Agent mention 通信闭环（2026-08-16）</h2>
+    <ul>
+      <li><b>实时协议：</b>Desktop Team 内部消息接收并保留 <code>communication_kind</code>、<code>communication_status</code>、<code>request_id</code> 与 <code>reply_to</code>，用户 @ 成员的回答可与 Team Bus 原请求准确关联。</li>
+      <li><b>展示一致：</b>Desktop Team 气泡复用既有 ask 状态徽标，用户 mention 与 Agent 间 ask 共用“已发送 / 等待回答 / 回答中 / 已回答 / 失败”等状态文案。</li>
+      <li><b>历史映射：</b>Desktop history mapping 与 Web 使用相同字段契约，兼容既有 Team communication event；用户 mention 不新增任务、DAG 或产物。</li>
+      <li><b>实现边界：</b>复用既有 <code>TeamInternalChunk</code>、<code>ChatMessage</code>、<code>chat-controller</code> 与 <code>chat-render</code>，没有新增前端模块或资源。</li>
+    </ul>
+    <p>验证：用户 mention 后端定向回归、Desktop history mapping、Desktop TypeScript typecheck 与相关渲染回归通过。</p>
+  </section>
+  <section>
+    <h2>用户 Agent mention 历史恢复与失败状态（2026-08-16）</h2>
+    <ul>
+      <li>直接 @Agent 的回答、超时、失败和取消状态复用已有 Agent 子会话保存，不新增 TeamPlan、Task、DAG 或产物。</li>
+      <li>Desktop history mapping 读取统一的 <code>communication_kind</code>、<code>communication_status</code>、<code>request_id</code> 和 <code>reply_to</code>，刷新或重连后仍能显示通信状态。</li>
+      <li>通信去重按 request_id 保留，同样文本的多次用户 mention 不会在历史恢复时被折叠。</li>
+    </ul>
+    <p>验证：会话存储 round-trip、用户 mention、超时、历史 API 投影和通信去重回归通过。</p>
+  </section>
+  <section>
+    <h2>用户 Agent mention 幂等与状态闭环（2026-08-16）</h2>
+    <ul>
+      <li><code>request_id</code> 是一次直接 mention 的幂等键；并发、重连或重复发送同一请求不会重复唤醒成员。</li>
+      <li>失败、超时、取消均可从子会话恢复；新的 <code>request_id</code> 才会触发真正重试。</li>
+      <li>复用现有 session stop/interrupt 和 Desktop history mapping，实时消息与历史消息按通信关联字段合并。</li>
+    </ul>
+    <p>验证：并发重复请求、同 request_id 恢复、新 request_id 重试、取消状态和历史合并回归通过。</p>
+  </section>
+  <section>
+    <h2>用户 Agent mention 重试与取消（2026-08-16）</h2>
+    <ul>
+      <li><b>运行态：</b>直接 mention 先渲染“等待回答”气泡；操作入口通过既有 <code>conversation-renderer</code> 事件委托接线，取消复用 <code>stopGeneration()</code>，不新增 Desktop 专用后端接口。</li>
+      <li><b>重试：</b>失败、超时、取消且存在 <code>communicationRequestText</code> 时显示“重试”；回调复用 <code>dispatchWs()</code> 和原成员，自动生成新的 <code>request_id</code>。</li>
+      <li><b>状态一致：</b>Desktop history mapping、实时 reducer 和 DOM renderer 使用同一通信字段；等待帧与终态 answer 按 request_id 合并，刷新后仍可恢复终态。</li>
+      <li><b>范围：</b>只复用 <code>ChatMessage</code>、<code>TeamInternalChunk</code>、<code>chat-controller</code>、<code>conversation-renderer</code> 和既有样式；不新增模块、任务、DAG 或产物。</li>
+    </ul>
+    <p>验证：Desktop history mapping/渲染回归 72 passed，Desktop TypeScript typecheck 通过。</p>
+  </section>
+  <section>
+    <h2>用户 Agent mention 端到端验收（2026-08-16）</h2>
+    <ul>
+      <li><b>完整链路：</b>Desktop 结构化成员选择、Team 内部消息接收、实时气泡、历史映射和重连恢复均通过验证。</li>
+      <li><b>边界回归：</b>重复 request_id、失败/超时/取消、重试新 request_id，以及等待态与终态合并均通过；不新增 Desktop 专用通信接口。</li>
+      <li><b>结果：</b>Desktop 历史/渲染测试 72 passed，TypeScript typecheck 通过；与 Web 使用同一通信元数据和状态语义。</li>
+    </ul>
+  </section>
+  <section>
+    <h2>Team Request/Response 可读性修复（2026-08-17）</h2>
+    <ul>
+      <li><b>问题：</b>浅色主题的过程代码块使用近白色 <code>--mw-code-text-light</code>，但 <code>Request</code>/<code>Response</code> 背景是浅色表面，导致 JSON 内容几乎不可见。</li>
+      <li><b>修复：</b>过程时间线和流式对话的代码内容改用 <code>--mw-text-primary</code>；保留现有代码块布局、字体、滚动和深色主题语义，不修改通用代码令牌。</li>
+      <li><b>范围：</b>仅更新 <code>process-timeline.css</code>、<code>stream-chat.css</code> 及样式回归测试，没有新增模块或接口。</li>
+    </ul>
+    <p>验证：Desktop 样式回归 12 passed、Team 渲染回归 53 passed、TypeScript typecheck 和 CSS lint 通过。</p>
+  </section>
+  <section>
+    <h2>Team @Agent 显示名称与路由 ID 分离（2026-08-17）</h2>
+    <ul>
+      <li><b>用户界面：</b>选择团队成员后，输入框显示成员名称，例如 <code>@kk</code> 或 <code>@Crew 内置智能体</code>，不再显示 <code>agent_...</code> 内部编码。</li>
+      <li><b>通信协议：</b>Composer 保存可读显示 token；文件引用才会还原为 canonical <code>@file:</code> / <code>@folder:</code> / <code>@image:</code>，成员身份通过结构化 <code>user_mentions.member_id</code> 路由。</li>
+      <li><b>范围：</b>复用既有 <code>composer-mention</code> 的显示 token/canonical token 机制，不新增接口、模块或持久化字段。</li>
+    </ul>
+    <p>验证：Desktop composer mention 测试 46 passed，Desktop typecheck 通过。</p>
+  </section>
+  <section>
+    <h2>Team @Agent 输入选区重影修复（2026-08-17）</h2>
+    <ul>
+      <li><b>问题：</b>Composer 使用透明 textarea 承载光标/选区、覆盖层绘制正文；选中文字时浏览器又绘制 textarea 字形，导致文字重影并产生拥挤感。</li>
+      <li><b>修复：</b>在最终生效的 chat features 样式层为 mention source textarea 增加透明选区字形规则，保留原生选择、复制与光标行为，正文只由覆盖层显示。</li>
+      <li><b>范围：</b>仅更新既有 Composer 样式回归和 Desktop 前端文档，没有新增模块、接口或资源。</li>
+    </ul>
+    <p>验证：样式回归测试、Desktop typecheck、CSS lint、production build 与 <code>git diff --check</code> 通过。</p>
+  </section>
+  <section>
+    <h2>历史 Team mention 恢复与通信身份视觉修复（2026-08-17）</h2>
+    <ul>
+      <li>历史打开 Team Session 时，从持久化 session model 的 <code>external_team_id</code> 恢复到 mention 状态，@ 候选成员与新建 Team 会话一致。</li>
+      <li>Team 成员 tone 0/1 改用状态色，确保看板头像和内部消息气泡不会落成无色灰阶。</li>
+      <li>通信标题优先使用结构化 <code>mention_to</code> 修正方向；例如成员提交给 Leader 时显示“向 leader”，不再把节点标题中的旧目标当成当前收件人。</li>
+    </ul>
+    <p>验证：相关 Desktop/Web 渲染、session model 与样式回归测试，以及 Desktop/Web typecheck、CSS lint、production build 通过。</p>
+  </section>
+  <section>
+    <h2>Team @Agent 直达路由第一阶段（2026-08-17）</h2>
+    <ul>
+      <li><b>可读正文：</b>Composer 发送后保留用户选择的 <code>@kk</code> 或显示名；文件引用仍按既有规则还原为 <code>@file:</code> / <code>@folder:</code> / <code>@image:</code>。</li>
+      <li><b>结构化身份：</b>成员的稳定 <code>member_id</code> 只放在 <code>user_mentions</code>，由 Gateway 透传给 TeamManager，不再写入用户消息正文。</li>
+      <li><b>执行边界：</b>带结构化 mention 的回合在 TeamSpec/DAG 之前进入既有 Team ask 直达通道；没有 mention 的普通 Team prompt 保持原有工作流。</li>
+    </ul>
+    <p>验证：composer mention 与 Gateway mention 结构回归通过；未新增前端模块、接口或持久化字段。</p>
+  </section>
+  <section>
+    <h2>Team @Agent 直达生命周期第二阶段（2026-08-17）</h2>
+    <ul>
+      <li>直接 @Agent 的等待、回答、失败、超时和取消统一映射到同一个通信气泡，不再让错误帧留下“等待回答”的旧状态。</li>
+      <li>终态帧保留 <code>request_id</code>、<code>reply_to</code> 和 <code>communication_request_text</code>，历史恢复与实时消息使用同一字段。</li>
+      <li>失败/超时/取消继续复用既有“重试”入口；本阶段只补状态闭环，不新增 Desktop 通信接口或模块。</li>
+    </ul>
+    <p>验证：Desktop mention、Team 看板/消息回归和 typecheck 通过。</p>
+  </section>
+  <section>
+    <h2>Team @Agent 并发与取消竞态第三阶段（2026-08-18）</h2>
+    <ul>
+      <li><b>请求门控：</b>Desktop 继续复用既有 reducer turn gate，按 <code>request_id</code> 丢弃取消回合的迟到帧；新回合由既有 <code>dispatchWs()</code> 生成新的请求身份。</li>
+      <li><b>跨端一致：</b>后端 Agent/Provider 异常统一落成 <code>failed</code> 通信终态，Desktop 与 Web 共用已有状态字段和重试语义。</li>
+      <li><b>范围：</b>本阶段 Desktop 不新增模块或协议，保留现有 request-scoped turn gate，并补齐跨端通信契约文档。</li>
+    </ul>
+    <p>验证：Desktop TypeScript typecheck 通过；Web/后端直接 mention 并发、失败和取消竞态回归通过。</p>
+  </section>
+  <section>
+    <h2>Team @成员路由 ID 修复（2026-08-18）</h2>
+    <ul>
+      <li><b>问题：</b>外部 Agent 配置 ID 与 Team Runtime 成员 ID 被混用，导致候选显示为成员名但发送的是外部 Agent ID。</li>
+      <li><b>修复：</b>Desktop Composer 选择团队成员时，外部成员使用 <code>agent_name</code> 作为 Team mention ID，Leader 统一使用 <code>leader</code>；外部 Agent ID 继续只用于配置和模型切换。</li>
+      <li><b>范围：</b>复用既有 <code>composer-mention</code> 和 <code>user_mentions</code> 协议，不新增接口、模块或持久化字段。</li>
+    </ul>
+    <p>验证：Desktop Composer mention 测试 47 passed，Desktop TypeScript typecheck 通过。</p>
+  </section>
+  <section>
+    <h2>Team 实时成员职责展示降噪（2026-08-18）</h2>
+    <ul>
+      <li><b>问题：</b>Desktop 实时 Team 回合把成员完整 Markdown 角色提示直接展示在聊天标题，工作原则、协作关系和输出格式会挤占正文区域。</li>
+      <li><b>修复：</b>在实时 <code>renderTeamInternalMessage</code> 入口统一压缩成员职责，只保留可读的职责摘要；完整配置仍属于执行上下文，不进入用户消息标题。</li>
+      <li><b>布局：</b>职责摘要支持省略，通信状态徽标保持不换行，避免小窗口下被挤成竖排。</li>
+      <li><b>范围：</b>复用现有 Team 内部消息渲染、通信元数据和 CSS，不新增模块、接口、持久化字段或 DAG。</li>
+    </ul>
+    <p>验证：Desktop Team 渲染回归 55 passed，TypeScript typecheck、CSS lint、production build 与 <code>git diff --check</code> 通过。</p>
+  </section>
+  <section>
+    <h2>Team @Agent 直接通信流式 timeline（2026-08-18）</h2>
+    <ul>
+      <li><b>实时体验：</b>单独 @成员与团队节点回复共用文本增量、思考和工具 timeline；等待帧、过程帧和终态帧按同一个 <code>request_id</code> 合并为一个 Team 成员气泡。</li>
+      <li><b>语义边界：</b>direct mention 仍不创建 DAG、任务、依赖或产物；只复用 Agent 回答过程，不显示团队派发/验收节点。</li>
+      <li><b>实现：</b>Desktop history mapping 对 <code>user_mention_answer + team_stream</code> 复用现有流式合并、思考合并和工具调用合并逻辑，终态保留过程区。</li>
+    </ul>
+    <p>验证：Desktop history mapping 与 Team 渲染回归 75 passed，后端 direct mention 回归 6 passed。</p>
+  </section>
+  <section>
+    <h2>Team @Agent 成功态标签降噪（2026-08-18）</h2>
+    <ul>
+      <li>用户直接 @成员成功回答时不再显示“已回答”徽标，避免在正文气泡旁重复表达完成态，并与团队成员普通回复保持一致。</li>
+      <li>等待回答、排队中、回答中、失败、超时和取消仍保留状态提示；失败、超时和取消继续提供已有的重试入口。</li>
+      <li>只调整既有 Desktop Team 内部消息状态文案映射，不新增模块、接口、持久化字段或 DAG。</li>
+    </ul>
+    <p>验证：直接 mention 成功态渲染回归、Desktop TypeScript typecheck 与 production build 通过。</p>
+  </section>
+  <section>
+    <h2>Team 通信回合展示统一（2026-08-18）</h2>
+    <ul>
+      <li>成员名称行不再追加“已发送”“等待回答”“回答中”“已超时”等通信状态标签，避免与团队成员普通回复的标题结构不一致。</li>
+      <li>处理中、思考和工具调用继续由既有 Agent Turn timeline 展示；失败、超时和取消继续保留正文及既有重试/取消操作。</li>
+      <li>用户直接 @成员、成员间 ask、Leader 通信与普通 Team 成员回合统一复用 Desktop 的 <code>renderAgentTurn</code> 和 <code>renderTeamInternalMessage</code>，不新增通信组件或协议字段。</li>
+    </ul>
+    <p>验证：Desktop Team 通信渲染回归、TypeScript typecheck 与 production build 通过。</p>
+  </section>
+  <section>
+    <h2>Team 通信状态样式收口（2026-08-18）</h2>
+    <ul>
+      <li>删除已不再渲染的成员名称行通信状态徽标样式，避免保留无法触达的 Desktop CSS。</li>
+      <li><code>communication_status</code> 仍作为通信生命周期字段使用，继续驱动历史恢复、重试和取消判断；状态不再承担名称行视觉展示职责。</li>
+      <li>本阶段不新增组件、接口、持久化字段或 Team DAG 逻辑。</li>
+    </ul>
+    <p>验证：Desktop Team 回合渲染回归、CSS 引用扫描、TypeScript typecheck 与 production build 通过。</p>
   </section>
 </div>
 </body>

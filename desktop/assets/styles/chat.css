@@ -1046,7 +1046,7 @@ button.chat-message-file:hover {
 }
 
 .chat-assistant-turn {
-  max-width: min(920px, 100%);
+  max-width: 100%;
   gap: var(--mw-space-3);
 }
 
@@ -2060,6 +2060,16 @@ button.chat-message-file:hover {
     caret-color: var(--mw-text-primary);
 }
 
+/*
+ * 选区仍由 textarea 原生承载，但正文由 .chat-input-overlay 绘制。
+ * 选中时显式隐藏 textarea 的字形，避免原生选区文字与覆盖层重影。
+ */
+.chat-input-container textarea.chat-input-overlay-source::selection {
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    background: var(--mw-bg-selected);
+}
+
 .input-container textarea::placeholder {
     color: var(--mw-text-muted);
 }
@@ -2941,7 +2951,6 @@ button.chat-message-file:hover {
 }
 
 /* ===== 追问选择框（ask_followup_question）— 对齐 web FollowupQuestionCard ===== */
-.followup-card-wrap--permission,
 .followup-card-wrap--staffing {
   position: fixed;
   inset: 0;
@@ -2952,6 +2961,17 @@ button.chat-message-file:hover {
   background: var(--mw-status-info-bg);
   overscroll-behavior: contain;
   animation: permission-backdrop-in 140ms ease-out both;
+}
+.followup-card-wrap--permission {
+  position: fixed;
+  left: var(--permission-card-left, auto);
+  right: var(--permission-card-right, clamp(var(--mw-space-4), 3vw, var(--mw-space-8)));
+  bottom: var(--permission-card-bottom, clamp(var(--mw-space-4), 3vw, var(--mw-space-8)));
+  z-index: var(--mw-z-dialog);
+  width: var(--permission-card-width, min(440px, calc(100vw - 32px)));
+  max-width: calc(100vw - 32px);
+  pointer-events: none;
+  animation: permission-floating-in 160ms cubic-bezier(.2, .8, .2, 1) both;
 }
 .followup-card {
   width: min(100%, 720px);
@@ -2965,7 +2985,7 @@ button.chat-message-file:hover {
   scroll-margin-bottom: 120px;
 }
 .followup-card--permission {
-  width: min(520px, calc(100vw - 32px));
+  width: 100%;
   max-height: min(680px, calc(100vh - 48px));
   margin: 0;
   padding: 0;
@@ -2974,7 +2994,7 @@ button.chat-message-file:hover {
   border-radius: var(--mw-radius-4);
   background: var(--mw-bg-surface);
   box-shadow: 0 24px 80px color-mix(in srgb, var(--mw-black) 24%, transparent), 0 2px 8px color-mix(in srgb, var(--mw-black) 18%, transparent);
-  animation: permission-dialog-in 160ms cubic-bezier(.2, .8, .2, 1) both;
+  pointer-events: auto;
 }
 .followup-card--staffing {
   width: min(560px, calc(100vw - 32px));
@@ -2982,10 +3002,10 @@ button.chat-message-file:hover {
   margin: 0;
   padding: 0;
   overflow: hidden;
-  border-color: color-mix(in srgb, var(--mw-border-default) 88%, #7d846d);
+  border-color: color-mix(in srgb, var(--mw-border-default) 88%, var(--mw-team-accent-base));
   border-radius: 14px;
   background: var(--mw-bg-surface);
-  box-shadow: 0 24px 80px rgb(0 0 0 / 34%), 0 2px 8px rgb(0 0 0 / 16%);
+  box-shadow: var(--mw-shadow-dialog);
   animation: permission-dialog-in 160ms cubic-bezier(.2, .8, .2, 1) both;
 }
 .staffing-dialog__source {
@@ -2998,7 +3018,7 @@ button.chat-message-file:hover {
   font-weight: 600;
 }
 .staffing-dialog__source .session__team-logo {
-  color: color-mix(in srgb, #768064 76%, var(--mw-text-primary));
+  color: color-mix(in srgb, var(--mw-team-accent) 76%, var(--mw-text-primary));
   transform: scale(1.05);
   transform-origin: center;
 }
@@ -3008,9 +3028,9 @@ button.chat-message-file:hover {
   padding-bottom: 16px;
 }
 .staffing-dialog__header-icon {
-  color: color-mix(in srgb, #768064 78%, var(--mw-text-primary));
-  background: color-mix(in srgb, #aeb99a 16%, var(--mw-bg-surface));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, #768064 22%, transparent);
+  color: color-mix(in srgb, var(--mw-team-accent) 78%, var(--mw-text-primary));
+  background: color-mix(in srgb, var(--mw-team-accent-soft) 16%, var(--mw-bg-surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mw-team-accent) 22%, transparent);
 }
 .staffing-dialog__header .followup-card__subtitle {
   max-width: 440px;
@@ -3029,10 +3049,10 @@ button.chat-message-file:hover {
   gap: 8px;
   margin-bottom: 18px;
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, #8f9b7a 22%, var(--mw-border-default));
+  border: 1px solid color-mix(in srgb, var(--mw-team-accent-border) 22%, var(--mw-border-default));
   border-radius: 9px;
-  color: color-mix(in srgb, #657052 78%, var(--mw-text-primary));
-  background: color-mix(in srgb, #aeb99a 11%, var(--mw-bg-app));
+  color: color-mix(in srgb, var(--mw-team-accent-strong) 78%, var(--mw-text-primary));
+  background: color-mix(in srgb, var(--mw-team-accent-soft) 11%, var(--mw-bg-app));
   font-size: 12.5px;
   line-height: 1.45;
 }
@@ -3057,9 +3077,9 @@ button.chat-message-file:hover {
   background: color-mix(in srgb, var(--mw-bg-app) 88%, var(--mw-bg-subtle));
 }
 .followup-card--staffing .followup-card__option:has(input:checked) {
-  border-color: color-mix(in srgb, #768064 72%, var(--mw-border-subtle));
-  background: color-mix(in srgb, #aeb99a 12%, var(--mw-bg-app));
-  box-shadow: inset 3px 0 0 color-mix(in srgb, #768064 80%, transparent);
+  border-color: color-mix(in srgb, var(--mw-team-accent) 72%, var(--mw-border-subtle));
+  background: color-mix(in srgb, var(--mw-team-accent-soft) 12%, var(--mw-bg-app));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--mw-team-accent) 80%, transparent);
 }
 .staffing-dialog__actions {
   display: flex;
@@ -3085,9 +3105,9 @@ button.chat-message-file:hover {
   width: 42px;
   height: 42px;
   border-radius: 11px;
-  color: color-mix(in srgb, #667254 82%, var(--mw-text-primary));
-  background: color-mix(in srgb, #aeb99a 16%, var(--mw-bg-app));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, #768064 20%, transparent);
+  color: color-mix(in srgb, var(--mw-team-accent-muted) 82%, var(--mw-text-primary));
+  background: color-mix(in srgb, var(--mw-team-accent-soft) 16%, var(--mw-bg-app));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mw-team-accent) 20%, transparent);
 }
 .staffing-dialog__status-copy {
   min-width: 0;
@@ -3097,8 +3117,8 @@ button.chat-message-file:hover {
   font-size: 16px;
 }
 .followup-card--staffing-failed .staffing-dialog__status-icon {
-  color: var(--mw-status-danger, #dc2626);
-  background: color-mix(in srgb, var(--mw-status-danger, #dc2626) 9%, var(--mw-bg-app));
+  color: var(--mw-status-danger);
+  background: color-mix(in srgb, var(--mw-status-danger) 9%, var(--mw-bg-app));
 }
 .staffing-dialog__spinner {
   width: 18px;
@@ -3236,48 +3256,77 @@ button.chat-message-file:hover {
   gap: var(--mw-space-2);
 }
 .followup-card__option {
+  position: relative;
   display: flex;
-  align-items: center;
-  gap: var(--mw-space-2);
-  min-height: 46px;
-  padding: var(--mw-space-2) var(--mw-space-3);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-4);
-  background: var(--mw-bg-app);
+  align-items: flex-start;
+  gap: var(--mw-space-3);
+  min-height: 48px;
+  padding: var(--mw-space-3);
+  border: 1px solid var(--mw-border-default);
+  border-radius: var(--mw-radius-3);
+  background: var(--mw-bg-subtle);
   cursor: pointer;
   transition: var(--mw-transition-interactive);
 }
-.followup-card__option:hover {
-  border-color: color-mix(in srgb, var(--mw-text-muted) 34%, var(--mw-border-subtle));
-  background: color-mix(in srgb, var(--mw-bg-selected) 82%, var(--mw-bg-app));
+.followup-card__option:hover:not(:has(input:disabled)) {
+  border-color: var(--mw-border-strong);
+  background: var(--mw-bg-selected);
+}
+.followup-card__option:active:not(:has(input:disabled)) {
+  transform: scale(var(--mw-press-scale));
 }
 .followup-card__option:has(input:checked) {
   border-color: color-mix(in srgb, var(--mw-action-primary) 72%, var(--mw-border-subtle));
   background: color-mix(in srgb, var(--mw-action-primary) 9%, var(--mw-bg-app));
   box-shadow: inset 3px 0 0 color-mix(in srgb, var(--mw-action-primary) 78%, transparent);
 }
+.followup-card__option:has(input:disabled) {
+  cursor: default;
+  opacity: 0.58;
+}
 .followup-card__option:focus-within {
   border-color: var(--mw-action-primary);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--mw-action-primary) 22%, transparent);
 }
 .followup-card__option input {
-  flex: 0 0 auto;
-  margin: 0;
-  accent-color: var(--mw-action-primary);
-}
-.followup-card__option input[type="radio"] {
-  width: 17px;
-  height: 17px;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 .followup-card__option span {
   font-size: var(--mw-type-compact-size);
   color: var(--mw-text-secondary);
+}
+.followup-card__option .followup-card__option-key {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  place-items: center;
+  border: 1px solid var(--mw-border-strong);
+  border-radius: var(--mw-radius-2);
+  background: var(--mw-bg-surface);
+  color: var(--mw-text-primary);
+  font-size: var(--mw-type-label-size);
+  font-weight: var(--mw-type-item-weight);
+  line-height: 1;
+  transition: var(--mw-transition-interactive);
+}
+.followup-card__option:has(input:checked) .followup-card__option-key {
+  border-color: var(--mw-action-primary);
+  background: var(--mw-action-primary);
+  color: var(--mw-action-primary-text);
 }
 .followup-card__option-copy {
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: var(--mw-space-1);
+  padding-top: 2px;
 }
 .followup-card__option .followup-card__option-description {
   color: var(--mw-text-muted);
@@ -3400,7 +3449,6 @@ button.chat-message-file:hover {
   outline-offset: 2px;
 }
 @media (max-width: 640px) {
-  .followup-card-wrap--permission,
   .followup-card-wrap--staffing {
     padding: var(--mw-space-4);
   }
@@ -3443,6 +3491,11 @@ button.chat-message-file:hover {
 
 @keyframes permission-dialog-in {
   from { opacity: 0; transform: translateY(5px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes permission-floating-in {
+  from { opacity: 0; transform: translateY(8px) scale(.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 

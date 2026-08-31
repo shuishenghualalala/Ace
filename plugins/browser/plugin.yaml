@@ -6,6 +6,7 @@ author: "Crew"
 kind: backend
 provides_tools:
   - browser_use
+  - browser_use_advanced
 ui_hints:
   emoji: 🌐
   capability: browser

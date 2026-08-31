@@ -5,14 +5,20 @@
 
 import { backendApi } from '../backend-client';
 import { setRuntimeStyle } from '../components/runtime-style';
-import { $, $$, escapeHtml, notify, state } from '../state';
+import { $, $$, escapeHtml, state } from '../state';
 import {
   activeComposerModelId,
+  composerModelOptions,
+  loadSessionModel,
   resolveComposerModelLabel,
+  sessionDisplayModelLabel,
   setSessionModel,
   syncSessionModelUi,
+  type ComposerModelOption,
 } from './session-model';
+import { isDraftSession } from './workspaces';
 import { syncExternalAgentsFeatureUi } from './external-agents-feature';
+import { maybeStartModelTourOnce } from './model-tour';
 import { syncSecurityModuleFeatureUi } from './security-mode';
 
 let dropdownOpen = false;
@@ -86,9 +92,18 @@ export interface ModelSelectPopoverOptions {
   id?: string;
   width?: number;
   align?: 'start' | 'end';
+  /** 模型目录；缺省为 config 里的 Crew 模型。主对话传 composerModelOptions(sid) 以覆盖 external runtime 目录。 */
+  models?: ComposerModelOption[];
+  /** 提供时在浮层头部渲染「打开模型配置引导」按钮（主对话）。 */
+  onModelTour?: () => void;
 }
 
 const MODEL_CHECK_ICON = `<svg class="composer-select-item__check" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
+
+/** config 里的 Crew 模型 → 浮层条目：直接复用 composerModelOptions 的 Crew 分支（null 会话无绑定）。 */
+function defaultModelOptions(): ComposerModelOption[] {
+  return composerModelOptions(null);
+}
 
 /**
  * 打开模型选择浮层（composer-select-popover 视觉与 composer-toolbar 各浮层一致）。
@@ -97,27 +112,35 @@ const MODEL_CHECK_ICON = `<svg class="composer-select-item__check" viewBox="0 0 
  */
 export function openModelSelectPopover(opts: ModelSelectPopoverOptions): () => void {
   const { anchor, activeId, onPick } = opts;
-  const models = state.config?.models ?? [];
+  const models = opts.models ?? defaultModelOptions();
   const width = opts.width ?? 320;
 
   const popover = document.createElement('div');
   if (opts.id) popover.id = opts.id;
-  popover.className = 'composer-floating-popover composer-select-popover';
+  // --model 修饰类承载布局样式（composer-context.css），主对话与 Wiki 实例同一浮层同一外观。
+  popover.className = 'composer-floating-popover composer-select-popover composer-select-popover--model';
   setRuntimeStyle(popover, 'width', `${width}px`);
   popover.setAttribute('role', 'listbox');
   popover.setAttribute('aria-label', '选择模型');
+  const modelTourHeader = opts.onModelTour
+    ? `
+    <div class="composer-select-popover__header">
+      <span>选择模型</span>
+      <button type="button" class="composer-select-popover__help" data-model-tour-open aria-label="打开模型配置引导" title="打开模型配置引导">?</button>
+    </div>`
+    : '';
   popover.innerHTML = models.length
     ? `
+      ${modelTourHeader}
       <div class="composer-select-popover__section">可用模型</div>
       <div class="composer-select-popover__list">
         ${models
           .map(
             (m) => `
-          <button type="button" class="composer-select-item${m.id === activeId ? ' is-selected' : ''}" data-model-id="${escapeHtml(m.id)}">
-            <span class="composer-select-item__icon composer-select-item__icon--model">${escapeHtml((m.name || m.model || '?').slice(0, 1).toUpperCase())}</span>
-            <span class="composer-select-item__body">
-              <span class="composer-select-item__title">${escapeHtml(m.name || m.model)}</span>
-              <span class="composer-select-item__desc${m.has_key ? '' : ' composer-select-item__desc--warn'}">${m.has_key ? escapeHtml(m.model || m.id) : '未配置 API Key'}</span>
+          <button type="button" class="composer-select-item composer-select-item--model${m.id === activeId ? ' is-selected' : ''}" data-model-id="${escapeHtml(m.id)}" title="${escapeHtml(m.description)}" aria-label="${escapeHtml(`${m.label}${m.description ? `，${m.description}` : ''}`)}"${m.selectable ? '' : ' disabled'}>
+            <span class="composer-select-item__body composer-select-item__body--model">
+              <span class="composer-select-item__title">${escapeHtml(m.label)}${m.default ? ' · 默认' : ''}</span>
+              ${m.warning ? `<span class="composer-select-item__meta composer-select-item__meta--warn">${escapeHtml(m.description)}</span>` : ''}
             </span>
             ${m.id === activeId ? MODEL_CHECK_ICON : '<span class="composer-select-item__spacer"></span>'}
           </button>
@@ -126,7 +149,7 @@ export function openModelSelectPopover(opts: ModelSelectPopoverOptions): () => v
           .join('')}
       </div>
     `
-    : '<div class="composer-select-popover__empty">暂无模型，请前往配置页</div>';
+    : `${modelTourHeader}<div class="composer-select-popover__empty">暂无模型，请前往配置页</div>`;
 
   document.body.appendChild(popover);
   const place = (): void => {
@@ -160,6 +183,12 @@ export function openModelSelectPopover(opts: ModelSelectPopoverOptions): () => v
   document.addEventListener('click', onDocClick, true);
   document.addEventListener('keydown', onKeydown, true);
 
+  popover.querySelector<HTMLElement>('[data-model-tour-open]')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    close();
+    opts.onModelTour?.();
+  });
+
   popover.querySelectorAll('[data-model-id]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const id = btn.getAttribute('data-model-id');
@@ -169,6 +198,94 @@ export function openModelSelectPopover(opts: ModelSelectPopoverOptions): () => v
   });
 
   return close;
+}
+
+// ── Composer 模型 chip 控制器（主对话 / Wiki 问答面板各实例化一个） ──
+
+export interface ComposerModelControl {
+  /** 按当前 getSessionId() 重刷 chip 文案。 */
+  refresh(): void;
+  /** 浮层开着时关闭（幂等）。 */
+  close(): void;
+  dispose(): void;
+}
+
+export interface ComposerModelControlOptions {
+  /** 本实例的会话来源（主对话 = 全局活跃会话；Wiki = 内嵌会话）。 */
+  getSessionId: () => string | null;
+  /** chip 文案元素；缺省在 anchor 内查 .mw-context-chip__label。 */
+  labelEl?: HTMLElement | null;
+  /** 打开浮层前的协调钩子（主对话用来先关掉其他工具栏浮层）。 */
+  onBeforeOpen?: () => void;
+  /** 提供时浮层头部带「模型配置引导」入口（主对话）。 */
+  onModelTour?: () => void;
+  /** 切换模型时透传的 workspace_id；缺省走主 Composer 工作区。 */
+  workspaceId?: string;
+}
+
+/**
+ * Composer 工具栏的模型 chip：点击开合统一模型浮层，选中走会话级 setSessionModel，
+ * 文案跟随 session:model-changed（按 sessionId 过滤，多实例互不干扰）。
+ */
+export function createComposerModelControl(
+  anchor: HTMLButtonElement,
+  opts: ComposerModelControlOptions,
+): ComposerModelControl {
+  const controller = new AbortController();
+  const labelEl = opts.labelEl ?? anchor.querySelector<HTMLElement>('.mw-context-chip__label');
+  let closePopover: (() => void) | null = null;
+
+  const syncLabel = (): void => {
+    if (labelEl) labelEl.textContent = sessionDisplayModelLabel(opts.getSessionId()) || '模型';
+  };
+
+  const close = (): void => {
+    closePopover?.();
+  };
+
+  anchor.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (closePopover) {
+      closePopover();
+      return;
+    }
+    if (anchor.disabled || !state.config) return;
+    opts.onBeforeOpen?.();
+    const sid = opts.getSessionId();
+    anchor.classList.add('is-open');
+    anchor.setAttribute('aria-expanded', 'true');
+    closePopover = openModelSelectPopover({
+      anchor,
+      activeId: activeComposerModelId(sid),
+      models: composerModelOptions(sid),
+      align: 'end',
+      width: 300,
+      ...(opts.onModelTour ? { onModelTour: opts.onModelTour } : {}),
+      onPick: (modelId) => {
+        void setSessionModel(modelId, sid ?? undefined, opts.workspaceId);
+      },
+      onClose: () => {
+        closePopover = null;
+        anchor.classList.remove('is-open');
+        anchor.setAttribute('aria-expanded', 'false');
+      },
+    });
+  }, { signal: controller.signal });
+
+  window.addEventListener('session:model-changed', (ev) => {
+    const detail = (ev as CustomEvent<{ sessionId?: string }>).detail;
+    if (detail?.sessionId && detail.sessionId === opts.getSessionId()) syncLabel();
+  }, { signal: controller.signal });
+  syncLabel();
+
+  return {
+    refresh: syncLabel,
+    close,
+    dispose() {
+      controller.abort();
+      closePopover?.();
+    },
+  };
 }
 
 export function syncModelUi(): void {
@@ -199,6 +316,11 @@ export async function loadConfig(): Promise<void> {
     syncModelUi();
     syncExternalAgentsFeatureUi();
     syncSecurityModuleFeatureUi();
+    maybeStartModelTourOnce(state.config);
+    // 模型 CRUD / Key 变化会改变服务端 demo_mode 判定；刷新当前会话绑定，
+    // 让演示模式横幅不必等下次会话切换才更新（草稿会话无服务端绑定，跳过）。
+    const sid = state.activeSessionId;
+    if (sid && !isDraftSession(sid)) void loadSessionModel(sid);
     return;
   } catch {
     state.config = null;

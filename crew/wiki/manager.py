@@ -27,6 +27,8 @@ class WikiSessionManager:
         self._pending_cards: dict[SessionKey, list[dict[str, Any]]] = {}
         self._pending_changes: dict[SessionKey, list[dict[str, Any]]] = {}
         self._confirmations: dict[tuple[str, str, str], dict[str, Any]] = {}
+        # (owner, session_id, action, kb_id) 会话级批量授权（内存态，进程生命周期）
+        self._action_grants: set[tuple[str, str, str, str]] = set()
         self._loaded: set[SessionKey] = set()
         # 当前会话选中的知识库（默认 "default"）
         self._kb_ids: dict[SessionKey, str] = {}
@@ -184,6 +186,31 @@ class WikiSessionManager:
         expired = [key for key, value in self._confirmations.items() if float(value.get("expires_at", 0)) <= current]
         for key in expired:
             self._confirmations.pop(key, None)
+
+    # ---- 会话级批量授权（「本批次全部允许」） ----
+
+    def grant_action(
+        self,
+        session_id: str,
+        *,
+        action: str,
+        kb_id: str,
+        owner_account_id: str | None = None,
+    ) -> None:
+        """记录会话级授权：本进程内同 (action, kb_id) 的后续危险操作不再询问。"""
+        owner, sid = self._key(session_id, owner_account_id)
+        self._action_grants.add((owner, sid, str(action), str(kb_id)))
+
+    def has_action_grant(
+        self,
+        session_id: str,
+        *,
+        action: str,
+        kb_id: str,
+        owner_account_id: str | None = None,
+    ) -> bool:
+        owner, sid = self._key(session_id, owner_account_id)
+        return (owner, sid, str(action), str(kb_id)) in self._action_grants
 
 
 def time_iso() -> str:

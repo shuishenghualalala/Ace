@@ -14,6 +14,7 @@ export interface AgentTurnIdentity {
   role?: string;
   tone?: number;
   crewLogo?: boolean;
+  teamLogo?: boolean;
   external?: boolean;
 }
 
@@ -27,6 +28,7 @@ interface Props {
   processClassName?: string;
   collapsibleTitle?: string;
   afterContent?: ReactNode;
+  nameSuffix?: ReactNode;
   onApprovePlan?: () => void;
   onRejectPlan?: () => void;
   onRejectAndExitPlan?: () => void;
@@ -42,6 +44,7 @@ export default function AgentTurnBubble({
   processClassName = "",
   collapsibleTitle,
   afterContent,
+  nameSuffix,
   onApprovePlan,
   onRejectPlan,
   onRejectAndExitPlan,
@@ -103,7 +106,11 @@ export default function AgentTurnBubble({
       id={id}
       data-message-id={id?.replace(/^message-/, "")}
     >
-      {identity.crewLogo ? (
+      {identity.teamLogo ? (
+        <div className="msg__avatar msg__avatar--team team-internal__avatar">
+          <span className="session__team-logo" aria-hidden="true"><i /><i /></span>
+        </div>
+      ) : identity.crewLogo ? (
         <div className="msg__avatar bot team-internal__avatar">
           <AgentAvatarLogo />
         </div>
@@ -116,6 +123,7 @@ export default function AgentTurnBubble({
         <div className={`msg__name${className.includes("team-internal") ? " team-internal__name" : ""}`}>
           {className.includes("team-internal") ? <strong>{identity.name}</strong> : identity.name}
           {identity.role && <em>{identity.role}</em>}
+          {nameSuffix}
         </div>
         {collapsibleTitle ? (
           <details className="team-internal__collapse">

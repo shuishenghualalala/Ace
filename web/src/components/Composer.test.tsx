@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import Composer from "./Composer";
+import Composer, { formatTeamMentionToken, teamMemberMentionId } from "./Composer";
 import ExternalAgentAvatar from "./ExternalAgentAvatar";
 import type { AppConfig } from "../types";
 
@@ -81,6 +81,29 @@ describe("Composer team execution tier picker", () => {
     expect(enabledHtml).toContain(">外援</button>");
     expect(enabledHtml).toContain("external-agent-avatar");
     expect(enabledHtml).not.toContain(">Agents</button>");
+  });
+});
+
+describe("Composer team member mention display", () => {
+  it("uses the Team Runtime member id instead of the external Agent id", () => {
+    expect(teamMemberMentionId({
+      agentId: "agent_c6f06632e6a4",
+      mentionId: "kk",
+      isLeader: false,
+    })).toBe("kk");
+    expect(teamMemberMentionId({
+      agentId: "agent_leader",
+      isLeader: true,
+    })).toBe("leader");
+  });
+
+  it("uses the member name instead of the internal agent id", () => {
+    expect(formatTeamMentionToken({ agentId: "agent_c6f06632e6a4", name: "kk" })).toBe("@kk");
+  });
+
+  it("keeps spaced names readable", () => {
+    expect(formatTeamMentionToken({ agentId: "crew-builtin", name: " Crew   内置智能体 " }))
+      .toBe("@Crew 内置智能体");
   });
 });
 

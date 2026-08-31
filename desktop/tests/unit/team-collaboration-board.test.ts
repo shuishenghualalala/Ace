@@ -92,6 +92,29 @@ const tasks: Task[] = [
   },
 ];
 
+describe('blocked Team node ownership', () => {
+  it('shows an unassigned blocked node as waiting for assignment', () => {
+    const nodes = makeTeamFlowNodes([{
+      id: 'blocked-verify',
+      task_id: 'blocked-verify',
+      kind: 'team',
+      session_id: SESSION_ID,
+      title: '测试验证',
+      assignee: '',
+      status: 'blocked',
+      result: '用户拒绝补员',
+      progress: {
+        source: 'team_kanban',
+        plan_node_id: 'verify',
+        runtime_blocking: { status: 'blocked' },
+        previous_assignee: 'kk',
+      },
+    }]);
+
+    expect(nodes[0].owner).toBe('待分配');
+  });
+});
+
 beforeEach(() => {
   __resetAllStoresForTest();
   __resetTeamCollaborationBoardForTest();
@@ -126,6 +149,44 @@ beforeEach(() => {
     ],
   }]);
   vi.spyOn(backendApi, 'externalAgents').mockResolvedValue([]);
+  vi.spyOn(backendApi, 'getSessionModel').mockResolvedValue({
+    ok: true,
+    source: 'team',
+    scope: 'team',
+    external_team_id: 'team-product',
+    model_binding_revision: 1,
+    members: [
+      {
+        member_id: 'crew::builtin',
+        member_name: 'Crew',
+        is_leader: true,
+        model_profile_id: 'crew-model',
+        model_label: 'Crew Model',
+        model_switchable: true,
+        status: 'idle',
+        models: [{ id: 'crew-model', label: 'Crew Model', default: true }, { id: 'crew-fast', label: 'Crew Fast' }],
+      },
+      {
+        member_id: 'agent-frontend',
+        member_name: '前端工程师',
+        is_leader: false,
+        model_profile_id: 'frontend-model',
+        model_label: 'Frontend Model',
+        model_switchable: true,
+        status: 'idle',
+        models: [{ id: 'frontend-model', label: 'Frontend Model', default: true }, { id: 'frontend-fast', label: 'Frontend Fast' }],
+      },
+    ],
+  });
+  vi.spyOn(backendApi, 'setSessionModel').mockResolvedValue({
+    ok: true,
+    source: 'team',
+    scope: 'team_member',
+    member_id: 'agent-frontend',
+    member_name: '前端工程师',
+    model_profile_id: 'frontend-fast',
+    model_label: 'Frontend Fast',
+  });
 });
 
 afterEach(() => {
@@ -182,9 +243,11 @@ describe('协作看板 HTML', () => {
 
     expect(html).toContain('协作看板');
     expect(html).toContain('Team Flow');
-    expect(html).toContain('团队 DAG 工作流');
+    expect(html).toContain('团队工作流');
     expect(html).toContain('Crew');
     expect(html).toContain('href="#avatar-headphones"');
+    expect(html).toContain('class="pixel-flag"');
+    expect(html).not.toContain('class="leader-flag"');
     expect(html).not.toContain('assistant.png');
     expect(html).not.toContain('Crew 内置智能体');
     expect(html).toContain('Leader 统筹团队协作，负责项目计划与验收把关');
@@ -209,6 +272,39 @@ describe('协作看板 HTML', () => {
     expect(expandedHtml).toContain('data-team-open-path="/tmp/team-board.ts"');
     expect(expandedHtml).toContain('执行详情');
     expect(expandedHtml).toContain('工具调用：apply_patch');
+  });
+
+  it('在成员卡片提供按成员切换模型的入口', async () => {
+    await refreshTeamCollaborationBoard(SESSION_ID);
+    document.body.innerHTML = buildTeamCollaborationBoardHtml(SESSION_ID);
+    activateTeamCollaborationBoard(SESSION_ID);
+
+    const selector = document.querySelector<HTMLSelectElement>('[data-team-member-id="agent-frontend"]');
+    expect(selector).not.toBeNull();
+    expect(selector?.value).toBe('frontend-model');
+    expect(selector?.options).toHaveLength(2);
+
+    if (!selector) throw new Error('成员模型选择器缺失');
+    selector.value = 'frontend-fast';
+    selector.dispatchEvent(new Event('change'));
+    expect(backendApi.setSessionModel).toHaveBeenCalledWith(
+      SESSION_ID,
+      'frontend-fast',
+      { member_id: 'agent-frontend' },
+    );
+  });
+
+  it('不把后台 agent_turn 的 task JSON 当成用户产物', async () => {
+    vi.mocked(backendApi.tasks).mockResolvedValueOnce([{
+      ...tasks[0],
+      output_ref: '/owner/.crew/tasks/task_internal.json',
+    }]);
+    await refreshTeamCollaborationBoard(SESSION_ID);
+
+    const html = buildTeamCollaborationBoardHtml(SESSION_ID);
+
+    expect(html).not.toContain('task_internal.json');
+    expect(html).not.toContain('产物');
   });
 
   it('轮询数据未变化时不触发看板重绘，避免中断滚动条拖拽', async () => {

@@ -1,7 +1,7 @@
 /**
  * Wiki 知识库页：左侧 Wiki Agent 对话主区 + 右侧知识库面板（目录+详情）（对齐 web WikiHub）。
  *
- * 数据源：GET /api/wiki/kbs + /api/wiki/pages（brief=1 分页）+ /api/wiki/pages/{id} + /api/wiki/summary
+ * 数据源：GET /api/wiki/kbs + /api/wiki/pages（brief=1 分页）+ /api/wiki/pages/{id}
  *         + /api/wiki/graph（Phase 3 图谱，由 features/wiki-graph.ts 消费）
  * 写操作：POST /api/wiki/upload（主进程 gateway:upload IPC）+ /api/wiki/ingest(+cancel)
  *         + DELETE /api/wiki/pages/{id} + DELETE /api/wiki/pages（批量）
@@ -41,7 +41,6 @@ import {
   type WikiVaultDocument,
 } from '../backend-client';
 import { $, escapeHtml, notify, state } from '../state';
-import { renderMarkdownHtml } from '../markdown';
 import { mountFoldedMarkdown, type FoldedMarkdownHandle } from '../markdown-fold';
 import { showContextMenu, type ContextMenuItem } from '../lib/context-menu';
 import { showConfirmDialog, showPromptDialog } from '../ui-feedback';
@@ -73,6 +72,9 @@ export interface WikiAgentEntryRequest {
 let wikiAgentEntryHandler: ((req: WikiAgentEntryRequest) => void) | null = null;
 let wikiAgentPanelRenderer: ((root: HTMLElement, req: WikiAgentEntryRequest) => void) | null = null;
 let wikiAgentKbDeletedHandler: ((kbId: string) => void) | null = null;
+let wikiBrowserSurfaceRenderer: ((root: HTMLElement, sessionId: string) => void) | null = null;
+let wikiBrowserSurfaceOpen = false;
+let wikiBrowserSurfaceSession = '';
 
 export function setWikiAgentEntryHandler(fn: ((req: WikiAgentEntryRequest) => void) | null): void {
   wikiAgentEntryHandler = fn;
@@ -82,6 +84,35 @@ export function setWikiAgentPanelRenderer(
   fn: ((root: HTMLElement, req: WikiAgentEntryRequest) => void) | null,
 ): void {
   wikiAgentPanelRenderer = fn;
+}
+
+export function setWikiBrowserSurfaceRenderer(
+  fn: ((root: HTMLElement, sessionId: string) => void) | null,
+): void {
+  wikiBrowserSurfaceRenderer = fn;
+}
+
+export function openWikiBrowserSurface(sessionId: string): void {
+  const normalized = sessionId.trim();
+  if (!normalized) return;
+  wikiBrowserSurfaceSession = normalized;
+  wikiBrowserSurfaceOpen = true;
+  renderShell();
+}
+
+/** Rebind the existing Wiki browser surface without making it depend on kbId. */
+export function setWikiBrowserSurfaceSession(sessionId: string): void {
+  const normalized = sessionId.trim();
+  if (!normalized || !wikiBrowserSurfaceOpen || normalized === wikiBrowserSurfaceSession) return;
+  wikiBrowserSurfaceSession = normalized;
+  renderShell();
+}
+
+export function closeWikiBrowserSurface(): void {
+  if (!wikiBrowserSurfaceOpen) return;
+  wikiBrowserSurfaceOpen = false;
+  wikiBrowserSurfaceSession = '';
+  renderShell();
 }
 
 export function setWikiAgentKbDeletedHandler(
@@ -512,8 +543,6 @@ interface WikiViewState {
   /** 页面详情接口返回的正向与反向结构化关系。 */
   relationPages: Record<string, WikiRelationPage[]>;
   sourceTitles: WikiSourceTitles;
-  /** KB 概览（/api/wiki/summary）；未生成或加载失败时为 null。 */
-  kbSummary: { summary: string; page_count?: number | undefined; source_count?: number | undefined; generated_at?: number | undefined; status: string } | null;
   /** 文件树已展开目录路径。 */
   expandedPaths: Set<string>;
   /** 是否已完成首次加载（避免每次切 tab 都打满量请求）。仅加载成功后置位。 */
@@ -545,7 +574,6 @@ function initialViewState(): WikiViewState {
     sourcePages: {},
     relationPages: {},
     sourceTitles: {},
-    kbSummary: null,
     expandedPaths: new Set<string>(DEFAULT_EXPANDED_PATHS),
     loaded: false,
     kbsLoadFailed: false,
@@ -1129,18 +1157,8 @@ function detailHtml(group: WikiDetailGroup): string {
           <p class="wiki-detail__empty-hint">拖拽 tab 到此处，或从目录打开页面</p>
         </div>`;
     }
-    const summary = view.kbSummary
-      ? `<div class="wiki-overview">
-          <div class="wiki-overview__title">知识库概览</div>
-          <div class="md-body chat-markdown wiki-overview__body">${renderMarkdownHtml(view.kbSummary.summary)}</div>
-          ${view.kbSummary.page_count != null || view.kbSummary.source_count != null
-            ? `<div class="wiki-overview__meta">${view.kbSummary.page_count != null ? `${view.kbSummary.page_count} 个页面` : ''}${view.kbSummary.page_count != null && view.kbSummary.source_count != null ? ' · ' : ''}${view.kbSummary.source_count != null ? `${view.kbSummary.source_count} 个来源` : ''}</div>`
-            : ''}
-        </div>`
-      : '';
     return `
       <div class="wiki-detail__empty">
-        ${summary}
         <p class="wiki-detail__empty-hint">选择右侧页面查看详情，或在左侧对话栏基于知识库提问</p>
       </div>`;
   }
@@ -1285,7 +1303,7 @@ function flushGroupDirty(group: WikiDetailGroup): void {
   void saveWikiPageDraft(group.id, group.selectedId);
 }
 
-async function resolveAndOpenWikiPage(title: string): Promise<boolean> {
+export async function openWikiPageByTitle(title: string): Promise<boolean> {
   const normalized = title.trim().toLocaleLowerCase();
   const local = view.pages.find((page) =>
     [page.title, ...page.aliases].some((value) => value.trim().toLocaleLowerCase() === normalized),
@@ -1323,7 +1341,6 @@ interface DetailSig {
   selectedId: string | null;
   page: WikiPage | null;
   sourceTitles: WikiSourceTitles;
-  kbSummary: { summary: string; page_count?: number | undefined; source_count?: number | undefined; generated_at?: number | undefined; status: string } | null;
   loading: boolean;
   /** 组内 tab 列表 + 激活 tab：tab 增删/切换时组子树需重建 tab 栏。 */
   tabsKey: string;
@@ -1335,7 +1352,6 @@ function currentDetailSig(group: WikiDetailGroup): DetailSig {
     selectedId,
     page: selectedId ? view.pageDetails[selectedId] ?? view.pages.find((p) => p.id === selectedId) ?? null : null,
     sourceTitles: view.sourceTitles,
-    kbSummary: selectedId ? null : view.kbSummary,
     loading: selectedId ? loadingDetails.has(selectedId) : false,
     tabsKey: `${group.tabs.map(tabKey).join('|')}#${groupActiveKey(group) ?? ''}`,
   };
@@ -1346,9 +1362,6 @@ function sameDetailSig(a: DetailSig, b: DetailSig): boolean {
     a.selectedId === b.selectedId &&
     a.page === b.page &&
     a.sourceTitles === b.sourceTitles &&
-    a.kbSummary?.summary === b.kbSummary?.summary &&
-    a.kbSummary?.page_count === b.kbSummary?.page_count &&
-    a.kbSummary?.source_count === b.kbSummary?.source_count &&
     a.loading === b.loading &&
     a.tabsKey === b.tabsKey
   );
@@ -1460,11 +1473,11 @@ function renderShell(): void {
           </section>`;
       })
       .join(groupSashHtml);
-    body = `
-      <div class="wiki-body">
-        <aside class="wiki-agent-pane" data-wiki-agent-panel aria-label="Wiki Agent 对话"></aside>
-        <div class="wiki-sash" data-wiki-browser-sash role="separator" aria-orientation="vertical" title="拖拽调整知识库面板宽度，双击复位"></div>
-        <div class="wiki-browser-pane${graphMode ? ' wiki-browser-pane--graph' : ''}"${browserPaneStyleAttr()}>
+    const browserPaneMarkup = wikiBrowserSurfaceOpen
+      ? `<div class="wiki-browser-pane wiki-browser-pane--surface" style="width: ${browserWidth}px">
+          <div class="wiki-browser-surface" data-wiki-browser-surface data-session-id="${escapeHtml(wikiBrowserSurfaceSession)}"></div>
+        </div>`
+      : `<div class="wiki-browser-pane${graphMode ? ' wiki-browser-pane--graph' : ''}"${browserPaneStyleAttr()}>
           <div class="wiki-list-pane"${catalogPaneStyleAttr()}>
             ${batchBarHtml()}
             <nav class="hub-segment wiki-view-tabs" aria-label="列表视图">${tabs}</nav>
@@ -1476,7 +1489,12 @@ function renderShell(): void {
           <div class="wiki-detail-pane">
             <div class="wiki-detail-groups" data-orientation="${view.groupOrientation}">${detailGroupsHtml}</div>
           </div>
-        </div>
+        </div>`;
+    body = `
+      <div class="wiki-body">
+        <aside class="wiki-agent-pane" data-wiki-agent-panel aria-label="Wiki Agent 对话"></aside>
+        ${wikiBrowserSurfaceOpen ? '' : '<div class="wiki-sash" data-wiki-browser-sash role="separator" aria-orientation="vertical" title="拖拽调整知识库面板宽度，双击复位"></div>'}
+        ${browserPaneMarkup}
       </div>`;
   }
 
@@ -1490,6 +1508,9 @@ function renderShell(): void {
   // 已解析正文）、图谱画布（SVG 全量重建 + 逐节点重绑事件，wiki-graph 内部另有签名比对）。
   const liveAgentPanel = root.querySelector<HTMLElement>('[data-wiki-agent-panel]');
   const keepAgentPanel = view.kbId && liveAgentPanel?.dataset.kbId === view.kbId ? liveAgentPanel : null;
+  const liveBrowserSurface = wikiBrowserSurfaceOpen
+    ? root.querySelector<HTMLElement>('[data-wiki-browser-surface]')
+    : null;
   // 面板节点虽被保留，但 innerHTML 重建会把它短暂 detach，浏览器把内部滚动位置
   // 重置为 0（对话跳回最早消息）。与 listScrollMemory 同理：先记后恢复。
   const agentMessagesScrollTop =
@@ -1513,10 +1534,10 @@ function renderShell(): void {
   const liveListScroll = root.querySelector<HTMLElement>('.wiki-list-scroll');
   if (liveListScroll && listScrollMemory) listScrollMemory.top = liveListScroll.scrollTop;
   root.innerHTML = `
-    <div class="page-shell page-shell--wiki${wikiBrowserOpen ? '' : ' wiki-browser-collapsed'}">
+    <div class="page-shell page-shell--wiki${wikiBrowserOpen || wikiBrowserSurfaceOpen ? '' : ' wiki-browser-collapsed'}">
       <header class="page-header page-header--hub">
         <div class="page-header__copy">
-          <h1 class="page-header__title">Wiki <span class="accent">知识库</span></h1>
+          <h1 class="page-header__title">Crew 笔记</h1>
           <p class="page-header__desc">都什么年代了，还在古法记笔记？？</p>
         </div>
         <div class="page-header__actions">
@@ -1542,6 +1563,14 @@ function renderShell(): void {
       agentPanelKept = true;
       const messagesEl = keepAgentPanel.querySelector<HTMLElement>('[data-wiki-agent-messages]');
       if (messagesEl && agentMessagesScrollTop > 0) messagesEl.scrollTop = agentMessagesScrollTop;
+    }
+  }
+  let browserSurfaceKept = false;
+  if (liveBrowserSurface && wikiBrowserSurfaceOpen) {
+    const placeholder = root.querySelector<HTMLElement>('[data-wiki-browser-surface]');
+    if (placeholder) {
+      placeholder.replaceWith(liveBrowserSurface);
+      browserSurfaceKept = true;
     }
   }
   // 各组占位节点随 innerHTML 重新生成，签名未变的组子树换回复用。
@@ -1571,7 +1600,7 @@ function renderShell(): void {
       element: target,
       markdown: page.content || '',
       onChange: () => scheduleWikiPageSave(group.id, page.id),
-      onWikiLink: (title) => void resolveAndOpenWikiPage(title),
+      onWikiLink: (title) => void openWikiPageByTitle(title),
     });
   };
   for (const group of view.detailGroups) {
@@ -1613,6 +1642,10 @@ function renderShell(): void {
     if (panel) {
       wikiAgentPanelRenderer?.(panel, { kbId: view.kbId, kbName: currentKbName() });
     }
+  }
+  if (view.kbId && wikiBrowserSurfaceOpen && !browserSurfaceKept) {
+    const surface = root.querySelector<HTMLElement>('[data-wiki-browser-surface]');
+    if (surface) wikiBrowserSurfaceRenderer?.(surface, wikiBrowserSurfaceSession);
   }
   // 图谱视图：renderShell 重建 DOM 后重新挂载（图谱模块自管数据/布局/视口状态，重挂载不丢；
   // 画布节点被保留且状态未变时 mountWikiGraph 内部 no-op）。
@@ -2018,20 +2051,6 @@ function clearDropZoneHighlight(container: HTMLElement): void {
   container.querySelectorAll('.is-drop-target').forEach((el) => el.classList.remove('is-drop-target'));
 }
 
-/** KB 概览只用于详情空态展示，失败静默（不打扰主流程）。 */
-async function loadKbSummary(): Promise<void> {
-  if (!view.kbId) return;
-  const seq = loadSeq;
-  try {
-    const res = await backendApi.wikiSummary(view.kbId);
-    if (seq !== loadSeq) return;
-    view.kbSummary = res.status === 'ready' && res.summary ? { summary: res.summary, page_count: res.page_count, source_count: res.source_count, generated_at: res.generated_at, status: res.status } : null;
-    if (!activeGroup().selectedId) renderShell();
-  } catch {
-    /* 概览加载失败不提示 */
-  }
-}
-
 /** 切 KB / 整页重载（KB 切换、删除、wiki:changed 事件等入口；无页头刷新按钮）。 */
 async function reloadAll(): Promise<void> {
   loadSeq += 1;
@@ -2048,7 +2067,6 @@ async function reloadAll(): Promise<void> {
   view.pageDetails = {};
   view.sourcePages = {};
   view.relationPages = {};
-  view.kbSummary = null;
   view.expandedPaths = new Set<string>(DEFAULT_EXPANDED_PATHS);
   loadingDetails.clear();
   loadingVaultDocs.clear();
@@ -2061,7 +2079,6 @@ async function reloadAll(): Promise<void> {
   if (view.kbId) {
     await loadVaultDocument('Home.md');
   }
-  void loadKbSummary();
 }
 
 // 文件附件统一从对话区 Composer 进入 Wiki Agent 工作流；页面不再编排上传或 ingest。
@@ -2131,14 +2148,14 @@ async function handleDeleteKb(): Promise<void> {
 
 // ── 单条操作（重命名 / 删除，Phase 2） ──
 
-/** 删除后重新加载列表与概览（互不依赖，并行）；删的是某组当前选中页时清空该组详情栏。 */
+/** 删除后重新加载列表；删的是某组当前选中页时清空该组详情栏。 */
 async function refreshAfterDelete(deletedIds: string[]): Promise<void> {
   for (const group of view.detailGroups) {
     if (group.selectedId && deletedIds.includes(group.selectedId)) {
       group.selectedId = null;
     }
   }
-  await Promise.all([loadPages(), loadKbSummary()]);
+  await loadPages();
 }
 
 /** 重命名：应用内输入弹窗（Electron 不支持 window.prompt），只更新 title，后端缺省字段沿用旧值。 */
@@ -2611,7 +2628,7 @@ function bindEvents(): void {
       const btn = (e.target as HTMLElement).closest('[data-rel-title]') as HTMLElement | null;
       if (!btn) return;
       const title = btn.getAttribute('data-rel-title') ?? '';
-      void resolveAndOpenWikiPage(title);
+      void openWikiPageByTitle(title);
     });
   }
 }

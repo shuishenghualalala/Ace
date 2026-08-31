@@ -52,7 +52,9 @@ def _build_wiki_agent_context_reminder(
     # 构建 KB 列表摘要
     if kbs:
         kb_list = "\n".join(
-            f"  - {kb.id} ({kb.name or kb.id}): {kb.summary.page_count} pages, {kb.summary.source_count} sources"
+            f"  - {kb.id} ({kb.name or kb.id}): "
+            f"{store.count_pages(owner_account_id=owner, kb_id=kb.id)} pages, "
+            f"{len(store.list_raws(owner_account_id=owner, kb_id=kb.id))} sources"
             for kb in kbs[:20]
         )
     else:

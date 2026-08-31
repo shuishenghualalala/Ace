@@ -340,6 +340,106 @@ describe('Team Session history mapping', () => {
       collapsedTitle: '核心逻辑的执行过程',
     });
   });
+
+  it('deduplicates a live user mention answer already restored from history', () => {
+    const history = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '我当前使用 K3 模型。',
+      event_type: 'team_communication',
+      source_session_id: 'desktop_demo::turn::mention_req_2::coder',
+      agent_id: 'coder',
+      communication_kind: 'user_mention_answer',
+      communication_status: 'answered',
+      request_id: 'mention_req_2',
+      reply_to: 'bus_msg_2',
+    });
+    const live = { ...history, id: 'live-mention-answer' };
+
+    const merged = mergeTeamInternalMessage([history], live);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].requestId).toBe('mention_req_2');
+    expect(merged[0].communicationStatus).toBe('answered');
+  });
+
+  it('replaces a waiting direct mention with the terminal answer by request id', () => {
+    const waiting = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '正在询问 coder…',
+      agent_id: 'coder',
+      communication_kind: 'user_mention_answer',
+      communication_status: 'waiting_reply',
+      request_id: 'mention_req_waiting',
+      communication_request_text: '你使用的是什么模型？',
+    });
+    const answered = {
+      ...waiting,
+      id: 'answered',
+      content: '当前使用 K3 模型。',
+      communicationStatus: 'answered',
+      replyTo: 'bus_msg_waiting',
+    };
+
+    const merged = mergeTeamInternalMessage([waiting], answered);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].content).toBe('当前使用 K3 模型。');
+    expect(merged[0].communicationStatus).toBe('answered');
+  });
+
+  it('merges direct mention streaming frames into one answer timeline', () => {
+    const waiting = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '正在询问 coder…',
+      agent_id: 'coder',
+      communication_kind: 'user_mention_answer',
+      communication_status: 'waiting_reply',
+      request_id: 'mention_req_stream',
+      source_session_id: 'desktop_demo::turn::mention_req_stream::coder',
+    });
+    const stream = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '当前使用 ',
+      agent_id: 'coder',
+      communication_kind: 'user_mention_answer',
+      communication_status: 'delivered',
+      request_id: 'mention_req_stream',
+      event_type: 'team_stream',
+      display_mode: 'stream',
+      collapsed_title: 'coder 的回答过程',
+      source_session_id: 'desktop_demo::turn::mention_req_stream::coder',
+      thinking: '先确认模型配置。',
+      tool_calls: [{
+        id: 'runtime-info-1',
+        name: 'runtime_info',
+        arguments: {},
+        status: 'running',
+      }],
+    });
+    const answered = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '当前使用 Kimi Code/K3。',
+      agent_id: 'coder',
+      communication_kind: 'user_mention_answer',
+      communication_status: 'answered',
+      request_id: 'mention_req_stream',
+      source_session_id: 'desktop_demo::turn::mention_req_stream::coder',
+      event_type: 'team_communication',
+    });
+
+    const streaming = mergeTeamInternalMessage([waiting], stream, { append: true });
+    const merged = mergeTeamInternalMessage(streaming, answered);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      content: '当前使用 Kimi Code/K3。',
+      communicationStatus: 'answered',
+      eventType: 'team_communication',
+      processText: '当前使用 ',
+    });
+    expect(merged[0].thinking).toBe('先确认模型配置。');
+    expect(merged[0].toolCalls?.[0]).toMatchObject({ toolCallId: 'runtime-info-1', status: 'running' });
+  });
 });
 
 describe('inferTurnFileChangesFromToolCalls', () => {

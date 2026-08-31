@@ -32,6 +32,7 @@ from crew.core.types import ToolCall
 from crew.browser.manager import _bounded
 from plugins.browser.tool import (
     BROWSER_USE_SCHEMA,
+    BROWSER_USE_ADVANCED_SCHEMA,
     CAPABILITY_DISABLED,
     BrowserUseTool,
     validate_args,
@@ -120,7 +121,7 @@ async def plugin_tool(tmp_path, monkeypatch):
         await manager.aclose()
 
 
-# ---- 装配：只暴露单一 browser_use ----
+# ---- 装配：默认工具 + 延迟加载高级动作 ----
 
 
 def test_build_app_exposes_only_browser_use(tmp_path):
@@ -138,18 +139,19 @@ def test_build_app_exposes_only_browser_use(tmp_path):
     # record_install 必须一次性审批并在安装前复核 trace/draft 摘要。
     assert sorted(browser_names) == [
         "browser_use",
+        "browser_use_advanced",
         "record_compile",
         "record_install",
         "record_replay",
     ]
-    # browser_use 直接进入主 schema（不 deferred）；deferred catalog 中无 browser_*
+    # browser_use 直接进入主 schema；高级动作只在 tool_search 命中后加载。
     assert browser_schemas[0].get("_crew_should_defer") is False
-    deferred_names = {
-        (s.get("function") or {}).get("name")
-        for s in schemas
-        if s.get("_crew_should_defer")
-    }
-    assert all(not str(name).startswith("browser_") for name in deferred_names)
+    advanced = next(
+        s for s in browser_schemas
+        if (s.get("function") or {}).get("name") == "browser_use_advanced"
+    )
+    assert advanced.get("_crew_should_defer") is True
+    assert "mouse_click" in advanced["function"]["parameters"]["properties"]["action"]["enum"]
 
 
 def test_plugin_loaded_and_skill_root_registered(tmp_path):
@@ -475,10 +477,11 @@ def test_public_schema_exposes_action_specific_required_fields():
             {"action": "drag", "start_ref": "p1:e1", "end_ref": "p1:e2"}
         )
     )
+    advanced_validator = Draft202012Validator(BROWSER_USE_ADVANCED_SCHEMA["parameters"])
     assert not list(
-        validator.iter_errors(
-            {
-                "action": "mouse_click",
+        advanced_validator.iter_errors(
+                {
+                    "action": "mouse_click",
                 "x": -1.25,
                 "y": 2.5,
                 "delay_ms": 0.5,
@@ -486,7 +489,7 @@ def test_public_schema_exposes_action_specific_required_fields():
         )
     )
     assert not list(
-        validator.iter_errors(
+        advanced_validator.iter_errors(
             {
                 "action": "mouse_drag",
                 "start_x": 1,
@@ -497,17 +500,17 @@ def test_public_schema_exposes_action_specific_required_fields():
         )
     )
     assert not list(
-        validator.iter_errors(
+        advanced_validator.iter_errors(
             {"action": "drop", "ref": "p1:e1", "data": {}}
         )
     )
     assert list(
-        validator.iter_errors(
+        advanced_validator.iter_errors(
             {"action": "drop", "ref": "p1:e1"}
         )
     )
     assert list(
-        validator.iter_errors(
+        advanced_validator.iter_errors(
             {"action": "mouse_click", "x": 1, "y": 2, "click_count": 1.5}
         )
     )
@@ -524,10 +527,10 @@ def test_public_schema_exposes_action_specific_required_fields():
         validator.iter_errors({"action": "locate", "selector": "#search"})
     )
     assert list(validator.iter_errors({"action": "locate"}))
-    assert not list(validator.iter_errors({"action": "screenshot", "settled": False}))
-    assert list(validator.iter_errors({"action": "screenshot", "settled": "false"}))
+    assert not list(advanced_validator.iter_errors({"action": "screenshot", "settled": False}))
+    assert list(advanced_validator.iter_errors({"action": "screenshot", "settled": "false"}))
     assert not list(
-        validator.iter_errors(
+        advanced_validator.iter_errors(
             {
                 "action": "console",
                 "level": "warning",
@@ -537,10 +540,10 @@ def test_public_schema_exposes_action_specific_required_fields():
         )
     )
     assert list(
-        validator.iter_errors({"action": "console", "level": "trace"})
+        advanced_validator.iter_errors({"action": "console", "level": "trace"})
     )
     assert list(
-        validator.iter_errors({"action": "console", "all": "true"})
+        advanced_validator.iter_errors({"action": "console", "all": "true"})
     )
     assert not list(
         validator.iter_errors(
@@ -712,6 +715,21 @@ async def test_mutation_result_declares_that_snapshot_is_already_fresh(plugin_to
     assert "fresh_snapshot: true" in result
     assert "不要立刻调用 snapshot" in result
     assert sum(command == "snapshot" for command, _args in driver.calls) == 1
+
+
+async def test_mutation_can_skip_post_observation_explicitly(plugin_tool, ctx_vars):
+    tool, _manager, driver, _prefs = plugin_tool
+    result = await tool.handler(
+        {
+            "action": "navigate",
+            "url": "https://example.com",
+            "observation": "none",
+        }
+    )
+
+    assert "fresh_snapshot: false" in result
+    assert "先调用 snapshot" in result
+    assert sum(command == "snapshot" for command, _args in driver.calls) == 0
 
 
 async def test_find_dispatches_once_and_returned_ref_is_immediately_executable(
@@ -1644,7 +1662,7 @@ async def test_close_tab_then_new_tab_in_same_manager(plugin_tool):
     assert "example.com/2" not in str(listed)
 
 
-async def test_functional_build_never_accepts_approval_tokens(plugin_tool, ctx_vars):
+async def test_approval_approver_rejects_unissued_tokens(plugin_tool, ctx_vars):
     tool, manager, _driver, _prefs = plugin_tool
     await manager.navigate(OWNER, SESSION, "https://example.com")
 
@@ -1659,8 +1677,8 @@ async def test_functional_build_never_accepts_approval_tokens(plugin_tool, ctx_v
     finally:
         current_tool_call_id.reset(token_call)
 
-    # Revocation does not need to clear a token store because no such store
-    # exists in the functional build.
+    # 令牌表只认签发过的 token；revoke 移除 owner 后，未消费的令牌也因
+    # 会话消失而失效，伪造 token 同样确认失败。
     await manager.revoke_owner(OWNER)
     token_call = current_tool_call_id.set("call-approval")
     try:

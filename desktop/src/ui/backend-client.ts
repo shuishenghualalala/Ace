@@ -34,7 +34,6 @@ export type ChunkKind =
   | 'work_event'
   | 'wiki_ingest_progress'
   | 'wiki_cards'
-  | 'wiki_summary'
   | 'wiki_changed'
   | 'ping'
   | 'pong';
@@ -81,8 +80,52 @@ export interface RuntimeModelProfile {
   label: string;
   provider?: string;
   default?: boolean;
+  loaded?: boolean;
+  has_key?: boolean;
   capabilities?: string[];
   thinking_levels?: string[];
+}
+
+export interface TeamMemberModelBinding {
+  member_id: string;
+  member_name: string;
+  is_leader: boolean;
+  runtime_id?: string;
+  model_profile_id?: string;
+  model_label?: string;
+  model_switchable?: boolean;
+  status?: string;
+  active_task_count?: number;
+  unavailable_reason?: string | null;
+  models?: RuntimeModelProfile[];
+}
+
+export interface SessionModelBindingResponse {
+  ok: boolean;
+  source?: 'crew' | 'external' | 'team';
+  scope?: 'team' | 'team_member';
+  session_id?: string;
+  external_team_id?: string;
+  model_binding_revision?: number;
+  model_profile_id?: string;
+  pending_model_profile_id?: string | null;
+  model_label?: string;
+  pending_label?: string | null;
+  has_pending?: boolean;
+  pending?: boolean;
+  /** 服务端判定：会话生效 Provider 为 FakeProvider 演示模式 */
+  demo_mode?: boolean;
+  models?: RuntimeModelProfile[];
+  model_switchable?: boolean;
+  runtime_id?: string;
+  external_agent_id?: string;
+  member_id?: string;
+  member_name?: string;
+  is_leader?: boolean;
+  status?: string;
+  active_task_count?: number;
+  unavailable_reason?: string | null;
+  members?: TeamMemberModelBinding[];
 }
 
 export interface AgentProfile {
@@ -323,6 +366,11 @@ export interface BackendHistoryItem {
   mention_from?: string;
   mention_to?: string[];
   mention_intent?: string;
+  communication_kind?: string;
+  communication_status?: string;
+  request_id?: string;
+  reply_to?: string;
+  communication_request_text?: string;
   display_mode?: string;
   collapsed_title?: string;
   process_text?: string;
@@ -404,6 +452,10 @@ export interface BrowserPageState {
   viewport_height: number;
   can_go_back: boolean;
   can_go_forward: boolean;
+  queue_depth?: number;
+  last_queue_wait_ms?: number;
+  last_operation_ms?: number;
+  queue_timeouts?: number;
   tabs: Array<{ id: string; label: string; url: string; title: string }>;
   downloads: Array<{
     id?: string;
@@ -821,7 +873,7 @@ export interface SystemMetrics {
   uptime_s: number;
   cpu_count: number;
   cpu_percent?: number;
-  memory?: { total_gb: number; used_gb: number; percent: number };
+  memory?: { total_gb: number; used_gb: number; available_gb: number; percent: number };
   disk?: { total_gb: number; used_gb: number; free_gb: number; percent: number };
   network?: { bytes_sent: number; bytes_recv: number };
   process?: { rss_mb: number; pid: number };
@@ -1497,12 +1549,6 @@ export interface WikiCardsChunk extends Omit<ChatChunk, 'kind' | 'body'> {
   body: { pages?: WikiPage[]; cards?: WikiPage[] };
 }
 
-/** wiki_summary 帧：进入 Wiki 模式时后端推送的 KB 概览卡（body 为 WikiSummary）。 */
-export interface WikiSummaryChunk extends Omit<ChatChunk, 'kind' | 'body'> {
-  kind: 'wiki_summary';
-  body: WikiSummary;
-}
-
 export interface WikiUploadResult {
   ok: boolean;
   source_id: string;
@@ -1516,15 +1562,6 @@ export interface WikiUploadResult {
   message?: string;
   pages?: WikiPage[];
   issues?: string[];
-}
-
-export interface WikiSummary {
-  summary: string;
-  kb_id: string;
-  page_count?: number;
-  source_count?: number;
-  generated_at?: number;
-  status: 'ready' | 'generating' | 'empty' | 'stale';
 }
 
 export const backendApi = {
@@ -1616,44 +1653,20 @@ export const backendApi = {
   },
 
   getSessionModel: (sessionId: string) =>
-    getJSON<{
-      ok: boolean;
-      source?: 'crew' | 'external';
-      model_profile_id: string;
-      pending_model_profile_id?: string | null;
-      model_label?: string;
-      pending_label?: string | null;
-      has_pending?: boolean;
-      models?: RuntimeModelProfile[];
-      model_switchable?: boolean;
-      runtime_id?: string;
-      external_agent_id?: string;
-    }>(`/api/session/${encodeURIComponent(sessionId)}/model`),
+    getJSON<SessionModelBindingResponse>(`/api/session/${encodeURIComponent(sessionId)}/model`),
 
   setSessionModel: (
     sessionId: string,
     modelProfileId: string,
-    opts?: { workspace_id?: string; title?: string },
+    opts?: { workspace_id?: string; title?: string; member_id?: string },
   ) =>
-    getJSON<{
-      ok: boolean;
-      source?: 'crew' | 'external';
-      model_profile_id: string;
-      pending_model_profile_id?: string | null;
-      model_label?: string;
-      pending_label?: string | null;
-      has_pending?: boolean;
-      pending?: boolean;
-      models?: RuntimeModelProfile[];
-      model_switchable?: boolean;
-      runtime_id?: string;
-      external_agent_id?: string;
-    }>(`/api/session/${encodeURIComponent(sessionId)}/model`, {
+    getJSON<SessionModelBindingResponse>(`/api/session/${encodeURIComponent(sessionId)}/model`, {
       method: 'PUT',
       ...jsonBody({
         model_profile_id: modelProfileId,
         workspace_id: opts?.workspace_id,
         title: opts?.title,
+        member_id: opts?.member_id,
       }),
     }),
 
@@ -1731,6 +1744,24 @@ export const backendApi = {
       body: JSON.stringify({ reason }),
       headers: { 'Content-Type': 'application/json' },
     }),
+  recoverTeamNode: (
+    sessionId: string,
+    nodeId: string,
+    action: 'reassign' | 'retry' | 'abandon',
+    replacementAssignee = '',
+  ) =>
+    getJSON<{ ok: boolean; node?: Task; error?: string }>(
+      `/api/session/${encodeURIComponent(sessionId)}/team/recover`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          node_id: nodeId,
+          action,
+          replacement_assignee: replacementAssignee,
+        }),
+        headers: { 'Content-Type': 'application/json' },
+      },
+    ),
   cronJobs: (sessionId?: string) => {
     const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
     return getJSON<CronJobList>(`/api/cron/jobs${q}`);
@@ -1755,9 +1786,22 @@ export const backendApi = {
   // 用量统计
   usage: () => getJSON<{ total_tokens?: number; prompt_tokens?: number; completion_tokens?: number; total_cost?: number; sessions?: number }>('/api/usage'),
   sessionContext: (sessionId: string) =>
-    getJSON<{ used_tokens: number; max_tokens: number; ratio: number }>(`/api/session/${encodeURIComponent(sessionId)}/context`),
+    getJSON<{
+      available: boolean;
+      used_tokens: number | null;
+      max_tokens: number;
+      ratio: number | null;
+      source: 'provider' | 'request_view' | 'preview' | 'unavailable';
+      warning?: string;
+    }>(`/api/session/${encodeURIComponent(sessionId)}/context`),
   browserState: (sessionId: string) =>
     getJSON<{ ok: boolean; state: BrowserPageState }>(`/api/browser/${encodeURIComponent(sessionId)}/state`),
+  /** 读取指定标签页的正文（@ 提及标签页、存入 Wiki 共用）。ok:false 时带 error。 */
+  browserReadTab: (sessionId: string, tabId: string) =>
+    getJSON<{ ok: boolean; title: string; url: string; text: string; error?: string }>(
+      `/api/browser/${encodeURIComponent(sessionId)}/read-tab`,
+      { method: 'POST', ...jsonBody({ tab_id: tabId }) },
+    ),
   // record_* 动作返回 `recording` 而不是 `state`：录制态与页面控制态是正交的
   // 两件事，录制不改变 ControlMode，所以不复用 state 字段。
   browserControl: (sessionId: string, action: string, value = '') =>
@@ -2138,8 +2182,6 @@ export const backendApi = {
       source_titles: WikiSourceTitles;
       source_files: WikiSourceFiles;
     }>(withKb(`/api/wiki/search?q=${encodeURIComponent(query)}&top_k=${topK}`, kbId)),
-  wikiSummary: (kbId?: string, force?: boolean) =>
-    getJSON<{ ok: boolean } & WikiSummary>(withKb(`/api/wiki/summary${force ? '?force=true' : ''}`, kbId)),
   /** 知识图谱（Phase 3）：全量节点 + 关系边，不走分页。 */
   wikiGraph: (kbId?: string) =>
     getJSON<{ ok: boolean; graph: WikiGraph }>(withKb('/api/wiki/graph', kbId)),
@@ -2152,6 +2194,12 @@ export const backendApi = {
       withKb('/api/wiki/ingest', kbId),
       { method: 'POST', ...jsonBody({ source_id: sourceId, session_id: sessionId ?? '' }) },
     ),
+  /** 把一段正文直接存进 Wiki（如浏览器标签页）；kb_id 缺省时后端回落默认 KB。 */
+  wikiCaptureText: (payload: { title: string; content: string; source_url?: string; kb_id?: string }) =>
+    getJSON<{ ok: boolean; source_id: string; pages: WikiPage[] }>('/api/wiki/capture', {
+      method: 'POST',
+      ...jsonBody(payload),
+    }),
   wikiCancelIngest: (sourceId: string, kbId?: string) =>
     getJSON<{ ok: boolean; cancelled?: boolean }>(withKb('/api/wiki/ingest/cancel', kbId), {
       method: 'POST',
@@ -2722,7 +2770,7 @@ export const workApi = {
   // 引用
   listReferences: (targetSessionId: string) =>
     getJSON<{ items: WorkReference[]; count: number }>(`/api/work/references?target_session_id=${encodeURIComponent(targetSessionId)}`),
-  createReference: (payload: { target_session_id: string; reference_type: string; source_id: string; source_link?: string }) =>
+  createReference: (payload: { target_session_id: string; reference_type: string; source_id: string; source_link?: string; snapshot_summary?: string }) =>
     getJSON<WorkReference>('/api/work/references', { method: 'POST', ...jsonBody(payload) }),
   deleteReference: (referenceId: string) =>
     getJSON<{ ok: boolean }>(`/api/work/references/${encodeURIComponent(referenceId)}`, { method: 'DELETE' }),

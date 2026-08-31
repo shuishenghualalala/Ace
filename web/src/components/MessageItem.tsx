@@ -12,9 +12,22 @@ interface Props {
   canEdit?: boolean;
   onEdit?: (msg: UiMessage) => void;
   teamMembers?: TeamMemberView[];
+  onRetryMention?: (msg: UiMessage) => void;
+  onCancelMention?: (msg: UiMessage) => void;
+  /** 传入后消息正文中的 [[Wiki 页面名]] 渲染为可点击引用链接（Wiki 问答场景）。 */
+  onWikiLink?: (title: string) => void;
 }
 
-export default function MessageItem({ msg, isStreaming = false, canEdit = false, onEdit, teamMembers }: Props) {
+export default function MessageItem({
+  msg,
+  isStreaming = false,
+  canEdit = false,
+  onEdit,
+  teamMembers,
+  onRetryMention,
+  onCancelMention,
+  onWikiLink,
+}: Props) {
   switch (msg.role) {
     case "user": {
       const images = msg.attachments?.filter((a) => a.type === "image");
@@ -40,7 +53,15 @@ export default function MessageItem({ msg, isStreaming = false, canEdit = false,
       );
     }
     case "team_internal":
-      return <TeamAgentTurnBubble message={msg} isStreaming={isStreaming} teamMembers={teamMembers} />;
+      return (
+        <TeamAgentTurnBubble
+          message={msg}
+          isStreaming={isStreaming}
+          teamMembers={teamMembers}
+          onRetryMention={onRetryMention}
+          onCancelMention={onCancelMention}
+        />
+      );
     case "assistant": {
       const hasThinking = Boolean(msg.thinking);
       const hasToolCalls = msg.toolCalls && msg.toolCalls.length > 0;
@@ -61,7 +82,7 @@ export default function MessageItem({ msg, isStreaming = false, canEdit = false,
             )}
             {msg.text && (
               <div className="msg__text md-body">
-                <MarkdownContent content={msg.text} />
+                <MarkdownContent content={msg.text} onWikiLink={onWikiLink} />
               </div>
             )}
           </div>

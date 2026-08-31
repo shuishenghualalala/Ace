@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -76,7 +77,22 @@ def _invoke(handler: Callable, args: argparse.Namespace, ctx: CliContext) -> Any
     return result
 
 
+def _shell_exit_code(code: int) -> int:
+    """CliError 允许带 HTTP 风格语义码（404/409…），但进程退出码只有 0-255，
+    且 >125 带「信号/保留」语义——404 会被 shell 截断成 148，看起来像被信号杀死。
+    越界的统一收敛为通用业务失败码 1。"""
+    return code if 0 < code < 126 else 1
+
+
 def main(argv: list[str] | None = None) -> int:
+    # CLI 进程默认只保留 WARNING+ 日志：INFO 级的运行时装配/PERF 噪音对命令行
+    # 没有价值（REPL 里还会穿插进提示符行）。gateway 进程不受影响；
+    # 显式设置 CREW_LOG_LEVEL 可覆盖（经 load_config → cfg.log_level 生效）。
+    # 用 set/restore 而不是 setdefault：测试同进程多次调 main() 时不能把
+    # CREW_LOG_LEVEL 泄漏给后续用例（load_config 会读到它）。
+    prev_log_level = os.environ.get("CREW_LOG_LEVEL")
+    if prev_log_level is None:
+        os.environ["CREW_LOG_LEVEL"] = "WARNING"
     raw = list(sys.argv[1:] if argv is None else argv)
     try:
         flags, rest = extract_global_flags(raw)
@@ -100,9 +116,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except CliError as exc:
         print(f"错误: {exc}", file=sys.stderr)
-        return exc.exit_code
+        return _shell_exit_code(exc.exit_code)
     except KeyboardInterrupt:
         return 130
+    finally:
+        if prev_log_level is None:
+            os.environ.pop("CREW_LOG_LEVEL", None)
 
 
 if __name__ == "__main__":

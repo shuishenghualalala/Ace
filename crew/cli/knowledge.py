@@ -140,11 +140,6 @@ def _register_wiki(subparsers) -> None:
     query.add_argument("--kb-id", default="default")
     query.set_defaults(handler=_wiki_query)
 
-    summary = cmds.add_parser("summary", help="查看/生成知识库摘要")
-    summary.add_argument("--kb-id", default="default")
-    summary.add_argument("--force", action="store_true")
-    summary.set_defaults(handler=_wiki_summary)
-
     lint = cmds.add_parser("lint", help="检查知识库页面质量")
     lint.add_argument("--kb-id", default="default")
     lint.add_argument("--deep", action="store_true")
@@ -584,19 +579,6 @@ def _wiki_query(args: Any, ctx: CliContext) -> CliResult:
     kb_id = _kb_id(args.kb_id)
     result = querier.query(args.q, owner_account_id=ctx.owner, kb_id=kb_id)
     return CliResult(data={"ok": True, **result}, text=result.get("answer", ""))
-
-
-async def _wiki_summary(args: Any, ctx: CliContext) -> CliResult:
-    summarizer = getattr(ctx.app, "_wiki_summarizer", None)
-    if summarizer is None:
-        raise CliError("Wiki 未启用（缺少 summarizer）")
-    kb_id = _kb_id(args.kb_id)
-    summary = (
-        await summarizer.generate_kb_summary(ctx.owner, kb_id, force=True)
-        if args.force
-        else summarizer.get_summary(ctx.owner, kb_id)
-    )
-    return CliResult(data={"ok": True, **summary.to_dict(), "kb_id": kb_id})
 
 
 async def _wiki_lint(args: Any, ctx: CliContext) -> CliResult:

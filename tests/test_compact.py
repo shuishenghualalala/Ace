@@ -86,6 +86,24 @@ def test_l1_does_not_mutate_input():
     assert [m.content for m in msgs] == before  # 入参未被修改
 
 
+def test_compact_preview_view_matches_real_l1_without_calling_provider():
+    provider = FakeProvider()
+    comp = ContextCompactor(
+        provider,
+        token_budget=1_000_000,
+        keep_recent_tools=2,
+        max_tool_result_chars=20_000,
+    )
+    msgs = [Message.user("开始")] + [_tool_msg(i) for i in range(12)]
+
+    preview = comp.compact_preview_view(msgs)
+    expected = micro_compact(msgs, keep_recent_tools=2, max_tool_result_chars=20_000)
+
+    assert [message.content for message in preview] == [message.content for message in expected]
+    assert estimate_tokens(preview) < estimate_tokens(msgs)
+    assert provider.calls == []
+
+
 # --------------------------------------------------------------------------- #
 # L1 file_read 去重
 # --------------------------------------------------------------------------- #
@@ -707,6 +725,27 @@ async def test_compact_view_under_budget_no_llm():
     out = await comp.compact_view(msgs, "s1")
     assert provider.calls == []  # 零 LLM
     assert len(out) == len(msgs)  # 无工具结果可清理，原样返回
+
+
+async def test_compact_view_includes_fixed_request_overhead_in_threshold():
+    """system/tools 等统一请求开销必须参与 compact 水位判断。"""
+    provider = FakeProvider(reply="短摘要")
+    comp = ContextCompactor(provider, token_budget=100, keep_recent=2)
+    msgs = [Message.user("small") for _ in range(5)]
+
+    assert comp.will_compact_view(
+        msgs,
+        "s-overhead",
+        prompt_overhead_tokens=1_000,
+    ) is True
+    out = await comp.compact_view(
+        msgs,
+        "s-overhead",
+        prompt_overhead_tokens=1_000,
+    )
+
+    assert len(provider.calls) == 1
+    assert any(SUMMARY_MARKER in (message.content or "") for message in out)
 
 
 async def test_compact_view_over_budget_triggers_l3():

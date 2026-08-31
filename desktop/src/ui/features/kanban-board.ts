@@ -386,14 +386,22 @@ async function openKanbanPath(targetPath: string): Promise<void> {
   }
 }
 
+/**
+ * 归一化 openPath 的 allowedRoot：后端在无项目工作空间时会把
+ * workspace_root_path 存成 ""，直接透传会触发 IPC_ARG_VALIDATION_FAILED，
+ * 空串 / 空白串 / 非字符串统一归一化为 undefined。
+ */
+export function normalizeAllowedRoot(value: unknown): string | undefined {
+  const root = typeof value === 'string' ? value.trim() : '';
+  return root || undefined;
+}
+
 /** 从当前看板数据中提取关联的项目工作空间根目录。 */
 function resolveKanbanWorkspaceRootPath(): string | undefined {
   const board = (state.kanbanBoard || { workflow: undefined }) as {
     workflow?: { context?: Record<string, unknown> };
   };
-  const rootPath = board.workflow?.context?.workspace_root_path;
-  const root = typeof rootPath === 'string' ? rootPath.trim() : '';
-  return root || undefined;
+  return normalizeAllowedRoot(board.workflow?.context?.workspace_root_path);
 }
 
 /** 看板数据更新后，若 Inspector 任务 Tab 已挂载则刷新 DOM。 */

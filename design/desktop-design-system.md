@@ -1625,11 +1625,18 @@ hero and not a Work dashboard.
   sit wider than the mascot body. Mascot, paws, and Composer share one
   responsive center axis; paws are decorative and never receive pointer events.
 - The mascot may breathe by at most `2px`. Reduced-motion disables this motion,
-  and short or narrow windows scale the complete mascot-hand unit together.
+  and narrow windows scale the complete mascot-hand unit together. At viewport
+  heights of `680px` or below, the mascot scales to `140px` and the Header keeps
+  a `16px` bottom safety gap: the body may overlap only the upper half of the
+  project-context strip while the paws remain anchored to its top edge.
 - The welcome state reuses the production Composer in the centered composition;
   it does not create a second textarea or event path. Once conversation content
   exists, the same Composer returns to the chat workspace's stable bottom
   region.
+- Completion canvases opened from the Composer are always above the Welcome
+  mascot and paws. While a mention canvas is present, the Composer root and its
+  shell do not create trapping stacking contexts; only the input panel is raised
+  above the Welcome Header. The project-context strip remains below the mascot.
 - Scenario categories use compact icon-and-label commands below the Composer
   instead of three descriptive cards. Expanding a category reveals its commands
   beneath that category row without moving the brand, greeting, or Composer.

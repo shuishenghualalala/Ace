@@ -49,6 +49,27 @@ def test_init_kb_creates_directories_and_defaults(store: FileSystemWikiStore):
     assert index_text == "# 知识导航\n\n暂无页面。\n"
     assert "Crew" not in home_text
     assert "Crew" not in index_text
+    schema_text = (base / ".wiki-schema.md").read_text(encoding="utf-8")
+    assert "不按素材长度设置固定的关键词或话题数量上限" in schema_text
+    assert "最多生成 5 个关键词和 3 个话题" not in schema_text
+
+
+def test_init_kb_migrates_generated_fixed_knowledge_limits(store: FileSystemWikiStore):
+    store.init_kb(kb_id="legacy-quota")
+    schema_path = store._dir(kb_id="legacy-quota") / ".wiki-schema.md"
+    schema_path.write_text(
+        "# 知识库维护规则\n\n## 编译规则\n"
+        "- 长 source 整篇最多生成 5 个关键词和 3 个话题；短 source 最多 3 个关键词且不生成话题\n"
+        "- 用户自定义规则\n",
+        encoding="utf-8",
+    )
+
+    store.init_kb(kb_id="legacy-quota")
+
+    schema_text = schema_path.read_text(encoding="utf-8")
+    assert "不按素材长度设置固定的关键词或话题数量上限" in schema_text
+    assert "用户自定义规则" in schema_text
+    assert "最多生成 5 个关键词和 3 个话题" not in schema_text
 
 
 def test_init_kb_migrates_legacy_generated_empty_home_without_overwriting_custom_home(
@@ -1015,7 +1036,7 @@ def test_get_neighbors_respects_kb_id(store: FileSystemWikiStore):
 
 # ---- orientation & log ----
 
-def test_orient_returns_kb_summary_and_stats(store: FileSystemWikiStore):
+def test_orient_returns_stats_and_candidate_index(store: FileSystemWikiStore):
     store.save_page(WikiPage(id="", page_type="topic", title="页面A", content="# 页面A\n\n正文", file_path="", tags=["项目A"]))
     store.save_page(WikiPage(id="", page_type="entity", title="概念B", content="# 概念B\n\n正文", file_path="", aliases=["B"]))
     store.save_raw(RawSource(id="s1", title="来源一", source_type="upload", parsed_path=""))

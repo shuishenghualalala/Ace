@@ -7,7 +7,11 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from crew.gateway.ws import create_ws_router, normalize_team_execution_profile
+from crew.gateway.ws import (
+    create_ws_router,
+    normalize_team_execution_profile,
+    normalize_user_mentions,
+)
 
 AUTH_HEADERS: dict[str, str] = {}
 
@@ -20,6 +24,17 @@ def test_team_execution_profile_accepts_requested_mode_only():
     assert normalize_team_execution_profile({"requested_mode": "ai"})["requested_mode"] == "ai"
     assert normalize_team_execution_profile({"requested_mode": "unknown"}) is None
     assert normalize_team_execution_profile({"mode": "fast"}) is None
+
+
+def test_user_mentions_keep_display_text_out_of_identity_transport():
+    assert normalize_user_mentions([
+        {"kind": "team_member", "member_id": "agent_c6f06632e6a4"},
+    ]) == [{"kind": "team_member", "member_id": "agent_c6f06632e6a4"}]
+    assert normalize_user_mentions([]) == []
+    assert normalize_user_mentions([
+        {"kind": "file", "member_id": "agent_c6f06632e6a4"},
+    ]) is None
+    assert normalize_user_mentions({"kind": "team_member", "member_id": "kk"}) is None
 
 
 class _ReplayConnections:
@@ -99,6 +114,47 @@ def test_ws_subscribe_replays_after_last_gateway_sequence():
     assert connections.replays == [("s1", 3), ("s2", 8)]
     assert first["body"]["text"] == "replay:s1:3"
     assert second["body"]["text"] == "replay:s2:8"
+
+
+def test_ws_message_forwards_structured_user_mentions_before_dispatch(monkeypatch):
+    connections = _ReplayConnections()
+    captured = []
+
+    async def fake_stream_and_broadcast(_crew, connection_store, envelope, owner):
+        captured.append(envelope)
+        await connection_store.push_payload(
+            envelope.session_id,
+            {
+                "kind": "captured",
+                "body": {"user_mentions": envelope.params.get("user_mentions")},
+                "is_final": True,
+                "sequence": 1,
+            },
+            owner_account_id=owner,
+        )
+        return "", None
+
+    monkeypatch.setattr(
+        "crew.gateway.ws.stream_and_broadcast",
+        fake_stream_and_broadcast,
+    )
+    client = _client(connections)
+
+    with client.websocket_connect("/ws", headers=AUTH_HEADERS) as ws:
+        ws.send_json({
+            "query": "@kk 你现在用什么模型",
+            "session_id": "mention-s1",
+            "external_team_id": "team-1",
+            "user_mentions": [{"kind": "team_member", "member_id": "kk"}],
+        })
+        message = ws.receive_json()
+
+    assert captured[0].query == "@kk 你现在用什么模型"
+    assert captured[0].params["external_team_id"] == "team-1"
+    assert captured[0].params["user_mentions"] == [
+        {"kind": "team_member", "member_id": "kk"},
+    ]
+    assert message["body"]["user_mentions"] == captured[0].params["user_mentions"]
 
 
 def test_ws_subscribe_replay_defaults_invalid_sequence_to_zero():

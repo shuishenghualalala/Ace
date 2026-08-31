@@ -29,7 +29,6 @@ import type {
   WikiSourceFiles,
   WikiSourceTitles,
   WikiUploadResult,
-  WikiSummary,
   Workspace,
 } from "./types";
 
@@ -281,6 +280,23 @@ export const api = {
       method: "POST",
       ...jsonBody({ reason }),
     }),
+  recoverTeamNode: (
+    sessionId: string,
+    nodeId: string,
+    action: "reassign" | "retry" | "abandon",
+    replacementAssignee = "",
+  ) =>
+    getJSON<{ ok: boolean; node?: Task; error?: string }>(
+      `/api/session/${encodeURIComponent(sessionId)}/team/recover`,
+      {
+        method: "POST",
+        ...jsonBody({
+          node_id: nodeId,
+          action,
+          replacement_assignee: replacementAssignee,
+        }),
+      },
+    ),
   waitTask: (id: string, timeout = 30) =>
     getJSON<Task>(`/api/tasks/${encodeURIComponent(id)}/wait`, {
       method: "POST",
@@ -509,10 +525,6 @@ export const api = {
       method: "POST",
       ...jsonBody({ source_id }),
     }),
-  wikiSummary: (kbId?: string, force?: boolean) =>
-    getJSON<{ ok: boolean } & WikiSummary>(
-      withKb(`/api/wiki/summary${force ? "?force=true" : ""}`, kbId),
-    ),
   wikiSourceFileUrl: (sourceId: string, kbId?: string) =>
     withKb(`/api/wiki/sources/${encodeURIComponent(sourceId)}/file`, kbId),
 };

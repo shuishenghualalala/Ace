@@ -260,7 +260,8 @@ def goal_title(goal: str) -> str:
 
 
 def goal_needs_build(goal: str) -> bool:
-    return bool(build_team_spec(goal).execution_profile.get("needs_build"))
+    spec = build_team_spec({"goal": goal})
+    return "build" in set(spec.team_requirements.get("workflow_lanes") or [])
 
 
 def team_goal_uses_shared_workspace(goal: str) -> bool:
@@ -292,14 +293,20 @@ def team_goal_uses_shared_workspace(goal: str) -> bool:
     return any(marker in text for marker in shared_markers)
 
 
-def build_default_workflow_nodes(team: Any, goal: str) -> tuple[list[dict[str, Any]], list[Any]]:
+def build_default_workflow_nodes(
+    team: Any,
+    goal: str,
+    *,
+    team_spec: Any | None = None,
+) -> tuple[list[dict[str, Any]], list[Any]]:
     members = list(team.members.values())
     if not members:
         return [], []
-    team_spec = build_team_spec(goal)
+    team_spec = team_spec if team_spec is not None else build_team_spec({"goal": goal})
     execution_profile = team_spec.execution_profile
-    planning = planning_modes(execution_profile)
+    planning = planning_modes({"planning": team_spec.planning})
     required_roles = list(team_spec.team_requirements.get("roles") or [])
+    required_lanes = set(team_spec.team_requirements.get("workflow_lanes") or [])
     task_title = goal_title(goal)
     nodes: list[dict[str, Any]] = [
         {
@@ -307,7 +314,7 @@ def build_default_workflow_nodes(team: Any, goal: str) -> tuple[list[dict[str, A
             "title": f"Leader 拆分任务：{task_title}",
             "detail": (
                 f"根据用户目标拆分团队任务、确定依赖、验收标准和协作顺序：{goal}\n"
-                f"TeamSpec：{execution_profile.get('intent', 'mixed')}/{execution_profile.get('complexity', 'focused')}，"
+                f"TeamSpec：{team_spec.task_profile.get('intent', 'mixed')}/{team_spec.task_profile.get('complexity', 'focused')}，"
                 f"建议协作模式 {team_spec.collaboration_mode}，角色 {'、'.join(required_roles) or '按现有成员'}。"
             ),
             "assignee": "leader",
@@ -393,7 +400,7 @@ def build_default_workflow_nodes(team: Any, goal: str) -> tuple[list[dict[str, A
         )
         for index, member in enumerate(lanes.get("design", []))
     ]
-    needs_build = bool(execution_profile.get("needs_build"))
+    needs_build = "build" in required_lanes
     build_members = lanes.get("build", []) if needs_build else []
     if needs_build and not build_members:
         build_members = [
@@ -430,7 +437,7 @@ def build_default_workflow_nodes(team: Any, goal: str) -> tuple[list[dict[str, A
         )
         for index, member in enumerate(build_members)
     ]
-    needs_verification = bool(execution_profile.get("needs_verification"))
+    needs_verification = "verify" in required_lanes
     verify_members = lanes.get("verify", []) if needs_verification else []
     verify_templates = {
         member.member_id: verify_role_template(member, task_title, goal)
@@ -524,7 +531,7 @@ def build_default_workflow_nodes(team: Any, goal: str) -> tuple[list[dict[str, A
     leader_review_ids = [*review_after_plan_ids, *leader_review_ids]
     docs_release_members = (
         [*lanes.get("docs", []), *lanes.get("release", [])]
-        if (bool(execution_profile.get("needs_docs")) or needs_build)
+        if ("docs" in required_lanes or "release" in required_lanes or needs_build)
         else []
     )
     docs_parent_ids = verify_ids or leader_review_ids or build_ids or design_ids or ["leader_plan"]
@@ -551,7 +558,7 @@ def build_default_workflow_nodes(team: Any, goal: str) -> tuple[list[dict[str, A
         terminal_ids,
         node_metadata("summary", label="汇总结论、验收反馈", key="team_lead"),
     )
-    if not needs_build and not needs_verification and not bool(execution_profile.get("needs_docs")):
+    if not needs_build and not needs_verification and not ({"docs", "release"} & required_lanes):
         return nodes, edges
     if len(nodes) > 2:
         return nodes, edges

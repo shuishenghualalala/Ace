@@ -1,7 +1,24 @@
 import { createIcon, MONOCHROME_ICON_CLASS, type IconId } from '../components/icon';
+import type { ContextRingElements } from './composer-context-ring';
+
+/** 工厂创建的关键控件句柄：供实例级控制器（模型 chip / 上下文环）接线。 */
+export interface ComposerContextControls {
+  modelChip: HTMLButtonElement;
+  ring: ContextRingElements;
+}
 
 export interface ComposerContextView {
+  controls: ComposerContextControls;
   dispose(): void;
+}
+
+export interface ComposerContextViewOptions {
+  /**
+   * 表面变体：'main'（默认）= 主对话全量控件（带全局 id，供既有 binder 查找）；
+   * 'wiki' = Wiki 问答面板精简表面（无全局 id，只保留附件「+」/ 模型 chip / 上下文环，
+   * 智能体 / 技能 / 请求批准 / 工作区等主对话专属控件不渲染）。
+   */
+  surface?: 'main' | 'wiki';
 }
 
 interface ContextTargets {
@@ -18,15 +35,15 @@ function requireTarget(root: HTMLElement, slot: string): HTMLElement {
 }
 
 function createChip(
-  id: string,
+  id: string | null,
   label: string,
   icon: IconId | null,
-  labelId?: string,
+  labelId?: string | null,
 ): HTMLButtonElement {
   const button = document.createElement('button');
   const copy = document.createElement('span');
   button.type = 'button';
-  button.id = id;
+  if (id) button.id = id;
   button.className = 'mw-context-chip';
   button.title = label;
   button.setAttribute('aria-haspopup', 'listbox');
@@ -137,14 +154,14 @@ function createProjectControl(): HTMLElement {
 }
 
 function createIconControl(
-  id: string,
+  id: string | null,
   label: string,
   icon: IconId,
   className: string,
 ): HTMLButtonElement {
   const button = document.createElement('button');
   button.type = 'button';
-  button.id = id;
+  if (id) button.id = id;
   button.className = `mw-button mw-button--ghost mw-button--icon ${className}`;
   button.title = label;
   button.setAttribute('aria-label', label);
@@ -152,16 +169,20 @@ function createIconControl(
   return button;
 }
 
-function createLeftControls(): DocumentFragment {
+function createLeftControls(withIds: boolean, surface: 'main' | 'wiki'): DocumentFragment {
   const fragment = document.createDocumentFragment();
-  const security = document.createElement('div');
-  const workflow = document.createElement('div');
   const attach = createIconControl(
-    'chat-attach-btn',
+    withIds ? 'chat-attach-btn' : null,
     '添加附件',
     'icon-plus',
     'mw-context-attach',
   );
+  fragment.append(attach);
+  // Wiki 表面只保留附件「+」：智能体 / 技能 / 请求批准 / 产物目录是主对话专属能力。
+  if (surface === 'wiki') return fragment;
+
+  const security = document.createElement('div');
+  const workflow = document.createElement('div');
   const mode = document.createElement('div');
   const modeTrigger = createChip(
     'chat-craft-btn',
@@ -203,23 +224,23 @@ function createLeftControls(): DocumentFragment {
   workdir.removeAttribute('aria-haspopup');
   workdir.removeAttribute('aria-expanded');
   workflow.append(workdir);
-  fragment.append(attach, mode, skills, security, workflow);
+  fragment.append(mode, skills, security, workflow);
   return fragment;
 }
 
-function createContextRing(): HTMLButtonElement {
+function createContextRing(withIds: boolean): ContextRingElements {
   const button = document.createElement('button');
   const percentage = document.createElement('span');
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   const track = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
   const progress = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
   button.type = 'button';
-  button.id = 'chat-context-ring-btn';
+  if (withIds) button.id = 'chat-context-ring-btn';
   button.className = 'mw-button mw-button--ghost mw-context-ring';
   button.hidden = true;
   button.title = '上下文占用';
   button.setAttribute('aria-label', '上下文占用');
-  percentage.id = 'chat-context-ring-pct';
+  if (withIds) percentage.id = 'chat-context-ring-pct';
   percentage.className = 'mw-context-ring__percentage';
   percentage.setAttribute('aria-hidden', 'true');
   percentage.textContent = '0%';
@@ -239,28 +260,40 @@ function createContextRing(): HTMLButtonElement {
   progress.setAttribute('transform', 'rotate(-90 12 12)');
   svg.append(track, progress);
   button.append(svg, percentage);
-  return button;
+  return { btn: button, pct: percentage, progress };
 }
 
-function createRightControls(): DocumentFragment {
+function createRightControls(
+  withIds: boolean,
+): { fragment: DocumentFragment; modelChip: HTMLButtonElement; ring: ContextRingElements } {
   const fragment = document.createDocumentFragment();
   const model = document.createElement('div');
-  model.id = 'chat-model-picker-inline';
-  model.append(createChip(
-    'chat-model-picker-inline-btn',
+  if (withIds) model.id = 'chat-model-picker-inline';
+  const modelChip = createChip(
+    withIds ? 'chat-model-picker-inline-btn' : null,
     '模型',
     null,
-    'chat-model-picker-inline-label',
-  ));
-  fragment.append(model, createContextRing());
-  return fragment;
+    withIds ? 'chat-model-picker-inline-label' : null,
+  );
+  model.append(modelChip);
+  const ring = createContextRing(withIds);
+  fragment.append(model, ring.btn);
+  return { fragment, modelChip, ring };
 }
 
 /**
  * Builds the main Composer context surface. Feature binders keep the existing
  * Gateway and state contracts while static HTML no longer owns these controls.
+ *
+ * surface='wiki' 时构建 Wiki 问答面板的精简表面：同一批控件工厂、无全局 id，
+ * 行为由调用方用返回的 controls 句柄接实例级控制器（model-picker / context-ring）。
  */
-export function createComposerContextView(root: HTMLElement): ComposerContextView {
+export function createComposerContextView(
+  root: HTMLElement,
+  opts?: ComposerContextViewOptions,
+): ComposerContextView {
+  const surface = opts?.surface ?? 'main';
+  const withIds = surface === 'main';
   const targets: ContextTargets = {
     project: requireTarget(root, 'project'),
     beforeInput: requireTarget(root, 'before-input'),
@@ -268,13 +301,27 @@ export function createComposerContextView(root: HTMLElement): ComposerContextVie
     toolbarRight: requireTarget(root, 'toolbar-right'),
   };
   const controls = root.querySelector<HTMLElement>('#composer-controls');
-  targets.project.append(createProjectControl());
-  targets.beforeInput.append(createBeforeInput());
-  targets.toolbarLeft.append(createLeftControls());
-  targets.toolbarRight.prepend(createRightControls());
+  if (surface === 'main') {
+    targets.project.append(createProjectControl());
+    targets.beforeInput.append(createBeforeInput());
+  }
+  targets.toolbarLeft.append(createLeftControls(withIds, surface));
+  const right = createRightControls(withIds);
+  targets.toolbarRight.prepend(right.fragment);
   if (controls) targets.toolbarRight.append(controls);
 
+  // 附件「+」→ 触发同实例 before-input 槽位里的文件选择框
+  // （主对话由 createBeforeInput 创建；Wiki 由自己的 contextStaging 提供）。
+  const attachBtn = targets.toolbarLeft.querySelector<HTMLButtonElement>('.mw-context-attach')!;
+  attachBtn.addEventListener('click', () => {
+    targets.beforeInput.querySelector<HTMLInputElement>('input[type="file"]')?.click();
+  });
+
   return {
+    controls: {
+      modelChip: right.modelChip,
+      ring: right.ring,
+    },
     dispose() {
       targets.project.replaceChildren();
       targets.beforeInput.replaceChildren();

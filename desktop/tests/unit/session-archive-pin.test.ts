@@ -5,7 +5,7 @@
  *
  * 覆盖：
  * - pinned 会话在主列表排序最前（pinned DESC, updatedAt DESC）
- * - pinned 行 DOM 带 history-item--pinned class（视觉标识）
+ * - pinned 行 DOM 带 mw-session-history__row--pinned class（视觉标识）
  * - pinned 状态变化后回收行 class 同步更新（不重建节点）
  * - syncSessionsFromBackend 透传 archived/pinned 字段（后端缺省视为 false）
  * - backendApi.archiveSession / pinSession 调用正确端点与 payload
@@ -45,7 +45,7 @@ describe('置顶会话排序', () => {
     });
     const list = mountHistoryList();
     renderWorkspaceHistory(() => {});
-    const rows = list.querySelectorAll('.conversations-list [data-session-id]');
+    const rows = list.querySelectorAll('[data-session-id]');
     expect(rows[0].getAttribute('data-session-id')).toBe('old_pinned');
     expect(rows[1].getAttribute('data-session-id')).toBe('recent_normal');
   });
@@ -59,7 +59,7 @@ describe('置顶会话排序', () => {
     });
     const list = mountHistoryList();
     renderWorkspaceHistory(() => {});
-    const rows = list.querySelectorAll('.conversations-list [data-session-id]');
+    const rows = list.querySelectorAll('[data-session-id]');
     expect(rows[0].getAttribute('data-session-id')).toBe('p2');
     expect(rows[1].getAttribute('data-session-id')).toBe('p1');
   });
@@ -73,7 +73,7 @@ describe('置顶会话排序', () => {
     });
     const list = mountHistoryList();
     renderWorkspaceHistory(() => {});
-    expect(list.querySelectorAll('.conversations-list [data-session-id]')[0].getAttribute('data-session-id'))
+    expect(list.querySelectorAll('[data-session-id]')[0].getAttribute('data-session-id'))
       .toBe('p1');
     // 取消置顶
     sessionStore.set({
@@ -83,13 +83,13 @@ describe('置顶会话排序', () => {
       ],
     });
     renderWorkspaceHistory(() => {});
-    expect(list.querySelectorAll('.conversations-list [data-session-id]')[0].getAttribute('data-session-id'))
+    expect(list.querySelectorAll('[data-session-id]')[0].getAttribute('data-session-id'))
       .toBe('n1');
   });
 });
 
 describe('置顶视觉标识', () => {
-  it('pinned 行带 history-item--pinned class', () => {
+  it('pinned 行带 mw-session-history__row--pinned class', () => {
     sessionStore.set({
       sessions: [
         makeSession('p1', 'default', { pinned: true }),
@@ -100,8 +100,8 @@ describe('置顶视觉标识', () => {
     renderWorkspaceHistory(() => {});
     const pinnedRow = list.querySelector('[data-session-id="p1"]') as HTMLElement;
     const normalRow = list.querySelector('[data-session-id="n1"]') as HTMLElement;
-    expect(pinnedRow.classList.contains('history-item--pinned')).toBe(true);
-    expect(normalRow.classList.contains('history-item--pinned')).toBe(false);
+    expect(pinnedRow.classList.contains('mw-session-history__row--pinned')).toBe(true);
+    expect(normalRow.classList.contains('mw-session-history__row--pinned')).toBe(false);
   });
 
   it('回收行：pinned 状态变化后 class 同步更新，节点身份保持', () => {
@@ -109,14 +109,14 @@ describe('置顶视觉标识', () => {
     const list = mountHistoryList();
     renderWorkspaceHistory(() => {});
     const rowBefore = list.querySelector('[data-session-id="s1"]') as HTMLElement;
-    expect(rowBefore.classList.contains('history-item--pinned')).toBe(false);
+    expect(rowBefore.classList.contains('mw-session-history__row--pinned')).toBe(false);
 
     // 同 sid 切换为 pinned：reconciler 复用节点，仅 toggled class
     sessionStore.set({ sessions: [makeSession('s1', 'default', { pinned: true })] });
     renderWorkspaceHistory(() => {});
     const rowAfter = list.querySelector('[data-session-id="s1"]') as HTMLElement;
     expect(rowAfter).toBe(rowBefore);
-    expect(rowAfter.classList.contains('history-item--pinned')).toBe(true);
+    expect(rowAfter.classList.contains('mw-session-history__row--pinned')).toBe(true);
   });
 });
 

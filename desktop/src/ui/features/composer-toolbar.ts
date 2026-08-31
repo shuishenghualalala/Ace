@@ -3,7 +3,6 @@
  */
 
 import {
-  backendApi,
   type ExternalAgent,
   type ExternalRuntime,
   type ExternalTeam,
@@ -22,11 +21,9 @@ import {
   getSessionAgentDisplay,
   setComposerTargetWorkspace,
   visibleProjectWorkspaces,
-  workspaceForSessionDispatch,
   workspaceLabel,
 } from './workspaces';
-import { composerModelOptions, setSessionModel, activeComposerModelId, resolveComposerModelLabel } from './session-model';
-import { syncModelUi } from './model-picker';
+import { createComposerModelControl, syncModelUi, type ComposerModelControl } from './model-picker';
 import {
   loadExternalConversationCatalog,
   useAgent,
@@ -96,7 +93,8 @@ function visibleCraftOptions(): typeof CRAFT_OPTIONS {
     : CRAFT_OPTIONS.filter((option) => option.value !== 'external');
 }
 
-let modelPopoverOpen = false;
+/** 模型 chip 控制器（model-picker 提供的实例级实现）；行为委托给它，这里只持句柄。 */
+let modelControl: ComposerModelControl | null = null;
 let skillsPopoverOpen = false;
 let craftPopoverOpen = false;
 let workspacePopoverOpen = false;
@@ -202,9 +200,7 @@ function closeCraftPopover(): void {
 }
 
 function closeModelPopover(): void {
-  modelPopoverOpen = false;
-  $('#chat-model-inline-popover')?.remove();
-  $('#chat-model-picker-inline-btn')?.classList.remove('is-open');
+  modelControl?.close();
 }
 
 function closeSecurityModeInline(): void {
@@ -552,63 +548,6 @@ function renderCraftPopover(): void {
   });
 }
 
-function renderModelPopover(): void {
-  closeAllPopovers();
-  const anchor = $('#chat-model-picker-inline-btn') as HTMLButtonElement | null;
-  if (!anchor || anchor.disabled || !state.config) return;
-
-  const models = composerModelOptions();
-  const active = activeComposerModelId();
-  const popover = document.createElement('div');
-  popover.id = 'chat-model-inline-popover';
-  popover.setAttribute('role', 'listbox');
-  popover.setAttribute('aria-label', '选择模型');
-  const modelTourHelp = `
-    <div class="composer-select-popover__header">
-      <span>选择模型</span>
-      <button type="button" class="composer-select-popover__help" data-model-tour-open aria-label="打开模型配置引导" title="打开模型配置引导">?</button>
-    </div>`;
-  popover.innerHTML = models.length
-    ? `
-      ${modelTourHelp}
-      <div class="composer-select-popover__section">可用模型</div>
-      <div class="composer-select-popover__list">
-        ${models
-          .map(
-            (m) => `
-          <button type="button" class="composer-select-item composer-select-item--model${m.id === active ? ' is-selected' : ''}" data-model-id="${escapeHtml(m.id)}" title="${escapeHtml(m.description)}" aria-label="${escapeHtml(`${m.label}${m.description ? `，${m.description}` : ''}`)}"${m.selectable ? '' : ' disabled'}>
-            <span class="composer-select-item__body composer-select-item__body--model">
-              <span class="composer-select-item__title">${escapeHtml(m.label)}${m.default ? ' · 默认' : ''}</span>
-              ${m.warning ? `<span class="composer-select-item__meta composer-select-item__meta--warn">${escapeHtml(m.description)}</span>` : ''}
-            </span>
-            ${m.id === active ? selectChevron() : '<span class="composer-select-item__spacer"></span>'}
-          </button>
-        `,
-          )
-          .join('')}
-      </div>
-    `
-    : `${modelTourHelp}<div class="composer-select-popover__empty">暂无模型，请前往配置页</div>`;
-
-  mountSelectPopover(anchor, popover, 300, 'end');
-  modelPopoverOpen = true;
-  anchor.classList.add('is-open');
-
-  popover.querySelector<HTMLButtonElement>('[data-model-tour-open]')?.addEventListener('click', (event) => {
-    event.stopPropagation();
-    closeModelPopover();
-    startModelTour();
-  });
-
-  $$('.composer-select-item[data-model-id]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const id = btn.getAttribute('data-model-id');
-      if (id) void setSessionModel(id);
-      closeModelPopover();
-    });
-  });
-}
-
 async function renderSkillsPopover(): Promise<void> {
   closeAllPopovers();
   const anchor = $('#chat-skills-btn') as HTMLElement | null;
@@ -681,8 +620,7 @@ async function renderSkillsPopover(): Promise<void> {
 }
 
 function syncComposerModelChip(): void {
-  const label = document.getElementById('chat-model-picker-inline-label');
-  if (label) label.textContent = resolveComposerModelLabel() || '模型';
+  modelControl?.refresh();
 }
 
 /** 安全模式 chip 标签：据当前生效模式（会话绑定优先，否则新对话预设）渲染。 */
@@ -795,7 +733,6 @@ function externalTeamLeaderLabel(
 
 function bindExternalModeSwitch(
   popover: HTMLElement,
-  anchor: HTMLElement,
 ): void {
   popover.querySelectorAll<HTMLElement>('[data-expert-mode-switch]').forEach((btn) => {
     btn.addEventListener('click', (event) => {
@@ -831,7 +768,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
   externalPopoverOpen = true;
   resolvedAnchor.classList.add('is-open');
   resolvedAnchor.setAttribute('aria-expanded', 'true');
-  bindExternalModeSwitch(popover, resolvedAnchor);
+  bindExternalModeSwitch(popover);
 
   let catalog: ExternalConversationCatalog;
   try {
@@ -842,7 +779,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
       ${renderComposerModeSwitch('external')}
       <div class="composer-select-popover__empty">加载外援失败：${escapeHtml((error as Error).message)}</div>
     `;
-    bindExternalModeSwitch(popover, resolvedAnchor);
+    bindExternalModeSwitch(popover);
     scheduleFloatingPopoverPosition(resolvedAnchor, popover, 340);
     return;
   }
@@ -907,7 +844,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
       </div>
     `}
   `;
-  bindExternalModeSwitch(popover, resolvedAnchor);
+  bindExternalModeSwitch(popover);
   // 初次定位发生在“正在加载”短内容阶段；目录渲染后高度改变，必须重新贴合锚点。
   scheduleFloatingPopoverPosition(resolvedAnchor, popover, 340);
 
@@ -986,6 +923,19 @@ export function bindComposerToolbar(): () => void {
   toolbarBoundTrigger = trigger;
   const { signal } = toolbarController;
 
+  // 模型 chip：与 Wiki 问答面板共用 model-picker 的实例级控制器（浮层/文案/会话级切换）。
+  const modelAnchor = $('#chat-model-picker-inline-btn') as HTMLButtonElement | null;
+  modelControl?.dispose();
+  modelControl = modelAnchor
+    ? createComposerModelControl(modelAnchor, {
+      getSessionId: () => state.activeSessionId,
+      onBeforeOpen: closeAllPopovers,
+      onModelTour: () => {
+        startModelTour();
+      },
+    })
+    : null;
+
   $('#chat-craft-btn')?.addEventListener('click', (e) => {
     e.stopPropagation();
     if (craftPopoverOpen) closeAllPopovers();
@@ -997,12 +947,6 @@ export function bindComposerToolbar(): () => void {
     closeAllPopovers();
     applyComposerMode('craft');
     notify('已切回默认主智能体');
-  }, { signal });
-
-  $('#chat-model-picker-inline-btn')?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (modelPopoverOpen) closeModelPopover();
-    else renderModelPopover();
   }, { signal });
 
   $('#chat-security-mode-btn')?.addEventListener('click', (e) => {
@@ -1040,7 +984,6 @@ export function bindComposerToolbar(): () => void {
       && !t.closest('#chat-craft-popover')
       && !t.closest('#chat-craft-btn')
     ) closeCraftPopover();
-    if (modelPopoverOpen && !t.closest('#chat-model-inline-popover') && !t.closest('#chat-model-picker-inline-btn')) closeModelPopover();
     if (securityModePopoverOpen && !t.closest('#chat-security-mode-inline-popover') && !t.closest('#chat-security-mode-btn')) closeSecurityModeInline();
     if (skillsPopoverOpen && !t.closest('#chat-skills-inline-popover') && !t.closest('#chat-skills-btn')) closeSkillsPopover();
     if (externalPopoverOpen && !t.closest('#chat-external-inline-popover') && !t.closest('#chat-craft-btn')) closeExternalPopover();
@@ -1084,6 +1027,8 @@ export function bindComposerToolbar(): () => void {
     toolbarController?.abort();
     toolbarController = null;
     toolbarBoundTrigger = null;
+    modelControl?.dispose();
+    modelControl = null;
     unsubscribeSkills();
     unsubscribeSession();
     closeAllPopovers();

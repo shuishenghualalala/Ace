@@ -124,10 +124,17 @@ tools:
     idle_timeout_seconds: 600
     command_timeout_seconds: 30
     navigation_timeout_seconds: 60
-    max_tabs_per_session: 8
+    queue_timeout_seconds: 30
     max_output_chars: 30000
     max_transfer_bytes: 104857600
     artifact_ttl_hours: 24
+    # 动作治理档位：
+    # - off：全部放行，不弹任何审批
+    # - confirm_sensitive：默认。提交表单/回车/上传/下载/接受弹窗/页面内执行代码等
+    #   传「或高危」动作在桌面端弹一次性审批卡（allow once）；普通读写动作不打扰
+    # - confirm_writes：所有写交互（click/type/press/select/check/drag/fill_form/drop）都弹审批
+    # - read_only：写交互与高危动作直接拒绝
+    governance_mode: confirm_sensitive
     allowed_private_hosts: []
     allowed_private_cidrs: []
     blocked_hosts: []

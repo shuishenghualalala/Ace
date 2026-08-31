@@ -36,6 +36,9 @@ class TeamBus:
         recipient_member_ids: list[str],
         content: str,
         message_type: MessageType = "question",
+        intent: str = "",
+        request_id: str = "",
+        node_id: str = "",
         task_id: str = "",
         thread_id: str = "",
         reply_to: str = "",
@@ -53,8 +56,11 @@ class TeamBus:
             recipient_member_ids=recipients,
             content=content,
             message_type=message_type,
+            intent=intent,
+            request_id=request_id,
+            node_id=node_id,
             task_id=task_id,
-            thread_id=thread_id or task_id,
+            thread_id=thread_id or node_id or task_id,
             reply_to=reply_to,
             artifact_refs=list(artifact_refs or []),
             workflow_run_id=workflow_run_id,
@@ -104,6 +110,26 @@ class TeamBus:
                 for msg in self._messages.values()
                 if msg.team_session_id == team_session_id
             ]
+
+    def update_status(self, message_id: str, status: str) -> TeamMessage:
+        """更新消息生命周期状态并留下可观测事件。"""
+
+        normalized = str(status or "").strip()
+        if not normalized:
+            raise ValueError("消息状态不能为空")
+        with self._lock:
+            message = self._messages.get(str(message_id or "").strip())
+            if message is None:
+                raise KeyError(f"未知 TeamMessage: {message_id}")
+            previous = message.status
+            message.status = normalized
+            self._events.setdefault(message.team_session_id, []).append({
+                "type": "message_status_changed",
+                "message_id": message.message_id,
+                "previous_status": previous,
+                "status": normalized,
+            })
+            return message
 
     def events(self, team_session_id: str) -> list[dict[str, Any]]:
         with self._lock:

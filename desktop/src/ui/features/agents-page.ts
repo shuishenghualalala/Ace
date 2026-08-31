@@ -755,7 +755,6 @@ function teamMemberCount(team: ExternalTeam): number {
 function renderTeamDetail(): string {
   const team = teams.find((item) => item.id === activeTeamId);
   if (!team) return '';
-  const leader = teamAgentOptions().find((agent) => agent.id === team.leader_agent_id);
   const workflow = String(team.instructions || team.workflow || '').trim();
   const members = [...(team.members || [])].sort((left, right) => {
     if (left.agent_id === team.leader_agent_id) return -1;
@@ -767,7 +766,7 @@ function renderTeamDetail(): string {
       <div class="team-modal team-detail-modal" role="dialog" aria-modal="true" aria-labelledby="team-detail-title">
         <div class="team-modal__head">
           <div class="team-modal__title">
-            <div class="formation-avatar formation-avatar--leader" aria-hidden="true"><span>${escapeHtml(leader?.display_badge || '?')}</span></div>
+            <span class="session__team-logo team-detail-modal__team-logo" aria-hidden="true"><i></i><i></i></span>
             <div>
               <span>团队</span>
               <strong id="team-detail-title">${escapeHtml(team.name || '未命名团队')}</strong>

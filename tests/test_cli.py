@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -125,9 +126,10 @@ def test_session_flow(capsys, cli_home):
     assert code == 0
 
 
-def test_session_show_missing_returns_404(capsys, cli_home):
+def test_session_show_missing_exit_code(capsys, cli_home):
     code, _ = run_cli(capsys, "session", "show", "--id", "missing")
-    assert code == 404
+    # 业务错误的语义码（404）在进程出口统一收敛为 1（见 _shell_exit_code）
+    assert code == 1
 
 
 def test_cron_flow(capsys, cli_home):
@@ -326,6 +328,25 @@ def test_run_non_interactive_json(capsys, cli_home):
     assert data is not None
     assert data["session_id"]
     assert "收到" in data["text"]
+
+
+def test_business_error_exit_code_normalized(capsys, cli_home):
+    """CliError 的 HTTP 风格语义码（404/409）在进程出口收敛为 1，
+    不再出现 404 被 shell 截断成 148（看起来像被信号杀死）的情况。"""
+    code, _ = run_cli(capsys, "task", "show", "--id", "badtask")
+    assert code == 1
+
+
+def test_cli_log_level_env_does_not_leak(capsys, cli_home):
+    """main() 运行期间把 CREW_LOG_LEVEL 压为 WARNING，退出后恢复原状，
+    不污染同进程的其他调用方（测试套件也在同进程跑 main()）。"""
+    os.environ.pop("CREW_LOG_LEVEL", None)
+    try:
+        code, _ = run_cli(capsys, "--help")
+        assert code == 0
+        assert os.environ.get("CREW_LOG_LEVEL") is None
+    finally:
+        os.environ.pop("CREW_LOG_LEVEL", None)
 
 
 def test_readonly_content_commands(capsys, cli_home):

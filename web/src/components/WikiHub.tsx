@@ -68,6 +68,9 @@ interface Props {
   onSelectSession: (sessionId: string) => void;
   /** 删除 Wiki 对话。 */
   onDeleteSession: (sessionId: string) => Promise<void> | void;
+  /** 外部场景（如主对话）请求打开的 [[Wiki 页面名]]：挂载后消费一次并回调清除。 */
+  pendingWikiLinkTitle?: string | null;
+  onPendingWikiLinkHandled?: () => void;
 }
 
 export default function WikiHub({
@@ -79,8 +82,12 @@ export default function WikiHub({
   onNewSession,
   onSelectSession,
   onDeleteSession,
+  pendingWikiLinkTitle,
+  onPendingWikiLinkHandled,
 }: Props) {
   const [kbs, setKbs] = useState<WikiKB[]>([]);
+  /** KB 列表首轮加载是否已完成（无论成败），供外部跳入等逻辑等待。 */
+  const [kbsLoaded, setKbsLoaded] = useState(false);
   const [pages, setPages] = useState<WikiPage[]>([]);
   /** 已加载完整正文的页面（pageId -> WikiPage），列表只返回 brief。 */
   const [pageDetails, setPageDetails] = useState<Record<string, WikiPage>>({});
@@ -96,6 +103,10 @@ export default function WikiHub({
   const [selectedDocumentName, setSelectedDocumentName] = useState<"Home.md" | "index.md" | null>(null);
   const [vaultDocument, setVaultDocument] = useState<WikiVaultDocument | null>(null);
   const [initializedKbId, setInitializedKbId] = useState<string | null>(null);
+  /** 跨知识库打开 [[Wiki 双链]] 的待处理目标：切 KB 且初始化完成后由 effect 打开。 */
+  const [pendingCrossKbPage, setPendingCrossKbPage] = useState<{ kbId: string; page: WikiPage } | null>(null);
+  /** 跨 KB 跳转落地后抑制一次 Home.md 自动加载（值为目标 KB id）。 */
+  const suppressHomeAutoloadRef = useRef<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(
     new Set(["wiki", "wiki/sources"]),
@@ -348,6 +359,8 @@ export default function WikiHub({
       }
     } catch (err) {
       setMessage(`加载知识库失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setKbsLoaded(true);
     }
   }, [kbId, onKbChange]);
 
@@ -954,9 +967,18 @@ export default function WikiHub({
   /**
    * 点击正文 [[Wiki 双链]]：先按标题/别名在已加载页面里精确匹配，
    * 找不到再走搜索接口兜底（对齐桌面端 resolveAndOpenWikiPage）。
+   * 当前知识库未命中时依次搜索其他知识库——主对话等场景的链接可能指向别的 KB。
+   *
+   * 回调身份稳定（空依赖），点击时从 ref 读最新状态：否则 pages/kbs/kbId 每次
+   * 变化都让回调换身份，击穿 AgentTurn / MarkdownContent 的 memo，导致整个
+   * Wiki 聊天随无关的页面列表更新而全量重算。
    */
+  const latestWikiLinkRef = useRef({ pages, kbs, kbId, onKbChange });
+  latestWikiLinkRef.current = { pages, kbs, kbId, onKbChange };
+
   const handleWikiLink = useCallback(
     async (title: string) => {
+      const { pages, kbs, kbId, onKbChange } = latestWikiLinkRef.current;
       const local = findPageByTitle(pages, title);
       if (local) {
         openPageTab(local.id);
@@ -966,6 +988,21 @@ export default function WikiHub({
         const res = await api.wikiSearch(title, kbId, 8);
         const target = findPageByTitle(res.pages, title);
         if (!target) {
+          for (const kb of kbs) {
+            if (kb.id === kbId) continue;
+            try {
+              const other = await api.wikiSearch(title, kb.id, 8);
+              const hit = findPageByTitle(other.pages, title);
+              if (hit) {
+                // 切到目标 KB，等其初始化完成后由 pendingCrossKbPage 的 effect 打开
+                setPendingCrossKbPage({ kbId: kb.id, page: hit });
+                onKbChange(kb.id);
+                return;
+              }
+            } catch {
+              // 某个 KB 搜索失败不影响继续尝试其他 KB
+            }
+          }
           setMessage(`未找到 Wiki 页面：${title}`);
           return;
         }
@@ -978,13 +1015,39 @@ export default function WikiHub({
         setMessage(`打开 Wiki 页面失败：${err instanceof Error ? err.message : String(err)}`);
       }
     },
-    [pages, kbId, openPageTab],
+    [],
   );
 
+  // 跨知识库跳转落地：目标 KB 初始化完成后，把目标页并入列表并打开 Tab
   useEffect(() => {
-    if (initializedKbId === kbId) {
-      void loadVaultDocument("Home.md");
+    if (!pendingCrossKbPage || pendingCrossKbPage.kbId !== kbId) return;
+    if (initializedKbId !== kbId) return;
+    const target = pendingCrossKbPage.page;
+    // 抑制本次 KB 初始化后的 Home.md 自动加载，避免抢走刚打开页面的焦点
+    suppressHomeAutoloadRef.current = kbId;
+    setPages((prev) => (prev.some((p) => p.id === target.id) ? prev : [target, ...prev]));
+    setPageDetails((prev) => ({ ...prev, [target.id]: target }));
+    openPageTab(target.id);
+    setPendingCrossKbPage(null);
+  }, [pendingCrossKbPage, kbId, initializedKbId, openPageTab]);
+
+  // 外部（主对话）点击 [[Wiki 双链]] 跳入：挂载后按标题打开一次，然后通知上层清除。
+  // 等当前 KB 初始化且 KB 列表加载完再执行——否则跨 KB 搜索会因 kbs 为空而直接误判"未找到"。
+  useEffect(() => {
+    if (!pendingWikiLinkTitle) return;
+    if (initializedKbId !== kbId || !kbsLoaded) return;
+    void handleWikiLink(pendingWikiLinkTitle).finally(() => onPendingWikiLinkHandled?.());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingWikiLinkTitle, initializedKbId, kbId, kbsLoaded]);
+
+  useEffect(() => {
+    if (initializedKbId !== kbId) return;
+    // 跨 KB 跳转刚落地时跳过 Home.md 自动加载，避免抢走目标页焦点
+    if (suppressHomeAutoloadRef.current === kbId) {
+      suppressHomeAutoloadRef.current = null;
+      return;
     }
+    void loadVaultDocument("Home.md");
   }, [initializedKbId, kbId, loadVaultDocument]);
 
   useEffect(() => {
@@ -1387,7 +1450,7 @@ export default function WikiHub({
                 </div>
               </header>
               {sessionId ? (
-                <ChatPanel {...chatProps} />
+                <ChatPanel {...chatProps} onWikiLink={handleWikiLink} />
               ) : (
                 <div className="wiki-hub__empty">正在连接 Wiki Agent…</div>
               )}

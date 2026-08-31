@@ -1,12 +1,13 @@
 /**
  * 追问选择框（ask_followup_question）— desktop 端渲染与事件绑定。
  *
- * 普通追问对齐 web 端 FollowupQuestionCard；权限请求使用居中阻断式对话框。
+ * 普通追问对齐 web 端 FollowupQuestionCard；权限请求使用不阻断页面的浮层。
  * 取消时通知后端（followup_cancel），与 web 行为一致。
  */
 
 import type { FollowupAnswer } from './backend-client';
 import type { PendingFollowup } from './state';
+import { getPrimaryComposerRoot } from './features/composer-scope';
 
 const FREE_TEXT_OPTION = '__free_text__';
 
@@ -18,6 +19,90 @@ const PERMISSION_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" fill="n
 const PERMISSION_NOTICE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>`;
 const STAFFING_ICON = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 20a6 6 0 0 0-12 0"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M16 11h6"/></svg>`;
 const STAFFING_CHECK_ICON = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
+
+const PERMISSION_CARD_GAP = 12;
+const PERMISSION_CARD_MIN_MARGIN = 16;
+const PERMISSION_CARD_MAX_WIDTH = 440;
+const permissionCardRoots = new Set<HTMLElement>();
+const permissionCardObservers = new WeakMap<HTMLElement, ResizeObserver>();
+let permissionCardSyncScheduled = false;
+let permissionCardResizeBound = false;
+
+function permissionCardComposer(root: HTMLElement): HTMLElement | null {
+  // Wiki Agent 有自己的 Composer，不能误锚到主对话输入框。
+  const wikiPanel = root.closest<HTMLElement>('[data-wiki-agent-panel]');
+  return wikiPanel?.querySelector<HTMLElement>('[data-composer-view]')
+    ?? getPrimaryComposerRoot()
+    ?? document.querySelector<HTMLElement>('[data-composer-view]');
+}
+
+function positionPermissionCard(root: HTMLElement): void {
+  const composer = permissionCardComposer(root);
+  if (!composer) return;
+  const rect = composer.getBoundingClientRect();
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+  if (!rect.width || !rect.height || !viewportWidth || !viewportHeight) return;
+
+  const width = Math.min(
+    PERMISSION_CARD_MAX_WIDTH,
+    Math.max(280, rect.width),
+    viewportWidth - PERMISSION_CARD_MIN_MARGIN * 2,
+  );
+  const left = Math.max(
+    PERMISSION_CARD_MIN_MARGIN,
+    Math.min(
+      rect.left + (rect.width - width) / 2,
+      viewportWidth - width - PERMISSION_CARD_MIN_MARGIN,
+    ),
+  );
+  const bottom = Math.max(
+    PERMISSION_CARD_MIN_MARGIN,
+    viewportHeight - rect.top + PERMISSION_CARD_GAP,
+  );
+
+  root.style.setProperty('--permission-card-left', `${left}px`);
+  root.style.setProperty('--permission-card-right', 'auto');
+  root.style.setProperty('--permission-card-width', `${width}px`);
+  root.style.setProperty('--permission-card-bottom', `${bottom}px`);
+}
+
+function schedulePermissionCardSync(): void {
+  if (permissionCardSyncScheduled) return;
+  permissionCardSyncScheduled = true;
+  requestAnimationFrame(() => {
+    permissionCardSyncScheduled = false;
+    for (const root of permissionCardRoots) {
+      if (!root.isConnected) {
+        permissionCardObservers.get(root)?.disconnect();
+        permissionCardRoots.delete(root);
+        continue;
+      }
+      positionPermissionCard(root);
+    }
+  });
+}
+
+function observePermissionCardLayout(root: HTMLElement): void {
+  permissionCardRoots.add(root);
+  if (!permissionCardResizeBound) {
+    permissionCardResizeBound = true;
+    window.addEventListener('resize', schedulePermissionCardSync, { passive: true });
+    window.visualViewport?.addEventListener('resize', schedulePermissionCardSync, { passive: true });
+  }
+  const composer = permissionCardComposer(root);
+  if (composer && typeof ResizeObserver !== 'undefined' && !permissionCardObservers.has(root)) {
+    const observer = new ResizeObserver(schedulePermissionCardSync);
+    observer.observe(composer);
+    permissionCardObservers.set(root, observer);
+  }
+  positionPermissionCard(root);
+}
+
+/** 将权限卡锚定到所属对话的 Composer 上方；普通追问和 staffing 弹窗不参与。 */
+export function syncPermissionCardPositions(container: ParentNode = document): void {
+  container.querySelectorAll<HTMLElement>('.followup-card-wrap--permission').forEach(observePermissionCardLayout);
+}
 
 interface PermissionPromptParts {
   action: string;
@@ -176,6 +261,14 @@ function permissionPresentation(question: PendingFollowup): PermissionPresentati
   const toolName = permissionToolName(question.title);
   const parts = permissionPromptParts(question.questions[0]?.question ?? '');
   const actionObject = parseActionObject(parts.action);
+  if (toolName.startsWith('wiki_')) {
+    return {
+      title: '允许执行 Crew 笔记操作？',
+      context: 'Crew 笔记（Wiki）',
+      summary: clipped(parts.action, 160) || '执行知识库变更操作',
+      note: '',
+    };
+  }
   if ((toolName === 'browser_use' || toolName.startsWith('browser_')) && actionObject) {
     return browserPermissionPresentation(normalizedBrowserAction(toolName, actionObject), parts.reason);
   }
@@ -206,8 +299,8 @@ function permissionPresentation(question: PendingFollowup): PermissionPresentati
 
 function permissionButtonClass(label: string, value: string): string {
   const choice = `${label} ${value}`.toLowerCase();
-  if (/allow_once|允许一次|允许本次/.test(choice)) return ' permission-dialog__button--primary';
-  if (/always|session_exact|始终允许|本次对话/.test(choice)) return ' permission-dialog__button--persistent';
+  if (/allow_once|允许一次|允许本次|确认执行/.test(choice)) return ' permission-dialog__button--primary';
+  if (/always|session_exact|始终允许|本次对话|allow_batch|本批次/.test(choice)) return ' permission-dialog__button--persistent';
   return ' permission-dialog__button--secondary';
 }
 
@@ -235,20 +328,23 @@ function followupOptionsHtml(
   includeFreeText = question.allowFreeText,
 ): string {
   const inputType = question.multiSelect ? 'checkbox' : 'radio';
-  const optionHtml = options.map((option) => {
+  const optionHtml = options.map((option, index) => {
     const description = option.description
       ? `<span class="followup-card__option-description">${escapeHtml(option.description)}</span>`
       : '';
+    const optionKey = index < 26 ? String.fromCharCode(65 + index) : String(index + 1);
     return `
       <label class="followup-card__option">
         <input type="${inputType}" name="followup_${escapeHtml(question.id)}" value="${escapeHtml(option.value)}" data-qid="${escapeHtml(question.id)}" />
+        <span class="followup-card__option-key" aria-hidden="true">${optionKey}</span>
         <span class="followup-card__option-copy"><span>${escapeHtml(option.label)}</span>${description}</span>
       </label>`;
   }).join('');
   const freeTextOption = includeFreeText ? `
       <label class="followup-card__option followup-card__option--free">
         <input type="${inputType}" name="followup_${escapeHtml(question.id)}" value="${FREE_TEXT_OPTION}" data-qid="${escapeHtml(question.id)}" data-free="1" />
-        <span>其他（自定义输入）</span>
+        <span class="followup-card__option-key" aria-hidden="true">＋</span>
+        <span class="followup-card__option-copy"><span>其他（自定义输入）</span></span>
       </label>
       <input type="text" class="followup-card__free-input" data-qid="${escapeHtml(question.id)}" placeholder="请输入你的回答…" hidden />`
     : '';
@@ -262,8 +358,8 @@ function permissionDialogHtml(question: PendingFollowup): string {
   const options = firstQuestion?.options ?? [];
   const rank = (label: string, value: string): number => {
     const choice = `${label} ${value}`.toLowerCase();
-    if (/deny|拒绝/.test(choice)) return 0;
-    if (/always|session_exact|始终允许|本次对话/.test(choice)) return 1;
+    if (/deny|拒绝|取消/.test(choice)) return 0;
+    if (/always|session_exact|始终允许|本次对话|allow_batch|本批次/.test(choice)) return 1;
     return 2;
   };
   const orderedOptions = [...options].sort(
@@ -272,7 +368,7 @@ function permissionDialogHtml(question: PendingFollowup): string {
   const actions = orderedOptions.map((option) => `
       <button type="button" class="permission-dialog__button${permissionButtonClass(option.label, option.value)}" data-permission-qid="${escapeHtml(firstQuestion?.id ?? '')}" data-permission-value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</button>`).join('');
   return `
-    <div class="followup-card followup-card--permission" data-followup-id="${escapeHtml(question.questionId)}" role="alertdialog" aria-modal="true" aria-labelledby="${dialogId}-title" aria-describedby="${dialogId}-description" tabindex="-1">
+    <div class="followup-card followup-card--permission" data-followup-id="${escapeHtml(question.questionId)}" role="dialog" aria-modal="false" aria-labelledby="${dialogId}-title" aria-describedby="${dialogId}-description" tabindex="-1">
       ${followupSourceHtml(question)}
       <div class="followup-card__header">
         <span class="followup-card__header-icon">${PERMISSION_ICON}</span>
@@ -453,22 +549,9 @@ export function bindFollowupCard(root: HTMLElement, bindings: FollowupBindings):
         resolved = true;
         buttons.forEach((item) => { item.disabled = true; });
         bindings.onCancel(questionId);
-        return;
-      }
-      if (event.key !== 'Tab' || buttons.length === 0) return;
-      const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-      if (event.shiftKey && index <= 0) {
-        event.preventDefault();
-        buttons.at(-1)?.focus();
-      } else if (!event.shiftKey && index === buttons.length - 1) {
-        event.preventDefault();
-        buttons[0]?.focus();
       }
     });
-    const safestAction = buttons.find((button) => /deny|拒绝/i.test(
-      `${button.textContent ?? ''} ${button.dataset.permissionValue ?? ''}`,
-    ));
-    (safestAction ?? buttons[0] ?? card).focus({ preventScroll: true });
+    // 这是非模态浮层：不抢占当前页面焦点，也不把 Tab 键限制在浮层内。
     return;
   }
 

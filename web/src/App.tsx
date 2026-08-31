@@ -8,12 +8,13 @@ import SkillsHub from "./components/SkillsHub";
 import WikiHub from "./components/WikiHub";
 import TaskBoard from "./components/TaskBoard";
 import WorkspaceModal from "./components/WorkspaceModal";
+import { teamMemberMentionId } from "./components/Composer";
 import { useSessions } from "./hooks/useSessions";
 import { useWorkspaces } from "./hooks/useWorkspaces";
 import { useChat } from "./hooks/useChat";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { externalAgentsAvailable } from "./lib/featureFlags";
-import type { AppConfig, Attachment, ExternalTeam, Mode, Session, Task, TeamExecutionTier, UiMessage, Workspace } from "./types";
+import type { AppConfig, Attachment, ExternalTeam, Mode, Session, Task, TeamExecutionTier, UiMessage, UserAgentMention, Workspace } from "./types";
 
 const genId = () => `web_${Math.random().toString(36).slice(2, 8)}`;
 const CREW_BUILTIN_AGENT_ID = "crew::builtin";
@@ -27,6 +28,8 @@ export function resolveWikiAgentSessionId(
 }
 
 const CONFIG_RETRY_INTERVAL_MS = 3000;
+const TASKS_POLL_INTERVAL_MS = 2000;
+const TASKS_POLL_MAX_INTERVAL_MS = 60_000;
 
 export function isExternalAgentSession(session: Session | undefined): boolean {
   const kind = session?.agent_binding?.kind;
@@ -129,6 +132,7 @@ function teamMembersForBoard(team?: ExternalTeam) {
     : leaderMember?.agent_name || team.leader_agent_id || "Leader";
   const leader = {
     agentId: team.leader_agent_id,
+    mentionId: "leader",
     name: leaderName,
     displayBadge: leaderMember?.display_badge || (team.leader_agent_id === CREW_BUILTIN_AGENT_ID ? "M" : "?"),
     role: summarizeLeaderRole(leaderMember?.role || ""),
@@ -139,6 +143,7 @@ function teamMembersForBoard(team?: ExternalTeam) {
     .filter((member) => member.agent_id !== team.leader_agent_id)
     .map((member, index) => ({
       agentId: member.agent_id,
+      mentionId: member.agent_name?.trim() || member.agent_id,
       name: member.agent_name || member.agent_id,
       displayBadge: member.display_badge || "?",
       role: `负责${summarizeBusinessDuty(member.role || "", "协作执行", { max: 80 })}`,
@@ -173,15 +178,21 @@ export default function App() {
   const [wikiKbId, setWikiKbId] = useState("default");
   const [wikiAgentSession, setWikiAgentSession] = useState<WikiAgentSessionBinding | null>(null);
   const wikiAgentSessionId = resolveWikiAgentSessionId(wikiAgentSession, wikiKbId);
+  /** 主对话里点击 [[Wiki 页面名]] 时待打开的页面标题（跳转 Wiki 视图后由 WikiHub 消费）。 */
+  const [pendingWikiLinkTitle, setPendingWikiLinkTitle] = useState<string | null>(null);
 
   const { sessions, refresh: refreshSessions } = useSessions();
   const { workspaces, refresh: refreshWorkspaces } = useWorkspaces();
 
-  const refreshTasks = useCallback(async () => {
+  const refreshTasks = useCallback(async (): Promise<"ok" | "retry" | "stop"> => {
     try {
       setTasks(await api.tasks(currentSessionId));
-    } catch {
+      return "ok";
+    } catch (err) {
       setTasks([]);
+      // 会话不存在/不属于当前账户（404）：继续轮询无意义，停止直到切换会话
+      if (err instanceof ApiError && err.status === 404) return "stop";
+      return "retry";
     }
   }, [currentSessionId]);
 
@@ -191,6 +202,14 @@ export default function App() {
   }, [refreshSessions, refreshTasks]);
 
   const chat = useChat(currentSessionId, onAfterFinal);
+  const currentExternalTeam = externalTeams.find((team) => team.id === sessionExternalTeams[currentSessionId]);
+  const currentTeamMembers = useMemo(() => teamMembersForBoard(currentExternalTeam), [currentExternalTeam]);
+
+  // 主对话里点击 [[Wiki 页面名]]：跳到 Wiki 视图并打开对应页面（WikiHub 挂载后消费）。
+  const openWikiLinkFromChat = useCallback((title: string) => {
+    setPendingWikiLinkTitle(title);
+    setView("wiki");
+  }, []);
 
   // 进入 Wiki 视图或切换 KB 时，创建/复用该 KB 自己的 Wiki Agent 会话。
   useEffect(() => {
@@ -284,9 +303,21 @@ export default function App() {
 
   useEffect(() => {
     if (!boardOpen) return;
-    void refreshTasks();
-    const timer = window.setInterval(() => void refreshTasks(), 2000);
-    return () => window.clearInterval(timer);
+    let cancelled = false;
+    let timer: number | undefined;
+    let delay = TASKS_POLL_INTERVAL_MS;
+    const tick = async () => {
+      const result = await refreshTasks();
+      if (cancelled || result === "stop") return;
+      // 可恢复错误（网络/5xx）指数退避，成功即重置；切换会话时 effect 随 refreshTasks 重建，退避同步重置
+      delay = result === "ok" ? TASKS_POLL_INTERVAL_MS : Math.min(delay * 2, TASKS_POLL_MAX_INTERVAL_MS);
+      timer = window.setTimeout(() => void tick(), delay);
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [boardOpen, refreshTasks]);
 
   useEffect(() => {
@@ -364,6 +395,9 @@ export default function App() {
   };
 
   const deleteSession = async (id: string) => {
+    const title = sessions.find((s) => s.session_id === id)?.title || "新会话";
+    // 与其他删除入口（Wiki 页面/外援/团队/Wiki 对话）一致用原生 confirm 二次确认
+    if (!window.confirm(`确定删除会话「${title}」吗？该操作不可撤销。`)) return;
     await api.deleteSession(id);
     chat.clearSession(id);
     await refreshSessions();
@@ -391,7 +425,7 @@ export default function App() {
     if (wsId === currentWorkspaceId) newSession("default");
   };
 
-  const handleSend = (text: string, sendAttachments: Attachment[], subScenario?: string) => {
+  const handleSend = (text: string, sendAttachments: Attachment[], subScenario?: string, userMentions?: UserAgentMention[]) => {
     const cmd = text.trim().toLowerCase();
     // 与 CLI 一致：/plan 进入 Plan 模式（不发给模型）
     if (!editDraft && cmd === "/plan") {
@@ -409,8 +443,28 @@ export default function App() {
       subScenario,
       externalTeamId: effectiveMode === "team" ? sessionExternalTeams[currentSessionId] : undefined,
       teamExecutionTier,
+      userMentions: effectiveMode === "team" ? userMentions : undefined,
     });
     setEditDraft(null);
+  };
+
+  const retryMention = (message: UiMessage) => {
+    const query = String(message.communicationRequestText || "").trim();
+    const rawMemberId = String(message.agentId || (message.isLeader ? "leader" : "")).trim();
+    const rosterMember = currentTeamMembers?.find((member) => (
+      member.agentId === rawMemberId
+      || member.mentionId === rawMemberId
+      || member.name === rawMemberId
+    ));
+    const memberId = rosterMember
+      ? teamMemberMentionId(rosterMember)
+      : rawMemberId;
+    if (!query || !memberId) return;
+    handleSend(query, [], undefined, [{ kind: "team_member", member_id: memberId }]);
+  };
+
+  const cancelMention = (message: UiMessage) => {
+    chat.cancelMention(currentSessionId, message.requestId);
   };
 
   const editMessage = (message: UiMessage) => {
@@ -445,8 +499,6 @@ export default function App() {
   }, [currentSession, externalAgentsEnabled]);
   const title = currentSession?.title || "新会话";
   const currentAgentLabel = currentSession?.agent_label;
-  const currentExternalTeam = externalTeams.find((team) => team.id === sessionExternalTeams[currentSessionId]);
-  const currentTeamMembers = useMemo(() => teamMembersForBoard(currentExternalTeam), [currentExternalTeam]);
   const isCurrentTeamSession = mode === "team" && Boolean(sessionExternalTeams[currentSessionId]);
   const toolsMenuChrome = boardOpen;
   const toolCollapseLevel = !boardOpen ? 0 : boardWidth >= 520 ? 3 : boardWidth >= 420 ? 2 : 1;
@@ -652,6 +704,8 @@ export default function App() {
             onNewSession={newWikiSession}
             onSelectSession={selectWikiSession}
             onDeleteSession={deleteWikiSession}
+            pendingWikiLinkTitle={pendingWikiLinkTitle}
+            onPendingWikiLinkHandled={() => setPendingWikiLinkTitle(null)}
           />
         ) : (
           <>
@@ -680,6 +734,7 @@ export default function App() {
               attachments={attachments}
               onSend={handleSend}
               onAsk={(text) => handleSend(text, [])}
+              onWikiLink={openWikiLinkFromChat}
               onStop={() => chat.stop(currentSessionId)}
               onSteer={(text) => chat.steer(currentSessionId, text)}
               planActive={chat.planActive}
@@ -693,6 +748,8 @@ export default function App() {
               onDismissFollowup={() => chat.dismissFollowup(currentSessionId)}
               editDraft={editDraft}
               onEditMessage={editMessage}
+              onRetryMention={retryMention}
+              onCancelMention={cancelMention}
               onCancelEdit={() => setEditDraft(null)}
               onRemoveFromQueue={(i) => chat.removeFromQueue(currentSessionId, i)}
               onEditQueueItem={(i, q) => chat.editQueueItem(currentSessionId, i, q)}
@@ -729,6 +786,16 @@ export default function App() {
           onClose={() => setBoardOpen(false)}
           onCancel={async (taskId) => {
             await api.cancelTask(taskId);
+            await refreshTasks();
+          }}
+          onRecover={async (nodeId, action, replacementAssignee) => {
+            const result = await api.recoverTeamNode(
+              currentSessionId,
+              nodeId,
+              action,
+              replacementAssignee,
+            );
+            if (!result.ok) throw new Error(result.error || "节点恢复失败");
             await refreshTasks();
           }}
         />

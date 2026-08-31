@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -99,7 +98,7 @@ def test_publish_source_page_moves_existing_summary_into_source_kind_directory(
 
 
 @pytest.mark.asyncio
-async def test_short_ingest_creates_source_summary_and_entities_only(store, compiler):
+async def test_short_ingest_keeps_qualified_entities_and_topics(store, compiler):
     source_content = "这是关于 Crew 多智能体调用平台的原始文档内容。"
     analysis = {
         "source_summary": {
@@ -126,26 +125,18 @@ async def test_short_ingest_creates_source_summary_and_entities_only(store, comp
         ],
     }
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
-    compiler.summarizer = MagicMock()
-    compiler.summarizer.generate_kb_summary = AsyncMock(return_value=None)
 
     _save_paste_source(store, "src_1", "原始文档")
 
     result = await compiler.ingest("src_1", source_content=source_content)
 
     assert not result.issues
-    # 摘要走后台 fire-and-forget 刷新（_schedule_kb_summary_refresh），不阻塞 ingest；
-    # 等事件循环把后台任务跑完再断言。
-    await asyncio.sleep(0)
-    compiler.summarizer.generate_kb_summary.assert_awaited()
-    # mock 的 summarizer 不落盘，摘要状态保持初始 empty
-    assert store.get_kb_summary().status == "empty"
-    assert len(result.pages) == 3
+    assert len(result.pages) == 4
     titles = {p.title for p in result.pages}
     assert "原始文档" in titles
     assert "AgentRuntime" in titles
     assert "ModeManager" in titles
-    assert "Wiki 设计" not in titles
+    assert "Wiki 设计" in titles
 
     # source 页面保存原始内容
     source_page = store.get_by_title("原始文档")
@@ -809,16 +800,16 @@ async def test_plan_ingest_uses_compact_units_and_page_threshold(store, compiler
     assert '"entities"' in prompt
     assert '"concepts"' not in prompt
     assert '"topics"' in prompt
-    assert "entities 最多 3 个 unit" in prompt
-    assert "topics 最多 2 个 unit" in prompt
-    assert "最多 5 个 Entity 和 3 个 Topic" in prompt
+    assert "不要设置固定数量" in prompt
+    assert "达到质量标准的独立知识单元" in prompt
+    assert "最多 5 个 Entity 和 3 个 Topic" not in prompt
 
 
 @pytest.mark.asyncio
 async def test_analyze_chunk_uses_compact_output_budget(monkeypatch, compiler):
     chat = AsyncMock(
         return_value=(
-            '{"format":"knowledge-units-v7",'
+            '{"format":"knowledge-units-v8",'
             '"source_summary":{},"entities":[],"topics":[]}'
         )
     )
@@ -826,7 +817,7 @@ async def test_analyze_chunk_uses_compact_output_budget(monkeypatch, compiler):
 
     result = await compiler._analyze_chunk("测试材料")
 
-    assert result["format"] == "knowledge-units-v7"
+    assert result["format"] == "knowledge-units-v8"
     assert result["entities"] == []
     assert result["topics"] == []
     assert chat.await_args.kwargs["max_tokens"] == compiler_mod._ANALYSIS_MAX_TOKENS
@@ -1094,48 +1085,35 @@ def test_update_index_contains_navigation_quality_metadata(store, compiler):
     assert "关系 0" in index_text
 
 
-def test_document_limits_apply_after_all_chunks_are_merged():
-    from crew.wiki.compiler import _apply_document_limits
+def test_merge_preserves_all_qualified_entities_and_topics():
+    from crew.wiki.compiler import _merge_analysis_results
 
-    analysis = {
-        "entities": [
+    analysis = _merge_analysis_results(
+        [
             {
-                "name": f"Entity {index}",
-                "importance": "core" if index < 2 else "supporting",
-                "claims": [{"statement": f"claim {index}"}],
+                "entities": [
+                    {
+                        "name": f"Entity {index}",
+                        "importance": "core" if index < 2 else "supporting",
+                        "claims": [{"statement": f"claim {index}"}],
+                    }
+                    for index in range(8)
+                ],
+                "topics": [
+                    {
+                        "name": f"Topic {index}",
+                        "importance": "core",
+                        "claims": [{"statement": f"topic claim {index}"}],
+                    }
+                    for index in range(5)
+                ],
+                "relationships": [],
             }
-            for index in range(8)
-        ],
-        "topics": [
-            {
-                "name": f"Topic {index}",
-                "importance": "core",
-                "claims": [{"statement": f"topic claim {index}"}],
-            }
-            for index in range(5)
-        ],
-        "relationships": [],
-    }
+        ]
+    )
 
-    _apply_document_limits(analysis, content_length=50_000)
-
-    assert len(analysis["entities"]) == 5
-    assert len(analysis["topics"]) == 3
-
-
-def test_short_document_limits_skip_topics():
-    from crew.wiki.compiler import _apply_document_limits
-
-    analysis = {
-        "entities": [{"name": f"E{index}", "claims": []} for index in range(5)],
-        "topics": [{"name": "Short Topic", "claims": []}],
-        "relationships": [],
-    }
-
-    _apply_document_limits(analysis, content_length=1_000)
-
-    assert len(analysis["entities"]) == 3
-    assert analysis["topics"] == []
+    assert len(analysis["entities"]) == 8
+    assert len(analysis["topics"]) == 5
 
 
 @pytest.mark.asyncio
@@ -1274,7 +1252,7 @@ async def test_apply_skips_page_when_target_modified_externally(store, compiler)
     existing.content = "# AgentRuntime\n\n已被外部修改的新内容"
     store.update(existing)
 
-    result = await compiler.apply_ingest("s1")
+    await compiler.apply_ingest("s1")
     page_after = store.get(existing.id)
     assert "已被外部修改的新内容" in page_after.content
     assert "运行时描述" not in page_after.content  # 计划内容未覆盖
@@ -1326,10 +1304,10 @@ async def test_plan_ingest_reports_analysis_progress(store, compiler):
 
     await compiler.plan_ingest("src_prog", use_chunking=True, chunk_size=1000, progress=_progress)
 
-    assert events[0].startswith("正在分析来源内容")
-    # 分块进度：至少出现一次「已完成/总块数」形式
-    assert any("块）" in e and "/" in e for e in events)
-    assert any("生成页面变更计划" in e for e in events)
+    assert events[0].startswith("正在通读素材")
+    # 分段进度：至少出现一次「已完成/总段数」形式
+    assert any("段）" in e and "/" in e for e in events)
+    assert any("盘算要改哪些页面" in e for e in events)
 
 
 async def test_plan_ingest_without_progress_callback_still_works(store, compiler):

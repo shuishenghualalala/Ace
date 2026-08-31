@@ -8,10 +8,37 @@ interface Props {
   message: UiMessage;
   isStreaming?: boolean;
   teamMembers?: TeamMemberView[];
+  onRetryMention?: (message: UiMessage) => void;
+  onCancelMention?: (message: UiMessage) => void;
 }
 
 function isCrewAgent(message: UiMessage): boolean {
   return String(message.agentId || "").trim() === "crew::builtin";
+}
+
+function resolveTeamCommunicationRole(message: UiMessage, fallback: string): string {
+  const role = String(fallback || "").trim();
+  const target = (message.mentionTo || [])
+    .map((item) => String(item || "").trim())
+    .find(Boolean);
+  if (!target || !/^向\s+\S+/.test(role)) return role;
+  const label = target === "crew::builtin" ? "Crew" : target;
+  return role.replace(/^向\s+\S+/, `向 ${label}`);
+}
+
+function compactTeamRole(role: string): string {
+  const normalized = String(role || "")
+    .replace(/[\r\n]+/g, " ")
+    .replace(/[`*_#>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return "";
+  const beforeInternalSections = normalized.split(/(?:工作原则|团队协作关系|输出格式|工作安排|边界)\s*[-:：]?/i)[0]
+    .replace(/^(职责|角色|职能)\s*[-:：]?\s*/i, "")
+    .replace(/^[-*\d.、)\s]+/, "")
+    .trim();
+  const compact = beforeInternalSections || normalized;
+  return compact.length > 48 ? `${compact.slice(0, 48).trimEnd()}…` : compact;
 }
 
 function resolveIdentity(message: UiMessage, teamMembers: TeamMemberView[] = []) {
@@ -22,7 +49,10 @@ function resolveIdentity(message: UiMessage, teamMembers: TeamMemberView[] = [])
   return {
     name: crewLogo ? "Crew" : (member?.name || message.agentName || "Agent"),
     badge: member?.displayBadge || "?",
-    role: member?.isLeader ? "leader" : (message.isLeader ? "leader" : (message.agentRole || member?.role || "").trim()),
+    role: compactTeamRole(resolveTeamCommunicationRole(
+      message,
+      member?.isLeader ? "leader" : (message.isLeader ? "leader" : (message.agentRole || member?.role || "").trim()),
+    )),
     tone: member?.tone ?? message.agentTone ?? 0,
     crewLogo,
   };
@@ -86,13 +116,30 @@ function highlightMentionMarkdown(text: string): string {
   );
 }
 
-export default function TeamAgentTurnBubble({ message, isStreaming = false, teamMembers }: Props) {
+const RETRYABLE_MENTION_STATUSES = new Set(["failed", "expired", "cancelled"]);
+const ACTIVE_MENTION_STATUSES = new Set(["published", "waiting_reply", "queued", "delivered"]);
+
+export default function TeamAgentTurnBubble({
+  message,
+  isStreaming = false,
+  teamMembers,
+  onRetryMention,
+  onCancelMention,
+}: Props) {
   const identity = resolveIdentity(message, teamMembers);
   const state = buildAgentTurnState([{
     ...message,
     text: highlightMentionMarkdown(message.text),
   }], isStreaming);
   const processText = (message.processText || "").trim();
+  const isUserMentionAnswer = message.communicationKind === "user_mention_answer";
+  const canRetryMention = isUserMentionAnswer
+    && RETRYABLE_MENTION_STATUSES.has(String(message.communicationStatus || "").trim())
+    && Boolean(message.communicationRequestText)
+    && Boolean(onRetryMention);
+  const canCancelMention = isUserMentionAnswer
+    && ACTIVE_MENTION_STATUSES.has(String(message.communicationStatus || "").trim())
+    && Boolean(onCancelMention);
   const isCollapsible = message.displayMode === "collapsible";
   const isPlanningProgress = message.eventType === "team_planning_progress";
   const afterContent = (
@@ -106,6 +153,32 @@ export default function TeamAgentTurnBubble({ message, isStreaming = false, team
           </div>
         </details>
       )}
+      {(canRetryMention || canCancelMention) && (
+        <div className="team-internal__communication-actions">
+          {canRetryMention && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.currentTarget.disabled = true;
+                onRetryMention?.(message);
+              }}
+            >
+              重试
+            </button>
+          )}
+          {canCancelMention && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.currentTarget.disabled = true;
+                onCancelMention?.(message);
+              }}
+            >
+              取消
+            </button>
+          )}
+        </div>
+      )}
     </>
   );
   const bubbleClassName = `team-internal__bubble team-internal__bubble--tone-${identity.tone}`
@@ -114,8 +187,8 @@ export default function TeamAgentTurnBubble({ message, isStreaming = false, team
     + " md-body";
 
   return (
-    <AgentTurnBubble
-      identity={identity}
+      <AgentTurnBubble
+      identity={{ ...identity, teamLogo: isPlanningProgress }}
       state={state}
       isStreaming={isStreaming}
       id={`message-${message.id}`}

@@ -37,6 +37,10 @@ function isTeamPlanningProgress(message: UiMessage): boolean {
   return message.eventType === "team_planning_progress";
 }
 
+function isUserMentionAnswer(message: UiMessage): boolean {
+  return message.communicationKind === "user_mention_answer" && Boolean(message.requestId);
+}
+
 function isDuplicateTeamEvent(existing: UiMessage, incoming: UiMessage): boolean {
   return existing.role === "team_internal"
     && incoming.role === "team_internal"
@@ -107,6 +111,44 @@ export function mergeTeamInternalMessage(
     : messages;
   if (withoutDuplicateAssistant.some((message) => isDuplicateTeamEvent(message, incoming))) {
     return withoutDuplicateAssistant;
+  }
+  if (isUserMentionAnswer(incoming)) {
+    const communicationIndex = withoutDuplicateAssistant.findIndex((message) =>
+      isUserMentionAnswer(message)
+      && message.requestId === incoming.requestId
+      && message.agentId === incoming.agentId,
+    );
+    if (communicationIndex >= 0) {
+      const matched = withoutDuplicateAssistant[communicationIndex];
+      if (isTeamStream(incoming) && !isTeamStream(matched)) {
+        return [
+          ...withoutDuplicateAssistant.slice(0, communicationIndex),
+          { ...matched, ...incoming },
+          ...withoutDuplicateAssistant.slice(communicationIndex + 1),
+        ];
+      }
+      if (!isTeamStream(incoming)) {
+        const matchedProcessText = isTeamStream(matched)
+          && (matched.text || '').trim()
+          && (matched.text || '').trim() !== (incoming.text || '').trim()
+          ? matched.processText || matched.text
+          : incoming.processText;
+        return [
+          ...withoutDuplicateAssistant.slice(0, communicationIndex),
+          {
+            ...matched,
+            ...incoming,
+            displayMode: incoming.displayMode || matched.displayMode,
+            collapsedTitle: matched.collapsedTitle || incoming.collapsedTitle,
+            processText: matchedProcessText,
+            thinking: mergeThinking(matched.thinking, incoming.thinking),
+            toolCalls: mergeAgentToolCalls(matched.toolCalls, incoming.toolCalls),
+          },
+          ...withoutDuplicateAssistant.slice(communicationIndex + 1),
+        ];
+      }
+      // 流式 direct mention 继续进入下面的 append 合并，不覆盖已有过程。
+    }
   }
   const matchingIndex = findMatchingTeamNode(withoutDuplicateAssistant, incoming);
 

@@ -165,16 +165,13 @@ class ContextCompactor:
         messages: list[Message],
         session_id: str | None = None,
         owner_account_id: str | None = None,
+        prompt_overhead_tokens: int = 0,
     ) -> bool:
         """返回本轮是否会调用摘要模型，用于发送准确的前端活动提示。"""
         if not self.enabled:
             return False
-        view = micro_compact(
-            messages,
-            self.keep_recent_tools,
-            max_tool_result_chars=self.max_tool_result_chars,
-        )
-        if estimate_tokens(view) <= self.token_budget:
+        view = self.compact_preview_view(messages)
+        if estimate_tokens(view) + max(0, int(prompt_overhead_tokens)) <= self.token_budget:
             return False
         vkey = self._view_key(session_id, owner_account_id)
         failure_key = vkey or ("", "")
@@ -191,6 +188,7 @@ class ContextCompactor:
         messages: list[Message],
         session_id: str | None = None,
         owner_account_id: str | None = None,
+        prompt_overhead_tokens: int = 0,
     ) -> list[Message]:
         """executor 循环内每轮调用的视图压缩。
 
@@ -205,12 +203,8 @@ class ContextCompactor:
         """
         if not self.enabled:
             return messages
-        messages = micro_compact(
-            messages,
-            self.keep_recent_tools,
-            max_tool_result_chars=self.max_tool_result_chars,
-        )
-        if estimate_tokens(messages) <= self.token_budget:
+        messages = self.compact_preview_view(messages)
+        if estimate_tokens(messages) + max(0, int(prompt_overhead_tokens)) <= self.token_budget:
             return messages  # L1 已够，无需 LLM 摘要
 
         vkey = self._view_key(session_id, owner_account_id)
@@ -250,6 +244,21 @@ class ContextCompactor:
             self._view_mem[vkey] = new_state
         return result
 
+    def compact_preview_view(self, messages: list[Message]) -> list[Message]:
+        """返回无需模型调用即可确定的 L1 请求视图。
+
+        会话打开时不能为了显示用量发起摘要请求，但也不能直接统计未经 L1
+        清理的 canonical history。预览与真实 compact 路径共用这个入口，确保
+        旧工具结果清理、最近工具保留数和单条截断规则完全一致。
+        """
+        if not self.enabled:
+            return messages
+        return micro_compact(
+            messages,
+            self.keep_recent_tools,
+            max_tool_result_chars=self.max_tool_result_chars,
+        )
+
     async def maybe_compact(
         self,
         messages: list[Message],
@@ -259,11 +268,7 @@ class ContextCompactor:
         """预检式压缩：L1 每轮跑；仍超预算才走 L2/L3（带防抖 + 断路器）。"""
         if not self.enabled:
             return messages
-        messages = micro_compact(
-            messages,
-            self.keep_recent_tools,
-            max_tool_result_chars=self.max_tool_result_chars,
-        )
+        messages = self.compact_preview_view(messages)
         if estimate_tokens(messages) <= self.token_budget:
             return messages  # L1 已够
 

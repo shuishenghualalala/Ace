@@ -1,4 +1,4 @@
-"""browser_use：单一模型工具接口，按 action 分发到 BrowserManager。
+"""browser_use：常用/高级两级模型工具接口，按 action 分发到 BrowserManager。
 
 设计要点：
 - 所有 action 映射到 browser_* 逻辑能力名，能力判定、
@@ -11,10 +11,17 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from contextlib import nullcontext
 from typing import Any, Callable
 
 from crew.browser.driver import BrowserDriverError
-from crew.browser.manager import DEFERRED_OBSERVATION_NOTE, BrowserManager
+from crew.browser.manager import (
+    DEFERRED_OBSERVATION_NOTE,
+    DEFERRED_SINGLE_OBSERVATION_NOTE,
+    BrowserManager,
+)
+from crew.browser.types import BATCH_STEP_TOOLS
 from crew.core.runctx import (
     current_agent_workdir,
     current_model_capabilities,
@@ -28,6 +35,7 @@ from crew.tools.security_guard import authorize_file_tool
 
 PLUGIN_KEY = "browser"
 TOOL_NAME = "browser_use"
+ADVANCED_TOOL_NAME = "browser_use_advanced"
 CAPABILITY_DISABLED = (
     "BROWSER_CAPABILITY_DISABLED: 内置浏览器能力已被关闭；"
     "请告知用户在设置中重新开启，不要改用终端、网页搜索或其它自动化机制"
@@ -79,11 +87,11 @@ _ACTIONS_WITH_POST_SNAPSHOT = frozenset(
 
 # action -> (逻辑工具名, 子 action)。tabs/dialog/takeover 三个逻辑工具按子 action 展开。
 _ACTION_LOGICAL: dict[str, tuple[str, str | None]] = {
+    # 可批量步骤的词表唯一来源是 crew.browser.types.BATCH_STEP_TOOLS（治理层
+    # 共用同一份），这里并入，不在本文件重复登记。
+    **{action: (tool, None) for action, tool in BATCH_STEP_TOOLS.items()},
     "navigate": ("browser_navigate", None),
     "snapshot": ("browser_snapshot", None),
-    "find": ("browser_find", None),
-    "click": ("browser_click", None),
-    "drag": ("browser_drag", None),
     "mouse_move": ("browser_mouse_move_xy", None),
     "mouse_down": ("browser_mouse_down", None),
     "mouse_up": ("browser_mouse_up", None),
@@ -93,19 +101,9 @@ _ACTION_LOGICAL: dict[str, tuple[str, str | None]] = {
     "resize": ("browser_resize", None),
     "drop": ("browser_drop", None),
     "locate": ("browser_locate", None),
-    "type": ("browser_type", None),
-    "fill_form": ("browser_fill_form", None),
-    "select": ("browser_select", None),
-    "check": ("browser_check", None),
-    "hover": ("browser_hover", None),
-    "scroll": ("browser_scroll", None),
     "back": ("browser_back", None),
     "forward": ("browser_forward", None),
     "reload": ("browser_reload", None),
-    "press": ("browser_press", None),
-    "keydown": ("browser_keydown", None),
-    "keyup": ("browser_keyup", None),
-    "wait": ("browser_wait", None),
     "screenshot": ("browser_screenshot", None),
     "get_images": ("browser_get_images", None),
     "vision": ("browser_vision", None),
@@ -131,23 +129,8 @@ _ACTION_LOGICAL: dict[str, tuple[str, str | None]] = {
 # batch 步骤只允许「同一页面内的元素级动作」：它们的 ref 全部来自当前最新
 # snapshot，执行中间不重新观察（每次 snapshot 换代会重铸 ref），末步统一观察。
 # 跨页导航/标签页/上传下载/坐标鼠标/截图观察类动作各有独立语义，不放进来。
-_BATCHABLE_ACTIONS = frozenset(
-    {
-        "click",
-        "drag",
-        "type",
-        "fill_form",
-        "select",
-        "check",
-        "hover",
-        "scroll",
-        "press",
-        "keydown",
-        "keyup",
-        "wait",
-        "find",
-    }
-)
+# 词表唯一来源见 crew.browser.types.BATCH_STEP_TOOLS。
+_BATCHABLE_ACTIONS = frozenset(BATCH_STEP_TOOLS)
 # 单批步数上限：够覆盖表单+多步操作流，又不至于让一次调用变成失控脚本。
 _BATCH_MAX_STEPS = 20
 # 中间步骤结果压缩到这个长度以内（find 的命中上下文等小结果保留原文）。
@@ -293,16 +276,67 @@ _ACTION_VARIANTS: list[dict[str, Any]] = [
     _action_variant("batch", "steps"),
 ]
 
+# Keep the default tool small enough to be useful on every browser turn.  The
+# advanced surface remains available through a deferred companion tool, so this
+# is progressive disclosure rather than a capability removal.
+_CORE_ACTIONS = frozenset(
+    {
+        "navigate",
+        "snapshot",
+        "find",
+        "click",
+        "drag",
+        "type",
+        "fill_form",
+        "select",
+        "check",
+        "hover",
+        "scroll",
+        "back",
+        "forward",
+        "reload",
+        "press",
+        "wait",
+        "locate",
+        "tab_list",
+        "tab_new",
+        "tab_select",
+        "tab_close",
+        "upload",
+        "download",
+        "dialog_status",
+        "dialog_accept",
+        "dialog_dismiss",
+        "takeover",
+        "pause",
+        "batch",
+    }
+)
+_ADVANCED_ACTIONS = frozenset(_ACTION_LOGICAL).difference(_CORE_ACTIONS)
+
+
+def _variant_action(variant: dict[str, Any]) -> str:
+    properties = variant.get("properties")
+    action = properties.get("action") if isinstance(properties, dict) else None
+    return str(action.get("const")) if isinstance(action, dict) else ""
+
+
+_CORE_ACTION_VARIANTS = [
+    variant for variant in _ACTION_VARIANTS if _variant_action(variant) in _CORE_ACTIONS
+]
+_ADVANCED_ACTION_VARIANTS = [
+    variant
+    for variant in _ACTION_VARIANTS
+    if _variant_action(variant) in _ADVANCED_ACTIONS
+]
+
 BROWSER_USE_SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,
     "description": (
         "使用 Crew 内置浏览器完成网页任务：导航、观察 snapshot、"
         "在 accessibility snapshot 中按文本或正则查找、"
-        "元素与坐标点击/拖放、底层鼠标输入、视口调整、填写/批量填写/"
-        "选择/勾选/悬停/滚动/等待、"
-        "导出页面截图、标签页管理、上传下载、页面/元素 JavaScript evaluate、"
-        "Playwright 服务端代码执行、"
-        "对话框处理与控制权切换。"
+        "元素点击/拖放、填写/批量填写、选择/勾选/悬停/滚动/等待、"
+        "标签页管理、上传下载、对话框处理与控制权切换。"
         "type 必须同时传 ref 和 text；press 的 ref 可选，不传时作用于页面当前焦点。"
         "搜索请一步到位：type 时带 submit=true（在输入框 ref 上填词并回车提交），"
         "不要拆成 type 再单独 click 搜索按钮或 press Enter——那样中间页面易变、旧 ref 会失效。"
@@ -323,7 +357,7 @@ BROWSER_USE_SCHEMA: dict[str, Any] = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": sorted(_ACTION_LOGICAL),
+                "enum": sorted(_CORE_ACTIONS),
                 "description": "要执行的浏览器动作",
             },
             "url": {
@@ -692,7 +726,23 @@ BROWSER_USE_SCHEMA: dict[str, Any] = {
                     "官方行为一致，也构成已提供的 data"
                 ),
             },
-            "full": {"type": "boolean", "default": False, "description": "snapshot 取完整快照"},
+            "full": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "snapshot 取完整模式；默认 compact。full=true 会绕过 compact 参数，"
+                    "但仍受宿主和输出安全护栏限制"
+                ),
+            },
+            "observation": {
+                "type": "string",
+                "enum": ["auto", "none"],
+                "default": "auto",
+                "description": (
+                    "mutation 后是否自动返回 snapshot。默认 auto；对不需要立即读取页面的"
+                    "动作可设为 none，动作仍会执行，但必须在使用 ref 前自行 snapshot"
+                ),
+            },
             "steps": {
                 "type": "array",
                 "minItems": 1,
@@ -716,10 +766,39 @@ BROWSER_USE_SCHEMA: dict[str, Any] = {
             },
         },
         "required": ["action"],
-        "oneOf": _ACTION_VARIANTS,
+        "oneOf": _CORE_ACTION_VARIANTS,
         "additionalProperties": False,
     },
 }
+
+# The companion schema keeps the complete parameter vocabulary before the
+# default schema is trimmed. Keeping the handler and permission path the same
+# avoids two subtly different browser security implementations.
+BROWSER_USE_ADVANCED_SCHEMA: dict[str, Any] = deepcopy(BROWSER_USE_SCHEMA)
+
+_CORE_SCHEMA_PROPERTIES = frozenset(
+    {
+        "action", "url", "ref", "start_ref", "end_ref", "text", "regex",
+        "text_gone", "time_seconds", "values", "fields", "checked", "submit",
+        "slowly", "button", "click_count", "modifiers", "delay_ms", "selector",
+        "direction", "pixels", "key", "tab_id", "paths", "filename", "data",
+        "full", "steps", "stop_on_error", "observation", "screenshot_id", "x", "y",
+    }
+)
+BROWSER_USE_SCHEMA["parameters"]["properties"] = {
+    key: value
+    for key, value in BROWSER_USE_SCHEMA["parameters"]["properties"].items()
+    if key in _CORE_SCHEMA_PROPERTIES
+}
+BROWSER_USE_ADVANCED_SCHEMA["name"] = ADVANCED_TOOL_NAME
+BROWSER_USE_ADVANCED_SCHEMA["description"] = (
+    "高级浏览器动作：坐标鼠标、截图/视觉、控制台/网络诊断、页面代码执行和底层输入。"
+    "普通网页操作请使用 browser_use；本工具按需加载。"
+)
+BROWSER_USE_ADVANCED_SCHEMA["parameters"]["properties"]["action"]["enum"] = sorted(
+    _ADVANCED_ACTIONS
+)
+BROWSER_USE_ADVANCED_SCHEMA["parameters"]["oneOf"] = _ADVANCED_ACTION_VARIANTS
 
 _REQUIRED: dict[str, tuple[str, ...]] = {
     "navigate": ("url",),
@@ -800,6 +879,8 @@ def validate_args(args: dict[str, Any]) -> str | None:
     action = str(args.get("action") or "")
     if action not in _ACTION_LOGICAL:
         return f"未知 browser action: {action or '<missing>'}"
+    if args.get("observation", "auto") not in {"auto", "none"}:
+        return 'browser_use observation 仅支持 "auto" 或 "none"'
     for field in _REQUIRED.get(action, ()):
         value = args.get(field)
         if (
@@ -1501,14 +1582,31 @@ class BrowserUseTool:
             if denied:
                 raise BrowserDriverError(denied)
             self._manager.ensure_capability_current(owner, generation)
+            skip_observation = (
+                args.get("observation", "auto") == "none"
+                and action in _ACTIONS_WITH_POST_SNAPSHOT
+            )
+            observation_scope = (
+                self._manager.defer_post_observation()
+                if skip_observation
+                else nullcontext()
+            )
             try:
-                result = await dispatch[action]()
+                with observation_scope:
+                    result = await dispatch[action]()
             except BrowserDriverError as exc:
                 self._manager.note_action_outcome(owner, session, action, ok=False)
                 raise await self._failure_with_evidence(
                     exc, action, owner, session, workdir
                 ) from None
             self._manager.note_action_outcome(owner, session, action, ok=True)
+        if skip_observation and result == DEFERRED_SINGLE_OBSERVATION_NOTE:
+            return (
+                "<browser_action_result>\n"
+                f"action: {action}\nstatus: success\nfresh_snapshot: false\n"
+                "next: 动作已执行但未重新观察页面；使用任何旧 ref 前先调用 snapshot。\n"
+                "</browser_action_result>"
+            )
         return self._action_result(action, result)
 
     async def _run_batch(self, args: dict[str, Any], owner: str, session: str, workdir: str) -> Any:
@@ -1781,6 +1879,23 @@ def register_browser_use_tool(
         display_name="内置浏览器",
         ui_label_template="内置浏览器 {action}",
         should_defer=False,
+        permission_resolver=tool.permission_resolver,
+        permission_approver=tool.permission_approver,
+    )
+    ctx.register_tool(
+        name=ADVANCED_TOOL_NAME,
+        toolset="browser",
+        schema=BROWSER_USE_ADVANCED_SCHEMA,
+        handler=tool.handler,
+        check_fn=manager.available,
+        is_async=True,
+        display_name="内置浏览器高级动作",
+        ui_label_template="内置浏览器高级动作 {action}",
+        should_defer=True,
+        search_hint=(
+            "browser advanced 坐标鼠标 screenshot vision console network evaluate "
+            "run_code_unsafe unsafe diagnostics"
+        ),
         permission_resolver=tool.permission_resolver,
         permission_approver=tool.permission_approver,
     )

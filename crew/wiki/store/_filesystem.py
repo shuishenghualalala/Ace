@@ -8,12 +8,14 @@ import re
 import shutil
 import threading
 import time
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from crew.state.home import get_owner_runtime_home, owner_path_segment
 from crew.state.logging import get_logger
-from crew.wiki.schemas import HomeIntro, KBSummary, KnowledgeBase, LintIssue, RawSource, WikiGraph, WikiOrientation, WikiPage, WikiRelation
+from crew.wiki.schemas import HomeIntro, KnowledgeBase, LintIssue, RawSource, WikiGraph, WikiOrientation, WikiPage, WikiRelation
 from crew.wiki.sources import SOURCE_DIRS
 from crew.wiki._utils import normalize_page_key, query_terms
 from crew.wiki.search import SQLiteFTS5SearchIndex, WikiSearchIndex
@@ -131,6 +133,25 @@ class FileSystemWikiStore(WikiStore):
             self._search_indexes[key] = SQLiteFTS5SearchIndex(db_path)
         return self._search_indexes[key]
 
+    @contextmanager
+    def batch_index(
+        self,
+        owner_account_id: str = "",
+        kb_id: str = "default",
+    ) -> Iterator[None]:
+        with self._search_index(owner_account_id, kb_id).batch():
+            yield
+
+    def close(self) -> None:
+        """关闭各知识库的 FTS 连接。"""
+        indexes = list(self._search_indexes.values())
+        self._search_indexes.clear()
+        for index in indexes:
+            try:
+                index.close()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("关闭 Wiki FTS 索引失败: %s", exc)
+
     def _source_dir(
         self,
         source_kind: str,
@@ -172,6 +193,9 @@ class FileSystemWikiStore(WikiStore):
             ).replace(
                 "- Crew 内部状态保存到 `.crew/`",
                 "- 系统内部状态保存到 `.crew/`",
+            ).replace(
+                "- 长 source 整篇最多生成 5 个关键词和 3 个话题；短 source 最多 3 个关键词且不生成话题",
+                "- 不按素材长度设置固定的关键词或话题数量上限；是否入库由质量、独立性、可复用性和证据完整性决定",
             )
             if migrated_schema != schema_text:
                 schema_path.write_text(migrated_schema, encoding="utf-8")
@@ -243,26 +267,6 @@ class FileSystemWikiStore(WikiStore):
         meta["relation_schema_version"] = 2
         self._kb_meta_path(base).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
-    def _quick_count(self, base: Path, raw_dir: Path) -> tuple[int, int]:
-        """快速统计 KB 的页面数和 source 数（只数文件，不解序列化）。"""
-        page_count = 0
-        for sub in _PAGE_DIRS:
-            current_dir = base / "wiki" / sub
-            legacy_dir = base / sub
-            if current_dir.exists():
-                page_count += len(list(current_dir.rglob("*.md")))
-            if legacy_dir.exists():
-                page_count += len(list(legacy_dir.glob("*.md")))
-        meta_dir = base / ".crew" / "sources"
-        if meta_dir.exists():
-            raw_count = len(list(meta_dir.glob("*.json")))
-        else:
-            raw_count = len([
-                path for path in raw_dir.glob("*.md")
-                if not path.name.endswith(".parsed.md")
-            ]) if raw_dir.exists() else 0
-        return page_count, raw_count
-
     def list_kbs(self, owner_account_id: str = "") -> list[KnowledgeBase]:
         kbs: dict[str, KnowledgeBase] = {}
         root = self._kb_root(owner_account_id)
@@ -271,42 +275,22 @@ class FileSystemWikiStore(WikiStore):
                 if sub.is_dir():
                     kb_id = sub.name
                     meta = self._read_kb_meta(sub)
-                    summary = KBSummary()
-                    summary_data = meta.get("summary")
-                    if isinstance(summary_data, dict):
-                        summary = KBSummary.from_dict(summary_data)
-                    # 兜底：summary 未生成时，直接从文件系统统计
-                    if summary.status == "empty" or summary.page_count == 0:
-                        raw_dir = self._raw_dir(owner_account_id, kb_id)
-                        page_count, raw_count = self._quick_count(sub, raw_dir)
-                        if page_count > 0:
-                            summary.page_count = page_count
-                            summary.source_count = raw_count
-                            summary.status = "ready"
                     kbs[kb_id] = KnowledgeBase(
                         id=kb_id,
                         name=meta.get("name") or (_DEFAULT_KB_NAME if kb_id == _DEFAULT_KB_ID else kb_id),
                         created_at=float(meta.get("created_at", 0.0) or sub.stat().st_ctime),
                         updated_at=float(meta.get("updated_at", 0.0) or sub.stat().st_mtime),
-                        summary=summary,
                         vault_path=str(sub.resolve()),
                     )
         # 旧版 wiki/ 作为 default KB 回退
         if _DEFAULT_KB_ID not in kbs:
             legacy = self._legacy_dir(owner_account_id)
             if legacy.exists():
-                legacy_raw = self._legacy_raw_dir(owner_account_id)
-                page_count, raw_count = self._quick_count(legacy, legacy_raw)
                 kbs[_DEFAULT_KB_ID] = KnowledgeBase(
                     id=_DEFAULT_KB_ID,
                     name=_DEFAULT_KB_NAME,
                     created_at=legacy.stat().st_ctime,
                     updated_at=legacy.stat().st_mtime,
-                    summary=KBSummary(
-                        page_count=page_count,
-                        source_count=raw_count,
-                        status="ready" if page_count > 0 else "empty",
-                    ),
                     vault_path=str(legacy.resolve()),
                 )
         return list(kbs.values())
@@ -343,12 +327,12 @@ class FileSystemWikiStore(WikiStore):
         base = self._kb_root(owner_account_id) / kb_id
         if not base.exists():
             return False
+        index_key = self._search_index_key(owner_account_id, kb_id)
+        index = self._search_indexes.pop(index_key, None)
+        if index is not None:
+            index.close()
         try:
             shutil.rmtree(base)
-            self._search_indexes.pop(
-                self._search_index_key(owner_account_id, kb_id),
-                None,
-            )
             return True
         except Exception as exc:  # noqa: BLE001
             log.warning("删除知识库失败 %s: %s", base, exc)
@@ -363,37 +347,6 @@ class FileSystemWikiStore(WikiStore):
 
     def _kb_meta_path(self, base: Path) -> Path:
         return base / ".kb.json"
-
-    def get_kb_summary(
-        self,
-        owner_account_id: str = "",
-        kb_id: str = "default",
-    ) -> KBSummary:
-        """直接读取 .kb.json 中的 summary 字段，避免遍历全部知识库。"""
-        base = self._kb_root(owner_account_id) / normalize_kb_id(kb_id)
-        meta = self._read_kb_meta(base)
-        summary_data = meta.get("summary")
-        if isinstance(summary_data, dict):
-            return KBSummary.from_dict(summary_data)
-        return KBSummary()
-
-    def set_kb_summary(
-        self,
-        summary: KBSummary,
-        owner_account_id: str = "",
-        kb_id: str = "default",
-    ) -> None:
-        """将 summary 写回 .kb.json，同时保留其它元数据字段。"""
-        base = self._kb_root(owner_account_id) / normalize_kb_id(kb_id)
-        meta = self._read_kb_meta(base)
-        meta["summary"] = summary.to_dict()
-        try:
-            self._kb_meta_path(base).write_text(
-                json.dumps(meta, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("写入知识库摘要元数据失败 %s: %s", base, exc)
 
     def get_home_intro(
         self,
@@ -1199,12 +1152,6 @@ class FileSystemWikiStore(WikiStore):
         """程序化 Lint：断链、孤立页面、格式违规、时效性标记。"""
         pages = list(self._iter_pages(owner_account_id, kb_id))
         title_to_id = {p.title: p.id for p in pages}
-        normalized_title_keys = {
-            normalize_page_key(value)
-            for page in pages
-            for value in [page.title, *page.aliases]
-            if normalize_page_key(value)
-        }
         raw_ids = {
             source.id for source in self.list_raws(owner_account_id, kb_id)
         }
@@ -1890,7 +1837,8 @@ _DEFAULT_SCHEMA_MD = """# 知识库维护规则
 
 ## 编译规则
 - 每个 source 必须生成一个 source 摘要
-- 长 source 整篇最多生成 5 个关键词和 3 个话题；短 source 最多 3 个关键词且不生成话题
+- 不按素材长度设置固定的关键词或话题数量上限；是否入库由质量、独立性、可复用性和证据完整性决定
+- 知识库概览负责整体理解，知识导航负责完整目录；分页、批处理和上下文预算只作为工程保护，不代表知识容量
 - 创建页面前必须按规范标题、aliases 和页面类型匹配已有知识
 - 关键结论写入 claims，并以 evidence.source_id 回溯 Raw Source
 - 页面级 confidence 取所有主张中的保守值

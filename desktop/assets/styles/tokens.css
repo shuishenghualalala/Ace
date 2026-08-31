@@ -50,6 +50,15 @@
   --mw-indigo-50: #eaecf8;
   --mw-orange-600: #914b1e;
   --mw-orange-50: #fcece2;
+  /* Cross-feature semantic accents. Components consume these instead of owning raw colors. */
+  --mw-team-accent: #768064;
+  --mw-team-accent-base: #7d846d;
+  --mw-team-accent-soft: #aeb99a;
+  --mw-team-accent-border: #8f9b7a;
+  --mw-team-accent-strong: #657052;
+  --mw-team-accent-muted: #667254;
+  --mw-context-compaction-accent-light: #965858;
+  --mw-context-compaction-accent-dark: #c77b7b;
   --mw-overlay-light: rgb(0 0 0 / 38%);
   --mw-overlay-dark: rgb(0 0 0 / 72%);
   --mw-overlay-hc: rgb(0 0 0 / 82%);
@@ -186,8 +195,10 @@
   /* Primitive elevation and motion */
   --mw-shadow-none: none;
   --mw-shadow-raised: 0 2px 0 rgb(46 51 54 / 6%);
+  --mw-shadow-qr: 0 1px 4px rgb(46 51 54 / 8%);
   --mw-shadow-float: 0 10px 28px rgb(46 51 54 / 12%);
   --mw-shadow-overlay: 0 18px 48px rgb(46 51 54 / 18%);
+  --mw-shadow-dialog: 0 24px 80px rgb(46 51 54 / 24%), 0 2px 8px rgb(46 51 54 / 18%);
   --mw-z-overlay: 40;
   --mw-z-dialog: 50;
   --mw-duration-fast: 100ms;

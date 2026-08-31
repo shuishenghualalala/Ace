@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from crew.agent.external.runtime_profile import canonical_runtime_model_id, normalize_runtime_models
+from crew.core.errors import ToolError
 from crew.agent.loop.tool_result_display import (
     SUBAGENT_FULL_RESULT_TOOLS,
     tool_result_detail_for_ui,
@@ -28,6 +30,7 @@ from crew.state.team_member_model import (
     set_team_member_model_binding,
 )
 from crew.team.history_projection import (
+    direct_mention_request_ids,
     is_duplicate_team_parent_final,
     team_internal_history_items,
     team_tasks_with_plan_projection,
@@ -506,19 +509,20 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         if child_sessions:
             should_aggregate = should_aggregate or any("::turn::" in child_id for child_id, _ in child_sessions)
         if should_aggregate:
-            visible = team_visible_history_items(
-                crew,
-                session_id,
-                owner_account_id=owner,
-                config=config,
-                has_child_team_sessions=any("::turn::" in child_id for child_id, _ in child_sessions),
-            )
             internal = team_internal_history_items(
                 crew,
                 session_id,
                 child_sessions,
                 owner_account_id=owner,
                 config=config,
+            )
+            visible = team_visible_history_items(
+                crew,
+                session_id,
+                owner_account_id=owner,
+                config=config,
+                has_child_team_sessions=any("::turn::" in child_id for child_id, _ in child_sessions),
+                suppressed_request_ids=direct_mention_request_ids(internal),
             )
             if internal:
                 visible = [
@@ -626,7 +630,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         return bool(
             metadata.get("availability_status") == "ready"
             and models
-            and capabilities.get("model_switch")
+            and capabilities.get("model_switch") is True
         )
 
     def external_session_model_binding(session_id: str, owner: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
@@ -911,6 +915,11 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     {"ok": False, "code": "session_or_member_not_found", "error": "Team 成员不存在"},
                     status_code=404,
                 )
+            runtime_member_id = (
+                "leader"
+                if member.get("is_leader")
+                else str(member.get("member_name") or member_id)
+            )
             if model_id == str(member.get("model_profile_id") or ""):
                 return JSONResponse({
                     "ok": True,
@@ -987,30 +996,86 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     {"ok": False, "code": "invalid_revision", "error": "expected_revision 必须是整数"},
                     status_code=400,
                 )
-            try:
-                set_team_member_model_binding(
-                    crew.session_store,
+            team_manager = getattr(crew, "team", None)
+            member_lock_factory = getattr(team_manager, "member_model_lock", None)
+            lock_context = (
+                member_lock_factory(session_id, runtime_member_id, owner)
+                if callable(member_lock_factory)
+                else nullcontext()
+            )
+            with lock_context:
+                if callable(getattr(team_manager, "team_is_planning", None)) and team_manager.team_is_planning(
                     session_id,
-                    owner_account_id=owner,
-                    agent_id=member_id,
-                    runtime_id=runtime_id,
-                    model_id=canonical_model_id,
-                    binding_source=(
-                        "restored_from_agent_default"
-                        if bool(payload.get("restore_default"))
-                        else "session_override"
-                    ),
-                    expected_revision=expected_revision,
+                    owner,
+                ):
+                    return JSONResponse(
+                        {"ok": False, "code": "team_planning", "error": "Team 正在规划中，请稍后重试"},
+                        status_code=409,
+                    )
+                latest_state = (
+                    team_manager.team_member_switch_state(
+                        session_id,
+                        runtime_member_id,
+                        owner_account_id=owner,
+                    )
+                    if callable(getattr(team_manager, "team_member_switch_state", None))
+                    else {}
                 )
-            except TeamMemberModelBindingError as exc:
-                status_code = 404 if exc.code == "session_or_member_not_found" else 409
-                return JSONResponse(
-                    {"ok": False, "code": exc.code, "error": exc.message},
-                    status_code=status_code,
-                )
-            drop_team = getattr(crew.team, "drop_session_team", None)
-            if callable(drop_team):
-                drop_team(session_id, owner_account_id=owner)
+                latest_dispatcher_state = dispatcher.status(session_id, owner_account_id=owner)
+                if (
+                    latest_state.get("status") != "idle"
+                    or (
+                        member.get("is_leader")
+                        and latest_dispatcher_state.get("live") != "idle"
+                    )
+                ):
+                    return JSONResponse(
+                        {"ok": False, "code": "member_busy", "error": "目标成员运行中，请在任务结束后切换模型"},
+                        status_code=409,
+                    )
+                incompatibility_checker = getattr(team_manager, "pending_model_switch_incompatibilities", None)
+                if callable(incompatibility_checker) and not is_crew_builtin_agent(member_id):
+                    incompatible_nodes = incompatibility_checker(
+                        session_id,
+                        member_id,
+                        runtime,
+                        canonical_model_id,
+                        owner_account_id=owner,
+                    )
+                    if incompatible_nodes:
+                        return JSONResponse(
+                            {
+                                "ok": False,
+                                "code": "pending_work_incompatible",
+                                "error": "所选模型不满足当前待执行节点的硬能力要求",
+                                "incompatible_nodes": incompatible_nodes,
+                            },
+                            status_code=409,
+                        )
+                try:
+                    set_team_member_model_binding(
+                        crew.session_store,
+                        session_id,
+                        owner_account_id=owner,
+                        agent_id=member_id,
+                        runtime_id=runtime_id,
+                        model_id=canonical_model_id,
+                        binding_source=(
+                            "restored_from_agent_default"
+                            if bool(payload.get("restore_default"))
+                            else "session_override"
+                        ),
+                        expected_revision=expected_revision,
+                    )
+                except TeamMemberModelBindingError as exc:
+                    status_code = 404 if exc.code == "session_or_member_not_found" else 409
+                    return JSONResponse(
+                        {"ok": False, "code": exc.code, "error": exc.message},
+                        status_code=status_code,
+                    )
+                drop_team = getattr(crew.team, "drop_session_team", None)
+                if callable(drop_team):
+                    drop_team(session_id, owner_account_id=owner)
             refreshed = team_session_model_binding(session_id, owner)
             if refreshed is None:  # pragma: no cover - binding cannot change executor here
                 return JSONResponse({"ok": False, "error": "Team 模型绑定读取失败"}, status_code=500)
@@ -1058,6 +1123,9 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             if not callable(setter):
                 return JSONResponse({"ok": False, "error": "session agent config store 不可用"}, status_code=500)
             setter(session_id, config, owner_account_id=owner)
+            clear_prompt_usage = getattr(crew.session_store, "clear_prompt_usage", None)
+            if callable(clear_prompt_usage):
+                clear_prompt_usage(session_id, owner_account_id=owner)
             crew.agents.drop(session_id, owner_account_id=owner)
             binding.update({"model_profile_id": model_id, "model_label": selected.get("label") or model_id})
             return JSONResponse(binding)
@@ -1246,13 +1314,33 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         owner = _owner(request)
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
-        return JSONResponse(
-            crew.session_store.context_usage(
-                session_id,
-                crew.resolve_session_context_window(session_id, owner),
-                owner_account_id=owner,
-            )
+        context_window = crew.resolve_session_context_window(session_id, owner)
+        usage = crew.session_store.context_usage(
+            session_id,
+            context_window,
+            owner_account_id=owner,
         )
+        if usage.get("available"):
+            return JSONResponse(usage)
+
+        preview_builder = getattr(crew, "preview_session_context", None)
+        if callable(preview_builder):
+            try:
+                preview = await preview_builder(session_id, owner)
+            except Exception as exc:  # noqa: BLE001 - preview must not break context API
+                log.warning("context preview failed session=%s: %s", session_id, exc)
+                preview = None
+            if isinstance(preview, dict) and isinstance(preview.get("used_tokens"), int):
+                used = int(preview["used_tokens"])
+                return JSONResponse({
+                    "available": True,
+                    "used_tokens": used,
+                    "max_tokens": context_window,
+                    "ratio": round(used / context_window, 4) if context_window > 0 else None,
+                    "source": "preview",
+                    "warning": str(preview.get("warning") or "当前为请求视图预估值"),
+                })
+        return JSONResponse(usage)
 
     @router.delete("/api/session/{session_id}")
     async def delete_session(request: Request, session_id: str) -> JSONResponse:
@@ -1316,6 +1404,35 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+
+    @router.post("/api/session/{session_id}/team/recover")
+    async def recover_team_node(
+        request: Request,
+        session_id: str,
+        payload: dict | None = None,
+    ) -> JSONResponse:
+        """恢复 Team 阻塞节点，并由 Team Runtime 继续可执行分支。"""
+        owner = _owner(request)
+        if not _session_owned(session_id, owner):
+            return _not_found(session_id)
+        team_manager = getattr(crew, "team", None)
+        recover = getattr(team_manager, "recover_plan_node", None)
+        if not callable(recover):
+            return JSONResponse({"ok": False, "error": "Team Runtime 不可用"}, status_code=409)
+        body = payload or {}
+        try:
+            result = recover(
+                session_id,
+                node_id=str(body.get("node_id") or ""),
+                action=str(body.get("action") or ""),
+                replacement_assignee=str(body.get("replacement_assignee") or ""),
+                owner_account_id=owner,
+            )
+            return JSONResponse(result)
+        except (ValueError, ToolError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        except KeyError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
 
     @router.get("/api/tasks/{task_or_session_id}")
     async def task_or_legacy_session(request: Request, task_or_session_id: str) -> JSONResponse:

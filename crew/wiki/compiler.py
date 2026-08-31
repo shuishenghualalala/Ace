@@ -174,9 +174,9 @@ _ANALYZE_SMOOTH_STEP = 1
 _ANALYZE_SMOOTH_INTERVAL = 0.4
 
 # 轻量知识单元协议版本。修改 Prompt 或单元语义时必须升级，以使旧缓存失效。
-_ANALYSIS_PROTOCOL_VERSION = "knowledge-units-v7"
+_ANALYSIS_PROTOCOL_VERSION = "knowledge-units-v8"
 
-# 长文档分块分析阈值。每块输出已被限制为紧凑知识单元，因此可以让模型读取
+# 长文档分块分析阈值。每块输出经过质量筛选并保持为紧凑知识单元，因此可以让模型读取
 # 更完整的章节上下文，减少请求数量和跨块重复。
 _CHUNK_SIZE_CHARS = 48_000
 # 低于此长度直接单轮分析，避免无意义分块
@@ -185,10 +185,6 @@ _SINGLE_PASS_THRESHOLD = 48_000
 # 有界输出。普通错误只重试一次，429/503 容量错误不重试。
 _ANALYZE_CHUNK_CONCURRENCY = 2
 _ANALYZE_CHUNK_MAX_RETRIES = 1
-_SHORT_SOURCE_THRESHOLD = 1_000
-_LONG_SOURCE_ENTITY_LIMIT = 5
-_LONG_SOURCE_TOPIC_LIMIT = 3
-_SHORT_SOURCE_ENTITY_LIMIT = 3
 # 推理型模型（如 deepseek-v4 系列）会先烧掉一笔不可见的推理 token，过小的
 # 上限会让正文一个字都吐不出来（实测空返回）；这里只是上限而非目标，
 # 非推理模型不受影响。
@@ -494,48 +490,6 @@ def _merge_analysis_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     return merged
 
 
-def _candidate_rank(item: dict[str, Any]) -> tuple[int, int, int]:
-    """稳定排序知识候选：核心优先，其次证据数量和置信度。"""
-    importance = 1 if item.get("importance") == "core" else 0
-    claim_count = len({
-        normalize_page_key(str(claim.get("statement", "")))
-        for claim in (item.get("claims") or [])
-        if isinstance(claim, dict) and normalize_page_key(str(claim.get("statement", "")))
-    })
-    confidence = _CONFIDENCE_ORDER.get(str(item.get("confidence") or "medium"), 1)
-    return importance, claim_count, confidence
-
-
-def _apply_document_limits(analysis: dict[str, Any], content_length: int) -> None:
-    """按整篇素材限制页面候选，而不是让配额随分块数量增长。"""
-    short_source = content_length <= _SHORT_SOURCE_THRESHOLD
-    entity_limit = (
-        _SHORT_SOURCE_ENTITY_LIMIT if short_source else _LONG_SOURCE_ENTITY_LIMIT
-    )
-    topic_limit = 0 if short_source else _LONG_SOURCE_TOPIC_LIMIT
-    analysis["entities"] = sorted(
-        analysis.get("entities") or [],
-        key=_candidate_rank,
-        reverse=True,
-    )[:entity_limit]
-    analysis["topics"] = sorted(
-        analysis.get("topics") or [],
-        key=_candidate_rank,
-        reverse=True,
-    )[:topic_limit]
-    selected = {
-        normalize_page_key(str(item.get("name", "")))
-        for bucket in ("entities", "topics")
-        for item in analysis.get(bucket) or []
-    }
-    analysis["relationships"] = [
-        relation
-        for relation in analysis.get("relationships") or []
-        if normalize_page_key(str(relation.get("source", ""))) in selected
-        and normalize_page_key(str(relation.get("target", ""))) in selected
-    ]
-
-
 def _pop_analysis_issues(analysis: dict[str, Any]) -> list[str]:
     """提取并移除分块失败标记，避免把失败误报成空分析成功。"""
     warnings = [
@@ -774,7 +728,7 @@ _ANALYSIS_PROMPT = """你负责整理知识库。请阅读下面的信息源片�
 
 请输出一个紧凑 JSON 对象（不要包含 markdown 代码块标记）：
 {{
-  "format": "knowledge-units-v7",
+  "format": "knowledge-units-v8",
   "source_summary": {{
     "one_sentence": "这一片段的核心意思，最多80字",
     "core_points": ["核心观点1", "核心观点2"]
@@ -820,13 +774,14 @@ _ANALYSIS_PROMPT = """你负责整理知识库。请阅读下面的信息源片�
 - 同一个规范 subject 只能出现在一个数组中，禁止跨类型重复。稳定知识对象归 entities，综合导航归 topics。
 - core 表示该 subject 是片段的中心对象，或即使只出现一次也值得成为规范页面；supporting 表示它只是支撑性知识。路过式名称、作者列表、参考文献条目不要输出。
 - source_summary 只概括当前片段；core_points 最多 2 条。
-- 按重要性从高到低排列；每个片段 entities 最多 3 个 unit，topics 最多 2 个 unit。Compiler 会在整篇素材合并后再次硬限制为最多 5 个 Entity 和 3 个 Topic。
+- 按重要性从高到低排列，但不要设置固定数量，也不要为了缩短结果丢弃达到质量标准的独立知识单元。
 - 宁缺毋滥，禁止为了凑数拆出近义、重复或无独立复用价值的主张。
+- 是否输出由知识质量决定：稳定、可复用且有直接证据的对象或主张应保留；路过式名称、重复表述和无法可靠定位的推断应省略。
 - 不要撰写完整 Wiki 页面，不要生成长篇摘要，不要重复原文背景。
 - confidence：多处直接证据为 high；单处直接证据为 medium；间接、模糊或时效存疑为 low。
 - 发现来源内部存在互相不兼容的说法时设置 contested=true，并在 contradictions 中简述冲突。
 - locator/excerpt 用于把主张定位回原文；无法可靠定位时留空，禁止编造。
-- relations 只记录本片段明确支持且两端都有长期复用价值的关系，最多 2 条。
+- relations 只记录本片段明确支持且两端都有长期复用价值的关系，避免装饰性或推断性连边。
 - 使用紧凑 JSON；只输出 JSON，不要任何解释文字。
 """
 
@@ -1077,9 +1032,6 @@ class WikiCompiler:
 
         await _notify_progress(progress, "done", {"source_id": source_id, "page_count": len(pages)})
 
-        # 页面变化后台刷新知识库摘要（内容 hash 未变时不触发 LLM）
-        self._schedule_kb_summary_refresh(owner_account_id, kb_id)
-
         # 追加操作日志
         try:
             titles = [p.title for p in pages]
@@ -1176,7 +1128,7 @@ class WikiCompiler:
             )
         if progress is not None:
             try:
-                await progress("正在生成页面变更计划…")
+                await progress("正在盘算要改哪些页面…")
             except Exception:  # noqa: BLE001
                 pass
         analysis_stats = {
@@ -1330,70 +1282,72 @@ class WikiCompiler:
 
         await _notify_progress(progress, "analyze", {"source_id": source_id})
 
-        source_plan = next(
-            (page for page in pages_to_apply if page.page_type == "source"),
-            None,
-        )
-        for planned in pages_to_apply:
-            _check_cancelled(cancel_event)
-            if planned.page_type == "source":
-                continue
-            if planned.action == "skip":
-                existing = self.store.resolve_page(
-                    planned.title,
-                    planned.page_type,
-                    planned.aliases,
+        # save/update 会逐页写文件，但 FTS 索引在此范围内只提交一次事务。
+        with self.store.batch_index(owner_account_id, kb_id):
+            source_plan = next(
+                (page for page in pages_to_apply if page.page_type == "source"),
+                None,
+            )
+            for planned in pages_to_apply:
+                _check_cancelled(cancel_event)
+                if planned.page_type == "source":
+                    continue
+                if planned.action == "skip":
+                    existing = self.store.resolve_page(
+                        planned.title,
+                        planned.page_type,
+                        planned.aliases,
+                        owner_account_id,
+                        kb_id,
+                    )
+                    if existing is not None:
+                        linked_pages.append(existing)
+                    continue
+                else:
+                    page = self._apply_plan(planned, source_id, owner_account_id, kb_id)
+
+                if page is not None:
+                    applied_pages.append(page)
+                    linked_pages.append(page)
+                else:
+                    skipped_titles.append(planned.title)
+
+            if source_plan is not None:
+                entity_titles = [
+                    page.title for page in linked_pages if page.page_type == "entity"
+                ]
+                topic_titles = [
+                    page.title for page in linked_pages if page.page_type == "topic"
+                ]
+                source_content_filtered = _replace_source_page_links(
+                    source_plan.content,
+                    entity_titles,
+                    topic_titles,
+                )
+                source_page = self._ensure_source_page(
+                    source_id,
+                    raw,
+                    source_content,
                     owner_account_id,
                     kb_id,
+                    prepared_content=source_content_filtered,
                 )
-                if existing is not None:
-                    linked_pages.append(existing)
-                continue
-            else:
-                page = self._apply_plan(planned, source_id, owner_account_id, kb_id)
+                applied_pages.insert(0, source_page)
 
-            if page is not None:
-                applied_pages.append(page)
-                linked_pages.append(page)
-            else:
-                skipped_titles.append(planned.title)
-
-        if source_plan is not None:
-            entity_titles = [
-                page.title for page in linked_pages if page.page_type == "entity"
-            ]
-            topic_titles = [
-                page.title for page in linked_pages if page.page_type == "topic"
-            ]
-            source_content_filtered = _replace_source_page_links(
-                source_plan.content,
-                entity_titles,
-                topic_titles,
-            )
-            source_page = self._ensure_source_page(
-                source_id,
-                raw,
-                source_content,
-                owner_account_id,
-                kb_id,
-                prepared_content=source_content_filtered,
-            )
-            applied_pages.insert(0, source_page)
-
-        # 应用关系（只在实际写入的页面间）
-        _check_cancelled(cancel_event)
-        self._apply_relationships(applied_pages, plan.relationships, owner_account_id, kb_id)
-        source_page = next((page for page in applied_pages if page.page_type == "source"), None)
-        knowledge_pages = [page for page in linked_pages if page.page_type in {"entity", "topic"}]
-        if source_page is not None:
-            source_page.relations = [
-                WikiRelation(
-                    target_page_id=page.id,
-                    relation="describes" if page.page_type == "entity" else "covers",
-                )
-                for page in knowledge_pages
-            ]
-            self.store.update(source_page, owner_account_id, kb_id)
+            # 应用关系（只在实际写入的页面间）
+            _check_cancelled(cancel_event)
+            self._apply_relationships(applied_pages, plan.relationships, owner_account_id, kb_id)
+            source_page = next((page for page in applied_pages if page.page_type == "source"), None)
+            knowledge_pages = [page for page in linked_pages if page.page_type in {"entity", "topic"}]
+            if source_page is not None:
+                source_page.relations = [
+                    WikiRelation(
+                        target_page_id=page.id,
+                        relation="describes" if page.page_type == "entity" else "covers",
+                    )
+                    for page in knowledge_pages
+                ]
+                self.store.update(source_page, owner_account_id, kb_id)
 
         # 更新 index.md；批处理会在全部来源完成后统一更新一次。
         _check_cancelled(cancel_event)
@@ -1401,9 +1355,6 @@ class WikiCompiler:
             self._update_index(owner_account_id, kb_id)
 
         await _notify_progress(progress, "done", {"source_id": source_id, "page_count": len(applied_pages)})
-
-        # 页面变化后台刷新知识库摘要（内容 hash 未变时不触发 LLM）
-        self._schedule_kb_summary_refresh(owner_account_id, kb_id)
 
         # 追加操作日志
         try:
@@ -1767,11 +1718,10 @@ class WikiCompiler:
         owner_account_id: str = "",
         kb_id: str = "default",
     ) -> None:
-        """统一完成写入后的 index、log、全文索引与摘要状态维护。"""
+        """统一完成写入后的 index、log、全文索引与导读状态维护。"""
         self._update_index(owner_account_id, kb_id)
         self.store.append_log([message], owner_account_id=owner_account_id, kb_id=kb_id)
         self.store.update_home(owner_account_id=owner_account_id, kb_id=kb_id)
-        self._schedule_kb_summary_refresh(owner_account_id, kb_id)
         self._schedule_home_intro_refresh(owner_account_id, kb_id)
 
     def _schedule_home_intro_refresh(
@@ -1807,43 +1757,6 @@ class WikiCompiler:
         except Exception as exc:  # noqa: BLE001
             log.warning(
                 "Home 导读后台刷新失败 %s:%s: %s",
-                owner_account_id,
-                kb_id,
-                exc,
-            )
-
-    def _schedule_kb_summary_refresh(
-        self,
-        owner_account_id: str,
-        kb_id: str,
-    ) -> None:
-        """后台 fire-and-forget 刷新知识库摘要；无事件循环的环境直接跳过。
-
-        摘要只在内容 hash 变化时重新生成（见 generate_kb_summary），
-        不阻塞当前写入流程。
-        """
-        if self.summarizer is None:
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        loop.create_task(self._refresh_kb_summary(owner_account_id, kb_id))
-
-    async def _refresh_kb_summary(
-        self,
-        owner_account_id: str,
-        kb_id: str,
-    ) -> None:
-        try:
-            await self.summarizer.generate_kb_summary(
-                owner_account_id,
-                kb_id,
-                force=False,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "知识库摘要后台刷新失败 %s:%s: %s",
                 owner_account_id,
                 kb_id,
                 exc,
@@ -1988,7 +1901,6 @@ class WikiCompiler:
             next_cursor = None
         if apply and selected:
             self._update_index(owner_account_id, kb_id)
-            self._schedule_kb_summary_refresh(owner_account_id, kb_id)
             self.store.append_log(
                 [
                     "批量 ingest 完成："
@@ -2247,9 +2159,9 @@ class WikiCompiler:
                 pass
 
         if len(chunks) > 1:
-            await _emit(f"正在分析来源内容（共 {len(chunks)} 块）…")
+            await _emit(f"正在通读素材（共 {len(chunks)} 段）…")
         else:
-            await _emit("正在分析来源内容…")
+            await _emit("正在通读素材…")
 
         semaphore = asyncio.Semaphore(_ANALYZE_CHUNK_CONCURRENCY)
         cached_chunks = _load_analysis_cache(cache_path)
@@ -2300,7 +2212,7 @@ class WikiCompiler:
             except Exception as exc:  # noqa: BLE001
                 log.warning("Wiki 分块分析异常，跳过该块: %s", exc)
             if len(chunks) > 1:
-                await _emit(f"正在分析来源内容（{len(results_by_index)}/{len(chunks)} 块）…")
+                await _emit(f"正在通读素材（{len(results_by_index)}/{len(chunks)} 段）…")
 
         results = [
             results_by_index.get(
@@ -2318,7 +2230,6 @@ class WikiCompiler:
         failed = sum(1 for r in results if r.get("_chunk_failed"))
         truncated = sum(1 for r in results if r.get("_truncated"))
         merged = _merge_analysis_results(results)
-        _apply_document_limits(merged, len(content))
         merged["_analysis_meta"] = {
             "total_chunks": len(chunks),
             "analyzed_chunks": len(tasks),
