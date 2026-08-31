@@ -746,4 +746,8 @@ graph TD
 <p>本阶段新增 Core 跨模块能力文件，未新增数据库表或 API；配置、Team builder、App 装配、Gateway 交互桥和 Runtime adapter 均复用同一 policy。</p>
 <p>验证：Timeout Policy 与外援/Team/Gateway/Kanban 组合回归 <code>483 passed, 1 skipped</code>；相关 Python 编译、Ruff E9/F 与 <code>git diff --check</code> 通过。安全 Runtime 回归中有 2 项 macOS Seatbelt preflight 受当前执行环境限制，非本次代码断言失败。</p>
 
+<h2>2026-08-31 Leader 审阅 JSON 兜底修复</h2>
+<p>Leader 审阅结果优先读取结构化 <code>action</code>。当模型在 <code>message</code>/<code>instructions</code> 中输出未转义双引号导致完整 JSON 不可解析时，Runtime 仍会读取显式动作，避免把“无阻塞”误判为 <code>block</code>；纯文本兜底同时识别常见否定表达（如“无阻塞”）。Leader prompt 也明确要求字符串内的英文双引号遵循 JSON 转义规则。</p>
+<p>该修复只影响审阅决策解析与回归测试，不改变 <code>target_node_id</code>、TeamPlan 状态机或此前的外援 mention 稳定 ID 传输。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

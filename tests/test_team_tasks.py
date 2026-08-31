@@ -1098,6 +1098,12 @@ def test_leader_review_decision_parser_supports_structured_and_plain_results():
         '```json\n{"action":"revise","target_node_id":"build_1","message":"实现不完整","instructions":"补齐错误处理"}\n```'
     )
     plain = InProcessTeamManager._parse_leader_review_decision("需要用户补充生产环境权限信息。")
+    malformed_approval = InProcessTeamManager._parse_leader_review_decision(
+        '{"action":"approve","target_node_id":"","message":"方案符合"最简的 demo，web 端"的确认范围；'
+        '第 7 节的"待确认"项均属可迭代增强，无信息缺口、无阻塞。","instructions":""}'
+    )
+    non_blocking = InProcessTeamManager._parse_leader_review_decision("方案已完成，无阻塞。")
+    blocking = InProcessTeamManager._parse_leader_review_decision("权限缺失，当前无法继续。")
 
     assert structured == {
         "action": "revise",
@@ -1106,6 +1112,9 @@ def test_leader_review_decision_parser_supports_structured_and_plain_results():
         "instructions": "补齐错误处理",
     }
     assert plain["action"] == "ask_user"
+    assert malformed_approval["action"] == "approve"
+    assert non_blocking["action"] == "approve"
+    assert blocking["action"] == "block"
 
 
 def test_team_user_input_signal_ignores_generic_pending_confirmation():

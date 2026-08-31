@@ -4050,12 +4050,27 @@ class InProcessTeamManager(TeamManager):
         allowed_actions = {"approve", "revise", "ask_user", "block"}
         action = str(data.get("action") or "").strip().lower()
         if action not in allowed_actions:
+            # A model can leave quotes inside a JSON string unescaped.  The
+            # whole object is no longer decodable, but an explicit action is
+            # still safer and more useful than guessing from the review prose.
+            explicit_action = re.search(
+                r'"action"\s*:\s*"(approve|revise|ask_user|block)"',
+                body,
+                flags=re.IGNORECASE,
+            )
+            if explicit_action:
+                action = explicit_action.group(1).lower()
+
+        if action not in allowed_actions:
             lowered = body.lower()
             if any(word in lowered for word in ("需要修改", "继续优化", "重新处理", "revise", "changes requested")):
                 action = "revise"
             elif any(word in lowered for word in ("需要用户", "请用户", "补充信息", "ask_user")):
                 action = "ask_user"
-            elif any(word in lowered for word in ("阻塞", "无法继续", "block")):
+            elif (
+                any(word in lowered for word in ("阻塞", "无法继续", "block"))
+                and not any(word in lowered for word in ("无阻塞", "没有阻塞", "未阻塞", "不阻塞", "不存在阻塞"))
+            ):
                 action = "block"
             else:
                 action = "approve"
@@ -6001,6 +6016,7 @@ class InProcessTeamManager(TeamManager):
                 "判断成员输出是否回答了当前目标、是否存在信息缺口、是否需要向用户追问或继续推进。",
                 "必须输出 JSON 对象，不要输出 JSON 之外的文字。",
                 '格式：{"action":"approve|revise|ask_user|block","target_node_id":"需要修订的节点 ID 或空字符串","message":"审阅结论","instructions":"给成员的具体修订要求或空字符串"}。',
+                "必须输出可被 JSON 解析的对象；message/instructions 内如果需要英文双引号，必须使用 JSON 转义，不要输出未转义的双引号。",
                 "revise 仅用于原成员可按明确意见继续优化，并且必须填写被修订父节点的 target_node_id；"
                 "ask_user 用于必须由用户补充信息；block 用于当前团队无法继续。",
                 "如果存在安全、可逆的默认处理方式，不要只说缺少信息；请在 ask_user 的 message 中先给出你的默认建议、影响和确认问题，"
