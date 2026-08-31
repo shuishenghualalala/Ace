@@ -49,20 +49,26 @@
 
 /* 代码块 */
 .md-pre {
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 14px;
+  background: #202629;
+  border: 1px solid rgba(236, 240, 241, 0.16);
+  border-radius: 10px;
+  padding: 14px 16px;
   overflow-x: auto;
   font-size: 13px;
-  line-height: 1.55;
-  margin: 0.5em 0;
+  line-height: 1.65;
+  color: #ecf0f1;
+  margin: 0.7em 0;
 }
 .md-pre code {
   font-family: var(--mono);
-  background: none;
+  background: transparent;
+  color: inherit;
   padding: 0;
   font-size: inherit;
+}
+.md-pre code.hljs {
+  background: transparent;
+  padding: 0;
 }
 
 /* 表格 */

@@ -1442,14 +1442,32 @@
 
 .wiki-editor__content pre {
   overflow-x: auto;
+  margin: 16px 0;
   padding: 14px 16px;
-  border-radius: 9px;
-  background: var(--mw-bg-subtle);
+  border: 1px solid color-mix(in srgb, var(--mw-code-text) 16%, transparent);
+  border-radius: var(--mw-radius-4);
+  background: var(--mw-code-bg);
+  color: var(--mw-code-text);
+  font: var(--mw-type-code-weight) var(--mw-type-code-size) / var(--mw-type-code-line) var(--mw-font-mono);
+  white-space: pre;
 }
 
-.wiki-editor__content code {
-  border-radius: 4px;
-  background: var(--mw-bg-subtle);
+.wiki-editor__content pre code {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.wiki-editor__content :not(pre) > code {
+  padding: 1px var(--mw-space-1);
+  border: 1px solid var(--mw-border-subtle);
+  border-radius: var(--mw-radius-1);
+  background: var(--mw-bg-selected);
+  color: var(--mw-text-primary);
+  font: var(--mw-type-code-weight) var(--mw-type-code-size) / var(--mw-type-code-line) var(--mw-font-mono);
 }
 
 .wiki-editor__wikilink {

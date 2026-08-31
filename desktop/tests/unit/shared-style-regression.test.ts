@@ -7,6 +7,7 @@ const studioCss = readFileSync(resolve(stylesDir, 'studio.css'), 'utf8');
 const layoutCss = readFileSync(resolve(stylesDir, 'layouts.css'), 'utf8');
 const chatCss = readFileSync(resolve(stylesDir, 'chat.css'), 'utf8');
 const webMessagesCss = readFileSync(resolve(stylesDir, 'web-messages.css'), 'utf8');
+const wikiPageCss = readFileSync(resolve(stylesDir, 'wiki-page.css'), 'utf8');
 const kanbanCss = readFileSync(resolve(stylesDir, 'kanban-board.css'), 'utf8');
 const composerCss = readFileSync(resolve(stylesDir, 'composer.css'), 'utf8');
 const composerContextCss = readFileSync(resolve(stylesDir, 'composer-context.css'), 'utf8');
@@ -88,6 +89,38 @@ describe('shared chat chrome styles', () => {
     expect(ruleBody(streamChatCss, '.process-code-block pre')).toContain(
       'color: var(--mw-text-primary)',
     );
+  });
+
+  it('does not let web-flow prose styles override fenced code blocks', () => {
+    expect(webMessagesCss).toContain(
+      '.chat-messages.web-flow .md-body code:not(.chat-md-code code)',
+    );
+    expect(webMessagesCss).toContain(
+      '.chat-messages.web-flow .md-body pre:not(.chat-md-code)',
+    );
+    const prosePre = ruleBody(
+      webMessagesCss,
+      '.chat-messages.web-flow .md-body pre:not(.chat-md-code)',
+    );
+    expect(prosePre).toContain('background: var(--mw-bg-subtle)');
+
+    const block = ruleBody(chatCss, '.chat-markdown .chat-md-code');
+    expect(block).toContain('background: var(--mw-code-bg)');
+    expect(block).toContain('color: var(--mw-code-text)');
+  });
+
+  it('keeps Wiki detail editor code blocks on the shared high-contrast surface', () => {
+    const block = ruleBody(wikiPageCss, '.wiki-editor__content pre');
+    expect(block).toContain('background: var(--mw-code-bg)');
+    expect(block).toContain('color: var(--mw-code-text)');
+
+    const nestedCode = ruleBody(wikiPageCss, '.wiki-editor__content pre code');
+    expect(nestedCode).toContain('background: transparent');
+    expect(nestedCode).toContain('color: inherit');
+
+    const inlineCode = ruleBody(wikiPageCss, '.wiki-editor__content :not(pre) > code');
+    expect(inlineCode).toContain('background: var(--mw-bg-selected)');
+    expect(inlineCode).toContain('color: var(--mw-text-primary)');
   });
 
   it('keeps selected mention input text from duplicating the overlay copy', () => {
