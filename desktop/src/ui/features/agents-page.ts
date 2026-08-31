@@ -66,12 +66,6 @@ export interface ExternalConversationCatalog {
   runtimes: ExternalRuntime[];
 }
 
-export interface ExternalConversationCatalog {
-  agents: ExternalAgent[];
-  teams: ExternalTeam[];
-  runtimes: ExternalRuntime[];
-}
-
 const CREW_BUILTIN_AGENT_ID = 'crew::builtin';
 
 const TEAM_DRAFT_DEBOUNCE_MS = 600;

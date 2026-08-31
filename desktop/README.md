@@ -75,6 +75,10 @@ npm run dev
 | `scripts/check-security.mjs` | Electron/IPC/XSS 等静态安全门禁 |
 | `electron-builder.yml` | Linux、Windows 和 macOS 的 Electron `dir` 构建配置 |
 
+### 外援中心迁移边界
+
+`features/agent-hub.ts` 负责 Agent Hub 外壳与目录卡片，`features/agents-page.ts` 负责外援目录、创建流程和派活业务。当前创建 Agent/Team 表单仍由 `agents-page.ts` 提供，属于迁移中的兼容边界；后续收口时应先移除 Hub 对旧表单包装层，再迁移表单渲染与状态，不应直接删除现有创建流程。会话外援身份以 Gateway 返回的 `agent_binding` 为准，旧 Gateway 的 Provider fallback 和旧 `agent-config` 字段兼容逻辑必须集中在适配层，不能继续散落在页面组件中。
+
 渲染层通过 `window.Crew` 的最小预加载桥访问主进程能力。`gateway:fetch` 仅允许本机 Gateway 的 `/api/` 路径；外部链接、文件选择和上传均在主进程执行白名单及大小校验。
 
 ## 开发与验证
