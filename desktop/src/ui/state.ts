@@ -821,6 +821,11 @@ export function setQueueHint(sessionId: string, hint: string): void {
   messageStore.set({ queueHints: { ...messageStore.get().queueHints, [sessionId]: hint } });
 }
 
+/** 读取某 session 的队列提示。 */
+export function getQueueHint(sessionId: string): string {
+  return messageStore.get().queueHints[sessionId] ?? '';
+}
+
 /** 设置当前 workspace 选中。 */
 export function setCurrentWorkspaceId(workspaceId: string): void {
   workspaceStore.set({ currentWorkspaceId: workspaceId });

@@ -71,6 +71,7 @@ import {
   newTurnRequestId,
   openTurnForRequest,
   resumeSessionGeneration,
+  setBackendIdleHandler,
 } from './session-busy';
 import { clearScenarioChip, takeArmedSubScenario } from './scenario-arm';
 import { requireRendererLogin } from './auth-gate';
@@ -106,6 +107,7 @@ import {
   ensureSessionBook,
   ensureSessionMessages,
   getPendingQueue,
+  getQueueHint,
   isBusySession,
   isDynamicKanbanSession,
   newMessageId,
@@ -158,6 +160,16 @@ interface DispatchOptions {
 export function setChatCallbacks(opts: { openSession: OpenSessionFn; setTab: (tab: TabKey) => void }): void {
   openSessionFn = opts.openSession;
   setTabFn = opts.setTab;
+  // 后端状态同步确认会话已 idle 时的兜底：final 帧丢失（登出围栏吞帧、重连门拦丢弃）
+  // 时本地待发队列会一直卡住并常显「正在排队…」，借此继续派出队首、清掉过期提示。
+  setBackendIdleHandler((idleSessionId) => {
+    if (getPendingQueue(idleSessionId).length > 0) {
+      consumePending(idleSessionId);
+    }
+    if (getPendingQueue(idleSessionId).length === 0 && getQueueHint(idleSessionId)) {
+      setQueueHintWithUi(idleSessionId, '');
+    }
+  });
   if (!teamIdentityRefreshBound && typeof window !== 'undefined') {
     teamIdentityRefreshBound = true;
     window.addEventListener('team-collaboration:updated', ((event: Event) => {

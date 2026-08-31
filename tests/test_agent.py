@@ -986,3 +986,28 @@ async def test_revision_intent_gets_hidden_turn_framing():
     assert "修订式中断" in reminder
     assert "上一条回复" in reminder
     assert "最终答案" in reminder
+
+
+async def test_read_attachment_rejects_oversized_file(tmp_path, monkeypatch):
+    """附件读取对超大文件应读前拒绝，而非整读进内存。"""
+    from crew.agent import runtime as rt
+
+    big = tmp_path / "big.md"
+    big.write_text("x" * 100, encoding="utf-8")
+    monkeypatch.setattr(rt, "MAX_READ_FILE_BYTES", 10)
+
+    result = await rt._read_attachment(str(big))
+
+    assert "文件过大" in result
+
+
+async def test_read_attachment_reads_small_file(tmp_path):
+    """小附件正常读取（路径经 resolve 后读取，避免符号链接组件报错）。"""
+    from crew.agent import runtime as rt
+
+    small = tmp_path / "small.md"
+    small.write_text("hello attachment", encoding="utf-8")
+
+    result = await rt._read_attachment(str(small))
+
+    assert "hello attachment" in result

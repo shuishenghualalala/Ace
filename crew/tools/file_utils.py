@@ -19,6 +19,11 @@ from typing import Iterator, Optional
 from crew.core.runctx import current_agent_workdir
 
 
+# 统一整读上限：单次整读超过该值直接抛 ValueError，
+# 避免把超大文件整体搬进内存（OOM / 拖垮事件循环）。
+MAX_READ_FILE_BYTES = 512 * 1024 * 1024
+
+
 class FileConflictError(RuntimeError):
     """Raised when a structured write target changed after inspection."""
 
@@ -36,11 +41,14 @@ class FileVersion:
     data: bytes = b""
 
 
-def snapshot_file(path: Path) -> FileVersion:
-    """Capture identity and content hash, rejecting ambiguous hard-link writes."""
+def snapshot_file(path: Path, *, max_bytes: int | None = None) -> FileVersion:
+    """Capture identity and content hash, rejecting ambiguous hard-link writes.
+
+    max_bytes 为整读上限：超出即抛 ValueError，避免无界读取整文件。
+    """
     canonical = _lexical_absolute(path)
     try:
-        info, data = _read_verified_file(canonical)
+        info, data = _read_verified_file(canonical, max_bytes=max_bytes)
     except FileNotFoundError:
         return FileVersion(path=canonical, exists=False)
     return FileVersion(

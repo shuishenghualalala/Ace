@@ -94,6 +94,36 @@ async def test_file_delete_refuses_directories_and_symlinks(registry, tmp_path):
     assert target.read_text(encoding="utf-8") == "keep"
 
 
+async def test_file_read_rejects_oversized_file_before_read(registry, tmp_path, monkeypatch):
+    """file_read 读超过整读上限的文件应读前拒绝，而非整读进内存（对照 codex 上限）。"""
+    from crew.tools import builtin
+
+    target = tmp_path / "big.txt"
+    target.write_text("x" * 100, encoding="utf-8")
+    monkeypatch.setattr(builtin, "MAX_READ_FILE_BYTES", 10)
+
+    result = await registry.execute(ToolCall("c1", "file_read", {"path": str(target)}))
+
+    assert result.is_error
+    assert "读取上限" in result.content
+
+
+async def test_patch_rejects_oversized_file_before_read(registry, tmp_path, monkeypatch):
+    """patch 读超过整读上限的文件应读前拒绝，并返回干净的 ToolError。"""
+    from crew.tools import file_tools
+
+    target = tmp_path / "big.txt"
+    target.write_text("x" * 100, encoding="utf-8")
+    monkeypatch.setattr(file_tools, "MAX_READ_FILE_BYTES", 10)
+
+    result = await registry.execute(
+        ToolCall("c1", "patch", {"path": str(target), "old": "x", "new": "y"})
+    )
+
+    assert result.is_error
+    assert "文件过大" in result.content
+
+
 async def test_builtin_file_tools_resolve_relative_paths_from_agent_workdir(registry, tmp_path):
     token = current_agent_workdir.set(str(tmp_path))
     try:

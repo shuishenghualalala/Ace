@@ -20,6 +20,7 @@ from crew.core.runctx import (
     current_request_id,
     current_session_id,
     emit_tool_progress,
+    touch_current_task_activity,
 )
 from crew.tools.registry import Registry, tool_error, tool_result
 from crew.tools.security_guard import authorize_network_tool
@@ -674,14 +675,22 @@ def register_wiki_tools(
         return _kb_id(args)
 
     def _build_progress_callback() -> Callable[[str, int, dict[str, Any]], Awaitable[None]] | None:
-        """构建一个向前端推送 wiki_ingest 进度的回调（非 gateway 场景返回 None）。"""
+        """构建 Wiki ingest 进度回调：保活当前任务，并在可用时推送到前端。"""
         push = current_push_fn.get()
         sid = current_session_id.get()
         req_id = current_request_id.get()
-        if push is None or not sid:
+        if push is None and not sid:
             return None
 
         async def _progress(stage: str, step: int, payload: dict[str, Any]) -> None:
+            touch_current_task_activity({
+                "last_tool": "wiki_ingest",
+                "tool_phase": "progress",
+                "stage": stage,
+                "step": step,
+            })
+            if push is None or not sid:
+                return
             try:
                 await push(sid, {
                     "kind": "tool_progress",

@@ -23,6 +23,7 @@ from crew.tasks.models import RuntimeTask, TaskKind, normalize_task_status
 from crew.tools.process_registry import terminate_process_tree
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
+_WORKER_STOP_GRACE_SECONDS = 3.0
 
 
 class TaskRuntime:
@@ -48,6 +49,7 @@ class TaskRuntime:
         self._workers: dict[str, asyncio.Task[Any]] = {}
         self._cancel_callbacks: dict[str, Callable[[str], Any]] = {}
         self._events: dict[str, asyncio.Event] = {}
+        self._termination_intents: dict[str, tuple[str, str]] = {}
         self._monitor_task: asyncio.Task[Any] | None = None
         self._event_callback: Callable[[dict[str, Any]], Any] | None = None
         self._completion_callback: Callable[[dict[str, Any]], Any] | None = None
@@ -345,6 +347,8 @@ class TaskRuntime:
             return self._row_to_dict(row), cursor.rowcount == 1
 
         task, won = self._writer.execute(_finish)
+        with self._lock:
+            self._termination_intents.pop(task_id, None)
         if not won:
             return task
         event = self._events.get(task_id)
@@ -421,6 +425,78 @@ class TaskRuntime:
             self._cancel_callbacks[task_id] = cancel
         self._events.setdefault(task_id, asyncio.Event())
 
+    def pending_termination(self, task_id: str) -> tuple[str, str] | None:
+        """Return an in-flight cancellation intent for a worker-backed task."""
+        with self._lock:
+            return self._termination_intents.get(task_id)
+
+    def _record_termination_intent(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        reason: str,
+    ) -> tuple[str, str]:
+        normalized = normalize_task_status(status)
+        if normalized not in {"cancelled", "timed_out"}:
+            raise ValueError(f"不支持的取消终态: {normalized}")
+        intent = (normalized, str(reason or ""))
+        with self._lock:
+            return self._termination_intents.setdefault(task_id, intent)
+
+    async def _stop_worker_for_termination(
+        self,
+        task_id: str,
+        *,
+        task: dict[str, Any],
+        owner_account_id: str,
+        status: str,
+        reason: str,
+        callback_timeout: float | None = None,
+    ) -> dict[str, Any]:
+        terminal_status, terminal_reason = self._record_termination_intent(
+            task_id,
+            status=status,
+            reason=reason,
+        )
+        self.update(task_id, owner_account_id=owner_account_id, cancel_requested=True)
+        callback = self._cancel_callbacks.get(task_id)
+        if callback is not None:
+            value = callback(terminal_reason)
+            if asyncio.iscoroutine(value):
+                if callback_timeout is None:
+                    await value
+                else:
+                    try:
+                        await asyncio.wait_for(value, timeout=callback_timeout)
+                    except asyncio.TimeoutError:
+                        pass
+        elif task["kind"] == "shell":
+            self.kill_process_group(int((task.get("progress") or {}).get("pid") or 0), terminal_reason)
+
+        worker = self._workers.get(task_id)
+        if worker is not None and not worker.done():
+            worker.cancel()
+            if worker is not asyncio.current_task():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(worker),
+                        timeout=_WORKER_STOP_GRACE_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                except asyncio.CancelledError:
+                    if not worker.done():
+                        raise
+                except Exception:  # noqa: BLE001 - 被停止的 worker 的原始异常不覆盖终态
+                    pass
+        return self.finish(
+            task_id,
+            owner_account_id=owner_account_id,
+            status=terminal_status,
+            error=terminal_reason,
+        )
+
     async def wait(
         self,
         task_id: str,
@@ -451,23 +527,12 @@ class TaskRuntime:
         task = self.get(task_id, owner_account_id=owner_account_id)
         if task["status"] in TERMINAL_STATUSES:
             return task
-        self.update(task_id, owner_account_id=owner_account_id, cancel_requested=True)
-        callback = self._cancel_callbacks.get(task_id)
-        if callback is not None:
-            value = callback(reason)
-            if asyncio.iscoroutine(value):
-                await value
-        elif task["kind"] == "shell":
-            self.kill_process_group(int((task.get("progress") or {}).get("pid") or 0), reason)
-        worker = self._workers.get(task_id)
-        if worker is not None and not worker.done():
-            worker.cancel()
-        await asyncio.sleep(0.05)
-        return self.finish(
+        return await self._stop_worker_for_termination(
             task_id,
+            task=task,
             owner_account_id=owner_account_id,
             status="cancelled",
-            error=reason,
+            reason=reason,
         )
 
     async def cancel_owner(
@@ -589,28 +654,15 @@ class TaskRuntime:
     async def _timeout(self, task_id: str, reason: str) -> None:
         owner = self._owner_for_task(task_id)
         task = self.get(task_id, owner_account_id=owner)
-        if task["status"] != "running":
+        if task["status"] != "running" or bool(task.get("cancel_requested")):
             return
-        self.update(task_id, owner_account_id=owner, cancel_requested=True)
-        callback = self._cancel_callbacks.get(task_id)
-        if callback is not None:
-            value = callback(reason)
-            if asyncio.iscoroutine(value):
-                try:
-                    await asyncio.wait_for(value, timeout=3.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    pass
-        elif task["kind"] == "shell":
-            self.kill_process_group(int((task.get("progress") or {}).get("pid") or 0), reason)
-        worker = self._workers.get(task_id)
-        if worker is not None and not worker.done():
-            worker.cancel()
-        await asyncio.sleep(0.05)
-        self.finish(
+        await self._stop_worker_for_termination(
             task_id,
+            task=task,
             owner_account_id=owner,
             status="timed_out",
-            error=reason,
+            reason=reason,
+            callback_timeout=_WORKER_STOP_GRACE_SECONDS,
         )
 
     def reconcile_after_restart(self) -> None:

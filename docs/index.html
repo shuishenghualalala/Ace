@@ -3,65 +3,408 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Crew 文档总览</title>
+<title>Ace 文档总览</title>
 <style>
-  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;}
-  *{box-sizing:border-box} body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
-  .wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px} h1{font-size:28px;font-weight:800;margin:0 0 4px}
-  .crumb{color:var(--t3);font-size:13px;margin-bottom:6px}.sub{color:var(--t3);margin-bottom:36px}
-  h2{font-size:19px;font-weight:700;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}
+  :root{
+    --text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:1040px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:34px;font-weight:800;margin:0 0 8px;letter-spacing:-0.02em}
+  h2{font-size:22px;font-weight:700;margin:48px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h3{font-size:16px;font-weight:700;margin:24px 0 10px}
+  p,li{color:var(--t2)}
   code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
-  .logo{width:28px;height:28px;border-radius:7px;background:var(--black);color:#fff;display:inline-grid;place-items:center;font-weight:800;vertical-align:middle;margin-right:8px}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px}
+  .logo{width:40px;height:40px;border-radius:9px;background:var(--black);color:#fff;display:inline-grid;place-items:center;font-weight:800;font-size:20px;vertical-align:middle;margin-right:12px}
   a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}a:hover{border-bottom-color:var(--text)}
-  ul{padding-left:0;list-style:none}ul li{padding:6px 0}ul li .d{color:var(--t3);font-size:13px;margin-left:8px}
-  .nav{margin-top:40px;color:var(--t3);font-size:13px}
+  .crumb{color:var(--t3);font-size:13px;margin-bottom:6px}
+  .sub{color:var(--t2);font-size:16px;max-width:720px}
+  .tag{display:inline-block;font-size:12px;color:var(--t2);border:1px solid var(--border);border-radius:999px;padding:2px 10px;margin:0 6px 6px 0}
   .note{color:var(--t3);font-size:13px;margin-top:8px}
+  .nav{margin-top:40px;color:var(--t3);font-size:13px}
+
+  /* 架构分层 */
+  .layer{margin-bottom:28px}
+  .layer-title{font-size:13px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px}
+  .layer-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+  .card{display:block;border:1px solid var(--border);border-radius:10px;padding:16px;background:var(--bg);transition:border-color .15s,background .15s}
+  .card:hover{border-color:var(--text);background:var(--soft)}
+  .card .name{font-weight:700;font-size:15px;margin-bottom:4px}
+  .card .path{font-family:var(--mono);font-size:12px;color:var(--t3);margin-bottom:8px}
+  .card .desc{font-size:13px;color:var(--t2);line-height:1.55}
+  .card.external{position:relative}
+  .card.external::after{content:"→";position:absolute;top:12px;right:14px;font-size:12px;color:var(--t3)}
+
+  /* 流程图 */
+  .flow{display:flex;flex-direction:column;gap:18px;align-items:center;margin:24px 0}
+  .flow-row{display:flex;flex-wrap:wrap;justify-content:center;gap:12px;width:100%}
+  .flow-node{display:inline-block;border:1px solid var(--border);border-radius:8px;padding:10px 16px;background:var(--soft);font-size:14px;font-weight:600}
+  .flow-node a{border-bottom:none}.flow-node a:hover{color:var(--black)}
+  .flow-arrow{color:var(--t3);font-size:18px;line-height:1}
+  .flow-label{width:100%;text-align:center;font-size:12px;color:var(--t3);margin-top:-10px;margin-bottom:4px}
+
+  /* 详细运转流程 */
+  .runtime{display:flex;flex-direction:column;gap:12px;align-items:center;margin:28px 0}
+  .phase{width:100%;max-width:720px;border:1px solid var(--border);border-radius:10px;padding:16px 20px;background:var(--soft)}
+  .phase-title{font-size:12px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px}
+  .phase-body{font-size:14px;color:var(--t2);line-height:1.6}
+  .phase-list{margin:8px 0 0;padding-left:18px}
+  .phase-list li{padding:3px 0;font-size:13px}
+  .branch{display:flex;gap:12px;width:100%;max-width:720px}
+  .branch-col{flex:1;border:1px solid var(--border);border-radius:10px;padding:14px;background:var(--bg);text-align:center}
+  .branch-col .title{font-weight:700;font-size:14px;margin-bottom:6px}
+  .branch-col .body{font-size:12px;color:var(--t2);line-height:1.5}
+  .loop{width:100%;max-width:720px;border:2px solid var(--text);border-radius:12px;padding:20px;background:var(--bg)}
+  .loop-title{font-weight:700;margin-bottom:10px}
+  .loop-list{margin:0;padding-left:18px}
+  .loop-list li{padding:4px 0;font-size:13px;color:var(--t2)}
+  .arrow{color:var(--t3);font-size:18px;line-height:1}
+
+  /* 分类索引 */
+  .section-list{list-style:none;padding-left:0}
+  .section-list li{padding:8px 0;border-bottom:1px solid var(--border)}
+  .section-list li:last-child{border-bottom:none}
+  .section-list .d{color:var(--t3);font-size:13px;margin-left:8px}
+
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+  th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}
+  th{background:var(--soft);font-weight:600}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <div class="crumb">Crew / 文档总览</div>
-  <h1><span class="logo">C</span>Crew 文档总览</h1>
-  <div class="sub">按功能模块分类，点击进入对应文档。后端模块进入「后端模块索引」可下钻到单个模块。</div>
+  <div class="crumb">Ace / 文档总览</div>
+  <h1><span class="logo">A</span>Ace 多智能体平台</h1>
+  <div class="sub">
+    开源版 Crew，以单智能体调用为核心，支持 Team 多智能体协同、Skills 技能运行时、Native Security Runtime 与浏览器自动化。
+    下面是 Ace 的架构分层与一次请求的典型流转，每个模块都可点击进入对应文档。
+  </div>
+  <div style="margin-top:16px">
+    <span class="tag">Python 3.11+</span>
+    <span class="tag">FastAPI + WebSocket</span>
+    <span class="tag">SQLite</span>
+    <span class="tag">OpenAI 兼容 Provider</span>
+    <span class="tag">Native Security Runtime</span>
+  </div>
 
-  <h2>后端模块</h2>
-  <ul>
-    <li><a href="backend/modules/index.html"><code>backend/modules/index.html</code></a><span class="d">后端模块索引（core / state / agent / gateway / skills / sites / team …）</span></li>
-    <li><a href="backend/modules/sites.html"><code>backend/modules/sites.html</code></a><span class="d">“灵感”统一 App 库、离线分享与置顶小窗，以及对话右侧 Surface 预览和批注</span></li>
-    <li><a href="backend/weixin-channel.html"><code>backend/weixin-channel.html</code></a><span class="d">微信渠道（weixin）设计文档</span></li>
+  <h2>1. 一次请求怎么运转</h2>
+  <p>下面是一次对话请求的完整内部流转：从用户输入到模型调用、工具执行、安全审批、状态保存，再到响应返回。流程图中的模块只做示意，点击下方的「架构分层与模块索引」卡片可进入对应文档。</p>
+
+  <div class="runtime">
+    <div class="phase">
+      <div class="phase-title">1. 输入层</div>
+      <div class="phase-body">CLI / Web / Desktop 发起一次用户请求，携带文本、附件、上下文 session_id 与结构化 mention（Team 场景）。</div>
+    </div>
+    <div class="arrow">↓</div>
+
+    <div class="phase">
+      <div class="phase-title">2. Gateway / Auth</div>
+      <div class="phase-body">
+        网关完成认证、鉴权、Owner 隔离与协议转换：
+        <ul class="phase-list">
+          <li>校验 token 或本地 session，按 Owner 划分资源边界；</li>
+          <li>复用或新建 Session，加载对话历史与工作空间；</li>
+          <li>将外部请求统一封装为 Core 层的 Envelope / Message。</li>
+        </ul>
+      </div>
+    </div>
+    <div class="arrow">↓</div>
+
+    <div class="phase">
+      <div class="phase-title">3. App 装配层</div>
+      <div class="phase-body">
+        <code>crew/app.py</code> 根据 mode 与请求类型做装配：
+        <ul class="phase-list">
+          <li>从缓存或配置中取出 Agent / Team 实例；</li>
+          <li>注入 Provider、Tools、Memory、Plugins、Security 等依赖；</li>
+          <li>路由到 <code>agent</code>、<code>team</code> 或 <code>cron</code> 执行路径。</li>
+        </ul>
+      </div>
+    </div>
+    <div class="arrow">↓</div>
+
+    <div class="branch">
+      <div class="branch-col">
+        <div class="title">mode = agent</div>
+        <div class="body">直接进入单 Agent 内核循环，适合一对一对话。</div>
+      </div>
+      <div class="branch-col">
+        <div class="title">mode = team</div>
+        <div class="body">Leader 做规划并委派给 Teammate，通过 Team Bus 协同。</div>
+      </div>
+      <div class="branch-col">
+        <div class="title">mode = cron</div>
+        <div class="body">Cron 调度器定时构造 Envelope，投递到 App 执行。</div>
+      </div>
+    </div>
+    <div class="arrow">↓</div>
+
+    <div class="phase">
+      <div class="phase-title">4. 任务运行时</div>
+      <div class="phase-body">
+        无论是 Agent 独立执行、Team 委派还是 Cron 触发，都会产生可追踪的运行时单元：
+        <ul class="phase-list">
+          <li><b>Tasks</b>：维护 task 状态机、超时、取消、看板与历史恢复；</li>
+          <li><b>DynamicKanban</b>：把复杂工作流解析为 DAG，按节点状态驱动多 Agent 协作。</li>
+        </ul>
+      </div>
+    </div>
+    <div class="arrow">↓</div>
+
+    <div class="loop">
+      <div class="loop-title">5. Agent 内核循环（单 Agent 或被 Team 复用）</div>
+      <ol class="loop-list">
+        <li><b>加载上下文</b>：从 State 读取历史消息、配置、工作空间；</li>
+        <li><b>Memory prefetch</b>：根据当前 query 召回相关记忆；</li>
+        <li><b>Plugin pre-hook</b>：在调用模型前执行插件钩子；</li>
+        <li><b>调用 Provider</b>：把历史 + 系统提示 + 工具 schema 发给 LLM；</li>
+        <li><b>解析响应</b>：拆分文本、thinking、tool_call；</li>
+        <li><b>工具执行</b>：若产生 tool_call，进入 Tools 执行流程：
+          <ul class="phase-list">
+            <li>Security Broker 做审批与沙箱约束；</li>
+            <li>按需调用 Browser、Wiki、Skills、文件系统或外部 API；</li>
+            <li>执行结果回灌到对话历史，回到步骤 4 继续循环。</li>
+          </ul>
+        </li>
+        <li><b>Plugin post-hook</b>：在响应生成后执行插件钩子；</li>
+        <li><b>持久化</b>：Memory write、State save、更新 Task 状态。</li>
+      </ol>
+    </div>
+    <div class="arrow">↓</div>
+
+    <div class="phase">
+      <div class="phase-title">6. 响应返回</div>
+      <div class="phase-body">
+        将最终响应切分为帧（delta / thinking / tool / final / error），经 Gateway 推送到 CLI 或 Web/Desktop；同时把终态写入 Task、Team Bus 与历史会话，供后续恢复。
+      </div>
+    </div>
+  </div>
+
+  <h2>2. 架构分层与模块索引</h2>
+  <p>点击卡片进入对应模块文档；<code>browser</code> 与 <code>security</code> 因涉及独立工程，文档独立成册。</p>
+
+  <div class="layer">
+    <div class="layer-title">入口层 · 把外部输入变成内部 Envelope</div>
+    <div class="layer-grid">
+      <a class="card" href="backend/modules/cli.html">
+        <div class="name">CLI</div>
+        <div class="path">crew/cli/</div>
+        <div class="desc">本地 REPL、slash 命令、非交互 run、管理子命令、JSON 输出与安全命令。</div>
+      </a>
+      <a class="card" href="backend/modules/gateway.html">
+        <div class="name">Gateway / Auth</div>
+        <div class="path">crew/gateway/ + crew/state/</div>
+        <div class="desc">Web / API / WebSocket 入口、Owner 认证会话、资源隔离、协议转换。</div>
+      </a>
+    </div>
+  </div>
+
+  <div class="layer">
+    <div class="layer-title">装配层 · 依赖注入与 mode 路由</div>
+    <div class="layer-grid">
+      <a class="card" href="backend/modules/app.html">
+        <div class="name">App 装配</div>
+        <div class="path">crew/app.py</div>
+        <div class="desc">依赖注入、Agent 缓存、agent / team / cron 路由，统一进入 app.handle。</div>
+      </a>
+    </div>
+  </div>
+
+  <div class="layer">
+    <div class="layer-title">内核与协同层 · 真正跑任务</div>
+    <div class="layer-grid">
+      <a class="card" href="backend/modules/agent.html">
+        <div class="name">Agent 内核</div>
+        <div class="path">crew/agent/</div>
+        <div class="desc">单智能体循环：历史、记忆、模型、工具、规划、保存；含 external / executor / loop / plan / subagent / compact。</div>
+      </a>
+      <a class="card" href="backend/modules/team.html">
+        <div class="name">Team 多智能体</div>
+        <div class="path">crew/team/</div>
+        <div class="desc">Formation 长期组队与 Runtime 临时补员；Leader 委派 Teammate，复用 Agent 内核。</div>
+      </a>
+      <a class="card" href="backend/modules/tasks.html">
+        <div class="name">Tasks 任务</div>
+        <div class="path">crew/tasks/</div>
+        <div class="desc">委派任务的状态流转、任务看板、agent_turn 活动保活与超时终态收敛。</div>
+      </a>
+      <a class="card" href="backend/modules/dynamickanban.html">
+        <div class="name">DynamicKanban</div>
+        <div class="path">crew/dynamickanban/</div>
+        <div class="desc">多智能体 DAG 工作流引擎：Hermes Kanban 持久化骨架 + Dynamic Workflow LLM 决策大脑。</div>
+      </a>
+    </div>
+  </div>
+
+  <div class="layer">
+    <div class="layer-title">能力层 · 模型、工具、知识与自动化</div>
+    <div class="layer-grid">
+      <a class="card" href="backend/modules/providers.html">
+        <div class="name">Provider</div>
+        <div class="path">crew/providers/</div>
+        <div class="desc">隔离模型厂商 SDK，连接 OpenAI 兼容端点。</div>
+      </a>
+      <a class="card" href="backend/modules/tools.html">
+        <div class="name">Tools</div>
+        <div class="path">crew/tools/</div>
+        <div class="desc">工具注册、schema 暴露、工具执行和结果回灌。</div>
+      </a>
+      <a class="card" href="backend/modules/skills.html">
+        <div class="name">Skills</div>
+        <div class="path">crew/skills/ + crew/agent/skills.py</div>
+        <div class="desc">三层目录发现 / 加载 / 激活 / 装卸 / 审计。</div>
+      </a>
+      <a class="card" href="backend/modules/wiki.html">
+        <div class="name">Wiki</div>
+        <div class="path">crew/wiki/</div>
+        <div class="desc">LLM Wiki：KB/页面管理、编译检索、Agent 工具。</div>
+      </a>
+      <a class="card external" href="browser/playwright-engine-design.md">
+        <div class="name">Browser</div>
+        <div class="path">crew/browser/ → docs/browser/</div>
+        <div class="desc">内置 playwright-core 引擎、录制 → trace → 回放、浏览器自动化技能。</div>
+      </a>
+      <a class="card" href="backend/modules/evolution.html">
+        <div class="name">Evolution</div>
+        <div class="path">crew/evolution/</div>
+        <div class="desc">技能进化：轨迹提取、技能生成与优化、自学习队列。</div>
+      </a>
+    </div>
+  </div>
+
+  <div class="layer">
+    <div class="layer-title">基础设施层 · 状态、记忆、插件、安全与自动化</div>
+    <div class="layer-grid">
+      <a class="card" href="backend/modules/state.html">
+        <div class="name">State</div>
+        <div class="path">crew/state/</div>
+        <div class="desc">配置、日志、会话、工作空间。</div>
+      </a>
+      <a class="card" href="backend/modules/memory.html">
+        <div class="name">Memory</div>
+        <div class="path">crew/memory/</div>
+        <div class="desc">对话前召回和对话后写入。</div>
+      </a>
+      <a class="card" href="backend/modules/plugins.html">
+        <div class="name">Plugins</div>
+        <div class="path">crew/plugins/</div>
+        <div class="desc">LLM / 工具调用生命周期钩子。</div>
+      </a>
+      <a class="card" href="backend/modules/cron.html">
+        <div class="name">Cron</div>
+        <div class="path">crew/cron/</div>
+        <div class="desc">定时自动化入口，构造 Envelope 投递到 App。</div>
+      </a>
+      <a class="card" href="backend/modules/notifications.html">
+        <div class="name">Notifications</div>
+        <div class="path">crew/notifications/</div>
+        <div class="desc">多渠道消息推送与状态同步。</div>
+      </a>
+      <a class="card" href="backend/modules/work.html">
+        <div class="name">Work</div>
+        <div class="path">crew/work/</div>
+        <div class="desc">用户工作上下文与长期任务管理。</div>
+      </a>
+      <a class="card external" href="security/native-security-runtime.html">
+        <div class="name">Security</div>
+        <div class="path">crew/security/ → docs/security/</div>
+        <div class="desc">进程启动、广泛只读沙箱、审批作用域、Native Runtime 与三平台原生边界。</div>
+      </a>
+    </div>
+  </div>
+
+  <div class="layer">
+    <div class="layer-title">接口层 · 所有模块的共同语言</div>
+    <div class="layer-grid">
+      <a class="card" href="backend/modules/core.html">
+        <div class="name">Core</div>
+        <div class="path">crew/core/</div>
+        <div class="desc">Envelope、Message、接口契约，所有模块共同语言。</div>
+      </a>
+    </div>
+  </div>
+
+  <div class="layer">
+    <div class="layer-title">产品与场景层 · 直接面向用户的入口</div>
+    <div class="layer-grid">
+      <a class="card" href="backend/modules/sites.html">
+        <div class="name">Sites</div>
+        <div class="path">crew/sites/</div>
+        <div class="desc">“灵感”统一 App 库：混合资源图库、真实预览、离线分享、置顶小窗、对话 Surface 与元素批注。</div>
+      </a>
+      <a class="card" href="backend/modules/scenarios.html">
+        <div class="name">Scenarios</div>
+        <div class="path">crew/scenarios/</div>
+        <div class="desc">首页场景化引导：策展数据、细分玩法预填、skill/专家/注入提示词绑定。</div>
+      </a>
+      <a class="card" href="backend/modules/companion.html">
+        <div class="name">Companion</div>
+        <div class="path">crew/companion/</div>
+        <div class="desc">陪伴模式：长期会话状态与主动交互。</div>
+      </a>
+    </div>
+  </div>
+
+  <h2>3. 推荐阅读顺序</h2>
+  <p>第一次理解 Ace，建议按下面顺序读，先建立整体链路，再下钻到具体模块：</p>
+  <ol>
+    <li><b>Core</b>：先看 <a href="backend/modules/core.html"><code>core</code></a>，理解 Envelope / Message / 接口契约。</li>
+    <li><b>State + Provider + Tools</b>：补齐 Agent 需要的历史、模型和行动能力。</li>
+    <li><b>Agent</b>：理解单智能体循环；这是 Team、Tasks、Skills 的复用基础。</li>
+    <li><b>App + Gateway / CLI</b>：看入口怎么装配、怎么路由。</li>
+    <li><b>Team + Tasks + DynamicKanban + Cron</b>：在单 Agent 基础上理解多智能体协同、任务看板、工作流与自动化。</li>
+    <li><b>Security + Browser</b>：理解 Native Runtime 与浏览器自动化如何保障行动边界。</li>
+  </ol>
+
+  <h2>4. 按领域分类的文档</h2>
+
+  <h3>后端模块</h3>
+  <ul class="section-list">
+    <li><a href="backend/modules/index.html"><code>backend/modules/index.html</code></a><span class="d">后端模块总索引，含状态看板</span></li>
+    <li><a href="backend/weixin-channel.html"><code>backend/weixin-channel.html</code></a><span class="d">微信渠道设计文档</span></li>
   </ul>
 
-  <h2>前端</h2>
-  <ul>
+  <h3>前端</h3>
+  <ul class="section-list">
     <li><a href="frontend/web-frontend.html"><code>frontend/web-frontend.html</code></a><span class="d">Web 前端设计文档</span></li>
     <li><a href="frontend/desktop-frontend.html"><code>frontend/desktop-frontend.html</code></a><span class="d">桌面端前端设计文档</span></li>
     <li><a href="frontend/tool-execution-two-phase.html"><code>frontend/tool-execution-two-phase.html</code></a><span class="d">Tool 执行两阶段前端渲染</span></li>
     <li><a href="frontend/stream-performance-diagnostics.html"><code>frontend/stream-performance-diagnostics.html</code></a><span class="d">流式首 token 端到端性能诊断</span></li>
   </ul>
 
-  <h2>浏览器自动化</h2>
-  <ul>
+  <h3>浏览器自动化</h3>
+  <ul class="section-list">
     <li><a href="browser/playwright-engine-design.md"><code>browser/playwright-engine-design.md</code></a><span class="d">内置 playwright-core 引擎设计决策</span></li>
     <li><a href="browser/record-to-skill-design.md"><code>browser/record-to-skill-design.md</code></a><span class="d">录制 → trace v11 → Playwright Replay 回放契约</span></li>
     <li><a href="browser/record-to-skill-landscape.md"><code>browser/record-to-skill-landscape.md</code></a><span class="d">录制→技能：六个项目的做法与差异对比</span></li>
   </ul>
 
-  <h2>桌面端</h2>
-  <ul>
+  <h3>安全</h3>
+  <ul class="section-list">
     <li><a href="security/native-security-runtime.html"><code>security/native-security-runtime.html</code></a><span class="d">安全模式、广泛只读沙箱、审批作用域、逐命令脱沙箱与三平台原生边界</span></li>
+    <li><a href="security/security-test-matrix.md"><code>security/security-test-matrix.md</code></a><span class="d">安全测试矩阵</span></li>
+    <li><a href="security/execution-surface-inventory.md"><code>security/execution-surface-inventory.md</code></a><span class="d">执行面清单</span></li>
   </ul>
 
-  <h2>部署与发布</h2>
+  <h3>部署、测试与产品</h3>
+  <ul class="section-list">
+    <li><a href="deploy/release-packaging.html"><code>deploy/release-packaging.html</code></a><span class="d">macOS / Linux / Windows 安装包发布流程</span></li>
+    <li><a href="testing/e2e-testing.md"><code>testing/e2e-testing.md</code></a><span class="d">后端 E2E 批量测试</span></li>
+    <li><a href="product/companion.html"><code>product/companion.html</code></a><span class="d">Companion 产品文档</span></li>
+  </ul>
+
+  <h2>5. 文档维护约定</h2>
   <ul>
-    <li><a href="deploy/release-packaging.html"><code>deploy/release-packaging.html</code></a><span class="d">macOS / Linux（UOS、Kylin）/ Windows 安装包发布流程与产物组成</span></li>
+    <li>每次改动后端模块，若涉及职责、接口或新增子功能，同步更新 <code>docs/backend/modules/&lt;module&gt;.html</code>。</li>
+    <li>新增模块时，复制 <a href="backend/modules/_template.html"><code>backend/modules/_template.html</code></a> 创建文档，并在此页与 <a href="backend/modules/index.html"><code>backend/modules/index.html</code></a> 登记。</li>
+    <li>详细规范见 <a href="README.md"><code>docs/README.md</code></a>。</li>
   </ul>
 
-  <h2>测试</h2>
-  <ul>
-    <li><a href="testing/e2e-testing.md"><code>testing/e2e-testing.md</code></a><span class="d">后端 E2E 批量测试：运行方式、日志产物与新增场景指南</span></li>
-  </ul>
-
-  <div class="nav">Crew · 开源版本 Ace 的开发文档索引</div>
+  <div class="nav">Ace 文档总览 · 开源多智能体平台</div>
 </div>
 </body>
 </html>

@@ -98,3 +98,20 @@ current_push_fn: ContextVar[PushFn | None] = ContextVar("current_push_fn", defau
 # 长耗时工具（如 Dynamic Kanban workflow）可直接 touch_activity 保活，避免被 inactivity 超时取消。
 current_task_runtime_id: ContextVar[str] = ContextVar("current_task_runtime_id", default="")
 current_task_runtime: ContextVar[Any | None] = ContextVar("current_task_runtime", default=None)
+
+# 当前回合的业务活动回调。由调度器注入并负责限流，工具和子任务只需报告实际进展。
+TaskActivityFn = Callable[[dict[str, Any] | None], None]
+current_task_activity_fn: ContextVar[TaskActivityFn | None] = ContextVar(
+    "current_task_activity_fn", default=None
+)
+
+
+def touch_current_task_activity(progress: dict[str, Any] | None = None) -> None:
+    """报告当前回合的真实业务活动；无运行时上下文时静默。"""
+    fn = current_task_activity_fn.get()
+    if fn is None:
+        return
+    try:
+        fn(progress)
+    except Exception:  # noqa: BLE001 - 活动上报失败不得影响工具执行
+        pass

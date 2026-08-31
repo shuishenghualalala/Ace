@@ -8,12 +8,23 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 
-from crew.core.runctx import current_request_id, current_session_id, current_tool_call_id
+from crew.agent.loop.tool_runner import ToolRunner
+from crew.agent.subagent.tools import _run_children
+from crew.core.runctx import (
+    current_request_id,
+    current_session_id,
+    current_tool_call_id,
+    current_tool_progress_fn,
+    emit_tool_progress,
+    touch_current_task_activity,
+)
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.mocks import InMemorySessionStore
+from crew.core.types import ToolCall
 from crew.gateway.dispatcher import SessionDispatcher
 from crew.tasks.runtime import TaskRuntime
 from crew.tools.builtin import handle_terminal
@@ -33,6 +44,19 @@ def _runtime(tmp_path, **kwargs) -> TaskRuntime:
         "shell_execution": 0.0,
     }
     return runtime
+
+
+def _agent_turn_controller(*, inactivity_timeout: float) -> SimpleNamespace:
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            tasks_agent_turn_inactivity_timeout_seconds=inactivity_timeout,
+            tasks_agent_turn_execution_timeout_seconds=0,
+        )
+    )
+
+
+def _agent_turn_tasks(runtime: TaskRuntime, *, owner: str = "owner") -> list[dict]:
+    return runtime.list_tasks(session_id="s1", owner_account_id=owner)
 
 
 @pytest.mark.asyncio
@@ -57,6 +81,184 @@ async def test_activity_and_heartbeat_are_independent(tmp_path):
                 break
             await asyncio.sleep(0.02)
         assert runtime.get(task["task_id"])["status"] == "timed_out"
+    finally:
+        await runtime.stop()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_turn_tool_progress_keeps_watchdog_alive(tmp_path):
+    """工具旁路进度也必须刷新 parent agent_turn 的业务活动时间。"""
+    runtime = _runtime(tmp_path, monitor_interval=0.1)
+    store = InMemorySessionStore()
+
+    async def inner(envelope):
+        runner = ToolRunner(None, None, None, session_id=envelope.session_id)
+        token = runner._install_progress_sink(ToolCall("tool-1", "terminal", {}))
+        try:
+            for index in range(12):
+                await emit_tool_progress(f"running {index}")
+                await asyncio.sleep(0.025)
+        finally:
+            current_tool_progress_fn.reset(token)
+        yield ResponseChunk.final(envelope.request_id, "done")
+
+    dispatcher = SessionDispatcher(
+        inner,
+        store,
+        controller=_agent_turn_controller(inactivity_timeout=0.08),
+        task_runtime=runtime,
+    )
+    await runtime.start()
+    try:
+        chunks = [
+            chunk
+            async for chunk in dispatcher.run(
+                Envelope.of("run", session_id="s1", user_id="owner", mode="dynamic_kanban")
+            )
+        ]
+        task = _agent_turn_tasks(runtime)[0]
+        assert task["status"] == "completed"
+        assert task["last_activity_at"] > task["started_at"]
+        assert chunks[-1].kind == "final"
+    finally:
+        await runtime.stop()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_synchronous_subagent_progress_keeps_parent_watchdog_alive(tmp_path):
+    """同步 delegate_task 等待子 agent 时，其子 chunk 也属于父回合活动。"""
+    runtime = _runtime(tmp_path, monitor_interval=0.1)
+    store = InMemorySessionStore()
+
+    class StreamingChild:
+        async def run(self, envelope):
+            for index in range(12):
+                await asyncio.sleep(0.025)
+                yield ResponseChunk.delta(envelope.request_id, f"step {index}")
+            yield ResponseChunk.final(envelope.request_id, "child done")
+
+        async def aclose(self):
+            return None
+
+    async def inner(envelope):
+        await _run_children(
+            [{"label": "child", "goal_text": "work", "spec": {}}],
+            build_child=lambda _spec: StreamingChild(),
+            max_concurrent=1,
+            active=None,
+            idle_timeout=1,
+            max_runtime=1,
+            progress_callback=touch_current_task_activity,
+        )
+        yield ResponseChunk.final(envelope.request_id, "done")
+
+    dispatcher = SessionDispatcher(
+        inner,
+        store,
+        controller=_agent_turn_controller(inactivity_timeout=0.08),
+        task_runtime=runtime,
+    )
+    await runtime.start()
+    try:
+        chunks = [
+            chunk
+            async for chunk in dispatcher.run(
+                Envelope.of("run", session_id="s1", user_id="owner", mode="dynamic_kanban")
+            )
+        ]
+        task = _agent_turn_tasks(runtime)[0]
+        assert task["status"] == "completed"
+        assert task["last_activity_at"] > task["started_at"]
+        assert chunks[-1].kind == "final"
+    finally:
+        await runtime.stop()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_turn_watchdog_preserves_timeout_reason_and_terminal_state(tmp_path, monkeypatch):
+    """watchdog 取消回合后，最终状态与前端错误都必须保留超时原因。"""
+    runtime = _runtime(tmp_path, monitor_interval=0.1)
+    store = InMemorySessionStore()
+    blocked = asyncio.Event()
+
+    async def inner(envelope):
+        await blocked.wait()
+        yield ResponseChunk.final(envelope.request_id, "unreachable")
+
+    dispatcher = SessionDispatcher(
+        inner,
+        store,
+        controller=_agent_turn_controller(inactivity_timeout=0.08),
+        task_runtime=runtime,
+    )
+    monkeypatch.setattr("crew.state.home.get_owner_runtime_home", lambda _owner: tmp_path)
+    await runtime.start()
+    try:
+        chunks = [
+            chunk
+            async for chunk in dispatcher.run(
+                Envelope.of("run", session_id="s1", user_id="owner")
+            )
+        ]
+        task = _agent_turn_tasks(runtime)[0]
+        status, error = store.get_status("s1", owner_account_id="owner")
+        assert task["status"] == "timed_out"
+        assert task["error"].startswith("无业务活动超过")
+        assert chunks[-1].kind == "error"
+        assert chunks[-1].body["message"] == task["error"]
+        assert status == "failed"
+        assert error == task["error"]
+    finally:
+        await runtime.stop()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_turn_cancel_preserves_cancelled_terminal_state(tmp_path):
+    """通过 TaskRuntime 取消正在运行的回合时，不能被 dispatcher 覆盖为 failed。"""
+    runtime = _runtime(tmp_path, monitor_interval=0.1)
+    store = InMemorySessionStore()
+    started = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def inner(envelope):
+        started.set()
+        await blocked.wait()
+        yield ResponseChunk.final(envelope.request_id, "unreachable")
+
+    dispatcher = SessionDispatcher(
+        inner,
+        store,
+        controller=_agent_turn_controller(inactivity_timeout=10),
+        task_runtime=runtime,
+    )
+    await runtime.start()
+    try:
+        async def drain() -> list[ResponseChunk]:
+            return [
+                chunk
+                async for chunk in dispatcher.run(
+                    Envelope.of("run", session_id="s1", user_id="owner", mode="dynamic_kanban")
+                )
+            ]
+
+        run_task = asyncio.create_task(drain())
+        await started.wait()
+        task_id = _agent_turn_tasks(runtime)[0]["task_id"]
+        cancelled = await runtime.cancel(task_id, reason="测试取消", owner_account_id="owner")
+        chunks = await run_task
+        task = runtime.get(task_id, owner_account_id="owner")
+        status, error = store.get_status("s1", owner_account_id="owner")
+        assert cancelled["status"] == "cancelled"
+        assert task["status"] == "cancelled"
+        assert task["error"] == "测试取消"
+        assert chunks[-1].kind == "error"
+        assert chunks[-1].body["message"] == "测试取消"
+        assert status == "stopped"
+        assert error == "测试取消"
     finally:
         await runtime.stop()
         runtime.close()

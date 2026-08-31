@@ -34,6 +34,7 @@ from crew.tools.file_utils import (
     atomic_replace_bytes,
     read_verified_bytes,
     snapshot_file,
+    MAX_READ_FILE_BYTES,
 )
 from crew.tools.output_filters import strip_ansi, truncate_output
 from crew.tools.redact import redact_sensitive_text
@@ -963,7 +964,7 @@ async def handle_file_read(
         return f"[二进制文件，跳过文本读取]: {path}"
     try:
         # 阻塞 I/O 丢线程池，避免卡住事件循环（拖垮网关心跳）
-        raw_bytes = await asyncio.to_thread(read_verified_bytes, path)
+        raw_bytes = await asyncio.to_thread(read_verified_bytes, path, max_bytes=MAX_READ_FILE_BYTES)
         text = raw_bytes.decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         raise ToolError(f"读取失败: {exc}") from exc
@@ -1011,7 +1012,7 @@ async def handle_file_read(
 def _write_file_sync(path: Path, content: str, append: bool) -> dict[str, Any]:
     """同步执行文件写入（含 BOM / 行尾保留）。阻塞 I/O，由调用方丢线程池执行。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    version = snapshot_file(path)
+    version = snapshot_file(path, max_bytes=MAX_READ_FILE_BYTES)
 
     # Preserve existing file's BOM and line endings (Hermes-compatible)
     original_ending = None

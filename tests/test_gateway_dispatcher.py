@@ -247,7 +247,10 @@ async def test_global_active_run_limit_across_sessions():
 
     assert started == ["a"]
     assert disp.status("a", owner_account_id=OWNER)["global_active"] == 1
-    assert disp.status("b", owner_account_id=OWNER)["live"] == "queued"
+    # b 已出队、正在等全局并发槽：对外的 live 是 running（已受理），不是 queued；
+    # 等槽状态经 waiting_for_global_slot 单独暴露。
+    assert disp.status("b", owner_account_id=OWNER)["live"] == "running"
+    assert disp.status("b", owner_account_id=OWNER)["queue_depth"] == 0
     assert disp.status("b", owner_account_id=OWNER)["waiting_for_global_slot"] == 1
     assert disp.runtime_status()["global_queued"] == 1
 
