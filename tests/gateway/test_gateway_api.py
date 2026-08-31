@@ -138,7 +138,7 @@ async def test_external_session_model_switch_requires_idle_and_runtime_catalog(t
         "external-model",
         {
             "executor": "acp",
-            "acp": {"external_agent_id": agent["id"]},
+            "external_agent_id": agent["id"],
         },
         owner_account_id=OWNER_A,
     )
@@ -240,6 +240,13 @@ async def test_external_session_agent_config_requires_one_canonical_id(tmp_path,
                 "acp": {"external_agent_id": agent["id"]},
             },
         )
+        acp_legacy = await client.put(
+            "/api/session/external-config-acp-legacy/agent-config",
+            json={
+                "executor": "acp",
+                "external_agent_id": agent["id"],
+            },
+        )
         loaded = await client.get("/api/session/external-config-equal/agent-config")
 
     assert missing.status_code == 400
@@ -247,6 +254,9 @@ async def test_external_session_agent_config_requires_one_canonical_id(tmp_path,
     assert "不支持顶层" in top_level.json()["error"]
     assert conflict.status_code == 400
     assert equal.status_code == 200
+    assert acp_legacy.status_code == 200
+    assert acp_legacy.json()["external"]["external_agent_id"] == agent["id"]
+    assert "external_agent_id" not in acp_legacy.json()
     assert equal.json()["executor"] == "external"
     assert equal.json()["external"]["external_agent_id"] == agent["id"]
     assert "acp" not in equal.json()

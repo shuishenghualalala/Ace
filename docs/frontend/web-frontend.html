@@ -234,7 +234,7 @@ cd web && npm run build
       <tr><td>创建智能体</td><td><code>AgentsHub.tsx</code></td><td>选择运行时和模型，创建用户自定义外部智能体；若来自运行时"使用"入口，会显示像素风预填提示，创建完成后自动跳转到"我的"。</td></tr>
       <tr><td>创建团队</td><td><code>AgentsHub.tsx</code></td><td>选择 Leader、填写团队描述/工作流、智能组队、成员职责弹窗编辑；智能组队会把当前 Leader 一并传给后端，返回后自动填充完整角色职责。</td></tr>
       <tr><td>我的</td><td><code>AgentsHub.tsx</code></td><td>我的智能体/我的团队卡片展示，支持派活、删除、团队详情弹窗和 Markdown 职责渲染。</td></tr>
-      <tr><td>派活</td><td><code>App.tsx</code> / <code>api.ts</code></td><td>点击我的智能体"派活"后创建新 session，调用 <code>PUT /api/session/{id}/agent-config</code> 写入 <code>executor=external</code> 与 <code>external.external_agent_id</code>，再切到普通对话窗口继续交互；ACP 客户端的 <code>acp.external_agent_id</code> 仅作为后端输入别名。</td></tr>
+      <tr><td>派活</td><td><code>App.tsx</code> / <code>api.ts</code></td><td>点击我的智能体"派活"后创建新 session，调用 <code>PUT /api/session/{id}/agent-config</code> 写入 <code>executor=external</code> 与 <code>external.external_agent_id</code>，再切到普通对话窗口继续交互；ACP 客户端的 <code>acp.external_agent_id</code> 与 ACP 时代顶层字段仅作为后端输入别名。</td></tr>
       <tr><td>样式</td><td><code>global.css</code></td><td>迁回运行时卡片、成员卡片、像素头像/旗帜、职责弹窗、团队详情弹窗等样式。</td></tr>
     </tbody>
   </table>

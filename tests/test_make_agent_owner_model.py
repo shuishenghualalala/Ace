@@ -278,11 +278,11 @@ async def test_make_agent_without_api_key_borrows_fake_provider(tmp_path, monkey
     await agent.aclose()
 
 
-def test_make_agent_acp_accepts_acp_external_agent_id(owner_app):
-    """ACP executor 继续读取 ACP 输入别名中的 external_agent_id。"""
+def test_make_agent_acp_accepts_top_level_external_agent_id(owner_app):
+    """ACP executor 继续读取 ACP 时代的顶层 external_agent_id。"""
     app, owner = owner_app
     agent = app._make_agent(
-        {"executor": "acp", "acp": {"external_agent_id": "agent_e2e"}},
+        {"executor": "acp", "external_agent_id": "agent_e2e"},
         owner_account_id=owner,
     )
 
