@@ -13,6 +13,24 @@ def compact_history_content(value: Any) -> str:
     return " ".join(str(value or "").split())
 
 
+def team_child_member_id(child_session_id: str) -> str | None:
+    """Return the member suffix from a Team child session id.
+
+    Team child sessions use ``{parent}::turn::{request_id}::{member_id}``.
+    Ordinary Agent turns use ``{parent}::turn::{request_id}``; those are
+    execution sidechains and must never be interpreted as Team members.
+    """
+    child_id = str(child_session_id or "").strip()
+    marker = "::turn::"
+    if marker not in child_id:
+        return None
+    turn_part = child_id.split(marker, 1)[1]
+    request_id, separator, member_id = turn_part.rpartition("::")
+    if not separator or not request_id.strip() or not member_id.strip():
+        return None
+    return member_id.strip()
+
+
 def is_duplicate_team_parent_final(
     item: dict[str, Any],
     internal_items: list[dict[str, Any]],
@@ -255,9 +273,10 @@ def _child_session_history_items(
     items: list[dict[str, Any]] = []
     for child_session_id, child_messages in child_sessions:
         child_id = str(child_session_id)
-        if "::turn::" not in child_id:
+        member_id = team_child_member_id(child_id)
+        if not member_id:
             continue
-        identity = _team_internal_agent_identity(child_id.rsplit("::", 1)[-1], profiles)
+        identity = _team_internal_agent_identity(member_id, profiles)
         for message in child_messages:
             if message.is_meta or message.role != "assistant":
                 continue

@@ -985,6 +985,43 @@ async def test_team_task_api_ignores_legacy_turn_child_tasks_without_workflow(tm
 
 
 @pytest.mark.asyncio
+async def test_builtin_session_history_does_not_project_request_id_as_agent(tmp_path, auth_headers):
+    cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False, gateway_dev_mode=False)
+    crew = build_app(config=cfg, enable_team=False)
+    parent = "web_builtin_parent"
+    request_id = "req_builtin_1"
+    child = f"{parent}::turn::{request_id}"
+    crew.session_store.save(
+        parent,
+        [Message.user("你好"), Message(role="assistant", content="普通回答")],
+        owner_account_id=OWNER_A,
+    )
+    crew.session_store.set_agent_config(parent, {"executor": "builtin"}, owner_account_id=OWNER_A)
+    crew.session_store.save(
+        child,
+        [
+            Message.user("你好"),
+            Message(role="assistant", content="普通回答"),
+            Message.user("继续回答"),
+            Message(role="assistant", content="新的普通回答"),
+        ],
+        owner_account_id=OWNER_A,
+    )
+    app = create_app(crew)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        response = await client.get(f"/api/session/{parent}")
+
+    assert response.status_code == 200
+    items = response.json()
+    assert [item["content"] for item in items] == ["你好", "普通回答"]
+    assert [item["role"] for item in items] == ["user", "assistant"]
+    assert all("agent_name" not in item for item in items)
+    assert all(request_id not in item for item in items)
+
+
+@pytest.mark.asyncio
 async def test_team_task_api_projects_team_plan_nodes(tmp_path, auth_headers):
     cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False, gateway_dev_mode=False)
     crew = build_app(config=cfg, enable_team=True)

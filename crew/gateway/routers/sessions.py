@@ -32,6 +32,7 @@ from crew.state.team_member_model import (
 from crew.team.history_projection import (
     direct_mention_request_ids,
     is_duplicate_team_parent_final,
+    team_child_member_id,
     team_internal_history_items,
     team_tasks_with_plan_projection,
     team_visible_history_items,
@@ -505,10 +506,16 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         config = getter(session_id, owner_account_id=owner) if callable(getter) else None
         should_aggregate = str((config or {}).get("executor") or "").lower() == "team"
         loader = getattr(crew.session_store, "load_child_sessions", None)
-        child_sessions = loader(session_id, owner_account_id=owner) if callable(loader) else []
-        if child_sessions:
-            should_aggregate = should_aggregate or any("::turn::" in child_id for child_id, _ in child_sessions)
+        child_sessions = (
+            loader(session_id, owner_account_id=owner)
+            if should_aggregate and callable(loader)
+            else []
+        )
         if should_aggregate:
+            has_child_team_sessions = any(
+                team_child_member_id(child_id)
+                for child_id, _ in child_sessions
+            )
             internal = team_internal_history_items(
                 crew,
                 session_id,
@@ -521,7 +528,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 session_id,
                 owner_account_id=owner,
                 config=config,
-                has_child_team_sessions=any("::turn::" in child_id for child_id, _ in child_sessions),
+                has_child_team_sessions=has_child_team_sessions,
                 suppressed_request_ids=direct_mention_request_ids(internal),
             )
             if internal:
