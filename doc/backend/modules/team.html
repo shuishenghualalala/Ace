@@ -740,4 +740,10 @@ graph TD
 </ul>
 <p>验证：<code>tests/test_team_tasks.py</code> 为 <code>251 passed, 1 skipped</code>；相关 Gateway/Kanban 回归为 <code>94 passed</code>，覆盖有/无 TeamPlan 的内部与控制面派活、持久化计划恢复、节点重复派活和 Workflow Runtime 预占状态。Python 编译、Ruff 的 E9/F 检查与 <code>git diff --check</code> 通过；全量 Ruff 仍有历史遗留告警，未在本阶段扩大范围。</p>
 
+<h2>2026-08-31 外援 Timeout Policy 统一接入</h2>
+<p>Team 成员与单外援共用 <code>crew/core/timeout_policy.py</code>。外部执行器将策略解析为 idle window、absolute hard deadline、交互等待和绑定 grace period，再传给 ACP/Codex/Claude/CLI adapter；Team 不再在成员构建层复制超时规则。第一阶段不改变已有默认有效时长，便于旧 session 平滑迁移。</p>
+<p>管理员可在 <code>runtime.timeout_policy</code> 设置统一参数；<code>hard_timeout_seconds: 0</code> 关闭外部适配器的整次执行硬截止，但不关闭 idle timeout 或交互令牌过期；应用级 TaskRuntime 仍可作为独立的全局兜底。Followup 默认等待仍为 300 秒。交互绑定 TTL 会随 hard deadline 延长，并保留 grace period，避免执行结束后留下永久回调权限。</p>
+<p>本阶段新增 Core 跨模块能力文件，未新增数据库表或 API；配置、Team builder、App 装配、Gateway 交互桥和 Runtime adapter 均复用同一 policy。</p>
+<p>验证：Timeout Policy 与外援/Team/Gateway/Kanban 组合回归 <code>483 passed, 1 skipped</code>；相关 Python 编译、Ruff E9/F 与 <code>git diff --check</code> 通过。安全 Runtime 回归中有 2 项 macOS Seatbelt preflight 受当前执行环境限制，非本次代码断言失败。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

@@ -23,6 +23,14 @@ runtime:
   llm_trace: false
   max_iterations: 0
   dk_task_timeout_seconds: 3600
+  # 外部 Runtime 统一超时策略。hard_timeout_seconds: 0 表示不设硬截止；
+  # 缺省时保持各协议现有兼容默认（ACP 仍为 idle×4 或 idle+900）。
+  timeout_policy:
+    external_idle_seconds: 120
+    interactive_idle_floor_seconds: 330
+    interaction_timeout_seconds: 300
+    binding_grace_seconds: 30
+    # hard_timeout_seconds: 0
   sqlite_wal: true
 agent:
   executor: builtin

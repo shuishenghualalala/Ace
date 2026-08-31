@@ -139,6 +139,10 @@
   </ul>
   <p>验证：Team 回归为 <code>251 passed, 1 skipped</code>，Gateway/Kanban 回归为 <code>94 passed</code>；覆盖有/无 TeamPlan 的内部与控制面派活、持久化计划恢复、重复派活拒绝和 Workflow Runtime 预占状态。同步完成 Python 编译、Ruff 的 E9/F 检查与 <code>git diff --check</code>；全量 Ruff 的历史遗留告警未在本阶段扩大范围。</p>
 
+  <h2>13. 外援 Timeout Policy 统一接入（2026-08-31）</h2>
+  <p>单外援与 Team 外援统一由 <code>core/timeout_policy.py</code> 管理 idle timeout、hard deadline、Followup 等待和交互绑定 grace period。配置入口为 <code>runtime.timeout_policy</code>；显式 <code>hard_timeout_seconds: 0</code> 表示不设外部适配器硬截止，同时保留 idle 与 token 生命周期边界，应用级 TaskRuntime 仍可独立兜底。省略配置时继续使用各协议现有兼容默认。</p>
+  <p>验证：Timeout Policy 与外援/Team/Gateway/Kanban 组合回归 <code>483 passed, 1 skipped</code>；macOS Seatbelt 安全 Runtime 组合中 2 项受当前执行环境 preflight 限制。</p>
+
   <div class="nav">返回：<a href="../../index.html">Crew 文档总览</a></div>
 </div>
 </body>

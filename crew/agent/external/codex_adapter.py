@@ -17,15 +17,16 @@ from crew.agent.external.runtime_adapter import (
     ExternalPermissionRequest,
     ExternalStreamEvent,
     ExternalToolEvent,
+    NativeInteractiveLineTransport,
     RuntimeAdapterProbe,
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
-    NativeInteractiveLineTransport,
     build_external_runtime_env,
     open_managed_external_interactive,
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
+from crew.core.timeout_policy import remaining_seconds
 
 CODEX_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 
@@ -36,6 +37,26 @@ class CodexAdapterError(RuntimeError):
 
 class CodexAppServerUnsupported(CodexAdapterError):
     pass
+
+
+def _request_timeout(request: RuntimeExecutionRequest, cap: float) -> float:
+    """Clamp one RPC wait to the shared absolute deadline when configured."""
+    timeout = min(max(0.1, float(request.timeout or 0.0)), cap)
+    if not request.hard_timeout_enabled or request.hard_deadline is None:
+        return timeout
+    remaining = remaining_seconds(request.hard_deadline)
+    if remaining is None or remaining <= 0:
+        raise CodexAdapterError("Codex 外部 Runtime 已达到硬截止时间")
+    return min(timeout, remaining)
+
+
+def _execution_timeout(request: RuntimeExecutionRequest) -> float | None:
+    if not request.hard_timeout_enabled:
+        return request.timeout
+    remaining = remaining_seconds(request.hard_deadline)
+    if remaining is not None and remaining <= 0:
+        raise CodexAdapterError("Codex 外部 Runtime 已达到硬截止时间")
+    return remaining
 
 
 class _CodexLineTransport(Protocol):
@@ -383,7 +404,7 @@ async def _stream_codex_app_server(
     terminal_received = False
     try:
         try:
-            await _initialize(client, request.timeout)
+            await _initialize(client, _request_timeout(request, 10.0))
         except CodexAdapterError as exc:
             if proc.returncode is None:
                 try:
@@ -404,7 +425,7 @@ async def _stream_codex_app_server(
                 thread_result = await client.request(
                     "thread/resume",
                     resume_params,
-                    timeout=min(request.timeout, 15.0),
+                    timeout=_request_timeout(request, 15.0),
                 )
                 resumed = True
             except CodexAdapterError as exc:
@@ -413,7 +434,7 @@ async def _stream_codex_app_server(
             thread_result = await client.request(
                 "thread/start",
                 _codex_thread_params(request),
-                timeout=min(request.timeout, 15.0),
+                timeout=_request_timeout(request, 15.0),
             )
         thread_id = _result_id(thread_result, "threadId") or request.resume_session_id
         if not thread_id:
@@ -437,7 +458,7 @@ async def _stream_codex_app_server(
                 "effort": "medium",
                 "summary": "concise",
             },
-            timeout=min(request.timeout, 15.0),
+            timeout=_request_timeout(request, 15.0),
         )
         turn_id = _result_id(turn_result, "turnId")
         if not turn_id:
@@ -445,7 +466,10 @@ async def _stream_codex_app_server(
 
         while True:
             try:
-                payload = await asyncio.wait_for(client.events.get(), timeout=request.timeout)
+                payload = await asyncio.wait_for(
+                    client.events.get(),
+                    timeout=_request_timeout(request, max(0.1, float(request.timeout or 0.0))),
+                )
             except asyncio.TimeoutError as exc:
                 raise CodexAdapterError("Codex 模型响应空闲超时") from exc
             method = str(payload.get("method") or "")
@@ -654,7 +678,7 @@ async def stream_codex_events(
                 cwd=request.cwd,
                 system_prompt=request.system_prompt,
                 custom_env=request.custom_env,
-                timeout=request.timeout,
+                timeout=_execution_timeout(request),
             )
         )
         if output:
@@ -682,7 +706,7 @@ async def stream_codex_events(
                 custom_env=request.custom_env,
                 credential_home_paths=request.credential_home_paths,
                 network_endpoints=request.network_endpoints,
-                timeout=request.timeout,
+                timeout=_execution_timeout(request),
             )
         )
         if output:

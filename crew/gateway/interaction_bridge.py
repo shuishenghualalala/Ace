@@ -22,14 +22,15 @@ from crew.agent.skills import SkillActivation
 from crew.core.errors import ToolError
 from crew.core.followup import CANCELLED_MARKER, send_followup_question_to, wait_for_answer
 from crew.core.runctx import PushFn, current_owner_account_id
-from crew.state.logging import get_logger
-from crew.team.delegate_tool import TEAM_RESULT_STATUSES, require_team_result_status
+from crew.core.timeout_policy import DEFAULT_INTERACTION_TIMEOUT_SECONDS
 from crew.security.models import (
     AdditionalPermissionProfile,
     NetworkAccess,
     NetworkEntry,
     SandboxPermissions,
 )
+from crew.state.logging import get_logger
+from crew.team.delegate_tool import TEAM_RESULT_STATUSES, require_team_result_status
 
 log = get_logger("interaction_bridge")
 
@@ -48,6 +49,7 @@ class ExternalInteractionBinding:
     team_role: Literal["", "leader", "member"]
     cwd: str
     active_skills: tuple[SkillActivation, ...]
+    interaction_timeout_seconds: float
     expires_at: float
 
 
@@ -95,6 +97,7 @@ class InteractionBridge:
         team_role: Literal["", "leader", "member"] = "",
         cwd: str = "",
         active_skills: tuple[SkillActivation, ...] | list[SkillActivation] = (),
+        interaction_timeout_seconds: float = DEFAULT_INTERACTION_TIMEOUT_SECONDS,
     ) -> ExternalInteractionBinding | None:
         owner = str(owner_account_id or current_owner_account_id.get() or "").strip()
         if not self.available or not owner:
@@ -123,6 +126,7 @@ class InteractionBridge:
             team_role=team_role,
             cwd=str(cwd or "").strip(),
             active_skills=tuple(active_skills),
+            interaction_timeout_seconds=max(0.1, float(interaction_timeout_seconds or 0.0)),
             expires_at=time.time() + max(1.0, ttl_seconds),
         )
         self._bindings[token] = binding
@@ -518,7 +522,11 @@ class InteractionBridge:
             push_fn=push_fn,
             record_history=record_history,
         )
-        answers = await wait_for_answer(session_id, question_id)
+        answers = await wait_for_answer(
+            session_id,
+            question_id,
+            timeout=binding.interaction_timeout_seconds,
+        )
         cancelled = bool(answers) and answers[0].get("id") == CANCELLED_MARKER
         if cancelled:
             return {

@@ -219,6 +219,7 @@ class TeamMemberFactory:
         if spec.executor == "builtin":
             return {}
         config: dict[str, Any] = dict(spec.metadata.get(spec.executor) or {})
+        config.setdefault("timeout_policy", self.config.timeout_policy)
         if spec.external_agent_id:
             config["external_agent_id"] = spec.external_agent_id
         if spec.model:

@@ -919,6 +919,7 @@ class CrewApp:
         if executor_kind in {"external", "acp"} and isinstance(executor_config, dict):
             executor_config = {
                 **executor_config,
+                "timeout_policy": executor_config.get("timeout_policy", cfg.timeout_policy),
                 "external_store": self.external_agents,
                 "interaction_bridge": self.interaction_bridge,
             }

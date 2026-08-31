@@ -16,18 +16,18 @@ from crew.agent.external.runtime_adapter import (
     RuntimeAdapterProbe,
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
+    build_external_runtime_env,
     build_external_runtime_home_files,
     build_external_runtime_network_permissions,
-    build_external_runtime_env,
     build_managed_external_runtime_env,
     merge_additional_permission_profiles,
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
+from crew.core.timeout_policy import DEFAULT_EXTERNAL_IDLE_SECONDS, TimeoutPolicy
 from crew.security.models import AdditionalPermissionProfile
 from crew.security.runtime_client import NativeRuntimeError
 from crew.state.logging import get_logger
-
 
 log = get_logger("agent.acp")
 
@@ -78,7 +78,9 @@ class AcpAdapterConfig:
     )
     mcp_servers: list[dict[str, Any]] = field(default_factory=list)
     resume_session_id: str = ""
-    timeout: float = 120.0
+    timeout: float = DEFAULT_EXTERNAL_IDLE_SECONDS
+    hard_deadline: float | None = None
+    hard_timeout_enabled: bool = False
     permission_handler: PermissionHandler | None = None
 
 
@@ -1056,7 +1058,15 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
         # ACP handshake a small floor, then switch to the configured idle
         # budget as soon as a session or stream event is observed.
         idle_deadline = started_at + max(idle_timeout, 2.0)
-        hard_deadline = started_at + max(idle_timeout * 4, idle_timeout + 900.0)
+        if config.hard_timeout_enabled:
+            hard_deadline = config.hard_deadline
+        else:
+            # Direct adapter callers from older integrations did not provide a
+            # policy; retain the historical watchdog for those calls only.
+            hard_deadline = TimeoutPolicy.from_mapping({}).resolve_external(
+                idle_timeout,
+                protocol="acp-stdio",
+            ).hard_deadline(started_at)
 
         def _touch_activity() -> None:
             nonlocal idle_deadline
@@ -1075,7 +1085,9 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
                     )
                 now = loop.time()
                 idle_remaining = idle_deadline - now
-                hard_remaining = hard_deadline - now
+                hard_remaining = (
+                    float("inf") if hard_deadline is None else hard_deadline - now
+                )
                 if hard_remaining <= 0:
                     task.cancel()
                     proc_state = "running" if proc.returncode is None else f"exited({proc.returncode})"
@@ -1254,6 +1266,8 @@ class AcpRuntimeAdapter:
                 ],
                 resume_session_id=request.resume_session_id,
                 timeout=request.timeout,
+                hard_deadline=request.hard_deadline,
+                hard_timeout_enabled=request.hard_timeout_enabled,
                 permission_handler=request.permission_handler,
             ),
         )
