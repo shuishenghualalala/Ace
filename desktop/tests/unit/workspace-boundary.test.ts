@@ -47,10 +47,12 @@ describe('workspace/session boundary', () => {
       id,
       { name: 'Kimi', provider: 'kimi', model: 'kimi' },
       'kimi',
+      { kind: 'external_agent', id: 'agent-kimi' },
     );
 
     expect(getSessionAgentDisplay(id)).toEqual({
       agentLabel: { name: 'Kimi', provider: 'kimi', model: 'kimi' },
+      agentBinding: { kind: 'external_agent', id: 'agent-kimi' },
       modelLabel: 'kimi',
     });
     applySessionModelBinding(id, {
@@ -62,13 +64,19 @@ describe('workspace/session boundary', () => {
     commitDraftSession(id, '你好', '你好', vi.fn());
     expect(sessionStore.get().sessions.find((session) => session.id === id)).toMatchObject({
       agentLabel: { name: 'Kimi', provider: 'kimi', model: 'kimi' },
+      agentBinding: { kind: 'external_agent', id: 'agent-kimi' },
       modelLabel: 'kimi',
     });
   });
 
   it('first-send title replaces an early hydrated placeholder session', () => {
     const id = createSessionInWorkspace('default', vi.fn());
-    assignSessionAgentDisplay(id, { name: '小游戏团队', provider: 'team' });
+    assignSessionAgentDisplay(
+      id,
+      { name: '小游戏团队', provider: 'team' },
+      '',
+      { kind: 'external_team', id: 'team-game' },
+    );
     sessionStore.set({
       sessions: [{
         id,
@@ -77,6 +85,7 @@ describe('workspace/session boundary', () => {
         preview: '',
         badge: '主智能体',
         workspaceId: 'default',
+        agentBinding: { kind: 'external_team', id: 'team-game' },
       }],
     });
 
