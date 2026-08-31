@@ -8,9 +8,10 @@ use crate::identity::{
 #[cfg(not(target_os = "linux"))]
 use crate::protocol::should_initiate;
 use crate::protocol::{
-    is_valid_agent_mode, normalize_room_name, FrameCodec, Message, PeerInfo, PublishedAgent,
-    Reassembler, ReplyReference, TransferredFile, DEFAULT_AGENT_MODE, FILE_WEBRTC_CAPABILITY,
-    INCOMING_MESSAGE_UUID, OUTGOING_MESSAGE_UUID, PEER_INFO_UUID, PROTOCOL_VERSION, SERVICE_UUID,
+    is_valid_agent_mode, normalize_room_name, AgentMention, AgentSender, FrameCodec, Message,
+    PeerInfo, PublishedAgent, Reassembler, ReplyReference, TransferredFile, DEFAULT_AGENT_MODE,
+    FILE_WEBRTC_CAPABILITY, INCOMING_MESSAGE_UUID, OUTGOING_MESSAGE_UUID, PEER_INFO_UUID,
+    PROTOCOL_VERSION, SERVICE_UUID,
 };
 use crate::runtime::{subscribe_outgoing_message, NearbyConfig};
 use anyhow::{Context, Result};
@@ -82,6 +83,25 @@ fn incoming_write_type(characteristic: &btleplug::api::Characteristic) -> Result
     }
 }
 
+fn outgoing_message_properties(is_apple: bool) -> Vec<CharacteristicProperty> {
+    if is_apple {
+        vec![CharacteristicProperty::Indicate]
+    } else {
+        vec![
+            CharacteristicProperty::Notify,
+            CharacteristicProperty::Indicate,
+        ]
+    }
+}
+
+fn server_frame_delay(is_apple: bool, message_type: &str) -> Duration {
+    if is_apple && matches!(message_type, "file.webrtc_offer" | "file.webrtc_answer") {
+        Duration::from_millis(12)
+    } else {
+        Duration::from_millis(5)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum IpcCommand {
@@ -144,6 +164,10 @@ pub(crate) enum IpcCommand {
         client_message_id: Option<String>,
         #[serde(default)]
         mentions: Vec<String>,
+        #[serde(default)]
+        agent_mentions: Vec<AgentMention>,
+        #[serde(default)]
+        agent_sender: Option<AgentSender>,
         #[serde(default)]
         reply_to: Option<ReplyReference>,
     },
@@ -938,15 +962,22 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                             owner_peer_id: room.owner_peer_id.clone(),
                         }).await?;
                     }
-                    IpcCommand::SendRoomMessage { room_id, text, client_message_id, mentions, reply_to } => {
+                    IpcCommand::SendRoomMessage { room_id, text, client_message_id, mentions, agent_mentions, agent_sender, reply_to } => {
                         if rooms.contains_key(&room_id) {
                             let mentions = rooms
                                 .get(&room_id)
                                 .map(|room| filter_room_mentions(mentions, room))
                                 .unwrap_or_default();
+                            let agent_mentions = rooms
+                                .get(&room_id)
+                                .map(|room| filter_room_agent_mentions(agent_mentions, room))
+                                .unwrap_or_default();
                             let message = Message::room_message_with_context(
                                 peer.peer_id.clone(), room_id.clone(), text, mentions, reply_to,
-                            ).with_client_message_id(client_message_id);
+                            )
+                            .with_agent_mentions(agent_mentions)
+                            .with_agent_sender(agent_sender)
+                            .with_client_message_id(client_message_id);
                             if let Some(room) = rooms.get_mut(&room_id) {
                                 remember_room_message(room, &message);
                             }
@@ -1339,6 +1370,10 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                                 if pending.peer_id != peer_id || !pending.accepted || sdp.is_empty() {
                                     continue;
                                 }
+                                eprintln!(
+                                    "[nearby][webrtc] transfer_id={transfer_id} role=receiver stage=offer_received sdp_bytes={}",
+                                    sdp.len()
+                                );
                                 let manager = transfers.clone();
                                 let event_tx = transfer_event_tx.clone();
                                 tokio::spawn(async move {
@@ -1371,6 +1406,10 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                                 if pending.peer_id != peer_id || sdp.is_empty() {
                                     continue;
                                 }
+                                eprintln!(
+                                    "[nearby][webrtc] transfer_id={transfer_id} role=sender stage=answer_received sdp_bytes={}",
+                                    sdp.len()
+                                );
                                 let manager = transfers.clone();
                                 let event_tx = transfer_event_tx.clone();
                                 let failed_peer_id = peer_id.clone();
@@ -1510,6 +1549,10 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
             Some(event) = transfer_event_rx.recv() => {
                 match event {
                     TransferEvent::OfferReady { peer_id, transfer_id, sdp } => {
+                        eprintln!(
+                            "[nearby][webrtc] transfer_id={transfer_id} role=sender stage=offer_signal_ready sdp_bytes={}",
+                            sdp.len()
+                        );
                         let sent = if let Some(outbound) = sessions.get(&peer_id) {
                             outbound.send(Message::file_webrtc_signal(
                                 peer.peer_id.clone(),
@@ -1520,6 +1563,11 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         } else {
                             false
                         };
+                        if sent {
+                            eprintln!(
+                                "[nearby][webrtc] transfer_id={transfer_id} role=sender stage=offer_signal_queued"
+                            );
+                        }
                         if !sent {
                             outgoing_transfers.remove(&transfer_id);
                             transfers.finish(&transfer_id).await;
@@ -1531,6 +1579,10 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         }
                     }
                     TransferEvent::AnswerReady { peer_id, transfer_id, sdp } => {
+                        eprintln!(
+                            "[nearby][webrtc] transfer_id={transfer_id} role=receiver stage=answer_signal_ready sdp_bytes={}",
+                            sdp.len()
+                        );
                         let sent = if let Some(outbound) = sessions.get(&peer_id) {
                             outbound.send(Message::file_webrtc_signal(
                                 peer.peer_id.clone(),
@@ -1541,6 +1593,11 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         } else {
                             false
                         };
+                        if sent {
+                            eprintln!(
+                                "[nearby][webrtc] transfer_id={transfer_id} role=receiver stage=answer_signal_queued"
+                            );
+                        }
                         if !sent {
                             incoming_transfers.remove(&transfer_id);
                             transfers.finish(&transfer_id).await;
@@ -1561,6 +1618,10 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         }).await?;
                     }
                     TransferEvent::Sent { peer_id, metadata } => {
+                        eprintln!(
+                            "[nearby][webrtc] transfer_id={} role=sender stage=transfer_completed bytes={}",
+                            metadata.transfer_id, metadata.size
+                        );
                         outgoing_transfers.remove(&metadata.transfer_id);
                         transfers.finish(&metadata.transfer_id).await;
                         if let Some(message_id) = metadata.client_message_id {
@@ -1568,6 +1629,10 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         }
                     }
                     TransferEvent::Received { peer_id, metadata, path } => {
+                        eprintln!(
+                            "[nearby][webrtc] transfer_id={} role=receiver stage=transfer_completed bytes={}",
+                            metadata.transfer_id, metadata.size
+                        );
                         incoming_transfers.remove(&metadata.transfer_id);
                         transfers.finish(&metadata.transfer_id).await;
                         let file = TransferredFile {
@@ -1594,6 +1659,9 @@ pub(crate) async fn run_ble(config: NearbyConfig) -> Result<()> {
                         }
                     }
                     TransferEvent::Failed { peer_id, transfer_id, message } => {
+                        eprintln!(
+                            "[nearby][webrtc] transfer_id={transfer_id} stage=failed error={message}"
+                        );
                         outgoing_transfers.remove(&transfer_id);
                         incoming_transfers.remove(&transfer_id);
                         transfers.finish(&transfer_id).await;
@@ -1766,10 +1834,7 @@ fn nearby_service(peer: &PeerInfo) -> Result<Service> {
             },
             ServerCharacteristic {
                 uuid: OUTGOING_MESSAGE_UUID,
-                properties: vec![
-                    CharacteristicProperty::Notify,
-                    CharacteristicProperty::Indicate,
-                ],
+                properties: outgoing_message_properties(cfg!(target_vendor = "apple")),
                 permissions: vec![],
                 value: None,
                 descriptors: vec![],
@@ -2224,27 +2289,47 @@ fn spawn_server_writer(
     tokio::spawn(async move {
         let mut transfer_id = 1_u32;
         while let Some(message) = outbound_rx.recv().await {
+            let message_type = message.message_type.clone();
             let Ok(bytes) = message.encode() else {
+                eprintln!(
+                    "[nearby][peripheral] message_write_failed message_type={message_type} reason=encode"
+                );
                 continue;
             };
             let Ok(frames) =
                 FrameCodec::fragment(&bytes, FrameCodec::frame_payload_capacity(23), transfer_id)
             else {
+                eprintln!(
+                    "[nearby][peripheral] message_write_failed message_type={message_type} reason=fragment"
+                );
                 continue;
             };
+            let frame_count = frames.len();
+            let frame_delay = server_frame_delay(cfg!(target_vendor = "apple"), &message_type);
+            eprintln!(
+                "[nearby][peripheral] message_write_started message_type={message_type} bytes={} frame_count={frame_count}",
+                bytes.len()
+            );
             transfer_id = transfer_id.wrapping_add(1);
-            for frame in frames {
-                if server
+            for (index, frame) in frames.into_iter().enumerate() {
+                if let Err(error) = server
                     .lock()
                     .await
                     .update_characteristic(OUTGOING_MESSAGE_UUID, frame)
                     .await
-                    .is_err()
                 {
+                    eprintln!(
+                        "[nearby][peripheral] message_write_failed message_type={message_type} frame_index={index} error={error}"
+                    );
                     return;
                 }
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                if index + 1 < frame_count {
+                    tokio::time::sleep(frame_delay).await;
+                }
             }
+            eprintln!(
+                "[nearby][peripheral] message_write_completed message_type={message_type} frame_count={frame_count}"
+            );
         }
     });
 }
@@ -2623,6 +2708,21 @@ pub(crate) fn filter_room_mentions(mentions: Vec<String>, room: &RoomState) -> V
         .collect()
 }
 
+pub(crate) fn filter_room_agent_mentions(
+    mentions: Vec<AgentMention>,
+    room: &RoomState,
+) -> Vec<AgentMention> {
+    let mut seen = HashSet::new();
+    mentions
+        .into_iter()
+        .filter(|mention| {
+            room.peer_ids.contains(&mention.peer_id)
+                && !mention.public_agent_id.trim().is_empty()
+                && seen.insert((mention.peer_id.clone(), mention.public_agent_id.clone()))
+        })
+        .collect()
+}
+
 pub(crate) fn validate_file_transfer(
     file_id: &str,
     name: &str,
@@ -2776,6 +2876,25 @@ mod tests {
             ),
             vec!["crew_agent"]
         );
+        assert_eq!(
+            filter_room_agent_mentions(
+                vec![
+                    AgentMention {
+                        peer_id: "crew_agent".to_owned(),
+                        public_agent_id: "agent_mori".to_owned(),
+                    },
+                    AgentMention {
+                        peer_id: "crew_outsider".to_owned(),
+                        public_agent_id: "agent_other".to_owned(),
+                    },
+                ],
+                &room,
+            ),
+            vec![AgentMention {
+                peer_id: "crew_agent".to_owned(),
+                public_agent_id: "agent_mori".to_owned(),
+            }]
+        );
     }
 
     #[test]
@@ -2804,6 +2923,71 @@ mod tests {
         assert_eq!(
             incoming_write_type(&characteristic).unwrap(),
             WriteType::WithoutResponse
+        );
+    }
+
+    #[test]
+    fn apple_outgoing_messages_use_reliable_indications() {
+        assert_eq!(
+            outgoing_message_properties(true),
+            vec![CharacteristicProperty::Indicate]
+        );
+        assert_eq!(
+            outgoing_message_properties(false),
+            vec![
+                CharacteristicProperty::Notify,
+                CharacteristicProperty::Indicate
+            ]
+        );
+    }
+
+    #[test]
+    fn apple_webrtc_signaling_uses_conservative_frame_pacing() {
+        assert_eq!(
+            server_frame_delay(true, "file.webrtc_answer"),
+            Duration::from_millis(12)
+        );
+        assert_eq!(
+            server_frame_delay(true, "peer.message"),
+            Duration::from_millis(5)
+        );
+        assert_eq!(
+            server_frame_delay(false, "file.webrtc_answer"),
+            Duration::from_millis(5)
+        );
+    }
+
+    #[test]
+    fn large_webrtc_signal_survives_default_server_fragmentation() {
+        let message = Message::file_webrtc_signal(
+            "crew_sender",
+            "transfer_large_sdp",
+            format!(
+                "v=0\r\n{}",
+                "a=candidate:host 1 udp 12345 192.168.1.10 54321 typ host\r\n".repeat(80)
+            ),
+            true,
+        );
+        let encoded = message.encode().unwrap();
+        let frames =
+            FrameCodec::fragment(&encoded, FrameCodec::frame_payload_capacity(23), 73).unwrap();
+        assert!(frames.len() > 100);
+
+        let mut reassembler = Reassembler::default();
+        let mut completed = None;
+        for bytes in frames {
+            let frame = FrameCodec::parse(&bytes).unwrap();
+            if let crate::protocol::ReassemblyResult::Complete(bytes) = reassembler.accept(frame) {
+                completed = Some(bytes);
+            }
+        }
+
+        assert_eq!(completed.as_deref(), Some(encoded.as_slice()));
+        assert_eq!(
+            Message::decode(completed.as_deref().unwrap())
+                .unwrap()
+                .message_type,
+            "file.webrtc_answer"
         );
     }
 

@@ -124,6 +124,33 @@ def test_dm_has_no_agent_capability_and_strips_mentions(tmp_path):
     }
 
 
+def test_room_message_keeps_valid_stable_agent_targets(tmp_path):
+    service, _, _ = _service(tmp_path)
+    _connect_peer(service)
+    service.store.upsert_room(
+        "owner-a", "room-1", name="设计群", human_member_ids=["peer-1"]
+    )
+    binding = service.open_conversation(
+        "owner-a", kind="nearby_room", target_id="room-1", title="设计群"
+    )
+    service.enqueue_human_message(
+        "owner-a",
+        session_id=binding["session_id"],
+        text="@Mori 总结一下",
+        mentions=["peer-1"],
+        agent_mentions=[
+            {"peer_id": "peer-1", "public_agent_id": "agent_mori"},
+            {"peer_id": "peer-1", "public_agent_id": "agent_mori"},
+            {"peer_id": "bad target", "public_agent_id": "agent_bad"},
+        ],
+    )
+    event = service.store.claim_outbox("owner-a")[0]
+    assert event["payload"]["mentions"] == ["peer-1"]
+    assert event["payload"]["agent_mentions"] == [
+        {"peer_id": "peer-1", "public_agent_id": "agent_mori"}
+    ]
+
+
 def test_message_with_attachment_is_persisted_and_queued_without_local_path(tmp_path):
     service, sessions, _ = _service(tmp_path)
     _connect_peer(service)

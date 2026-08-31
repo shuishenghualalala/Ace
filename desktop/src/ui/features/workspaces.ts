@@ -252,6 +252,7 @@ export function syncSessionsFromBackend(rows: BackendSession[]): void {
           name: row.agent_label.name || '',
           provider: row.agent_label.provider || '',
           display_badge: row.agent_label.display_badge || '?',
+          ...(row.agent_label.avatar ? { avatar: row.agent_label.avatar } : {}),
           ...(row.agent_label.model ? { model: row.agent_label.model } : {}),
         }
       : prev?.agentLabel;

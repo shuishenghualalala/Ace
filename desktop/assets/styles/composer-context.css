@@ -791,6 +791,11 @@
   color: var(--mw-status-success);
 }
 
+.mention-chip--agent {
+  color: var(--mw-text-link);
+  font-weight: 600;
+}
+
 .mention-chip__mark {
   display: inline-flex;
   width: 1ch;
@@ -842,12 +847,44 @@
   background: var(--mw-bg-selected);
 }
 
+.mention-pop__section {
+  padding: var(--mw-space-1) var(--mw-space-2) 0;
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+  font-weight: 600;
+}
+
 .mention-pop__sig {
   display: inline-grid;
   width: 30px;
   height: 30px;
   place-items: center;
   color: var(--mw-text-secondary);
+}
+
+.mention-pop__sig--agent {
+  position: relative;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--mw-text-link) 11%, var(--mw-bg-surface));
+  color: var(--mw-text-link);
+  font-size: var(--mw-type-caption-size);
+  font-weight: 700;
+}
+
+.mention-pop__sig--agent::after {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--mw-bg-surface);
+  border-radius: 50%;
+  background: var(--mw-status-success);
+  content: '';
+}
+
+.mention-pop__sig--agent[data-status='working']::after {
+  background: var(--mw-status-info);
 }
 
 .mention-pop__body {

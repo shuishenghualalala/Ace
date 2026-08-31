@@ -331,6 +331,11 @@ def create_companion_router(crew) -> APIRouter:
                 session_id=session_id,
                 text=str(payload.get("text") or ""),
                 mentions=payload.get("mentions") if isinstance(payload.get("mentions"), list) else None,
+                agent_mentions=(
+                    payload.get("agent_mentions")
+                    if isinstance(payload.get("agent_mentions"), list)
+                    else None
+                ),
                 attachments=attachments,
             )
             return JSONResponse({"ok": True, **receipt})

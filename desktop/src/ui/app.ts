@@ -135,6 +135,7 @@ import { activateSecurityPage, initSecurityPage } from './features/security-cent
 import { stopStreamWatchdog } from './features/stream-watchdog';
 import type { RendererAdapter } from './adapters/renderer-adapter';
 import { createApplicationShell, type ApplicationShell } from './layouts/application-shell';
+import { createDesktopWorkspaceRegistry } from './features/workspace-registry';
 import {
   productModeStore,
   updateProductModeView,
@@ -851,6 +852,7 @@ function mountApplicationShell(
     }
     previousProductMode = productMode;
   };
+  const workspaceRegistry = createDesktopWorkspaceRegistry();
   const shell = createApplicationShell({
     commands: {
       minimize: () => adapter.bridge?.windowMinimize?.(),
@@ -864,6 +866,7 @@ function mountApplicationShell(
       security: securityModuleEnabled() ? 'available' : 'unavailable',
       work: WORK_FEATURE_STATES,
     },
+    workspaceRegistry,
     onNavigate: (location: ShellLocation, productMode: ProductMode) => {
       if (productMode === 'assistant') return activateTab(location as TabKey);
       if (!isWorkLocation(location)) return showSharedWorkPage(location);

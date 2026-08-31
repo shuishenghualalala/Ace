@@ -452,6 +452,10 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         session_id = binding["session_id"]
         session_title = binding["title"]
         workspace_id = binding["workspace_id"]
+        if public_agent_id:
+            agent_scope = hashlib.sha256(public_agent_id.encode("utf-8")).hexdigest()[:16]
+            session_id = f"{session_id}:agent:{agent_scope}"
+            session_title = f"{session_title} · {publication['display_name']}"
         try:
             # 白名单只收紧/放开 toolset 一项；executor、skills、text_only 等
             # 其余安全约束一律保持现状，不允许通过入参放宽。

@@ -9,6 +9,7 @@
  *   把 HTTP 状态码 + 后端错误信息合成人类可读消息抛给 UI 层。
  */
 import { logStream } from './stream-debug';
+import type { AvatarRef } from './avatar-manager';
 
 export type Mode = 'agent' | 'team' | 'dynamic_kanban';
 export type ChunkKind =
@@ -105,6 +106,7 @@ export interface ExternalAgent {
   name: string;
   provider: string;
   display_badge?: string;
+  avatar?: AvatarRef;
   runtime_id: string;
   model: string;
   system_prompt?: string;
@@ -141,6 +143,7 @@ export interface ExternalTeam {
   id: string;
   name: string;
   display_badge?: string;
+  avatar?: AvatarRef;
   description?: string;
   leader_agent_id?: string;
   instructions?: string;
@@ -284,7 +287,7 @@ export interface BackendSession {
   model_profile_id?: string;
   pending_model_profile_id?: string | null;
   model_label?: string;
-  agent_label?: { name?: string; provider?: string; display_badge?: string; model?: string };
+  agent_label?: { name?: string; provider?: string; display_badge?: string; model?: string; avatar?: AvatarRef };
   agent_binding?: SessionAgentBinding;
 }
 
@@ -318,6 +321,7 @@ export interface BackendHistoryItem {
     sender_name?: string;
     is_self?: boolean;
     delivery_state?: string;
+    avatar?: AvatarRef;
     workspace_id?: string;
   };
   timestamp?: number;
@@ -594,10 +598,16 @@ export interface CompanionAgentCandidate {
   source_kind: 'builtin' | 'external';
   source_id: string;
   display_name: string;
+  avatar?: AvatarRef;
   description: string;
   provider: string;
   available: boolean;
   published: boolean;
+  public_agent_id: string;
+}
+
+export interface CompanionAgentMention {
+  peer_id: string;
   public_agent_id: string;
 }
 
@@ -1614,11 +1624,12 @@ export const backendApi = {
     sessionId: string,
     text: string,
     mentions: string[] = [],
+    agentMentions: CompanionAgentMention[] = [],
     attachments: Attachment[] = [],
   ) =>
     getJSON<{ ok: boolean; event_id: string; status: string }>(
       `/api/companion/conversations/${encodeURIComponent(sessionId)}/messages`,
-      { method: 'POST', ...jsonBody({ text, mentions, attachments }) },
+      { method: 'POST', ...jsonBody({ text, mentions, agent_mentions: agentMentions, attachments }) },
     ),
   companionPrepareFile: (attachment: Attachment) =>
     getJSON<{ ok: boolean; file: CompanionPreparedFile }>(

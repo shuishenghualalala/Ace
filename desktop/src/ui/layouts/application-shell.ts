@@ -7,6 +7,7 @@ import {
   type ShellFeatureStates,
   type ShellLocation,
 } from '../features/sidebar-nav';
+import { createDesktopWorkspaceRegistry, type WorkspaceRegistry } from '../features/workspace-registry';
 import {
   productModeStore,
   restoreProductMode,
@@ -41,6 +42,7 @@ export interface ApplicationShellOptions {
   features?: ShellFeatureStates;
   storage?: Storage;
   productIconUrl?: string;
+  workspaceRegistry?: WorkspaceRegistry;
   onNavigate?: (location: ShellLocation, productMode: ProductMode) => boolean | void;
   onProductModeChange?: (productMode: ProductMode) => void;
 }
@@ -108,6 +110,7 @@ export function createApplicationShell(
   options: ApplicationShellOptions = {},
 ): ApplicationShell {
   const storage = options.storage ?? localStorage;
+  const workspaceRegistry = options.workspaceRegistry ?? createDesktopWorkspaceRegistry();
   let features = options.features ?? {};
   let disposed = false;
 
@@ -325,7 +328,7 @@ export function createApplicationShell(
     setProductMode(productMode, storage);
     options.onProductModeChange?.(productMode);
     const state = productModeStore.get();
-    const item = resolveShellNavigation(productMode, features).find(
+    const item = resolveShellNavigation(productMode, features, workspaceRegistry).find(
       (candidate) =>
         candidate.id === state.views[productMode].lastPosition &&
         candidate.featureState === 'available',
@@ -341,7 +344,7 @@ export function createApplicationShell(
         : undefined;
     const state = productModeStore.get();
     const modeView = state.views[state.productMode];
-    const items = resolveShellNavigation(state.productMode, features);
+    const items = resolveShellNavigation(state.productMode, features, workspaceRegistry);
     navigationList.replaceChildren();
     for (const item of items) {
       const button = document.createElement('button');

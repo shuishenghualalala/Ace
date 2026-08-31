@@ -128,9 +128,14 @@ import { messageStore, sessionStore } from '../stores/stores';
 import type { TabKey } from '../state';
 import { resolveChatRenderTargetId, openStudioChatPanel, isStudioView } from './studio-chrome-state';
 import { isStreamDebugEnabled, logStream } from '../stream-debug';
-import { setDisabledWorkPreferenceIdsForTurn, takeDisabledWorkPreferenceIds } from './composer-mention';
+import {
+  setConversationMentionsForTurn,
+  setDisabledWorkPreferenceIdsForTurn,
+  takeConversationMentionsForTurn,
+  takeDisabledWorkPreferenceIds,
+} from './composer-mention';
 import { productModeStore } from '../stores/product-mode-store';
-import { conversationAdapters } from './conversation-adapters';
+import { conversationAdapters, type ConversationMentionTarget } from './conversation-adapters';
 
 // ---------- registry: 由 index.ts 在 init 时注入的回调（破循环） ----------
 
@@ -149,6 +154,7 @@ interface DispatchOptions {
   optimisticUserMessageId?: string;
   wikiConfirmationId?: string;
   workDisabledPreferenceIds?: string[];
+  conversationMentions?: ConversationMentionTarget[];
 }
 /**
  * index.ts init 时调用，把 openSession / setTab 等顶层入口注入本模块。
@@ -1416,6 +1422,7 @@ export function consumePending(sessionId: string): void {
   if (head.clientIntent) dispatchOptions.clientIntent = head.clientIntent;
   if (head.optimisticUserMessageId) dispatchOptions.optimisticUserMessageId = head.optimisticUserMessageId;
   if (head.workDisabledPreferenceIds) dispatchOptions.workDisabledPreferenceIds = head.workDisabledPreferenceIds;
+  if (head.conversationMentions) dispatchOptions.conversationMentions = head.conversationMentions;
   void dispatchWs(sessionId, head.query, head.attachments ?? [], dispatchOptions);
 }
 
@@ -1432,6 +1439,9 @@ export function sendQueueItemNow(sessionId: string, id: string): void {
     ...(item.workDisabledPreferenceIds
       ? { workDisabledPreferenceIds: item.workDisabledPreferenceIds }
       : {}),
+    ...(item.conversationMentions
+      ? { conversationMentions: item.conversationMentions }
+      : {}),
   });
 }
 
@@ -1442,6 +1452,7 @@ export function editQueueItem(sessionId: string, index: number): void {
   queueEditDraft = { sessionId };
   removePendingQueueItem(sessionId, index);
   setDisabledWorkPreferenceIdsForTurn(item.workDisabledPreferenceIds ?? []);
+  setConversationMentionsForTurn(item.conversationMentions ?? []);
   if (getPendingQueue(sessionId).length === 0) setQueueHintWithUi(sessionId, '');
   const input = queryPrimaryComposer<HTMLTextAreaElement>('[data-composer-input]');
   if (input) {
@@ -1492,13 +1503,21 @@ export async function dispatchWs(
     if (!alreadyRendered) {
       appendMessage(sessionId, 'user', query, {
         attachments,
+        conversationMentions: dispatchOptions.conversationMentions,
         ...(optimisticUserMessageId ? { id: optimisticUserMessageId } : {}),
       });
     }
     renderChat();
     jumpChatToBottom();
     try {
-      await conversationAdapter.send({ sessionId, text: query, attachments });
+      await conversationAdapter.send({
+        sessionId,
+        text: query,
+        attachments,
+        ...(dispatchOptions.conversationMentions
+          ? { mentions: dispatchOptions.conversationMentions }
+          : {}),
+      });
       return true;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -1613,6 +1632,7 @@ export async function sendMessage(text: string): Promise<void> {
     sessionId,
     composeSiteAnnotationMessage(sessionId, plainContent),
   );
+  const conversationMentions = takeConversationMentionsForTurn(content);
   const previewText = plainContent || (hasAnnotationDraft ? '页面注释' : '附件消息');
 
   if (isBusy(sessionId)) {
@@ -1625,6 +1645,7 @@ export async function sendMessage(text: string): Promise<void> {
       workDisabledPreferenceIds: productModeStore.get().productMode === 'work'
         ? takeDisabledWorkPreferenceIds()
         : [],
+      conversationMentions,
     };
     if (queueEditDraft?.sessionId === sessionId) {
       queueEditDraft = null;
@@ -1653,7 +1674,10 @@ export async function sendMessage(text: string): Promise<void> {
     queueEditDraft = null;
   }
 
-  const sent = await dispatchWs(sessionId, content, takeAttachmentsForSend(), takeArmedSubScenario());
+  const sent = await dispatchWs(sessionId, content, takeAttachmentsForSend(), {
+    subScenario: takeArmedSubScenario(),
+    conversationMentions,
+  });
   if (sent) {
     clearSiteAnnotationDraft(sessionId);
     clearBlueprintAnnotationDraft(sessionId);
@@ -1739,6 +1763,7 @@ export function withdrawMessage(msgId: string): void {
   const idx = list.findIndex((m) => m.id === msgId);
   if (idx < 0 || list[idx].role !== 'user') return;
   const content = list[idx].content;
+  const conversationMentions = list[idx].conversationMentions ?? [];
 
   // 1. 中断当前工作流 + 立即解除 busy（让发送按钮可点）
   stopGeneration();
@@ -1761,6 +1786,7 @@ export function withdrawMessage(msgId: string): void {
   // 6. 回填输入框
   const input = queryPrimaryComposer<HTMLTextAreaElement>('[data-composer-input]');
   if (input) {
+    setConversationMentionsForTurn(conversationMentions);
     input.value = content;
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.focus();
@@ -1778,6 +1804,7 @@ export function cancelEdit(): void {
   setEditFrom(sessionId, null);
   const input = queryPrimaryComposer<HTMLTextAreaElement>('[data-composer-input]');
   if (input) {
+    setConversationMentionsForTurn([]);
     input.value = '';
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }

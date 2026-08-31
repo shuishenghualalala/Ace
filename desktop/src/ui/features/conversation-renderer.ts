@@ -390,7 +390,7 @@ function sigUserMessage(msg: ChatMessage, configModel: string): string {
     ? msg.attachments.map((a) => `${a.type}|${a.path}|${a.name}`).join(',')
     : '';
   const author = msg.companionAuthor
-    ? `${msg.companionAuthor.kind}|${msg.companionAuthor.id}|${msg.companionAuthor.name}|${msg.companionAuthor.isSelf}`
+    ? `${msg.companionAuthor.kind}|${msg.companionAuthor.id}|${msg.companionAuthor.name}|${msg.companionAuthor.isSelf}|${JSON.stringify(msg.companionAuthor.avatar ?? null)}`
     : '';
   return `u|${msg.id}|${msg.role}|${msg.content}|${msg.model ?? ''}|${configModel}|${msg.timestamp}|${att}|${author}`;
 }

@@ -4,6 +4,7 @@ import * as path from 'path';
 import type {
   NearbyAgentHistoryEntry,
   NearbyAgentTurnRequest,
+  NearbyAgentSender,
   NearbyCommand,
   NearbyEvent,
   NearbyRoomAgentMode,
@@ -54,6 +55,15 @@ function readSettingsFile(crewHome: string): Record<string, unknown> {
   return {};
 }
 
+function agentSenderDisplayName(payload: Record<string, unknown>): string | undefined {
+  const raw = payload.agent_sender;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const sender = raw as Record<string, unknown>;
+  const publicAgentId = typeof sender.public_agent_id === 'string' ? sender.public_agent_id.trim() : '';
+  const displayName = typeof sender.display_name === 'string' ? sender.display_name.trim() : '';
+  return publicAgentId && displayName ? displayName : undefined;
+}
+
 export function loadNearbyAgentSettings(crewHome: string): NearbyAgentSettings {
   const record = readSettingsFile(crewHome);
   return {
@@ -94,6 +104,7 @@ export function saveNearbyAgentSettings(
 export class NearbyAgentBridge {
   private localPeerId = '';
   private localDisplayName = '';
+  private readonly localAgents = new Map<string, string>();
   private readonly peerNames = new Map<string, string>();
   private readonly rooms = new Map<string, NearbyRoomState>();
   private readonly agentRuns = new Map<string, AbortController>();
@@ -160,6 +171,15 @@ export class NearbyAgentBridge {
     if (event.type === 'ready') {
       this.localPeerId = peerId;
       this.localDisplayName = displayName;
+      this.localAgents.clear();
+      const publishedAgents = Array.isArray(peer.published_agents) ? peer.published_agents : [];
+      for (const rawAgent of publishedAgents) {
+        if (!rawAgent || typeof rawAgent !== 'object' || Array.isArray(rawAgent)) continue;
+        const agent = rawAgent as Record<string, unknown>;
+        const publicAgentId = typeof agent.public_agent_id === 'string' ? agent.public_agent_id : '';
+        const agentName = typeof agent.display_name === 'string' ? agent.display_name.trim() : '';
+        if (publicAgentId && agentName) this.localAgents.set(publicAgentId, agentName);
+      }
     }
   }
 
@@ -214,7 +234,8 @@ export class NearbyAgentBridge {
     const text = (payload as Record<string, unknown>).text;
     if (typeof text !== 'string' || !text.trim()) return null;
     const sender = typeof message.sender === 'string' ? message.sender : '';
-    return { sender: this.peerName(sender), text };
+    const agentDisplayName = agentSenderDisplayName(payload as Record<string, unknown>);
+    return { sender: agentDisplayName || this.peerName(sender), text };
   }
 
   private handleMessage(event: NearbyEvent): void {
@@ -233,10 +254,13 @@ export class NearbyAgentBridge {
     // history 传入触发消息之前的最近消息，触发消息本身作为 query 传给后端
     const room = this.roomState(roomId);
     const history = room.history.slice(-ROOM_CONTEXT_HISTORY_LIMIT);
-    room.history.push({ sender: this.peerName(sender), text });
+    const agentDisplayName = agentSenderDisplayName(body);
+    room.history.push({ sender: agentDisplayName || this.peerName(sender), text });
     if (room.history.length > ROOM_CONTEXT_HISTORY_LIMIT) {
       room.history.splice(0, room.history.length - ROOM_CONTEXT_HISTORY_LIMIT);
     }
+    // Agent 回复参与上下文，但不再触发任何本机 Agent，避免群聊中的自动往返循环。
+    if (agentDisplayName) return;
     this.maybeRespond(roomId, room, sender, message, text, history);
   }
 
@@ -253,51 +277,81 @@ export class NearbyAgentBridge {
     const settings = this.options.getSettings();
     if (!settings.autoReply) return;
     if (room.agentMode === 'quiet') return;
-    if (room.agentMode === 'mention') {
-      const mentions = Array.isArray((message.payload as Record<string, unknown>).mentions)
-        ? (message.payload as Record<string, unknown>).mentions as unknown[]
+    const payload = message.payload as Record<string, unknown>;
+    const mentions = Array.isArray(payload.mentions) ? payload.mentions as unknown[] : [];
+    const rawAgentMentions = Array.isArray(payload.agent_mentions) ? payload.agent_mentions : [];
+    const hasLocalSpecificRequest = rawAgentMentions.some((item) => (
+      item && typeof item === 'object' && !Array.isArray(item)
+      && (item as Record<string, unknown>).peer_id === this.localPeerId
+    ));
+    const targetedAgentIds = [...new Set(rawAgentMentions.flatMap((item): string[] => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+      const target = item as Record<string, unknown>;
+      const publicAgentId = typeof target.public_agent_id === 'string' ? target.public_agent_id : '';
+      return target.peer_id === this.localPeerId && this.localAgents.has(publicAgentId)
+        ? [publicAgentId]
         : [];
+    }))];
+    if (room.agentMode === 'mention') {
       // 协议层 mentions 取值是 peer_id（发送前会按房间成员过滤）
-      if (!this.localPeerId || !mentions.includes(this.localPeerId)) return;
+      if (!this.localPeerId || (!mentions.includes(this.localPeerId) && targetedAgentIds.length === 0)) return;
+      // 明确指定了本机某个 Agent，但该席位已撤回/过期时不降级到其他 Agent。
+      if (hasLocalSpecificRequest && targetedAgentIds.length === 0) return;
     }
 
     const requestId = typeof message.message_id === 'string' ? message.message_id : '';
     if (!requestId) return;
-    const runKey = `${roomId}\0${requestId}`;
-    if (this.agentRuns.has(runKey)) return;
-    if (this.agentRuns.size >= MAX_CONCURRENT_AGENT_TURNS) {
-      this.sendRoomReply(roomId, sender, 'Agent 当前忙碌，请稍后再试');
-      return;
-    }
+    const defaultAgentId = this.localAgents.keys().next().value as string | undefined;
+    const targetIds = targetedAgentIds.length > 0 ? targetedAgentIds : [defaultAgentId || ''];
+    for (const publicAgentId of targetIds) {
+      const runKey = `${roomId}\0${requestId}\0${publicAgentId}`;
+      if (this.agentRuns.has(runKey)) continue;
+      const agentSender = publicAgentId
+        ? { public_agent_id: publicAgentId, display_name: this.localAgents.get(publicAgentId) || 'Agent' }
+        : undefined;
+      if (this.agentRuns.size >= MAX_CONCURRENT_AGENT_TURNS) {
+        this.sendRoomReply(roomId, sender, 'Agent 当前忙碌，请稍后再试', agentSender);
+        continue;
+      }
 
-    const controller = new AbortController();
-    this.agentRuns.set(runKey, controller);
-    console.warn(`[nearby][agent] room_request_received room=${roomId} request=${requestId}`);
-    const request: NearbyAgentTurnRequest = {
-      peerId: sender,
-      peerName: this.peerName(sender),
-      requestId,
-      text,
-      roomId,
-      roomName: room.name,
-      history,
-      allowedToolsets: settings.allowedToolsets,
-    };
-    void this.options.runAgentTurn(request, controller.signal)
-      .then((reply) => {
-        console.warn(`[nearby][agent] room_turn_completed room=${roomId} request=${requestId}`);
-        this.sendRoomReply(roomId, sender, reply);
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) return;
-        const detail = error instanceof Error ? error.message : String(error);
-        console.warn(`[nearby][agent] room_turn_failed room=${roomId} request=${requestId} error=${detail}`);
-        this.sendRoomReply(roomId, sender, detail || 'Agent 暂时无法回复');
-      })
-      .finally(() => this.agentRuns.delete(runKey));
+      const controller = new AbortController();
+      this.agentRuns.set(runKey, controller);
+      console.warn(`[nearby][agent] room_request_received room=${roomId} request=${requestId} agent=${publicAgentId || 'default'}`);
+      const request: NearbyAgentTurnRequest = {
+        peerId: sender,
+        peerName: this.peerName(sender),
+        requestId,
+        text,
+        roomId,
+        roomName: room.name,
+        history,
+        allowedToolsets: settings.allowedToolsets,
+        ...(publicAgentId && agentSender ? {
+          publicAgentId,
+          agentDisplayName: agentSender.display_name,
+        } : {}),
+      };
+      void this.options.runAgentTurn(request, controller.signal)
+        .then((reply) => {
+          console.warn(`[nearby][agent] room_turn_completed room=${roomId} request=${requestId} agent=${publicAgentId || 'default'}`);
+          this.sendRoomReply(roomId, sender, reply, agentSender);
+        })
+        .catch((error: unknown) => {
+          if (controller.signal.aborted) return;
+          const detail = error instanceof Error ? error.message : String(error);
+          console.warn(`[nearby][agent] room_turn_failed room=${roomId} request=${requestId} error=${detail}`);
+          this.sendRoomReply(roomId, sender, detail || 'Agent 暂时无法回复', agentSender);
+        })
+        .finally(() => this.agentRuns.delete(runKey));
+    }
   }
 
-  private sendRoomReply(roomId: string, sender: string, rawText: string): void {
+  private sendRoomReply(
+    roomId: string,
+    sender: string,
+    rawText: string,
+    agentSender?: NearbyAgentSender,
+  ): void {
     const text = Array.from(String(rawText || '').trim()).slice(0, MAX_AGENT_REPLY_CHARS).join('');
     if (!text) return;
     const command: NearbyCommand = {
@@ -305,6 +359,7 @@ export class NearbyAgentBridge {
       room_id: roomId,
       text,
       mentions: [sender],
+      ...(agentSender ? { agent_sender: agentSender } : {}),
     };
     console.warn(`[nearby][agent] room_reply_queued room=${roomId} peer=${sender}`);
     this.options.sendCommand(command);

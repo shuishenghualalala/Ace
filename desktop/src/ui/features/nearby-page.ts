@@ -3,12 +3,18 @@
  */
 
 import { backendApi, type CompanionConversationBinding } from '../backend-client';
-import { conversationAdapters } from './conversation-adapters';
+import {
+  conversationAdapters,
+  type ConversationComposerContext,
+  type ConversationMentionTarget,
+} from './conversation-adapters';
 import { openSessionInChat, renderChat } from './chat-controller';
 import { loadBackendHistory } from './session-controller';
 import { sessionStore } from '../stores/stores';
 import { createCompanionHub, type CompanionHubActions } from './companion-hub';
-import { roomConversationId, NearbyStore, type NearbyAgentMode } from './nearby-store';
+import { AGENT_MODE_LABELS, roomConversationId, NearbyStore, type NearbyAgentMode } from './nearby-store';
+
+const AGENT_TARGET_CAPABILITY = 'agent.target.v1';
 
 export interface NearbyPage {
   activate(): void;
@@ -252,6 +258,59 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
   page.append(banner, hub.element, liveStatus);
   root.replaceChildren(page);
 
+  function companionComposerContext(sessionId: string): ConversationComposerContext | null {
+    const binding = companionBindings.get(sessionId);
+    if (!binding || binding.kind !== 'nearby_room') return null;
+    const conversation = store.conversations.get(roomConversationId(binding.target_id));
+    if (!conversation) return null;
+    const memberIds = conversation.memberIds.includes(store.localPeerId)
+      ? conversation.memberIds
+      : [store.localPeerId, ...conversation.memberIds];
+    return {
+      title: conversation.title,
+      modeLabel: AGENT_MODE_LABELS[conversation.agentMode],
+      members: memberIds.map((peerId) => {
+        const isSelf = peerId === store.localPeerId;
+        const peer = isSelf ? null : store.peers.get(peerId);
+        const connection = isSelf ? 'connected' : peer?.connection ?? 'disconnected';
+        const state = connection === 'connected'
+          ? 'online'
+          : connection === 'connecting'
+            ? 'connecting'
+            : 'offline';
+        const agents = isSelf ? store.localPublishedAgents : peer?.published_agents ?? [];
+        const supportsSpecificTarget = isSelf || peer?.capabilities.includes(AGENT_TARGET_CAPABILITY) === true;
+        return {
+          peerId,
+          label: isSelf ? store.localName : store.peerLabel(peerId),
+          isSelf,
+          state,
+          stateLabel: isSelf ? '本机在线' : state === 'online' ? '在线' : state === 'connecting' ? '连接中' : '离线',
+          ...(isSelf ? {} : peer?.avatar ? { avatar: peer.avatar } : {}),
+          agents: agents.map((agent, index) => {
+            const pending = store.isAgentReplyPending(conversation.id, peerId, agent.public_agent_id);
+            const canRoute = supportsSpecificTarget || index === 0;
+            const unavailable = state !== 'online' || !canRoute;
+            return {
+              kind: 'agent' as const,
+              peerId,
+              publicAgentId: agent.public_agent_id,
+              label: agent.display_name,
+              ownerLabel: isSelf ? store.localName : store.peerLabel(peerId),
+              routing: supportsSpecificTarget ? 'specific' as const : 'peer-default' as const,
+              state: isSelf ? 'local' as const : pending ? 'working' as const : unavailable ? 'unavailable' as const : 'available' as const,
+              stateLabel: isSelf ? '本机' : pending ? '处理中' : state !== 'online' ? '主人离线' : canRoute ? '可用' : '需对方升级',
+              ...(unavailable
+                ? { disabledReason: state !== 'online' ? 'Agent 的主人当前离线' : '对方版本不支持指定多个 Agent' }
+                : {}),
+              ...(agent.avatar ? { avatar: agent.avatar } : {}),
+            };
+          }),
+        };
+      }),
+    };
+  }
+
   const unregisterConversationAdapter = conversationAdapters.register({
     id: 'companion',
     matches: (sessionId) => sessionId.startsWith('agent:main:nearby:'),
@@ -289,7 +348,9 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
         } : {}),
       };
     },
-    async send({ sessionId, text, attachments }) {
+    composerContext: companionComposerContext,
+    subscribe: (listener) => store.subscribe(listener),
+    async send({ sessionId, text, attachments, mentions: selectedMentions = [] }) {
       const binding = companionBindings.get(sessionId);
       if (!binding) throw new Error('同伴会话尚未绑定，请从同伴页重新打开');
       const conversation = store.conversations.get(
@@ -308,13 +369,37 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
       const room = binding.kind === 'nearby_room'
         ? store.conversations.get(roomConversationId(binding.target_id))
         : null;
+      const context = room ? companionComposerContext(sessionId) : null;
+      const contextAgents = context?.members.flatMap((member) => member.agents) ?? [];
+      const inferredAgentMentions: ConversationMentionTarget[] = contextAgents
+        .filter((agent) => {
+          if (agent.disabledReason) return false;
+          const duplicate = contextAgents.some((candidate) => (
+            candidate !== agent
+            && candidate.label.trim().toLowerCase() === agent.label.trim().toLowerCase()
+          ));
+          return text.includes(`@${agent.label}${duplicate ? `·${agent.ownerLabel}` : ''}`);
+        });
+      const agentTargets = [...selectedMentions, ...inferredAgentMentions]
+        .filter((target, index, rows) => rows.findIndex((candidate) => (
+          candidate.peerId === target.peerId && candidate.publicAgentId === target.publicAgentId
+        )) === index);
       const mentions = room
-        ? room.memberIds.filter((peerId) => (
-          text.includes(`@${store.peerLabel(peerId)}`)
-          || text.includes(`@${store.peerAgentLabel(peerId)}`)
-        ))
+        ? [...new Set([
+          ...agentTargets.map((target) => target.peerId),
+          ...room.memberIds.filter((peerId) => text.includes(`@${store.peerLabel(peerId)}`)),
+        ])]
         : [];
-      const receipt = await backendApi.companionSendMessage(sessionId, text, mentions, attachments);
+      const agentMentions = agentTargets
+        .filter((target) => target.routing === 'specific')
+        .map((target) => ({ peer_id: target.peerId, public_agent_id: target.publicAgentId }));
+      const receipt = await backendApi.companionSendMessage(
+        sessionId,
+        text,
+        mentions,
+        agentMentions,
+        attachments,
+      );
       try {
         if (text.trim() && binding.kind === 'nearby_dm') {
           await bridge.nearbyCommand?.({
@@ -325,11 +410,18 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
           await bridge.nearbyCommand?.({
             type: 'send_room_message', room_id: binding.target_id, text,
             client_message_id: receipt.event_id, mentions,
+            ...(agentMentions.length > 0 ? { agent_mentions: agentMentions } : {}),
           });
-          if (room?.agentMode === 'mention' && mentions.length > 0) {
+          if (room?.agentMode === 'mention' && agentTargets.length > 0) {
+            store.expectAgentTargets(room.id, agentTargets);
+          } else if (room?.agentMode === 'mention' && mentions.length > 0) {
             store.expectAgentReply(room.id, mentions);
           } else if (room?.agentMode === 'auto') {
-            store.expectAgentReply(room.id, room.memberIds.filter((peerId) => peerId !== store.localPeerId));
+            store.expectAgentTargets(room.id, agentTargets);
+            const targetedPeers = new Set(agentTargets.map((target) => target.peerId));
+            store.expectAgentReply(room.id, room.memberIds.filter((peerId) => (
+              peerId !== store.localPeerId && !targetedPeers.has(peerId)
+            )));
           }
         }
         for (const file of prepared) {
@@ -422,6 +514,8 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
     let text = '';
     let sender = '';
     let senderKind: 'human' | 'agent' = 'human';
+    let senderAgentId = '';
+    let senderAgentName = '';
     if (event.type === 'peer_message_received') {
       kind = 'nearby_dm';
       targetId = typeof event.peer_id === 'string' ? event.peer_id : '';
@@ -441,7 +535,11 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
         const messageId = typeof message?.message_id === 'string' ? message.message_id : '';
         const projected = store.conversationMessages(roomConversationId(targetId))
           .find((item) => item.id === messageId);
-        if (projected?.kind === 'agent') senderKind = 'agent';
+        if (projected?.kind === 'agent') {
+          senderKind = 'agent';
+          senderAgentId = projected.agentPublicId || '';
+          senderAgentName = projected.senderName || store.peerAgentLabel(sender);
+        }
       } else if (messageType === 'peer.message') {
         kind = 'nearby_dm';
         targetId = typeof event.peer_id === 'string' ? event.peer_id : sender;
@@ -479,8 +577,9 @@ export function mountNearbyPage(root: HTMLElement, bridge: Window['Crew'] = wind
         : (typeof rawMessage?.message_id === 'string' ? rawMessage.message_id : '');
       void backendApi.companionLinkState({
         type: 'message', kind, target_id: targetId, text, message_id: messageId,
-        sender_kind: senderKind, sender_id: sender,
-        sender_name: store.peerLabel(sender), conversation_title: conversation?.title ?? '',
+        sender_kind: senderKind, sender_id: senderKind === 'agent' ? senderAgentId || sender : sender,
+        sender_name: senderKind === 'agent' ? senderAgentName : store.peerLabel(sender),
+        conversation_title: conversation?.title ?? '',
       }).then((result) => syncIncomingProjection(result, text)).catch(() => undefined);
     }
   }

@@ -22,6 +22,7 @@ import {
 import { serializeMentionInput } from './composer-mention';
 import { registerPrimaryComposerRoot } from './composer-scope';
 import type { PanelAttachments } from './attachments';
+import { createCompanionComposerPresence } from './companion-composer-presence';
 
 const MAX_INPUT_HEIGHT = 180;
 
@@ -203,6 +204,9 @@ export function createComposerView(
   // 主对话 Composer 注册为 primary root：composer-scope 的 scope 查询都锚定到它，
   // 避免与 Wiki 问答面板的 Composer 实例混淆。
   if (options.primary) registerPrimaryComposerRoot(root);
+  const companionPresence = options.primary
+    ? createCompanionComposerPresence(beforeInput, getSessionId)
+    : null;
 
   const movedContext: Array<{ source: HTMLElement; nodes: Node[] }> = [];
   if (contextStaging) {
@@ -339,6 +343,7 @@ export function createComposerView(
       ? '登录后可发送消息'
       : (!uiStore.get().backendConnected ? '服务离线' : ''));
     renderQueue();
+    companionPresence?.refresh();
   };
 
   const submit = async (): Promise<void> => {
@@ -418,6 +423,7 @@ export function createComposerView(
       unsubscribeUi();
       unsubscribeSession();
       unsubscribeMessages();
+      companionPresence?.dispose();
       for (const { source, nodes } of movedContext) source.append(...nodes);
       host.replaceChildren();
     },

@@ -77,7 +77,7 @@ export interface SessionRow {
   /** 渠道会话所属平台（侧栏渠道文件夹用）。 */
   channelPlatform?: string;
   /** 后端会话绑定的智能体/团队展示标签。 */
-  agentLabel?: { name?: string; provider?: string; display_badge?: string; model?: string };
+  agentLabel?: { name?: string; provider?: string; display_badge?: string; model?: string; avatar?: import('./avatar-manager').AvatarRef };
   /** 精确的会话执行身份；展示标签不承担类型判断。 */
   agentBinding?: import('./backend-client').SessionAgentBinding;
   /** 当前会话底部展示用模型名；ACP 会话使用外部智能体自己的模型名。 */

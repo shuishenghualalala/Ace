@@ -11,6 +11,7 @@ import {
   type BackendHistoryItem,
 } from '../backend-client';
 import type { ChatMessage, MessageRole, ToolCallInfo, TurnFileChangeSummary } from '../chat-render';
+import { parseAvatarRef } from '../avatar-manager';
 import { isPlanDocumentPath } from '../plan-document-path';
 import { newMessageId, state } from '../state';
 import { sessionDisplayModelLabel, sessionMessageModelLabel } from './session-model';
@@ -253,12 +254,14 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     })),
   };
   if (item.origin?.source === 'companion') {
+    const avatar = parseAvatarRef(item.origin.avatar);
     base.companionAuthor = {
       kind: item.origin.sender_kind === 'agent' ? 'agent' : 'human',
       id: item.origin.sender_id || '',
       name: item.origin.sender_name || item.name || '同伴',
       isSelf: item.origin.is_self === true,
       ...(item.origin.delivery_state ? { deliveryState: item.origin.delivery_state } : {}),
+      ...(avatar ? { avatar } : {}),
     };
   }
   if (role === 'assistant' || role === 'team_internal') {

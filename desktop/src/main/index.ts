@@ -139,6 +139,8 @@ import { resolveWorkspaceDirectoryInfo, resolveWorkspaceFilePath } from './works
 import { configurePptxWasmRuntime, PPTX_WASM_V8_FLAGS } from './wasm-runtime';
 import {
   NearbyService,
+  type NearbyAgentMention,
+  type NearbyAgentSender,
   type NearbyAgentTurnRequest,
   type NearbyCommand,
   type NearbyEvent,
@@ -1100,6 +1102,7 @@ async function runNearbyAgentTurn(
       ...(request.roomName ? { room_name: request.roomName } : {}),
       ...(request.history?.length ? { history: request.history } : {}),
       ...(request.allowedToolsets?.length ? { allowed_toolsets: request.allowedToolsets } : {}),
+      ...(request.publicAgentId ? { public_agent_id: request.publicAgentId } : {}),
     }),
     signal,
   });
@@ -1241,6 +1244,8 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby message`);
     }
     const mentions = parseNearbyMentions(value.mentions);
+    const agentMentions = parseNearbyAgentMentions(value.agent_mentions);
+    const agentSender = parseNearbyAgentSender(value.agent_sender);
     const replyTo = parseNearbyReply(value.reply_to);
     const clientMessageId = parseNearbyClientMessageId(value.client_message_id);
     return {
@@ -1249,6 +1254,8 @@ function parseNearbyCommand(raw: unknown): NearbyCommand {
       text: value.text,
       ...(clientMessageId !== undefined ? { client_message_id: clientMessageId } : {}),
       ...(mentions !== undefined ? { mentions } : {}),
+      ...(agentMentions !== undefined ? { agent_mentions: agentMentions } : {}),
+      ...(agentSender !== undefined ? { agent_sender: agentSender } : {}),
       ...(replyTo !== undefined ? { reply_to: replyTo } : {}),
     };
   }
@@ -1383,6 +1390,52 @@ function parseNearbyMentions(raw: unknown): string[] | undefined {
     throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby mention peer id`);
   }
   return [...new Set(mentions)];
+}
+
+function parseNearbyAgentMentions(raw: unknown): NearbyAgentMention[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length > 32) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby agent mentions`);
+  }
+  const mentions: NearbyAgentMention[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby agent mention`);
+    }
+    const value = item as Record<string, unknown>;
+    if (
+      typeof value.peer_id !== 'string'
+      || typeof value.public_agent_id !== 'string'
+      || !/^[A-Za-z0-9_.:-]{1,128}$/.test(value.peer_id)
+      || !/^[A-Za-z0-9_.:-]{1,160}$/.test(value.public_agent_id)
+    ) {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby agent mention target`);
+    }
+    const key = `${value.peer_id}\0${value.public_agent_id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    mentions.push({ peer_id: value.peer_id, public_agent_id: value.public_agent_id });
+  }
+  return mentions;
+}
+
+function parseNearbyAgentSender(raw: unknown): NearbyAgentSender | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby agent sender`);
+  }
+  const value = raw as Record<string, unknown>;
+  if (
+    typeof value.public_agent_id !== 'string'
+    || !/^[A-Za-z0-9_.:-]{1,160}$/.test(value.public_agent_id)
+    || typeof value.display_name !== 'string'
+    || !value.display_name.trim()
+    || value.display_name.length > 120
+  ) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid nearby agent sender`);
+  }
+  return { public_agent_id: value.public_agent_id, display_name: value.display_name.trim() };
 }
 
 function parseNearbyReply(raw: unknown): NearbyReplyReference | undefined {

@@ -16,7 +16,7 @@
     <tbody>
       <tr><td>Python Companion</td><td><code>.venv/bin/python -m pytest -q tests/test_companion.py</code><br>WebRTC 暂存路径限制在 <code>nearby/received</code>；摘要校验通过后写入会话绑定的工作空间根目录，同名不覆盖，并兼容旧 Base64 历史。</td><td class="pass">14 passed</td></tr>
       <tr><td>双实例端到端</td><td><code>.venv/bin/python -m pytest -q tests/test_companion_e2e.py</code><br>启动 Mock Bus、两个独立 Rust Nearby 进程与两个 Gateway，验证新的 <code>file_path</code> 命令契约和文件投影。</td><td class="pass">1 passed</td></tr>
-      <tr><td>Rust 协议与链路</td><td><code>cargo test --manifest-path nearby/Cargo.toml</code><br>协议 v3、<code>file.webrtc</code> 能力协商、接收决定、SDP 信令、超时与失败事件；测试内真实建立两个 webrtc-rs PeerConnection，经可靠有序 DataChannel 传普通文件和空文件、校验并落盘。</td><td class="pass">58 passed</td></tr>
+      <tr><td>Rust 协议与链路</td><td><code>cargo test --manifest-path nearby/Cargo.toml</code><br>协议 v3、<code>file.webrtc</code> 能力协商、接收决定、SDP 信令、超时与失败事件；测试内真实建立两个 webrtc-rs PeerConnection，经可靠有序 DataChannel 传普通文件和空文件、校验并落盘，并覆盖大 SDP 分片和 Apple Peripheral 属性策略。</td><td class="pass">63 passed</td></tr>
       <tr><td>Desktop 类型</td><td><code>npm run typecheck</code></td><td class="pass">通过</td></tr>
       <tr><td>Desktop 同伴回归</td><td><code>nearby-store</code>、<code>nearby-page</code>、<code>nearby-service</code>、<code>nearby-agent-bridge</code>、<code>nearby-tray</code>；覆盖路径发送、WebRTC 完成文件投影、旧 BLE 文件历史兼容和旧 v3 同伴附件禁用。</td><td class="pass">48 passed</td></tr>
       <tr><td>Desktop 附件集成</td><td>附件历史映射、共享文件卡、预览/下载事件、IPC Schema 与工作空间范围读取专项测试；覆盖 Windows 路径和自定义项目工作空间。</td><td class="pass">105 passed</td></tr>
@@ -30,6 +30,16 @@
   </table>
   <h2>验证说明</h2>
   <div class="note">本机自动化已覆盖 WebRTC 的实际建链与文件字节传输，也覆盖新旧 v3 节点的发现和文字兼容；但 Mock Bus 无法代替两台真实设备的 BLE 广播/扫描权限、系统蓝牙栈和 NAT/防火墙矩阵。完整 Python E2E 使用仓库 <code>.venv</code> 运行并通过。</div>
+  <h2>2026-08-28 macOS 双机文件信令修复</h2>
+  <table>
+    <thead><tr><th>问题</th><th>修复与验证</th></tr></thead>
+    <tbody>
+      <tr><td>接收确认后没有文件</td><td>日志确认 <code>file.webrtc_offer</code> 已完整到达接收方，但 Mac Peripheral 回传 Answer 时忽略了 CoreBluetooth 队列满状态，较大的 SDP 分片会静默丢失。</td></tr>
+      <tr><td>可靠回传</td><td>Apple OutgoingMessage 使用 Indicate；队列满时等待 <code>peripheralManagerIsReadyToUpdateSubscribers</code> 并重试当前帧，Offer/Answer 使用保守分片节奏。Windows/Linux 路径保持原策略。</td></tr>
+      <tr><td>诊断覆盖</td><td>增加 Offer、Answer、ICE、DataChannel 与 Peripheral 分片阶段日志，不输出 SDP 内容，可直接定位信令在哪个阶段停止。</td></tr>
+      <tr><td>测试结果</td><td>Rust 63 项、Clippy、Desktop Nearby 48 项、TypeScript 类型检查和开发构建通过；真实 macOS ↔ macOS 双向文件等待新构建实机验收。</td></tr>
+    </tbody>
+  </table>
   <h2>2026-08-28 BLE 文本通信回归修复</h2>
   <table>
     <thead><tr><th>问题</th><th>修复与验证</th></tr></thead>
@@ -38,6 +48,17 @@
       <tr><td>文本发送方式回退</td><td>恢复双属性 IncomingMessage 优先使用 <code>WriteWithoutResponse</code>，新增选择逻辑回归用例通过。</td></tr>
       <tr><td>Windows 广播重复启动</td><td>应用层相同状态请求幂等返回；WinRT 遇 Aborted 状态先停止再启动，并增加状态日志。</td></tr>
       <tr><td>测试结果</td><td>Rust 60 项、Desktop Nearby 35 项、Python Companion 13 项、Mock Bus 14 项通过；真实 macOS ↔ Windows BLE 仍需用户用新构建包验收。</td></tr>
+    </tbody>
+  </table>
+  <h2>2026-08-31 Desktop 群成员状态栏与精准 @Agent</h2>
+  <table>
+    <thead><tr><th>层级</th><th>覆盖</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Desktop UI / Bridge</td><td>状态栏收起与展开、成员/Agent 状态、点击和输入 <code>@</code>、同名消歧、结构化目标、旧节点兼容、Agent 回复身份及循环防护。</td><td class="pass">98 passed</td></tr>
+      <tr><td>Rust Nearby</td><td><code>agent_mentions</code> 成员过滤、<code>agent_sender</code> 往返、协议 v3 兼容及原有链路回归。</td><td class="pass">64 passed</td></tr>
+      <tr><td>Python Companion / Gateway</td><td>目标规范化、稳定 Agent ID 转发、显式 Agent 的 Session/配置隔离。</td><td class="pass">23 passed</td></tr>
+      <tr><td>静态检查</td><td>Desktop TypeScript、ESLint、CSS lint；Rust format/check。</td><td class="pass">通过</td></tr>
+      <tr><td>External Team 边界</td><td>团队协作面板、样式与测试文件无代码差异；同伴能力由 ConversationAdapter 会话类型门控；原团队面板定向回归通过。</td><td class="pass">5 passed / 保持原状</td></tr>
     </tbody>
   </table>
   <h2>仍需真实设备验证</h2>

@@ -4,6 +4,16 @@ import * as path from 'path';
 
 export type NearbyRoomAgentMode = 'mention' | 'auto' | 'quiet';
 
+export interface NearbyAgentMention {
+  peer_id: string;
+  public_agent_id: string;
+}
+
+export interface NearbyAgentSender {
+  public_agent_id: string;
+  display_name: string;
+}
+
 export type NearbyCommand =
   | { type: 'start_discovery' }
   | { type: 'stop_discovery' }
@@ -32,6 +42,8 @@ export type NearbyCommand =
     text: string;
     client_message_id?: string;
     mentions?: string[];
+    agent_mentions?: NearbyAgentMention[];
+    agent_sender?: NearbyAgentSender;
     reply_to?: NearbyReplyReference;
   }
   | {
@@ -95,6 +107,8 @@ export interface NearbyAgentTurnRequest {
   history?: NearbyAgentHistoryEntry[];
   /** 本机主人配置的工具白名单；空数组 = 全禁。 */
   allowedToolsets?: string[];
+  publicAgentId?: string;
+  agentDisplayName?: string;
 }
 
 export interface NearbyPublishedAgent {
@@ -365,6 +379,7 @@ export class NearbyService {
     const binary = candidates.find((candidate) => path.isAbsolute(candidate) && fs.existsSync(candidate));
     const runtimeArgs = [
       '--ipc',
+      '--capability', 'agent.target.v1',
       ...this.publishedAgents.flatMap((agent) => ['--published-agent', JSON.stringify(agent)]),
     ];
     if (binary) return { command: binary, args: runtimeArgs, cwd: path.dirname(binary) };

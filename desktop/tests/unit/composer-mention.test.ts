@@ -6,7 +6,7 @@
 // @vitest-environment happy-dom
 
 import { describe, expect, it } from 'vitest';
-import { buildChippedNodes, compactMentionText, computePinyin, detectTrigger, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput } from '../../src/ui/features/composer-mention';
+import { buildChippedNodes, compactMentionText, computePinyin, conversationAgentMentionText, detectTrigger, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput, takeConversationMentionsForTurn } from '../../src/ui/features/composer-mention';
 
 describe('detectTrigger', () => {
   it('行首 @ 触发', () => {
@@ -258,5 +258,37 @@ describe('renderChip（只显示名字，文件引用使用类型图标）', () 
     const visible = compactMentionText(item);
     expect(visible).toBe('@Ace/desktop');
     expect(serializeMentionInput(`查看 ${visible} 怎么`)).toBe('查看 @folder:Ace/desktop 怎么');
+  });
+
+  it('同伴 Agent mention 保留可见名称并独立产出稳定目标', () => {
+    const target = {
+      kind: 'agent' as const,
+      peerId: 'ace_peer_a',
+      publicAgentId: 'agent_mori',
+      label: 'Mori',
+      ownerLabel: '林墨',
+      routing: 'specific' as const,
+    };
+    const visible = compactMentionText({
+      text: '@Mori',
+      display: 'Mori',
+      meta: '林墨 · 可用',
+      sig: 'agent',
+      conversationMention: target,
+    });
+
+    expect(visible).toBe('@Mori');
+    expect(serializeMentionInput('@Mori 总结一下')).toBe('@Mori 总结一下');
+    expect(takeConversationMentionsForTurn('@Mori 总结一下')).toEqual([target]);
+    const chip = buildChippedNodes('@Mori', undefined, [target])[0] as HTMLElement;
+    expect(chip.classList.contains('mention-chip--agent')).toBe(true);
+  });
+
+  it('同名 Agent 使用主人名称消歧', () => {
+    const agents = [
+      { kind: 'agent' as const, peerId: 'a', publicAgentId: 'x', label: 'Mori', ownerLabel: '林墨', routing: 'specific' as const },
+      { kind: 'agent' as const, peerId: 'b', publicAgentId: 'y', label: 'Mori', ownerLabel: '阿布', routing: 'specific' as const },
+    ];
+    expect(conversationAgentMentionText(agents[0]!, agents)).toBe('@Mori·林墨');
   });
 });

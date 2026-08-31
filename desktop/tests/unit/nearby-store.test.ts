@@ -314,6 +314,45 @@ describe('NearbyStore room rename', () => {
 });
 
 describe('NearbyStore agent reply expectations', () => {
+  it('keeps peer and published-agent avatars on incoming messages', () => {
+    const store = readyStore();
+    store.applyEvent({
+      type: 'peer_connected',
+      peer: {
+        ...remotePeer,
+        avatar: 'data:image/png;base64,user',
+        published_agents: [{
+          public_agent_id: 'agent:remote',
+          display_name: '远端 Agent',
+          source_kind: 'builtin',
+          source_ref: 'crew',
+          avatar: { kind: 'image', src: 'data:image/png;base64,agent' },
+        }],
+      },
+    });
+    const dmId = dmConversationId('ace_remote');
+    store.applyEvent({
+      type: 'message',
+      peer_id: 'ace_remote',
+      message: { type: 'peer.message', message_id: 'human_1', sender: 'ace_remote', payload: { text: '你好' } },
+    });
+    expect(store.conversationMessages(dmId).at(-1)?.senderAvatar).toEqual({
+      kind: 'image',
+      src: 'data:image/png;base64,user',
+    });
+
+    store.expectAgentReply(dmId, ['ace_remote']);
+    store.applyEvent({
+      type: 'message',
+      peer_id: 'ace_remote',
+      message: { type: 'agent.response', message_id: 'agent_1', sender: 'ace_remote', payload: { text: '你好，我是 Agent' } },
+    });
+    expect(store.conversationMessages(dmId).at(-1)?.senderAvatar).toEqual({
+      kind: 'image',
+      src: 'data:image/png;base64,agent',
+    });
+  });
+
   it('renders the awaited room reply as an agent message and clears the placeholder', () => {
     const store = readyStore();
     store.applyEvent({ type: 'peer_connected', peer: remotePeer });

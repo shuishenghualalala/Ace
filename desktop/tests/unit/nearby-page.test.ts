@@ -196,7 +196,7 @@ describe('companion management hub', () => {
     peer_id: 'ace_peer_a',
     display_name: '林墨',
     agent_name: 'Mori',
-    capabilities: ['chat', 'file.webrtc'],
+    capabilities: ['chat', 'file.webrtc', 'agent.target.v1'],
     published_agents: [{
       public_agent_id: 'agent_mori',
       display_name: 'Mori',
@@ -349,6 +349,52 @@ describe('companion management hub', () => {
       peer_ids: ['ace_peer_a'],
       agent_mode: 'mention',
     }));
+    page.dispose();
+  });
+
+  it('exposes room members to the Composer and sends a stable Agent target', async () => {
+    const { command, gatewayFetch, page, root, emit } = setup();
+    emit({ type: 'ready', peer: localPeer, discoverable: true });
+    emit({ type: 'peer_connected', peer });
+    emit({
+      type: 'room_created', room_id: 'room_1', room_name: '同伴产品小队',
+      peer_ids: ['ace_local', 'ace_peer_a'], owner_peer_id: 'ace_local', agent_mode: 'mention',
+    });
+    [...root.querySelectorAll<HTMLButtonElement>('.companion-main__header .companion-button')]
+      .find((button) => button.textContent === '进入群聊')?.click();
+    await vi.waitFor(() => expect(root.querySelector('.companion-workspace-sheet')).not.toBeNull());
+    [...root.querySelectorAll<HTMLButtonElement>('.companion-workspace-sheet .companion-button')]
+      .find((button) => button.textContent === '进入主对话')?.click();
+    await vi.waitFor(() => expect(gatewayFetch.mock.calls.some(([url, init]) => (
+      url.endsWith('/api/companion/conversations/open')
+      && JSON.parse(init?.body ?? '{}').kind === 'nearby_room'
+    ))).toBe(true));
+
+    const sessionId = 'agent:main:nearby:dm:opened';
+    const adapter = conversationAdapters.resolve(sessionId)!;
+    const context = adapter.composerContext?.(sessionId);
+    const agent = context?.members.flatMap((member) => member.agents)
+      .find((candidate) => candidate.publicAgentId === 'agent_mori');
+    expect(agent).toMatchObject({ label: 'Mori', state: 'available', routing: 'specific' });
+    await adapter.send({
+      sessionId,
+      text: '@Mori 总结一下',
+      attachments: [],
+      mentions: [agent!],
+    });
+
+    expect(command).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'send_room_message',
+      room_id: 'room_1',
+      mentions: ['ace_peer_a'],
+      agent_mentions: [{ peer_id: 'ace_peer_a', public_agent_id: 'agent_mori' }],
+    }));
+    const sendCall = gatewayFetch.mock.calls.find(([url]) => (
+      url.includes('/api/companion/conversations/') && url.endsWith('/messages')
+    ));
+    expect(JSON.parse(sendCall?.[1]?.body ?? '{}').agent_mentions).toEqual([
+      { peer_id: 'ace_peer_a', public_agent_id: 'agent_mori' },
+    ]);
     page.dispose();
   });
 

@@ -189,17 +189,26 @@ impl PeripheralManager {
         characteristic: Uuid,
         value: Vec<u8>,
     ) -> Result<(), Error> {
-        if let Some(char) = self.cached_characteristics.get(&characteristic) {
-            unsafe {
+        let Some(char) = self.cached_characteristics.get(&characteristic).cloned() else {
+            return Ok(());
+        };
+        let data = NSData::from_vec(value);
+        loop {
+            let ready = self.peripheral_delegate.prepare_characteristic_update();
+            let queued = unsafe {
                 self.cb_peripheral_manager
-                    .updateValue_forCharacteristic_onSubscribedCentrals(
-                        &NSData::from_vec(value.clone()),
-                        char,
-                        None,
-                    );
+                    .updateValue_forCharacteristic_onSubscribedCentrals(&data, &char, None)
+            };
+            if queued {
+                self.peripheral_delegate
+                    .cancel_characteristic_update_wait();
+                return Ok(());
             }
+            log::debug!("CoreBluetooth update queue is full; waiting before retry");
+            self.peripheral_delegate
+                .wait_for_characteristic_update(ready)
+                .await?;
         }
-        return Ok(());
     }
 
     // Peripheral with cache value must only have Read permission, else it will crash

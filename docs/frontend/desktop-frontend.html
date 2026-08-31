@@ -580,6 +580,17 @@
     </ul>
     <p>验证：新增模型隔离、Tray 光学比例和响应式样式回归测试；定向 4 个测试文件共 <code>36 passed</code>，TypeScript、CSS lint 与 production build 通过。真实 Renderer 在 1280px 和 900px 两种视口测得黄助手、图片画布与 Agent 头像均为 38px，中心线分别同为 439px 和 347px；Electron <code>nativeImage</code> 实际导出的默认/完成态均为非空 44×44 位图，完成态主体与默认态光学尺寸一致且庆祝星光保留。</p>
   </section>
+  <section>
+    <h2>同伴群聊成员状态栏与精准 @Agent（2026-08-31）</h2>
+    <ul>
+      <li>仅在 Desktop 同伴群聊的主 Composer 上方展示可折叠状态栏；收起态显示在线人数、可用 Agent 数、触发模式和快捷 Agent，展开态按主人归组展示群成员与 Agent 状态。</li>
+      <li>用户输入 <code>@</code> 或点击快捷 Agent 即可插入提及；可见文本保持自然的 <code>@名称</code>，内部使用 <code>peer_id + public_agent_id</code> 稳定定位。同名 Agent 以主人名消歧。</li>
+      <li>状态只表达已知事实：成员区分在线、连接中、离线，Agent 区分可用、工作中、不可用；旧节点不支持精准路由时，只允许默认 Agent 走兼容路径。</li>
+      <li>Agent 回复携带可验证的发送身份、参与群聊上下文但不再次触发 Agent，避免自动往返循环；动画遵守减少动态效果与减少透明度设置。</li>
+      <li>能力通过 <code>ConversationAdapter</code> 按同伴会话注入，普通会话与 External Team 的 Composer、成员区和发送链保持原状。</li>
+    </ul>
+    <p>验证：Desktop 同伴与 Composer 定向回归 <code>98 passed</code>；TypeScript、ESLint 与 CSS lint 通过。</p>
+  </section>
 </div>
 </body>
 </html>

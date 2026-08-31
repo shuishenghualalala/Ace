@@ -301,6 +301,39 @@ async def test_nearby_agent_turn_rejects_dm_and_isolates_rooms(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_nearby_agent_turn_scopes_an_explicit_public_agent(tmp_path):
+    crew = build_app(
+        config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False),
+        enable_team=False,
+    )
+    crew.provider = NearbyTestProvider()
+    crew.companion.ensure_defaults("local")
+    publication = crew.companion.store.list_publications(
+        "local", enabled_only=True
+    )[0]
+    app = create_app(crew)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/nearby/agent-turn",
+            json={
+                "peer_id": "ace_windows",
+                "peer_name": "Windows 工作站",
+                "request_id": "request-agent-target",
+                "query": "你好",
+                "room_id": "room-project-a",
+                "public_agent_id": publication["public_agent_id"],
+            },
+        )
+
+    assert response.status_code == 200
+    session_id = response.json()["session_id"]
+    assert ":agent:" in session_id
+    config = crew.session_store.get_agent_config(session_id, owner_account_id="local")
+    assert config["companion_public_agent_id"] == publication["public_agent_id"]
+
+
+@pytest.mark.asyncio
 async def test_nearby_agent_turn_room_session_isolated_and_history_truncated(tmp_path):
     crew = build_app(
         config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False),

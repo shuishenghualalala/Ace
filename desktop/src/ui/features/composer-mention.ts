@@ -31,6 +31,11 @@ import { workStore } from '../stores/work-store';
 import { composerWorkspaceId } from './workspaces';
 import { queryPrimaryComposer } from './composer-scope';
 import {
+  conversationAdapters,
+  type ConversationAgentPresence,
+  type ConversationMentionTarget,
+} from './conversation-adapters';
+import {
   removeMentionTag,
   renderMentionTags,
   searchMentions,
@@ -55,14 +60,17 @@ interface MentionItem {
   display: string;
   meta: string;
   /** 图标类型：slash / folder / image / file。 */
-  sig: 'slash' | 'folder' | 'image' | 'file';
+  sig: 'slash' | 'folder' | 'image' | 'file' | 'agent';
   workResult?: MentionResult;
+  conversationMention?: ConversationMentionTarget;
+  section?: 'conversation' | 'context';
 }
 
 interface CompactMention {
   visible: string;
   canonical: string;
-  kind: 'folder' | 'image' | 'file';
+  kind: 'folder' | 'image' | 'file' | 'agent';
+  conversationMention?: ConversationMentionTarget;
 }
 
 interface ChipToken {
@@ -323,6 +331,25 @@ function activeWorkspaceId(): string {
 }
 
 async function fetchFileItems(token: string): Promise<MentionItem[]> {
+  const sessionId = sessionStore.get().activeSessionId;
+  const conversationAdapter = sessionId ? conversationAdapters.resolve(sessionId) : null;
+  if (conversationAdapter) {
+    const context = conversationAdapter.composerContext?.(sessionId!) ?? null;
+    if (!context || !conversationAdapter.abilities(sessionId!).canMentionAgents) return [];
+    const agents = context.members.flatMap((member) => member.agents)
+      .filter((agent) => !memberAgentDisabled(agent));
+    const query = token.slice(1).trim().toLowerCase();
+    return agents
+      .filter((agent) => !query || `${agent.label} ${agent.ownerLabel}`.toLowerCase().includes(query))
+      .map((agent) => ({
+        text: conversationAgentMentionText(agent, agents),
+        display: agent.label,
+        meta: `${agent.ownerLabel} · ${agent.stateLabel}`,
+        sig: 'agent' as const,
+        conversationMention: agent,
+        section: 'conversation' as const,
+      }));
+  }
   const rowsPromise = backendApi.complete(token, { workspaceId: activeWorkspaceId() });
   const workPromise = productModeStore.get().productMode === 'work'
     ? searchMentions(token.slice(1), activeWorkspaceId())
@@ -333,16 +360,50 @@ async function fetchFileItems(token: string): Promise<MentionItem[]> {
     display: r.display,
     meta: r.meta,
     sig: r.type === 'folder' ? 'folder' : r.type === 'image' ? 'image' : 'file',
+    section: 'context' as const,
   })).concat(workResults.map((result) => ({
     text: workMentionText(result),
     display: result.title,
     meta: result.entity_type === 'agent_session' ? 'Agent 会话快照' : result.entity_type === 'work_session' ? 'Work 会话' : ENTITY_META[result.entity_type],
     sig: 'file' as const,
     workResult: result,
+    section: 'context' as const,
   })));
 }
 
+function memberAgentDisabled(agent: ConversationAgentPresence): boolean {
+  return agent.state === 'local' || Boolean(agent.disabledReason);
+}
+
+export function conversationAgentMentionText(
+  agent: ConversationMentionTarget,
+  allAgents: readonly ConversationMentionTarget[],
+): string {
+  const duplicate = allAgents.some((candidate) => (
+    candidate !== agent
+    && candidate.label.trim().toLowerCase() === agent.label.trim().toLowerCase()
+  ));
+  return `@${agent.label}${duplicate ? `·${agent.ownerLabel}` : ''}`;
+}
+
 export function compactMentionText(item: MentionItem): string {
+  if (item.sig === 'agent' && item.conversationMention) {
+    const visible = item.text;
+    if (!compactMentions.some((mention) => (
+      mention.kind === 'agent'
+      && mention.visible === visible
+      && mention.conversationMention?.peerId === item.conversationMention?.peerId
+      && mention.conversationMention?.publicAgentId === item.conversationMention?.publicAgentId
+    ))) {
+      compactMentions.push({
+        visible,
+        canonical: visible,
+        kind: 'agent',
+        conversationMention: item.conversationMention,
+      });
+    }
+    return visible;
+  }
   if (!['folder', 'image', 'file'].includes(item.sig)) return item.text;
   const prefix = `@${item.sig}:`;
   if (!item.text.startsWith(prefix)) return item.text;
@@ -375,10 +436,70 @@ export function serializeMentionInput(value: string): string {
   syncCompactMentions(value);
   let result = value;
   for (const mention of [...compactMentions].sort((a, b) => b.visible.length - a.visible.length)) {
+    if (mention.kind === 'agent') continue;
     const escaped = mention.visible.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     result = result.replace(new RegExp(`(^|\\s)${escaped}(?=\\s|$)`, 'g'), (_match, lead: string) => `${lead}${mention.canonical}`);
   }
   return result;
+}
+
+export function takeConversationMentionsForTurn(value: string): ConversationMentionTarget[] {
+  syncCompactMentions(value);
+  const selected = compactMentions
+    .filter((mention) => mention.kind === 'agent' && mention.conversationMention)
+    .map((mention) => mention.conversationMention!)
+    .filter((mention, index, rows) => rows.findIndex((candidate) => (
+      candidate.peerId === mention.peerId && candidate.publicAgentId === mention.publicAgentId
+    )) === index);
+  compactMentions = compactMentions.filter((mention) => mention.kind !== 'agent');
+  return selected;
+}
+
+export function setConversationMentionsForTurn(mentions: readonly ConversationMentionTarget[]): void {
+  compactMentions = compactMentions.filter((mention) => mention.kind !== 'agent');
+  const sessionId = sessionStore.get().activeSessionId;
+  const context = sessionId
+    ? conversationAdapters.resolve(sessionId)?.composerContext?.(sessionId)
+    : null;
+  const agents = context?.members.flatMap((member) => member.agents) ?? [];
+  for (const mention of mentions) {
+    const visible = conversationAgentMentionText(mention, agents.length ? agents : mentions);
+    compactMentions.push({
+      visible,
+      canonical: visible,
+      kind: 'agent',
+      conversationMention: mention,
+    });
+  }
+  renderOverlay();
+}
+
+export function insertConversationAgentMention(target: ConversationMentionTarget): void {
+  const composerInput = queryPrimaryComposer<HTMLTextAreaElement>('[data-composer-input]');
+  if (!composerInput) return;
+  const sessionId = sessionStore.get().activeSessionId;
+  const context = sessionId
+    ? conversationAdapters.resolve(sessionId)?.composerContext?.(sessionId)
+    : null;
+  const allAgents = context?.members.flatMap((member) => member.agents) ?? [target];
+  const visible = conversationAgentMentionText(target, allAgents);
+  const value = composerInput.value;
+  const start = composerInput.selectionStart ?? value.length;
+  const end = composerInput.selectionEnd ?? start;
+  const needsLead = start > 0 && !/\s/.test(value[start - 1]!);
+  const needsTrail = end < value.length && !/\s/.test(value[end]!);
+  const inserted = `${needsLead ? ' ' : ''}${visible}${needsTrail ? ' ' : ' '}`;
+  composerInput.value = value.slice(0, start) + inserted + value.slice(end);
+  const nextCaret = start + inserted.length;
+  composerInput.setSelectionRange(nextCaret, nextCaret);
+  compactMentions.push({
+    visible,
+    canonical: visible,
+    kind: 'agent',
+    conversationMention: target,
+  });
+  composerInput.dispatchEvent(new Event('input', { bubbles: true }));
+  composerInput.focus();
 }
 
 /** Return preferences that can be known to apply before a Work turn is sent. */
@@ -558,20 +679,45 @@ export function renderChip(token: string, kind: 'at' | 'slash'): { mark: string;
  * 用 createTextNode / textContent，不经过 innerHTML，XSS 安全。
  * slashTokens 缺省取本地 skills 缓存（气泡渲染时若未载入，/中文名 暂不染色，@file: 不受影响）。
  */
-export function buildChippedNodes(text: string, slashTokens?: Set<string>): Node[] {
+export function buildChippedNodes(
+  text: string,
+  slashTokens?: Set<string>,
+  conversationMentions: readonly ConversationMentionTarget[] = [],
+): Node[] {
   const nodes: Node[] = [];
-  const tokens = iterChipTokens(text, slashTokens);
+  const mentionTokens: ChipToken[] = [];
+  for (const mention of conversationMentions) {
+    const visible = conversationAgentMentionText(mention, conversationMentions);
+    let from = 0;
+    while (from <= text.length) {
+      const start = text.indexOf(visible, from);
+      if (start < 0) break;
+      const end = start + visible.length;
+      if (isTokenBoundary(text, start - 1) && isTokenBoundary(text, end)) {
+        mentionTokens.push({ start, end, kind: 'at' });
+      }
+      from = end;
+    }
+  }
+  const tokens = normalizeChipTokens([...iterChipTokens(text, slashTokens), ...mentionTokens]);
   let cursor = 0;
   for (const t of tokens) {
     if (t.start < cursor) continue; // 重叠保护
     if (t.start > cursor) nodes.push(document.createTextNode(text.slice(cursor, t.start)));
     const rawToken = text.slice(t.start, t.end);
+    const structuredAgent = conversationMentions.find((mention) => (
+      conversationAgentMentionText(mention, conversationMentions) === rawToken
+    ));
     const compact = t.kind === 'at' ? compactMentions.find((mention) => mention.visible === rawToken) : undefined;
     const { mark, body } = compact
-      ? { mark: `@${compact.kind}:`, body: rawToken.slice(1) }
-      : renderChip(rawToken, t.kind);
+      ? compact.kind === 'agent'
+        ? { mark: '@', body: rawToken.slice(1) }
+        : { mark: `@${compact.kind}:`, body: rawToken.slice(1) }
+      : structuredAgent
+        ? { mark: '@', body: rawToken.slice(1) }
+        : renderChip(rawToken, t.kind);
     const chip = document.createElement('span');
-    chip.className = `mention-chip mention-chip--${t.kind}`;
+    chip.className = `mention-chip mention-chip--${compact?.kind === 'agent' || structuredAgent ? 'agent' : t.kind}`;
     if (mark) {
       const markSpan = document.createElement('span');
       const atKind = mark.match(/^@(file|folder|image):/)?.[1] as 'file' | 'folder' | 'image' | undefined;
@@ -600,7 +746,12 @@ export function buildChippedNodes(text: string, slashTokens?: Set<string>): Node
 // ---------------- 浮层渲染 ----------------
 
 function createSig(sig: MentionItem['sig']): HTMLElement {
-  const iconBySig: Record<MentionItem['sig'], IconId> = {
+  if (sig === 'agent') {
+    const element = document.createElement('span');
+    element.className = 'mention-pop__sig mention-pop__sig--agent';
+    return element;
+  }
+  const iconBySig: Record<Exclude<MentionItem['sig'], 'agent'>, IconId> = {
     slash: 'skill-badge',
     folder: 'icon-folder',
     image: 'icon-image',
@@ -623,6 +774,12 @@ function renderPopup(): void {
   popup.className = 'mention-pop';
   popup.setAttribute('role', 'listbox');
   items.forEach((item, index) => {
+    if (item.section && item.section !== items[index - 1]?.section) {
+      const heading = document.createElement('div');
+      heading.className = 'mention-pop__section';
+      heading.textContent = item.section === 'conversation' ? '群内 Agent' : '文件与上下文';
+      popup?.append(heading);
+    }
     const button = document.createElement('button');
     const body = document.createElement('span');
     const display = document.createElement('span');
@@ -641,7 +798,14 @@ function renderPopup(): void {
       meta.textContent = item.meta;
       body.append(meta);
     }
-    button.append(createSig(item.sig), body);
+    const sig = createSig(item.sig);
+    if (item.sig === 'agent') {
+      sig.textContent = item.display.trim().slice(0, 1).toUpperCase() || 'A';
+      sig.dataset.status = item.conversationMention
+        ? (item.meta.includes('处理中') ? 'working' : 'available')
+        : 'available';
+    }
+    button.append(sig, body);
     button.addEventListener('mousedown', (event) => {
       event.preventDefault();
       selectedIndex = index;
@@ -987,6 +1151,8 @@ export function bindComposerMention(): () => void {
   const unsubscribeSession = sessionStore.subscribe((next, previous) => {
     if (next.activeSessionId === previous.activeSessionId) return;
     disabledWorkPreferenceIds.clear();
+    compactMentions = compactMentions.filter((mention) => mention.kind !== 'agent');
+    closePopup();
     renderWorkTags();
   });
 

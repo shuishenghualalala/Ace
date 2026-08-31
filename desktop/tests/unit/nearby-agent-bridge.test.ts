@@ -89,6 +89,56 @@ describe('NearbyAgentBridge room adjudication', () => {
     await vi.waitFor(() => expect(runAgentTurn).toHaveBeenCalledTimes(1));
   });
 
+  it('keeps Agent replies in history without triggering another Agent turn', async () => {
+    const { bridge, runAgentTurn } = createBridge();
+    bridge.handleEvent(createRoom('auto'));
+    const agentReply = roomMessage('ace_remote', 'agent reply', ['ace_local'], 'msg_agent');
+    const replyMessage = agentReply.message as { payload: Record<string, unknown> };
+    replyMessage.payload.agent_sender = { public_agent_id: 'agent_mori', display_name: 'Mori' };
+
+    bridge.handleEvent(agentReply);
+    await Promise.resolve();
+    expect(runAgentTurn).not.toHaveBeenCalled();
+
+    bridge.handleEvent(roomMessage('ace_remote', 'human follow-up', [], 'msg_human'));
+    await vi.waitFor(() => expect(runAgentTurn).toHaveBeenCalledTimes(1));
+    expect(runAgentTurn.mock.calls[0]?.[0].history).toEqual([{ sender: 'Mori', text: 'agent reply' }]);
+  });
+
+  it('routes a structured room mention to the selected published Agent', async () => {
+    const sent: NearbyCommand[] = [];
+    const runAgentTurn = vi.fn().mockResolvedValue('Mori reply');
+    const bridge = new NearbyAgentBridge({
+      sendCommand: (command) => sent.push(command),
+      runAgentTurn,
+      getSettings: () => ({ autoReply: true, allowedToolsets: [] }),
+    });
+    bridge.handleEvent({
+      type: 'ready',
+      peer: {
+        peer_id: 'ace_local',
+        display_name: 'Mac',
+        published_agents: [{ public_agent_id: 'agent_mori', display_name: 'Mori' }],
+      },
+    });
+    bridge.handleEvent(createRoom('mention'));
+    const event = roomMessage('ace_remote', '@Mori 总结一下', ['ace_local'], 'msg_target');
+    const message = event.message as { payload: Record<string, unknown> };
+    message.payload.agent_mentions = [{ peer_id: 'ace_local', public_agent_id: 'agent_mori' }];
+    bridge.handleEvent(event);
+
+    await vi.waitFor(() => expect(runAgentTurn).toHaveBeenCalledTimes(1));
+    expect(runAgentTurn.mock.calls[0]?.[0]).toMatchObject({
+      publicAgentId: 'agent_mori',
+      agentDisplayName: 'Mori',
+    });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({
+      type: 'send_room_message',
+      agent_sender: { public_agent_id: 'agent_mori', display_name: 'Mori' },
+    });
+  });
+
   it('quiet mode never responds, even when mentioned', async () => {
     const { bridge, runAgentTurn } = createBridge();
     bridge.handleEvent(createRoom('quiet'));

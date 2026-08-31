@@ -39,7 +39,7 @@
       <tr><td><code>nearby/src/protocol.rs</code></td><td>消息格式、控制消息、文字消息、房间消息（room.* 家族）、分帧与重组。</td></tr>
       <tr><td><code>nearby/src/file_transfer.rs</code></td><td>基于 webrtc-rs 的 DataChannel 建链、ICE/STUN/TURN、流式读写、进度、超时、SHA-256 校验、临时文件和完成 ACK。</td></tr>
       <tr><td><code>nearby/src/mock.rs</code></td><td>无需蓝牙硬件的双实例发现、连接和消息协议测试后端；配合 <code>--mock-bus</code> 协调器做多实例联调。</td></tr>
-      <tr><td><code>nearby/vendor/ble-peripheral-rust</code></td><td>macOS 与 Windows BLE Peripheral/GATT Server；Windows 回调通过 Tokio 异步执行，避免阻塞 WinRT 事件线程。</td></tr>
+      <tr><td><code>nearby/vendor/ble-peripheral-rust</code></td><td>macOS 与 Windows BLE Peripheral/GATT Server；macOS 按 CoreBluetooth 可写回调处理发送队列背压，Windows 回调通过 Tokio 异步执行，避免阻塞 WinRT 事件线程。</td></tr>
       <tr><td><code>desktop/src/main/nearby-service.ts</code></td><td>识别远端 Agent 请求、抑制请求/回复回环、限制并发，并把 Agent 结果写回 Nearby 运行时。</td></tr>
       <tr><td><code>desktop/src/main/nearby-agent-bridge.ts</code></td><td>群内 Agent 编排器：维护房间触发模式与最近消息，按裁决链决定本机 Agent 是否响应，并读写同伴 Agent 设置（settings.json）。</td></tr>
       <tr><td><code>crew/gateway/routers/sessions.py</code></td><td><code>POST /api/nearby/agent-turn</code>：创建按 Owner 与 Peer（或房间）隔离的持久 Agent 会话；固定内置文本模式、禁用全部 Skills，工具按白名单收窄开放。</td></tr>
@@ -50,7 +50,7 @@
 
   <h2>BLE 协议</h2>
   <p>服务 UUID 为 <code>5957645b-4b06-49cf-bde2-366a593e73a7</code>。GATT 服务包含 PeerInfo、IncomingMessage 和 OutgoingMessage 三个特征。Central 订阅 OutgoingMessage 通知，并向 IncomingMessage 写入分片 JSON 帧。</p>
-  <p>每个实例持久化一个随机 Peer ID。物理连接建立后，Central 先读取静态 PeerInfo，再按两个 Peer ID 确定唯一连接发起方；非发起方会在写入通知订阅前关闭重复物理连接，避免 macOS 与 Windows 同时扫描和广播时争用 GATT 会话。静态特征只携带身份、名称和能力等精简 bootstrap，不携带可能很大的已发布 Agent 配置；保留连接随后订阅 OutgoingMessage，并通过已有的 BLE 分片 <code>hello</code> 补齐完整 PeerInfo。IncomingMessage 同时声明两种写属性时，Central 优先使用 <code>WriteWithoutResponse</code>，保持文字消息的原有行为。Windows 写入 Notify 的 CCCD 失败时会清理监听器并最多重试 3 次，日志保留底层 WinRT 状态和完整错误链。</p>
+  <p>每个实例持久化一个随机 Peer ID。物理连接建立后，Central 先读取静态 PeerInfo，再按两个 Peer ID 确定唯一连接发起方；非发起方会在写入通知订阅前关闭重复物理连接，避免 macOS 与 Windows 同时扫描和广播时争用 GATT 会话。静态特征只携带身份、名称和能力等精简 bootstrap，不携带可能很大的已发布 Agent 配置；保留连接随后订阅 OutgoingMessage，并通过已有的 BLE 分片 <code>hello</code> 补齐完整 PeerInfo。IncomingMessage 同时声明两种写属性时，Central 优先使用 <code>WriteWithoutResponse</code>，保持文字消息的原有行为。macOS 的 OutgoingMessage 使用可靠 Indicate；当 CoreBluetooth 拒绝继续入队时，Peripheral 等待 <code>peripheralManagerIsReadyToUpdateSubscribers</code> 后重试当前帧，避免大 SDP 在通知队列中静默丢帧。Windows 写入 Notify 的 CCCD 失败时会清理监听器并最多重试 3 次，日志保留底层 WinRT 状态和完整错误链。</p>
   <p>只有用户选择设备并交换 <code>peer.connect</code> 后，界面才进入已连接状态。主动断开使用 <code>peer.disconnect</code>。基础协议保持 <code>v3</code>（<code>PROTOCOL_VERSION = 3</code>），WebRTC 文件传输作为 <code>file.webrtc</code> 能力增量协商：旧 v3 客户端仍可被发现、连接并交换文字，新文件控制消息只会发给明确声明该能力的同伴。</p>
 
   <h2>文件传输链路</h2>
@@ -181,13 +181,24 @@ cargo run --manifest-path nearby/Cargo.toml -- --transport mock --mock-bus</pre>
   <table>
     <thead><tr><th>检查项</th><th>结果</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td>Rust 单元与本机 DataChannel E2E</td><td class="pass">通过</td><td><code>cargo test --manifest-path nearby/Cargo.toml</code>：58 项通过；其中真实建立两个 webrtc-rs PeerConnection，覆盖普通文件与空文件传输、SHA-256 校验、落盘及旧 v3 能力协商。</td></tr>
+      <tr><td>Rust 单元与本机 DataChannel E2E</td><td class="pass">通过</td><td><code>cargo test --manifest-path nearby/Cargo.toml</code>：63 项通过；其中真实建立两个 webrtc-rs PeerConnection，覆盖普通文件与空文件传输、SHA-256 校验、落盘、旧 v3 能力协商、大 SDP 分片重组和 Apple 信令属性策略。</td></tr>
       <tr><td>Desktop 类型与同伴回归</td><td class="pass">通过</td><td><code>npm run typecheck</code>；Nearby Store/Page/Service/Agent Bridge/Tray 共 48 项通过，覆盖旧同伴可聊天但附件入口禁用。</td></tr>
       <tr><td>Gateway 附件测试</td><td class="pass">通过</td><td><code>tests/test_companion.py</code> 14 项、<code>tests/test_companion_e2e.py</code> 1 项通过，覆盖工作空间落盘、同名防覆盖、受控路径和不再发送 Base64。</td></tr>
       <tr><td>跨版本双实例 E2E</td><td class="pass">通过</td><td>构建 WebRTC 改造前的 <code>9554b94</code> 节点与当前节点，经 Mock Bus 验证双向发现、连接和文字；旧节点无 <code>file.webrtc</code> 时文件被明确拒绝，不影响同伴可见性。</td></tr>
       <tr><td>三实例与构建回归</td><td class="pass">通过</td><td>Mock Bus 建群/成员/设置/重启共 14 项；<code>cargo clippy --all-targets -- -D warnings</code>、CSS 检查和 <code>npm run build:dev</code> 均通过。</td></tr>
       <tr><td>Desktop 全仓测试基线</td><td>存在既有失败</td><td><code>npm test</code>：1661 项通过、62 项失败；失败分布在 27 个非 Nearby 测试文件，本轮修改文件未出现在失败列表中。Nearby 5 个测试文件单独复跑为 48/48。</td></tr>
       <tr><td>跨网络 TURN 与真实 BLE</td><td class="pending">待实机验收</td><td>需要两台真实电脑和已配置的 TURN 服务验证防火墙、NAT、权限、休眠及系统弹窗。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>验证记录（2026-08-28，macOS 双机文件信令修复）</h2>
+  <table>
+    <thead><tr><th>检查项</th><th>结果</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>日志根因定位</td><td class="pass">已确认</td><td>接收方已完整收到 <code>file.webrtc_offer</code>，但未出现 Answer；问题位于 macOS Peripheral 回传大信令的路径。原实现忽略 CoreBluetooth <code>updateValue</code> 的队列满返回值，导致分片被静默丢弃。</td></tr>
+      <tr><td>CoreBluetooth 背压</td><td class="pass">通过</td><td>本地 Peripheral 依赖现已注册系统可写回调；队列满时等待回调并重试同一帧。Apple OutgoingMessage 改用 Indicate，Offer/Answer 分片采用保守节奏，其他平台保留原有 Notify/Indicate 属性。</td></tr>
+      <tr><td>诊断与回归</td><td class="pass">通过</td><td>新增 Offer、Answer、ICE、DataChannel 和 Peripheral 分片阶段日志，不记录 SDP 内容；新增大 SDP 完整重组、Apple 属性与节奏测试。Rust 63 项、Clippy、Desktop Nearby 48 项、TypeScript 和开发构建均通过。</td></tr>
+      <tr><td>真实 macOS ↔ macOS 文件</td><td class="pending">待实机验收</td><td>需要两台 Mac 使用新构建，分别验证双向发送、普通文件、空文件、接收拒绝和连续多次传输。</td></tr>
     </tbody>
   </table>
 

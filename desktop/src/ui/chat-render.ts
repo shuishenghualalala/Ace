@@ -24,6 +24,7 @@ import { imageDisplayUrl, isAbsoluteLocalPath, screenshotResultPath } from './to
 import { buildChippedNodes } from './features/composer-mention';
 import { isPlanDocumentPath } from './plan-document-path';
 import { createIcon, type IconId } from './components/icon';
+import type { ConversationMentionTarget } from './features/conversation-adapters';
 
 export type MessageRole = 'user' | 'assistant' | 'status' | 'error' | 'team_internal';
 
@@ -94,6 +95,7 @@ export interface ChatMessage {
     id: string;
     name: string;
     isSelf: boolean;
+    avatar?: import('./avatar-manager').AvatarRef;
     deliveryState?: string;
   } | undefined;
   /** 多轮工具 loop 内该 assistant 段是过程还是最终答案；由 reducer 写入，历史回放可推断。 */
@@ -102,6 +104,7 @@ export interface ChatMessage {
   toolCalls?: ToolCallInfo[] | undefined;
   streaming?: boolean | undefined;
   attachments?: Attachment[] | undefined;
+  conversationMentions?: ConversationMentionTarget[] | undefined;
   /** 发送/生成此消息时使用的模型（来自当时的 state.configModel）。 */
   model?: string | undefined;
   /** 整回合推理起点（首片 delta/tool 到达时刻）。
@@ -162,6 +165,7 @@ export interface PendingMessage {
   subScenario?: string;
   planActive?: boolean;
   workDisabledPreferenceIds?: string[];
+  conversationMentions?: ConversationMentionTarget[];
   /** revision: 队列项被用户提升为“修订式中断”的下一轮正式输入。 */
   clientIntent?: 'revision';
   /** 已乐观渲染成 user 气泡的消息 id；队列面板隐藏，发送时复用避免重复气泡。 */
@@ -2030,7 +2034,7 @@ export function renderMessageHtml(
     if (message.content) {
       const text = document.createElement('div');
       text.className = 'msg__text';
-      for (const node of buildChippedNodes(message.content)) text.appendChild(node);
+      for (const node of buildChippedNodes(message.content, undefined, message.conversationMentions)) text.appendChild(node);
       body.append(text);
     }
     appendAttachments(body, message.attachments);

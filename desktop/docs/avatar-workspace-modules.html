@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ace Desktop 头像与工作空间模块记录</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.65; }
+    body { max-width: 960px; margin: 0 auto; padding: 40px 24px 64px; color: #202124; background: #faf9f6; }
+    h1, h2 { line-height: 1.25; color: #16324f; }
+    code { padding: 2px 5px; border-radius: 4px; background: #eee9df; }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0 28px; background: #fff; }
+    th, td { padding: 10px 12px; border: 1px solid #ded8cd; text-align: left; vertical-align: top; }
+    th { color: #16324f; background: #f0ece4; }
+    .meta { color: #5d6670; }
+  </style>
+</head>
+<body>
+  <h1>Ace Desktop 头像与工作空间模块</h1>
+  <p class="meta">更新日期：2026-08-28 · 范围：Desktop UI 与 Desktop 类型层</p>
+
+  <h2>本次更新</h2>
+  <ul>
+    <li>新增 <code>src/ui/avatar-manager.ts</code>，统一头像身份、来源校验、DOM/HTML 渲染和 fallback。</li>
+    <li>Crew、同伴、外援、Team 看板、会话历史和聊天消息改为通过公共头像模块读取。</li>
+    <li>同伴 Peer、发布 Agent、消息作者和历史来源支持可选头像字段；旧协议缺字段时继续使用统一 fallback。</li>
+    <li>新增 <code>src/ui/features/workspace-registry.ts</code>，注册普通对话、外援、Wiki、同伴和项目工作空间，并接入 Shell 导航。</li>
+  </ul>
+
+  <h2>头像归属边界</h2>
+  <table>
+    <thead><tr><th>身份</th><th>数据归属</th><th>公共模块行为</th></tr></thead>
+    <tbody>
+      <tr><td>Crew</td><td>内置身份</td><td>统一使用 Crew 默认头像</td></tr>
+      <tr><td>同伴用户</td><td>Nearby/Companion</td><td>优先用户头像，缺失时按用户名称 fallback</td></tr>
+      <tr><td>同伴 Agent</td><td>Nearby/Companion</td><td>优先发布 Agent 头像，缺失时按 Agent 名称 fallback</td></tr>
+      <tr><td>外援 Agent/Team</td><td>External</td><td>继续使用既有外援头像样式和 provider/Team 标识；头像归属仍由 External 模块负责</td></tr>
+      <tr><td>Wiki/系统身份</td><td>各自模块</td><td>使用模块指定图标</td></tr>
+    </tbody>
+  </table>
+
+  <h2>工作空间模块边界</h2>
+  <p><code>WorkspaceRegistry</code> 只管理模块注册、导航入口和生命周期，不持有任何业务数据。每个域继续拥有自己的 API、状态和页面实现，后续可以通过注册新模块增加 Desktop 功能。</p>
+  <table>
+    <thead><tr><th>模块 ID</th><th>类型</th><th>负责内容</th></tr></thead>
+    <tbody>
+      <tr><td><code>conversation</code></td><td>普通对话</td><td>默认对话和通用会话</td></tr>
+      <tr><td><code>companion</code></td><td>同伴</td><td>发现、私聊、群聊和同伴 Agent</td></tr>
+      <tr><td><code>external</code></td><td>外援</td><td>外援 Agent、Team 和外援会话</td></tr>
+      <tr><td><code>wiki</code></td><td>Wiki</td><td>Wiki 工作区和 Wiki Agent</td></tr>
+      <tr><td><code>project</code></td><td>项目</td><td>用户本地目录和办公工作空间</td></tr>
+    </tbody>
+  </table>
+
+  <h2>数据协议说明</h2>
+  <p>当前 Nearby native 协议的 PeerInfo 和 PublishedAgent 尚未携带头像字段。本次 Desktop 改动已支持可选字段并安全忽略非法来源；要显示其他设备的真实头像，后续仍需在 Desktop 随附的 Nearby 通道中补充头像字段。</p>
+
+  <h2>验证</h2>
+  <ul>
+    <li><code>npm run lint:css</code>：通过。</li>
+    <li>头像、Workspace Registry、同伴状态、历史映射和 Team 看板测试：通过；外援卡片、消息区和会话列表继续沿用原有 DOM/CSS 表现。</li>
+    <li><code>npm run typecheck</code>：通过；Desktop release build：通过。</li>
+    <li>扩大回归共 123 个测试中 122 个通过；唯一失败是已有灵感卡断言 <code>data-browser-artifact</code>，与本次头像和 Workspace 改动无关。</li>
+  </ul>
+</body>
+</html>

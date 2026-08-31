@@ -134,6 +134,10 @@ impl WebRtcTransfers {
     ) -> Result<()> {
         validate_metadata(&metadata, self.max_file_bytes)?;
         validate_source_file(&source_path, &metadata).await?;
+        eprintln!(
+            "[nearby][webrtc] transfer_id={} role=sender stage=starting bytes={}",
+            metadata.transfer_id, metadata.size
+        );
 
         let (gather_tx, mut gather_rx) = mpsc::channel(1);
         let peer_connection = build_peer_connection(
@@ -141,6 +145,10 @@ impl WebRtcTransfers {
             self.configuration.clone(),
         )
         .await?;
+        eprintln!(
+            "[nearby][webrtc] transfer_id={} role=sender stage=peer_connection_ready",
+            metadata.transfer_id
+        );
         let data_channel = peer_connection
             .create_data_channel(
                 &format!("ace-file-{}", metadata.transfer_id),
@@ -173,16 +181,26 @@ impl WebRtcTransfers {
             .set_local_description(offer)
             .await
             .context("failed to set local WebRTC offer")?;
+        eprintln!(
+            "[nearby][webrtc] transfer_id={} role=sender stage=ice_gathering_started",
+            metadata.transfer_id
+        );
         wait_for_ice_gathering(&mut gather_rx).await?;
         let offer = peer_connection
             .local_description()
             .await
             .context("WebRTC offer disappeared after ICE gathering")?;
+        let offer_sdp = serde_json::to_string(&offer).context("failed to encode WebRTC offer")?;
+        eprintln!(
+            "[nearby][webrtc] transfer_id={} role=sender stage=ice_gathering_completed sdp_bytes={}",
+            metadata.transfer_id,
+            offer_sdp.len()
+        );
         self.event_tx
             .send(TransferEvent::OfferReady {
                 peer_id,
                 transfer_id: metadata.transfer_id,
-                sdp: serde_json::to_string(&offer).context("failed to encode WebRTC offer")?,
+                sdp: offer_sdp,
             })
             .await
             .context("failed to publish WebRTC offer")?;
@@ -196,6 +214,11 @@ impl WebRtcTransfers {
         offer_sdp: String,
     ) -> Result<()> {
         validate_metadata(&metadata, self.max_file_bytes)?;
+        eprintln!(
+            "[nearby][webrtc] transfer_id={} role=receiver stage=starting offer_sdp_bytes={}",
+            metadata.transfer_id,
+            offer_sdp.len()
+        );
         fs::create_dir_all(&self.receive_dir)
             .await
             .with_context(|| {
@@ -221,6 +244,10 @@ impl WebRtcTransfers {
         };
         let peer_connection =
             build_peer_connection(Arc::new(handler), self.configuration.clone()).await?;
+        eprintln!(
+            "[nearby][webrtc] transfer_id={} role=receiver stage=peer_connection_ready",
+            metadata.transfer_id
+        );
         self.connections
             .lock()
             .await
@@ -232,6 +259,10 @@ impl WebRtcTransfers {
             .set_remote_description(offer)
             .await
             .context("failed to apply remote WebRTC offer")?;
+        eprintln!(
+            "[nearby][webrtc] transfer_id={} role=receiver stage=remote_offer_applied",
+            metadata.transfer_id
+        );
         let answer = peer_connection
             .create_answer(None)
             .await
@@ -240,16 +271,27 @@ impl WebRtcTransfers {
             .set_local_description(answer)
             .await
             .context("failed to set local WebRTC answer")?;
+        eprintln!(
+            "[nearby][webrtc] transfer_id={} role=receiver stage=ice_gathering_started",
+            metadata.transfer_id
+        );
         wait_for_ice_gathering(&mut gather_rx).await?;
         let answer = peer_connection
             .local_description()
             .await
             .context("WebRTC answer disappeared after ICE gathering")?;
+        let answer_sdp =
+            serde_json::to_string(&answer).context("failed to encode WebRTC answer")?;
+        eprintln!(
+            "[nearby][webrtc] transfer_id={} role=receiver stage=ice_gathering_completed sdp_bytes={}",
+            metadata.transfer_id,
+            answer_sdp.len()
+        );
         self.event_tx
             .send(TransferEvent::AnswerReady {
                 peer_id,
                 transfer_id: metadata.transfer_id,
-                sdp: serde_json::to_string(&answer).context("failed to encode WebRTC answer")?,
+                sdp: answer_sdp,
             })
             .await
             .context("failed to publish WebRTC answer")?;
@@ -257,6 +299,10 @@ impl WebRtcTransfers {
     }
 
     pub async fn apply_answer(&self, transfer_id: &str, answer_sdp: &str) -> Result<()> {
+        eprintln!(
+            "[nearby][webrtc] transfer_id={transfer_id} role=sender stage=applying_remote_answer sdp_bytes={}",
+            answer_sdp.len()
+        );
         let peer_connection = self
             .connections
             .lock()
@@ -269,7 +315,11 @@ impl WebRtcTransfers {
         peer_connection
             .set_remote_description(answer)
             .await
-            .context("failed to apply remote WebRTC answer")
+            .context("failed to apply remote WebRTC answer")?;
+        eprintln!(
+            "[nearby][webrtc] transfer_id={transfer_id} role=sender stage=remote_answer_applied"
+        );
+        Ok(())
     }
 
     pub async fn finish(&self, transfer_id: &str) {
@@ -315,6 +365,10 @@ impl PeerConnectionEventHandler for ReceiverHandler {
         let metadata = self.metadata.clone();
         let part_path = self.part_path.clone();
         let final_path = self.final_path.clone();
+        eprintln!(
+            "[nearby][webrtc] transfer_id={} role=receiver stage=data_channel_announced",
+            metadata.transfer_id
+        );
         tokio::spawn(async move {
             let result = tokio::time::timeout(
                 TRANSFER_TIMEOUT,
@@ -333,6 +387,10 @@ impl PeerConnectionEventHandler for ReceiverHandler {
                 Ok(Err(error)) => format!("{error:#}"),
                 Err(_) => "WebRTC file receive timed out".to_owned(),
             };
+            eprintln!(
+                "[nearby][webrtc] transfer_id={} role=receiver stage=data_channel_failed error={error}",
+                metadata.transfer_id
+            );
             {
                 let _ = fs::remove_file(&part_path).await;
                 let _ = event_tx
@@ -380,6 +438,10 @@ fn spawn_sender(
             Ok(Err(error)) => format!("{error:#}"),
             Err(_) => "WebRTC file send timed out".to_owned(),
         };
+        eprintln!(
+            "[nearby][webrtc] transfer_id={} role=sender stage=data_channel_failed error={error}",
+            metadata.transfer_id
+        );
         {
             let _ = event_tx
                 .send(TransferEvent::Failed {
@@ -401,7 +463,13 @@ async fn send_file(
 ) -> Result<()> {
     loop {
         match data_channel.poll().await {
-            Some(DataChannelEvent::OnOpen) => break,
+            Some(DataChannelEvent::OnOpen) => {
+                eprintln!(
+                    "[nearby][webrtc] transfer_id={} role=sender stage=data_channel_open",
+                    metadata.transfer_id
+                );
+                break;
+            }
             Some(DataChannelEvent::OnClose | DataChannelEvent::OnError) | None => {
                 anyhow::bail!("WebRTC file channel closed before opening")
             }
@@ -455,6 +523,10 @@ async fn send_file(
     loop {
         match data_channel.poll().await {
             Some(DataChannelEvent::OnMessage(message)) if message.data.as_ref() == TRANSFER_ACK => {
+                eprintln!(
+                    "[nearby][webrtc] transfer_id={} role=sender stage=verification_ack_received",
+                    metadata.transfer_id
+                );
                 event_tx
                     .send(TransferEvent::Sent {
                         peer_id: peer_id.to_owned(),
@@ -493,18 +565,24 @@ async fn receive_file(
     let mut last_reported = 0_u64;
     while let Some(event) = data_channel.poll().await {
         match event {
-            DataChannelEvent::OnOpen if metadata.size == 0 => {
-                return complete_received_file(
-                    data_channel,
-                    peer_id,
-                    metadata,
-                    part_path,
-                    final_path,
-                    file,
-                    hasher,
-                    event_tx,
-                )
-                .await;
+            DataChannelEvent::OnOpen => {
+                eprintln!(
+                    "[nearby][webrtc] transfer_id={} role=receiver stage=data_channel_open",
+                    metadata.transfer_id
+                );
+                if metadata.size == 0 {
+                    return complete_received_file(
+                        data_channel,
+                        peer_id,
+                        metadata,
+                        part_path,
+                        final_path,
+                        file,
+                        hasher,
+                        event_tx,
+                    )
+                    .await;
+                }
             }
             DataChannelEvent::OnMessage(message) => {
                 received += message.data.len() as u64;
@@ -585,6 +663,10 @@ async fn complete_received_file(
         .send(BytesMut::from(TRANSFER_ACK))
         .await
         .context("failed to acknowledge received file")?;
+    eprintln!(
+        "[nearby][webrtc] transfer_id={} role=receiver stage=verification_ack_sent",
+        metadata.transfer_id
+    );
     event_tx
         .send(TransferEvent::Received {
             peer_id: peer_id.to_owned(),

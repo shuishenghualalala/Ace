@@ -122,6 +122,8 @@ const api = {
     text?: string;
     client_message_id?: string;
     mentions?: string[];
+    agent_mentions?: Array<{ peer_id: string; public_agent_id: string }>;
+    agent_sender?: { public_agent_id: string; display_name: string };
     reply_to?: { message_id: string; sender: string; text: string };
     file_id?: string;
     name?: string;

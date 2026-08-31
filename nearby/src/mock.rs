@@ -2,10 +2,10 @@ use crate::{
     identity::{load_nearby_settings, resolve_state_dir, save_nearby_settings, NearbySettings},
     ipc::{
         add_room_members, broadcast_room_message, build_history_snapshot, create_peer,
-        filter_room_mentions, handle_received_message, load_dms, load_rooms,
-        peer_supports_webrtc_file, remember_dm_message, remember_room_message, save_dms,
-        save_rooms, unix_timestamp_seconds, validate_file_transfer, EventSink, IpcCommand,
-        IpcEvent, RoomState,
+        filter_room_agent_mentions, filter_room_mentions, handle_received_message, load_dms,
+        load_rooms, peer_supports_webrtc_file, remember_dm_message, remember_room_message,
+        save_dms, save_rooms, unix_timestamp_seconds, validate_file_transfer, EventSink,
+        IpcCommand, IpcEvent, RoomState,
     },
     protocol::{
         is_valid_agent_mode, normalize_room_name, FileChunk, Message, PeerInfo, DEFAULT_AGENT_MODE,
@@ -494,13 +494,16 @@ pub async fn run(config: NearbyConfig) -> Result<()> {
                         let room = rooms.get(&room_id).expect("room exists");
                         sink.send(IpcEvent::RoomCreated { room_id, room_name: room.room_name.clone(), peer_ids: room.peer_ids.iter().cloned().collect(), agent_mode: room.agent_mode.clone(), owner_peer_id: room.owner_peer_id.clone() }).await?;
                     }
-                    IpcCommand::SendRoomMessage { room_id, text, client_message_id, mentions, reply_to } => {
+                    IpcCommand::SendRoomMessage { room_id, text, client_message_id, mentions, agent_mentions, agent_sender, reply_to } => {
                         if !rooms.contains_key(&room_id) {
                             sink.send(IpcEvent::Error { message: "群聊不存在或已退出".to_owned() }).await?;
                             continue;
                         }
                         let mentions = filter_room_mentions(mentions, rooms.get(&room_id).unwrap());
+                        let agent_mentions = filter_room_agent_mentions(agent_mentions, rooms.get(&room_id).unwrap());
                         let message = Message::room_message_with_context(peer.peer_id.clone(), room_id.clone(), text, mentions, reply_to)
+                            .with_agent_mentions(agent_mentions)
+                            .with_agent_sender(agent_sender)
                             .with_client_message_id(client_message_id);
                         remember_room_message(rooms.get_mut(&room_id).unwrap(), &message);
                         save_rooms(&state_dir, &rooms)?;

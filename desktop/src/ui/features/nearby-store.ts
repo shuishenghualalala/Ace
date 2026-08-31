@@ -6,6 +6,8 @@
  * JSON（{ version, type, message_id, sender, payload }）。
  */
 
+import { parseAvatarRef, type AvatarRef } from '../avatar-manager';
+
 export type NearbyConnectionState = 'discovered' | 'connecting' | 'connected' | 'disconnected' | 'unavailable';
 
 export type NearbyAgentMode = 'mention' | 'auto' | 'quiet';
@@ -22,6 +24,7 @@ export interface NearbyPeer {
   agent_name: string;
   capabilities: string[];
   published_agents: NearbyPublishedAgent[];
+  avatar?: AvatarRef;
   connection: NearbyConnectionState;
 }
 
@@ -31,6 +34,7 @@ export interface NearbyPublishedAgent {
   source_kind: string;
   source_ref: string;
   description?: string;
+  avatar?: AvatarRef;
 }
 
 export interface NearbyFileCard {
@@ -57,6 +61,9 @@ export interface NearbyChatMessage {
   timestamp: number;
   isOwn: boolean;
   isError: boolean;
+  agentPublicId?: string;
+  senderName?: string;
+  senderAvatar?: AvatarRef;
   file?: NearbyFileCard;
 }
 
@@ -131,12 +138,14 @@ function asPublishedAgents(value: unknown): NearbyPublishedAgent[] {
     const publicAgentId = asString(record?.public_agent_id);
     const displayName = asString(record?.display_name);
     if (!record || !publicAgentId || !displayName) return [];
+    const avatar = parseAvatarRef(record.avatar);
     return [{
       public_agent_id: publicAgentId,
       display_name: displayName,
       source_kind: asString(record.source_kind, 'local'),
       source_ref: asString(record.source_ref),
       ...(asString(record.description) ? { description: asString(record.description) } : {}),
+      ...(avatar ? { avatar } : {}),
     }];
   });
 }
@@ -146,12 +155,14 @@ function asPeer(value: unknown): Omit<NearbyPeer, 'connection'> | null {
   if (!record) return null;
   const peerId = asString(record.peer_id);
   if (!peerId) return null;
+  const avatar = parseAvatarRef(record.avatar);
   return {
     peer_id: peerId,
     display_name: asString(record.display_name),
     agent_name: asString(record.agent_name),
     capabilities: asStringArray(record.capabilities),
     published_agents: asPublishedAgents(record.published_agents),
+    ...(avatar ? { avatar } : {}),
   };
 }
 
@@ -163,6 +174,7 @@ export class NearbyStore {
   localPeerId = '';
   localName = '我';
   localAgentName = 'Ace Agent';
+  localPublishedAgents: NearbyPublishedAgent[] = [];
   discoverable = true;
   discovering = true;
   settings: NearbyAgentSettings = { autoReply: true, allowedToolsets: [] };
@@ -197,6 +209,21 @@ export class NearbyStore {
     return agentName || 'Ace Agent';
   }
 
+  peerAvatar(peerId: string, agent = false): AvatarRef | undefined {
+    const peer = this.peers.get(peerId);
+    if (!peer) return undefined;
+    if (agent) return peer.published_agents[0]?.avatar ?? peer.avatar;
+    return peer.avatar;
+  }
+
+  agentAvatar(peerId: string, publicAgentId: string): AvatarRef | undefined {
+    const agents = peerId === this.localPeerId
+      ? this.localPublishedAgents
+      : this.peers.get(peerId)?.published_agents ?? [];
+    return agents.find((agent) => agent.public_agent_id === publicAgentId)?.avatar
+      ?? this.peerAvatar(peerId, true);
+  }
+
   conversationMessages(conversationId: string): NearbyChatMessage[] {
     return this.messages.get(conversationId) ?? [];
   }
@@ -212,7 +239,11 @@ export class NearbyStore {
 
   /** 正在等待哪些成员的 Agent 回复（渲染「思考中…」占位）。 */
   pendingAgentSenders(conversationId: string): string[] {
-    return [...(this.pendingAgent.get(conversationId) ?? [])];
+    return [...new Set(
+      [...(this.pendingAgent.get(conversationId) ?? [])]
+        .map((key) => key.split('\0', 1)[0] || '')
+        .filter(Boolean),
+    )];
   }
 
   expectAgentReply(conversationId: string, peerIds: string[]): void {
@@ -222,13 +253,42 @@ export class NearbyStore {
       pending = new Set();
       this.pendingAgent.set(conversationId, pending);
     }
-    for (const peerId of peerIds) pending.add(peerId);
+    for (const peerId of peerIds) pending.add(`${peerId}\0`);
     this.changed();
   }
 
-  private clearPending(conversationId: string, peerId: string): boolean {
+  expectAgentTargets(
+    conversationId: string,
+    targets: Array<{ peerId: string; publicAgentId: string }>,
+  ): void {
+    if (targets.length === 0) return;
+    let pending = this.pendingAgent.get(conversationId);
+    if (!pending) {
+      pending = new Set();
+      this.pendingAgent.set(conversationId, pending);
+    }
+    for (const target of targets) pending.add(`${target.peerId}\0${target.publicAgentId}`);
+    this.changed();
+  }
+
+  isAgentReplyPending(conversationId: string, peerId: string, publicAgentId: string): boolean {
     const pending = this.pendingAgent.get(conversationId);
-    if (!pending?.delete(peerId)) return false;
+    return Boolean(
+      pending?.has(`${peerId}\0${publicAgentId}`)
+      || pending?.has(`${peerId}\0`),
+    );
+  }
+
+  private clearPending(conversationId: string, peerId: string, publicAgentId = ''): boolean {
+    const pending = this.pendingAgent.get(conversationId);
+    if (!pending) return false;
+    let removed = pending.delete(`${peerId}\0${publicAgentId}`);
+    if (!removed && publicAgentId) removed = pending.delete(`${peerId}\0`);
+    if (!removed && !publicAgentId) {
+      const fallback = [...pending].find((key) => key.startsWith(`${peerId}\0`));
+      if (fallback) removed = pending.delete(fallback);
+    }
+    if (!removed) return false;
     if (pending.size === 0) this.pendingAgent.delete(conversationId);
     return true;
   }
@@ -359,6 +419,7 @@ export class NearbyStore {
       const conversation = this.conversations.get(conversationId);
       if (!conversation) return;
       const senderPeerId = asString(message.sender);
+      const senderAvatar = this.peerAvatar(senderPeerId);
       this.appendMessage(conversation, {
         id: `file:${fileId}`,
         kind: 'file',
@@ -367,6 +428,7 @@ export class NearbyStore {
         timestamp: history ? 0 : Date.now(),
         isOwn: senderPeerId === this.localPeerId,
         isError: false,
+        ...(senderAvatar ? { senderAvatar } : {}),
         file: {
           file_id: fileId,
           name: asString(file.name, '未命名文件'),
@@ -476,6 +538,7 @@ export class NearbyStore {
     const isOwn = senderPeerId === this.localPeerId;
     const fromAgent = type === 'agent.response' || type === 'agent.error';
     if (!isOwn && fromAgent) this.clearPending(conversation.id, peerId);
+    const senderAvatar = this.peerAvatar(senderPeerId, fromAgent);
     this.appendMessage(conversation, {
       id: asString(message.message_id, `dm:${peerId}:${conversation.lastMessageAt}:${text.length}`),
       kind: fromAgent ? 'agent' : 'text',
@@ -484,6 +547,7 @@ export class NearbyStore {
       timestamp: history ? 0 : Date.now(),
       isOwn,
       isError: type === 'agent.error',
+      ...(senderAvatar ? { senderAvatar } : {}),
     }, { countUnread: !history });
   }
 
@@ -498,12 +562,24 @@ export class NearbyStore {
     const text = asString(payload.text).trim();
     if (!text) return;
     const isOwn = senderPeerId === this.localPeerId;
-    // 群内 Agent 回复在协议层与普通消息同型；用「发出时登记的期待回复」区分：
-    // 期待中的成员下一条消息按 Agent 气泡渲染。
-    const isAgentReply = !isOwn && this.clearPending(conversation.id, senderPeerId);
+    const agentSender = asRecord(payload.agent_sender);
+    const claimedAgentId = asString(agentSender?.public_agent_id);
+    const publishedAgent = this.peers.get(senderPeerId)?.published_agents
+      .find((agent) => agent.public_agent_id === claimedAgentId);
+    const agentPublicId = publishedAgent?.public_agent_id || '';
+    const agentDisplayName = publishedAgent?.display_name || '';
+    // 新版消息携带稳定 Agent 身份；旧版继续用「发出时登记的期待回复」兼容识别。
+    const isAgentReply = !isOwn && (
+      Boolean(agentPublicId)
+      || this.clearPending(conversation.id, senderPeerId)
+    );
+    if (agentPublicId) this.clearPending(conversation.id, senderPeerId, agentPublicId);
     if (!conversation.memberIds.includes(senderPeerId) && senderPeerId) {
       conversation.memberIds = [...conversation.memberIds, senderPeerId];
     }
+    const senderAvatar = agentPublicId
+      ? this.agentAvatar(senderPeerId, agentPublicId)
+      : this.peerAvatar(senderPeerId, isAgentReply);
     this.appendMessage(conversation, {
       id: asString(message.message_id, `room:${roomId}:${Date.now()}`),
       kind: isAgentReply ? 'agent' : 'text',
@@ -512,6 +588,9 @@ export class NearbyStore {
       timestamp: history ? 0 : Date.now(),
       isOwn,
       isError: false,
+      ...(agentPublicId ? { agentPublicId } : {}),
+      ...(agentDisplayName ? { senderName: agentDisplayName } : {}),
+      ...(senderAvatar ? { senderAvatar } : {}),
     }, { countUnread: !history });
   }
 
@@ -562,6 +641,7 @@ export class NearbyStore {
           this.localPeerId = peer.peer_id;
           this.localName = peer.display_name.trim() || '我';
           this.localAgentName = peer.agent_name.trim() || 'Ace Agent';
+          this.localPublishedAgents = peer.published_agents;
           // 快照可能先于 ready 到达：拿到本机 peer_id 后重算群主身份
           for (const conversation of this.conversations.values()) {
             if (conversation.kind === 'room' && conversation.ownerPeerId) {
@@ -664,6 +744,7 @@ export class NearbyStore {
         const text = asString(event.text).trim();
         if (!peerId || !text) break;
         const conversation = this.ensureDmConversation(peerId);
+        const senderAvatar = this.peerAvatar(peerId);
         this.appendMessage(conversation, {
           id: asString(event.message_id, `pm:${peerId}:${Date.now()}`),
           kind: 'text',
@@ -672,6 +753,7 @@ export class NearbyStore {
           timestamp: typeof event.timestamp === 'number' ? event.timestamp * 1000 : Date.now(),
           isOwn: false,
           isError: false,
+          ...(senderAvatar ? { senderAvatar } : {}),
         }, { countUnread: true });
         if (!this.activeConversationId) this.setActiveConversation(conversation.id);
         note = { text: `收到 ${asString(event.display_name) || this.peerLabel(peerId)} 的消息`, tone: 'normal' };

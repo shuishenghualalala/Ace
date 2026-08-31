@@ -67,6 +67,18 @@ pub struct ReplyReference {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMention {
+    pub peer_id: String,
+    pub public_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSender {
+    pub public_agent_id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileChunk {
     pub file_id: String,
     pub name: String,
@@ -124,6 +136,22 @@ impl Message {
         if let Some(client_message_id) = client_message_id.filter(|value| !value.trim().is_empty())
         {
             self.payload["client_message_id"] = Value::String(client_message_id);
+        }
+        self
+    }
+
+    pub fn with_agent_mentions(mut self, mentions: Vec<AgentMention>) -> Self {
+        if !mentions.is_empty() {
+            self.payload["agent_mentions"] =
+                serde_json::to_value(mentions).expect("AgentMention is always JSON serializable");
+        }
+        self
+    }
+
+    pub fn with_agent_sender(mut self, sender: Option<AgentSender>) -> Self {
+        if let Some(sender) = sender {
+            self.payload["agent_sender"] =
+                serde_json::to_value(sender).expect("AgentSender is always JSON serializable");
         }
         self
     }
@@ -768,6 +796,32 @@ mod tests {
         assert_eq!(decoded.payload["mentions"][0], "crew_agent");
         assert_eq!(decoded.payload["reply_to"]["message_id"], "m_parent");
         assert_eq!(decoded.payload["reply_to"]["text"], "previous message");
+    }
+
+    #[test]
+    fn room_message_preserves_specific_agent_target_and_sender() {
+        let message = Message::room_message("crew_local", "room_1", "@Mori 你好")
+            .with_agent_mentions(vec![AgentMention {
+                peer_id: "crew_remote".to_owned(),
+                public_agent_id: "agent_mori".to_owned(),
+            }])
+            .with_agent_sender(Some(AgentSender {
+                public_agent_id: "agent_local".to_owned(),
+                display_name: "本机 Agent".to_owned(),
+            }));
+        let decoded = Message::decode(&message.encode().unwrap()).unwrap();
+        assert_eq!(
+            decoded.payload["agent_mentions"][0]["peer_id"],
+            "crew_remote"
+        );
+        assert_eq!(
+            decoded.payload["agent_mentions"][0]["public_agent_id"],
+            "agent_mori"
+        );
+        assert_eq!(
+            decoded.payload["agent_sender"]["public_agent_id"],
+            "agent_local"
+        );
     }
 
     #[test]

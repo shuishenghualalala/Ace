@@ -269,6 +269,7 @@ class CompanionService:
         session_id: str,
         text: str,
         mentions: list[str] | None = None,
+        agent_mentions: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         binding = self.store.binding_for_session(owner_account_id, session_id)
@@ -290,6 +291,26 @@ class CompanionService:
         ]
         if binding["kind"] == "nearby_dm":
             normalized_mentions = []
+        normalized_agent_mentions: list[dict[str, str]] = []
+        seen_agent_mentions: set[tuple[str, str]] = set()
+        if binding["kind"] == "nearby_room":
+            for item in (agent_mentions or [])[:32]:
+                if not isinstance(item, dict):
+                    continue
+                peer_id = str(item.get("peer_id") or "").strip()
+                public_agent_id = str(item.get("public_agent_id") or "").strip()
+                key = (peer_id, public_agent_id)
+                if (
+                    not TARGET_RE.fullmatch(peer_id)
+                    or not TARGET_RE.fullmatch(public_agent_id)
+                    or key in seen_agent_mentions
+                ):
+                    continue
+                seen_agent_mentions.add(key)
+                normalized_agent_mentions.append({
+                    "peer_id": peer_id,
+                    "public_agent_id": public_agent_id,
+                })
         receipt = self.store.enqueue(
             owner_account_id,
             kind=binding["kind"],
@@ -299,6 +320,7 @@ class CompanionService:
                 "session_id": session_id,
                 "text": body,
                 "mentions": list(dict.fromkeys(normalized_mentions)),
+                "agent_mentions": normalized_agent_mentions,
                 "files": [
                     {
                         "file_id": item["file_id"],

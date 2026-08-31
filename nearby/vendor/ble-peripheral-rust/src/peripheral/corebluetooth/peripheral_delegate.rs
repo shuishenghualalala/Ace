@@ -25,6 +25,7 @@ pub struct IVars {
     pub sender: Sender<PeripheralEvent>,
     pub services_resolver: Arc<Mutex<HashMap<Uuid, oneshot::Sender<Option<String>>>>>,
     pub advertisement_resolver: Arc<Mutex<Option<oneshot::Sender<Option<String>>>>>,
+    pub characteristic_update_resolver: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
 declare_class!(
@@ -154,7 +155,7 @@ declare_class!(
         }
 
         #[method(peripheralManager:didReceiveWriteRequests:)]
-         fn delegate_peripheralmanager_didreceivewriterequests(
+        fn delegate_peripheralmanager_didreceivewriterequests(
             &self,
             manager: &CBPeripheralManager,
             requests: &NSArray<CBATTRequest>,
@@ -185,6 +186,18 @@ declare_class!(
                 }
             }
         }
+
+        #[method(peripheralManagerIsReadyToUpdateSubscribers:)]
+        fn delegate_peripheralmanagerisreadytoupdatesubscribers(
+            &self,
+            _: &CBPeripheralManager,
+        ) {
+            if let Ok(mut resolver) = self.ivars().characteristic_update_resolver.lock() {
+                if let Some(sender) = resolver.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
     }
 );
 
@@ -194,8 +207,43 @@ impl PeripheralDelegate {
             sender,
             services_resolver: Arc::new(Mutex::new(HashMap::new())),
             advertisement_resolver: Arc::new(Mutex::new(None)),
+            characteristic_update_resolver: Arc::new(Mutex::new(None)),
         });
         return unsafe { msg_send_id![super(this), init] };
+    }
+
+    pub fn prepare_characteristic_update(&self) -> oneshot::Receiver<()> {
+        let (sender, receiver) = oneshot::channel();
+        if let Ok(mut resolver) = self.ivars().characteristic_update_resolver.lock() {
+            *resolver = Some(sender);
+        }
+        receiver
+    }
+
+    pub fn cancel_characteristic_update_wait(&self) {
+        if let Ok(mut resolver) = self.ivars().characteristic_update_resolver.lock() {
+            resolver.take();
+        }
+    }
+
+    pub async fn wait_for_characteristic_update(
+        &self,
+        receiver: oneshot::Receiver<()>,
+    ) -> Result<(), Error> {
+        match timeout(Duration::from_secs(5), receiver).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(Error::from_string(
+                format!("Channel error while waiting: {error}"),
+                ErrorType::CoreBluetooth,
+            )),
+            Err(_) => {
+                self.cancel_characteristic_update_wait();
+                Err(Error::from_string(
+                    "Timeout waiting for characteristic update readiness".to_string(),
+                    ErrorType::CoreBluetooth,
+                ))
+            }
+        }
     }
 
     pub fn is_waiting_for_advertisement_result(&self) -> bool {
