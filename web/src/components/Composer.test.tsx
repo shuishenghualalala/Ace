@@ -85,12 +85,11 @@ describe("Composer team execution tier picker", () => {
 });
 
 describe("Composer team member mention display", () => {
-  it("uses the Team Runtime member id instead of the external Agent id", () => {
+  it("uses the stable Team Runtime member id instead of the display name", () => {
     expect(teamMemberMentionId({
       agentId: "agent_c6f06632e6a4",
-      mentionId: "kk",
       isLeader: false,
-    })).toBe("kk");
+    })).toBe("agent_c6f06632e6a4");
     expect(teamMemberMentionId({
       agentId: "agent_leader",
       isLeader: true,

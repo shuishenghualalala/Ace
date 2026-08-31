@@ -606,7 +606,7 @@
     <h2>Team Composer @ 成员联想与结构化发送（2026-08-16）</h2>
     <ul>
       <li><b>候选分类：</b>Team 会话输入 <code>@</code> 时复用现有 Composer 补全，在同一浮层先展示当前团队成员，再展示文件/工作区引用；普通单 Agent 会话仍只展示原有文件候选。</li>
-      <li><b>协议边界：</b>选择成员后保留可读的 <code>@agent_id</code> 文本，同时通过 <code>user_mentions</code> 发送 <code>{kind: "team_member", member_id}</code>；成员 mention 不创建附件，也不进入 TeamSpec/DAG。</li>
+      <li><b>协议边界：</b>选择成员后保留可读的 <code>@成员名</code> 文本，同时通过 <code>user_mentions</code> 发送 <code>{kind: "team_member", member_id}</code>；成员 mention 不创建附件，也不进入 TeamSpec/DAG。</li>
       <li><b>排队一致性：</b>忙碌会话的本地待发队列、立即发送和自动消费均保留结构化 mention，避免消息排队后退化为普通文本。</li>
       <li><b>复用范围：</b>复用现有 <code>composer-mention.ts</code>、Team 目录、队列和 WebSocket dispatch，不新增业务模块；Wiki Composer 不主动生成 Team 成员候选。</li>
     </ul>
@@ -725,7 +725,7 @@
     <h2>Team @成员路由 ID 修复（2026-08-18）</h2>
     <ul>
       <li><b>问题：</b>外部 Agent 配置 ID 与 Team Runtime 成员 ID 被混用，导致候选显示为成员名但发送的是外部 Agent ID。</li>
-      <li><b>修复：</b>Desktop Composer 选择团队成员时，外部成员使用 <code>agent_name</code> 作为 Team mention ID，Leader 统一使用 <code>leader</code>；外部 Agent ID 继续只用于配置和模型切换。</li>
+      <li><b>修复：</b>Desktop Composer 选择团队成员时，外部成员使用稳定的 <code>agent_id</code> 作为 Team mention ID，Leader 统一使用 <code>leader</code>；输入框仍显示 <code>agent_name</code>，只把稳定 ID 放入结构化 <code>user_mentions</code>。</li>
       <li><b>范围：</b>复用既有 <code>composer-mention</code> 和 <code>user_mentions</code> 协议，不新增接口、模块或持久化字段。</li>
     </ul>
     <p>验证：Desktop Composer mention 测试 47 passed，Desktop TypeScript typecheck 通过。</p>
@@ -795,6 +795,15 @@
       <li><b>范围：</b>复用既有 Followup 协议、Gateway 推送和 Desktop 确认卡，不新增接口、模块、持久化字段或 Team DAG 逻辑。</li>
     </ul>
     <p>验证：后端 Followup 可见 Session 路由与 SingleAgent sidechain 上下文回归、Desktop Team sidechain 权限卡归并回归通过；Python E/F 静态门禁、Desktop TypeScript typecheck、production build 和差异检查通过。</p>
+  </section>
+  <section>
+    <h2>Team @成员稳定 ID 发送修复（2026-08-31）</h2>
+    <ul>
+      <li><b>问题：</b>外部 Team 后端以 <code>agent_id</code> 作为成员路由键，但 Composer 曾把显示名（例如 <code>kk</code>）写入 <code>user_mentions.member_id</code>，导致 UI 看得到成员、发送后却提示“不是当前团队成员”。</li>
+      <li><b>修复：</b>Desktop/Web 统一使用 <code>agent_id</code> 发送结构化 mention；显示文本继续使用 <code>agent_name</code>，不改变用户可读的 <code>@kk</code> 体验。</li>
+      <li><b>范围：</b>仅调整既有 Composer 身份映射和回归测试，不新增接口、字段或模块。</li>
+    </ul>
+    <p>验证：Desktop/Web Composer mention 回归、TypeScript typecheck 和 production build 通过。</p>
   </section>
 </div>
 </body>

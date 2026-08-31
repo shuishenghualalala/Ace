@@ -77,13 +77,13 @@ export interface UserAgentMention {
   member_id: string;
 }
 
-/** External Agent id 用于配置；Team mention 必须使用 Team Runtime 成员 id。 */
+/** External Agent id 用于配置；Team mention 必须使用 Team Runtime 的稳定成员 id。 */
 export function teamMemberMentionId(
   member: Pick<ExternalTeamMember, 'agent_id' | 'agent_name'>,
   leaderAgentId?: string,
 ): string {
   if (member.agent_id === leaderAgentId) return 'leader';
-  return member.agent_name?.trim() || member.agent_id;
+  return member.agent_id?.trim() || '';
 }
 
 interface ChipToken {
