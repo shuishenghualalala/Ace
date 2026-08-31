@@ -47,7 +47,6 @@ async def test_disabled_flag_hides_management_api_and_rejects_new_external_bindi
         "existing-external",
         {
             "executor": "external",
-            "external_agent_id": "agent-1",
             "external": {"external_agent_id": "agent-1"},
         },
         owner_account_id=owner,
@@ -80,7 +79,6 @@ async def test_disabled_flag_hides_management_api_and_rejects_new_external_bindi
             "/api/session/external/agent-config",
             json={
                 "executor": "acp",
-                "external_agent_id": "agent-1",
                 "acp": {"external_agent_id": "agent-1"},
             },
         )
@@ -139,7 +137,6 @@ async def test_disabled_flag_preserves_but_blocks_existing_external_session(tmp_
         "old-external",
         {
             "executor": "acp",
-            "external_agent_id": "agent-1",
             "acp": {"external_agent_id": "agent-1"},
         },
         owner_account_id=owner,
@@ -156,7 +153,7 @@ async def test_disabled_flag_preserves_but_blocks_existing_external_session(tmp_
     assert chunks[0].kind == "error"
     assert chunks[0].body["message"] == "外部智能体功能已在配置中关闭"
     stored = crew.session_store.get_agent_config("old-external", owner_account_id=owner)
-    assert stored["external_agent_id"] == "agent-1"
+    assert stored["acp"]["external_agent_id"] == "agent-1"
 
     crew.session_store.ensure_session("old-team", owner_account_id=owner)
     crew.session_store.set_agent_config(

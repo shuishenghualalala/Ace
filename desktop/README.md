@@ -77,9 +77,11 @@ npm run dev
 
 ### 外援中心迁移边界
 
-`features/agent-hub.ts` 负责 Agent Hub 外壳与目录卡片，`features/agents-page.ts` 负责外援目录、创建流程和派活业务。创建 Agent/Team 表单由 `agents-page.ts` 通过类型化 `renderForm` slot 挂载，Hub 不再持有 `legacy-form` 包装节点。会话外援身份严格以 Gateway 返回的 `agent_binding` 为准，外援 Session 只写规范字段 `external.external_agent_id`；Provider 字符串仅用于展示，不参与身份推断。
+`features/agent-hub.ts` 负责 Agent Hub 外壳与目录卡片，`features/agents-page.ts` 负责外援目录、创建流程和派活业务。创建 Agent/Team 表单由 `agents-page.ts` 通过类型化 `renderForm` slot 挂载，Hub 不再持有 `legacy-form` 包装节点。会话外援身份严格以 Gateway 返回的 `agent_binding` 为准，外援 Session 只写规范字段 `external.external_agent_id`；Provider 字符串仅用于展示，不参与身份推断。Gateway 不再接受顶层 `external_agent_id`，`acp.external_agent_id` 仅保留为 ACP 输入别名。
 
 2026-08-31 P3-6 阶段收口：移除重复目录类型和 `legacy-form` 节点，外援 Agent 配置改为规范字段单写，Desktop 身份判断统一依赖 `agent_binding`；模块级页面状态暂不重构。验证记录：相关 5 个单元测试文件 49 项通过，`npm run typecheck` 和 `npm run build` 通过。
+
+2026-08-31 会话字段收口：Desktop 继续只写 `external.external_agent_id`；Gateway 不再接受顶层 `external_agent_id`，`acp.external_agent_id` 仅作为 ACP 输入别名保留。
 
 渲染层通过 `window.Crew` 的最小预加载桥访问主进程能力。`gateway:fetch` 仅允许本机 Gateway 的 `/api/` 路径；外部链接、文件选择和上传均在主进程执行白名单及大小校验。
 

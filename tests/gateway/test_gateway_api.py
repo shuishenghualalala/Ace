@@ -138,7 +138,6 @@ async def test_external_session_model_switch_requires_idle_and_runtime_catalog(t
         "external-model",
         {
             "executor": "acp",
-            "external_agent_id": agent["id"],
             "acp": {"external_agent_id": agent["id"]},
         },
         owner_account_id=OWNER_A,
@@ -218,19 +217,25 @@ async def test_external_session_agent_config_requires_one_canonical_id(tmp_path,
             "/api/session/external-config-missing/agent-config",
             json={"executor": "external"},
         )
+        top_level = await client.put(
+            "/api/session/external-config-top-level/agent-config",
+            json={
+                "executor": "external",
+                "external_agent_id": agent["id"],
+            },
+        )
         conflict = await client.put(
             "/api/session/external-config-conflict/agent-config",
             json={
                 "executor": "external",
-                "external_agent_id": "agent-top-level",
                 "external": {"external_agent_id": agent["id"]},
+                "acp": {"external_agent_id": "different-agent"},
             },
         )
         equal = await client.put(
             "/api/session/external-config-equal/agent-config",
             json={
                 "executor": "acp",
-                "external_agent_id": agent["id"],
                 "external": {"external_agent_id": agent["id"], "model": "default"},
                 "acp": {"external_agent_id": agent["id"]},
             },
@@ -238,6 +243,8 @@ async def test_external_session_agent_config_requires_one_canonical_id(tmp_path,
         loaded = await client.get("/api/session/external-config-equal/agent-config")
 
     assert missing.status_code == 400
+    assert top_level.status_code == 400
+    assert "不支持顶层" in top_level.json()["error"]
     assert conflict.status_code == 400
     assert equal.status_code == 200
     assert equal.json()["executor"] == "external"
@@ -288,7 +295,6 @@ async def test_external_session_model_resolves_adapter_declared_legacy_id(tmp_pa
         "claude-legacy-model",
         {
             "executor": "external",
-            "external_agent_id": agent["id"],
             "external": {
                 "external_agent_id": agent["id"],
                 "model": "default",

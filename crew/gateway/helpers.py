@@ -226,13 +226,12 @@ def session_agent_binding(config: dict | None) -> dict[str, str]:
 
 
 def session_external_agent_ids(config: dict | None) -> tuple[str, ...]:
-    """Return distinct external Agent ids found in legacy and canonical fields."""
+    """Return distinct ids from the canonical and ACP session fields."""
 
     value = config if isinstance(config, dict) else {}
     external = value.get("external") if isinstance(value.get("external"), dict) else {}
     acp = value.get("acp") if isinstance(value.get("acp"), dict) else {}
     candidates = (
-        value.get("external_agent_id"),
         external.get("external_agent_id"),
         acp.get("external_agent_id"),
     )
@@ -244,12 +243,7 @@ def session_external_agent_ids(config: dict | None) -> tuple[str, ...]:
 
 
 def session_external_agent_id(config: dict | None) -> str:
-    """Resolve one external Agent id with the canonical field taking precedence.
-
-    ``external`` is the current storage shape.  The top-level and ``acp`` fields
-    remain readable for old sessions, but every consumer uses this same resolver
-    so a legacy session cannot render one Agent and execute another.
-    """
+    """Resolve one external Agent id from the canonical field or ACP alias."""
 
     value = config if isinstance(config, dict) else {}
     external = value.get("external") if isinstance(value.get("external"), dict) else {}
@@ -257,7 +251,6 @@ def session_external_agent_id(config: dict | None) -> str:
     return str(
         external.get("external_agent_id")
         or acp.get("external_agent_id")
-        or value.get("external_agent_id")
         or ""
     ).strip()
 
@@ -265,12 +258,18 @@ def session_external_agent_id(config: dict | None) -> str:
 def normalize_external_session_config(config: dict) -> dict:
     """Normalize an external/ACP session config into the single canonical shape.
 
-    Old clients may send the id at the top level or under ``acp``.  Equal
-    duplicates are accepted and collapsed; conflicting ids and missing ids are
-    rejected before anything is persisted.
+    ``external.external_agent_id`` is the only current session field.  ACP
+    clients may still send ``acp.external_agent_id`` as an input alias.  The
+    removed top-level field is rejected so new writes cannot reintroduce it.
+    Equal canonical/ACP ids are accepted and collapsed; conflicting ids and
+    missing ids are rejected before anything is persisted.
     """
 
     value = dict(config)
+    if "external_agent_id" in value:
+        raise ValueError(
+            "外援 Session 不支持顶层 external_agent_id，请使用 external.external_agent_id"
+        )
     ids = session_external_agent_ids(value)
     if len(ids) > 1:
         raise ValueError("外援 Session 的 external_agent_id 配置冲突")
@@ -284,7 +283,6 @@ def normalize_external_session_config(config: dict) -> dict:
     value["executor"] = "external"
     value["external"] = canonical_external
     value.pop("acp", None)
-    value.pop("external_agent_id", None)
     return value
 
 
