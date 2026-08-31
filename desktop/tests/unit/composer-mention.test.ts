@@ -236,8 +236,8 @@ describe('mentionTextForSkill', () => {
 });
 
 describe('Team agent mentions', () => {
-  it('routes an external roster entry by Team member id, not external Agent id', () => {
-    expect(teamMemberMentionId({ agent_id: 'agent_c6f06632e6a4', agent_name: 'kk' }, 'agent_leader')).toBe('kk');
+  it('routes an external roster entry by stable Team member id, not display name', () => {
+    expect(teamMemberMentionId({ agent_id: 'agent_c6f06632e6a4', agent_name: 'kk' }, 'agent_leader')).toBe('agent_c6f06632e6a4');
     expect(teamMemberMentionId({ agent_id: 'agent_leader', agent_name: 'Crew Leader' }, 'agent_leader')).toBe('leader');
   });
 

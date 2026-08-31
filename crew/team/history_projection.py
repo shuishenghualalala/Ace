@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from crew.core.types import Message
-from crew.team.result_presenter import is_team_chat_noise, node_display_progress, result_projection
+from crew.core.types import Message, safe_duration_seconds
+from crew.team.result_presenter import (
+    is_team_chat_noise,
+    node_display_progress,
+    normalize_legacy_chunked_thinking,
+    result_projection,
+)
 from crew.team.roles import CREW_BUILTIN_AGENT_ID, LEGACY_CREW_BUILTIN_AGENT_ID, is_crew_builtin_display_id
 
 
@@ -31,6 +36,87 @@ def team_child_member_id(child_session_id: str) -> str | None:
     return member_id.strip()
 
 
+def project_team_event_history(store: Any, workflow_ids: list[str]) -> list[dict[str, Any]]:
+    """Project persisted Team events into the canonical internal chat shape."""
+
+    items: list[dict[str, Any]] = []
+    communication_status_by_request: dict[str, str] = {}
+    visible_event_types = {
+        "team_assign",
+        "team_stream",
+        "team_submit",
+        "team_ack",
+        "team_review",
+        "team_decision",
+        "team_summary",
+        "team_communication",
+    }
+    for workflow_id in workflow_ids:
+        try:
+            events = store.list_events(workflow_id, limit=500)
+        except Exception:  # noqa: BLE001
+            continue
+        for event in sorted(events, key=lambda item: float(item.ts or 0)):
+            payload = dict(event.payload or {})
+            if event.event_type not in visible_event_types:
+                continue
+            if event.event_type == "team_communication":
+                request_id = str(payload.get("request_id") or "").strip()
+                communication_kind = str(payload.get("communication_kind") or "").strip()
+                if request_id and communication_kind in {"ask_lifecycle", "ask_answer"}:
+                    communication_status_by_request[request_id] = str(
+                        payload.get("communication_status") or ""
+                    ).strip()
+                if communication_kind == "ask_lifecycle":
+                    continue
+            text = str(payload.get("text") or "").strip()
+            if is_team_chat_noise(text):
+                continue
+            items.append({
+                "role": "team_internal",
+                "content": text[:1200],
+                "agent_id": str(payload.get("agent_id") or event.actor or "agent"),
+                "agent_name": str(payload.get("agent_name") or payload.get("agent_id") or event.actor or "Agent"),
+                "agent_role": str(payload.get("agent_role") or ""),
+                "agent_tone": payload.get("agent_tone"),
+                "is_leader": bool(payload.get("is_leader")),
+                "source_session_id": str(payload.get("source_session_id") or ""),
+                "node_id": str(payload.get("node_id") or ""),
+                "event_type": str(payload.get("event_type") or event.event_type),
+                "display_mode": str(payload.get("display_mode") or "chat"),
+                "collapsed_title": str(payload.get("collapsed_title") or ""),
+                "process_text": str(payload.get("process_text") or ""),
+                "thinking": normalize_legacy_chunked_thinking(str(payload.get("thinking") or "")),
+                "tool_calls": _safe_tool_calls(payload.get("tool_calls")),
+                "artifacts": list(payload.get("artifacts") or []),
+                "turn_file_changes": list(payload.get("turn_file_changes") or []),
+                "mention_from": str(payload.get("mention_from") or ""),
+                "mention_to": list(payload.get("mention_to") or []),
+                "mention_intent": str(payload.get("mention_intent") or ""),
+                "request_id": str(payload.get("request_id") or ""),
+                "reply_to": str(payload.get("reply_to") or ""),
+                "communication_kind": str(payload.get("communication_kind") or ""),
+                "communication_status": str(payload.get("communication_status") or ""),
+                "timestamp": float(event.ts or 0),
+                **({"turn_started_at": payload.get("turn_started_at")} if payload.get("turn_started_at") is not None else {}),
+                **(
+                    {"turn_duration": turn_duration}
+                    if (turn_duration := safe_duration_seconds(payload.get("turn_duration"))) is not None
+                    else {}
+                ),
+            })
+    for item in items:
+        request_id = str(item.get("request_id") or "").strip()
+        if (
+            request_id
+            and item.get("communication_kind") == "ask_request"
+            and request_id in communication_status_by_request
+        ):
+            item["communication_status"] = communication_status_by_request[request_id]
+    items.sort(key=lambda item: float(item.get("timestamp") or 0))
+    return items
+
+
 def is_duplicate_team_parent_final(
     item: dict[str, Any],
     internal_items: list[dict[str, Any]],
@@ -40,6 +126,13 @@ def is_duplicate_team_parent_final(
     content = compact_history_content(item.get("content"))
     if not content:
         return False
+    request_id = str(item.get("request_id") or "").strip()
+    if request_id:
+        return any(
+            str(internal.get("event_type") or "") == "team_summary"
+            and str(internal.get("request_id") or "").strip() == request_id
+            for internal in internal_items
+        )
     content_head = content[:240]
     for internal in internal_items:
         if str(internal.get("event_type") or "") != "team_summary":
@@ -145,9 +238,33 @@ def _message_tool_calls(message) -> list[dict[str, Any]]:
             "status": tc.status,
             **({"ui_label": tc.ui_label} if tc.ui_label else {}),
             **({"started_at": tc.started_at} if tc.started_at is not None else {}),
-            **({"duration": tc.duration} if tc.duration is not None else {}),
+            **(
+                {"duration": duration}
+                if (duration := safe_duration_seconds(tc.duration)) is not None
+                else {}
+            ),
         })
     return tool_calls
+
+
+def _safe_tool_calls(value: Any) -> list[dict[str, Any]]:
+    """Normalize persisted Team tool calls before exposing them to history UI."""
+
+    if not isinstance(value, list):
+        return []
+    calls: list[dict[str, Any]] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        call = dict(raw)
+        if "duration" in call:
+            duration = safe_duration_seconds(call.get("duration"))
+            if duration is None:
+                call.pop("duration", None)
+            else:
+                call["duration"] = duration
+        calls.append(call)
+    return calls
 
 
 def _team_internal_member_profiles(
@@ -401,7 +518,12 @@ def team_internal_history_items(
             str(item.get("content") or "")[:160],
             str(item.get("communication_kind") or ""),
             str(item.get("communication_status") or ""),
-            str(item.get("request_id") or item.get("reply_to") or ""),
+            str(
+                item.get("request_id")
+                or item.get("reply_to")
+                or item.get("source_session_id")
+                or ""
+            ),
         )
         if key in seen:
             continue
@@ -478,6 +600,8 @@ def team_tasks_with_plan_projection(
             request_id = str(task.get("request_id") or "").strip()
             if request_id and f"{session_id}::turn::{request_id}" in represented_turns:
                 return False
+            if request_id:
+                return True
             title = str(task.get("detail") or task.get("title") or "").strip()
             if compact_history_content(title) in represented_turn_titles:
                 return False

@@ -338,6 +338,23 @@ describe('renderAgentTurn', () => {
       .toBe('Crew 已生成团队执行图 · 3s');
   });
 
+  it('Team 规划事件没有正文或过程时不渲染空气泡', () => {
+    const root = renderTeamInternalMessage({
+      id: 'team-planning-empty',
+      role: 'team_internal',
+      content: '',
+      timestamp: 1_700_000_004_200,
+      agentId: 'crew::builtin',
+      agentName: '像素开发小游戏团队',
+      isLeader: true,
+      eventType: 'team_planning_progress',
+      streaming: false,
+    }, false);
+
+    expect(root.dataset.empty).toBe('true');
+    expect(root.querySelector('.team-internal__bubble')).toBeNull();
+  });
+
   it('已完成回合保留「已思考」入口且有正文时默认折叠过程区', () => {
     const root = renderAgentTurn(makeMessages(), {
       isStreaming: false,

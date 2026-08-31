@@ -14,12 +14,18 @@ import uuid
 from typing import Any
 
 from crew.core.errors import ToolError
-from crew.core.runctx import current_push_fn, current_request_id, current_session_id
+from crew.core.runctx import (
+    current_display_session_id,
+    current_push_fn,
+    current_request_id,
+    current_session_id,
+)
+from crew.core.timeout_policy import DEFAULT_INTERACTION_TIMEOUT_SECONDS
 from crew.state.logging import get_logger
 
 log = get_logger("followup")
 
-_DEFAULT_TIMEOUT = 300.0
+_DEFAULT_TIMEOUT = DEFAULT_INTERACTION_TIMEOUT_SECONDS
 
 # 取消标记：用户点「取消」时以此作为答案回灌，工具 handler 据此识别取消。
 # 用回灌而非 future.cancel()，避免 CancelledError 冒泡到 agent 主任务。
@@ -273,7 +279,9 @@ async def send_followup_question(
     由 ask_followup_question 工具 handler 调用。record_history=False 时答案
     不写进 canonical history（权限确认等 side-channel 用）。
     """
-    session_id = current_session_id.get()
+    # Team/sidechain 执行历史继续使用内部 task session；需要用户作答的交互必须
+    # 绑定到当前可见 session，否则 Desktop 不会展示，waiter 也无法收到回答。
+    session_id = current_display_session_id.get() or current_session_id.get()
     if not session_id:
         raise ToolError("当前无会话，无法发送追问")
 

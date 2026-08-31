@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import hmac
-import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -23,6 +22,7 @@ from crew.team.formation import (
     fast_team_suggestion as fast_team_suggestion,
     suggest_role_description as suggest_role_description,
 )
+from crew.core.text_parsing import extract_json_object  # noqa: F401 - re-exported for gateway routers
 
 if TYPE_CHECKING:
     from crew.app import CrewApp
@@ -206,24 +206,6 @@ def role_markdown(role_name: str, agent: dict, workflow: str, description: str, 
     ])
 
 
-def extract_json_object(text: str) -> dict | None:
-    """从可能含前后噪声的文本中抽取首个 JSON 对象。"""
-    try:
-        value = json.loads(text)
-        return value if isinstance(value, dict) else None
-    except json.JSONDecodeError:
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        value = json.loads(text[start : end + 1])
-        return value if isinstance(value, dict) else None
-    except json.JSONDecodeError:
-        return None
-
-
 # ---------------------------------------------------------------------------
 # 会话 agent 标签（左边栏展示 executor 归属）
 # ---------------------------------------------------------------------------
@@ -232,26 +214,87 @@ def session_agent_binding(config: dict | None) -> dict[str, str]:
     """Project the persisted session config into a stable UI binding kind."""
     value = config if isinstance(config, dict) else {}
     executor = str(value.get("executor") or "builtin").strip().lower()
-    external = value.get("external") if isinstance(value.get("external"), dict) else {}
-    acp = value.get("acp") if isinstance(value.get("acp"), dict) else {}
     team = value.get("team") if isinstance(value.get("team"), dict) else {}
 
     external_team_id = str(team.get("external_team_id") or "").strip()
     if executor == "team" and external_team_id:
         return {"kind": "external_team", "id": external_team_id}
 
-    external_agent_id = str(
-        value.get("external_agent_id")
-        or external.get("external_agent_id")
-        or acp.get("external_agent_id")
-        or ""
-    ).strip()
+    external_agent_id = session_external_agent_id(value)
     if executor in {"external", "acp"} and external_agent_id:
         return {"kind": "external_agent", "id": external_agent_id}
 
     if executor == "client":
         return {"kind": "client", "id": ""}
     return {"kind": "builtin", "id": ""}
+
+
+def session_external_agent_ids(config: dict | None) -> tuple[str, ...]:
+    """Return ids from canonical fields plus ACP's legacy input aliases."""
+
+    value = config if isinstance(config, dict) else {}
+    executor = str(value.get("executor") or "").strip().lower()
+    external = value.get("external") if isinstance(value.get("external"), dict) else {}
+    acp = value.get("acp") if isinstance(value.get("acp"), dict) else {}
+    candidates = (
+        value.get("external_agent_id") if executor == "acp" else None,
+        external.get("external_agent_id"),
+        acp.get("external_agent_id"),
+    )
+    return tuple(dict.fromkeys(
+        str(item or "").strip()
+        for item in candidates
+        if str(item or "").strip()
+    ))
+
+
+def session_external_agent_id(config: dict | None) -> str:
+    """Resolve an external Agent id, retaining ACP's legacy top-level alias."""
+
+    value = config if isinstance(config, dict) else {}
+    executor = str(value.get("executor") or "").strip().lower()
+    external = value.get("external") if isinstance(value.get("external"), dict) else {}
+    acp = value.get("acp") if isinstance(value.get("acp"), dict) else {}
+    return str(
+        external.get("external_agent_id")
+        or acp.get("external_agent_id")
+        or (value.get("external_agent_id") if executor == "acp" else None)
+        or ""
+    ).strip()
+
+
+def normalize_external_session_config(config: dict) -> dict:
+    """Normalize an external/ACP session config into the single canonical shape.
+
+    ``external.external_agent_id`` is the current field for the protocol-neutral
+    external executor.  ACP clients may still send ``acp.external_agent_id`` or
+    the ACP-era top-level ``external_agent_id`` as input aliases.  The top-level
+    field is rejected for ``executor=external`` so that new canonical writes do
+    not reintroduce it.  Equal ids are accepted and collapsed; conflicting ids
+    and missing ids are rejected before anything is persisted.
+    """
+
+    value = dict(config)
+    executor = str(value.get("executor") or "").strip().lower()
+    if "external_agent_id" in value and executor != "acp":
+        raise ValueError(
+            "外援 Session 不支持顶层 external_agent_id，请使用 external.external_agent_id"
+        )
+    ids = session_external_agent_ids(value)
+    if len(ids) > 1:
+        raise ValueError("外援 Session 的 external_agent_id 配置冲突")
+    if not ids:
+        raise ValueError("外援 Session 必须提供 external_agent_id")
+
+    external = value.get("external") if isinstance(value.get("external"), dict) else {}
+    acp = value.get("acp") if isinstance(value.get("acp"), dict) else {}
+    canonical_external = {**dict(acp), **dict(external)}
+    canonical_external["external_agent_id"] = ids[0]
+    value["executor"] = "external"
+    value["external"] = canonical_external
+    value.pop("acp", None)
+    value.pop("external_agent_id", None)
+    return value
 
 
 def session_agent_label(
@@ -286,12 +329,7 @@ def session_agent_label(
         external = (config or {}).get("external") if isinstance((config or {}).get("external"), dict) else {}
         acp = (config or {}).get("acp") if isinstance((config or {}).get("acp"), dict) else {}
         selected_model = str(external.get("model") or acp.get("model") or "").strip()
-        agent_id = str(
-            external.get("external_agent_id")
-            or acp.get("external_agent_id")
-            or (config or {}).get("external_agent_id")
-            or ""
-        ).strip()
+        agent_id = session_external_agent_id(config)
         if agent_id and crew.external_agents is not None:
             try:
                 agent, runtime = crew.external_agents.agent_with_runtime(

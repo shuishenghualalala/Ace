@@ -23,6 +23,7 @@ from crew.core.runctx import (
     current_active_skill_packages,
     current_agent_workdir,
     current_agent_id,
+    current_display_session_id,
     current_owner_account_id,
     current_session_id,
     current_session_source,
@@ -759,6 +760,9 @@ class SingleAgent(Agent):
             raise RuntimeError("SingleAgent 已关闭，不能继续执行")
         sid = envelope.session_id
         task_sid = str(envelope.params.get("task_session_id") or sid)
+        display_sid = str(envelope.params.get("display_session_id") or task_sid).strip()
+        if "::turn::" in display_sid:
+            display_sid = display_sid.split("::turn::", 1)[0]
         cwd = self._resolve_agent_workdir(envelope, task_session_id=task_sid)
         # 提前设置运行期会话 id，使 compactor.maybe_compact() 中的 LLM trace 也能带上 session_id
         from crew.core.runctx import (
@@ -771,6 +775,7 @@ class SingleAgent(Agent):
         )
 
         current_session_id.set(task_sid)
+        current_display_session_id.set(display_sid or task_sid)
         # team member 执行工具时，后台子 agent 通知按 member 子会话隔离，
         # 使完成通知能回到发起 member；主 agent 该值为空（回退 current_session_id）。
         notify_session = str(envelope.params.get("member_session_id") or "")

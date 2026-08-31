@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import math
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -21,6 +23,30 @@ IMAGE_INPUT_UNAVAILABLE_NOTICE = (
 _FILE_WRITE_UI_ARG_KEYS = ("path", "file_path", "append")
 _BROWSER_REF_RE = re.compile(r"^p[1-9]\d*:[es][1-9]\d*$")
 _FORM_FIELD_TYPES = ("textbox", "combobox", "checkbox", "radio", "slider")
+
+
+def safe_duration_seconds(value: Any) -> float | None:
+    """Return a duration in seconds, dropping values that are epoch timestamps.
+
+    Tool and turn durations are elapsed seconds.  A few legacy records stored
+    the wall-clock timestamp in this field, which otherwise renders as several
+    hundred thousand hours in clients.  Keep valid durations unchanged and
+    hide only values that are recognizably current Unix seconds/milliseconds.
+    """
+
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        return None
+    if duration < 0 or not math.isfinite(duration):
+        return None
+    now = time.time()
+    if (
+        1_000_000_000 <= duration <= (now + 366 * 24 * 60 * 60)
+        or 1_000_000_000_000 <= duration <= (now + 366 * 24 * 60 * 60) * 1000
+    ):
+        return None
+    return duration
 
 
 def _record_replay_arguments_for_display(

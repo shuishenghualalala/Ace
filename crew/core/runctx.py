@@ -10,6 +10,11 @@ from contextvars import ContextVar
 from typing import Any, Callable, Coroutine
 
 current_session_id: ContextVar[str] = ContextVar("current_session_id", default="")
+# 用户当前可见的会话 id。sidechain/Team Leader 的工具仍按 current_session_id
+# 隔离执行历史，但权限确认等 side-channel 交互必须投递到这个可见会话。
+current_display_session_id: ContextVar[str] = ContextVar(
+    "current_display_session_id", default=""
+)
 # team member 执行工具时的子会话 id（envelope.params.member_session_id）。
 # delegate_task/run_agent 后台入队按此 key 隔离，使完成通知能回到发起 member 而非 team_session。
 # 主 agent 路径为空 -> 回退 current_session_id，行为不变。

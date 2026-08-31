@@ -28,10 +28,12 @@ describe('shouldSkipHistoryReloadOnReconnect', () => {
         {
           id: 'sid-kimi', title: 'Kimi session', updatedAt: 2, preview: '', badge: '', workspaceId: 'default',
           agentLabel: { provider: 'kimi', display_badge: 'K', name: 'Kimi' },
+          agentBinding: { kind: 'external_agent', id: 'agent-kimi' },
         },
         {
           id: 'sid-codex', title: 'Codex session', updatedAt: 1, preview: '', badge: '', workspaceId: 'default',
           agentLabel: { provider: 'codex', display_badge: 'X', name: 'Codex' },
+          agentBinding: { kind: 'external_agent', id: 'agent-codex' },
         },
       ],
     });
@@ -68,6 +70,7 @@ describe('shouldSkipHistoryReloadOnReconnect', () => {
       sessions: [{
         id: 'sid-team', title: 'Team session', updatedAt: 1, preview: '', badge: '', workspaceId: 'default',
         agentLabel: { provider: 'team', display_badge: 'T', name: '研发团队' },
+        agentBinding: { kind: 'external_team', id: 'team-dev' },
       }],
     });
     const host = document.createElement('div');

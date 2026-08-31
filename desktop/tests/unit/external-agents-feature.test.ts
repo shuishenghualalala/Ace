@@ -74,6 +74,12 @@ describe('external agents feature flag', () => {
 
   });
 
+  it('缺少 agent_binding 时不再通过 Provider 猜测外援身份', () => {
+    const providerOnly = session('codex');
+    expect(isExternalAgentOrTeamSession(providerOnly)).toBe(false);
+    expect(isSessionVisibleWithExternalAgentsFlag(providerOnly)).toBe(true);
+  });
+
   it('重新打开开关后外部历史会话恢复可见', () => {
     const external = session('codex');
     external.agentBinding = { kind: 'external_agent', id: 'agent-codex' };

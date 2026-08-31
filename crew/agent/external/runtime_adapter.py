@@ -16,13 +16,13 @@ from typing import Any, AsyncIterator, Literal, Protocol, Sequence
 from urllib.parse import urlsplit
 
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
+from crew.core.timeout_policy import DEFAULT_EXTERNAL_IDLE_SECONDS
 from crew.security.models import (
     AdditionalPermissionProfile,
     NetworkAccess,
     NetworkEntry,
     SandboxPermissions,
 )
-
 
 _PROTECTED_EXTERNAL_ENV_NAMES = frozenset({"JWT"})
 _PROTECTED_EXTERNAL_ENV_PREFIXES = ("CREW_", "ACE_SECURITY_", "ACE_BUNDLED_")
@@ -348,7 +348,12 @@ class RuntimeExecutionRequest:
     dynamic_tools: list[dict[str, Any]] = field(default_factory=list)
     dynamic_tool_handler: Any = None
     resume_session_id: str = ""
-    timeout: float = 120.0
+    timeout: float = DEFAULT_EXTERNAL_IDLE_SECONDS
+    # Absolute monotonic deadline for the whole external turn.  The boolean
+    # distinguishes an explicitly unlimited policy (deadline=None) from old
+    # direct adapter callers that still expect their legacy watchdog.
+    hard_deadline: float | None = None
+    hard_timeout_enabled: bool = False
     permission_handler: Any = None
 
     def __post_init__(self) -> None:

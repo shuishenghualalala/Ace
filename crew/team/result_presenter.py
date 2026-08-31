@@ -22,6 +22,16 @@ WORKFLOW_LANE_ORDER = {
     "other": 90,
 }
 
+_RESULT_PATH_RE = re.compile(
+    r"(?P<path>(?:/[^\s`'\"，。；、)\]]+)+\.(?:html?|md|txt|json|csv|js|ts|tsx|py|png|jpe?g|gif|svg|pdf))"
+)
+_RESULT_RELATIVE_PATH_RE = re.compile(
+    r"(?<![\w/.-])(?P<path>(?:\.?/)?(?:[\w.-]+/)*[\w.-]+\.(?:html?|md|txt|json|csv|js|ts|tsx|py|png|jpe?g|gif|svg|pdf))(?![\w/.-])"
+)
+_RESULT_BACKTICK_PATH_RE = re.compile(
+    r"`(?P<path>(?:/|\.{0,2}/)?[\w.-]+(?:/[\w.-]+)+/?)`"
+)
+
 
 def workflow_lane_order(lane: str) -> int:
     return WORKFLOW_LANE_ORDER.get(str(lane or "").strip().lower(), WORKFLOW_LANE_ORDER["other"])
@@ -134,6 +144,28 @@ def is_team_chat_noise(text: str) -> bool:
     return stripped.startswith(noise_prefixes)
 
 
+def normalize_legacy_chunked_thinking(value: str) -> str:
+    """Repair thinking persisted by the old one-delta-per-paragraph writer."""
+
+    text = str(value or "")
+    blocks = [part.strip() for part in re.split(r"\n{2,}", text) if part.strip()]
+    if len(blocks) < 6:
+        return text
+    token_like = sum(bool(re.fullmatch(r"\S{1,28}", part)) for part in blocks)
+    if token_like / len(blocks) < 0.8:
+        return text
+
+    joined = blocks[0]
+    for block in blocks[1:]:
+        if re.fullmatch(r"[.,!?;:%)\]}，。！？；：、]+", block) or block.startswith(("'", "’")):
+            joined += block
+        elif joined.endswith(("(", "[", "{", "'", "’")):
+            joined += block
+        else:
+            joined += f" {block}"
+    return joined
+
+
 def _node_dict_metadata(node: dict[str, Any]) -> dict[str, Any]:
     metadata = node.get("metadata")
     if isinstance(metadata, dict):
@@ -172,7 +204,9 @@ def node_dict_assignment_text(node: dict[str, Any]) -> str:
 
 
 def node_dict_should_show_assignment(node: dict[str, Any], edges: list[dict[str, Any]]) -> bool:
-    return True
+    del edges
+    assignee = str(node.get("assignee") or "").strip().lower()
+    return bool(assignee and assignee != "leader")
 
 
 def node_result_digest(text: str, limit: int = 260) -> str:
@@ -182,6 +216,20 @@ def node_result_digest(text: str, limit: int = 260) -> str:
     if normalized.startswith("[") and "的执行结果]" in normalized[:40]:
         normalized = normalized.split("]", 1)[-1].strip()
     return normalized if len(normalized) <= limit else f"{normalized[:limit].rstrip()}..."
+
+
+def extract_result_paths(text: str) -> list[str]:
+    """Extract unique file-like paths from a Team result without resolving them."""
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    for pattern in (_RESULT_PATH_RE, _RESULT_RELATIVE_PATH_RE, _RESULT_BACKTICK_PATH_RE):
+        for match in pattern.finditer(str(text or "")):
+            path = match.group("path").strip().strip("`'\"")
+            if path and path not in seen:
+                seen.add(path)
+                paths.append(path)
+    return paths
 
 
 def _compact_preserving_boundaries(value: str, limit: int) -> str:
@@ -402,6 +450,12 @@ def artifact_cards(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return cards
 
 
+def has_explicit_file_artifact(artifacts: list[dict[str, Any]]) -> bool:
+    """Whether a node already produced a concrete file that users can open."""
+
+    return any(str(item.get("path") or "").strip() for item in artifacts)
+
+
 def assignment_text(node: TeamPlanNode) -> str:
     return _assignment_text_for(
         node_id=node.node_id,
@@ -412,7 +466,9 @@ def assignment_text(node: TeamPlanNode) -> str:
 
 
 def should_show_assignment(plan: TeamPlan, node: TeamPlanNode) -> bool:
-    return True
+    del plan
+    assignee = str(node.assignee or "").strip().lower()
+    return bool(assignee and assignee != "leader")
 
 
 def artifact_title_head(title: str) -> str:

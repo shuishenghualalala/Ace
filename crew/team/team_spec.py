@@ -254,29 +254,85 @@ def build_team_spec(source: TeamSpecInput = None) -> TeamSpec:
     )
 
 
+def team_spec_for_creation(
+    source: TeamSpecInput = None,
+    *,
+    description: str = "",
+) -> dict[str, Any]:
+    """Build the durable TeamSpec from the team-creation form.
+
+    Team creation is a structured UI flow, not a chat turn. When the form
+    does not provide a TeamSpec, only its explicit description is used as the
+    initial goal; the team name is intentionally not treated as task
+    semantics. The normalized snapshot is persisted once the user confirms
+    the roster.
+    """
+
+    if source is None:
+        source = {"goal": str(description or "").strip()}
+    return build_team_spec(source).to_dict()
+
+
+def persisted_team_spec_for_turn(source: Mapping[str, Any], goal: str) -> dict[str, Any]:
+    """Project a persisted TeamSpec snapshot into the current turn contract.
+
+    External teams created before TeamSpec V3 may keep task semantics in
+    ``execution_profile``. That storage compatibility is handled only at the
+    persistence boundary; explicit runtime input still goes through the strict
+    ``build_team_spec`` validation above. The current user goal always wins.
+    """
+
+    raw = dict(source)
+    legacy_execution = _mapping(raw.get("execution_profile"))
+    task_profile = _mapping(raw.get("task_profile"))
+    for key in _TASK_PROFILE_KEYS:
+        if key not in task_profile and key in legacy_execution:
+            task_profile[key] = legacy_execution[key]
+
+    return {
+        **raw,
+        "goal": str(goal or "").strip(),
+        "task_profile": task_profile,
+        "execution_profile": {
+            key: legacy_execution[key]
+            for key in _RUNTIME_EXECUTION_KEYS
+            if key in legacy_execution
+        },
+    }
+
+
 def team_spec_from_planning_decision(
     base_spec: TeamSpec,
     decision: Any,
 ) -> TeamSpec:
     """Project one structured PlanningDecision into the shared TeamSpec.
 
-    PlanningDecision understands the free-form goal once.  This function is
-    the data-contract boundary: downstream Formation and Workflow consumers
-    receive the same normalized capabilities, lanes, deliverables and risk
-    information instead of interpreting the prompt independently.
+    PlanningDecision understands the free-form goal once. This function is
+    the current-turn data-contract boundary: downstream Workflow consumers
+    receive the same normalized task profile, capabilities, lanes,
+    deliverables and risk information instead of interpreting the prompt
+    independently. Durable team policy is retained, while durable task
+    requirements are not merged into the current turn.
     """
 
+    # The persisted TeamSpec describes the team's durable boundary. Once the
+    # current prompt has been understood, its work units become the source of
+    # truth for this turn. Unioning the two would leak a durable build/verify
+    # lane into an otherwise plan-only request.
+    work_units = [
+        unit
+        for unit in decision.work_units
+        if unit.id != "leader" and not unit.id.startswith("leader_")
+    ]
     capabilities = normalize_capabilities([
-        *(base_spec.team_requirements.get("capabilities") or []),
-        *(
-            capability
-            for unit in decision.work_units
-            for capability in unit.required_capabilities
-        ),
-        *(["review", "verification"] if decision.quality_policy in {
-            "independent_review", "evaluator_optimizer",
-        } else []),
-    ])
+        capability
+        for unit in work_units
+        for capability in unit.required_capabilities
+    ] + (
+        ["review", "verification"]
+        if decision.quality_policy in {"independent_review", "evaluator_optimizer"}
+        else []
+    ))
     lane_by_kind = {
         "plan": "plan",
         "research": "plan",
@@ -287,32 +343,57 @@ def team_spec_from_planning_decision(
         "docs": "docs",
     }
     lanes = list(dict.fromkeys([
-        *(base_spec.team_requirements.get("workflow_lanes") or []),
-        *(
-            lane_by_kind[unit.kind]
-            for unit in decision.work_units
-            if unit.kind in lane_by_kind
-        ),
-        *(["verify"] if decision.quality_policy in {
-            "independent_review", "evaluator_optimizer",
-        } else []),
-    ]))
+        lane_by_kind[unit.kind]
+        for unit in work_units
+        if unit.kind in lane_by_kind
+    ] + (
+        ["verify"]
+        if decision.quality_policy in {"independent_review", "evaluator_optimizer"}
+        else []
+    )))
     decision_deliverables = [
         {
             "type": str(unit.kind or "answer"),
             "description": str(unit.expected_output or unit.objective).strip(),
         }
-        for unit in decision.work_units
+        for unit in work_units
         if str(unit.expected_output or unit.objective).strip()
     ]
+    kinds = {str(unit.kind or "other").strip().lower() for unit in work_units}
+    if "build" in kinds and "verify" in kinds:
+        intent = "mixed"
+        deliverable_shape = "artifact"
+    elif "build" in kinds:
+        intent = "implementation"
+        deliverable_shape = "artifact"
+    elif "verify" in kinds:
+        intent = "testing"
+        deliverable_shape = "verification"
+    elif kinds & {"research", "analysis"}:
+        intent = "research"
+        deliverable_shape = "research"
+    elif kinds & {"plan", "design", "docs"}:
+        intent = "documentation"
+        deliverable_shape = "docs"
+    else:
+        intent = str(base_spec.task_profile.get("intent") or "mixed")
+        deliverable_shape = str(base_spec.task_profile.get("deliverable_shape") or "unknown")
+    if len(work_units) <= 1:
+        complexity = "simple"
+    elif len(work_units) <= 3:
+        complexity = "focused"
+    else:
+        complexity = "multi_role"
     planning = {
-        **dict(base_spec.planning or {}),
         "strategy": "llm_dag",
         "reflection_policy": "after_planning" if decision.quality_policy != "none" else "none",
         "missing_info": list(decision.critical_missing_info),
+        "build_plan_mode": "auto" if "build" in lanes else "skip",
+        "verify_plan_mode": "required" if "verify" in lanes else "skip",
+        "user_review_gate": str((base_spec.planning or {}).get("user_review_gate") or "on_risk"),
     }
     requirements = {
-        **dict(base_spec.team_requirements or {}),
+        "roles": [],
         "capabilities": capabilities,
         "workflow_lanes": lanes,
     }
@@ -323,21 +404,19 @@ def team_spec_from_planning_decision(
     return TeamSpec(
         **{
             **base_spec.to_dict(),
-            "task_profile": dict(base_spec.task_profile or {}),
+            "task_profile": {
+                "intent": intent,
+                "complexity": complexity,
+                "deliverable_shape": deliverable_shape,
+            },
             "team_requirements": requirements,
             "planning": planning,
-            "deliverables": [
-                *list(base_spec.deliverables or []),
-                *decision_deliverables,
+            "deliverables": decision_deliverables[:8],
+            "success_criteria": [
+                str(unit.expected_output or unit.objective).strip()
+                for unit in work_units
+                if str(unit.expected_output or unit.objective).strip()
             ][:8],
-            "success_criteria": list(dict.fromkeys([
-                *list(base_spec.success_criteria or []),
-                *(
-                    str(unit.expected_output or unit.objective).strip()
-                    for unit in decision.work_units
-                    if str(unit.expected_output or unit.objective).strip()
-                ),
-            ]))[:8],
             "risk_level": decision.risk_level,
             "uncertainty": decision.semantic_uncertainty,
             "planner_notes": list(dict.fromkeys(notes))[:8],

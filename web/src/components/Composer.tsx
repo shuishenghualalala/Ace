@@ -42,9 +42,9 @@ interface Props {
 }
 
 export function teamMemberMentionId(
-  member: Pick<TeamMemberView, "agentId" | "mentionId" | "isLeader">,
+  member: Pick<TeamMemberView, "agentId" | "isLeader">,
 ): string {
-  return member.mentionId?.trim() || (member.isLeader ? "leader" : member.agentId?.trim() || "");
+  return member.isLeader ? "leader" : member.agentId?.trim() || "";
 }
 
 export function formatTeamMentionToken(member: Pick<TeamMemberView, "agentId" | "mentionId" | "name">): string {

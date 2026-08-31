@@ -15,6 +15,17 @@ import { isPlanDocumentPath } from '../plan-document-path';
 import { newMessageId, state } from '../state';
 import { sessionDisplayModelLabel, sessionMessageModelLabel } from './session-model';
 
+export function backendDurationToMs(value: unknown): number {
+  const seconds = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return 0;
+  const now = Date.now();
+  if (
+    (seconds >= 1_000_000_000 && seconds <= now / 1000 + 366 * 24 * 60 * 60)
+    || (seconds >= 1_000_000_000_000 && seconds <= now + 366 * 24 * 60 * 60 * 1000)
+  ) return 0;
+  return Math.round(seconds * 1000);
+}
+
 export function makeSessionTitle(text: string): string {
   return text.trim().slice(0, 18) || '新对话';
 }
@@ -254,7 +265,7 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
       result: tc.result,
       status: normalizeHistoryToolStatus(tc.status, tc.result, tc.duration),
       startedAt: tc.started_at != null ? tc.started_at * 1000 : 0,
-      duration: tc.duration != null ? Math.round(tc.duration * 1000) : 0,
+      duration: tc.duration != null ? backendDurationToMs(tc.duration) : 0,
     })),
   };
   if (role === 'assistant' || role === 'team_internal') {
@@ -322,6 +333,14 @@ function isDuplicateAssistantOfTeamResult(existing: ChatMessage, incoming: ChatM
   const assistant = existing.role === 'assistant' ? existing : incoming.role === 'assistant' ? incoming : null;
   const team = existing.role === 'team_internal' ? existing : incoming.role === 'team_internal' ? incoming : null;
   if (!assistant || !team || !isTeamNodeResult(team)) return false;
+  if (assistant.requestId || team.requestId) {
+    return Boolean(
+      assistant.requestId
+      && team.requestId
+      && assistant.requestId === team.requestId
+      && team.eventType === 'team_summary',
+    );
+  }
   const assistantText = compactText(assistant.content);
   const teamText = compactText(team.content);
   return Boolean(assistantText && teamText && (assistantText === teamText || assistantText.includes(teamText) || teamText.includes(assistantText)));
@@ -338,6 +357,7 @@ function teamTurnKey(message: ChatMessage): string {
 function matchesTeamNode(existing: ChatMessage, incoming: ChatMessage): boolean {
   if (existing.role !== 'team_internal') return false;
   if (!isTeamStream(existing) && !isTeamNodeResult(existing) && !isTeamPlanningProgress(existing)) return false;
+  if (hasDifferentTeamRequests(existing, incoming)) return false;
   if (incoming.nodeId && existing.nodeId === incoming.nodeId) {
     const existingTurn = teamTurnKey(existing);
     const incomingTurn = teamTurnKey(incoming);
@@ -352,6 +372,25 @@ function matchesTeamNode(existing: ChatMessage, incoming: ChatMessage): boolean 
   );
 }
 
+function sameTeamRequest(existing: ChatMessage, incoming: ChatMessage): boolean {
+  const existingRequestId = String(existing.requestId || '').trim();
+  const incomingRequestId = String(incoming.requestId || '').trim();
+  if (existingRequestId || incomingRequestId) {
+    return Boolean(existingRequestId && incomingRequestId && existingRequestId === incomingRequestId);
+  }
+  return Boolean(
+    existing.sourceSessionId
+    && incoming.sourceSessionId
+    && existing.sourceSessionId === incoming.sourceSessionId,
+  );
+}
+
+function hasDifferentTeamRequests(existing: ChatMessage, incoming: ChatMessage): boolean {
+  const existingRequestId = String(existing.requestId || '').trim();
+  const incomingRequestId = String(incoming.requestId || '').trim();
+  return Boolean(existingRequestId && incomingRequestId && existingRequestId !== incomingRequestId);
+}
+
 function isDuplicateTeamEvent(existing: ChatMessage, incoming: ChatMessage): boolean {
   return existing.role === 'team_internal'
     && incoming.role === 'team_internal'
@@ -360,7 +399,7 @@ function isDuplicateTeamEvent(existing: ChatMessage, incoming: ChatMessage): boo
     && existing.eventType === incoming.eventType
     && existing.nodeId === incoming.nodeId
     && (existing.agentId || existing.mentionFrom) === (incoming.agentId || incoming.mentionFrom)
-    && existing.sourceSessionId === incoming.sourceSessionId
+    && sameTeamRequest(existing, incoming)
     && existing.content.trim() === incoming.content.trim();
 }
 

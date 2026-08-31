@@ -1,7 +1,8 @@
 """Lightweight Team turn routing.
 
-The runtime authority is ``TeamTurnDecision``.  TeamSpec only supplies the task
-profile; execution mode is inferred here from that profile.
+The runtime authority is ``TeamTurnDecision``. The current user message is
+always the turn goal; a persisted TeamSpec only supplies defaults for a
+substantive task and never overrides a direct-chat fast path.
 """
 
 from __future__ import annotations
@@ -25,17 +26,27 @@ class TeamTurnRouter:
     """Fast local router backed by TeamSpec."""
 
     def route(self, goal: str, *, team_spec: TeamSpecInput = None) -> TeamTurnDecision:
-        if isinstance(team_spec, TeamSpec):
-            spec_source: TeamSpecInput = team_spec
-        elif isinstance(team_spec, dict):
-            spec_source = {"goal": goal, **team_spec}
-        elif _is_simple_chat(goal):
-            spec_source = {
-                "goal": goal,
-                "task_profile": {
-                    "intent": "chat",
-                    "complexity": "simple",
+        if _is_simple_chat(goal):
+            decision = direct_chat_decision("simple_chat")
+            return TeamTurnDecision(
+                turn_kind=decision.turn_kind,
+                execution_mode=decision.execution_mode,
+                reason=decision.reason,
+                diagnostics={
+                    **decision.diagnostics,
+                    "turn_source": "simple_chat",
+                    "team_spec_default_ignored": team_spec is not None,
                 },
+            )
+        if isinstance(team_spec, TeamSpec):
+            spec_source: TeamSpecInput = {
+                **team_spec.to_dict(),
+                "goal": str(goal or "").strip(),
+            }
+        elif isinstance(team_spec, dict):
+            spec_source = {
+                **team_spec,
+                "goal": str(goal or "").strip(),
             }
         else:
             spec_source = {"goal": goal}

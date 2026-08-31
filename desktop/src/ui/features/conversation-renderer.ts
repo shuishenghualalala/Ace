@@ -26,6 +26,7 @@ import {
 import { diffRenderUnits, type RenderUnit } from '../chat-diff';
 import { attachScrollAnchor, type ScrollAnchor } from './scroll-anchor';
 import { getSessionAgentDisplay } from './workspaces';
+import { isExternalAgentSession, isExternalTeamSession } from './external-agents-feature';
 import {
   resolveTeamCollaborationMember,
   resolveTeamCollaborationName,
@@ -501,14 +502,15 @@ function sessionTurnIdentity(sessionId: string | null): AgentTurnOptions['identi
   if (!sessionId) return undefined;
   const display = getSessionAgentDisplay(sessionId);
   const provider = String(display?.agentLabel?.provider || '').trim().toLowerCase();
-  if (!provider || provider === 'crew' || provider === 'builtin' || provider === 'client') return undefined;
   // Team 是会话容器，不是发言者。团队消息由 team_internal.agent_id 决定头像；
   // 首帧前的通用等待态沿用内置 Leader（Crew），聊天区不展示 Team Logo。
-  if (provider === 'team') return undefined;
-  const name = String(display?.agentLabel?.name || 'Agent').trim();
+  if (isExternalTeamSession(display?.agentBinding)) return undefined;
   if (provider === 'sites') {
+    const name = String(display?.agentLabel?.name || 'Agent').trim();
     return { kind: 'external', name, badge: '', icon: 'icon-inspiration' };
   }
+  if (!isExternalAgentSession(display?.agentBinding)) return undefined;
+  const name = String(display?.agentLabel?.name || 'Agent').trim();
   const badge = provider.includes('codex') ? 'X' : (name || provider).slice(0, 1).toUpperCase();
   return { kind: 'external', name, badge };
 }

@@ -104,7 +104,7 @@ async def execute_captured(
     argv: tuple[str, ...],
     *,
     cwd: Path,
-    timeout: float,
+    timeout: float | None,
     env: dict[str, str] | None = None,
     stdin: bytes | None = None,
     home_files: Mapping[str, bytes] | None = None,
@@ -224,15 +224,16 @@ async def execute_captured(
     try:
         process = await asyncio.shield(spawn_task)
         _safe_activity_callback(on_started, process.pid)
-        stdout, stderr = await asyncio.wait_for(
-            _collect_host_output(
-                process,
-                stdin=stdin,
-                max_output_bytes=max_output_bytes,
-                on_output=on_output,
-            ),
-            timeout=timeout,
+        output_task = _collect_host_output(
+            process,
+            stdin=stdin,
+            max_output_bytes=max_output_bytes,
+            on_output=on_output,
         )
+        if timeout is None:
+            stdout, stderr = await output_task
+        else:
+            stdout, stderr = await asyncio.wait_for(output_task, timeout=timeout)
     except asyncio.CancelledError:
         if process is None:
             try:

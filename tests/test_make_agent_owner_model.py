@@ -279,7 +279,7 @@ async def test_make_agent_without_api_key_borrows_fake_provider(tmp_path, monkey
 
 
 def test_make_agent_acp_accepts_top_level_external_agent_id(owner_app):
-    """前端 session agent-config 会把 external_agent_id 存在顶层，ACP executor 必须能读到。"""
+    """ACP executor 继续读取 ACP 时代的顶层 external_agent_id。"""
     app, owner = owner_app
     agent = app._make_agent(
         {"executor": "acp", "external_agent_id": "agent_e2e"},
@@ -507,7 +507,11 @@ def test_demo_mode_false_for_external_executor_sessions(tmp_path, monkeypatch):
     app.session_store.ensure_session("s-ext", owner_account_id=owner)
     app.session_store.set_agent_config(
         "s-ext",
-        {"executor": "external", "external_agent_id": "agent-x", "model_profile_id": "ext-model"},
+        {
+            "executor": "external",
+            "external": {"external_agent_id": "agent-x"},
+            "model_profile_id": "ext-model",
+        },
         owner_account_id=owner,
     )
 

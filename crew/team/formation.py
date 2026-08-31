@@ -663,17 +663,9 @@ def _choose_minimal_team(
                 profile = profiles[agent_id]
                 if not is_agent_profile_available(profile):
                     continue
-                coverage = evaluate_capability_coverage(
-                    uncovered,
-                    {agent_id: profile},
-                    assigned_agent_ids=[agent_id],
-                )
-                cover = list(coverage.covered)
-                score = sum(profile.score(cap) for cap in cover)
-                if score > best_score:
-                    best_agent = agent
-                    best_cover = cover
-                    best_score = score
+                best_agent = agent
+                best_cover = list(uncovered)
+                break
         if best_agent is None:
             break
         agent_id = str(best_agent.get("id") or "")

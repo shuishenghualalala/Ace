@@ -474,4 +474,280 @@ graph TD
   <li><b>验证：</b><code>tests/gateway/test_gateway_api.py tests/test_external_agents.py tests/test_team_tasks.py</code> 完整后端回归为 <code>364 passed, 1 skipped</code>；并完成涉及文件的 Python 编译检查。</li>
 </ul>
 
+<h2>154. 2026-08-21 Team 成员运行事件持久化基线</h2>
+<ul>
+  <li><b>事件来源：</b>TeamPlan 节点的 <code>execution_events</code> 继续作为节点日志投影，但运行事件补充 <code>event_id</code>、<code>plan_id</code>、<code>node_id</code>、<code>request_id</code>、<code>attempt_id</code>、<code>actor_id</code> 和 <code>timestamp</code>，不再只依赖展示文本。</li>
+  <li><b>实时过程：</b>成员执行中的结构化 tool/thinking/status 事件在产生时同步到节点 metadata；实时聊天仍通过 <code>team_stream</code> 推送，完成阶段不再依赖最后几条事件才补写看板。</li>
+  <li><b>幂等：</b>同一 <code>event_id</code> 重复到达时更新原事件，不追加重复节点日志，避免完成阶段重新投影时出现重复过程。</li>
+  <li><b>边界：</b>普通 delta 文本仍只走实时流，不逐 token 写入 Kanban；后续前端节点日志应优先读取结构化事件，不再从聊天文本猜测成员过程。</li>
+  <li><b>验证：</b>新增实时节点事件持久化、字段关联和同事件更新幂等测试；本次未新增模块、表或前端协议。</li>
+</ul>
+
+<h2>155. 2026-08-21 Team 看板节点日志单一来源</h2>
+<ul>
+  <li><b>节点日志来源：</b>Web 与 Desktop 的 TaskBoard 只读取 Team task projection 中的结构化 <code>execution_events</code> 和节点错误，不再从聊天消息、成员名称、task id 或 delegate task id 反推执行过程。</li>
+  <li><b>语义边界：</b>聊天负责群聊叙事，看板负责节点运行事实；同一条成员过程不会因聊天消息和看板投影各自命中而重复展示。</li>
+  <li><b>兼容处理：</b>仅保留结构化事件标题 <code>节点承接</code> 的明确占位事件过滤，不再用“将按 DAG 节点”之类的自然语言正则控制 UI。</li>
+  <li><b>验证：</b>Web TaskBoard 节点日志测试改为验证结构化事件入口；Desktop/Web 不再保留按消息文本匹配节点日志的重复逻辑。</li>
+</ul>
+
+<h2>156. 2026-08-21 Team Leader 规划事件语义收口</h2>
+<ul>
+  <li><b>规划文案：</b><code>leader_plan</code> 只表示 TeamPlan 已生成和即将按 DAG 派发，不再使用“收到，我来处理”这类会让用户误以为 Leader 亲自承担成员任务的文案。</li>
+  <li><b>事件类型：</b><code>leader_plan</code> 归类为 <code>team_planning_progress</code>；<code>team_assign</code> 只用于真实成员节点分派；<code>leader_review</code>、<code>leader_summary</code> 继续使用各自的控制事件。</li>
+  <li><b>分派规则：</b>分派展示策略显式排除 Leader 控制节点，避免通过“始终返回 true”的隐式规则判断是否应产生成员 @mention。</li>
+  <li><b>兼容边界：</b>本次未删除旧 delegate 入口；普通 required workflow 继续由 Runtime 产生成员分派事件，旧入口后续单独收敛。</li>
+  <li><b>验证：</b>新增 Leader 规划文案和控制节点分派策略测试；本次未新增模块、表或接口。</li>
+</ul>
+
+<h2>157. 2026-08-21 Team 事件关联与终局去重</h2>
+<ul>
+  <li><b>关联字段：</b>所有 <code>team_internal</code> 事件都携带当前回合 <code>request_id</code>，不再只给用户 mention 事件写入，保证规划、分派、成员提交和 Leader 汇总可以关联到同一回合。</li>
+  <li><b>去重优先级：</b>实时和历史投影优先使用 <code>request_id</code> 与 <code>team_summary</code> 关联去重；旧数据缺少关联字段时才保留文本相似度兼容逻辑。</li>
+  <li><b>终局边界：</b>父 <code>agent_turn</code> 的 final 只负责回合结束，Team 聊天最终展示以同 request 的 <code>team_summary</code> 为准，避免 Leader 汇总重复出现。</li>
+  <li><b>验证：</b>补充 Team 内部事件 request_id 和父 final/Leader summary 稳定关联测试；本次未新增模块、表或接口。</li>
+</ul>
+
+<h2>158. 2026-08-21 Team 结构化响应解析收敛</h2>
+<ul>
+  <li><b>公共能力：</b>新增一个底层 <code>crew/core/text_parsing.py</code>，统一 Team 与 Gateway 从模型说明文字/代码围栏中提取 JSON 对象。</li>
+  <li><b>解析方式：</b>使用 <code>json.JSONDecoder.raw_decode</code> 处理嵌套对象，不再通过 <code>\{.*?\}</code> 或首尾大括号猜测 JSON 边界。</li>
+  <li><b>职责边界：</b>公共解析器只负责提取 JSON；TeamTurnDecision、GraphPlanner、Leader Review 仍分别负责自己的字段和 schema 校验。</li>
+  <li><b>兼容：</b>旧的 Gateway 公共函数保留原导出位置，但实现统一转向底层解析器；本次未新增业务模块、表或接口。</li>
+  <li><b>验证：</b>新增嵌套 JSON 代码围栏测试，并覆盖 Team 规划、Leader Review 和 Gateway 原有解析调用。</li>
+</ul>
+
+<h2>159. 2026-08-21 Team owner 读取边界与成员气泡契约</h2>
+<ul>
+  <li><b>读取边界：</b>TeamPlan 与 Team 的 key 始终由 <code>(owner_account_id, session_id)</code> 精确决定，不再遍历同 session 的任意 owner；owner 缺失时仅保留既有本地 <code>local</code> 兼容键。</li>
+  <li><b>安全语义：</b>带 owner 的调用不会回退到其他 owner；缺失 owner 也不会读到 A/B 等账户的数据。跨账户同 session 的计划和成员状态继续相互隔离。</li>
+  <li><b>前端契约：</b>Web 的 <code>team_internal</code> 不并入通用 Agent turn，而是继续经 <code>TeamAgentTurnBubble</code> 单独渲染，保留成员身份、过程详情和通信操作；与 Desktop 的成员消息渲染边界保持一致。</li>
+  <li><b>验证：</b>新增缺失 owner 不跨账户读取的后端回归；Team 测试为 <code>222 passed, 1 skipped</code>，Web MessageList/TaskBoard/history 回归为 <code>38 passed</code>，Web typecheck 通过。</li>
+</ul>
+
+<h2>160. 2026-08-21 Web/Desktop Team 流式合并语义对齐</h2>
+<ul>
+  <li><b>帧合并：</b>Web Team 消息合并器与 Desktop 对齐，支持 delta、累计快照和有重叠前缀的流式帧，不再直接字符串拼接导致重复正文。</li>
+  <li><b>过程保留：</b>流式过程文本、thinking、工具调用、<code>turnStartedAt</code> 和终态耗时统一保留；终态替换过程气泡时继续保留可展开的过程内容。</li>
+  <li><b>边界：</b>只调整 Team 内部消息投影，不改变后端事件协议、TaskBoard 节点事实或普通 Agent 消息合并。</li>
+  <li><b>验证：</b>新增累计帧、过程文本和回合计时回归；Web MessageList/TaskBoard/history 回归为 <code>39 passed</code>，Web typecheck 通过。</li>
+</ul>
+
+<h2>161. 2026-08-21 Team 状态投影协议收敛</h2>
+<ul>
+  <li><b>单一转换表：</b>TeamPlan 状态到 Kanban 状态、Kanban 状态回读为 TeamPlan 状态分别由模块级转换表维护，删除散落在方法内部的重复字典。</li>
+  <li><b>兼容别名：</b>回读同时兼容 <code>running</code>/<code>in_progress</code>、<code>done</code>/<code>completed</code> 和 <code>needs_info</code>，未知值仍安全降级为 <code>pending</code>。</li>
+  <li><b>边界：</b>不改变 TeamPlan 的内部状态命名，也不把 Kanban 的展示状态直接暴露给 Team Runtime；仅统一持久化和恢复投影的转换规则。</li>
+  <li><b>验证：</b>新增状态别名和未知状态回归；Team 全量测试需保持通过，本原子不新增模块或接口。</li>
+</ul>
+
+<h2>162. 2026-08-21 Legacy delegate 兼容边界显式化（已被 P2-4 收口方案取代）</h2>
+<ul>
+  <li><b>历史记录：</b>当时曾用 <code>allow_legacy_without_plan</code> 标记隐藏旧入口，以保留无 TeamPlan 派活兼容。</li>
+  <li><b>当前状态：</b>该兼容边界已由 2026-08-28 的 P2-4 收口取代；旧入口不再绕过 TeamPlan，无法恢复计划的 session 会明确拒绝派活。</li>
+</ul>
+
+<h2>163. 2026-08-21 Web/Desktop 历史角色归一化对齐</h2>
+<ul>
+  <li><b>输入边界：</b>Web 历史投影不再把后端未知 <code>role</code> 直接强转为前端枚举，而是与 Desktop 一致归一为 <code>status</code>；已知 <code>user/assistant/error/team_internal</code> 保持原语义。</li>
+  <li><b>安全性：</b>异常历史数据不会进入错误的消息渲染分支，也不会被误识别为 Team 成员发言或用户消息。</li>
+  <li><b>范围：</b>只调整历史读取边界，不改变实时 WebSocket 事件、Team 内部消息合并和正常角色数据。</li>
+  <li><b>验证：</b>新增未知角色归一化回归，并运行 Web/Desktop 历史映射测试和 TypeScript 类型检查。</li>
+</ul>
+
+<h2>164. 2026-08-21 Team 事件去重按请求关联</h2>
+<ul>
+  <li><b>关联优先级：</b>Web 与 Desktop 合并 <code>team_internal</code> 节点结果时，若任一事件带有 <code>requestId</code>，必须双方 requestId 相同才允许去重。</li>
+  <li><b>旧数据兼容：</b>只有双方都没有 requestId 时，才回退到双方都存在且相同的 <code>sourceSessionId</code>；空 source 不再被当作同一请求。</li>
+  <li><b>用户可见行为：</b>不同回合即使成员、节点和文本完全相同，也会分别保留；历史恢复与实时事件属于同一请求时仍只展示一条。</li>
+  <li><b>范围：</b>仅收紧前端 Team 事件合并条件，不改变后端事件协议、节点执行或普通 Agent 消息合并。</li>
+  <li><b>验证：</b>Web 历史/消息/看板测试为 <code>41 passed</code>，Desktop 历史映射测试为 <code>21 passed</code>，两端 typecheck 通过。</li>
+</ul>
+
+<h2>165. 2026-08-21 Team summary 与父 final 按请求隔离</h2>
+<ul>
+  <li><b>问题：</b>父 <code>assistant</code> final 与 <code>team_summary</code> 在旧文本兜底下可能因正文相同而跨回合合并。</li>
+  <li><b>规则：</b>只要任一侧有 <code>requestId</code>，必须双方 requestId 相同且 Team 事件为 <code>team_summary</code> 才去重；双方都没有 requestId 时才保留历史文本兼容。</li>
+  <li><b>行为：</b>同一请求的父 final 仍由 Team summary 替换；不同请求即使正文完全相同，也各自保留，不影响用户查看不同回合的结果。</li>
+  <li><b>验证：</b>Web 历史/消息/看板测试为 <code>42 passed</code>，Desktop 历史映射测试为 <code>22 passed</code>，两端 typecheck 通过。</li>
+</ul>
+
+<h2>166. 2026-08-21 Team thinking 归一化职责收敛</h2>
+<ul>
+  <li><b>职责：</b>旧版按段落持久化 thinking 的修复逻辑归入现有 <code>result_presenter.py</code>，与结果清洗、摘要和展示文本处理放在同一职责边界。</li>
+  <li><b>管理器瘦身：</b><code>team_manager.py</code> 删除重复实现，仅保留历史模块级名称的兼容别名，不新增文件或调用层。</li>
+  <li><b>兼容：</b>旧数据仍按原规则合并标点、括号和短 token；不足以判断为旧分段格式时原样返回。</li>
+  <li><b>验证：</b>复用既有 legacy thinking 回归，并运行 Team 全量测试和 Python 编译检查。</li>
+</ul>
+
+<h2>167. 2026-08-21 Team 结果路径解析职责收敛</h2>
+<ul>
+  <li><b>解析边界：</b>结果文本中的绝对路径、相对路径和反引号路径由 <code>result_presenter.extract_result_paths</code> 统一提取并去重。</li>
+  <li><b>安全边界：</b>展示模块只返回候选字符串；当前 workspace、回合目录、文件存在性和目录穿越校验仍由 <code>team_manager.py</code> 负责。</li>
+  <li><b>收益：</b>移除管理器顶部的三组路径正则和重复提取循环，减少核心编排文件的文本解析噪声，不新增模块。</li>
+  <li><b>验证：</b>复用 Team 自动产物路径、越界路径和节点文件变更测试，并运行 Team 全量测试及 Python 编译检查。</li>
+</ul>
+
+<h2>168. 2026-08-21 Team 历史投影按请求与子会话隔离</h2>
+<ul>
+  <li><b>父 final：</b>父 <code>agent_turn</code> 带有 <code>request_id</code> 时，只接受同 request 的 <code>team_summary</code> 去重，不再继续使用跨回合正文包含关系。</li>
+  <li><b>旧子会话：</b>历史事件缺少 request_id/reply_to 时，回退去重 key 纳入 <code>source_session_id</code>；不同成员回合即使正文相同也各自保留。</li>
+  <li><b>兼容边界：</b>完全缺少请求关联的旧父 final 仍保留文本兼容逻辑；带关联字段的新事件不再被旧文本启发式覆盖。</li>
+  <li><b>验证：</b>新增跨 request 父 final、跨子会话同文案历史回归；Team 全量测试和 Python 编译检查通过。</li>
+</ul>
+
+<h2>169. 2026-08-21 Team 看板任务按 request_id 投影</h2>
+<ul>
+  <li><b>匹配优先级：</b>任务投影有 <code>request_id</code> 时，只按对应的 <code>turn_session_id</code> 判断是否已被 TeamPlan 表示；不再用相同标题跨回合匹配。</li>
+  <li><b>旧数据兼容：</b>仅没有 request_id 的旧父任务继续使用规范化标题兜底，保留历史数据的可见性。</li>
+  <li><b>用户可见行为：</b>不同请求即使使用同一任务标题，也不会互相隐藏；同一请求仍避免父 task 与 TeamPlan 节点重复展示。</li>
+  <li><b>验证：</b>新增不同 request 同标题的任务投影回归，并运行 Team 全量测试和 Python 编译检查。</li>
+</ul>
+
+<h2>170. 2026-08-21 Web/Desktop Team 流式帧请求冲突隔离</h2>
+<ul>
+  <li><b>合并条件：</b>同节点流式帧继续按 node/source 兼容旧历史，但当双方都有不同 <code>requestId</code> 时立即视为不同回合，不再合并正文、thinking 或工具过程。</li>
+  <li><b>兼容边界：</b>只有一侧缺少 requestId 时仍允许历史 sourceSessionId 回退；新数据的显式请求关联优先级更高。</li>
+  <li><b>范围：</b>Web 与 Desktop 合并器保持同一语义，不改变后端事件协议、节点执行和同 request 的累计帧合并。</li>
+  <li><b>验证：</b>新增同 node/source、不同 request 的流式帧回归；两端历史/消息/看板测试与 typecheck 均通过。</li>
+</ul>
+
+<h2>171. 2026-08-21 Team 展示职责去除管理器代理层</h2>
+<ul>
+  <li><b>职责边界：</b>结果摘要、验收标题、节点标签、产物卡片和产物文件名统一直接调用 <code>result_presenter.py</code>，不再经由 <code>team_manager.py</code> 的同名静态转发方法。</li>
+  <li><b>实现范围：</b>删除纯代理方法，保留 TeamManager 对 workspace、产物归属、文件变更和持久化的编排职责；未新增文件、接口或数据字段。</li>
+  <li><b>行为兼容：</b>展示函数实现没有改变，只收窄调用路径；原有产物命名、节点摘要、验收结论和看板卡片输出保持不变。</li>
+  <li><b>验证：</b>复用 Team 全量测试、产物命名/路径回归和 Python 编译检查。</li>
+</ul>
+
+<h2>172. 2026-08-21 Team 删除无调用代理方法</h2>
+<ul>
+  <li><b>清理范围：</b>删除未被 TeamManager 实际调用的 <code>_role_*</code>/<code>_goal_*</code> 转发方法，以及单点使用的 JSON、聊天噪声和共享工作区代理。</li>
+  <li><b>真实来源：</b>角色/目标能力继续由 <code>flow_builder.py</code> 提供，JSON 解析由 <code>crew/core/text_parsing.py</code> 提供，聊天展示判断由 <code>result_presenter.py</code> 提供。</li>
+  <li><b>边界：</b>不删除仍承担编排职责的 <code>_default_workflow_nodes</code>、workspace 路径校验和成员能力读取；不新增模块。</li>
+  <li><b>验证：</b>运行 Team 全量测试和 Python 编译检查，确认旧工作流节点、共享 workspace 和历史投影行为不变。</li>
+</ul>
+
+<h2>173. 2026-08-21 Team 事件历史投影职责分离</h2>
+<ul>
+  <li><b>管理器职责：</b><code>team_manager.py</code> 只解析 session、owner 并选择 Team Kanban workflow；不再直接遍历事件、拼装聊天字段。</li>
+  <li><b>投影职责：</b>现有 <code>history_projection.py</code> 新增 <code>project_team_event_history</code>，统一处理可见事件筛选、聊天噪声、thinking 兼容、通信状态补全和历史字段映射。</li>
+  <li><b>边界：</b>不改变事件类型白名单、ask 生命周期隐藏规则、request 状态补全和排序；不新增数据库表或 API。</li>
+  <li><b>验证：</b>Team 全量测试为 <code>227 passed, 1 skipped</code>，Gateway Team 测试为 <code>10 passed</code>，Python 编译检查通过。</li>
+</ul>
+
+<h2>174. 2026-08-21 Team 计划变更纯函数归位</h2>
+<ul>
+  <li><b>计划职责：</b>节点引用归一化、DAG 环检测和安全节点 ID 清洗移入现有 <code>workflow_plan.py</code>，与 WorkflowPlan 的稳定计划契约放在同一边界。</li>
+  <li><b>管理器职责：</b><code>team_manager.py</code> 只保留结合当前 TeamPlan 生成唯一节点 ID、校验成员和持久化计划变更的运行时编排。</li>
+  <li><b>行为兼容：</b>依赖去重、环检测和节点 ID 清洗规则保持原实现，不改变 Leader 受控加节点流程。</li>
+  <li><b>验证：</b>运行 Team 全量测试和 Python 编译检查。</li>
+</ul>
+
+<h2>175. 2026-08-21 Team 第五阶段回归验收</h2>
+<ul>
+  <li><b>边界修复：</b><code>_choose_minimal_team</code> 在能力画像没有任何有效覆盖时只执行一次候选成员兜底，随后结束本轮选择；不再重复选择空覆盖成员导致无限循环。</li>
+  <li><b>数据语义：</b>兜底成员仍保留用户可见的组队建议，但 Formation coverage 会继续标记真实未覆盖能力；provider/name 不再被测试当作能力证据，能力覆盖回归改用显式 profile。</li>
+  <li><b>后端专项：</b>Team 相关测试 <code>291 passed, 1 skipped</code>；<code>crew/team</code> Python 编译检查通过。</li>
+  <li><b>Web：</b><code>26</code> 个测试文件、<code>177 passed</code>，TypeScript typecheck 通过。</li>
+  <li><b>Desktop：</b><code>149</code> 个测试文件、<code>1726 passed</code>，TypeScript typecheck 通过。</li>
+  <li><b>全量边界：</b>后端全量共 <code>3430 passed</code>、<code>37 skipped</code>、<code>25 failed</code>、<code>17 errors</code>；失败集中在沙箱禁止本地端口监听/连接、可选微信依赖和安全运行时，不属于 Team 回归，已用 Team 专项测试隔离确认。</li>
+</ul>
+
+<h2>2026-08-21 TeamSpec 持久化快照进入本轮规划</h2>
+<p>外部团队加载时会保留 <code>external_team.team_spec_json</code> 的 TeamSpec 快照；该快照来自“外援—组建团队”的结构化表单，团队名称不会被当作任务语义。Team turn 未显式携带 <code>team_spec</code> 时，<code>TeamManager</code> 将当前用户目标投影到该快照后传给 Turn Router 与 <code>TeamGraphPlanner</code>；Turn Router 始终以当前 Prompt 覆盖 TeamSpec 的旧 goal，寒暄、确认等 direct chat 快路径也不受长期 execution 默认影响。普通聊天 Prompt 不重新触发 FormationConstraints 或 FormationPlan。因而 PlanningDecision 超时回退 Standard 时仍保留已确认的团队边界，同时本轮任务仍由当前 turn 语义决定。</p>
+<p>旧持久化快照中若将 <code>intent</code>、<code>complexity</code> 等任务语义写在 <code>execution_profile</code>，仅在持久化边界投影回 <code>task_profile</code>；显式运行时输入仍由 <code>build_team_spec</code> 严格校验。回归测试覆盖快照投影、当前目标覆盖和成员 DAG 节点生成。</p>
+
+<h2>2026-08-21 已确认成员能力与模型画像合并</h2>
+<p>TeamMemberSpec 中已确认的成员能力是本轮 DAG 的 assignment contract；AgentProfile 只作为模型/runtime 证据补充，不能因新画像只有低置信先验就清空成员能力。DAG 直接消费能力契约；Runtime 则在保留该契约的同时，以当前 AgentProfile 的可用性和模型绑定作为执行门槛，因此“职责覆盖”不会再把 unavailable/unknown 外部成员误判成可执行。Desktop 完成态若收到没有正文、过程或产物的规划事件，不再渲染空的浅绿色气泡；流式规划仍保留进度展示。</p>
+
+<h2>2026-08-24 Team 第一阶段：能力契约与 Runtime 可用性分离</h2>
+<p><code>evaluate_capability_coverage()</code> 新增显式的 Runtime 画像可用性门控。DAG 规划不访问外部 Store，继续使用已确认的 <code>TeamMemberSpec.capabilities</code>；Runtime 对外部成员同时校验能力契约与 AgentProfile 的 <code>availability</code>/<code>binding_status</code>。低置信画像不会抹掉确认能力，但画像解析失败或 Runtime/model 不可用会进入 <code>unknown</code>/<code>unavailable</code>，触发既有补员链路。Runtime 当前成员与现有成员改派候选均复用同一成员覆盖解析，避免两套判断漂移。</p>
+
+<h2>2026-08-24 Team 第二阶段：成员画像解析入口收口</h2>
+<p>TeamManager 新增单一的 <code>_resolve_member_profile()</code> 入口，统一处理 External Agent/model 绑定、AgentProfile 缓存解析和异常降级。Team 初始化写入 <code>member_profiles</code> 与 Runtime 节点 readiness 检查均复用该入口；DAG 仍只消费内存画像和已确认能力，不访问 Store。这样既保留规划与运行时的职责边界，也避免两条路径对成员模型绑定、画像失败语义和日志处理不一致。</p>
+
+<h2>2026-08-24 Team 第三阶段：AgentProfile 缓存修订边界</h2>
+<p>Runtime Profile cache 不再把 schema <code>profile_version</code> 当作唯一画像版本。缓存 key 现在同时包含 Agent 的 <code>profile_updated_at</code>、画像内容指纹、Runtime 状态修订和当前 model 的执行指纹；observation 聚合、Runtime 可用性变化或模型目录事实变化后，会自然生成新 key 并重新解析画像。缓存仍保留在 TeamManager 内，不新增存储表或跨模块缓存。</p>
+
+<h2>2026-08-24 Team 第四阶段：Runtime 临时成员恢复与 Team 缓存生命周期</h2>
+<p>WorkflowPlan 持久化的 <code>runtime_members</code> 现在会在进程重启或 Team 缓存 miss 后还原为本次 WorkflowRun 的临时 <code>TeamMemberSpec</code>，再参与 Team 构建和节点执行；恢复时按 <code>external_team_id</code> 匹配，避免旧团队临时成员串入新团队。Session Agent/Team 配置更新在淘汰普通 Agent 缓存的同时淘汰 Team 缓存，模型切换仍保持既有同一 Session 的 Team 重建语义。</p>
+
+<h2>2026-08-24 Team 重构第一阶段：TeamPlan 持久化边界收口</h2>
+<p>新增 <code>crew/team/team_plan_store.py</code>，集中负责 TeamPlan 与 Dynamic Kanban 的保存、节点同步、WorkflowPlan 恢复、事件索引和 Runtime 临时成员快照恢复。<code>TeamManager</code> 保留原有私有兼容入口，但不再直接实现 Kanban 遍历和快照解析；TeamPlan、节点状态、revision、事件类型和 Team/Session 外部协议均保持不变。本阶段只调整职责边界，不改变 DAG 规划、Runtime 补员、成员模型绑定或 Web/Desktop 展示行为。</p>
+<p>验证：<code>tests/test_team_tasks.py</code> 为 <code>236 passed, 1 skipped</code>，<code>tests/gateway/test_gateway_api.py</code> 为 <code>23 passed</code>，相关 Python 文件编译检查通过。</p>
+
+<h2>2026-08-24 Team 重构第二阶段：Runtime 补员策略边界收口</h2>
+<p>新增 <code>crew/team/runtime_staffing.py</code>，集中负责当前成员能力覆盖、Runtime/model 可用性准入、补员触发原因、现有成员改派判断、候选 Runtime/Agent 选择、补员选项文案和临时 <code>TeamMemberSpec</code> 编译。<code>TeamManager</code> 继续负责用户确认、节点状态更新、Team 重建和 revision 持久化；因此补员的业务时序、确认语义、WorkflowRun 作用域和 External Team 不变约束均保持不变。</p>
+<p>策略通过当前 External Agent Store 提供器读取成员事实，避免 Manager 初始化后 Store 绑定变化造成候选失效。验证：<code>tests/test_team_tasks.py</code> 为 <code>236 passed, 1 skipped</code>，<code>tests/gateway/test_gateway_api.py</code> 为 <code>23 passed</code>，<code>tests/test_dynamic_kanban.py</code> 为 <code>70 passed</code>，相关 Python 文件编译检查通过。</p>
+
+<h2>2026-08-24 Team 重构第三阶段：成员构建与模型绑定边界收口</h2>
+<p>新增 <code>crew/team/team_builder.py</code>，集中负责 External Team 成员规格、Formation 职责投影、Session 级 <code>member_model_bindings</code> 物化、Registry 克隆、Runtime executor 配置和 Agent 实例装配。<code>TeamManager</code> 继续负责 TeamBus、mention、delegate、计划回调和最终 Team 组装；成员模型切换仍只影响当前 Session 的后续 Team 重建，不改变其他 Session、External Team 默认模型或既有 DAG。</p>
+<p>验证：<code>tests/test_team_tasks.py</code> 为 <code>236 passed, 1 skipped</code>，<code>tests/gateway/test_gateway_api.py</code> 为 <code>23 passed</code>，<code>tests/test_dynamic_kanban.py</code> 为 <code>70 passed</code>，相关 Python 文件编译检查通过。</p>
+
+<h2>2026-08-24 Team 重构第四阶段：Workflow Runtime 编排边界收口</h2>
+<p>新增 <code>crew/team/team_workflow_runtime.py</code>，集中承载规划进度、Leader 节点、成员节点调度、实时过程、补员/审阅回调和 WorkflowRun 最终收束。<code>TeamManager</code> 保留原有入口与兼容回调，只负责提供 Team、计划、持久化和运行服务，不再内嵌整段执行循环。</p>
+<p>本阶段不改变 DAG 节点状态、Runtime 补员确认、Leader 审阅、Team Bus 事件或 Web/Desktop 流式协议；追问交互仍通过 TeamManager 兼容入口注入，保持既有测试替身和运行时扩展边界。验证：Team <code>236 passed, 1 skipped</code>，Dynamic Kanban <code>70 passed</code>，Gateway Plan <code>11 passed</code>，Python 编译与 diff 检查通过。</p>
+
+<h2>2026-08-25 Team PlanningDecision 竞速与 Workflow 安全上下文修复</h2>
+<p><code>PlanningDecision</code> 的 chat/stream 竞速现在只有在返回通过 PlanningDecision schema 校验的结构化 JSON 时才允许某一路取消另一条传输；chat 路径返回说明性非 JSON 文本或结构不完整的 JSON 时继续等待 stream，若 stream 已输出 reasoning 则继续进入 grace，避免把合法的流式规划误判为 <code>invalid_json</code>/<code>schema_invalid</code> 并回退稳定 DAG。诊断保留 <code>chat_non_json</code>、<code>chat_schema_invalid</code>、<code>stream_non_json</code> 和实际 transport，便于区分模型内容问题与超时。</p>
+<p>必需 Workflow 在成员 <code>Agent.run()</code> 之前建立 Team 委派，因此在 <code>TeamManager._run_required_workflow()</code> 入口有界继承 envelope 中的 host-owned <code>ProcessLaunch</code>；ACP/CLI 子进程继续 fail-closed，不创建默认安全上下文、不放宽权限。新增 PlanningDecision 非 JSON 竞速、reasoning grace 和 Team Workflow 启动上下文回归。</p>
+
+<h2>2026-08-25 Team 本轮执行范围确认</h2>
+<p><code>PlanningDecision</code> 新增 <code>requested_scope</code>：<code>plan_only</code> 表示用户只要求方案/设计/文档，<code>execute</code> 表示用户明确要求开发、修改、运行或验证，<code>uncertain</code> 表示无法可靠判断。该字段只描述当前用户请求，不覆盖 TeamSpec 的长期任务语义。</p>
+<p>当用户请求为 <code>plan_only</code>，而当前 TeamSpec 的默认 intent 或 workflow lane 包含实际开发/验证时，GraphPlanner 在创建 DAG 前返回 <code>scope_conflict</code>，TeamManager 不创建 TeamPlan、不派发成员；Workflow Runtime 通过既有 follow-up 通道询问“仅输出开发方案”或“方案并实际开发验证”。用户选择写入当前回合的 <code>scope_confirmation</code>，再重跑本轮 PlanningDecision，不修改团队配置，也不影响其他 session。</p>
+<p>回归覆盖：冲突时无节点、追问选项和确认后的当前回合配置传递；实现复用现有 PlanningDecision、Team Workflow Runtime 和 follow-up 通道，未新增顶层模块、数据库表或 API。</p>
+
+<h2>2026-08-26 Team 第三阶段：PlanningDecision 生成当前回合 TeamSpec</h2>
+<p>PlanningDecision 成功后，<code>team_spec_from_planning_decision()</code> 将本轮 work units 作为当前任务 TeamSpec 的唯一需求来源：重新生成当前回合的 <code>task_profile</code>、能力、workflow lanes、planning 模式、deliverables 和 success criteria，并过滤 Leader 控制工作单元。持久化 TeamSpec 的角色、长期 build/verify 泳道和长期交付物仍只用于决策前的默认范围与策略判断，不再和本轮字段做并集。</p>
+<p>因此同一长期开发团队收到“只写贪吃蛇开发方案”时，确认后的 WorkflowPlan 只保留方案/设计节点；如果本轮确实要求实现和验证，PlanningDecision 的 build/verify work units 才会进入当前 TeamSpec 和 DAG。同步 Fast/显式 TeamSpec 规划仍保持原有结构化输入行为。本阶段未新增模块、数据库表或 API。</p>
+<p>验证：新增长期 TeamSpec 与本轮 plan-only 决策的隔离回归，覆盖当前目标、task_profile、能力、泳道、交付物、验收标准和 WorkflowPlan.task 投影；并运行 Team 全量测试、Python 编译检查。</p>
+
+<h2>2026-08-26 Team 第四阶段：WorkflowPlan 节点契约单向编译</h2>
+<p>节点执行契约统一由 <code>workflow_plan.py</code> 生成，<code>graph_planner.py</code> 只负责语义工作单元、负责人和 DAG 编译。PlanningDecision 的 <code>expected_output</code>、Formation 节点的 <code>expected_outputs</code> 会优先进入 WorkflowPlan 节点的 <code>expected_outputs</code> 与验收条件；没有显式声明时才使用泳道默认契约。</p>
+<p>这样 TeamSpec → WorkflowPlan → TeamPlan 的链路只有一个方向：WorkflowPlan 保存当前回合的稳定计划快照，TeamPlan/看板只保存其运行状态和投影，不重新解释任务语义，也不会把长期团队的默认输出带回当前回合。本阶段未新增模块、数据库表或 API。</p>
+<p>验证：补充方案节点实际输出进入 WorkflowPlan 的回归；Team 全量测试、ruff、Python 编译和 diff 检查通过后提交。</p>
+
+<h2>2026-08-26 Team 重构第五阶段：WorkflowPlan 到 TeamPlan 单向运行投影</h2>
+<p><code>WorkflowPlan</code> 现在是本轮节点与依赖的唯一静态输入。TeamManager 的运行时主路径不再同时传入独立的 <code>nodes/edges</code> 和快照；旧参数仅保留给没有 WorkflowPlan 的兼容入口。恢复时当前快照优先，历史 <code>team_plan_created</code> 事件只在旧数据缺少节点时兜底，避免旧事件覆盖当前节点标题、负责人、能力和执行契约。</p>
+<p>WorkflowPlan 节点补充必要的展示字段与节点契约投影，TeamPlan/看板继续保存状态、结果、重试、产物和运行事件；运行态不会反写任务语义。修复同时兼容 <code>assignee</code>/<code>assignee_id</code>，保持旧入口、成员执行、Fast 模式、恢复和 Web/Desktop 看板展示不变。本阶段未新增模块、数据库表或接口。</p>
+<p>验证：<code>tests/test_team_tasks.py</code> 为 <code>246 passed, 1 skipped</code>，新增快照单源与旧事件恢复回归；相关 Python 编译检查、Ruff 和 <code>git diff --check</code> 通过。</p>
+
+<h2>2026-08-27 Team 真实验收：耗时、产物与看板定位收敛</h2>
+<ul>
+  <li><b>耗时边界：</b>工具/回合耗时统一按 elapsed seconds 传输；Gateway、Team 历史投影和 Web/Desktop 映射会丢弃误存为 Unix 时间戳的旧值，不再展示 <code>external_tool 496609h 13m</code> 这类异常数据。正常耗时保持不变，历史原始记录不被改写。</li>
+  <li><b>产物边界：</b>方案/设计节点先登记成员实际写出的具体文件；只有当前节点没有可打开的显式文件产物时，才生成兜底 Markdown。成员已生成 <code>拳皇街机小游戏Demo方案.md</code> 时，不再额外展示内容近似会话总结的 <code>端到端实现方案.md</code>。</li>
+  <li><b>看板边界：</b>Web/Desktop 移除节点内“执行详情”时间线，不再把 thinking/tool 的碎片直接展示给用户；结构化 <code>execution_events</code> 仍保留在后端用于审计和排查。节点展开区保留摘要、状态、耗时、产物和恢复动作，并增加“定位”按钮跳转到对应团队消息。</li>
+  <li><b>功能影响：</b>本次只调整历史展示、产物选择和看板信息层级，不改变 DAG、Runtime 补员、成员执行、TeamSpec 或模型切换语义；文件打开、节点取消和阻塞恢复继续沿用原入口。</li>
+  <li><b>验证：</b>Web 全量 <code>26 files / 177 passed</code>，Desktop 全量 <code>149 files / 1729 passed</code>；后端 Team/Gateway 回归 <code>274 passed, 1 skipped</code>，Ruff、Python 编译、Web/Desktop TypeScript、两端构建和 Desktop CSS lint 均通过。</li>
+</ul>
+
+<h2>2026-08-27 PlanningDecision 双阶段输出收敛</h2>
+<ul>
+  <li><b>首轮：</b>继续使用 <code>stream_chat()</code> 与 <code>chat()</code> 并发竞速，默认最多等待 30 秒；流式 reasoning 仍只用于进度展示，不当作规划结果。</li>
+  <li><b>重试：</b>首轮没有结构化结果时只进行一次最多 10 秒的短 <code>chat()</code> 重试，带 <code>response_format=json_object</code>、<code>reasoning_mode=disabled</code> 和 2048 token 上限；首轮与重试合计最多约 40 秒，成功后继续编译语义 DAG。</li>
+  <li><b>回退：</b>两次都失败才回退 <code>standard_role_dag</code>；首轮与重试的错误类型、耗时和 transport 分开记录，不增加用户确认步骤，也不在业务层复制语义规则。</li>
+  <li><b>进度：</b>规划气泡只展示“理解任务目标、识别工作单元、生成团队执行图”三段状态，移除没有实际动作含义的“准备团队执行：待执行”。</li>
+  <li><b>模块边界：</b>Provider 只负责把结构化输出和非思考模式映射到厂商请求；GraphPlanner 负责两阶段时序与校验；TeamManager 只负责进度协议。未新增顶层模块、数据库表或 API。</li>
+</ul>
+
+<h2>2026-08-28 TeamPlan 派活语义收口（P2-4）</h2>
+<ul>
+  <li><b>唯一执行路径：</b><code>delegate_to_teammate</code>、<code>team_mention(assign)</code> 和外部控制面的 <code>request_delegate</code> 都必须绑定现有 <code>TeamPlan</code> 节点；节点不存在、成员不匹配或状态不允许时统一拒绝。</li>
+  <li><b>移除隐式 Legacy Delegate：</b>删除 <code>allow_legacy_without_plan</code> 及其无计划派活分支，TeamManager 不再允许通过隐藏参数绕过 TeamPlan。Workflow Runtime 预先标记节点为 <code>in_progress</code> 时使用显式的内部预占语义（<code>preclaimed_node</code>），并仍校验节点未绑定既有任务。</li>
+  <li><b>旧版本兼容：</b>旧 TeamPlan/看板数据仍通过 <code>TeamPlanStore.hydrate()</code> 恢复；旧事件仅用于读取和恢复，不再作为无计划执行入口。没有可恢复计划的旧 session 会返回明确错误，不会静默执行 Legacy Delegate。</li>
+  <li><b>冗余清理：</b>外部团队 Leader 解析删除完全相同的 if/else 分支，委派回调统一命名为计划派活，不再使用 <code>legacy_delegate</code> 作为运行语义。</li>
+</ul>
+<p>验证：<code>tests/test_team_tasks.py</code> 为 <code>251 passed, 1 skipped</code>；相关 Gateway/Kanban 回归为 <code>94 passed</code>，覆盖有/无 TeamPlan 的内部与控制面派活、持久化计划恢复、节点重复派活和 Workflow Runtime 预占状态。Python 编译、Ruff 的 E9/F 检查与 <code>git diff --check</code> 通过；全量 Ruff 仍有历史遗留告警，未在本阶段扩大范围。</p>
+
+<h2>2026-08-31 外援 Timeout Policy 统一接入</h2>
+<p>Team 成员与单外援共用 <code>crew/core/timeout_policy.py</code>。外部执行器将策略解析为 idle window、absolute hard deadline、交互等待和绑定 grace period，再传给 ACP/Codex/Claude/CLI adapter；Team 不再在成员构建层复制超时规则。第一阶段不改变已有默认有效时长，便于旧 session 平滑迁移。</p>
+<p>管理员可在 <code>runtime.timeout_policy</code> 设置统一参数；<code>hard_timeout_seconds: 0</code> 关闭外部适配器的整次执行硬截止，但不关闭 idle timeout 或交互令牌过期；应用级 TaskRuntime 仍可作为独立的全局兜底。Followup 默认等待仍为 300 秒。交互绑定 TTL 会随 hard deadline 延长，并保留 grace period，避免执行结束后留下永久回调权限。</p>
+<p>本阶段新增 Core 跨模块能力文件，未新增数据库表或 API；配置、Team builder、App 装配、Gateway 交互桥和 Runtime adapter 均复用同一 policy。</p>
+<p>验证：Timeout Policy 与外援/Team/Gateway/Kanban 组合回归 <code>483 passed, 1 skipped</code>；相关 Python 编译、Ruff E9/F 与 <code>git diff --check</code> 通过。安全 Runtime 回归中有 2 项 macOS Seatbelt preflight 受当前执行环境限制，非本次代码断言失败。</p>
+
+<h2>2026-08-31 Leader 审阅 JSON 兜底修复</h2>
+<p>Leader 审阅结果优先读取结构化 <code>action</code>。当模型在 <code>message</code>/<code>instructions</code> 中输出未转义双引号导致完整 JSON 不可解析时，Runtime 仍会读取显式动作，避免把“无阻塞”误判为 <code>block</code>；纯文本兜底同时识别常见否定表达（如“无阻塞”）。Leader prompt 也明确要求字符串内的英文双引号遵循 JSON 转义规则。</p>
+<p>该修复只影响审阅决策解析与回归测试，不改变 <code>target_node_id</code>、TeamPlan 状态机或此前的外援 mention 稳定 ID 传输。</p>
+
 <div class="nav">返回：<a href="../crew-architecture.html">Crew 架构总览</a> · <a href="index.html">模块索引</a></div></div><script>mermaid.initialize({startOnLoad:true,theme:"default"});</script></body></html>

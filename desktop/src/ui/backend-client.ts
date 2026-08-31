@@ -38,10 +38,9 @@ export type ChunkKind =
   | 'ping'
   | 'pong';
 
-/** 写入 /api/session/{id}/agent-config 的 payload。 */
+/** 写入 /api/session/{id}/agent-config 的 payload；外援 Agent id 只放在 external 下。 */
 export interface SessionAgentConfig {
   executor: 'builtin' | 'client' | 'external' | 'acp' | 'team';
-  external_agent_id?: string;
   external?: { external_agent_id?: string; model?: string; [k: string]: unknown };
   acp?: { external_agent_id?: string; [k: string]: unknown };
   team?: { external_team_id?: string; [k: string]: unknown };
@@ -327,6 +326,7 @@ export interface BackendSession {
   pending_model_profile_id?: string | null;
   model_label?: string;
   agent_label?: { name?: string; provider?: string; display_badge?: string; model?: string };
+  /** 后端判定的会话执行身份；外援判断只依赖该字段。 */
   agent_binding?: SessionAgentBinding;
 }
 

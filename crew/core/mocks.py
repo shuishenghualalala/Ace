@@ -36,6 +36,8 @@ class FakeProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         *,
         max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
+        reasoning_mode: str | None = None,
     ) -> ChatResponse:
         self.calls.append(list(messages))
         if self._script:
@@ -49,6 +51,8 @@ class FakeProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         *,
         max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
+        reasoning_mode: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         self.stream_calls.append(list(messages))
         # 复用 chat() 的逻辑，把结果拆成字符逐个发出。

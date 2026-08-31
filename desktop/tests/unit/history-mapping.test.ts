@@ -14,6 +14,7 @@ vi.mock('../../src/ui/features/session-model', () => ({
 }));
 
 import {
+  backendDurationToMs,
   filterExistingTurnFileChanges,
   inferTurnFileChangesFromToolCalls,
   mapBackendHistoryItem,
@@ -24,6 +25,11 @@ import type { BackendHistoryItem } from '../../src/ui/backend-client';
 import type { TurnFileChangeSummary } from '../../src/ui/chat-render';
 
 describe('mapBackendHistoryItem turnFileChanges', () => {
+  it('does not render an epoch timestamp as an elapsed duration', () => {
+    expect(backendDurationToMs(Math.floor(Date.now() / 1000))).toBe(0);
+    expect(backendDurationToMs(1.2)).toBe(1_200);
+  });
+
   it('历史消息优先保留生成当时的模型', () => {
     const msg = mapBackendHistoryItem({
       role: 'assistant',
@@ -287,6 +293,29 @@ describe('Team Session history mapping', () => {
     expect(merged[0].toolCalls?.[0]).toMatchObject({ toolCallId: 'tool-1', status: 'done', result: 'ok' });
   });
 
+  it('does not merge same-node frames when explicit requests conflict', () => {
+    const first = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '第一回合',
+      event_type: 'team_stream',
+      display_mode: 'stream',
+      node_id: 'implement_core',
+      source_session_id: 'parent::turn::shared::coder',
+      request_id: 'request_1',
+    });
+    const second = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '第二回合',
+      event_type: 'team_stream',
+      display_mode: 'stream',
+      node_id: 'implement_core',
+      source_session_id: 'parent::turn::shared::coder',
+      request_id: 'request_2',
+    });
+
+    expect(mergeTeamInternalMessage([first], second, { append: true })).toHaveLength(2);
+  });
+
   it('uses the single-agent overlap merge for cumulative Team thinking frames', () => {
     const first = mapBackendHistoryItem({
       role: 'team_internal',
@@ -341,6 +370,26 @@ describe('Team Session history mapping', () => {
     });
   });
 
+  it('keeps same-looking assistant final and Team summary from different requests', () => {
+    const assistant = {
+      id: 'assistant-final-req-1',
+      role: 'assistant' as const,
+      content: '项目总共用了 11 分钟 21 秒。',
+      requestId: 'req_1',
+    };
+    const summary = {
+      id: 'team-summary-req-2',
+      role: 'team_internal' as const,
+      content: assistant.content,
+      requestId: 'req_2',
+      eventType: 'team_summary' as const,
+      nodeId: 'leader_summary',
+      agentId: 'leader',
+    };
+
+    expect(mergeTeamInternalMessage([assistant], summary)).toHaveLength(2);
+  });
+
   it('deduplicates a live user mention answer already restored from history', () => {
     const history = mapBackendHistoryItem({
       role: 'team_internal',
@@ -360,6 +409,22 @@ describe('Team Session history mapping', () => {
     expect(merged).toHaveLength(1);
     expect(merged[0].requestId).toBe('mention_req_2');
     expect(merged[0].communicationStatus).toBe('answered');
+  });
+
+  it('does not deduplicate same-looking node results from different requests', () => {
+    const first = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '@leader 已完成',
+      agent_id: 'coder',
+      event_type: 'team_submit',
+      node_id: 'implement_core',
+      source_session_id: 'desktop_demo::turn::request_1::coder',
+      request_id: 'request_1',
+      display_mode: 'chat',
+    });
+    const second = { ...first, id: 'result-2', requestId: 'request_2' };
+
+    expect(mergeTeamInternalMessage([first], second)).toHaveLength(2);
   });
 
   it('replaces a waiting direct mention with the terminal answer by request id', () => {
