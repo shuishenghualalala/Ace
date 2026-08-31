@@ -39,6 +39,10 @@ import {
   type ConversationRenderHooks,
 } from './conversation-renderer';
 import { getToolFold, setToolFold } from './fold-state';
+import {
+  markInteractionSubmitted,
+  syncInteractionCards,
+} from '../components/interaction-card';
 
 /** Composer 动作组：submit/stop/edit/queue（app.ts 主对话原接线逻辑的参数化形态）。 */
 export interface ConversationPanelActions {
@@ -151,6 +155,19 @@ export function mountConversationPanel(
   const composerRoot = composerHost.querySelector<HTMLElement>('[data-composer-view]');
   if (!composerRoot) throw new Error('ConversationPanel: Composer root 缺失');
 
+  const handleInteractionSubmit = (event: Event): void => {
+    if (!(event instanceof CustomEvent)) return;
+    const detail = event.detail as { interactionId?: unknown; text?: unknown } | null;
+    const interactionId = typeof detail?.interactionId === 'string' ? detail.interactionId.trim() : '';
+    const text = typeof detail?.text === 'string' ? detail.text.trim() : '';
+    if (!interactionId || !text || text.length > 2_000) return;
+    markInteractionSubmitted(interactionId);
+    const target = opts.resolveMessages?.()?.container ?? messagesEl;
+    if (target) syncInteractionCards(target);
+    void opts.actions.submit(text);
+  };
+  host.addEventListener('crew:interaction-submit', handleInteractionSubmit);
+
   // ── 附件预览：渲染进 Composer 的 [data-attachment-preview]（before-input 槽位内，
   //    主对话由 composer-context-view 创建，Wiki 面板由自己的 contextStaging 提供）──
   const renderPreview = (): void => {
@@ -201,6 +218,7 @@ export function mountConversationPanel(
       ...(opts.emptyState ? { emptyState: opts.emptyState } : {}),
       ...(opts.followupHandlers ? { followupHandlers: opts.followupHandlers } : {}),
       afterRender: (sessionId) => {
+        syncInteractionCards(target.container);
         renderPanelTodo(sessionId);
         opts.afterRender?.(sessionId);
       },
@@ -245,6 +263,7 @@ export function mountConversationPanel(
       if (disposed) return;
       disposed = true;
       unsubscribeAttachments();
+      host.removeEventListener('crew:interaction-submit', handleInteractionSubmit);
       for (const unsubscribe of unsubscribeStores) unsubscribe();
       composer.dispose();
       for (const containerId of renderedContainerIds) disposeConversationRenderer(containerId);

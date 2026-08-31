@@ -3,7 +3,6 @@
  */
 
 import {
-  backendApi,
   type ExternalAgent,
   type ExternalRuntime,
   type ExternalTeam,
@@ -22,7 +21,6 @@ import {
   getSessionAgentDisplay,
   setComposerTargetWorkspace,
   visibleProjectWorkspaces,
-  workspaceForSessionDispatch,
   workspaceLabel,
 } from './workspaces';
 import { createComposerModelControl, syncModelUi, type ComposerModelControl } from './model-picker';
@@ -735,7 +733,6 @@ function externalTeamLeaderLabel(
 
 function bindExternalModeSwitch(
   popover: HTMLElement,
-  anchor: HTMLElement,
 ): void {
   popover.querySelectorAll<HTMLElement>('[data-expert-mode-switch]').forEach((btn) => {
     btn.addEventListener('click', (event) => {
@@ -771,7 +768,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
   externalPopoverOpen = true;
   resolvedAnchor.classList.add('is-open');
   resolvedAnchor.setAttribute('aria-expanded', 'true');
-  bindExternalModeSwitch(popover, resolvedAnchor);
+  bindExternalModeSwitch(popover);
 
   let catalog: ExternalConversationCatalog;
   try {
@@ -782,7 +779,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
       ${renderComposerModeSwitch('external')}
       <div class="composer-select-popover__empty">加载外援失败：${escapeHtml((error as Error).message)}</div>
     `;
-    bindExternalModeSwitch(popover, resolvedAnchor);
+    bindExternalModeSwitch(popover);
     scheduleFloatingPopoverPosition(resolvedAnchor, popover, 340);
     return;
   }
@@ -847,7 +844,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
       </div>
     `}
   `;
-  bindExternalModeSwitch(popover, resolvedAnchor);
+  bindExternalModeSwitch(popover);
   // 初次定位发生在“正在加载”短内容阶段；目录渲染后高度改变，必须重新贴合锚点。
   scheduleFloatingPopoverPosition(resolvedAnchor, popover, 340);
 

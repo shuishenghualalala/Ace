@@ -29,7 +29,7 @@ export interface ShellNavigationItem {
 type ShellNavigationDefinition = Omit<ShellNavigationItem, 'featureState'>;
 
 const SHARED_NAVIGATION: ReadonlyArray<ShellNavigationDefinition> = [
-  { id: 'wiki', label: 'Wiki', icon: 'icon-wiki' },
+  { id: 'wiki', label: '笔记', icon: 'icon-wiki' },
   { id: 'cron', label: '任务', icon: 'process-clock' },
   { id: 'security', label: '安全', icon: 'icon-security' },
   { id: 'system', label: '系统', icon: 'icon-folder' },

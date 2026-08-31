@@ -228,7 +228,7 @@ const commonResponses = {
     uptime_s: 132_300,
     cpu_count: 12,
     cpu_percent: 36,
-    memory: { total_gb: 32, used_gb: 13.4, percent: 42 },
+    memory: { total_gb: 32, used_gb: 13.4, available_gb: 18.6, percent: 42 },
     disk: { total_gb: 512, used_gb: 238, free_gb: 274, percent: 46 },
     network: { bytes_sent: 28_300_000, bytes_recv: 91_700_000 },
     process: { rss_mb: 286, pid: 12_580 },

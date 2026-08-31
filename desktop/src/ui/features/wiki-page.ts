@@ -1537,7 +1537,7 @@ function renderShell(): void {
     <div class="page-shell page-shell--wiki${wikiBrowserOpen || wikiBrowserSurfaceOpen ? '' : ' wiki-browser-collapsed'}">
       <header class="page-header page-header--hub">
         <div class="page-header__copy">
-          <h1 class="page-header__title">Wiki <span class="accent">知识库</span></h1>
+          <h1 class="page-header__title">Crew 笔记</h1>
           <p class="page-header__desc">都什么年代了，还在古法记笔记？？</p>
         </div>
         <div class="page-header__actions">

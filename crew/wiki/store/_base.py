@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from collections.abc import Iterator
 from typing import Any
 
 from crew.wiki.schemas import (
@@ -19,6 +21,15 @@ from crew.wiki._utils import normalize_page_key
 
 class WikiStore(ABC):
     """Wiki 存储抽象接口。"""
+
+    @contextmanager
+    def batch_index(
+        self,
+        owner_account_id: str = "",
+        kb_id: str = "default",
+    ) -> Iterator[None]:
+        """把一组页面写入合并为一次索引提交。"""
+        yield
 
     @abstractmethod
     def init_kb(self, owner_account_id: str = "", kb_id: str = "default") -> None: ...

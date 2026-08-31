@@ -873,7 +873,7 @@ export interface SystemMetrics {
   uptime_s: number;
   cpu_count: number;
   cpu_percent?: number;
-  memory?: { total_gb: number; used_gb: number; percent: number };
+  memory?: { total_gb: number; used_gb: number; available_gb: number; percent: number };
   disk?: { total_gb: number; used_gb: number; free_gb: number; percent: number };
   network?: { bytes_sent: number; bytes_recv: number };
   process?: { rss_mb: number; pid: number };
@@ -1791,7 +1791,7 @@ export const backendApi = {
       used_tokens: number | null;
       max_tokens: number;
       ratio: number | null;
-      source: 'provider' | 'request_view' | 'unavailable';
+      source: 'provider' | 'request_view' | 'preview' | 'unavailable';
       warning?: string;
     }>(`/api/session/${encodeURIComponent(sessionId)}/context`),
   browserState: (sessionId: string) =>

@@ -1781,6 +1781,7 @@ class CrewApp:
             getattr(getattr(self, "dynamic_kanban", None), "store", None),
             getattr(getattr(self, "sites", None), "store", None),
             self.work_service,
+            getattr(self, "_wiki_store", None),
         ]
         for store in stores:
             close = getattr(store, "close", None)
@@ -1876,6 +1877,43 @@ class CrewApp:
         profile = profiles.get(mid) if mid else None
         cw = profile.context_window if profile is not None else None
         return int(cw or self.config.context_window or 128000)
+
+    async def preview_session_context(
+        self,
+        session_id: str,
+        owner_account_id: str = "",
+    ) -> dict[str, Any] | None:
+        """返回会话打开时的 builtin request-view 预估，不写入最近一次实际 usage。"""
+        owner = str(owner_account_id or "").strip()
+        getter = getattr(self.session_store, "get_agent_config", None)
+        agent_config = getter(session_id, owner_account_id=owner) if callable(getter) else None
+        if str((agent_config or {}).get("executor") or "builtin").strip().lower() != "builtin":
+            return None
+
+        workspace_id = self.session_store.get_workspace_id(session_id, owner) or "default"
+        workspace_instructions = ""
+        workspace_root_path = ""
+        try:
+            workspace = self.workspace_store.get(workspace_id, owner_account_id=owner)
+            workspace_instructions = str(workspace.get("instructions") or "")
+            workspace_root_path = str(workspace.get("root_path") or "")
+        except Exception:  # noqa: BLE001 - workspace metadata is optional for preview
+            pass
+
+        async with self.agents.lease(
+            session_id,
+            agent_config,
+            owner_account_id=owner,
+        ) as agent:
+            if not isinstance(agent, SingleAgent):
+                return None
+            return await agent.preview_context(
+                session_id,
+                owner_account_id=owner,
+                workspace_id=workspace_id,
+                workspace_instructions=workspace_instructions,
+                workspace_root_path=workspace_root_path,
+            )
 
     def owner_active_model_profile(self, owner_account_id: str = "") -> ModelProfile:
         profile = self.config.owner_active_model_profile(owner_account_id)
@@ -2348,6 +2386,9 @@ class CrewApp:
             fallback_model_id=self.config.owner_default_model_id(owner_account_id),
         )
         if not busy:
+            clear_prompt_usage = getattr(self.session_store, "clear_prompt_usage", None)
+            if callable(clear_prompt_usage):
+                clear_prompt_usage(session_id, owner_account_id=owner_account_id)
             self.agents.drop(session_id, owner_account_id=owner_account_id)
         binding = read_binding(
             stored,

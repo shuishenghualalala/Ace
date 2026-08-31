@@ -51,7 +51,7 @@
   /* 底部不留 padding：三条竖向分隔线（对话↔面板、目录↔详情）直接伸到窗口底边，
      对齐主对话 mw-chat-template 整列通高的版式；对话栏底部留白由 disclaimer 自带 padding 承担。
      右侧同样不留 padding：知识库面板（自带背景色）直接顶到窗口右边，滚动条贴窗缘（VSCode 风格） */
-  padding: var(--mw-space-5) 0 0 var(--mw-space-8);
+  padding: var(--mw-space-5) 0 0 0;
 }
 
 /* 右侧知识库面板：整体固定宽度（内联 width，拖拽可调），内部目录 + 详情横向排布 */
@@ -553,7 +553,7 @@
   border: 1px solid var(--mw-border-default);
   border-radius: var(--mw-radius-4);
   background: var(--mw-bg-surface);
-  box-shadow: var(--mw-shadow-lg);
+  box-shadow: var(--mw-shadow-overlay);
 }
 
 .wiki-file-changes-dialog__header {
@@ -701,8 +701,36 @@
 }
 
 .wiki-agent-pane__messages.chat-messages.web-flow .messages__inner {
+  width: 100%;
+  max-width: none;
   gap: var(--mw-space-4);
   padding: 0 var(--mw-space-2);
+}
+
+/* Wiki 对话栏较窄时不需要为主聊天区的头像基线额外预留右侧空间。 */
+.wiki-agent-pane__messages.chat-messages.web-flow .msg:not(.user) {
+  padding-right: 0;
+}
+
+/* Wiki 用户气泡沿用主聊天的安全边距会显得偏左；在窄栏内贴近右侧内容边界。 */
+.wiki-agent-pane__messages.chat-messages.web-flow .msg.user {
+  padding-right: 0;
+}
+
+.wiki-agent-pane__messages.chat-messages.web-flow .msg.user .msg__body {
+  max-width: 100%;
+}
+
+/* Wiki 对话栏不需要主聊天区的头像安全左边距，避免助手正文整体偏右。 */
+.wiki-agent-pane__messages.chat-messages.web-flow .msg.msg--agent-turn {
+  padding-left: 0;
+  margin-left: 0;
+  width: 100%;
+}
+
+.wiki-agent-pane__messages.chat-messages.web-flow .msg.msg--agent-turn .msg__avatar {
+  position: relative;
+  z-index: 1;
 }
 
 .wiki-agent-pane__empty {

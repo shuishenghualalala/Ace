@@ -14,11 +14,11 @@ import { renderWorkspaceHistory } from './workspaces';
 import { refreshKanbanBoard } from './kanban-board';
 import { refreshCronJobs } from './cron-page';
 import { findChannelSession, loadChannelSessions } from './channel-sessions';
-import { discardDraft, loadWorkspaces, loadSessionsList, refreshSidebarAfterHydrate, syncSessionsFromBackend } from './workspaces';
+import { discardDraft, loadWorkspaces, loadSessionsList, refreshSidebarAfterHydrate } from './workspaces';
 import { loadConfig } from './model-picker';
 import { externalAgentsEnabled, isExternalAgentOrTeamSession } from './external-agents-feature';
 import { resetToAgentMode } from './session-mode';
-import { loadSessionModel, mergeSessionModelsFromBackend, syncSessionModelUi } from './session-model';
+import { loadSessionModel, syncSessionModelUi } from './session-model';
 import { loadInspectorContext, refreshInspector } from './inspector';
 import { syncCraftLabel } from './composer-toolbar';
 import {
@@ -214,7 +214,7 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
     // todoSnapshot 挂到最后一条 assistant（最新进度）。两者可能不是同一条消息，分开挂载。
     const wantPlan = Boolean(planState?.has_plan && planState.plan);
     const rawTodos = Array.isArray(todoState?.todos) ? todoState.todos : [];
-    const todos: TodoItem[] = rawTodos.map((t: any) => ({
+    const todos: TodoItem[] = rawTodos.map((t) => ({
       id: typeof t.id === 'string' ? t.id : '?',
       content: typeof t.content === 'string' ? t.content : '',
       status:

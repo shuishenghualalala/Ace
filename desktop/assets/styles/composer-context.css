@@ -801,6 +801,19 @@
   vertical-align: -0.12em;
 }
 
+/*
+ * Slash skill chips must occupy the same width as the literal "/" in the
+ * textarea.  The generic marker box is sized for @file/@folder icons; using
+ * it for a text slash makes the overlay a few pixels wider than the native
+ * textarea, which becomes visible as a caret drift at the end of the line.
+ */
+.mention-chip--slash .mention-chip__mark {
+  display: inline;
+  width: auto;
+  height: auto;
+  vertical-align: baseline;
+}
+
 .mention-chip__mark .mw-icon {
   width: 14px;
   height: 14px;

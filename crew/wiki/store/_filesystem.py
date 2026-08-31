@@ -8,6 +8,8 @@ import re
 import shutil
 import threading
 import time
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -131,6 +133,25 @@ class FileSystemWikiStore(WikiStore):
             self._search_indexes[key] = SQLiteFTS5SearchIndex(db_path)
         return self._search_indexes[key]
 
+    @contextmanager
+    def batch_index(
+        self,
+        owner_account_id: str = "",
+        kb_id: str = "default",
+    ) -> Iterator[None]:
+        with self._search_index(owner_account_id, kb_id).batch():
+            yield
+
+    def close(self) -> None:
+        """关闭各知识库的 FTS 连接。"""
+        indexes = list(self._search_indexes.values())
+        self._search_indexes.clear()
+        for index in indexes:
+            try:
+                index.close()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("关闭 Wiki FTS 索引失败: %s", exc)
+
     def _source_dir(
         self,
         source_kind: str,
@@ -172,6 +193,9 @@ class FileSystemWikiStore(WikiStore):
             ).replace(
                 "- Crew 内部状态保存到 `.crew/`",
                 "- 系统内部状态保存到 `.crew/`",
+            ).replace(
+                "- 长 source 整篇最多生成 5 个关键词和 3 个话题；短 source 最多 3 个关键词且不生成话题",
+                "- 不按素材长度设置固定的关键词或话题数量上限；是否入库由质量、独立性、可复用性和证据完整性决定",
             )
             if migrated_schema != schema_text:
                 schema_path.write_text(migrated_schema, encoding="utf-8")
@@ -303,12 +327,12 @@ class FileSystemWikiStore(WikiStore):
         base = self._kb_root(owner_account_id) / kb_id
         if not base.exists():
             return False
+        index_key = self._search_index_key(owner_account_id, kb_id)
+        index = self._search_indexes.pop(index_key, None)
+        if index is not None:
+            index.close()
         try:
             shutil.rmtree(base)
-            self._search_indexes.pop(
-                self._search_index_key(owner_account_id, kb_id),
-                None,
-            )
             return True
         except Exception as exc:  # noqa: BLE001
             log.warning("删除知识库失败 %s: %s", base, exc)
@@ -1813,7 +1837,8 @@ _DEFAULT_SCHEMA_MD = """# 知识库维护规则
 
 ## 编译规则
 - 每个 source 必须生成一个 source 摘要
-- 长 source 整篇最多生成 5 个关键词和 3 个话题；短 source 最多 3 个关键词且不生成话题
+- 不按素材长度设置固定的关键词或话题数量上限；是否入库由质量、独立性、可复用性和证据完整性决定
+- 知识库概览负责整体理解，知识导航负责完整目录；分页、批处理和上下文预算只作为工程保护，不代表知识容量
 - 创建页面前必须按规范标题、aliases 和页面类型匹配已有知识
 - 关键结论写入 claims，并以 evidence.source_id 回溯 Raw Source
 - 页面级 confidence 取所有主张中的保守值

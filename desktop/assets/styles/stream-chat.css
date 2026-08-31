@@ -275,7 +275,7 @@
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--mw-text-primary);
+  color: var(--mw-code-text);
   font-family: var(--mw-font-mono);
   font-size: var(--mw-type-caption-size);
   line-height: 1.65;
@@ -585,29 +585,29 @@
 }
 
 .context-compaction-notice {
-  --context-compaction-accent: #965858;
+  --mw-context-compaction-accent: var(--mw-context-compaction-accent-light);
   display: flex;
   align-items: center;
   gap: 9px;
   width: 100%;
   min-height: 28px;
   margin: 0 0 8px;
-  color: var(--tx0, #252632);
-  font-size: var(--font-sm, 13px);
+  color: var(--mw-text-primary);
+  font-size: var(--mw-type-compact-size);
   line-height: 1.45;
   animation: context-compaction-in .22s ease-out;
 }
-.context-compaction-notice__logo { flex: 0 0 18px; color: var(--context-compaction-accent); animation: context-compaction-breathe 1.4s ease-in-out infinite; }
-.context-compaction-notice__logo .nav-agent-logo__blob { fill: color-mix(in srgb, var(--context-compaction-accent) 14%, transparent); stroke: currentColor; }
-.context-compaction-notice strong { flex: 0 0 auto; color: var(--context-compaction-accent); font-weight: 650; }
-.context-compaction-notice > span { min-width: 0; color: var(--tx2, #737683); }
+.context-compaction-notice__logo { flex: 0 0 18px; color: var(--mw-context-compaction-accent); animation: context-compaction-breathe 1.4s ease-in-out infinite; }
+.context-compaction-notice__logo .nav-agent-logo__blob { fill: color-mix(in srgb, var(--mw-context-compaction-accent) 14%, transparent); stroke: currentColor; }
+.context-compaction-notice strong { flex: 0 0 auto; color: var(--mw-context-compaction-accent); font-weight: 650; }
+.context-compaction-notice > span { min-width: 0; color: var(--mw-text-secondary); }
 @keyframes context-compaction-breathe { 50% { opacity: .55; transform: translateY(-1px); } }
 @keyframes context-compaction-in { from { opacity: 0; transform: translateY(5px); } }
 @media (prefers-reduced-motion: reduce) {
   .context-compaction-notice, .context-compaction-notice__logo { animation: none; }
 }
 @media (prefers-color-scheme: dark) {
-  .context-compaction-notice { --context-compaction-accent: #c77b7b; }
+  .context-compaction-notice { --mw-context-compaction-accent: var(--mw-context-compaction-accent-dark); }
 }
 
 @keyframes chat-running-logo-hop {

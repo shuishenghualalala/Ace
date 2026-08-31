@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from crew.agent.executor.base import AgentExecutor, ExecutionContext
+from crew.agent.executor.base import AgentExecutor, ExecutionContext, FinalRequestView
 from crew.agent.executor.builtin import BuiltinExecutor
 from crew.agent.executor.external import (
     AcpExecutor,
@@ -29,6 +29,7 @@ from crew.plugins.manager import PluginManager
 __all__ = [
     "AgentExecutor",
     "ExecutionContext",
+    "FinalRequestView",
     "BuiltinExecutor",
     "ClientExecutor",
     "ClientExecutorConfig",

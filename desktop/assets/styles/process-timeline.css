@@ -80,6 +80,10 @@
   margin-bottom: 0;
 }
 
+.mw-process-timeline .process-timeline__tool {
+  min-width: 0;
+}
+
 .mw-process-timeline .process-timeline__row {
   display: flex;
   width: 100%;
@@ -109,16 +113,25 @@
   overflow-wrap: anywhere;
 }
 
-/* 运行中工具的阶段进度文案（wiki 编译等长耗时工具，phase=progress 帧驱动） */
+.mw-process-timeline .process-timeline__progress {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 0 var(--mw-space-1);
+  padding-left: var(--mw-space-2);
+  border-left: 1px solid var(--mw-border-subtle);
+}
+
+/* 工具阶段进度按产生顺序单独成行，不与工具标题横向挤在一起。 */
 .mw-process-timeline .process-timeline__stage {
+  display: block;
   min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
+  flex: none;
+  overflow-wrap: anywhere;
   color: var(--mw-text-muted);
   font-size: var(--mw-type-caption-size);
   font-weight: var(--mw-type-body-weight);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .mw-process-timeline .process-timeline__duration {
@@ -169,7 +182,7 @@
   max-height: min(42vh, 360px);
   margin: 0;
   overflow: auto;
-  color: var(--mw-text-primary);
+  color: var(--mw-code-text);
   font: var(--mw-type-code-weight) var(--mw-type-code-size) / var(--mw-type-code-line) var(--mw-font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;

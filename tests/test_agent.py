@@ -66,6 +66,36 @@ async def test_agent_plain_answer_no_tools():
     assert "你好" in final
 
 
+async def test_context_preview_counts_same_l1_view_used_before_send():
+    store = InMemorySessionStore()
+    history: list[Message] = [Message.user("开始调研")]
+    for i in range(12):
+        call_id = f"browser-{i}"
+        history.extend([
+            Message.assistant(
+                tool_calls=[ToolCall(call_id, "browser_use", {"action": "snapshot"})]
+            ),
+            Message.tool(call_id, "页面内容" * 10_000, name="browser_use"),
+        ])
+    store.save("preview-l1", history, owner_account_id="local")
+    compactor = ContextCompactor(
+        FakeProvider(),
+        token_budget=1_000_000,
+        keep_recent_tools=2,
+        max_tool_result_chars=20_000,
+    )
+    agent = _agent(
+        FakeProvider(),
+        session_store=store,
+        compactor=compactor,
+    )
+
+    preview = await agent.preview_context("preview-l1", owner_account_id="local")
+
+    assert preview is not None
+    assert preview["used_tokens"] < estimate_tokens(history)
+
+
 async def test_agent_streaming_yields_delta():
     """Agent 使用 stream_chat() 时应逐 token yield delta chunk。"""
     agent = _agent(FakeProvider())  # 回声模式

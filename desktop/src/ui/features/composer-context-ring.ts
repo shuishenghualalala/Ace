@@ -71,14 +71,18 @@ export function createContextRingController(
     else if (clamped >= 0.7) els.btn.classList.add('is-warn');
   };
 
-  const setRingTooltip = (used: number, max: number, ratio: number, source: 'provider' | 'request_view'): void => {
+  const setRingTooltip = (used: number, max: number, ratio: number, source: 'provider' | 'request_view' | 'preview'): void => {
     const pct = (ratio * 100).toFixed(1);
-    const sourceLabel = source === 'provider' ? '实际用量' : '本地计算';
+    const sourceLabel = source === 'provider'
+      ? '实际用量'
+      : source === 'preview'
+        ? '打开会话时预估'
+        : '本地计算';
     els.btn.title = `${pct}% · ${formatTokenCount(used)} / ${formatTokenCount(max)} 上下文 · ${sourceLabel}`;
     els.btn.setAttribute('aria-label', els.btn.title);
   };
 
-  const setRingUsage = (used: number, max: number, source: 'provider' | 'request_view'): void => {
+  const setRingUsage = (used: number, max: number, source: 'provider' | 'request_view' | 'preview'): void => {
     const ratio = max > 0 ? used / max : 0;
     setRingProgress(ratio);
     setRingTooltip(used, max, ratio, source);
@@ -123,7 +127,9 @@ export function createContextRingController(
         if (latestPromptTokens !== null) {
           setRingUsage(latestPromptTokens, max, latestPromptSource);
         } else if (ctx.available && typeof ctx.used_tokens === 'number') {
-          const source = ctx.source === 'request_view' ? 'request_view' : 'provider';
+          const source = ctx.source === 'request_view' || ctx.source === 'preview'
+            ? ctx.source
+            : 'provider';
           setRingUsage(ctx.used_tokens, max, source);
         } else {
           setRingUnavailable(max, ctx.warning);

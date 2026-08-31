@@ -50,6 +50,38 @@ describe('toolIconKind（时间线工具图标分类）', () => {
 });
 
 describe('renderAgentTurn', () => {
+  it('renders Wiki learning activities outside the collapsed tool timeline', () => {
+    const root = renderAgentTurn(makeMessages({
+      toolCalls: [{
+        toolCallId: 'learning-1',
+        name: 'wiki_learning_activity',
+        status: 'done',
+        startedAt: 1,
+        args: JSON.stringify({ action: 'create' }),
+        result: JSON.stringify({
+          activity: {
+            id: 'activity-1',
+            activity_type: 'quiz',
+            prompt: '选择正确答案',
+            public_payload: {
+              schema: 'crew.interaction.v1',
+              interaction: { options: [{ id: 'A', label: '答案 A' }] },
+            },
+          },
+        }),
+      }],
+    }), {
+      isStreaming: false,
+      userPinnedOpen: null,
+      turnDurationMs: 1_000,
+    });
+
+    const card = root.querySelector('.interaction-card');
+    expect(card).not.toBeNull();
+    expect(card?.closest('.msg__foldable')).toBeNull();
+    expect(card?.textContent).toContain('选择正确答案');
+  });
+
   it('普通 Crew 回合与生成占位复用智能体页 Q 版耳机机器人头像', () => {
     const turn = renderAgentTurn(makeMessages({ thinking: undefined }), {
       isStreaming: false,
@@ -553,6 +585,27 @@ describe('renderAgentTurn', () => {
     const staticRow = root.querySelector('.process-timeline__row--static');
     expect(staticRow).not.toBeNull();
     expect(staticRow?.querySelector('.process-timeline__title')?.textContent).toBe('查看技能');
+  });
+
+  it('工具阶段进度按产生顺序渲染为独立过程行', () => {
+    const root = renderAgentTurn(
+      makeMessages({
+        thinking: undefined,
+        toolCalls: [{
+          toolCallId: 'wiki-1',
+          name: 'wiki_plan_ingest',
+          args: '{}',
+          status: 'running',
+          startedAt: 1_700_000_000_000,
+          progressText: '正在通读素材（2/2 段）…',
+          progressHistory: ['读取文档…', '正在通读素材（1/2 段）…', '正在通读素材（2/2 段）…'],
+        }],
+      }),
+      { isStreaming: true, userPinnedOpen: null, turnDurationMs: 5_000 },
+    );
+    const lines = Array.from(root.querySelectorAll('.process-timeline__stage')).map((node) => node.textContent);
+    expect(lines).toEqual(['读取文档…', '正在通读素材（1/2 段）…', '正在通读素材（2/2 段）…']);
+    expect(root.querySelector('.process-timeline__title')?.textContent).not.toContain('正在通读素材');
   });
 
   it('run_agent 渲染 subagent 专用卡片：中文标题 + 任务描述 + 执行摘要', () => {

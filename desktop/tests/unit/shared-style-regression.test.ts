@@ -83,10 +83,10 @@ describe('shared chat chrome styles', () => {
 
   it('keeps Request/Response code readable on light process surfaces', () => {
     expect(ruleBody(processTimelineCss, '.mw-process-timeline .process-code-block pre')).toContain(
-      'color: var(--mw-text-primary)',
+      'color: var(--mw-code-text)',
     );
     expect(ruleBody(streamChatCss, '.process-code-block pre')).toContain(
-      'color: var(--mw-text-primary)',
+      'color: var(--mw-code-text)',
     );
   });
 

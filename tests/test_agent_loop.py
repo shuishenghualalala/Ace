@@ -13,7 +13,8 @@ from typing import AsyncIterator
 
 import pytest
 
-from crew.agent.executor import BuiltinExecutor, ExecutionContext
+from crew.agent.compact import estimate_prompt_tokens
+from crew.agent.executor import BuiltinExecutor, ExecutionContext, FinalRequestView
 from crew.agent.loop import (
     IterationBudget,
     ToolCallGuardrailConfig,
@@ -161,8 +162,7 @@ async def test_llm_request_middleware_partial_request_keeps_tools():
     events = [
         ev
         async for ev in executor._call_model(
-            [Message.user("hi")],
-            tools,
+            FinalRequestView.create([Message.user("hi")], tools),
             "r",
             next_seq,
             result,
@@ -171,7 +171,7 @@ async def test_llm_request_middleware_partial_request_keeps_tools():
     ]
 
     assert events == []
-    assert provider.seen_tools is tools
+    assert provider.seen_tools == tools
     assert provider.seen_messages[-1].content == "middleware"
 
 
@@ -202,8 +202,7 @@ async def test_llm_execution_middleware_stream_error_does_not_become_provider_fa
     events = [
         ev
         async for ev in executor._call_model(
-            [Message.user("hi")],
-            None,
+            FinalRequestView.create([Message.user("hi")]),
             "r",
             next_seq,
             result,
@@ -214,6 +213,46 @@ async def test_llm_execution_middleware_stream_error_does_not_become_provider_fa
     assert not result.get("error")
     assert result["text"] == "x"
     assert [ev.kind for ev in events] == ["delta"]
+
+
+async def test_request_view_count_matches_execution_middleware_payload_sent_to_provider():
+    provider = RecordingProvider()
+    plugins = PluginManager()
+
+    async def append_at_execution(request, next_call, **kwargs):
+        changed = {
+            **request,
+            "messages": [*request["messages"], Message.user("execution middleware")],
+        }
+        return await next_call(changed)
+
+    plugins._middleware.setdefault(LLM_EXECUTION_MIDDLEWARE, []).append(append_at_execution)
+    executor = BuiltinExecutor(provider, Registry(), plugins, backoff_seconds=0)
+    result = {}
+    seq = 0
+
+    def next_seq():
+        nonlocal seq
+        seq += 1
+        return seq
+
+    events = [
+        event
+        async for event in executor._call_model(
+            FinalRequestView.create([Message.user("hi")]),
+            "r",
+            next_seq,
+            result,
+            session_id="s",
+        )
+    ]
+
+    assert events == []
+    assert provider.seen_messages[-1].content == "execution middleware"
+    assert result["usage"]["request_view_tokens"] == estimate_prompt_tokens(
+        provider.seen_messages,
+        provider.seen_tools,
+    )
 
 
 def test_iteration_budget_consume_refund():
@@ -460,7 +499,13 @@ async def test_loop_overflow_triggers_force_compact_then_succeeds():
             self.calls += 1
             return messages
 
-        async def compact_view(self, messages, session_id=None, owner_account_id=None):
+        async def compact_view(
+            self,
+            messages,
+            session_id=None,
+            owner_account_id=None,
+            prompt_overhead_tokens=0,
+        ):
             # 不压缩视图，让首轮直接命中 provider 触发 overflow 兜底
             return messages
 
@@ -1743,7 +1788,13 @@ class _RecordingCompactor:
         self.calls: list[int] = []
         self.marker = Message.user("__compacted_view__")
 
-    async def compact_view(self, messages, session_id=None, owner_account_id=None):
+    async def compact_view(
+        self,
+        messages,
+        session_id=None,
+        owner_account_id=None,
+        prompt_overhead_tokens=0,
+    ):
         self.calls.append(len(messages))
         return [self.marker]
 

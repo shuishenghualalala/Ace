@@ -46,6 +46,7 @@
 @import './browser-panel.css' layer(features);
 @import './composer-context.css' layer(components);
 @import './transcript.css' layer(components);
+@import './interaction-card.css' layer(components);
 @import './process-timeline.css' layer(components);
 @import './diff.css' layer(components);
 @import './inspector.css' layer(shell);

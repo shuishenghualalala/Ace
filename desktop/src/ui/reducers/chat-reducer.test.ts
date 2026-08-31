@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Bookkeeping } from '../state';
-import { statusReducer, toolReducer } from './chat-reducer';
+import { toolReducer } from './chat-reducer';
 
 function emptyBook(): Bookkeeping {
   return {

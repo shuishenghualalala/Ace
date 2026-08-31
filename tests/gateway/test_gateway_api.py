@@ -66,6 +66,9 @@ async def test_api_session_context(api, auth_headers):
     assert "used_tokens" in data
     assert "max_tokens" in data
     assert "ratio" in data
+    assert data["available"] is True
+    assert data["source"] == "preview"
+    assert data["used_tokens"] > 0
 
 
 @pytest.mark.asyncio

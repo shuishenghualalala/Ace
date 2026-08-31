@@ -655,6 +655,101 @@ class SingleAgent(Agent):
 
         return str(task_workspace_path(envelope.workspace_id, owner_account_id=envelope.user_id))
 
+    async def preview_context(
+        self,
+        session_id: str,
+        *,
+        owner_account_id: str = "",
+        workspace_id: str = "default",
+        workspace_instructions: str = "",
+        workspace_root_path: str = "",
+    ) -> dict[str, Any] | None:
+        """计算会话打开时的 builtin 下一次请求视图预览。
+
+        预览只使用当前已持久化历史、当前 system prompt 和工具 schema；它不添加
+        尚未输入的用户消息，也不发起模型请求。返回值明确标记为 ``preview``，
+        不能被当作 provider 的实际 usage。
+        """
+        if self._closed or not isinstance(self.executor, BuiltinExecutor):
+            return None
+
+        owner = str(owner_account_id or "").strip()
+        envelope = Envelope(
+            session_id=session_id,
+            params={
+                "query": "",
+                "workspace_instructions": workspace_instructions,
+                "workspace_root_path": workspace_root_path,
+            },
+            user_id=owner,
+            workspace_id=workspace_id or "default",
+        )
+        cwd = self._resolve_agent_workdir(envelope, task_session_id=session_id)
+
+        owner_token = current_owner_account_id.set(owner)
+        session_token = current_session_id.set(session_id)
+        workspace_token = current_workspace_id.set(envelope.workspace_id)
+        try:
+            history = self.session_store.load(session_id, owner_account_id=owner)
+            system_static, user_reminder = await self._build_prompts(
+                envelope, [], cwd, task_sid=session_id
+            )
+
+            view_messages = list(history)
+            if self.plan_manager is not None:
+                view_messages.extend(
+                    get_plan_mode_attachment_messages(
+                        view_messages,
+                        session_id,
+                        self.plan_manager,
+                        owner_account_id=owner,
+                    )
+                )
+            if self.wiki_manager is not None:
+                view_messages.extend(
+                    get_wiki_agent_attachment_messages(
+                        session_id,
+                        self.wiki_manager,
+                        owner_account_id=owner,
+                    )
+                )
+            # 与真实发送保持同一顺序：canonical history 先走无需 LLM 的 L1
+            # compact，再注入本轮动态 reminder。否则旧 browser/tool 结果会被全量
+            # 计入打开会话预览，出现 190% 但发送前已降到低水位的假象。
+            if self.compactor is not None:
+                view_messages = self.compactor.compact_preview_view(view_messages)
+            if user_reminder:
+                view_messages = [Message.system_reminder(user_reminder), *view_messages]
+
+            effective_tool_filter = self._effective_tool_filter(
+                session_id, owner_account_id=owner
+            )
+            tool_schemas = self.registry.list_schemas(effective_tool_filter)
+            request_view = self.executor.build_request_view(
+                system_static,
+                view_messages,
+                tool_schemas,
+                session_id,
+                self.tool_disclosure_mode,
+                consume_transient=False,
+            )
+            request_view, _ = await self.executor.finalize_request_view(
+                request_view,
+                session_id=session_id,
+                request_id=f"context-preview:{session_id}",
+                provider=self.provider,
+            )
+            tokens = request_view.estimated_prompt_tokens()
+            return {
+                "used_tokens": tokens,
+                "source": "preview",
+                "warning": "当前为统一请求视图的发送前预估；运行期 hook 仍可能调整，发送后将以实际 usage 更新",
+            }
+        finally:
+            current_workspace_id.reset(workspace_token)
+            current_session_id.reset(session_token)
+            current_owner_account_id.reset(owner_token)
+
     async def run(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
         if self._closed:
             raise RuntimeError("SingleAgent 已关闭，不能继续执行")

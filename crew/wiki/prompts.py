@@ -1,4 +1,4 @@
-"""Wiki Agent 提示词与工具描述。"""
+"""Crew 笔记（内部 Wiki）Agent 提示词与工具描述。"""
 
 from __future__ import annotations
 
@@ -21,8 +21,9 @@ WIKI_ORIENT_PROMPT = """获取当前 Wiki 知识库的全景信息。
 WIKI_BATCH_INGEST_PROMPT = """批量整理当前知识库中已经解析的 RawSource。
 
 一次最多处理 5 份素材；可通过 source_ids 指定范围，也可省略后按 cursor 分批处理全部
-parsed source。返回成功、跳过、失败、剩余数量和 next_cursor。每份素材仍遵守整篇最多
-5 个 Entity、3 个 Topic 的上限，并复用分块缓存、plan/apply 和来源去重。
+parsed source。返回成功、跳过、失败、剩余数量和 next_cursor。每份素材都不设置固定数量的
+Entity 或 Topic 上限；知识单元按质量、独立性、复用价值和证据完整性筛选，
+并复用分块缓存、plan/apply 和来源去重。
 
 wiki.ingest.auto_apply=true 时自动应用本批计划；关闭时先返回整批计划和一次性确认 ID。"""
 
@@ -130,7 +131,8 @@ def _load_wiki_agent_preset_prompt() -> str:
 
 WIKI_AGENT_SYSTEM_PROMPT = _load_wiki_agent_preset_prompt()
 
-WIKI_AGENT_CONTEXT_REMINDER = """[Wiki Agent 当前上下文]
+WIKI_AGENT_CONTEXT_REMINDER = """[Crew 笔记 / Wiki Agent 当前上下文]
+- 术语约定：Crew 笔记是产品名称；Wiki、知识库、Wiki 知识库是兼容别名，均指当前活跃的同一套内容。
 - 当前活跃知识库（active_kb_id）：{active_kb_id}
 - 当前活跃知识库名称：{active_kb_name}
 - 可用知识库列表：{kb_list}

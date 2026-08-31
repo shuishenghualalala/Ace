@@ -98,7 +98,7 @@ def test_publish_source_page_moves_existing_summary_into_source_kind_directory(
 
 
 @pytest.mark.asyncio
-async def test_short_ingest_creates_source_summary_and_entities_only(store, compiler):
+async def test_short_ingest_keeps_qualified_entities_and_topics(store, compiler):
     source_content = "这是关于 Crew 多智能体调用平台的原始文档内容。"
     analysis = {
         "source_summary": {
@@ -131,12 +131,12 @@ async def test_short_ingest_creates_source_summary_and_entities_only(store, comp
     result = await compiler.ingest("src_1", source_content=source_content)
 
     assert not result.issues
-    assert len(result.pages) == 3
+    assert len(result.pages) == 4
     titles = {p.title for p in result.pages}
     assert "原始文档" in titles
     assert "AgentRuntime" in titles
     assert "ModeManager" in titles
-    assert "Wiki 设计" not in titles
+    assert "Wiki 设计" in titles
 
     # source 页面保存原始内容
     source_page = store.get_by_title("原始文档")
@@ -800,16 +800,16 @@ async def test_plan_ingest_uses_compact_units_and_page_threshold(store, compiler
     assert '"entities"' in prompt
     assert '"concepts"' not in prompt
     assert '"topics"' in prompt
-    assert "entities 最多 3 个 unit" in prompt
-    assert "topics 最多 2 个 unit" in prompt
-    assert "最多 5 个 Entity 和 3 个 Topic" in prompt
+    assert "不要设置固定数量" in prompt
+    assert "达到质量标准的独立知识单元" in prompt
+    assert "最多 5 个 Entity 和 3 个 Topic" not in prompt
 
 
 @pytest.mark.asyncio
 async def test_analyze_chunk_uses_compact_output_budget(monkeypatch, compiler):
     chat = AsyncMock(
         return_value=(
-            '{"format":"knowledge-units-v7",'
+            '{"format":"knowledge-units-v8",'
             '"source_summary":{},"entities":[],"topics":[]}'
         )
     )
@@ -817,7 +817,7 @@ async def test_analyze_chunk_uses_compact_output_budget(monkeypatch, compiler):
 
     result = await compiler._analyze_chunk("测试材料")
 
-    assert result["format"] == "knowledge-units-v7"
+    assert result["format"] == "knowledge-units-v8"
     assert result["entities"] == []
     assert result["topics"] == []
     assert chat.await_args.kwargs["max_tokens"] == compiler_mod._ANALYSIS_MAX_TOKENS
@@ -1085,48 +1085,35 @@ def test_update_index_contains_navigation_quality_metadata(store, compiler):
     assert "关系 0" in index_text
 
 
-def test_document_limits_apply_after_all_chunks_are_merged():
-    from crew.wiki.compiler import _apply_document_limits
+def test_merge_preserves_all_qualified_entities_and_topics():
+    from crew.wiki.compiler import _merge_analysis_results
 
-    analysis = {
-        "entities": [
+    analysis = _merge_analysis_results(
+        [
             {
-                "name": f"Entity {index}",
-                "importance": "core" if index < 2 else "supporting",
-                "claims": [{"statement": f"claim {index}"}],
+                "entities": [
+                    {
+                        "name": f"Entity {index}",
+                        "importance": "core" if index < 2 else "supporting",
+                        "claims": [{"statement": f"claim {index}"}],
+                    }
+                    for index in range(8)
+                ],
+                "topics": [
+                    {
+                        "name": f"Topic {index}",
+                        "importance": "core",
+                        "claims": [{"statement": f"topic claim {index}"}],
+                    }
+                    for index in range(5)
+                ],
+                "relationships": [],
             }
-            for index in range(8)
-        ],
-        "topics": [
-            {
-                "name": f"Topic {index}",
-                "importance": "core",
-                "claims": [{"statement": f"topic claim {index}"}],
-            }
-            for index in range(5)
-        ],
-        "relationships": [],
-    }
+        ]
+    )
 
-    _apply_document_limits(analysis, content_length=50_000)
-
-    assert len(analysis["entities"]) == 5
-    assert len(analysis["topics"]) == 3
-
-
-def test_short_document_limits_skip_topics():
-    from crew.wiki.compiler import _apply_document_limits
-
-    analysis = {
-        "entities": [{"name": f"E{index}", "claims": []} for index in range(5)],
-        "topics": [{"name": "Short Topic", "claims": []}],
-        "relationships": [],
-    }
-
-    _apply_document_limits(analysis, content_length=1_000)
-
-    assert len(analysis["entities"]) == 3
-    assert analysis["topics"] == []
+    assert len(analysis["entities"]) == 8
+    assert len(analysis["topics"]) == 5
 
 
 @pytest.mark.asyncio

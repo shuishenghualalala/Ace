@@ -10,8 +10,8 @@
  *     + 构成饼图 + 成本 + 系统提示 + **原始消息 JSON**
  *
  * 数据来源：当前会话（state.messages / state.config / state.backendSessions）。
- * 上下文用量只接受 Provider 返回的真实 prompt_tokens；未返回时显示不可用，
- * 不用字符估算冒充真实上下文。
+ * 上下文用量优先使用 Provider 返回的真实 prompt_tokens；打开 session 且尚无
+ * 实际 usage 时显示明确标记的 request-view preview，不把预估冒充真实上下文。
  */
 
 import DOMPurify from 'dompurify';
@@ -110,7 +110,7 @@ interface ContextStats {
   lastActiveAt: string;
   contextWindow: number;
   usedTokens: number | null;
-  usedTokensSource: 'provider' | 'request_view' | 'unavailable';
+  usedTokensSource: 'provider' | 'request_view' | 'preview' | 'unavailable';
   inputTokens: number;
   outputTokens: number;
   cacheRead: number;
@@ -174,7 +174,7 @@ const contextBySession = new Map<string, {
   used_tokens: number | null;
   max_tokens: number;
   ratio: number | null;
-  source: 'provider' | 'request_view' | 'unavailable';
+  source: 'provider' | 'request_view' | 'preview' | 'unavailable';
   warning?: string;
 }>();
 
@@ -279,17 +279,21 @@ function computeContextStats(): ContextStats {
   const toolTokens = estimateTokens(toolText);
   const otherTokens = estimateTokens(otherText);
 
-  const inputTokens = usage?.promptTokens ?? 0;
+  const inputTokens = usage?.promptTokens ?? (
+    apiCtx?.source === 'preview' && typeof apiCtx.used_tokens === 'number'
+      ? apiCtx.used_tokens
+      : 0
+  );
   const outputTokens = usage?.completionTokens ?? 0;
-  const usedTokens = apiCtx?.available && typeof apiCtx.used_tokens === 'number'
-    ? apiCtx.used_tokens
-    : usage?.promptTokens != null
-      ? usage.promptTokens
+  const usedTokens = usage?.promptTokens != null
+    ? usage.promptTokens
+    : apiCtx?.available && typeof apiCtx.used_tokens === 'number'
+      ? apiCtx.used_tokens
       : null;
-  const usedTokensSource = apiCtx?.available && typeof apiCtx.used_tokens === 'number'
-    ? apiCtx.source
-    : usage?.promptTokens != null
-      ? (usage.promptTokensSource ?? 'provider')
+  const usedTokensSource = usage?.promptTokens != null
+    ? (usage.promptTokensSource ?? 'provider')
+    : apiCtx?.available && typeof apiCtx.used_tokens === 'number'
+      ? apiCtx.source
       : 'unavailable';
   const cacheRead = usage?.cacheRead ?? 0;
   const cacheWrite = usage?.cacheWrite ?? 0;
@@ -852,8 +856,10 @@ function renderContextUsage(): string {
   const fillClass = pct != null && pct > 80 ? 'is-warn' : '';
   const unavailableNotice = c.usedTokens == null
     ? '<div class="inspector-context-warning">当前上下文用量不可用。</div>'
-    : c.usedTokensSource === 'request_view'
-      ? '<div class="inspector-context-warning">当前数值按本次实际请求视图（system、消息、工具 schema）本地计算。</div>'
+    : c.usedTokensSource === 'preview'
+      ? '<div class="inspector-context-warning">当前为打开会话时按下一次请求视图计算的预估值，发送后将以实际 usage 更新。</div>'
+      : c.usedTokensSource === 'request_view'
+        ? '<div class="inspector-context-warning">当前数值按本次实际请求视图（system、消息、工具 schema）本地计算。</div>'
       : '';
   return `
     <div class="inspector-section">

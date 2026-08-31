@@ -447,8 +447,10 @@ export interface ToolUpsert {
   status: ToolCallInfo['status'];
   startedAt: number;
   duration?: number;
-  /** 运行中工具的阶段进度文案（phase=progress 帧携带，完成时清除）。 */
+  /** 最近一条运行中工具的阶段进度文案。 */
   progressText?: string;
+  /** 按到达顺序保留的阶段进度行，避免前端只显示最后一条。 */
+  progressHistory?: string[];
 }
 
 // ---------- 7 个 reducer ----------
@@ -729,14 +731,18 @@ export function toolReducer(chunk: ToolChunk, snapshot: ReducerSnapshot): Reduce
 
   const phase = chunk.body.phase;
   if (phase === 'progress') {
-    // 进度帧：保持运行态、仅更新阶段文案——不能落入下面的完成分支（否则工具行被提前标成 done）。
+    // 进度帧：保持运行态，进度作为独立过程行保留；不能落入完成分支。
     if (existing) {
       toolUpsert.status = existing.status === 'generating' ? 'generating' : 'running';
       toolUpsert.startedAt = existing.startedAt;
       if (existing.duration != null) toolUpsert.duration = existing.duration;
     }
-    if (typeof chunk.body.text === 'string' && chunk.body.text) toolUpsert.progressText = chunk.body.text;
+    const text = typeof chunk.body.text === 'string' ? chunk.body.text.trim() : '';
+    const history = existing?.progressHistory ? [...existing.progressHistory] : [];
+    if (text && history.at(-1) !== text) history.push(text);
+    if (text) toolUpsert.progressText = text;
     else if (existing?.progressText) toolUpsert.progressText = existing.progressText;
+    toolUpsert.progressHistory = history;
   } else if (phase === 'generating' || phase === 'start') {
     // 新建
   } else {
@@ -784,6 +790,7 @@ export function toolReducer(chunk: ToolChunk, snapshot: ReducerSnapshot): Reduce
     startedAt: toolUpsert.startedAt,
     duration: toolUpsert.duration,
     progressText: toolUpsert.progressText,
+    progressHistory: toolUpsert.progressHistory ?? existing?.progressHistory,
   });
   book.toolMap = newToolMap;
 

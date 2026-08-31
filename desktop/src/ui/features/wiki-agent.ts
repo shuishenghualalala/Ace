@@ -74,7 +74,6 @@ import {
   dispatchWs,
   editQueueItem,
   isBusy,
-  openSessionInChat,
   setWikiSendExtrasResolver,
   steerQueuedItem,
   subscribeSessions,
@@ -412,8 +411,7 @@ function embeddedState(kbId: string): Promise<EmbeddedWikiAgentState> {
   if (cached) return Promise.resolve(cached);
   const pending = embeddedLoads.get(kbId);
   if (pending) return pending;
-  let load: Promise<EmbeddedWikiAgentState>;
-  load = backendApi.wikiAgentSession(kbId).then(async (res) => {
+  const load = backendApi.wikiAgentSession(kbId).then(async (res) => {
     if (embeddedLoads.get(kbId) !== load) {
       throw new Error('Wiki Agent 会话加载已失效');
     }
