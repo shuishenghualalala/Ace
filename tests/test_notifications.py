@@ -599,6 +599,30 @@ def test_task_completion_non_resume_kind_publishes_notification(tmp_path):
     assert center.list(OWNER)[0].payload["task_kind"] == "browser"
 
 
+def test_task_completion_foreground_never_notifies(tmp_path):
+    """前台执行（未转后台）完成一律不通知：回合与工具调用在会话里已内联展示。"""
+    center = NotificationCenterService(_store(tmp_path))
+    app = _app_for_task_completion(center, session_status="running")
+
+    app._on_task_completion(_completed_shell_task(kind="agent_turn", backgrounded=False))
+    app._on_task_completion(_completed_shell_task(task_id="t-shell-2", backgrounded=False))
+
+    assert center.unread_count(OWNER) == 0
+
+
+def test_task_completion_backgrounded_resume_turn_notifies(tmp_path):
+    """后台工作唤醒的恢复回合（agent_turn 且 backgrounded）结束 → 发最终通知。"""
+    center = NotificationCenterService(_store(tmp_path))
+    app = _app_for_task_completion(center, session_status="running")
+
+    app._on_task_completion(_completed_shell_task(kind="agent_turn", result="最终答复"))
+
+    assert center.unread_count(OWNER) == 1
+    item = center.list(OWNER)[0]
+    assert item.payload["task_kind"] == "agent_turn"
+    assert item.body == "最终答复"
+
+
 # ---- REST 路由 ----
 
 def _router_client(tmp_path: Path) -> tuple[TestClient, NotificationCenterService]:

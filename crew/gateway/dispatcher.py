@@ -641,6 +641,9 @@ class SessionDispatcher:
                                 inactivity_timeout=getattr(
                                     cfg, "tasks_agent_turn_inactivity_timeout_seconds", 600.0
                                 ),
+                                # 后台任务唤醒的恢复回合是异步执行的（用户没有同步等待），
+                                # 标记 backgrounded，其完成才会触发通知中心提醒。
+                                backgrounded=bool(envelope.params.get("internal_task_resume")),
                                 owner_account_id=owner,
                             )
                             runtime_task_id = task["task_id"]

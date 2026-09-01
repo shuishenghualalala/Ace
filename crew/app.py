@@ -605,9 +605,16 @@ class CrewApp:
     # ---- 通知中心来源：tasks / approval / followup / plan（cron 在 build_app 装配）----
 
     def _publish_task_notification(self, task: dict[str, Any]) -> None:
-        """后台任务到达 completed/failed 终态时发一条站内通知。"""
+        """转入后台的任务彻底结束时发一条站内通知。
+
+        任务运行时是全局执行账本（agent_turn / shell / subagent 都会记账），
+        只有 backgrounded=True 的条目代表离开用户视野的工作；前台执行在会话里
+        已内联展示，一律不通知。
+        """
         status = str(task.get("status") or "")
         if status not in {"completed", "failed"}:
+            return
+        if not bool(task.get("backgrounded")):
             return
         from crew.core.interfaces import Notification
 
