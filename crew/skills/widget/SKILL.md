@@ -37,9 +37,9 @@ Then:
 
 `creationHints` accepts 1-6 short progress lines. The host displays them while the page is being authored. Static Widgets need no slots, events, Binding, or Automation.
 
-For appearance and responsive layout, load `widgetdesign/SKILL.md` before writing HTML/CSS. It is
-the self-contained Widget design authority; do not load another Widget Design Skill for the same
-work.
+For appearance and responsive layout, load the widgetdesign skill with `skill_view(name="widgetdesign")`
+before writing HTML/CSS. It is an independent skill, not a file inside this directory; do not pass it
+as `file_path` of the `widget` skill, and do not load another Widget Design Skill for the same work.
 
 ## Inspect And Modify An Existing Widget
 

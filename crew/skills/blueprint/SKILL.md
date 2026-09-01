@@ -33,10 +33,12 @@ Blueprint has four assets:
 
 ## Routing
 
-- Executable work, schedules, conditions, runs, cancellation, or delivery: load `automation/SKILL.md`.
-- HTML UI, data rendering, input controls, or Widget files: load `widget/SKILL.md`, then read `widget/references/runtime-api.md` before iframe API code.
-- Automation-to-Widget data delivery or Widget submit routing: load `binding/SKILL.md`.
-- Board creation, Widget placement, movement, resizing, z-order, or view state: load `canvas/SKILL.md`.
+These are independent skills, not files inside this directory. Always load them with `skill_view(name="...")`; never pass them as `file_path` of the `blueprint` skill.
+
+- Executable work, schedules, conditions, runs, cancellation, or delivery: `skill_view(name="automation")`.
+- HTML UI, data rendering, input controls, or Widget files: `skill_view(name="widget")`, then `skill_view(name="widget", file_path="references/runtime-api.md")` before iframe API code.
+- Automation-to-Widget data delivery or Widget submit routing: `skill_view(name="binding")`.
+- Board creation, Widget placement, movement, resizing, z-order, or view state: `skill_view(name="canvas")`.
 
 ## Standard Chains
 

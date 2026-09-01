@@ -204,7 +204,7 @@ tool_result_lifecycle:
     session_config:
       capability_profiles: ["sites.authoring"]
     config:
-      compaction_token_budget: 8000
+      compaction_token_budget: 30000
       compaction_keep_recent: 6
       compaction_keep_recent_tools: 4
       max_iterations: 25
@@ -230,6 +230,35 @@ tool_result_lifecycle:
     expected_files:
       - path: "app-notes.md"
       - path: "interaction-notes.md"
+    max_skill_view_per_name: 1
+    expect_compaction_recovery: true
+    timeout_seconds: 600
+
+  # 单个长用户回合内的 L3：_safe_split 接受 assistant 边界后，回合内早期迭代
+  # 应被摘要（不再有 followup 提供 user 边界，压缩标记必须出现在回合之内）。
+  site_single_turn_intra_compaction:
+    title: 单个长回合内触发 L3 完整压缩并恢复受保护结果
+    mode: agent
+    session_config:
+      capability_profiles: ["sites.authoring"]
+    config:
+      compaction_token_budget: 30000
+      compaction_keep_recent: 6
+      compaction_keep_recent_tools: 4
+      max_iterations: 25
+    workspace:
+      instructions: |
+        这是 E2E 玩具工作区。只允许读取和修改当前工作区内的文件，不要运行 git 命令。
+    prompt: |
+      完成一个多步骤建站任务（全程不要向我提问，所有选择自行决定）：
+      1. 阅读建站 Skill 的完整说明，严格按它的资产链执行；
+      2. 创建一个「待办清单」App 画布，并添加至少两个组件；
+      3. 用 file_write 把设计说明写入 app-notes.md；
+      4. 用 file_read 读回确认，再用 terminal 运行 ls 验证工作区；
+      5. 最后总结你用到的 Skill 和资产。
+    expected_tools: [skill_view, Canvas, Widget]
+    expected_files:
+      - path: "app-notes.md"
     max_skill_view_per_name: 1
     expect_compaction_recovery: true
     timeout_seconds: 600
