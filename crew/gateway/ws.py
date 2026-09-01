@@ -38,7 +38,6 @@ from crew.gateway.helpers import (
 from crew.gateway.broadcast import stream_and_broadcast
 from crew.gateway.session_context import session_context_from_envelope
 from crew.state.logging import get_logger
-from crew.state.active_owner import ActiveOwnerConflict
 from crew.core.followup import get_followup_waiter
 
 log = get_logger("gateway.ws")
@@ -154,14 +153,10 @@ def create_ws_router(
             await socket.close(code=1013, reason="Gateway startup failed")
             return
         owner = account.owner_account_id
-        if logout_coordinator is not None and logout_coordinator.is_draining():
+        if logout_coordinator is not None and logout_coordinator.is_draining(owner):
             await socket.close(code=4423, reason="Logout in progress")
             return
-        try:
-            crew.active_owner.claim(owner)
-        except ActiveOwnerConflict:
-            await socket.close(code=4423, reason="Active owner conflict")
-            return
+        crew.active_owner.claim(owner)
         if logout_coordinator is not None:
             logout_coordinator.activate_owner(owner)
 
@@ -381,8 +376,12 @@ def create_ws_router(
                                 continue
 
                     def _replay_filter(payload: dict) -> bool:
-                        """过滤已失效的临时交互帧：只回放仍在等待中的追问。"""
-                        if payload.get("kind") != "followup_question":
+                        """过滤已失效的临时帧：status 是瞬时态，回放只会把过期状态
+                        （如"排队中"）重新贴到前端；追问只回放仍在等待中的。"""
+                        kind = payload.get("kind")
+                        if kind == "status":
+                            return False
+                        if kind != "followup_question":
                             return True
                         body = payload.get("body") or {}
                         qid = str(body.get("question_id") or "").strip()
@@ -801,7 +800,7 @@ def create_ws_router(
                     envelope.params["team_confirm_execution_mode"] = True
                 envelope.attachments = attachments
                 envelope.params["session_context"] = session_context_from_envelope(
-                    envelope, connected_platforms(channel_manager)
+                    envelope, connected_platforms(channel_manager, owner)
                 )
                 if active_packages_added:
                     envelope.params["active_skill_packages"] = active_packages_added

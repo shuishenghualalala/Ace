@@ -72,6 +72,45 @@ async def test_api_session_context(api, auth_headers):
 
 
 @pytest.mark.asyncio
+async def test_team_agent_config_update_evicts_team_cache(tmp_path, auth_headers):
+    crew = build_app(
+        config=Config(
+            db_path=str(tmp_path / "team-config-cache.db"),
+            cron_enabled=False,
+            team_config={
+                "members": [{
+                    "member_id": "kk",
+                    "name": "kk",
+                    "executor": "builtin",
+                    "capabilities": ["implementation"],
+                }],
+            },
+        ),
+        enable_team=True,
+    )
+    crew.session_store.ensure_session("team-config-cache", owner_account_id=OWNER_A)
+    cached = crew.team._get_or_create("team-config-cache", owner_account_id=OWNER_A)
+    assert cached is crew.team._teams[(OWNER_A, "team-config-cache")]
+
+    app = create_app(crew)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers=auth_headers,
+    ) as client:
+        response = await client.put(
+            "/api/session/team-config-cache/agent-config",
+            json={
+                "executor": "team",
+                "team": {},
+            },
+        )
+
+    assert response.status_code == 200
+    assert (OWNER_A, "team-config-cache") not in crew.team._teams
+
+
+@pytest.mark.asyncio
 async def test_external_session_model_switch_requires_idle_and_runtime_catalog(tmp_path, auth_headers, monkeypatch):
     crew = build_app(config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False), enable_team=False)
     runtime = crew.external_agents.upsert_runtime({
@@ -103,7 +142,6 @@ async def test_external_session_model_switch_requires_idle_and_runtime_catalog(t
         {
             "executor": "acp",
             "external_agent_id": agent["id"],
-            "acp": {"external_agent_id": agent["id"]},
         },
         owner_account_id=OWNER_A,
     )
@@ -152,6 +190,84 @@ async def test_external_session_model_switch_requires_idle_and_runtime_catalog(t
     assert stored["executor"] == "external"
     assert stored["external"]["model"] == "gpt-alt"
 
+
+@pytest.mark.asyncio
+async def test_external_session_agent_config_requires_one_canonical_id(tmp_path, auth_headers):
+    crew = build_app(config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False), enable_team=False)
+    runtime = crew.external_agents.upsert_runtime({
+        "id": "external-config-runtime",
+        "provider": "custom",
+        "name": "External Config Runtime",
+        "executable_path": "/bin/sh",
+        "version": "test",
+        "protocol": "cli",
+        "metadata": {"availability_status": "ready"},
+    })
+    agent = crew.external_agents.create_agent(
+        owner_account_id=OWNER_A,
+        name="External Config Agent",
+        runtime_id=runtime["id"],
+        model="default",
+    )
+    app = create_app(crew)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers=auth_headers,
+    ) as client:
+        missing = await client.put(
+            "/api/session/external-config-missing/agent-config",
+            json={"executor": "external"},
+        )
+        top_level = await client.put(
+            "/api/session/external-config-top-level/agent-config",
+            json={
+                "executor": "external",
+                "external_agent_id": agent["id"],
+            },
+        )
+        conflict = await client.put(
+            "/api/session/external-config-conflict/agent-config",
+            json={
+                "executor": "external",
+                "external": {"external_agent_id": agent["id"]},
+                "acp": {"external_agent_id": "different-agent"},
+            },
+        )
+        equal = await client.put(
+            "/api/session/external-config-equal/agent-config",
+            json={
+                "executor": "acp",
+                "external": {"external_agent_id": agent["id"], "model": "default"},
+                "acp": {"external_agent_id": agent["id"]},
+            },
+        )
+        acp_legacy = await client.put(
+            "/api/session/external-config-acp-legacy/agent-config",
+            json={
+                "executor": "acp",
+                "external_agent_id": agent["id"],
+            },
+        )
+        loaded = await client.get("/api/session/external-config-equal/agent-config")
+
+    assert missing.status_code == 400
+    assert top_level.status_code == 400
+    assert "不支持顶层" in top_level.json()["error"]
+    assert conflict.status_code == 400
+    assert equal.status_code == 200
+    assert acp_legacy.status_code == 200
+    assert acp_legacy.json()["external"]["external_agent_id"] == agent["id"]
+    assert "external_agent_id" not in acp_legacy.json()
+    assert equal.json()["executor"] == "external"
+    assert equal.json()["external"]["external_agent_id"] == agent["id"]
+    assert "acp" not in equal.json()
+    assert "external_agent_id" not in equal.json()
+    assert loaded.status_code == 200
+    assert loaded.json() == equal.json()
+
+
 @pytest.mark.asyncio
 async def test_external_session_model_resolves_adapter_declared_legacy_id(tmp_path, auth_headers):
     crew = build_app(config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False), enable_team=False)
@@ -192,7 +308,6 @@ async def test_external_session_model_resolves_adapter_declared_legacy_id(tmp_pa
         "claude-legacy-model",
         {
             "executor": "external",
-            "external_agent_id": agent["id"],
             "external": {
                 "external_agent_id": agent["id"],
                 "model": "default",
@@ -982,6 +1097,43 @@ async def test_team_task_api_ignores_legacy_turn_child_tasks_without_workflow(tm
     assert history.status_code == 200
     assert any(item["role"] == "assistant" and "团队工作流完成" in item["content"] for item in history.json())
     assert any("成员完成开发" in item["content"] for item in history.json())
+
+
+@pytest.mark.asyncio
+async def test_builtin_session_history_does_not_project_request_id_as_agent(tmp_path, auth_headers):
+    cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False, gateway_dev_mode=False)
+    crew = build_app(config=cfg, enable_team=False)
+    parent = "web_builtin_parent"
+    request_id = "req_builtin_1"
+    child = f"{parent}::turn::{request_id}"
+    crew.session_store.save(
+        parent,
+        [Message.user("你好"), Message(role="assistant", content="普通回答")],
+        owner_account_id=OWNER_A,
+    )
+    crew.session_store.set_agent_config(parent, {"executor": "builtin"}, owner_account_id=OWNER_A)
+    crew.session_store.save(
+        child,
+        [
+            Message.user("你好"),
+            Message(role="assistant", content="普通回答"),
+            Message.user("继续回答"),
+            Message(role="assistant", content="新的普通回答"),
+        ],
+        owner_account_id=OWNER_A,
+    )
+    app = create_app(crew)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        response = await client.get(f"/api/session/{parent}")
+
+    assert response.status_code == 200
+    items = response.json()
+    assert [item["content"] for item in items] == ["你好", "普通回答"]
+    assert [item["role"] for item in items] == ["user", "assistant"]
+    assert all("agent_name" not in item for item in items)
+    assert all(request_id not in item for item in items)
 
 
 @pytest.mark.asyncio

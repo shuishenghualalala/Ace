@@ -143,6 +143,32 @@ class FeishuChannel(Channel):
         """绑定 CrewApp，用 Active Owner 与退出协调状态对入站消息做最终门禁。"""
         self._app = app
 
+    def _gateway_owner(self) -> str:
+        return str(getattr(self, "_gateway_owner_account_id", "") or "").strip()
+
+    def _owner_lease(self, owner: str):
+        active_owner = self._app.active_owner
+        getter = getattr(active_owner, "get", None)
+        return getter(owner) if owner and callable(getter) else active_owner.current()
+
+    def _owner_is_draining(self, owner: str) -> bool:
+        coordinator = getattr(self._app, "logout_coordinator", None)
+        if coordinator is None:
+            return False
+        try:
+            return bool(coordinator.is_draining(owner))
+        except TypeError:
+            return bool(coordinator.is_draining())
+
+    def _owner_binding(self, owner: str) -> str:
+        bindings = getattr(self._app, "channel_bindings", None)
+        if bindings is None:
+            return ""
+        try:
+            return str(bindings.get_binding(self.name, owner) or "")
+        except TypeError:
+            return str(bindings.get_binding(self.name) or "")
+
     # -- 生命周期 ----------------------------------------------------------- #
     async def start(self, handler: MessageHandler) -> None:
         if not self._owner_may_connect():
@@ -267,40 +293,39 @@ class FeishuChannel(Channel):
             task.add_done_callback(self._ingress_workers.discard)
 
     def _owner_available(self, owner_account_id: str | None = None) -> bool:
-        """返回当前 Active Owner 是否仍拥有飞书渠道；任何状态读取异常均关闭入口。"""
+        """返回该渠道实例的 Owner 是否仍可接收入站事件。"""
         if self._app is None:
             return True
         try:
-            lease = self._app.active_owner.current()
+            owner = str(owner_account_id or self._gateway_owner()).strip()
+            lease = self._owner_lease(owner)
             if lease is None:
                 return False
-            owner = str(lease.owner_account_id or "")
-            if owner_account_id and owner != str(owner_account_id):
+            active_owner = str(lease.owner_account_id or "")
+            if self._owner_is_draining(active_owner):
                 return False
-            coordinator = getattr(self._app, "logout_coordinator", None)
-            if coordinator is not None and coordinator.is_draining():
-                return False
-            bindings = getattr(self._app, "channel_bindings", None)
-            return bindings is not None and str(bindings.get_binding(self.name) or "") == owner
+            bound_owner = self._owner_binding(active_owner)
+            if not bound_owner:
+                return True
+            return bound_owner == active_owner
         except Exception as exc:  # noqa: BLE001 - 身份事实源异常必须 fail closed
             log.warning("Feishu Active Owner 门禁读取失败: %s", exc)
             return False
 
     def _owner_may_connect(self) -> bool:
-        """连接前阻止旧绑定账号在新 Active Owner 登录后被物理重连。"""
+        """连接前只检查当前渠道实例自己的 Owner 会话。"""
         if self._app is None:
             return True
         try:
-            lease = self._app.active_owner.current()
+            owner = self._gateway_owner()
+            lease = self._owner_lease(owner)
             if lease is None:
                 return False
-            owner = str(lease.owner_account_id or "")
-            coordinator = getattr(self._app, "logout_coordinator", None)
-            if coordinator is not None and coordinator.is_draining():
+            active_owner = str(lease.owner_account_id or "")
+            if self._owner_is_draining(active_owner):
                 return False
-            bindings = getattr(self._app, "channel_bindings", None)
-            bound_owner = str(bindings.get_binding(self.name) or "") if bindings is not None else ""
-            return not bound_owner or bound_owner == owner
+            bound_owner = self._owner_binding(active_owner)
+            return not bound_owner or bound_owner == active_owner
         except Exception as exc:  # noqa: BLE001 - 身份事实源异常必须 fail closed
             log.warning("Feishu 连接 Owner 门禁读取失败: %s", exc)
             return False

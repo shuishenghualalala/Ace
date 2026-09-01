@@ -357,6 +357,8 @@ class OpenAIProvider(LLMProvider):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.vision = vision
+        provider_hint = f"{base_url or ''} {model}".lower()
+        self._supports_thinking_control = "deepseek" in provider_hint
 
     async def aclose(self) -> None:
         """Close the owned SDK client exactly once, including concurrent callers."""
@@ -374,6 +376,8 @@ class OpenAIProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         *,
         max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
+        reasoning_mode: str | None = None,
     ) -> ChatResponse:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -383,6 +387,10 @@ class OpenAIProvider(LLMProvider):
         effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
         if effective_max_tokens is not None:
             payload["max_tokens"] = effective_max_tokens
+        if response_format is not None:
+            payload["response_format"] = response_format
+        if reasoning_mode == "disabled" and self._supports_thinking_control:
+            payload["extra_body"] = {"thinking": {"type": "disabled"}}
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -456,6 +464,8 @@ class OpenAIProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         *,
         max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
+        reasoning_mode: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """流式补全，逐 token 返回增量文本。"""
         payload: dict[str, Any] = {
@@ -468,6 +478,10 @@ class OpenAIProvider(LLMProvider):
         effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
         if effective_max_tokens is not None:
             payload["max_tokens"] = effective_max_tokens
+        if response_format is not None:
+            payload["response_format"] = response_format
+        if reasoning_mode == "disabled" and self._supports_thinking_control:
+            payload["extra_body"] = {"thinking": {"type": "disabled"}}
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"

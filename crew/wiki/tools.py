@@ -20,10 +20,12 @@ from crew.core.runctx import (
     current_request_id,
     current_session_id,
     emit_tool_progress,
+    touch_current_task_activity,
 )
+from crew.core.timeout_policy import DEFAULT_INTERACTION_TIMEOUT_SECONDS
+from crew.security.outbound import PublicRedirectApprovalRequired, parse_public_http_target
 from crew.tools.registry import Registry, tool_error, tool_result
 from crew.tools.security_guard import authorize_network_tool
-from crew.security.outbound import PublicRedirectApprovalRequired, parse_public_http_target
 
 from .capture import capture_text_source, save_parsed_source
 from .compiler import WikiCompiler
@@ -36,14 +38,6 @@ from .parser import (
     parse_document_from_bytes,
     validate_parsed_text,
 )
-from .sources import (
-    adapter_status,
-    all_adapter_statuses,
-    classify_file,
-    classify_url,
-    fetch_youtube_transcript,
-)
-from .store._ids import filename_from_title
 from .prompts import (
     WIKI_APPLY_INGEST_PROMPT,
     WIKI_BATCH_INGEST_PROMPT,
@@ -52,7 +46,6 @@ from .prompts import (
     WIKI_DELETE_SOURCE_PROMPT,
     WIKI_DIGEST_PROMPT,
     WIKI_FETCH_URL_PROMPT,
-    WIKI_REFRESH_SOURCE_PROMPT,
     WIKI_LINT_PROMPT,
     WIKI_LIST_INBOX_PROMPT,
     WIKI_LIST_KBS_PROMPT,
@@ -61,11 +54,20 @@ from .prompts import (
     WIKI_PARSE_SOURCE_PROMPT,
     WIKI_PLAN_INGEST_PROMPT,
     WIKI_READ_PROMPT,
+    WIKI_REFRESH_SOURCE_PROMPT,
     WIKI_SEARCH_PROMPT,
     WIKI_UPDATE_PAGE_PROMPT,
 )
 from .query import WikiQuerier
+from .sources import (
+    adapter_status,
+    all_adapter_statuses,
+    classify_file,
+    classify_url,
+    fetch_youtube_transcript,
+)
 from .store import WikiStore
+from .store._ids import filename_from_title
 
 # Wiki 工具按读写职责拆分为只读与管理工具集。
 #
@@ -674,14 +676,22 @@ def register_wiki_tools(
         return _kb_id(args)
 
     def _build_progress_callback() -> Callable[[str, int, dict[str, Any]], Awaitable[None]] | None:
-        """构建一个向前端推送 wiki_ingest 进度的回调（非 gateway 场景返回 None）。"""
+        """构建 Wiki ingest 进度回调：保活当前任务，并在可用时推送到前端。"""
         push = current_push_fn.get()
         sid = current_session_id.get()
         req_id = current_request_id.get()
-        if push is None or not sid:
+        if push is None and not sid:
             return None
 
         async def _progress(stage: str, step: int, payload: dict[str, Any]) -> None:
+            touch_current_task_activity({
+                "last_tool": "wiki_ingest",
+                "tool_phase": "progress",
+                "stage": stage,
+                "step": step,
+            })
+            if push is None or not sid:
+                return
             try:
                 await push(sid, {
                     "kind": "tool_progress",
@@ -810,7 +820,11 @@ def register_wiki_tools(
             )
         except ToolError:
             return "unavailable"
-        answers = await wait_for_answer(session_id, question_id, timeout=300)
+        answers = await wait_for_answer(
+            session_id,
+            question_id,
+            timeout=DEFAULT_INTERACTION_TIMEOUT_SECONDS,
+        )
         if not answers:
             return "timeout"
         first = answers[0] if isinstance(answers[0], dict) else {}
@@ -845,13 +859,14 @@ def register_wiki_tools(
         return tool_result(cancelled=True, message=cancel_message)
 
     def _capture_bytes(path: str, title: str, kb_id: str) -> str:
-        from pathlib import Path
         import shutil
         import time
         import uuid
+        from pathlib import Path
 
         from crew.gateway.context import _get_upload_dir
         from crew.wiki.multimodal import is_image_mime, is_video_mime
+
         from .schemas import RawSource
 
         candidate = Path(path).expanduser().resolve()

@@ -47,7 +47,7 @@ async def test_team_planning_and_kanban_use_owner_default_provider(tmp_path, mon
     class EmptyPlanner:
         async def plan_async(self, _team, _goal, *, provider, **_kwargs):
             captured["provider"] = provider
-            return SimpleNamespace(nodes=[], edges=[], critical_missing_info=[])
+            return SimpleNamespace(nodes=[], edges=[], critical_missing_info=[], workflow_plan={})
 
     app.team.graph_planner = EmptyPlanner()
     planned = await app.team._ensure_runtime_plan_async(

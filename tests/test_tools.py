@@ -94,6 +94,36 @@ async def test_file_delete_refuses_directories_and_symlinks(registry, tmp_path):
     assert target.read_text(encoding="utf-8") == "keep"
 
 
+async def test_file_read_rejects_oversized_file_before_read(registry, tmp_path, monkeypatch):
+    """file_read 读超过整读上限的文件应读前拒绝，而非整读进内存（对照 codex 上限）。"""
+    from crew.tools import builtin
+
+    target = tmp_path / "big.txt"
+    target.write_text("x" * 100, encoding="utf-8")
+    monkeypatch.setattr(builtin, "MAX_READ_FILE_BYTES", 10)
+
+    result = await registry.execute(ToolCall("c1", "file_read", {"path": str(target)}))
+
+    assert result.is_error
+    assert "读取上限" in result.content
+
+
+async def test_patch_rejects_oversized_file_before_read(registry, tmp_path, monkeypatch):
+    """patch 读超过整读上限的文件应读前拒绝，并返回干净的 ToolError。"""
+    from crew.tools import file_tools
+
+    target = tmp_path / "big.txt"
+    target.write_text("x" * 100, encoding="utf-8")
+    monkeypatch.setattr(file_tools, "MAX_READ_FILE_BYTES", 10)
+
+    result = await registry.execute(
+        ToolCall("c1", "patch", {"path": str(target), "old": "x", "new": "y"})
+    )
+
+    assert result.is_error
+    assert "文件过大" in result.content
+
+
 async def test_builtin_file_tools_resolve_relative_paths_from_agent_workdir(registry, tmp_path):
     token = current_agent_workdir.set(str(tmp_path))
     try:
@@ -588,6 +618,60 @@ async def test_ask_followup_question_returns_user_answers():
     finally:
         current_session_id.reset(sid_token)
         current_request_id.reset(rid_token)
+        current_push_fn.reset(push_token)
+
+
+async def test_followup_question_uses_visible_session_for_sidechain():
+    import asyncio
+
+    from crew.core.followup import resolve_answer
+    from crew.core.runctx import (
+        current_display_session_id,
+        current_push_fn,
+        current_session_id,
+    )
+    from crew.tools.interaction import handle_ask_followup_question
+
+    visible_session_id = "team-session"
+    sid_token = current_session_id.set(f"{visible_session_id}::turn::req-1")
+    display_sid_token = current_display_session_id.set(visible_session_id)
+    pushed: list[tuple[str, dict]] = []
+
+    async def mock_push(sid: str, payload: dict) -> None:
+        pushed.append((sid, payload))
+
+    push_token = current_push_fn.set(mock_push)
+
+    async def answer_after_short_delay() -> None:
+        await asyncio.sleep(0.05)
+        question_id = pushed[0][1]["body"]["question_id"]
+        resolve_answer(
+            visible_session_id,
+            question_id,
+            [{"question_id": "permission", "answers": ["allow_once"]}],
+        )
+
+    try:
+        answerer = asyncio.create_task(answer_after_short_delay())
+        result = await handle_ask_followup_question({
+            "title": "权限确认",
+            "questions": [{
+                "id": "permission",
+                "question": "允许浏览器操作？",
+                "options": [{"label": "仅本次允许", "value": "allow_once"}],
+                "allowFreeText": False,
+            }],
+        })
+        await answerer
+
+        assert json.loads(result)["answers"] == [
+            {"question_id": "permission", "answers": ["allow_once"]}
+        ]
+        assert pushed[0][0] == visible_session_id
+        assert pushed[0][1]["session_id"] == visible_session_id
+    finally:
+        current_session_id.reset(sid_token)
+        current_display_session_id.reset(display_sid_token)
         current_push_fn.reset(push_token)
 
 

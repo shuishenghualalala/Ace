@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
 
 import pytest
@@ -61,6 +62,34 @@ def test_bind_on_connect_resets_bound_at_when_owner_changes(bindings):
     time.sleep(0.01)
     second = bindings.bind_on_connect("feishu", "B:uid-b")
     assert second["bound_at"] > first["bound_at"]
+
+
+def test_legacy_single_platform_binding_migrates_to_composite_owner_key(tmp_path):
+    db_path = tmp_path / "crew.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE channel_bindings (
+            platform TEXT PRIMARY KEY,
+            owner_account_id TEXT NOT NULL,
+            bound_at REAL NOT NULL
+        );
+        INSERT INTO channel_bindings VALUES ('feishu', 'A:uid-a', 10);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = ChannelBindingsStore(str(db_path))
+    store.bind_on_connect("feishu", "B:uid-b")
+
+    assert {row["owner_account_id"] for row in store.list_for_platform("feishu")} == {
+        "A:uid-a",
+        "B:uid-b",
+    }
+    assert store.get_binding("feishu", "A:uid-a") == "A:uid-a"
+    assert store.get_binding("feishu", "B:uid-b") == "B:uid-b"
+    store.close()
 
 
 def test_list_sessions_excludes_channel_by_default(store):

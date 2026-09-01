@@ -10,6 +10,11 @@ from contextvars import ContextVar
 from typing import Any, Callable, Coroutine
 
 current_session_id: ContextVar[str] = ContextVar("current_session_id", default="")
+# 用户当前可见的会话 id。sidechain/Team Leader 的工具仍按 current_session_id
+# 隔离执行历史，但权限确认等 side-channel 交互必须投递到这个可见会话。
+current_display_session_id: ContextVar[str] = ContextVar(
+    "current_display_session_id", default=""
+)
 # team member 执行工具时的子会话 id（envelope.params.member_session_id）。
 # delegate_task/run_agent 后台入队按此 key 隔离，使完成通知能回到发起 member 而非 team_session。
 # 主 agent 路径为空 -> 回退 current_session_id，行为不变。
@@ -98,3 +103,20 @@ current_push_fn: ContextVar[PushFn | None] = ContextVar("current_push_fn", defau
 # 长耗时工具（如 Dynamic Kanban workflow）可直接 touch_activity 保活，避免被 inactivity 超时取消。
 current_task_runtime_id: ContextVar[str] = ContextVar("current_task_runtime_id", default="")
 current_task_runtime: ContextVar[Any | None] = ContextVar("current_task_runtime", default=None)
+
+# 当前回合的业务活动回调。由调度器注入并负责限流，工具和子任务只需报告实际进展。
+TaskActivityFn = Callable[[dict[str, Any] | None], None]
+current_task_activity_fn: ContextVar[TaskActivityFn | None] = ContextVar(
+    "current_task_activity_fn", default=None
+)
+
+
+def touch_current_task_activity(progress: dict[str, Any] | None = None) -> None:
+    """报告当前回合的真实业务活动；无运行时上下文时静默。"""
+    fn = current_task_activity_fn.get()
+    if fn is None:
+        return
+    try:
+        fn(progress)
+    except Exception:  # noqa: BLE001 - 活动上报失败不得影响工具执行
+        pass

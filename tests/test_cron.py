@@ -700,6 +700,42 @@ async def test_cron_service_mounts_only_active_owner_jobs(tmp_path):
     await service.stop()
 
 
+async def test_cron_service_mounts_and_unmounts_multiple_owners_independently(tmp_path):
+    store = CronJobStore(str(tmp_path / "c.db"))
+
+    async def runner(_env):
+        return None
+
+    job_a = store.create(
+        name="A",
+        schedule="every 1h",
+        query="a",
+        session_id="same",
+        owner_account_id=OWNER,
+    )
+    owner_b = "B:uid-b"
+    job_b = store.create(
+        name="B",
+        schedule="every 1h",
+        query="b",
+        session_id="same",
+        owner_account_id=owner_b,
+    )
+    service = CronService(store, runner)
+    await service.start()
+    try:
+        service.mount_owner(OWNER)
+        service.mount_owner(owner_b)
+        assert service.mounted_owners == {OWNER, owner_b}
+        assert {job.id for job in service.scheduler.get_jobs()} == {job_a["id"], job_b["id"]}
+
+        await service.unmount_owner(OWNER)
+        assert service.mounted_owners == {owner_b}
+        assert [job.id for job in service.scheduler.get_jobs()] == [job_b["id"]]
+    finally:
+        await service.stop()
+
+
 async def test_mount_owner_reuses_prepared_rows_without_reading_each_job(tmp_path, monkeypatch):
     store = CronJobStore(str(tmp_path / "c.db"))
     for index in range(3):

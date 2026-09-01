@@ -155,12 +155,12 @@ def create_cron_router(crew) -> APIRouter:
             return None
         return service
 
-    def _sync_service(job_id: str) -> None:
+    def _sync_service(job_id: str, owner: str) -> None:
         """把单个 job 的最新 trigger 同步到 APScheduler。"""
         svc = _service()
         if svc is not None:
             try:
-                svc.sync_job(job_id)
+                svc.sync_job(job_id, owner_account_id=owner)
             except Exception:  # noqa: BLE001 — sync_job 内部混用 sqlite/trigger 解析/APScheduler，失败面未知；写路由仅记录不阻断
                 log.exception("cron service.sync_job 失败 id=%s", job_id)
 
@@ -313,7 +313,7 @@ def create_cron_router(crew) -> APIRouter:
             )
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-        _sync_service(str(job["id"]))
+        _sync_service(str(job["id"]), owner)
         return JSONResponse(_serialize_job(job), status_code=201)
 
     @router.post("/api/cron/jobs/{job_id}/pause")
@@ -328,7 +328,7 @@ def create_cron_router(crew) -> APIRouter:
         if job is None:
             return JSONResponse({"ok": False, "error": f"任务不存在: {job_id}"}, status_code=404)
         store.set_enabled(job_id, False, owner_account_id=owner)
-        _sync_service(job_id)
+        _sync_service(job_id, owner)
         refreshed = store.get(job_id, owner_account_id=owner) or job
         return JSONResponse(_serialize_job(refreshed))
 
@@ -344,7 +344,7 @@ def create_cron_router(crew) -> APIRouter:
         if job is None:
             return JSONResponse({"ok": False, "error": f"任务不存在: {job_id}"}, status_code=404)
         store.set_enabled(job_id, True, owner_account_id=owner)
-        _sync_service(job_id)
+        _sync_service(job_id, owner)
         refreshed = store.get(job_id, owner_account_id=owner) or job
         return JSONResponse(_serialize_job(refreshed))
 
@@ -359,7 +359,7 @@ def create_cron_router(crew) -> APIRouter:
         if job is None:
             return JSONResponse({"ok": False, "error": f"任务不存在: {job_id}"}, status_code=404)
         store.delete(job_id, owner_account_id=owner)
-        _sync_service(job_id)
+        _sync_service(job_id, owner)
         return JSONResponse({"ok": True, "id": job_id})
 
     @router.post("/api/cron/jobs/{job_id}/run")
@@ -415,7 +415,7 @@ def create_cron_router(crew) -> APIRouter:
         cron_service = _service()
         if cron_service is None:
             return JSONResponse({"ok": False, "error": "CronService 未启用"}, status_code=503)
-        if cron_service.mounted_owner != owner:
+        if owner not in cron_service.mounted_owners:
             return JSONResponse(
                 {"ok": False, "error": "当前账号未挂载到 CronService"},
                 status_code=409,

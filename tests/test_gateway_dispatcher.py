@@ -23,6 +23,7 @@ from crew.core.runctx import current_owner_account_id
 from crew.core.types import Message
 from crew.gateway.channel_manager import ChannelManager
 from crew.gateway.connections import ConnectionManager, _MAX_CONSECUTIVE_FAILURES
+from crew.gateway.delivery import DeliveryRouter
 from crew.gateway.dispatcher import BusyMode, SessionDispatcher
 from crew.gateway.hooks import hook_registry
 
@@ -246,7 +247,10 @@ async def test_global_active_run_limit_across_sessions():
 
     assert started == ["a"]
     assert disp.status("a", owner_account_id=OWNER)["global_active"] == 1
-    assert disp.status("b", owner_account_id=OWNER)["live"] == "queued"
+    # b 已出队、正在等全局并发槽：对外的 live 是 running（已受理），不是 queued；
+    # 等槽状态经 waiting_for_global_slot 单独暴露。
+    assert disp.status("b", owner_account_id=OWNER)["live"] == "running"
+    assert disp.status("b", owner_account_id=OWNER)["queue_depth"] == 0
     assert disp.status("b", owner_account_id=OWNER)["waiting_for_global_slot"] == 1
     assert disp.runtime_status()["global_queued"] == 1
 
@@ -481,7 +485,14 @@ async def test_channel_manager_lifecycle_dispatches_through_session_dispatcher()
     await manager.start_all(dispatcher.run)
 
     assert manager.status() == [
-        {"name": "fake", "running": True, "error": "", "operation": "", "reason": ""}
+        {
+            "name": "fake",
+            "owner_account_id": "",
+            "running": True,
+            "error": "",
+            "operation": "",
+            "reason": "",
+        }
     ]
     assert seen[0].channel == "fake"
     assert seen[0].session_id == "fake:u1"
@@ -493,6 +504,7 @@ async def test_channel_manager_lifecycle_dispatches_through_session_dispatcher()
     assert manager.status() == [
         {
             "name": "fake",
+            "owner_account_id": "",
             "running": False,
             "error": "",
             "operation": "",
@@ -526,7 +538,58 @@ async def test_channel_manager_starts_only_active_owner_channels():
 
     await manager.start_all(handler, owner_account_id="B:uid-b")
 
-    assert started == ["owner-b", "global"]
+    assert started == ["owner-b"]
+
+
+async def test_channel_manager_stops_one_owner_without_affecting_another():
+    stopped: list[str] = []
+
+    class OwnedChannel(Channel):
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def start(self, _handler: MessageHandler) -> None:
+            return None
+
+        async def stop(self) -> None:
+            stopped.append(self.name)
+
+    async def handler(_envelope):
+        if False:
+            yield
+
+    manager = ChannelManager()
+    manager.register(OwnedChannel("shared"), owner_account_id="A:uid-a")
+    manager.register(OwnedChannel("shared"), owner_account_id="B:uid-b")
+    await manager.start_all(handler, owner_account_id="A:uid-a")
+    await manager.start_all(handler, owner_account_id="B:uid-b")
+
+    assert {row["owner_account_id"] for row in manager.status("B:uid-b")} == {"B:uid-b"}
+    assert await manager.stop_owner("A:uid-a", reason="login_required") == []
+    assert manager.get("shared", "A:uid-a") is not None
+    assert manager.status("A:uid-a")[0]["running"] is False
+    assert manager.status("B:uid-b")[0]["running"] is True
+    assert stopped == ["shared"]
+
+
+async def test_delivery_router_keeps_same_platform_senders_owner_scoped():
+    sent: list[tuple[str, str]] = []
+
+    async def sender_a(chat_id: str, text: str, _origin) -> bool:
+        sent.append(("A", f"{chat_id}:{text}"))
+        return True
+
+    async def sender_b(chat_id: str, text: str, _origin) -> bool:
+        sent.append(("B", f"{chat_id}:{text}"))
+        return True
+
+    router = DeliveryRouter()
+    router.register("feishu", sender_a, owner_account_id="A:uid-a")
+    router.register("feishu", sender_b, owner_account_id="B:uid-b")
+
+    assert (await router.deliver("feishu:chat-a", "from-a", owner_account_id="A:uid-a"))["ok"]
+    assert (await router.deliver("feishu:chat-b", "from-b", owner_account_id="B:uid-b"))["ok"]
+    assert sent == [("A", "chat-a:from-a"), ("B", "chat-b:from-b")]
 
 
 def test_channel_manager_status_includes_creation_errors():
@@ -537,6 +600,7 @@ def test_channel_manager_status_includes_creation_errors():
     assert manager.status() == [
         {
             "name": "feishu",
+            "owner_account_id": "",
             "running": False,
             "error": "missing appSecret",
             "operation": "",

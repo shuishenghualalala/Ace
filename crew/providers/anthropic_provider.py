@@ -265,6 +265,8 @@ class AnthropicProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         *,
         max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
+        reasoning_mode: str | None = None,
     ) -> ChatResponse:
         payload = self._payload(messages, tools, max_tokens_override=max_tokens)
         session = _current_session()
@@ -315,6 +317,8 @@ class AnthropicProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         *,
         max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
+        reasoning_mode: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         payload = {**self._payload(messages, tools, max_tokens_override=max_tokens), "stream": True}
         session = _current_session()

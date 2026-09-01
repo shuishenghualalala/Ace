@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import inspect
 import json
@@ -49,9 +50,10 @@ from crew.agent.skills import SkillActivation
 from crew.core.envelope import ResponseChunk
 from crew.core.followup import drain_followup_answer_messages
 from crew.core.runctx import current_owner_account_id
+from crew.core.timeout_policy import DEFAULT_EXTERNAL_IDLE_SECONDS, TimeoutPolicy
 from crew.core.types import Message, ToolCall
-from crew.state.home import get_owner_runtime_home
 from crew.security.models import AdditionalPermissionProfile
+from crew.state.home import get_owner_runtime_home
 from crew.team.workspace_guard import check_workspace_guard, classify_external_permission
 
 
@@ -80,7 +82,9 @@ class ExternalExecutorConfig:
     external_agent_id: str = ""
     model: str = ""          # Session 级覆盖；为空时继承 AgentProfile 默认模型
     cwd: str = "."
-    timeout: float = 120.0
+    timeout: float = DEFAULT_EXTERNAL_IDLE_SECONDS
+    hard_timeout: float | None = None
+    timeout_policy: dict[str, Any] = field(default_factory=dict)
     external_store: Any = None
     interaction_bridge: Any = None
     plan_manager: Any = None
@@ -136,18 +140,6 @@ def _provider_display_name(provider: str) -> str:
     if lower == "hermes":
         return "Hermes"
     return value or "外部智能体"
-
-
-def _effective_runtime_timeout(
-    base_timeout: float,
-    task_payload: "_ExternalTaskPayload",
-    *,
-    has_interaction_binding: bool,
-) -> float:
-    timeout = max(0.1, float(base_timeout or 120.0))
-    if has_interaction_binding or task_payload.mode == "team_execute":
-        return max(timeout, 330.0)
-    return timeout
 
 
 @dataclass(frozen=True)
@@ -964,6 +956,28 @@ class ExternalExecutor(AgentExecutor):
             metadata=runtime_metadata,
         )
         structured_adapter = bool(adapter_id)
+        task_payload = _build_external_task_payload(
+            ctx,
+            agent,
+            runtime,
+            prompt,
+            model=effective_model,
+        )
+        timeout_policy = TimeoutPolicy.from_mapping(self.config.timeout_policy)
+        resolve_kwargs: dict[str, Any] = {
+            # CLI/client legacy paths never received the structured Team idle
+            # floor; keep their effective default unchanged until a policy
+            # explicitly opts into that behavior.
+            "mode": task_payload.mode if structured_adapter else "single_agent",
+            "has_interaction_binding": False,
+            "protocol": adapter_id if structured_adapter else protocol,
+        }
+        if self.config.hard_timeout is not None:
+            # An explicit zero is preserved and handled by TimeoutPolicy as
+            # unlimited; None means "no per-executor override".
+            resolve_kwargs["hard_timeout"] = self.config.hard_timeout
+        timeout_budget = timeout_policy.resolve_external(self.config.timeout, **resolve_kwargs)
+        execution_started_at = asyncio.get_running_loop().time()
         seq = 0
         runtime_binding_session_id = self.config.crew_session_id or _display_session_id(ctx.session_id)
         display_session_id = self.config.display_session_id or _display_session_id(ctx.session_id)
@@ -1035,22 +1049,19 @@ class ExternalExecutor(AgentExecutor):
                 elif binding:
                     skipped_unsafe_binding = True
 
-                task_payload = _build_external_task_payload(
-                    ctx,
-                    agent,
-                    runtime,
-                    prompt,
-                    model=effective_model,
-                )
-                binding_ttl = max(self.config.timeout, 330.0) + 30
                 context_type = "standalone" if task_payload.mode == "single_agent" else "team"
+                resolve_kwargs["has_interaction_binding"] = bridge is not None
+                timeout_budget = timeout_policy.resolve_external(
+                    self.config.timeout,
+                    **resolve_kwargs,
+                )
                 interaction_binding = bridge.create_binding(
                     owner_account_id=owner_account_id,
                     display_session_id=display_session_id,
                     control_session_id=control_session_id,
                     origin_session_id=ctx.session_id,
                     agent_name=str(agent.get("name") or provider or "External Agent"),
-                    ttl_seconds=binding_ttl,
+                    ttl_seconds=timeout_budget.binding_ttl_seconds,
                     context_type=context_type,
                     team_session_id=(
                         str(ctx.params.get("team_session_id") or control_session_id)
@@ -1061,12 +1072,14 @@ class ExternalExecutor(AgentExecutor):
                     team_role=task_payload.team_role if context_type == "team" else "",
                     cwd=cwd,
                     active_skills=ctx.active_skills,
+                    interaction_timeout_seconds=timeout_budget.interaction_seconds,
                 ) if bridge is not None else None
-                interactive_timeout = _effective_runtime_timeout(
-                    self.config.timeout,
-                    task_payload,
-                    has_interaction_binding=interaction_binding is not None,
-                )
+                if interaction_binding is None:
+                    resolve_kwargs["has_interaction_binding"] = False
+                    timeout_budget = timeout_policy.resolve_external(
+                        self.config.timeout,
+                        **resolve_kwargs,
+                    )
                 permission_params = dict(ctx.params or {})
                 permission_guard = _permission_guard(
                     permission_params,
@@ -1192,7 +1205,9 @@ class ExternalExecutor(AgentExecutor):
                         dynamic_tools=dynamic_tools,
                         dynamic_tool_handler=dynamic_tool_handler,
                         resume_session_id=resume_session_id,
-                        timeout=interactive_timeout,
+                        timeout=timeout_budget.idle_seconds,
+                        hard_deadline=timeout_budget.hard_deadline(execution_started_at),
+                        hard_timeout_enabled=True,
                         permission_handler=_handle_permission,
                     )
                     resume_reset_memory = _summarize_messages_for_runtime_reset(ctx.messages)
@@ -1299,11 +1314,11 @@ class ExternalExecutor(AgentExecutor):
                         custom_env=agent.get("custom_env") or self.config.env,
                         credential_home_paths=credential_home_paths,
                         network_endpoints=network_endpoints,
-                        timeout=self.config.timeout,
+                        timeout=timeout_budget.hard_seconds,
                     )
                 )
             elif protocol == "client":
-                output = await _run_client_prompt(
+                client_call = _run_client_prompt(
                     prompt,
                     ClientExecutorConfig(
                         module=str(runtime.get("executable_path") or ""),
@@ -1315,6 +1330,10 @@ class ExternalExecutor(AgentExecutor):
                     ),
                     ctx,
                 )
+                if timeout_budget.hard_seconds is None:
+                    output = await client_call
+                else:
+                    output = await asyncio.wait_for(client_call, timeout=timeout_budget.hard_seconds)
             else:
                 output = f"暂不支持的外部智能体协议: {protocol or 'unknown'}"
         except AcpAdapterError as exc:

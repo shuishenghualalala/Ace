@@ -17,8 +17,12 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 from crew.agent.file_changes import (
+    FILE_CHANGE_MAX_BYTES,
     FileMetadataSnapshot,
+    FileState,
+    file_change_from_states,
     metadata_change,
+    read_file_state,
     workspace_snapshot,
 )
 from crew.agent.loop.tool_dispatch_helpers import (
@@ -637,18 +641,31 @@ class ToolRunner:
         无 push_fn（CLI/测试）时注入一个 no-op sink，避免 handler 里到处判空。
         返回 contextvar token，调用方在 finally 里 reset。
         """
-        from crew.core.runctx import current_push_fn, current_request_id, current_tool_progress_fn
+        from crew.core.runctx import (
+            current_push_fn,
+            current_request_id,
+            current_tool_progress_fn,
+            touch_current_task_activity,
+        )
 
         push = current_push_fn.get()
         rid = current_request_id.get() or ""
         sid = self.session_id
 
+        def _touch_activity(text: str) -> None:
+            touch_current_task_activity({
+                "last_tool": tc.name,
+                "tool_phase": "progress",
+                "text_tail": text[-500:],
+            })
+
         if push is None:
-            async def _noop(_text: str) -> None:
-                return
+            async def _noop(text: str) -> None:
+                _touch_activity(text)
             return current_tool_progress_fn.set(_noop)
 
         async def _sink(text: str) -> None:
+            _touch_activity(text)
             try:
                 # 与常规工具帧同用 kind="tool"（gateway/桌面端只认这个 kind；
                 # 历史上用 "tool_event" 的进度帧在 normalize 阶段就被丢弃了）。
@@ -1085,12 +1102,11 @@ class ToolRunner:
             rid, kind="todo_updated", body={"todos": items}, sequence=next_seq(),
         )
 
-    def _read_file_before(self, tc) -> str | None:
-        """file_write 执行前读原文件内容（算 diff 的 before）。不存在 / 读失败返回 None。"""
-        from pathlib import Path
+    def _mutation_target_path(self, tc) -> Path | None:
+        """解析 file_write / file_delete 的目标文件路径（不 resolve，保留展示原样）。"""
         from crew.core.runctx import current_agent_workdir
 
-        raw = str((tc.arguments or {}).get("path", ""))
+        raw = str((tc.arguments or {}).get("path", "")).strip()
         if not raw:
             return None
         target = Path(raw).expanduser()
@@ -1098,60 +1114,48 @@ class ToolRunner:
             cwd = current_agent_workdir.get()
             if cwd:
                 target = Path(cwd).expanduser() / target
+        return target
+
+    def _read_file_before(self, tc) -> FileState:
+        """file_write / file_delete 执行前的目标文件状态（带大小上限，不读全文）。"""
+        target = self._mutation_target_path(tc)
+        if target is None:
+            return FileState(False)
         try:
-            return target.read_text(encoding="utf-8", errors="replace") if target.is_file() else None
-        except Exception:  # noqa: BLE001
-            return None
+            return read_file_state(target)
+        except Exception:  # noqa: BLE001 — 快照读取失败不得拖垮工具执行
+            return FileState(False)
 
-    def _file_change_event(self, tc, before, rid: str, next_seq: Callable[[], int]) -> ResponseChunk:
-        """file_write 后：读 after、算 unified diff、存入 file_change_store、广播 file_changes 帧。"""
-        import difflib
-        from pathlib import Path
-        from crew.core.runctx import current_agent_workdir
+    def _file_change_event(self, tc, before: FileState, rid: str, next_seq: Callable[[], int]) -> ResponseChunk:
+        """file_write / file_delete 后：读 after、算 diff、存 store、广播 file_changes 帧。
 
-        raw = str((tc.arguments or {}).get("path", ""))
-        target = Path(raw).expanduser()
-        if not target.is_absolute():
-            cwd = current_agent_workdir.get()
-            if cwd:
-                target = Path(cwd).expanduser() / target
+        before / after 都走 read_file_state 的 128 KiB 上限：超限或二进制文件只记录
+        元数据（binary=True、diff 为空），避免无界全文读取阻塞事件循环。
+        """
+        target = self._mutation_target_path(tc)
+        if target is None:
+            return ResponseChunk(
+                rid, kind="file_changes", body={"files": []}, sequence=next_seq(),
+            )
 
-        after = None
         try:
-            if target.is_file():
-                after = target.read_text(encoding="utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            after = None
+            after = read_file_state(target)
+        except Exception:  # noqa: BLE001 — 快照读取失败不得拖垮工具执行
+            after = FileState(False)
+        if before.binary or after.binary:
+            log.info(
+                "文件变更快照降级为元数据 path=%s before_binary=%s after_binary=%s limit=%s",
+                target, before.binary, after.binary, FILE_CHANGE_MAX_BYTES,
+            )
 
-        before_lines = (before or "").splitlines()
-        after_lines = (after or "").splitlines()
-        diff_rows: list = []
-        added = 0
-        removed = 0
-        for line in difflib.unified_diff(before_lines, after_lines, lineterm=""):
-            if line.startswith("@@") or line.startswith("---") or line.startswith("+++"):
-                diff_rows.append({"line": 0, "kind": "meta", "text": line})
-            elif line.startswith("+"):
-                added += 1
-                diff_rows.append({"line": 0, "kind": "add", "text": line[1:]})
-            elif line.startswith("-"):
-                removed += 1
-                diff_rows.append({"line": 0, "kind": "del", "text": line[1:]})
-            else:
-                diff_rows.append({"line": 0, "kind": "ctx", "text": line[1:]})
-
-        status = "added" if before is None else ("deleted" if not after else "modified")
-        change = {
-            "path": str(target),
-            "name": target.name or str(target),
-            "added": added,
-            "removed": removed,
-            "status": status,
-            "diff": diff_rows[:200],
-        }
-        # 本会话内首次写入时 before 为空 → 记 created_in_session。
+        change = file_change_from_states(target, before, after)
+        if change is None:
+            return ResponseChunk(
+                rid, kind="file_changes", body={"files": []}, sequence=next_seq(),
+            )
+        # 本会话内首次写入时 before 不存在 → 记 created_in_session。
         # 后续同路径再写会变成 modified，但对账时若文件已不存在仍应整条剔除（临时脚本写了又删）。
-        if before is None:
+        if not before.exists:
             change["created_in_session"] = True
 
         items = [change]

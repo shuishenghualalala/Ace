@@ -41,7 +41,8 @@ export interface AgentHubState {
   message?: string;
   featureEnabled?: boolean;
   scanning?: boolean;
-  form?: HTMLElement;
+  /** Render the active create form into the Hub-owned region. */
+  renderForm?: (region: HTMLElement) => void;
 }
 
 export interface AgentHubOptions {
@@ -318,7 +319,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
       const formRegion = document.createElement('section');
       formRegion.className = 'mw-agent-hub__form';
       formRegion.dataset.agentFormRegion = '';
-      if (current.form) formRegion.append(current.form);
+      if (current.renderForm) current.renderForm(formRegion);
       else formRegion.append(textElement('p', 'mw-hub-state', '表单正在准备…'));
       results.append(formRegion);
     }

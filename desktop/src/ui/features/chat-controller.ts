@@ -71,6 +71,7 @@ import {
   newTurnRequestId,
   openTurnForRequest,
   resumeSessionGeneration,
+  setBackendIdleHandler,
 } from './session-busy';
 import { clearScenarioChip, takeArmedSubScenario } from './scenario-arm';
 import { requireRendererLogin } from './auth-gate';
@@ -80,7 +81,7 @@ import {
 } from '../followup';
 import type { FollowupAnswer } from '../backend-client';
 import type { ChatChunk, WikiIngestProgress } from '../backend-client';
-import { makeSessionTitle, mergeTeamInternalMessage, normalizeTurnFileChanges } from './history-mapping';
+import { backendDurationToMs, makeSessionTitle, mergeTeamInternalMessage, normalizeTurnFileChanges } from './history-mapping';
 import { applyFoldState, createChatRenderCoalescer, createStreamingPatchCoalescer } from '../render-utils';
 import { getToolFold, setToolFold } from './fold-state';
 import { renderSecurityBanner } from './security-banner';
@@ -106,6 +107,7 @@ import {
   ensureSessionBook,
   ensureSessionMessages,
   getPendingQueue,
+  getQueueHint,
   isBusySession,
   isDynamicKanbanSession,
   newMessageId,
@@ -158,6 +160,16 @@ interface DispatchOptions {
 export function setChatCallbacks(opts: { openSession: OpenSessionFn; setTab: (tab: TabKey) => void }): void {
   openSessionFn = opts.openSession;
   setTabFn = opts.setTab;
+  // 后端状态同步确认会话已 idle 时的兜底：final 帧丢失（登出围栏吞帧、重连门拦丢弃）
+  // 时本地待发队列会一直卡住并常显「正在排队…」，借此继续派出队首、清掉过期提示。
+  setBackendIdleHandler((idleSessionId) => {
+    if (getPendingQueue(idleSessionId).length > 0) {
+      consumePending(idleSessionId);
+    }
+    if (getPendingQueue(idleSessionId).length === 0 && getQueueHint(idleSessionId)) {
+      setQueueHintWithUi(idleSessionId, '');
+    }
+  });
   if (!teamIdentityRefreshBound && typeof window !== 'undefined') {
     teamIdentityRefreshBound = true;
     window.addEventListener('team-collaboration:updated', ((event: Event) => {
@@ -922,7 +934,9 @@ function normalizeTeamToolCalls(raw: unknown): ToolCallInfo[] | undefined {
       ...(typeof value.result === 'string' ? { result: value.result } : {}),
       status,
       startedAt: backendSecondsToMs(value.started_at, 0),
-      ...(typeof value.duration === 'number' ? { duration: value.duration * 1000 } : {}),
+      ...(typeof value.duration === 'number' && backendDurationToMs(value.duration) > 0
+        ? { duration: backendDurationToMs(value.duration) }
+        : {}),
     };
   });
   return calls.length ? calls : undefined;
@@ -1000,10 +1014,27 @@ function applyTeamInternalChunk(sessionId: string, chunk: TeamInternalChunk): vo
 
 // T3：把 applyChunk 改造成 dispatch + apply + 副作用 的薄适配层。
 // 状态迁移全部走 chat-reducer，避免在 index.ts 重复实现 7 个 kind 的迁移逻辑。
-export function applyChunk(chunk: ChatChunk): void {
-  const sid = chunk.session_id || state.activeSessionId || 'default';
+function visibleFollowupSessionId(sessionId: string): string {
+  const sidechainMarker = '::turn::';
+  const markerIndex = sessionId.indexOf(sidechainMarker);
+  return markerIndex > 0 ? sessionId.slice(0, markerIndex) : sessionId;
+}
+
+export function applyChunk(incomingChunk: ChatChunk): void {
+  const sourceSid = incomingChunk.session_id || state.activeSessionId || 'default';
+  const sid = incomingChunk.kind === 'followup_question'
+    ? visibleFollowupSessionId(sourceSid)
+    : sourceSid;
+  // 旧后端可能把 Team sidechain 的 Followup 推到内部 session。归并到可见父
+  // session 时不能沿用子 session 自己的 gateway_sequence 命名空间，否则会被
+  // 父 session 的较高水位误判为 replay 重复帧。
+  const chunk: ChatChunk = sid === sourceSid
+    ? incomingChunk
+    : { ...incomingChunk, session_id: sid };
+  if (sid !== sourceSid) delete chunk.gateway_sequence;
   logStream('apply-chunk', 'recv', {
     sid,
+    source_sid: sourceSid === sid ? undefined : sourceSid,
     kind: chunk.kind,
     request_id: chunk.request_id,
     sequence: chunk.sequence,

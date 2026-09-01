@@ -29,17 +29,18 @@ from crew.agent.external.runtime_adapter import (
     ExternalPermissionRequest,
     ExternalStreamEvent,
     ExternalToolEvent,
+    NativeInteractiveLineTransport,
     RuntimeAdapterProbe,
     RuntimeExecutionRequest,
     RuntimeResumeRejected,
-    NativeInteractiveLineTransport,
+    build_external_runtime_env,
     build_external_runtime_home_files,
     build_external_runtime_network_permissions,
-    build_external_runtime_env,
     open_managed_external_interactive,
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
+from crew.core.timeout_policy import DEFAULT_EXTERNAL_IDLE_SECONDS, remaining_seconds
 from crew.security.runtime_client import NativeRuntimeError, RuntimeErrorCode
 from crew.state.logging import get_logger
 
@@ -48,6 +49,26 @@ log = get_logger("agent.cli")
 
 class ExternalCliError(RuntimeError):
     pass
+
+
+def _request_read_timeout(request: RuntimeExecutionRequest) -> float:
+    """Use the idle window while also respecting an optional absolute deadline."""
+    timeout = max(0.1, float(request.timeout or 0.0))
+    if not request.hard_timeout_enabled or request.hard_deadline is None:
+        return timeout
+    remaining = remaining_seconds(request.hard_deadline)
+    if remaining is None or remaining <= 0:
+        raise ExternalCliError("外部 Runtime 已达到硬截止时间")
+    return min(timeout, remaining)
+
+
+def _request_execution_timeout(request: RuntimeExecutionRequest) -> float | None:
+    if not request.hard_timeout_enabled:
+        return request.timeout
+    remaining = remaining_seconds(request.hard_deadline)
+    if remaining is not None and remaining <= 0:
+        raise ExternalCliError("外部 Runtime 已达到硬截止时间")
+    return remaining
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -409,7 +430,9 @@ class ExternalCliConfig:
     custom_env: dict[str, str] = field(default_factory=dict)
     credential_home_paths: tuple[str, ...] = ()
     network_endpoints: tuple[str, ...] = ()
-    timeout: float = 120.0
+    # ``None`` means no wall-clock hard deadline; the caller may still impose
+    # an idle deadline at the runtime-adapter layer.
+    timeout: float | None = DEFAULT_EXTERNAL_IDLE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -951,7 +974,10 @@ async def _stream_claude_once(
     try:
         while True:
             try:
-                line = await asyncio.wait_for(transport.read_line(), timeout=request.timeout)
+                line = await asyncio.wait_for(
+                    transport.read_line(),
+                    timeout=_request_read_timeout(request),
+                )
             except asyncio.TimeoutError as exc:
                 raise ExternalCliError("Claude Code 模型响应空闲超时") from exc
             if not line:
@@ -1101,7 +1127,7 @@ async def stream_claude_events(
                 cwd=request.cwd,
                 system_prompt=request.system_prompt,
                 custom_env=request.custom_env,
-                timeout=request.timeout,
+                timeout=_request_execution_timeout(request),
             )
         )
         if output:

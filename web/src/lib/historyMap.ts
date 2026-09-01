@@ -87,13 +87,16 @@ function mapToolCalls(
     result: tc.result ?? "",
     status: tc.status ?? "done",
     startedAt: backendSecondsToMs(tc.started_at) ?? 0,
-    duration: backendDurationToMs(tc.duration),
+    duration: tc.duration == null ? undefined : backendDurationToMs(tc.duration) || undefined,
   }));
 }
 
 /** 把网关历史条目映射为前端 UiMessage（含秒→毫秒换算）。 */
 export function mapHistoryItem(item: BackendHistoryItem): UiMessage {
-  const role = item.role as MsgRole;
+  const role: MsgRole =
+    item.role === "assistant" || item.role === "user" || item.role === "team_internal"
+      ? item.role
+      : item.role === "error" ? "error" : "status";
   const base: UiMessage = {
     id: newId(),
     role,

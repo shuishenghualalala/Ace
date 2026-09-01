@@ -21,8 +21,9 @@ from __future__ import annotations
 import asyncio
 import enum
 import json
+import time
 from pathlib import Path
-from typing import AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.errors import ProviderError, ToolError
@@ -35,6 +36,7 @@ from crew.state.logging import get_logger
 
 log = get_logger("gateway.dispatcher")
 SessionKey = tuple[str, str]
+_TASK_ACTIVITY_PULSE_INTERVAL_SECONDS = 1.0
 
 
 class BusyMode(enum.Enum):
@@ -188,7 +190,9 @@ class SessionDispatcher:
         self._global_semaphore.release()
 
     def _queued_depth(self, key: SessionKey) -> int:
-        return self._waiting.get(key, 0) + self._global_waiting.get(self._label(key), 0)
+        """排队深度只计同会话待执行的消息数；当前回合等待全局并发槽属于运行中的
+        内部调度状态（经 status 的 waiting_for_global_slot 单独暴露），不计入排队。"""
+        return self._waiting.get(key, 0)
 
     def activate_owner(self, owner_account_id: str) -> None:
         """Allow newly authenticated work for an owner after logout cleanup."""
@@ -504,6 +508,23 @@ class SessionDispatcher:
         if current_task is not None:
             self._tasks.setdefault(key, set()).add(current_task)
 
+        def _runtime_termination_intent(task_id: str) -> tuple[str, str] | None:
+            if not task_id or self._task_runtime is None:
+                return None
+            getter = getattr(self._task_runtime, "pending_termination", None)
+            if not callable(getter):
+                return None
+            try:
+                intent = getter(task_id)
+            except Exception:  # noqa: BLE001 - 查询内存终态意图不能影响主回合清理
+                return None
+            if not isinstance(intent, tuple) or len(intent) != 2:
+                return None
+            status, reason = intent
+            if status not in {"cancelled", "timed_out"}:
+                return None
+            return str(status), str(reason or "")
+
         # 工作区隔离：已有会话的 workspace 与入站不一致时记录警告（C2）
         stored_ws = self._store.get_workspace_id(sid, owner_account_id=owner)
         if stored_ws is not None and stored_ws != envelope.workspace_id:
@@ -578,19 +599,30 @@ class SessionDispatcher:
         deferred_terminal: ResponseChunk | None = None
         rt_id_token = None
         rt_token = None
+        rt_activity_token = None
+        activity_live = False
+        last_runtime_activity_touch = 0.0
+        runtime_activity_interval = _TASK_ACTIVITY_PULSE_INTERVAL_SECONDS
+        runtime_activity_touch: Callable[[dict[str, Any] | None], None] | None = None
 
         try:
             try:
                 async with lock:
                     _dequeue_once()
+                    # 出队即视为已受理：等待全局并发槽是内部调度细节，对外 live 应为
+                    # running 而非 queued，否则「当前消息等槽」会被误显示为排队。
+                    self._running.add(key)
+                    self._running_counts[key] = self._running_counts.get(key, 0) + 1
+                    self._running_request_ids[key] = rid
                     global_slot = False
                     try:
                         global_slot = await self._acquire_global_slot(key)
                     except asyncio.CancelledError:
+                        # 等槽期间被取消：回滚已受理标记，行为与「进入 running 前取消」一致。
+                        self._running_counts.pop(key, None)
+                        self._running.discard(key)
+                        self._running_request_ids.pop(key, None)
                         raise
-                    self._running.add(key)
-                    self._running_counts[key] = self._running_counts.get(key, 0) + 1
-                    self._running_request_ids[key] = rid
                     if current_task is not None:
                         self._running_task[key] = current_task
                     runtime_task_id = ""
@@ -621,23 +653,52 @@ class SessionDispatcher:
                             self._run_task_ids[key] = runtime_task_id
                             self._task_runtime.mark_running(runtime_task_id)
                             if current_task is not None:
+                                def _cancel_current_turn(
+                                    _reason: str,
+                                    *,
+                                    owned: asyncio.Task = current_task,
+                                ) -> None:
+                                    if not owned.done():
+                                        owned.cancel()
+
                                 self._task_runtime.attach_worker(
                                     runtime_task_id,
                                     current_task,
-                                    cancel=(
-                                        lambda _reason, owned=current_task: owned.cancel()
-                                        if not owned.done()
-                                        else None
-                                    ),
+                                    cancel=_cancel_current_turn,
                                 )
                             # 注入 task runtime 上下文，供长耗时工具内部保活
                             from crew.core.runctx import (
+                                current_task_activity_fn,
                                 current_task_runtime,
                                 current_task_runtime_id,
                             )
 
+                            def _touch_runtime_activity(
+                                progress: dict[str, Any] | None = None,
+                            ) -> None:
+                                nonlocal last_runtime_activity_touch
+                                if not activity_live:
+                                    return
+                                now = time.monotonic()
+                                if now - last_runtime_activity_touch < runtime_activity_interval:
+                                    return
+                                last_runtime_activity_touch = now
+                                try:
+                                    self._task_runtime.touch_activity(runtime_task_id, progress)
+                                except Exception:  # noqa: BLE001 - 活动保活不得中断主回合
+                                    log.debug("更新 agent_turn 活动失败 task=%s", runtime_task_id)
+
+                            runtime_activity_touch = _touch_runtime_activity
+                            inactivity_timeout = float(task.get("inactivity_timeout") or 0)
+                            if inactivity_timeout > 0:
+                                runtime_activity_interval = min(
+                                    _TASK_ACTIVITY_PULSE_INTERVAL_SECONDS,
+                                    max(0.01, inactivity_timeout / 3),
+                                )
+                            activity_live = True
                             rt_id_token = current_task_runtime_id.set(runtime_task_id)
                             rt_token = current_task_runtime.set(self._task_runtime)
+                            rt_activity_token = current_task_activity_fn.set(runtime_activity_touch)
                         except Exception:
                             log.exception("注册 agent_turn 任务失败 session=%s", sid)
 
@@ -733,14 +794,14 @@ class SessionDispatcher:
                         )
                     try:
                         async for chunk in self._inner(exec_envelope):
-                            if runtime_task_id and self._task_runtime is not None:
+                            if runtime_activity_touch is not None:
                                 progress: dict[str, object] = {"last_chunk": chunk.kind}
                                 if chunk.kind in {"delta", "thinking"}:
                                     progress["text_tail"] = str(chunk.body.get("text", ""))[-500:]
                                 elif chunk.kind == "tool":
                                     progress["last_tool"] = chunk.body.get("name", "")
                                     progress["tool_phase"] = chunk.body.get("phase", "")
-                                self._task_runtime.touch_activity(runtime_task_id, progress)
+                                runtime_activity_touch(progress)
                             is_terminal = chunk.is_final or chunk.kind in {"final", "error"}
                             if chunk.kind == "error" or chunk.status == "failed":
                                 failed = True
@@ -753,7 +814,8 @@ class SessionDispatcher:
                                 yield chunk
                     except asyncio.CancelledError:
                         failed = True
-                        err = self._stop_reasons.get(key, "已停止当前回复")
+                        intent = _runtime_termination_intent(runtime_task_id)
+                        err = intent[1] if intent is not None else self._stop_reasons.get(key, "已停止当前回复")
                         log.info("会话已停止 session=%s", sid)
                         deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, err))
                     except ProviderError as exc:
@@ -773,6 +835,7 @@ class SessionDispatcher:
                         log.exception("会话执行异常 session=%s", sid)
                         deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, str(exc)), exc)
                     finally:
+                        activity_live = False
                         if sidechain_id:
                             try:
                                 sidechain_history = self._store.load(sidechain_id, owner_account_id=owner)
@@ -828,24 +891,56 @@ class SessionDispatcher:
                             self._running_task.pop(key, None)
                         if self._run_task_ids.get(key) == runtime_task_id:
                             self._run_task_ids.pop(key, None)
+                        runtime_terminal_status = ""
                         if runtime_task_id and self._task_runtime is not None:
                             try:
                                 current = self._task_runtime.get(runtime_task_id, owner_account_id=owner)
                                 if current["status"] not in {
                                     "completed", "failed", "cancelled", "timed_out"
                                 }:
-                                    self._task_runtime.finish(
+                                    intent = _runtime_termination_intent(runtime_task_id)
+                                    finish_status = "failed" if failed else "completed"
+                                    finish_error = err
+                                    if intent is not None:
+                                        finish_status, finish_error = intent
+                                        failed = True
+                                        err = finish_error
+                                    current = self._task_runtime.finish(
                                         runtime_task_id,
                                         owner_account_id=owner,
-                                        status="failed" if failed else "completed",
+                                        status=finish_status,
                                         result=final_text,
-                                        error=err,
+                                        error=finish_error,
                                     )
+                                runtime_terminal_status = str(current.get("status") or "")
+                                if runtime_terminal_status in {"cancelled", "timed_out"}:
+                                    failed = True
+                                    err = str(current.get("error") or err)
+                                    deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, err))
+                                elif runtime_terminal_status == "failed":
+                                    failed = True
+                                    err = str(current.get("error") or err)
+                                    if deferred_terminal is None or deferred_terminal.kind == "final":
+                                        deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, err))
+                                elif runtime_terminal_status == "completed":
+                                    failed = False
+                                    err = ""
+                                    if deferred_terminal is None or deferred_terminal.kind == "error":
+                                        deferred_terminal = ResponseChunk.final(
+                                            rid,
+                                            str(current.get("result") or final_text),
+                                        )
                             except Exception:
                                 log.exception("完成 agent_turn 任务失败 task=%s", runtime_task_id)
                         self._release_global_slot(key, global_slot)
                         try:
-                            status = "stopped" if err.startswith("已停止") or err.startswith("被新消息中断") else ("failed" if failed else "completed")
+                            status = (
+                                "stopped"
+                                if runtime_terminal_status == "cancelled"
+                                or err.startswith("已停止")
+                                or err.startswith("被新消息中断")
+                                else ("failed" if failed else "completed")
+                            )
                             self._store.set_status(sid, status, err, owner_account_id=owner)
                         except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，finally 中不得掩盖主流程结果
                             log.exception("写入会话状态失败 session=%s", sid)
@@ -871,12 +966,19 @@ class SessionDispatcher:
                     log.exception("写入会话状态失败 session=%s", sid)
                 deferred_terminal = ResponseChunk.error(rid, err)
         finally:
-            if rt_id_token is not None or rt_token is not None:
+            activity_live = False
+            if rt_id_token is not None or rt_token is not None or rt_activity_token is not None:
                 from crew.core.runctx import (
+                    current_task_activity_fn,
                     current_task_runtime,
                     current_task_runtime_id,
                 )
 
+                if rt_activity_token is not None:
+                    try:
+                        current_task_activity_fn.reset(rt_activity_token)
+                    except Exception:
+                        pass
                 if rt_id_token is not None:
                     try:
                         current_task_runtime_id.reset(rt_id_token)

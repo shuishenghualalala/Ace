@@ -112,6 +112,44 @@ async def test_email_mode_normalizes_email_and_scopes_owner(email_api):
 
 
 @pytest.mark.asyncio
+async def test_email_accounts_can_keep_independent_gateway_sessions(email_api):
+    transport = ASGITransport(app=email_api, client=("127.0.0.1", 12345))
+    async with (
+        AsyncClient(transport=transport, base_url="http://test") as client_a,
+        AsyncClient(transport=transport, base_url="http://test") as client_b,
+    ):
+        login_a = await client_a.post(
+            "/api/auth/login",
+            json={"email": "user-a@example.com"},
+        )
+        login_b = await client_b.post(
+            "/api/auth/login",
+            json={"email": "user-b@example.com"},
+        )
+        session_a = await client_a.get("/api/auth/session")
+        session_b = await client_b.get("/api/auth/session")
+        data_a = await client_a.get("/api/sessions")
+        data_b = await client_b.get("/api/sessions")
+        logout_a = await client_a.post("/api/auth/logout")
+        session_b_after_a_logout = await client_b.get("/api/auth/session")
+
+    assert login_a.status_code == 200
+    assert login_b.status_code == 200
+    assert session_a.status_code == 200
+    assert session_b.status_code == 200
+    assert session_a.json()["user"]["userId"] == "user-a@example.com"
+    assert session_b.json()["user"]["userId"] == "user-b@example.com"
+    assert data_a.status_code == 200
+    assert data_b.status_code == 200
+    assert logout_a.status_code == 200
+    assert session_b_after_a_logout.status_code == 200
+    assert {
+        lease.owner_account_id
+        for lease in email_api.state.crew.active_owner.list()
+    } == {"email:user-b@example.com"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("email", ["", "missing-at.example.com", "a@b", "a b@example.com"])
 async def test_email_mode_rejects_invalid_email(email_api, email):
     transport = ASGITransport(app=email_api, client=("127.0.0.1", 12345))

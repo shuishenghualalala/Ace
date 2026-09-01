@@ -881,7 +881,7 @@ def _cron_create(args: Any, ctx: CliContext) -> CliResult:
         raise CliError(str(exc)) from exc
     service = getattr(app, "cron_service", None)
     if service is not None and service.is_running:
-        service.sync_job(str(job["id"]))
+        service.sync_job(str(job["id"]), owner_account_id=ctx.owner)
     view = _cron_job_view(job)
     return CliResult(data=view, text=f"已创建定时任务 {view['id']}")
 
@@ -895,7 +895,7 @@ def _cron_set_enabled(args: Any, ctx: CliContext, enabled: bool) -> CliResult:
     store.set_enabled(args.job_id, enabled, owner_account_id=ctx.owner)
     service = getattr(app, "cron_service", None)
     if service is not None and service.is_running:
-        service.sync_job(args.job_id)
+        service.sync_job(args.job_id, owner_account_id=ctx.owner)
     refreshed = store.get(args.job_id, owner_account_id=ctx.owner) or job
     view = _cron_job_view(refreshed)
     return CliResult(data=view, text=("已恢复" if enabled else "已暂停") + f" {view['id']}")
@@ -940,7 +940,7 @@ async def _cron_retry(args: Any, ctx: CliContext) -> CliResult:
 
 
 def _mount_cron_owner(service: Any, owner: str) -> None:
-    if service.mounted_owner == owner:
+    if owner in service.mounted_owners:
         return
     try:
         service.mount_owner(owner)
@@ -957,7 +957,7 @@ def _cron_delete(args: Any, ctx: CliContext) -> CliResult:
     store.delete(args.job_id, owner_account_id=ctx.owner)
     service = getattr(app, "cron_service", None)
     if service is not None and service.is_running:
-        service.sync_job(args.job_id)
+        service.sync_job(args.job_id, owner_account_id=ctx.owner)
     return CliResult(data={"ok": True, "id": args.job_id}, text="定时任务已删除")
 
 

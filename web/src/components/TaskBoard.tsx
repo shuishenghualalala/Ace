@@ -62,14 +62,6 @@ interface StableProgress {
   percent: number;
 }
 
-interface NodeLogEntry {
-  id: string;
-  kind: "thinking" | "tool" | "assistant" | "status";
-  title: string;
-  body: string;
-  icon?: string;
-}
-
 interface ChatOutlineItem {
   id: string;
   messageId: string;
@@ -664,110 +656,21 @@ function dependencyLabel(node: FlowNode, nodes: FlowNode[]): string {
   return parents.map((parentId) => compactText(byId.get(parentId) || parentId, 18)).join("、");
 }
 
-export function nodeLogs(node: FlowNode, messages: UiMessage[]): NodeLogEntry[] {
-  const owner = cleanAgentName(node.owner).toLowerCase();
-  const taskId = String(node.raw.task_id || node.raw.id || "");
-  const delegateTaskId = String(node.raw.progress?.delegate_task_id || "");
-  const workflowLane = progressText(node.raw, "workflow_lane");
-  const isLeaderNode = owner === "leader" || workflowLane === "lead" || workflowLane === "summary";
-  const relevant = messages.filter((message) => {
-    if (message.role !== "assistant" && message.role !== "tool") return false;
-    const source = String(message.sourceSessionId || "").toLowerCase();
-    const text = plainTaskText(message.text).toLowerCase();
-    const sourceMatches = owner && (source.endsWith(`::${owner}`) || source.includes(`::${owner}::`));
-    const sourceFitsNode = isLeaderNode ? sourceMatches || !source.includes("::turn::") : sourceMatches;
-    const textMatches = Boolean(taskId && text.includes(taskId.toLowerCase()))
-      || Boolean(delegateTaskId && text.includes(delegateTaskId.toLowerCase()));
-    return sourceFitsNode || textMatches;
-  });
-  const entries: NodeLogEntry[] = [];
-  const seen = new Set<string>();
-  const pushEntry = (entry: NodeLogEntry) => {
-    const key = `${entry.kind}:${entry.title}:${entry.body.slice(0, 180)}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    entries.push(entry);
-  };
-  const structuredEvents = Array.isArray(node.raw.progress?.execution_events)
-    ? node.raw.progress?.execution_events as Record<string, unknown>[]
-    : [];
-  for (const event of structuredEvents.slice(-6)) {
-    const kind = String(event.kind || event.event_type || "status");
-    const title = String(event.event_title || event.title || "执行事件");
-    const body = logText(String(event.event_text || event.body || event.message || ""));
-    if (title === "节点承接" || /将按\s*DAG\s*节点/.test(body)) continue;
-    pushEntry({
-      id: String(event.id || `${node.id}_event_${entries.length}`),
-      kind: kind === "tool" ? "tool" : kind === "thinking" ? "thinking" : kind === "assistant" ? "assistant" : "status",
-      title,
-      body,
-      icon: String(event.event_icon || kind || "status"),
-    });
-  }
-  for (const message of relevant.slice(-4)) {
-    if (message.thinking) {
-      pushEntry({
-        id: `${message.id}_thinking`,
-        kind: "thinking",
-        title: "思考过程",
-        body: logText(message.thinking),
-        icon: "thinking",
-      });
-    }
-    for (const tool of message.toolCalls || []) {
-      pushEntry({
-        id: `${message.id}_${tool.toolCallId}`,
-        kind: "tool",
-        title: `工具调用：${tool.name}`,
-        body: logText([tool.args, tool.result].filter(Boolean).join("\n")) || "工具调用已记录。",
-        icon: "tool",
-      });
-    }
-    if (message.text) {
-      pushEntry({
-        id: `${message.id}_assistant`,
-        kind: "assistant",
-        title: "执行输出",
-        body: logText(message.text),
-        icon: "assistant",
-      });
-    }
-  }
-  if (entries.length === 0 && node.raw.error) {
-    entries.push({
-      id: `${node.id}_task`,
-      kind: "tool",
-      title: "错误日志",
-      body: logText(node.raw.error),
-      icon: "tool",
-    });
-  }
-  return entries.slice(-8);
-}
-
-function logIconLabel(entry: NodeLogEntry): string {
-  const icon = String(entry.icon || entry.kind || "").toLowerCase();
-  if (entry.kind === "thinking" || icon.includes("think")) return "思";
-  if (entry.kind === "tool" || icon.includes("tool")) return "工";
-  if (entry.kind === "assistant" || icon.includes("assistant")) return "答";
-  if (icon.includes("route") || icon.includes("replan")) return "路";
-  if (icon.includes("alert")) return "!";
-  if (icon.includes("spark") || icon.includes("reflection")) return "省";
-  return "态";
-}
-
 function compactText(text: string, max = 90): string {
   return compactTaskText(text, max);
 }
 
-function logText(text: string): string {
-  const normalized = String(text || "")
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .replace(/\n{4,}/g, "\n\n\n")
-    .trim();
-  if (!normalized) return "";
-  return normalized.length > 1600 ? `${normalized.slice(0, 1600)}\n...` : normalized;
+export function nodeMessageId(node: FlowNode, messages: UiMessage[]): string {
+  const nodeIds = new Set(
+    [planNodeId(node), node.raw.task_id, node.raw.id]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean),
+  );
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.nodeId && nodeIds.has(String(message.nodeId).trim())) return message.id;
+  }
+  return "";
 }
 
 function makeChatOutline(messages: UiMessage[]): ChatOutlineItem[] {
@@ -1212,11 +1115,9 @@ export default function TaskBoard({
                           {expandedNodes.has(node.id) && (
                             <div className="flow-node__detail">
                               {(() => {
-                                const logs = nodeLogs(node, messages);
                                 const paths = artifactPaths(node.raw);
                                 const duration = durationLabel(node.raw);
-                                const toolCount = logs.filter((entry) => entry.kind === "tool").length;
-                                const detailCount = `${logs.length} 条事件${toolCount ? ` · ${toolCount} 个工具` : ""}`;
+                                const messageId = nodeMessageId(node, messages);
                                 return (
                                   <>
                                     <section className="flow-node__brief" aria-label="节点摘要">
@@ -1250,27 +1151,17 @@ export default function TaskBoard({
                                       </section>
                                     )}
 
-                                    <details className="flow-node__execution">
-                                      <summary>
-                                        <span>执行详情</span>
-                                        <em>{detailCount}</em>
-                                      </summary>
-                                      {logs.length === 0 ? (
-                                        <p className="flow-node__log-empty">暂无执行日志</p>
-                                      ) : (
-                                        <div className="flow-node__timeline" aria-label="节点执行时间线">
-                                          {logs.map((entry) => (
-                                            <article className={`flow-log is-${entry.kind}`} key={entry.id}>
-                                              <span className="flow-log__icon" aria-hidden="true">{logIconLabel(entry)}</span>
-                                              <div className="flow-log__body">
-                                                <strong>{entry.title}</strong>
-                                                <pre>{entry.body}</pre>
-                                              </div>
-                                            </article>
-                                          ))}
-                                        </div>
-                                      )}
-                                    </details>
+                                    {messageId && onJumpToMessage && (
+                                      <div className="flow-node__actions flow-node__locate-actions">
+                                        <button
+                                          className="mini-cancel flow-node__locate"
+                                          type="button"
+                                          onClick={() => onJumpToMessage(messageId)}
+                                        >
+                                          定位
+                                        </button>
+                                      </div>
+                                    )}
                                   </>
                                 );
                               })()}

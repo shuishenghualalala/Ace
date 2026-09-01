@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from crew.team.capabilities import normalize_capabilities, normalize_capability
 
@@ -18,6 +18,7 @@ PlanningMode = Literal["auto", "fast", "standard", "ai"]
 DependencyPattern = Literal["sequential", "parallel_merge", "staged"]
 QualityPolicy = Literal["none", "leader_review", "independent_review", "evaluator_optimizer"]
 Level = Literal["low", "medium", "high"]
+RequestedScope = Literal["plan_only", "execute", "uncertain"]
 
 WORKFLOW_PLAN_VERSION = 1
 _WORK_UNIT_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -26,6 +27,45 @@ _WORK_UNIT_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 def normalize_planning_mode(value: object, *, default: PlanningMode = "auto") -> PlanningMode:
     mode = str(value or "").strip().lower()
     return mode if mode in {"auto", "fast", "standard", "ai"} else default  # type: ignore[return-value]
+
+
+def normalize_plan_node_refs(raw: Any) -> list[str]:
+    """Normalize a plan-change dependency field into unique node ids."""
+
+    items = [raw] if isinstance(raw, str) else list(raw or [])
+    refs: list[str] = []
+    for item in items:
+        value = str(item or "").strip()
+        if value and value not in refs:
+            refs.append(value)
+    return refs
+
+
+def plan_edges_have_cycle(node_ids: set[str], edges: list[Any]) -> bool:
+    """Return whether the supplied plan edges contain a cycle."""
+
+    outgoing: dict[str, list[str]] = {node_id: [] for node_id in node_ids}
+    indegree: dict[str, int] = {node_id: 0 for node_id in node_ids}
+    for edge in edges:
+        if edge.parent_id not in node_ids or edge.child_id not in node_ids:
+            continue
+        outgoing.setdefault(edge.parent_id, []).append(edge.child_id)
+        indegree[edge.child_id] = indegree.get(edge.child_id, 0) + 1
+    ready = [node_id for node_id, degree in indegree.items() if degree == 0]
+    visited = 0
+    while ready:
+        node_id = ready.pop()
+        visited += 1
+        for child_id in outgoing.get(node_id, []):
+            indegree[child_id] -= 1
+            if indegree[child_id] == 0:
+                ready.append(child_id)
+    return visited != len(node_ids)
+
+
+def safe_plan_node_id(value: str, *, fallback: str = "node") -> str:
+    text = re.sub(r"[^0-9A-Za-z_]+", "_", str(value or "").strip().lower()).strip("_")
+    return text[:48] or fallback
 
 
 @dataclass(frozen=True)
@@ -46,6 +86,7 @@ class WorkUnit:
 @dataclass(frozen=True)
 class PlanningDecision:
     goal_clarity: Level = "medium"
+    requested_scope: RequestedScope = "uncertain"
     critical_missing_info: list[str] = field(default_factory=list)
     dependency_pattern: DependencyPattern = "sequential"
     quality_policy: QualityPolicy = "leader_review"
@@ -83,6 +124,8 @@ def planning_decision_messages(
     members: list[dict[str, Any]],
     requested_mode: PlanningMode,
     max_work_units: int = 8,
+    scope_confirmation: str = "",
+    structured_retry: bool = False,
 ) -> tuple[str, str]:
     payload = {
         "goal": goal,
@@ -91,20 +134,40 @@ def planning_decision_messages(
         "policy": {
             "requested_mode": requested_mode,
             "max_work_units": max(1, int(max_work_units)),
+            "scope_confirmation": str(scope_confirmation or "").strip() or None,
         },
     }
-    system = (
-        "你是 Crew Workflow PlanningDecision。只输出 JSON；不输出 Markdown/解释。"
-        "只拆 work_units、依赖形态、质量策略和缺失事实；不生成 DAG nodes/edges，"
-        "不选择/改派 Agent，不修改 Team/权限/预算。"
-        "members 中的 formation_responsibility 只表示常驻分工边界；先按任务需要拆工作，"
-        "不得为了让每个成员都有任务而生成重复或近义 work_unit。"
-        "Leader 的目标确认、TeamPlan 创建/调整、派活和最终汇总由执行器自动生成，"
-        "不得把这些控制动作重复写入 work_units，也不得使用 leader_ 前缀作为 work_unit id。"
-    )
+    if structured_retry:
+        system = (
+            "你是 Crew Workflow PlanningDecision。直接输出完整 JSON，不输出推理、Markdown 或解释。"
+            "严格按用户本轮范围生成 work_units；不要生成 DAG nodes/edges、Leader 控制动作或改派 Agent。"
+        )
+    else:
+        system = (
+            "你是 Crew Workflow PlanningDecision。只输出 JSON；不输出 Markdown/解释。"
+            "先识别用户本轮明确要求的交付范围，再拆 work_units、依赖形态、质量策略和缺失事实；"
+            "不生成 DAG nodes/edges，"
+            "不选择/改派 Agent，不修改 Team/权限/预算。"
+            "requested_scope 只表示本轮用户是否要求实际执行：plan_only=只写方案/设计/文档，"
+            "execute=明确要求开发、修改、运行或验证，uncertain=无法可靠判断。"
+            "用户本轮明确范围优先于 TeamSpec 的默认 intent 和 workflow_lanes；不要因为默认团队包含 build/verify"
+            "就把只写方案的请求自动扩展为实现和验证。"
+            + (
+                "用户已经确认本轮范围为 plan_only，只生成方案类工作，不生成 build/verify 工作。"
+                if scope_confirmation == "plan_only"
+                else "用户已经确认本轮范围为 execute，可以按用户目标规划实际开发和验证。"
+                if scope_confirmation == "execute"
+                else ""
+            )
+            + "members 中的 formation_responsibility 只表示常驻分工边界；先按任务需要拆工作，"
+            + "不得为了让每个成员都有任务而生成重复或近义 work_unit。"
+            + "Leader 的目标确认、TeamPlan 创建/调整、派活和最终汇总由执行器自动生成，"
+            + "不得把这些控制动作重复写入 work_units，也不得使用 leader_ 前缀作为 work_unit id。"
+        )
     user = (
         "JSON schema="
-        '{"goal_clarity":"low|medium|high","critical_missing_info":[],"dependency_pattern":"sequential|parallel_merge|staged",'
+        '{"goal_clarity":"low|medium|high","requested_scope":"plan_only|execute|uncertain",'
+        '"critical_missing_info":[],"dependency_pattern":"sequential|parallel_merge|staged",'
         '"quality_policy":"none|leader_review|independent_review|evaluator_optimizer","dynamic_discovery":false,'
         '"conditional_branching":false,"iteration_until_convergence":false,"risk_level":"low|medium|high",'
         '"semantic_uncertainty":"low|medium|high","work_units":[{"id":"snake_case","objective":"可执行目标",'
@@ -133,6 +196,11 @@ def _dependency_pattern(value: object) -> DependencyPattern:
 def _quality_policy(value: object) -> QualityPolicy:
     item = str(value or "").strip().lower()
     return item if item in {"none", "leader_review", "independent_review", "evaluator_optimizer"} else "leader_review"  # type: ignore[return-value]
+
+
+def _requested_scope(value: object) -> RequestedScope:
+    item = str(value or "").strip().lower()
+    return item if item in {"plan_only", "execute", "uncertain"} else "uncertain"  # type: ignore[return-value]
 
 
 def _has_cycle(units: list[WorkUnit]) -> bool:
@@ -224,6 +292,7 @@ def coerce_planning_decision(data: dict[str, Any], *, max_work_units: int = 12) 
     ][:6]
     return PlanningDecision(
         goal_clarity=_level(data.get("goal_clarity")),
+        requested_scope=_requested_scope(data.get("requested_scope")),
         critical_missing_info=missing,
         dependency_pattern=_dependency_pattern(data.get("dependency_pattern")),
         quality_policy=_quality_policy(data.get("quality_policy")),
@@ -281,6 +350,163 @@ def confidence_dimensions(
     }
 
 
+def node_execution_contract(
+    *,
+    goal: str,
+    node_id: str,
+    title: str,
+    lane: str,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the stable execution contract projected into a plan node."""
+
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    outputs = {
+        "lead": ["任务拆解", "依赖关系", "验收标准"],
+        "plan": ["方案", "约束", "验收标准"],
+        "design": ["设计说明", "关键状态", "实现约束"],
+        "build": ["实现产物", "变更说明", "自测结果"],
+        "verify": ["测试记录", "缺陷/风险", "验收结论"],
+        "docs": ["交付记录", "产物引用", "后续建议"],
+        "release": ["发布检查", "环境说明", "风险清单"],
+        "summary": ["最终结论", "产物清单", "风险与下一步"],
+    }.get(lane, ["执行结果", "风险说明", "下一步"])
+    expected_output = str(metadata.get("expected_output") or "").strip()
+    raw_expected_outputs = metadata.get("expected_outputs")
+    declared_outputs = (
+        [expected_output]
+        if expected_output
+        else [
+            str(item).strip()
+            for item in (
+                raw_expected_outputs
+                if isinstance(raw_expected_outputs, (list, tuple))
+                else []
+            )
+            if str(item).strip()
+        ]
+    )
+    if declared_outputs:
+        outputs = declared_outputs
+    acceptance_criteria = [
+        "输出必须具体可检查。",
+        "如需改变团队成员或补员，必须先提示用户并等待确认。",
+        f"结果必须服务于用户目标：{goal}",
+    ]
+    if declared_outputs:
+        acceptance_criteria.insert(
+            0,
+            f"必须交付本节点声明的输出：{'、'.join(declared_outputs)}。",
+        )
+    return {
+        "purpose": title,
+        "inputs": ["用户目标", "上游节点结果"],
+        "outputs": outputs,
+        "acceptance_criteria": acceptance_criteria,
+        "requires_leader_review": "review" in node_id or "方案" in title or "审阅" in title,
+        "conflict_scope": lane,
+    }
+
+
+def workflow_plan_graph(
+    workflow_plan: Mapping[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    """Return the graph inputs carried by a WorkflowPlan snapshot.
+
+    WorkflowPlan is the persisted plan contract.  The runtime TeamPlan may
+    still be built from the legacy ``nodes``/``edges`` arguments, but callers
+    with a snapshot should not maintain a second graph definition beside it.
+    """
+
+    if not isinstance(workflow_plan, Mapping):
+        return [], []
+    nodes = [dict(node) for node in workflow_plan.get("nodes") or [] if isinstance(node, Mapping)]
+    edges = [
+        dict(edge) if isinstance(edge, Mapping) else edge
+        for edge in workflow_plan.get("edges") or []
+    ]
+    return nodes, edges
+
+
+def workflow_node_runtime_metadata(
+    workflow_plan: Mapping[str, Any],
+    node: Mapping[str, Any],
+    *,
+    runtime_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project stable WorkflowPlan node fields into runtime metadata.
+
+    Runtime metadata may contain status/attempt annotations from events, but
+    stable capability and output contract fields always come from the current
+    WorkflowPlan snapshot.  This prevents stale ``team_plan_created`` payloads
+    from silently changing the node contract during process recovery.
+    """
+
+    metadata = dict(runtime_metadata) if isinstance(runtime_metadata, Mapping) else {}
+    node_id = str(node.get("id") or node.get("node_id") or "").strip()
+    title = str(node.get("title") or node_id).strip()
+    lane = str(node.get("workflow_lane") or node.get("kind") or metadata.get("workflow_lane") or "other").strip() or "other"
+    required_capabilities = normalize_capabilities(node.get("required_capabilities") or [])
+    expected_outputs = [
+        str(item).strip()
+        for item in (node.get("expected_outputs") or [])
+        if str(item).strip()
+    ]
+    inputs = [
+        str(item).strip()
+        for item in (node.get("inputs") or [])
+        if str(item).strip()
+    ]
+    contract = node_execution_contract(
+        goal=str((workflow_plan.get("task") or {}).get("goal") or "").strip(),
+        node_id=node_id,
+        title=title,
+        lane=lane,
+        metadata={"expected_outputs": expected_outputs},
+    )
+    if inputs:
+        contract["inputs"] = inputs
+    if node.get("acceptance_criteria"):
+        contract["acceptance_criteria"] = [
+            str(item).strip()
+            for item in node.get("acceptance_criteria") or []
+            if str(item).strip()
+        ]
+    planning = workflow_plan.get("planning") if isinstance(workflow_plan.get("planning"), Mapping) else {}
+    execution_mode = str(
+        planning.get("selected_mode") or planning.get("requested_mode") or "standard"
+    ).strip()
+    execution_profile = dict(metadata.get("execution_profile") or {})
+    execution_profile.update({
+        "requested_mode": str(planning.get("requested_mode") or execution_mode),
+        "selected_mode": execution_mode,
+    })
+    execution_profile.setdefault("budget", dict(workflow_plan.get("budget_snapshot") or {}))
+    metadata.update({
+        "workflow_lane": lane,
+        "required_capabilities": required_capabilities,
+        "capability_source": str(node.get("capability_source") or metadata.get("capability_source") or ""),
+        "execution_contract": contract,
+        "planner": str(node.get("planner") or planning.get("engine") or metadata.get("planner") or "team_graph_planner"),
+        "execution_profile": execution_profile,
+        "execution_budget": dict(workflow_plan.get("budget_snapshot") or {}),
+        "execution_mode": execution_mode,
+        "agent_log_style": "agent_turn",
+    })
+    for key in (
+        "display_title",
+        "role_key",
+        "role_label",
+        "display_order",
+        "full_title",
+        "display_action",
+        "plan_strategy",
+    ):
+        if node.get(key) not in (None, ""):
+            metadata[key] = node[key]
+    return metadata
+
+
 def workflow_plan_from_graph(
     *,
     goal: str,
@@ -298,6 +524,7 @@ def workflow_plan_from_graph(
     warnings: list[str],
     fallback_from: str | None = None,
     planning_decision: dict[str, Any] | None = None,
+    requested_scope: str | None = None,
 ) -> WorkflowPlan:
     deliverables = team_spec.get("deliverables") if isinstance(team_spec.get("deliverables"), list) else []
     task_deliverables = [
@@ -308,18 +535,30 @@ def workflow_plan_from_graph(
     for node in nodes:
         metadata = dict(node.get("metadata") or {})
         contract = dict(metadata.get("execution_contract") or {})
-        plan_nodes.append({
+        plan_node = {
             "id": str(node.get("id") or ""),
             "title": str(node.get("title") or ""),
+            "detail": str(node.get("detail") or ""),
             "display_title": str(metadata.get("display_title") or ""),
             "kind": str(metadata.get("work_unit_kind") or metadata.get("workflow_lane") or "other"),
+            "workflow_lane": str(metadata.get("workflow_lane") or ""),
             "assignee_id": str(node.get("assignee") or "leader"),
             "required_capabilities": normalize_capabilities(metadata.get("required_capabilities") or []),
             "capability_source": str(metadata.get("capability_source") or ""),
             "inputs": list(contract.get("inputs") or ["task.goal"]),
             "expected_outputs": list(contract.get("outputs") or []),
             "acceptance_criteria": list(contract.get("acceptance_criteria") or []),
-        })
+            "planner": str(metadata.get("planner") or ""),
+            "plan_strategy": str(metadata.get("plan_strategy") or ""),
+            "execution_profile": dict(metadata.get("execution_profile") or {}),
+            "execution_budget": dict(metadata.get("execution_budget") or {}),
+            "execution_mode": str(metadata.get("execution_mode") or ""),
+            "agent_log_style": str(metadata.get("agent_log_style") or ""),
+        }
+        for key in ("role_key", "role_label", "display_order", "full_title", "display_action"):
+            if key in metadata:
+                plan_node[key] = metadata[key]
+        plan_nodes.append(plan_node)
     planning_payload = {
         "requested_mode": requested_mode,
         "selected_mode": selected_mode,
@@ -331,6 +570,8 @@ def workflow_plan_from_graph(
         "reason_codes": list(dict.fromkeys(str(item) for item in reasons if str(item))),
         "fallback_from": fallback_from,
     }
+    if requested_scope in {"plan_only", "execute", "uncertain"}:
+        planning_payload["requested_scope"] = requested_scope
     if planning_decision:
         planning_payload["planning_decision"] = dict(planning_decision)
     return WorkflowPlan(

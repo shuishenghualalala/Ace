@@ -211,6 +211,8 @@ class Config:
     llm_trace: bool = True  # 是否把每次 LLM 收发全量写入 {crew_home}/logs/llm.jsonl，便于排查
     max_iterations: int = 0  # 0=无限，靠 auto-compact + guardrail 防失控
     dk_task_timeout_seconds: float = 3600.0  # Dynamic Kanban 单个任务执行超时（秒），0=不限
+    # 外部 Runtime 的统一空闲/硬截止/交互等待策略；空映射保持现有协议兼容默认。
+    timeout_policy: dict[str, Any] = field(default_factory=dict)
     dk_verification_gate_enabled: bool = True  # Dynamic Kanban 是否启用 LLM verification gate
     crew_home: str = ""  # 空=使用默认（冻结态 ~/DEFAULT_HOME_DIRNAME，开发态 ROOT/.crew/），否则使用指定路径
     task_workspace_root: str = ""  # 空={crew_home}/task_workspaces；否则作为任务产物根目录
@@ -1422,6 +1424,8 @@ def load_config(config_path: str | Path | None = None) -> Config:
             runtime.get("dk_task_timeout_seconds", cfg.dk_task_timeout_seconds),
             cfg.dk_task_timeout_seconds,
         )
+        raw_timeout_policy = runtime.get("timeout_policy", cfg.timeout_policy)
+        cfg.timeout_policy = raw_timeout_policy if isinstance(raw_timeout_policy, dict) else {}
         cfg.sqlite_wal = bool(runtime.get("sqlite_wal", cfg.sqlite_wal))
         gw = data.get("gateway", {})
         cfg.gateway_host = gw.get("host", cfg.gateway_host)

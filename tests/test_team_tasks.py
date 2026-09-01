@@ -18,6 +18,7 @@ from crew.core.errors import ToolError
 from crew.core.interfaces import LLMProvider
 from crew.core.mocks import InMemorySessionStore, NullMemory
 from crew.core.runctx import current_agent_id, current_agent_workdir
+from crew.core.text_parsing import extract_json_object
 from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
 from crew.dynamickanban.store import SQLiteKanbanStore
 from crew.gateway.auth import AccountContext
@@ -29,6 +30,7 @@ from crew.tasks.runtime import TaskRuntime
 from crew.tasks.task_manager import InMemoryTaskManager, LegacyTaskManagerAdapter
 from crew.team.delegate_tool import run_delegate_to_teammate
 from crew.team.bus import TeamBus
+from crew.team import flow_builder
 from crew.security.launch import ProcessLaunch, current_process_launch
 from crew.security.models import (
     FilesystemAccess,
@@ -38,8 +40,11 @@ from crew.security.models import (
 )
 from crew.team.graph_planner import (
     DEFAULT_PLANNING_DECISION_TIMEOUT,
+    PLANNING_DECISION_RETRY_MAX_TOKENS,
+    PLANNING_DECISION_RETRY_TIMEOUT,
     PLANNING_DECISION_MAX_TOKENS,
     TeamGraphPlanner,
+    _member_capability_sets,
     _normalize_nodes_with_graph,
     schedule_planning_provider_warmup,
 )
@@ -48,15 +53,22 @@ from crew.team.agent_profile import (
     CapabilityAssessment,
     evaluate_capability_coverage,
 )
-from crew.team.history_projection import team_internal_history_items
-from crew.team.models import RuntimeStaffingRequest, TeamPlan, TeamPlanEdge, TeamPlanNode
+from crew.team.history_projection import (
+    is_duplicate_team_parent_final,
+    team_internal_history_items,
+    team_tasks_with_plan_projection,
+)
+from crew.team.models import RuntimeStaffingRequest, TeamMemberSpec, TeamPlan, TeamPlanEdge, TeamPlanNode
 from crew.team.result_presenter import (
     assignment_text,
+    artifact_filename,
+    has_explicit_file_artifact,
     node_dict_assignment_text,
     node_dict_should_show_assignment,
     node_display_progress,
     result_projection,
     should_show_assignment,
+    unique_artifact_path,
 )
 from crew.team.roles import CREW_BUILTIN_AGENT_ID
 from crew.team.team_manager import (
@@ -65,7 +77,7 @@ from crew.team.team_manager import (
     _join_stream_fragments,
     _normalize_legacy_chunked_thinking,
 )
-from crew.team.team_spec import build_team_spec
+from crew.team.team_spec import build_team_spec, persisted_team_spec_for_turn
 from crew.team.turn_decision import (
     TeamTurnDecision,
     coerce_team_turn_decision,
@@ -153,7 +165,7 @@ def test_team_planning_progress_uses_agent_turn_timing_contract(monkeypatch):
     assert 'turn_duration' not in running.body
     assert done.body['display_mode'] == 'collapsible'
     assert done.body['collapsed_title'] == 'Crew 已生成团队执行图'
-    assert '- 准备团队执行：完成' in done.body['process_text']
+    assert '- 准备团队执行：' not in done.body['process_text']
     assert '进行中' not in done.body['process_text']
     assert done.body['turn_started_at'] == pytest.approx(1_700_000_005.8)
     assert done.body['turn_duration'] == pytest.approx(4.2)
@@ -643,6 +655,48 @@ class ReasoningOnlyPlanningProvider(LLMProvider):
         yield StreamChunk(delta_text="", done=True, finish_reason="length")
 
 
+class StructuredRetryPlanningProvider(LLMProvider):
+    def __init__(self):
+        self.stream_calls = 0
+        self.chat_calls = 0
+        self.retry_kwargs = None
+
+    async def chat(
+        self,
+        messages,
+        tools=None,
+        *,
+        max_tokens=None,
+        response_format=None,
+        reasoning_mode=None,
+    ):
+        self.chat_calls += 1
+        if reasoning_mode == "disabled":
+            self.retry_kwargs = {
+                "max_tokens": max_tokens,
+                "response_format": response_format,
+                "reasoning_mode": reasoning_mode,
+            }
+            return ChatResponse(
+                text=json.dumps(P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"], ensure_ascii=False),
+                finish_reason="stop",
+            )
+        return ChatResponse(text="", reasoning_content="继续推演但没有输出 JSON", finish_reason="length")
+
+    async def stream_chat(
+        self,
+        messages,
+        tools=None,
+        *,
+        max_tokens=None,
+        response_format=None,
+        reasoning_mode=None,
+    ):
+        self.stream_calls += 1
+        yield StreamChunk(reasoning_content="先分析任务结构")
+        yield StreamChunk(delta_text="", done=True, finish_reason="length")
+
+
 class ChatWinsPlanningProvider(LLMProvider):
     def __init__(self):
         self.stream_calls = 0
@@ -657,6 +711,43 @@ class ChatWinsPlanningProvider(LLMProvider):
         yield StreamChunk(reasoning_content="持续推演但暂不输出 JSON")
         await asyncio.sleep(1.0)
         yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+
+
+class ChatNonJsonStreamPlanningProvider(LLMProvider):
+    def __init__(self):
+        self.stream_calls = 0
+        self.chat_calls = 0
+
+    async def chat(self, messages, tools=None, *, max_tokens=None):
+        self.chat_calls += 1
+        return ChatResponse(text="我会先分析任务，再给出执行拆分。")
+
+    async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+        self.stream_calls += 1
+        await asyncio.sleep(0.01)
+        yield StreamChunk(delta_text=json.dumps(
+            P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"],
+            ensure_ascii=False,
+        ))
+        yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+
+
+class ChatNonJsonStreamReasoningPlanningProvider(ChatNonJsonStreamPlanningProvider):
+    async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+        self.stream_calls += 1
+        yield StreamChunk(reasoning_content="持续推演规划")
+        await asyncio.sleep(0.3)
+        yield StreamChunk(delta_text=json.dumps(
+            P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"],
+            ensure_ascii=False,
+        ))
+        yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+
+
+class ChatSchemaInvalidStreamPlanningProvider(ChatNonJsonStreamPlanningProvider):
+    async def chat(self, messages, tools=None, *, max_tokens=None):
+        self.chat_calls += 1
+        return ChatResponse(text=json.dumps({"work_units": []}, ensure_ascii=False))
 
 
 class StreamReasoningGracePlanningProvider(LLMProvider):
@@ -675,6 +766,47 @@ class StreamReasoningGracePlanningProvider(LLMProvider):
         await asyncio.sleep(0.3)
         yield StreamChunk(delta_text=json.dumps(P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"], ensure_ascii=False))
         yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+
+
+class ScopePlanningProvider(LLMProvider):
+    def __init__(self):
+        self.calls = 0
+        self.messages = []
+
+    async def chat(self, messages, tools=None, *, max_tokens=None):
+        self.calls += 1
+        self.messages = list(messages)
+        confirmed_plan_only = any(
+            '"scope_confirmation":"plan_only"' in str(message.content or "")
+            for message in messages
+        )
+        unit_kind = "build" if confirmed_plan_only else "design"
+        return ChatResponse(text="""
+{
+  "goal_clarity": "high",
+  "requested_scope": "plan_only",
+  "critical_missing_info": [],
+  "dependency_pattern": "sequential",
+  "quality_policy": "none",
+  "dynamic_discovery": false,
+  "conditional_branching": false,
+  "iteration_until_convergence": false,
+  "risk_level": "low",
+  "semantic_uncertainty": "low",
+  "work_units": [{
+    "id": "snake_plan",
+    "objective": "形成贪吃蛇开发方案",
+    "display_title": "开发方案",
+    "kind": "__UNIT_KIND__",
+    "required_capabilities": ["implementation"],
+    "depends_on": [],
+    "expected_output": "开发方案"
+  }]
+}
+""".replace("__UNIT_KIND__", unit_kind))
+
+    async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+        yield StreamChunk(delta_text="", done=True)
 
 
 class CachePlanningProvider(SemanticPlanningProvider):
@@ -836,6 +968,17 @@ def test_team_result_projection_builds_structured_contract():
     ]
 
 
+def test_team_json_parser_handles_nested_objects_inside_model_fences():
+    parsed = extract_json_object(
+        '模型说明\n```json\n{"action":"revise","metadata":{"required":["tests"]}}\n```\n'
+    )
+
+    assert parsed == {
+        "action": "revise",
+        "metadata": {"required": ["tests"]},
+    }
+
+
 def test_team_result_projection_keeps_useful_command_evidence_untruncated():
     projection = result_projection(
         "验证情况：JS 语法已通过 `node --check index.html`，核心交互通过浏览器手动检查，未发现阻断问题。"
@@ -911,12 +1054,56 @@ def test_team_decision_presenter_uses_same_rules_for_dict_and_plan_nodes():
     assert should_show_assignment(plan, verify_node) is True
     assert node_dict_should_show_assignment(raw_verify_node, raw_edges) is True
 
+    leader_node = TeamPlanNode(
+        node_id="leader_summary",
+        title="Leader 汇总",
+        assignee="leader",
+    )
+    raw_leader_node = {
+        "node_id": leader_node.node_id,
+        "title": leader_node.title,
+        "assignee": leader_node.assignee,
+    }
+    assert should_show_assignment(plan, leader_node) is False
+    assert node_dict_should_show_assignment(raw_leader_node, raw_edges) is False
+
+
+def test_leader_plan_control_text_describes_planning_not_ownership():
+    plan = TeamPlan(
+        team_session_id="leader-plan-copy",
+        goal="写一份贪吃蛇开发方案",
+        nodes={
+            "leader_plan": TeamPlanNode(
+                node_id="leader_plan",
+                title="Leader 拆解任务",
+                assignee="leader",
+            ),
+            "build": TeamPlanNode(
+                node_id="build",
+                title="编写开发方案",
+                assignee="kk",
+            ),
+        },
+    )
+
+    text = InProcessTeamManager._leader_control_text(plan, plan.nodes["leader_plan"])
+
+    assert "团队执行计划已生成" in text
+    assert "按节点推进" in text
+    assert "我来处理" not in text
+
 
 def test_leader_review_decision_parser_supports_structured_and_plain_results():
     structured = InProcessTeamManager._parse_leader_review_decision(
         '```json\n{"action":"revise","target_node_id":"build_1","message":"实现不完整","instructions":"补齐错误处理"}\n```'
     )
     plain = InProcessTeamManager._parse_leader_review_decision("需要用户补充生产环境权限信息。")
+    malformed_approval = InProcessTeamManager._parse_leader_review_decision(
+        '{"action":"approve","target_node_id":"","message":"方案符合"最简的 demo，web 端"的确认范围；'
+        '第 7 节的"待确认"项均属可迭代增强，无信息缺口、无阻塞。","instructions":""}'
+    )
+    non_blocking = InProcessTeamManager._parse_leader_review_decision("方案已完成，无阻塞。")
+    blocking = InProcessTeamManager._parse_leader_review_decision("权限缺失，当前无法继续。")
 
     assert structured == {
         "action": "revise",
@@ -925,6 +1112,9 @@ def test_leader_review_decision_parser_supports_structured_and_plain_results():
         "instructions": "补齐错误处理",
     }
     assert plain["action"] == "ask_user"
+    assert malformed_approval["action"] == "approve"
+    assert non_blocking["action"] == "approve"
+    assert blocking["action"] == "block"
 
 
 def test_team_user_input_signal_ignores_generic_pending_confirmation():
@@ -1398,11 +1588,17 @@ def test_team_markdown_artifact_uses_business_filename(tmp_path):
         ),
     ]
     for node, content, expected in cases:
-        assert InProcessTeamManager._artifact_filename(node, content) == expected
+        assert artifact_filename(node, content) == expected
 
     existing = tmp_path / "功能测试方案.md"
     existing.write_text("old", encoding="utf-8")
-    assert InProcessTeamManager._unique_artifact_path(tmp_path, "功能测试方案.md").name == "功能测试方案-2.md"
+    assert unique_artifact_path(tmp_path, "功能测试方案.md").name == "功能测试方案-2.md"
+
+
+def test_review_node_does_not_add_summary_artifact_when_member_wrote_file():
+    assert has_explicit_file_artifact([{"path": "/tmp/拳皇街机小游戏Demo方案.md"}]) is True
+    assert has_explicit_file_artifact([{"artifact_id": "artifact-1"}]) is False
+    assert has_explicit_file_artifact([]) is False
 
 
 def test_team_node_owned_artifacts_filters_concurrent_member_artifacts():
@@ -1868,6 +2064,63 @@ def test_team_child_tool_chunk_becomes_node_execution_event():
     assert event["event_type"] == "tool"
     assert event["event_icon"] == "tool"
     assert "README.md" in event["event_text"]
+
+
+def test_team_live_execution_event_is_persisted_to_node_projection(tmp_path):
+    store = SQLiteKanbanStore(tmp_path / "team-live-events.db")
+    tm, _ = _team(kanban_store=store)
+    tm.create_plan(
+        "live-events",
+        goal="执行实时过程展示",
+        nodes=[{"id": "build", "title": "实现功能", "assignee": "coder"}],
+        owner_account_id="owner-live",
+    )
+    plan = tm._plans[("owner-live", "live-events")]
+    node = plan.nodes["build"]
+
+    tm._append_plan_node_event(
+        plan,
+        node,
+        owner_account_id="owner-live",
+        event={
+            "id": "build:tool:tool-1:start",
+            "event_type": "tool",
+            "kind": "tool",
+            "event_title": "coder 工具调用：file_write",
+            "event_text": "README.md",
+            "request_id": "live-request",
+            "attempt_id": "1",
+            "actor_id": "coder",
+            "timestamp": 123.0,
+        },
+    )
+
+    task = tm.task_projection_for_session("live-events", owner_account_id="owner-live")[0]
+    event = task["progress"]["execution_events"][0]
+    assert event["event_id"] == "build:tool:tool-1:start"
+    assert event["request_id"] == "live-request"
+    assert event["node_id"] == "build"
+    assert event["actor_id"] == "coder"
+    assert event["event_text"] == "README.md"
+
+
+def test_team_node_execution_event_update_is_idempotent():
+    tm, _ = _team()
+    plan = TeamPlan(team_session_id="event-idempotent", goal="事件幂等")
+    node = TeamPlanNode(node_id="build", title="实现功能", assignee="coder")
+    plan.nodes[node.node_id] = node
+
+    event = {
+        "id": "build:tool:tool-1:result",
+        "event_type": "tool",
+        "event_text": "第一次结果",
+    }
+    tm._append_plan_node_event(plan, node, event=event)
+    tm._append_plan_node_event(plan, node, event={**event, "event_text": "最终结果"})
+
+    events = node.metadata["execution_events"]
+    assert len(events) == 1
+    assert events[0]["event_text"] == "最终结果"
 
 
 def test_team_verify_node_receives_upstream_artifact_refs():
@@ -2448,6 +2701,83 @@ async def test_team_plan_persists_to_kanban_store_and_history_events(tmp_path):
     assert created_nodes["build_1"]["metadata"]["workflow_lane"] == "build"
 
 
+def test_create_plan_uses_workflow_plan_graph_as_runtime_source():
+    tm, _ = _team()
+    result = tm.create_plan(
+        "workflow-plan-source",
+        goal="旧入口目标",
+        nodes=[{"id": "legacy", "title": "旧节点", "assignee": "coder"}],
+        edges=[],
+        workflow_plan={
+            "version": 1,
+            "revision": 1,
+            "task": {"goal": "当前计划目标"},
+            "nodes": [{"id": "canonical", "title": "当前节点", "assignee_id": "coder"}],
+            "edges": [],
+        },
+    )
+
+    assert [node["node_id"] for node in result["plan"]["nodes"]] == ["canonical"]
+    assert result["plan"]["nodes"][0]["title"] == "当前节点"
+
+
+def test_hydrate_keeps_workflow_plan_contract_when_creation_event_is_stale(tmp_path):
+    store = SQLiteKanbanStore(tmp_path / "workflow-plan-source.db")
+    owner_store = store.for_owner("local")
+    tm, _ = _team(kanban_store=store)
+    tm.create_plan(
+        "workflow-plan-recovery-source",
+        goal="任务",
+        nodes=[{"id": "legacy", "title": "旧节点", "assignee": "coder"}],
+        owner_account_id="local",
+        workflow_plan={
+            "version": 1,
+            "revision": 1,
+            "task": {"goal": "任务"},
+            "nodes": [{
+                "id": "canonical",
+                "title": "当前节点",
+                "kind": "build",
+                "assignee_id": "coder",
+                "required_capabilities": ["implementation"],
+                "inputs": ["task.goal"],
+                "expected_outputs": ["当前输出"],
+                "acceptance_criteria": ["必须检查当前输出"],
+            }],
+            "edges": [],
+        },
+    )
+    workflow = owner_store.get_latest_workflow_by_session("workflow-plan-recovery-source")
+    assert workflow is not None
+    owner_store.add_event(
+        workflow.id,
+        "team_plan_created",
+        actor="legacy_runtime",
+        payload={
+            "nodes": [{
+                "node_id": "canonical",
+                "title": "过期节点",
+                "metadata": {
+                    "required_capabilities": ["testing"],
+                    "execution_contract": {"outputs": ["过期输出"]},
+                },
+            }],
+        },
+    )
+
+    restored = tm._hydrate_persisted_team_plan(
+        "workflow-plan-recovery-source",
+        owner_account_id="local",
+    )
+
+    assert restored is not None
+    node = restored.nodes["canonical"]
+    assert node.title == "当前节点"
+    assert node.metadata["required_capabilities"] == ["implementation"]
+    assert node.metadata["execution_contract"]["outputs"] == ["当前输出"]
+    assert node.metadata["execution_contract"]["acceptance_criteria"] == ["必须检查当前输出"]
+
+
 def test_workflow_plan_revision_updates_snapshot_and_event_atomically(tmp_path):
     store = SQLiteKanbanStore(tmp_path / "workflow-revision.db").for_owner("local")
     workflow = store.create_workflow(
@@ -2624,6 +2954,7 @@ async def test_team_direct_leader_reply_renders_once_as_team_internal():
     assert stream.body["source_session_id"] == result.body["source_session_id"]
     assert result.body["agent_id"] == "leader"
     assert result.body["is_leader"] is True
+    assert result.body["request_id"] == result.request_id
     assert "你好，我是 hh" in result.body["text"]
     assert "process_text" not in result.body
     assert any(ch.kind == "final" for ch in chunks)
@@ -2649,6 +2980,29 @@ def test_team_plans_are_scoped_by_owner_for_same_session_id():
     assert plan_a["goal"] == "A 的任务"
     assert plan_b["goal"] == "B 的任务"
     assert [plan["goal"] for plan in tm.plans_for_session("same-team", owner_account_id="A:uid-a")] == ["A 的任务"]
+
+
+def test_team_status_projection_normalizes_plan_and_kanban_aliases():
+    assert InProcessTeamManager._kanban_status("in_progress") == "running"
+    assert InProcessTeamManager._kanban_status("needs_info") == "blocked"
+    assert InProcessTeamManager._taskboard_status("in_progress") == "in_progress"
+    assert InProcessTeamManager._taskboard_status("done") == "completed"
+    assert InProcessTeamManager._taskboard_status("needs_info") == "blocked"
+    assert InProcessTeamManager._taskboard_status("unknown") == "pending"
+
+
+def test_team_missing_owner_does_not_fall_back_to_another_owner():
+    tm, _ = _team()
+    tm.create_plan(
+        "owner-isolation",
+        goal="仅属于 A",
+        nodes=[{"id": "a", "title": "A 节点", "assignee": "coder"}],
+        owner_account_id="A:uid-a",
+    )
+    tm._build_team("owner-isolation", owner_account_id="A:uid-a")
+
+    assert tm.read_plan("owner-isolation")["plan"] is None
+    assert tm._teams.get(tm._existing_team_key("owner-isolation")) is None
 
 
 async def test_team_required_workflow_dispatches_when_leader_does_not_delegate():
@@ -2855,10 +3209,10 @@ def test_team_delegate_workspace_isolates_abstract_team_turns(tmp_path, monkeypa
     )
     tm, _ = _team()
 
-    assert tm._team_goal_uses_shared_workspace("测试一下之前开发的贪吃蛇是否可验收")
-    assert tm._team_goal_uses_shared_workspace("检查 snake.html 是否可验收")
-    assert not tm._team_goal_uses_shared_workspace("测试一下团队协作吧")
-    assert not tm._team_goal_uses_shared_workspace("测试一下团队协作是否正常运行")
+    assert flow_builder.team_goal_uses_shared_workspace("测试一下之前开发的贪吃蛇是否可验收")
+    assert flow_builder.team_goal_uses_shared_workspace("检查 snake.html 是否可验收")
+    assert not flow_builder.team_goal_uses_shared_workspace("测试一下团队协作吧")
+    assert not flow_builder.team_goal_uses_shared_workspace("测试一下团队协作是否正常运行")
 
     shared = tm._team_delegate_cwd(
         Envelope.of("测试一下之前开发的贪吃蛇是否可验收", session_id="web_a::turn::req_1", mode="team"),
@@ -3069,7 +3423,7 @@ async def test_delegate_tool_allows_pending_member_plan_node():
     assert len(tasks.list("guard_plan_s3")) == 1
 
 
-async def test_legacy_delegate_entry_uses_unified_assignment_events(tmp_path):
+async def test_delegate_entry_uses_unified_assignment_events(tmp_path):
     store = SQLiteKanbanStore(tmp_path / "legacy-delegate-kanban.db")
     owner_store = store.for_owner("local")
     tm, tasks = _team(kanban_store=store)
@@ -3106,10 +3460,72 @@ async def test_legacy_delegate_entry_uses_unified_assignment_events(tmp_path):
     events = owner_store.get_board_state(workflow.id)["events"]
     assign = next(event for event in events if event["event_type"] == "team_assign")
     submit = next(event for event in events if event["event_type"] == "team_submit")
-    assert assign["payload"]["assignment_source"] == "legacy_delegate"
-    assert submit["payload"]["assignment_source"] == "legacy_delegate"
+    assert assign["payload"]["assignment_source"] == "delegate"
+    assert submit["payload"]["assignment_source"] == "delegate"
     assert assign["payload"]["mention_to"] == ["coder"]
     assert submit["payload"]["mention_from"] == "coder"
+
+
+async def test_delegate_entry_without_plan_is_rejected():
+    tm, tasks = _team()
+    team = tm._build_team("legacy_delegate_no_plan_s1")
+
+    token = current_agent_id.set("leader")
+    try:
+        result = await team.leader.registry.execute(
+            ToolCall(
+                "legacy-delegate-no-plan",
+                "delegate_to_teammate",
+                {"member": "coder", "instruction": "算 1+1"},
+            )
+        )
+    finally:
+        current_agent_id.reset(token)
+
+    assert result.is_error
+    assert "尚未创建 TeamPlan" in result.content
+    assert tasks.list("legacy_delegate_no_plan_s1") == []
+
+
+async def test_request_delegate_without_plan_is_rejected():
+    tm, tasks = _team()
+
+    with pytest.raises(ToolError, match="尚未创建 TeamPlan"):
+        await tm.request_delegate(
+            "request_delegate_no_plan_s1",
+            member="coder",
+            instruction="算 1+1",
+            requester_member_id="external_agent",
+        )
+
+    assert tasks.list("request_delegate_no_plan_s1") == []
+
+
+async def test_request_delegate_hydrates_persisted_team_plan(tmp_path):
+    store = SQLiteKanbanStore(tmp_path / "persisted-plan-delegate.db")
+    writer, _ = _team(kanban_store=store)
+    writer._build_team("persisted-plan-delegate", owner_account_id="local")
+    writer.create_plan(
+        "persisted-plan-delegate",
+        goal="恢复后执行",
+        nodes=[{"id": "work", "title": "恢复任务", "assignee": "coder"}],
+        edges=[],
+        owner_account_id="local",
+    )
+
+    reader, tasks = _team(kanban_store=store)
+    result = await reader.request_delegate(
+        "persisted-plan-delegate",
+        member="coder",
+        instruction="算 1+1",
+        requester_member_id="external_agent",
+        plan_node_id="work",
+        owner_account_id="local",
+    )
+
+    assert result["ok"] is True
+    assert result["plan_node_id"] == "work"
+    assert tasks.list("persisted-plan-delegate")[0]["assignee"] == "coder"
 
 
 async def test_team_mention_tool_routes_and_guards_user_mentions():
@@ -3964,11 +4380,18 @@ async def test_external_team_mention_propagates_current_active_skill(monkeypatch
 
 async def test_team_request_delegate_control_plane_entry():
     tm, tasks = _team()
+    tm.create_plan(
+        "mcp_team_s1",
+        goal="执行受控派活",
+        nodes=[{"id": "work", "title": "执行任务", "assignee": "coder"}],
+        edges=[],
+    )
     result = await tm.request_delegate(
         "mcp_team_s1",
         member="coder",
         instruction="算 1+1",
         requester_member_id="external_agent",
+        plan_node_id="work",
     )
     assert result["ok"] is True
     assert result["member"] == "coder"
@@ -3989,11 +4412,18 @@ async def test_team_request_delegate_control_plane_entry():
 
 async def test_team_request_delegate_can_wait_for_result():
     tm, tasks = _team()
+    tm.create_plan(
+        "mcp_team_sync_s1",
+        goal="执行受控派活",
+        nodes=[{"id": "work", "title": "执行任务", "assignee": "coder"}],
+        edges=[],
+    )
     result = await tm.request_delegate(
         "mcp_team_sync_s1",
         member="coder",
         instruction="算 1+1",
         requester_member_id="external_agent",
+        plan_node_id="work",
         wait_for_result=True,
     )
     assert result["ok"] is True
@@ -4067,6 +4497,42 @@ async def test_team_delegate_propagates_security_launch_context():
     assert seen[0].params["_security_process_launch"] is launch
 
 
+@pytest.mark.asyncio
+async def test_required_workflow_binds_envelope_security_launch(monkeypatch):
+    tm, _ = _team()
+    team = tm._build_team("workflow-security-context")
+    launch = ProcessLaunch(
+        PermissionProfile(PermissionProfileKind.MANAGED),
+        ("native-runtime",),
+    )
+    observed: list[object] = []
+
+    async def fake_run_required_workflow(*args, **kwargs):
+        observed.append(current_process_launch.get())
+        if False:
+            yield ResponseChunk.final("unused", "unused")
+
+    monkeypatch.setattr(tm._workflow_runtime, "run_required_workflow", fake_run_required_workflow)
+    before = current_process_launch.get()
+    envelope = Envelope.of(
+        "执行一个团队任务",
+        session_id="workflow-security-context",
+        mode="team",
+        params={"_security_process_launch": launch},
+    )
+
+    _ = [
+        chunk async for chunk in tm._run_required_workflow(
+            envelope,
+            team=team,
+            external_team_id="",
+        )
+    ]
+
+    assert observed == [launch]
+    assert current_process_launch.get() is before
+
+
 async def test_team_delegate_inherits_workspace_root_from_security_launch(tmp_path):
     session_cwd = tmp_path / "external-session"
     session_cwd.mkdir()
@@ -4137,12 +4603,19 @@ async def test_team_request_delegate_returns_before_slow_worker_finishes():
             return ChatResponse(text="coder慢任务完成")
 
     tm, tasks = _team(SlowControlPlaneProvider())
+    tm.create_plan(
+        "mcp_team_async_s1",
+        goal="执行受控派活",
+        nodes=[{"id": "work", "title": "慢任务", "assignee": "coder"}],
+        edges=[],
+    )
     result = await asyncio.wait_for(
         tm.request_delegate(
             "mcp_team_async_s1",
             member="coder",
             instruction="慢任务",
             requester_member_id="external_agent",
+            plan_node_id="work",
         ),
         timeout=0.5,
     )
@@ -4478,8 +4951,8 @@ def test_team_uses_external_team_selected_leader():
     team = tm._build_team("team_selected_leader", external_team_id="team_ext")
 
     assert team.session.leader_member_id == "leader"
-    assert "hh" in team.teammates
-    assert "kk" not in team.teammates
+    assert "agent_hh" in team.teammates
+    assert "agent_kk" not in team.teammates
     assert isinstance(team.leader.executor, AcpExecutor)
     assert team.leader.executor.config.external_agent_id == "agent_kk"
     assert team.leader.executor.config.crew_session_id == "team_selected_leader::leader"
@@ -4492,11 +4965,44 @@ def test_team_uses_external_team_selected_leader():
         team_spec=_structured_team_spec("开发一个贪吃蛇游戏", capabilities=["implementation"], workflow_lanes=("build",)),
     )
     assert [node["id"] for node in nodes] == ["leader_plan", "build_design_1", "build_1", "leader_review", "leader_summary"]
-    assert nodes[1]["assignee"] == "hh"
+    assert nodes[1]["assignee"] == "agent_hh"
     assert nodes[1]["metadata"]["workflow_lane"] == "design"
     assert nodes[3]["title"] == "Leader 审阅方案：贪吃蛇游戏"
     assert ["build_design_1", "leader_review"] in edges
     assert ["leader_review", "build_1"] in edges
+
+
+def test_external_team_keeps_duplicate_display_names_distinct():
+    class DummyExternalStore:
+        def get_team(self, team_id: str, *, owner_account_id: str = ""):
+            assert team_id == "team_duplicate_names"
+            return {
+                "id": team_id,
+                "leader_agent_id": CREW_BUILTIN_AGENT_ID,
+                "members": [
+                    {
+                        "agent_id": "agent_a",
+                        "agent_name": "同名成员",
+                        "role": "负责前端实现",
+                    },
+                    {
+                        "agent_id": "agent_b",
+                        "agent_name": "同名成员",
+                        "role": "负责后端实现",
+                    },
+                ],
+            }
+
+    tm, _ = _team()
+    tm.external_store = DummyExternalStore()
+
+    team = tm._build_team("team_duplicate_names", external_team_id="team_duplicate_names")
+
+    assert set(team.members) == {"agent_a", "agent_b"}
+    assert set(team.teammates) == {"agent_a", "agent_b"}
+    assert [team.members[item].name for item in ("agent_a", "agent_b")] == ["同名成员", "同名成员"]
+    assert team.teammates["agent_a"].executor.config.external_agent_id == "agent_a"
+    assert team.teammates["agent_b"].executor.config.external_agent_id == "agent_b"
 
 
 def test_external_team_projects_confirmed_formation_responsibility_into_runtime():
@@ -4562,13 +5068,13 @@ def test_external_team_projects_confirmed_formation_responsibility_into_runtime(
     tm.external_store = DummyExternalStore()
 
     team = tm._build_team("formation-runtime", external_team_id="team_ext")
-    cc_spec = team.members["cc"]
+    cc_spec = team.members["agent_cc"]
     assert cc_spec.metadata["formation_plan_version"] == 1
     assert cc_spec.metadata["formation_responsibility"] == responsibility
     assert cc_spec.metadata["formation_locked"] is True
 
     nodes, _ = tm._default_workflow_nodes(team, "设计一个贪吃蛇游戏")
-    plan_node = next(node for node in nodes if node["assignee"] == "cc")
+    plan_node = next(node for node in nodes if node["assignee"] == "agent_cc")
     assert plan_node["title"].startswith("需求与验收：")
     assert plan_node["metadata"]["expected_outputs"] == ["需求范围", "玩法规则", "验收清单"]
 
@@ -4980,6 +5486,109 @@ def test_team_spec_rejects_legacy_execution_flags():
         })
 
 
+def test_persisted_team_spec_for_turn_projects_legacy_task_semantics():
+    projected = persisted_team_spec_for_turn(
+        {
+            "version": 3,
+            "goal": "旧团队目标",
+            "execution_profile": {
+                "intent": "implementation",
+                "complexity": "multi_role",
+                "needs_build": True,
+                "needs_verification": True,
+            },
+            "team_requirements": {
+                "roles": ["fullstack_developer"],
+                "workflow_lanes": ["build", "verify"],
+                "capabilities": ["implementation", "verification"],
+            },
+        },
+        "本轮用户目标",
+    )
+
+    assert projected["goal"] == "本轮用户目标"
+    assert projected["task_profile"] == {
+        "intent": "implementation",
+        "complexity": "multi_role",
+    }
+    assert projected["execution_profile"] == {}
+    assert projected["team_requirements"]["workflow_lanes"] == ["build", "verify"]
+
+
+async def test_team_interact_uses_persisted_external_team_spec_for_planning(monkeypatch):
+    class DummyExternalStore:
+        def get_team(self, team_id: str, *, owner_account_id: str = ""):
+            assert team_id == "team_persisted_spec"
+            assert owner_account_id == "local"
+            return {
+                "id": team_id,
+                "name": "像素小游戏开发团队",
+                "leader_agent_id": CREW_BUILTIN_AGENT_ID,
+                "team_spec": {
+                    "version": 3,
+                    "goal": "旧团队目标",
+                    "execution_profile": {
+                        "intent": "implementation",
+                        "complexity": "multi_role",
+                        "needs_build": True,
+                        "needs_docs": True,
+                    },
+                    "team_requirements": {
+                        "roles": ["fullstack_developer"],
+                        "workflow_lanes": ["design", "build", "docs", "verify"],
+                        "capabilities": ["synthesis", "design", "implementation", "documentation"],
+                    },
+                },
+                "members": [
+                    {
+                        "agent_id": CREW_BUILTIN_AGENT_ID,
+                        "agent_name": "Crew 内置智能体",
+                        "role": "项目经理",
+                        "workflow_lane": "lead",
+                        "capabilities": ["planning"],
+                    },
+                    {
+                        "agent_id": "agent_kk",
+                        "agent_name": "kk",
+                        "role": "全栈开发",
+                        "workflow_lane": "build",
+                        "capabilities": ["frontend", "backend", "implementation"],
+                    },
+                ],
+            }
+
+    tm, _ = _team()
+    tm.external_store = DummyExternalStore()
+    captured: dict[str, object] = {}
+
+    async def fake_required_workflow(envelope, *, team, external_team_id, execution_profile, team_spec):
+        captured["team"] = team
+        captured["team_spec"] = team_spec
+        yield ResponseChunk.final(envelope.request_id, "done")
+
+    monkeypatch.setattr(tm, "_run_required_workflow", fake_required_workflow)
+    goal = "帮我写一个拳王小游戏的游戏方案吧"
+    chunks = [chunk async for chunk in tm.interact(Envelope.of(
+        goal,
+        session_id="persisted-spec-session",
+        request_id="req-persisted-spec",
+        user_id="local",
+        mode="team",
+        params={"external_team_id": "team_persisted_spec"},
+    ))]
+
+    assert any(chunk.kind == "final" for chunk in chunks)
+    projected = captured["team_spec"]
+    assert isinstance(projected, dict)
+    assert projected["goal"] == goal
+    assert projected["team_requirements"]["workflow_lanes"] == ["design", "build", "docs", "verify"]
+    assert projected["execution_profile"] == {}
+
+    team = captured["team"]
+    plan = tm.graph_planner.plan(team, goal, team_spec=projected)
+    assert any(node["assignee"] == "agent_kk" and node["id"].startswith("build") for node in plan.nodes)
+
+
 def test_team_spec_keeps_task_semantics_out_of_execution_profile():
     spec = build_team_spec({
         "goal": "输出研究方案",
@@ -5165,6 +5774,199 @@ def test_dag_admission_records_uncovered_node_instead_of_hiding_it_in_runtime():
     assert execute["metadata"]["capability_status"] == "missing"
     assert execute["metadata"]["capability_gap_source"] == "dag_admission"
     assert "testing" in execute["metadata"]["capability_coverage"]["missing"]
+
+
+def test_assigned_team_capabilities_survive_weak_model_profile():
+    member = SimpleNamespace(
+        member_id="kk",
+        capabilities=["frontend", "backend", "implementation"],
+        metadata={},
+    )
+    weak_profile = AgentProfile(
+        agent_id="agent-kk",
+        capabilities={
+            capability: CapabilityAssessment(score=0.2, confidence=0.15)
+            for capability in ("frontend", "backend", "implementation")
+        },
+    )
+    team = SimpleNamespace(
+        leader_spec=None,
+        members={"kk": member},
+        member_profiles={"kk": weak_profile},
+    )
+
+    assert _member_capability_sets(team)["kk"] == ["frontend", "backend", "implementation"]
+
+
+def test_external_member_assignment_contract_survives_weak_profile_for_runtime_coverage():
+    tm, _ = _team()
+    member = SimpleNamespace(
+        member_id="kk",
+        external_agent_id="agent-kk",
+        executor="external",
+        capabilities=["frontend", "backend", "implementation"],
+        metadata={},
+    )
+    weak_profile = AgentProfile(
+        agent_id="agent-kk",
+        capabilities={"implementation": CapabilityAssessment(score=0.2, confidence=0.15)},
+    )
+    team = SimpleNamespace(members={"kk": member}, teammates={"kk": object()})
+    tm._resolve_external_agent_profile = lambda *args, **kwargs: weak_profile
+    tm.external_store = SimpleNamespace(
+        get_agent=lambda *args, **kwargs: {"runtime_id": "runtime-kk"},
+        get_runtime=lambda *args, **kwargs: {},
+    )
+
+    coverage = tm._member_capability_coverage(
+        team,
+        "kk",
+        ["frontend", "backend", "implementation"],
+        owner_account_id="local",
+    )
+
+    assert coverage.status == "covered"
+
+
+def test_external_member_unavailability_is_not_hidden_by_assignment_contract():
+    tm, _ = _team()
+    member = SimpleNamespace(
+        member_id="kk",
+        external_agent_id="agent-kk",
+        executor="external",
+        capabilities=["implementation"],
+        metadata={},
+    )
+    unavailable_profile = AgentProfile(
+        agent_id="agent-kk",
+        availability="unavailable",
+        capabilities={"implementation": CapabilityAssessment(score=0.9, confidence=0.9)},
+    )
+    team = SimpleNamespace(members={"kk": member}, teammates={"kk": object()})
+    tm._resolve_external_agent_profile = lambda *args, **kwargs: unavailable_profile
+    tm.external_store = SimpleNamespace(
+        get_agent=lambda *args, **kwargs: {"runtime_id": "runtime-kk"},
+        get_runtime=lambda *args, **kwargs: {},
+    )
+
+    coverage = tm._member_capability_coverage(
+        team,
+        "kk",
+        ["implementation"],
+        owner_account_id="local",
+    )
+    trigger = tm._runtime_staffing_trigger(
+        team,
+        TeamPlanNode(
+            node_id="build",
+            title="实现",
+            assignee="kk",
+            metadata={"required_capabilities": ["implementation"]},
+        ),
+        owner_account_id="local",
+        max_attempts=2,
+    )
+
+    assert coverage.status == "unavailable"
+    assert trigger is not None
+    assert trigger["trigger_type"] == "agent_unavailable"
+
+
+def test_team_member_profile_resolution_is_shared_by_build_and_runtime_coverage():
+    tm, _ = _team()
+    member = SimpleNamespace(
+        member_id="kk",
+        external_agent_id="agent-kk",
+        executor="external",
+        capabilities=["implementation"],
+        model="model-kk",
+        metadata={},
+    )
+    profile = AgentProfile(
+        agent_id="agent-kk",
+        capabilities={"implementation": CapabilityAssessment(score=0.9, confidence=0.9)},
+    )
+    calls: list[tuple[str, str, str]] = []
+
+    def resolve(agent_id, *, owner_account_id, model_id, **kwargs):
+        calls.append((agent_id, owner_account_id, model_id))
+        return profile
+
+    tm._resolve_external_agent_profile = resolve
+    team = SimpleNamespace(members={"kk": member}, teammates={"kk": object()})
+
+    resolved = tm._resolve_team_member_profiles([member], None, owner_account_id="local")
+    coverage = tm._member_capability_coverage(
+        team,
+        "kk",
+        ["implementation"],
+        owner_account_id="local",
+    )
+
+    assert resolved == {"kk": profile}
+    assert coverage.status == "covered"
+    assert calls == [
+        ("agent-kk", "local", "model-kk"),
+        ("agent-kk", "local", "model-kk"),
+    ]
+
+
+def test_runtime_profile_cache_refreshes_when_profile_revision_changes(monkeypatch):
+    tm, _ = _team()
+    current = {
+        "agent": {
+            "id": "agent-kk",
+            "runtime_id": "runtime-kk",
+            "profile_version": 4,
+            "profile_updated_at": "2026-08-24T10:00:00Z",
+            "profile": {"capabilities": {"implementation": {"score": 0.2}}},
+        },
+        "runtime": {
+            "id": "runtime-kk",
+            "updated_at": "2026-08-24T10:00:00Z",
+            "metadata": {"availability_status": "ready"},
+        },
+    }
+    build_calls: list[str] = []
+
+    def fake_build(agent, *, runtime, model_id):
+        build_calls.append(str(agent.get("profile_updated_at") or ""))
+        score = float(
+            agent.get("profile", {})
+            .get("capabilities", {})
+            .get("implementation", {})
+            .get("score", 0.0)
+        )
+        return AgentProfile(
+            agent_id="agent-kk",
+            capabilities={"implementation": CapabilityAssessment(score=score, confidence=0.9)},
+        )
+
+    tm.external_store = SimpleNamespace(
+        agent_with_runtime=lambda *args, **kwargs: (current["agent"], current["runtime"]),
+    )
+    monkeypatch.setattr("crew.team.team_manager.build_agent_profile", fake_build)
+
+    first = tm._resolve_external_agent_profile(
+        "agent-kk",
+        owner_account_id="local",
+        model_id="model-kk",
+    )
+    current["agent"] = {
+        **current["agent"],
+        "profile_updated_at": "2026-08-24T10:00:01Z",
+        "profile": {"capabilities": {"implementation": {"score": 0.9}}},
+    }
+    second = tm._resolve_external_agent_profile(
+        "agent-kk",
+        owner_account_id="local",
+        model_id="model-kk",
+    )
+
+    assert first is not second
+    assert first.score("implementation") == 0.2
+    assert second.score("implementation") == 0.9
+    assert build_calls == ["2026-08-24T10:00:00Z", "2026-08-24T10:00:01Z"]
 
 
 def test_dag_admission_reassigns_existing_member_and_refreshes_role_metadata():
@@ -5460,6 +6262,39 @@ def test_runtime_staffing_reassigns_existing_member_before_prompting_user():
     assert trigger["replacement_assignee"] == "hh"
 
 
+def test_runtime_reassignment_refreshes_plan_status_after_reopening_node():
+    tm, _ = _team(config=_recovery_team_config())
+    team = tm._build_team("runtime-reassign-status")
+    node = TeamPlanNode(
+        node_id="verify",
+        title="验证",
+        assignee="kk",
+        status="blocked",
+        metadata={"required_capabilities": ["testing"]},
+    )
+    plan = TeamPlan(
+        team_session_id="runtime-reassign-status",
+        goal="验证",
+        status="blocked",
+        nodes={"verify": node},
+    )
+
+    tm._apply_existing_member_reassignment(
+        plan,
+        node,
+        team,
+        {
+            "replacement_assignee": "hh",
+            "required_capabilities": ["testing"],
+            "reason": "已有测试成员可以承担",
+        },
+        owner_account_id="local",
+    )
+
+    assert node.status == "pending"
+    assert plan.status == "active"
+
+
 def _recovery_team_config() -> Config:
     return Config(team_config={
         "members": [
@@ -5557,6 +6392,64 @@ def test_recover_plan_node_reassigns_persisted_blocked_node(tmp_path):
     verify = next(item for item in projected if item["progress"].get("plan_node_id") == "verify")
     assert verify["assignee"] == "hh"
     assert verify["status"] == "pending"
+
+
+def test_runtime_members_restore_from_persisted_workflow_after_team_cache_miss(tmp_path, monkeypatch):
+    store = SQLiteKanbanStore(tmp_path / "runtime-member-recovery.db")
+    tm, _ = _team(config=_recovery_team_config(), kanban_store=store)
+    runtime_member = TeamMemberSpec(
+        member_id="runtime-worker",
+        name="Runtime 外援·后端",
+        role="负责后端实现",
+        executor="external",
+        external_agent_id="agent-runtime-worker",
+        model="backend-model",
+        capabilities=["backend"],
+        metadata={"runtime_staffing": True},
+    )
+    plan = TeamPlan(
+        team_session_id="runtime-member-recovery",
+        goal="实现后端接口",
+        nodes={
+            "build": TeamPlanNode(
+                node_id="build",
+                title="实现接口",
+                assignee=runtime_member.member_id,
+                metadata={"required_capabilities": ["backend"]},
+            ),
+        },
+    )
+    tm._persist_team_plan(
+        plan,
+        owner_account_id="local",
+        workflow_plan={
+            "version": 1,
+            "revision": 2,
+            "task": {"goal": plan.goal},
+            "nodes": [{
+                "id": "build",
+                "title": "实现接口",
+                "assignee_id": runtime_member.member_id,
+                "required_capabilities": ["backend"],
+            }],
+            "edges": [],
+            "runtime_members": [runtime_member.to_dict()],
+        },
+    )
+
+    recovered_tm, _ = _team(config=_recovery_team_config(), kanban_store=store)
+    captured: dict[str, list[TeamMemberSpec]] = {}
+
+    def fake_build(session_id, **kwargs):
+        runtime_members = list(kwargs.get("runtime_members") or [])
+        captured[session_id] = runtime_members
+        return SimpleNamespace(runtime_members={item.member_id: item for item in runtime_members})
+
+    monkeypatch.setattr(recovered_tm, "_build_team", fake_build)
+    recovered_tm._get_or_create("runtime-member-recovery", owner_account_id="local")
+
+    assert [item.member_id for item in captured["runtime-member-recovery"]] == ["agent-runtime-worker"]
+    assert recovered_tm._plans[recovered_tm._key("runtime-member-recovery", "local")].nodes["build"].assignee == "runtime-worker"
 
 
 def test_recover_plan_node_reuses_capability_coverage_and_rejects_invalid_member():
@@ -5749,6 +6642,47 @@ def test_team_turn_router_returns_team_turn_decision():
     assert fast_decision.is_new_workflow is True
     assert fast_decision.execution_mode == "standard"
     assert fast_decision.diagnostics["turn_source"] == "task_profile"
+
+
+def test_team_turn_router_current_prompt_overrides_persisted_team_spec_goal():
+    router = TeamTurnRouter()
+
+    decision = router.route(
+        "写一个贪吃蛇游戏的开发方案",
+        team_spec={
+            "goal": "开发一个带登录的管理后台",
+            "task_profile": {
+                "intent": "documentation",
+                "complexity": "focused",
+            },
+        },
+    )
+
+    assert decision.is_new_workflow is True
+    assert decision.diagnostics["team_spec"]["goal"] == "写一个贪吃蛇游戏的开发方案"
+
+
+def test_team_turn_router_simple_chat_ignores_persisted_execution_defaults():
+    router = TeamTurnRouter()
+
+    decision = router.route(
+        "你好",
+        team_spec={
+            "goal": "开发一个完整网页游戏",
+            "task_profile": {
+                "intent": "implementation",
+                "complexity": "multi_role",
+            },
+            "team_requirements": {
+                "workflow_lanes": ["build", "verify"],
+            },
+        },
+    )
+
+    assert decision.is_direct_chat is True
+    assert decision.execution_mode == "direct"
+    assert decision.diagnostics["turn_source"] == "simple_chat"
+    assert decision.diagnostics["team_spec_default_ignored"] is True
 
 
 async def test_ai_planner_uses_llm_single_dag():
@@ -6766,6 +7700,103 @@ async def test_team_graph_planner_uses_chat_when_chat_wins_planning_race():
     assert graph_plan.nodes[1]["metadata"]["plan_strategy"] == "standard_semantic_dag"
 
 
+async def test_team_graph_planner_keeps_stream_when_chat_returns_non_json():
+    provider = ChatNonJsonStreamPlanningProvider()
+    tm, _ = _team(config=Config(
+        max_iterations=3,
+        team_config={
+            "members": [{
+                "member_id": "writer",
+                "name": "writer",
+                "role": "负责综合写作",
+                "executor": "builtin",
+                "metadata": {"workflow_lane": "docs"},
+                "capabilities": ["documentation", "synthesis"],
+            }]
+        },
+    ))
+
+    graph_plan = await TeamGraphPlanner().plan_async(
+        tm._build_team("chat-non-json-stream"),
+        "整理一份架构综述",
+        execution_profile={"requested_mode": "standard", "budget": {"planning_decision_timeout": 0.5}},
+        provider=provider,
+    )
+
+    planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
+    assert planning_decision["status"] == "success"
+    assert planning_decision["transport"] == "stream_race_won"
+    assert planning_decision["race_winner"] == "stream"
+    assert planning_decision["chat_non_json"] is True
+    assert not graph_plan.workflow_plan["planning"].get("fallback_from")
+
+
+async def test_team_graph_planner_keeps_stream_when_chat_schema_is_invalid():
+    provider = ChatSchemaInvalidStreamPlanningProvider()
+    tm, _ = _team(config=Config(
+        max_iterations=3,
+        team_config={
+            "members": [{
+                "member_id": "writer",
+                "name": "writer",
+                "role": "负责综合写作",
+                "executor": "builtin",
+                "metadata": {"workflow_lane": "docs"},
+                "capabilities": ["documentation", "synthesis"],
+            }]
+        },
+    ))
+
+    graph_plan = await TeamGraphPlanner().plan_async(
+        tm._build_team("chat-schema-invalid-stream"),
+        "整理一份架构综述",
+        execution_profile={"requested_mode": "standard", "budget": {"planning_decision_timeout": 0.5}},
+        provider=provider,
+    )
+
+    planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
+    assert planning_decision["status"] == "success"
+    assert planning_decision["transport"] == "stream_race_won"
+    assert planning_decision["race_winner"] == "stream"
+    assert planning_decision["chat_schema_invalid"] is True
+
+
+async def test_team_graph_planner_keeps_reasoning_grace_after_chat_non_json():
+    provider = ChatNonJsonStreamReasoningPlanningProvider()
+    tm, _ = _team(config=Config(
+        max_iterations=3,
+        team_config={
+            "members": [{
+                "member_id": "writer",
+                "name": "writer",
+                "role": "负责综合写作",
+                "executor": "builtin",
+                "metadata": {"workflow_lane": "docs"},
+                "capabilities": ["documentation", "synthesis"],
+            }]
+        },
+    ))
+
+    graph_plan = await TeamGraphPlanner().plan_async(
+        tm._build_team("chat-non-json-reasoning"),
+        "整理一份架构综述",
+        execution_profile={
+            "requested_mode": "standard",
+            "budget": {
+                "planning_decision_timeout": 0.001,
+                "planning_decision_reasoning_grace_timeout": 0.2,
+            },
+        },
+        provider=provider,
+    )
+
+    planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
+    assert planning_decision["status"] == "success"
+    assert planning_decision["transport"] == "stream_reasoning_grace"
+    assert planning_decision["reasoning_grace_used"] is True
+    assert planning_decision["chat_non_json"] is True
+
+
 async def test_team_graph_planner_keeps_waiting_stream_when_reasoning_after_chat_race_window():
     provider = StreamReasoningGracePlanningProvider()
     tm, _ = _team(config=Config(
@@ -6876,9 +7907,9 @@ async def test_team_graph_planner_classifies_reasoning_only_without_calling_stre
     planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
     labels = [str(event.get("label") or "") for event in events]
     assert provider.stream_calls == 1
-    assert provider.chat_calls == 1
+    assert provider.chat_calls == 2
     assert provider.stream_max_tokens == PLANNING_DECISION_MAX_TOKENS == 4096
-    assert provider.chat_max_tokens == PLANNING_DECISION_MAX_TOKENS == 4096
+    assert provider.chat_max_tokens == PLANNING_DECISION_RETRY_MAX_TOKENS == 2048
     assert planning_decision["status"] == "fallback"
     assert planning_decision["error_type"] == "reasoning_only_length"
     assert planning_decision["first_reasoning_ms"] is not None
@@ -6890,6 +7921,46 @@ async def test_team_graph_planner_classifies_reasoning_only_without_calling_stre
     assert graph_plan.nodes[0]["metadata"]["plan_strategy"] == "standard_role_dag"
     assert any("尚未输出结构化结果" in label for label in labels)
     assert all("流式结果为空" not in label for label in labels)
+
+
+async def test_team_graph_planner_uses_structured_non_reasoning_retry():
+    assert DEFAULT_PLANNING_DECISION_TIMEOUT == 30.0
+    assert PLANNING_DECISION_RETRY_TIMEOUT == 10.0
+    provider = StructuredRetryPlanningProvider()
+    tm, _ = _team(config=Config(
+        max_iterations=3,
+        team_config={
+            "members": [{
+                "member_id": "writer",
+                "name": "writer",
+                "role": "负责综合写作",
+                "executor": "builtin",
+                "metadata": {"workflow_lane": "docs"},
+                "capabilities": ["documentation", "synthesis"],
+            }]
+        },
+    ))
+
+    graph_plan = await TeamGraphPlanner().plan_async(
+        tm._build_team("structured-planning-retry"),
+        "整理一份架构综述",
+        execution_profile={"requested_mode": "standard"},
+        provider=provider,
+    )
+
+    planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
+    assert provider.stream_calls == 1
+    assert provider.chat_calls == 2
+    assert provider.retry_kwargs == {
+        "max_tokens": PLANNING_DECISION_RETRY_MAX_TOKENS,
+        "response_format": {"type": "json_object"},
+        "reasoning_mode": "disabled",
+    }
+    assert planning_decision["status"] == "success"
+    assert planning_decision["transport"] == "structured_retry"
+    assert planning_decision["attempts"] == 2
+    assert planning_decision["primary_error_type"] == "reasoning_only_length"
+    assert graph_plan.nodes[1]["metadata"]["plan_strategy"] == "standard_semantic_dag"
 
 
 async def test_team_graph_planner_reuses_planning_decision_cache_for_same_inputs():
@@ -7003,6 +8074,91 @@ async def test_team_runtime_planning_defaultable_missing_info_still_creates_plan
 
 
 @pytest.mark.asyncio
+async def test_team_planning_pauses_when_plan_only_conflicts_with_default_execution():
+    provider = ScopePlanningProvider()
+    tm, _ = _team(provider, config=Config(
+        max_iterations=3,
+        team_config={
+            "members": [{
+                "member_id": "dev",
+                "name": "dev",
+                "role": "负责开发实现",
+                "executor": "builtin",
+                "metadata": {"workflow_lane": "build"},
+                "capabilities": ["implementation"],
+            }],
+        },
+    ))
+    team = tm._build_team("scope-conflict")
+    durable_spec = {
+        "goal": "帮我写一个贪吃蛇游戏的开发方案",
+        "task_profile": {
+            "intent": "implementation",
+            "complexity": "multi_role",
+            "deliverable_shape": "artifact",
+        },
+        "team_requirements": {
+            "roles": ["fullstack_developer"],
+            "capabilities": ["implementation"],
+            "workflow_lanes": ["build", "verify"],
+        },
+        "deliverables": [{"type": "code", "description": "可运行游戏"}],
+        "success_criteria": ["游戏可运行"],
+    }
+
+    graph_plan = await TeamGraphPlanner().plan_async(
+        team,
+        "帮我写一个贪吃蛇游戏的开发方案",
+        execution_profile={"requested_mode": "standard"},
+        team_spec=durable_spec,
+        provider=provider,
+    )
+
+    assert provider.calls == 1
+    assert graph_plan.nodes == []
+    planning = graph_plan.workflow_plan["planning"]
+    assert planning["scope_conflict"] is True
+    assert planning["requested_scope"] == "plan_only"
+    assert planning["default_execution_scope"] == "execute"
+    assert graph_plan.spec.team_requirements["workflow_lanes"] == ["build", "verify"]
+    assert graph_plan.spec.deliverables == [{"type": "code", "description": "可运行游戏"}]
+
+    confirmed = await TeamGraphPlanner().plan_async(
+        team,
+        "帮我写一个贪吃蛇游戏的开发方案\n\n用户已确认本轮执行范围：仅输出开发方案。",
+        execution_profile={"requested_mode": "standard", "scope_confirmation": "plan_only"},
+        team_spec=durable_spec,
+        provider=provider,
+    )
+    confirmed_ids = {node["id"] for node in confirmed.nodes}
+    assert {"leader_plan", "snake_plan", "leader_summary"} <= confirmed_ids
+    assert not {"build", "verify", "independent_review"} & confirmed_ids
+    assert next(node for node in confirmed.nodes if node["id"] == "snake_plan")["metadata"]["work_unit_kind"] == "design"
+    assert confirmed.spec.task_profile == {
+        "intent": "documentation",
+        "complexity": "simple",
+        "deliverable_shape": "docs",
+    }
+    assert confirmed.spec.goal.endswith("用户已确认本轮执行范围：仅输出开发方案。")
+    assert confirmed.spec.team_requirements == {
+        "roles": [],
+        "capabilities": ["implementation"],
+        "workflow_lanes": ["design"],
+    }
+    assert confirmed.spec.deliverables == [{"type": "design", "description": "开发方案"}]
+    assert confirmed.spec.success_criteria == ["开发方案"]
+    assert confirmed.spec.planning["build_plan_mode"] == "skip"
+    assert confirmed.spec.planning["verify_plan_mode"] == "skip"
+    assert confirmed.workflow_plan["task"]["deliverables"] == ["开发方案"]
+    assert confirmed.workflow_plan["task"]["acceptance_criteria"] == ["开发方案"]
+    plan_node = next(
+        node for node in confirmed.workflow_plan["nodes"] if node["id"] == "snake_plan"
+    )
+    assert plan_node["expected_outputs"] == ["开发方案"]
+    assert "必须交付本节点声明的输出：开发方案。" in plan_node["acceptance_criteria"]
+
+
+@pytest.mark.asyncio
 async def test_team_runtime_planning_missing_info_uses_text_followup(monkeypatch):
     tm, _ = _team(MissingInfoPlanningProvider(), config=Config(
         max_iterations=3,
@@ -7083,6 +8239,53 @@ async def test_team_runtime_planning_missing_info_followup_failure_is_terminal(m
 
     assert chunks[-1].kind == "error"
     assert chunks[-1].is_final is True
+
+
+@pytest.mark.asyncio
+async def test_team_runtime_scope_conflict_asks_before_replanning(monkeypatch):
+    tm, _ = _team(config=Config(max_iterations=3))
+    session_id = "scope-runtime-followup"
+    team = tm._build_team(session_id)
+    calls: list[dict[str, object]] = []
+
+    async def fake_ensure(session_id, team, goal, external_team_id, **kwargs):
+        calls.append({"goal": goal, "execution_profile": kwargs.get("execution_profile")})
+        if len(calls) == 1:
+            tm._planning_scope_conflicts[("owner", session_id)] = {
+                "scope_conflict": True,
+                "default_intent": "implementation",
+                "default_workflow_lanes": ["build", "verify"],
+            }
+        return None
+
+    captured: dict[str, object] = {}
+
+    async def fake_send(session_id, questions, **kwargs):
+        captured["questions"] = questions
+        return session_id, "scope-question"
+
+    async def fake_wait(session_id, question_id):
+        return [{"id": "workflow_planning_scope", "answers": ["plan_only"]}]
+
+    monkeypatch.setattr(tm, "_ensure_runtime_plan_async", fake_ensure)
+    monkeypatch.setattr("crew.team.team_manager.send_followup_question_to", fake_send)
+    monkeypatch.setattr("crew.team.team_manager.wait_for_answer", fake_wait)
+
+    chunks = [
+        chunk async for chunk in tm._run_required_workflow(
+            Envelope.of("帮我写一个贪吃蛇游戏的开发方案", session_id=session_id, user_id="owner"),
+            team=team,
+            external_team_id="",
+            execution_profile={"requested_mode": "standard"},
+        )
+    ]
+
+    question = captured["questions"][0]
+    assert question["id"] == "workflow_planning_scope"
+    assert [item["value"] for item in question["options"]] == ["plan_only", "execute"]
+    assert calls[1]["execution_profile"]["scope_confirmation"] == "plan_only"
+    assert "用户已确认本轮执行范围" in calls[1]["goal"]
+    assert chunks[-1].kind == "final"
 
 
 async def test_team_graph_planner_ai_async_uses_llm_single_dag():
@@ -8117,8 +9320,8 @@ async def test_runtime_staffing_e2e_reassigns_executes_and_learns_without_mutati
     assert "Runtime 补员" not in captured_questions[0]["question"]
     assert captured_questions[0]["options"][0]["value"] == "candidate:0"
     assert captured_questions[0]["options"][-1]["label"] == "这次先不添加"
-    assert delegated_members == [reserve["name"]]
-    assert node.assignee == reserve["name"]
+    assert delegated_members == [reserve["id"]]
+    assert node.assignee == reserve["id"]
     assert node.status == "completed"
     assert node.attempt_count == 1
     assert node.delegate_task_id == "staffed-attempt-1"
@@ -8136,7 +9339,7 @@ async def test_runtime_staffing_e2e_reassigns_executes_and_learns_without_mutati
     assert workflow.context["workflow_plan"]["revision"] == 2
     assert workflow.context["workflow_plan"]["runtime_members"][0]["external_agent_id"] == reserve["id"]
     board = owner_kanban.get_board_state(workflow.id)
-    assert board["tasks"][0]["assignee"] == reserve["name"]
+    assert board["tasks"][0]["assignee"] == reserve["id"]
     assert board["tasks"][0]["status"] == "done"
     _, _, recovered_metadata = tm._node_event_index(board["events"])
     assert recovered_metadata[node.node_id]["runtime_staffing"]["status"] == "applied"
@@ -9004,6 +10207,7 @@ def test_team_parent_session_history_prefers_kanban_events_over_child_sessions(a
                 "agent_role": "leader",
                 "is_leader": True,
                 "source_session_id": "team_parent::turn::r1::leader",
+                "request_id": "r1",
                 "timestamp": 4,
             }]
 
@@ -9267,6 +10471,35 @@ def test_team_history_keeps_distinct_communication_replies_with_same_text():
     assert items[0]["reply_to"] == "bus_1"
 
 
+def test_team_history_keeps_legacy_same_text_from_distinct_child_sessions():
+    class Crew:
+        class tasks:
+            @staticmethod
+            def list_tasks(*args, **kwargs):
+                return []
+
+    items = team_internal_history_items(
+        Crew(),
+        "team_parent",
+        [
+            (
+                "team_parent::turn::req_1::coder",
+                [Message(role="assistant", content="节点已完成。", timestamp=1)],
+            ),
+            (
+                "team_parent::turn::req_2::coder",
+                [Message(role="assistant", content="节点已完成。", timestamp=2)],
+            ),
+        ],
+    )
+
+    assert len(items) == 2
+    assert [item["source_session_id"] for item in items] == [
+        "team_parent::turn::req_1::coder",
+        "team_parent::turn::req_2::coder",
+    ]
+
+
 def test_team_history_preserves_terminal_user_mention_state_for_retry():
     class Crew:
         class tasks:
@@ -9436,6 +10669,7 @@ def test_team_parent_session_history_dedupes_parent_final_against_leader_summary
                     "kind": "agent_turn",
                     "session_id": "team_parent",
                     "detail": "测试一下之前开发的贪吃蛇是否可验收",
+                    "request_id": "r1",
                     "result": "本次团队任务完成。测试结论：可以验收。",
                     "created_at": 1,
                     "updated_at": 5,
@@ -9455,6 +10689,74 @@ def test_team_parent_session_history_dedupes_parent_final_against_leader_summary
         ("user", "测试一下之前开发的贪吃蛇是否可验收"),
         ("team_internal", "本次团队任务完成。测试结论：可以验收。"),
     ]
+
+
+def test_team_parent_final_with_request_id_only_matches_same_request_summary():
+    parent = {
+        "role": "assistant",
+        "content": "本次团队任务完成。",
+        "request_id": "request_2",
+    }
+    summaries = [
+        {
+            "role": "team_internal",
+            "event_type": "team_summary",
+            "content": parent["content"],
+            "request_id": "request_1",
+        },
+        {
+            "role": "team_internal",
+            "event_type": "team_summary",
+            "content": parent["content"],
+            "request_id": "request_2",
+        },
+    ]
+
+    assert not is_duplicate_team_parent_final(parent, summaries[:1])
+    assert is_duplicate_team_parent_final(parent, summaries)
+
+
+def test_team_task_projection_does_not_match_different_requests_by_title():
+    class Crew:
+        class tasks:
+            @staticmethod
+            def list_tasks(*args, **kwargs):
+                return [
+                    {
+                        "task_id": "parent-req-2",
+                        "kind": "agent_turn",
+                        "session_id": "team_parent",
+                        "request_id": "req_2",
+                        "title": "同一个任务标题",
+                        "detail": "同一个任务标题",
+                    },
+                    {
+                        "task_id": "team-req-1",
+                        "kind": "team",
+                        "session_id": "team_parent::turn::req_1",
+                        "title": "同一个任务标题",
+                    },
+                ]
+
+        class team:
+            @staticmethod
+            def task_projection_for_session(*args, **kwargs):
+                return [{
+                    "task_id": "plan-node-req-1",
+                    "kind": "team",
+                    "session_id": "team_parent::turn::req_1",
+                    "title": "同一个任务标题",
+                    "progress": {
+                        "turn_session_id": "team_parent::turn::req_1",
+                        "turn_title": "同一个任务标题",
+                        "plan_node_id": "node_req_1",
+                        "delegate_task_id": "team-req-1",
+                    },
+                }]
+
+    rows = team_tasks_with_plan_projection(Crew(), "team_parent", None, 200)
+
+    assert {row["task_id"] for row in rows} == {"plan-node-req-1", "parent-req-2"}
 
 
 def test_team_parent_session_history_suppresses_child_fallback_when_team_workflow_exists(auth_headers):

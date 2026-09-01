@@ -1,4 +1,8 @@
-"""Gateway Active Owner 排他租约的 SQLite 事实源。"""
+"""Gateway Owner 会话租约的 SQLite 事实源。
+
+会话租约按 ``owner_account_id`` 唯一，而不是把整个 Gateway 锁成一个账号。
+渠道或其它确实需要排他的资源应在各自资源边界加锁，不能复用本模块作为全局登录锁。
+"""
 
 from __future__ import annotations
 
@@ -13,7 +17,7 @@ from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 @dataclass(frozen=True)
 class ActiveOwnerLease:
-    """当前 Gateway 唯一登录 Owner 及其最近权威验证时间。"""
+    """一个 Owner 的最近认证会话及其权威验证时间。"""
 
     owner_account_id: str
     claimed_at: float
@@ -21,15 +25,14 @@ class ActiveOwnerLease:
 
 
 class ActiveOwnerConflict(RuntimeError):
-    """另一个 Owner 已持有排他租约。"""
+    """保留供旧调用方导入；按 Owner 会话模型不再用于跨账号登录冲突。"""
 
 
 class ActiveOwnerLeaseStore:
-    """以 SQLite 单行记录原子管理 Gateway 的唯一 Active Owner。
+    """按 Owner 持久化 Gateway 会话租约和重启退出意图。"""
 
-    普通连接断开不会触碰该记录。调用方只能在明确登录/权威心跳成功时
-    ``claim``，并在显式 Logout 或权威 session 过期后 ``release``。
-    """
+    _SESSION_TABLE = "owner_session_lease"
+    _LOGOUT_TABLE = "owner_logout_intent"
 
     def __init__(
         self,
@@ -46,24 +49,65 @@ class ActiveOwnerLeaseStore:
 
     def _ensure_schema(self) -> None:
         self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS active_owner_lease (
-                lease_id INTEGER PRIMARY KEY CHECK (lease_id = 1),
-                owner_account_id TEXT NOT NULL,
+            f"""
+            CREATE TABLE IF NOT EXISTS {self._SESSION_TABLE} (
+                owner_account_id TEXT PRIMARY KEY,
                 claimed_at REAL NOT NULL,
                 verified_at REAL NOT NULL
             )
             """
         )
         self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS active_owner_logout_intent (
-                intent_id INTEGER PRIMARY KEY CHECK (intent_id = 1),
-                owner_account_id TEXT NOT NULL,
+            f"""
+            CREATE TABLE IF NOT EXISTS {self._LOGOUT_TABLE} (
+                owner_account_id TEXT PRIMARY KEY,
                 requested_at REAL NOT NULL
             )
             """
         )
+        self._migrate_legacy_rows()
+
+    def _migrate_legacy_rows(self) -> None:
+        """Copy the old singleton lease into the owner-scoped tables once."""
+
+        tables = {
+            str(row[0])
+            for row in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if "active_owner_lease" in tables:
+            legacy = self._conn.execute(
+                """
+                SELECT owner_account_id, claimed_at, verified_at
+                FROM active_owner_lease
+                """
+            ).fetchone()
+            if legacy is not None:
+                self._conn.execute(
+                    f"""
+                    INSERT OR IGNORE INTO {self._SESSION_TABLE}
+                        (owner_account_id, claimed_at, verified_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (str(legacy[0]), float(legacy[1]), float(legacy[2])),
+                )
+        if "active_owner_logout_intent" in tables:
+            legacy_intent = self._conn.execute(
+                """
+                SELECT owner_account_id, requested_at
+                FROM active_owner_logout_intent
+                """
+            ).fetchone()
+            if legacy_intent is not None:
+                self._conn.execute(
+                    f"""
+                    INSERT OR IGNORE INTO {self._LOGOUT_TABLE}
+                        (owner_account_id, requested_at)
+                    VALUES (?, ?)
+                    """,
+                    (str(legacy_intent[0]), float(legacy_intent[1])),
+                )
 
     @staticmethod
     def _lease_from_row(row: sqlite3.Row | tuple | None) -> ActiveOwnerLease | None:
@@ -75,18 +119,50 @@ class ActiveOwnerLeaseStore:
             verified_at=float(row[2]),
         )
 
-    def current(self) -> ActiveOwnerLease | None:
-        """返回当前租约快照；没有登录 Owner 时返回 ``None``。"""
+    @staticmethod
+    def _normalize_owner(owner_account_id: str) -> str:
+        owner = str(owner_account_id or "").strip()
+        if not owner:
+            raise ValueError("owner_account_id 必填")
+        return owner
 
+    def get(self, owner_account_id: str) -> ActiveOwnerLease | None:
+        """返回指定 Owner 的会话租约。"""
+
+        owner = str(owner_account_id or "").strip()
+        if not owner:
+            return None
         with self._lock:
             row = self._conn.execute(
-                """
+                f"""
                 SELECT owner_account_id, claimed_at, verified_at
-                FROM active_owner_lease
-                WHERE lease_id = 1
-                """
+                FROM {self._SESSION_TABLE}
+                WHERE owner_account_id = ?
+                """,
+                (owner,),
             ).fetchone()
         return self._lease_from_row(row)
+
+    def list(self) -> list[ActiveOwnerLease]:
+        """返回所有已登记的 Owner 会话。"""
+
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT owner_account_id, claimed_at, verified_at
+                FROM {self._SESSION_TABLE}
+                ORDER BY owner_account_id
+                """
+            ).fetchall()
+        return [lease for row in rows if (lease := self._lease_from_row(row)) is not None]
+
+    def current(self, owner_account_id: str | None = None) -> ActiveOwnerLease | None:
+        """兼容旧调用；新代码必须传 Owner，避免重新引入全局身份语义。"""
+
+        if owner_account_id is not None:
+            return self.get(owner_account_id)
+        leases = self.list()
+        return leases[0] if len(leases) == 1 else None
 
     def claim(
         self,
@@ -94,45 +170,39 @@ class ActiveOwnerLeaseStore:
         *,
         verified_at: float | None = None,
     ) -> ActiveOwnerLease:
-        """原子取得或刷新租约；其他 Owner 已占用时 fail closed。"""
+        """原子取得或刷新指定 Owner 的会话租约。"""
 
-        owner = str(owner_account_id or "").strip()
-        if not owner:
-            raise ValueError("owner_account_id 必填")
+        owner = self._normalize_owner(owner_account_id)
         verified = float(time.time() if verified_at is None else verified_at)
 
         def _claim(conn: sqlite3.Connection) -> ActiveOwnerLease:
             row = conn.execute(
-                """
+                f"""
                 SELECT owner_account_id, claimed_at, verified_at
-                FROM active_owner_lease
-                WHERE lease_id = 1
-                """
+                FROM {self._SESSION_TABLE}
+                WHERE owner_account_id = ?
+                """,
+                (owner,),
             ).fetchone()
             lease = self._lease_from_row(row)
             if lease is None:
                 conn.execute(
-                    """
-                    INSERT INTO active_owner_lease (
-                        lease_id, owner_account_id, claimed_at, verified_at
-                    ) VALUES (1, ?, ?, ?)
+                    f"""
+                    INSERT INTO {self._SESSION_TABLE}
+                        (owner_account_id, claimed_at, verified_at)
+                    VALUES (?, ?, ?)
                     """,
                     (owner, verified, verified),
                 )
                 return ActiveOwnerLease(owner, verified, verified)
-            if lease.owner_account_id != owner:
-                raise ActiveOwnerConflict("Gateway 已由其他账号登录")
-            # Keep the ownership check and successful return inside the same
-            # BEGIN IMMEDIATE boundary.  This coalesces WAL updates without a
-            # stale read-return window where another connection can hand off.
             if verified <= lease.verified_at + self._refresh_interval_seconds:
                 return lease
             next_verified = max(lease.verified_at, verified)
             conn.execute(
-                """
-                UPDATE active_owner_lease
+                f"""
+                UPDATE {self._SESSION_TABLE}
                 SET verified_at = ?
-                WHERE lease_id = 1 AND owner_account_id = ?
+                WHERE owner_account_id = ?
                 """,
                 (next_verified, owner),
             )
@@ -141,7 +211,7 @@ class ActiveOwnerLeaseStore:
         return self._writer.execute(_claim)
 
     def release(self, owner_account_id: str) -> bool:
-        """仅当调用方仍是当前 Owner 时释放租约。"""
+        """释放指定 Owner 的会话租约，不触碰其它账号。"""
 
         owner = str(owner_account_id or "").strip()
         if not owner:
@@ -149,18 +219,12 @@ class ActiveOwnerLeaseStore:
 
         def _release(conn: sqlite3.Connection) -> bool:
             cursor = conn.execute(
-                """
-                DELETE FROM active_owner_lease
-                WHERE lease_id = 1 AND owner_account_id = ?
-                """,
+                f"DELETE FROM {self._SESSION_TABLE} WHERE owner_account_id = ?",
                 (owner,),
             )
             if cursor.rowcount == 1:
                 conn.execute(
-                    """
-                    DELETE FROM active_owner_logout_intent
-                    WHERE intent_id = 1 AND owner_account_id = ?
-                    """,
+                    f"DELETE FROM {self._LOGOUT_TABLE} WHERE owner_account_id = ?",
                     (owner,),
                 )
             return cursor.rowcount == 1
@@ -168,12 +232,7 @@ class ActiveOwnerLeaseStore:
         return self._writer.execute(_release)
 
     def prepare_restart_logout(self, owner_account_id: str) -> bool:
-        """Persist a logout intent while retaining the lease across process restart.
-
-        This is used when a channel SDK cannot be stopped in-process.  Keeping
-        the lease prevents another owner from connecting until process death
-        has physically torn down the old channel connection.
-        """
+        """记录指定 Owner 的重启退出意图，同时保留其资源清理边界。"""
 
         owner = str(owner_account_id or "").strip()
         if not owner:
@@ -181,17 +240,16 @@ class ActiveOwnerLeaseStore:
 
         def _prepare(conn: sqlite3.Connection) -> bool:
             row = conn.execute(
-                "SELECT owner_account_id FROM active_owner_lease WHERE lease_id = 1"
+                f"SELECT 1 FROM {self._SESSION_TABLE} WHERE owner_account_id = ?",
+                (owner,),
             ).fetchone()
-            if row is None or str(row[0]) != owner:
+            if row is None:
                 return False
             conn.execute(
-                """
-                INSERT INTO active_owner_logout_intent (
-                    intent_id, owner_account_id, requested_at
-                ) VALUES (1, ?, ?)
-                ON CONFLICT(intent_id) DO UPDATE SET
-                    owner_account_id = excluded.owner_account_id,
+                f"""
+                INSERT INTO {self._LOGOUT_TABLE} (owner_account_id, requested_at)
+                VALUES (?, ?)
+                ON CONFLICT(owner_account_id) DO UPDATE SET
                     requested_at = excluded.requested_at
                 """,
                 (owner, time.time()),
@@ -200,52 +258,56 @@ class ActiveOwnerLeaseStore:
 
         return self._writer.execute(_prepare)
 
-    def pending_restart_logout(self) -> str | None:
-        """Return the owner whose logout must complete after Gateway restart."""
+    def pending_restart_logouts(self) -> list[str]:
+        """返回所有需要在 Gateway 重启边界完成的 Owner 退出。"""
 
         with self._lock:
-            row = self._conn.execute(
-                """
+            rows = self._conn.execute(
+                f"""
                 SELECT owner_account_id
-                FROM active_owner_logout_intent
-                WHERE intent_id = 1
+                FROM {self._LOGOUT_TABLE}
+                ORDER BY requested_at, owner_account_id
                 """
-            ).fetchone()
-        return str(row[0]) if row is not None else None
+            ).fetchall()
+        return [str(row[0]) for row in rows]
 
-    def complete_restart_logout(self) -> str | None:
-        """Atomically release the retained lease after the old process has died."""
+    def pending_restart_logout(self) -> str | None:
+        """兼容旧调用，返回最早的一条退出意图。"""
 
-        def _complete(conn: sqlite3.Connection) -> str | None:
-            intent = conn.execute(
-                """
-                SELECT owner_account_id
-                FROM active_owner_logout_intent
-                WHERE intent_id = 1
-                """
-            ).fetchone()
-            if intent is None:
-                return None
-            owner = str(intent[0])
-            lease = conn.execute(
-                "SELECT owner_account_id FROM active_owner_lease WHERE lease_id = 1"
-            ).fetchone()
-            if lease is not None and str(lease[0]) != owner:
-                raise ActiveOwnerConflict("退出重启意图与当前 Active Owner 不一致")
-            if lease is not None:
+        pending = self.pending_restart_logouts()
+        return pending[0] if pending else None
+
+    def complete_restart_logout(self, owner_account_id: str | None = None) -> list[str] | str | None:
+        """原子完成一个或全部重启退出，并释放对应 Owner 会话。"""
+
+        requested_owner = str(owner_account_id or "").strip()
+
+        def _complete(conn: sqlite3.Connection) -> list[str]:
+            if requested_owner:
+                rows = conn.execute(
+                    f"SELECT owner_account_id FROM {self._LOGOUT_TABLE} WHERE owner_account_id = ?",
+                    (requested_owner,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"SELECT owner_account_id FROM {self._LOGOUT_TABLE} ORDER BY requested_at, owner_account_id"
+                ).fetchall()
+            owners = [str(row[0]) for row in rows]
+            for owner in owners:
                 conn.execute(
-                    """
-                    DELETE FROM active_owner_lease
-                    WHERE lease_id = 1 AND owner_account_id = ?
-                    """,
+                    f"DELETE FROM {self._SESSION_TABLE} WHERE owner_account_id = ?",
                     (owner,),
                 )
-            conn.execute(
-                "DELETE FROM active_owner_logout_intent WHERE intent_id = 1"
-            )
-            return owner
+                conn.execute(
+                    f"DELETE FROM {self._LOGOUT_TABLE} WHERE owner_account_id = ?",
+                    (owner,),
+                )
+            return owners
 
-        return self._writer.execute(_complete)
+        owners = self._writer.execute(_complete)
+        if requested_owner:
+            return requested_owner if owners else None
+        return owners
 
     def close(self) -> None:
         """关闭 Store 持有的 SQLite 连接。"""

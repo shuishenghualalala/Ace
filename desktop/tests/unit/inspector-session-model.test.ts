@@ -237,6 +237,7 @@ describe('session-model 会话级解析（根因：不再读全局 active_model_
         preview: '',
         badge: '',
         agentLabel: { name: '研发团队', provider: 'team' },
+        agentBinding: { kind: 'external_team', id: 'team-a' },
       }],
     });
 
@@ -257,7 +258,28 @@ describe('session-model 会话级解析（根因：不再读全局 active_model_
     expect(trigger.title).toBe('选择模型');
   });
 
-  it('仅 provider=team 的 Session 被识别为协作会话', () => {
+  it('仅 agent_binding=external_team 的 Session 被识别为协作会话', () => {
+    sessionStore.set({
+      sessions: [{
+        id: 'sess-a',
+        title: '研发团队',
+        workspaceId: 'default',
+        updatedAt: 1,
+        preview: '',
+        badge: '',
+        agentLabel: { name: '研发团队', provider: 'team' },
+        agentBinding: { kind: 'external_team', id: 'team-a' },
+      }],
+    });
+    expect(isExternalTeamSession('sess-a')).toBe(true);
+
+    sessionStore.set({
+      sessions: [{ id: 'sess-a', title: '普通会话', workspaceId: 'default', updatedAt: 1, preview: '', badge: '' }],
+    });
+    expect(isExternalTeamSession('sess-a')).toBe(false);
+  });
+
+  it('Provider 标签不能替代 agent_binding 判定外部 Team', () => {
     sessionStore.set({
       sessions: [{
         id: 'sess-a',
@@ -268,11 +290,6 @@ describe('session-model 会话级解析（根因：不再读全局 active_model_
         badge: '',
         agentLabel: { name: '研发团队', provider: 'team' },
       }],
-    });
-    expect(isExternalTeamSession('sess-a')).toBe(true);
-
-    sessionStore.set({
-      sessions: [{ id: 'sess-a', title: '普通会话', workspaceId: 'default', updatedAt: 1, preview: '', badge: '' }],
     });
     expect(isExternalTeamSession('sess-a')).toBe(false);
   });
@@ -287,6 +304,7 @@ describe('session-model 会话级解析（根因：不再读全局 active_model_
         preview: '',
         badge: '',
         agentLabel: { name: '研发团队', provider: 'team' },
+        agentBinding: { kind: 'external_team', id: 'team-a' },
       }],
     });
 
@@ -316,6 +334,7 @@ describe('session-model 会话级解析（根因：不再读全局 active_model_
         preview: '',
         badge: '',
         agentLabel: { name: '研发团队', provider: 'team' },
+        agentBinding: { kind: 'external_team', id: 'team-a' },
       }],
     });
     refreshInspectorChrome();

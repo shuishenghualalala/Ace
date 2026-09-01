@@ -328,7 +328,8 @@ flowchart LR
   "risk_level": "medium",
   "uncertainty": "low"
 }</code></pre>
-  <p>当前创建 Team 时的快照位于 <code>external_team.team_spec_json</code>。运行阶段不得覆盖创建 Team 时的长期快照；本轮实际目标、交付物和验收条件保存于 WorkflowPlan 的 <code>task</code>，两者通过 Team 与 turn 上下文关联。</p>
+  <p>当前创建 Team 时的快照位于 <code>external_team.team_spec_json</code>。创建入口是“外援—组建团队”的结构化表单，不是聊天 Prompt；如果表单没有显式描述，只保存最小 TeamSpec，不从团队名称推断任务能力或工作流。运行阶段不得覆盖创建 Team 时的长期快照；本轮实际目标、交付物和验收条件保存于 WorkflowPlan 的 <code>task</code>，两者通过 Team 与 turn 上下文关联。</p>
+  <p><b>本轮 TeamSpec 投影：</b>PlanningDecision 是当前 Prompt 的唯一语义解释入口。决策成功后，当前回合 TeamSpec 只接收本轮 work units 派生的 <code>task_profile</code>、能力、工作泳道、交付物、验收标准和规划模式；创建 Team 的长期角色、build/verify 泳道和长期交付物只用于决策前的默认范围/策略判断，不与本轮字段做并集。这样“只写方案”不会因长期团队包含开发/验证职责而生成实现或验证节点。</p>
 
   <h2>4. CapabilityCatalog：能力是共享词典，不是第五个数据对象</h2>
   <p><code>crew/team/capabilities.py</code> 是 TeamSpec、AgentProfile、FormationPlan 与角色目录共同使用的通用能力词典。它不独立落库、不增加领域标签，也不保存某次任务分工。能力覆盖计算由 <code>crew/team/agent_profile.py</code> 的 <code>CapabilityCoverage</code>/<code>evaluate_capability_coverage()</code> 统一完成；该结果是一次性计算结果，不是新的画像对象，也不引入 <code>EffectiveAgentProfile</code>。</p>
@@ -411,7 +412,7 @@ sequenceDiagram
   UI->>Store: TeamSpec + FormationPlan + 成员投影
   Store-->>UI: 已创建 Team
   </div></div>
-  <ul><li>创建页采用"定义团队 → 确认阵容"两阶段：第一阶段只要求团队名称，系统提供目标参考、默认 Leader 和常用约束选项。</li><li>点击"智能组队"生成候选 FormationPlan，不立即写数据库；前端不再提前要求用户编辑槽位或工作流。</li><li>Leader、目标或约束变化后，候选 FormationPlan 失效并重新求解。</li><li>确认阵容阶段展示成员、角色、assigned capabilities、覆盖率与置信度；完整职责按需展开编辑。</li><li>点击"创建/保存团队"后，持久化 TeamSpec、FormationPlan，并把成员应用到 <code>external_team_member</code>。</li><li>创建页展示的默认协作方式只是 FormationPlan 的可读说明；实际 WorkflowPlan / DAG 仍在每轮任务运行时生成。</li></ul>
+  <ul><li>创建页采用"定义团队 → 确认阵容"两阶段：第一阶段填写团队名称、可选的结构化目标和长期策略，名称本身不作为任务语义。</li><li>点击"智能组队"生成候选 FormationPlan，不立即写数据库；手动选择成员时不需要聊天式 PlanningDecision。</li><li>Leader、目标或约束变化后，候选 FormationPlan 失效并重新求解。</li><li>确认阵容阶段展示成员、角色、assigned capabilities、覆盖率与置信度；完整职责按需展开编辑。</li><li>点击"创建/保存团队"后，规范化并持久化 TeamSpec、FormationPlan，并把成员应用到 <code>external_team_member</code>。</li><li>创建页展示的默认协作方式只是 FormationPlan 的可读说明；实际 WorkflowPlan / DAG 仍在每轮任务运行时生成。</li></ul>
 
   <h2>9. 数据库落点</h2>
   <table><thead><tr><th>数据</th><th>当前权威落点</th><th>状态</th></tr></thead><tbody>
@@ -443,7 +444,7 @@ sequenceDiagram
   </ul>
 
   <h2>11. Workflow 业务概念体系</h2>
-  <p>一个长期 Team 可以拥有多个 Team Session；Session 中每个实质性用户 turn 产生一次 WorkflowRun。PlanningDecision 理解本轮语义，WorkflowPlan 定义准备怎么完成，WorkflowRun 与 NodeAttempt 保存实际执行，WorkflowEvent 保存可解释、可恢复的时间线。</p>
+  <p>一个长期 Team 可以拥有多个 Team Session；Session 中每个实质性用户 turn 产生一次 WorkflowRun。Team turn 路由始终以当前用户 Prompt 为目标，已保存 TeamSpec 只提供本轮实质任务的默认上下文，不能覆盖当前目标；寒暄、确认等 direct chat 快路径先于长期任务画像生效。PlanningDecision 理解本轮语义，WorkflowPlan 定义准备怎么完成，WorkflowRun 与 NodeAttempt 保存实际执行，WorkflowEvent 保存可解释、可恢复的时间线。</p>
   <div class="mermaid-wrap"><div class="mermaid">
 flowchart TD
   Team["Team<br/>长期阵容"] --> Session["Team Session<br/>连续对话"]
@@ -457,7 +458,7 @@ flowchart TD
   Run --> Event["WorkflowEvent<br/>审计时间线"]
   Event -. "新增/删除/替换节点、依赖或负责人" .-> Plan
   </div></div>
-  <div class="note"><code>PlanningDecision</code> 是一次受约束的内部语义分析结果，不独立落库、不成为长期业务对象。它负责把自然语言编译为可校验的任务结构；最终模式、成员分配、预算和执行权限仍由确定性代码控制。</div>
+  <div class="note"><code>PlanningDecision</code> 是一次受约束的内部语义分析结果，不独立落库、不成为长期业务对象。它负责把当前 Prompt 编译为可校验的任务结构；已保存 TeamSpec 只提供默认上下文，当前 Prompt 始终优先，最终模式、成员分配、预算和执行权限仍由确定性代码控制。</div>
 
   <h2>12. WorkflowPlan V1 最小契约</h2>
   <p><code>version</code> 表示数据结构版本；<code>revision</code> 表示同一次任务计划发生了多少次结构性修订。节点普通状态变化和同节点重试不增加 revision；新增、删除、替换节点，修改依赖或负责人时 revision 递增。</p>
@@ -499,6 +500,8 @@ flowchart TD
   "warnings": []
 }</code></pre>
   <p>WorkflowPlan 不保存节点实时状态、结果摘要、产物路径、retry count、模型思考、工具调用过程、完整 AgentProfile、完整 FormationPlan 或领域标签。这些数据分别属于 WorkflowRun、NodeAttempt、WorkflowEvent 或既有长期对象。</p>
+  <p><b>计划编译边界：</b>WorkflowPlan 只从当前回合 TeamSpec 和已编译 DAG 生成。任务级交付物与验收标准进入 <code>task</code>，节点级 <code>required_capabilities</code>、<code>expected_outputs</code> 和 <code>acceptance_criteria</code> 进入节点契约；如果 PlanningDecision 或 Formation 节点已经声明具体输出，优先保留该声明，不再用泳道默认文案覆盖。TeamPlan 只是该快照的可变运行投影；运行时主路径只消费 WorkflowPlan 的节点与 edges，旧的独立图参数只服务于无快照的兼容入口。</p>
+  <p><b>运行投影边界（2026-08-26）：</b>恢复时以当前 <code>kanban_workflows.context.workflow_plan</code> 为静态事实源，<code>team_plan_created</code> 事件仅作为旧快照缺失节点时的兼容兜底；节点状态、结果、重试、产物、临时负责人和执行事件由 WorkflowRun/看板投影提供，不覆盖 WorkflowPlan 的任务语义。快照节点携带稳定展示字段与契约，避免 TeamPlan 在进程重启后重新解释任务。</p>
 
   <h2>13. Workflow 持久化与重启恢复</h2>
   <p>V1 不新建平行 Workflow 表。当前生效 WorkflowPlan 写入 <code>kanban_workflows.context.workflow_plan</code>；节点和 edges 分别投影到 <code>kanban_tasks</code> 与 <code>kanban_dependencies</code>；每次节点执行写入 <code>kanban_task_runs</code>；协作、决策和计划修订追加写入 <code>kanban_events</code>。</p>
@@ -651,12 +654,13 @@ flowchart LR
   </ul>
 
   <h2>20. Formation、DAG 与 Runtime 能力准入（2026-08-13）</h2>
-  <p>能力来源统一但生命周期不同：Formation 使用 TeamSpec 的长期团队要求；DAG 编译使用 Formation 已确认并落到 <code>TeamMemberSpec.capabilities</code> 的能力分配快照校验负责人；Runtime 只检查当前节点在计划生成后是否发生能力/Runtime 变化。Formation 与 Runtime 消费 Resolver 返回的标准 <code>AgentProfile</code>，DAG 不重新访问外部 Agent Store，而是消费由 Formation 形成的能力契约；三者共用同一个覆盖计算入口，不建立 <code>EffectiveAgentProfile</code> 或第二套能力评分。</p>
+  <p>能力来源统一但生命周期不同：Formation 使用 TeamSpec 的长期团队要求；DAG 编译使用 Formation 已确认并落到 <code>TeamMemberSpec.capabilities</code> 的能力分配快照校验负责人；Runtime 只检查当前节点在计划生成后是否发生能力/Runtime 变化。Formation 与 Runtime 消费 Resolver 返回的标准 <code>AgentProfile</code>，DAG 不重新访问外部 Agent Store，而是消费由 Formation 形成的能力契约；三者共用同一个覆盖计算入口，不建立 <code>EffectiveAgentProfile</code> 或第二套能力评分。Runtime 的能力契约与可执行性是两个维度：已确认能力可以抵抗低置信先验，但不能绕过外部 AgentProfile 的不可用或未知状态。</p>
   <ul>
-    <li><b>统一入口：</b><code>evaluate_capability_coverage()</code> 只做本地确定性计算，返回 required、covered、missing、unavailable、unknown 和 covered_by；不访问 Store、不调用 LLM。</li>
+    <li><b>统一入口：</b><code>evaluate_capability_coverage()</code> 只做本地确定性计算，返回 required、covered、missing、unavailable、unknown 和 covered_by；不访问 Store、不调用 LLM。DAG 仅传入能力契约；Runtime 同时传入已解析画像并开启可用性门控。</li>
     <li><b>DAG 硬准入：</b>节点生成后必须检查 assignee 是否完整覆盖节点能力。若现有其他成员完整覆盖，编译器只做本轮确定性改派并记录 <code>previous_assignee</code>、<code>assignment_source=existing_member_reassignment</code>；若无人覆盖，记录计划内能力缺口，不能伪装成已覆盖。</li>
     <li><b>Runtime 兜底：</b>节点执行前只检查当前 assignee，不把整个团队能力并集当作当前节点能力。无真实缺口不创建 RuntimeStaffingRequest、不发送补员确认。</li>
-    <li><b>性能边界：</b>Runtime 按 owner、Agent、模型和 profile version 缓存已解析 AgentProfile；普通调度轮询不重新读取和解析全部成员，只有绑定、画像或计划变化时才失效。</li>
+    <li><b>解析边界：</b>TeamManager 通过单一成员画像解析入口读取当前 External Agent/model 绑定；Team 初始化和 Runtime readiness 不各自拼装 Store 数据。DAG 只消费已解析的 <code>member_profiles</code> 与确认能力契约，不反向触发 I/O。</li>
+    <li><b>性能边界：</b>Runtime 按 owner、Agent、模型、画像修订/内容指纹和 Runtime/model 执行指纹缓存已解析 AgentProfile；普通调度轮询不重新读取和解析全部成员，画像、Runtime 状态或模型事实变化时自然换 key，不复用旧画像。</li>
   </ul>
   <h2>21. Runtime 动态补员数据链（2026-08-04）</h2>
   <p>Runtime 补员是 <b>WorkflowRun 级运行决策</b>，不是 FormationPlan 的长期建队决策。它可消费 AgentProfile，但不得反向把本轮职责写成能力证据，也不得修改 External Team 成员关系。</p>
@@ -672,7 +676,13 @@ flowchart LR
     <li><b>事务约束：</b>WorkflowPlan 快照/revision event 与 Kanban task assignee/status/retry reset 必须同一 SQLite 事务提交；失败时不得留下“计划已改派、任务仍指向旧人”的半状态。</li>
     <li><b>幂等约束：</b>补员 request 由 plan/node/trigger/capability/attempt 确定；托管 Agent 由 Owner/managed kind/managed key 唯一。两层幂等分别防重复决策和重复造 Agent。</li>
     <li><b>事件边界：</b>继续使用既有 <code>workflow_plan_revised</code> 与 <code>team_node_updated</code>；允许增加 event payload/delta 内容，但不修改 <code>kanban_events</code> schema。</li>
+    <li><b>恢复边界：</b>进程重启或 Team 缓存淘汰后，从当前 WorkflowPlan 的 <code>runtime_members</code> 快照恢复临时成员；Session 团队配置变化会淘汰 Team 运行时缓存，临时成员只在匹配的 WorkflowRun/External Team 计划中恢复。</li>
   </ul>
+  <p><b>实现边界（2026-08-24）：</b>TeamPlan 与 Dynamic Kanban 的持久化、节点状态同步和 WorkflowPlan/runtime_members 恢复由 <code>crew/team/team_plan_store.py</code> 统一承载；TeamManager 只通过兼容入口调用，不改变 TeamPlan、WorkflowPlan revision 或 Runtime staffing 的数据语义。持久化适配器不参与能力判断、DAG 规划和成员选择，避免事实恢复逻辑反向影响业务决策。</p>
+  <p><b>Runtime 策略边界（2026-08-24）：</b>能力覆盖、Runtime/model 可用性门控和补员候选编译由 <code>crew/team/runtime_staffing.py</code> 统一承载；它只返回本轮运行决策和临时成员规格，不直接修改 Team、WorkflowPlan 或 External Team。用户确认、节点状态和 revision 仍由 TeamManager 的运行时编排负责。</p>
+  <p><b>成员构建边界（2026-08-24）：</b>External Team 成员规格、Formation 职责投影、Session 级模型绑定物化和执行 Agent 装配由 <code>crew/team/team_builder.py</code> 统一承载；TeamManager 只组合 TeamBus、通信和计划回调。TeamBuilder 不创建长期成员关系，也不修改 AgentProfile 能力事实。</p>
+  <p><b>Workflow Runtime 编排边界（2026-08-24）：</b>规划进度、Leader 节点、成员节点调度、实时过程、补员/审阅回调和 WorkflowRun 收束由 <code>crew/team/team_workflow_runtime.py</code> 统一承载；TeamManager 保留稳定入口和服务回调，负责提供 Team、计划、持久化与运行依赖。该边界只改变代码组织，不复制 TeamPlan 状态机，也不改变 DAG、Runtime 补员、Team Bus 事件或前端流式协议。</p>
+  <p><b>PlanningDecision 与启动边界（2026-08-25）：</b>规划竞速以“通过 PlanningDecision schema 校验的结构化 JSON”作为传输胜出条件；chat 的说明性文本或结构不完整的 JSON 不能取消仍可能返回合法 JSON 的 stream，reasoning 输出也不能绕过 grace 处理。必需 Team Workflow 在成员 Agent.run 前通过 envelope 继承同一份 host-owned <code>ProcessLaunch</code>，ACP/CLI 仍按缺少上下文即拒绝的安全原则执行。</p>
   <h3>21.1 WorkflowPlan 节点能力契约（2026-08-04）</h3>
   <p><code>required_capabilities</code> 是节点的工作需求，不是 assignee 的能力副本。Runtime 补员、执行实证和后续 AgentProfile 聚合只消费这一份契约。</p>
   <ul>
@@ -790,7 +800,7 @@ flowchart LR
     <tr><td>完成</td><td>统一外部执行入口</td><td><code>delegate_to_external_agent</code>、外部单 Agent 会话和外部 Team 成员统一通过 <code>ExternalExecutor -&gt; adapter_id -&gt; RuntimeAdapter</code> 执行；旧 <code>AcpExecutor</code> 仅为导入兼容别名，旧 executor kind <code>acp/cli</code> 仅用于配置迁移。</td></tr>
     <tr><td>完成</td><td>CLI Team 上下文与恢复加固</td><td>CLI Team 使用按 team_role 构造的协议中性 system prompt；原生 session/thread 明确拒绝 resume 时只在本轮尚未产生可见工作前重建一次，并注入 Crew 连续上下文摘要；Codex 事件按当前 thread/turn 严格隔离，结束事件兼容可信 <code>turn.id</code>。</td></tr>
     <tr><td>P1</td><td>跨系统验收矩阵</td><td>保留统一 resolver 和进程启动器，增加 Windows、macOS、麒麟、统信的 CI 或实机 smoke，覆盖 PATH/用户目录、带空格路径、Windows <code>.cmd/.exe</code>、中文路径与 UTF-8、进程树取消、Claude/Codex/ACP 握手；只有通过对应平台验收后才标记"已验证"。</td></tr>
-    <tr><td>P0</td><td>PlanningDecision 延迟与可观测性</td><td>第一阶段已把默认超时从 5s 调整为 12s，后续按产品等待口径调整为 30s，并支持 <code>budget.planning_decision_timeout</code> 覆盖；已区分 <code>timeout</code>、<code>provider_error</code>、<code>invalid_json</code>、<code>schema_invalid</code>、<code>reasoning_only_empty</code> 与 <code>reasoning_only_length</code>。当前调用策略为 <code>stream_chat()</code> 与 <code>chat()</code> 并行竞速：chat 先产出结构化内容则取消 stream；若 chat 未产出且 stream 已出现 reasoning，则进入 reasoning grace 继续等待 stream 输出 JSON。记录 <code>transport</code>、<code>race_winner</code>、<code>chat_elapsed_ms</code>、<code>stream_elapsed_ms</code>、<code>reasoning_grace_used</code>、<code>first_reasoning_ms</code>、<code>first_content_ms</code>、<code>partial_chars</code>、<code>prompt_bytes</code> 与 <code>cache_hit</code>。失败时仍回退 <code>standard_role_dag</code>，不做本地语义 fallback。</td></tr>
+    <tr><td>P0</td><td>PlanningDecision 延迟与可观测性</td><td>PlanningDecision 采用两阶段策略：首轮 <code>stream_chat()</code> 与 <code>chat()</code> 并行竞速，默认最多 30s；首轮没有可校验结构化结果时，仅进行一次最多 10s 的短 <code>chat()</code> 重试，重试使用 <code>response_format=json_object</code>、<code>reasoning_mode=disabled</code> 与 2048 token 上限。两阶段总等待上限约 40s，持续上报规划进度；两次都失败才回退 <code>standard_role_dag</code>。记录 <code>attempts</code>、<code>primary_elapsed_ms</code>、<code>retry_elapsed_ms</code>、<code>retry_error_type</code>、<code>transport</code>、<code>race_winner</code>、<code>first_reasoning_ms</code>、<code>first_content_ms</code>、<code>partial_chars</code>、<code>prompt_bytes</code> 与 <code>cache_hit</code>；不把 reasoning 当作 JSON，也不做本地业务关键词 fallback。</td></tr>
     <tr><td>P0</td><td>Standard Semantic DAG 跑通</td><td>第一阶段已锁定成功路径：<code>PlanningDecision -&gt; WorkUnit -&gt; Topology Compiler -&gt; standard_semantic_dag</code>；PlanningDecision 超时、provider 异常、JSON 无效或 schema 无效时均回退 <code>standard_role_dag</code> 并记录原因。当前 fake provider 测试覆盖并行调研、综述、法律咨询、历史查询和开发测试闭环；真实 provider smoke 通过 <code>CREW_REAL_PROVIDER_E2E=1</code> opt-in 运行，避免普通回归依赖外部网络和密钥。</td></tr>
     <tr><td>P1</td><td>history_query / team_status_query 快路径</td><td>阶段 1 已新增轻量 <code>TeamTurnDecision</code>：仅当当前 Team session 已有 team workflow 时，先判断本轮是否为 <code>status_query</code>；命中后直接读取 kanban workflow、workflow_plan、tasks、task_runs 与 events 形成 <code>TeamStatusSnapshot</code>，由 Leader 轻量汇总，不创建新 TeamPlan、不进入 PlanningDecision、不生成 DAG。阶段 2 已把旧 <code>direct_leader</code> 决策在 TeamManager 内映射为 <code>turn_kind=direct_chat</code>，行为保持兼容。阶段 3 已把轻量 question 推断为 <code>TeamTurnDecision.execution_mode=fast</code>，并作为 <code>requested_mode=fast</code> 传入 Fast TeamPlan；Mode Fast 仍是显式 Fast TeamPlan，不并入 direct_chat。阶段 4 已收敛 TeamManager 主读路径：入口分支只读 <code>turn_kind</code> 与 <code>execution_mode</code>；<code>TeamTurnRouter</code> 已直接返回 <code>TeamTurnDecision</code>。阶段 5 已移除 TeamSpec 对业务关键词的执行推断；<code>workflow_lanes</code> 成为执行泳道规范来源。阶段 6 已将任务语义收敛到 <code>task_profile</code>，将 <code>execution_profile</code> 限定为运行控制。阶段 7 已删除 TeamSpec 历史迁移/兼容入口：旧语义字段、<code>needs_*</code>、<code>required_lanes</code> 与字符串目标直接拒绝。</td></tr>
     <tr><td>P1</td><td>AI Planner 动态工作流</td><td>Runtime 硬缺口检测、确认式 WorkflowRun 补员、节点改派和 revision 原子持久化已完成；后续继续补条件分支、循环优化、基于中间结果扩展 DAG 和完整进程重启恢复。所有结构变化继续通过 WorkflowPlan <code>revision</code> 和既有 <code>kanban_events</code> 记录。</td></tr>

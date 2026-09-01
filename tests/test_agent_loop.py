@@ -923,6 +923,125 @@ def _seq_counter():
     return nxt
 
 
+async def test_file_delete_large_file_runs_full_loop_without_unbounded_read(tmp_path, monkeypatch):
+    """file_delete 删除 >128KiB 文件走完整 run_batch 链路：不无界读、删除成功、变更降级为元数据。
+
+    回归背景：ToolRunner 曾在 file_delete 执行前用 Path.read_text 无界读取目标文件，
+    626MB 的 bundle 会阻塞 Gateway 事件循环导致重启。修复后 before/after 均走
+    read_file_state 的 128 KiB 上限，超限文件只记录元数据。
+    """
+    from functools import partial
+    from pathlib import Path as PathType
+
+    from crew.agent.file_changes import FILE_CHANGE_MAX_BYTES
+    from crew.tools.builtin import handle_file_delete
+
+    big = tmp_path / "big.bundle"
+    big.write_bytes(b"\x00" * (FILE_CHANGE_MAX_BYTES + 4096))
+
+    read_text_calls: list[str] = []
+    original_read_text = PathType.read_text
+
+    def spy_read_text(self, *args, **kwargs):
+        read_text_calls.append(str(self))
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(PathType, "read_text", spy_read_text)
+
+    reg = Registry()
+    reg.register(
+        name="file_delete",
+        toolset="file",
+        schema={"name": "file_delete", "parameters": {}},
+        handler=partial(handle_file_delete, workspace_store=None, security_service=None),
+        is_async=True,
+        override=True,
+    )
+    runner = _runner(reg)
+    call = ToolCall("d", "file_delete", {"path": str(big)})
+
+    messages: list[Message] = []
+    chunks = [c async for c in runner.run_batch([call], messages, "rid", _seq_counter())]
+
+    # 删除本体成功落地。
+    assert not big.exists()
+    # 变更链路未对目标文件做无界 read_text（修复的核心）。
+    assert str(big) not in read_text_calls
+    # 广播 file_changes 帧，且降级为元数据（binary、无 diff）。
+    change_frames = [c for c in chunks if c.kind == "file_changes"]
+    assert change_frames
+    files = change_frames[-1].body["files"]
+    deleted = next((f for f in files if f.get("path") == str(big)), None)
+    assert deleted is not None
+    assert deleted["status"] == "deleted"
+    assert deleted.get("binary") is True
+    assert deleted.get("diff") == []
+    # 结果帧无 error，无"服务重启"类错误。
+    assert not any(c.kind == "error" for c in chunks)
+    assert not any("服务重启" in str(c.body) for c in chunks)
+
+
+async def test_full_agent_loop_deletes_large_file_without_restart(tmp_path, monkeypatch):
+    """完整 Agent 循环端到端：模型选择 file_delete 删除 >128KiB 文件，任务 completed、不无界读。
+
+    从 provider 输出 file_delete 工具调用，经 executor 完整循环（ToolRunner.run_batch
+    → _read_file_before → handle_file_delete → _file_change_event）到 final 回答，
+    验证大文件删除不阻塞、不无界读、变更降级为元数据。
+    """
+    from functools import partial
+    from pathlib import Path as PathType
+
+    from crew.agent.file_changes import FILE_CHANGE_MAX_BYTES
+    from crew.tools.builtin import handle_file_delete
+
+    big = tmp_path / "big.bundle"
+    big.write_bytes(b"\x00" * (FILE_CHANGE_MAX_BYTES + 4096))
+
+    read_text_calls: list[str] = []
+    original_read_text = PathType.read_text
+
+    def spy_read_text(self, *args, **kwargs):
+        read_text_calls.append(str(self))
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(PathType, "read_text", spy_read_text)
+
+    reg = Registry()
+    reg.register(
+        name="file_delete",
+        toolset="file",
+        schema={"name": "file_delete", "parameters": {}},
+        handler=partial(handle_file_delete, workspace_store=None, security_service=None),
+        is_async=True,
+        override=True,
+    )
+
+    provider = ScriptStreamProvider([
+        ChatResponse(tool_calls=[ToolCall("d", "file_delete", {"path": str(big)})]),
+        ChatResponse(text="已删除", finish_reason="stop"),
+    ])
+    ctx = _ctx(tool_schemas=reg.list_schemas(), enforce_tool_scope=True)
+    chunks = await _collect(_executor(provider, reg), ctx)
+
+    # 删除本体成功落地。
+    assert not big.exists()
+    # 变更链路未对目标文件做无界 read_text。
+    assert str(big) not in read_text_calls
+    # 完整循环以 final 收尾，无 error、无"服务重启"。
+    assert chunks[-1].kind == "final"
+    assert not any(c.kind == "error" for c in chunks)
+    assert not any("服务重启" in str(c.body) for c in chunks)
+    # file_changes 帧降级为元数据。
+    change_frames = [c for c in chunks if c.kind == "file_changes"]
+    assert change_frames
+    files = change_frames[-1].body["files"]
+    deleted = next((f for f in files if f.get("path") == str(big)), None)
+    assert deleted is not None
+    assert deleted["status"] == "deleted"
+    assert deleted.get("binary") is True
+    assert deleted.get("diff") == []
+
+
 async def test_tool_runner_rejects_unauthorized_direct_call_before_plugins_and_prewarm(caplog):
     """即使未授权工具已全局注册且可 prewarm，也不能进入插件或 handler。"""
     handler_calls = 0

@@ -6,7 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from crew.core.runctx import current_attachment_paths, current_owner_account_id, current_session_id
+from crew.core.runctx import (
+    current_attachment_paths,
+    current_owner_account_id,
+    current_push_fn,
+    current_session_id,
+    current_task_activity_fn,
+)
 from crew.tools.registry import Registry
 from crew.wiki.compiler import WikiCompiler
 from crew.wiki.manager import WikiSessionManager
@@ -727,6 +733,59 @@ async def test_wiki_apply_ingest_passes_chunk_options(wiki_mocks):
     assert call_kwargs["kb_id"] == "kb_active"
     assert call_kwargs["chunk_size"] == 12000
     assert call_kwargs["use_chunking"] is True
+
+
+async def test_wiki_apply_ingest_progress_touches_current_task(wiki_mocks):
+    """Wiki 自己推送的分块进度同样要保活当前 agent turn。"""
+    from crew.wiki.schemas import PlanResult
+
+    registry = wiki_mocks["registry"]
+    compiler = wiki_mocks["compiler"]
+    manager = wiki_mocks["manager"]
+    manager.consume_confirmation.return_value = {
+        "source_id": "s1",
+        "plan_fingerprint": "fp",
+        "source_content_sha256": "sh",
+        "planned_titles": [],
+    }
+    compiler.load_plan.return_value = PlanResult(
+        source_id="s1",
+        planned_pages=[],
+        plan_fingerprint="fp",
+        source_content_sha256="sh",
+    )
+    ingest_result = MagicMock(source_id="s1", pages=[], issues=[])
+
+    async def apply_ingest(*_args, progress, **_kwargs):
+        await progress("chunking", 3, {"total": 12})
+        return ingest_result
+
+    compiler.apply_ingest = AsyncMock(side_effect=apply_ingest)
+    activity: list[dict] = []
+    pushed: list[dict] = []
+
+    async def push(_session_id: str, payload: dict) -> None:
+        pushed.append(payload)
+
+    activity_token = current_task_activity_fn.set(lambda progress: activity.append(progress or {}))
+    push_token = current_push_fn.set(push)
+    try:
+        _set_context()
+        await registry.get("wiki_apply_ingest").run({
+            "source_id": "s1",
+            "confirmation_id": "wcf_test",
+        })
+    finally:
+        current_push_fn.reset(push_token)
+        current_task_activity_fn.reset(activity_token)
+
+    assert activity == [{
+        "last_tool": "wiki_ingest",
+        "tool_phase": "progress",
+        "stage": "chunking",
+        "step": 3,
+    }]
+    assert pushed[0]["kind"] == "tool_progress"
 
 
 async def test_wiki_apply_ingest_rejects_stale_confirmation_when_plan_regenerated(wiki_mocks):

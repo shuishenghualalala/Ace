@@ -243,7 +243,7 @@ def register_cron_tools(
             return tool_error(str(exc))
 
         if service is not None:
-            service.sync_job(str(job["id"]))
+            service.sync_job(str(job["id"]), owner_account_id=owner)
             refreshed = store.get(str(job["id"]), owner_account_id=owner)
             if refreshed is not None:
                 job = refreshed
@@ -314,14 +314,14 @@ def register_cron_tools(
         owner = current_owner_account_id.get()
         ok = store.delete(job_id, owner_account_id=owner)
         if ok and service is not None:
-            service.sync_job(job_id)
+            service.sync_job(job_id, owner_account_id=owner)
         return tool_result(deleted=ok, id=job_id) if ok else tool_error(f"任务不存在: {job_id}")
 
     async def handle_pause(args: dict[str, Any]) -> str:
         job_id = str(args.get("id", "")).strip()
         ok = store.set_enabled(job_id, False, owner_account_id=current_owner_account_id.get())
         if ok and service is not None:
-            service.sync_job(job_id)
+            service.sync_job(job_id, owner_account_id=current_owner_account_id.get())
         return tool_result(paused=ok, id=job_id) if ok else tool_error(f"任务不存在: {job_id}")
 
     async def handle_resume(args: dict[str, Any]) -> str:
@@ -329,7 +329,7 @@ def register_cron_tools(
         owner = current_owner_account_id.get()
         ok = store.set_enabled(job_id, True, owner_account_id=owner)
         if ok and service is not None:
-            service.sync_job(job_id)
+            service.sync_job(job_id, owner_account_id=current_owner_account_id.get())
         refreshed = store.get(job_id, owner_account_id=owner) if ok else None
         if ok:
             next_run_at = refreshed["next_run_at"] if refreshed else 0

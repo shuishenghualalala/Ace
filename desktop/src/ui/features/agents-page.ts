@@ -66,12 +66,6 @@ export interface ExternalConversationCatalog {
   runtimes: ExternalRuntime[];
 }
 
-export interface ExternalConversationCatalog {
-  agents: ExternalAgent[];
-  teams: ExternalTeam[];
-  runtimes: ExternalRuntime[];
-}
-
 const CREW_BUILTIN_AGENT_ID = 'crew::builtin';
 
 const TEAM_DRAFT_DEBOUNCE_MS = 600;
@@ -1186,18 +1180,8 @@ function renderCreateTeam(): string {
   `;
 }
 
-function createLegacyAgentForm(): HTMLElement | undefined {
-  if (activeTab !== 'create-agent' && activeTab !== 'create-team') return undefined;
-  const host = document.createElement('div');
-  host.className = 'mw-agent-hub__legacy-form';
-  host.innerHTML = activeTab === 'create-agent'
-    ? renderCreateAgent()
-    : `${renderCreateTeam()}${renderTeamConstraintDecision()}`;
-  return host;
-}
-
 function agentHubState(): AgentHubState {
-  const form = createLegacyAgentForm();
+  const formTab = activeTab;
   return {
     tab: activeTab,
     agents: agents.map((agent) => ({
@@ -1232,7 +1216,15 @@ function agentHubState(): AgentHubState {
     scanning: runtimeScanning,
     message,
     featureEnabled: externalAgentsEnabled(),
-    ...(form ? { form } : {}),
+    ...((formTab === 'create-agent' || formTab === 'create-team')
+      ? {
+          renderForm: (region: HTMLElement): void => {
+            region.innerHTML = formTab === 'create-agent'
+              ? renderCreateAgent()
+              : `${renderCreateTeam()}${renderTeamConstraintDecision()}`;
+          },
+        }
+      : {}),
   };
 }
 
@@ -2154,7 +2146,6 @@ export async function useAgent(agent: ExternalAgent): Promise<void> {
   try {
     await backendApi.setSessionAgentConfig(sessionId, {
       executor: 'external',
-      external_agent_id: agent.id,
       external: { external_agent_id: agent.id },
     });
     setActiveExternalTeamForSession(sessionId, '');

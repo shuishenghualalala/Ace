@@ -5,7 +5,7 @@ import {
   currentTurnNodesForBoard,
   makeNodes,
   makeTurnGroups,
-  nodeLogs,
+  nodeMessageId,
   nodeTitle,
   teamDagInfo,
 } from "./TaskBoard";
@@ -131,84 +131,28 @@ describe("currentTurnNodesForBoard", () => {
   });
 });
 
-describe("nodeLogs", () => {
-  it("does not use node detail handoff text as execution log fallback", () => {
-    const node = {
-      id: "leader_plan",
-      title: "Leader 拆分任务",
-      owner: "leader",
-      agents: ["Leader"],
-      status: "completed" as const,
-      summary: "",
-      summaryItems: [],
-      raw: task({
-        kind: "team",
-        detail: "leader 将按 DAG 节点「Leader 审阅方案：贪吃蛇小游戏吧」执行。",
-        progress: {
-          source: "team_plan",
-          plan_node_id: "leader_plan",
-          workflow_lane: "lead",
-        },
-      }),
-    };
+describe("nodeMessageId", () => {
+  it("locates the latest Team message associated with a DAG node", () => {
+    const node = makeNodes([task({
+      id: "task-build",
+      task_id: "task-build",
+      kind: "team",
+      progress: { source: "team_plan", plan_node_id: "build" },
+    })])[0];
 
-    expect(nodeLogs(node, [])).toEqual([]);
+    expect(nodeMessageId(node, [
+      { id: "assign", role: "team_internal", text: "@kk 开始执行", nodeId: "build" },
+      { id: "submit", role: "team_internal", text: "已完成", nodeId: "build" },
+    ])).toBe("submit");
   });
 
-  it("filters legacy handoff execution events from node logs", () => {
-    const node = {
-      id: "fast_execute",
-      title: "成员执行任务",
-      owner: "kk",
-      agents: ["kk"],
-      status: "completed" as const,
-      summary: "",
-      summaryItems: [],
-      raw: task({
-        kind: "team",
-        progress: {
-          source: "team_plan",
-          execution_events: [{
-            kind: "status",
-            event_title: "节点承接",
-            event_text: "kk 将按 DAG 节点「快速执行：2048小游戏」执行。",
-          }],
-        },
-      }),
-    };
+  it("does not invent a locate target when history has no node message", () => {
+    const node = makeNodes([task({
+      kind: "team",
+      progress: { source: "team_plan", plan_node_id: "build" },
+    })])[0];
 
-    expect(nodeLogs(node, [])).toEqual([]);
-  });
-
-  it("keeps structured execution events as log entries", () => {
-    const node = {
-      id: "verify",
-      title: "测试验证",
-      owner: "kk",
-      agents: ["kk"],
-      status: "completed" as const,
-      summary: "",
-      summaryItems: [],
-      raw: task({
-        kind: "team",
-        progress: {
-          source: "team_plan",
-          execution_events: [{
-            kind: "tool",
-            title: "运行测试",
-            message: "npm test -- --run snake.test.ts\n2 passed",
-          }],
-        },
-      }),
-    };
-
-    expect(nodeLogs(node, [])).toEqual([
-      expect.objectContaining({
-        kind: "tool",
-        title: "运行测试",
-        body: "npm test -- --run snake.test.ts\n2 passed",
-      }),
-    ]);
+    expect(nodeMessageId(node, [])).toBe("");
   });
 });
 

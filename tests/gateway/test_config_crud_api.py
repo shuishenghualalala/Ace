@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -281,6 +282,27 @@ async def test_session_history_returns_optional_timing_metadata(api, auth_header
             "status": "modified",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_history_hides_epoch_shaped_tool_duration(api, auth_headers):
+    app_crew = api.state.crew
+    assistant = Message.assistant(
+        "done",
+        [ToolCall("tc-epoch", "external_tool", {}, duration=time.time())],
+    )
+    app_crew.session_store.save(
+        "epoch-duration",
+        [Message.user("hi"), assistant],
+        owner_account_id="A:uid-a",
+    )
+
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.get("/api/session/epoch-duration")
+
+    assert resp.status_code == 200
+    assert "duration" not in resp.json()[1]["tool_calls"][0]
 
 
 @pytest.mark.asyncio

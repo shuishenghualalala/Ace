@@ -131,6 +131,7 @@ describe('syncSessionsFromBackend 透传 archived/pinned', () => {
           display_badge: 'K',
           model: 'kimi-k2.5',
         },
+        agent_binding: { kind: 'external_agent', id: 'agent-kimi' },
       }),
       backendRow('crew', {
         model_label: 'DeepSeek',

@@ -23,6 +23,7 @@ from crew.core.runctx import (
     current_active_skill_packages,
     current_agent_workdir,
     current_agent_id,
+    current_display_session_id,
     current_owner_account_id,
     current_session_id,
     current_session_source,
@@ -42,6 +43,7 @@ from crew.core.types import Message, tool_arguments_for_history
 from crew.agent.auxiliary import generate_session_title
 from crew.agent.compact import ContextCompactor
 from crew.agent.executor import AgentExecutor, BuiltinExecutor, ExecutionContext
+from crew.tools.file_utils import MAX_READ_FILE_BYTES, read_verified_bytes
 from crew.tools.policy import ToolDisclosureMode
 from crew.agent.loop.control import TurnControl
 from crew.agent.plan import get_plan_mode_attachment_messages
@@ -101,7 +103,7 @@ _IMAGE_MIME: dict[str, str] = {
 }
 
 
-def _read_image_as_data_url(path: str) -> str | None:
+async def _read_image_as_data_url(path: str) -> str | None:
     """读取图像文件并编码为 base64 data URL。失败返回 None。"""
     from pathlib import Path
 
@@ -113,14 +115,14 @@ def _read_image_as_data_url(path: str) -> str | None:
     if mime is None:
         return None
     try:
-        data = p.read_bytes()
+        data = await asyncio.to_thread(read_verified_bytes, p.resolve(), max_bytes=MAX_READ_FILE_BYTES)
         b64 = base64.b64encode(data).decode("ascii")
         return f"data:{mime};base64,{b64}"
     except Exception:
         return None
 
 
-def _read_attachment(path: str) -> str:
+async def _read_attachment(path: str) -> str:
     """读取附件文件内容，返回文本。非文本文件返回摘要信息（含完整路径）。"""
     from pathlib import Path
 
@@ -131,7 +133,11 @@ def _read_attachment(path: str) -> str:
     ext = p.suffix.lower()
     if ext in _TEXT_EXTS:
         try:
-            return p.read_text(encoding="utf-8", errors="replace")[:8000]
+            # 读前按大小拒绝，避免同步整读超大附件拖垮事件循环。
+            raw = await asyncio.to_thread(read_verified_bytes, p.resolve(), max_bytes=MAX_READ_FILE_BYTES)
+            return raw.decode("utf-8", errors="replace")[:8000]
+        except ValueError:
+            return f"[文件过大，无法作为附件注入: {p.name}]"
         except Exception as exc:
             return f"[读取失败: {exc}]"
 
@@ -382,7 +388,7 @@ class SingleAgent(Agent):
         """请求在下一个安全点优雅中断本轮对话。"""
         self.control.interrupt(message)
 
-    def _build_user_text(
+    async def _build_user_text(
         self, envelope: Envelope
     ) -> tuple[str, list[str], list[dict[str, Any]] | None]:
         """拼接用户文本（含附件引用），返回 (user_text, 附件内容块列表, 多模态 content_parts)。
@@ -407,7 +413,7 @@ class SingleAgent(Agent):
 
                 # 图像附件：编码为 base64 data URL
                 if att_type == "image" or (path and Path(path).suffix.lower() in _IMAGE_MIME):
-                    data_url = _read_image_as_data_url(path) if path else None
+                    data_url = await _read_image_as_data_url(path) if path else None
                     if data_url:
                         image_parts.append({
                             "type": "image_url",
@@ -417,7 +423,7 @@ class SingleAgent(Agent):
 
                 # 非图像附件：按原逻辑读取文本内容
                 if not content and path:
-                    content = _read_attachment(path)
+                    content = await _read_attachment(path)
                 if content:
                     att_contents.append(f"### 附件: {name} (路径: {path})\n```\n{content}\n```")
 
@@ -754,6 +760,9 @@ class SingleAgent(Agent):
             raise RuntimeError("SingleAgent 已关闭，不能继续执行")
         sid = envelope.session_id
         task_sid = str(envelope.params.get("task_session_id") or sid)
+        display_sid = str(envelope.params.get("display_session_id") or task_sid).strip()
+        if "::turn::" in display_sid:
+            display_sid = display_sid.split("::turn::", 1)[0]
         cwd = self._resolve_agent_workdir(envelope, task_session_id=task_sid)
         # 提前设置运行期会话 id，使 compactor.maybe_compact() 中的 LLM trace 也能带上 session_id
         from crew.core.runctx import (
@@ -766,6 +775,7 @@ class SingleAgent(Agent):
         )
 
         current_session_id.set(task_sid)
+        current_display_session_id.set(display_sid or task_sid)
         # team member 执行工具时，后台子 agent 通知按 member 子会话隔离，
         # 使完成通知能回到发起 member；主 agent 该值为空（回退 current_session_id）。
         notify_session = str(envelope.params.get("member_session_id") or "")
@@ -860,7 +870,7 @@ class SingleAgent(Agent):
         # 1. 用户消息（含附件） + 2. prompt 构建
         #    history 是「canonical 全量历史」，从此定型，只追加不被压缩覆盖。
         turn_started_at = time.time()
-        user_text, att_contents, content_parts = self._build_user_text(envelope)
+        user_text, att_contents, content_parts = await self._build_user_text(envelope)
         llm_trace("user", {"session_id": sid, "text": user_text})
         user_message = Message.user(
             user_text,

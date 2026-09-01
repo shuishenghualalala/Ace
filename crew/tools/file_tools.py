@@ -38,6 +38,7 @@ from crew.tools.file_utils import (
     read_verified_bytes,
     snapshot_file,
     stat_verified_file,
+    MAX_READ_FILE_BYTES,
 )
 from crew.tools.managed_tools import (
     ChecksumMismatchError,
@@ -554,11 +555,10 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
             except OSError:
                 return
         try:
-            content = read_verified_bytes(full)
-            if len(content) > _DEFAULT_MAX_FILE_BYTES:
-                return
+            # 读前按大小拒绝，不再整读后再判断。
+            content = read_verified_bytes(full, max_bytes=_DEFAULT_MAX_FILE_BYTES)
             lines_list = content.decode("utf-8", errors="strict").splitlines(keepends=True)
-        except (FileConflictError, UnicodeDecodeError, OSError):
+        except (FileConflictError, UnicodeDecodeError, OSError, ValueError):
             return
         if multiline:
             # 整文件 search：DOTALL 让 . 匹配换行，定位匹配起始行号（兜底不完美，但跨行能命中）
@@ -697,7 +697,10 @@ async def handle_patch(
     if not old:
         raise ToolError("old 不能为空")
 
-    version = snapshot_file(path)
+    try:
+        version = await asyncio.to_thread(snapshot_file, path, max_bytes=MAX_READ_FILE_BYTES)
+    except ValueError as exc:
+        raise ToolError(f"文件过大，无法整体读取做替换: {path}") from exc
     text_bytes = version.data
     text = text_bytes.decode("utf-8", errors="replace")
     text, had_bom = _strip_bom(text)
@@ -714,7 +717,7 @@ async def handle_patch(
     if had_bom and not updated.startswith("﻿"):
         updated = "﻿" + updated
 
-    atomic_replace_bytes(path, updated.encode("utf-8"), version)
+    await asyncio.to_thread(atomic_replace_bytes, path, updated.encode("utf-8"), version)
 
     diff = "".join(
         difflib.unified_diff(

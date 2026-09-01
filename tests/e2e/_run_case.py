@@ -198,7 +198,7 @@ def _setup_external(
         runtime_id=runtime["id"],
         model=str(spec.get("runtime_model") or ""),
     )
-    return {"executor": "external", "external_agent_id": agent["id"]}, None
+    return {"executor": "external", "external": {"external_agent_id": agent["id"]}}, None
 
 
 async def _collect_chunks(

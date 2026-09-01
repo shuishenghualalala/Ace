@@ -277,9 +277,15 @@ _CONNECT_WAIT_TIMEOUT_S = 15.0
 _CONNECT_POLL_S = 0.25
 
 
-def _read_channel_detail(channel_manager, name: str) -> dict[str, Any]:
+def _read_channel_detail(
+    channel_manager,
+    name: str,
+    owner_account_id: str = "",
+) -> dict[str, Any]:
     """读取渠道可选的运行态快照（鸭子类型 status_detail）。"""
-    channel = channel_manager.channels.get(name)
+    channel = channel_manager.get(name, owner_account_id)
+    if channel is None and owner_account_id in {"local", "dev:dev"}:
+        channel = channel_manager.get(name, "")
     if channel is None:
         return {}
     detail_fn = getattr(channel, "status_detail", None)
@@ -292,9 +298,9 @@ def _read_channel_detail(channel_manager, name: str) -> dict[str, Any]:
         return {}
 
 
-def _channel_supports_live_probe(channel_manager, name: str) -> bool:
+def _channel_supports_live_probe(channel_manager, name: str, owner_account_id: str = "") -> bool:
     """是否应等待真实连通（有 status_detail 且含 connected / bot_identity_known）。"""
-    detail = _read_channel_detail(channel_manager, name)
+    detail = _read_channel_detail(channel_manager, name, owner_account_id)
     return "connected" in detail or "bot_identity_known" in detail
 
 
@@ -323,24 +329,31 @@ def _platform_error_kind(name: str, error: Any) -> str:
     return "network" if any(marker in message for marker in network_markers) else ""
 
 
-async def _wait_for_live_connected(channel_manager, name: str) -> tuple[bool, str]:
+async def _wait_for_live_connected(
+    channel_manager,
+    name: str,
+    owner_account_id: str = "",
+) -> tuple[bool, str]:
     """连接后等待真实握手成功；无探针的渠道（测试桩）直接通过。"""
-    if not _channel_supports_live_probe(channel_manager, name):
+    if not _channel_supports_live_probe(channel_manager, name, owner_account_id):
         return True, ""
     deadline = asyncio.get_event_loop().time() + _CONNECT_WAIT_TIMEOUT_S
     while asyncio.get_event_loop().time() < deadline:
-        detail = _read_channel_detail(channel_manager, name)
+        detail = _read_channel_detail(channel_manager, name, owner_account_id)
         if _is_live_connected(name, detail):
             return True, ""
-        lifecycle = {item["name"]: item for item in channel_manager.status()}
-        state = lifecycle.get(name, {})
+        lifecycle = {
+            (item["name"], item.get("owner_account_id", "")): item
+            for item in channel_manager.status(owner_account_id)
+        }
+        state = lifecycle.get((name, owner_account_id), {})
         if state.get("error"):
             return False, str(state.get("error") or "连接失败")
         last_error = detail.get("last_error")
         if last_error and not detail.get("connected"):
             return False, str(last_error)
         await asyncio.sleep(_CONNECT_POLL_S)
-    detail = _read_channel_detail(channel_manager, name)
+    detail = _read_channel_detail(channel_manager, name, owner_account_id)
     if _is_live_connected(name, detail):
         return True, ""
     err = detail.get("last_error") or "连接超时，请检查凭据与环境是否正确"
@@ -352,10 +365,11 @@ def _enrich_platform_row(
     row: dict[str, Any],
     channel_manager,
     *,
+    owner_account_id: str = "",
     secret_values: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """补充 live_connected：区分「进程已启动」与「远端已连通」。"""
-    detail = _read_channel_detail(channel_manager, name)
+    detail = _read_channel_detail(channel_manager, name, owner_account_id)
     if detail:
         row["detail"] = _redact(detail, secret_values)
     row["live_connected"] = _is_live_connected(name, detail) if detail else False
@@ -411,21 +425,32 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
         }
 
     def _owner_can_see_runtime(name: str, owner_account_id: str = "") -> bool:
-        bindings = getattr(crew, "channel_bindings", None)
-        if bindings is None:
+        owner = str(owner_account_id or "").strip()
+        if channel_manager.get(name, owner) is not None or (
+            owner in {"local", "dev:dev"} and channel_manager.get(name, "") is not None
+        ):
             return True
-        bound_owner = str(bindings.get_binding(name) or "")
-        return not bound_owner or bound_owner == str(owner_account_id or "").strip()
+        return any(
+            row.get("name") == name and row.get("owner_account_id", "") == owner
+            for row in channel_manager.status(owner)
+        )
+
+    def _runtime_state(name: str, owner_account_id: str = "") -> dict[str, Any]:
+        owner = str(owner_account_id or "").strip()
+        rows = channel_manager.status(owner)
+        for row in rows:
+            if row["name"] == name and row.get("owner_account_id", "") == owner:
+                return row
+        return {}
 
     @router.get("/api/platforms")
     async def platforms(request: Request) -> JSONResponse:
         owner = account_from_request(request).owner_account_id
         configs = _platform_configs(owner)
-        lifecycle = {item["name"]: item for item in channel_manager.status()}
         rows = []
         for item in platform_registry.list(configs):
             cfg = configs.get(item["name"])
-            state = lifecycle.get(item["name"], {}) if _owner_can_see_runtime(item["name"], owner) else {}
+            state = _runtime_state(item["name"], owner) if _owner_can_see_runtime(item["name"], owner) else {}
             row = {
                 **item,
                 "enabled": bool(cfg.enabled) if cfg is not None else False,
@@ -440,6 +465,7 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
                     item["name"],
                     row,
                     channel_manager,
+                    owner_account_id=owner,
                     secret_values=_platform_secret_values(item["name"], owner),
                 )
             else:
@@ -449,12 +475,11 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
 
     def _single_platform_status(name: str, owner_account_id: str = "") -> dict[str, Any]:
         configs = _platform_configs(owner_account_id)
-        lifecycle = {item["name"]: item for item in channel_manager.status()}
         for item in platform_registry.list(configs):
             if item["name"] != name:
                 continue
             cfg = configs.get(name)
-            state = lifecycle.get(name, {}) if _owner_can_see_runtime(name, owner_account_id) else {}
+            state = _runtime_state(name, owner_account_id) if _owner_can_see_runtime(name, owner_account_id) else {}
             row = {
                 **item,
                 "enabled": bool(cfg.enabled) if cfg is not None else False,
@@ -469,6 +494,7 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
                     name,
                     row,
                     channel_manager,
+                    owner_account_id=owner_account_id,
                     secret_values=_platform_secret_values(name, owner_account_id),
                 )
             else:
@@ -477,7 +503,7 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
         raise KeyError(name)
 
     async def _restart_platform(name: str, owner_account_id: str = "") -> tuple[bool, dict[str, Any]]:
-        if channel_manager.is_busy(name):
+        if channel_manager.is_busy(name, owner_account_id):
             raise RuntimeError("渠道正在重连，请稍后再操作")
         entry = platform_registry.get(name)
         cfg = entry.build_config(
@@ -485,14 +511,14 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
             include_env=not bool(owner_account_id),
         )
         if not cfg.enabled:
-            await channel_manager.stop_one(name)
+            await channel_manager.stop_one(name, owner_account_id)
             if crew.delivery_router is not None:
-                crew.delivery_router.unregister(name)
+                crew.delivery_router.unregister(name, owner_account_id=owner_account_id)
             return True, _single_platform_status(name, owner_account_id)
         try:
             channel = platform_registry.create_channel(name, cfg)
         except Exception as exc:  # noqa: BLE001 — 插件构造/校验失败必须隔离到目标平台
-            channel_manager.record_error(name, str(exc))
+            channel_manager.record_error(name, str(exc), owner_account_id)
             return False, _single_platform_status(name, owner_account_id)
         if hasattr(channel, "bind_app"):
             channel.bind_app(crew)
@@ -507,29 +533,29 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
         sender = getattr(channel, "send_to_target", None)
         if crew.delivery_router is not None:
             if state.running and callable(sender):
-                crew.delivery_router.register(name, sender)
+                crew.delivery_router.register(name, sender, owner_account_id=owner_account_id)
             elif not state.running:
-                crew.delivery_router.unregister(name)
+                crew.delivery_router.unregister(name, owner_account_id=owner_account_id)
         if not state.running:
             return False, _single_platform_status(name, owner_account_id)
-        live_ok, live_err = await _wait_for_live_connected(channel_manager, name)
+        live_ok, live_err = await _wait_for_live_connected(channel_manager, name, owner_account_id)
         if not live_ok:
-            await channel_manager.stop_one(name)
+            await channel_manager.stop_one(name, owner_account_id)
             if crew.delivery_router is not None:
-                crew.delivery_router.unregister(name)
-            channel_manager.record_error(name, live_err)
+                crew.delivery_router.unregister(name, owner_account_id=owner_account_id)
+            channel_manager.record_error(name, live_err, owner_account_id)
             status = _single_platform_status(name, owner_account_id)
             return False, status
         return True, _single_platform_status(name, owner_account_id)
 
-    def _busy_response(name: str) -> JSONResponse | None:
-        if channel_manager.is_busy(name):
+    def _busy_response(name: str, owner_account_id: str = "") -> JSONResponse | None:
+        if channel_manager.is_busy(name, owner_account_id):
             return JSONResponse({"ok": False, "error": "渠道正在重连，请稍后再操作"}, status_code=409)
         return None
 
     def _hot_apply_platform_config(name: str, owner_account_id: str = "") -> None:
         """保存配置后热应用：运行中的渠道若实现 apply_config，就地刷新非连接类设置（不断连）。"""
-        channel = channel_manager.channels.get(name)
+        channel = channel_manager.get(name, owner_account_id)
         apply = getattr(channel, "apply_config", None)
         if channel is None or not callable(apply):
             return
@@ -565,10 +591,10 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
         owner = account_from_request(request).owner_account_id
         if not platform_registry.is_registered(platform):
             return JSONResponse({"ok": False, "error": f"未知平台: {platform}"}, status_code=404)
-        busy = _busy_response(platform)
+        busy = _busy_response(platform, owner)
         if busy is not None:
             return busy
-        async with channel_manager.lock_for(platform):
+        async with channel_manager.lock_for(platform, owner):
             enabled, config, secrets, environment = _normalize_config_payload(payload)
             try:
                 config = _apply_environment_preset(platform, config, environment)
@@ -604,12 +630,12 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
     @router.post("/api/platforms/{name}/connect")
     async def connect_platform(request: Request, name: str) -> JSONResponse:
         platform = name.strip().lower()
+        owner = account_from_request(request).owner_account_id
         if not platform_registry.is_registered(platform):
             return JSONResponse({"ok": False, "error": f"未知平台: {platform}"}, status_code=404)
-        busy = _busy_response(platform)
+        busy = _busy_response(platform, owner)
         if busy is not None:
             return busy
-        owner = account_from_request(request).owner_account_id
         crew.config.persist_channel_config(platform, {"enabled": True}, owner_account_id=owner)
         try:
             ok, status = await _restart_platform(platform, owner)
@@ -626,16 +652,16 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
     @router.post("/api/platforms/{name}/disconnect")
     async def disconnect_platform(request: Request, name: str) -> JSONResponse:
         platform = name.strip().lower()
+        owner = account_from_request(request).owner_account_id
         if not platform_registry.is_registered(platform):
             return JSONResponse({"ok": False, "error": f"未知平台: {platform}"}, status_code=404)
-        busy = _busy_response(platform)
+        busy = _busy_response(platform, owner)
         if busy is not None:
             return busy
-        owner = account_from_request(request).owner_account_id
         crew.config.persist_channel_config(platform, {"enabled": False}, owner_account_id=owner)
-        state = await channel_manager.stop_one(platform)
+        state = await channel_manager.stop_one(platform, owner)
         if crew.delivery_router is not None:
-            crew.delivery_router.unregister(platform)
+            crew.delivery_router.unregister(platform, owner_account_id=owner)
         error = _safe_platform_error(platform, owner, state.error)
         return JSONResponse({
             "ok": not bool(state.error),
@@ -649,20 +675,20 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
         owner = account_from_request(request).owner_account_id
         if not platform_registry.is_registered(platform):
             return JSONResponse({"ok": False, "error": f"未知平台: {platform}"}, status_code=404)
-        busy = _busy_response(platform)
+        busy = _busy_response(platform, owner)
         if busy is not None:
             return busy
-        async with channel_manager.lock_for(platform):
-            state = await channel_manager.stop_one_locked(platform, operation="deleting_account")
+        async with channel_manager.lock_for(platform, owner):
+            state = await channel_manager.stop_one_locked(platform, owner, operation="deleting_account")
             error = _safe_platform_error(platform, owner, state.error)
             if crew.delivery_router is not None:
-                crew.delivery_router.unregister(platform)
+                crew.delivery_router.unregister(platform, owner_account_id=owner)
             raw = _platform_raw(platform, owner)
             remove_keys = _account_remove_keys(platform, raw)
             crew.config.persist_channel_config(platform, {"enabled": False, "_remove_keys": remove_keys}, owner_account_id=owner)
             _remove_secret_envs(platform, owner_account_id=owner)
             if getattr(crew, "channel_bindings", None) is not None:
-                crew.channel_bindings.unbind(platform)
+                crew.channel_bindings.unbind(platform, owner)
         return JSONResponse({
             "ok": not bool(state.error),
             "deleted": True,
@@ -695,8 +721,12 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
     @router.post("/api/feishu/events")
     async def feishu_events(request: Request) -> JSONResponse:
         """飞书 webhook 入口：登录、渠道和 token 前置门禁通过后才读取并入队正文。"""
-        lease = crew.active_owner.current()
-        if lease is None:
+        candidates = [
+            (owner, channel)
+            for name, owner, channel in channel_manager.iter_channels()
+            if name == "feishu"
+        ]
+        if not candidates:
             return JSONResponse(
                 {
                     "ok": False,
@@ -705,21 +735,11 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
                 },
                 status_code=503,
             )
-        feishu = channel_manager.channels.get("feishu")
-        if feishu is None:
-            return JSONResponse({"ok": False, "error": "feishu channel not registered"}, status_code=503)
-        owner = str(lease.owner_account_id or "")
-        if not feishu.ingress_available(owner):
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "error": "飞书渠道未连接或正在退出登录",
-                    "code": "CHANNEL_DISCONNECTED",
-                },
-                status_code=503,
-            )
         allow_missing_token = bool(crew.config.gateway_dev_mode)
-        if not feishu.settings.verification_token and not allow_missing_token:
+        if not allow_missing_token and not any(
+            str(getattr(channel.settings, "verification_token", "") or "").strip()
+            for _owner, channel in candidates
+        ):
             return JSONResponse(
                 {
                     "ok": False,
@@ -740,9 +760,19 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
                 {"ok": False, "error": "invalid webhook event", "code": "INVALID_EVENT"},
                 status_code=400,
             )
-        if not feishu.verify_webhook(payload, allow_missing_token=allow_missing_token):
+        selected = None
+        for owner, feishu in candidates:
+            ingress_available = getattr(feishu, "ingress_available", None)
+            if callable(ingress_available) and not ingress_available(owner):
+                continue
+            verify = getattr(feishu, "verify_webhook", None)
+            if callable(verify) and verify(payload, allow_missing_token=allow_missing_token):
+                selected = (owner, feishu)
+                break
+        if selected is None:
             log.warning("飞书 webhook 校验失败，拒绝请求")
             return JSONResponse({"ok": False, "error": "invalid verification token"}, status_code=403)
+        owner, feishu = selected
         challenge = feishu.challenge_response(payload)
         if challenge is not None:
             return JSONResponse(challenge)

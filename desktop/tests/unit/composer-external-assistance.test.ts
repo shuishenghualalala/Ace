@@ -234,7 +234,8 @@ describe('composer 外援入口', () => {
     expect(document.querySelector('[data-create-agent]')?.textContent).toContain('加入我的外援');
 
     document.querySelector<HTMLElement>('[data-agents-tab="create-team"]')?.click();
-    expect(document.querySelector('.mw-agent-hub__form > .mw-agent-hub__legacy-form > .team-create')).not.toBeNull();
+    expect(document.querySelector('.mw-agent-hub__form > .team-create')).not.toBeNull();
+    expect(document.querySelector('.mw-agent-hub__legacy-form')).toBeNull();
     expect(document.querySelectorAll('.team-create__heading .team-mark i')).toHaveLength(2);
     const leaderTrigger = document.querySelector<HTMLElement>('[data-agents-select-key="team-leader"]');
     expect(leaderTrigger?.textContent).toContain('Crew');
@@ -809,7 +810,6 @@ describe('composer 外援入口', () => {
     expect(ensureSession).toHaveBeenCalledOnce();
     expect(setAgentConfig).toHaveBeenCalledWith('new-agent-session', {
       executor: 'external',
-      external_agent_id: 'agent-codex',
       external: { external_agent_id: 'agent-codex' },
     });
     expect(assigned).toHaveBeenCalledWith(

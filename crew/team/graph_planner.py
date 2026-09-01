@@ -6,12 +6,12 @@ import asyncio
 import hashlib
 import inspect
 import json
-import re
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from crew.core.types import ChatResponse, Message
+from crew.core.text_parsing import extract_json_object
 from crew.dynamickanban.models import PlanEdge, PlanNode, PlanResult
 from crew.dynamickanban.plan_graph import PlanGraph
 from crew.team import flow_builder
@@ -32,6 +32,7 @@ from crew.team.workflow_plan import (
     WorkUnit,
     coerce_planning_decision,
     confidence_dimensions,
+    node_execution_contract,
     normalize_planning_mode,
     planning_decision_messages,
     select_planning_mode,
@@ -39,9 +40,12 @@ from crew.team.workflow_plan import (
 )
 
 DEFAULT_PLANNING_DECISION_TIMEOUT = 30.0
+PLANNING_DECISION_RETRY_TIMEOUT = 10.0
 PLANNING_DECISION_MAX_TOKENS = 4096
+PLANNING_DECISION_RETRY_MAX_TOKENS = 2048
 PLANNING_DECISION_CACHE_TTL_SECONDS = 600.0
 PLANNING_DECISION_WARMUP_TIMEOUT = 6.0
+PLANNING_DECISION_RESPONSE_FORMAT = {"type": "json_object"}
 
 _PLANNING_DECISION_CACHE: dict[str, tuple[float, PlanningDecision]] = {}
 _PLANNING_WARMUP_TASKS: dict[str, asyncio.Task[None]] = {}
@@ -100,6 +104,7 @@ def _merged_execution_profile(spec: TeamSpec, execution_profile: dict[str, Any] 
         "turn_kind",
         "turn_decision_source",
         "profile_source",
+        "scope_confirmation",
     }
     unknown = sorted(set(incoming) - allowed_keys)
     if unknown:
@@ -130,8 +135,34 @@ def _runtime_execution_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "turn_kind",
         "turn_decision_source",
         "profile_source",
+        "scope_confirmation",
     }
     return {key: value for key, value in profile.items() if key in runtime_keys}
+
+
+def _default_execution_scope(spec: TeamSpec) -> str:
+    """Return the execution scope implied by the persisted TeamSpec."""
+
+    intent = str(spec.task_profile.get("intent") or "mixed").strip().lower()
+    lanes = {
+        str(item).strip().lower()
+        for item in (spec.team_requirements.get("workflow_lanes") or [])
+        if str(item).strip()
+    }
+    if intent in {"implementation", "testing"} or lanes & {"build", "verify", "release"}:
+        return "execute"
+    return "plan_only"
+
+
+def _limit_decision_to_plan_only(decision: PlanningDecision) -> PlanningDecision:
+    """Keep a confirmed plan-only turn from creating execution nodes."""
+
+    units = [
+        replace(unit, kind="design") if unit.kind == "build" else unit
+        for unit in decision.work_units
+        if unit.kind != "verify"
+    ]
+    return replace(decision, quality_policy="none", work_units=units)
 
 
 FastPrimary = TeamMemberSpec | str
@@ -281,11 +312,12 @@ def _member_by_id(team: Any) -> dict[str, TeamMemberSpec]:
 
 
 def _member_capability_sets(team: Any) -> dict[str, list[str]]:
-    """Return the current model-backed capability set for DAG admission.
+    """Return the effective capability set for DAG admission.
 
-    External Team members carry their resolved ``AgentProfile`` on the in-memory
-    Team assembled from the Session binding.  Formation capabilities remain the
-    fallback for built-in members and legacy teams without a resolved profile.
+    A TeamMemberSpec is the user's confirmed assignment contract. A resolved
+    AgentProfile adds model/runtime evidence, but must not erase capabilities
+    already assigned to that member: a newly materialized profile commonly has
+    only weak priors before the first execution observation.
     """
 
     result: dict[str, list[str]] = {}
@@ -296,20 +328,21 @@ def _member_capability_sets(team: Any) -> dict[str, list[str]]:
     for member in members:
         if not member.member_id:
             continue
+        assigned = normalize_capabilities(member.capabilities or [])
+        if not assigned:
+            assigned = normalize_capabilities(
+                flow_builder.member_node_metadata(member).get("required_capabilities") or []
+            )
         profile = profiles.get(member.member_id) if isinstance(profiles, dict) else None
         if isinstance(profile, AgentProfile):
-            result[member.member_id] = [
+            profiled = [
                 capability
                 for capability, assessment in profile.capabilities.items()
                 if is_agent_profile_available(profile) and assessment.score >= 0.5
             ]
+            result[member.member_id] = normalize_capabilities([*assigned, *profiled])
             continue
-        capabilities = normalize_capabilities(member.capabilities or [])
-        if not capabilities:
-            capabilities = normalize_capabilities(
-                flow_builder.member_node_metadata(member).get("required_capabilities") or []
-            )
-        result[member.member_id] = capabilities
+        result[member.member_id] = assigned
     return result
 
 
@@ -917,6 +950,7 @@ def _planning_team_spec_summary(spec: TeamSpec, profile: dict[str, Any]) -> dict
     planning = spec.planning if isinstance(spec.planning, dict) else {}
     return {
         "intent": str(spec.task_profile.get("intent") or "mixed"),
+        "default_execution_scope": _default_execution_scope(spec),
         "complexity": str(spec.task_profile.get("complexity") or "focused"),
         "required_capabilities": normalize_capabilities(requirements.get("capabilities") or []),
         "workflow_lanes": [
@@ -933,6 +967,7 @@ def _planning_team_spec_summary(spec: TeamSpec, profile: dict[str, Any]) -> dict
         "risk_level": str(spec.risk_level or "low"),
         "uncertainty": str(spec.uncertainty or "low"),
         "missing_info": [_compact_text(item, 140) for item in (planning.get("missing_info") or [])][:6],
+        "scope_confirmation": str(profile.get("scope_confirmation") or "").strip() or None,
     }
 
 
@@ -973,14 +1008,17 @@ def _planning_cache_key(
     members: list[dict[str, Any]],
     requested_mode: PlanningMode,
     max_work_units: int,
+    scope_confirmation: str = "",
 ) -> str:
     payload = {
+        "contract_version": 2,
         "provider": _provider_identity(provider),
         "goal": goal,
         "team_spec": team_spec,
         "members": members,
         "requested_mode": requested_mode,
         "max_work_units": max_work_units,
+        "scope_confirmation": scope_confirmation,
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -1035,13 +1073,51 @@ async def _notify_planning_progress(
         return
 
 
-async def _chat_provider_text(provider: Any, messages: list[Message], *, max_tokens: int) -> ChatResponse:
-    try:
-        return await provider.chat(messages, tools=None, max_tokens=max_tokens)
-    except TypeError as exc:
-        if "max_tokens" not in str(exc):
-            raise
-        return await provider.chat(messages, tools=None)
+def _optional_provider_kwargs(
+    *,
+    max_tokens: int | None,
+    response_format: dict[str, Any] | None,
+    reasoning_mode: str | None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"tools": None}
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+    if reasoning_mode is not None:
+        kwargs["reasoning_mode"] = reasoning_mode
+    return kwargs
+
+
+def _unsupported_provider_kwarg(exc: TypeError, kwargs: dict[str, Any]) -> str | None:
+    message = str(exc)
+    for name in ("response_format", "reasoning_mode", "max_tokens"):
+        if name in kwargs and name in message:
+            return name
+    return None
+
+
+async def _chat_provider_text(
+    provider: Any,
+    messages: list[Message],
+    *,
+    max_tokens: int,
+    response_format: dict[str, Any] | None = None,
+    reasoning_mode: str | None = None,
+) -> ChatResponse:
+    kwargs = _optional_provider_kwargs(
+        max_tokens=max_tokens,
+        response_format=response_format,
+        reasoning_mode=reasoning_mode,
+    )
+    while True:
+        try:
+            return await provider.chat(messages, **kwargs)
+        except TypeError as exc:
+            unsupported = _unsupported_provider_kwarg(exc, kwargs)
+            if unsupported is None:
+                raise
+            kwargs.pop(unsupported)
 
 
 async def _stream_provider_text(
@@ -1050,6 +1126,8 @@ async def _stream_provider_text(
     *,
     max_tokens: int,
     timeout_s: float,
+    response_format: dict[str, Any] | None = None,
+    reasoning_mode: str | None = None,
     progress: PlanningProgressCallback | None = None,
 ) -> tuple[str, dict[str, Any]]:
     started = time.perf_counter()
@@ -1064,12 +1142,20 @@ async def _stream_provider_text(
         "reasoning_chars": 0,
     }
 
-    try:
-        stream = provider.stream_chat(messages, tools=None, max_tokens=max_tokens)
-    except TypeError as exc:
-        if "max_tokens" not in str(exc):
-            raise
-        stream = provider.stream_chat(messages, tools=None)
+    kwargs = _optional_provider_kwargs(
+        max_tokens=max_tokens,
+        response_format=response_format,
+        reasoning_mode=reasoning_mode,
+    )
+    while True:
+        try:
+            stream = provider.stream_chat(messages, **kwargs)
+            break
+        except TypeError as exc:
+            unsupported = _unsupported_provider_kwarg(exc, kwargs)
+            if unsupported is None:
+                raise
+            kwargs.pop(unsupported)
 
     async def collect() -> None:
         nonlocal chunks
@@ -1153,13 +1239,18 @@ async def _race_provider_text(
     messages: list[Message],
     *,
     max_tokens: int,
+    max_work_units: int,
     timeout_s: float,
     reasoning_grace_s: float,
+    response_format: dict[str, Any] | None = None,
+    reasoning_mode: str | None = None,
     progress: PlanningProgressCallback | None = None,
 ) -> tuple[str, dict[str, Any]]:
     started = time.perf_counter()
     race_timeout_s = max(0.2, timeout_s)
     stream_chunks: list[str] = []
+    chat_text = ""
+    stream_text = ""
     stream_diag: dict[str, Any] = {
         "transport": "race",
         "first_token_ms": None,
@@ -1170,12 +1261,20 @@ async def _race_provider_text(
         "reasoning_chars": 0,
     }
 
-    try:
-        stream = provider.stream_chat(messages, tools=None, max_tokens=max_tokens)
-    except TypeError as exc:
-        if "max_tokens" not in str(exc):
-            raise
-        stream = provider.stream_chat(messages, tools=None)
+    stream_kwargs = _optional_provider_kwargs(
+        max_tokens=max_tokens,
+        response_format=response_format,
+        reasoning_mode=reasoning_mode,
+    )
+    while True:
+        try:
+            stream = provider.stream_chat(messages, **stream_kwargs)
+            break
+        except TypeError as exc:
+            unsupported = _unsupported_provider_kwarg(exc, stream_kwargs)
+            if unsupported is None:
+                raise
+            stream_kwargs.pop(unsupported)
 
     async def collect_stream() -> str:
         async for chunk in stream:
@@ -1219,15 +1318,21 @@ async def _race_provider_text(
                 )
             stream_chunks.append(delta)
             stream_diag["partial_chars"] = sum(len(item) for item in stream_chunks)
-            try:
-                _json_from_text("".join(stream_chunks))
+            if _planning_decision_text_status(
+                "".join(stream_chunks),
+                max_work_units=max_work_units,
+            ) == "valid":
                 return "".join(stream_chunks)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                pass
         return "".join(stream_chunks)
 
     async def collect_chat() -> ChatResponse:
-        return await _chat_provider_text(provider, messages, max_tokens=max_tokens)
+        return await _chat_provider_text(
+            provider,
+            messages,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            reasoning_mode=reasoning_mode,
+        )
 
     stream_task = asyncio.create_task(collect_stream())
     chat_task = asyncio.create_task(collect_chat())
@@ -1236,6 +1341,8 @@ async def _race_provider_text(
         "cache_hit": False,
         "transport": "race",
         "race_timeout_ms": int(race_timeout_s * 1000),
+        "structured_output_requested": response_format is not None,
+        "reasoning_mode": reasoning_mode or "default",
     }
 
     try:
@@ -1249,6 +1356,7 @@ async def _race_provider_text(
             if chat_task in done:
                 response = chat_task.result()
                 text = str(response.text or "")
+                chat_text = text
                 chat_reasoning = str(getattr(response, "reasoning_content", "") or "")
                 diagnostics.update({
                     "chat_elapsed_ms": int((time.perf_counter() - started) * 1000),
@@ -1256,28 +1364,43 @@ async def _race_provider_text(
                     "chat_finish_reason": response.finish_reason,
                 })
                 if text.strip():
-                    stream_task.cancel()
-                    diagnostics.update(stream_diag)
-                    diagnostics.update({
-                        "transport": "chat_race_won",
-                        "race_winner": "chat",
-                        "partial_chars": len(text),
-                        "reasoning_chars": int(stream_diag.get("reasoning_chars") or 0) + len(chat_reasoning),
-                        "cancelled_transport": "stream",
-                    })
-                    return text, diagnostics
+                    text_status = _planning_decision_text_status(text, max_work_units=max_work_units)
+                    if text_status == "non_json":
+                        # A provider may return explanatory chat text while
+                        # stream_chat still produces the structured decision.
+                        diagnostics["chat_non_json"] = True
+                    elif text_status == "schema_invalid":
+                        diagnostics["chat_schema_invalid"] = True
+                    else:
+                        stream_task.cancel()
+                        diagnostics.update(stream_diag)
+                        diagnostics.update({
+                            "transport": "chat_race_won",
+                            "race_winner": "chat",
+                            "partial_chars": len(text),
+                            "reasoning_chars": int(stream_diag.get("reasoning_chars") or 0) + len(chat_reasoning),
+                            "cancelled_transport": "stream",
+                        })
+                        return text, diagnostics
             if stream_task in done:
                 text = stream_task.result()
+                stream_text = text
                 diagnostics.update({"stream_elapsed_ms": int((time.perf_counter() - started) * 1000)})
                 if text.strip():
-                    chat_task.cancel()
-                    diagnostics.update(stream_diag)
-                    diagnostics.update({
-                        "transport": "stream_race_won",
-                        "race_winner": "stream",
-                        "cancelled_transport": "chat",
-                    })
-                    return text, diagnostics
+                    text_status = _planning_decision_text_status(text, max_work_units=max_work_units)
+                    if text_status == "non_json":
+                        diagnostics["stream_non_json"] = True
+                    elif text_status == "schema_invalid":
+                        diagnostics["stream_schema_invalid"] = True
+                    else:
+                        chat_task.cancel()
+                        diagnostics.update(stream_diag)
+                        diagnostics.update({
+                            "transport": "stream_race_won",
+                            "race_winner": "stream",
+                            "cancelled_transport": "chat",
+                        })
+                        return text, diagnostics
 
         has_reasoning = int(stream_diag.get("reasoning_chars") or 0) > 0 or stream_diag.get("first_reasoning_ms") is not None
         if chat_task.done():
@@ -1288,6 +1411,20 @@ async def _race_provider_text(
             except Exception:
                 pass
         if not has_reasoning:
+            non_json_text = stream_text or chat_text
+            if non_json_text.strip():
+                text_status = _planning_decision_text_status(
+                    non_json_text,
+                    max_work_units=max_work_units,
+                )
+                diagnostics.update(stream_diag)
+                diagnostics.update({
+                    "transport": f"race_{text_status}",
+                    "race_winner": "",
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                    "partial_chars": len(non_json_text),
+                })
+                return non_json_text, diagnostics
             for task in tasks:
                 task.cancel()
             diagnostics.update(stream_diag)
@@ -1302,6 +1439,19 @@ async def _race_provider_text(
             elapsed_ms=int((time.perf_counter() - started) * 1000),
             diagnostics=stream_diag,
         )
+        if reasoning_grace_s <= 0:
+            diagnostics.update(stream_diag)
+            diagnostics.update({
+                "transport": "race_reasoning_only",
+                "race_winner": "",
+                "reasoning_grace_used": False,
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            })
+            raise PlanningDecisionFailure(
+                _empty_planning_response_error_type(diagnostics),
+                "PlanningDecision produced reasoning but no structured JSON content",
+                diagnostics,
+            )
         try:
             text = await asyncio.wait_for(stream_task, timeout=max(0.2, reasoning_grace_s))
         except asyncio.TimeoutError as exc:
@@ -1368,6 +1518,41 @@ def _empty_planning_response_error_type(diagnostics: dict[str, Any]) -> str:
     return "reasoning_only_empty"
 
 
+def _combine_planning_attempt_diagnostics(
+    primary: dict[str, Any],
+    retry: dict[str, Any],
+    *,
+    primary_elapsed_ms: int,
+    retry_elapsed_ms: int,
+) -> dict[str, Any]:
+    """Keep one flat diagnostic contract while preserving both attempts."""
+
+    combined = {**primary, **retry}
+    combined.update({
+        "attempts": 2,
+        "primary_elapsed_ms": primary_elapsed_ms,
+        "retry_elapsed_ms": retry_elapsed_ms,
+        "elapsed_ms": primary_elapsed_ms + retry_elapsed_ms,
+    })
+    for key in ("first_chunk_ms", "first_reasoning_ms", "first_content_ms", "partial_chars", "reasoning_chars"):
+        combined[f"primary_{key}"] = primary.get(key)
+        combined[f"retry_{key}"] = retry.get(key)
+    primary_content_ms = primary.get("first_content_ms")
+    retry_content_ms = retry.get("first_content_ms")
+    combined["first_content_ms"] = (
+        primary_content_ms
+        if primary_content_ms is not None
+        else primary_elapsed_ms + retry_content_ms
+        if retry_content_ms is not None
+        else None
+    )
+    combined["reasoning_chars"] = (
+        int(primary.get("reasoning_chars") or 0)
+        + int(retry.get("reasoning_chars") or 0)
+    )
+    return combined
+
+
 async def _planning_provider_warmup(provider: Any) -> None:
     key = _provider_identity(provider)
     started = time.perf_counter()
@@ -1429,17 +1614,24 @@ async def _planning_decision_with_llm(
     members: list[TeamMemberSpec],
     requested_mode: PlanningMode,
     profile: dict[str, Any],
+    retry: bool = False,
     progress: PlanningProgressCallback | None = None,
 ) -> PlanningDecisionCall:
     budget = profile.get("budget") if isinstance(profile.get("budget"), dict) else {}
     try:
-        timeout_s = float(budget.get("planning_decision_timeout") or DEFAULT_PLANNING_DECISION_TIMEOUT)
+        timeout_key = "planning_decision_retry_timeout" if retry else "planning_decision_timeout"
+        timeout_default = PLANNING_DECISION_RETRY_TIMEOUT if retry else DEFAULT_PLANNING_DECISION_TIMEOUT
+        timeout_s = float(budget.get(timeout_key) or timeout_default)
     except (TypeError, ValueError):
         timeout_s = DEFAULT_PLANNING_DECISION_TIMEOUT
     try:
-        reasoning_grace_s = float(budget.get("planning_decision_reasoning_grace_timeout") or timeout_s)
+        reasoning_grace_s = float(
+            budget["planning_decision_reasoning_grace_timeout"]
+            if "planning_decision_reasoning_grace_timeout" in budget
+            else 0
+        )
     except (TypeError, ValueError):
-        reasoning_grace_s = timeout_s
+        reasoning_grace_s = 0
     try:
         max_work_units = int(budget.get("standard_max_work_units") or 8)
     except (TypeError, ValueError):
@@ -1456,15 +1648,21 @@ async def _planning_decision_with_llm(
         members=member_summary,
         requested_mode=requested_mode,
         max_work_units=max_work_units,
+        scope_confirmation=str(profile.get("scope_confirmation") or "").strip(),
+        structured_retry=retry,
     )
     messages = [Message.system(system), Message.user(user)]
     prompt_bytes = len(system.encode("utf-8")) + len(user.encode("utf-8"))
     await _notify_planning_progress(
         progress,
-        phase="started",
-        label="正在理解任务目标",
+        phase="retry" if retry else "started",
+        label="正在进行结构化规划重试" if retry else "正在理解任务目标",
         elapsed_ms=0,
-        diagnostics={"prompt_bytes": prompt_bytes, "transport": "race"},
+        diagnostics={
+            "prompt_bytes": prompt_bytes,
+            "transport": "structured_retry" if retry else "race",
+            "retry": retry,
+        },
     )
     cache_key = _planning_cache_key(
         provider=provider,
@@ -1473,8 +1671,9 @@ async def _planning_decision_with_llm(
         members=member_summary,
         requested_mode=requested_mode,
         max_work_units=max_work_units,
+        scope_confirmation=str(profile.get("scope_confirmation") or "").strip(),
     )
-    cached = _cache_get(cache_key, cache_ttl)
+    cached = None if retry else _cache_get(cache_key, cache_ttl)
     if cached is not None:
         await _notify_planning_progress(
             progress,
@@ -1496,39 +1695,81 @@ async def _planning_decision_with_llm(
         )
 
     started = time.perf_counter()
+    max_tokens = PLANNING_DECISION_RETRY_MAX_TOKENS if retry else PLANNING_DECISION_MAX_TOKENS
     diagnostics: dict[str, Any] = {
         "cache_hit": False,
         "prompt_bytes": prompt_bytes,
-        "transport": "race",
+        "transport": "structured_retry" if retry else "race",
+        "retry": retry,
+        "retry_timeout_ms": int(timeout_s * 1000) if retry else None,
     }
-    try:
-        text, stream_diagnostics = await _race_provider_text(
-            provider,
-            messages,
-            max_tokens=PLANNING_DECISION_MAX_TOKENS,
-            timeout_s=timeout_s,
-            reasoning_grace_s=reasoning_grace_s,
-            progress=progress,
-        )
-        diagnostics.update(stream_diagnostics)
-    except PlanningDecisionFailure as exc:
-        diagnostics.update(exc.diagnostics)
-        raise
-    except asyncio.TimeoutError as exc:
-        diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
-        raise PlanningDecisionFailure(
-            "timeout",
-            f"PlanningDecision timed out after {timeout_s:.1f}s",
-            diagnostics,
-        ) from exc
-    except Exception as exc:
-        diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
-        raise PlanningDecisionFailure("provider_error", str(exc) or exc.__class__.__name__, diagnostics) from exc
+    if retry:
+        try:
+            response = await asyncio.wait_for(
+                _chat_provider_text(
+                    provider,
+                    messages,
+                    max_tokens=max_tokens,
+                    response_format=PLANNING_DECISION_RESPONSE_FORMAT,
+                    reasoning_mode="disabled",
+                ),
+                timeout=max(0.2, timeout_s),
+            )
+        except asyncio.TimeoutError as exc:
+            diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+            raise PlanningDecisionFailure(
+                "timeout",
+                f"PlanningDecision structured retry timed out after {timeout_s:.1f}s",
+                diagnostics,
+            ) from exc
+        except Exception as exc:
+            diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+            raise PlanningDecisionFailure("provider_error", str(exc) or exc.__class__.__name__, diagnostics) from exc
+        text = str(response.text or "")
+        reasoning = str(getattr(response, "reasoning_content", "") or "")
+        diagnostics.update({
+            "response_format": PLANNING_DECISION_RESPONSE_FORMAT,
+            "reasoning_mode": "disabled",
+            "partial_chars": len(text),
+            "reasoning_chars": len(reasoning),
+            "finish_reason": response.finish_reason,
+            "chat_finish_reason": response.finish_reason,
+            "first_content_ms": 0 if text else None,
+        })
+        if not text.strip():
+            diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+            raise PlanningDecisionFailure(
+                _empty_planning_response_error_type(diagnostics),
+                "PlanningDecision structured retry produced no JSON content",
+                diagnostics,
+            )
+    else:
+        try:
+            text, stream_diagnostics = await _race_provider_text(
+                provider,
+                messages,
+                max_tokens=max_tokens,
+                max_work_units=max_work_units + 4,
+                timeout_s=timeout_s,
+                reasoning_grace_s=reasoning_grace_s,
+                progress=progress,
+            )
+            diagnostics.update(stream_diagnostics)
+        except PlanningDecisionFailure as exc:
+            diagnostics.update(exc.diagnostics)
+            raise
+        except asyncio.TimeoutError as exc:
+            diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+            raise PlanningDecisionFailure(
+                "timeout",
+                f"PlanningDecision timed out after {timeout_s:.1f}s",
+                diagnostics,
+            ) from exc
+        except Exception as exc:
+            diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+            raise PlanningDecisionFailure("provider_error", str(exc) or exc.__class__.__name__, diagnostics) from exc
     try:
         data = _json_from_text(text)
-    except json.JSONDecodeError as exc:
-        diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
-        raise PlanningDecisionFailure("invalid_json", str(exc), diagnostics) from exc
     except ValueError as exc:
         diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
         error_type = (
@@ -1557,23 +1798,32 @@ async def _planning_decision_with_llm(
         elapsed_ms=elapsed_ms,
         diagnostics=diagnostics,
     )
-    _cache_put(cache_key, decision, cache_ttl)
+    if not retry:
+        _cache_put(cache_key, decision, cache_ttl)
     return PlanningDecisionCall(decision=decision, elapsed_ms=elapsed_ms, diagnostics=diagnostics)
 
 
 def _json_from_text(text: str) -> dict[str, Any]:
     body = str(text or "").strip()
-    if not body:
-        raise ValueError("empty LLM graph response")
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", body, flags=re.DOTALL)
-    if fenced:
-        body = fenced.group(1)
-    elif "{" in body and "}" in body:
-        body = body[body.find("{"):body.rfind("}") + 1]
-    parsed = json.loads(body)
-    if not isinstance(parsed, dict):
-        raise ValueError("LLM graph response must be a JSON object")
+    parsed = extract_json_object(text)
+    if parsed is None:
+        message = "empty LLM graph response" if not body else "invalid LLM graph JSON"
+        raise ValueError(message)
     return parsed
+
+
+def _planning_decision_text_status(text: str, *, max_work_units: int) -> str:
+    """Classify a race candidate without treating arbitrary JSON as a winner."""
+
+    try:
+        data = _json_from_text(text)
+    except ValueError:
+        return "non_json"
+    try:
+        coerce_planning_decision(data, max_work_units=max_work_units)
+    except ValueError:
+        return "schema_invalid"
+    return "valid"
 
 
 def _team_members_for_prompt(members: list[TeamMemberSpec]) -> list[dict[str, Any]]:
@@ -1758,32 +2008,6 @@ async def _build_ai_workflow_nodes_with_llm(
     return nodes, edges, ["AI Planner 使用 LLM 生成单方案 DAG。", *notes]
 
 
-def _node_contract(goal: str, node: PlanNode, metadata: dict[str, Any]) -> dict[str, Any]:
-    lane = str(metadata.get("workflow_lane") or "other")
-    outputs = {
-        "lead": ["任务拆解", "依赖关系", "验收标准"],
-        "plan": ["方案", "约束", "验收标准"],
-        "design": ["设计说明", "关键状态", "实现约束"],
-        "build": ["实现产物", "变更说明", "自测结果"],
-        "verify": ["测试记录", "缺陷/风险", "验收结论"],
-        "docs": ["交付记录", "产物引用", "后续建议"],
-        "release": ["发布检查", "环境说明", "风险清单"],
-        "summary": ["最终结论", "产物清单", "风险与下一步"],
-    }.get(lane, ["执行结果", "风险说明", "下一步"])
-    return {
-        "purpose": node.title,
-        "inputs": ["用户目标", "上游节点结果"],
-        "outputs": outputs,
-        "acceptance_criteria": [
-            "输出必须具体可检查。",
-            "如需改变团队成员或补员，必须先提示用户并等待确认。",
-            f"结果必须服务于用户目标：{goal}",
-        ],
-        "requires_leader_review": "review" in node.id or "方案" in node.title or "审阅" in node.title,
-        "conflict_scope": lane,
-    }
-
-
 def _normalize_nodes_with_graph(
     *,
     goal: str,
@@ -1936,7 +2160,13 @@ def _normalize_nodes_with_graph(
             ),
             "agent_log_style": "agent_turn",
             "execution_events": list(metadata.get("execution_events") or []),
-            "execution_contract": _node_contract(goal, node, metadata),
+            "execution_contract": node_execution_contract(
+                goal=goal,
+                node_id=node.id,
+                title=node.title,
+                lane=lane,
+                metadata=metadata,
+            ),
         })
         if coverage is not None:
             metadata["capability_coverage"] = coverage.to_dict()
@@ -2062,6 +2292,7 @@ def _result_with_workflow_plan(
     extra_warnings: list[str] | None = None,
     critical_missing_info: list[str] | None = None,
     planning_decision: dict[str, Any] | None = None,
+    requested_scope: str | None = None,
 ) -> TeamGraphPlan:
     _attach_policy_warnings(nodes, policy_report)
     warnings = [item.message for item in policy_report.warnings]
@@ -2082,6 +2313,7 @@ def _result_with_workflow_plan(
         warnings=warnings,
         fallback_from=fallback_from,
         planning_decision=planning_decision,
+        requested_scope=requested_scope,
     ).to_dict()
     return TeamGraphPlan(
         spec=spec,
@@ -2108,6 +2340,8 @@ class TeamGraphPlanner:
         if isinstance(spec_source, dict) and not str(spec_source.get("goal") or "").strip():
             spec_source = {"goal": goal, **spec_source}
         base_spec = build_team_spec(spec_source)
+        if str(goal or "").strip() and base_spec.goal != str(goal).strip():
+            base_spec = replace(base_spec, goal=str(goal).strip())
         profile = _merged_execution_profile(base_spec, execution_profile)
         requested_mode = normalize_planning_mode(profile.get("requested_mode"))
         selected_mode: PlanningMode = "fast" if requested_mode == "fast" else "standard"
@@ -2158,6 +2392,7 @@ class TeamGraphPlanner:
             quality_policy="none" if selected_mode == "fast" else "leader_review",
             confidence={"requirement": 0.68, "topology": 1.0, "capability": 1.0, "overall": 0.68},
             fallback_from=fallback_from,
+            requested_scope=str(profile.get("scope_confirmation") or "uncertain"),
         )
 
     async def plan_async(
@@ -2174,6 +2409,8 @@ class TeamGraphPlanner:
         if isinstance(spec_source, dict) and not str(spec_source.get("goal") or "").strip():
             spec_source = {"goal": goal, **spec_source}
         base_spec = build_team_spec(spec_source)
+        if str(goal or "").strip() and base_spec.goal != str(goal).strip():
+            base_spec = replace(base_spec, goal=str(goal).strip())
         profile = _merged_execution_profile(base_spec, execution_profile)
         requested_mode = normalize_planning_mode(profile.get("requested_mode"))
         members: list[TeamMemberSpec] = list((getattr(team, "members", {}) or {}).values())
@@ -2209,6 +2446,71 @@ class TeamGraphPlanner:
                 decision_error_type = "unknown"
                 decision_diagnostics = {}
                 decision_elapsed_ms = int((time.perf_counter() - started) * 1000) if "started" in locals() else 0
+
+            if decision is None:
+                primary_elapsed_ms = decision_elapsed_ms
+                primary_diagnostics = dict(decision_diagnostics)
+                primary_error = decision_error
+                primary_error_type = decision_error_type
+                retry_started = time.perf_counter()
+                try:
+                    retry_call = await _planning_decision_with_llm(
+                        provider=provider,
+                        goal=goal,
+                        spec=base_spec,
+                        members=members,
+                        requested_mode=requested_mode,
+                        profile=profile,
+                        retry=True,
+                        progress=planning_progress,
+                    )
+                    decision = retry_call.decision
+                    retry_elapsed_ms = int((time.perf_counter() - retry_started) * 1000)
+                    decision_elapsed_ms = primary_elapsed_ms + retry_elapsed_ms
+                    decision_diagnostics = _combine_planning_attempt_diagnostics(
+                        primary_diagnostics,
+                        retry_call.diagnostics,
+                        primary_elapsed_ms=primary_elapsed_ms,
+                        retry_elapsed_ms=retry_elapsed_ms,
+                    )
+                    decision_diagnostics.update({
+                        "primary_error_type": primary_error_type,
+                        "primary_error": primary_error,
+                    })
+                except PlanningDecisionFailure as exc:
+                    retry_elapsed_ms = int((time.perf_counter() - retry_started) * 1000)
+                    decision_error = primary_error or str(exc)
+                    decision_error_type = primary_error_type or exc.error_type
+                    decision_elapsed_ms = primary_elapsed_ms + retry_elapsed_ms
+                    decision_diagnostics = _combine_planning_attempt_diagnostics(
+                        primary_diagnostics,
+                        exc.diagnostics,
+                        primary_elapsed_ms=primary_elapsed_ms,
+                        retry_elapsed_ms=retry_elapsed_ms,
+                    )
+                    decision_diagnostics.update({
+                        "primary_error_type": primary_error_type,
+                        "primary_error": primary_error,
+                        "retry_error_type": exc.error_type,
+                        "retry_error": str(exc),
+                    })
+                except Exception as exc:  # noqa: BLE001
+                    retry_elapsed_ms = int((time.perf_counter() - retry_started) * 1000)
+                    decision_error = primary_error or str(exc)
+                    decision_error_type = primary_error_type or "unknown"
+                    decision_elapsed_ms = primary_elapsed_ms + retry_elapsed_ms
+                    decision_diagnostics = _combine_planning_attempt_diagnostics(
+                        primary_diagnostics,
+                        {"transport": "structured_retry"},
+                        primary_elapsed_ms=primary_elapsed_ms,
+                        retry_elapsed_ms=retry_elapsed_ms,
+                    )
+                    decision_diagnostics.update({
+                        "primary_error_type": primary_error_type,
+                        "primary_error": primary_error,
+                        "retry_error_type": "unknown",
+                        "retry_error": str(exc),
+                    })
 
         if decision is not None:
             budget = profile.get("budget") if isinstance(profile.get("budget"), dict) else {}
@@ -2274,7 +2576,63 @@ class TeamGraphPlanner:
                 workflow_plan=fallback_plan,
             )
 
+        confirmed_scope = str(profile.get("scope_confirmation") or "").strip().lower()
+        if confirmed_scope not in {"plan_only", "execute"}:
+            confirmed_scope = ""
+        requested_scope = confirmed_scope or (decision.requested_scope if decision is not None else "uncertain")
+        default_scope = _default_execution_scope(base_spec)
+        if requested_scope == "plan_only" and default_scope == "execute" and not confirmed_scope:
+            await _notify_planning_progress(
+                planning_progress,
+                phase="scope_confirmation",
+                status="waiting",
+                label="本轮执行范围需要确认",
+                elapsed_ms=decision_elapsed_ms,
+                diagnostics={
+                    **decision_diagnostics,
+                    "requested_scope": requested_scope,
+                    "default_execution_scope": default_scope,
+                },
+            )
+            pending_spec = replace(
+                base_spec,
+                execution_profile=_runtime_execution_profile({
+                    **profile,
+                    "requested_mode": requested_mode,
+                    "selected_mode": selected_mode,
+                }),
+            )
+            policy_report = analyze_team_policy(spec=pending_spec, members=members)
+            return TeamGraphPlan(
+                spec=pending_spec,
+                nodes=[],
+                edges=[],
+                policy_report=policy_report,
+                planner_notes=["用户本轮请求只包含方案，但团队默认范围包含实际执行；等待用户确认。"],
+                workflow_plan={
+                    "task": {"turn_id": "", "goal": goal, "deliverables": [], "acceptance_criteria": []},
+                    "planning": {
+                        "requested_mode": requested_mode,
+                        "selected_mode": selected_mode,
+                        "requested_scope": requested_scope,
+                        "default_execution_scope": default_scope,
+                        "default_intent": str(base_spec.task_profile.get("intent") or "mixed"),
+                        "default_workflow_lanes": list(base_spec.team_requirements.get("workflow_lanes") or []),
+                        "scope_conflict": True,
+                        "planning_decision": {
+                            "status": "awaiting_user_confirmation",
+                            "elapsed_ms": decision_elapsed_ms,
+                            **decision_diagnostics,
+                        },
+                    },
+                    "nodes": [],
+                    "edges": [],
+                },
+            )
+
         if decision is not None:
+            if confirmed_scope == "plan_only":
+                decision = _limit_decision_to_plan_only(decision)
             base_spec = team_spec_from_planning_decision(base_spec, decision)
         profile.update({"requested_mode": requested_mode, "selected_mode": selected_mode})
         spec = replace(base_spec, execution_profile=_runtime_execution_profile(profile))
@@ -2336,6 +2694,7 @@ class TeamGraphPlanner:
                     "fallback_from": None,
                     **decision_diagnostics,
                 } if decision else None,
+                requested_scope=str(profile.get("scope_confirmation") or (decision.requested_scope if decision else "uncertain")),
             )
 
         if selected_mode == "standard" and decision is not None:
@@ -2385,6 +2744,7 @@ class TeamGraphPlanner:
                     "fallback_from": None,
                     **decision_diagnostics,
                 },
+                requested_scope=str(profile.get("scope_confirmation") or decision.requested_scope),
             )
 
         try:
@@ -2454,4 +2814,5 @@ class TeamGraphPlanner:
             confidence=ai_confidence,
             extra_warnings=list(decision.critical_missing_info) if decision else [],
             critical_missing_info=list(decision.critical_missing_info) if decision else [],
+            requested_scope=str(profile.get("scope_confirmation") or (decision.requested_scope if decision else "uncertain")),
         )

@@ -303,7 +303,6 @@ def build_default_workflow_nodes(
     if not members:
         return [], []
     team_spec = team_spec if team_spec is not None else build_team_spec({"goal": goal})
-    execution_profile = team_spec.execution_profile
     planning = planning_modes({"planning": team_spec.planning})
     required_roles = list(team_spec.team_requirements.get("roles") or [])
     required_lanes = set(team_spec.team_requirements.get("workflow_lanes") or [])

@@ -4,6 +4,10 @@
 
 import { backendApi, type ModelOption, type RuntimeModelProfile, type TeamMemberModelBinding } from '../backend-client';
 import { isBusySession, notify, setActiveExternalTeamForSession, state } from '../state';
+import {
+  isExternalAgentSession,
+  isExternalTeamSession as isBoundExternalTeamSession,
+} from './external-agents-feature';
 import { composerWorkspaceId, ensureComposerDraftSession, getDraftSessionModelId, getSessionAgentDisplay, isDraftSession, setDraftSessionModelId } from './workspaces';
 
 export interface SessionModelBinding {
@@ -84,10 +88,8 @@ export function modelIdForNewCrewSession(): string {
 
   const binding = bindingsBySession.get(sessionId);
   const display = getSessionAgentDisplay(sessionId);
-  const provider = String(display?.agentLabel?.provider || '').trim().toLowerCase();
-  const isExternalIdentity = display?.agentBinding?.kind === 'external_agent'
-    || display?.agentBinding?.kind === 'external_team'
-    || Boolean(provider && !['crew', 'builtin', 'client'].includes(provider));
+  const isExternalIdentity = isExternalAgentSession(display?.agentBinding)
+    || isBoundExternalTeamSession(display?.agentBinding);
 
   if (binding?.source === 'external' || isExternalIdentity) return fallback;
   return activeComposerModelId() || fallback;
@@ -128,15 +130,7 @@ function externalSessionModelLabel(sessionId: string | null | undefined): string
   const binding = bindingsBySession.get(sessionId);
   if (binding?.source === 'external' && binding.model_label) return binding.model_label;
   const display = getSessionAgentDisplay(sessionId);
-  const provider = String(display?.agentLabel?.provider || '').toLowerCase();
-  if (
-    (display?.agentLabel?.model || display?.modelLabel)
-    && provider
-    && provider !== 'crew'
-    && provider !== 'builtin'
-    && provider !== 'client'
-    && provider !== 'team'
-  ) {
+  if (isExternalAgentSession(display?.agentBinding) && (display?.agentLabel?.model || display?.modelLabel)) {
     return display?.agentLabel?.model || display?.modelLabel || '';
   }
   return '';
@@ -297,8 +291,11 @@ export function syncSessionModelUi(): void {
 /** 外部 Team Session：优先读会话展示身份，draft/首发过渡期回退外源 Team 绑定。 */
 export function isExternalTeamSession(sessionId: string | null | undefined = state.activeSessionId): boolean {
   if (!sessionId) return false;
-  const provider = String(getSessionAgentDisplay(sessionId)?.agentLabel?.provider || '').trim().toLowerCase();
-  return provider === 'team' || Boolean(state.activeExternalTeamIdBySession[sessionId]);
+  const display = getSessionAgentDisplay(sessionId);
+  const binding = bindingsBySession.get(sessionId);
+  return isBoundExternalTeamSession(display?.agentBinding)
+    || binding?.source === 'team'
+    || Boolean(state.activeExternalTeamIdBySession[sessionId]);
 }
 
 /** 仅刷新模型按钮可用态；busy 高频变化时不触碰标签或外部身份展示。 */

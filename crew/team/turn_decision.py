@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from crew.core.types import Message
+from crew.core.text_parsing import extract_json_object
 
 
 TurnKind = Literal["direct_chat", "status_query", "new_workflow", "uncertain"]
@@ -199,14 +199,8 @@ async def _chat(provider: Any, messages: list[Message], *, max_tokens: int) -> A
 
 def _json_from_text(text: str) -> dict[str, Any]:
     body = str(text or "").strip()
-    if not body:
-        raise ValueError("empty team turn decision response")
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", body, flags=re.DOTALL)
-    if fenced:
-        body = fenced.group(1)
-    elif "{" in body and "}" in body:
-        body = body[body.find("{"):body.rfind("}") + 1]
-    parsed = json.loads(body)
-    if not isinstance(parsed, dict):
-        raise ValueError("team turn decision response must be a JSON object")
+    parsed = extract_json_object(text)
+    if parsed is None:
+        message = "empty team turn decision response" if not body else "invalid team turn decision JSON"
+        raise ValueError(message)
     return parsed

@@ -32,6 +32,7 @@ from crew.core.runctx import (
     current_session_id,
     current_subagent_notify_session,
     current_workspace_id,
+    touch_current_task_activity,
 )
 from crew.state.logging import get_logger
 from crew.core.errors import ToolError
@@ -443,6 +444,7 @@ async def _run_one_child(
                 break
             if progress_callback is not None:
                 progress_callback({
+                    "agent": label,
                     "tool_calls": tool_calls,
                     "last_tool": last_tool,
                     "partial_output": (final_text or partial)[-_PARTIAL_TAIL:],
@@ -517,6 +519,7 @@ async def _run_children(
     active: ActiveSubagents | None,
     idle_timeout: float,
     max_runtime: float,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
     """并发跑多个子 agent，结构化汇总（JSON）。specs 每项含 label/goal_text/spec。"""
     parent_session_id = current_session_id.get() or ""
@@ -533,6 +536,7 @@ async def _run_children(
                 active=active,
                 idle_timeout=idle_timeout,
                 max_runtime=max_runtime,
+                progress_callback=progress_callback,
             )
 
     results = await asyncio.gather(*(_guarded(item) for item in specs))
@@ -754,6 +758,13 @@ def register_subagent_tools(
             active=active,
             idle_timeout=idle_timeout,
             max_runtime=max_runtime,
+            progress_callback=lambda progress: touch_current_task_activity({
+                "last_tool": "delegate_task",
+                "tool_phase": "progress",
+                "subagent": progress.get("agent", ""),
+                "subagent_last_tool": progress.get("last_tool", ""),
+                "subagent_last_chunk": progress.get("last_chunk", ""),
+            }),
         )
 
     registry.register(
