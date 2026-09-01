@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from crew.agent.capabilities import capability_profile_ids
 from crew.agent.external.runtime_registry import resolve_runtime_display_badge
 from crew.gateway.session_context import SessionSource, build_session_key
 from crew.team.formation import (
@@ -306,7 +307,13 @@ def session_agent_label(
     getter = getattr(crew.session_store, "get_agent_config", None)
     config = getter(session_id, owner_account_id=owner_account_id) if callable(getter) else None
     executor = str((config or {}).get("executor") or "builtin").lower()
-    if bool((config or {}).get("inspiration_creation") or (config or {}).get("site_creation")):
+    capability_registry = getattr(crew, "capability_profiles", None)
+    if capability_registry is not None:
+        display = capability_registry.display_for(capability_profile_ids(config))
+        if display is not None:
+            return display.as_dict()
+    elif bool((config or {}).get("inspiration_creation") or (config or {}).get("site_creation")):
+        # Lightweight test doubles and older embedding hosts may not expose the registry.
         return {"name": "灵感", "provider": "sites", "display_badge": "◇"}
     if executor == "team":
         team_cfg = (config or {}).get("team") if isinstance((config or {}).get("team"), dict) else {}

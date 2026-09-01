@@ -121,4 +121,5 @@ def register_interaction_tools(registry: Registry) -> None:
         ui_label_template="询问用户",
         always_load=True,
         search_hint="ask user followup question clarify choices",
+        result_retention="important",
     )

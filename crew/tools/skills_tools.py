@@ -20,6 +20,7 @@ from crew.agent.skills import (
     resolve_skill_any,
 )
 from crew.core.errors import ToolError
+from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
 from crew.core.runctx import current_active_skill_packages, current_skill_scope
 from crew.tools.registry import Registry, tool_result
 from crew.tools.security_guard import authorize_file_tool
@@ -104,6 +105,25 @@ SKILLS_REPAIR_SCHEMA = {
         "required": [],
     },
 }
+
+
+def _skill_view_result_policy(args: dict[str, Any]) -> ToolResultPolicy:
+    """主说明是持续指令；技能目录下的其他文件是可去重资源。"""
+    name = str(args.get("name") or "").strip().casefold()
+    file_path = str(args.get("file_path") or "").strip().replace("\\", "/")
+    normalized_path = file_path.casefold()
+    if not file_path or normalized_path.rsplit("/", 1)[-1] in {
+        "skill.md",
+        "package.md",
+    }:
+        return ToolResultPolicy(
+            ToolResultRetention.INSTRUCTION,
+            identity=f"skill={name}",
+        )
+    return ToolResultPolicy(
+        ToolResultRetention.RESOURCE,
+        identity=f"skill={name}|file={normalized_path}",
+    )
 
 def _get_skill_category(skills: dict, slug: str) -> str:
     """从 SKILL.md frontmatter 取 category 字段（懒读取）。"""
@@ -363,6 +383,7 @@ def register_skills_tools(
         ui_label_template="查看技能列表",
         always_load=True,
         search_hint="list skills discover skill metadata",
+        result_retention=ToolResultRetention.TEMPORARY,
     )
     registry.register(
         name="skill_view",
@@ -374,6 +395,7 @@ def register_skills_tools(
         ui_label_template="阅读 {name}",
         always_load=True,
         search_hint="view skill read SKILL.md package instructions",
+        result_policy_resolver=_skill_view_result_policy,
     )
     registry.register(
         name="skill_package_open",
@@ -385,6 +407,7 @@ def register_skills_tools(
         ui_label_template="展开技能包 {name}",
         always_load=True,
         search_hint="open skill package expand package skills",
+        result_retention=ToolResultRetention.IMPORTANT,
     )
     registry.register(
         name="skills_audit",
@@ -396,6 +419,7 @@ def register_skills_tools(
         ui_label_template="检查技能",
         always_load=True,
         search_hint="audit skills validate metadata paths",
+        result_retention=ToolResultRetention.TEMPORARY,
     )
     registry.register(
         name="skills_repair",
@@ -411,4 +435,5 @@ def register_skills_tools(
         ui_label_template="修复技能",
         always_load=True,
         search_hint="repair skills update metadata migrate paths",
+        result_retention=ToolResultRetention.IMPORTANT,
     )

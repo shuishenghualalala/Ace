@@ -20,6 +20,11 @@ from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncIterator, Callable, Coroutine
 
 from crew.agent.compact import ContextCompactor, SummaryStore
+from crew.agent.capabilities import (
+    CapabilityProfileRegistry,
+    capability_profile_ids,
+    merge_disabled_skills,
+)
 from crew.agent.executor import create_executor
 from crew.agent.external.store import ExternalAgentStore
 from crew.agent.external.tools import register_external_agent_tools
@@ -385,6 +390,7 @@ class CrewApp:
         self.workspace_store = workspace_store
         self.memory = memory
         self.plugins = plugins
+        self.capability_profiles = CapabilityProfileRegistry()
         self.security_grants = GrantRegistry()
         self.security_approvals = ApprovalManager(self.security_grants)
         self.security_rules = SQLiteRuleStore(config.db_path, wal_enabled=config.sqlite_wal)
@@ -911,10 +917,19 @@ class CrewApp:
         )
         enabled_skills = ac.get("enabled_skills") if ac is not None else None
         disabled_skills = ac.get("disabled_skills") if ac is not None else None
+        session_capabilities = self.capability_profiles.resolve(
+            capability_profile_ids(resolved),
+            executor=executor_kind,
+            strict=False,
+        )
+        disabled_skills = self.capability_profiles.disabled_skills_for(
+            disabled_skills,
+            session_capabilities,
+        )
         browser_effective = self._browser_plugin_effective(owner, user_type)
         if not browser_effective:
             # 插件有效状态折算进 per-session skill 范围：关闭后下一轮不再出现
-            disabled_skills = [*(disabled_skills or []), "browser-use"]
+            disabled_skills = merge_disabled_skills(disabled_skills, ["browser-use"])
 
         if executor_kind in {"external", "acp"} and isinstance(executor_config, dict):
             executor_config = {
@@ -949,13 +964,18 @@ class CrewApp:
         else:
             # Wiki 管理 Skill 只属于固定 Wiki 预设；普通主 Agent 即使默认启用全部
             # Skills 也看不到它，避免通过说明间接获得管理工作流。
-            disabled_skills = [*(disabled_skills or []), "crew-wiki-curator"]
+            disabled_skills = merge_disabled_skills(disabled_skills, ["crew-wiki-curator"])
 
         main_tool_filter = self._single_agent_tool_filter(executor_kind, ac)
+        capability_scoped_tools = self.capability_profiles.filter_authorized_tools(
+            self.registry,
+            main_tool_filter,
+            session_capabilities,
+        )
         if is_wiki_agent_session:
-            tool_filter = self._wiki_agent_tool_filter(main_tool_filter)
+            tool_filter = self._wiki_agent_tool_filter(capability_scoped_tools)
         else:
-            tool_filter = main_tool_filter
+            tool_filter = capability_scoped_tools
             # 普通对话不能直接发现或调用任何 Wiki 工具；Wiki 页面会把消息直接
             # 发送到 preset_agent_type=Wiki 的持久化预设会话。
             tool_filter = exclude_toolsets(
@@ -963,6 +983,7 @@ class CrewApp:
                 tool_filter,
                 exact={"wiki.read", "wiki.manage"},
             )
+            system_prompt_override = session_capabilities.prompt or None
         if not browser_effective and tool_filter is not None:
             # 插件关闭时从允许工具中剔除 browser_use（skill 过滤见上）
             tool_filter = [name for name in tool_filter if name != "browser_use"]
@@ -1055,6 +1076,7 @@ class CrewApp:
             post_compact_max_chars_per_file=cfg.compaction_post_compact_max_chars_per_file,
             max_tool_result_chars=cfg.compaction_max_tool_result_chars,
             store=self.summary_store,
+            result_policy_resolver=self.registry.result_policy,
         )
         from crew.agent.loop import ToolCallGuardrailConfig
 
@@ -1304,6 +1326,11 @@ class CrewApp:
             if parent_snapshot is None:
                 ac = cfg.access_control.resolve_for(parent_user_type)
                 main_tools = self._single_agent_tool_filter("builtin", ac)
+                main_tools = self.capability_profiles.filter_authorized_tools(
+                    self.registry,
+                    main_tools,
+                    self.capability_profiles.resolve([]),
+                )
             else:
                 main_tools = ordered_intersection(self.registry.names(), parent_snapshot)
             tool_filter = self._wiki_agent_tool_filter(main_tools)
@@ -2775,11 +2802,16 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         workspace_store=workspace_store,
         security_service=app.security_service,
     )
-    from crew.sites import SQLiteSiteStore, SiteManager
+    from crew.sites import (
+        SQLiteSiteStore,
+        SiteManager,
+        register_site_capability_profiles,
+    )
     from crew.tools.blueprint_tools import register_blueprint_tools
     from crew.tools.site_tools import register_site_tools
 
     app.sites = SiteManager(SQLiteSiteStore(cfg.db_path, wal_enabled=cfg.sqlite_wal))
+    register_site_capability_profiles(app.capability_profiles)
     register_site_tools(
         registry,
         app.sites,

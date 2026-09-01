@@ -397,7 +397,28 @@
     <li><a href="product/companion.html"><code>product/companion.html</code></a><span class="d">Companion 产品文档</span></li>
   </ul>
 
-  <h2>5. 文档维护约定</h2>
+  <h2>5. 内置工具与功能速查</h2>
+  <p>Ace 当前内置 70+ 个工具（<a href="backend/modules/tools.html">完整清单见 tools 模块文档</a>）和 23 个内置技能（<a href="backend/modules/skills.html">完整清单见 skills 模块文档</a>）。下面按领域给出速查：</p>
+  <table>
+    <thead><tr><th>领域</th><th>代表工具 / 功能</th></tr></thead>
+    <tbody>
+      <tr><td>文件系统</td><td><code>file_read</code> / <code>file_write</code> / <code>file_delete</code> / <code>glob</code> / <code>grep</code> / <code>patch</code></td></tr>
+      <tr><td>终端与进程</td><td><code>terminal</code> / <code>process</code></td></tr>
+      <tr><td>网络与搜索</td><td><code>web_search</code> / <code>web_extract</code> / <code>vision_analyze</code></td></tr>
+      <tr><td>浏览器自动化</td><td><code>browser_navigate</code> / <code>browser_click</code> / <code>browser_type</code> / <code>browser_vision</code> / <code>browser_tabs</code> 等</td></tr>
+      <tr><td>子 Agent</td><td><code>delegate_task</code> / <code>run_agent</code> / <code>collect_subagent</code> / <code>delegate_to_external_agent</code></td></tr>
+      <tr><td>Team 协同</td><td><code>delegate_to_teammate</code> / <code>team_mention</code></td></tr>
+      <tr><td>Wiki 知识库</td><td><code>wiki_search</code> / <code>wiki_read</code> / <code>wiki_batch_ingest</code> / <code>wiki_capture_attachment</code> 等</td></tr>
+      <tr><td>计划模式</td><td><code>enter_plan_mode</code> / <code>exit_plan_mode</code> / <code>todo</code></td></tr>
+      <tr><td>Cron 定时</td><td><code>cron_create</code> / <code>cron_list</code> / <code>cron_pause</code> / <code>cron_resume</code></td></tr>
+      <tr><td>交互与记忆</td><td><code>ask_followup_question</code> / <code>memory</code></td></tr>
+      <tr><td>技能管理</td><td><code>skills_list</code> / <code>skill_view</code> / <code>skill_package_open</code></td></tr>
+      <tr><td>Sites / Blueprint</td><td><code>Canvas</code> / <code>Widget</code> / <code>Automation</code> / <code>Binding</code> / <code>publish_site</code></td></tr>
+      <tr><td>内置技能</td><td>对话中通过 <code>/技能名</code> 激活，如 <code>/docx</code>、<code>/webapp-building</code>、<code>/pdf</code>、<code>/cua-driver</code> 等</td></tr>
+    </tbody>
+  </table>
+
+  <h2>6. 文档维护约定</h2>
   <ul>
     <li>每次改动后端模块，若涉及职责、接口或新增子功能，同步更新 <code>docs/backend/modules/&lt;module&gt;.html</code>。</li>
     <li>新增模块时，复制 <a href="backend/modules/_template.html"><code>backend/modules/_template.html</code></a> 创建文档，并在此页与 <a href="backend/modules/index.html"><code>backend/modules/index.html</code></a> 登记。</li>

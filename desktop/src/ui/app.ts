@@ -490,7 +490,10 @@ function bindGlobalEvents(): () => void {
       const sessionId = createSessionInWorkspace(workspaceId, openSession);
       assignSessionAgentDisplay(sessionId, { name: '灵感', provider: 'sites', display_badge: '◇' });
       await backendApi.ensureSession(sessionId, { workspace_id: workspaceId, title: '新灵感' });
-      await backendApi.setSessionAgentConfig(sessionId, { executor: 'builtin', inspiration_creation: true });
+      await backendApi.setSessionAgentConfig(sessionId, {
+        executor: 'builtin',
+        capability_profiles: ['sites.authoring'],
+      });
       await refreshSessions();
     },
   });

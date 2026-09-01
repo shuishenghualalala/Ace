@@ -53,6 +53,8 @@ def register(ctx):
         toolset="demo",
         schema=SCHEMA,
         handler=handle_echo,
+        result_retention="resource",
+        result_identity_fields=("text",),
     )
     ctx.register_hook("pre_tool_call", block_secret)
 """.lstrip(),
@@ -73,6 +75,9 @@ async def test_directory_plugin_registers_tool_and_hook(tmp_path):
     assert loaded.tools_registered == ["demo_echo"]
     assert loaded.hooks_registered == ["pre_tool_call"]
     assert registry.names() == ["demo_echo"]
+    policy = registry.result_policy("demo_echo", {"text": "hello"})
+    assert policy.retention.value == "resource"
+    assert policy.identity == "text=hello"
 
     ok = await registry.execute(ToolCall("c1", "demo_echo", {"text": "hello"}))
     assert not ok.is_error

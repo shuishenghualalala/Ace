@@ -58,9 +58,12 @@
   <p>「灵感」对外是一个统一 App 库：用户在侧栏点「灵感」即看到当前账号所有 App，按更新时间倒序排列，卡片是懒加载的真实内容缩略预览。它对内仍然复用 <code>sites</code> 模块，并保留两种运行时——<span class="chip c-site">site</span> 构建产物型与 <span class="chip c-canvas">canvas</span> 声明式组件型——但图库、详情、对话 Surface、批注和四操作都不向用户暴露这一区别，只靠资源 ID 前缀在内部分发。</p>
   <p>整个系统的核心动力线是：Agent 在灵感会话里调用工具产出 App，工具返回一个稳定的 <code>InspirationSurface</code> 协议；这个协议既是聊天里的生成物卡片，也是右侧 Inspector 预览的锚点，还是图库列表项的来源。一条数据从需求到可使用 App 的全景如下：</p>
   <pre><code>用户「描述你想创建的 App」
-   <span class="flow-arrow">│</span>  新建 builtin Session（inspiration_creation=true，标题「灵感」）
+   <span class="flow-arrow">│</span>  新建 builtin Session（capability_profiles=["sites.authoring"]）
    <span class="flow-arrow">▼</span>
-Agent 加载 skill（webapp-building / blueprint 域）生成 App 源码或 Widget 声明
+主 Agent 解析 Capability Profile，叠加 Site/Blueprint toolset、Skill 与 Prompt
+   <span class="flow-arrow">│</span>  sites.authoring 组合 blueprint.authoring
+   <span class="flow-arrow">▼</span>
+主 Agent 加载 skill（webapp-building / blueprint 域）生成 App 源码或 Widget 声明
    <span class="flow-arrow">│</span>  调用工具：publish_site  /  Canvas.show / Widget.show
    <span class="flow-arrow">▼</span>
 后端 sites 模块分发（ID 前缀 site_/canvas_/widget_）
@@ -126,8 +129,22 @@ Agent 加载 skill（webapp-building / blueprint 域）生成 App 源码或 Widg
   <h3>2.4 ace-site:// 私有协议</h3>
   <p>预览不直连后端 HTTP 端口，而是走 Electron 私有 scheme <code>ace-site://{resource_id}/</code>。主进程 <code>protocol.handle</code> 把 hostname 当作 assetId，按前缀定 kind 并映射到当前认证 Gateway：site → <code>/api/sites/{id}/preview/{path}</code>、canvas → <code>/api/sites/canvases/{id}/render</code>、widget → <code>/api/sites/widgets/{id}/render/{path}</code>。ID 必须匹配 <code>/^(?:site|canvas|widget)_[0-9a-f]{12}$/i</code>，不接受任意 URL。这样预览鉴权由主进程统一注入，资源 ID 是唯一入口，后端再对 release/widget 根目录做二次边界校验。</p>
 
+  <h3>2.5 Capability Profile：Site 是主 Agent 的能力叠加层</h3>
+  <p>Site 不拥有独立 Agent，也不改变执行器。Session 的 <code>executor</code> 仍是 <code>builtin</code>，只通过 <code>capability_profiles</code> 指定附加能力。<code>sites.authoring</code> 提供 <code>sites</code> toolset、<code>webapp-building</code> Skill、灵感会话 Prompt 和显示信息，并通过 <code>includes</code> 组合 <code>blueprint.authoring</code>；后者独立拥有 <code>blueprint</code> toolset 及 Blueprint 域 Skills。</p>
+  <pre><code>普通会话：Main Agent
+Site 会话：Main Agent + sites.authoring + blueprint.authoring
+Blueprint 会话：Main Agent + blueprint.authoring</code></pre>
+  <p>Profile 的解析顺序是依赖优先、显式 Profile 后置。工具范围先由账号访问控制生成授权快照，再从快照中选择已激活 Feature 的 toolset，因此 Profile 不能扩大权限；Skill 的 <code>disabled=["*"]</code> 也保持最高优先级。未挂载 Profile 时，所有已注册 Profile 声明拥有的工具和 Skill 都从普通主 Agent 中隐藏。Profile 注销后，其 Feature 所有权声明在当前进程内继续保留，覆盖工具与 Profile 无法原子注销的短暂窗口，残留能力按默认拒绝处理。</p>
+  <table>
+    <thead><tr><th>Profile</th><th>toolset</th><th>Skills</th><th>组合关系</th></tr></thead>
+    <tbody>
+      <tr><td><code>sites.authoring</code></td><td><code>sites</code></td><td><code>webapp-building</code></td><td>包含 <code>blueprint.authoring</code></td></tr>
+      <tr><td><code>blueprint.authoring</code></td><td><code>blueprint</code></td><td><code>blueprint / automation / widget / widgetdesign / binding / canvas</code></td><td>可独立挂载</td></tr>
+    </tbody>
+  </table>
+
   <h2 id="tools">3. 工具（Agent Tools）</h2>
-  <p>Agent 不直接写文件入库，而是通过工具产出 App 并返回 Surface。灵感相关工具分两组：<code>sites</code> toolset 的 <code>publish_site</code>，以及 <code>blueprint</code> toolset 的四个 Blueprint 工具。所有工具 <code>always_load=True</code>，即开箱可用，无需额外注册。</p>
+  <p>Agent 不直接写文件入库，而是通过工具产出 App 并返回 Surface。灵感相关工具分两组：<code>sites</code> toolset 的 <code>publish_site</code>，以及 <code>blueprint</code> toolset 的四个 Blueprint 工具。工具仍随应用注册到共享 Registry，<code>always_load=True</code> 只控制已授权工具的披露方式；普通主 Agent 会在会话装配期排除这两个 Feature toolset，只有对应 Capability Profile 激活后才可见。</p>
 
   <h3>3.1 publish_site —— 构建产物型发布</h3>
   <table>
@@ -241,7 +258,7 @@ Agent 加载 skill（webapp-building / blueprint 域）生成 App 源码或 Widg
   <h2 id="lifecycle">6. 生命周期与状态</h2>
 
   <h3>6.1 灵感资源生命周期</h3>
-  <pre><code>新建（inspiration_creation=true builtin Session）
+  <pre><code>新建（builtin Session + capability_profiles=["sites.authoring"]）
   <span class="flow-arrow">→</span> 对话生成（工具产出 Surface）
   <span class="flow-arrow">→</span> 对话成果卡（点击后打开 Inspector 预览）
   <span class="flow-arrow">→</span> 指出要修改的位置（按需进入批注）
@@ -264,6 +281,10 @@ Agent 加载 skill（webapp-building / blueprint 域）生成 App 源码或 Widg
   <h3>6.6 用户体验收敛（2026-08-10）</h3>
   <p>灵感对用户只保留「成果」这一概念，site/canvas/widget、HTML、revision 等继续作为内部协议字段，不出现在成果卡和预览操作中。聊天内网站、看板和静态 HTML 统一渲染为一张可点击的灵感成果卡：整卡是单一入口，右侧使用箭头表达“查看”，不再同时展示“在 Crew 打开”或打开方式菜单。生成结果到达时不自动抢占 Inspector，用户点击卡片后才打开对应的网站或看板预览；历史回放仍可从同一 Surface 恢复。</p>
   <p>预览面板默认只展示成果内容；网站和看板的批注入口统一为「指出要修改的位置」，进入后通过点击元素产生 Composer 批注草稿。刷新、revision、整体批注/元素批注等运行时概念不作为普通用户操作暴露。低频的分享、固定和删除继续保留在图库详情的次级操作中，避免干扰查看与修改主路径。</p>
+
+  <h3>6.7 Session 能力迁移（2026-08-31）</h3>
+  <p>Desktop 新建灵感会话改写 <code>capability_profiles=["sites.authoring"]</code>。Gateway 写入 AgentConfig 时校验 Profile 是否存在、数据是否为字符串数组以及 executor 是否兼容；历史客户端传入 <code>inspiration_creation=true</code> 或 <code>site_creation=true</code> 时会规范化为新字段。数据库中的旧 Session 无需迁移，读取和 Agent 装配路径仍能识别两个旧标志。</p>
+  <p class="warning"><strong>当前阶段边界：</strong>本次完成的是 Session 级能力可逆化。<code>SiteManager</code>、API、调度器和 Desktop 导航仍由应用组合根统一启动；应用级 Feature 的 activate/deactivate、服务注销和前端 mount/dispose 属于下一阶段，不应把本次能力隔离误认为完整 Feature Runtime 已完成。</p>
 
   <h2 id="tradeoffs">7. 设计取舍</h2>
 
@@ -308,6 +329,8 @@ Agent 加载 skill（webapp-building / blueprint 域）生成 App 源码或 Widg
       <tr><td>后端·Blueprint</td><td><code>crew/sites/blueprint.py</code></td><td>Canvas/Widget/Binding/Automation 数据、Widget Runtime、调度与运行</td></tr>
       <tr><td>后端·路由</td><td><code>crew/gateway/routers/sites.py</code></td><td><code>/api/sites/inspirations</code> 统一 API、旧接口兼容、Canvas/Widget 渲染、预览 bridge 注入</td></tr>
       <tr><td>后端·工具</td><td><code>crew/tools/site_tools.py</code> / <code>crew/tools/blueprint_tools.py</code></td><td><code>publish_site</code>；Canvas/Widget/Automation/Binding 四工具 action 实现 + Surface 返回</td></tr>
+      <tr><td>Agent·能力内核</td><td><code>crew/agent/capabilities.py</code></td><td>Capability Profile 注册、依赖解析、配置规范化、授权工具选择和 Skill 禁用范围合成</td></tr>
+      <tr><td>Site·能力贡献</td><td><code>crew/sites/capabilities.py</code></td><td>注册 <code>sites.authoring</code> 与 <code>blueprint.authoring</code>，定义工具、Skill、Prompt、显示信息和组合关系</td></tr>
       <tr><td>前端·图库</td><td><code>desktop/src/ui/features/sites-page.ts</code></td><td>图库/详情/搜索/四操作/site Surface/批注草稿</td></tr>
       <tr><td>前端·Surface</td><td><code>desktop/src/ui/features/blueprint-surface.ts</code></td><td>canvas/widget Surface 渲染、revision 指纹刷新、嵌套 iframe 选区与批注合成</td></tr>
       <tr><td>前端·契约</td><td><code>desktop/src/ui/backend-client.ts</code></td><td>InspirationItem/Detail/Annotation/Surface 类型定义与 API 客户端</td></tr>
@@ -338,7 +361,7 @@ Agent 加载 skill（webapp-building / blueprint 域）生成 App 源码或 Widg
   <p>旧 site/canvas/widget/automation 接口继续保留，使已有客户端、数据和工具调用不失效。</p>
 
   <h2 id="summary">11. 小结</h2>
-  <p>把灵感功能当成一个系统看，它有三层稳定契约：底层是<strong>双运行时</strong>（site 构建产物 / canvas 声明式组件），靠 ID 前缀分发；中层是<strong>InspirationSurface 协议</strong>，把工具产出统一成图库、预览、历史回放的单一事实来源；上层是<strong>四操作生命周期</strong>（修改/分享/固定/删除），围绕 Surface 背后资源做受控管理。Agent 侧通过 <code>publish_site</code> + Blueprint 四工具产出 Surface，由 <code>webapp-building</code> 与 Blueprint 域 skill 决定走哪条执行路径。安全上靠 ace-site:// 私有协议、sticky 沙箱窗口、ZIP canonical 校验、owner 隔离四道独立边界纵深防御。理解了「工具产出 Surface、Surface 驱动一切」这条主线，就理解了灵感功能的全部设计意图。</p>
+  <p>把灵感功能当成一个系统看，它有四层稳定契约：Agent 层通过<strong>Capability Profile</strong>把 Site/Blueprint 能力按 Session 叠加到主 Agent；底层是<strong>双运行时</strong>（site 构建产物 / canvas 声明式组件），靠 ID 前缀分发；中层是<strong>InspirationSurface 协议</strong>，把工具产出统一成图库、预览、历史回放的单一事实来源；上层是<strong>四操作生命周期</strong>（修改/分享/固定/删除），围绕 Surface 背后资源做受控管理。安全上除 ace-site:// 私有协议、sticky 沙箱窗口、ZIP canonical 校验和 owner 隔离外，Profile 还必须服从账号工具与 Skill 策略，不能借能力叠加扩大授权。</p>
   <p><a href="index.html">返回后端模块索引</a></p>
 </main></body>
 </html>

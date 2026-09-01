@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from crew.core.errors import ToolError
+from crew.core.interfaces import ToolResultRetention
 from crew.security.outbound import (
     PublicRedirectApprovalRequired,
     fetch_public_http,
@@ -300,6 +301,7 @@ def register_web_tools(
         ui_label_template="搜索 {query}",
         should_defer=True,
         search_hint="web search internet query pages current information",
+        result_retention=ToolResultRetention.TEMPORARY,
     )
     registry.register(
         name="web_extract",
@@ -315,6 +317,7 @@ def register_web_tools(
         ui_label_template="读取网页 {url}",
         should_defer=True,
         search_hint="fetch extract webpage url article content",
+        result_retention=ToolResultRetention.TEMPORARY,
     )
     registry.register(
         name="vision_analyze",
@@ -330,4 +333,6 @@ def register_web_tools(
         ui_label_template="分析图片 {path}",
         should_defer=True,
         search_hint="vision image analyze dimensions local picture",
+        # 视觉结论可能昂贵且无法从普通文本工具恢复，按重要结果保护。
+        result_retention=ToolResultRetention.IMPORTANT,
     )

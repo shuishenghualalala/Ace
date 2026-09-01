@@ -21,6 +21,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk
@@ -77,6 +79,27 @@ class LLMProvider(ABC):
 # --------------------------------------------------------------------------- #
 # 工具层
 # --------------------------------------------------------------------------- #
+class ToolResultRetention(str, Enum):
+    """工具结果在 Agent 上下文中的保留方式。
+
+    这是工具自身的契约，不属于压缩器的工具名白名单。Feature 或插件注册工具时
+    声明语义，压缩器只按语义处理；未知工具默认按 IMPORTANT 保护。
+    """
+
+    TEMPORARY = "temporary"
+    RESOURCE = "resource"
+    INSTRUCTION = "instruction"
+    IMPORTANT = "important"
+
+
+@dataclass(frozen=True)
+class ToolResultPolicy:
+    """一次具体工具调用的结果保留策略。"""
+
+    retention: ToolResultRetention = ToolResultRetention.IMPORTANT
+    identity: str = ""
+
+
 class Tool(ABC):
     """单个工具。子类实现 name/description/parameters/run。"""
 
@@ -104,6 +127,10 @@ class Tool(ABC):
             },
         }
 
+    def result_policy(self, args: dict[str, Any]) -> ToolResultPolicy:
+        """返回结果保留策略；第三方 Tool 未声明时安全地保留重要结果。"""
+        return ToolResultPolicy()
+
 
 class ToolRegistry(ABC):
     """工具注册表，负责注册、查询、执行。"""
@@ -125,6 +152,10 @@ class ToolRegistry(ABC):
     def ui_meta(self, name: str) -> dict[str, str]:
         """返回仅用于前端展示的工具元数据；不进入 LLM tool schema。"""
         return {}
+
+    def result_policy(self, name: str, args: dict[str, Any]) -> ToolResultPolicy:
+        """解析一次工具调用的结果保留策略；未知工具默认按重要结果保护。"""
+        return ToolResultPolicy()
 
     @abstractmethod
     def list_schemas(

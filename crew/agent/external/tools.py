@@ -95,4 +95,5 @@ def register_external_agent_tools(
         ui_label_template="委派外部智能体 {agent_id}",
         should_defer=True,
         search_hint="delegate external agent local runtime acp cli",
+        result_retention="important",
     )

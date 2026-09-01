@@ -580,6 +580,7 @@ def register_delegate_tool(
         is_async=True,
         display_name="委派队友",
         ui_label_template="委派给 {member}",
+        result_retention="important",
     )
 
 
@@ -597,6 +598,7 @@ def register_plan_change_tool(
         is_async=True,
         display_name="变更计划",
         ui_label_template="变更 TeamPlan",
+        result_retention="important",
     )
 
 
@@ -624,4 +626,5 @@ def register_team_mention_tool(
             communication_router=communication_router,
         ),
         is_async=True,
+        result_retention="important",
     )

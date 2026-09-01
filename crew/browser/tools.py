@@ -384,4 +384,6 @@ def register_browser_tools(registry: Registry, manager: BrowserManager) -> None:
             ),
             permission_resolver=permission,
             permission_approver=approve,
+            # 页面 ref/截图/console 都随浏览器状态变化，旧结果只适合作为过程证据。
+            result_retention="temporary",
         )

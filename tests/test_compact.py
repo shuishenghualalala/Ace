@@ -6,6 +6,8 @@ from crew.agent.compact import estimate_tokens
 from crew.agent.compact.microcompact import (
     CLEARED_PLACEHOLDER,
     FILE_UNCHANGED_STUB,
+    INSTRUCTION_REPLACED_STUB,
+    RESOURCE_REPLACED_STUB,
     TOOL_SUMMARY_PREFIX,
     micro_compact,
 )
@@ -13,6 +15,7 @@ from crew.agent.compact.pipeline import ContextCompactor
 from crew.agent.compact.store import SummaryState, SummaryStore
 from crew.agent.compact.summary import SUMMARY_MARKER
 from crew.core.errors import ProviderError
+from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
 from crew.core.types import ChatResponse, Message, ToolCall
 
 
@@ -48,12 +51,38 @@ def _tool_msg(i: int) -> Message:
     return Message.tool(tool_call_id=f"call_{i}", content=f"工具结果{i}" * 50, name="Read")
 
 
+def _test_result_policy(tool_name: str, args: dict) -> ToolResultPolicy:
+    if tool_name in {"Read", "terminal"}:
+        return ToolResultPolicy(ToolResultRetention.TEMPORARY)
+    if tool_name == "file_read":
+        path = str(args.get("path") or "")
+        return ToolResultPolicy(
+            ToolResultRetention.RESOURCE,
+            identity=f"path={path}" if path else "",
+        )
+    if tool_name == "skill_view":
+        name = str(args.get("name") or "")
+        file_path = str(args.get("file_path") or "")
+        if file_path:
+            return ToolResultPolicy(
+                ToolResultRetention.RESOURCE,
+                identity=f"skill={name}|file={file_path}",
+            )
+        return ToolResultPolicy(
+            ToolResultRetention.INSTRUCTION,
+            identity=f"skill={name}",
+        )
+    return ToolResultPolicy()
+
+
 # --------------------------------------------------------------------------- #
 # L1 MicroCompact
 # --------------------------------------------------------------------------- #
 def test_l1_clears_old_tool_results():
     msgs = [Message.user("开始")] + [_tool_msg(i) for i in range(10)]
-    out = micro_compact(msgs, keep_recent_tools=3)
+    out = micro_compact(
+        msgs, keep_recent_tools=3, result_policy_resolver=_test_result_policy
+    )
 
     assert len(out) == len(msgs)  # 长度不变
     tools = [m for m in out if m.role == "tool"]
@@ -68,21 +97,29 @@ def test_l1_clears_old_tool_results():
 
 def test_l1_noop_when_under_threshold():
     msgs = [Message.user("hi")] + [_tool_msg(i) for i in range(3)]
-    out = micro_compact(msgs, keep_recent_tools=6)
+    out = micro_compact(
+        msgs, keep_recent_tools=6, result_policy_resolver=_test_result_policy
+    )
     assert out is msgs  # 同一引用，瞬时 no-op
 
 
 def test_l1_idempotent():
     msgs = [Message.user("开始")] + [_tool_msg(i) for i in range(10)]
-    once = micro_compact(msgs, keep_recent_tools=3)
-    twice = micro_compact(once, keep_recent_tools=3)
+    once = micro_compact(
+        msgs, keep_recent_tools=3, result_policy_resolver=_test_result_policy
+    )
+    twice = micro_compact(
+        once, keep_recent_tools=3, result_policy_resolver=_test_result_policy
+    )
     assert [m.content for m in once] == [m.content for m in twice]
 
 
 def test_l1_does_not_mutate_input():
     msgs = [_tool_msg(i) for i in range(10)]
     before = [m.content for m in msgs]
-    micro_compact(msgs, keep_recent_tools=3)
+    micro_compact(
+        msgs, keep_recent_tools=3, result_policy_resolver=_test_result_policy
+    )
     assert [m.content for m in msgs] == before  # 入参未被修改
 
 
@@ -93,11 +130,17 @@ def test_compact_preview_view_matches_real_l1_without_calling_provider():
         token_budget=1_000_000,
         keep_recent_tools=2,
         max_tool_result_chars=20_000,
+        result_policy_resolver=_test_result_policy,
     )
     msgs = [Message.user("开始")] + [_tool_msg(i) for i in range(12)]
 
     preview = comp.compact_preview_view(msgs)
-    expected = micro_compact(msgs, keep_recent_tools=2, max_tool_result_chars=20_000)
+    expected = micro_compact(
+        msgs,
+        keep_recent_tools=2,
+        max_tool_result_chars=20_000,
+        result_policy_resolver=_test_result_policy,
+    )
 
     assert [message.content for message in preview] == [message.content for message in expected]
     assert estimate_tokens(preview) < estimate_tokens(msgs)
@@ -122,26 +165,31 @@ def test_l1_file_read_dedup_same_content():
     """相同路径的 file_read 重复返回相同内容时，旧结果用 FILE_UNCHANGED_STUB。"""
     same_result = "相同的文件内容" * 100
     msgs = _file_read_msgs(5, "/tmp/test.txt", lambda _i: same_result)
-    out = micro_compact(msgs, keep_recent_tools=1)
+    out = micro_compact(
+        msgs, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
     tools = [m for m in out if m.role == "tool"]
 
     # 最近 1 条保留原样
     assert tools[4].content == same_result
-    # 第 0 条首次出现，保留原内容
-    assert tools[0].content == same_result
-    # 第 1-3 条与最近一次相同，用 stub
+    # 同一资源只保留最新版本，前 4 条相同内容都用 unchanged stub。
     stub = FILE_UNCHANGED_STUB.format(path="/tmp/test.txt")
-    assert all(t.content == stub for t in tools[1:4])
+    assert all(t.content == stub for t in tools[:4])
 
 
 def test_l1_file_read_dedup_different_content():
     """相同路径的 file_read 返回不同内容时，各自保留原内容。"""
     msgs = _file_read_msgs(5, "/tmp/test.txt", lambda i: f"内容版本{i}" * 50)
-    out = micro_compact(msgs, keep_recent_tools=1)
+    out = micro_compact(
+        msgs, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
     tools = [m for m in out if m.role == "tool"]
 
-    # 所有内容都不同，不应出现 stub
-    assert all(FILE_UNCHANGED_STUB.split("{", 1)[0] not in t.content for t in tools[:4])
+    # 旧版本明确标记为已被新资源替换，最新版本保持完整。
+    assert all(
+        t.content.startswith(RESOURCE_REPLACED_STUB.split("{", 1)[0])
+        for t in tools[:4]
+    )
     assert tools[4].content == "内容版本4" * 50
 
 
@@ -162,15 +210,16 @@ def test_l1_file_read_dedup_multiple_paths():
         msgs.append(Message.assistant("读B", tool_calls=tc_b))
         msgs.append(Message.tool(tool_call_id=f"call_b_{i}", content=content_b, name="file_read"))
 
-    out = micro_compact(msgs, keep_recent_tools=2)
+    out = micro_compact(
+        msgs, keep_recent_tools=2, result_policy_resolver=_test_result_policy
+    )
     tools = [m for m in out if m.role == "tool"]
 
-    # 最近 2 条保留
+    # 每个资源只保留最近版本。
     assert tools[4].content == content_a
     assert tools[5].content == content_b
-    # 前 4 条：第 0 轮首次出现保留，第 1 轮重复用 stub
-    assert tools[0].content == content_a
-    assert tools[1].content == content_b
+    assert tools[0].content == FILE_UNCHANGED_STUB.format(path="/tmp/a.txt")
+    assert tools[1].content == FILE_UNCHANGED_STUB.format(path="/tmp/b.txt")
     assert tools[2].content == FILE_UNCHANGED_STUB.format(path="/tmp/a.txt")
     assert tools[3].content == FILE_UNCHANGED_STUB.format(path="/tmp/b.txt")
 
@@ -180,7 +229,9 @@ def test_l1_non_file_read_tools_use_summary():
     msgs = [Message.user("开始")]
     for i in range(5):
         msgs.append(Message.tool(tool_call_id=f"call_{i}", content=f"terminal结果{i}" * 50, name="terminal"))
-    out = micro_compact(msgs, keep_recent_tools=1)
+    out = micro_compact(
+        msgs, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
     tools = [m for m in out if m.role == "tool"]
     assert tools[4].content == "terminal结果4" * 50  # 最近 1 条保留原内容
     # 前 4 条压缩为信息摘要，保留工具名
@@ -188,39 +239,117 @@ def test_l1_non_file_read_tools_use_summary():
     assert all("[terminal]" in m.content for m in tools[:4])
 
 
-def test_l1_no_tool_name_falls_back_to_placeholder():
-    """完全拿不到工具名（无 tool_call_map 且 m.name 为空）时降级为纯占位符。"""
+def test_l1_unknown_tool_defaults_to_important():
+    """拿不到工具名时按重要结果保护，未知插件结果不会被误清理。"""
     msgs = [Message.user("开始")]
     for i in range(5):
         # name="" 且无对应 assistant(tool_calls)
         msgs.append(Message.tool(tool_call_id=f"call_{i}", content=f"结果{i}" * 50, name=""))
-    out = micro_compact(msgs, keep_recent_tools=1)
+    out = micro_compact(
+        msgs, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
     tools = [m for m in out if m.role == "tool"]
     assert tools[4].content == "结果4" * 50
-    assert all(m.content == CLEARED_PLACEHOLDER for m in tools[:4])
+    assert all(m.content == f"结果{i}" * 50 for i, m in enumerate(tools))
 
 
 def test_l1_file_read_dedup_idempotent():
     """已包含 FILE_UNCHANGED_STUB 的结果再次压缩应保持不变。"""
     same_result = "相同的文件内容" * 50
     msgs = _file_read_msgs(5, "/tmp/test.txt", lambda _i: same_result)
-    once = micro_compact(msgs, keep_recent_tools=1)
-    twice = micro_compact(once, keep_recent_tools=1)
+    once = micro_compact(
+        msgs, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
+    twice = micro_compact(
+        once, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
     assert [m.content for m in once] == [m.content for m in twice]
 
 
-def test_l1_file_read_without_tool_call_map_fallback():
-    """file_read 消息找不到 assistant(tool_calls) 且无参数时，用 m.name 生成信息摘要。"""
+def test_l1_resource_without_identity_defaults_to_full_result():
+    """资源缺少稳定标识时不猜测、不清理，避免误删未知内容。"""
     msgs = [
         Message.tool(tool_call_id="call_0", content="文件内容" * 50, name="file_read"),
         Message.tool(tool_call_id="call_1", content="文件内容" * 50, name="file_read"),
     ]
-    out = micro_compact(msgs, keep_recent_tools=1)
+    out = micro_compact(
+        msgs, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
     tools = [m for m in out if m.role == "tool"]
     assert tools[1].content == "文件内容" * 50  # 最近 1 条保留
-    # 无参数的 file_read 降级为信息摘要（保留工具名 + 内容长度）
-    assert tools[0].content.startswith(TOOL_SUMMARY_PREFIX)
-    assert "[file_read]" in tools[0].content
+    assert tools[0].content == "文件内容" * 50
+
+
+def test_l1_many_temporary_results_do_not_evict_loaded_skill():
+    """Skill 后出现超过保留窗口的并行结果时，完整指令仍对模型可见。"""
+    skill_call = ToolCall(
+        id="skill_call",
+        name="skill_view",
+        arguments={"name": "sites-building"},
+    )
+    skill_content = "完整建站指令" * 100
+    msgs = [
+        Message.user("创建网站"),
+        Message.assistant("读取技能", tool_calls=[skill_call]),
+        Message.tool("skill_call", skill_content, name="skill_view"),
+    ]
+    for i in range(12):
+        msgs.append(
+            Message.tool(
+                tool_call_id=f"terminal_{i}",
+                content=f"临时输出{i}" * 50,
+                name="terminal",
+            )
+        )
+
+    out = micro_compact(
+        msgs, keep_recent_tools=3, result_policy_resolver=_test_result_policy
+    )
+    skill_result = next(m for m in out if m.tool_call_id == "skill_call")
+    terminal_results = [m for m in out if m.name == "terminal"]
+    assert skill_result.content == skill_content
+    assert sum(m.content.startswith(TOOL_SUMMARY_PREFIX) for m in terminal_results) == 9
+
+
+def test_l1_important_result_does_not_consume_temporary_window():
+    """用户回答等重要结果既不被清理，也不挤占临时结果保留窗口。"""
+    msgs = [
+        Message.tool("answer", '{"answers":[{"value":"保留方案A"}]}', name="ask_followup_question"),
+        *[
+            Message.tool(f"terminal_{i}", f"输出{i}" * 50, name="terminal")
+            for i in range(5)
+        ],
+    ]
+    out = micro_compact(
+        msgs, keep_recent_tools=2, result_policy_resolver=_test_result_policy
+    )
+    assert out[0].content == '{"answers":[{"value":"保留方案A"}]}'
+    assert all(m.content.startswith(TOOL_SUMMARY_PREFIX) for m in out[1:4])
+    assert all(not m.content.startswith(TOOL_SUMMARY_PREFIX) for m in out[4:])
+
+
+def test_l1_instruction_keeps_only_latest_loaded_version():
+    msgs: list[Message] = []
+    for i, content in enumerate(("旧版指令", "新版指令")):
+        call = ToolCall(
+            id=f"skill_{i}",
+            name="skill_view",
+            arguments={"name": "sites-building"},
+        )
+        msgs.extend(
+            [
+                Message.assistant("读取技能", tool_calls=[call]),
+                Message.tool(call.id, content, name="skill_view"),
+            ]
+        )
+    out = micro_compact(
+        msgs, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
+    tools = [m for m in out if m.role == "tool"]
+    assert tools[0].content == INSTRUCTION_REPLACED_STUB.format(
+        identity="skill=sites-building"
+    )
+    assert tools[1].content == "新版指令"
 
 
 # --------------------------------------------------------------------------- #
@@ -261,10 +390,24 @@ def test_post_compact_limits_file_count_and_length():
         ("/tmp/d.txt", "D" * 100),
     ])
     contents = collect_recent_file_contents(msgs, max_files=2, max_chars_per_file=10)
-    # 只保留最近 2 个文件（按路径排序后取最后）
+    # 只保留按读取顺序计算的最近 2 个文件。
     assert set(contents.keys()) == {"/tmp/c.txt", "/tmp/d.txt"}
     assert contents["/tmp/d.txt"].startswith("D" * 10)
     assert "内容已截断" in contents["/tmp/d.txt"]
+
+
+def test_post_compact_file_limit_uses_actual_read_order():
+    """文件恢复按最后读取顺序选择，而不是按路径字母顺序。"""
+    from crew.agent.compact.post_compact import collect_recent_file_contents
+
+    msgs = _build_file_read_history([
+        ("/tmp/z-first.txt", "旧读取"),
+        ("/tmp/a-latest.txt", "最新读取"),
+    ])
+    contents = collect_recent_file_contents(
+        msgs, max_files=1, max_chars_per_file=5000
+    )
+    assert contents == {"/tmp/a-latest.txt": "最新读取"}
 
 
 def test_post_compact_builds_attachment_message():
@@ -297,6 +440,70 @@ def test_post_compact_no_attachments_when_no_files():
     ]
     attachments = build_post_compact_file_attachments(msgs)
     assert attachments == []
+
+
+def test_post_compact_protected_results_survive_multiple_compactions():
+    from crew.agent.compact.post_compact import (
+        POST_COMPACT_RESULTS_MARKER,
+        build_post_compact_attachments,
+    )
+
+    skill_call = ToolCall(
+        id="skill", name="skill_view", arguments={"name": "sites-building"}
+    )
+    answer_call = ToolCall(
+        id="answer", name="ask_followup_question", arguments={"questions": []}
+    )
+    msgs = [
+        Message.assistant("读取", tool_calls=[skill_call, answer_call]),
+        Message.tool("skill", "必须遵循的完整 Skill 指令", name="skill_view"),
+        Message.tool("answer", "用户选择：方案 A", name="ask_followup_question"),
+    ]
+    first = build_post_compact_attachments(
+        msgs,
+        result_policy_resolver=_test_result_policy,
+        max_resources=3,
+        max_chars_per_resource=5000,
+    )
+    second = build_post_compact_attachments(
+        first,
+        result_policy_resolver=_test_result_policy,
+        max_resources=3,
+        max_chars_per_resource=5000,
+    )
+
+    assert len(first) == len(second) == 2
+    assert all(POST_COMPACT_RESULTS_MARKER in m.content for m in second)
+    assert any("完整 Skill 指令" in m.content for m in second)
+    assert any("用户选择：方案 A" in m.content for m in second)
+
+
+def test_registry_exposes_skill_and_unknown_tool_result_policies():
+    from crew.tools.registry import Registry
+    from crew.tools.skills_tools import register_skills_tools
+
+    registry = Registry()
+    register_skills_tools(registry)
+    registry.register(
+        name="plugin_unknown",
+        schema={"name": "plugin_unknown", "parameters": {}},
+        handler=lambda _args: "result",
+    )
+
+    main = registry.result_policy("skill_view", {"name": "sites-building"})
+    explicit_main = registry.result_policy(
+        "skill_view", {"name": "sites-building", "file_path": "SKILL.md"}
+    )
+    reference = registry.result_policy(
+        "skill_view",
+        {"name": "sites-building", "file_path": "references/runtime.md"},
+    )
+    unknown = registry.result_policy("plugin_unknown", {})
+
+    assert main.retention is ToolResultRetention.INSTRUCTION
+    assert explicit_main.retention is ToolResultRetention.INSTRUCTION
+    assert reference.retention is ToolResultRetention.RESOURCE
+    assert unknown.retention is ToolResultRetention.IMPORTANT
 
 
 # --------------------------------------------------------------------------- #

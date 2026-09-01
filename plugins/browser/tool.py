@@ -1881,6 +1881,8 @@ def register_browser_use_tool(
         should_defer=False,
         permission_resolver=tool.permission_resolver,
         permission_approver=tool.permission_approver,
+        # 页面 snapshot/ref 随操作代次失效，旧结果只作为临时过程证据。
+        result_retention="temporary",
     )
     ctx.register_tool(
         name=ADVANCED_TOOL_NAME,
@@ -1898,5 +1900,6 @@ def register_browser_use_tool(
         ),
         permission_resolver=tool.permission_resolver,
         permission_approver=tool.permission_approver,
+        result_retention="temporary",
     )
     return tool

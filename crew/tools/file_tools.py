@@ -26,6 +26,7 @@ from typing import Any, Callable
 import wcmatch.glob as wcglob
 
 from crew.core.errors import ToolError
+from crew.core.interfaces import ToolResultRetention
 from crew.tools.file_utils import (
     _check_sensitive_path,
     _detect_line_ending,
@@ -761,6 +762,7 @@ def register_file_tools(
 ui_label_template="查找 {pattern}",
         always_load=True,
         search_hint="search files grep ripgrep find filename content glob",
+        result_retention=ToolResultRetention.TEMPORARY,
     )
     registry.register(
         name="grep",
@@ -774,6 +776,7 @@ ui_label_template="查找 {pattern}",
         is_async=True,
         display_name="搜索内容",
         ui_label_template="搜索 {pattern}",
+        result_retention=ToolResultRetention.TEMPORARY,
     )
     registry.register(
         name="patch",
@@ -787,6 +790,7 @@ ui_label_template="查找 {pattern}",
         is_async=True,
         display_name="修改文件",
         ui_label_template="修改 {path}",
-always_load=True,
+        always_load=True,
         search_hint="patch edit replace modify file text",
+        result_retention=ToolResultRetention.TEMPORARY,
     )

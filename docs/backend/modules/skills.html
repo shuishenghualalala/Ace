@@ -47,6 +47,7 @@
       <tr><td>用户</td><td>get_crew_home()/skills/</td><td>get_user_skills_dir()</td></tr>
     </tbody>
   </table>
+
   <p>覆盖优先级：user &gt; plugin &gt; builtin（用户覆盖同名插件/内置）。</p>
 
   <h3>2.2 可安装源（仅展示，未安装不可调用）</h3>
@@ -59,15 +60,51 @@
   </table>
   <p>本地源是跨 agent 共享的 skill 仓库（如 <code>npx skills add larksuite/cli</code> 安装的飞书 skills），默认 <code>~/.agents/skills</code>，可用 env <code>CREW_LOCAL_SKILLS_DIR</code> 覆盖。不扫 <code>~/.claude/skills</code>（其内容为软链到 <code>~/.agents/skills</code>，会重复）。</p>
 
-  <h2>3. 安装机制</h2>
-  <h3>3.1 Optional（仓库随附）</h3>
+  <h2>3. 内置技能清单</h2>
+  <p>以下技能随仓库内置在 <code>crew/skills/</code> 下，用户可在对话中通过 <code>/技能名</code> 激活。</p>
+  <table>
+    <thead><tr><th>技能名</th><th>中文名</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>agent-guide</code></td><td>使用手册</td><td>回答平台使用问题，如技能安装、卸载、技能存放路径等。</td></tr>
+      <tr><td><code>automation</code></td><td>自动化管理</td><td>创建、读取、更新、删除、运行、取消、调度、条件触发或检查 Daimon Blueprint 自动化及其运行记录。</td></tr>
+      <tr><td><code>binding</code></td><td>绑定管理</td><td>创建、读取、验证、修复、删除或排查 Blueprint 自动化与 Widget 之间的绑定。</td></tr>
+      <tr><td><code>blueprint</code></td><td>蓝图路由</td><td>在 Blueprint 的自动化、Widget、绑定和画布工具之间做选择或路由。</td></tr>
+      <tr><td><code>canvas</code></td><td>画布管理</td><td>创建、读取、更新、删除 Blueprint 画布，以及放置、移动、调整 Widget 布局。</td></tr>
+      <tr><td><code>content-research-writer</code></td><td>内容研究与写作</td><td>协助撰写高质量内容，进行研究、添加引用、优化开头、迭代大纲并提供实时反馈。</td></tr>
+      <tr><td><code>crew-wiki-curator</code></td><td>Wiki 管理规范</td><td>维护 Crew Wiki 知识库的结构规范、操作流程和质量标准。</td></tr>
+      <tr><td><code>cua-driver</code></td><td>桌面自动化</td><td>使用 CUA Driver 控制本机原生桌面应用，并在每次操作后验证界面状态。</td></tr>
+      <tr><td><code>docx</code></td><td>Word 文档处理</td><td>创建、编辑或分析 .docx 格式的 Word 文档。</td></tr>
+      <tr><td><code>find-skill-skillhub</code></td><td>SkillHub 技能搜索</td><td>在 SkillHub 平台查找/搜索 Skill 技能，支持关键词分词搜索与分类筛选。</td></tr>
+      <tr><td><code>github-advanced-search</code></td><td>GitHub 高级搜索</td><td>GitHub 高级搜索与开源项目筛选，构造精确查询、生成搜索 URL、评估项目价值。</td></tr>
+      <tr><td><code>image-understanding</code></td><td>图片理解</td><td>使用用户配置的 OpenAI 兼容视觉模型分析本地图片，支持 Wiki 图片材料解析。</td></tr>
+      <tr><td><code>md-to-pdf</code></td><td>Markdown 转 PDF</td><td>将 Markdown 文档转换为 PDF 格式，适用于文档导出、报告生成或共享。</td></tr>
+      <tr><td><code>pdf</code></td><td>PDF 处理</td><td>创建和处理 PDF 文件，支持生成报告、论文、图表、表格、公式、代码文档及页面处理。</td></tr>
+      <tr><td><code>process-doc</code></td><td>业务流程文档</td><td>记录业务流程——流程图、RACI 和 SOP，适用于流程正式化、职责明确、交接或审计。</td></tr>
+      <tr><td><code>scientific-problem-selection</code></td><td>科学问题选择</td><td>帮助科学家进行科研问题选择、项目构思、卡壳项目排障和战略性科学决策。</td></tr>
+      <tr><td><code>seaborn-visualization</code></td><td>Seaborn 数据可视化</td><td>图表绘制、统计可视化、Seaborn/Matplotlib/Pandas 报表生成，支持中文图表标签。</td></tr>
+      <tr><td><code>skill-creator</code></td><td>技能创建器</td><td>创建新技能、修改或优化现有技能、运行评估测试技能性能。</td></tr>
+      <tr><td><code>video-understanding</code></td><td>视频理解</td><td>使用用户配置的外部视频分析服务理解本地视频，支持 Wiki 视频材料解析。</td></tr>
+      <tr><td><code>webapp-building</code></td><td>Web 应用构建</td><td>使用 TypeScript、Tailwind CSS 和 shadcn/ui 在本地构建现代 React Web 应用。</td></tr>
+      <tr><td><code>widget</code></td><td>Widget 组件管理</td><td>创建、显示、更新、验证、删除、渲染或排障 Blueprint Widget 及其响应式页面。</td></tr>
+      <tr><td><code>widgetdesign</code></td><td>Widget 设计</td><td>创建或审查响应式 Daimon/Kimi 对话式、Blueprint 或 Canvas Widget 的设计规范与指南。</td></tr>
+      <tr><td><code>xlsx</code></td><td>Excel 电子表格处理</td><td>创建、编辑、分析或转换 Excel、CSV 等电子表格文件。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>3.1 Skill 读取生命周期</h3>
+  <p><code>skill_view(name)</code> 返回主 <code>SKILL.md</code> 或 <code>PACKAGE.md</code> 时，结果标记为持续指令；后续即使出现大量终端、Canvas、Widget 等工具调用，也不会被日常微压缩清除。<code>skill_view(name, file_path)</code> 返回引用文件时按资源处理，同一 Skill 路径只保留最近版本。</p>
+  <p>上下文接近上限、必须生成完整摘要时，最近 5 个已加载 Skill 会作为受保护附件恢复；单 Skill 最多保留 20000 字符，总附件另有上限。恢复内容来自会话内已经授权返回的结果，不会在压缩阶段直接读取文件系统。</p>
+  <p><code>skill_view</code> 同时纳入只读工具防循环：同一 name/file_path 连续返回相同内容会先提示模型使用现有结果，达到配置阈值后停止重复调用。</p>
+
+  <h2>4. 安装机制</h2>
+  <h3>4.1 Optional（仓库随附）</h3>
   <p><code>install_skill</code> 从 <code>list_optional_skills()</code> 解析源，<code>_install_skill_tree</code> 在 user dir 内分阶段 <code>copytree</code> + <code>_validate_skill_tree</code> 校验后同文件系统 <code>rename</code> 原子发布。失败回滚 tombstone。</p>
-  <h3>3.2 本地（软链）</h3>
+  <h3>4.2 本地（软链）</h3>
   <p>optional 找不到时 fallback <code>list_local_skills()</code>。<code>_install_local_skill_link</code> 在 user dir 建 <code>os.symlink</code> 指向 <code>~/.agents/skills/&lt;name&gt;</code>，源更新自动同步；卸载仅 <code>os.unlink</code> 软链，<b>不递归删源</b>。</p>
   <pre><code>get_crew_home()/skills/lark-doc  --symlink-->  ~/.agents/skills/lark-doc</code></pre>
   <p><code>list_skills</code> 的 <code>is_user</code> 判定用 <code>resolve_skill_path</code>：软链 skill 因受信任根放行通过，正确标记 <code>source=user</code>（不误判 builtin）。</p>
 
-  <h2>4. 安全校验（核心）</h2>
+  <h2>5. 安全校验（核心）</h2>
   <p><code>resolve_skill_path(path, allowed_root)</code> 解析路径（跟随软链），证明最终目标在 allowed_root 内，越界则抛 <code>SkillPathError</code>。被 <code>scan_skills</code> / <code>_scan_dir</code> / <code>_iter_skill_files</code> / <code>_validate_skill_tree</code> / <code>read_skill_text</code> / <code>uninstall</code> 全链路调用。</p>
   <div class="warn">
     <b>软链放行边界（本地 skill 关键）</b>：本地 skill 软链指向 <code>~/.agents/skills</code>（在 user dir 外），默认会被判越界、全链路加载失败。为此引入 <code>_trusted_link_target_roots()</code>（返回 <code>[~/.agents/skills]</code>），<code>resolve_skill_path</code> 越界时追加检查——resolved 落在受信任根内则放行。
@@ -81,7 +118,7 @@
     <b>一处改动打通全链路</b>：仅在 <code>resolve_skill_path</code> 加受信任根放行，scan/validate/view/uninstall 自动接受本地软链 skill，无需逐点打补丁。安全边界由"只放行 <code>~/.agents/skills</code> 这一个根"保证。
   </div>
 
-  <h2>5. API（crew/gateway/routers/misc.py）</h2>
+  <h2>6. API（crew/gateway/routers/misc.py）</h2>
   <table>
     <thead><tr><th>路由</th><th>说明</th></tr></thead>
     <tbody>
@@ -93,7 +130,7 @@
   </table>
   <p>审计日志 <code>get_crew_home()/logs/global-skills-audit.jsonl</code> 记录所有 install/uninstall（<code>source</code> 字段自由字符串，本地安装传 <code>desktop-api</code> 等，无需 schema 改动）。</p>
 
-  <h2>6. 数据流</h2>
+  <h2>7. 数据流</h2>
   <pre><code>~/.agents/skills/&lt;name&gt;/SKILL.md
    │  list_local_skills()（_parse_listing_skill，source=local）
    ▼
@@ -105,10 +142,11 @@ get_crew_home()/skills/&lt;name&gt;  --symlink-->  ~/.agents/skills/&lt;name&gt;
    ▼
 对话中 /&lt;name&gt;  ──►  resolve_skill  ──►  build_skill_activation</code></pre>
 
-  <h2>7. 测试</h2>
+  <h2>8. 测试</h2>
   <p><code>tests/test_local_skills.py</code>（8 例）：扫描发现、软链安装、scan 加载、source 判定（user 不误判 builtin）、卸载删链不删源、安全边界（软链到白名单外被拒）、已安装不重复、slug 不存在。</p>
   <p><code>tests/gateway/test_global_skills_api.py</code>：store 路由响应含 <code>local</code> 字段。</p>
   <p><code>desktop/tests/unit/skills-global-scope.test.ts</code>：本地徽章、软链文案、<code>~/.agents/skills</code> 文案断言。</p>
+  <p><code>tests/test_compact.py</code>：覆盖超过工具保留窗口后 Skill 仍完整、引用资源按 identity 去重、完整压缩后 Skill 可跨多次压缩恢复；<code>tests/test_agent_loop.py</code> 覆盖重复 <code>skill_view</code> 防循环。</p>
 
   <div class="nav">返回：<a href="index.html">后端模块索引</a> · <a href="../../index.html">Crew 文档总览</a></div>
 </div>

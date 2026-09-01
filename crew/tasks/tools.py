@@ -62,6 +62,7 @@ def register_task_tools(registry: Any, runtime: Any) -> None:
         ui_label_template="查询任务 {task_id}",
         should_defer=True,
         search_hint="task get status result background runtime",
+        result_retention="important",
     )
     registry.register(
         name="task_wait",
@@ -84,6 +85,7 @@ def register_task_tools(registry: Any, runtime: Any) -> None:
         ui_label_template="等待任务 {task_id}",
         should_defer=True,
         search_hint="task wait background runtime completion timeout",
+        result_retention="important",
     )
     registry.register(
         name="task_cancel",
@@ -106,6 +108,7 @@ def register_task_tools(registry: Any, runtime: Any) -> None:
         ui_label_template="取消任务 {task_id}",
         should_defer=True,
         search_hint="task cancel stop background runtime",
+        result_retention="important",
     )
     registry.register(
         name="task_list",
@@ -128,4 +131,5 @@ def register_task_tools(registry: Any, runtime: Any) -> None:
         ui_label_template="列出任务",
         should_defer=True,
         search_hint="task list background runtime status session",
+        result_retention="temporary",
     )

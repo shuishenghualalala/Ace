@@ -200,7 +200,12 @@ def test_wiki_tools_are_exclusive_to_wiki_preset(tmp_path):
         "builtin",
         app.config.access_control.resolve_for("internal"),
     )
-    expected = app._wiki_agent_tool_filter(main_expected)
+    scoped_main_expected = app.capability_profiles.filter_authorized_tools(
+        app.registry,
+        main_expected,
+        app.capability_profiles.resolve([]),
+    )
+    expected = app._wiki_agent_tool_filter(scoped_main_expected)
 
     assert not any(name.startswith("wiki_") for name in main_agent.tool_filter)
     assert main_agent.wiki_manager is None
@@ -217,6 +222,8 @@ def test_wiki_tools_are_exclusive_to_wiki_preset(tmp_path):
     assert "terminal" in wiki_agent.tool_filter
     assert "file_read" in wiki_agent.tool_filter
     assert "wiki_compile" not in wiki_agent.tool_filter
+    assert "publish_site" not in wiki_agent.tool_filter
+    assert "Canvas" not in wiki_agent.tool_filter
     assert wiki_agent.wiki_manager is app.wiki_manager
     assert wiki_agent.agent_id == "subagent_Wiki"
     assert wiki_agent.tool_disclosure_mode == "direct"

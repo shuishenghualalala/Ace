@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import crew as _crew_pkg
+from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
 from crew.core.runctx import current_owner_account_id
 from crew.security.launch import (
     ProcessLaunch,
@@ -1179,6 +1180,15 @@ def _handle_process(args: dict[str, Any]) -> str:
 
 def register_process_tool(registry: Any) -> None:
     """注册 process 工具到给定 registry。"""
+    def _result_policy(args: dict[str, Any]) -> ToolResultPolicy:
+        action = str(args.get("action") or "").strip().casefold()
+        retention = (
+            ToolResultRetention.TEMPORARY
+            if action in {"list", "log", "poll", "wait"}
+            else ToolResultRetention.IMPORTANT
+        )
+        return ToolResultPolicy(retention)
+
     registry.register(
         name="process",
         toolset="terminal",
@@ -1189,4 +1199,5 @@ def register_process_tool(registry: Any) -> None:
         ui_label_template="进程 {action}",
         always_load=True,
         search_hint="process background job poll log wait kill list terminal",
+        result_policy_resolver=_result_policy,
     )

@@ -13,7 +13,12 @@ import re
 from typing import Any, Callable
 
 from crew.core.errors import ToolError, ToolNotFoundError
-from crew.core.interfaces import Tool, ToolRegistry
+from crew.core.interfaces import (
+    Tool,
+    ToolRegistry,
+    ToolResultPolicy,
+    ToolResultRetention,
+)
 from crew.core.types import ToolCall, ToolOutput, ToolPermissionDecision, ToolResult
 from crew.state.logging import get_logger
 from crew.tools.pipeline import (
@@ -67,6 +72,9 @@ class FunctionTool(Tool):
         on_progress: str | None = None,
         permission_resolver: Callable[[dict[str, Any]], ToolPermissionDecision | None] | None = None,
         permission_approver: Callable[[str, dict[str, Any]], bool] | None = None,
+        result_retention: ToolResultRetention | str = ToolResultRetention.IMPORTANT,
+        result_identity_fields: list[str] | tuple[str, ...] | None = None,
+        result_policy_resolver: Callable[[dict[str, Any]], ToolResultPolicy] | None = None,
     ) -> None:
         self.name = name
         self.toolset = toolset
@@ -96,6 +104,13 @@ class FunctionTool(Tool):
         self.on_progress = on_progress
         self.permission_resolver = permission_resolver
         self.permission_approver = permission_approver
+        self.result_retention = (
+            result_retention
+            if isinstance(result_retention, ToolResultRetention)
+            else ToolResultRetention(str(result_retention))
+        )
+        self.result_identity_fields = tuple(result_identity_fields or ())
+        self.result_policy_resolver = result_policy_resolver
 
     def to_schema(self) -> dict[str, Any]:
         function_schema = dict(self.schema)
@@ -133,6 +148,22 @@ class FunctionTool(Tool):
             return result
         return json.dumps(result, ensure_ascii=False)
 
+    def result_policy(self, args: dict[str, Any]) -> ToolResultPolicy:
+        if self.result_policy_resolver is not None:
+            policy = self.result_policy_resolver(args)
+            if not isinstance(policy, ToolResultPolicy):
+                raise ToolError(f"工具 {self.name} 的 result_policy_resolver 返回值无效")
+            return policy
+        identity_parts = [
+            f"{field}={args[field]}"
+            for field in self.result_identity_fields
+            if field in args and args[field] is not None
+        ]
+        return ToolResultPolicy(
+            retention=self.result_retention,
+            identity="|".join(identity_parts),
+        )
+
 
 class Registry(ToolRegistry):
     def __init__(self) -> None:
@@ -164,6 +195,11 @@ class Registry(ToolRegistry):
                 on_progress=kwargs.get("on_progress"),
                 permission_resolver=kwargs.get("permission_resolver"),
                 permission_approver=kwargs.get("permission_approver"),
+                result_retention=kwargs.get(
+                    "result_retention", ToolResultRetention.IMPORTANT
+                ),
+                result_identity_fields=kwargs.get("result_identity_fields"),
+                result_policy_resolver=kwargs.get("result_policy_resolver"),
             )
         if not tool.name:
             raise ToolError(f"工具缺少 name: {tool!r}")
@@ -219,6 +255,19 @@ class Registry(ToolRegistry):
     def toolset_for(self, name: str) -> str | None:
         tool = self._tools.get(name)
         return getattr(tool, "toolset", "default") if tool else None
+
+    def result_policy(self, name: str, args: dict[str, Any]) -> ToolResultPolicy:
+        """返回具体调用的结果生命周期；解析失败时宁可多保留，也不误删。"""
+        try:
+            tool, _note = self._lookup(name)
+            policy = tool.result_policy(args)
+            return policy if isinstance(policy, ToolResultPolicy) else ToolResultPolicy()
+        except ToolNotFoundError:
+            # 历史里可能保留已卸载插件或已断开的 MCP 工具，未知即安全保留。
+            return ToolResultPolicy()
+        except Exception:  # noqa: BLE001 - 压缩策略不得影响主工具链
+            log.exception("解析工具 %s 的结果生命周期失败，按重要结果保留", name)
+            return ToolResultPolicy()
 
     async def resolve_permission(self, tool_call: ToolCall) -> ToolPermissionDecision | None:
         """Return a tool-specific permission decision, if the tool declares one."""

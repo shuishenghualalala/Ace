@@ -299,6 +299,7 @@
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-08-31</td><td>灵感新建会话不再写仅用于标签判断的 <code>inspiration_creation</code>，改为给普通 builtin 主 Agent 挂载 <code>capability_profiles=["sites.authoring"]</code>；显示身份保持“灵感”，实际工具、Skill 与 Prompt 由后端 Capability Profile 解析。</td><td><code>app.ts</code>、<code>backend-client.ts</code>、Session AgentConfig 契约及灵感模块文档；不新增独立 Site Agent，不改变聊天执行器。</td></tr>
       <tr><td>2026-08-17</td><td>邮箱登录会话验证保留 Gateway 真实错误：无效 Cookie 仍清理，<code>ACTIVE_OWNER_CONFLICT</code> 等错误的文案、代码和 HTTP 状态码透传到登录 UI。</td><td><code>desktop/src/main/auth-session.ts</code>、<code>desktop/tests/unit/auth-session.test.ts</code>、桌面认证文档。</td></tr>
       <tr><td>2026-08-10</td><td>灵感成果卡与右侧预览体验收敛：网站、看板、HTML 统一为单一可点击成果卡；去除技术类型、Crew 品牌残留和次级打开按钮；生成完成不自动展开 Inspector；网站/看板批注入口统一为“指出要修改的位置”。</td><td>chat-render、conversation-renderer、blueprint-surface、sites-page、browser-panel.css、Desktop 单测与本文档；复用现有 Surface 协议，不新增模块。</td></tr>
       <tr><td>2026-08-08</td><td>普通对话消息轨道增加窄窗口 16px 安全间距，同时保持宽窗口正文基线不变。</td><td>既有 <code>web-messages.css</code>、共享样式回归测试与本文档；无新模块、文件、API 或数据结构。</td></tr>

@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
 from crew.core.runctx import (
     current_agent_workdir,
     current_owner_account_id,
@@ -29,6 +30,28 @@ def _context() -> tuple[str, str, str, str]:
     if not owner:
         raise ValueError("当前会话缺少用户身份")
     return owner, workspace_id, session_id, workdir
+
+
+def _blueprint_result_policy(args: dict[str, Any]) -> ToolResultPolicy:
+    action = str(args.get("action") or "").strip()
+    if action == "readRunArtifact":
+        identity = "|".join(
+            f"{key}={args[key]}"
+            for key in ("automationId", "runId")
+            if args.get(key) is not None
+        )
+        return ToolResultPolicy(ToolResultRetention.RESOURCE, identity)
+    if action in {
+        "list",
+        "read",
+        "show",
+        "validate",
+        "readRun",
+        "readRunLogs",
+        "listRuns",
+    }:
+        return ToolResultPolicy(ToolResultRetention.TEMPORARY)
+    return ToolResultPolicy(ToolResultRetention.IMPORTANT)
 
 
 def _schema(name: str, description: str, actions: list[str]) -> dict[str, Any]:
@@ -292,11 +315,15 @@ def register_blueprint_tools(
         raise ValueError("未知 Binding action")
 
     registry.register(name="Canvas", toolset="blueprint", schema=CANVAS_SCHEMA, handler=canvas_tool,
-                      display_name="灵感 App", ui_label_template="管理 App {title}", always_load=True)
+                      display_name="灵感 App", ui_label_template="管理 App {title}", always_load=True,
+                      result_policy_resolver=_blueprint_result_policy)
     registry.register(name="Widget", toolset="blueprint", schema=WIDGET_SCHEMA, handler=widget_tool,
-                      display_name="App 组件", ui_label_template="管理组件 {title}", always_load=True)
+                      display_name="App 组件", ui_label_template="管理组件 {title}", always_load=True,
+                      result_policy_resolver=_blueprint_result_policy)
     registry.register(name="Automation", toolset="blueprint", schema=AUTOMATION_SCHEMA,
                       handler=automation_tool, is_async=True, display_name="App 自动化",
-                      ui_label_template="运行自动化 {title}", always_load=True)
+                      ui_label_template="运行自动化 {title}", always_load=True,
+                      result_policy_resolver=_blueprint_result_policy)
     registry.register(name="Binding", toolset="blueprint", schema=BINDING_SCHEMA, handler=binding_tool,
-                      display_name="数据绑定", ui_label_template="绑定组件数据", always_load=True)
+                      display_name="数据绑定", ui_label_template="绑定组件数据", always_load=True,
+                      result_policy_resolver=_blueprint_result_policy)

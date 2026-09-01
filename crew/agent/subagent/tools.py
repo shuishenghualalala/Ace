@@ -780,6 +780,7 @@ def register_subagent_tools(
         ui_label_template="委派子任务 {title}",
         should_defer=True,
         search_hint="delegate subagent parallel task research review isolated context",
+        result_retention="important",
     )
 
     # ---- run_agent：调用预设 agent ----
@@ -884,6 +885,7 @@ def register_subagent_tools(
             ui_label_template="运行子智能体 {agent_type}",
             should_defer=True,
             search_hint="run preset subagent specialist background task 运行 预设 子智能体 委派 知识库 wiki",
+            result_retention="important",
         )
         # collect 仅在支持后台时才有意义
         if tasks is not None:
@@ -897,6 +899,7 @@ def register_subagent_tools(
                 ui_label_template="收集子智能体结果 {task_id}",
                 should_defer=True,
                 search_hint="collect background subagent task result wait status",
+                result_retention="important",
             )
     else:
         log.info("无预设子智能体，跳过注册 run_agent（delegate_task 仍可用）")

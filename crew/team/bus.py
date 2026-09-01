@@ -230,6 +230,7 @@ def register_team_bus_tools(
         is_async=True,
         display_name="读取团队消息",
         ui_label_template="读取团队消息",
+        result_retention="important",
     )
     registry.register(
         name="team_add_artifact",

@@ -41,6 +41,7 @@ export type ChunkKind =
 /** 写入 /api/session/{id}/agent-config 的 payload；外援 Agent id 只放在 external 下。 */
 export interface SessionAgentConfig {
   executor: 'builtin' | 'client' | 'external' | 'acp' | 'team';
+  capability_profiles?: string[];
   external?: { external_agent_id?: string; model?: string; [k: string]: unknown };
   acp?: { external_agent_id?: string; [k: string]: unknown };
   team?: { external_team_id?: string; [k: string]: unknown };

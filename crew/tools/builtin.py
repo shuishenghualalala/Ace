@@ -18,6 +18,7 @@ from pathlib import PureWindowsPath
 from typing import Any
 
 from crew.core.errors import ToolError
+from crew.core.interfaces import ToolResultRetention
 from crew.core.runctx import emit_tool_progress
 from crew.tools.file_utils import (
     _apply_line_pagination,
@@ -1146,6 +1147,7 @@ def register_builtin_tools(
         ui_label_template="运行 {command}",
         always_load=True,
         search_hint="shell command terminal bash powershell execute background process",
+        result_retention=ToolResultRetention.TEMPORARY,
     )
     registry.register(
         name="file_read",
@@ -1161,6 +1163,8 @@ def register_builtin_tools(
         ui_label_template="读取 {path}",
         always_load=True,
         search_hint="read file view contents inspect text",
+        result_retention=ToolResultRetention.RESOURCE,
+        result_identity_fields=("path", "offset", "limit"),
     )
     registry.register(
         name="file_write",
@@ -1176,6 +1180,7 @@ def register_builtin_tools(
         ui_label_template="写入 {path}",
         always_load=True,
         search_hint="write file append create save text",
+        result_retention=ToolResultRetention.TEMPORARY,
     )
     registry.register(
         name="file_delete",
@@ -1191,6 +1196,7 @@ def register_builtin_tools(
         ui_label_template="删除 {path}",
         always_load=True,
         search_hint="delete remove file unlink exact path",
+        result_retention=ToolResultRetention.TEMPORARY,
     )
 
     from crew.tools.file_tools import register_file_tools

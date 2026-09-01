@@ -11,6 +11,7 @@ import json
 from typing import Any, Awaitable, Callable
 
 from crew.core.errors import ToolError
+from crew.core.interfaces import ToolResultRetention
 from crew.core.followup import send_followup_question, wait_for_answer
 from crew.core.runctx import (
     current_attachment_files,
@@ -2328,6 +2329,19 @@ def register_wiki_tools(
     read_tools = set(WIKI_READ_TOOLS)
     for schema, handler, is_async, emoji, display_name, ui_label, search_hint in _TOOLS:
         toolset = WIKI_READ_TOOLSET if schema["name"] in read_tools else WIKI_MANAGE_TOOLSET
+        result_kwargs: dict[str, Any] = {}
+        if schema["name"] == "wiki_read":
+            result_kwargs = {
+                "result_retention": ToolResultRetention.RESOURCE,
+                "result_identity_fields": (
+                    "kb_id",
+                    "page_id",
+                    "include_neighbors",
+                    "neighbor_limit",
+                ),
+            }
+        elif schema["name"] in read_tools:
+            result_kwargs = {"result_retention": ToolResultRetention.TEMPORARY}
         registry.register(
             name=schema["name"],
             toolset=toolset,
@@ -2338,4 +2352,5 @@ def register_wiki_tools(
             display_name=display_name,
             ui_label_template=ui_label,
             search_hint=search_hint,
+            **result_kwargs,
         )

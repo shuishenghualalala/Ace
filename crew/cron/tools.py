@@ -351,6 +351,11 @@ def register_cron_tools(
         (CRON_RESUME_SCHEMA, handle_resume, "恢复定时任务", "恢复定时任务 {job_id}"),
     ]
     for schema, handler, display_name, ui_label_template in specs:
+        result_retention = (
+            "temporary"
+            if schema["name"] in {"cron_list", "cron_get"}
+            else "important"
+        )
         registry.register(
             name=schema["name"],
             toolset="cron",
@@ -362,4 +367,5 @@ def register_cron_tools(
             ui_label_template=ui_label_template,
             should_defer=True,
             search_hint="cron schedule recurring automation reminder job list pause resume delete",
+            result_retention=result_retention,
         )

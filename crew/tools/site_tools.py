@@ -83,4 +83,5 @@ def register_site_tools(
         handler=publish_site, display_name="发布灵感", ui_label_template="发布灵感 {name}",
         always_load=True, search_hint="部署站点 发布网站 local site publish deploy website",
         is_async=True,
+        result_retention="important",
     )

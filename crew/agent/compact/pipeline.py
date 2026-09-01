@@ -19,8 +19,8 @@ todo 状态不在此处重注入：Crew 由 runtime._plan_reminder_blocks 每轮
 
 from __future__ import annotations
 
-from crew.agent.compact.microcompact import micro_compact
-from crew.agent.compact.post_compact import build_post_compact_file_attachments
+from crew.agent.compact.microcompact import ResultPolicyResolver, micro_compact
+from crew.agent.compact.post_compact import build_post_compact_attachments
 from crew.agent.compact.store import SummaryState, SummaryStore
 from crew.agent.compact.summary import (
     SUMMARY_MARKER,
@@ -69,6 +69,7 @@ class ContextCompactor:
         post_compact_max_chars_per_file: int = 5000,
         max_tool_result_chars: int = 0,
         store: SummaryStore | None = None,
+        result_policy_resolver: ResultPolicyResolver | None = None,
     ) -> None:
         self.provider = provider
         self.enabled = enabled
@@ -81,6 +82,7 @@ class ContextCompactor:
         self.post_compact_max_chars_per_file = post_compact_max_chars_per_file
         self.max_tool_result_chars = max_tool_result_chars
         self.store = store
+        self.result_policy_resolver = result_policy_resolver
         # store 为 None 时退化为进程内缓存（重启即失，自动降级 L3）。
         self._mem: dict[SummaryKey, SummaryState] = {}
         # 每个 session 连续摘要失败次数，用于断路器。
@@ -257,6 +259,7 @@ class ContextCompactor:
             messages,
             self.keep_recent_tools,
             max_tool_result_chars=self.max_tool_result_chars,
+            result_policy_resolver=self.result_policy_resolver,
         )
 
     async def maybe_compact(
@@ -328,6 +331,7 @@ class ContextCompactor:
             messages,
             keep_tools,
             max_tool_result_chars=self.max_tool_result_chars,
+            result_policy_resolver=self.result_policy_resolver,
         )
         keep = max(2, self.keep_recent // 2)
         state = self._get_state(session_id, owner_account_id)
@@ -393,15 +397,20 @@ class ContextCompactor:
         )
         log.info("上下文压缩：%d 条旧消息 -> 摘要，保留最近 %d 条", len(old), len(recent))
 
-        # Post-compact 文件恢复：把被摘要掉的 old 段中最近读取的文件内容附加回来
-        attachments = build_post_compact_file_attachments(
-            old,
-            max_files=self.post_compact_files,
-            max_chars_per_file=self.post_compact_max_chars_per_file,
+        # Post-compact 恢复：保留 Skill 指令、最近资源和不可重放的重要结论。
+        attachments = (
+            build_post_compact_attachments(
+                old,
+                result_policy_resolver=self.result_policy_resolver,
+                max_resources=self.post_compact_files,
+                max_chars_per_resource=self.post_compact_max_chars_per_file,
+            )
+            if self.result_policy_resolver is not None
+            else []
         )
         if attachments:
             log.info(
-                "压缩后恢复 %d 个文件附件，单文件上限 %d 字符",
+                "压缩后恢复 %d 个受保护工具结果，单资源上限 %d 字符",
                 len(attachments),
                 self.post_compact_max_chars_per_file,
             )

@@ -1716,7 +1716,9 @@ def build_skills_index_prompt(
         lines.append("")
         lines.append(
             "这是 compact skill index。需要使用某个 skill 时，先用 skill_view(name) 加载完整说明；"
-            "也可以通过 /skill-name [补充指令] 激活。"
+            "同一 name/file_path 已成功读取且结果仍在上下文时，直接继续使用，不要重复读取；"
+            "只有需要其他文件或有明确证据表明内容已变化时才再次调用。也可以通过 "
+            "/skill-name [补充指令] 激活。"
         )
         for key, desc in standalone_entries:
             lines.append(f"- {key}: {desc}")

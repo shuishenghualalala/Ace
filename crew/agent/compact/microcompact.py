@@ -1,42 +1,37 @@
-"""L1 MicroCompact：纯规则、无 LLM 的廉价预压。
+"""L1 MicroCompact：按工具结果生命周期执行的无 LLM 预压。
 
-旧工具结果（Read/Bash/Grep 等的大段输出）是上下文里最占 token 的部分，
-且越早的越没有参考价值。本层把较早的 ``role=="tool"`` 消息内容替换成占位符，
-只保留最近 ``keep_recent_tools`` 条原样。
+工具结果不能只按时间统一清理：Skill 指令、用户回答和子 Agent 结论即使较早，
+仍可能决定后续行为。本层只压缩明确声明为临时过程的旧结果；资源和指令按稳定
+标识保留最近版本，重要结论保持完整，直到 L2/L3 结构化摘要。
 
 特性：
 - 纯函数，不修改入参（只 copy 被改写的消息）。
 - 保留 tool 消息本身与 ``tool_call_id``，不破坏 assistant(tool_calls)↔tool 配对。
 - 幂等：已清理的消息保持清理。
 - 护栏：可清理的 tool 消息不足时原样返回（瞬时 no-op）。
-- file_read 去重：相同路径重复读取且内容未变时，旧结果替换为
-  ``FILE_UNCHANGED_STUB``，让模型能区分"文件未变"与"内容被清理"。
+- 资源去重：相同资源只保留最近版本，旧版本替换为明确的替换标记。
+- 安全默认：未知工具按重要结果保留，插件需显式声明后才能被 L1 清理。
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import replace
-from typing import Any
+from typing import Any, Callable
 
+from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
 from crew.core.types import Message
 
 CLEARED_PLACEHOLDER = "[旧工具结果已清理]"
 FILE_UNCHANGED_STUB = "[file_read {path} 自上次读取以来内容未改变]"
+RESOURCE_REPLACED_STUB = "[资源旧版本已替换: {identity}]"
+INSTRUCTION_REPLACED_STUB = "[已加载指令的旧版本已替换: {identity}]"
 # 信息性摘要统一前缀：供模型识别「这是压缩摘要」并保证 micro_compact 幂等。
 # 用于 _summarize_tool_result（agent/context_compressor.py:400），适配 Crew 工具名。
 TOOL_SUMMARY_PREFIX = "[已压缩工具摘要] "
 
 
-def _extract_tool_path(tool_name: str, arguments: dict[str, Any] | None) -> str | None:
-    """从工具参数中提取用于去重的路径标识。
-
-    目前仅支持 ``file_read`` 的 ``path`` 参数；未来可扩展其他 path-scoped 工具。
-    """
-    if tool_name != "file_read" or not arguments:
-        return None
-    path = arguments.get("path")
-    return str(path) if path is not None else None
+ResultPolicyResolver = Callable[[str, dict[str, Any]], ToolResultPolicy]
 
 
 def _build_tool_call_map(
@@ -53,6 +48,21 @@ def _build_tool_call_map(
             for tc in m.tool_calls:
                 mapping[tc.id] = (tc.name, tc.arguments)
     return mapping
+
+
+def _resolve_result_policy(
+    resolver: ResultPolicyResolver | None,
+    tool_name: str,
+    arguments: dict[str, Any] | None,
+) -> ToolResultPolicy:
+    """安全解析结果策略；未知或异常均按重要结果保留。"""
+    if resolver is None or not tool_name:
+        return ToolResultPolicy()
+    try:
+        policy = resolver(tool_name, arguments or {})
+    except Exception:  # noqa: BLE001 - 生命周期解析失败不能破坏对话
+        return ToolResultPolicy()
+    return policy if isinstance(policy, ToolResultPolicy) else ToolResultPolicy()
 
 
 def _truncate_tool_result(content: str, max_chars: int) -> str:
@@ -135,11 +145,13 @@ def micro_compact(
     messages: list[Message],
     keep_recent_tools: int = 6,
     max_tool_result_chars: int = 0,
+    result_policy_resolver: ResultPolicyResolver | None = None,
 ) -> list[Message]:
-    """清理较早的工具结果内容，保留最近 ``keep_recent_tools`` 条。
+    """按生命周期压缩工具结果。
 
-    对 ``file_read`` 增加去重：若旧 tool 结果与最近一次的完整内容相同，替换为
-    ``FILE_UNCHANGED_STUB``；其他工具仍用 ``CLEARED_PLACEHOLDER``。
+    ``keep_recent_tools`` 只计算 TEMPORARY 工具，不会因为后续临时调用较多而挤掉
+    INSTRUCTION / IMPORTANT。RESOURCE 和 INSTRUCTION 按 identity 只保留最近版本。
+    未提供 resolver 或工具未声明策略时，结果按 IMPORTANT 原样保留。
 
     当 ``max_tool_result_chars > 0`` 时，单条 tool result 超过此长度会被截断
     （保留前后片段），避免单条结果撑爆上下文。
@@ -147,62 +159,87 @@ def micro_compact(
     返回新列表；无可清理项时返回原列表（同一引用）。
     """
     keep = max(0, keep_recent_tools)
-
-    # 收集所有 tool 消息的下标（按出现顺序）
-    tool_indices = [i for i, m in enumerate(messages) if m.role == "tool"]
-    if len(tool_indices) <= keep and max_tool_result_chars <= 0:
-        return messages  # 没有可清理项且无截断，瞬时返回
-
-    # 最近 keep 条保留，更早的清理
-    clear_indices = set(tool_indices[: max(0, len(tool_indices) - keep)])
-
-    # 构建 tool_call_id → (tool_name, arguments) 映射
     tool_call_map = _build_tool_call_map(messages)
 
-    # 记录每个 (tool_name, path) 在待清理范围内最近一次的完整内容
-    last_seen_content: dict[tuple[str, str], str] = {}
+    details: dict[int, tuple[str, dict[str, Any] | None, ToolResultPolicy]] = {}
+    temporary_indices: list[int] = []
+    latest_scoped_result: dict[tuple[ToolResultRetention, str, str], int] = {}
+    for index, message in enumerate(messages):
+        if message.role != "tool":
+            continue
+        tool_name, arguments = tool_call_map.get(
+            message.tool_call_id or "", (message.name or "", None)
+        )
+        policy = _resolve_result_policy(result_policy_resolver, tool_name, arguments)
+        details[index] = (tool_name, arguments, policy)
+        if policy.retention is ToolResultRetention.TEMPORARY:
+            temporary_indices.append(index)
+        elif (
+            policy.retention
+            in {ToolResultRetention.RESOURCE, ToolResultRetention.INSTRUCTION}
+            and policy.identity
+        ):
+            latest_scoped_result[(policy.retention, tool_name, policy.identity)] = index
+
+    clear_indices = set(
+        temporary_indices[: max(0, len(temporary_indices) - keep)]
+    )
+    if not clear_indices and not latest_scoped_result and max_tool_result_chars <= 0:
+        return messages
 
     result: list[Message] = []
+    changed = False
     for i, m in enumerate(messages):
-        # 先处理单条 tool result 长度上限（即使保留的也截断）
         content = m.content
         if m.role == "tool" and content and max_tool_result_chars > 0:
             content = _truncate_tool_result(content, max_tool_result_chars)
+        replacement = content
 
-        if i in clear_indices and content and content != CLEARED_PLACEHOLDER:
-            # 已是压缩产物（信息摘要 / file_read stub）的消息保持幂等
-            if content.startswith(TOOL_SUMMARY_PREFIX) or content.startswith(
-                FILE_UNCHANGED_STUB.split("{", 1)[0]
-            ):
-                result.append(replace(m, content=content) if content != m.content else m)
-                continue
-
-            # 通过 tool_call_id 获取工具名和参数；失败时降级用 Message.name
-            tool_name, arguments = tool_call_map.get(
-                m.tool_call_id or "", (m.name or "", None)
+        detail = details.get(i)
+        if detail is not None and content:
+            tool_name, arguments, policy = detail
+            already_compacted = content.startswith(
+                (
+                    TOOL_SUMMARY_PREFIX,
+                    FILE_UNCHANGED_STUB.split("{", 1)[0],
+                    RESOURCE_REPLACED_STUB.split("{", 1)[0],
+                    INSTRUCTION_REPLACED_STUB.split("{", 1)[0],
+                )
+            )
+            scoped_key = (policy.retention, tool_name, policy.identity)
+            is_replaced_scoped_result = bool(
+                policy.identity
+                and policy.retention
+                in {ToolResultRetention.RESOURCE, ToolResultRetention.INSTRUCTION}
+                and latest_scoped_result.get(scoped_key) != i
             )
 
-            path = _extract_tool_path(tool_name, arguments)
-            if path is not None:
-                dedup_key = (tool_name, path)
-                last_content = last_seen_content.get(dedup_key)
-                if last_content is not None and last_content == content:
-                    stub = FILE_UNCHANGED_STUB.format(path=path)
-                    result.append(replace(m, content=stub))
-                    continue
-                # 首次见到此 (tool_name, path) 或内容已变：保留原内容并更新记录
-                last_seen_content[dedup_key] = content
-                result.append(replace(m, content=content) if content != m.content else m)
-                continue
-
-            # 非 file_read 工具 → 信息性摘要（保留工具名/命令/结果概要，用于）；
-            # 拿不到工具名时降级为纯占位符
-            if tool_name:
-                result.append(
-                    replace(m, content=_summarize_tool_result(tool_name, arguments, content))
+            if is_replaced_scoped_result and not already_compacted:
+                latest_index = latest_scoped_result[scoped_key]
+                latest_content = messages[latest_index].content
+                if (
+                    policy.retention is ToolResultRetention.RESOURCE
+                    and tool_name == "file_read"
+                    and latest_content == m.content
+                ):
+                    path = str((arguments or {}).get("path") or policy.identity)
+                    replacement = FILE_UNCHANGED_STUB.format(path=path)
+                elif policy.retention is ToolResultRetention.RESOURCE:
+                    replacement = RESOURCE_REPLACED_STUB.format(identity=policy.identity)
+                else:
+                    replacement = INSTRUCTION_REPLACED_STUB.format(
+                        identity=policy.identity
+                    )
+            elif i in clear_indices and not already_compacted:
+                replacement = (
+                    _summarize_tool_result(tool_name, arguments, content)
+                    if tool_name
+                    else CLEARED_PLACEHOLDER
                 )
-            else:
-                result.append(replace(m, content=CLEARED_PLACEHOLDER))
+
+        if replacement != m.content:
+            changed = True
+            result.append(replace(m, content=replacement))
         else:
-            result.append(replace(m, content=content) if content != m.content else m)
-    return result
+            result.append(m)
+    return result if changed else messages

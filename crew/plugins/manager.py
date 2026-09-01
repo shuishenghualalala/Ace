@@ -218,6 +218,9 @@ class PluginContext:
         permission_approver: Callable[..., Any] | None = None,
         display_name: str = "",
         ui_label_template: str = "",
+        result_retention: str = "important",
+        result_identity_fields: list[str] | tuple[str, ...] | None = None,
+        result_policy_resolver: Callable[..., Any] | None = None,
     ) -> None:
         if self._manager.registry is None:
             raise RuntimeError("PluginManager 未绑定 ToolRegistry，无法注册工具")
@@ -240,6 +243,9 @@ class PluginContext:
             permission_approver=permission_approver,
             display_name=display_name,
             ui_label_template=ui_label_template,
+            result_retention=result_retention,
+            result_identity_fields=result_identity_fields,
+            result_policy_resolver=result_policy_resolver,
         )
         self._manager._active_tools.append(name)
 

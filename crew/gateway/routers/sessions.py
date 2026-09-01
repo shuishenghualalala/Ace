@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from crew.agent.capabilities import canonicalize_capability_config
 from crew.agent.external.runtime_profile import canonical_runtime_model_id, normalize_runtime_models
 from crew.core.errors import ToolError
 from crew.agent.loop.tool_result_display import (
@@ -1179,6 +1180,10 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 {"ok": False, "error": "executor 必须是 builtin | client | external | team"},
                 status_code=400,
             )
+        try:
+            config = canonicalize_capability_config(config, crew.capability_profiles)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         team_config = config.get("team") if isinstance(config.get("team"), dict) else {}
         external_agent_id = ""
         external_team_id = str(team_config.get("external_team_id") or "").strip()

@@ -317,6 +317,17 @@ def test_guardrail_treats_wiki_readonly_tools_as_idempotent():
     assert decision.should_halt and decision.code == "idempotent_no_progress_block"
 
 
+def test_guardrail_treats_skill_view_as_idempotent():
+    """同一路径的 Skill 重复返回相同内容时应触发无进展拦截。"""
+    cfg = ToolCallGuardrailConfig(hard_stop_enabled=True, no_progress_block_after=2)
+    guard = ToolCallGuardrailController(cfg)
+    args = {"name": "sites-building", "file_path": "references/runtime.md"}
+    guard.after_call("skill_view", args, "相同 Skill 内容")
+    guard.after_call("skill_view", args, "相同 Skill 内容")
+    decision = guard.before_call("skill_view", args)
+    assert decision.should_halt and decision.code == "idempotent_no_progress_block"
+
+
 async def test_guardrail_halt_stops_loop():
     """循环里同参工具反复失败 → 命中 guardrail 硬停，给用户中文消息 + 给模型写 guidance。"""
     reg = Registry()
