@@ -111,7 +111,9 @@ class WikiConfig:
     """
 
     enabled: bool = True          # 是否启用 Wiki 与相关 API
-    model: str = ""               # 编译/摘要使用的模型档案 id（llm.models 下的 key）；空 = 跟随主模型
+    # 编译/摘要使用的模型档案 id（llm.models 下的 key）；空 = 跟随当前会话模型，
+    # 无会话上下文时回退 owner 默认模型。
+    model: str = ""
     capture_attachments: bool = True  # 聊天附件上传后是否自动收入 default 知识库
     storage: WikiStorageConfig = field(default_factory=WikiStorageConfig)
     ingest: WikiIngestConfig = field(default_factory=WikiIngestConfig)

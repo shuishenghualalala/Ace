@@ -197,7 +197,7 @@ Crew is not tied to a single model vendor. You can connect any supported provide
 3. Enter the model ID, API model name, API protocol, base URL, and API key.
 4. Select the model's text, tool-calling, and vision capabilities, then save it. If needed, mark it as the default model in the list.
 
-New sessions inherit the default model selected in Settings. Existing sessions can switch models from the composer. Auxiliary tasks—including external Team planning, team-description generation, and Dynamic Kanban orchestration—use the current account's default model rather than the model selected for an individual session. Wiki compilation and summarization follow the same rule unless you explicitly set `wiki.model` in the configuration.
+New sessions inherit the default model selected in Settings. Existing sessions can switch models from the composer. Auxiliary tasks—including external Team planning, team-description generation, and Dynamic Kanban orchestration—use the current account's default model rather than the model selected for an individual session. Wiki compilation and summarization instead inherit the current session's effective model by default; set `wiki.model` in the configuration only when you want a dedicated Wiki model. Wiki operations without a session context fall back to the current account's default model.
 
 Crew supports OpenAI-compatible APIs and the Anthropic Messages API. Your API key is stored only in the current owner's local `.env` file: it is never written to `config.yaml`, returned to the frontend, or sent to a remote authentication service.
 

@@ -2834,9 +2834,10 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     if wiki_storage_root is not None:
         log.info("Wiki 独立存储根目录: %s", wiki_storage_root)
     app.wiki_manager = WikiSessionManager(store=app._wiki_store)
-    # wiki 编译/摘要可用 wiki.model 指定独立模型档案（如更快的 flash 模型），
-    # 默认跟随当前 owner 的默认模型。推理型主模型对长 JSON 输出会产生数分钟推理，
-    # 导致编译在"LLM 分析"阶段卡死（实测 minimax-latest 3 次全部超时）。
+    # wiki 编译/摘要可用 wiki.model 指定独立模型档案（如更快的 flash 模型）。
+    # 未指定时优先继承当前 Agent 实际生效的 Provider，使会话级模型切换同样作用于
+    # wiki_plan_ingest 等工具内部的二次 LLM 调用；脱离 Agent 上下文的 Wiki API/后台
+    # 任务才回退当前 owner 的默认模型。
     wiki_provider = provider
     wiki_provider_is_explicit = False
     wiki_model_id = (cfg.wiki.model or "").strip() if cfg.wiki else ""
@@ -2848,18 +2849,32 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
             app._auxiliary_providers.append(wiki_provider)
             log.info("Wiki 使用独立模型 profile=%s model=%s", wiki_model_id, wiki_profile.model)
         else:
-            log.warning("wiki.model=%s 未找到可用模型档案，回退 owner 默认模型", wiki_model_id)
-    wiki_owner_provider = None if wiki_provider_is_explicit else app.owner_team_provider
+            log.warning(
+                "wiki.model=%s 未找到可用模型档案，回退当前会话模型或 owner 默认模型",
+                wiki_model_id,
+            )
+    wiki_provider_resolver = None
+    if not wiki_provider_is_explicit:
+        from crew.core.runctx import current_provider
+
+        def _wiki_runtime_provider(owner_account_id: str = "") -> LLMProvider:
+            session_provider = current_provider.get()
+            if session_provider is not None:
+                return session_provider
+            return app.owner_team_provider(owner_account_id)
+
+        wiki_provider_resolver = _wiki_runtime_provider
+
     app._wiki_summarizer = WikiSummarizer(
         app._wiki_store,
         wiki_provider,
-        provider_for_owner=wiki_owner_provider,
+        provider_for_owner=wiki_provider_resolver,
     )
     app._wiki_compiler = WikiCompiler(
         app._wiki_store,
         wiki_provider,
         summarizer=app._wiki_summarizer,
-        provider_for_owner=wiki_owner_provider,
+        provider_for_owner=wiki_provider_resolver,
     )
     app._wiki_querier = WikiQuerier(app._wiki_store)
     register_wiki_tools(
