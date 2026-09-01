@@ -146,7 +146,7 @@ function createProjectControl(): HTMLElement {
   workspace.hidden = true;
   workspace.append(createChip(
     'chat-workspace-btn',
-    '不在项目中工作',
+    '在默认目录中工作',
     'icon-folder',
     'chat-workspace-btn-label',
   ));
