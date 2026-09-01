@@ -303,6 +303,58 @@ def _assertions(
         if spec.get("expect_wiki_pages") and page_count == 0:
             errors.append(f"期望 wiki 有页面，实际 0 个 (kb={wiki_kb_id})")
 
+    # 同一 Skill 不重复读取：按 (name, file_path) 统计 start 帧次数——
+    # 同一 Skill 的不同引用文件是不同资源，重复读取同一文件才算循环。
+    max_per_skill = int(spec.get("max_skill_view_per_name") or 0)
+    if max_per_skill > 0:
+        skill_reads: dict[str, int] = {}
+        for chunk in chunks:
+            if (
+                chunk.kind == "tool"
+                and str(chunk.body.get("phase") or "") == "start"
+                and str(chunk.body.get("name") or "") == "skill_view"
+            ):
+                try:
+                    args = json.loads(str(chunk.body.get("args") or "{}"))
+                except ValueError:
+                    args = {}
+                name = str(args.get("name") or "").strip().casefold()
+                file_path = str(args.get("file_path") or "").strip().replace("\\", "/")
+                key = f"{name}|{file_path.casefold()}"
+                skill_reads[key] = skill_reads.get(key, 0) + 1
+        for skill_key, count in sorted(skill_reads.items()):
+            if count > max_per_skill:
+                errors.append(
+                    f"skill_view 重复读取 {skill_key!r} {count} 次"
+                    f"（上限 {max_per_skill}，疑似压缩后指令丢失导致的重读循环）"
+                )
+
+    # 完整压缩后受保护结果恢复：压缩只作用于发给 LLM 的视图，
+    # 因此从 llm.jsonl 的真实请求中观测，而非持久化历史。
+    # trace 文件在主日志同目录（state/logging._setup_llm_trace），case 目录互相隔离。
+    if spec.get("expect_compaction_recovery"):
+        from crew.agent.compact.post_compact import POST_COMPACT_RESULTS_MARKER
+        from crew.agent.compact.summary import SUMMARY_MARKER
+
+        trace_path = Path(app.config.log_file).expanduser().parent / "llm.jsonl"
+        request_texts: list[str] = []
+        if trace_path.exists():
+            for line in trace_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if record.get("dir") == "request":
+                    request_texts.append(
+                        json.dumps(record.get("messages") or [], ensure_ascii=False)
+                    )
+        if not any(SUMMARY_MARKER in text for text in request_texts):
+            errors.append("期望会话触发完整压缩，但 llm.jsonl 请求中没有压缩摘要标记")
+        if not any(POST_COMPACT_RESULTS_MARKER in text for text in request_texts):
+            errors.append("期望压缩后恢复受保护工具结果，但 llm.jsonl 请求中没有恢复附件")
+
     return not errors, errors
 
 
@@ -402,6 +454,23 @@ async def _run_case(spec: dict[str, Any], case_dir: Path) -> int:
 
                     timeout = float(spec.get("timeout_seconds") or 300)
                     chunks = await _collect_chunks(app, envelope, timeout=timeout)
+
+                    # 多轮会话：同一 session 依次发送 followup，制造 user 边界，
+                    # 让完整压缩（_safe_split 需要 user 边界）有机会触发。
+                    for followup in spec.get("followups") or []:
+                        followup_envelope = Envelope.of(
+                            str(followup),
+                            session_id=session_id,
+                            user_id=owner,
+                            workspace_id=workspace_id,
+                            mode=envelope_mode,
+                            params=params,
+                        )
+                        chunks.extend(
+                            await _collect_chunks(
+                                app, followup_envelope, timeout=timeout
+                            )
+                        )
 
                     transcript = [
                         {

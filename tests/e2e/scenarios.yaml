@@ -192,3 +192,44 @@ external:
         contains: ["101"]
     expected_final_keywords: ["kimi_output.txt"]
     timeout_seconds: 360
+
+# 工具结果生命周期：Site 场景真实模型验证（Tier 4）。
+# max_skill_view_per_name 统计每个 Skill 的 skill_view start 帧次数上限；
+# expect_compaction_recovery 从 llm.jsonl 的真实请求中确认完整压缩发生且
+# 受保护结果（Skill 指令 / 重要结论 / 最近资源）以附件形式恢复。
+tool_result_lifecycle:
+  site_skill_survives_compaction:
+    title: Site 场景连续工具调用压缩后不重复读 Skill 且受保护结果恢复
+    mode: agent
+    session_config:
+      capability_profiles: ["sites.authoring"]
+    config:
+      compaction_token_budget: 8000
+      compaction_keep_recent: 6
+      compaction_keep_recent_tools: 4
+      max_iterations: 25
+    workspace:
+      instructions: |
+        这是 E2E 玩具工作区。只允许读取和修改当前工作区内的文件，不要运行 git 命令。
+    prompt: |
+      完成一个多步骤建站任务（全程不要向我提问，所有选择自行决定）：
+      1. 阅读建站 Skill 的完整说明，严格按它的资产链执行；
+      2. 创建一个「待办清单」App 画布，并添加至少两个组件；
+      3. 用 file_write 把设计说明写入 app-notes.md；
+      4. 用 file_read 读回确认，再用 terminal 运行 ls 验证工作区；
+      5. 最后总结你用到的 Skill 和资产。
+    followups:
+      - |
+        继续完善这个 App（不要向我提问）：再给画布添加一个组件，
+        然后用 file_write 把交互说明写入 interaction-notes.md，
+        用 terminal 运行 ls 确认文件存在。
+      - |
+        最后一轮（不要向我提问）：用 file_read 读回 app-notes.md，
+        总结这个 App 用到的 Skill、资产链和文件，说明每一步依据的是哪份 Skill 指令。
+    expected_tools: [skill_view, Canvas, Widget]
+    expected_files:
+      - path: "app-notes.md"
+      - path: "interaction-notes.md"
+    max_skill_view_per_name: 1
+    expect_compaction_recovery: true
+    timeout_seconds: 600
