@@ -227,8 +227,9 @@ wiki:
   # 也可通过 CREW_WIKI_HOME 环境变量覆盖。
   storage:
     root: ""
-  # Wiki 提取需要稳定、快速的结构化输出，独立于主对话模型。
-  # 可填 llm.models 下的 profile key；留空时跟随主模型。
+  # Wiki 提取可选用独立的、适合稳定结构化输出的模型。
+  # 可填 llm.models 下的 profile key；留空时跟随当前会话模型，
+  # 无会话上下文时回退当前账号的默认模型。
   model: ""
 
 # 进程内 HTTP 边界（web_search/web_extract/Wiki 抓取）的上游代理。

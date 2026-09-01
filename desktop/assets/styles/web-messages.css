@@ -628,7 +628,7 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   margin: 0.2em 0;
 }
 
-.chat-messages.web-flow .md-body code {
+.chat-messages.web-flow .md-body code:not(.chat-md-code code) {
   background: var(--mw-border-subtle);
   padding: var(--mw-space-1) var(--mw-space-1);
   border-radius: var(--mw-radius-1);
@@ -656,7 +656,7 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   max-width: 100%;
 }
 
-.chat-messages.web-flow .md-body pre {
+.chat-messages.web-flow .md-body pre:not(.chat-md-code) {
   background: var(--mw-bg-subtle);
   border: 1px solid var(--mw-border-subtle);
   border-radius: var(--mw-radius-3);
@@ -667,7 +667,7 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   font-size: var(--mw-type-caption-size);
 }
 
-.chat-messages.web-flow .md-body pre code {
+.chat-messages.web-flow .md-body pre:not(.chat-md-code) code {
   background: none;
   padding: 0;
 }

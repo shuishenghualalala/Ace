@@ -2,6 +2,7 @@
  * @vitest-environment happy-dom
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { backendApi } from '../../src/ui/backend-client';
 import { renderConfigModels } from '../../src/ui/features/config-panes';
 import { __resetAllStoresForTest, configStore } from '../../src/ui/stores/stores';
 
@@ -32,9 +33,29 @@ describe('设置页默认模型展示', () => {
     await renderConfigModels();
     const active = document.querySelector<HTMLElement>('[data-integration-id="craft"]');
     const selectable = document.querySelector<HTMLButtonElement>('[data-integration-id="deepseek"] [data-integration-select]');
+    const setDefault = document.querySelector<HTMLButtonElement>('[data-integration-id="deepseek"] [data-integration-action="set-default"]');
     expect(active?.dataset.active).toBe('true');
     expect(active?.textContent).toContain('默认模型');
     expect(selectable).not.toBeNull();
     expect(selectable?.textContent).toContain('DeepSeek');
+    expect(setDefault?.textContent).toBe('设为默认');
+  });
+
+  it('可把已配置模型设为 owner 默认模型', async () => {
+    const current = configStore.get().config!;
+    const next = { ...current, model: 'deepseek-chat', active_model_id: 'deepseek' };
+    const switchModel = vi.spyOn(backendApi, 'switchModel').mockResolvedValue(next);
+    vi.spyOn(backendApi, 'config').mockResolvedValue(next);
+
+    await renderConfigModels();
+    document.querySelector<HTMLButtonElement>(
+      '[data-integration-id="deepseek"] [data-integration-action="set-default"]',
+    )?.click();
+
+    await vi.waitFor(() => expect(switchModel).toHaveBeenCalledWith('deepseek'));
+    await vi.waitFor(() => {
+      expect(configStore.get().config?.active_model_id).toBe('deepseek');
+      expect(document.querySelector<HTMLElement>('[data-integration-id="deepseek"]')?.dataset.active).toBe('true');
+    });
   });
 });

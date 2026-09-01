@@ -58,6 +58,40 @@ const CHANNEL_TOGGLES: Record<string, Array<{ key: string; label: string; hint?:
 
 let modelIntegrationView: SettingsIntegrationView | null = null;
 let channelIntegrationView: SettingsIntegrationView | null = null;
+let switchingDefaultModel = false;
+
+async function setDefaultModel(modelId: string): Promise<void> {
+  const config = state.config;
+  if (!config || switchingDefaultModel || modelId === config.active_model_id) return;
+
+  const model = (config.model_profiles ?? config.models ?? [])
+    .find((candidate) => candidate.id === modelId);
+  if (!model) {
+    notify('模型配置不存在，请刷新后重试');
+    return;
+  }
+  if (!model.loaded) {
+    notify('模型未加载，不能设为默认');
+    return;
+  }
+  if (!model.has_key) {
+    notify('请先为该模型配置 API Key');
+    return;
+  }
+
+  switchingDefaultModel = true;
+  await renderConfigModels();
+  try {
+    state.config = await backendApi.switchModel(modelId);
+    await loadConfig();
+    notify(`默认模型已切换为 ${model.name || model.id}`);
+  } catch (error) {
+    notify(`切换默认模型失败：${(error as Error).message}`);
+  } finally {
+    switchingDefaultModel = false;
+    await renderConfigModels();
+  }
+}
 
 function ensureModelIntegrationView(): SettingsIntegrationView | null {
   const pane = document.getElementById('settings-pane-model');
@@ -74,7 +108,9 @@ function ensureModelIntegrationView(): SettingsIntegrationView | null {
           .find((candidate) => candidate.id === id);
         if (model && !model.builtin) openModelConfigModal(model);
       },
-      onAction: () => undefined,
+      onAction: (action, id) => {
+        if (action === 'set-default') void setDefaultModel(id);
+      },
     });
   }
   if (!pane.contains(modelIntegrationView.element)) pane.replaceChildren(modelIntegrationView.element);
@@ -497,6 +533,11 @@ export async function renderConfigModels(): Promise<void> {
       selectable: !model.builtin,
       icon: 'process-thinking',
       active,
+      actions: active ? [] : [{
+        id: 'set-default',
+        label: '设为默认',
+        disabled: switchingDefaultModel || !model.loaded || !model.has_key,
+      }],
     };
   });
   view.update({ state: 'ready', message: '', items });

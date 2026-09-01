@@ -753,26 +753,34 @@ button.chat-message-file:hover {
 
 .chat-markdown code {
     font-family: var(--mw-font-mono);
-    background: var(--mw-code-bg);
+    background: var(--mw-bg-selected);
+    color: var(--mw-text-primary);
+    border: 1px solid var(--mw-border-subtle);
     border-radius: var(--mw-radius-1);
-    padding: var(--mw-space-1) var(--mw-space-1);
+    padding: 1px var(--mw-space-1);
     font-size: var(--mw-type-caption-size);
 }
 
 .chat-markdown .chat-md-code {
-    background: var(--mw-bg-subtle);
-    border: 1px solid var(--mw-border-subtle);
-    border-radius: var(--mw-radius-3);
-    color: var(--mw-text-primary);
-    padding: var(--mw-space-2);
+    margin: 0;
+    background: var(--mw-code-bg);
+    border: 0;
+    border-radius: 0;
+    color: var(--mw-code-text);
+    padding: var(--mw-space-3) var(--mw-space-4) var(--mw-space-4);
     overflow-x: auto;
+    font-size: var(--mw-type-code-size);
+    line-height: var(--mw-type-code-line);
 }
 
 .chat-markdown .chat-md-code code {
     background: transparent;
+    border: 0;
     border-radius: 0;
+    color: inherit;
     padding: 0;
     display: block;
+    font-size: inherit;
     white-space: pre;
 }
 
@@ -958,10 +966,10 @@ button.chat-message-file:hover {
 }
 
 .chat-markdown .code-block-wrapper {
-    background: var(--mw-bg-subtle);
-    border: 1px solid var(--mw-border-subtle);
-    border-radius: var(--mw-radius-3);
-    margin-top: var(--mw-space-2);
+    background: var(--mw-code-bg);
+    border: 1px solid color-mix(in srgb, var(--mw-code-text) 16%, transparent);
+    border-radius: var(--mw-radius-4);
+    margin: var(--mw-space-3) 0;
     overflow: hidden;
 }
 
@@ -970,31 +978,40 @@ button.chat-message-file:hover {
     justify-content: space-between;
     align-items: center;
     gap: var(--mw-space-2);
-    padding: var(--mw-space-2) var(--mw-space-2);
-    border-bottom: 1px solid var(--mw-border-subtle);
-    background: var(--mw-bg-subtle);
+    min-height: 34px;
+    padding: var(--mw-space-1) var(--mw-space-2) var(--mw-space-1) var(--mw-space-4);
+    border-bottom: 1px solid color-mix(in srgb, var(--mw-code-text) 12%, transparent);
+    background: color-mix(in srgb, var(--mw-code-text) 4%, var(--mw-code-bg));
 }
 
 .chat-markdown .code-block-lang {
+    font-family: var(--mw-font-mono);
     font-size: var(--mw-type-caption-size);
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--mw-text-secondary);
-    background: var(--mw-code-bg);
-    padding: var(--mw-space-1) var(--mw-space-2);
-    border-radius: var(--mw-radius-1);
+    font-weight: 600;
+    letter-spacing: .02em;
+    color: color-mix(in srgb, var(--mw-code-text) 68%, transparent);
     align-self: center;
 }
 
 .chat-markdown .code-block-copy {
-    border: 1px solid var(--mw-border-subtle);
-    background: var(--mw-bg-app);
-    color: var(--mw-text-secondary);
-    border-radius: var(--mw-radius-full);
+    border: 0;
+    background: transparent;
+    color: color-mix(in srgb, var(--mw-code-text) 72%, transparent);
+    border-radius: var(--mw-radius-2);
     padding: var(--mw-space-1) var(--mw-space-2);
     font-size: var(--mw-type-caption-size);
     cursor: pointer;
+    transition: background var(--mw-duration-fast) ease, color var(--mw-duration-fast) ease;
+}
+
+.chat-markdown .code-block-copy:hover {
+    background: color-mix(in srgb, var(--mw-code-text) 10%, transparent);
+    color: var(--mw-code-text);
+}
+
+.chat-markdown .code-block-copy:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--mw-code-text) 72%, transparent);
+    outline-offset: 1px;
 }
 
 .chat-markdown .code-block-copy__done {
