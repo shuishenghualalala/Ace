@@ -2,6 +2,7 @@
 AGENTS.md
 CLAUDE.md
 .claude/
+.dsh/
 .git-commands.md
 CONTEXT.md
 .codebase-memory/
@@ -113,5 +114,5 @@ Thumbs.db
 /crew-tui/
 
 # doc
-/docs/
-/doc/
+.docs/
+.doc/

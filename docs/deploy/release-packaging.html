@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Crew 三平台桌面发行包发布</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;}
+  *{box-sizing:border-box} body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px} h1{font-size:28px;font-weight:800;margin:0 0 4px}
+  .crumb{color:var(--t3);font-size:13px;margin-bottom:6px}.sub{color:var(--t3);margin-bottom:36px}
+  h2{font-size:19px;font-weight:700;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:16px;font-weight:700;margin:28px 0 8px}p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  pre{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:6px;padding:14px 16px;overflow:auto;color:var(--text)}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{font-weight:700;color:var(--text);background:var(--soft)}
+  a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}a:hover{border-bottom-color:var(--text)}
+  .nav{margin-top:40px;color:var(--t3);font-size:13px}
+  .note{background:var(--soft);border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin:14px 0;font-size:14px;color:var(--t2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="crumb">Crew / 部署与发布</div>
+  <h1>三平台桌面发行包发布</h1>
+  <div class="sub">macOS、Linux（UOS / Kylin）、Windows 安装包的制作内容与 GitHub Release 发布流程。</div>
+
+  <h2>发布入口</h2>
+  <p>仓库新增 workflow <code>.github/workflows/release-desktop.yml</code>，两种触发方式：</p>
+  <table>
+    <tr><th>方式</th><th>触发条件</th><th>说明</th></tr>
+    <tr><td>自动</td><td>推送 <code>v*</code> tag（例如 <code>v1.1.0</code>）</td><td>同时构建四个任务并上传到对应 GitHub Release</td></tr>
+    <tr><td>手动</td><td>Actions 页面选择 <code>release-desktop</code>，填写 <code>tag</code> 输入</td><td>适合打包已存在的旧 tag，例如 <code>v1.1.0</code></td></tr>
+  </table>
+  <div class="note">自动触发只对“包含该 workflow 的提交上打出的 tag”生效。仓库中已存在的旧 tag 不会自动触发，需要用手动方式，或先合入代码后打新 tag。</div>
+
+  <h2>发布产物</h2>
+  <table>
+    <tr><th>平台</th><th>产物</th><th>组成</th></tr>
+    <tr>
+      <td>macOS arm64</td>
+      <td><code>crew-desktop_&lt;版本&gt;_arm64.dmg</code></td>
+      <td rowspan="2">Electron 桌面端 + PyInstaller Gateway + 内嵌 Python/Node 运行时 + macOS 安全运行组件</td>
+    </tr>
+    <tr>
+      <td>macOS x64</td>
+      <td><code>crew-desktop_&lt;版本&gt;_x64.dmg</code></td>
+    </tr>
+    <tr>
+      <td>Linux UOS</td>
+      <td><code>crew-desktop_&lt;版本&gt;_uos_amd64.deb</code></td>
+      <td rowspan="2">/opt/crew-desktop（Electron + bwrap + 安全运行组件）+ /opt/crew-gateway（PyInstaller Gateway）+ 内嵌运行时</td>
+    </tr>
+    <tr>
+      <td>Linux Kylin</td>
+      <td><code>crew-desktop_&lt;版本&gt;_kylin_amd64.deb</code></td>
+    </tr>
+    <tr>
+      <td>Windows x64</td>
+      <td><code>Crew_Setup_v&lt;版本&gt;.exe</code></td>
+      <td>win-unpacked 桌面端 + PyInstaller Gateway + 内嵌 Python/Node 运行时 + Windows 安全运行组件，Inno Setup 安装器</td>
+    </tr>
+  </table>
+  <p>Release 同时附带 <code>SHA256SUMS</code> 校验文件和各平台体积报告。</p>
+
+  <h2>打包内容约定</h2>
+  <p>三个平台的安装包都不包含 <code>web/</code> 目录及其构建产物 <code>web/dist</code>。桌面端界面来自 <code>desktop/dist</code>；Gateway 缺少 web 静态资源时，浏览器直连管理台显示“前端未构建”占位页，桌面端功能不受影响。</p>
+  <p>内置 skills 随 Gateway 进入包内 <code>_internal/crew/skills</code>；用户自定义 skills 保留在 <code>~/.Crew/skills</code>，安装包不覆盖、不写入用户数据。docs、测试、源码、本地配置与密钥一律不进包。</p>
+
+  <h2>桌面端「更新」按钮的下载指向</h2>
+  <p>桌面端设置页「关于我们」里的「更新」按钮，点击后由主进程请求 <code>GET https://api.github.com/repos/shuishenghualalala/Ace/releases/latest</code>，按当前系统/架构匹配对应安装包并打开下载页：</p>
+  <table>
+    <tr><th>当前系统</th><th>匹配产物</th></tr>
+    <tr><td>macOS（Apple 芯片 M 系列）</td><td><code>crew-desktop_&lt;版本&gt;_arm64.dmg</code></td></tr>
+    <tr><td>macOS（Intel）</td><td><code>crew-desktop_&lt;版本&gt;_x64.dmg</code></td></tr>
+    <tr><td>Linux 麒麟 Kylin（amd64）</td><td><code>crew-desktop_&lt;版本&gt;_kylin_amd64.deb</code></td></tr>
+    <tr><td>Linux 统信 UOS / 其他发行版（amd64）</td><td><code>crew-desktop_&lt;版本&gt;_uos_amd64.deb</code></td></tr>
+    <tr><td>Windows 10/11（x64）</td><td><code>Crew_Setup_v&lt;版本&gt;.exe</code></td></tr>
+  </table>
+  <p>Release 发布后会自动生成「平台选择表 + SHA256 校验说明」的 release notes，桌面端按钮的匹配逻辑与之一致。查询失败或无匹配资产时，按钮回退到 GitHub Releases 列表页。</p>
+  <div class="note"><b>按钮指向与分支无关：</b><code>/releases/latest</code> 是仓库级接口，始终返回该仓库最新发布的<strong>正式</strong> Release（自动跳过 prerelease 与 draft），无论当前代码在 dev 还是 main 分支，按钮下载的都是仓库最新的正式版，而不是“当前分支的版本”。</div>
+  <div class="note"><b>内测版发布建议：</b>若用 dev 分支发布内测版本、又不想让正式用户从「更新」按钮下载到它，给该 Release 打上 prerelease 标记即可（<code>gh release create vX.Y.Z --prerelease ...</code>）。prerelease 不会被 <code>/releases/latest</code> 返回，正式用户按钮不会指向它；main 分支发布正式版后按钮自动指向正式版。</div>
+
+  <h2>发布步骤</h2>
+  <h3>自动发布（推荐）</h3>
+  <pre>git checkout main
+git pull
+git tag v1.1.0
+git push origin v1.1.0</pre>
+  <p>推送后进入 GitHub Actions 的 <code>release-desktop</code> 运行页观察四个构建任务，完成后 GitHub Release 自动生成并附带全部安装包。</p>
+
+  <h3>手动发布旧 tag</h3>
+  <p>进入 Actions 页面，选择 <code>release-desktop</code>，点击 Run workflow，在 <code>tag</code> 输入框填写 <code>v1.1.0</code>，分支选择包含该 workflow 的分支（例如 main）。workflow 会检出该 tag 并使用其代码打包。</p>
+
+  <h2>注意事项</h2>
+  <ul>
+    <li>当前产物未做 Apple 签名与公证，macOS 首次打开需要右键打开；Windows 侧未做 Authenticode 签名时 SmartScreen 可能拦截。</li>
+    <li>每个构建任务都在目标原生平台 runner 上执行，PyInstaller / Electron 不做交叉编译。</li>
+    <li>Linux 构建依赖 Docker，Windows 构建依赖 Inno Setup 6，workflow 已自动安装。</li>
+  </ul>
+
+  <div class="nav">相关文件：deb-package/pack_mac.sh · deb-package/pack_deb.ps1 · deb-package/pack_exe.ps1 · Dockerfile.pack · .github/workflows/release-desktop.yml</div>
+</div>
+</body>
+</html>

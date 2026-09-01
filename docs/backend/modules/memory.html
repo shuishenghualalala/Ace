@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>memory · Ace 后端模块</title>
+<!--
+  ============================================================================
+  模块文档模板：复制此文件 → 改名为 <module>.html → 填写各节。
+  约定：每次改动某后端模块的代码，先归类到对应模块，再更新该模块文档：
+    1) 若改了职责/文件/接口 → 同步对应小节
+    2) 必填：在「变更记录」追加一行（日期 + 变更 + 影响面）
+  风格：白底黑白极简，最大宽度 960px，系统字体，无装饰。
+  ============================================================================
+-->
+<style>
+  :root{
+    --text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:28px;font-weight:800;margin:0 0 4px}
+  .crumb{color:var(--t3);font-size:13px;margin-bottom:6px}
+  .sub{color:var(--t3);margin-bottom:36px}
+  h2{font-size:19px;font-weight:700;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+  th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}
+  th{background:var(--soft);font-weight:600}
+  .logo{width:28px;height:28px;border-radius:7px;background:var(--black);color:#fff;display:inline-grid;place-items:center;font-weight:800;vertical-align:middle;margin-right:8px}
+  ul{padding-left:20px}
+  .tree{font-family:var(--mono);font-size:13px;white-space:pre;color:var(--t2)}
+  .todo{color:var(--t2)}
+  .nav{margin-top:40px;color:var(--t3);font-size:13px}
+  a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}a:hover{border-bottom-color:var(--text)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="crumb">Ace / 后端模块 / memory</div>
+  <h1><span class="logo">A</span>crew/memory</h1>
+  <div class="sub">Memory 记忆：对话前召回与对话后写入。</div>
+
+  <h2>1. 职责</h2>
+  <ul>
+    <li>该模块做什么、不做什么（边界）。</li>
+  </ul>
+
+  <h2>2. 功能拆解</h2>
+  <p>按子功能或核心流程拆解，这是本模块文档的重点。</p>
+  <table>
+    <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td><code>feature-a</code></td><td>…</td><td>已落地</td></tr>
+      <tr><td><code>feature-b</code></td><td>…</td><td>待补充</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 关键文件</h2>
+  <table>
+    <thead><tr><th>文件</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td><code>crew/memory/xxx.py</code></td><td>…</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. 数据模型与接口</h2>
+  <p>对外暴露的关键类/方法、事件/消息约定、Schema。</p>
+  <pre><code># 关键签名</code></pre>
+
+  <h2>5. 当前存在的问题 / TODO</h2>
+  <ul class="todo">
+    <li>问题 1：…</li>
+    <li>TODO：…</li>
+  </ul>
+
+  <h2>6. 扩展点</h2>
+  <ul>
+    <li>如何在此模块上加功能（遵守契约、不跨目录）。</li>
+  </ul>
+
+  <h2>7. 变更记录</h2>
+  <table>
+    <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
+    <tbody>
+      <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+</div>
+</body>
+</html>

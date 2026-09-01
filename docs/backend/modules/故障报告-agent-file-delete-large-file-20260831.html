@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>故障报告：删除大文件导致 Gateway 重启</title>
+<style>
+  :root{--text:#111;--t2:#4b5563;--muted:#6b7280;--border:#e5e7eb;--soft:#f8fafc;--red:#b91c1c;--amber:#92400e;--green:#166534;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;}
+  *{box-sizing:border-box} body{margin:0;color:var(--text);background:#fff;font-family:var(--sans);line-height:1.75;font-size:15px}
+  .wrap{max-width:980px;margin:0 auto;padding:54px 24px 96px} h1{font-size:30px;line-height:1.3;margin:0 0 8px} h2{font-size:20px;margin:38px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)} h3{font-size:16px;margin:24px 0 8px}
+  .crumb,.meta{color:var(--muted);font-size:13px}.crumb{margin-bottom:8px}.meta{margin-bottom:28px}
+  p,li{color:var(--t2)} code{font:13px var(--mono);background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 5px;color:var(--text)}
+  table{width:100%;border-collapse:collapse;margin:10px 0 18px;font-size:14px} th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top} th{background:var(--soft);font-weight:650}
+  .banner{border-left:4px solid var(--red);background:#fef2f2;padding:14px 16px;margin:20px 0}.banner b{color:var(--red)}
+  .note{border-left:4px solid #d97706;background:#fffbeb;padding:12px 16px;margin:16px 0}.ok{color:var(--green);font-weight:650}.risk{color:var(--red);font-weight:650}
+  pre{overflow:auto;background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:6px;font:12px/1.6 var(--mono)} a{color:var(--text);text-decoration:none;border-bottom:1px solid #cbd5e1} a:hover{border-bottom-color:var(--text)}
+  .footer{margin-top:42px;color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <div class="crumb">Ace / 后端模块 / Agent + Tools / 故障报告</div>
+  <h1>删除大文件导致 Gateway 重启与 Agent 回合失败</h1>
+  <div class="meta">报告编号：ACE-20260831-AGENT-FILE-DELETE-LARGE-FILE　·　发现日期：2026-08-31　·　状态：已修复</div>
+
+  <div class="banner"><b>结论：</b>删除动作触发前，Agent 工具执行器会同步、无上限地读取目标文件内容以生成变更记录。针对 626,377,419 字节的 Git bundle，这个读取会阻塞 Gateway 事件循环；桌面端随后将 Gateway 判定为失联并重启，正在执行的 Python 协程无法跨进程恢复，最终任务显示“服务重启，Python 协程无法恢复”。</div>
+
+  <h2>1. 用户现象</h2>
+  <ul>
+    <li>用户要求删除：<code>/Users/ahuamao/Downloads/mobileworkFuWuDuan-client-feature-0827-mind-map-20260824.bundle</code>。</li>
+    <li>文件类型为 Git bundle，现场大小为 626,377,419 字节，约 597 MiB。</li>
+    <li>界面先出现工具执行中的卡片，随后出现“服务重启，Python 协程无法恢复”。</li>
+    <li>当前现场检查确认文件仍存在，因此这次请求没有完成删除。</li>
+  </ul>
+
+  <h2>2. 现场证据</h2>
+  <table>
+    <thead><tr><th>时间</th><th>证据</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td>11:14:28</td><td>请求 <code>req_mtgo00vi_4f8e16ec5652</code> 被 Gateway 接收</td><td>删除请求正常进入 Agent 链路</td></tr>
+      <tr><td>11:14:34</td><td>同一会话先完成目标文件检查，确认文件存在</td><td>目标路径和文件本身没有问题</td></tr>
+      <tr><td>11:14:51～11:14:52</td><td>Gateway 再次输出完整启动日志</td><td>原 Gateway 在请求执行期间被重启</td></tr>
+      <tr><td>11:14:52</td><td>运行时任务变为 <code>failed</code>，错误为“服务重启，Python 协程无法恢复”</td><td>这是重启恢复逻辑主动写入的终态，不是底层 Python 异常</td></tr>
+      <tr><td>11:15:51、11:16:47、11:17:22</td><td>日志再次出现 Gateway 启动序列</td><td>重启/重新拉起出现重复发生</td></tr>
+      <tr><td>11:17:24</td><td>启动日志记录旧实例被 <code>SIGKILL</code> 回收，原因 <code>identity-mismatch</code></td><td>桌面端健康证明失败后回收旧实例并重建</td></tr>
+    </tbody>
+  </table>
+
+  <p>相关日志与数据：</p>
+  <ul>
+    <li><a href="file:///Users/ahuamao/Library/Application%20Support/crew-desktop-ui/gateway-dev/logs/crew.log">Gateway 持久日志 crew.log</a>：请求与多次启动序列。</li>
+    <li><a href="file:///Users/ahuamao/Library/Application%20Support/crew-desktop-ui/logs/gateway-startup.log">Gateway 启动日志 gateway-startup.log</a>：桌面端 spawn、回收和重探测决策。</li>
+    <li><a href="file:///Users/ahuamao/Library/Application%20Support/crew-desktop-ui/gateway-dev/crew_data/crew.db">运行时数据库 crew.db</a>：<code>runtime_tasks</code> 中保存了失败任务的状态、请求 ID 和错误原因。</li>
+  </ul>
+
+  <h2>3. 代码调用链</h2>
+  <ol>
+    <li>模型选择 <code>file_delete</code> 工具后，进入 <a href="file:///Users/ahuamao/Documents/Codes/Ace/crew/agent/loop/tool_runner.py#L349"><code>ToolRunner.run_batch</code></a>。</li>
+    <li>在真正执行工具前，代码调用 <a href="file:///Users/ahuamao/Documents/Codes/Ace/crew/agent/loop/tool_runner.py#L1101"><code>ToolRunner._read_file_before</code></a>，读取删除前内容。</li>
+    <li>该方法使用 <code>target.read_text(encoding="utf-8", errors="replace")</code>，没有大小上限、文件类型判断或二进制快速路径。</li>
+    <li>读取是在当前 Gateway 协程中同步执行的；它不是通过线程池执行，因此会阻塞同一事件循环上的健康检查和其他请求。</li>
+    <li>真正的删除实现位于 <a href="file:///Users/ahuamao/Documents/Codes/Ace/crew/tools/builtin.py#L1093"><code>handle_file_delete</code></a>，内部使用 <code>asyncio.to_thread</code>。但本次请求很可能在到达真正删除前，就已经被前置读取拖住并触发 Gateway 重启。</li>
+    <li>Gateway 重启后，<a href="file:///Users/ahuamao/Documents/Codes/Ace/crew/tasks/runtime.py#L668"><code>TaskRuntime.reconcile_after_restart</code></a> 会将未完成的非 shell 任务标记为失败，因为 Python 协程无法跨进程恢复。</li>
+  </ol>
+
+  <h2>4. 根因定位</h2>
+  <h3>直接根因</h3>
+  <p><code>ToolRunner._read_file_before</code> 为了生成文件变更 diff，对 <code>file_write</code> 和 <code>file_delete</code> 都执行完整内容读取。对于大文件和二进制文件，这是不必要且无界的工作。</p>
+
+  <h3>设计不一致</h3>
+  <p>Ace 已有带 128 KiB 上限的文件状态读取实现：<a href="file:///Users/ahuamao/Documents/Codes/Ace/crew/agent/file_changes.py#L77"><code>_read_text_with_limit</code></a> 和 <a href="file:///Users/ahuamao/Documents/Codes/Ace/crew/agent/file_changes.py#L88"><code>read_file_state</code></a>。该实现会把超大文件标记为二进制，只保留元数据，不读取全部内容；但当前 <code>ToolRunner</code> 仍在使用旧的无上限读取逻辑。</p>
+
+  <div class="note"><b>注意：</b><code>identity-mismatch</code> 是桌面端健康证明失败后的监督动作记录，不代表删除目标路径鉴权失败，也不代表 Git bundle 文件损坏。</div>
+
+  <h2>5. 影响范围</h2>
+  <table>
+    <thead><tr><th>范围</th><th>影响</th></tr></thead>
+    <tbody>
+      <tr><td><code>file_delete</code> 删除大文件</td><td class="risk">高风险：可能阻塞 Gateway，导致删除未完成、Agent 回合失败和服务重启。</td></tr>
+      <tr><td><code>file_write</code> 覆盖大文件</td><td class="risk">存在同类风险：执行前读取无上限；执行后生成变更事件时仍有直接读取逻辑。</td></tr>
+      <tr><td>小型文本文件删除</td><td class="ok">通常不受影响，现有文件变更卡片逻辑可以继续工作。</td></tr>
+      <tr><td>用户原始文件</td><td class="ok">本次现场文件仍在，未发现删除成功或误删证据。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>6. 建议修复方案（已实施）</h2>
+  <ol>
+    <li>让 <code>ToolRunner</code> 复用 <code>crew.agent.file_changes.read_file_state</code>，不要继续使用无上限的 <code>Path.read_text</code>。</li>
+    <li>对 <code>file_delete</code> 不生成内容 diff：只记录 <code>exists=true</code>、<code>binary=true</code> 等状态，删除后生成 <code>status=deleted</code> 的元数据变更。</li>
+    <li>对 <code>file_write</code> 的执行前和执行后状态同样使用大小上限；超限文件只展示路径、大小/二进制状态，不读取全文。</li>
+    <li>增加回归测试：使用临时大文件或模拟超限读取，验证 <code>file_delete</code> 能完成、任务能进入 <code>completed</code>，并且不会调用无界全文读取。</li>
+    <li>增加一条集成级日志：记录文件变更快照被截断为元数据的原因，便于后续区分“工具失败”和“变更展示降级”。</li>
+  </ol>
+
+  <h2>7. 验证建议</h2>
+  <ul>
+    <li>小型文本文件删除：应保留现有删除文件变更卡片。</li>
+    <li>大于 128 KiB 的文本文件删除：应快速完成，变更卡片不包含全文 diff。</li>
+    <li>大于 128 KiB 的二进制文件删除：应快速完成，标记为二进制删除。</li>
+    <li>大文件覆盖写入：应验证执行前后均不发生无界读取。</li>
+    <li>Windows、macOS、Linux 均执行一次，因为文件读取、删除和进程托管路径存在平台差异。</li>
+  </ul>
+
+  <h2>8. 修复与验证记录</h2>
+  <p>本次修复已落地并通过单元与端到端验证，核心思路是「统一读取上限 + 不无界读」：让 <code>ToolRunner</code> 复用 <code>crew.agent.file_changes</code> 既有的 128 KiB 受限读取层，而不是在每个调用点各自无界 <code>read_text()</code>。</p>
+  <h3>改动文件</h3>
+  <ul>
+    <li><code>crew/agent/loop/tool_runner.py</code>：<code>_read_file_before</code> 与 <code>_file_change_event</code> 改用 <code>read_file_state</code> / <code>file_change_from_states</code> 生成 before/after 状态与变更；超限或二进制文件只记录元数据（<code>binary=true</code>、<code>diff=[]</code>），并新增降级日志。路径解析抽为 <code>_mutation_target_path</code>，消除重复。</li>
+    <li><code>tests/test_file_changes_security.py</code>：新增超限文件删除的元数据降级单测。</li>
+    <li><code>tests/test_agent_loop.py</code>：新增完整 <code>run_batch</code> 链路的 file_delete 大文件端到端测试（真实 <code>handle_file_delete</code> + 真实文件系统 + 断言不再调用无界 <code>read_text</code>）。</li>
+  </ul>
+  <h3>验证结果</h3>
+  <ul>
+    <li>单元测试：<code>tests/test_file_changes_security.py</code> 5 passed；<code>tests/test_tools.py</code> 50 passed。</li>
+    <li>端到端：<code>tests/test_agent_loop.py</code>（含新增 case）69 passed。</li>
+    <li>真实规模回归：用稀疏文件模拟 626,377,419 字节 bundle，修复前无界 <code>read_text</code> 单次读取约 1.08s（阻塞事件循环）；修复后完整删除链路约 0.086s，文件成功删除，变更条目为 <code>status=deleted / binary=true / diff=[]</code>，无 error、无“服务重启”。</li>
+    <li>删除本体仍由 <code>handle_file_delete</code> 的 <code>asyncio.to_thread</code> 执行，不阻塞事件循环；本次改动不涉及删除/写入本体逻辑。</li>
+  </ul>
+  <h3>说明</h3>
+  <ul>
+    <li>变更快照上限沿用 Ace 既有的 <code>FILE_CHANGE_MAX_BYTES = 128 KiB</code>，与「文件系统读取层统一设 512 MiB 上限」的思路一致，仅阈值按 Ace 现有约定保留。</li>
+    <li>本次没有删除用户现场的目标 bundle 文件，也没有新增模块或数据表。</li>
+  </ul>
+
+  <h2>9. 扩展修复：文件工具统一读取上限</h2>
+  <p>参照「整读上限 + 读取前 metadata 预检 + 异步读取」的思路，审查发现 Ace 的 <code>file_read</code> / <code>patch</code> / <code>file_write</code> / <code>grep</code> 仍存在无界读取或同步阻塞，本轮统一修复。</p>
+  <h3>改动</h3>
+  <ul>
+    <li><code>crew/tools/file_utils.py</code>：新增 <code>MAX_READ_FILE_BYTES = 512 * 1024 * 1024</code>（统一整读上限）；<code>snapshot_file</code> 增加 <code>max_bytes</code> 参数。</li>
+    <li><code>crew/tools/builtin.py</code>：<code>handle_file_read</code> 读取加 <code>max_bytes</code>（读前拒绝超大文件）；<code>_write_file_sync</code> 的 <code>snapshot_file</code> 加 <code>max_bytes</code>。</li>
+    <li><code>crew/tools/file_tools.py</code>：<code>handle_patch</code> 的 <code>snapshot_file</code> / <code>atomic_replace_bytes</code> 改用 <code>asyncio.to_thread</code>（阻塞 I/O 丢线程池），并对超限抛干净 <code>ToolError</code>；grep 兜底改为读前按大小拒绝（<code>max_bytes=_DEFAULT_MAX_FILE_BYTES</code>），不再整读后再判断。</li>
+  </ul>
+  <h3>验证</h3>
+  <ul>
+    <li>单元/回归：<code>tests/test_tools.py</code>、<code>tests/security/test_file_races.py</code>、<code>tests/test_agent_loop.py</code>、<code>tests/test_file_changes_security.py</code>、<code>tests/security/test_outbound_tools.py</code> 共 155 passed；新增 4 个回归测试覆盖 <code>snapshot_file</code>/<code>file_read</code>/<code>patch</code> 的读前拒绝。</li>
+    <li>真实规模：600 MiB 稀疏文件 <code>file_read</code> 读前拒绝耗时 0.0017s，<code>patch</code> 读前拒绝耗时 0.0018s（不再整读进内存）。</li>
+    <li>端到端：<code>complex_tasks</code> 4 个 case 全 PASSED（write_file / delegate_task_batch / team_workflow / dynamic_kanban）。</li>
+  </ul>
+
+  <h2>10. 附件读取读前上限</h2>
+  <p>附件与图像注入上下文时同样存在「同步读整个文件再截断」的无界读取：<code>_read_attachment</code> 用 <code>read_text()[:8000]</code>、<code>_read_image_as_data_url</code> 用 <code>read_bytes()</code>，用户 @ 引用超大附件时会同步整读进内存并阻塞事件循环。本轮统一改为：</p>
+  <ul>
+    <li><code>_read_attachment</code> / <code>_read_image_as_data_url</code> 改用 <code>read_verified_bytes(path.resolve(), max_bytes=MAX_READ_FILE_BYTES)</code>，读前拒绝超大文件，并经 <code>asyncio.to_thread</code> 异步读取。</li>
+    <li><code>_build_user_text</code> 改为异步方法，调用点改为 <code>await</code>。</li>
+    <li>路径先 <code>resolve()</code> 再读取，避免 macOS 上 <code>/var</code> 符号链接导致目录链打开失败。</li>
+  </ul>
+  <p>验证：<code>tests/test_agent.py</code> 新增 <code>_read_attachment</code> 超大 / 正常两类回归用例；600 MiB 稀疏附件读前拒绝耗时 0.0015s，小附件正常读取；相关测试 192 passed。</p>
+
+  <div class="footer">归属模块：<code>crew/agent/</code>、<code>crew/tools/</code>、<code>crew/tasks/</code>　·　关联桌面监督：<code>desktop/src/main/index.ts</code></div>
+</main>
+</body>
+</html>

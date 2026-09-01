@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1680" height="1080" viewBox="0 0 1680 1080" role="img" aria-labelledby="title desc">
+  <title id="title">Ace 同伴功能总体架构</title>
+  <desc id="desc">从主对话界面，经会话适配层、同伴领域层、Agent 运行时和蓝牙链路适配层完成消息、文件与群聊 Agent 协作。</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="5" stdDeviation="8" flood-color="#0f172a" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#475569"/>
+    </marker>
+    <style>
+      .title { font: 700 34px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 17px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #64748b; }
+      .lane-title { font: 700 19px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #334155; letter-spacing: .5px; }
+      .box-title { font: 700 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #0f172a; }
+      .box-text { font: 400 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #475569; }
+      .tag { font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #334155; }
+      .arrow-label { font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #334155; }
+      .card { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; rx: 18; filter: url(#shadow); }
+      .arrow { fill: none; stroke: #475569; stroke-width: 2; marker-end: url(#arrow); }
+      .private { stroke: #7c3aed; }
+      .public { stroke: #0f766e; }
+    </style>
+  </defs>
+
+  <rect width="1680" height="1080" fill="#f8fafc"/>
+  <text class="title" x="64" y="58">Ace 同伴功能 · 总体架构（待评审）</text>
+  <text class="subtitle" x="64" y="88">同一套主对话体验，分离会话路由、同伴业务、Agent 执行与近场传输</text>
+
+  <rect x="48" y="120" width="1584" height="210" rx="24" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text class="lane-title" x="76" y="155">01 · 桌面交互与会话接入</text>
+  <rect class="card" x="88" y="184" width="275" height="112"/>
+  <text class="box-title" x="112" y="218">同伴管理中心</text>
+  <text class="box-text" x="112" y="246">发现、好友、群成员、Agent 授权</text>
+  <text class="box-text" x="112" y="270">自动扫描，无“连接”心智负担</text>
+
+  <rect class="card" x="432" y="174" width="310" height="132"/>
+  <text class="box-title" x="456" y="208">主对话 UI</text>
+  <text class="box-text" x="456" y="236">私聊头像 / 群头像 + 同伴来源标</text>
+  <text class="box-text" x="456" y="260">统一消息流、文件卡、输入框</text>
+  <text class="box-text" x="456" y="284">本机执行卡 → 右侧执行看板</text>
+
+  <rect class="card" x="824" y="174" width="365" height="132"/>
+  <text class="box-title" x="848" y="208">ConversationAdapterRegistry</text>
+  <text class="box-text" x="848" y="236">GatewayConversationAdapter</text>
+  <text class="box-text" x="848" y="260">NearbyConversationAdapter</text>
+  <text class="box-text" x="848" y="284">统一能力矩阵，按会话类型收口入口</text>
+
+  <rect class="card" x="1266" y="184" width="318" height="112"/>
+  <text class="box-title" x="1290" y="218">ConversationBinding</text>
+  <text class="box-text" x="1290" y="246">gateway / nearby_dm / nearby_room</text>
+  <text class="box-text" x="1290" y="270">会话 ID 与来源绑定，持久化恢复</text>
+
+  <path class="arrow" d="M363 240 L432 240"/>
+  <path class="arrow" d="M742 240 L824 240"/>
+  <path class="arrow" d="M1189 240 L1266 240"/>
+
+  <rect x="48" y="366" width="1584" height="348" rx="24" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <text class="lane-title" x="76" y="402">02 · Gateway 同伴领域与 Agent 执行</text>
+
+  <rect class="card" x="88" y="438" width="350" height="216"/>
+  <text class="box-title" x="112" y="474">Companion Domain</text>
+  <text class="box-text" x="112" y="504">联系人 / 房间 / 人类成员 / Agent 席位</text>
+  <text class="box-text" x="112" y="530">消息、文件元数据、协作预算、幂等</text>
+  <text class="box-text" x="112" y="556">权限不变量统一校验</text>
+  <rect x="112" y="580" width="290" height="48" rx="10" fill="#dcfce7"/>
+  <text class="tag" x="132" y="610">crew.db 是业务状态唯一真相源</text>
+
+  <rect class="card" x="512" y="438" width="320" height="216"/>
+  <text class="box-title" x="536" y="474">AgentSeatRunner</text>
+  <text class="box-text" x="536" y="504">publicAgentId → 本机运行时映射</text>
+  <text class="box-text" x="536" y="530">只允许群内、已授权 Agent 席位</text>
+  <text class="box-text" x="536" y="556">预算、超时、去重、取消</text>
+  <rect x="536" y="580" width="272" height="48" rx="10" fill="#ede9fe"/>
+  <text class="tag" x="558" y="610">产生私有执行流 + 公开最终结果</text>
+
+  <rect class="card" x="906" y="424" width="332" height="244"/>
+  <text class="box-title" x="930" y="460">现有 Agent RuntimeAdapter</text>
+  <text class="box-text" x="930" y="492">Ace 内置 Agent</text>
+  <text class="box-text" x="930" y="518">外援 ACP / CLI Agent</text>
+  <text class="box-text" x="930" y="544">统一 chunk / tool / final / error 事件</text>
+  <rect x="930" y="574" width="284" height="68" rx="10" fill="#f1f5f9"/>
+  <text class="tag" x="950" y="600">仅公开经过脱敏的 Agent Profile</text>
+  <text class="tag" x="950" y="622">密钥、模型、路径与工具细节不外发</text>
+
+  <rect class="card" x="1312" y="438" width="272" height="216"/>
+  <text class="box-title" x="1336" y="474">Local Run Store</text>
+  <text class="box-text" x="1336" y="504">完整 chunk 与工具执行过程</text>
+  <text class="box-text" x="1336" y="530">仅 Agent 所有者可订阅</text>
+  <text class="box-text" x="1336" y="556">映射为主对话执行看板</text>
+  <rect x="1336" y="580" width="224" height="48" rx="10" fill="#ede9fe"/>
+  <text class="tag" x="1364" y="610">LOCAL_ONLY 可见性</text>
+
+  <path class="arrow" d="M1006 306 L1006 352 L263 352 L263 438"/>
+  <text class="arrow-label" x="644" y="346">同伴会话命令 / 事件</text>
+  <path class="arrow" d="M438 520 L512 520"/>
+  <text class="arrow-label" x="452" y="432">agent.invoke</text>
+  <path class="arrow" d="M832 520 L906 520"/>
+  <path class="arrow private" d="M1238 492 L1312 492"/>
+  <text class="arrow-label" x="1244" y="480">全量流</text>
+  <path class="arrow private" d="M1448 438 L1448 350 L592 350 L592 306"/>
+  <text class="arrow-label" x="1054" y="344">仅本机：执行卡 / 右侧看板</text>
+  <path class="arrow public" d="M1072 668 L1072 686 L263 686 L263 654"/>
+  <text class="arrow-label" x="620" y="700">对外：agent.result / error（最终输出）</text>
+
+  <rect x="48" y="750" width="1584" height="266" rx="24" fill="#fffbeb" stroke="#fde68a"/>
+  <text class="lane-title" x="76" y="786">03 · 本地桥接与近场链路</text>
+  <rect class="card" x="184" y="836" width="328" height="126"/>
+  <text class="box-title" x="208" y="872">Desktop Main Bridge</text>
+  <text class="box-text" x="208" y="902">本机鉴权 IPC / WebSocket</text>
+  <text class="box-text" x="208" y="928">生命周期、权限提示、断线恢复</text>
+
+  <rect class="card" x="672" y="826" width="350" height="146"/>
+  <text class="box-title" x="696" y="862">LinkAdapterRegistry</text>
+  <text class="box-text" x="696" y="892">discover / advertise / connect / send</text>
+  <text class="box-text" x="696" y="918">统一 LinkEvent，隐藏平台 BLE 差异</text>
+  <text class="box-text" x="696" y="944">传输层与 Agent 运行时契约分离</text>
+
+  <rect class="card" x="1190" y="826" width="300" height="146"/>
+  <text class="box-title" x="1214" y="862">LinkAdapter 实现</text>
+  <text class="box-text" x="1214" y="892">BleLinkAdapter · macOS / Win / Linux</text>
+  <text class="box-text" x="1214" y="918">MockLinkAdapter · 自动化与双实例联调</text>
+  <text class="box-text" x="1214" y="944">协议 v3 · 文本 / 流式文件 / E2EE</text>
+
+  <path class="arrow" d="M263 654 L263 774 L348 774 L348 836"/>
+  <text class="arrow-label" x="276" y="768">发送与链路事件</text>
+  <path class="arrow" d="M512 899 L672 899"/>
+  <path class="arrow" d="M1022 899 L1190 899"/>
+
+  <rect x="64" y="1038" width="1552" height="1" fill="#cbd5e1"/>
+  <text class="subtitle" x="64" y="1067">边界原则：NearbyConversationAdapter 处理“聊什么”；LinkAdapter 处理“怎么传”；RuntimeAdapter 处理“Agent 怎么执行”。</text>
+</svg>

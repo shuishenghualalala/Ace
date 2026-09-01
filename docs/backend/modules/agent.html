@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>agent · Ace 后端模块</title>
+<!--
+  ============================================================================
+  模块文档模板：复制此文件 → 改名为 <module>.html → 填写各节。
+  约定：每次改动某后端模块的代码，先归类到对应模块，再更新该模块文档：
+    1) 若改了职责/文件/接口 → 同步对应小节
+    2) 必填：在「变更记录」追加一行（日期 + 变更 + 影响面）
+  风格：白底黑白极简，最大宽度 960px，系统字体，无装饰。
+  ============================================================================
+-->
+<style>
+  :root{
+    --text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:28px;font-weight:800;margin:0 0 4px}
+  .crumb{color:var(--t3);font-size:13px;margin-bottom:6px}
+  .sub{color:var(--t3);margin-bottom:36px}
+  h2{font-size:19px;font-weight:700;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+  th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}
+  th{background:var(--soft);font-weight:600}
+  .logo{width:28px;height:28px;border-radius:7px;background:var(--black);color:#fff;display:inline-grid;place-items:center;font-weight:800;vertical-align:middle;margin-right:8px}
+  ul{padding-left:20px}
+  .tree{font-family:var(--mono);font-size:13px;white-space:pre;color:var(--t2)}
+  .todo{color:var(--t2)}
+  .nav{margin-top:40px;color:var(--t3);font-size:13px}
+  a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}a:hover{border-bottom-color:var(--text)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="crumb">Ace / 后端模块 / agent</div>
+  <h1><span class="logo">A</span>crew/agent</h1>
+  <div class="sub">Agent 内核：单智能体循环、工具调度、上下文压缩、规划与会话保存。</div>
+
+  <h2>1. 职责</h2>
+  <ul>
+    <li>组织主 Agent 的模型调用与多轮工具循环，维护 canonical 历史和仅发送给模型的 request view。</li>
+    <li>在上下文预算内执行分层压缩，保护已加载指令与不可重放的重要结论，并按 path 从磁盘重读最近文件。</li>
+    <li>提供子 Agent、外部 Agent、Plan/Todo 和 Skill 索引等运行时能力；具体工具实现仍归所属 Feature。</li>
+  </ul>
+
+  <h2>2. 功能拆解</h2>
+  <table>
+    <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td>Agent Loop</td><td>模型流式输出、并行工具调用、结果回灌、重试与防循环。</td><td>已落地</td></tr>
+      <tr><td>上下文视图</td><td>canonical 历史保持完整；每轮根据预算生成独立 request view。</td><td>已落地</td></tr>
+      <tr><td>分层压缩</td><td>L1 仅压缩临时过程结果，L2/L3 生成结构化摘要并恢复受保护结果。</td><td>已落地</td></tr>
+      <tr><td>能力调度</td><td>按会话能力 Profile 过滤 Skill、工具和系统提示。</td><td>已落地</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 关键文件</h2>
+  <table>
+    <thead><tr><th>文件</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td><code>crew/agent/executor/builtin.py</code></td><td>主 Agent 工具循环与 request view 调度。</td></tr>
+      <tr><td><code>crew/agent/compact/pipeline.py</code></td><td>L1/L2/L3 压缩编排、预算判断和摘要状态。</td></tr>
+      <tr><td><code>crew/agent/compact/microcompact.py</code></td><td>按工具结果生命周期执行选择性微压缩。</td></tr>
+      <tr><td><code>crew/agent/compact/post_compact.py</code></td><td>完整压缩后恢复 Skill 指令、资源和重要结果。</td></tr>
+      <tr><td><code>crew/agent/loop/tool_guardrails.py</code></td><td>重复失败与只读工具无进展检测。</td></tr>
+      <tr><td><code>crew/agent/skills.py</code></td><td>Skill 扫描、索引、激活和提示构建。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. 数据模型与接口</h2>
+  <pre><code>ContextCompactor.compact_preview_view(messages)  # 纯规则 L1 视图
+await ContextCompactor.compact_view(messages)   # 超预算时可进入 L3
+
+ToolResultRetention:
+  TEMPORARY   # 临时过程，可由 L1 压缩
+  RESOURCE    # 按 identity 保留最近资源版本
+  INSTRUCTION # 持续生效的已加载指令
+  IMPORTANT   # 用户决定、Agent 结论等不可重放结果</code></pre>
+  <p>未声明生命周期的工具默认使用 <code>IMPORTANT</code>。L1 不再按“最近六个工具”统一清理；<code>keep_recent_tools</code> 只计算 <code>TEMPORARY</code> 工具。<code>file_read</code> 声明为 <code>TEMPORARY</code>：旧分片由 L1 清成含 path/offset 的一行摘要，完整压缩后按 path 去重、从磁盘重读最新内容恢复（不回放旧快照）。</p>
+  <p>切分点（<code>_safe_split</code>）接受 user 或 assistant 边界——recent 以 assistant 开头时其 tool_calls 结果同在 recent，配对完整；因此单个长回合内的早期迭代也能被 L3 摘要，不再整回合受保护。摘要消息尾部附 canonical 历史回溯指引（会话数据库路径 + session_id）。恢复预算（指令 5 条 / 重要结论 8 条 / 附件总量等）见 <code>agent.compaction.post_compact_*</code> 配置。</p>
+
+  <h2>5. 当前存在的问题 / TODO</h2>
+  <ul class="todo">
+    <li>文件恢复只重读本会话 file_read 已成功授权读取过的路径，读取走身份校验句柄（防 TOCTOU），不引入新的文件访问。</li>
+    <li>后续可为更多 Feature 工具补充更细的动态 identity；未补充前按重要结果保护，不影响正确性。</li>
+  </ul>
+
+  <h2>6. 扩展点</h2>
+  <ul>
+    <li>新增 Feature 工具时在工具注册处声明结果生命周期，Agent 压缩器不维护 Feature 工具名白名单。</li>
+    <li>资源类工具必须给出稳定 identity 字段；同一 identity 的旧版本会被明确替换。</li>
+    <li>需要跨完整压缩持续生效的说明使用 <code>INSTRUCTION</code>，不可重新获取的结果使用 <code>IMPORTANT</code>。</li>
+  </ul>
+
+  <h2>7. 变更记录</h2>
+  <table>
+    <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
+    <tbody>
+      <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
+      <tr><td>2026-08-31</td><td>普通 Agent 历史回放身份隔离</td><td>Gateway 会话历史投影只对 executor=team 的会话聚合子历史；Team 子会话必须含 member_id。</td></tr>
+      <tr><td>2026-09-01</td><td>上下文微压缩由时间窗口改为工具结果生命周期；完整压缩后恢复指令、资源和重要结论。</td><td><code>crew/agent/compact</code>、工具循环上下文稳定性。</td></tr>
+      <tr><td>2026-09-01</td><td><code>_safe_split</code> 接受 assistant 边界：单个长回合内的早期迭代可被 L3 摘要（修复回合内 L3 永不触发）；file_read 改 TEMPORARY + 压缩后按 path 磁盘重读；恢复预算移入 <code>agent.compaction.post_compact_*</code> 配置；摘要消息附 canonical 历史回溯指引。</td><td><code>crew/agent/compact/pipeline.py</code>、<code>post_compact.py</code>、<code>crew/state/config.py</code>、<code>crew/app.py</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+</div>
+</body>
+</html>

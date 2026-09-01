@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>tools · Ace 后端模块</title>
+<style>
+  :root{
+    --text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:28px;font-weight:800;margin:0 0 4px}
+  .crumb{color:var(--t3);font-size:13px;margin-bottom:6px}
+  .sub{color:var(--t3);margin-bottom:36px}
+  h2{font-size:19px;font-weight:700;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:15px;font-weight:700;margin:24px 0 8px}
+  p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+  th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}
+  th{background:var(--soft);font-weight:600}
+  .logo{width:28px;height:28px;border-radius:7px;background:var(--black);color:#fff;display:inline-grid;place-items:center;font-weight:800;vertical-align:middle;margin-right:8px}
+  ul{padding-left:20px}
+  .todo{color:var(--t2)}
+  .nav{margin-top:40px;color:var(--t3);font-size:13px}
+  a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}a:hover{border-bottom-color:var(--text)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="crumb">Ace / 后端模块 / tools</div>
+  <h1><span class="logo">T</span>crew/tools</h1>
+  <div class="sub">工具注册、schema 暴露、执行与结果回灌；内置工具集 + 执行流水线 + 权限披露 + 安全审批 + 输出处理。</div>
+
+  <h2>1. 职责</h2>
+  <ul>
+    <li><b>注册与发现</b>：Registry 管理工具注册、schema 暴露、按需加载（渐进式披露）。</li>
+    <li><b>执行与回灌</b>：内置工具集 + 执行流水线（输入校验 / 权限 / 结果处理），错误统一回灌给模型。</li>
+    <li><b>安全与治理</b>：文件/网络/外部运行时授权、敏感脱敏、终端命令防护、文件读取上限。</li>
+    <li><b>边界</b>：不含 Agent 循环（<code>crew/agent/loop</code>）、记忆（<code>crew/memory</code>）、工作区（<code>crew/team</code>）；这些模块通过本模块的 Registry 消费工具。</li>
+  </ul>
+
+  <h2>2. 内置工具清单</h2>
+  <p>下表列出 Ace 当前内置的工具（按功能领域分组）。<code>mcp_client</code> 会动态接入外部 MCP server 的工具，不在此列。</p>
+
+  <h3>2.1 文件系统</h3>
+  <table>
+    <thead><tr><th>工具</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>file_read</code></td><td>读取文本文件，支持 offset/limit 分页、保留行尾符、自动处理 UTF-8 BOM。</td></tr>
+      <tr><td><code>file_write</code></td><td>写入文件（覆盖或追加），自动创建父目录；保留原文件行尾符与 BOM；拒绝敏感系统路径。</td></tr>
+      <tr><td><code>file_delete</code></td><td>删除明确指定的文件，不递归删除目录；工作区外路径需精确授权。</td></tr>
+      <tr><td><code>patch</code></td><td>对文本文件执行替换补丁（old → new），保留行尾符与 BOM。</td></tr>
+      <tr><td><code>glob</code></td><td>按 glob 模式查找文件（如 <code>**/*.py</code>），优先使用托管 rg，Python 兜底。</td></tr>
+      <tr><td><code>grep</code></td><td>按 ripgrep 正则搜索文件内容，优先使用托管 rg，Python 兜底。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.2 终端与进程</h3>
+  <table>
+    <thead><tr><th>工具</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>terminal</code></td><td>执行 shell 命令；支持前台/后台、超时、精确权限申请与沙箱策略。</td></tr>
+      <tr><td><code>process</code></td><td>管理 <code>terminal(background=true)</code> 启动的后台进程：list / poll / log / wait / kill。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.3 网络与搜索</h3>
+  <table>
+    <thead><tr><th>工具</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>web_search</code></td><td>使用公开搜索页面做轻量网页搜索，返回标题与链接。</td></tr>
+      <tr><td><code>web_extract</code></td><td>抓取 URL 并提取标题与正文文本。</td></tr>
+      <tr><td><code>vision_analyze</code></td><td>分析本地图片的基础元信息（PNG/JPEG 尺寸等）。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.4 浏览器自动化</h3>
+  <p>详见 <a href="../../browser/playwright-engine-design.md">browser/playwright-engine-design.md</a>。</p>
+  <table>
+    <thead><tr><th>工具</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>browser_navigate</code></td><td>在 Crew 内置浏览器中导航，返回带 ref 的 accessibility snapshot。</td></tr>
+      <tr><td><code>browser_snapshot</code></td><td>重新观察当前页面，旧 ref 立即失效。</td></tr>
+      <tr><td><code>browser_find</code></td><td>按文本或正则查找 snapshot 中的元素，返回新代次 ref。</td></tr>
+      <tr><td><code>browser_click</code></td><td>点击 snapshot 中的页面 ref， accessibility 无节点时可用坐标兜底。</td></tr>
+      <tr><td><code>browser_locate</code></td><td>把技能里存盘的稳定选择器解析成当前页面的 ref。</td></tr>
+      <tr><td><code>browser_type</code></td><td>清空并填写 snapshot 中的输入元素。</td></tr>
+      <tr><td><code>browser_scroll</code></td><td>滚动页面并返回新 snapshot。</td></tr>
+      <tr><td><code>browser_back</code></td><td>后退并返回新 snapshot。</td></tr>
+      <tr><td><code>browser_press</code></td><td>按 Playwright 键名、字符或组合快捷键。</td></tr>
+      <tr><td><code>browser_get_images</code></td><td>列出当前页面全部图片的 URL、alt 与尺寸。</td></tr>
+      <tr><td><code>browser_vision</code></td><td>生成当前页面截图并作为多模态视觉输入附加给模型。</td></tr>
+      <tr><td><code>browser_console</code></td><td>读取 Playwright Console / PageError 缓冲。</td></tr>
+      <tr><td><code>browser_tabs</code></td><td>管理当前 Crew 会话自己的标签页：list / new / select / close。</td></tr>
+      <tr><td><code>browser_upload</code></td><td>上传本地文件到 file input 或完成最近一次触发的文件选择器。</td></tr>
+      <tr><td><code>browser_download</code></td><td>把链接下载到当前任务 downloads/browser/，需用户确认。</td></tr>
+      <tr><td><code>browser_dialog</code></td><td>查看、关闭或接受当前浏览器对话框；accept 需用户确认。</td></tr>
+      <tr><td><code>browser_takeover</code></td><td>请求用户接管、暂停或停止浏览器。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.5 子 Agent 与外部 Agent</h3>
+  <table>
+    <thead><tr><th>工具</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>delegate_task</code></td><td>派生一个或多个临时子 Agent 在隔离上下文中执行任务，支持批量并行与后台运行。</td></tr>
+      <tr><td><code>run_agent</code></td><td>调用预定义身份、prompt、工具与模型的子 Agent。</td></tr>
+      <tr><td><code>collect_subagent</code></td><td>Retrieve 后台子 Agent 的结果；wait=true 阻塞至完成。</td></tr>
+      <tr><td><code>delegate_to_external_agent</code></td><td>把子任务交给已创建且 Runtime 可用的外部智能体执行（ACP/CLI 等）。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.6 Team 协同</h3>
+  <table>
+    <thead><tr><th>工具</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>delegate_to_teammate</code></td><td>Leader 把子任务委派给指定队友执行并返回结果。</td></tr>
+      <tr><td><code>team_mention</code></td><td>Team 内 @成员通信，支持提交结果状态 pass / fail / blocked。</td></tr>
+      <tr><td><code>request_plan_change</code></td><td>请求变更当前 Team 计划。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.7 Wiki 知识库</h3>
+  <p>详见 <a href="wiki.html">wiki 模块文档</a>。</p>
+  <table>
+    <thead><tr><th>工具</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>wiki_orient</code></td><td>了解当前活跃知识库的结构与状态。</td></tr>
+      <tr><td><code>wiki_search</code></td><td>搜索知识库，返回相关页面与 Claim/Evidence 上下文。</td></tr>
+      <tr><td><code>wiki_read</code></td><td>读取知识库页面内容。</td></tr>
+      <tr><td><code>wiki_list_sources</code></td><td>列出当前知识库的 raw sources。</td></tr>
+      <tr><td><code>wiki_list_kbs</code></td><td>列出所有知识库。</td></tr>
+      <tr><td><code>wiki_list_inbox</code></td><td>列出收件箱待处理 source。</td></tr>
+      <tr><td><code>wiki_batch_ingest</code></td><td>批量解析并入库 raw sources。</td></tr>
+      <tr><td><code>wiki_lint</code></td><td>检查知识库页面问题。</td></tr>
+      <tr><td><code>wiki_create_kb</code></td><td>创建知识库。</td></tr>
+      <tr><td><code>wiki_delete_kb</code></td><td>删除知识库。</td></tr>
+      <tr><td><code>wiki_delete_source</code></td><td>删除 source。</td></tr>
+      <tr><td><code>wiki_parse_source</code></td><td>解析 source 为结构化文本。</td></tr>
+      <tr><td><code>wiki_update_page</code></td><td>更新知识库页面。</td></tr>
+      <tr><td><code>wiki_plan_ingest</code></td><td>规划 source 入库步骤。</td></tr>
+      <tr><td><code>wiki_apply_ingest</code></td><td>执行确认的入库计划。</td></tr>
+      <tr><td><code>wiki_fetch_url</code></td><td>抓取 URL 内容到 Wiki。</td></tr>
+      <tr><td><code>wiki_refresh_source</code></td><td>刷新已有 source。</td></tr>
+      <tr><td><code>wiki_digest</code></td><td>对 source 做摘要。</td></tr>
+      <tr><td><code>wiki_capture_attachment</code></td><td>读取当前 owner 本轮上传目录的附件。</td></tr>
+      <tr><td><code>wiki_capture_text</code></td><td>捕获文本文源。</td></tr>
+      <tr><td><code>wiki_capture_session</code></td><td>捕获当前会话内容为 source。</td></tr>
+      <tr><td><code>wiki_create_page</code></td><td>创建新页面。</td></tr>
+      <tr><td><code>wiki_delete_pages</code></td><td>批量删除页面。</td></tr>
+      <tr><td><code>wiki_rename_page</code></td><td>重命名页面。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.8 计划模式</h3>
+  <table>
+    <thead><tr><th>工具</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>enter_plan_mode</code></td><td>进入计划模式（仅由 UI / CLI / WebSocket 显式触发，模型不可主动调用）。</td></tr>
+      <tr><td><code>exit_plan_mode</code></td><td>提交计划文件，等待用户审批。</td></tr>
+      <tr><td><code>todo</code></td><td>管理当前会话的任务列表。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.9 Cron 定时任务</h3>
+  <table>
+    <thead><tr><th>工具</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>cron_create</code></td><td>创建定时任务，到点自动把 query 作为一轮对话执行。</td></tr>
+      <tr><td><code>cron_list</code></td><td>列出定时任务。</td></tr>
+      <tr><td><code>cron_get</code></td><td>查看指定任务详情与最近执行记录。</td></tr>
+      <tr><td><code>cron_delete</code></td><td>删除定时任务。</td></tr>
+      <tr><td><code>cron_pause</code></td><td>暂停定时任务。</td></tr>
+      <tr><td><code>cron_resume</code></td><td>恢复被暂停的定时任务。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.10 交互与记忆</h3>
+  <table>
+    <thead><tr><th>工具</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>ask_followup_question</code></td><td>当需求高度不确定时，向前端弹出单选/多选/文本输入交互框澄清。</td></tr>
+      <tr><td><code>memory</code></td><td>读写轻量持久记忆。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.11 技能管理</h3>
+  <table>
+    <thead><tr><th>工具</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>skills_list</code></td><td>列出当前专家/上下文中允许使用的技能 metadata。</td></tr>
+      <tr><td><code>skill_view</code></td><td>读取某个技能的 SKILL.md、PACKAGE.md 或指定文件。</td></tr>
+      <tr><td><code>skill_package_open</code></td><td>展开一个 skill package，使其内部 skills 对当前 agent 可见。</td></tr>
+      <tr><td><code>skills_audit</code></td><td>检测 skills 中文展示 metadata、query 示例与旧项目固定路径引用。</td></tr>
+      <tr><td><code>skills_repair</code></td><td>调用模型补全中文 metadata 并迁移旧路径。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.12 Sites / Blueprint</h3>
+  <table>
+    <thead><tr><th>工具</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>Canvas</code></td><td>创建和管理灵感 App 的 Canvas 与 Widget 布局（actions: list/create/read/update/placeWidget/updatePlacement/removePlacement/show/delete）。</td></tr>
+      <tr><td><code>Widget</code></td><td>创建、读取、更新、验证和展示灵感 App 的 HTML Widget（actions: list/create/read/update/validate/show/delete）。</td></tr>
+      <tr><td><code>Automation</code></td><td>创建、运行、调度和检查可向 Widget 产出 JSON Artifact 的任务（actions: list/create/read/update/run/readRun/readRunArtifact/readRunLogs/listRuns/delete）。</td></tr>
+      <tr><td><code>Binding</code></td><td>建立并验证 Automation Artifact 与 Widget main Slot 的连接（actions: list/create/read/validate/delete）。</td></tr>
+      <tr><td><code>publish_site</code></td><td>将当前 Workspace 内已完成的 App 构建为 Ace Desktop 本地灵感；仅在用户明确要求发布时调用。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 功能拆解</h2>
+  <table>
+    <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td>工具注册表</td><td><code>Registry</code> / <code>Tool</code>：注册、unregister、schema 暴露、execute 与异常包装</td><td>已落地</td></tr>
+      <tr><td>结果生命周期</td><td>工具声明临时过程、资源、持续指令或重要结论；未知/MCP/插件工具默认按重要结果保护</td><td>已落地</td></tr>
+      <tr><td>内置工具集</td><td>文件、终端、搜索、浏览器、子 Agent、Team、Wiki、Cron、交互、记忆、技能、Blueprint 等 70+ 工具</td><td>已落地</td></tr>
+      <tr><td>执行流水线</td><td><code>validate_arguments</code>（JSON Schema）→ <code>check_permission</code>（allow/deny/ask）→ <code>truncate_or_persist</code>（大结果落盘）</td><td>已落地</td></tr>
+      <tr><td>渐进式工具披露</td><td><code>tool_search</code>：核心工具常驻，延迟工具按需加载，token 预算控制</td><td>已落地</td></tr>
+      <tr><td>安全审批</td><td><code>security_guard</code>：文件/网络/外部运行时授权，需审批时阻塞等待 owner 决策</td><td>已落地</td></tr>
+      <tr><td>敏感脱敏</td><td><code>redact</code>：日志与工具输出的密钥 / URL / 凭据脱敏</td><td>已落地</td></tr>
+      <tr><td>输出处理</td><td><code>output_filters</code>：去 ANSI、头尾截断、阈值可配</td><td>已落地</td></tr>
+      <tr><td>后台进程</td><td><code>process_registry</code>：terminal background 进程的跟踪、输出缓冲、回收</td><td>已落地</td></tr>
+      <tr><td>终端防护</td><td><code>terminal_guard</code>：危险 / 硬线命令检测</td><td>已落地</td></tr>
+      <tr><td>MCP 客户端</td><td><code>mcp_client</code>：连接外部 MCP server，把其 tools 注册进 Registry</td><td>已落地</td></tr>
+      <tr><td>托管二进制</td><td><code>managed_tools</code>：rg（ripgrep）自动下载 / 校验 / 安装</td><td>已落地</td></tr>
+      <tr><td>文件读取上限</td><td><code>file_utils</code>：统一整读上限，读前 metadata 预检 + 双保险复查</td><td>已落地</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. 关键文件</h2>
+  <table>
+    <thead><tr><th>文件</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td><code>registry.py</code></td><td><code>Registry</code> / <code>Tool</code> / <code>tool_result</code>：注册、schema 暴露、execute、权限解析</td></tr>
+      <tr><td><code>builtin.py</code></td><td>内置工具 handler 与 schema：terminal / file_read / file_write / file_delete</td></tr>
+      <tr><td><code>file_tools.py</code></td><td><code>glob</code> / <code>grep</code> / <code>patch</code> 工具（rg 优先，Python 兜底）</td></tr>
+      <tr><td><code>file_utils.py</code></td><td>文件工具公共辅助：安全读取（<code>read_verified_bytes</code> / <code>snapshot_file</code>）、BOM/行尾保留、路径解析、整读上限</td></tr>
+      <tr><td><code>pipeline.py</code></td><td>执行流水线三个纯函数阶段：<code>validate_arguments</code> / <code>check_permission</code> / <code>truncate_or_persist</code></td></tr>
+      <tr><td><code>policy.py</code></td><td>工具授权与披露策略原语（<code>ToolDisclosureMode</code>、toolsets 过滤）</td></tr>
+      <tr><td><code>tool_search.py</code></td><td>渐进式工具披露：按需加载、token 预算、bridge 工具</td></tr>
+      <tr><td><code>security_guard.py</code></td><td>文件 / 网络 / 外部运行时授权（<code>authorize_file_tool</code> 等）</td></tr>
+      <tr><td><code>redact.py</code></td><td>基于正则的密钥脱敏（日志与工具输出）</td></tr>
+      <tr><td><code>output_filters.py</code></td><td>终端输出后处理：去 ANSI、头尾截断</td></tr>
+      <tr><td><code>process_registry.py</code></td><td>后台进程注册表：跟踪、输出缓冲、按 TTL 回收</td></tr>
+      <tr><td><code>terminal_guard.py</code></td><td>终端命令安全检测（危险 / 硬线命令）</td></tr>
+      <tr><td><code>managed_tools.py</code></td><td>托管 ripgrep：下载 / 校验 / 安装 pin 版本</td></tr>
+      <tr><td><code>mcp_client.py</code></td><td>MCP Client：连接外部 server，注册其 tools</td></tr>
+      <tr><td><code>web_tools.py</code></td><td><code>web_search</code> / <code>web_extract</code> / <code>vision_analyze</code></td></tr>
+      <tr><td><code>site_tools.py</code></td><td><code>publish_site</code>：把 Workspace 中的 App 发布到 Desktop 灵感</td></tr>
+      <tr><td><code>skills_tools.py</code></td><td>技能工具：skills_list / skill_view / skill_package_open / skills_repair / skills_audit</td></tr>
+      <tr><td><code>memory_tools.py</code></td><td><code>memory</code> 记忆工具</td></tr>
+      <tr><td><code>interaction.py</code></td><td><code>ask_followup_question</code> 交互工具</td></tr>
+      <tr><td><code>blueprint_tools.py</code></td><td>Canvas / Widget / Automation / Binding 的 Agent 工具契约</td></tr>
+      <tr><td><code>cron_tools.py</code></td><td>cron 定时任务工具兼容层</td></tr>
+      <tr><td><code>cua_setup.py</code></td><td>CUA Driver 安装与 MCP 接入服务</td></tr>
+    </tbody>
+  </table>
+
+  <h2>5. 数据模型与接口</h2>
+  <p>核心类与关键签名：</p>
+  <pre><code>class Tool:  # 注册的最小单元
+    name: str; toolset: str; schema: dict
+    to_schema() / ui_meta() / available() / async run(args) -> str | ToolOutput
+
+class Registry:
+    register(tool) / unregister(name) / get(name) / names()
+    list_schemas() -> list[dict]              # 暴露给模型
+    async execute(tool_call) -> ToolResult    # 异常统一包装为 is_error
+    async resolve_permission(tool_call) -> ToolPermissionDecision | None
+    result_policy(name, args) -> ToolResultPolicy
+
+registry.register(
+    ...,
+    result_retention="temporary|resource|instruction|important",
+    result_identity_fields=("path",),
+    result_policy_resolver=optional_callable,
+)</code></pre>
+  <p><code>result_identity_fields</code> 用于资源和指令去重；需要根据 action 动态判断时使用 <code>result_policy_resolver</code>。未声明值默认为 <code>important</code>，因此外部 MCP 和旧插件不会被误压缩。</p>
+  <p>Schema 私有字段约定（渐进式披露读取）：</p>
+  <pre><code>{
+  "name": "glob", "toolset": "file",
+  "_crew_always_load": true,    # 常驻加载，不进延迟目录
+  "_crew_should_defer": true,   # 显式延迟加载
+  "_crew_is_mcp": true,         # MCP 来源的工具
+  "display_name": "查找文件",    # UI 展示名
+  "x_search_hint": "..."        # 检索关键词
+}</code></pre>
+  <p>执行流水线（pipeline，纯函数）：</p>
+  <pre><code>validate_arguments(tool_name, parameters, args) -> str | None   # Stage 2 输入验证（JSON Schema）
+check_permission(...) -> allow | deny | ask                      # Stage 4 权限（ask 由调用方走交互）
+truncate_or_persist(...)                                         # Stage 6 结果处理（大结果落盘）</code></pre>
+  <p>文件安全读取（file_utils，统一整读上限）：</p>
+  <pre><code>MAX_READ_FILE_BYTES = 512 * 1024 * 1024
+read_verified_bytes(path, *, max_bytes=None) -> bytes  # 读前 metadata 预检 + take(max+1) 复查
+snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，拒绝多硬链接写入</code></pre>
+
+  <h2>6. 当前存在的问题 / TODO</h2>
+  <ul class="todo">
+    <li><code>file_read</code> 对 ≤512 MiB 的大文本文件仍是「整读后截断」：读整个文件只为返回 <code>read_max_chars</code>（默认 100000 字符），存在内存浪费；后续可改为按 offset/limit 流式读取。</li>
+    <li><code>file_write</code> 覆盖写旧文件时 <code>snapshot_file</code> 整读旧文件（用于 BOM/行尾保留与写前校验）；append 场景下为必要读取，普通覆盖场景可优化为只读头部。</li>
+    <li>各工具 schema 的参数枚举与必填校验主要依赖执行期业务校验，schema 层未做严格枚举约束。</li>
+  </ul>
+
+  <h2>7. 扩展点</h2>
+  <ul>
+    <li>新增工具：在 <code>register_builtin_tools</code> 或对应领域 <code>register_xxx_tools</code> 里 <code>registry.register(...)</code>，声明 schema + handler（async）+ display_name + search_hint。</li>
+    <li>声明结果生命周期：列表/日志等可重查结果用 <code>temporary</code>；<code>file_read</code> 等文件读取也用 <code>temporary</code>（旧分片由 L1 清理，压缩后按 path 从磁盘重读恢复）；Wiki 页面等用 <code>resource</code> 并声明 identity；Skill 主说明用 <code>instruction</code>；用户决定或 Agent 结论用 <code>important</code>。</li>
+    <li>延迟加载工具：schema 加 <code>_crew_should_defer=true</code>，由 <code>tool_search</code> 按需披露。</li>
+    <li>外部工具：通过 MCP client 注册，或 CUA setup 接入。</li>
+    <li>遵守契约：文件类工具复用 <code>file_utils</code> 的安全读取与整读上限；网络类复用 <code>security_guard</code> 授权；不跨目录重复实现。</li>
+  </ul>
+
+  <h2>8. 变更记录</h2>
+  <table>
+    <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
+    <tbody>
+      <tr><td>2026-09-01</td><td>文档初始建立</td><td>—</td></tr>
+      <tr><td>2026-09-01</td><td>统一整读上限 <code>MAX_READ_FILE_BYTES=512 MiB</code>；<code>file_read</code> / <code>patch</code> / <code>file_write</code> / <code>grep</code> 读前拒绝超大文件；<code>patch</code> 的读 / 写改 <code>asyncio.to_thread</code></td><td><code>crew/tools/file_utils.py</code>、<code>builtin.py</code>、<code>file_tools.py</code></td></tr>
+      <tr><td>2026-09-01</td><td>附件读取 <code>_read_attachment</code> / <code>_read_image_as_data_url</code> 异步化 + 读前上限，路径 resolve 后读取</td><td><code>crew/agent/runtime.py</code></td></tr>
+      <tr><td>2026-09-01</td><td>在 tools.html 中补充内置工具清单（70+ 工具按领域分组）</td><td><code>docs/backend/modules/tools.html</code></td></tr>
+      <tr><td>2026-09-01</td><td>新增工具结果生命周期注册契约；核心工具按语义分类，未知与 MCP 工具安全默认保留。</td><td><code>Tool</code>、<code>Registry</code>、内置工具注册。</td></tr>
+      <tr><td>2026-09-01</td><td><code>file_read</code> 结果生命周期由 <code>resource</code>（分片级 identity 去重）改为 <code>temporary</code>：旧分片由 L1 清成含 path/offset 的信息摘要，完整压缩后按 path 去重、从磁盘重读最新内容恢复。</td><td><code>crew/tools/builtin.py</code>、<code>crew/agent/compact/post_compact.py</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+</div>
+</body>
+</html>
