@@ -34,18 +34,83 @@
   font-weight: var(--mw-type-item-weight);
 }
 
-.interaction-card__hint,
 .interaction-card__evidence {
   color: var(--mw-text-muted);
   font-size: var(--mw-type-caption-size);
   line-height: var(--mw-type-caption-line);
 }
 
-.interaction-card__hint {
-  margin-top: var(--mw-space-2);
-  padding: var(--mw-space-3);
+.interaction-card__answer-input {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 112px;
+  margin-top: var(--mw-space-3);
+  padding: var(--mw-space-3) var(--mw-space-4);
+  border: 1px solid var(--mw-border-default);
   border-radius: var(--mw-radius-3);
-  background: var(--mw-bg-subtle);
+  outline: none;
+  color: var(--mw-text-primary);
+  background: var(--mw-bg-app);
+  font: inherit;
+  font-size: var(--mw-type-body-size);
+  line-height: 1.55;
+  resize: vertical;
+  transition: var(--mw-transition-interactive);
+}
+
+.interaction-card__answer-input::placeholder {
+  color: var(--mw-text-muted);
+  opacity: 1;
+}
+
+.interaction-card__answer-input:hover:not(:disabled) {
+  border-color: var(--mw-border-strong);
+}
+
+.interaction-card__answer-input:focus {
+  border-color: var(--mw-action-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--mw-action-primary) 20%, transparent);
+}
+
+.interaction-card__answer-input:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
+.interaction-card__answer-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--mw-space-3);
+}
+
+.interaction-card__answer-submit {
+  min-width: 104px;
+  min-height: 36px;
+  padding: var(--mw-space-2) var(--mw-space-4);
+  border: 0;
+  border-radius: var(--mw-radius-3);
+  color: var(--mw-action-primary-text);
+  background: var(--mw-action-primary);
+  font: inherit;
+  font-size: var(--mw-type-compact-size);
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--mw-transition-interactive);
+}
+
+.interaction-card__answer-submit:hover:not(:disabled) {
+  background: var(--mw-action-primary-hover);
+}
+
+.interaction-card__answer-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.interaction-card__answer-submit:focus-visible {
+  outline: 2px solid var(--mw-action-primary);
+  outline-offset: 2px;
 }
 
 .interaction-card__evidence {

@@ -90,6 +90,43 @@ describe('interaction card', () => {
     expect(card?.textContent).not.toContain('response_text');
   });
 
+  it('renders an editable text answer and submits the trimmed response', () => {
+    const card = renderToolInteractionCard(tool({
+      args: JSON.stringify({ action: 'create' }),
+      result: JSON.stringify({
+        activity: {
+          id: 'activity-text',
+          activity_type: 'interview',
+          prompt: '请说明线程和 asyncio 的适用场景。',
+          public_payload: {
+            schema: 'crew.interaction.v1',
+            interaction: { kind: 'text' },
+          },
+        },
+      }),
+    }));
+
+    const answer = card?.querySelector<HTMLTextAreaElement>('[data-interaction-answer]');
+    const submit = card?.querySelector<HTMLButtonElement>('[data-interaction-submit]');
+    expect(answer?.placeholder).toBe('在下方输入你的回答…');
+    expect(submit?.disabled).toBe(true);
+
+    const submitted = vi.fn();
+    card?.addEventListener('crew:interaction-submit', submitted);
+    if (answer && submit) {
+      answer.value = '  线程适合阻塞 I/O，asyncio 适合协作式 I/O。  ';
+      answer.dispatchEvent(new Event('input', { bubbles: true }));
+      expect(submit.disabled).toBe(false);
+      submit.click();
+    }
+
+    expect(submitted).toHaveBeenCalledOnce();
+    expect((submitted.mock.calls[0][0] as CustomEvent).detail).toEqual({
+      interactionId: 'activity-text',
+      text: '线程适合阻塞 I/O，asyncio 适合协作式 I/O。',
+    });
+  });
+
   it('keeps only the latest unresolved card interactive', () => {
     const container = document.createElement('div');
     const first = document.createElement('section');
@@ -99,16 +136,22 @@ describe('interaction card', () => {
     const latest = document.createElement('section');
     latest.className = 'interaction-card';
     latest.dataset.interactionId = 'activity-new';
-    latest.appendChild(document.createElement('input')).dataset.interactionOption = 'B';
+    const latestInput = document.createElement('input');
+    latestInput.dataset.interactionOption = 'B';
+    const latestAnswer = document.createElement('textarea');
+    latestAnswer.dataset.interactionAnswer = '1';
+    latest.append(latestInput, latestAnswer);
     container.append(first, latest);
 
     syncInteractionCards(container);
     expect(first.querySelector('input')?.disabled).toBe(true);
     expect(latest.querySelector('input')?.disabled).toBe(false);
+    expect(latestAnswer.disabled).toBe(false);
 
     markInteractionSubmitted('activity-new');
     syncInteractionCards(container);
     expect(latest.querySelector('input')?.disabled).toBe(true);
+    expect(latestAnswer.disabled).toBe(true);
   });
 
   it('uses text nodes for untrusted card content', () => {

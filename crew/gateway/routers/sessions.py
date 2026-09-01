@@ -72,6 +72,11 @@ def _tool_result_for_history(tool_call: ToolCall, paired_results: dict[str, str]
         return tool_result_detail_for_ui(
             tool_call.name, paired_results.get(tool_call.id, "")
         )
+    # Wiki 学习工具返回的是前端交互卡片所需的公开载荷。内置执行器把结果
+    # 存在独立的 `tool` 消息里，历史回放时必须配回 assistant.tool_calls，
+    # 否则前端拿到空 result 后会直接跳过学习卡片。
+    if tool_call.name in {"wiki_learning_activity", "wiki_learning_assess"}:
+        return paired_results.get(tool_call.id, "")
     return ""
 
 

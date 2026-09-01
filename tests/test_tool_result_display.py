@@ -109,3 +109,34 @@ def test_inspiration_surface_survives_live_detail_and_history_replay():
   assert json.loads(_tool_result_for_history(site_call, {"publish-1": site_payload})) == {
       "ok": True, "surface": site_surface,
   }
+
+
+def test_wiki_learning_cards_survive_history_replay():
+    """学习活动/评估结果是公开交互卡片载荷，历史回放不能丢失。"""
+    import json
+
+    from crew.core.types import Message, ToolCall
+    from crew.gateway.routers.sessions import (
+        _session_messages_to_history_items,
+        _tool_result_for_history,
+    )
+
+    activity_payload = json.dumps(
+        {"activity": {"id": "activity-1", "public_payload": {"schema": "crew.interaction.v1"}}},
+        ensure_ascii=False,
+    )
+    assessment_payload = json.dumps(
+        {"assessment": {"activity_id": "activity-1", "summary": "回答清晰", "score": 0.8}},
+        ensure_ascii=False,
+    )
+    activity = ToolCall("activity-1", "wiki_learning_activity", {"action": "create"})
+    assessment = ToolCall("assessment-1", "wiki_learning_assess", {"activity_id": "activity-1"})
+
+    assert _tool_result_for_history(activity, {"activity-1": activity_payload}) == activity_payload
+    assert _tool_result_for_history(assessment, {"assessment-1": assessment_payload}) == assessment_payload
+
+    history = _session_messages_to_history_items([
+        Message.assistant("", [activity]),
+        Message.tool("activity-1", activity_payload, name="wiki_learning_activity"),
+    ])
+    assert history[0]["tool_calls"][0]["result"] == activity_payload
