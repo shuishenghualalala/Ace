@@ -512,6 +512,93 @@ def test_plan_empty_review_does_not_publish(tmp_path):
     assert center.unread_count(OWNER) == 0
 
 
+# ---- task 完成回调：会恢复 turn 的中间任务不发通知 ----
+
+class _TaskRuntimeStub:
+    """仅实现 _on_task_completion 用到的 TaskRuntime 接口。"""
+
+    def __init__(self) -> None:
+        self._loop = None
+        self.resume_enqueued: list[str] = []
+
+    def mark_notified(self, task_id: str, owner_account_id: str = "") -> bool:
+        return True
+
+    def mark_resume_enqueued(self, task_id: str, owner_account_id: str = "") -> bool:
+        self.resume_enqueued.append(task_id)
+        return True
+
+
+class _SessionStoreStub:
+    """按固定状态回答 get_status，模拟 turn 进行中 / 已结束。"""
+
+    def __init__(self, status: str) -> None:
+        self._status = status
+
+    def get_status(self, session_id: str, owner_account_id: str = ""):
+        return self._status, None
+
+
+def _app_for_task_completion(center: NotificationCenterService, session_status: str):
+    app = _app_with_notifications(center)
+    app._push_fn = None
+    app.tasks = _TaskRuntimeStub()
+    app.session_store = _SessionStoreStub(session_status)
+    return app
+
+
+def _completed_shell_task(**kwargs) -> dict:
+    task = {
+        "task_id": "t-shell-1",
+        "owner_account_id": OWNER,
+        "kind": "shell",
+        "backgrounded": True,
+        "status": "completed",
+        "session_id": "s-task-1",
+        "result": "done",
+    }
+    task.update(kwargs)
+    return task
+
+
+def test_task_completion_resume_eligible_skips_notification(tmp_path):
+    """后台 shell 任务会恢复 turn（会话仍在运行）→ 中间步骤不发通知。"""
+    center = NotificationCenterService(_store(tmp_path))
+    app = _app_for_task_completion(center, session_status="running")
+
+    app._on_task_completion(_completed_shell_task())
+
+    assert center.unread_count(OWNER) == 0
+    assert app.tasks.resume_enqueued == ["t-shell-1"]  # resume 逻辑不受影响
+
+
+def test_task_completion_turn_over_publishes_notification(tmp_path):
+    """后台 shell 任务完成时会话已停止（turn 结束）→ 正常发通知。"""
+    center = NotificationCenterService(_store(tmp_path))
+    app = _app_for_task_completion(center, session_status="stopped")
+
+    app._on_task_completion(_completed_shell_task())
+
+    assert center.unread_count(OWNER) == 1
+    assert app.tasks.resume_enqueued == []
+    item = center.list(OWNER)[0]
+    assert item.source == "tasks"
+    assert item.kind == "task_completed"
+    assert item.payload["task_id"] == "t-shell-1"
+
+
+def test_task_completion_non_resume_kind_publishes_notification(tmp_path):
+    """非 shell/subagent 类型的任务完成 → 保持原有行为，正常发通知。"""
+    center = NotificationCenterService(_store(tmp_path))
+    app = _app_for_task_completion(center, session_status="running")
+
+    app._on_task_completion(_completed_shell_task(kind="browser"))
+
+    assert center.unread_count(OWNER) == 1
+    assert app.tasks.resume_enqueued == []
+    assert center.list(OWNER)[0].payload["task_kind"] == "browser"
+
+
 # ---- REST 路由 ----
 
 def _router_client(tmp_path: Path) -> tuple[TestClient, NotificationCenterService]:

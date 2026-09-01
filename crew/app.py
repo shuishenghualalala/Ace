@@ -583,11 +583,16 @@ class CrewApp:
         ):
             return
         self._on_task_event({**task, "phase": task.get("status", "completed")})
-        self._publish_task_notification(task)
-        if (
+        # 会触发恢复 turn 的中间任务不发通知：一轮对话只在最终结束时通知一次
+        will_resume = (
             task.get("kind") in {"shell", "subagent"}
             and bool(task.get("backgrounded"))
             and self._should_resume_completed_task(task)
+        )
+        if not will_resume:
+            self._publish_task_notification(task)
+        if (
+            will_resume
             and self.tasks.mark_resume_enqueued(
                 task_id,
                 owner_account_id=owner,

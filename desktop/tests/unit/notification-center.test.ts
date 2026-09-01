@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   openSessionInChat: vi.fn(),
   markSystemTrayNotification: vi.fn(),
   traySetNotifications: vi.fn(),
+  activeSessionId: null as string | null,
 }));
 
 vi.mock('../../src/ui/backend-client', () => ({
@@ -27,6 +28,10 @@ vi.mock('../../src/ui/features/chat-controller', () => ({
 
 vi.mock('../../src/ui/features/system-tray', () => ({
   markSystemTrayNotification: () => mocks.markSystemTrayNotification(),
+}));
+
+vi.mock('../../src/ui/stores/session-store', () => ({
+  sessionStore: { get: () => ({ activeSessionId: mocks.activeSessionId }) },
 }));
 
 import {
@@ -105,6 +110,7 @@ describe('notification center', () => {
     mocks.markAllRead.mockResolvedValue({ ok: true });
     mocks.openSessionInChat.mockResolvedValue(undefined);
     mocks.traySetNotifications.mockResolvedValue({ ok: true });
+    mocks.activeSessionId = null;
     removeTrayBridge();
   });
 
@@ -380,5 +386,66 @@ describe('notification center', () => {
     await flush();
     handleNotificationPush(sample());
     expect((document.getElementById('notification-badge') as HTMLElement).textContent).toBe('1');
+  });
+
+  it('当前打开会话的推送：抑制角标/toast/托盘，静默置为已读', async () => {
+    installTrayBridge();
+    mocks.activeSessionId = 's1';
+    bindNotificationCenter();
+    await flush();
+    mocks.traySetNotifications.mockClear();
+
+    handleNotificationPush(sample({ title: '后台任务已完成' }));
+    await flush();
+    const badge = document.getElementById('notification-badge') as HTMLElement;
+    expect(badge.hidden).toBe(true);
+    expect(badge.textContent).toBe('0');
+    expect(mocks.markRead).toHaveBeenCalledWith('n1');
+    expect(document.body.textContent).not.toContain('后台任务已完成');
+    expect(mocks.traySetNotifications).not.toHaveBeenCalled();
+    expect(mocks.markSystemTrayNotification).not.toHaveBeenCalled();
+
+    // 面板开着时也不插入未读列表
+    (document.getElementById('notification-bell-btn') as HTMLButtonElement).click();
+    await flush();
+    mocks.markRead.mockClear();
+    handleNotificationPush(sample({ id: 'n2', title: '后台任务已完成' }));
+    await flush();
+    expect(document.querySelectorAll('.mw-notification-item').length).toBe(0);
+    expect(mocks.markRead).toHaveBeenCalledWith('n2');
+  });
+
+  it('其他会话的推送：保持原有角标 +1 + toast + 托盘同步', async () => {
+    installTrayBridge();
+    mocks.activeSessionId = 's-other';
+    bindNotificationCenter();
+    await flush();
+    mocks.traySetNotifications.mockClear();
+
+    handleNotificationPush(sample({ title: '后台任务已完成' }));
+    const badge = document.getElementById('notification-badge') as HTMLElement;
+    expect(badge.hidden).toBe(false);
+    expect(badge.textContent).toBe('1');
+    expect(document.body.textContent).toContain('后台任务已完成');
+    expect(mocks.markRead).not.toHaveBeenCalled();
+    expect(mocks.traySetNotifications).toHaveBeenCalled();
+    expect(mocks.markSystemTrayNotification).toHaveBeenCalled();
+  });
+
+  it('无 session_id 的推送：保持原有角标 +1 + toast + 托盘同步', async () => {
+    installTrayBridge();
+    mocks.activeSessionId = 's1';
+    bindNotificationCenter();
+    await flush();
+    mocks.traySetNotifications.mockClear();
+
+    handleNotificationPush(sample({ title: '有一个操作等待审批', payload: null }));
+    const badge = document.getElementById('notification-badge') as HTMLElement;
+    expect(badge.hidden).toBe(false);
+    expect(badge.textContent).toBe('1');
+    expect(document.body.textContent).toContain('有一个操作等待审批');
+    expect(mocks.markRead).not.toHaveBeenCalled();
+    expect(mocks.traySetNotifications).toHaveBeenCalled();
+    expect(mocks.markSystemTrayNotification).toHaveBeenCalled();
   });
 });

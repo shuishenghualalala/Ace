@@ -5,6 +5,7 @@
  * 数据流：
  * - 启动时 GET /api/notifications/unread-count 初始化角标；
  * - WS notification 帧（chat-controller 分发到这里）只负责「唤醒」：角标 +1 + toast 轻提示；
+ *   来自当前打开会话的推送例外：结果已在聊天区内联展示，直接静默置为已读；
  * - 面板每次打开都走 REST 拉取未读（unreadOnly），只展示未读条目，作为断线兜底；
  * - 单条已读 / 全部已读走 REST，成功后同步本地状态与角标（已读条目随即从面板移除）。
  *   后端历史不动：已读仅是展示过滤，刷新面板仍可拉全量（面板拉取固定 unreadOnly）。
@@ -21,6 +22,7 @@ import type { TrayNotificationSummary } from '../../shared/types';
 import { showToast } from '../components/overlays';
 import { openSessionInChat } from './chat-controller';
 import { markSystemTrayNotification } from './system-tray';
+import { sessionStore } from '../stores/session-store';
 import { relativeTime } from './work/time';
 
 const PANEL_MAX_HEIGHT = 480;
@@ -116,9 +118,26 @@ function isValidNotification(value: unknown): value is BackendNotification {
   return typeof candidate.id === 'string' && typeof candidate.title === 'string';
 }
 
+/** 推送是否来自当前聊天区已打开的会话（这类结果已内联展示，无需再走未读提醒）。 */
+function isActiveSessionPush(notification: BackendNotification): boolean {
+  const sessionId = typeof notification.payload?.session_id === 'string'
+    ? notification.payload.session_id.trim()
+    : '';
+  return Boolean(sessionId) && sessionId === sessionStore.get().activeSessionId;
+}
+
 /** WS notification 帧入口（chat-controller 分发）：角标 +1 + toast；面板开着则同步插入列表。 */
 export function handleNotificationPush(notification: BackendNotification | undefined): void {
   if (!isValidNotification(notification)) return;
+  // 当前正在查看的会话产生的推送：完成/审批/追问卡片已在聊天区内联展示，
+  // 角标/toast/托盘都属于噪音，直接静默置为已读，保持后端未读状态一致。
+  if (isActiveSessionPush(notification)) {
+    seenPushIds.add(notification.id);
+    void notificationApi.markRead(notification.id).catch(() => {
+      // 已读失败静默降级：下次刷新未读数时自然收敛。
+    });
+    return;
+  }
   if (!seenPushIds.has(notification.id)) {
     seenPushIds.add(notification.id);
     unreadCount += 1;
