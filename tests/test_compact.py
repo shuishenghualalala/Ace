@@ -353,85 +353,113 @@ def test_l1_instruction_keeps_only_latest_loaded_version():
 
 
 # --------------------------------------------------------------------------- #
-# Post-Compact 文件恢复
+# Post-Compact 文件恢复（按 path 去重 + 磁盘重读最新内容）
 # --------------------------------------------------------------------------- #
-def _build_file_read_history(paths_contents: list[tuple[str, str]]) -> list[Message]:
-    """构造多轮 file_read 历史。"""
+def _build_file_read_history(paths_args: list[tuple[str, dict]]) -> list[Message]:
+    """构造多轮 file_read 历史（工具结果内容是压缩时的旧快照）。"""
     msgs: list[Message] = []
-    for i, (path, content) in enumerate(paths_contents):
-        msgs.append(Message.user(f"第{i}轮"))
-        tc = [ToolCall(id=f"call_{i}", name="file_read", arguments={"path": path})]
+    for i, (path, args) in enumerate(paths_args):
+        tc = [ToolCall(id=f"call_{i}", name="file_read", arguments={"path": path, **args})]
         msgs.append(Message.assistant("读取文件", tool_calls=tc))
-        msgs.append(Message.tool(tool_call_id=f"call_{i}", content=content, name="file_read"))
+        msgs.append(Message.tool(tool_call_id=f"call_{i}", content=f"旧快照{i}", name="file_read"))
     return msgs
 
 
-def test_post_compact_collects_recent_file_contents():
-    """从 old 段中收集最近读取的文件内容。"""
-    from crew.agent.compact.post_compact import collect_recent_file_contents
+def test_post_compact_collects_recent_file_reads_dedups_shards(tmp_path):
+    """同一文件的多个 offset/limit 分片合并为单个文件级条目（保留最后一次分片参数）。"""
+    from crew.agent.compact.post_compact import collect_recent_file_reads
 
+    p = str(tmp_path / "a.txt")
     msgs = _build_file_read_history([
-        ("/tmp/a.txt", "A 旧内容"),
-        ("/tmp/a.txt", "A 新内容"),
-        ("/tmp/b.txt", "B 内容"),
+        (p, {"offset": 1, "limit": 100}),
+        (p, {"offset": 101, "limit": 100}),
     ])
-    contents = collect_recent_file_contents(msgs, max_files=3, max_chars_per_file=5000)
-    assert contents == {"/tmp/a.txt": "A 新内容", "/tmp/b.txt": "B 内容"}
-
-
-def test_post_compact_limits_file_count_and_length():
-    """最多保留 N 个文件，且单文件超长时截断。"""
-    from crew.agent.compact.post_compact import collect_recent_file_contents
-
-    msgs = _build_file_read_history([
-        ("/tmp/a.txt", "A"),
-        ("/tmp/b.txt", "B"),
-        ("/tmp/c.txt", "C"),
-        ("/tmp/d.txt", "D" * 100),
-    ])
-    contents = collect_recent_file_contents(msgs, max_files=2, max_chars_per_file=10)
-    # 只保留按读取顺序计算的最近 2 个文件。
-    assert set(contents.keys()) == {"/tmp/c.txt", "/tmp/d.txt"}
-    assert contents["/tmp/d.txt"].startswith("D" * 10)
-    assert "内容已截断" in contents["/tmp/d.txt"]
+    reads = collect_recent_file_reads(msgs, max_files=3)
+    assert len(reads) == 1
+    assert reads[0][0] == p
+    assert reads[0][1]["offset"] == 101
 
 
 def test_post_compact_file_limit_uses_actual_read_order():
     """文件恢复按最后读取顺序选择，而不是按路径字母顺序。"""
-    from crew.agent.compact.post_compact import collect_recent_file_contents
+    from crew.agent.compact.post_compact import collect_recent_file_reads
 
     msgs = _build_file_read_history([
-        ("/tmp/z-first.txt", "旧读取"),
-        ("/tmp/a-latest.txt", "最新读取"),
+        ("/tmp/z-first.txt", {}),
+        ("/tmp/a-latest.txt", {}),
     ])
-    contents = collect_recent_file_contents(
-        msgs, max_files=1, max_chars_per_file=5000
-    )
-    assert contents == {"/tmp/a-latest.txt": "最新读取"}
+    reads = collect_recent_file_reads(msgs, max_files=1)
+    assert [path for path, _args in reads] == ["/tmp/a-latest.txt"]
 
 
-def test_post_compact_builds_attachment_message():
-    """构造的附件消息包含文件路径和内容。"""
+def test_post_compact_rereads_latest_content_from_disk(tmp_path):
+    """恢复内容来自磁盘最新内容，而非压缩时的旧快照。"""
     from crew.agent.compact.post_compact import (
         POST_COMPACT_FILES_MARKER,
         build_post_compact_file_attachments,
     )
 
-    msgs = _build_file_read_history([
-        ("/tmp/a.txt", "A 内容"),
-        ("/tmp/b.txt", "B 内容"),
-    ])
-    attachments = build_post_compact_file_attachments(msgs, max_files=3, max_chars_per_file=5000)
+    p = tmp_path / "a.txt"
+    p.write_text("磁盘上的新内容", encoding="utf-8")
+    msgs = _build_file_read_history([(str(p), {})])
+    attachments = build_post_compact_file_attachments(msgs)
     assert len(attachments) == 1
     assert attachments[0].role == "system"
     assert POST_COMPACT_FILES_MARKER in attachments[0].content
-    assert "### 文件：/tmp/a.txt" in attachments[0].content
-    assert "A 内容" in attachments[0].content
-    assert "B 内容" in attachments[0].content
+    assert "磁盘上的新内容" in attachments[0].content
+    assert "旧快照0" not in attachments[0].content
+
+
+def test_post_compact_file_attachments_respect_shard_pagination(tmp_path):
+    """按原 offset/limit 分片重读：只恢复当时读取的行区间。"""
+    from crew.agent.compact.post_compact import build_post_compact_file_attachments
+
+    p = tmp_path / "lines.txt"
+    p.write_text("\n".join(f"第{i}行" for i in range(1, 11)), encoding="utf-8")
+    msgs = _build_file_read_history([(str(p), {"offset": 3, "limit": 2})])
+    attachments = build_post_compact_file_attachments(msgs)
+    assert len(attachments) == 1
+    assert "第3行" in attachments[0].content
+    assert "第4行" in attachments[0].content
+    assert "第1行" not in attachments[0].content
+
+
+def test_post_compact_file_attachments_skip_missing_files(tmp_path):
+    """已删除的文件跳过；全部不可读时返回空列表。"""
+    from crew.agent.compact.post_compact import build_post_compact_file_attachments
+
+    alive = tmp_path / "alive.txt"
+    alive.write_text("还在", encoding="utf-8")
+    msgs = _build_file_read_history([
+        (str(tmp_path / "gone.txt"), {}),
+        (str(alive), {}),
+    ])
+    attachments = build_post_compact_file_attachments(msgs)
+    assert len(attachments) == 1
+    assert "还在" in attachments[0].content
+    assert "gone.txt" not in attachments[0].content
+
+    msgs_gone = _build_file_read_history([(str(tmp_path / "gone.txt"), {})])
+    assert build_post_compact_file_attachments(msgs_gone) == []
+
+
+def test_post_compact_file_attachments_survive_multiple_compactions(tmp_path):
+    """上一轮压缩生成的文件附件在下一轮压缩时仍被识别并重读。"""
+    from crew.agent.compact.post_compact import build_post_compact_file_attachments
+
+    p = tmp_path / "a.txt"
+    p.write_text("跨压缩存活", encoding="utf-8")
+    first = build_post_compact_file_attachments(_build_file_read_history([(str(p), {})]))
+    assert len(first) == 1
+
+    # 第二轮压缩：old 段只剩上一轮的附件（原 file_read tool_calls 已被摘要掉）
+    second = build_post_compact_file_attachments([Message.user("后续"), *first])
+    assert len(second) == 1
+    assert "跨压缩存活" in second[0].content
 
 
 def test_post_compact_no_attachments_when_no_files():
-    """没有 file_read 结果时返回空列表。"""
+    """没有 file_read 调用时返回空列表。"""
     from crew.agent.compact.post_compact import build_post_compact_file_attachments
 
     msgs = [
@@ -602,7 +630,7 @@ def test_l1_keeps_short_tool_result_unchanged():
 # 边界对齐
 # --------------------------------------------------------------------------- #
 def test_safe_split_does_not_break_tool_pairs():
-    # assistant(tool_calls) 后跟 tool 结果，split 必须落在 user 边界
+    # assistant(tool_calls) 后跟 tool 结果，split 不得落在 tool 上切断配对
     msgs = [
         Message.user("q1"),
         Message.assistant("", [ToolCall(id="c1", name="Read")]),
@@ -612,8 +640,85 @@ def test_safe_split_does_not_break_tool_pairs():
         Message.tool("c2", "结果"),
     ]
     split = ContextCompactor._safe_split(msgs, keep_recent=2)
-    # 倒数 2 是 [assistant, tool]，向前回退到 user 边界（下标 3）
-    assert msgs[split].role == "user"
+    # 倒数 2 是 [assistant, tool]：assistant 是安全边界，配对完整保留在 recent
+    assert split == 4
+    assert msgs[split].role == "assistant"
+    assert [m.role for m in msgs[split:]] == ["assistant", "tool"]
+
+
+def test_safe_split_accepts_assistant_boundary_within_long_turn():
+    """单个长回合内只有回合开头一个 user 边界：split 落在 assistant 边界，
+    回合内早期迭代由此可被摘要（修复前退回回合开头，整个回合受保护）。"""
+    msgs = [Message.user("长回合开始")]
+    for i in range(20):
+        msgs.append(Message.assistant(f"步骤{i}", [ToolCall(id=f"c{i}", name="terminal")]))
+        msgs.append(Message.tool(f"c{i}", f"输出{i}"))
+    split = ContextCompactor._safe_split(msgs, keep_recent=6)
+    assert split > 1  # 未退回回合开头的 user，也未降级为 0
+    assert msgs[split].role == "assistant"  # recent 不以 tool 开头：配对完整
+
+
+def test_safe_split_falls_back_without_boundary():
+    """没有任何 user/assistant 边界时安全降级为 0（不压缩）。"""
+    msgs = [Message.system("sys")] + [Message.tool(f"c{i}", "结果") for i in range(10)]
+    assert ContextCompactor._safe_split(msgs, keep_recent=2) == 0
+
+
+def test_builtin_file_read_is_temporary():
+    """内置 file_read 声明为 TEMPORARY：旧分片由 L1 清理，恢复靠磁盘重读。"""
+    from crew.tools.builtin import register_builtin_tools
+    from crew.tools.registry import Registry
+
+    registry = Registry()
+    register_builtin_tools(registry)
+    policy = registry.result_policy("file_read", {"path": "/tmp/x", "offset": 1, "limit": 10})
+    assert policy.retention is ToolResultRetention.TEMPORARY
+
+
+async def test_compact_view_compacts_within_single_long_turn():
+    """单个长回合（一次 user + 多次工具迭代）内超水位时，L3 能在 assistant 边界下刀。"""
+    provider = FakeProvider(reply="短摘要")
+    comp = ContextCompactor(provider, token_budget=10, keep_recent=4)
+    msgs = [Message.user("长回合")]
+    for i in range(12):
+        msgs.append(Message.assistant(f"步骤{i}", [ToolCall(id=f"c{i}", name="terminal")]))
+        msgs.append(Message.tool(f"c{i}", f"输出{i} " * 100))
+    out = await comp.compact_view(msgs, "intra-turn")
+    assert len(provider.calls) == 1  # 修复前：找不到 user 边界，L3 永不触发
+    assert out[0].content.startswith(SUMMARY_MARKER)
+    # 最近的工具迭代逐字保留
+    assert any("输出11" in (m.content or "") for m in out)
+
+
+async def test_summary_message_includes_history_hint():
+    """摘要消息附完整历史回溯指引（数据库路径 + session_id）。"""
+    provider = FakeProvider(reply="摘要")
+    comp = ContextCompactor(
+        provider, token_budget=10, keep_recent=2, history_db_path="/data/crew.db"
+    )
+    history = await _big_history(10)
+    out = await comp.maybe_compact(history, "sess-hint")
+    assert "crew.db" in out[0].content
+    assert "sess-hint" in out[0].content
+
+
+def test_post_compact_attachment_budgets_configurable():
+    """指令/重要结论的恢复条数预算可由调用方配置（默认 5/8，最近优先）。"""
+    from crew.agent.compact.post_compact import build_post_compact_attachments
+
+    msgs: list[Message] = []
+    for i in range(5):
+        call = ToolCall(id=f"a{i}", name="ask_followup_question", arguments={})
+        msgs.append(Message.assistant("问", tool_calls=[call]))
+        msgs.append(Message.tool(f"a{i}", f"回答{i}", name="ask_followup_question"))
+    out = build_post_compact_attachments(
+        msgs,
+        result_policy_resolver=_test_result_policy,
+        max_important=2,
+    )
+    assert len(out) == 2
+    assert any("回答4" in m.content for m in out)  # 最近优先
+    assert not any("回答0" in m.content for m in out)
 
 
 # --------------------------------------------------------------------------- #

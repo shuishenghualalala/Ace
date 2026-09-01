@@ -19,8 +19,13 @@ todo 状态不在此处重注入：Crew 由 runtime._plan_reminder_blocks 每轮
 
 from __future__ import annotations
 
+import asyncio
+
 from crew.agent.compact.microcompact import ResultPolicyResolver, micro_compact
-from crew.agent.compact.post_compact import build_post_compact_attachments
+from crew.agent.compact.post_compact import (
+    build_post_compact_attachments,
+    build_post_compact_file_attachments,
+)
 from crew.agent.compact.store import SummaryState, SummaryStore
 from crew.agent.compact.summary import (
     SUMMARY_MARKER,
@@ -51,8 +56,8 @@ SummaryKey = tuple[str, str]
 class ContextCompactor:
     """三层渐进式上下文压缩。
 
-    保留最近 keep_recent 条，并向前扩展到 user 边界——避免切断
-    assistant(tool_calls) 与其 tool 结果的配对（否则 OpenAI 接口报错）。
+    保留最近 keep_recent 条，并向最近的安全边界（user/assistant）对齐——
+    避免切断 assistant(tool_calls) 与其 tool 结果的配对（否则 OpenAI 接口报错）。
     """
 
     def __init__(
@@ -67,7 +72,13 @@ class ContextCompactor:
         l2_delta_threshold: int = 2000,
         post_compact_files: int = 3,
         post_compact_max_chars_per_file: int = 5000,
+        post_compact_max_instructions: int = 5,
+        post_compact_max_important: int = 8,
+        post_compact_max_instruction_chars: int = 20000,
+        post_compact_max_important_chars: int = 5000,
+        post_compact_max_total_chars: int = 140000,
         max_tool_result_chars: int = 0,
+        history_db_path: str = "",
         store: SummaryStore | None = None,
         result_policy_resolver: ResultPolicyResolver | None = None,
     ) -> None:
@@ -80,7 +91,13 @@ class ContextCompactor:
         self.l2_delta_threshold = l2_delta_threshold
         self.post_compact_files = post_compact_files
         self.post_compact_max_chars_per_file = post_compact_max_chars_per_file
+        self.post_compact_max_instructions = post_compact_max_instructions
+        self.post_compact_max_important = post_compact_max_important
+        self.post_compact_max_instruction_chars = post_compact_max_instruction_chars
+        self.post_compact_max_important_chars = post_compact_max_important_chars
+        self.post_compact_max_total_chars = post_compact_max_total_chars
         self.max_tool_result_chars = max_tool_result_chars
+        self.history_db_path = history_db_path
         self.store = store
         self.result_policy_resolver = result_policy_resolver
         # store 为 None 时退化为进程内缓存（重启即失，自动降级 L3）。
@@ -125,32 +142,40 @@ class ContextCompactor:
     def _safe_split(messages: list[Message], keep_recent: int) -> int:
         """返回 recent 段起始下标，确保不切断 assistant(tool_calls)↔tool 配对。
 
+        安全边界为 user 或 assistant 消息：recent 以 assistant 开头时，其
+        tool_calls 的结果紧随其后、同在 recent 内，配对完整。长回合内只有
+        回合开头一个 user 边界，接受 assistant 边界才能让回合内早期迭代
+        被摘要——否则整个回合都受保护，回合内 L3 永不触发。
+
         策略（按优先级）：
         1. 从倒数 keep_recent 处出发；
-        2. 若该处已是 user，直接返回；
-        3. 优先向后（往最近消息）找 user：扩展 recent 以包含完整回合；
-        4. 向后无 user 则向前（往更早消息）找 user：收缩 recent，让 old 可压缩；
-        5. 保底：找不到合适的 user 边界则返回 0（安全降级，不压缩）。
+        2. 若该处已是安全边界（user/assistant），直接返回；
+        3. 优先向后（往最近消息）找安全边界：收缩 recent，让 old 可压缩；
+        4. 向后找不到则向前（往更早消息）找：扩展 recent，保住完整配对；
+        5. 保底：找不到安全边界则返回 0（安全降级，不压缩）。
         """
         n = len(messages)
         if n <= keep_recent:
             return 0
 
+        def _is_boundary(index: int) -> bool:
+            return messages[index].role in ("user", "assistant")
+
         start = max(0, n - keep_recent)
-        if messages[start].role == "user":
+        if _is_boundary(start):
             return start
 
-        # 向后扩展：找下一个 user，让 recent 以完整回合开始
+        # 向后收缩：找下一个安全边界，让 old 以完整配对结尾
         for i in range(start, n):
-            if messages[i].role == "user":
+            if _is_boundary(i):
                 return i
 
-        # 向前扩展：找上一个 user，让 old 以 user 之前的消息结尾
+        # 向前扩展：找上一个安全边界，保住完整配对
         for i in range(start - 1, -1, -1):
-            if messages[i].role == "user":
+            if _is_boundary(i):
                 return i
 
-        # 无 user 边界，安全降级
+        # 无安全边界，安全降级
         return 0
 
     @staticmethod
@@ -230,7 +255,7 @@ class ContextCompactor:
 
         before = estimate_tokens(messages)
         # state=None → _summarize_old 直走 L3 全量，不触碰 canonical L2 缓存
-        result, new_state, skipped = await self._summarize_old(messages, None, self.keep_recent)
+        result, new_state, skipped = await self._summarize_old(messages, None, self.keep_recent, session_id=session_id)
         if skipped:
             return result  # old 段太小主动跳过，不计失败
         if new_state is None:
@@ -297,7 +322,7 @@ class ContextCompactor:
             return messages
 
         before = estimate_tokens(messages)
-        result, new_state, skipped = await self._summarize_old(messages, state, self.keep_recent)
+        result, new_state, skipped = await self._summarize_old(messages, state, self.keep_recent, session_id=session_id)
         if skipped:
             return result  # old 段太小主动跳过，不计失败、不触发断路器
         if new_state is None:
@@ -335,7 +360,7 @@ class ContextCompactor:
         )
         keep = max(2, self.keep_recent // 2)
         state = self._get_state(session_id, owner_account_id)
-        result, new_state, _skipped = await self._summarize_old(messages, state, keep)
+        result, new_state, _skipped = await self._summarize_old(messages, state, keep, session_id=session_id)
         if new_state is not None:
             # 兜底压缩成功即视为「有效压缩」，清零防抖计数与断路器计数
             new_state.ineffective_count = 0
@@ -343,11 +368,23 @@ class ContextCompactor:
             self._failure_counts[self._key(session_id, owner_account_id) or ("", "")] = 0
         return result
 
+    def _history_hint(self, session_id: str | None) -> str:
+        """摘要消息尾部附完整历史回溯指引（canonical 历史 append-only 落库）。"""
+        if not self.history_db_path or not session_id:
+            return ""
+        return (
+            "\n\n> 压缩前的完整对话原文未丢失：已持久化在本地会话数据库 "
+            f"`{self.history_db_path}` 的 sessions 表中（session_id=`{session_id}`，"
+            "messages 字段为 JSON）。如确需压缩前某段的原文细节，可用 terminal "
+            "以只读方式查询该库，或直接向用户确认。"
+        )
+
     async def _summarize_old(
         self,
         messages: list[Message],
         state: SummaryState | None,
         keep_recent: int,
+        session_id: str | None = None,
     ) -> tuple[list[Message], SummaryState | None, bool]:
         """把 keep_recent 之前的历史摘要成一条 system 消息（L2 复用 / L3 全量）。
 
@@ -397,16 +434,33 @@ class ContextCompactor:
         )
         log.info("上下文压缩：%d 条旧消息 -> 摘要，保留最近 %d 条", len(old), len(recent))
 
-        # Post-compact 恢复：保留 Skill 指令、最近资源和不可重放的重要结论。
+        # Post-compact 恢复：保留 Skill 指令、不可重放的重要结论，
+        # 以及最近读取的文件——文件按 path 去重后从磁盘重读最新内容，
+        # 不回放压缩时的旧快照（磁盘 I/O 丢线程池，避免阻塞事件循环）。
         attachments = (
             build_post_compact_attachments(
                 old,
                 result_policy_resolver=self.result_policy_resolver,
                 max_resources=self.post_compact_files,
                 max_chars_per_resource=self.post_compact_max_chars_per_file,
+                max_instructions=self.post_compact_max_instructions,
+                max_important=self.post_compact_max_important,
+                max_instruction_chars=self.post_compact_max_instruction_chars,
+                max_important_chars=self.post_compact_max_important_chars,
+                max_total_chars=self.post_compact_max_total_chars,
             )
             if self.result_policy_resolver is not None
             else []
+        )
+        file_attachments = await asyncio.to_thread(
+            build_post_compact_file_attachments,
+            old,
+            max_files=self.post_compact_files,
+            max_chars_per_file=self.post_compact_max_chars_per_file,
+        )
+        attachments = [*attachments, *file_attachments]
+        summary_message = Message.system(
+            f"{SUMMARY_MARKER}\n{summary}{self._history_hint(session_id)}"
         )
         if attachments:
             log.info(
@@ -414,9 +468,5 @@ class ContextCompactor:
                 len(attachments),
                 self.post_compact_max_chars_per_file,
             )
-            return [
-                Message.system(f"{SUMMARY_MARKER}\n{summary}"),
-                *attachments,
-                *recent,
-            ], new_state, False
-        return [Message.system(f"{SUMMARY_MARKER}\n{summary}"), *recent], new_state, False
+            return [summary_message, *attachments, *recent], new_state, False
+        return [summary_message, *recent], new_state, False

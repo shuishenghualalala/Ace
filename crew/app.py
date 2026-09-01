@@ -1074,7 +1074,13 @@ class CrewApp:
             l2_delta_threshold=cfg.compaction_l2_delta_threshold,
             post_compact_files=cfg.compaction_post_compact_files,
             post_compact_max_chars_per_file=cfg.compaction_post_compact_max_chars_per_file,
+            post_compact_max_instructions=cfg.compaction_post_compact_max_instructions,
+            post_compact_max_important=cfg.compaction_post_compact_max_important,
+            post_compact_max_instruction_chars=cfg.compaction_post_compact_max_instruction_chars,
+            post_compact_max_important_chars=cfg.compaction_post_compact_max_important_chars,
+            post_compact_max_total_chars=cfg.compaction_post_compact_max_total_chars,
             max_tool_result_chars=cfg.compaction_max_tool_result_chars,
+            history_db_path=cfg.db_path,
             store=self.summary_store,
             result_policy_resolver=self.registry.result_policy,
         )

@@ -227,8 +227,13 @@ class Config:
     compaction_keep_recent_tools: int = 6  # L1：保留最近 N 个工具结果，更早的清理
     compaction_l2_incremental: bool = True  # L2：增量摘要缓存（复用旧摘要）
     compaction_l2_delta_threshold: int = 5000  # L2：新增低于此 token 时纯规则复用、零 LLM
-    compaction_post_compact_files: int = 3  # 压缩后恢复最近 N 个文件内容
+    compaction_post_compact_files: int = 3  # 压缩后恢复最近 N 个文件内容（按 path 去重，从磁盘重读）
     compaction_post_compact_max_chars_per_file: int = 5000  # 单个恢复文件最大字符数
+    compaction_post_compact_max_instructions: int = 5  # 压缩后最多恢复的指令条数
+    compaction_post_compact_max_important: int = 8  # 压缩后最多恢复的重要结论条数
+    compaction_post_compact_max_instruction_chars: int = 20000  # 单条恢复指令最大字符数
+    compaction_post_compact_max_important_chars: int = 5000  # 单条恢复重要结论最大字符数
+    compaction_post_compact_max_total_chars: int = 140000  # 恢复附件总字符闸口
     compaction_max_tool_result_chars: int = 20000  # 单条 tool result 最大字符数，超长截断
     retry_max: int = 2
     retry_backoff: float = 1.0
@@ -1613,6 +1618,21 @@ def load_config(config_path: str | Path | None = None) -> Config:
             cfg.compaction_post_compact_files = int(comp.get("post_compact_files", cfg.compaction_post_compact_files))
             cfg.compaction_post_compact_max_chars_per_file = int(
                 comp.get("post_compact_max_chars_per_file", cfg.compaction_post_compact_max_chars_per_file)
+            )
+            cfg.compaction_post_compact_max_instructions = int(
+                comp.get("post_compact_max_instructions", cfg.compaction_post_compact_max_instructions)
+            )
+            cfg.compaction_post_compact_max_important = int(
+                comp.get("post_compact_max_important", cfg.compaction_post_compact_max_important)
+            )
+            cfg.compaction_post_compact_max_instruction_chars = int(
+                comp.get("post_compact_max_instruction_chars", cfg.compaction_post_compact_max_instruction_chars)
+            )
+            cfg.compaction_post_compact_max_important_chars = int(
+                comp.get("post_compact_max_important_chars", cfg.compaction_post_compact_max_important_chars)
+            )
+            cfg.compaction_post_compact_max_total_chars = int(
+                comp.get("post_compact_max_total_chars", cfg.compaction_post_compact_max_total_chars)
             )
             cfg.compaction_max_tool_result_chars = int(
                 comp.get("max_tool_result_chars", cfg.compaction_max_tool_result_chars)

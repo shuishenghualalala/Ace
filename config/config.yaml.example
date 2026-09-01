@@ -44,6 +44,13 @@ agent:
     keep_recent_tools: 6
     l2_incremental: true
     l2_delta_threshold: 5000
+    post_compact_files: 3                    # 压缩后恢复最近 N 个文件（按 path 去重，从磁盘重读）
+    post_compact_max_chars_per_file: 5000    # 单个恢复文件最大字符数
+    post_compact_max_instructions: 5         # 压缩后最多恢复的指令条数
+    post_compact_max_important: 8            # 压缩后最多恢复的重要结论条数
+    post_compact_max_instruction_chars: 20000
+    post_compact_max_important_chars: 5000
+    post_compact_max_total_chars: 140000     # 恢复附件总字符闸口
   retry:
     max_retries: 3
     backoff_seconds: 1.0

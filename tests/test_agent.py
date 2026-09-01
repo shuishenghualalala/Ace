@@ -701,8 +701,8 @@ def test_drop_dangling_tool_calls():
 # ---------------------------------------------------------------------------
 # 上下文压缩
 # ---------------------------------------------------------------------------
-async def test_compactor_summarizes_old_and_keeps_recent_from_user_boundary():
-    # 构造一段超预算历史：5 轮 user/assistant + 一组 tool 配对
+async def test_compactor_summarizes_old_and_keeps_recent_from_safe_boundary():
+    # 构造一段超预算历史：6 轮 user/assistant
     msgs = []
     for i in range(6):
         msgs.append(Message.user("问题" * 500 + str(i)))
@@ -712,8 +712,8 @@ async def test_compactor_summarizes_old_and_keeps_recent_from_user_boundary():
     out = await compactor.maybe_compact(msgs)
     # 第一条应是摘要 system
     assert out[0].role == "system" and "历史摘要" in out[0].content
-    # recent 段从 user 边界开始
-    assert out[1].role == "user"
+    # recent 段从安全边界开始（user 或 assistant），绝不以 tool 开头切断配对
+    assert out[1].role in ("user", "assistant")
     # 压缩后更短
     assert len(out) < len(msgs)
 

@@ -1163,8 +1163,10 @@ def register_builtin_tools(
         ui_label_template="读取 {path}",
         always_load=True,
         search_hint="read file view contents inspect text",
-        result_retention=ToolResultRetention.RESOURCE,
-        result_identity_fields=("path", "offset", "limit"),
+        # 文件内容按临时结果处理：旧分片由 L1 清成一行摘要（含 path/offset，
+        # 模型可随时重读）；压缩后恢复按 path 从磁盘重读最新内容（post_compact）。
+        # 不做 RESOURCE 级分片去重——offset/limit 分片互不去重会积累多份原文。
+        result_retention=ToolResultRetention.TEMPORARY,
     )
     registry.register(
         name="file_write",
