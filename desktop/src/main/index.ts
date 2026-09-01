@@ -105,7 +105,7 @@ import {
 } from '../shared/constants';
 import { listOpenWithApplications, openFileWithApplication } from './open-with-service';
 import { handleUninstall, setUninstallDeps } from './uninstall';
-import { isTrayStatus, TrayService } from './tray-service';
+import { isTrayNotificationSummary, isTrayStatus, TrayService } from './tray-service';
 import { currentAppVersion, currentAppVersionLabel } from './app-version';
 import {
   configureUpdateController,
@@ -924,6 +924,14 @@ function createTray(): void {
     onQuit: () => {
       isQuitting = true;
       app.quit();
+    },
+    onNotificationSelected: (id: string) => {
+      showMainWindow();
+      mainWindow?.webContents.send('tray:notification-selected', id);
+    },
+    onNotificationsMarkAllRead: () => {
+      showMainWindow();
+      mainWindow?.webContents.send('tray:notifications-mark-all-read');
     },
   });
   trayService.create();
@@ -2819,6 +2827,15 @@ function registerIpc() {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: tray:set-status expected a known tray status`);
     }
     setTrayStatus(status);
+    return { ok: true };
+  });
+  trustedHandle('tray:set-notifications', (_e, summary: unknown) => {
+    if (!isTrayNotificationSummary(summary)) {
+      throw new Error(
+        `${IPC_ARG_VALIDATION_FAILED}: tray:set-notifications expected a valid notification summary`,
+      );
+    }
+    trayService?.setNotifications(summary);
     return { ok: true };
   });
   trustedHandle('app:get-system-locale', () => {

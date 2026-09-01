@@ -8,6 +8,7 @@ import type {
   VersionUpdateDownloadProgressPayload,
   VersionUpdatePackageResult,
   VersionUpdatePayload,
+  TrayNotificationSummary,
   TrayStatus,
 } from '../shared/types';
 import type { SecurityAuditArgs } from '../shared/ipc-schemas';
@@ -83,6 +84,21 @@ const api = {
     const listener = () => cb();
     ipcRenderer.on('tray:activated', listener);
     return () => ipcRenderer.removeListener('tray:activated', listener);
+  },
+  /** 通知中心 → 托盘菜单：推送未读摘要（未读数 + 最近 5 条未读），主进程重建托盘菜单。 */
+  traySetNotifications: (summary: TrayNotificationSummary) =>
+    ipcRenderer.invoke('tray:set-notifications', summary) as Promise<{ ok: true }>,
+  /** 托盘菜单点击某条通知：Renderer 复用通知中心的已读 + 跳转逻辑。 */
+  onTrayNotificationSelected: (cb: (id: string) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, id: string) => cb(id);
+    ipcRenderer.on('tray:notification-selected', listener);
+    return () => ipcRenderer.removeListener('tray:notification-selected', listener);
+  },
+  /** 托盘菜单「全部标为已读」：Renderer 复用通知中心的全部已读逻辑。 */
+  onTrayNotificationsMarkAllRead: (cb: () => void) => {
+    const listener = () => cb();
+    ipcRenderer.on('tray:notifications-mark-all-read', listener);
+    return () => ipcRenderer.removeListener('tray:notifications-mark-all-read', listener);
   },
   getSystemLocale: () => ipcRenderer.invoke('app:get-system-locale') as Promise<string>,
   rendererInitialStateReady: (): Promise<{ ok: true }> =>

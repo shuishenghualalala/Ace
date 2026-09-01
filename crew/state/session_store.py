@@ -534,6 +534,16 @@ class SQLiteSessionStore(SessionStore):
             ).fetchone()
         return str(row[0]) if row else None
 
+    def resolve_owner_account_id(self, session_id: str) -> str:
+        """仅有 session_id 时反查所属 owner（通知来源回调等场景），取最近更新的一行。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT owner_account_id FROM sessions WHERE session_id = ? "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        return str(row[0]) if row else ""
+
     def total_usage(self, owner_account_id: str = "") -> dict[str, int]:
         """累计 token 估算与会话数（排除 Team 子会话）。"""
         with self._lock:

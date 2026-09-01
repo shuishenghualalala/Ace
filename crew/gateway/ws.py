@@ -266,6 +266,12 @@ def create_ws_router(
                             },
                             owner_account_id=owner,
                         )
+                        # 通知中心待办：仅可审批（非 empty）的 review 发通知；
+                        # 通知失败不得影响卡片推送主流程。
+                        try:
+                            crew.publish_plan_review_notification(sid, owner, review)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("plan 待办通知发布失败 session=%s: %s", sid, exc)
 
                 # Wiki Agent：本轮若有待展示卡片 → 推 wiki_cards 帧
                 wm = getattr(crew, "wiki_manager", None)
@@ -503,6 +509,14 @@ def create_ws_router(
                     if not _session_owned(session_id):
                         await _reject_missing_session(session_id)
                         continue
+
+                    def _mark_plan_notification_read() -> None:
+                        """计划被批准/拒绝/退出后，对应待办通知自动已读；失败不阻断控制流。"""
+                        try:
+                            crew.mark_plan_review_notification_read(session_id, owner)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("plan 通知自动已读失败 session=%s: %s", session_id, exc)
+
                     if act == "plan_enter":
                         pm.enter(session_id, owner_account_id=owner)
                         await _send_status(
@@ -548,14 +562,17 @@ def create_ws_router(
                         )
                     elif act == "plan_reject":
                         pm.reject(session_id, owner_account_id=owner)
+                        _mark_plan_notification_read()
                         await _send_status(
                             session_id, "已保留 Plan 模式，请继续完善计划"
                         )
                     elif act == "plan_reject_and_exit":
                         pm.reject_and_exit(session_id, owner_account_id=owner)
+                        _mark_plan_notification_read()
                         await _send_status(session_id, "已拒绝计划并退出 Plan 模式")
                     elif act == "plan_exit":
                         pm.exit(session_id, owner_account_id=owner)
+                        _mark_plan_notification_read()
                         await _send_status(session_id, "已退出 Plan 模式")
                     else:  # plan_approve → 退出只读并自动起一轮执行
                         # 批准前若客户端附带 plan 正文，先落盘再批准（看板「手改后批准」原子路径）。
@@ -579,6 +596,7 @@ def create_ws_router(
                                 continue
                             pm.request_approval(session_id, owner_account_id=owner)
                         pm.approve(session_id, owner_account_id=owner)
+                        _mark_plan_notification_read()
                         _register_session(session_id)
                         approval_text = "计划已批准，请按上述计划开始执行。"
                         exec_env = Envelope.of(

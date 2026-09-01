@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from crew.core.errors import ToolError
 from crew.core.runctx import (
@@ -31,6 +31,44 @@ _DEFAULT_TIMEOUT = DEFAULT_INTERACTION_TIMEOUT_SECONDS
 # 用回灌而非 future.cancel()，避免 CancelledError 冒泡到 agent 主任务。
 CANCELLED_MARKER = "__cancelled__"
 _CANCELLED_ANSWER = [{"id": CANCELLED_MARKER, "answers": []}]
+
+# 通知中心注入钩子（由 crew/app.py 装配层注入；core 不反向依赖通知实现）：
+#   on_pending(session_id, question_id, text)  追问发出后触发（仅 record_history=True）
+#   on_resolved(session_id, question_id)       回答 / 取消 / 超时后触发（自动已读）
+NotifyPendingFn = Callable[[str, str, str], None]
+NotifyResolvedFn = Callable[[str, str], None]
+_on_pending_hook: NotifyPendingFn | None = None
+_on_resolved_hook: NotifyResolvedFn | None = None
+
+
+def set_followup_notification_hooks(
+    on_pending: NotifyPendingFn | None = None,
+    on_resolved: NotifyResolvedFn | None = None,
+) -> None:
+    """装配层注入通知回调；传 None 表示不通知（默认，测试/CLI 场景）。"""
+    global _on_pending_hook, _on_resolved_hook
+    _on_pending_hook = on_pending
+    _on_resolved_hook = on_resolved
+
+
+def _fire_pending(session_id: str, question_id: str, text: str) -> None:
+    """fire-and-forget：通知失败只记日志，绝不打断追问主流程。"""
+    if _on_pending_hook is None:
+        return
+    try:
+        _on_pending_hook(session_id, question_id, text)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("追问待办通知触发失败 session=%s question=%s: %s", session_id, question_id, exc)
+
+
+def _fire_resolved(session_id: str, question_id: str) -> None:
+    """fire-and-forget：自动已读失败只记日志（mark_read 幂等，重复触发无害）。"""
+    if _on_resolved_hook is None:
+        return
+    try:
+        _on_resolved_hook(session_id, question_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("追问通知自动已读触发失败 session=%s question=%s: %s", session_id, question_id, exc)
 
 
 class FollowupWaiter:
@@ -95,6 +133,8 @@ class FollowupWaiter:
             self._futures.pop(key, None)
             self._questions.pop(key, None)
             self._record_history.pop(key, None)
+            # 等待结束（回答/取消/超时）即解除待办：对应通知自动已读。
+            _fire_resolved(session_id, question_id)
         return answers
 
     def resolve(
@@ -113,6 +153,8 @@ class FollowupWaiter:
             if display_message:
                 self._answer_messages.setdefault(session_id, []).append(display_message)
         future.set_result(answers)
+        # 用户已回答：对应待办通知自动已读（wait 的 finally 会再触发一次，幂等）。
+        _fire_resolved(session_id, question_id)
         return True
 
     def cancel(self, session_id: str, question_id: str) -> bool:
@@ -123,6 +165,8 @@ class FollowupWaiter:
         self._record_history.pop(key, None)
         if future is not None and not future.done():
             future.set_result(_CANCELLED_ANSWER)
+            # 用户取消：对应待办通知自动已读。
+            _fire_resolved(session_id, question_id)
             return True
         return False
 
@@ -337,6 +381,11 @@ async def send_followup_question_to(
         payload["body"]["origin"] = dict(origin)
     await push_fn(session_id, payload)
     log.info("已发送追问 session=%s question=%s", session_id, question_id)
+    # 通知中心待办：仅 record_history=True 的普通追问发通知；
+    # record_history=False 是权限确认等 side-channel UI，已由 approval 来源覆盖，不重复通知。
+    if record_history:
+        first_question = str(normalized[0].get("question") or "") if normalized else ""
+        _fire_pending(session_id, question_id, first_question or str(title or "").strip())
     return session_id, question_id
 
 

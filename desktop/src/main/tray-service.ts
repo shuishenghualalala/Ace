@@ -1,6 +1,12 @@
 import { Menu, nativeImage, Tray } from 'electron';
 import * as path from 'path';
-import type { TrayStatus } from '../shared/types';
+import type { TrayNotificationSummary, TrayStatus } from '../shared/types';
+
+/** 托盘菜单展示的未读通知条数上限。 */
+export const TRAY_MENU_MAX_ITEMS = 5;
+
+/** 托盘菜单单行标签长度上限，超出截断并补省略号。 */
+const TRAY_MENU_LABEL_MAX = 40;
 
 const STATUS_ASSETS: Record<TrayStatus, string> = {
   default: 'default.png',
@@ -35,6 +41,64 @@ export interface TrayServiceOptions {
   onActivate: () => void;
   onUninstall: () => void;
   onQuit: () => void;
+  /** 托盘菜单点击某条通知：主进程唤醒窗口并转发给 Renderer 标记已读 + 跳转。 */
+  onNotificationSelected: (id: string) => void;
+  /** 托盘菜单「全部标为已读」：主进程唤醒窗口并转发给 Renderer 复用全部已读逻辑。 */
+  onNotificationsMarkAllRead: () => void;
+}
+
+function truncateMenuLabel(text: string): string {
+  return text.length > TRAY_MENU_LABEL_MAX
+    ? `${text.slice(0, TRAY_MENU_LABEL_MAX)}…`
+    : text;
+}
+
+/**
+ * 托盘菜单模板：纯函数，便于在无 Electron 环境单测。
+ * 有未读时在顶部追加通知区（禁用表头 + 最近未读 + 全部标为已读 + 分隔线），
+ * 原有的打开 Crew / 卸载 / 退出保持不变。
+ */
+export function buildTrayMenuTemplate(
+  summary: TrayNotificationSummary,
+  handlers: TrayServiceOptions,
+): Electron.MenuItemConstructorOptions[] {
+  const template: Electron.MenuItemConstructorOptions[] = [];
+  if (summary.unreadCount > 0) {
+    template.push({ label: `通知 · ${summary.unreadCount} 条未读`, enabled: false });
+    for (const item of summary.items.slice(0, TRAY_MENU_MAX_ITEMS)) {
+      const label = item.sourceLabel ? `${item.sourceLabel} · ${item.title}` : item.title;
+      template.push({
+        label: truncateMenuLabel(label),
+        click: () => handlers.onNotificationSelected(item.id),
+      });
+    }
+    template.push({ label: '全部标为已读', click: () => handlers.onNotificationsMarkAllRead() });
+    template.push({ type: 'separator' });
+  }
+  template.push(
+    { label: '打开 Crew', click: () => handlers.onActivate() },
+    { label: '卸载', click: () => handlers.onUninstall() },
+    { type: 'separator' },
+    { label: '退出', click: () => handlers.onQuit() },
+  );
+  return template;
+}
+
+/** Renderer 上报的托盘通知摘要结构校验（IPC 边界）。 */
+export function isTrayNotificationSummary(value: unknown): value is TrayNotificationSummary {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<TrayNotificationSummary>;
+  if (typeof candidate.unreadCount !== 'number'
+    || !Number.isFinite(candidate.unreadCount)
+    || candidate.unreadCount < 0) return false;
+  if (!Array.isArray(candidate.items) || candidate.items.length > TRAY_MENU_MAX_ITEMS) return false;
+  return candidate.items.every((item) => {
+    if (!item || typeof item !== 'object') return false;
+    const entry = item as Partial<{ id: unknown; title: unknown; sourceLabel: unknown }>;
+    return typeof entry.id === 'string'
+      && typeof entry.title === 'string'
+      && (entry.sourceLabel === undefined || typeof entry.sourceLabel === 'string');
+  });
 }
 
 /**
@@ -44,6 +108,7 @@ export interface TrayServiceOptions {
 export class TrayService {
   private tray: Tray | null = null;
   private status: TrayStatus = 'default';
+  private notificationSummary: TrayNotificationSummary = { unreadCount: 0, items: [] };
 
   public constructor(private readonly options: TrayServiceOptions) {}
 
@@ -51,12 +116,7 @@ export class TrayService {
     if (this.tray) return;
     this.tray = new Tray(this.resolveIcon(this.status));
     this.tray.setToolTip(STATUS_LABELS[this.status]);
-    this.tray.setContextMenu(Menu.buildFromTemplate([
-      { label: '打开 Crew', click: () => this.options.onActivate() },
-      { label: '卸载', click: () => this.options.onUninstall() },
-      { type: 'separator' },
-      { label: '退出', click: () => this.options.onQuit() },
-    ]));
+    this.rebuildMenu();
     this.tray.on('double-click', () => this.options.onActivate());
     this.tray.on('click', () => this.options.onActivate());
   }
@@ -68,6 +128,12 @@ export class TrayService {
     this.tray.setToolTip(STATUS_LABELS[status]);
   }
 
+  /** 通知状态变化时由 Renderer 推送摘要，立即重建菜单避免展示过期未读。 */
+  public setNotifications(summary: TrayNotificationSummary): void {
+    this.notificationSummary = summary;
+    this.rebuildMenu();
+  }
+
   public getStatus(): TrayStatus {
     return this.status;
   }
@@ -75,6 +141,13 @@ export class TrayService {
   public dispose(): void {
     this.tray?.destroy();
     this.tray = null;
+  }
+
+  private rebuildMenu(): void {
+    if (!this.tray) return;
+    this.tray.setContextMenu(Menu.buildFromTemplate(
+      buildTrayMenuTemplate(this.notificationSummary, this.options),
+    ));
   }
 
   private resolveIcon(status: TrayStatus): Electron.NativeImage {

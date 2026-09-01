@@ -3,96 +3,105 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>notifications · Ace 后端模块</title>
-<!--
-  ============================================================================
-  模块文档模板：复制此文件 → 改名为 <module>.html → 填写各节。
-  约定：每次改动某后端模块的代码，先归类到对应模块，再更新该模块文档：
-    1) 若改了职责/文件/接口 → 同步对应小节
-    2) 必填：在「变更记录」追加一行（日期 + 变更 + 影响面）
-  风格：白底黑白极简，最大宽度 960px，系统字体，无装饰。
-  ============================================================================
--->
+<title>通知中心 · 后端模块文档</title>
 <style>
-  :root{
-    --text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
-    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
-    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;
-  }
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;}
   *{box-sizing:border-box}
   body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
-  .wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}
-  h1{font-size:28px;font-weight:800;margin:0 0 4px}
-  .crumb{color:var(--t3);font-size:13px;margin-bottom:6px}
-  .sub{color:var(--t3);margin-bottom:36px}
-  h2{font-size:19px;font-weight:700;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  .wrap{max-width:880px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:26px;font-weight:800;letter-spacing:-.5px;margin:0 0 6px}
+  .sub{color:var(--t3);margin-bottom:40px}
+  h2{font-size:20px;font-weight:700;margin:44px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:15px;font-weight:700;margin:22px 0 8px}
   p,li{color:var(--t2)}
   code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
-  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px;line-height:1.6}
+  pre code{background:none;border:none;padding:0}
   table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
   th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}
   th{background:var(--soft);font-weight:600}
-  .logo{width:28px;height:28px;border-radius:7px;background:var(--black);color:#fff;display:inline-grid;place-items:center;font-weight:800;vertical-align:middle;margin-right:8px}
   ul{padding-left:20px}
-  .tree{font-family:var(--mono);font-size:13px;white-space:pre;color:var(--t2)}
-  .todo{color:var(--t2)}
-  .nav{margin-top:40px;color:var(--t3);font-size:13px}
+  .ok{border-left:3px solid #16a34a;background:#f0fdf4;padding:12px 16px;margin:14px 0;border-radius:4px}
   a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}a:hover{border-bottom-color:var(--text)}
+  .nav{margin-top:44px;color:var(--t3);font-size:13px;padding-top:16px;border-top:1px solid var(--border)}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <div class="crumb">Ace / 后端模块 / notifications</div>
-  <h1><span class="logo">A</span>crew/notifications</h1>
-  <div class="sub">Notifications 通知：多渠道消息推送与状态同步。</div>
+  <h1>通知中心（Notification Center）</h1>
+  <div class="sub">crew/notifications/ + crew/core/interfaces.py + crew/gateway/routers/notifications.py · 2026-08-28 建立</div>
 
-  <h2>1. 职责</h2>
+  <h2>1. 定位</h2>
+  <p>统一的消息提醒中心：桌面端左上角 Crew logo 旁铃铛 + 未读角标 + 通知面板。采用「中心存储 + 来源推送（push）」模式：<b>core 只定义契约</b>，各业务模块在自己的事件产生点调一次 <code>publish()</code> 即完事，中心统一持久化、统一未读数、统一 WS 推送。来源模块互不感知，拔掉任何一个来源只是少几次 publish 调用，中心与 UI 照常工作。</p>
+
+  <h2>2. 结构</h2>
+  <pre><code>desktop 铃铛/角标/面板 (features/notification-center.ts)
+    ▲ WS notify_owner 推送          ▲ REST /api/notifications
+crew/gateway  routers/notifications.py · connections.notify_owner
+    ▲ 依赖注入（crew/app.py 装配，回调注入，无反向 import）
+crew/notifications/  service.py (NotificationCenterService) · store.py (NotificationStore)
+    ▲ 实现
+crew/core/interfaces.py  Notification dataclass · NotificationCenter ABC
+    ▲ publish()            publish()         publish()        publish()
+crew/cron            crew/tasks      crew/security     crew/companion   crew/core      crew/gateway
+scheduler 完成点      app.py 完成回调   approvals 审批     gateway 入站消息   followup 追问  ws plan_review</code></pre>
+
+  <h2>3. 分层职责</h2>
+  <table>
+    <thead><tr><th>层</th><th>文件</th><th>职责</th></tr></thead>
+    <tbody>
+      <tr><td>契约</td><td><code>crew/core/interfaces.py</code></td><td><code>Notification</code> dataclass（id/owner/source/kind/title/body/payload/created_at/read_at）与 <code>NotificationCenter</code> ABC：publish / list / unread_count / mark_read / mark_all_read / mark_read_by_payload / clear。</td></tr>
+      <tr><td>实现</td><td><code>crew/notifications/store.py</code></td><td>SQLite <code>notifications</code> 表（共享 <code>crew_data/crew.db</code>，走 <code>connect_sqlite</code> + <code>SQLiteWriteHelper</code> 惯例）；insert 同事务内按 (owner, source) 裁剪到最近 200 条；<code>mark_read_by_payload</code> 用 json_each 匹配 payload 顶层值。</td></tr>
+      <tr><td>实现</td><td><code>crew/notifications/service.py</code></td><td>实现 ABC；publish 写库后经可选 async <code>push_fn(owner, payload)</code> 广播 <code>{"kind":"notification",...}</code>（fire-and-forget，推送失败只记日志不影响写库）。</td></tr>
+      <tr><td>装配</td><td><code>crew/app.py</code></td><td>构造 service；<code>set_push</code> 时把 <code>notify_owner</code> 延迟注入为 push_fn；向 cron / security 注入回调；tasks 完成回调、companion 入站消息处直接 publish。</td></tr>
+      <tr><td>网关</td><td><code>crew/gateway/routers/notifications.py</code></td><td>REST 面（见第 5 节）。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. 可插拔约定</h2>
   <ul>
-    <li>该模块做什么、不做什么（边界）。</li>
+    <li><b>来源方零依赖</b>：cron / security 等永远不 import <code>crew/notifications</code>，只接收可选回调（如 <code>CronService.set_on_run_finished()</code>、<code>SecurityApprovalService.set_notification_hooks()</code>），与 <code>TaskRuntime.set_callbacks</code> 同一套路。</li>
+    <li><b>来源缺席无影响</b>：模块未装配 = 没人调 publish；UI 面板来源列表从数据动态渲染，不写死。</li>
+    <li><b>新增来源不改核心</b>：在 app.py 装配处拿 center 句柄调 publish 即可，core / 中心 / UI 零改动。</li>
   </ul>
 
-  <h2>2. 功能拆解</h2>
-  <p>按子功能或核心流程拆解，这是本模块文档的重点。</p>
+  <h2>5. API 契约</h2>
   <table>
-    <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
+    <thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td><code>feature-a</code></td><td>…</td><td>已落地</td></tr>
-      <tr><td><code>feature-b</code></td><td>…</td><td>待补充</td></tr>
+      <tr><td>GET</td><td><code>/api/notifications?limit=50&amp;offset=0&amp;unread_only=false</code></td><td><code>{"notifications":[...], "unread_count":n}</code>，created_at 倒序，limit 上限 200</td></tr>
+      <tr><td>GET</td><td><code>/api/notifications/unread-count</code></td><td><code>{"unread_count":n}</code></td></tr>
+      <tr><td>POST</td><td><code>/api/notifications/{id}/read</code></td><td>单条已读</td></tr>
+      <tr><td>POST</td><td><code>/api/notifications/read-all</code></td><td>全部已读</td></tr>
+      <tr><td>DELETE</td><td><code>/api/notifications</code></td><td>清空当前 owner</td></tr>
+    </tbody>
+  </table>
+  <p>notification JSON：<code>{id, source, kind, title, body, payload: object|null, created_at, read_at: float|null}</code>。WS 实时帧：<code>{"kind":"notification","notification":{...}}</code>，经 <code>ConnectionManager.notify_owner</code> 账号级广播；WS 只负责唤醒角标，面板打开时总是 REST 全量拉取（与 security-approval 的推送唤醒 + 拉取兜底模式一致）。</p>
+
+  <h2>6. 已接入来源</h2>
+  <table>
+    <thead><tr><th>source</th><th>产生点</th><th>事件</th></tr></thead>
+    <tbody>
+      <tr><td><code>cron</code></td><td><code>crew/cron/scheduler.py</code> _run_claimed_fire finally</td><td>定时任务执行完成 / 失败</td></tr>
+      <tr><td><code>tasks</code></td><td><code>crew/app.py</code> _on_task_completion</td><td>任务完成 / 失败</td></tr>
+      <tr><td><code>approval</code></td><td><code>crew/security/service.py</code> request_action / _decide_locked</td><td>新审批到达；决策后按 payload.request_id 自动已读</td></tr>
+      <tr><td><code>companion</code></td><td><code>crew/gateway/routers/companion.py</code> link-state 入站分支</td><td>同伴消息 / 同伴 agent 执行结果</td></tr>
+      <tr><td><code>followup</code></td><td><code>crew/core/followup.py</code> send_followup_question_to / FollowupWaiter resolve·cancel·wait</td><td>追问发出（仅 record_history=True，权限 side-channel 不重复通知）；回答 / 取消 / 超时后按 payload.question_id 自动已读。经 <code>set_followup_notification_hooks</code> 注入回调，owner 由 app 侧 session store 反查（<code>resolve_owner_account_id</code>）</td></tr>
+      <tr><td><code>plan</code></td><td><code>crew/gateway/ws.py</code> plan_review 帧推送 / plan_* 决策分支</td><td>计划待审批（仅非 empty 的可审批卡片）；批准 / 拒绝 / 退出后按 payload.session_id 自动已读</td></tr>
     </tbody>
   </table>
 
-  <h2>3. 关键文件</h2>
-  <table>
-    <thead><tr><th>文件</th><th>作用</th></tr></thead>
-    <tbody>
-      <tr><td><code>crew/notifications/xxx.py</code></td><td>…</td></tr>
-    </tbody>
-  </table>
+  <h2>7. 前端</h2>
+  <p>desktop 端 <code>features/notification-center.ts</code>（唯一新模块文件）：铃铛按钮挂在 brand 块（<code>application-shell.ts</code>），未读角标 0 隐藏 / 99+ 封顶；面板点外部或 Esc 关闭；<b>面板只展示未读</b>（拉取固定 <code>unreadOnly</code>，单条已读后立即从列表移除，后端历史不动），条目点击按 payload 跳转（session_id → 打开会话，approval → 触发审批弹窗），并支持单条已读 / 全部已读。WS 帧走应用级常驻 <code>BackendChatSocket</code> 的 <code>applyChunk</code> 分发，带 push id 去重。</p>
 
-  <h2>4. 数据模型与接口</h2>
-  <p>对外暴露的关键类/方法、事件/消息约定、Schema。</p>
-  <pre><code># 关键签名</code></pre>
+  <h2>8. 测试</h2>
+  <div class="ok"><code>tests/test_notifications.py</code> 26 用例：store CRUD / 分页 / 未读过滤 / 裁剪 / payload 往返；service 推送容错；cron 完成失败回调与无回调降级；approval 创建通知与自动已读、复用请求不重复通知；followup 发送发布 / side-channel 不发布 / 回答·取消·超时自动已读 / 钩子容错；plan 非空发布与截断、empty 不发布、决策自动已读；REST 契约字段形状。前端 <code>desktop/tests/unit/notification-center.test.ts</code> 18 用例。</div>
 
-  <h2>5. 当前存在的问题 / TODO</h2>
-  <ul class="todo">
-    <li>问题 1：…</li>
-    <li>TODO：…</li>
-  </ul>
+  <h2>9. 变更记录</h2>
+  <p><b>2026-09-01：</b>新增两个通知来源。① <code>followup</code>（kind=<code>followup_pending</code>）：<code>crew/core/followup.py</code> 在 <code>send_followup_question_to</code> 发出追问后触发模块级注入钩子 <code>set_followup_notification_hooks(on_pending/on_resolved)</code>（fire-and-forget，钩子异常只记日志），仅 <code>record_history=True</code> 的普通追问发通知——<code>record_history=False</code> 是权限确认 side-channel UI，已由 approval 来源覆盖；<code>FollowupWaiter</code> 的 resolve / cancel / wait-finally（超时）三处触发 <code>on_resolved</code>，由 app 侧 <code>mark_read_by_payload("followup", question_id)</code> 自动已读（幂等）。owner 解析：followup 层只有 session_id，app 回调经新增的 <code>SessionStore.resolve_owner_account_id</code>（按 updated_at 取最近一行）反查。② <code>plan</code>（kind=<code>plan_review_pending</code>）：<code>crew/gateway/ws.py</code> 在 plan_review 帧推送后调 <code>CrewApp.publish_plan_review_notification</code>，仅非 empty（可审批）的 review 发通知，「计划为空」提示卡不进待办；plan_approve / plan_reject / plan_reject_and_exit / plan_exit 四个决策分支调 <code>mark_plan_review_notification_read</code> 自动已读。桌面端 <code>SOURCE_LABELS</code> 新增「追问 / 计划」标签。③ 面板改为只展示未读：拉取固定 <code>unreadOnly</code>、已读即移出列表、空态文案改「没有未读通知」；移除「清空」按钮（后端 <code>clear</code> 接口保留，仅不再暴露 UI）；修复面板头部落入 <code>.mw-app-titlebar</code> 拖拽区导致「全部已读」点不动的问题（<code>.mw-notification-panel</code> 加 <code>-webkit-app-region: no-drag</code>）。</p>
 
-  <h2>6. 扩展点</h2>
-  <ul>
-    <li>如何在此模块上加功能（遵守契约、不跨目录）。</li>
-  </ul>
-
-  <h2>7. 变更记录</h2>
-  <table>
-    <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
-    <tbody>
-      <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
-    </tbody>
-  </table>
-
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+  <div class="nav">返回：<a href="index.html">后端模块文档索引</a> · <a href="../../index.html">Crew 文档总览</a></div>
 </div>
 </body>
 </html>
