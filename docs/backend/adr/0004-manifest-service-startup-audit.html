@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0004 · Manifest 服务依赖与启动审计</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0004 · Manifest 服务依赖与启动审计</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-02 · 阶段：插件架构 Stage 1 / Commit 5</div>
+
+  <h2>背景</h2>
+  <p>Feature Runtime 已能解析服务依赖，但目录插件的 Manifest 尚未进入该模型，加载顺序仍由目录顺序决定。插件也可以继续从无约束字典读取服务，无法区分必需、可选和对外提供的能力；插件停在 Waiting 或 Failed 时缺少统一、可机器读取的启动结果。</p>
+
+  <h2>决定</h2>
+  <div class="decision"><p>目录插件使用 Manifest 的 <code>requires</code>、<code>optional</code> 和 <code>provides</code> 声明服务边，PluginManager 一次发现全部定义，再由 Feature Runtime 计算确定性激活批次。</p></div>
+  <ul>
+    <li>Consumer 即使目录排序在 Provider 之前，也必须等 Provider 的服务实际可见后再安装。</li>
+    <li><code>provides</code> 是可验证契约：安装结束前必须通过当前 Scope 注册对应 Service，否则整代安装失败并回滚。</li>
+    <li><code>PluginContext.register_service()</code> 只允许发布已声明服务；<code>resolve_service()</code> 与 <code>get_service()</code> 只允许读取已声明依赖。</li>
+    <li>组合根通过 <code>publish_host_services()</code> 把 Host 对象同时发布到兼容字典和类型化 Registry；后到服务触发 Waiting 插件重试。</li>
+    <li>Runtime 输出包含状态、Generation、配置版本、服务依赖、缺失项、注册标签和错误的稳定快照。</li>
+    <li><code>build_app()</code> 在装配收敛后执行一次审计；<code>crew --dump-features</code> 输出同一数据，存在 Waiting/Failed 时返回非零退出码。</li>
+  </ul>
+
+  <h2>首批迁移</h2>
+  <table>
+    <thead><tr><th>插件</th><th>声明</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>Browser</td><td>requires config；optional plugin_prefs、workspace_store、security_service</td><td>配置改用声明式解析；后到运行期依赖仍保留兼容视图。</td></tr>
+      <tr><td>Wiki Learning</td><td>requires config</td><td>不再从无约束字典读取必需配置。</td></tr>
+      <tr><td>Feishu Tools</td><td>requires workspace_store、security_service</td><td>安全与工作区边界缺失时不发布工具。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>兼容与跨平台</h2>
+  <p>旧 Manifest 不声明服务时行为不变；<code>requires_services</code>、<code>optional_services</code>、<code>provides_services</code> 作为显式别名可用，但同一字段不能同时使用两种写法。实现只依赖 Python 数据结构与 asyncio，不依赖文件系统排序差异、Unix 信号或进程模型。</p>
+
+  <h2>后续</h2>
+  <p><code>ctx.services</code> 仍为迁移期兼容视图。下一切片实现 replace/restart 配置更新及 drain lease 后，再逐个移除插件的隐式字典读取。</p>
+
+  <div class="nav"><a href="0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="../modules/plugins.html">Feature / Plugin 模块文档</a> · <a href="../../testing/plugin-architecture-stage-1-manifest-audit.html">测试记录</a></div>
+</div>
+</body>
+</html>

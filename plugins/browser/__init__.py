@@ -28,10 +28,8 @@ manager: BrowserManager | None = None
 
 def register(ctx) -> None:
     global manager
-    config = ctx.services.get("config")
-    if config is None:
-        raise RuntimeError("browser 插件缺少 config 服务")
-    plugin_prefs = ctx.services.get("plugin_prefs")
+    config = ctx.resolve_service("config")
+    plugin_prefs = ctx.get_service("plugin_prefs")
 
     manager = BrowserManager(config.browser)
     ctx.register_disposer(_close_manager)

@@ -3,6 +3,9 @@ version: "0.1.0"
 description: "Feishu/Lark document and drive comment tools."
 author: "Crew"
 kind: standalone
+requires:
+  - workspace_store
+  - security_service
 requires_env:
   - name: FEISHU_APP_ID
     description: "Feishu/Lark app ID"

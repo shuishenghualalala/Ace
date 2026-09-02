@@ -357,6 +357,146 @@ async def test_registration_phases_are_visible_in_plugin_diagnostics(tmp_path):
     assert phases["resource:dispose"] is RegistrationPhase.RESOURCE
 
 
+async def test_manifest_services_drive_plugin_activation_order(tmp_path):
+    consumer = tmp_path / "a_consumer"
+    consumer.mkdir()
+    (consumer / "plugin.yaml").write_text(
+        "\n".join(
+            [
+                "name: a-consumer",
+                "requires:",
+                "  - catalog",
+                "optional:",
+                "  - enhancer",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (consumer / "__init__.py").write_text(
+        """
+VALUE = None
+
+def register(ctx):
+    global VALUE
+    VALUE = ctx.resolve_service("catalog")["origin"]
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    provider = tmp_path / "z_provider"
+    provider.mkdir()
+    (provider / "plugin.yaml").write_text(
+        "\n".join(
+            [
+                "name: z-provider",
+                "provides:",
+                "  - catalog",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (provider / "__init__.py").write_text(
+        """
+def register(ctx):
+    ctx.register_service("catalog", {"origin": "provider"})
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    plugins = PluginManager()
+    await plugins.discover_and_load_async(
+        [tmp_path],
+        enabled=["a-consumer", "z-provider"],
+    )
+
+    assert plugins.get_plugin("a-consumer").enabled
+    assert plugins.get_plugin("z-provider").enabled
+    module = __import__("crew_runtime_plugins.a_consumer", fromlist=["VALUE"])
+    assert module.VALUE == "provider"
+    report = plugins.startup_audit()
+    assert report.healthy
+    consumer_diagnostic = next(
+        item for item in report.features if item.feature_id == "a_consumer"
+    )
+    assert consumer_diagnostic.missing_optional == ("enhancer",)
+
+
+async def test_missing_manifest_service_waits_without_running_plugin(tmp_path):
+    plugin_dir = tmp_path / "waiting_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: waiting-plugin\nrequires:\n  - security_service\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        "CALLED = False\n\ndef register(ctx):\n    global CALLED\n    CALLED = True\n",
+        encoding="utf-8",
+    )
+    plugins = PluginManager()
+
+    await plugins.discover_and_load_async([tmp_path], enabled=["waiting-plugin"])
+
+    loaded = plugins.get_plugin("waiting-plugin")
+    assert loaded is not None and not loaded.enabled
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.WAITING
+    assert loaded.error == "missing required services: security_service"
+    assert plugins.startup_audit().as_dict()["issues"] == ["waiting_plugin"]
+    assert "crew_runtime_plugins.waiting_plugin" not in __import__("sys").modules
+
+
+async def test_late_host_service_retries_waiting_plugin(tmp_path):
+    plugin_dir = tmp_path / "late_consumer"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: late-consumer\nrequires:\n  - security_service\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+VALUE = None
+
+def register(ctx):
+    global VALUE
+    VALUE = ctx.resolve_service("security_service")
+""".lstrip(),
+        encoding="utf-8",
+    )
+    plugins = PluginManager()
+    await plugins.discover_and_load_async([tmp_path], enabled=["late-consumer"])
+    service = object()
+
+    plugins.publish_host_services({"security_service": service})
+    await plugins.retry_waiting_async()
+
+    loaded = plugins.get_plugin("late-consumer")
+    assert loaded is not None and loaded.enabled
+    assert loaded.error is None
+    module = __import__("crew_runtime_plugins.late_consumer", fromlist=["VALUE"])
+    assert module.VALUE is service
+    assert plugins.startup_audit().healthy
+
+
+async def test_plugin_cannot_publish_undeclared_service(tmp_path):
+    plugin_dir = tmp_path / "hidden_provider"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: hidden-provider\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        "def register(ctx):\n    ctx.register_service('hidden', object())\n",
+        encoding="utf-8",
+    )
+    plugins = PluginManager()
+
+    await plugins.discover_and_load_async([tmp_path], enabled=["hidden-provider"])
+
+    loaded = plugins.get_plugin("hidden-provider")
+    assert loaded is not None and not loaded.enabled
+    assert "must declare provided service 'hidden'" in str(loaded.error)
+
+
 # ---- PluginPreferencesStore ----
 
 

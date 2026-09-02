@@ -3000,12 +3000,13 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     # Plugins are discovered before CrewApp constructs the security service.
     # Publish these live dependencies afterward; plugin tools retain the shared
     # services mapping and therefore see the production authorization boundary.
-    plugins.services.update(
+    plugins.publish_host_services(
         {
             "workspace_store": workspace_store,
             "security_service": app.security_service,
         }
     )
+    plugins.retry_waiting()
     register_builtin_tools(
         registry,
         workspace_store=workspace_store,
@@ -3393,5 +3394,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     # 不注销会跨实例累积（Gateway 重启 / 测试批量建 App 时 emit 会扇出到所有失效闭包）
     app._promote_session_model_hook = _promote_session_model_on_agent_end
     hook_registry.register("agent:end", _promote_session_model_on_agent_end)
+
+    plugins.log_startup_audit()
 
     return app

@@ -224,3 +224,19 @@ def test_registry_raises_for_missing_service_and_supports_default_lookup():
     with pytest.raises(ServiceNotFoundError, match="missing"):
         registry.resolve(key)
     assert registry.get(key, default="fallback") == "fallback"
+
+
+def test_registry_lists_visible_keys_and_exact_scope_ownership():
+    registry = ServiceRegistry()
+    storage = ServiceKey[object]("storage")
+    knowledge = ServiceKey[object]("knowledge")
+    provider = _active_scope("provider")
+    activating = FeatureScope(FeatureGeneration("activating", 1))
+
+    registry.register(provider, storage, object())
+    registry.register(activating, knowledge, object())
+
+    assert registry.available_keys() == (storage,)
+    owned = registry.bindings_owned_by(activating)
+    assert [binding.key for binding in owned] == [knowledge]
+    assert not owned[0].visible

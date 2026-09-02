@@ -32,9 +32,7 @@ def _skill_body(path: Path) -> str:
 
 
 def register(ctx: Any) -> None:
-    config = ctx.services.get("config")
-    if config is None:
-        raise RuntimeError("wiki_learning 插件缺少 config 服务")
+    config = ctx.resolve_service("config")
 
     store = WikiLearningStore(config.db_path, wal_enabled=config.sqlite_wal)
     wiki_store = FileSystemWikiStore(storage_root=config.wiki.storage.resolved_root())

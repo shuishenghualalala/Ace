@@ -306,3 +306,33 @@ class ServiceRegistry:
                 ),
             )
         )
+
+    def bindings_owned_by(self, owner: FeatureScope) -> tuple[ServiceBinding[Any], ...]:
+        """Return every staged or visible service owned by one exact scope."""
+        return tuple(
+            sorted(
+                (
+                    entry.snapshot()
+                    for entry in self._entries.values()
+                    if entry.owner is owner
+                ),
+                key=lambda item: (
+                    item.key.name,
+                    item.scope_kind.value,
+                    item.scope_path.identity(item.scope_kind),
+                ),
+            )
+        )
+
+    def available_keys(
+        self,
+        scope_path: ServiceScopePath | None = None,
+    ) -> tuple[ServiceKey[Any], ...]:
+        """Return stable keys resolvable from one tenant path."""
+        path = scope_path or ServiceScopePath.global_scope()
+        keys = {address[0]: entry.key for address, entry in self._entries.items()}
+        return tuple(
+            keys[name]
+            for name in sorted(keys)
+            if self.contains(keys[name], path)
+        )

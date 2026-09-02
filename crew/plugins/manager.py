@@ -31,8 +31,18 @@ from crew.features.manager import (
     FeatureInstallContext,
     FeatureRecord,
     FeatureRuntime,
+    FeatureStartupAudit,
 )
-from crew.features.runtime import FeatureActivationError, FeatureState, RegistrationPhase
+from crew.features.dependencies import FeatureServiceDependencies
+from crew.features.runtime import (
+    FeatureActivationError,
+    FeatureGeneration,
+    FeatureScope,
+    FeatureState,
+    RegistrationPhase,
+    RegistrationToken,
+)
+from crew.features.services import ServiceKey, ServiceScopeKind, ServiceScopePath
 from crew.tools.redact import redact_sensitive_text
 from crew.tools.registry import Registry
 from crew.state.logging import get_logger
@@ -195,6 +205,26 @@ VALID_HOOKS = {
 VALID_PLUGIN_KINDS = {"standalone", "backend", "exclusive", "platform", "model-provider"}
 
 
+def _manifest_service_names(raw: dict[str, Any], name: str) -> list[str]:
+    """Read one service declaration, accepting the explicit legacy-safe alias."""
+    alias = f"{name}_services"
+    declared = raw.get(name)
+    aliased = raw.get(alias)
+    if declared is not None and aliased is not None:
+        raise ValueError(f"plugin manifest cannot declare both {name!r} and {alias!r}")
+    value = declared if declared is not None else aliased
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"plugin manifest field {name!r} must be a list of strings")
+    normalized = [item.strip() for item in value]
+    if any(not item for item in normalized):
+        raise ValueError(f"plugin manifest field {name!r} contains an empty service key")
+    if len(normalized) != len(set(normalized)):
+        raise ValueError(f"plugin manifest field {name!r} contains duplicate service keys")
+    return normalized
+
+
 @dataclass
 class PluginManifest:
     name: str
@@ -207,6 +237,9 @@ class PluginManifest:
     source: str = ""
     requires_env: list[Any] = field(default_factory=list)
     optional_env: list[Any] = field(default_factory=list)
+    requires_services: list[str] = field(default_factory=list)
+    optional_services: list[str] = field(default_factory=list)
+    provides_services: list[str] = field(default_factory=list)
     provides_tools: list[str] = field(default_factory=list)
     provides_hooks: list[str] = field(default_factory=list)
     config_schema: dict[str, Any] = field(default_factory=dict)
@@ -267,6 +300,64 @@ class PluginContext:
         phase: RegistrationPhase = RegistrationPhase.CONTRIBUTION,
     ) -> None:
         self._feature_context.register_disposer(disposer, label=label, phase=phase)
+
+    @staticmethod
+    def _service_key(key: str | ServiceKey[Any]) -> ServiceKey[Any]:
+        return key if isinstance(key, ServiceKey) else ServiceKey(str(key))
+
+    def register_service(
+        self,
+        key: str | ServiceKey[Any],
+        value: Any,
+        *,
+        scope_kind: ServiceScopeKind = ServiceScopeKind.GLOBAL,
+        scope_path: ServiceScopePath | None = None,
+    ) -> RegistrationToken:
+        """Publish one Manifest-declared service under this plugin scope."""
+        service_key = self._service_key(key)
+        if service_key.name not in self.manifest.provides_services:
+            raise ValueError(
+                f"plugin {self.manifest.name!r} must declare provided service "
+                f"{service_key.name!r} in its manifest"
+            )
+        return self._feature_context.register_service(
+            service_key,
+            value,
+            scope_kind=scope_kind,
+            scope_path=scope_path,
+        )
+
+    def resolve_service(self, key: str | ServiceKey[Any]) -> Any:
+        """Resolve one required or optional service declared by this plugin."""
+        service_key = self._service_key(key)
+        declared = {
+            *self.manifest.requires_services,
+            *self.manifest.optional_services,
+        }
+        if service_key.name not in declared:
+            raise ValueError(
+                f"plugin {self.manifest.name!r} must declare consumed service "
+                f"{service_key.name!r} in its manifest"
+            )
+        return self._feature_context.resolve_service(service_key)
+
+    def get_service(
+        self,
+        key: str | ServiceKey[Any],
+        default: Any = None,
+    ) -> Any:
+        """Resolve a declared optional service with an explicit fallback."""
+        service_key = self._service_key(key)
+        declared = {
+            *self.manifest.requires_services,
+            *self.manifest.optional_services,
+        }
+        if service_key.name not in declared:
+            raise ValueError(
+                f"plugin {self.manifest.name!r} must declare consumed service "
+                f"{service_key.name!r} in its manifest"
+            )
+        return self._feature_context.get_service(service_key, default)
 
     def register_tool(
         self,
@@ -579,8 +670,11 @@ class PluginManager:
         self._plugins: list[Plugin] = list(plugins or [])
         self.registry = registry
         # 注入给插件的共享服务（如 config / plugin_prefs），经 PluginContext.services 透传
-        self.services: dict[str, Any] = dict(services or {})
         self.feature_runtime = feature_runtime or FeatureRuntime()
+        self.services: dict[str, Any] = {}
+        self._host_scope = FeatureScope(FeatureGeneration("ace.host", 1))
+        self.publish_host_services(services or {})
+        self._host_scope.activate()
         self._hooks: dict[str, list[Callable[..., Any]]] = {}
         self._middleware: dict[str, list[Callable[..., Any]]] = {}
         # hook/middleware 的归属表（plugin_key, callback），与上面两结构平行维护，供按插件摘除
@@ -613,6 +707,69 @@ class PluginManager:
 
     def bind_registry(self, registry: Registry) -> None:
         self.registry = registry
+
+    def publish_host_services(self, services: dict[str, Any]) -> None:
+        """Publish composition-root services to both compatibility and typed views."""
+        for raw_name, value in services.items():
+            key = ServiceKey[Any](str(raw_name))
+            if key.name in self.services:
+                current = self.services[key.name]
+                if current is not value:
+                    raise ValueError(f"host service {key.name!r} is already published")
+                continue
+            existing = self.feature_runtime.services.get(key)
+            if existing is not None:
+                if existing is not value:
+                    raise ValueError(
+                        f"runtime service {key.name!r} conflicts with the host value"
+                    )
+            else:
+                self.feature_runtime.services.register(
+                    self._host_scope,
+                    key,
+                    value,
+                    label=f"service:{key.name}@host",
+                )
+            self.services[key.name] = value
+
+    def retry_waiting(self) -> None:
+        """Synchronously retry plugins whose required host services arrived later."""
+        _run_async_compat(self.retry_waiting_async())
+
+    async def retry_waiting_async(self) -> None:
+        definitions = [
+            loaded.feature_record.definition
+            for loaded in self._loaded.values()
+            if loaded.feature_record is not None
+            and loaded.feature_record.state is FeatureState.WAITING
+        ]
+        if not definitions:
+            return
+        records = await self.feature_runtime.activate_many(definitions)
+        for record in records:
+            loaded = self._loaded.get(record.definition.feature_id)
+            if loaded is not None:
+                self._apply_feature_record(loaded, record)
+
+    def startup_audit(self) -> FeatureStartupAudit:
+        """Audit every enabled candidate that entered the Feature Runtime."""
+        feature_ids = [
+            loaded.manifest.key or loaded.manifest.name
+            for loaded in self._loaded.values()
+            if loaded.feature_record is not None
+        ]
+        return self.feature_runtime.startup_audit(feature_ids)
+
+    def log_startup_audit(self) -> FeatureStartupAudit:
+        """Emit one explicit startup diagnostic for every unresolved feature."""
+        report = self.startup_audit()
+        for issue in report.issues:
+            if issue.missing_required:
+                detail = f"missing required services: {', '.join(issue.missing_required)}"
+            else:
+                detail = issue.error or f"state is {issue.state}"
+            log.error("插件启动审计失败: %s: %s", issue.feature_id, detail)
+        return report
 
     def discover_and_load(
         self,
@@ -673,6 +830,7 @@ class PluginManager:
         self._plugin_commands.clear()
         self._api_routers.clear()
         self._clear_plugin_platform_entries()
+        definitions: list[FeatureDefinition] = []
         for root in [Path(d) for d in dirs]:
             if not root.is_dir():
                 continue
@@ -696,7 +854,14 @@ class PluginManager:
                         error="not enabled",
                     )
                     continue
-                await self._load_plugin_async(manifest)
+                loaded, definition = self._prepare_feature(manifest)
+                self._loaded[lookup_key] = loaded
+                definitions.append(definition)
+
+        records = await self.feature_runtime.activate_many(definitions)
+        for record in records:
+            loaded = self._loaded[record.definition.feature_id]
+            self._apply_feature_record(loaded, record)
 
     def get_plugin(self, key: str) -> LoadedPlugin | None:
         """按 key 或 name 查已发现的插件（含未启用的）。"""
@@ -820,6 +985,9 @@ class PluginManager:
                 source=str(raw.get("source") or source),
                 requires_env=list(raw.get("requires_env") or []),
                 optional_env=list(raw.get("optional_env") or []),
+                requires_services=_manifest_service_names(raw, "requires"),
+                optional_services=_manifest_service_names(raw, "optional"),
+                provides_services=_manifest_service_names(raw, "provides"),
                 provides_tools=list(raw.get("provides_tools") or []),
                 provides_hooks=list(raw.get("provides_hooks") or []),
                 config_schema=dict(raw.get("config_schema") or raw.get("configSchema") or {}),
@@ -839,7 +1007,10 @@ class PluginManager:
         """Compatibility wrapper for callers that load one parsed manifest."""
         _run_async_compat(self._load_plugin_async(manifest))
 
-    async def _load_plugin_async(self, manifest: PluginManifest) -> None:
+    def _prepare_feature(
+        self,
+        manifest: PluginManifest,
+    ) -> tuple[LoadedPlugin, FeatureDefinition]:
         loaded = LoadedPlugin(manifest=manifest)
 
         def install(feature_context: FeatureInstallContext) -> Any:
@@ -850,8 +1021,23 @@ class PluginManager:
             return register(PluginContext(manifest, self, feature_context, loaded))
 
         owner_key = manifest.key or manifest.name
-        definition = FeatureDefinition(owner_key, install)
-        record = await self.feature_runtime.activate(definition)
+        dependencies = FeatureServiceDependencies(
+            owner_key,
+            requires=tuple(ServiceKey[Any](name) for name in manifest.requires_services),
+            optional=tuple(ServiceKey[Any](name) for name in manifest.optional_services),
+            provides=tuple(ServiceKey[Any](name) for name in manifest.provides_services),
+        )
+        return loaded, FeatureDefinition(
+            owner_key,
+            install,
+            dependencies=dependencies,
+        )
+
+    def _apply_feature_record(
+        self,
+        loaded: LoadedPlugin,
+        record: FeatureRecord,
+    ) -> None:
         loaded.feature_record = record
         loaded.enabled = record.state is FeatureState.ACTIVE
         loaded.hooks_registered = list(dict.fromkeys(loaded.hooks_registered))
@@ -860,7 +1046,9 @@ class PluginManager:
         loaded.api_routers_registered = list(dict.fromkeys(loaded.api_routers_registered))
         loaded.platforms_registered = list(dict.fromkeys(loaded.platforms_registered))
         loaded.skill_roots = list(dict.fromkeys(loaded.skill_roots))
-        if not loaded.enabled:
+        if loaded.enabled:
+            loaded.error = None
+        else:
             error = record.error
             if isinstance(error, FeatureActivationError):
                 error = error.cause
@@ -879,7 +1067,14 @@ class PluginManager:
             loaded.platforms_registered.clear()
             loaded.disposers.clear()
             loaded.skill_roots.clear()
-            log.error("加载插件失败: %s: %s", manifest.name, loaded.error)
+            log_method = log.info if record.state is FeatureState.WAITING else log.error
+            log_method("加载插件失败: %s: %s", loaded.manifest.name, loaded.error)
+
+    async def _load_plugin_async(self, manifest: PluginManifest) -> None:
+        loaded, definition = self._prepare_feature(manifest)
+        record = await self.feature_runtime.activate(definition)
+        self._apply_feature_record(loaded, record)
+        owner_key = manifest.key or manifest.name
         self._loaded[owner_key] = loaded
 
     def _iter_plugin_dirs(self, root: Path) -> list[tuple[Path, str]]:

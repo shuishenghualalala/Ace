@@ -39,7 +39,7 @@
   </ul>
 
   <h2>兼容与限制</h2>
-  <p>插件的 <code>register(ctx)</code>、全部 <code>register_*</code> 方法、Manifest 和 <code>LoadedPlugin</code> 查询仍可使用。同步构造 Ace 时行为不变；已处于事件循环的宿主应迁移到异步 API。现有 <code>ctx.services</code> 字典暂时保留，下一步再映射 required/optional Service。</p>
+  <p>插件的 <code>register(ctx)</code>、全部 <code>register_*</code> 方法、Manifest 和 <code>LoadedPlugin</code> 查询仍可使用。同步构造 Ace 时行为不变；已处于事件循环的宿主应迁移到异步 API。现有 <code>ctx.services</code> 字典暂时保留；Manifest 服务映射已由 ADR-0004 接续实现。</p>
 
   <h2>跨平台影响</h2>
   <p>生命周期只使用 Python 标准 <code>asyncio</code> 与 <code>threading</code>。同步兼容桥不依赖 Unix 信号或 fork；macOS、Linux、Windows 使用同一实现。</p>
@@ -47,7 +47,7 @@
   <h2>回退方式</h2>
   <p>该提交可整体回退到旧 PluginManager；Feature Runtime 与 Service Registry 本身没有破坏性数据变更。Browser 的业务实现、工具 schema 和用户偏好均未改变。</p>
 
-  <div class="nav"><a href="0002-scoped-service-registry.html">ADR-0002</a> · <a href="../modules/plugins.html">Feature / Plugin 模块文档</a> · <a href="../../testing/plugin-architecture-stage-1-adapter.html">测试记录</a></div>
+  <div class="nav"><a href="0002-scoped-service-registry.html">ADR-0002</a> · <a href="0004-manifest-service-startup-audit.html">ADR-0004</a> · <a href="../modules/plugins.html">Feature / Plugin 模块文档</a> · <a href="../../testing/plugin-architecture-stage-1-adapter.html">测试记录</a></div>
 </div>
 </body>
 </html>

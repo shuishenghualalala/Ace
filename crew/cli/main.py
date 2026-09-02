@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 from crew.cli import chat, content, integration, knowledge, management, security
-from crew.cli.app import DEFAULT_CLI_OWNER, CliContext, CliError, emit
+from crew.cli.app import DEFAULT_CLI_OWNER, CliContext, CliError, CliResult, emit
 
 CREW_VERSION = "0.1.0"
 
@@ -23,6 +23,7 @@ _VALUE_FLAGS = {
 _BOOL_FLAGS = {
     "--json": "json_output",
     "--quiet": "quiet",
+    "--dump-features": "dump_features",
 }
 
 
@@ -84,6 +85,43 @@ def _shell_exit_code(code: int) -> int:
     return code if 0 < code < 126 else 1
 
 
+async def _dump_features(_args: argparse.Namespace, ctx: CliContext) -> CliResult:
+    """Build the composition root, snapshot features, then release owned resources."""
+    app = ctx.app
+    try:
+        report = app.plugins.startup_audit()
+        payload = report.as_dict()
+        lines = [
+            f"Feature startup audit: {'healthy' if report.healthy else 'blocked'}"
+        ]
+        for feature in payload["features"]:
+            generation = feature["generation"] or "-"
+            line = f"{feature['id']}  {feature['state']}  {generation}"
+            missing = feature["services"]["missing_required"]
+            if missing:
+                line += f"  missing={','.join(missing)}"
+            lines.append(line)
+            lines.extend(
+                f"  - {registration['phase']}:{registration['label']} "
+                f"[{registration['state']}]"
+                for registration in feature["registrations"]
+            )
+        return CliResult(data=payload, text="\n".join(lines))
+    finally:
+        await app.shutdown()
+        ctx._app = None
+
+
+def _context_from_flags(flags: dict[str, Any]) -> CliContext:
+    return CliContext(
+        owner=str(flags.get("owner") or DEFAULT_CLI_OWNER),
+        workspace_id=str(flags.get("workspace_id") or "default"),
+        config_path=flags.get("config_path"),
+        json_output=bool(flags.get("json_output")),
+        quiet=bool(flags.get("quiet")),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     # CLI 进程默认只保留 WARNING+ 日志：INFO 级的运行时装配/PERF 噪音对命令行
     # 没有价值（REPL 里还会穿插进提示符行）。gateway 进程不受影响；
@@ -96,6 +134,13 @@ def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     try:
         flags, rest = extract_global_flags(raw)
+        if flags.get("dump_features"):
+            if rest:
+                raise CliError("--dump-features 不能与子命令同时使用")
+            ctx = _context_from_flags(flags)
+            result = _invoke(_dump_features, argparse.Namespace(), ctx)
+            emit(result, json_output=ctx.json_output, quiet=ctx.quiet)
+            return 0 if result.data["healthy"] else 1
         if not rest:
             rest = ["chat"]
         parser = build_parser()
@@ -104,13 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         if handler is None:
             parser.print_help()
             return 0
-        ctx = CliContext(
-            owner=str(flags.get("owner") or DEFAULT_CLI_OWNER),
-            workspace_id=str(flags.get("workspace_id") or "default"),
-            config_path=flags.get("config_path"),
-            json_output=bool(flags.get("json_output")),
-            quiet=bool(flags.get("quiet")),
-        )
+        ctx = _context_from_flags(flags)
         result = _invoke(handler, args, ctx)
         emit(result, json_output=ctx.json_output, quiet=ctx.quiet)
         return 0

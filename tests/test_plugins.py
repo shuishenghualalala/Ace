@@ -189,7 +189,10 @@ async def test_feishu_plugin_registers_but_hides_without_credentials(monkeypatch
     monkeypatch.delenv("FEISHU_APP_ID", raising=False)
     monkeypatch.delenv("FEISHU_APP_SECRET", raising=False)
     registry = Registry()
-    plugins = PluginManager(registry=registry)
+    plugins = PluginManager(
+        registry=registry,
+        services={"workspace_store": object(), "security_service": object()},
+    )
     plugins.discover_and_load([Path("plugins")], enabled=["feishu"])
 
     assert "feishu_doc_read" in registry.names()
@@ -321,6 +324,41 @@ def register(ctx):
     assert loaded.manifest.config_schema == {"type": "object"}
     assert loaded.manifest.ui_hints == {"color": "blue"}
     assert loaded.hooks_registered == ["custom_future_hook"]
+
+
+def test_manifest_parses_service_dependencies_and_rejects_ambiguous_aliases(tmp_path):
+    plugin_dir = tmp_path / "service_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        """
+name: service-plugin
+requires:
+  - storage
+optional_services:
+  - owner_model
+provides:
+  - knowledge
+""",
+        encoding="utf-8",
+    )
+    manager = PluginManager()
+
+    manifest = manager._read_manifest(plugin_dir, key="service_plugin", source="local")
+
+    assert manifest is not None
+    assert manifest.requires_services == ["storage"]
+    assert manifest.optional_services == ["owner_model"]
+    assert manifest.provides_services == ["knowledge"]
+
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: service-plugin\nrequires: [storage]\nrequires_services: [storage]\n",
+        encoding="utf-8",
+    )
+    assert manager._read_manifest(
+        plugin_dir,
+        key="service_plugin",
+        source="local",
+    ) is None
 
 
 def test_platform_registration_accepts_extended_kwargs(tmp_path):
