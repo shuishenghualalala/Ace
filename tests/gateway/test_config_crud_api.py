@@ -350,6 +350,58 @@ async def test_create_model_writes_env(api, tmp_path: Path, auth_headers):
 
 
 @pytest.mark.asyncio
+async def test_create_model_without_api_key_env_uses_isolated_env(api, tmp_path: Path, auth_headers):
+    """省略 api_key_env 时，新增模型不能污染已有模型的共享 key。"""
+    env_path = _owner_overlay_path(tmp_path).parent / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8") + "CREW_API_KEY=sk-existing-legacy\n",
+        encoding="utf-8",
+    )
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.post("/api/config/models", json={
+            "id": "implicit-model",
+            "base_url": "https://implicit.example.com/v1",
+            "model": "implicit-1",
+            "api_key": "sk-implicit-secret",
+        })
+
+    assert resp.status_code == 201, resp.text
+    profile = resp.json()["profile"]
+    env_name = profile["api_key_env"]
+    assert env_name.startswith("CREW_MODEL_IMPLICIT_MODEL_")
+    assert env_name.endswith("_API_KEY")
+    assert env_name != "CREW_API_KEY"
+    env_text = env_path.read_text(encoding="utf-8")
+    assert f"{env_name}=sk-implicit-secret" in env_text
+    assert "CREW_API_KEY=sk-existing-legacy" in env_text
+    assert "TEST_ALPHA_API_KEY=sk-alpha-xxx" in env_text
+    assert "TEST_BETA_API_KEY=sk-beta-xxx" in env_text
+
+
+@pytest.mark.asyncio
+async def test_owner_model_without_key_does_not_fallback_to_shared_key(api, tmp_path: Path, auth_headers):
+    """owner 私有 profile 缺 key 时，不应借用 CREW_API_KEY 的值。"""
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.post("/api/config/models", json={
+            "id": "missing-key",
+            "base_url": "https://missing.example.com/v1",
+            "model": "missing-1",
+        })
+
+    assert resp.status_code == 201, resp.text
+    env_path = _owner_overlay_path(tmp_path).parent / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8") + "CREW_API_KEY=sk-shared-legacy\n",
+        encoding="utf-8",
+    )
+    profile = api.state.crew.owner_model_profiles(OWNER_A)["missing-key"]
+    assert profile.api_key == ""
+    assert profile.has_key is False
+
+
+@pytest.mark.asyncio
 async def test_create_model_rejects_non_api_key_env(api, auth_headers, tmp_path, monkeypatch):
     """模型 API Key 写入只允许密钥变量名，避免覆盖 CREW_HOME 等运行变量。"""
     protected_home = str(tmp_path / "keep-this-home")
@@ -417,6 +469,30 @@ async def test_update_model_success(api, auth_headers):
     assert data["profile"]["id"] == "alpha"
     # 拿不到 temperature（public_dict 有），验证一下
     assert data["profile"]["temperature"] == 0.1
+
+
+@pytest.mark.asyncio
+async def test_config_marks_default_profile_owner_editable(api, auth_headers):
+    """设置页可识别默认 builtin profile 的 owner copy-on-write 能力。"""
+    default = api.state.crew.config.model_profiles["alpha"].__class__(
+        id="default",
+        name="Default",
+        api_key="",
+        api_key_env="DEFAULT_API_KEY",
+        base_url="https://api.example.com/v1",
+        model="your-model-name",
+        loaded=True,
+        builtin=True,
+    )
+    api.state.crew.config.model_profiles["default"] = default
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.get("/api/config")
+
+    assert resp.status_code == 200
+    item = next(profile for profile in resp.json()["model_profiles"] if profile["id"] == "default")
+    assert item["builtin"] is True
+    assert item["editable"] is True
 
 
 @pytest.mark.asyncio

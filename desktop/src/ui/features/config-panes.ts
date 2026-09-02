@@ -106,7 +106,7 @@ function ensureModelIntegrationView(): SettingsIntegrationView | null {
       onSelect: (id) => {
         const model = (state.config?.model_profiles ?? state.config?.models ?? [])
           .find((candidate) => candidate.id === id);
-        if (model && !model.builtin) openModelConfigModal(model);
+        if (model && (model.editable ?? !model.builtin)) openModelConfigModal(model);
       },
       onAction: (action, id) => {
         if (action === 'set-default') void setDefaultModel(id);
@@ -186,13 +186,6 @@ function setChannelFormMode(configured: boolean): void {
   document.querySelectorAll<HTMLSelectElement>('[data-channel-environment]').forEach((select) => {
     select.disabled = configured;
   });
-}
-
-function isGatewayAdmin(): boolean {
-  if (typeof state.config?.is_gateway_admin === 'boolean') {
-    return state.config.is_gateway_admin;
-  }
-  return (state.config?.model_profiles ?? []).some((p) => p.builtin);
 }
 
 function selectedModelProtocol(): 'openai' | 'anthropic' {
@@ -323,11 +316,12 @@ function fillModelForm(model?: ModelOption): void {
     const input = document.getElementById(id) as HTMLInputElement | null;
     if (input) input.readOnly = readonly;
   };
-  const builtinReadonly = !!(model?.builtin && isGatewayAdmin());
+  const modelEditable = model ? (model.editable ?? !model.builtin) : true;
+  const builtinReadonly = !modelEditable;
   set('cfg-model-id', model?.id ?? '');
   set('cfg-model-model', model?.model ?? '');
   setModelProtocol(model?.provider ?? 'openai');
-  set('cfg-model-base-url', model?.builtin ? '' : (model?.base_url ?? ''));
+  set('cfg-model-base-url', modelEditable ? (model?.base_url ?? '') : '');
   set('cfg-model-api-key', '');
   fillContextWindowSelect(model?.context_window);
   setModelCapabilities(model?.capabilities);
@@ -340,15 +334,15 @@ function fillModelForm(model?: ModelOption): void {
   const idInput = document.getElementById('cfg-model-id') as HTMLInputElement | null;
   if (idInput) idInput.disabled = !!model;
   const baseWrap = document.getElementById('cfg-model-base-url-wrap');
-  if (baseWrap) baseWrap.hidden = !!model?.builtin;
+  if (baseWrap) baseWrap.hidden = !modelEditable;
   const keyField = document.getElementById('cfg-model-api-key-wrap');
-  if (keyField) keyField.hidden = !!model?.builtin;
+  if (keyField) keyField.hidden = !modelEditable;
   const protocolField = document.getElementById('cfg-model-protocol-wrap');
-  if (protocolField) protocolField.hidden = !!model?.builtin;
+  if (protocolField) protocolField.hidden = !modelEditable;
   const contextWindowField = document.getElementById('cfg-model-context-window-wrap');
-  if (contextWindowField) contextWindowField.hidden = !!model?.builtin;
+  if (contextWindowField) contextWindowField.hidden = !modelEditable;
   const capabilitiesField = document.getElementById('cfg-model-capabilities-wrap');
-  if (capabilitiesField) capabilitiesField.hidden = !!model?.builtin;
+  if (capabilitiesField) capabilitiesField.hidden = !modelEditable;
 }
 
 /** 填充上下文窗口下拉：标准档位选中，非标准值动态加 option 承接（避免丢值）。 */
@@ -371,9 +365,9 @@ function closeModelConfigModal(): void {
   if (overlay) overlay.hidden = true;
 }
 
-/** 打开模型配置弹层（新增或编辑）。内置模型不允许打开。 */
+/** 打开模型配置弹层（新增或编辑）。不可编辑的内置模型不允许打开。 */
 export function openModelConfigModal(model?: ModelOption): void {
-  if (model?.builtin) return;
+  if (model && !(model.editable ?? !model.builtin)) return;
   const overlay = $('#model-connect-overlay') as HTMLElement | null;
   if (!overlay) return;
   fillModelForm(model);
@@ -419,7 +413,7 @@ function bindModelFormOnce(): void {
       }
       const editing = (document.getElementById('cfg-model-id') as HTMLInputElement | null)?.disabled;
       const editingModel = editing ? (state.config?.model_profiles ?? state.config?.models ?? []).find((m) => m.id === id) : undefined;
-      if (editingModel?.builtin && !isGatewayAdmin()) {
+      if (editingModel && !(editingModel.editable ?? !editingModel.builtin)) {
         notify('内置模型仅管理员可查看');
         return;
       }
@@ -530,7 +524,7 @@ export async function renderConfigModels(): Promise<void> {
         : `${model.model}${model.base_url ? ` · ${model.base_url}` : ''}`,
       status: modelStatusText(model, active),
       tone: !model.has_key ? 'danger' : active ? 'success' : model.loaded ? 'info' : 'warning',
-      selectable: !model.builtin,
+      selectable: model.editable ?? !model.builtin,
       icon: 'process-thinking',
       active,
       actions: active ? [] : [{

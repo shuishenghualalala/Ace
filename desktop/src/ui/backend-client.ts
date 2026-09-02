@@ -417,6 +417,7 @@ export interface ModelOption {
   timeout?: number;
   loaded: boolean;
   builtin?: boolean;
+  editable?: boolean;
   capabilities?: string[];
 }
 

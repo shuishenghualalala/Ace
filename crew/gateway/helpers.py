@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from crew.agent.capabilities import capability_profile_ids
 from crew.agent.external.runtime_registry import resolve_runtime_display_badge
 from crew.gateway.session_context import SessionSource, build_session_key
+from crew.state.config import is_owner_overridable_model_profile
 from crew.team.formation import (
     build_team_draft as build_team_draft,
     confirmed_formation_plan as confirmed_formation_plan,
@@ -131,13 +132,31 @@ def config_body(
     is_gateway_admin: bool = False,
 ) -> dict[str, Any]:
     """构造前端配置响应体（GET /api/config、POST /api/config/model、CRUD 共用）。"""
-    profiles = [
-        profile.public_dict()
-        for profile in crew.owner_visible_model_profiles(
-            owner_account_id,
-            include_builtin_profiles=include_builtin_profiles,
+    visible_profiles = crew.owner_visible_model_profiles(
+        owner_account_id,
+        include_builtin_profiles=include_builtin_profiles,
+    )
+
+    def _profile_dict(profile) -> dict[str, Any]:
+        data = profile.public_dict()
+        data["editable"] = (
+            not profile.builtin
+            or is_gateway_admin
+            or is_owner_overridable_model_profile(profile)
         )
-    ]
+        return data
+
+    profiles = [_profile_dict(profile) for profile in visible_profiles]
+    model_options = crew.owner_public_model_options(owner_account_id)
+    profile_by_id = {profile.id: profile for profile in crew.owner_model_profiles(owner_account_id).values()}
+    for option in model_options:
+        profile = profile_by_id.get(option.get("id"))
+        if profile is not None:
+            option["editable"] = (
+                not profile.builtin
+                or is_gateway_admin
+                or is_owner_overridable_model_profile(profile)
+            )
     active = crew.owner_default_model_profile(owner_account_id)
     return {
         "model": active.model,
@@ -145,7 +164,7 @@ def config_body(
         "base_url": active.base_url,
         "active_model_id": active.id,
         "default_model_id": active.id,
-        "models": crew.owner_public_model_options(owner_account_id),
+        "models": model_options,
         "model_profiles": profiles,
         "is_gateway_admin": is_gateway_admin,
         "wiki": {

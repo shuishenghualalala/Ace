@@ -162,6 +162,14 @@ def test_add_model_uses_defaults(cfg: Config):
     assert profile.temperature == 0.7
 
 
+def test_add_model_custom_key_does_not_fallback_to_shared_key(cfg: Config, monkeypatch):
+    monkeypatch.setenv("CREW_API_KEY", "sk-shared")
+    profile = cfg.add_model({"id": "isolated", "api_key_env": "ISOLATED_API_KEY"})
+
+    assert profile.api_key == ""
+    assert profile.has_key is False
+
+
 # ----------------------- Config.update_model -----------------------
 
 

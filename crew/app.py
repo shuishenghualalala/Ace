@@ -51,6 +51,7 @@ from crew.state.config import (
     ModelProfile,
     _build_profile_from_payload,
     is_placeholder_model_profile,
+    is_owner_overridable_model_profile,
     load_config,
     remove_env_key,
     resolve_writable_env_path,
@@ -107,6 +108,21 @@ def _validate_model_api_key_env(api_key_env: str) -> str:
     if "API_KEY" not in name.upper():
         raise ValueError(f"api_key_env 只能使用模型密钥变量名，例如 {_MODEL_API_KEY_ENV_EXAMPLES}")
     return name
+
+
+def _default_model_api_key_env(model_id: str) -> str:
+    """为未指定 ``api_key_env`` 的模型生成稳定且隔离的密钥变量名。
+
+    模型创建接口允许省略 ``api_key_env``，但不能因此把新模型的密钥写进
+    ``CREW_API_KEY``：那是历史兼容变量，多个 profile 共用时一个测试 key 就会
+    覆盖当前对话模型的真实凭据。使用可读 slug 加哈希后缀既方便排查，也避免
+    ``a-b`` 与 ``a_b`` 这类模型 id 发生变量名冲突。
+    """
+    raw = str(model_id or "").strip()
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", raw.upper()).strip("_") or "MODEL"
+    slug = slug[:32].rstrip("_") or "MODEL"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10].upper()
+    return f"CREW_MODEL_{slug}_{digest}_API_KEY"
 
 
 def _payload_bool(value: Any) -> bool:
@@ -2175,7 +2191,10 @@ class CrewApp:
         current_default_id = cfg.owner_active_model_id(owner) if owner else cfg.active_model_id
         current_default_is_placeholder = is_placeholder_model_profile(existing.get(current_default_id))
 
-        api_key_env = _validate_model_api_key_env(payload.get("api_key_env") or "CREW_API_KEY")
+        requested_api_key_env = str(payload.get("api_key_env") or "").strip()
+        api_key_env = _validate_model_api_key_env(
+            requested_api_key_env or _default_model_api_key_env(model_id)
+        )
         payload = {**payload, "api_key_env": api_key_env, "builtin": False}
         api_key = str(payload.get("api_key") or "")
         # 先写 env（让 _build_profile_from_payload 能从 os.environ 取到），再构建 profile
@@ -2222,7 +2241,7 @@ class CrewApp:
         profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
         if model_id not in profiles:
             raise KeyError(model_id)
-        if owner and profiles[model_id].builtin:
+        if owner and profiles[model_id].builtin and not is_owner_overridable_model_profile(profiles[model_id]):
             owner = ""
             profiles = cfg.model_profiles
         loaded_val = payload.get("loaded")
@@ -2257,7 +2276,9 @@ class CrewApp:
                 "context_window": payload.get("context_window", current.context_window),
                 "timeout": payload.get("timeout", current.timeout),
                 "loaded": payload.get("loaded", current.loaded),
-                "builtin": current.builtin,
+                # owner 更新 builtin default 时采用 copy-on-write，写进 owner
+                # overlay 后它就是 owner 私有 profile，不再是共享 builtin。
+                "builtin": False,
                 "capabilities": payload.get("capabilities", list(current.capabilities)),
             }
             profile = _build_profile_from_payload(model_id, merged)

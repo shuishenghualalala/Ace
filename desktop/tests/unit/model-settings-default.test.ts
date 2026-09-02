@@ -58,4 +58,33 @@ describe('设置页默认模型展示', () => {
       expect(document.querySelector<HTMLElement>('[data-integration-id="deepseek"]')?.dataset.active).toBe('true');
     });
   });
+
+  it('允许编辑 owner 可覆盖的 default profile', async () => {
+    configStore.set({
+      config: {
+        model: 'craft',
+        has_key: true,
+        base_url: '',
+        active_model_id: 'craft',
+        model_profiles: [
+          ...models,
+          {
+            id: 'default',
+            name: 'Default',
+            model: 'your-model-name',
+            has_key: false,
+            loaded: true,
+            builtin: true,
+            editable: true,
+          },
+        ],
+      },
+    });
+
+    await renderConfigModels();
+    const selectable = document.querySelector<HTMLButtonElement>(
+      '[data-integration-id="default"] [data-integration-select]',
+    );
+    expect(selectable).not.toBeNull();
+  });
 });

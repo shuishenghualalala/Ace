@@ -183,6 +183,16 @@ def is_placeholder_model_profile(profile: ModelProfile | None) -> bool:
     }
 
 
+def is_owner_overridable_model_profile(profile: ModelProfile | None) -> bool:
+    """判断 owner 是否可以在自己的 overlay 中覆盖默认 profile。
+
+    ``default`` 是首次运行时的兜底 profile，不应因为来源为 builtin 就把
+    首次配置卡死；owner 的修改写入私有 overlay，不会改动共享 config.yaml。
+    其它 builtin profile 仍保留管理员才能修改的全局语义。
+    """
+    return bool(profile and profile.builtin and profile.id == "default")
+
+
 @dataclass
 class Config:
     # --- LLM ---
@@ -1102,14 +1112,15 @@ def _build_owner_model_profile(model_id: str, raw: dict[str, Any], env_map: dict
 
 
 def _build_profile_from_payload(model_id: str, payload: dict[str, Any]) -> ModelProfile:
-    """从 CRUD payload 构建 ModelProfile（不解析 env，由调用方决定 key 来源）。
+    """从 CRUD payload 构建 ModelProfile，并读取其指定变量中的已有 key。
 
     与 _build_model_profile 的区别：后者从 yaml+env 加载；前者从用户输入构建。
-    api_key 默认空串，若调用方需要从 env 注入，自行在构建后赋值。
+    自定义变量不会回落到共享的 CREW_API_KEY，避免不同 profile 串用凭据。
     """
     api_key_env = str(payload.get("api_key_env") or "CREW_API_KEY").strip() or "CREW_API_KEY"
-    # 已存在的 env 变量沿用其值，让 update 场景保留 has_key 状态
-    api_key = _lookup_api_key(api_key_env, None, fallback_global=True)
+    # 已存在的 env 变量沿用其值，让 update 场景保留 has_key 状态；自定义变量
+    # 不得回落到 CREW_API_KEY，否则新增 profile 仍可能借用别的模型凭据。
+    api_key = _lookup_api_key(api_key_env, None, fallback_global=False)
     capabilities = _model_capabilities(payload)
     return ModelProfile(
         id=model_id,
@@ -1167,7 +1178,7 @@ def _lookup_api_key(
         local = str(env_map.get(env_name, "") or "")
         if local:
             return local
-        if env_name != "CREW_API_KEY":
+        if fallback_global and env_name != "CREW_API_KEY":
             fallback = str(env_map.get("CREW_API_KEY", "") or "")
             if fallback:
                 return fallback
