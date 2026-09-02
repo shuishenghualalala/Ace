@@ -6,7 +6,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from crew.core.runctx import current_owner_account_id
+
 from crew.gateway.auth_policy import requires_gateway_auth
 from crew.gateway.interaction_bridge import InteractionBridge, create_interaction_router
 from crew.security.models import NetworkAccess
@@ -27,11 +27,12 @@ def test_only_known_binding_routes_bypass_desktop_gateway_auth():
 
 
 def test_interaction_binding_requires_owner():
-    """没有 Owner 的 token 不能成为可调用的跨进程凭据。"""
+    """没有 Owner 的 token 不能成为可调用的跨进程凭据（owner 必填，空串拒绝）。"""
     bridge = InteractionBridge()
     bridge.configure(push_fn=lambda *_: None, gateway_url="http://127.0.0.1:8000")
 
     assert bridge.create_binding(
+        owner_account_id="",
         display_session_id="main",
         origin_session_id="main::agent",
         agent_name="Agent",
@@ -43,16 +44,14 @@ def test_interaction_binding_inherits_runtime_owner_context():
     """实际 ACP 执行器可从当前 turn 的 Owner ContextVar 建立绑定。"""
     bridge = InteractionBridge()
     bridge.configure(push_fn=lambda *_: None, gateway_url="http://127.0.0.1:8000")
-    token = current_owner_account_id.set("A:uid-a")
-    try:
-        binding = bridge.create_binding(
-            display_session_id="main",
-            origin_session_id="main::agent",
-            agent_name="Agent",
-            ttl_seconds=30,
-        )
-    finally:
-        current_owner_account_id.reset(token)
+    # owner 归一后绑定由执行器显式传 turn 的 owner（executor 读 ContextVar 后传入）
+    binding = bridge.create_binding(
+        owner_account_id="A:uid-a",
+        display_session_id="main",
+        origin_session_id="main::agent",
+        agent_name="Agent",
+        ttl_seconds=30,
+    )
 
     assert binding is not None
     assert binding.owner_account_id == "A:uid-a"

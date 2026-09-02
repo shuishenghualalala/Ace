@@ -59,6 +59,7 @@ from crew.gateway.routers.sites import create_sites_router
 from crew.gateway.routers.wiki import create_wiki_router
 from crew.gateway.routers.work import create_work_router
 from crew.gateway.ws import create_ws_router
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID, normalize_owner_account_id
 from crew.state.logging import get_logger
 
 log = get_logger("gateway")
@@ -69,12 +70,13 @@ def _register_platform_channel(
     channel_manager: ChannelManager,
     entry,
     *,
-    owner_account_id: str = "",
+    owner_account_id: str,
+    include_env: bool,
 ) -> bool:
-    owner = str(owner_account_id or "").strip()
+    owner = normalize_owner_account_id(owner_account_id)
     try:
         raw = resolved_channel_raw(crew.config, entry.name, owner)
-        pconfig = entry.build_config(raw, include_env=not bool(owner))
+        pconfig = entry.build_config(raw, include_env=include_env)
     except Exception as exc:  # noqa: BLE001 - 单个平台配置异常不应阻断其它渠道启动
         log.warning("平台 %s 配置解析失败，跳过启动: %s", entry.name, exc)
         channel_manager.record_error(entry.name, "platform config invalid", owner)
@@ -84,16 +86,13 @@ def _register_platform_channel(
         return False
     if not entry.configured(pconfig):
         hint = entry.install_hint or "请补全平台凭证或设置 enabled: false"
-        if owner:
-            log.warning(
-                "平台 %s 已由 owner=%s 启用但配置不完整，跳过启动（%s）",
-                entry.name,
-                owner,
-                hint,
-            )
-        else:
-            log.warning("平台 %s 已启用但配置不完整，跳过启动（%s）", entry.name, hint)
-            channel_manager.record_error(entry.name, "platform config incomplete", owner)
+        log.warning(
+            "平台 %s 已由 owner=%s 启用但配置不完整，跳过启动（%s）",
+            entry.name,
+            owner,
+            hint,
+        )
+        channel_manager.record_error(entry.name, "platform config incomplete", owner)
         return False
     try:
         channel = platform_registry.create_channel(entry.name, pconfig)
@@ -105,8 +104,7 @@ def _register_platform_channel(
     if hasattr(channel, "bind_app"):
         channel.bind_app(crew)
     channel_manager.register(channel, owner_account_id=owner)
-    if owner:
-        log.info("恢复 owner 绑定平台通道: %s owner=%s", entry.name, owner)
+    log.info("平台通道已归属 owner: %s owner=%s", entry.name, owner)
     return True
 
 
@@ -117,15 +115,10 @@ def _register_enabled_platform_channels(crew: CrewApp, channel_manager: ChannelM
     if bindings is not None:
         for entry in entries:
             try:
-                list_for_platform = getattr(bindings, "list_for_platform", None)
-                if callable(list_for_platform):
-                    owners = [
-                        str(row.get("owner_account_id") or "").strip()
-                        for row in list_for_platform(entry.name)
-                    ]
-                else:
-                    bound_owner = str(bindings.get_binding(entry.name) or "").strip()
-                    owners = [bound_owner] if bound_owner else []
+                owners = [
+                    str(row.get("owner_account_id") or "").strip()
+                    for row in bindings.list_for_platform(entry.name)
+                ]
             except Exception as exc:  # noqa: BLE001 - 绑定存储异常不能影响其它渠道启动
                 log.warning("读取平台绑定失败: %s: %s", entry.name, exc)
                 continue
@@ -134,10 +127,16 @@ def _register_enabled_platform_channels(crew: CrewApp, channel_manager: ChannelM
     for entry in entries:
         owners = bound_owners.get(entry.name, [])
         if owners:
+            # 显式绑定的渠道：凭证来自 owner overlay，不读进程 env
             for owner in owners:
-                _register_platform_channel(crew, channel_manager, entry, owner_account_id=owner)
+                _register_platform_channel(
+                    crew, channel_manager, entry, owner_account_id=owner, include_env=False
+                )
             continue
-        _register_platform_channel(crew, channel_manager, entry)
+        # 未绑定渠道归本机 owner（local）；env 凭证启用语义保留（决策⑦）
+        _register_platform_channel(
+            crew, channel_manager, entry, owner_account_id=LOCAL_OWNER_ACCOUNT_ID, include_env=True
+        )
 
 
 def _wire_delivery_senders(
