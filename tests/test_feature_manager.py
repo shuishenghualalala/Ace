@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from crew.features import (
     FeatureDefinition,
     FeatureDrainTimeoutError,
@@ -11,6 +13,9 @@ from crew.features import (
     FeatureServiceDependencies,
     FeatureState,
     FeatureStopPolicy,
+    FeatureUpdateError,
+    FeatureUpdateRejectedError,
+    FeatureUpdateStrategy,
     MissingProvidedServicesError,
     ServiceKey,
 )
@@ -276,3 +281,344 @@ async def test_runtime_records_restart_requirement_without_disposing_generation(
     assert record.scope is not None
     diagnostic = runtime.startup_audit().as_dict()["features"][0]
     assert diagnostic["lifecycle"]["restart_required"] is True
+
+
+async def test_replace_publishes_new_service_before_draining_old_generation():
+    runtime = FeatureRuntime()
+    provider = ServiceKey[str]("provider")
+    dependencies = FeatureServiceDependencies("provider-feature", provides=(provider,))
+
+    def definition(value: str, revision: int) -> FeatureDefinition:
+        return FeatureDefinition(
+            "provider-feature",
+            lambda context: context.register_service(provider, value),
+            dependencies=dependencies,
+            desired_config_revision=revision,
+            update_strategy=FeatureUpdateStrategy.REPLACE,
+        )
+
+    record = await runtime.activate(definition("old", 1))
+    assert record.scope is not None
+    old_scope = record.scope
+    lease = old_scope.acquire_lease("completion:old")
+
+    updating = asyncio.create_task(runtime.update(definition("new", 2)))
+    while record.generation is None or record.generation.sequence < 2:
+        await asyncio.sleep(0)
+
+    assert runtime.services.resolve(provider) == "new"
+    assert record.state is FeatureState.ACTIVE
+    assert old_scope.state is FeatureState.DRAINING
+    assert not updating.done()
+
+    lease.release()
+    result = await updating
+
+    assert result.updated
+    assert result.previous_generation == "provider-feature@g1"
+    assert result.current_generation == "provider-feature@g2"
+    assert record.desired_config_revision == 2
+    assert record.effective_config_revision == 2
+    assert record.retiring == []
+
+
+async def test_replace_install_failure_keeps_old_generation_effective():
+    runtime = FeatureRuntime()
+    provider = ServiceKey[str]("provider")
+    dependencies = FeatureServiceDependencies("provider-feature", provides=(provider,))
+    old = FeatureDefinition(
+        "provider-feature",
+        lambda context: context.register_service(provider, "old"),
+        dependencies=dependencies,
+        update_strategy=FeatureUpdateStrategy.REPLACE,
+    )
+    record = await runtime.activate(old)
+
+    def broken_install(context) -> None:
+        context.register_service(provider, "new")
+        raise RuntimeError("new config rejected")
+
+    result = await runtime.update(
+        FeatureDefinition(
+            "provider-feature",
+            broken_install,
+            dependencies=dependencies,
+            desired_config_revision=2,
+            update_strategy=FeatureUpdateStrategy.REPLACE,
+        )
+    )
+
+    assert not result.updated
+    assert isinstance(result.error, FeatureUpdateError)
+    assert runtime.services.resolve(provider) == "old"
+    assert record.generation is not None and record.generation.key == "provider-feature@g1"
+    assert record.state is FeatureState.ACTIVE
+    assert record.desired_config_revision == 2
+    assert record.effective_config_revision == 1
+    diagnostic = runtime.startup_audit().as_dict()["features"][0]
+    assert diagnostic["config"] == {"desired_revision": 2, "effective_revision": 1}
+    assert diagnostic["lifecycle"]["update_strategy"] == "replace"
+
+
+async def test_replace_timeout_tracks_retiring_generation_until_deactivation():
+    runtime = FeatureRuntime()
+    provider = ServiceKey[str]("provider")
+    dependencies = FeatureServiceDependencies("provider-feature", provides=(provider,))
+
+    def definition(value: str, revision: int) -> FeatureDefinition:
+        return FeatureDefinition(
+            "provider-feature",
+            lambda context: context.register_service(provider, value),
+            dependencies=dependencies,
+            desired_config_revision=revision,
+            drain_timeout_seconds=0.01,
+            update_strategy=FeatureUpdateStrategy.REPLACE,
+        )
+
+    record = await runtime.activate(definition("old", 1))
+    assert record.scope is not None
+    lease = record.scope.acquire_lease("completion:stuck")
+
+    result = await runtime.update(definition("new", 2))
+
+    assert result.updated
+    assert isinstance(result.error, FeatureUpdateError)
+    assert runtime.services.resolve(provider) == "new"
+    assert [item.scope.generation.key for item in record.retiring] == [
+        "provider-feature@g1"
+    ]
+    diagnostic = runtime.startup_audit().as_dict()["features"][0]
+    assert diagnostic["lifecycle"]["retiring_generations"] == [
+        "provider-feature@g1"
+    ]
+
+    with pytest.raises(FeatureUpdateRejectedError, match="still retires"):
+        await runtime.update(definition("newer", 3))
+
+    lease.release()
+    assert await runtime.deactivate("provider-feature", timeout_seconds=1)
+    assert record.retiring == []
+
+
+async def test_restart_stops_old_generation_before_installing_new_config():
+    runtime = FeatureRuntime()
+    events: list[str] = []
+
+    def definition(value: str, revision: int) -> FeatureDefinition:
+        def install(context) -> None:
+            events.append(f"install:{value}")
+            context.register_disposer(
+                lambda: events.append(f"dispose:{value}"),
+                label=f"resource:{value}",
+            )
+
+        return FeatureDefinition(
+            "exclusive",
+            install,
+            desired_config_revision=revision,
+            update_strategy=FeatureUpdateStrategy.RESTART,
+        )
+
+    record = await runtime.activate(definition("old", 1))
+    assert record.scope is not None
+    lease = record.scope.acquire_lease("exclusive:active")
+    updating = asyncio.create_task(runtime.update(definition("new", 2)))
+    while record.state is not FeatureState.DRAINING:
+        await asyncio.sleep(0)
+
+    assert events == ["install:old"]
+    assert not updating.done()
+
+    lease.release()
+    result = await updating
+
+    assert result.updated
+    assert events == ["install:old", "dispose:old", "install:new"]
+    assert record.generation is not None and record.generation.key == "exclusive@g2"
+    assert record.effective_config_revision == 2
+
+
+async def test_restart_drain_timeout_reopens_old_generation_and_same_revision_retries():
+    runtime = FeatureRuntime()
+
+    def definition(value: str, revision: int) -> FeatureDefinition:
+        return FeatureDefinition(
+            "exclusive",
+            lambda _context: None,
+            desired_config_revision=revision,
+            drain_timeout_seconds=0.01,
+            update_strategy=FeatureUpdateStrategy.RESTART,
+        )
+
+    record = await runtime.activate(definition("old", 1))
+    assert record.scope is not None
+    lease = record.scope.acquire_lease("exclusive:stuck")
+
+    timed_out = await runtime.update(definition("new", 2))
+
+    assert not timed_out.updated
+    assert record.state is FeatureState.ACTIVE
+    assert record.scope is not None
+    assert record.scope.state is FeatureState.ACTIVE
+    assert record.desired_config_revision == 2
+    assert record.effective_config_revision == 1
+
+    lease.release()
+    retried = await runtime.update(definition("new", 2))
+
+    assert retried.updated
+    assert record.effective_config_revision == 2
+
+
+async def test_restart_failure_restores_previous_config_as_new_generation():
+    runtime = FeatureRuntime()
+    provider = ServiceKey[str]("provider")
+    dependencies = FeatureServiceDependencies("exclusive", provides=(provider,))
+    installs = 0
+
+    def install_old(context) -> None:
+        nonlocal installs
+        installs += 1
+        context.register_service(provider, "old")
+
+    old = FeatureDefinition(
+        "exclusive",
+        install_old,
+        dependencies=dependencies,
+        update_strategy=FeatureUpdateStrategy.RESTART,
+    )
+    record = await runtime.activate(old)
+
+    def install_broken(_context) -> None:
+        raise RuntimeError("bind failed")
+
+    result = await runtime.update(
+        FeatureDefinition(
+            "exclusive",
+            install_broken,
+            dependencies=dependencies,
+            desired_config_revision=2,
+            update_strategy=FeatureUpdateStrategy.RESTART,
+        )
+    )
+
+    assert not result.updated
+    assert result.restored
+    assert isinstance(result.error, FeatureUpdateError)
+    assert installs == 2
+    assert runtime.services.resolve(provider) == "old"
+    assert record.state is FeatureState.ACTIVE
+    assert record.generation is not None and record.generation.key == "exclusive@g3"
+    assert record.desired_config_revision == 2
+    assert record.effective_config_revision == 1
+
+
+async def test_restart_reports_both_update_and_recovery_failure():
+    runtime = FeatureRuntime()
+    installs = 0
+
+    def install_old(_context) -> None:
+        nonlocal installs
+        installs += 1
+        if installs > 1:
+            raise RuntimeError("old config cannot recover")
+
+    old = FeatureDefinition(
+        "exclusive",
+        install_old,
+        update_strategy=FeatureUpdateStrategy.RESTART,
+    )
+    record = await runtime.activate(old)
+
+    def install_broken(_context) -> None:
+        raise RuntimeError("new config failed")
+
+    result = await runtime.update(
+        FeatureDefinition(
+            "exclusive",
+            install_broken,
+            desired_config_revision=2,
+            update_strategy=FeatureUpdateStrategy.RESTART,
+        )
+    )
+
+    assert not result.updated
+    assert not result.restored
+    assert isinstance(result.error, FeatureUpdateError)
+    assert result.error.recovery_error is not None
+    assert record.state is FeatureState.FAILED
+    assert record.desired_config_revision == 2
+    assert record.effective_config_revision == 1
+
+
+async def test_update_rejects_runtime_contract_changes():
+    runtime = FeatureRuntime()
+    await runtime.activate(
+        FeatureDefinition(
+            "stable",
+            lambda _context: None,
+            update_strategy=FeatureUpdateStrategy.RESTART,
+        )
+    )
+
+    with pytest.raises(FeatureUpdateRejectedError, match="strategy"):
+        await runtime.update(
+            FeatureDefinition(
+                "stable",
+                lambda _context: None,
+                desired_config_revision=2,
+                update_strategy=FeatureUpdateStrategy.REPLACE,
+            )
+        )
+
+
+async def test_concurrent_updates_serialize_by_feature_generation():
+    runtime = FeatureRuntime()
+    second_started = asyncio.Event()
+    second_release = asyncio.Event()
+
+    await runtime.activate(
+        FeatureDefinition(
+            "serialized",
+            lambda _context: None,
+            update_strategy=FeatureUpdateStrategy.RESTART,
+        )
+    )
+
+    async def install_second(_context) -> None:
+        second_started.set()
+        await second_release.wait()
+
+    second = asyncio.create_task(
+        runtime.update(
+            FeatureDefinition(
+                "serialized",
+                install_second,
+                desired_config_revision=2,
+                update_strategy=FeatureUpdateStrategy.RESTART,
+            )
+        )
+    )
+    await second_started.wait()
+    third = asyncio.create_task(
+        runtime.update(
+            FeatureDefinition(
+                "serialized",
+                lambda _context: None,
+                desired_config_revision=3,
+                update_strategy=FeatureUpdateStrategy.RESTART,
+            )
+        )
+    )
+    await asyncio.sleep(0)
+    assert not third.done()
+
+    second_release.set()
+    second_result, third_result = await asyncio.gather(second, third)
+
+    assert second_result.current_generation == "serialized@g2"
+    assert third_result.current_generation == "serialized@g3"
+    record = runtime.get("serialized")
+    assert record is not None
+    assert record.desired_config_revision == 3
+    assert record.effective_config_revision == 3

@@ -176,7 +176,7 @@ class _ServiceEntry(Generic[T]):
 
 
 class ServiceConflictError(CrewError):
-    """Two generations attempted to own the same service address."""
+    """Unrelated features attempted to own the same service address."""
 
 
 class ServiceNotFoundError(CrewError):
@@ -190,7 +190,7 @@ class ServiceRegistry:
     """Own and resolve services across global, workspace, user, and session scopes."""
 
     def __init__(self) -> None:
-        self._entries: dict[ServiceAddress, _ServiceEntry[Any]] = {}
+        self._entries: dict[ServiceAddress, list[_ServiceEntry[Any]]] = {}
 
     @staticmethod
     def _address(
@@ -218,17 +218,35 @@ class ServiceRegistry:
         """
         path = (scope_path or ServiceScopePath.global_scope()).at(scope_kind)
         address = self._address(key, scope_kind, path)
-        current = self._entries.get(address)
-        if current is not None:
+        current = self._entries.get(address, [])
+        conflicting = next(
+            (
+                entry
+                for entry in current
+                if entry.owner.generation.feature_id != owner.generation.feature_id
+                or entry.owner is owner
+            ),
+            None,
+        )
+        if current and owner.state is not FeatureState.ACTIVATING:
+            conflicting = conflicting or current[0]
+        if conflicting is not None:
             raise ServiceConflictError(
                 f"service {key.name!r} at {scope_kind.value}:{path.identity(scope_kind)!r} "
-                f"is already owned by {current.owner.generation.key}"
+                f"is already owned by {conflicting.owner.generation.key}"
             )
 
         entry: _ServiceEntry[T]
 
         def unregister() -> None:
-            if self._entries.get(address) is entry:
+            entries = self._entries.get(address)
+            if entries is None:
+                return
+            try:
+                entries.remove(entry)
+            except ValueError:
+                return
+            if not entries:
                 self._entries.pop(address, None)
 
         registration_label = label or f"service:{key.name}@{scope_kind.value}"
@@ -245,7 +263,7 @@ class ServiceRegistry:
             owner=owner,
             token=token,
         )
-        self._entries[address] = entry
+        self._entries.setdefault(address, []).append(entry)
         return token
 
     def resolve_binding(
@@ -256,8 +274,16 @@ class ServiceRegistry:
         """Resolve the nearest visible implementation for a tenant path."""
         path = scope_path or ServiceScopePath.global_scope()
         for scope_kind, candidate in path.resolution_order():
-            entry = self._entries.get(self._address(key, scope_kind, candidate))
-            if entry is not None and entry.visible:
+            entries = self._entries.get(self._address(key, scope_kind, candidate), ())
+            visible = [entry for entry in entries if entry.visible]
+            if visible:
+                entry = max(
+                    visible,
+                    key=lambda item: (
+                        item.owner.generation.sequence,
+                        item.owner.generation.created_at,
+                    ),
+                )
                 return cast(ServiceBinding[T], entry.snapshot())
         raise ServiceNotFoundError(
             f"service {key.name!r} is not available for scope {path!r}"
@@ -293,7 +319,11 @@ class ServiceRegistry:
         return True
 
     def bindings(self, *, include_inactive: bool = True) -> tuple[ServiceBinding[Any], ...]:
-        snapshots = (entry.snapshot() for entry in self._entries.values())
+        snapshots = (
+            entry.snapshot()
+            for entries in self._entries.values()
+            for entry in entries
+        )
         if not include_inactive:
             snapshots = (binding for binding in snapshots if binding.visible)
         return tuple(
@@ -313,7 +343,8 @@ class ServiceRegistry:
             sorted(
                 (
                     entry.snapshot()
-                    for entry in self._entries.values()
+                    for entries in self._entries.values()
+                    for entry in entries
                     if entry.owner is owner
                 ),
                 key=lambda item: (
@@ -330,7 +361,11 @@ class ServiceRegistry:
     ) -> tuple[ServiceKey[Any], ...]:
         """Return stable keys resolvable from one tenant path."""
         path = scope_path or ServiceScopePath.global_scope()
-        keys = {address[0]: entry.key for address, entry in self._entries.items()}
+        keys = {
+            address[0]: entries[0].key
+            for address, entries in self._entries.items()
+            if entries
+        }
         return tuple(
             keys[name]
             for name in sorted(keys)

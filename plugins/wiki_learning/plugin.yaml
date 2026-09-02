@@ -6,6 +6,7 @@ author: "Crew"
 kind: backend
 stop_policy: drain
 drain_timeout_seconds: 30
+update_strategy: restart
 requires:
   - config
 provides_tools:

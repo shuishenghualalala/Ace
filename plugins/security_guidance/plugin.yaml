@@ -4,6 +4,7 @@ description: "Warn when file writes or patches contain common unsafe code patter
 author: "Crew"
 kind: standalone
 stop_policy: immediate
+update_strategy: restart
 provides_hooks:
   - pre_tool_call
   - transform_tool_result

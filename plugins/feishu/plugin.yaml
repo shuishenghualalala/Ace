@@ -5,6 +5,7 @@ author: "Crew"
 kind: standalone
 stop_policy: drain
 drain_timeout_seconds: 30
+update_strategy: restart
 requires:
   - workspace_store
   - security_service

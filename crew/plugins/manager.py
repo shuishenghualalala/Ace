@@ -33,6 +33,7 @@ from crew.features.manager import (
     FeatureRecord,
     FeatureRuntime,
     FeatureStartupAudit,
+    FeatureUpdateStrategy,
 )
 from crew.features.dependencies import FeatureServiceDependencies
 from crew.features.runtime import (
@@ -248,6 +249,7 @@ class PluginManifest:
     ui_hints: dict[str, Any] = field(default_factory=dict)
     stop_policy: FeatureStopPolicy = FeatureStopPolicy.DRAIN
     drain_timeout_seconds: float | None = 30.0
+    update_strategy: FeatureUpdateStrategy = FeatureUpdateStrategy.RESTART
     path: Path | None = None
 
 
@@ -1094,6 +1096,9 @@ class PluginManager:
                 ui_hints=dict(raw.get("ui_hints") or raw.get("uiHints") or {}),
                 stop_policy=FeatureStopPolicy(raw.get("stop_policy") or "drain"),
                 drain_timeout_seconds=self._manifest_drain_timeout(raw),
+                update_strategy=FeatureUpdateStrategy(
+                    raw.get("update_strategy") or "restart"
+                ),
                 path=plugin_dir,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1135,6 +1140,7 @@ class PluginManager:
             dependencies=dependencies,
             stop_policy=manifest.stop_policy,
             drain_timeout_seconds=manifest.drain_timeout_seconds,
+            update_strategy=manifest.update_strategy,
         )
 
     def _apply_feature_record(
@@ -1151,7 +1157,7 @@ class PluginManager:
         loaded.platforms_registered = list(dict.fromkeys(loaded.platforms_registered))
         loaded.skill_roots = list(dict.fromkeys(loaded.skill_roots))
         if loaded.enabled:
-            loaded.error = None
+            loaded.error = str(record.error) if record.error else None
         else:
             error = record.error
             if isinstance(error, FeatureActivationError):

@@ -57,6 +57,12 @@ def test_config_revisions_only_publish_the_latest_desired_generation():
     assert revisions.desired_config_revision == 3
     assert revisions.effective_config_revision == 3
 
+    revisions.request(4)
+    restored = revisions.generation_for(sequence=4, config_revision=3)
+    revisions.mark_restored(restored)
+    assert revisions.desired_config_revision == 4
+    assert revisions.effective_config_revision == 3
+
 
 async def test_scope_awaits_async_cleanup_and_disposes_in_lifo_order():
     scope = FeatureScope(FeatureGeneration("browser", 1))

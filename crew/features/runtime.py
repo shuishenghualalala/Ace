@@ -128,10 +128,19 @@ class FeatureConfigRevisions:
 
     def new_generation(self, sequence: int) -> FeatureGeneration:
         """Create a generation for the configuration currently desired."""
+        return self.generation_for(
+            sequence,
+            self._desired_config_revision,
+        )
+
+    def generation_for(self, sequence: int, config_revision: int) -> FeatureGeneration:
+        """Create a generation for a validated desired or recovery revision."""
+        if not 1 <= config_revision <= self._desired_config_revision:
+            raise ValueError("generation config revision must be between one and desired")
         return FeatureGeneration(
             feature_id=self.feature_id,
             sequence=sequence,
-            desired_config_revision=self._desired_config_revision,
+            desired_config_revision=config_revision,
         )
 
     def mark_effective(self, generation: FeatureGeneration) -> None:
@@ -146,6 +155,16 @@ class FeatureConfigRevisions:
                 f"{generation.desired_config_revision}, but desired revision is "
                 f"{self._desired_config_revision}"
             )
+        self._effective_config_revision = generation.desired_config_revision
+
+    def mark_restored(self, generation: FeatureGeneration) -> None:
+        """Publish a recovery generation while retaining a newer desired revision."""
+        if generation.feature_id != self.feature_id:
+            raise ValueError(
+                f"generation {generation.key} belongs to a different feature"
+            )
+        if not 1 <= generation.desired_config_revision <= self._desired_config_revision:
+            raise ValueError("restored config revision must be between one and desired")
         self._effective_config_revision = generation.desired_config_revision
 
 
@@ -408,7 +427,10 @@ class FeatureScope:
     def stop_diagnostic(self) -> FeatureStopDiagnostic | None:
         return self._stop_diagnostic
 
-    def observe_state(self, observer: Callable[[FeatureState], None]) -> None:
+    def observe_state(
+        self,
+        observer: Callable[[FeatureState], None] | None,
+    ) -> None:
         """Mirror future scope transitions into an owning runtime record."""
         self._state_observer = observer
 
@@ -459,6 +481,26 @@ class FeatureScope:
         """Dispose a partially installed generation."""
         await self.dispose()
 
+    def begin_draining(self) -> None:
+        """Synchronously close the lease gate before an atomic registry switch."""
+        if self._state is FeatureState.DRAINING:
+            return
+        if self._state is not FeatureState.ACTIVE:
+            raise RuntimeError(
+                f"feature {self.generation.key} cannot drain while {self._state.value}"
+            )
+        self._set_state(FeatureState.DRAINING)
+
+    def resume_active(self) -> None:
+        """Reopen a timed-out update drain while all resources are still intact."""
+        if self._state is not FeatureState.DRAINING:
+            raise RuntimeError(
+                f"feature {self.generation.key} cannot resume while {self._state.value}"
+            )
+        if self._disposal_task is not None:
+            raise RuntimeError(f"feature {self.generation.key} already started disposal")
+        self._set_state(FeatureState.ACTIVE)
+
     async def stop(
         self,
         policy: FeatureStopPolicy | str = FeatureStopPolicy.DRAIN,
@@ -503,7 +545,7 @@ class FeatureScope:
             diagnostic.restart_required = True
             raise FeatureRestartRequiredError(self.generation)
 
-        self._set_state(FeatureState.DRAINING)
+        self.begin_draining()
         if policy is FeatureStopPolicy.IMMEDIATE:
             diagnostic.forced_leases = tuple(
                 lease.label for lease in self.active_leases

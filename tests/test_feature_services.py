@@ -131,12 +131,37 @@ async def test_registration_token_removes_only_its_owned_service():
     with pytest.raises(ServiceConflictError, match="first@g1"):
         registry.register(_active_scope("second", 1), key, "second")
 
+    same_feature_active = _active_scope("first", 2)
+    with pytest.raises(ServiceConflictError, match="first@g1"):
+        registry.register(same_feature_active, key, "unexpected")
+
     await first_token.dispose()
     second_scope = _active_scope("second", 1)
     registry.register(second_scope, key, "second")
 
     await first_token.dispose()
     assert registry.resolve(key) == "second"
+
+
+async def test_new_generation_is_staged_then_atomically_replaces_old_service():
+    registry = ServiceRegistry()
+    key = ServiceKey[str]("provider")
+    old_scope = _active_scope("provider-feature", 1)
+    registry.register(old_scope, key, "old")
+    new_scope = FeatureScope(FeatureGeneration("provider-feature", 2))
+    registry.register(new_scope, key, "new")
+
+    assert registry.resolve(key) == "old"
+    assert [binding.visible for binding in registry.bindings()] == [True, False]
+
+    new_scope.activate()
+    assert registry.resolve(key) == "new"
+
+    await old_scope.dispose()
+    assert registry.resolve(key) == "new"
+    assert [binding.generation.key for binding in registry.bindings()] == [
+        "provider-feature@g2"
+    ]
 
 
 def test_dependency_graph_distinguishes_required_and_optional_services():
