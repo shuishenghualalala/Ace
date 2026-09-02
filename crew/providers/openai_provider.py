@@ -26,7 +26,12 @@ from crew.core.types import (
     StreamChunk,
     ToolCall,
 )
+from crew.providers.vendors import REASONING_LEVELS, VendorCompat
 from crew.state.logging import llm_trace
+
+# 各家 reasoning 字段别名：OpenAI 兼容生态没有统一名字
+# （DeepSeek/GLM 用 reasoning_content，部分网关用 reasoning / reasoning_text）
+_REASONING_FIELDS = ("reasoning_content", "reasoning", "reasoning_text")
 
 
 _PARTIAL_STRING_KEYS = ("path", "file_path", "command", "query", "url", "name")
@@ -183,18 +188,27 @@ def _is_blank_text_message(message: Message) -> bool:
     return not (text or "").strip()
 
 
-def _messages_for_openai(messages: list[Message], *, vision: bool = True) -> list[dict[str, Any]]:
+def _messages_for_openai(
+    messages: list[Message],
+    *,
+    vision: bool = True,
+    reasoning_echo: bool = False,
+) -> list[dict[str, Any]]:
     """序列化并丢弃空白 user/system，避免历史污染导致 ChatBody validation 400。
 
     Args:
         vision: 当前模型是否支持 image_url 多模态输入。False 时会把 content_parts
             中的图片块降级为文本占位，避免纯文本模型因收到 image_url 而 400。
+        reasoning_echo: 厂商要求历史 assistant 消息携带 reasoning_content 时
+            （DeepSeek），从 Message.thinking 回填；缺失补空串。
     """
     out: list[dict[str, Any]] = []
     for m in messages:
         if _is_blank_text_message(m):
             continue
         msg = m.to_openai()
+        if reasoning_echo and m.role == "assistant":
+            msg["reasoning_content"] = m.thinking or ""
         if not vision and m.content_parts:
             # 过滤 image_url，只保留 text；无 text 时补一个占位说明，避免空 content。
             removed_image = any(
@@ -318,6 +332,49 @@ def _filter_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [m for m in messages if _is_valid_openai_message(m)]
 
 
+def _reasoning_text(obj: Any) -> str:
+    """从 SDK 对象提取 reasoning 内容，按各家字段别名依次探测。"""
+    for field_name in _REASONING_FIELDS:
+        value = getattr(obj, field_name, None)
+        if value:
+            return str(value)
+    return ""
+
+
+def _thinking_extra_body(compat: VendorCompat, reasoning_mode: str | None) -> dict[str, Any]:
+    """把统一 reasoning_mode 翻译成厂商思考参数（并入 extra_body）。
+
+    reasoning_mode：None = 不发参数（模型默认行为）；"off"/"disabled" = 关闭；
+    其余取值须是 REASONING_LEVELS 中的等级。等级先经档案映射表翻译成厂商
+    effort 值：缺项原样透传等级名，显式 None 视为该档不支持（只开思考、不发
+    effort）。模型不支持思考时 compat.thinking_format 已被档案层收成 none。
+    """
+    if compat.thinking_format == "none" or not reasoning_mode:
+        return {}
+    fmt = compat.thinking_format
+    if reasoning_mode in ("off", "disabled"):
+        if fmt in ("deepseek", "zai"):
+            return {"thinking": {"type": "disabled"}}
+        if fmt == "qwen":
+            return {"enable_thinking": False}
+        return {}
+    if reasoning_mode not in REASONING_LEVELS:
+        return {}
+    # 仅 deepseek/qwen 支持 reasoning_effort；zai 只认 thinking.type
+    effort: str | None = None
+    if compat.supports_reasoning_effort and fmt in ("deepseek", "qwen"):
+        effort = compat.thinking_level_map.get(reasoning_mode, reasoning_mode)
+    if fmt in ("deepseek", "zai"):
+        body: dict[str, Any] = {"thinking": {"type": "enabled"}}
+    elif fmt == "qwen":
+        body = {"enable_thinking": True}
+    else:
+        return {}
+    if effort is not None:
+        body["reasoning_effort"] = effort
+    return body
+
+
 class OpenAIProvider(LLMProvider):
     def __init__(
         self,
@@ -328,6 +385,7 @@ class OpenAIProvider(LLMProvider):
         max_tokens: int | None = None,
         timeout: float | httpx.Timeout = 120.0,
         vision: bool = True,
+        compat: VendorCompat | None = None,
     ) -> None:
         # 延迟导入，避免未装 openai 时整个包不可用
         from openai import AsyncOpenAI
@@ -357,8 +415,8 @@ class OpenAIProvider(LLMProvider):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.vision = vision
-        provider_hint = f"{base_url or ''} {model}".lower()
-        self._supports_thinking_control = "deepseek" in provider_hint
+        # 厂商差异开关：装配层按 crew.providers.vendors 档案传入；缺省 = 通用 OpenAI 行为
+        self._compat = compat if compat is not None else VendorCompat()
 
     async def aclose(self) -> None:
         """Close the owned SDK client exactly once, including concurrent callers."""
@@ -381,7 +439,9 @@ class OpenAIProvider(LLMProvider):
     ) -> ChatResponse:
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": _filter_messages(_messages_for_openai(messages, vision=self.vision)),
+            "messages": _filter_messages(
+                _messages_for_openai(messages, vision=self.vision, reasoning_echo=self._compat.requires_reasoning_echo)
+            ),
             "temperature": self.temperature,
         }
         effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
@@ -389,8 +449,9 @@ class OpenAIProvider(LLMProvider):
             payload["max_tokens"] = effective_max_tokens
         if response_format is not None:
             payload["response_format"] = response_format
-        if reasoning_mode == "disabled" and self._supports_thinking_control:
-            payload["extra_body"] = {"thinking": {"type": "disabled"}}
+        thinking = _thinking_extra_body(self._compat, reasoning_mode)
+        if thinking:
+            payload["extra_body"] = thinking
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -438,10 +499,8 @@ class OpenAIProvider(LLMProvider):
                 "cached_tokens": cached,
             }
 
-        # 提取推理/思考内容（DeepSeek 等模型返回 reasoning_content）
-        reasoning_content = ""
-        if hasattr(msg, "reasoning_content") and msg.reasoning_content:
-            reasoning_content = msg.reasoning_content
+        # 提取推理/思考内容（DeepSeek 等模型返回 reasoning_content，字段名按厂商有别）
+        reasoning_content = _reasoning_text(msg)
 
         llm_trace("response", {
             "session_id": session, "model": self.model, "stream": False,
@@ -470,7 +529,9 @@ class OpenAIProvider(LLMProvider):
         """流式补全，逐 token 返回增量文本。"""
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": _filter_messages(_messages_for_openai(messages, vision=self.vision)),
+            "messages": _filter_messages(
+                _messages_for_openai(messages, vision=self.vision, reasoning_echo=self._compat.requires_reasoning_echo)
+            ),
             "temperature": self.temperature,
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -480,8 +541,9 @@ class OpenAIProvider(LLMProvider):
             payload["max_tokens"] = effective_max_tokens
         if response_format is not None:
             payload["response_format"] = response_format
-        if reasoning_mode == "disabled" and self._supports_thinking_control:
-            payload["extra_body"] = {"thinking": {"type": "disabled"}}
+        thinking = _thinking_extra_body(self._compat, reasoning_mode)
+        if thinking:
+            payload["extra_body"] = thinking
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -577,10 +639,10 @@ class OpenAIProvider(LLMProvider):
                 if delta_text:
                     full_text += delta_text
 
-                # 累积 reasoning_content（DeepSeek 等）：保留增量片段供下方单独 yield
-                reasoning_delta = ""
-                if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                    reasoning_delta = delta.reasoning_content
+                # 累积 reasoning 增量（DeepSeek 等；字段名按厂商有别）：
+                # 保留增量片段供下方单独 yield
+                reasoning_delta = _reasoning_text(delta)
+                if reasoning_delta:
                     reasoning_content += reasoning_delta
                     if not reasoning_milestone_emitted:
                         reasoning_milestone_emitted = True

@@ -6,7 +6,7 @@
 <title>state · Ace 后端模块</title>
 <!--
   ============================================================================
-  模块文档模板：复制此文件 → 改名为 <module>.html → 填写各节。
+  模块文档：crew/state
   约定：每次改动某后端模块的代码，先归类到对应模块，再更新该模块文档：
     1) 若改了职责/文件/接口 → 同步对应小节
     2) 必填：在「变更记录」追加一行（日期 + 变更 + 影响面）
@@ -44,20 +44,27 @@
 <div class="wrap">
   <div class="crumb">Ace / 后端模块 / state</div>
   <h1><span class="logo">A</span>crew/state</h1>
-  <div class="sub">State 状态：配置、日志、会话、工作空间。</div>
+  <div class="sub">State 状态层：配置加载/写回、API Key 凭证库、Crew Home 与 owner 运行时目录、会话/工作区存储、日志。</div>
 
   <h2>1. 职责</h2>
   <ul>
-    <li>该模块做什么、不做什么（边界）。</li>
+    <li>持久化与配置事实来源：<code>config.yaml</code>（结构化配置，不含密钥）+ <code>.env</code>（环境变量密钥）+ <code>credentials.json</code>（模型 API Key 凭证库）。</li>
+    <li>目录布局：<code>CREW_HOME</code>（默认项目根 <code>.crew/</code>，打包环境 <code>~/.crew/</code>）与 owner 运行时 home（<code>accounts/&lt;owner&gt;/</code>）。</li>
+    <li>不做：业务逻辑、LLM 调用（装配在 <code>crew/app.py</code>）。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
-  <p>按子功能或核心流程拆解，这是本模块文档的重点。</p>
   <table>
     <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
     <tbody>
-      <tr><td><code>feature-a</code></td><td>…</td><td>已落地</td></tr>
-      <tr><td><code>feature-b</code></td><td>…</td><td>待补充</td></tr>
+      <tr><td><code>config.py</code></td><td><code>Config</code>/<code>ModelProfile</code> 加载、多模型 profile CRUD、yaml 写回（<code>persist_model_profiles</code>，写锁 + 不写密钥）、owner overlay、<code>resolve_profile_api_key</code> key 解析链。</td><td>已落地</td></tr>
+      <tr><td><code>credentials.py</code></td><td>模型 API Key 凭证库：按 profile id（owner 作用域）存取，JSON 原子替换写入，POSIX 0600；解析链第一层，环境变量路径保留为后备。</td><td>已落地</td></tr>
+      <tr><td><code>home.py</code></td><td><code>get_crew_home</code> / <code>get_owner_runtime_home</code> / <code>ensure_crew_home</code>：home 目录解析与初始化（SOUL.md/MEMORY.md 等）。</td><td>已落地</td></tr>
+      <tr><td><code>session_store.py</code> / <code>workspace_store.py</code></td><td>会话与工作区持久化（SQLite）。</td><td>已落地</td></tr>
+      <tr><td><code>session_model.py</code></td><td>Session 显式模型绑定 / pending 绑定提升。</td><td>已落地</td></tr>
+      <tr><td><code>access_control.py</code> / <code>active_owner.py</code> / <code>channel_bindings.py</code> / <code>plugin_preferences.py</code> / <code>team_member_model.py</code></td><td>访问控制配置、当前 owner 上下文、渠道绑定、插件偏好、团队成员模型。</td><td>已落地</td></tr>
+      <tr><td><code>logging.py</code></td><td><code>setup_logging</code> / <code>llm_trace</code> 结构化日志。</td><td>已落地</td></tr>
+      <tr><td><code>sqlite.py</code> / <code>_migration.py</code> / <code>models.py</code></td><td>SQLite 连接与迁移、共享数据模型。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -65,29 +72,40 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/state/xxx.py</code></td><td>…</td></tr>
+      <tr><td><code>crew/state/config.py</code></td><td>配置与模型 profile 的加载/校验/写回；key 解析链与共享 env 名覆盖拦截的数据基础。</td></tr>
+      <tr><td><code>crew/state/credentials.py</code></td><td>模型 API Key 凭证库（read/store/delete，按 profile id + owner 作用域）。</td></tr>
+      <tr><td><code>crew/state/home.py</code></td><td>CREW_HOME 与 owner 运行时目录。</td></tr>
+      <tr><td><code>tests/test_credentials_store.py</code></td><td>凭证库与 CRUD key 写路径回归（含"多模型串 key"缺陷回归）。</td></tr>
     </tbody>
   </table>
 
   <h2>4. 数据模型与接口</h2>
-  <p>对外暴露的关键类/方法、事件/消息约定、Schema。</p>
-  <pre><code># 关键签名</code></pre>
+  <p>模型 API Key 解析链（<code>resolve_profile_api_key</code>，所有 profile 构建点统一走它）：</p>
+  <pre><code>凭证库[profile_id]（owner 作用域，credentials.json）
+  → api_key_env 环境变量（env_map 优先于进程环境）
+  → （仅全局/共享层）CREW_API_KEY 兜底</code></pre>
+  <p>写路径（<code>crew/app.py</code> 模型 CRUD）：默认 <code>store_key(owner, profile_id, key)</code>；
+  显式传 <code>api_key_env</code> 才写 <code>.env</code>——当目标变量名被其它 profile 引用且已有不同旧值时，
+  必须 payload 带 <code>overwrite_shared_key: true</code> 才放行（防"所有 apikey 变成最新的 apikey"）；
+  <code>remove_model</code> 同步清理凭证库条目。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>问题 1：…</li>
-    <li>TODO：…</li>
+    <li>TODO：凭证库文件锁（当前单进程 + 原子替换足够；多进程部署出现时再引入）。</li>
+    <li>TODO：桌面端设置页展示 key 来源（凭证库 / env 变量名）。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
   <ul>
-    <li>如何在此模块上加功能（遵守契约、不跨目录）。</li>
+    <li>新增持久化配置：归 state 层新建模块；密钥类一律走凭证库/`.env`，禁止进 yaml。</li>
+    <li>owner 隔离的新存储文件放 <code>get_owner_runtime_home(owner)</code> 下，全局的放 <code>get_crew_home()</code> 下。</li>
   </ul>
 
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-09-02</td><td>新增模型 API Key 凭证库 <code>credentials.py</code>（按 profile id + owner 作用域，JSON 原子写，POSIX 0600）；<code>config.py</code> 全部 profile 构建点统一走 <code>resolve_profile_api_key</code> 解析链；模型 CRUD 默认写凭证库，显式 <code>api_key_env</code> 才写 .env 并带共享名覆盖拦截（<code>overwrite_shared_key</code>）；<code>remove_model</code> 清理凭证条目；<code>build_provider</code> 门控纳入激活 profile 的 key。修复用户反馈"配置多个模型后所有 apikey 变成最新的 apikey"。</td><td>state/config、app 模型 CRUD、LLM 装配；存量 .env 部署零迁移（解析链保留 env 路径）</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
     </tbody>
   </table>

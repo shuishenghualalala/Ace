@@ -18,6 +18,7 @@ from dotenv import dotenv_values, load_dotenv
 from crew.browser.types import BrowserConfig
 from crew.security.outbound import NetworkConfig
 from crew.state.access_control import AccessControlConfig
+from crew.state.credentials import read_stored_key
 from crew.wiki.config import WikiConfig
 
 from crew.state.logging import get_logger
@@ -427,9 +428,11 @@ class Config:
             if not profile.builtin:
                 continue
             builtin = replace(profile)
-            builtin.api_key = _lookup_api_key(
+            # 内置模型是全局共享层：key 解析走全局凭证库 + owner .env / 进程环境兜底
+            builtin.api_key = resolve_profile_api_key(
+                model_id,
                 builtin.api_key_env,
-                env_map,
+                env_map=env_map,
                 fallback_global=fallback_global,
             )
             profiles[model_id] = builtin
@@ -440,7 +443,7 @@ class Config:
             for model_id, raw in models.items():
                 if not isinstance(raw, dict):
                     continue
-                profile = _build_owner_model_profile(str(model_id), raw, env_map)
+                profile = _build_owner_model_profile(str(model_id), raw, env_map, owner_account_id or "")
                 profiles[str(model_id)] = profile
         return profiles
 
@@ -698,8 +701,8 @@ class Config:
             "builtin": profile_data.get("builtin", current.builtin),
             "capabilities": profile_data.get("capabilities", list(current.capabilities)),
         }
-        # _build_profile_from_payload 会从 os.environ[api_key_env] 取 key：
-        # - 调用方先 _apply_api_key_to_env 写入了 env → 取到新 key
+        # _build_profile_from_payload 按 key 解析链取值（凭证库 → env → 全局兜底）：
+        # - 调用方先写凭证库/env → 取到新 key
         # - api_key_env 改到不存在的变量 → 取到空串，has_key=False（反映真实状态）
         # - 什么都不改 → 取到原值（os.environ 在 load_config 时已设置）
         profile = _build_profile_from_payload(model_id, merged)
@@ -1055,7 +1058,7 @@ def _model_capabilities(raw: dict[str, Any]) -> list[str]:
 
 def _build_model_profile(model_id: str, raw: dict[str, Any]) -> ModelProfile:
     api_key_env = str(raw.get("api_key_env") or "CREW_API_KEY")
-    api_key = _lookup_api_key(api_key_env, None, fallback_global=True)
+    api_key = resolve_profile_api_key(model_id, api_key_env, fallback_global=True)
     capabilities = _model_capabilities(raw)
 
     return ModelProfile(
@@ -1078,9 +1081,20 @@ def _build_model_profile(model_id: str, raw: dict[str, Any]) -> ModelProfile:
     )
 
 
-def _build_owner_model_profile(model_id: str, raw: dict[str, Any], env_map: dict[str, str]) -> ModelProfile:
+def _build_owner_model_profile(
+    model_id: str,
+    raw: dict[str, Any],
+    env_map: dict[str, str],
+    owner_account_id: str = "",
+) -> ModelProfile:
     api_key_env = str(raw.get("api_key_env") or "CREW_API_KEY")
-    api_key = _lookup_api_key(api_key_env, env_map, fallback_global=False)
+    api_key = resolve_profile_api_key(
+        model_id,
+        api_key_env,
+        env_map=env_map,
+        fallback_global=False,
+        owner_account_id=owner_account_id,
+    )
     capabilities = _model_capabilities(raw)
     return ModelProfile(
         id=model_id,
@@ -1101,15 +1115,28 @@ def _build_owner_model_profile(model_id: str, raw: dict[str, Any], env_map: dict
     )
 
 
-def _build_profile_from_payload(model_id: str, payload: dict[str, Any]) -> ModelProfile:
-    """从 CRUD payload 构建 ModelProfile（不解析 env，由调用方决定 key 来源）。
+def _build_profile_from_payload(
+    model_id: str,
+    payload: dict[str, Any],
+    *,
+    owner_account_id: str = "",
+    env_map: dict[str, str] | None = None,
+) -> ModelProfile:
+    """从 CRUD payload 构建 ModelProfile。
 
     与 _build_model_profile 的区别：后者从 yaml+env 加载；前者从用户输入构建。
-    api_key 默认空串，若调用方需要从 env 注入，自行在构建后赋值。
+    key 走 resolve_profile_api_key 解析链（凭证库 → env → 全局兜底）：
+    - 全局作用域（owner_account_id 为空）：env 兜底 CREW_API_KEY，与存量行为一致；
+    - owner 作用域：env_map 为该 owner 的 .env（写入不同步进程环境），无全局兜底。
     """
     api_key_env = str(payload.get("api_key_env") or "CREW_API_KEY").strip() or "CREW_API_KEY"
-    # 已存在的 env 变量沿用其值，让 update 场景保留 has_key 状态
-    api_key = _lookup_api_key(api_key_env, None, fallback_global=True)
+    api_key = resolve_profile_api_key(
+        model_id,
+        api_key_env,
+        env_map=env_map,
+        fallback_global=not bool(owner_account_id),
+        owner_account_id=owner_account_id,
+    )
     capabilities = _model_capabilities(payload)
     return ModelProfile(
         id=model_id,
@@ -1177,6 +1204,30 @@ def _lookup_api_key(
     if not value and env_name != "CREW_API_KEY" and fallback_global:
         value = os.getenv("CREW_API_KEY", "") or ""
     return value
+
+
+def resolve_profile_api_key(
+    profile_id: str,
+    api_key_env: str,
+    env_map: dict[str, str] | None = None,
+    *,
+    fallback_global: bool,
+    owner_account_id: str = "",
+) -> str:
+    """模型 API Key 解析链（单一事实来源，所有 profile 构建点都走这里）。
+
+    凭证库[profile_id]（owner 作用域，见 crew.state.credentials）
+    → api_key_env 环境变量（env_map 优先于进程环境）
+    → fallback_global 时回落 CREW_API_KEY。
+
+    凭证库条目由 CRUD 写路径维护：默认按 profile id 存储，从结构上避免
+    "多模型共用一个环境变量名、新 key 覆盖旧 key"的串 key 问题；环境变量
+    路径完整保留，存量 .env 部署零迁移。
+    """
+    stored = read_stored_key(owner_account_id, profile_id)
+    if stored:
+        return stored
+    return _lookup_api_key(api_key_env, env_map, fallback_global=fallback_global)
 
 
 def _load_env_map(env_path: Path) -> dict[str, str]:

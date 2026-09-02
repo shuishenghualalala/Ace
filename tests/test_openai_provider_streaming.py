@@ -10,7 +10,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from crew.app import build_provider_for_profile
 from crew.providers.openai_provider import OpenAIProvider, _merge_tool_argument_fragment
+from crew.state.config import ModelProfile
 
 pytestmark = pytest.mark.asyncio
 
@@ -75,10 +77,8 @@ async def test_stream_emits_ready_tool_call_per_index(monkeypatch):
 
 
 async def test_chat_maps_structured_non_reasoning_options_for_deepseek(monkeypatch):
-    p = OpenAIProvider(
-        api_key="sk-test",
-        base_url="https://api.deepseek.com",
-        model="deepseek-v4-flash",
+    p = build_provider_for_profile(
+        ModelProfile(id="ds", api_key="sk-test", provider="deepseek", model="deepseek-v4-flash")
     )
     seen = {}
 

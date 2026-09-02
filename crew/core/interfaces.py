@@ -53,6 +53,10 @@ class LLMProvider(ABC):
 
         ``response_format`` 和 ``reasoning_mode`` 是结构化短调用的可选能力；不支持的
         provider 可以忽略它们，调用方会在兼容层降级到普通 JSON 提示。
+
+        ``reasoning_mode`` 取值：None = 模型默认行为；"off"/"disabled" = 关闭思考；
+        其余为思考等级（minimal/low/medium/high/xhigh/max），由厂商档案
+        （crew.providers.vendors）映射为各家专属参数，不支持的档位被忽略。
         """
         raise NotImplementedError
 

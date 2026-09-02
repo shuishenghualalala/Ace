@@ -6,7 +6,7 @@
 <title>providers · Ace 后端模块</title>
 <!--
   ============================================================================
-  模块文档模板：复制此文件 → 改名为 <module>.html → 填写各节。
+  模块文档：crew/providers
   约定：每次改动某后端模块的代码，先归类到对应模块，再更新该模块文档：
     1) 若改了职责/文件/接口 → 同步对应小节
     2) 必填：在「变更记录」追加一行（日期 + 变更 + 影响面）
@@ -44,20 +44,23 @@
 <div class="wrap">
   <div class="crumb">Ace / 后端模块 / providers</div>
   <h1><span class="logo">A</span>crew/providers</h1>
-  <div class="sub">Provider 模型：隔离模型厂商 SDK，连接 OpenAI 兼容端点。</div>
+  <div class="sub">Provider 层：把内核 Message/工具 schema 翻译成具体厂商 API，隔离厂商 SDK 与 wire 协议差异。</div>
 
   <h2>1. 职责</h2>
   <ul>
-    <li>该模块做什么、不做什么（边界）。</li>
+    <li>实现 <code>crew.core.interfaces.LLMProvider</code>（<code>chat</code> / <code>stream_chat</code>），负责"翻译"：内核 Message ↔ 厂商 wire 格式，不掺业务逻辑。</li>
+    <li>维护厂商档案表（<code>vendors.py</code>）：把 OpenAI/Anthropic 两种 wire 协议之下的厂商专属差异收口成显式数据。</li>
+    <li>不做：会话管理、重试策略（属 agent/executor 层）、工具执行。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
-  <p>按子功能或核心流程拆解，这是本模块文档的重点。</p>
   <table>
     <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
     <tbody>
-      <tr><td><code>feature-a</code></td><td>…</td><td>已落地</td></tr>
-      <tr><td><code>feature-b</code></td><td>…</td><td>待补充</td></tr>
+      <tr><td><code>openai_provider</code></td><td>OpenAI Chat Completions 兼容 Provider（openai SDK + httpx）。base_url 可指向任意兼容端点；工具调用增量拼装与流式提前派发；reasoning 字段别名解析（reasoning_content / reasoning / reasoning_text）；厂商思考参数（extra_body）按 compat 开关注入；DeepSeek 式 assistant 消息 reasoning_content 回填。</td><td>已落地</td></tr>
+      <tr><td><code>anthropic_provider</code></td><td>Anthropic Messages API Provider（httpx 直连）。base_url 覆盖后同样服务走 Anthropic 协议的厂商端点（Kimi For Coding、MiniMax）。</td><td>已落地</td></tr>
+      <tr><td><code>vendors（厂商档案）</code></td><td>厂商注册表：<code>VendorProfile</code>（协议 / base_url / api_key_env / 模型目录）+ <code>VendorCompat</code>（思考参数格式、reasoning_effort 支持、回传要求、等级映射）。收录 DeepSeek、ZAI（全球/CN coding 端点）、Moonshot（全球/CN）、Kimi For Coding（Anthropic 协议）、MiniMax（全球/CN，Anthropic 协议）、Qwen Token Plan。</td><td>已落地</td></tr>
+      <tr><td><code>ssl_context</code></td><td>进程级共享 SSLContext（cadata 一次性加载），所有 provider 的 httpx/openai 客户端共用，避免 cacert.pem 病态微读拖慢启动。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -65,29 +68,48 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/providers/xxx.py</code></td><td>…</td></tr>
+      <tr><td><code>crew/providers/openai_provider.py</code></td><td>OpenAI 兼容 Provider；<code>_thinking_extra_body()</code> 把统一 reasoning_mode 翻译成厂商思考参数；<code>_messages_for_openai(reasoning_echo=)</code> 负责回传要求。</td></tr>
+      <tr><td><code>crew/providers/anthropic_provider.py</code></td><td>Anthropic Messages Provider（含 prompt cache_control 标注）。</td></tr>
+      <tr><td><code>crew/providers/vendors.py</code></td><td>厂商档案表 + 解析函数（<code>resolve_vendor</code> / <code>match_vendor</code> / <code>compat_for_model</code>）。</td></tr>
+      <tr><td><code>crew/providers/ssl_context.py</code></td><td>共享 SSLContext 单例。</td></tr>
+      <tr><td><code>tests/test_vendor_profiles.py</code></td><td>档案表、compat 翻译、payload 组装、装配默认值的离线单测。</td></tr>
     </tbody>
   </table>
 
   <h2>4. 数据模型与接口</h2>
-  <p>对外暴露的关键类/方法、事件/消息约定、Schema。</p>
-  <pre><code># 关键签名</code></pre>
+  <p>LLMProvider 契约（<code>crew/core/interfaces.py</code>）：<code>reasoning_mode</code> 取值 None = 模型默认；<code>"off"/"disabled"</code> = 关闭思考；<code>minimal/low/medium/high/xhigh/max</code> = 思考等级，由档案映射为厂商参数。</p>
+  <pre><code>VendorProfile:  id / name / protocol("openai"|"anthropic") / base_url / api_key_env
+                / models: tuple[VendorModel] / compat: VendorCompat
+VendorModel:    id / reasoning / vision / context_window / max_tokens / thinking_level_map
+VendorCompat:   thinking_format("none"|"deepseek"|"zai"|"qwen")
+                / supports_reasoning_effort / requires_reasoning_echo / thinking_level_map
+
+resolve_vendor(provider_id, base_url, model)   # id 精确匹配 > host 匹配 > 模型 id 匹配
+compat_for_model(vendor, model_id)             # 填入等级映射；不支持思考的模型收掉思考参数</code></pre>
+  <p>装配（<code>crew/app.py</code>）：<code>provider_id</code> 写厂商 id（如 <code>deepseek</code>）即按档案装配——base_url / API key（档案默认环境变量，如 <code>DEEPSEEK_API_KEY</code>）/ vision（模型目录标记）取档案默认值，用户显式配置优先。通用 <code>openai</code>/<code>anthropic</code> 配置按 base_url host / 模型 id 兜底识别厂商（host 匹配不受协议过滤，URL 即端点身份；模型 id 匹配仅在同名协议厂商内，避免协议劫持）；未知 id 仍抛 <code>ValueError</code>。</p>
+  <pre><code># config.yaml 示例：env 里放 DEEPSEEK_API_KEY 即可，无需填 base_url
+provider: deepseek
+model: deepseek-reasoner</code></pre>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>问题 1：…</li>
-    <li>TODO：…</li>
+    <li>档案里的模型目录为 models.dev 快照，未收录的模型字段留空（宁缺勿猜）；后续可做定期刷新。</li>
+    <li>思考等级映射目前仅 Qwen3.8 系列有模型级映射，其余厂商原样透传等级名。</li>
+    <li>TODO：token/成本统计（档案已具备字段位，未接入 usage 归一化）。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
   <ul>
-    <li>如何在此模块上加功能（遵守契约、不跨目录）。</li>
+    <li>新增厂商：在 <code>vendors.py</code> 的 <code>VENDORS</code> 加一条 <code>VendorProfile</code>（声明顺序 = 自动识别优先级）。</li>
+    <li>新增厂商差异维度：先在 <code>VendorCompat</code> 加字段并给默认值（默认 = 通用 OpenAI 行为），再让 <code>openai_provider</code> 消费该开关；不要在 wire 层新增对 URL/模型名的字符串嗅探。</li>
+    <li>新增协议实现：新建 Provider 类实现 <code>LLMProvider</code>，在 <code>crew/app.py</code> 的 <code>_provider_class</code> 注册。</li>
   </ul>
 
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-09-02</td><td>新增厂商档案注册表 <code>vendors.py</code>（9 家厂商 + 模型目录 + compat 开关）；<code>openai_provider</code> 按 compat 注入思考参数、reasoning 字段别名、DeepSeek reasoning_content 回传，移除"URL/模型名含 deepseek"字符串嗅探；<code>app.py</code> 装配支持 <code>provider: &lt;厂商id&gt;</code>（base_url / 环境变量 key / vision 档案默认值）；新增 <code>tests/test_vendor_profiles.py</code>（40 例）与 <code>tests/test_model_binding_providers.py</code>（5 例，覆盖会话绑定 / wiki / 团队的 provider 组装链路）。</td><td>providers、app 装配、LLMProvider.reasoning_mode 取值扩展（向后兼容）；custom/存量配置行为不变（DeepSeek 端点经档案兜底识别后行为等价）</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
     </tbody>
   </table>

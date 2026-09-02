@@ -12,6 +12,7 @@ import asyncio
 import json
 import hashlib
 import inspect
+import os
 import re
 import sys
 import time
@@ -40,6 +41,7 @@ from crew.plugins.builtin import LoggingPlugin
 from crew.plugins.manager import PluginManager
 from crew.providers.anthropic_provider import AnthropicProvider
 from crew.providers.openai_provider import OpenAIProvider
+from crew.providers.vendors import VendorProfile, compat_for_model, resolve_vendor
 from crew.security.approvals import ApprovalManager
 from crew.security.audit import AuditEvent, SQLiteSecurityAudit
 from crew.security.context import SecurityContext
@@ -56,6 +58,7 @@ from crew.state.config import (
     resolve_writable_env_path,
     write_env_key,
 )
+from crew.state.credentials import delete_stored_key, store_key
 from crew.state.home import ensure_crew_home
 from crew.agent.skills import configure_skill_filter
 from crew.state.logging import get_logger, setup_logging
@@ -2353,6 +2356,45 @@ class CrewApp:
         log.info("已写入 API Key 到 .env (var=%s, file=%s)", api_key_env, env_path)
         return str(env_path)
 
+    def _assert_shared_env_key_safe(
+        self,
+        api_key_env: str,
+        api_key: str,
+        *,
+        exclude_profile_id: str,
+        owner_account_id: str,
+        overwrite: bool = False,
+    ) -> None:
+        """显式写共享 env 名前的拦截（凭证库路径不经过这里，无此问题）。
+
+        多个 profile 引用同一个 api_key_env 是合法场景（同厂商共用一个 key）；
+        但带新 key 覆盖一个"被其它 profile 引用且已有不同旧值"的变量名时，
+        必须显式确认（payload 带 overwrite_shared_key: true），否则静默改掉
+        其它模型的 key——即用户反馈的"所有 apikey 变成最新的 apikey"。
+        """
+        cfg = self.config
+        profiles = self.owner_model_profiles(owner_account_id) if owner_account_id else cfg.model_profiles
+        others = sorted(
+            pid
+            for pid, profile in profiles.items()
+            if pid != exclude_profile_id and profile.api_key_env == api_key_env
+        )
+        if not others:
+            return
+        env_map = cfg.owner_env_map(owner_account_id)
+        current = env_map.get(api_key_env, "") or os.environ.get(api_key_env, "")
+        if not current or current == api_key:
+            return
+        if overwrite:
+            log.warning("覆盖共享 API Key env=%s，同时影响模型=%s", api_key_env, "、".join(others))
+            return
+        raise ValueError(
+            f"环境变量 {api_key_env} 同时被其它模型引用（{'、'.join(others)}），"
+            "写入新 key 会一起改掉它们的 key。请为该模型改用独立的 api_key_env，"
+            "或去掉 api_key_env 让 key 存入凭证库，或在请求中带 "
+            "overwrite_shared_key: true 明确覆盖。"
+        )
+
     def add_model(self, payload: dict, *, owner_account_id: str = "") -> ModelProfile:
         """新增模型 profile 并持久化。
 
@@ -2378,19 +2420,37 @@ class CrewApp:
         current_default_id = cfg.owner_active_model_id(owner) if owner else cfg.active_model_id
         current_default_is_placeholder = is_placeholder_model_profile(existing.get(current_default_id))
 
+        explicit_env = bool(str(payload.get("api_key_env") or "").strip())
+        overwrite_shared_key = _payload_bool(payload.get("overwrite_shared_key"))
+        payload = {k: v for k, v in payload.items() if k != "overwrite_shared_key"}
         api_key_env = _validate_model_api_key_env(payload.get("api_key_env") or "CREW_API_KEY")
         payload = {**payload, "api_key_env": api_key_env, "builtin": False}
         api_key = str(payload.get("api_key") or "")
-        # 先写 env（让 _build_profile_from_payload 能从 os.environ 取到），再构建 profile
+        # key 默认写入凭证库（按 profile id，见 crew.state.credentials），不碰共享
+        # env 名；显式传 api_key_env 表示用户要用环境变量管理 → 写 .env（带拦截）。
         if api_key:
-            self._apply_api_key_to_env(
-                api_key_env,
-                api_key,
-                owner_account_id=owner_account_id,
-            )
+            if explicit_env:
+                self._assert_shared_env_key_safe(
+                    api_key_env,
+                    api_key,
+                    exclude_profile_id=model_id,
+                    owner_account_id=owner_account_id,
+                    overwrite=overwrite_shared_key,
+                )
+                self._apply_api_key_to_env(
+                    api_key_env,
+                    api_key,
+                    owner_account_id=owner_account_id,
+                )
+            else:
+                store_key(owner_account_id, model_id, api_key)
         if owner:
-            profile = _build_profile_from_payload(model_id, payload)
-            profile.api_key = api_key or cfg.owner_env_map(owner).get(api_key_env, "")
+            profile = _build_profile_from_payload(
+                model_id,
+                payload,
+                owner_account_id=owner,
+                env_map=cfg.owner_env_map(owner),
+            )
             profiles = cfg.owner_model_profiles(owner)
             profiles[model_id] = profile
             activate_new_model = bool(
@@ -2433,6 +2493,9 @@ class CrewApp:
         if active_model_id == model_id and loaded_val is not None and not _payload_bool(loaded_val):
             raise ValueError("当前激活模型不能设为未加载，请先切换到其它已加载模型")
 
+        explicit_env = bool(str(payload.get("api_key_env") or "").strip())
+        overwrite_shared_key = _payload_bool(payload.get("overwrite_shared_key"))
+        payload = {k: v for k, v in payload.items() if k != "overwrite_shared_key"}
         api_key_env = _validate_model_api_key_env(
             payload.get("api_key_env") or profiles[model_id].api_key_env
         )
@@ -2440,12 +2503,30 @@ class CrewApp:
             payload = {**payload, "api_key_env": api_key_env}
         payload = {**payload, "builtin": profiles[model_id].builtin}
         api_key = str(payload.get("api_key") or "")
-        if api_key:
+        # key 默认写凭证库；显式传 api_key_env 表示切到环境变量管理 → 写 .env（带
+        # 拦截）并清除该 profile 的凭证库条目，避免旧 store 值反过来遮蔽 env。
+        env_name_changed = (
+            "api_key_env" in payload
+            and str(payload.get("api_key_env") or "").strip() != profiles[model_id].api_key_env
+        )
+        if api_key and explicit_env:
+            self._assert_shared_env_key_safe(
+                api_key_env,
+                api_key,
+                exclude_profile_id=model_id,
+                owner_account_id=owner_account_id,
+                overwrite=overwrite_shared_key,
+            )
             self._apply_api_key_to_env(
                 api_key_env,
                 api_key,
                 owner_account_id=owner_account_id,
             )
+            delete_stored_key(owner_account_id, model_id)
+        elif api_key:
+            store_key(owner_account_id, model_id, api_key)
+        elif explicit_env and env_name_changed:
+            delete_stored_key(owner_account_id, model_id)
         if owner:
             current = profiles[model_id]
             merged = {
@@ -2463,11 +2544,12 @@ class CrewApp:
                 "builtin": current.builtin,
                 "capabilities": payload.get("capabilities", list(current.capabilities)),
             }
-            profile = _build_profile_from_payload(model_id, merged)
-            if api_key:
-                profile.api_key = api_key
-            else:
-                profile.api_key = cfg.owner_env_map(owner).get(profile.api_key_env, "")
+            profile = _build_profile_from_payload(
+                model_id,
+                merged,
+                owner_account_id=owner,
+                env_map=cfg.owner_env_map(owner),
+            )
             profiles[model_id] = profile
             cfg.persist_owner_model_profiles(owner, profiles, active_model_id=cfg.owner_active_model_id(owner))
             self.agents.drop_owner(owner)
@@ -2536,6 +2618,8 @@ class CrewApp:
             removed = cfg.remove_model(model_id)  # 内部校验"最后一个"
             if not any(profile.api_key_env == removed.api_key_env for profile in cfg.model_profiles.values()):
                 remove_env_key(resolve_writable_env_path(owner_account_id), removed.api_key_env)
+        # 删除模型同时清理凭证库条目（owner 重定向后 owner 变量为实际作用域）
+        delete_stored_key(owner, model_id)
         switched_to: str | None = None
         if active_model_id == model_id:
             # 按 id 字典序切到剩余的第一个，行为可预测
@@ -2881,12 +2965,68 @@ class CrewApp:
                 current_push_fn.reset(token)
 
 
+def _vendor_llm_key(api_key: str, vendor: VendorProfile | None) -> str:
+    """配置的 api_key 优先；厂商档案的默认环境变量兜底。"""
+    if api_key:
+        return api_key
+    if vendor is not None:
+        return os.environ.get(vendor.api_key_env, "")
+    return ""
+
+
+def _construct_llm_provider(
+    *,
+    provider_id: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    temperature: float,
+    max_tokens: int | None,
+    timeout: float,
+    vision: bool,
+) -> LLMProvider:
+    """装配 LLM Provider。
+
+    provider id 命中厂商档案（crew.providers.vendors）时：base_url、API key
+    （档案默认环境变量）、vision 取档案默认值，用户显式配置优先；OpenAI 协议
+    厂商按模型修正 compat 后传入。未命中走通用 openai/anthropic，未知 id
+    由 _provider_class 抛 ValueError。
+    """
+    vendor = resolve_vendor(provider_id, base_url, model)
+    api_key = _vendor_llm_key(api_key, vendor)
+    if vendor is not None:
+        base_url = base_url or vendor.base_url
+        vm = vendor.model(model)
+        vision = vision or bool(vm and vm.vision)
+        common = {
+            "api_key": api_key,
+            "base_url": base_url or None,
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "timeout": timeout,
+            "vision": vision,
+        }
+        if vendor.protocol == "openai":
+            return OpenAIProvider(compat=compat_for_model(vendor, model), **common)
+        return AnthropicProvider(**common)
+    return _provider_class(provider_id)(
+        api_key=api_key,
+        base_url=base_url or None,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        vision=vision,
+    )
+
+
 def build_provider_for_profile(profile: ModelProfile, stream_read_timeout: float | None = None) -> LLMProvider:
     """按指定 ModelProfile 直接创建 Provider（fallback 用，不改全局激活模型）。"""
-    provider_cls = _provider_class(profile.provider)
-    return provider_cls(
+    return _construct_llm_provider(
+        provider_id=profile.provider,
         api_key=profile.api_key,
-        base_url=profile.base_url or None,
+        base_url=profile.base_url,
         model=profile.model,
         temperature=profile.temperature,
         max_tokens=profile.max_tokens,
@@ -2897,11 +3037,16 @@ def build_provider_for_profile(profile: ModelProfile, stream_read_timeout: float
 
 def build_provider(cfg: Config) -> LLMProvider:
     """按当前激活模型配置创建 Provider。"""
-    if cfg.has_llm_key:
-        provider_cls = _provider_class(cfg.provider)
-        provider: LLMProvider = provider_cls(
-            api_key=cfg.api_key,
-            base_url=cfg.base_url or None,
+    vendor = resolve_vendor(cfg.provider, cfg.base_url, cfg.model)
+    # 激活 profile 的 key 已按解析链（凭证库 → env）解析完毕；启动路径的
+    # cfg.api_key 未必同步过，门与入参都纳入 profile key，避免凭证库配置
+    # 因为顶层 api_key 为空而误落 FakeProvider。
+    active_profile_key = cfg.active_model.api_key
+    if cfg.has_llm_key or active_profile_key or bool(vendor and os.environ.get(vendor.api_key_env)):
+        provider: LLMProvider = _construct_llm_provider(
+            provider_id=cfg.provider,
+            api_key=cfg.api_key or active_profile_key,
+            base_url=cfg.base_url,
             model=cfg.model,
             temperature=cfg.temperature,
             max_tokens=cfg.max_tokens,
