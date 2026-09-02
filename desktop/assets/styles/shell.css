@@ -96,7 +96,7 @@
   position: relative;
   grid-column: 1 / -1;
   grid-row: 1 / -1;
-  grid-template-columns: var(--mw-app-rail-width) 260px minmax(0, 1fr);
+  grid-template-columns: var(--mw-app-rail-width) var(--mw-app-context-width, 260px) 5px minmax(0, 1fr);
   grid-template-rows: 40px minmax(0, 1fr);
 }
 
@@ -137,8 +137,44 @@
   grid-row: 2;
 }
 
-.mw-app-page-outlet {
+.mw-app-context__sash {
+  position: relative;
+  z-index: 3;
+  display: block;
+  width: 16px;
   grid-column: 3;
+  grid-row: 2;
+  align-self: stretch;
+  justify-self: center;
+  margin: 0 -6px;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.mw-app-context__sash::after {
+  position: absolute;
+  inset: 0 auto 0 50%;
+  width: 4px;
+  border-radius: var(--mw-radius-full);
+  background: transparent;
+  content: '';
+  transform: translateX(-50%);
+  transition: var(--mw-transition-interactive);
+}
+
+.mw-app-context__sash:hover::after,
+.mw-app-context__sash.is-dragging::after,
+.mw-app-context__sash:focus-visible::after {
+  background: var(--mw-action-primary);
+}
+
+.mw-app-context__sash:focus-visible {
+  outline: 0;
+}
+
+.mw-app-page-outlet {
+  grid-column: 4;
   grid-row: 2;
 }
 
@@ -146,6 +182,11 @@
   .mw-app-page-outlet,
 .mw-application-shell[data-navigation-collapsed='true'] .mw-app-page-outlet {
   grid-column: 2;
+}
+
+.mw-application-shell__body.mw-shell-template[data-has-context='false'] .mw-app-context__sash,
+.mw-application-shell[data-navigation-collapsed='true'] .mw-app-context__sash {
+  display: none;
 }
 
 .mw-app-navigation {
@@ -457,6 +498,11 @@
   overflow: auto;
 }
 
+body.mw-app-context-resizing {
+  user-select: none;
+  cursor: col-resize;
+}
+
 .mw-assistant-context,
 .mw-app-page-outlet > #renderer-legacy-outlet,
 .mw-app-page-outlet .main-content {
@@ -508,7 +554,7 @@
 
   .mw-application-shell__body.mw-shell-template,
   .mw-application-shell[data-product-mode='work'] .mw-application-shell__body {
-    grid-template-columns: var(--mw-app-rail-width-compact) 240px minmax(0, 1fr);
+    grid-template-columns: var(--mw-app-rail-width-compact) var(--mw-app-context-width, 240px) 5px minmax(0, 1fr);
   }
 
   /* 无上下文栏的页面（主对话以外的页面 has-context=false）也要收成紧凑栏——

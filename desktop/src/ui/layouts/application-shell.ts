@@ -19,6 +19,36 @@ const PRODUCT_LABEL: Record<ProductMode, string> = {
   work: 'Crew 办公助手',
 };
 
+const APP_CONTEXT_WIDTH_KEY = 'crew.desktop.appContextWidth.v1';
+const APP_CONTEXT_DEFAULT_WIDTH = 260;
+const APP_CONTEXT_MIN_WIDTH = 220;
+const APP_CONTEXT_MAX_WIDTH = 480;
+
+function clampAppContextWidth(width: number): number {
+  if (!Number.isFinite(width)) return APP_CONTEXT_DEFAULT_WIDTH;
+  const viewportCap = Math.max(APP_CONTEXT_MIN_WIDTH, Math.floor(window.innerWidth * 0.45));
+  return Math.max(APP_CONTEXT_MIN_WIDTH, Math.min(APP_CONTEXT_MAX_WIDTH, viewportCap, Math.round(width)));
+}
+
+function loadAppContextWidth(storage: Storage): number {
+  try {
+    const raw = storage.getItem(APP_CONTEXT_WIDTH_KEY);
+    const parsed = raw == null ? Number.NaN : Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? clampAppContextWidth(parsed) : APP_CONTEXT_DEFAULT_WIDTH;
+  } catch {
+    return APP_CONTEXT_DEFAULT_WIDTH;
+  }
+}
+
+function persistAppContextWidth(storage: Storage, width: number | null): void {
+  try {
+    if (width == null) storage.removeItem(APP_CONTEXT_WIDTH_KEY);
+    else storage.setItem(APP_CONTEXT_WIDTH_KEY, String(clampAppContextWidth(width)));
+  } catch {
+    // localStorage unavailable: retain the in-memory width.
+  }
+}
+
 export interface ApplicationShellCommands {
   minimize?: () => void | Promise<void>;
   maximize?: () => void | Promise<void>;
@@ -118,6 +148,7 @@ export function createApplicationShell(
   const contextHeader = document.createElement('header');
   const contextTitle = document.createElement('strong');
   const contextContent = document.createElement('div');
+  const contextSash = document.createElement('div');
   const historyActions = document.createElement('div');
 
   element.className = 'mw-application-shell';
@@ -147,6 +178,14 @@ export function createApplicationShell(
   template.slots.context?.classList.add('mw-app-context');
   template.slots.main.classList.add('mw-app-page-outlet');
   template.slots.main.dataset.shellPageOutlet = '';
+  contextSash.className = 'mw-app-context__sash';
+  contextSash.dataset.shellContextSash = '';
+  contextSash.setAttribute('role', 'separator');
+  contextSash.setAttribute('aria-orientation', 'vertical');
+  contextSash.setAttribute('aria-label', '调整历史列表宽度');
+  contextSash.title = '拖拽调整历史列表宽度，双击复位';
+  contextSash.tabIndex = 0;
+  if (template.slots.context) template.element.insertBefore(contextSash, template.slots.main);
   navigation.className = 'mw-app-navigation';
   navigationList.className = 'mw-app-navigation__list';
   navigationList.setAttribute('aria-label', '主导航');
@@ -215,6 +254,68 @@ export function createApplicationShell(
   template.slots.context?.append(contextHeader, contextContent);
   template.element.append(restoreContextCommand);
   element.append(titlebar, template.element);
+
+  let contextWidth = loadAppContextWidth(storage);
+  let finishContextResize: (() => void) | null = null;
+  const applyContextWidth = (width: number | null): void => {
+    if (width == null) {
+      contextWidth = APP_CONTEXT_DEFAULT_WIDTH;
+      template.element.style.removeProperty('--mw-app-context-width');
+    } else {
+      contextWidth = clampAppContextWidth(width);
+      template.element.style.setProperty('--mw-app-context-width', `${contextWidth}px`);
+    }
+    contextSash.setAttribute('aria-valuemin', String(APP_CONTEXT_MIN_WIDTH));
+    contextSash.setAttribute('aria-valuemax', String(APP_CONTEXT_MAX_WIDTH));
+    contextSash.setAttribute('aria-valuenow', String(contextWidth));
+  };
+  applyContextWidth(contextWidth);
+
+  const onContextSashMouseDown = (event: MouseEvent): void => {
+    if (contextSash.hidden || element.dataset.navigationCollapsed === 'true') return;
+    const startX = event.clientX;
+    const startWidth = contextWidth;
+    let currentWidth = startWidth;
+    const onMove = (moveEvent: MouseEvent): void => {
+      currentWidth = clampAppContextWidth(startWidth + moveEvent.clientX - startX);
+      applyContextWidth(currentWidth);
+    };
+    const onUp = (): void => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      finishContextResize = null;
+      contextSash.classList.remove('is-dragging');
+      document.body.classList.remove('mw-app-context-resizing');
+      persistAppContextWidth(storage, currentWidth);
+    };
+    finishContextResize = onUp;
+    contextSash.classList.add('is-dragging');
+    document.body.classList.add('mw-app-context-resizing');
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    event.preventDefault();
+  };
+  const onContextSashDoubleClick = (): void => {
+    if (contextSash.hidden || element.dataset.navigationCollapsed === 'true') return;
+    applyContextWidth(null);
+    persistAppContextWidth(storage, null);
+  };
+  const onContextSashKeyDown = (event: KeyboardEvent): void => {
+    if (contextSash.hidden || element.dataset.navigationCollapsed === 'true') return;
+    if (event.key === 'Home') {
+      onContextSashDoubleClick();
+      event.preventDefault();
+      return;
+    }
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    const delta = event.key === 'ArrowRight' ? 16 : -16;
+    applyContextWidth(contextWidth + delta);
+    persistAppContextWidth(storage, contextWidth);
+    event.preventDefault();
+  };
+  contextSash.addEventListener('mousedown', onContextSashMouseDown);
+  contextSash.addEventListener('dblclick', onContextSashDoubleClick);
+  contextSash.addEventListener('keydown', onContextSashKeyDown);
 
   const switchProductMode = (productMode: ProductMode): void => {
     if (productModeStore.get().productMode === productMode) return;
@@ -307,6 +408,7 @@ export function createApplicationShell(
     syncCollapseCommand(contextCollapseCommand, '上下文');
     syncCollapseCommand(historyCollapseCommand, '历史');
     newChatCommand.hidden = !(assistantChat && modeView.navigationCollapsed);
+    contextSash.hidden = !assistantChat || modeView.navigationCollapsed || !hasContext;
     renderNavigation();
   };
 
@@ -364,6 +466,10 @@ export function createApplicationShell(
       disposed = true;
       unsubscribe();
       element.removeEventListener('click', handleClick);
+      finishContextResize?.();
+      contextSash.removeEventListener('mousedown', onContextSashMouseDown);
+      contextSash.removeEventListener('dblclick', onContextSashDoubleClick);
+      contextSash.removeEventListener('keydown', onContextSashKeyDown);
     },
   };
 }

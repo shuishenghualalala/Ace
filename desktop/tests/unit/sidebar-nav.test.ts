@@ -64,4 +64,32 @@ describe('resolveShellNavigation', () => {
 
     shell.dispose();
   });
+
+  it('makes the assistant history boundary draggable and persistent', () => {
+    localStorage.clear();
+    const shell = createApplicationShell({
+      features: { agents: 'available' },
+      storage: localStorage,
+    });
+    document.body.replaceChildren(shell.element);
+
+    const sash = shell.element.querySelector<HTMLElement>('[data-shell-context-sash]');
+    const template = shell.element.querySelector<HTMLElement>('.mw-shell-template');
+    expect(sash).not.toBeNull();
+    expect(template).not.toBeNull();
+    expect(sash?.getAttribute('role')).toBe('separator');
+    expect(sash?.hidden).toBe(false);
+
+    sash?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 200 }));
+    document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 280 }));
+    expect(template?.style.getPropertyValue('--mw-app-context-width')).toBe('340px');
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: 280 }));
+    expect(localStorage.getItem('crew.desktop.appContextWidth.v1')).toBe('340');
+
+    sash?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    expect(template?.style.getPropertyValue('--mw-app-context-width')).toBe('');
+    expect(localStorage.getItem('crew.desktop.appContextWidth.v1')).toBeNull();
+
+    shell.dispose();
+  });
 });
