@@ -633,10 +633,10 @@ def test_safe_split_does_not_break_tool_pairs():
     # assistant(tool_calls) 后跟 tool 结果，split 不得落在 tool 上切断配对
     msgs = [
         Message.user("q1"),
-        Message.assistant("", [ToolCall(id="c1", name="Read")]),
+        Message.assistant("local", [ToolCall(id="c1", name="Read")]),
         Message.tool("c1", "结果"),
         Message.user("q2"),
-        Message.assistant("", [ToolCall(id="c2", name="Read")]),
+        Message.assistant("local", [ToolCall(id="c2", name="Read")]),
         Message.tool("c2", "结果"),
     ]
     split = ContextCompactor._safe_split(msgs, keep_recent=2)
@@ -869,7 +869,7 @@ async def test_anti_thrash_skips_after_two_ineffective():
     provider = FakeProvider()
     comp = ContextCompactor(provider, token_budget=10, keep_recent=2)
     # 预置：该 session 已连续 2 次无效压缩
-    comp._mem[("", "t1")] = SummaryState(text="旧摘要", covered_count=0, ineffective_count=2)
+    comp._mem[("local", "t1")] = SummaryState(text="旧摘要", covered_count=0, ineffective_count=2)
     history = await _big_history(10)
     out = await comp.maybe_compact(history, "t1")
     # 跳过摘要：provider 未被调用，结果不含摘要标记
@@ -883,27 +883,27 @@ async def test_ineffective_count_increments_on_low_savings():
     comp = ContextCompactor(provider, token_budget=10, keep_recent=2)
     history = await _big_history(10)
     await comp.maybe_compact(history, "t2")
-    assert comp._mem[("", "t2")].ineffective_count == 1
+    assert comp._mem[("local", "t2")].ineffective_count == 1
 
 
 async def test_ineffective_count_resets_on_good_savings():
     provider = FakeProvider(reply="短摘要")  # 极小 → 省很多
     comp = ContextCompactor(provider, token_budget=10, keep_recent=2)
-    comp._mem[("", "t3")] = SummaryState(text="x", covered_count=0, ineffective_count=1)
+    comp._mem[("local", "t3")] = SummaryState(text="x", covered_count=0, ineffective_count=1)
     history = await _big_history(10)
     await comp.maybe_compact(history, "t3")
-    assert comp._mem[("", "t3")].ineffective_count == 0
+    assert comp._mem[("local", "t3")].ineffective_count == 0
 
 
 async def test_force_compact_bypasses_anti_thrash_and_resets():
     provider = FakeProvider(reply="短摘要")
     comp = ContextCompactor(provider, token_budget=10, keep_recent=4)
-    comp._mem[("", "t4")] = SummaryState(text="x", covered_count=0, ineffective_count=2)
+    comp._mem[("local", "t4")] = SummaryState(text="x", covered_count=0, ineffective_count=2)
     history = await _big_history(10)
     out = await comp.force_compact(history, "t4")
     # 兜底不受防抖限制：照常压缩并把计数清零
     assert out[0].content.startswith(SUMMARY_MARKER)
-    assert comp._mem[("", "t4")].ineffective_count == 0
+    assert comp._mem[("local", "t4")].ineffective_count == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -947,12 +947,12 @@ async def test_circuit_breaker_resets_on_success():
 
     for _ in range(2):
         await comp.maybe_compact(history, "cb2")
-    assert comp._failure_counts.get(("", "cb2"), 0) == 2
+    assert comp._failure_counts.get(("local", "cb2"), 0) == 2
 
     # 换成功 provider 后再压缩
     comp.provider = FakeProvider(reply="摘要")
     await comp.maybe_compact(history, "cb2")
-    assert comp._failure_counts.get(("", "cb2"), 0) == 0
+    assert comp._failure_counts.get(("local", "cb2"), 0) == 0
 
 
 # --------------------------------------------------------------------------- #

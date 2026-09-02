@@ -6,7 +6,6 @@ import time
 import uuid
 from typing import Any
 
-from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
 from crew.gateway.session_context import SessionContext, SessionSource, session_context_from_envelope
 from crew.state.logging import get_logger
 
@@ -173,11 +172,9 @@ def prepare_inbound_channel_envelope(crew: Any, envelope: Any) -> None:
     params = getattr(envelope, "params", None) or {}
     binder = str(params.get("gateway_owner_account_id") or "").strip()
     if not binder:
-        bound = bindings_store.list_for_platform(platform)
-        binder = str(bound[0]["owner_account_id"]).strip() if bound else ""
+        binder = str(bindings_store.get_binding(platform) or "").strip()
     if not binder:
-        # 无绑定渠道的入站消息归本机 owner（决策⑥）：平台原始 uid 不得充当 owner
-        binder = LOCAL_OWNER_ACCOUNT_ID
+        return
     platform_uid = str(params.get("platform_uid") or getattr(envelope, "user_id", "") or "")
     if platform_uid:
         params.setdefault("platform_uid", platform_uid)

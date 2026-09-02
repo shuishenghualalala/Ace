@@ -195,10 +195,10 @@ class SessionStore(ABC):
     """会话历史持久化。"""
 
     @abstractmethod
-    def load(self, session_id: str, owner_account_id: str = "") -> list[Message]: ...
+    def load(self, session_id: str, owner_account_id: str) -> list[Message]: ...
 
     @abstractmethod
-    def append(self, session_id: str, messages: list[Message], owner_account_id: str = "") -> None: ...
+    def append(self, session_id: str, messages: list[Message], owner_account_id: str) -> None: ...
 
     @abstractmethod
     def save(
@@ -206,7 +206,6 @@ class SessionStore(ABC):
         session_id: str,
         messages: list[Message],
         workspace_id: str = "default",
-        owner_account_id: str = "",
         *,
         title_fallback: str | None = None,
         last_prompt_tokens: int | None = None,
@@ -230,40 +229,40 @@ class SessionStore(ABC):
         ...
 
     @abstractmethod
-    def clear_prompt_usage(self, session_id: str, owner_account_id: str = "") -> None:
+    def clear_prompt_usage(self, session_id: str, owner_account_id: str) -> None:
         """清除会话上一轮的 Provider prompt usage。"""
         ...
 
     @abstractmethod
-    def clear(self, session_id: str, owner_account_id: str = "") -> None: ...
+    def clear(self, session_id: str, owner_account_id: str) -> None: ...
 
     @abstractmethod
-    def set_title(self, session_id: str, title: str, owner_account_id: str = "") -> None:
+    def set_title(self, session_id: str, title: str, owner_account_id: str) -> None:
         """设置会话标题（覆盖默认的「首条 user 消息」标题）。"""
         ...
 
     @abstractmethod
-    def set_archived(self, session_id: str, archived: bool, owner_account_id: str = "") -> None:
+    def set_archived(self, session_id: str, archived: bool, owner_account_id: str) -> None:
         """归档 / 取消归档会话。归档会话从主列表隐藏，可在归档视图查看与恢复。"""
         ...
 
     @abstractmethod
-    def set_pinned(self, session_id: str, pinned: bool, owner_account_id: str = "") -> None:
+    def set_pinned(self, session_id: str, pinned: bool, owner_account_id: str) -> None:
         """置顶 / 取消置顶会话。置顶会话在主列表排序靠前。"""
         ...
 
     @abstractmethod
-    def set_status(self, session_id: str, status: str, error: str = "", owner_account_id: str = "") -> None:
+    def set_status(self, session_id: str, status: str, owner_account_id: str, error: str = "") -> None:
         """记录上一轮运行的 terminal 结果（completed / failed）及错误信息。"""
         ...
 
     @abstractmethod
-    def get_status(self, session_id: str, owner_account_id: str = "") -> tuple[str, str]:
+    def get_status(self, session_id: str, owner_account_id: str) -> tuple[str, str]:
         """取上一轮运行结果 (last_status, last_error)；无记录返回 ("", "")。"""
         ...
 
     @abstractmethod
-    def get_workspace_id(self, session_id: str, owner_account_id: str = "") -> str | None:
+    def get_workspace_id(self, session_id: str, owner_account_id: str) -> str | None:
         """读取会话所属 workspace_id；会话不存在时返回 None（工作区隔离用）。"""
         ...
 
@@ -271,7 +270,6 @@ class SessionStore(ABC):
     def list_sessions(
         self,
         workspace_id: str | None = None,
-        owner_account_id: str = "",
         *,
         include_archived: bool = False,
     ) -> list[dict[str, Any]]:
@@ -294,22 +292,21 @@ class WorkspaceStore(ABC):
         description: str = "",
         instructions: str = "",
         root_path: str = "",
-        owner_account_id: str = "",
     ) -> dict[str, Any]: ...
 
     @abstractmethod
-    def get(self, workspace_id: str, owner_account_id: str = "") -> dict[str, Any]: ...
+    def get(self, workspace_id: str, owner_account_id: str) -> dict[str, Any]: ...
 
     @abstractmethod
-    def list(self, owner_account_id: str = "") -> list[dict[str, Any]]: ...
+    def list(self, owner_account_id: str) -> list[dict[str, Any]]: ...
 
     @abstractmethod
-    def update(self, workspace_id: str, owner_account_id: str = "", **fields: Any) -> dict[str, Any]:
+    def update(self, workspace_id: str, owner_account_id: str, **fields: Any) -> dict[str, Any]:
         """更新 name/description/instructions/root_path 中的任意字段。"""
         ...
 
     @abstractmethod
-    def delete(self, workspace_id: str, owner_account_id: str = "") -> None: ...
+    def delete(self, workspace_id: str, owner_account_id: str) -> None: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -463,7 +460,7 @@ class NotificationCenter(ABC):
     def mark_all_read(self, owner_account_id: str) -> int: ...
 
     @abstractmethod
-    def mark_read_by_payload(self, source: str, key: str, owner_account_id: str = "") -> int:
+    def mark_read_by_payload(self, source: str, key: str, owner_account_id: str) -> int:
         """把 payload 顶层任一值等于 key 的未读通知标记已读（如审批 request_id 被处理后自动已读）。"""
         ...
 

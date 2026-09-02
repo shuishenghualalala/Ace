@@ -107,14 +107,15 @@ class SessionDispatcher:
         sid = str((context or {}).get("session_id") or "")
         if not sid:
             return
-        owner = normalize_owner_account_id((context or {}).get("owner_account_id"))
-        key = self._key(sid, owner)
-        self._sessions_started.discard(key)
-        self._tasks.pop(key, None)
-        self._active_exec_session_ids.pop(key, None)
+        owner = str((context or {}).get("owner_account_id") or "")
+        keys = [self._key(sid, owner)] if owner else [key for key in self._sessions_started if key[1] == sid]
+        for key in keys:
+            self._sessions_started.discard(key)
+            self._tasks.pop(key, None)
+            self._active_exec_session_ids.pop(key, None)
         security_service = getattr(self._controller, "security_service", None)
         end_session = getattr(security_service, "end_session", None)
-        if callable(end_session):
+        if owner and callable(end_session):
             end_session(owner, sid)
 
     # ------------------------------------------------------------------ #
@@ -297,7 +298,7 @@ class SessionDispatcher:
                 log.exception("team active children 状态获取失败 session=%s", session_id)
         return [] if session_id else {}
 
-    def _has_active_children(self, session_id: str, owner_account_id: str = "") -> bool:
+    def _has_active_children(self, session_id: str, owner_account_id: str) -> bool:
         snap = self._active_children_snapshot(session_id, owner_account_id=owner_account_id)
         return bool(snap)
 
@@ -570,7 +571,7 @@ class SessionDispatcher:
                 msg = f"队列已满（最多 {self._max_queue_depth_per_session} 条），请稍后再试"
                 yield ResponseChunk.error(rid, msg)
                 try:
-                    self._store.set_status(sid, "failed", msg, owner_account_id=owner)
+                    self._store.set_status(sid, "failed", owner_account_id=owner, error=msg)
                 except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，不得覆盖已 yield 的队列满错误
                     log.exception("写入队列满状态失败 session=%s", sid)
                 return
@@ -709,7 +710,7 @@ class SessionDispatcher:
 
                     # 标记会话进入 running，同时刷新 updated_at 防止被后台过期清理误删
                     try:
-                        self._store.set_status(sid, "running", "", owner_account_id=owner)
+                        self._store.set_status(sid, "running", owner_account_id=owner, error="")
                     except Exception:
                         log.exception("写入 running 状态失败 session=%s", sid)
 
@@ -959,7 +960,7 @@ class SessionDispatcher:
                                     or err.startswith("被新消息中断")
                                     else ("failed" if failed else "completed")
                                 )
-                                self._store.set_status(sid, status, err, owner_account_id=owner)
+                                self._store.set_status(sid, status, owner_account_id=owner, error=err)
                             except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，finally 中不得掩盖主流程结果
                                 log.exception("写入会话状态失败 session=%s", sid)
                             # 触发 agent:end hook：必须在 running 计数与落库状态清理之后，
@@ -979,7 +980,7 @@ class SessionDispatcher:
                 err = self._stop_reasons.get(key, "已停止当前回复")
                 log.info("排队中的会话请求已停止 session=%s", sid)
                 try:
-                    self._store.set_status(sid, "stopped", err, owner_account_id=owner)
+                    self._store.set_status(sid, "stopped", owner_account_id=owner, error=err)
                 except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，取消分支中不得掩盖已 yield 的停止错误
                     log.exception("写入会话状态失败 session=%s", sid)
                 deferred_terminal = ResponseChunk.error(rid, err)

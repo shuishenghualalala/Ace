@@ -22,7 +22,6 @@ from typing import Any, AsyncIterator, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.gateway.outbound import format_outbound_payload
-from crew.core.runctx import normalize_owner_account_id
 from crew.state.logging import get_logger
 
 log = get_logger("gateway.broadcast")
@@ -66,7 +65,7 @@ async def _broadcast_stream(
                 chunk.kind,
             )
         if owner is None:
-            owner = normalize_owner_account_id(envelope.user_id)
+            owner = str(envelope.user_id or "")
             connections.clear_buffer(envelope.session_id, owner_account_id=owner)
         payload = format_outbound_payload(chunk, session_id=envelope.session_id, context=render_context)
         if payload is not None:

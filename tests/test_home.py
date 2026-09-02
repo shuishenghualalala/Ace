@@ -133,9 +133,11 @@ def test_load_soul_md_empty(crew_home_dir):
 
 
 def test_load_memory_md_exists(crew_home_dir):
-    """MEMORY.md 存在且有内容时返回内容。"""
+    """MEMORY.md 存在且有内容时返回内容（local owner home 下）。"""
     ensure_crew_home()
-    (crew_home_dir / "memories" / "MEMORY.md").write_text("用户偏好: 中文\n", encoding="utf-8")
+    owner_dir = get_owner_runtime_home("local")
+    (owner_dir / "memories").mkdir(parents=True, exist_ok=True)
+    (owner_dir / "memories" / "MEMORY.md").write_text("用户偏好: 中文\n", encoding="utf-8")
     content = load_memory_md()
     assert "中文" in content
 
@@ -149,8 +151,11 @@ def test_load_memory_md_empty(crew_home_dir):
 
 
 def test_load_user_md_exists(crew_home_dir):
-    """USER.md 存在且有内容时返回内容。"""
+    """USER.md 存在且有内容时返回内容（local owner home 下）。"""
     ensure_crew_home()
+    owner_dir = get_owner_runtime_home("local")
+    (owner_dir / "memories").mkdir(parents=True, exist_ok=True)
+    (owner_dir / "memories" / "USER.md").write_text("姓名: 测试\n", encoding="utf-8")
     content = load_user_md()
     assert "姓名" in content
 
@@ -163,11 +168,13 @@ def test_task_workspace_defaults_under_user_home(tmp_path, monkeypatch):
     root = get_task_workspace_root()
     # task_workspaces 默认跟随 get_crew_home()，而非硬编码 ~/.crew
     assert root == crew_home / "task_workspaces"
+    owner_root = get_owner_runtime_home("local") / "task_workspaces"
 
     # Builtin Layer 3 remains workspace-scoped; external sessions may opt into
     # the isolated helper below without changing this existing path.
-    task_dir = task_workspace_path("space one")
-    assert task_dir == root / "space_one"
+    # owner 统一后任务工作区按 owner home 解析（本机 = local）
+    task_dir = task_workspace_path("space one", owner_account_id="local")
+    assert task_dir == owner_root / "space_one"
     assert task_dir.is_dir()
 
     # agent_workspace_path 是预留给将来多 agent 的子目录（不是主 work_dir）
@@ -188,8 +195,8 @@ def test_task_workspace_root_env_override(tmp_path, monkeypatch):
     root = tmp_path / "crew-task-output"
     monkeypatch.setenv("CREW_TASK_WORKSPACE_ROOT", str(root))
     assert get_task_workspace_root() == root
-    assert task_workspace_path("ws-a") == root / "ws-a"
-    assert agent_workspace_path("ws-a", "main") == root / "ws-a" / "agents" / "main"
+    assert task_workspace_path("ws-a", owner_account_id="local") == get_owner_runtime_home("local") / "task_workspaces" / "ws-a"
+    assert agent_workspace_path("ws-a", "main", owner_account_id="local") == get_owner_runtime_home("local") / "task_workspaces" / "ws-a" / "agents" / "main"
 
 
 def test_owner_runtime_home_and_workspace_are_owner_scoped(tmp_path, monkeypatch):
@@ -273,9 +280,11 @@ def test_export_crew_runtime_env_uses_crew_home_env_file(tmp_path, monkeypatch):
 
     values = export_crew_runtime_env()
 
-    assert os.environ["CREW_ENV_FILE"] == str(home / ".env")
-    assert values["CREW_ENV_FILE"] == str(home / ".env")
-    assert values["DOTENV_CONFIG_PATH"] == str(home / ".env")
+    # owner 统一后无参调用即本机 owner，env 文件在 local owner home 下
+    expected = get_owner_runtime_home("local") / ".env"
+    assert os.environ["CREW_ENV_FILE"] == str(expected)
+    assert values["CREW_ENV_FILE"] == str(expected)
+    assert values["DOTENV_CONFIG_PATH"] == str(expected)
 
 
 def test_export_crew_runtime_env_owner_scope(tmp_path, monkeypatch):
@@ -517,7 +526,7 @@ def test_export_crew_runtime_env_clears_stale_owner_account_id(tmp_path, monkeyp
 
     export_crew_runtime_env()
 
-    assert "CREW_OWNER_ACCOUNT_ID" not in os.environ
+    assert os.environ["CREW_OWNER_ACCOUNT_ID"] == "local"
 
 
 def test_load_config_loads_env_from_configured_crew_home(tmp_path, monkeypatch):
@@ -545,7 +554,7 @@ def test_load_config_loads_env_from_configured_crew_home(tmp_path, monkeypatch):
 
     cfg = load_config(cfg_path)
 
-    assert os.environ["CREW_ENV_FILE"] == str(home / ".env")
+    assert os.environ["CREW_ENV_FILE"] == str(get_owner_runtime_home("local") / ".env")
     assert os.environ["CREW_TEST_HOME_ENV_KEY"] == "sk-from-crew-home"
     assert cfg.active_model.api_key == "sk-from-crew-home"
 
@@ -579,7 +588,7 @@ def test_load_config_reads_model_key_from_system_config_env(tmp_path, monkeypatc
     cfg = load_config(cfg_path)
 
     assert cfg.active_model.api_key == "sk-from-system-config"
-    assert os.environ["CREW_ENV_FILE"] == str(crew_home / ".env")
+    assert os.environ["CREW_ENV_FILE"] == str(get_owner_runtime_home("local") / ".env")
 
 
 def test_load_config_initializes_local_yaml_from_publishable_example(tmp_path, monkeypatch):
@@ -686,7 +695,7 @@ def test_load_config_user_crew_env_overrides_system_config_env(tmp_path, monkeyp
     cfg = load_config(cfg_path)
 
     assert cfg.active_model.api_key == "sk-from-user-crew"
-    assert os.environ["CREW_ENV_FILE"] == str(crew_home / ".env")
+    assert os.environ["CREW_ENV_FILE"] == str(get_owner_runtime_home("local") / ".env")
 
 
 def test_refresh_owner_runtime_env_loads_system_and_owner_env(tmp_path, monkeypatch):

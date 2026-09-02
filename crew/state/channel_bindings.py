@@ -125,18 +125,28 @@ class ChannelBindingsStore:
                 self._conn.execute(f"DELETE FROM {self._TABLE} WHERE platform = ?", (plat,))
             self._conn.commit()
 
-    def get_binding(self, platform: str, owner_account_id: str) -> str | None:
-        """返回指定 Owner 的绑定。"""
+    def get_binding(self, platform: str, owner_account_id: str | None = None) -> str | None:
+        """返回指定 Owner 的绑定；无 Owner 参数时保留旧的首条兼容视图。"""
 
         plat = str(platform or "").strip().lower()
+        owner = str(owner_account_id or "").strip()
         with self._lock:
-            row = self._conn.execute(
-                f"""
-                SELECT owner_account_id FROM {self._TABLE}
-                WHERE platform = ? AND owner_account_id = ?
-                """,
-                (plat, owner_account_id),
-            ).fetchone()
+            if owner:
+                row = self._conn.execute(
+                    f"""
+                    SELECT owner_account_id FROM {self._TABLE}
+                    WHERE platform = ? AND owner_account_id = ?
+                    """,
+                    (plat, owner),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    f"""
+                    SELECT owner_account_id FROM {self._TABLE}
+                    WHERE platform = ? ORDER BY bound_at, owner_account_id LIMIT 1
+                    """,
+                    (plat,),
+                ).fetchone()
         return str(row[0]) if row else None
 
     def list_for_platform(self, platform: str) -> list[dict[str, Any]]:

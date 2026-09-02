@@ -53,10 +53,12 @@ class ChannelManager:
         return [
             (name, channel_owner, channel)
             for (name, channel_owner), channel in self._channels.items()
-            if owner is None or channel_owner == owner
+            if owner is None
+            or channel_owner == owner
+            or (channel_owner == "" and owner in {"local", "dev:dev"})
         ]
 
-    def register(self, channel: Channel, *, owner_account_id: str) -> None:
+    def register(self, channel: Channel, *, owner_account_id: str = "") -> None:
         name, owner = self._key(channel.name, owner_account_id)
         try:
             setattr(channel, "_gateway_owner_account_id", owner)
@@ -64,14 +66,14 @@ class ChannelManager:
             pass
         self._channels[(name, owner)] = channel
         self._states.setdefault((name, owner), ChannelState())
-        log.info("注册渠道: %s owner=%s", name, owner)
+        log.info("注册渠道: %s owner=%s", name, owner or "global")
 
-    def unregister(self, name: str, owner_account_id: str) -> None:
+    def unregister(self, name: str, owner_account_id: str = "") -> None:
         key = self._key(name, owner_account_id)
         self._channels.pop(key, None)
         self._states.pop(key, None)
 
-    def record_error(self, name: str, error: str, owner_account_id: str) -> None:
+    def record_error(self, name: str, error: str, owner_account_id: str = "") -> None:
         key = self._key(name, owner_account_id)
         self._states[key] = ChannelState(running=False, error=error, reason="error")
         try:
@@ -118,22 +120,25 @@ class ChannelManager:
 
     @staticmethod
     def _owner_handler(handler: MessageHandler, owner_account_id: str) -> MessageHandler:
-        owner = owner_account_id
+        owner = str(owner_account_id or "").strip()
 
         def bound(envelope):
-            params = dict(getattr(envelope, "params", {}) or {})
-            params["gateway_owner_account_id"] = owner
-            envelope.params = params
+            if owner:
+                params = dict(getattr(envelope, "params", {}) or {})
+                params["gateway_owner_account_id"] = owner
+                envelope.params = params
             return handler(envelope)
 
         return bound
 
-    async def start_all(self, handler: MessageHandler, *, owner_account_id: str) -> None:
-        """启动指定 Owner 的渠道，已运行实例保持不变。"""
+    async def start_all(self, handler: MessageHandler, *, owner_account_id: str = "") -> None:
+        """启动全局渠道和指定 Owner 的渠道，已运行实例保持不变。"""
 
         owner = str(owner_account_id or "").strip()
         for name, channel_owner, channel in list(self.iter_channels()):
-            if channel_owner != owner:
+            if channel_owner not in {"", owner}:
+                continue
+            if channel_owner == "" and owner not in {"", "local", "dev:dev"}:
                 continue
             key = (name, channel_owner)
             state = self._states.setdefault(key, ChannelState())
@@ -296,7 +301,11 @@ class ChannelManager:
         keys = list(dict.fromkeys([*self._channels.keys(), *self._states.keys()]))
         rows: list[dict[str, Any]] = []
         for name, channel_owner in keys:
-            if owner is not None and channel_owner != owner:
+            if (
+                owner is not None
+                and channel_owner != owner
+                and not (channel_owner == "" and owner in {"local", "dev:dev"})
+            ):
                 continue
             state = self._states.get((name, channel_owner), ChannelState())
             row: dict[str, Any] = {

@@ -317,7 +317,7 @@ def _assert_channel_restores_on_gateway_startup(
             assert connected.status_code == 200, connected.text
             assert connected.json()["ok"] is True
             assert dummy_cls.starts == 1
-            assert app.state.crew.channel_bindings.get_binding(platform, owner_account_id="A:uid-a") == "A:uid-a"
+            assert app.state.crew.channel_bindings.get_binding(platform) == "A:uid-a"
 
         cfg = load_config(config_path=str(config_yaml))
         crew = build_app(config=cfg, enable_team=False)

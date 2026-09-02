@@ -17,7 +17,7 @@ from crew.core.types import ChatResponse, ToolCall
 from crew.plugins.manager import PluginManager
 from crew.state.config import Config
 from crew.state.session_store import SQLiteSessionStore
-from crew.state.home import task_workspace_path
+from crew.state.home import task_workspace_path, get_owner_runtime_home
 from crew.state.workspace_store import SQLiteWorkspaceStore
 from crew.tools.registry import Registry
 
@@ -25,14 +25,14 @@ from crew.tools.registry import Registry
 def test_workspace_store_crud(tmp_path):
     store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
     # 默认空间存在
-    assert store.get("default")["name"] == "默认工作空间"
-    ws = store.create("电商后台", instructions="用 TypeScript")
+    assert store.get("default", owner_account_id="local")["name"] == "默认工作空间"
+    ws = store.create("电商后台", owner_account_id="local", instructions="用 TypeScript")
     assert ws["instructions"] == "用 TypeScript"
-    assert any(w["id"] == ws["id"] for w in store.list())
-    updated = store.update(ws["id"], name="改名了")
+    assert any(w["id"] == ws["id"] for w in store.list(owner_account_id="local"))
+    updated = store.update(ws["id"], owner_account_id="local", name="改名了")
     assert updated["name"] == "改名了"
-    store.delete(ws["id"])
-    assert all(w["id"] != ws["id"] for w in store.list())
+    store.delete(ws["id"], owner_account_id="local")
+    assert all(w["id"] != ws["id"] for w in store.list(owner_account_id="local"))
 
 
 def test_workspace_store_root_path(tmp_path):
@@ -64,25 +64,25 @@ def test_builtin_wiki_workspace_auto_created(tmp_path):
 
 def test_builtin_wiki_workspace_protected(tmp_path):
     store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
-    store.get("wiki")  # 先确保存在
+    store.get("wiki", owner_account_id="local")  # 先确保存在
     with pytest.raises(ValueError):
-        store.delete("wiki")
+        store.delete("wiki", owner_account_id="local")
 
 
 def test_unknown_workspace_still_missing(tmp_path):
     """内置之外的 id 不放开校验：不存在仍抛 KeyError。"""
     store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
     with pytest.raises(KeyError):
-        store.get("ghost")
+        store.get("ghost", owner_account_id="local")
 
 
 def test_inmemory_store_mirrors_builtin_workspaces():
     store = InMemoryWorkspaceStore()
-    assert store.get("wiki")["hidden"] is True
-    store.delete("wiki")  # mock 对齐既有 default 行为：内置空间删除被忽略
-    assert store.get("wiki")["id"] == "wiki"
+    assert store.get("wiki", owner_account_id="local")["hidden"] is True
+    store.delete("wiki", owner_account_id="local")  # mock 对齐既有 default 行为：内置空间删除被忽略
+    assert store.get("wiki", owner_account_id="local")["id"] == "wiki"
     with pytest.raises(KeyError):
-        store.get("ghost")
+        store.get("ghost", owner_account_id="local")
 
 
 def test_session_list_filtered_by_workspace(tmp_path):
@@ -291,7 +291,8 @@ async def test_single_agent_writes_relative_artifacts_to_task_workspace(tmp_path
     async for _ in agent.run(Envelope.of("写文件", session_id="s-artifact", workspace_id="ws-main", user_id="")):
         pass
 
-    # Layer 3：work_dir = {task_workspace_root}/{workspace_id}/（只到 workspace 级）
-    expected = tmp_path / "task-output" / "ws-main" / marker
+    # Layer 3：owner 统一后 work_dir = {owner_home}/task_workspaces/{workspace_id}/
+    # （owner 作用域优先于 CREW_TASK_WORKSPACE_ROOT 环境变量）
+    expected = get_owner_runtime_home("local") / "task_workspaces" / "ws-main" / marker
     assert expected.read_text(encoding="utf-8") == "ok"
     assert not (Path.cwd() / marker).exists()

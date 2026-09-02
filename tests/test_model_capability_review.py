@@ -40,10 +40,9 @@ def test_removing_non_active_global_model_clears_all_agent_cache(
     cfg = Config(
         active_model_id="active",
         model_profiles={
-            # owner 统一后全局层模型必须标记 builtin 才会出现在 owner 视图
-            "active": _profile("active", builtin=True),
-            "removed": _profile("removed", builtin=True),
-            "other": _profile("other", builtin=True),
+            "active": _profile("active"),
+            "removed": _profile("removed"),
+            "other": _profile("other"),
         },
     )
     app = build_app(config=cfg, enable_team=False)
@@ -53,7 +52,7 @@ def test_removing_non_active_global_model_clears_all_agent_cache(
     monkeypatch.setattr(cfg, "persist_model_profiles", lambda: tmp_path / "config.yaml")
     monkeypatch.setattr("crew.app.remove_env_key", lambda *_args, **_kwargs: None)
 
-    app.remove_model("removed", owner_account_id="owner-a")
+    app.remove_model("removed")
 
     assert app.agents.peek("bound-to-removed", owner_account_id="owner-a") is None
     assert app.agents.peek("other-session", owner_account_id="owner-b") is None
@@ -108,10 +107,8 @@ def test_inherited_text_only_subagent_cannot_use_browser_vision() -> None:
     assert child.model_capabilities == ("text", "tools")
 
 
-def test_explicit_no_tools_subagent_has_empty_tool_filter(monkeypatch: pytest.MonkeyPatch) -> None:
-    # 子 agent 经 owner 视图解析模型：全局层模型需标记 builtin，key 从 env 解析
-    monkeypatch.setenv("KEY_PLAIN", "k-plain")
-    no_tools = _profile("plain", capabilities=["text"], builtin=True)
+def test_explicit_no_tools_subagent_has_empty_tool_filter() -> None:
+    no_tools = _profile("plain", capabilities=["text"])
     cfg = Config(active_model_id="plain", model_profiles={"plain": no_tools})
     app = build_app(config=cfg, enable_team=False)
 

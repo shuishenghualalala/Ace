@@ -31,7 +31,7 @@ from crew.agent.external.tools import register_external_agent_tools
 from crew.agent.runtime import SingleAgent
 from crew.agent.subagent.definition import build_preset_spec
 from crew.core.envelope import Envelope, ResponseChunk
-from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID, normalize_owner_account_id
+from crew.core.runctx import normalize_owner_account_id
 from crew.core.interfaces import Agent, LLMProvider, MemoryProvider, SessionStore, WorkspaceStore
 from crew.evolution import EvolutionManager, EvolutionQueue
 from crew.gateway.dispatcher import BusyMode, SessionDispatcher
@@ -827,9 +827,9 @@ class CrewApp:
         解析 profile 走 owner 视图，避免 fallback 列表里的私有模型 id 被当成「不存在」。
         """
         cfg = self.config
-        owner = normalize_owner_account_id(owner_account_id)
-        profiles = self.owner_model_profiles(owner)
-        active_id = cfg.owner_default_model_id(owner)
+        owner = str(owner_account_id or "").strip()
+        profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
+        active_id = cfg.owner_default_model_id(owner) if owner else (cfg.default_model_id or cfg.active_model_id)
         providers: list[LLMProvider] = []
         for mid in cfg.fallback_models:
             if mid == active_id:
@@ -953,21 +953,25 @@ class CrewApp:
         的 demo_mode 判定共用本方法，避免读写两处各自重推导致误报/漏报。
         """
         cfg = self.config
-        owner_profiles = self.owner_model_profiles(owner)
+        owner_profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
         provider_profile: ModelProfile | None = None
         build_dynamic_provider = False
         # 装配期回退说明：写入 agent，供 run 开头以 status 帧推到 UI（避免只打日志用户无感）
         model_fallback_notice: str | None = None
-        # owner 默认激活模型，末尾用于静默降级判定
-        active = self.config.owner_default_model_profile(owner)
-        if active is not None and active.has_key:
-            provider_profile = active
-            build_dynamic_provider = True
+        # owner 默认激活模型；仅 owner 非空时赋值，末尾用于静默降级判定（见缺口 1a）
+        active: ModelProfile | None = None
+        if owner:
+            active = self.config.owner_default_model_profile(owner)
+            if active is not None and active.has_key:
+                provider_profile = active
+                build_dynamic_provider = True
+            else:
+                # The owner overlay can retain a deleted/unloaded model id, or
+                # point at a profile whose owner-local key disappeared.  In
+                # both cases self.provider is the global active provider, so
+                # capability gating must use that same profile too.
+                provider_profile = cfg.active_model
         else:
-            # The owner overlay can retain a deleted/unloaded model id, or
-            # point at a profile whose owner-local key disappeared.  In
-            # both cases self.provider is the global active provider, so
-            # capability gating must use that same profile too.
             provider_profile = cfg.active_model
         if session_model and session_model != "inherit":
             profile = owner_profiles.get(session_model)
@@ -1082,10 +1086,10 @@ class CrewApp:
             if external_agent_id and not str(executor_config.get("external_agent_id") or "").strip():
                 executor_config["external_agent_id"] = external_agent_id
 
-        # 显式参数优先；仅在调用方未传时回退 ContextVar（默认即本机 local）
+        # 显式参数优先；仅在调用方未传时回退 ContextVar（兼容直接测 _make_agent 的旧路径）
         from crew.core.runctx import current_owner_account_id
 
-        owner = normalize_owner_account_id(owner_account_id or current_owner_account_id.get())
+        owner = str(owner_account_id or current_owner_account_id.get() or "").strip()
         requested_user_type = str(resolved.get("user_type") or "").strip().lower()
         resolver = getattr(cfg.access_control, "user_type_for_owner", None)
         user_type = (
@@ -1456,8 +1460,8 @@ class CrewApp:
         if model and model != "inherit":
             # 子 agent 创建时通常已在 agent.run 内，ContextVar 有值；仍走 owner 视图，
             # 才能解析会话/账号私有模型，与 _make_agent 口径一致。
-            owner = current_owner_account_id.get()
-            profiles = self.owner_model_profiles(owner)
+            owner = str(current_owner_account_id.get() or "").strip()
+            profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
             profile = profiles.get(model)
             if profile and profile.has_key:
                 provider = build_provider_for_profile(profile, cfg.stream_read_timeout)
@@ -1468,8 +1472,8 @@ class CrewApp:
         elif effective_capabilities is None:
             # 兼容直接构造子 Agent 的调用路径；正常运行中优先使用父 Agent 写入的
             # ContextVar，因为父会话可能绑定的并不是 owner/global active 模型。
-            owner = current_owner_account_id.get()
-            inherited_profile = cfg.owner_default_model_profile(owner) or cfg.active_model
+            owner = str(current_owner_account_id.get() or "").strip()
+            inherited_profile = cfg.owner_default_model_profile(owner) if owner else cfg.active_model
             if inherited_profile is not None:
                 effective_capabilities = list(inherited_profile.capabilities)
 
@@ -2200,8 +2204,8 @@ class CrewApp:
         self._owner_team_member_model_providers[key] = provider
         return provider
 
-    def _invalidate_owner_team_provider(self, owner_account_id: str) -> None:
-        owner = normalize_owner_account_id(owner_account_id)
+    def _invalidate_owner_team_provider(self, owner_account_id: str = "") -> None:
+        owner = str(owner_account_id or "").strip()
         if owner:
             provider = self._owner_team_providers.pop(owner, None)
             if provider is not None and provider is not self.provider:
@@ -2218,10 +2222,6 @@ class CrewApp:
                 drop_kanban(owner)
             return
 
-        self._invalidate_all_owner_team_providers()
-
-    def _invalidate_all_owner_team_providers(self) -> None:
-        """全局写路径（内置模型变更）专用：清空所有 owner 的 Team/Provider 缓存。"""
         providers = list({
             id(provider): provider
             for provider in [
@@ -2294,23 +2294,36 @@ class CrewApp:
             include_builtin_profiles=include_builtin_profiles,
         )
 
-    def use_model(self, model_id: str, *, owner_account_id: str) -> ModelProfile:
-        """设置默认兜底模型；Session 的显式模型绑定保持不变。
-
-        默认模型是 owner 级偏好（写 owner overlay 的 llm.default）；owner 无
-        overlay 时也会由 persist 写出。全局 config.yaml 的 active 不再由本
-        方法维护——启动兜底 Provider 只在 build_app 时解析一次。
-        """
-        owner = normalize_owner_account_id(owner_account_id)
-        profiles = self.owner_model_profiles(owner)
-        profile = profiles.get(model_id)
-        if profile is None:
-            raise KeyError(model_id)
-        if not profile.loaded:
-            raise ValueError(f"模型未加载，不能用于对话: {model_id}")
-        self.config.persist_owner_model_profiles(owner, profiles, active_model_id=model_id)
-        self.agents.drop_owner(owner)
-        self._invalidate_owner_team_provider(owner)
+    def use_model(self, model_id: str, *, owner_account_id: str = "") -> ModelProfile:
+        """设置默认兜底模型；Session 的显式模型绑定保持不变。"""
+        owner = str(owner_account_id or "").strip()
+        if owner:
+            profiles = self.owner_model_profiles(owner)
+            profile = profiles.get(model_id)
+            if profile is None:
+                raise KeyError(model_id)
+            if not profile.loaded:
+                raise ValueError(f"模型未加载，不能用于对话: {model_id}")
+            self.config.persist_owner_model_profiles(owner, profiles, active_model_id=model_id)
+            self.agents.drop_owner(owner)
+            self._invalidate_owner_team_provider(owner)
+        else:
+            profile = self.config.activate_model(model_id)
+            self.config.default_model_id = model_id
+            if self.config.config_path:
+                self.config.persist_model_profiles()
+            old_provider = self.provider
+            self.provider = build_provider(self.config)
+            self.agents.clear()
+            self._invalidate_owner_team_provider()
+            if self.team is not None:
+                self.team.provider = self.provider
+            if self.dynamic_kanban is not None:
+                self.dynamic_kanban.provider = self.provider
+                if hasattr(self.dynamic_kanban, "clear"):
+                    self.dynamic_kanban.clear()
+            if old_provider is not self.provider:
+                self._schedule_provider_retirement(old_provider)
         log.info("设置默认模型: %s model=%s base_url=%s", profile.id, profile.model, profile.base_url or "默认")
         return profile
 
@@ -2324,35 +2337,28 @@ class CrewApp:
         api_key_env: str,
         api_key: str,
         *,
-        owner_account_id: str,
+        owner_account_id: str = "",
     ) -> str:
-        """把用户填写的 api_key 写入 owner .env，返回实际 env 文件路径。
+        """把用户填写的 api_key 写入 .env，返回实际 env 文件路径。
 
         - api_key_env 必须是合法模型 API Key 环境变量名；非法时抛 ValueError。
-        - 本机 owner 写入后同步进程环境，保证启动期 build_provider 能解析到 key
-          （决策③）；远程 owner 不同步，避免跨账号串线。
+        - owner 私有 key 只写 owner .env，不再同步全局进程环境，避免跨账号串线。
         """
         api_key_env = _validate_model_api_key_env(api_key_env)
-        owner = normalize_owner_account_id(owner_account_id)
-        env_path = resolve_writable_env_path(owner)
-        write_env_key(
-            env_path,
-            api_key_env,
-            api_key,
-            sync_process_env=owner == LOCAL_OWNER_ACCOUNT_ID,
-        )
+        env_path = resolve_writable_env_path(owner_account_id)
+        write_env_key(env_path, api_key_env, api_key, sync_process_env=not bool(owner_account_id))
         log.info("已写入 API Key 到 .env (var=%s, file=%s)", api_key_env, env_path)
         return str(env_path)
 
-    def add_model(self, payload: dict, *, owner_account_id: str) -> ModelProfile:
-        """新增模型 profile 并持久化到 owner overlay。
+    def add_model(self, payload: dict, *, owner_account_id: str = "") -> ModelProfile:
+        """新增模型 profile 并持久化。
 
         Args:
             payload: {
                 id: 必填,
                 name, base_url, model, api_key_env, temperature,
                 max_tokens, context_window, timeout: 选填,
-                api_key: 选填明文 key，提供则写入 owner .env
+                api_key: 选填明文 key，提供则写入 .env
             }
 
         Raises:
@@ -2362,58 +2368,65 @@ class CrewApp:
         model_id = str(payload.get("id") or "").strip()
         if not model_id:
             raise ValueError("model id 不能为空")
-        owner = normalize_owner_account_id(owner_account_id)
-        profiles = self.owner_model_profiles(owner)
-        if model_id in profiles:
+        owner = str(owner_account_id or "").strip()
+        existing = self.owner_model_profiles(owner) if owner else cfg.model_profiles
+        if model_id in existing:
             raise ValueError(f"模型 id 已存在: {model_id}")
-        current_default_is_placeholder = is_placeholder_model_profile(
-            profiles.get(cfg.owner_active_model_id(owner))
-        )
+        current_default_id = cfg.owner_active_model_id(owner) if owner else cfg.active_model_id
+        current_default_is_placeholder = is_placeholder_model_profile(existing.get(current_default_id))
 
         api_key_env = _validate_model_api_key_env(payload.get("api_key_env") or "CREW_API_KEY")
         payload = {**payload, "api_key_env": api_key_env, "builtin": False}
         api_key = str(payload.get("api_key") or "")
+        # 先写 env（让 _build_profile_from_payload 能从 os.environ 取到），再构建 profile
         if api_key:
-            self._apply_api_key_to_env(api_key_env, api_key, owner_account_id=owner)
-        profile = _build_profile_from_payload(model_id, payload)
-        profile.api_key = api_key or cfg.owner_env_map(owner).get(api_key_env, "")
-        profiles[model_id] = profile
-        activate_new_model = bool(
-            current_default_is_placeholder
-            and profile.loaded
-            and profile.has_key
-            and not is_placeholder_model_profile(profile)
-        )
-        next_default_id = model_id if activate_new_model else cfg.owner_active_model_id(owner)
-        cfg.persist_owner_model_profiles(owner, profiles, active_model_id=next_default_id)
-        self.agents.drop_owner(owner)
-        if activate_new_model:
-            self._invalidate_owner_team_provider(owner)
-            log.info("首个可用模型已自动设为 owner 默认模型: %s", model_id)
+            self._apply_api_key_to_env(
+                api_key_env,
+                api_key,
+                owner_account_id=owner_account_id,
+            )
+        if owner:
+            profile = _build_profile_from_payload(model_id, payload)
+            profile.api_key = api_key or cfg.owner_env_map(owner).get(api_key_env, "")
+            profiles = cfg.owner_model_profiles(owner)
+            profiles[model_id] = profile
+            activate_new_model = bool(
+                current_default_is_placeholder
+                and profile.loaded
+                and profile.has_key
+                and not is_placeholder_model_profile(profile)
+            )
+            next_default_id = model_id if activate_new_model else cfg.owner_active_model_id(owner)
+            cfg.persist_owner_model_profiles(owner, profiles, active_model_id=next_default_id)
+            self.agents.drop_owner(owner)
+            if activate_new_model:
+                self._invalidate_owner_team_provider(owner)
+                log.info("首个可用模型已自动设为 owner 默认模型: %s", model_id)
+        else:
+            profile = cfg.add_model(payload)
+            cfg.persist_model_profiles()
         log.info("新增模型 profile: %s (model=%s)", profile.id, profile.model)
         return profile
 
-    def update_model(self, model_id: str, payload: dict, *, owner_account_id: str) -> ModelProfile:
+    def update_model(self, model_id: str, payload: dict, *, owner_account_id: str = "") -> ModelProfile:
         """更新已存在的模型 profile 并持久化。
 
-        写入层由 profile.builtin 显式决定（write_scope）：内置模型归共享
-        config.yaml（影响所有 owner），owner 私有模型归 owner overlay。
+        若更新目标是当前激活模型，会重建 Provider 并清空 Agent 缓存（与 use_model 对齐）。
 
         Raises:
             KeyError: model_id 不存在。
             ValueError: env 写入失败；yaml 写回失败。
         """
         cfg = self.config
-        owner = normalize_owner_account_id(owner_account_id)
-        profiles = self.owner_model_profiles(owner)
+        owner = str(owner_account_id or "").strip()
+        profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
         if model_id not in profiles:
             raise KeyError(model_id)
-        # 内置模型属于全局共享层：编辑它写回 config.yaml 并清全部 owner 缓存
-        write_scope = "global" if profiles[model_id].builtin else "owner"
-        if write_scope == "global":
+        if owner and profiles[model_id].builtin:
+            owner = ""
             profiles = cfg.model_profiles
         loaded_val = payload.get("loaded")
-        active_model_id = cfg.owner_active_model_id(owner)
+        active_model_id = cfg.owner_active_model_id(owner) if owner else cfg.active_model_id
         if active_model_id == model_id and loaded_val is not None and not _payload_bool(loaded_val):
             raise ValueError("当前激活模型不能设为未加载，请先切换到其它已加载模型")
 
@@ -2425,8 +2438,12 @@ class CrewApp:
         payload = {**payload, "builtin": profiles[model_id].builtin}
         api_key = str(payload.get("api_key") or "")
         if api_key:
-            self._apply_api_key_to_env(api_key_env, api_key, owner_account_id=owner)
-        if write_scope == "owner":
+            self._apply_api_key_to_env(
+                api_key_env,
+                api_key,
+                owner_account_id=owner_account_id,
+            )
+        if owner:
             current = profiles[model_id]
             merged = {
                 "id": model_id,
@@ -2461,10 +2478,10 @@ class CrewApp:
             # mutable profile contents. Clear even for a non-active shared
             # model because existing sessions may be explicitly bound to it.
             self.agents.clear()
-            self._invalidate_all_owner_team_providers()
+            self._invalidate_owner_team_provider()
 
-        # 全局层的激活模型变更 → 重建启动兜底 Provider + 清缓存
-        if active_model_id == model_id and write_scope == "global":
+        # 激活模型变更 → 重建 Provider + 清缓存，让下一轮对话立即生效
+        if active_model_id == model_id and not owner:
             cfg.activate_model(model_id)
             old_provider = self.provider
             self.provider = build_provider(cfg)
@@ -2479,10 +2496,8 @@ class CrewApp:
         log.info("更新模型 profile: %s (model=%s)", profile.id, profile.model)
         return profile
 
-    def remove_model(self, model_id: str, *, owner_account_id: str) -> dict:
+    def remove_model(self, model_id: str, *, owner_account_id: str = "") -> dict:
         """删除模型 profile 并持久化。
-
-        写入层由 profile.builtin 显式决定（write_scope），语义同 update_model。
 
         - 删除激活模型时：自动切到剩余的第一个 profile，重建 Provider + 清缓存。
         - 删除最后一个模型时：抛 ValueError（由 gateway 层返回 409）。
@@ -2491,16 +2506,16 @@ class CrewApp:
             {"removed": <ModelProfile>, "switched_to": <new_active_id or None>}
         """
         cfg = self.config
-        owner = normalize_owner_account_id(owner_account_id)
-        profiles = self.owner_model_profiles(owner)
+        owner = str(owner_account_id or "").strip()
+        profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
         if model_id not in profiles:
             raise KeyError(model_id)
-        write_scope = "global" if profiles[model_id].builtin else "owner"
-        if write_scope == "global":
+        if owner and profiles[model_id].builtin:
+            owner = ""
             profiles = cfg.model_profiles
         if len(profiles) <= 1:
             raise ValueError("至少保留一个模型配置，禁止删除最后一个")
-        active_model_id = cfg.owner_active_model_id(owner)
+        active_model_id = cfg.owner_active_model_id(owner) if owner else cfg.active_model_id
         if active_model_id == model_id:
             loaded_replacements = [
                 mid
@@ -2510,20 +2525,20 @@ class CrewApp:
             if not loaded_replacements:
                 raise ValueError("删除当前激活模型前，至少需要另一个已加载模型")
 
-        if write_scope == "owner":
+        if owner:
             removed = profiles.pop(model_id)
             if not any(profile.api_key_env == removed.api_key_env for profile in profiles.values()):
-                remove_env_key(resolve_writable_env_path(owner), removed.api_key_env, sync_process_env=False)
+                remove_env_key(resolve_writable_env_path(owner_account_id), removed.api_key_env, sync_process_env=False)
         else:
             removed = cfg.remove_model(model_id)  # 内部校验"最后一个"
             if not any(profile.api_key_env == removed.api_key_env for profile in cfg.model_profiles.values()):
-                remove_env_key(resolve_writable_env_path(owner), removed.api_key_env)
+                remove_env_key(resolve_writable_env_path(owner_account_id), removed.api_key_env)
         switched_to: str | None = None
         if active_model_id == model_id:
             # 按 id 字典序切到剩余的第一个，行为可预测
             new_id = sorted(mid for mid, profile in profiles.items() if profile.loaded)[0]
             switched_to = new_id
-            if write_scope == "owner":
+            if owner:
                 cfg.persist_owner_model_profiles(owner, profiles, active_model_id=new_id)
                 self._invalidate_owner_team_provider(owner)
             else:
@@ -2541,15 +2556,15 @@ class CrewApp:
                         self.dynamic_kanban.clear()
                 if old_provider is not self.provider:
                     self._schedule_provider_retirement(old_provider)
-        elif write_scope == "owner":
+        elif owner:
             cfg.persist_owner_model_profiles(owner, profiles, active_model_id=cfg.owner_active_model_id(owner))
             self._invalidate_owner_team_provider(owner)
         else:
             cfg.persist_model_profiles()
-            self._invalidate_all_owner_team_providers()
+            self._invalidate_owner_team_provider()
         # Cache keys only contain the selected profile id, not mutable profile contents.
         # A deleted non-active profile can still be pinned by an existing session.
-        if write_scope == "owner":
+        if owner:
             self.agents.drop_owner(owner)
         else:
             self.agents.clear()
@@ -2707,7 +2722,7 @@ class CrewApp:
     def _on_subagent_background_done(self, session_id: str, result: dict) -> None:
         """后台子 agent 完成回调（在事件循环内同步调用）：入队 + 实时推送。"""
         # 1) 入队，供下一轮 handle() 注入主 agent 上下文（限长，防无限堆积）
-        key = self._owner_session_key(session_id, str(result.get("owner_account_id") or ""))
+        key = self._owner_session_key(session_id, normalize_owner_account_id(result.get("owner_account_id")))
         queue = self._subagent_pending.setdefault(key, [])
         queue.append(result)
         if len(queue) > 20:

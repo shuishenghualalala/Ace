@@ -163,8 +163,8 @@ async def test_background_task_id_unique_and_mapped(tmp_path):
         for t in list(app._subagent_bg_tasks):
             await t
 
-        assert app.subagent_tasks.get(id1)["status"] == "done"
-        assert app.subagent_tasks.get(id2)["status"] == "done"
+        assert app.subagent_tasks.get(id1, owner_account_id="local")["status"] == "done"
+        assert app.subagent_tasks.get(id2, owner_account_id="local")["status"] == "done"
     finally:
         current_session_id.reset(tok)
 
