@@ -9,11 +9,13 @@ import pytest
 from crew.features import (
     FeatureActivationError,
     FeatureCleanupError,
+    FeatureConfigRevisions,
     FeatureGeneration,
     FeatureScope,
     FeatureState,
     FeatureTransaction,
     RegistrationState,
+    StaleFeatureGenerationError,
 )
 
 
@@ -21,11 +23,35 @@ def test_generation_has_stable_diagnostic_key_and_validates_identity():
     generation = FeatureGeneration("  wiki  ", 2)
 
     assert generation.feature_id == "wiki"
-    assert generation.key == "wiki@2"
+    assert generation.key == "wiki@g2"
     with pytest.raises(ValueError, match="feature_id"):
         FeatureGeneration(" ", 1)
     with pytest.raises(ValueError, match="sequence"):
         FeatureGeneration("wiki", 0)
+    with pytest.raises(ValueError, match="config revision"):
+        FeatureGeneration("wiki", 1, desired_config_revision=0)
+
+
+def test_config_revisions_only_publish_the_latest_desired_generation():
+    revisions = FeatureConfigRevisions("wiki")
+    first = revisions.new_generation(sequence=1)
+
+    revisions.mark_effective(first)
+    assert revisions.desired_config_revision == 1
+    assert revisions.effective_config_revision == 1
+
+    revisions.request(2)
+    second = revisions.new_generation(sequence=2)
+    revisions.request(3)
+
+    with pytest.raises(StaleFeatureGenerationError):
+        revisions.mark_effective(second)
+    assert revisions.effective_config_revision == 1
+
+    third = revisions.new_generation(sequence=3)
+    revisions.mark_effective(third)
+    assert revisions.desired_config_revision == 3
+    assert revisions.effective_config_revision == 3
 
 
 async def test_scope_awaits_async_cleanup_and_disposes_in_lifo_order():

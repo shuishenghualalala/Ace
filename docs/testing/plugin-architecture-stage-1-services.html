@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 1 · Service Registry 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>插件架构阶段 1 · Service Registry 测试记录</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-02</div>
+
+  <h2>1. 验证目标</h2>
+  <ul>
+    <li>服务按 Session、User、Workspace、Global 的顺序解析，租户之间不串值。</li>
+    <li>激活中贡献不可见，提交后整体可见，停止开始后立即拒绝新解析。</li>
+    <li>required 缺失阻止就绪，optional 缺失只进入诊断。</li>
+    <li>静态依赖批次、无 Provider 断路和循环等待可被识别。</li>
+    <li>配置更新失败或 Generation 过时不改变 effective revision。</li>
+  </ul>
+
+  <h2>2. 测试矩阵</h2>
+  <table>
+    <thead><tr><th>层级</th><th>命令 / 范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Unit</td><td><code>test_feature_services.py</code> 与配置版本专项</td><td class="ok">11 通过</td></tr>
+      <tr><td>Focused regression</td><td>Feature Runtime、Plugin 生命周期、Tool Registry、Browser Plugin</td><td class="ok">296 通过，1 跳过</td></tr>
+      <tr><td>Architecture</td><td><code>lint-imports</code>：6 条契约，295 个模块，1249 条依赖</td><td class="ok">通过</td></tr>
+      <tr><td>Static</td><td>本次 Python 修改文件 Ruff</td><td class="ok">通过</td></tr>
+      <tr><td>Docs</td><td>5 个 HTML 文件解析、链接和 Mermaid 进度图离线渲染</td><td class="ok">通过</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 不变量</h2>
+  <ul>
+    <li>同一 Service Key 在同一精确作用域不能重复注册；不同作用域可以并存。</li>
+    <li>旧 Token 再次释放不能误删后来注册的新 Generation。</li>
+    <li>依赖图的启动批次只用于静态诊断，真实激活仍以当前作用域的可见服务为准。</li>
+    <li>desired revision 单调递增；只有仍匹配最新 desired 的 Generation 能成为 effective。</li>
+  </ul>
+
+  <h2>4. 跨平台说明</h2>
+  <p>全部测试只使用 Python 标准异步与内存结构，没有平台路径、Shell、信号或文件锁差异。</p>
+
+  <div class="nav"><a href="../backend/adr/0002-scoped-service-registry.html">ADR-0002</a> · <a href="../backend/modules/plugins.html">模块文档</a> · <a href="../index.html">文档总览</a></div>
+</div>
+</body>
+</html>

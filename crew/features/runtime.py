@@ -50,6 +50,7 @@ class FeatureGeneration:
 
     feature_id: str
     sequence: int
+    desired_config_revision: int = 1
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __post_init__(self) -> None:
@@ -58,12 +59,78 @@ class FeatureGeneration:
             raise ValueError("feature_id must not be empty")
         if self.sequence < 1:
             raise ValueError("generation sequence must be greater than zero")
+        if self.desired_config_revision < 1:
+            raise ValueError("desired config revision must be greater than zero")
         object.__setattr__(self, "feature_id", normalized_id)
 
     @property
     def key(self) -> str:
         """Stable diagnostic key for this activation."""
-        return f"{self.feature_id}@{self.sequence}"
+        return f"{self.feature_id}@g{self.sequence}"
+
+
+class StaleFeatureGenerationError(CrewError):
+    """A generation no longer represents the desired configuration."""
+
+
+class FeatureConfigRevisions:
+    """Track requested and currently effective configuration revisions."""
+
+    def __init__(
+        self,
+        feature_id: str,
+        *,
+        desired_config_revision: int = 1,
+        effective_config_revision: int | None = None,
+    ) -> None:
+        normalized_id = feature_id.strip()
+        if not normalized_id:
+            raise ValueError("feature_id must not be empty")
+        if desired_config_revision < 1:
+            raise ValueError("desired config revision must be greater than zero")
+        if effective_config_revision is not None and not (
+            1 <= effective_config_revision <= desired_config_revision
+        ):
+            raise ValueError("effective config revision must be between one and desired")
+        self.feature_id = normalized_id
+        self._desired_config_revision = desired_config_revision
+        self._effective_config_revision = effective_config_revision
+
+    @property
+    def desired_config_revision(self) -> int:
+        return self._desired_config_revision
+
+    @property
+    def effective_config_revision(self) -> int | None:
+        return self._effective_config_revision
+
+    def request(self, revision: int) -> None:
+        """Record a newer user-requested configuration revision."""
+        if revision <= self._desired_config_revision:
+            raise ValueError("requested config revision must increase monotonically")
+        self._desired_config_revision = revision
+
+    def new_generation(self, sequence: int) -> FeatureGeneration:
+        """Create a generation for the configuration currently desired."""
+        return FeatureGeneration(
+            feature_id=self.feature_id,
+            sequence=sequence,
+            desired_config_revision=self._desired_config_revision,
+        )
+
+    def mark_effective(self, generation: FeatureGeneration) -> None:
+        """Publish a generation only if it still matches the latest request."""
+        if generation.feature_id != self.feature_id:
+            raise ValueError(
+                f"generation {generation.key} belongs to a different feature"
+            )
+        if generation.desired_config_revision != self._desired_config_revision:
+            raise StaleFeatureGenerationError(
+                f"generation {generation.key} targets config revision "
+                f"{generation.desired_config_revision}, but desired revision is "
+                f"{self._desired_config_revision}"
+            )
+        self._effective_config_revision = generation.desired_config_revision
 
 
 @dataclass(frozen=True, slots=True)
