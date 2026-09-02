@@ -720,7 +720,7 @@ class ExternalAgentStore:
         agent_id: str,
         *,
         runtime: dict[str, Any] | None = None,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         """Refresh the default model overlay and return the public Agent row."""
 
@@ -737,7 +737,7 @@ class ExternalAgentStore:
         agent_id: str,
         model_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         """Resolve and persist one lazy model overlay as a public AgentProfile."""
 
@@ -780,7 +780,7 @@ class ExternalAgentStore:
         agent_id: str,
         *,
         runtime: dict[str, Any] | None = None,
-        owner_account_id: str = "",
+        owner_account_id: str,
         model_id: str | None = None,
     ) -> dict[str, Any]:
         """Refresh one or more ProfileEnvelope overlays in the caller transaction."""
@@ -860,7 +860,7 @@ class ExternalAgentStore:
     def record_agent_profile_observation(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         external_agent_id: str,
         source_run_id: str,
         source_node_id: str,
@@ -994,7 +994,7 @@ class ExternalAgentStore:
         self,
         external_agent_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> list[dict[str, Any]]:
         with self._conn() as conn:
             rows = conn.execute(
@@ -1022,7 +1022,7 @@ class ExternalAgentStore:
     def create_agent(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         name: str,
         runtime_id: str,
         model: str = "",
@@ -1064,7 +1064,7 @@ class ExternalAgentStore:
     def get_or_create_managed_agent(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         managed_kind: str,
         managed_key: str,
         name: str,
@@ -1124,7 +1124,7 @@ class ExternalAgentStore:
     def list_agents(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         include_managed: bool = True,
     ) -> list[dict[str, Any]]:
         with self._conn() as conn:
@@ -1144,7 +1144,7 @@ class ExternalAgentStore:
                 ).fetchall()
         return [self._agent_dict(row) for row in rows]
 
-    def get_agent(self, agent_id: str, *, owner_account_id: str = "") -> dict[str, Any]:
+    def get_agent(self, agent_id: str, *, owner_account_id: str) -> dict[str, Any]:
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT * FROM external_agent WHERE id = ? AND owner_account_id = ?",
@@ -1154,7 +1154,7 @@ class ExternalAgentStore:
             raise KeyError(agent_id)
         return self._agent_dict(row)
 
-    def delete_agent(self, agent_id: str, *, owner_account_id: str = "") -> None:
+    def delete_agent(self, agent_id: str, *, owner_account_id: str) -> None:
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT id FROM external_agent WHERE id = ? AND owner_account_id = ?",
@@ -1199,7 +1199,7 @@ class ExternalAgentStore:
         self,
         agent_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         agent = self.get_agent(agent_id, owner_account_id=owner_account_id)
         runtime = self.get_runtime(agent["runtime_id"])
@@ -1208,7 +1208,7 @@ class ExternalAgentStore:
     def get_runtime_session_binding(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         crew_session_id: str,
         external_agent_id: str,
         runtime_id: str,
@@ -1234,7 +1234,7 @@ class ExternalAgentStore:
     def latest_runtime_session_binding_for_agent(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         crew_session_id: str,
         external_agent_id: str,
     ) -> dict[str, Any] | None:
@@ -1263,7 +1263,7 @@ class ExternalAgentStore:
     def save_runtime_session_binding(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         crew_session_id: str,
         external_agent_id: str,
         runtime_id: str,
@@ -1330,7 +1330,7 @@ class ExternalAgentStore:
     def delete_runtime_session_binding(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         crew_session_id: str,
         external_agent_id: str,
         runtime_id: str,
@@ -1355,7 +1355,7 @@ class ExternalAgentStore:
         self,
         crew_session_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> int:
         """删除某 Crew 会话下全部外部 Runtime 绑定行，返回删除行数。"""
         sid = str(crew_session_id or "").strip()
@@ -1373,7 +1373,7 @@ class ExternalAgentStore:
     def get_acp_session_binding(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         crew_session_id: str,
         external_agent_id: str,
         runtime_id: str,
@@ -1396,7 +1396,7 @@ class ExternalAgentStore:
     def save_acp_session_binding(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         crew_session_id: str,
         external_agent_id: str,
         runtime_id: str,
@@ -1421,7 +1421,7 @@ class ExternalAgentStore:
     def delete_acp_session_binding(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         crew_session_id: str,
         external_agent_id: str,
         runtime_id: str,
@@ -1442,7 +1442,7 @@ class ExternalAgentStore:
         self,
         crew_session_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> int:
         return self.delete_runtime_bindings_for_session(
             crew_session_id,
@@ -1452,7 +1452,7 @@ class ExternalAgentStore:
     def create_team(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         name: str,
         leader_agent_id: str,
         members: list[dict[str, Any]],
@@ -1539,7 +1539,7 @@ class ExternalAgentStore:
                 )
         return self.get_team(team_id, owner_account_id=owner_account_id)
 
-    def list_teams(self, *, owner_account_id: str = "") -> list[dict[str, Any]]:
+    def list_teams(self, *, owner_account_id: str) -> list[dict[str, Any]]:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM external_team WHERE owner_account_id = ? AND archived_at IS NULL ORDER BY created_at DESC",
@@ -1547,7 +1547,7 @@ class ExternalAgentStore:
             ).fetchall()
         return [self.get_team(row["id"], owner_account_id=owner_account_id) for row in rows]
 
-    def get_team(self, team_id: str, *, owner_account_id: str = "") -> dict[str, Any]:
+    def get_team(self, team_id: str, *, owner_account_id: str) -> dict[str, Any]:
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT * FROM external_team WHERE id = ? AND owner_account_id = ? AND archived_at IS NULL",
@@ -1577,7 +1577,7 @@ class ExternalAgentStore:
         team["members"] = [self._team_member_dict(member) for member in member_rows]
         return team
 
-    def delete_team(self, team_id: str, *, owner_account_id: str = "") -> None:
+    def delete_team(self, team_id: str, *, owner_account_id: str) -> None:
         now = _now()
         with self._conn() as conn:
             row = conn.execute(

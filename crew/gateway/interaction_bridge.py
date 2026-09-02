@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from crew.agent.skills import SkillActivation
 from crew.core.errors import ToolError
 from crew.core.followup import CANCELLED_MARKER, send_followup_question_to, wait_for_answer
-from crew.core.runctx import PushFn, current_owner_account_id
+from crew.core.runctx import PushFn
 from crew.core.timeout_policy import DEFAULT_INTERACTION_TIMEOUT_SECONDS
 from crew.security.models import (
     AdditionalPermissionProfile,
@@ -85,7 +85,7 @@ class InteractionBridge:
     def create_binding(
         self,
         *,
-        owner_account_id: str | None = None,
+        owner_account_id: str,
         display_session_id: str,
         control_session_id: str = "",
         origin_session_id: str,
@@ -99,7 +99,7 @@ class InteractionBridge:
         active_skills: tuple[SkillActivation, ...] | list[SkillActivation] = (),
         interaction_timeout_seconds: float = DEFAULT_INTERACTION_TIMEOUT_SECONDS,
     ) -> ExternalInteractionBinding | None:
-        owner = str(owner_account_id or current_owner_account_id.get() or "").strip()
+        owner = str(owner_account_id).strip()
         if not self.available or not owner:
             return None
         if context_type not in {"standalone", "team"}:

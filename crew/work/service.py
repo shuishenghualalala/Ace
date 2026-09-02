@@ -10,6 +10,7 @@ from datetime import date, datetime, time, timedelta
 from dataclasses import asdict, dataclass
 from typing import Any, Awaitable, Callable, Protocol, Sequence
 
+from crew.core.runctx import normalize_owner_account_id
 from crew.core.envelope import Envelope
 from crew.core.interfaces import LLMProvider, SessionStore, WorkspaceStore
 from crew.core.types import Message
@@ -1204,7 +1205,7 @@ class WorkService:
 
     def _auto_start_item(self, context: dict[str, Any]) -> None:
         """Move one pending item to in-progress after a successful linked turn."""
-        owner = str(context.get("owner_account_id") or "").strip()
+        owner = normalize_owner_account_id(context.get("owner_account_id"))
         session_id = str(context.get("session_id") or "").strip()
         if (
             not owner
@@ -1235,7 +1236,7 @@ class WorkService:
         )
 
     async def _record_turn_preferences(self, context: dict[str, Any]) -> None:
-        owner = str(context.get("owner_account_id") or "").strip()
+        owner = normalize_owner_account_id(context.get("owner_account_id"))
         session_id = str(context.get("session_id") or "").strip()
         if (
             not owner

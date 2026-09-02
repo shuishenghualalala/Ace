@@ -176,20 +176,17 @@ class NotificationStore:
 
         return int(self._writer.execute(_write))
 
-    def mark_read_by_payload(self, source: str, key: str, owner_account_id: str = "") -> int:
-        """把 payload 顶层任一值等于 key 的未读通知标记已读。owner 为空时跨 owner 匹配。"""
+    def mark_read_by_payload(self, source: str, key: str, owner_account_id: str) -> int:
+        """把 payload 顶层任一值等于 key 的未读通知标记已读（严格限定 owner）。"""
 
         def _write(conn) -> int:
-            sql = (
+            cur = conn.execute(
                 "UPDATE notifications SET read_at = ? "
                 "WHERE source = ? AND read_at IS NULL AND payload != '' "
-                "AND EXISTS (SELECT 1 FROM json_each(notifications.payload) WHERE json_each.value = ?)"
+                "AND owner_account_id = ? "
+                "AND EXISTS (SELECT 1 FROM json_each(notifications.payload) WHERE json_each.value = ?)",
+                (time.time(), str(source), owner_account_id, str(key)),
             )
-            params: tuple = (time.time(), str(source), str(key))
-            if owner_account_id:
-                sql += " AND owner_account_id = ?"
-                params = (*params, owner_account_id)
-            cur = conn.execute(sql, params)
             return cur.rowcount
 
         return int(self._writer.execute(_write))

@@ -705,11 +705,11 @@ class CrewApp:
 
     def _on_followup_resolved(self, session_id: str, question_id: str) -> None:
         """追问被回答/取消/超时后，对应待办通知自动已读（同 approval 语义）。"""
-        self.notifications.mark_read_by_payload(
-            "followup",
-            question_id,
-            owner_account_id=self.session_store.resolve_owner_account_id(session_id),
-        )
+        owner = self.session_store.resolve_owner_account_id(session_id)
+        if not owner:
+            # 会话已不存在：无主可归，通知留给 TTL 清理，不做错误归属。
+            return
+        self.notifications.mark_read_by_payload("followup", question_id, owner_account_id=owner)
 
     # ---- 通知中心来源：plan（计划审批）----
 
@@ -1596,7 +1596,7 @@ class CrewApp:
             if notifications is not None:
                 notifications.set_push_fn(notify_owner_fn)
 
-    def _active_children_snapshot(self, session_id: str | None = None, owner_account_id: str = "") -> object:
+    def _active_children_snapshot(self, session_id: str | None, owner_account_id: str) -> object:
         team = self.team
         fn = getattr(team, "active_children", None)
         team_snap = fn(session_id, owner_account_id=owner_account_id) if callable(fn) else ([] if session_id else {})
@@ -2743,10 +2743,10 @@ class CrewApp:
                 pass  # 无运行中事件循环则跳过
 
     @staticmethod
-    def _owner_session_key(session_id: str, owner_account_id: str = "") -> OwnerSessionKey:
-        return owner_account_id or "", session_id
+    def _owner_session_key(session_id: str, owner_account_id: str) -> OwnerSessionKey:
+        return owner_account_id, session_id
 
-    def _on_subagent_collected(self, session_id: str, task_id: str, owner_account_id: str = "") -> None:
+    def _on_subagent_collected(self, session_id: str, task_id: str, owner_account_id: str) -> None:
         """模型已主动 collect 取走某后台结果 → 从待注入队列移除，避免下一轮重复注入。"""
         key = self._owner_session_key(session_id, owner_account_id)
         queue = self._subagent_pending.get(key)

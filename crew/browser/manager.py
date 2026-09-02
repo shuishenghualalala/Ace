@@ -597,7 +597,7 @@ class BrowserManager:
 
     def capability_generation(self, owner_account_id: str) -> int:
         """该 owner 当前的 Browser 能力代次（未撤销过为 0，单调递增）。"""
-        return self._capability_generations.get(str(owner_account_id or ""), 0)
+        return self._capability_generations.get(owner_account_id, 0)
 
     async def set_observation_deferred(
         self, owner_account_id: str, session_id: str, deferred: bool
@@ -626,14 +626,13 @@ class BrowserManager:
             _POST_OBSERVATION_DEFERRED.reset(token)
 
     def _bump_capability_generation(self, owner_account_id: str) -> int:
-        owner_id = str(owner_account_id or "")
-        new_value = self._capability_generations.get(owner_id, 0) + 1
-        self._capability_generations[owner_id] = new_value
+        new_value = self._capability_generations.get(owner_account_id, 0) + 1
+        self._capability_generations[owner_account_id] = new_value
         return new_value
 
     def renew_capability(self, owner_account_id: str) -> int:
         """重新启用能力时递增代次，并失效旧页面观察句柄。"""
-        owner_id = str(owner_account_id or "").strip()
+        owner_id = owner_account_id
         owner = self._owners.get(owner_id)
         if owner is not None:
             self._clear_native_selection(owner)
@@ -646,7 +645,7 @@ class BrowserManager:
 
     def capability_runtime_state(self, owner_account_id: str) -> dict[str, bool]:
         """Return a synchronous fail-closed view for capability enable gates."""
-        owner = self._owners.get(str(owner_account_id or "").strip())
+        owner = self._owners.get(owner_account_id)
         closing = bool(owner is not None and owner.closing)
         actions_blocked = bool(owner is not None and owner.actions_blocked)
         stop_unconfirmed = bool(owner is not None and owner.stop_unconfirmed)
@@ -662,8 +661,7 @@ class BrowserManager:
         self, owner_account_id: str, expected_generation: int
     ) -> Iterator[None]:
         """把一次 browser_use 调用绑定到不可跨 revoke 的能力代次。"""
-        owner_id = str(owner_account_id or "").strip()
-        token = _EXPECTED_CAPABILITY.set((owner_id, int(expected_generation)))
+        token = _EXPECTED_CAPABILITY.set((owner_account_id, int(expected_generation)))
         try:
             yield
         finally:
@@ -671,7 +669,7 @@ class BrowserManager:
 
     def _ensure_leased_capability_current(self, owner_account_id: str) -> None:
         lease = _EXPECTED_CAPABILITY.get()
-        if lease is None or lease[0] != str(owner_account_id or "").strip():
+        if lease is None or lease[0] != owner_account_id:
             return
         self.ensure_capability_current(lease[0], lease[1])
 
@@ -682,9 +680,9 @@ class BrowserManager:
         关闭其标签页与 Host owner（磁盘 Profile/Cookie 保留）。fail-stop：任何一步
         失败该 owner 保持 blocked 且不回收到可用集合，绝不静默恢复。其它 owner 不受影响。
         """
-        owner_id = str(owner_account_id or "").strip()
-        if not owner_id:
-            return
+        if not owner_account_id:
+            raise BrowserDriverError("browser revoke_owner 缺少账号上下文")
+        owner_id = owner_account_id
         owner: _Owner | None = None
         generation = self.capability_generation(owner_id)
 

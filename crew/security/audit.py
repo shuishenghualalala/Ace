@@ -394,27 +394,16 @@ class SQLiteSecurityAudit:
             json.dumps(asdict(record), ensure_ascii=False, sort_keys=True) for record in records
         )
 
-    def purge_expired(
-        self,
-        *,
-        now: float | None = None,
-        owner_account_id: str | None = None,
-    ) -> int:
-        """Purge retention-expired records globally or for one authenticated owner."""
+    def purge_expired(self, owner_account_id: str, *, now: float | None = None) -> int:
+        """Purge retention-expired records for one authenticated owner."""
         cutoff = (time.time() if now is None else float(now)) - _RETENTION_SECONDS
-        owner = str(owner_account_id or "").strip()
 
         def _write(conn) -> int:
-            if owner:
-                cursor = conn.execute(
-                    "DELETE FROM security_audit_events "
-                    "WHERE timestamp < ? AND owner_account_id = ?",
-                    (cutoff, owner),
-                )
-            else:
-                cursor = conn.execute(
-                    "DELETE FROM security_audit_events WHERE timestamp < ?", (cutoff,)
-                )
+            cursor = conn.execute(
+                "DELETE FROM security_audit_events "
+                "WHERE timestamp < ? AND owner_account_id = ?",
+                (cutoff, owner_account_id),
+            )
             return cursor.rowcount
 
         return self._writer.execute(_write)

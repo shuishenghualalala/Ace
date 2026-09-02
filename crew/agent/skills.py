@@ -695,7 +695,7 @@ def _skill_operator(operator_account_id: str | None) -> str:
         return str(operator_account_id).strip()
     from crew.core.runctx import current_owner_account_id
 
-    return str(current_owner_account_id.get() or "system").strip() or "system"
+    return current_owner_account_id.get()
 
 
 def _safe_audit_value(value: Any, *, limit: int = 160) -> str:

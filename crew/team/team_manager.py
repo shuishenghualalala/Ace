@@ -442,7 +442,7 @@ class InProcessTeamManager(TeamManager):
     ) -> dict[str, Any]:
         """Capture immutable model facts for a member execution attempt."""
 
-        team = self._teams.get(self._existing_team_key(session_id, owner_account_id))
+        team = self._teams.get(self._key(session_id, owner_account_id))
         spec = None
         if team is not None:
             if member_id == "leader":
@@ -513,8 +513,8 @@ class InProcessTeamManager(TeamManager):
     ) -> list[dict[str, Any]]:
         """Check pending nodes against the candidate model's hard execution facts."""
 
-        plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
-        team = self._teams.get(self._existing_team_key(session_id, owner_account_id))
+        plan = self._plans.get(self._key(session_id, owner_account_id))
+        team = self._teams.get(self._key(session_id, owner_account_id))
         if plan is None or team is None:
             return []
         spec = next(
@@ -557,39 +557,22 @@ class InProcessTeamManager(TeamManager):
         return incompatible
 
     @staticmethod
-    def _key(session_id: str, owner_account_id: str = "") -> TeamKey:
-        return str(owner_account_id or ""), str(session_id or "")
+    def _key(session_id: str, owner_account_id: str) -> TeamKey:
+        return owner_account_id, session_id
 
     @staticmethod
     def _session_from_key(key: TeamKey) -> str:
         return key[1]
 
-    def _kanban_store_for_owner(self, owner_account_id: str = "") -> Any | None:
+    def _kanban_store_for_owner(self, owner_account_id: str) -> Any | None:
         store = self.kanban_store
         if store is None:
             return None
-        owner = str(owner_account_id or "").strip()
-        if not owner:
-            return None
         if hasattr(store, "for_owner"):
-            return store.for_owner(owner)
+            return store.for_owner(owner_account_id)
         return store
 
-    def _existing_plan_key(self, session_id: str, owner_account_id: str = "") -> TeamKey:
-        key = self._key(session_id, owner_account_id)
-        if owner_account_id:
-            return key
-        local_key = self._key(session_id, "local")
-        return local_key if local_key in self._plans else key
-
-    def _existing_team_key(self, session_id: str, owner_account_id: str = "") -> TeamKey:
-        key = self._key(session_id, owner_account_id)
-        if owner_account_id:
-            return key
-        local_key = self._key(session_id, "local")
-        return local_key if local_key in self._teams else key
-
-    def _session_external_team_id(self, session_id: str, owner_account_id: str = "") -> str:
+    def _session_external_team_id(self, session_id: str, owner_account_id: str) -> str:
         getter = getattr(self.session_store, "get_agent_config", None)
         if not callable(getter):
             return ""
@@ -684,7 +667,7 @@ class InProcessTeamManager(TeamManager):
         if not parent_session_id or not child_id:
             return
         member_id = str(record.get("member") or "").strip()
-        team = self._teams.get(self._existing_team_key(parent_session_id, owner_account_id))
+        team = self._teams.get(self._key(parent_session_id, owner_account_id))
         if team is None:
             external_team_id = self._session_external_team_id(parent_session_id, owner_account_id)
             if external_team_id:
@@ -779,7 +762,7 @@ class InProcessTeamManager(TeamManager):
             if key not in {"agent", "owner_account_id"}
         }
 
-    def active_children(self, session_id: str | None = None, owner_account_id: str = "") -> object:
+    def active_children(self, session_id: str | None, owner_account_id: str) -> object:
         """返回活跃 teammate 状态；供 gateway runtime/concurrency 只读展示。"""
         with self._active_lock:
             if session_id is not None:
@@ -790,7 +773,7 @@ class InProcessTeamManager(TeamManager):
             return {
                 sid: [self._public_child(record) for record in children.values()]
                 for (owner, sid), children in self._active_children.items()
-                if not owner_account_id or owner == owner_account_id
+                if owner == owner_account_id
             }
 
     def team_member_switch_state(
@@ -869,7 +852,7 @@ class InProcessTeamManager(TeamManager):
         """Return a member's display name while keeping IDs in protocol fields."""
 
         candidate = str(member_id or "").strip()
-        team = self._teams.get(self._existing_team_key(session_id, owner_account_id))
+        team = self._teams.get(self._key(session_id, owner_account_id))
         if team is None:
             return candidate
         spec = (
@@ -1035,7 +1018,7 @@ class InProcessTeamManager(TeamManager):
         )
 
     def read_plan(self, session_id: str, owner_account_id: str = "") -> dict[str, Any]:
-        plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
+        plan = self._plans.get(self._key(session_id, owner_account_id))
         if plan is None:
             return {"ok": True, "plan": None}
         return {"ok": True, "plan": plan.to_dict()}
@@ -1863,7 +1846,7 @@ class InProcessTeamManager(TeamManager):
         nodes that are ready after the local repair.
         """
 
-        plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
+        plan = self._plans.get(self._key(session_id, owner_account_id))
         if plan is None:
             plan = self._hydrate_persisted_team_plan(
                 session_id,
@@ -2315,7 +2298,7 @@ class InProcessTeamManager(TeamManager):
         if len(targets) != 1:
             raise ToolError("team_mention(assign) 必须且只能 @ 一个具体团队成员。")
         member = targets[0]
-        team = self._teams.get(self._existing_team_key(session_id, owner_account_id))
+        team = self._teams.get(self._key(session_id, owner_account_id))
         if team is not None:
             member = self._resolve_team_member_id(team, member)
         node_id = str(event.get("node_id") or "").strip()
@@ -2508,7 +2491,7 @@ class InProcessTeamManager(TeamManager):
         allow_reopen: bool = False,
         owner_account_id: str = "",
     ) -> dict[str, Any]:
-        plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
+        plan = self._plans.get(self._key(session_id, owner_account_id))
         if plan is None:
             raise ValueError("当前 Team session 尚未创建 TeamPlan")
         node = plan.nodes.get(str(node_id or "").strip())
@@ -2546,7 +2529,7 @@ class InProcessTeamManager(TeamManager):
         plan_node_id: str,
         preclaimed_node: bool = False,
     ) -> TeamPlan:
-        plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
+        plan = self._plans.get(self._key(session_id, owner_account_id))
         if plan is None:
             plan = self._hydrate_persisted_team_plan(
                 session_id,
@@ -2557,7 +2540,7 @@ class InProcessTeamManager(TeamManager):
         if plan is None:
             raise ToolError("当前 Team session 尚未创建 TeamPlan，不能派活。")
 
-        team = self._teams.get(self._existing_team_key(session_id, owner_account_id))
+        team = self._teams.get(self._key(session_id, owner_account_id))
         if team is not None:
             self._normalize_plan_member_ids(plan, team)
 
@@ -2618,7 +2601,7 @@ class InProcessTeamManager(TeamManager):
         valid_member_ids: set[str],
         member_specs: dict[str, TeamMemberSpec],
     ) -> dict[str, Any]:
-        plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
+        plan = self._plans.get(self._key(session_id, owner_account_id))
         if plan is None:
             raise ToolError("当前 Team session 尚未创建 TeamPlan，不能变更 DAG。")
         change_type = str(change.get("change_type") or "add_node").strip()
@@ -3068,7 +3051,7 @@ class InProcessTeamManager(TeamManager):
             owner_account_id=owner_account_id,
             source_attempt_id=attempt_id,
         )
-        team = self._teams.get(self._existing_team_key(plan.team_session_id, owner_account_id))
+        team = self._teams.get(self._key(plan.team_session_id, owner_account_id))
         spec = team.members.get(node.assignee) if team is not None else None
         external_agent_id = str(
             spec.external_agent_id
@@ -4647,7 +4630,7 @@ class InProcessTeamManager(TeamManager):
         ])
 
     def _cancel_plan(self, session_id: str, message: str | None = None, owner_account_id: str = "") -> bool:
-        plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
+        plan = self._plans.get(self._key(session_id, owner_account_id))
         if plan is None:
             return False
         reason = message or "团队运行已停止"
@@ -6705,7 +6688,7 @@ class InProcessTeamManager(TeamManager):
                 owner_account_id=owner_account_id,
                 runtime_members=runtime_members,
             )
-            existing_plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
+            existing_plan = self._plans.get(self._key(session_id, owner_account_id))
             if existing_plan is not None and hasattr(self._teams[key], "members"):
                 self._normalize_plan_member_ids(existing_plan, self._teams[key])
         return self._teams[key]
@@ -7178,9 +7161,9 @@ class InProcessTeamManager(TeamManager):
 
     async def destroy(self, session_id: str, owner_account_id: str = "") -> None:
         self.interrupt(session_id, "团队已销毁", owner_account_id=owner_account_id)
-        key = self._existing_team_key(session_id, owner_account_id)
+        key = self._key(session_id, owner_account_id)
         self._teams.pop(key, None)
-        self._plans.pop(self._existing_plan_key(session_id, owner_account_id), None)
+        self._plans.pop(self._key(session_id, owner_account_id), None)
         self._runtime_member_snapshots.pop(key, None)
         with self._active_lock:
             self._active_children.pop(self._key(session_id, owner_account_id), None)
@@ -7331,7 +7314,7 @@ class InProcessTeamManager(TeamManager):
         return interrupted + cancelled_tasks
 
     def steer(self, session_id: str, text: str, owner_account_id: str = "") -> bool:
-        team = self._teams.get(self._existing_team_key(session_id, owner_account_id))
+        team = self._teams.get(self._key(session_id, owner_account_id))
         if team is None:
             return False
         fn = getattr(team.leader, "steer", None)
@@ -7342,7 +7325,7 @@ class InProcessTeamManager(TeamManager):
     def interrupt(self, session_id: str, message: str | None = None, owner_account_id: str = "") -> bool:
         did_interrupt = False
         for target_session_id in self._matching_team_session_ids(session_id, owner_account_id=owner_account_id):
-            team = self._teams.get(self._existing_team_key(target_session_id, owner_account_id))
+            team = self._teams.get(self._key(target_session_id, owner_account_id))
             if team is not None:
                 for leader_agent in (getattr(team, "leader", None), getattr(team, "direct_leader", None)):
                     fn = getattr(leader_agent, "interrupt", None)

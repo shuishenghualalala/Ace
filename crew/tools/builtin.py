@@ -842,7 +842,7 @@ async def handle_terminal(
     if not session.exited:
         elapsed = time.monotonic() - started
         if timeout_explicit and effective_timeout <= auto_after and elapsed >= effective_timeout:
-            process_registry.kill_process(session.id)
+            process_registry.kill_process(session.id, owner_account_id=session.owner_account_id)
             if runtime is not None and task_id:
                 runtime.finish(
                     task_id,

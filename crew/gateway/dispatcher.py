@@ -298,7 +298,7 @@ class SessionDispatcher:
                 log.exception("team active children 状态获取失败 session=%s", session_id)
         return [] if session_id else {}
 
-    def _has_active_children(self, session_id: str, owner_account_id: str = "") -> bool:
+    def _has_active_children(self, session_id: str, owner_account_id: str) -> bool:
         snap = self._active_children_snapshot(session_id, owner_account_id=owner_account_id)
         return bool(snap)
 
