@@ -71,6 +71,8 @@
       <tr><td>Browser 试点</td><td>五个工具、Skill Root 与 BrowserManager 资源归属同一 Scope，应用关闭走统一生命周期。</td><td>已落地</td></tr>
       <tr><td>Manifest 服务依赖</td><td><code>requires</code>、<code>optional</code>、<code>provides</code> 映射到 Feature 服务图，按确定性批次激活。</td><td>已落地</td></tr>
       <tr><td>启动审计</td><td>输出状态、Generation、缺失服务和注册标签；CLI 可直接导出同一快照。</td><td>已落地</td></tr>
+      <tr><td>请求 Lease</td><td>插件 Tool、Hook、Middleware、Command 入口自动持有 Generation 租约；draining 后拒绝新请求。</td><td>已落地</td></tr>
+      <tr><td>停用策略</td><td>Manifest 声明 drain/cancel/immediate/restart_required 与超时；失败不提前标记 disabled。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -78,7 +80,7 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/features/runtime.py</code></td><td>Generation、Registration Token、Scope、Transaction 和结构化生命周期错误。</td></tr>
+      <tr><td><code>crew/features/runtime.py</code></td><td>Generation、Registration Token、请求 Lease、四类停用策略、Scope、Transaction 和结构化生命周期错误。</td></tr>
       <tr><td><code>crew/features/services.py</code></td><td>作用域化 Service Registry 与注册所有权。</td></tr>
       <tr><td><code>crew/features/dependencies.py</code></td><td>Feature 服务依赖声明、运行期解析和启动诊断。</td></tr>
       <tr><td><code>crew/features/manager.py</code></td><td>FeatureDefinition、InstallContext、运行记录与统一启停调度。</td></tr>
@@ -128,11 +130,17 @@ storage = ctx.resolve_service("storage")</code></pre>
   <pre><code>crew --dump-features
 crew --dump-features --json</code></pre>
   <p>启动审计与 CLI 使用同一结构化快照；Waiting/Failed 会列出缺失 Service 或原始错误，CLI 同时返回非零退出码。</p>
+  <pre><code>stop_policy: drain
+drain_timeout_seconds: 30
+
+async with context.acquire_lease("request:42"):
+    await execute_request()</code></pre>
+  <p>目录插件的 Tool、Hook、Middleware 和 Command 由 Adapter 自动持有 Lease。<code>drain</code> 等待旧请求，<code>cancel</code> 通知并取消活跃异步任务，<code>immediate</code> 直接清理并记录被越过的 Lease，<code>restart_required</code> 保留当前 Generation 到宿主关闭。同步 Tool 即使收到取消，也会等工作线程真正退出后才释放 Lease，避免后台线程继续使用已关闭资源。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>replace/restart 更新策略与 drain lease 将在阶段 1 后续提交实现。</li>
-    <li>运行期 Provider 消失后的 Consumer 级联 drain/retry 尚未实现，将与 drain lease 一并收口。</li>
+    <li>replace/restart 配置更新策略将在阶段 1 下一提交实现。</li>
+    <li>运行期 Provider 消失后的 Consumer 级联 drain/retry 尚未实现，将在配置更新与依赖重算时收口。</li>
     <li><code>ctx.services</code> 兼容字典仍在使用，待 Service Adapter 完成后删除。</li>
     <li>外部 MCP 协议当前不携带 Ace 生命周期元数据，因此默认按重要结果保护。</li>
   </ul>
@@ -153,10 +161,11 @@ crew --dump-features --json</code></pre>
       <tr><td>2026-09-02</td><td>增加四级 Service Registry、显式依赖图与 desired/effective 配置版本。</td><td>Feature Runtime 内核；现有插件服务字典暂不改变。</td></tr>
       <tr><td>2026-09-02</td><td>目录插件接入统一 FeatureRuntime；Browser 成为首个真实 Scope 试点。</td><td>PluginManager、Browser、应用关闭与插件测试。</td></tr>
       <tr><td>2026-09-02</td><td>Manifest 服务依赖进入激活图，增加 Host Service 桥、启动审计与 Feature dump。</td><td>Feature Runtime、PluginManager、CLI、Browser、Wiki Learning、Feishu。</td></tr>
+      <tr><td>2026-09-02</td><td>增加请求 Lease、四类 Manifest 停用策略、超时与强制清理诊断。</td><td>Feature Runtime、Plugin Adapter、全部内置目录插件。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0001-feature-lifecycle-primitives.html">ADR-0001</a> · <a href="../adr/0002-scoped-service-registry.html">ADR-0002</a> · <a href="../adr/0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="../adr/0004-manifest-service-startup-audit.html">ADR-0004</a> · <a href="../../testing/plugin-architecture-stage-1-manifest-audit.html">测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0001-feature-lifecycle-primitives.html">ADR-0001</a> · <a href="../adr/0002-scoped-service-registry.html">ADR-0002</a> · <a href="../adr/0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="../adr/0004-manifest-service-startup-audit.html">ADR-0004</a> · <a href="../adr/0005-feature-drain-lease.html">ADR-0005</a> · <a href="../../testing/plugin-architecture-stage-1-drain-lease.html">测试记录</a></div>
 </div>
 </body>
 </html>

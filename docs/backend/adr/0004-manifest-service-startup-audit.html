@@ -42,9 +42,9 @@
   <p>旧 Manifest 不声明服务时行为不变；<code>requires_services</code>、<code>optional_services</code>、<code>provides_services</code> 作为显式别名可用，但同一字段不能同时使用两种写法。实现只依赖 Python 数据结构与 asyncio，不依赖文件系统排序差异、Unix 信号或进程模型。</p>
 
   <h2>后续</h2>
-  <p><code>ctx.services</code> 仍为迁移期兼容视图。下一切片实现 replace/restart 配置更新及 drain lease 后，再逐个移除插件的隐式字典读取。</p>
+  <p><code>ctx.services</code> 仍为迁移期兼容视图。Drain lease 已由 ADR-0005 接续实现；下一切片完成 replace/restart 配置更新后，再逐个移除插件的隐式字典读取。</p>
 
-  <div class="nav"><a href="0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="../modules/plugins.html">Feature / Plugin 模块文档</a> · <a href="../../testing/plugin-architecture-stage-1-manifest-audit.html">测试记录</a></div>
+  <div class="nav"><a href="0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="0005-feature-drain-lease.html">ADR-0005</a> · <a href="../modules/plugins.html">Feature / Plugin 模块文档</a> · <a href="../../testing/plugin-architecture-stage-1-manifest-audit.html">测试记录</a></div>
 </div>
 </body>
 </html>

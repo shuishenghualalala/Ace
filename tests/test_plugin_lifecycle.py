@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from crew.core.types import ToolCall, ToolPermissionDecision
-from crew.features import FeatureState, RegistrationPhase
+from crew.features import FeatureLeaseUnavailableError, FeatureState, RegistrationPhase
 from crew.plugins.manager import PluginManager
 from crew.state.plugin_preferences import (
     PluginPreferencesStore,
@@ -355,6 +355,159 @@ async def test_registration_phases_are_visible_in_plugin_diagnostics(tmp_path):
     assert phases["tool:lifecycle_echo"] is RegistrationPhase.CONTRIBUTION
     assert phases["hook:pre_tool_call"] is RegistrationPhase.CONTRIBUTION
     assert phases["resource:dispose"] is RegistrationPhase.RESOURCE
+
+
+async def test_plugin_tool_invocations_hold_generation_lease_during_drain(tmp_path):
+    plugin_dir = tmp_path / "leased_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: leased-plugin\nkind: standalone\nstop_policy: drain\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+import asyncio
+
+STARTED = asyncio.Event()
+RELEASE = asyncio.Event()
+
+async def handler(args):
+    STARTED.set()
+    await RELEASE.wait()
+    return "done"
+
+def register(ctx):
+    ctx.register_tool(
+        name="leased_tool",
+        toolset="leased",
+        schema={"name": "leased_tool", "parameters": {"type": "object"}},
+        handler=handler,
+        is_async=True,
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+    await plugins.discover_and_load_async([tmp_path], enabled=["leased-plugin"])
+    module = __import__("crew_runtime_plugins.leased_plugin", fromlist=["STARTED"])
+    tool = registry.get("leased_tool")
+
+    running = asyncio.create_task(tool.run({}))
+    await module.STARTED.wait()
+    unloading = asyncio.create_task(plugins.unload_plugin_async("leased-plugin"))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    loaded = plugins.get_plugin("leased-plugin")
+    assert loaded is not None and loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.DRAINING
+    assert not unloading.done()
+    with pytest.raises(
+        FeatureLeaseUnavailableError,
+        match="does not accept new requests while draining",
+    ):
+        await tool.run({})
+
+    module.RELEASE.set()
+    assert await running == "done"
+    assert await unloading is True
+    assert registry.names() == []
+
+
+async def test_cancel_does_not_release_sync_tool_lease_before_worker_finishes(tmp_path):
+    plugin_dir = tmp_path / "sync_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "\n".join(
+            [
+                "name: sync-plugin",
+                "kind: standalone",
+                "stop_policy: cancel",
+                "drain_timeout_seconds: 0.01",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+from threading import Event
+
+STARTED = Event()
+RELEASE = Event()
+
+def handler(args):
+    STARTED.set()
+    RELEASE.wait()
+    return "done"
+
+def register(ctx):
+    ctx.register_tool(
+        name="sync_tool",
+        toolset="sync",
+        schema={"name": "sync_tool", "parameters": {"type": "object"}},
+        handler=handler,
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+    await plugins.discover_and_load_async([tmp_path], enabled=["sync-plugin"])
+    module = __import__("crew_runtime_plugins.sync_plugin", fromlist=["STARTED"])
+    running = asyncio.create_task(registry.get("sync_tool").run({}))
+    while not module.STARTED.is_set():
+        await asyncio.sleep(0)
+
+    assert await plugins.unload_plugin_async("sync-plugin") is False
+
+    loaded = plugins.get_plugin("sync-plugin")
+    assert loaded is not None and loaded.enabled
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.DRAINING
+    assert registry.names() == ["sync_tool"]
+
+    module.RELEASE.set()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert await plugins.unload_plugin_async("sync-plugin") is True
+    assert registry.names() == []
+
+
+async def test_restart_required_plugin_is_retained_until_host_shutdown(tmp_path):
+    plugin_dir = tmp_path / "route_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: route-plugin\nkind: standalone\nstop_policy: restart_required\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+def register(ctx):
+    ctx.register_tool(
+        name="route_tool",
+        toolset="route",
+        schema={"name": "route_tool", "parameters": {"type": "object"}},
+        handler=lambda args: "ok",
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+    await plugins.discover_and_load_async([tmp_path], enabled=["route-plugin"])
+
+    assert await plugins.unload_plugin_async("route-plugin") is False
+
+    loaded = plugins.get_plugin("route-plugin")
+    assert loaded is not None and loaded.enabled
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.restart_required
+    assert registry.names() == ["route_tool"]
+
+    assert await plugins.aclose() == ()
+    assert not loaded.enabled
+    assert registry.names() == []
 
 
 async def test_manifest_services_drive_plugin_activation_order(tmp_path):

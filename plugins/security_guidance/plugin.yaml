@@ -3,6 +3,7 @@ version: "0.1.0"
 description: "Warn when file writes or patches contain common unsafe code patterns."
 author: "Crew"
 kind: standalone
+stop_policy: immediate
 provides_hooks:
   - pre_tool_call
   - transform_tool_result

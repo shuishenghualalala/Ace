@@ -17,6 +17,7 @@ import sys
 from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
+from functools import wraps
 from pathlib import Path
 from threading import Thread
 from types import ModuleType
@@ -39,6 +40,7 @@ from crew.features.runtime import (
     FeatureGeneration,
     FeatureScope,
     FeatureState,
+    FeatureStopPolicy,
     RegistrationPhase,
     RegistrationToken,
 )
@@ -244,6 +246,8 @@ class PluginManifest:
     provides_hooks: list[str] = field(default_factory=list)
     config_schema: dict[str, Any] = field(default_factory=dict)
     ui_hints: dict[str, Any] = field(default_factory=dict)
+    stop_policy: FeatureStopPolicy = FeatureStopPolicy.DRAIN
+    drain_timeout_seconds: float | None = 30.0
     path: Path | None = None
 
 
@@ -300,6 +304,55 @@ class PluginContext:
         phase: RegistrationPhase = RegistrationPhase.CONTRIBUTION,
     ) -> None:
         self._feature_context.register_disposer(disposer, label=label, phase=phase)
+
+    def _lease_callback(
+        self,
+        callback: Callable[..., Any],
+        *,
+        label: str,
+        run_sync_in_thread: bool = False,
+    ) -> Callable[..., Any]:
+        """Wrap one callable so every invocation owns a generation lease."""
+
+        @wraps(callback)
+        async def leased(*args: Any, **kwargs: Any) -> Any:
+            async with self._feature_context.acquire_lease(label):
+                call_kwargs = kwargs
+                try:
+                    signature = inspect.signature(callback)
+                    accepts_kwargs = any(
+                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                        for parameter in signature.parameters.values()
+                    )
+                    if not accepts_kwargs:
+                        call_kwargs = {
+                            key: value
+                            for key, value in kwargs.items()
+                            if key in signature.parameters
+                        }
+                except (TypeError, ValueError):
+                    pass
+                if run_sync_in_thread and not inspect.iscoroutinefunction(callback):
+                    work = asyncio.create_task(
+                        asyncio.to_thread(callback, *args, **call_kwargs),
+                        name=f"plugin-sync-callback:{self.manifest.name}:{label}",
+                    )
+                    try:
+                        return await asyncio.shield(work)
+                    except asyncio.CancelledError:
+                        while not work.done():
+                            try:
+                                await asyncio.shield(work)
+                            except asyncio.CancelledError:
+                                continue
+                        work.result()
+                        raise
+                result = callback(*args, **call_kwargs)
+                if inspect.isawaitable(result):
+                    return await result
+                return result
+
+        return leased
 
     @staticmethod
     def _service_key(key: str | ServiceKey[Any]) -> ServiceKey[Any]:
@@ -387,14 +440,19 @@ class PluginContext:
             raise RuntimeError("PluginManager 未绑定 ToolRegistry，无法注册工具")
         registry = self._manager.registry
         previous = registry.get(name) if name in registry.names() else None
+        leased_handler = self._lease_callback(
+            handler,
+            label=f"tool:{name}",
+            run_sync_in_thread=not (is_async or inspect.iscoroutinefunction(handler)),
+        )
         registry.register(
             name=name,
             toolset=toolset,
             schema=schema,
-            handler=handler,
+            handler=leased_handler,
             check_fn=check_fn,
             requires_env=requires_env,
-            is_async=is_async,
+            is_async=True,
             description=description,
             emoji=emoji,
             override=override,
@@ -434,8 +492,11 @@ class PluginContext:
                 hook_name,
             )
         owner_key = self.manifest.key or self.manifest.name
-        self._manager._hooks.setdefault(hook_name, []).append(callback)
-        self._manager._hook_owners.setdefault(hook_name, []).append((owner_key, callback))
+        leased_callback = self._lease_callback(callback, label=f"hook:{hook_name}")
+        self._manager._hooks.setdefault(hook_name, []).append(leased_callback)
+        self._manager._hook_owners.setdefault(hook_name, []).append(
+            (owner_key, leased_callback)
+        )
         self._loaded.hooks_registered.append(hook_name)
 
         def unregister() -> None:
@@ -444,7 +505,7 @@ class PluginContext:
                 self._manager._hook_owners,
                 hook_name,
                 owner_key,
-                callback,
+                leased_callback,
             )
             self._discard_once(self._loaded.hooks_registered, hook_name)
 
@@ -462,8 +523,14 @@ class PluginContext:
                 kind,
             )
         owner_key = self.manifest.key or self.manifest.name
-        self._manager._middleware.setdefault(kind, []).append(callback)
-        self._manager._middleware_owners.setdefault(kind, []).append((owner_key, callback))
+        leased_callback = self._lease_callback(
+            callback,
+            label=f"middleware:{kind}",
+        )
+        self._manager._middleware.setdefault(kind, []).append(leased_callback)
+        self._manager._middleware_owners.setdefault(kind, []).append(
+            (owner_key, leased_callback)
+        )
         self._loaded.middleware_registered.append(kind)
 
         def unregister() -> None:
@@ -472,7 +539,7 @@ class PluginContext:
                 self._manager._middleware_owners,
                 kind,
                 owner_key,
-                callback,
+                leased_callback,
             )
             self._discard_once(self._loaded.middleware_registered, kind)
 
@@ -535,8 +602,12 @@ class PluginContext:
             )
             return
         previous = self._manager._plugin_commands.get(clean)
+        leased_handler = self._lease_callback(
+            handler,
+            label=f"command:{clean}",
+        )
         entry = {
-            "handler": handler,
+            "handler": leased_handler,
             "description": description or "Plugin command",
             "plugin": self.manifest.name,
             "args_hint": (args_hint or "").strip(),
@@ -889,23 +960,40 @@ class PluginManager:
             return asyncio.run(self.unload_plugin_async(key))
         raise RuntimeError("事件循环中请使用 await unload_plugin_async(key)")
 
-    async def unload_plugin_async(self, key: str) -> bool:
+    async def unload_plugin_async(
+        self,
+        key: str,
+        *,
+        host_shutdown: bool = False,
+    ) -> bool:
         """停用插件并等待该 Generation 的全部注册和资源完成清理。"""
         loaded = self.get_plugin(key)
         if loaded is None or not loaded.enabled:
             return False
         owner_key = loaded.manifest.key or loaded.manifest.name
-        stopped = await self.feature_runtime.deactivate(owner_key)
-        loaded.enabled = False
-        loaded.tools_registered.clear()
-        loaded.hooks_registered.clear()
-        loaded.middleware_registered.clear()
-        loaded.commands_registered.clear()
-        loaded.api_routers_registered.clear()
-        loaded.platforms_registered.clear()
-        loaded.disposers.clear()
-        loaded.skill_roots.clear()
+        policy = (
+            FeatureStopPolicy.IMMEDIATE
+            if host_shutdown
+            and loaded.manifest.stop_policy is FeatureStopPolicy.RESTART_REQUIRED
+            else None
+        )
+        stopped = await self.feature_runtime.deactivate(owner_key, policy=policy)
         record = loaded.feature_record
+        retained = (
+            not stopped
+            and record is not None
+            and record.state in {FeatureState.ACTIVE, FeatureState.DRAINING}
+        )
+        loaded.enabled = retained
+        if not retained:
+            loaded.tools_registered.clear()
+            loaded.hooks_registered.clear()
+            loaded.middleware_registered.clear()
+            loaded.commands_registered.clear()
+            loaded.api_routers_registered.clear()
+            loaded.platforms_registered.clear()
+            loaded.disposers.clear()
+            loaded.skill_roots.clear()
         loaded.error = None if stopped else str(record.error if record else "cleanup failed")
         if stopped:
             log.info("插件已卸载: %s", owner_key)
@@ -920,7 +1008,7 @@ class PluginManager:
             if not loaded.enabled:
                 continue
             owner_key = loaded.manifest.key or loaded.manifest.name
-            if not await self.unload_plugin_async(owner_key):
+            if not await self.unload_plugin_async(owner_key, host_shutdown=True):
                 failed.append(owner_key)
         return tuple(failed)
 
@@ -955,6 +1043,18 @@ class PluginManager:
         if root == get_user_plugins_dir().resolve():
             return "project"
         return "local"
+
+    @staticmethod
+    def _manifest_drain_timeout(raw: dict[str, Any]) -> float | None:
+        value = raw.get("drain_timeout_seconds", 30.0)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("plugin manifest drain_timeout_seconds must be a number or null")
+        timeout = float(value)
+        if timeout < 0:
+            raise ValueError("plugin manifest drain_timeout_seconds must not be negative")
+        return timeout
 
     def _read_manifest(self, plugin_dir: Path, *, key: str, source: str) -> PluginManifest | None:
         manifest_path = plugin_dir / "plugin.yaml"
@@ -992,6 +1092,8 @@ class PluginManager:
                 provides_hooks=list(raw.get("provides_hooks") or []),
                 config_schema=dict(raw.get("config_schema") or raw.get("configSchema") or {}),
                 ui_hints=dict(raw.get("ui_hints") or raw.get("uiHints") or {}),
+                stop_policy=FeatureStopPolicy(raw.get("stop_policy") or "drain"),
+                drain_timeout_seconds=self._manifest_drain_timeout(raw),
                 path=plugin_dir,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1031,6 +1133,8 @@ class PluginManager:
             owner_key,
             install,
             dependencies=dependencies,
+            stop_policy=manifest.stop_policy,
+            drain_timeout_seconds=manifest.drain_timeout_seconds,
         )
 
     def _apply_feature_record(

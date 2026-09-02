@@ -4,6 +4,7 @@ version: "0.1.0"
 description: "Feishu/Lark channel adapter plugin for Crew gateway."
 author: "Crew"
 kind: platform
+stop_policy: restart_required
 requires_env:
   - name: FEISHU_APP_ID
     description: "Feishu/Lark app ID"

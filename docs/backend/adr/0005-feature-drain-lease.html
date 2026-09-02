@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0005 · Feature 请求 Lease 与停用策略</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0005 · Feature 请求 Lease 与停用策略</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-02 · 阶段：插件架构 Stage 1 / Commit 6</div>
+
+  <h2>背景</h2>
+  <p>Scope 已能逆序撤销贡献和资源，但旧的停用路径不知道某个 Handler 是否仍在使用 Provider、连接或 Store。直接执行 disposer 会让运行中的请求访问已关闭资源；仅等待 disposer 又无法阻止新请求持续进入。</p>
+
+  <h2>决定</h2>
+  <div class="decision"><p>每个外部可见调用在进入 Active Generation 时获取 Lease；停止先把 Scope 置为 Draining，关闭新 Lease 入口，再依据 Manifest 策略处理已有 Lease，最后进入两相清理。</p></div>
+  <table>
+    <thead><tr><th>策略</th><th>行为</th><th>典型能力</th></tr></thead>
+    <tbody>
+      <tr><td>drain</td><td>拒绝新增，等待活跃 Lease 自然释放。</td><td>Provider、Wiki、一般工具。</td></tr>
+      <tr><td>cancel</td><td>设置取消信号并取消持有 Lease 的异步任务，再等待其退出。</td><td>Browser 操作、用户主动停止的后台工作。</td></tr>
+      <tr><td>immediate</td><td>直接清理；若存在 Lease，将其标签记录为 forced cleanup。</td><td>无状态纯贡献。</td></tr>
+      <tr><td>restart_required</td><td>运行期停用失败关闭，保留当前 Generation 并记录待重启；宿主关闭边界可完成清理。</td><td>稳定 Router 树、进程级资源。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>入口覆盖</h2>
+  <p>Plugin Adapter 自动包装 Tool、Hook、Middleware 和 Command，不要求现有插件修改 Handler。同步 Tool 在线程中运行时，取消只中断外层任务；Lease 必须等工作线程实际返回后才能释放，超时期间资源保持可用且 Feature 保持 Draining。</p>
+
+  <h2>诊断与失败语义</h2>
+  <p>Feature 快照新增 stop policy、活跃 Lease、restart required 和最近一次停止详情。Drain 超时返回失败，Scope 保持 Draining、拒绝新请求且不释放资源；释放遗留 Lease 后可重试。只有贡献已撤销、资源已完成清理时，Runtime 才把 Feature 变回 Discovered。</p>
+
+  <h2>兼容与跨平台</h2>
+  <p>旧 Manifest 缺省为 <code>drain</code> 和 30 秒。实现只使用 Python asyncio、线程池等待和单调状态转换，不依赖 Unix signal、fork 或平台特定句柄；macOS、Linux 和 Windows 共享同一语义。</p>
+
+  <h2>后续</h2>
+  <p>下一切片在该 Lease 边界上实现配置 replace/restart：replace 原子发布新 Generation 后 drain 旧代；restart 先 drain 当前代，再以新配置激活并在失败时恢复。</p>
+
+  <div class="nav"><a href="0004-manifest-service-startup-audit.html">ADR-0004</a> · <a href="../modules/plugins.html">Feature / Plugin 模块文档</a> · <a href="../../testing/plugin-architecture-stage-1-drain-lease.html">测试记录</a></div>
+</div>
+</body>
+</html>

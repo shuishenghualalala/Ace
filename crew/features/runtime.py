@@ -35,6 +35,15 @@ class FeatureState(str, Enum):
     DISPOSED = "disposed"
 
 
+class FeatureStopPolicy(str, Enum):
+    """How one active generation reaches its teardown boundary."""
+
+    DRAIN = "drain"
+    CANCEL = "cancel"
+    IMMEDIATE = "immediate"
+    RESTART_REQUIRED = "restart_required"
+
+
 class RegistrationState(str, Enum):
     """Lifecycle state of one owned registration."""
 
@@ -180,6 +189,129 @@ class FeatureActivationError(CrewError):
         super().__init__(f"feature {generation.key} activation failed{cleanup_suffix}: {cause}")
 
 
+@dataclass(frozen=True, slots=True)
+class FeatureLeaseSnapshot:
+    """Serializable identity for one request using a feature generation."""
+
+    label: str
+    acquired_at: datetime
+    cancel_requested: bool
+
+
+@dataclass(slots=True)
+class FeatureStopDiagnostic:
+    """Last stop attempt, including timeout and forced-cleanup evidence."""
+
+    policy: FeatureStopPolicy
+    timeout_seconds: float | None
+    active_at_start: tuple[str, ...]
+    cancel_signalled: bool = False
+    timed_out: bool = False
+    forced_leases: tuple[str, ...] = ()
+    restart_required: bool = False
+
+
+class FeatureLeaseUnavailableError(CrewError):
+    """A request tried to enter a generation that no longer accepts work."""
+
+    def __init__(self, generation: FeatureGeneration, state: FeatureState) -> None:
+        self.generation = generation
+        self.state = state
+        super().__init__(
+            f"feature {generation.key} does not accept new requests while {state.value}"
+        )
+
+
+class FeatureDrainTimeoutError(CrewError):
+    """A stop attempt reached its deadline while requests still held leases."""
+
+    def __init__(
+        self,
+        generation: FeatureGeneration,
+        policy: FeatureStopPolicy,
+        timeout_seconds: float,
+        leases: tuple[FeatureLeaseSnapshot, ...],
+    ) -> None:
+        self.generation = generation
+        self.policy = policy
+        self.timeout_seconds = timeout_seconds
+        self.leases = leases
+        labels = ", ".join(lease.label for lease in leases)
+        super().__init__(
+            f"feature {generation.key} {policy.value} timed out after "
+            f"{timeout_seconds:g}s with {len(leases)} active lease(s): {labels}"
+        )
+
+
+class FeatureRestartRequiredError(CrewError):
+    """An active generation can only be removed at a host restart boundary."""
+
+    def __init__(self, generation: FeatureGeneration) -> None:
+        self.generation = generation
+        super().__init__(f"feature {generation.key} requires a host restart to deactivate")
+
+
+class FeatureLease:
+    """Single request claim that keeps one feature generation alive."""
+
+    def __init__(self, scope: FeatureScope, label: str) -> None:
+        normalized_label = label.strip()
+        if not normalized_label:
+            raise ValueError("feature lease label must not be empty")
+        self._scope = scope
+        self.label = normalized_label
+        self.acquired_at = datetime.now(timezone.utc)
+        self.cancel_event = asyncio.Event()
+        try:
+            self._owner_task = asyncio.current_task()
+        except RuntimeError:
+            self._owner_task = None
+        self._released = False
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self.cancel_event.is_set()
+
+    @property
+    def released(self) -> bool:
+        return self._released
+
+    def snapshot(self) -> FeatureLeaseSnapshot:
+        return FeatureLeaseSnapshot(
+            label=self.label,
+            acquired_at=self.acquired_at,
+            cancel_requested=self.cancel_requested,
+        )
+
+    def request_cancel(self) -> None:
+        """Notify cooperative work and interrupt its owning asyncio task."""
+        if self._released:
+            return
+        self.cancel_event.set()
+        owner = self._owner_task
+        if owner is not None and owner is not asyncio.current_task() and not owner.done():
+            owner.cancel()
+
+    def release(self) -> None:
+        """Release this claim once; repeated release is a no-op."""
+        if self._released:
+            return
+        self._released = True
+        self._scope._release_lease(self)
+
+    async def __aenter__(self) -> FeatureLease:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        self.release()
+        return False
+
+
 class RegistrationToken:
     """Single-shot, awaitable ownership token for one runtime contribution."""
 
@@ -246,8 +378,14 @@ class FeatureScope:
         self.generation = generation
         self._state = FeatureState.ACTIVATING
         self._registrations: list[RegistrationToken] = []
+        self._leases: set[FeatureLease] = set()
+        self._leases_drained = asyncio.Event()
+        self._leases_drained.set()
+        self._stop_task: asyncio.Task[None] | None = None
+        self._stop_diagnostic: FeatureStopDiagnostic | None = None
         self._disposal_task: asyncio.Task[None] | None = None
         self._start_lock = asyncio.Lock()
+        self._state_observer: Callable[[FeatureState], None] | None = None
 
     @property
     def state(self) -> FeatureState:
@@ -257,6 +395,41 @@ class FeatureScope:
     def registrations(self) -> tuple[RegistrationToken, ...]:
         """Ordered registration snapshot for diagnostics."""
         return tuple(self._registrations)
+
+    @property
+    def active_leases(self) -> tuple[FeatureLeaseSnapshot, ...]:
+        """Current request claims, oldest first, for diagnostics."""
+        return tuple(
+            lease.snapshot()
+            for lease in sorted(self._leases, key=lambda item: item.acquired_at)
+        )
+
+    @property
+    def stop_diagnostic(self) -> FeatureStopDiagnostic | None:
+        return self._stop_diagnostic
+
+    def observe_state(self, observer: Callable[[FeatureState], None]) -> None:
+        """Mirror future scope transitions into an owning runtime record."""
+        self._state_observer = observer
+
+    def _set_state(self, state: FeatureState) -> None:
+        self._state = state
+        if self._state_observer is not None:
+            self._state_observer(state)
+
+    def acquire_lease(self, label: str = "request") -> FeatureLease:
+        """Accept one request only while this generation is fully active."""
+        if self._state is not FeatureState.ACTIVE:
+            raise FeatureLeaseUnavailableError(self.generation, self._state)
+        lease = FeatureLease(self, label)
+        self._leases.add(lease)
+        self._leases_drained.clear()
+        return lease
+
+    def _release_lease(self, lease: FeatureLease) -> None:
+        self._leases.discard(lease)
+        if not self._leases:
+            self._leases_drained.set()
 
     def register(
         self,
@@ -280,17 +453,93 @@ class FeatureScope:
             raise RuntimeError(
                 f"feature {self.generation.key} cannot activate while {self._state.value}"
             )
-        self._state = FeatureState.ACTIVE
+        self._set_state(FeatureState.ACTIVE)
 
     async def rollback(self) -> None:
         """Dispose a partially installed generation."""
+        await self.dispose()
+
+    async def stop(
+        self,
+        policy: FeatureStopPolicy | str = FeatureStopPolicy.DRAIN,
+        *,
+        timeout_seconds: float | None = 30.0,
+    ) -> None:
+        """Reject new leases, settle existing work, then dispose owned effects."""
+        stop_policy = FeatureStopPolicy(policy)
+        if timeout_seconds is not None and timeout_seconds < 0:
+            raise ValueError("feature stop timeout must not be negative")
+        async with self._start_lock:
+            if self._stop_task is None:
+                self._stop_task = asyncio.create_task(
+                    self._run_stop(stop_policy, timeout_seconds),
+                    name=f"feature-scope-stop:{self.generation.key}",
+                )
+            task = self._stop_task
+        try:
+            await asyncio.shield(task)
+        except BaseException:
+            if task.done():
+                async with self._start_lock:
+                    if self._stop_task is task:
+                        self._stop_task = None
+            raise
+
+    async def _run_stop(
+        self,
+        policy: FeatureStopPolicy,
+        timeout_seconds: float | None,
+    ) -> None:
+        if self._state is FeatureState.DISPOSED:
+            return
+        active_at_start = tuple(lease.label for lease in self.active_leases)
+        diagnostic = FeatureStopDiagnostic(
+            policy=policy,
+            timeout_seconds=timeout_seconds,
+            active_at_start=active_at_start,
+        )
+        self._stop_diagnostic = diagnostic
+        if policy is FeatureStopPolicy.RESTART_REQUIRED:
+            diagnostic.restart_required = True
+            raise FeatureRestartRequiredError(self.generation)
+
+        self._set_state(FeatureState.DRAINING)
+        if policy is FeatureStopPolicy.IMMEDIATE:
+            diagnostic.forced_leases = tuple(
+                lease.label for lease in self.active_leases
+            )
+            await self.dispose()
+            return
+
+        if policy is FeatureStopPolicy.CANCEL and self._leases:
+            diagnostic.cancel_signalled = True
+            for lease in tuple(self._leases):
+                lease.request_cancel()
+
+        if self._leases:
+            try:
+                if timeout_seconds is None:
+                    await self._leases_drained.wait()
+                else:
+                    await asyncio.wait_for(
+                        self._leases_drained.wait(),
+                        timeout=timeout_seconds,
+                    )
+            except TimeoutError as error:
+                diagnostic.timed_out = True
+                raise FeatureDrainTimeoutError(
+                    self.generation,
+                    policy,
+                    timeout_seconds if timeout_seconds is not None else 0,
+                    self.active_leases,
+                ) from error
         await self.dispose()
 
     async def dispose(self) -> None:
         """Close registration, then await all disposers in reverse order."""
         async with self._start_lock:
             if self._disposal_task is None:
-                self._state = FeatureState.STOPPING
+                self._set_state(FeatureState.STOPPING)
                 self._disposal_task = asyncio.create_task(
                     self._dispose_all(),
                     name=f"feature-scope-dispose:{self.generation.key}",
@@ -312,9 +561,9 @@ class FeatureScope:
             except (Exception, asyncio.CancelledError) as error:
                 issues.append(FeatureCleanupIssue(label=token.label, error=error))
         if issues:
-            self._state = FeatureState.FAILED
+            self._set_state(FeatureState.FAILED)
             raise FeatureCleanupError(self.generation, tuple(issues))
-        self._state = FeatureState.DISPOSED
+        self._set_state(FeatureState.DISPOSED)
 
 
 class FeatureTransaction:

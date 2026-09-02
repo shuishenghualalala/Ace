@@ -6,6 +6,7 @@ import sys
 import pytest
 
 from crew.core.types import Message, ToolCall, ToolResult
+from crew.features import FeatureStopPolicy
 from crew.plugins.manager import PluginManager
 from crew.tools.registry import Registry
 from plugins.platforms.feishu.adapter import lark_available
@@ -286,6 +287,8 @@ kind: platform
 version: 2.0.0
 description: Rich manifest
 author: Crew
+stop_policy: restart_required
+drain_timeout_seconds: 12.5
 requires_env:
   - name: RICH_TOKEN
 optional_env:
@@ -319,6 +322,8 @@ def register(ctx):
     assert loaded.manifest.name == "rich-plugin"
     assert loaded.manifest.label == "Rich Plugin"
     assert loaded.manifest.kind == "platform"
+    assert loaded.manifest.stop_policy is FeatureStopPolicy.RESTART_REQUIRED
+    assert loaded.manifest.drain_timeout_seconds == 12.5
     assert loaded.manifest.requires_env == [{"name": "RICH_TOKEN"}]
     assert loaded.manifest.optional_env == [{"name": "RICH_OPT"}]
     assert loaded.manifest.config_schema == {"type": "object"}

@@ -19,10 +19,14 @@ from crew.features.runtime import (
     FeatureActivationError,
     FeatureCleanupError,
     FeatureConfigRevisions,
+    FeatureDrainTimeoutError,
     FeatureGeneration,
+    FeatureLease,
+    FeatureRestartRequiredError,
     RegistrationPhase,
     FeatureScope,
     FeatureState,
+    FeatureStopPolicy,
     FeatureTransaction,
     RegistrationToken,
     StaleFeatureGenerationError,
@@ -57,6 +61,8 @@ class FeatureDefinition:
     dependencies: FeatureServiceDependencies | None = None
     service_scope: ServiceScopePath = field(default_factory=ServiceScopePath.global_scope)
     desired_config_revision: int = 1
+    stop_policy: FeatureStopPolicy = FeatureStopPolicy.DRAIN
+    drain_timeout_seconds: float | None = 30.0
 
     def __post_init__(self) -> None:
         feature_id = self.feature_id.strip()
@@ -66,11 +72,18 @@ class FeatureDefinition:
             raise TypeError("feature installer must be callable")
         if self.desired_config_revision < 1:
             raise ValueError("desired config revision must be greater than zero")
+        try:
+            stop_policy = FeatureStopPolicy(self.stop_policy)
+        except ValueError as error:
+            raise ValueError(f"unsupported feature stop policy {self.stop_policy!r}") from error
+        if self.drain_timeout_seconds is not None and self.drain_timeout_seconds < 0:
+            raise ValueError("feature drain timeout must not be negative")
         dependencies = self.dependencies or FeatureServiceDependencies(feature_id)
         if dependencies.feature_id != feature_id:
             raise ValueError("feature definition and dependency IDs must match")
         object.__setattr__(self, "feature_id", feature_id)
         object.__setattr__(self, "dependencies", dependencies)
+        object.__setattr__(self, "stop_policy", stop_policy)
 
 
 @dataclass(slots=True)
@@ -84,6 +97,7 @@ class FeatureRecord:
     scope: FeatureScope | None = None
     dependency_resolution: FeatureDependencyResolution | None = None
     error: BaseException | None = None
+    restart_required: bool = False
 
     @property
     def desired_config_revision(self) -> int:
@@ -121,6 +135,10 @@ class FeatureDiagnostic:
     missing_required: tuple[str, ...]
     missing_optional: tuple[str, ...]
     registrations: tuple[FeatureRegistrationDiagnostic, ...]
+    stop_policy: str
+    active_leases: tuple[str, ...]
+    restart_required: bool
+    last_stop: dict[str, Any] | None
     error: str | None
 
     @property
@@ -144,6 +162,12 @@ class FeatureDiagnostic:
                 "missing_optional": list(self.missing_optional),
             },
             "registrations": [item.as_dict() for item in self.registrations],
+            "lifecycle": {
+                "stop_policy": self.stop_policy,
+                "active_leases": list(self.active_leases),
+                "restart_required": self.restart_required,
+                "last_stop": self.last_stop,
+            },
             "error": self.error,
         }
 
@@ -191,6 +215,10 @@ class FeatureInstallContext:
         phase: RegistrationPhase = RegistrationPhase.RESOURCE,
     ) -> RegistrationToken:
         return self.scope.register(disposer, label=label, phase=phase)
+
+    def acquire_lease(self, label: str = "request") -> FeatureLease:
+        """Hold this generation active for one externally visible operation."""
+        return self.scope.acquire_lease(label)
 
     def resolve_service(self, key: ServiceKey[Any]) -> Any:
         return self.services.resolve(key, self.definition.service_scope)
@@ -306,6 +334,18 @@ class FeatureRuntime:
                 )
                 for token in (record.scope.registrations if record.scope else ())
             )
+            stop_diagnostic = record.scope.stop_diagnostic if record.scope else None
+            last_stop = None
+            if stop_diagnostic is not None:
+                last_stop = {
+                    "policy": stop_diagnostic.policy.value,
+                    "timeout_seconds": stop_diagnostic.timeout_seconds,
+                    "active_at_start": list(stop_diagnostic.active_at_start),
+                    "cancel_signalled": stop_diagnostic.cancel_signalled,
+                    "timed_out": stop_diagnostic.timed_out,
+                    "forced_leases": list(stop_diagnostic.forced_leases),
+                    "restart_required": stop_diagnostic.restart_required,
+                }
             diagnostics.append(
                 FeatureDiagnostic(
                     feature_id=record.definition.feature_id,
@@ -323,6 +363,12 @@ class FeatureRuntime:
                         key.name for key in resolution.missing_optional
                     ),
                     registrations=registrations,
+                    stop_policy=record.definition.stop_policy.value,
+                    active_leases=tuple(
+                        lease.label for lease in (record.scope.active_leases if record.scope else ())
+                    ),
+                    restart_required=record.restart_required,
+                    last_stop=last_stop,
                     error=str(record.error) if record.error else None,
                 )
             )
@@ -332,6 +378,12 @@ class FeatureRuntime:
         """Resolve dependencies and transactionally install one feature."""
         record = self.discover(definition)
         if record.state is FeatureState.ACTIVE:
+            return record
+        if record.scope is not None and record.scope.state in {
+            FeatureState.ACTIVATING,
+            FeatureState.DRAINING,
+            FeatureState.STOPPING,
+        }:
             return record
         if record.scope is not None and record.scope.state is FeatureState.FAILED:
             return record
@@ -354,6 +406,7 @@ class FeatureRuntime:
         )
         record.dependency_resolution = resolution
         record.error = None
+        record.restart_required = False
         if not resolution.ready:
             record.state = FeatureState.WAITING
             record.scope = None
@@ -364,6 +417,7 @@ class FeatureRuntime:
         self._sequences[definition.feature_id] = sequence
         generation = record.revisions.new_generation(sequence)
         transaction = FeatureTransaction(generation)
+        transaction.scope.observe_state(lambda state: setattr(record, "state", state))
         context = FeatureInstallContext(
             definition=definition,
             scope=transaction.scope,
@@ -410,7 +464,13 @@ class FeatureRuntime:
         record.state = FeatureState.ACTIVE
         return record
 
-    async def deactivate(self, feature_id: str) -> bool:
+    async def deactivate(
+        self,
+        feature_id: str,
+        *,
+        policy: FeatureStopPolicy | str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> bool:
         """Stop one feature and wait until all owned resources are quiescent."""
         record = self._records.get(feature_id)
         if record is None:
@@ -419,9 +479,28 @@ class FeatureRuntime:
             record.state = FeatureState.DISCOVERED
             record.error = None
             return False
-        record.state = FeatureState.STOPPING
+        stop_policy = FeatureStopPolicy(policy or record.definition.stop_policy)
+        stop_timeout = (
+            record.definition.drain_timeout_seconds
+            if timeout_seconds is None
+            else timeout_seconds
+        )
+        record.state = (
+            FeatureState.ACTIVE
+            if stop_policy is FeatureStopPolicy.RESTART_REQUIRED
+            else FeatureState.DRAINING
+        )
         try:
-            await record.scope.dispose()
+            await record.scope.stop(stop_policy, timeout_seconds=stop_timeout)
+        except FeatureRestartRequiredError as error:
+            record.state = FeatureState.ACTIVE
+            record.restart_required = True
+            record.error = error
+            return False
+        except FeatureDrainTimeoutError as error:
+            record.state = record.scope.state
+            record.error = error
+            return False
         except FeatureCleanupError as error:
             record.state = FeatureState.FAILED
             record.error = error
@@ -429,4 +508,5 @@ class FeatureRuntime:
         record.state = FeatureState.DISCOVERED
         record.scope = None
         record.error = None
+        record.restart_required = False
         return True

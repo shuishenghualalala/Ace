@@ -4,6 +4,8 @@ version: "1.1.0"
 description: Crew 应用内浏览器自动化：导航、页面操作、标签页、上传下载、对话框与控制权切换。用户可按账号热开关；关闭立即撤销能力并中断在途动作。
 author: "Crew"
 kind: backend
+stop_policy: cancel
+drain_timeout_seconds: 10
 requires:
   - config
 optional:

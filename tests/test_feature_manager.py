@@ -6,9 +6,11 @@ import asyncio
 
 from crew.features import (
     FeatureDefinition,
+    FeatureDrainTimeoutError,
     FeatureRuntime,
     FeatureServiceDependencies,
     FeatureState,
+    FeatureStopPolicy,
     MissingProvidedServicesError,
     ServiceKey,
 )
@@ -227,3 +229,50 @@ async def test_startup_audit_names_waiting_feature_and_owned_registrations():
         {"label": "resource:active", "phase": "resource", "state": "active"}
     ]
     assert active.state is FeatureState.ACTIVE
+
+
+async def test_runtime_reports_drain_timeout_without_marking_feature_disabled():
+    runtime = FeatureRuntime()
+    record = await runtime.activate(
+        FeatureDefinition("provider", lambda _context: None, drain_timeout_seconds=0.01)
+    )
+    assert record.scope is not None
+    lease = record.scope.acquire_lease("completion:1")
+
+    assert await runtime.deactivate("provider") is False
+
+    assert record.state is FeatureState.DRAINING
+    assert isinstance(record.error, FeatureDrainTimeoutError)
+    diagnostic = runtime.startup_audit().as_dict()["features"][0]
+    assert diagnostic["lifecycle"]["active_leases"] == ["completion:1"]
+    assert diagnostic["lifecycle"]["last_stop"]["timed_out"] is True
+
+    unchanged = await runtime.activate(record.definition)
+    assert unchanged is record
+    assert unchanged.generation is not None
+    assert unchanged.generation.sequence == 1
+
+    lease.release()
+    assert await runtime.deactivate("provider", timeout_seconds=1) is True
+
+
+async def test_runtime_records_restart_requirement_without_disposing_generation():
+    runtime = FeatureRuntime()
+    record = await runtime.activate(
+        FeatureDefinition(
+            "gateway-routes",
+            lambda context: context.register_disposer(
+                lambda: None,
+                label="route:gateway",
+            ),
+            stop_policy=FeatureStopPolicy.RESTART_REQUIRED,
+        )
+    )
+
+    assert await runtime.deactivate("gateway-routes") is False
+
+    assert record.state is FeatureState.ACTIVE
+    assert record.restart_required
+    assert record.scope is not None
+    diagnostic = runtime.startup_audit().as_dict()["features"][0]
+    assert diagnostic["lifecycle"]["restart_required"] is True

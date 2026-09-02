@@ -10,9 +10,13 @@ from crew.features import (
     FeatureActivationError,
     FeatureCleanupError,
     FeatureConfigRevisions,
+    FeatureDrainTimeoutError,
     FeatureGeneration,
+    FeatureLeaseUnavailableError,
+    FeatureRestartRequiredError,
     FeatureScope,
     FeatureState,
+    FeatureStopPolicy,
     FeatureTransaction,
     RegistrationState,
     StaleFeatureGenerationError,
@@ -241,3 +245,140 @@ async def test_activation_error_includes_rollback_failures():
     assert error.cleanup_error is not None
     assert [issue.label for issue in error.cleanup_error.issues] == ["worker:team"]
     assert transaction.scope.state is FeatureState.FAILED
+
+
+async def test_drain_rejects_new_requests_and_waits_for_active_lease():
+    scope = FeatureScope(FeatureGeneration("wiki", 1))
+    disposed = False
+
+    def cleanup() -> None:
+        nonlocal disposed
+        disposed = True
+
+    scope.register(cleanup, label="resource:wiki")
+    scope.activate()
+    lease = scope.acquire_lease("query:42")
+
+    stopping = asyncio.create_task(
+        scope.stop(FeatureStopPolicy.DRAIN, timeout_seconds=1)
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert scope.state is FeatureState.DRAINING
+    assert not stopping.done()
+    assert not disposed
+    with pytest.raises(FeatureLeaseUnavailableError, match="draining"):
+        scope.acquire_lease("query:late")
+
+    lease.release()
+    await stopping
+
+    assert disposed
+    assert scope.state is FeatureState.DISPOSED
+
+
+async def test_cancel_interrupts_the_task_holding_a_lease_before_cleanup():
+    scope = FeatureScope(FeatureGeneration("browser", 1))
+    scope.register(lambda: None, label="resource:browser")
+    scope.activate()
+    acquired = asyncio.Event()
+    leases = []
+
+    async def run_request() -> None:
+        async with scope.acquire_lease("action:navigate") as lease:
+            leases.append(lease)
+            acquired.set()
+            await asyncio.Event().wait()
+
+    request = asyncio.create_task(run_request())
+    await acquired.wait()
+
+    await scope.stop(FeatureStopPolicy.CANCEL, timeout_seconds=1)
+
+    assert request.cancelled()
+    assert leases[0].cancel_requested
+    assert scope.stop_diagnostic is not None
+    assert scope.stop_diagnostic.cancel_signalled
+    assert scope.state is FeatureState.DISPOSED
+
+
+async def test_drain_timeout_keeps_resources_and_can_be_retried():
+    scope = FeatureScope(FeatureGeneration("provider", 1))
+    disposed = False
+
+    def cleanup() -> None:
+        nonlocal disposed
+        disposed = True
+
+    scope.register(cleanup, label="resource:provider")
+    scope.activate()
+    lease = scope.acquire_lease("completion:slow")
+
+    with pytest.raises(FeatureDrainTimeoutError) as captured:
+        await scope.stop(FeatureStopPolicy.DRAIN, timeout_seconds=0.01)
+
+    assert captured.value.leases[0].label == "completion:slow"
+    assert scope.state is FeatureState.DRAINING
+    assert not disposed
+    assert scope.stop_diagnostic is not None and scope.stop_diagnostic.timed_out
+
+    lease.release()
+    await scope.stop(FeatureStopPolicy.DRAIN, timeout_seconds=1)
+    assert disposed
+
+
+async def test_immediate_stop_records_forced_cleanup_with_active_leases():
+    scope = FeatureScope(FeatureGeneration("stateless", 1))
+    scope.register(lambda: None, label="contribution:stateless")
+    scope.activate()
+    lease = scope.acquire_lease("request:existing")
+
+    await scope.stop(FeatureStopPolicy.IMMEDIATE)
+
+    assert scope.state is FeatureState.DISPOSED
+    assert scope.stop_diagnostic is not None
+    assert scope.stop_diagnostic.forced_leases == ("request:existing",)
+    lease.release()
+
+
+async def test_restart_required_leaves_generation_active_for_host_boundary():
+    scope = FeatureScope(FeatureGeneration("gateway-routes", 1))
+    scope.register(lambda: None, label="route:gateway")
+    scope.activate()
+
+    with pytest.raises(FeatureRestartRequiredError):
+        await scope.stop(FeatureStopPolicy.RESTART_REQUIRED)
+
+    assert scope.state is FeatureState.ACTIVE
+    assert scope.stop_diagnostic is not None
+    assert scope.stop_diagnostic.restart_required
+
+
+async def test_cancelled_stop_caller_does_not_start_parallel_teardown():
+    scope = FeatureScope(FeatureGeneration("provider", 1))
+    cleanup_calls = 0
+
+    def cleanup() -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+
+    scope.register(cleanup, label="resource:provider")
+    scope.activate()
+    lease = scope.acquire_lease("request:held")
+    first = asyncio.create_task(
+        scope.stop(FeatureStopPolicy.DRAIN, timeout_seconds=1)
+    )
+    await asyncio.sleep(0)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    second = asyncio.create_task(
+        scope.stop(FeatureStopPolicy.DRAIN, timeout_seconds=1)
+    )
+    lease.release()
+    await second
+
+    assert cleanup_calls == 1
+    assert scope.state is FeatureState.DISPOSED

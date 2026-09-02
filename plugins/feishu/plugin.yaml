@@ -3,6 +3,8 @@ version: "0.1.0"
 description: "Feishu/Lark document and drive comment tools."
 author: "Crew"
 kind: standalone
+stop_policy: drain
+drain_timeout_seconds: 30
 requires:
   - workspace_store
   - security_service
