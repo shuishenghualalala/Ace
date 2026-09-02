@@ -598,7 +598,6 @@ async def _run_background(
         try:
             result["task_id"] = task_id
             result["owner_account_id"] = current_owner_account_id.get()
-            result["owner_account_id"] = current_owner_account_id.get()
             on_done(parent_session_id, result)
         except Exception:  # noqa: BLE001
             log.debug("后台子任务完成回调失败 task_id=%s", task_id)

@@ -106,6 +106,15 @@ def test_store_mark_read_by_payload(tmp_path):
     by_id = {item.id: item for item in store.list(OWNER)}
     assert by_id[hit.id].read_at is not None
     assert store.unread_count(OWNER) == 2
+    # 反向断言：同 payload 的其他 owner 通知不受影响（恒加 owner 过滤，杜绝跨账号已读）
+    other_owner = "B:uid-b"
+    store.insert(
+        _notification(source="approval", kind="approval_pending", payload={"request_id": "req-1"}, owner_account_id=other_owner)
+    )
+    assert store.mark_read_by_payload("approval", "req-1", owner_account_id=OWNER) == 0
+    assert store.unread_count(other_owner) == 1
+    assert store.mark_read_by_payload("approval", "req-1", owner_account_id=other_owner) == 1
+    assert store.unread_count(other_owner) == 0
 
 
 def test_store_clear(tmp_path):

@@ -1319,8 +1319,7 @@ def _load_env_files() -> None:
         candidates.append(exe_dir / ".env")
         from crew.state.home import get_crew_home
         candidates.append(get_crew_home() / ".env")
-    env_home = os.environ.get("CREW_HOME", "").strip()
-    env_home = os.getenv("CREW_HOME")
+    env_home = os.getenv("CREW_HOME", "").strip()
     if env_home:
         candidates.append(Path(env_home).expanduser() / ".env")
 

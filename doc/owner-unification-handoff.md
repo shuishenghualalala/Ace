@@ -20,7 +20,7 @@
 |---|---|---|
 | ① | 目录布局 | **方案 A**：所有 owner（含 local）统一住 `{CREW_HOME}/accounts/<hash>/`；基础 CREW_HOME 退役为安装级目录（config.yaml、日志、skills 模板） |
 | ② | `agent/skills.py` 的伪 owner `"system"` | 并入 `local`（该字段仅审计打标，非存储路径） |
-| ③ | 本机保存 key 是否同步进程环境 | **local 保留 `sync_process_env=True`**（启动期 `build_provider` 靠它解析 key），远程 owner 不同步 |
+| ③ | key 的跨重启解析机制 | **key 只存 owner overlay 对应的 `.env`（accounts/<hash>/.env），不同步进程环境**；启动期/运行期经 owner 视图 env_map 解析（独立测试探针已验证跨重启可解析）。⚠️ 7121eb0 提交信息与本节初版描述有误，以此为准 |
 | ④ | `tools/blueprint_tools.py`、`site_tools.py` 的 fail-closed raise | **保留 raise**（它们是防御不是空路径） |
 | ⑤ | `work/service.py` 钩子空跳 | 归一后**照常执行**（静默跳过掩盖漏传 bug） |
 | ⑥ | 无绑定渠道入站消息 | **归 local**（拒绝会断渠道消息）；平台原始 uid 严禁充当 owner |
@@ -76,7 +76,11 @@
 
 ## 三、剩余工作（按优先级）
 
-### A. 修复 13 个测试失败（全是已知修法的"重新应用"，预计 1-2 小时）
+### A. 修复 12 个测试失败（全是已知修法的"重新应用"，预计 1-2 小时）
+
+> 独立测试修正：原稿写 13 个，其中 `test_channel_config_api.py::
+test_operation_rejects_during_reconnect[save-config]` 实测是绿的（该条修法的
+前提 "record_error 已必填" 不成立——它仍在剩余 336 处清单里），跳过。
 
 > 这些修复在会话中做过一次，因基线对比时的 `git checkout <sha> -- .` 误操作被回卷。
 > 每条都验证过独立跑绿。全量基线失败清单见 `doc/baseline-failures-at-04a7e16.txt`
@@ -120,9 +124,7 @@
    - 同 `test_context_complete.py` 夹具修法：路径 base 用
      `get_owner_runtime_home("local")`（先 setenv CREW_HOME 再取，见下条教训）。
 
-9. **`tests/gateway/test_channel_config_api.py::test_operation_rejects_during_reconnect[save-config]`**
-   - `ChannelManager.record_error` 已必填；该测试的 `record_error("feishu", "...")`
-     补 `owner_account_id="local"`，状态行断言 `"owner_account_id": "local"`。
+
 
 ### B. 完成步骤 4 签名清扫（剩余 ~336 处 `str = ""`）
 
@@ -231,6 +233,34 @@ pytest 的 `TypeError: missing/unexpected/multiple values for argument 'owner_ac
   涉及磁盘迁移脚本 + Windows 验证）；
 - `runctx` 之外的防御清理复查：全库 `grep -rn 'or "local"' crew` 应只剩边界调用；
 - `docs/backend/modules/*.html` 模块文档更新（见 D）。
+
+---
+
+## 附：独立测试报告（AHUAMAO）后的修正记录
+
+独立测试（被测 `d158b82`，只测不改）结论：**交付基本属实，全量失败集
+56 = 46 基线 − 2 + 12，零基线外新失败；探针 19/19 通过**。据此本日追加：
+
+1. **偏差①（中）已修**：交接文档"13 个测试修复"修正为 **12 个**，删除
+   `test_channel_config_api` 条目（实测绿，且其前提 `record_error` 必填
+   不成立——`channel_manager.py` 的 `record_error` 仍在剩余 336 清单中）。
+2. **偏差②（低）已定案**：决策③ 机制以实测为准——`_apply_api_key_to_env`
+   现行为 `sync_process_env=not bool(owner)`（local 亦不同步进程环境），
+   key 跨重启经 owner 视图 env_map 解析（探针验证通过）。**接手人不要给
+   local 加回 `sync_process_env=True`**（7121eb0 提交信息描述不准，以本节为准）。
+3. **回归盲区已补**：`test_notifications.py::test_store_mark_read_by_payload`
+   增加跨 owner 同 payload 的正/反向断言（变异测试验证：旧实现下必失败）。
+   签名清扫继续动 notifications 前先跑它。
+4. **代码瑕疵已修**：`agent/subagent/tools.py` 重复赋值行；
+   `state/config.py` `env_home` 死赋值（保留 strip 版本，修掉未 strip 的
+   空白值构造怪路径问题）。
+5. **环境清理已批准**：worktree `.Crew/accounts/` 的 9 个调试账号目录
+   （不止早前点名的 1 个）全部可删，由独立测试方执行。
+6. **防御残留新基线**（文档"遗留事项"补充）：`or "local"` ×3
+   （`team/communication.py`）、`if not owner` ×59（含决策④合法 raise，
+   逐个甄别）、`subagent/tools.py:852` 的 `or ""` 兜底——签名清扫时一并处理。
+
+---
 
 ## 七、快速上手命令
 
