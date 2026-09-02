@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>plugins · Ace 后端模块</title>
+<title>features / plugins · Ace 后端模块</title>
 <!--
   ============================================================================
   模块文档模板：复制此文件 → 改名为 <module>.html → 填写各节。
@@ -42,14 +42,16 @@
 </head>
 <body>
 <div class="wrap">
-  <div class="crumb">Ace / 后端模块 / plugins</div>
-  <h1><span class="logo">A</span>crew/plugins</h1>
-  <div class="sub">Plugins 插件：可逆注册 Feature 能力、工具、Skill 与运行时钩子。</div>
+  <div class="crumb">Ace / 后端模块 / features + plugins</div>
+  <h1><span class="logo">A</span>crew/features · crew/plugins</h1>
+  <div class="sub">Feature Runtime 统一所有权内核；Plugins 是迁移期目录发现与兼容入口。</div>
 
   <h2>1. 职责</h2>
   <ul>
+    <li>用 Feature Generation 和 Scope 管理第一方、第三方能力的统一生命周期。</li>
     <li>向插件提供受控注册上下文，并在启用/停用时管理插件贡献的工具与钩子。</li>
     <li>插件工具沿用核心 Registry 契约，可声明结果在 Agent 上下文中的生命周期。</li>
+    <li>当前 <code>crew/features</code> 不包含目录发现或产品逻辑；<code>PluginManager</code> 将作为兼容 Facade 接入。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
@@ -59,6 +61,10 @@
     <tbody>
       <tr><td>工具注册</td><td><code>PluginContext.register_tool</code> 注册并记录插件贡献，停用时可撤销。</td><td>已落地</td></tr>
       <tr><td>结果生命周期</td><td>插件可声明 temporary/resource/instruction/important；省略时安全默认 important。</td><td>已落地</td></tr>
+      <tr><td>Generation</td><td><code>FeatureGeneration</code> 为每次激活提供稳定的 Feature ID 与递增代号。</td><td>已落地</td></tr>
+      <tr><td>注册所有权</td><td><code>RegistrationToken</code> 统一同步/异步 disposer，并保证并发、重复释放只执行一次。</td><td>已落地</td></tr>
+      <tr><td>Scope 与事务</td><td><code>FeatureScope</code> 逆序等待清理并聚合错误；<code>FeatureTransaction</code> 回滚未提交安装。</td><td>已落地</td></tr>
+      <tr><td>贡献可见性</td><td>Service/Contribution Registry 将在后续提交提供暂存与原子提交。</td><td>下一步</td></tr>
     </tbody>
   </table>
 
@@ -66,11 +72,19 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
+      <tr><td><code>crew/features/runtime.py</code></td><td>Generation、Registration Token、Scope、Transaction 和结构化生命周期错误。</td></tr>
       <tr><td><code>crew/plugins/manager.py</code></td><td>插件发现、状态管理、<code>PluginContext</code> 和贡献撤销。</td></tr>
     </tbody>
   </table>
 
   <h2>4. 数据模型与接口</h2>
+  <pre><code>generation = FeatureGeneration("wiki", sequence=1)
+async with FeatureTransaction(generation) as transaction:
+    transaction.register(dispose_service, label="service:knowledge")
+    scope = transaction.commit()
+
+await scope.dispose()  # 返回时该 Generation 已完成全部异步清理</code></pre>
+  <p>注册标签必须能说明贡献类型和身份。Scope 进入停止状态后拒绝新注册；任何单项清理失败都会被记录，但不会跳过其余 disposer。</p>
   <pre><code>PluginContext.register_tool(
     name, toolset, schema, handler,
     result_retention="important",
@@ -81,11 +95,14 @@
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
+    <li>现有 <code>PluginManager</code> 尚未接入 Feature Scope，其同步卸载入口仍不能等待运行中事件循环里的异步 disposer。</li>
+    <li>Service/Contribution Registry、依赖解析和事务式对外可见性将在阶段 1 后续提交实现。</li>
     <li>外部 MCP 协议当前不携带 Ace 生命周期元数据，因此默认按重要结果保护。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
   <ul>
+    <li>新增运行时注册类型必须返回 disposer 并归属一个明确 Generation，不得另建独立清理清单。</li>
     <li>新增插件工具时在插件注册处声明结果语义，不向 Agent 压缩器添加插件工具名判断。</li>
   </ul>
 
@@ -95,10 +112,11 @@
     <tbody>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
       <tr><td>2026-09-01</td><td>插件工具注册接口增加结果生命周期与资源 identity 声明。</td><td><code>PluginContext.register_tool</code>，兼容旧插件。</td></tr>
+      <tr><td>2026-09-02</td><td>建立中立 Feature 生命周期所有权、异步清理和激活回滚原语。</td><td><code>crew/features</code>；现有插件行为暂不改变。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0001-feature-lifecycle-primitives.html">ADR-0001</a> · <a href="../../testing/plugin-architecture-stage-1-lifecycle.html">测试记录</a></div>
 </div>
 </body>
 </html>

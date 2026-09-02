@@ -5,11 +5,11 @@
 > 基线核查日期：2026-08-31  
 > 目标读者：Ace 后端、桌面端、Web 端及独立功能模块的维护者  
 > 修订记录：2026-08-31 评审追加——workspace_guard 依赖核查（§2.3.3、§11、§17）、第一方/第三方插件契约收口（§2.3.8）、effect 诊断与启动审计（§6.3）、服务作用域维度（§6.4）、拦截器语义（§7.5）、螺旋式迁移节奏与依赖检查工具（§10、§13.3）、配置与数据命名空间约定（§12.5）、Adapter 保质期（§15.2）、ADR 机制（§16）、新增验收指标（§14）；同日补充——演进紧迫性论证与中心文件基线数据（§1.1.1）、接口层多租户地基（§2.2）；同日范围校正——明确 dsh 广义 Plugin 与 Ace 当前 `plugins/` 的区别，将目标提升为全部 Feature 的统一可逆生命周期，补充 Feature Generation、业务数据边界、全量迁移地图和工作量评估（§0、§3.3、§5、§6、§8、§10、§16、§18、§19）；同日——§2.1、§5.1 增加耦合视角与装配视角两张架构对比图（离线渲染版：docs/todo/ace-arch-compare.html）
-> 实施进度：2026-09-02 阶段 0 首个切片已在 `refactor/plugin-architecture-stage-0` 开始实施——安全策略归位、声明式依赖契约和 CI 门禁已落地，验证记录见 `docs/testing/plugin-architecture-stage-0.html`。
+> 实施进度：2026-09-02 阶段 0 首个切片与阶段 1 生命周期内核切片均已完成——Feature Generation、Scope、Registration Token、异步清理与事务回滚已落地；当前分支为 `refactor/plugin-architecture-stage-0`，验证记录见 `docs/testing/plugin-architecture-stage-1-lifecycle.html`。
 
 ## 当前实施进度图（2026-09-02）
 
-绿色表示已经落地并通过相关回归的区域，蓝色表示紧接着要实施的切片，灰色表示尚未开始。当前完成的是**阶段 0 的首个切片**，不是整份演进方案已经完成。
+绿色表示已经落地并通过相关回归的区域，蓝色表示紧接着要实施的切片，灰色表示尚未开始。当前完成的是**阶段 0 边界治理与阶段 1 生命周期内核**，不是整份演进方案已经完成。
 
 ```mermaid
 flowchart TB
@@ -29,18 +29,23 @@ flowchart TB
 
     Removed["已消除<br/>Agent → Team 的 3 处反向导入<br/>Security → Tools 的策略依赖"] --> Security
     Workspace --> DoneMark
-    DoneMark --> Next["阶段 1 · 下一切片<br/>FeatureScope<br/>FeatureGeneration<br/>RegistrationToken"]
-    Next --> Later["后续阶段<br/>Service Registry → 核心扩展点<br/>业务 Feature 迁移 → UI Registry"]
+    DoneMark --> Scope["阶段 1 · 生命周期内核<br/>FeatureScope + FeatureGeneration"]
+    Scope --> Token["RegistrationToken<br/>单次释放 · 并发等待"]
+    Token --> Rollback["FeatureTransaction<br/>LIFO 回滚 · 错误聚合"]
+    Rollback --> RuntimeTests["生命周期测试<br/>9 passed"]
+    RuntimeTests --> Next["阶段 1 · 下一切片<br/>Service Registry<br/>作用域解析 · 依赖图 · 配置版本"]
+    Next --> Adapter["阶段 1 · 后续切片<br/>PluginManager Adapter<br/>Browser 生命周期试点"]
+    Adapter --> Later["后续阶段<br/>核心扩展点 → 业务 Feature 迁移 → UI Registry"]
 
     classDef done fill:#e8f6ee,stroke:#1e8449,color:#145a32,stroke-width:2px
     classDef next fill:#e6f0fb,stroke:#2471a3,color:#154360,stroke-width:2px
     classDef pending fill:#f4f4f4,stroke:#999999,color:#555555
-    class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed done
+    class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed,Scope,Token,Rollback,RuntimeTests done
     class Next next
-    class Later pending
+    class Adapter,Later pending
 ```
 
-这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。历史反向依赖及其后续删除阶段仍以 `.importlinter` 中的逐条豁免为准。
+这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。生命周期内核尚未接管现有 `PluginManager`；下一步先建立统一注册表与依赖解析，再通过兼容 Adapter 接入，避免形成两套长期平行的生命周期。历史反向依赖及其后续删除阶段仍以 `.importlinter` 中的逐条豁免为准。
 
 ## 0. 执行摘要
 
