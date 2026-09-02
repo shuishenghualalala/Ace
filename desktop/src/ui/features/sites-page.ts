@@ -30,6 +30,7 @@ let openInspirationAgent: ((item: InspirationItem) => Promise<void>) | null = nu
 let createInspirationSession: (() => Promise<void>) | null = null;
 let activeSessionSites: LocalSite[] = [];
 let sessionSitesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let cardPreviewObserver: ResizeObserver | null = null;
 const annotationDrafts = new Map<string, AnnotationDraft>();
 const ANNOTATION_DRAFTS_KEY = 'ace.inspirationAnnotationDrafts.v1';
 const LEGACY_ANNOTATION_DRAFTS_KEY = 'ace.siteAnnotationDrafts.v1';
@@ -37,6 +38,24 @@ const LEGACY_ANNOTATION_DRAFTS_KEY = 'ace.siteAnnotationDrafts.v1';
 function root(): HTMLElement | null { return $('#sites-page-root'); }
 function previewUrl(item: Pick<InspirationItem, 'id'> | LocalSite): string {
   return `ace-site://${encodeURIComponent(item.id)}/`;
+}
+
+const CARD_PREVIEW_WIDTH = 1280;
+
+/** 预览 iframe 按 1280px 虚拟视口渲染，随卡片实际宽度动态缩放，保证任意网格宽度下铺满。 */
+function fitCardPreviews(): void {
+  cardPreviewObserver?.disconnect();
+  cardPreviewObserver = null;
+  const previews = Array.from(root()?.querySelectorAll<HTMLElement>('.inspiration-card__preview') ?? []);
+  if (!previews.length) return;
+  const fit = (preview: HTMLElement): void => {
+    const frame = preview.querySelector('iframe');
+    if (frame) frame.style.transform = `scale(${preview.clientWidth / CARD_PREVIEW_WIDTH})`;
+  };
+  cardPreviewObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) fit(entry.target as HTMLElement);
+  });
+  for (const preview of previews) { fit(preview); cardPreviewObserver.observe(preview); }
 }
 
 function saveDrafts(): void {
@@ -99,6 +118,7 @@ function renderGallery(el: HTMLElement): void {
     </main>
   </div>`;
   bindGalleryEvents();
+  fitCardPreviews();
 }
 
 function renderDetail(el: HTMLElement, item: InspirationItem): void {
