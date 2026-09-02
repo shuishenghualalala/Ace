@@ -1,4 +1,4 @@
-"""Workspace guard for isolated Team delegate tasks."""
+"""Workspace boundary and external-runtime permission policy."""
 
 from __future__ import annotations
 
@@ -8,7 +8,11 @@ import re
 import shlex
 from typing import Any, Literal
 
-from crew.tools.terminal_guard import classify_command, detect_dangerous_command, detect_hardline_command
+from crew.security.terminal_guard import (
+    classify_command,
+    detect_dangerous_command,
+    detect_hardline_command,
+)
 
 
 SEARCH_TOOL_NAMES = {

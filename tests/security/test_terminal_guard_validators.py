@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from crew.tools.terminal_guard import (
+from crew.security.terminal_guard import (
     classify_command,
     detect_dangerous_command,
     detect_hardline_command,
@@ -665,7 +665,7 @@ class TestE2EWorkspaceGuard:
         }
 
     def _call(self, command: str) -> str:
-        from crew.team.workspace_guard import classify_external_permission
+        from crew.security.workspace_guard import classify_external_permission
 
         decision = classify_external_permission(
             {"rawInput": {"tool": "terminal", "arguments": {"command": command}}},

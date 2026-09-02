@@ -1,6 +1,6 @@
 name: ci
 
-# PR 门禁：Python 测试 + ruff、Web 构建与测试、Desktop 完整检查。
+# PR 门禁：Python 测试 + ruff + 架构依赖契约、Web 构建与测试、Desktop 完整检查。
 # 安全运行时（Rust）的专项门禁见 security-*.yml，Playwright 协议契约见
 # playwright-core-contract.yml，本 workflow 不重复覆盖。
 
@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   python:
-    name: pytest + ruff
+    name: pytest + ruff + architecture
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -30,6 +30,7 @@ jobs:
       # wiki extra 与 README「验证安装」一节保持一致；e2e 标记默认跳过
       - run: uv sync --extra dev --extra wiki
       - run: uv run ruff check .
+      - run: uv run lint-imports
       # tests/security 需要构建 Rust 原生运行时，由 security-*.yml 专门覆盖
       - run: uv run pytest -q --ignore=tests/security
 

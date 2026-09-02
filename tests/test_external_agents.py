@@ -79,7 +79,7 @@ from crew.security.service import ExecAuthorization
 from crew.state.config import Config
 from crew.team.formation import build_agent_profile, fast_team_suggestion
 from crew.team.roles import CREW_BUILTIN_AGENT_ID, all_role_public_payloads
-from crew.team.workspace_guard import classify_external_permission
+from crew.security.workspace_guard import classify_external_permission
 from crew.tools.registry import Registry
 
 

@@ -48,7 +48,7 @@ from crew.tools.pipeline import (
     grant_session_allow,
     should_block_for_tool_call,
 )
-from crew.team.workspace_guard import check_workspace_guard
+from crew.security.workspace_guard import check_workspace_guard
 from crew.tools.tool_search import ToolSearchConfig, dispatch_bridge_tool, is_bridge_tool
 
 log = get_logger("agent.tool_runner")

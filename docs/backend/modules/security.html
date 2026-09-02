@@ -44,20 +44,26 @@
 <div class="wrap">
   <div class="crumb">Ace / 后端模块 / security</div>
   <h1><span class="logo">A</span>crew/security</h1>
-  <div class="sub">Security 安全运行时：进程启动、沙箱、审批与 Native Runtime 策略。</div>
+  <div class="sub">宿主安全内核：命令与工作区策略、审批、沙箱、审计及 Native Runtime 边界。</div>
 
   <h2>1. 职责</h2>
   <ul>
-    <li>该模块做什么、不做什么（边界）。</li>
+    <li>定义不依赖具体产品 Feature 的安全决策、授权、审计和执行边界。</li>
+    <li>统一命令风险识别、Workspace 读写边界与外部 Runtime 权限分类。</li>
+    <li>管理安全上下文、临时授权、持久规则、Native Runtime 调用和进程清理。</li>
+    <li>不负责 Team 编排、Agent 业务流程或具体 Tool 的实现；这些模块只能消费安全能力。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
-  <p>按子功能或核心流程拆解，这是本模块文档的重点。</p>
+  <p>安全模块是 Host 与 Feature 共同依赖的稳定底座。策略数据可以由上层提供，但裁决逻辑归安全模块所有。</p>
   <table>
     <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
     <tbody>
-      <tr><td><code>feature-a</code></td><td>…</td><td>已落地</td></tr>
-      <tr><td><code>feature-b</code></td><td>…</td><td>待补充</td></tr>
+      <tr><td><code>terminal_guard</code></td><td>跨平台识别 hardline、dangerous 与需要审批的命令。</td><td>已归位</td></tr>
+      <tr><td><code>workspace_guard</code></td><td>校验工具和外部 Runtime 对可读、可写路径及网络副作用的访问。</td><td>已归位</td></tr>
+      <tr><td><code>context / policy / grants</code></td><td>构造安全上下文，解析模式策略并管理临时执行授权。</td><td>已落地</td></tr>
+      <tr><td><code>service / broker</code></td><td>统一审批、规则选择、审计和 Native Runtime 执行入口。</td><td>已落地</td></tr>
+      <tr><td><code>launch / process_lifecycle</code></td><td>封装 macOS、Linux、Windows 的安全启动与进程树终止差异。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -65,34 +71,45 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/security/xxx.py</code></td><td>…</td></tr>
+      <tr><td><code>crew/security/terminal_guard.py</code></td><td>命令安全分类和验证器链。</td></tr>
+      <tr><td><code>crew/security/workspace_guard.py</code></td><td>Workspace 边界与外部 Runtime 权限分类。</td></tr>
+      <tr><td><code>crew/security/service.py</code></td><td>宿主安全服务组合入口。</td></tr>
+      <tr><td><code>crew/security/context.py</code></td><td>请求级安全上下文。</td></tr>
+      <tr><td><code>crew/security/launch.py</code></td><td>安全进程启动参数与平台适配。</td></tr>
+      <tr><td><code>.importlinter</code></td><td>Core、Agent、Security 与产品 Feature 的可执行依赖契约。</td></tr>
     </tbody>
   </table>
 
   <h2>4. 数据模型与接口</h2>
-  <p>对外暴露的关键类/方法、事件/消息约定、Schema。</p>
-  <pre><code># 关键签名</code></pre>
+  <p>调用方传入普通数据结构，安全模块返回不可变决策；调用方不得绕过裁决自行解释结果。</p>
+  <pre><code>check_workspace_guard(tool_name, args, guard, *, cwd) -&gt; WorkspaceGuardDecision
+classify_external_permission(tool_call, guard, *, cwd) -&gt; WorkspacePermissionDecision
+classify_command(command) -&gt; CommandClassification
+detect_hardline_command(command) -&gt; tuple[bool, str]</code></pre>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>问题 1：…</li>
-    <li>TODO：…</li>
+    <li><code>crew/security/audit.py</code> 仍使用 <code>crew.tools.redact</code>；后续应把通用脱敏能力收回安全层。</li>
+    <li>Team 目前仍负责生成 Workspace Guard 配置，但只能依赖这里的稳定决策接口。</li>
+    <li>阶段 1 的 FeatureScope 落地后，安全拦截器注册必须具备作用域所有权且不可覆盖 hardline 不变量。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
   <ul>
-    <li>如何在此模块上加功能（遵守契约、不跨目录）。</li>
+    <li>新增安全策略应放入 <code>crew/security</code>，保持纯 Python、跨平台和可单元测试。</li>
+    <li>Feature 只能提交动作描述、权限上下文和策略配置，不得导入安全模块内部实现后绕过公开决策。</li>
+    <li>新增依赖必须通过 <code>lint-imports</code>；历史豁免必须标注删除阶段，禁止扩大通配范围。</li>
   </ul>
 
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
-      <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
+      <tr><td>2026-09-02</td><td>将 Terminal Guard 与 Workspace Guard 收归安全内核，并建立声明式架构依赖门禁。</td><td>Agent、Tools、CLI、Team/External 测试、CI</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../../testing/plugin-architecture-stage-0.html">阶段 0 测试记录</a></div>
 </div>
 </body>
 </html>

@@ -54,7 +54,7 @@ from crew.core.timeout_policy import DEFAULT_EXTERNAL_IDLE_SECONDS, TimeoutPolic
 from crew.core.types import Message, ToolCall
 from crew.security.models import AdditionalPermissionProfile
 from crew.state.home import get_owner_runtime_home
-from crew.team.workspace_guard import check_workspace_guard, classify_external_permission
+from crew.security.workspace_guard import check_workspace_guard, classify_external_permission
 
 
 # ---------------------------------------------------------------------------

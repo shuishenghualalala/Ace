@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from crew.state.logging import get_logger
-from crew.team.workspace_guard import normalize_acp_tool_name
+from crew.security.workspace_guard import normalize_acp_tool_name
 from crew.tools.file_utils import _has_binary_extension
 from crew.tools.redact import redact_sensitive_text
 

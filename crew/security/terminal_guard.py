@@ -1,4 +1,4 @@
-"""终端命令安全检测。
+"""终端命令安全策略与多层验证。
 
 第一道防线（hardline / dangerous）保留原有正则模式匹配。
 第二道防线（classify_command）是多层独立验证器架构，逐项检查命令的
@@ -1131,5 +1131,4 @@ def classify_command(command: str) -> tuple[str, str]:
         return ('ask', deferred_result.message)
 
     return ('passthrough', 'Command passed all security checks')
-
 

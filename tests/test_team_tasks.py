@@ -85,7 +85,7 @@ from crew.team.turn_decision import (
 )
 from crew.team.turn_router import TeamTurnRouter
 from crew.team.workflow_plan import coerce_planning_decision
-from crew.team.workspace_guard import check_workspace_guard, classify_external_permission
+from crew.security.workspace_guard import check_workspace_guard, classify_external_permission
 from crew.tools.registry import Registry, register_builtin_tools
 
 

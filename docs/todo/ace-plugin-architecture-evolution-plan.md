@@ -5,6 +5,42 @@
 > 基线核查日期：2026-08-31  
 > 目标读者：Ace 后端、桌面端、Web 端及独立功能模块的维护者  
 > 修订记录：2026-08-31 评审追加——workspace_guard 依赖核查（§2.3.3、§11、§17）、第一方/第三方插件契约收口（§2.3.8）、effect 诊断与启动审计（§6.3）、服务作用域维度（§6.4）、拦截器语义（§7.5）、螺旋式迁移节奏与依赖检查工具（§10、§13.3）、配置与数据命名空间约定（§12.5）、Adapter 保质期（§15.2）、ADR 机制（§16）、新增验收指标（§14）；同日补充——演进紧迫性论证与中心文件基线数据（§1.1.1）、接口层多租户地基（§2.2）；同日范围校正——明确 dsh 广义 Plugin 与 Ace 当前 `plugins/` 的区别，将目标提升为全部 Feature 的统一可逆生命周期，补充 Feature Generation、业务数据边界、全量迁移地图和工作量评估（§0、§3.3、§5、§6、§8、§10、§16、§18、§19）；同日——§2.1、§5.1 增加耦合视角与装配视角两张架构对比图（离线渲染版：docs/todo/ace-arch-compare.html）
+> 实施进度：2026-09-02 阶段 0 首个切片已在 `refactor/plugin-architecture-stage-0` 开始实施——安全策略归位、声明式依赖契约和 CI 门禁已落地，验证记录见 `docs/testing/plugin-architecture-stage-0.html`。
+
+## 当前实施进度图（2026-09-02）
+
+绿色表示已经落地并通过相关回归的区域，蓝色表示紧接着要实施的切片，灰色表示尚未开始。当前完成的是**阶段 0 的首个切片**，不是整份演进方案已经完成。
+
+```mermaid
+flowchart TB
+    subgraph Done["阶段 0 · 首个切片 ✅ 已完成"]
+        direction LR
+        Agent["Agent Core"] --> Security["crew/security<br/>安全策略统一归属"]
+        Tools["Tools"] --> Security
+        CLI["CLI"] --> Security
+        Security --> Terminal["terminal_guard<br/>命令风险与跨平台校验"]
+        Security --> Workspace["workspace_guard<br/>工作区与外部 Runtime 权限"]
+
+        CI["CI"] --> Contracts[".importlinter<br/>6 条声明式依赖契约"]
+        Contracts -.->|保护边界| Agent
+        Contracts -.->|保护边界| Security
+        Tests["相关回归<br/>1081 passed · 2 skipped"] --> DoneMark["安全归位切片可交付"]
+    end
+
+    Removed["已消除<br/>Agent → Team 的 3 处反向导入<br/>Security → Tools 的策略依赖"] --> Security
+    Workspace --> DoneMark
+    DoneMark --> Next["阶段 1 · 下一切片<br/>FeatureScope<br/>FeatureGeneration<br/>RegistrationToken"]
+    Next --> Later["后续阶段<br/>Service Registry → 核心扩展点<br/>业务 Feature 迁移 → UI Registry"]
+
+    classDef done fill:#e8f6ee,stroke:#1e8449,color:#145a32,stroke-width:2px
+    classDef next fill:#e6f0fb,stroke:#2471a3,color:#154360,stroke-width:2px
+    classDef pending fill:#f4f4f4,stroke:#999999,color:#555555
+    class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed done
+    class Next next
+    class Later pending
+```
+
+这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。历史反向依赖及其后续删除阶段仍以 `.importlinter` 中的逐条豁免为准。
 
 ## 0. 执行摘要
 
@@ -259,13 +295,13 @@ Ace 并非从零开始做模块化。以下能力可以直接作为演进基础�
 - `crew.gateway.session_context`；
 - `wiki_manager` 特殊逻辑。
 
-此外，`crew/agent` 还有三处对 `crew/team` 的直接导入（2026-08-31 核查）：
+此外，2026-08-31 基线中的 `crew/agent` 还有三处对 `crew/team` 的直接导入：
 
 - `crew/agent/loop/tool_runner.py` 导入 `crew.team.workspace_guard.check_workspace_guard`；
 - `crew/agent/executor/external.py` 导入 `crew.team.workspace_guard` 的 `check_workspace_guard` 与 `classify_external_permission`；
 - `crew/agent/file_changes.py` 导入 `crew.team.workspace_guard.normalize_acp_tool_name`。
 
-`workspace_guard` 本质上是工作区安全工具，并非 Team 领域概念，只是当前被安放在 `team/` 目录中。它恰好挡在“`crew/agent` 不得导入 `crew/team`”红线的正中央，且迁移成本低、不涉及业务逻辑，应作为最早一批整改项移入核心安全层（见 §10 阶段 0、§11）。
+`workspace_guard` 本质上是工作区安全工具，并非 Team 领域概念。阶段 0 已将其与依赖的 `terminal_guard` 一并迁入 `crew/security/`，上述三处生产导入已改为依赖安全内核；本节保留迁移前路径作为基线证据。Gateway、Wiki 与 External Agent Store 的历史反向依赖则由 `.importlinter` 精确豁免并阻止继续增长。
 
 从分层角度看，Gateway 和 Wiki 应依赖 Agent Core 提供的扩展点，而不是 Agent Core 导入 Gateway 和 Wiki。
 

@@ -360,7 +360,7 @@ def _security_fake_execution(args: Any, ctx: CliContext) -> CliResult:
 
 
 def _security_check_terminal(args: Any, ctx: CliContext) -> CliResult:
-    from crew.tools.terminal_guard import (
+    from crew.security.terminal_guard import (
         classify_command,
         detect_dangerous_command,
         detect_hardline_command,
