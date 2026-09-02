@@ -2510,24 +2510,27 @@ class CrewApp:
             "api_key_env" in payload
             and str(payload.get("api_key_env") or "").strip() != profiles[model_id].api_key_env
         )
+        # 注意用归置后的 owner（builtin 重定向后为空=全局作用域），不能用
+        # 原始 owner_account_id——否则内置模型的 key 会写进 owner 私有
+        # 凭证库/overlay .env，而全局 profile 的解析链读不到它。
         if api_key and explicit_env:
             self._assert_shared_env_key_safe(
                 api_key_env,
                 api_key,
                 exclude_profile_id=model_id,
-                owner_account_id=owner_account_id,
+                owner_account_id=owner,
                 overwrite=overwrite_shared_key,
             )
             self._apply_api_key_to_env(
                 api_key_env,
                 api_key,
-                owner_account_id=owner_account_id,
+                owner_account_id=owner,
             )
-            delete_stored_key(owner_account_id, model_id)
+            delete_stored_key(owner, model_id)
         elif api_key:
-            store_key(owner_account_id, model_id, api_key)
+            store_key(owner, model_id, api_key)
         elif explicit_env and env_name_changed:
-            delete_stored_key(owner_account_id, model_id)
+            delete_stored_key(owner, model_id)
         if owner:
             current = profiles[model_id]
             merged = {

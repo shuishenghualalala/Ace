@@ -389,11 +389,11 @@ def test_remove_env_key_removes_file_line_and_process_env(tmp_path: Path):
 
 
 def test_resolve_writable_env_path_returns_under_crew_home(monkeypatch, tmp_path):
-    """默认写入 crew_home/.env。"""
+    """空 owner 归一为 local：默认写入 local 账号目录下的 .env（方案 A 布局）。"""
     home = tmp_path / ".crew"
     monkeypatch.setenv("CREW_HOME", str(home))
-    p = resolve_writable_env_path()
-    assert p == home / ".env"
+    p = resolve_writable_env_path("local")
+    assert p == home / "accounts" / owner_path_segment("local") / ".env"
 
 
 def test_resolve_writable_env_path_owner_scoped(monkeypatch, tmp_path):
