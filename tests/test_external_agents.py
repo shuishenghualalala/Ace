@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from crew.agent.executor.base import ExecutionContext
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
 from crew.agent.executor.external import (
     AcpExecutor,
     ClientExecutor,
@@ -2728,7 +2729,8 @@ def test_external_agent_store_refreshes_v1_profiles_without_schema_change(tmp_pa
         "executable_path": "/bin/kimi",
         "version": "1.2.3",
     })
-    agent = store.create_agent(name="Legacy Agent", runtime_id=runtime["id"])
+    # owner 统一后创建即带归属；本机场景显式用 local。
+    agent = store.create_agent(name="Legacy Agent", runtime_id=runtime["id"], owner_account_id=LOCAL_OWNER_ACCOUNT_ID)
     with sqlite3.connect(db) as conn:
         conn.execute(
             "UPDATE external_agent SET profile_json = ?, profile_version = 1 WHERE id = ?",
@@ -2739,7 +2741,7 @@ def test_external_agent_store_refreshes_v1_profiles_without_schema_change(tmp_pa
             }), agent["id"]),
         )
 
-    refreshed = ExternalAgentStore(str(db)).get_agent(agent["id"])
+    refreshed = ExternalAgentStore(str(db)).get_agent(agent["id"], owner_account_id=LOCAL_OWNER_ACCOUNT_ID)
     with sqlite3.connect(db) as conn:
         stored_envelope = json.loads(conn.execute(
             "SELECT profile_json FROM external_agent WHERE id = ?",

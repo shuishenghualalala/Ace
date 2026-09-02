@@ -5,7 +5,7 @@ import threading
 import time
 from pathlib import Path
 
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID, current_owner_account_id
 from crew.core.types import Message, ToolCall
 from crew.memory.simple import SQLiteMemory
 from crew.state.session_store import SQLiteSessionStore
@@ -171,11 +171,12 @@ def test_migration_from_legacy_schema(tmp_path):
     conn.close()
 
     store = SQLiteSessionStore(str(db))  # 触发迁移
-    loaded = store.load("old")
+    # 迁移产生的历史行经 owner 回填归属本机 local；访问需显式带 owner。
+    loaded = store.load("old", owner_account_id=LOCAL_OWNER_ACCOUNT_ID)
     assert len(loaded) == 1 and loaded[0].content == "旧消息"
     # 迁移后新会话功能正常
-    store.save("new", [Message.user("新问题")])
-    assert {s["session_id"] for s in store.list_sessions()} == {"old", "new"}
+    store.save("new", [Message.user("新问题")], owner_account_id=LOCAL_OWNER_ACCOUNT_ID)
+    assert {s["session_id"] for s in store.list_sessions(owner_account_id=LOCAL_OWNER_ACCOUNT_ID)} == {"old", "new"}
 
 
 def test_set_status_and_not_overwritten_by_save(tmp_path):

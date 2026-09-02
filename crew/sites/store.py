@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from crew.state._migration import backfill_empty_owner_rows
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 
@@ -117,6 +118,11 @@ class SQLiteSiteStore:
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sites)").fetchall()}
         if "description" not in columns:
             conn.execute("ALTER TABLE sites ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+        # 历史 owner='' 行归属本机 local（owner 统一后不存在无主站点数据）。
+        backfill_empty_owner_rows(
+            conn,
+            ["sites", "site_releases", "site_annotations", "inspiration_annotations"],
+        )
 
     @staticmethod
     def _site_row(row) -> dict[str, Any]:

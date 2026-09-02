@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 
 from crew.core.interfaces import Notification
+from crew.state._migration import backfill_empty_owner_rows
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 # 每个 (owner, source) 最多保留的通知条数
@@ -55,6 +56,8 @@ class NotificationStore:
             "CREATE INDEX IF NOT EXISTS idx_notifications_owner_created "
             "ON notifications(owner_account_id, created_at DESC)"
         )
+        # 历史 owner='' 行归属本机 local（owner 统一后不存在无主通知）。
+        backfill_empty_owner_rows(conn, ["notifications"])
 
     @staticmethod
     def _row_to_notification(row: sqlite3.Row) -> Notification:

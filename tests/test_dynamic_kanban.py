@@ -13,6 +13,7 @@ import pytest
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.mocks import FakeProvider, InMemorySessionStore, NullMemory
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
 from crew.core.types import ChatResponse, Message, ToolCall
 from crew.dynamickanban.manager import DynamicKanbanManager
 from crew.dynamickanban.models import PlanDelta
@@ -208,9 +209,11 @@ def test_legacy_workflow_migration_only_backfills_provable_owner(tmp_path: Path)
     assert owner_a.get_workflow("wf_ambiguous") is None
     assert owner_b.get_workflow("wf_ambiguous") is None
     assert owner_a.get_workflow("wf_orphan") is None
+    # owner 统一后无主看板归本机 local，不再永久隔离
+    assert root.for_owner(LOCAL_OWNER_ACCOUNT_ID).get_workflow("wf_orphan") is not None
     root.close()
 
-    # Reopening reruns migrations; quarantined rows must remain quarantined.
+    # Reopening reruns migrations; ambiguous rows stay quarantined for manual claim.
     reopened = SQLiteKanbanStore(db_path)
     assert reopened.for_owner("A:uid-a").get_workflow("wf_unique") is not None
     reopened.close()
@@ -223,7 +226,7 @@ def test_legacy_workflow_migration_only_backfills_provable_owner(tmp_path: Path)
     check.close()
     assert rows == {
         "wf_ambiguous": "legacy_ambiguous",
-        "wf_orphan": "legacy_orphaned",
+        "wf_orphan": "owned",
         "wf_unique": "owned",
     }
 
