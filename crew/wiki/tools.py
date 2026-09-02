@@ -21,7 +21,6 @@ from crew.core.runctx import (
     current_request_id,
     current_session_id,
     emit_tool_progress,
-    normalize_owner_account_id,
     touch_current_task_activity,
 )
 from crew.core.timeout_policy import DEFAULT_INTERACTION_TIMEOUT_SECONDS
@@ -646,7 +645,7 @@ def register_wiki_tools(
     """把 Wiki 工具注册到 registry（toolset='wiki'）。"""
 
     def _owner() -> str:
-        return normalize_owner_account_id(current_owner_account_id.get())
+        return current_owner_account_id.get()
 
     def _kb_id(args: dict[str, Any] | None = None) -> str:
         """读取目标知识库：优先使用用户显式传入的 kb_id，否则使用当前活跃知识库。"""

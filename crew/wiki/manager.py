@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from crew.core.runctx import current_owner_account_id, normalize_owner_account_id
+from crew.core.runctx import current_owner_account_id
 from crew.state.home import get_crew_home, safe_path_segment
 from crew.state.logging import get_logger
 
@@ -37,8 +37,8 @@ class WikiSessionManager:
 
     @staticmethod
     def _key(session_id: str, owner_account_id: str | None = None) -> SessionKey:
-        raw_owner = current_owner_account_id.get() if owner_account_id is None else owner_account_id
-        return normalize_owner_account_id(raw_owner), session_id or "default"
+        owner = current_owner_account_id.get() if owner_account_id is None else owner_account_id
+        return owner or "", session_id or "default"
 
     def _state_dir(self, key: SessionKey) -> Path:
         owner, sid = key

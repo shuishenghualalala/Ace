@@ -720,7 +720,6 @@ async def handle_terminal(
         current_request_id,
         current_session_id,
         current_tool_call_id,
-        normalize_owner_account_id,
     )
     from crew.state.home import get_owner_runtime_home
     from crew.tools.process_registry import process_registry
@@ -728,8 +727,8 @@ async def handle_terminal(
     runtime = getattr(process_registry, "_task_runtime", None)
     task_id = ""
     output_ref = ""
-    # 归一化一次、全函数复用：空上下文回落本机 owner，spawn 与 runtime 记录必须同源。
-    owner = normalize_owner_account_id(current_owner_account_id.get())
+    # 读取一次、全函数复用：spawn 与 runtime 记录的 owner 必须同源。
+    owner = current_owner_account_id.get()
     if runtime is not None:
         output_dir = get_owner_runtime_home(owner) / "tasks"
         task = runtime.create_runtime(

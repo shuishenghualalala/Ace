@@ -13,7 +13,7 @@ from datetime import datetime
 import pytest
 
 from crew.core.types import ToolCall
-from crew.core.runctx import current_owner_account_id, current_session_source
+from crew.core.runctx import current_owner_account_id, current_session_source, LOCAL_OWNER_ACCOUNT_ID
 from crew.cron import CronJobStore, CronService, parse_schedule
 from crew.cron.jobs import BJ_TZ, format_bj_timestamp, parse_duration
 from crew.cron.scheduler import IntervalScheduler
@@ -55,11 +55,11 @@ async def test_cron_fire_scopes_owner_context_and_resets_after_run(tmp_path):
         owner_account_id=OWNER,
     )
 
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
     await service.tick()
 
     assert seen == [OWNER]
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
     await service.stop()
 
 

@@ -1141,7 +1141,7 @@ def _handle_process(args: dict[str, Any]) -> str:
 
     action = args.get("action", "")
     session_id = str(args.get("session_id", "")) if args.get("session_id") is not None else ""
-    owner_account_id = normalize_owner_account_id(current_owner_account_id.get())
+    owner_account_id = current_owner_account_id.get()
 
     if action == "list":
         return json.dumps(

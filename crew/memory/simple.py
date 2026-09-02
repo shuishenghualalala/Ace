@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-from crew.core.runctx import current_owner_account_id, normalize_owner_account_id
+from crew.core.runctx import current_owner_account_id
 from crew.core.interfaces import MemoryProvider
 from crew.core.types import Message
 from crew.state._migration import backfill_empty_owner_rows
@@ -63,7 +63,7 @@ class SQLiteMemory(MemoryProvider):
 
     @staticmethod
     def _owner() -> str:
-        return normalize_owner_account_id(current_owner_account_id.get())
+        return current_owner_account_id.get()
 
     async def prefetch(self, session_id: str, query: str) -> str:
         terms = [t for t in query.split() if len(t) >= 2]
