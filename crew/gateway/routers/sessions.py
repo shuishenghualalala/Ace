@@ -243,7 +243,7 @@ async def _teardown_session_resources(
     delete_acp = getattr(external, "delete_acp_bindings_for_session", None) if external else None
     if callable(delete_acp):
         try:
-            delete_acp(session_id)
+            delete_acp(session_id, owner_account_id=owner)
         except Exception as exc:  # noqa: BLE001
             log.warning("删除会话 %s 时清理 ACP 绑定失败: %s", session_id, exc)
 
