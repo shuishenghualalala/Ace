@@ -13,7 +13,7 @@
  */
 
 import { getLastGatewaySequences, isDuplicateGatewayChunk, noteGatewaySequence, touchStreamActivity } from './gateway-sequence';
-import { noteDelta, resetAssistant, resetSession } from '../stream-reassembly';
+import { noteDelta, parseDeltaRange, resetAssistant, resetSession } from '../stream-reassembly';
 import {
   type ChatMessage,
   type MessageRole,
@@ -1277,7 +1277,8 @@ export function applyChunk(incomingChunk: ChatChunk): void {
     const seq = typeof chunk.gateway_sequence === 'number' && chunk.gateway_sequence > 0 ? chunk.gateway_sequence : null;
     if (aid && seq !== null) {
       const text = typeof parsed.body.text === 'string' ? parsed.body.text : '';
-      const reconstructed = noteDelta(sid, aid, seq, text);
+      // 帧区间（回合内帧序号）一并入缓冲：live 合并帧与 replay 单帧文本重复时按区间去重。
+      const reconstructed = noteDelta(sid, aid, seq, text, parseDeltaRange(parsed.body, parsed.sequence));
       for (const u of result.messageUpserts) {
         if (u.op === 'append' && u.message) {
           u.message = { ...u.message, content: reconstructed };

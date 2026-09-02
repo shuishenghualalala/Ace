@@ -880,23 +880,6 @@ class SessionDispatcher:
                                     sid,
                                     sidechain_id,
                                 )
-                        # agent:end 负载需要回合刚结束时的队列深度，先算好；
-                        # emit 本身挪到下方 running 计数与落库状态清理之后，
-                        # 否则监听者（如桌面端渠道通知）收到通知立即拉 status 仍看到 running。
-                        remaining = max(0, self._running_counts.get(key, 1) - 1)
-                        queue_depth = self._waiting.get(key, 0)
-                        if remaining:
-                            self._running_counts[key] = remaining
-                        else:
-                            self._running_counts.pop(key, None)
-                            self._running.discard(key)
-                            self._running_request_ids.pop(key, None)
-                            if self._active_exec_session_ids.get(key) == exec_session_id:
-                                self._active_exec_session_ids.pop(key, None)
-                        if self._running_task.get(key) is current_task:
-                            self._running_task.pop(key, None)
-                        if self._run_task_ids.get(key) == runtime_task_id:
-                            self._run_task_ids.pop(key, None)
                         runtime_terminal_status = ""
                         if runtime_task_id and self._task_runtime is not None:
                             try:
@@ -938,31 +921,61 @@ class SessionDispatcher:
                                         )
                             except Exception:
                                 log.exception("完成 agent_turn 任务失败 task=%s", runtime_task_id)
-                        self._release_global_slot(key, global_slot)
                         try:
-                            status = (
-                                "stopped"
-                                if runtime_terminal_status == "cancelled"
-                                or err.startswith("已停止")
-                                or err.startswith("被新消息中断")
-                                else ("failed" if failed else "completed")
-                            )
-                            self._store.set_status(sid, status, err, owner_account_id=owner)
-                        except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，finally 中不得掩盖主流程结果
-                            log.exception("写入会话状态失败 session=%s", sid)
-                        # 触发 agent:end hook：必须在 running 计数与落库状态清理之后，
-                        # 监听者收到通知后拉到的才是终态。
-                        await hook_registry.emit("agent:end", {
-                            "session_id": sid,
-                            "message": envelope.query[:500],
-                            "response": final_text[:500],
-                            "channel": envelope.channel,
-                            "failed": failed,
-                            "error": err,
-                            "owner_account_id": owner,
-                            "queue_depth": queue_depth,
-                            "running_depth": remaining,
-                        })
+                            # 终态帧必须在 running 清理 / agent:end 之前推出：监听者与状态同步
+                            # 以 idle 为权威信号，若 idle 先到而 final 未达，前端会提前派出排队
+                            # 消息，final 反被回合门拦丢弃（回合永不封口、流式残字）。
+                            if (
+                                deferred_terminal is not None
+                                and owner not in self._blocked_owners
+                                and self._owner_epochs.get(owner, 0) == owner_epoch
+                            ):
+                                terminal_chunk = deferred_terminal
+                                deferred_terminal = None
+                                yield terminal_chunk
+                        finally:
+                            # agent:end 负载需要回合刚结束时的队列深度，先算好；
+                            # emit 本身挪到下方 running 计数与落库状态清理之后，
+                            # 否则监听者（如桌面端渠道通知）收到通知立即拉 status 仍看到 running。
+                            remaining = max(0, self._running_counts.get(key, 1) - 1)
+                            queue_depth = self._waiting.get(key, 0)
+                            if remaining:
+                                self._running_counts[key] = remaining
+                            else:
+                                self._running_counts.pop(key, None)
+                                self._running.discard(key)
+                                self._running_request_ids.pop(key, None)
+                                if self._active_exec_session_ids.get(key) == exec_session_id:
+                                    self._active_exec_session_ids.pop(key, None)
+                            if self._running_task.get(key) is current_task:
+                                self._running_task.pop(key, None)
+                            if self._run_task_ids.get(key) == runtime_task_id:
+                                self._run_task_ids.pop(key, None)
+                            self._release_global_slot(key, global_slot)
+                            try:
+                                status = (
+                                    "stopped"
+                                    if runtime_terminal_status == "cancelled"
+                                    or err.startswith("已停止")
+                                    or err.startswith("被新消息中断")
+                                    else ("failed" if failed else "completed")
+                                )
+                                self._store.set_status(sid, status, err, owner_account_id=owner)
+                            except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，finally 中不得掩盖主流程结果
+                                log.exception("写入会话状态失败 session=%s", sid)
+                            # 触发 agent:end hook：必须在 running 计数与落库状态清理之后，
+                            # 监听者收到通知后拉到的才是终态。
+                            await hook_registry.emit("agent:end", {
+                                "session_id": sid,
+                                "message": envelope.query[:500],
+                                "response": final_text[:500],
+                                "channel": envelope.channel,
+                                "failed": failed,
+                                "error": err,
+                                "owner_account_id": owner,
+                                "queue_depth": queue_depth,
+                                "running_depth": remaining,
+                            })
             except asyncio.CancelledError:
                 err = self._stop_reasons.get(key, "已停止当前回复")
                 log.info("排队中的会话请求已停止 session=%s", sid)
