@@ -107,8 +107,9 @@ def test_inherited_text_only_subagent_cannot_use_browser_vision() -> None:
     assert child.model_capabilities == ("text", "tools")
 
 
-def test_explicit_no_tools_subagent_has_empty_tool_filter() -> None:
-    no_tools = _profile("plain", capabilities=["text"])
+def test_explicit_no_tools_subagent_has_empty_tool_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KEY_PLAIN", "k-plain")
+    no_tools = _profile("plain", capabilities=["text"], builtin=True)
     cfg = Config(active_model_id="plain", model_profiles={"plain": no_tools})
     app = build_app(config=cfg, enable_team=False)
 

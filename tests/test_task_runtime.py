@@ -68,6 +68,7 @@ async def test_activity_and_heartbeat_are_independent(tmp_path):
             kind="subagent",
             session_id="s1",
             title="idle",
+            owner_account_id="local",
             inactivity_timeout=0.08,
             execution_timeout=0,
             backgrounded=True,
@@ -267,14 +268,14 @@ async def test_agent_turn_cancel_preserves_cancelled_terminal_state(tmp_path):
 @pytest.mark.asyncio
 async def test_wait_timeout_does_not_cancel_task(tmp_path):
     runtime = _runtime(tmp_path, wait_timeout=0.02)
-    task = runtime.create_runtime(kind="team", session_id="s1", title="wait")
+    task = runtime.create_runtime(kind="team", session_id="s1", title="wait", owner_account_id="local")
     runtime.mark_running(task["task_id"])
     result = await runtime.wait(task["task_id"], owner_account_id="local")
     assert result["retrieval_status"] == "timeout"
     assert runtime.get(task["task_id"], owner_account_id="local")["status"] == "running"
     runtime.finish(
         task["task_id"],
-        owner_account_id="",
+        owner_account_id="local",
         status="completed",
         result="ok",
     )
@@ -315,9 +316,9 @@ async def test_shell_auto_background_reuses_running_process(tmp_path):
 @pytest.mark.asyncio
 async def test_restart_reconciliation(tmp_path):
     runtime = _runtime(tmp_path)
-    agent = runtime.create_runtime(kind="agent_turn", session_id="s1", title="agent")
+    agent = runtime.create_runtime(kind="agent_turn", session_id="s1", title="agent", owner_account_id="local")
     runtime.mark_running(agent["task_id"])
-    shell = runtime.create_runtime(kind="shell", session_id="s1", title="shell")
+    shell = runtime.create_runtime(kind="shell", session_id="s1", title="shell", owner_account_id="local")
     runtime.mark_running(shell["task_id"])
     # Windows 无 sleep 可执行文件；用当前解释器挂起进程以模拟长驻 shell。
     process_options = (
@@ -341,13 +342,13 @@ async def test_restart_reconciliation(tmp_path):
 
     recovered = _runtime(tmp_path)
     recovered.reconcile_after_restart()
-    assert recovered.get(agent["task_id"])["status"] == "failed"
-    shell_row = recovered.get(shell["task_id"])
+    assert recovered.get(agent["task_id"], owner_account_id="local")["status"] == "failed"
+    shell_row = recovered.get(shell["task_id"], owner_account_id="local")
     assert shell_row["status"] == "running"
     assert shell_row["progress"]["detached"] is True
-    await recovered.cancel(shell["task_id"], "restart cancel")
+    await recovered.cancel(shell["task_id"], "restart cancel", owner_account_id="local")
     await asyncio.wait_for(process.wait(), timeout=2)
-    assert recovered.get(shell["task_id"])["status"] == "cancelled"
+    assert recovered.get(shell["task_id"], owner_account_id="local")["status"] == "cancelled"
     recovered.close()
 
 

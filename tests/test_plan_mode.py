@@ -761,7 +761,7 @@ def test_plan_approved_reminder_injects_plan_file_content(tmp_path, monkeypatch)
 
     agent = SingleAgent.__new__(SingleAgent)
     agent.plan_manager = mgr
-    blocks = agent._plan_reminder_blocks(sid, owner_account_id="")
+    blocks = agent._plan_reminder_blocks(sid, owner_account_id="local")
     assert blocks, "just_approved 应注入至少一块 reminder"
     body = blocks[0]
     assert "BEGIN APPROVED PLAN" in body
@@ -771,7 +771,7 @@ def test_plan_approved_reminder_injects_plan_file_content(tmp_path, monkeypatch)
     assert "{plan_content}" not in body
     assert "{plan_file}" not in body
     # 一次性：再次取不应再注入批准块
-    assert agent._plan_reminder_blocks(sid, owner_account_id="") == []
+    assert agent._plan_reminder_blocks(sid, owner_account_id="local") == []
     # 模板本身仍要求 plan_content 占位
     assert "{plan_content}" in PLAN_APPROVED_REMINDER
 
@@ -806,8 +806,8 @@ def test_effective_tool_filter_narrows_in_plan():
     assert "exit_plan_mode" not in eff_explicit
     assert "enter_plan_mode" not in eff_explicit
     stub.tool_filter = None
-    # 激活 → 收窄到只读白名单
-    mgr.enter(sid)
+    # 激活 → 收窄到只读白名单（_effective_tool_filter 默认 owner=""，显式对齐）
+    mgr.enter(sid, owner_account_id="")
     assert SingleAgent._effective_tool_filter(stub, sid) == list(PLAN_MODE_TOOLS)
 
     # 与既有 filter 取交集

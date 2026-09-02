@@ -8,7 +8,7 @@ from crew.gateway.context import (
     resolve_structured_path_references,
     save_upload,
 )
-from crew.state.home import owner_path_segment
+from crew.state.home import get_owner_runtime_home, owner_path_segment
 
 
 def test_classify_file():
@@ -37,18 +37,17 @@ def test_save_upload_owner_scoped(tmp_path, monkeypatch):
 
 
 def test_complete_path(tmp_path, monkeypatch):
-    # 创建测试文件结构
-    crew_home = tmp_path / ".crew"
-    crew_home.mkdir()
-    monkeypatch.setenv("CREW_HOME", str(crew_home))
-    (crew_home / "src").mkdir()
-    (crew_home / "src" / "main.py").write_text("print('hi')")
-    (crew_home / "readme.md").write_text("# Test")
+    # 创建测试文件结构（owner 统一后补全 base 是本机 owner 的运行时 home）
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    home = get_owner_runtime_home("local", create=False)
+    (home / "src").mkdir(parents=True)
+    (home / "src" / "main.py").write_text("print('hi')")
+    (home / "readme.md").write_text("# Test")
 
-    results = complete_path("src", cwd=str(crew_home))
+    results = complete_path("src", cwd=str(home))
     assert any(r["display"] == "src" for r in results)
 
-    results = complete_path("@file:readme", cwd=str(crew_home))
+    results = complete_path("@file:readme", cwd=str(home))
     assert any("readme" in r["display"] for r in results)
 
 
