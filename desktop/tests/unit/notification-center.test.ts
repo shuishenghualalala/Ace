@@ -4,19 +4,19 @@ import type { BackendNotification } from '../../src/ui/backend-client';
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
-  unreadCount: vi.fn(),
   markRead: vi.fn(),
   markAllRead: vi.fn(),
   openSessionInChat: vi.fn(),
   markSystemTrayNotification: vi.fn(),
   traySetNotifications: vi.fn(),
   activeSessionId: null as string | null,
+  activeTab: 'chat' as string,
+  visibilityState: 'visible' as DocumentVisibilityState,
 }));
 
 vi.mock('../../src/ui/backend-client', () => ({
   notificationApi: {
     list: (opts?: unknown) => mocks.list(opts),
-    unreadCount: () => mocks.unreadCount(),
     markRead: (id: string) => mocks.markRead(id),
     markAllRead: () => mocks.markAllRead(),
   },
@@ -34,6 +34,10 @@ vi.mock('../../src/ui/stores/session-store', () => ({
   sessionStore: { get: () => ({ activeSessionId: mocks.activeSessionId }) },
 }));
 
+vi.mock('../../src/ui/stores/ui-store', () => ({
+  uiStore: { get: () => ({ activeTab: mocks.activeTab }) },
+}));
+
 import {
   bindNotificationCenter,
   handleNotificationPush,
@@ -46,6 +50,11 @@ function installDom(): void {
       <span id="notification-badge" hidden></span>
     </button>
   `;
+}
+
+/** happy-dom 下接管 document.visibilityState，模拟窗口可见 / 最小化与隐藏到托盘。 */
+function setVisibilityState(state: DocumentVisibilityState): void {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
 }
 
 function sample(overrides: Partial<BackendNotification> = {}): BackendNotification {
@@ -104,19 +113,20 @@ describe('notification center', () => {
     vi.clearAllMocks();
     resetNotificationCenterForTest();
     installDom();
-    mocks.unreadCount.mockResolvedValue({ unread_count: 0 });
     mocks.list.mockResolvedValue({ notifications: [], unread_count: 0 });
     mocks.markRead.mockResolvedValue({ ok: true });
     mocks.markAllRead.mockResolvedValue({ ok: true });
     mocks.openSessionInChat.mockResolvedValue(undefined);
     mocks.traySetNotifications.mockResolvedValue({ ok: true });
     mocks.activeSessionId = null;
+    mocks.activeTab = 'chat';
+    setVisibilityState('visible');
     removeTrayBridge();
   });
 
-  it('启动时拉取未读数：>0 显示角标，>99 封顶为 99+', async () => {
+  it('启动时拉取未读：>0 显示角标，>99 封顶为 99+', async () => {
     const badge = document.getElementById('notification-badge') as HTMLElement;
-    mocks.unreadCount.mockResolvedValue({ unread_count: 3 });
+    mocks.list.mockResolvedValue({ notifications: [], unread_count: 3 });
     bindNotificationCenter();
     await flush();
     expect(badge.hidden).toBe(false);
@@ -124,7 +134,7 @@ describe('notification center', () => {
 
     resetNotificationCenterForTest();
     installDom();
-    mocks.unreadCount.mockResolvedValue({ unread_count: 120 });
+    mocks.list.mockResolvedValue({ notifications: [], unread_count: 120 });
     const badge2 = document.getElementById('notification-badge') as HTMLElement;
     bindNotificationCenter();
     await flush();
@@ -216,7 +226,6 @@ describe('notification center', () => {
   });
 
   it('点击条目：标记已读 + 角标同步 + 按 payload.session_id 跳转', async () => {
-    mocks.unreadCount.mockResolvedValue({ unread_count: 1 });
     mocks.list.mockResolvedValue({ notifications: [sample()], unread_count: 1 });
     bindNotificationCenter();
     await flush();
@@ -284,16 +293,18 @@ describe('notification center', () => {
     expect(items[0].textContent).toContain('追问');
   });
 
-  it('启动时向托盘推送初始未读摘要（最近 5 条未读）', async () => {
+  it('启动时一次未读拉取同时驱动角标与托盘摘要（托盘取最近 5 条）', async () => {
     installTrayBridge();
-    mocks.list.mockResolvedValue({ notifications: [sample()], unread_count: 1 });
+    const sixItems = Array.from({ length: 6 }, (_, i) => sample({ id: `n${i + 1}` }));
+    mocks.list.mockResolvedValue({ notifications: sixItems, unread_count: 6 });
     bindNotificationCenter();
     await flush();
-    expect(mocks.list).toHaveBeenCalledWith({ limit: 5, offset: 0, unreadOnly: true });
-    expect(lastTraySummary()).toEqual({
-      unreadCount: 1,
-      items: [{ id: 'n1', title: '定时任务执行失败', sourceLabel: '定时任务' }],
-    });
+    // 启动只发一次 REST 未读拉取（上限与面板一致），角标与托盘摘要共用这份数据。
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(mocks.list).toHaveBeenCalledWith({ limit: 50, offset: 0, unreadOnly: true });
+    const summary = lastTraySummary();
+    expect(summary.unreadCount).toBe(6);
+    expect(summary.items.map((item) => item.id)).toEqual(['n1', 'n2', 'n3', 'n4', 'n5']);
   });
 
   it('WS 推送：托盘摘要同步 +1，并切换托盘图标为通知态', async () => {
@@ -316,7 +327,6 @@ describe('notification center', () => {
 
   it('托盘点击通知：标记已读 + 按 payload.session_id 跳转 + 托盘摘要清空', async () => {
     const bridge = installTrayBridge();
-    mocks.unreadCount.mockResolvedValue({ unread_count: 1 });
     mocks.list.mockResolvedValue({ notifications: [sample()], unread_count: 1 });
     bindNotificationCenter();
     await flush();
@@ -346,7 +356,6 @@ describe('notification center', () => {
 
   it('托盘「全部标为已读」：复用全部已读逻辑并同步托盘摘要', async () => {
     const bridge = installTrayBridge();
-    mocks.unreadCount.mockResolvedValue({ unread_count: 1 });
     mocks.list.mockResolvedValue({ notifications: [sample()], unread_count: 1 });
     bindNotificationCenter();
     await flush();
@@ -360,7 +369,6 @@ describe('notification center', () => {
 
   it('托盘选中通知后，该条目立即从打开的面板中移除', async () => {
     const bridge = installTrayBridge();
-    mocks.unreadCount.mockResolvedValue({ unread_count: 2 });
     mocks.list.mockResolvedValue({
       notifications: [sample(), sample({ id: 'n2', title: '有一个计划等待你批准', source: 'plan' })],
       unread_count: 2,
@@ -388,7 +396,7 @@ describe('notification center', () => {
     expect((document.getElementById('notification-badge') as HTMLElement).textContent).toBe('1');
   });
 
-  it('当前打开会话的推送：抑制角标/toast/托盘，静默置为已读', async () => {
+  it('当前打开会话的推送（聊天页签可见）：抑制角标/toast/托盘，静默置为已读', async () => {
     installTrayBridge();
     mocks.activeSessionId = 's1';
     bindNotificationCenter();
@@ -413,6 +421,42 @@ describe('notification center', () => {
     await flush();
     expect(document.querySelectorAll('.mw-notification-item').length).toBe(0);
     expect(mocks.markRead).toHaveBeenCalledWith('n2');
+  });
+
+  it('当前会话的推送但用户切去了其他页签：照常角标 + toast + 托盘提醒', async () => {
+    installTrayBridge();
+    mocks.activeSessionId = 's1';
+    mocks.activeTab = 'agents';
+    bindNotificationCenter();
+    await flush();
+    mocks.traySetNotifications.mockClear();
+
+    handleNotificationPush(sample({ title: '后台任务已完成' }));
+    const badge = document.getElementById('notification-badge') as HTMLElement;
+    expect(badge.hidden).toBe(false);
+    expect(badge.textContent).toBe('1');
+    expect(document.body.textContent).toContain('后台任务已完成');
+    expect(mocks.markRead).not.toHaveBeenCalled();
+    expect(mocks.traySetNotifications).toHaveBeenCalled();
+    expect(mocks.markSystemTrayNotification).toHaveBeenCalled();
+  });
+
+  it('当前会话的推送但窗口不可见（最小化/藏到托盘）：照常提醒，托盘图标闩锁', async () => {
+    installTrayBridge();
+    mocks.activeSessionId = 's1';
+    setVisibilityState('hidden');
+    bindNotificationCenter();
+    await flush();
+    mocks.traySetNotifications.mockClear();
+
+    handleNotificationPush(sample({ title: '后台任务已完成' }));
+    const badge = document.getElementById('notification-badge') as HTMLElement;
+    expect(badge.hidden).toBe(false);
+    expect(badge.textContent).toBe('1');
+    expect(document.body.textContent).toContain('后台任务已完成');
+    expect(mocks.markRead).not.toHaveBeenCalled();
+    expect(mocks.traySetNotifications).toHaveBeenCalled();
+    expect(mocks.markSystemTrayNotification).toHaveBeenCalled();
   });
 
   it('其他会话的推送：保持原有角标 +1 + toast + 托盘同步', async () => {

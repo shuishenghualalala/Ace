@@ -10,7 +10,7 @@ from typing import Any
 
 from crew.core.errors import ToolError
 from crew.core.followup import CANCELLED_MARKER, send_followup_question, validate_questions, wait_for_answer
-from crew.core.runctx import current_session_id
+from crew.core.runctx import current_session_id, current_task_activity_fn
 from crew.tools.registry import Registry, tool_result
 
 
@@ -87,7 +87,15 @@ async def handle_ask_followup_question(args: dict[str, Any]) -> str:
         raise ToolError("当前无会话，无法发送追问")
 
     session_id, question_id = await send_followup_question(validated, title=title)
-    answers = await wait_for_answer(session_id, question_id)
+    # 选择卡片挂起期间回合必须保持运行中：无限等待（用户没选就一直等，取消/
+    # 回答/停止会话均可解除），并周期上报任务活动，防止任务运行时的不活跃超时
+    # 把回合误杀成 timed_out、进而误发"任务已超时"通知。
+    answers = await wait_for_answer(
+        session_id,
+        question_id,
+        timeout=None,
+        activity_fn=current_task_activity_fn.get(),
+    )
 
     # 用户点「取消」：后端回灌的取消标记答案，识别后告知模型用户已放弃选择。
     cancelled = bool(answers) and answers[0].get("id") == CANCELLED_MARKER

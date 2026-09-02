@@ -370,6 +370,18 @@ class AgentManager:
 # 正常 shutdown() 会把自己从表中移除，生产单实例场景开销可忽略。
 _LIVE_APPS: list["CrewApp"] = []
 
+# tasks 来源通知的语义（全链路唯一判定点见 CrewApp._should_notify_task）：
+# - 通知只认 agent_turn 回合终态；只有这些终态值得提醒，cancelled 是用户主动
+#   取消，结果由用户自己触发。
+_NOTIFYWORTHY_TASK_STATUSES = frozenset({"completed", "failed", "timed_out"})
+# - 这些类型的后台任务完成后会触发恢复回合（"自动继续"，与通知无关）。
+_RESUMABLE_TASK_KINDS = frozenset({"shell", "subagent"})
+_TASK_NOTIFICATION_TITLES = {
+    "completed": "任务已完成",
+    "failed": "任务失败",
+    "timed_out": "任务已超时",
+}
+
 
 class CrewApp:
 
@@ -574,7 +586,7 @@ class CrewApp:
             return
 
     def _on_task_completion(self, task: dict[str, Any]) -> None:
-        """Deduplicate completion delivery and resume background tool tasks."""
+        """Deduplicate completion delivery, resume background tool tasks, notify turn ends."""
         task_id = str(task.get("task_id") or "")
         owner = str(task.get("owner_account_id") or "")
         if not task_id or not self.tasks.mark_notified(
@@ -583,14 +595,13 @@ class CrewApp:
         ):
             return
         self._on_task_event({**task, "phase": task.get("status", "completed")})
-        # 会触发恢复 turn 的中间任务不发通知：一轮对话只在最终结束时通知一次
+        # 后台 shell/subagent 任务完成后自动恢复回合（"自动继续"功能，与通知无关）；
+        # 恢复回合自身是 agent_turn，其终态会走下方通知路径，把最终答复带给用户。
         will_resume = (
-            task.get("kind") in {"shell", "subagent"}
+            str(task.get("kind") or "") in _RESUMABLE_TASK_KINDS
             and bool(task.get("backgrounded"))
             and self._should_resume_completed_task(task)
         )
-        if not will_resume:
-            self._publish_task_notification(task)
         if (
             will_resume
             and self.tasks.mark_resume_enqueued(
@@ -601,21 +612,29 @@ class CrewApp:
             and self.tasks._loop.is_running()
         ):
             asyncio.create_task(self._resume_completed_task(task))
+        # 通知只认回合终态：用户派的任务（agent_turn）结束了就发一条。
+        # 用户正在看时由前端按可见性静默已读，没在看才响铃；shell/subagent 等
+        # 中间任务不单独通知，其结果由所属回合或恢复回合统一携带。
+        if self._should_notify_task(task):
+            self._publish_task_notification(task)
 
     # ---- 通知中心来源：tasks / approval / followup / plan（cron 在 build_app 装配）----
 
-    def _publish_task_notification(self, task: dict[str, Any]) -> None:
-        """转入后台的任务彻底结束时发一条站内通知。
+    def _should_notify_task(self, task: dict[str, Any]) -> bool:
+        """任务通知唯一判定：只认 agent_turn 回合终态（completed/failed/timed_out）。
 
-        任务运行时是全局执行账本（agent_turn / shell / subagent 都会记账），
-        只有 backgrounded=True 的条目代表离开用户视野的工作；前台执行在会话里
-        已内联展示，一律不通知。
+        任务运行时是全局执行账本（agent_turn / shell / subagent 都会记账），一轮
+        对话只应有回合结束这一条通知；选择卡片挂起期间回合保持 running，不会走到
+        这里。cancelled 由用户主动触发，无需提醒。
         """
+        return (
+            str(task.get("kind") or "") == "agent_turn"
+            and str(task.get("status") or "") in _NOTIFYWORTHY_TASK_STATUSES
+        )
+
+    def _publish_task_notification(self, task: dict[str, Any]) -> None:
+        """发布一条回合终态通知；是否发布由 _should_notify_task 决定。"""
         status = str(task.get("status") or "")
-        if status not in {"completed", "failed"}:
-            return
-        if not bool(task.get("backgrounded")):
-            return
         from crew.core.interfaces import Notification
 
         summary = str(task.get("result") or task.get("error") or "")[:200]
@@ -624,7 +643,7 @@ class CrewApp:
                 owner_account_id=str(task.get("owner_account_id") or ""),
                 source="tasks",
                 kind=f"task_{status}",
-                title="后台任务已完成" if status == "completed" else "后台任务失败",
+                title=_TASK_NOTIFICATION_TITLES.get(status, "任务已结束"),
                 body=summary,
                 payload={
                     "task_id": str(task.get("task_id") or ""),

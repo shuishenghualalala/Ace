@@ -3150,7 +3150,6 @@ export const notificationApi = {
       `/api/notifications?${params.toString()}`,
     );
   },
-  unreadCount: () => getJSON<{ unread_count: number }>('/api/notifications/unread-count'),
   markRead: (id: string) =>
     getJSON<{ ok: boolean }>(`/api/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' }),
   markAllRead: () => getJSON<{ ok: boolean }>('/api/notifications/read-all', { method: 'POST' }),

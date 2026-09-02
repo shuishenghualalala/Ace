@@ -470,6 +470,25 @@ async def test_followup_hook_failure_does_not_break_flow(tmp_path):
         set_followup_notification_hooks()
 
 
+async def test_followup_wait_keepalive_supports_infinite_timeout():
+    """选择卡片挂起场景：activity_fn 周期上报任务活动，等待横跨多个分片不被取消；
+    timeout=None 表示无限等待，直到用户作答。"""
+    sid, question_id = await _send_one_followup("s-f6")
+    pulses: list[bool] = []
+
+    def activity_fn() -> None:
+        pulses.append(True)
+
+    waiter = asyncio.create_task(
+        wait_for_answer(sid, question_id, timeout=None, activity_fn=activity_fn, activity_interval=0.02)
+    )
+    await asyncio.sleep(0.06)  # 横跨多个活动心跳分片
+    assert not waiter.done()  # 无限等待：未作答就保持挂起（回合保持运行中）
+    assert pulses  # 心跳已上报，长等待不会被不活跃超时误杀
+    assert resolve_answer(sid, question_id, [{"id": "q0", "answers": ["方案A"]}]) is True
+    assert await waiter == [{"id": "q0", "answers": ["方案A"]}]
+
+
 # ---- plan 来源接入 ----
 
 def _app_with_notifications(center: NotificationCenterService):
@@ -561,53 +580,111 @@ def _completed_shell_task(**kwargs) -> dict:
     return task
 
 
-def test_task_completion_resume_eligible_skips_notification(tmp_path):
-    """后台 shell 任务会恢复 turn（会话仍在运行）→ 中间步骤不发通知。"""
+async def test_task_completion_resume_eligible_skips_notification(tmp_path):
+    """后台 shell 任务会恢复 turn（会话仍在运行）→ 中间步骤不发通知，恢复正常派发。"""
     center = NotificationCenterService(_store(tmp_path))
     app = _app_for_task_completion(center, session_status="running")
+    dispatched: list[dict] = []
+
+    async def _record_resume(task: dict) -> None:
+        dispatched.append(task)
+
+    app._resume_completed_task = _record_resume
+    app.tasks._loop = asyncio.get_running_loop()
 
     app._on_task_completion(_completed_shell_task())
+    await asyncio.sleep(0)  # 让 create_task 的恢复协程跑起来
 
     assert center.unread_count(OWNER) == 0
     assert app.tasks.resume_enqueued == ["t-shell-1"]  # resume 逻辑不受影响
+    assert [str(task["task_id"]) for task in dispatched] == ["t-shell-1"]
 
 
-def test_task_completion_turn_over_publishes_notification(tmp_path):
-    """后台 shell 任务完成时会话已停止（turn 结束）→ 正常发通知。"""
+def test_task_completion_resume_unavailable_stays_silent(tmp_path):
+    """恢复无法接力（运行时无可用事件循环）→ 不恢复也不通知（中间任务静默）。"""
     center = NotificationCenterService(_store(tmp_path))
-    app = _app_for_task_completion(center, session_status="stopped")
+    app = _app_for_task_completion(center, session_status="running")
+    assert app.tasks._loop is None
 
     app._on_task_completion(_completed_shell_task())
 
+    assert app.tasks.resume_enqueued == ["t-shell-1"]
+    assert center.unread_count(OWNER) == 0
+
+
+def test_task_completion_agent_turn_completed_notifies(tmp_path):
+    """普通对话回合（agent_turn）结束就发通知——这是任务完成提醒的主路径。
+
+    回合是否 backgrounded 与通知无关；用户正看着时由前端按可见性静默已读。
+    """
+    center = NotificationCenterService(_store(tmp_path))
+    app = _app_for_task_completion(center, session_status="stopped")
+
+    app._on_task_completion(_completed_shell_task(kind="agent_turn", backgrounded=False, result="最终答复"))
+
     assert center.unread_count(OWNER) == 1
-    assert app.tasks.resume_enqueued == []
     item = center.list(OWNER)[0]
     assert item.source == "tasks"
     assert item.kind == "task_completed"
+    assert item.title == "任务已完成"
     assert item.payload["task_id"] == "t-shell-1"
+    assert item.body == "最终答复"
 
 
-def test_task_completion_non_resume_kind_publishes_notification(tmp_path):
-    """非 shell/subagent 类型的任务完成 → 保持原有行为，正常发通知。"""
+def test_task_completion_timed_out_notifies(tmp_path):
+    """回合超时也发通知：用户需要知道任务没有正常跑完。"""
     center = NotificationCenterService(_store(tmp_path))
-    app = _app_for_task_completion(center, session_status="running")
+    app = _app_for_task_completion(center, session_status="stopped")
 
-    app._on_task_completion(_completed_shell_task(kind="browser"))
+    app._on_task_completion(
+        _completed_shell_task(kind="agent_turn", backgrounded=False, status="timed_out", result="", error="命令超时（>60s）")
+    )
 
     assert center.unread_count(OWNER) == 1
-    assert app.tasks.resume_enqueued == []
-    assert center.list(OWNER)[0].payload["task_kind"] == "browser"
+    item = center.list(OWNER)[0]
+    assert item.kind == "task_timed_out"
+    assert item.title == "任务已超时"
+    assert item.body == "命令超时（>60s）"
 
 
-def test_task_completion_foreground_never_notifies(tmp_path):
-    """前台执行（未转后台）完成一律不通知：回合与工具调用在会话里已内联展示。"""
+def test_task_completion_cancelled_does_not_notify(tmp_path):
+    """用户主动取消的回合不通知：结果由用户自己触发，提醒属于噪音。"""
+    center = NotificationCenterService(_store(tmp_path))
+    app = _app_for_task_completion(center, session_status="stopped")
+
+    app._on_task_completion(_completed_shell_task(kind="agent_turn", backgrounded=False, status="cancelled"))
+
+    assert center.unread_count(OWNER) == 0
+
+
+def test_should_notify_task_matrix(tmp_path):
+    """任务通知唯一判定点的语义矩阵：只认 agent_turn 的可提醒终态。"""
     center = NotificationCenterService(_store(tmp_path))
     app = _app_for_task_completion(center, session_status="running")
 
-    app._on_task_completion(_completed_shell_task(kind="agent_turn", backgrounded=False))
-    app._on_task_completion(_completed_shell_task(task_id="t-shell-2", backgrounded=False))
+    # agent_turn 的可提醒终态
+    for status in ("completed", "failed", "timed_out"):
+        assert app._should_notify_task(_completed_shell_task(kind="agent_turn", status=status))
+    # cancelled / 非终态不提醒
+    assert not app._should_notify_task(_completed_shell_task(kind="agent_turn", status="cancelled"))
+    assert not app._should_notify_task(_completed_shell_task(kind="agent_turn", status="running"))
+    # 中间任务（shell/subagent/browser 等）一律不单独通知，无论前后台
+    for kind in ("shell", "subagent", "browser"):
+        for backgrounded in (True, False):
+            assert not app._should_notify_task(_completed_shell_task(kind=kind, backgrounded=backgrounded))
+
+
+def test_task_completion_tool_tasks_never_notify(tmp_path):
+    """shell/subagent 等中间任务即使后台完成也不单独通知：结果由所属回合或恢复回合携带。"""
+    center = NotificationCenterService(_store(tmp_path))
+    app = _app_for_task_completion(center, session_status="stopped")
+
+    app._on_task_completion(_completed_shell_task())                                   # 后台 shell，会话已停
+    app._on_task_completion(_completed_shell_task(task_id="t-shell-2", backgrounded=False))  # 前台 shell
+    app._on_task_completion(_completed_shell_task(task_id="t-shell-3", kind="browser"))      # 其他类型
 
     assert center.unread_count(OWNER) == 0
+    assert app.tasks.resume_enqueued == []
 
 
 def test_task_completion_backgrounded_resume_turn_notifies(tmp_path):
@@ -621,6 +698,29 @@ def test_task_completion_backgrounded_resume_turn_notifies(tmp_path):
     item = center.list(OWNER)[0]
     assert item.payload["task_kind"] == "agent_turn"
     assert item.body == "最终答复"
+
+
+def test_task_runtime_notify_completion_suppression(tmp_path):
+    """create_runtime(notify_completion=False) 的任务（如 cron 回合）完成时不触发回调，
+    但仍原子占掉一次性完成副作用（notified_at），防止其他路径重复触发。"""
+    from crew.tasks.runtime import TaskRuntime
+
+    runtime = TaskRuntime(str(tmp_path / "crew.db"))
+    seen: list[dict] = []
+    runtime.set_callbacks(on_completion=lambda task: seen.append(task))
+
+    suppressed = runtime.create_runtime(
+        kind="agent_turn", session_id="s-cron", title="cron 回合",
+        owner_account_id=OWNER, notify_completion=False,
+    )
+    normal = runtime.create_runtime(
+        kind="agent_turn", session_id="s-chat", title="对话回合", owner_account_id=OWNER,
+    )
+    runtime.finish(suppressed["task_id"], owner_account_id=OWNER, status="completed", result="cron 结果")
+    runtime.finish(normal["task_id"], owner_account_id=OWNER, status="completed", result="最终答复")
+
+    assert [str(task.get("task_id")) for task in seen] == [str(normal["task_id"])]
+    assert runtime.get(suppressed["task_id"], owner_account_id=OWNER)["notified_at"] is not None
 
 
 # ---- REST 路由 ----

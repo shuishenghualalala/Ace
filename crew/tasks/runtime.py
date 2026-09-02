@@ -55,6 +55,9 @@ class TaskRuntime:
         self._completion_callback: Callable[[dict[str, Any]], Any] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._blocked_owners: set[str] = set()
+        # 创建时声明不发完成通知的任务 (task_id, owner_account_id) 集合（进程内存量，
+        # 与任务同生命周期；任务完成占坑时移除）。
+        self._notify_suppressed: set[tuple[str, str]] = set()
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -133,6 +136,7 @@ class TaskRuntime:
         auto_backgrounded: bool = False,
         task_id: str | None = None,
         owner_account_id: str = "",
+        notify_completion: bool = True,
     ) -> dict[str, Any]:
         owner_account_id = str(owner_account_id or "").strip()
         if owner_account_id in self._blocked_owners:
@@ -172,6 +176,9 @@ class TaskRuntime:
             )
 
         self._writer.execute(_write)
+        if not notify_completion:
+            # 该任务的完成不需要发通知（如 cron 回合已有自己的定时任务通知）。
+            self._notify_suppressed.add((record.task_id, owner_account_id))
         self._emit(record.to_dict(), "started" if record.status == "running" else "created")
         return record.to_dict()
 
@@ -790,6 +797,13 @@ class TaskRuntime:
     def _notify_completion(self, task: dict[str, Any]) -> None:
         callback = self._completion_callback
         if callback is None or task.get("notified_at") is not None:
+            return
+        key = (str(task.get("task_id") or ""), str(task.get("owner_account_id") or ""))
+        if key in self._notify_suppressed:
+            # 声明不发通知的任务：仍要原子占掉一次性完成副作用（mark_notified），
+            # 防止其他完成路径重复触发；集合条目随之清理。
+            self._notify_suppressed.discard(key)
+            self.mark_notified(key[0], owner_account_id=key[1])
             return
         self._call_callback(callback, task)
 

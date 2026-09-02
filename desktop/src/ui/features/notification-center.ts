@@ -3,16 +3,18 @@
  * + 未读角标（#notification-badge）+ 点击弹出的通知面板。
  *
  * 数据流：
- * - 启动时 GET /api/notifications/unread-count 初始化角标；
- * - WS notification 帧（chat-controller 分发到这里）只负责「唤醒」：角标 +1 + toast 轻提示；
- *   来自当前打开会话的推送例外：结果已在聊天区内联展示，直接静默置为已读；
- * - 面板每次打开都走 REST 拉取未读（unreadOnly），只展示未读条目，作为断线兜底；
- * - 单条已读 / 全部已读走 REST，成功后同步本地状态与角标（已读条目随即从面板移除）。
- *   后端历史不动：已读仅是展示过滤，刷新面板仍可拉全量（面板拉取固定 unreadOnly）。
+ * - 未读状态单一数据源：notifications（未读条目，上限 UNREAD_LIST_LIMIT）+ unreadCount
+ *   （后端权威未读总数，可能大于条目数）。启动与面板打开都走同一次 REST 未读拉取；
+ * - WS notification 帧（chat-controller 分发到这里）负责「唤醒」：角标 +1 + toast 轻提示；
+ *   来自「用户此刻正看着的会话」的推送例外：结果已在聊天区内联展示，直接静默置为已读。
+ *   「正看着」= 该会话是当前聊天会话，且聊天页签在前台、应用窗口可见——切到其他页签、
+ *   窗口最小化或隐藏到托盘时照常提醒，否则人不在聊天区就永远收不到任务完成通知；
+ * - 单条已读 / 全部已读走 REST，成功后同步本地状态与角标（已读条目随即从列表移除）。
+ *   后端历史不动：已读仅是展示过滤，刷新列表仍可拉全量（拉取固定 unreadOnly）。
  *
  * 托盘菜单双向同步：
  * - 应用 → 托盘：上述每次变更都通过 window.Crew.traySetNotifications 推送
- *   未读摘要（未读数 + 最近 5 条未读），主进程据此重建托盘菜单；
+ *   未读摘要（未读数 + 最近 5 条未读，由单一数据源切片派生），主进程据此重建托盘菜单；
  * - 托盘 → 应用：托盘菜单点击通知 / 全部标为已读经 preload 事件回到这里，
  *   复用 openNotification / handleMarkAllRead，与面板点击行为一致；
  * - 新推送到达时额外调用 markSystemTrayNotification() 切换托盘图标态。
@@ -22,11 +24,14 @@ import type { TrayNotificationSummary } from '../../shared/types';
 import { showToast } from '../components/overlays';
 import { openSessionInChat } from './chat-controller';
 import { markSystemTrayNotification } from './system-tray';
+import { uiStore } from '../stores/ui-store';
 import { sessionStore } from '../stores/session-store';
 import { relativeTime } from './work/time';
 
 const PANEL_MAX_HEIGHT = 480;
 const PANEL_VIEWPORT_GAP = 8;
+/** 本地未读列表与 REST 拉取共用的大小上限；超出部分以后端 unread_count 体现。 */
+const UNREAD_LIST_LIMIT = 50;
 /** 托盘菜单展示的最近未读条数上限。 */
 const TRAY_MENU_MAX_ITEMS = 5;
 
@@ -44,10 +49,9 @@ let bound = false;
 let panel: HTMLDivElement | null = null;
 let panelOpen = false;
 let loading = false;
+/** 未读条目单一数据源：推送时增补，刷新时整体替换，面板与托盘都从这里取数。 */
 let notifications: BackendNotification[] = [];
 let unreadCount = 0;
-/** 托盘菜单使用的最近未读条目（与面板列表相互独立，启动时单独拉一次）。 */
-let trayUnreadItems: BackendNotification[] = [];
 /** 本次运行已见过的推送 id：WS 重连 replay 等场景下去重，避免角标重复 +1。 */
 const seenPushIds = new Set<string>();
 let onDocumentPointerDown: ((event: MouseEvent) => void) | null = null;
@@ -85,9 +89,8 @@ function renderBadge(): void {
  */
 function pushTraySummary(): void {
   const summary: TrayNotificationSummary = {
-    // 角标接口尚未返回时用已知未读条目数兜底，保证托盘不会漏掉未读区。
-    unreadCount: Math.max(unreadCount, trayUnreadItems.length),
-    items: trayUnreadItems.slice(0, TRAY_MENU_MAX_ITEMS).map((item) => ({
+    unreadCount,
+    items: notifications.slice(0, TRAY_MENU_MAX_ITEMS).map((item) => ({
       id: item.id,
       title: item.title,
       sourceLabel: item.source ? sourceLabel(item.source) : undefined,
@@ -100,38 +103,31 @@ function pushTraySummary(): void {
   });
 }
 
-/** 启动时拉一次最近未读，作为托盘菜单的初始数据（角标仍由 refreshUnreadCount 驱动）。 */
-async function refreshTraySnapshot(): Promise<void> {
-  try {
-    const result = await notificationApi.list({ limit: TRAY_MENU_MAX_ITEMS, offset: 0, unreadOnly: true });
-    trayUnreadItems = Array.isArray(result?.notifications) ? result.notifications : [];
-  } catch {
-    // 后端未就绪或版本未支持时静默降级：托盘菜单保持无通知。
-    trayUnreadItems = [];
-  }
-  pushTraySummary();
-}
-
 function isValidNotification(value: unknown): value is BackendNotification {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Partial<BackendNotification>;
   return typeof candidate.id === 'string' && typeof candidate.title === 'string';
 }
 
-/** 推送是否来自当前聊天区已打开的会话（这类结果已内联展示，无需再走未读提醒）。 */
-function isActiveSessionPush(notification: BackendNotification): boolean {
+/**
+ * 推送是否属于「用户此刻正看着的会话」（这类结果已在聊天区内联展示，无需再走未读提醒）。
+ * 三个条件缺一不可：会话是当前聊天会话 + 聊天页签在前台 + 应用窗口可见。
+ * 只比对会话 id 会把「切去别的页签 / 窗口最小化」误判成正在看，通知被静默吞掉。
+ */
+function isViewingSessionPush(notification: BackendNotification): boolean {
   const sessionId = typeof notification.payload?.session_id === 'string'
     ? notification.payload.session_id.trim()
     : '';
-  return Boolean(sessionId) && sessionId === sessionStore.get().activeSessionId;
+  if (!sessionId || sessionId !== sessionStore.get().activeSessionId) return false;
+  return uiStore.get().activeTab === 'chat' && document.visibilityState === 'visible';
 }
 
 /** WS notification 帧入口（chat-controller 分发）：角标 +1 + toast；面板开着则同步插入列表。 */
 export function handleNotificationPush(notification: BackendNotification | undefined): void {
   if (!isValidNotification(notification)) return;
-  // 当前正在查看的会话产生的推送：完成/审批/追问卡片已在聊天区内联展示，
+  // 用户此刻正看着的会话：完成/审批/追问卡片已在聊天区内联展示，
   // 角标/toast/托盘都属于噪音，直接静默置为已读，保持后端未读状态一致。
-  if (isActiveSessionPush(notification)) {
+  if (isViewingSessionPush(notification)) {
     seenPushIds.add(notification.id);
     void notificationApi.markRead(notification.id).catch(() => {
       // 已读失败静默降级：下次刷新未读数时自然收敛。
@@ -141,14 +137,9 @@ export function handleNotificationPush(notification: BackendNotification | undef
   if (!seenPushIds.has(notification.id)) {
     seenPushIds.add(notification.id);
     unreadCount += 1;
-    if (panelOpen) {
-      notifications.unshift(notification);
-      renderList();
-    }
-    if (!trayUnreadItems.some((item) => item.id === notification.id)) {
-      trayUnreadItems.unshift(notification);
-      if (trayUnreadItems.length > TRAY_MENU_MAX_ITEMS) trayUnreadItems.length = TRAY_MENU_MAX_ITEMS;
-    }
+    notifications.unshift(notification);
+    if (notifications.length > UNREAD_LIST_LIMIT) notifications.length = UNREAD_LIST_LIMIT;
+    if (panelOpen) renderList();
     renderBadge();
     pushTraySummary();
   }
@@ -157,35 +148,45 @@ export function handleNotificationPush(notification: BackendNotification | undef
   showToast({ message: notification.title || '收到新通知' });
 }
 
-async function refreshUnreadCount(): Promise<void> {
+/** 未读列表的 REST 拉取。失败返回 null，由调用方决定提示策略。 */
+async function fetchUnreadPage(): Promise<{ items: BackendNotification[]; unread: number } | null> {
   try {
-    const result = await notificationApi.unreadCount();
-    unreadCount = Math.max(0, Number(result?.unread_count) || 0);
-    renderBadge();
-    pushTraySummary();
+    const result = await notificationApi.list({ limit: UNREAD_LIST_LIMIT, offset: 0, unreadOnly: true });
+    return {
+      items: Array.isArray(result?.notifications) ? result.notifications : [],
+      unread: Math.max(0, Number(result?.unread_count) || 0),
+    };
   } catch {
-    // 后端未就绪或版本未支持时静默降级：角标保持隐藏，不影响主流程。
+    return null;
   }
 }
 
-async function refreshList(): Promise<void> {
-  loading = true;
-  renderList();
-  try {
-    // 面板只展示未读：历史已读条目仍留在后端，这里仅是展示过滤。
-    const result = await notificationApi.list({ limit: 50, offset: 0, unreadOnly: true });
-    notifications = Array.isArray(result?.notifications) ? result.notifications : [];
-    unreadCount = Math.max(0, Number(result?.unread_count) || 0);
-    trayUnreadItems = notifications.slice(0, TRAY_MENU_MAX_ITEMS);
-    pushTraySummary();
-  } catch (err) {
-    notifications = [];
-    showToast({ message: `通知加载失败：${(err as Error)?.message ?? err}`, tone: 'danger' });
-  } finally {
-    loading = false;
-    renderBadge();
+/** 用拉取结果整体替换未读单一数据源，并同步角标与托盘。 */
+function applyUnreadPage(items: BackendNotification[], unread: number): void {
+  notifications = items;
+  unreadCount = unread;
+  renderBadge();
+  pushTraySummary();
+}
+
+/**
+ * REST 拉取未读（面板只展示未读：历史已读条目留在后端，这里仅是展示过滤）。
+ * quiet 用于启动时的静默兜底（后端未就绪时不打扰）；面板打开时给加载态与失败提示。
+ */
+async function refreshList(options: { quiet?: boolean } = {}): Promise<void> {
+  if (!options.quiet) {
+    loading = true;
     renderList();
   }
+  const page = await fetchUnreadPage();
+  if (!options.quiet) {
+    loading = false;
+    if (!page) {
+      showToast({ message: '通知加载失败，请稍后重试', tone: 'danger' });
+    }
+    renderList();
+  }
+  if (page) applyUnreadPage(page.items, page.unread);
 }
 
 function createPanel(): HTMLDivElement {
@@ -262,10 +263,9 @@ async function navigateToNotification(notification: BackendNotification): Promis
   }
 }
 
-/** 本地单条已读：从面板列表移除（面板只展示未读），并同步托盘摘要与角标。 */
+/** 本地单条已读：从未读列表移除（面板只展示未读），并同步托盘摘要与角标。 */
 function applyLocalRead(id: string): void {
   notifications = notifications.filter((item) => item.id !== id);
-  trayUnreadItems = trayUnreadItems.filter((item) => item.id !== id);
   unreadCount = Math.max(0, unreadCount - 1);
   renderBadge();
   renderList();
@@ -292,16 +292,13 @@ async function handleItemClick(notification: BackendNotification): Promise<void>
 
 /** 托盘菜单点击通知：本地找不到时拉一次列表兜底，然后走与面板点击相同的已读 + 跳转。 */
 async function handleTrayNotificationSelected(id: string): Promise<void> {
-  let notification = trayUnreadItems.find((item) => item.id === id)
-    ?? notifications.find((item) => item.id === id);
+  let notification = notifications.find((item) => item.id === id);
   if (!notification) {
-    try {
-      // 面板只存未读条目，兜底拉取同样限定未读，避免已读历史混入面板。
-      const result = await notificationApi.list({ limit: 50, offset: 0, unreadOnly: true });
-      notifications = Array.isArray(result?.notifications) ? result.notifications : [];
+    const page = await fetchUnreadPage();
+    if (page) {
+      // 列表只存未读条目，兜底拉取同样限定未读，避免已读历史混入。
+      applyUnreadPage(page.items, page.unread);
       notification = notifications.find((item) => item.id === id);
-    } catch {
-      // 拉取失败按无法跳转处理，不打扰用户。
     }
   }
   if (!notification) return;
@@ -311,10 +308,9 @@ async function handleTrayNotificationSelected(id: string): Promise<void> {
 async function handleMarkAllRead(): Promise<void> {
   try {
     await notificationApi.markAllRead();
-    // 面板只展示未读：全部已读即清空面板列表（后端历史保留）。
+    // 面板只展示未读：全部已读即清空本地列表（后端历史保留）。
     notifications = [];
     unreadCount = 0;
-    trayUnreadItems = [];
     renderBadge();
     renderList();
     pushTraySummary();
@@ -407,8 +403,8 @@ export function bindNotificationCenter(): () => void {
   bound = true;
   const bell = bellButton();
   bell?.addEventListener('click', togglePanel);
-  void refreshUnreadCount();
-  void refreshTraySnapshot();
+  // 启动时静默拉一次未读：角标、面板初始列表与托盘摘要共用这份数据。
+  void refreshList({ quiet: true });
   // 托盘 → 应用：点击托盘通知 / 全部标为已读，复用通知中心已有逻辑。
   const offTraySelected = window.Crew?.onTrayNotificationSelected?.(
     (id: string) => void handleTrayNotificationSelected(id),
@@ -434,7 +430,6 @@ export function resetNotificationCenterForTest(): void {
   panel = null;
   notifications = [];
   unreadCount = 0;
-  trayUnreadItems = [];
   seenPushIds.clear();
   loading = false;
   bound = false;

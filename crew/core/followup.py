@@ -27,6 +27,9 @@ log = get_logger("followup")
 
 _DEFAULT_TIMEOUT = DEFAULT_INTERACTION_TIMEOUT_SECONDS
 
+# 选择卡片挂起期间的任务活动心跳间隔：防止长等待被任务运行时的不活跃超时误杀。
+_ACTIVITY_PULSE_INTERVAL_SECONDS = 30.0
+
 # 取消标记：用户点「取消」时以此作为答案回灌，工具 handler 据此识别取消。
 # 用回灌而非 future.cancel()，避免 CancelledError 冒泡到 agent 主任务。
 CANCELLED_MARKER = "__cancelled__"
@@ -117,14 +120,24 @@ class FollowupWaiter:
         session_id: str,
         question_id: str,
         *,
-        timeout: float = _DEFAULT_TIMEOUT,
+        timeout: float | None = _DEFAULT_TIMEOUT,
+        activity_fn: Callable[[], None] | None = None,
+        activity_interval: float = _ACTIVITY_PULSE_INTERVAL_SECONDS,
     ) -> list[dict[str, Any]]:
-        """等待用户回答；超时返回空答案列表（让 LLM 自己处理）。"""
+        """等待用户回答；超时返回空答案列表（让 LLM 自己处理）。
+
+        timeout=None 表示无限等待：选择卡片场景下用户没选，回合就一直保持运行中。
+        提供 activity_fn 时按 activity_interval 周期上报任务活动，防止长等待被
+        任务运行时的不活跃超时误杀。
+        """
         future = self._futures.get(self._key(session_id, question_id))
         if future is None:
             raise ToolError(f"追问不存在: {question_id}")
         try:
-            answers = await asyncio.wait_for(future, timeout=timeout)
+            if activity_fn is None:
+                answers = await asyncio.wait_for(future, timeout=timeout)
+            else:
+                answers = await self._wait_with_activity(future, activity_fn, activity_interval, timeout)
         except asyncio.TimeoutError:
             log.warning("追问超时 session=%s question=%s", session_id, question_id)
             answers = []
@@ -136,6 +149,30 @@ class FollowupWaiter:
             # 等待结束（回答/取消/超时）即解除待办：对应通知自动已读。
             _fire_resolved(session_id, question_id)
         return answers
+
+    @staticmethod
+    async def _wait_with_activity(
+        future: "asyncio.Future[list[dict[str, Any]]]",
+        activity_fn: Callable[[], None],
+        interval: float,
+        timeout: float | None,
+    ) -> list[dict[str, Any]]:
+        """分片等待 Future，每片结束时上报一次任务活动。
+
+        用 asyncio.wait 而非 wait_for：分片超时不会取消 Future 本身，答案到达时
+        仍能正常取到；timeout=None 时无限循环直到用户作答。
+        """
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + max(0.0, float(timeout))
+        while True:
+            remaining = None if deadline is None else deadline - loop.time()
+            if remaining is not None and remaining <= 0:
+                raise asyncio.TimeoutError
+            slice_wait = interval if remaining is None else min(interval, remaining)
+            done, _pending = await asyncio.wait({future}, timeout=slice_wait)
+            if done:
+                return future.result()
+            activity_fn()
 
     def resolve(
         self,
@@ -426,9 +463,17 @@ async def wait_for_answer(
     session_id: str,
     question_id: str,
     *,
-    timeout: float = _DEFAULT_TIMEOUT,
+    timeout: float | None = _DEFAULT_TIMEOUT,
+    activity_fn: Callable[[], None] | None = None,
+    activity_interval: float = _ACTIVITY_PULSE_INTERVAL_SECONDS,
 ) -> list[dict[str, Any]]:
-    return await _followup_waiter.wait(session_id, question_id, timeout=timeout)
+    return await _followup_waiter.wait(
+        session_id,
+        question_id,
+        timeout=timeout,
+        activity_fn=activity_fn,
+        activity_interval=activity_interval,
+    )
 
 
 def resolve_answer(
