@@ -28,6 +28,7 @@ from crew.state.config import Config
 from crew.state.plugin_preferences import PluginPreferencesStore
 from crew.tools.registry import Registry
 from crew.core.types import ToolCall
+from crew.features import FeatureState, RegistrationPhase
 
 from crew.browser.manager import _bounded
 from plugins.browser.tool import (
@@ -164,6 +165,76 @@ def test_plugin_loaded_and_skill_root_registered(tmp_path):
     assert loaded is not None and loaded.enabled
     assert any("browser" in str(root) for root in crew.plugins.plugin_skill_roots())
     assert "/browser-use" in scan_skills()
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.ACTIVE
+    scope = loaded.feature_record.scope
+    assert scope is not None
+    labels = {token.label: token.phase for token in scope.registrations}
+    assert labels["resource:_close_manager"] is RegistrationPhase.RESOURCE
+    assert labels["tool:browser_use"] is RegistrationPhase.CONTRIBUTION
+    assert labels["tool:browser_use_advanced"] is RegistrationPhase.CONTRIBUTION
+    assert labels["tool:record_compile"] is RegistrationPhase.CONTRIBUTION
+    assert labels["tool:record_install"] is RegistrationPhase.CONTRIBUTION
+    assert labels["tool:record_replay"] is RegistrationPhase.CONTRIBUTION
+
+
+async def test_browser_feature_unload_hides_tools_before_manager_cleanup_finishes(
+    tmp_path,
+    monkeypatch,
+):
+    cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
+    crew = build_app(config=cfg, enable_team=False)
+    manager = crew.browser_manager
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+
+    async def slow_close() -> None:
+        cleanup_started.set()
+        await cleanup_release.wait()
+
+    monkeypatch.setattr(manager, "aclose", slow_close)
+    unloading = asyncio.create_task(crew.plugins.unload_plugin_async("browser"))
+    await cleanup_started.wait()
+
+    loaded = crew.plugins.get_plugin("browser")
+    assert loaded is not None and loaded.enabled
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.STOPPING
+    assert not unloading.done()
+    assert not {
+        "browser_use",
+        "browser_use_advanced",
+        "record_compile",
+        "record_install",
+        "record_replay",
+    } & set(crew.registry.names())
+
+    cleanup_release.set()
+    assert await unloading is True
+    assert not loaded.enabled
+    await crew.shutdown()
+
+
+async def test_app_shutdown_disposes_browser_through_feature_scope(tmp_path, monkeypatch):
+    cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
+    crew = build_app(config=cfg, enable_team=False)
+    manager = crew.browser_manager
+    close_calls = 0
+
+    async def close_once() -> None:
+        nonlocal close_calls
+        close_calls += 1
+
+    monkeypatch.setattr(manager, "aclose", close_once)
+
+    await crew.shutdown()
+
+    loaded = crew.plugins.get_plugin("browser")
+    assert close_calls == 1
+    assert loaded is not None and not loaded.enabled
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.DISCOVERED
+    assert "browser_use" not in crew.registry.names()
 
 
 def test_record_publish_tools_reuse_browser_hot_disable_gate(tmp_path):

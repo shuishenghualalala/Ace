@@ -185,6 +185,10 @@ class PlatformRegistry:
             raise ValueError("platform entry missing name")
         self._entries[entry.name] = entry
 
+    def unregister(self, name: str) -> bool:
+        """Remove one exact platform entry by name."""
+        return self._entries.pop(name, None) is not None
+
     def clear_plugin_entries(self) -> None:
         for name, entry in list(self._entries.items()):
             if entry.source == "plugin" or entry.plugin_name:

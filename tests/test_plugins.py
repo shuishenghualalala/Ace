@@ -385,6 +385,8 @@ def register(ctx):
         platform_registry.create_channel("rich", PlatformConfig(name="rich", extra={"token": "bad"}))
     channel = platform_registry.create_channel("rich", PlatformConfig(name="rich", extra={"token": "ok"}))
     assert channel.cfg.extra == {"token": "ok"}
+    assert plugins.unload_plugin("rich-platform") is True
+    assert not platform_registry.is_registered("rich")
 
 
 def test_disabled_platform_plugin_does_not_leave_registry_entry(tmp_path):
@@ -478,6 +480,11 @@ def register(ctx):
     assert result == {"wrapped": {"text": "secret", "masked": True, "executed": True}}
     assert await plugins.run_plugin_command("/hello world") == "hello world"
     assert plugins.api_routers[0][0] == "mw-plugin"
+
+    assert await plugins.unload_plugin_async("mw-plugin") is True
+    assert plugins._middleware == {}
+    assert plugins.plugin_commands == {}
+    assert plugins.api_routers == []
 
 
 async def test_observer_hook_failures_do_not_break_core_paths():

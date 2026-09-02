@@ -11,6 +11,7 @@ from crew.features.runtime import (
     FeatureGeneration,
     FeatureScope,
     FeatureState,
+    RegistrationPhase,
     RegistrationState,
     RegistrationToken,
 )
@@ -231,7 +232,11 @@ class ServiceRegistry:
                 self._entries.pop(address, None)
 
         registration_label = label or f"service:{key.name}@{scope_kind.value}"
-        token = owner.register(unregister, label=registration_label)
+        token = owner.register(
+            unregister,
+            label=registration_label,
+            phase=RegistrationPhase.CONTRIBUTION,
+        )
         entry = _ServiceEntry(
             key=key,
             value=value,

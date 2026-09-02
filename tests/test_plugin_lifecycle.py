@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from crew.core.types import ToolCall, ToolPermissionDecision
+from crew.features import FeatureState, RegistrationPhase
 from crew.plugins.manager import PluginManager
 from crew.state.plugin_preferences import (
     PluginPreferencesStore,
@@ -124,7 +127,7 @@ async def test_unload_plugin_removes_registrations_and_runs_disposers(tmp_path):
     assert registry.names() == ["lifecycle_echo"]
     assert plugins.plugin_skill_roots() != []
 
-    assert plugins.unload_plugin("lifecycle_plugin") is True
+    assert await plugins.unload_plugin_async("lifecycle_plugin") is True
 
     assert registry.names() == []
     # hook 不再触发：pre_tool_call 列表已空
@@ -141,8 +144,8 @@ async def test_unload_plugin_removes_registrations_and_runs_disposers(tmp_path):
     assert loaded.enabled is False
     assert loaded.error is None
     # 重复卸载返回 False
-    assert plugins.unload_plugin("lifecycle_plugin") is False
-    assert plugins.unload_plugin("nonexistent") is False
+    assert await plugins.unload_plugin_async("lifecycle_plugin") is False
+    assert await plugins.unload_plugin_async("nonexistent") is False
 
 
 async def test_plugin_skill_root_resolves_against_plugin_dir(tmp_path):
@@ -150,6 +153,208 @@ async def test_plugin_skill_root_resolves_against_plugin_dir(tmp_path):
     roots = plugins.plugin_skill_roots()
     assert len(roots) == 1
     assert roots[0].endswith("lifecycle_plugin/skills")
+
+
+async def test_failed_install_rolls_back_contributions_and_async_resource(tmp_path):
+    plugin_dir = tmp_path / "broken_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: broken-plugin\nkind: standalone\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "skills").mkdir()
+    (plugin_dir / "__init__.py").write_text(
+        """
+import asyncio
+
+EVENTS = []
+
+async def dispose_resource():
+    await asyncio.sleep(0)
+    EVENTS.append("resource")
+
+def hook(**kwargs):
+    return None
+
+def handler(args):
+    return "ok"
+
+def register(ctx):
+    ctx.register_disposer(dispose_resource)
+    ctx.register_tool(
+        name="broken_tool",
+        toolset="broken",
+        schema={"name": "broken_tool", "parameters": {"type": "object"}},
+        handler=handler,
+    )
+    ctx.register_hook("pre_tool_call", hook)
+    ctx.register_command("broken", handler)
+    ctx.register_skill_root("skills")
+    raise RuntimeError("install failed after contributions")
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+
+    await plugins.discover_and_load_async([tmp_path], enabled=["broken-plugin"])
+
+    loaded = plugins.get_plugin("broken-plugin")
+    assert loaded is not None and not loaded.enabled
+    assert "install failed after contributions" in str(loaded.error)
+    assert registry.names() == []
+    assert plugins._hooks == {}
+    assert plugins.plugin_commands == {}
+    assert plugins.plugin_skill_roots() == []
+    module = __import__("crew_runtime_plugins.broken_plugin", fromlist=["EVENTS"])
+    assert module.EVENTS == ["resource"]
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.scope is not None
+    assert loaded.feature_record.scope.state is FeatureState.DISPOSED
+
+
+async def test_repeated_discovery_replaces_generation_without_duplicates(tmp_path):
+    _write_lifecycle_plugin(tmp_path)
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+
+    await plugins.discover_and_load_async([tmp_path], enabled=["lifecycle_plugin"])
+    first = plugins.get_plugin("lifecycle_plugin")
+    assert first is not None and first.feature_record is not None
+    first_scope = first.feature_record.scope
+    first_module = __import__(
+        "crew_runtime_plugins.lifecycle_plugin",
+        fromlist=["DISPOSED"],
+    )
+
+    await plugins.discover_and_load_async([tmp_path], enabled=["lifecycle_plugin"])
+
+    second = plugins.get_plugin("lifecycle_plugin")
+    assert second is not None and second.feature_record is not None
+    assert first_scope is not None and first_scope.state is FeatureState.DISPOSED
+    assert first_module.DISPOSED == ["sync"]
+    assert second.feature_record.generation is not None
+    assert second.feature_record.generation.key == "lifecycle_plugin@g2"
+    assert registry.names() == ["lifecycle_echo"]
+    assert len(plugins._hooks["pre_tool_call"]) == 1
+    assert len(plugins.plugin_skill_roots()) == 1
+
+
+async def test_async_unload_closes_contributions_before_waiting_for_resource(tmp_path):
+    plugin_dir = tmp_path / "slow_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: slow-plugin\nkind: standalone\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+import asyncio
+
+STARTED = asyncio.Event()
+RELEASE = asyncio.Event()
+
+def handler(args):
+    return "ok"
+
+def hook(**kwargs):
+    return None
+
+async def dispose_resource():
+    STARTED.set()
+    await RELEASE.wait()
+
+def register(ctx):
+    ctx.register_tool(
+        name="slow_tool",
+        toolset="slow",
+        schema={"name": "slow_tool", "parameters": {"type": "object"}},
+        handler=handler,
+    )
+    ctx.register_hook("pre_tool_call", hook)
+    ctx.register_disposer(dispose_resource)
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+    await plugins.discover_and_load_async([tmp_path], enabled=["slow-plugin"])
+    loaded = plugins.get_plugin("slow-plugin")
+    module = __import__("crew_runtime_plugins.slow_plugin", fromlist=["STARTED"])
+
+    unloading = asyncio.create_task(plugins.unload_plugin_async("slow-plugin"))
+    await module.STARTED.wait()
+
+    assert loaded is not None and loaded.enabled
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.STOPPING
+    assert not unloading.done()
+    assert registry.names() == []
+    assert plugins._hooks == {}
+
+    module.RELEASE.set()
+    assert await unloading is True
+    assert not loaded.enabled
+    assert loaded.error is None
+
+
+async def test_cleanup_failure_is_aggregated_after_other_resources_stop(tmp_path):
+    plugin_dir = tmp_path / "cleanup_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: cleanup-plugin\nkind: standalone\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+EVENTS = []
+
+def broken():
+    EVENTS.append("broken")
+    raise RuntimeError("close failed")
+
+def healthy():
+    EVENTS.append("healthy")
+
+def register(ctx):
+    ctx.register_disposer(broken)
+    ctx.register_disposer(healthy)
+    ctx.register_tool(
+        name="cleanup_tool",
+        toolset="cleanup",
+        schema={"name": "cleanup_tool", "parameters": {"type": "object"}},
+        handler=lambda args: "ok",
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+    await plugins.discover_and_load_async([tmp_path], enabled=["cleanup-plugin"])
+
+    assert await plugins.unload_plugin_async("cleanup-plugin") is False
+
+    loaded = plugins.get_plugin("cleanup-plugin")
+    module = __import__("crew_runtime_plugins.cleanup_plugin", fromlist=["EVENTS"])
+    assert module.EVENTS == ["healthy", "broken"]
+    assert registry.names() == []
+    assert loaded is not None and not loaded.enabled
+    assert "resource:broken" in str(loaded.error)
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.FAILED
+
+
+async def test_registration_phases_are_visible_in_plugin_diagnostics(tmp_path):
+    registry, plugins = _load(tmp_path)
+    loaded = plugins.get_plugin("lifecycle_plugin")
+
+    assert loaded is not None and loaded.feature_record is not None
+    scope = loaded.feature_record.scope
+    assert scope is not None
+    phases = {token.label: token.phase for token in scope.registrations}
+    assert phases["tool:lifecycle_echo"] is RegistrationPhase.CONTRIBUTION
+    assert phases["hook:pre_tool_call"] is RegistrationPhase.CONTRIBUTION
+    assert phases["resource:dispose"] is RegistrationPhase.RESOURCE
 
 
 # ---- PluginPreferencesStore ----

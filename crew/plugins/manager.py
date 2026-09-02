@@ -14,9 +14,11 @@ import asyncio
 import importlib.util
 import inspect
 import sys
+from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from threading import Thread
 from types import ModuleType
 from typing import Any, Callable, Literal
 
@@ -24,6 +26,13 @@ import yaml
 
 from crew.core.interfaces import Plugin
 from crew.core.types import Message, ToolCall, ToolResult
+from crew.features.manager import (
+    FeatureDefinition,
+    FeatureInstallContext,
+    FeatureRecord,
+    FeatureRuntime,
+)
+from crew.features.runtime import FeatureActivationError, FeatureState, RegistrationPhase
 from crew.tools.redact import redact_sensitive_text
 from crew.tools.registry import Registry
 from crew.state.logging import get_logger
@@ -122,6 +131,37 @@ def _normalize_command_name(name: str) -> str:
     return str(name or "").lower().strip().lstrip("/").replace(" ", "-")
 
 
+def _run_async_compat(awaitable: Any) -> Any:
+    """Run an async compatibility operation from a synchronous host.
+
+    Normal startup has no event loop and uses ``asyncio.run`` directly. Tests
+    and embedded hosts may construct Ace from an async function; in that case a
+    short-lived worker owns the compatibility loop so the caller's loop is not
+    re-entered.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(awaitable)
+
+    result: list[Any] = []
+    errors: list[BaseException] = []
+    context = copy_context()
+
+    def run() -> None:
+        try:
+            result.append(context.run(asyncio.run, awaitable))
+        except BaseException as error:  # re-raised on the calling thread
+            errors.append(error)
+
+    worker = Thread(target=run, name="ace-plugin-compat", daemon=False)
+    worker.start()
+    worker.join()
+    if errors:
+        raise errors[0]
+    return result[0] if result else None
+
+
 BUILTIN_COMMANDS = {
     "help",
     "new",
@@ -187,16 +227,46 @@ class LoadedPlugin:
     disposers: list = field(default_factory=list)
     skill_roots: list[str] = field(default_factory=list)
     error: str | None = None
+    feature_record: FeatureRecord | None = None
 
 
 class PluginContext:
     """传给插件 ``register(ctx)`` 的 Crew 插件上下文。"""
 
-    def __init__(self, manifest: PluginManifest, manager: "PluginManager") -> None:
+    def __init__(
+        self,
+        manifest: PluginManifest,
+        manager: "PluginManager",
+        feature_context: FeatureInstallContext,
+        loaded: LoadedPlugin,
+    ) -> None:
         self.manifest = manifest
         self._manager = manager
+        self._feature_context = feature_context
+        self._loaded = loaded
         # 由 build_app 注入的共享服务（config / plugin_prefs 等），插件只读消费
         self.services: dict[str, Any] = manager.services
+
+    @property
+    def generation(self):
+        """当前目录插件所属的 Feature Generation。"""
+        return self._feature_context.generation
+
+    @staticmethod
+    def _discard_once(values: list[Any], value: Any) -> None:
+        try:
+            values.remove(value)
+        except ValueError:
+            pass
+
+    def _own(
+        self,
+        disposer: Callable[..., Any],
+        *,
+        label: str,
+        phase: RegistrationPhase = RegistrationPhase.CONTRIBUTION,
+    ) -> None:
+        self._feature_context.register_disposer(disposer, label=label, phase=phase)
 
     def register_tool(
         self,
@@ -224,7 +294,9 @@ class PluginContext:
     ) -> None:
         if self._manager.registry is None:
             raise RuntimeError("PluginManager 未绑定 ToolRegistry，无法注册工具")
-        self._manager.registry.register(
+        registry = self._manager.registry
+        previous = registry.get(name) if name in registry.names() else None
+        registry.register(
             name=name,
             toolset=toolset,
             schema=schema,
@@ -247,7 +319,21 @@ class PluginContext:
             result_identity_fields=result_identity_fields,
             result_policy_resolver=result_policy_resolver,
         )
-        self._manager._active_tools.append(name)
+        registered = registry.get(name)
+        self._loaded.tools_registered.append(name)
+
+        def unregister() -> None:
+            if name in registry.names() and registry.get(name) is registered:
+                registry.unregister(name)
+                if previous is not None:
+                    registry.register(previous, override=True)
+            self._discard_once(self._loaded.tools_registered, name)
+
+        try:
+            self._own(unregister, label=f"tool:{name}")
+        except BaseException:
+            unregister()
+            raise
 
     def register_hook(self, hook_name: str, callback: Callable[..., Any]) -> None:
         if hook_name not in VALID_HOOKS:
@@ -259,7 +345,23 @@ class PluginContext:
         owner_key = self.manifest.key or self.manifest.name
         self._manager._hooks.setdefault(hook_name, []).append(callback)
         self._manager._hook_owners.setdefault(hook_name, []).append((owner_key, callback))
-        self._manager._active_hooks.append(hook_name)
+        self._loaded.hooks_registered.append(hook_name)
+
+        def unregister() -> None:
+            self._manager._remove_owned_callback(
+                self._manager._hooks,
+                self._manager._hook_owners,
+                hook_name,
+                owner_key,
+                callback,
+            )
+            self._discard_once(self._loaded.hooks_registered, hook_name)
+
+        try:
+            self._own(unregister, label=f"hook:{hook_name}")
+        except BaseException:
+            unregister()
+            raise
 
     def register_middleware(self, kind: str, callback: Callable[..., Any]) -> None:
         if kind not in VALID_MIDDLEWARE:
@@ -271,14 +373,39 @@ class PluginContext:
         owner_key = self.manifest.key or self.manifest.name
         self._manager._middleware.setdefault(kind, []).append(callback)
         self._manager._middleware_owners.setdefault(kind, []).append((owner_key, callback))
-        self._manager._active_middleware.append(kind)
+        self._loaded.middleware_registered.append(kind)
+
+        def unregister() -> None:
+            self._manager._remove_owned_callback(
+                self._manager._middleware,
+                self._manager._middleware_owners,
+                kind,
+                owner_key,
+                callback,
+            )
+            self._discard_once(self._loaded.middleware_registered, kind)
+
+        try:
+            self._own(unregister, label=f"middleware:{kind}")
+        except BaseException:
+            unregister()
+            raise
 
     def register_disposer(self, fn: Callable[..., Any]) -> None:
         """登记插件级清理回调（可多个），unload_plugin 时逆序调用。
 
         回调可以是同步函数或返回 awaitable；抛错只记日志，不中断后续清理。
         """
-        self._manager._active_disposers.append(fn)
+        self._loaded.disposers.append(fn)
+        try:
+            self._own(
+                fn,
+                label=f"resource:{getattr(fn, '__name__', 'anonymous')}",
+                phase=RegistrationPhase.RESOURCE,
+            )
+        except BaseException:
+            self._discard_once(self._loaded.disposers, fn)
+            raise
 
     def register_skill_root(self, path: str | Path) -> None:
         """声明插件携带的 skills 目录；相对路径按插件目录解析，存绝对路径。"""
@@ -286,7 +413,17 @@ class PluginContext:
         if not p.is_absolute():
             base = self.manifest.path or Path.cwd()
             p = base / p
-        self._manager._active_skill_roots.append(str(p.resolve()))
+        root = str(p.resolve())
+        self._loaded.skill_roots.append(root)
+
+        def unregister() -> None:
+            self._discard_once(self._loaded.skill_roots, root)
+
+        try:
+            self._own(unregister, label=f"skill-root:{root}")
+        except BaseException:
+            unregister()
+            raise
 
     def register_command(
         self,
@@ -306,18 +443,50 @@ class PluginContext:
                 clean,
             )
             return
-        self._manager._plugin_commands[clean] = {
+        previous = self._manager._plugin_commands.get(clean)
+        entry = {
             "handler": handler,
             "description": description or "Plugin command",
             "plugin": self.manifest.name,
             "args_hint": (args_hint or "").strip(),
         }
-        self._manager._active_commands.append(clean)
+        self._manager._plugin_commands[clean] = entry
+        self._loaded.commands_registered.append(clean)
+
+        def unregister() -> None:
+            if self._manager._plugin_commands.get(clean) is entry:
+                if previous is None:
+                    self._manager._plugin_commands.pop(clean, None)
+                else:
+                    self._manager._plugin_commands[clean] = previous
+            self._discard_once(self._loaded.commands_registered, clean)
+
+        try:
+            self._own(unregister, label=f"command:{clean}")
+        except BaseException:
+            unregister()
+            raise
 
     def register_api_router(self, router: Any) -> None:
         """Register a FastAPI APIRouter mounted by gateway under /api/plugins/<name>."""
-        self._manager._api_routers[self.manifest.name] = router
-        self._manager._active_api_routers.append(self.manifest.name)
+        key = self.manifest.name
+        previous = self._manager._api_routers.get(key)
+        self._manager._api_routers[key] = router
+        self._loaded.api_routers_registered.append(key)
+
+        def unregister() -> None:
+            if self._manager._api_routers.get(key) is router:
+                if previous is None:
+                    self._manager._api_routers.pop(key, None)
+                else:
+                    self._manager._api_routers[key] = previous
+            self._discard_once(self._loaded.api_routers_registered, key)
+
+        try:
+            self._own(unregister, label=f"route:{key}")
+        except BaseException:
+            unregister()
+            raise
 
     def notify_dashboard(self, kind: str = "audit_updated", body: dict[str, Any] | None = None, owner_id: str = "") -> None:
         """向当前用户的前端 Dashboard 推送自定义事件（通过 WebSocket）。
@@ -361,22 +530,42 @@ class PluginContext:
         entry_kwargs.setdefault("plugin_name", self.manifest.name)
         entry_kwargs.setdefault("optional_env", list(optional_env or []))
         entry_kwargs = self._manager._normalize_platform_entry_kwargs(PlatformEntry, entry_kwargs)
-        platform_registry.register(
-            PlatformEntry(
-                name=name,
-                label=label,
-                adapter_factory=adapter_factory,
-                check_fn=check_fn or (lambda: True),
-                validate_config=validate_config,
-                is_connected=is_connected,
-                required_env=list(required_env or []),
-                install_hint=install_hint,
-                source="plugin",
-                description=description,
-                **entry_kwargs,
-            )
+        try:
+            previous = platform_registry.get(name)
+        except KeyError:
+            previous = None
+        entry = PlatformEntry(
+            name=name,
+            label=label,
+            adapter_factory=adapter_factory,
+            check_fn=check_fn or (lambda: True),
+            validate_config=validate_config,
+            is_connected=is_connected,
+            required_env=list(required_env or []),
+            install_hint=install_hint,
+            source="plugin",
+            description=description,
+            **entry_kwargs,
         )
-        self._manager._active_platforms.append(name)
+        platform_registry.register(entry)
+        self._loaded.platforms_registered.append(name)
+
+        def unregister() -> None:
+            try:
+                current = platform_registry.get(name)
+            except KeyError:
+                current = None
+            if current is entry:
+                platform_registry.unregister(name)
+                if previous is not None:
+                    platform_registry.register(previous)
+            self._discard_once(self._loaded.platforms_registered, name)
+
+        try:
+            self._own(unregister, label=f"platform:{name}")
+        except BaseException:
+            unregister()
+            raise
 
 
 class PluginManager:
@@ -385,11 +574,13 @@ class PluginManager:
         plugins: list[Plugin] | None = None,
         registry: Registry | None = None,
         services: dict | None = None,
+        feature_runtime: FeatureRuntime | None = None,
     ) -> None:
         self._plugins: list[Plugin] = list(plugins or [])
         self.registry = registry
         # 注入给插件的共享服务（如 config / plugin_prefs），经 PluginContext.services 透传
         self.services: dict[str, Any] = dict(services or {})
+        self.feature_runtime = feature_runtime or FeatureRuntime()
         self._hooks: dict[str, list[Callable[..., Any]]] = {}
         self._middleware: dict[str, list[Callable[..., Any]]] = {}
         # hook/middleware 的归属表（plugin_key, callback），与上面两结构平行维护，供按插件摘除
@@ -398,14 +589,6 @@ class PluginManager:
         self._plugin_commands: dict[str, dict[str, Any]] = {}
         self._api_routers: dict[str, Any] = {}
         self._loaded: dict[str, LoadedPlugin] = {}
-        self._active_tools: list[str] = []
-        self._active_hooks: list[str] = []
-        self._active_middleware: list[str] = []
-        self._active_commands: list[str] = []
-        self._active_api_routers: list[str] = []
-        self._active_platforms: list[str] = []
-        self._active_disposers: list = []
-        self._active_skill_roots: list[str] = []
         self._notify_dashboard_fn: Callable[..., Any] | None = None
         self._legacy_session_end_hooks_warned: set[int] = set()
 
@@ -438,6 +621,22 @@ class PluginManager:
         enabled: list[str] | None = None,
         disabled: list[str] | None = None,
     ) -> None:
+        """同步宿主兼容入口；完整等待发现、卸载、回滚和重新加载。"""
+        _run_async_compat(
+            self.discover_and_load_async(
+                plugin_dirs,
+                enabled=enabled,
+                disabled=disabled,
+            )
+        )
+
+    async def discover_and_load_async(
+        self,
+        plugin_dirs: list[str | Path] | None = None,
+        *,
+        enabled: list[str] | None = None,
+        disabled: list[str] | None = None,
+    ) -> None:
         """扫描并加载目录插件。
 
         enabled=None 或 ["*"] 表示加载扫描到的插件；enabled=[] 表示全部跳过。
@@ -456,6 +655,15 @@ class PluginManager:
         if disabled is not None and disabled == ["*"]:
             enabled_set = set()  # 禁用所有目录插件
             disabled_set = set()
+
+        for loaded in list(self._loaded.values()):
+            if loaded.feature_record is None or loaded.feature_record.scope is None:
+                continue
+            if not await self.unload_plugin_async(loaded.manifest.key or loaded.manifest.name):
+                raise RuntimeError(
+                    f"插件 {loaded.manifest.key or loaded.manifest.name} 未能完整卸载: "
+                    f"{loaded.error or 'unknown cleanup error'}"
+                )
 
         self._loaded.clear()
         self._hooks.clear()
@@ -488,7 +696,7 @@ class PluginManager:
                         error="not enabled",
                     )
                     continue
-                self._load_plugin(manifest)
+                await self._load_plugin_async(manifest)
 
     def get_plugin(self, key: str) -> LoadedPlugin | None:
         """按 key 或 name 查已发现的插件（含未启用的）。"""
@@ -509,96 +717,71 @@ class PluginManager:
         return roots
 
     def unload_plugin(self, key: str) -> bool:
-        """按插件归属注销工具/hook/middleware/command/router/platform，并调用 disposer。
+        """同步卸载入口；异步宿主必须改用 ``unload_plugin_async``。"""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.unload_plugin_async(key))
+        raise RuntimeError("事件循环中请使用 await unload_plugin_async(key)")
 
-        找不到或本未加载（enabled=False）返回 False。清理逐步推进：单项失败只记日志，
-        不中断后续清理；插件保留在 _loaded 中（enabled=False）供 API 展示。
-        """
+    async def unload_plugin_async(self, key: str) -> bool:
+        """停用插件并等待该 Generation 的全部注册和资源完成清理。"""
         loaded = self.get_plugin(key)
         if loaded is None or not loaded.enabled:
             return False
         owner_key = loaded.manifest.key or loaded.manifest.name
-
-        if self.registry is not None:
-            for name in loaded.tools_registered:
-                try:
-                    self.registry.unregister(name)
-                except Exception:  # noqa: BLE001
-                    log.exception("注销插件 %s 工具失败: %s", owner_key, name)
-
-        for hook_name in list(loaded.hooks_registered):
-            self._remove_owned_callbacks(self._hooks, self._hook_owners, hook_name, owner_key)
-        for kind in list(loaded.middleware_registered):
-            self._remove_owned_callbacks(
-                self._middleware, self._middleware_owners, kind, owner_key
-            )
-
-        for command in list(loaded.commands_registered):
-            entry = self._plugin_commands.get(command)
-            if entry is not None and entry.get("plugin") in (loaded.manifest.name, owner_key):
-                self._plugin_commands.pop(command, None)
-
-        self._api_routers.pop(loaded.manifest.name, None)
-        self._api_routers.pop(owner_key, None)
-        self._unregister_plugin_platforms(loaded.manifest.name)
-
-        for disposer in reversed(loaded.disposers):
-            try:
-                result = disposer()
-                if inspect.isawaitable(result):
-                    self._schedule_awaitable(result, owner_key)
-            except Exception:  # noqa: BLE001
-                log.exception("插件 %s 的 disposer 执行失败", owner_key)
-
-        loaded.tools_registered = []
-        loaded.hooks_registered = []
-        loaded.middleware_registered = []
-        loaded.commands_registered = []
-        loaded.api_routers_registered = []
-        loaded.platforms_registered = []
-        loaded.disposers = []
-        loaded.skill_roots = []
+        stopped = await self.feature_runtime.deactivate(owner_key)
         loaded.enabled = False
-        loaded.error = None
-        log.info("插件已卸载: %s", owner_key)
-        return True
+        loaded.tools_registered.clear()
+        loaded.hooks_registered.clear()
+        loaded.middleware_registered.clear()
+        loaded.commands_registered.clear()
+        loaded.api_routers_registered.clear()
+        loaded.platforms_registered.clear()
+        loaded.disposers.clear()
+        loaded.skill_roots.clear()
+        record = loaded.feature_record
+        loaded.error = None if stopped else str(record.error if record else "cleanup failed")
+        if stopped:
+            log.info("插件已卸载: %s", owner_key)
+        else:
+            log.error("插件 %s 未能完整卸载: %s", owner_key, loaded.error)
+        return stopped
+
+    async def aclose(self) -> tuple[str, ...]:
+        """Stop every loaded directory plugin in reverse discovery order."""
+        failed: list[str] = []
+        for loaded in reversed(list(self._loaded.values())):
+            if not loaded.enabled:
+                continue
+            owner_key = loaded.manifest.key or loaded.manifest.name
+            if not await self.unload_plugin_async(owner_key):
+                failed.append(owner_key)
+        return tuple(failed)
 
     @staticmethod
-    def _remove_owned_callbacks(
+    def _remove_owned_callback(
         table: dict[str, list[Callable[..., Any]]],
         owners: dict[str, list[tuple[str, Callable[..., Any]]]],
         name: str,
         owner_key: str,
+        callback: Callable[..., Any],
     ) -> None:
-        """从回调表与归属表中摘除某插件在某 hook/middleware 下注册的回调。"""
-        owned = [cb for key, cb in owners.get(name, []) if key == owner_key]
-        if not owned:
-            owners.pop(name, None)
-            return
+        """Remove one exact callback without touching a replacement generation."""
         callbacks = table.get(name, [])
-        table[name] = [cb for cb in callbacks if cb not in owned]
-        owners[name] = [(key, cb) for key, cb in owners.get(name, []) if key != owner_key]
-        if not table[name]:
+        for index, candidate in enumerate(callbacks):
+            if candidate is callback:
+                callbacks.pop(index)
+                break
+        owned_callbacks = owners.get(name, [])
+        for index, (candidate_key, candidate) in enumerate(owned_callbacks):
+            if candidate_key == owner_key and candidate is callback:
+                owned_callbacks.pop(index)
+                break
+        if not callbacks:
             table.pop(name, None)
-        if not owners[name]:
+        if not owned_callbacks:
             owners.pop(name, None)
-
-    @staticmethod
-    def _schedule_awaitable(awaitable: Any, owner_key: str) -> None:
-        """在卸载同步上下文中执行异步清理：有运行中的事件循环就 create_task，
-        否则用 asyncio.run 跑完（对齐打包/CLI 等无循环场景）。"""
-        async def _guarded() -> None:
-            try:
-                await awaitable
-            except Exception:  # noqa: BLE001
-                log.exception("插件 %s 的异步 disposer 执行失败", owner_key)
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run(_guarded())
-        else:
-            loop.create_task(_guarded())
 
     def _source_for_root(self, root: Path) -> str:
         root = root.resolve()
@@ -653,44 +836,51 @@ class PluginManager:
             return None
 
     def _load_plugin(self, manifest: PluginManifest) -> None:
+        """Compatibility wrapper for callers that load one parsed manifest."""
+        _run_async_compat(self._load_plugin_async(manifest))
+
+    async def _load_plugin_async(self, manifest: PluginManifest) -> None:
         loaded = LoadedPlugin(manifest=manifest)
-        try:
+
+        def install(feature_context: FeatureInstallContext) -> Any:
             module = self._load_module(manifest)
             register = getattr(module, "register", None)
             if register is None:
                 raise RuntimeError("缺少 register(ctx) 函数")
-            self._active_tools = []
-            self._active_hooks = []
-            self._active_middleware = []
-            self._active_commands = []
-            self._active_api_routers = []
-            self._active_platforms = []
-            self._active_disposers = []
-            self._active_skill_roots = []
-            register(PluginContext(manifest, self))
-            loaded.tools_registered = list(self._active_tools)
-            loaded.hooks_registered = list(dict.fromkeys(self._active_hooks))
-            loaded.middleware_registered = list(dict.fromkeys(self._active_middleware))
-            loaded.commands_registered = list(dict.fromkeys(self._active_commands))
-            loaded.api_routers_registered = list(dict.fromkeys(self._active_api_routers))
-            loaded.platforms_registered = list(dict.fromkeys(self._active_platforms))
-            loaded.disposers = list(self._active_disposers)
-            loaded.skill_roots = list(dict.fromkeys(self._active_skill_roots))
-            loaded.enabled = True
-        except Exception as exc:  # noqa: BLE001
-            loaded.error = str(exc)
-            self._unregister_plugin_platforms(manifest.name)
-            log.exception("加载插件失败: %s", manifest.name)
-        finally:
-            self._loaded[manifest.key or manifest.name] = loaded
-            self._active_tools = []
-            self._active_hooks = []
-            self._active_middleware = []
-            self._active_commands = []
-            self._active_api_routers = []
-            self._active_platforms = []
-            self._active_disposers = []
-            self._active_skill_roots = []
+            return register(PluginContext(manifest, self, feature_context, loaded))
+
+        owner_key = manifest.key or manifest.name
+        definition = FeatureDefinition(owner_key, install)
+        record = await self.feature_runtime.activate(definition)
+        loaded.feature_record = record
+        loaded.enabled = record.state is FeatureState.ACTIVE
+        loaded.hooks_registered = list(dict.fromkeys(loaded.hooks_registered))
+        loaded.middleware_registered = list(dict.fromkeys(loaded.middleware_registered))
+        loaded.commands_registered = list(dict.fromkeys(loaded.commands_registered))
+        loaded.api_routers_registered = list(dict.fromkeys(loaded.api_routers_registered))
+        loaded.platforms_registered = list(dict.fromkeys(loaded.platforms_registered))
+        loaded.skill_roots = list(dict.fromkeys(loaded.skill_roots))
+        if not loaded.enabled:
+            error = record.error
+            if isinstance(error, FeatureActivationError):
+                error = error.cause
+            if record.state is FeatureState.WAITING and record.dependency_resolution:
+                missing = ", ".join(
+                    key.name for key in record.dependency_resolution.missing_required
+                )
+                loaded.error = f"missing required services: {missing}"
+            else:
+                loaded.error = str(error or f"feature state is {record.state.value}")
+            loaded.tools_registered.clear()
+            loaded.hooks_registered.clear()
+            loaded.middleware_registered.clear()
+            loaded.commands_registered.clear()
+            loaded.api_routers_registered.clear()
+            loaded.platforms_registered.clear()
+            loaded.disposers.clear()
+            loaded.skill_roots.clear()
+            log.error("加载插件失败: %s: %s", manifest.name, loaded.error)
+        self._loaded[owner_key] = loaded
 
     def _iter_plugin_dirs(self, root: Path) -> list[tuple[Path, str]]:
         """Return flat plugin dirs plus one-level category plugin dirs."""
@@ -746,14 +936,6 @@ class PluginManager:
             platform_registry.clear_plugin_entries()
         except Exception as exc:  # noqa: BLE001
             log.warning("清理插件平台注册表失败: %s", exc)
-
-    def _unregister_plugin_platforms(self, plugin_name: str) -> None:
-        try:
-            from crew.gateway.platform_registry import platform_registry
-
-            platform_registry.unregister_plugin_entries(plugin_name)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("回滚插件平台 %s 失败: %s", plugin_name, exc)
 
     def _normalize_platform_entry_kwargs(
         self,

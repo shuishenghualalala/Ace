@@ -190,7 +190,7 @@ async def test_plugin_learning_flow_captures_answer_privately(tmp_path):
     assert stored_answer == raw_answer
 
     wiki_store.close()
-    assert manager.unload_plugin("wiki_learning") is True
+    assert await manager.unload_plugin_async("wiki_learning") is True
     assert registry.names() == []
     assert manager.plugin_skill_roots() == []
 
@@ -252,7 +252,7 @@ async def test_assessment_is_idempotent_per_request_and_not_same_turn(tmp_path):
     )
 
     wiki_store.close()
-    manager.unload_plugin("wiki_learning")
+    await manager.unload_plugin_async("wiki_learning")
 
 
 @pytest.mark.asyncio
@@ -291,7 +291,7 @@ async def test_activity_rejects_nested_private_answers(tmp_path):
     assert "不能包含答案" in created.content
 
     wiki_store.close()
-    manager.unload_plugin("wiki_learning")
+    await manager.unload_plugin_async("wiki_learning")
 
 
 @pytest.mark.asyncio
@@ -311,4 +311,4 @@ async def test_learning_skill_only_injects_for_relevant_wiki_turn(tmp_path):
         assert not any("Wiki learning coach" in message.content for message in normal)
 
     wiki_store.close()
-    manager.unload_plugin("wiki_learning")
+    await manager.unload_plugin_async("wiki_learning")

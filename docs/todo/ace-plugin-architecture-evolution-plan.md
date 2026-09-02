@@ -5,11 +5,11 @@
 > 基线核查日期：2026-08-31  
 > 目标读者：Ace 后端、桌面端、Web 端及独立功能模块的维护者  
 > 修订记录：2026-08-31 评审追加——workspace_guard 依赖核查（§2.3.3、§11、§17）、第一方/第三方插件契约收口（§2.3.8）、effect 诊断与启动审计（§6.3）、服务作用域维度（§6.4）、拦截器语义（§7.5）、螺旋式迁移节奏与依赖检查工具（§10、§13.3）、配置与数据命名空间约定（§12.5）、Adapter 保质期（§15.2）、ADR 机制（§16）、新增验收指标（§14）；同日补充——演进紧迫性论证与中心文件基线数据（§1.1.1）、接口层多租户地基（§2.2）；同日范围校正——明确 dsh 广义 Plugin 与 Ace 当前 `plugins/` 的区别，将目标提升为全部 Feature 的统一可逆生命周期，补充 Feature Generation、业务数据边界、全量迁移地图和工作量评估（§0、§3.3、§5、§6、§8、§10、§16、§18、§19）；同日——§2.1、§5.1 增加耦合视角与装配视角两张架构对比图（离线渲染版：docs/todo/ace-arch-compare.html）
-> 实施进度：2026-09-02 阶段 0 边界治理、阶段 1 生命周期内核与作用域化 Service Registry 切片均已完成——Generation 所有权、异步回滚、四级服务解析、显式依赖图和 desired/effective 配置版本已落地；当前分支为 `refactor/plugin-architecture-stage-0`，验证记录见 `docs/testing/plugin-architecture-stage-1-services.html`。
+> 实施进度：2026-09-02 阶段 0 边界治理，以及阶段 1 的生命周期内核、Service Registry、Legacy Plugin Adapter 与 Browser 试点均已完成——目录插件已进入统一 Generation/Scope，应用关闭会等待异步资源清理；当前分支为 `refactor/plugin-architecture-stage-0`，验证记录见 `docs/testing/plugin-architecture-stage-1-adapter.html`。
 
 ## 当前实施进度图（2026-09-02）
 
-绿色表示已经落地并通过相关回归的区域，蓝色表示紧接着要实施的切片，灰色表示尚未开始。当前完成的是**阶段 0 边界治理、阶段 1 生命周期内核和 Service Registry**，不是整份演进方案已经完成。
+绿色表示已经落地并通过相关回归的区域，蓝色表示紧接着要实施的切片，灰色表示尚未开始。当前完成的是**阶段 0 边界治理与阶段 1 的前三个切片**，不是整份演进方案已经完成。
 
 ```mermaid
 flowchart TB
@@ -37,18 +37,24 @@ flowchart TB
     Services --> Dependencies["显式依赖图<br/>required · optional · provides"]
     Dependencies --> Config["配置版本<br/>desired ≠ effective"]
     Config --> ServiceTests["服务/依赖/配置<br/>11 tests"]
-    ServiceTests --> Adapter["阶段 1 · 下一切片<br/>PluginManager Adapter<br/>Browser 生命周期试点"]
-    Adapter --> Later["后续阶段<br/>核心扩展点 → 业务 Feature 迁移 → UI Registry"]
+    ServiceTests --> Runtime["FeatureRuntime<br/>统一激活 · 等待 · 停用"]
+    Runtime --> Adapter["Legacy Plugin Adapter<br/>旧 register(ctx) → Scope"]
+    Adapter --> Phases["两相清理<br/>先 Contribution · 后 Resource"]
+    Phases --> Browser["Browser 真实试点<br/>5 Tools + Skill + Manager"]
+    Browser --> Shutdown["App shutdown<br/>统一等待插件清理"]
+    Shutdown --> AdapterTests["Adapter 联合回归<br/>324 passed · 1 skipped"]
+    AdapterTests --> Next["阶段 1 · 下一切片<br/>Manifest Service 依赖<br/>replace/restart · drain · 启动审计"]
+    Next --> Later["后续阶段<br/>核心扩展点 → 业务 Feature 迁移 → UI Registry"]
 
     classDef done fill:#e8f6ee,stroke:#1e8449,color:#145a32,stroke-width:2px
     classDef next fill:#e6f0fb,stroke:#2471a3,color:#154360,stroke-width:2px
     classDef pending fill:#f4f4f4,stroke:#999999,color:#555555
-    class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed,Scope,Token,Rollback,RuntimeTests,Services,Dependencies,Config,ServiceTests done
-    class Adapter next
+    class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed,Scope,Token,Rollback,RuntimeTests,Services,Dependencies,Config,ServiceTests,Runtime,Adapter,Phases,Browser,Shutdown,AdapterTests done
+    class Next next
     class Later pending
 ```
 
-这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。生命周期内核与 Service Registry 尚未接管现有 `PluginManager`；下一步通过兼容 Adapter 接入，并以 Browser 插件验证真实多贡献生命周期，避免形成两套长期平行的实现。历史反向依赖及其后续删除阶段仍以 `.importlinter` 中的逐条豁免为准。
+这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。现有 `PluginManager` 已成为 Feature Runtime 的目录发现与兼容入口，Browser 已验证真实多贡献生命周期；下一步补齐 Manifest Service 依赖、配置替换、drain 与启动审计，完成阶段 1 的剩余控制面。历史反向依赖及其后续删除阶段仍以 `.importlinter` 中的逐条豁免为准。
 
 ## 0. 执行摘要
 

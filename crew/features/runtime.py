@@ -44,6 +44,13 @@ class RegistrationState(str, Enum):
     FAILED = "failed"
 
 
+class RegistrationPhase(str, Enum):
+    """Teardown phase: close public contributions before owned resources."""
+
+    CONTRIBUTION = "contribution"
+    RESOURCE = "resource"
+
+
 @dataclass(frozen=True, slots=True)
 class FeatureGeneration:
     """Identity of one concrete feature activation."""
@@ -181,6 +188,7 @@ class RegistrationToken:
         generation: FeatureGeneration,
         label: str,
         disposer: Disposer,
+        phase: RegistrationPhase = RegistrationPhase.RESOURCE,
     ) -> None:
         normalized_label = label.strip()
         if not normalized_label:
@@ -189,6 +197,7 @@ class RegistrationToken:
             raise TypeError("registration disposer must be callable")
         self.generation = generation
         self.label = normalized_label
+        self.phase = phase
         self.registered_at = datetime.now(timezone.utc)
         self._disposer = disposer
         self._state = RegistrationState.ACTIVE
@@ -249,13 +258,19 @@ class FeatureScope:
         """Ordered registration snapshot for diagnostics."""
         return tuple(self._registrations)
 
-    def register(self, disposer: Disposer, *, label: str) -> RegistrationToken:
+    def register(
+        self,
+        disposer: Disposer,
+        *,
+        label: str,
+        phase: RegistrationPhase = RegistrationPhase.RESOURCE,
+    ) -> RegistrationToken:
         """Assign a labeled contribution to this generation."""
         if self._state not in {FeatureState.ACTIVATING, FeatureState.ACTIVE}:
             raise RuntimeError(
                 f"feature {self.generation.key} cannot register while {self._state.value}"
             )
-        token = RegistrationToken(self.generation, label, disposer)
+        token = RegistrationToken(self.generation, label, disposer, phase)
         self._registrations.append(token)
         return token
 
@@ -285,7 +300,13 @@ class FeatureScope:
 
     async def _dispose_all(self) -> None:
         issues: list[FeatureCleanupIssue] = []
-        for token in reversed(self._registrations):
+        ordered = [
+            token
+            for phase in (RegistrationPhase.CONTRIBUTION, RegistrationPhase.RESOURCE)
+            for token in reversed(self._registrations)
+            if token.phase is phase
+        ]
+        for token in ordered:
             try:
                 await token.dispose()
             except (Exception, asyncio.CancelledError) as error:
@@ -311,8 +332,14 @@ class FeatureTransaction:
     def committed(self) -> bool:
         return self._committed
 
-    def register(self, disposer: Disposer, *, label: str) -> RegistrationToken:
-        return self.scope.register(disposer, label=label)
+    def register(
+        self,
+        disposer: Disposer,
+        *,
+        label: str,
+        phase: RegistrationPhase = RegistrationPhase.RESOURCE,
+    ) -> RegistrationToken:
+        return self.scope.register(disposer, label=label, phase=phase)
 
     def commit(self) -> FeatureScope:
         if self._committed:

@@ -1982,8 +1982,12 @@ class CrewApp:
         await self._shutdown_provider_resources_with_deadline(provider_timeout)
         if self.mcp_manager is not None:
             await self.mcp_manager.aclose()
-        if self.browser_manager is not None:
-            await self.browser_manager.aclose()
+        plugin_shutdown_failures = await self.plugins.aclose()
+        if plugin_shutdown_failures:
+            log.error(
+                "App shutdown 插件清理失败: %s",
+                ", ".join(plugin_shutdown_failures),
+            )
         await self.tasks.stop()
         bindings = getattr(self, "channel_bindings", None)
         if bindings is not None and hasattr(bindings, "close"):

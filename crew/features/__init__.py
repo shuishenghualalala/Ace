@@ -7,6 +7,12 @@ from crew.features.dependencies import (
     FeatureDependencyResolution,
     FeatureServiceDependencies,
 )
+from crew.features.manager import (
+    FeatureDefinition,
+    FeatureInstallContext,
+    FeatureRecord,
+    FeatureRuntime,
+)
 from crew.features.runtime import (
     FeatureActivationError,
     FeatureCleanupError,
@@ -16,6 +22,7 @@ from crew.features.runtime import (
     FeatureScope,
     FeatureState,
     FeatureTransaction,
+    RegistrationPhase,
     RegistrationState,
     RegistrationToken,
     StaleFeatureGenerationError,
@@ -39,11 +46,16 @@ __all__ = [
     "FeatureDependencyBlock",
     "FeatureDependencyGraph",
     "FeatureDependencyResolution",
+    "FeatureDefinition",
     "FeatureGeneration",
+    "FeatureInstallContext",
+    "FeatureRecord",
+    "FeatureRuntime",
     "FeatureScope",
     "FeatureServiceDependencies",
     "FeatureState",
     "FeatureTransaction",
+    "RegistrationPhase",
     "RegistrationState",
     "RegistrationToken",
     "ServiceBinding",
