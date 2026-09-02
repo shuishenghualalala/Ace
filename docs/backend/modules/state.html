@@ -49,7 +49,7 @@
   <h2>1. 职责</h2>
   <ul>
     <li>持久化与配置事实来源：<code>config.yaml</code>（结构化配置，不含密钥）+ <code>.env</code>（环境变量密钥）+ <code>credentials.json</code>（模型 API Key 凭证库）。</li>
-    <li>目录布局：<code>CREW_HOME</code>（默认项目根 <code>.crew/</code>，打包环境 <code>~/.crew/</code>）与 owner 运行时 home（<code>accounts/&lt;owner&gt;/</code>）。</li>
+    <li>目录布局（方案 A）：<code>CREW_HOME</code>（默认项目根 <code>.crew/</code>，打包环境 <code>~/.crew/</code>）退役为安装级目录（config.yaml、日志、skills 模板）；所有 owner（含本机 <code>local</code>）的运行时 home 统一住 <code>accounts/&lt;hash&gt;/</code>，目录名由 <code>owner_path_segment</code> 从 owner id 哈希派生，不泄露身份。</li>
     <li>不做：业务逻辑、LLM 调用（装配在 <code>crew/app.py</code>）。</li>
   </ul>
 
@@ -64,7 +64,7 @@
       <tr><td><code>session_model.py</code></td><td>Session 显式模型绑定 / pending 绑定提升。</td><td>已落地</td></tr>
       <tr><td><code>access_control.py</code> / <code>active_owner.py</code> / <code>channel_bindings.py</code> / <code>plugin_preferences.py</code> / <code>team_member_model.py</code></td><td>访问控制配置、当前 owner 上下文、渠道绑定、插件偏好、团队成员模型。</td><td>已落地</td></tr>
       <tr><td><code>logging.py</code></td><td><code>setup_logging</code> / <code>llm_trace</code> 结构化日志。</td><td>已落地</td></tr>
-      <tr><td><code>sqlite.py</code> / <code>_migration.py</code> / <code>models.py</code></td><td>SQLite 连接与迁移、共享数据模型。</td><td>已落地</td></tr>
+      <tr><td><code>sqlite.py</code> / <code>_migration.py</code> / <code>models.py</code></td><td>SQLite 连接与迁移、共享数据模型。<code>_migration.py</code> 含存量 owner 回填：<code>backfill_empty_owner_rows</code>（<code>UPDATE OR IGNORE</code> 逐行归一为 <code>local</code>，与既有目标 owner 行主键冲突的空行跳过、收尾按"保归属行删无主行"清除）；主库多表 + memory / channel_bindings / plugin_preferences / sites / external 各库就地回填；cron 表先经 <code>backfill_cron_owner_from_sessions</code> 智能归属（session 唯一 owner 优先，其余归 local）；DK 多 owner 歧义行保留隔离（<code>legacy_ambiguous</code>），待 <code>claim-legacy</code> CLI 人工认领。启动时 <code>inspect_and_backfill_legacy_owners</code> 自动执行，永久有效。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -88,6 +88,11 @@
   显式传 <code>api_key_env</code> 才写 <code>.env</code>——当目标变量名被其它 profile 引用且已有不同旧值时，
   必须 payload 带 <code>overwrite_shared_key: true</code> 才放行（防"所有 apikey 变成最新的 apikey"）；
   <code>remove_model</code> 同步清理凭证库条目。</p>
+  <p>owner 归一化规则（owner 统一化改造）：空 owner 不再是一种"模式"，而是归一为本机 owner <code>local</code> 的特例。
+  归一化原语 <code>normalize_owner_account_id()</code> / 常量 <code>LOCAL_OWNER_ACCOUNT_ID</code> 定义在
+  <code>crew/core/runctx.py</code>，只允许出现在系统边界——gateway 认证、CLI 入口、ContextVar set 点、
+  store 创建入口与存量回填；边界之内 owner 恒非空，<code>owner_account_id=""</code> 在存储层不再是合法模式，
+  读取方不写任何 <code>if not owner</code> / <code>or "local"</code> 防御分支。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
@@ -105,6 +110,7 @@
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-09-03</td><td>合并 owner 统一化改造（refactor/llm-provider → refactor/plugin-architecture-stage-0，merge 22af708）：方案 A 目录布局（所有 owner 含 local 统一住 <code>accounts/&lt;hash&gt;/</code>，基础 CREW_HOME 退役为安装级目录）；<code>_migration.py</code> 存量回填（<code>backfill_empty_owner_rows</code> + cron 智能归属 + DK 歧义行隔离待 <code>claim-legacy</code>）；凭证库 × owner 作用域整合（owner 私有 key 写 owner overlay，不同步进程环境）。</td><td>state 层目录布局与全部 owner 列存储</td></tr>
       <tr><td>2026-09-02</td><td>新增模型 API Key 凭证库 <code>credentials.py</code>（按 profile id + owner 作用域，JSON 原子写，POSIX 0600）；<code>config.py</code> 全部 profile 构建点统一走 <code>resolve_profile_api_key</code> 解析链；模型 CRUD 默认写凭证库，显式 <code>api_key_env</code> 才写 .env 并带共享名覆盖拦截（<code>overwrite_shared_key</code>）；<code>remove_model</code> 清理凭证条目；<code>build_provider</code> 门控纳入激活 profile 的 key。修复用户反馈"配置多个模型后所有 apikey 变成最新的 apikey"。</td><td>state/config、app 模型 CRUD、LLM 装配；存量 .env 部署零迁移（解析链保留 env 路径）</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
     </tbody>

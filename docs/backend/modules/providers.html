@@ -86,7 +86,7 @@ VendorCompat:   thinking_format("none"|"deepseek"|"zai"|"qwen")
 
 resolve_vendor(provider_id, base_url, model)   # id 精确匹配 > host 匹配 > 模型 id 匹配
 compat_for_model(vendor, model_id)             # 填入等级映射；不支持思考的模型收掉思考参数</code></pre>
-  <p>装配（<code>crew/app.py</code>）：<code>provider_id</code> 写厂商 id（如 <code>deepseek</code>）即按档案装配——base_url / API key（档案默认环境变量，如 <code>DEEPSEEK_API_KEY</code>）/ vision（模型目录标记）取档案默认值，用户显式配置优先。通用 <code>openai</code>/<code>anthropic</code> 配置按 base_url host / 模型 id 兜底识别厂商（host 匹配不受协议过滤，URL 即端点身份；模型 id 匹配仅在同名协议厂商内，避免协议劫持）；未知 id 仍抛 <code>ValueError</code>。</p>
+  <p>装配（<code>crew/app.py</code>）：<code>provider_id</code> 写厂商 id（如 <code>deepseek</code>）即按档案装配——base_url / API key（档案默认环境变量，如 <code>DEEPSEEK_API_KEY</code>）/ vision（模型目录标记）取档案默认值，用户显式配置优先。通用 <code>openai</code>/<code>anthropic</code> 配置按 base_url host / 模型 id 兜底识别厂商（host 匹配不受协议过滤，URL 即端点身份；模型 id 匹配仅在同名协议厂商内，避免协议劫持）；未知 id 仍抛 <code>ValueError</code>。key 解析按 owner 作用域：凭证库按 owner 隔离存储，owner 私有 key 写 owner overlay <code>.env</code>（<code>accounts/&lt;hash&gt;/.env</code>），不同步进程环境；全局/内置模型走共享层（共享 config.yaml + 系统 env）。</p>
   <pre><code># config.yaml 示例：env 里放 DEEPSEEK_API_KEY 即可，无需填 base_url
 provider: deepseek
 model: deepseek-reasoner</code></pre>
@@ -109,6 +109,7 @@ model: deepseek-reasoner</code></pre>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-09-03</td><td>与 owner 统一化合并后，厂商装配的 key 解析链按 owner 作用域收口（凭证库按 owner 隔离，owner 私有 key 写 owner overlay <code>.env</code>，全局/内置模型走共享层）；<code>update_model</code> 内置模型（builtin）重定向全局作用域后，key 写入/读取作用域保持一致（修复合并整合点，见 <code>crew/app.py</code> 归置后 owner 注释）。</td><td>app 装配与模型 CRUD 的 key 作用域；厂商档案与 Provider 协议层无改动</td></tr>
       <tr><td>2026-09-02</td><td>新增厂商档案注册表 <code>vendors.py</code>（9 家厂商 + 模型目录 + compat 开关）；<code>openai_provider</code> 按 compat 注入思考参数、reasoning 字段别名、DeepSeek reasoning_content 回传，移除"URL/模型名含 deepseek"字符串嗅探；<code>app.py</code> 装配支持 <code>provider: &lt;厂商id&gt;</code>（base_url / 环境变量 key / vision 档案默认值）；新增 <code>tests/test_vendor_profiles.py</code>（40 例）与 <code>tests/test_model_binding_providers.py</code>（5 例，覆盖会话绑定 / wiki / 团队的 provider 组装链路）。</td><td>providers、app 装配、LLMProvider.reasoning_mode 取值扩展（向后兼容）；custom/存量配置行为不变（DeepSeek 端点经档案兜底识别后行为等价）</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
     </tbody>

@@ -6,7 +6,7 @@
 <title>gateway · Ace 后端模块</title>
 <!--
   ============================================================================
-  模块文档模板：复制此文件 → 改名为 <module>.html → 填写各节。
+  模块文档：crew/gateway
   约定：每次改动某后端模块的代码，先归类到对应模块，再更新该模块文档：
     1) 若改了职责/文件/接口 → 同步对应小节
     2) 必填：在「变更记录」追加一行（日期 + 变更 + 影响面）
@@ -44,20 +44,27 @@
 <div class="wrap">
   <div class="crumb">Ace / 后端模块 / gateway</div>
   <h1><span class="logo">A</span>crew/gateway</h1>
-  <div class="sub">Gateway 网关：Web/API/WS 入口与协议转换。</div>
+  <div class="sub">Gateway 网关：HTTP/WebSocket API 入口、认证与 owner 归一化边界、渠道（飞书/微信等）接入与归属、请求分发。</div>
 
   <h2>1. 职责</h2>
   <ul>
-    <li>该模块做什么、不做什么（边界）。</li>
+    <li>对外入口：桌面端/浏览器的 HTTP API 与 WebSocket（<code>app.py</code> 装配，<code>routers/</code> 分域路由，<code>ws.py</code> WS 入口），以及平台渠道（飞书/微信等，经 <code>platform_registry</code> + <code>plugins/platforms</code>）的接入与生命周期管理。</li>
+    <li>认证与 owner 归一化边界：<code>auth.py</code> 把可信传输映射为 <code>AccountContext</code>（loopback → 本机 owner <code>local</code>；remote/email → 签名会话 → <code>provider:user</code>）；<code>dispatcher.py</code> 是 ContextVar set 点，<code>normalize_owner_account_id</code> 只在这类系统边界出现。</li>
+    <li>请求分发：<code>dispatcher.py</code> 对同一 session 串行化执行（per-session FIFO + 忙时策略 queue/interrupt/steer + 全局并发上限），触发 session/agent 生命周期钩子。</li>
+    <li>渠道归属：按 (platform, owner) 注册/投递渠道实例（<code>channel_manager</code> / <code>delivery</code> / <code>channel_sessions</code> / <code>channel_bindings</code>），对话事件实时广播给桌面 WS 观察者（<code>broadcast</code>）。</li>
+    <li>不做：业务逻辑与 LLM 调用（在 <code>crew/app.py</code> / agent 层），gateway 只做协议转换、鉴权、串行化与投递。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
-  <p>按子功能或核心流程拆解，这是本模块文档的重点。</p>
   <table>
     <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
     <tbody>
-      <tr><td><code>feature-a</code></td><td>…</td><td>已落地</td></tr>
-      <tr><td><code>feature-b</code></td><td>…</td><td>待补充</td></tr>
+      <tr><td>认证（<code>auth.py</code>）</td><td>owner 归一化发生在此：loopback 流量映射为本机 owner <code>local</code>（dev 模式 <code>dev:dev</code>）；remote/email 模式校验 HMAC 签名 cookie 会话（会话密钥 0600/0700 权限校验），owner 取 <code>provider:user</code>。<code>require_admin</code>（local 恒 admin，否则查 <code>gateway_admin_accounts</code>）；WS 同源 Origin 校验。</td><td>已落地</td></tr>
+      <tr><td>请求分发（<code>dispatcher.py</code>）</td><td><code>SessionDispatcher</code> 包裹内核入口，per-session FIFO 串行 + 队列深度/运行状态暴露；ContextVar set 点：<code>run()</code> 首行 <code>current_owner_account_id.set(normalize_owner_account_id(envelope.user_id))</code>；owner 级登出演代栅栏（logout 后旧轮次不再出帧）；session:end 钩子回收会话状态。</td><td>已落地</td></tr>
+      <tr><td>模型/配置路由（<code>routers/config.py</code>）</td><td><code>/api/config</code>、<code>/api/config/model</code> 切换、模型 profile CRUD（POST/PUT/DELETE <code>/api/config/models</code>）。统一走 <code>CrewApp.add_model/update_model/remove_model</code> 并显式传 <code>owner_account_id=account_from_request(request).owner_account_id</code>；内置（builtin）模型的改/删需管理员；删除前拦截运行中会话并可 force。</td><td>已落地</td></tr>
+      <tr><td>渠道管理（<code>channel_manager.py</code> / <code>delivery.py</code> / <code>channel_sessions.py</code>）</td><td>按 (platform, owner) 键管理渠道实例：注册/热重连/停止/<code>stop_owner</code>，状态变更经 <code>hook_registry</code> 发 <code>channel:state_change</code>；<code>_owner_handler</code> 给 owner 绑定渠道注入 <code>gateway_owner_account_id</code> 参数。<code>DeliveryRouter</code> 按 (platform, owner) 路由 cron/agent 出站文本（<code>origin</code> / <code>local</code> / <code>&lt;platform&gt;:&lt;chat_id&gt;</code>），IM 出站过滤链汇聚于此。<code>channel_sessions</code> 负责渠道 session key、绑定者 owner 映射与 <code>/new</code>/<code>/reset</code> 会话轮换。</td><td>已落地</td></tr>
+      <tr><td>广播（<code>broadcast.py</code>）</td><td>消费 <code>crew.dispatch</code> 的 ResponseChunk 流，逐帧推给该 (owner, session) 的全部 WS 观察者；owner 取 dispatch 改写后的 <code>envelope.user_id</code>（渠道会话 = 绑定桌面账号 binder），WS 入口显式传鉴权账号。<code>make_broadcasting_handler</code> 一处接入，所有渠道零改获得实时渲染。</td><td>已落地</td></tr>
+      <tr><td>交互桥（<code>interaction_bridge.py</code>）</td><td>外部 Runtime（MCP 子进程）与 Crew 主会话之间的短期绑定：token → <code>ExternalInteractionBinding</code>（含 <code>owner_account_id</code>、显示/控制 session、权限画像、过期时间），把 MCP 交互请求安全映射回发起任务的会话。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -65,29 +72,46 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/gateway/xxx.py</code></td><td>…</td></tr>
+      <tr><td><code>crew/gateway/app.py</code></td><td>FastAPI 装配：中间件（认证挂 <code>request.state.account</code>）、各域路由挂载、渠道注册（<code>_register_enabled_platform_channels</code>：绑定 owner 逐个建实例，未绑定平台建单个全局实例）。</td></tr>
+      <tr><td><code>crew/gateway/auth.py</code></td><td>认证与 owner 归一化边界；<code>AccountContext</code> / <code>authenticate_http_request</code> / <code>authenticate_websocket</code>；再导出 <code>LOCAL_OWNER_ACCOUNT_ID</code>。</td></tr>
+      <tr><td><code>crew/gateway/dispatcher.py</code></td><td>会话串行化调度器；ContextVar set 点；忙时策略与登出演代栅栏。</td></tr>
+      <tr><td><code>crew/gateway/routers/config.py</code></td><td>配置与模型 profile CRUD 路由，模型 CRUD 显式传 owner。</td></tr>
+      <tr><td><code>crew/gateway/channel_manager.py</code> / <code>delivery.py</code> / <code>channel_sessions.py</code></td><td>渠道实例生命周期、出站投递路由、入站绑定改写与会话轮换。</td></tr>
+      <tr><td><code>crew/gateway/broadcast.py</code> / <code>connections.py</code> / <code>ws.py</code></td><td>对话事件广播、WS 连接与回放缓存管理、WS 入口。</td></tr>
+      <tr><td><code>crew/gateway/interaction_bridge.py</code></td><td>外部 Runtime 受限 MCP 交互桥。</td></tr>
+      <tr><td><code>crew/state/channel_bindings.py</code></td><td>平台 ↔ owner 绑定的持久化（<code>bind_on_connect</code> / <code>get_binding</code> / <code>list_for_platform</code>）。</td></tr>
     </tbody>
   </table>
 
   <h2>4. 数据模型与接口</h2>
-  <p>对外暴露的关键类/方法、事件/消息约定、Schema。</p>
-  <pre><code># 关键签名</code></pre>
+  <p>owner 归一化在 gateway 的边界规则（归一化原语 <code>normalize_owner_account_id()</code> / <code>LOCAL_OWNER_ACCOUNT_ID</code> 定义在 <code>crew/core/runctx.py</code>）：</p>
+  <pre><code>认证（auth.py）        loopback → AccountContext(owner="local")；remote/email → owner="provider:user"
+ContextVar set 点       dispatcher.run(): current_owner_account_id.set(normalize_owner_account_id(envelope.user_id))
+渠道注册（app.py）      绑定 owner 的渠道 include_env=False（凭证只读 owner overlay）
+                        未绑定的全局渠道 owner=""，include_env=True（env 凭证启用）
+入站消息（channel_sessions.py）
+                        有绑定者：envelope.user_id 改写为绑定桌面账号（binder），
+                        平台原始 uid 只保留在 params.platform_uid，不充当 owner</code></pre>
+  <p>边界之内 owner 恒非空：HTTP 路由经 <code>account_from_request(request).owner_account_id</code> 取 owner 显式传给 CrewApp/store；渠道路径经 dispatcher 的 ContextVar 继承。<code>channel_manager</code> / <code>delivery</code> 仍保留 <code>{"", "local", "dev:dev"}</code> 兼容视图（全局渠道对本机 owner 可见），见 TODO。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>问题 1：…</li>
-    <li>TODO：…</li>
+    <li>渠道归属统一（交接文档决策⑥⑦：未绑定渠道注册/入站消息归 <code>local</code>、删除 <code>{"", "local", "dev:dev"}</code> 特判、<code>channel_bindings.get_binding</code> 删首条兼容视图）曾在 <code>ab0d596</code> 落地，<code>5434708</code> 签名清扫时随 gateway 调用点收紧一并回卷。当前未绑定渠道仍以全局实例（<code>owner=""</code>）注册，无绑定入站消息不改写 owner——与交接文档描述存在偏差，待确认后重新落地。</li>
+    <li>签名清扫未完成：<code>routers/channels.py</code>（19 处）、<code>channel_manager.py</code>（11 处）、<code>dispatcher.py</code>（9 处）、<code>connections.py</code>（9 处）等仍有 <code>owner_account_id: str = ""</code> 默认值待收紧（交接文档第三节 B）。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
   <ul>
-    <li>如何在此模块上加功能（遵守契约、不跨目录）。</li>
+    <li>新增渠道平台：在 <code>plugins/platforms</code> 实现 adapter 并注册进 <code>platform_registry</code>；渠道实例自动获得广播、投递与 owner 归属能力，无需改 gateway 本体。</li>
+    <li>新增 HTTP 路由：在 <code>routers/</code> 新建 <code>create_xxx_router</code> 并在 <code>app.py</code> 挂载；owner 一律经 <code>account_from_request</code> 获取，不要自行解析。</li>
+    <li>出站内容处理：归 <code>response_filters.py</code> 过滤链，不在各 adapter 里私写。</li>
   </ul>
 
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-09-03</td><td>合并 owner 统一化改造（refactor/llm-provider → refactor/plugin-architecture-stage-0，merge 22af708）：认证边界归一（<code>auth.py</code> loopback → <code>local</code>，经 <code>LOCAL_OWNER_ACCOUNT_ID</code>）；ContextVar set 点收口（<code>dispatcher.run</code> 统一 <code>normalize_owner_account_id</code>）；绑定渠道入站 binder 改写语义固定（平台原始 uid 不充当 owner）。注意：渠道归属统一（决策⑥⑦）未随合并落地，<code>ab0d596</code> 的实现被 <code>5434708</code> 回卷，见 TODO。</td><td>gateway 认证/分发边界、模型 CRUD 路由 owner 传参；渠道归属语义维持旧行为（未绑定=全局实例）</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
     </tbody>
   </table>
