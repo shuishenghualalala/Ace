@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from types import SimpleNamespace
 
 import pytest
 
@@ -312,30 +311,33 @@ async def test_replaced_global_provider_waits_for_pre_switch_consumer(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_use_model_installs_new_provider_before_retiring_old_one(tmp_path, monkeypatch):
-    import crew.app as app_module
+async def test_use_model_persists_owner_default_without_rebuilding_global_provider(tmp_path):
+    """owner 统一后 use_model 写 owner overlay 默认模型，不再重建全局 Provider。"""
+    from crew.state.config import ModelProfile
 
     old_provider = _ClosableProvider()
-    new_provider = _ClosableProvider()
     cfg = Config(
         db_path=str(tmp_path / "crew.db"),
         memory_db_path=str(tmp_path / "memory.db"),
         crew_home=str(tmp_path / ".crew"),
+        active_model_id="base",
+        model_profiles={
+            "base": ModelProfile(id="base", api_key="k-base", model="base-model", builtin=True),
+            "next": ModelProfile(id="next", api_key="k-next", model="next-model", builtin=True),
+        },
     )
     app = build_app(config=cfg, enable_team=False)
     app.cron_service = None
     app.mcp_manager = None
     app.provider = old_provider
-    profile = SimpleNamespace(id="next", model="next-model", base_url="")
-    monkeypatch.setattr(app.config, "activate_model", lambda _model_id: profile)
-    monkeypatch.setattr(app_module, "build_provider", lambda _cfg: new_provider)
 
-    selected = app.use_model("next")
+    selected = app.use_model("next", owner_account_id="local")
 
-    assert selected is profile
-    assert app.provider is new_provider
-    await app._drain_provider_retirements()
-    assert old_provider.close_calls == 1
-    assert new_provider.close_calls == 0
+    assert selected.id == "next"
+    # 全局启动兜底 Provider 不再由 use_model 重建/退役
+    assert app.provider is old_provider
+    assert old_provider.close_calls == 0
+    # 默认模型落 owner overlay
+    overlay = app.config.owner_overlay_data("local")
+    assert overlay["llm"]["default"] == "next"
     await app.shutdown()
-    assert new_provider.close_calls == 1
