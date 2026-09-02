@@ -13,6 +13,7 @@ import pytest
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.mocks import FakeProvider, InMemorySessionStore, NullMemory
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
 from crew.core.types import ChatResponse, Message, ToolCall
 from crew.dynamickanban.manager import DynamicKanbanManager
 from crew.dynamickanban.models import PlanDelta
@@ -208,9 +209,11 @@ def test_legacy_workflow_migration_only_backfills_provable_owner(tmp_path: Path)
     assert owner_a.get_workflow("wf_ambiguous") is None
     assert owner_b.get_workflow("wf_ambiguous") is None
     assert owner_a.get_workflow("wf_orphan") is None
+    # owner 统一后无主看板归本机 local，不再永久隔离
+    assert root.for_owner(LOCAL_OWNER_ACCOUNT_ID).get_workflow("wf_orphan") is not None
     root.close()
 
-    # Reopening reruns migrations; quarantined rows must remain quarantined.
+    # Reopening reruns migrations; ambiguous rows stay quarantined for manual claim.
     reopened = SQLiteKanbanStore(db_path)
     assert reopened.for_owner("A:uid-a").get_workflow("wf_unique") is not None
     reopened.close()
@@ -223,7 +226,7 @@ def test_legacy_workflow_migration_only_backfills_provable_owner(tmp_path: Path)
     check.close()
     assert rows == {
         "wf_ambiguous": "legacy_ambiguous",
-        "wf_orphan": "legacy_orphaned",
+        "wf_orphan": "owned",
         "wf_unique": "owned",
     }
 
@@ -488,7 +491,7 @@ async def test_manager_interrupt(
         await asyncio.sleep(0.01)
     assert manager._engines, "engine 应已注册"
 
-    assert manager.interrupt(session_id, "测试中断", owner_account_id="local") is True
+    assert manager.interrupt(session_id, owner_account_id="local", message="测试中断") is True
     barrier.set()
     chunks = await task
     assert chunks[-1].kind == "final"
@@ -526,10 +529,11 @@ def test_manager_interrupt_requires_owner(
         plugins=plugins,
         config=cfg,
     )
-    assert manager.interrupt("s_missing_owner", "测试中断") is False
-    assert manager.interrupt("s_missing_owner", "测试中断", owner_account_id="   ") is False
+    assert manager.interrupt("s_missing_owner", owner_account_id="local", message="测试中断") is False
+    with pytest.raises(ValueError):
+        manager.interrupt("s_missing_owner", owner_account_id="   ", message="测试中断")
     # 有 owner 但该 session 没有活跃 workflow：同样是 False，且不抛异常。
-    assert manager.interrupt("s_missing_owner", "测试中断", owner_account_id="local") is False
+    assert manager.interrupt("s_missing_owner", owner_account_id="local", message="测试中断") is False
 
 
 def test_manager_steer_requires_owner(
@@ -551,7 +555,7 @@ def test_manager_steer_requires_owner(
         plugins=plugins,
         config=cfg,
     )
-    assert manager.steer("s_missing_owner", "补充指令") is False
+    assert manager.steer("s_missing_owner", owner_account_id="local", text="补充指令") is False
 
 
 @pytest.mark.asyncio
@@ -581,11 +585,11 @@ async def test_manager_interrupt_is_owner_scoped(
     owner_a_store.create_workflow("s_scoped", "owner_a 需求")
 
     # owner_b 查不到该 workflow，因此中断失败
-    assert manager.interrupt("s_scoped", "测试中断", owner_account_id="owner_b") is False
+    assert manager.interrupt("s_scoped", owner_account_id="owner_b", message="测试中断") is False
 
     # owner_a 可以查到并中断：没有运行中 engine 时走 DB 兜底，
     # 把残留任务和 workflow 标记为失败（paused/active 僵尸均可中止）
-    assert manager.interrupt("s_scoped", "测试中断", owner_account_id="owner_a") is True
+    assert manager.interrupt("s_scoped", owner_account_id="owner_a", message="测试中断") is True
     wf = owner_a_store.get_latest_workflow_by_session("s_scoped")
     assert wf is not None and wf.status == "failed"
 
@@ -1218,7 +1222,7 @@ async def test_manager_quarantines_conflicting_stored_definition(
     )
 
     with pytest.raises(WorkflowDefinitionMigrationError):
-        await manager._load_or_build_definition(workflow, workflow.title)
+        await manager._load_or_build_definition(workflow, workflow.title, owner_account_id="local")
 
     quarantined = owner_store.get_workflow(workflow.id)
     assert quarantined is not None
@@ -1259,7 +1263,7 @@ async def test_manager_quarantines_invalid_v2_definition(
     )
 
     with pytest.raises(ValueError, match="入口|循环"):
-        await manager._load_or_build_definition(workflow, workflow.title)
+        await manager._load_or_build_definition(workflow, workflow.title, owner_account_id="local")
 
     quarantined = owner_store.get_workflow(workflow.id)
     assert quarantined is not None
@@ -1545,7 +1549,7 @@ async def test_manager_pause_and_resume_stream(
     session_store: InMemorySessionStore,
     plugins: PluginManager,
 ) -> None:
-    """manager.pause() / resume_stream() 能让 workflow 暂停后继续。"""
+    """manager.pause(owner_account_id="local") / resume_stream() 能让 workflow 暂停后继续。"""
     barrier = asyncio.Event()
     provider = FakeProvider()
     store = SQLiteKanbanStore(db_path)
@@ -1615,7 +1619,7 @@ async def test_manager_pause_and_resume_stream(
         await asyncio.sleep(0.01)
     assert manager._engines, "runtime 应已注册"
 
-    assert manager.pause(session_id, "测试暂停", owner_account_id="local") is True
+    assert manager.pause(session_id, owner_account_id="local", reason="测试暂停") is True
     barrier.set()
     chunks = await task
     assert chunks[-1].kind == "final"
@@ -2393,7 +2397,7 @@ async def test_manager_resume_stream_waits_for_previous_engine(
     old_runtime = next(iter(manager._engines.values()))
 
     # pause 立即落盘 paused，但旧 runtime 仍卡在 phase 内（barrier 未放行）
-    assert manager.pause(session_id, "测试暂停", owner_account_id="local") is True
+    assert manager.pause(session_id, owner_account_id="local", reason="测试暂停") is True
 
     env2 = Envelope.of("继续", session_id=session_id, mode="dynamic_kanban", request_id="req_rr2")
     resume_task = asyncio.create_task(_consume(manager.resume_stream(session_id, "req_rr2", env2)))
@@ -2597,7 +2601,7 @@ async def test_manager_resume_stream_disconnect_keeps_workflow_resumable(
             break
         await asyncio.sleep(0.01)
     assert manager._engines, "runtime 应已注册"
-    assert manager.pause(session_id, "测试暂停", owner_account_id="local") is True
+    assert manager.pause(session_id, owner_account_id="local", reason="测试暂停") is True
     gate.set()
     await interact_task
     wf = owner_store.get_latest_active_workflow_by_session(session_id, active_statuses={"paused"})
@@ -2699,7 +2703,7 @@ async def test_manager_interrupt_paused_workflow_marks_failed(
         await asyncio.sleep(0.01)
     assert manager._engines, "runtime 应已注册"
 
-    assert manager.pause(session_id, "测试暂停", owner_account_id="local") is True
+    assert manager.pause(session_id, owner_account_id="local", reason="测试暂停") is True
     barrier.set()
     await interact_task
     wf = owner_store.get_latest_active_workflow_by_session(session_id, active_statuses={"paused"})
@@ -2707,7 +2711,7 @@ async def test_manager_interrupt_paused_workflow_marks_failed(
     assert not manager._engines, "runtime 应已退出"
 
     # paused 状态中止：无 runtime 可置标志，应走 DB 兜底落 failed
-    assert manager.interrupt(session_id, "中止", owner_account_id="local") is True
+    assert manager.interrupt(session_id, owner_account_id="local", message="中止") is True
     wf = owner_store.get_workflow(wf.id)
     assert wf.status == "failed"
     state = owner_store.load_runtime_state(wf.id)

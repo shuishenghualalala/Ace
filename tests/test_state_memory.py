@@ -5,7 +5,7 @@ import threading
 import time
 from pathlib import Path
 
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID, current_owner_account_id
 from crew.core.types import Message, ToolCall
 from crew.memory.simple import SQLiteMemory
 from crew.state.session_store import SQLiteSessionStore
@@ -171,25 +171,26 @@ def test_migration_from_legacy_schema(tmp_path):
     conn.close()
 
     store = SQLiteSessionStore(str(db))  # 触发迁移
-    loaded = store.load("old")
+    # 迁移产生的历史行经 owner 回填归属本机 local；访问需显式带 owner。
+    loaded = store.load("old", owner_account_id=LOCAL_OWNER_ACCOUNT_ID)
     assert len(loaded) == 1 and loaded[0].content == "旧消息"
     # 迁移后新会话功能正常
-    store.save("new", [Message.user("新问题")])
-    assert {s["session_id"] for s in store.list_sessions()} == {"old", "new"}
+    store.save("new", [Message.user("新问题")], owner_account_id=LOCAL_OWNER_ACCOUNT_ID)
+    assert {s["session_id"] for s in store.list_sessions(owner_account_id=LOCAL_OWNER_ACCOUNT_ID)} == {"old", "new"}
 
 
 def test_set_status_and_not_overwritten_by_save(tmp_path):
     """set_status 写入 last_status/last_error；后续 save() 不应覆盖它们。"""
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
-    store.save("s1", [Message.user("hi")])
-    store.set_status("s1", "failed", "boom")
-    assert store.get_status("s1") == ("failed", "boom")
+    store.save("s1", [Message.user("hi")], owner_account_id="local")
+    store.set_status("s1", "failed", owner_account_id="local", error="boom")
+    assert store.get_status("s1", owner_account_id="local") == ("failed", "boom")
 
-    # 再保存一轮消息，状态列应保持不变
-    store.save("s1", [Message.user("hi"), Message.assistant("再答")])
-    assert store.get_status("s1") == ("failed", "boom")
+    # 再保存一轮消息，状态列应保持不变（同 owner 覆盖保存不碰状态列）
+    store.save("s1", [Message.user("hi"), Message.assistant("再答")], owner_account_id="local")
+    assert store.get_status("s1", owner_account_id="local") == ("failed", "boom")
     # list_sessions 也带出 last_status
-    s1 = next(s for s in store.list_sessions() if s["session_id"] == "s1")
+    s1 = next(s for s in store.list_sessions(owner_account_id="local") if s["session_id"] == "s1")
     assert s1["last_status"] == "failed"
 
 

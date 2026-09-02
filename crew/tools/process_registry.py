@@ -32,7 +32,7 @@ from typing import Any
 
 import crew as _crew_pkg
 from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import current_owner_account_id, normalize_owner_account_id
 from crew.security.launch import (
     ProcessLaunch,
     audit_execution_result,
@@ -114,9 +114,9 @@ def _checkpoint_path() -> Path:
     return get_crew_home() / "processes.json"
 
 
-def _owner_matches(session: "ProcessSession", owner_account_id: str = "") -> bool:
-    owner = str(owner_account_id or "").strip()
-    return not owner or str(session.owner_account_id or "") == owner
+def _owner_matches(session: "ProcessSession", owner_account_id: str) -> bool:
+    # owner 必填且恒非空（系统边界已归一）：严格相等，杜绝空 owner 跨会话放行。
+    return session.owner_account_id == owner_account_id
 
 
 def _pid_alive(pid: int | None) -> bool:
@@ -150,7 +150,7 @@ class ProcessSession:
     id: str
     command: str
     session_key: str = ""                         # 归属会话（用于通知路由）
-    owner_account_id: str = ""
+    owner_account_id: str = ""                    # 归属账号（创建入口已归一，字段保留默认兼容 checkpoint）
     pid: int | None = None
     process: subprocess.Popen | None = None
     cwd: str | None = None
@@ -201,8 +201,9 @@ class ProcessRegistry:
     # ----- 通知队列 -----
 
     @staticmethod
-    def _key(session_key: str, owner_account_id: str = "") -> SessionKey:
-        return owner_account_id or "", session_key
+    def _key(session_key: str, owner_account_id: str) -> SessionKey:
+        # 两端（入队/弹出）都经过这里归一，避免空串与 local 通知互相黑洞。
+        return normalize_owner_account_id(owner_account_id), session_key
 
     def _enqueue(self, session: ProcessSession, event: dict[str, Any]) -> None:
         with self._pending_lock:
@@ -211,7 +212,7 @@ class ProcessRegistry:
             if len(queue) > MAX_PENDING_PER_SESSION:
                 del queue[:-MAX_PENDING_PER_SESSION]
 
-    def drain_for_session(self, session_key: str, owner_account_id: str = "") -> list[dict[str, Any]]:
+    def drain_for_session(self, session_key: str, owner_account_id: str) -> list[dict[str, Any]]:
         """弹出某 session 的全部待通知事件（线程安全）。"""
         with self._pending_lock:
             return self._pending.pop(self._key(session_key, owner_account_id), []) or []
@@ -239,7 +240,7 @@ class ProcessRegistry:
         *,
         cwd: str | None = None,
         session_key: str = "",
-        owner_account_id: str = "",
+        owner_account_id: str,
         watch_patterns: list[str] | None = None,
         notify_on_complete: bool = False,
         task_id: str = "",
@@ -251,6 +252,8 @@ class ProcessRegistry:
 
         输出由 daemon reader 线程读入滚动缓冲，可经 poll/log/wait 取回。
         """
+        # 创建入口统一归一：注册表里不再产生无主会话，读取端（工具 handler）同样归一。
+        owner_account_id = normalize_owner_account_id(owner_account_id)
         child_env, secret_values = self._child_env(owner_account_id)
         session = ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}",
@@ -425,7 +428,7 @@ class ProcessRegistry:
         *,
         cwd: str | None,
         session_key: str = "",
-        owner_account_id: str = "",
+        owner_account_id: str,
         watch_patterns: list[str] | None = None,
         notify_on_complete: bool = False,
         task_id: str = "",
@@ -435,6 +438,8 @@ class ProcessRegistry:
         security_action: Any | None = None,
     ) -> ProcessSession:
         """Launch only the fixed Ace bridge; command is sent through stdin."""
+        # 与 spawn_local 一致：创建入口归一，注册表里不产生无主会话。
+        owner_account_id = normalize_owner_account_id(owner_account_id)
         result_dir = _checkpoint_path().parent
         result_dir.mkdir(parents=True, exist_ok=True)
         result_fd, result_name = tempfile.mkstemp(
@@ -798,7 +803,7 @@ class ProcessRegistry:
 
     # ----- 查询 -----
 
-    def get(self, session_id: str, owner_account_id: str = "") -> ProcessSession | None:
+    def get(self, session_id: str, owner_account_id: str) -> ProcessSession | None:
         with self._lock:
             session = self._running.get(session_id) or self._finished.get(session_id)
         session = self._refresh_detached(session)
@@ -820,7 +825,7 @@ class ProcessRegistry:
         self._move_to_finished(session)
         return session
 
-    def poll(self, session_id: str, owner_account_id: str = "") -> dict[str, Any]:
+    def poll(self, session_id: str, owner_account_id: str) -> dict[str, Any]:
         """查看状态 + 最近输出预览。"""
         session = self.get(session_id, owner_account_id=owner_account_id)
         if session is None:
@@ -849,7 +854,7 @@ class ProcessRegistry:
         offset: int = 0,
         limit: int = 200,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         """读取完整输出日志（按行分页）。"""
         session = self.get(session_id, owner_account_id=owner_account_id)
@@ -874,7 +879,7 @@ class ProcessRegistry:
             result["exit_code"] = session.exit_code
         return result
 
-    def wait(self, session_id: str, timeout: int | None = None, *, owner_account_id: str = "") -> dict[str, Any]:
+    def wait(self, session_id: str, timeout: int | None = None, *, owner_account_id: str) -> dict[str, Any]:
         """阻塞直到进程退出或超时。"""
         session = self.get(session_id, owner_account_id=owner_account_id)
         if session is None:
@@ -895,7 +900,7 @@ class ProcessRegistry:
             "timeout_note": f"已等待 {int(effective_timeout)}s，进程仍在运行",
         }
 
-    def kill_process(self, session_id: str, owner_account_id: str = "") -> dict[str, Any]:
+    def kill_process(self, session_id: str, owner_account_id: str) -> dict[str, Any]:
         """杀掉一个后台进程（含子进程树）。"""
         session = self.get(session_id, owner_account_id=owner_account_id)
         if session is None:
@@ -935,7 +940,7 @@ class ProcessRegistry:
         except Exception as exc:  # noqa: BLE001
             return {"status": "error", "error": str(exc)}
 
-    def list_sessions(self, owner_account_id: str = "") -> list[dict[str, Any]]:
+    def list_sessions(self, owner_account_id: str) -> list[dict[str, Any]]:
         with self._lock:
             all_sessions = list(self._running.values()) + list(self._finished.values())
         all_sessions = [
@@ -1038,7 +1043,7 @@ class ProcessRegistry:
                 id=entry.get("session_id") or f"proc_{uuid.uuid4().hex[:12]}",
                 command=entry.get("command", "unknown"),
                 session_key=entry.get("session_key", ""),
-                owner_account_id=entry.get("owner_account_id", ""),
+                owner_account_id=normalize_owner_account_id(entry.get("owner_account_id")),
                 pid=pid,
                 cwd=entry.get("cwd"),
                 started_at=entry.get("started_at", time.time()),
@@ -1136,7 +1141,7 @@ def _handle_process(args: dict[str, Any]) -> str:
 
     action = args.get("action", "")
     session_id = str(args.get("session_id", "")) if args.get("session_id") is not None else ""
-    owner_account_id = str(current_owner_account_id.get() or "").strip()
+    owner_account_id = current_owner_account_id.get()
 
     if action == "list":
         return json.dumps(

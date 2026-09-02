@@ -77,10 +77,10 @@ async def test_activity_and_heartbeat_are_independent(tmp_path):
             runtime.heartbeat(task["task_id"])
             await asyncio.sleep(0.03)
         for _ in range(10):
-            if runtime.get(task["task_id"])["status"] == "timed_out":
+            if runtime.get(task["task_id"], owner_account_id="local")["status"] == "timed_out":
                 break
             await asyncio.sleep(0.02)
-        assert runtime.get(task["task_id"])["status"] == "timed_out"
+        assert runtime.get(task["task_id"], owner_account_id="local")["status"] == "timed_out"
     finally:
         await runtime.stop()
         runtime.close()
@@ -269,9 +269,9 @@ async def test_wait_timeout_does_not_cancel_task(tmp_path):
     runtime = _runtime(tmp_path, wait_timeout=0.02)
     task = runtime.create_runtime(kind="team", session_id="s1", title="wait")
     runtime.mark_running(task["task_id"])
-    result = await runtime.wait(task["task_id"])
+    result = await runtime.wait(task["task_id"], owner_account_id="local")
     assert result["retrieval_status"] == "timeout"
-    assert runtime.get(task["task_id"])["status"] == "running"
+    assert runtime.get(task["task_id"], owner_account_id="local")["status"] == "running"
     runtime.finish(
         task["task_id"],
         owner_account_id="",
@@ -300,7 +300,7 @@ async def test_shell_auto_background_reuses_running_process(tmp_path):
         assert payload["auto_backgrounded"] is True
         task_id = payload["task_id"]
         pid = payload["pid"]
-        completed = await runtime.wait(task_id, timeout=2)
+        completed = await runtime.wait(task_id, timeout=2, owner_account_id="local")
         assert completed["status"] == "completed"
         assert completed["progress"]["pid"] == pid
         assert "end" in completed["result"]
@@ -396,7 +396,7 @@ def test_task_get_is_owner_scoped(tmp_path):
     with pytest.raises(KeyError):
         runtime.get(task["task_id"], owner_account_id="B:uid-b")
     with pytest.raises(KeyError):
-        runtime.get(task["task_id"])
+        runtime.get(task["task_id"], owner_account_id="local")
     runtime.close()
 
 

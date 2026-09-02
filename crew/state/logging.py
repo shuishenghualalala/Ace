@@ -17,7 +17,6 @@ import contextlib
 import contextvars
 import json
 import logging
-import os
 import re
 import sys
 import threading
@@ -162,7 +161,7 @@ class RingBufferHandler(logging.Handler):
                 "message": self.format(record),
                 # Capture ownership when the event is created. Query-time identity
                 # cannot reconstruct which request/background task caused a log.
-                "owner_account_id": str(current_owner_account_id.get() or "").strip(),
+                "owner_account_id": current_owner_account_id.get(),
             }
         except Exception:  # noqa: BLE001 - 缓冲失败不能影响主流程
             return
@@ -301,14 +300,8 @@ def llm_trace(direction: str, payload: dict[str, Any]) -> None:
     if not _LLM_TRACE_ENABLED:
         return
     if "owner_account_id" not in payload:
-        try:
-            from crew.core.runctx import current_owner_account_id
-
-            owner_account_id = current_owner_account_id.get()
-        except Exception:  # noqa: BLE001 - trace 不能影响主流程
-            owner_account_id = ""
-        if owner_account_id:
-            payload = {**payload, "owner_account_id": owner_account_id}
+        # ContextVar 默认即本机 owner，归属恒非空、恒附加。
+        payload = {**payload, "owner_account_id": current_owner_account_id.get()}
     record = _sanitize_llm_trace({"ts": round(time.time(), 3), "dir": direction, **payload})
     try:
         line = json.dumps(record, ensure_ascii=False, default=str)

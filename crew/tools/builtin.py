@@ -731,8 +731,9 @@ async def handle_terminal(
     runtime = getattr(process_registry, "_task_runtime", None)
     task_id = ""
     output_ref = ""
+    # 读取一次、全函数复用：spawn 与 runtime 记录的 owner 必须同源。
+    owner = current_owner_account_id.get()
     if runtime is not None:
-        owner = current_owner_account_id.get()
         output_dir = get_owner_runtime_home(owner) / "tasks"
         task = runtime.create_runtime(
             kind="shell",
@@ -772,7 +773,7 @@ async def handle_terminal(
                 **({"launch": launch} if launch is not None else {}),
                 cwd=cwd,
                 session_key=current_session_id.get(),
-                owner_account_id=current_owner_account_id.get(),
+                owner_account_id=owner,
                 watch_patterns=[str(p) for p in watch_patterns],
                 notify_on_complete=notify_on_complete,
                 task_id=task_id,
@@ -811,7 +812,7 @@ async def handle_terminal(
         **({"launch": launch} if launch is not None else {}),
         cwd=cwd,
         session_key=current_session_id.get(),
-        owner_account_id=current_owner_account_id.get(),
+        owner_account_id=owner,
         notify_on_complete=False,
         task_id=task_id,
         output_ref=output_ref,
@@ -845,7 +846,7 @@ async def handle_terminal(
     if not session.exited:
         elapsed = time.monotonic() - started
         if timeout_explicit and effective_timeout <= auto_after and elapsed >= effective_timeout:
-            process_registry.kill_process(session.id)
+            process_registry.kill_process(session.id, owner_account_id=session.owner_account_id)
             if runtime is not None and task_id:
                 runtime.finish(
                     task_id,

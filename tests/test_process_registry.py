@@ -31,14 +31,15 @@ def _isolate_checkpoint(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(pr, "_checkpoint_path", lambda: d / "processes.json")
 
 
-def _wait_exit(reg: ProcessRegistry, sid: str, timeout: float = 10.0) -> dict:
+def _wait_exit(reg: ProcessRegistry, sid: str, timeout: float = 10.0, *, owner_account_id: str = "local") -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        r = reg.poll(sid)
+        r = reg.poll(sid, owner_account_id=owner_account_id)
         if r.get("status") == "exited":
             return r
         time.sleep(0.05)
-    raise AssertionError(f"进程 {sid} 未在 {timeout}s 内退出: {reg.poll(sid)}")
+    last = reg.poll(sid, owner_account_id=owner_account_id)
+    raise AssertionError(f"进程 {sid} 未在 {timeout}s 内退出: {last}")
 
 
 def _py_cmd(code: str) -> str:
@@ -53,16 +54,16 @@ def _py_cmd(code: str) -> str:
 
 def test_spawn_local_python_prints_unicode_emoji():
     reg = ProcessRegistry()
-    s = reg.spawn_local(_py_cmd("print(chr(0x1f4cc))"), session_key="unicode-emoji")
-    r = _wait_exit(reg, s.id)
+    s = reg.spawn_local(_py_cmd("print(chr(0x1f4cc))"), session_key="unicode-emoji", owner_account_id="local")
+    r = _wait_exit(reg, s.id, owner_account_id="local")
     assert r["exit_code"] == 0
     assert "\U0001f4cc" in r.get("output_preview", "")
 
 
 def test_capture_output_and_poll():
     reg = ProcessRegistry()
-    s = reg.spawn_local(_py_cmd("print('hello-crew')"), session_key="sess1")
-    r = _wait_exit(reg, s.id)
+    s = reg.spawn_local(_py_cmd("print('hello-crew')"), session_key="sess1", owner_account_id="local")
+    r = _wait_exit(reg, s.id, owner_account_id="local")
     assert r["exit_code"] == 0
     assert "hello-crew" in r["output_preview"]
 
@@ -83,44 +84,44 @@ def test_child_env_uses_only_runtime_defaults(monkeypatch):
 
 def test_read_log():
     reg = ProcessRegistry()
-    s = reg.spawn_local(_py_cmd("print('l1'); print('l2'); print('l3')"), session_key="s")
-    _wait_exit(reg, s.id)
-    log = reg.read_log(s.id, offset=0, limit=200)
+    s = reg.spawn_local(_py_cmd("print('l1'); print('l2'); print('l3')"), session_key="s", owner_account_id="local")
+    _wait_exit(reg, s.id, owner_account_id="local")
+    log = reg.read_log(s.id, offset=0, limit=200, owner_account_id="local")
     assert log["total_lines"] == 3
     assert "l2" in log["output"]
 
 
 def test_wait_returns_exit():
     reg = ProcessRegistry()
-    s = reg.spawn_local(_py_cmd("import sys; sys.exit(0)"), session_key="s")
-    r = reg.wait(s.id, timeout=10)
+    s = reg.spawn_local(_py_cmd("import sys; sys.exit(0)"), session_key="s", owner_account_id="local")
+    r = reg.wait(s.id, timeout=10, owner_account_id="local")
     assert r["status"] == "exited"
     assert r["exit_code"] == 0
 
 
 def test_wait_timeout():
     reg = ProcessRegistry()
-    s = reg.spawn_local(_py_cmd("import time; time.sleep(5)"), session_key="s")
-    r = reg.wait(s.id, timeout=1)
+    s = reg.spawn_local(_py_cmd("import time; time.sleep(5)"), session_key="s", owner_account_id="local")
+    r = reg.wait(s.id, timeout=1, owner_account_id="local")
     assert r["status"] == "timeout"
-    reg.kill_process(s.id)
+    reg.kill_process(s.id, owner_account_id="local")
 
 
 def test_kill_running_process():
     reg = ProcessRegistry()
-    s = reg.spawn_local(_py_cmd("import time; time.sleep(30)"), session_key="s")
+    s = reg.spawn_local(_py_cmd("import time; time.sleep(30)"), session_key="s", owner_account_id="local")
     time.sleep(0.2)
-    assert reg.poll(s.id)["status"] == "running"
-    r = reg.kill_process(s.id)
+    assert reg.poll(s.id, owner_account_id="local")["status"] == "running"
+    r = reg.kill_process(s.id, owner_account_id="local")
     assert r["status"] == "killed"
-    _wait_exit(reg, s.id)
-    assert reg.poll(s.id)["status"] == "exited"
+    _wait_exit(reg, s.id, owner_account_id="local")
+    assert reg.poll(s.id, owner_account_id="local")["status"] == "exited"
 
 
 def test_notify_on_complete_enqueues():
     reg = ProcessRegistry()
     s = reg.spawn_local(_py_cmd("print('done')"), session_key="sessX", owner_account_id="A:uid-a", notify_on_complete=True)
-    _wait_exit(reg, s.id)
+    _wait_exit(reg, s.id, owner_account_id="A:uid-a")
     # reader 线程的 finally 里 enqueue，给一点时间
     time.sleep(0.1)
     events = reg.drain_for_session("sessX", owner_account_id="A:uid-a")
@@ -136,8 +137,8 @@ def test_process_notifications_are_owner_scoped():
     reg = ProcessRegistry()
     a = reg.spawn_local(_py_cmd("print('owner-a')"), session_key="same", owner_account_id="A:uid-a", notify_on_complete=True)
     b = reg.spawn_local(_py_cmd("print('owner-b')"), session_key="same", owner_account_id="B:uid-b", notify_on_complete=True)
-    _wait_exit(reg, a.id)
-    _wait_exit(reg, b.id)
+    _wait_exit(reg, a.id, owner_account_id="A:uid-a")
+    _wait_exit(reg, b.id, owner_account_id="B:uid-b")
     time.sleep(0.1)
 
     events_a = reg.drain_for_session("same", owner_account_id="A:uid-a")
@@ -149,10 +150,10 @@ def test_process_notifications_are_owner_scoped():
 
 def test_watch_patterns_match():
     reg = ProcessRegistry()
-    s = reg.spawn_local(_py_cmd("print('READY-NOW')"), session_key="sessW", watch_patterns=["READY"])
-    _wait_exit(reg, s.id)
+    s = reg.spawn_local(_py_cmd("print('READY-NOW')"), session_key="sessW", watch_patterns=["READY"], owner_account_id="local")
+    _wait_exit(reg, s.id, owner_account_id="local")
     time.sleep(0.1)
-    events = reg.drain_for_session("sessW")
+    events = reg.drain_for_session("sessW", owner_account_id="local")
     matches = [e for e in events if e["type"] == "watch_match"]
     assert matches, f"期望 watch_match, got {events}"
     assert matches[0]["pattern"] == "READY"
@@ -161,10 +162,10 @@ def test_watch_patterns_match():
 
 def test_watch_no_match_no_event():
     reg = ProcessRegistry()
-    s = reg.spawn_local(_py_cmd("print('nothing-here')"), session_key="sessN", watch_patterns=["ZZZ"])
-    _wait_exit(reg, s.id)
+    s = reg.spawn_local(_py_cmd("print('nothing-here')"), session_key="sessN", watch_patterns=["ZZZ"], owner_account_id="local")
+    _wait_exit(reg, s.id, owner_account_id="local")
     time.sleep(0.1)
-    assert reg.drain_for_session("sessN") == []
+    assert reg.drain_for_session("sessN", owner_account_id="local") == []
 
 
 def test_format_notification():
@@ -189,7 +190,7 @@ def test_recover_from_checkpoint(tmp_path, monkeypatch):
 
     reg = pr.ProcessRegistry()
     # 起一个真实存活的长进程，让它写进 checkpoint
-    s = reg.spawn_local(_py_cmd("import time; time.sleep(30)"), session_key="recov", notify_on_complete=True)
+    s = reg.spawn_local(_py_cmd("import time; time.sleep(30)"), session_key="recov", notify_on_complete=True, owner_account_id="local")
     assert (tmp_path / "processes.json").exists()
     real_pid = s.pid
 
@@ -197,19 +198,19 @@ def test_recover_from_checkpoint(tmp_path, monkeypatch):
     reg2 = pr.ProcessRegistry()
     n = reg2.recover_from_checkpoint()
     assert n == 1
-    r = reg2.poll(s.id)
+    r = reg2.poll(s.id, owner_account_id="local")
     assert r["status"] == "running"
     assert r.get("detached") is True
     assert "无输出历史" in r.get("note", "")
 
     # detached 进程可被 kill（走 host PID）
-    kr = reg2.kill_process(s.id)
+    kr = reg2.kill_process(s.id, owner_account_id="local")
     assert kr["status"] == "killed"
     # 真实进程应已被杀
     time.sleep(0.3)
     assert not pr._pid_alive(real_pid)
     # 原 registry 也清理掉
-    reg.kill_process(s.id)
+    reg.kill_process(s.id, owner_account_id="local")
 
 
 def test_recover_skips_dead_pid(tmp_path, monkeypatch):
@@ -223,7 +224,7 @@ def test_recover_skips_dead_pid(tmp_path, monkeypatch):
     )
     reg = pr.ProcessRegistry()
     assert reg.recover_from_checkpoint() == 0
-    assert reg.poll("proc_dead")["status"] == "not_found"
+    assert reg.poll("proc_dead", owner_account_id="local")["status"] == "not_found"
 
 
 def test_detached_dead_pid_transitions_to_exited(tmp_path, monkeypatch):
@@ -232,7 +233,7 @@ def test_detached_dead_pid_transitions_to_exited(tmp_path, monkeypatch):
     monkeypatch.setattr(pr, "_checkpoint_path", lambda: tmp_path / "processes.json")
     reg = pr.ProcessRegistry()
     # 起一个短进程并认领为 detached，等它自己退出后 poll 应转 exited
-    s = reg.spawn_local(_py_cmd("import time; time.sleep(0.2)"), session_key="d")
+    s = reg.spawn_local(_py_cmd("import time; time.sleep(0.2)"), session_key="d", owner_account_id="local")
     pid = s.pid
     reg2 = pr.ProcessRegistry()
     reg2.recover_from_checkpoint()
@@ -241,15 +242,15 @@ def test_detached_dead_pid_transitions_to_exited(tmp_path, monkeypatch):
     while pr._pid_alive(pid) and time.monotonic() < deadline:
         time.sleep(0.05)
     time.sleep(0.1)
-    r = reg2.poll(s.id)
+    r = reg2.poll(s.id, owner_account_id="local")
     assert r["status"] == "exited"
-    reg.kill_process(s.id)
+    reg.kill_process(s.id, owner_account_id="local")
 
 
 def test_process_tool_handler():
     # 走全局单例（工具 handler 用的是它）
-    s = process_registry.spawn_local(_py_cmd("print('tool-test')"), session_key="th")
-    _wait_exit(process_registry, s.id)
+    s = process_registry.spawn_local(_py_cmd("print('tool-test')"), session_key="th", owner_account_id="local")
+    _wait_exit(process_registry, s.id, owner_account_id="local")
     out = json.loads(_handle_process({"action": "poll", "session_id": s.id}))
     assert out["status"] == "exited"
     listed = json.loads(_handle_process({"action": "list"}))
@@ -260,7 +261,7 @@ def test_process_tool_handler():
 
 def test_process_tool_handler_is_owner_scoped():
     s = process_registry.spawn_local(_py_cmd("print('tool-owner')"), session_key="own", owner_account_id="A:uid-a")
-    _wait_exit(process_registry, s.id)
+    _wait_exit(process_registry, s.id, owner_account_id="A:uid-a")
 
     token = current_owner_account_id.set("B:uid-b")
     try:

@@ -43,8 +43,8 @@ def build_mcp_server(crew: CrewApp) -> Any:
         # list_sessions 走 SQLite 阻塞 I/O，丢到线程池避免阻塞事件循环。
         rows = await asyncio.to_thread(
             crew.session_store.list_sessions,
-            workspace_id,
-            owner,
+            owner_account_id=owner,
+            workspace_id=workspace_id,
         )
         return json.dumps(rows, ensure_ascii=False)
 

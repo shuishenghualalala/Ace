@@ -15,9 +15,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from crew.app import build_app
+from crew.core.runctx import normalize_owner_account_id
 from crew.state.config import load_config
 
-DEFAULT_CLI_OWNER = os.getenv("CREW_CLI_ACCOUNT", "local")
+# env 显式设空串也归一为 local，杜绝 CLI 以"无主"身份运行。
+DEFAULT_CLI_OWNER = normalize_owner_account_id(os.getenv("CREW_CLI_ACCOUNT"))
 
 
 class CliError(RuntimeError):

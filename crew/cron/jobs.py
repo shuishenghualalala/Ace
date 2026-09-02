@@ -27,6 +27,7 @@ from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from crew.state.logging import get_logger
+from crew.state._migration import backfill_empty_owner_rows
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 log = get_logger("cron")
@@ -540,6 +541,8 @@ class CronJobStore:
             WHERE fire_key <> ''
             """
         )
+        # 历史 owner='' 行归属本机 local（owner 统一后不存在无主任务/运行记录）。
+        backfill_empty_owner_rows(conn, ["cron_jobs", "cron_job_runs"])
         self._conn.commit()
 
     @staticmethod

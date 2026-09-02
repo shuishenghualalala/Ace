@@ -24,9 +24,19 @@ def _restore_process_env():
     build_app 会读到真实模型并发起真实 HTTP 调用（慢、烧钱、顺序依赖失败）。
     """
     before = dict(os.environ)
+    # 隔离运行器 shell 的 CREW_*/GATEWAY_* 变量：否则 legacy CREW_MODEL/CREW_BASE_URL
+    # 覆盖路径会把本会话的模型配置泄进测试（每个用例需显式 setenv 自己需要的变量）。
+    leaked = [
+        name
+        for name in (*os.environ, "GATEWAY_PORT")
+        if name.startswith("CREW_") or name == "GATEWAY_PORT"
+    ]
+    saved = {name: os.environ.pop(name) for name in leaked if name in os.environ}
     yield
     os.environ.clear()
     os.environ.update(before)
+    for name, value in saved.items():
+        os.environ[name] = value
 
 
 @pytest.fixture(autouse=True)

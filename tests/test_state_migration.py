@@ -1,5 +1,6 @@
 import sqlite3
 
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
 from crew.core.types import Message
 from crew.cron import CronJobStore
 from crew.state._migration import claim_legacy_owner_database, inspect_and_backfill_legacy_owners
@@ -51,6 +52,7 @@ def test_startup_migration_backfills_only_unambiguous_cron_owner(tmp_path):
     counts, backfilled = inspect_and_backfill_legacy_owners(str(db))
 
     assert backfilled == 1
-    assert counts["cron_jobs"] == 1
+    # 智能回填后不再残留无主行：歧义任务归本机 local 兜底（owner 统一后无"无主"数据）。
+    assert counts["cron_jobs"] == 0
     assert cron.get(owned_job["id"], owner_account_id="A:uid-a")["owner_account_id"] == "A:uid-a"
-    assert cron.get(shared_job["id"], _all_owners=True)["owner_account_id"] == ""
+    assert cron.get(shared_job["id"], _all_owners=True)["owner_account_id"] == LOCAL_OWNER_ACCOUNT_ID

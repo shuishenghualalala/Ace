@@ -562,7 +562,7 @@ async def test_run_agent_background_launch_and_collect():
     assert res["status"] == "completed"
     assert res["summary"].strip()
     # 看板状态也更新为 done
-    assert app.subagent_tasks.get(task_id)["status"] == "done"
+    assert app.subagent_tasks.get(task_id, owner_account_id="local")["status"] == "done"
     # 完成后 wait=False 轮询同样取到结构化结果
     polled = await app.registry.execute(
         ToolCall("b2p", "collect_subagent", {"task_id": task_id, "wait": False})
@@ -589,14 +589,14 @@ async def test_background_completion_auto_injected_next_turn():
     finally:
         current_session_id.reset(tok)
 
-    assert ("", "s1") in app._subagent_pending  # 未 collect → 已入队待自动注入
+    assert ("local", "s1") in app._subagent_pending  # 未 collect → 已入队待自动注入
 
     # 下一轮：handle 的 drain 把待通知放进 envelope.params
-    env = Envelope.of("继续", session_id="s1", user_id="")
+    env = Envelope.of("继续", session_id="s1", user_id="local")
     app._drain_subagent_notifications(env)
     notifs = env.params["subagent_notifications"]
     assert notifs and notifs[0]["agent"] == "Explore"
-    assert ("", "s1") not in app._subagent_pending  # 排空后不重复注入
+    assert ("local", "s1") not in app._subagent_pending  # 排空后不重复注入
 
     block = _format_subagent_notifications(notifs)
     assert "后台子任务完成通知" in block and "Explore" in block
@@ -621,7 +621,7 @@ async def test_collect_dedupes_auto_injection():
         current_session_id.reset(tok)
 
     # collect 已消费 → 不应再留在待注入队列
-    assert ("", "s2") not in app._subagent_pending
+    assert ("local", "s2") not in app._subagent_pending
 
 
 def test_subagent_pending_collect_is_owner_scoped():
@@ -719,7 +719,7 @@ async def test_delegate_task_background_launch_and_collect():
     res = json.loads(collected.content)
     assert res["status"] == "completed"
     assert res["summary"].strip()
-    assert app.subagent_tasks.get(task_id)["status"] == "done"
+    assert app.subagent_tasks.get(task_id, owner_account_id="local")["status"] == "done"
 
 
 async def test_delegate_task_background_rejects_batch():
@@ -754,16 +754,16 @@ async def test_delegate_task_background_auto_injected_next_turn():
     finally:
         current_session_id.reset(tok)
 
-    assert ("", "s-dbg") in app._subagent_pending  # 未 collect -> 已入队待自动注入
+    assert ("local", "s-dbg") in app._subagent_pending  # 未 collect -> 已入队待自动注入
 
-    env = Envelope.of("继续", session_id="s-dbg", user_id="")
+    env = Envelope.of("继续", session_id="s-dbg", user_id="local")
     app._drain_subagent_notifications(env)
     notifs = env.params["subagent_notifications"]
     assert notifs and notifs[0]["status"] == "completed"
     block = _format_subagent_notifications(notifs)
     assert "后台子任务完成通知" in block
     assert "delegate_task" in block  # 文案泛化后含 delegate_task
-    assert ("", "s-dbg") not in app._subagent_pending  # 排空后不重复注入
+    assert ("local", "s-dbg") not in app._subagent_pending  # 排空后不重复注入
 
 
 # ── 7. 多智能体 member 后台 delegate_task 通知回到发起 member ────────────────
@@ -789,8 +789,8 @@ async def test_team_member_bg_delegate_notifies_to_member_session():
         current_subagent_notify_session.reset(tok2)
 
     # 入队到 member 子会话，而非 team_session
-    assert ("", "team-s1::coder") in app._subagent_pending
-    assert ("", "team-s1") not in app._subagent_pending
+    assert ("local", "team-s1::coder") in app._subagent_pending
+    assert ("local", "team-s1") not in app._subagent_pending
 
 
 async def test_team_member_run_drains_bg_notifications():
@@ -813,7 +813,7 @@ async def test_team_member_run_drains_bg_notifications():
     finally:
         current_session_id.reset(tok1)
         current_subagent_notify_session.reset(tok2)
-    assert ("", "team-s1::coder") in app._subagent_pending
+    assert ("local", "team-s1::coder") in app._subagent_pending
 
     # member 下一轮：构造带 subagent_drain_fn 的 member，run member sub_env
     member = SingleAgent(
@@ -829,14 +829,14 @@ async def test_team_member_run_drains_bg_notifications():
     sub_env = Envelope.of(
         "继续",
         session_id="team-s1::coder",
-        user_id="",
+        user_id="local",
         params={"member_session_id": "team-s1::coder", "task_session_id": "team-s1"},
     )
     async for _chunk in member.run(sub_env):
         pass  # 跑完即可，drain 在 run 开头发生
 
     # drain 已把通知注入 sub_env.params + 从队列移除
-    assert ("", "team-s1::coder") not in app._subagent_pending
+    assert ("local", "team-s1::coder") not in app._subagent_pending
     notifs = sub_env.params.get("subagent_notifications")
     assert notifs and notifs[0]["status"] == "completed"
     assert "后台子任务完成通知" in _format_subagent_notifications(notifs)

@@ -137,18 +137,15 @@ class TeamPlanStore:
         self.refresh_plan_status = refresh_plan_status
 
     @staticmethod
-    def _key(session_id: str, owner_account_id: str = "") -> TeamKey:
-        return str(owner_account_id or ""), str(session_id or "")
+    def _key(session_id: str, owner_account_id: str) -> TeamKey:
+        return owner_account_id, session_id
 
-    def _store_for_owner(self, owner_account_id: str = "") -> Any | None:
+    def _store_for_owner(self, owner_account_id: str) -> Any | None:
         store = self.kanban_store
         if store is None:
             return None
-        owner = str(owner_account_id or "").strip()
-        if not owner:
-            return None
         if hasattr(store, "for_owner"):
-            return store.for_owner(owner)
+            return store.for_owner(owner_account_id)
         return store
 
     @staticmethod
@@ -178,7 +175,7 @@ class TeamPlanStore:
         *,
         node_id: str = "",
         external_team_id: str = "",
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> TeamPlan | None:
         """从 Dynamic Kanban 恢复最近的 TeamPlan。"""
 
@@ -196,7 +193,7 @@ class TeamPlanStore:
             for workflow in workflows
             if str((getattr(workflow, "context", {}) or {}).get("source") or "") == "team"
             and str((getattr(workflow, "context", {}) or {}).get("owner_account_id") or "")
-            == str(owner_account_id or "")
+            == owner_account_id
         ]
         candidates.sort(
             key=lambda workflow: float(
@@ -373,7 +370,7 @@ class TeamPlanStore:
         session_id: str,
         *,
         external_team_id: str = "",
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> list[TeamMemberSpec]:
         key = self._key(session_id, owner_account_id)
         if key not in self.runtime_member_snapshots:
@@ -388,7 +385,7 @@ class TeamPlanStore:
         self,
         plan: TeamPlan,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         external_team_id: str = "",
         workflow_plan: dict[str, Any] | None = None,
     ) -> None:
@@ -488,7 +485,7 @@ class TeamPlanStore:
         except Exception as exc:  # noqa: BLE001
             log.warning("TeamPlan 同步到 kanban store 失败 session=%s err=%s", plan.team_session_id, exc)
 
-    def sync_node(self, plan: TeamPlan, node: TeamPlanNode, owner_account_id: str = "") -> None:
+    def sync_node(self, plan: TeamPlan, node: TeamPlanNode, owner_account_id: str) -> None:
         store = self._store_for_owner(owner_account_id)
         if store is None:
             return

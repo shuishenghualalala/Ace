@@ -7,6 +7,7 @@ import threading
 import time
 from typing import Any
 
+from crew.state._migration import backfill_empty_owner_rows
 from crew.state.logging import get_logger
 
 log = get_logger("state.channel_bindings")
@@ -63,6 +64,8 @@ class ChannelBindingsStore:
             self._conn.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_channel_bindings_owner ON {self._TABLE}(owner_account_id)"
             )
+            # 历史 owner='' 行归属本机 local（owner 统一后不存在无主绑定）。
+            backfill_empty_owner_rows(self._conn, [self._TABLE])
             self._conn.commit()
 
     @staticmethod

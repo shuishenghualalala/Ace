@@ -16,7 +16,7 @@ from typing import Any, TypeVar
 
 from crew.core.interfaces import SessionStore
 from crew.core.types import Message, ToolCall
-from crew.state._migration import rebuild_table_pk
+from crew.state._migration import backfill_empty_owner_rows, rebuild_table_pk
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 T = TypeVar("T")
@@ -121,6 +121,11 @@ class SQLiteSessionStore(SessionStore):
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN owner_account_id TEXT NOT NULL DEFAULT ''")
         self._migrate_owned_aux_tables(conn)
         self._migrate_sessions_pk(conn)
+        # 历史 owner='' 行归属本机 local（owner 统一后不存在无主会话）。
+        backfill_empty_owner_rows(
+            conn,
+            ["sessions", "session_agent_config", "channel_session_routes"],
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_updated ON sessions(owner_account_id, updated_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_workspace ON sessions(owner_account_id, workspace_id, updated_at DESC)")
         conn.execute(

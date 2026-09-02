@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from crew.cron.scheduler import CronService
 
 
+
 # origin 投递只对「已注册外部 sender 的渠道」有效（见 gateway 装配的 DeliveryRouter）。
 # 创建期与运行期共用这一份白名单：新增外部渠道（如 weixin）时在此加平台名，
 # 并同步在 DeliveryRouter 注册对应 sender。

@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 
 from crew.core.interfaces import Notification
+from crew.state._migration import backfill_empty_owner_rows
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 # 每个 (owner, source) 最多保留的通知条数
@@ -55,6 +56,8 @@ class NotificationStore:
             "CREATE INDEX IF NOT EXISTS idx_notifications_owner_created "
             "ON notifications(owner_account_id, created_at DESC)"
         )
+        # 历史 owner='' 行归属本机 local（owner 统一后不存在无主通知）。
+        backfill_empty_owner_rows(conn, ["notifications"])
 
     @staticmethod
     def _row_to_notification(row: sqlite3.Row) -> Notification:
@@ -173,20 +176,17 @@ class NotificationStore:
 
         return int(self._writer.execute(_write))
 
-    def mark_read_by_payload(self, source: str, key: str, owner_account_id: str = "") -> int:
-        """把 payload 顶层任一值等于 key 的未读通知标记已读。owner 为空时跨 owner 匹配。"""
+    def mark_read_by_payload(self, source: str, key: str, owner_account_id: str) -> int:
+        """把 payload 顶层任一值等于 key 的未读通知标记已读（严格限定 owner）。"""
 
         def _write(conn) -> int:
-            sql = (
+            cur = conn.execute(
                 "UPDATE notifications SET read_at = ? "
                 "WHERE source = ? AND read_at IS NULL AND payload != '' "
-                "AND EXISTS (SELECT 1 FROM json_each(notifications.payload) WHERE json_each.value = ?)"
+                "AND owner_account_id = ? "
+                "AND EXISTS (SELECT 1 FROM json_each(notifications.payload) WHERE json_each.value = ?)",
+                (time.time(), str(source), owner_account_id, str(key)),
             )
-            params: tuple = (time.time(), str(source), str(key))
-            if owner_account_id:
-                sql += " AND owner_account_id = ?"
-                params = (*params, owner_account_id)
-            cur = conn.execute(sql, params)
             return cur.rowcount
 
         return int(self._writer.execute(_write))

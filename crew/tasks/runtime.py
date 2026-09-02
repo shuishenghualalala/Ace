@@ -18,6 +18,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any, Callable
 
+from crew.state._migration import backfill_empty_owner_rows
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 from crew.tasks.models import RuntimeTask, TaskKind, normalize_task_status
 from crew.tools.process_registry import terminate_process_tree
@@ -108,6 +109,8 @@ class TaskRuntime:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_runtime_tasks_status ON runtime_tasks(status, updated_at)"
         )
+        # 历史 owner='' 行归属本机 local（owner 统一后不存在无主任务）。
+        backfill_empty_owner_rows(self._conn, ["runtime_tasks"])
 
     def set_callbacks(
         self,

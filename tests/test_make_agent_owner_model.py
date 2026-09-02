@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from crew.app import build_app
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import current_owner_account_id, LOCAL_OWNER_ACCOUNT_ID
 from crew.state.config import load_config
 from crew.state.home import get_owner_runtime_home, owner_path_segment
 
@@ -116,7 +116,7 @@ def owner_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     (owner_home / ".env").write_text("CREW_API_KEY=sk-minimax-owner\n", encoding="utf-8")
 
     # 断言：ContextVar 默认空（模拟 handle → agents.get 时机）
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
     return app, owner
 
 
@@ -142,7 +142,7 @@ def test_agents_get_uses_owner_private_model_without_contextvar(owner_app):
 def test_make_agent_explicit_owner_overrides_empty_contextvar(owner_app):
     """直接调用 _make_agent 时，显式 owner_account_id 优先于空 ContextVar。"""
     app, owner = owner_app
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
 
     agent = app._make_agent(
         {"model_profile_id": "MiniMax-M3"},
@@ -321,7 +321,9 @@ async def test_make_agent_builds_only_final_dynamic_provider_and_declares_owners
 @pytest.mark.asyncio
 async def test_make_agent_does_not_own_borrowed_app_provider(owner_app):
     app, _owner = owner_app
-    agent = app._make_agent({"model_profile_id": "inherit"}, owner_account_id="")
+    # owner 统一后不存在"空 owner 借用"路径：借用发生在 owner 名下无任何可用
+    # key 的静默降级场景（全新 owner 无 overlay、进程 env 对其不可见）。
+    agent = app._make_agent({"model_profile_id": "inherit"}, owner_account_id="email:nobody")
 
     assert agent.provider is app.provider
     assert app.provider not in agent._owned_providers

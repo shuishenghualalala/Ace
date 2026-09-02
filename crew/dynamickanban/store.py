@@ -99,6 +99,15 @@ class SQLiteKanbanStore:
                 """
             )
             self._migrate_workflow_ownership(conn)
+            # owner 统一后不存在无主看板：session 无法归属的孤儿行归本机 local；
+            # 多 owner 歧义行（legacy_ambiguous）保持隔离，留给 claim-legacy 人工认领。
+            conn.execute(
+                """
+                UPDATE kanban_workflows
+                SET owner_account_id = 'local', isolation_state = 'owned', schema_version = 2
+                WHERE owner_account_id = '' AND isolation_state = 'legacy_orphaned'
+                """
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS kanban_tasks (

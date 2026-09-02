@@ -645,7 +645,7 @@ def register_wiki_tools(
     """把 Wiki 工具注册到 registry（toolset='wiki'）。"""
 
     def _owner() -> str:
-        return current_owner_account_id.get() or ""
+        return current_owner_account_id.get()
 
     def _kb_id(args: dict[str, Any] | None = None) -> str:
         """读取目标知识库：优先使用用户显式传入的 kb_id，否则使用当前活跃知识库。"""

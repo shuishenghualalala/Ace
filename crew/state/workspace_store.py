@@ -11,7 +11,7 @@ from pathlib import Path
 
 from crew.core.interfaces import WorkspaceStore
 from crew.state.models import Workspace
-from crew.state._migration import primary_key_columns, rebuild_table_pk
+from crew.state._migration import backfill_empty_owner_rows, primary_key_columns, rebuild_table_pk
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 DEFAULT_ID = "default"
@@ -70,6 +70,8 @@ class SQLiteWorkspaceStore(WorkspaceStore):
         self._migrate_owner_primary_key(conn)
         self._migrate_root_path_column(conn)
         self._migrate_hidden_column(conn)
+        # 历史 owner='' 行归属本机 local（owner 统一后不存在无主工作空间）。
+        backfill_empty_owner_rows(conn, ["workspaces"])
 
     def _migrate_root_path_column(self, conn) -> None:
         info = conn.execute("PRAGMA table_info(workspaces)").fetchall()

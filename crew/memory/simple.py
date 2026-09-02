@@ -14,6 +14,7 @@ from pathlib import Path
 from crew.core.runctx import current_owner_account_id
 from crew.core.interfaces import MemoryProvider
 from crew.core.types import Message
+from crew.state._migration import backfill_empty_owner_rows
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 
@@ -57,10 +58,12 @@ class SQLiteMemory(MemoryProvider):
         cols = {r[1] for r in conn.execute("PRAGMA table_info(memory)").fetchall()}
         if "owner_account_id" not in cols:
             conn.execute("ALTER TABLE memory ADD COLUMN owner_account_id TEXT NOT NULL DEFAULT ''")
+        # 历史 owner='' 行归属本机 local（owner 统一后不存在无主记忆）。
+        backfill_empty_owner_rows(conn, ["memory"])
 
     @staticmethod
     def _owner() -> str:
-        return str(current_owner_account_id.get() or "").strip()
+        return current_owner_account_id.get()
 
     async def prefetch(self, session_id: str, query: str) -> str:
         terms = [t for t in query.split() if len(t) >= 2]

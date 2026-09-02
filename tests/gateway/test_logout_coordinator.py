@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID, current_owner_account_id
 from crew.gateway.logout import LogoutCleanupError, LogoutCoordinator
 
 
@@ -179,12 +179,12 @@ async def test_logout_cleanup_keeps_original_owner_context_and_resets_afterward(
         return await original_stop_owner(owner)
 
     coordinator._dispatcher.stop_owner = observe_stop_owner
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
 
     await coordinator.logout("A:uid-a")
 
     assert seen == ["A:uid-a"]
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
 
 
 @pytest.mark.asyncio
@@ -253,7 +253,7 @@ async def test_owner_activation_is_nonblocking_and_reopens_local_admission():
         "activate-tasks:A:uid-a",
     ]
     assert seen == ["A:uid-a"]
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
     await coordinator.shutdown()
 
 

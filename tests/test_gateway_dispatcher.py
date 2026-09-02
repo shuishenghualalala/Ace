@@ -19,7 +19,7 @@ import pytest
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.interfaces import Channel, MessageHandler
 from crew.core.mocks import InMemorySessionStore
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import current_owner_account_id, LOCAL_OWNER_ACCOUNT_ID
 from crew.core.types import Message
 from crew.gateway.channel_manager import ChannelManager
 from crew.gateway.connections import ConnectionManager, _MAX_CONSECUTIVE_FAILURES
@@ -87,12 +87,12 @@ async def test_dispatcher_scopes_owner_context_and_resets_after_run():
         yield ResponseChunk.final(env.request_id, "done")
 
     disp = SessionDispatcher(inner, InMemorySessionStore())
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
 
     await _drain(disp.run(_env("causal-owner")))
 
     assert seen == [OWNER]
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
 
 
 async def test_same_session_serialized_and_queued():

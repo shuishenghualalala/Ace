@@ -62,16 +62,16 @@ class DynamicKanbanManager:
         self._session_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._max_concurrent = getattr(config, "dk_max_concurrent", 0) or config.team_max_concurrent_children or 3
 
-    def _provider_for_owner(self, owner_account_id: str = "") -> LLMProvider:
+    def _provider_for_owner(self, owner_account_id: str) -> LLMProvider:
         resolver = self.provider_for_owner
         if callable(resolver):
-            resolved = resolver(str(owner_account_id or ""))
+            resolved = resolver(owner_account_id)
             if resolved is not None:
                 return resolved
         return self.provider
 
-    def _orchestrator_for_owner(self, owner_account_id: str = "") -> WorkflowOrchestrator:
-        owner = str(owner_account_id or "")
+    def _orchestrator_for_owner(self, owner_account_id: str) -> WorkflowOrchestrator:
+        owner = owner_account_id
         orchestrator = self._orchestrators.get(owner)
         if orchestrator is None:
             orchestrator = WorkflowOrchestrator(self._provider_for_owner(owner))
@@ -234,7 +234,7 @@ class DynamicKanbanManager:
     def _make_runtime(
         self,
         store: SQLiteKanbanStore,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> WorkflowRuntime:
         provider = self._provider_for_owner(owner_account_id)
         return WorkflowRuntime(
@@ -353,7 +353,7 @@ class DynamicKanbanManager:
         workflow: Any,
         query: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> WorkflowDefinition:
         """复用 workflow 中已持久化的 definition，否则让 orchestrator 生成。"""
         stored = (workflow.context or {}).get("workflow_definition")
@@ -595,7 +595,7 @@ class DynamicKanbanManager:
         self,
         session_id: str,
         text: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> bool:
         """向运行中的 workflow 注入补充指令。
 
@@ -603,10 +603,7 @@ class DynamicKanbanManager:
         主循环读取，并结合指令重规划后续阶段（复用 replan 通道）。
         没有活跃 workflow 时返回 False。
         """
-        owner = str(owner_account_id or "").strip()
-        if not owner:
-            log.warning("[DK] steer 缺少 owner_account_id session=%s", session_id)
-            return False
+        owner = owner_account_id
         store = self.store.for_owner(owner)
         log.info("[DK] steer owner=%s session=%s text=%s", owner, session_id, text)
         workflow = store.get_latest_active_workflow_by_session(
@@ -624,8 +621,8 @@ class DynamicKanbanManager:
     def interrupt(
         self,
         session_id: str,
+        owner_account_id: str,
         message: str | None = None,
-        owner_account_id: str = "",
     ) -> bool:
         """请求中断某 session 最新活跃的 workflow。
 
@@ -633,10 +630,7 @@ class DynamicKanbanManager:
         没有 runtime（paused 或崩溃残留的 active 僵尸）时直接在 DB 层
         把剩余任务和 workflow 标记为失败，保证中止始终生效。
         """
-        owner = str(owner_account_id or "").strip()
-        if not owner:
-            log.warning("[DK] interrupt 缺少 owner_account_id session=%s", session_id)
-            return False
+        owner = owner_account_id
         store = self.store.for_owner(owner)
         log.info("[DK] interrupt owner=%s session=%s message=%s", owner, session_id, message)
         workflow = store.get_latest_active_workflow_by_session(
@@ -669,18 +663,15 @@ class DynamicKanbanManager:
     def pause(
         self,
         session_id: str,
+        owner_account_id: str,
         reason: str = "用户请求暂停",
-        owner_account_id: str = "",
     ) -> bool:
         """暂停某 session 最新活跃的 workflow。
 
         如果 runtime 正在内存中运行，则设置 pause 标志；
         否则直接把 workflow 状态置为 paused，下次 resume 时恢复。
         """
-        owner = str(owner_account_id or "").strip()
-        if not owner:
-            log.warning("[DK] pause 缺少 owner_account_id session=%s", session_id)
-            return False
+        owner = owner_account_id
         store = self.store.for_owner(owner)
         log.info("[DK] pause owner=%s session=%s reason=%s", owner, session_id, reason)
         workflow = store.get_latest_active_workflow_by_session(
@@ -754,6 +745,7 @@ class DynamicKanbanManager:
         definition = await self._load_or_build_definition(
             workflow,
             workflow.title,
+            owner_account_id=owner,
         )
         workflow.context["workflow_definition"] = definition.to_dict()
         workflow = store.resume_workflow(workflow.id)
@@ -763,7 +755,7 @@ class DynamicKanbanManager:
             context=workflow.context,
         )
 
-        runtime = self._make_runtime(store)
+        runtime = self._make_runtime(store, owner_account_id=owner)
         with self._lock:
             self._engines[engine_key] = runtime
         try:
@@ -782,12 +774,9 @@ class DynamicKanbanManager:
                 if self._engines.get(engine_key) is runtime:
                     self._engines.pop(engine_key, None)
 
-    def status(self, session_id: str, owner_account_id: str = "") -> dict[str, Any] | None:
+    def status(self, session_id: str, owner_account_id: str) -> dict[str, Any] | None:
         """返回某 session 最新 workflow 的状态快照。"""
-        owner = str(owner_account_id or "").strip()
-        if not owner:
-            log.warning("[DK] status 缺少 owner_account_id session=%s", session_id)
-            return None
+        owner = owner_account_id
         store = self.store.for_owner(owner)
         workflow = store.get_latest_active_workflow_by_session(
             session_id, active_statuses={"active", "paused", "done", "failed"}
@@ -805,13 +794,10 @@ class DynamicKanbanManager:
     def clear_session_workspaces(
         self,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> list[Path]:
         """删除某 session 关联的所有 workflow 工作目录，并清理 DB 记录。"""
-        owner = str(owner_account_id or "").strip()
-        if not owner:
-            log.warning("[DK] clear_session_workspaces 缺少 owner_account_id session=%s", session_id)
-            return []
+        owner = owner_account_id
         from crew.state.home import get_task_workspace_root
 
         allowed_roots: list[Path] = [Path(get_task_workspace_root(create=False))]

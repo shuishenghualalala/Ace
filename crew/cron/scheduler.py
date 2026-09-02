@@ -14,7 +14,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from crew.core.envelope import Envelope
 from crew.core.interfaces import Scheduler
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import current_owner_account_id, normalize_owner_account_id
 from crew.cron.jobs import BJ_TZ, CronJobStore, build_trigger
 from crew.state.logging import get_logger
 
@@ -276,7 +276,7 @@ class CronService:
 
     async def _execute_claimed_fire(self, claim: dict) -> None:
         """Execute a claimed Fire under its persisted causal Owner context."""
-        owner = str(claim.get("job", {}).get("owner_account_id") or "").strip()
+        owner = normalize_owner_account_id(claim.get("job", {}).get("owner_account_id"))
         token = current_owner_account_id.set(owner)
         try:
             await self._run_claimed_fire(claim)

@@ -15,7 +15,7 @@ from crew.agent.external.runtime_profile import (
     runtime_model_fingerprint,
     runtime_model_migrations,
 )
-from crew.state._migration import rebuild_table_pk
+from crew.state._migration import backfill_empty_owner_rows, rebuild_table_pk
 from crew.team.agent_profile import (
     RUNTIME_DEFAULT_MODEL_ID,
     build_agent_profile_envelope,
@@ -52,214 +52,219 @@ class ExternalAgentStore:
 
     def _init(self) -> None:
         with self._conn() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS external_runtime (
-                  id TEXT PRIMARY KEY,
-                  provider TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  executable_path TEXT NOT NULL,
-                  version TEXT,
-                  protocol TEXT NOT NULL DEFAULT 'acp',
-                  metadata_json TEXT NOT NULL DEFAULT '{}',
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  last_seen_at TEXT
-                )
-                """
-            )
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS external_agent (
-                  id TEXT PRIMARY KEY,
-                  owner_account_id TEXT NOT NULL DEFAULT '',
-                  name TEXT NOT NULL,
-                  provider TEXT NOT NULL,
-                  runtime_id TEXT NOT NULL,
-                  model TEXT,
-                  system_prompt TEXT NOT NULL DEFAULT '',
-                  custom_args_json TEXT NOT NULL DEFAULT '[]',
-                  custom_env_json TEXT NOT NULL DEFAULT '{{}}',
-                  profile_json TEXT NOT NULL DEFAULT '{{}}',
-                  profile_version INTEGER NOT NULL DEFAULT {AGENT_PROFILE_VERSION},
-                  profile_updated_at TEXT,
-                  managed_kind TEXT NOT NULL DEFAULT '',
-                  managed_key TEXT NOT NULL DEFAULT '',
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  FOREIGN KEY(runtime_id) REFERENCES external_runtime(id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS external_agent_profile_observation (
-                  id TEXT PRIMARY KEY,
-                  owner_account_id TEXT NOT NULL DEFAULT '',
-                  external_agent_id TEXT NOT NULL,
-                  source_run_id TEXT NOT NULL,
-                  source_node_id TEXT NOT NULL,
-                  source_attempt_id TEXT NOT NULL,
-                  runtime_id TEXT NOT NULL DEFAULT '',
-                  model_id TEXT NOT NULL DEFAULT '',
-                  model_fingerprint TEXT NOT NULL DEFAULT '',
-                  model_binding_source TEXT NOT NULL DEFAULT '',
-                  capabilities_json TEXT NOT NULL DEFAULT '[]',
-                  assessment_source TEXT NOT NULL,
-                  outcome TEXT NOT NULL,
-                  quality_weight REAL NOT NULL DEFAULT 0,
-                  failure_kind TEXT NOT NULL DEFAULT '',
-                  observed_at TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  FOREIGN KEY(external_agent_id) REFERENCES external_agent(id),
-                  UNIQUE(owner_account_id, external_agent_id, source_attempt_id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS external_team (
-                  id TEXT PRIMARY KEY,
-                  owner_account_id TEXT NOT NULL DEFAULT '',
-                  name TEXT NOT NULL,
-                  description TEXT NOT NULL DEFAULT '',
-                  leader_agent_id TEXT NOT NULL,
-                  instructions TEXT NOT NULL DEFAULT '',
-                  team_spec_json TEXT NOT NULL DEFAULT '{}',
-                  formation_plan_json TEXT NOT NULL DEFAULT '{}',
-                  archived_at TEXT,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  FOREIGN KEY(leader_agent_id) REFERENCES external_agent(id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS external_team_member (
-                  id TEXT PRIMARY KEY,
-                  team_id TEXT NOT NULL,
-                  agent_id TEXT NOT NULL,
-                  role TEXT NOT NULL DEFAULT '',
-                  role_key TEXT NOT NULL DEFAULT '',
-                  role_label TEXT NOT NULL DEFAULT '',
-                  capabilities_json TEXT NOT NULL DEFAULT '[]',
-                  workflow_lane TEXT NOT NULL DEFAULT '',
-                  sort_order INTEGER NOT NULL DEFAULT 0,
-                  created_at TEXT NOT NULL,
-                  FOREIGN KEY(team_id) REFERENCES external_team(id),
-                  FOREIGN KEY(agent_id) REFERENCES external_agent(id),
-                  UNIQUE(team_id, agent_id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS external_runtime_session_binding (
-                  owner_account_id TEXT NOT NULL DEFAULT '',
-                  crew_session_id TEXT NOT NULL,
-                  external_agent_id TEXT NOT NULL,
-                  runtime_id TEXT NOT NULL,
-                  adapter_id TEXT NOT NULL,
-                  cwd TEXT NOT NULL DEFAULT '',
-                  native_session_id TEXT NOT NULL,
-                  session_profile TEXT NOT NULL DEFAULT '',
-                  status TEXT NOT NULL DEFAULT 'active',
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  PRIMARY KEY (owner_account_id, crew_session_id, external_agent_id, runtime_id, adapter_id, cwd),
-                  FOREIGN KEY(external_agent_id) REFERENCES external_agent(id),
-                  FOREIGN KEY(runtime_id) REFERENCES external_runtime(id)
-                )
-                """
-            )
-            self._ensure_column(
-                conn,
-                "external_runtime_session_binding",
-                "session_profile",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(conn, "external_team_member", "role_key", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(conn, "external_team_member", "role_label", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(conn, "external_team_member", "capabilities_json", "TEXT NOT NULL DEFAULT '[]'")
-            self._ensure_column(conn, "external_team_member", "workflow_lane", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(conn, "external_team", "team_spec_json", "TEXT NOT NULL DEFAULT '{}'")
-            self._ensure_column(conn, "external_team", "formation_plan_json", "TEXT NOT NULL DEFAULT '{}'")
-            self._ensure_column(conn, "external_agent", "profile_json", "TEXT NOT NULL DEFAULT '{}'")
-            self._ensure_column(
-                conn,
-                "external_agent",
-                "profile_version",
-                f"INTEGER NOT NULL DEFAULT {AGENT_PROFILE_VERSION}",
-            )
-            self._ensure_column(conn, "external_agent", "profile_updated_at", "TEXT")
-            self._ensure_column(conn, "external_agent", "managed_kind", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(conn, "external_agent", "managed_key", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(conn, "external_agent", "owner_account_id", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(conn, "external_team", "owner_account_id", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(
-                conn,
-                "external_agent_profile_observation",
-                "runtime_id",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                conn,
-                "external_agent_profile_observation",
-                "model_id",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                conn,
-                "external_agent_profile_observation",
-                "model_fingerprint",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                conn,
-                "external_agent_profile_observation",
-                "model_binding_source",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            conn.execute(
-                """
-                UPDATE external_agent_profile_observation
-                SET model_binding_source = 'legacy_unknown'
-                WHERE COALESCE(model_id, '') = ''
-                  AND COALESCE(model_binding_source, '') = ''
-                """
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_external_agent_owner ON external_agent(owner_account_id, created_at)"
-            )
-            conn.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_external_agent_managed_identity
-                ON external_agent(owner_account_id, managed_kind, managed_key)
-                WHERE managed_kind <> '' AND managed_key <> ''
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_external_agent_profile_observation_agent
-                ON external_agent_profile_observation(owner_account_id, external_agent_id, observed_at)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_external_agent_profile_observation_model
-                ON external_agent_profile_observation(
-                  owner_account_id, external_agent_id, model_id, observed_at
-                )
-                """
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_external_team_owner ON external_team(owner_account_id, archived_at, created_at)"
-            )
-            self._migrate_embedded_formation_plans(conn)
-            self._drop_column_if_exists(conn, "external_runtime", "status")
-            self._migrate_legacy_acp_bindings(conn)
+            self._create_schema(conn)
+            # 历史 owner='' 行归属本机 local（owner 统一后不存在无主外部 Agent）。
+            backfill_empty_owner_rows(conn, ["external_agent", "external_agent_profile_observation"])
         self._backfill_agent_profiles()
+
+    def _create_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_runtime (
+              id TEXT PRIMARY KEY,
+              provider TEXT NOT NULL,
+              name TEXT NOT NULL,
+              executable_path TEXT NOT NULL,
+              version TEXT,
+              protocol TEXT NOT NULL DEFAULT 'acp',
+              metadata_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              last_seen_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS external_agent (
+              id TEXT PRIMARY KEY,
+              owner_account_id TEXT NOT NULL DEFAULT '',
+              name TEXT NOT NULL,
+              provider TEXT NOT NULL,
+              runtime_id TEXT NOT NULL,
+              model TEXT,
+              system_prompt TEXT NOT NULL DEFAULT '',
+              custom_args_json TEXT NOT NULL DEFAULT '[]',
+              custom_env_json TEXT NOT NULL DEFAULT '{{}}',
+              profile_json TEXT NOT NULL DEFAULT '{{}}',
+              profile_version INTEGER NOT NULL DEFAULT {AGENT_PROFILE_VERSION},
+              profile_updated_at TEXT,
+              managed_kind TEXT NOT NULL DEFAULT '',
+              managed_key TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(runtime_id) REFERENCES external_runtime(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_agent_profile_observation (
+              id TEXT PRIMARY KEY,
+              owner_account_id TEXT NOT NULL DEFAULT '',
+              external_agent_id TEXT NOT NULL,
+              source_run_id TEXT NOT NULL,
+              source_node_id TEXT NOT NULL,
+              source_attempt_id TEXT NOT NULL,
+              runtime_id TEXT NOT NULL DEFAULT '',
+              model_id TEXT NOT NULL DEFAULT '',
+              model_fingerprint TEXT NOT NULL DEFAULT '',
+              model_binding_source TEXT NOT NULL DEFAULT '',
+              capabilities_json TEXT NOT NULL DEFAULT '[]',
+              assessment_source TEXT NOT NULL,
+              outcome TEXT NOT NULL,
+              quality_weight REAL NOT NULL DEFAULT 0,
+              failure_kind TEXT NOT NULL DEFAULT '',
+              observed_at TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(external_agent_id) REFERENCES external_agent(id),
+              UNIQUE(owner_account_id, external_agent_id, source_attempt_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_team (
+              id TEXT PRIMARY KEY,
+              owner_account_id TEXT NOT NULL DEFAULT '',
+              name TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '',
+              leader_agent_id TEXT NOT NULL,
+              instructions TEXT NOT NULL DEFAULT '',
+              team_spec_json TEXT NOT NULL DEFAULT '{}',
+              formation_plan_json TEXT NOT NULL DEFAULT '{}',
+              archived_at TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(leader_agent_id) REFERENCES external_agent(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_team_member (
+              id TEXT PRIMARY KEY,
+              team_id TEXT NOT NULL,
+              agent_id TEXT NOT NULL,
+              role TEXT NOT NULL DEFAULT '',
+              role_key TEXT NOT NULL DEFAULT '',
+              role_label TEXT NOT NULL DEFAULT '',
+              capabilities_json TEXT NOT NULL DEFAULT '[]',
+              workflow_lane TEXT NOT NULL DEFAULT '',
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(team_id) REFERENCES external_team(id),
+              FOREIGN KEY(agent_id) REFERENCES external_agent(id),
+              UNIQUE(team_id, agent_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_runtime_session_binding (
+              owner_account_id TEXT NOT NULL DEFAULT '',
+              crew_session_id TEXT NOT NULL,
+              external_agent_id TEXT NOT NULL,
+              runtime_id TEXT NOT NULL,
+              adapter_id TEXT NOT NULL,
+              cwd TEXT NOT NULL DEFAULT '',
+              native_session_id TEXT NOT NULL,
+              session_profile TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'active',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (owner_account_id, crew_session_id, external_agent_id, runtime_id, adapter_id, cwd),
+              FOREIGN KEY(external_agent_id) REFERENCES external_agent(id),
+              FOREIGN KEY(runtime_id) REFERENCES external_runtime(id)
+            )
+            """
+        )
+        self._ensure_column(
+            conn,
+            "external_runtime_session_binding",
+            "session_profile",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column(conn, "external_team_member", "role_key", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column(conn, "external_team_member", "role_label", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column(conn, "external_team_member", "capabilities_json", "TEXT NOT NULL DEFAULT '[]'")
+        self._ensure_column(conn, "external_team_member", "workflow_lane", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column(conn, "external_team", "team_spec_json", "TEXT NOT NULL DEFAULT '{}'")
+        self._ensure_column(conn, "external_team", "formation_plan_json", "TEXT NOT NULL DEFAULT '{}'")
+        self._ensure_column(conn, "external_agent", "profile_json", "TEXT NOT NULL DEFAULT '{}'")
+        self._ensure_column(
+            conn,
+            "external_agent",
+            "profile_version",
+            f"INTEGER NOT NULL DEFAULT {AGENT_PROFILE_VERSION}",
+        )
+        self._ensure_column(conn, "external_agent", "profile_updated_at", "TEXT")
+        self._ensure_column(conn, "external_agent", "managed_kind", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column(conn, "external_agent", "managed_key", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column(conn, "external_agent", "owner_account_id", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column(conn, "external_team", "owner_account_id", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column(
+            conn,
+            "external_agent_profile_observation",
+            "runtime_id",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column(
+            conn,
+            "external_agent_profile_observation",
+            "model_id",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column(
+            conn,
+            "external_agent_profile_observation",
+            "model_fingerprint",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        self._ensure_column(
+            conn,
+            "external_agent_profile_observation",
+            "model_binding_source",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        conn.execute(
+            """
+            UPDATE external_agent_profile_observation
+            SET model_binding_source = 'legacy_unknown'
+            WHERE COALESCE(model_id, '') = ''
+              AND COALESCE(model_binding_source, '') = ''
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_external_agent_owner ON external_agent(owner_account_id, created_at)"
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_external_agent_managed_identity
+            ON external_agent(owner_account_id, managed_kind, managed_key)
+            WHERE managed_kind <> '' AND managed_key <> ''
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_external_agent_profile_observation_agent
+            ON external_agent_profile_observation(owner_account_id, external_agent_id, observed_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_external_agent_profile_observation_model
+            ON external_agent_profile_observation(
+              owner_account_id, external_agent_id, model_id, observed_at
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_external_team_owner ON external_team(owner_account_id, archived_at, created_at)"
+        )
+        self._migrate_embedded_formation_plans(conn)
+        self._drop_column_if_exists(conn, "external_runtime", "status")
+        self._migrate_legacy_acp_bindings(conn)
 
     @staticmethod
     def _migrate_embedded_formation_plans(conn: sqlite3.Connection) -> None:
@@ -715,7 +720,7 @@ class ExternalAgentStore:
         agent_id: str,
         *,
         runtime: dict[str, Any] | None = None,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         """Refresh the default model overlay and return the public Agent row."""
 
@@ -732,7 +737,7 @@ class ExternalAgentStore:
         agent_id: str,
         model_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         """Resolve and persist one lazy model overlay as a public AgentProfile."""
 
@@ -775,7 +780,7 @@ class ExternalAgentStore:
         agent_id: str,
         *,
         runtime: dict[str, Any] | None = None,
-        owner_account_id: str = "",
+        owner_account_id: str,
         model_id: str | None = None,
     ) -> dict[str, Any]:
         """Refresh one or more ProfileEnvelope overlays in the caller transaction."""
@@ -855,7 +860,7 @@ class ExternalAgentStore:
     def record_agent_profile_observation(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         external_agent_id: str,
         source_run_id: str,
         source_node_id: str,
@@ -989,7 +994,7 @@ class ExternalAgentStore:
         self,
         external_agent_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> list[dict[str, Any]]:
         with self._conn() as conn:
             rows = conn.execute(
@@ -1017,7 +1022,7 @@ class ExternalAgentStore:
     def create_agent(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         name: str,
         runtime_id: str,
         model: str = "",
@@ -1059,7 +1064,7 @@ class ExternalAgentStore:
     def get_or_create_managed_agent(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         managed_kind: str,
         managed_key: str,
         name: str,
@@ -1119,7 +1124,7 @@ class ExternalAgentStore:
     def list_agents(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         include_managed: bool = True,
     ) -> list[dict[str, Any]]:
         with self._conn() as conn:
@@ -1139,7 +1144,7 @@ class ExternalAgentStore:
                 ).fetchall()
         return [self._agent_dict(row) for row in rows]
 
-    def get_agent(self, agent_id: str, *, owner_account_id: str = "") -> dict[str, Any]:
+    def get_agent(self, agent_id: str, *, owner_account_id: str) -> dict[str, Any]:
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT * FROM external_agent WHERE id = ? AND owner_account_id = ?",
@@ -1149,7 +1154,7 @@ class ExternalAgentStore:
             raise KeyError(agent_id)
         return self._agent_dict(row)
 
-    def delete_agent(self, agent_id: str, *, owner_account_id: str = "") -> None:
+    def delete_agent(self, agent_id: str, *, owner_account_id: str) -> None:
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT id FROM external_agent WHERE id = ? AND owner_account_id = ?",
@@ -1194,7 +1199,7 @@ class ExternalAgentStore:
         self,
         agent_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         agent = self.get_agent(agent_id, owner_account_id=owner_account_id)
         runtime = self.get_runtime(agent["runtime_id"])
@@ -1203,7 +1208,7 @@ class ExternalAgentStore:
     def get_runtime_session_binding(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         crew_session_id: str,
         external_agent_id: str,
         runtime_id: str,
@@ -1229,7 +1234,7 @@ class ExternalAgentStore:
     def latest_runtime_session_binding_for_agent(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         crew_session_id: str,
         external_agent_id: str,
     ) -> dict[str, Any] | None:
@@ -1258,7 +1263,7 @@ class ExternalAgentStore:
     def save_runtime_session_binding(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         crew_session_id: str,
         external_agent_id: str,
         runtime_id: str,
@@ -1325,7 +1330,7 @@ class ExternalAgentStore:
     def delete_runtime_session_binding(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         crew_session_id: str,
         external_agent_id: str,
         runtime_id: str,
@@ -1350,7 +1355,7 @@ class ExternalAgentStore:
         self,
         crew_session_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> int:
         """删除某 Crew 会话下全部外部 Runtime 绑定行，返回删除行数。"""
         sid = str(crew_session_id or "").strip()
@@ -1368,7 +1373,7 @@ class ExternalAgentStore:
     def get_acp_session_binding(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         crew_session_id: str,
         external_agent_id: str,
         runtime_id: str,
@@ -1391,7 +1396,7 @@ class ExternalAgentStore:
     def save_acp_session_binding(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         crew_session_id: str,
         external_agent_id: str,
         runtime_id: str,
@@ -1416,7 +1421,7 @@ class ExternalAgentStore:
     def delete_acp_session_binding(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         crew_session_id: str,
         external_agent_id: str,
         runtime_id: str,
@@ -1437,7 +1442,7 @@ class ExternalAgentStore:
         self,
         crew_session_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> int:
         return self.delete_runtime_bindings_for_session(
             crew_session_id,
@@ -1447,7 +1452,7 @@ class ExternalAgentStore:
     def create_team(
         self,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         name: str,
         leader_agent_id: str,
         members: list[dict[str, Any]],
@@ -1534,7 +1539,7 @@ class ExternalAgentStore:
                 )
         return self.get_team(team_id, owner_account_id=owner_account_id)
 
-    def list_teams(self, *, owner_account_id: str = "") -> list[dict[str, Any]]:
+    def list_teams(self, *, owner_account_id: str) -> list[dict[str, Any]]:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM external_team WHERE owner_account_id = ? AND archived_at IS NULL ORDER BY created_at DESC",
@@ -1542,7 +1547,7 @@ class ExternalAgentStore:
             ).fetchall()
         return [self.get_team(row["id"], owner_account_id=owner_account_id) for row in rows]
 
-    def get_team(self, team_id: str, *, owner_account_id: str = "") -> dict[str, Any]:
+    def get_team(self, team_id: str, *, owner_account_id: str) -> dict[str, Any]:
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT * FROM external_team WHERE id = ? AND owner_account_id = ? AND archived_at IS NULL",
@@ -1572,7 +1577,7 @@ class ExternalAgentStore:
         team["members"] = [self._team_member_dict(member) for member in member_rows]
         return team
 
-    def delete_team(self, team_id: str, *, owner_account_id: str = "") -> None:
+    def delete_team(self, team_id: str, *, owner_account_id: str) -> None:
         now = _now()
         with self._conn() as conn:
             row = conn.execute(

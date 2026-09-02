@@ -31,6 +31,7 @@ from crew.core.runctx import (
     current_subagent_notify_session,
     current_user_type,
     current_workspace_id,
+    normalize_owner_account_id,
 )
 from crew.core.interfaces import (
     Agent,
@@ -678,7 +679,7 @@ class SingleAgent(Agent):
         if self._closed or not isinstance(self.executor, BuiltinExecutor):
             return None
 
-        owner = str(owner_account_id or "").strip()
+        owner = normalize_owner_account_id(owner_account_id)
         envelope = Envelope(
             session_id=session_id,
             params={
@@ -789,7 +790,7 @@ class SingleAgent(Agent):
         current_request_id.set(envelope.request_id)
         current_parent_task_id.set(str(envelope.params.get("sidechain_task_id") or ""))
         current_workspace_id.set(envelope.workspace_id)
-        current_owner_account_id.set(envelope.user_id)
+        current_owner_account_id.set(normalize_owner_account_id(envelope.user_id))
         # 热刷新当前 owner 的运行期 env：config/.env + owner .env + session.json。
         from crew.state.home import refresh_owner_runtime_env
 

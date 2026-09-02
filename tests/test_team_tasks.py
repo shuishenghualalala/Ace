@@ -1160,7 +1160,7 @@ def test_leader_review_followup_timeout_or_cancel_is_not_answered(answers):
 
 async def test_leader_review_followup_answer_reopens_and_reexecutes(monkeypatch):
     tm, _ = _team()
-    team = tm._build_team("review_followup")
+    team = tm._build_team("review_followup", owner_account_id="local")
     plan = TeamPlan(team_session_id="review_followup", goal="开发小游戏")
     design = TeamPlanNode(
         node_id="build_design_1",
@@ -1225,7 +1225,7 @@ async def test_leader_review_followup_answer_reopens_and_reexecutes(monkeypatch)
 
 async def test_leader_node_streams_thinking_tools_and_delta_before_result(monkeypatch):
     tm, _ = _team()
-    team = tm._build_team("leader_live_stream")
+    team = tm._build_team("leader_live_stream", owner_account_id="local")
     plan = TeamPlan(team_session_id="leader_live_stream", goal="审阅方案")
     review = TeamPlanNode(node_id="leader_review", title="Leader 审阅", assignee="leader")
 
@@ -1637,7 +1637,7 @@ def auto_artifact_ctx(tmp_path, monkeypatch):
         lambda workspace_id: tmp_path / str(workspace_id or "default"),
     )
     tm, _ = _team()
-    team = tm._build_team("auto_artifact_s1")
+    team = tm._build_team("auto_artifact_s1", owner_account_id="local")
 
     def _node(title: str, detail: str) -> TeamPlanNode:
         return TeamPlanNode(node_id="build_1", title=title, detail=detail, assignee="kk")
@@ -1650,7 +1650,7 @@ def auto_artifact_ctx(tmp_path, monkeypatch):
 
 def test_team_auto_file_artifacts_from_node_result(tmp_path):
     tm, _ = _team()
-    team = tm._build_team("auto_artifact_s1")
+    team = tm._build_team("auto_artifact_s1", owner_account_id="local")
     node = TeamPlanNode(
         node_id="build_1",
         title="实现：小游戏",
@@ -1777,7 +1777,7 @@ def test_team_auto_file_artifacts_ignore_relative_paths_outside_turn_workspace(t
     (repo_web / "index.html").write_text("<html>wrong file</html>", encoding="utf-8")
     monkeypatch.chdir(repo_web)
     tm, _ = _team()
-    team = tm._build_team("auto_artifact_ignore_cwd_s1")
+    team = tm._build_team("auto_artifact_ignore_cwd_s1", owner_account_id="local")
     node = TeamPlanNode(
         node_id="build_1",
         title="实现：2048",
@@ -1865,7 +1865,7 @@ def test_team_auto_file_artifacts_do_not_reown_upstream_artifacts(tmp_path, monk
         lambda workspace_id: tmp_path / str(workspace_id or "default"),
     )
     tm, _ = _team()
-    team = tm._build_team("auto_artifact_upstream_s1")
+    team = tm._build_team("auto_artifact_upstream_s1", owner_account_id="local")
     build_node = TeamPlanNode(
         node_id="build_1",
         title="实现：2048",
@@ -1915,7 +1915,7 @@ def test_team_auto_file_artifacts_require_current_node_file_changes(tmp_path, mo
         lambda workspace_id: tmp_path / str(workspace_id or "default"),
     )
     tm, _ = _team()
-    team = tm._build_team("auto_artifact_changed_s1")
+    team = tm._build_team("auto_artifact_changed_s1", owner_account_id="local")
     node = TeamPlanNode(
         node_id="build_1",
         title="实现：2048",
@@ -1974,7 +1974,7 @@ async def test_team_leader_fallback_file_uses_turn_workspace_and_registers_artif
         user_id="owner",
         workspace_id="default",
     )
-    team = tm._build_team(envelope.session_id)
+    team = tm._build_team(envelope.session_id, owner_account_id="local")
     node = TeamPlanNode(
         node_id="leader_summary",
         title="Leader 汇总并兜底交付",
@@ -2618,7 +2618,7 @@ async def test_team_leader_delegates_to_teammate():
     assert messages[1]["recipient_member_ids"] == ["leader"]
     assert messages[2]["recipient_member_ids"] == ["coder"]
     assert messages[3]["recipient_member_ids"] == ["leader"]
-    plan = tm.read_plan("t1")["plan"]
+    plan = tm.read_plan("t1", owner_account_id="local")["plan"]
     assert plan["status"] == "completed"
     assert [node["node_id"] for node in plan["nodes"]] == [
         "leader_plan",
@@ -2715,6 +2715,7 @@ def test_create_plan_uses_workflow_plan_graph_as_runtime_source():
             "nodes": [{"id": "canonical", "title": "当前节点", "assignee_id": "coder"}],
             "edges": [],
         },
+        owner_account_id="local",
     )
 
     assert [node["node_id"] for node in result["plan"]["nodes"]] == ["canonical"]
@@ -3001,8 +3002,8 @@ def test_team_missing_owner_does_not_fall_back_to_another_owner():
     )
     tm._build_team("owner-isolation", owner_account_id="A:uid-a")
 
-    assert tm.read_plan("owner-isolation")["plan"] is None
-    assert tm._teams.get(tm._existing_team_key("owner-isolation")) is None
+    assert tm.read_plan("owner-isolation", owner_account_id="B:uid-b")["plan"] is None
+    assert tm._teams.get(tm._key("owner-isolation", "B:uid-b")) is None
 
 
 async def test_team_required_workflow_dispatches_when_leader_does_not_delegate():
@@ -3030,7 +3031,7 @@ async def test_team_required_workflow_dispatches_when_leader_does_not_delegate()
     assert len(board) == 3
     assert {task["assignee"] for task in board} == {"researcher", "coder"}
     assert {task["status"] for task in board} == {"done"}
-    plan = tm.read_plan("workflow_s1")["plan"]
+    plan = tm.read_plan("workflow_s1", owner_account_id="local")["plan"]
     assert plan["status"] == "completed"
     assert [node["assignee"] for node in plan["nodes"]] == ["leader", "researcher", "coder", "leader", "coder", "leader"]
     assert [node["status"] for node in plan["nodes"]] == ["completed"] * 6
@@ -3046,7 +3047,7 @@ def test_team_required_workflow_single_member_title_uses_goal():
         },
     )
     tm, _ = _team(config=config)
-    team = tm._build_team("single_member_s1")
+    team = tm._build_team("single_member_s1", owner_account_id="local")
     nodes, edges = tm._default_workflow_nodes(
         team,
         "写一个贪吃蛇小游戏，像素风",
@@ -3081,7 +3082,7 @@ def test_team_workflow_lane_reuses_role_catalog_without_member_metadata():
         },
     )
     tm, _ = _team(config=config)
-    team = tm._build_team("catalog_lane_s1")
+    team = tm._build_team("catalog_lane_s1", owner_account_id="local")
     nodes, edges = tm._default_workflow_nodes(
         team,
         "组队算1+1",
@@ -3145,7 +3146,7 @@ def test_team_required_workflow_generates_role_lane_dag():
         },
     )
     tm, _ = _team(config=config)
-    team = tm._build_team("lane_dag_s1")
+    team = tm._build_team("lane_dag_s1", owner_account_id="local")
     nodes, edges = tm._default_workflow_nodes(
         team,
         "写一个贪吃蛇小游戏，像素风",
@@ -3304,7 +3305,7 @@ def test_team_workspace_file_changes_include_deletions(tmp_path):
 
 async def test_delegate_tool_rejects_non_team_leader_context():
     tm, _ = _team()
-    team = tm._build_team("guard_s1")
+    team = tm._build_team("guard_s1", owner_account_id="local")
     token = current_agent_id.set("coder")
     try:
         result = await team.leader.registry.execute(
@@ -3318,7 +3319,7 @@ async def test_delegate_tool_rejects_non_team_leader_context():
 
 async def test_delegate_tool_requires_existing_plan_node_when_team_plan_exists():
     tm, tasks = _team()
-    team = tm._build_team("guard_plan_s1")
+    team = tm._build_team("guard_plan_s1", owner_account_id="local")
     tm.create_plan(
         "guard_plan_s1",
         goal="实现并验收",
@@ -3328,6 +3329,7 @@ async def test_delegate_tool_requires_existing_plan_node_when_team_plan_exists()
             {"id": "leader_summary", "title": "Leader 总结", "assignee": "leader"},
         ],
         edges=[["leader_plan", "build_1"], ["build_1", "leader_summary"]],
+        owner_account_id="local",
     )
 
     token = current_agent_id.set("leader")
@@ -3345,7 +3347,7 @@ async def test_delegate_tool_requires_existing_plan_node_when_team_plan_exists()
 
 async def test_delegate_tool_rejects_leader_plan_node():
     tm, tasks = _team()
-    team = tm._build_team("guard_plan_s2")
+    team = tm._build_team("guard_plan_s2", owner_account_id="local")
     tm.create_plan(
         "guard_plan_s2",
         goal="实现并验收",
@@ -3355,6 +3357,7 @@ async def test_delegate_tool_rejects_leader_plan_node():
             {"id": "leader_summary", "title": "Leader 总结", "assignee": "leader"},
         ],
         edges=[["leader_plan", "build_1"], ["build_1", "leader_summary"]],
+        owner_account_id="local",
     )
 
     token = current_agent_id.set("leader")
@@ -3376,7 +3379,7 @@ async def test_delegate_tool_rejects_leader_plan_node():
 
 async def test_delegate_tool_allows_pending_member_plan_node():
     tm, tasks = _team()
-    team = tm._build_team("guard_plan_s3")
+    team = tm._build_team("guard_plan_s3", owner_account_id="local")
     tm.create_plan(
         "guard_plan_s3",
         goal="实现并验收",
@@ -3386,6 +3389,7 @@ async def test_delegate_tool_allows_pending_member_plan_node():
             {"id": "leader_summary", "title": "Leader 总结", "assignee": "leader"},
         ],
         edges=[["leader_plan", "build_1"], ["build_1", "leader_summary"]],
+        owner_account_id="local",
     )
 
     token = current_agent_id.set("leader")
@@ -3403,7 +3407,7 @@ async def test_delegate_tool_allows_pending_member_plan_node():
     assert not result.is_error
     assert "coder算出：2" in result.content
     assert [task["assignee"] for task in tasks.list("guard_plan_s3")] == ["coder"]
-    nodes = {node.get("node_id") or node.get("id"): node for node in tm.read_plan("guard_plan_s3")["plan"]["nodes"]}
+    nodes = {node.get("node_id") or node.get("id"): node for node in tm.read_plan("guard_plan_s3", owner_account_id="local")["plan"]["nodes"]}
     assert nodes["build_1"]["status"] == "completed"
 
     token = current_agent_id.set("leader")
@@ -3468,7 +3472,7 @@ async def test_delegate_entry_uses_unified_assignment_events(tmp_path):
 
 async def test_delegate_entry_without_plan_is_rejected():
     tm, tasks = _team()
-    team = tm._build_team("legacy_delegate_no_plan_s1")
+    team = tm._build_team("legacy_delegate_no_plan_s1", owner_account_id="local")
 
     token = current_agent_id.set("leader")
     try:
@@ -3496,7 +3500,8 @@ async def test_request_delegate_without_plan_is_rejected():
             member="coder",
             instruction="算 1+1",
             requester_member_id="external_agent",
-        )
+        owner_account_id="local",
+    )
 
     assert tasks.list("request_delegate_no_plan_s1") == []
 
@@ -3530,7 +3535,7 @@ async def test_request_delegate_hydrates_persisted_team_plan(tmp_path):
 
 async def test_team_mention_tool_routes_and_guards_user_mentions():
     tm, tasks = _team()
-    team = tm._build_team("mention_s1")
+    team = tm._build_team("mention_s1", owner_account_id="local")
     assert "team_send_message" not in team.leader.registry.names()
     assert "team_read_messages" in team.leader.registry.names()
     assert "team_send_message" not in team.teammates["coder"].registry.names()
@@ -3552,6 +3557,7 @@ async def test_team_mention_tool_routes_and_guards_user_mentions():
         goal="补充测试方案",
         nodes=[{"id": "qa_plan", "title": "补充测试方案", "detail": "请补充测试方案", "assignee": "coder"}],
         edges=[],
+        owner_account_id="local",
     )
 
     leader_token = current_agent_id.set("leader")
@@ -3574,7 +3580,7 @@ async def test_team_mention_tool_routes_and_guards_user_mentions():
     assert "[@coder](mention://member/coder)" in result.content
     assert "coder算出" in result.content
     assert [task["assignee"] for task in tasks.list("mention_s1")] == ["coder"]
-    assert tm.read_plan("mention_s1")["plan"]["nodes"][0]["status"] == "completed"
+    assert tm.read_plan("mention_s1", owner_account_id="local")["plan"]["nodes"][0]["status"] == "completed"
     messages = team.bus.read(team_session_id="mention_s1", member_id="coder", consume=False)
     assert messages and messages[0].sender_member_id == "leader"
 
@@ -3652,12 +3658,13 @@ async def test_team_mention_tool_routes_and_guards_user_mentions():
 
 async def test_team_mention_assign_requires_existing_plan_node():
     tm, tasks = _team()
-    team = tm._build_team("mention_guard_s1")
+    team = tm._build_team("mention_guard_s1", owner_account_id="local")
     tm.create_plan(
         "mention_guard_s1",
         goal="补充测试方案",
         nodes=[{"id": "qa_plan", "title": "补充测试方案", "detail": "请补充测试方案", "assignee": "coder"}],
         edges=[],
+        owner_account_id="local",
     )
 
     leader_token = current_agent_id.set("leader")
@@ -3689,7 +3696,7 @@ async def test_team_mention_assign_requires_existing_plan_node():
     assert mismatch.is_error
     assert "不能委派给 researcher" in mismatch.content
     assert tasks.list("mention_guard_s1") == []
-    assert tm.read_plan("mention_guard_s1")["plan"]["nodes"][0]["status"] == "pending"
+    assert tm.read_plan("mention_guard_s1", owner_account_id="local")["plan"]["nodes"][0]["status"] == "pending"
 
 
 def test_team_bus_message_contract_keeps_request_reply_context():
@@ -3717,7 +3724,7 @@ def test_team_bus_message_contract_keeps_request_reply_context():
 @pytest.mark.asyncio
 async def test_builtin_and_external_mentions_share_communication_router_contract():
     tm, _tasks = _team()
-    builtin_team = tm._build_team("communication_builtin_s1")
+    builtin_team = tm._build_team("communication_builtin_s1", owner_account_id="local")
 
     member_token = current_agent_id.set("coder")
     try:
@@ -3779,7 +3786,7 @@ async def test_team_ask_runs_target_agent_and_publishes_reply():
             return await super().chat(messages, tools)
 
     tm, _tasks = _team(provider=AskAnswerProvider())
-    team = tm._build_team("communication_ask_s1")
+    team = tm._build_team("communication_ask_s1", owner_account_id="local")
     member_token = current_agent_id.set("coder")
     try:
         result = await team.teammates["coder"].registry.execute(
@@ -3823,7 +3830,7 @@ async def test_team_ask_serializes_same_target_and_records_queue_status():
             return await super().chat(messages, tools)
 
     tm, _tasks = _team(provider=SlowAskProvider())
-    team = tm._build_team("communication_queue_s1")
+    team = tm._build_team("communication_queue_s1", owner_account_id="local")
     coordinator = team.communication_router.ask_coordinator
     assert coordinator is not None
     coordinator.timeout_seconds = 1.0
@@ -3873,7 +3880,7 @@ async def test_team_ask_timeout_returns_expired_and_replies():
             return await super().chat(messages, tools)
 
     tm, _tasks = _team(provider=TimeoutAskProvider())
-    team = tm._build_team("communication_timeout_s1")
+    team = tm._build_team("communication_timeout_s1", owner_account_id="local")
     coordinator = team.communication_router.ask_coordinator
     assert coordinator is not None
     coordinator.timeout_seconds = 0.01
@@ -3922,7 +3929,7 @@ async def test_team_ask_cancellation_persists_cancelled_status():
             return await super().chat(messages, tools)
 
     tm, _tasks = _team(provider=SlowAskProvider())
-    team = tm._build_team("communication_cancel_s1")
+    team = tm._build_team("communication_cancel_s1", owner_account_id="local")
     member_token = current_agent_id.set("coder")
     task = asyncio.create_task(
         team.teammates["coder"].registry.execute(
@@ -4348,6 +4355,7 @@ async def test_external_team_mention_propagates_current_active_skill(monkeypatch
             "assignee": "coder",
         }],
         edges=[],
+        owner_account_id="local",
     )
     seen = {}
 
@@ -4366,6 +4374,7 @@ async def test_external_team_mention_propagates_current_active_skill(monkeypatch
         intent="assign",
         content="查询资料",
         node_id="search",
+        owner_account_id="local",
         task_payload_meta={
             "active_skills": [{
                 "skill_id": "directory-search",
@@ -4385,6 +4394,7 @@ async def test_team_request_delegate_control_plane_entry():
         goal="执行受控派活",
         nodes=[{"id": "work", "title": "执行任务", "assignee": "coder"}],
         edges=[],
+        owner_account_id="local",
     )
     result = await tm.request_delegate(
         "mcp_team_s1",
@@ -4392,6 +4402,7 @@ async def test_team_request_delegate_control_plane_entry():
         instruction="算 1+1",
         requester_member_id="external_agent",
         plan_node_id="work",
+        owner_account_id="local",
     )
     assert result["ok"] is True
     assert result["member"] == "coder"
@@ -4406,7 +4417,7 @@ async def test_team_request_delegate_control_plane_entry():
     assert len(board) == 1
     assert board[0]["assignee"] == "coder"
     assert board[0]["status"] == "done"
-    messages = tm._teams[("", "mcp_team_s1")].bus.list_messages("mcp_team_s1")
+    messages = tm._teams[("local", "mcp_team_s1")].bus.list_messages("mcp_team_s1")
     assert messages[0]["sender_member_id"] == "external_agent"
 
 
@@ -4417,6 +4428,7 @@ async def test_team_request_delegate_can_wait_for_result():
         goal="执行受控派活",
         nodes=[{"id": "work", "title": "执行任务", "assignee": "coder"}],
         edges=[],
+        owner_account_id="local",
     )
     result = await tm.request_delegate(
         "mcp_team_sync_s1",
@@ -4425,6 +4437,7 @@ async def test_team_request_delegate_can_wait_for_result():
         requester_member_id="external_agent",
         plan_node_id="work",
         wait_for_result=True,
+        owner_account_id="local",
     )
     assert result["ok"] is True
     assert result["status"] == "completed"
@@ -4500,7 +4513,7 @@ async def test_team_delegate_propagates_security_launch_context():
 @pytest.mark.asyncio
 async def test_required_workflow_binds_envelope_security_launch(monkeypatch):
     tm, _ = _team()
-    team = tm._build_team("workflow-security-context")
+    team = tm._build_team("workflow-security-context", owner_account_id="local")
     launch = ProcessLaunch(
         PermissionProfile(PermissionProfileKind.MANAGED),
         ("native-runtime",),
@@ -4575,6 +4588,7 @@ async def test_required_workflow_delegate_waits_for_structured_acceptance_before
         goal="实现功能",
         nodes=[{"id": "build_1", "title": "编码实现", "assignee": "coder"}],
         edges=[],
+        owner_account_id="local",
     )
 
     await tm.request_delegate(
@@ -4584,9 +4598,10 @@ async def test_required_workflow_delegate_waits_for_structured_acceptance_before
         plan_node_id="build_1",
         wait_for_result=True,
         finalize_plan_node=False,
+        owner_account_id="local",
     )
 
-    node = tm.read_plan("acceptance-owned-s1")["plan"]["nodes"][0]
+    node = tm.read_plan("acceptance-owned-s1", owner_account_id="local")["plan"]["nodes"][0]
     assert node["status"] == "in_progress"
     assert node["delegate_task_id"]
 
@@ -4608,6 +4623,7 @@ async def test_team_request_delegate_returns_before_slow_worker_finishes():
         goal="执行受控派活",
         nodes=[{"id": "work", "title": "慢任务", "assignee": "coder"}],
         edges=[],
+        owner_account_id="local",
     )
     result = await asyncio.wait_for(
         tm.request_delegate(
@@ -4616,7 +4632,8 @@ async def test_team_request_delegate_returns_before_slow_worker_finishes():
             instruction="慢任务",
             requester_member_id="external_agent",
             plan_node_id="work",
-        ),
+        owner_account_id="local",
+    ),
         timeout=0.5,
     )
     assert result["ok"] is True
@@ -4642,6 +4659,7 @@ async def test_team_plan_create_and_delegate_binding():
             {"id": "code", "title": "编码实现", "detail": "实现代码", "assignee": "coder"},
         ],
         edges=[["design", "code"]],
+        owner_account_id="local",
     )
     assert created["ok"] is True
     plan = created["plan"]
@@ -4654,18 +4672,19 @@ async def test_team_plan_create_and_delegate_binding():
         instruction="算 1+1",
         requester_member_id="external_agent",
         plan_node_id="code",
+        owner_account_id="local",
     )
     assert result["ok"] is True
     assert result["status"] == "in_progress"
     board = tasks.list("plan_team_s1")
     assert len(board) == 1
     for _ in range(20):
-        current = tm.read_plan("plan_team_s1")["plan"]
+        current = tm.read_plan("plan_team_s1", owner_account_id="local")["plan"]
         code_node = next(node for node in current["nodes"] if node["node_id"] == "code")
         if code_node["status"] == "completed":
             break
         await asyncio.sleep(0.01)
-    current = tm.read_plan("plan_team_s1")["plan"]
+    current = tm.read_plan("plan_team_s1", owner_account_id="local")["plan"]
     code_node = next(node for node in current["nodes"] if node["node_id"] == "code")
     assert code_node["status"] == "completed"
     assert code_node["delegate_task_id"] == board[0]["id"]
@@ -4674,7 +4693,7 @@ async def test_team_plan_create_and_delegate_binding():
 
 async def test_leader_request_plan_change_adds_dag_node_and_requeues_summary():
     tm, _ = _team()
-    team = tm._build_team("plan_change_s1")
+    team = tm._build_team("plan_change_s1", owner_account_id="local")
     tm.create_plan(
         "plan_change_s1",
         goal="补充调研后汇总",
@@ -4683,9 +4702,10 @@ async def test_leader_request_plan_change_adds_dag_node_and_requeues_summary():
             {"id": "leader_summary", "title": "Leader 汇总", "assignee": "leader"},
         ],
         edges=[["leader_plan", "leader_summary"]],
+        owner_account_id="local",
     )
-    tm.update_plan_node("plan_change_s1", node_id="leader_plan", status="completed", result_summary="已承接")
-    tm.update_plan_node("plan_change_s1", node_id="leader_summary", status="in_progress")
+    tm.update_plan_node("plan_change_s1", node_id="leader_plan", status="completed", result_summary="已承接", owner_account_id="local")
+    tm.update_plan_node("plan_change_s1", node_id="leader_summary", status="in_progress", owner_account_id="local")
 
     assert "request_plan_change" in team.leader.registry.names()
     assert "request_plan_change" not in team.direct_leader.registry.names()
@@ -4719,7 +4739,7 @@ async def test_leader_request_plan_change_adds_dag_node_and_requeues_summary():
     assert payload["node"]["node_id"] == "extra_research"
     assert payload["requeued_nodes"] == ["leader_summary"]
 
-    plan = tm.read_plan("plan_change_s1")["plan"]
+    plan = tm.read_plan("plan_change_s1", owner_account_id="local")["plan"]
     nodes = {node["node_id"]: node for node in plan["nodes"]}
     assert nodes["extra_research"]["status"] == "pending"
     assert nodes["extra_research"]["metadata"]["required_capabilities"] == ["research", "analysis"]
@@ -4731,7 +4751,7 @@ async def test_leader_request_plan_change_adds_dag_node_and_requeues_summary():
 
 async def test_leader_request_plan_change_rejects_unknown_member_without_mutation():
     tm, _ = _team()
-    team = tm._build_team("plan_change_s2")
+    team = tm._build_team("plan_change_s2", owner_account_id="local")
     tm.create_plan(
         "plan_change_s2",
         goal="补充调研后汇总",
@@ -4740,6 +4760,7 @@ async def test_leader_request_plan_change_rejects_unknown_member_without_mutatio
             {"id": "leader_summary", "title": "Leader 汇总", "assignee": "leader"},
         ],
         edges=[["leader_plan", "leader_summary"]],
+        owner_account_id="local",
     )
 
     token = current_agent_id.set("leader")
@@ -4766,14 +4787,14 @@ async def test_leader_request_plan_change_rejects_unknown_member_without_mutatio
     assert "assignee" in result.content
     assert "ghost" in result.content
     assert "not one of" in result.content
-    plan = tm.read_plan("plan_change_s2")["plan"]
+    plan = tm.read_plan("plan_change_s2", owner_account_id="local")["plan"]
     assert [node["node_id"] for node in plan["nodes"]] == ["leader_plan", "leader_summary"]
     assert plan["edges"] == [{"parent_id": "leader_plan", "child_id": "leader_summary"}]
 
 
 async def test_leader_request_plan_change_requires_capability_contract():
     tm, _ = _team()
-    team = tm._build_team("plan_change_missing_capabilities")
+    team = tm._build_team("plan_change_missing_capabilities", owner_account_id="local")
     tm.create_plan(
         "plan_change_missing_capabilities",
         goal="补充调研后汇总",
@@ -4782,6 +4803,7 @@ async def test_leader_request_plan_change_requires_capability_contract():
             {"id": "leader_summary", "title": "Leader 汇总", "assignee": "leader"},
         ],
         edges=[["leader_plan", "leader_summary"]],
+        owner_account_id="local",
     )
 
     token = current_agent_id.set("leader")
@@ -4803,7 +4825,7 @@ async def test_leader_request_plan_change_requires_capability_contract():
 
     assert result.is_error
     assert "required_capabilities" in result.content
-    plan = tm.read_plan("plan_change_missing_capabilities")["plan"]
+    plan = tm.read_plan("plan_change_missing_capabilities", owner_account_id="local")["plan"]
     assert [node["node_id"] for node in plan["nodes"]] == ["leader_plan", "leader_summary"]
 
 
@@ -4850,7 +4872,7 @@ async def test_runtime_executes_added_node_after_leader_plan_change():
 
     provider = PlanChangeProvider()
     tm, tasks = _team(provider)
-    team = tm._build_team("plan_change_runtime_s1")
+    team = tm._build_team("plan_change_runtime_s1", owner_account_id="local")
     plan = TeamPlan(team_session_id="plan_change_runtime_s1", goal="补充调研后汇总")
     plan.nodes["leader_plan"] = TeamPlanNode(
         node_id="leader_plan",
@@ -4878,7 +4900,7 @@ async def test_runtime_executes_added_node_after_leader_plan_change():
     final = next(chunk.body["text"] for chunk in chunks if chunk.kind == "final")
     assert "最终汇总" in final
     assert provider.summary_calls >= 3
-    current = tm.read_plan("plan_change_runtime_s1")["plan"]
+    current = tm.read_plan("plan_change_runtime_s1", owner_account_id="local")["plan"]
     nodes = {node["node_id"]: node for node in current["nodes"]}
     assert nodes["extra_research"]["status"] == "completed"
     assert nodes["leader_summary"]["status"] == "completed"
@@ -4907,7 +4929,7 @@ def test_team_builds_heterogeneous_member_with_member_session_binding():
     tm, _ = _team(config=config)
     tm.external_store = DummyExternalStore()
 
-    team = tm._build_team("team_s1")
+    team = tm._build_team("team_s1", owner_account_id="local")
     kimi = team.teammates["kimi"]
 
     assert team.session.member_sessions["kimi"].member_session_id == "team_s1::kimi"
@@ -4917,7 +4939,7 @@ def test_team_builds_heterogeneous_member_with_member_session_binding():
     assert kimi.executor.config.display_session_id == "team_s1"
     assert kimi.executor.config.control_session_id == "team_s1"
 
-    turn_team = tm._build_team("web_s1::turn::req_abc")
+    turn_team = tm._build_team("web_s1::turn::req_abc", owner_account_id="local")
     turn_kimi = turn_team.teammates["kimi"]
     assert turn_kimi.executor.config.crew_session_id == "web_s1::turn::req_abc::kimi"
     assert turn_kimi.executor.config.display_session_id == "web_s1"
@@ -4948,7 +4970,7 @@ def test_team_uses_external_team_selected_leader():
     tm, _ = _team()
     tm.external_store = DummyExternalStore()
 
-    team = tm._build_team("team_selected_leader", external_team_id="team_ext")
+    team = tm._build_team("team_selected_leader", external_team_id="team_ext", owner_account_id="local")
 
     assert team.session.leader_member_id == "leader"
     assert "agent_hh" in team.teammates
@@ -4996,7 +5018,7 @@ def test_external_team_keeps_duplicate_display_names_distinct():
     tm, _ = _team()
     tm.external_store = DummyExternalStore()
 
-    team = tm._build_team("team_duplicate_names", external_team_id="team_duplicate_names")
+    team = tm._build_team("team_duplicate_names", external_team_id="team_duplicate_names", owner_account_id="local")
 
     assert set(team.members) == {"agent_a", "agent_b"}
     assert set(team.teammates) == {"agent_a", "agent_b"}
@@ -5067,7 +5089,7 @@ def test_external_team_projects_confirmed_formation_responsibility_into_runtime(
     tm, _ = _team()
     tm.external_store = DummyExternalStore()
 
-    team = tm._build_team("formation-runtime", external_team_id="team_ext")
+    team = tm._build_team("formation-runtime", external_team_id="team_ext", owner_account_id="local")
     cc_spec = team.members["agent_cc"]
     assert cc_spec.metadata["formation_plan_version"] == 1
     assert cc_spec.metadata["formation_responsibility"] == responsibility
@@ -5089,7 +5111,7 @@ def test_team_external_team_load_failure_does_not_fallback_to_default_team():
     tm.external_store = BrokenExternalStore()
 
     with pytest.raises(ToolError, match="读取外部团队失败"):
-        tm._build_team("team_selected_leader", external_team_id="team_ext")
+        tm._build_team("team_selected_leader", external_team_id="team_ext", owner_account_id="local")
 
 
 def test_team_uses_crew_builtin_as_regular_member():
@@ -5117,7 +5139,7 @@ def test_team_uses_crew_builtin_as_regular_member():
     tm, _ = _team()
     tm.external_store = DummyExternalStore()
 
-    team = tm._build_team("team_builtin_member", external_team_id="team_ext")
+    team = tm._build_team("team_builtin_member", external_team_id="team_ext", owner_account_id="local")
 
     assert team.session.leader_member_id == "leader"
     assert CREW_BUILTIN_AGENT_ID in team.teammates
@@ -5212,10 +5234,11 @@ def test_team_interrupt_parent_cancels_sidechain_plan():
             {"id": "build_1", "title": "实现", "assignee": "coder"},
         ],
         edges=[["leader_plan", "build_1"]],
+        owner_account_id="local",
     )
 
-    assert tm.interrupt("web_parent", "已停止当前回复") is True
-    plan = tm.read_plan(session_id)["plan"]
+    assert tm.interrupt("web_parent", "已停止当前回复", owner_account_id="local") is True
+    plan = tm.read_plan(session_id, owner_account_id="local")["plan"]
     assert plan["status"] == "cancelled"
     by_id = {node["node_id"]: node for node in plan["nodes"]}
     assert by_id["leader_plan"]["status"] == "cancelled"
@@ -5429,7 +5452,7 @@ def test_testing_goal_without_build_member_does_not_create_build_node():
             ]
         },
     ))
-    team = tm._build_team("test-only")
+    team = tm._build_team("test-only", owner_account_id="local")
 
     collaboration_spec = build_team_spec(_structured_team_spec(
         "测试一下团队协作",
@@ -5628,7 +5651,7 @@ def test_team_graph_planner_emits_runtime_only_execution_profile():
             }],
         },
     ))
-    team = tm._build_team("runtime-profile-contract")
+    team = tm._build_team("runtime-profile-contract", owner_account_id="local")
     plan = TeamGraphPlanner().plan(
         team,
         "开发一个小工具",
@@ -5712,7 +5735,7 @@ def test_dag_admission_reassigns_node_to_existing_member_with_full_coverage():
             ],
         },
     ))
-    team = tm._build_team("capability-admission")
+    team = tm._build_team("capability-admission", owner_account_id="local")
     graph_plan = TeamGraphPlanner().plan(
         team,
         "执行测试",
@@ -5758,7 +5781,7 @@ def test_dag_admission_records_uncovered_node_instead_of_hiding_it_in_runtime():
             ],
         },
     ))
-    team = tm._build_team("capability-admission-gap")
+    team = tm._build_team("capability-admission-gap", owner_account_id="local")
     graph_plan = TeamGraphPlanner().plan(
         team,
         "做测试",
@@ -6014,7 +6037,7 @@ def test_runtime_staffing_does_not_trigger_when_assigned_member_is_covered():
             }],
         },
     ))
-    team = tm._build_team("runtime-covered")
+    team = tm._build_team("runtime-covered", owner_account_id="local")
     node = TeamPlanNode(
         node_id="build",
         title="实现",
@@ -6195,7 +6218,7 @@ async def test_runtime_staffing_decline_blocks_node_without_fake_continuation(mo
     )
     plan = TeamPlan(team_session_id="runtime-decline", goal="执行测试", nodes={"build": node})
     tm._plans[tm._key(plan.team_session_id, "local")] = plan
-    team = tm._build_team(plan.team_session_id)
+    team = tm._build_team(plan.team_session_id, owner_account_id="local")
     trigger = {
         "trigger_type": "capability_gap",
         "required_capabilities": ["testing"],
@@ -6245,7 +6268,7 @@ def test_runtime_staffing_reassigns_existing_member_before_prompting_user():
             ],
         },
     ))
-    team = tm._build_team("runtime-reassign")
+    team = tm._build_team("runtime-reassign", owner_account_id="local")
     node = TeamPlanNode(
         node_id="verify",
         title="验证",
@@ -6264,7 +6287,7 @@ def test_runtime_staffing_reassigns_existing_member_before_prompting_user():
 
 def test_runtime_reassignment_refreshes_plan_status_after_reopening_node():
     tm, _ = _team(config=_recovery_team_config())
-    team = tm._build_team("runtime-reassign-status")
+    team = tm._build_team("runtime-reassign-status", owner_account_id="local")
     node = TeamPlanNode(
         node_id="verify",
         title="验证",
@@ -6527,7 +6550,7 @@ def test_recovery_retry_clears_stale_staffing_request_for_fresh_runtime_decision
     assert "runtime_staffing" not in recovered["metadata"]
     assert tm._runtime_staffing_request(plan.nodes["verify"]) is None
     trigger = tm._runtime_staffing_trigger(
-        tm._build_team("recovery-fresh-staffing"),
+        tm._build_team("recovery-fresh-staffing", owner_account_id="local"),
         plan.nodes["verify"],
         owner_account_id="local",
         max_attempts=2,
@@ -6707,7 +6730,7 @@ async def test_ai_planner_uses_llm_single_dag():
             ]
         },
     ))
-    team = tm._build_team("standard-llm")
+    team = tm._build_team("standard-llm", owner_account_id="local")
 
     graph_plan = await tm.graph_planner.plan_async(
         team,
@@ -6800,7 +6823,7 @@ def test_team_graph_planner_warns_without_mutating_user_team():
             ]
         },
     ))
-    team = tm._build_team("graph-policy")
+    team = tm._build_team("graph-policy", owner_account_id="local")
     before_members = list(team.members)
 
     graph_plan = TeamGraphPlanner().plan(
@@ -6858,7 +6881,7 @@ def test_team_graph_planner_standard_profile_uses_default_role_dag():
             ]
         },
     ))
-    team = tm._build_team("standard-graph")
+    team = tm._build_team("standard-graph", owner_account_id="local")
 
     graph_plan = TeamGraphPlanner().plan(
         team,
@@ -6924,7 +6947,7 @@ def test_standard_role_dag_uses_distinct_confirmed_formation_responsibilities():
             ]
         },
     ))
-    team = tm._build_team("formation-standard-distinct")
+    team = tm._build_team("formation-standard-distinct", owner_account_id="local")
 
     graph_plan = TeamGraphPlanner().plan(
         team,
@@ -6968,7 +6991,7 @@ def test_standard_role_dag_does_not_create_duplicate_nodes_for_same_formation_sc
         for member_id in ("pm_a", "pm_b")
     ]
     tm, _ = _team(config=Config(max_iterations=3, team_config={"members": members}))
-    team = tm._build_team("formation-standard-dedup")
+    team = tm._build_team("formation-standard-dedup", owner_account_id="local")
 
     graph_plan = TeamGraphPlanner().plan(
         team,
@@ -7006,7 +7029,7 @@ def test_team_graph_planner_standard_question_stays_role_dag_without_inquiry_or_
             ]
         },
     ))
-    team = tm._build_team("standard-question-role-dag")
+    team = tm._build_team("standard-question-role-dag", owner_account_id="local")
 
     graph_plan = TeamGraphPlanner().plan(
         team,
@@ -7064,7 +7087,7 @@ def test_team_graph_planner_standard_budget_trims_optional_nodes():
             ]
         },
     ))
-    team = tm._build_team("standard-budget")
+    team = tm._build_team("standard-budget", owner_account_id="local")
 
     graph_plan = TeamGraphPlanner().plan(
         team,
@@ -7124,7 +7147,7 @@ async def test_team_graph_planner_standard_compiles_semantic_parallel_work_units
             ]
         },
     ))
-    team = tm._build_team("semantic-standard")
+    team = tm._build_team("semantic-standard", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -7233,7 +7256,7 @@ async def test_team_graph_planner_drops_reserved_leader_control_work_units():
             }]
         },
     ))
-    team = tm._build_team("semantic-leader-control")
+    team = tm._build_team("semantic-leader-control", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -7326,7 +7349,7 @@ async def test_team_graph_planner_renames_repeated_review_and_keeps_summary_term
             ]
         },
     ))
-    team = tm._build_team("semantic-repeated-review")
+    team = tm._build_team("semantic-repeated-review", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -7400,7 +7423,7 @@ async def test_team_graph_planner_p0_standard_semantic_dag_scenarios(scenario):
             ]
         },
     ))
-    team = tm._build_team(f"p0-standard-{scenario}")
+    team = tm._build_team(f"p0-standard-{scenario}", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -7487,7 +7510,7 @@ async def test_team_graph_planner_real_provider_standard_semantic_dag_smoke():
             ]
         },
     ))
-    team = tm._build_team("real-provider-standard-semantic")
+    team = tm._build_team("real-provider-standard-semantic", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -7562,7 +7585,7 @@ async def test_team_graph_planner_balances_parallel_semantic_research_units():
             ]
         },
     ))
-    team = tm._build_team("semantic-balanced")
+    team = tm._build_team("semantic-balanced", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -7610,7 +7633,7 @@ async def test_team_graph_planner_does_not_balance_to_weaker_parallel_candidate(
             ]
         },
     ))
-    team = tm._build_team("semantic-no-forced-balance")
+    team = tm._build_team("semantic-no-forced-balance", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -7643,7 +7666,7 @@ async def test_team_graph_planner_streams_planning_decision_and_records_diagnost
             }]
         },
     ))
-    team = tm._build_team("streaming-planning")
+    team = tm._build_team("streaming-planning", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -7681,7 +7704,7 @@ async def test_team_graph_planner_uses_chat_when_chat_wins_planning_race():
             }]
         },
     ))
-    team = tm._build_team("chat-wins-planning")
+    team = tm._build_team("chat-wins-planning", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -7717,7 +7740,7 @@ async def test_team_graph_planner_keeps_stream_when_chat_returns_non_json():
     ))
 
     graph_plan = await TeamGraphPlanner().plan_async(
-        tm._build_team("chat-non-json-stream"),
+        tm._build_team("chat-non-json-stream", owner_account_id="local"),
         "整理一份架构综述",
         execution_profile={"requested_mode": "standard", "budget": {"planning_decision_timeout": 0.5}},
         provider=provider,
@@ -7748,7 +7771,7 @@ async def test_team_graph_planner_keeps_stream_when_chat_schema_is_invalid():
     ))
 
     graph_plan = await TeamGraphPlanner().plan_async(
-        tm._build_team("chat-schema-invalid-stream"),
+        tm._build_team("chat-schema-invalid-stream", owner_account_id="local"),
         "整理一份架构综述",
         execution_profile={"requested_mode": "standard", "budget": {"planning_decision_timeout": 0.5}},
         provider=provider,
@@ -7778,7 +7801,7 @@ async def test_team_graph_planner_keeps_reasoning_grace_after_chat_non_json():
     ))
 
     graph_plan = await TeamGraphPlanner().plan_async(
-        tm._build_team("chat-non-json-reasoning"),
+        tm._build_team("chat-non-json-reasoning", owner_account_id="local"),
         "整理一份架构综述",
         execution_profile={
             "requested_mode": "standard",
@@ -7812,7 +7835,7 @@ async def test_team_graph_planner_keeps_waiting_stream_when_reasoning_after_chat
             }]
         },
     ))
-    team = tm._build_team("stream-reasoning-grace")
+    team = tm._build_team("stream-reasoning-grace", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -7853,7 +7876,7 @@ async def test_team_graph_planner_reports_reasoning_progress_before_content():
             }]
         },
     ))
-    team = tm._build_team("reasoning-planning")
+    team = tm._build_team("reasoning-planning", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -7894,7 +7917,7 @@ async def test_team_graph_planner_classifies_reasoning_only_without_calling_stre
             }]
         },
     ))
-    team = tm._build_team("reasoning-only-planning")
+    team = tm._build_team("reasoning-only-planning", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -7942,7 +7965,7 @@ async def test_team_graph_planner_uses_structured_non_reasoning_retry():
     ))
 
     graph_plan = await TeamGraphPlanner().plan_async(
-        tm._build_team("structured-planning-retry"),
+        tm._build_team("structured-planning-retry", owner_account_id="local"),
         "整理一份架构综述",
         execution_profile={"requested_mode": "standard"},
         provider=provider,
@@ -7978,7 +8001,7 @@ async def test_team_graph_planner_reuses_planning_decision_cache_for_same_inputs
             }]
         },
     ))
-    team = tm._build_team("cached-planning")
+    team = tm._build_team("cached-planning", owner_account_id="local")
     execution_profile = {
         "requested_mode": "standard",
         "budget": {"standard_max_work_units": 8, "planning_decision_cache_ttl": 600},
@@ -8028,7 +8051,7 @@ async def test_team_graph_planner_surfaces_critical_missing_user_facts():
             }]
         },
     ))
-    team = tm._build_team("missing-planning-input")
+    team = tm._build_team("missing-planning-input", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -8058,7 +8081,7 @@ async def test_team_runtime_planning_defaultable_missing_info_still_creates_plan
             }],
         },
     ))
-    team = tm._build_team("defaultable-missing-info")
+    team = tm._build_team("defaultable-missing-info", owner_account_id="local")
 
     plan = await tm._ensure_runtime_plan_async(
         "defaultable-missing-info",
@@ -8089,7 +8112,7 @@ async def test_team_planning_pauses_when_plan_only_conflicts_with_default_execut
             }],
         },
     ))
-    team = tm._build_team("scope-conflict")
+    team = tm._build_team("scope-conflict", owner_account_id="local")
     durable_spec = {
         "goal": "帮我写一个贪吃蛇游戏的开发方案",
         "task_profile": {
@@ -8174,7 +8197,7 @@ async def test_team_runtime_planning_missing_info_uses_text_followup(monkeypatch
             }],
         },
     ))
-    team = tm._build_team("missing-info-followup")
+    team = tm._build_team("missing-info-followup", owner_account_id="local")
     captured: dict[str, object] = {}
 
     async def fake_send(session_id, questions, **kwargs):
@@ -8221,7 +8244,7 @@ async def test_team_runtime_planning_missing_info_followup_failure_is_terminal(m
             }],
         },
     ))
-    team = tm._build_team("missing-info-followup-failure")
+    team = tm._build_team("missing-info-followup-failure", owner_account_id="local")
 
     async def fake_send(*args, **kwargs):
         raise ToolError("questions[0].options 必须是非空数组")
@@ -8245,7 +8268,7 @@ async def test_team_runtime_planning_missing_info_followup_failure_is_terminal(m
 async def test_team_runtime_scope_conflict_asks_before_replanning(monkeypatch):
     tm, _ = _team(config=Config(max_iterations=3))
     session_id = "scope-runtime-followup"
-    team = tm._build_team(session_id)
+    team = tm._build_team(session_id, owner_account_id="local")
     calls: list[dict[str, object]] = []
 
     async def fake_ensure(session_id, team, goal, external_team_id, **kwargs):
@@ -8312,7 +8335,7 @@ async def test_team_graph_planner_ai_async_uses_llm_single_dag():
             ]
         },
     ))
-    team = tm._build_team("standard-llm")
+    team = tm._build_team("standard-llm", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -8352,7 +8375,7 @@ async def test_team_graph_planner_ai_async_records_fallback_timing():
             ]
         },
     ))
-    team = tm._build_team("standard-fallback-timing")
+    team = tm._build_team("standard-fallback-timing", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -8401,7 +8424,7 @@ async def test_team_graph_planner_ai_missing_capability_contract_falls_back_to_s
     ))
 
     graph_plan = await TeamGraphPlanner().plan_async(
-        tm._build_team("ai-missing-capabilities"),
+        tm._build_team("ai-missing-capabilities", owner_account_id="local"),
         "开发一个登录接口",
         execution_profile={"requested_mode": "ai"},
         team_spec=_structured_team_spec(
@@ -8433,7 +8456,7 @@ async def test_team_graph_planner_standard_async_falls_back_to_role_dag_when_dec
             }],
         },
     ))
-    team = tm._build_team("standard-role-only")
+    team = tm._build_team("standard-role-only", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -8487,7 +8510,7 @@ async def test_team_graph_planner_standard_decision_failure_is_classified(
             }],
         },
     ))
-    team = tm._build_team("standard-decision-classification")
+    team = tm._build_team("standard-decision-classification", owner_account_id="local")
 
     graph_plan = await TeamGraphPlanner().plan_async(
         team,
@@ -8532,7 +8555,7 @@ def test_team_graph_planner_fast_profile_builds_minimal_dag():
             ]
         },
     ))
-    team = tm._build_team("fast-graph")
+    team = tm._build_team("fast-graph", owner_account_id="local")
 
     graph_plan = TeamGraphPlanner().plan(
         team,
@@ -8586,7 +8609,7 @@ def test_team_graph_planner_fast_mode_overrides_default_build_verification():
             ]
         },
     ))
-    team = tm._build_team("fast-build-no-verify")
+    team = tm._build_team("fast-build-no-verify", owner_account_id="local")
 
     graph_plan = TeamGraphPlanner().plan(
         team,
@@ -8642,7 +8665,7 @@ async def test_team_graph_planner_auto_fast_uses_work_unit_capability_contract()
     ))
 
     graph_plan = await TeamGraphPlanner().plan_async(
-        tm._build_team("auto-fast-capabilities"),
+        tm._build_team("auto-fast-capabilities", owner_account_id="local"),
         "实现登录接口",
         execution_profile={"requested_mode": "auto"},
         provider=OneUnitPlanningProvider(),
@@ -8677,7 +8700,7 @@ def test_team_graph_planner_fast_question_prefers_plan_or_docs_before_verify():
             ]
         },
     ))
-    team = tm._build_team("fast-question-primary")
+    team = tm._build_team("fast-question-primary", owner_account_id="local")
 
     graph_plan = TeamGraphPlanner().plan(
         team,
@@ -8709,7 +8732,7 @@ def test_team_graph_planner_fast_question_uses_leader_before_build_when_no_docs_
             ]
         },
     ))
-    team = tm._build_team("fast-question-leader")
+    team = tm._build_team("fast-question-leader", owner_account_id="local")
 
     graph_plan = TeamGraphPlanner().plan(
         team,
@@ -8749,7 +8772,7 @@ def test_team_graph_planner_fast_profile_adds_lightweight_verify_when_requested(
             ]
         },
     ))
-    team = tm._build_team("fast-verify")
+    team = tm._build_team("fast-verify", owner_account_id="local")
 
     graph_plan = TeamGraphPlanner().plan(
         team,
@@ -8842,7 +8865,7 @@ def test_team_runtime_accepts_fast_execution_profile():
             ]
         },
     ))
-    team = tm._build_team("runtime-fast")
+    team = tm._build_team("runtime-fast", owner_account_id="local")
 
     plan = tm._ensure_runtime_plan(
         "runtime-fast",
@@ -8893,7 +8916,7 @@ async def test_auto_fast_turn_decision_creates_fast_teamplan_without_planning_de
         ))
     ]
 
-    plan = tm.read_plan("auto-fast-turn")["plan"]
+    plan = tm.read_plan("auto-fast-turn", owner_account_id="local")["plan"]
     assert plan is not None
     assert [node["node_id"] for node in plan["nodes"]] == ["leader_plan", "fast_execute", "leader_summary"]
     fast_node = next(node for node in plan["nodes"] if node["node_id"] == "fast_execute")
@@ -8932,7 +8955,7 @@ async def test_explicit_fast_turn_decision_overrides_direct_chat_route():
         ))
     ]
 
-    plan = tm.read_plan("explicit-fast-turn")["plan"]
+    plan = tm.read_plan("explicit-fast-turn", owner_account_id="local")["plan"]
     assert plan is not None
     assert [node["node_id"] for node in plan["nodes"]] == ["leader_plan", "fast_execute", "leader_summary"]
     assert provider.planning_decision_calls == 0
@@ -8958,7 +8981,7 @@ async def test_team_mode_confirmation_followup_sets_execution_profile(monkeypatc
             ]
         },
     ))
-    team = tm._build_team("mode-confirm")
+    team = tm._build_team("mode-confirm", owner_account_id="local")
     captured: dict[str, object] = {}
 
     async def fake_send(session_id, questions, **kwargs):
@@ -9037,7 +9060,7 @@ async def test_team_runtime_auto_falls_back_to_standard_when_planning_decision_i
             ]
         },
     ))
-    team = tm._build_team("runtime-profile")
+    team = tm._build_team("runtime-profile", owner_account_id="local")
 
     plan = await tm._ensure_runtime_plan_async(
         "runtime-profile",
@@ -9063,7 +9086,7 @@ async def test_team_runtime_auto_falls_back_to_standard_when_planning_decision_i
 
 def test_team_runtime_reflection_records_event_and_retry_guidance():
     tm, _ = _team()
-    team = tm._build_team("runtime-reflect")
+    team = tm._build_team("runtime-reflect", owner_account_id="local")
     plan = tm._ensure_runtime_plan("runtime-reflect", team, "开发一个登录接口", "", owner_account_id="local")
     assert plan is not None
     node = next(item for item in plan.nodes.values() if item.assignee != "leader")
@@ -9084,7 +9107,7 @@ def test_team_runtime_reflection_records_event_and_retry_guidance():
 
 def test_team_runtime_reflection_inserts_diagnostic_replan_node():
     tm, _ = _team()
-    team = tm._build_team("runtime-replan")
+    team = tm._build_team("runtime-replan", owner_account_id="local")
     plan = tm._ensure_runtime_plan(
         "runtime-replan",
         team,
@@ -9743,7 +9766,7 @@ async def test_simple_team_message_goes_to_direct_leader_without_teamplan():
         async for chunk in tm.interact(Envelope.of("你好", session_id="simple-team", mode="team"))
     ]
 
-    assert tm.read_plan("simple-team")["plan"] is None
+    assert tm.read_plan("simple-team", owner_account_id="local")["plan"] is None
     assert any(chunk.kind == "status" and "直接回复" in str(chunk.body.get("message") or "") for chunk in chunks)
     assert any(chunk.kind == "final" and "你好" in str(chunk.body.get("text") or "") for chunk in chunks)
 
@@ -9810,9 +9833,9 @@ async def test_simple_message_direct_for_test_team_roles():
         async for chunk in tm.interact(Envelope.of("你好", session_id="test-team-simple", mode="team"))
     ]
 
-    assert tm.read_plan("test-team-simple")["plan"] is None
+    assert tm.read_plan("test-team-simple", owner_account_id="local")["plan"] is None
     assert tasks.list("test-team-simple") == []
-    assert tm._build_team("test-team-simple").bus.list_artifacts("test-team-simple") == []
+    assert tm._build_team("test-team-simple", owner_account_id="local").bus.list_artifacts("test-team-simple") == []
     assert any(chunk.kind == "status" and "直接回复" in str(chunk.body.get("message") or "") for chunk in chunks)
     assert any(chunk.kind == "final" and "你好" in str(chunk.body.get("text") or "") for chunk in chunks)
 
@@ -9855,7 +9878,7 @@ async def test_team_info_question_keeps_team_bubble_process_and_full_summary():
         async for chunk in tm.interact(Envelope.of("你的团队成员有哪些", session_id="team-info", mode="team"))
     ]
 
-    plan = tm.read_plan("team-info")["plan"]
+    plan = tm.read_plan("team-info", owner_account_id="local")["plan"]
     assert plan is not None
     assert not tasks.list("team-info")
     final_text = next(chunk.body["text"] for chunk in chunks if chunk.kind == "final")
@@ -9899,7 +9922,7 @@ async def test_team_status_question_keeps_full_result_without_direct_route_rule(
     ]
 
     assert provider.turn_decision_calls == 0
-    assert tm.read_plan("team-status")["plan"] is not None
+    assert tm.read_plan("team-status", owner_account_id="local")["plan"] is not None
     assert tasks.list("team-status")
     final_text = next(chunk.body["text"] for chunk in chunks if chunk.kind == "final")
     assert "我来查看当前团队运行状态" in final_text

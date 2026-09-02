@@ -25,7 +25,26 @@ current_request_id: ContextVar[str] = ContextVar("current_request_id", default="
 current_tool_call_id: ContextVar[str] = ContextVar("current_tool_call_id", default="")
 current_parent_task_id: ContextVar[str] = ContextVar("current_parent_task_id", default="")
 current_workspace_id: ContextVar[str] = ContextVar("current_workspace_id", default="default")
-current_owner_account_id: ContextVar[str] = ContextVar("current_owner_account_id", default="")
+
+# 本机免登录 owner 的固定账号 id。系统不存在"无主"数据：空 owner 一律归一到
+# local（本机用户就是一个普通 owner），多账号 owner（如 "email:xxx"）原样保留。
+# 归一只发生在系统边界（认证、CLI、ContextVar 写入点、存量数据回填）；
+# 边界之内 owner 恒非空，读取方无需任何防御。
+LOCAL_OWNER_ACCOUNT_ID = "local"
+
+
+def normalize_owner_account_id(value: str | None) -> str:
+    """把 owner_account_id 归一为非空字符串：空/None 回落到本机 owner。
+
+    仅供系统边界使用（认证入口、CLI 入口、ContextVar 写入点、遗留数据回填）。
+    """
+    owner = str(value or "").strip()
+    return owner or LOCAL_OWNER_ACCOUNT_ID
+
+
+current_owner_account_id: ContextVar[str] = ContextVar(
+    "current_owner_account_id", default=LOCAL_OWNER_ACCOUNT_ID
+)
 current_agent_workdir: ContextVar[str] = ContextVar("current_agent_workdir", default="")
 current_workspace_guard: ContextVar[dict[str, Any] | None] = ContextVar("current_workspace_guard", default=None)
 current_agent_id: ContextVar[str] = ContextVar("current_agent_id", default="")

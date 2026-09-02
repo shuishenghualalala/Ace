@@ -6,14 +6,21 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
+from crew.state.logging import get_logger
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
+
+log = get_logger("migration")
 
 OWNER_TABLE_LABELS = {
     "sessions": "会话",
     "session_agent_config": "会话 Agent 配置",
+    "channel_session_routes": "渠道会话路由",
     "workspaces": "工作空间",
     "cron_jobs": "定时任务",
     "runtime_tasks": "任务",
+    "notifications": "通知",
+    "compaction_summaries": "压缩摘要",
 }
 
 
@@ -94,6 +101,33 @@ def backfill_cron_owner_from_sessions(conn: sqlite3.Connection) -> int:
     return int(conn.execute("SELECT changes()").fetchone()[0] or 0)
 
 
+def backfill_empty_owner_rows(
+    conn: sqlite3.Connection,
+    tables: list[str] | None = None,
+    *,
+    owner_account_id: str = LOCAL_OWNER_ACCOUNT_ID,
+) -> dict[str, int]:
+    """把空 owner 行自动归一到指定账号（默认本机 ``local``）。
+
+    owner 统一后系统不存在"无主"数据：历史 ``owner=''`` 行属于本机场景。
+    回填策略（两步）：
+    1. ``UPDATE OR IGNORE`` 逐行归一——与既有目标 owner 行主键冲突的空行跳过；
+    2. 结束后仍残留的空行即冲突重复行，按"保归属行、删无主行"清除。
+    tables 缺省扫描 OWNER_TABLE_LABELS 全集；不存在的表自动跳过。
+    """
+    changed: dict[str, int] = {}
+    for table in tables or list(OWNER_TABLE_LABELS):
+        if not _has_owner_column(conn, table):
+            continue
+        conn.execute(
+            f"UPDATE OR IGNORE {table} SET owner_account_id = ? WHERE owner_account_id = ''",
+            (owner_account_id,),
+        )
+        changed[table] = int(conn.execute("SELECT changes()").fetchone()[0] or 0)
+        conn.execute(f"DELETE FROM {table} WHERE owner_account_id = ''")
+    return changed
+
+
 def inspect_and_backfill_legacy_owners(
     db_path: str | Path,
     *,
@@ -105,6 +139,10 @@ def inspect_and_backfill_legacy_owners(
     try:
         writer = SQLiteWriteHelper(conn, threading.Lock())
         backfilled = writer.execute(backfill_cron_owner_from_sessions)
+        claimed = writer.execute(backfill_empty_owner_rows)
+        total = sum(claimed.values())
+        if total:
+            log.info("已将 %d 条无主数据归属本机账号 %s", total, LOCAL_OWNER_ACCOUNT_ID)
         return legacy_owner_counts(conn), backfilled
     finally:
         conn.close()

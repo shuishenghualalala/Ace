@@ -134,9 +134,10 @@ def test_ring_buffer_filters_by_causal_owner_and_keeps_raw_thread_logs_system_on
         "causal-b",
         "causal-system",
     }
+    # owner 归一化后不存在"无主"日志：系统上下文（无 owner 环境变量）归属本机 local。
     assert next(item for item in admin["items"] if item["message"] == "causal-system")[
         "owner_account_id"
-    ] == ""
+    ] == "local"
 
 
 def test_setup_logging_without_env_keeps_passed_level(monkeypatch):
