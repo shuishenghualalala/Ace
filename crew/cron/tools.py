@@ -12,12 +12,18 @@ from crew.core.runctx import (
     current_session_id,
     current_session_source,
     current_workspace_id,
+    normalize_owner_account_id,
 )
 from crew.cron.jobs import CronJobStore, format_bj_timestamp
 from crew.tools.registry import Registry, tool_error, tool_result
 
 if TYPE_CHECKING:
     from crew.cron.scheduler import CronService
+
+
+def _current_owner() -> str:
+    """工具调用的归一化 owner；空上下文回落本机 owner，杜绝无主 cron 数据。"""
+    return normalize_owner_account_id(current_owner_account_id.get())
 
 
 # origin 投递只对「已注册外部 sender 的渠道」有效（见 gateway 装配的 DeliveryRouter）。
@@ -212,7 +218,7 @@ def register_cron_tools(
         if not (name and schedule and query):
             return tool_error("name / schedule / query 均不能为空")
         session_id = str(args.get("session_id") or current_session_id.get() or "cron")
-        owner = current_owner_account_id.get()
+        owner = _current_owner()
         origin_source = current_session_source.get() or {}
         deliver = str(args.get("deliver") or "").strip()
         deliver_note = ""
@@ -262,7 +268,7 @@ def register_cron_tools(
         )
 
     async def handle_list(args: dict[str, Any]) -> str:
-        owner = current_owner_account_id.get()
+        owner = _current_owner()
         if args.get("all"):
             jobs = store.list(owner_account_id=owner)
         elif "session_id" in args:
@@ -293,7 +299,7 @@ def register_cron_tools(
         job_id = str(args.get("id", "")).strip()
         if not job_id:
             return tool_error("id 不能为空")
-        owner = current_owner_account_id.get()
+        owner = _current_owner()
         job = store.get(job_id, owner_account_id=owner)
         if job is None:
             return tool_error(f"任务不存在: {job_id}")
@@ -311,7 +317,7 @@ def register_cron_tools(
 
     async def handle_delete(args: dict[str, Any]) -> str:
         job_id = str(args.get("id", "")).strip()
-        owner = current_owner_account_id.get()
+        owner = _current_owner()
         ok = store.delete(job_id, owner_account_id=owner)
         if ok and service is not None:
             service.sync_job(job_id, owner_account_id=owner)
@@ -319,17 +325,17 @@ def register_cron_tools(
 
     async def handle_pause(args: dict[str, Any]) -> str:
         job_id = str(args.get("id", "")).strip()
-        ok = store.set_enabled(job_id, False, owner_account_id=current_owner_account_id.get())
+        ok = store.set_enabled(job_id, False, owner_account_id=_current_owner())
         if ok and service is not None:
-            service.sync_job(job_id, owner_account_id=current_owner_account_id.get())
+            service.sync_job(job_id, owner_account_id=_current_owner())
         return tool_result(paused=ok, id=job_id) if ok else tool_error(f"任务不存在: {job_id}")
 
     async def handle_resume(args: dict[str, Any]) -> str:
         job_id = str(args.get("id", "")).strip()
-        owner = current_owner_account_id.get()
+        owner = _current_owner()
         ok = store.set_enabled(job_id, True, owner_account_id=owner)
         if ok and service is not None:
-            service.sync_job(job_id, owner_account_id=current_owner_account_id.get())
+            service.sync_job(job_id, owner_account_id=_current_owner())
         refreshed = store.get(job_id, owner_account_id=owner) if ok else None
         if ok:
             next_run_at = refreshed["next_run_at"] if refreshed else 0

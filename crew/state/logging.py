@@ -17,7 +17,6 @@ import contextlib
 import contextvars
 import json
 import logging
-import os
 import re
 import sys
 import threading
@@ -29,7 +28,7 @@ from typing import Any, Iterator
 from rich.console import Console
 from rich.logging import RichHandler
 
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import current_owner_account_id, normalize_owner_account_id
 
 
 def _ensure_utf8_stdio() -> None:
@@ -162,7 +161,7 @@ class RingBufferHandler(logging.Handler):
                 "message": self.format(record),
                 # Capture ownership when the event is created. Query-time identity
                 # cannot reconstruct which request/background task caused a log.
-                "owner_account_id": str(current_owner_account_id.get() or "").strip(),
+                "owner_account_id": normalize_owner_account_id(current_owner_account_id.get()),
             }
         except Exception:  # noqa: BLE001 - 缓冲失败不能影响主流程
             return
@@ -302,9 +301,12 @@ def llm_trace(direction: str, payload: dict[str, Any]) -> None:
         return
     if "owner_account_id" not in payload:
         try:
-            from crew.core.runctx import current_owner_account_id
+            from crew.core.runctx import (  # noqa: F401 - 局部导入避免循环依赖
+                current_owner_account_id,
+                normalize_owner_account_id,
+            )
 
-            owner_account_id = current_owner_account_id.get()
+            owner_account_id = normalize_owner_account_id(current_owner_account_id.get())
         except Exception:  # noqa: BLE001 - trace 不能影响主流程
             owner_account_id = ""
         if owner_account_id:

@@ -27,7 +27,7 @@ from typing import Any, AsyncIterator, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.errors import ProviderError, ToolError
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import current_owner_account_id, normalize_owner_account_id
 from crew.core.interfaces import MessageHandler, SessionStore
 from crew.core.types import Message
 from crew.gateway.hooks import hook_registry
@@ -483,7 +483,7 @@ class SessionDispatcher:
     # ------------------------------------------------------------------ #
     async def run(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
         """Run one turn under the causally verified Owner logging context."""
-        token = current_owner_account_id.set(str(envelope.user_id or "").strip())
+        token = current_owner_account_id.set(normalize_owner_account_id(envelope.user_id))
         try:
             async for chunk in self._run_owned(envelope):
                 yield chunk

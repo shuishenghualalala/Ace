@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from crew.browser.manager import BrowserManager
-from crew.core.runctx import current_agent_workdir, current_owner_account_id, current_session_id
+from crew.core.runctx import (
+    current_agent_workdir,
+    current_owner_account_id,
+    current_session_id,
+    normalize_owner_account_id,
+)
 from crew.tools.registry import Registry
 
 
@@ -202,7 +207,11 @@ BROWSER_UI_LABELS = {
 
 
 def _ctx() -> tuple[str, str, str]:
-    return current_owner_account_id.get(), current_session_id.get(), current_agent_workdir.get()
+    return (
+        normalize_owner_account_id(current_owner_account_id.get()),
+        current_session_id.get(),
+        current_agent_workdir.get(),
+    )
 
 
 def register_browser_tools(registry: Registry, manager: BrowserManager) -> None:

@@ -1196,7 +1196,8 @@ async def test_cron_create_origin_on_local_source_rewritten_with_note(tmp_path):
     payload = json.loads(res.content)
     assert payload["deliver"] == "new_session"
     assert "origin 不可用" in payload["note"]
-    assert store.list()[0]["deliver"] == "new_session"
+    # 工具无 owner 上下文时归一为本机 local，任务不再落无主层。
+    assert store.list(owner_account_id="local")[0]["deliver"] == "new_session"
 
 
 async def test_cron_service_run_now_creates_manual_fire_and_new_session():
