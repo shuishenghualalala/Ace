@@ -65,7 +65,7 @@
       <tr><td>Driver 分派</td><td>优先按开放 mode 从共享 Registry 解析并执行，同时自动持有 Driver Generation Lease。</td><td>已落地</td></tr>
       <tr><td>默认 Agent Driver</td><td><code>agent</code> 兼容 ID 与 <code>agent.default</code> 稳定 ID 指向同一 Core Driver。</td><td>已落地</td></tr>
       <tr><td>业务 Driver Adapter</td><td>Team 与 Dynamic Kanban Manager 通过独立 FeatureScope 注册旧 mode，不进入核心分支。</td><td>已落地</td></tr>
-      <tr><td>上下文贡献</td><td>请求阶段按优先级执行 Feature-owned Contributor；Host 仅拥有结构化路径边界。</td><td>已落地</td></tr>
+      <tr><td>上下文贡献</td><td>请求阶段按优先级执行 Feature-owned Contributor；Host 拥有结构化路径桥，Gateway 拥有 Session Source Handler。</td><td>已落地</td></tr>
       <tr><td>关闭编排</td><td>先停止 Dispatcher，并行 drain 所有内置 Feature Scope（Driver 与 Context Contributor），再关闭业务服务、Provider、插件和 Store。</td><td>已落地</td></tr>
     </tbody>
   </table>
@@ -97,7 +97,7 @@ async for chunk in app.handle(envelope):
   <ul class="todo">
     <li>把默认 Agent Scope 从同步组合根桥接迁为完整 Core FeatureDefinition，并进入统一启动审计。</li>
     <li>把 Team 与 Dynamic Kanban 的 Manager、Store 和后台任务所有权从桥接 Scope 逐步迁入完整 Product Feature。</li>
-    <li>将 Session Source、Cron、后台通知、Wiki Attachment 与 Plan 逐项迁入 Context Contributor。</li>
+    <li>将 Cron、后台通知、Wiki Attachment 与 Plan 逐项迁入 Context Contributor。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
@@ -114,10 +114,11 @@ async for chunk in app.handle(envelope):
       <tr><td>2026-09-03</td><td>接入 Execution Driver Registry，并迁移默认 Agent 执行入口。</td><td><code>CrewApp.handle</code>、默认 Agent Scope、未知 mode 错误。</td></tr>
       <tr><td>2026-09-03</td><td>将 Team 与 Dynamic Kanban 包装为 Feature-owned Driver Adapter，删除最后两个业务 mode 分支。</td><td><code>CrewApp.handle</code>、内置 Driver Scope、关闭顺序。</td></tr>
       <tr><td>2026-09-03</td><td>接入 Context Contributor Registry，迁移结构化路径与 Browser 标签页引用。</td><td>请求前处理、FeatureScope、Browser 插件。</td></tr>
+      <tr><td>2026-09-03</td><td>装配 Gateway Session Source Contributor，统一输出来源字典和动态模型上下文。</td><td>请求前处理、Gateway/Agent 边界。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0009-context-contributor-registry.html">ADR-0009</a> · <a href="../../testing/plugin-architecture-stage-2-context-contributors.html">测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0010-session-source-context-contributor.html">ADR-0010</a> · <a href="../../testing/plugin-architecture-stage-2-session-context.html">测试记录</a></div>
 </div>
 </body>
 </html>

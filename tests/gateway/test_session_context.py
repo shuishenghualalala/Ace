@@ -1,9 +1,11 @@
 """测试会话上下文构建。"""
 
 
+from crew.core.envelope import Envelope
 from crew.gateway.session_context import (
     SessionContext,
     SessionSource,
+    build_session_context_contribution,
     build_session_context_prompt,
     build_session_key,
 )
@@ -166,3 +168,32 @@ def test_session_context_to_dict():
     assert data["workspace_id"] == "workspace-1"
     assert "web" in data["connected_platforms"]
     assert data["source"]["platform"] == "web"
+
+
+async def test_session_context_contribution_normalizes_mapping_and_prompt(tmp_path):
+    envelope = Envelope.of(
+        "hello",
+        session_id="session-123",
+        user_id="owner-a",
+        params={
+            "workspace_root_path": str(tmp_path),
+            "session_context": {
+                "source": {
+                    "platform": "feishu",
+                    "chat_id": "chat-a",
+                    "chat_type": "group",
+                    "user_id": "user-a",
+                },
+                "connected_platforms": ["local", "feishu"],
+                "shared_multi_user": True,
+            },
+        },
+    )
+
+    contribution = await build_session_context_contribution(envelope)
+
+    assert contribution is not None
+    assert contribution.params["session_source"]["platform"] == "feishu"
+    assert contribution.params["session_source"]["chat_id"] == "chat-a"
+    assert "当前会话上下文" in contribution.prompt_parts[0]
+    assert str(tmp_path) in contribution.prompt_parts[0]

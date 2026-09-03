@@ -1016,6 +1016,18 @@ async def test_revision_intent_gets_hidden_turn_framing():
     assert "最终答案" in reminder
 
 
+async def test_feature_context_fragments_are_dynamic_not_static():
+    """Feature runtime context stays out of the prefix-stable system prompt."""
+    agent = _agent(FakeProvider(script=[]))
+    env = Envelope.of("hello", session_id="s-context", channel="web")
+    env.params["_context_prompt_parts"] = ["## 当前会话上下文\n**来源:** Web"]
+
+    system_static, reminder = await agent._build_prompts(env, [])
+
+    assert "当前会话上下文" not in system_static
+    assert "当前会话上下文" in reminder
+
+
 async def test_read_attachment_rejects_oversized_file(tmp_path, monkeypatch):
     """附件读取对超大文件应读前拒绝，而非整读进内存。"""
     from crew.agent import runtime as rt

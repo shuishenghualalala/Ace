@@ -1,21 +1,24 @@
-"""会话上下文：消息来源跟踪与动态系统提示注入。
+"""Gateway-owned session source, delivery metadata, and context contribution.
 
-用于 gateway/session.py 的 SessionSource + SessionContext + build_session_context_prompt，
-但只保留核心结构，不迁移 Crew 的重型 SessionStore（已有 crew.state.SessionStore）、
-PII 脱敏、WhatsApp 特定逻辑、复杂会话重置策略。
+This module keeps the routing data contract independent from SessionStore and
+publishes its model-visible snapshot through the shared Context Contributor path.
 
 SessionSource 描述"消息从哪来"（平台、渠道、用户），用于：
 1. 路由响应回正确位置
-2. 注入上下文到系统提示（告诉 Agent 当前在哪个平台/渠道）
+2. 贡献动态模型上下文（告诉 Agent 当前在哪个平台/渠道）
 3. 追踪来源用于 cron 投递
 
-SessionContext 包装 SessionSource + 全局配置，生成动态系统提示段落。
+SessionContext wraps SessionSource and connected-platform metadata. Agent Runtime
+consumes only the generic contribution output and does not import this module.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+
+from crew.core.envelope import Envelope
+from crew.features.context import ContextContribution
 
 
 @dataclass
@@ -109,15 +112,34 @@ class SessionContext:
             "workspace_id": self.workspace_id,
         }
 
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict[str, Any],
+        *,
+        session_id: str = "",
+        workspace_id: str = "default",
+    ) -> SessionContext:
+        raw_source = data.get("source", data)
+        if not isinstance(raw_source, dict):
+            raise TypeError("session context source must be a mapping")
+        return cls(
+            source=SessionSource.from_dict(raw_source),
+            connected_platforms=list(data.get("connected_platforms") or []),
+            shared_multi_user=bool(data.get("shared_multi_user")),
+            session_id=str(data.get("session_id") or session_id),
+            workspace_id=str(data.get("workspace_id") or workspace_id),
+        )
+
 
 def build_session_context_prompt(
     context: SessionContext,
     *,
     workspace_path: str | None = None,
 ) -> str:
-    """构建动态系统提示段落，告诉 Agent 当前会话上下文。
+    """构建动态模型上下文片段，告诉 Agent 当前会话上下文。
 
-    注入到系统提示，让 Agent 知道：
+    通过 Context Contributor 注入，让 Agent 知道：
     - 消息来自哪个平台/渠道
     - 哪些平台已连接
     - 定时任务输出可投递到哪里
@@ -182,6 +204,37 @@ def build_session_context_prompt(
     lines.append("*若要明确指定目标，使用 `\"platform:chat_id\"` 格式（如用户提供了具体聊天 ID）。*")
 
     return "\n".join(lines)
+
+
+async def build_session_context_contribution(
+    envelope: Envelope,
+) -> ContextContribution | None:
+    """Normalize Gateway session metadata into generic runtime context."""
+    raw = envelope.params.get("session_context")
+    if isinstance(raw, SessionContext):
+        context = raw
+    elif isinstance(raw, dict):
+        context = SessionContext.from_dict(
+            raw,
+            session_id=envelope.session_id,
+            workspace_id=envelope.workspace_id,
+        )
+    else:
+        return None
+
+    workspace_path = str(
+        envelope.params.get("cwd")
+        or envelope.params.get("workspace_root_path")
+        or ""
+    ).strip()
+    prompt = build_session_context_prompt(
+        context,
+        workspace_path=workspace_path or None,
+    )
+    return ContextContribution(
+        params={"session_source": context.source.to_dict()},
+        prompt_parts=(prompt,),
+    )
 
 
 def build_session_key(

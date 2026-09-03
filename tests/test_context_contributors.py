@@ -23,6 +23,7 @@ from crew.features import (
     FeatureState,
     FeatureStopPolicy,
 )
+from crew.gateway.session_context import SessionContext, SessionSource
 from crew.state.config import Config
 
 
@@ -260,13 +261,26 @@ async def test_app_uses_host_and_browser_owned_context_contributors(
         }
         assert "host.reference.structured-path" in contributor_ids
         assert "browser.reference.tab" in contributor_ids
+        assert "gateway.session.source" in contributor_ids
 
         envelope = Envelope.of(
             "inspect @file:notes.md @browser_tab:tab-a",
             session_id="s1",
             user_id="owner-a",
             mode="test.context",
-            params={"workspace_root_path": str(workspace)},
+            params={
+                "workspace_root_path": str(workspace),
+                "session_context": SessionContext(
+                    source=SessionSource(
+                        platform="web",
+                        chat_id="chat-a",
+                        user_id="owner-a",
+                        user_name="AHUAMAO",
+                    ),
+                    connected_platforms=["local", "web"],
+                    session_id="s1",
+                ),
+            },
         )
         chunks = [chunk async for chunk in app.handle(envelope)]
 
@@ -277,6 +291,18 @@ async def test_app_uses_host_and_browser_owned_context_contributors(
         ]
         assert envelope.params["browser_tab_references"][0]["tab_id"] == "tab-a"
         assert "browser body" in envelope.params["_context_prompt_parts"][0]
+        assert "当前会话上下文" in envelope.params["_context_prompt_parts"][1]
+        assert envelope.params["session_source"] == {
+            "platform": "web",
+            "chat_id": "chat-a",
+            "chat_name": None,
+            "chat_type": "dm",
+            "user_id": "owner-a",
+            "user_name": "AHUAMAO",
+            "thread_id": None,
+            "guild_id": None,
+            "message_id": None,
+        }
 
         assert await app.plugins.unload_plugin_async("browser")
         remaining_ids = {
@@ -285,6 +311,7 @@ async def test_app_uses_host_and_browser_owned_context_contributors(
         }
         assert "browser.reference.tab" not in remaining_ids
         assert "host.reference.structured-path" in remaining_ids
+        assert "gateway.session.source" in remaining_ids
     finally:
         await app.plugins.feature_runtime.deactivate(feature_id)
         await app.shutdown()

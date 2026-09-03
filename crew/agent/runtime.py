@@ -50,12 +50,6 @@ from crew.agent.loop.control import TurnControl
 from crew.agent.plan import get_plan_mode_attachment_messages
 from crew.wiki.attachments import get_wiki_agent_attachment_messages
 from crew.agent.prompt_builder import DEFAULT_AGENT_IDENTITY, build_prompt_parts
-from crew.gateway.session_context import (
-    SessionContext,
-    SessionSource,
-    build_session_context_prompt,
-    session_context_from_envelope,
-)
 from crew.plugins.manager import PluginManager, TerminalOutcome
 from crew.state.logging import get_logger, llm_trace
 from crew.state.home import external_session_workspace_path, task_workspace_path, safe_path_segment
@@ -65,16 +59,21 @@ log = get_logger("agent")
 
 def _session_source_for_run(envelope: Envelope) -> dict[str, Any]:
     """Return a serializable source snapshot for tools invoked in this turn."""
-    ctx_raw = envelope.params.get("session_context")
-    if isinstance(ctx_raw, SessionContext):
-        return ctx_raw.source.to_dict()
-    if isinstance(ctx_raw, dict):
-        try:
-            raw_source = ctx_raw.get("source", ctx_raw)
-            return SessionSource.from_dict(raw_source).to_dict()
-        except Exception:  # noqa: BLE001
-            pass
-    return session_context_from_envelope(envelope, []).source.to_dict()
+    normalized = envelope.params.get("session_source")
+    if isinstance(normalized, dict):
+        return dict(normalized)
+    params = envelope.params
+    return {
+        "platform": str(envelope.channel or "web"),
+        "chat_id": str(params.get("platform_chat_id") or envelope.session_id),
+        "chat_name": params.get("platform_chat_name"),
+        "chat_type": str(params.get("platform_chat_type") or "dm"),
+        "user_id": params.get("platform_uid") or envelope.user_id,
+        "user_name": params.get("platform_user_name"),
+        "thread_id": params.get("platform_thread_id"),
+        "guild_id": None,
+        "message_id": params.get("platform_message_id"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -447,27 +446,6 @@ class SingleAgent(Agent):
         # 从而覆盖 SOUL.md 中的通用 Crew 身份。
         if self.system_prompt and self.system_prompt != DEFAULT_AGENT_IDENTITY:
             system_static = f"{system_static}\n\n{self.system_prompt}"
-
-        # 会话来源上下文（B1）：gateway 经 envelope.params["session_context"] 注入
-        ctx_raw = envelope.params.get("session_context")
-        if isinstance(ctx_raw, SessionContext):
-            ctx_prompt = build_session_context_prompt(ctx_raw, workspace_path=cwd)
-            system_static = f"{system_static}\n\n{ctx_prompt}"
-        elif isinstance(ctx_raw, dict):
-            try:
-                from crew.gateway.session_context import SessionSource
-
-                source = SessionSource.from_dict(ctx_raw.get("source", ctx_raw))
-                ctx = SessionContext(
-                    source=source,
-                    connected_platforms=list(ctx_raw.get("connected_platforms") or []),
-                    shared_multi_user=bool(ctx_raw.get("shared_multi_user")),
-                    session_id=str(ctx_raw.get("session_id") or envelope.session_id),
-                    workspace_id=str(ctx_raw.get("workspace_id") or envelope.workspace_id),
-                )
-                system_static = f"{system_static}\n\n{build_session_context_prompt(ctx, workspace_path=cwd)}"
-            except Exception:  # noqa: BLE001
-                log.debug("session_context 解析失败，跳过注入")
 
         # 动态内容 + 附件
         reminder_parts = [prompt_parts["user_reminder"]]

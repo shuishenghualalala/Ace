@@ -47,6 +47,7 @@ from crew.features import (
 )
 from crew.gateway.dispatcher import BusyMode, SessionDispatcher
 from crew.gateway.helpers import session_external_agent_id
+from crew.gateway.session_context import build_session_context_contribution
 from crew.memory.simple import SQLiteMemory
 from crew.plugins.builtin import LoggingPlugin
 from crew.plugins.manager import PluginManager
@@ -528,6 +529,21 @@ class CrewApp:
                 model_visible=False,
                 persistent=False,
                 description="Workspace-bounded structured path grants",
+            ),
+        )
+        self._register_context_contributor_scope(
+            "gateway.session-context",
+            ContextContributor(
+                contributor_id="gateway.session.source",
+                handler=build_session_context_contribution,
+                phase=ContextPhase.REQUEST,
+                priority=300,
+                predicate=lambda envelope: (
+                    envelope.params.get("session_context") is not None
+                ),
+                model_visible=True,
+                persistent=False,
+                description="Normalized session source and delivery context",
             ),
         )
         # 对话级 Plan 模式管理器（由 build_app 装配后赋值）
