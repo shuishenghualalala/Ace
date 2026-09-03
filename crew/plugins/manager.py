@@ -708,6 +708,16 @@ class PluginContext:
             unregister()
             raise
 
+        # 同一贡献同步落入 Feature Runtime 的 Route Registry：Gateway 启动期
+        # 从注册表装配并加闸门；Scope 释放时注册项摘除，闸门随即对该插件的
+        # API 返回 capability_unavailable（FastAPI 路由树本身不热卸载）。
+        self._feature_context.register_api_router(
+            router,
+            prefix=f"/api/plugins/{key.strip('/')}",
+            contribution_id=f"plugin:{key}",
+            description=f"directory plugin {key} API",
+        )
+
     def notify_dashboard(self, kind: str = "audit_updated", body: dict[str, Any] | None = None, owner_id: str = "") -> None:
         """向当前用户的前端 Dashboard 推送自定义事件（通过 WebSocket）。
 
