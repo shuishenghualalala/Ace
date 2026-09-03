@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0007 · Execution Driver Registry</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0007 · Execution Driver Registry</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-03 · 阶段：插件架构 Stage 2 / Commit 1</div>
+
+  <h2>背景</h2>
+  <p><code>CrewApp.handle()</code> 直接判断 agent、team 和 dynamic_kanban。新增模式需要改中心文件，未知字符串还会落入默认 Agent，既不利于能力隔离，也无法让 Feature 停用真正撤销执行入口。仅建立普通字典同样不够：Driver 的活跃请求必须参与 Generation drain，更新时还要保证新旧实现原子切换。</p>
+
+  <h2>决定</h2>
+  <div class="decision"><p>建立共享的 ExecutionDriverRegistry。mode 是开放的小写稳定标识；Driver 只能由 FeatureScope 注册，解析只返回 Active Generation，dispatch 自动持有该 Generation 的请求 Lease。</p></div>
+  <table>
+    <thead><tr><th>边界</th><th>决定</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>所有权</td><td>注册返回 RegistrationToken，Contribution 阶段先于资源撤销。</td><td>Feature 停用或插件卸载后 mode 自动消失。</td></tr>
+      <tr><td>Generation</td><td>同一 Feature 可暂存 Activating 新代；提交后选择序号最新的 Active Driver。</td><td>replace 更新不产生路由空窗，旧代无法误删新代。</td></tr>
+      <tr><td>请求</td><td>dispatch 在调用 Handler 前获取 <code>execution:&lt;request_id&gt;</code> Lease。</td><td>drain 拒绝新请求并等待当前流结束。</td></tr>
+      <tr><td>协议</td><td><code>Envelope.mode</code> 从业务 Literal 改为开放字符串。</td><td>新增 mode 不需要修改 Core 类型。</td></tr>
+      <tr><td>失败</td><td>未注册 mode 返回最终 error chunk，稳定码为 <code>capability_unavailable</code>。</td><td>调用方不会把拼写错误静默执行成默认 Agent。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>首个真实消费者</h2>
+  <p>默认单 Agent 路径已从 <code>handle()</code> 尾部移入 Driver Handler。旧 ID <code>agent</code> 与稳定 ID <code>agent.default</code> 由同一 Core FeatureScope 提供，保持客户端兼容。FeatureRuntime 与 PluginContext 暴露同一注册入口，目录插件可以提供新 mode，并在卸载时由 Scope 自动撤销。</p>
+
+  <h2>迁移边界</h2>
+  <ul>
+    <li>Team 和 Dynamic Kanban 本切片仍保留旧分支；下一切片将 Manager 包装为 Feature-owned Driver 后删除分支。</li>
+    <li>Owner、Workspace、安全启动参数和后台通知仍是 Host 公共前处理；后续由 Context Contributor 继续拆分。</li>
+    <li>默认 Agent Scope 目前由同步组合根创建，以保证未调用 startup 的既有入口仍可运行；Core Feature 完整迁移后进入统一启动审计。</li>
+    <li>ResponseChunk 的业务 kind 未在本切片改动，避免同时改变路由与前端事件协议。</li>
+  </ul>
+
+  <h2>设计核查</h2>
+  <p>外部插件生命周期实现表明，注册项必须由执行它的生命周期单元精确持有，清理需要可等待且不能依赖全局名称删除。Ace 的 Driver Registry 因此复用 FeatureScope、RegistrationToken、Generation 可见性和 Lease，而不再建立第二套卸载清单。</p>
+
+  <h2>跨平台</h2>
+  <p>Registry、流式 dispatch 和 drain 仅使用 Python 对象与 asyncio，不依赖 Unix signal、fork、文件锁或平台路径语义；macOS、Linux 与 Windows 使用同一代码路径。</p>
+
+  <div class="nav"><a href="0006-feature-generation-update.html">ADR-0006</a> · <a href="../modules/plugins.html">Feature / Plugin 模块文档</a> · <a href="../modules/app.html">App 模块文档</a> · <a href="../../testing/plugin-architecture-stage-2-execution-driver.html">测试记录</a></div>
+</div>
+</body>
+</html>

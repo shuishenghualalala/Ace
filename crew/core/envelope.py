@@ -24,7 +24,7 @@ ChunkKind = Literal[
     "team_internal",
 ]
 Status = Literal["in_progress", "succeeded", "failed"]
-Mode = Literal["agent", "team", "dynamic_kanban"]
+Mode = str
 
 
 def _new_id(prefix: str) -> str:
@@ -161,11 +161,20 @@ class ResponseChunk:
         )
 
     @staticmethod
-    def error(request_id: str, message: str, sequence: int = 0) -> "ResponseChunk":
+    def error(
+        request_id: str,
+        message: str,
+        sequence: int = 0,
+        *,
+        code: str | None = None,
+    ) -> "ResponseChunk":
+        body = {"message": message}
+        if code:
+            body["code"] = code
         return ResponseChunk(
             request_id,
             kind="error",
-            body={"message": message},
+            body=body,
             sequence=sequence,
             is_final=True,
             status="failed",

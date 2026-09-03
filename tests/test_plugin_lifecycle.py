@@ -6,8 +6,14 @@ import asyncio
 
 import pytest
 
+from crew.core.envelope import Envelope
 from crew.core.types import ToolCall, ToolPermissionDecision
-from crew.features import FeatureLeaseUnavailableError, FeatureState, RegistrationPhase
+from crew.features import (
+    ExecutionDriverUnavailableError,
+    FeatureLeaseUnavailableError,
+    FeatureState,
+    RegistrationPhase,
+)
 from crew.plugins.manager import PluginManager
 from crew.state.plugin_preferences import (
     PluginPreferencesStore,
@@ -153,6 +159,45 @@ async def test_plugin_skill_root_resolves_against_plugin_dir(tmp_path):
     roots = plugins.plugin_skill_roots()
     assert len(roots) == 1
     assert roots[0].endswith("lifecycle_plugin/skills")
+
+
+async def test_plugin_execution_driver_is_owned_and_removed_on_unload(tmp_path):
+    plugin_dir = tmp_path / "mode_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: mode_plugin\nversion: 1.0.0\nkind: standalone\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+from crew.core.envelope import ResponseChunk
+
+async def execute(envelope):
+    yield ResponseChunk.final(envelope.request_id, envelope.query.upper())
+
+def register(ctx):
+    ctx.register_execution_driver(
+        "plugin.echo",
+        execute,
+        capabilities=("demo.echo",),
+        description="Plugin echo driver",
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    plugins = PluginManager(registry=Registry(), services={"config": object()})
+    await plugins.discover_and_load_async([tmp_path], enabled=["mode_plugin"])
+
+    envelope = Envelope.of("hello", session_id="s1", mode="plugin.echo")
+    chunks = [
+        chunk
+        async for chunk in plugins.feature_runtime.execution_drivers.dispatch(envelope)
+    ]
+    assert chunks[-1].body["text"] == "HELLO"
+    assert await plugins.unload_plugin_async("mode_plugin")
+
+    with pytest.raises(ExecutionDriverUnavailableError):
+        plugins.feature_runtime.execution_drivers.resolve("plugin.echo")
 
 
 async def test_failed_install_rolls_back_contributions_and_async_resource(tmp_path):

@@ -35,6 +35,7 @@ from crew.features.manager import (
     FeatureStartupAudit,
     FeatureUpdateStrategy,
 )
+from crew.features.drivers import ExecutionDriver, ExecutionDriverHandler
 from crew.features.dependencies import FeatureServiceDependencies
 from crew.features.runtime import (
     FeatureActivationError,
@@ -380,6 +381,24 @@ class PluginContext:
             value,
             scope_kind=scope_kind,
             scope_path=scope_path,
+        )
+
+    def register_execution_driver(
+        self,
+        mode: str,
+        handler: ExecutionDriverHandler,
+        *,
+        capabilities: tuple[str, ...] = (),
+        description: str = "",
+    ) -> RegistrationToken:
+        """Publish an open execution mode under this plugin Generation."""
+        return self._feature_context.register_execution_driver(
+            ExecutionDriver(
+                mode=mode,
+                execute=handler,
+                capabilities=capabilities,
+                description=description,
+            )
         )
 
     def resolve_service(self, key: str | ServiceKey[Any]) -> Any:

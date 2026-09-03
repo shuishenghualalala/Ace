@@ -7,6 +7,14 @@ from crew.features.dependencies import (
     FeatureDependencyResolution,
     FeatureServiceDependencies,
 )
+from crew.features.drivers import (
+    ExecutionDriver,
+    ExecutionDriverBinding,
+    ExecutionDriverConflictError,
+    ExecutionDriverHandler,
+    ExecutionDriverRegistry,
+    ExecutionDriverUnavailableError,
+)
 from crew.features.manager import (
     FeatureDiagnostic,
     FeatureDefinition,
@@ -85,6 +93,12 @@ __all__ = [
     "FeatureUpdateRejectedError",
     "FeatureUpdateResult",
     "FeatureUpdateStrategy",
+    "ExecutionDriver",
+    "ExecutionDriverBinding",
+    "ExecutionDriverConflictError",
+    "ExecutionDriverHandler",
+    "ExecutionDriverRegistry",
+    "ExecutionDriverUnavailableError",
     "RegistrationPhase",
     "RegistrationState",
     "RegistrationToken",

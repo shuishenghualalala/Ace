@@ -74,6 +74,7 @@
       <tr><td>请求 Lease</td><td>插件 Tool、Hook、Middleware、Command 入口自动持有 Generation 租约；draining 后拒绝新请求。</td><td>已落地</td></tr>
       <tr><td>停用策略</td><td>Manifest 声明 drain/cancel/immediate/restart_required 与超时；失败不提前标记 disabled。</td><td>已落地</td></tr>
       <tr><td>配置 Generation 更新</td><td><code>replace</code> 原子发布新代后退役旧代；<code>restart</code> 先停旧代并在新代失败时恢复旧配置。</td><td>已落地</td></tr>
+      <tr><td>Execution Driver Registry</td><td>开放 mode 的 Handler 由 FeatureScope 注册，执行自动持有 Lease；新旧 Generation 可原子替换。</td><td>首个切片已落地</td></tr>
     </tbody>
   </table>
 
@@ -83,6 +84,7 @@
     <tbody>
       <tr><td><code>crew/features/runtime.py</code></td><td>Generation、desired/effective revision、Registration Token、请求 Lease、四类停用策略、Scope、Transaction 和结构化生命周期错误。</td></tr>
       <tr><td><code>crew/features/services.py</code></td><td>作用域化 Service Registry、注册所有权和同一 Feature 新旧 Generation 的暂存切换。</td></tr>
+      <tr><td><code>crew/features/drivers.py</code></td><td>Execution Driver 定义、生命周期所有权、开放 mode 解析和请求分派。</td></tr>
       <tr><td><code>crew/features/dependencies.py</code></td><td>Feature 服务依赖声明、运行期解析和启动诊断。</td></tr>
       <tr><td><code>crew/features/manager.py</code></td><td>FeatureDefinition、InstallContext、运行记录、串行启停和 replace/restart 更新调度。</td></tr>
       <tr><td><code>crew/plugins/manager.py</code></td><td>插件发现、状态管理、<code>PluginContext</code> 和贡献撤销。</td></tr>
@@ -146,6 +148,15 @@ async with context.acquire_lease("request:42"):
     )
 )</code></pre>
   <p>更新请求必须提交递增且已验证的不可变定义。<code>replace</code> 允许同一 Feature 的新旧 Generation 短暂并存：新服务仅在新 Scope 提交后可见，Registry 选择最新 Active Generation，旧代随后关闭 Lease 入口并退役。<code>restart</code> 用于独占资源：先 drain 并清理旧代，再安装新代；安装失败会以旧定义创建恢复 Generation。失败期间 desired revision 保留用户意图，effective revision 始终反映实际运行配置。</p>
+  <pre><code>ctx.register_execution_driver(
+    "feature.echo",
+    execute,
+    capabilities=("demo.echo",),
+)
+
+async for chunk in runtime.execution_drivers.dispatch(envelope):
+    ...</code></pre>
+  <p>Feature 与目录插件共享同一个 Driver Registry。注册发生在 Activating Scope 时仍不可见，Scope 提交后才可解析；Driver 执行自动持有所属 Generation Lease，插件卸载或 Feature 停用后 mode 贡献随 Token 一起撤销。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
@@ -173,10 +184,11 @@ async with context.acquire_lease("request:42"):
       <tr><td>2026-09-02</td><td>Manifest 服务依赖进入激活图，增加 Host Service 桥、启动审计与 Feature dump。</td><td>Feature Runtime、PluginManager、CLI、Browser、Wiki Learning、Feishu。</td></tr>
       <tr><td>2026-09-02</td><td>增加请求 Lease、四类 Manifest 停用策略、超时与强制清理诊断。</td><td>Feature Runtime、Plugin Adapter、全部内置目录插件。</td></tr>
       <tr><td>2026-09-03</td><td>增加 replace/restart 配置更新、双 Generation 服务切换、旧代退役和失败恢复。</td><td>Feature Runtime、Service Registry、目录插件 Manifest。</td></tr>
+      <tr><td>2026-09-03</td><td>增加 Feature-owned Execution Driver Registry 和目录插件注册入口。</td><td>Feature Runtime、PluginContext、CrewApp 默认 Agent Driver。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0001-feature-lifecycle-primitives.html">ADR-0001</a> · <a href="../adr/0002-scoped-service-registry.html">ADR-0002</a> · <a href="../adr/0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="../adr/0004-manifest-service-startup-audit.html">ADR-0004</a> · <a href="../adr/0005-feature-drain-lease.html">ADR-0005</a> · <a href="../adr/0006-feature-generation-update.html">ADR-0006</a> · <a href="../../testing/plugin-architecture-stage-1-generation-update.html">测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0001-feature-lifecycle-primitives.html">ADR-0001</a> · <a href="../adr/0002-scoped-service-registry.html">ADR-0002</a> · <a href="../adr/0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="../adr/0004-manifest-service-startup-audit.html">ADR-0004</a> · <a href="../adr/0005-feature-drain-lease.html">ADR-0005</a> · <a href="../adr/0006-feature-generation-update.html">ADR-0006</a> · <a href="../adr/0007-execution-driver-registry.html">ADR-0007</a> · <a href="../../testing/plugin-architecture-stage-2-execution-driver.html">测试记录</a></div>
 </div>
 </body>
 </html>

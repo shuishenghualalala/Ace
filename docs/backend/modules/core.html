@@ -58,9 +58,9 @@
   <table>
     <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
     <tbody>
-      <tr><td><code>envelope</code></td><td>统一请求与流式响应协议。</td><td>已落地，阶段 2 开放业务枚举</td></tr>
+      <tr><td><code>envelope</code></td><td>统一请求与流式响应协议；mode 为开放字符串，未知能力使用稳定错误码。</td><td>mode 已开放，业务事件待迁移</td></tr>
       <tr><td><code>types</code></td><td>消息、工具调用、模型响应等基础数据类型。</td><td>已落地</td></tr>
-      <tr><td><code>interfaces</code></td><td>LLM、Memory、Session、Workspace、Tool、Agent 等稳定 Protocol。</td><td>已落地，阶段 1 补 Feature 生命周期契约</td></tr>
+      <tr><td><code>interfaces</code></td><td>LLM、Memory、Session、Workspace、Tool、Agent 等稳定 Protocol。</td><td>已落地</td></tr>
       <tr><td><code>runctx</code></td><td>请求级用户、Workspace、权限与 Agent 运行上下文。</td><td>已落地</td></tr>
       <tr><td><code>errors / followup</code></td><td>跨 Host 的错误和用户交互协议。</td><td>已落地</td></tr>
     </tbody>
@@ -89,9 +89,9 @@
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li><code>Envelope.mode</code> 与 <code>ResponseChunk.kind</code> 仍包含业务枚举，阶段 2 迁为开放标识和命名空间事件。</li>
+    <li><code>ResponseChunk.kind</code> 仍包含业务枚举，阶段 2 后续迁为命名空间 <code>feature_event</code>。</li>
     <li><code>followup.py</code> 仍依赖 <code>crew.state.logging</code>，后续需判断日志接口是否应成为 Host 注入能力。</li>
-    <li>Feature Runtime 契约尚未落地；阶段 1 会加入 Scope、Generation 与 Registration Token。</li>
+    <li>Team 与 Dynamic Kanban 的旧 mode 值仍由 App 兼容分支处理，待迁入 Driver Registry。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
@@ -106,10 +106,11 @@
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
       <tr><td>2026-09-02</td><td>建立 Core 对 Product Feature 与 Host 的声明式依赖保护线。</td><td>Python 架构、CI</td></tr>
+      <tr><td>2026-09-03</td><td>将 Envelope mode 改为开放标识，并为能力不可用响应增加稳定错误码。</td><td><code>Envelope</code>、<code>ResponseChunk.error</code>、Execution Driver 调用方。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../../testing/plugin-architecture-stage-0.html">阶段 0 测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0007-execution-driver-registry.html">ADR-0007</a> · <a href="../../testing/plugin-architecture-stage-2-execution-driver.html">测试记录</a></div>
 </div>
 </body>
 </html>

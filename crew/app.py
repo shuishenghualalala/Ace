@@ -1,7 +1,7 @@
 """装配层（依赖注入）。
 
 把各模块的具体实现拼装成一个可运行的 CrewApp，并提供统一入口 handle(envelope)。
-所有入口（CLI/Gateway/Web）都调 app.handle()，按 mode 路由到单 Agent 或 Team。
+所有入口（CLI/Gateway/Web）都调 app.handle()，执行模式优先由 Driver Registry 解析。
 
 新增一个实现（如新 Provider/新工具）通常只需在这里改一行注册。
 """
@@ -35,6 +35,12 @@ from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.runctx import normalize_owner_account_id
 from crew.core.interfaces import Agent, LLMProvider, MemoryProvider, SessionStore, WorkspaceStore
 from crew.evolution import EvolutionManager, EvolutionQueue
+from crew.features import (
+    ExecutionDriver,
+    FeatureGeneration,
+    FeatureScope,
+    FeatureStopPolicy,
+)
 from crew.gateway.dispatcher import BusyMode, SessionDispatcher
 from crew.gateway.helpers import session_external_agent_id
 from crew.memory.simple import SQLiteMemory
@@ -490,6 +496,21 @@ class CrewApp:
         self.summary_store = SummaryStore(config.db_path, wal_enabled=config.sqlite_wal)
 
         self.agents = AgentManager(self._make_agent)
+        self.execution_drivers = plugins.feature_runtime.execution_drivers
+        self._default_driver_scope = FeatureScope(
+            FeatureGeneration("core.agent-driver", 1)
+        )
+        for mode in ("agent", "agent.default"):
+            self.execution_drivers.register(
+                self._default_driver_scope,
+                ExecutionDriver(
+                    mode=mode,
+                    execute=self._run_default_execution_driver,
+                    capabilities=("agent.default",),
+                    description="Default single-agent execution",
+                ),
+            )
+        self._default_driver_scope.activate()
         # 对话级 Plan 模式管理器（由 build_app 装配后赋值）
         self.plan_manager = None
         # 专用 Wiki Agent 会话管理器（由 build_app 装配后赋值）
@@ -1952,6 +1973,10 @@ class CrewApp:
                 pass
             self._expiry_task = None
         await self.dispatcher.shutdown()
+        await self._default_driver_scope.stop(
+            FeatureStopPolicy.DRAIN,
+            timeout_seconds=provider_timeout,
+        )
         if self.cron_service is not None:
             await self.cron_service.stop()
         if self.work_service is not None:
@@ -2875,8 +2900,26 @@ class CrewApp:
         if pending:
             envelope.params["process_notifications"] = pending
 
+    async def _run_default_execution_driver(
+        self,
+        envelope: Envelope,
+    ) -> AsyncIterator[ResponseChunk]:
+        config_session_id = str(
+            envelope.params.get("task_session_id") or envelope.session_id
+        )
+        async with self.agents.lease(
+            envelope.session_id,
+            self._session_agent_config(
+                config_session_id,
+                owner_account_id=envelope.user_id,
+            ),
+            owner_account_id=envelope.user_id,
+        ) as agent:
+            async for chunk in agent.run(envelope):
+                yield chunk
+
     async def handle(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
-        """统一入口：按 mode 路由。"""
+        """统一入口：完成公共前处理后解析可插拔执行 Driver。"""
         from crew.core.runctx import current_push_fn
 
         token = None
@@ -2931,6 +2974,10 @@ class CrewApp:
                     return
             self._drain_subagent_notifications(envelope)
             self._drain_process_notifications(envelope)
+            if self.execution_drivers.get(envelope.mode) is not None:
+                async for chunk in self.execution_drivers.dispatch(envelope):
+                    yield chunk
+                return
             if envelope.mode == "team":
                 if self.team is None:
                     yield ResponseChunk.error(envelope.request_id, "Team 模式未启用")
@@ -2956,14 +3003,11 @@ class CrewApp:
                 async for chunk in self.dynamic_kanban.interact(envelope):
                     yield chunk
                 return
-
-            async with self.agents.lease(
-                envelope.session_id,
-                self._session_agent_config(config_session_id, owner_account_id=envelope.user_id),
-                owner_account_id=envelope.user_id,
-            ) as agent:
-                async for chunk in agent.run(envelope):
-                    yield chunk
+            yield ResponseChunk.error(
+                envelope.request_id,
+                f"执行能力不可用：{envelope.mode or '<empty>'}",
+                code="capability_unavailable",
+            )
         finally:
             if token is not None:
                 current_push_fn.reset(token)

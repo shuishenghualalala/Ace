@@ -16,6 +16,7 @@ from crew.features.dependencies import (
     FeatureDependencyResolution,
     FeatureServiceDependencies,
 )
+from crew.features.drivers import ExecutionDriver, ExecutionDriverRegistry
 from crew.features.runtime import (
     Disposer,
     FeatureActivationError,
@@ -294,6 +295,7 @@ class FeatureInstallContext:
     definition: FeatureDefinition
     scope: FeatureScope
     services: ServiceRegistry
+    execution_drivers: ExecutionDriverRegistry
     dependencies: FeatureDependencyResolution
 
     @property
@@ -338,12 +340,30 @@ class FeatureInstallContext:
             label=label,
         )
 
+    def register_execution_driver(
+        self,
+        driver: ExecutionDriver,
+        *,
+        label: str | None = None,
+    ) -> RegistrationToken:
+        """Publish a mode handler owned by this exact Feature Generation."""
+        return self.execution_drivers.register(
+            self.scope,
+            driver,
+            label=label,
+        )
+
 
 class FeatureRuntime:
     """Activate, diagnose, and stop features through one reversible lifecycle."""
 
-    def __init__(self, services: ServiceRegistry | None = None) -> None:
+    def __init__(
+        self,
+        services: ServiceRegistry | None = None,
+        execution_drivers: ExecutionDriverRegistry | None = None,
+    ) -> None:
         self.services = services or ServiceRegistry()
+        self.execution_drivers = execution_drivers or ExecutionDriverRegistry()
         self.dependencies = FeatureDependencyGraph()
         self._records: dict[str, FeatureRecord] = {}
         self._sequences: dict[str, int] = {}
@@ -508,6 +528,7 @@ class FeatureRuntime:
             definition=definition,
             scope=transaction.scope,
             services=self.services,
+            execution_drivers=self.execution_drivers,
             dependencies=resolution,
         )
         async with transaction:

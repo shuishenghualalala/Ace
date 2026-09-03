@@ -31,14 +31,14 @@
   <table>
     <thead><tr><th>#</th><th>模块</th><th>职责</th><th>状态</th></tr></thead>
     <tbody>
-      <tr><td>1</td><td><a href="core.html"><code>core</code></a><span class="muted">crew/core/</span></td><td>Core 契约：Envelope、Message、接口，所有模块共同语言。</td><td><span class="status todo">骨架</span></td></tr>
+      <tr><td>1</td><td><a href="core.html"><code>core</code></a><span class="muted">crew/core/</span></td><td>Core 契约：开放 mode 的 Envelope、ResponseChunk、Message 与稳定接口。</td><td><span class="status ok">演进中</span></td></tr>
       <tr><td>2</td><td><a href="state.html"><code>state</code></a><span class="muted">crew/state/</span></td><td>State 状态：配置、日志、会话、工作空间。</td><td><span class="status todo">骨架</span></td></tr>
       <tr><td>3</td><td><a href="providers.html"><code>providers</code></a><span class="muted">crew/providers/</span></td><td>Provider 模型：隔离模型厂商 SDK，连接 OpenAI 兼容端点。</td><td><span class="status todo">骨架</span></td></tr>
       <tr><td>4</td><td><a href="tools.html"><code>tools</code></a><span class="muted">crew/tools/</span></td><td>Tools 工具：工具注册、schema 暴露、工具执行和结果回灌。</td><td><span class="status ok">已落地</span></td></tr>
       <tr><td>5</td><td><a href="agent.html"><code>agent</code></a><span class="muted">crew/agent/</span></td><td>Agent 内核：单智能体循环（历史、记忆、模型、工具、保存）；含 external / executor / loop / plan / subagent / compact 子模块。</td><td><span class="status todo">骨架</span></td></tr>
       <tr><td>6</td><td><a href="memory.html"><code>memory</code></a><span class="muted">crew/memory/</span></td><td>Memory 记忆：对话前召回和对话后写入。</td><td><span class="status todo">骨架</span></td></tr>
       <tr><td>7</td><td><a href="plugins.html"><code>features / plugins</code></a><span class="muted">crew/features/ + crew/plugins/</span></td><td>Feature 生命周期所有权内核与目录插件兼容入口。</td><td><span class="status ok">演进中</span></td></tr>
-      <tr><td>8</td><td><a href="app.html"><code>app.py</code></a><span class="muted">crew/app.py</span></td><td>App 装配：依赖注入、Agent 缓存、agent/team 路由。</td><td><span class="status todo">骨架</span></td></tr>
+      <tr><td>8</td><td><a href="app.html"><code>app.py</code></a><span class="muted">crew/app.py</span></td><td>Host 组合根：依赖注入、公共前处理、Execution Driver 分派与关闭编排。</td><td><span class="status ok">演进中</span></td></tr>
       <tr><td>9</td><td><a href="gateway.html"><code>gateway</code></a> / <a href="auth.html"><code>auth</code></a><span class="muted">crew/gateway/ + crew/state/</span></td><td>Gateway 网关与认证：Web/API/WS 入口、按 Owner 的认证会话、退出清理、资源隔离。</td><td><span class="status">gateway 骨架</span> · <span class="status ok">auth 已落地</span></td></tr>
       <tr><td>10</td><td><a href="cli.html"><code>cli</code></a><span class="muted">crew/cli/</span></td><td>CLI 入口：进程内命令树、非交互 run、管理子命令、JSON 输出与安全命令。</td><td><span class="status ok">已落地</span></td></tr>
       <tr><td>11</td><td><a href="team.html"><code>team</code></a><span class="muted">crew/team/</span></td><td>Team 多智能体：Formation 长期组队与 Runtime 临时补员；复用 Agent 内核。</td><td><span class="status todo">骨架</span></td></tr>
