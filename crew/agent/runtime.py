@@ -462,7 +462,7 @@ class SingleAgent(Agent):
             )
         return list(report.persistent_messages)
 
-    def _plan_reminder_blocks(self, session_id: str, owner_account_id: str = "") -> list[str]:
+    def _plan_reminder_blocks(self, session_id: str, owner_account_id: str) -> list[str]:
         """Plan 模式相关的动态 reminder 块（前置注入部分）。
 
         注意：plan 工作流与审批/修订/退出事件不在这里——它们由 hidden attachment
@@ -496,7 +496,7 @@ class SingleAgent(Agent):
             blocks.append(todo_block)
         return blocks
 
-    def _effective_tool_filter(self, session_id: str, owner_account_id: str = "") -> list[str] | None:
+    def _effective_tool_filter(self, session_id: str, owner_account_id: str) -> list[str] | None:
         """Plan 模式激活时把工具集收窄到只读白名单。
 
         未激活时剔除 Plan 模式入口/切换工具，避免模型误调用。
@@ -575,7 +575,7 @@ class SingleAgent(Agent):
         self,
         session_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         workspace_id: str = "default",
         workspace_instructions: str = "",
         workspace_root_path: str = "",

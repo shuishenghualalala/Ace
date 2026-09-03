@@ -795,29 +795,29 @@ def test_effective_tool_filter_narrows_in_plan():
 
     stub = _Stub()
     # 未激活 → 即使 tool_filter=None，也枚举 registry 并隐藏 Plan 控制工具。
-    eff_normal = SingleAgent._effective_tool_filter(stub, sid)
+    eff_normal = SingleAgent._effective_tool_filter(stub, sid, owner_account_id="")
     assert eff_normal is not None
     assert "enter_plan_mode" not in eff_normal
     assert "exit_plan_mode" not in eff_normal
     assert "file_read" in eff_normal
     # 显式 tool_filter 里列了 enter/exit，未激活时同样被剔除
     stub.tool_filter = ["file_read", "file_write", "enter_plan_mode", "exit_plan_mode"]
-    eff_explicit = SingleAgent._effective_tool_filter(stub, sid)
+    eff_explicit = SingleAgent._effective_tool_filter(stub, sid, owner_account_id="")
     assert "exit_plan_mode" not in eff_explicit
     assert "enter_plan_mode" not in eff_explicit
     stub.tool_filter = None
     # 激活 → 收窄到只读白名单（_effective_tool_filter 默认 owner=""，显式对齐）
     mgr.enter(sid, owner_account_id="")
-    assert SingleAgent._effective_tool_filter(stub, sid) == list(PLAN_MODE_TOOLS)
+    assert SingleAgent._effective_tool_filter(stub, sid, owner_account_id="") == list(PLAN_MODE_TOOLS)
 
     # 与既有 filter 取交集
     stub.tool_filter = ["file_read", "file_write", "memory"]  # memory 不在白名单
-    eff = SingleAgent._effective_tool_filter(stub, sid)
+    eff = SingleAgent._effective_tool_filter(stub, sid, owner_account_id="")
     assert set(eff) == {"file_read", "file_write"}
 
     # plan 激活后 exit_plan_mode 可见，enter_plan_mode 仍不可见（白名单内无主动进入）。
     stub.tool_filter = ["file_read", "file_write", "enter_plan_mode", "exit_plan_mode"]
-    eff_active = SingleAgent._effective_tool_filter(stub, sid)
+    eff_active = SingleAgent._effective_tool_filter(stub, sid, owner_account_id="")
     assert "exit_plan_mode" in eff_active
     assert "enter_plan_mode" not in eff_active
 

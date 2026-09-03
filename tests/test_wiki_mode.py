@@ -36,7 +36,7 @@ def _agent(provider, **kw):
 
 def test_effective_tool_filter_uses_preassembled_agent_scope():
     agent = _agent(FakeProvider())
-    tools = agent._effective_tool_filter("s1")
+    tools = agent._effective_tool_filter("s1", owner_account_id="local")
     assert "wiki_init" not in tools
     assert "enter_plan_mode" not in tools
 
@@ -47,7 +47,7 @@ def test_effective_tool_filter_respects_wiki_preset_scope():
         tool_filter=["wiki_orient", "wiki_search"],
         tool_disclosure_mode=ToolDisclosureMode.DIRECT,
     )
-    tools = agent._effective_tool_filter("s1")
+    tools = agent._effective_tool_filter("s1", owner_account_id="local")
     assert tools == ["wiki_orient", "wiki_search"]
 
 
@@ -58,7 +58,7 @@ def test_wiki_context_tag_does_not_expand_tool_scope_dynamically():
         tool_filter=["wiki_search", "wiki_apply_ingest"],
         tool_disclosure_mode=ToolDisclosureMode.DIRECT,
     )
-    assert agent._effective_tool_filter("s1") == ["wiki_search", "wiki_apply_ingest"]
+    assert agent._effective_tool_filter("s1", owner_account_id="local") == ["wiki_search", "wiki_apply_ingest"]
 
 
 def test_resolve_agent_workdir_uses_workspace_for_wiki_agent():
