@@ -170,7 +170,7 @@ def direct_mention_request_ids(
 def team_visible_history_items(
     crew,
     session_id: str,
-    owner_account_id: str = "",
+    owner_account_id: str,
     config: dict[str, Any] | None = None,
     has_child_team_sessions: bool = False,
     suppressed_request_ids: set[str] | None = None,
@@ -271,7 +271,7 @@ def _team_internal_member_profiles(
     crew,
     config: dict[str, Any] | None,
     *,
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> dict[str, dict[str, Any]]:
     external_team_id = str(((config or {}).get("team") or {}).get("external_team_id") or "").strip()
     store = getattr(crew, "external_agents", None)
@@ -425,7 +425,7 @@ def team_internal_history_items(
     crew,
     session_id: str,
     child_sessions: list[tuple[str, list[Message]]],
-    owner_account_id: str = "",
+    owner_account_id: str,
     config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
@@ -547,7 +547,7 @@ def team_tasks_with_plan_projection(
     session_id: str,
     status: str | None,
     limit: int,
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> list[dict[str, Any]]:
     all_tasks = crew.tasks.list_tasks(
         status=status,

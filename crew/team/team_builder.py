@@ -95,7 +95,7 @@ class TeamMemberFactory:
         self,
         external_team_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         model_bindings: dict[str, Any] | None = None,
     ) -> tuple[list[TeamMemberSpec], TeamMemberSpec | None]:
         external_store = self._external_store()
@@ -182,7 +182,7 @@ class TeamMemberFactory:
         self,
         external_team_id_override: str = "",
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> list[TeamMemberSpec]:
         team_cfg = self.config.team_config or {}
         external_team_id = str(
@@ -242,7 +242,7 @@ class TeamMemberFactory:
         spec: TeamMemberSpec,
         member_session_id: str,
         team_session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         tool_filter: list[str] | None = None,
     ) -> SingleAgent:
         from crew.tools.policy import exclude_toolsets

@@ -385,7 +385,7 @@ async def run_delegate_to_teammate(
     on_child_chunk: Callable[[str, ResponseChunk], None] | None = None,
     on_task_created: Callable[[dict[str, Any]], None] | None = None,
     on_task_finished: Callable[[dict[str, Any]], None] | None = None,
-    owner_account_id: str = "",
+    owner_account_id: str,
     task_payload_meta: dict[str, Any] | None = None,
     attachments: list[dict[str, Any]] | None = None,
 ) -> str:

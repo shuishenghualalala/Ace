@@ -2115,8 +2115,8 @@ def test_team_node_execution_event_update_is_idempotent():
         "event_type": "tool",
         "event_text": "第一次结果",
     }
-    tm._append_plan_node_event(plan, node, event=event)
-    tm._append_plan_node_event(plan, node, event={**event, "event_text": "最终结果"})
+    tm._append_plan_node_event(plan, node, event=event, owner_account_id="local")
+    tm._append_plan_node_event(plan, node, event={**event, "event_text": "最终结果"}, owner_account_id="local")
 
     events = node.metadata["execution_events"]
     assert len(events) == 1
@@ -3755,6 +3755,7 @@ async def test_builtin_and_external_mentions_share_communication_router_contract
 
     external_result = await tm.external_team_mention(
         "communication_external_s1",
+        owner_account_id="local",
         member_id="coder",
         to=["leader"],
         intent="ask",
@@ -3763,7 +3764,7 @@ async def test_builtin_and_external_mentions_share_communication_router_contract
         task_id="task_43",
     )
     assert external_result["status"] == "answered"
-    external_team = tm._get_or_create("communication_external_s1")
+    external_team = tm._get_or_create("communication_external_s1", owner_account_id="local")
     external_message = external_team.bus.read(
         team_session_id="communication_external_s1",
         member_id="leader",
@@ -4344,7 +4345,7 @@ async def test_user_agent_mention_exposes_terminal_failure_state_before_error_fr
 
 async def test_external_team_mention_propagates_current_active_skill(monkeypatch):
     tm, _tasks = _team()
-    tm._get_or_create("external_skill_team")
+    tm._get_or_create("external_skill_team", owner_account_id="local")
     tm.create_plan(
         "external_skill_team",
         goal="查询资料",
@@ -4500,6 +4501,7 @@ async def test_team_delegate_propagates_security_launch_context():
             {"coder": RecordingAgent()},
             InMemoryTaskManager(),
             "team-security-context-s1",
+            owner_account_id="local",
             member="coder",
             instruction="执行受控外援任务",
         )
@@ -4570,6 +4572,7 @@ async def test_team_delegate_inherits_workspace_root_from_security_launch(tmp_pa
             {"coder": RecordingAgent()},
             InMemoryTaskManager(),
             "team-workspace-context-s1",
+            owner_account_id="local",
             member="coder",
             instruction="执行受控外援任务",
         )
@@ -9094,6 +9097,7 @@ def test_team_runtime_reflection_records_event_and_retry_guidance():
     tm._reflect_plan_node(
         plan,
         node,
+        owner_account_id="local",
         reason="工具执行失败",
         decision="补充失败上下文后按原成员重试。",
         retryable=True,
@@ -10416,6 +10420,7 @@ def test_team_history_keeps_direct_mention_child_with_existing_workflow_events()
                 request_id="mention_1",
             )],
         )],
+        owner_account_id="local",
     )
 
     assert [item["content"] for item in items] == [
@@ -10441,6 +10446,7 @@ def test_team_history_maps_legacy_crew_child_session_to_builtin_identity():
                 [Message(role="assistant", content="Crew 已完成 QA。", timestamp=1)],
             )
         ],
+        owner_account_id="local",
     )
 
     assert len(items) == 1
@@ -10485,6 +10491,7 @@ def test_team_history_keeps_distinct_communication_replies_with_same_text():
                 )],
             ),
         ],
+        owner_account_id="local",
     )
 
     assert len(items) == 2
@@ -10514,6 +10521,7 @@ def test_team_history_keeps_legacy_same_text_from_distinct_child_sessions():
                 [Message(role="assistant", content="节点已完成。", timestamp=2)],
             ),
         ],
+        owner_account_id="local",
     )
 
     assert len(items) == 2
@@ -10548,6 +10556,7 @@ def test_team_history_preserves_terminal_user_mention_state_for_retry():
                 )],
             )
         ],
+        owner_account_id="local",
     )
 
     assert items == [{
@@ -10777,7 +10786,7 @@ def test_team_task_projection_does_not_match_different_requests_by_title():
                     },
                 }]
 
-    rows = team_tasks_with_plan_projection(Crew(), "team_parent", None, 200)
+    rows = team_tasks_with_plan_projection(Crew(), "team_parent", None, 200, owner_account_id="local")
 
     assert {row["task_id"] for row in rows} == {"plan-node-req-1", "parent-req-2"}
 

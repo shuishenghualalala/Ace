@@ -188,7 +188,7 @@ class TeamCommunicationRouter:
         mention: Any,
         content: str,
         request_id: str = "",
-        owner_account_id: str = "",
+        owner_account_id: str,
         workspace_id: str = "default",
         security_process_launch: Any | None = None,
         on_chunk: Callable[[str, ResponseChunk], Any] | None = None,
@@ -264,7 +264,7 @@ class TeamAskCoordinator:
         bus: TeamBus,
         session_id: str,
         resolve_agent: Callable[[str], Any | None],
-        owner_account_id: str = "",
+        owner_account_id: str,
         session_store: Any | None = None,
         on_chunk: Callable[[str, ResponseChunk], Any] | None = None,
         on_lifecycle: Callable[[dict[str, Any]], Any] | None = None,
@@ -309,7 +309,7 @@ class TeamAskCoordinator:
         try:
             messages = self.session_store.load(
                 turn_session_id,
-                owner_account_id=str(owner_account_id or self.owner_account_id or "local"),
+                owner_account_id=str(owner_account_id or self.owner_account_id),
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("读取 Team mention 幂等历史失败 session=%s err=%s", turn_session_id, exc)
@@ -388,7 +388,7 @@ class TeamAskCoordinator:
 
         turn_session_id = self._turn_session_id(request_id, target)
         member_session_id = f"{self.session_id}::{target}"
-        owner = str(event.get("owner_account_id") or self.owner_account_id or "local")
+        owner = str(event.get("owner_account_id") or self.owner_account_id)
         workspace_id = str(event.get("workspace_id") or "default")
         node_id = str(event.get("node_id") or "")
         task_id = str(event.get("task_id") or "")
@@ -593,7 +593,7 @@ class TeamAskCoordinator:
         turn_session_id = self._turn_session_id(request_id, target)
         self._persist_communication_history(
             turn_session_id,
-            owner_account_id=str(event.get("owner_account_id") or self.owner_account_id or "local"),
+            owner_account_id=str(event.get("owner_account_id") or self.owner_account_id),
             workspace_id=str(event.get("workspace_id") or "default"),
             content=reason,
             communication_kind=self._answer_kind(event),

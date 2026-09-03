@@ -262,7 +262,7 @@ class InProcessTeamManager(TeamManager):
         self.turn_router = TeamTurnRouter()
         self.graph_planner = TeamGraphPlanner()
 
-    def _provider_for_owner(self, owner_account_id: str = "") -> LLMProvider:
+    def _provider_for_owner(self, owner_account_id: str) -> LLMProvider:
         resolver = self.provider_for_owner
         if callable(resolver):
             resolved = resolver(str(owner_account_id or ""))
@@ -273,7 +273,7 @@ class InProcessTeamManager(TeamManager):
     def _provider_for_member(
         self,
         spec: TeamMemberSpec,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> LLMProvider:
         """Resolve the Provider captured by one newly-created built-in member."""
         model_id = str(spec.model or "").strip()
@@ -404,7 +404,7 @@ class InProcessTeamManager(TeamManager):
         self,
         session_id: str,
         member_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> threading.RLock:
         """Return the single lock shared by switching and member dispatch."""
 
@@ -416,11 +416,11 @@ class InProcessTeamManager(TeamManager):
         with self._member_locks_guard:
             return self._member_locks.setdefault(key, threading.RLock())
 
-    def team_is_planning(self, session_id: str, owner_account_id: str = "") -> bool:
+    def team_is_planning(self, session_id: str, owner_account_id: str) -> bool:
         with self._active_lock:
             return self._key(_visible_session_id(session_id), owner_account_id) in self._planning_sessions
 
-    def _begin_team_planning(self, session_id: str, owner_account_id: str = "") -> bool:
+    def _begin_team_planning(self, session_id: str, owner_account_id: str) -> bool:
         key = self._key(_visible_session_id(session_id), owner_account_id)
         with self._active_lock:
             if key in self._planning_sessions:
@@ -428,7 +428,7 @@ class InProcessTeamManager(TeamManager):
             self._planning_sessions.add(key)
             return True
 
-    def _end_team_planning(self, session_id: str, owner_account_id: str = "") -> None:
+    def _end_team_planning(self, session_id: str, owner_account_id: str) -> None:
         with self._active_lock:
             self._planning_sessions.discard(self._key(_visible_session_id(session_id), owner_account_id))
 
@@ -437,7 +437,7 @@ class InProcessTeamManager(TeamManager):
         session_id: str,
         member_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         plan_node_id: str = "",
     ) -> dict[str, Any]:
         """Capture immutable model facts for a member execution attempt."""
@@ -509,7 +509,7 @@ class InProcessTeamManager(TeamManager):
         runtime: dict[str, Any],
         model_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> list[dict[str, Any]]:
         """Check pending nodes against the candidate model's hard execution facts."""
 
@@ -603,7 +603,7 @@ class InProcessTeamManager(TeamManager):
         self,
         external_team_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         model_bindings: dict[str, Any] | None = None,
     ) -> tuple[list[TeamMemberSpec], TeamMemberSpec | None]:
         return self._team_member_factory.external_team_specs(
@@ -616,7 +616,7 @@ class InProcessTeamManager(TeamManager):
         self,
         external_team_id_override: str = "",
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> list[TeamMemberSpec]:
         return self._team_member_factory.members(
             external_team_id_override,
@@ -647,7 +647,7 @@ class InProcessTeamManager(TeamManager):
         spec: TeamMemberSpec,
         member_session_id: str,
         team_session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         tool_filter: list[str] | None = None,
     ) -> SingleAgent:
         return self._team_member_factory.new_agent(
@@ -710,7 +710,7 @@ class InProcessTeamManager(TeamManager):
                     child_id
                 ] = active_record
 
-    def _mark_child_done(self, parent_session_id: str, child_id: str, owner_account_id: str = "") -> None:
+    def _mark_child_done(self, parent_session_id: str, child_id: str, owner_account_id: str) -> None:
         with self._active_lock:
             key = self._key(parent_session_id, owner_account_id)
             children = self._active_children.get(key)
@@ -742,7 +742,7 @@ class InProcessTeamManager(TeamManager):
 
         task.add_done_callback(_discard)
 
-    def _cancel_delegate_tasks(self, session_id: str, owner_account_id: str = "") -> int:
+    def _cancel_delegate_tasks(self, session_id: str, owner_account_id: str) -> int:
         key = self._key(session_id, owner_account_id)
         with self._active_lock:
             tasks = list(self._delegate_tasks.get(key, set()))
@@ -780,7 +780,7 @@ class InProcessTeamManager(TeamManager):
         self,
         session_id: str,
         member_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         """Return one member's execution state across a visible Team session.
 
@@ -818,8 +818,8 @@ class InProcessTeamManager(TeamManager):
     def _member_ids_for_session(
         self,
         session_id: str,
+        owner_account_id: str,
         external_team_id: str = "",
-        owner_account_id: str = "",
     ) -> list[str]:
         team = self._get_or_create(session_id, external_team_id=external_team_id, owner_account_id=owner_account_id)
         return list(dict.fromkeys(["leader", *team.teammates.keys()]))
@@ -847,7 +847,7 @@ class InProcessTeamManager(TeamManager):
         self,
         session_id: str,
         member_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> str:
         """Return a member's display name while keeping IDs in protocol fields."""
 
@@ -885,7 +885,7 @@ class InProcessTeamManager(TeamManager):
         nodes: list[dict[str, Any]] | None = None,
         edges: list[Any] | None = None,
         external_team_id: str = "",
-        owner_account_id: str = "",
+        owner_account_id: str,
         workflow_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """创建或替换当前 Team session 的轻量 TeamPlan。
@@ -991,7 +991,7 @@ class InProcessTeamManager(TeamManager):
         *,
         node_id: str = "",
         external_team_id: str = "",
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> TeamPlan | None:
         return self._plan_store.hydrate(
             session_id,
@@ -1009,7 +1009,7 @@ class InProcessTeamManager(TeamManager):
         session_id: str,
         *,
         external_team_id: str = "",
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> list[TeamMemberSpec]:
         return self._plan_store.runtime_members_for_session(
             session_id,
@@ -1017,13 +1017,13 @@ class InProcessTeamManager(TeamManager):
             owner_account_id=owner_account_id,
         )
 
-    def read_plan(self, session_id: str, owner_account_id: str = "") -> dict[str, Any]:
+    def read_plan(self, session_id: str, owner_account_id: str) -> dict[str, Any]:
         plan = self._plans.get(self._key(session_id, owner_account_id))
         if plan is None:
             return {"ok": True, "plan": None}
         return {"ok": True, "plan": plan.to_dict()}
 
-    def plans_for_session(self, session_id: str, owner_account_id: str = "") -> list[dict[str, Any]]:
+    def plans_for_session(self, session_id: str, owner_account_id: str) -> list[dict[str, Any]]:
         """返回父 Team session 及其 per-turn 子 session 下的 TeamPlan。"""
         sid = str(session_id or "").strip()
         if not sid:
@@ -1063,7 +1063,7 @@ class InProcessTeamManager(TeamManager):
         self,
         session_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
         """从持久化 Kanban 工作流还原 Team 看板节点。"""
@@ -1158,7 +1158,7 @@ class InProcessTeamManager(TeamManager):
         items.sort(key=lambda item: float(item.get("created_at") or item.get("started_at") or 0))
         return items[:max(1, int(limit or 200))]
 
-    def _latest_team_workflow_for_status(self, session_id: str, owner_account_id: str = "") -> Any | None:
+    def _latest_team_workflow_for_status(self, session_id: str, owner_account_id: str) -> Any | None:
         store = self._kanban_store_for_owner(owner_account_id)
         if store is None:
             return None
@@ -1313,7 +1313,7 @@ class InProcessTeamManager(TeamManager):
         snapshot: dict[str, Any],
         decision: TeamTurnDecision,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> str:
         system = """你是 Crew Team Leader。用户正在询问已有团队运行事实。
 只能基于 TeamStatusSnapshot 回答；不要生成新任务、不要派活、不要修改 DAG。
@@ -1541,7 +1541,7 @@ class InProcessTeamManager(TeamManager):
         self,
         plan: TeamPlan,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         external_team_id: str = "",
         workflow_plan: dict[str, Any] | None = None,
     ) -> None:
@@ -1552,7 +1552,7 @@ class InProcessTeamManager(TeamManager):
             workflow_plan=workflow_plan,
         )
 
-    def _sync_kanban_node(self, plan: TeamPlan, node: TeamPlanNode, owner_account_id: str = "") -> None:
+    def _sync_kanban_node(self, plan: TeamPlan, node: TeamPlanNode, owner_account_id: str) -> None:
         self._plan_store.sync_node(plan, node, owner_account_id=owner_account_id)
 
     @staticmethod
@@ -1837,7 +1837,7 @@ class InProcessTeamManager(TeamManager):
         node_id: str,
         action: str,
         replacement_assignee: str = "",
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         """Apply one user-directed recovery action to a blocked Team node.
 
@@ -2047,7 +2047,7 @@ class InProcessTeamManager(TeamManager):
         self,
         session_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         event_type: str,
         actor: str,
         payload: dict[str, Any],
@@ -2437,7 +2437,7 @@ class InProcessTeamManager(TeamManager):
         )
         return {"result": final_text, "node_id": node_id, "member": member}
 
-    def _team_workflow_ids_for_session(self, session_id: str, owner_account_id: str = "") -> list[str]:
+    def _team_workflow_ids_for_session(self, session_id: str, owner_account_id: str) -> list[str]:
         store = self._kanban_store_for_owner(owner_account_id)
         if store is None:
             return []
@@ -2464,10 +2464,10 @@ class InProcessTeamManager(TeamManager):
                 workflow_ids.append(str(workflow.id))
         return list(dict.fromkeys(workflow_ids))
 
-    def has_team_workflow_for_session(self, session_id: str, owner_account_id: str = "") -> bool:
+    def has_team_workflow_for_session(self, session_id: str, owner_account_id: str) -> bool:
         return bool(self._team_workflow_ids_for_session(session_id, owner_account_id))
 
-    def event_history_for_session(self, session_id: str, owner_account_id: str = "") -> list[dict[str, Any]]:
+    def event_history_for_session(self, session_id: str, owner_account_id: str) -> list[dict[str, Any]]:
         store = self._kanban_store_for_owner(owner_account_id)
         if store is None:
             return []
@@ -2489,7 +2489,7 @@ class InProcessTeamManager(TeamManager):
         attempt_count: int | None = None,
         last_error: str | None = None,
         allow_reopen: bool = False,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         plan = self._plans.get(self._key(session_id, owner_account_id))
         if plan is None:
@@ -2511,7 +2511,7 @@ class InProcessTeamManager(TeamManager):
         self._sync_kanban_node(plan, node, owner_account_id=owner_account_id)
         return {"ok": True, "plan": plan.to_dict(), "node": node.to_dict()}
 
-    def _mark_plan_node(self, session_id: str, node_id: str, owner_account_id: str = "", **updates: Any) -> None:
+    def _mark_plan_node(self, session_id: str, node_id: str, owner_account_id: str, **updates: Any) -> None:
         if not node_id:
             return
         try:
@@ -2523,7 +2523,7 @@ class InProcessTeamManager(TeamManager):
         self,
         session_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         external_team_id: str = "",
         member: str,
         plan_node_id: str,
@@ -2596,7 +2596,7 @@ class InProcessTeamManager(TeamManager):
         self,
         session_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         change: dict[str, Any],
         valid_member_ids: set[str],
         member_specs: dict[str, TeamMemberSpec],
@@ -2761,7 +2761,7 @@ class InProcessTeamManager(TeamManager):
         plan: TeamPlan,
         node: TeamPlanNode,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         event: dict[str, Any],
     ) -> None:
         metadata = dict(node.metadata or {})
@@ -3761,7 +3761,7 @@ class InProcessTeamManager(TeamManager):
         plan: TeamPlan,
         node: TeamPlanNode,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         reason: str,
         decision: str,
         suggested_action: str = "",
@@ -3805,7 +3805,7 @@ class InProcessTeamManager(TeamManager):
         plan: TeamPlan,
         node: TeamPlanNode,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         parent_node_ids: list[str] | None = None,
         reason: str = "runtime_reflection",
     ) -> None:
@@ -3904,7 +3904,7 @@ class InProcessTeamManager(TeamManager):
         plan: TeamPlan,
         node: TeamPlanNode,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         reason: str,
     ) -> TeamPlanNode | None:
         if node.assignee == "leader" or node.node_id.startswith("runtime_diagnosis_"):
@@ -4085,7 +4085,7 @@ class InProcessTeamManager(TeamManager):
         plan: TeamPlan,
         *,
         final_summary: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, dict[str, str]]:
         candidates: list[dict[str, str]] = []
         for node in plan.nodes.values():
@@ -4332,7 +4332,7 @@ class InProcessTeamManager(TeamManager):
         review_node: TeamPlanNode,
         decision: dict[str, str],
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         max_revisions: int = 2,
     ) -> dict[str, str]:
         action = str(decision.get("action") or "approve")
@@ -4464,7 +4464,7 @@ class InProcessTeamManager(TeamManager):
         plan: TeamPlan,
         node: TeamPlanNode,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         reason: str,
     ) -> TeamPlanNode | None:
         if node.assignee == "leader" or node.node_id.startswith("leader_review"):
@@ -4546,7 +4546,7 @@ class InProcessTeamManager(TeamManager):
         )
         return review
 
-    def _matching_team_session_ids(self, session_id: str, owner_account_id: str = "") -> list[str]:
+    def _matching_team_session_ids(self, session_id: str, owner_account_id: str) -> list[str]:
         sid = str(session_id or "").strip()
         if not sid:
             return []
@@ -4558,7 +4558,7 @@ class InProcessTeamManager(TeamManager):
         matched = [key[1] for key in keys if key[0] == owner_account_id and (key[1] == sid or key[1].startswith(prefix))]
         return list(dict.fromkeys([sid, *sorted(matched)]))
 
-    def _team_context_summary(self, session_id: str, owner_account_id: str = "") -> str:
+    def _team_context_summary(self, session_id: str, owner_account_id: str) -> str:
         try:
             list_tasks = getattr(self.tasks, "list_tasks", None)
             if callable(list_tasks):
@@ -4629,7 +4629,7 @@ class InProcessTeamManager(TeamManager):
             *rows,
         ])
 
-    def _cancel_plan(self, session_id: str, message: str | None = None, owner_account_id: str = "") -> bool:
+    def _cancel_plan(self, session_id: str, message: str | None = None, *, owner_account_id: str) -> bool:
         plan = self._plans.get(self._key(session_id, owner_account_id))
         if plan is None:
             return False
@@ -4973,7 +4973,7 @@ class InProcessTeamManager(TeamManager):
         team: Team,
         goal: str,
         external_team_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         execution_profile: dict[str, Any] | None = None,
         team_spec: dict[str, Any] | None = None,
     ) -> TeamPlan | None:
@@ -5017,7 +5017,7 @@ class InProcessTeamManager(TeamManager):
         team: Team,
         goal: str,
         external_team_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         execution_profile: dict[str, Any] | None = None,
         team_spec: dict[str, Any] | None = None,
         planning_progress: Callable[[dict[str, Any]], Any] | None = None,
@@ -6355,7 +6355,7 @@ class InProcessTeamManager(TeamManager):
         session_id: str,
         *,
         external_team_id: str = "",
-        owner_account_id: str = "",
+        owner_account_id: str,
         runtime_members: list[TeamMemberSpec] | None = None,
         existing_session: TeamSession | None = None,
         existing_bus: TeamBus | None = None,
@@ -6674,7 +6674,7 @@ class InProcessTeamManager(TeamManager):
             member_profiles=member_profiles,
         )
 
-    def _get_or_create(self, session_id: str, *, external_team_id: str = "", owner_account_id: str = "") -> Team:
+    def _get_or_create(self, session_id: str, *, external_team_id: str = "", owner_account_id: str) -> Team:
         key = self._key(session_id, owner_account_id)
         if key not in self._teams:
             runtime_members = self._runtime_members_for_session(
@@ -6708,7 +6708,7 @@ class InProcessTeamManager(TeamManager):
         questions: list[dict[str, Any]] | None = None,
         title: str = "",
         task_payload_meta: dict[str, Any] | None = None,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         """受信任 Binding 调用的 Team mention 入口。
 
@@ -6753,7 +6753,7 @@ class InProcessTeamManager(TeamManager):
         external_team_id: str = "",
         plan_node_id: str = "",
         wait_for_result: bool = False,
-        owner_account_id: str = "",
+        owner_account_id: str,
         on_child_chunk: Callable[[str, ResponseChunk], None] | None = None,
         task_payload_meta: dict[str, Any] | None = None,
         finalize_plan_node: bool = True,
@@ -7159,7 +7159,7 @@ class InProcessTeamManager(TeamManager):
         async for chunk in target_leader.run(leader_env):
             yield chunk
 
-    async def destroy(self, session_id: str, owner_account_id: str = "") -> None:
+    async def destroy(self, session_id: str, owner_account_id: str) -> None:
         self.interrupt(session_id, "团队已销毁", owner_account_id=owner_account_id)
         key = self._key(session_id, owner_account_id)
         self._teams.pop(key, None)
@@ -7169,7 +7169,7 @@ class InProcessTeamManager(TeamManager):
             self._active_children.pop(self._key(session_id, owner_account_id), None)
         log.info("[Team] 已销毁团队 session=%s", session_id)
 
-    def drop_session_team(self, session_id: str, owner_account_id: str = "") -> bool:
+    def drop_session_team(self, session_id: str, owner_account_id: str) -> bool:
         """Evict cached Team runtimes while preserving persisted plan/history.
 
         In-flight turns retain their local Team/Agent references, so eviction
@@ -7313,7 +7313,7 @@ class InProcessTeamManager(TeamManager):
                 self._active_children.pop(key, None)
         return interrupted + cancelled_tasks
 
-    def steer(self, session_id: str, text: str, owner_account_id: str = "") -> bool:
+    def steer(self, session_id: str, text: str, owner_account_id: str) -> bool:
         team = self._teams.get(self._key(session_id, owner_account_id))
         if team is None:
             return False
@@ -7322,7 +7322,7 @@ class InProcessTeamManager(TeamManager):
             return False
         return bool(fn(text))
 
-    def interrupt(self, session_id: str, message: str | None = None, owner_account_id: str = "") -> bool:
+    def interrupt(self, session_id: str, message: str | None = None, *, owner_account_id: str) -> bool:
         did_interrupt = False
         for target_session_id in self._matching_team_session_ids(session_id, owner_account_id=owner_account_id):
             team = self._teams.get(self._key(target_session_id, owner_account_id))
