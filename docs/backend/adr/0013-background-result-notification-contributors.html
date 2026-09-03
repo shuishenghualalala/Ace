@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0013 · Background Result Notification Contributors</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0013 · Background Result Notification Contributors</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-03 · 阶段：插件架构 Stage 2 / Context Contributor 后续切片</div>
+
+  <h2>背景</h2>
+  <p>后台子任务、后台进程与任务恢复回合的结果通知，曾由三条中心特判路径注入模型上下文：<code>CrewApp</code> 持有 subagent 待注入队列并在 <code>handle()</code> 中手写 drain，<code>runtime.py</code> 用三个 <code>_format_*_notifications</code> 函数逐个检查 <code>envelope.params</code> 的魔法 key，team member 回合另有一条 <code>subagent_drain_fn</code> 构造参数旁路。新增一类后台结果必须同时改组合根、Agent Runtime 和 Team 接线。</p>
+
+  <h2>决定</h2>
+  <div class="decision"><p>三条路径统一迁为 PROMPT 阶段 Context Contributor。队列所有权收归来源模块：subagent 待注入队列迁入 <code>crew/agent/subagent/context.py</code>，进程通知沿用 <code>process_registry._pending</code>，任务恢复回合只读 <code>envelope.params["task_notifications"]</code>。Agent Runtime 只运行通用 Prompt Contributor，不再包含通知格式化函数与魔法 key 检查。</p></div>
+  <table>
+    <thead><tr><th>职责</th><th>所有者</th><th>契约</th></tr></thead>
+    <tbody>
+      <tr><td>subagent 完成队列与文案</td><td><code>crew/agent/subagent/context.py</code></td><td>按 (owner, session) 分键、单键限 20 条；drain 恰好一次；collect 按 task_id 摘除。</td></tr>
+      <tr><td>进程通知队列与文案</td><td><code>crew/tools/process_registry.py</code></td><td>reader 线程入队不变；contributor 复用 <code>format_process_notification</code> 逐条格式化。</td></tr>
+      <tr><td>恢复回合任务通知</td><td><code>crew/tasks/context.py</code></td><td>只读 envelope params，不持队列；自动续跑行为不在本切片。</td></tr>
+      <tr><td>匹配与顺序</td><td>Feature Runtime</td><td>Prompt phase、priority 10/20/30，保持 reminder 块旧相对次序（通知在 cron/wiki 之前）。</td></tr>
+      <tr><td>team member 覆盖</td><td>共享 Contributor 注册表</td><td>member agent 持有同一注册表，drain 键落到 member 子会话；<code>subagent_drain_fn</code> 旁路删除。</td></tr>
+      <tr><td>撤销</td><td>FeatureScope</td><td>Contributor Token 随 Scope 精确释放，应用关闭统一等待。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>行为兼容</h2>
+  <ul>
+    <li>三个 reminder 块（<code># 后台子任务完成通知</code>、<code># 后台进程通知</code>、<code># 后台任务完成通知</code>）输出文案与旧格式化函数逐字一致（AST 级对比验证）。</li>
+    <li>subagent 完成时的 WS status 直推保留在组合根，不经过通知贡献者。</li>
+    <li><code>preview_context</code> 标记 <code>_context_preview</code>，预览不消费队列。</li>
+    <li><code>_resume_completed_task</code> 的自动续跑行为不变，仅注入格式化改道。</li>
+  </ul>
+
+  <h2>边界与后续</h2>
+  <p>本次只迁移模型可见的通知注入。用户可见的通知中心 publish（任务终态、审批、cron 完成）与 <code>_resume_completed_task</code> 的触发器化留作后续切片；Cron 的 Store/Scheduler 完整 Feature 化仍在阶段 3A。</p>
+
+  <h2>跨平台</h2>
+  <p>Contributor 只处理 Envelope 字段、队列与字符串，不引入进程信号、平台路径或线程语义变化。</p>
+
+  <div class="nav"><a href="0012-cron-trigger-context-contributor.html">ADR-0012</a> · <a href="../modules/agent.html">Agent 模块</a> · <a href="../../testing/plugin-architecture-stage-2-background-notifications.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</div>
+</body>
+</html>
