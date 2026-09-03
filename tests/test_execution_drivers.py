@@ -130,7 +130,10 @@ async def test_app_routes_registered_custom_mode_without_handle_branch(
         ),
         enable_team=False,
     )
-    assert {"agent", "agent.default"} <= set(app.execution_drivers.modes())
+    assert {"agent", "agent.default", "dynamic_kanban"} <= set(
+        app.execution_drivers.modes()
+    )
+
     async def echo(envelope: Envelope):
         yield ResponseChunk.final(envelope.request_id, envelope.query.upper())
 
@@ -175,3 +178,61 @@ async def test_app_routes_registered_custom_mode_without_handle_branch(
     finally:
         await app.plugins.feature_runtime.deactivate(feature_id)
         await app.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_team_adapter_registers_mode_and_preserves_session_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    app = build_app(
+        Config(
+            db_path=str(tmp_path / "crew.db"),
+            memory_db_path=str(tmp_path / "memory.db"),
+            cron_enabled=False,
+            api_key="",
+        ),
+        enable_team=False,
+    )
+
+    class RecordingTeam:
+        def __init__(self) -> None:
+            self.envelopes: list[Envelope] = []
+
+        async def interact(self, envelope: Envelope):
+            self.envelopes.append(envelope)
+            yield ResponseChunk.final(envelope.request_id, "team")
+
+    team = RecordingTeam()
+    monkeypatch.setattr(
+        app,
+        "_session_agent_config",
+        lambda *_args, **_kwargs: {
+            "team": {"external_team_id": "configured-team"}
+        },
+    )
+    try:
+        assert "team" not in app.execution_drivers.modes()
+        unavailable = [
+            chunk
+            async for chunk in app.handle(
+                Envelope.of("hello", session_id="disabled", mode="team")
+            )
+        ]
+        assert unavailable[-1].body["code"] == "capability_unavailable"
+
+        app.set_team_manager(team)
+        assert "team" in app.execution_drivers.modes()
+
+        envelope = Envelope.of("hello", session_id="s1", mode="team")
+        chunks = [chunk async for chunk in app.handle(envelope)]
+
+        assert chunks[-1].body["text"] == "team"
+        assert team.envelopes == [envelope]
+        assert envelope.params["external_team_id"] == "configured-team"
+    finally:
+        await app.shutdown()
+
+    assert "team" not in app.execution_drivers.modes()
+    assert "dynamic_kanban" not in app.execution_drivers.modes()

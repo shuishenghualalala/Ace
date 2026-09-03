@@ -91,7 +91,7 @@
   <ul class="todo">
     <li><code>ResponseChunk.kind</code> 仍包含业务枚举，阶段 2 后续迁为命名空间 <code>feature_event</code>。</li>
     <li><code>followup.py</code> 仍依赖 <code>crew.state.logging</code>，后续需判断日志接口是否应成为 Host 注入能力。</li>
-    <li>Team 与 Dynamic Kanban 的旧 mode 值仍由 App 兼容分支处理，待迁入 Driver Registry。</li>
+    <li>旧 <code>team_internal</code> 等业务事件仍在 Core Chunk 枚举中，后续由 Feature Event 协议迁出。</li>
   </ul>
 
   <h2>6. 扩展点</h2>

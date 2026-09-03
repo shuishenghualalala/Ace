@@ -638,10 +638,15 @@ async def test_app_handle_dynamic_kanban(tmp_path: Path) -> None:
     )
     app = build_app(config, enable_team=False)
     assert app.dynamic_kanban is not None
+    binding = app.execution_drivers.resolve("dynamic_kanban")
+    assert binding.generation.feature_id == "product.dynamic-kanban-driver-adapter"
 
-    env = Envelope.of("测试请求", session_id="session_1", mode="dynamic_kanban")
-    chunks = [c async for c in app.handle(env)]
-    assert chunks[-1].kind == "final"
+    try:
+        env = Envelope.of("测试请求", session_id="session_1", mode="dynamic_kanban")
+        chunks = [c async for c in app.handle(env)]
+        assert chunks[-1].kind == "final"
+    finally:
+        await app.shutdown()
 
 
 

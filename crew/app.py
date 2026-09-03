@@ -497,20 +497,22 @@ class CrewApp:
 
         self.agents = AgentManager(self._make_agent)
         self.execution_drivers = plugins.feature_runtime.execution_drivers
-        self._default_driver_scope = FeatureScope(
-            FeatureGeneration("core.agent-driver", 1)
+        self._execution_driver_scopes: list[FeatureScope] = []
+        self._register_execution_driver_scope(
+            "core.agent-driver",
+            ExecutionDriver(
+                mode="agent",
+                execute=self._run_default_execution_driver,
+                capabilities=("agent.default",),
+                description="Default single-agent execution",
+            ),
+            ExecutionDriver(
+                mode="agent.default",
+                execute=self._run_default_execution_driver,
+                capabilities=("agent.default",),
+                description="Default single-agent execution",
+            ),
         )
-        for mode in ("agent", "agent.default"):
-            self.execution_drivers.register(
-                self._default_driver_scope,
-                ExecutionDriver(
-                    mode=mode,
-                    execute=self._run_default_execution_driver,
-                    capabilities=("agent.default",),
-                    description="Default single-agent execution",
-                ),
-            )
-        self._default_driver_scope.activate()
         # 对话级 Plan 模式管理器（由 build_app 装配后赋值）
         self.plan_manager = None
         # 专用 Wiki Agent 会话管理器（由 build_app 装配后赋值）
@@ -1592,8 +1594,46 @@ class CrewApp:
             model_capabilities=effective_capabilities,
         )
 
+    def _register_execution_driver_scope(
+        self,
+        feature_id: str,
+        *drivers: ExecutionDriver,
+    ) -> FeatureScope:
+        """Publish synchronous composition-root adapters as one owned Generation."""
+        scope = FeatureScope(FeatureGeneration(feature_id, 1))
+        for driver in drivers:
+            self.execution_drivers.register(scope, driver)
+        scope.activate()
+        self._execution_driver_scopes.append(scope)
+        return scope
+
     def set_team_manager(self, team) -> None:
+        if self.team is not None:
+            raise RuntimeError("team manager is already configured")
+        self._register_execution_driver_scope(
+            "product.team-driver-adapter",
+            ExecutionDriver(
+                mode="team",
+                execute=self._run_team_execution_driver,
+                capabilities=("team.coordinate",),
+                description="Team coordination execution",
+            ),
+        )
         self.team = team
+
+    def set_dynamic_kanban_manager(self, manager) -> None:
+        if self.dynamic_kanban is not None:
+            raise RuntimeError("dynamic kanban manager is already configured")
+        self._register_execution_driver_scope(
+            "product.dynamic-kanban-driver-adapter",
+            ExecutionDriver(
+                mode="dynamic_kanban",
+                execute=self._run_dynamic_kanban_execution_driver,
+                capabilities=("dynamic-kanban.execute",),
+                description="Dynamic Kanban workflow execution",
+            ),
+        )
+        self.dynamic_kanban = manager
 
     def set_push(
         self,
@@ -1973,9 +2013,14 @@ class CrewApp:
                 pass
             self._expiry_task = None
         await self.dispatcher.shutdown()
-        await self._default_driver_scope.stop(
-            FeatureStopPolicy.DRAIN,
-            timeout_seconds=provider_timeout,
+        await asyncio.gather(
+            *(
+                scope.stop(
+                    FeatureStopPolicy.DRAIN,
+                    timeout_seconds=provider_timeout,
+                )
+                for scope in reversed(self._execution_driver_scopes)
+            )
         )
         if self.cron_service is not None:
             await self.cron_service.stop()
@@ -2918,6 +2963,42 @@ class CrewApp:
             async for chunk in agent.run(envelope):
                 yield chunk
 
+    async def _run_team_execution_driver(
+        self,
+        envelope: Envelope,
+    ) -> AsyncIterator[ResponseChunk]:
+        if self.team is None:
+            yield ResponseChunk.error(envelope.request_id, "Team 模式未启用")
+            return
+        if not envelope.params.get("external_team_id"):
+            config = self._session_agent_config(
+                envelope.session_id,
+                owner_account_id=envelope.user_id,
+            )
+            team_config = config.get("team")
+            if not isinstance(team_config, dict):
+                team_config = {}
+            external_team_id = str(
+                team_config.get("external_team_id") or ""
+            ).strip()
+            if external_team_id:
+                envelope.params["external_team_id"] = external_team_id
+        async for chunk in self.team.interact(envelope):
+            yield chunk
+
+    async def _run_dynamic_kanban_execution_driver(
+        self,
+        envelope: Envelope,
+    ) -> AsyncIterator[ResponseChunk]:
+        if self.dynamic_kanban is None:
+            yield ResponseChunk.error(
+                envelope.request_id,
+                "Dynamic Kanban 模式未启用",
+            )
+            return
+        async for chunk in self.dynamic_kanban.interact(envelope):
+            yield chunk
+
     async def handle(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
         """统一入口：完成公共前处理后解析可插拔执行 Driver。"""
         from crew.core.runctx import current_push_fn
@@ -2976,31 +3057,6 @@ class CrewApp:
             self._drain_process_notifications(envelope)
             if self.execution_drivers.get(envelope.mode) is not None:
                 async for chunk in self.execution_drivers.dispatch(envelope):
-                    yield chunk
-                return
-            if envelope.mode == "team":
-                if self.team is None:
-                    yield ResponseChunk.error(envelope.request_id, "Team 模式未启用")
-                    return
-                if not envelope.params.get("external_team_id"):
-                    # 必须带 owner：session_agent_config 按账号隔离，漏传会读到空/错配置
-                    config = self._session_agent_config(
-                        envelope.session_id,
-                        owner_account_id=envelope.user_id,
-                    )
-                    team_cfg = config.get("team") if isinstance(config.get("team"), dict) else {}
-                    external_team_id = str(team_cfg.get("external_team_id") or "").strip()
-                    if external_team_id:
-                        envelope.params["external_team_id"] = external_team_id
-                async for chunk in self.team.interact(envelope):
-                    yield chunk
-                return
-
-            if envelope.mode == "dynamic_kanban":
-                if self.dynamic_kanban is None:
-                    yield ResponseChunk.error(envelope.request_id, "Dynamic Kanban 模式未启用")
-                    return
-                async for chunk in self.dynamic_kanban.interact(envelope):
                     yield chunk
                 return
             yield ResponseChunk.error(
@@ -3559,15 +3615,17 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     # Dynamic Kanban：独立的多智能体协同后端
     from crew.dynamickanban.manager import DynamicKanbanManager
 
-    app.dynamic_kanban = DynamicKanbanManager(
-        store=dk_store,
-        provider=provider,
-        base_registry=registry,
-        session_store=session_store,
-        memory=memory,
-        plugins=plugins,
-        config=cfg,
-        provider_for_owner=app.owner_team_provider,
+    app.set_dynamic_kanban_manager(
+        DynamicKanbanManager(
+            store=dk_store,
+            provider=provider,
+            base_registry=registry,
+            session_store=session_store,
+            memory=memory,
+            plugins=plugins,
+            config=cfg,
+            provider_for_owner=app.owner_team_provider,
+        )
     )
 
     from crew.gateway.hooks import hook_registry
