@@ -95,7 +95,7 @@ ToolResultRetention:
   <ul class="todo">
     <li>文件恢复只重读本会话 file_read 已成功授权读取过的路径，读取走身份校验句柄（防 TOCTOU），不引入新的文件访问。</li>
     <li>后续可为更多 Feature 工具补充更细的动态 identity；未补充前按重要结果保护，不影响正确性。</li>
-    <li>Wiki Attachment 直接依赖已删除；Plan reminder 等动态上下文仍待逐项迁入 Contributor。</li>
+    <li>Wiki Attachment 与 Cron trigger 直接依赖已删除；后台结果和 Plan reminder 等动态上下文仍待逐项迁入 Contributor。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
@@ -116,10 +116,11 @@ ToolResultRetention:
       <tr><td>2026-09-03</td><td>移除静态引用注入表依赖，改为消费 Feature-owned Context Contributor 的通用片段。</td><td><code>crew/agent/runtime.py</code>、Agent→Gateway 架构边界。</td></tr>
       <tr><td>2026-09-03</td><td>Session Source 改由 Gateway Contributor 归一；Agent 只消费动态 fragment 和稳定 source 字典。</td><td>删除 Agent Runtime→Gateway 最后一条直接依赖豁免。</td></tr>
       <tr><td>2026-09-03</td><td>Wiki Attachment 改由 Prompt Contributor 提供；预览与真实执行统一贡献顺序。</td><td>删除 Agent Runtime→Wiki 直接导入和 Manager 注入。</td></tr>
+      <tr><td>2026-09-03</td><td>Cron 触发轮文案改由 Cron Prompt Contributor 提供。</td><td>Agent Runtime 不再判断 Cron channel 或保存 Cron 产品文案。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0011-wiki-attachment-context-contributor.html">ADR-0011</a> · <a href="../../testing/plugin-architecture-stage-2-wiki-context.html">测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0012-cron-trigger-context-contributor.html">ADR-0012</a> · <a href="../../testing/plugin-architecture-stage-2-cron-context.html">测试记录</a></div>
 </div>
 </body>
 </html>

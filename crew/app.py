@@ -3538,7 +3538,11 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     )
 
     # cron：任务存储 + 引擎 + 暴露给 agent 的工具
-    from crew.cron import CronJobStore, CronService
+    from crew.cron import (
+        CronJobStore,
+        CronService,
+        contribute_cron_trigger_reminder,
+    )
     from crew.cron.tools import EXTERNAL_ORIGIN_PLATFORMS
     from crew.tools.cron_tools import register_cron_tools
 
@@ -3546,6 +3550,20 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     app.cron_store = cron_store
     app.cron_service = None
     if cfg.cron_enabled:
+        app._register_context_contributor_scope(
+            "product.cron-context-adapter",
+            ContextContributor(
+                contributor_id="cron.trigger.reminder",
+                handler=contribute_cron_trigger_reminder,
+                phase=ContextPhase.PROMPT,
+                priority=50,
+                predicate=lambda envelope: envelope.channel == "cron",
+                model_visible=True,
+                persistent=False,
+                description="Active Cron fire framing for the executing agent",
+            ),
+        )
+
         def _cron_origin_source(env: Envelope):
             raw = env.params.get("cron_origin_source")
             if not isinstance(raw, dict) or not raw:

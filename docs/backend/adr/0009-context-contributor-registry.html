@@ -39,7 +39,7 @@
 
   <h2>边界</h2>
   <ul>
-    <li>首个切片只接管请求阶段的引用上下文；随后 Session Source 与 Wiki Attachment 已成为真实消费者，Cron Reminder、后台通知与 Plan 继续逐项迁移。</li>
+    <li>首个切片只接管请求阶段的引用上下文；随后 Session Source、Wiki Attachment 与 Cron Reminder 已成为真实消费者，后台通知与 Plan 继续逐项迁移。</li>
     <li>持久 prompt fragment 已进入报告；Wiki 所需的 persistent Message 已落地。通用 Session Event Schema 仍随 Feature Event 阶段实现。</li>
     <li>旧 <code>resolve_browser_tab_references()</code> API 暂由 Gateway 重导出，调用方迁移后删除。</li>
   </ul>

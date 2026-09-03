@@ -985,10 +985,34 @@ async def test_title_timeout_falls_back_to_first_query():
 async def test_cron_fired_turn_gets_scheduled_task_framing():
     # 定时任务触发轮：reminder 应明确"此刻在执行定时任务"+ 带任务名 + 当前时间，
     # 避免 agent 把注入的 query 当成用户提前发来的消息而反问"是否到时间"。
-    agent = _agent(FakeProvider(script=[]))
+    from crew.cron import contribute_cron_trigger_reminder
+    from crew.features import (
+        ContextContributor,
+        ContextContributorRegistry,
+        ContextPhase,
+        FeatureGeneration,
+        FeatureScope,
+    )
+
+    context_registry = ContextContributorRegistry()
+    scope = FeatureScope(FeatureGeneration("cron-context-test", 1))
+    context_registry.register(
+        scope,
+        ContextContributor(
+            "cron.trigger.reminder",
+            contribute_cron_trigger_reminder,
+            phase=ContextPhase.PROMPT,
+        ),
+    )
+    scope.activate()
+    agent = _agent(
+        FakeProvider(script=[]),
+        context_contributors=context_registry,
+    )
     cron_env = Envelope.of("詹姆斯goat", session_id="s1", channel="cron")
     cron_env.params["cron_job_name"] = "詹姆斯GOAT提醒"
 
+    await agent._contribute_prompt_context(cron_env)
     _static, reminder = await agent._build_prompts(cron_env, [])
 
     assert "定时任务触发" in reminder
@@ -997,10 +1021,11 @@ async def test_cron_fired_turn_gets_scheduled_task_framing():
     assert "当前时间：" in reminder            # 触发轮能看到当前时刻（不只是日期）
 
     # 普通渠道不注入该框架
-    _s2, normal_reminder = await agent._build_prompts(
-        Envelope.of("你好", session_id="s2", channel="web"), []
-    )
+    normal_env = Envelope.of("你好", session_id="s2", channel="web")
+    await agent._contribute_prompt_context(normal_env)
+    _s2, normal_reminder = await agent._build_prompts(normal_env, [])
     assert "定时任务触发" not in normal_reminder
+    await scope.dispose()
 
 
 async def test_revision_intent_gets_hidden_turn_framing():

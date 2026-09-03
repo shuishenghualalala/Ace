@@ -44,20 +44,24 @@
 <div class="wrap">
   <div class="crumb">Ace / 后端模块 / cron</div>
   <h1><span class="logo">A</span>crew/cron</h1>
-  <div class="sub">Cron 计划任务：定时自动化入口。</div>
+  <div class="sub">Cron 计划任务：持久调度、触发执行、投递与 Agent Prompt Context。</div>
 
   <h2>1. 职责</h2>
   <ul>
-    <li>该模块做什么、不做什么（边界）。</li>
+    <li>持久化按 Owner 隔离的定时任务和运行记录，计算 trigger 并调度执行。</li>
+    <li>构造 Cron Envelope，交给共享 SessionDispatcher 执行，并记录终态。</li>
+    <li>拥有定时任务触发轮的模型上下文；Agent Runtime 不理解 Cron 产品语义。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
-  <p>按子功能或核心流程拆解，这是本模块文档的重点。</p>
   <table>
     <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
     <tbody>
-      <tr><td><code>feature-a</code></td><td>…</td><td>已落地</td></tr>
-      <tr><td><code>feature-b</code></td><td>…</td><td>待补充</td></tr>
+      <tr><td>任务与运行存储</td><td>保存 schedule、trigger、投递目标、Owner 和 fire 幂等记录。</td><td>已落地</td></tr>
+      <tr><td>调度服务</td><td>定时 claim、并发上限、重试与完成回调。</td><td>已落地</td></tr>
+      <tr><td>自然语言计划</td><td>解析 interval、once 等用户输入并构造 trigger。</td><td>已落地</td></tr>
+      <tr><td>Trigger Context</td><td><code>cron.trigger.reminder</code> 为触发轮贡献瞬时 prompt fragment。</td><td>已落地</td></tr>
+      <tr><td>完整 Cron Feature</td><td>Scheduler、Store、Tools、Route、Owner mount 与 restart 策略进入统一 Runtime。</td><td>待迁移</td></tr>
     </tbody>
   </table>
 
@@ -65,23 +69,34 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/cron/xxx.py</code></td><td>…</td></tr>
+      <tr><td><code>crew/cron/jobs.py</code></td><td>任务/运行存储、trigger 构造和 schedule 解析。</td></tr>
+      <tr><td><code>crew/cron/scheduler.py</code></td><td>CronService 调度循环、fire claim 与执行终态。</td></tr>
+      <tr><td><code>crew/cron/context.py</code></td><td>Cron 触发轮 Prompt Contributor。</td></tr>
+      <tr><td><code>crew/tools/cron_tools.py</code></td><td>面向 Agent 的 Cron 工具入口。</td></tr>
     </tbody>
   </table>
 
   <h2>4. 数据模型与接口</h2>
-  <p>对外暴露的关键类/方法、事件/消息约定、Schema。</p>
-  <pre><code># 关键签名</code></pre>
+  <pre><code>ContextContributor(
+    contributor_id="cron.trigger.reminder",
+    phase=ContextPhase.PROMPT,
+    priority=50,
+    persistent=False,
+)
+
+await contribute_cron_trigger_reminder(envelope)</code></pre>
+  <p>只有 <code>channel=cron</code> 的 Envelope 产生 fragment；任务名来自 <code>cron_job_name</code>。Contributor 只在 Cron 配置启用时注册，应用关闭时由 FeatureScope 撤销。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>问题 1：…</li>
-    <li>TODO：…</li>
+    <li>Cron Service 仍由 <code>build_app()</code> 直接构造，启动/停止由中心清单管理。</li>
+    <li>后续以 restart 策略纳入 FeatureRuntime，并把调度 Task 与 Owner mount 归入同一 Scope。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
   <ul>
-    <li>如何在此模块上加功能（遵守契约、不跨目录）。</li>
+    <li>新增触发轮上下文在 Cron Contributor 中扩展，不向 Agent Runtime 添加渠道判断。</li>
+    <li>新增 Scheduler 资源必须能被 Scope drain/cancel，持久任务数据不随 disable 删除。</li>
   </ul>
 
   <h2>7. 变更记录</h2>
@@ -89,10 +104,11 @@
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
+      <tr><td>2026-09-03</td><td>定时任务触发文案迁入 Prompt Context Contributor，并绑定 Cron 开关与 FeatureScope。</td><td>Agent Runtime、Cron 启停边界和请求上下文。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0012-cron-trigger-context-contributor.html">ADR-0012</a> · <a href="../../testing/plugin-architecture-stage-2-cron-context.html">测试记录</a></div>
 </div>
 </body>
 </html>

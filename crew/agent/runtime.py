@@ -470,17 +470,6 @@ class SingleAgent(Agent):
                 f"一次性 confirmation_id={wiki_confirmation_id}。"
                 "仅将此 ID 传给上一回合对应的 Wiki 执行工具，不得改动目标或参数。"
             )
-        # 定时任务触发轮：明确告知"此刻正在执行定时任务"，否则 agent 只从历史看到
-        # "有个任务定在某时刻"、却不知道当前这轮就是它到点触发（query 含糊时尤其会
-        # 反问"是你提前来问还是任务触发了"）。配合上面 reminder 里的当前时间一起兜底。
-        if getattr(envelope, "channel", "") == "cron":
-            job_name = str(envelope.params.get("cron_job_name") or "").strip()
-            name_part = f"「{job_name}」" if job_name else ""
-            reminder_parts.append(
-                f"【定时任务触发】你之前创建的定时任务{name_part}现在已到点执行。"
-                "请直接完成下面这条任务内容、并输出要发送给用户的话——"
-                "不要询问是否到时间、不要反问是不是用户提前来问、也不要解释这是定时任务。"
-            )
         # 后台子 agent 完成通知：自动注入本轮上下文（无需模型主动 collect）
         bg_block = _format_subagent_notifications(envelope.params.get("subagent_notifications"))
         if bg_block:

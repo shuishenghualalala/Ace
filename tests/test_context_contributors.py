@@ -356,3 +356,52 @@ async def test_app_uses_host_and_browser_owned_context_contributors(
     finally:
         await app.plugins.feature_runtime.deactivate(feature_id)
         await app.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cron_context_contributor_follows_feature_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    app = build_app(
+        Config(
+            db_path=str(tmp_path / "crew.db"),
+            memory_db_path=str(tmp_path / "memory.db"),
+            cron_enabled=True,
+            api_key="",
+        ),
+        enable_team=False,
+    )
+    try:
+        prompt_ids = {
+            binding.contributor.contributor_id
+            for binding in app.context_contributors.bindings(ContextPhase.PROMPT)
+        }
+        assert prompt_ids == {"cron.trigger.reminder", "wiki.agent.context"}
+
+        cron_report = await app.context_contributors.contribute(
+            Envelope.of(
+                "生成日报",
+                session_id="cron-session",
+                channel="cron",
+                params={"cron_job_name": "每日简报"},
+            ),
+            phase=ContextPhase.PROMPT,
+        )
+        assert len(cron_report.prompt_parts) == 1
+        assert "每日简报" in cron_report.prompt_parts[0]
+
+        web_report = await app.context_contributors.contribute(
+            Envelope.of("生成日报", session_id="web-session", channel="web"),
+            phase=ContextPhase.PROMPT,
+        )
+        assert web_report.prompt_parts == ()
+    finally:
+        await app.shutdown()
+
+    remaining_ids = {
+        binding.contributor.contributor_id
+        for binding in app.context_contributors.bindings(ContextPhase.PROMPT)
+    }
+    assert "cron.trigger.reminder" not in remaining_ids
