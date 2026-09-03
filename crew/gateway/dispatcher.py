@@ -107,15 +107,14 @@ class SessionDispatcher:
         sid = str((context or {}).get("session_id") or "")
         if not sid:
             return
-        owner = str((context or {}).get("owner_account_id") or "")
-        keys = [self._key(sid, owner)] if owner else [key for key in self._sessions_started if key[1] == sid]
-        for key in keys:
-            self._sessions_started.discard(key)
-            self._tasks.pop(key, None)
-            self._active_exec_session_ids.pop(key, None)
+        owner = normalize_owner_account_id((context or {}).get("owner_account_id"))
+        key = self._key(sid, owner)
+        self._sessions_started.discard(key)
+        self._tasks.pop(key, None)
+        self._active_exec_session_ids.pop(key, None)
         security_service = getattr(self._controller, "security_service", None)
         end_session = getattr(security_service, "end_session", None)
-        if owner and callable(end_session):
+        if callable(end_session):
             end_session(owner, sid)
 
     # ------------------------------------------------------------------ #

@@ -81,8 +81,6 @@ class DeliveryRouter:
         chat_id = parsed.chat_id or (origin.chat_id if origin else None)
         owner = str(owner_account_id or "").strip()
         sender = self._senders.get((platform, owner))
-        if sender is None and owner in {"", "local", "dev:dev"}:
-            sender = self._senders.get((platform, ""))
         if sender is None:
             return {
                 "ok": False,

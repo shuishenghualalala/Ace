@@ -480,14 +480,14 @@ async def test_channel_manager_lifecycle_dispatches_through_session_dispatcher()
 
     channel = FakeChannel()
     manager = ChannelManager()
-    manager.register(channel)
+    manager.register(channel, owner_account_id="local")
 
-    await manager.start_all(dispatcher.run)
+    await manager.start_all(dispatcher.run, owner_account_id="local")
 
     assert manager.status() == [
         {
             "name": "fake",
-            "owner_account_id": "",
+            "owner_account_id": "local",
             "running": True,
             "error": "",
             "operation": "",
@@ -504,7 +504,7 @@ async def test_channel_manager_lifecycle_dispatches_through_session_dispatcher()
     assert manager.status() == [
         {
             "name": "fake",
-            "owner_account_id": "",
+            "owner_account_id": "local",
             "running": False,
             "error": "",
             "operation": "",
@@ -530,9 +530,10 @@ async def test_channel_manager_starts_only_active_owner_channels():
     manager = ChannelManager()
     manager.register(OwnedChannel("owner-a"), owner_account_id="A:uid-a")
     manager.register(OwnedChannel("owner-b"), owner_account_id="B:uid-b")
-    manager.register(OwnedChannel("global"))
+    # owner 统一后不存在无主"全局渠道"：未绑定渠道归属本机 local
+    manager.register(OwnedChannel("global"), owner_account_id="local")
 
-    await manager.start_all(handler)
+    await manager.start_all(handler, owner_account_id="local")
     assert started == ["global"]
     started.clear()
 
@@ -595,12 +596,12 @@ async def test_delivery_router_keeps_same_platform_senders_owner_scoped():
 def test_channel_manager_status_includes_creation_errors():
     manager = ChannelManager()
 
-    manager.record_error("feishu", "missing appSecret")
+    manager.record_error("feishu", "missing appSecret", owner_account_id="local")
 
     assert manager.status() == [
         {
             "name": "feishu",
-            "owner_account_id": "",
+            "owner_account_id": "local",
             "running": False,
             "error": "missing appSecret",
             "operation": "",

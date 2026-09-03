@@ -72,7 +72,7 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/gateway/app.py</code></td><td>FastAPI 装配：中间件（认证挂 <code>request.state.account</code>）、各域路由挂载、渠道注册（<code>_register_enabled_platform_channels</code>：绑定 owner 逐个建实例，未绑定平台建单个全局实例）。</td></tr>
+      <tr><td><code>crew/gateway/app.py</code></td><td>FastAPI 装配：中间件（认证挂 <code>request.state.account</code>）、各域路由挂载、渠道注册（<code>_register_enabled_platform_channels</code>：绑定 owner 逐个建实例 <code>include_env=False</code>，未绑定平台归本机 owner <code>local</code>、<code>include_env=True</code>）。</td></tr>
       <tr><td><code>crew/gateway/auth.py</code></td><td>认证与 owner 归一化边界；<code>AccountContext</code> / <code>authenticate_http_request</code> / <code>authenticate_websocket</code>；再导出 <code>LOCAL_OWNER_ACCOUNT_ID</code>。</td></tr>
       <tr><td><code>crew/gateway/dispatcher.py</code></td><td>会话串行化调度器；ContextVar set 点；忙时策略与登出演代栅栏。</td></tr>
       <tr><td><code>crew/gateway/routers/config.py</code></td><td>配置与模型 profile CRUD 路由，模型 CRUD 显式传 owner。</td></tr>
@@ -87,16 +87,16 @@
   <p>owner 归一化在 gateway 的边界规则（归一化原语 <code>normalize_owner_account_id()</code> / <code>LOCAL_OWNER_ACCOUNT_ID</code> 定义在 <code>crew/core/runctx.py</code>）：</p>
   <pre><code>认证（auth.py）        loopback → AccountContext(owner="local")；remote/email → owner="provider:user"
 ContextVar set 点       dispatcher.run(): current_owner_account_id.set(normalize_owner_account_id(envelope.user_id))
-渠道注册（app.py）      绑定 owner 的渠道 include_env=False（凭证只读 owner overlay）
-                        未绑定的全局渠道 owner=""，include_env=True（env 凭证启用）
+渠道注册（app.py）      显式绑定 owner 的渠道 include_env=False（凭证只读 owner overlay）
+                        未绑定渠道归本机 owner local，include_env=True（env 凭证启用，决策⑦）
 入站消息（channel_sessions.py）
-                        有绑定者：envelope.user_id 改写为绑定桌面账号（binder），
-                        平台原始 uid 只保留在 params.platform_uid，不充当 owner</code></pre>
-  <p>边界之内 owner 恒非空：HTTP 路由经 <code>account_from_request(request).owner_account_id</code> 取 owner 显式传给 CrewApp/store；渠道路径经 dispatcher 的 ContextVar 继承。<code>channel_manager</code> / <code>delivery</code> 仍保留 <code>{"", "local", "dev:dev"}</code> 兼容视图（全局渠道对本机 owner 可见），见 TODO。</p>
+                        有绑定者：envelope.user_id 改写为绑定桌面账号（binder）；
+                        无绑定渠道：归本机 owner local（决策⑥）；
+                        平台原始 uid 只保留在 params.platform_uid，严禁充当 owner</code></pre>
+  <p>边界之内 owner 恒非空：HTTP 路由经 <code>account_from_request(request).owner_account_id</code> 取 owner 显式传给 CrewApp/store；渠道路径经 dispatcher 的 ContextVar 继承。<code>channel_manager</code> / <code>delivery</code> 的 <code>{"", "local", "dev:dev"}</code> 全局特判已删除，渠道一律按 (platform, owner) 精确归属。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>渠道归属统一（交接文档决策⑥⑦：未绑定渠道注册/入站消息归 <code>local</code>、删除 <code>{"", "local", "dev:dev"}</code> 特判、<code>channel_bindings.get_binding</code> 删首条兼容视图）曾在 <code>ab0d596</code> 落地，<code>5434708</code> 签名清扫时随 gateway 调用点收紧一并回卷。当前未绑定渠道仍以全局实例（<code>owner=""</code>）注册，无绑定入站消息不改写 owner——与交接文档描述存在偏差，待确认后重新落地。</li>
     <li>签名清扫未完成：<code>routers/channels.py</code>（19 处）、<code>channel_manager.py</code>（11 处）、<code>dispatcher.py</code>（9 处）、<code>connections.py</code>（9 处）等仍有 <code>owner_account_id: str = ""</code> 默认值待收紧（交接文档第三节 B）。</li>
   </ul>
 
@@ -111,7 +111,8 @@ ContextVar set 点       dispatcher.run(): current_owner_account_id.set(normaliz
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
-      <tr><td>2026-09-03</td><td>合并 owner 统一化改造（refactor/llm-provider → refactor/plugin-architecture-stage-0，merge 22af708）：认证边界归一（<code>auth.py</code> loopback → <code>local</code>，经 <code>LOCAL_OWNER_ACCOUNT_ID</code>）；ContextVar set 点收口（<code>dispatcher.run</code> 统一 <code>normalize_owner_account_id</code>）；绑定渠道入站 binder 改写语义固定（平台原始 uid 不充当 owner）。注意：渠道归属统一（决策⑥⑦）未随合并落地，<code>ab0d596</code> 的实现被 <code>5434708</code> 回卷，见 TODO。</td><td>gateway 认证/分发边界、模型 CRUD 路由 owner 传参；渠道归属语义维持旧行为（未绑定=全局实例）</td></tr>
+      <tr><td>2026-09-03</td><td>渠道归属统一（决策⑥⑦）重新落地：<code>ab0d596</code> 的实现曾被 <code>5434708</code> 签名清扫回卷，本次按当前代码契约重放——未绑定渠道注册归本机 owner <code>local</code>（<code>include_env=True</code>），显式绑定渠道 <code>include_env=False</code>；<code>channel_manager</code> 删除 <code>{"", "local", "dev:dev"}</code> 全局特判、register/unregister/record_error/start_all owner 必填；<code>delivery</code> 删除空 owner sender 回退；无绑定渠道入站消息归 <code>local</code>（平台原始 uid 严禁充当 owner）；<code>channel_bindings.get_binding</code> owner 必填、删除首条兼容视图；dispatcher session_end 归一 owner。<code>tools/builtin.py</code> kill 显式传 owner 与 <code>_has_active_children</code> owner 必填维持 5434708 收紧后的形态。</td><td>gateway 渠道注册/投递/入站归属语义；未绑定渠道行为变化：owner="" → local</td></tr>
+      <tr><td>2026-09-03</td><td>合并 owner 统一化改造（refactor/llm-provider → refactor/plugin-architecture-stage-0，merge 22af708）：认证边界归一（<code>auth.py</code> loopback → <code>local</code>，经 <code>LOCAL_OWNER_ACCOUNT_ID</code>）；ContextVar set 点收口（<code>dispatcher.run</code> 统一 <code>normalize_owner_account_id</code>）；绑定渠道入站 binder 改写语义固定（平台原始 uid 不充当 owner）。</td><td>gateway 认证/分发边界、模型 CRUD 路由 owner 传参</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
     </tbody>
   </table>
