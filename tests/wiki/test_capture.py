@@ -18,7 +18,7 @@ from crew.wiki.store import FileSystemWikiStore
 def store():
     with tempfile.TemporaryDirectory() as tmp:
         s = FileSystemWikiStore(base_dir=tmp)
-        s.init_kb()
+        s.init_kb("A:uid-a")
         yield s
 
 
@@ -130,7 +130,7 @@ async def test_capture_image_describe_failure_marks_failed(store, monkeypatch):
 
 
 async def test_capture_skips_empty_content(store):
-    assert await capture_upload_to_wiki(store, None, WikiConfig(), "a.txt", b"") is None
+    assert await capture_upload_to_wiki(store, None, WikiConfig(), "a.txt", b"", owner_account_id="A:uid-a") is None
     assert store.list_raws("A:uid-a", "default") == []
 
 
@@ -168,7 +168,7 @@ async def test_capture_never_raises(store, monkeypatch):
     """底层异常（如磁盘错误）被吞掉并返回 None，不影响上传主链路。"""
     monkeypatch.setattr(store, "_source_dir", Mock(side_effect=RuntimeError("disk full")))
     assert (
-        await capture_upload_to_wiki(store, None, WikiConfig(), "a.txt", b"x")
+        await capture_upload_to_wiki(store, None, WikiConfig(), "a.txt", b"x", owner_account_id="A:uid-a")
         is None
     )
 

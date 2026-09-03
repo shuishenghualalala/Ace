@@ -181,11 +181,12 @@ async def test_ingest_succeeds_via_stream_when_chat_broken(tmp_path: Path):
             source_type="upload",
             parsed_path=str(tmp_path / "s1.parsed.md"),
             created_at=0.0,
-        )
+        ),
+        "owner",
     )
     (tmp_path / "s1.parsed.md").write_text("关于 AgentRuntime 的设计文档。", encoding="utf-8")
 
-    result = await compiler.ingest("s1")
+    result = await compiler.ingest("s1", "owner")
     assert not result.issues
     assert provider.stream_calls >= 1
     assert provider.chat_calls == 0

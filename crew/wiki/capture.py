@@ -61,7 +61,7 @@ async def capture_upload_to_wiki(
     config: WikiConfig,
     filename: str,
     content: bytes,
-    owner_account_id: str = "",
+    owner_account_id: str,
     kb_id: str = "default",
     provider: LLMProvider | None = None,
 ) -> RawSource | None:

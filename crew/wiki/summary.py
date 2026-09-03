@@ -115,7 +115,7 @@ class WikiSummarizer:
         # 防止同一 KB 并发生成
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
 
-    def _provider_for_owner(self, owner_account_id: str = "") -> LLMProvider:
+    def _provider_for_owner(self, owner_account_id: str) -> LLMProvider:
         resolver = self.provider_for_owner
         if callable(resolver):
             resolved = resolver(str(owner_account_id or ""))
@@ -165,7 +165,7 @@ class WikiSummarizer:
 
     def get_home_intro(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> HomeIntro:
         """直接读取缓存的 Home 导读（不触发 LLM）。"""
@@ -173,7 +173,7 @@ class WikiSummarizer:
 
     async def generate_home_intro(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
         force: bool = False,
     ) -> tuple[HomeIntro, bool]:

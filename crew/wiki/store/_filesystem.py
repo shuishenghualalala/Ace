@@ -67,7 +67,7 @@ class FileSystemWikiStore(WikiStore):
         self._global_lock = threading.Lock()
         self._search_indexes: dict[str, WikiSearchIndex] = {}
 
-    def _owner_home(self, owner_account_id: str = "") -> Path:
+    def _owner_home(self, owner_account_id: str) -> Path:
         """返回 owner 级运行时 home（不依赖 kb_id）。"""
         if self._base_dir:
             return self._base_dir
@@ -81,19 +81,19 @@ class FileSystemWikiStore(WikiStore):
             return path
         return get_owner_runtime_home(owner_account_id or "")
 
-    def _legacy_dir(self, owner_account_id: str = "") -> Path:
+    def _legacy_dir(self, owner_account_id: str) -> Path:
         """旧版 wiki 目录（兼容回退）。"""
         return self._owner_home(owner_account_id) / "wiki"
 
-    def _legacy_raw_dir(self, owner_account_id: str = "") -> Path:
+    def _legacy_raw_dir(self, owner_account_id: str) -> Path:
         """旧版 raw source 目录（兼容回退）。"""
         return self._owner_home(owner_account_id) / "wiki_raw"
 
-    def _kb_root(self, owner_account_id: str = "") -> Path:
+    def _kb_root(self, owner_account_id: str) -> Path:
         """多知识库根目录 wiki_lib/。"""
         return self._owner_home(owner_account_id) / "wiki_lib"
 
-    def _dir(self, owner_account_id: str = "", kb_id: str = "default") -> Path:
+    def _dir(self, owner_account_id: str, kb_id: str = "default") -> Path:
         kb_id = normalize_kb_id(kb_id)
         path = self._kb_root(owner_account_id) / kb_id
         # 兼容旧版：default KB 且新版目录不存在但旧版 wiki/ 存在时，使用旧版路径
@@ -104,7 +104,7 @@ class FileSystemWikiStore(WikiStore):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _raw_dir(self, owner_account_id: str = "", kb_id: str = "default") -> Path:
+    def _raw_dir(self, owner_account_id: str, kb_id: str = "default") -> Path:
         kb_id = normalize_kb_id(kb_id)
         # 默认优先使用新版路径 wiki_lib/{kb_id}/raw
         new_raw = self._kb_root(owner_account_id) / kb_id / "raw"
@@ -116,7 +116,7 @@ class FileSystemWikiStore(WikiStore):
         new_raw.mkdir(parents=True, exist_ok=True)
         return new_raw
 
-    def _lock(self, owner_account_id: str = "", kb_id: str = "default") -> threading.Lock:
+    def _lock(self, owner_account_id: str, kb_id: str = "default") -> threading.Lock:
         with self._global_lock:
             key = f"{owner_account_id or '__default__'}:{normalize_kb_id(kb_id)}"
             if key not in self._locks:
@@ -136,7 +136,7 @@ class FileSystemWikiStore(WikiStore):
     @contextmanager
     def batch_index(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> Iterator[None]:
         with self._search_index(owner_account_id, kb_id).batch():
@@ -155,7 +155,7 @@ class FileSystemWikiStore(WikiStore):
     def _source_dir(
         self,
         source_kind: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> Path:
         raw_dir = self._raw_dir(owner_account_id, kb_id)
@@ -163,12 +163,12 @@ class FileSystemWikiStore(WikiStore):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _source_meta_dir(self, owner_account_id: str = "", kb_id: str = "default") -> Path:
+    def _source_meta_dir(self, owner_account_id: str, kb_id: str = "default") -> Path:
         path = self._dir(owner_account_id, kb_id) / ".crew" / "sources"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def init_kb(self, owner_account_id: str = "", kb_id: str = "default") -> None:
+    def init_kb(self, owner_account_id: str, kb_id: str = "default") -> None:
         base = self._dir(owner_account_id, kb_id)
         # raw 目录与页面目录一起初始化
         self._raw_dir(owner_account_id, kb_id)
@@ -267,7 +267,7 @@ class FileSystemWikiStore(WikiStore):
         meta["relation_schema_version"] = 2
         self._kb_meta_path(base).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
-    def list_kbs(self, owner_account_id: str = "") -> list[KnowledgeBase]:
+    def list_kbs(self, owner_account_id: str) -> list[KnowledgeBase]:
         kbs: dict[str, KnowledgeBase] = {}
         root = self._kb_root(owner_account_id)
         if root.exists():
@@ -299,7 +299,8 @@ class FileSystemWikiStore(WikiStore):
         self,
         kb_id: str,
         name: str = "",
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> KnowledgeBase:
         kb_id = normalize_kb_id(kb_id)
         if kb_id == _DEFAULT_KB_ID:
@@ -320,7 +321,7 @@ class FileSystemWikiStore(WikiStore):
         self.init_kb(owner_account_id, kb_id)
         return kb
 
-    def delete_kb(self, kb_id: str, owner_account_id: str = "") -> bool:
+    def delete_kb(self, kb_id: str, owner_account_id: str) -> bool:
         kb_id = normalize_kb_id(kb_id)
         if kb_id in _PROTECTED_KB_IDS:
             raise ValueError(f"禁止删除 {kb_id} 知识库")
@@ -340,7 +341,7 @@ class FileSystemWikiStore(WikiStore):
 
     def get_vault_path(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> str:
         return str(self._dir(owner_account_id, kb_id).resolve())
@@ -350,7 +351,7 @@ class FileSystemWikiStore(WikiStore):
 
     def get_home_intro(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> HomeIntro:
         """直接读取 .kb.json 中的 home_intro 字段。"""
@@ -364,7 +365,7 @@ class FileSystemWikiStore(WikiStore):
     def set_home_intro(
         self,
         intro: HomeIntro,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> None:
         """将 Home.md 导读写回 .kb.json，同时保留其它元数据字段。"""
@@ -416,7 +417,7 @@ class FileSystemWikiStore(WikiStore):
     def save_raw(
         self,
         source: RawSource,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> RawSource:
         with self._lock(owner_account_id, kb_id):
@@ -448,7 +449,7 @@ class FileSystemWikiStore(WikiStore):
     def load_raw(
         self,
         source_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> RawSource | None:
         meta_path = self._source_meta_dir(owner_account_id, kb_id) / f"{source_id}.json"
@@ -471,7 +472,7 @@ class FileSystemWikiStore(WikiStore):
 
     def list_raws(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> list[RawSource]:
         results: list[RawSource] = []
@@ -495,7 +496,7 @@ class FileSystemWikiStore(WikiStore):
     def delete_raw(
         self,
         source_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> bool:
         with self._lock(owner_account_id, kb_id):
@@ -602,7 +603,7 @@ class FileSystemWikiStore(WikiStore):
     def get_source_titles(
         self,
         source_ids: list[str],
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> dict[str, str]:
         """批量获取 source_id 对应的人类可读标题，缺失时回退到 source_id。"""
@@ -616,7 +617,7 @@ class FileSystemWikiStore(WikiStore):
         self,
         source_id: str,
         content: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> str:
         """把内容保存为 raw source 的 parsed markdown，返回文件路径。"""
@@ -641,7 +642,7 @@ class FileSystemWikiStore(WikiStore):
     def save_page(
         self,
         page: WikiPage,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiPage:
         with self._lock(owner_account_id, kb_id):
@@ -688,7 +689,7 @@ class FileSystemWikiStore(WikiStore):
 
     def _iter_pages(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
         brief: bool = False,
     ):
@@ -723,7 +724,7 @@ class FileSystemWikiStore(WikiStore):
     def get(
         self,
         page_id_str: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiPage | None:
         for page in self._iter_pages(owner_account_id, kb_id):
@@ -734,7 +735,7 @@ class FileSystemWikiStore(WikiStore):
     def get_by_title(
         self,
         title: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiPage | None:
         for page in self._iter_pages(owner_account_id, kb_id):
@@ -745,7 +746,7 @@ class FileSystemWikiStore(WikiStore):
     def update(
         self,
         page: WikiPage,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiPage | None:
         with self._lock(owner_account_id, kb_id):
@@ -770,7 +771,7 @@ class FileSystemWikiStore(WikiStore):
     def delete(
         self,
         page_id_str: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> bool:
         with self._lock(owner_account_id, kb_id):
@@ -788,7 +789,7 @@ class FileSystemWikiStore(WikiStore):
 
     def list_all(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
         limit: int = 100,
         offset: int = 0,
@@ -800,7 +801,7 @@ class FileSystemWikiStore(WikiStore):
 
     def count_pages(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> int:
         """统计页面数量，仅遍历文件不反序列化。"""
@@ -823,7 +824,7 @@ class FileSystemWikiStore(WikiStore):
     def list_pages_by_source(
         self,
         source_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> list[WikiPage]:
         """返回引用了指定 source 的页面列表（brief 模式，不含正文）。"""
@@ -837,7 +838,8 @@ class FileSystemWikiStore(WikiStore):
         self,
         query: str,
         top_k: int = 5,
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> list[WikiPage]:
         """搜索 Wiki 页面。
@@ -930,7 +932,8 @@ class FileSystemWikiStore(WikiStore):
         self,
         query: str,
         top_k: int = 5,
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> list[WikiPage]:
         """把 index.md 作为独立导航通道搜索，不向 Agent 注入完整索引正文。"""
@@ -992,7 +995,7 @@ class FileSystemWikiStore(WikiStore):
 
     def get_graph(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiGraph:
         pages = list(self._iter_pages(owner_account_id, kb_id))
@@ -1058,7 +1061,7 @@ class FileSystemWikiStore(WikiStore):
     def get_neighbors(
         self,
         page_id_str: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> list[WikiPage]:
         """返回与指定页面关联的邻居，按关系远近排序。
@@ -1146,7 +1149,7 @@ class FileSystemWikiStore(WikiStore):
 
     def lint(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> list[LintIssue]:
         """程序化 Lint：断链、孤立页面、格式违规、时效性标记。"""
@@ -1334,7 +1337,7 @@ class FileSystemWikiStore(WikiStore):
     def append_log(
         self,
         messages: list[str],
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> None:
         """追加 Wiki 操作日志到 log.md。"""
@@ -1345,7 +1348,7 @@ class FileSystemWikiStore(WikiStore):
 
     def update_home(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> None:
         base = self._dir(owner_account_id, kb_id)
@@ -1368,7 +1371,7 @@ class FileSystemWikiStore(WikiStore):
 
     def layout_migration_preview(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> dict[str, Any]:
         base = self._dir(owner_account_id, kb_id)
@@ -1406,7 +1409,7 @@ class FileSystemWikiStore(WikiStore):
 
     def migrate_layout(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> dict[str, Any]:
         """幂等迁移旧平铺布局；只移动明确识别的 Wiki 文件。"""
@@ -1526,7 +1529,7 @@ class FileSystemWikiStore(WikiStore):
     def check_source_duplicate(
         self,
         source: RawSource,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
         *,
         _raws: list[RawSource] | None = None,
@@ -1543,7 +1546,7 @@ class FileSystemWikiStore(WikiStore):
     def check_source_drift(
         self,
         source: RawSource,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
         *,
         _raws: list[RawSource] | None = None,
@@ -1565,7 +1568,7 @@ class FileSystemWikiStore(WikiStore):
 
     def superseded_source_ids(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
         *,
         _raws: list[RawSource] | None = None,
@@ -1580,7 +1583,7 @@ class FileSystemWikiStore(WikiStore):
 
     def orient(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiOrientation:
         """返回当前 KB 的全景信息，供 Agent 在操作前 orientation。"""

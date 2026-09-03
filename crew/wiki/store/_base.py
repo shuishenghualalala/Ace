@@ -25,32 +25,33 @@ class WikiStore(ABC):
     @contextmanager
     def batch_index(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> Iterator[None]:
         """把一组页面写入合并为一次索引提交。"""
         yield
 
     @abstractmethod
-    def init_kb(self, owner_account_id: str = "", kb_id: str = "default") -> None: ...
+    def init_kb(self, owner_account_id: str, kb_id: str = "default") -> None: ...
 
     @abstractmethod
-    def list_kbs(self, owner_account_id: str = "") -> list[KnowledgeBase]: ...
+    def list_kbs(self, owner_account_id: str) -> list[KnowledgeBase]: ...
 
     @abstractmethod
     def create_kb(
         self,
         kb_id: str,
         name: str = "",
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> KnowledgeBase: ...
 
     @abstractmethod
-    def delete_kb(self, kb_id: str, owner_account_id: str = "") -> bool: ...
+    def delete_kb(self, kb_id: str, owner_account_id: str) -> bool: ...
 
     def get_vault_path(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> str:
         """返回可由 Obsidian 直接打开的知识库根目录。"""
@@ -62,7 +63,7 @@ class WikiStore(ABC):
     # ---- home intro ----
     def get_home_intro(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> HomeIntro:
         """读取 Home.md 导读缓存；不支持的存储实现返回空导读。"""
@@ -71,7 +72,7 @@ class WikiStore(ABC):
     def set_home_intro(
         self,
         intro: HomeIntro,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> None:
         """写入 Home.md 导读缓存；不支持的存储实现可保持空操作。"""
@@ -81,7 +82,7 @@ class WikiStore(ABC):
     def save_raw(
         self,
         source: RawSource,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> RawSource: ...
 
@@ -89,14 +90,14 @@ class WikiStore(ABC):
     def load_raw(
         self,
         source_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> RawSource | None: ...
 
     @abstractmethod
     def list_raws(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> list[RawSource]: ...
 
@@ -104,14 +105,14 @@ class WikiStore(ABC):
     def delete_raw(
         self,
         source_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> bool: ...
 
     def find_source_kb(
         self,
         source_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> str | None:
         """定位 source_id 实际所在的知识库 ID；找不到返回 None。
 
@@ -129,7 +130,7 @@ class WikiStore(ABC):
     def get_source_titles(
         self,
         source_ids: list[str],
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> dict[str, str]:
         """批量获取 source_id 对应的人类可读标题，缺失时回退到 source_id。"""
@@ -140,7 +141,7 @@ class WikiStore(ABC):
         self,
         source_id: str,
         content: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> str: ...
 
@@ -149,7 +150,7 @@ class WikiStore(ABC):
     def save_page(
         self,
         page: WikiPage,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiPage: ...
 
@@ -157,7 +158,7 @@ class WikiStore(ABC):
     def get(
         self,
         page_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiPage | None: ...
 
@@ -165,7 +166,7 @@ class WikiStore(ABC):
     def get_by_title(
         self,
         title: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiPage | None: ...
 
@@ -174,7 +175,8 @@ class WikiStore(ABC):
         title: str,
         page_type: str | None = None,
         aliases: list[str] | None = None,
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiPage | None:
         """按规范标题和 aliases 解析已有页面。
@@ -216,7 +218,7 @@ class WikiStore(ABC):
     def get_source_page(
         self,
         source_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiPage | None:
         """按 source_id 定位其 Source 摘要页；身份基于 source_id 而非标题。
@@ -241,7 +243,7 @@ class WikiStore(ABC):
     def update(
         self,
         page: WikiPage,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiPage | None: ...
 
@@ -249,14 +251,14 @@ class WikiStore(ABC):
     def delete(
         self,
         page_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> bool: ...
 
     @abstractmethod
     def list_all(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
         limit: int = 100,
         offset: int = 0,
@@ -265,7 +267,7 @@ class WikiStore(ABC):
 
     def count_pages(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> int:
         """返回知识库中的页面总数。默认通过 list_all(brief=True) 计数，子类应覆盖为高效实现。"""
@@ -274,7 +276,7 @@ class WikiStore(ABC):
     def list_pages_by_source(
         self,
         source_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> list[WikiPage]:
         """返回引用了指定 source 的页面列表（brief 模式，不含正文）。默认通过 list_all 过滤。"""
@@ -289,7 +291,8 @@ class WikiStore(ABC):
         self,
         query: str,
         top_k: int = 5,
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> list[WikiPage]: ...
 
@@ -297,7 +300,8 @@ class WikiStore(ABC):
         self,
         query: str,
         top_k: int = 5,
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> list[WikiPage]:
         """从结构化 index 导航召回页面；不支持的存储实现可返回空结果。"""
@@ -306,7 +310,7 @@ class WikiStore(ABC):
     @abstractmethod
     def get_graph(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiGraph: ...
 
@@ -314,7 +318,7 @@ class WikiStore(ABC):
     def get_neighbors(
         self,
         page_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> list[WikiPage]:
         """返回与指定页面关联的邻居页面列表（通过 related / [[wikilink]] / sources 关系）。
@@ -326,21 +330,21 @@ class WikiStore(ABC):
     @abstractmethod
     def lint(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> list[LintIssue]: ...
 
     @abstractmethod
     def orient(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiOrientation: ...
 
     def append_log(
         self,
         messages: list[str],
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> None:
         """追加 Wiki 操作日志；默认空实现，子类可覆盖。"""
@@ -348,7 +352,7 @@ class WikiStore(ABC):
 
     def update_home(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> None:
         """重建 Obsidian Home.md；不支持的存储实现可保持空操作。"""
@@ -356,14 +360,14 @@ class WikiStore(ABC):
 
     def layout_migration_preview(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> dict[str, Any]:
         return {"required": False, "pages": 0, "sources": 0}
 
     def migrate_layout(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> dict[str, Any]:
         return {"migrated": False, "pages": 0, "sources": 0}
@@ -371,7 +375,7 @@ class WikiStore(ABC):
     def check_source_duplicate(
         self,
         source: RawSource,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> RawSource | None:
         """检查同 KB 下是否已有相同 content_sha256 的 source；默认空实现。"""
@@ -380,7 +384,7 @@ class WikiStore(ABC):
     def check_source_drift(
         self,
         source: RawSource,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> list[RawSource]:
         """检查同 URL 的 source 是否发生过内容漂移；默认空实现。"""
@@ -388,7 +392,7 @@ class WikiStore(ABC):
 
     def superseded_source_ids(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> set[str]:
         """返回已被新版本取代的 source_id 集合；默认空实现。"""

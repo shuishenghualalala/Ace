@@ -31,7 +31,7 @@ _EMPTY_ANALYSIS: dict[str, Any] = {"entities": [], "topics": [], "relationships"
 def _save_paste_source(store: FileSystemWikiStore, source_id: str, title: str, **extra: Any) -> None:
     """保存一个 paste 类型、无 parsed 文件的 RawSource。"""
     store.save_raw(
-        RawSource(id=source_id, title=title, source_type="paste", parsed_path="", **extra)
+        RawSource(id=source_id, title=title, source_type="paste", parsed_path="", **extra), owner_account_id="owner"
     )
 
 
@@ -53,20 +53,20 @@ def test_publish_source_page_is_fast_and_searchable_without_llm(store, compiler)
         parsed_path="",
         source_kind="pdf",
     )
-    store.save_raw(raw)
-    raw.parsed_path = store.save_parsed_markdown("src_fast", "这是无需 LLM 的全文来源内容")
+    store.save_raw(raw, owner_account_id="owner")
+    raw.parsed_path = store.save_parsed_markdown("src_fast", "这是无需 LLM 的全文来源内容", owner_account_id="owner")
     raw.parse_status = "parsed"
-    store.save_raw(raw)
+    store.save_raw(raw, owner_account_id="owner")
 
-    page = compiler.publish_source_page("src_fast")
+    page = compiler.publish_source_page("src_fast", owner_account_id="owner")
 
     assert page.page_type == "source"
     assert page.file_path == "wiki/sources/pdfs/快速来源.md"
     assert page.summary == "这是无需 LLM 的全文来源内容"
     assert "## 来源信息" in page.content
     assert "这是无需 LLM 的全文来源内容" in page.content
-    assert store.get_by_title("快速来源") is not None
-    assert any(item.id == page.id for item in store.search("全文来源"))
+    assert store.get_by_title("快速来源", owner_account_id="owner") is not None
+    assert any(item.id == page.id for item in store.search("全文来源", owner_account_id="owner"))
 
 
 def test_publish_source_page_moves_existing_summary_into_source_kind_directory(
@@ -80,21 +80,21 @@ def test_publish_source_page_moves_existing_summary_into_source_kind_directory(
         parsed_path="",
         source_kind="note",
     )
-    store.save_raw(raw)
-    raw.parsed_path = store.save_parsed_markdown(raw.id, "来源正文")
-    store.save_raw(raw)
-    first = compiler.publish_source_page(raw.id)
-    old_path = store._dir() / first.file_path
+    store.save_raw(raw, owner_account_id="owner")
+    raw.parsed_path = store.save_parsed_markdown(raw.id, "来源正文", owner_account_id="owner")
+    store.save_raw(raw, owner_account_id="owner")
+    first = compiler.publish_source_page(raw.id, owner_account_id="owner")
+    old_path = store._dir(owner_account_id="owner") / first.file_path
     assert first.file_path == "wiki/sources/notes/移动来源.md"
 
     raw.source_kind = "article"
-    store.save_raw(raw)
-    moved = compiler.publish_source_page(raw.id)
+    store.save_raw(raw, owner_account_id="owner")
+    moved = compiler.publish_source_page(raw.id, owner_account_id="owner")
 
     assert moved.file_path == "wiki/sources/articles/移动来源.md"
     assert not old_path.exists()
-    assert (store._dir() / moved.file_path).is_file()
-    assert store.get(moved.id) is not None
+    assert (store._dir(owner_account_id="owner") / moved.file_path).is_file()
+    assert store.get(moved.id, owner_account_id="owner") is not None
 
 
 @pytest.mark.asyncio
@@ -128,7 +128,7 @@ async def test_short_ingest_keeps_qualified_entities_and_topics(store, compiler)
 
     _save_paste_source(store, "src_1", "原始文档")
 
-    result = await compiler.ingest("src_1", source_content=source_content)
+    result = await compiler.ingest("src_1", source_content=source_content, owner_account_id="owner")
 
     assert not result.issues
     assert len(result.pages) == 4
@@ -139,7 +139,7 @@ async def test_short_ingest_keeps_qualified_entities_and_topics(store, compiler)
     assert "Wiki 设计" in titles
 
     # source 页面保存原始内容
-    source_page = store.get_by_title("原始文档")
+    source_page = store.get_by_title("原始文档", owner_account_id="owner")
     assert source_page is not None
     assert source_page.page_type == "source"
     assert "## 核心观点" in source_page.content
@@ -150,11 +150,11 @@ async def test_short_ingest_keeps_qualified_entities_and_topics(store, compiler)
     assert source_content in source_page.content
 
     # entity 页面保存到 store
-    entity_page = store.get_by_title("AgentRuntime")
+    entity_page = store.get_by_title("AgentRuntime", owner_account_id="owner")
     assert entity_page is not None
     assert entity_page.page_type == "entity"
     # relationship 被应用
-    mode_page = store.get_by_title("ModeManager")
+    mode_page = store.get_by_title("ModeManager", owner_account_id="owner")
     assert mode_page is not None
     assert entity_page.related == []
     assert any(
@@ -163,7 +163,7 @@ async def test_short_ingest_keeps_qualified_entities_and_topics(store, compiler)
     )
 
     # index.md 已更新
-    index_text = (store._dir() / "index.md").read_text(encoding="utf-8")
+    index_text = (store._dir(owner_account_id="owner") / "index.md").read_text(encoding="utf-8")
     assert "AgentRuntime" in index_text
 
 
@@ -171,7 +171,7 @@ async def test_short_ingest_keeps_qualified_entities_and_topics(store, compiler)
 async def test_ingest_with_source_content_no_raw_file(store, compiler):
     compiler.provider = FakeProvider(script=[_analysis_response(_EMPTY_ANALYSIS)])
 
-    result = await compiler.ingest("missing_src", source_content="一些内容")
+    result = await compiler.ingest("missing_src", source_content="一些内容", owner_account_id="owner")
 
     assert not result.issues
     assert len(result.pages) == 1
@@ -181,7 +181,7 @@ async def test_ingest_with_source_content_no_raw_file(store, compiler):
 
 @pytest.mark.asyncio
 async def test_ingest_returns_issue_when_source_missing_and_no_content(store, compiler):
-    result = await compiler.ingest("missing_src")
+    result = await compiler.ingest("missing_src", owner_account_id="owner")
     assert result.issues
     assert "missing_src 不存在" in result.issues[0]
     assert not result.pages
@@ -192,7 +192,7 @@ async def test_ingest_handles_invalid_json_gracefully(store, compiler):
     compiler.provider = FakeProvider(script=[ChatResponse(text="not valid json")])
     _save_paste_source(store, "src_bad", "Bad")
 
-    result = await compiler.ingest("src_bad", source_content="bad content")
+    result = await compiler.ingest("src_bad", source_content="bad content", owner_account_id="owner")
 
     assert result.issues
     assert "LLM 分析失败" in result.issues[0]
@@ -207,9 +207,9 @@ async def test_plan_capacity_failure_preserves_parsed_source_for_retry(store, co
         parsed_path="",
         parse_status="parsed",
     )
-    store.save_raw(raw)
-    raw.parsed_path = store.save_parsed_markdown("src_capacity", "已成功保存的 Markdown 正文")
-    store.save_raw(raw)
+    store.save_raw(raw, owner_account_id="owner")
+    raw.parsed_path = store.save_parsed_markdown("src_capacity", "已成功保存的 Markdown 正文", owner_account_id="owner")
+    store.save_raw(raw, owner_account_id="owner")
     compiler._analyze = AsyncMock(
         return_value={
             "_chunk_failed": True,
@@ -219,10 +219,10 @@ async def test_plan_capacity_failure_preserves_parsed_source_for_retry(store, co
         }
     )
 
-    plan = await compiler.plan_ingest("src_capacity")
+    plan = await compiler.plan_ingest("src_capacity", owner_account_id="owner")
 
     assert any("已解析内容仍保留" in issue for issue in plan.issues)
-    saved = store.load_raw("src_capacity")
+    saved = store.load_raw("src_capacity", owner_account_id="owner")
     assert saved is not None
     assert saved.parse_status == "parsed"
     assert Path(saved.parsed_path).read_text(encoding="utf-8") == "已成功保存的 Markdown 正文"
@@ -235,7 +235,7 @@ async def test_ingest_strips_markdown_code_fences(store, compiler):
     )
     _save_paste_source(store, "src_fenced", "Fenced")
 
-    result = await compiler.ingest("src_fenced", source_content="原始内容")
+    result = await compiler.ingest("src_fenced", source_content="原始内容", owner_account_id="owner")
 
     assert not result.issues
     assert result.pages[0].title == "Fenced"
@@ -252,16 +252,16 @@ async def test_compile_all_recompiles_all_raw_sources(store, compiler):
         raw = RawSource(
             id=f"src_{i}", title=f"Raw {i}", source_type="paste", parsed_path=""
         )
-        store.save_raw(raw)
-        raw.parsed_path = store.save_parsed_markdown(raw.id, f"Raw {i} content")
+        store.save_raw(raw, owner_account_id="owner")
+        raw.parsed_path = store.save_parsed_markdown(raw.id, f"Raw {i} content", owner_account_id="owner")
         raw.parse_status = "parsed"
-        store.save_raw(raw)
+        store.save_raw(raw, owner_account_id="owner")
 
-    result = await compiler.compile_all()
+    result = await compiler.compile_all(owner_account_id="owner")
 
     assert len(result.ingested) == 2
     assert not result.errors
-    pages = store.list_all()
+    pages = store.list_all(owner_account_id="owner")
     assert len(pages) == 2
 
 
@@ -272,10 +272,10 @@ async def test_repeated_ingest_updates_source_page(store, compiler):
     )
     _save_paste_source(store, "src_repeat", "重复源")
 
-    await compiler.ingest("src_repeat", source_content="第一段内容。")
-    await compiler.ingest("src_repeat", source_content="第二段内容。")
+    await compiler.ingest("src_repeat", source_content="第一段内容。", owner_account_id="owner")
+    await compiler.ingest("src_repeat", source_content="第二段内容。", owner_account_id="owner")
 
-    pages = store.list_all()
+    pages = store.list_all(owner_account_id="owner")
     assert len(pages) == 1
     # 当前 source 页面会按最新内容覆盖
     assert "第二段内容" in pages[0].content
@@ -291,9 +291,9 @@ async def test_lint_returns_issue_dicts(store, compiler):
             title="孤立页",
             content="# 孤立页\n\n正文无链接。",
             file_path="topics/孤立页.md",
-        )
+        ), owner_account_id="owner"
     )
-    issues = await compiler.lint()
+    issues = await compiler.lint(owner_account_id="owner")
     orphan = next(issue for issue in issues if issue["kind"] == "orphan")
     assert orphan["page_id"] == "p1"
     assert any(issue["kind"] == "index_drift" for issue in issues)
@@ -308,7 +308,7 @@ async def test_lint_deep_calls_llm_for_contradiction_and_gap(store, compiler):
             title="概念A",
             content="# 概念A\n\n属性值是 1。",
             file_path="entities/概念A.md",
-        )
+        ), owner_account_id="owner"
     )
     store.save_page(
         WikiPage(
@@ -317,7 +317,7 @@ async def test_lint_deep_calls_llm_for_contradiction_and_gap(store, compiler):
             title="概念B",
             content="# 概念B\n\n概念A 的属性值是 2。",
             file_path="entities/概念B.md",
-        )
+        ), owner_account_id="owner"
     )
     llm_response = [
         {
@@ -335,7 +335,7 @@ async def test_lint_deep_calls_llm_for_contradiction_and_gap(store, compiler):
     ]
     compiler.provider = FakeProvider(script=[ChatResponse(text=json.dumps(llm_response, ensure_ascii=False))])
 
-    issues = await compiler.lint(deep=True)
+    issues = await compiler.lint(deep=True, owner_account_id="owner")
     kinds = {i["kind"] for i in issues}
     assert "contradiction" in kinds
     assert "entity_gap" in kinds
@@ -350,9 +350,9 @@ async def test_lint_deep_skips_llm_when_single_page(store, compiler):
             title="唯一页",
             content="# 唯一页\n\n无矛盾对象。",
             file_path="topics/唯一页.md",
-        )
+        ), owner_account_id="owner"
     )
-    issues = await compiler.lint(deep=True)
+    issues = await compiler.lint(deep=True, owner_account_id="owner")
     assert all(i["kind"] != "contradiction" for i in issues)
     assert all(i["kind"] != "entity_gap" for i in issues)
 
@@ -372,9 +372,9 @@ async def test_orient_appends_log_after_ingest(store, compiler):
     compiler.provider = FakeProvider(script=[_analysis_response(_EMPTY_ANALYSIS)])
     _save_paste_source(store, "src_log", "日志测试源")
 
-    await compiler.ingest("src_log", source_content="测试内容")
+    await compiler.ingest("src_log", source_content="测试内容", owner_account_id="owner")
 
-    orientation = await compiler.orient()
+    orientation = await compiler.orient(owner_account_id="owner")
     assert any("src_log" in " ".join(entry["messages"]) for entry in orientation.recent_log)
 
 
@@ -384,7 +384,7 @@ async def test_ingest_reports_duplicate_source(store, compiler):
     _save_paste_source(store, "src_dup_1", "源A", content_sha256="samehash")
     _save_paste_source(store, "src_dup_2", "源B", content_sha256="samehash")
 
-    result = await compiler.ingest("src_dup_2", source_content="测试内容")
+    result = await compiler.ingest("src_dup_2", source_content="测试内容", owner_account_id="owner")
     assert any("重复" in issue for issue in result.issues)
 
 
@@ -407,7 +407,7 @@ async def test_ingest_progress_callback_reports_stages(store, compiler):
     async def progress(stage: str, percent: int, detail: dict[str, Any]) -> None:
         stages.append((stage, percent, detail))
 
-    result = await compiler.ingest("src_prog", source_content="内容", progress=progress)
+    result = await compiler.ingest("src_prog", source_content="内容", progress=progress, owner_account_id="owner")
 
     assert not result.issues
     # 进度协议已简化为 load → analyze（平滑推进） → done 三个阶段。
@@ -436,7 +436,7 @@ async def test_ingest_progress_callback_silent_on_exception(store, compiler):
     async def bad_progress(_stage: str, _percent: int, _detail: dict[str, Any]) -> None:
         raise RuntimeError("callback error")
 
-    result = await compiler.ingest("src_broken_cb", source_content="内容", progress=bad_progress)
+    result = await compiler.ingest("src_broken_cb", source_content="内容", progress=bad_progress, owner_account_id="owner")
 
     assert not result.issues
     assert len(result.pages) == 1
@@ -457,13 +457,13 @@ async def test_apply_ingest_uses_saved_plan_and_respects_approved_titles(store, 
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
 
     _save_paste_source(store, "src_plan", "计划文档")
-    store.save_parsed_markdown("src_plan", source_content)
+    store.save_parsed_markdown("src_plan", source_content, owner_account_id="owner")
 
-    plan = await compiler.plan_ingest("src_plan")
+    plan = await compiler.plan_ingest("src_plan", owner_account_id="owner")
     assert plan.total_new == 3  # source + 两个 entity
 
     # 只批准 EntityA，source 页面也会自动写入
-    result = await compiler.apply_ingest("src_plan", approved_titles=["EntityA"])
+    result = await compiler.apply_ingest("src_plan", approved_titles=["EntityA"], owner_account_id="owner")
 
     assert not result.issues
     titles = {p.title for p in result.pages}
@@ -471,8 +471,8 @@ async def test_apply_ingest_uses_saved_plan_and_respects_approved_titles(store, 
     assert "EntityB" not in titles
     assert "计划文档" in titles  # source 页面始终写入
 
-    assert store.get_by_title("EntityB") is None
-    source_page = store.get_by_title("计划文档")
+    assert store.get_by_title("EntityB", owner_account_id="owner") is None
+    source_page = store.get_by_title("计划文档", owner_account_id="owner")
     assert source_page is not None
     assert "[[EntityA]]" in source_page.content
     assert "[[EntityB]]" not in source_page.content
@@ -490,9 +490,9 @@ async def test_apply_ingest_rejects_when_plan_missing(store, compiler):
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
 
     _save_paste_source(store, "src_fallback", "回退文档")
-    store.save_parsed_markdown("src_fallback", source_content)
+    store.save_parsed_markdown("src_fallback", source_content, owner_account_id="owner")
 
-    result = await compiler.apply_ingest("src_fallback")
+    result = await compiler.apply_ingest("src_fallback", owner_account_id="owner")
 
     assert result.pages == []
     assert result.issues == ["未找到 ingest 计划；请先重新调用 wiki_plan_ingest"]
@@ -506,14 +506,14 @@ async def test_apply_ingest_rejects_stale_source_content(store, compiler):
         source_type="paste",
         parsed_path="",
     )
-    store.save_raw(raw)
-    store.save_parsed_markdown(raw.id, "第一版内容")
+    store.save_raw(raw, owner_account_id="owner")
+    store.save_parsed_markdown(raw.id, "第一版内容", owner_account_id="owner")
     compiler.provider = FakeProvider(script=[_analysis_response(_EMPTY_ANALYSIS)])
-    plan = await compiler.plan_ingest(raw.id)
+    plan = await compiler.plan_ingest(raw.id, owner_account_id="owner")
     assert plan.source_content_sha256
 
-    store.save_parsed_markdown(raw.id, "第二版内容")
-    result = await compiler.apply_ingest(raw.id)
+    store.save_parsed_markdown(raw.id, "第二版内容", owner_account_id="owner")
+    result = await compiler.apply_ingest(raw.id, owner_account_id="owner")
 
     assert result.pages == []
     assert any("计划已过期" in issue for issue in result.issues)
@@ -705,7 +705,7 @@ async def test_long_document_ingest_uses_chunked_analysis(store, compiler):
         "long_src",
         source_content=source_content,
         chunk_size=20_000,
-        use_chunking=True,
+        use_chunking=True, owner_account_id="owner",
     )
 
     assert not result.issues
@@ -730,12 +730,12 @@ async def test_plan_ingest_uses_compact_units_and_page_threshold(store, compiler
         source_type="paste",
         parsed_path="",
     )
-    store.save_raw(raw)
+    store.save_raw(raw, owner_account_id="owner")
     raw.parsed_path = store.save_parsed_markdown(
         raw.id,
-        "核心机制、辅助实践和路过名称的材料。",
+        "核心机制、辅助实践和路过名称的材料。", owner_account_id="owner",
     )
-    store.save_raw(raw)
+    store.save_raw(raw, owner_account_id="owner")
     compiler.provider = FakeProvider(
         script=[
             _analysis_response(
@@ -781,7 +781,7 @@ async def test_plan_ingest_uses_compact_units_and_page_threshold(store, compiler
         ]
     )
 
-    plan = await compiler.plan_ingest(raw.id)
+    plan = await compiler.plan_ingest(raw.id, owner_account_id="owner")
     titles = {page.title for page in plan.planned_pages}
 
     assert "核心机制" in titles
@@ -833,9 +833,9 @@ async def test_plan_ingest_reuses_successful_chunk_cache(store, compiler):
         source_type="paste",
         parsed_path="",
     )
-    store.save_raw(raw)
-    raw.parsed_path = store.save_parsed_markdown(raw.id, content)
-    store.save_raw(raw)
+    store.save_raw(raw, owner_account_id="owner")
+    raw.parsed_path = store.save_parsed_markdown(raw.id, content, owner_account_id="owner")
+    store.save_raw(raw, owner_account_id="owner")
 
     from crew.wiki.compiler import _split_into_semantic_chunks
 
@@ -860,9 +860,9 @@ async def test_plan_ingest_reuses_successful_chunk_cache(store, compiler):
         ]
     )
 
-    first = await compiler.plan_ingest(raw.id)
+    first = await compiler.plan_ingest(raw.id, owner_account_id="owner")
     call_count = len(compiler.provider.calls)
-    second = await compiler.plan_ingest(raw.id)
+    second = await compiler.plan_ingest(raw.id, owner_account_id="owner")
 
     assert call_count == chunk_count
     assert len(compiler.provider.calls) == call_count
@@ -871,7 +871,7 @@ async def test_plan_ingest_reuses_successful_chunk_cache(store, compiler):
     assert second.analysis_stats["analyzed_chunks"] == 0
     assert second.analysis_stats["cache_hits"] == chunk_count
     assert (
-        store._dir() / ".crew" / "cache" / f"{raw.id}.analysis-cache.json"
+        store._dir(owner_account_id="owner") / ".crew" / "cache" / f"{raw.id}.analysis-cache.json"
     ).exists()
 
 
@@ -917,13 +917,13 @@ async def test_chunk_cache_resumes_only_failed_chunks(tmp_path, compiler):
         content,
         chunk_size=30_000,
         use_chunking=True,
-        cache_path=cache_path,
+        cache_path=cache_path, owner_account_id="owner",
     )
     second = await compiler._analyze(
         content,
         chunk_size=30_000,
         use_chunking=True,
-        cache_path=cache_path,
+        cache_path=cache_path, owner_account_id="owner",
     )
 
     assert first["_analysis_meta"]["failed_chunks"] == 1
@@ -945,7 +945,7 @@ async def test_plan_matches_alias_and_applies_claim_evidence(store, compiler):
             content="容器编排平台。",
             file_path="",
             aliases=["K8s"],
-        )
+        ), owner_account_id="owner"
     )
     raw = RawSource(
         id="src_alias",
@@ -953,9 +953,9 @@ async def test_plan_matches_alias_and_applies_claim_evidence(store, compiler):
         source_type="paste",
         parsed_path="",
     )
-    store.save_raw(raw)
-    raw.parsed_path = store.save_parsed_markdown("src_alias", "K8s 支持声明式部署。")
-    store.save_raw(raw)
+    store.save_raw(raw, owner_account_id="owner")
+    raw.parsed_path = store.save_parsed_markdown("src_alias", "K8s 支持声明式部署。", owner_account_id="owner")
+    store.save_raw(raw, owner_account_id="owner")
     compiler.provider = FakeProvider(
         script=[
             _analysis_response(
@@ -982,7 +982,7 @@ async def test_plan_matches_alias_and_applies_claim_evidence(store, compiler):
         ]
     )
 
-    plan = await compiler.plan_ingest("src_alias")
+    plan = await compiler.plan_ingest("src_alias", owner_account_id="owner")
     entity_plan = next(page for page in plan.planned_pages if page.page_type == "entity")
 
     assert entity_plan.action == "update"
@@ -990,12 +990,12 @@ async def test_plan_matches_alias_and_applies_claim_evidence(store, compiler):
     assert entity_plan.title == "Kubernetes"
     assert entity_plan.claims[0].evidence[0].source_id == "src_alias"
 
-    await compiler.apply_ingest("src_alias")
-    updated = store.get(existing.id)
+    await compiler.apply_ingest("src_alias", owner_account_id="owner")
+    updated = store.get(existing.id, owner_account_id="owner")
     assert updated is not None
     assert updated.claims[0].confidence == "high"
     assert updated.claims[0].evidence[0].locator == "第一段"
-    assert len([page for page in store.list_all() if page.page_type == "entity"]) == 1
+    assert len([page for page in store.list_all(owner_account_id="owner") if page.page_type == "entity"]) == 1
 
 
 @pytest.mark.asyncio
@@ -1007,7 +1007,7 @@ async def test_contested_ingest_is_preserved_in_plan_and_page(store, compiler):
             title="发布策略",
             content="默认采用蓝绿发布。",
             file_path="",
-        )
+        ), owner_account_id="owner"
     )
     raw = RawSource(
         id="src_contested",
@@ -1015,12 +1015,12 @@ async def test_contested_ingest_is_preserved_in_plan_and_page(store, compiler):
         source_type="paste",
         parsed_path="",
     )
-    store.save_raw(raw)
+    store.save_raw(raw, owner_account_id="owner")
     raw.parsed_path = store.save_parsed_markdown(
         "src_contested",
-        "部分团队反对默认蓝绿发布。",
+        "部分团队反对默认蓝绿发布。", owner_account_id="owner",
     )
-    store.save_raw(raw)
+    store.save_raw(raw, owner_account_id="owner")
     compiler.provider = FakeProvider(
         script=[
             _analysis_response(
@@ -1046,13 +1046,13 @@ async def test_contested_ingest_is_preserved_in_plan_and_page(store, compiler):
         ]
     )
 
-    plan = await compiler.plan_ingest("src_contested")
+    plan = await compiler.plan_ingest("src_contested", owner_account_id="owner")
     entity_plan = next(page for page in plan.planned_pages if page.page_type == "entity")
     assert entity_plan.action == "contest"
     assert plan.total_contested == 1
 
-    await compiler.apply_ingest("src_contested")
-    updated = store.get(existing.id)
+    await compiler.apply_ingest("src_contested", owner_account_id="owner")
+    updated = store.get(existing.id, owner_account_id="owner")
     assert updated is not None
     assert updated.contested is True
     assert "既有页面建议默认采用蓝绿发布" in updated.contradictions
@@ -1069,11 +1069,11 @@ def test_update_index_contains_navigation_quality_metadata(store, compiler):
             sources=["s1", "s2"],
             confidence="high",
             contested=True,
-        )
+        ), owner_account_id="owner"
     )
 
-    compiler.update_index()
-    index_text = (store._dir() / "index.md").read_text(encoding="utf-8")
+    compiler.update_index(owner_account_id="owner")
+    index_text = (store._dir(owner_account_id="owner") / "index.md").read_text(encoding="utf-8")
 
     assert "# 知识导航" in index_text
     assert "## 关键词" in index_text
@@ -1132,22 +1132,22 @@ async def test_batch_ingest_is_bounded_and_returns_cursor(store, compiler):
             source_type="paste",
             parsed_path="",
         )
-        store.save_raw(raw)
-        raw.parsed_path = store.save_parsed_markdown(raw.id, f"content {index}")
+        store.save_raw(raw, owner_account_id="owner")
+        raw.parsed_path = store.save_parsed_markdown(raw.id, f"content {index}", owner_account_id="owner")
         raw.parse_status = "parsed"
-        store.save_raw(raw)
+        store.save_raw(raw, owner_account_id="owner")
         source_ids.append(raw.id)
 
     first = await compiler.batch_ingest(
         source_ids=source_ids,
         batch_size=1,
-        apply=True,
+        apply=True, owner_account_id="owner",
     )
     second = await compiler.batch_ingest(
         source_ids=source_ids,
         cursor=first["next_cursor"],
         batch_size=1,
-        apply=True,
+        apply=True, owner_account_id="owner",
     )
 
     assert first["succeeded"] == ["batch_0"]
@@ -1212,10 +1212,10 @@ async def test_plan_ingest_records_plan_fingerprint(store, compiler):
     }
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
     _save_paste_source(store, "s1", "文档")
-    store.save_parsed_markdown("s1", "文档正文内容")
-    plan = await compiler.plan_ingest("s1")
+    store.save_parsed_markdown("s1", "文档正文内容", owner_account_id="owner")
+    plan = await compiler.plan_ingest("s1", owner_account_id="owner")
     assert plan.plan_fingerprint
-    disk = compiler.load_plan("s1")
+    disk = compiler.load_plan("s1", owner_account_id="owner")
     assert disk is not None and disk.plan_fingerprint == plan.plan_fingerprint
 
 
@@ -1230,7 +1230,7 @@ async def test_apply_skips_page_when_target_modified_externally(store, compiler)
     }
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
     _save_paste_source(store, "s1", "文档")
-    store.save_parsed_markdown("s1", "文档正文内容")
+    store.save_parsed_markdown("s1", "文档正文内容", owner_account_id="owner")
     # 预置目标 entity 页，使计划走 update 并快照其正文版本
     existing = store.save_page(
         WikiPage(
@@ -1240,9 +1240,9 @@ async def test_apply_skips_page_when_target_modified_externally(store, compiler)
             content="# AgentRuntime\n\n原始正文",
             file_path="",
             sources=["s1"],
-        )
+        ), owner_account_id="owner"
     )
-    plan = await compiler.plan_ingest("s1")
+    plan = await compiler.plan_ingest("s1", owner_account_id="owner")
     update_plan = next(
         p for p in plan.planned_pages if p.title == "AgentRuntime" and p.action == "update"
     )
@@ -1250,10 +1250,10 @@ async def test_apply_skips_page_when_target_modified_externally(store, compiler)
 
     # 计划生成后，目标页被外部修改
     existing.content = "# AgentRuntime\n\n已被外部修改的新内容"
-    store.update(existing)
+    store.update(existing, owner_account_id="owner")
 
-    await compiler.apply_ingest("s1")
-    page_after = store.get(existing.id)
+    await compiler.apply_ingest("s1", owner_account_id="owner")
+    page_after = store.get(existing.id, owner_account_id="owner")
     assert "已被外部修改的新内容" in page_after.content
     assert "运行时描述" not in page_after.content  # 计划内容未覆盖
 
@@ -1269,14 +1269,14 @@ async def test_apply_rejects_superseded_source(store, compiler):
     }
     compiler.provider = FakeProvider(script=[_analysis_response(analysis)])
     _save_paste_source(store, "s1", "文档")
-    store.save_parsed_markdown("s1", "文档正文内容")
-    await compiler.plan_ingest("s1")
+    store.save_parsed_markdown("s1", "文档正文内容", owner_account_id="owner")
+    await compiler.plan_ingest("s1", owner_account_id="owner")
 
-    raw = store.load_raw("s1")
+    raw = store.load_raw("s1", owner_account_id="owner")
     raw.superseded_by = "s2"
-    store.save_raw(raw)
+    store.save_raw(raw, owner_account_id="owner")
 
-    result = await compiler.apply_ingest("s1")
+    result = await compiler.apply_ingest("s1", owner_account_id="owner")
     assert any("已被新版本" in issue for issue in result.issues)
     assert result.pages == []
 
@@ -1284,12 +1284,12 @@ async def test_apply_rejects_superseded_source(store, compiler):
 async def test_plan_ingest_reports_analysis_progress(store, compiler):
     """长耗时 LLM 分析应对调用方上报阶段进度（前端工具行据此展示当前阶段）。"""
     raw = RawSource(id="src_prog", title="进度来源", source_type="paste", parsed_path="")
-    store.save_raw(raw)
+    store.save_raw(raw, owner_account_id="owner")
     raw.parsed_path = store.save_parsed_markdown(
-        "src_prog", ("第一段内容，包含若干知识点。" * 300) + "\n\n" + ("第二段内容，包含另一些知识点。" * 300)
+        "src_prog", ("第一段内容，包含若干知识点。" * 300) + "\n\n" + ("第二段内容，包含另一些知识点。" * 300), owner_account_id="owner"
     )
     raw.parse_status = "parsed"
-    store.save_raw(raw)
+    store.save_raw(raw, owner_account_id="owner")
     compiler.provider = FakeProvider(script=[
         _analysis_response(_EMPTY_ANALYSIS),
         _analysis_response(_EMPTY_ANALYSIS),
@@ -1302,7 +1302,7 @@ async def test_plan_ingest_reports_analysis_progress(store, compiler):
     async def _progress(text: str) -> None:
         events.append(text)
 
-    await compiler.plan_ingest("src_prog", use_chunking=True, chunk_size=1000, progress=_progress)
+    await compiler.plan_ingest("src_prog", use_chunking=True, chunk_size=1000, progress=_progress, owner_account_id="owner")
 
     assert events[0].startswith("正在通读素材")
     # 分段进度：至少出现一次「已完成/总段数」形式
@@ -1313,12 +1313,12 @@ async def test_plan_ingest_reports_analysis_progress(store, compiler):
 async def test_plan_ingest_without_progress_callback_still_works(store, compiler):
     """不传 progress（CLI/无推送通道场景）时行为不变。"""
     raw = RawSource(id="src_noprog", title="无回调来源", source_type="paste", parsed_path="")
-    store.save_raw(raw)
-    raw.parsed_path = store.save_parsed_markdown("src_noprog", "短内容。")
+    store.save_raw(raw, owner_account_id="owner")
+    raw.parsed_path = store.save_parsed_markdown("src_noprog", "短内容。", owner_account_id="owner")
     raw.parse_status = "parsed"
-    store.save_raw(raw)
+    store.save_raw(raw, owner_account_id="owner")
     compiler.provider = FakeProvider(script=[_analysis_response(_EMPTY_ANALYSIS)])
 
-    result = await compiler.plan_ingest("src_noprog")
+    result = await compiler.plan_ingest("src_noprog", owner_account_id="owner")
 
     assert result.source_id == "src_noprog"

@@ -36,7 +36,7 @@ _MARKER_NAME = ".tutorial_kb_seeded"
 _INDEX_SECTIONS = ("入门", "理论", "界面功能", "对话交互", "案例")
 
 
-def ensure_tutorial_kb(store: Any, owner_account_id: str = "") -> bool:
+def ensure_tutorial_kb(store: Any, owner_account_id: str) -> bool:
     """如果教程知识库不存在就复制一份；已存在则不覆盖用户修改。
 
     返回 True 表示本次执行了初始化。任何异常都被吞掉并记日志。

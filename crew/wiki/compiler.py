@@ -856,7 +856,7 @@ class WikiCompiler:
             default="",
         )
 
-    def _provider_for_owner(self, owner_account_id: str = "") -> LLMProvider:
+    def _provider_for_owner(self, owner_account_id: str) -> LLMProvider:
         resolver = self.provider_for_owner
         if callable(resolver):
             resolved = resolver(str(owner_account_id or ""))
@@ -864,14 +864,14 @@ class WikiCompiler:
                 return resolved
         return self.provider
 
-    def init_kb(self, owner_account_id: str = "", kb_id: str = "default") -> None:
+    def init_kb(self, owner_account_id: str, kb_id: str = "default") -> None:
         """初始化 Wiki 目录结构。"""
         self.store.init_kb(owner_account_id, kb_id)
 
     async def ingest(
         self,
         source_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         source_content: str | None = None,
         kb_id: str = "default",
         progress: ProgressFn | None = None,
@@ -1048,7 +1048,7 @@ class WikiCompiler:
     async def plan_ingest(
         self,
         source_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
         cancel_event: asyncio.Event | None = None,
         *,
@@ -1222,7 +1222,7 @@ class WikiCompiler:
     async def apply_ingest(
         self,
         source_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
         approved_titles: list[str] | None = None,
         progress: ProgressFn | None = None,
@@ -1297,8 +1297,8 @@ class WikiCompiler:
                         planned.title,
                         planned.page_type,
                         planned.aliases,
-                        owner_account_id,
-                        kb_id,
+                        owner_account_id=owner_account_id,
+                        kb_id=kb_id,
                     )
                     if existing is not None:
                         linked_pages.append(existing)
@@ -1405,7 +1405,7 @@ class WikiCompiler:
     def load_plan(
         self,
         source_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> PlanResult | None:
         """公开读取已保存的 ingest 计划，供工具层做指纹与版本校验。"""
@@ -1450,8 +1450,8 @@ class WikiCompiler:
             title,
             page_type,
             aliases,
-            owner_account_id,
-            kb_id,
+            owner_account_id=owner_account_id,
+            kb_id=kb_id,
         )
         if existing:
             target_content_sha256 = hashlib.sha256(
@@ -1555,8 +1555,8 @@ class WikiCompiler:
             title,
             "topic",
             aliases,
-            owner_account_id,
-            kb_id,
+            owner_account_id=owner_account_id,
+            kb_id=kb_id,
         )
         if existing:
             target_content_sha256 = hashlib.sha256(
@@ -1637,8 +1637,8 @@ class WikiCompiler:
             planned.title,
             planned.page_type,
             planned.aliases,
-            owner_account_id,
-            kb_id,
+            owner_account_id=owner_account_id,
+            kb_id=kb_id,
         )
         if planned.action in ("update", "contest") and existing is not None:
             # 目标页版本校验：计划生成后若目标页被外部修改（content hash 不符），
@@ -1686,14 +1686,14 @@ class WikiCompiler:
             kb_id=kb_id,
         )
 
-    def update_index(self, owner_account_id: str = "", kb_id: str = "default") -> None:
+    def update_index(self, owner_account_id: str, kb_id: str = "default") -> None:
         """公开方法：重建 index.md。"""
         self._update_index(owner_account_id, kb_id)
 
     def publish_source_page(
         self,
         source_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiPage:
         """把已解析 RawSource 快速发布为全文 Source 页面，不执行 LLM 结构化分析。"""
@@ -1708,14 +1708,14 @@ class WikiCompiler:
             source_id,
             raw,
             source_content,
-            owner_account_id,
-            kb_id,
+            owner_account_id=owner_account_id,
+            kb_id=kb_id,
         )
 
     def finalize_write(
         self,
         message: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> None:
         """统一完成写入后的 index、log、全文索引与导读状态维护。"""
@@ -1764,7 +1764,7 @@ class WikiCompiler:
 
     async def compile_all(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> CompileResult:
         """兼容入口：按五份一批重新编译所有已解析 RawSource。"""
@@ -1806,7 +1806,7 @@ class WikiCompiler:
         batch_size: int = 5,
         apply: bool = True,
         use_existing_plans: bool = False,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
         cancel_event: asyncio.Event | None = None,
     ) -> dict[str, Any]:
@@ -1925,7 +1925,7 @@ class WikiCompiler:
 
     async def lint(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
         deep: bool = False,
     ) -> list[dict[str, Any]]:
@@ -1948,7 +1948,7 @@ class WikiCompiler:
         self,
         pages: list[WikiPage],
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> list[LintIssue]:
         """调用 LLM 检查页面间的矛盾和概念缺口。"""
         # 控制 token：每个页面只取前 1500 字符
@@ -1998,7 +1998,7 @@ class WikiCompiler:
 
     async def orient(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiOrientation:
         """返回当前 KB 的全景信息，供 Agent 在操作前 orientation。"""
@@ -2010,7 +2010,7 @@ class WikiCompiler:
         topic: str,
         *,
         mode: str = "auto",
-        owner_account_id: str = "",
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiPage:
         """跨至少两个独立来源生成可持久化的 comparison/synthesis 页面。"""
@@ -2099,8 +2099,8 @@ class WikiCompiler:
             )
         self.finalize_write(
             f"生成 {suffix}页面 [[{title}]]，综合 {len(source_ids)} 个来源",
-            owner_account_id,
-            kb_id,
+            owner_account_id=owner_account_id,
+            kb_id=kb_id,
         )
         return page
 
@@ -2111,7 +2111,7 @@ class WikiCompiler:
         content: str,
         cancel_event: asyncio.Event | None = None,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         chunk_size: int | None = None,
         use_chunking: bool | None = None,
         cache_path: Path | None = None,
@@ -2389,7 +2389,8 @@ class WikiCompiler:
         confidence: Confidence | None = None,
         contested: bool = False,
         contradictions: list[str] | None = None,
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
         kb_id: str = "default",
     ) -> WikiPage | None:
         if not title.strip():
@@ -2398,8 +2399,8 @@ class WikiCompiler:
             title,
             page_type,
             aliases,
-            owner_account_id,
-            kb_id,
+            owner_account_id=owner_account_id,
+            kb_id=kb_id,
         )
         if existing:
             existing.content = _merge_content(existing.content, description)
@@ -2466,8 +2467,8 @@ class WikiCompiler:
             title,
             "topic",
             aliases,
-            owner_account_id,
-            kb_id,
+            owner_account_id=owner_account_id,
+            kb_id=kb_id,
         )
         content = _build_topic_content(top)
         if existing:

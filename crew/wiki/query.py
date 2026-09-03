@@ -26,7 +26,7 @@ class WikiQuerier:
     def query(
         self,
         question: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         top_k: int = 5,
         kb_id: str = "default",
     ) -> dict[str, Any]:
@@ -44,7 +44,7 @@ class WikiQuerier:
     def search(
         self,
         query: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         top_k: int = 5,
         kb_id: str = "default",
         *,
