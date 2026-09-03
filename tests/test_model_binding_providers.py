@@ -128,3 +128,34 @@ def test_wiki_resolver_prefers_current_session_provider(app):
         assert crew._wiki_summarizer._provider_for_owner("") is sentinel
     finally:
         current_provider.reset(token)
+
+
+def test_owner_update_builtin_model_key_lands_global_scope(app):
+    """owner 更新内置模型：key 必须落全局凭证库，不得进 owner 私有库。
+
+    内置模型归共享 config.yaml 层，update_model 会把 owner 归置为全局
+    作用域（""）再写 key；若误用原始 owner_account_id，key 会写进 owner
+    私有库/overlay .env，而全局 profile 的解析链读不到（表现为内置模型
+    更新后 key "消失"）。
+    """
+    from crew.state.config import _build_model_profile
+
+    crew = app
+    # 与 load_config 相同的构建函数：注册一个全局层内置模型
+    crew.config.model_profiles["ds1"] = _build_model_profile(
+        "ds1",
+        {
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "base_url": "https://api.deepseek.com",
+            "builtin": True,
+        },
+    )
+
+    crew.update_model("ds1", {"api_key": "sk-builtin-x"}, owner_account_id="acc-a")
+
+    # 归置后的 owner 为全局作用域：key 必须写全局库
+    assert read_stored_key("", "ds1") == "sk-builtin-x"
+    # owner 私有库不得出现该条目
+    assert read_stored_key("acc-a", "ds1") == ""
