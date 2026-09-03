@@ -5,7 +5,7 @@
 > 基线核查日期：2026-08-31  
 > 目标读者：Ace 后端、桌面端、Web 端及独立功能模块的维护者  
 > 修订记录：2026-08-31 评审追加——workspace_guard 依赖核查（§2.3.3、§11、§17）、第一方/第三方插件契约收口（§2.3.8）、effect 诊断与启动审计（§6.3）、服务作用域维度（§6.4）、拦截器语义（§7.5）、螺旋式迁移节奏与依赖检查工具（§10、§13.3）、配置与数据命名空间约定（§12.5）、Adapter 保质期（§15.2）、ADR 机制（§16）、新增验收指标（§14）；同日补充——演进紧迫性论证与中心文件基线数据（§1.1.1）、接口层多租户地基（§2.2）；同日范围校正——明确 dsh 广义 Plugin 与 Ace 当前 `plugins/` 的区别，将目标提升为全部 Feature 的统一可逆生命周期，补充 Feature Generation、业务数据边界、全量迁移地图和工作量评估（§0、§3.3、§5、§6、§8、§10、§16、§18、§19）；同日——§2.1、§5.1 增加耦合视角与装配视角两张架构对比图（离线渲染版：docs/todo/ace-arch-compare.html）
-> 实施进度：2026-09-03 阶段 0 边界治理和阶段 1 控制面均已落地——生命周期内核、Service Registry、Legacy Plugin Adapter、Browser 试点、Manifest 服务依赖、启动审计、请求 drain、四类停用策略及配置 Generation 更新已进入真实装配路径。`replace` 支持新旧 Generation 暂存、原子切换和旧代退役，`restart` 支持先停旧代、失败恢复旧配置，并分别记录 desired/effective config revision；当前分支为 `refactor/plugin-architecture-stage-0`，本轮核心回归为 48 passed。
+> 实施进度：2026-09-03 阶段 0 边界治理和阶段 1 控制面均已落地——生命周期内核、Service Registry、Legacy Plugin Adapter、Browser 试点、Manifest 服务依赖、启动审计、请求 drain、四类停用策略及配置 Generation 更新已进入真实装配路径。`replace` 支持新旧 Generation 暂存、原子切换和旧代退役，`restart` 支持先停旧代、失败恢复旧配置，并分别记录 desired/effective config revision；当前分支为 `refactor/plugin-architecture-stage-0`，最新验证记录见 `docs/testing/plugin-architecture-stage-1-generation-update.html`。
 
 ## 当前实施进度图（2026-09-03）
 
@@ -54,7 +54,7 @@ flowchart TB
     LeaseTests --> Update["配置更新策略<br/>replace · restart"]
     Update --> Generation["双 Generation 暂存<br/>新代提交 · 旧代 drain"]
     Generation --> Recovery["更新失败恢复<br/>desired ≠ effective · 旧配置重建"]
-    Recovery --> UpdateTests["Generation 更新核心回归<br/>48 passed"]
+    Recovery --> UpdateTests["Generation 更新联合回归<br/>336 passed · 1 skipped"]
     UpdateTests --> Stage1Done["阶段 1 控制面完成<br/>启停 · 更新 · 回滚 · 诊断"]
     Stage1Done --> Next["阶段 2 · 下一切片<br/>Execution Driver Registry"]
     Next --> Later["后续阶段<br/>核心扩展点 → 业务 Feature 迁移 → UI Registry"]

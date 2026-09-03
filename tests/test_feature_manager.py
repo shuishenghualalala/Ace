@@ -470,6 +470,36 @@ async def test_restart_drain_timeout_reopens_old_generation_and_same_revision_re
     assert record.effective_config_revision == 2
 
 
+async def test_restart_required_update_records_new_desired_revision_for_host_restart():
+    runtime = FeatureRuntime()
+    current = FeatureDefinition(
+        "gateway-routes",
+        lambda context: context.register_disposer(
+            lambda: None,
+            label="route:gateway",
+        ),
+        stop_policy=FeatureStopPolicy.RESTART_REQUIRED,
+        update_strategy=FeatureUpdateStrategy.RESTART,
+    )
+    record = await runtime.activate(current)
+
+    result = await runtime.update(
+        FeatureDefinition(
+            "gateway-routes",
+            current.install,
+            desired_config_revision=2,
+            stop_policy=FeatureStopPolicy.RESTART_REQUIRED,
+            update_strategy=FeatureUpdateStrategy.RESTART,
+        )
+    )
+
+    assert not result.updated
+    assert record.state is FeatureState.ACTIVE
+    assert record.restart_required
+    assert record.desired_config_revision == 2
+    assert record.effective_config_revision == 1
+
+
 async def test_restart_failure_restores_previous_config_as_new_generation():
     runtime = FeatureRuntime()
     provider = ServiceKey[str]("provider")

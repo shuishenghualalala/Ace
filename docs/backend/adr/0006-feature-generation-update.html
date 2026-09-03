@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0006 · Feature Generation 配置更新</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0006 · Feature Generation 配置更新</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-03 · 阶段：插件架构 Stage 1 / Commit 7</div>
+
+  <h2>背景</h2>
+  <p>Feature 已有统一 Scope、Service 所有权和请求 Lease，但配置变化仍需要明确的发布协议。直接修改正在运行的对象会让旧请求观察到一半新、一半旧的状态；统一销毁再启动又会让可并行 Provider 产生不必要的空窗。控制面还必须区分用户请求的配置与当前真正生效的配置。</p>
+
+  <h2>决定</h2>
+  <div class="decision"><p>每次配置变更提交一个递增、已验证且不可变的 FeatureDefinition。Runtime 按 Feature 串行执行更新，并根据资源特性选择 replace 或 restart；Generation 是唯一发布与回滚边界。</p></div>
+  <table>
+    <thead><tr><th>策略</th><th>发布顺序</th><th>失败语义</th></tr></thead>
+    <tbody>
+      <tr><td>replace</td><td>安装新 Generation → 提交新 Scope → Registry 选择新服务 → 旧 Scope 进入 Draining → 清理旧代。</td><td>新代安装失败时回滚其全部注册，旧代持续服务；切换后的旧代超时会保留为 retiring 并进入诊断。</td></tr>
+      <tr><td>restart</td><td>旧 Scope 拒绝新增并 drain → 清理旧代 → 安装并发布新 Generation。</td><td>新代安装失败时，以旧定义和旧 effective revision 创建恢复 Generation；恢复也失败则明确进入 Failed。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>可见性与并发</h2>
+  <p>Service Registry 允许同一 Feature 的 Active 旧代和 Activating 新代短暂共存。Activating 服务不可见；新 Scope 提交后，解析器按 Generation 顺序选择最新 Active 服务。切换和关闭旧代 Lease 入口之间不跨异步让出点，因此请求不会落回旧服务。不同 Feature 可以并行操作，同一 Feature 的 activate、update 和 deactivate 由同一把异步锁串行化。</p>
+
+  <h2>配置修订与恢复</h2>
+  <p><code>desired_config_revision</code> 保存最新用户意图，<code>effective_config_revision</code> 保存实际运行版本。更新失败不会倒退 desired；restart 恢复成功时会产生新的 Generation 序号，但 effective 仍指向旧配置修订。相同 desired revision 可以在失败原因解除后重试。<code>restart_required</code> 不破坏当前 Generation，同时记录待宿主重启状态。</p>
+
+  <h2>边界</h2>
+  <ul>
+    <li>更新不得改变 requires/optional/provides、Service Scope 或更新策略；这些属于 Feature 稳定契约，应通过停用与重新发现变更。</li>
+    <li>replace 只适用于支持双代并存的资源；独占连接、监听端口、Cron 和稳定 Router 使用 restart。</li>
+    <li>目录插件 Manifest 已声明更新策略，但其运行期配置快照和控制面入口随具体 Product Feature 迁移逐步接入。</li>
+    <li>实现只依赖 asyncio 和内存状态机，不使用进程信号或平台特定锁，macOS、Linux 与 Windows 共享同一协议。</li>
+  </ul>
+
+  <h2>设计核查</h2>
+  <p>外部生命周期实现的关键经验是：配置在生命周期切换前完成解析，加载与卸载由单一串行状态驱动，卸载必须等待所有归属资源结束。Ace 在此基础上增加双 Generation replace、请求 Lease、desired/effective 分离和结构化恢复结果，以适配长请求与控制面诊断。</p>
+
+  <div class="nav"><a href="0005-feature-drain-lease.html">ADR-0005</a> · <a href="../modules/plugins.html">Feature / Plugin 模块文档</a> · <a href="../../testing/plugin-architecture-stage-1-generation-update.html">测试记录</a></div>
+</div>
+</body>
+</html>
