@@ -5,11 +5,11 @@
 > 基线核查日期：2026-08-31  
 > 目标读者：Ace 后端、桌面端、Web 端及独立功能模块的维护者  
 > 修订记录：2026-08-31 评审追加——workspace_guard 依赖核查（§2.3.3、§11、§17）、第一方/第三方插件契约收口（§2.3.8）、effect 诊断与启动审计（§6.3）、服务作用域维度（§6.4）、拦截器语义（§7.5）、螺旋式迁移节奏与依赖检查工具（§10、§13.3）、配置与数据命名空间约定（§12.5）、Adapter 保质期（§15.2）、ADR 机制（§16）、新增验收指标（§14）；同日补充——演进紧迫性论证与中心文件基线数据（§1.1.1）、接口层多租户地基（§2.2）；同日范围校正——明确 dsh 广义 Plugin 与 Ace 当前 `plugins/` 的区别，将目标提升为全部 Feature 的统一可逆生命周期，补充 Feature Generation、业务数据边界、全量迁移地图和工作量评估（§0、§3.3、§5、§6、§8、§10、§16、§18、§19）；同日——§2.1、§5.1 增加耦合视角与装配视角两张架构对比图（离线渲染版：docs/todo/ace-arch-compare.html）
-> 实施进度：2026-09-02 阶段 0 边界治理，以及阶段 1 的生命周期内核、Service Registry、Legacy Plugin Adapter、Browser 试点、Manifest 服务依赖、启动审计和 drain lease 均已完成——目录插件已进入统一 Generation/Scope，加载顺序由服务图决定，运行入口自动持有请求租约，可通过 `crew --dump-features` 查看实际装配和停用诊断；当前分支为 `refactor/plugin-architecture-stage-0`，最新验证记录见 `docs/testing/plugin-architecture-stage-1-drain-lease.html`。
+> 实施进度：2026-09-03 阶段 0 边界治理和阶段 1 控制面均已落地——生命周期内核、Service Registry、Legacy Plugin Adapter、Browser 试点、Manifest 服务依赖、启动审计、请求 drain、四类停用策略及配置 Generation 更新已进入真实装配路径。`replace` 支持新旧 Generation 暂存、原子切换和旧代退役，`restart` 支持先停旧代、失败恢复旧配置，并分别记录 desired/effective config revision；当前分支为 `refactor/plugin-architecture-stage-0`，本轮核心回归为 48 passed。
 
-## 当前实施进度图（2026-09-02）
+## 当前实施进度图（2026-09-03）
 
-绿色表示已经落地并通过相关回归的区域，蓝色表示紧接着要实施的切片，灰色表示尚未开始。当前完成的是**阶段 0 边界治理与阶段 1 的前五个切片**，不是整份演进方案已经完成。
+绿色表示已经落地并通过相关回归的区域，蓝色表示紧接着要实施的切片，灰色表示尚未开始。当前完成的是**阶段 0 边界治理与阶段 1 控制面**，不是整份演进方案已经完成。
 
 ```mermaid
 flowchart TB
@@ -51,18 +51,23 @@ flowchart TB
     Lease --> StopPolicy["四类停用策略<br/>drain · cancel · immediate · restart_required"]
     StopPolicy --> StopAudit["结构化停用诊断<br/>超时 · 活跃请求 · 强制清理 · 待重启"]
     StopAudit --> LeaseTests["Lease/Stop Policy 联合回归<br/>325 passed · 1 skipped"]
-    LeaseTests --> Next["阶段 1 · 下一切片<br/>配置 replace/restart"]
+    LeaseTests --> Update["配置更新策略<br/>replace · restart"]
+    Update --> Generation["双 Generation 暂存<br/>新代提交 · 旧代 drain"]
+    Generation --> Recovery["更新失败恢复<br/>desired ≠ effective · 旧配置重建"]
+    Recovery --> UpdateTests["Generation 更新核心回归<br/>48 passed"]
+    UpdateTests --> Stage1Done["阶段 1 控制面完成<br/>启停 · 更新 · 回滚 · 诊断"]
+    Stage1Done --> Next["阶段 2 · 下一切片<br/>Execution Driver Registry"]
     Next --> Later["后续阶段<br/>核心扩展点 → 业务 Feature 迁移 → UI Registry"]
 
     classDef done fill:#e8f6ee,stroke:#1e8449,color:#145a32,stroke-width:2px
     classDef next fill:#e6f0fb,stroke:#2471a3,color:#154360,stroke-width:2px
     classDef pending fill:#f4f4f4,stroke:#999999,color:#555555
-    class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed,Scope,Token,Rollback,RuntimeTests,Services,Dependencies,Config,ServiceTests,Runtime,Adapter,Phases,Browser,Shutdown,AdapterTests,Manifest,Ordered,Audit,ManifestTests,Lease,StopPolicy,StopAudit,LeaseTests done
+    class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed,Scope,Token,Rollback,RuntimeTests,Services,Dependencies,Config,ServiceTests,Runtime,Adapter,Phases,Browser,Shutdown,AdapterTests,Manifest,Ordered,Audit,ManifestTests,Lease,StopPolicy,StopAudit,LeaseTests,Update,Generation,Recovery,UpdateTests,Stage1Done done
     class Next next
     class Later pending
 ```
 
-这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。现有 `PluginManager` 已成为 Feature Runtime 的目录发现与兼容入口，Browser 已验证真实多贡献生命周期；Manifest Service 依赖、确定性激活、启动审计和请求 drain 已进入真实装配路径。下一步补齐配置 replace/restart，完成阶段 1 的剩余控制面。历史反向依赖及其后续删除阶段仍以 `.importlinter` 中的逐条豁免为准。
+这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。现有 `PluginManager` 已成为 Feature Runtime 的目录发现与兼容入口，Browser 已验证真实多贡献生命周期；Manifest Service 依赖、确定性激活、启动审计、请求 drain 和配置 Generation 更新已经进入真实装配路径。下一步进入阶段 2，先建立 Execution Driver Registry，将 `CrewApp.handle()` 中按模式分派的执行入口逐步变成可注册贡献。历史反向依赖及其后续删除阶段仍以 `.importlinter` 中的逐条豁免为准。
 
 ## 0. 执行摘要
 
