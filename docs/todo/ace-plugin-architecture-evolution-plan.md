@@ -5,7 +5,7 @@
 > 基线核查日期：2026-08-31  
 > 目标读者：Ace 后端、桌面端、Web 端及独立功能模块的维护者  
 > 修订记录：2026-08-31 评审追加——workspace_guard 依赖核查（§2.3.3、§11、§17）、第一方/第三方插件契约收口（§2.3.8）、effect 诊断与启动审计（§6.3）、服务作用域维度（§6.4）、拦截器语义（§7.5）、螺旋式迁移节奏与依赖检查工具（§10、§13.3）、配置与数据命名空间约定（§12.5）、Adapter 保质期（§15.2）、ADR 机制（§16）、新增验收指标（§14）；同日补充——演进紧迫性论证与中心文件基线数据（§1.1.1）、接口层多租户地基（§2.2）；同日范围校正——明确 dsh 广义 Plugin 与 Ace 当前 `plugins/` 的区别，将目标提升为全部 Feature 的统一可逆生命周期，补充 Feature Generation、业务数据边界、全量迁移地图和工作量评估（§0、§3.3、§5、§6、§8、§10、§16、§18、§19）；同日——§2.1、§5.1 增加耦合视角与装配视角两张架构对比图（离线渲染版：docs/todo/ace-arch-compare.html）
-> 实施进度：2026-09-03 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver、Context Contributor 主链均已落地。Cron Trigger Reminder Contributor 已完成，Agent Runtime 不再包含 Cron 渠道文案特判；后台结果通知 Contributor 已完成，子任务/进程/任务结果三条 reminder 路径迁为 PROMPT contributor，Runtime 格式化特判与 `subagent_drain_fn` 旁路删除，验证子 Agent 切片回归为 87 passed。当前分支为 `refactor/plugin-architecture-stage-0`，验证记录见 `docs/testing/plugin-architecture-stage-2-cron-context.html` 与 `docs/testing/plugin-architecture-stage-2-background-notifications.html`。
+> 实施进度：2026-09-03 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver、Context Contributor 主链均已落地。Cron Trigger Reminder Contributor 已完成，Agent Runtime 不再包含 Cron 渠道文案特判；后台结果通知 Contributor 已完成，子任务/进程/任务结果三条 reminder 路径迁为 PROMPT contributor，Runtime 格式化特判与 `subagent_drain_fn` 旁路删除；Feature Event 命名空间已落地，核心协议新增 `feature_event` 开放信封，team/wiki 四类业务事件改发命名空间事件、旧帧由 Gateway 出口适配器转换，切片回归 264 passed。当前分支为 `refactor/plugin-architecture-stage-0`，验证记录见 `docs/testing/plugin-architecture-stage-2-cron-context.html`、`docs/testing/plugin-architecture-stage-2-background-notifications.html` 与 `docs/testing/plugin-architecture-stage-2-feature-event.html`。
 
 ## 当前实施进度图（2026-09-03）
 
@@ -77,20 +77,23 @@ flowchart TB
     BgContext --> QueueOwner["通知队列收归来源模块<br/>drain 恰好一次 · collect 摘除"]
     QueueOwner --> TeamDrain["team member 旁路消除<br/>共享注册表覆盖 member 回合"]
     TeamDrain --> BgTests["通知 Contributor 联合回归<br/>87 passed · 文案逐字一致"]
-    BgTests --> Next["阶段 2 · 后续切片<br/>Feature Event 命名空间"]
-    Next --> Later["后续阶段<br/>Route Gate → Core Feature 包装 → 业务迁移"]
+    BgTests --> FeatureEvent["Feature Event 命名空间<br/>feature/event/version/payload"]
+    FeatureEvent --> EventCompat["Gateway 出口适配器<br/>旧帧转换 · 回放一致 · 未登记丢弃"]
+    EventCompat --> EventTests["Feature Event 联合回归<br/>264 passed · 零新增失败"]
+    EventTests --> Next["阶段 2 · 后续切片<br/>Route Gate Registry"]
+    Next --> Later["后续阶段<br/>Core Feature 包装 → 业务迁移"]
 
     classDef done fill:#e8f6ee,stroke:#1e8449,color:#145a32,stroke-width:2px
     classDef next fill:#e6f0fb,stroke:#2471a3,color:#154360,stroke-width:2px
     classDef pending fill:#f4f4f4,stroke:#999999,color:#555555
     class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed,Scope,Token,Rollback,RuntimeTests,Services,Dependencies,Config,ServiceTests,Runtime,Adapter,Phases,Browser,Shutdown,AdapterTests,Manifest,Ordered,Audit,ManifestTests,Lease,StopPolicy,StopAudit,LeaseTests,Update,Generation,Recovery,UpdateTests,Stage1Done,Drivers,DriverLease,DefaultDriver,PluginDriver,DriverTests,Adapters,DriverAdapterTests done
     class ContextRegistry,PathContext,BrowserContext,ContextTests done
-    class SessionContext,SessionTests,WikiContext,WikiTests,CronContext,CronTests,BgContext,QueueOwner,TeamDrain,BgTests done
+    class SessionContext,SessionTests,WikiContext,WikiTests,CronContext,CronTests,BgContext,QueueOwner,TeamDrain,BgTests,FeatureEvent,EventCompat,EventTests done
     class Next next
     class Later pending
 ```
 
-这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。Cron Trigger 切片把定时任务触发语义和文案移回 Cron 模块，只有 Cron 启用且当前请求来自 cron channel 时才贡献瞬时 prompt fragment；Agent Runtime 不再认识 Cron channel。后台结果通知切片把子任务、进程与任务恢复回合三条 reminder 注入路径迁为 PROMPT contributor，通知队列收归来源模块，team member 的 `subagent_drain_fn` 旁路随共享注册表覆盖而删除。Cron 的 Scheduler、Store 与 Owner mount 完整 Feature 化留在阶段 3A；`_resume_completed_task` 触发器化与用户可见通知来源贡献化留作后续切片；下一步是 §7.3 Feature Event 命名空间迁移。
+这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。Cron Trigger 切片把定时任务触发语义和文案移回 Cron 模块，只有 Cron 启用且当前请求来自 cron channel 时才贡献瞬时 prompt fragment；Agent Runtime 不再认识 Cron channel。后台结果通知切片把子任务、进程与任务恢复回合三条 reminder 注入路径迁为 PROMPT contributor，通知队列收归来源模块，team member 的 `subagent_drain_fn` 旁路随共享注册表覆盖而删除。Cron 的 Scheduler、Store 与 Owner mount 完整 Feature 化留在阶段 3A；`_resume_completed_task` 触发器化与用户可见通知来源贡献化留作后续切片。Feature Event 切片让核心协议只保留开放 `feature_event` 信封，Team 内部消息与 Wiki 卡片/变更/摄取进度改发 `team.internal_message`、`wiki.cards`、`wiki.changed`、`wiki.ingest_progress`（均 v1），旧 kind 帧由 `crew/gateway/event_compat.py` 在 WS 出口（含断线回放）转换，现有客户端协议零变化；前端 reducer 迁移到 `ace.feature-event.v1` 后删除适配器与旧枚举（阶段 5）。下一步是 Route Gate Registry（§6.4/§6.5 启动期装配 + 运行期能力门控）。
 
 ## 0. 执行摘要
 

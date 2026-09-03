@@ -107,6 +107,7 @@
     <tbody>
       <tr><td>2026-09-02</td><td>建立 Core 对 Product Feature 与 Host 的声明式依赖保护线。</td><td>Python 架构、CI</td></tr>
       <tr><td>2026-09-03</td><td>将 Envelope mode 改为开放标识，并为能力不可用响应增加稳定错误码。</td><td><code>Envelope</code>、<code>ResponseChunk.error</code>、Execution Driver 调用方。</td></tr>
+      <tr><td>2026-09-03</td><td>新增开放业务事件帧 <code>feature_event</code>（feature/event/version/payload）与 <code>ResponseChunk.feature_event()</code> 工厂；wiki_cards、wiki_ingest_progress、team_internal 三个业务枚举进入迁移期，生产侧不再使用。</td><td><code>ChunkKind</code>、<code>ResponseChunk</code>、事件生产方。</td></tr>
     </tbody>
   </table>
 

@@ -119,6 +119,7 @@ ContextVar set 点       dispatcher.run(): current_owner_account_id.set(normaliz
       <tr><td>2026-09-03</td><td>合并 owner 统一化改造（refactor/llm-provider → refactor/plugin-architecture-stage-0，merge 22af708）：认证边界归一（<code>auth.py</code> loopback → <code>local</code>，经 <code>LOCAL_OWNER_ACCOUNT_ID</code>）；ContextVar set 点收口（<code>dispatcher.run</code> 统一 <code>normalize_owner_account_id</code>）；绑定渠道入站 binder 改写语义固定（平台原始 uid 不充当 owner）。</td><td>gateway 认证/分发边界、模型 CRUD 路由 owner 传参</td></tr>
       <tr><td>2026-09-03</td><td>移除静态 <code>REFERENCE_INJECTORS</code>；结构化路径与 Browser 标签页改由各自 Context Contributor 提供。</td><td><code>crew/gateway/context.py</code>、Agent 依赖边界。</td></tr>
       <tr><td>2026-09-03</td><td>Session Source 通过 Contributor 输出，Agent Runtime 不再导入 Gateway 类型或 formatter。</td><td><code>session_context.py</code>、Agent→Gateway 直接依赖契约。</td></tr>
+      <tr><td>2026-09-03</td><td>新增 Feature Event 出口适配层 <code>event_compat.py</code>：已登记的 feature_event 在 <code>push_payload</code> 出口转换为旧 kind 帧（含断线回放），未登记事件丢弃；现有客户端线上协议零变化。</td><td><code>connections.push_payload</code>、WS 推送点（wiki_cards/wiki_changed/wiki_ingest_progress 生产侧已改发 feature_event）。</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
     </tbody>
   </table>
