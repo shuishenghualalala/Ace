@@ -138,7 +138,7 @@ class TaskRuntime:
         backgrounded: bool = False,
         auto_backgrounded: bool = False,
         task_id: str | None = None,
-        owner_account_id: str = "",
+        owner_account_id: str,
         notify_completion: bool = True,
     ) -> dict[str, Any]:
         owner_account_id = str(owner_account_id or "").strip()
@@ -204,7 +204,8 @@ class TaskRuntime:
         title: str,
         detail: str = "",
         assignee: str | None = None,
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> dict[str, Any]:
         task = self.create_runtime(
             kind="team",
@@ -255,7 +256,7 @@ class TaskRuntime:
         self._emit(task, "started")
         return task
 
-    def update(self, task_id: str, owner_account_id: str = "", **changes: Any) -> dict[str, Any]:
+    def update(self, task_id: str, owner_account_id: str, **changes: Any) -> dict[str, Any]:
         allowed = {f.name for f in fields(RuntimeTask)} - {"task_id", "created_at"}
         clean = {k: v for k, v in changes.items() if k in allowed}
         if "status" in clean:
@@ -380,7 +381,7 @@ class TaskRuntime:
             raise KeyError(f"任务不存在: {task_id}")
         return str(row[0] or "")
 
-    def get(self, task_id: str, owner_account_id: str = "") -> dict[str, Any]:
+    def get(self, task_id: str, owner_account_id: str) -> dict[str, Any]:
         sql = "SELECT * FROM runtime_tasks WHERE task_id=?"
         sql += " AND owner_account_id=?"
         params: tuple[Any, ...] = (task_id, owner_account_id)
@@ -390,7 +391,7 @@ class TaskRuntime:
             raise KeyError(f"任务不存在: {task_id}")
         return self._row_to_dict(row)
 
-    def list(self, session_id: str, owner_account_id: str = "") -> list[dict[str, Any]]:
+    def list(self, session_id: str, owner_account_id: str) -> list[dict[str, Any]]:
         return self.list_tasks(session_id=session_id, owner_account_id=owner_account_id)
 
     def list_tasks(
@@ -399,7 +400,7 @@ class TaskRuntime:
         session_id: str | None = None,
         status: str | None = None,
         limit: int = 200,
-        owner_account_id: str = "",
+        owner_account_id: str,
         _all_owners: bool = False,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
@@ -511,7 +512,8 @@ class TaskRuntime:
         self,
         task_id: str,
         timeout: float | None = None,
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> dict[str, Any]:
         task = self.get(task_id, owner_account_id=owner_account_id)
         if task["status"] in TERMINAL_STATUSES:
@@ -532,7 +534,8 @@ class TaskRuntime:
         self,
         task_id: str,
         reason: str = "用户取消",
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> dict[str, Any]:
         task = self.get(task_id, owner_account_id=owner_account_id)
         if task["status"] in TERMINAL_STATUSES:
@@ -648,7 +651,7 @@ class TaskRuntime:
         while True:
             await asyncio.sleep(self.monitor_interval)
             now = time.time()
-            for task in self.list_tasks(status="running", limit=1000, _all_owners=True):
+            for task in self.list_tasks(status="running", limit=1000, _all_owners=True, owner_account_id=""):
                 reason = ""
                 if task["execution_timeout"] > 0 and task["started_at"]:
                     if now - task["started_at"] >= task["execution_timeout"]:
@@ -677,7 +680,7 @@ class TaskRuntime:
 
     def reconcile_after_restart(self) -> None:
         """Non-shell coroutines cannot survive process restart."""
-        for task in self.list_tasks(status="running", limit=10000, _all_owners=True):
+        for task in self.list_tasks(status="running", limit=10000, _all_owners=True, owner_account_id=""):
             if task["kind"] == "shell":
                 pid = int((task.get("progress") or {}).get("pid") or 0)
                 if pid and self._pid_alive(pid):
@@ -701,7 +704,7 @@ class TaskRuntime:
                     status="failed",
                     error="服务重启，Python 协程无法恢复",
                 )
-        for task in self.list_tasks(limit=10000, _all_owners=True):
+        for task in self.list_tasks(limit=10000, _all_owners=True, owner_account_id="local"):
             if task["status"] in TERMINAL_STATUSES and task["notified_at"] is None:
                 self._notify_completion(task)
 
@@ -732,7 +735,7 @@ class TaskRuntime:
             self._safe_unlink_output_ref(ref)
         return deleted
 
-    def unlink_session_output_files(self, session_id: str, owner_account_id: str = "") -> int:
+    def unlink_session_output_files(self, session_id: str, owner_account_id: str) -> int:
         """删除某会话全部 runtime task 的 output_ref 磁盘文件（不删 DB 行）。"""
         tasks = self.list_tasks(session_id=session_id, owner_account_id=owner_account_id, limit=10000)
         n = 0

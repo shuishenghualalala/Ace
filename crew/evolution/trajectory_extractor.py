@@ -72,7 +72,7 @@ class TrajectoryExtractor:
     def extract(
         self,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> TrajectoryLog | None:
         """提取单个会话的轨迹日志。
 
@@ -124,7 +124,7 @@ class TrajectoryExtractor:
     def extract_batch(
         self,
         session_ids: list[str],
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> list[TrajectoryLog]:
         """批量提取多个会话的轨迹。"""
         results: list[TrajectoryLog] = []
@@ -136,7 +136,7 @@ class TrajectoryExtractor:
 
     def extract_all(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         workspace_id: str | None = None,
         include_archived: bool = False,
     ) -> list[TrajectoryLog]:

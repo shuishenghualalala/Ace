@@ -53,11 +53,11 @@ class DeliveryRouter:
     def __init__(self) -> None:
         self._senders: dict[tuple[str, str], SenderFn] = {}
 
-    def register(self, platform: str, sender: SenderFn, *, owner_account_id: str = "") -> None:
+    def register(self, platform: str, sender: SenderFn, *, owner_account_id: str) -> None:
         key = (str(platform or "").strip().lower(), str(owner_account_id or "").strip())
         self._senders[key] = sender
 
-    def unregister(self, platform: str, *, owner_account_id: str = "") -> None:
+    def unregister(self, platform: str, *, owner_account_id: str) -> None:
         """移除一个 Owner 的平台 sender。"""
         key = (str(platform or "").strip().lower(), str(owner_account_id or "").strip())
         self._senders.pop(key, None)
@@ -68,7 +68,7 @@ class DeliveryRouter:
         text: str,
         *,
         origin: SessionSource | None = None,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         """投递文本到目标，返回 {ok, platform, error?}。"""
         if not text.strip():

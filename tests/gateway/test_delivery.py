@@ -30,9 +30,9 @@ async def test_delivery_router_origin_uses_source():
 
     origin = SessionSource(platform="testchat", chat_id="line-1", chat_type="dm")
     router = DeliveryRouter()
-    router.register("testchat", sender)
+    router.register("testchat", sender, owner_account_id="")
 
-    result = await router.deliver("origin", "cron result", origin=origin)
+    result = await router.deliver("origin", "cron result", origin=origin, owner_account_id="")
 
     assert result["ok"] is True
     assert result["platform"] == "testchat"
@@ -48,7 +48,7 @@ async def test_delivery_router_mock_sender():
         return True
 
     router = DeliveryRouter()
-    router.register("feishu", sender)
-    result = await router.deliver("feishu:oc_99", "cron result")
+    router.register("feishu", sender, owner_account_id="")
+    result = await router.deliver("feishu:oc_99", "cron result", owner_account_id="")
     assert result["ok"] is True
     assert calls == [("oc_99", "cron result")]

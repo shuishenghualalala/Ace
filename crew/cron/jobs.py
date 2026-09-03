@@ -579,7 +579,7 @@ class CronJobStore:
         workspace_id: str = "default",
         deliver: str = "",
         origin_source: dict[str, Any] | None = None,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         """按 schedule 创建任务，返回任务 dict。schedule 解析失败抛 ValueError。"""
         now_dt = _local_now()
@@ -632,7 +632,7 @@ class CronJobStore:
         self,
         job_id: str,
         enabled: bool,
-        owner_account_id: str = "",
+        owner_account_id: str,
         *,
         _all_owners: bool = False,
     ) -> bool:
@@ -670,7 +670,7 @@ class CronJobStore:
             return cur.rowcount
         return self._writer.execute(_write) > 0
 
-    def delete(self, job_id: str, owner_account_id: str = "", *, _all_owners: bool = False) -> bool:
+    def delete(self, job_id: str, owner_account_id: str, *, _all_owners: bool = False) -> bool:
         """删除任务，返回任务是否存在。"""
         def _write(conn):
             sql = "DELETE FROM cron_jobs WHERE id = ?"
@@ -1042,7 +1042,7 @@ class CronJobStore:
 
         self._writer.execute(_write)
 
-    def session_has_running_job_run(self, session_id: str, owner_account_id: str = "") -> bool:
+    def session_has_running_job_run(self, session_id: str, owner_account_id: str) -> bool:
         """该会话下是否仍有 status=running 的 cron_job_runs。"""
         sql = (
             "SELECT 1 FROM cron_job_runs r "
@@ -1054,7 +1054,7 @@ class CronJobStore:
             row = self._conn.execute(sql, (session_id, owner_account_id)).fetchone()
         return row is not None
 
-    def delete_jobs_for_session(self, session_id: str, owner_account_id: str = "") -> int:
+    def delete_jobs_for_session(self, session_id: str, owner_account_id: str) -> int:
         """删除某会话下全部 cron_jobs（含已停用），避免删会话后留下指向死 session_id 的孤儿行。
 
         调用方应先用 ``session_has_running_job_run`` / enabled 守卫拦住进行中的任务。
@@ -1185,7 +1185,7 @@ class CronJobStore:
             return "date", {"run_at": run_at}
         raise ValueError("row 缺少可恢复的 trigger 信息")
 
-    def get(self, job_id: str, owner_account_id: str = "", *, _all_owners: bool = False) -> dict[str, Any] | None:
+    def get(self, job_id: str, owner_account_id: str, *, _all_owners: bool = False) -> dict[str, Any] | None:
         sql = "SELECT * FROM cron_jobs WHERE id = ?"
         params: tuple[Any, ...] = (job_id,)
         if not _all_owners:
@@ -1198,8 +1198,8 @@ class CronJobStore:
     def list(
         self,
         session_id: str | None = None,
-        owner_account_id: str = "",
         *,
+        owner_account_id: str,
         _all_owners: bool = False,
     ) -> list[dict[str, Any]]:
         sql = "SELECT * FROM cron_jobs"

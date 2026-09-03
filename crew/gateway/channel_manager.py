@@ -32,7 +32,7 @@ class ChannelManager:
         self._locks: dict[ChannelKey, asyncio.Lock] = {}
 
     @staticmethod
-    def _key(name: str, owner_account_id: str = "") -> ChannelKey:
+    def _key(name: str, owner_account_id: str) -> ChannelKey:
         return str(name or "").strip().lower(), str(owner_account_id or "").strip()
 
     @property
@@ -45,7 +45,7 @@ class ChannelManager:
                 view[name] = channel
         return MappingProxyType(view)
 
-    def get(self, name: str, owner_account_id: str = "") -> Channel | None:
+    def get(self, name: str, owner_account_id: str) -> Channel | None:
         return self._channels.get(self._key(name, owner_account_id))
 
     def iter_channels(self, owner_account_id: str | None = None) -> list[tuple[str, str, Channel]]:
@@ -81,7 +81,7 @@ class ChannelManager:
         except RuntimeError:
             pass
 
-    def is_busy(self, name: str, owner_account_id: str = "") -> bool:
+    def is_busy(self, name: str, owner_account_id: str) -> bool:
         """返回指定渠道实例是否正在执行互斥生命周期操作。"""
 
         if str(owner_account_id or "").strip():
@@ -93,7 +93,7 @@ class ChannelManager:
             if platform == str(name or "").strip().lower()
         )
 
-    def lock_for(self, name: str, owner_account_id: str = "") -> asyncio.Lock:
+    def lock_for(self, name: str, owner_account_id: str) -> asyncio.Lock:
         """返回指定 ``(platform, owner)`` 的互斥锁。"""
 
         return self._locks.setdefault(self._key(name, owner_account_id), asyncio.Lock())
@@ -162,7 +162,7 @@ class ChannelManager:
         channel: Channel,
         handler: MessageHandler,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> ChannelState:
         """只替换指定 Owner 的渠道实例。"""
 
@@ -216,7 +216,7 @@ class ChannelManager:
     async def stop_one_locked(
         self,
         name: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         *,
         operation: str = "disconnecting",
     ) -> ChannelState:
@@ -244,7 +244,7 @@ class ChannelManager:
         await self._emit_state_change(platform, owner, running=False, error=state.error)
         return state
 
-    async def stop_one(self, name: str, owner_account_id: str = "") -> ChannelState:
+    async def stop_one(self, name: str, owner_account_id: str) -> ChannelState:
         lock = self.lock_for(name, owner_account_id)
         async with lock:
             return await self.stop_one_locked(name, owner_account_id)

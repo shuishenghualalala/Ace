@@ -69,7 +69,7 @@ class ConnectionManager:
         owner, session_id = key
         return f"{owner}:{session_id}" if owner else session_id
 
-    def register(self, session_id: str, ws: WebSocket, *, owner_account_id: str = "") -> None:
+    def register(self, session_id: str, ws: WebSocket, *, owner_account_id: str) -> None:
         key = self._key(session_id, owner_account_id)
         self._conns[key].add(ws)
         self._ws_to_sessions[ws].add(key)
@@ -101,7 +101,7 @@ class ConnectionManager:
         if not self._ws_to_sessions.get(ws) and not self._ws_to_owners.get(ws):
             self._send_locks.pop(ws, None)
 
-    def _unregister_socket_owners(self, ws: WebSocket, owner_account_id: str = "") -> None:
+    def _unregister_socket_owners(self, ws: WebSocket, owner_account_id: str) -> None:
         owners = {str(owner_account_id or "")} if owner_account_id else set(self._ws_to_owners.get(ws, set()))
         for owner in owners:
             self._unregister_owner(owner, ws)
@@ -110,7 +110,7 @@ class ConnectionManager:
         for owner, session_id in list(self._ws_to_sessions.get(ws, set())):
             self.unregister(session_id, ws, owner_account_id=owner)
 
-    def unregister(self, session_id: str, ws: WebSocket, *, owner_account_id: str = "") -> None:
+    def unregister(self, session_id: str, ws: WebSocket, *, owner_account_id: str) -> None:
         key = self._key(session_id, owner_account_id)
         self._conns[key].discard(ws)
         sessions = self._ws_to_sessions.get(ws)
@@ -129,7 +129,7 @@ class ConnectionManager:
         ws: WebSocket,
         session_ids: set[str],
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> None:
         """WS 断开时，从该连接注册的所有 session 里移除。"""
         for sid in session_ids:
@@ -156,7 +156,7 @@ class ConnectionManager:
             flush_task.cancel()
         self._pending_payloads.pop(key, None)
 
-    def has_connection(self, session_id: str, *, owner_account_id: str = "") -> bool:
+    def has_connection(self, session_id: str, *, owner_account_id: str) -> bool:
         return bool(self._conns.get(self._key(session_id, owner_account_id)))
 
     async def send_socket(self, ws: WebSocket, payload: dict) -> None:
@@ -271,7 +271,7 @@ class ConnectionManager:
                 sessions.discard(key)
             if sessions is not None and not sessions:
                 self._ws_to_sessions.pop(ws, None)
-            self._unregister_socket_owners(ws)
+            self._unregister_socket_owners(ws, owner_account_id="local")
             if not self._ws_to_sessions.get(ws) and not self._ws_to_owners.get(ws):
                 self._send_locks.pop(ws, None)
         if not self._conns[key]:
@@ -394,7 +394,7 @@ class ConnectionManager:
             return body.get("phase") in {"generating", "start"}
         return kind in {"followup_question", "plan_review"}
 
-    async def push(self, session_id: str, chunk: Any, *, owner_account_id: str = "") -> None:
+    async def push(self, session_id: str, chunk: Any, *, owner_account_id: str) -> None:
         """把一个 ResponseChunk 推送给该 session 的所有活跃 WS 连接。
 
         推送失败（连接已关闭）时静默移除该连接，不抛异常。
@@ -411,7 +411,7 @@ class ConnectionManager:
         session_id: str,
         payload: dict,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> None:
         """把已格式化的 WS payload 推送给该 session 的所有活跃连接。
 
@@ -513,7 +513,7 @@ class ConnectionManager:
         *,
         after_gateway_sequence: int = 0,
         filter_fn: Callable[[dict], bool] | None = None,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> None:
         """向指定 socket 回放该 session 缓存中 gateway_sequence > after 的帧。
 
@@ -544,7 +544,7 @@ class ConnectionManager:
                     # socket 已死，停止回放；外层 WS handler 会清理死连接
                     break
 
-    def clear_buffer(self, session_id: str, *, owner_account_id: str = "") -> None:
+    def clear_buffer(self, session_id: str, *, owner_account_id: str) -> None:
         """新一轮请求开始时清空回放缓存，但保持 gateway_sequence 会话级单调递增。
 
         客户端用 gateway_sequence 做断线回放水位与实时去重。若每轮从 1 重新开始，

@@ -267,7 +267,7 @@ def persist_file_changes(
     session_id: str,
     changes: Iterable[dict[str, Any]],
     *,
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> list[dict[str, Any]]:
     """Merge changes into Crew's existing cumulative and per-turn stores."""
 

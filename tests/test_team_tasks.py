@@ -10019,12 +10019,13 @@ async def test_direct_leader_continue_gets_team_context_summary():
             return ChatResponse(text="没有上下文。")
 
     tm, tasks = _team(ContinueProvider())
-    parent_task = tasks.create("team-continue", "你能帮我测试一下我的贪吃蛇游戏么")
+    parent_task = tasks.create("team-continue", "你能帮我测试一下我的贪吃蛇游戏么", owner_account_id="local")
     tasks.update_status(parent_task["id"], "cancelled", "已停止当前回复")
     team_task = tasks.create(
         "team-continue",
         "测试设计：你能帮我测试一下我的贪吃蛇游戏么",
         assignee="kk",
+    owner_account_id="local",
     )
     tasks.update_status(team_task["id"], "failed", "外部智能体调用失败")
 
@@ -10039,7 +10040,7 @@ async def test_direct_leader_continue_gets_team_context_summary():
 
 def test_task_manager_lifecycle():
     tasks = InMemoryTaskManager()
-    t = tasks.create("s1", "标题", assignee="coder")
+    t = tasks.create("s1", "标题", assignee="coder", owner_account_id="local")
     assert t["status"] == "in_progress"
     tasks.update_status(t["id"], "done", "结果")
     assert tasks.get(t["id"])["status"] == "done"
@@ -10067,12 +10068,12 @@ def test_legacy_task_manager_adapter_create_accepts_owner_account_id(tmp_path):
 def test_legacy_task_manager_adapter_preserves_cancelled_status(tmp_path):
     runtime = TaskRuntime(str(tmp_path / "tasks.db"))
     tasks = LegacyTaskManagerAdapter(runtime)
-    task = tasks.create("cancel-session", "可取消任务", assignee="worker")
+    task = tasks.create("cancel-session", "可取消任务", assignee="worker", owner_account_id="local")
 
     cancelled = tasks.update_status(task["id"], "cancelled", "stop")
 
     assert cancelled["status"] == "cancelled"
-    assert runtime.get(task["task_id"])["status"] == "cancelled"
+    assert runtime.get(task["task_id"], owner_account_id="local")["status"] == "cancelled"
 
 
 def test_team_parent_session_history_aggregates_child_sessions(auth_headers):

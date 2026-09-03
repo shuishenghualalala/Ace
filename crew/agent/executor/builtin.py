@@ -284,7 +284,7 @@ class BuiltinExecutor(AgentExecutor):
         rid: str,
         next_seq,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> list[ResponseChunk]:
         """final 前对账文件改动：剔除本轮新建又已删的路径，并广播最新累计列表。"""
         if self.plan_manager is None:

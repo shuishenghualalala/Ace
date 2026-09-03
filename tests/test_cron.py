@@ -115,7 +115,7 @@ def test_parse_schedule_cron_expr_rejected():
 
 def test_store_create_interval_and_compute_next_run(tmp_path):
     store = CronJobStore(str(tmp_path / "c.db"))
-    job = store.create(name="t", schedule="every 30m", query="hi", session_id="s1")
+    job = store.create(name="t", schedule="every 30m", query="hi", session_id="s1", owner_account_id="local")
     assert job["kind"] == "interval"
     assert job["interval_seconds"] == 1800
     assert job["trigger_type"] == "interval"
@@ -125,7 +125,7 @@ def test_store_create_interval_and_compute_next_run(tmp_path):
 
 def test_store_supports_natural_language_schedule(tmp_path):
     store = CronJobStore(str(tmp_path / "c.db"))
-    job = store.create(name="daily", schedule="每天早上9点", query="go", session_id="s1")
+    job = store.create(name="daily", schedule="每天早上9点", query="go", session_id="s1", owner_account_id="local")
     assert job["kind"] == "cron"
     assert job["trigger_type"] == "cron"
     assert job["trigger_payload"] == {"hour": 9, "minute": 0}
@@ -139,13 +139,13 @@ def test_format_bj_timestamp():
 
 def test_store_list_and_delete(tmp_path):
     store = CronJobStore(str(tmp_path / "c.db"))
-    store.create(name="a", schedule="every 1m", query="x", session_id="s1")
-    store.create(name="b", schedule="every 1m", query="y", session_id="s2")
-    assert len(store.list()) == 2
-    assert len(store.list(session_id="s1")) == 1
-    jid = store.list(session_id="s2")[0]["id"]
-    assert store.delete(jid) is True
-    assert len(store.list()) == 1
+    store.create(name="a", schedule="every 1m", query="x", session_id="s1", owner_account_id="local")
+    store.create(name="b", schedule="every 1m", query="y", session_id="s2", owner_account_id="local")
+    assert len(store.list(owner_account_id="local")) == 2
+    assert len(store.list(session_id="s1", owner_account_id="local")) == 1
+    jid = store.list(session_id="s2", owner_account_id="local")[0]["id"]
+    assert store.delete(jid, owner_account_id="local") is True
+    assert len(store.list(owner_account_id="local")) == 1
 
 
 def test_scheduled_fire_claim_has_one_database_winner(tmp_path):
@@ -374,6 +374,7 @@ def test_late_interval_claim_advances_to_strictly_future_occurrence(tmp_path):
         schedule="every 1h",
         query="once",
         session_id="s1",
+        owner_account_id="",
     )
     claim_time = job["next_run_at"] + 5 * 3600 + 1
 
@@ -383,7 +384,7 @@ def test_late_interval_claim_advances_to_strictly_future_occurrence(tmp_path):
         now=claim_time,
     ) is not None
 
-    refreshed = store.get(job["id"])
+    refreshed = store.get(job["id"], owner_account_id="")
     assert refreshed["next_run_at"] > claim_time
 
 
@@ -887,7 +888,7 @@ async def test_cron_tools_via_registry(tmp_path):
 
     del_res = await reg.execute(ToolCall("c3", "cron_delete", {"id": job_id}))
     assert json.loads(del_res.content)["deleted"] is True
-    assert store.list() == []
+    assert store.list(owner_account_id="local") == []
 
 
 async def test_cron_list_defaults_to_all_user_jobs(tmp_path):

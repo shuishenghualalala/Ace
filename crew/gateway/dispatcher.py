@@ -119,14 +119,14 @@ class SessionDispatcher:
 
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _key(session_id: str, owner_account_id: str = "") -> SessionKey:
+    def _key(session_id: str, owner_account_id: str) -> SessionKey:
         return owner_account_id, session_id
 
     @staticmethod
     def _label(key: SessionKey) -> str:
         return f"{key[0]}:{key[1]}" if key[0] else key[1]
 
-    def _resolve_key(self, session_id: str, owner_account_id: str = "") -> SessionKey:
+    def _resolve_key(self, session_id: str, owner_account_id: str) -> SessionKey:
         """Return the explicit owner-scoped dispatcher key."""
 
         return self._key(session_id, owner_account_id)
@@ -277,7 +277,8 @@ class SessionDispatcher:
     def _active_children_snapshot(
         self,
         session_id: str | None = None,
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> object:
         if callable(self._active_children_fn):
             try:
@@ -301,7 +302,7 @@ class SessionDispatcher:
         snap = self._active_children_snapshot(session_id, owner_account_id=owner_account_id)
         return bool(snap)
 
-    def stop(self, session_id: str, reason: str = "已停止当前回复", owner_account_id: str = "") -> bool:
+    def stop(self, session_id: str, reason: str = "已停止当前回复", *, owner_account_id: str) -> bool:
         """停止某会话当前运行/等待的请求——取消所有 task。"""
         key = self._resolve_key(session_id, owner_account_id)
         prefix = f"{session_id}::turn::"
@@ -362,7 +363,7 @@ class SessionDispatcher:
         self,
         session_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         reason: str,
     ) -> bool:
         if self._task_runtime is None:
@@ -403,7 +404,7 @@ class SessionDispatcher:
                 log.exception("取消运行任务失败 task=%s", task.get("task_id") or task.get("id"))
         return did_cancel
 
-    def interrupt(self, session_id: str, reason: str = "被新消息中断", owner_account_id: str = "") -> bool:
+    def interrupt(self, session_id: str, reason: str = "被新消息中断", *, owner_account_id: str) -> bool:
         """中断当前运行的请求。
 
         有 controller 时走协作式优雅中断（loop 在安全点停止，历史完整保留）；
@@ -432,7 +433,7 @@ class SessionDispatcher:
         running.cancel()
         return True
 
-    def steer(self, session_id: str, text: str, owner_account_id: str = "") -> bool:
+    def steer(self, session_id: str, text: str, owner_account_id: str) -> bool:
         """向运行中的 agent 注入补充指令。"""
         if not text.strip():
             return False
@@ -461,7 +462,7 @@ class SessionDispatcher:
         log.info("steer 实时注入未生效，已缓存补充指令 session=%s", session_id)
         return True
 
-    def background(self, session_id: str, owner_account_id: str = "") -> str | None:
+    def background(self, session_id: str, owner_account_id: str) -> str | None:
         """把当前 Agent turn 标记为后台任务；执行协程继续运行。"""
         key = self._resolve_key(session_id, owner_account_id)
         task_id = self._run_task_ids.get(key)
@@ -1023,7 +1024,7 @@ class SessionDispatcher:
             yield deferred_terminal
 
     # ------------------------------------------------------------------ #
-    def status(self, session_id: str, owner_account_id: str = "") -> dict:
+    def status(self, session_id: str, owner_account_id: str) -> dict:
         """返回会话当前运行态（内存）+ 上一轮 terminal 结果（落库）。"""
         key = self._resolve_key(session_id, owner_account_id)
         last_status, last_error = self._store.get_status(session_id, owner_account_id=key[0])
@@ -1064,5 +1065,5 @@ class SessionDispatcher:
             "global_active": len(self._global_running),
             "global_queued": sum(self._global_waiting.values()),
             "sessions": {self._label(key): self.status(key[1], owner_account_id=key[0]) for key in keys},
-            "active_children": self._active_children_snapshot(None),
+            "active_children": self._active_children_snapshot(None, owner_account_id="local"),
         }

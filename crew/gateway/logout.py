@@ -74,7 +74,7 @@ class LogoutCoordinator:
 
         return next(iter(self._draining_owners), "")
 
-    def is_draining(self, owner_account_id: str = "") -> bool:
+    def is_draining(self, owner_account_id: str) -> bool:
         owner = str(owner_account_id or "").strip()
         return bool(self._draining_owners if not owner else owner in self._draining_owners)
 

@@ -23,7 +23,7 @@ class InMemoryTaskManager(TaskManager):
         detail: str = "",
         assignee: str | None = None,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         task = Task(session_id=session_id, title=title, detail=detail, assignee=assignee,
                     status="pending" if assignee is None else "in_progress")
@@ -86,7 +86,7 @@ class LegacyTaskManagerAdapter:
         detail: str = "",
         assignee: str | None = None,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ):
         return self._legacy(
             self.runtime.create(
@@ -110,10 +110,10 @@ class LegacyTaskManagerAdapter:
     def update_status(self, task_id: str, status: str, result: str = ""):
         return self._legacy(self.runtime.update_status(task_id, status, result))
 
-    def get(self, task_id: str, owner_account_id: str = ""):
+    def get(self, task_id: str, owner_account_id: str):
         return self._legacy(self.runtime.get(task_id, owner_account_id=owner_account_id))
 
-    def list(self, session_id: str, owner_account_id: str = ""):
+    def list(self, session_id: str, owner_account_id: str):
         return [
             self._legacy(task)
             for task in self.runtime.list(session_id, owner_account_id=owner_account_id)

@@ -101,7 +101,7 @@ def _public_channel_config(
     raw: dict[str, Any],
     *,
     crew_config,
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> dict[str, Any]:
     secret_envs = set(_PLATFORM_SECRET_ENV.get(name, {}).values())
     env_map = _owner_env_map(crew_config, owner_account_id)
@@ -126,7 +126,7 @@ def _public_channel_config(
     return payload
 
 
-def _has_channel_account(name: str, raw: dict[str, Any], *, owner_account_id: str = "") -> bool:
+def _has_channel_account(name: str, raw: dict[str, Any], *, owner_account_id: str) -> bool:
     try:
         entry = platform_registry.get(name)
     except KeyError:
@@ -185,7 +185,7 @@ def _write_env_fields(
     config: dict[str, Any],
     secrets: dict[str, str],
     *,
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> None:
     env_path = resolve_writable_env_path(owner_account_id)
     field_map = {**_PLATFORM_ENV_FIELDS.get(name, {}), **_PLATFORM_SECRET_ENV.get(name, {})}
@@ -239,7 +239,7 @@ def _prospective_channel_config(
     config: dict[str, Any],
     secrets: dict[str, str],
     *,
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> dict[str, Any]:
     """合并当前配置与待保存字段，供保存前校验（不落盘）。
 
@@ -265,7 +265,7 @@ def _validate_platform_config_ready(
     config: dict[str, Any],
     secrets: dict[str, str],
     *,
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> bool:
     entry = platform_registry.get(name)
     prospective = _prospective_channel_config(name, crew, config, secrets, owner_account_id=owner_account_id)
@@ -280,7 +280,7 @@ _CONNECT_POLL_S = 0.25
 def _read_channel_detail(
     channel_manager,
     name: str,
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> dict[str, Any]:
     """读取渠道可选的运行态快照（鸭子类型 status_detail）。"""
     channel = channel_manager.get(name, owner_account_id)
@@ -298,7 +298,7 @@ def _read_channel_detail(
         return {}
 
 
-def _channel_supports_live_probe(channel_manager, name: str, owner_account_id: str = "") -> bool:
+def _channel_supports_live_probe(channel_manager, name: str, owner_account_id: str) -> bool:
     """是否应等待真实连通（有 status_detail 且含 connected / bot_identity_known）。"""
     detail = _read_channel_detail(channel_manager, name, owner_account_id)
     return "connected" in detail or "bot_identity_known" in detail
@@ -332,7 +332,7 @@ def _platform_error_kind(name: str, error: Any) -> str:
 async def _wait_for_live_connected(
     channel_manager,
     name: str,
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> tuple[bool, str]:
     """连接后等待真实握手成功；无探针的渠道（测试桩）直接通过。"""
     if not _channel_supports_live_probe(channel_manager, name, owner_account_id):
@@ -365,7 +365,7 @@ def _enrich_platform_row(
     row: dict[str, Any],
     channel_manager,
     *,
-    owner_account_id: str = "",
+    owner_account_id: str,
     secret_values: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """补充 live_connected：区分「进程已启动」与「远端已连通」。"""
@@ -380,7 +380,7 @@ def _enrich_platform_row(
     return row
 
 
-def _remove_secret_envs(name: str, *, owner_account_id: str = "") -> None:
+def _remove_secret_envs(name: str, *, owner_account_id: str) -> None:
     env_path = resolve_writable_env_path(owner_account_id)
     for env_name in set(_PLATFORM_SECRET_ENV.get(name, {}).values()):
         remove_env_key(env_path, env_name, sync_process_env=not bool(owner_account_id))
@@ -389,10 +389,10 @@ def _remove_secret_envs(name: str, *, owner_account_id: str = "") -> None:
 def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
     router = APIRouter()
 
-    def _platform_raw(name: str, owner_account_id: str = "") -> dict[str, Any]:
+    def _platform_raw(name: str, owner_account_id: str) -> dict[str, Any]:
         return _resolved_channel_raw(crew.config, name, owner_account_id)
 
-    def _platform_secret_values(name: str, owner_account_id: str = "") -> tuple[str, ...]:
+    def _platform_secret_values(name: str, owner_account_id: str) -> tuple[str, ...]:
         raw = _platform_raw(name, owner_account_id)
         values: list[str] = []
         secret_fields = set(_PLATFORM_SECRET_ENV.get(name, {}))
@@ -415,7 +415,7 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
     def _safe_platform_error(name: str, owner_account_id: str, error: Any) -> str:
         return _safe_error(error, _platform_secret_values(name, owner_account_id))
 
-    def _platform_configs(owner_account_id: str = "") -> dict[str, PlatformConfig]:
+    def _platform_configs(owner_account_id: str) -> dict[str, PlatformConfig]:
         return {
             entry.name: entry.build_config(
                 _platform_raw(entry.name, owner_account_id),
@@ -424,7 +424,7 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
             for entry in platform_registry.all_entries()
         }
 
-    def _owner_can_see_runtime(name: str, owner_account_id: str = "") -> bool:
+    def _owner_can_see_runtime(name: str, owner_account_id: str) -> bool:
         owner = str(owner_account_id or "").strip()
         if channel_manager.get(name, owner) is not None or (
             owner in {"local", "dev:dev"} and channel_manager.get(name, "") is not None
@@ -435,7 +435,7 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
             for row in channel_manager.status(owner)
         )
 
-    def _runtime_state(name: str, owner_account_id: str = "") -> dict[str, Any]:
+    def _runtime_state(name: str, owner_account_id: str) -> dict[str, Any]:
         owner = str(owner_account_id or "").strip()
         rows = channel_manager.status(owner)
         for row in rows:
@@ -473,7 +473,7 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
             rows.append(row)
         return JSONResponse(rows)
 
-    def _single_platform_status(name: str, owner_account_id: str = "") -> dict[str, Any]:
+    def _single_platform_status(name: str, owner_account_id: str) -> dict[str, Any]:
         configs = _platform_configs(owner_account_id)
         for item in platform_registry.list(configs):
             if item["name"] != name:
@@ -502,7 +502,7 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
             return row
         raise KeyError(name)
 
-    async def _restart_platform(name: str, owner_account_id: str = "") -> tuple[bool, dict[str, Any]]:
+    async def _restart_platform(name: str, owner_account_id: str) -> tuple[bool, dict[str, Any]]:
         if channel_manager.is_busy(name, owner_account_id):
             raise RuntimeError("渠道正在重连，请稍后再操作")
         entry = platform_registry.get(name)
@@ -548,12 +548,12 @@ def create_channels_router(crew, dispatcher, channel_manager) -> APIRouter:
             return False, status
         return True, _single_platform_status(name, owner_account_id)
 
-    def _busy_response(name: str, owner_account_id: str = "") -> JSONResponse | None:
+    def _busy_response(name: str, owner_account_id: str) -> JSONResponse | None:
         if channel_manager.is_busy(name, owner_account_id):
             return JSONResponse({"ok": False, "error": "渠道正在重连，请稍后再操作"}, status_code=409)
         return None
 
-    def _hot_apply_platform_config(name: str, owner_account_id: str = "") -> None:
+    def _hot_apply_platform_config(name: str, owner_account_id: str) -> None:
         """保存配置后热应用：运行中的渠道若实现 apply_config，就地刷新非连接类设置（不断连）。"""
         channel = channel_manager.get(name, owner_account_id)
         apply = getattr(channel, "apply_config", None)

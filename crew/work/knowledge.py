@@ -18,10 +18,10 @@ OrganizationProvider = Callable[[], Sequence[dict[str, Any]]]
 class WikiSaver(Protocol):
     """Minimum WikiStore surface for personal knowledge operations."""
 
-    def save_page(self, page: Any, owner_account_id: str = "", kb_id: str = "default") -> Any: ...
+    def save_page(self, page: Any, owner_account_id: str, kb_id: str = "default") -> Any: ...
 
     def list_all(
-        self, owner_account_id: str = "", kb_id: str = "default",
+        self, owner_account_id: str, kb_id: str = "default",
         limit: int = 100, offset: int = 0, brief: bool = False,
     ) -> list[Any]: ...
 

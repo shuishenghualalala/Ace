@@ -960,16 +960,16 @@ async def test_circuit_breaker_resets_on_success():
 # --------------------------------------------------------------------------- #
 def test_summary_store_roundtrip(tmp_path):
     store = SummaryStore(str(tmp_path / "c.db"))
-    assert store.get("s") is None
-    store.put("s", SummaryState(text="摘要A", covered_count=5, ineffective_count=1))
-    got = store.get("s")
+    assert store.get("s", owner_account_id="local") is None
+    store.put("s", SummaryState(text="摘要A", covered_count=5, ineffective_count=1), owner_account_id="local")
+    got = store.get("s", owner_account_id="local")
     assert got.text == "摘要A" and got.covered_count == 5 and got.ineffective_count == 1
     # 覆盖更新
-    store.put("s", SummaryState(text="摘要B", covered_count=9))
-    got2 = store.get("s")
+    store.put("s", SummaryState(text="摘要B", covered_count=9), owner_account_id="local")
+    got2 = store.get("s", owner_account_id="local")
     assert got2.text == "摘要B" and got2.covered_count == 9 and got2.ineffective_count == 0
-    store.delete("s")
-    assert store.get("s") is None
+    store.delete("s", owner_account_id="local")
+    assert store.get("s", owner_account_id="local") is None
 
 
 def test_summary_store_is_owner_scoped(tmp_path):
@@ -979,7 +979,7 @@ def test_summary_store_is_owner_scoped(tmp_path):
 
     assert store.get("same", owner_account_id="A:uid-a").text == "摘要A"
     assert store.get("same", owner_account_id="B:uid-b").text == "摘要B"
-    assert store.get("same") is None
+    assert store.get("same", owner_account_id="local") is None
 
 
 async def test_compactor_in_memory_cache_is_owner_scoped():

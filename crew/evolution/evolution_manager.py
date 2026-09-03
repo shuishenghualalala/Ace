@@ -91,7 +91,7 @@ class EvolutionManager:
 
     def extract_trajectories(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         workspace_id: str | None = None,
         include_archived: bool = False,
     ) -> int:
@@ -112,7 +112,7 @@ class EvolutionManager:
     def extract_session(
         self,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> str | None:
         """提取单个会话的轨迹并保存，返回 log_id。"""
         log = self._extractor.extract(session_id, owner_account_id)
@@ -224,7 +224,7 @@ class EvolutionManager:
 
     def run_full_cycle(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         workspace_id: str | None = None,
         session_id: str | None = None,
         dry_run_optimize: bool = True,

@@ -20,8 +20,8 @@ def test_claim_legacy_owner_database_claims_empty_owner_rows(tmp_path):
         sessions.set_agent_config("legacy-session", {"executor": "builtin"}, owner_account_id="")
         workspaces.create("legacy workspace", owner_account_id="")
 
-        cron.create(name="legacy cron", schedule="every 1m", query="hi", session_id="legacy-session")
-        tasks.create_runtime(kind="team", session_id="legacy-session", title="legacy task")
+        cron.create(name="legacy cron", schedule="every 1m", query="hi", session_id="legacy-session", owner_account_id="")
+        tasks.create_runtime(kind="team", session_id="legacy-session", title="legacy task", owner_account_id="")
 
         changed, remaining = claim_legacy_owner_database(str(db), "A:uid-a")
     finally:
@@ -47,8 +47,8 @@ def test_startup_migration_backfills_only_unambiguous_cron_owner(tmp_path):
     sessions.save("owned", [Message.user("owned")], owner_account_id="A:uid-a")
     sessions.save("shared", [Message.user("a")], owner_account_id="A:uid-a")
     sessions.save("shared", [Message.user("b")], owner_account_id="B:uid-b")
-    owned_job = cron.create(name="owned", schedule="every 1m", query="hi", session_id="owned")
-    shared_job = cron.create(name="shared", schedule="every 1m", query="hi", session_id="shared")
+    owned_job = cron.create(name="owned", schedule="every 1m", query="hi", session_id="owned", owner_account_id="")
+    shared_job = cron.create(name="shared", schedule="every 1m", query="hi", session_id="shared", owner_account_id="")
 
     counts, backfilled = inspect_and_backfill_legacy_owners(str(db))
 
@@ -56,4 +56,4 @@ def test_startup_migration_backfills_only_unambiguous_cron_owner(tmp_path):
     # 智能回填后不再残留无主行：歧义任务归本机 local 兜底（owner 统一后无"无主"数据）。
     assert counts["cron_jobs"] == 0
     assert cron.get(owned_job["id"], owner_account_id="A:uid-a")["owner_account_id"] == "A:uid-a"
-    assert cron.get(shared_job["id"], _all_owners=True)["owner_account_id"] == LOCAL_OWNER_ACCOUNT_ID
+    assert cron.get(shared_job["id"], _all_owners=True, owner_account_id="")["owner_account_id"] == LOCAL_OWNER_ACCOUNT_ID

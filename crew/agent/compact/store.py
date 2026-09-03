@@ -87,7 +87,7 @@ class SummaryStore:
         # 历史 owner='' 行归属本机 local（owner 统一后不存在无主摘要）。
         backfill_empty_owner_rows(conn, ["compaction_summaries"])
 
-    def get(self, session_id: str, owner_account_id: str = "") -> SummaryState | None:
+    def get(self, session_id: str, owner_account_id: str) -> SummaryState | None:
         owner_account_id = normalize_owner_account_id(owner_account_id)
         with self._lock:
             row = self._conn.execute(
@@ -99,7 +99,7 @@ class SummaryStore:
             return None
         return SummaryState(text=row[0], covered_count=int(row[1]), ineffective_count=int(row[2]))
 
-    def put(self, session_id: str, state: SummaryState, owner_account_id: str = "") -> None:
+    def put(self, session_id: str, state: SummaryState, owner_account_id: str) -> None:
         owner_account_id = normalize_owner_account_id(owner_account_id)
 
         def _write(conn):
@@ -117,7 +117,7 @@ class SummaryStore:
 
         self._writer.execute(_write)
 
-    def delete(self, session_id: str, owner_account_id: str = "") -> None:
+    def delete(self, session_id: str, owner_account_id: str) -> None:
         owner_account_id = normalize_owner_account_id(owner_account_id)
 
         def _write(conn):

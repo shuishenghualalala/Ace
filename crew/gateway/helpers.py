@@ -96,7 +96,7 @@ def resolve_session_id(data: dict[str, Any], *, platform: str = "web") -> str:
     return build_session_key(source)
 
 
-def connected_platforms(channel_manager: ChannelManager, owner_account_id: str = "") -> list[str]:
+def connected_platforms(channel_manager: ChannelManager, owner_account_id: str) -> list[str]:
     names = ["local", "web"]
     try:
         rows = channel_manager.status(owner_account_id)
@@ -126,7 +126,7 @@ def status_frame(session_id: str, message: str) -> dict[str, Any]:
 def config_body(
     crew: CrewApp,
     *,
-    owner_account_id: str = "",
+    owner_account_id: str,
     include_builtin_profiles: bool = True,
     is_gateway_admin: bool = False,
 ) -> dict[str, Any]:
@@ -302,7 +302,7 @@ def session_agent_label(
     crew: CrewApp,
     session_id: str,
     *,
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> dict[str, str]:
     getter = getattr(crew.session_store, "get_agent_config", None)
     config = getter(session_id, owner_account_id=owner_account_id) if callable(getter) else None
@@ -375,7 +375,7 @@ def with_session_agent_labels(
     crew: CrewApp,
     sessions: list[dict],
     *,
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> list[dict]:
     """为会话列表合并 agent 展示标签与会话级模型绑定。"""
     from crew.state.session_model import read_binding

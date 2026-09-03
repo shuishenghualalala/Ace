@@ -19,7 +19,7 @@ def _router_with_capture(platform: str):
         seen["text"] = text
         return True
 
-    router.register(platform, _sender)
+    router.register(platform, _sender, owner_account_id="")
     return router, seen
 
 
@@ -27,7 +27,7 @@ def test_deliver_strips_thinking_for_im_platforms():
     """IM 渠道主动下发时剥离 <thinking>，思考过程不外发。"""
     for platform in ("feishu", "dingtalk", "wecom"):
         router, seen = _router_with_capture(platform)
-        out = asyncio.run(router.deliver(f"{platform}:u1", "<thinking>内部推理</thinking>最终答案"))
+        out = asyncio.run(router.deliver(f"{platform}:u1", "<thinking>内部推理</thinking>最终答案", owner_account_id=""))
         assert out["ok"] and out["platform"] == platform
         assert "<thinking>" not in seen["text"], f"{platform} 应剥离 thinking"
         assert "最终答案" in seen["text"]
@@ -35,6 +35,6 @@ def test_deliver_strips_thinking_for_im_platforms():
 
 def test_deliver_empty_text_short_circuits_before_sender():
     router, seen = _router_with_capture("testchat")
-    out = asyncio.run(router.deliver("testchat:u1", "   "))
+    out = asyncio.run(router.deliver("testchat:u1", "   ", owner_account_id=""))
     assert out["ok"] is False and "empty" in out["error"]
     assert "text" not in seen  # 空文本不调用 sender，也不进过滤

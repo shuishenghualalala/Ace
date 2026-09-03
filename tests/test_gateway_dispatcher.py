@@ -798,9 +798,9 @@ def _chunk(text: str = "hi") -> ResponseChunk:
 async def test_connections_push_to_registered():
     mgr = ConnectionManager()
     ws = _fake_ws()
-    mgr.register("s1", ws)
-    assert mgr.has_connection("s1")
-    await mgr.push("s1", _chunk("hello"))
+    mgr.register("s1", ws, owner_account_id="")
+    assert mgr.has_connection("s1", owner_account_id="")
+    await mgr.push("s1", _chunk("hello"), owner_account_id="")
     ws.send_json.assert_awaited_once()
     payload = ws.send_json.call_args[0][0]
     assert payload["body"]["text"] == "hello"
@@ -811,7 +811,7 @@ async def test_connections_no_push_when_empty():
     mgr = ConnectionManager()
     ws = _fake_ws()
     # 未注册，push 不抛异常且 send_json 不被调用
-    await mgr.push("s1", _chunk())
+    await mgr.push("s1", _chunk(), owner_account_id="")
     ws.send_json.assert_not_awaited()
     assert mgr._consecutive_failures.get("s1", 0) == 0
 
@@ -819,10 +819,10 @@ async def test_connections_no_push_when_empty():
 async def test_connections_unregister_stops_push():
     mgr = ConnectionManager()
     ws = _fake_ws()
-    mgr.register("s1", ws)
-    mgr.unregister("s1", ws)
-    assert not mgr.has_connection("s1")
-    await mgr.push("s1", _chunk())
+    mgr.register("s1", ws, owner_account_id="")
+    mgr.unregister("s1", ws, owner_account_id="")
+    assert not mgr.has_connection("s1", owner_account_id="")
+    await mgr.push("s1", _chunk(), owner_account_id="")
     ws.send_json.assert_not_awaited()
 
 
@@ -831,10 +831,10 @@ async def test_connections_unregister_all():
     ws = _fake_ws()
     registered = {"s1", "s2"}
     for sid in registered:
-        mgr.register(sid, ws)
-    mgr.unregister_all(ws, registered)
-    assert not mgr.has_connection("s1")
-    assert not mgr.has_connection("s2")
+        mgr.register(sid, ws, owner_account_id="")
+    mgr.unregister_all(ws, registered, owner_account_id="")
+    assert not mgr.has_connection("s1", owner_account_id="")
+    assert not mgr.has_connection("s2", owner_account_id="")
 
 
 async def test_connections_dead_socket_removed_on_push():
@@ -844,9 +844,9 @@ async def test_connections_dead_socket_removed_on_push():
     dead_ws.send_json = AsyncMock(side_effect=RuntimeError("closed"))
     live_ws = _fake_ws()
 
-    mgr.register("s1", dead_ws)
-    mgr.register("s1", live_ws)
-    await mgr.push("s1", _chunk("test"))
+    mgr.register("s1", dead_ws, owner_account_id="")
+    mgr.register("s1", live_ws, owner_account_id="")
+    await mgr.push("s1", _chunk("test"), owner_account_id="")
 
     # 死连接被清除，活跃连接收到推送
     assert dead_ws not in mgr._conns.get("s1", set())
@@ -857,14 +857,14 @@ async def test_push_rate_limiting():
     """推送限流：连续推送间隔 < min_interval 时缓存帧。"""
     mgr = ConnectionManager(min_interval=0.1)  # 100ms 限流
     ws = _fake_ws()
-    mgr.register("s1", ws)
+    mgr.register("s1", ws, owner_account_id="")
 
     # 第一次推送应立即发送
-    await mgr.push("s1", _chunk("a"))
+    await mgr.push("s1", _chunk("a"), owner_account_id="")
     assert ws.send_json.call_count == 1
 
     # 立即第二次推送，应被限流（缓存）
-    await mgr.push("s1", _chunk("b"))
+    await mgr.push("s1", _chunk("b"), owner_account_id="")
     # 仍然只有 1 次（限流中，缓存了第二帧）
     assert ws.send_json.call_count == 1
 
@@ -879,10 +879,10 @@ async def test_push_final_frame_not_rate_limited():
     """is_final=True 的帧不受限流影响。"""
     mgr = ConnectionManager(min_interval=10.0)  # 极长限流
     ws = _fake_ws()
-    mgr.register("s1", ws)
+    mgr.register("s1", ws, owner_account_id="")
 
     final_chunk = ResponseChunk.final("req1", "done")
-    await mgr.push("s1", final_chunk)
+    await mgr.push("s1", final_chunk, owner_account_id="")
     assert ws.send_json.call_count == 1  # final 帧立即推送
 
 
@@ -895,8 +895,8 @@ async def test_push_degrades_after_consecutive_failures():
     for _ in range(_MAX_CONSECUTIVE_FAILURES):
         dead_ws = AsyncMock()
         dead_ws.send_json = AsyncMock(side_effect=RuntimeError("closed"))
-        mgr.register("s1", dead_ws)
-        await mgr.push("s1", _chunk())
+        mgr.register("s1", dead_ws, owner_account_id="")
+        await mgr.push("s1", _chunk(), owner_account_id="")
 
     # 超过阈值后降级
     assert mgr._consecutive_failures.get(key, 0) >= _MAX_CONSECUTIVE_FAILURES
@@ -904,9 +904,9 @@ async def test_push_degrades_after_consecutive_failures():
     # 后续推送静默（不尝试推送）
     dead_ws = AsyncMock()
     dead_ws.send_json = AsyncMock(side_effect=RuntimeError("closed"))
-    mgr.register("s1", dead_ws)
+    mgr.register("s1", dead_ws, owner_account_id="")
     dead_ws.send_json.reset_mock()
-    await mgr.push("s1", _chunk())
+    await mgr.push("s1", _chunk(), owner_account_id="")
     dead_ws.send_json.assert_not_awaited()
 
 
@@ -914,16 +914,16 @@ async def test_unregister_cleans_auxiliary_state():
     """unregister 清理 _last_push_ts / _consecutive_failures，防止 dict 无限增长。"""
     mgr = ConnectionManager(min_interval=0)
     ws = _fake_ws()
-    mgr.register("s1", ws)
+    mgr.register("s1", ws, owner_account_id="")
     key = ("", "s1")
 
     # 产生一些辅助状态
-    await mgr.push("s1", _chunk("a"))
+    await mgr.push("s1", _chunk("a"), owner_account_id="")
     assert key in mgr._last_push_ts
     assert key in mgr._consecutive_failures
 
     # unregister 后应清理
-    mgr.unregister("s1", ws)
+    mgr.unregister("s1", ws, owner_account_id="")
     assert key not in mgr._last_push_ts
     assert key not in mgr._consecutive_failures
     assert key not in mgr._pending_payloads
@@ -934,16 +934,16 @@ async def test_unregister_cancels_pending_flush_task():
     """unregister 时若有未完成的延迟推送 task，应取消它。"""
     mgr = ConnectionManager(min_interval=10.0)  # 长限流 → 第二帧必定缓存
     ws = _fake_ws()
-    mgr.register("s1", ws)
+    mgr.register("s1", ws, owner_account_id="")
     key = ("", "s1")
 
-    await mgr.push("s1", _chunk("a"))  # 第一帧立即推送，设置 _last_push_ts
-    await mgr.push("s1", _chunk("b"))  # 第二帧被限流，创建 flush task
+    await mgr.push("s1", _chunk("a"), owner_account_id="")  # 第一帧立即推送，设置 _last_push_ts
+    await mgr.push("s1", _chunk("b"), owner_account_id="")  # 第二帧被限流，创建 flush task
     assert key in mgr._flush_tasks
     flush_task = mgr._flush_tasks[key]
     assert not flush_task.done()
 
-    mgr.unregister("s1", ws)
+    mgr.unregister("s1", ws, owner_account_id="")
     assert key not in mgr._flush_tasks
     assert key not in mgr._pending_payloads
     # cancel() 已调用，让事件循环处理取消
@@ -956,33 +956,33 @@ async def test_unregister_keeps_state_when_other_connections_remain():
     mgr = ConnectionManager(min_interval=0)
     ws1 = _fake_ws()
     ws2 = _fake_ws()
-    mgr.register("s1", ws1)
-    mgr.register("s1", ws2)
+    mgr.register("s1", ws1, owner_account_id="")
+    mgr.register("s1", ws2, owner_account_id="")
     key = ("", "s1")
 
-    await mgr.push("s1", _chunk("a"))
+    await mgr.push("s1", _chunk("a"), owner_account_id="")
 
-    mgr.unregister("s1", ws1)  # 还有 ws2
+    mgr.unregister("s1", ws1, owner_account_id="")  # 还有 ws2
     assert key in mgr._last_push_ts  # 状态保留
-    assert mgr.has_connection("s1")
+    assert mgr.has_connection("s1", owner_account_id="")
 
 
 async def test_unregister_uses_socket_session_index_for_lock_cleanup():
     """同一 socket 订阅多个 session 时，只在最后一个 session 注销后清 send lock。"""
     mgr = ConnectionManager(min_interval=0)
     ws = _fake_ws()
-    mgr.register("s1", ws)
-    mgr.register("s2", ws)
+    mgr.register("s1", ws, owner_account_id="")
+    mgr.register("s2", ws, owner_account_id="")
 
     await mgr.send_socket(ws, {"kind": "ping"})
     assert ws in mgr._send_locks
     assert mgr._ws_to_sessions[ws] == {("", "s1"), ("", "s2")}
 
-    mgr.unregister("s1", ws)
+    mgr.unregister("s1", ws, owner_account_id="")
     assert ws in mgr._send_locks
     assert mgr._ws_to_sessions[ws] == {("", "s2")}
 
-    mgr.unregister("s2", ws)
+    mgr.unregister("s2", ws, owner_account_id="")
     assert ws not in mgr._send_locks
     assert ws not in mgr._ws_to_sessions
 
@@ -1000,6 +1000,7 @@ async def test_push_payload_no_connection_does_not_degrade():
             "sequence": 1,
             "session_id": "s1",
         },
+    owner_account_id="",
     )
 
     assert mgr._consecutive_failures.get("s1", 0) == 0
@@ -1010,19 +1011,22 @@ async def test_push_payload_rate_limit_merges_delta_text():
     """限流缓存的 delta 需拼接文本，避免前端按增量追加时丢字。"""
     mgr = ConnectionManager(min_interval=10.0)
     ws = _fake_ws()
-    mgr.register("s1", ws)
+    mgr.register("s1", ws, owner_account_id="")
 
     await mgr.push_payload(
         "s1",
         {"kind": "delta", "body": {"text": "a"}, "is_final": False, "sequence": 1, "session_id": "s1"},
+    owner_account_id="",
     )
     await mgr.push_payload(
         "s1",
         {"kind": "delta", "body": {"text": "b"}, "is_final": False, "sequence": 2, "session_id": "s1"},
+    owner_account_id="",
     )
     await mgr.push_payload(
         "s1",
         {"kind": "delta", "body": {"text": "c"}, "is_final": False, "sequence": 3, "session_id": "s1"},
+    owner_account_id="",
     )
 
     assert ws.send_json.call_count == 1
@@ -1036,19 +1040,22 @@ async def test_push_payload_final_flushes_pending_before_final():
     """final 到来前先刷掉 pending delta，避免旧帧晚到。"""
     mgr = ConnectionManager(min_interval=10.0)
     ws = _fake_ws()
-    mgr.register("s1", ws)
+    mgr.register("s1", ws, owner_account_id="")
 
     await mgr.push_payload(
         "s1",
         {"kind": "delta", "body": {"text": "a"}, "is_final": False, "sequence": 1, "session_id": "s1"},
+    owner_account_id="",
     )
     await mgr.push_payload(
         "s1",
         {"kind": "delta", "body": {"text": "b"}, "is_final": False, "sequence": 2, "session_id": "s1"},
+    owner_account_id="",
     )
     await mgr.push_payload(
         "s1",
         {"kind": "final", "body": {"text": "ab"}, "is_final": True, "sequence": 3, "session_id": "s1"},
+    owner_account_id="",
     )
 
     sent = [call.args[0] for call in ws.send_json.await_args_list]

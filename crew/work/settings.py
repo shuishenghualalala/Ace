@@ -18,7 +18,7 @@ _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 class WorkspaceValidator(Protocol):
     """Minimum WorkspaceStore surface needed to validate ownership."""
 
-    def get(self, workspace_id: str, owner_account_id: str = "") -> dict[str, Any]: ...
+    def get(self, workspace_id: str, owner_account_id: str) -> dict[str, Any]: ...
 
 
 class WorkSettingsStore:
