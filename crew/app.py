@@ -1258,7 +1258,7 @@ class CrewApp:
             system_prompt=system_prompt_override,
             enable_title=cfg.title_auto,
             plan_manager=self.plan_manager,
-            wiki_manager=self.wiki_manager if is_wiki_agent_session else None,
+            context_tags=("wiki",) if is_wiki_agent_session else (),
             tool_disclosure_mode=(
                 ToolDisclosureMode.DIRECT
                 if is_wiki_agent_session
@@ -1291,7 +1291,7 @@ class CrewApp:
         enable_title: bool = False,
         lightweight: bool = False,
         plan_manager: Any = None,
-        wiki_manager: Any = None,
+        context_tags: tuple[str, ...] = (),
         tool_disclosure_mode: ToolDisclosureMode = ToolDisclosureMode.PROGRESSIVE,
         agent_id: str = "default",
         enabled_skills: list[str] | None = None,
@@ -1383,7 +1383,8 @@ class CrewApp:
             profile_path=profile_path,
             lightweight=lightweight,
             plan_manager=plan_manager,
-            wiki_manager=wiki_manager,
+            context_contributors=self.context_contributors,
+            context_tags=context_tags,
             tool_disclosure_mode=tool_disclosure_mode,
             agent_id=agent_id,
             enabled_skills=enabled_skills,
@@ -1612,7 +1613,7 @@ class CrewApp:
             system_prompt=spec.get("system_prompt"),
             enable_title=False,
             lightweight=True,
-            wiki_manager=self.wiki_manager if is_wiki_preset else None,
+            context_tags=("wiki",) if is_wiki_preset else (),
             tool_disclosure_mode=(
                 ToolDisclosureMode.DIRECT
                 if is_wiki_preset
@@ -3378,6 +3379,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         WikiSessionManager,
         WikiQuerier,
         WikiSummarizer,
+        build_wiki_agent_context_contributor,
     )
     from crew.wiki.tools import register_wiki_tools
     wiki_storage_root = cfg.wiki.storage.resolved_root() if cfg.wiki else None
@@ -3385,6 +3387,23 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     if wiki_storage_root is not None:
         log.info("Wiki 独立存储根目录: %s", wiki_storage_root)
     app.wiki_manager = WikiSessionManager(store=app._wiki_store)
+    app._register_context_contributor_scope(
+        "product.wiki-context-adapter",
+        ContextContributor(
+            contributor_id="wiki.agent.context",
+            handler=build_wiki_agent_context_contributor(
+                app.wiki_manager,
+                session_store,
+            ),
+            phase=ContextPhase.PROMPT,
+            priority=100,
+            predicate=lambda envelope: "wiki"
+            in tuple(envelope.params.get("_context_tags") or ()),
+            model_visible=True,
+            persistent=True,
+            description="Active knowledge base context for Wiki agents",
+        ),
+    )
     # wiki 编译/摘要可用 wiki.model 指定独立模型档案（如更快的 flash 模型）。
     # 未指定时优先继承当前 Agent 实际生效的 Provider，使会话级模型切换同样作用于
     # wiki_plan_ingest 等工具内部的二次 LLM 调用；脱离 Agent 上下文的 Wiki API/后台

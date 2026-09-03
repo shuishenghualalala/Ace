@@ -5,11 +5,11 @@
 > 基线核查日期：2026-08-31  
 > 目标读者：Ace 后端、桌面端、Web 端及独立功能模块的维护者  
 > 修订记录：2026-08-31 评审追加——workspace_guard 依赖核查（§2.3.3、§11、§17）、第一方/第三方插件契约收口（§2.3.8）、effect 诊断与启动审计（§6.3）、服务作用域维度（§6.4）、拦截器语义（§7.5）、螺旋式迁移节奏与依赖检查工具（§10、§13.3）、配置与数据命名空间约定（§12.5）、Adapter 保质期（§15.2）、ADR 机制（§16）、新增验收指标（§14）；同日补充——演进紧迫性论证与中心文件基线数据（§1.1.1）、接口层多租户地基（§2.2）；同日范围校正——明确 dsh 广义 Plugin 与 Ace 当前 `plugins/` 的区别，将目标提升为全部 Feature 的统一可逆生命周期，补充 Feature Generation、业务数据边界、全量迁移地图和工作量评估（§0、§3.3、§5、§6、§8、§10、§16、§18、§19）；同日——§2.1、§5.1 增加耦合视角与装配视角两张架构对比图（离线渲染版：docs/todo/ace-arch-compare.html）
-> 实施进度：2026-09-03 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver、Context Contributor 首批主链均已落地。Session Source Contributor 已完成，Agent Runtime→Gateway 最后一条直接依赖豁免已删除，Luna 子 Agent 联合回归为 149 passed。当前分支为 `refactor/plugin-architecture-stage-0`，验证记录见 `docs/testing/plugin-architecture-stage-2-session-context.html`。
+> 实施进度：2026-09-03 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver、Context Contributor 主链均已落地。Wiki Attachment Contributor 已完成，Agent Runtime→Wiki 的直接依赖与豁免已删除，Luna 子 Agent 联合回归为 283 passed。当前分支为 `refactor/plugin-architecture-stage-0`，验证记录见 `docs/testing/plugin-architecture-stage-2-wiki-context.html`。
 
 ## 当前实施进度图（2026-09-03）
 
-绿色表示已经落地并通过相关回归的区域，蓝色表示紧接着要实施的切片，灰色表示尚未开始。当前完成的是**阶段 0 边界治理与阶段 1 控制面**，不是整份演进方案已经完成。
+绿色表示已经落地并通过相关回归的区域，蓝色表示紧接着要实施的切片，灰色表示尚未开始。当前已完成**阶段 0、阶段 1，以及阶段 2 的 Driver / Context Contributor 主链**，不是整份演进方案已经完成。
 
 ```mermaid
 flowchart TB
@@ -69,7 +69,9 @@ flowchart TB
     BrowserContext --> ContextTests["Context 联合回归<br/>248 passed"]
     ContextTests --> SessionContext["Session Source Contributor<br/>source 归一 · 动态 context"]
     SessionContext --> SessionTests["Session Context 联合回归<br/>149 passed · 直接豁免归零"]
-    SessionTests --> Next["阶段 2 · 后续切片<br/>Wiki Attachment Contributor"]
+    SessionTests --> WikiContext["Wiki Attachment Contributor<br/>Prompt phase · persistent message"]
+    WikiContext --> WikiTests["Wiki Context 联合回归<br/>283 passed · Agent→Wiki 归零"]
+    WikiTests --> Next["阶段 2 · 后续切片<br/>Cron / Notification Contributor"]
     Next --> Later["后续阶段<br/>Feature Event → Route Gate → 业务迁移"]
 
     classDef done fill:#e8f6ee,stroke:#1e8449,color:#145a32,stroke-width:2px
@@ -77,12 +79,12 @@ flowchart TB
     classDef pending fill:#f4f4f4,stroke:#999999,color:#555555
     class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed,Scope,Token,Rollback,RuntimeTests,Services,Dependencies,Config,ServiceTests,Runtime,Adapter,Phases,Browser,Shutdown,AdapterTests,Manifest,Ordered,Audit,ManifestTests,Lease,StopPolicy,StopAudit,LeaseTests,Update,Generation,Recovery,UpdateTests,Stage1Done,Drivers,DriverLease,DefaultDriver,PluginDriver,DriverTests,Adapters,DriverAdapterTests done
     class ContextRegistry,PathContext,BrowserContext,ContextTests done
-    class SessionContext,SessionTests done
+    class SessionContext,SessionTests,WikiContext,WikiTests done
     class Next next
     class Later pending
 ```
 
-这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。Session Source 切片把渠道来源归一与模型上下文格式化留在 Gateway，Agent 只读取通用 fragment 和 source 字典，并删除 Agent Runtime→Gateway 的最后一条直接依赖豁免。PluginManager 的平台装配间接路径留待 Route Gate 切片处理；下一步迁移 Wiki Attachment。
+这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。Wiki Attachment 切片让 Wiki 自己生成活跃 KB hidden attachment，Agent 只运行通用 Prompt Contributor；真实执行持久化上下文消息，预览只展示而不写回，并删除 Agent Runtime→Wiki 的直接依赖豁免。Wiki Tool、API、Store 与 Preset 的完整 Bundle 化留在阶段 3；下一步迁移 Cron / Notification 动态提醒。
 
 ## 0. 执行摘要
 

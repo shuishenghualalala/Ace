@@ -11,6 +11,7 @@ from typing import Any, TypeAlias
 
 from crew.core.envelope import Envelope
 from crew.core.errors import CrewError
+from crew.core.types import Message
 from crew.features.runtime import (
     FeatureGeneration,
     FeatureScope,
@@ -43,10 +44,11 @@ _CONTEXT_PHASE_ORDER = {
 
 @dataclass(frozen=True, slots=True)
 class ContextContribution:
-    """One contributor's parameter updates and ordered prompt fragments."""
+    """One contributor's parameters, prompt fragments, and persistent messages."""
 
     params: Mapping[str, Any] = field(default_factory=dict)
     prompt_parts: tuple[str, ...] = ()
+    messages: tuple[Message, ...] = ()
 
     def __post_init__(self) -> None:
         params = {str(key): value for key, value in self.params.items() if str(key)}
@@ -55,8 +57,12 @@ class ContextContribution:
             for item in self.prompt_parts
             if (text := str(item or "").strip())
         )
+        messages = tuple(self.messages)
+        if any(not isinstance(message, Message) for message in messages):
+            raise TypeError("context contribution messages must contain Message values")
         object.__setattr__(self, "params", params)
         object.__setattr__(self, "prompt_parts", prompt_parts)
+        object.__setattr__(self, "messages", messages)
 
 
 ContextContributorHandler: TypeAlias = Callable[
@@ -128,11 +134,12 @@ class ContextContributionFailure:
 
 @dataclass(frozen=True, slots=True)
 class ContextContributionReport:
-    """Merged output from one context phase in deterministic contributor order."""
+    """Merged context output in deterministic contributor order."""
 
     params: Mapping[str, Any]
     prompt_parts: tuple[str, ...]
     persistent_prompt_parts: tuple[str, ...]
+    persistent_messages: tuple[Message, ...]
     failures: tuple[ContextContributionFailure, ...]
 
 
@@ -299,6 +306,7 @@ class ContextContributorRegistry:
         params: dict[str, Any] = {}
         prompt_parts: list[str] = []
         persistent_prompt_parts: list[str] = []
+        persistent_messages: list[Message] = []
         failures: list[ContextContributionFailure] = []
 
         for binding in self.bindings(phase):
@@ -325,6 +333,10 @@ class ContextContributorRegistry:
                     raise TypeError(
                         "context contributor handler must return ContextContribution or None"
                     )
+                if result.messages and not contributor.persistent:
+                    raise TypeError(
+                        "context contribution messages require a persistent contributor"
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -349,10 +361,12 @@ class ContextContributorRegistry:
                 prompt_parts.extend(result.prompt_parts)
                 if contributor.persistent:
                     persistent_prompt_parts.extend(result.prompt_parts)
+                persistent_messages.extend(result.messages)
 
         return ContextContributionReport(
             params=params,
             prompt_parts=tuple(prompt_parts),
             persistent_prompt_parts=tuple(persistent_prompt_parts),
+            persistent_messages=tuple(persistent_messages),
             failures=tuple(failures),
         )

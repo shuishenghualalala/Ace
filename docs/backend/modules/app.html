@@ -52,7 +52,7 @@
     <li>在所有执行模式共享的边界完成 Owner、Workspace、安全上下文和通知注入。</li>
     <li>通过 Execution Driver Registry 解析开放 mode；不再把未知 mode 静默当成默认 Agent。</li>
     <li>默认 Agent、Team 与 Dynamic Kanban 均作为生命周期拥有的 Driver；核心路由不认识具体业务 mode。</li>
-    <li>按阶段执行 Context Contributor，并把参数更新与通用 prompt fragment 交给后续 Driver。</li>
+    <li>按阶段执行 Context Contributor，并把参数更新、通用 prompt fragment 与受控 persistent message 交给后续 Driver。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
@@ -65,7 +65,7 @@
       <tr><td>Driver 分派</td><td>优先按开放 mode 从共享 Registry 解析并执行，同时自动持有 Driver Generation Lease。</td><td>已落地</td></tr>
       <tr><td>默认 Agent Driver</td><td><code>agent</code> 兼容 ID 与 <code>agent.default</code> 稳定 ID 指向同一 Core Driver。</td><td>已落地</td></tr>
       <tr><td>业务 Driver Adapter</td><td>Team 与 Dynamic Kanban Manager 通过独立 FeatureScope 注册旧 mode，不进入核心分支。</td><td>已落地</td></tr>
-      <tr><td>上下文贡献</td><td>请求阶段按优先级执行 Feature-owned Contributor；Host 拥有结构化路径桥，Gateway 拥有 Session Source Handler。</td><td>已落地</td></tr>
+      <tr><td>上下文贡献</td><td>Request 阶段由 Host 执行；Prompt 阶段由 Agent Scope 执行。Wiki、Gateway 与 Browser 保持各自 Handler 所有权。</td><td>已落地</td></tr>
       <tr><td>关闭编排</td><td>先停止 Dispatcher，并行 drain 所有内置 Feature Scope（Driver 与 Context Contributor），再关闭业务服务、Provider、插件和 Store。</td><td>已落地</td></tr>
     </tbody>
   </table>
@@ -97,7 +97,7 @@ async for chunk in app.handle(envelope):
   <ul class="todo">
     <li>把默认 Agent Scope 从同步组合根桥接迁为完整 Core FeatureDefinition，并进入统一启动审计。</li>
     <li>把 Team 与 Dynamic Kanban 的 Manager、Store 和后台任务所有权从桥接 Scope 逐步迁入完整 Product Feature。</li>
-    <li>将 Cron、后台通知、Wiki Attachment 与 Plan 逐项迁入 Context Contributor。</li>
+    <li>将 Cron、后台通知与 Plan 逐项迁入 Context Contributor。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
@@ -115,10 +115,11 @@ async for chunk in app.handle(envelope):
       <tr><td>2026-09-03</td><td>将 Team 与 Dynamic Kanban 包装为 Feature-owned Driver Adapter，删除最后两个业务 mode 分支。</td><td><code>CrewApp.handle</code>、内置 Driver Scope、关闭顺序。</td></tr>
       <tr><td>2026-09-03</td><td>接入 Context Contributor Registry，迁移结构化路径与 Browser 标签页引用。</td><td>请求前处理、FeatureScope、Browser 插件。</td></tr>
       <tr><td>2026-09-03</td><td>装配 Gateway Session Source Contributor，统一输出来源字典和动态模型上下文。</td><td>请求前处理、Gateway/Agent 边界。</td></tr>
+      <tr><td>2026-09-03</td><td>装配 Wiki Prompt Contributor，并用 Agent Preset 通用 tag 选择上下文能力。</td><td>组合根、Wiki Agent 与 FeatureScope。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0010-session-source-context-contributor.html">ADR-0010</a> · <a href="../../testing/plugin-architecture-stage-2-session-context.html">测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0011-wiki-attachment-context-contributor.html">ADR-0011</a> · <a href="../../testing/plugin-architecture-stage-2-wiki-context.html">测试记录</a></div>
 </div>
 </body>
 </html>

@@ -48,7 +48,6 @@ from crew.tools.file_utils import MAX_READ_FILE_BYTES, read_verified_bytes
 from crew.tools.policy import ToolDisclosureMode
 from crew.agent.loop.control import TurnControl
 from crew.agent.plan import get_plan_mode_attachment_messages
-from crew.wiki.attachments import get_wiki_agent_attachment_messages
 from crew.agent.prompt_builder import DEFAULT_AGENT_IDENTITY, build_prompt_parts
 from crew.plugins.manager import PluginManager, TerminalOutcome
 from crew.state.logging import get_logger, llm_trace
@@ -235,7 +234,8 @@ class SingleAgent(Agent):
         profile_path: str | None = None,
         lightweight: bool = False,
         plan_manager: Any = None,
-        wiki_manager: Any = None,
+        context_contributors: Any = None,
+        context_tags: tuple[str, ...] = (),
         tool_disclosure_mode: ToolDisclosureMode = ToolDisclosureMode.PROGRESSIVE,
         agent_id: str = "default",
         enabled_skills: list[str] | None = None,
@@ -275,8 +275,15 @@ class SingleAgent(Agent):
         self.include_optional_skills = include_optional_skills
         # Plan 模式管理器（仅主 agent 注入；子 agent / Team 为 None）。
         self.plan_manager = plan_manager
-        # Wiki Agent 会话管理器（仅 Wiki 预设注入）。
-        self.wiki_manager = wiki_manager
+        # Shared Feature registry; PROMPT contributors run inside this Agent scope.
+        self.context_contributors = context_contributors
+        self.context_tags = tuple(
+            dict.fromkeys(
+                tag
+                for item in context_tags
+                if (tag := str(item or "").strip().lower())
+            )
+        )
         # 工具授权与披露分离：Wiki 使用 direct，其余默认 progressive。
         self.tool_disclosure_mode = ToolDisclosureMode(tool_disclosure_mode)
         self.agent_id = safe_path_segment(agent_id, "default")
@@ -504,6 +511,36 @@ class SingleAgent(Agent):
 
         return system_static, user_reminder
 
+    async def _contribute_prompt_context(
+        self,
+        envelope: Envelope,
+    ) -> list[Message]:
+        """Run Agent-scoped contributors and merge their generic outputs."""
+        if self.context_contributors is None:
+            return []
+        envelope.params["_context_agent_id"] = self.agent_id
+        envelope.params["_context_tags"] = self.context_tags
+        report = await self.context_contributors.contribute(
+            envelope,
+            phase="prompt",
+        )
+        envelope.params.update(report.params)
+        if report.prompt_parts:
+            current_parts = envelope.params.get("_context_prompt_parts")
+            if not isinstance(current_parts, list):
+                current_parts = []
+                envelope.params["_context_prompt_parts"] = current_parts
+            current_parts.extend(report.prompt_parts)
+        for failure in report.failures:
+            log.warning(
+                "Agent 上下文贡献降级 contributor=%s generation=%s timeout=%s error=%s",
+                failure.contributor_id,
+                failure.generation.key,
+                failure.timed_out,
+                failure.message,
+            )
+        return list(report.persistent_messages)
+
     def _plan_reminder_blocks(self, session_id: str, owner_account_id: str = "") -> list[str]:
         """Plan 模式相关的动态 reminder 块（前置注入部分）。
 
@@ -649,6 +686,7 @@ class SingleAgent(Agent):
         workspace_token = current_workspace_id.set(envelope.workspace_id)
         try:
             history = self.session_store.load(session_id, owner_account_id=owner)
+            context_messages = await self._contribute_prompt_context(envelope)
             system_static, user_reminder = await self._build_prompts(
                 envelope, [], cwd, task_sid=session_id
             )
@@ -663,14 +701,7 @@ class SingleAgent(Agent):
                         owner_account_id=owner,
                     )
                 )
-            if self.wiki_manager is not None:
-                view_messages.extend(
-                    get_wiki_agent_attachment_messages(
-                        session_id,
-                        self.wiki_manager,
-                        owner_account_id=owner,
-                    )
-                )
+            view_messages.extend(context_messages)
             # 与真实发送保持同一顺序：canonical history 先走无需 LLM 的 L1
             # compact，再注入本轮动态 reminder。否则旧 browser/tool 结果会被全量
             # 计入打开会话预览，出现 190% 但发送前已降到低水位的假象。
@@ -780,13 +811,6 @@ class SingleAgent(Agent):
         from crew.security.launch import current_process_launch
 
         current_process_launch.set(envelope.params.get("_security_process_launch"))
-        # 专用 Wiki Agent 自行建立 KB 状态；普通会话不创建 Wiki 会话状态。
-        if (
-            self.wiki_manager is not None
-            and self.tool_disclosure_mode is ToolDisclosureMode.DIRECT
-        ):
-            wiki_kb_id = str(envelope.params.get("wiki_kb_id") or "").strip() or "default"
-            self.wiki_manager.set_kb_id(task_sid, wiki_kb_id, owner_account_id=envelope.user_id)
         t0 = time.perf_counter()
 
         # 装配期模型回退：只打日志用户无感，首轮推 status 让 UI「执行过程」可见。
@@ -866,15 +890,7 @@ class SingleAgent(Agent):
                 )
             )
 
-        # 专用 Wiki Agent 每轮注入活跃知识库与 KB 列表上下文。
-        if self.wiki_manager is not None:
-            history.extend(
-                get_wiki_agent_attachment_messages(
-                    task_sid,
-                    self.wiki_manager,
-                    owner_account_id=owner,
-                )
-            )
+        history.extend(await self._contribute_prompt_context(envelope))
 
         t = time.perf_counter()
         system_static, user_reminder = await self._build_prompts(

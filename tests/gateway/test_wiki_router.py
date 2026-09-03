@@ -208,12 +208,12 @@ def test_wiki_tools_are_exclusive_to_wiki_preset(tmp_path):
     expected = app._wiki_agent_tool_filter(scoped_main_expected)
 
     assert not any(name.startswith("wiki_") for name in main_agent.tool_filter)
-    assert main_agent.wiki_manager is None
+    assert main_agent.context_tags == ()
     assert wiki_agent.tool_filter == expected
     assert run_agent_wiki.tool_filter == wiki_agent.tool_filter
     assert run_agent_wiki.system_prompt == wiki_agent.system_prompt
     assert run_agent_wiki.enabled_skills == wiki_agent.enabled_skills
-    assert run_agent_wiki.wiki_manager is wiki_agent.wiki_manager
+    assert run_agent_wiki.context_contributors is wiki_agent.context_contributors
     assert run_agent_wiki.tool_disclosure_mode == wiki_agent.tool_disclosure_mode
     assert "wiki_search" in wiki_agent.tool_filter
     assert "wiki_apply_ingest" in wiki_agent.tool_filter
@@ -224,7 +224,8 @@ def test_wiki_tools_are_exclusive_to_wiki_preset(tmp_path):
     assert "wiki_compile" not in wiki_agent.tool_filter
     assert "publish_site" not in wiki_agent.tool_filter
     assert "Canvas" not in wiki_agent.tool_filter
-    assert wiki_agent.wiki_manager is app.wiki_manager
+    assert wiki_agent.context_contributors is app.context_contributors
+    assert wiki_agent.context_tags == ("wiki",)
     assert wiki_agent.agent_id == "subagent_Wiki"
     assert wiki_agent.tool_disclosure_mode == "direct"
     assert "crew-wiki-curator" in (main_agent.disabled_skills or [])
@@ -241,7 +242,7 @@ def test_legacy_wiki_session_flag_does_not_grant_wiki_tools(tmp_path):
         )
 
     assert not any(name.startswith("wiki_") for name in agent.tool_filter)
-    assert agent.wiki_manager is None
+    assert agent.context_tags == ()
     assert agent.tool_disclosure_mode == "progressive"
 
 

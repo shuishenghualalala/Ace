@@ -44,9 +44,6 @@ source_modules =
 forbidden_modules =
     crew.wiki
 allow_indirect_imports = True
-# 阶段 2：Wiki Attachment Contributor 落地后删除以下豁免。
-ignore_imports =
-    crew.agent.runtime -> crew.wiki.attachments
 
 [importlinter:contract:external-agent-team-boundary]
 name = External Agent must not add direct Team dependencies

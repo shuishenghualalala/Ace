@@ -9,6 +9,7 @@ import pytest
 
 from crew.app import build_app
 from crew.core.envelope import Envelope, ResponseChunk
+from crew.core.types import Message
 from crew.features import (
     ContextContribution,
     ContextContributionFailedError,
@@ -195,6 +196,38 @@ async def test_request_cancellation_propagates_and_releases_contributor_lease() 
     assert scope.active_leases == ()
 
 
+async def test_persistent_messages_require_explicit_contributor_contract() -> None:
+    async def attach(_envelope: Envelope) -> ContextContribution:
+        message = Message.system_reminder("persistent context")
+        message.attachment_type = "feature_context"
+        return ContextContribution(messages=(message,))
+
+    invalid_registry = ContextContributorRegistry()
+    invalid_registry.register(
+        _active_scope("invalid-message-context"),
+        ContextContributor("feature.invalid-message", attach),
+    )
+    invalid = await invalid_registry.contribute(
+        Envelope.of("hello", session_id="s-invalid")
+    )
+    assert invalid.persistent_messages == ()
+    assert len(invalid.failures) == 1
+    assert "persistent contributor" in invalid.failures[0].message
+
+    registry = ContextContributorRegistry()
+    registry.register(
+        _active_scope("message-context"),
+        ContextContributor(
+            "feature.message",
+            attach,
+            persistent=True,
+        ),
+    )
+    report = await registry.contribute(Envelope.of("hello", session_id="s-valid"))
+    assert len(report.persistent_messages) == 1
+    assert report.persistent_messages[0].attachment_type == "feature_context"
+
+
 @pytest.mark.asyncio
 async def test_app_uses_host_and_browser_owned_context_contributors(
     tmp_path: Path,
@@ -262,6 +295,10 @@ async def test_app_uses_host_and_browser_owned_context_contributors(
         assert "host.reference.structured-path" in contributor_ids
         assert "browser.reference.tab" in contributor_ids
         assert "gateway.session.source" in contributor_ids
+        assert {
+            binding.contributor.contributor_id
+            for binding in app.context_contributors.bindings(ContextPhase.PROMPT)
+        } == {"wiki.agent.context"}
 
         envelope = Envelope.of(
             "inspect @file:notes.md @browser_tab:tab-a",
@@ -312,6 +349,10 @@ async def test_app_uses_host_and_browser_owned_context_contributors(
         assert "browser.reference.tab" not in remaining_ids
         assert "host.reference.structured-path" in remaining_ids
         assert "gateway.session.source" in remaining_ids
+        assert {
+            binding.contributor.contributor_id
+            for binding in app.context_contributors.bindings(ContextPhase.PROMPT)
+        } == {"wiki.agent.context"}
     finally:
         await app.plugins.feature_runtime.deactivate(feature_id)
         await app.shutdown()

@@ -9,7 +9,11 @@
 
 from __future__ import annotations
 
-from .attachments import create_wiki_attachment_message, get_wiki_agent_attachment_messages
+from .attachments import (
+    build_wiki_agent_context_contributor,
+    create_wiki_attachment_message,
+    get_wiki_agent_attachment_messages,
+)
 from ._utils import is_wiki_agent_session
 from .compiler import WikiCompiler
 from .manager import WikiSessionManager
@@ -47,6 +51,7 @@ __all__ = [
     "HomeIntro",
     "KnowledgeBase",
     "WikiSessionManager",
+    "build_wiki_agent_context_contributor",
     "create_wiki_attachment_message",
     "get_wiki_agent_attachment_messages",
     "is_wiki_agent_session",

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from crew.core.envelope import Envelope
 from crew.core.types import Message
+from crew.features.context import ContextContribution, ContextContributorHandler
 
 from .manager import WikiSessionManager
 from .prompts import WIKI_AGENT_CONTEXT_REMINDER
@@ -85,3 +87,50 @@ def get_wiki_agent_attachment_messages(
             data={"reminderType": "agent_context"},
         )
     ]
+
+
+def build_wiki_agent_context_contributor(
+    manager: WikiSessionManager,
+    session_store: Any,
+) -> ContextContributorHandler:
+    """Bind Wiki context generation to its manager and persistent session metadata."""
+
+    async def contribute(envelope: Envelope) -> ContextContribution | None:
+        tags = envelope.params.get("_context_tags")
+        if not isinstance(tags, (list, tuple)) or "wiki" not in tags:
+            return None
+
+        task_session_id = str(
+            envelope.params.get("task_session_id") or envelope.session_id
+        )
+        getter = getattr(session_store, "get_agent_config", None)
+        stored = (
+            getter(task_session_id, owner_account_id=envelope.user_id) or {}
+            if callable(getter)
+            else {}
+        )
+        current_kb_id = manager.get_kb_id(
+            task_session_id,
+            owner_account_id=envelope.user_id,
+        )
+        kb_id = str(
+            envelope.params.get("wiki_kb_id")
+            or stored.get("wiki_kb_id")
+            or current_kb_id
+            or "default"
+        ).strip() or "default"
+        manager.set_kb_id(
+            task_session_id,
+            kb_id,
+            owner_account_id=envelope.user_id,
+        )
+        messages = get_wiki_agent_attachment_messages(
+            task_session_id,
+            manager,
+            owner_account_id=envelope.user_id,
+        )
+        if not messages:
+            return None
+        return ContextContribution(messages=tuple(messages))
+
+    return contribute
