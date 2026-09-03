@@ -50,7 +50,6 @@ from crew.agent.loop.control import TurnControl
 from crew.agent.plan import get_plan_mode_attachment_messages
 from crew.wiki.attachments import get_wiki_agent_attachment_messages
 from crew.agent.prompt_builder import DEFAULT_AGENT_IDENTITY, build_prompt_parts
-from crew.gateway.context import REFERENCE_INJECTORS
 from crew.gateway.session_context import (
     SessionContext,
     SessionSource,
@@ -145,32 +144,6 @@ async def _read_attachment(path: str) -> str:
     # xlsx/docx 等二进制文件：返回摘要（含完整路径，方便 Agent 用工具进一步读取）
     size = p.stat().st_size
     return f"[二进制文件: {p.name}, 大小: {size} 字节, 类型: {ext or '未知'}, 完整路径: {path}]"
-
-
-def _format_browser_tab_references(refs: object) -> str:
-    """把 @browser_tab 引用的标签页正文格式化为可注入上下文的块。"""
-    if not isinstance(refs, list) or not refs:
-        return ""
-    lines = [
-        "# 用户引用的浏览器标签页",
-        "用户在消息中通过 @browser_tab 显式引用了以下标签页，正文为发送时的只读快照：",
-    ]
-    for ref in refs:
-        if not isinstance(ref, dict):
-            continue
-        tab_id = str(ref.get("tab_id") or "")
-        error = str(ref.get("error") or "").strip()
-        if error:
-            lines.append(f"\n## 标签页 {tab_id}\n（浏览器标签页内容不可用：{error}）")
-            continue
-        title = str(ref.get("title") or "").strip() or "(无标题)"
-        url = str(ref.get("url") or "").strip()
-        text = str(ref.get("text") or "").strip() or "(页面正文为空)"
-        header = f"\n## {title}"
-        if url:
-            header += f"\nURL: {url}"
-        lines.append(f"{header}\n{text}")
-    return "\n".join(lines)
 
 
 def _format_subagent_notifications(pending: object) -> str:
@@ -534,13 +507,14 @@ class SingleAgent(Agent):
         task_block = _format_task_notifications(envelope.params.get("task_notifications"))
         if task_block:
             reminder_parts.append(task_block)
-        # 对话 @引用：发送时解析注入的正文快照块（含失败占位），按注册表顺序拼接
-        for injector in REFERENCE_INJECTORS:
-            if injector.formatter is None:
-                continue
-            ref_block = injector.formatter(envelope.params.get(injector.params_key))
-            if ref_block:
-                reminder_parts.append(ref_block)
+        # Feature-owned Context Contributors 已在 Host 请求阶段按优先级产出。
+        context_parts = envelope.params.get("_context_prompt_parts")
+        if isinstance(context_parts, (list, tuple)):
+            reminder_parts.extend(
+                text
+                for item in context_parts
+                if (text := str(item or "").strip())
+            )
         client_intent_block = _format_client_intent(envelope)
         if client_intent_block:
             reminder_parts.append(client_intent_block)

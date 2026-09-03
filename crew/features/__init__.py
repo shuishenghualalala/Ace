@@ -7,6 +7,20 @@ from crew.features.dependencies import (
     FeatureDependencyResolution,
     FeatureServiceDependencies,
 )
+from crew.features.context import (
+    ContextContribution,
+    ContextContributionFailedError,
+    ContextContributionFailure,
+    ContextContributionReport,
+    ContextContributor,
+    ContextContributorBinding,
+    ContextContributorConflictError,
+    ContextContributorHandler,
+    ContextContributorPredicate,
+    ContextContributorRegistry,
+    ContextFailurePolicy,
+    ContextPhase,
+)
 from crew.features.drivers import (
     ExecutionDriver,
     ExecutionDriverBinding,
@@ -62,6 +76,18 @@ from crew.features.services import (
 )
 
 __all__ = [
+    "ContextContribution",
+    "ContextContributionFailedError",
+    "ContextContributionFailure",
+    "ContextContributionReport",
+    "ContextContributor",
+    "ContextContributorBinding",
+    "ContextContributorConflictError",
+    "ContextContributorHandler",
+    "ContextContributorPredicate",
+    "ContextContributorRegistry",
+    "ContextFailurePolicy",
+    "ContextPhase",
     "FeatureActivationError",
     "FeatureActivationPlan",
     "FeatureCleanupError",

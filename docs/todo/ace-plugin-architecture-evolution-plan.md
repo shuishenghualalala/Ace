@@ -5,7 +5,7 @@
 > 基线核查日期：2026-08-31  
 > 目标读者：Ace 后端、桌面端、Web 端及独立功能模块的维护者  
 > 修订记录：2026-08-31 评审追加——workspace_guard 依赖核查（§2.3.3、§11、§17）、第一方/第三方插件契约收口（§2.3.8）、effect 诊断与启动审计（§6.3）、服务作用域维度（§6.4）、拦截器语义（§7.5）、螺旋式迁移节奏与依赖检查工具（§10、§13.3）、配置与数据命名空间约定（§12.5）、Adapter 保质期（§15.2）、ADR 机制（§16）、新增验收指标（§14）；同日补充——演进紧迫性论证与中心文件基线数据（§1.1.1）、接口层多租户地基（§2.2）；同日范围校正——明确 dsh 广义 Plugin 与 Ace 当前 `plugins/` 的区别，将目标提升为全部 Feature 的统一可逆生命周期，补充 Feature Generation、业务数据边界、全量迁移地图和工作量评估（§0、§3.3、§5、§6、§8、§10、§16、§18、§19）；同日——§2.1、§5.1 增加耦合视角与装配视角两张架构对比图（离线渲染版：docs/todo/ace-arch-compare.html）
-> 实施进度：2026-09-03 阶段 0 边界治理和阶段 1 控制面均已落地；阶段 2 的 Execution Driver 主链已完成。开放 mode、Feature-owned Driver、Generation 可见性、请求 Lease、默认 Agent、Team、Dynamic Kanban、目录插件入口和标准 capability unavailable 错误均已进入真实路径，`CrewApp.handle()` 不再包含业务 mode 分支。当前分支为 `refactor/plugin-architecture-stage-0`，最新验证记录见 `docs/testing/plugin-architecture-stage-2-driver-adapters.html`。
+> 实施进度：2026-09-03 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver 主链均已落地。Context Contributor Registry、Host 结构化路径贡献、Browser 标签页贡献以及 Agent→Gateway context 反向依赖删除也已完成，Luna 子 Agent 联合回归为 248 passed。当前分支为 `refactor/plugin-architecture-stage-0`，验证记录见 `docs/testing/plugin-architecture-stage-2-context-contributors.html`。
 
 ## 当前实施进度图（2026-09-03）
 
@@ -63,18 +63,23 @@ flowchart TB
     PluginDriver --> DriverTests["Driver 联合回归<br/>257 passed · 1 skipped"]
     DriverTests --> Adapters["Team / Kanban Driver Adapter<br/>核心 mode 分支归零"]
     Adapters --> DriverAdapterTests["Adapter 联合回归<br/>147 passed"]
-    DriverAdapterTests --> Next["阶段 2 · 下一切片<br/>Context Contributor Registry"]
+    DriverAdapterTests --> ContextRegistry["Context Contributor Registry<br/>阶段 · 顺序 · 失败 · 超时 · Lease"]
+    ContextRegistry --> PathContext["Host 路径贡献<br/>工作空间内授权路径"]
+    PathContext --> BrowserContext["Browser 标签页贡献<br/>插件卸载自动撤销"]
+    BrowserContext --> ContextTests["Context 联合回归<br/>248 passed"]
+    ContextTests --> Next["阶段 2 · 后续切片<br/>Session / Wiki Contributor"]
     Next --> Later["后续阶段<br/>Feature Event → Route Gate → 业务迁移"]
 
     classDef done fill:#e8f6ee,stroke:#1e8449,color:#145a32,stroke-width:2px
     classDef next fill:#e6f0fb,stroke:#2471a3,color:#154360,stroke-width:2px
     classDef pending fill:#f4f4f4,stroke:#999999,color:#555555
     class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed,Scope,Token,Rollback,RuntimeTests,Services,Dependencies,Config,ServiceTests,Runtime,Adapter,Phases,Browser,Shutdown,AdapterTests,Manifest,Ordered,Audit,ManifestTests,Lease,StopPolicy,StopAudit,LeaseTests,Update,Generation,Recovery,UpdateTests,Stage1Done,Drivers,DriverLease,DefaultDriver,PluginDriver,DriverTests,Adapters,DriverAdapterTests done
+    class ContextRegistry,PathContext,BrowserContext,ContextTests done
     class Next next
     class Later pending
 ```
 
-这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。阶段 1 控制面已经收口；阶段 2 的 Execution Driver 主链和三个内置消费者均已落地，新执行模式可由 Feature 或目录插件直接注册，Team 与 Dynamic Kanban 也不再占用核心路由分支。下一步建立 Context Contributor Registry，逐步把 Wiki 引用、安全与通知等公共前处理从 Host 中拆成有所有权的贡献。历史反向依赖及其后续删除阶段仍以 `.importlinter` 中的逐条豁免为准。
+这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证；Context Contributor 已用 Host 路径和 Browser 标签页两个不同所有者验证真实装配，并删除 Agent Runtime 对 Gateway 引用表的依赖。下一切片迁移 Session Source 和 Wiki Attachment。历史反向依赖及其后续删除阶段仍以 `.importlinter` 中的逐条豁免为准。
 
 ## 0. 执行摘要
 

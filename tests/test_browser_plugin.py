@@ -176,6 +176,10 @@ def test_plugin_loaded_and_skill_root_registered(tmp_path):
     assert labels["tool:record_compile"] is RegistrationPhase.CONTRIBUTION
     assert labels["tool:record_install"] is RegistrationPhase.CONTRIBUTION
     assert labels["tool:record_replay"] is RegistrationPhase.CONTRIBUTION
+    assert (
+        labels["context-contributor:browser.reference.tab"]
+        is RegistrationPhase.CONTRIBUTION
+    )
 
 
 async def test_browser_feature_unload_hides_tools_before_manager_cleanup_finishes(
@@ -208,6 +212,10 @@ async def test_browser_feature_unload_hides_tools_before_manager_cleanup_finishe
         "record_install",
         "record_replay",
     } & set(crew.registry.names())
+    assert not any(
+        binding.contributor.contributor_id == "browser.reference.tab"
+        for binding in crew.context_contributors.bindings()
+    )
 
     cleanup_release.set()
     assert await unloading is True

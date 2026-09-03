@@ -35,9 +35,8 @@ source_modules =
 forbidden_modules =
     crew.gateway
 allow_indirect_imports = True
-# 阶段 2：Context Contributor 接管引用与 Session 上下文后删除以下豁免。
+# 阶段 2：引用注入已迁出；Session Context Contributor 落地后删除剩余豁免。
 ignore_imports =
-    crew.agent.runtime -> crew.gateway.context
     crew.agent.runtime -> crew.gateway.session_context
 
 [importlinter:contract:agent-wiki-boundary]

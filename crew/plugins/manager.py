@@ -35,6 +35,13 @@ from crew.features.manager import (
     FeatureStartupAudit,
     FeatureUpdateStrategy,
 )
+from crew.features.context import (
+    ContextContributor,
+    ContextContributorHandler,
+    ContextContributorPredicate,
+    ContextFailurePolicy,
+    ContextPhase,
+)
 from crew.features.drivers import ExecutionDriver, ExecutionDriverHandler
 from crew.features.dependencies import FeatureServiceDependencies
 from crew.features.runtime import (
@@ -397,6 +404,36 @@ class PluginContext:
                 mode=mode,
                 execute=handler,
                 capabilities=capabilities,
+                description=description,
+            )
+        )
+
+    def register_context_contributor(
+        self,
+        contributor_id: str,
+        handler: ContextContributorHandler,
+        *,
+        phase: ContextPhase = ContextPhase.REQUEST,
+        priority: int = 100,
+        failure_policy: ContextFailurePolicy = ContextFailurePolicy.DEGRADE,
+        timeout_seconds: float | None = None,
+        predicate: ContextContributorPredicate | None = None,
+        model_visible: bool = True,
+        persistent: bool = False,
+        description: str = "",
+    ) -> RegistrationToken:
+        """Publish ordered request context under this plugin Generation."""
+        return self._feature_context.register_context_contributor(
+            ContextContributor(
+                contributor_id=contributor_id,
+                handler=handler,
+                phase=phase,
+                priority=priority,
+                failure_policy=failure_policy,
+                timeout_seconds=timeout_seconds,
+                predicate=predicate,
+                model_visible=model_visible,
+                persistent=persistent,
                 description=description,
             )
         )

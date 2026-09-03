@@ -75,6 +75,7 @@
       <tr><td>停用策略</td><td>Manifest 声明 drain/cancel/immediate/restart_required 与超时；失败不提前标记 disabled。</td><td>已落地</td></tr>
       <tr><td>配置 Generation 更新</td><td><code>replace</code> 原子发布新代后退役旧代；<code>restart</code> 先停旧代并在新代失败时恢复旧配置。</td><td>已落地</td></tr>
       <tr><td>Execution Driver Registry</td><td>开放 mode 的 Handler 由 FeatureScope 注册，执行自动持有 Lease；默认 Agent、Team 与 Dynamic Kanban 已接入。</td><td>已落地</td></tr>
+      <tr><td>Context Contributor Registry</td><td>阶段、优先级、失败策略、超时与模型可见性均为显式元数据；Browser 已成为真实插件消费者。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -85,6 +86,7 @@
       <tr><td><code>crew/features/runtime.py</code></td><td>Generation、desired/effective revision、Registration Token、请求 Lease、四类停用策略、Scope、Transaction 和结构化生命周期错误。</td></tr>
       <tr><td><code>crew/features/services.py</code></td><td>作用域化 Service Registry、注册所有权和同一 Feature 新旧 Generation 的暂存切换。</td></tr>
       <tr><td><code>crew/features/drivers.py</code></td><td>Execution Driver 定义、生命周期所有权、开放 mode 解析和请求分派。</td></tr>
+      <tr><td><code>crew/features/context.py</code></td><td>Context Contributor 定义、排序、Generation 选择、失败/超时与请求 Lease。</td></tr>
       <tr><td><code>crew/features/dependencies.py</code></td><td>Feature 服务依赖声明、运行期解析和启动诊断。</td></tr>
       <tr><td><code>crew/features/manager.py</code></td><td>FeatureDefinition、InstallContext、运行记录、串行启停和 replace/restart 更新调度。</td></tr>
       <tr><td><code>crew/plugins/manager.py</code></td><td>插件发现、状态管理、<code>PluginContext</code> 和贡献撤销。</td></tr>
@@ -186,10 +188,11 @@ async for chunk in runtime.execution_drivers.dispatch(envelope):
       <tr><td>2026-09-03</td><td>增加 replace/restart 配置更新、双 Generation 服务切换、旧代退役和失败恢复。</td><td>Feature Runtime、Service Registry、目录插件 Manifest。</td></tr>
       <tr><td>2026-09-03</td><td>增加 Feature-owned Execution Driver Registry 和目录插件注册入口。</td><td>Feature Runtime、PluginContext、CrewApp 默认 Agent Driver。</td></tr>
       <tr><td>2026-09-03</td><td>Team 与 Dynamic Kanban 经桥接 Scope 注册 Driver，核心请求入口不再包含业务 mode 分支。</td><td>Execution Driver Registry、CrewApp 组合根与停机 drain。</td></tr>
+      <tr><td>2026-09-03</td><td>增加 Context Contributor Registry；结构化路径由 Host、标签页引用由 Browser 插件拥有。</td><td>Feature Runtime、PluginContext、Browser 与 Agent 边界。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0001-feature-lifecycle-primitives.html">ADR-0001</a> · <a href="../adr/0002-scoped-service-registry.html">ADR-0002</a> · <a href="../adr/0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="../adr/0004-manifest-service-startup-audit.html">ADR-0004</a> · <a href="../adr/0005-feature-drain-lease.html">ADR-0005</a> · <a href="../adr/0006-feature-generation-update.html">ADR-0006</a> · <a href="../adr/0007-execution-driver-registry.html">ADR-0007</a> · <a href="../adr/0008-team-kanban-driver-adapters.html">ADR-0008</a> · <a href="../../testing/plugin-architecture-stage-2-driver-adapters.html">测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0001-feature-lifecycle-primitives.html">ADR-0001</a> · <a href="../adr/0002-scoped-service-registry.html">ADR-0002</a> · <a href="../adr/0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="../adr/0004-manifest-service-startup-audit.html">ADR-0004</a> · <a href="../adr/0005-feature-drain-lease.html">ADR-0005</a> · <a href="../adr/0006-feature-generation-update.html">ADR-0006</a> · <a href="../adr/0007-execution-driver-registry.html">ADR-0007</a> · <a href="../adr/0008-team-kanban-driver-adapters.html">ADR-0008</a> · <a href="../adr/0009-context-contributor-registry.html">ADR-0009</a> · <a href="../../testing/plugin-architecture-stage-2-context-contributors.html">测试记录</a></div>
 </div>
 </body>
 </html>

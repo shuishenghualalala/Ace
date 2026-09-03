@@ -36,6 +36,10 @@ from crew.core.runctx import normalize_owner_account_id
 from crew.core.interfaces import Agent, LLMProvider, MemoryProvider, SessionStore, WorkspaceStore
 from crew.evolution import EvolutionManager, EvolutionQueue
 from crew.features import (
+    ContextContribution,
+    ContextContributionFailedError,
+    ContextContributor,
+    ContextPhase,
     ExecutionDriver,
     FeatureGeneration,
     FeatureScope,
@@ -497,7 +501,8 @@ class CrewApp:
 
         self.agents = AgentManager(self._make_agent)
         self.execution_drivers = plugins.feature_runtime.execution_drivers
-        self._execution_driver_scopes: list[FeatureScope] = []
+        self.context_contributors = plugins.feature_runtime.context_contributors
+        self._builtin_feature_scopes: list[FeatureScope] = []
         self._register_execution_driver_scope(
             "core.agent-driver",
             ExecutionDriver(
@@ -511,6 +516,18 @@ class CrewApp:
                 execute=self._run_default_execution_driver,
                 capabilities=("agent.default",),
                 description="Default single-agent execution",
+            ),
+        )
+        self._register_context_contributor_scope(
+            "host.structured-path-context",
+            ContextContributor(
+                contributor_id="host.reference.structured-path",
+                handler=self._structured_path_context,
+                phase=ContextPhase.REQUEST,
+                priority=100,
+                model_visible=False,
+                persistent=False,
+                description="Workspace-bounded structured path grants",
             ),
         )
         # 对话级 Plan 模式管理器（由 build_app 装配后赋值）
@@ -1604,7 +1621,20 @@ class CrewApp:
         for driver in drivers:
             self.execution_drivers.register(scope, driver)
         scope.activate()
-        self._execution_driver_scopes.append(scope)
+        self._builtin_feature_scopes.append(scope)
+        return scope
+
+    def _register_context_contributor_scope(
+        self,
+        feature_id: str,
+        *contributors: ContextContributor,
+    ) -> FeatureScope:
+        """Publish synchronous Host contributors as one owned Generation."""
+        scope = FeatureScope(FeatureGeneration(feature_id, 1))
+        for contributor in contributors:
+            self.context_contributors.register(scope, contributor)
+        scope.activate()
+        self._builtin_feature_scopes.append(scope)
         return scope
 
     def set_team_manager(self, team) -> None:
@@ -2019,7 +2049,7 @@ class CrewApp:
                     FeatureStopPolicy.DRAIN,
                     timeout_seconds=provider_timeout,
                 )
-                for scope in reversed(self._execution_driver_scopes)
+                for scope in reversed(self._builtin_feature_scopes)
             )
         )
         if self.cron_service is not None:
@@ -2853,33 +2883,6 @@ class CrewApp:
             envelope.params["workspace_instructions"] = ""
             return None
 
-    async def _inject_at_references(self, envelope: Envelope, *, workspace_root: str | None) -> None:
-        """遍历 @引用 注册表，把解析结果并入 envelope.params。
-
-        注入点集中在发送时（与 workspace enrichment 同层）；单条引用的解析/
-        读取失败只记录日志并跳过，**不阻断发送**。消费方为 runtime 的
-        user_reminder 块及 external executor / team 的读取授权。
-        """
-        from crew.gateway.context import REFERENCE_INJECTORS, ReferenceResolveContext
-
-        ctx = ReferenceResolveContext(
-            query=str(envelope.query or ""),
-            owner_account_id=envelope.user_id,
-            session_id=envelope.session_id,
-            workspace_root=str(workspace_root or "").strip(),
-            browser_manager=getattr(self, "browser_manager", None),
-        )
-        for injector in REFERENCE_INJECTORS:
-            if not injector.token_re.search(ctx.query):
-                continue
-            try:
-                refs = await injector.resolver(ctx)
-            except Exception:  # noqa: BLE001 - 单条引用解析失败不阻断发送
-                log.exception("解析 @%s 引用失败", injector.name)
-                continue
-            if refs:
-                envelope.params[injector.params_key] = refs
-
     def _on_subagent_background_done(self, session_id: str, result: dict) -> None:
         """后台子 agent 完成回调（在事件循环内同步调用）：入队 + 实时推送。"""
         # 1) 入队，供下一轮 handle() 注入主 agent 上下文（限长，防无限堆积）
@@ -2963,6 +2966,25 @@ class CrewApp:
             async for chunk in agent.run(envelope):
                 yield chunk
 
+    async def _structured_path_context(
+        self,
+        envelope: Envelope,
+    ) -> ContextContribution | None:
+        workspace_root = str(
+            envelope.params.get("workspace_root_path") or ""
+        ).strip()
+        if not workspace_root:
+            return None
+        from crew.gateway.context import resolve_structured_path_references
+
+        refs = resolve_structured_path_references(
+            envelope.query,
+            workspace_root=workspace_root,
+        )
+        if not refs:
+            return None
+        return ContextContribution(params={"referenced_paths": refs})
+
     async def _run_team_execution_driver(
         self,
         envelope: Envelope,
@@ -3010,8 +3032,34 @@ class CrewApp:
 
             token = current_push_fn.set(_push_for_owner)
         try:
-            workspace_root = self._enrich_workspace(envelope)
-            await self._inject_at_references(envelope, workspace_root=workspace_root)
+            self._enrich_workspace(envelope)
+            try:
+                context_report = await self.context_contributors.contribute(
+                    envelope,
+                    phase=ContextPhase.REQUEST,
+                )
+            except ContextContributionFailedError as error:
+                yield ResponseChunk.error(
+                    envelope.request_id,
+                    f"请求上下文构建失败：{error.contributor_id}",
+                    code=error.code,
+                )
+                return
+            envelope.params.update(context_report.params)
+            if context_report.prompt_parts:
+                current_parts = envelope.params.get("_context_prompt_parts")
+                if not isinstance(current_parts, list):
+                    current_parts = []
+                    envelope.params["_context_prompt_parts"] = current_parts
+                current_parts.extend(context_report.prompt_parts)
+            for failure in context_report.failures:
+                log.warning(
+                    "请求上下文贡献降级 contributor=%s generation=%s timeout=%s error=%s",
+                    failure.contributor_id,
+                    failure.generation.key,
+                    failure.timed_out,
+                    failure.message,
+                )
             from crew.agent.skills import trusted_skill_roots_from_params
             from crew.security.context import build_gateway_security_context
             from crew.security.launch import compile_process_launch

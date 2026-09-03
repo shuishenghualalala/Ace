@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0009 · Context Contributor Registry</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0009 · Context Contributor Registry</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-03 · 阶段：插件架构 Stage 2 / Commit 3</div>
+
+  <h2>背景</h2>
+  <p>请求上下文仍由中心代码拼接：<code>CrewApp</code> 和 Agent Runtime 同时遍历 Gateway 的静态 <code>REFERENCE_INJECTORS</code>。新增引用来源必须修改 Host 与 Agent，Browser 被禁用后静态表仍会运行占位逻辑，且贡献没有 Feature Generation 所有权、超时或 drain 语义。</p>
+
+  <h2>决定</h2>
+  <div class="decision"><p>建立共享 ContextContributorRegistry。Contributor 由 FeatureScope 注册，声明稳定 ID、阶段、优先级、失败策略、超时、匹配条件、模型可见性与持久性；每次执行自动持有所属 Generation Lease。</p></div>
+  <table>
+    <thead><tr><th>契约</th><th>语义</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>顺序</td><td>先按阶段，再按数字优先级和稳定 ID 排序；后执行者确定性覆盖同名参数。</td><td>插件发现顺序不影响上下文。</td></tr>
+      <tr><td>失败</td><td><code>degrade</code> 记录结构化失败并继续；<code>fail</code> 返回稳定 <code>context_contribution_failed</code>。</td><td>可选上下文留空，安全边界可失败关闭。</td></tr>
+      <tr><td>超时与取消</td><td>异步 Handler 可设置正数超时；任务取消永远向上传播。</td><td>慢贡献不无限阻塞请求，Host shutdown 可取消。</td></tr>
+      <tr><td>生命周期</td><td>Activating 不可见，新 Generation 提交后接管；Contributor Handler 持有 Lease，并固定绑定该 Generation 拥有的资源实例。</td><td>停用先隐藏入口，再等待在途上下文读取，旧代不会误用或关闭新代资源。</td></tr>
+      <tr><td>输出</td><td>统一产出参数更新和有序 prompt fragment，并声明是否模型可见、是否持久。</td><td>Agent 只消费通用片段，不认识来源 Feature。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>首批真实贡献</h2>
+  <ul>
+    <li><code>host.reference.structured-path</code> 由 Host Scope 提供，将显式 <code>@file/@folder/@image</code> token 解析为工作空间内授权路径；不产生模型文本。</li>
+    <li><code>browser.reference.tab</code> 由 Browser 插件自身提供，将显式标签页 token 解析为有界只读快照和 prompt fragment；卸载插件后贡献自动消失。</li>
+    <li>原静态 <code>REFERENCE_INJECTORS</code> 被删除，Agent Runtime 不再导入 <code>crew.gateway.context</code>，相应 import-linter 豁免同步删除。</li>
+  </ul>
+
+  <h2>边界</h2>
+  <ul>
+    <li>本切片只接管请求阶段的引用上下文；Session Source、Cron Reminder、后台通知、Wiki Attachment 与 Plan 仍按后续真实消费者逐项迁移。</li>
+    <li>持久 prompt fragment 已进入契约和报告，但写入 Session Event 的机制随 Feature Event 阶段实现。</li>
+    <li>旧 <code>resolve_browser_tab_references()</code> API 暂由 Gateway 重导出，调用方迁移后删除。</li>
+  </ul>
+
+  <h2>设计核查</h2>
+  <p>生命周期扩展系统的关键约束是：注册项由创建它的生命周期单元持有，顺序是显式元数据而非导入偶然性，卸载在返回前完成精确撤销。Context Contributor 因此复用 FeatureScope、RegistrationToken、Generation 选择和 Lease，不另建孤立的插件清理表。</p>
+
+  <h2>跨平台</h2>
+  <p>排序、异步超时、取消和 drain 使用 Python asyncio 与普通数据结构；路径贡献继续使用 pathlib 的工作空间 containment 校验，macOS、Linux 与 Windows 共享同一实现。</p>
+
+  <div class="nav"><a href="0008-team-kanban-driver-adapters.html">ADR-0008</a> · <a href="../modules/plugins.html">Feature / Plugin 模块</a> · <a href="../modules/app.html">App 模块</a> · <a href="../modules/agent.html">Agent 模块</a> · <a href="../../testing/plugin-architecture-stage-2-context-contributors.html">测试记录</a></div>
+</div>
+</body>
+</html>

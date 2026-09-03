@@ -16,6 +16,7 @@ from crew.features.dependencies import (
     FeatureDependencyResolution,
     FeatureServiceDependencies,
 )
+from crew.features.context import ContextContributor, ContextContributorRegistry
 from crew.features.drivers import ExecutionDriver, ExecutionDriverRegistry
 from crew.features.runtime import (
     Disposer,
@@ -296,6 +297,7 @@ class FeatureInstallContext:
     scope: FeatureScope
     services: ServiceRegistry
     execution_drivers: ExecutionDriverRegistry
+    context_contributors: ContextContributorRegistry
     dependencies: FeatureDependencyResolution
 
     @property
@@ -353,6 +355,19 @@ class FeatureInstallContext:
             label=label,
         )
 
+    def register_context_contributor(
+        self,
+        contributor: ContextContributor,
+        *,
+        label: str | None = None,
+    ) -> RegistrationToken:
+        """Publish request context owned by this exact Feature Generation."""
+        return self.context_contributors.register(
+            self.scope,
+            contributor,
+            label=label,
+        )
+
 
 class FeatureRuntime:
     """Activate, diagnose, and stop features through one reversible lifecycle."""
@@ -361,9 +376,13 @@ class FeatureRuntime:
         self,
         services: ServiceRegistry | None = None,
         execution_drivers: ExecutionDriverRegistry | None = None,
+        context_contributors: ContextContributorRegistry | None = None,
     ) -> None:
         self.services = services or ServiceRegistry()
         self.execution_drivers = execution_drivers or ExecutionDriverRegistry()
+        self.context_contributors = (
+            context_contributors or ContextContributorRegistry()
+        )
         self.dependencies = FeatureDependencyGraph()
         self._records: dict[str, FeatureRecord] = {}
         self._sequences: dict[str, int] = {}
@@ -529,6 +548,7 @@ class FeatureRuntime:
             scope=transaction.scope,
             services=self.services,
             execution_drivers=self.execution_drivers,
+            context_contributors=self.context_contributors,
             dependencies=resolution,
         )
         async with transaction:
