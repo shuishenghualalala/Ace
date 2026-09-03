@@ -5652,7 +5652,12 @@ class InProcessTeamManager(TeamManager):
             body["append"] = True
         if tone is not None:
             body["agent_tone"] = tone
-        return ResponseChunk(request_id=request_id, kind="team_internal", body=body)
+        return ResponseChunk.feature_event(
+            request_id,
+            "team",
+            "internal_message",
+            body,
+        )
 
     def _recorded_team_internal_chunk(
         self,
@@ -5714,9 +5719,10 @@ class InProcessTeamManager(TeamManager):
             reply_to=reply_to,
             communication_request_text=communication_request_text,
         )
+        inner = chunk.body["payload"]
         if node_id:
-            chunk.body["node_id"] = node_id
-        payload = dict(chunk.body)
+            inner["node_id"] = node_id
+        payload = dict(inner)
         payload["node_id"] = node_id
         payload["event_type"] = event_type
         if not append:

@@ -89,6 +89,20 @@ from crew.security.workspace_guard import check_workspace_guard, classify_extern
 from crew.tools.registry import Registry, register_builtin_tools
 
 
+def _is_team_internal(chunk) -> bool:
+    """team_internal 流式断言的迁移期等价物：生产侧已改发 feature_event。"""
+    return (
+        chunk.kind == "feature_event"
+        and chunk.body.get("feature") == "team"
+        and chunk.body.get("event") == "internal_message"
+    )
+
+
+def _team_internal_body(chunk) -> dict:
+    """取 team.internal_message 事件的业务 payload（旧 chunk.body 的等价物）。"""
+    return chunk.body.get("payload") or {}
+
+
 def _structured_team_spec(
     goal: str,
     *,
@@ -158,17 +172,17 @@ def test_team_planning_progress_uses_agent_turn_timing_contract(monkeypatch):
         'elapsed_ms': 4_200,
     })
 
-    assert running.kind == 'team_internal'
-    assert running.body['event_type'] == 'team_planning_progress'
-    assert running.body['display_mode'] == 'stream'
-    assert running.body['turn_started_at'] == pytest.approx(1_700_000_007.5)
-    assert 'turn_duration' not in running.body
-    assert done.body['display_mode'] == 'collapsible'
-    assert done.body['collapsed_title'] == 'Crew 已生成团队执行图'
-    assert '- 准备团队执行：' not in done.body['process_text']
-    assert '进行中' not in done.body['process_text']
-    assert done.body['turn_started_at'] == pytest.approx(1_700_000_005.8)
-    assert done.body['turn_duration'] == pytest.approx(4.2)
+    assert _is_team_internal(running)
+    assert _team_internal_body(running)['event_type'] == 'team_planning_progress'
+    assert _team_internal_body(running)['display_mode'] == 'stream'
+    assert _team_internal_body(running)['turn_started_at'] == pytest.approx(1_700_000_007.5)
+    assert 'turn_duration' not in _team_internal_body(running)
+    assert _team_internal_body(done)['display_mode'] == 'collapsible'
+    assert _team_internal_body(done)['collapsed_title'] == 'Crew 已生成团队执行图'
+    assert '- 准备团队执行：' not in _team_internal_body(done)['process_text']
+    assert '进行中' not in _team_internal_body(done)['process_text']
+    assert _team_internal_body(done)['turn_started_at'] == pytest.approx(1_700_000_005.8)
+    assert _team_internal_body(done)['turn_duration'] == pytest.approx(4.2)
 
 
 class JsonGraphProvider(LLMProvider):
@@ -1220,7 +1234,7 @@ async def test_leader_review_followup_answer_reopens_and_reexecutes(monkeypatch)
     assert review_calls == 2
     assert review.status == "completed"
     assert review.metadata["user_followup_answers"][0]["answers"] == ["确认并继续"]
-    assert any(chunk.kind == "team_internal" and chunk.body.get("event_type") == "team_summary" for chunk in chunks)
+    assert any(_is_team_internal(chunk) and _team_internal_body(chunk).get("event_type") == "team_summary" for chunk in chunks)
 
 
 async def test_leader_node_streams_thinking_tools_and_delta_before_result(monkeypatch):
@@ -1254,9 +1268,9 @@ async def test_leader_node_streams_thinking_tools_and_delta_before_result(monkey
 
     chunks = [chunk for chunk, _ in streamed if chunk is not None]
     final_results = [result for _, result in streamed if result is not None]
-    assert chunks[0].body["thinking"] == "先核对方案完整性。"
-    assert chunks[1].body["tool_calls"][0]["status"] == "running"
-    assert chunks[2].body["text"] == "正在形成审阅结论"
+    assert _team_internal_body(chunks[0])["thinking"] == "先核对方案完整性。"
+    assert _team_internal_body(chunks[1])["tool_calls"][0]["status"] == "running"
+    assert _team_internal_body(chunks[2])["text"] == "正在形成审阅结论"
     assert final_results == ['{"action":"approve","message":"方案通过。","target_node_id":"","instructions":""}']
 
 
@@ -2578,24 +2592,24 @@ async def test_team_leader_delegates_to_teammate():
         mode="team",
         params={"team_spec": _structured_team_spec("组队算1+1", capabilities=["planning", "implementation"], workflow_lanes=("build",))},
     )):
-        if ch.kind == "team_internal":
+        if _is_team_internal(ch):
             team_internal.append(ch)
         if ch.kind == "final":
             final = ch.body["text"]
     assert final is not None
     assert "团队最终答案：2" in final
-    assert any(ch.body.get("event_type") == "team_assign" and "@coder" in str(ch.body.get("text") or "") for ch in team_internal)
-    assert any("coder算出" in str(ch.body.get("text") or "") for ch in team_internal)
-    assert all("正在使用工具" not in str(ch.body.get("text") or "") for ch in team_internal)
-    assert all("调用工具" not in str(ch.body.get("text") or "") for ch in team_internal)
-    assert any(ch.body.get("event_type") == "team_submit" and ch.body.get("mention_intent") == "handoff" for ch in team_internal)
+    assert any(_team_internal_body(ch).get("event_type") == "team_assign" and "@coder" in str(_team_internal_body(ch).get("text") or "") for ch in team_internal)
+    assert any("coder算出" in str(_team_internal_body(ch).get("text") or "") for ch in team_internal)
+    assert all("正在使用工具" not in str(_team_internal_body(ch).get("text") or "") for ch in team_internal)
+    assert all("调用工具" not in str(_team_internal_body(ch).get("text") or "") for ch in team_internal)
+    assert any(_team_internal_body(ch).get("event_type") == "team_submit" and _team_internal_body(ch).get("mention_intent") == "handoff" for ch in team_internal)
     result_chunks = [
         ch for ch in team_internal
-        if ch.body.get("event_type") == "team_submit" and ch.body.get("mention_intent") == "handoff"
+        if _team_internal_body(ch).get("event_type") == "team_submit" and _team_internal_body(ch).get("mention_intent") == "handoff"
     ]
     assert result_chunks
-    assert all(ch.body.get("display_mode") != "collapsible" for ch in result_chunks)
-    assert all(ch.body.get("node_id") for ch in result_chunks)
+    assert all(_team_internal_body(ch).get("display_mode") != "collapsible" for ch in result_chunks)
+    assert all(_team_internal_body(ch).get("node_id") for ch in result_chunks)
     board = tasks.list("t1")
     team_node_tasks = [
         item for item in board
@@ -2647,7 +2661,7 @@ async def test_team_plan_persists_to_kanban_store_and_history_events(tmp_path):
         mode="team",
         params={"team_spec": _structured_team_spec("组队算1+1", capabilities=["planning", "implementation"], workflow_lanes=("build",))},
     ))]
-    assert any(ch.kind == "team_internal" for ch in chunks)
+    assert any(_is_team_internal(ch) for ch in chunks)
 
     plan = tm.read_plan("persist-team", owner_account_id="local")["plan"]
     workflow = owner_store.get_latest_workflow_by_session("persist-team")
@@ -2878,9 +2892,9 @@ async def test_team_history_does_not_synthesize_missing_assignment_events(tmp_pa
     tm, _ = _team(kanban_store=store)
     chunks = [ch async for ch in tm.interact(Envelope.of("组队算1+1", session_id="restore-assign-team", mode="team"))]
     assert any(
-        ch.kind == "team_internal"
-        and ch.body.get("event_type") == "team_assign"
-        and ch.body.get("mention_intent") == "assign"
+        _is_team_internal(ch)
+        and _team_internal_body(ch).get("event_type") == "team_assign"
+        and _team_internal_body(ch).get("mention_intent") == "assign"
         for ch in chunks
     )
 
@@ -2927,9 +2941,9 @@ async def test_team_bus_tool_results_are_not_rendered_as_chat_noise(tmp_path):
     tm, _ = _team(provider=BusReadingProvider(), kanban_store=store)
     chunks = [ch async for ch in tm.interact(Envelope.of("组队做一次展示自检", session_id="bus-team", mode="team"))]
     internal_texts = [
-        str(ch.body.get("text") or "")
+        str(_team_internal_body(ch).get("text") or "")
         for ch in chunks
-        if ch.kind == "team_internal"
+        if _is_team_internal(ch)
     ]
     rendered = "\n".join(internal_texts)
     assert "工具 team_read_messages 返回" not in rendered
@@ -2947,17 +2961,17 @@ async def test_team_direct_leader_reply_renders_once_as_team_internal():
 
     tm, _ = _team(SimpleLeaderProvider())
     chunks = [ch async for ch in tm.interact(Envelope.of("你好", session_id="direct-leader-team", mode="team"))]
-    internal = [ch for ch in chunks if ch.kind == "team_internal"]
+    internal = [ch for ch in chunks if _is_team_internal(ch)]
 
-    stream = next(ch for ch in internal if ch.body.get("event_type") == "team_stream")
-    result = next(ch for ch in internal if ch.body.get("event_type") == "team_summary")
-    assert stream.body["node_id"] == result.body["node_id"]
-    assert stream.body["source_session_id"] == result.body["source_session_id"]
-    assert result.body["agent_id"] == "leader"
-    assert result.body["is_leader"] is True
-    assert result.body["request_id"] == result.request_id
-    assert "你好，我是 hh" in result.body["text"]
-    assert "process_text" not in result.body
+    stream = next(ch for ch in internal if _team_internal_body(ch).get("event_type") == "team_stream")
+    result = next(ch for ch in internal if _team_internal_body(ch).get("event_type") == "team_summary")
+    assert _team_internal_body(stream)["node_id"] == _team_internal_body(result)["node_id"]
+    assert _team_internal_body(stream)["source_session_id"] == _team_internal_body(result)["source_session_id"]
+    assert _team_internal_body(result)["agent_id"] == "leader"
+    assert _team_internal_body(result)["is_leader"] is True
+    assert _team_internal_body(result)["request_id"] == result.request_id
+    assert "你好，我是 hh" in _team_internal_body(result)["text"]
+    assert "process_text" not in _team_internal_body(result)
     assert any(ch.kind == "final" for ch in chunks)
 
 
@@ -3273,8 +3287,8 @@ def test_team_internal_chunk_carries_member_turn_file_changes(tmp_path):
         }],
     )
 
-    assert chunk.kind == "team_internal"
-    assert chunk.body["turn_file_changes"] == [{
+    assert _is_team_internal(chunk)
+    assert _team_internal_body(chunk)["turn_file_changes"] == [{
         "path": str(changed),
         "name": changed.name,
         "added": 2,
@@ -4063,23 +4077,23 @@ async def test_user_agent_mention_wakes_selected_member_without_workflow_or_arti
     chunks = [chunk async for chunk in tm.interact(envelope)]
 
     assert chunks[0].kind == "status"
-    assert chunks[1].kind == "team_internal"
+    assert _is_team_internal(chunks[1])
     waiting = chunks[1]
-    assert waiting.body["communication_status"] == "waiting_reply"
-    assert waiting.body["communication_request_text"] == envelope.query
+    assert _team_internal_body(waiting)["communication_status"] == "waiting_reply"
+    assert _team_internal_body(waiting)["communication_request_text"] == envelope.query
     answer = next(
         chunk for chunk in chunks
-        if chunk.kind == "team_internal" and chunk.body.get("communication_status") == "answered"
+        if _is_team_internal(chunk) and _team_internal_body(chunk).get("communication_status") == "answered"
     )
-    assert answer.body["agent_id"] == "coder"
-    assert answer.body["mention_intent"] == "answer"
-    assert answer.body["communication_kind"] == "user_mention_answer"
-    assert answer.body["communication_status"] == "answered"
-    assert answer.body["request_id"] == envelope.request_id
-    assert answer.body["communication_request_text"] == envelope.query
+    assert _team_internal_body(answer)["agent_id"] == "coder"
+    assert _team_internal_body(answer)["mention_intent"] == "answer"
+    assert _team_internal_body(answer)["communication_kind"] == "user_mention_answer"
+    assert _team_internal_body(answer)["communication_status"] == "answered"
+    assert _team_internal_body(answer)["request_id"] == envelope.request_id
+    assert _team_internal_body(answer)["communication_request_text"] == envelope.query
     assert chunks[-1].body["text"] == "coder 当前使用 K3 模型。"
     assert any(
-        chunk.kind == "team_internal" and chunk.body.get("event_type") == "team_stream"
+        _is_team_internal(chunk) and _team_internal_body(chunk).get("event_type") == "team_stream"
         for chunk in chunks
     )
     assert seen_launch == [process_launch]
@@ -4096,7 +4110,7 @@ async def test_user_agent_mention_wakes_selected_member_without_workflow_or_arti
     assert reply["reply_to"] == request["message_id"]
     assert reply["sender_member_id"] == "coder"
     assert reply["recipient_member_ids"] == ["user"]
-    assert answer.body["reply_to"] == request["message_id"]
+    assert _team_internal_body(answer)["reply_to"] == request["message_id"]
     child_messages = tm.session_store.load(
         f"user_mention_s1::turn::{envelope.request_id}::coder",
         owner_account_id="local",
@@ -4146,9 +4160,9 @@ async def test_user_agent_mention_request_id_is_idempotent_and_new_id_retries():
     )
     for result in (first, duplicate):
         assert result[0].kind == "status"
-        assert result[1].body["communication_status"] == "waiting_reply"
+        assert _team_internal_body(result[1])["communication_status"] == "waiting_reply"
         assert any(
-            chunk.kind == "team_internal" and chunk.body.get("communication_status") == "answered"
+            _is_team_internal(chunk) and _team_internal_body(chunk).get("communication_status") == "answered"
             for chunk in result
         )
         assert result[-1].kind == "final"
@@ -4161,9 +4175,9 @@ async def test_user_agent_mention_request_id_is_idempotent_and_new_id_retries():
 
     retried = await run("user_mention_retry")
     assert retried[0].kind == "status"
-    assert retried[1].body["communication_status"] == "waiting_reply"
+    assert _team_internal_body(retried[1])["communication_status"] == "waiting_reply"
     assert any(
-        chunk.kind == "team_internal" and chunk.body.get("communication_status") == "answered"
+        _is_team_internal(chunk) and _team_internal_body(chunk).get("communication_status") == "answered"
         for chunk in retried
     )
     assert retried[-1].kind == "final"
@@ -4213,16 +4227,16 @@ async def test_user_agent_mention_streams_thinking_and_tools_without_workflow():
     chunks = [chunk async for chunk in tm.interact(envelope)]
     stream_chunks = [
         chunk for chunk in chunks
-        if chunk.kind == "team_internal" and chunk.body.get("event_type") == "team_stream"
+        if _is_team_internal(chunk) and _team_internal_body(chunk).get("event_type") == "team_stream"
     ]
-    assert any(chunk.body.get("thinking") == "先确认模型配置。" for chunk in stream_chunks)
-    assert any(chunk.body.get("tool_calls") for chunk in stream_chunks)
-    assert any(chunk.body.get("text") == "coder 当前使用 " for chunk in stream_chunks)
+    assert any(_team_internal_body(chunk).get("thinking") == "先确认模型配置。" for chunk in stream_chunks)
+    assert any(_team_internal_body(chunk).get("tool_calls") for chunk in stream_chunks)
+    assert any(_team_internal_body(chunk).get("text") == "coder 当前使用 " for chunk in stream_chunks)
     terminal = next(
         chunk for chunk in chunks
-        if chunk.kind == "team_internal" and chunk.body.get("communication_status") == "answered"
+        if _is_team_internal(chunk) and _team_internal_body(chunk).get("communication_status") == "answered"
     )
-    assert terminal.body["text"] == "coder 当前使用 Kimi Code/K3。"
+    assert _team_internal_body(terminal)["text"] == "coder 当前使用 Kimi Code/K3。"
     assert chunks[-1].kind == "final"
     assert tasks.list("user_mention_stream_s1") == []
     assert ("local", "user_mention_stream_s1") not in tm._plans
@@ -4255,11 +4269,11 @@ async def test_user_agent_mention_converts_agent_exception_to_failed_terminal_st
     first = [chunk async for chunk in tm.interact(envelope)]
     duplicate = [chunk async for chunk in tm.interact(envelope)]
 
-    assert [chunk.kind for chunk in first] == ["status", "team_internal", "team_internal", "error"]
-    assert first[2].body["communication_status"] == "failed"
-    assert "稍后重试" in first[2].body["text"]
-    assert first[-1].body["message"] == first[2].body["text"]
-    assert [chunk.kind for chunk in duplicate] == ["status", "team_internal", "team_internal", "error"]
+    assert [chunk.kind for chunk in first] == ["status", "feature_event", "feature_event", "error"]
+    assert _team_internal_body(first[2])["communication_status"] == "failed"
+    assert "稍后重试" in _team_internal_body(first[2])["text"]
+    assert first[-1].body["message"] == _team_internal_body(first[2])["text"]
+    assert [chunk.kind for chunk in duplicate] == ["status", "feature_event", "feature_event", "error"]
     assert calls == 1
 
     messages = team.bus.list_messages("user_mention_exception_s1")
@@ -4328,16 +4342,16 @@ async def test_user_agent_mention_exposes_terminal_failure_state_before_error_fr
 
     assert [chunk.kind for chunk in chunks] == [
         "status",
-        "team_internal",
-        "team_internal",
+        "feature_event",
+        "feature_event",
         "error",
     ]
     terminal = chunks[2]
-    assert terminal.body["communication_kind"] == "user_mention_answer"
-    assert terminal.body["communication_status"] == "expired"
-    assert terminal.body["request_id"] == envelope.request_id
-    assert terminal.body["reply_to"] == "bus_failed"
-    assert terminal.body["communication_request_text"] == envelope.query
+    assert _team_internal_body(terminal)["communication_kind"] == "user_mention_answer"
+    assert _team_internal_body(terminal)["communication_status"] == "expired"
+    assert _team_internal_body(terminal)["request_id"] == envelope.request_id
+    assert _team_internal_body(terminal)["reply_to"] == "bus_failed"
+    assert _team_internal_body(terminal)["communication_request_text"] == envelope.query
     assert chunks[-1].body["message"] == "coder 的回答已超时。"
     assert tasks.list("user_mention_failed_s1") == []
     assert ("local", "user_mention_failed_s1") not in tm._plans
@@ -8841,9 +8855,9 @@ async def test_team_fast_question_leader_runs_model_and_summarizes_user_goal():
     assert "kk 已准备好" in final
     assert "本次团队任务已完成" not in final
     team_internal_text = "\n".join(
-        str(chunk.body.get("text") or "")
+        str(_team_internal_body(chunk).get("text") or "")
         for chunk in chunks
-        if chunk.kind == "team_internal"
+        if _is_team_internal(chunk)
     )
     assert "天气需要补充位置才能查询" in team_internal_text
     assert "已收到「快速执行" not in team_internal_text
@@ -9635,7 +9649,7 @@ async def test_team_runtime_display_end_to_end_for_parallel_qa_and_security(tmp_
             )},
         ))
     ]
-    internal = [chunk for chunk in chunks if chunk.kind == "team_internal"]
+    internal = [chunk for chunk in chunks if _is_team_internal(chunk)]
     final_text = next(chunk.body["text"] for chunk in chunks if chunk.kind == "final")
 
     plan = tm.read_plan("team-e2e-display", owner_account_id="local")["plan"]
@@ -9652,30 +9666,30 @@ async def test_team_runtime_display_end_to_end_for_parallel_qa_and_security(tmp_
 
     submit_chunks = [
         chunk for chunk in internal
-        if chunk.body.get("event_type") == "team_submit" and chunk.body.get("mention_intent") == "submit"
+        if _team_internal_body(chunk).get("event_type") == "team_submit" and _team_internal_body(chunk).get("mention_intent") == "submit"
     ]
     result_chunks = [
         chunk for chunk in internal
-        if chunk.body.get("event_type") == "team_submit" and chunk.body.get("mention_intent") == "handoff"
+        if _team_internal_body(chunk).get("event_type") == "team_submit" and _team_internal_body(chunk).get("mention_intent") == "handoff"
     ]
-    assert {chunk.body["node_id"] for chunk in submit_chunks} == {"security_engineer_plan_1", "qa_engineer_plan_2"}
-    assert {chunk.body["node_id"] for chunk in result_chunks} == {"security_engineer_verify_1", "qa_engineer_verify_2"}
-    assert all(chunk.body.get("display_mode") != "collapsible" for chunk in [*submit_chunks, *result_chunks])
-    assert all("用户审阅" not in str(chunk.body.get("text") or "") for chunk in [*submit_chunks, *result_chunks])
-    assert all("@leader" in str(chunk.body.get("text") or "") for chunk in submit_chunks)
+    assert {_team_internal_body(chunk)["node_id"] for chunk in submit_chunks} == {"security_engineer_plan_1", "qa_engineer_plan_2"}
+    assert {_team_internal_body(chunk)["node_id"] for chunk in result_chunks} == {"security_engineer_verify_1", "qa_engineer_verify_2"}
+    assert all(_team_internal_body(chunk).get("display_mode") != "collapsible" for chunk in [*submit_chunks, *result_chunks])
+    assert all("用户审阅" not in str(_team_internal_body(chunk).get("text") or "") for chunk in [*submit_chunks, *result_chunks])
+    assert all("@leader" in str(_team_internal_body(chunk).get("text") or "") for chunk in submit_chunks)
     leader_review = next(
         chunk for chunk in internal
-        if chunk.body.get("event_type") == "team_review"
+        if _team_internal_body(chunk).get("event_type") == "team_review"
     )
-    leader_review_text = str(leader_review.body.get("text") or "")
+    leader_review_text = str(_team_internal_body(leader_review).get("text") or "")
     assert "@crew" in leader_review_text
     assert "@kk" in leader_review_text
     assert "方案已通过 Leader 审阅，开始验证" in leader_review_text
     assign_chunks = [
         chunk for chunk in internal
-        if chunk.body.get("event_type") == "team_assign" and chunk.body.get("mention_intent") == "assign"
+        if _team_internal_body(chunk).get("event_type") == "team_assign" and _team_internal_body(chunk).get("mention_intent") == "assign"
     ]
-    assign_by_node = {str(chunk.body.get("node_id") or ""): chunk for chunk in assign_chunks}
+    assign_by_node = {str(_team_internal_body(chunk).get("node_id") or ""): chunk for chunk in assign_chunks}
     plan_assignments = [
         chunk
         for node_id, chunk in assign_by_node.items()
@@ -9688,19 +9702,19 @@ async def test_team_runtime_display_end_to_end_for_parallel_qa_and_security(tmp_
     ]
     assert plan_assignments
     assert verify_assignments
-    assert all("先不要执行验证" in str(chunk.body.get("text") or "") for chunk in plan_assignments)
-    assert all("先不要执行验证" not in str(chunk.body.get("text") or "") for chunk in verify_assignments)
-    qa_submit = next(chunk for chunk in submit_chunks if chunk.body.get("node_id") == "qa_engineer_plan_2")
-    assert str(qa_submit.body.get("text") or "").startswith("@leader 测试方案：")
-    assert "请审阅" in str(qa_submit.body.get("text") or "")
-    assert "FULL_MARKDOWN_TAIL" not in str(qa_submit.body.get("text") or "")
-    qa_result = next(chunk for chunk in result_chunks if chunk.body.get("node_id") == "qa_engineer_verify_2")
-    qa_result_text = str(qa_result.body.get("text") or "")
+    assert all("先不要执行验证" in str(_team_internal_body(chunk).get("text") or "") for chunk in plan_assignments)
+    assert all("先不要执行验证" not in str(_team_internal_body(chunk).get("text") or "") for chunk in verify_assignments)
+    qa_submit = next(chunk for chunk in submit_chunks if _team_internal_body(chunk).get("node_id") == "qa_engineer_plan_2")
+    assert str(_team_internal_body(qa_submit).get("text") or "").startswith("@leader 测试方案：")
+    assert "请审阅" in str(_team_internal_body(qa_submit).get("text") or "")
+    assert "FULL_MARKDOWN_TAIL" not in str(_team_internal_body(qa_submit).get("text") or "")
+    qa_result = next(chunk for chunk in result_chunks if _team_internal_body(chunk).get("node_id") == "qa_engineer_verify_2")
+    qa_result_text = str(_team_internal_body(qa_result).get("text") or "")
     assert "核心功能与回归路径通过" in qa_result_text
     assert "测试验证已完成" in qa_result_text
-    security_result = next(chunk for chunk in result_chunks if chunk.body.get("node_id") == "security_engineer_verify_1")
-    assert "未发现权限、隐私或工具输出暴露风险" in str(security_result.body.get("text") or "")
-    qa_artifacts = qa_submit.body.get("artifacts") or []
+    security_result = next(chunk for chunk in result_chunks if _team_internal_body(chunk).get("node_id") == "security_engineer_verify_1")
+    assert "未发现权限、隐私或工具输出暴露风险" in str(_team_internal_body(security_result).get("text") or "")
+    qa_artifacts = _team_internal_body(qa_submit).get("artifacts") or []
     assert qa_artifacts
     qa_artifact_path = Path(str(qa_artifacts[0].get("path") or ""))
     assert qa_artifact_path.suffix == ".md"
@@ -9709,7 +9723,7 @@ async def test_team_runtime_display_end_to_end_for_parallel_qa_and_security(tmp_
 
     visible_messages: list[dict[str, object]] = []
     for chunk in internal:
-        body = chunk.body
+        body = _team_internal_body(chunk)
         event_type = body.get("event_type")
         matching_index = next((
             index for index in range(len(visible_messages) - 1, -1, -1)
@@ -9733,8 +9747,8 @@ async def test_team_runtime_display_end_to_end_for_parallel_qa_and_security(tmp_
         else:
             visible_messages.append(dict(body))
     completed_node_ids = {
-        *[chunk.body["node_id"] for chunk in submit_chunks],
-        *[chunk.body["node_id"] for chunk in result_chunks],
+        *[_team_internal_body(chunk)["node_id"] for chunk in submit_chunks],
+        *[_team_internal_body(chunk)["node_id"] for chunk in result_chunks],
     }
     for message in visible_messages:
         if message.get("node_id") in completed_node_ids:
@@ -9890,13 +9904,13 @@ async def test_team_info_question_keeps_team_bubble_process_and_full_summary():
     assert "..." not in final_text
     leader_answer = next(
         chunk for chunk in chunks
-        if chunk.kind == "team_internal"
-        and chunk.body.get("agent_id") == "leader"
-        and "当前团队成员" in str(chunk.body.get("text") or "")
+        if _is_team_internal(chunk)
+        and _team_internal_body(chunk).get("agent_id") == "leader"
+        and "当前团队成员" in str(_team_internal_body(chunk).get("text") or "")
     )
     finished_node = next(
         node for node in plan["nodes"]
-        if node["node_id"] == leader_answer.body.get("node_id") and node["status"] == "completed"
+        if node["node_id"] == _team_internal_body(leader_answer).get("node_id") and node["status"] == "completed"
     )
     assert "当前团队成员：Leader、Crew 内置智能体、kk" in str(finished_node.get("result_summary") or "")
     prompt_text = "\n".join(message.content for messages in seen_messages for message in messages)
@@ -9973,7 +9987,7 @@ async def test_team_status_duration_query_reads_snapshot_without_new_workflow(tm
         chunk
         async for chunk in tm.interact(Envelope.of("组队算1+1", session_id="status-query-team", mode="team"))
     ]
-    assert any(chunk.kind == "team_internal" for chunk in first_chunks)
+    assert any(_is_team_internal(chunk) for chunk in first_chunks)
     owner_store = store.for_owner("local")
     workflows_before = [
         workflow
@@ -10000,9 +10014,9 @@ async def test_team_status_duration_query_reads_snapshot_without_new_workflow(tm
     assert tm.read_plan("status-query-team", owner_account_id="local")["plan"] is not None
     assert "节点数" in final_text
     assert any(
-        chunk.kind == "team_internal"
-        and chunk.body.get("event_type") == "team_summary"
-        and "节点数" in str(chunk.body.get("text") or "")
+        _is_team_internal(chunk)
+        and _team_internal_body(chunk).get("event_type") == "team_summary"
+        and "节点数" in str(_team_internal_body(chunk).get("text") or "")
         for chunk in chunks
     )
 
