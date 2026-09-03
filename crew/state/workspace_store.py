@@ -147,7 +147,8 @@ class SQLiteWorkspaceStore(WorkspaceStore):
         description: str = "",
         instructions: str = "",
         root_path: str = "",
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> dict:
         normalized_root = _normalize_root_path(root_path)
         ws = Workspace(
@@ -177,7 +178,7 @@ class SQLiteWorkspaceStore(WorkspaceStore):
         self._writer.execute(_write)
         return ws.to_dict()
 
-    def get(self, workspace_id: str, owner_account_id: str = "") -> dict:
+    def get(self, workspace_id: str, owner_account_id: str) -> dict:
         if workspace_id in BUILTIN_WORKSPACES:
             self._ensure_builtin(workspace_id, owner_account_id)
         with self._lock:
@@ -190,7 +191,7 @@ class SQLiteWorkspaceStore(WorkspaceStore):
             raise KeyError(f"工作空间不存在: {workspace_id}")
         return self._row(r)
 
-    def list(self, owner_account_id: str = "") -> list[dict]:
+    def list(self, owner_account_id: str) -> list[dict]:
         self._ensure_builtin(DEFAULT_ID, owner_account_id)
         with self._lock:
             rows = self._conn.execute(
@@ -200,7 +201,7 @@ class SQLiteWorkspaceStore(WorkspaceStore):
             ).fetchall()
         return [self._row(r) for r in rows]
 
-    def update(self, workspace_id: str, owner_account_id: str = "", **fields) -> dict:
+    def update(self, workspace_id: str, owner_account_id: str, **fields) -> dict:
         allowed = {
             k: v for k, v in fields.items()
             if k in ("name", "description", "instructions", "root_path", "hidden") and v is not None
@@ -219,7 +220,7 @@ class SQLiteWorkspaceStore(WorkspaceStore):
             self._writer.execute(_write)
         return self.get(workspace_id, owner_account_id=owner_account_id)
 
-    def delete(self, workspace_id: str, owner_account_id: str = "", *, writer=None) -> None:
+    def delete(self, workspace_id: str, owner_account_id: str, *, writer=None) -> None:
         if workspace_id in BUILTIN_WORKSPACES:
             raise ValueError("内置工作空间不可删除")
         if writer is not None:

@@ -270,7 +270,7 @@ class SQLiteSessionStore(SessionStore):
         return out
 
     # ---- SessionStore 接口 ----
-    def load(self, session_id: str, owner_account_id: str = "") -> list[Message]:
+    def load(self, session_id: str, owner_account_id: str) -> list[Message]:
         with self._lock:
             row = self._conn.execute(
                 "SELECT messages FROM sessions WHERE session_id = ? AND owner_account_id = ?",
@@ -307,8 +307,8 @@ class SQLiteSessionStore(SessionStore):
         session_id: str,
         messages: list[Message],
         workspace_id: str = "default",
-        owner_account_id: str = "",
         *,
+        owner_account_id: str,
         title_fallback: str | None = None,
         last_prompt_tokens: int | None = None,
         last_prompt_tokens_source: str | None = None,
@@ -358,7 +358,7 @@ class SQLiteSessionStore(SessionStore):
             )
         self._writer.execute(_write)
 
-    def clear_prompt_usage(self, session_id: str, owner_account_id: str = "") -> None:
+    def clear_prompt_usage(self, session_id: str, owner_account_id: str) -> None:
         """清除上一轮 Provider usage，避免新回合暂未返回 usage 时显示旧值。"""
         def _write(conn):
             conn.execute(
@@ -374,7 +374,8 @@ class SQLiteSessionStore(SessionStore):
         session_id: str,
         workspace_id: str = "default",
         title: str = "",
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> None:
         """创建一个空会话占位，用于派活后立即在侧栏展示。已有会话不覆盖。"""
         now = time.time()
@@ -399,12 +400,12 @@ class SQLiteSessionStore(SessionStore):
             ).fetchone()
         return row is not None
 
-    def append(self, session_id: str, messages: list[Message], owner_account_id: str = "") -> None:
+    def append(self, session_id: str, messages: list[Message], owner_account_id: str) -> None:
         existing = self.load(session_id, owner_account_id=owner_account_id)
         existing.extend(messages)
         self.save(session_id, existing, owner_account_id=owner_account_id)
 
-    def clear(self, session_id: str, owner_account_id: str = "") -> None:
+    def clear(self, session_id: str, owner_account_id: str) -> None:
         def _write(conn):
             conn.execute(
                 "DELETE FROM sessions WHERE session_id = ? AND owner_account_id = ?",
@@ -419,7 +420,7 @@ class SQLiteSessionStore(SessionStore):
     def delete_sessions_for_workspace(
         self,
         workspace_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         *,
         writer: Any | None = None,
     ) -> list[str]:
@@ -447,7 +448,7 @@ class SQLiteSessionStore(SessionStore):
             self.clear(sid, owner_account_id=owner_account_id)
         return ids
 
-    def set_title(self, session_id: str, title: str, owner_account_id: str = "") -> None:
+    def set_title(self, session_id: str, title: str, owner_account_id: str) -> None:
         def _write(conn):
             conn.execute(
                 "UPDATE sessions SET title = ? WHERE session_id = ? AND owner_account_id = ?",
@@ -455,7 +456,7 @@ class SQLiteSessionStore(SessionStore):
             )
         self._writer.execute(_write)
 
-    def set_archived(self, session_id: str, archived: bool, owner_account_id: str = "") -> None:
+    def set_archived(self, session_id: str, archived: bool, owner_account_id: str) -> None:
         """归档 / 取消归档会话。归档会话从侧栏主列表隐藏，可在「归档」分区查看与恢复。
         归档时顺带清除置顶：置顶是主列表的排序提升，归档后不再出现在主列表，置顶无意义。"""
         archived_int = 1 if archived else 0
@@ -475,7 +476,7 @@ class SQLiteSessionStore(SessionStore):
                 )
         self._writer.execute(_write)
 
-    def set_pinned(self, session_id: str, pinned: bool, owner_account_id: str = "") -> None:
+    def set_pinned(self, session_id: str, pinned: bool, owner_account_id: str) -> None:
         """置顶 / 取消置顶会话。置顶会话在主列表排在最前（pinned DESC, updated_at DESC）。"""
         pinned_int = 1 if pinned else 0
 
@@ -486,7 +487,7 @@ class SQLiteSessionStore(SessionStore):
             )
         self._writer.execute(_write)
 
-    def set_status(self, session_id: str, status: str, error: str = "", owner_account_id: str = "") -> None:
+    def set_status(self, session_id: str, status: str, error: str = "", *, owner_account_id: str) -> None:
         """记录上一轮运行的 terminal 结果（completed / failed / running）。
 
         与 save() 解耦：save() 不碰 last_status/last_error，由 gateway 调度器单独写，
@@ -511,7 +512,7 @@ class SQLiteSessionStore(SessionStore):
                 )
         self._writer.execute(_write)
 
-    def touch_session(self, session_id: str, owner_account_id: str = "") -> None:
+    def touch_session(self, session_id: str, owner_account_id: str) -> None:
         """刷新会话 updated_at，用于长任务运行期间保活。"""
         now = time.time()
 
@@ -522,7 +523,7 @@ class SQLiteSessionStore(SessionStore):
             )
         self._writer.execute(_write)
 
-    def get_status(self, session_id: str, owner_account_id: str = "") -> tuple[str, str]:
+    def get_status(self, session_id: str, owner_account_id: str) -> tuple[str, str]:
         with self._lock:
             row = self._conn.execute(
                 "SELECT last_status, last_error FROM sessions WHERE session_id = ? AND owner_account_id = ?",
@@ -530,7 +531,7 @@ class SQLiteSessionStore(SessionStore):
             ).fetchone()
         return (row[0], row[1]) if row else ("", "")
 
-    def get_workspace_id(self, session_id: str, owner_account_id: str = "") -> str | None:
+    def get_workspace_id(self, session_id: str, owner_account_id: str) -> str | None:
         """读取会话所属 workspace_id，不存在时返回 None。"""
         with self._lock:
             row = self._conn.execute(
@@ -549,7 +550,7 @@ class SQLiteSessionStore(SessionStore):
             ).fetchone()
         return str(row[0]) if row else ""
 
-    def total_usage(self, owner_account_id: str = "") -> dict[str, int]:
+    def total_usage(self, owner_account_id: str) -> dict[str, int]:
         """累计 token 估算与会话数（排除 Team 子会话）。"""
         with self._lock:
             row = self._conn.execute(
@@ -563,7 +564,7 @@ class SQLiteSessionStore(SessionStore):
         self,
         session_id: str,
         context_window: int | None,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, float | int | str | None]:
         """返回 Provider 最近一次真实 prompt 用量；没有真实 usage 时明确不可用。"""
         with self._lock:
@@ -608,8 +609,8 @@ class SQLiteSessionStore(SessionStore):
     def list_sessions(
         self,
         workspace_id: str | None = None,
-        owner_account_id: str = "",
         *,
+        owner_account_id: str,
         include_archived: bool = False,
         exclude_channel_sessions: bool = True,
     ) -> list[dict]:
@@ -692,7 +693,7 @@ class SQLiteSessionStore(SessionStore):
         self,
         session_id: str,
         config: dict[str, Any],
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         """为某个 session 写入专属 agent.executor 配置。"""
         now = self._now_iso()
@@ -718,7 +719,7 @@ class SQLiteSessionStore(SessionStore):
         self,
         session_id: str,
         updater: Callable[[dict[str, Any]], dict[str, Any]],
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         """Atomically read, transform, and persist one Session AgentConfig."""
 
@@ -764,7 +765,7 @@ class SQLiteSessionStore(SessionStore):
         self._writer.execute(_write)
         return self.get_agent_config(session_id, owner_account_id=owner_account_id) or {}
 
-    def get_agent_config(self, session_id: str, owner_account_id: str = "") -> dict[str, Any] | None:
+    def get_agent_config(self, session_id: str, owner_account_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
                 "SELECT config_json, created_at, updated_at FROM session_agent_config "
@@ -781,7 +782,7 @@ class SQLiteSessionStore(SessionStore):
         config["_updated_at"] = row[2]
         return config
 
-    def clear_agent_config(self, session_id: str, owner_account_id: str = "") -> None:
+    def clear_agent_config(self, session_id: str, owner_account_id: str) -> None:
         def _write(conn):
             conn.execute(
                 "DELETE FROM session_agent_config WHERE session_id = ? AND owner_account_id = ?",
@@ -790,7 +791,7 @@ class SQLiteSessionStore(SessionStore):
         self._writer.execute(_write)
 
     # ---- 渠道稳定 key -> 当前实际 session ----
-    def get_channel_session(self, session_key: str, owner_account_id: str = "") -> str | None:
+    def get_channel_session(self, session_key: str, owner_account_id: str) -> str | None:
         with self._lock:
             row = self._conn.execute(
                 "SELECT session_id FROM channel_session_routes "
@@ -803,7 +804,7 @@ class SQLiteSessionStore(SessionStore):
         self,
         session_key: str,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> None:
         now = time.time()
 
@@ -825,7 +826,7 @@ class SQLiteSessionStore(SessionStore):
     def get_channel_session_key(
         self,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> str | None:
         with self._lock:
             row = self._conn.execute(

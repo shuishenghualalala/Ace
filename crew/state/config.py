@@ -434,6 +434,7 @@ class Config:
                 builtin.api_key_env,
                 env_map=env_map,
                 fallback_global=fallback_global,
+                owner_account_id=owner_account_id,
             )
             profiles[model_id] = builtin
 
@@ -665,7 +666,7 @@ class Config:
             raise ValueError(f"模型 id 已存在: {model_id}")
 
         # 构建 profile（不含 api_key；key 由调用方处理 env 写入）
-        profile = _build_profile_from_payload(model_id, profile_data)
+        profile = _build_profile_from_payload(model_id, profile_data, owner_account_id="")
         self.model_profiles[model_id] = profile
         return profile
 
@@ -705,7 +706,7 @@ class Config:
         # - 调用方先写凭证库/env → 取到新 key
         # - api_key_env 改到不存在的变量 → 取到空串，has_key=False（反映真实状态）
         # - 什么都不改 → 取到原值（os.environ 在 load_config 时已设置）
-        profile = _build_profile_from_payload(model_id, merged)
+        profile = _build_profile_from_payload(model_id, merged, owner_account_id="")
         self.model_profiles[model_id] = profile
         return profile
 
@@ -1058,7 +1059,12 @@ def _model_capabilities(raw: dict[str, Any]) -> list[str]:
 
 def _build_model_profile(model_id: str, raw: dict[str, Any]) -> ModelProfile:
     api_key_env = str(raw.get("api_key_env") or "CREW_API_KEY")
-    api_key = resolve_profile_api_key(model_id, api_key_env, fallback_global=True)
+    api_key = resolve_profile_api_key(
+        model_id,
+        api_key_env,
+        fallback_global=True,
+        owner_account_id="",
+    )
     capabilities = _model_capabilities(raw)
 
     return ModelProfile(
@@ -1085,7 +1091,7 @@ def _build_owner_model_profile(
     model_id: str,
     raw: dict[str, Any],
     env_map: dict[str, str],
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> ModelProfile:
     api_key_env = str(raw.get("api_key_env") or "CREW_API_KEY")
     api_key = resolve_profile_api_key(
@@ -1119,7 +1125,7 @@ def _build_profile_from_payload(
     model_id: str,
     payload: dict[str, Any],
     *,
-    owner_account_id: str = "",
+    owner_account_id: str,
     env_map: dict[str, str] | None = None,
 ) -> ModelProfile:
     """从 CRUD payload 构建 ModelProfile。
@@ -1212,7 +1218,7 @@ def resolve_profile_api_key(
     env_map: dict[str, str] | None = None,
     *,
     fallback_global: bool,
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> str:
     """模型 API Key 解析链（单一事实来源，所有 profile 构建点都走这里）。
 

@@ -80,7 +80,7 @@ def test_session_binding_builtin_model_global_scope(app):
             "builtin": True,
         },
     )
-    crew.set_session_model_binding(SESSION_ID, "ds1", busy=False)
+    crew.set_session_model_binding(SESSION_ID, "ds1", busy=False, owner_account_id="")
     profile, owns_provider, notice = crew._resolve_session_provider_profile("", "ds1")
     assert owns_provider is True and notice is None and profile.id == "ds1"
     assert profile.has_key
@@ -88,7 +88,7 @@ def test_session_binding_builtin_model_global_scope(app):
     assert isinstance(provider, OpenAIProvider)
     assert provider.base_url == "https://api.deepseek.com"
     assert provider._client.api_key == "sk-ds"
-    binding = crew.read_session_model_binding(SESSION_ID)
+    binding = crew.read_session_model_binding(SESSION_ID, owner_account_id="")
     assert binding["model_profile_id"] == "ds1"
 
 

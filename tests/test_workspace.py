@@ -39,16 +39,16 @@ def test_workspace_store_root_path(tmp_path):
     store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
     project = tmp_path / "my-project"
     project.mkdir()
-    ws = store.create("我的项目", root_path=str(project))
+    ws = store.create("我的项目", root_path=str(project), owner_account_id="local")
     assert ws["root_path"] == str(project.resolve())
-    got = store.get(ws["id"])
+    got = store.get(ws["id"], owner_account_id="local")
     assert got["root_path"] == str(project.resolve())
 
 
 def test_default_workspace_protected(tmp_path):
     store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
     with pytest.raises(ValueError):
-        store.delete("default")
+        store.delete("default", owner_account_id="local")
 
 
 def test_builtin_wiki_workspace_auto_created(tmp_path):
@@ -89,11 +89,13 @@ def test_session_list_filtered_by_workspace(tmp_path):
     from crew.state.session_store import SQLiteSessionStore
 
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
-    store.save("s1", [Message.user("A")], workspace_id="ws_a")
-    store.save("s2", [Message.user("B")], workspace_id="ws_b")
-    a = store.list_sessions("ws_a")
+    store.save("s1", [Message.user("A")], workspace_id="ws_a", owner_account_id="local")
+    store.save("s2", [Message.user("B")], workspace_id="ws_b", owner_account_id="local")
+    a = store.list_sessions("ws_a", owner_account_id="local")
+
     assert len(a) == 1 and a[0]["session_id"] == "s1"
-    assert len(store.list_sessions()) == 2
+    assert len(store.list_sessions(owner_account_id="local")) == 2
+
 
 
 async def test_agent_injects_workspace_instructions():
@@ -118,14 +120,17 @@ async def test_agent_injects_workspace_instructions():
 
 def test_workspace_hidden_flag(tmp_path):
     store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
-    ws = store.create("隐藏测试")
+    ws = store.create("隐藏测试", owner_account_id="local")
     assert ws.get("hidden") is False
-    updated = store.update(ws["id"], hidden=True)
+    updated = store.update(ws["id"], hidden=True, owner_account_id="local")
     assert updated["hidden"] is True
-    got = store.get(ws["id"])
+    got = store.get(ws["id"], owner_account_id="local")
+
     assert got["hidden"] is True
-    store.update(ws["id"], hidden=False)
-    assert store.get(ws["id"])["hidden"] is False
+    store.update(ws["id"], hidden=False, owner_account_id="local")
+
+    assert store.get(ws["id"], owner_account_id="local")["hidden"] is False
+
 
 
 def test_delete_sessions_for_workspace(tmp_path):
@@ -133,34 +138,42 @@ def test_delete_sessions_for_workspace(tmp_path):
 
     ws_store = SQLiteWorkspaceStore(str(tmp_path / "ws.db"))
     sess_store = SQLiteSessionStore(str(tmp_path / "s.db"))
-    ws = ws_store.create("待删空间")
+    ws = ws_store.create("待删空间", owner_account_id="local")
     from crew.core.types import Message
 
-    sess_store.save("s1", [Message.user("A")], workspace_id=ws["id"])
-    sess_store.save("s2", [Message.user("B")], workspace_id=ws["id"])
-    sess_store.save("s3", [Message.user("C")], workspace_id="default")
-    deleted = sess_store.delete_sessions_for_workspace(ws["id"])
+    sess_store.save("s1", [Message.user("A")], workspace_id=ws["id"], owner_account_id="local")
+    sess_store.save("s2", [Message.user("B")], workspace_id=ws["id"], owner_account_id="local")
+
+    sess_store.save("s3", [Message.user("C")], workspace_id="default", owner_account_id="local")
+
+    deleted = sess_store.delete_sessions_for_workspace(ws["id"], owner_account_id="local")
+
     assert set(deleted) == {"s1", "s2"}
-    assert len(sess_store.list_sessions(ws["id"])) == 0
-    assert len(sess_store.list_sessions("default")) == 1
+    assert len(sess_store.list_sessions(ws["id"], owner_account_id="local")) == 0
+
+    assert len(sess_store.list_sessions("default", owner_account_id="local")) == 1
+
 
 
 def test_workspace_delete_can_be_wrapped_with_session_delete_in_one_transaction(tmp_path):
     db = str(tmp_path / "shared.db")
     ws_store = SQLiteWorkspaceStore(db)
     sess_store = SQLiteSessionStore(db)
-    ws = ws_store.create("事务空间")
-    sess_store.save("s1", [Message.user("A")], workspace_id=ws["id"])
+    ws = ws_store.create("事务空间", owner_account_id="local")
+    sess_store.save("s1", [Message.user("A")], workspace_id=ws["id"], owner_account_id="local")
 
     def _delete_and_fail(conn):
-        sess_store.delete_sessions_for_workspace(ws["id"], writer=conn)
+        sess_store.delete_sessions_for_workspace(ws["id"], writer=conn, owner_account_id="local")
+
         raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError):
         sess_store.transaction(_delete_and_fail)
 
-    assert ws_store.get(ws["id"])["id"] == ws["id"]
-    assert [row["session_id"] for row in sess_store.list_sessions(ws["id"])] == ["s1"]
+    assert ws_store.get(ws["id"], owner_account_id="local")["id"] == ws["id"]
+
+    assert [row["session_id"] for row in sess_store.list_sessions(ws["id"], owner_account_id="local")] == ["s1"]
+
 
 
 def test_save_title_fallback_defaults_to_first_user_message(tmp_path):
@@ -168,13 +181,16 @@ def test_save_title_fallback_defaults_to_first_user_message(tmp_path):
     兼容未传该参数的调用方）时，都以首条 user 消息截断作为标题。"""
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
     # 占位标题被首条 user 消息覆盖
-    store.ensure_session("s1", title="新会话")
-    store.save("s1", [Message.user("帮我写一段 Python 脚本")])
-    s1 = next(s for s in store.list_sessions() if s["session_id"] == "s1")
+    store.ensure_session("s1", title="新会话", owner_account_id="local")
+    store.save("s1", [Message.user("帮我写一段 Python 脚本")], owner_account_id="local")
+    s1 = next(s for s in store.list_sessions(owner_account_id="local") if s["session_id"] == "s1")
+
     assert s1["title"] == "帮我写一段 Python 脚本"
     # title_fallback=None（旧行为）同样取首条 user 消息
-    store.save("s-legacy", [Message.user("帮我看看天气")], title_fallback=None)
-    row = next(s for s in store.list_sessions() if s["session_id"] == "s-legacy")
+    store.save("s-legacy", [Message.user("帮我看看天气")], title_fallback=None, owner_account_id="local")
+
+    row = next(s for s in store.list_sessions(owner_account_id="local") if s["session_id"] == "s-legacy")
+
     assert row["title"] == "帮我看看天气"
 
 
@@ -185,10 +201,11 @@ def test_save_does_not_overwrite_workspace_id_on_update(tmp_path):
     旧行为会把它覆盖掉，导致会话在 default/test 之间反复漂移。
     """
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
-    store.save("s-drift", [Message.user("在 test 里问问题")], workspace_id="test")
+    store.save("s-drift", [Message.user("在 test 里问问题")], workspace_id="test", owner_account_id="local")
     # 第二轮回写带了 default（例如 dispatcher 中间态/旧 envelope）
-    store.save("s-drift", [Message.user("在 test 里问问题"), Message.assistant("回答")], workspace_id="default")
-    row = next(s for s in store.list_sessions() if s["session_id"] == "s-drift")
+    store.save("s-drift", [Message.user("在 test 里问问题"), Message.assistant("回答")], workspace_id="default", owner_account_id="local")
+    row = next(s for s in store.list_sessions(owner_account_id="local") if s["session_id"] == "s-drift")
+
     assert row["workspace_id"] == "test"
 
 
@@ -198,22 +215,25 @@ def test_save_title_fallback_empty_keeps_placeholder_for_summary(tmp_path):
     避免「先 save 写入截断用户原话 → 摘要生成失败/未完成 → 标题永久停在原话」。
     """
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
-    store.ensure_session("s-title", title="新会话")
-    store.save("s-title", [Message.user("你好，你有哪些文件")], title_fallback="")
-    row = next(s for s in store.list_sessions() if s["session_id"] == "s-title")
+    store.ensure_session("s-title", title="新会话", owner_account_id="local")
+    store.save("s-title", [Message.user("你好，你有哪些文件")], title_fallback="", owner_account_id="local")
+    row = next(s for s in store.list_sessions(owner_account_id="local") if s["session_id"] == "s-title")
+
     # 占位标题保留，未被截断的用户原话抢占
     assert row["title"] in ("", "新会话")
     # 摘要生成后 set_title 写入
-    store.set_title("s-title", "文件清单问答")
-    row = next(s for s in store.list_sessions() if s["session_id"] == "s-title")
+    store.set_title("s-title", "文件清单问答", owner_account_id="local")
+
+    row = next(s for s in store.list_sessions(owner_account_id="local") if s["session_id"] == "s-title")
+
     assert row["title"] == "文件清单问答"
 
 
 def test_save_title_fallback_none_keeps_legacy_behavior(tmp_path):
     """title_fallback=None 保持旧行为（首条 user 消息截断作 fallback），兼容未传该参数的调用方。"""
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
-    store.save("s-legacy", [Message.user("帮我看看天气")], title_fallback=None)
-    row = next(s for s in store.list_sessions() if s["session_id"] == "s-legacy")
+    store.save("s-legacy", [Message.user("帮我看看天气")], title_fallback=None, owner_account_id="local")
+    row = next(s for s in store.list_sessions(owner_account_id="local") if s["session_id"] == "s-legacy")
     assert row["title"] == "帮我看看天气"
 
 

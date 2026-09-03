@@ -96,11 +96,14 @@ def test_corrupt_store_treated_as_empty_and_repaired(crew_home):
 
 def test_resolve_prefers_store_over_env(crew_home, monkeypatch):
     monkeypatch.setenv("ALPHA_KEY", "sk-env")
-    assert resolve_profile_api_key("p1", "ALPHA_KEY", fallback_global=True) == "sk-env"
+    assert resolve_profile_api_key("p1", "ALPHA_KEY", fallback_global=True, owner_account_id="") == "sk-env"
+
     store_key("", "p1", "sk-store")
-    assert resolve_profile_api_key("p1", "ALPHA_KEY", fallback_global=True) == "sk-store"
+    assert resolve_profile_api_key("p1", "ALPHA_KEY", fallback_global=True, owner_account_id="") == "sk-store"
+
     # 其它 profile 不受该 store 条目影响，仍走 env
-    assert resolve_profile_api_key("p2", "ALPHA_KEY", fallback_global=True) == "sk-env"
+    assert resolve_profile_api_key("p2", "ALPHA_KEY", fallback_global=True, owner_account_id="") == "sk-env"
+
 
 
 def test_resolve_owner_scope_uses_owner_store(crew_home):
@@ -109,7 +112,8 @@ def test_resolve_owner_scope_uses_owner_store(crew_home):
         resolve_profile_api_key("p1", "ALPHA_KEY", fallback_global=False, owner_account_id="acc-a")
         == "sk-owner"
     )
-    assert resolve_profile_api_key("p1", "ALPHA_KEY", fallback_global=False) == ""
+    assert resolve_profile_api_key("p1", "ALPHA_KEY", fallback_global=False, owner_account_id="") == ""
+
 
 
 def test_build_profile_from_payload_resolves_by_scope(crew_home, monkeypatch):
@@ -118,10 +122,12 @@ def test_build_profile_from_payload_resolves_by_scope(crew_home, monkeypatch):
     store_key("acc-a", "o1", "sk-owner-store")
 
     # 全局作用域：凭证库命中
-    p = _build_profile_from_payload("g1", {"api_key_env": "GAMMA_KEY"})
+    p = _build_profile_from_payload("g1", {"api_key_env": "GAMMA_KEY"}, owner_account_id="")
+
     assert p.api_key == "sk-global-store"
     # 无 store 条目 → env；有 store 条目 → 覆盖 env
-    assert _build_profile_from_payload("g2", {"api_key_env": "GAMMA_KEY"}).api_key == "sk-env"
+    assert _build_profile_from_payload("g2", {"api_key_env": "GAMMA_KEY"}, owner_account_id="").api_key == "sk-env"
+
     # owner 作用域：owner store 优先于 owner env_map，且不回落全局 env
     p2 = _build_profile_from_payload(
         "o1",
@@ -145,8 +151,10 @@ def test_build_profile_from_payload_resolves_by_scope(crew_home, monkeypatch):
 
 def test_add_two_models_keys_do_not_clobber(app):
     crew = app
-    crew.add_model({"id": "m1", "model": "gpt-test", "api_key": "sk-first"})
-    crew.add_model({"id": "m2", "model": "gpt-test", "api_key": "sk-second"})
+    crew.add_model({"id": "m1", "model": "gpt-test", "api_key": "sk-first"}, owner_account_id="")
+
+    crew.add_model({"id": "m2", "model": "gpt-test", "api_key": "sk-second"}, owner_account_id="")
+
     profiles = crew.config.model_profiles
     assert profiles["m1"].api_key == "sk-first"
     assert profiles["m2"].api_key == "sk-second"
@@ -159,9 +167,12 @@ def test_add_two_models_keys_do_not_clobber(app):
 
 def test_update_model_key_only_touches_target(app):
     crew = app
-    crew.add_model({"id": "m1", "model": "gpt-test", "api_key": "sk-first"})
-    crew.add_model({"id": "m2", "model": "gpt-test", "api_key": "sk-second"})
-    crew.update_model("m1", {"api_key": "sk-first-2"})
+    crew.add_model({"id": "m1", "model": "gpt-test", "api_key": "sk-first"}, owner_account_id="")
+
+    crew.add_model({"id": "m2", "model": "gpt-test", "api_key": "sk-second"}, owner_account_id="")
+
+    crew.update_model("m1", {"api_key": "sk-first-2"}, owner_account_id="")
+
     assert crew.config.model_profiles["m1"].api_key == "sk-first-2"
     assert crew.config.model_profiles["m2"].api_key == "sk-second"
 
@@ -170,53 +181,67 @@ def test_legacy_shared_env_profile_not_clobbered_by_new_store_key(app, monkeypat
     """存量场景：旧模型 key 来自共享 CREW_API_KEY，新模型默认写凭证库后互不影响。"""
     monkeypatch.setenv("CREW_API_KEY", "sk-legacy")
     crew = app
-    crew.add_model({"id": "m1", "model": "gpt-test"})
+    crew.add_model({"id": "m1", "model": "gpt-test"}, owner_account_id="")
+
     assert crew.config.model_profiles["m1"].api_key == "sk-legacy"
-    crew.add_model({"id": "m2", "model": "gpt-test", "api_key": "sk-new"})
+    crew.add_model({"id": "m2", "model": "gpt-test", "api_key": "sk-new"}, owner_account_id="")
+
     assert crew.config.model_profiles["m2"].api_key == "sk-new"
     assert crew.config.model_profiles["m1"].api_key == "sk-legacy"
 
 
 def test_shared_env_key_overwrite_blocked_unless_explicit(app):
     crew = app
-    crew.add_model({"id": "m1", "model": "gpt-test", "api_key_env": "SHARED_API_KEY", "api_key": "sk-one"})
-    crew.add_model({"id": "m2", "model": "gpt-test", "api_key": "sk-two-default"})
+    crew.add_model({"id": "m1", "model": "gpt-test", "api_key_env": "SHARED_API_KEY", "api_key": "sk-one"}, owner_account_id="")
+
+    crew.add_model({"id": "m2", "model": "gpt-test", "api_key": "sk-two-default"}, owner_account_id="")
+
     # m2 引用同一个共享变量名 + 不同新值 → 拦截
     with pytest.raises(ValueError, match="SHARED_API_KEY"):
-        crew.update_model("m2", {"api_key_env": "SHARED_API_KEY", "api_key": "sk-two"})
+        crew.update_model("m2", {"api_key_env": "SHARED_API_KEY", "api_key": "sk-two"}, owner_account_id="")
+
     # 显式确认后放行，且不影响 m1
-    crew.update_model("m2", {"api_key_env": "SHARED_API_KEY", "api_key": "sk-two", "overwrite_shared_key": True})
+    crew.update_model("m2", {"api_key_env": "SHARED_API_KEY", "api_key": "sk-two", "overwrite_shared_key": True}, owner_account_id="")
+
     profiles = crew.config.model_profiles
     assert profiles["m1"].api_key == "sk-one"
     assert profiles["m2"].api_key == "sk-two"
     # 同值共享是合法场景，直接放行
-    crew.add_model({"id": "m3", "model": "gpt-test", "api_key_env": "SHARED_API_KEY", "api_key": "sk-two"})
+    crew.add_model({"id": "m3", "model": "gpt-test", "api_key_env": "SHARED_API_KEY", "api_key": "sk-two"}, owner_account_id="")
+
     assert crew.config.model_profiles["m3"].api_key == "sk-two"
 
 
 def test_explicit_env_rename_clears_store_entry(app):
     crew = app
-    crew.add_model({"id": "m1", "model": "gpt-test", "api_key": "sk-store"})
+    crew.add_model({"id": "m1", "model": "gpt-test", "api_key": "sk-store"}, owner_account_id="")
+
     assert read_stored_key("", "m1") == "sk-store"
     # 用户显式把该模型切到 env 管理 → 清除 store 条目，env 成为 key 来源
-    crew.update_model("m1", {"api_key_env": "M1_API_KEY", "api_key": "sk-env-managed"})
+    crew.update_model("m1", {"api_key_env": "M1_API_KEY", "api_key": "sk-env-managed"}, owner_account_id="")
+
     assert read_stored_key("", "m1") == ""
     assert crew.config.model_profiles["m1"].api_key == "sk-env-managed"
 
 
 def test_remove_model_cleans_store(app):
     crew = app
-    crew.add_model({"id": "m1", "model": "gpt-test", "api_key": "sk-one"})
-    crew.add_model({"id": "m2", "model": "gpt-test", "api_key": "sk-two"})
-    crew.remove_model("m2")
+    crew.add_model({"id": "m1", "model": "gpt-test", "api_key": "sk-one"}, owner_account_id="")
+
+    crew.add_model({"id": "m2", "model": "gpt-test", "api_key": "sk-two"}, owner_account_id="")
+
+    crew.remove_model("m2", owner_account_id="")
+
     assert read_stored_key("", "m2") == ""
     assert read_stored_key("", "m1") == "sk-one"
 
 
 def test_store_key_satisfies_provider_gate(app):
     crew = app
-    crew.add_model({"id": "m1", "model": "gpt-test", "api_key": "sk-store"})
-    crew.use_model("m1")
+    crew.add_model({"id": "m1", "model": "gpt-test", "api_key": "sk-store"}, owner_account_id="")
+
+    crew.use_model("m1", owner_account_id="")
+
     assert isinstance(crew.provider, OpenAIProvider)
     assert crew.provider._client.api_key == "sk-store"
 

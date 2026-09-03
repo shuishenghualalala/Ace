@@ -211,6 +211,7 @@ class SessionStore(ABC):
         messages: list[Message],
         workspace_id: str = "default",
         *,
+        owner_account_id: str,
         title_fallback: str | None = None,
         last_prompt_tokens: int | None = None,
         last_prompt_tokens_source: str | None = None,
@@ -275,6 +276,7 @@ class SessionStore(ABC):
         self,
         workspace_id: str | None = None,
         *,
+        owner_account_id: str,
         include_archived: bool = False,
     ) -> list[dict[str, Any]]:
         """列出会话摘要：[{session_id, title, message_count, updated_at, workspace_id, archived, pinned}]。

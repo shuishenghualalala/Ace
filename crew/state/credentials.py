@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 _CREDENTIALS_FILENAME = "credentials.json"
 
 
-def credentials_path(owner_account_id: str = "", *, create: bool = False) -> Path:
+def credentials_path(owner_account_id: str, *, create: bool = False) -> Path:
     """返回凭证库文件路径。owner 传入时为该账号私有库，否则为全局库。"""
     owner = str(owner_account_id or "").strip()
     if owner:

@@ -52,7 +52,7 @@ def test_removing_non_active_global_model_clears_all_agent_cache(
     monkeypatch.setattr(cfg, "persist_model_profiles", lambda: tmp_path / "config.yaml")
     monkeypatch.setattr("crew.app.remove_env_key", lambda *_args, **_kwargs: None)
 
-    app.remove_model("removed")
+    app.remove_model("removed", owner_account_id="")
 
     assert app.agents.peek("bound-to-removed", owner_account_id="owner-a") is None
     assert app.agents.peek("other-session", owner_account_id="owner-b") is None

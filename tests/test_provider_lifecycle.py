@@ -180,7 +180,7 @@ async def test_app_shutdown_closes_agent_owned_before_global_provider_and_is_ide
     app.mcp_manager = None
     app.provider = OrderedProvider()
     app.agents = AgentManager(OrderedAgent)
-    app.agents.get("s1")
+    app.agents.get("s1", owner_account_id="local")
 
     await app.shutdown()
     await app.shutdown()
@@ -330,7 +330,7 @@ async def test_use_model_installs_new_provider_before_retiring_old_one(tmp_path,
     monkeypatch.setattr(app.config, "activate_model", lambda _model_id: profile)
     monkeypatch.setattr(app_module, "build_provider", lambda _cfg: new_provider)
 
-    selected = app.use_model("next")
+    selected = app.use_model("next", owner_account_id="")
 
     assert selected is profile
     assert app.provider is new_provider

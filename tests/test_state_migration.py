@@ -16,9 +16,10 @@ def test_claim_legacy_owner_database_claims_empty_owner_rows(tmp_path):
     cron = CronJobStore(str(db))
     tasks = TaskRuntime(str(db))
     try:
-        sessions.save("legacy-session", [Message.user("hi")])
-        sessions.set_agent_config("legacy-session", {"executor": "builtin"})
-        workspaces.create("legacy workspace")
+        sessions.save("legacy-session", [Message.user("hi")], owner_account_id="")
+        sessions.set_agent_config("legacy-session", {"executor": "builtin"}, owner_account_id="")
+        workspaces.create("legacy workspace", owner_account_id="")
+
         cron.create(name="legacy cron", schedule="every 1m", query="hi", session_id="legacy-session")
         tasks.create_runtime(kind="team", session_id="legacy-session", title="legacy task")
 

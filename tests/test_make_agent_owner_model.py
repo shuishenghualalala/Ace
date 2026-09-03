@@ -379,7 +379,7 @@ def test_team_mode_reads_session_config_with_owner(owner_app, tmp_path):
         owner_account_id=owner,
     )
     # 漏传 owner → 读不到该账号下的 team 配置
-    without_owner = app._session_agent_config(sid)
+    without_owner = app._session_agent_config(sid, owner_account_id="")
     assert without_owner.get("team", {}).get("external_team_id") != "ext-team-1"
     with_owner = app._session_agent_config(sid, owner_account_id=owner)
     assert with_owner.get("team", {}).get("external_team_id") == "ext-team-1"
