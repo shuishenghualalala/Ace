@@ -66,6 +66,19 @@
   max-width: 840px;
 }
 
+.settings-integrations__group {
+  grid-column: 1 / -1;
+  font-size: var(--mw-type-caption-size);
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--mw-text-secondary);
+  padding-top: var(--mw-space-2);
+}
+
+.settings-integrations__group:first-child {
+  padding-top: 0;
+}
+
 .settings-integrations__item,
 .settings-integrations__cua {
   display: grid;
@@ -80,7 +93,6 @@
 
 .settings-integrations__item[data-active='true'] {
   border-color: var(--mw-border-strong);
-  box-shadow: inset 3px 0 0 var(--mw-action-primary);
 }
 
 .settings-integrations__select {

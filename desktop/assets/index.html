@@ -156,23 +156,32 @@
       <div class="channel-connect-overlay" id="model-connect-overlay" hidden>
         <div class="channel-connect-modal" id="model-connect-modal" role="dialog" aria-modal="true" aria-labelledby="model-connect-title">
           <header class="channel-connect-header">
-            <div class="model-connect-icon" id="model-connect-icon" aria-hidden="true">AI</div>
             <h3 id="model-connect-title" class="channel-connect-title">新增模型</h3>
             <button type="button" class="channel-connect-close" id="model-connect-close" aria-label="关闭">×</button>
           </header>
           <div class="channel-connect-body">
             <p class="channel-connect-desc" id="model-connect-desc">填写模型 ID 与 API 凭据后保存。</p>
             <form class="channel-connect-form" id="cfg-model-form">
+              <div class="channel-connect-field" id="cfg-model-vendor-wrap">
+                <div class="channel-connect-field-head">
+                  <label class="channel-connect-label" for="cfg-model-vendor">厂商</label>
+                  <span class="channel-connect-hint channel-connect-hint--inline">选择厂商后自动填充 Base URL 与模型列表；选「自定义」则手动填写</span>
+                </div>
+                <select class="channel-connect-input" id="cfg-model-vendor"></select>
+              </div>
               <div class="channel-connect-field">
-                <label class="channel-connect-label" for="cfg-model-id">模型 ID <span class="channel-connect-required">*</span></label>
+                <div class="channel-connect-field-head">
+                  <label class="channel-connect-label" for="cfg-model-id">模型 ID <span class="channel-connect-required">*</span></label>
+                  <span class="channel-connect-hint channel-connect-hint--inline">配置标识，同时作为列表与下拉中的显示名</span>
+                </div>
                 <input class="channel-connect-input" id="cfg-model-id" placeholder="例如 minimax" />
-                <span class="channel-connect-hint">配置标识，同时作为列表与下拉中的显示名</span>
               </div>
               <div class="channel-connect-field">
                 <label class="channel-connect-label" for="cfg-model-model">接口模型名 <span class="channel-connect-required">*</span></label>
+                <select class="channel-connect-input" id="cfg-model-model-select" hidden></select>
                 <input class="channel-connect-input" id="cfg-model-model" placeholder="例如 gpt-4o-mini 或 minimax/minimax-latest" />
               </div>
-              <div class="channel-connect-field" id="cfg-model-protocol-wrap">
+              <div class="channel-connect-field" id="cfg-model-protocol-wrap" hidden>
                 <span class="channel-connect-label">API 协议</span>
                 <div class="model-protocol-choice">
                   <label class="model-protocol-choice__item">
@@ -194,7 +203,10 @@
                 <input class="channel-connect-input" id="cfg-model-api-key" type="password" placeholder="必填；编辑时留空则保留原 Key" autocomplete="off" />
               </div>
               <div class="channel-connect-field" id="cfg-model-context-window-wrap">
-                <label class="channel-connect-label" for="cfg-model-context-window">上下文窗口</label>
+                <div class="channel-connect-field-head">
+                  <label class="channel-connect-label" for="cfg-model-context-window">上下文窗口</label>
+                  <span class="channel-connect-hint channel-connect-hint--inline">模型支持的最大上下文 token 数；影响用量显示与历史压缩阈值</span>
+                </div>
                 <select class="channel-connect-input" id="cfg-model-context-window">
                   <option value="128000">128k</option>
                   <option value="200000">200k</option>
@@ -202,7 +214,13 @@
                   <option value="512000">512k</option>
                   <option value="1000000">1M</option>
                 </select>
-                <span class="channel-connect-hint">模型支持的最大上下文 token 数；影响用量显示与历史压缩阈值</span>
+              </div>
+              <div class="channel-connect-field" id="cfg-model-max-tokens-wrap">
+                <div class="channel-connect-field-head">
+                  <label class="channel-connect-label" for="cfg-model-max-tokens">最大输出 token</label>
+                  <span class="channel-connect-hint channel-connect-hint--inline">单次回复的最大输出长度，默认 32768</span>
+                </div>
+                <input class="channel-connect-input" id="cfg-model-max-tokens" type="number" min="1" step="1024" placeholder="32768" />
               </div>
             </form>
             <div class="channel-connect-actions model-connect-actions">

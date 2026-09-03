@@ -437,6 +437,24 @@ export interface ModelPayload {
   capabilities?: string[];
 }
 
+/** 后端厂商目录（GET /api/config/vendors）的公开视图。 */
+export interface VendorModelOption {
+  id: string;
+  context_window?: number | null;
+  max_tokens?: number | null;
+  reasoning?: boolean;
+  vision?: boolean;
+}
+
+export interface VendorProfileOption {
+  id: string;
+  name: string;
+  protocol: 'openai' | 'anthropic';
+  base_url: string;
+  api_key_env: string;
+  models: VendorModelOption[];
+}
+
 export interface BrowserPageState {
   owner_hash: string;
   session_hash: string;
@@ -1636,6 +1654,7 @@ export const backendApi = {
     `/api/sites/${encodeURIComponent(siteId)}/export`, { method: 'POST', ...jsonBody({}) },
   ),
   config: () => getJSON<BackendConfig>('/api/config'),
+  configVendors: () => getJSON<{ vendors: VendorProfileOption[] }>('/api/config/vendors'),
   switchModel: (modelId: string) =>
     getJSON<BackendConfig>('/api/config/model', { method: 'POST', ...jsonBody({ model_id: modelId }) }),
   createModel: (payload: ModelPayload) =>

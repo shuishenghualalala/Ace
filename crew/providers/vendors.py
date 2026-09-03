@@ -245,6 +245,31 @@ VENDORS: dict[str, VendorProfile] = {
 
 
 # ---------------------------------------------------------------------------
+# 对外暴露（前端厂商目录）
+# ---------------------------------------------------------------------------
+
+def vendor_public_dict(vendor: VendorProfile) -> dict:
+    """厂商档案的公开视图：仅前端选型所需字段，不含 compat 内部开关与密钥。"""
+    return {
+        "id": vendor.id,
+        "name": vendor.name,
+        "protocol": vendor.protocol,
+        "base_url": vendor.base_url,
+        "api_key_env": vendor.api_key_env,
+        "models": [
+            {
+                "id": m.id,
+                "context_window": m.context_window,
+                "max_tokens": m.max_tokens,
+                "reasoning": m.reasoning,
+                "vision": m.vision,
+            }
+            for m in vendor.models
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
 # 解析函数
 # ---------------------------------------------------------------------------
 

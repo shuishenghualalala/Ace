@@ -301,13 +301,13 @@
 }
 
 .model-connect-actions .channel-connect-btn--primary:not(:disabled):not(.is-blocked):not(.is-loading) {
-  color: var(--mw-status-danger);
+  color: var(--mw-action-primary-text);
   background: var(--mw-action-primary);
   border-color: transparent;
 }
 
 .model-connect-actions .channel-connect-btn--primary:not(:disabled):not(.is-blocked):not(.is-loading):hover {
-  background: var(--mw-action-primary);
+  background: var(--mw-action-primary-hover);
 }
 
 

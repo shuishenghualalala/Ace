@@ -18,6 +18,13 @@ def create_config_router(crew, dispatcher=None) -> APIRouter:
     async def config(request: Request) -> JSONResponse:
         return JSONResponse(_visible_config_body(request))
 
+    @router.get("/api/config/vendors")
+    async def config_vendors() -> JSONResponse:
+        """厂商目录（只读）：供前端"选择厂商"下拉使用，不含密钥。"""
+        from crew.providers.vendors import VENDORS, vendor_public_dict
+
+        return JSONResponse({"vendors": [vendor_public_dict(v) for v in VENDORS.values()]})
+
     def _admin_or_403(request: Request) -> JSONResponse | None:
         try:
             require_admin(account_from_request(request), crew.config)

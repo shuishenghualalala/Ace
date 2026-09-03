@@ -462,6 +462,21 @@
   color: var(--mw-text-secondary);
 }
 
+/* 字段标题行：标题在左、提示在右（模型配置弹层）。 */
+.channel-connect-field-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--mw-space-3);
+}
+
+.channel-connect-hint--inline {
+  margin-top: 0;
+  text-align: right;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
 /* 微信扫码登录区域 */
 .channel-connect-qr {
   display: flex;

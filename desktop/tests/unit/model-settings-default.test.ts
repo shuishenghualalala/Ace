@@ -3,7 +3,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { backendApi } from '../../src/ui/backend-client';
-import { renderConfigModels } from '../../src/ui/features/config-panes';
+import { __setVendorCatalogForTest, renderConfigModels } from '../../src/ui/features/config-panes';
 import { __resetAllStoresForTest, configStore } from '../../src/ui/stores/stores';
 
 const models = [
@@ -14,6 +14,8 @@ const models = [
 beforeEach(() => {
   vi.restoreAllMocks();
   __resetAllStoresForTest();
+  // 不请求真实 Gateway，厂商目录置空（分组落入「自定义」）
+  __setVendorCatalogForTest([]);
   document.body.innerHTML = `
     <section id="settings-pane-model"></section>
   `;
