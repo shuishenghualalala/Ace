@@ -34,6 +34,14 @@ def _active_scope(feature_id: str, sequence: int = 1) -> FeatureScope:
     return scope
 
 
+# 三条核心通知通路（后台子任务/后台进程/任务恢复回合）迁为 PROMPT contributor 后常驻注册
+CORE_PROMPT_CONTRIBUTOR_IDS = {
+    "subagent.background.reminder",
+    "process.background.reminder",
+    "task.resume.reminder",
+}
+
+
 async def test_contributors_run_by_priority_and_merge_deterministically() -> None:
     registry = ContextContributorRegistry()
     calls: list[str] = []
@@ -298,7 +306,7 @@ async def test_app_uses_host_and_browser_owned_context_contributors(
         assert {
             binding.contributor.contributor_id
             for binding in app.context_contributors.bindings(ContextPhase.PROMPT)
-        } == {"wiki.agent.context"}
+        } == {"wiki.agent.context"} | CORE_PROMPT_CONTRIBUTOR_IDS
 
         envelope = Envelope.of(
             "inspect @file:notes.md @browser_tab:tab-a",
@@ -352,7 +360,7 @@ async def test_app_uses_host_and_browser_owned_context_contributors(
         assert {
             binding.contributor.contributor_id
             for binding in app.context_contributors.bindings(ContextPhase.PROMPT)
-        } == {"wiki.agent.context"}
+        } == {"wiki.agent.context"} | CORE_PROMPT_CONTRIBUTOR_IDS
     finally:
         await app.plugins.feature_runtime.deactivate(feature_id)
         await app.shutdown()
@@ -378,7 +386,10 @@ async def test_cron_context_contributor_follows_feature_flag(
             binding.contributor.contributor_id
             for binding in app.context_contributors.bindings(ContextPhase.PROMPT)
         }
-        assert prompt_ids == {"cron.trigger.reminder", "wiki.agent.context"}
+        assert prompt_ids == {
+            "cron.trigger.reminder",
+            "wiki.agent.context",
+        } | CORE_PROMPT_CONTRIBUTOR_IDS
 
         cron_report = await app.context_contributors.contribute(
             Envelope.of(
@@ -405,3 +416,185 @@ async def test_cron_context_contributor_follows_feature_flag(
         for binding in app.context_contributors.bindings(ContextPhase.PROMPT)
     }
     assert "cron.trigger.reminder" not in remaining_ids
+
+
+@pytest.mark.asyncio
+async def test_notification_contributors_registered_as_core(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """三条通知通路是核心能力：常驻注册（不挂 feature flag）、瞬时、DEGRADE。"""
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    app = build_app(
+        Config(
+            db_path=str(tmp_path / "crew.db"),
+            memory_db_path=str(tmp_path / "memory.db"),
+            cron_enabled=False,
+            api_key="",
+        ),
+        enable_team=False,
+    )
+    try:
+        bindings = {
+            binding.contributor.contributor_id: binding.contributor
+            for binding in app.context_contributors.bindings(ContextPhase.PROMPT)
+        }
+        for contributor_id in CORE_PROMPT_CONTRIBUTOR_IDS:
+            contributor = bindings[contributor_id]
+            assert contributor.phase is ContextPhase.PROMPT
+            assert contributor.persistent is False
+            assert contributor.model_visible is True
+            assert contributor.failure_policy is ContextFailurePolicy.DEGRADE
+    finally:
+        await app.shutdown()
+
+
+async def test_subagent_notification_contributor_drains_once_and_respects_collect() -> None:
+    """子任务通知 contributor：collect 摘除不重复注入，drain 每会话恰好一次。"""
+    from crew.agent.subagent.context import (
+        SubagentNotificationQueue,
+        build_subagent_notification_handler,
+    )
+
+    queue = SubagentNotificationQueue()
+    handler = build_subagent_notification_handler(queue)
+    queue.enqueue("s1", {
+        "task_id": "t1", "agent": "Alpha", "status": "completed",
+        "summary": "a", "owner_account_id": "local",
+    })
+    queue.enqueue("s1", {
+        "task_id": "t2", "agent": "Beta", "status": "completed",
+        "summary": "b", "owner_account_id": "local",
+    })
+
+    # 模型主动 collect 取走 t1 → 从待注入队列摘除
+    queue.remove("s1", "t1", "local")
+
+    env = Envelope.of("继续", session_id="s1", user_id="local")
+    result = await handler(env)
+    assert result is not None
+    assert len(result.prompt_parts) == 1
+    text = result.prompt_parts[0]
+    assert text.startswith("# 后台子任务完成通知")
+    assert "[Beta]" in text and "[Alpha]" not in text
+
+    # 排空后不重复注入
+    assert await handler(Envelope.of("继续", session_id="s1", user_id="local")) is None
+
+
+async def test_subagent_notification_contributor_member_session_key() -> None:
+    """team member 回合：drain 键取 member_session_id，与入队键（member 子会话）对齐。"""
+    from crew.agent.subagent.context import (
+        SubagentNotificationQueue,
+        build_subagent_notification_handler,
+    )
+
+    queue = SubagentNotificationQueue()
+    handler = build_subagent_notification_handler(queue)
+    queue.enqueue("team-s1::coder", {
+        "task_id": "t1", "agent": "Explore", "status": "completed",
+        "summary": "done", "owner_account_id": "local",
+    })
+
+    # member 回合 envelope 的 session_id 可能含 turn 段，drain 键必须是 member_session_id
+    env = Envelope.of(
+        "继续",
+        session_id="team-s1::turn::req-1::coder",
+        user_id="local",
+        params={"member_session_id": "team-s1::coder"},
+    )
+    result = await handler(env)
+    assert result is not None and "后台子任务完成通知" in result.prompt_parts[0]
+    assert queue.drain("team-s1::coder", "local") == []
+
+
+async def test_subagent_notification_contributor_skips_preview() -> None:
+    """上下文预览只读：不消费待注入队列。"""
+    from crew.agent.subagent.context import (
+        SubagentNotificationQueue,
+        build_subagent_notification_handler,
+    )
+
+    queue = SubagentNotificationQueue()
+    handler = build_subagent_notification_handler(queue)
+    queue.enqueue("s1", {
+        "task_id": "t1", "agent": "Explore", "status": "completed",
+        "summary": "done", "owner_account_id": "local",
+    })
+
+    preview = Envelope.of("", session_id="s1", user_id="local", params={"_context_preview": True})
+    assert await handler(preview) is None
+    # 队列未被预览消费，正式回合仍能注入
+    assert await handler(Envelope.of("继续", session_id="s1", user_id="local")) is not None
+
+
+async def test_process_notification_contributor_drains_once() -> None:
+    """进程通知 contributor：复用 format_process_notification，drain 每会话恰好一次。"""
+    from crew.tools.process_registry import (
+        ProcessRegistry,
+        build_process_notification_handler,
+    )
+
+    registry = ProcessRegistry()
+    handler = build_process_notification_handler(registry)
+    registry._pending[("local", "s1")] = [{
+        "type": "completion", "session_id": "proc_1", "command": "echo hi",
+        "exit_code": 0, "output": "hi",
+    }]
+
+    result = await handler(Envelope.of("继续", session_id="s1", user_id="local"))
+    assert result is not None
+    text = result.prompt_parts[0]
+    assert text.startswith("# 后台进程通知")
+    assert "proc_1" in text and "退出码 0" in text
+
+    assert await handler(Envelope.of("继续", session_id="s1", user_id="local")) is None
+
+
+async def test_process_notification_contributor_team_session_key() -> None:
+    """team 回合：drain 键取 team_session_id（与 spawn 时 current_session_id 一致）。"""
+    from crew.tools.process_registry import (
+        ProcessRegistry,
+        build_process_notification_handler,
+    )
+
+    registry = ProcessRegistry()
+    handler = build_process_notification_handler(registry)
+    registry._pending[("local", "team-s1")] = [{
+        "type": "completion", "session_id": "proc_2", "command": "echo hi",
+        "exit_code": 0, "output": "hi",
+    }]
+
+    env = Envelope.of(
+        "继续",
+        session_id="team-s1::leader",
+        user_id="local",
+        params={"team_session_id": "team-s1"},
+    )
+    result = await handler(env)
+    assert result is not None and "proc_2" in result.prompt_parts[0]
+
+
+async def test_task_notification_contributor_formats_resume_turn() -> None:
+    """任务恢复回合 contributor：读 envelope.params 的 task_notifications 产出 reminder。"""
+    from crew.tasks.context import contribute_task_notifications
+
+    task = {
+        "task_id": "t-shell-1", "kind": "shell", "status": "completed",
+        "result": "构建成功",
+    }
+    env = Envelope.of(
+        "后台任务已完成，请根据结果继续原任务。",
+        session_id="s1",
+        channel="task",
+        params={"internal_task_resume": True, "task_notifications": [task]},
+    )
+    result = await contribute_task_notifications(env)
+    assert result is not None
+    text = result.prompt_parts[0]
+    assert text.startswith("# 后台任务完成通知")
+    assert "## t-shell-1 kind=shell status=completed" in text
+    assert "构建成功" in text
+
+    # 无通知的回合不产生任何输出
+    assert await contribute_task_notifications(Envelope.of("你好", session_id="s1")) is None

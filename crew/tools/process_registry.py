@@ -10,8 +10,9 @@ gateway watcher 路由 / 跨 session 全局熔断器，只保留本地进程真�
   - notify_on_complete：进程退出时排队一次完成通知
 
 通知投递复用 Crew 既有通路：reader 线程把事件写入 per-session 待通知队列，
-app.handle() 每轮 drain_for_session() 取出 → envelope.params → runtime 拼进
-<system-reminder>，与后台子 agent 通知保持一致。
+PROMPT 阶段 Context Contributor（见本文件 build_process_notification_handler）
+在 agent 回合内 drain_for_session() 取出 → 拼进 <system-reminder>，
+与后台子任务通知走同一机制。
 """
 
 from __future__ import annotations
@@ -31,8 +32,10 @@ from pathlib import Path
 from typing import Any
 
 import crew as _crew_pkg
+from crew.core.envelope import Envelope
 from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
 from crew.core.runctx import current_owner_account_id, normalize_owner_account_id
+from crew.features.context import ContextContribution
 from crew.security.launch import (
     ProcessLaunch,
     audit_execution_result,
@@ -1091,6 +1094,47 @@ def format_process_notification(evt: dict[str, Any]) -> str | None:
         f"[重要] 后台进程 {sid} 已结束（退出码 {exit_code}）。\n"
         f"命令: {cmd}\n输出:\n{out}"
     )
+
+
+def format_process_notifications(pending: object) -> str:
+    """把后台进程的 watch/完成通知格式化为可注入上下文的 system-reminder 块。"""
+    if not isinstance(pending, list) or not pending:
+        return ""
+    lines = [
+        "# 后台进程通知",
+        "以下后台进程（你之前用 terminal(background=true) 启动）有新动态：",
+    ]
+    for evt in pending:
+        if not isinstance(evt, dict):
+            continue
+        text = format_process_notification(evt)
+        if text:
+            lines.append(f"\n{text}")
+    return "\n".join(lines)
+
+
+def build_process_notification_handler(registry: "ProcessRegistry"):
+    """构造 PROMPT 阶段 contributor handler：drain 本回合会话的待通知事件。
+
+    drain 键与入队键对齐：入队用 spawn 时的 current_session_id（team 回合即
+    团队会话），故 team 成员回合优先取 team_session_id，其余取 envelope.session_id。
+    上下文预览（preview_context）只读不消费，直接跳过。
+    """
+
+    async def _handler(envelope: Envelope) -> ContextContribution | None:
+        if envelope.params.get("_context_preview"):
+            return None
+        notify_session = str(
+            envelope.params.get("team_session_id") or envelope.session_id
+        )
+        block = format_process_notifications(
+            registry.drain_for_session(notify_session, owner_account_id=envelope.user_id)
+        )
+        if not block:
+            return None
+        return ContextContribution(prompt_parts=(block,))
+
+    return _handler
 
 
 # ---------------------------------------------------------------------------

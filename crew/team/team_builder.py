@@ -36,7 +36,7 @@ class TeamMemberFactory:
         external_store_provider: Callable[[], Any | None] | None,
         interaction_bridge: Any | None,
         provider_for_member: Callable[[TeamMemberSpec, str], LLMProvider],
-        drain_subagent_notifications: Callable[[str, str], list] | None,
+        context_contributors: Any | None = None,
     ) -> None:
         self.base_registry = base_registry
         self.session_store = session_store
@@ -47,7 +47,7 @@ class TeamMemberFactory:
         self.external_store_provider = external_store_provider
         self.interaction_bridge = interaction_bridge
         self.provider_for_member = provider_for_member
-        self.drain_subagent_notifications = drain_subagent_notifications
+        self.context_contributors = context_contributors
 
     def _external_store(self) -> Any | None:
         if callable(self.external_store_provider):
@@ -287,5 +287,5 @@ class TeamMemberFactory:
             max_iterations=self.config.max_iterations,
             executor=executor,
             agent_id=spec.member_id,
-            subagent_drain_fn=self.drain_subagent_notifications,
+            context_contributors=self.context_contributors,
         )

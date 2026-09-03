@@ -189,7 +189,7 @@ class InProcessTeamManager(TeamManager):
         external_store: Any | None = None,
         interaction_bridge: Any | None = None,
         kanban_store: Any | None = None,
-        drain_subagent_notifications: Callable[[str, str], list] | None = None,
+        context_contributors: Any | None = None,
         provider_for_owner: Callable[[str], LLMProvider] | None = None,
         provider_for_member_model: Callable[[str, str], LLMProvider] | None = None,
     ) -> None:
@@ -209,9 +209,10 @@ class InProcessTeamManager(TeamManager):
         self.external_store = external_store
         self.interaction_bridge = interaction_bridge
         self.kanban_store = kanban_store
-        # drain team member 后台子 agent 通知的回调（app.pop_subagent_notifications）。
-        # team member 派活时由 SingleAgent.run 调用，把完成通知注入 member 本轮上下文。
-        self.drain_subagent_notifications = drain_subagent_notifications
+        # 共享的 Context Contributor 注册表：注入给 member agent，使 PROMPT 阶段
+        # contributor（如后台子任务完成通知）在 member 回合内求值，覆盖 member
+        # 不经 app.handle 的旁路。
+        self.context_contributors = context_contributors
         self._teams: dict[TeamKey, Team] = {}
         self._plans: dict[TeamKey, TeamPlan] = {}
         self._plan_workflows: dict[TeamKey, str] = {}
@@ -256,7 +257,7 @@ class InProcessTeamManager(TeamManager):
             external_store_provider=lambda: self.external_store,
             interaction_bridge=self.interaction_bridge,
             provider_for_member=lambda spec, owner: self._provider_for_member(spec, owner),
-            drain_subagent_notifications=self.drain_subagent_notifications,
+            context_contributors=self.context_contributors,
         )
         self._workflow_runtime = TeamWorkflowRuntime(self)
         self.turn_router = TeamTurnRouter()

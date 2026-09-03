@@ -16,7 +16,7 @@ import asyncio
 import base64
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.runctx import (
@@ -144,62 +144,6 @@ async def _read_attachment(path: str) -> str:
     return f"[二进制文件: {p.name}, 大小: {size} 字节, 类型: {ext or '未知'}, 完整路径: {path}]"
 
 
-def _format_subagent_notifications(pending: object) -> str:
-    """把后台子 agent 的完成结果格式化为可注入上下文的 system-reminder 块。"""
-    if not isinstance(pending, list) or not pending:
-        return ""
-    lines = [
-        "# 后台子任务完成通知",
-        "以下后台子智能体（你之前用 run_agent / delegate_task 的 run_in_background 启动）已完成，结果如下：",
-    ]
-    for r in pending:
-        if not isinstance(r, dict):
-            continue
-        agent = r.get("agent", "子智能体")
-        status = r.get("status", "")
-        dur = r.get("duration_seconds", "")
-        summary = str(r.get("summary", "")).strip()
-        lines.append(f"\n## [{agent}] status={status} 用时={dur}s\n{summary}")
-    return "\n".join(lines)
-
-
-def _format_process_notifications(pending: object) -> str:
-    """把后台进程的 watch/完成通知格式化为可注入上下文的 system-reminder 块。"""
-    if not isinstance(pending, list) or not pending:
-        return ""
-    from crew.tools.process_registry import format_process_notification
-
-    lines = [
-        "# 后台进程通知",
-        "以下后台进程（你之前用 terminal(background=true) 启动）有新动态：",
-    ]
-    for evt in pending:
-        if not isinstance(evt, dict):
-            continue
-        text = format_process_notification(evt)
-        if text:
-            lines.append(f"\n{text}")
-    return "\n".join(lines)
-
-
-def _format_task_notifications(pending: object) -> str:
-    if not isinstance(pending, list) or not pending:
-        return ""
-    lines = [
-        "# 后台任务完成通知",
-        "以下后台任务已结束。请读取结果，判断是否继续原任务、修复失败或向用户汇报。",
-    ]
-    for task in pending:
-        if not isinstance(task, dict):
-            continue
-        lines.append(
-            "\n## "
-            f"{task.get('task_id', '')} kind={task.get('kind', '')} status={task.get('status', '')}\n"
-            f"{task.get('result') or task.get('error') or '(无结果)'}"
-        )
-    return "\n".join(lines)
-
-
 def _format_client_intent(envelope: Envelope) -> str:
     """把前端会话调度意图格式化为仅供模型读取的本轮提醒。"""
     intent = str(envelope.params.get("client_intent") or "").strip()
@@ -249,7 +193,6 @@ class SingleAgent(Agent):
         evolution_full_cycle: bool = False,
         evolution_visible: bool = False,
         evolution_queue: Any = None,
-        subagent_drain_fn: Callable[[str, str], list] | None = None,
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -287,8 +230,6 @@ class SingleAgent(Agent):
         # 工具授权与披露分离：Wiki 使用 direct，其余默认 progressive。
         self.tool_disclosure_mode = ToolDisclosureMode(tool_disclosure_mode)
         self.agent_id = safe_path_segment(agent_id, "default")
-        # team member 派活前 drain 自己后台通知的回调（仅 team member 注入；主/子 agent 为 None）
-        self.subagent_drain_fn = subagent_drain_fn
         # 装配期会话模型回退说明：首轮 run 推 status，避免用户只看 UI 绑定误以为已切换成功。
         self.model_fallback_notice = str(model_fallback_notice or "").strip() or None
         self.model_capabilities = (
@@ -470,17 +411,8 @@ class SingleAgent(Agent):
                 f"一次性 confirmation_id={wiki_confirmation_id}。"
                 "仅将此 ID 传给上一回合对应的 Wiki 执行工具，不得改动目标或参数。"
             )
-        # 后台子 agent 完成通知：自动注入本轮上下文（无需模型主动 collect）
-        bg_block = _format_subagent_notifications(envelope.params.get("subagent_notifications"))
-        if bg_block:
-            reminder_parts.append(bg_block)
-        # 后台进程 watch/完成通知：同样自动注入本轮上下文
-        proc_block = _format_process_notifications(envelope.params.get("process_notifications"))
-        if proc_block:
-            reminder_parts.append(proc_block)
-        task_block = _format_task_notifications(envelope.params.get("task_notifications"))
-        if task_block:
-            reminder_parts.append(task_block)
+        # 后台子任务 / 后台进程 / 恢复回合任务完成通知已由各自的 PROMPT 阶段
+        # Context Contributor 产出并汇入 _context_prompt_parts，这里不再按魔法 key 特判。
         # Feature-owned Context Contributors 已在 Host 请求阶段按优先级产出。
         context_parts = envelope.params.get("_context_prompt_parts")
         if isinstance(context_parts, (list, tuple)):
@@ -664,6 +596,9 @@ class SingleAgent(Agent):
                 "query": "",
                 "workspace_instructions": workspace_instructions,
                 "workspace_root_path": workspace_root_path,
+                # 预览只读：通知类 contributor（后台子任务/进程）据此跳过 drain，
+                # 避免预览消费掉本应注入正式回合的待通知结果。
+                "_context_preview": True,
             },
             user_id=owner,
             workspace_id=workspace_id or "default",
@@ -749,16 +684,12 @@ class SingleAgent(Agent):
 
         current_session_id.set(task_sid)
         current_display_session_id.set(display_sid or task_sid)
-        # team member 执行工具时，后台子 agent 通知按 member 子会话隔离，
+        # team member 执行工具时，后台子任务通知按 member 子会话隔离，
         # 使完成通知能回到发起 member；主 agent 该值为空（回退 current_session_id）。
+        # 完成结果的待注入队列由 subagent 模块的 PROMPT contributor drain（见
+        # crew/agent/subagent/context.py），drain 键与这里的入队键保持一致。
         notify_session = str(envelope.params.get("member_session_id") or "")
         current_subagent_notify_session.set(notify_session)
-        # team member 派活前 drain 自己的后台完成通知注入本轮上下文
-        #（team 模式下 member.run 不经 app.handle 的 drain；主 agent 无 member_session_id）
-        if notify_session and self.subagent_drain_fn is not None:
-            _pending = self.subagent_drain_fn(notify_session, envelope.user_id)
-            if _pending:
-                envelope.params["subagent_notifications"] = _pending
         current_request_id.set(envelope.request_id)
         current_parent_task_id.set(str(envelope.params.get("sidechain_task_id") or ""))
         current_workspace_id.set(envelope.workspace_id)

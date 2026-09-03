@@ -30,9 +30,12 @@ from crew.agent.executor import create_executor
 from crew.agent.external.store import ExternalAgentStore
 from crew.agent.external.tools import register_external_agent_tools
 from crew.agent.runtime import SingleAgent
+from crew.agent.subagent.context import (
+    SubagentNotificationQueue,
+    build_subagent_notification_handler,
+)
 from crew.agent.subagent.definition import build_preset_spec
 from crew.core.envelope import Envelope, ResponseChunk
-from crew.core.runctx import normalize_owner_account_id
 from crew.core.interfaces import Agent, LLMProvider, MemoryProvider, SessionStore, WorkspaceStore
 from crew.evolution import EvolutionManager, EvolutionQueue
 from crew.features import (
@@ -87,9 +90,9 @@ from crew.tools.policy import (
     select_requested_tools,
 )
 from crew.tasks import TaskRuntime
+from crew.tasks.context import contribute_task_notifications
 
 log = get_logger("app")
-OwnerSessionKey = tuple[str, str]
 
 _MODEL_API_KEY_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MODEL_API_KEY_ENV_EXAMPLES = "CREW_API_KEY、OPENAI_API_KEY、ANTHROPIC_API_KEY 或 *_API_KEY*"
@@ -207,7 +210,13 @@ class AgentManager:
         raw = json.dumps(agent_config, ensure_ascii=False, sort_keys=True)
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
-    def get(self, session_id: str, agent_config: dict | None = None, owner_account_id: str = "") -> Agent:
+    def get(
+        self,
+        session_id: str,
+        agent_config: dict | None = None,
+        *,
+        owner_account_id: str,
+    ) -> Agent:
         if not self._accepting:
             raise RuntimeError("AgentManager 已关闭")
         config = agent_config or {}
@@ -225,10 +234,11 @@ class AgentManager:
         self,
         session_id: str,
         agent_config: dict | None = None,
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> AsyncIterator[Agent]:
         """Lease one concrete cached Agent for the complete duration of a turn."""
-        agent = self.get(session_id, agent_config, owner_account_id)
+        agent = self.get(session_id, agent_config, owner_account_id=owner_account_id)
         identity = id(agent)
         self._lease_counts[identity] = self._lease_counts.get(identity, 0) + 1
         self._leases_drained.clear()
@@ -245,14 +255,14 @@ class AgentManager:
             return self._factory(config)
         return self._factory()
 
-    def peek(self, session_id: str, owner_account_id: str = "") -> Agent | None:
+    def peek(self, session_id: str, owner_account_id: str) -> Agent | None:
         """取已缓存的 Agent（不创建）。用于 steer/interrupt 只作用于运行中的会话。"""
         for key, agent in self._cache.items():
             if key[0] == owner_account_id and key[1] == session_id:
                 return agent
         return None
 
-    def drop(self, session_id: str, owner_account_id: str = "") -> None:
+    def drop(self, session_id: str, owner_account_id: str) -> None:
         for key in list(self._cache):
             if key[0] == owner_account_id and key[1] == session_id:
                 self._evict_key(key)
@@ -493,7 +503,10 @@ class CrewApp:
             on_event=self._on_task_event,
             on_completion=self._on_task_completion,
         )
-        from crew.tools.process_registry import process_registry
+        from crew.tools.process_registry import (
+            build_process_notification_handler,
+            process_registry,
+        )
 
         process_registry.configure_task_runtime(self.tasks)
         self.external_agents: ExternalAgentStore | None = None
@@ -504,6 +517,10 @@ class CrewApp:
         self.execution_drivers = plugins.feature_runtime.execution_drivers
         self.context_contributors = plugins.feature_runtime.context_contributors
         self._builtin_feature_scopes: list[FeatureScope] = []
+        # 后台子任务完成结果的待注入队列（按父 session 分键）：实现在
+        # crew/agent/subagent/context.py，完成回调入队、PROMPT contributor drain、
+        # collect_subagent 摘除三端共享同一实例。
+        self._subagent_notifications = SubagentNotificationQueue()
         self._register_execution_driver_scope(
             "core.agent-driver",
             ExecutionDriver(
@@ -546,6 +563,45 @@ class CrewApp:
                 description="Normalized session source and delivery context",
             ),
         )
+        # 后台结果 → 模型可见 reminder：三条核心通知通路（子任务/进程/任务恢复回合）
+        # 均为 PROMPT 阶段瞬时 contributor，队列所有权在来源模块；priority 低于
+        # cron(50)/wiki(100)，保持 reminder 内原有相对次序。
+        self._register_context_contributor_scope(
+            "core.subagent-context",
+            ContextContributor(
+                contributor_id="subagent.background.reminder",
+                handler=build_subagent_notification_handler(self._subagent_notifications),
+                phase=ContextPhase.PROMPT,
+                priority=10,
+                model_visible=True,
+                persistent=False,
+                description="Background subagent completion notifications",
+            ),
+        )
+        self._register_context_contributor_scope(
+            "core.process-context",
+            ContextContributor(
+                contributor_id="process.background.reminder",
+                handler=build_process_notification_handler(process_registry),
+                phase=ContextPhase.PROMPT,
+                priority=20,
+                model_visible=True,
+                persistent=False,
+                description="Background process watch/completion notifications",
+            ),
+        )
+        self._register_context_contributor_scope(
+            "core.task-context",
+            ContextContributor(
+                contributor_id="task.resume.reminder",
+                handler=contribute_task_notifications,
+                phase=ContextPhase.PROMPT,
+                priority=30,
+                model_visible=True,
+                persistent=False,
+                description="Completed background task framing for resume turns",
+            ),
+        )
         # 对话级 Plan 模式管理器（由 build_app 装配后赋值）
         self.plan_manager = None
         # 专用 Wiki Agent 会话管理器（由 build_app 装配后赋值）
@@ -565,8 +621,6 @@ class CrewApp:
         self.subagent_tasks = None
         # 后台子 agent 的 asyncio 任务强引用（防 GC），完成后自动移除
         self._subagent_bg_tasks: set[asyncio.Task] = set()
-        # 后台子 agent 完成结果的待通知队列（按父 session），下一轮注入主 agent 上下文
-        self._subagent_pending: dict[OwnerSessionKey, list[dict]] = {}
         # 异步进化队列：按 session 串行处理 evolution 任务，结果在下一轮交互中体现
         self._evolution_queue = EvolutionQueue()
         # App-owned global Providers retired by model switching wait for every task that
@@ -880,7 +934,7 @@ class CrewApp:
                 if asyncio.iscoroutine(value):
                     await value
 
-    def _build_fallback_providers(self, owner_account_id: str = "") -> list[LLMProvider]:
+    def _build_fallback_providers(self, owner_account_id: str) -> list[LLMProvider]:
         """按 config.fallback_models 预建备用 provider（跳过当前激活模型与无 key 的）。
 
         解析 profile 走 owner 视图，避免 fallback 列表里的私有模型 id 被当成「不存在」。
@@ -911,7 +965,7 @@ class CrewApp:
             "model_profile_id": "inherit",
         }
 
-    def _session_agent_config(self, session_id: str, owner_account_id: str = "") -> dict:
+    def _session_agent_config(self, session_id: str, owner_account_id: str) -> dict:
         getter = getattr(self.session_store, "get_agent_config", None)
         if callable(getter):
             stored = getter(session_id, owner_account_id=owner_account_id)
@@ -1104,7 +1158,7 @@ class CrewApp:
         self,
         agent_config: dict | None = None,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> SingleAgent:
         """按会话配置装配主 Agent。
 
@@ -1299,7 +1353,7 @@ class CrewApp:
         inject_skills: bool = False,
         include_optional_skills: bool = False,
         context_window_override: int | None = None,
-        owner_account_id: str = "",
+        owner_account_id: str,
         model_fallback_notice: str | None = None,
         owned_providers: list[LLMProvider] | None = None,
         model_capabilities: list[str] | None = None,
@@ -1500,6 +1554,7 @@ class CrewApp:
 
         cfg = self.config
         parent_user_type = (current_user_type.get() or cfg.access_control.user_type).strip().lower()
+        owner = str(current_owner_account_id.get() or "").strip()
         if parent_user_type not in ("external", "internal"):
             parent_user_type = cfg.access_control.user_type
 
@@ -1626,6 +1681,7 @@ class CrewApp:
             context_window_override=sub_profile.context_window if sub_profile else None,
             owned_providers=[provider] if sub_profile is not None else None,
             model_capabilities=effective_capabilities,
+            owner_account_id=owner,
         )
 
     def _register_execution_driver_scope(
@@ -1754,7 +1810,7 @@ class CrewApp:
                 current_push_fn.reset(token)
 
     # ---- 可控性：gateway dispatcher 经此路由到运行中 Agent 的 TurnControl ----
-    def steer(self, session_id: str, text: str, owner_account_id: str = "") -> bool:
+    def steer(self, session_id: str, text: str, owner_account_id: str) -> bool:
         """向运行中的会话注入补充指令。无运行中 Agent 则返回 False（dispatcher 降级缓存）。"""
         agent = self.agents.peek(session_id, owner_account_id=owner_account_id)
         fn = getattr(agent, "steer", None)
@@ -1778,7 +1834,13 @@ class CrewApp:
                 log.exception("dynamic_kanban steer 失败 session=%s", session_id)
         return False
 
-    def interrupt(self, session_id: str, message: str | None = None, owner_account_id: str = "") -> bool:
+    def interrupt(
+        self,
+        session_id: str,
+        message: str | None = None,
+        *,
+        owner_account_id: str,
+    ) -> bool:
         """请求运行中的会话在安全点优雅中断。无运行中 Agent 则返回 False。"""
         agent = self.agents.peek(session_id, owner_account_id=owner_account_id)
         fn = getattr(agent, "interrupt", None)
@@ -2208,13 +2270,13 @@ class CrewApp:
             except Exception:  # noqa: BLE001
                 log.exception("会话过期定时器异常")
 
-    def owner_model_profiles(self, owner_account_id: str = "") -> dict[str, ModelProfile]:
+    def owner_model_profiles(self, owner_account_id: str) -> dict[str, ModelProfile]:
         return self.config.owner_model_profiles(owner_account_id)
 
     def resolve_session_context_window(
         self,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> int:
         """会话绑定模型的上下文窗口。
 
@@ -2241,7 +2303,7 @@ class CrewApp:
     async def preview_session_context(
         self,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any] | None:
         """返回会话打开时的 builtin request-view 预估，不写入最近一次实际 usage。"""
         owner = str(owner_account_id or "").strip()
@@ -2275,17 +2337,17 @@ class CrewApp:
                 workspace_root_path=workspace_root_path,
             )
 
-    def owner_active_model_profile(self, owner_account_id: str = "") -> ModelProfile:
+    def owner_active_model_profile(self, owner_account_id: str) -> ModelProfile:
         profile = self.config.owner_active_model_profile(owner_account_id)
         if profile is not None:
             return profile
         return self.config.active_model
 
-    def owner_default_model_profile(self, owner_account_id: str = "") -> ModelProfile:
+    def owner_default_model_profile(self, owner_account_id: str) -> ModelProfile:
         """返回 owner 默认兜底模型；active 命名仅作为旧 API 兼容保留。"""
         return self.owner_active_model_profile(owner_account_id)
 
-    def owner_team_provider(self, owner_account_id: str = "") -> LLMProvider:
+    def owner_team_provider(self, owner_account_id: str) -> LLMProvider:
         """Return the owner-default Provider used by Team planning and built-in members.
 
         Team Agents survive across HTTP/WS requests, so their Provider cannot use the
@@ -2308,7 +2370,7 @@ class CrewApp:
 
     def owner_team_member_model_provider(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         model_profile_id: str = "",
     ) -> LLMProvider:
         """Return the App-owned Provider for one explicitly bound Team member."""
@@ -2328,7 +2390,7 @@ class CrewApp:
         self._owner_team_member_model_providers[key] = provider
         return provider
 
-    def _invalidate_owner_team_provider(self, owner_account_id: str = "") -> None:
+    def _invalidate_owner_team_provider(self, owner_account_id: str) -> None:
         owner = str(owner_account_id or "").strip()
         if owner:
             provider = self._owner_team_providers.pop(owner, None)
@@ -2368,7 +2430,7 @@ class CrewApp:
     @asynccontextmanager
     async def owner_provider(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> AsyncIterator[LLMProvider]:
         """Yield the owner-default Provider for a request-scoped auxiliary task.
 
@@ -2404,12 +2466,12 @@ class CrewApp:
                             type(provider).__name__,
                         )
 
-    def owner_public_model_options(self, owner_account_id: str = "") -> list[dict[str, Any]]:
+    def owner_public_model_options(self, owner_account_id: str) -> list[dict[str, Any]]:
         return self.config.owner_public_model_options(owner_account_id)
 
     def owner_visible_model_profiles(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         *,
         include_builtin_profiles: bool = True,
     ) -> list[ModelProfile]:
@@ -2418,7 +2480,7 @@ class CrewApp:
             include_builtin_profiles=include_builtin_profiles,
         )
 
-    def use_model(self, model_id: str, *, owner_account_id: str = "") -> ModelProfile:
+    def use_model(self, model_id: str, *, owner_account_id: str) -> ModelProfile:
         """设置默认兜底模型；Session 的显式模型绑定保持不变。"""
         owner = str(owner_account_id or "").strip()
         if owner:
@@ -2439,7 +2501,8 @@ class CrewApp:
             old_provider = self.provider
             self.provider = build_provider(self.config)
             self.agents.clear()
-            self._invalidate_owner_team_provider()
+            self._invalidate_owner_team_provider(owner_account_id="")
+
             if self.team is not None:
                 self.team.provider = self.provider
             if self.dynamic_kanban is not None:
@@ -2461,7 +2524,7 @@ class CrewApp:
         api_key_env: str,
         api_key: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> str:
         """把用户填写的 api_key 写入 .env，返回实际 env 文件路径。
 
@@ -2513,7 +2576,7 @@ class CrewApp:
             "overwrite_shared_key: true 明确覆盖。"
         )
 
-    def add_model(self, payload: dict, *, owner_account_id: str = "") -> ModelProfile:
+    def add_model(self, payload: dict, *, owner_account_id: str) -> ModelProfile:
         """新增模型 profile 并持久化。
 
         Args:
@@ -2589,7 +2652,7 @@ class CrewApp:
         log.info("新增模型 profile: %s (model=%s)", profile.id, profile.model)
         return profile
 
-    def update_model(self, model_id: str, payload: dict, *, owner_account_id: str = "") -> ModelProfile:
+    def update_model(self, model_id: str, payload: dict, *, owner_account_id: str) -> ModelProfile:
         """更新已存在的模型 profile 并持久化。
 
         若更新目标是当前激活模型，会重建 Provider 并清空 Agent 缓存（与 use_model 对齐）。
@@ -2684,7 +2747,7 @@ class CrewApp:
             # mutable profile contents. Clear even for a non-active shared
             # model because existing sessions may be explicitly bound to it.
             self.agents.clear()
-            self._invalidate_owner_team_provider()
+            self._invalidate_owner_team_provider(owner_account_id="")
 
         # 激活模型变更 → 重建 Provider + 清缓存，让下一轮对话立即生效
         if active_model_id == model_id and not owner:
@@ -2702,7 +2765,7 @@ class CrewApp:
         log.info("更新模型 profile: %s (model=%s)", profile.id, profile.model)
         return profile
 
-    def remove_model(self, model_id: str, *, owner_account_id: str = "") -> dict:
+    def remove_model(self, model_id: str, *, owner_account_id: str) -> dict:
         """删除模型 profile 并持久化。
 
         - 删除激活模型时：自动切到剩余的第一个 profile，重建 Provider + 清缓存。
@@ -2769,7 +2832,7 @@ class CrewApp:
             self._invalidate_owner_team_provider(owner)
         else:
             cfg.persist_model_profiles()
-            self._invalidate_owner_team_provider()
+            self._invalidate_owner_team_provider(owner_account_id="")
         # Cache keys only contain the selected profile id, not mutable profile contents.
         # A deleted non-active profile can still be pinned by an existing session.
         if owner:
@@ -2786,7 +2849,7 @@ class CrewApp:
     def promote_pending_model_if_idle(
         self,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         *,
         queue_depth: int = 0,
         running_depth: int = 0,
@@ -2812,7 +2875,7 @@ class CrewApp:
         self,
         session_id: str,
         model_profile_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         *,
         busy: bool,
     ) -> dict:
@@ -2850,7 +2913,7 @@ class CrewApp:
     def read_session_model_binding(
         self,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict:
         from crew.state.session_model import read_binding
 
@@ -2901,13 +2964,10 @@ class CrewApp:
             return None
 
     def _on_subagent_background_done(self, session_id: str, result: dict) -> None:
-        """后台子 agent 完成回调（在事件循环内同步调用）：入队 + 实时推送。"""
-        # 1) 入队，供下一轮 handle() 注入主 agent 上下文（限长，防无限堆积）
-        key = self._owner_session_key(session_id, normalize_owner_account_id(result.get("owner_account_id")))
-        queue = self._subagent_pending.setdefault(key, [])
-        queue.append(result)
-        if len(queue) > 20:
-            del queue[:-20]
+        """后台子任务完成回调（在事件循环内同步调用）：入队 + 实时推送。"""
+        # 1) 入队，由 PROMPT contributor（subagent.background.reminder）在下一回合
+        #    drain 注入主 agent / 发起 member 的上下文（队列限长见 SubagentNotificationQueue）
+        self._subagent_notifications.enqueue(session_id, result)
         # 2) 实时推送（best-effort，有活跃 WS 时；push_fn 为协程，fire-and-forget）
         if self._push_fn is not None:
             label = result.get("agent", "子智能体")
@@ -2923,47 +2983,6 @@ class CrewApp:
                     asyncio.ensure_future(fut)
             except RuntimeError:
                 pass  # 无运行中事件循环则跳过
-
-    @staticmethod
-    def _owner_session_key(session_id: str, owner_account_id: str) -> OwnerSessionKey:
-        return owner_account_id, session_id
-
-    def _on_subagent_collected(self, session_id: str, task_id: str, owner_account_id: str) -> None:
-        """模型已主动 collect 取走某后台结果 → 从待注入队列移除，避免下一轮重复注入。"""
-        key = self._owner_session_key(session_id, owner_account_id)
-        queue = self._subagent_pending.get(key)
-        if not queue:
-            return
-        remaining = [r for r in queue if r.get("task_id") != task_id]
-        if remaining:
-            self._subagent_pending[key] = remaining
-        else:
-            self._subagent_pending.pop(key, None)
-
-    def _drain_subagent_notifications(self, envelope: Envelope) -> None:
-        """把该 session 待通知的后台子任务结果取出，注入 envelope.params 供内核注入上下文。"""
-        pending = self.pop_subagent_notifications(envelope.session_id, envelope.user_id)
-        if pending:
-            envelope.params["subagent_notifications"] = pending
-
-    def pop_subagent_notifications(self, session_id: str, owner_account_id: str = "") -> list:
-        """取出并清空该 session 待通知的后台子任务结果。
-
-        供 team member 派活前 drain：让发起 delegate_task/run_agent 后台的 member
-        在下一轮执行时看到完成通知（team 模式下 member.run 不经 app.handle 的 drain）。
-        """
-        return self._subagent_pending.pop(
-            self._owner_session_key(session_id, owner_account_id),
-            None,
-        ) or []
-
-    def _drain_process_notifications(self, envelope: Envelope) -> None:
-        """把该 session 后台进程的 watch/完成通知取出，注入 envelope.params。"""
-        from crew.tools.process_registry import process_registry
-
-        pending = process_registry.drain_for_session(envelope.session_id, owner_account_id=envelope.user_id)
-        if pending:
-            envelope.params["process_notifications"] = pending
 
     async def _run_default_execution_driver(
         self,
@@ -3118,8 +3137,6 @@ class CrewApp:
                         "外部智能体功能已在配置中关闭",
                     )
                     return
-            self._drain_subagent_notifications(envelope)
-            self._drain_process_notifications(envelope)
             if self.execution_drivers.get(envelope.mode) is not None:
                 async for chunk in self.execution_drivers.dispatch(envelope):
                     yield chunk
@@ -3427,7 +3444,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     if not wiki_provider_is_explicit:
         from crew.core.runctx import current_provider
 
-        def _wiki_runtime_provider(owner_account_id: str = "") -> LLMProvider:
+        def _wiki_runtime_provider(owner_account_id: str) -> LLMProvider:
             session_provider = current_provider.get()
             if session_provider is not None:
                 return session_provider
@@ -3534,7 +3551,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         launch_background=_launch_background,
         on_background_done=app._on_subagent_background_done,
         background_capacity=lambda: len(app._subagent_bg_tasks) < cfg.subagent_max_concurrent,
-        on_collected=app._on_subagent_collected,
+        on_collected=app._subagent_notifications.remove,
     )
 
     # cron：任务存储 + 引擎 + 暴露给 agent 的工具
@@ -3707,7 +3724,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
                 external_store=app.external_agents,
                 interaction_bridge=app.interaction_bridge,
                 kanban_store=dk_store,
-                drain_subagent_notifications=app.pop_subagent_notifications,
+                context_contributors=app.context_contributors,
                 provider_for_owner=app.owner_team_provider,
                 provider_for_member_model=app.owner_team_member_model_provider,
             )
