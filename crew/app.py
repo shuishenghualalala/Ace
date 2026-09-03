@@ -44,9 +44,11 @@ from crew.features import (
     ContextContributor,
     ContextPhase,
     ExecutionDriver,
-    FeatureGeneration,
+    FeatureDefinition,
     FeatureScope,
+    FeatureState,
     FeatureStopPolicy,
+    run_async_compat,
 )
 from crew.gateway.dispatcher import BusyMode, SessionDispatcher
 from crew.gateway.helpers import session_external_agent_id
@@ -1684,31 +1686,65 @@ class CrewApp:
             owner_account_id=owner,
         )
 
+    def _install_builtin_feature(self, definition: FeatureDefinition) -> FeatureScope:
+        """声明一个内置 Feature 并经共享 FeatureRuntime 激活。
+
+        组合根的内置贡献不再手写 FeatureScope，而是声明 FeatureDefinition
+        交给 FeatureRuntime 事务式激活——启动审计与 dump-features 因此覆盖
+        组合根装配的全部能力。返回活跃 Generation 的 scope，供应用关闭时
+        按逆序 stop（关闭路径不变）。
+        """
+        record = run_async_compat(self.plugins.feature_runtime.activate(definition))
+        if record.state is not FeatureState.ACTIVE or record.scope is None:
+            raise RuntimeError(
+                f"内置 Feature 激活失败：{definition.feature_id} "
+                f"state={record.state} error={record.error}"
+            )
+        self._builtin_feature_scopes.append(record.scope)
+        return record.scope
+
+    @staticmethod
+    def _builtin_feature_required(feature_id: str) -> bool:
+        """core./host./gateway. 前缀的能力是产品运行必需；product.* 可由产品策略停用。"""
+        return not feature_id.startswith("product.")
+
     def _register_execution_driver_scope(
         self,
         feature_id: str,
         *drivers: ExecutionDriver,
     ) -> FeatureScope:
-        """Publish synchronous composition-root adapters as one owned Generation."""
-        scope = FeatureScope(FeatureGeneration(feature_id, 1))
-        for driver in drivers:
-            self.execution_drivers.register(scope, driver)
-        scope.activate()
-        self._builtin_feature_scopes.append(scope)
-        return scope
+        """Declare execution drivers as one feature and activate it via the runtime."""
+
+        def install(ctx) -> None:
+            for driver in drivers:
+                ctx.register_execution_driver(driver)
+
+        return self._install_builtin_feature(
+            FeatureDefinition(
+                feature_id,
+                install,
+                required_by_product=self._builtin_feature_required(feature_id),
+            )
+        )
 
     def _register_context_contributor_scope(
         self,
         feature_id: str,
         *contributors: ContextContributor,
     ) -> FeatureScope:
-        """Publish synchronous Host contributors as one owned Generation."""
-        scope = FeatureScope(FeatureGeneration(feature_id, 1))
-        for contributor in contributors:
-            self.context_contributors.register(scope, contributor)
-        scope.activate()
-        self._builtin_feature_scopes.append(scope)
-        return scope
+        """Declare context contributors as one feature and activate it via the runtime."""
+
+        def install(ctx) -> None:
+            for contributor in contributors:
+                ctx.register_context_contributor(contributor)
+
+        return self._install_builtin_feature(
+            FeatureDefinition(
+                feature_id,
+                install,
+                required_by_product=self._builtin_feature_required(feature_id),
+            )
+        )
 
     def set_team_manager(self, team) -> None:
         if self.team is not None:

@@ -39,6 +39,7 @@ from crew.features.routes import (
 from crew.features.manager import (
     FeatureDiagnostic,
     FeatureDefinition,
+    FeatureRequiredByProductError,
     FeatureInstallContext,
     FeatureRegistrationDiagnostic,
     FeatureRecord,
@@ -50,6 +51,7 @@ from crew.features.manager import (
     FeatureUpdateStrategy,
     MissingProvidedServicesError,
     RetiringFeatureGeneration,
+    run_async_compat,
 )
 from crew.features.runtime import (
     FeatureActivationError,
@@ -113,6 +115,7 @@ __all__ = [
     "FeatureRestartRequiredError",
     "FeatureInstallContext",
     "FeatureRecord",
+    "FeatureRequiredByProductError",
     "FeatureRegistrationDiagnostic",
     "FeatureRuntime",
     "FeatureScope",
@@ -150,4 +153,5 @@ __all__ = [
     "ServiceScopeKind",
     "ServiceScopePath",
     "StaleFeatureGenerationError",
+    "run_async_compat",
 ]

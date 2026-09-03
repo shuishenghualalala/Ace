@@ -14,12 +14,10 @@ import asyncio
 import importlib.util
 import inspect
 import sys
-from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from functools import wraps
 from pathlib import Path
-from threading import Thread
 from types import ModuleType
 from typing import Any, Callable, Literal
 
@@ -34,6 +32,7 @@ from crew.features.manager import (
     FeatureRuntime,
     FeatureStartupAudit,
     FeatureUpdateStrategy,
+    run_async_compat,
 )
 from crew.features.context import (
     ContextContributor,
@@ -153,34 +152,8 @@ def _normalize_command_name(name: str) -> str:
 
 
 def _run_async_compat(awaitable: Any) -> Any:
-    """Run an async compatibility operation from a synchronous host.
-
-    Normal startup has no event loop and uses ``asyncio.run`` directly. Tests
-    and embedded hosts may construct Ace from an async function; in that case a
-    short-lived worker owns the compatibility loop so the caller's loop is not
-    re-entered.
-    """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(awaitable)
-
-    result: list[Any] = []
-    errors: list[BaseException] = []
-    context = copy_context()
-
-    def run() -> None:
-        try:
-            result.append(context.run(asyncio.run, awaitable))
-        except BaseException as error:  # re-raised on the calling thread
-            errors.append(error)
-
-    worker = Thread(target=run, name="ace-plugin-compat", daemon=False)
-    worker.start()
-    worker.join()
-    if errors:
-        raise errors[0]
-    return result[0] if result else None
+    """同步宿主桥：委托给 Feature Runtime 的共享实现 run_async_compat。"""
+    return run_async_compat(awaitable)
 
 
 BUILTIN_COMMANDS = {

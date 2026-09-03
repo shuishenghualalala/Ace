@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
+from contextvars import copy_context
+from threading import Thread
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, TypeAlias
@@ -120,6 +122,48 @@ class RetiringFeatureGeneration:
     error: BaseException | None = None
 
 
+def run_async_compat(awaitable: Any) -> Any:
+    """Run an async runtime operation from a synchronous host.
+
+    正常启动没有事件循环，直接用 ``asyncio.run``；测试或嵌入式宿主可能在
+    async 函数里装配 Ace，此时由短命 worker 线程持有兼容循环，避免重入
+    调用方的事件循环。
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(awaitable)
+
+    result: list[Any] = []
+    errors: list[BaseException] = []
+    context = copy_context()
+
+    def run() -> None:
+        try:
+            result.append(context.run(asyncio.run, awaitable))
+        except BaseException as error:  # re-raised on the calling thread
+            errors.append(error)
+
+    worker = Thread(target=run, name="ace-feature-compat", daemon=False)
+    worker.start()
+    worker.join()
+    if errors:
+        raise errors[0]
+    return result[0] if result else None
+
+
+class FeatureRequiredByProductError(CrewError):
+    """Control plane tried to stop a feature the product marks as required."""
+
+    code = "feature_required_by_product"
+
+    def __init__(self, feature_id: str) -> None:
+        self.feature_id = feature_id
+        super().__init__(
+            f"feature {feature_id!r} is required by the product and cannot be deactivated"
+        )
+
+
 class MissingProvidedServicesError(CrewError):
     """A feature completed installation without publishing promised services."""
 
@@ -142,6 +186,9 @@ class FeatureDefinition:
     stop_policy: FeatureStopPolicy = FeatureStopPolicy.DRAIN
     drain_timeout_seconds: float | None = 30.0
     update_strategy: FeatureUpdateStrategy = FeatureUpdateStrategy.RESTART
+    # 产品必需性：为 True 时控制面不得停用（测试与部署装配仍可显式放行），
+    # 不改变激活/更新/回滚的生命周期模型。
+    required_by_product: bool = False
 
     def __post_init__(self) -> None:
         feature_id = self.feature_id.strip()
@@ -175,6 +222,7 @@ class FeatureDefinition:
         object.__setattr__(self, "dependencies", dependencies)
         object.__setattr__(self, "stop_policy", stop_policy)
         object.__setattr__(self, "update_strategy", update_strategy)
+        object.__setattr__(self, "required_by_product", bool(self.required_by_product))
 
 
 @dataclass(slots=True)
@@ -232,6 +280,7 @@ class FeatureDiagnostic:
     active_leases: tuple[str, ...]
     retiring_generations: tuple[str, ...]
     restart_required: bool
+    required_by_product: bool
     last_stop: dict[str, Any] | None
     error: str | None
 
@@ -256,6 +305,7 @@ class FeatureDiagnostic:
                 "missing_optional": list(self.missing_optional),
             },
             "registrations": [item.as_dict() for item in self.registrations],
+            "required_by_product": self.required_by_product,
             "lifecycle": {
                 "stop_policy": self.stop_policy,
                 "update_strategy": self.update_strategy,
@@ -547,6 +597,7 @@ class FeatureRuntime:
                         retiring.scope.generation.key for retiring in record.retiring
                     ),
                     restart_required=record.restart_required,
+                    required_by_product=record.definition.required_by_product,
                     last_stop=last_stop,
                     error=str(record.error) if record.error else None,
                 )
@@ -977,11 +1028,18 @@ class FeatureRuntime:
         *,
         policy: FeatureStopPolicy | str | None = None,
         timeout_seconds: float | None = None,
+        allow_required_by_product: bool = False,
     ) -> bool:
-        """Stop one feature and wait until all owned resources are quiescent."""
+        """Stop one feature and wait until all owned resources are quiescent.
+
+        required_by_product 的 Feature 默认拒绝停用（产品控制面语义）；
+        测试与部署装配可显式传 allow_required_by_product=True 放行。
+        """
         record = self._records.get(feature_id)
         if record is None:
             return False
+        if record.definition.required_by_product and not allow_required_by_product:
+            raise FeatureRequiredByProductError(feature_id)
         async with self._operation_lock(feature_id):
             return await self._deactivate_locked(
                 record,
