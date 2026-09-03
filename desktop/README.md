@@ -6,7 +6,24 @@ Crew 的 Electron 桌面客户端。它连接本机 Crew Gateway，提供对话�
 
 ## 快速开始
 
-在仓库根目录执行：
+在仓库根目录执行一行命令即可启动开发模式（会自动激活虚拟环境、补齐配置和依赖）：
+
+```bash
+# macOS / Linux
+bash scripts/dev.sh
+```
+
+```powershell
+# Windows PowerShell
+pwsh ./scripts/dev.ps1
+```
+
+`npm run dev` 会传入 `--dev`，使用隔离的 `dev:dev` Owner 和开发数据目录，不显示邮箱登录页。
+普通模式和开发模式都使用托管端口 `28180`；连接成功后，渲染层会记录实际地址。
+
+### 手动步骤
+
+如果需要按步骤执行：
 
 ```bash
 uv venv .venv --python 3.11
@@ -22,15 +39,12 @@ npm start
 `config/config.yaml`；默认 `auth.mode: email`，首次打开会显示邮箱登录页。邮箱不需要验证码，
 仅用于生成相互隔离的本机租户 Owner。
 
-如果只进行日常开发、不测试邮箱登录流程，使用：
+如果只想启动开发模式：
 
 ```bash
 cd desktop
 npm run dev
 ```
-
-`npm run dev` 会传入 `--dev`，使用隔离的 `dev:dev` Owner 和开发数据目录，不显示邮箱登录页。
-普通模式和开发模式都使用托管端口 `28180`；连接成功后，渲染层会记录实际地址。
 
 首次打开后，在“设置 → 模型”中添加模型并将其设为默认。API Key 写入当前用户的本地环境文件，不会返回给渲染层。
 

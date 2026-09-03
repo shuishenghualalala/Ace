@@ -242,7 +242,7 @@ describe('Crew shell and Welcome identity', () => {
     expect(compactHeightCss).toContain('grid-row: 1');
     expect(compactHeightCss).toContain('grid-row: auto');
     expect(welcomeCss).toContain(
-      'grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr)',
+      'grid-template-rows: minmax(min-content, 1fr) auto minmax(0, 1fr)',
     );
     expect(compactHeightCss).not.toContain(
       'grid-template-rows: minmax(0, 1fr) auto auto',

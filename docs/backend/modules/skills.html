@@ -39,6 +39,7 @@
 
   <h2>2. 目录分层</h2>
   <h3>2.1 扫描层（scan_skills，决定可调用）</h3>
+  <p><code>get_skills()</code> 用 <code>_mtime_key()</code>（遍历全部 SKILL.md / PACKAGE.md 的 mtime）做缓存失效检测。该扫描在 Windows + 杀软下约 1s，因此带 <code>_MTIME_KEY_TTL_S = 2.0</code> 的短 TTL 缓存：TTL 内复用上次扫描结果；进程内安装/卸载经 <code>_invalidate_cache()</code> 立即失效，仅"外部直接改文件"的感知有 ≤2s 延迟。扫描与缓存读写由模块级 <code>_SCAN_LOCK</code> 保护（提示词组装经 <code>asyncio.to_thread</code> 移出事件循环后存在跨线程并发）。</p>
   <table>
     <thead><tr><th>层</th><th>目录</th><th>常量</th></tr></thead>
     <tbody>
@@ -147,6 +148,14 @@ get_crew_home()/skills/&lt;name&gt;  --symlink-->  ~/.agents/skills/&lt;name&gt;
   <p><code>tests/gateway/test_global_skills_api.py</code>：store 路由响应含 <code>local</code> 字段。</p>
   <p><code>desktop/tests/unit/skills-global-scope.test.ts</code>：本地徽章、软链文案、<code>~/.agents/skills</code> 文案断言。</p>
   <p><code>tests/test_compact.py</code>：覆盖超过工具保留窗口后 Skill 仍完整、引用资源按 identity 去重、完整压缩后 Skill 可跨多次压缩恢复；<code>tests/test_agent_loop.py</code> 覆盖重复 <code>skill_view</code> 防循环。</p>
+
+  <h2>9. 变更记录</h2>
+  <table>
+    <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
+    <tbody>
+      <tr><td>2026-09-03</td><td><code>_mtime_key()</code> 加 2s TTL 缓存 + <code>_SCAN_LOCK</code> 线程安全保护；外部文件变更感知延迟 ≤2s，进程内安装/卸载仍立即生效。</td><td><code>crew/agent/skills.py</code>；get_skills 全部调用方（提示词组装、WS /skill 激活、/api/skills）</td></tr>
+    </tbody>
+  </table>
 
   <div class="nav">返回：<a href="index.html">后端模块索引</a> · <a href="../../index.html">Crew 文档总览</a></div>
 </div>

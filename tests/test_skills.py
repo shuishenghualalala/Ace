@@ -247,11 +247,9 @@ def skills_dir(tmp_path, monkeypatch):
     monkeypatch.setattr("crew.agent.skills.get_builtin_skills_dir", lambda: builtin_dir)
     monkeypatch.setattr("crew.agent.skills.get_user_skills_dir", lambda: user_dir)
 
-    # 清除缓存
+    # 清除缓存（含 mtime TTL 缓存）
     import crew.agent.skills as skills_mod
-    skills_mod._cache = {}
-    skills_mod._cache_key = ()
-    skills_mod._skills_index_cache.clear()
+    skills_mod._invalidate_cache()
 
     yield tmp_path
 
@@ -264,8 +262,12 @@ def test_scan_finds_builtin_and_user_skills(skills_dir):
     assert result["/custom"]["featured"] is False
 
 
-def test_get_skills_refreshes_when_skill_md_changes(skills_dir):
+def test_get_skills_refreshes_when_skill_md_changes(skills_dir, monkeypatch):
     from crew.agent.skills import get_skills
+
+    # 外部文件变更的感知有 _MTIME_KEY_TTL_S 短 TTL；本用例验证刷新机制本身，关闭 TTL
+    import crew.agent.skills as skills_mod
+    monkeypatch.setattr(skills_mod, "_MTIME_KEY_TTL_S", 0.0)
 
     initial = get_skills()
     assert initial["/greet"]["description"] == "问候技能"
@@ -2050,3 +2052,44 @@ def test_update_path_cannot_bypass_the_replay_template(tmp_path, monkeypatch):
 
     # 合法的同模板改写仍然放行——校验不能把正常的技能维护也堵死
     assert update_skill_markdown(slug, good, source="evolution") is True
+
+
+# ── _mtime_key TTL 缓存 ────────────────────────────────────────────────────
+
+
+def test_mtime_key_ttl_avoids_rescan(monkeypatch):
+    """TTL 窗口内重复 get_skills() 不应重复扫描目录 mtime。"""
+    import crew.agent.skills as skills_mod
+
+    skills_mod._invalidate_cache()
+    # 第一次调用建立缓存
+    skills_mod.get_skills()
+
+    calls = 0
+    real_scan = skills_mod._scan_mtime_key
+
+    def counting_scan():
+        nonlocal calls
+        calls += 1
+        return real_scan()
+
+    monkeypatch.setattr(skills_mod, "_scan_mtime_key", counting_scan)
+    skills_mod.get_skills()
+    skills_mod.get_skills()
+    assert calls == 0, "TTL 窗口内不应重新扫描"
+
+    # TTL 过期后允许重新扫描
+    monkeypatch.setattr(skills_mod, "_MTIME_KEY_TTL_S", 0.0)
+    skills_mod.get_skills()
+    assert calls == 1
+
+
+def test_invalidate_cache_clears_mtime_ttl(monkeypatch):
+    """进程内安装/卸载触发的失效必须同时清掉 mtime TTL 缓存。"""
+    import crew.agent.skills as skills_mod
+
+    skills_mod.get_skills()
+    assert skills_mod._mtime_key_cache is not None
+    skills_mod._invalidate_cache()
+    assert skills_mod._mtime_key_cache is None
+    assert skills_mod._cache == {}

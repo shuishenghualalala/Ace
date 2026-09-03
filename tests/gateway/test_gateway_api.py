@@ -1004,7 +1004,9 @@ async def test_cron_retry_creates_linked_fire_without_replaying_source(tmp_path,
 
     assert resp.status_code == 202
     assert resp.json()["source_fire_id"] == source["id"]
-    for _ in range(50):
+    # 重试会触发完整 agent turn（含 skills mtime 扫描，Windows 上约秒级），
+    # 轮询上限放宽到 10s，完成即提前退出。
+    for _ in range(1000):
         await asyncio.sleep(0.01)
         runs = crew.cron_store.get_job_runs(job["id"])
         if len(runs) == 2 and runs[0]["status"] != "running":

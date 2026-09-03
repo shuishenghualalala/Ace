@@ -455,7 +455,10 @@ class SingleAgent(Agent):
             mem_sid, envelope.query
         )
         ws_instructions = envelope.params.get("workspace_instructions", "")
-        prompt_parts = build_prompt_parts(
+        # 提示词组装含大量同步磁盘 I/O（skills mtime 扫描、CREW.md/SOUL.md/记忆文件读取），
+        # 直接跑会阻塞事件循环（健康探测、WS 推送全部排队），丢到线程池执行。
+        prompt_parts = await asyncio.to_thread(
+            build_prompt_parts,
             workspace_instructions=ws_instructions,
             memory_text=memory_text,
             cwd=cwd,

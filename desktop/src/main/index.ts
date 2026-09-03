@@ -1909,7 +1909,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
     if (ensureGatewayPromise !== cachedPromise) return ensureGateway();
     ensureGatewayPromise = null;
     if (cached.managed) {
-      await stopManagedGateway('identity-mismatch');
+      await stopManagedGateway('health-reproof-failed');
     }
     logSupervisorDecision('instance-reprobe', {
       cachedBaseUrl: cached.baseUrl,

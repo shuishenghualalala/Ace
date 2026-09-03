@@ -129,10 +129,11 @@ cat <<EOF
   激活虚拟环境:
     source .venv/bin/activate
 
-  启动方式（三选一）:
-    桌面端:   cd desktop && npm start       $( [ "$WITH_DESKTOP" = "1" ] || echo "（需先 --with-desktop）" )
-    Web 端:   python -m crew.gateway.server + cd web && npm run dev
-    CLI:      python -m crew.cli
+  启动方式（四选一）:
+    桌面端开发: bash scripts/dev.sh
+    桌面端:     cd desktop && npm start       $( [ "$WITH_DESKTOP" = "1" ] || echo "（需先 --with-desktop）" )
+    Web 端:     python -m crew.gateway.server + cd web && npm run dev
+    CLI:        python -m crew.cli
 
   配置模型:
     桌面端「设置 → 模型 → 添加模型」，或编辑 config/config.yaml + config/.env

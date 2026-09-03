@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import importlib.util
@@ -558,7 +559,7 @@ def create_runtimes_router(crew) -> APIRouter:
             detected = await discover_local_runtimes()
         finally:
             current_process_launch.reset(token)
-        synced = store.sync_runtimes(detected)
+        synced = await asyncio.to_thread(store.sync_runtimes, detected)
         return JSONResponse([_runtime_availability(runtime) for runtime in synced])
 
     @router.get("/api/runtimes")

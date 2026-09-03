@@ -89,6 +89,7 @@
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
+      <tr><td>2026-09-03</td><td><code>SQLiteMemory</code> 的 <code>prefetch</code>/<code>write</code>/<code>delete</code> 三个 async 方法内的同步 sqlite 访问（含 <code>SQLiteWriteHelper</code> 锁冲突时的 sleep 重试）改经 <code>asyncio.to_thread</code> 执行，不再阻塞 gateway 事件循环。</td><td><code>crew/memory/simple.py</code></td></tr>
     </tbody>
   </table>
 

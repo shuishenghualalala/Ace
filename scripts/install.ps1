@@ -118,10 +118,11 @@ Write-Host @"
   激活虚拟环境:
     .venv\Scripts\Activate.ps1
 
-  启动方式（三选一）:
-    桌面端:   cd desktop && npm start       $desktopHint
-    Web 端:   python -m crew.gateway.server + cd web && npm run dev
-    CLI:      python -m crew.cli
+  启动方式（四选一）:
+    桌面端开发: pwsh ./scripts/dev.ps1
+    桌面端:     cd desktop && npm start       $desktopHint
+    Web 端:     python -m crew.gateway.server + cd web && npm run dev
+    CLI:        python -m crew.cli
 
   配置模型:
     桌面端「设置 → 模型 → 添加模型」，或编辑 config/config.yaml + config/.env

@@ -39,6 +39,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -118,6 +119,16 @@ _EXCLUDED_DIRS = frozenset({
 _cache: dict[str, dict] = {}
 _cache_key: tuple = ()
 _skills_index_cache: dict[tuple, str] = {}
+
+# _mtime_key() 的短 TTL 缓存：每次调用都全目录 stat 在 Windows + 杀软下约 1s，
+# 短 TTL 内复用扫描结果；进程内安装/卸载走 _invalidate_cache() 立即失效。
+_MTIME_KEY_TTL_S = 2.0
+_mtime_key_cache: tuple | None = None
+_mtime_key_ts: float = 0.0
+
+# 扫描/缓存写锁：提示词组装经 asyncio.to_thread 移出事件循环后，
+# get_skills()/scan_skills() 与 WS 线程的读取可能并发，统一用这把锁串行化。
+_SCAN_LOCK = threading.RLock()
 
 # 安装事实是宿主级全局状态。同步装卸只持有短锁；异步 repair 在生成内容阶段不持锁，
 # 发布前用树指纹检测并发修改，避免长时间阻塞事件循环。
@@ -1316,6 +1327,17 @@ def _scan_dir(skills_dir: Path, seen: set[str]) -> dict[str, dict]:
 
 def _mtime_key() -> tuple:
     """Skill / PACKAGE.md 文件路径与 mtime 组合，用于缓存失效检测。"""
+    global _mtime_key_cache, _mtime_key_ts
+    now = time.monotonic()
+    if _mtime_key_cache is not None and now - _mtime_key_ts < _MTIME_KEY_TTL_S:
+        return _mtime_key_cache
+    key = _scan_mtime_key()
+    _mtime_key_cache = key
+    _mtime_key_ts = now
+    return key
+
+
+def _scan_mtime_key() -> tuple:
     key: list[tuple[str, int]] = []
     plugin_roots = get_plugin_skill_roots()
     for d in (get_builtin_skills_dir(), get_user_skills_dir(), *plugin_roots):
@@ -1369,29 +1391,31 @@ def scan_skills() -> dict[str, dict]:
     """
     global _cache, _cache_key, _packages, _package_members
 
-    # 每次扫描重置 package 缓存，避免旧数据残留
-    _packages = {}
-    _package_members = {}
+    with _SCAN_LOCK:
+        # 每次扫描重置 package 缓存，避免旧数据残留
+        _packages = {}
+        _package_members = {}
 
-    # 每个目录独立去重，目录间允许同名（上层覆盖下层）
-    builtin = _scan_dir(get_builtin_skills_dir(), set())
-    plugin: dict[str, dict] = {}
-    for root in get_plugin_skill_roots():
-        plugin.update(_scan_dir(root, set()))
-    user = _scan_dir(get_user_skills_dir(), set())
+        # 每个目录独立去重，目录间允许同名（上层覆盖下层）
+        builtin = _scan_dir(get_builtin_skills_dir(), set())
+        plugin: dict[str, dict] = {}
+        for root in get_plugin_skill_roots():
+            plugin.update(_scan_dir(root, set()))
+        user = _scan_dir(get_user_skills_dir(), set())
 
-    result: dict[str, dict] = {**builtin, **plugin, **user}
-    _cache = result
-    _cache_key = _mtime_key()
-    _skills_index_cache.clear()
-    return result
+        result: dict[str, dict] = {**builtin, **plugin, **user}
+        _cache = result
+        _cache_key = _mtime_key()
+        _skills_index_cache.clear()
+        return result
 
 
 def get_skills() -> dict[str, dict]:
     """返回当前 skills 映射，目录有变化时自动重新扫描。"""
-    if not _cache or _cache_key != _mtime_key():
-        scan_skills()
-    return _cache
+    with _SCAN_LOCK:
+        if not _cache or _cache_key != _mtime_key():
+            scan_skills()
+        return _cache
 
 
 # ── 调度 ──────────────────────────────────────────────────────────────────
@@ -1663,7 +1687,6 @@ def build_skills_index_prompt(
         ):
             continue
         allowed_skills[key] = info
-
     # 按 package 聚合
     standalone_entries: list[tuple[str, str]] = []
     packages_to_show: dict[str, dict] = {}
@@ -1727,9 +1750,10 @@ def build_skills_index_prompt(
         return ""
 
     result = "\n".join(lines)
-    _skills_index_cache[cache_key] = result
-    if len(_skills_index_cache) > 16:
-        _skills_index_cache.pop(next(iter(_skills_index_cache)))
+    with _SCAN_LOCK:
+        _skills_index_cache[cache_key] = result
+        if len(_skills_index_cache) > 16:
+            _skills_index_cache.pop(next(iter(_skills_index_cache)))
     return result
 
 
@@ -2733,11 +2757,15 @@ def uninstall_skill(
 
 def _invalidate_cache() -> None:
     global _cache, _cache_key, _packages, _package_members
-    _cache = {}
-    _cache_key = ()
-    _packages = {}
-    _package_members = {}
-    _skills_index_cache.clear()
+    global _mtime_key_cache, _mtime_key_ts
+    with _SCAN_LOCK:
+        _cache = {}
+        _cache_key = ()
+        _packages = {}
+        _package_members = {}
+        _skills_index_cache.clear()
+        _mtime_key_cache = None
+        _mtime_key_ts = 0.0
 
 
 # ── Skills 审计 ──────────────────────────────────────────────────────────

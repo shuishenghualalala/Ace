@@ -133,7 +133,25 @@ pwsh ./scripts/install.ps1 -All
 
 With no arguments, the script installs only the backend and local configuration templates. Use `--dev` to add development dependencies, or `--with-web` / `--with-desktop` to install the corresponding frontend. After reviewing the script, you can also run it through a pipe: `curl -fsSL <raw script URL> | bash`. In that mode, the script clones the repository before continuing.
 
+#### Start the desktop in dev mode (one command)
+
+After installation, you can start the desktop development environment from the repo root with a single command. It activates the virtual environment, ensures the local config files exist, installs desktop dependencies if needed, and runs `npm run dev`.
+
+```bash
+# macOS / Linux
+bash scripts/dev.sh
+```
+
+```powershell
+# Windows PowerShell
+pwsh ./scripts/dev.ps1
+```
+
+`npm run dev` passes `--dev`, uses an isolated development owner and data directory, and starts a managed Gateway automatically, so you do not need to launch the backend separately.
+
 #### Manual steps (macOS / Linux)
+
+If you prefer to run each step by hand:
 
 ```bash
 git clone https://github.com/shuishenghualalala/Ace.git
