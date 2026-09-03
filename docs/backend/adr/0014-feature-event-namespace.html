@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0014 · Feature Event 命名空间与旧帧出口适配</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0014 · Feature Event 命名空间与旧帧出口适配</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-03 · 阶段：插件架构 Stage 2 / 核心协议演进（§7.3）</div>
+
+  <h2>背景</h2>
+  <p>核心 <code>ChunkKind</code> 枚举把 <code>wiki_cards</code>、<code>wiki_ingest_progress</code>、<code>team_internal</code> 三个业务概念写进了稳定协议：每增加一个业务事件都要改核心类型。生产侧也分散——<code>team_internal</code> 由 Team 编排以 ResponseChunk 产出，<code>wiki_cards</code>/<code>wiki_changed</code>/<code>wiki_ingest_progress</code> 由 Gateway 推送点直接拼帧。桌面端与 Web 端的 reducer 只认识这些旧 kind。</p>
+
+  <h2>决定</h2>
+  <div class="decision"><p>核心协议新增唯一开放事件帧 <code>feature_event</code>，body 固定为 <code>{feature, event, version, payload}</code>；生产侧全部改发命名空间事件；在 WS 出口（<code>connections.push_payload</code>）由 Legacy Adapter <code>crew/gateway/event_compat.py</code> 把已登记事件翻译回旧 kind 帧，线上协议对现有客户端逐字节不变。</p></div>
+  <table>
+    <thead><tr><th>职责</th><th>所有者</th><th>契约</th></tr></thead>
+    <tbody>
+      <tr><td>事件信封结构</td><td><code>crew/core/envelope.py</code></td><td><code>ResponseChunk.feature_event()</code> 与 <code>feature_event_body()</code>；核心不含任何 Feature 名称。</td></tr>
+      <tr><td>新→旧映射与出口展开</td><td><code>crew/gateway/event_compat.py</code></td><td>(feature, event, version) → 旧 kind；帧级字段透传；未登记事件记日志并丢弃。</td></tr>
+      <tr><td>出口唯一转换点</td><td><code>crew/gateway/connections.py</code></td><td><code>push_payload</code> 先展开再入回放缓存；断线 replay 因此也保持旧协议。</td></tr>
+      <tr><td>team 内部消息</td><td><code>crew/team/team_manager.py</code></td><td><code>team.internal_message v1</code>，payload 即原 team_internal body。</td></tr>
+      <tr><td>wiki 卡片/变更/摄取进度</td><td><code>crew/gateway/ws.py</code>、<code>routers/wiki.py</code></td><td><code>wiki.cards / wiki.changed / wiki.ingest_progress v1</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>行为兼容</h2>
+  <ul>
+    <li>桌面端、Web 端、CLI 均不改：WS 线上帧与回放帧仍为旧 kind（契约测试逐字段验证）。</li>
+    <li>CLI 本来就不消费这三种帧，无需适配。</li>
+    <li><code>history_projection</code> 的 <code>team_internal</code> 持久 role 属于会话投影（§7.4 Session Event），不在本切片。</li>
+    <li>其他业务 kind（<code>kanban</code>、<code>workflow_progress</code> 等）本次不动，迁移顺序按计划另行评估。</li>
+  </ul>
+
+  <h2>边界与后续</h2>
+  <p>本切片选择「出口转换」而非「双发」：旧客户端只看到旧帧，<code>feature_event</code> 先在后端内部流动并积累契约测试。阶段 5 前端 reducer 迁移到 <code>ace.feature-event.v1</code> 后，删除 <code>event_compat.py</code> 与三个旧 ChunkKind 枚举（deprecated_after 的跟踪要求见计划 §15.2）。新增业务事件的规则：生产侧只发 feature_event 并登记映射，不再往 <code>ChunkKind</code> 加业务枚举。</p>
+
+  <h2>跨平台</h2>
+  <p>纯协议与字典转换，不引入进程、路径或平台分支。</p>
+
+  <div class="nav"><a href="0013-background-result-notification-contributors.html">ADR-0013</a> · <a href="../modules/core.html">Core 模块</a> · <a href="../../testing/plugin-architecture-stage-2-feature-event.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</div>
+</body>
+</html>

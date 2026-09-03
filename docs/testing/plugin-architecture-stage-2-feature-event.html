@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 2 · Feature Event 命名空间测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>插件架构阶段 2 · Feature Event 命名空间</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-2-feature-event（worktree）· 日期：2026-09-03 · 测试执行：主 Agent（子 Agent 通道当时配额受限）</div>
+
+  <h2>1. 验证目标</h2>
+  <ul>
+    <li>核心协议新增 <code>feature_event</code> 信封（feature / event / version / payload），三个旧业务 kind 停止生产侧使用。</li>
+    <li>Team 编排、Wiki 卡片/变更/摄取进度全部改发命名空间事件。</li>
+    <li>WS 出口（含断线回放）对现有客户端帧格式逐字节不变：旧 kind、旧 body、帧级字段透传。</li>
+    <li>未登记的 feature_event 记录日志并丢弃，不泄漏给旧前端。</li>
+    <li>CLI 不消费这三种帧，零适配。</li>
+  </ul>
+
+  <h2>2. 当前状态</h2>
+  <table>
+    <thead><tr><th>门禁</th><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>契约测试（新增）</td><td>tests/gateway/test_event_compat.py：信封结构、4 条映射、未知事件丢弃、出口转换与回放</td><td class="ok">13 passed</td></tr>
+      <tr><td>Team 流式协议回归</td><td>tests/test_team_tasks.py（断言迁至 feature_event 结构）</td><td class="ok">251 passed · 1 skipped</td></tr>
+      <tr><td>Wiki 生产侧契约</td><td>tests/gateway/test_wiki_router.py（feature_event 形状断言）</td><td class="ok">通过</td></tr>
+      <tr><td>全量回归</td><td>pytest tests/ 对基线 doc/baseline-failures-at-04a7e16.txt</td><td class="ok">3752 passed · 39 failed ⊆ 基线 46 · 零新增</td></tr>
+      <tr><td>静态与架构</td><td>Ruff、lint-imports</td><td class="ok">全绿 · 6 kept / 0 broken</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 工作树边界</h2>
+  <p>本切片在独立 worktree（.worktrees/feature-event）从 1ae4f3e 切出，与主工作树在途的 owner 必填清扫（第五批）零文件交叠；回归数字为该干净分支上的实测。合回主分支后需复跑全量确认与清扫批次叠加无新增失败。</p>
+
+  <div class="nav"><a href="../backend/adr/0014-feature-event-namespace.html">ADR-0014</a> · <a href="../backend/modules/core.html">Core 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</div>
+</body>
+</html>

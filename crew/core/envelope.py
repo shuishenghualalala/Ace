@@ -20,6 +20,10 @@ ChunkKind = Literal[
     "kanban", "followup_question",
     "todo_updated", "todo_reminder", "file_changes",
     "workflow_progress",
+    # 命名空间业务事件：body = {"feature", "event", "version", "payload"}。
+    "feature_event",
+    # 以下三个业务枚举处于迁移期：生产侧已改发 feature_event，旧帧由
+    # gateway event_compat 适配器在出口转换生成；前端 reducer 全部迁移后删除。
     "wiki_cards", "wiki_ingest_progress",
     "team_internal",
 ]
@@ -299,3 +303,47 @@ class ResponseChunk:
             body=body,
             sequence=sequence,
         )
+
+    @staticmethod
+    def feature_event(
+        request_id: str,
+        feature: str,
+        event: str,
+        payload: dict[str, Any] | None = None,
+        sequence: int = 0,
+        *,
+        version: int = 1,
+    ) -> "ResponseChunk":
+        """命名空间业务事件：核心协议只认识 envelope，不认识具体 Feature。
+
+        body 固定为 {"feature", "event", "version", "payload"}，事件名形如
+        team.internal_message / wiki.cards；迁移期由 gateway event_compat
+        适配器在出口转换为旧 kind 帧，前端升级后旧帧删除。
+        """
+        return ResponseChunk(
+            request_id,
+            kind="feature_event",
+            body={
+                "feature": feature,
+                "event": event,
+                "version": version,
+                "payload": payload or {},
+            },
+            sequence=sequence,
+        )
+
+
+def feature_event_body(
+    feature: str,
+    event: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    version: int = 1,
+) -> dict[str, Any]:
+    """构造 feature_event 的标准 body（供直接产出 WS 帧的 Host 推送点复用）。"""
+    return {
+        "feature": feature,
+        "event": event,
+        "version": version,
+        "payload": payload or {},
+    }

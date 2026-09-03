@@ -674,10 +674,14 @@ def test_wiki_ingest_with_session_id_accepts_progress_target(tmp_path, auth_head
     assert data["source_id"] == source_id
     assert "pages" in data
     # router 在返回前 gather 等待 progress task，因此可以断言推送内容
+    #（生产侧产出命名空间 feature_event；旧 wiki_ingest_progress 帧由出口
+    # event_compat 适配器转换，见 tests/gateway/test_event_compat.py）
     assert len(calls) > 0
     assert calls[0]["session_id"] == "sess_progress_1"
-    assert calls[0]["payload"]["kind"] == "wiki_ingest_progress"
-    assert calls[0]["payload"]["body"]["stage"] == "load"
+    assert calls[0]["payload"]["kind"] == "feature_event"
+    body = calls[0]["payload"]["body"]
+    assert (body["feature"], body["event"], body["version"]) == ("wiki", "ingest_progress", 1)
+    assert body["payload"]["stage"] == "load"
 
 
 def test_wiki_ingest_without_session_id_does_not_push_progress(tmp_path, auth_headers):

@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
+from crew.core.envelope import feature_event_body
 from crew.gateway.auth import account_from_request
 from crew.state.logging import get_logger
 from crew.wiki._utils import is_wiki_agent_session
@@ -614,14 +615,18 @@ def create_wiki_router(crew) -> APIRouter:
                 _push_payload(
                     session_id,
                     {
-                        "kind": "wiki_ingest_progress",
-                        "body": {
-                            "stage": stage,
-                            "percent": percent,
-                            "label": label,
-                            "source_id": source_id,
-                            "detail": detail,
-                        },
+                        "kind": "feature_event",
+                        "body": feature_event_body(
+                            "wiki",
+                            "ingest_progress",
+                            {
+                                "stage": stage,
+                                "percent": percent,
+                                "label": label,
+                                "source_id": source_id,
+                                "detail": detail,
+                            },
+                        ),
                         "is_final": stage == "done",
                         "sequence": 0,
                         "session_id": session_id,
@@ -651,14 +656,18 @@ def create_wiki_router(crew) -> APIRouter:
             _push_payload(
                 session_id,
                 {
-                    "kind": "wiki_ingest_progress",
-                    "body": {
-                        "stage": "done",
-                        "percent": 100,
-                        "label": "编译完成",
-                        "source_id": source_id,
-                        "error": result.issues[0],
-                    },
+                    "kind": "feature_event",
+                    "body": feature_event_body(
+                        "wiki",
+                        "ingest_progress",
+                        {
+                            "stage": "done",
+                            "percent": 100,
+                            "label": "编译完成",
+                            "source_id": source_id,
+                            "error": result.issues[0],
+                        },
+                    ),
                     "is_final": True,
                     "sequence": 0,
                     "session_id": session_id,

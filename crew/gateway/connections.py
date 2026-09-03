@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 from fastapi import WebSocket
 
+from crew.gateway.event_compat import expand_outgoing_payload
 from crew.state.logging import get_logger
 
 log = get_logger("gateway.connections")
@@ -412,6 +413,22 @@ class ConnectionManager:
         payload: dict,
         *,
         owner_account_id: str,
+    ) -> None:
+        """把已格式化的 WS payload 推送给该 session 的所有活跃连接。
+
+        迁移期适配：kind == "feature_event" 的帧先经 event_compat 展开为旧
+        kind 帧（未登记的事件丢弃），回放缓存与线上帧因此保持旧协议不变；
+        前端迁移到 feature_event 后删除该适配层。
+        """
+        for frame in expand_outgoing_payload(payload):
+            await self._push_payload_frame(session_id, frame, owner_account_id=owner_account_id)
+
+    async def _push_payload_frame(
+        self,
+        session_id: str,
+        payload: dict,
+        *,
+        owner_account_id: str = "",
     ) -> None:
         """把已格式化的 WS payload 推送给该 session 的所有活跃连接。
 

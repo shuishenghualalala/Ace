@@ -104,6 +104,7 @@ execute = InProcessTeamManager.interact</code></pre>
       <tr><td>2026-08-18</td><td>Team 历史 mention 成员身份恢复</td><td>history_projection.py 优先使用 mention_from 解析成员画像。</td></tr>
       <tr><td>2026-08-18</td><td>Team direct mention 历史消息所有权</td><td>direct mention 子回合为 canonical；父 agent_turn 仅作运行时记录；历史投影按 request_id 识别。</td></tr>
       <tr><td>2026-09-03</td><td>Team 请求入口迁入 Feature-owned Execution Driver Adapter。</td><td><code>mode=team</code>、请求 Lease、核心路由。</td></tr>
+      <tr><td>2026-09-03</td><td>内部协作消息改发命名空间事件 <code>team.internal_message v1</code>（feature_event），旧 team_internal 帧由 Gateway 出口适配器生成；持久投影 role 不变。</td><td><code>_team_internal_chunk</code>、流式响应协议。</td></tr>
     </tbody>
   </table>
 
