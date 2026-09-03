@@ -25,7 +25,7 @@
 | ⑤ | `work/service.py` 钩子空跳 | 归一后**照常执行**（静默跳过掩盖漏传 bug） |
 | ⑥ | 无绑定渠道入站消息 | **归 local**（拒绝会断渠道消息）；平台原始 uid 严禁充当 owner |
 | ⑦ | 渠道 `include_env` | 未绑定（现归 local）渠道**保留 env 凭证启用**；显式绑定 owner 的渠道 False |
-| ⑧ | `internal_accounts` 配置时 local 是否强制 internal | **是**（否则本机用户被降权 external）——⚠️ 尚未实现，见"遗留事项" |
+| ⑧ | `internal_accounts` 配置时 local 是否强制 internal | **是**（否则本机用户被降权 external）——已实现（`9d9eda3`，local 无条件优先于白名单与 requested 兼容路径）|
 | ⑨ | 存量 `''` 行 | 回填 `local`（已实现）；PK 冲突保 local 删空行 |
 
 ### 代码中的终极规则（验收标准）
@@ -230,9 +230,6 @@ grep -rn 'owner_account_id: str = ""' crew --include='*.py'
 
 - **llm-provider apikey 修复本体**（派生专属 env 变量名 + update 保留原 key）——
   owner 统一后改动集中在 `app.py` 单路径，很小；
-- 决策⑧ `access_control`：local 强制 internal 尚未实现
-  （`crew/state/access_control.py::user_type_for_owner`，用户配置了
-  internal_accounts 且不含 local 时本机用户会被降权 external）；
 - 文件系统层的 wiki 旧全局根（`wiki_lib/`、`wiki_sessions/legacy/`）向
   `accounts/<hash("local")>/` 的磁盘搬迁（PR2 只迁了 SQLite；方案 A 的完整落地方向，
   涉及磁盘迁移脚本 + Windows 验证）；
