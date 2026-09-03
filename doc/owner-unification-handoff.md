@@ -126,34 +126,39 @@ test_operation_rejects_during_reconnect[save-config]` 实测是绿的（该条�
 
 
 
-### B. 完成步骤 4 签名清扫（剩余 ~336 处 `str = ""`）
+### B. 完成步骤 4 签名清扫（✅ 已完成，2026-09-03）
+
+清扫已全部落地，crew 内 `owner_account_id: str = ""` 从 335 处归零，仅存
+1 处**有意保留的合法例外**：`tools/process_registry.py:156` 的 dataclass
+字段（checkpoint 兼容，行内注释已说明）。分批提交：
+
+| 提交 | 批次 | 内容 |
+|---|---|---|
+| `44bc2cd` | 第二批 | team 模块 55+8 处；communication 删除 3 处 `or "local"` 尾兜底 |
+| `eaea43b` | 第三批 | wiki 模块（store 协议/_filesystem/compiler 等 107 处） |
+| `97b7b29` | 第四批 | state 存储层 37 处 + interfaces 协议补 save/list_sessions owner 声明 |
+| `fd1310a` | 第五批 | tasks/cron/evolution/gateway/work 88 处 |
+| `de9c9f9` | 收官 | agent/runtime 3 处 |
+
+经验教训（后续同类清扫必读）：
+
+1. 混合默认参数签名（owner 前面有带默认值的参数）无法直接去默认——按调用方
+   传参风格选择 `*, owner_account_id: str`（kw-only）或重排参数；dispatcher
+   的 stop/interrupt 与 tasks 的 wait/cancel 均采用 kw-only。
+2. 看门狗/后台循环（如 `_monitor_loop`）内部的 TypeError 会被后台任务静默
+   吞掉，表现为测试挂死而非报错——内部调用点必须人工逐一排查，pytest 的
+   TypeError 清单不含它们。
+3. ast 的 end_col_offset 是 UTF-8 字节偏移，中文行按字符切片会错位；批量
+   改写用 `line.encode('utf-8')` 后按字节切。
+4. 连接注册表/投递与迁移测试的 owner 语义是 `""`（全局注册表/故意构造遗留
+   行），不是 `"local"`——批量插参前先核对每处测试的语义。
+
+验收命令（当前仅剩合法例外 1 处）：
 
 ```sh
-# 随时用这两条生成剩余清单
-grep -rn 'owner_account_id: str = ""' crew --include='*.py' | cut -d: -f1 | sort | uniq -c | sort -rn
-grep -rn 'owner_account_id: str | None = None' crew --include='*.py'   # 需逐个甄别
+grep -rn 'owner_account_id: str = ""' crew --include='*.py'
+# 仅剩 tools/process_registry.py:156（dataclass 字段，注释说明保留）
 ```
-
-大户口（当前计数）：
-
-| 文件 | 数量 | 备注 |
-|---|---|---|
-| `crew/team/team_manager.py` | 55 | 方法多，内部互调已显式传 owner，主要是删默认+测试补参 |
-| `crew/wiki/store/_filesystem.py` | 45 | 与 `_base.py`（38）同一 PR，接口+实现+mock 同步 |
-| `crew/wiki/store/_base.py` | 38 | 抽象签名源头 |
-| `crew/app.py` | 31 | 注意 `_current_active_owner_id`（1712 附近）保留 current() 单租约回退 |
-| `crew/state/session_store.py` | 24 | 接口已必填，实现+调用方收紧 |
-| `crew/gateway/routers/channels.py` | 19 | |
-| `crew/wiki/compiler.py` | 17 | |
-| 其余 | <15 each | channel_manager 11、tasks/runtime 9、dispatcher 9、connections 9、cron/jobs 7… |
-
-**`| None = None` 的甄别原则**：函数体是 `owner if owner is not None else ContextVar.get()`
-的上下文继承模式**保留**（None≠空语义）；把 None 当 "" 用的（空容忍）改为必填。
-
-**推荐操作法**（本次已验证有效）：一次收一个模块的签名 → 跑全量 pytest →
-pytest 的 `TypeError: missing/unexpected/multiple values for argument 'owner_account_id'`
-就是完整的调用点清单 → 逐个修 → 绿了再进下一个模块。**绝不要**用正则跨行盲插参数
-（本次在 test_task_runtime 踩过：多行调用插重 owner、行内判断漏判多行参数）。
 
 ### C. 两个"合法例外"要显式标注（勿删）
 
