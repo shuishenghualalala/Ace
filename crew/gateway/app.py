@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -151,6 +152,28 @@ def _wire_delivery_senders(
         sender = getattr(channel, "send_to_target", None)
         if callable(sender):
             delivery_router.register(name, sender, owner_account_id=owner)
+
+
+def make_route_gate(route_registry: Any, contribution_id: str) -> Any:
+    """运行期闸门依赖：贡献所属 Generation 释放后返回统一的不可用响应。
+
+    FastAPI 路由树在构造期固化，Feature 停用不拆路由；闸门口径以
+    Route Registry 的可见性为准（演进方案 §6.5 运行期能力门控）。
+    """
+    from fastapi import HTTPException
+
+    async def _gate() -> None:
+        if not route_registry.is_available(contribution_id):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "ok": False,
+                    "error": f"功能暂不可用：{contribution_id}",
+                    "code": "capability_unavailable",
+                },
+            )
+
+    return _gate
 
 
 def create_app(crew: CrewApp | None = None) -> FastAPI:
@@ -400,13 +423,24 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         )
     )
 
-    for plugin_name, plugin_router in crew.plugins.api_routers:
-        prefix = f"/api/plugins/{plugin_name.strip('/')}"
+    route_registry = crew.plugins.feature_runtime.routes
+
+    for binding in route_registry.bindings():
+        contribution = binding.contribution
         try:
-            api.include_router(plugin_router, prefix=prefix)
-            log.info("插件 API 已挂载: %s", prefix)
+            api.include_router(
+                contribution.router,
+                prefix=contribution.prefix,
+                dependencies=[Depends(make_route_gate(route_registry, contribution.contribution_id))],
+            )
+            log.info(
+                "插件 API 已挂载: %s (contribution=%s, owner=%s)",
+                contribution.prefix,
+                contribution.contribution_id,
+                binding.generation.key,
+            )
         except Exception as exc:  # noqa: BLE001
-            log.warning("插件 API 挂载失败 %s: %s", plugin_name, exc)
+            log.warning("插件 API 挂载失败 %s: %s", contribution.prefix, exc)
 
     from crew.gateway.channel_sessions import channel_platform_from_session_id, is_channel_session_id
 

@@ -120,6 +120,7 @@ ContextVar set 点       dispatcher.run(): current_owner_account_id.set(normaliz
       <tr><td>2026-09-03</td><td>移除静态 <code>REFERENCE_INJECTORS</code>；结构化路径与 Browser 标签页改由各自 Context Contributor 提供。</td><td><code>crew/gateway/context.py</code>、Agent 依赖边界。</td></tr>
       <tr><td>2026-09-03</td><td>Session Source 通过 Contributor 输出，Agent Runtime 不再导入 Gateway 类型或 formatter。</td><td><code>session_context.py</code>、Agent→Gateway 直接依赖契约。</td></tr>
       <tr><td>2026-09-03</td><td>新增 Feature Event 出口适配层 <code>event_compat.py</code>：已登记的 feature_event 在 <code>push_payload</code> 出口转换为旧 kind 帧（含断线回放），未登记事件丢弃；现有客户端线上协议零变化。</td><td><code>connections.push_payload</code>、WS 推送点（wiki_cards/wiki_changed/wiki_ingest_progress 生产侧已改发 feature_event）。</td></tr>
+      <tr><td>2026-09-03</td><td>插件 API 路由改从 Route Registry 启动期装配，挂载点带运行期闸门（<code>make_route_gate</code>）：Feature 停用后请求得到 503 + capability_unavailable，路由树不做热卸载。</td><td><code>create_app</code> 插件挂载循环、<code>crew/features/routes.py</code>。</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
     </tbody>
   </table>

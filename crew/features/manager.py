@@ -18,6 +18,7 @@ from crew.features.dependencies import (
 )
 from crew.features.context import ContextContributor, ContextContributorRegistry
 from crew.features.drivers import ExecutionDriver, ExecutionDriverRegistry
+from crew.features.routes import RouteContribution, RouteRegistry
 from crew.features.runtime import (
     Disposer,
     FeatureActivationError,
@@ -298,6 +299,7 @@ class FeatureInstallContext:
     services: ServiceRegistry
     execution_drivers: ExecutionDriverRegistry
     context_contributors: ContextContributorRegistry
+    routes: RouteRegistry
     dependencies: FeatureDependencyResolution
 
     @property
@@ -368,6 +370,31 @@ class FeatureInstallContext:
             label=label,
         )
 
+    def register_api_router(
+        self,
+        router: Any,
+        *,
+        prefix: str = "",
+        contribution_id: str | None = None,
+        description: str = "",
+        label: str | None = None,
+    ) -> RegistrationToken:
+        """Publish one mountable API surface owned by this exact Feature Generation.
+
+        路由树在启动期装配；停用期由 RouteRegistry 闸门口径返回
+        capability_unavailable，不直接改动 FastAPI route list。
+        """
+        return self.routes.register(
+            self.scope,
+            RouteContribution(
+                contribution_id=contribution_id or self.definition.feature_id,
+                router=router,
+                prefix=prefix,
+                description=description,
+            ),
+            label=label,
+        )
+
 
 class FeatureRuntime:
     """Activate, diagnose, and stop features through one reversible lifecycle."""
@@ -377,12 +404,14 @@ class FeatureRuntime:
         services: ServiceRegistry | None = None,
         execution_drivers: ExecutionDriverRegistry | None = None,
         context_contributors: ContextContributorRegistry | None = None,
+        routes: RouteRegistry | None = None,
     ) -> None:
         self.services = services or ServiceRegistry()
         self.execution_drivers = execution_drivers or ExecutionDriverRegistry()
         self.context_contributors = (
             context_contributors or ContextContributorRegistry()
         )
+        self.routes = routes or RouteRegistry()
         self.dependencies = FeatureDependencyGraph()
         self._records: dict[str, FeatureRecord] = {}
         self._sequences: dict[str, int] = {}
@@ -549,6 +578,7 @@ class FeatureRuntime:
             services=self.services,
             execution_drivers=self.execution_drivers,
             context_contributors=self.context_contributors,
+            routes=self.routes,
             dependencies=resolution,
         )
         async with transaction:

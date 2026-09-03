@@ -29,6 +29,13 @@ from crew.features.drivers import (
     ExecutionDriverRegistry,
     ExecutionDriverUnavailableError,
 )
+from crew.features.routes import (
+    RouteBinding,
+    RouteConflictError,
+    RouteContribution,
+    RouteRegistry,
+    RouteUnavailableError,
+)
 from crew.features.manager import (
     FeatureDiagnostic,
     FeatureDefinition,
@@ -130,6 +137,11 @@ __all__ = [
     "RegistrationToken",
     "RetiringFeatureGeneration",
     "MissingProvidedServicesError",
+    "RouteBinding",
+    "RouteConflictError",
+    "RouteContribution",
+    "RouteRegistry",
+    "RouteUnavailableError",
     "ServiceBinding",
     "ServiceConflictError",
     "ServiceKey",
