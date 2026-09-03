@@ -494,7 +494,8 @@ Required contrast pairs:
 The selected pair applies to navigation, segmented controls, selected rows,
 secondary emphasis buttons, and text selection. Important selected states also
 use structure such as an indicator, check, border, or `aria-current`; color is
-not the only signal.
+not the only signal. Selected states never use a left edge accent bar or
+stripe; structure comes from the border, check, or indicator instead.
 
 ## 8. Typography
 

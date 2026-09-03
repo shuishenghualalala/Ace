@@ -481,7 +481,8 @@
 }
 
 .wiki-agent-history__item.is-active {
-  box-shadow: inset 2px 0 0 var(--mw-action-primary);
+  background: var(--mw-bg-selected);
+  color: var(--mw-text-selected);
 }
 
 .wiki-agent-history__item-delete {

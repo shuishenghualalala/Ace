@@ -3096,7 +3096,6 @@ button.chat-message-file:hover {
 .followup-card--staffing .followup-card__option:has(input:checked) {
   border-color: color-mix(in srgb, var(--mw-team-accent) 72%, var(--mw-border-subtle));
   background: color-mix(in srgb, var(--mw-team-accent-soft) 12%, var(--mw-bg-app));
-  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--mw-team-accent) 80%, transparent);
 }
 .staffing-dialog__actions {
   display: flex;
@@ -3295,7 +3294,6 @@ button.chat-message-file:hover {
 .followup-card__option:has(input:checked) {
   border-color: color-mix(in srgb, var(--mw-action-primary) 72%, var(--mw-border-subtle));
   background: color-mix(in srgb, var(--mw-action-primary) 9%, var(--mw-bg-app));
-  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--mw-action-primary) 78%, transparent);
 }
 .followup-card__option:has(input:disabled) {
   cursor: default;

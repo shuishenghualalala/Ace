@@ -106,6 +106,7 @@ Thumbs.db
 
 # Local planning and non-release documentation
 /TODO/
+/docs/todo/
 /SPEC*.md
 /spec/
 /tasks/
