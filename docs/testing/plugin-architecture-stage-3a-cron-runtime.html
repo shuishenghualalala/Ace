@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 3A · Cron Runtime Feature 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>插件架构阶段 3A · Cron Runtime Feature</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-04 · 独立测试：Luna 子 Agent</div>
+
+  <h2>1. 验证目标</h2>
+  <ul>
+    <li><code>product.cron</code> 在宿主事件循环中 activate，并完整拥有 Scheduler、Tools、Context 与 Host Binding。</li>
+    <li>restart 配置更新生成新 Generation、停止旧 Scheduler，并重新挂载全部 Active Owner。</li>
+    <li>Scheduler 启动失败时工具、Contributor、绑定与资源全部回滚。</li>
+    <li>Gateway Logout 始终解析当前 Generation 的 Service，停用不删除持久任务数据。</li>
+  </ul>
+
+  <h2>2. 测试矩阵</h2>
+  <table>
+    <thead><tr><th>层级</th><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>切片白盒</td><td>Cron activate/deactivate、restart update、Owner remount、启动失败回滚、显式 Service 注入、工具身份化注销</td><td class="ok">目标用例全部通过</td></tr>
+      <tr><td>核心回归</td><td>Cron、Context、Tools、Gateway Auth</td><td class="ok">144 passed</td></tr>
+      <tr><td>生命周期回归</td><td>Feature Runtime、Gateway Cron/Logout、restart、lease/drain</td><td class="ok">66 passed；重点边界 4 passed</td></tr>
+      <tr><td>Plugin/Browser 回归</td><td>与基线 <code>doc/baseline-failures-at-04a7e16.txt</code> 逐项比对</td><td class="ok">相对基线 PASS</td></tr>
+      <tr><td>静态与架构</td><td>Ruff、compileall、lint-imports、HTML 解析、git diff check、禁用表述扫描</td><td class="ok">全部通过；6 contracts kept</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 关键断言</h2>
+  <ul>
+    <li>激活前记录为 DISCOVERED 且 Cron 工具不可见；提交后状态 ACTIVE，诊断包含 <code>resource:cron.scheduler</code>、<code>tool:cron_create</code> 等标签。</li>
+    <li>停用后 <code>CrewApp.cron_service</code> 清空、工具和 Contributor 消失，SQLite 任务数据不被删除。</li>
+    <li>restart 后旧 Service 不再运行，新 Service 指向 g2 且已挂载原 Active Owner。</li>
+    <li>启动异常后的 Runtime 状态为 FAILED，不存在孤儿工具或上下文贡献。</li>
+  </ul>
+
+  <h2>4. 跨平台说明</h2>
+  <p>生命周期代码只使用 asyncio 与对象身份校验；测试临时目录沿用 <code>TemporaryDirectory(ignore_cleanup_errors=True)</code>，避免 Windows 在 SQLite 句柄释放时序上的目录清理差异。无 POSIX-only 分支。</p>
+
+  <h2>5. 基线与环境约束</h2>
+  <p>Plugin/Browser 分组实际为 601 passed、29 skipped、14 failed。其中 3 项 Electron RPC / <code>run_code_unsafe</code> 契约失败已存在于仓库基线；其余 11 项均因当前沙箱禁止监听 <code>127.0.0.1</code> 而失败。另有 1 项 Core Feature 用例因沙箱禁止写入 <code>~/.Crew/logs</code> 失败。Cron 目标范围无新增代码级失败，故本切片按“相对基线通过”验收。</p>
+
+  <div class="nav"><a href="../backend/adr/0017-cron-runtime-feature.html">ADR-0017</a> · <a href="../backend/modules/cron.html">Cron 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</div>
+</body>
+</html>

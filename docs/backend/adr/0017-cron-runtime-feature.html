@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0017 · Cron Runtime Feature 与 restart Generation</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0017 · Cron Runtime Feature 与 restart Generation</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-04 · 阶段：插件架构 Stage 3A</div>
+
+  <h2>背景</h2>
+  <p>Cron 的 Scheduler、六个 Agent Tool、Trigger Context、Owner mount 和 Host Service 绑定分散在 <code>build_app()</code>、<code>CrewApp.startup()/shutdown()</code> 与 Gateway Logout 中。中心清单既无法表达配置代，也无法在启动中途失败时完整撤销贡献。另一方面，Cron 任务数据必须在运行能力停用后保留，供显式查询、清理和再次启用。</p>
+
+  <h2>候选方案</h2>
+  <table>
+    <thead><tr><th>方案</th><th>结论</th></tr></thead>
+    <tbody>
+      <tr><td>仅把 <code>start()/stop()</code> 包进一个 helper，继续由 CrewApp 手写调用</td><td>拒绝；资源仍属于中心清单，不能参与 Generation 更新与回滚。</td></tr>
+      <tr><td>在同步 <code>build_app()</code> 中启动 AsyncIOScheduler</td><td>拒绝；临时事件循环结束后 Scheduler 将绑定失效循环，也无法安全服务三平台宿主。</td></tr>
+      <tr><td>build 阶段声明、宿主事件循环中由 FeatureRuntime 激活</td><td>采用；长生命周期能力得到真实异步激活边界，后续 Sites/Browser 可复用。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>决定</h2>
+  <div class="decision"><p>建立 <code>product.cron</code> FeatureDefinition，更新策略为 <code>restart</code>、停用策略为 <code>cancel</code>。Feature 安装逐项取得 Scheduler、Tools、Context Contributor、Owner mount 和 Host Binding 的所有权；每个 Tool 与 Fire 持有 Generation Lease。<code>CrewApp</code> 只提供通用托管 Feature 声明、激活、更新和逆序停用入口，不再调用 CronService 的具体启停方法。</p></div>
+  <table>
+    <thead><tr><th>职责</th><th>所有者</th><th>契约</th></tr></thead>
+    <tbody>
+      <tr><td>运行代</td><td><code>crew/cron/feature.py</code></td><td>候选 Service 不在同步构造期启动；FeatureRuntime 激活时启动并挂载当前 Active Owner。</td></tr>
+      <tr><td>公开贡献</td><td>同一 FeatureScope</td><td>六个工具、Prompt Contributor 与 Host Binding 先于资源关闭撤销；工具注销校验对象身份，旧代不能误删替换代。</td></tr>
+      <tr><td>活跃工作</td><td>Generation Lease</td><td>Tool/Fire 在运行期间持有 Lease；cancel 停用通知并取消旧代 Fire，结束后再关闭 Scheduler。</td></tr>
+      <tr><td>持久数据</td><td>Cron 数据平面</td><td>停用不删除任务和 Fire 记录；当前兼容 Store 由 Host 最终关闭，后续以稳定数据服务替换字段访问。</td></tr>
+      <tr><td>Gateway Owner</td><td>动态 Service getter</td><td>Logout/activate 每次解析当前 Generation 的 CronService，restart 后不持有旧 Service。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>失败与回退</h2>
+  <p>Scheduler 启动或后续注册失败时，FeatureTransaction 先撤销工具、上下文和 Host Binding，再停止候选 Scheduler，不留下半激活贡献。restart 新代失败时由 FeatureRuntime 以旧定义创建恢复 Generation。回退本提交可恢复原中心启停分支，SQLite 任务数据格式没有变化。</p>
+
+  <h2>跨平台</h2>
+  <p>新增路径只依赖 Python asyncio、Feature Runtime 和既有 APScheduler；未引入 signal、fork、Unix socket、路径分隔符或 shell 约定。SQLite 数据保留语义与 macOS、Linux、Windows 一致。</p>
+
+  <div class="nav"><a href="0016-core-features-required-by-product.html">ADR-0016</a> · <a href="../modules/cron.html">Cron 模块</a> · <a href="../../testing/plugin-architecture-stage-3a-cron-runtime.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</div>
+</body>
+</html>

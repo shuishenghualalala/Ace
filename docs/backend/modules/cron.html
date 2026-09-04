@@ -61,7 +61,9 @@
       <tr><td>调度服务</td><td>定时 claim、并发上限、重试与完成回调。</td><td>已落地</td></tr>
       <tr><td>自然语言计划</td><td>解析 interval、once 等用户输入并构造 trigger。</td><td>已落地</td></tr>
       <tr><td>Trigger Context</td><td><code>cron.trigger.reminder</code> 为触发轮贡献瞬时 prompt fragment。</td><td>已落地</td></tr>
-      <tr><td>完整 Cron Feature</td><td>Scheduler、Store、Tools、Route、Owner mount 与 restart 策略进入统一 Runtime。</td><td>待迁移</td></tr>
+      <tr><td>Cron Runtime Feature</td><td><code>product.cron</code> 统一拥有 Scheduler、Tools、Context、Host Binding、Owner mount 与 restart 更新。</td><td>已落地</td></tr>
+      <tr><td>Cron 数据平面</td><td>持久任务数据独立于运行代；停用撤销运行能力但不删除任务记录。</td><td>已落地</td></tr>
+      <tr><td>Route Contribution</td><td>HTTP 路由进入 Cron Bundle 与 Route Registry。</td><td>待迁移</td></tr>
     </tbody>
   </table>
 
@@ -72,6 +74,7 @@
       <tr><td><code>crew/cron/jobs.py</code></td><td>任务/运行存储、trigger 构造和 schedule 解析。</td></tr>
       <tr><td><code>crew/cron/scheduler.py</code></td><td>CronService 调度循环、fire claim 与执行终态。</td></tr>
       <tr><td><code>crew/cron/context.py</code></td><td>Cron 触发轮 Prompt Contributor。</td></tr>
+      <tr><td><code>crew/cron/feature.py</code></td><td>FeatureDefinition、运行器、工具/上下文贡献、Scheduler disposer 与 Owner 重新挂载。</td></tr>
       <tr><td><code>crew/tools/cron_tools.py</code></td><td>面向 Agent 的 Cron 工具入口。</td></tr>
     </tbody>
   </table>
@@ -84,13 +87,17 @@
     persistent=False,
 )
 
-await contribute_cron_trigger_reminder(envelope)</code></pre>
-  <p>只有 <code>channel=cron</code> 的 Envelope 产生 fragment；任务名来自 <code>cron_job_name</code>。Contributor 只在 Cron 配置启用时注册，应用关闭时由 FeatureScope 撤销。</p>
+await contribute_cron_trigger_reminder(envelope)
+
+bundle = build_cron_feature(host, registry, store, enabled=True, max_parallel_jobs=2)
+app.declare_managed_feature(bundle.definition)
+await app.update_managed_feature(next_bundle.definition)</code></pre>
+  <p>只有 <code>channel=cron</code> 的 Envelope 产生 fragment；任务名来自 <code>cron_job_name</code>。<code>product.cron</code> 在宿主事件循环中激活，六个工具和每次 Fire 都持有本 Generation Lease。更新采用 <code>restart</code>：先取消并清理旧代，再启动新 Scheduler，最后重新挂载当前 Active Owner；失败由 FeatureRuntime 恢复旧定义。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>Cron Service 仍由 <code>build_app()</code> 直接构造，启动/停止由中心清单管理。</li>
-    <li>后续以 restart 策略纳入 FeatureRuntime，并把调度 Task 与 Owner mount 归入同一 Scope。</li>
+    <li>HTTP Route 仍由 Gateway 内置路由表装配；下一步迁入 Cron Bundle 的 Route Contribution。</li>
+    <li>持久 Store 当前作为停用后仍可访问的数据平面由 Host 关闭；后续引入稳定数据服务契约后再移除 <code>CrewApp.cron_store</code> 兼容字段。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
@@ -105,10 +112,11 @@ await contribute_cron_trigger_reminder(envelope)</code></pre>
     <tbody>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
       <tr><td>2026-09-03</td><td>定时任务触发文案迁入 Prompt Context Contributor，并绑定 Cron 开关与 FeatureScope。</td><td>Agent Runtime、Cron 启停边界和请求上下文。</td></tr>
+      <tr><td>2026-09-04</td><td>完成 <code>product.cron</code> Runtime Feature：Scheduler、Tools、Context、Owner mount 和 Host Binding 统一归属 Generation，支持 restart 更新与失败回滚。</td><td>Cron 生命周期、CrewApp 启停清单、Gateway Logout 动态服务解析。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0012-cron-trigger-context-contributor.html">ADR-0012</a> · <a href="../../testing/plugin-architecture-stage-2-cron-context.html">测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0017-cron-runtime-feature.html">ADR-0017</a> · <a href="../../testing/plugin-architecture-stage-3a-cron-runtime.html">测试记录</a></div>
 </div>
 </body>
 </html>

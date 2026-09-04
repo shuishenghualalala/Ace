@@ -6,13 +6,17 @@
 """
 
 from crew.cron.context import contribute_cron_trigger_reminder
+from crew.cron.feature import CRON_FEATURE_ID, CronFeatureBundle, build_cron_feature
 from crew.cron.jobs import CronJobStore, parse_duration, parse_schedule
 from crew.cron.scheduler import CronService, IntervalScheduler
 
 __all__ = [
     "CronJobStore",
     "CronService",
+    "CRON_FEATURE_ID",
+    "CronFeatureBundle",
     "IntervalScheduler",
+    "build_cron_feature",
     "contribute_cron_trigger_reminder",
     "parse_duration",
     "parse_schedule",

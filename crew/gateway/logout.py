@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Callable
 
 from crew.core.runctx import current_owner_account_id
 from crew.state.logging import get_logger
@@ -46,6 +46,7 @@ class LogoutCoordinator:
         connections: Any,
         channel_handler: Any,
         cron_service: Any | None = None,
+        cron_service_getter: Callable[[], Any | None] | None = None,
         team_manager: Any | None = None,
         interaction_bridge: Any | None = None,
         security_service: Any | None = None,
@@ -58,6 +59,7 @@ class LogoutCoordinator:
         self._connections = connections
         self._channel_handler = channel_handler
         self._cron_service = cron_service
+        self._cron_service_getter = cron_service_getter
         self._team_manager = team_manager
         self._interaction_bridge = interaction_bridge
         self._security_service = security_service
@@ -87,6 +89,11 @@ class LogoutCoordinator:
         lease = self._owner_lease(owner)
         return lease is not None and lease.owner_account_id == owner
 
+    def _current_cron_service(self) -> Any | None:
+        if self._cron_service_getter is not None:
+            return self._cron_service_getter()
+        return self._cron_service
+
     def activate_owner(self, owner_account_id: str) -> None:
         """Open local admission and start only this Owner's resources."""
 
@@ -95,8 +102,9 @@ class LogoutCoordinator:
             return
         token = current_owner_account_id.set(owner)
         try:
-            if self._cron_service is not None and self._cron_service.is_running:
-                self._cron_service.mount_owner(owner)
+            cron_service = self._current_cron_service()
+            if cron_service is not None and cron_service.is_running:
+                cron_service.mount_owner(owner)
             self._dispatcher.activate_owner(owner)
             self._task_runtime.activate_owner(owner)
             task = self._activation_tasks.get(owner)
@@ -247,9 +255,10 @@ class LogoutCoordinator:
             requires_gateway_restart = False
 
             await self._cancel_activation(owner)
-            if self._cron_service is not None:
+            cron_service = self._current_cron_service()
+            if cron_service is not None:
                 try:
-                    await self._cron_service.unmount_owner(owner)
+                    await cron_service.unmount_owner(owner)
                 except Exception as exc:  # noqa: BLE001 - keep lease when Cron cleanup fails
                     log.exception("Logout 撤下 Cron 失败 owner=%s", owner)
                     errors.append(f"cron: {exc}")

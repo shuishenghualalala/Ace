@@ -214,12 +214,18 @@ class Registry(ToolRegistry):
                 log.debug("注册别名: %s -> %s", alias, tool.name)
         log.debug("注册工具: %s", tool.name)
 
-    def unregister(self, name: str) -> bool:
+    def unregister(self, name: str, *, expected: Tool | None = None) -> bool:
         """注销一个工具（含其别名）。用于删除/重连单个 MCP server 时清理旧工具。
 
         返回是否确实移除了工具。内置工具理论上不会被调用方 unregister，但不做硬限制——
         调用方（MCPClientManager）只对本 server 注册过的工具名调用。
+
+        ``expected`` 用于 Feature disposer 的所有权校验：若同名工具已被后续
+        Generation 替换，旧 Generation 的清理不能误删新工具。
         """
+        current = self._tools.get(name)
+        if expected is not None and current is not expected:
+            return False
         removed = self._tools.pop(name, None) is not None
         # 清理指向该 name 的别名
         stale_aliases = [a for a, c in self._aliases.items() if c == name]

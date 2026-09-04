@@ -43,6 +43,24 @@ async def test_terminal_tool_executes(registry):
     assert "hi-crew" in result.content
 
 
+def test_registry_expected_unregister_does_not_remove_replacement():
+    registry = Registry()
+    schema = {"name": "owned", "parameters": {"type": "object"}}
+    old = FunctionTool(name="owned", toolset="test", schema=schema, handler=lambda _: "old")
+    replacement = FunctionTool(
+        name="owned",
+        toolset="test",
+        schema=schema,
+        handler=lambda _: "new",
+    )
+    registry.register(old)
+    registry.register(replacement, override=True)
+
+    assert registry.unregister("owned", expected=old) is False
+    assert registry.get("owned") is replacement
+    assert registry.unregister("owned", expected=replacement) is True
+
+
 async def test_file_write_then_read(registry, tmp_path):
     p = tmp_path / "demo.txt"
     w = await registry.execute(ToolCall("c1", "file_write", {"path": str(p), "content": "你好"}))

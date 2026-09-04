@@ -5,7 +5,7 @@
 > 基线核查日期：2026-08-31  
 > 目标读者：Ace 后端、桌面端、Web 端及独立功能模块的维护者  
 > 修订记录：2026-08-31 评审追加——workspace_guard 依赖核查（§2.3.3、§11、§17）、第一方/第三方插件契约收口（§2.3.8）、effect 诊断与启动审计（§6.3）、服务作用域维度（§6.4）、拦截器语义（§7.5）、螺旋式迁移节奏与依赖检查工具（§10、§13.3）、配置与数据命名空间约定（§12.5）、Adapter 保质期（§15.2）、ADR 机制（§16）、新增验收指标（§14）；同日补充——演进紧迫性论证与中心文件基线数据（§1.1.1）、接口层多租户地基（§2.2）；同日范围校正——明确 dsh 广义 Plugin 与 Ace 当前 `plugins/` 的区别，将目标提升为全部 Feature 的统一可逆生命周期，补充 Feature Generation、业务数据边界、全量迁移地图和工作量评估（§0、§3.3、§5、§6、§8、§10、§16、§18、§19）；同日——§2.1、§5.1 增加耦合视角与装配视角两张架构对比图（离线渲染版：docs/todo/ace-arch-compare.html）
-> 实施进度：2026-09-03 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver、Context Contributor 主链均已落地。Cron Trigger Reminder Contributor 已完成，Agent Runtime 不再包含 Cron 渠道文案特判；后台结果通知 Contributor 已完成，子任务/进程/任务结果三条 reminder 路径迁为 PROMPT contributor，Runtime 格式化特判与 `subagent_drain_fn` 旁路删除；Feature Event 命名空间已落地，核心协议新增 `feature_event` 开放信封，team/wiki 四类业务事件改发命名空间事件、旧帧由 Gateway 出口适配器转换，切片回归 264 passed；Route Registry 与运行期闸门已落地，目录插件 API 路由归属 FeatureScope、Gateway 从注册表装配，停用返回 capability_unavailable，切片回归 8 passed；Core Feature 声明化完成，组合根 10 处内置注册收敛为 FeatureDefinition 经 Runtime 统一激活，required_by_product 控制面守卫落地，切片回归 7 passed。当前分支为 `refactor/plugin-architecture-stage-0`，验证记录见 `docs/testing/plugin-architecture-stage-2-cron-context.html`、`docs/testing/plugin-architecture-stage-2-background-notifications.html` 与 `docs/testing/plugin-architecture-stage-2-feature-event.html`。
+> 实施进度：2026-09-04 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver、Context Contributor 主链均已落地。Cron Trigger Reminder Contributor、后台结果通知 Contributor、Feature Event 命名空间、Route Registry 与 Core Feature 声明化均已完成；阶段 3A 已完成首个 Cron Runtime Feature 切片：`product.cron` 以 restart Generation 统一拥有 Scheduler、六个 Tools、Trigger Context、Owner mount、Host Binding 与运行 Lease，`CrewApp.startup()/shutdown()` 的 Cron 专用启停分支删除，Gateway Logout 改为动态解析当前 Generation Service。Cron 持久数据平面仍独立保留，HTTP Route Contribution 留在下一轮。当前分支为 `refactor/plugin-architecture-stage-0`，验证记录见 `docs/testing/plugin-architecture-stage-3a-cron-runtime.html`。
 
 ## 当前实施进度图（2026-09-03）
 
@@ -86,8 +86,10 @@ flowchart TB
     RouteTests --> CoreDecl["Core Feature 声明化<br/>组合根 10 处收敛 · Runtime 统一激活"]
     CoreDecl --> Required["required_by_product<br/>控制面停用守卫"]
     Required --> CoreTests["Core Feature 联合回归<br/>7 passed · 全量零新增"]
-    CoreTests --> Next["阶段 2 收尾<br/>资源所有权迁入 Generation"]
-    Next --> Later["后续阶段<br/>阶段 3A：Cron/Sites/Browser 生命周期验证"]
+    CoreTests --> CronRuntime["阶段 3A · Cron Runtime Feature<br/>restart · Tools · Context · Owner mount"]
+    CronRuntime --> CronRuntimeTests["Cron 生命周期验证<br/>回滚 · 更新 · 动态 Gateway Service"]
+    CronRuntimeTests --> Next["阶段 3A 下一切片<br/>Sites Scope 与中心启停分支移除"]
+    Next --> Later["阶段 3A 后续<br/>Browser 完整资源所有权验证"]
 
     classDef done fill:#e8f6ee,stroke:#1e8449,color:#145a32,stroke-width:2px
     classDef next fill:#e6f0fb,stroke:#2471a3,color:#154360,stroke-width:2px
@@ -95,11 +97,12 @@ flowchart TB
     class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed,Scope,Token,Rollback,RuntimeTests,Services,Dependencies,Config,ServiceTests,Runtime,Adapter,Phases,Browser,Shutdown,AdapterTests,Manifest,Ordered,Audit,ManifestTests,Lease,StopPolicy,StopAudit,LeaseTests,Update,Generation,Recovery,UpdateTests,Stage1Done,Drivers,DriverLease,DefaultDriver,PluginDriver,DriverTests,Adapters,DriverAdapterTests done
     class ContextRegistry,PathContext,BrowserContext,ContextTests done
     class SessionContext,SessionTests,WikiContext,WikiTests,CronContext,CronTests,BgContext,QueueOwner,TeamDrain,BgTests,FeatureEvent,EventCompat,EventTests,RouteReg,RouteGate,RouteTests,CoreDecl,Required,CoreTests done
+    class CronRuntime,CronRuntimeTests done
     class Next next
     class Later pending
 ```
 
-这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。Cron Trigger 切片把定时任务触发语义和文案移回 Cron 模块，只有 Cron 启用且当前请求来自 cron channel 时才贡献瞬时 prompt fragment；Agent Runtime 不再认识 Cron channel。后台结果通知切片把子任务、进程与任务恢复回合三条 reminder 注入路径迁为 PROMPT contributor，通知队列收归来源模块，team member 的 `subagent_drain_fn` 旁路随共享注册表覆盖而删除。Cron 的 Scheduler、Store 与 Owner mount 完整 Feature 化留在阶段 3A；`_resume_completed_task` 触发器化与用户可见通知来源贡献化留作后续切片。Feature Event 切片让核心协议只保留开放 `feature_event` 信封，Team 内部消息与 Wiki 卡片/变更/摄取进度改发 `team.internal_message`、`wiki.cards`、`wiki.changed`、`wiki.ingest_progress`（均 v1），旧 kind 帧由 `crew/gateway/event_compat.py` 在 WS 出口（含断线回放）转换，现有客户端协议零变化；前端 reducer 迁移到 `ace.feature-event.v1` 后删除适配器与旧枚举（阶段 5）。Route Gate 切片新增 `crew/features/routes.py`：目录插件 `register_api_router` 双写 Route Registry，Gateway 启动期从注册表装配并以 `make_route_gate` 做运行期能力门控——FastAPI 路由树不热卸载，停用即 503 `capability_unavailable`；内置 23 个域路由随各自 Feature Bundle 迁移（阶段 3 起）逐个进入注册表。Core Feature 声明化切片把组合根 10 处手写 scope 注册（agent driver、三个后台通知 contributor、host 路径、session source、team/kanban driver adapter、wiki/cron context）收敛为声明式 FeatureDefinition 并标记 required_by_product（core./host./gateway. 必需，product.* 可选），启动审计与 dump-features 已覆盖全树；默认 Agent Loop、Tool Runtime、Session/Task、LLM Provider 的 store/连接/后台任务资源所有权迁入 Generation 属阶段 3 纵向切片。下一步进入阶段 3A：Cron、Sites、Browser 生命周期验证。
+这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。阶段 2 的 Driver、Context、Feature Event、Route Gate 和声明式 Core Feature 已形成扩展主链。阶段 3A 的 Cron 首切片新增 `crew/cron/feature.py`，把原先散落在 `build_app()`、`CrewApp.startup()/shutdown()` 和 Gateway Logout 的 Scheduler、Tools、Trigger Context、Owner mount 与 Service Binding 收入 `product.cron` Generation；工具和 Fire 自动持有 Lease，配置更新使用 restart，失败由事务回滚或恢复旧定义。持久 Cron Store 暂作为停用后仍可访问的数据平面由 Host 最终关闭，不随 Feature disable 删除；Cron HTTP Router 进入 Route Registry、稳定数据服务替换 `CrewApp.cron_store` 字段属于后续纵向切片。下一步继续阶段 3A 的 Sites Scope，然后完成 Browser Owner/页面/进程资源验证。
 
 ## 0. 执行摘要
 

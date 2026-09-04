@@ -382,6 +382,7 @@ async def test_cron_context_contributor_follows_feature_flag(
         enable_team=False,
     )
     try:
+        await app.startup()
         prompt_ids = {
             binding.contributor.contributor_id
             for binding in app.context_contributors.bindings(ContextPhase.PROMPT)

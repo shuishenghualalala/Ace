@@ -519,6 +519,9 @@ class CrewApp:
         self.execution_drivers = plugins.feature_runtime.execution_drivers
         self.context_contributors = plugins.feature_runtime.context_contributors
         self._builtin_feature_scopes: list[FeatureScope] = []
+        # 需要宿主事件循环的长生命周期 Feature 在 build_app 仅声明，startup
+        # 再由共享 Runtime 按依赖图激活；Sites/Browser 后续复用同一入口。
+        self._managed_feature_definitions: OrderedDict[str, FeatureDefinition] = OrderedDict()
         # 后台子任务完成结果的待注入队列（按父 session 分键）：实现在
         # crew/agent/subagent/context.py，完成回调入队、PROMPT contributor drain、
         # collect_subagent 摘除三端共享同一实例。
@@ -1703,6 +1706,56 @@ class CrewApp:
         self._builtin_feature_scopes.append(record.scope)
         return record.scope
 
+    def declare_managed_feature(self, definition: FeatureDefinition) -> None:
+        """声明一个需要在宿主事件循环中激活的长生命周期 Feature。"""
+
+        feature_id = definition.feature_id
+        if feature_id in self._managed_feature_definitions:
+            raise ValueError(f"managed feature already declared: {feature_id}")
+        self.plugins.feature_runtime.discover(definition)
+        self._managed_feature_definitions[feature_id] = definition
+
+    async def _activate_managed_features(
+        self,
+        *,
+        excluded: frozenset[str] = frozenset(),
+    ) -> None:
+        definitions = [
+            definition
+            for feature_id, definition in self._managed_feature_definitions.items()
+            if feature_id not in excluded
+        ]
+        records = await self.plugins.feature_runtime.activate_many(definitions)
+        for record in records:
+            if record.state is FeatureState.ACTIVE:
+                continue
+            log.error(
+                "托管 Feature 激活失败: id=%s state=%s error=%s",
+                record.definition.feature_id,
+                record.state.value,
+                record.error,
+            )
+
+    async def update_managed_feature(self, definition: FeatureDefinition):
+        """以 FeatureRuntime 的声明策略更新一个已托管 Feature。"""
+
+        if definition.feature_id not in self._managed_feature_definitions:
+            raise KeyError(f"unknown managed feature: {definition.feature_id}")
+        result = await self.plugins.feature_runtime.update(definition)
+        record = self.plugins.feature_runtime.get(definition.feature_id)
+        if record is not None:
+            self._managed_feature_definitions[definition.feature_id] = record.definition
+        return result
+
+    async def _deactivate_managed_features(self, *, timeout: float) -> None:
+        runtime = self.plugins.feature_runtime
+        for feature_id in reversed(self._managed_feature_definitions):
+            await runtime.deactivate(
+                feature_id,
+                timeout_seconds=timeout,
+                allow_required_by_product=True,
+            )
+
     @staticmethod
     def _builtin_feature_required(feature_id: str) -> bool:
         """core./host./gateway. 前缀的能力是产品运行必需；product.* 可由产品策略停用。"""
@@ -1921,14 +1974,6 @@ class CrewApp:
         lease = self.active_owner.get(owner) if owner else self.active_owner.current()
         return lease.owner_account_id if lease is not None else None
 
-    async def start_cron(self) -> None:
-        """Start the cron engine after delivery channels are ready."""
-        if self.cron_service is not None:
-            try:
-                await self.cron_service.start()
-            except Exception:  # noqa: BLE001
-                log.exception("CronService 启动失败")
-
     async def startup(self, *, start_cron: bool = True) -> None:
         """拉起后台能力：连接外部 MCP server、启动 cron 引擎、会话过期定时器。失败静默降级。"""
         try:
@@ -1974,8 +2019,10 @@ class CrewApp:
                 await self.mcp_manager.start(self.registry)
             except Exception:  # noqa: BLE001
                 log.exception("MCP Client 启动失败")
-        if start_cron:
-            await self.start_cron()
+        # 兼容测试入口的 start_cron=False；产品 Feature 的实际装配不再由
+        # CrewApp 按具体 Manager 手写启动。
+        excluded = frozenset() if start_cron else frozenset({"product.cron"})
+        await self._activate_managed_features(excluded=excluded)
         if getattr(self, "sites", None) is not None:
             try:
                 await self.sites.start()
@@ -2158,6 +2205,7 @@ class CrewApp:
                 pass
             self._expiry_task = None
         await self.dispatcher.shutdown()
+        await self._deactivate_managed_features(timeout=provider_timeout)
         await asyncio.gather(
             *(
                 scope.stop(
@@ -2167,8 +2215,6 @@ class CrewApp:
                 for scope in reversed(self._builtin_feature_scopes)
             )
         )
-        if self.cron_service is not None:
-            await self.cron_service.stop()
         if self.work_service is not None:
             try:
                 await self.work_service.stop()
@@ -3590,153 +3636,22 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         on_collected=app._subagent_notifications.remove,
     )
 
-    # cron：任务存储 + 引擎 + 暴露给 agent 的工具
-    from crew.cron import (
-        CronJobStore,
-        CronService,
-        contribute_cron_trigger_reminder,
+    # Cron 数据平面在停用后仍保留，Scheduler/Tools/Context 则由同一
+    # product.cron Generation 在宿主事件循环中事务激活。
+    from crew.cron import CronJobStore, build_cron_feature
+
+    app.cron_store = CronJobStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
+    cron_feature = build_cron_feature(
+        app,
+        registry,
+        app.cron_store,
+        enabled=cfg.cron_enabled,
+        max_parallel_jobs=cfg.cron_max_parallel_jobs,
     )
-    from crew.cron.tools import EXTERNAL_ORIGIN_PLATFORMS
-    from crew.tools.cron_tools import register_cron_tools
-
-    cron_store = CronJobStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
-    app.cron_store = cron_store
-    app.cron_service = None
-    if cfg.cron_enabled:
-        app._register_context_contributor_scope(
-            "product.cron-context-adapter",
-            ContextContributor(
-                contributor_id="cron.trigger.reminder",
-                handler=contribute_cron_trigger_reminder,
-                phase=ContextPhase.PROMPT,
-                priority=50,
-                predicate=lambda envelope: envelope.channel == "cron",
-                model_visible=True,
-                persistent=False,
-                description="Active Cron fire framing for the executing agent",
-            ),
-        )
-
-        def _cron_origin_source(env: Envelope):
-            raw = env.params.get("cron_origin_source")
-            if not isinstance(raw, dict) or not raw:
-                return None
-            try:
-                from crew.gateway.session_context import SessionSource
-
-                return SessionSource.from_dict(raw)
-            except Exception:  # noqa: BLE001
-                log.warning("cron origin_source 无法解析 session=%s raw=%s", env.session_id, raw)
-                return None
-
-        async def _notify_cron_session(kind: str, env: Envelope, session_id: str) -> None:
-            """Notify the active Owner that a Cron Fire created or updated a session."""
-            if app._notify_owner_fn is None:
-                return
-            try:
-                await app._notify_owner_fn(
-                    env.user_id,
-                    {
-                        "kind": kind,
-                        "body": {
-                            "job_id": str(env.params.get("cron_job_id") or ""),
-                            "job_name": str(env.params.get("cron_job_name") or "").strip(),
-                            "source_session_id": str(
-                                env.params.get("cron_source_session_id") or ""
-                            ),
-                        },
-                        "session_id": session_id,
-                        "is_final": True,
-                        "sequence": 0,
-                    },
-                )
-            except Exception:  # noqa: BLE001
-                log.debug("cron 广播会话事件失败 kind=%s session=%s", kind, session_id)
-
-        async def _cron_runner(env: Envelope) -> None:
-            # 走 SessionDispatcher：尊重忙时策略 / 全局并发上限，与 WS/平台入口同一调度
-            final_text, error = "", ""
-            deliver_target = str(env.params.get("cron_deliver") or "").strip()
-            origin = _cron_origin_source(env)
-
-            # origin 只对当前 DeliveryRouter 支持的外部渠道有效。Web/local/missing
-            # 必须回退新会话，否则会把本地来源误当作外部 sender 并在执行后失败。
-            if deliver_target.lower() == "origin" and (
-                origin is None or origin.platform not in EXTERNAL_ORIGIN_PLATFORMS
-            ):
-                log.debug("cron deliver origin 无外部 sender，fallback 为新建会话")
-                deliver_target = "new_session"
-
-            # 默认/新会话投递：每个任务一个固定的投递会话（首次触发创建、后续触发追加），
-            # 分钟级任务不再每次触发刷一个同名新会话。"local" 表示显式投递回原绑定会话。
-            if deliver_target in {"", "new_session"}:
-                job_name = str(env.params.get("cron_job_name") or "").strip()
-                new_sid = f"{str(env.params.get('cron_job_id') or 'job')}_feed"
-                already_exists = app.session_store.session_belongs_to(
-                    new_sid, owner_account_id=env.user_id
-                )
-                app.session_store.ensure_session(
-                    new_sid,
-                    workspace_id=env.workspace_id,
-                    title=f"[定时] {job_name}" if job_name else "[定时] 任务",
-                    owner_account_id=env.user_id,
-                )
-                env.session_id = new_sid
-                await _notify_cron_session(
-                    "cron_session_updated" if already_exists else "cron_session_created",
-                    env,
-                    new_sid,
-                )
-                deliver_target = "new_session"
-
-            if origin is not None and "session_context" not in env.params:
-                from crew.gateway.session_context import SessionContext
-
-                env.params["session_context"] = SessionContext(
-                    source=origin,
-                    connected_platforms=["local", origin.platform],
-                    shared_multi_user=origin.chat_type in {"group", "channel"},
-                    session_id=env.session_id,
-                    workspace_id=env.workspace_id,
-                )
-            async for chunk in app.dispatch(env):
-                # 有活跃 WS 时实时推送，无则只落库（用户下次打开可见）
-                if app._push_fn is not None:
-                    try:
-                        await app._push_fn(env.session_id, chunk, owner_account_id=env.user_id)
-                    except Exception:  # noqa: BLE001
-                        log.debug("cron 推送 chunk 失败，session=%s", env.session_id)
-                # 捕获最终文本/错误，供投递到外部渠道（如 feishu:chat_id）
-                if chunk.kind == "final":
-                    final_text = chunk.body.get("text", "")
-                elif chunk.kind == "error":
-                    error = chunk.body.get("message", "")
-            if deliver_target.lower() == "local":
-                await _notify_cron_session("cron_session_updated", env, env.session_id)
-            # 投递：把 cron 结果发到 deliver 指定的渠道（delivery_router 由 gateway 装配）
-            if deliver_target and deliver_target.lower() not in {"local", "new_session"}:
-                reply = (final_text or error).strip()
-                if reply:
-                    if app.delivery_router is None:
-                        raise RuntimeError("cron deliver 需要 gateway delivery router")
-                    result = await app.delivery_router.deliver(
-                        deliver_target,
-                        reply,
-                        origin=origin,
-                        owner_account_id=env.user_id,
-                    )
-                    if not result.get("ok"):
-                        log.warning("cron deliver 失败 target=%s err=%s",
-                                    deliver_target, result.get("error"))
-                        raise RuntimeError(str(result.get("error") or f"deliver failed: {deliver_target}"))
-
-        app.cron_service = CronService(
-            cron_store,
-            _cron_runner,
-            max_parallel_jobs=cfg.cron_max_parallel_jobs,
-        )
-        app.cron_service.set_on_run_finished(app._on_cron_run_finished)
-    register_cron_tools(registry, cron_store, app.cron_service)
+    # 保留 build_app 后可检查候选 Service 的兼容视图；Runtime 激活/更新时
+    # 会原子维护同一属性，Gateway 通过动态 getter 消费。
+    app.cron_service = cron_feature.service
+    app.declare_managed_feature(cron_feature.definition)
 
     # MCP Client：连接外部 MCP server（在 startup 时实际连接）
     from crew.tools.mcp_client import MCPClientManager
