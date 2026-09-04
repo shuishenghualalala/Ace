@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 3A · Browser Runtime 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 3A · Browser Runtime</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-04 · 实现与测试：独立 Luna 子 Agent</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li>startup-phase 插件只在宿主事件循环激活，后台 Task 归属正确 loop。</li>
+    <li>失败激活完整回滚 Service、Tools、Context、Skill 和 Manager；激活前 unload 不会被后续 phase 复活。</li>
+    <li>restart 生成新 <code>browser.manager</code>，失败恢复到新恢复 Generation，CrewApp 动态跟随。</li>
+    <li>停用关闭全部 Owner、Session、Tab/Page 和后台 Task；API Gate 不触达旧 Manager。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Browser Plugin + Plugin Lifecycle</td><td class="ok">233 passed</td></tr>
+      <tr><td>Feature / Plugin / Route</td><td class="ok">40 passed，1 skipped</td></tr>
+      <tr><td>Gateway Browser</td><td class="ok">52 passed</td></tr>
+      <tr><td>BrowserManager 相邻回归</td><td class="ok">209 passed，28 skipped</td></tr>
+      <tr><td>Ruff、compileall、lint-imports、git diff check、禁用表述扫描</td><td class="ok">全部通过；6 contracts kept</td></tr>
+    </tbody>
+  </table>
+  <p>各测试组存在重叠，不将数量相加作为全量测试总数。最后补强的 10 个 deferred/restart/rollback/cleanup 定向用例全部通过。</p>
+
+  <h2>跨平台断言</h2>
+  <p>测试覆盖 Fake Driver 的多 Owner 关闭、后台 Task 回收和重复 <code>aclose()</code>；新增生命周期层未引入 POSIX-only 调用。</p>
+
+  <div class="nav"><a href="../backend/adr/0019-browser-host-loop-feature.html">ADR-0019</a> · <a href="../backend/modules/plugins.html">Feature / Plugin 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

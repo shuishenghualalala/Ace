@@ -231,3 +231,61 @@ async def test_read_tab_content_propagates_driver_error():
 
     with pytest.raises(BrowserDriverError, match="尚未连接"):
         await manager.read_tab_content("dev:dev", "session", "s0123-1")
+
+
+async def test_read_tab_resolves_current_manager_and_stops_at_capability_gate():
+    calls: list[tuple[str, str, str]] = []
+
+    async def stale_read(*_args):
+        raise AssertionError("deactivated generation must not reach the old manager")
+
+    async def active_read(owner, session_id, tab_id):
+        calls.append((owner, session_id, tab_id))
+        return {"title": "T", "url": "u", "text": "正文"}
+
+    class DynamicCrew:
+        def __init__(self):
+            self._manager = SimpleNamespace(read_tab_content=stale_read)
+            self.enabled = True
+            self.registry = _registry()
+            self.config = SimpleNamespace(access_control=_AccessControl(["browser_use"]))
+            self.session_store = _SessionStore()
+
+        @property
+        def browser_manager(self):
+            return self._manager
+
+        def _browser_plugin_effective(self, _owner, _user_type):
+            return self.enabled
+
+    crew = DynamicCrew()
+    router = create_browser_router(crew)
+    endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path == "/api/browser/{session_id}/read-tab"
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(account=AccountContext("dev:dev")),
+        headers={"authorization": "Bearer expected-token"},
+    )
+
+    crew._manager = SimpleNamespace(read_tab_content=active_read)
+    response = await endpoint(request, "session", {"tab_id": "s0123-1"})
+    assert response.status_code == 200
+    assert calls == [("dev:dev", "session", "s0123-1")]
+
+    # Removing the concrete browser tool is the router's tool-level gate.
+    crew.registry = Registry()
+    response = await endpoint(request, "session", {"tab_id": "s0123-1"})
+    assert response.status_code == 403
+    assert calls == [("dev:dev", "session", "s0123-1")]
+
+    # Feature deactivation is a second gate and must not fall through to the
+    # stale manager captured by an earlier request.
+    crew.registry = _registry()
+    crew.enabled = False
+    crew._manager = SimpleNamespace(read_tab_content=stale_read)
+    response = await endpoint(request, "session", {"tab_id": "s0123-1"})
+    assert response.status_code == 403
+    assert calls == [("dev:dev", "session", "s0123-1")]

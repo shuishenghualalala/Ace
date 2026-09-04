@@ -33,14 +33,18 @@ log = get_logger("plugins.browser")
 manager: BrowserManager | None = None
 
 
-def register(ctx) -> None:
+async def register(ctx) -> None:
     global manager
     config = ctx.resolve_service("config")
     plugin_prefs = ctx.get_service("plugin_prefs")
 
     browser_manager = BrowserManager(config.browser)
     manager = browser_manager
+    # Register cleanup before startup so every partial installation can be
+    # rolled back by FeatureTransaction, including a failed driver startup.
     ctx.register_disposer(_manager_disposer(browser_manager))
+    await browser_manager.startup()
+    ctx.register_service("browser.manager", browser_manager)
     ctx.register_context_contributor(
         "browser.reference.tab",
         _browser_tab_contributor(browser_manager),

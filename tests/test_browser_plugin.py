@@ -11,7 +11,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from jsonschema import Draft202012Validator
 
-from crew.app import build_app
+from crew.app import CrewApp, build_app
 from crew.browser.driver import BrowserDriverError
 from crew.browser.manager import BrowserManager
 from crew.browser.types import BrowserConfig
@@ -125,61 +125,67 @@ async def plugin_tool(tmp_path, monkeypatch):
 # ---- 装配：默认工具 + 延迟加载高级动作 ----
 
 
-def test_build_app_exposes_only_browser_use(tmp_path):
+async def test_build_app_exposes_only_browser_use(tmp_path):
     cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
     crew = build_app(config=cfg, enable_team=False)
+    try:
+        await crew.startup(start_cron=False)
+        names = set(crew.registry.names())
+        assert "browser_use" in names
+        assert names & _OLD_BROWSER_TOOLS == set()
 
-    names = set(crew.registry.names())
-    assert "browser_use" in names
-    assert names & _OLD_BROWSER_TOOLS == set()
-
-    schemas = crew.registry.list_schemas(enabled_toolsets=["*"])
-    browser_schemas = [s for s in schemas if s.get("_crew_toolset") == "browser"]
-    browser_names = [(s.get("function") or {}).get("name") for s in browser_schemas]
-    # 两阶段发布：record_compile 只生成 owner-private immutable draft；
-    # record_install 必须一次性审批并在安装前复核 trace/draft 摘要。
-    assert sorted(browser_names) == [
-        "browser_use",
-        "browser_use_advanced",
-        "record_compile",
-        "record_install",
-        "record_replay",
-    ]
-    # browser_use 直接进入主 schema；高级动作只在 tool_search 命中后加载。
-    assert browser_schemas[0].get("_crew_should_defer") is False
-    advanced = next(
-        s for s in browser_schemas
-        if (s.get("function") or {}).get("name") == "browser_use_advanced"
-    )
-    assert advanced.get("_crew_should_defer") is True
-    assert "mouse_click" in advanced["function"]["parameters"]["properties"]["action"]["enum"]
+        schemas = crew.registry.list_schemas(enabled_toolsets=["*"])
+        browser_schemas = [s for s in schemas if s.get("_crew_toolset") == "browser"]
+        browser_names = [(s.get("function") or {}).get("name") for s in browser_schemas]
+        # 两阶段发布：record_compile 只生成 owner-private immutable draft；
+        # record_install 必须一次性审批并在安装前复核 trace/draft 摘要。
+        assert sorted(browser_names) == [
+            "browser_use",
+            "browser_use_advanced",
+            "record_compile",
+            "record_install",
+            "record_replay",
+        ]
+        # browser_use 直接进入主 schema；高级动作只在 tool_search 命中后加载。
+        assert browser_schemas[0].get("_crew_should_defer") is False
+        advanced = next(
+            s for s in browser_schemas
+            if (s.get("function") or {}).get("name") == "browser_use_advanced"
+        )
+        assert advanced.get("_crew_should_defer") is True
+        assert "mouse_click" in advanced["function"]["parameters"]["properties"]["action"]["enum"]
+    finally:
+        await crew.shutdown()
 
 
-def test_plugin_loaded_and_skill_root_registered(tmp_path):
+async def test_plugin_loaded_and_skill_root_registered(tmp_path):
     from crew.agent.skills import scan_skills
 
     cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
     crew = build_app(config=cfg, enable_team=False)
-
-    loaded = crew.plugins.get_plugin("browser")
-    assert loaded is not None and loaded.enabled
-    assert any("browser" in str(root) for root in crew.plugins.plugin_skill_roots())
-    assert "/browser-use" in scan_skills()
-    assert loaded.feature_record is not None
-    assert loaded.feature_record.state is FeatureState.ACTIVE
-    scope = loaded.feature_record.scope
-    assert scope is not None
-    labels = {token.label: token.phase for token in scope.registrations}
-    assert labels["resource:_close_manager"] is RegistrationPhase.RESOURCE
-    assert labels["tool:browser_use"] is RegistrationPhase.CONTRIBUTION
-    assert labels["tool:browser_use_advanced"] is RegistrationPhase.CONTRIBUTION
-    assert labels["tool:record_compile"] is RegistrationPhase.CONTRIBUTION
-    assert labels["tool:record_install"] is RegistrationPhase.CONTRIBUTION
-    assert labels["tool:record_replay"] is RegistrationPhase.CONTRIBUTION
-    assert (
-        labels["context-contributor:browser.reference.tab"]
-        is RegistrationPhase.CONTRIBUTION
-    )
+    try:
+        await crew.startup(start_cron=False)
+        loaded = crew.plugins.get_plugin("browser")
+        assert loaded is not None and loaded.enabled
+        assert any("browser" in str(root) for root in crew.plugins.plugin_skill_roots())
+        assert "/browser-use" in scan_skills()
+        assert loaded.feature_record is not None
+        assert loaded.feature_record.state is FeatureState.ACTIVE
+        scope = loaded.feature_record.scope
+        assert scope is not None
+        labels = {token.label: token.phase for token in scope.registrations}
+        assert labels["resource:_close_manager"] is RegistrationPhase.RESOURCE
+        assert labels["tool:browser_use"] is RegistrationPhase.CONTRIBUTION
+        assert labels["tool:browser_use_advanced"] is RegistrationPhase.CONTRIBUTION
+        assert labels["tool:record_compile"] is RegistrationPhase.CONTRIBUTION
+        assert labels["tool:record_install"] is RegistrationPhase.CONTRIBUTION
+        assert labels["tool:record_replay"] is RegistrationPhase.CONTRIBUTION
+        assert (
+            labels["context-contributor:browser.reference.tab"]
+            is RegistrationPhase.CONTRIBUTION
+        )
+    finally:
+        await crew.shutdown()
 
 
 async def test_browser_feature_unload_hides_tools_before_manager_cleanup_finishes(
@@ -188,6 +194,7 @@ async def test_browser_feature_unload_hides_tools_before_manager_cleanup_finishe
 ):
     cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
     crew = build_app(config=cfg, enable_team=False)
+    await crew.startup(start_cron=False)
     manager = crew.browser_manager
     cleanup_started = asyncio.Event()
     cleanup_release = asyncio.Event()
@@ -226,6 +233,7 @@ async def test_browser_feature_unload_hides_tools_before_manager_cleanup_finishe
 async def test_app_shutdown_disposes_browser_through_feature_scope(tmp_path, monkeypatch):
     cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
     crew = build_app(config=cfg, enable_team=False)
+    await crew.startup(start_cron=False)
     manager = crew.browser_manager
     close_calls = 0
 
@@ -245,51 +253,58 @@ async def test_app_shutdown_disposes_browser_through_feature_scope(tmp_path, mon
     assert "browser_use" not in crew.registry.names()
 
 
-def test_record_publish_tools_reuse_browser_hot_disable_gate(tmp_path):
+async def test_record_publish_tools_reuse_browser_hot_disable_gate(tmp_path):
     cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
     crew = build_app(config=cfg, enable_team=False)
-    crew.plugin_prefs.set_enabled(OWNER, "browser", False)
-    tokens = [
-        (current_owner_account_id, current_owner_account_id.set(OWNER)),
-        (current_session_id, current_session_id.set(SESSION)),
-        (current_user_type, current_user_type.set("internal")),
-        (current_tool_call_id, current_tool_call_id.set("publish-call")),
-    ]
     try:
-        compile_decision = crew.registry.get("record_compile").permission_resolver({})
-        install_decision = crew.registry.get("record_install").permission_resolver({})
-        replay_decision = crew.registry.get("record_replay").permission_resolver({})
-    finally:
-        for var, token in reversed(tokens):
-            var.reset(token)
+        await crew.startup(start_cron=False)
+        crew.plugin_prefs.set_enabled(OWNER, "browser", False)
+        tokens = [
+            (current_owner_account_id, current_owner_account_id.set(OWNER)),
+            (current_session_id, current_session_id.set(SESSION)),
+            (current_user_type, current_user_type.set("internal")),
+            (current_tool_call_id, current_tool_call_id.set("publish-call")),
+        ]
+        try:
+            compile_decision = crew.registry.get("record_compile").permission_resolver({})
+            install_decision = crew.registry.get("record_install").permission_resolver({})
+            replay_decision = crew.registry.get("record_replay").permission_resolver({})
+        finally:
+            for var, token in reversed(tokens):
+                var.reset(token)
 
-    assert compile_decision.behavior == "deny"
-    assert install_decision.behavior == "deny"
-    assert replay_decision.behavior == "deny"
-    assert "BROWSER_CAPABILITY_DISABLED" in compile_decision.reason
-    assert "BROWSER_CAPABILITY_DISABLED" in install_decision.reason
-    assert "BROWSER_CAPABILITY_DISABLED" in replay_decision.reason
-    assert compile_decision.allow_always is False
-    assert install_decision.allow_always is False
+        assert compile_decision.behavior == "deny"
+        assert install_decision.behavior == "deny"
+        assert replay_decision.behavior == "deny"
+        assert "BROWSER_CAPABILITY_DISABLED" in compile_decision.reason
+        assert "BROWSER_CAPABILITY_DISABLED" in install_decision.reason
+        assert "BROWSER_CAPABILITY_DISABLED" in replay_decision.reason
+        assert compile_decision.allow_always is False
+        assert install_decision.allow_always is False
+    finally:
+        await crew.shutdown()
 
 
 # ---- 四态一致：system && role && user ----
 
 
-def test_effective_state_follows_user_type_and_preference(tmp_path):
+async def test_effective_state_follows_user_type_and_preference(tmp_path):
     cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
     crew = build_app(config=cfg, enable_team=False)
-
-    # internal 无偏好：默认开
-    assert crew._browser_plugin_effective(OWNER, "internal") is True
-    # internal 显式关闭
-    crew.plugin_prefs.set_enabled(OWNER, "browser", False)
-    assert crew._browser_plugin_effective(OWNER, "internal") is False
-    # external 无偏好：fail-closed
-    assert crew._browser_plugin_effective(OWNER, "external") is False
-    # external 显式 opt-in：开
-    crew.plugin_prefs.set_enabled(OWNER, "browser", True)
-    assert crew._browser_plugin_effective(OWNER, "external") is True
+    try:
+        await crew.startup(start_cron=False)
+        # internal 无偏好：默认开
+        assert crew._browser_plugin_effective(OWNER, "internal") is True
+        # internal 显式关闭
+        crew.plugin_prefs.set_enabled(OWNER, "browser", False)
+        assert crew._browser_plugin_effective(OWNER, "internal") is False
+        # external 无偏好：fail-closed
+        assert crew._browser_plugin_effective(OWNER, "external") is False
+        # external 显式 opt-in：开
+        crew.plugin_prefs.set_enabled(OWNER, "browser", True)
+        assert crew._browser_plugin_effective(OWNER, "external") is True
+    finally:
+        await crew.shutdown()
 
 
 def test_role_layer_overrides_user_optin(tmp_path):
@@ -1822,12 +1837,15 @@ async def test_revoke_one_owner_does_not_affect_another(plugin_tool, ctx_vars):
 
 
 @pytest.fixture
-def api(tmp_path):
+async def api(tmp_path):
     cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
     crew = build_app(config=cfg, enable_team=False)
     from crew.gateway.server import create_app
-
-    return create_app(crew), crew
+    await crew.startup(start_cron=False)
+    try:
+        yield create_app(crew), crew
+    finally:
+        await crew.shutdown()
 
 
 async def test_plugins_states_api_returns_five_states(api, auth_headers):
@@ -2016,3 +2034,245 @@ async def test_put_browser_enabled_validates_input(api, auth_headers):
         unknown = await client.put("/api/plugins/no-such-plugin/enabled", json={"enabled": True})
     assert missing.status_code == 400
     assert unknown.status_code == 404
+
+
+async def test_browser_startup_activation_owns_manager_tasks_on_host_loop(tmp_path):
+    cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
+    crew = build_app(config=cfg, enable_team=False)
+    try:
+        loaded = crew.plugins.get_plugin("browser")
+        assert loaded is not None and loaded.feature_record is not None
+        assert loaded.feature_record.state is FeatureState.DISCOVERED
+        assert loaded.feature_record.scope is None
+        assert crew.browser_manager is None
+        assert "browser_use" not in crew.registry.names()
+        assert crew.plugins.resolve_service("browser.manager") is None
+
+        loop = asyncio.get_running_loop()
+        await crew.startup(start_cron=False)
+        manager = crew.browser_manager
+        assert manager is not None
+        assert loaded.enabled
+        assert loaded.feature_record.state is FeatureState.ACTIVE
+        assert manager._idle_task is not None
+        assert manager._idle_task.get_loop() is loop
+        assert manager._prepare_task is not None
+        assert manager._prepare_task.get_loop() is loop
+    finally:
+        await crew.shutdown()
+    assert manager._idle_task is None
+    assert manager._prepare_task is None
+    assert crew.browser_manager is None
+
+
+async def test_browser_restart_rebinds_crew_property_and_keeps_disposer_identity_safe(tmp_path):
+    cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
+    crew = build_app(config=cfg, enable_team=False)
+    try:
+        await crew.startup(start_cron=False)
+        old_manager = crew.browser_manager
+        assert old_manager is not None
+        old_loaded = crew.plugins.get_plugin("browser")
+        assert old_loaded is not None and old_loaded.feature_record is not None
+        old_scope = old_loaded.feature_record.scope
+        assert old_scope is not None
+        old_disposer = old_loaded.disposers[0]
+
+        result = await crew.plugins.update_plugin_async(
+            "browser", desired_config_revision=2
+        )
+        assert result.updated is True
+        assert result.previous_generation == "browser@g1"
+        assert result.current_generation == "browser@g2"
+        assert old_scope.state is FeatureState.DISPOSED
+        assert old_manager._closed is True
+
+        new_manager = crew.browser_manager
+        assert new_manager is not None and new_manager is not old_manager
+        assert new_manager._closed is False
+        assert crew.plugins.resolve_service("browser.manager") is new_manager
+        loaded = crew.plugins.get_plugin("browser")
+        assert loaded is not None and loaded is not old_loaded
+        assert loaded.feature_record is not None
+        assert loaded.feature_record.generation is not None
+        assert loaded.feature_record.generation.key == "browser@g2"
+        assert loaded.feature_record.effective_config_revision == 2
+        assert crew.registry.names().count("browser_use") == 1
+        assert sum(
+            binding.contributor.contributor_id == "browser.reference.tab"
+            for binding in crew.context_contributors.bindings()
+        ) == 1
+        browser_skill_roots = [
+            root for root in crew.plugins.plugin_skill_roots() if "/browser/" in root
+        ]
+        assert len(browser_skill_roots) == 1
+
+        # A stale generation disposer must not clear the newly published manager.
+        await old_disposer()
+        assert crew.browser_manager is new_manager
+    finally:
+        await crew.shutdown()
+
+
+async def test_crew_startup_does_not_start_an_already_activated_browser_manager(
+    tmp_path, monkeypatch
+):
+    cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
+    crew = build_app(config=cfg, enable_team=False)
+    try:
+        await crew.startup(start_cron=False)
+        manager = crew.browser_manager
+        assert manager is not None
+
+        async def unexpected_startup():
+            raise AssertionError("CrewApp.startup must not start the BrowserManager directly")
+
+        monkeypatch.setattr(manager, "startup", unexpected_startup)
+        await crew.startup(start_cron=False)
+    finally:
+        await crew.shutdown()
+
+
+def test_explicit_browser_manager_injection_is_authoritative(tmp_path):
+    cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
+    crew = build_app(config=cfg, enable_team=False)
+    injected = object()
+    published = object()
+    crew.plugins.publish_host_services({"browser.manager": published})
+
+    crew.browser_manager = injected
+    assert crew.browser_manager is injected
+    crew.browser_manager = None
+    assert crew.browser_manager is None
+
+
+async def test_browser_manager_aclose_releases_all_owner_resources_and_tasks(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "crew.browser.manager.get_owner_runtime_home",
+        lambda owner: tmp_path / "accounts" / str(owner),
+    )
+    driver = FakeBrowserDriver()
+    manager = BrowserManager(BrowserConfig(), driver)
+    try:
+        await manager.startup()
+        await manager.navigate("owner-a", "session-a", "https://example.com/a")
+        await manager.navigate("owner-b", "session-b", "https://example.com/b")
+        assert set(manager._owners) == {"owner-a", "owner-b"}
+
+        await manager.aclose()
+
+        assert manager._closed is True
+        assert manager._owners == {}
+        assert manager._idle_task is None
+        assert manager._prepare_task is None
+        closed = [values[0] for command, values in driver.calls if command == "close"]
+        assert len(closed) == 2
+        assert all(value.startswith("crew_") for value in closed)
+
+        # Closing is safe to repeat and never creates a second driver/process close.
+        await manager.aclose()
+        assert len([1 for command, _ in driver.calls if command == "close"]) == 2
+    finally:
+        await manager.aclose()
+
+
+async def test_browser_plugin_update_failure_restores_previous_generation_without_leaks(
+    tmp_path,
+):
+    events_path = tmp_path / "manager-events.txt"
+    plugin_dir = tmp_path / "browser_substitute"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        """
+name: browser-substitute
+key: browser-substitute
+activation_phase: startup
+provides:
+  - browser.manager
+update_strategy: restart
+stop_policy: immediate
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        f"""
+from pathlib import Path
+
+EVENTS = Path({str(events_path)!r})
+CURRENT = None
+
+class Candidate:
+    def __init__(self, generation):
+        self.generation = generation
+        self.closed = False
+
+def event(value):
+    with EVENTS.open("a", encoding="utf-8") as stream:
+        stream.write(value + "\\n")
+
+def register(ctx):
+    global CURRENT
+    candidate = Candidate(ctx.generation.key)
+    CURRENT = candidate
+    event("created:" + candidate.generation)
+
+    def dispose():
+        global CURRENT
+        candidate.closed = True
+        event("closed:" + candidate.generation)
+        if CURRENT is candidate:
+            CURRENT = None
+
+    ctx.register_disposer(dispose)
+    ctx.register_service("browser.manager", candidate)
+    if ctx.generation.desired_config_revision == 2:
+        raise RuntimeError("candidate browser generation failed")
+""".lstrip(),
+        encoding="utf-8",
+    )
+    from crew.plugins.manager import PluginManager
+    from crew.tools.registry import Registry
+
+    plugins = PluginManager(registry=Registry())
+    try:
+        await plugins.discover_and_load_async([tmp_path], enabled=["browser-substitute"])
+        await plugins.activate_phase_async("startup")
+        loaded = plugins.get_plugin("browser-substitute")
+        assert loaded is not None and loaded.enabled
+        old_manager = plugins.resolve_service("browser.manager")
+        assert old_manager is not None
+
+        app = CrewApp.__new__(CrewApp)
+        app.plugins = plugins
+        app._browser_manager_override = CrewApp._UNSET_BROWSER_MANAGER
+        crew_manager = CrewApp.browser_manager.fget(app)
+        assert crew_manager is not None
+        assert crew_manager is old_manager
+
+        result = await plugins.update_plugin_async(
+            "browser-substitute", desired_config_revision=2
+        )
+
+        assert result.updated is False
+        assert result.restored is True
+        assert result.previous_generation == "browser-substitute@g1"
+        assert result.current_generation == "browser-substitute@g3"
+        record = plugins.feature_runtime.get("browser-substitute")
+        assert record is not None and record.state is FeatureState.ACTIVE
+        assert record.generation is not None
+        assert record.generation.key == result.current_generation
+        assert loaded.feature_record is record
+        assert loaded.enabled is True
+        restored_manager = plugins.resolve_service("browser.manager")
+        assert restored_manager is not None and restored_manager is not old_manager
+        assert CrewApp.browser_manager.fget(app) is restored_manager
+        assert old_manager.closed is True
+        assert events_path.read_text(encoding="utf-8").splitlines() == [
+            "created:browser-substitute@g1",
+            "closed:browser-substitute@g1",
+            "created:browser-substitute@g2",
+            "closed:browser-substitute@g2",
+            "created:browser-substitute@g3",
+        ]
+    finally:
+        await plugins.aclose()

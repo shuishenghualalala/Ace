@@ -15,7 +15,7 @@ import importlib.util
 import inspect
 import sys
 from copy import deepcopy
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from functools import wraps
 from pathlib import Path
 from types import ModuleType
@@ -31,6 +31,7 @@ from crew.features.manager import (
     FeatureRecord,
     FeatureRuntime,
     FeatureStartupAudit,
+    FeatureUpdateResult,
     FeatureUpdateStrategy,
     run_async_compat,
 )
@@ -187,6 +188,7 @@ VALID_HOOKS = {
 }
 
 VALID_PLUGIN_KINDS = {"standalone", "backend", "exclusive", "platform", "model-provider"}
+VALID_ACTIVATION_PHASES = {"build", "startup"}
 
 
 def _manifest_service_names(raw: dict[str, Any], name: str) -> list[str]:
@@ -231,6 +233,10 @@ class PluginManifest:
     stop_policy: FeatureStopPolicy = FeatureStopPolicy.DRAIN
     drain_timeout_seconds: float | None = 30.0
     update_strategy: FeatureUpdateStrategy = FeatureUpdateStrategy.RESTART
+    # ``build`` preserves the historical synchronous discovery contract.
+    # ``startup`` defers installation until the host owns its long-lived event
+    # loop, which is required by plugins that create background tasks.
+    activation_phase: str = "build"
     path: Path | None = None
 
 
@@ -238,6 +244,10 @@ class PluginManifest:
 class LoadedPlugin:
     manifest: PluginManifest
     enabled: bool = False
+    # Selected definitions remain discoverable after build.  A suppression is
+    # an explicit lifecycle decision and prevents a later phase retry from
+    # silently bringing an unloaded plugin back.
+    activation_suppressed: bool = False
     tools_registered: list[str] = field(default_factory=list)
     hooks_registered: list[str] = field(default_factory=list)
     middleware_registered: list[str] = field(default_factory=list)
@@ -844,6 +854,15 @@ class PluginManager:
                 )
             self.services[key.name] = value
 
+    def resolve_service(
+        self,
+        key: str | ServiceKey[Any],
+        default: Any = None,
+    ) -> Any:
+        """Resolve a currently visible global service for host integrations."""
+        service_key = key if isinstance(key, ServiceKey) else ServiceKey(str(key))
+        return self.feature_runtime.services.get(service_key, default=default)
+
     def retry_waiting(self) -> None:
         """Synchronously retry plugins whose required host services arrived later."""
         _run_async_compat(self.retry_waiting_async())
@@ -854,6 +873,8 @@ class PluginManager:
             for loaded in self._loaded.values()
             if loaded.feature_record is not None
             and loaded.feature_record.state is FeatureState.WAITING
+            and loaded.manifest.activation_phase == "build"
+            and not loaded.activation_suppressed
         ]
         if not definitions:
             return
@@ -862,6 +883,123 @@ class PluginManager:
             loaded = self._loaded.get(record.definition.feature_id)
             if loaded is not None:
                 self._apply_feature_record(loaded, record)
+
+    def activate_phase(self, phase: str = "startup") -> None:
+        """Synchronously activate plugins assigned to one host lifecycle phase."""
+        _run_async_compat(self.activate_phase_async(phase))
+
+    async def activate_phase_async(self, phase: str = "startup") -> tuple[LoadedPlugin, ...]:
+        """Activate discovered plugins for ``phase`` on the caller's event loop.
+
+        Discovery always records every selected definition first.  Only the
+        ``build`` phase is installed during synchronous construction; phases
+        such as ``startup`` are deliberately activated by the long-lived host
+        loop so background tasks and async resources keep the right ownership.
+        """
+        normalized = str(phase or "").strip().lower()
+        if normalized == "deferred":
+            normalized = "startup"
+        if normalized not in VALID_ACTIVATION_PHASES:
+            raise ValueError(
+                "plugin activation phase must be one of: build, startup"
+            )
+        definitions = [
+            loaded.feature_record.definition
+            for loaded in self._loaded.values()
+            if loaded.feature_record is not None
+            and loaded.manifest.activation_phase == normalized
+            and not loaded.activation_suppressed
+            and loaded.feature_record.state
+            in {FeatureState.DISCOVERED, FeatureState.WAITING}
+        ]
+        if not definitions:
+            return ()
+        records = await self.feature_runtime.activate_many(definitions)
+        activated: list[LoadedPlugin] = []
+        for record in records:
+            loaded = self._loaded.get(record.definition.feature_id)
+            if loaded is None:
+                continue
+            self._apply_feature_record(loaded, record)
+            activated.append(loaded)
+        return tuple(activated)
+
+    async def activate_deferred_async(self) -> tuple[LoadedPlugin, ...]:
+        """Compatibility name for the host startup phase."""
+        return await self.activate_phase_async("startup")
+
+    def activate_deferred(self) -> None:
+        """Synchronously activate the deferred startup phase."""
+        self.activate_phase("startup")
+
+    def update_plugin(
+        self,
+        key: str,
+        *,
+        desired_config_revision: int | None = None,
+    ) -> FeatureUpdateResult:
+        """Synchronously restart one active directory plugin generation."""
+        return _run_async_compat(
+            self.update_plugin_async(
+                key,
+                desired_config_revision=desired_config_revision,
+            )
+        )
+
+    async def update_plugin_async(
+        self,
+        key: str,
+        *,
+        desired_config_revision: int | None = None,
+    ) -> FeatureUpdateResult:
+        """Prepare and restart one plugin without an unload/activate gap.
+
+        The candidate LoadedPlugin is kept private until FeatureRuntime has
+        switched to its new Generation.  Restart recovery therefore continues
+        to use the previous definition and metadata when installation fails.
+        """
+        loaded = self.get_plugin(key)
+        if loaded is None:
+            raise KeyError(f"unknown plugin {key!r}")
+        record = loaded.feature_record
+        if not loaded.enabled or record is None or record.scope is None:
+            state = record.state.value if record is not None else "undiscovered"
+            raise RuntimeError(f"plugin {key!r} cannot update while {state}")
+        revision = (
+            record.desired_config_revision + 1
+            if desired_config_revision is None
+            else int(desired_config_revision)
+        )
+        if revision <= record.desired_config_revision:
+            raise ValueError("plugin config revision must increase monotonically")
+
+        candidate, definition = self._prepare_feature(loaded.manifest)
+        definition = replace(definition, desired_config_revision=revision)
+        owner_key = loaded.manifest.key or loaded.manifest.name
+        result = await self.feature_runtime.update(definition)
+        current = self.feature_runtime.get(owner_key)
+        if current is None:
+            raise RuntimeError(f"plugin {owner_key!r} update lost its runtime record")
+        if result.updated:
+            self._apply_feature_record(candidate, current)
+            self._loaded[owner_key] = candidate
+        else:
+            # Runtime restart recovery may have rebuilt the old definition;
+            # refresh its metadata without replacing the live LoadedPlugin.
+            self._apply_feature_record(loaded, current)
+        return result
+
+    async def reload_plugin_async(
+        self,
+        key: str,
+        *,
+        desired_config_revision: int | None = None,
+    ) -> FeatureUpdateResult:
+        """Alias for the explicit Generation-preserving update operation."""
+        return await self.update_plugin_async(
+            key,
+            desired_config_revision=desired_config_revision,
+        )
 
     def startup_audit(self) -> FeatureStartupAudit:
         """Audit every enabled candidate that entered the Feature Runtime."""
@@ -942,7 +1080,7 @@ class PluginManager:
         self._plugin_commands.clear()
         self._api_routers.clear()
         self._clear_plugin_platform_entries()
-        definitions: list[FeatureDefinition] = []
+        build_definitions: list[FeatureDefinition] = []
         for root in [Path(d) for d in dirs]:
             if not root.is_dir():
                 continue
@@ -968,9 +1106,13 @@ class PluginManager:
                     continue
                 loaded, definition = self._prepare_feature(manifest)
                 self._loaded[lookup_key] = loaded
-                definitions.append(definition)
+                # Discover every selected plugin before activation so startup
+                # audit and dependency diagnostics include deferred features.
+                loaded.feature_record = self.feature_runtime.discover(definition)
+                if manifest.activation_phase == "build":
+                    build_definitions.append(definition)
 
-        records = await self.feature_runtime.activate_many(definitions)
+        records = await self.feature_runtime.activate_many(build_definitions)
         for record in records:
             loaded = self._loaded[record.definition.feature_id]
             self._apply_feature_record(loaded, record)
@@ -1009,7 +1151,24 @@ class PluginManager:
     ) -> bool:
         """停用插件并等待该 Generation 的全部注册和资源完成清理。"""
         loaded = self.get_plugin(key)
-        if loaded is None or not loaded.enabled:
+        if loaded is None:
+            return False
+        if not loaded.enabled:
+            # A selected deferred plugin has no Generation to stop yet.  Treat
+            # unloading that discovered/waiting definition as an idempotent
+            # success while preserving failed and explicitly disabled states.
+            record = loaded.feature_record
+            if (
+                record is not None
+                and record.scope is None
+                and record.state in {
+                    FeatureState.DISCOVERED,
+                    FeatureState.WAITING,
+                }
+                and not loaded.activation_suppressed
+            ):
+                loaded.activation_suppressed = True
+                return True
             return False
         owner_key = loaded.manifest.key or loaded.manifest.name
         policy = (
@@ -1027,6 +1186,7 @@ class PluginManager:
         )
         loaded.enabled = retained
         if not retained:
+            loaded.activation_suppressed = True
             loaded.tools_registered.clear()
             loaded.hooks_registered.clear()
             loaded.middleware_registered.clear()
@@ -1138,6 +1298,7 @@ class PluginManager:
                 update_strategy=FeatureUpdateStrategy(
                     raw.get("update_strategy") or "restart"
                 ),
+                activation_phase=self._manifest_activation_phase(raw),
                 path=plugin_dir,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1148,6 +1309,23 @@ class PluginManager:
                 error=str(exc),
             )
             return None
+
+    @staticmethod
+    def _manifest_activation_phase(raw: dict[str, Any]) -> str:
+        value = str(
+            raw.get("activation_phase")
+            if raw.get("activation_phase") is not None
+            else raw.get("activation") or "build"
+        ).strip().lower()
+        # ``deferred`` was used by early local manifests; accepting it keeps
+        # discovery forward-compatible while exposing one stable phase name.
+        if value == "deferred":
+            value = "startup"
+        if value not in VALID_ACTIVATION_PHASES:
+            raise ValueError(
+                "plugin manifest activation_phase must be one of: build, startup"
+            )
+        return value
 
     def _load_plugin(self, manifest: PluginManifest) -> None:
         """Compatibility wrapper for callers that load one parsed manifest."""
@@ -1201,6 +1379,11 @@ class PluginManager:
             error = record.error
             if isinstance(error, FeatureActivationError):
                 error = error.cause
+            if record.state is FeatureState.DISCOVERED:
+                # Deferred plugins are intentionally quiet until their host
+                # lifecycle phase runs; discovery is not an activation error.
+                loaded.error = None
+                return
             if record.state is FeatureState.WAITING and record.dependency_resolution:
                 missing = ", ".join(
                     key.name for key in record.dependency_resolution.missing_required

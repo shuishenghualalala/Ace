@@ -99,6 +99,184 @@ def _load(tmp_path):
     return registry, plugins
 
 
+async def test_startup_phase_is_discovered_without_installing_contributions(tmp_path):
+    plugin_dir = tmp_path / "startup_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: startup-plugin\nactivation_phase: startup\nprovides_tools:\n  - startup_tool\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+CALLED = False
+
+def register(ctx):
+    global CALLED
+    CALLED = True
+    ctx.register_tool(
+        name="startup_tool",
+        toolset="startup",
+        schema={"name": "startup_tool", "parameters": {"type": "object"}},
+        handler=lambda args: "ok",
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+    try:
+        await plugins.discover_and_load_async([tmp_path], enabled=["startup-plugin"])
+
+        loaded = plugins.get_plugin("startup-plugin")
+        assert loaded is not None and not loaded.enabled
+        assert loaded.feature_record is not None
+        assert loaded.feature_record.state is FeatureState.DISCOVERED
+        assert loaded.feature_record.scope is None
+        assert loaded.tools_registered == []
+        assert registry.names() == []
+        assert plugins.resolve_service("startup.service") is None
+        assert "crew_runtime_plugins.startup_plugin" not in __import__("sys").modules
+
+        activated = await plugins.activate_phase_async("startup")
+        assert activated == (loaded,)
+        assert loaded.enabled
+        assert loaded.feature_record.state is FeatureState.ACTIVE
+        assert registry.names() == ["startup_tool"]
+    finally:
+        await plugins.aclose()
+
+
+async def test_failed_activation_rolls_back_all_contributions_and_global_binding(tmp_path):
+    plugin_dir = tmp_path / "rollback_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "skills").mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        """
+name: rollback-plugin
+activation_phase: startup
+provides:
+  - rollback.service
+provides_tools:
+  - rollback_tool
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+CURRENT = None
+
+class Candidate:
+    pass
+
+async def contribute(*args, **kwargs):
+    return None
+
+def register(ctx):
+    global CURRENT
+    candidate = Candidate()
+    CURRENT = candidate
+
+    async def dispose():
+        global CURRENT
+        if CURRENT is candidate:
+            CURRENT = None
+
+    ctx.register_disposer(dispose)
+    ctx.register_service("rollback.service", candidate)
+    ctx.register_tool(
+        name="rollback_tool",
+        toolset="rollback",
+        schema={"name": "rollback_tool", "parameters": {"type": "object"}},
+        handler=lambda args: "ok",
+    )
+    ctx.register_context_contributor("rollback.context", contribute)
+    ctx.register_skill_root("skills")
+    raise RuntimeError("activation failed after all contributions")
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+
+    await plugins.discover_and_load_async([tmp_path], enabled=["rollback-plugin"])
+    await plugins.activate_phase_async("startup")
+
+    loaded = plugins.get_plugin("rollback-plugin")
+    assert loaded is not None and not loaded.enabled
+    assert "activation failed after all contributions" in str(loaded.error)
+    assert registry.names() == []
+    assert plugins.resolve_service("rollback.service") is None
+    assert plugins.feature_runtime.context_contributors.bindings() == ()
+    assert plugins.plugin_skill_roots() == []
+    module = __import__("crew_runtime_plugins.rollback_plugin", fromlist=["CURRENT"])
+    assert module.CURRENT is None
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.scope is not None
+    assert loaded.feature_record.scope.state is FeatureState.DISPOSED
+
+
+async def test_unload_before_startup_activation_is_idempotent_and_resource_free(tmp_path):
+    plugin_dir = tmp_path / "deferred_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: deferred-plugin\nactivation_phase: startup\nprovides_tools:\n  - deferred_tool\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+CALLED = False
+
+def register(ctx):
+    global CALLED
+    CALLED = True
+    ctx.register_tool(
+        name="deferred_tool",
+        toolset="deferred",
+        schema={"name": "deferred_tool", "parameters": {"type": "object"}},
+        handler=lambda args: "ok",
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+
+    await plugins.discover_and_load_async([tmp_path], enabled=["deferred-plugin"])
+    loaded = plugins.get_plugin("deferred-plugin")
+    assert loaded is not None and loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.DISCOVERED
+
+    assert await plugins.unload_plugin_async("deferred-plugin") is True
+    assert await plugins.unload_plugin_async("deferred-plugin") is False
+    assert loaded.feature_record.scope is None
+    assert loaded.feature_record.state is FeatureState.DISCOVERED
+    assert loaded.enabled is False
+    assert loaded.activation_suppressed is True
+    assert registry.names() == []
+    assert "crew_runtime_plugins.deferred_plugin" not in __import__("sys").modules
+    assert await plugins.activate_phase_async("startup") == ()
+    assert "crew_runtime_plugins.deferred_plugin" not in __import__("sys").modules
+
+
+def test_invalid_activation_phase_is_reported_on_discovery(tmp_path):
+    plugin_dir = tmp_path / "bad_phase"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: bad-phase\nactivation_phase: never\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text("def register(ctx): pass\n", encoding="utf-8")
+    plugins = PluginManager()
+
+    plugins.discover_and_load([tmp_path], enabled=["bad-phase"])
+
+    loaded = plugins.get_plugin("bad_phase")
+    assert loaded is not None and loaded.enabled is False
+    assert loaded.feature_record is None
+    assert loaded.error is not None
+    assert "activation_phase must be one of: build, startup" in loaded.error
+
+
 async def test_register_tool_passthrough_permission_and_ui(tmp_path):
     registry, plugins = _load(tmp_path)
 

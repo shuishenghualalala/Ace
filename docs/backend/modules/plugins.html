@@ -68,7 +68,7 @@
       <tr><td>依赖与配置版本</td><td>区分 required/optional/provides，诊断启动批次；分离 desired/effective revision。</td><td>已落地</td></tr>
       <tr><td>Feature Runtime</td><td>统一激活、等待依赖、事务回滚、停用和诊断记录。</td><td>已落地</td></tr>
       <tr><td>Legacy Adapter</td><td>旧 <code>register(ctx)</code> 的全部贡献内部转为带标签 Token，不要求插件改入口。</td><td>已落地</td></tr>
-      <tr><td>Browser 试点</td><td>五个工具、Skill Root 与 BrowserManager 资源归属同一 Scope，应用关闭走统一生命周期。</td><td>已落地</td></tr>
+      <tr><td>Browser Runtime Feature</td><td>startup-phase 在宿主事件循环激活；Manager、后台 Task、五个工具、Skill、Context 与动态 Service 归属同一 restart Scope。</td><td>已落地</td></tr>
       <tr><td>Manifest 服务依赖</td><td><code>requires</code>、<code>optional</code>、<code>provides</code> 映射到 Feature 服务图，按确定性批次激活。</td><td>已落地</td></tr>
       <tr><td>启动审计</td><td>输出状态、Generation、缺失服务和注册标签；CLI 可直接导出同一快照。</td><td>已落地</td></tr>
       <tr><td>请求 Lease</td><td>插件 Tool、Hook、Middleware、Command 入口自动持有 Generation 租约；draining 后拒绝新请求。</td><td>已落地</td></tr>
@@ -92,7 +92,7 @@
       <tr><td><code>crew/features/context.py</code></td><td>Context Contributor 定义、排序、Generation 选择、失败/超时与请求 Lease。</td></tr>
       <tr><td><code>crew/features/dependencies.py</code></td><td>Feature 服务依赖声明、运行期解析和启动诊断。</td></tr>
       <tr><td><code>crew/features/manager.py</code></td><td>FeatureDefinition、InstallContext、运行记录、串行启停和 replace/restart 更新调度。</td></tr>
-      <tr><td><code>crew/plugins/manager.py</code></td><td>插件发现、状态管理、<code>PluginContext</code> 和贡献撤销。</td></tr>
+      <tr><td><code>crew/plugins/manager.py</code></td><td>插件发现、build/startup phase 激活、restart 更新、状态管理、<code>PluginContext</code> 和贡献撤销。</td></tr>
     </tbody>
   </table>
 
@@ -122,9 +122,11 @@ service = services.resolve(knowledge, request_scope)</code></pre>
 )</code></pre>
   <p>资源工具应提供稳定 identity；根据 action 同时提供读写能力的工具可通过 resolver 动态返回策略。未声明的旧插件保持兼容，并按重要结果保护。</p>
   <pre><code>await plugins.discover_and_load_async(...)
+await plugins.activate_phase_async("startup")
+await plugins.update_plugin_async("browser", desired_config_revision=2)
 await plugins.unload_plugin_async("browser")
 failed = await plugins.aclose()</code></pre>
-  <p>同步 <code>discover_and_load()</code> 继续服务现有构造入口；已经运行事件循环的宿主应直接使用异步接口。同步 <code>unload_plugin()</code> 不允许在事件循环中假报完成。</p>
+  <p>同步 <code>discover_and_load()</code> 继续服务现有构造入口；manifest 默认 <code>activation_phase=build</code>。创建长期 asyncio Task 的插件声明 <code>startup</code>，Definition 先进入 DISCOVERED，再由宿主长期事件循环激活。同步 <code>unload_plugin()</code> 不允许在事件循环中假报完成。</p>
   <pre><code>requires:
   - storage
 optional:
@@ -171,7 +173,7 @@ async for chunk in runtime.execution_drivers.dispatch(envelope):
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
     <li>运行期 Provider 消失后的 Consumer 级联 drain/retry 尚未实现，将在配置更新与依赖重算时收口。</li>
-    <li>目录插件已声明更新策略，但运行期配置快照与控制面重载入口仍需在具体 Feature 迁移时接入；在此之前目录插件默认使用 restart。</li>
+    <li>目录插件已有通用 restart 更新入口；运行期配置快照、校验与用户控制面 API 仍需在具体 Feature 迁移时接入。</li>
     <li><code>ctx.services</code> 兼容字典仍在使用，待 Service Adapter 完成后删除。</li>
     <li>外部 MCP 协议当前不携带 Ace 生命周期元数据，因此默认按重要结果保护。</li>
   </ul>
@@ -205,10 +207,11 @@ async for chunk in runtime.execution_drivers.dispatch(envelope):
       <tr><td>2026-09-03</td><td>FeatureDefinition 增加 required_by_product 与 deactivate 守卫；组合根内置注册收敛为声明式 Feature；同步桥上移为 run_async_compat 公共实现。</td><td>Feature Runtime、CrewApp 组合根、PluginManager。</td></tr>
       <tr><td>2026-09-04</td><td>增加宿主事件循环托管 Feature 路径，Cron 成为首个 restart Product Feature；工具注销增加 Generation 身份校验。</td><td>Feature Runtime、CrewApp、Cron、Tool Registry、Gateway Logout。</td></tr>
       <tr><td>2026-09-04</td><td>Sites Manager、Store、Blueprint Scheduler、Tools 与 Capability Profile 进入同一 restart Generation。</td><td>Feature Runtime、CrewApp、Sites、Tool/Capability Registry。</td></tr>
+      <tr><td>2026-09-04</td><td>增加 manifest 驱动的 startup phase 与目录插件 restart 更新入口；Browser Manager、后台 Task 和动态 Service 完成 Scope 收口。</td><td>PluginManager、CrewApp、Browser 插件、Gateway Browser Gate。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0001-feature-lifecycle-primitives.html">ADR-0001</a> · <a href="../adr/0002-scoped-service-registry.html">ADR-0002</a> · <a href="../adr/0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="../adr/0004-manifest-service-startup-audit.html">ADR-0004</a> · <a href="../adr/0005-feature-drain-lease.html">ADR-0005</a> · <a href="../adr/0006-feature-generation-update.html">ADR-0006</a> · <a href="../adr/0007-execution-driver-registry.html">ADR-0007</a> · <a href="../adr/0008-team-kanban-driver-adapters.html">ADR-0008</a> · <a href="../adr/0009-context-contributor-registry.html">ADR-0009</a> · <a href="../adr/0010-session-source-context-contributor.html">ADR-0010</a> · <a href="../adr/0011-wiki-attachment-context-contributor.html">ADR-0011</a> · <a href="../adr/0012-cron-trigger-context-contributor.html">ADR-0012</a> · <a href="../../testing/plugin-architecture-stage-2-cron-context.html">测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0001-feature-lifecycle-primitives.html">ADR-0001</a> · <a href="../adr/0002-scoped-service-registry.html">ADR-0002</a> · <a href="../adr/0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="../adr/0004-manifest-service-startup-audit.html">ADR-0004</a> · <a href="../adr/0005-feature-drain-lease.html">ADR-0005</a> · <a href="../adr/0006-feature-generation-update.html">ADR-0006</a> · <a href="../adr/0007-execution-driver-registry.html">ADR-0007</a> · <a href="../adr/0008-team-kanban-driver-adapters.html">ADR-0008</a> · <a href="../adr/0009-context-contributor-registry.html">ADR-0009</a> · <a href="../adr/0010-session-source-context-contributor.html">ADR-0010</a> · <a href="../adr/0011-wiki-attachment-context-contributor.html">ADR-0011</a> · <a href="../adr/0012-cron-trigger-context-contributor.html">ADR-0012</a> · <a href="../adr/0019-browser-host-loop-feature.html">ADR-0019</a> · <a href="../../testing/plugin-architecture-stage-3a-browser-runtime.html">Browser 测试记录</a></div>
 </div>
 </body>
 </html>

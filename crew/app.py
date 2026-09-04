@@ -14,7 +14,6 @@ import hashlib
 import inspect
 import os
 import re
-import sys
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
@@ -48,6 +47,7 @@ from crew.features import (
     FeatureScope,
     FeatureState,
     FeatureStopPolicy,
+    ServiceKey,
     run_async_compat,
 )
 from crew.gateway.dispatcher import BusyMode, SessionDispatcher
@@ -412,6 +412,8 @@ _TASK_NOTIFICATION_TITLES = {
 
 class CrewApp:
 
+    _UNSET_BROWSER_MANAGER = object()
+
     def __init__(
         self,
         config: Config,
@@ -652,9 +654,10 @@ class CrewApp:
         self.cron_service = None
         self.delivery_router = None
         self.mcp_manager = None
-        # First-party Browser Use runtime. build_app injects BrowserManager and
-        # registers its tools after the generic built-ins are assembled.
-        self.browser_manager = None
+        # An explicitly assigned manager is reserved for embedded hosts and
+        # tests.  Production resolves the active Browser Generation Service
+        # on every access, so restart/unload never leaves a stale reference.
+        self._browser_manager_override: Any = self._UNSET_BROWSER_MANAGER
         # Gateway 装配后注入；供 ACP executor 创建按会话绑定的受限 MCP 交互工具。
         self.interaction_bridge = None
         # 后台任务推送回调：push(session_id, chunk) → 发给前端活跃 WS
@@ -674,6 +677,21 @@ class CrewApp:
             task_runtime=self.tasks,
         )
         _LIVE_APPS.append(self)
+
+    @property
+    def browser_manager(self) -> Any:
+        """Return the explicit manager or the currently active Browser Service."""
+        if self._browser_manager_override is not self._UNSET_BROWSER_MANAGER:
+            return self._browser_manager_override
+        plugins = getattr(self, "plugins", None)
+        if plugins is None:
+            return None
+        return plugins.resolve_service(ServiceKey[Any]("browser.manager"))
+
+    @browser_manager.setter
+    def browser_manager(self, manager: Any) -> None:
+        """Inject a manager explicitly for tests or an embedding host."""
+        self._browser_manager_override = manager
 
     def _on_task_event(self, task: dict[str, Any]) -> None:
         """Push normalized task events to connected clients."""
@@ -2007,11 +2025,6 @@ class CrewApp:
                 await self.work_service.start()
             except Exception:  # noqa: BLE001
                 log.exception("WorkService 启动失败")
-        if self.browser_manager is not None:
-            try:
-                await self.browser_manager.startup()
-            except Exception:  # noqa: BLE001
-                log.exception("BrowserManager 启动失败")
         if self.mcp_manager is not None:
             try:
                 # MCP 连接移出 lifespan 关键路径：后台 task 内完成子进程 spawn + 工具注册，
@@ -2019,6 +2032,12 @@ class CrewApp:
                 await self.mcp_manager.start(self.registry)
             except Exception:  # noqa: BLE001
                 log.exception("MCP Client 启动失败")
+        # Directory plugins that own long-lived tasks activate on this host's
+        # event loop.  The phase is manifest-driven and not feature-specific.
+        try:
+            await self.plugins.activate_phase_async("startup")
+        except Exception:  # noqa: BLE001
+            log.exception("插件 startup phase 激活失败")
         # 兼容测试入口的 start_cron=False；产品 Feature 的实际装配不再由
         # CrewApp 按具体 Manager 手写启动。
         excluded = frozenset() if start_cron else frozenset({"product.cron"})
@@ -3337,19 +3356,6 @@ def _provider_class(provider: str):
     raise ValueError(f"未知模型 provider: {provider}")
 
 
-def _browser_manager_from_plugins(plugins: PluginManager):
-    """从已加载的 browser 插件取回 BrowserManager；未加载/加载失败返回 None。"""
-    loaded = plugins.get_plugin("browser")
-    if loaded is None or not loaded.enabled or loaded.manifest.path is None:
-        return None
-    module_key = (loaded.manifest.key or loaded.manifest.name).replace("/", "_").replace("-", "_")
-    module = sys.modules.get(f"crew_runtime_plugins.{module_key}")
-    manager = getattr(module, "manager", None) if module is not None else None
-    if manager is None:
-        log.warning("browser 插件已加载但未暴露 BrowserManager")
-    return manager
-
-
 def build_app(config: Config | None = None, *, enable_team: bool = True) -> CrewApp:
     """工厂：从配置构建一个 CrewApp。"""
     cfg = config or load_config()
@@ -3437,9 +3443,6 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     # Generation 身份动态维护同一属性，Gateway 只读取当前 host binding。
     app.sites = sites_feature.manager
     app.declare_managed_feature(sites_feature.definition)
-    # Browser 能力由 plugins/browser 插件装配（创建 BrowserManager、注册 browser_use）。
-    # 系统级禁用/未加载时保持 None，面板路由与 startup/aclose 已有 None 兜底。
-    app.browser_manager = _browser_manager_from_plugins(plugins)
     app.channel_bindings = channel_bindings
     app.plugin_prefs = plugin_prefs
     app.external_agents = external_agents
