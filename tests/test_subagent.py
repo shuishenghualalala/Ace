@@ -336,6 +336,31 @@ async def test_workspace_prompt_explains_managed_host_paths_and_file_expansion(t
     assert "不要把文件工具称为绕过沙箱" in reminder
 
 
+async def test_workspace_prompt_injects_powershell_facts(tmp_path, monkeypatch):
+    """Windows shell：注入 PowerShell 环境事实（含 $env: 语法要点）。"""
+    monkeypatch.setattr(
+        "crew.agent.prompt_builder.current_shell_kind", lambda: "powershell"
+    )
+    reminder = (await build_prompt_parts(cwd=str(tmp_path), lightweight=True))["user_reminder"]
+
+    assert "内置 terminal 由 PowerShell 执行" in reminder
+    assert "$env:VAR" in reminder
+    assert "PowerShell 7+" in reminder
+
+
+async def test_workspace_prompt_injects_bash_facts(tmp_path, monkeypatch):
+    """POSIX shell：只注入一句 bash 事实，不含 PowerShell 细则。"""
+    monkeypatch.setattr(
+        "crew.agent.prompt_builder.current_shell_kind", lambda: "bash"
+    )
+    reminder = (await build_prompt_parts(cwd=str(tmp_path), lightweight=True))["user_reminder"]
+
+    assert "内置 terminal 由 bash 执行" in reminder
+    assert "POSIX" in reminder
+    assert "$env:" not in reminder
+    assert "PowerShell" not in reminder
+
+
 def test_active_subagents_interrupt_cascade():
     """🔴 中断级联：CrewApp.interrupt 经 ActiveSubagents 下发到运行中的子 agent。"""
     class _FakeChild:

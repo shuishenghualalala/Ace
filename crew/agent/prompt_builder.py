@@ -20,6 +20,7 @@ from typing import Optional
 
 from crew.state.home import load_soul_md, load_memory_md, load_user_md
 from crew.agent.skills import abuild_skills_index_prompt, abuild_optional_skills_index_prompt
+from crew.tools.process_registry import current_shell_kind
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,25 @@ def build_context_files_prompt(cwd: str | None = None) -> str:
 # 静态/动态分离 System Prompt 构建
 # ---------------------------------------------------------------------------
 
+def _shell_facts_block() -> str:
+    """当前 shell 环境事实：与 spawn_local 实际执行 shell 保持同源。
+
+    只注入环境事实而非教学长文，避免模型照搬 skill 里的 bash 语法在
+    PowerShell 上触发 ParserError。lightweight 子 agent 同样注入。
+    """
+    if current_shell_kind() == "powershell":
+        return (
+            "- 内置 terminal 由 PowerShell 执行（pwsh/powershell -NoProfile）："
+            "禁止 `VAR=val && cmd` 之类 bash 语法，环境变量用 `$env:VAR = \"...\"` 单独语句；"
+            "`&&`/`||` 仅 PowerShell 7+ 可用，5.1 用 `;` 连接命令；"
+            "路径用反斜杠/正斜杠均可，但含空格必须加引号；"
+            "控制台默认代码页非 UTF-8，若输出乱码先执行 "
+            "`[Console]::OutputEncoding = [System.Text.Encoding]::UTF8` "
+            "或设置 `$env:PYTHONIOENCODING=\"utf-8\"`。"
+        )
+    return "- 内置 terminal 由 bash 执行，使用 POSIX 语法。"
+
+
 async def build_prompt_parts(
     workspace_instructions: str = "",
     memory_text: str = "",
@@ -204,7 +224,8 @@ async def build_prompt_parts(
             "- 列目录、查找和读取文件时优先使用 glob、grep、file_read；这些工具与 terminal "
             "服从同一文件策略。用户拒绝任一安全审批后，必须立即停止本轮操作，不得换用其他工具重试。\n"
             "- runtime_crashed、runtime_protocol_mismatch 和 sandbox_unavailable 表示安全运行时故障，"
-            "不表示目标路径在沙箱外；不得据此改用其他文件工具。"
+            "不表示目标路径在沙箱外；不得据此改用其他文件工具。\n"
+            f"{_shell_facts_block()}"
         )
     # 子 agent（lightweight）：跳过全局 workspace/上下文文件/skills/记忆/用户画像注入，
     # 只保留日期，保持聚焦（用于 skip_memory / skip_context_files）。

@@ -82,6 +82,18 @@ _WINDOWS_PROCESS_FLAGS = (
 )
 
 
+def current_shell_kind() -> str:
+    """Return the shell family that executes model terminal commands on this host.
+
+    与 ``spawn_local`` 的 Windows 分支（``shutil.which("pwsh") or
+    shutil.which("powershell")``）保持同源语义：Windows 上按 shell 家族归为
+    "powershell"（pwsh 与 powershell 均属 PowerShell 家族），其余平台为 "bash"。
+    """
+    if _IS_WINDOWS:
+        return "powershell"
+    return "bash"
+
+
 def terminate_process_tree(pid: int) -> None:
     """Best-effort terminate one process and its complete child process tree.
 

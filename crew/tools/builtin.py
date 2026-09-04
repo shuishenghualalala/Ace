@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import time
 from dataclasses import replace
@@ -38,6 +37,7 @@ from crew.tools.file_utils import (
     MAX_READ_FILE_BYTES,
 )
 from crew.tools.output_filters import strip_ansi, truncate_output
+from crew.tools.process_registry import current_shell_kind
 from crew.tools.redact import redact_sensitive_text
 from crew.tools.registry import Registry
 from crew.tools.security_guard import authorize_file_tool
@@ -583,7 +583,7 @@ async def handle_terminal(
         ):
             raise ToolError("prefix_rule 只能与 require_escalated 一起使用")
         final_argv = shell_argv(command)
-        shell_kind = "powershell" if os.name == "nt" else "bash"
+        shell_kind = current_shell_kind()
         classification = None
         if mode is not ConversationPermissionMode.FULL_ACCESS:
             classification = await NativeRuntimeClient(packaged_runtime_argv()).classify_shell(
