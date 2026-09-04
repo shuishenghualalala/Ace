@@ -198,17 +198,17 @@ def test_subagent_inherits_parent_skills():
         current_skill_scope.set((None, None))
 
 
-def test_lightweight_subagent_prompt_injects_skills_when_inherited():
+async def test_lightweight_subagent_prompt_injects_skills_when_inherited():
     """delegate_task 子 agent（lightweight+inject_skills）prompt 含 skills 索引；
     run_agent 路径（inject_skills=False）不含。"""
     from crew.agent.skills import list_skills
     if not list_skills():
         return  # 无 skill 环境 skip
 
-    inj = build_prompt_parts(lightweight=True, inject_skills=True)
+    inj = await build_prompt_parts(lightweight=True, inject_skills=True)
     assert "可用 Skills" in inj["user_reminder"]
 
-    no_inj = build_prompt_parts(lightweight=True, inject_skills=False)
+    no_inj = await build_prompt_parts(lightweight=True, inject_skills=False)
     assert "可用 Skills" not in no_inj["user_reminder"]
 
 
@@ -306,7 +306,7 @@ def test_subagent_inherits_parent_final_authorization_snapshot():
     assert inherited == ["file_read"]
 
 
-def test_lightweight_prompt_skips_global_context():
+async def test_lightweight_prompt_skips_global_context():
     """🔴 上下文隔离：lightweight 子 agent 不注入全局 workspace/记忆。"""
     app = build_app(config=Config(max_iterations=5))
     child = app._make_subagent(
@@ -314,21 +314,21 @@ def test_lightweight_prompt_skips_global_context():
          "model": "inherit", "max_iterations": 5}
     )
     assert child.lightweight is True
-    light = build_prompt_parts(workspace_instructions="组织规则X", lightweight=True)
-    full = build_prompt_parts(workspace_instructions="组织规则X", lightweight=False)
+    light = await build_prompt_parts(workspace_instructions="组织规则X", lightweight=True)
+    full = await build_prompt_parts(workspace_instructions="组织规则X", lightweight=False)
     assert "组织规则X" not in light["user_reminder"]
     assert "组织规则X" in full["user_reminder"]
 
 
-def test_prompt_marks_runtime_cwd_as_authoritative_workspace(tmp_path):
-    parts = build_prompt_parts(cwd=str(tmp_path), lightweight=True)
+async def test_prompt_marks_runtime_cwd_as_authoritative_workspace(tmp_path):
+    parts = await build_prompt_parts(cwd=str(tmp_path), lightweight=True)
 
     assert f"当前工作目录：`{tmp_path.resolve()}`" in parts["user_reminder"]
     assert "不要用它推导、验证或重建当前工作空间路径" in parts["user_reminder"]
 
 
-def test_workspace_prompt_explains_managed_host_paths_and_file_expansion(tmp_path):
-    reminder = build_prompt_parts(cwd=str(tmp_path), lightweight=True)["user_reminder"]
+async def test_workspace_prompt_explains_managed_host_paths_and_file_expansion(tmp_path):
+    reminder = (await build_prompt_parts(cwd=str(tmp_path), lightweight=True))["user_reminder"]
 
     assert "宿主用户目录" in reminder
     assert "with_additional_permissions" in reminder

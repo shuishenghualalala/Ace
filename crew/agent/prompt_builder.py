@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from crew.state.home import load_soul_md, load_memory_md, load_user_md
-from crew.agent.skills import build_skills_index_prompt, build_optional_skills_index_prompt
+from crew.agent.skills import abuild_skills_index_prompt, abuild_optional_skills_index_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,7 @@ def build_context_files_prompt(cwd: str | None = None) -> str:
 # 静态/动态分离 System Prompt 构建
 # ---------------------------------------------------------------------------
 
-def build_prompt_parts(
+async def build_prompt_parts(
     workspace_instructions: str = "",
     memory_text: str = "",
     cwd: str | None = None,
@@ -155,11 +156,13 @@ def build_prompt_parts(
       - user_reminder: 项目文件 + workspace + skills + 记忆 + 用户画像 + 会话记忆 + 日期
                        （每轮可能变，通过 <system-reminder> 注入 user 消息）
 
+    async：磁盘读取（profile/SOUL/上下文文件/记忆/用户画像）经 asyncio.to_thread
+    移出事件循环；skills 索引走 SkillIndex 的 async 访问器，命中时纯内存。
     """
     # ── System Static 层（几乎不变） ──
     static_parts: list[str] = []
     if profile_path:
-        profile_content = _load_profile(profile_path)
+        profile_content = await asyncio.to_thread(_load_profile, profile_path)
         if profile_content:
             static_parts.append(profile_content)
 
@@ -172,7 +175,7 @@ def build_prompt_parts(
             static_parts.append(DEFAULT_OUTPUT_STYLE)
         else:
             t = time.perf_counter()
-            soul = load_soul_md()
+            soul = await asyncio.to_thread(load_soul_md)
             logger.debug("[PERF] load_soul_md       %.3fs", time.perf_counter() - t)
             if soul:
                 static_parts.append(soul)
@@ -209,18 +212,18 @@ def build_prompt_parts(
         if workspace_instructions.strip():
             reminder_parts.append(f"# 项目提示词\n{workspace_instructions.strip()}")
         t = time.perf_counter()
-        context_files = build_context_files_prompt(cwd)
+        context_files = await asyncio.to_thread(build_context_files_prompt, cwd)
         logger.debug("[PERF] context_files      %.3fs", time.perf_counter() - t)
         if context_files:
             reminder_parts.append(context_files)
         try:
             t = time.perf_counter()
-            skills_index = build_skills_index_prompt(
+            skills_index = await abuild_skills_index_prompt(
                 enabled=enabled_skills,
                 disabled=disabled_skills,
             )
             if include_optional_skills:
-                optional_index = build_optional_skills_index_prompt(
+                optional_index = await abuild_optional_skills_index_prompt(
                     enabled=enabled_skills,
                     disabled=disabled_skills,
                 )
@@ -233,12 +236,12 @@ def build_prompt_parts(
             pass  # skills 索引不影响主流程
 
         t = time.perf_counter()
-        memory_md = load_memory_md()
+        memory_md = await asyncio.to_thread(load_memory_md)
         logger.debug("[PERF] load_memory_md     %.3fs", time.perf_counter() - t)
         if memory_md:
             reminder_parts.append(f"# 持久记忆\n{memory_md}")
         t = time.perf_counter()
-        user_md = load_user_md()
+        user_md = await asyncio.to_thread(load_user_md)
         logger.debug("[PERF] load_user_md       %.3fs", time.perf_counter() - t)
         if user_md:
             reminder_parts.append(f"# 用户画像\n{user_md}")
@@ -248,7 +251,7 @@ def build_prompt_parts(
     # 对照 delegate_task 的 skills 参数——只放开 skills，不放开 workspace/记忆/用户画像。
     if lightweight and inject_skills:
         try:
-            skills_index = build_skills_index_prompt(
+            skills_index = await abuild_skills_index_prompt(
                 enabled=enabled_skills,
                 disabled=disabled_skills,
             )
@@ -269,7 +272,7 @@ def build_prompt_parts(
 # 向后兼容：旧版调用方式
 # ---------------------------------------------------------------------------
 
-def build_system_prompt_parts(
+async def build_system_prompt_parts(
     workspace_instructions: str = "",
     memory_text: str = "",
     cwd: str | None = None,
@@ -283,7 +286,7 @@ def build_system_prompt_parts(
     .. deprecated::
         请使用 :func:`build_prompt_parts` 代替。
     """
-    parts = build_prompt_parts(
+    parts = await build_prompt_parts(
         workspace_instructions=workspace_instructions,
         memory_text=memory_text,
         cwd=cwd,
@@ -300,7 +303,7 @@ def build_system_prompt_parts(
     }
 
 
-def build_system_prompt(
+async def build_system_prompt(
     base: str = "",
     memory_text: str = "",
     workspace_instructions: str = "",
@@ -314,7 +317,7 @@ def build_system_prompt(
 
     base 参数保留但不再作为主身份——身份由 SOUL.md 或 DEFAULT_AGENT_IDENTITY 决定。
     """
-    parts = build_prompt_parts(
+    parts = await build_prompt_parts(
         workspace_instructions=workspace_instructions,
         memory_text=memory_text,
         cwd=cwd,
