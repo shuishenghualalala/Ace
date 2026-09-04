@@ -5,19 +5,21 @@
 
 from __future__ import annotations
 
+import asyncio
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 from crew.agent.skills import (
+    aget_package_members,
+    aget_skill_body,
+    aget_skill_packages,
+    aget_skills,
+    alist_skills,
+    aresolve_package,
+    aresolve_skill_any,
     audit_skills,
-    get_package_members,
-    get_skill_packages,
-    get_skills,
-    list_skills,
     repair_skills,
-    resolve_package,
-    resolve_skill_any,
 )
 from crew.core.errors import ToolError
 from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
@@ -151,28 +153,31 @@ def _current_skill_scope() -> tuple[list[str] | None, list[str] | None]:
         return None, None
 
 
-def handle_skills_list(args: dict[str, Any]) -> str:
+async def handle_skills_list(args: dict[str, Any]) -> str:
     """列出当前专家/上下文允许的技能。委托 crew.agent.skills.list_skills()，统一真相源。
 
     可选 category 过滤：技能 frontmatter 有 category 字段时生效。
     """
     category = str(args.get("category") or "").strip()
     enabled, disabled = _current_skill_scope()
-    items = list_skills(enabled=enabled, disabled=disabled)
+    items = await alist_skills(enabled=enabled, disabled=disabled)
     if category:
-        # list_skills() 返回的 info 不含 category，从 get_skills() 取完整 info 做过滤
-        all_skills = get_skills()
-        slug_set = {
-            info["slug"]
-            for info in all_skills.values()
-            if str(all_skills.get(f"/{info['slug']}", {}).get("category") or "") == category
-            or _get_skill_category(all_skills, info["slug"]) == category
-        }
+        # list_skills() 返回的 info 不含 category，从索引取完整 info 做过滤；
+        # frontmatter 懒读取走线程池，不在事件循环上读盘
+        all_skills = await aget_skills()
+        slug_set = set()
+        for info in all_skills.values():
+            if str(info.get("category") or "") == category:
+                slug_set.add(info["slug"])
+                continue
+            legacy = await asyncio.to_thread(_get_skill_category, all_skills, info["slug"])
+            if legacy == category:
+                slug_set.add(info["slug"])
         items = [s for s in items if s["slug"] in slug_set]
     return tool_result(success=True, skills=items, count=len(items))
 
 
-def handle_skill_view(args: dict[str, Any]) -> str:
+async def handle_skill_view(args: dict[str, Any]) -> str:
     """读取某个技能的 SKILL.md、package 的 PACKAGE.md 或技能目录内指定文件。
 
     支持三种 name 形式：
@@ -187,26 +192,29 @@ def handle_skill_view(args: dict[str, Any]) -> str:
         raise ToolError("name 不能为空")
 
     # 1. 先尝试作为 package 读取
-    pkg = resolve_package(name)
+    pkg = await aresolve_package(name)
     if pkg is not None:
         from crew.agent.skills import _registered_skill_dir, read_skill_text, resolve_skill_path
 
-        package_dir = _registered_skill_dir(Path(pkg["package_dir"]))
-        pkg_md_path = resolve_skill_path(Path(pkg["package_md_path"]), package_dir)
-        content = read_skill_text(pkg_md_path, package_dir, errors="replace")
+        def _read_package() -> tuple[str, str]:
+            package_dir = _registered_skill_dir(Path(pkg["package_dir"]))
+            pkg_md_path = resolve_skill_path(Path(pkg["package_md_path"]), package_dir)
+            return str(pkg_md_path), read_skill_text(pkg_md_path, package_dir, errors="replace")
+
+        pkg_md_path, content = await asyncio.to_thread(_read_package)
         return tool_result(
             success=True,
             name=pkg["name"],
             slug=pkg["slug"],
             type="package",
-            path=str(pkg_md_path),
+            path=pkg_md_path,
             content=content,
         )
 
     # 2. 作为 skill 读取
-    info = resolve_skill_any(name)
+    info = await aresolve_skill_any(name)
     if info is None:
-        available = sorted(v["name"] for v in get_skills().values())
+        available = sorted(v["name"] for v in (await aget_skills()).values())
         raise ToolError(f"未找到技能或 package: {name}。可用技能: {', '.join(available)}")
 
     from crew.agent.skills import (
@@ -225,13 +233,17 @@ def handle_skill_view(args: dict[str, Any]) -> str:
     file_path = str(args.get("file_path") or "").strip()
 
     if not file_path:
-        # 返回 SKILL.md 内容
+        # 返回 SKILL.md 内容：body 缓存命中为零开销，回退读盘进线程池
         try:
             safe_skill_dir = _registered_skill_dir(skill_dir)
             skill_md = resolve_skill_path(Path(info["skill_md_path"]), safe_skill_dir)
         except SkillPathError as exc:
             raise ToolError(f"路径越权：{exc}") from exc
-        content = info.get("content") or read_skill_text(skill_md, safe_skill_dir, errors="replace")
+        content = await aget_skill_body(info)
+        if not content:
+            content = await asyncio.to_thread(
+                read_skill_text, skill_md, safe_skill_dir, errors="replace"
+            )
         return tool_result(
             success=True,
             name=info["name"],
@@ -257,11 +269,11 @@ def handle_skill_view(args: dict[str, Any]) -> str:
         type="skill",
         skill_dir=str(skill_dir),
         path=str(target),
-        content=read_skill_text(target, safe_skill_dir, errors="replace"),
+        content=await asyncio.to_thread(read_skill_text, target, safe_skill_dir, errors="replace"),
     )
 
 
-def handle_skill_package_open(args: dict[str, Any]) -> str:
+async def handle_skill_package_open(args: dict[str, Any]) -> str:
     """展开一个 skill package，使其内部 skills 在当前 agent 上下文中可见。
 
     将 package slug 加入 current_active_skill_packages，后续 system prompt 会展开其内部 skills。
@@ -271,15 +283,15 @@ def handle_skill_package_open(args: dict[str, Any]) -> str:
     if not name:
         raise ToolError("name 不能为空")
 
-    pkg = resolve_package(name)
+    pkg = await aresolve_package(name)
     if pkg is None:
-        available = sorted(p["name"] for p in get_skill_packages().values())
+        available = sorted(p["name"] for p in (await aget_skill_packages()).values())
         raise ToolError(f"未找到 package: {name}。可用 packages: {', '.join(available)}")
 
     pkg_slug = pkg["slug"]
 
     # 检查 package 内至少有一个 skill 被当前 scope 允许
-    members = get_package_members(pkg_slug)
+    members = await aget_package_members(pkg_slug)
     if not members:
         return tool_result(
             success=True,
@@ -324,8 +336,10 @@ def handle_skill_package_open(args: dict[str, Any]) -> str:
     )
 
 
-def handle_skills_audit(args: dict[str, Any]) -> str:
-    result = audit_skills(
+async def handle_skills_audit(args: dict[str, Any]) -> str:
+    # 审计要遍历整棵 skill 树，进线程池执行
+    result = await asyncio.to_thread(
+        audit_skills,
         include_optional=bool(args.get("include_optional", False)),
         only=str(args.get("only") or "").strip() or None,
     )
@@ -341,7 +355,8 @@ async def handle_skills_repair(
     if not bool(args.get("dry_run", False)):
         from crew.agent.skills import _is_metadata_finding
 
-        pending = audit_skills(
+        pending = await asyncio.to_thread(
+            audit_skills,
             include_optional=bool(args.get("include_optional", False)),
             only=str(args.get("only") or "").strip() or None,
         )
@@ -378,7 +393,7 @@ def register_skills_tools(
         toolset="skills",
         schema=SKILLS_LIST_SCHEMA,
         handler=handle_skills_list,
-        is_async=False,
+        is_async=True,
         display_name="查看技能列表",
         ui_label_template="查看技能列表",
         always_load=True,
@@ -390,7 +405,7 @@ def register_skills_tools(
         toolset="skills",
         schema=SKILL_VIEW_SCHEMA,
         handler=handle_skill_view,
-        is_async=False,
+        is_async=True,
         display_name="阅读技能",
         ui_label_template="阅读 {name}",
         always_load=True,
@@ -402,7 +417,7 @@ def register_skills_tools(
         toolset="skills",
         schema=SKILL_PACKAGE_OPEN_SCHEMA,
         handler=handle_skill_package_open,
-        is_async=False,
+        is_async=True,
         display_name="展开技能包",
         ui_label_template="展开技能包 {name}",
         always_load=True,
@@ -414,7 +429,7 @@ def register_skills_tools(
         toolset="skills",
         schema=SKILLS_AUDIT_SCHEMA,
         handler=handle_skills_audit,
-        is_async=False,
+        is_async=True,
         display_name="检查技能",
         ui_label_template="检查技能",
         always_load=True,

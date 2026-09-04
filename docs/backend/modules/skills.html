@@ -31,7 +31,7 @@
 <body>
 <div class="wrap">
   <h1>Skill 子系统</h1>
-  <div class="sub">crew/agent/skills.py · 目录发现、加载、安装与安全校验 · 2026-08-02 建立</div>
+  <div class="sub">crew/agent/skills/（子包） · 目录发现、加载、安装与安全校验 · 2026-08-02 建立</div>
 
   <h2>1. 定位</h2>
   <p>Skill 是封装在目录（含 <code>SKILL.md</code>）中的可复用 Agent 能力。对话中通过 <code>/skill名</code> 激活，由 <code>resolve_skill</code> 解析、<code>build_skill_activation</code> 构建指令注入当前轮。</p>
@@ -39,7 +39,10 @@
 
   <h2>2. 目录分层</h2>
   <h3>2.1 扫描层（scan_skills，决定可调用）</h3>
-  <p><code>get_skills()</code> 用 <code>_mtime_key()</code>（遍历全部 SKILL.md / PACKAGE.md 的 mtime）做缓存失效检测。该扫描在 Windows + 杀软下约 1s，因此带 <code>_MTIME_KEY_TTL_S = 2.0</code> 的短 TTL 缓存：TTL 内复用上次扫描结果；进程内安装/卸载经 <code>_invalidate_cache()</code> 立即失效，仅"外部直接改文件"的感知有 ≤2s 延迟。扫描与缓存读写由模块级 <code>_SCAN_LOCK</code> 保护（提示词组装经 <code>asyncio.to_thread</code> 移出事件循环后存在跨线程并发）。</p>
+  <p>模块已拆分为 <code>crew/agent/skills/</code> 子包：<code>core.py</code>（路径/containment/frontmatter 原语）、<code>scanner.py</code>（一层 + package 感知枚举，只产 metadata）、<code>catalog.py</code>（metadata 缓存 + revision 单调递增计数器）、<code>watcher.py</code>（watchdog 监听）、<code>index.py</code>（SkillIndex 单例 + body 缓存 + async 访问器）、<code>manage.py</code>（安装/卸载/repair/审计）；<code>__init__.py</code> 重导出全部公共 API，<code>from crew.agent.skills import X</code> 不变。</p>
+  <p>缓存失效双通道：<b>watcher 通道</b>——watchdog 监听各 skill roots（root 不存在时监听最近现存祖先），SKILL.md / PACKAGE.md 及目录增删改触发 <code>revision += 1</code> 并清缓存，毫秒级感知；<b>stat 回退</b>——watchdog 不可用（导入/启动失败、root 不可监听）时回退 <code>_scan_mtime_key()</code> + <code>_MTIME_KEY_TTL_S = 2.0</code> 短 TTL，行为与拆分前一致。进程内安装/卸载经 <code>_invalidate_cache()</code> 立即失效，两种通道一致生效。稳态下 <code>get_skills()</code> 只做内存 revision 比较，零磁盘 stat；扫描也不再读 SKILL.md 正文（原先把 body 全量读进缓存）。</p>
+  <p>metadata / body 分离：扫描结果 info dict 不含 <code>content</code> 字段；正文按需经 <code>get_skill_body(info)</code> 加载，按 <code>(path, mtime_ns)</code> 缓存，重扫时整体失效。<code>build_skill_message</code> 与 <code>skill_view</code> 均已改走 body 缓存。</p>
+  <p>async 访问器：<code>aget_skills()</code> / <code>abuild_skills_index_prompt()</code> 等一组 <code>a*</code> 接口——revision 命中纯内存返回，miss 扫描 / body 读盘经 <code>asyncio.to_thread</code> 移出事件循环。提示词组装链路（<code>build_prompt_parts</code> → runtime、skills 工具 handler、WS /skill 激活）已全链路 async；同步 API 保留给 CLI 等同步调用方。</p>
   <table>
     <thead><tr><th>层</th><th>目录</th><th>常量</th></tr></thead>
     <tbody>
@@ -148,12 +151,14 @@ get_crew_home()/skills/&lt;name&gt;  --symlink-->  ~/.agents/skills/&lt;name&gt;
   <p><code>tests/gateway/test_global_skills_api.py</code>：store 路由响应含 <code>local</code> 字段。</p>
   <p><code>desktop/tests/unit/skills-global-scope.test.ts</code>：本地徽章、软链文案、<code>~/.agents/skills</code> 文案断言。</p>
   <p><code>tests/test_compact.py</code>：覆盖超过工具保留窗口后 Skill 仍完整、引用资源按 identity 去重、完整压缩后 Skill 可跨多次压缩恢复；<code>tests/test_agent_loop.py</code> 覆盖重复 <code>skill_view</code> 防循环。</p>
+  <p><code>tests/test_skills.py</code>：watcher 事件失效、stat 回退、body 缓存 mtime 失效等（2026-09-04 新增 4 例）；skill 工具 handler 测试已改 async。<code>tests/test_eventloop_blocking.py</code>：<code>test_prompt_build_skills_cold_scan_does_not_block_loop</code> 用心跳间隔证明 skills 冷扫描不阻塞 gateway 事件循环。</p>
 
   <h2>9. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
       <tr><td>2026-09-03</td><td><code>_mtime_key()</code> 加 2s TTL 缓存 + <code>_SCAN_LOCK</code> 线程安全保护；外部文件变更感知延迟 ≤2s，进程内安装/卸载仍立即生效。</td><td><code>crew/agent/skills.py</code>；get_skills 全部调用方（提示词组装、WS /skill 激活、/api/skills）</td></tr>
+      <tr><td>2026-09-04</td><td>子包化重构 + 性能优化：watcher 失效（watchdog）+ stat 回退双通道消除稳态全目录 stat（原约 1s/次）；metadata/body 分离，info 不再含 <code>content</code>；新增一组 <code>a*</code> async 访问器；提示词组装与 skill 工具、WS 激活全链路 async 化。</td><td><code>crew/agent/skills/</code> 子包；<code>crew/agent/prompt_builder.py</code>、<code>runtime.py</code>、<code>crew/tools/skills_tools.py</code>、<code>crew/gateway/ws.py</code>；新增依赖 watchdog</td></tr>
     </tbody>
   </table>
 

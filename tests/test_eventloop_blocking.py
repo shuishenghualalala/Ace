@@ -62,3 +62,25 @@ async def test_memory_write_does_not_block_loop(tmp_path, monkeypatch):
     )
     memory.close()
     assert gap < 0.2, f"记忆写入阻塞了事件循环: 心跳被拖延 {gap:.3f}s"
+
+
+@pytest.mark.asyncio
+async def test_prompt_build_skills_cold_scan_does_not_block_loop(monkeypatch):
+    """skills 冷扫描（cache miss）必须在线程池里，不能卡住 gateway 事件循环。"""
+    from crew.agent.prompt_builder import build_prompt_parts
+    from crew.agent.skills import _invalidate_cache
+    from crew.agent.skills import scanner
+
+    real_scan_all = scanner.scan_all
+
+    def slow_scan_all():
+        time.sleep(0.3)  # 模拟 Windows + 杀软下的全目录 stat/解析
+        return real_scan_all()
+
+    monkeypatch.setattr(scanner, "scan_all", slow_scan_all)
+    _invalidate_cache()
+
+    gap = await _max_heartbeat_gap(
+        build_prompt_parts(lightweight=True, inject_skills=True)
+    )
+    assert gap < 0.2, f"skills 冷扫描阻塞了事件循环: 心跳被拖延 {gap:.3f}s"
