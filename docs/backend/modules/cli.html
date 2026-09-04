@@ -31,10 +31,10 @@
 <body>
 <div class="wrap">
   <h1>CLI 子系统</h1>
-  <div class="sub">crew/cli/ · 进程内命令树、非交互自动化、结构化输出 · 2026-08-13 重构</div>
+  <div class="sub">crew/cli/ · 进程内命令树、非交互自动化、结构化输出 · 2026-09-05 更新</div>
 
   <h2>1. 定位</h2>
-  <p>CLI 是 Crew 的本地自动化入口：默认交互式 REPL（<code>chat</code>），同时提供一次性对话（<code>run</code>）和覆盖全部后端模块的管理子命令。CLI 进程内直调 <code>build_app()</code> 装配的 service/store，不依赖 Gateway 或桌面端；与 occ 默认 CLI 的进程内架构一致。</p>
+  <p>CLI 是 Crew 的本地自动化入口：默认交互式 REPL（<code>chat</code>），同时提供一次性对话（<code>run</code>）和覆盖全部后端模块的管理子命令。CLI 进程内消费 <code>build_app()</code> 装配的 Host Service，不依赖 Gateway 或桌面端；可选 Feature 的命令在执行时动态解析当前 Service。</p>
   <div class="ok">
     <b>自动化目标</b>：所有命令支持 <code>--json</code> 结构化输出，失败返回非零退出码，可直接接入 pytest、shell 脚本与 CI。
   </div>
@@ -48,7 +48,7 @@
       <tr><td><code>crew/cli/app.py</code></td><td><code>CliContext</code> 懒加载 App、<code>running_app()</code> 生命周期、<code>CliResult</code>/<code>emit</code> 输出。</td></tr>
       <tr><td><code>crew/cli/chat.py</code></td><td>交互 REPL 与一次性 <code>run</code>（text/json/stream-json）。</td></tr>
       <tr><td><code>crew/cli/management.py</code></td><td>config / session / workspace / task / cron / system / migrate。</td></tr>
-      <tr><td><code>crew/cli/knowledge.py</code></td><td>wiki / skill。</td></tr>
+      <tr><td><code>crew/cli/knowledge.py</code></td><td>wiki / skill；Wiki 命令动态消费 Knowledge Service，并在完整命令周期持有 Generation Lease。</td></tr>
       <tr><td><code>crew/cli/integration.py</code></td><td>mcp / plugin / channel / runtime / browser / weixin-login。</td></tr>
       <tr><td><code>crew/cli/security.py</code></td><td>security：审批模式、请求决策、规则、审计、capabilities。</td></tr>
       <tr><td><code>crew/cli/content.py</code></td><td>site / work。</td></tr>
@@ -82,7 +82,7 @@
       <tr><td><code>system</code></td><td>健康、资源指标、进程内日志查询、工具与工具集目录。</td></tr>
       <tr><td><code>kanban</code></td><td>Dynamic Kanban 看板状态/暂停/恢复。</td></tr>
       <tr><td><code>scenario</code></td><td>场景推荐、介绍话术与加载语。</td></tr>
-      <tr><td><code>wiki</code></td><td>知识库、页面、搜索、数据源、上传、入库、编译、图谱、问答、摘要、lint、Agent 会话。</td></tr>
+      <tr><td><code>wiki</code></td><td>知识库、页面、搜索、数据源、上传、入库、编译、图谱、问答、摘要、lint、Agent 会话；能力不可用或 draining 时统一返回“Wiki 未启用”。</td></tr>
       <tr><td><code>skill</code></td><td>技能列表/安装/卸载/自进化配置。</td></tr>
       <tr><td><code>mcp</code></td><td>serve / interaction-proxy、服务器配置增删改查与热重载、CUA Driver 安装管理。</td></tr>
       <tr><td><code>plugin</code></td><td>插件状态与 per-owner 启用/禁用（含浏览器能力代次切换）。</td></tr>
@@ -112,12 +112,24 @@
     <b>进程内审批状态</b>：审批请求保存在当前进程内存中。跨 CLI 进程无法看到另一进程创建的 pending 请求；测试完整决策链路时用 <code>security fake-executions --decision &lt;once|session|always|reject&gt;</code> 在同一进程内创建并立即决策。
   </div>
 
-  <h2>5. 测试</h2>
-  <p>自动化测试在 <code>tests/test_cli.py</code>：命令树、配置、工作空间/会话 CRUD、cron、wiki、安全模式与决策、非交互 run、只读内容命令。运行：</p>
-  <pre><code>pytest tests/test_cli.py -q
-ruff check crew/cli tests/test_cli.py</code></pre>
+  <h2>5. Wiki Service 消费边界</h2>
+  <p>每个 Wiki 叶子命令都在真正执行时调用 <code>acquire_service_lease(KNOWLEDGE_SERVICE_KEY)</code>。同步命令在返回或异常时释放 Lease；异步命令在整个 await 周期持有 Lease。这样新命令只会看到当前 Active Generation，旧 Provider 会等待在途命令结束后再关闭。</p>
+  <p>没有 <code>product.wiki</code> 运行记录的嵌入宿主可以提供外部 <code>knowledge_service</code>；一旦产品 Feature 存在但不可用，CLI 不回退到旧对象。SessionStore 仍属于 Host，但 Wiki Agent 会话命令同样先经过 Service Gate。文件读取只处理用户传入的本地路径，上传解析、媒体处理和 Wiki 数据目录均留在 Provider。</p>
 
-  <div class="nav">返回：<a href="index.html">后端模块索引</a></div>
+  <h2>6. 测试</h2>
+  <p>通用 CLI 自动化测试在 <code>tests/test_cli.py</code>；Wiki Service、Gate、Generation Lease 与上传结果契约在 <code>tests/test_cli_wiki_service.py</code>。运行：</p>
+  <pre><code>pytest tests/test_cli.py tests/test_cli_wiki_service.py -q
+ruff check crew/cli tests/test_cli.py tests/test_cli_wiki_service.py</code></pre>
+
+  <h2>7. 变更记录</h2>
+  <table>
+    <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
+    <tbody>
+      <tr><td>2026-09-05</td><td>Wiki CLI 改为动态 Knowledge Service Consumer，并为每个命令绑定同代 Lease。</td><td>全部 Wiki 子命令、Feature Gate、Provider 替换与上传边界。</td></tr>
+    </tbody>
+  </table>
+
+  <div class="nav">返回：<a href="index.html">后端模块索引</a> · <a href="wiki.html">Wiki 模块</a> · <a href="../adr/0022-wiki-cli-knowledge-service-consumer.html">ADR-0022</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-cli-consumer.html">测试记录</a></div>
 </div>
 </body>
 </html>
