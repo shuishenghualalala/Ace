@@ -174,7 +174,9 @@ def build_wiki_feature(
                 querier=WikiQuerier(store),
                 summarizer=summarizer,
                 manager=manager,
-            )
+            ),
+            config=cfg,
+            security_service=effective_security_service,
         )
 
     candidate = make_provider()

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 3B · Wiki Gateway Consumer 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.note{border-left:3px solid #999;padding:8px 16px;background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 3B · Wiki Gateway Consumer</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-05 · 编码与测试：相互独立的 Luna 子 Agent</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li>Service Registry 的 acquire、release、drain 和新旧 Generation 选择属于同一租约语义。</li>
+    <li>全部 <code>/api/wiki/*</code> 在 Knowledge Service 不可用时统一返回 503；正常请求按次解析当前 Generation。</li>
+    <li>在途 API 请求阻止旧 Provider 提前关闭；外部注入 Service 在无产品记录的嵌入宿主中仍可消费。</li>
+    <li>附件捕获持有同一 Service/Lease 解析显式或会话 KB，drain 竞态不回落 default，停用后不捕获。</li>
+    <li>Gateway 不再导入 Wiki Store、Parser、私有组件或本地目录 API；页面搜索、上传和 Owner/KB 行为保持回归。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>新增 Service Lease / Gateway Gate / 附件竞态定向</td><td class="ok">12 passed，64 deselected</td></tr>
+      <tr><td>Gateway Wiki Router 全文件</td><td class="ok">46 passed</td></tr>
+      <tr><td>Feature Services / Runtime / Lifecycle + Wiki + Gateway Wiki</td><td class="ok">473 passed</td></tr>
+      <tr><td>Cron / Sites / Browser / Feature 邻接回归</td><td class="ok">538 passed，28 skipped</td></tr>
+      <tr><td>Ruff、compileall、git diff check</td><td class="ok">全部通过</td></tr>
+      <tr><td>Import Linter</td><td class="ok">309 files，1353 dependencies，6 contracts kept，0 broken</td></tr>
+    </tbody>
+  </table>
+  <p>测试组存在重叠，不将数量相加作为全量总数。测试代码修改 <code>tests/test_feature_services.py</code>、<code>tests/gateway/test_wiki_router.py</code> 与 <code>tests/gateway/test_upload.py</code>。</p>
+
+  <h2>既有基线说明</h2>
+  <div class="note">完整上传测试在当前工作区与从 <code>HEAD</code> 解出的干净基线中均为 7 failed、8 passed；7 项都因默认 <code>auth.mode=email</code> 与空认证 fixture 返回既有 401。新增的 4 个附件 Service/Lease 测试全部通过，因此不把该基线问题记为本切片回归。</div>
+
+  <h2>关键场景</h2>
+  <p>覆盖全路由 inactive 表、外部 Service fallback、g1 请求与 g2 新请求并存、旧代 drain 等待、下载内容边界、页面搜索类型、显式/session KB、acquire 后立即 draining 的竞态，以及 Gateway 源码 AST 边界扫描。</p>
+
+  <div class="nav"><a href="../backend/adr/0021-wiki-gateway-knowledge-service-consumer.html">ADR-0021</a> · <a href="../backend/modules/wiki.html">Wiki 模块</a> · <a href="../backend/modules/gateway.html">Gateway 模块</a> · <a href="../backend/modules/plugins.html">Feature / Plugin 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

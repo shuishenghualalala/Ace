@@ -5,9 +5,9 @@
 > 基线核查日期：2026-08-31  
 > 目标读者：Ace 后端、桌面端、Web 端及独立功能模块的维护者  
 > 修订记录：2026-08-31 评审追加——workspace_guard 依赖核查（§2.3.3、§11、§17）、第一方/第三方插件契约收口（§2.3.8）、effect 诊断与启动审计（§6.3）、服务作用域维度（§6.4）、拦截器语义（§7.5）、螺旋式迁移节奏与依赖检查工具（§10、§13.3）、配置与数据命名空间约定（§12.5）、Adapter 保质期（§15.2）、ADR 机制（§16）、新增验收指标（§14）；同日补充——演进紧迫性论证与中心文件基线数据（§1.1.1）、接口层多租户地基（§2.2）；同日范围校正——明确 dsh 广义 Plugin 与 Ace 当前 `plugins/` 的区别，将目标提升为全部 Feature 的统一可逆生命周期，补充 Feature Generation、业务数据边界、全量迁移地图和工作量评估（§0、§3.3、§5、§6、§8、§10、§16、§18、§19）；同日——§2.1、§5.1 增加耦合视角与装配视角两张架构对比图（离线渲染版：docs/todo/ace-arch-compare.html）
-> 实施进度：2026-09-04 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver、Context Contributor 主链均已落地。Cron Trigger Reminder Contributor、后台结果通知 Contributor、Feature Event 命名空间、Route Registry 与 Core Feature 声明化均已完成；阶段 3A 的 Cron、Sites、Browser 三个 Runtime Feature 验证切片已完成。阶段 3B 第一切片也已落地：`KnowledgeService`、`LocalWikiProvider` 与 `product.wiki` Foundation Bundle 统一拥有本地 Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context 和 Home 导读后台 Task；`build_app()` 不再逐项构造 Wiki 内部对象。Wiki API、CLI、Agent Preset、Event、Route 和 UI 仍在后续纵向切片，Work 的可选 Knowledge Service 依赖留到阶段 3C。当前分支为 `refactor/plugin-architecture-stage-0`，阶段 3A 验证记录见 `docs/testing/plugin-architecture-stage-3a-*-runtime.html`，Wiki Foundation 记录见 `docs/testing/plugin-architecture-stage-3b-wiki-foundation.html`。
+> 实施进度：2026-09-05 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver、Context Contributor 主链均已落地。Cron Trigger Reminder Contributor、后台结果通知 Contributor、Feature Event 命名空间、Route Registry 与 Core Feature 声明化均已完成；阶段 3A 的 Cron、Sites、Browser 三个 Runtime Feature 验证切片已完成。阶段 3B 已完成 Foundation 与 Gateway Consumer 两个切片：`KnowledgeService`、`LocalWikiProvider` 与 `product.wiki` Bundle 统一拥有本地 Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context 和 Home 导读后台 Task；`build_app()` 不再逐项构造 Wiki 内部对象；Wiki REST 与聊天附件捕获通过动态 Service + Generation Lease 访问能力，不再持有私有组件或本地文件布局。CLI、Agent Preset、Event、Route 和 UI 仍在后续纵向切片，Work 的可选 Knowledge Service 依赖留到阶段 3C。当前分支为 `refactor/plugin-architecture-stage-0`，阶段 3A 验证记录见 `docs/testing/plugin-architecture-stage-3a-*-runtime.html`，Wiki Foundation 与 Gateway Consumer 记录分别见 `docs/testing/plugin-architecture-stage-3b-wiki-foundation.html`、`docs/testing/plugin-architecture-stage-3b-wiki-gateway-consumer.html`。
 
-## 当前实施进度图（2026-09-04）
+## 当前实施进度图（2026-09-05）
 
 绿色表示已经落地并通过相关回归的区域，蓝色表示紧接着要实施的切片，灰色表示尚未开始。当前已完成**阶段 0、阶段 1，以及阶段 2 的 Driver / Context Contributor 主链**，不是整份演进方案已经完成。
 
@@ -94,7 +94,9 @@ flowchart TB
     BrowserRuntime --> BrowserRuntimeTests["Browser 生命周期验证<br/>restart · rollback · Owner 清理 · API Gate"]
     BrowserRuntimeTests --> WikiFoundation["阶段 3B · Wiki Foundation<br/>Knowledge Service · Local Provider · Bundle"]
     WikiFoundation --> WikiFoundationTests["Wiki Foundation 验证<br/>29 定向 · restart · rollback · Task Owner"]
-    WikiFoundationTests --> Next["阶段 3B 下一切片<br/>Wiki API / CLI Service 消费迁移"]
+    WikiFoundationTests --> WikiGateway["阶段 3B · Gateway Consumer<br/>REST · Attachment · Service Lease"]
+    WikiGateway --> WikiGatewayTests["Gateway Consumer 验证<br/>46 Router · 473 组合 · drain 竞态"]
+    WikiGatewayTests --> Next["阶段 3B 下一切片<br/>Wiki CLI Service 消费迁移"]
 
     classDef done fill:#e8f6ee,stroke:#1e8449,color:#145a32,stroke-width:2px
     classDef next fill:#e6f0fb,stroke:#2471a3,color:#154360,stroke-width:2px
@@ -102,11 +104,11 @@ flowchart TB
     class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed,Scope,Token,Rollback,RuntimeTests,Services,Dependencies,Config,ServiceTests,Runtime,Adapter,Phases,Browser,Shutdown,AdapterTests,Manifest,Ordered,Audit,ManifestTests,Lease,StopPolicy,StopAudit,LeaseTests,Update,Generation,Recovery,UpdateTests,Stage1Done,Drivers,DriverLease,DefaultDriver,PluginDriver,DriverTests,Adapters,DriverAdapterTests done
     class ContextRegistry,PathContext,BrowserContext,ContextTests done
     class SessionContext,SessionTests,WikiContext,WikiTests,CronContext,CronTests,BgContext,QueueOwner,TeamDrain,BgTests,FeatureEvent,EventCompat,EventTests,RouteReg,RouteGate,RouteTests,CoreDecl,Required,CoreTests done
-    class CronRuntime,CronRuntimeTests,SitesRuntime,SitesRuntimeTests,BrowserRuntime,BrowserRuntimeTests,WikiFoundation,WikiFoundationTests done
+    class CronRuntime,CronRuntimeTests,SitesRuntime,SitesRuntimeTests,BrowserRuntime,BrowserRuntimeTests,WikiFoundation,WikiFoundationTests,WikiGateway,WikiGatewayTests done
     class Next next
 ```
 
-这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。阶段 2 的 Driver、Context、Feature Event、Route Gate 和声明式 Core Feature 已形成扩展主链。阶段 3A 的 Cron、Sites 与 Browser 已完成真实资源所有权验证。阶段 3B 第一切片进一步建立 `knowledge` 稳定 Service、Local Provider 和 `product.wiki` Foundation Bundle；Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context 与 Home 导读后台 Task 现在共享同一 restart Generation。Scope Task Factory 只为每代登记一个 Task Owner，drain 关闭准入，dispose 统一 cancel/join；更新失败会用旧 Definition 恢复可用 Generation，停用不删除持久数据。中心 `build_app()` 已不再逐项构造 Wiki 内部对象，但 Gateway/CLI 仍通过 Components 兼容视图访问，Work 仍直接持有 Wiki Store。下一步把 Wiki API 与 CLI 迁为 Knowledge Service Consumer，再继续 Event、Route、Preset 与 UI Contribution。
+这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。阶段 2 的 Driver、Context、Feature Event、Route Gate 和声明式 Core Feature 已形成扩展主链。阶段 3A 的 Cron、Sites 与 Browser 已完成真实资源所有权验证。阶段 3B Foundation 建立了 `knowledge` 稳定 Service、Local Provider 和 `product.wiki` Bundle；Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context 与 Home 导读后台 Task 共享同一 restart Generation。第二切片把 Wiki REST 与聊天附件捕获迁为 Service Consumer：Service Registry 在同一次选择中返回 Provider 与 Generation Lease，draining 拒绝新请求并等待在途请求；上传、下载、解析和本地目录操作留在 Provider，Gateway 不再读取 Components 兼容视图。CLI 与 Work 仍使用迁移期兼容视图。下一步迁移 Wiki CLI，再继续 Event、Route、Preset 与 UI Contribution。
 
 ## 0. 执行摘要
 
@@ -1347,6 +1349,7 @@ Desktop 和 Web 不应分别发明一套 Feature 协议。建议共享：
 - 定义 `KnowledgeService`。（第一切片已完成）
 - 现有 Wiki 实现包装为 Local Provider。（第一切片已完成）
 - 将 Wiki Tool、API、Agent Preset、Context Contributor 和 Event 注册集中到 Wiki Bundle。
+- Wiki REST 与聊天附件捕获改为动态 optional `KnowledgeService` Consumer；请求持有同代 Lease，停用统一 Gate。（第二切片已完成）
 - `build_app()` 只加载 Bundle，不构造 Wiki 内部对象。（第一切片已完成）
 - 建立 Remote Provider 契约测试，但可以暂不提供生产远程服务。
 - 将 Wiki Compiler 内部创建的后台 Task 收入 Scope Task Factory，停用时能够 drain/cancel。（Home 导读刷新已完成）

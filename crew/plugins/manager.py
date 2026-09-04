@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, fields, replace
 from functools import wraps
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, TypeVar
 
 import yaml
 
@@ -47,18 +47,21 @@ from crew.features.dependencies import FeatureServiceDependencies
 from crew.features.runtime import (
     FeatureActivationError,
     FeatureGeneration,
+    FeatureLease,
     FeatureScope,
     FeatureState,
     FeatureStopPolicy,
     RegistrationPhase,
     RegistrationToken,
 )
+
 from crew.features.services import ServiceKey, ServiceScopeKind, ServiceScopePath
 from crew.tools.redact import redact_sensitive_text
 from crew.tools.registry import Registry
 from crew.state.logging import get_logger
 
 log = get_logger("plugins")
+ServiceT = TypeVar("ServiceT")
 _NS_PARENT = "crew_runtime_plugins"
 
 OBSERVER_SCHEMA_VERSION = "crew.observer.v1"
@@ -862,6 +865,15 @@ class PluginManager:
         """Resolve a currently visible global service for host integrations."""
         service_key = key if isinstance(key, ServiceKey) else ServiceKey(str(key))
         return self.feature_runtime.services.get(service_key, default=default)
+
+    def acquire_service_lease(
+        self,
+        key: ServiceKey[ServiceT],
+        *,
+        label: str = "service-request",
+    ) -> tuple[ServiceT, FeatureLease] | None:
+        """Resolve a service and lease its active Feature generation together."""
+        return self.feature_runtime.services.acquire_lease(key, label=label)
 
     def retry_waiting(self) -> None:
         """Synchronously retry plugins whose required host services arrived later."""

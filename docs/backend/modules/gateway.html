@@ -67,6 +67,7 @@
       <tr><td>交互桥（<code>interaction_bridge.py</code>）</td><td>外部 Runtime（MCP 子进程）与 Crew 主会话之间的短期绑定：token → <code>ExternalInteractionBinding</code>（含 <code>owner_account_id</code>、显示/控制 session、权限画像、过期时间），把 MCP 交互请求安全映射回发起任务的会话。</td><td>已落地</td></tr>
       <tr><td>上下文兼容 API（<code>context.py</code>）</td><td>保留上传与结构化路径解析；Browser 标签页解析暂时重导出。静态 <code>REFERENCE_INJECTORS</code> 已删除。</td><td>迁移中</td></tr>
       <tr><td>Session Source Contributor（<code>session_context.py</code>）</td><td>拥有渠道来源数据和 formatter，通过 Feature Runtime 输出规范化 source 与动态模型上下文。</td><td>已落地</td></tr>
+      <tr><td>Wiki Knowledge Consumer（<code>routers/wiki.py</code> / <code>routers/misc.py</code>）</td><td>REST 与附件捕获按请求解析 Knowledge Service 并持有 Generation Lease；能力停用统一返回 503 或跳过后台捕获。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -83,6 +84,7 @@
       <tr><td><code>crew/gateway/interaction_bridge.py</code></td><td>外部 Runtime 受限 MCP 交互桥。</td></tr>
       <tr><td><code>crew/gateway/context.py</code></td><td>上传、路径解析与旧 Browser 引用 API 兼容出口；不再拥有注入注册表。</td></tr>
       <tr><td><code>crew/gateway/session_context.py</code></td><td>SessionSource/SessionContext 路由契约、prompt formatter 与 Contributor Handler。</td></tr>
+      <tr><td><code>crew/gateway/routers/wiki.py</code></td><td>Provider-neutral Wiki HTTP 适配；只处理认证、参数与响应，不访问 Store、Parser 或本地目录。</td></tr>
       <tr><td><code>crew/state/channel_bindings.py</code></td><td>平台 ↔ owner 绑定的持久化（<code>bind_on_connect</code> / <code>get_binding</code> / <code>list_for_platform</code>）。</td></tr>
     </tbody>
   </table>
@@ -98,6 +100,13 @@ ContextVar set 点       dispatcher.run(): current_owner_account_id.set(normaliz
                         无绑定渠道：归本机 owner local（决策⑥）；
                         平台原始 uid 只保留在 params.platform_uid，严禁充当 owner</code></pre>
   <p>边界之内 owner 恒非空：HTTP 路由经 <code>account_from_request(request).owner_account_id</code> 取 owner 显式传给 CrewApp/store；渠道路径经 dispatcher 的 ContextVar 继承。<code>channel_manager</code> / <code>delivery</code> 的 <code>{"", "local", "dev:dev"}</code> 全局特判已删除，渠道一律按 (platform, owner) 精确归属。</p>
+  <pre><code>service, lease = plugins.acquire_service_lease(
+    KNOWLEDGE_SERVICE_KEY,
+    label="gateway:wiki",
+)
+async with lease:
+    return await handle_with(service)</code></pre>
+  <p>Wiki Router 树仍在应用构造期挂载，但能力按请求动态解析。draining 后新请求得到 503；已进入请求持有旧 Generation，结束后才允许 Provider 关闭。外部嵌入宿主没有产品 Feature 记录时，可继续通过兼容 Service 注入。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
@@ -121,11 +130,12 @@ ContextVar set 点       dispatcher.run(): current_owner_account_id.set(normaliz
       <tr><td>2026-09-03</td><td>Session Source 通过 Contributor 输出，Agent Runtime 不再导入 Gateway 类型或 formatter。</td><td><code>session_context.py</code>、Agent→Gateway 直接依赖契约。</td></tr>
       <tr><td>2026-09-03</td><td>新增 Feature Event 出口适配层 <code>event_compat.py</code>：已登记的 feature_event 在 <code>push_payload</code> 出口转换为旧 kind 帧（含断线回放），未登记事件丢弃；现有客户端线上协议零变化。</td><td><code>connections.push_payload</code>、WS 推送点（wiki_cards/wiki_changed/wiki_ingest_progress 生产侧已改发 feature_event）。</td></tr>
       <tr><td>2026-09-03</td><td>插件 API 路由改从 Route Registry 启动期装配，挂载点带运行期闸门（<code>make_route_gate</code>）：Feature 停用后请求得到 503 + capability_unavailable，路由树不做热卸载。</td><td><code>create_app</code> 插件挂载循环、<code>crew/features/routes.py</code>。</td></tr>
+      <tr><td>2026-09-05</td><td>Wiki REST 与聊天附件捕获移除私有 Store/Compiler/Querier/Manager 依赖，改为动态 Knowledge Service + Generation Lease。</td><td><code>routers/wiki.py</code>、<code>routers/misc.py</code>、Feature disable/restart 与远程 Provider 边界。</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0010-session-source-context-contributor.html">ADR-0010</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0010-session-source-context-contributor.html">ADR-0010</a> · <a href="../adr/0021-wiki-gateway-knowledge-service-consumer.html">ADR-0021</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-gateway-consumer.html">Gateway Consumer 测试记录</a></div>
 </div>
 </body>
 </html>

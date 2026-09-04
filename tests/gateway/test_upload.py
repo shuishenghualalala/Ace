@@ -5,14 +5,20 @@ from __future__ import annotations
 import asyncio
 import base64
 from pathlib import Path
+from types import SimpleNamespace
 
+from fastapi import FastAPI
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from crew.app import build_app
+from crew.features import FeatureGeneration, FeatureScope, ServiceRegistry
+from crew.gateway.auth import AccountContext
 from crew.gateway.context import save_upload
+from crew.gateway.routers.misc import create_misc_router
 from crew.gateway.server import create_app
 from crew.state.home import owner_path_segment
+from crew.wiki.service import KNOWLEDGE_SERVICE_KEY
 
 
 @pytest.fixture
@@ -59,6 +65,178 @@ def test_save_upload_rejects_path_separator(crew_home):
 def test_save_upload_rejects_nul(crew_home):
     with pytest.raises(ValueError):
         save_upload("evil\x00.txt", b"x")
+
+
+def _misc_router_app(crew):
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def attach_test_account(request, call_next):
+        request.state.account = AccountContext("A:uid-a", is_local=True)
+        return await call_next(request)
+
+    app.include_router(create_misc_router(crew))
+    return app
+
+
+class _CaptureService:
+    def __init__(self):
+        self.calls = []
+        self.done = asyncio.Event()
+
+    def list_knowledge_bases(self, owner_account_id):
+        return [SimpleNamespace(id="project")]
+
+    def session_kb_id(self, session_id, owner_account_id):
+        assert session_id == "wiki-session"
+        return "session-kb"
+
+    async def capture_attachment(self, filename, content, owner_account_id, kb_id="default"):
+        self.calls.append((filename, content, owner_account_id, kb_id))
+        self.done.set()
+
+
+class _RegistryPlugins:
+    def __init__(self, registry):
+        self.registry = registry
+
+    def acquire_service_lease(self, key, *, label="service-request"):
+        return self.registry.acquire_lease(key, label=label)
+
+    def resolve_service(self, key, default=None):
+        return self.registry.get(key, default=default)
+
+
+class _DrainAfterAcquirePlugins(_RegistryPlugins):
+    def __init__(self, registry, scope):
+        super().__init__(registry)
+        self.scope = scope
+
+    def acquire_service_lease(self, key, *, label="service-request"):
+        acquired = super().acquire_service_lease(key, label=label)
+        self.scope.begin_draining()
+        return acquired
+
+
+def _capture_crew(registry):
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            wiki=SimpleNamespace(enabled=True, capture_attachments=True),
+        ),
+        plugins=_RegistryPlugins(registry),
+        knowledge_service=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_upload_capture_uses_external_override_without_product_record(crew_home):
+    registry = ServiceRegistry()
+    service = _CaptureService()
+    crew = _capture_crew(registry)
+    crew.knowledge_service = service
+    transport = ASGITransport(app=_misc_router_app(crew))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/upload",
+            json={
+                "filename": "external.txt",
+                "content": base64.b64encode(b"external").decode(),
+            },
+        )
+        assert response.status_code == 200
+        await service.done.wait()
+
+    assert service.calls == [("external.txt", b"external", "A:uid-a", "default")]
+
+
+@pytest.mark.asyncio
+async def test_upload_capture_keeps_acquired_service_when_drain_starts_before_kb_resolution(crew_home):
+    registry = ServiceRegistry()
+    scope = FeatureScope(FeatureGeneration("product.wiki", 1))
+    service = _CaptureService()
+    registry.register(scope, KNOWLEDGE_SERVICE_KEY, service)
+    scope.activate()
+    crew = _capture_crew(registry)
+    crew.plugins = _DrainAfterAcquirePlugins(registry, scope)
+    transport = ASGITransport(app=_misc_router_app(crew))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/upload",
+            json={
+                "filename": "race.txt",
+                "content": base64.b64encode(b"race").decode(),
+                "kb_id": "project",
+            },
+        )
+        assert response.status_code == 200
+        await service.done.wait()
+
+    assert service.calls == [("race.txt", b"race", "A:uid-a", "project")]
+    await scope.dispose()
+
+
+@pytest.mark.asyncio
+async def test_upload_capture_resolves_explicit_and_session_kb_with_lease(crew_home):
+    registry = ServiceRegistry()
+    scope = FeatureScope(FeatureGeneration("product.wiki", 1))
+    service = _CaptureService()
+    registry.register(scope, KNOWLEDGE_SERVICE_KEY, service)
+    scope.activate()
+    crew = _capture_crew(registry)
+    transport = ASGITransport(app=_misc_router_app(crew))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/upload",
+            json={
+                "filename": "explicit.txt",
+                "content": base64.b64encode(b"explicit").decode(),
+                "kb_id": "project",
+            },
+        )
+        assert response.status_code == 200
+        await service.done.wait()
+        service.done.clear()
+        response = await client.post(
+            "/api/upload",
+            json={
+                "filename": "session.txt",
+                "content": base64.b64encode(b"session").decode(),
+                "session_id": "wiki-session",
+            },
+        )
+        assert response.status_code == 200
+        await service.done.wait()
+
+    assert [(item[0], item[3]) for item in service.calls] == [
+        ("explicit.txt", "project"),
+        ("session.txt", "session-kb"),
+    ]
+    await scope.dispose()
+
+
+@pytest.mark.asyncio
+async def test_upload_capture_does_not_fallback_to_compat_service_during_drain(crew_home):
+    registry = ServiceRegistry()
+    scope = FeatureScope(FeatureGeneration("product.wiki", 1))
+    service = _CaptureService()
+    registry.register(scope, KNOWLEDGE_SERVICE_KEY, service)
+    scope.activate()
+    scope.begin_draining()
+    crew = _capture_crew(registry)
+    transport = ASGITransport(app=_misc_router_app(crew))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/upload",
+            json={
+                "filename": "draining.txt",
+                "content": base64.b64encode(b"draining").decode(),
+            },
+        )
+        assert response.status_code == 200
+        await asyncio.sleep(0)
+
+    assert service.calls == []
+    await scope.dispose()
 
 
 # ---------------- 路由层 413 体积上限 ----------------

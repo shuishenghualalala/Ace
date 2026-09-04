@@ -9,6 +9,7 @@ from typing import Any, Generic, TypeVar, cast
 from crew.core.errors import CrewError
 from crew.features.runtime import (
     FeatureGeneration,
+    FeatureLease,
     FeatureScope,
     FeatureState,
     RegistrationPhase,
@@ -288,6 +289,35 @@ class ServiceRegistry:
         raise ServiceNotFoundError(
             f"service {key.name!r} is not available for scope {path!r}"
         )
+
+    def acquire_lease(
+        self,
+        key: ServiceKey[T],
+        scope_path: ServiceScopePath | None = None,
+        *,
+        label: str = "service-request",
+    ) -> tuple[T, FeatureLease] | None:
+        """Resolve one visible service and lease its owning generation.
+
+        The lookup and lease acquisition share the same visible entry, so a
+        consumer cannot retain a provider after its generation starts draining.
+        ``None`` means the optional service is currently unavailable.
+        """
+        path = scope_path or ServiceScopePath.global_scope()
+        for scope_kind, candidate in path.resolution_order():
+            entries = self._entries.get(self._address(key, scope_kind, candidate), ())
+            visible = [entry for entry in entries if entry.visible]
+            if not visible:
+                continue
+            entry = max(
+                visible,
+                key=lambda item: (
+                    item.owner.generation.sequence,
+                    item.owner.generation.created_at,
+                ),
+            )
+            return entry.value, entry.owner.acquire_lease(label)
+        return None
 
     def resolve(
         self,

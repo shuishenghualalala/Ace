@@ -10,6 +10,8 @@ from crew.features import (
     FeatureDependencyGraph,
     FeatureGeneration,
     FeatureScope,
+    FeatureState,
+    FeatureStopPolicy,
     FeatureServiceDependencies,
     ServiceConflictError,
     ServiceKey,
@@ -141,6 +143,78 @@ async def test_registration_token_removes_only_its_owned_service():
 
     await first_token.dispose()
     assert registry.resolve(key) == "second"
+
+
+async def test_registry_lease_tracks_generation_and_drains_before_release():
+    registry = ServiceRegistry()
+    key = ServiceKey[str]("knowledge")
+    closed: list[str] = []
+
+    old = _active_scope("product.wiki", 1)
+    old.register(lambda: closed.append("old"), label="resource:old")
+    registry.register(old, key, "old")
+
+    value, lease = registry.acquire_lease(key, label="gateway:wiki")
+    assert value == "old"
+    assert old.state is FeatureState.ACTIVE
+    assert [item.label for item in old.active_leases] == ["gateway:wiki"]
+
+    stopping = asyncio.create_task(old.stop(FeatureStopPolicy.DRAIN, timeout_seconds=None))
+    async def wait_for_draining() -> None:
+        while old.state is FeatureState.ACTIVE:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_draining(), timeout=1)
+    assert old.state is FeatureState.DRAINING
+    assert registry.acquire_lease(key) is None
+    assert not stopping.done()
+    assert closed == []
+
+    lease.release()
+    lease.release()
+    await stopping
+    assert old.state is FeatureState.DISPOSED
+    assert closed == ["old"]
+    assert registry.acquire_lease(key) is None
+
+
+def test_registry_lease_returns_none_for_missing_or_inactive_service():
+    registry = ServiceRegistry()
+    key = ServiceKey[str]("knowledge")
+    assert registry.acquire_lease(key) is None
+
+    activating = FeatureScope(FeatureGeneration("product.wiki", 1))
+    registry.register(activating, key, "staged")
+    assert registry.acquire_lease(key) is None
+
+
+async def test_registry_lease_resolves_new_generation_while_old_request_is_in_flight():
+    registry = ServiceRegistry()
+    key = ServiceKey[str]("knowledge")
+    old = _active_scope("product.wiki", 1)
+    old_closed = asyncio.Event()
+    old.register(lambda: old_closed.set(), label="resource:old")
+    registry.register(old, key, "old")
+    new = FeatureScope(FeatureGeneration("product.wiki", 2))
+    registry.register(new, key, "new")
+
+    old_value, old_lease = registry.acquire_lease(key, label="in-flight")
+    assert old_value == "old"
+    new.activate()
+    new_value, new_lease = registry.acquire_lease(key, label="new-request")
+    assert new_value == "new"
+
+    stopping = asyncio.create_task(old.stop(timeout_seconds=None))
+    await asyncio.sleep(0)
+    assert not stopping.done()
+    assert not old_closed.is_set()
+    assert registry.resolve(key) == "new"
+
+    old_lease.release()
+    await stopping
+    assert old_closed.is_set()
+    new_lease.release()
+    await new.dispose()
 
 
 async def test_new_generation_is_staged_then_atomically_replaces_old_service():

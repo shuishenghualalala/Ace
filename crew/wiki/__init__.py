@@ -40,12 +40,19 @@ from .schemas import HomeIntro
 from .search import SQLiteFTS5SearchIndex, WikiSearchIndex
 from .store import FileSystemWikiStore, WikiStore
 from .summary import WikiSummarizer
+from .service import (
+    KNOWLEDGE_SERVICE_KEY,
+    KnowledgeService,
+    KnowledgeSourceFile,
+    KnowledgeUploadResult,
+    KnowledgeVaultDocument,
+    LocalWikiProvider,
+    WikiPageRelation,
+    normalize_kb_id,
+)
 from .feature import (
     KNOWLEDGE_SERVICE,
     WIKI_FEATURE_ID,
-    KnowledgeService,
-    KNOWLEDGE_SERVICE_KEY,
-    LocalWikiProvider,
     WikiFeatureBundle,
     WikiFeatureHost,
     build_wiki_feature,
@@ -63,6 +70,11 @@ __all__ = [
     "KnowledgeService",
     "KNOWLEDGE_SERVICE_KEY",
     "LocalWikiProvider",
+    "KnowledgeSourceFile",
+    "KnowledgeUploadResult",
+    "KnowledgeVaultDocument",
+    "WikiPageRelation",
+    "normalize_kb_id",
     "WikiFeatureBundle",
     "WikiFeatureHost",
     "build_wiki_feature",
