@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0020 · Wiki Knowledge Feature Foundation</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:920px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #1e8449;padding:8px 16px;background:#f7fbf8}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>ADR-0020 · Wiki Knowledge Feature Foundation</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-04 · 阶段：插件架构 3B</div>
+
+  <h2>背景</h2>
+  <p>Wiki 的 Store、Compiler、Querier、Summarizer、Session Manager、24 个 Tools 与 Prompt Context 原本由 <code>build_app()</code> 逐项构造。调用方又通过 <code>CrewApp._wiki_*</code> 私有字段直接持有具体对象，因此无法用一个生命周期单元启停、更新或替换本地实现。</p>
+
+  <h2>决策</h2>
+  <div class="decision">建立稳定的 <code>knowledge</code> Service Definition，由 <code>LocalWikiProvider</code> 提供当前文件系统实现；<code>product.wiki</code> Feature Generation 统一拥有 Provider、Tools、Context Contributor 与逃逸调用栈的后台 Task。</div>
+  <ul>
+    <li><code>KnowledgeService</code> 首批稳定接口覆盖 query、search、ingest、document read 与 index status；Gateway/CLI 尚未迁移的细粒度调用暂经显式 Components 兼容视图访问。</li>
+    <li>Wiki Tools 先纯构造，再逐个登记 identity-safe disposer 并发布；同步 Handler 在 Generation Lease 内继续通过工作线程执行。</li>
+    <li>Wiki 使用 <code>DRAIN + RESTART</code>。当前按名称寻址的 Tool Registry 不能安全暂存两套同名贡献，因此不使用 replace；更新失败由旧 Definition 重建恢复 Generation。</li>
+    <li><code>FeatureScope.create_task()</code> 为每代只登记一个 Task Owner，drain 时关闭准入，dispose 时 cancel 并 join；Wiki Compiler 的 Home 导读刷新成为首个真实消费者。</li>
+    <li><code>CrewApp</code> 的迁移期 Wiki 属性动态解析当前可见 Service。Feature 停用后 Service、Tools、Context 与兼容视图同步撤销，持久 Wiki 数据不删除。</li>
+    <li>Work 尚未迁成 Consumer Feature，本轮先保证关闭顺序为 Consumer stop 后 Provider deactivate。</li>
+  </ul>
+
+  <h2>结果与后续</h2>
+  <p><code>build_app()</code> 不再了解 Wiki 内部对象或逐项注册贡献。下一切片将把 Wiki API 与 CLI 消费者从 Components 兼容视图迁到 <code>KnowledgeService</code>，随后继续收拢 Agent Preset、Event、Route 和 UI Contribution；Work 的可选依赖在阶段 3C 处理。</p>
+
+  <h2>跨平台</h2>
+  <p>新增生命周期只依赖 Python asyncio、线程调度、pathlib 与既有文件系统 Store，不引入平台命令、POSIX 信号或固定路径语义，可用于 macOS、Linux 与 Windows。</p>
+
+  <div class="nav"><a href="../modules/wiki.html">Wiki 模块</a> · <a href="../modules/plugins.html">Feature / Plugin 模块</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-foundation.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

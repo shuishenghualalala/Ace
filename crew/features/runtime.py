@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from types import TracebackType
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from crew.core.errors import CrewError
 
@@ -398,6 +398,9 @@ class FeatureScope:
         self._state = FeatureState.ACTIVATING
         self._registrations: list[RegistrationToken] = []
         self._leases: set[FeatureLease] = set()
+        self._tasks: dict[asyncio.Task[Any], str] = {}
+        self._task_admission_open = True
+        self._task_owner_registered = False
         self._leases_drained = asyncio.Event()
         self._leases_drained.set()
         self._stop_task: asyncio.Task[None] | None = None
@@ -448,6 +451,71 @@ class FeatureScope:
         self._leases_drained.clear()
         return lease
 
+    def create_task(
+        self,
+        awaitable: Coroutine[Any, Any, Any],
+        *,
+        name: str,
+    ) -> asyncio.Task[Any]:
+        """Create a background task owned by this Generation.
+
+        Task admission closes as soon as the scope starts draining.  Every task
+        gets its cancellation disposer before it is scheduled, so a failed
+        installation cannot leave an unowned task behind.  Disposal cancels
+        outstanding tasks and waits for their completion; the task factory is
+        intended for work that escaped its request call stack, not temporary
+        fan-out that callers already await.
+        """
+        normalized_name = str(name or "").strip()
+        if not normalized_name:
+            raise ValueError("feature task name must not be empty")
+        if not self._task_admission_open or self._state not in {
+            FeatureState.ACTIVATING,
+            FeatureState.ACTIVE,
+        }:
+            awaitable.close()
+            raise FeatureLeaseUnavailableError(self.generation, self._state)
+
+        if not self._task_owner_registered:
+            try:
+                self.register(
+                    self._stop_tasks,
+                    label="tasks:feature-scope",
+                    phase=RegistrationPhase.RESOURCE,
+                )
+            except BaseException:
+                awaitable.close()
+                raise
+            self._task_owner_registered = True
+        try:
+            task = asyncio.create_task(awaitable, name=normalized_name)
+        except BaseException:
+            awaitable.close()
+            raise
+        self._tasks[task] = normalized_name
+
+        def consume_done(done: asyncio.Task[Any]) -> None:
+            self._tasks.pop(done, None)
+            if done.cancelled():
+                return
+            try:
+                done.exception()
+            except BaseException:
+                # A task's result is intentionally consumed here so a detached
+                # background failure does not become an unhandled loop warning.
+                return
+
+        task.add_done_callback(consume_done)
+        return task
+
+    async def _stop_tasks(self) -> None:
+        """Cancel and join the detached tasks currently owned by this scope."""
+        tasks = tuple(task for task in self._tasks if not task.done())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     def _release_lease(self, lease: FeatureLease) -> None:
         self._leases.discard(lease)
         if not self._leases:
@@ -489,6 +557,7 @@ class FeatureScope:
             raise RuntimeError(
                 f"feature {self.generation.key} cannot drain while {self._state.value}"
             )
+        self._task_admission_open = False
         self._set_state(FeatureState.DRAINING)
 
     def resume_active(self) -> None:
@@ -499,6 +568,7 @@ class FeatureScope:
             )
         if self._disposal_task is not None:
             raise RuntimeError(f"feature {self.generation.key} already started disposal")
+        self._task_admission_open = True
         self._set_state(FeatureState.ACTIVE)
 
     async def stop(
@@ -590,6 +660,7 @@ class FeatureScope:
         await asyncio.shield(task)
 
     async def _dispose_all(self) -> None:
+        self._task_admission_open = False
         issues: list[FeatureCleanupIssue] = []
         ordered = [
             token

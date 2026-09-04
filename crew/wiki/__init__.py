@@ -40,6 +40,16 @@ from .schemas import HomeIntro
 from .search import SQLiteFTS5SearchIndex, WikiSearchIndex
 from .store import FileSystemWikiStore, WikiStore
 from .summary import WikiSummarizer
+from .feature import (
+    KNOWLEDGE_SERVICE,
+    WIKI_FEATURE_ID,
+    KnowledgeService,
+    KNOWLEDGE_SERVICE_KEY,
+    LocalWikiProvider,
+    WikiFeatureBundle,
+    WikiFeatureHost,
+    build_wiki_feature,
+)
 __all__ = [
     "WikiStore",
     "FileSystemWikiStore",
@@ -48,6 +58,14 @@ __all__ = [
     "WikiCompiler",
     "WikiQuerier",
     "WikiSummarizer",
+    "KNOWLEDGE_SERVICE",
+    "WIKI_FEATURE_ID",
+    "KnowledgeService",
+    "KNOWLEDGE_SERVICE_KEY",
+    "LocalWikiProvider",
+    "WikiFeatureBundle",
+    "WikiFeatureHost",
+    "build_wiki_feature",
     "HomeIntro",
     "KnowledgeBase",
     "WikiSessionManager",

@@ -5,9 +5,9 @@
 > 基线核查日期：2026-08-31  
 > 目标读者：Ace 后端、桌面端、Web 端及独立功能模块的维护者  
 > 修订记录：2026-08-31 评审追加——workspace_guard 依赖核查（§2.3.3、§11、§17）、第一方/第三方插件契约收口（§2.3.8）、effect 诊断与启动审计（§6.3）、服务作用域维度（§6.4）、拦截器语义（§7.5）、螺旋式迁移节奏与依赖检查工具（§10、§13.3）、配置与数据命名空间约定（§12.5）、Adapter 保质期（§15.2）、ADR 机制（§16）、新增验收指标（§14）；同日补充——演进紧迫性论证与中心文件基线数据（§1.1.1）、接口层多租户地基（§2.2）；同日范围校正——明确 dsh 广义 Plugin 与 Ace 当前 `plugins/` 的区别，将目标提升为全部 Feature 的统一可逆生命周期，补充 Feature Generation、业务数据边界、全量迁移地图和工作量评估（§0、§3.3、§5、§6、§8、§10、§16、§18、§19）；同日——§2.1、§5.1 增加耦合视角与装配视角两张架构对比图（离线渲染版：docs/todo/ace-arch-compare.html）
-> 实施进度：2026-09-04 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver、Context Contributor 主链均已落地。Cron Trigger Reminder Contributor、后台结果通知 Contributor、Feature Event 命名空间、Route Registry 与 Core Feature 声明化均已完成；阶段 3A 的 Cron、Sites、Browser 三个 Runtime Feature 验证切片已完成。`product.cron` 统一拥有 Scheduler、六个 Tools、Trigger Context、Owner mount、Host Binding 与运行 Lease；`product.sites` 统一拥有 Manager、两类 Store、Blueprint Scheduler、五个 Tools、两个 Capability Profile、Host Binding 与运行 Lease；Browser 目录插件在宿主事件循环内统一拥有 Manager、后台 Task、五个 Tools、Skill、Context Contributor 与动态 Service Binding。`CrewApp.startup()/shutdown()` 已删除 Cron、Sites、Browser 的具体 Manager 启停分支。Browser HTTP Router 本轮保留在 Gateway，但通过动态 Service 与 Tool Gate 跟随 Feature 可用性，后续再迁入 Route Contribution。当前分支为 `refactor/plugin-architecture-stage-0`，验证记录见 `docs/testing/plugin-architecture-stage-3a-cron-runtime.html`、`docs/testing/plugin-architecture-stage-3a-sites-runtime.html` 与 `docs/testing/plugin-architecture-stage-3a-browser-runtime.html`。
+> 实施进度：2026-09-04 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver、Context Contributor 主链均已落地。Cron Trigger Reminder Contributor、后台结果通知 Contributor、Feature Event 命名空间、Route Registry 与 Core Feature 声明化均已完成；阶段 3A 的 Cron、Sites、Browser 三个 Runtime Feature 验证切片已完成。阶段 3B 第一切片也已落地：`KnowledgeService`、`LocalWikiProvider` 与 `product.wiki` Foundation Bundle 统一拥有本地 Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context 和 Home 导读后台 Task；`build_app()` 不再逐项构造 Wiki 内部对象。Wiki API、CLI、Agent Preset、Event、Route 和 UI 仍在后续纵向切片，Work 的可选 Knowledge Service 依赖留到阶段 3C。当前分支为 `refactor/plugin-architecture-stage-0`，阶段 3A 验证记录见 `docs/testing/plugin-architecture-stage-3a-*-runtime.html`，Wiki Foundation 记录见 `docs/testing/plugin-architecture-stage-3b-wiki-foundation.html`。
 
-## 当前实施进度图（2026-09-03）
+## 当前实施进度图（2026-09-04）
 
 绿色表示已经落地并通过相关回归的区域，蓝色表示紧接着要实施的切片，灰色表示尚未开始。当前已完成**阶段 0、阶段 1，以及阶段 2 的 Driver / Context Contributor 主链**，不是整份演进方案已经完成。
 
@@ -92,7 +92,9 @@ flowchart TB
     SitesRuntime --> SitesRuntimeTests["Sites 生命周期验证<br/>回滚 · 更新 · Lease · 持久数据"]
     SitesRuntimeTests --> BrowserRuntime["阶段 3A · Browser Host-loop Feature<br/>Manager · Tasks · Tools · Service"]
     BrowserRuntime --> BrowserRuntimeTests["Browser 生命周期验证<br/>restart · rollback · Owner 清理 · API Gate"]
-    BrowserRuntimeTests --> Next["阶段 3B 下一切片<br/>Wiki 完整业务纵向迁移"]
+    BrowserRuntimeTests --> WikiFoundation["阶段 3B · Wiki Foundation<br/>Knowledge Service · Local Provider · Bundle"]
+    WikiFoundation --> WikiFoundationTests["Wiki Foundation 验证<br/>29 定向 · restart · rollback · Task Owner"]
+    WikiFoundationTests --> Next["阶段 3B 下一切片<br/>Wiki API / CLI Service 消费迁移"]
 
     classDef done fill:#e8f6ee,stroke:#1e8449,color:#145a32,stroke-width:2px
     classDef next fill:#e6f0fb,stroke:#2471a3,color:#154360,stroke-width:2px
@@ -100,11 +102,11 @@ flowchart TB
     class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed,Scope,Token,Rollback,RuntimeTests,Services,Dependencies,Config,ServiceTests,Runtime,Adapter,Phases,Browser,Shutdown,AdapterTests,Manifest,Ordered,Audit,ManifestTests,Lease,StopPolicy,StopAudit,LeaseTests,Update,Generation,Recovery,UpdateTests,Stage1Done,Drivers,DriverLease,DefaultDriver,PluginDriver,DriverTests,Adapters,DriverAdapterTests done
     class ContextRegistry,PathContext,BrowserContext,ContextTests done
     class SessionContext,SessionTests,WikiContext,WikiTests,CronContext,CronTests,BgContext,QueueOwner,TeamDrain,BgTests,FeatureEvent,EventCompat,EventTests,RouteReg,RouteGate,RouteTests,CoreDecl,Required,CoreTests done
-    class CronRuntime,CronRuntimeTests,SitesRuntime,SitesRuntimeTests,BrowserRuntime,BrowserRuntimeTests done
+    class CronRuntime,CronRuntimeTests,SitesRuntime,SitesRuntimeTests,BrowserRuntime,BrowserRuntimeTests,WikiFoundation,WikiFoundationTests done
     class Next next
 ```
 
-这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。阶段 2 的 Driver、Context、Feature Event、Route Gate 和声明式 Core Feature 已形成扩展主链。阶段 3A 的 Cron 切片把 Scheduler、Tools、Trigger Context、Owner mount 与 Service Binding 收入 `product.cron`；Sites 切片把 Manager、Site/Blueprint Store、Blueprint Scheduler、Tools、Capability Profile 与 Host Binding 收入 `product.sites`；Browser 切片让目录插件在宿主事件循环内启动并统一拥有 Manager、后台 Task、Tools、Skill、Context Contributor 与动态 Service Binding。三个切片的配置更新均走 Generation restart，失败由事务回滚或恢复定义；预激活停用会抑制后续阶段激活，Browser Owner、页面和进程资源在停用时统一回收。中心启动/关闭已不再认识 Cron、Sites 或 Browser 的具体 Manager。Cron HTTP Router、Sites HTTP Route Contribution、Browser Route Contribution 与稳定数据服务接口属于后续纵向切片。下一步进入阶段 3B，完成 Wiki 的首个完整业务纵向迁移。
+这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。阶段 2 的 Driver、Context、Feature Event、Route Gate 和声明式 Core Feature 已形成扩展主链。阶段 3A 的 Cron、Sites 与 Browser 已完成真实资源所有权验证。阶段 3B 第一切片进一步建立 `knowledge` 稳定 Service、Local Provider 和 `product.wiki` Foundation Bundle；Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context 与 Home 导读后台 Task 现在共享同一 restart Generation。Scope Task Factory 只为每代登记一个 Task Owner，drain 关闭准入，dispose 统一 cancel/join；更新失败会用旧 Definition 恢复可用 Generation，停用不删除持久数据。中心 `build_app()` 已不再逐项构造 Wiki 内部对象，但 Gateway/CLI 仍通过 Components 兼容视图访问，Work 仍直接持有 Wiki Store。下一步把 Wiki API 与 CLI 迁为 Knowledge Service Consumer，再继续 Event、Route、Preset 与 UI Contribution。
 
 ## 0. 执行摘要
 
@@ -1342,13 +1344,13 @@ Desktop 和 Web 不应分别发明一套 Feature 协议。建议共享：
 
 #### 3B. Wiki
 
-- 定义 `KnowledgeService`。
-- 现有 Wiki 实现包装为 Local Provider。
+- 定义 `KnowledgeService`。（第一切片已完成）
+- 现有 Wiki 实现包装为 Local Provider。（第一切片已完成）
 - 将 Wiki Tool、API、Agent Preset、Context Contributor 和 Event 注册集中到 Wiki Bundle。
-- `build_app()` 只加载 Bundle，不构造 Wiki 内部对象。
+- `build_app()` 只加载 Bundle，不构造 Wiki 内部对象。（第一切片已完成）
 - 建立 Remote Provider 契约测试，但可以暂不提供生产远程服务。
-- 将 Wiki Compiler 内部创建的后台 Task 收入 Scope Task Factory，停用时能够 drain/cancel。
-- disable 只撤销运行时能力，Wiki 数据目录和索引不被删除。
+- 将 Wiki Compiler 内部创建的后台 Task 收入 Scope Task Factory，停用时能够 drain/cancel。（Home 导读刷新已完成）
+- disable 只撤销运行时能力，Wiki 数据目录和索引不被删除。（第一切片已完成）
 
 #### 3C. Work
 

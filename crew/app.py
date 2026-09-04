@@ -413,6 +413,8 @@ _TASK_NOTIFICATION_TITLES = {
 class CrewApp:
 
     _UNSET_BROWSER_MANAGER = object()
+    _UNSET_KNOWLEDGE_SERVICE = object()
+    _KNOWLEDGE_SERVICE_KEY = ServiceKey[Any]("knowledge")
 
     def __init__(
         self,
@@ -611,8 +613,9 @@ class CrewApp:
         )
         # 对话级 Plan 模式管理器（由 build_app 装配后赋值）
         self.plan_manager = None
-        # 专用 Wiki Agent 会话管理器（由 build_app 装配后赋值）
-        self.wiki_manager = None
+        # Knowledge Service is resolved dynamically from the Feature Runtime;
+        # an explicit override is reserved for embedded hosts and test doubles.
+        self._knowledge_service_override = self._UNSET_KNOWLEDGE_SERVICE
         # Team 管理器延迟装配（见 set_team_manager），避免 core 之外的循环依赖
         self.team = None
         # Dynamic Kanban 管理器延迟装配（见 build_app）
@@ -1992,6 +1995,48 @@ class CrewApp:
         lease = self.active_owner.get(owner) if owner else self.active_owner.current()
         return lease.owner_account_id if lease is not None else None
 
+    @property
+    def knowledge_service(self) -> Any:
+        """Return the current Generation's Knowledge Service binding."""
+        override = self._knowledge_service_override
+        runtime = self.plugins.feature_runtime
+        record = runtime.get("product.wiki")
+        if record is None and override is not self._UNSET_KNOWLEDGE_SERVICE:
+            return override
+        if record is not None and record.state is not FeatureState.ACTIVE:
+            return None
+        return runtime.services.get(self._KNOWLEDGE_SERVICE_KEY)
+
+    @knowledge_service.setter
+    def knowledge_service(self, value: Any) -> None:
+        """Inject an externally-owned service for embedded hosts/tests."""
+        self._knowledge_service_override = value
+
+    def _wiki_component(self, name: str) -> Any:
+        service = self.knowledge_service
+        components = getattr(service, "components", None)
+        return getattr(components, name, None) if components is not None else None
+
+    @property
+    def _wiki_store(self) -> Any:
+        return self._wiki_component("store")
+
+    @property
+    def _wiki_compiler(self) -> Any:
+        return self._wiki_component("compiler")
+
+    @property
+    def _wiki_querier(self) -> Any:
+        return self._wiki_component("querier")
+
+    @property
+    def _wiki_summarizer(self) -> Any:
+        return self._wiki_component("summarizer")
+
+    @property
+    def wiki_manager(self) -> Any:
+        return self._wiki_component("manager")
+
     async def startup(self, *, start_cron: bool = True) -> None:
         """拉起后台能力：连接外部 MCP server、启动 cron 引擎、会话过期定时器。失败静默降级。"""
         try:
@@ -2219,6 +2264,14 @@ class CrewApp:
                 pass
             self._expiry_task = None
         await self.dispatcher.shutdown()
+        # Work consumes the Wiki Service during its own stop path.  Drain
+        # consumers before deactivating the provider Generation; this ordering
+        # remains temporary until Work becomes its own Feature in Stage 3C.
+        if self.work_service is not None:
+            try:
+                await self.work_service.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("WorkService 停止失败")
         await self._deactivate_managed_features(timeout=provider_timeout)
         await asyncio.gather(
             *(
@@ -2229,11 +2282,6 @@ class CrewApp:
                 for scope in reversed(self._builtin_feature_scopes)
             )
         )
-        if self.work_service is not None:
-            try:
-                await self.work_service.stop()
-            except Exception:  # noqa: BLE001
-                log.exception("WorkService 停止失败")
         # One-shot Subagents own dynamic providers and must finish their finally blocks
         # before AgentManager/global Provider shutdown.
         subagent_tasks = {task for task in self._subagent_bg_tasks if not task.done()}
@@ -2302,7 +2350,6 @@ class CrewApp:
             getattr(getattr(self, "sites", None), "store", None),
             getattr(getattr(getattr(self, "sites", None), "blueprint", None), "store", None),
             self.work_service,
-            getattr(self, "_wiki_store", None),
         ]
         for store in stores:
             close = getattr(store, "close", None)
@@ -3464,92 +3511,31 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     app.plan_manager = PlanModeManager(session_store=session_store)
     register_plan_tools(registry, app.plan_manager)
 
-    # Wiki：存储 + 编译器 + 查询器 + 摘要器 + 专用会话状态 + 工具
-    from crew.wiki import (
-        FileSystemWikiStore,
-        WikiCompiler,
-        WikiSessionManager,
-        WikiQuerier,
-        WikiSummarizer,
-        build_wiki_agent_context_contributor,
-    )
-    from crew.wiki.tools import register_wiki_tools
+    # Wiki：由 Product Feature Bundle 统一拥有 Store、Service、Tools、Context
+    # 与后台任务。Bundle 的兼容模式在同步 build_app 中立即激活，使旧 CLI、
+    # ASGI transport 和 Work 暂存适配器仍能读取动态兼容视图。
+    from crew.wiki import build_wiki_feature
+
     wiki_storage_root = cfg.wiki.storage.resolved_root() if cfg.wiki else None
-    app._wiki_store = FileSystemWikiStore(storage_root=wiki_storage_root)
     if wiki_storage_root is not None:
         log.info("Wiki 独立存储根目录: %s", wiki_storage_root)
-    app.wiki_manager = WikiSessionManager(store=app._wiki_store)
-    app._register_context_contributor_scope(
-        "product.wiki-context-adapter",
-        ContextContributor(
-            contributor_id="wiki.agent.context",
-            handler=build_wiki_agent_context_contributor(
-                app.wiki_manager,
-                session_store,
-            ),
-            phase=ContextPhase.PROMPT,
-            priority=100,
-            predicate=lambda envelope: "wiki"
-            in tuple(envelope.params.get("_context_tags") or ()),
-            model_visible=True,
-            persistent=True,
-            description="Active knowledge base context for Wiki agents",
-        ),
-    )
-    # wiki 编译/摘要可用 wiki.model 指定独立模型档案（如更快的 flash 模型）。
-    # 未指定时优先继承当前 Agent 实际生效的 Provider，使会话级模型切换同样作用于
-    # wiki_plan_ingest 等工具内部的二次 LLM 调用；脱离 Agent 上下文的 Wiki API/后台
-    # 任务才回退当前 owner 的默认模型。
-    wiki_provider = provider
-    wiki_provider_is_explicit = False
-    wiki_model_id = (cfg.wiki.model or "").strip() if cfg.wiki else ""
-    if wiki_model_id:
-        wiki_profile = cfg.model_profiles.get(wiki_model_id)
-        if wiki_profile is not None and wiki_profile.api_key:
-            wiki_provider = build_provider_for_profile(wiki_profile, cfg.stream_read_timeout)
-            wiki_provider_is_explicit = True
-            app._auxiliary_providers.append(wiki_provider)
-            log.info("Wiki 使用独立模型 profile=%s model=%s", wiki_model_id, wiki_profile.model)
-        else:
-            log.warning(
-                "wiki.model=%s 未找到可用模型档案，回退当前会话模型或 owner 默认模型",
-                wiki_model_id,
-            )
-    wiki_provider_resolver = None
-    if not wiki_provider_is_explicit:
-        from crew.core.runctx import current_provider
-
-        def _wiki_runtime_provider(owner_account_id: str) -> LLMProvider:
-            session_provider = current_provider.get()
-            if session_provider is not None:
-                return session_provider
-            return app.owner_team_provider(owner_account_id)
-
-        wiki_provider_resolver = _wiki_runtime_provider
-
-    app._wiki_summarizer = WikiSummarizer(
-        app._wiki_store,
-        wiki_provider,
-        provider_for_owner=wiki_provider_resolver,
-    )
-    app._wiki_compiler = WikiCompiler(
-        app._wiki_store,
-        wiki_provider,
-        summarizer=app._wiki_summarizer,
-        provider_for_owner=wiki_provider_resolver,
-    )
-    app._wiki_querier = WikiQuerier(app._wiki_store)
-    register_wiki_tools(
+    wiki_feature = build_wiki_feature(
+        app,
         registry,
-        app._wiki_store,
-        app._wiki_compiler,
-        app._wiki_querier,
-        app.wiki_manager,
+        provider=provider,
         config=cfg.wiki,
+        storage_root=wiki_storage_root,
         session_store=session_store,
         workspace_store=workspace_store,
         security_service=app.security_service,
+        provider_factory=lambda profile: build_provider_for_profile(
+            profile,
+            cfg.stream_read_timeout,
+        ),
+        runtime=plugins.feature_runtime,
+        activate=True,
     )
+    app.declare_managed_feature(wiki_feature.definition)
 
     from crew.work.briefs import WorkBriefStore
     from crew.work.items import WorkItemStore

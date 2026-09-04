@@ -64,6 +64,7 @@
       <tr><td>Generation</td><td><code>FeatureGeneration</code> 为每次激活提供稳定的 Feature ID 与递增代号。</td><td>已落地</td></tr>
       <tr><td>注册所有权</td><td><code>RegistrationToken</code> 统一同步/异步 disposer，并保证并发、重复释放只执行一次。</td><td>已落地</td></tr>
       <tr><td>Scope 与事务</td><td><code>FeatureScope</code> 逆序等待清理并聚合错误；<code>FeatureTransaction</code> 回滚未提交安装。</td><td>已落地</td></tr>
+      <tr><td>Scope Task Factory</td><td>每个 Generation 用单一 Task Owner 管理逃逸调用栈的后台协程；drain 关闭准入，dispose cancel/join，超时恢复重开准入。</td><td>已落地</td></tr>
       <tr><td>Service Registry</td><td>类型化 Service Key，支持 global/workspace/user/session 四级解析与 Generation 所有权。</td><td>已落地</td></tr>
       <tr><td>依赖与配置版本</td><td>区分 required/optional/provides，诊断启动批次；分离 desired/effective revision。</td><td>已落地</td></tr>
       <tr><td>Feature Runtime</td><td>统一激活、等待依赖、事务回滚、停用和诊断记录。</td><td>已落地</td></tr>
@@ -79,6 +80,7 @@
       <tr><td>宿主托管 Feature</td><td>长生命周期第一方 Feature 在 build 阶段声明，在宿主事件循环中激活/更新，并按逆序统一停用。</td><td>已落地</td></tr>
       <tr><td>Cron Runtime Feature</td><td><code>product.cron</code> 用 restart Generation 管理 Scheduler、Tools、Context、Owner mount 与 Host Binding。</td><td>已落地</td></tr>
       <tr><td>Sites Runtime Feature</td><td><code>product.sites</code> 用 restart Generation 管理 Manager、两类 Store、Scheduler、Tools、Capability Profiles 与 Host Binding。</td><td>已落地</td></tr>
+      <tr><td>Wiki Foundation Feature</td><td><code>product.wiki</code> 用 Knowledge Service 与 restart Generation 管理 Local Provider、24 个 Tools、Context 和后台导读 Task。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -86,7 +88,7 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/features/runtime.py</code></td><td>Generation、desired/effective revision、Registration Token、请求 Lease、四类停用策略、Scope、Transaction 和结构化生命周期错误。</td></tr>
+      <tr><td><code>crew/features/runtime.py</code></td><td>Generation、desired/effective revision、Registration Token、请求 Lease、Scope Task Factory、四类停用策略、Scope、Transaction 和结构化生命周期错误。</td></tr>
       <tr><td><code>crew/features/services.py</code></td><td>作用域化 Service Registry、注册所有权和同一 Feature 新旧 Generation 的暂存切换。</td></tr>
       <tr><td><code>crew/features/drivers.py</code></td><td>Execution Driver 定义、生命周期所有权、开放 mode 解析和请求分派。</td></tr>
       <tr><td><code>crew/features/context.py</code></td><td>Context Contributor 定义、排序、Generation 选择、失败/超时与请求 Lease。</td></tr>
@@ -103,7 +105,7 @@ async with FeatureTransaction(generation) as transaction:
     scope = transaction.commit()
 
 await scope.dispose()  # 返回时该 Generation 已完成全部异步清理</code></pre>
-  <p>注册标签必须能说明贡献类型和身份。Scope 进入停止状态后拒绝新注册；先关闭 Contribution，再清理 Resource，两相内部按后进先出执行。任何单项清理失败都会被记录，但不会跳过其余 disposer。</p>
+  <p>注册标签必须能说明贡献类型和身份。Scope 进入停止状态后拒绝新注册和后台 Task；先关闭 Contribution，再清理 Resource，两相内部按后进先出执行。<code>context.create_task()</code> 创建的逃逸任务由单一 Task Owner cancel/join，不随任务次数累积 Token。</p>
   <pre><code>knowledge = ServiceKey[KnowledgeService]("knowledge")
 services.register(
     feature_scope,
@@ -208,10 +210,11 @@ async for chunk in runtime.execution_drivers.dispatch(envelope):
       <tr><td>2026-09-04</td><td>增加宿主事件循环托管 Feature 路径，Cron 成为首个 restart Product Feature；工具注销增加 Generation 身份校验。</td><td>Feature Runtime、CrewApp、Cron、Tool Registry、Gateway Logout。</td></tr>
       <tr><td>2026-09-04</td><td>Sites Manager、Store、Blueprint Scheduler、Tools 与 Capability Profile 进入同一 restart Generation。</td><td>Feature Runtime、CrewApp、Sites、Tool/Capability Registry。</td></tr>
       <tr><td>2026-09-04</td><td>增加 manifest 驱动的 startup phase 与目录插件 restart 更新入口；Browser Manager、后台 Task 和动态 Service 完成 Scope 收口。</td><td>PluginManager、CrewApp、Browser 插件、Gateway Browser Gate。</td></tr>
+      <tr><td>2026-09-04</td><td>增加 Scope Task Factory；Wiki Foundation 以 Knowledge Service 和 restart Generation 接管本地 Provider、Tools、Context 与后台导读任务。</td><td>Feature Runtime、Wiki Bundle、CrewApp 动态服务视图。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0001-feature-lifecycle-primitives.html">ADR-0001</a> · <a href="../adr/0002-scoped-service-registry.html">ADR-0002</a> · <a href="../adr/0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="../adr/0004-manifest-service-startup-audit.html">ADR-0004</a> · <a href="../adr/0005-feature-drain-lease.html">ADR-0005</a> · <a href="../adr/0006-feature-generation-update.html">ADR-0006</a> · <a href="../adr/0007-execution-driver-registry.html">ADR-0007</a> · <a href="../adr/0008-team-kanban-driver-adapters.html">ADR-0008</a> · <a href="../adr/0009-context-contributor-registry.html">ADR-0009</a> · <a href="../adr/0010-session-source-context-contributor.html">ADR-0010</a> · <a href="../adr/0011-wiki-attachment-context-contributor.html">ADR-0011</a> · <a href="../adr/0012-cron-trigger-context-contributor.html">ADR-0012</a> · <a href="../adr/0019-browser-host-loop-feature.html">ADR-0019</a> · <a href="../../testing/plugin-architecture-stage-3a-browser-runtime.html">Browser 测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0001-feature-lifecycle-primitives.html">ADR-0001</a> · <a href="../adr/0002-scoped-service-registry.html">ADR-0002</a> · <a href="../adr/0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="../adr/0004-manifest-service-startup-audit.html">ADR-0004</a> · <a href="../adr/0005-feature-drain-lease.html">ADR-0005</a> · <a href="../adr/0006-feature-generation-update.html">ADR-0006</a> · <a href="../adr/0007-execution-driver-registry.html">ADR-0007</a> · <a href="../adr/0008-team-kanban-driver-adapters.html">ADR-0008</a> · <a href="../adr/0009-context-contributor-registry.html">ADR-0009</a> · <a href="../adr/0010-session-source-context-contributor.html">ADR-0010</a> · <a href="../adr/0011-wiki-attachment-context-contributor.html">ADR-0011</a> · <a href="../adr/0012-cron-trigger-context-contributor.html">ADR-0012</a> · <a href="../adr/0019-browser-host-loop-feature.html">ADR-0019</a> · <a href="../adr/0020-wiki-knowledge-feature-foundation.html">ADR-0020</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-foundation.html">Wiki Foundation 测试记录</a></div>
 </div>
 </body>
 </html>

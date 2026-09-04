@@ -25,7 +25,7 @@ from crew.core.runctx import (
 )
 from crew.core.timeout_policy import DEFAULT_INTERACTION_TIMEOUT_SECONDS
 from crew.security.outbound import PublicRedirectApprovalRequired, parse_public_http_target
-from crew.tools.registry import Registry, tool_error, tool_result
+from crew.tools.registry import FunctionTool, Registry, tool_error, tool_result
 from crew.tools.security_guard import authorize_network_tool
 
 from .capture import capture_text_source, save_parsed_source
@@ -631,8 +631,7 @@ _WIKI_RENAME_PAGE_SCHEMA = {
     },
 }
 
-def register_wiki_tools(
-    registry: Registry,
+def build_wiki_tools(
     store: WikiStore,
     compiler: WikiCompiler,
     querier: WikiQuerier,
@@ -641,8 +640,8 @@ def register_wiki_tools(
     session_store: Any = None,
     workspace_store: Any = None,
     security_service: Any = None,
-) -> None:
-    """把 Wiki 工具注册到 registry（toolset='wiki'）。"""
+) -> tuple[FunctionTool, ...]:
+    """构造 Wiki 工具；不触碰 Registry，供 Feature 事务逐项接管。"""
 
     def _owner() -> str:
         return current_owner_account_id.get()
@@ -2327,6 +2326,7 @@ def register_wiki_tools(
         (_WIKI_RENAME_PAGE_SCHEMA, _handle_rename_page, False, "✏️", "重命名 Wiki 页面", "重命名 {page_id}", "wiki rename page title change"),
     ]
     read_tools = set(WIKI_READ_TOOLS)
+    registered: list[FunctionTool] = []
     for schema, handler, is_async, emoji, display_name, ui_label, search_hint in _TOOLS:
         toolset = WIKI_READ_TOOLSET if schema["name"] in read_tools else WIKI_MANAGE_TOOLSET
         result_kwargs: dict[str, Any] = {}
@@ -2342,7 +2342,7 @@ def register_wiki_tools(
             }
         elif schema["name"] in read_tools:
             result_kwargs = {"result_retention": ToolResultRetention.TEMPORARY}
-        registry.register(
+        tool = FunctionTool(
             name=schema["name"],
             toolset=toolset,
             schema=schema,
@@ -2354,3 +2354,30 @@ def register_wiki_tools(
             search_hint=search_hint,
             **result_kwargs,
         )
+        registered.append(tool)
+    return tuple(registered)
+
+
+def register_wiki_tools(
+    registry: Registry,
+    store: WikiStore,
+    compiler: WikiCompiler,
+    querier: WikiQuerier,
+    manager: WikiSessionManager,
+    config: WikiConfig | None = None,
+    session_store: Any = None,
+    workspace_store: Any = None,
+    security_service: Any = None,
+) -> None:
+    """兼容入口：构造全部工具后逐个注册到 Registry。"""
+    for tool in build_wiki_tools(
+        store,
+        compiler,
+        querier,
+        manager,
+        config=config,
+        session_store=session_store,
+        workspace_store=workspace_store,
+        security_service=security_service,
+    ):
+        registry.register(tool)

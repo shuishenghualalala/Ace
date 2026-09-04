@@ -122,10 +122,11 @@ async for chunk in app.handle(envelope):
       <tr><td>2026-09-04</td><td>增加通用托管 Feature 声明/激活/更新/停用入口，并从中心启停清单删除 Cron 专用分支。</td><td><code>CrewApp.startup/shutdown</code>、阶段 3A Product Feature 接入。</td></tr>
       <tr><td>2026-09-04</td><td>Sites 进入托管 Feature Runtime，中心启动/关闭不再直接调用 SiteManager。</td><td><code>product.sites</code>、组合根、Store 与 Blueprint Scheduler。</td></tr>
       <tr><td>2026-09-04</td><td>目录插件支持宿主事件循环激活阶段，中心启动不再直接调用 BrowserManager。</td><td><code>CrewApp.startup</code>、Browser 动态 Service、插件 phase 激活。</td></tr>
+      <tr><td>2026-09-04</td><td>Wiki 内部对象构造与贡献注册移入 <code>product.wiki</code> Bundle；宿主兼容属性动态解析 Knowledge Service。</td><td><code>build_app</code>、关闭依赖顺序、Wiki/Work 迁移边界。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0013-background-result-notification-contributors.html">ADR-0013</a> · <a href="../adr/0019-browser-host-loop-feature.html">ADR-0019</a> · <a href="../../testing/plugin-architecture-stage-3a-browser-runtime.html">Browser 测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0013-background-result-notification-contributors.html">ADR-0013</a> · <a href="../adr/0019-browser-host-loop-feature.html">ADR-0019</a> · <a href="../adr/0020-wiki-knowledge-feature-foundation.html">ADR-0020</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-foundation.html">Wiki Foundation 测试记录</a></div>
 </div>
 </body>
 </html>

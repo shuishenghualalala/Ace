@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from contextvars import copy_context
 from threading import Thread
 from dataclasses import dataclass, field
@@ -368,6 +368,15 @@ class FeatureInstallContext:
     def acquire_lease(self, label: str = "request") -> FeatureLease:
         """Hold this generation active for one externally visible operation."""
         return self.scope.acquire_lease(label)
+
+    def create_task(
+        self,
+        awaitable: Coroutine[Any, Any, Any],
+        *,
+        name: str,
+    ) -> asyncio.Task[Any]:
+        """Create a named detached task owned by this Feature Generation."""
+        return self.scope.create_task(awaitable, name=name)
 
     def resolve_service(self, key: ServiceKey[Any]) -> Any:
         return self.services.resolve(key, self.definition.service_scope)

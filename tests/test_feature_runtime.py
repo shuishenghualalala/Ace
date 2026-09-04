@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 
 import pytest
 
@@ -387,4 +389,107 @@ async def test_cancelled_stop_caller_does_not_start_parallel_teardown():
     await second
 
     assert cleanup_calls == 1
+
+
+async def test_scope_task_factory_registers_one_owner_and_cancels_and_joins_tasks():
+    scope = FeatureScope(FeatureGeneration("wiki", 1))
+    scope.activate()
+    cancelled = asyncio.Event()
+    scheduled_with_owner = False
+
+    async def worker() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    original_create_task = asyncio.create_task
+
+    def create_task_with_assertion(awaitable, **kwargs):
+        nonlocal scheduled_with_owner
+        scheduled_with_owner = any(
+            token.label == "tasks:feature-scope" for token in scope.registrations
+        )
+        return original_create_task(awaitable, **kwargs)
+
+    # The runtime calls asyncio.create_task only after registering the owner.
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("crew.features.runtime.asyncio.create_task", create_task_with_assertion)
+    try:
+        first = scope.create_task(worker(), name="wiki-worker-1")
+        second = scope.create_task(worker(), name="wiki-worker-2")
+        assert scheduled_with_owner
+        assert [
+            token.label
+            for token in scope.registrations
+            if token.label == "tasks:feature-scope"
+        ] == ["tasks:feature-scope"]
+
+        await scope.dispose()
+        assert first.cancelled()
+        assert second.cancelled()
+        assert cancelled.is_set()
+        assert scope.state is FeatureState.DISPOSED
+    finally:
+        monkeypatch.undo()
+
+
+async def test_scope_finished_task_does_not_keep_strong_reference():
+    scope = FeatureScope(FeatureGeneration("wiki", 1))
+    scope.activate()
+
+    async def finished() -> str:
+        return "done"
+
+    task = scope.create_task(finished(), name="wiki-finished")
+    reference = weakref.ref(task)
+    await task
+    await asyncio.sleep(0)
+    del task
+    gc.collect()
+
+    assert reference() is None
+    await scope.dispose()
+
+
+async def test_scope_task_admission_closes_on_drain_and_resume_reopens_after_timeout():
+    scope = FeatureScope(FeatureGeneration("wiki", 1))
+    scope.activate()
+    lease = scope.acquire_lease("request:held")
+
+    with pytest.raises(FeatureDrainTimeoutError):
+        await scope.stop(FeatureStopPolicy.DRAIN, timeout_seconds=0.001)
+    assert scope.state is FeatureState.DRAINING
+
+    async def rejected() -> None:
+        raise AssertionError("rejected coroutine must never run")
+
+    coroutine = rejected()
+    with pytest.raises(FeatureLeaseUnavailableError):
+        scope.create_task(coroutine, name="wiki-rejected")
+    assert coroutine.cr_frame is None
+
+    scope.resume_active()
+    accepted = scope.create_task(asyncio.sleep(0), name="wiki-resumed")
+    await accepted
+    lease.release()
+    await scope.stop(FeatureStopPolicy.DRAIN, timeout_seconds=1)
+    assert scope.state is FeatureState.DISPOSED
+
+
+async def test_scope_stop_and_rollback_are_idempotent():
+    scope = FeatureScope(FeatureGeneration("wiki", 1))
+    calls = 0
+
+    def cleanup() -> None:
+        nonlocal calls
+        calls += 1
+
+    scope.register(cleanup, label="resource:wiki")
+    scope.activate()
+    await scope.stop(FeatureStopPolicy.DRAIN, timeout_seconds=1)
+    await scope.stop(FeatureStopPolicy.DRAIN, timeout_seconds=1)
+    await scope.rollback()
+    await scope.rollback()
+    assert calls == 1
     assert scope.state is FeatureState.DISPOSED

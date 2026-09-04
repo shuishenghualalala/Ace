@@ -8,7 +8,7 @@ import json
 import re
 import time
 import urllib.parse
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Coroutine
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable
@@ -846,15 +846,49 @@ class WikiCompiler:
         provider: LLMProvider,
         summarizer: WikiSummarizer | None = None,
         provider_for_owner: Callable[[str], LLMProvider] | None = None,
+        task_factory: Callable[[Coroutine[Any, Any, Any]], asyncio.Task[Any]] | None = None,
     ) -> None:
         self.store = store
         self.provider = provider
         self.summarizer = summarizer
         self.provider_for_owner = provider_for_owner
+        self._task_factory = task_factory
         self._analysis_owner: ContextVar[str] = ContextVar(
             f"wiki_analysis_owner_{id(self)}",
             default="",
         )
+
+    def set_task_factory(
+        self,
+        task_factory: Callable[[Coroutine[Any, Any, Any]], asyncio.Task[Any]] | None,
+    ) -> None:
+        """Bind detached compiler work to the owning Feature Generation."""
+        self._task_factory = task_factory
+
+    @property
+    def task_factory(
+        self,
+    ) -> Callable[[Coroutine[Any, Any, Any]], asyncio.Task[Any]] | None:
+        """Current detached-task factory for identity-safe feature rebinding."""
+        return self._task_factory
+
+    def bind_task_factory(
+        self,
+        task_factory: Callable[[Coroutine[Any, Any, Any]], asyncio.Task[Any]] | None,
+    ) -> Callable[[Coroutine[Any, Any, Any]], asyncio.Task[Any]] | None:
+        """Set a factory and return the exact predecessor for restoration."""
+        previous = self._task_factory
+        self._task_factory = task_factory
+        return previous
+
+    def restore_task_factory(
+        self,
+        factory: Callable[[Coroutine[Any, Any, Any]], asyncio.Task[Any]] | None,
+        previous: Callable[[Coroutine[Any, Any, Any]], asyncio.Task[Any]] | None,
+    ) -> None:
+        """Restore only if this generation still owns the current factory."""
+        if self._task_factory is factory:
+            self._task_factory = previous
 
     def _provider_for_owner(self, owner_account_id: str) -> LLMProvider:
         resolver = self.provider_for_owner
@@ -1740,7 +1774,23 @@ class WikiCompiler:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._refresh_home_intro(owner_account_id, kb_id))
+        refresh = self._refresh_home_intro(owner_account_id, kb_id)
+        if self._task_factory is not None:
+            try:
+                self._task_factory(refresh)
+            except Exception:
+                # Scope task factories close a rejected coroutine themselves;
+                # this optional refresh must never make the foreground write
+                # fail when drain has already closed task admission.
+                if getattr(refresh, "cr_frame", None) is not None:
+                    refresh.close()
+                log.warning(
+                    "Home 导读后台刷新未排入任务 Scope %s:%s",
+                    owner_account_id,
+                    kb_id,
+                )
+            return
+        loop.create_task(refresh)
 
     async def _refresh_home_intro(
         self,
