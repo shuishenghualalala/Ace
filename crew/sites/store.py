@@ -19,6 +19,7 @@ class SQLiteSiteStore:
         self._wal_enabled = wal_enabled
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._closed = False
         self._conn = connect_sqlite(self._path, wal_enabled=wal_enabled)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
@@ -26,6 +27,9 @@ class SQLiteSiteStore:
     def close(self) -> None:
         """关闭底层 SQLite 连接（WAL 模式下每库持有多个 fd，必须显式释放）。"""
         with self._lock:
+            if self._closed:
+                return
+            self._closed = True
             self._conn.close()
 
     @property

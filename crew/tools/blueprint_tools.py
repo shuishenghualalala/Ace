@@ -13,7 +13,7 @@ from crew.core.runctx import (
     current_session_id,
     current_workspace_id,
 )
-from crew.tools.registry import Registry, tool_result
+from crew.tools.registry import FunctionTool, Registry, tool_result
 
 
 def _response(data: Any = None, **extra: Any) -> str:
@@ -100,13 +100,12 @@ BINDING_SCHEMA = _schema(
 )
 
 
-def register_blueprint_tools(
-    registry: Registry,
+def build_blueprint_tools(
     sites,
     *,
     workspace_store=None,
     security_service=None,
-) -> None:
+) -> tuple[FunctionTool, ...]:
     manager = sites.blueprint
     store = manager.store
 
@@ -314,16 +313,42 @@ def register_blueprint_tools(
             return _response({"deleted": True})
         raise ValueError("未知 Binding action")
 
-    registry.register(name="Canvas", toolset="blueprint", schema=CANVAS_SCHEMA, handler=canvas_tool,
-                      display_name="灵感 App", ui_label_template="管理 App {title}", always_load=True,
-                      result_policy_resolver=_blueprint_result_policy)
-    registry.register(name="Widget", toolset="blueprint", schema=WIDGET_SCHEMA, handler=widget_tool,
-                      display_name="App 组件", ui_label_template="管理组件 {title}", always_load=True,
-                      result_policy_resolver=_blueprint_result_policy)
-    registry.register(name="Automation", toolset="blueprint", schema=AUTOMATION_SCHEMA,
-                      handler=automation_tool, is_async=True, display_name="App 自动化",
-                      ui_label_template="运行自动化 {title}", always_load=True,
-                      result_policy_resolver=_blueprint_result_policy)
-    registry.register(name="Binding", toolset="blueprint", schema=BINDING_SCHEMA, handler=binding_tool,
-                      display_name="数据绑定", ui_label_template="绑定组件数据", always_load=True,
-                      result_policy_resolver=_blueprint_result_policy)
+    return (
+        FunctionTool(
+            name="Canvas", toolset="blueprint", schema=CANVAS_SCHEMA, handler=canvas_tool,
+            display_name="灵感 App", ui_label_template="管理 App {title}", always_load=True,
+            result_policy_resolver=_blueprint_result_policy,
+        ),
+        FunctionTool(
+            name="Widget", toolset="blueprint", schema=WIDGET_SCHEMA, handler=widget_tool,
+            display_name="App 组件", ui_label_template="管理组件 {title}", always_load=True,
+            result_policy_resolver=_blueprint_result_policy,
+        ),
+        FunctionTool(
+            name="Automation", toolset="blueprint", schema=AUTOMATION_SCHEMA,
+            handler=automation_tool, is_async=True, display_name="App 自动化",
+            ui_label_template="运行自动化 {title}", always_load=True,
+            result_policy_resolver=_blueprint_result_policy,
+        ),
+        FunctionTool(
+            name="Binding", toolset="blueprint", schema=BINDING_SCHEMA, handler=binding_tool,
+            display_name="数据绑定", ui_label_template="绑定组件数据", always_load=True,
+            result_policy_resolver=_blueprint_result_policy,
+        ),
+    )
+
+
+def register_blueprint_tools(
+    registry: Registry,
+    sites,
+    *,
+    workspace_store=None,
+    security_service=None,
+) -> None:
+    """Compatibility wrapper for hosts that still own the Registry directly."""
+    for tool in build_blueprint_tools(
+        sites,
+        workspace_store=workspace_store,
+        security_service=security_service,
+    ):
+        registry.register(tool)

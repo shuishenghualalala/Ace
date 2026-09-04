@@ -8,7 +8,7 @@ from crew.core.runctx import (
     current_session_id,
     current_workspace_id,
 )
-from crew.tools.registry import Registry, tool_result
+from crew.tools.registry import FunctionTool, Registry, tool_result
 
 PUBLISH_SITE_SCHEMA = {
     "name": "publish_site",
@@ -31,13 +31,12 @@ PUBLISH_SITE_SCHEMA = {
 }
 
 
-def register_site_tools(
-    registry: Registry,
+def build_site_tools(
     manager,
     *,
     workspace_store=None,
     security_service=None,
-) -> None:
+) -> tuple[FunctionTool, ...]:
     async def publish_site(args):
         owner = current_owner_account_id.get().strip()
         workspace_id = current_workspace_id.get().strip() or "default"
@@ -78,10 +77,28 @@ def register_site_tools(
             },
         )
 
-    registry.register(
-        name="publish_site", toolset="sites", schema=PUBLISH_SITE_SCHEMA,
-        handler=publish_site, display_name="发布灵感", ui_label_template="发布灵感 {name}",
-        always_load=True, search_hint="部署站点 发布网站 local site publish deploy website",
-        is_async=True,
-        result_retention="important",
+    return (
+        FunctionTool(
+            name="publish_site", toolset="sites", schema=PUBLISH_SITE_SCHEMA,
+            handler=publish_site, display_name="发布灵感", ui_label_template="发布灵感 {name}",
+            always_load=True, search_hint="部署站点 发布网站 local site publish deploy website",
+            is_async=True,
+            result_retention="important",
+        ),
     )
+
+
+def register_site_tools(
+    registry: Registry,
+    manager,
+    *,
+    workspace_store=None,
+    security_service=None,
+) -> None:
+    """Compatibility wrapper for hosts that still own the Registry directly."""
+    for tool in build_site_tools(
+        manager,
+        workspace_store=workspace_store,
+        security_service=security_service,
+    ):
+        registry.register(tool)

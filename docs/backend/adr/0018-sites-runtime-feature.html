@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0018 · Sites Runtime Feature</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:920px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #1e8449;padding:8px 16px;background:#f7fbf8}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>ADR-0018 · Sites Runtime Feature</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-04 · 阶段：插件架构 3A</div>
+
+  <h2>背景</h2>
+  <p>Sites 原由 <code>build_app()</code> 构造 Manager、两类 SQLite Store、五个 Tools 和两个 Capability Profile，再由 <code>CrewApp.startup()/shutdown()</code> 单独启停 Blueprint Scheduler。贡献和资源分属不同清理路径，无法独立更新或停用。</p>
+
+  <h2>决策</h2>
+  <div class="decision"><code>product.sites</code> 使用 restart Generation，统一拥有 SiteManager、SQLiteSiteStore、BlueprintStore、Blueprint Scheduler、五个 Tools、两个 Capability Profile 与 Host Binding。</div>
+  <ul>
+    <li>每个 Definition 预建独立候选 Manager；失败重试创建新 Manager，不复用已关闭 Store。</li>
+    <li>Tools 与 Capability Profile 由稳定 identity 注销；旧 Generation 的 disposer 不会删除新一代贡献。</li>
+    <li>Tool handler 自动持有 Generation Lease，停用策略为 cancel。</li>
+    <li>停用先撤销贡献，再停止 Scheduler 并关闭两个 Store；SQLite 数据不删除。</li>
+    <li>Gateway Router 每次从 <code>crew.sites</code> 解析当前 Manager。HTTP Route Contribution 留给后续纵向切片。</li>
+    <li>显式注入的外部 Manager 可参与启停，但其 Store 不由 Feature 关闭。</li>
+  </ul>
+
+  <h2>结果</h2>
+  <p><code>CrewApp.startup()/shutdown()</code> 不再认识 Sites 具体 Manager；激活失败由事务回滚，restart 能原子切换 Host Binding 和运行贡献。Store 连接生命周期与 Scheduler 首次进入同一 Scope。</p>
+
+  <h2>跨平台</h2>
+  <p>生命周期层只使用 asyncio、对象 identity 与现有 SQLite 抽象，不引入 POSIX 信号、文件描述符或路径假设；原有 Site 构建器的 Windows/macOS/Linux 命令解析保持不变。</p>
+
+  <div class="nav"><a href="../modules/sites.html">Sites 模块</a> · <a href="../../testing/plugin-architecture-stage-3a-sites-runtime.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

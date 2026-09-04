@@ -78,6 +78,7 @@
       <tr><td>Context Contributor Registry</td><td>阶段、优先级、失败策略、超时、模型可见性与持久化均为显式元数据；Browser、Gateway、Wiki 和 Cron 已成为真实消费者。</td><td>已落地</td></tr>
       <tr><td>宿主托管 Feature</td><td>长生命周期第一方 Feature 在 build 阶段声明，在宿主事件循环中激活/更新，并按逆序统一停用。</td><td>已落地</td></tr>
       <tr><td>Cron Runtime Feature</td><td><code>product.cron</code> 用 restart Generation 管理 Scheduler、Tools、Context、Owner mount 与 Host Binding。</td><td>已落地</td></tr>
+      <tr><td>Sites Runtime Feature</td><td><code>product.sites</code> 用 restart Generation 管理 Manager、两类 Store、Scheduler、Tools、Capability Profiles 与 Host Binding。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -203,6 +204,7 @@ async for chunk in runtime.execution_drivers.dispatch(envelope):
       <tr><td>2026-09-03</td><td>增加 Route Registry：目录插件 API 路由归属 FeatureScope，Gateway 启动期从注册表装配，停用经闸门口径返回 capability_unavailable。</td><td>Feature Runtime、PluginContext.register_api_router、Gateway 插件挂载。</td></tr>
       <tr><td>2026-09-03</td><td>FeatureDefinition 增加 required_by_product 与 deactivate 守卫；组合根内置注册收敛为声明式 Feature；同步桥上移为 run_async_compat 公共实现。</td><td>Feature Runtime、CrewApp 组合根、PluginManager。</td></tr>
       <tr><td>2026-09-04</td><td>增加宿主事件循环托管 Feature 路径，Cron 成为首个 restart Product Feature；工具注销增加 Generation 身份校验。</td><td>Feature Runtime、CrewApp、Cron、Tool Registry、Gateway Logout。</td></tr>
+      <tr><td>2026-09-04</td><td>Sites Manager、Store、Blueprint Scheduler、Tools 与 Capability Profile 进入同一 restart Generation。</td><td>Feature Runtime、CrewApp、Sites、Tool/Capability Registry。</td></tr>
     </tbody>
   </table>
 

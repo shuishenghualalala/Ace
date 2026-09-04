@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 3A · Sites Runtime Feature 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 3A · Sites Runtime Feature</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-04 · 实现与测试：独立 Luna 子 Agent</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li>激活统一发布 Manager、Scheduler、五个 Tools、两个 Capability Profile 和 Host Binding。</li>
+    <li>停用撤销贡献、取消真实 Tool Lease、关闭两类 Store，同时保留 SQLite 数据。</li>
+    <li>restart 使用新 Manager；启动失败完整回滚，同一 Definition 重试不复用已关闭 Store。</li>
+    <li>外部注入 Manager 只由 Feature 停止 Scheduler，不关闭外部 Store。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Sites / Capability 定向生命周期测试</td><td class="ok">54 passed；补强后核心集合 41 passed</td></tr>
+      <tr><td>FeatureRuntime、Gateway、Tools 与相邻回归</td><td class="ok">159 passed，1 skipped；无 Sites 代码级失败</td></tr>
+      <tr><td>Ruff、compileall、lint-imports、git diff check、禁用表述扫描</td><td class="ok">全部通过；6 contracts kept</td></tr>
+    </tbody>
+  </table>
+
+  <h2>环境约束</h2>
+  <p>相邻回归有 1 项因沙箱禁止写入 <code>~/.Crew/logs/crew.log</code> 失败，与 Sites 改动无关；目标范围与相对基线均通过。</p>
+
+  <h2>跨平台断言</h2>
+  <p>测试使用临时目录和 asyncio 生命周期替身；实现未新增 POSIX-only 路径。Store close 为幂等操作，覆盖 Windows 句柄释放顺序。</p>
+
+  <div class="nav"><a href="../backend/adr/0018-sites-runtime-feature.html">ADR-0018</a> · <a href="../backend/modules/sites.html">Sites 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

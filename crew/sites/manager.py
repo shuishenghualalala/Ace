@@ -46,12 +46,24 @@ class SiteManager:
         self.blueprint = BlueprintManager(
             BlueprintStore(str(store.db_path), wal_enabled=store.wal_enabled)
         )
+        self._closed = False
 
     async def start(self) -> None:
         await self.blueprint.start()
 
     async def stop(self) -> None:
         await self.blueprint.stop()
+
+    async def close(self) -> None:
+        """停止调度并关闭本 Generation 拥有的两类 Store。"""
+        if self._closed:
+            return
+        try:
+            await self.stop()
+        finally:
+            self.store.close()
+            self.blueprint.store.close()
+            self._closed = True
 
     def _root(self, owner: str) -> Path:
         root = get_owner_runtime_home(owner, create=True) / "sites"

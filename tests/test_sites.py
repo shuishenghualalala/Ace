@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 import json
 import os
 import zipfile
@@ -11,6 +13,8 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from crew.agent.loop.tool_result_display import tool_result_detail_for_ui
+from crew.agent.capabilities import CapabilityProfileRegistry
+from crew.app import build_app
 from crew.core.runctx import (
     current_agent_workdir,
     current_owner_account_id,
@@ -21,10 +25,15 @@ from crew.core.types import ToolCall
 from crew.gateway.auth import AccountContext
 from crew.gateway.helpers import session_agent_label
 from crew.gateway.routers.sites import create_sites_router
+from crew.features import FeatureRuntime, FeatureState
+from crew.sites.feature import SITES_FEATURE_ID, build_sites_feature
 from crew.sites.manager import SiteBuildError, SiteManager
 from crew.sites.store import SQLiteSiteStore
+from crew.state.config import Config
+from crew.tools.blueprint_tools import build_blueprint_tools
 from crew.tools.blueprint_tools import register_blueprint_tools
 from crew.tools.registry import Registry
+from crew.tools.site_tools import build_site_tools
 from crew.tools.site_tools import register_site_tools
 
 
@@ -34,6 +43,352 @@ def site_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SiteManager
     root = tmp_path / "runtime-sites"
     monkeypatch.setattr(manager, "_root", lambda owner: root)
     return manager
+
+
+class _FeatureManager:
+    """跨平台生命周期替身，仅记录 Feature 所需的 manager 边界。"""
+
+    def __init__(self, name: str, *, fail_start: bool = False) -> None:
+        self.name = name
+        self.fail_start = fail_start
+        self.start_calls = 0
+        self.stop_calls = 0
+        self.close_calls = 0
+        self.blueprint = SimpleNamespace(store=None)
+
+    async def start(self) -> None:
+        self.start_calls += 1
+        if self.fail_start:
+            raise RuntimeError(f"{self.name} start failed")
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+class _LeasedToolManager(_FeatureManager):
+    def __init__(self) -> None:
+        super().__init__("leased-tool")
+        self.publish_started = asyncio.Event()
+
+    async def publish(self, **_kwargs):
+        self.publish_started.set()
+        await asyncio.Event().wait()
+
+
+def _feature_host(*, sites=None) -> SimpleNamespace:
+    return SimpleNamespace(
+        sites=sites,
+        capability_profiles=CapabilityProfileRegistry(),
+    )
+
+
+def _sites_tool_names() -> set[str]:
+    return {"publish_site", "Canvas", "Widget", "Automation", "Binding"}
+
+
+@pytest.mark.asyncio
+async def test_sites_feature_activation_publishes_all_contributions(tmp_path: Path) -> None:
+    host = _feature_host()
+    registry = Registry()
+    bundle = build_sites_feature(host, registry, db_path=str(tmp_path / "sites.db"))
+    runtime = FeatureRuntime()
+
+    assert bundle.definition.feature_id == SITES_FEATURE_ID
+    assert host.sites is None
+    assert registry.names() == []
+    assert host.capability_profiles.ids() == ()
+
+    record = await runtime.activate(bundle.definition)
+
+    assert record.state is FeatureState.ACTIVE
+    assert host.sites is bundle.manager
+    assert host.sites is not None
+    assert host.sites.blueprint._scheduler is not None
+    assert host.sites.blueprint._scheduler.running
+    assert set(registry.names()) == _sites_tool_names()
+    assert host.capability_profiles.ids() == (
+        "blueprint.authoring",
+        "sites.authoring",
+    )
+    assert {token.label for token in record.scope.registrations} >= {
+        "binding:sites.manager",
+        "tool:publish_site",
+        "tool:Canvas",
+        "tool:Widget",
+        "tool:Automation",
+        "tool:Binding",
+    }
+
+    assert await runtime.deactivate(SITES_FEATURE_ID) is True
+    assert record.state is FeatureState.DISCOVERED
+    assert host.sites is None
+    assert registry.names() == []
+    assert host.capability_profiles.ids() == ()
+
+
+@pytest.mark.asyncio
+async def test_sites_feature_deactivation_closes_stores_but_preserves_data(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "nested" / "sites.db"
+    host = _feature_host()
+    registry = Registry()
+    bundle = build_sites_feature(host, registry, db_path=str(db_path))
+    candidate = bundle.manager
+    assert candidate is not None
+    site = candidate.store.upsert_site(
+        owner="owner-1",
+        workspace_id="workspace-1",
+        session_id="session-1",
+        name="Persistent Site",
+        source_path="app",
+        build_command="",
+        output_directory=".",
+    )
+    canvas = candidate.blueprint.store.create_canvas(
+        "owner-1", "workspace-1", "session-1", "Persistent Canvas", "test"
+    )
+    runtime = FeatureRuntime()
+
+    await runtime.activate(bundle.definition)
+    assert await runtime.deactivate(SITES_FEATURE_ID) is True
+
+    assert candidate._closed is True
+    assert candidate.store._closed is True
+    assert candidate.blueprint.store._closed is True
+
+    reopened = SiteManager(SQLiteSiteStore(str(db_path)))
+    try:
+        assert reopened.store.get_site("owner-1", site["id"])["name"] == "Persistent Site"
+        assert reopened.blueprint.store.get_canvas("owner-1", canvas["id"])["title"] == "Persistent Canvas"
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_sites_feature_restart_uses_fresh_manager_and_stale_disposers_are_safe() -> None:
+    host = _feature_host()
+    registry = Registry()
+    managers: list[_FeatureManager] = []
+
+    def factory() -> _FeatureManager:
+        manager = _FeatureManager(f"manager-{len(managers) + 1}")
+        managers.append(manager)
+        return manager
+
+    first = build_sites_feature(host, registry, manager_factory=factory)
+    runtime = FeatureRuntime()
+    record = await runtime.activate(first.definition)
+    old_scope = record.scope
+    old_manager = managers[0]
+    old_contributions = tuple(old_scope.registrations)
+    old_tool = registry.get("publish_site")
+    old_site_profile = host.capability_profiles.get("sites.authoring")
+
+    replacement = build_sites_feature(
+        host,
+        registry,
+        manager_factory=factory,
+        desired_config_revision=2,
+    )
+    result = await runtime.update(replacement.definition)
+
+    assert result.updated is True
+    assert result.current_generation == "product.sites@g2"
+    assert old_manager.close_calls == 1
+    assert managers[1] is replacement.manager
+    assert host.sites is managers[1]
+    assert set(registry.names()) == _sites_tool_names()
+    assert registry.get("publish_site") is not old_tool
+    assert host.capability_profiles.get("sites.authoring") is not old_site_profile
+
+    # Directly exercise old-generation identity guards after the new generation is live.
+    for token in old_contributions:
+        if token.phase.value == "contribution":
+            token._disposer()
+    assert registry.get("publish_site") is not old_tool
+    assert set(registry.names()) == _sites_tool_names()
+    assert host.capability_profiles.ids() == (
+        "blueprint.authoring",
+        "sites.authoring",
+    )
+
+    await runtime.deactivate(SITES_FEATURE_ID)
+
+
+@pytest.mark.asyncio
+async def test_sites_feature_start_failure_rolls_back_and_retry_allocates_fresh_manager() -> None:
+    host = _feature_host()
+    registry = Registry()
+    managers: list[_FeatureManager] = []
+
+    def factory() -> _FeatureManager:
+        manager = _FeatureManager(
+            f"manager-{len(managers) + 1}",
+            fail_start=not managers,
+        )
+        managers.append(manager)
+        return manager
+
+    bundle = build_sites_feature(host, registry, manager_factory=factory)
+    runtime = FeatureRuntime()
+
+    failed = await runtime.activate(bundle.definition)
+    assert failed.state is FeatureState.FAILED
+    assert managers[0].close_calls == 1
+    assert host.sites is None
+    assert registry.names() == []
+    assert host.capability_profiles.ids() == ()
+
+    retried = await runtime.activate(bundle.definition)
+    assert retried.state is FeatureState.ACTIVE
+    assert len(managers) == 2
+    assert managers[1] is host.sites
+    assert managers[1].start_calls == 1
+    assert managers[0] is not managers[1]
+    assert set(registry.names()) == _sites_tool_names()
+
+    await runtime.deactivate(SITES_FEATURE_ID)
+
+
+@pytest.mark.asyncio
+async def test_sites_feature_external_manager_is_stopped_but_never_closed() -> None:
+    external = _FeatureManager("external")
+    candidate = _FeatureManager("candidate")
+    host = _feature_host(sites=external)
+    registry = Registry()
+    bundle = build_sites_feature(
+        host,
+        registry,
+        manager_factory=lambda: candidate,
+    )
+    runtime = FeatureRuntime()
+
+    record = await runtime.activate(bundle.definition)
+    assert record.state is FeatureState.ACTIVE
+    assert host.sites is external
+    assert external.start_calls == 1
+    assert candidate.close_calls == 0
+
+    assert await runtime.deactivate(SITES_FEATURE_ID) is True
+    assert external.stop_calls == 1
+    assert external.close_calls == 0
+    assert candidate.close_calls == 1
+    assert host.sites is None
+
+
+@pytest.mark.asyncio
+async def test_sites_feature_external_manager_start_failure_keeps_binding_and_cleans_candidate() -> None:
+    external = _FeatureManager("external", fail_start=True)
+    candidate = _FeatureManager("candidate")
+    host = _feature_host(sites=external)
+    registry = Registry()
+    bundle = build_sites_feature(
+        host,
+        registry,
+        manager_factory=lambda: candidate,
+    )
+    runtime = FeatureRuntime()
+
+    failed = await runtime.activate(bundle.definition)
+
+    assert failed.state is FeatureState.FAILED
+    assert external.stop_calls == 1
+    assert external.close_calls == 0
+    assert candidate.close_calls == 1
+    assert host.sites is external
+    assert registry.names() == []
+    assert host.capability_profiles.ids() == ()
+
+
+@pytest.mark.asyncio
+async def test_sites_feature_cancel_cancels_real_tool_wrapper_and_cleans_generation() -> None:
+    host = _feature_host()
+    registry = Registry()
+    manager = _LeasedToolManager()
+    bundle = build_sites_feature(
+        host,
+        registry,
+        manager_factory=lambda: manager,
+    )
+    runtime = FeatureRuntime()
+    record = await runtime.activate(bundle.definition)
+    scope = record.scope
+    contexts = [
+        (current_owner_account_id, current_owner_account_id.set("owner-1")),
+        (current_workspace_id, current_workspace_id.set("workspace-1")),
+        (current_session_id, current_session_id.set("session-1")),
+        (current_agent_workdir, current_agent_workdir.set(".")),
+    ]
+    try:
+        tool = registry.get("publish_site")
+        holder = asyncio.create_task(
+            tool.run({"source_path": "app", "name": "Leased App"})
+        )
+        await manager.publish_started.wait()
+        assert [lease.label for lease in scope.active_leases] == [
+            "tool:publish_site"
+        ]
+
+        assert await runtime.deactivate(SITES_FEATURE_ID) is True
+        with suppress(asyncio.CancelledError):
+            await holder
+        assert holder.cancelled()
+        assert manager.close_calls == 1
+    finally:
+        for context, token in reversed(contexts):
+            context.reset(token)
+    assert scope.stop_diagnostic is not None
+    assert scope.stop_diagnostic.cancel_signalled is True
+
+
+@pytest.mark.asyncio
+async def test_build_app_startup_and_shutdown_use_sites_feature_lifecycle(
+    tmp_path: Path,
+) -> None:
+    app = build_app(
+        Config(
+            db_path=str(tmp_path / "crew.db"),
+            memory_db_path=str(tmp_path / "memory.db"),
+            cron_enabled=False,
+            api_key="",
+        ),
+        enable_team=False,
+    )
+    runtime = app.plugins.feature_runtime
+    record = runtime.get(SITES_FEATURE_ID)
+    try:
+        assert record is not None
+        assert record.state is FeatureState.DISCOVERED
+        assert "publish_site" not in app.registry.names()
+
+        await app.startup(start_cron=False)
+        assert record.state is FeatureState.ACTIVE
+        assert app.sites is not None
+        assert app.sites.blueprint._scheduler is not None
+        assert set(app.registry.names()) >= _sites_tool_names()
+    finally:
+        await app.shutdown()
+
+    assert record is not None
+    assert record.state is FeatureState.DISCOVERED
+    assert app.sites is None
+
+
+def test_sites_builder_keeps_legacy_register_functions_compatible() -> None:
+    manager = _FeatureManager("legacy")
+    registry = Registry()
+    register_site_tools(registry, manager)
+    register_blueprint_tools(registry, manager)
+
+    assert set(registry.names()) == _sites_tool_names()
+    assert {tool.name for tool in build_site_tools(manager)} == {"publish_site"}
+    assert {tool.name for tool in build_blueprint_tools(manager)} == {
+        "Canvas", "Widget", "Automation", "Binding",
+    }
 
 
 @pytest.mark.asyncio

@@ -118,7 +118,7 @@ class CapabilityProfileRegistry:
         self._claimed_toolsets: tuple[str, ...] = ()
         self._claimed_skills: tuple[str, ...] = ()
 
-    def register(self, profile: CapabilityProfile) -> None:
+    def register(self, profile: CapabilityProfile) -> CapabilityProfile:
         normalized = profile.normalized()
         if normalized.id in self._profiles:
             raise ValueError(f"Capability Profile 已注册：{normalized.id}")
@@ -127,9 +127,24 @@ class CapabilityProfileRegistry:
             [*self._claimed_toolsets, *normalized.toolsets]
         )
         self._claimed_skills = _unique_strings([*self._claimed_skills, *normalized.skills])
+        return normalized
 
-    def unregister(self, profile_id: str) -> bool:
-        return self._profiles.pop(str(profile_id).strip(), None) is not None
+    def unregister(
+        self,
+        profile_id: str,
+        *,
+        expected: CapabilityProfile | None = None,
+    ) -> bool:
+        """Remove a profile only when it still belongs to this registration.
+
+        A later Feature Generation may have installed a replacement profile with
+        the same id.  An older disposer must not remove that replacement.
+        """
+        key = str(profile_id).strip()
+        current = self._profiles.get(key)
+        if expected is not None and current is not expected:
+            return False
+        return self._profiles.pop(key, None) is not None
 
     def get(self, profile_id: str) -> CapabilityProfile | None:
         return self._profiles.get(str(profile_id).strip())

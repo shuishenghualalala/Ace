@@ -2023,11 +2023,6 @@ class CrewApp:
         # CrewApp 按具体 Manager 手写启动。
         excluded = frozenset() if start_cron else frozenset({"product.cron"})
         await self._activate_managed_features(excluded=excluded)
-        if getattr(self, "sites", None) is not None:
-            try:
-                await self.sites.start()
-            except Exception:  # noqa: BLE001
-                log.exception("Sites Blueprint 调度器启动失败")
         # 启动会话过期定时器
         if self.config.session_idle_timeout > 0:
             self._expiry_task = asyncio.create_task(self._session_expiry_loop())
@@ -2220,8 +2215,6 @@ class CrewApp:
                 await self.work_service.stop()
             except Exception:  # noqa: BLE001
                 log.exception("WorkService 停止失败")
-        if getattr(self, "sites", None) is not None:
-            await self.sites.stop()
         # One-shot Subagents own dynamic providers and must finish their finally blocks
         # before AgentManager/global Provider shutdown.
         subagent_tasks = {task for task in self._subagent_bg_tasks if not task.done()}
@@ -2283,7 +2276,12 @@ class CrewApp:
             self.active_owner,
             getattr(self, "cron_store", None),
             getattr(getattr(self, "dynamic_kanban", None), "store", None),
+            # A host may be closed before startup (for example ASGI tests that
+            # use a transport without lifespan).  In that case the managed
+            # Feature has not yet consumed its candidate Manager, so close its
+            # stores here as orphaned persistent handles.
             getattr(getattr(self, "sites", None), "store", None),
+            getattr(getattr(getattr(self, "sites", None), "blueprint", None), "store", None),
             self.work_service,
             getattr(self, "_wiki_store", None),
         ]
@@ -3425,28 +3423,20 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         workspace_store=workspace_store,
         security_service=app.security_service,
     )
-    from crew.sites import (
-        SQLiteSiteStore,
-        SiteManager,
-        register_site_capability_profiles,
-    )
-    from crew.tools.blueprint_tools import register_blueprint_tools
-    from crew.tools.site_tools import register_site_tools
+    from crew.sites import build_sites_feature
 
-    app.sites = SiteManager(SQLiteSiteStore(cfg.db_path, wal_enabled=cfg.sqlite_wal))
-    register_site_capability_profiles(app.capability_profiles)
-    register_site_tools(
+    sites_feature = build_sites_feature(
+        app,
         registry,
-        app.sites,
+        db_path=cfg.db_path,
+        wal_enabled=cfg.sqlite_wal,
         workspace_store=workspace_store,
         security_service=app.security_service,
     )
-    register_blueprint_tools(
-        registry,
-        app.sites,
-        workspace_store=workspace_store,
-        security_service=app.security_service,
-    )
+    # 保留 build_app 后的候选 Manager 兼容视图；Runtime 激活/更新时以
+    # Generation 身份动态维护同一属性，Gateway 只读取当前 host binding。
+    app.sites = sites_feature.manager
+    app.declare_managed_feature(sites_feature.definition)
     # Browser 能力由 plugins/browser 插件装配（创建 BrowserManager、注册 browser_use）。
     # 系统级禁用/未加载时保持 None，面板路由与 startup/aclose 已有 None 兜底。
     app.browser_manager = _browser_manager_from_plugins(plugins)

@@ -120,6 +120,7 @@ async for chunk in app.handle(envelope):
       <tr><td>2026-09-03</td><td>在 Cron 启用时装配 Trigger Reminder Contributor，关闭时不产生该贡献。</td><td>Cron 配置开关、Prompt phase 与关闭撤销。</td></tr>
       <tr><td>2026-09-03</td><td>后台子任务/进程/任务结果通知迁为 Prompt Contributor，删除 handle() drain 与 subagent_drain_fn 旁路。</td><td>组合根、Agent Runtime、Team member 链路。</td></tr>
       <tr><td>2026-09-04</td><td>增加通用托管 Feature 声明/激活/更新/停用入口，并从中心启停清单删除 Cron 专用分支。</td><td><code>CrewApp.startup/shutdown</code>、阶段 3A Product Feature 接入。</td></tr>
+      <tr><td>2026-09-04</td><td>Sites 进入托管 Feature Runtime，中心启动/关闭不再直接调用 SiteManager。</td><td><code>product.sites</code>、组合根、Store 与 Blueprint Scheduler。</td></tr>
     </tbody>
   </table>
 

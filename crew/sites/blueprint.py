@@ -50,9 +50,18 @@ class BlueprintStore:
 
     def __init__(self, db_path: str, *, wal_enabled: bool = True) -> None:
         self._lock = threading.RLock()
+        self._closed = False
         self._conn = connect_sqlite(Path(db_path), wal_enabled=wal_enabled)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
+
+    def close(self) -> None:
+        """关闭 Blueprint SQLite 连接；持久化资产不会随 Feature 停用删除。"""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._conn.close()
 
     @staticmethod
     def _init_schema(conn) -> None:
