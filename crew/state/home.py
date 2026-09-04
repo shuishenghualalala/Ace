@@ -50,6 +50,48 @@ _RUNTIME_ENV_KEYS: set[str] = set()
 _FILE_CACHE: dict[str, tuple[tuple[int, int] | None, object]] = {}
 
 
+def _frozen_runtimes_dir() -> Path | None:
+    """PyInstaller --onedir 布局：exe 同级 ``_internal/runtimes/``。"""
+    if not getattr(sys, 'frozen', False):
+        return None
+    runtimes_dir = Path(sys.executable).parent / '_internal' / 'runtimes'
+    return runtimes_dir if runtimes_dir.is_dir() else None
+
+
+def _source_runtimes_dir() -> Path | None:
+    """源码打包态：gateway 由安装包内嵌的 Python 解释器直接跑源码。
+
+    此时 ``sys.executable`` 就是内嵌解释器，布局为 ``<gateway根>/runtimes/python/``：
+    Windows 下是 ``runtimes/python/python.exe``，POSIX 下是 ``runtimes/python/bin/python3``。
+    命中该布局即返回 ``runtimes/`` 目录，否则返回 None（开发态 venv / 系统 Python）。
+    """
+    exe = Path(sys.executable)
+    for candidate in (exe.parent.parent, exe.parent.parent.parent):
+        if candidate.name == 'runtimes' and (candidate / 'python').is_dir():
+            return candidate
+    return None
+
+
+def packaged_runtimes_dir() -> Path | None:
+    """返回打包内嵌运行时根目录（``runtimes/``），非打包态返回 None。"""
+    return _frozen_runtimes_dir() or _source_runtimes_dir()
+
+
+def is_packaged() -> bool:
+    """是否为打包安装态。
+
+    覆盖两种打包形态：PyInstaller frozen 产物，以及「内嵌 Python + 源码」产物。
+    desktop 主进程启动 gateway 时会注入 CREW_PACKAGED=1 作为显式标记；
+    无标记时通过当前解释器是否位于 runtimes/python/ 下自动判定，
+    保证 CLI / cron 等不经 desktop 的入口同样生效。
+    """
+    if getattr(sys, 'frozen', False):
+        return True
+    if os.environ.get("CREW_PACKAGED", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    return _source_runtimes_dir() is not None
+
+
 def _mask_owner_for_log(owner_account_id: str | None) -> str:
     owner = str(owner_account_id or "").strip()
     if not owner:
@@ -58,11 +100,11 @@ def _mask_owner_for_log(owner_account_id: str | None) -> str:
 
 
 def _bundled_runtime_paths() -> list[str]:
-    """返回打包内嵌运行时的目录路径列表（仅冻结态有效）。
+    """返回打包内嵌运行时的目录路径列表（仅打包态有效）。
 
-    下游发行流程可将 Python embeddable 和 Node.js portable 放入
-    ``crew-gateway/_internal/runtimes/`` 子目录（与可执行文件同级）。
-    运行时通过 ``sys.executable`` 定位 exe 所在目录。
+    支持两种打包布局：
+    - PyInstaller onedir：``crew-gateway/_internal/runtimes/``
+    - 源码打包：``<gateway根>/runtimes/``（当前解释器即内嵌 Python）
 
     返回的目录应 **前置** 到子进程 PATH，使 ``python`` / ``node`` 命令
     解析到打包版本，而非依赖系统安装。
@@ -70,21 +112,11 @@ def _bundled_runtime_paths() -> list[str]:
     import logging
     log = logging.getLogger(__name__)
 
-    frozen = getattr(sys, 'frozen', False)
-    log.debug(f"[bundled_runtime] frozen={frozen}, executable={sys.executable}")
+    runtimes_dir = packaged_runtimes_dir()
+    log.debug(f"[bundled_runtime] runtimes_dir={runtimes_dir}, executable={sys.executable}")
 
-    if not frozen:
-        log.debug("[bundled_runtime] Not in frozen mode, returning []")
-        return []
-
-    # PyInstaller --onedir 模式：exe 在 crew-gateway/，运行时在 crew-gateway/_internal/runtimes/
-    exe_dir = Path(sys.executable).parent
-    runtimes_dir = exe_dir / '_internal' / 'runtimes'
-
-    log.debug(f"[bundled_runtime] Looking for runtimes_dir: {runtimes_dir}")
-
-    if not runtimes_dir.is_dir():
-        log.warning(f"[bundled_runtime] runtimes_dir does not exist: {runtimes_dir}")
+    if runtimes_dir is None:
+        log.debug("[bundled_runtime] Not in packaged mode, returning []")
         return []
 
     paths: list[str] = []
@@ -121,7 +153,7 @@ def _bundled_runtime_paths() -> list[str]:
     else:
         log.warning(f"[bundled_runtime] node_dir not found: {node_dir}")
 
-    # 可选的下游发行包可以把 cua-driver 放到 _internal/runtimes/cua-driver/bin/。
+    # 可选的下游发行包可以把 cua-driver 放到 runtimes/cua-driver/bin/。
     # 检测到预置文件时将目录前置进 PATH，使 config.yaml 中的裸命令可被 MCP
     # 子进程解析；官方 Crew 源码与自构建安装包不携带该第三方二进制。
     cua_dir = runtimes_dir / 'cua-driver' / 'bin'
@@ -151,7 +183,7 @@ def _managed_system_path_dirs() -> list[str]:
 
 def _development_node_toolchain() -> tuple[list[str], tuple[Path, ...]]:
     """Expose the developer machine's Node toolchain when no packaged runtime exists."""
-    if getattr(sys, "frozen", False):
+    if is_packaged():
         return [], ()
     path_dirs: list[str] = []
     readable_roots: list[Path] = []
@@ -185,7 +217,7 @@ def _development_node_toolchain() -> tuple[list[str], tuple[Path, ...]]:
 def _development_python_toolchain() -> tuple[list[str], tuple[Path, ...]]:
     """Expose the developer machine's Python interpreter when no packaged runtime exists.
 
-    打包态用 ``_internal/runtimes/python`` 整目录可读模拟；开发态用当前解释器
+    打包态用 ``runtimes/python`` 整目录可读模拟；开发态用当前解释器
     (``sys.executable``) 定位 venv，把 venv 根目录与真实解释器根目录都作为 readable
     root 暴露，让沙箱里 ``python3`` 既能被 PATH 解析、又能 import venv 里装好的包。
 
@@ -195,7 +227,7 @@ def _development_python_toolchain() -> tuple[list[str], tuple[Path, ...]]:
     会导致 ``libpython*.dylib`` 被沙箱拦截（dyld 报错），所以两个根目录都要放行。
     非 venv 解释器（系统 python）降级为只放行解释器所在 bin 目录，避免误放行 ``/usr``。
     """
-    if getattr(sys, "frozen", False):
+    if is_packaged():
         return [], ()
     executable = Path(sys.executable).expanduser()
     if not executable.is_file():
@@ -279,11 +311,11 @@ def bundled_runtime_roots() -> tuple[Path, ...]:
 
     These roots are added to the managed sandbox's trusted-readable allowlist so
     the bundled interpreter/runtime stays usable inside the sandbox. Only
-    meaningful in frozen (packaged) mode; dev runs return an empty tuple.
+    meaningful in packaged mode; dev runs return an empty tuple.
     """
-    if not getattr(sys, "frozen", False):
+    runtimes_dir = packaged_runtimes_dir()
+    if runtimes_dir is None:
         return ()
-    runtimes_dir = Path(sys.executable).parent / "_internal" / "runtimes"
     return tuple(
         runtime.resolve(strict=True)
         for name in ("python", "node")
@@ -292,35 +324,37 @@ def bundled_runtime_roots() -> tuple[Path, ...]:
 
 
 def bundled_python_executable() -> str | None:
-    """返回打包内嵌 Python 解释器的可执行文件路径（仅冻结态有效）。
+    """返回打包内嵌 Python 解释器的可执行文件路径（仅打包态有效）。
 
     PyInstaller 打包后 ``sys.executable`` 指向 gateway 二进制本身，而非 Python
     解释器。MCP server 等子进程通过 ``${CREW_PYTHON}`` 环境变量取解释器路径来
     执行 ``crew/mcp_servers/*.py``，若该变量指向 gateway 二进制，会导致 gateway
     把脚本路径当成 argv 重新执行 gateway 入口，**递归繁殖进程**。
 
-    本函数在冻结态下定位打包内嵌的 Python 解释器，供 config.py 设置
-    ``CREW_PYTHON``。非冻结态返回 ``None``（调用方应回退到 ``sys.executable``）。
+    源码打包态下 gateway 本身就运行在内嵌 Python 上，``sys.executable``
+    即为正确解释器。非打包态返回 ``None``（调用方应回退到 ``sys.executable``）。
     """
-    if not getattr(sys, 'frozen', False):
+    if getattr(sys, 'frozen', False):
+        exe_dir = Path(sys.executable).parent
+        runtimes_dir = exe_dir / '_internal' / 'runtimes'
+        python_dir = runtimes_dir / 'python'
+
+        if not python_dir.is_dir():
+            return None
+
+        # Windows: python.exe 在根目录; macOS/Linux: python3 在 bin/ 子目录
+        candidates = [
+            python_dir / 'python.exe',
+            python_dir / 'bin' / 'python3',
+            python_dir / 'bin' / 'python',  # 兜底（符号链接别名）
+        ]
+        for c in candidates:
+            if c.exists():
+                return str(c)
         return None
 
-    exe_dir = Path(sys.executable).parent
-    runtimes_dir = exe_dir / '_internal' / 'runtimes'
-    python_dir = runtimes_dir / 'python'
-
-    if not python_dir.is_dir():
-        return None
-
-    # Windows: python.exe 在根目录; macOS/Linux: python3 在 bin/ 子目录
-    candidates = [
-        python_dir / 'python.exe',
-        python_dir / 'bin' / 'python3',
-        python_dir / 'bin' / 'python',  # 兜底（符号链接别名）
-    ]
-    for c in candidates:
-        if c.exists():
-            return str(c)
+    if _source_runtimes_dir() is not None:
+        return sys.executable
     return None
 
 
@@ -364,7 +398,7 @@ def get_crew_home() -> Path:
             p = Path.home() / p
         return p
     # 打包运行环境下，默认指向用户家目录 ~/DEFAULT_HOME_DIRNAME，避免在只读 /opt 下写入导致失败
-    if getattr(sys, 'frozen', False):
+    if is_packaged():
         return Path.home() / DEFAULT_HOME_DIRNAME
     return ROOT / DEFAULT_HOME_DIRNAME
 
@@ -402,7 +436,7 @@ def runtime_env_overrides(
 ) -> dict[str, str]:
     """构造当前 owner 的运行时路径变量，不直接写入 ``os.environ``。
 
-    冻结态（PyInstaller 打包产物）运行时，会将内嵌的 Python / Node.js
+    打包态运行时，会将内嵌的 Python / Node.js
     运行时目录 **前置** 到 PATH，确保技能脚本的 ``python`` / ``node``
     命令解析到打包版本。
     """
@@ -630,7 +664,7 @@ def export_crew_runtime_env(
       CREW_SKILLS_DIR       owner 私有 skills 目录
       CREW_ENV_FILE         Crew 可写 .env 路径
       DOTENV_CONFIG_PATH    Node dotenv/config 的标准路径变量
-      PATH                  冻结态时前置内嵌 Python/Node.js 运行时目录
+      PATH                  打包态时前置内嵌 Python/Node.js 运行时目录
 
     """
     import os

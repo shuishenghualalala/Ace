@@ -6,10 +6,16 @@
 #   - Gateway 随桌面进程托管，用户配置按用户目录隔离
 #   - 配置文件 (~/.Crew/) 在用户首次双击运行时动态初始化
 #   - 原生支持 Linux 多用户环境，服务与数据相互隔离
+#   - Gateway 不再经 PyInstaller 打包：desktop 主进程用内嵌 Python 以
+#     `python3 -m crew.gateway.server` 直接跑源码（CREW_PACKAGED=1 标记打包态）
+#
+# 依赖清单唯一数据源：pyproject.toml（核心 + wiki/pdf/docx/xlsx extras）
+# + deb-package/runtime-requirements.txt（技能脚本补充依赖），
+# 三平台打包脚本（.deb / .exe / .dmg）统一从这两处安装。
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Stage 1: crew-gateway 二进制构建
+# Stage 1: 内嵌运行时准备（Python standalone + 依赖安装 + Node.js portable）
 # -----------------------------------------------------------------------------
 FROM docker.m.daocloud.io/library/python:3.11-slim-buster AS gateway-builder
 
@@ -24,95 +30,78 @@ ENV ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
 # 与主仓库中未更新的 bzip2 (deb10u1) 之间版本不匹配，导致 apt 依赖解析失败
 RUN echo 'deb http://mirrors.aliyun.com/debian-archive/debian/ buster main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian/ buster-updates main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian-security buster/updates main non-free contrib' > /etc/apt/sources.list
 
-# Electron 43 的构建工具要求 Node 22.12+。NodeSource 在国内不稳定，
-# 改为直接从 npmmirror 下载固定的 Node.js 22 LTS 二进制。
+# 本阶段只需下载工具；gateway 依赖全部装进内嵌 Python，容器系统 Python 仅作底座
 RUN apt-get update -o Acquire::Check-Valid-Until=false && apt-get install -y --no-install-recommends \
-        binutils \
         curl \
         ca-certificates \
         xz-utils \
-    && curl -fsSL "https://npmmirror.com/mirrors/node/v22.18.0/node-v22.18.0-linux-x64.tar.xz" -o /tmp/node.tar.xz \
-    && tar -xf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
-    && rm /tmp/node.tar.xz \
-    && node --version \
-    && npm --version \
     && rm -rf /var/lib/apt/lists/*
+
+# 内嵌运行时版本（三平台打包脚本保持一致）
+ARG BUNDLED_PYTHON_VERSION=3.11.9
+ARG BUNDLED_NODE_VERSION=20.18.3
+
+# ----- Python standalone (indygreg/python-build-standalone) -----
+# 自包含、无系统依赖。gateway 与技能脚本共用一个解释器；
+# 目标 UOS/信创系统可能未预装 Python 或版本过旧，内嵌确保开箱即用。
+RUN mkdir -p /tmp/runtimes/python \
+    && echo "Downloading Python ${BUNDLED_PYTHON_VERSION} standalone..." \
+    && PYTHON_REL="indygreg/python-build-standalone/releases/download/20240415/cpython-${BUNDLED_PYTHON_VERSION}+20240415-x86_64-unknown-linux-gnu-install_only.tar.gz" \
+    && PYTHON_URL="https://github.com/${PYTHON_REL}" \
+    && echo "  downloading: ${PYTHON_URL}" \
+    && curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 180 "$PYTHON_URL" -o /tmp/python.tar.gz \
+    && test -s /tmp/python.tar.gz \
+    && tar -xzf /tmp/python.tar.gz -C /tmp/runtimes/python --strip-components=1 \
+    && rm /tmp/python.tar.gz \
+    && /tmp/runtimes/python/bin/python3 --version \
+    && ln -sf python3 /tmp/runtimes/python/bin/python \
+    && echo "✓ Python ${BUNDLED_PYTHON_VERSION} standalone ready"
 
 WORKDIR /app
 
-# ---------------------------------------------------------------------------
-# 缓存优化：先安装第三方依赖（仅 pyproject.toml 变更时重建），再拷贝源码。
-# 避免 crew/ 下任何代码改动触发全量 pip 依赖重新下载（这是构建从几分钟
-# 变成半小时的根因）。
-# ---------------------------------------------------------------------------
-COPY pyproject.toml README.md ./
-RUN pip install --no-cache-dir \
-    "openai>=1.30" \
-    "fastapi>=0.110" \
-    "uvicorn>=0.29" \
-    "pyyaml>=6.0" \
-    "python-dotenv>=1.0" \
-    "prompt_toolkit>=3.0" \
-    "rich>=13.0" \
-    "websockets>=12.0" \
-    "psutil>=5.9" \
-    "apscheduler>=3.11.2" \
-    "mcp>=2.0,<3.0" \
-    "httpx>=0.27,<1.0" \
-    "requests>=2.34.2" \
-    "wcmatch>=8.4" \
-    "jsonschema>=4.0" \
-    pyinstaller
-
-# 源码拷贝（代码变更只影响这一层及以下，依赖层保持缓存）
+# pip 安装 ".[extras]" 需要就地构建 crew wheel：hatchling 依据 pyproject 的
+# readme / license-files 声明读取 README.md / LICENSE / NOTICE，缺一不可
+COPY pyproject.toml README.md LICENSE NOTICE ./
 COPY crew ./crew
-RUN pip install --no-cache-dir --no-deps .
+COPY deb-package/runtime-requirements.txt ./deb-package/runtime-requirements.txt
 
-COPY config ./config
-COPY plugins ./plugins
+# ----- 为内嵌 Python 安装 gateway + 技能依赖 -----
+# 注意：用的是内嵌 Python 自带的 pip，不是容器系统 Python 的 pip；
+# PIP_INDEX_URL 环境变量对内嵌 pip 同样生效（清华镜像）。
+# 步骤（与三平台打包脚本统一）：
+#   1) 核心依赖 + wiki/pdf/docx/xlsx extras（pyproject 为唯一数据源）
+#   2) 卸载 crew 本身——crew 源码由安装包按源码树携带，不进 site-packages
+#   3) 技能脚本补充依赖（pyproject 未覆盖部分）
+#   4) markitdown 单独 --no-deps（可选依赖链 sympy/onnxruntime/numpy 超 100MB）
+RUN /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir --no-warn-script-location ".[wiki,pdf,docx,xlsx]" \
+    && /tmp/runtimes/python/bin/python3 -m pip uninstall -y crew \
+    && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir --no-warn-script-location -r deb-package/runtime-requirements.txt \
+    && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir --no-warn-script-location --no-deps "markitdown==0.0.2"
 
-RUN pyinstaller --name crew-gateway \
-    --onedir \
-    --add-data "config:config" \
-    --add-data "crew/skills:crew/skills" \
-    --add-data "crew/scenarios:crew/scenarios" \
-    --add-data "crew/mcp_servers:crew/mcp_servers" \
-    --add-data "crew/agent/subagent/presets:crew/agent/subagent/presets" \
-    --add-data "plugins:plugins" \
-    crew/gateway/server.py
+# 关键依赖自检：gateway 入口 + 技能高频依赖 + MCP
+RUN /tmp/runtimes/python/bin/python3 -c "import fastapi, uvicorn, openai, pandas, markitdown; from mcp.server.mcpserver import MCPServer; print('✓ deps ok')"
 
-# 兜底修复：PyInstaller --add-data 在某些环境下未完整递归复制 config 子目录，
-# 显式复制关键配置子目录到 _internal/config/ 以确保运行时路径解析正确
-RUN for subdir in prompts; do \
-        src="config/$subdir"; \
-        dst="dist/crew-gateway/_internal/config/$subdir"; \
-        if [ -d "$src" ]; then \
-            mkdir -p "$dst"; \
-            cp -r "$src"/* "$dst"/ 2>/dev/null || true; \
-            count=$(find "$dst" -type f 2>/dev/null | wc -l); \
-            echo "✓ config/$subdir -> _internal/config/$subdir ($count files)"; \
-        else \
-            echo "⚠ config/$subdir not found, skipping"; \
-        fi; \
-    done
+# 清理字节码缓存，减少安装包文件数量与体积
+RUN find /tmp/runtimes/python /app/crew -type d -name __pycache__ -prune -exec rm -rf {} + \
+    && find /tmp/runtimes/python /app/crew -name '*.pyc' -delete
 
-# 额外兜底：同时确保 exe 同级 config/ 中也存在（兼容多种路径解析方式）
-RUN for subdir in prompts; do \
-        src="config/$subdir"; \
-        dst="dist/crew-gateway/config/$subdir"; \
-        if [ -d "$src" ]; then \
-            mkdir -p "$dst"; \
-            cp -r "$src"/* "$dst"/ 2>/dev/null || true; \
-        fi; \
-    done
-
-# 安装包只携带可发布的配置模板；本地配置和真实密钥绝不进入发布产物
-RUN mkdir -p dist/crew-gateway/config \
-    && cp config/.env.example dist/crew-gateway/config/.env.example \
-    && cp config/config.yaml.example dist/crew-gateway/config/config.yaml.example \
-    && test -f dist/crew-gateway/config/.env.example \
-    && test -f dist/crew-gateway/config/config.yaml.example \
-    && echo "✓ 配置 example 已预置到安装包中，首次运行时生成用户私有配置"
+# ----- Node.js portable (npmmirror) -----
+# 技能脚本（docx/webapp 等）需要 node/npm。裁剪 corepack 与文档头文件，
+# 保留 npm/npx（技能安装依赖时需要）。
+RUN mkdir -p /tmp/runtimes/node \
+    && echo "Downloading Node.js v${BUNDLED_NODE_VERSION}..." \
+    && curl -fsSL "https://npmmirror.com/mirrors/node/v${BUNDLED_NODE_VERSION}/node-v${BUNDLED_NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz \
+    && tar -xf /tmp/node.tar.xz -C /tmp/runtimes/node --strip-components=1 \
+    && rm /tmp/node.tar.xz \
+    && rm -rf /tmp/runtimes/node/lib/node_modules/corepack \
+              /tmp/runtimes/node/bin/corepack \
+              /tmp/runtimes/node/share \
+              /tmp/runtimes/node/include \
+              /tmp/runtimes/node/CHANGELOG.md \
+              /tmp/runtimes/node/README.md \
+    && /tmp/runtimes/node/bin/node --version \
+    && PATH="/tmp/runtimes/node/bin:$PATH" /tmp/runtimes/node/bin/npm --version \
+    && echo "✓ Node.js v${BUNDLED_NODE_VERSION} portable ready (corepack/docs 已裁剪)"
 
 
 # -----------------------------------------------------------------------------
@@ -184,6 +173,13 @@ RUN node scripts/prepare-security-runtime.mjs --runtime /tmp/ace-security-runtim
     && npm run build \
     && npx electron-builder --linux --config electron-builder.yml
 
+# 裁剪 Electron locales：只保留 en-US / zh-CN，其余语言 pak 全部删除
+RUN if [ -d release/linux-unpacked/locales ]; then \
+        find release/linux-unpacked/locales -maxdepth 1 -type f -name '*.pak' \
+            ! -name 'en-US.pak' ! -name 'zh-CN.pak' -delete \
+        && echo "✓ Electron locales 裁剪完成（保留 en-US.pak, zh-CN.pak）"; \
+    fi
+
 
 # -----------------------------------------------------------------------------
 # Stage 3: Debian 安装包组装
@@ -201,49 +197,7 @@ RUN apt-get update -o Acquire::Check-Valid-Until=false && apt-get install -y --n
         dpkg-dev \
         bzip2 \
         imagemagick \
-        curl \
-        ca-certificates \
-        xz-utils \
     && rm -rf /var/lib/apt/lists/*
-
-# ----- 0) 下载内嵌运行时 (Python standalone + Node.js portable) -----
-# 与 Windows pack_exe.ps1 对齐：技能脚本需要 python/node，
-# 目标 UOS/信创系统可能未预装或版本过旧，打包内嵌运行时确保开箱即用。
-ARG BUNDLED_PYTHON_VERSION=3.11.9
-ARG BUNDLED_NODE_VERSION=20.18.3
-
-# Python standalone (indygreg/python-build-standalone) — 自包含，无系统依赖
-# 直接从官方发布地址下载；如构建环境需要代理，由调用方通过标准代理环境变量配置。
-RUN mkdir -p /tmp/runtimes/python \
-    && echo "Downloading Python ${BUNDLED_PYTHON_VERSION} standalone..." \
-    && PYTHON_REL="indygreg/python-build-standalone/releases/download/20240415/cpython-${BUNDLED_PYTHON_VERSION}+20240415-x86_64-unknown-linux-gnu-install_only.tar.gz" \
-
-    && PYTHON_URL="https://github.com/${PYTHON_REL}" \
-    && echo "  downloading: ${PYTHON_URL}" \
-    && curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 180 "$PYTHON_URL" -o /tmp/python.tar.gz \
-
-    && test -s /tmp/python.tar.gz \
-    && tar -xzf /tmp/python.tar.gz -C /tmp/runtimes/python --strip-components=1 \
-    && rm /tmp/python.tar.gz \
-    && /tmp/runtimes/python/bin/python3 --version \
-    && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir \
-       requests lxml python-pptx openpyxl xlsxwriter beautifulsoup4 markdown charset-normalizer \
-       reportlab matplotlib pikepdf pdfplumber markdown2 "xhtml2pdf>=0.2.15" pypdfium2 Pillow defusedxml pandas \
-    && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir --no-deps markitdown \
-    && /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir "mcp==2.0.0" \
-    && ln -sf python3 /tmp/runtimes/python/bin/python \
-    && /tmp/runtimes/python/bin/python3 -c "from mcp.server import MCPServer; print('✓ mcp.server.MCPServer importable')" \
-    && echo "✓ Python ${BUNDLED_PYTHON_VERSION} standalone ready"
-
-# Node.js portable (npmmirror) — 与 Stage 1/2 同源
-RUN mkdir -p /tmp/runtimes/node \
-    && echo "Downloading Node.js v${BUNDLED_NODE_VERSION}..." \
-    && curl -fsSL "https://npmmirror.com/mirrors/node/v${BUNDLED_NODE_VERSION}/node-v${BUNDLED_NODE_VERSION}-linux-x64.tar.xz" \
-       -o /tmp/node.tar.xz \
-    && tar -xf /tmp/node.tar.xz -C /tmp/runtimes/node --strip-components=1 \
-    && rm /tmp/node.tar.xz \
-    && /tmp/runtimes/node/bin/node --version \
-    && echo "✓ Node.js v${BUNDLED_NODE_VERSION} portable ready"
 
 WORKDIR /deb-build
 
@@ -258,8 +212,28 @@ RUN mkdir -p DEBIAN \
     usr/share/icons/hicolor/512x512/apps
 
 # ----- 1) 拷贝应用本体 -----
-COPY --from=gateway-builder /app/dist/crew-gateway ./opt/crew-gateway
+# /opt/crew-gateway 为源码树：crew/ + plugins/ + config/ 模板 + runtimes/。
+# desktop 主进程以 runtimes/python/bin/python3 -m crew.gateway.server 启动
+# （cwd=/opt/crew-gateway，PYTHONPATH=/opt/crew-gateway，CREW_PACKAGED=1）。
+COPY --from=gateway-builder /app/crew ./opt/crew-gateway/crew
+COPY plugins ./opt/crew-gateway/plugins
+COPY config/.env.example config/config.yaml.example ./opt/crew-gateway/config/
+COPY config/prompts ./opt/crew-gateway/config/prompts
+COPY --from=gateway-builder /tmp/runtimes ./opt/crew-gateway/runtimes
 COPY --from=desktop-builder /app/release/linux-unpacked ./opt/crew-desktop
+
+# 字节码兜底清理（.dockerignore 已全局排除，这里防御源码树内残留的缓存）
+RUN find opt/crew-gateway/crew opt/crew-gateway/plugins -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+
+# 安全检查：安装包只携带可发布的配置模板，
+# config 目录中出现真实 .env 或 config.yaml（本地密钥/配置）即构建失败
+RUN leaked=$(find opt/crew-gateway/config -maxdepth 1 -name '.env*' ! -name '.env.example') \
+    && { [ -z "$leaked" ] || { echo "安全检查失败: config 目录不应出现真实 .env 文件: $leaked"; exit 1; }; } \
+    && { [ ! -f opt/crew-gateway/config/config.yaml ] || { echo "安全检查失败: config 目录不应出现 config.yaml"; exit 1; }; } \
+    && test -f opt/crew-gateway/config/.env.example \
+    && test -f opt/crew-gateway/config/config.yaml.example \
+    && echo "✓ gateway 源码树就绪（config 仅含 .env.example / config.yaml.example / prompts/）"
+
 RUN chmod +x ./opt/crew-desktop/crew-desktop \
     && chmod -R 755 ./opt/crew-gateway \
     && chmod -R 755 ./opt/crew-desktop \
@@ -269,11 +243,12 @@ RUN chmod +x ./opt/crew-desktop/crew-desktop \
     && test "$(stat -c %u "$desktop_sandbox")" = "0" \
     && test "$(stat -c %a "$desktop_sandbox")" = "4755"
 
-# ----- 1b) 拷贝内嵌运行时到 _internal/runtimes/ -----
-# Python standalone + Node.js portable，确保技能脚本在无系统 Python/Node 时也能执行
-RUN cp -r /tmp/runtimes ./opt/crew-gateway/_internal/runtimes \
-    && chmod -R 755 ./opt/crew-gateway/_internal/runtimes \
-    && echo "✓ Bundled runtimes (Python + Node.js) copied to _internal/runtimes/"
+# ----- 1b) 冒烟验证 -----
+# 用安装布局内的内嵌 Python 以源码模式导入 gateway 入口，
+# 提前暴露依赖缺失 / 路径布局错误，而不是等安装后才在用户机器上炸。
+RUN cd /deb-build/opt/crew-gateway \
+    && PYTHONPATH=. CREW_PACKAGED=1 PYTHONDONTWRITEBYTECODE=1 \
+       ./runtimes/python/bin/python3 -c "import crew.gateway.server; print('✓ gateway import ok')"
 
 # ----- 2) 桌面菜单项 (.desktop) -----
 # 使用 printf 代替 echo 确保跨 shell 可移植的换行处理
@@ -306,14 +281,23 @@ RUN mkdir -p usr/share/icons/hicolor/48x48/apps \
     && rm /tmp/icon-source.png
 
 # ----- 4) Gateway 不再使用 systemd user service -----
-# 改由 desktop 子进程托管：desktop 启动时 spawn /opt/crew-gateway/crew-gateway，
-# 退出时随之消亡。废弃原因：多用户机器上各用户 systemd 服务 enable-linger + Restart=always
+# 改由 desktop 子进程托管：desktop 启动时以 /opt/crew-gateway 为工作目录、
+# 用内嵌 Python 运行 crew.gateway.server，退出时随之消亡。
+# 废弃原因：多用户机器上各用户 systemd 服务 enable-linger + Restart=always
 # 会抢同一个 8000 端口，且跨用户 instance key 不一致导致桌面端验签失败连不上。
 # 故不再生成 crew-gateway.service，postinst 也不 enable/linger。
 
-# ----- 5) Gateway 快捷软链 -----
-# 让喜欢用终端的高级用户可以直接执行 crew-gateway
-RUN ln -sf /opt/crew-gateway/crew-gateway usr/bin/crew-gateway
+# ----- 5) Gateway 终端入口 (wrapper 脚本) -----
+# 供喜欢用终端的高级用户直接执行 crew-gateway；正常场景由 desktop 子进程托管。
+# 启动方式与 desktop 完全一致：内嵌 Python + 源码模块 + 打包态环境变量。
+RUN cat > usr/bin/crew-gateway <<"WRAPPER_EOF"
+#!/bin/sh
+export CREW_PACKAGED=1
+export PYTHONPATH=/opt/crew-gateway
+cd /opt/crew-gateway
+exec /opt/crew-gateway/runtimes/python/bin/python3 -m crew.gateway.server "$@"
+WRAPPER_EOF
+RUN chmod +x usr/bin/crew-gateway
 
 # ----- 6) 核心：启动包装脚本 (crew-desktop) -----
 # 在打包阶段直接生成，负责：初始化用户目录 -> 启动 UI（UI 内部 spawn gateway）
@@ -330,8 +314,9 @@ if [ ! -d "$CREW_HOME" ]; then
 fi
 
 # 2. 拉起 Electron 桌面端（gateway 由 desktop 子进程 spawn 托管，不再用 systemd）
-#    desktop 启动时会扫描 8000-8009 空闲端口 spawn /opt/crew-gateway/crew-gateway，
-#    退出时随之消亡。这样彻底消除多用户 systemd 服务抢 8000 + 跨用户 key 不一致的问题。
+#    desktop 启动时会扫描 8000-8009 空闲端口，以 /opt/crew-gateway 为工作目录
+#    用内嵌 Python 运行 crew.gateway.server，退出时随之消亡。
+#    这样彻底消除多用户 systemd 服务抢 8000 + 跨用户 key 不一致的问题。
 exec /opt/crew-desktop/crew-desktop "$@"
 WRAPPER_EOF
 RUN chmod +x usr/bin/crew-desktop
@@ -382,9 +367,11 @@ if command -v loginctl >/dev/null 2>&1; then
 fi
 # 只杀掉各用户自己的旧 gateway 进程（旧 systemd 实例或手动启动的），释放 8000。
 # 不使用无用户范围的 pkill，避免安装/升级影响其他用户的进程。
+# gateway 进程命令行为 runtimes/python/bin/python3 -m crew.gateway.server，
+# 绝对路径中必含 /opt/crew-gateway，以此匹配（同时兼容旧版 PyInstaller 实例）。
 getent passwd 2>/dev/null | awk -F: '$3 >= 1000 && $3 < 65534 {print $3}' | while IFS= read -r uid; do
     [ -n "$uid" ] || continue
-    pkill -u "$uid" -f '/opt/crew-gateway/crew-gateway([[:space:]]|$)' 2>/dev/null || true
+    pkill -u "$uid" -f '/opt/crew-gateway' 2>/dev/null || true
 done
 
 # 3. 刷新桌面缓存
@@ -450,10 +437,12 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 # 终止各用户自己的运行实例，不影响其他用户的桌面端或 gateway。
+# gateway 进程命令行为 runtimes/python/bin/python3 -m crew.gateway.server，
+# 绝对路径中必含 /opt/crew-gateway，以此匹配。
 getent passwd 2>/dev/null | awk -F: '$3 >= 1000 && $3 < 65534 {print $3}' | while IFS= read -r uid; do
     [ -n "$uid" ] || continue
     pkill -u "$uid" -f '/opt/crew-desktop/crew-desktop([[:space:]]|$)' 2>/dev/null || true
-    pkill -u "$uid" -f '/opt/crew-gateway/crew-gateway([[:space:]]|$)' 2>/dev/null || true
+    pkill -u "$uid" -f '/opt/crew-gateway' 2>/dev/null || true
 done
 sleep 1
 
@@ -478,7 +467,7 @@ command -v gtk-update-icon-cache >/dev/null 2>&1 \\\n\
     && chmod 755 DEBIAN/postrm
 
 # ----- 11) 清理行尾符并构建 .deb -----
-RUN for f in usr/bin/crew-desktop DEBIAN/prerm DEBIAN/postrm; do \
+RUN for f in usr/bin/crew-desktop usr/bin/crew-gateway DEBIAN/prerm DEBIAN/postrm; do \
         sed -i 's/\r$//' "$f"; \
     done
 RUN dpkg-deb --build /deb-build /crew-desktop_${BUILD_VERSION}_amd64.deb

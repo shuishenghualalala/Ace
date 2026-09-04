@@ -51,11 +51,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.11"
-      - name: Prepare Python environment
-        run: uv sync --extra dev
       - name: Build DMG
         run: ./deb-package/pack_mac.sh "${{ steps.version.outputs.version }}" arm64
       - name: Stage release assets
@@ -97,11 +92,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.11"
-      - name: Prepare Python environment
-        run: uv sync --extra dev
       - name: Build DMG
         run: ./deb-package/pack_mac.sh "${{ steps.version.outputs.version }}" x64
       - name: Stage release assets
@@ -185,9 +175,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.11"
       - name: Install Inno Setup
         run: choco install innosetup --no-progress --yes
       - name: Install Inno Setup Chinese language
