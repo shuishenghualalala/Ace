@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 import getpass
 import uuid
-from typing import Any
-
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -24,7 +23,7 @@ from crew.wiki.parser import (
 from crew.wiki.schemas import RawSource, WikiRelation
 from crew.wiki.sources import classify_file
 from crew.wiki.store import normalize_kb_id
-from crew.wiki.store._ids import filename_from_title
+from crew.wiki.store._ids import filename_from_title, source_page_id
 
 log = get_logger("gateway.routers.wiki")
 
@@ -43,6 +42,38 @@ def create_wiki_router(crew) -> APIRouter:
 
     def _kb_id(request: Request) -> str:
         return request.query_params.get("kb_id") or "default"
+
+    def _find_title_conflict(
+        store,
+        title: str,
+        page_type: str,
+        owner: str,
+        kb_id: str,
+        exclude_page_id: str = "",
+    ):
+        """查找同知识库内同类型、同标题的页面。
+
+        Source Page 的身份由 source_id 决定，不按标题去重；不同来源可以有相同
+        的展示标题。其他页面类型沿用创建工具的唯一标题约束。
+        """
+        if page_type == "source":
+            return None
+        normalized_title = str(title or "").strip()
+        if not normalized_title:
+            return None
+        for candidate in store.list_all(
+            owner_account_id=owner,
+            kb_id=kb_id,
+            limit=10000,
+            brief=True,
+        ):
+            if (
+                candidate.id != exclude_page_id
+                and candidate.page_type == page_type
+                and str(candidate.title or "").strip() == normalized_title
+            ):
+                return candidate
+        return None
 
     def _task_key(owner: str, source_id: str) -> tuple[str, str]:
         return (owner, source_id)
@@ -393,13 +424,38 @@ def create_wiki_router(crew) -> APIRouter:
                 {"ok": False, "error": f"不支持的 Wiki 页面类型: {page_type}"},
                 status_code=400,
             )
+        owner = _owner(request)
+        title = str(data.get("title", "")).strip()
+        conflict = _find_title_conflict(store, title, page_type, owner, kb_id)
+        if conflict is not None:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"页面标题已存在: {conflict.id}",
+                    "existing_page_id": conflict.id,
+                },
+                status_code=409,
+            )
+        sources = [str(source_id).strip() for source_id in data.get("sources") or [] if str(source_id).strip()]
+        page_id = ""
+        if page_type == "source" and len(sources) == 1:
+            page_id = source_page_id(sources[0])
+            if store.get(page_id, owner, kb_id) is not None:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": f"该来源页面已存在: {page_id}",
+                        "existing_page_id": page_id,
+                    },
+                    status_code=409,
+                )
         page = WikiPage(
-            id="",
+            id=page_id,
             page_type=page_type,
-            title=data.get("title", ""),
+            title=title,
             content=data.get("content", ""),
             file_path="",
-            sources=list(data.get("sources") or []),
+            sources=sources,
             tags=list(data.get("tags") or []),
             relations=[
                 WikiRelation.from_dict(item)
@@ -407,7 +463,6 @@ def create_wiki_router(crew) -> APIRouter:
                 if isinstance(item, dict)
             ],
         )
-        owner = _owner(request)
         saved = store.save_page(page, owner, kb_id)
         _finish_page_write(owner, kb_id, f"创建页面 {saved.id} ({saved.title})")
         return {
@@ -446,7 +501,26 @@ def create_wiki_router(crew) -> APIRouter:
         if existing is None:
             return JSONResponse({"ok": False, "error": "页面不存在"}, status_code=404)
         data = await request.json()
-        existing.title = str(data.get("title", existing.title))
+        owner = _owner(request)
+        new_title = str(data.get("title", existing.title)).strip()
+        conflict = _find_title_conflict(
+            store,
+            new_title,
+            existing.page_type,
+            owner,
+            kb_id,
+            exclude_page_id=existing.id,
+        )
+        if conflict is not None:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"目标标题已存在: {conflict.id}",
+                    "existing_page_id": conflict.id,
+                },
+                status_code=409,
+            )
+        existing.title = new_title
         existing.content = str(data.get("content", existing.content))
         existing.tags = list(data.get("tags", existing.tags))
         existing.sources = list(data.get("sources", existing.sources))
@@ -457,7 +531,6 @@ def create_wiki_router(crew) -> APIRouter:
                 if isinstance(item, dict)
             ]
         existing.related = []
-        owner = _owner(request)
         updated = store.update(existing, owner, kb_id)
         result_page = updated or existing
         _finish_page_write(owner, kb_id, f"更新页面 {result_page.id} ({result_page.title})")

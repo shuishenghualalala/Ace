@@ -83,6 +83,65 @@ def test_wiki_init_and_pages_crud(tmp_path, auth_headers):
     assert res.status_code == 404
 
 
+def test_wiki_rejects_duplicate_title_on_create_and_update(tmp_path, auth_headers):
+    client, _app = _client(tmp_path)
+
+    first = client.post(
+        "/api/wiki/pages",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json={"page_type": "topic", "title": "唯一主题", "content": "A"},
+    )
+    assert first.status_code == 200
+    first_id = first.json()["page"]["id"]
+
+    duplicate = client.post(
+        "/api/wiki/pages",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json={"page_type": "topic", "title": "唯一主题", "content": "B"},
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["existing_page_id"] == first_id
+    assert len(client.get("/api/wiki/pages", headers=auth_headers).json()["pages"]) == 1
+
+    second = client.post(
+        "/api/wiki/pages",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json={"page_type": "topic", "title": "另一个主题", "content": "C"},
+    )
+    assert second.status_code == 200
+    second_id = second.json()["page"]["id"]
+
+    rename_conflict = client.put(
+        f"/api/wiki/pages/{second_id}",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        json={"title": "唯一主题"},
+    )
+    assert rename_conflict.status_code == 409
+    assert rename_conflict.json()["existing_page_id"] == first_id
+
+
+def test_wiki_allows_same_title_for_source_pages(tmp_path, auth_headers):
+    client, _app = _client(tmp_path)
+
+    for source_id in ("src_a", "src_b"):
+        response = client.post(
+            "/api/wiki/pages",
+            headers={**auth_headers, "Content-Type": "application/json"},
+            json={
+                "page_type": "source",
+                "title": "同名来源",
+                "content": source_id,
+                "sources": [source_id],
+            },
+        )
+        assert response.status_code == 200
+
+    pages = client.get("/api/wiki/pages", headers=auth_headers).json()["pages"]
+    assert len(pages) == 2
+    assert {page["title"] for page in pages} == {"同名来源"}
+    assert len({page["id"] for page in pages}) == 2
+
+
 def test_wiki_page_detail_returns_outgoing_and_incoming_relations(tmp_path, auth_headers):
     client, _app = _client(tmp_path)
     client.post("/api/wiki/init", headers=auth_headers)
