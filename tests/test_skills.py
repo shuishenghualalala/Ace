@@ -1082,7 +1082,6 @@ def test_builtin_skills_are_generic_only():
         "pdf/SKILL.md",
         "process-doc/SKILL.md",
         "scientific-problem-selection/SKILL.md",
-        "seaborn-visualization/SKILL.md",
         "skill-creator/SKILL.md",
         "video-understanding/SKILL.md",
         "webapp-building/SKILL.md",
