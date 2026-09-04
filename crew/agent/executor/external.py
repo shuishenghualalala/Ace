@@ -994,7 +994,7 @@ class ExternalExecutor(AgentExecutor):
 
         runtime_failure_binding_key: dict[str, str] | None = None
         runtime_failure_session_id = ""
-        thinking_parts: list[str] = []
+        thinking_text = ""
         persisted_tools: dict[str, ToolCall] = {}
         usage: dict[str, int] = {}
         try:
@@ -1232,8 +1232,10 @@ class ExternalExecutor(AgentExecutor):
                             parts.append(event.text)
                             yield ResponseChunk.delta(ctx.request_id, event.text, next_seq())
                         elif event.kind == "thinking" and event.text:
-                            thinking_parts.append(event.text)
-                            yield ResponseChunk.thinking_event(ctx.request_id, event.text, next_seq())
+                            # thinking 帧承载截至当前的累计全文快照:外部运行时的增量
+                            # 片段在此累计成快照,网关限流合并与前端渲染均依赖该语义。
+                            thinking_text += event.text
+                            yield ResponseChunk.thinking_event(ctx.request_id, thinking_text, next_seq())
                         elif event.kind == "error":
                             if adapter_id == "acp-stdio":
                                 raise AcpAdapterError(event.text or "ACP stdout read failed")
@@ -1389,8 +1391,8 @@ class ExternalExecutor(AgentExecutor):
             elif protocol == "cli":
                 output = _followup_cli_diagnostic(provider)
         assistant_message = Message.assistant(output, tool_calls, model=effective_model or None)
-        if thinking_parts:
-            assistant_message.thinking = "".join(thinking_parts).strip()
+        if thinking_text:
+            assistant_message.thinking = thinking_text.strip()
         ctx.messages.append(assistant_message)
         if not structured_adapter and output:
             yield ResponseChunk.delta(ctx.request_id, output, next_seq())

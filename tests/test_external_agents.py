@@ -3783,7 +3783,8 @@ async def test_acp_executor_uses_external_task_payload_for_single_agent(tmp_path
     async def fake_stream(prompt, config):
         seen["prompt"] = prompt
         seen["system_prompt"] = config.system_prompt
-        yield AcpStreamEvent(kind="thinking", text="先核对测试范围。")
+        yield AcpStreamEvent(kind="thinking", text="先核对")
+        yield AcpStreamEvent(kind="thinking", text="测试范围。")
         yield AcpStreamEvent(kind="text", text="ok")
 
     ctx = ExecutionContext(
@@ -3802,7 +3803,9 @@ async def test_acp_executor_uses_external_task_payload_for_single_agent(tmp_path
     })
 
     assert chunks[-1].kind == "final"
-    assert any(chunk.kind == "thinking" and chunk.body["text"] == "先核对测试范围。" for chunk in chunks)
+    # thinking 帧是累计全文快照:运行时增量片段逐帧累计,最后一帧即全文。
+    thinking_frames = [chunk.body["text"] for chunk in chunks if chunk.kind == "thinking"]
+    assert thinking_frames == ["先核对", "先核对测试范围。"]
     assert ctx.messages[-1].thinking == "先核对测试范围。"
     assert "# Crew External Task Payload" in seen["prompt"]
     assert "- team_role: none" in seen["prompt"]
@@ -5120,7 +5123,9 @@ async def test_external_executor_uses_codex_app_server_adapter(tmp_path):
     ]
 
     assert "".join(chunk.body.get("text", "") for chunk in chunks if chunk.kind == "delta") == "codex"
-    assert "".join(chunk.body.get("text", "") for chunk in chunks if chunk.kind == "thinking") == "inspect plan"
+    # thinking 帧是累计全文快照:reasoning 增量逐帧累计,最后一帧即全文。
+    thinking_frames = [chunk.body.get("text", "") for chunk in chunks if chunk.kind == "thinking"]
+    assert thinking_frames == ["inspect", "inspect plan"]
     assert chunks[-1].kind == "final"
     assert chunks[-1].body["usage"]["total_tokens"] == 6
     assert ctx.messages[-1].thinking == "inspect plan"
