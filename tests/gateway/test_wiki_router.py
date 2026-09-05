@@ -29,7 +29,7 @@ def _client(tmp_path):
 
 
 def test_wiki_init_and_pages_crud(tmp_path, auth_headers):
-    client, _app = _client(tmp_path)
+    client, app = _client(tmp_path)
 
     # init
     res = client.post("/api/wiki/init", headers=auth_headers)
@@ -81,6 +81,9 @@ def test_wiki_init_and_pages_crud(tmp_path, auth_headers):
     assert res.status_code == 200
     res = client.get(f"/api/wiki/pages/{page_id}", headers=auth_headers)
     assert res.status_code == 404
+    base = app._wiki_store._dir(OWNER, "default")
+    assert "测试主题" not in (base / "Home.md").read_text(encoding="utf-8")
+    assert "测试主题" not in (base / "index.md").read_text(encoding="utf-8")
 
 
 def test_wiki_rejects_duplicate_title_on_create_and_update(tmp_path, auth_headers):
@@ -1056,7 +1059,7 @@ def test_wiki_graph(tmp_path, auth_headers):
 
 
 def test_wiki_bulk_delete(tmp_path, auth_headers):
-    client, _app = _client(tmp_path)
+    client, app = _client(tmp_path)
     client.post("/api/wiki/init", headers=auth_headers)
 
     ids = []
@@ -1083,6 +1086,13 @@ def test_wiki_bulk_delete(tmp_path, auth_headers):
 
     res = client.get("/api/wiki/pages", headers=auth_headers)
     assert len(res.json()["pages"]) == 0
+    base = app._wiki_store._dir(OWNER, "default")
+    home_text = (base / "Home.md").read_text(encoding="utf-8")
+    index_text = (base / "index.md").read_text(encoding="utf-8")
+    assert "页面 A" not in home_text
+    assert "页面 B" not in home_text
+    assert "页面 A" not in index_text
+    assert "页面 B" not in index_text
 
 
 
@@ -1255,6 +1265,9 @@ def test_wiki_delete_source_cleans_related_pages(tmp_path, auth_headers):
     assert not any(s["id"] == "src_del" for s in res.json()["sources"])
     res = client.get(f"/api/wiki/pages/{page_id}", headers=auth_headers)
     assert res.status_code == 404
+    base = app._wiki_store._dir(OWNER, "default")
+    assert "引用页面" not in (base / "Home.md").read_text(encoding="utf-8")
+    assert "引用页面" not in (base / "index.md").read_text(encoding="utf-8")
 
 
 def test_wiki_delete_source_not_found(tmp_path, auth_headers):

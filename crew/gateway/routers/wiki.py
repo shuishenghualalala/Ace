@@ -548,9 +548,16 @@ def create_wiki_router(crew) -> APIRouter:
         store = getattr(crew, "_wiki_store", None)
         if store is None:
             return JSONResponse({"ok": False, "error": "Wiki 未启用"}, status_code=503)
-        ok = store.delete(page_id, _owner(request), _kb_id(request))
+        owner = _owner(request)
+        kb_id = _kb_id(request)
+        ok = store.delete(page_id, owner, kb_id)
         if not ok:
             return JSONResponse({"ok": False, "error": "页面不存在"}, status_code=404)
+        _finish_page_write(
+            owner,
+            kb_id,
+            f"删除页面 {page_id}",
+        )
         return {"ok": True}
 
     @router.delete("/pages")
@@ -560,15 +567,22 @@ def create_wiki_router(crew) -> APIRouter:
             return JSONResponse({"ok": False, "error": "Wiki 未启用"}, status_code=503)
         data = await request.json()
         page_ids = list(data.get("page_ids") or [])
+        owner = _owner(request)
         kb_id = _kb_id(request)
         deleted = []
         failed = []
         for page_id in page_ids:
-            ok = store.delete(page_id, _owner(request), kb_id)
+            ok = store.delete(page_id, owner, kb_id)
             if ok:
                 deleted.append(page_id)
             else:
                 failed.append({"id": page_id, "error": "页面不存在"})
+        if deleted:
+            _finish_page_write(
+                owner,
+                kb_id,
+                f"批量删除页面: {', '.join(deleted)}",
+            )
         return {"ok": True, "deleted": deleted, "failed": failed}
 
     @router.get("/search")
@@ -636,6 +650,11 @@ def create_wiki_router(crew) -> APIRouter:
         ok = store.delete_raw(source_id, owner_account_id=owner, kb_id=kb_id)
         if not ok:
             return JSONResponse({"ok": False, "error": "source 不存在"}, status_code=404)
+        _finish_page_write(
+            owner,
+            kb_id,
+            f"删除 raw source {source_id} 及其关联页面",
+        )
         return {"ok": True, "deleted_source_id": source_id, "related_pages": related_pages}
 
     @router.get("/sources/{source_id}/file")
