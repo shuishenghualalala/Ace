@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from crew.gateway.auth import account_from_request
@@ -41,7 +41,31 @@ def create_wiki_router(crew) -> APIRouter:
         return account_from_request(request).owner_account_id
 
     def _kb_id(request: Request) -> str:
-        return request.query_params.get("kb_id") or "default"
+        try:
+            return normalize_kb_id(request.query_params.get("kb_id"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def _query_int_param(
+        request: Request,
+        name: str,
+        default: int,
+        min_value: int,
+        max_value: int | None = None,
+    ) -> int:
+        """解析并校验 Wiki 查询参数，非法输入统一返回 400。"""
+        raw = request.query_params.get(name)
+        if raw is None:
+            return default
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"{name} 必须是整数") from exc
+        if value < min_value:
+            raise HTTPException(status_code=400, detail=f"{name} 不能小于 {min_value}")
+        if max_value is not None and value > max_value:
+            raise HTTPException(status_code=400, detail=f"{name} 不能大于 {max_value}")
+        return value
 
     def _find_title_conflict(
         store,
@@ -384,8 +408,8 @@ def create_wiki_router(crew) -> APIRouter:
         store = getattr(crew, "_wiki_store", None)
         if store is None:
             return JSONResponse({"ok": False, "error": "Wiki 未启用"}, status_code=503)
-        limit = int(request.query_params.get("limit", 100))
-        offset = int(request.query_params.get("offset", 0))
+        limit = _query_int_param(request, "limit", default=100, min_value=1, max_value=200)
+        offset = _query_int_param(request, "offset", default=0, min_value=0)
         brief = request.query_params.get("brief", "").lower() in ("1", "true", "yes")
         owner = _owner(request)
         kb_id = _kb_id(request)
@@ -591,7 +615,7 @@ def create_wiki_router(crew) -> APIRouter:
         if store is None:
             return JSONResponse({"ok": False, "error": "Wiki 未启用"}, status_code=503)
         query = request.query_params.get("q", "")
-        top_k = int(request.query_params.get("top_k", 5))
+        top_k = _query_int_param(request, "top_k", default=5, min_value=1, max_value=50)
         owner = _owner(request)
         kb_id = _kb_id(request)
         pages = store.search(
@@ -617,8 +641,8 @@ def create_wiki_router(crew) -> APIRouter:
         owner = _owner(request)
         kb_id = _kb_id(request)
         status_filter = request.query_params.get("status", "all").strip().lower()
-        limit = max(1, int(request.query_params.get("limit", 200)))
-        offset = max(0, int(request.query_params.get("offset", 0)))
+        limit = _query_int_param(request, "limit", default=200, min_value=1, max_value=200)
+        offset = _query_int_param(request, "offset", default=0, min_value=0)
         raws = store.list_raws(owner_account_id=owner, kb_id=kb_id)
         if status_filter != "all":
             raws = [r for r in raws if (r.parse_status or "pending") == status_filter]

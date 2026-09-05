@@ -145,6 +145,30 @@ def test_wiki_allows_same_title_for_source_pages(tmp_path, auth_headers):
     assert len({page["id"] for page in pages}) == 2
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/api/wiki/pages?limit=abc",
+        "/api/wiki/pages?limit=0",
+        "/api/wiki/pages?limit=201",
+        "/api/wiki/pages?offset=-1",
+        "/api/wiki/search?q=test&top_k=abc",
+        "/api/wiki/search?q=test&top_k=0",
+        "/api/wiki/search?q=test&top_k=51",
+        "/api/wiki/sources?limit=-1",
+        "/api/wiki/sources?offset=-1",
+        "/api/wiki/pages?kb_id=../escape",
+    ],
+)
+def test_wiki_rejects_invalid_query_params(tmp_path, auth_headers, url):
+    client, _app = _client(tmp_path)
+
+    response = client.get(url, headers=auth_headers)
+
+    assert response.status_code == 400
+    assert response.json()["detail"]
+
+
 def test_wiki_page_detail_returns_outgoing_and_incoming_relations(tmp_path, auth_headers):
     client, _app = _client(tmp_path)
     client.post("/api/wiki/init", headers=auth_headers)
