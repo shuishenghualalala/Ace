@@ -1687,7 +1687,7 @@ class WikiCompiler:
         )
 
     def update_index(self, owner_account_id: str = "", kb_id: str = "default") -> None:
-        """公开方法：重建 index.md。"""
+        """公开方法：重建 index.md 和 Home.md。"""
         self._update_index(owner_account_id, kb_id)
 
     def publish_source_page(
@@ -1721,7 +1721,6 @@ class WikiCompiler:
         """统一完成写入后的 index、log、全文索引与导读状态维护。"""
         self._update_index(owner_account_id, kb_id)
         self.store.append_log([message], owner_account_id=owner_account_id, kb_id=kb_id)
-        self.store.update_home(owner_account_id=owner_account_id, kb_id=kb_id)
         self._schedule_home_intro_refresh(owner_account_id, kb_id)
 
     def _schedule_home_intro_refresh(
@@ -2569,6 +2568,7 @@ class WikiCompiler:
             self.store.update(page, owner_account_id, kb_id)
 
     def _update_index(self, owner_account_id: str, kb_id: str) -> None:
+        """统一重建知识导航与首页。"""
         base = self.store._dir(owner_account_id, kb_id)
         index_path = base / "index.md"
         pages = self.store.list_all(limit=10000, owner_account_id=owner_account_id, kb_id=kb_id)
