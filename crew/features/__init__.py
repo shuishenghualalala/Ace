@@ -51,6 +51,13 @@ from crew.features.routes import (
     RouteRegistry,
     RouteUnavailableError,
 )
+from crew.features.presets import (
+    AgentPresetBinding,
+    AgentPresetConflictError,
+    AgentPresetContribution,
+    AgentPresetRegistry,
+    AgentPresetUnavailableError,
+)
 from crew.features.manager import (
     FeatureDiagnostic,
     FeatureDefinition,
@@ -173,6 +180,11 @@ __all__ = [
     "RouteContribution",
     "RouteRegistry",
     "RouteUnavailableError",
+    "AgentPresetBinding",
+    "AgentPresetConflictError",
+    "AgentPresetContribution",
+    "AgentPresetRegistry",
+    "AgentPresetUnavailableError",
     "ServiceBinding",
     "ServiceConflictError",
     "ServiceKey",

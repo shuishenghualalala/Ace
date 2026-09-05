@@ -315,6 +315,7 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
     <li>延迟加载工具：schema 加 <code>_crew_should_defer=true</code>，由 <code>tool_search</code> 按需披露。</li>
     <li>外部工具：通过 MCP client 注册，或 CUA setup 接入。</li>
     <li>遵守契约：文件类工具复用 <code>file_utils</code> 的安全读取与整读上限；网络类复用 <code>security_guard</code> 授权；不跨目录重复实现。</li>
+    <li>运行期目录型工具使用 <code>schema_resolver</code> 生成当前 schema；模型披露与执行期参数校验必须读取同一份动态 parameters。</li>
   </ul>
 
   <h2>8. 变更记录</h2>
@@ -327,10 +328,11 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
       <tr><td>2026-09-01</td><td>在 tools.html 中补充内置工具清单（70+ 工具按领域分组）</td><td><code>docs/backend/modules/tools.html</code></td></tr>
       <tr><td>2026-09-01</td><td>新增工具结果生命周期注册契约；核心工具按语义分类，未知与 MCP 工具安全默认保留。</td><td><code>Tool</code>、<code>Registry</code>、内置工具注册。</td></tr>
       <tr><td>2026-09-01</td><td><code>file_read</code> 结果生命周期由 <code>resource</code>（分片级 identity 去重）改为 <code>temporary</code>：旧分片由 L1 清成含 path/offset 的信息摘要，完整压缩后按 path 去重、从磁盘重读最新内容恢复。</td><td><code>crew/tools/builtin.py</code>、<code>crew/agent/compact/post_compact.py</code></td></tr>
+      <tr><td>2026-09-05</td><td>FunctionTool 增加动态 schema 解析，并让模型披露与执行校验共享当前 parameters。</td><td><code>run_agent</code> 的生命周期 preset enum。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0024-agent-preset-contribution-registry.html">ADR-0024</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-agent-preset.html">Agent Preset 测试记录</a></div>
 </div>
 </body>
 </html>

@@ -1,10 +1,11 @@
-"""Subagent 注册表：两层加载预设 agent 定义。
+"""Subagent 注册表：两层加载通用预设 agent 定义来源。
 
 对照 crew.agent.skills 的两层目录模式：
   1. 内置：<repo>/crew/agent/subagent/presets/*.md   随仓库发布
   2. 用户：get_crew_home()/agents/*.md                同名覆盖内置
 
-当前只维护内置与用户两级定义。
+产品 Feature 的专属预设由其 Bundle 从本地资产注册到 Feature Runtime；
+本类只维护内置与用户两级通用来源。
 """
 
 from __future__ import annotations
@@ -44,12 +45,20 @@ class SubagentRegistry:
 
     def __init__(self) -> None:
         self._defs: dict[str, SubagentDefinition] = {}
+        self._claimed: dict[str, SubagentDefinition] = {}
         self.reload()
 
     def reload(self) -> dict[str, SubagentDefinition]:
         builtin = _scan_dir(_PRESETS_DIR, "builtin")
         user = _scan_dir(get_user_agents_dir(), "user")
         self._defs = {**builtin, **user}  # user 覆盖同名 builtin
+        # Feature-owned definitions stay out of the generic catalog across a
+        # reload. If a newer user override exists, it becomes the next claimed
+        # value; otherwise the previous claimed value remains stable.
+        for name in tuple(self._claimed):
+            replacement = self._defs.pop(name, None)
+            if replacement is not None:
+                self._claimed[name] = replacement
         log.info("已加载预设子智能体: %s", list(self._defs))
         return self._defs
 
@@ -61,3 +70,13 @@ class SubagentRegistry:
 
     def list(self) -> list[SubagentDefinition]:
         return list(self._defs.values())
+
+    def claim(self, name: str) -> SubagentDefinition | None:
+        """Remove one definition from the generic catalog for a Feature owner."""
+        normalized = str(name or "").strip()
+        if normalized in self._claimed:
+            return self._claimed[normalized]
+        definition = self._defs.pop(normalized, None)
+        if definition is not None:
+            self._claimed[normalized] = definition
+        return definition

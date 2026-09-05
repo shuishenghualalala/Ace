@@ -62,6 +62,7 @@
       <tr><td>分层压缩</td><td>L1 仅压缩临时过程结果，L2/L3 生成结构化摘要并恢复受保护结果。</td><td>已落地</td></tr>
       <tr><td>能力调度</td><td>按会话能力 Profile 过滤 Skill、工具和系统提示。</td><td>已落地</td></tr>
       <tr><td>通用上下文贡献</td><td>在 Request View 组装前消费已排序的 fragment 与 persistent message，不导入具体来源 Feature。</td><td>已落地</td></tr>
+      <tr><td>Preset Consumer</td><td>主 Agent 与子 Agent 消费中立的 Feature-owned preset 策略；父权限、禁止嵌套、专属能力追加和 Generation Lease 使用统一装配路径。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -75,6 +76,8 @@
       <tr><td><code>crew/agent/compact/post_compact.py</code></td><td>完整压缩后恢复 Skill 指令、资源和重要结果。</td></tr>
       <tr><td><code>crew/agent/loop/tool_guardrails.py</code></td><td>重复失败与只读工具无进展检测。</td></tr>
       <tr><td><code>crew/agent/skills.py</code></td><td>Skill 扫描、索引、激活和提示构建。</td></tr>
+      <tr><td><code>crew/agent/subagent/definition.py</code></td><td>文件预设定义及其到中立 Feature contribution 的适配。</td></tr>
+      <tr><td><code>crew/agent/subagent/tools.py</code></td><td>动态预设目录、前后台子 Agent 执行与完整周期 Generation Lease。</td></tr>
       <tr><td><code>crew/agent/runtime.py</code></td><td>执行 Agent Scope 的 Prompt Contributor，把通用 fragment 与 persistent message 并入请求视图。</td></tr>
     </tbody>
   </table>
@@ -118,10 +121,11 @@ ToolResultRetention:
       <tr><td>2026-09-03</td><td>Wiki Attachment 改由 Prompt Contributor 提供；预览与真实执行统一贡献顺序。</td><td>删除 Agent Runtime→Wiki 直接导入和 Manager 注入。</td></tr>
       <tr><td>2026-09-03</td><td>Cron 触发轮文案改由 Cron Prompt Contributor 提供。</td><td>Agent Runtime 不再判断 Cron channel 或保存 Cron 产品文案。</td></tr>
       <tr><td>2026-09-03</td><td>后台子任务/进程/任务结果通知改由来源模块的 Prompt Contributor 提供，删除三个格式化函数与 params 魔法 key 检查。</td><td><code>crew/agent/runtime.py</code>、team member 的 subagent_drain_fn 旁路。</td></tr>
+      <tr><td>2026-09-05</td><td>主 Agent、preview 与前后台子 Agent 改为消费生命周期 Agent Preset Contribution。</td><td>动态目录、父权限封顶、Generation Lease 与 Agent 缓存换代。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0013-background-result-notification-contributors.html">ADR-0013</a> · <a href="../../testing/plugin-architecture-stage-2-background-notifications.html">测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0013-background-result-notification-contributors.html">ADR-0013</a> · <a href="../adr/0024-agent-preset-contribution-registry.html">ADR-0024</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-agent-preset.html">Agent Preset 测试记录</a></div>
 </div>
 </body>
 </html>

@@ -120,7 +120,7 @@ WIKI_LIST_INBOX_PROMPT = """列出当前知识库中已捕获但尚未深度整�
 
 def _load_wiki_agent_preset_prompt() -> str:
     """读取 Wiki 预设正文，不导入 ``crew.agent``，避免包初始化循环。"""
-    path = Path(__file__).resolve().parents[1] / "agent" / "subagent" / "presets" / "wiki.md"
+    path = Path(__file__).resolve().parent / "presets" / "wiki.md"
     content = path.read_text(encoding="utf-8")
     if content.startswith("---"):
         parts = content.split("---", 2)

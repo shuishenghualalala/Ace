@@ -21,6 +21,7 @@ from crew.features.dependencies import (
 from crew.features.context import ContextContributor, ContextContributorRegistry
 from crew.features.drivers import ExecutionDriver, ExecutionDriverRegistry
 from crew.features.events import FeatureEventContributor, FeatureEventContributorRegistry
+from crew.features.presets import AgentPresetContribution, AgentPresetRegistry
 from crew.features.routes import RouteContribution, RouteRegistry
 from crew.features.runtime import (
     Disposer,
@@ -353,6 +354,7 @@ class FeatureInstallContext:
     event_contributors: FeatureEventContributorRegistry
     routes: RouteRegistry
     dependencies: FeatureDependencyResolution
+    agent_presets: AgentPresetRegistry = field(default_factory=AgentPresetRegistry)
 
     @property
     def generation(self) -> FeatureGeneration:
@@ -469,6 +471,15 @@ class FeatureInstallContext:
             label=label,
         )
 
+    def register_agent_preset(
+        self,
+        contribution: AgentPresetContribution,
+        *,
+        label: str | None = None,
+    ) -> RegistrationToken:
+        """Publish a model-facing preset owned by this Feature Generation."""
+        return self.agent_presets.register(self.scope, contribution, label=label)
+
 
 class FeatureRuntime:
     """Activate, diagnose, and stop features through one reversible lifecycle."""
@@ -480,6 +491,7 @@ class FeatureRuntime:
         context_contributors: ContextContributorRegistry | None = None,
         routes: RouteRegistry | None = None,
         event_contributors: FeatureEventContributorRegistry | None = None,
+        agent_presets: AgentPresetRegistry | None = None,
     ) -> None:
         self.services = services or ServiceRegistry()
         self.execution_drivers = execution_drivers or ExecutionDriverRegistry()
@@ -490,6 +502,7 @@ class FeatureRuntime:
             event_contributors or FeatureEventContributorRegistry()
         )
         self.routes = routes or RouteRegistry()
+        self.agent_presets = agent_presets or AgentPresetRegistry()
         self.dependencies = FeatureDependencyGraph()
         self._records: dict[str, FeatureRecord] = {}
         self._sequences: dict[str, int] = {}
@@ -660,6 +673,7 @@ class FeatureRuntime:
             event_contributors=self.event_contributors,
             routes=self.routes,
             dependencies=resolution,
+            agent_presets=self.agent_presets,
         )
         async with transaction:
             result = definition.install(context)

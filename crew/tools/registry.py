@@ -75,6 +75,7 @@ class FunctionTool(Tool):
         result_retention: ToolResultRetention | str = ToolResultRetention.IMPORTANT,
         result_identity_fields: list[str] | tuple[str, ...] | None = None,
         result_policy_resolver: Callable[[dict[str, Any]], ToolResultPolicy] | None = None,
+        schema_resolver: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.name = name
         self.toolset = toolset
@@ -111,13 +112,33 @@ class FunctionTool(Tool):
         )
         self.result_identity_fields = tuple(result_identity_fields or ())
         self.result_policy_resolver = result_policy_resolver
+        self.schema_resolver = schema_resolver
 
     def to_schema(self) -> dict[str, Any]:
-        function_schema = dict(self.schema)
+        function_schema = self.current_function_schema()
+        return {
+            "type": "function",
+            "function": function_schema,
+        }
+
+    def current_function_schema(self) -> dict[str, Any]:
+        """Return the function schema currently visible to the runtime."""
+        function_schema = (
+            dict(self.schema_resolver())
+            if self.schema_resolver is not None
+            else dict(self.schema)
+        )
         function_schema.setdefault("name", self.name)
         function_schema.setdefault("description", self.description)
         function_schema.setdefault("parameters", self.parameters)
-        return {"type": "function", "function": function_schema}
+        return function_schema
+
+    def current_parameters(self) -> dict[str, Any]:
+        """Return parameters from the same schema used for model disclosure."""
+        return dict(
+            self.current_function_schema().get("parameters")
+            or {"type": "object", "properties": {}}
+        )
 
     def ui_meta(self) -> dict[str, str]:
         meta: dict[str, str] = {}
@@ -200,6 +221,7 @@ class Registry(ToolRegistry):
                 ),
                 result_identity_fields=kwargs.get("result_identity_fields"),
                 result_policy_resolver=kwargs.get("result_policy_resolver"),
+                schema_resolver=kwargs.get("schema_resolver"),
             )
         if not tool.name:
             raise ToolError(f"工具缺少 name: {tool!r}")
@@ -405,7 +427,13 @@ class Registry(ToolRegistry):
 
         args = tool_call.arguments
         # JSON Schema 结构校验
-        schema_err = validate_arguments(tool.name, tool.parameters, args)
+        current_parameters = getattr(tool, "current_parameters", None)
+        parameters = (
+            current_parameters()
+            if callable(current_parameters)
+            else tool.parameters
+        )
+        schema_err = validate_arguments(tool.name, parameters, args)
         if schema_err:
             return ToolResult(
                 tool_call.id, tool.name,

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0024 · Agent Preset Contribution Registry</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:920px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #1e8449;padding:8px 16px;background:#f7fbf8}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>ADR-0024 · Agent Preset Contribution Registry</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-05 · 阶段：插件架构 3B</div>
+
+  <h2>背景</h2>
+  <p>Wiki Agent 的 prompt、专属 Skill、Toolset 扩展、Context tag 和披露模式此前分散在通用预设目录与 <code>CrewApp</code> 的名称判断中。关闭 Wiki 只能撤销工具和服务，预设本身仍可被发现；Agent 缓存也只按会话配置区分，无法识别 Feature Generation 更新。</p>
+
+  <h2>决策</h2>
+  <div class="decision">建立中立的 <code>AgentPresetRegistry</code>：Feature 以不可变数据声明完整预设策略，注册、解析、执行和缓存均绑定所属 Generation；产品预设资产由自己的 Bundle 持有。</div>
+  <ul>
+    <li><code>AgentPresetContribution</code> 只包含字符串与不可变集合，描述 prompt、agent ID、固定 Skills、工具选择与追加、Context tags、披露模式、模型和后台策略，不依赖具体 Agent 实现。</li>
+    <li>注册返回 Scope-owned Token；只有最新 Active Generation 可解析。同名无关 Feature 冲突，rollback、restart 与 deactivate 通过同一 disposer 撤销目录可见性。</li>
+    <li>普通预设由必需的 <code>core.agent-presets</code> Feature 注册；Wiki Markdown 资产迁入 <code>crew/wiki/presets/</code>，由 <code>product.wiki</code> 注册。用户同名覆盖仍可被 Wiki Bundle 幂等领取，但专属安全策略不能被覆盖。</li>
+    <li>持久化主 Agent、上下文预览、前台与后台 <code>run_agent</code> 在完整执行期持有 preset Generation Lease。draining 后拒绝新执行，旧代执行结束前不释放所属资源。</li>
+    <li>持久化 Agent 的一次性有效配置包含 Generation key 与已解析策略；缓存换代只退休同 owner/session 的旧实例，活跃 Agent Lease 结束后再关闭。</li>
+    <li><code>run_agent</code> schema 从当前目录动态生成；工具披露与执行期 JSON Schema 校验读取同一份参数，Feature 停用后不再暴露已撤销预设。</li>
+    <li>子 Agent 先应用父会话最终授权与禁止嵌套边界，再按预设收窄，最后仅追加该预设显式声明的专属 Toolset。</li>
+  </ul>
+
+  <h2>结果与后续</h2>
+  <p><code>CrewApp</code> 的 Agent 装配路径不再导入 Wiki 工具常量，也不按 Wiki 名称决定 prompt、工具、Skill 或 Context。Stage 3B 仍需迁移 Wiki Route 与 UI Contribution；Work 的可选 Knowledge Service 依赖留在 Stage 3C。</p>
+
+  <h2>跨平台</h2>
+  <p>预设资产通过 <code>pathlib</code> 定位；Registry、Lease 与缓存指纹只使用 Python 标准数据结构和 asyncio，在 macOS、Linux 与 Windows 保持相同语义。</p>
+
+  <div class="nav"><a href="0023-feature-event-contributor-registry.html">ADR-0023</a> · <a href="../modules/agent.html">Agent 模块</a> · <a href="../modules/plugins.html">Feature / Plugin 模块</a> · <a href="../modules/wiki.html">Wiki 模块</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-agent-preset.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

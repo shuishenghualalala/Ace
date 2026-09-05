@@ -10,7 +10,6 @@ from httpx import ASGITransport, AsyncClient
 import pytest
 from starlette.testclient import TestClient
 
-from crew.agent.subagent.definition import build_preset_spec
 from crew.app import build_app
 from crew.gateway.server import create_app
 from crew.gateway.routers.wiki import create_wiki_router
@@ -403,8 +402,8 @@ def test_wiki_tools_are_exclusive_to_wiki_preset(tmp_path):
             owner_account_id=OWNER,
         )
 
-    definition = app.subagent_registry.get("Wiki")
-    run_agent_wiki = app._make_subagent(build_preset_spec(definition))
+    preset = app.agent_presets.resolve("Wiki")
+    run_agent_wiki = app._make_subagent(preset.contribution.as_spec())
     main_expected = app._single_agent_tool_filter(
         "builtin",
         app.config.access_control.resolve_for("internal"),
@@ -414,12 +413,19 @@ def test_wiki_tools_are_exclusive_to_wiki_preset(tmp_path):
         main_expected,
         app.capability_profiles.resolve([]),
     )
-    expected = app._wiki_agent_tool_filter(scoped_main_expected)
+    expected = app._apply_preset_tool_policy(
+        scoped_main_expected,
+        preset.contribution.as_spec(),
+    )
+    child_expected = app._apply_preset_tool_policy(
+        app._subagent_tool_filter(None, None),
+        preset.contribution.as_spec(),
+    )
 
     assert not any(name.startswith("wiki_") for name in main_agent.tool_filter)
     assert main_agent.context_tags == ()
     assert wiki_agent.tool_filter == expected
-    assert run_agent_wiki.tool_filter == wiki_agent.tool_filter
+    assert run_agent_wiki.tool_filter == child_expected
     assert run_agent_wiki.system_prompt == wiki_agent.system_prompt
     assert run_agent_wiki.enabled_skills == wiki_agent.enabled_skills
     assert run_agent_wiki.context_contributors is wiki_agent.context_contributors
@@ -435,6 +441,7 @@ def test_wiki_tools_are_exclusive_to_wiki_preset(tmp_path):
     assert "Canvas" not in wiki_agent.tool_filter
     assert wiki_agent.context_contributors is app.context_contributors
     assert wiki_agent.context_tags == ("wiki",)
+    # SingleAgent stores the neutral id as a path-safe segment for workspace state.
     assert wiki_agent.agent_id == "subagent_Wiki"
     assert wiki_agent.tool_disclosure_mode == "direct"
     assert "crew-wiki-curator" in (main_agent.disabled_skills or [])

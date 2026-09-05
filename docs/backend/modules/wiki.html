@@ -67,7 +67,8 @@
       <tr><td>Gateway Consumer</td><td>Wiki REST 与聊天附件捕获只消费动态 Knowledge Service；请求和后台任务持有 Generation Lease，停用统一 Gate。</td><td>已落地</td></tr>
       <tr><td>CLI Consumer</td><td>全部 Wiki 命令按次解析动态 Knowledge Service，并在同步或异步命令完整周期持有同代 Lease。</td><td>已落地</td></tr>
       <tr><td>Event Contribution</td><td>cards 与 changes 由 Wiki Bundle 注册为两个同代 Event Contributor；WS 只负责中立 dispatch 和标准帧投递。</td><td>已落地</td></tr>
-      <tr><td>完整业务纵向切片</td><td>Agent Preset、Route 与 UI 改为只依赖 Knowledge Service/Contribution。</td><td>迁移中</td></tr>
+      <tr><td>Agent Preset Contribution</td><td>Wiki prompt、固定 Skill、专属 Toolset、Context tag 与披露模式由 Bundle 注册；主 Agent 与子 Agent 全程持有同代 Lease。</td><td>已落地</td></tr>
+      <tr><td>完整业务纵向切片</td><td>Route 与 UI 改为只依赖 Knowledge Service/Contribution。</td><td>迁移中</td></tr>
     </tbody>
   </table>
 
@@ -76,7 +77,8 @@
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
       <tr><td><code>crew/wiki/service.py</code></td><td>Knowledge Service 契约、Service Key、本地 Provider 与迁移期 Components 视图。</td></tr>
-      <tr><td><code>crew/wiki/feature.py</code></td><td><code>product.wiki</code> 的 Provider、Tools、Context、Lease 与 restart 装配。</td></tr>
+      <tr><td><code>crew/wiki/feature.py</code></td><td><code>product.wiki</code> 的 Provider、Tools、Context、Events、Agent Preset、Lease 与 restart 装配。</td></tr>
+      <tr><td><code>crew/wiki/presets/wiki.md</code></td><td>由 Wiki Bundle 所有的 Agent prompt 与基础预设元数据。</td></tr>
       <tr><td><code>crew/wiki/store/</code></td><td>文件系统知识库数据与 Owner 隔离。</td></tr>
       <tr><td><code>crew/wiki/manager.py</code></td><td>会话活跃 KB 状态。</td></tr>
       <tr><td><code>crew/wiki/compiler.py</code></td><td>来源到知识页的编译流程。</td></tr>
@@ -109,7 +111,7 @@ ContextContributor(
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>Agent Preset、Route 与 UI Contribution 尚未全部归属 Wiki Bundle。</li>
+    <li>Route 与 UI Contribution 尚未归属 Wiki Bundle。</li>
     <li>Work 仍直接持有 Wiki Store；阶段 3C 改为可选 <code>knowledge</code> Service Consumer。</li>
   </ul>
 
@@ -130,10 +132,11 @@ ContextContributor(
       <tr><td>2026-09-05</td><td>Gateway Wiki API 与附件捕获迁为 Knowledge Service Consumer，并为请求绑定 Generation Lease。</td><td>REST Gate、上传/下载、KB/页面/来源、drain 与 Provider 替换边界。</td></tr>
       <tr><td>2026-09-05</td><td>Wiki CLI 全部叶子命令迁为动态 Knowledge Service Consumer。</td><td>命令 Gate、同步/异步 Lease、外部 Provider、上传与 Host SessionStore 边界。</td></tr>
       <tr><td>2026-09-05</td><td>Wiki cards/changes 注册为生命周期 Event Contributor，Gateway WS 删除 Manager 特判。</td><td>事件顺序、Generation replace、drain、失败隔离与旧帧出口兼容。</td></tr>
+      <tr><td>2026-09-05</td><td>Wiki Agent Preset 资产与完整策略归属 Bundle，通用 Agent 装配删除名称特判。</td><td>动态目录、前后台 Lease、父权限、普通 Agent 隔离与缓存换代。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0011-wiki-attachment-context-contributor.html">ADR-0011</a> · <a href="../adr/0020-wiki-knowledge-feature-foundation.html">ADR-0020</a> · <a href="../adr/0021-wiki-gateway-knowledge-service-consumer.html">ADR-0021</a> · <a href="../adr/0022-wiki-cli-knowledge-service-consumer.html">ADR-0022</a> · <a href="../adr/0023-feature-event-contributor-registry.html">ADR-0023</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-event-contributor.html">Event Contributor 测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0011-wiki-attachment-context-contributor.html">ADR-0011</a> · <a href="../adr/0020-wiki-knowledge-feature-foundation.html">ADR-0020</a> · <a href="../adr/0021-wiki-gateway-knowledge-service-consumer.html">ADR-0021</a> · <a href="../adr/0022-wiki-cli-knowledge-service-consumer.html">ADR-0022</a> · <a href="../adr/0023-feature-event-contributor-registry.html">ADR-0023</a> · <a href="../adr/0024-agent-preset-contribution-registry.html">ADR-0024</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-agent-preset.html">Agent Preset 测试记录</a></div>
 </div>
 </body>
 </html>

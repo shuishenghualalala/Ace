@@ -66,6 +66,7 @@
       <tr><td>默认 Agent Driver</td><td><code>agent</code> 兼容 ID 与 <code>agent.default</code> 稳定 ID 指向同一 Core Driver。</td><td>已落地</td></tr>
       <tr><td>业务 Driver Adapter</td><td>Team 与 Dynamic Kanban Manager 通过独立 FeatureScope 注册旧 mode，不进入核心分支。</td><td>已落地</td></tr>
       <tr><td>上下文贡献</td><td>Request 阶段由 Host 执行；Prompt 阶段由 Agent Scope 执行。Wiki、Cron、Gateway、Browser 与后台结果通知保持各自 Handler 所有权。</td><td>已落地</td></tr>
+      <tr><td>Agent Preset 装配</td><td>按中立 preset policy 组装 prompt、工具、Skill、Context 与披露模式；完整回合持有所属 Generation Lease，缓存指纹包含代次。</td><td>已落地</td></tr>
       <tr><td>托管 Feature</td><td>需要当前事件循环的 Product Feature 由 <code>declare_managed_feature()</code> 声明，startup 按依赖图激活，shutdown 按逆序停用。</td><td>已落地</td></tr>
       <tr><td>关闭编排</td><td>先停止 Dispatcher，再停用托管 Feature、drain 内置 Scope，最后关闭尚未迁移的业务服务、Provider、插件和 Store。</td><td>迁移中</td></tr>
     </tbody>
@@ -78,6 +79,7 @@
       <tr><td><code>crew/app.py</code></td><td>宿主组合根、公共请求前处理、内置 Driver Adapter 与关闭编排。</td></tr>
       <tr><td><code>crew/features/drivers.py</code></td><td>开放 mode 的可逆 Driver 注册、解析、Generation 选择与请求 Lease。</td></tr>
       <tr><td><code>crew/features/context.py</code></td><td>上下文阶段、顺序、失败策略、超时、Generation 与 Lease。</td></tr>
+      <tr><td><code>crew/features/presets.py</code></td><td>产品无关的 Agent Preset policy、目录解析、专属能力隔离与 Generation binding。</td></tr>
       <tr><td><code>crew/core/envelope.py</code></td><td>开放 mode 和稳定 <code>capability_unavailable</code> 错误载荷。</td></tr>
     </tbody>
   </table>
@@ -123,10 +125,11 @@ async for chunk in app.handle(envelope):
       <tr><td>2026-09-04</td><td>Sites 进入托管 Feature Runtime，中心启动/关闭不再直接调用 SiteManager。</td><td><code>product.sites</code>、组合根、Store 与 Blueprint Scheduler。</td></tr>
       <tr><td>2026-09-04</td><td>目录插件支持宿主事件循环激活阶段，中心启动不再直接调用 BrowserManager。</td><td><code>CrewApp.startup</code>、Browser 动态 Service、插件 phase 激活。</td></tr>
       <tr><td>2026-09-04</td><td>Wiki 内部对象构造与贡献注册移入 <code>product.wiki</code> Bundle；宿主兼容属性动态解析 Knowledge Service。</td><td><code>build_app</code>、关闭依赖顺序、Wiki/Work 迁移边界。</td></tr>
+      <tr><td>2026-09-05</td><td>Agent Preset 改为 Feature Runtime 动态装配，移除 Agent 构造中的 Wiki 名称与工具常量判断。</td><td>主 Agent、preview、子 Agent、缓存换代与 Wiki Bundle。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0013-background-result-notification-contributors.html">ADR-0013</a> · <a href="../adr/0019-browser-host-loop-feature.html">ADR-0019</a> · <a href="../adr/0020-wiki-knowledge-feature-foundation.html">ADR-0020</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-foundation.html">Wiki Foundation 测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0013-background-result-notification-contributors.html">ADR-0013</a> · <a href="../adr/0019-browser-host-loop-feature.html">ADR-0019</a> · <a href="../adr/0020-wiki-knowledge-feature-foundation.html">ADR-0020</a> · <a href="../adr/0024-agent-preset-contribution-registry.html">ADR-0024</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-agent-preset.html">Agent Preset 测试记录</a></div>
 </div>
 </body>
 </html>

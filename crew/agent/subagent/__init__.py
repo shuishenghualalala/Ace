@@ -7,7 +7,11 @@
 初期禁止嵌套：子 agent 的工具集由 app 侧 tool_filter 剔除 subagent 工具集。
 """
 
-from crew.agent.subagent.definition import SubagentDefinition, parse_definition
+from crew.agent.subagent.definition import (
+    SubagentDefinition,
+    parse_definition,
+    to_preset_contribution,
+)
 from crew.agent.subagent.registry import SubagentRegistry
 from crew.agent.subagent.tools import (
     SUBAGENT_TOOLSET,
@@ -21,6 +25,7 @@ from crew.agent.subagent.tools import (
 __all__ = [
     "SubagentDefinition",
     "parse_definition",
+    "to_preset_contribution",
     "SubagentRegistry",
     "SUBAGENT_TOOLSET",
     "ActiveSubagents",

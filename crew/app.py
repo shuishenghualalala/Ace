@@ -33,7 +33,6 @@ from crew.agent.subagent.context import (
     SubagentNotificationQueue,
     build_subagent_notification_handler,
 )
-from crew.agent.subagent.definition import build_preset_spec
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.interfaces import Agent, LLMProvider, MemoryProvider, SessionStore, WorkspaceStore
 from crew.evolution import EvolutionManager, EvolutionQueue
@@ -47,6 +46,8 @@ from crew.features import (
     FeatureScope,
     FeatureState,
     FeatureStopPolicy,
+    AgentPresetBinding,
+    AgentPresetUnavailableError,
     ServiceKey,
     run_async_compat,
 )
@@ -113,8 +114,6 @@ SUBAGENT_BLOCKED_TOOLSETS = {
     "memory",
     "cron",
     "tasks",
-    "wiki.read",
-    "wiki.manage",
 }
 SUBAGENT_BLOCKED_TOOLSET_PREFIXES = ("feishu",)
 
@@ -223,6 +222,17 @@ class AgentManager:
             raise RuntimeError("AgentManager 已关闭")
         config = agent_config or {}
         key = (owner_account_id, session_id, self._fingerprint(config))
+        # A preset Generation is part of the effective Agent configuration. As
+        # soon as a replacement is requested, retire only older entries for the
+        # same owner/session; unrelated sessions and configurations remain warm.
+        if config.get("_preset_generation"):
+            for stale_key in tuple(self._cache):
+                if (
+                    stale_key != key
+                    and stale_key[0] == owner_account_id
+                    and stale_key[1] == session_id
+                ):
+                    self._evict_key(stale_key)
         if key in self._cache:
             self._cache.move_to_end(key)  # LRU 标记最近使用
         else:
@@ -523,6 +533,7 @@ class CrewApp:
         self.execution_drivers = plugins.feature_runtime.execution_drivers
         self.context_contributors = plugins.feature_runtime.context_contributors
         self.event_contributors = plugins.feature_runtime.event_contributors
+        self.agent_presets = plugins.feature_runtime.agent_presets
         self._builtin_feature_scopes: list[FeatureScope] = []
         # 需要宿主事件循环的长生命周期 Feature 在 build_app 仅声明，startup
         # 再由共享 Runtime 按依赖图激活；Sites/Browser 后续复用同一入口。
@@ -1038,18 +1049,58 @@ class CrewApp:
 
         # builtin 执行器不直接调用 external_agent 工具。
         allowed = exclude_toolsets(self.registry, allowed, exact={"external_agent"})
+        # Product-owned exclusive toolsets are visible only to their matching
+        # preset policy; ordinary Agents never inherit them.
+        allowed = exclude_toolsets(
+            self.registry,
+            allowed,
+            exact=self.agent_presets.reserved_toolsets(),
+        )
 
         return allowed
 
-    def _wiki_agent_tool_filter(self, main_tools: list[str]) -> list[str]:
-        """Wiki Agent = 同身份主 Agent 最终静态范围 + Wiki 专属工具。"""
-        from crew.wiki.tools import WIKI_MANAGE_TOOLSET, WIKI_READ_TOOLSET
-
-        return extend_with_toolsets(
+    def _apply_preset_tool_policy(
+        self,
+        base_tools: list[str],
+        preset: dict[str, Any],
+        *,
+        allow_additions: bool = True,
+    ) -> list[str]:
+        """Apply a neutral preset's selection and dedicated toolset policy."""
+        selected = select_requested_tools(
             self.registry,
-            main_tools,
-            (WIKI_READ_TOOLSET, WIKI_MANAGE_TOOLSET),
+            base_tools,
+            requested_toolsets=preset.get("toolsets"),
+            requested_tools=preset.get("tools"),
         )
+        if allow_additions:
+            selected = extend_with_toolsets(
+                self.registry,
+                selected,
+                preset.get("toolset_additions") or (),
+            )
+        return selected
+
+    def _preset_binding(self, name: str) -> AgentPresetBinding | None:
+        if not name:
+            return None
+        try:
+            return self.agent_presets.resolve(name)
+        except AgentPresetUnavailableError:
+            return None
+
+    @asynccontextmanager
+    async def _preset_execution_lease(self, agent_config: dict | None):
+        """Hold the selected preset generation for the complete Agent turn."""
+        name = str((agent_config or {}).get("preset_agent_type") or "").strip()
+        binding = self._preset_binding(name)
+        if binding is None:
+            if name:
+                raise RuntimeError(f"Agent preset {name!r} is unavailable")
+            yield None
+            return
+        async with binding.acquire_lease(f"agent-preset:{name}"):
+            yield binding
 
     def _browser_plugin_effective(self, owner: str, user_type: str) -> bool:
         """当前 (owner, user_type) 下 Browser 插件的有效状态。
@@ -1284,23 +1335,30 @@ class CrewApp:
         agent_id = "default"
         system_prompt_override = None
         preset_agent_type = str(resolved.get("preset_agent_type") or "").strip()
-        preset_definition = None
-        preset_spec = None
-        if preset_agent_type and self.subagent_registry is not None:
-            preset_definition = self.subagent_registry.get(preset_agent_type)
-        is_wiki_agent_session = preset_agent_type == "Wiki"
-        if is_wiki_agent_session:
-            if preset_definition is None:
-                raise RuntimeError("Wiki 预设不存在，无法创建 Wiki Agent")
-            preset_spec = build_preset_spec(preset_definition)
+        preset_spec = (
+            dict(resolved["_preset_spec"])
+            if isinstance(resolved.get("_preset_spec"), dict)
+            else None
+        )
+        preset_binding = self._preset_binding(preset_agent_type) if preset_spec is None else None
+        if preset_spec is None and preset_binding is not None:
+            preset_spec = preset_binding.contribution.as_spec()
+        if preset_agent_type and preset_spec is None and preset_binding is None:
+            raise RuntimeError(f"Agent preset {preset_agent_type!r} is unavailable")
+        if preset_spec is not None:
             system_prompt_override = str(preset_spec["system_prompt"] or "")
-            agent_id = "subagent:Wiki"
-            enabled_skills = list(preset_spec["preset_skills"] or [])
-            disabled_skills = ["*"] if not enabled_skills else None
+            agent_id = str(preset_spec.get("agent_id") or agent_id)
+            fixed_skills = list(preset_spec.get("preset_skills") or [])
+            enabled_skills = fixed_skills
+            disabled_skills = ["*"] if fixed_skills else merge_disabled_skills(
+                disabled_skills,
+                self.agent_presets.reserved_skills(),
+            )
         else:
-            # Wiki 管理 Skill 只属于固定 Wiki 预设；普通主 Agent 即使默认启用全部
-            # Skills 也看不到它，避免通过说明间接获得管理工作流。
-            disabled_skills = merge_disabled_skills(disabled_skills, ["crew-wiki-curator"])
+            disabled_skills = merge_disabled_skills(
+                disabled_skills,
+                self.agent_presets.reserved_skills(),
+            )
 
         main_tool_filter = self._single_agent_tool_filter(executor_kind, ac)
         capability_scoped_tools = self.capability_profiles.filter_authorized_tools(
@@ -1308,17 +1366,12 @@ class CrewApp:
             main_tool_filter,
             session_capabilities,
         )
-        if is_wiki_agent_session:
-            tool_filter = self._wiki_agent_tool_filter(capability_scoped_tools)
-        else:
-            tool_filter = capability_scoped_tools
-            # 普通对话不能直接发现或调用任何 Wiki 工具；Wiki 页面会把消息直接
-            # 发送到 preset_agent_type=Wiki 的持久化预设会话。
-            tool_filter = exclude_toolsets(
-                self.registry,
-                tool_filter,
-                exact={"wiki.read", "wiki.manage"},
-            )
+        tool_filter = (
+            self._apply_preset_tool_policy(capability_scoped_tools, preset_spec)
+            if preset_spec is not None
+            else capability_scoped_tools
+        )
+        if preset_spec is None:
             system_prompt_override = session_capabilities.prompt or None
         if not browser_effective and tool_filter is not None:
             # 插件关闭时从允许工具中剔除 browser_use（skill 过滤见上）
@@ -1339,11 +1392,10 @@ class CrewApp:
             system_prompt=system_prompt_override,
             enable_title=cfg.title_auto,
             plan_manager=self.plan_manager,
-            context_tags=("wiki",) if is_wiki_agent_session else (),
-            tool_disclosure_mode=(
-                ToolDisclosureMode.DIRECT
-                if is_wiki_agent_session
-                else ToolDisclosureMode.PROGRESSIVE
+            context_tags=tuple(preset_spec.get("context_tags") or ()) if preset_spec else (),
+            tool_disclosure_mode=ToolDisclosureMode(
+                preset_spec.get("disclosure_mode", ToolDisclosureMode.PROGRESSIVE)
+                if preset_spec else ToolDisclosureMode.PROGRESSIVE
             ),
             agent_id=agent_id,
             enabled_skills=enabled_skills,
@@ -1541,6 +1593,11 @@ class CrewApp:
             exact=SUBAGENT_BLOCKED_TOOLSETS,
             prefixes=SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
         )
+        names = exclude_toolsets(
+            self.registry,
+            names,
+            exact=self.agent_presets.reserved_toolsets(),
+        )
         # 子 agent 同样受 per-owner 插件有效状态约束（schema 层；执行层还有
         # browser_use 的 permission_resolver 逐次重查兜底）。
         from crew.core.runctx import current_owner_account_id
@@ -1662,23 +1719,56 @@ class CrewApp:
                 enabled_skills = parent_enabled
                 disabled_skills = parent_disabled
 
-        is_wiki_preset = spec.get("preset_name") == "Wiki"
-        if is_wiki_preset:
+        preset_name = str(spec.get("preset_name") or "").strip()
+        preset_spec = (
+            dict(spec["_preset_spec"])
+            if isinstance(spec.get("_preset_spec"), dict)
+            else None
+        )
+        preset_binding = self._preset_binding(preset_name) if preset_spec is None else None
+        if preset_spec is None and preset_binding is not None:
+            preset_spec = preset_binding.contribution.as_spec()
+        if preset_name and preset_spec is None:
+            raise RuntimeError(f"Agent preset {preset_name!r} is unavailable")
+        if preset_name and preset_spec is not None:
+            # First apply the ordinary child safety boundary (parent snapshot,
+            # access control, and blocked/exclusive toolsets), then apply only
+            # the selected preset's explicit narrowing/additions.
             from crew.core.runctx import current_authorized_tool_names
 
             parent_snapshot = current_authorized_tool_names.get()
             if parent_snapshot is None:
-                ac = cfg.access_control.resolve_for(parent_user_type)
-                main_tools = self._single_agent_tool_filter("builtin", ac)
-                main_tools = self.capability_profiles.filter_authorized_tools(
-                    self.registry,
-                    main_tools,
-                    self.capability_profiles.resolve([]),
+                main_tools = self._subagent_tool_filter(
+                    None,
+                    None,
+                    user_type=parent_user_type,
                 )
             else:
                 main_tools = ordered_intersection(self.registry.names(), parent_snapshot)
-            tool_filter = self._wiki_agent_tool_filter(main_tools)
+                main_tools = exclude_toolsets(
+                    self.registry,
+                    main_tools,
+                    exact=SUBAGENT_BLOCKED_TOOLSETS,
+                    prefixes=SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
+                )
+                main_tools = exclude_toolsets(
+                    self.registry,
+                    main_tools,
+                    exact=self.agent_presets.reserved_toolsets(),
+                )
+            tool_filter = self._apply_preset_tool_policy(main_tools, preset_spec)
+            # A preset's fixed policy is authoritative for its skill scope.
+            fixed = list(preset_spec.get("preset_skills") or [])
+            enabled_skills = fixed
+            disabled_skills = ["*"] if fixed else merge_disabled_skills(
+                disabled_skills,
+                self.agent_presets.reserved_skills(),
+            )
         else:
+            disabled_skills = merge_disabled_skills(
+                disabled_skills,
+                self.agent_presets.reserved_skills(),
+            )
             tool_filter = self._subagent_tool_filter(
                 spec.get("toolsets"), spec.get("tools"), user_type=parent_user_type
             )
@@ -1692,16 +1782,14 @@ class CrewApp:
             tool_filter=tool_filter,
             user_type=parent_user_type,
             profile_path=None,
-            system_prompt=spec.get("system_prompt"),
+            system_prompt=(preset_spec or spec).get("system_prompt"),
             enable_title=False,
             lightweight=True,
-            context_tags=("wiki",) if is_wiki_preset else (),
-            tool_disclosure_mode=(
-                ToolDisclosureMode.DIRECT
-                if is_wiki_preset
-                else ToolDisclosureMode.PROGRESSIVE
+            context_tags=tuple((preset_spec or spec).get("context_tags") or ()),
+            tool_disclosure_mode=ToolDisclosureMode(
+                (preset_spec or spec).get("disclosure_mode", ToolDisclosureMode.PROGRESSIVE)
             ),
-            agent_id=f"subagent:{spec['preset_name']}" if spec.get("preset_name") else "subagent",
+            agent_id=str((preset_spec or spec).get("agent_id") or "subagent"),
             enabled_skills=enabled_skills,
             disabled_skills=disabled_skills,
             inject_skills=inject_skills,
@@ -2469,20 +2557,25 @@ class CrewApp:
         except Exception:  # noqa: BLE001 - workspace metadata is optional for preview
             pass
 
-        async with self.agents.lease(
-            session_id,
-            agent_config,
-            owner_account_id=owner,
-        ) as agent:
-            if not isinstance(agent, SingleAgent):
-                return None
-            return await agent.preview_context(
+        async with self._preset_execution_lease(agent_config) as preset_binding:
+            if preset_binding is not None:
+                agent_config = dict(agent_config or {})
+                agent_config["_preset_generation"] = preset_binding.generation.key
+                agent_config["_preset_spec"] = preset_binding.contribution.as_spec()
+            async with self.agents.lease(
                 session_id,
+                agent_config,
                 owner_account_id=owner,
-                workspace_id=workspace_id,
-                workspace_instructions=workspace_instructions,
-                workspace_root_path=workspace_root_path,
-            )
+            ) as agent:
+                if not isinstance(agent, SingleAgent):
+                    return None
+                return await agent.preview_context(
+                    session_id,
+                    owner_account_id=owner,
+                    workspace_id=workspace_id,
+                    workspace_instructions=workspace_instructions,
+                    workspace_root_path=workspace_root_path,
+                )
 
     def owner_active_model_profile(self, owner_account_id: str) -> ModelProfile:
         profile = self.config.owner_active_model_profile(owner_account_id)
@@ -3138,16 +3231,24 @@ class CrewApp:
         config_session_id = str(
             envelope.params.get("task_session_id") or envelope.session_id
         )
-        async with self.agents.lease(
-            envelope.session_id,
-            self._session_agent_config(
-                config_session_id,
-                owner_account_id=envelope.user_id,
-            ),
+        agent_config = self._session_agent_config(
+            config_session_id,
             owner_account_id=envelope.user_id,
-        ) as agent:
-            async for chunk in agent.run(envelope):
-                yield chunk
+        )
+        async with self._preset_execution_lease(agent_config) as preset_binding:
+            if preset_binding is not None:
+                agent_config = dict(agent_config or {})
+                # AgentManager's fingerprint must distinguish generations even
+                # when the persisted session configuration is unchanged.
+                agent_config["_preset_generation"] = preset_binding.generation.key
+                agent_config["_preset_spec"] = preset_binding.contribution.as_spec()
+            async with self.agents.lease(
+                envelope.session_id,
+                agent_config,
+                owner_account_id=envelope.user_id,
+            ) as agent:
+                async for chunk in agent.run(envelope):
+                    yield chunk
 
     async def _structured_path_context(
         self,
@@ -3512,6 +3613,12 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     app.plan_manager = PlanModeManager(session_store=session_store)
     register_plan_tools(registry, app.plan_manager)
 
+    # File-backed Agent definitions are only sources. Their live visibility is
+    # provided below by Feature-owned preset contributions.
+    from crew.agent.subagent import ActiveSubagents, SubagentRegistry, register_subagent_tools
+
+    sub_registry = SubagentRegistry()
+
     # Wiki：由 Product Feature Bundle 统一拥有 Store、Service、Tools、Context
     # 与后台任务。Bundle 的兼容模式在同步 build_app 中立即激活，使旧 CLI、
     # ASGI transport 和 Work 暂存适配器仍能读取动态兼容视图。
@@ -3535,8 +3642,27 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         ),
         runtime=plugins.feature_runtime,
         activate=True,
+        preset_source=sub_registry,
     )
     app.declare_managed_feature(wiki_feature.definition)
+
+    # General presets are one small Core Feature; product-owned definitions have
+    # already been claimed by their Bundle and therefore cannot leak here.
+    from crew.agent.subagent.definition import to_preset_contribution
+
+    general_preset_definitions = tuple(sub_registry.list())
+
+    def install_agent_presets(context) -> None:
+        for definition in general_preset_definitions:
+            context.register_agent_preset(to_preset_contribution(definition))
+
+    app._install_builtin_feature(
+        FeatureDefinition(
+            "core.agent-presets",
+            install_agent_presets,
+            required_by_product=True,
+        )
+    )
 
     from crew.work.briefs import WorkBriefStore
     from crew.work.items import WorkItemStore
@@ -3585,9 +3711,6 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     )
 
     # subagent：预设注册表 + delegate_task / run_agent / collect_subagent（toolset='subagent'）
-    from crew.agent.subagent import ActiveSubagents, SubagentRegistry, register_subagent_tools
-
-    sub_registry = SubagentRegistry()
     app.subagent_registry = sub_registry
     app.subagent_active = ActiveSubagents()
     from crew.tasks.task_manager import LegacyTaskManagerAdapter
@@ -3614,6 +3737,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         on_background_done=app._on_subagent_background_done,
         background_capacity=lambda: len(app._subagent_bg_tasks) < cfg.subagent_max_concurrent,
         on_collected=app._subagent_notifications.remove,
+        preset_registry=app.agent_presets,
     )
 
     # Cron 数据平面在停用后仍保留，Scheduler/Tools/Context 则由同一

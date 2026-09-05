@@ -254,7 +254,8 @@ def test_wiki_restart_failure_restores_old_definition_and_closes_failed_candidat
             super().close()
 
     monkeypatch.setattr(feature_module, "FileSystemWikiStore", TrackingStore)
-    real_build = feature_module.build_wiki_tools
+    tools_module = importlib.import_module("crew.wiki.tools")
+    real_build = tools_module.build_wiki_tools
     calls = 0
 
     def fail_once(*args, **kwargs):
@@ -274,6 +275,9 @@ def test_wiki_restart_failure_restores_old_definition_and_closes_failed_candidat
         storage_root=tmp_path / "wiki",
         desired_config_revision=1,
     )
+    # Each bundle closes over the tool builder at construction time. Make only
+    # the replacement candidate fail; recovery uses the original definition.
+    monkeypatch.setattr(tools_module, "build_wiki_tools", fail_once)
     second = build_wiki_feature(
         host,
         registry,
@@ -281,11 +285,11 @@ def test_wiki_restart_failure_restores_old_definition_and_closes_failed_candidat
         storage_root=tmp_path / "wiki",
         desired_config_revision=2,
     )
+    monkeypatch.setattr(tools_module, "build_wiki_tools", real_build)
 
     async def exercise():
         record = await runtime.activate(first.definition)
         old_definition = record.definition
-        monkeypatch.setattr(feature_module, "build_wiki_tools", fail_once)
         result = await runtime.update(second.definition)
         assert not result.updated
         assert result.restored

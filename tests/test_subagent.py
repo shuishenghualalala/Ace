@@ -67,15 +67,11 @@ def test_parse_definition_defaults(tmp_path):
 
 def test_registry_builtin_presets():
     reg = SubagentRegistry()
-    # 内置预设只保留通用能力，不包含特定产品的状态栏或指南。
-    assert set(reg.names()) >= {"general-purpose", "Explore", "Plan", "Wiki", "verification"}
+    # 内置注册表只保留通用来源；产品专属预设由 Feature Runtime 持有。
+    assert set(reg.names()) >= {"general-purpose", "Explore", "Plan", "verification"}
+    assert "Wiki" not in reg.names()
+    assert reg.get("Wiki") is None
     assert reg.get("Explore").source == "builtin"
-    wiki = reg.get("Wiki")
-    assert wiki is not None
-    # Wiki 权限由统一策略计算：父主 Agent 最终权限 + Wiki 专属 Toolset。
-    assert wiki.toolsets is None
-    assert wiki.tools is None
-    assert wiki.skills == ["crew-wiki-curator"]
 
 
 def test_registry_user_overrides_builtin(tmp_path, monkeypatch):
@@ -168,7 +164,8 @@ def test_subagent_inherits_parent_skills():
         # A: 不传 skills → 继承父全部（enabled/disabled 均为 None）
         a = app._make_subagent({**base_spec, "inherit_skills": True, "skills": None})
         assert a.inject_skills is True
-        assert a.enabled_skills is None and a.disabled_skills is None
+        assert a.enabled_skills is None
+        assert "crew-wiki-curator" in (a.disabled_skills or [])
 
         # B: 指定列表 → 与父允许集取交集
         b = app._make_subagent({**base_spec, "inherit_skills": True, "skills": [sample, "no-such-skill"]})
@@ -504,8 +501,8 @@ def test_subagent_tool_filter_coerces_string_toolsets():
     assert app._subagent_tool_filter("file", "file_read") == ["file_read"]
 
 
-def test_run_agent_not_registered_without_presets(monkeypatch):
-    """🔴 健壮性：无预设时不注册 run_agent（避免空 enum），delegate_task 仍在。"""
+def test_run_agent_keeps_feature_preset_when_generic_sources_are_empty(monkeypatch):
+    """通用来源为空时，Feature-owned Wiki 仍由动态注册表提供。"""
     empty_dir = sub_registry_mod._PRESETS_DIR.parent / "presets_none_xyz"
     # 指向一个不存在的目录 → 注册表为空
     monkeypatch.setattr(sub_registry_mod, "_PRESETS_DIR", empty_dir)
@@ -513,7 +510,9 @@ def test_run_agent_not_registered_without_presets(monkeypatch):
 
     app = build_app(config=Config(max_iterations=5))
     assert app.subagent_registry.names() == []
-    assert "run_agent" not in app.registry.names()
+    assert "run_agent" in app.registry.names()
+    schema = app.registry.get("run_agent").current_parameters()
+    assert schema["properties"]["agent_type"]["enum"] == ["Wiki"]
     assert "delegate_task" in app.registry.names()  # 自定义委派不受影响
 
 

@@ -5,7 +5,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from dataclasses import replace
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Protocol
+
+if TYPE_CHECKING:
+    from crew.tools.registry import FunctionTool, Registry
 
 from crew.core.interfaces import LLMProvider
 from crew.features import (
@@ -22,7 +27,6 @@ from crew.features import (
     RegistrationPhase,
     run_async_compat,
 )
-from crew.tools.registry import FunctionTool, Registry
 
 from .attachments import build_wiki_agent_context_contributor
 from .compiler import WikiCompiler
@@ -37,7 +41,6 @@ from .service import (
 )
 from .store import FileSystemWikiStore, WikiStore
 from .summary import WikiSummarizer
-from .tools import build_wiki_tools
 
 KNOWLEDGE_SERVICE = KNOWLEDGE_SERVICE_KEY
 WIKI_FEATURE_ID = "product.wiki"
@@ -121,6 +124,7 @@ def build_wiki_feature(
     runtime: FeatureRuntime | None = None,
     activate: bool = False,
     desired_config_revision: int = 1,
+    preset_source: Any = None,
 ) -> WikiFeatureBundle:
     """Build Wiki's stable service boundary and reversible feature definition.
 
@@ -184,6 +188,33 @@ def build_wiki_feature(
     candidate = make_provider()
     pending = [candidate]
 
+    preset_definition = None
+    # Deferred to keep importing the Wiki package from config/state free of an
+    # agent/tool registry cycle during process bootstrap.
+    from crew.agent.subagent.definition import parse_definition, to_preset_contribution
+    from .tools import build_wiki_tools
+
+    if preset_source is not None:
+        getter = getattr(preset_source, "get", None)
+        if callable(getter):
+            claim = getattr(preset_source, "claim", None)
+            preset_definition = claim("Wiki") if callable(claim) else getter("Wiki")
+    if preset_definition is None:
+        preset_definition = parse_definition(
+            Path(__file__).resolve().parent / "presets" / "wiki.md",
+            source="feature",
+        )
+    if preset_definition is None:
+        raise RuntimeError("Wiki Agent preset asset is unavailable")
+    preset = replace(
+        to_preset_contribution(preset_definition),
+        toolset_additions=("wiki.read", "wiki.manage"),
+        context_tags=("wiki",),
+        disclosure_mode="direct",
+        reserved_toolsets=("wiki.read", "wiki.manage"),
+        reserved_skills=("crew-wiki-curator",),
+    )
+
     def next_provider() -> LocalWikiProvider:
         return pending.pop() if pending else make_provider()
 
@@ -208,6 +239,7 @@ def build_wiki_feature(
             # host without the sentinel is an explicitly owned binding.
             explicit_binding = current is not None
         active_service = current if explicit_binding else candidate_provider
+        context.register_agent_preset(preset, label="agent-preset:Wiki")
         components = getattr(active_service, "components", None)
         if not isinstance(components, WikiProviderComponents):
             raise TypeError("Wiki host KnowledgeService must expose migration components")

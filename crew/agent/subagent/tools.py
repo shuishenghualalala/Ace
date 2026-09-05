@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from crew.agent.subagent.definition import build_preset_spec
 from crew.agent.subagent.registry import SubagentRegistry
+from crew.features import AgentPresetBinding, AgentPresetRegistry, AgentPresetUnavailableError
 
 if TYPE_CHECKING:
     from crew.agent.subagent.definition import SubagentDefinition
@@ -349,7 +350,7 @@ _PARTIAL_CAP = 2000   # 部分输出缓冲上限（保留尾部）
 _PARTIAL_TAIL = 800   # 中止时附带的部分输出尾部长度
 
 
-async def _run_one_child(
+async def _run_one_child_unleased(
     *,
     label: str,
     spec: dict[str, Any],
@@ -490,6 +491,37 @@ async def _run_one_child(
     }
 
 
+async def _run_one_child(
+    *,
+    label: str,
+    spec: dict[str, Any],
+    goal_text: str,
+    build_child: BuildChild,
+    parent_session_id: str,
+    active: ActiveSubagents | None,
+    idle_timeout: float,
+    max_runtime: float,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    preset_binding: AgentPresetBinding | None = None,
+) -> dict[str, Any]:
+    """Run a child while retaining its selected preset Generation lease."""
+    if preset_binding is None:
+        return await _run_one_child_unleased(
+            label=label, spec=spec, goal_text=goal_text, build_child=build_child,
+            parent_session_id=parent_session_id, active=active,
+            idle_timeout=idle_timeout, max_runtime=max_runtime,
+            progress_callback=progress_callback,
+        )
+    lease = preset_binding.acquire_lease(f"agent-preset:{label}")
+    async with lease:
+        return await _run_one_child_unleased(
+            label=label, spec=spec, goal_text=goal_text, build_child=build_child,
+            parent_session_id=parent_session_id, active=active,
+            idle_timeout=idle_timeout, max_runtime=max_runtime,
+            progress_callback=progress_callback,
+        )
+
+
 def _build_summary(
     status: str, final_text: str, partial: str, tool_calls: int, last_tool: str,
     abort_reason: str, started: float, idle_timeout: float, max_runtime: float,
@@ -537,6 +569,7 @@ async def _run_children(
                 idle_timeout=idle_timeout,
                 max_runtime=max_runtime,
                 progress_callback=progress_callback,
+                preset_binding=item.get("preset_binding"),
             )
 
     results = await asyncio.gather(*(_guarded(item) for item in specs))
@@ -573,6 +606,7 @@ async def _run_background(
                 if hasattr(tasks, "touch_activity")
                 else None
             ),
+            preset_binding=item.get("preset_binding"),
         )
     except asyncio.CancelledError:
         result = {"agent": item["label"], "status": "cancelled", "summary": "已取消",
@@ -619,6 +653,7 @@ def register_subagent_tools(
     on_background_done: Callable[[str, dict[str, Any]], None] | None = None,
     background_capacity: Callable[[], bool] | None = None,
     on_collected: Callable[[str, str], None] | None = None,
+    preset_registry: AgentPresetRegistry | None = None,
 ) -> None:
     """注册 delegate_task / run_agent / collect_subagent 工具到 toolset='subagent'。
 
@@ -792,27 +827,39 @@ def register_subagent_tools(
             return tool_error("agent_type is required")
         if not goal:
             return tool_error("goal is required")
-        definition = sub_registry.get(agent_type)
-        if definition is None:
+        binding = None
+        if preset_registry is not None:
+            try:
+                binding = preset_registry.resolve(agent_type)
+                spec = binding.contribution.as_spec()
+                spec["model"] = str(args.get("model") or "").strip() or spec["model"]
+                spec["preset_generation"] = binding.generation.key
+                spec["_preset_spec"] = dict(spec)
+            except AgentPresetUnavailableError:
+                return tool_error(f"Unknown or unavailable preset subagent: {agent_type}")
+            definition = None
+        else:
+            definition = sub_registry.get(agent_type)
+        if definition is None and binding is None:
             return tool_error(
                 f"Unknown preset subagent: {agent_type}. Available: {sub_registry.names()}"
             )
 
-        # Wiki 页面等持久化预设会话也复用同一规格构建函数。
-        spec = build_preset_spec(
-            definition,
-            model_override=str(args.get("model") or ""),
-        )
+        if binding is None:
+            spec = build_preset_spec(definition, model_override=str(args.get("model") or ""))
         if not spec["system_prompt"]:
             spec["system_prompt"] = _EPHEMERAL_PROMPT
         item = {
             "label": agent_type,
             "goal_text": _compose_goal(goal, args.get("context")),
             "spec": spec,
+            "preset_binding": binding,
         }
 
         # 后台异步：run_in_background 参数 或 预设 frontmatter background=true
-        want_bg = bool(args.get("run_in_background")) or definition.background
+        want_bg = bool(args.get("run_in_background")) or bool(
+            spec.get("background")
+        )
         if want_bg and tasks is not None and launch_background is not None:
             return _launch_one_bg(
                 item=item,
@@ -875,11 +922,19 @@ def register_subagent_tools(
 
     # 无预设子智能体时不注册 run_agent——否则 agent_type 的 enum 为空数组，
     # 模型无合法值可选、部分 provider 也会拒绝空 enum。delegate_task 仍可用。
-    if sub_registry.names():
+    if preset_registry is not None or sub_registry.names():
         registry.register(
             name="run_agent",
             toolset=RUN_AGENT_TOOLSET,
-            schema=build_run_agent_schema(sub_registry.list()),
+            schema=build_run_agent_schema(preset_registry.list() if preset_registry is not None else sub_registry.list()),
+            schema_resolver=(
+                (lambda: build_run_agent_schema(preset_registry.list()))
+                if preset_registry is not None else None
+            ),
+            check_fn=(
+                (lambda: bool(preset_registry.names()))
+                if preset_registry is not None else None
+            ),
             handler=handle_run_agent,
             is_async=True,
             display_name="运行子智能体",
