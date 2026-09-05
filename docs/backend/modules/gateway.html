@@ -68,6 +68,7 @@
       <tr><td>上下文兼容 API（<code>context.py</code>）</td><td>保留上传与结构化路径解析；Browser 标签页解析暂时重导出。静态 <code>REFERENCE_INJECTORS</code> 已删除。</td><td>迁移中</td></tr>
       <tr><td>Session Source Contributor（<code>session_context.py</code>）</td><td>拥有渠道来源数据和 formatter，通过 Feature Runtime 输出规范化 source 与动态模型上下文。</td><td>已落地</td></tr>
       <tr><td>Wiki Knowledge Consumer（<code>routers/wiki.py</code> / <code>routers/misc.py</code>）</td><td>REST 与附件捕获按请求解析 Knowledge Service 并持有 Generation Lease；能力停用统一返回 503 或跳过后台捕获。</td><td>已落地</td></tr>
+      <tr><td>Feature Event Dispatch（<code>ws.py</code>）</td><td>回合结束只调度中立 Event Contributor Registry；事件来源与 Generation 属于各 Feature，Gateway 提供标准帧 sink。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -131,11 +132,12 @@ async with lease:
       <tr><td>2026-09-03</td><td>新增 Feature Event 出口适配层 <code>event_compat.py</code>：已登记的 feature_event 在 <code>push_payload</code> 出口转换为旧 kind 帧（含断线回放），未登记事件丢弃；现有客户端线上协议零变化。</td><td><code>connections.push_payload</code>、WS 推送点（wiki_cards/wiki_changed/wiki_ingest_progress 生产侧已改发 feature_event）。</td></tr>
       <tr><td>2026-09-03</td><td>插件 API 路由改从 Route Registry 启动期装配，挂载点带运行期闸门（<code>make_route_gate</code>）：Feature 停用后请求得到 503 + capability_unavailable，路由树不做热卸载。</td><td><code>create_app</code> 插件挂载循环、<code>crew/features/routes.py</code>。</td></tr>
       <tr><td>2026-09-05</td><td>Wiki REST 与聊天附件捕获移除私有 Store/Compiler/Querier/Manager 依赖，改为动态 Knowledge Service + Generation Lease。</td><td><code>routers/wiki.py</code>、<code>routers/misc.py</code>、Feature disable/restart 与远程 Provider 边界。</td></tr>
+      <tr><td>2026-09-05</td><td>WS 回合尾部改为调度 Feature Event Contributor Registry，不再读取 Wiki Manager。</td><td>cards/changes 顺序投递、断线保留、失败隔离与 Generation Lease。</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0010-session-source-context-contributor.html">ADR-0010</a> · <a href="../adr/0021-wiki-gateway-knowledge-service-consumer.html">ADR-0021</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-gateway-consumer.html">Gateway Consumer 测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0010-session-source-context-contributor.html">ADR-0010</a> · <a href="../adr/0021-wiki-gateway-knowledge-service-consumer.html">ADR-0021</a> · <a href="../adr/0023-feature-event-contributor-registry.html">ADR-0023</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-event-contributor.html">Event Contributor 测试记录</a></div>
 </div>
 </body>
 </html>

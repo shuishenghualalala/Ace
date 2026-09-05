@@ -44,6 +44,12 @@ from crew.features.context import (
 )
 from crew.features.drivers import ExecutionDriver, ExecutionDriverHandler
 from crew.features.dependencies import FeatureServiceDependencies
+from crew.features.events import (
+    EventFailurePolicy,
+    FeatureEventContributor,
+    FeatureEventContributorHandler,
+    FeatureEventPredicate,
+)
 from crew.features.runtime import (
     FeatureActivationError,
     FeatureGeneration,
@@ -424,6 +430,30 @@ class PluginContext:
             )
         )
 
+    def register_event_contributor(
+        self,
+        contributor_id: str,
+        handler: FeatureEventContributorHandler,
+        *,
+        priority: int = 100,
+        failure_policy: EventFailurePolicy = EventFailurePolicy.DEGRADE,
+        timeout_seconds: float | None = None,
+        predicate: FeatureEventPredicate | None = None,
+        description: str = "",
+    ) -> RegistrationToken:
+        """Publish ordered feature events under this plugin Generation."""
+        return self._feature_context.register_event_contributor(
+            FeatureEventContributor(
+                contributor_id=contributor_id,
+                handler=handler,
+                priority=priority,
+                failure_policy=failure_policy,
+                timeout_seconds=timeout_seconds,
+                predicate=predicate,
+                description=description,
+            )
+        )
+
     def resolve_service(self, key: str | ServiceKey[Any]) -> Any:
         """Resolve one required or optional service declared by this plugin."""
         service_key = self._service_key(key)
@@ -796,6 +826,7 @@ class PluginManager:
         self.registry = registry
         # 注入给插件的共享服务（如 config / plugin_prefs），经 PluginContext.services 透传
         self.feature_runtime = feature_runtime or FeatureRuntime()
+        self.event_contributors = self.feature_runtime.event_contributors
         self.services: dict[str, Any] = {}
         self._host_scope = FeatureScope(FeatureGeneration("ace.host", 1))
         self.publish_host_services(services or {})

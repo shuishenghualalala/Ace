@@ -7,7 +7,10 @@ import threading
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from crew.core.mocks import FakeProvider
+from crew.core.envelope import Envelope
 from crew.features import FeatureGeneration, FeatureRuntime, FeatureScope, FeatureState, FeatureStopPolicy
 from crew.wiki import (
     KNOWLEDGE_SERVICE_KEY,
@@ -402,6 +405,99 @@ async def test_home_intro_refresh_is_scope_owned_and_drain_rejection_is_foregrou
     # Admission rejection is optional background work; the foreground write remains valid.
     compiler.finalize_write("after-drain", "owner", "default")
     await second_scope.dispose()
+
+
+async def test_wiki_event_contributor_uses_current_generation_manager_and_ordered_payloads(tmp_path):
+    runtime = FeatureRuntime()
+    registry = Registry()
+    host = _bundle_host()
+    first = build_wiki_feature(
+        host,
+        registry,
+        provider=FakeProvider(),
+        storage_root=tmp_path / "wiki",
+        desired_config_revision=1,
+    )
+    second = build_wiki_feature(
+        host,
+        registry,
+        provider=FakeProvider(),
+        storage_root=tmp_path / "wiki",
+        desired_config_revision=2,
+    )
+    first.manager.add_pending_cards("session", [{"title": "Card"}], owner_account_id="owner")
+    first.manager.add_pending_change("session", {"page_id": "changed"}, owner_account_id="owner")
+    second.manager.add_pending_cards("session", [{"title": "New card"}], owner_account_id="owner")
+
+    record = await runtime.activate(first.definition)
+    assert record.scope is not None
+    bindings = runtime.event_contributors.bindings()
+    assert [binding.contributor.contributor_id for binding in bindings] == [
+        "wiki.session.cards", "wiki.session.changes",
+    ]
+    assert all(binding.generation == record.generation for binding in bindings)
+    delivered = []
+
+    async def sink(event):
+        delivered.append(event)
+
+    report = await runtime.event_contributors.dispatch(
+        Envelope.of("q", session_id="session", user_id="owner"), sink
+    )
+    assert [event.as_body() for event in report.events] == [
+        {"feature": "wiki", "event": "cards", "version": 1, "payload": {"pages": [{"title": "Card"}]}},
+        {"feature": "wiki", "event": "changed", "version": 1, "payload": {"changes": [{"page_id": "changed"}]}},
+    ]
+    assert delivered == list(report.events)
+
+    result = await runtime.update(second.definition)
+    assert result.updated
+    assert all(binding.generation == record.generation for binding in runtime.event_contributors.bindings())
+    first.manager.add_pending_cards("session", [{"title": "Stale old generation"}], owner_account_id="owner")
+    new_events = await runtime.event_contributors.dispatch(
+        Envelope.of("q", session_id="session", user_id="owner"), sink
+    )
+    assert [event.as_body() for event in new_events.events] == [
+        {"feature": "wiki", "event": "cards", "version": 1, "payload": {"pages": [{"title": "New card"}]}},
+    ]
+    assert first.manager.take_pending_cards("session", owner_account_id="owner") == [{"title": "Stale old generation"}]
+    await runtime.deactivate("product.wiki")
+    assert runtime.event_contributors.bindings() == ()
+
+
+async def test_wiki_event_push_failure_does_not_drop_unpushed_change(tmp_path):
+    runtime = FeatureRuntime()
+    registry = Registry()
+    host = _bundle_host()
+    bundle = build_wiki_feature(
+        host,
+        registry,
+        provider=FakeProvider(),
+        storage_root=tmp_path / "wiki",
+    )
+    bundle.manager.add_pending_cards("session", [{"title": "Card"}], owner_account_id="owner")
+    bundle.manager.add_pending_change("session", {"page_id": "changed"}, owner_account_id="owner")
+    await runtime.activate(bundle.definition)
+
+    sent = []
+
+    async def fail_cards(event):
+        sent.append(event.event)
+        if event.event == "cards":
+            raise RuntimeError("push failed")
+
+    with pytest.raises(RuntimeError, match="push failed"):
+        await runtime.event_contributors.dispatch(
+            Envelope.of("q", session_id="session", user_id="owner"), fail_cards
+        )
+
+    assert sent == ["cards"]
+    # The old gateway and the split contributors take changes only after cards
+    # have been delivered, so a cards sink failure must leave changes pending.
+    assert bundle.manager.take_pending_changes("session", owner_account_id="owner") == [
+        {"page_id": "changed"}
+    ]
+    await runtime.deactivate("product.wiki")
 
 
 def test_wiki_tool_conflict_mid_batch_rolls_back_only_generation_tools(tmp_path):

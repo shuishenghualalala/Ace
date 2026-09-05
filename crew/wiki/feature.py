@@ -11,6 +11,8 @@ from crew.core.interfaces import LLMProvider
 from crew.features import (
     ContextContributor,
     ContextPhase,
+    FeatureEvent,
+    FeatureEventContributor,
     FeatureDefinition,
     FeatureInstallContext,
     FeatureRuntime,
@@ -245,6 +247,39 @@ def build_wiki_feature(
                 model_visible=True,
                 persistent=True,
                 description="Active knowledge base context for Wiki agents",
+            )
+        )
+
+        def take_pending_cards(envelope):
+            manager = components.manager
+            cards = manager.take_pending_cards(
+                envelope.session_id,
+                owner_account_id=envelope.user_id,
+            )
+            return FeatureEvent("wiki", "cards", 1, {"pages": cards}) if cards else None
+
+        def take_pending_changes(envelope):
+            manager = components.manager
+            changes = manager.take_pending_changes(
+                envelope.session_id,
+                owner_account_id=envelope.user_id,
+            )
+            return FeatureEvent("wiki", "changed", 1, {"changes": changes}) if changes else None
+
+        context.register_event_contributor(
+            FeatureEventContributor(
+                contributor_id="wiki.session.cards",
+                handler=take_pending_cards,
+                priority=100,
+                description="Pending Wiki cards for the current session",
+            )
+        )
+        context.register_event_contributor(
+            FeatureEventContributor(
+                contributor_id="wiki.session.changes",
+                handler=take_pending_changes,
+                priority=200,
+                description="Pending Wiki changes for the current session",
             )
         )
         tools = build_wiki_tools(

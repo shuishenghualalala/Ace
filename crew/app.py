@@ -522,6 +522,7 @@ class CrewApp:
         self.agents = AgentManager(self._make_agent)
         self.execution_drivers = plugins.feature_runtime.execution_drivers
         self.context_contributors = plugins.feature_runtime.context_contributors
+        self.event_contributors = plugins.feature_runtime.event_contributors
         self._builtin_feature_scopes: list[FeatureScope] = []
         # 需要宿主事件循环的长生命周期 Feature 在 build_app 仅声明，startup
         # 再由共享 Runtime 按依赖图激活；Sites/Browser 后续复用同一入口。

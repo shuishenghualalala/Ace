@@ -25,7 +25,8 @@ from crew.agent.skills import (
     resolve_skill_any,
 )
 from crew.core.runctx import current_active_skill_packages
-from crew.core.envelope import Envelope, feature_event_body
+from crew.core.envelope import Envelope
+from crew.features import FeatureEventContributionFailedError
 from crew.gateway.auth import AuthenticationError, authenticate_websocket
 from crew.scenarios import resolve_binding as resolve_scenario_binding
 from crew.gateway.helpers import (
@@ -273,17 +274,16 @@ def create_ws_router(
                         except Exception as exc:  # noqa: BLE001
                             log.warning("plan 待办通知发布失败 session=%s: %s", sid, exc)
 
-                # Wiki Agent：本轮若有待展示卡片 → 推 wiki.cards 事件帧
-                #（feature_event 由出口 event_compat 转成旧 wiki_cards 帧）
-                wm = getattr(crew, "wiki_manager", None)
-                if wm is not None and not disconnected.is_set():
-                    cards = wm.take_pending_cards(envelope.session_id, owner_account_id=owner)
-                    if cards:
+                # Feature 事件由各自 Bundle 注册的中立 Source 生产。断开时不 dispatch，
+                # 让待处理事件留在其 Feature 的会话状态中，供后续回合或重连消费。
+                event_contributors = getattr(crew, "event_contributors", None)
+                if not disconnected.is_set() and event_contributors is not None:
+                    async def push_feature_event(event) -> None:
                         await connections.push_payload(
                             envelope.session_id,
                             {
                                 "kind": "feature_event",
-                                "body": feature_event_body("wiki", "cards", {"pages": cards}),
+                                "body": event.as_body(),
                                 "is_final": False,
                                 "sequence": 0,
                                 "request_id": envelope.request_id,
@@ -291,20 +291,29 @@ def create_ws_router(
                             },
                             owner_account_id=owner,
                         )
-                    changes = wm.take_pending_changes(envelope.session_id, owner_account_id=owner)
-                    if changes:
-                        await connections.push_payload(
-                            envelope.session_id,
-                            {
-                                "kind": "feature_event",
-                                "body": feature_event_body("wiki", "changed", {"changes": changes}),
-                                "is_final": False,
-                                "sequence": 0,
-                                "request_id": envelope.request_id,
-                                "session_id": envelope.session_id,
-                            },
-                            owner_account_id=owner,
+
+                    try:
+                        event_report = await event_contributors.dispatch(
+                            envelope,
+                            push_feature_event,
                         )
+                    except FeatureEventContributionFailedError as error:
+                        log.warning(
+                            "Feature event source failed closed session=%s contributor=%s generation=%s: %s",
+                            envelope.session_id,
+                            error.contributor_id,
+                            error.generation.key,
+                            error,
+                        )
+                    else:
+                        for failure in event_report.failures:
+                            log.warning(
+                                "Feature event source degraded session=%s contributor=%s generation=%s: %s",
+                                envelope.session_id,
+                                failure.contributor_id,
+                                failure.generation.key,
+                                failure.message,
+                            )
             except Exception:  # noqa: BLE001 — WS runner 为并发派发的后台 task 顶层，dispatch 已内部回报错帧，此处仅兜底记录
                 log.exception("WS runner 异常 session=%s", envelope.session_id)
                 try:

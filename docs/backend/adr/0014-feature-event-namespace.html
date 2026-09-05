@@ -26,7 +26,7 @@
       <tr><td>新→旧映射与出口展开</td><td><code>crew/gateway/event_compat.py</code></td><td>(feature, event, version) → 旧 kind；帧级字段透传；未登记事件记日志并丢弃。</td></tr>
       <tr><td>出口唯一转换点</td><td><code>crew/gateway/connections.py</code></td><td><code>push_payload</code> 先展开再入回放缓存；断线 replay 因此也保持旧协议。</td></tr>
       <tr><td>team 内部消息</td><td><code>crew/team/team_manager.py</code></td><td><code>team.internal_message v1</code>，payload 即原 team_internal body。</td></tr>
-      <tr><td>wiki 卡片/变更/摄取进度</td><td><code>crew/gateway/ws.py</code>、<code>routers/wiki.py</code></td><td><code>wiki.cards / wiki.changed / wiki.ingest_progress v1</code>。</td></tr>
+      <tr><td>wiki 卡片/变更/摄取进度</td><td>Wiki Bundle Event Contributors、<code>routers/wiki.py</code></td><td><code>wiki.cards / wiki.changed / wiki.ingest_progress v1</code>；WS 只提供中立 dispatch sink。</td></tr>
     </tbody>
   </table>
 
@@ -40,11 +40,12 @@
 
   <h2>边界与后续</h2>
   <p>本切片选择「出口转换」而非「双发」：旧客户端只看到旧帧，<code>feature_event</code> 先在后端内部流动并积累契约测试。阶段 5 前端 reducer 迁移到 <code>ace.feature-event.v1</code> 后，删除 <code>event_compat.py</code> 与三个旧 ChunkKind 枚举（deprecated_after 的跟踪要求见计划 §15.2）。新增业务事件的规则：生产侧只发 feature_event 并登记映射，不再往 <code>ChunkKind</code> 加业务枚举。</p>
+  <p>2026-09-05 的 Stage 3B 后续切片新增 <code>FeatureEventContributorRegistry</code>：Wiki cards/changes 来源已从 WS 移入 Wiki FeatureScope，按 Generation Lease 顺序 dispatch；命名空间和出口兼容决策保持不变。</p>
 
   <h2>跨平台</h2>
   <p>纯协议与字典转换，不引入进程、路径或平台分支。</p>
 
-  <div class="nav"><a href="0013-background-result-notification-contributors.html">ADR-0013</a> · <a href="../modules/core.html">Core 模块</a> · <a href="../../testing/plugin-architecture-stage-2-feature-event.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+  <div class="nav"><a href="0013-background-result-notification-contributors.html">ADR-0013</a> · <a href="0023-feature-event-contributor-registry.html">ADR-0023</a> · <a href="../modules/core.html">Core 模块</a> · <a href="../../testing/plugin-architecture-stage-2-feature-event.html">阶段 2 测试记录</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-event-contributor.html">Stage 3B 测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
 </div>
 </body>
 </html>

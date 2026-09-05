@@ -20,6 +20,7 @@ from crew.features.dependencies import (
 )
 from crew.features.context import ContextContributor, ContextContributorRegistry
 from crew.features.drivers import ExecutionDriver, ExecutionDriverRegistry
+from crew.features.events import FeatureEventContributor, FeatureEventContributorRegistry
 from crew.features.routes import RouteContribution, RouteRegistry
 from crew.features.runtime import (
     Disposer,
@@ -349,6 +350,7 @@ class FeatureInstallContext:
     services: ServiceRegistry
     execution_drivers: ExecutionDriverRegistry
     context_contributors: ContextContributorRegistry
+    event_contributors: FeatureEventContributorRegistry
     routes: RouteRegistry
     dependencies: FeatureDependencyResolution
 
@@ -429,6 +431,19 @@ class FeatureInstallContext:
             label=label,
         )
 
+    def register_event_contributor(
+        self,
+        contributor: FeatureEventContributor,
+        *,
+        label: str | None = None,
+    ) -> RegistrationToken:
+        """Publish feature events owned by this exact Feature Generation."""
+        return self.event_contributors.register(
+            self.scope,
+            contributor,
+            label=label,
+        )
+
     def register_api_router(
         self,
         router: Any,
@@ -464,11 +479,15 @@ class FeatureRuntime:
         execution_drivers: ExecutionDriverRegistry | None = None,
         context_contributors: ContextContributorRegistry | None = None,
         routes: RouteRegistry | None = None,
+        event_contributors: FeatureEventContributorRegistry | None = None,
     ) -> None:
         self.services = services or ServiceRegistry()
         self.execution_drivers = execution_drivers or ExecutionDriverRegistry()
         self.context_contributors = (
             context_contributors or ContextContributorRegistry()
+        )
+        self.event_contributors = (
+            event_contributors or FeatureEventContributorRegistry()
         )
         self.routes = routes or RouteRegistry()
         self.dependencies = FeatureDependencyGraph()
@@ -638,6 +657,7 @@ class FeatureRuntime:
             services=self.services,
             execution_drivers=self.execution_drivers,
             context_contributors=self.context_contributors,
+            event_contributors=self.event_contributors,
             routes=self.routes,
             dependencies=resolution,
         )
