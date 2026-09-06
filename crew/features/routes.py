@@ -14,6 +14,8 @@ from typing import Any
 from crew.core.errors import CrewError
 from crew.features.runtime import (
     FeatureGeneration,
+    FeatureLease,
+    FeatureLeaseUnavailableError,
     FeatureScope,
     FeatureState,
     RegistrationPhase,
@@ -159,19 +161,52 @@ class RouteRegistry:
 
     def resolve(self, contribution_id: str) -> RouteBinding:
         normalized = _normalize_contribution_id(contribution_id)
+        entry = self._select_entry(normalized)
+        return entry.binding()
+
+    def _select_entry(self, contribution_id: str) -> _RouteEntry:
         visible = [
-            entry for entry in self._entries.get(normalized, ()) if entry.visible
+            entry
+            for entry in self._entries.get(contribution_id, ())
+            if entry.visible
         ]
         if not visible:
-            raise RouteUnavailableError(normalized)
-        entry = max(
+            raise RouteUnavailableError(contribution_id)
+        return max(
             visible,
             key=lambda item: (
                 item.owner.generation.sequence,
                 item.owner.generation.created_at,
             ),
         )
-        return entry.binding()
+
+    def acquire_lease(
+        self,
+        contribution_id: str,
+        *,
+        label: str = "route-request",
+    ) -> tuple[RouteBinding, FeatureLease] | None:
+        """Resolve and claim one route generation as one atomic operation.
+
+        A route gate must retain the exact generation selected for the request.
+        Resolving first and checking ``is_available`` later leaves a race where
+        a generation can drain between the check and the endpoint body.  This
+        method performs the visibility lookup and lease admission without an
+        await point, so the returned binding and lease always belong together.
+        ``None`` means that no active generation currently owns the route.
+        """
+        normalized = _normalize_contribution_id(contribution_id)
+        try:
+            entry = self._select_entry(normalized)
+        except RouteUnavailableError:
+            return None
+        try:
+            lease = entry.owner.acquire_lease(label)
+        except FeatureLeaseUnavailableError:
+            # A concurrent synchronous lifecycle transition can close the
+            # generation after selection.  Treat that as an unavailable route.
+            return None
+        return entry.binding(), lease
 
     def is_available(self, contribution_id: str) -> bool:
         """闸门口径：该贡献当前是否有可见的活跃 Generation。"""

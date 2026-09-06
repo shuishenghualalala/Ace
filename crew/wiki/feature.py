@@ -33,6 +33,7 @@ from .compiler import WikiCompiler
 from .config import WikiConfig
 from .manager import WikiSessionManager
 from .query import WikiQuerier
+from .routes import create_wiki_router
 from .service import (
     KnowledgeService,
     KNOWLEDGE_SERVICE_KEY,
@@ -187,6 +188,10 @@ def build_wiki_feature(
 
     candidate = make_provider()
     pending = [candidate]
+    # FastAPI mounts one stable route surface during host assembly.  Each
+    # generation contributes that same surface to the Route Registry, while
+    # the request gate selects and leases the matching generation at runtime.
+    wiki_router = create_wiki_router(host)
 
     preset_definition = None
     # Deferred to keep importing the Wiki package from config/state free of an
@@ -226,6 +231,11 @@ def build_wiki_feature(
         candidate_token = context.register_disposer(
             candidate_provider.close,
             label="resource:wiki.candidate-provider",
+        )
+        context.register_api_router(
+            wiki_router,
+            contribution_id=WIKI_FEATURE_ID,
+            label="route:wiki",
         )
         sentinel = getattr(host, "_UNSET_KNOWLEDGE_SERVICE", None)
         override = getattr(host, "_knowledge_service_override", sentinel)

@@ -296,17 +296,26 @@ class ServiceRegistry:
         scope_path: ServiceScopePath | None = None,
         *,
         label: str = "service-request",
+        generation: FeatureGeneration | None = None,
     ) -> tuple[T, FeatureLease] | None:
         """Resolve one visible service and lease its owning generation.
 
         The lookup and lease acquisition share the same visible entry, so a
         consumer cannot retain a provider after its generation starts draining.
-        ``None`` means the optional service is currently unavailable.
+        When ``generation`` is supplied, only that exact generation is eligible;
+        this lets a feature-owned route keep all of its capabilities in one
+        generation during a restart. ``None`` means the optional service is
+        currently unavailable.
         """
         path = scope_path or ServiceScopePath.global_scope()
         for scope_kind, candidate in path.resolution_order():
             entries = self._entries.get(self._address(key, scope_kind, candidate), ())
-            visible = [entry for entry in entries if entry.visible]
+            visible = [
+                entry
+                for entry in entries
+                if entry.visible
+                and (generation is None or entry.owner.generation == generation)
+            ]
             if not visible:
                 continue
             entry = max(

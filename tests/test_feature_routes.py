@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
-from fastapi import APIRouter, Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, Request
+from httpx import ASGITransport, AsyncClient
 from fastapi.testclient import TestClient
 
 from crew.features import (
@@ -76,6 +79,30 @@ async def test_new_generation_stages_then_replaces_contribution_atomically() -> 
     assert registry.resolve("plugin.browser").generation.key == "browser@g2"
 
 
+async def test_route_acquire_lease_binds_the_selected_generation() -> None:
+    registry = RouteRegistry()
+    old_scope = _active_scope("browser", 1)
+    registry.register(old_scope, RouteContribution("plugin.browser", _router()))
+
+    new_scope = FeatureScope(FeatureGeneration("browser", 2))
+    registry.register(new_scope, RouteContribution("plugin.browser", _router()))
+
+    old_binding, old_lease = registry.acquire_lease("plugin.browser", label="old")
+    assert old_binding.generation.key == "browser@g1"
+
+    new_scope.activate()
+    new_binding, new_lease = registry.acquire_lease("plugin.browser", label="new")
+    assert new_binding.generation.key == "browser@g2"
+
+    # The old request keeps its exact generation even after replacement becomes
+    # visible; releasing it must not affect the new generation's lease.
+    assert old_binding.generation.key != new_binding.generation.key
+    old_lease.release()
+    new_lease.release()
+    await old_scope.dispose()
+    await new_scope.dispose()
+
+
 async def test_scope_release_makes_contribution_unavailable() -> None:
     registry = RouteRegistry()
     scope = _active_scope("browser")
@@ -136,6 +163,55 @@ async def test_gate_returns_capability_unavailable_after_scope_release() -> None
     detail = response.json()["detail"]
     assert detail["ok"] is False
     assert detail["code"] == "capability_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_route_gate_drains_in_flight_request_before_scope_cleanup() -> None:
+    registry = RouteRegistry()
+    scope = _active_scope("browser")
+    started = asyncio.Event()
+    release = asyncio.Event()
+    closed = 0
+
+    async def handler(request: Request) -> dict[str, bool]:
+        nonlocal closed
+        started.set()
+        await release.wait()
+        return {"ok": True}
+
+    router = APIRouter()
+
+    @router.get("/status")
+    async def status(request: Request):
+        return await handler(request)
+
+    def dispose() -> None:
+        nonlocal closed
+        closed += 1
+
+    scope.register(dispose, label="resource:route-owner")
+    registry.register(scope, RouteContribution("plugin.browser", router))
+    app = _gated_app(registry, "plugin.browser", router)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        request = asyncio.create_task(client.get("/api/plugins/browser/status"))
+        await started.wait()
+        scope.begin_draining()
+        assert registry.acquire_lease("plugin.browser", label="late") is None
+        stopping = asyncio.create_task(scope.stop(timeout_seconds=None))
+        await asyncio.sleep(0)
+        assert not stopping.done()
+        assert closed == 0
+
+        release.set()
+        response = await request
+        await stopping
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert closed == 1
 
 
 async def test_legacy_plugin_router_lands_in_route_registry(tmp_path):

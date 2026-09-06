@@ -902,9 +902,14 @@ class PluginManager:
         key: ServiceKey[ServiceT],
         *,
         label: str = "service-request",
+        generation: FeatureGeneration | None = None,
     ) -> tuple[ServiceT, FeatureLease] | None:
         """Resolve a service and lease its active Feature generation together."""
-        return self.feature_runtime.services.acquire_lease(key, label=label)
+        return self.feature_runtime.services.acquire_lease(
+            key,
+            label=label,
+            generation=generation,
+        )
 
     def retry_waiting(self) -> None:
         """Synchronously retry plugins whose required host services arrived later."""

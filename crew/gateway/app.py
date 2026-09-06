@@ -57,7 +57,6 @@ from crew.gateway.routers.sessions import create_sessions_router
 from crew.gateway.routers.system import create_system_router
 from crew.gateway.routers.security import create_security_router
 from crew.gateway.routers.sites import create_sites_router
-from crew.gateway.routers.wiki import create_wiki_router
 from crew.gateway.routers.work import create_work_router
 from crew.gateway.ws import create_ws_router
 from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID, normalize_owner_account_id
@@ -155,15 +154,21 @@ def _wire_delivery_senders(
 
 
 def make_route_gate(route_registry: Any, contribution_id: str) -> Any:
-    """运行期闸门依赖：贡献所属 Generation 释放后返回统一的不可用响应。
+    """运行期闸门依赖：在整个请求期间持有同代 Route Lease。
 
     FastAPI 路由树在构造期固化，Feature 停用不拆路由；闸门口径以
     Route Registry 的可见性为准（演进方案 §6.5 运行期能力门控）。
+    Async-generator dependency 的 ``finally`` 在 endpoint 返回后执行，
+    因而 draining 只拒绝新请求，在途请求可安全完成。
     """
     from fastapi import HTTPException
 
-    async def _gate() -> None:
-        if not route_registry.is_available(contribution_id):
+    async def _gate(request: Request):
+        acquired = route_registry.acquire_lease(
+            contribution_id,
+            label=f"route:{contribution_id}",
+        )
+        if acquired is None:
             raise HTTPException(
                 status_code=503,
                 detail={
@@ -172,6 +177,14 @@ def make_route_gate(route_registry: Any, contribution_id: str) -> Any:
                     "code": "capability_unavailable",
                 },
             )
+        binding, lease = acquired
+        # Feature-owned routes can use this binding to resolve other
+        # generation-bound capabilities without a second, drifting lookup.
+        request.state.route_binding = binding
+        try:
+            yield
+        finally:
+            lease.release()
 
     return _gate
 
@@ -405,7 +418,6 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     api.include_router(create_misc_router(crew))
     api.include_router(create_plugins_router(crew))
     api.include_router(create_mcp_setup_router(crew))
-    api.include_router(create_wiki_router(crew))
     api.include_router(create_work_router(crew))
     api.include_router(create_sites_router(crew))
     api.include_router(create_mcp_servers_router(crew))

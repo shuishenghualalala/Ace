@@ -5,12 +5,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 import pytest
 from starlette.testclient import TestClient
 
 from crew.app import build_app
+from crew.features import RouteContribution, RouteRegistry
+from crew.gateway.app import make_route_gate
 from crew.gateway.server import create_app
 from crew.gateway.routers.wiki import create_wiki_router
 from crew.state.config import Config
@@ -53,8 +55,12 @@ class _RegistryPlugins:
     def __init__(self, registry):
         self.registry = registry
 
-    def acquire_service_lease(self, key, *, label="service-request"):
-        return self.registry.acquire_lease(key, label=label)
+    def acquire_service_lease(self, key, *, label="service-request", generation=None):
+        return self.registry.acquire_lease(
+            key,
+            label=label,
+            generation=generation,
+        )
 
     def resolve_service(self, key, default=None):
         return self.registry.get(key, default=default)
@@ -146,6 +152,16 @@ def test_wiki_gateway_static_boundary_does_not_import_local_store_or_parser():
         ):
             assert forbidden not in source
 
+    gateway_app = Path(__file__).parents[2] / "crew" / "gateway" / "app.py"
+    gateway_source = gateway_app.read_text(encoding="utf-8")
+    assert "create_wiki_router" not in gateway_source
+    assert "gateway.routers.wiki" not in gateway_source
+
+    feature_source = (
+        Path(__file__).parents[2] / "crew" / "wiki" / "feature.py"
+    ).read_text(encoding="utf-8")
+    assert "create_wiki_router(host)" in feature_source
+
 
 @pytest.mark.asyncio
 async def test_wiki_gateway_resolves_current_service_generation_per_request():
@@ -170,6 +186,42 @@ async def test_wiki_gateway_resolves_current_service_generation_per_request():
         assert second.status_code == 200
         assert second.json()["answer"] == "new"
 
+    await old_scope.dispose()
+    await new_scope.dispose()
+
+
+@pytest.mark.asyncio
+async def test_wiki_gateway_does_not_fallback_to_a_different_service_generation():
+    registry = ServiceRegistry()
+    old_scope = FeatureScope(FeatureGeneration("product.wiki", 1))
+    new_scope = FeatureScope(FeatureGeneration("product.wiki", 2))
+    registry.register(old_scope, KNOWLEDGE_SERVICE_KEY, _QueryService("old"))
+    registry.register(new_scope, KNOWLEDGE_SERVICE_KEY, _QueryService("new"))
+    old_scope.activate()
+    new_scope.activate()
+
+    crew = SimpleNamespace(plugins=_RegistryPlugins(registry), knowledge_service=None)
+    app = _router_app(create_wiki_router(crew))
+
+    # Simulate the Gateway route gate selecting the old generation while a
+    # replacement service is already active. The consumer must fail closed,
+    # never silently resolve the newer provider.
+    @app.middleware("http")
+    async def attach_old_route_generation(request, call_next):
+        request.state.route_binding = SimpleNamespace(
+            # A route can outlive a failed replacement while the matching
+            # service generation has already been removed. The consumer must
+            # not drift to the currently visible g2 service.
+            generation=FeatureGeneration("product.wiki", 3),
+        )
+        return await call_next(request)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/wiki/query?q=old")
+
+    assert response.status_code == 503
+    assert response.json() == {"ok": False, "error": "Wiki 未启用"}
     await old_scope.dispose()
     await new_scope.dispose()
 
@@ -218,6 +270,91 @@ async def test_wiki_gateway_lease_keeps_old_provider_open_until_inflight_request
         assert response.status_code == 200
         assert old_service.close_calls == 1
         await new_scope.dispose()
+
+
+@pytest.mark.asyncio
+async def test_wiki_ingest_cancel_is_generation_scoped_during_replace():
+    class BlockingService:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.close_calls = 0
+
+        async def ingest(self, source_id, owner_account_id, kb_id="default", **kwargs):
+            self.started.set()
+            await self.release.wait()
+            return IngestResult(source_id=source_id)
+
+        def close(self):
+            self.close_calls += 1
+
+    services = ServiceRegistry()
+    routes = RouteRegistry()
+    old_scope = FeatureScope(FeatureGeneration("product.wiki", 1))
+    old_service = BlockingService()
+    old_scope.register(old_service.close, label="resource:provider")
+    services.register(old_scope, KNOWLEDGE_SERVICE_KEY, old_service)
+    old_scope.activate()
+
+    crew = SimpleNamespace(
+        plugins=_RegistryPlugins(services),
+        knowledge_service=None,
+        session_store=SimpleNamespace(),
+    )
+    router = create_wiki_router(crew)
+    routes.register(
+        old_scope,
+        RouteContribution("product.wiki", router),
+        label="route:wiki",
+    )
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def attach_test_account(request, call_next):
+        request.state.account = AccountContext("A:uid-a", is_local=True)
+        return await call_next(request)
+
+    app.include_router(
+        router,
+        dependencies=[Depends(make_route_gate(routes, "product.wiki"))],
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        ingest = asyncio.create_task(
+            client.post("/api/wiki/ingest", json={"source_id": "same-source"})
+        )
+        await old_service.started.wait()
+
+        stopping = asyncio.create_task(old_scope.stop(timeout_seconds=None))
+        await asyncio.sleep(0)
+        assert not stopping.done()
+
+        new_scope = FeatureScope(FeatureGeneration("product.wiki", 2))
+        services.register(new_scope, KNOWLEDGE_SERVICE_KEY, _QueryService("new"))
+        routes.register(
+            new_scope,
+            RouteContribution("product.wiki", router),
+            label="route:wiki",
+        )
+        new_scope.activate()
+
+        cancelled = await client.post(
+            "/api/wiki/ingest/cancel",
+            json={"source_id": "same-source"},
+        )
+        assert cancelled.status_code == 404
+        assert cancelled.json() == {
+            "ok": False,
+            "error": "没有正在进行的 ingest 任务",
+        }
+
+        old_service.release.set()
+        response = await ingest
+        await stopping
+
+    assert response.status_code == 200
+    assert old_service.close_calls == 1
+    await new_scope.dispose()
 
 
 def test_wiki_gateway_external_override_is_usable_without_product_record():
