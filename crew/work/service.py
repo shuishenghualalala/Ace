@@ -24,8 +24,11 @@ from crew.work.knowledge import WorkKnowledgeStore
 from crew.work.settings import WorkSettingsStore
 from crew.work.sources import WorkSourceStore
 from crew.work.templates import WorkTemplateStore
+from crew.features.services import ServiceKey
 
 log = get_logger("work.service")
+
+WORK_SERVICE_KEY: ServiceKey["WorkService"] = ServiceKey("work")
 
 WORK_PRODUCT_CONTEXT = """## Crew 办公助手
 

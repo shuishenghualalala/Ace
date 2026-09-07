@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 3C · Work Feature 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.note{font-weight:700;color:#8a6116}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 3C · Work Feature</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-07 · 编码与测试：相互独立的 Luna 子 Agent</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li><code>product.work</code> 同代拥有 Service、52 个 REST endpoint、八个 Store 与 agent:end Hook；停用按 Contribution → Resource 顺序回收。</li>
+    <li>Route Gate 与 Work Service 精确绑定同一 Generation；draining、缺失代和停用状态均 fail-closed。</li>
+    <li>个人知识每次调用单独获取并释放可选 KnowledgeService Lease；Wiki 缺失时返回明确不可用，不持有 Wiki Store。</li>
+    <li>禁用不会通过兼容字段泄漏能力；外部注入 Service 不被 Feature 启停或关闭；持久数据在重启后保留。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Work Feature + Work Route 新增契约</td><td class="ok">9 passed</td></tr>
+      <tr><td>Work 安全、Owner 隔离、Reference API、Wiki shutdown</td><td class="ok">25 passed</td></tr>
+      <tr><td>Wiki Feature + Service Registry 修复后复验</td><td class="ok">26 passed</td></tr>
+      <tr><td>Route Registry 邻接回归</td><td class="ok">10 passed</td></tr>
+      <tr><td>Gateway API</td><td class="ok">25 passed</td></tr>
+      <tr><td>Ruff、compileall、git diff check</td><td class="ok">全部通过</td></tr>
+      <tr><td>Import Linter</td><td class="ok">314 files，1366 dependencies，6 contracts kept，0 broken</td></tr>
+    </tbody>
+  </table>
+  <p>测试组存在重叠，不将数量相加作为全量总数。Feature Runtime/Core 组合回归另有一项默认日志目录权限失败，CLI 组合回归另有一项原生安全运行时返回码失败；两项均可独立复现且与 Work 差异无关。</p>
+
+  <h2>静态与生命周期核验</h2>
+  <p>旧、新 Work Router 的 52 个 endpoint method/path 集合与函数签名一致，52 个均经过 Service Lease 包装。构建真实 Gateway 后 OpenAPI 含 38 条 Work path、56 个 method，未发现重复 method/path。额外脚本验证禁用时兼容绑定为空、候选仅关闭一次，以及外部 Service 的 start/stop/close 调用数均为零。</p>
+
+  <div class="nav"><a href="../backend/adr/0025-work-feature-lifecycle.html">ADR-0025</a> · <a href="../backend/modules/work.html">Work 模块</a> · <a href="../backend/modules/plugins.html">Feature / Plugin 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

@@ -12,7 +12,13 @@ from crew.work.models import (
     WorkItem,
     WorkSessionLink,
 )
-from crew.work.service import LLMPreferenceExtractor, PreferenceCandidate, WorkService
+from crew.work.feature import WORK_FEATURE_ID, WorkFeatureBundle, build_work_feature
+from crew.work.service import (
+    WORK_SERVICE_KEY,
+    LLMPreferenceExtractor,
+    PreferenceCandidate,
+    WorkService,
+)
 
 __all__ = [
     "BusinessStatus",
@@ -27,5 +33,9 @@ __all__ = [
     "SyncStatus",
     "WorkItem",
     "WorkService",
+    "WORK_FEATURE_ID",
+    "WORK_SERVICE_KEY",
+    "WorkFeatureBundle",
+    "build_work_feature",
     "WorkSessionLink",
 ]

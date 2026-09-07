@@ -6,8 +6,9 @@ import sqlite3
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, Iterator, Protocol, Sequence
 
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 from crew.wiki.schemas import WikiPage
@@ -15,15 +16,28 @@ from crew.wiki.schemas import WikiPage
 OrganizationProvider = Callable[[], Sequence[dict[str, Any]]]
 
 
-class WikiSaver(Protocol):
-    """Minimum WikiStore surface for personal knowledge operations."""
+class KnowledgeService(Protocol):
+    """Stable knowledge capability consumed by Work.
+
+    Work deliberately depends on the service contract rather than the local
+    Wiki store.  The acquirer is called for every personal-knowledge operation
+    so a restarting Wiki generation cannot be retained by this long-lived
+    Work object.
+    """
 
     def save_page(self, page: Any, owner_account_id: str, kb_id: str = "default") -> Any: ...
 
-    def list_all(
+    def read_document(
+        self, page_id: str, owner_account_id: str, kb_id: str = "default"
+    ) -> Any: ...
+
+    def list_pages(
         self, owner_account_id: str, kb_id: str = "default",
-        limit: int = 100, offset: int = 0, brief: bool = False,
+        *, limit: int = 100, offset: int = 0, brief: bool = False,
     ) -> list[Any]: ...
+
+
+KnowledgeServiceAcquirer = Callable[[], Any]
 
 
 class WorkKnowledgeStore:
@@ -33,11 +47,19 @@ class WorkKnowledgeStore:
         self,
         db_path: str | Path = "crew_data/crew.db",
         *,
-        wiki_store: WikiSaver | None = None,
+        knowledge_service_acquirer: KnowledgeServiceAcquirer | None = None,
+        knowledge_service_resolver: Callable[[], KnowledgeService | None] | None = None,
         organization_provider: OrganizationProvider | None = None,
         wal_enabled: bool = True,
     ) -> None:
-        self._wiki = wiki_store
+        if knowledge_service_acquirer is not None and knowledge_service_resolver is not None:
+            raise ValueError(
+                "provide knowledge_service_acquirer or knowledge_service_resolver, not both"
+            )
+        self._knowledge_service_acquirer = (
+            knowledge_service_acquirer
+            or knowledge_service_resolver
+        )
         self._org_provider = organization_provider
         self._lock = threading.RLock()
         self._conn = connect_sqlite(db_path, wal_enabled=wal_enabled, row_factory=True)
@@ -74,8 +96,37 @@ class WorkKnowledgeStore:
         )
 
     # ------------------------------------------------------------------ #
-    # Personal knowledge (delegated to Wiki store)
+    # Personal knowledge (delegated to the optional KnowledgeService)
     # ------------------------------------------------------------------ #
+
+    @contextmanager
+    def _knowledge_service(self) -> Iterator[KnowledgeService]:
+        """Acquire the current Wiki generation for exactly one call.
+
+        An acquirer may return either a service directly (embedded hosts) or
+        ``(service, lease)`` (the normal Feature Runtime path).  The latter is
+        released even when the operation raises, keeping Work independent of
+        Wiki generation ownership.
+        """
+        acquirer = self._knowledge_service_acquirer
+        if acquirer is None:
+            raise RuntimeError("Knowledge service is unavailable")
+        acquired = acquirer()
+        if acquired is None:
+            raise RuntimeError("Knowledge service is unavailable")
+        service = acquired
+        lease = None
+        if isinstance(acquired, tuple) and len(acquired) == 2:
+            service, lease = acquired
+        if service is None:
+            raise RuntimeError("Knowledge service is unavailable")
+        try:
+            yield service
+        finally:
+            if lease is not None:
+                release = getattr(lease, "release", None)
+                if callable(release):
+                    release()
 
     def save_personal(
         self,
@@ -87,9 +138,7 @@ class WorkKnowledgeStore:
         page_id: str | None = None,
         summary: str | None = None,
     ) -> Any:
-        """Save one personal knowledge page via the Wiki store."""
-        if self._wiki is None:
-            raise RuntimeError("Wiki store is unavailable")
+        """Save one personal knowledge page via the current KnowledgeService."""
         owner = _required(owner_account_id, "owner_account_id")
         page = WikiPage(
             id=page_id or f"wk_{uuid.uuid4().hex}",
@@ -100,20 +149,33 @@ class WorkKnowledgeStore:
             sources=[f"work-item:{source_item_id}"] if source_item_id else [],
             summary=summary,
         )
-        if page_id:
-            get_page = getattr(self._wiki, "get", None)
-            if callable(get_page):
-                existing = get_page(page.id, owner_account_id=owner)
+        with self._knowledge_service() as service:
+            if page_id:
+                read_document = getattr(service, "read_document", None)
+                if callable(read_document):
+                    existing = read_document(page.id, owner_account_id=owner)
+                else:
+                    existing = next(
+                        (
+                            candidate
+                            for candidate in service.list_pages(
+                                owner_account_id=owner,
+                                limit=1000,
+                            )
+                            if getattr(candidate, "id", None) == page.id
+                        ),
+                        None,
+                    )
                 if existing is not None:
                     page.file_path = existing.file_path
                     page.created_at = existing.created_at
-        return self._wiki.save_page(page, owner_account_id=owner)
+            return service.save_page(page, owner_account_id=owner)
 
     def list_personal(self, owner_account_id: str) -> list[Any]:
-        """List personal knowledge pages from the Wiki store."""
-        if self._wiki is None:
-            raise RuntimeError("Wiki store is unavailable")
-        return self._wiki.list_all(owner_account_id=owner_account_id)
+        """List personal knowledge pages from the current KnowledgeService."""
+        owner = _required(owner_account_id, "owner_account_id")
+        with self._knowledge_service() as service:
+            return service.list_pages(owner_account_id=owner)
 
     # ------------------------------------------------------------------ #
     # Organization knowledge (read-only provider)

@@ -2154,11 +2154,6 @@ class CrewApp:
         except Exception:  # noqa: BLE001
             log.exception("后台进程崩溃恢复失败")
         await self.tasks.start()
-        if self.work_service is not None:
-            try:
-                await self.work_service.start()
-            except Exception:  # noqa: BLE001
-                log.exception("WorkService 启动失败")
         if self.mcp_manager is not None:
             try:
                 # MCP 连接移出 lifespan 关键路径：后台 task 内完成子进程 spawn + 工具注册，
@@ -2353,14 +2348,6 @@ class CrewApp:
                 pass
             self._expiry_task = None
         await self.dispatcher.shutdown()
-        # Work consumes the Wiki Service during its own stop path.  Drain
-        # consumers before deactivating the provider Generation; this ordering
-        # remains temporary until Work becomes its own Feature in Stage 3C.
-        if self.work_service is not None:
-            try:
-                await self.work_service.stop()
-            except Exception:  # noqa: BLE001
-                log.exception("WorkService 停止失败")
         await self._deactivate_managed_features(timeout=provider_timeout)
         await asyncio.gather(
             *(
@@ -2407,8 +2394,6 @@ class CrewApp:
         if bindings is not None and hasattr(bindings, "close"):
             bindings.close()
         self.active_owner.close()
-        if self.work_service is not None:
-            self.work_service.close()
         self.security_rules.close()
         self.security_audit.close()
         self._close_persistent_stores()
@@ -2438,8 +2423,16 @@ class CrewApp:
             # stores here as orphaned persistent handles.
             getattr(getattr(self, "sites", None), "store", None),
             getattr(getattr(getattr(self, "sites", None), "blueprint", None), "store", None),
-            self.work_service,
         ]
+        work_record = self.plugins.feature_runtime.get("product.work")
+        if (
+            self.work_service is not None
+            and (work_record is None or work_record.state is FeatureState.DISCOVERED)
+        ):
+            # A managed Work candidate is created during build_app so legacy
+            # callers can inspect it before startup. If startup never happens,
+            # no FeatureScope owns it and this is the sole close fallback.
+            stores.append(self.work_service)
         for store in stores:
             close = getattr(store, "close", None)
             if callable(close):
@@ -3664,51 +3657,28 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         )
     )
 
-    from crew.work.briefs import WorkBriefStore
-    from crew.work.items import WorkItemStore
-    from crew.work.knowledge import WorkKnowledgeStore
-    from crew.work.preferences import WorkPreferenceStore
-    from crew.work.references import WorkReferenceStore
-    from crew.work.service import LLMPreferenceExtractor, WorkService
-    from crew.work.settings import WorkSettingsStore
-    from crew.work.sources import WorkSourceStore
-    from crew.work.templates import WorkTemplateStore
+    from crew.gateway.hooks import hook_registry
+    from crew.work import LLMPreferenceExtractor, build_work_feature
 
     async def _notify_work_owner(owner_account_id: str, payload: dict[str, Any]) -> None:
         if app._notify_owner_fn is not None:
             await app._notify_owner_fn(owner_account_id, payload)
 
-    app.work_service = WorkService(
-        references=WorkReferenceStore(
-            cfg.db_path,
-            session_store=session_store,
-            wal_enabled=cfg.sqlite_wal,
-        ),
-        preferences=WorkPreferenceStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
-        items=WorkItemStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
-        sources=WorkSourceStore(
-            cfg.db_path,
-            approved_source_keys=set(),
-            adapters={},
-            wal_enabled=cfg.sqlite_wal,
-        ),
-        briefs=WorkBriefStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
-        settings=WorkSettingsStore(
-            cfg.db_path,
-            workspace_store=workspace_store,
-            wal_enabled=cfg.sqlite_wal,
-        ),
-        templates=WorkTemplateStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
-        knowledge=WorkKnowledgeStore(
-            cfg.db_path,
-            wiki_store=app._wiki_store,
-            wal_enabled=cfg.sqlite_wal,
-        ),
-        session_store=session_store,
-        workspace_store=workspace_store,
+    work_feature = build_work_feature(
+        app,
+        db_path=cfg.db_path,
+        wal_enabled=cfg.sqlite_wal,
         preference_extractor=LLMPreferenceExtractor(provider),
         preference_notifier=_notify_work_owner,
+        hook_registry=hook_registry,
+        runtime=plugins.feature_runtime,
+        activate=True,
     )
+    # Route Registry needs a visible first Generation while create_app() mounts
+    # the startup route tree. Managed lifecycle still owns every later stop or
+    # replacement, and the host binding remains a compatibility view.
+    app.work_service = work_feature.service
+    app.declare_managed_feature(work_feature.definition)
 
     # subagent：预设注册表 + delegate_task / run_agent / collect_subagent（toolset='subagent'）
     app.subagent_registry = sub_registry
