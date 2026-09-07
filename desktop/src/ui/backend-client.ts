@@ -498,6 +498,9 @@ export interface BackendConfig {
   models: ModelOption[];
   model_profiles?: ModelOption[];
   is_gateway_admin?: boolean;
+  wiki?: {
+    enabled?: boolean;
+  };
   external_agents?: {
     enabled?: boolean;
   };

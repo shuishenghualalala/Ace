@@ -5,9 +5,9 @@
 > 基线核查日期：2026-08-31  
 > 目标读者：Ace 后端、桌面端、Web 端及独立功能模块的维护者  
 > 修订记录：2026-08-31 评审追加——workspace_guard 依赖核查（§2.3.3、§11、§17）、第一方/第三方插件契约收口（§2.3.8）、effect 诊断与启动审计（§6.3）、服务作用域维度（§6.4）、拦截器语义（§7.5）、螺旋式迁移节奏与依赖检查工具（§10、§13.3）、配置与数据命名空间约定（§12.5）、Adapter 保质期（§15.2）、ADR 机制（§16）、新增验收指标（§14）；同日补充——演进紧迫性论证与中心文件基线数据（§1.1.1）、接口层多租户地基（§2.2）；同日范围校正——明确 dsh 广义 Plugin 与 Ace 当前 `plugins/` 的区别，将目标提升为全部 Feature 的统一可逆生命周期，补充 Feature Generation、业务数据边界、全量迁移地图和工作量评估（§0、§3.3、§5、§6、§8、§10、§16、§18、§19）；同日——§2.1、§5.1 增加耦合视角与装配视角两张架构对比图（离线渲染版：docs/todo/ace-arch-compare.html）
-> 实施进度：2026-09-06 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver、Context Contributor 主链均已落地。Cron Trigger Reminder Contributor、后台结果通知 Contributor、Feature Event 命名空间、Route Registry 与 Core Feature 声明化均已完成；阶段 3A 的 Cron、Sites、Browser 三个 Runtime Feature 验证切片已完成。阶段 3B 已完成 Foundation、Gateway Consumer、CLI Consumer、Event Contribution、Agent Preset Contribution 与 Wiki Route Contribution 六个切片：`KnowledgeService`、`LocalWikiProvider` 与 `product.wiki` Bundle 统一拥有本地 Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context、Home 导读后台 Task、cards/changes Event Contributors、Wiki Agent prompt、完整策略和 REST route；`build_app()` 不再逐项构造 Wiki 内部对象；Wiki REST、聊天附件捕获和全部 Wiki CLI 叶子命令通过动态 Service + Generation Lease 访问能力，Route Registry 在请求入口原子选择并持有同代 Route Lease，KnowledgeService 绑定同一 Generation，停用/更新期间新请求返回 503 且在途请求完成后再 drain，WS 通过中立 Event Registry 顺序投递 Feature-owned 事件，主 Agent 与前后台子 Agent 通过中立 Preset Registry 在完整执行期持有同代 Lease。UI 仍在后续纵向切片，Work 的可选 Knowledge Service 依赖留到阶段 3C。当前分支为 `refactor/plugin-architecture-stage-0`，阶段 3A 验证记录见 `docs/testing/plugin-architecture-stage-3a-*-runtime.html`，阶段 3B Wiki 切片记录见 `docs/testing/plugin-architecture-stage-3b-wiki-*.html`。
+> 实施进度：2026-09-07 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver、Context Contributor 主链均已落地。Cron Trigger Reminder Contributor、后台结果通知 Contributor、Feature Event 命名空间、Route Registry 与 Core Feature 声明化均已完成；阶段 3A 的 Cron、Sites、Browser 三个 Runtime Feature 验证切片已完成。阶段 3B 已完成 Foundation、Gateway Consumer、CLI Consumer、Event Contribution、Agent Preset Contribution 与 Wiki Route Contribution 六个切片：`KnowledgeService`、`LocalWikiProvider` 与 `product.wiki` Bundle 统一拥有本地 Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context、Home 导读后台 Task、cards/changes Event Contributors、Wiki Agent prompt、完整策略和 REST route；`build_app()` 不再逐项构造 Wiki 内部对象；Wiki REST、聊天附件捕获和全部 Wiki CLI 叶子命令通过动态 Service + Generation Lease 访问能力，Route Registry 在请求入口原子选择并持有同代 Route Lease，KnowledgeService 绑定同一 Generation，停用/更新期间新请求返回 503 且在途请求完成后再 drain，WS 通过中立 Event Registry 顺序投递 Feature-owned 事件，主 Agent 与前后台子 Agent 通过中立 Preset Registry 在完整执行期持有同代 Lease。阶段 5 首个 UI 切片已完成：Desktop/Web 建立构建期可信 UI Navigation Registry，Wiki 以独立 descriptor 注册导航；核心导航 inventory 与 render 分支不再硬编码 Wiki descriptor，但宿主 capability state 以及现有 `SidebarView`/`TabKey` 兼容类型仍在迁移期保留。`wiki.enabled` 作为兼容能力来源，禁用时隐藏入口、拒绝程序化切换并从 Wiki 安全回落 Chat；注册支持确定性排序、冲突失败、可逆 unregister，Assistant/Work 原有导航语义保持不变。页面生命周期、API Client、Feature Event Reducer，以及外援、Team 等其他 UI Contribution 仍待迁移；Work 的可选 Knowledge Service 依赖与 API Consumer 留到阶段 3C。下一优先级为阶段 3C Work Foundation + API Consumer。当前分支为 `refactor/plugin-architecture-stage-0`，阶段 3A 验证记录见 `docs/testing/plugin-architecture-stage-3a-*-runtime.html`，阶段 3B Wiki 切片记录见 `docs/testing/plugin-architecture-stage-3b-wiki-*.html`，阶段 5 UI 首切片记录见 `docs/testing/plugin-architecture-stage-5-wiki-ui-navigation.html`。
 
-## 当前实施进度图（2026-09-06）
+## 当前实施进度图（2026-09-07）
 
 绿色表示已经落地并通过相关回归的区域，蓝色表示紧接着要实施的切片，灰色表示尚未开始。当前已完成**阶段 0、阶段 1，以及阶段 2 的 Driver / Context Contributor 主链**，不是整份演进方案已经完成。
 
@@ -104,7 +104,8 @@ flowchart TB
     WikiPreset --> WikiPresetTests["Agent Preset 验证<br/>15 新契约 · 前后台执行 · 缓存换代"]
     WikiPresetTests --> WikiRoute["阶段 3B · Wiki Route Contribution<br/>Feature Bundle · Route Lease"]
     WikiRoute --> WikiRouteTests["Wiki Route 验证<br/>原子 lease · drain · 同代 Service · 503"]
-    WikiRouteTests --> Next["阶段 3B 下一切片<br/>UI"]
+    WikiRouteTests --> UiRegistry["阶段 5 首切片 ✅<br/>Wiki UI Navigation Registry"]
+    UiRegistry --> Next["下一优先级<br/>阶段 3C Work Foundation + API Consumer"]
 
     classDef done fill:#e8f6ee,stroke:#1e8449,color:#145a32,stroke-width:2px
     classDef next fill:#e6f0fb,stroke:#2471a3,color:#154360,stroke-width:2px
@@ -112,11 +113,11 @@ flowchart TB
     class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed,Scope,Token,Rollback,RuntimeTests,Services,Dependencies,Config,ServiceTests,Runtime,Adapter,Phases,Browser,Shutdown,AdapterTests,Manifest,Ordered,Audit,ManifestTests,Lease,StopPolicy,StopAudit,LeaseTests,Update,Generation,Recovery,UpdateTests,Stage1Done,Drivers,DriverLease,DefaultDriver,PluginDriver,DriverTests,Adapters,DriverAdapterTests done
     class ContextRegistry,PathContext,BrowserContext,ContextTests done
     class SessionContext,SessionTests,WikiContext,WikiTests,CronContext,CronTests,BgContext,QueueOwner,TeamDrain,BgTests,FeatureEvent,EventCompat,EventTests,RouteReg,RouteGate,RouteTests,CoreDecl,Required,CoreTests done
-    class CronRuntime,CronRuntimeTests,SitesRuntime,SitesRuntimeTests,BrowserRuntime,BrowserRuntimeTests,WikiFoundation,WikiFoundationTests,WikiGateway,WikiGatewayTests,WikiCli,WikiCliTests,WikiEvents,WikiEventTests,WikiPreset,WikiPresetTests,WikiRoute,WikiRouteTests done
+    class CronRuntime,CronRuntimeTests,SitesRuntime,SitesRuntimeTests,BrowserRuntime,BrowserRuntimeTests,WikiFoundation,WikiFoundationTests,WikiGateway,WikiGatewayTests,WikiCli,WikiCliTests,WikiEvents,WikiEventTests,WikiPreset,WikiPresetTests,WikiRoute,WikiRouteTests,UiRegistry done
     class Next next
 ```
 
-这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。阶段 2 的 Driver、Context、Feature Event、Route Gate 和声明式 Core Feature 已形成扩展主链。阶段 3A 的 Cron、Sites 与 Browser 已完成真实资源所有权验证。阶段 3B Foundation 建立了 `knowledge` 稳定 Service、Local Provider 和 `product.wiki` Bundle；Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context 与 Home 导读后台 Task 共享同一 restart Generation。第二切片把 Wiki REST 与聊天附件捕获迁为 Service Consumer：Service Registry 在同一次选择中返回 Provider 与 Generation Lease，draining 拒绝新请求并等待在途请求；上传、下载、解析和本地目录操作留在 Provider，Gateway 不再读取 Components 兼容视图。第三切片把全部 Wiki CLI 叶子命令迁为同样的动态 Consumer：同步与异步 Handler 均在完整命令周期持有同代 Lease，上传解析交给 Provider，SessionStore 继续属于 Host。第四切片建立 Feature Event Contributor Registry，Wiki Bundle 注册 cards/changes 来源，WS 在所属 Lease 内顺序投递且不再读取 Manager。第五切片建立 Agent Preset Registry，Wiki prompt 与固定策略回归 Bundle；动态目录、父权限封顶、完整执行 Lease 与 generation-aware Agent 缓存取代中心名称判断。第六切片把 Wiki REST route 迁入 Bundle：Gateway 仅从 Route Registry 在启动期装配稳定路由树，运行期入口原子获取 Route Lease，并以同一 Generation 解析 KnowledgeService；旧代 drain 等待在途请求，停用后返回 503，历史 `crew.gateway.routers.wiki` import 保留兼容层。Work 仍使用迁移期兼容视图。下一步继续 UI Contribution。
+这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。阶段 2 的 Driver、Context、Feature Event、Route Gate 和声明式 Core Feature 已形成扩展主链。阶段 3A 的 Cron、Sites 与 Browser 已完成真实资源所有权验证。阶段 3B Foundation 建立了 `knowledge` 稳定 Service、Local Provider 和 `product.wiki` Bundle；Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context 与 Home 导读后台 Task 共享同一 restart Generation。第二切片把 Wiki REST 与聊天附件捕获迁为 Service Consumer；第三切片把全部 Wiki CLI 叶子命令迁为动态 Consumer；第四切片建立 Feature Event Contributor Registry；第五切片建立 Agent Preset Registry；第六切片把 Wiki REST route 迁入 Bundle。阶段 5 首个切片已将 Desktop/Web 的 Wiki 导航接入构建期可信 Registry：导航贡献可排序、冲突失败、撤销，`wiki.enabled` 控制入口和程序化切换，禁用时安全回落 Chat，并保留 Assistant/Work 原有共享导航语义。页面生命周期、API Client、Feature Event Reducer 和其他 Feature UI Contribution 仍未迁移。下一优先级为阶段 3C Work Foundation + API Consumer。
 
 ## 0. 执行摘要
 
@@ -1409,12 +1410,12 @@ Desktop 和 Web 不应分别发明一套 Feature 协议。建议共享：
 
 ### 阶段 5：前端 Feature Registry
 
-**目标**：让 Desktop 和 Web Shell 不再硬编码具体功能。
+**目标**：让 Desktop 和 Web Shell 逐步不再在核心导航 inventory/render 分支中硬编码具体 Feature descriptor。
 
 **工作内容**：
 
 - 建立共享 Feature Descriptor 和 Feature Event 类型。
-- 建立构建期 UI Module Registry。
+- 建立构建期 UI Module Registry；迁移期保留宿主 capability state 以及 `SidebarView`/`TabKey` 兼容类型。
 - 先迁 Wiki，再迁外援和 Team。
 - 将页面生命周期、导航、Composer 和 Stream Reducer 收回各 Feature。
 - 按 Backend Manifest 决定功能可见性。

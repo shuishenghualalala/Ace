@@ -1,11 +1,47 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { Session, Workspace } from "../types";
 import type { SessionStatus } from "../hooks/useChat";
 import crewLogo from "../assets/crew-logo.png";
 import externalAgentIcon from "../assets/external-agent.png";
 import { externalAgentInitial, externalAgentTone } from "./ExternalAgentAvatar";
+import { registerWikiNavigation } from "../lib/wiki-navigation";
+import { UiFeatureRegistry } from "../lib/ui-feature-registry";
 
 export type SidebarView = "chat" | "agents" | "skills" | "wiki";
+type SidebarNavigationId = Exclude<SidebarView, "chat">;
+interface SidebarFeatureAvailability {
+  externalAgentsEnabled: boolean;
+  wikiEnabled: boolean;
+}
+
+function registerCoreNavigation(
+  registry: UiFeatureRegistry<SidebarNavigationId, SidebarFeatureAvailability, ReactNode>,
+): void {
+  registry.register({
+    id: "skills",
+    label: "技能",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+      </svg>
+    ),
+    order: 10,
+  });
+  registry.register({
+    id: "agents",
+    label: "外援",
+    icon: <img className="sidebar-agent-icon" src={externalAgentIcon} alt="" />,
+    order: 20,
+    isAvailable: ({ externalAgentsEnabled }) => externalAgentsEnabled,
+  });
+}
+
+function createSidebarNavigationRegistry(): UiFeatureRegistry<SidebarNavigationId, SidebarFeatureAvailability, ReactNode> {
+  const registry = new UiFeatureRegistry<SidebarNavigationId, SidebarFeatureAvailability, ReactNode>();
+  registerCoreNavigation(registry);
+  registerWikiNavigation(registry);
+  return registry;
+}
 
 const STATUS_LABEL: Record<SessionStatus, string> = {
   idle: "空闲",
@@ -47,6 +83,7 @@ interface Props {
   expanded: Set<string>;
   view: SidebarView;
   externalAgentsEnabled: boolean;
+  wikiEnabled?: boolean;
   onViewChange: (v: SidebarView) => void;
   onToggleExpand: (wsId: string) => void;
   onNewWorkspace: () => void;
@@ -67,6 +104,7 @@ export default function Sidebar(props: Props) {
     expanded,
     view,
     externalAgentsEnabled,
+    wikiEnabled = true,
     onViewChange,
     onToggleExpand,
     onNewWorkspace,
@@ -83,6 +121,7 @@ export default function Sidebar(props: Props) {
 
   const sessionsOf = (wsId: string) =>
     sessions.filter((s) => s.workspace_id === wsId && (!q || s.title.includes(q)));
+  const navigation = createSidebarNavigationRegistry().project({ externalAgentsEnabled, wikiEnabled });
 
   return (
     <aside className="sidebar">
@@ -131,33 +170,12 @@ export default function Sidebar(props: Props) {
 
       {/* Nav Menu */}
       <nav className="sidebar__nav">
-        <div
-          className={"nav-item" + (view === "skills" ? " active" : "")}
-          onClick={() => onViewChange("skills")}
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
-          </svg>
-          <span>技能</span>
-        </div>
-        {externalAgentsEnabled && (
-          <div
-            className={"nav-item" + (view === "agents" ? " active" : "")}
-            onClick={() => onViewChange("agents")}
-          >
-            <img className="sidebar-agent-icon" src={externalAgentIcon} alt="" />
-            <span>外援</span>
+        {navigation.map((item) => (
+          <div key={item.id} className={"nav-item" + (view === item.id ? " active" : "")} onClick={() => onViewChange(item.id)}>
+            {item.icon}
+            <span>{item.label}</span>
           </div>
-        )}
-        <div
-          className={"nav-item" + (view === "wiki" ? " active" : "")}
-          onClick={() => onViewChange("wiki")}
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20" />
-          </svg>
-          <span>Wiki</span>
-        </div>
+        ))}
         <div className="nav-item nav-item--disabled">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="10"/>

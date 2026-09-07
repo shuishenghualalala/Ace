@@ -14,6 +14,11 @@ import { useWorkspaces } from "./hooks/useWorkspaces";
 import { useChat } from "./hooks/useChat";
 import { api, ApiError } from "./api";
 import { externalAgentsAvailable } from "./lib/featureFlags";
+import {
+  canNavigateToSidebarView,
+  resolveSidebarViewAfterCapabilitiesChange,
+  wikiNavigationEnabled,
+} from "./lib/wiki-navigation";
 import type { AppConfig, Attachment, ExternalTeam, Mode, Session, Task, TeamExecutionTier, UiMessage, UserAgentMention, Workspace } from "./types";
 
 const genId = () => `web_${Math.random().toString(36).slice(2, 8)}`;
@@ -158,6 +163,7 @@ export default function App() {
   const [configLoadState, setConfigLoadState] = useState<"loading" | "ready" | "retrying">("loading");
   const [configRetryKey, setConfigRetryKey] = useState(0);
   const externalAgentsEnabled = externalAgentsAvailable(config);
+  const wikiEnabled = wikiNavigationEnabled(config);
   const [currentWorkspaceId, setCurrentWorkspaceId] = useState("default");
   const [currentSessionId, setCurrentSessionId] = useState<string>(genId);
   const [expanded, setExpanded] = useState<Set<string>>(new Set(["default"]));
@@ -207,9 +213,10 @@ export default function App() {
 
   // 主对话里点击 [[Wiki 页面名]]：跳到 Wiki 视图并打开对应页面（WikiHub 挂载后消费）。
   const openWikiLinkFromChat = useCallback((title: string) => {
+    if (!canNavigateToSidebarView("wiki", config)) return;
     setPendingWikiLinkTitle(title);
     setView("wiki");
-  }, []);
+  }, [config]);
 
   // 进入 Wiki 视图或切换 KB 时，创建/复用该 KB 自己的 Wiki Agent 会话。
   useEffect(() => {
@@ -292,6 +299,11 @@ export default function App() {
   useEffect(() => {
     if (!externalAgentsEnabled && view === "agents") setView("chat");
   }, [externalAgentsEnabled, view]);
+
+  useEffect(() => {
+    const nextView = resolveSidebarViewAfterCapabilitiesChange(view, config);
+    if (nextView !== view) setView(nextView);
+  }, [config, view]);
 
   const jumpToMessage = useCallback((messageId: string) => {
     const target = document.getElementById(`message-${messageId}`);
@@ -598,8 +610,10 @@ export default function App() {
         expanded={expanded}
         view={view}
         externalAgentsEnabled={externalAgentsEnabled}
+        wikiEnabled={wikiEnabled}
         onViewChange={(nextView) => {
           if (nextView === "agents" && !externalAgentsEnabled) return;
+          if (!canNavigateToSidebarView(nextView, config)) return;
           setView(nextView);
         }}
         onToggleExpand={toggleExpand}

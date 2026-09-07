@@ -147,6 +147,12 @@ import {
   securityModuleEnabled,
 } from './features/security-mode';
 import {
+  bindWikiFeatureUi,
+  canNavigateToWiki,
+  resolveTabAfterWikiCapabilityChange,
+  wikiFeatureEnabled,
+} from './features/wiki-feature';
+import {
   isWorkLocation,
   type ShellLocation,
   type WorkLocation,
@@ -158,6 +164,7 @@ function setTab(tab: TabKey): boolean {
   if (!isBackendInitBypassActive() && !isBackendConnected()) {
     return false;
   }
+  if (tab === 'wiki' && !canNavigateToWiki(state.config)) return false;
   state.activeTab = tab;
   const productState = productModeStore.get();
   if (
@@ -852,6 +859,7 @@ function mountApplicationShell(
     },
     features: {
       agents: externalAgentsEnabled() ? 'available' : 'hidden',
+      wiki: wikiFeatureEnabled() ? 'available' : 'hidden',
       security: securityModuleEnabled() ? 'available' : 'unavailable',
       work: WORK_FEATURE_STATES,
     },
@@ -936,6 +944,11 @@ function mountApplicationShell(
   const disposeSecurityModuleFeature = bindSecurityModuleFeatureUi((enabled) => {
     shell.setFeatures({ security: enabled ? 'available' : 'unavailable' });
   });
+  const disposeWikiFeature = bindWikiFeatureUi((enabled) => {
+    shell.setFeatures({ wiki: enabled ? 'available' : 'hidden' });
+    const nextTab = resolveTabAfterWikiCapabilityChange(state.activeTab, enabled);
+    if (nextTab !== state.activeTab) activateTab(nextTab);
+  });
   syncProductMode(productModeStore.get().productMode);
 
   return {
@@ -951,6 +964,7 @@ function mountApplicationShell(
       rendererRoot.element.insertBefore(legacyOutlet, rendererRoot.overlayHost);
       disposeExternalAgentsFeature();
       disposeSecurityModuleFeature();
+      disposeWikiFeature();
       setNotificationClickHandler(null);
       shell.dispose();
       shell.element.remove();
