@@ -13,6 +13,7 @@ from crew.core.runctx import (
     current_session_id,
     current_task_activity_fn,
 )
+from crew.core.types import tool_arguments_for_ui
 from crew.tools.registry import Registry
 from crew.wiki.compiler import WikiCompiler
 from crew.wiki.manager import WikiSessionManager
@@ -143,6 +144,37 @@ def test_wiki_tool_ui_labels_render_placeholders(wiki_mocks):
     assert registry.toolset_for("wiki_search") == WIKI_READ_TOOLSET
     assert registry.toolset_for("wiki_read") == WIKI_READ_TOOLSET
     assert registry.toolset_for("wiki_apply_ingest") == WIKI_MANAGE_TOOLSET
+
+
+def test_wiki_source_ui_labels_use_title_and_hide_internal_id(wiki_mocks):
+    registry = wiki_mocks["registry"]
+    store = wiki_mocks["store"]
+    store.get_source_titles.return_value = {"s1": "知识库概览"}
+
+    label = registry.render_ui_label(
+        "wiki_plan_ingest",
+        {},
+        raw_args={"source_id": "s1"},
+    )
+
+    assert label == "盘算《知识库概览》该写进哪些页面"
+    assert "s1" not in label
+    assert tool_arguments_for_ui("wiki_plan_ingest", {"source_id": "s1"}) == {}
+
+
+def test_wiki_source_ui_labels_fallback_without_title(wiki_mocks):
+    registry = wiki_mocks["registry"]
+    store = wiki_mocks["store"]
+    store.get_source_titles.return_value = {"s1": "s1"}
+
+    label = registry.render_ui_label(
+        "wiki_apply_ingest",
+        {},
+        raw_args={"source_id": "s1"},
+    )
+
+    assert label == "把《这份素材》的改动写进知识库"
+    assert "s1" not in label
     assert registry.toolset_for("wiki_delete_kb") == WIKI_MANAGE_TOOLSET
     assert registry.toolset_for("wiki_refresh_source") == WIKI_MANAGE_TOOLSET
     assert registry.toolset_for("wiki_digest") == WIKI_MANAGE_TOOLSET

@@ -135,6 +135,19 @@ def tool_arguments_for_ui(name: str, arguments: dict[str, Any] | None) -> dict[s
     """Return tool arguments safe for frontend display."""
     if not isinstance(arguments, dict):
         return {}
+    # Wiki source IDs are stable internal keys, not user-facing information.
+    # Keep them in the runtime/history model for the agent, but omit them from
+    # live and replayed tool-card request details.
+    if name in {
+        "wiki_delete_source",
+        "wiki_parse_source",
+        "wiki_plan_ingest",
+        "wiki_apply_ingest",
+        "wiki_refresh_source",
+    }:
+        return {key: value for key, value in arguments.items() if key != "source_id"}
+    if name == "wiki_batch_ingest":
+        return {key: value for key, value in arguments.items() if key != "source_ids"}
     if name in {"file_write", "write_file"}:
         return {key: arguments[key] for key in _FILE_WRITE_UI_ARG_KEYS if key in arguments}
     if name == "record_replay":

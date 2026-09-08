@@ -9,6 +9,21 @@ import json
 # 渲染任务描述/最终回复/执行摘要，不能走预览提取或截断。
 # 结果本身有界（子任务摘要 × 批量上限 8），不防碍 WS/历史载荷体积。
 SUBAGENT_FULL_RESULT_TOOLS = frozenset({"delegate_task", "run_agent"})
+WIKI_SOURCE_ID_TOOLS = frozenset({
+    "wiki_delete_source",
+    "wiki_parse_source",
+    "wiki_plan_ingest",
+    "wiki_apply_ingest",
+    "wiki_refresh_source",
+})
+_WIKI_INTERNAL_RESULT_KEYS = frozenset({
+    "source_id",
+    "source_ids",
+    "existing_source_id",
+    "duplicate_of",
+    "confirmation_id",
+    "kb_id",
+})
 
 
 def tool_result_detail_for_ui(name: str, content: str, *, max_len: int = 1200) -> str:
@@ -30,10 +45,16 @@ def tool_result_detail_for_ui(name: str, content: str, *, max_len: int = 1200) -
 
     try:
         data = json.loads(text)
-    except Exception:
+    except json.JSONDecodeError:
         return _clip(text, max_len)
 
     if isinstance(data, dict):
+        if name in WIKI_SOURCE_ID_TOOLS:
+            data = _redact_wiki_internal_result(data)
+            for key in ("output", "content", "text", "result", "message"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return _clip(value.strip(), max_len)
         surface = data.get("surface")
         if name in {"Widget", "Canvas", "publish_site"} and isinstance(surface, dict):
             return _clip(json.dumps({"ok": bool(data.get("ok", True)), "surface": surface},
@@ -49,10 +70,30 @@ def tool_result_detail_for_ui(name: str, content: str, *, max_len: int = 1200) -
     return _clip(text, max_len)
 
 
+def _redact_wiki_internal_result(value: object, *, nested_source: bool = False) -> object:
+    """Remove internal Wiki identifiers from the user-facing result preview."""
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            if key in _WIKI_INTERNAL_RESULT_KEYS:
+                continue
+            # RawSource payloads use ``id`` rather than ``source_id``.
+            if nested_source and key == "id":
+                continue
+            result[key] = _redact_wiki_internal_result(
+                item,
+                nested_source=nested_source or key == "source",
+            )
+        return result
+    if isinstance(value, list):
+        return [_redact_wiki_internal_result(item, nested_source=nested_source) for item in value]
+    return value
+
+
 def _terminal_detail(content: str, *, max_len: int) -> str:
     try:
         data = json.loads(content)
-    except Exception:
+    except json.JSONDecodeError:
         return _clip(content, max_len)
 
     if not isinstance(data, dict):

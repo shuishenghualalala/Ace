@@ -62,6 +62,7 @@ class FunctionTool(Tool):
         emoji: str = "",
         display_name: str = "",
         ui_label_template: str = "",
+        ui_label_args_resolver: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None,
         should_defer: bool | None = None,
         search_hint: str = "",
         always_load: bool = False,
@@ -88,6 +89,11 @@ class FunctionTool(Tool):
         self.emoji = emoji
         self.display_name = display_name
         self.ui_label_template = ui_label_template
+        # Optional presentation-only enrichment.  The first argument is the
+        # already redacted UI projection; the second is the runtime argument
+        # set, which lets a tool resolve human-readable metadata without
+        # exposing its internal identifiers in the UI payload.
+        self.ui_label_args_resolver = ui_label_args_resolver
         self.should_defer = should_defer
         self.search_hint = search_hint
         self.always_load = always_load
@@ -185,6 +191,7 @@ class Registry(ToolRegistry):
                 emoji=kwargs.get("emoji", ""),
                 display_name=kwargs.get("display_name", ""),
                 ui_label_template=kwargs.get("ui_label_template", ""),
+                ui_label_args_resolver=kwargs.get("ui_label_args_resolver"),
                 should_defer=kwargs.get("should_defer"),
                 search_hint=kwargs.get("search_hint", ""),
                 always_load=bool(kwargs.get("always_load", False)),
@@ -320,16 +327,29 @@ class Registry(ToolRegistry):
             if value
         }
 
-    def render_ui_label(self, name: str, args: dict[str, Any] | None = None) -> str:
+    def render_ui_label(
+        self,
+        name: str,
+        args: dict[str, Any] | None = None,
+        *,
+        raw_args: dict[str, Any] | None = None,
+    ) -> str:
         """按工具私有 UI 模板渲染展示标题；不会写入 LLM tool schema。"""
         meta = self.ui_meta(name)
         template = meta.get("ui_label_template") or meta.get("display_name") or ""
         if not template:
             return ""
-        values = {k: _short_ui_value(v) for k, v in (args or {}).items()}
+        label_args = dict(args or {})
+        tool = self._tools.get(name)
+        resolver = getattr(tool, "ui_label_args_resolver", None)
+        if callable(resolver):
+            resolved = resolver(label_args, dict(raw_args or {}))
+            if isinstance(resolved, dict):
+                label_args = resolved
+        values = {k: _short_ui_value(v) for k, v in label_args.items()}
         try:
             return template.format_map(_SafeFormatDict(values)).strip()
-        except Exception:
+        except (KeyError, TypeError, ValueError):
             return meta.get("display_name", "").strip()
 
     def toolsets(self) -> list[str]:

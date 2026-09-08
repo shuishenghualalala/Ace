@@ -663,6 +663,28 @@ def register_wiki_tools(
             return located
         return _kb_id(args)
 
+    def _source_title_for_ui_label(
+        ui_args: dict[str, Any],
+        runtime_args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """用素材标题 enrich 工具标题，但不把 source_id 带进用户界面。"""
+        source_id = str(runtime_args.get("source_id") or "").strip()
+        title = ""
+        if source_id:
+            try:
+                kb_id = _kb_id_for_source(runtime_args, source_id)
+                titles = store.get_source_titles(
+                    [source_id],
+                    owner_account_id=_owner(),
+                    kb_id=kb_id,
+                )
+                candidate = titles.get(source_id) if isinstance(titles, dict) else ""
+                if isinstance(candidate, str) and candidate.strip() and candidate.strip() != source_id:
+                    title = candidate.strip()
+            except Exception:  # noqa: BLE001 - UI metadata must not block the tool call
+                title = ""
+        return {**ui_args, "source_title": title or "这份素材"}
+
     def _build_progress_callback() -> Callable[[str, int, dict[str, Any]], Awaitable[None]] | None:
         """构建 Wiki ingest 进度回调：保活当前任务，并在可用时推送到前端。"""
         push = current_push_fn.get()
@@ -2277,15 +2299,15 @@ def register_wiki_tools(
         (_WIKI_LINT_SCHEMA, _handle_lint, True, "🧹", "检查 Wiki", "检查 Wiki", "wiki lint check quality issues broken links orphan"),
         (_WIKI_CREATE_KB_SCHEMA, _handle_create_kb, False, "📚", "创建知识库", "创建知识库 {kb_id}", "wiki create knowledge base new kb"),
         (_WIKI_DELETE_KB_SCHEMA, _handle_delete_kb, False, "🗑️", "删除知识库", "删除知识库 {kb_id}", "wiki delete knowledge base remove kb"),
-        (_WIKI_DELETE_SOURCE_SCHEMA, _handle_delete_source, False, "🗑️", "删除 Raw Source", "删除 Raw Source {source_id}", "wiki delete raw source remove"),
-        (_WIKI_PARSE_SOURCE_SCHEMA, _handle_parse_source, True, "🔧", "重新解析 Raw Source", "重新解析 {source_id}", "wiki parse source reparse document extract text"),
+        (_WIKI_DELETE_SOURCE_SCHEMA, _handle_delete_source, False, "🗑️", "删除 Raw Source", "删除《{source_title}》", "wiki delete raw source remove"),
+        (_WIKI_PARSE_SOURCE_SCHEMA, _handle_parse_source, True, "🔧", "重新解析 Raw Source", "重新解析《{source_title}》", "wiki parse source reparse document extract text"),
         (_WIKI_LIST_SOURCES_SCHEMA, _handle_list_sources, False, "📋", "列出素材", "列出素材", "wiki list sources raw files inbox pending parsed failed recommend ingest"),
         (_WIKI_LIST_KBS_SCHEMA, _handle_list_kbs, False, "📚", "列出知识库", "列出知识库", "wiki list knowledge bases kbs"),
         (_WIKI_UPDATE_PAGE_SCHEMA, _handle_update_page, False, "✏️", "更新 Wiki 页面", "更新页面 {page_id}", "wiki update page edit content tags related aliases"),
-        (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "盘算 {source_id} 该写进哪些页面", "wiki plan ingest preview changes proposed pages"),
-        (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "把 {source_id} 的改动写进知识库", "wiki apply ingest write pages confirm plan"),
+        (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "盘算《{source_title}》该写进哪些页面", "wiki plan ingest preview changes proposed pages"),
+        (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "把《{source_title}》的改动写进知识库", "wiki apply ingest write pages confirm plan"),
         (_WIKI_FETCH_URL_SCHEMA, _handle_fetch_url, True, "🌐", "抓取网页", "抓取网页 {url}", "wiki fetch url webpage scrape crawl import"),
-        (_WIKI_REFRESH_SOURCE_SCHEMA, _handle_refresh_source, True, "🔄", "刷新网页来源", "刷新来源 {source_id}", "wiki refresh url source drift version"),
+        (_WIKI_REFRESH_SOURCE_SCHEMA, _handle_refresh_source, True, "🔄", "刷新网页来源", "刷新网页《{source_title}》", "wiki refresh url source drift version"),
         (_WIKI_DIGEST_SCHEMA, _handle_digest, True, "🧠", "生成跨来源报告", "综合 {topic}", "wiki digest synthesis comparison multi source"),
         (_WIKI_CAPTURE_ATTACHMENT_SCHEMA, _handle_capture_attachment, False, "📎", "捕获 Wiki 附件", "捕获附件 {path}", "wiki capture attachment file import upload"),
         (_WIKI_CAPTURE_TEXT_SCHEMA, _handle_capture_text, False, "📝", "捕获 Wiki 文本", "捕获文本 {title}", "wiki capture text snippet import note"),
@@ -2319,6 +2341,17 @@ def register_wiki_tools(
             emoji=emoji,
             display_name=display_name,
             ui_label_template=ui_label,
+            ui_label_args_resolver=(
+                _source_title_for_ui_label
+                if schema["name"] in {
+                    "wiki_delete_source",
+                    "wiki_parse_source",
+                    "wiki_plan_ingest",
+                    "wiki_apply_ingest",
+                    "wiki_refresh_source",
+                }
+                else None
+            ),
             search_hint=search_hint,
             **result_kwargs,
         )

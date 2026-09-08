@@ -32,6 +32,17 @@ def test_non_terminal_json_prefers_output_field():
   assert tool_result_detail_for_ui("web_search", payload) == "hello"
 
 
+def test_wiki_source_result_hides_internal_identifiers():
+  payload = (
+      '{"source_id":"paste_123", "confirmation_id":"wcf_123", '
+      '"message":"已生成《知识库概览》的整理计划"}'
+  )
+  detail = tool_result_detail_for_ui("wiki_plan_ingest", payload)
+  assert detail == "已生成《知识库概览》的整理计划"
+  assert "paste_123" not in detail
+  assert "wcf_123" not in detail
+
+
 def test_plain_text_is_clipped():
   text = "z" * 3000
   assert len(tool_result_detail_for_ui("file_read", text, max_len=100)) == 100

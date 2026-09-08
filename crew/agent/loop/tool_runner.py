@@ -1055,8 +1055,9 @@ class ToolRunner:
             # Labels are persisted and emitted separately from the already
             # redacted ``args`` field.  Render them from the same safe view so
             # a credential-bearing browser URL cannot leak through the title.
-            safe_args = tool_arguments_for_ui(tc.name, getattr(tc, "arguments", {}) or {})
-            return str(render(tc.name, safe_args) or "")
+            raw_args = getattr(tc, "arguments", {}) or {}
+            safe_args = tool_arguments_for_ui(tc.name, raw_args)
+            return str(render(tc.name, safe_args, raw_args=raw_args) or "")
         except Exception:
             log.debug("工具 UI 标题渲染失败: %s", getattr(tc, "name", ""), exc_info=True)
             return ""
