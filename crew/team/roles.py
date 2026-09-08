@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
-CREW_BUILTIN_AGENT_ID = "crew::builtin"
-LEGACY_CREW_BUILTIN_AGENT_ID = "crew"
+from crew.agent.external.catalog import (
+    CREW_BUILTIN_AGENT_ID,
+    LEGACY_CREW_BUILTIN_AGENT_ID,
+    builtin_agent_public,
+    is_builtin_agent,
+)
 
 
 def is_crew_builtin_agent(agent_id: str) -> bool:
-    return str(agent_id or "").strip() == CREW_BUILTIN_AGENT_ID
+    return is_builtin_agent(agent_id)
 
 
 def is_crew_builtin_display_id(agent_id: str) -> bool:
@@ -17,19 +21,7 @@ def is_crew_builtin_display_id(agent_id: str) -> bool:
 
 
 def crew_builtin_agent_public() -> dict[str, Any]:
-    return {
-        "id": CREW_BUILTIN_AGENT_ID,
-        "name": "Crew 内置智能体",
-        "provider": "crew",
-        "display_badge": "M",
-        "runtime_id": "",
-        "model": "builtin",
-        "system_prompt": "",
-        "custom_args": [],
-        "custom_env": {},
-        "created_at": "",
-        "updated_at": "",
-    }
+    return builtin_agent_public()
 
 
 # 默认团队成员（config.yaml 的 team.members 可覆盖）
@@ -218,7 +210,18 @@ TEAM_ROLE_PRESETS: list[dict[str, Any]] = [
         "node_label": "调研与风险分析",
         "deliverables": ["调研结论", "参考依据", "风险与建议"],
         "collaboration": "按 Leader 给出的范围提交来源、分析结论和不确定性。",
-        "keywords": ["检索", "搜索", "调研", "研究", "文献", "资料", "搜集", "分析", "比较", "咨询"],
+        "keywords": [
+            "检索",
+            "搜索",
+            "调研",
+            "研究",
+            "文献",
+            "资料",
+            "搜集",
+            "分析",
+            "比较",
+            "咨询",
+        ],
     },
     {
         "key": "technical_writer",
@@ -265,7 +268,9 @@ def role_capabilities(role_key: str) -> list[str]:
 
 def role_scope_key(role_key: str) -> str:
     preset = role_preset(role_key)
-    return str(preset.get("scope_key") or preset.get("key") or "general").strip().lower() or "general"
+    return (
+        str(preset.get("scope_key") or preset.get("key") or "general").strip().lower() or "general"
+    )
 
 
 def role_node_label(role_key: str) -> str:
@@ -370,11 +375,13 @@ def compile_role_responsibility(
         collaboration = "作为团队控制面驱动协作；成员提交结果、风险或阻塞后决定继续、返工或汇总。"
     else:
         description = str(preset.get("description") or "").strip()
-        mission = f"围绕「{goal}」，{description}" if description else f"围绕「{goal}」承担{preset['label']}职责。"
+        mission = (
+            f"围绕「{goal}」，{description}"
+            if description
+            else f"围绕「{goal}」承担{preset['label']}职责。"
+        )
         deliverables = [
-            str(item).strip()
-            for item in (preset.get("deliverables") or [])
-            if str(item).strip()
+            str(item).strip() for item in (preset.get("deliverables") or []) if str(item).strip()
         ]
         collaboration = str(preset.get("collaboration") or "").strip()
     boundaries = [
@@ -384,7 +391,8 @@ def compile_role_responsibility(
     return {
         "mission": mission,
         "boundaries": boundaries,
-        "deliverables": deliverables or ["与角色职责匹配的可检查成果", "验证或自检结果", "风险与下一步建议"],
+        "deliverables": deliverables
+        or ["与角色职责匹配的可检查成果", "验证或自检结果", "风险与下一步建议"],
         "collaboration": collaboration or "接收 Leader 派活，提交可验收成果、证据和风险。",
         "_scope_key": "team_lead" if is_leader else role_scope_key(str(preset["key"])),
         "_node_label": "团队规划与验收" if is_leader else role_node_label(str(preset["key"])),
@@ -427,8 +435,17 @@ def responsibility_signature(
     return (
         str(preset.get("workflow_lane") or "build").strip().lower(),
         str(compiled.get("_scope_key") or role_scope_key(str(preset["key"]))).strip().lower(),
-        tuple(sorted(str(item) for item in (assigned_capabilities or compiled.get("_assigned_capabilities") or []))),
-        tuple(str(item).strip().lower() for item in (compiled.get("deliverables") or []) if str(item).strip()),
+        tuple(
+            sorted(
+                str(item)
+                for item in (assigned_capabilities or compiled.get("_assigned_capabilities") or [])
+            )
+        ),
+        tuple(
+            str(item).strip().lower()
+            for item in (compiled.get("deliverables") or [])
+            if str(item).strip()
+        ),
     )
 
 
@@ -470,24 +487,28 @@ def intelligent_role_markdown(
         f"- 重点能力：{capabilities or preset['description']}。",
     ]
     lines.extend(f"- 边界：{item}" for item in stable["boundaries"])
-    lines.extend([
-        "",
-        "#### 团队协作关系",
-        f"- {stable['collaboration']}",
-        "",
-        "#### 输出格式",
-    ])
+    lines.extend(
+        [
+            "",
+            "#### 团队协作关系",
+            f"- {stable['collaboration']}",
+            "",
+            "#### 输出格式",
+        ]
+    )
     lines.extend(f"- {item}" for item in stable["deliverables"])
-    lines.extend([
-        "- 下一负责人：下一步应由 Leader 或具体成员继续。",
-        "- 下一动作：明确可执行的下一步。",
-        "- 风险/阻塞：缺少的信息、依赖、权限或失败原因。",
-        "",
-        "#### 工作安排",
-        "- 启动：确认本节点目标、依赖、交付物和验收点。",
-        "- 执行：按角色完成专业产出，并保留可复核过程。",
-        "- 汇总：交付结果、风险和建议后续动作。",
-    ])
+    lines.extend(
+        [
+            "- 下一负责人：下一步应由 Leader 或具体成员继续。",
+            "- 下一动作：明确可执行的下一步。",
+            "- 风险/阻塞：缺少的信息、依赖、权限或失败原因。",
+            "",
+            "#### 工作安排",
+            "- 启动：确认本节点目标、依赖、交付物和验收点。",
+            "- 执行：按角色完成专业产出，并保留可复核过程。",
+            "- 汇总：交付结果、风险和建议后续动作。",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -499,7 +520,7 @@ def leader_prompt(members: list[dict], *, mode: str = "leader_mesh") -> str:
     return (
         "你是一个智能体团队的 Leader（队长）。你不亲自执行具体操作，而是：\n"
         "1. 把用户任务拆解成子任务；\n"
-        "2. 对已存在的 TeamPlan 节点，通过 `team_mention(intent=\"assign\", to=[成员], node_id=...)` 委派给最合适的队友；\n"
+        '2. 对已存在的 TeamPlan 节点，通过 `team_mention(intent="assign", to=[成员], node_id=...)` 委派给最合适的队友；\n'
         "3. 如果当前 DAG 缺少必要工作，不要直接绕过 DAG 派活，先调用 `request_plan_change(change_type=add_node, ...)` 请求新增节点；\n"
         "4. 用 Team Bus 跟踪内部消息、进展、阻塞和产物；\n"
         "5. 收齐所有队友的执行结果后，汇总成给用户的最终答案。\n\n"

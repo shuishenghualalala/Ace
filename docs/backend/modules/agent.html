@@ -63,6 +63,7 @@
       <tr><td>能力调度</td><td>按会话能力 Profile 过滤 Skill、工具和系统提示。</td><td>已落地</td></tr>
       <tr><td>通用上下文贡献</td><td>在 Request View 组装前消费已排序的 fragment 与 persistent message，不导入具体来源 Feature。</td><td>已落地</td></tr>
       <tr><td>Preset Consumer</td><td>主 Agent 与子 Agent 消费中立的 Feature-owned preset 策略；父权限、禁止嵌套、专属能力追加和 Generation Lease 使用统一装配路径。</td><td>已落地</td></tr>
+      <tr><td>外援 Catalog 消费</td><td>Executor 与外援工具按 <code>ExternalAgentCatalog</code> Protocol 调用 Runtime/Agent/Profile/observation 能力，不依赖 Team 具体存储；具体实现（SQLite 或测试 Provider）由组合根注入。</td><td>已落地（4A-1 存储边界）</td></tr>
     </tbody>
   </table>
 
@@ -71,6 +72,11 @@
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
       <tr><td><code>crew/agent/executor/builtin.py</code></td><td>主 Agent 工具循环与 request view 调度。</td></tr>
+      <tr><td><code>crew/agent/executor/external.py</code></td><td>外部 Runtime 执行器；Store 配置按 <code>ExternalAgentCatalog</code> 契约注入。</td></tr>
+      <tr><td><code>crew/agent/external/catalog.py</code></td><td>外援中立契约：Runtime/Agent/Profile/observation/session binding Protocol 与内置身份。</td></tr>
+      <tr><td><code>crew/agent/external/store.py</code></td><td>Catalog SQLite 实现；独立初始化只建外援表，不建 Team 表。</td></tr>
+      <tr><td><code>crew/agent/external/capabilities.py</code></td><td>共享能力词汇与归一化。</td></tr>
+      <tr><td><code>crew/agent/external/profile.py</code></td><td>共享 AgentProfile 构建与 ProfileEnvelope 持久化。</td></tr>
       <tr><td><code>crew/agent/compact/pipeline.py</code></td><td>L1/L2/L3 压缩编排、预算判断和摘要状态。</td></tr>
       <tr><td><code>crew/agent/compact/microcompact.py</code></td><td>按工具结果生命周期执行选择性微压缩。</td></tr>
       <tr><td><code>crew/agent/compact/post_compact.py</code></td><td>完整压缩后恢复 Skill 指令、资源和重要结果。</td></tr>
@@ -122,6 +128,7 @@ ToolResultRetention:
       <tr><td>2026-09-03</td><td>Cron 触发轮文案改由 Cron Prompt Contributor 提供。</td><td>Agent Runtime 不再判断 Cron channel 或保存 Cron 产品文案。</td></tr>
       <tr><td>2026-09-03</td><td>后台子任务/进程/任务结果通知改由来源模块的 Prompt Contributor 提供，删除三个格式化函数与 params 魔法 key 检查。</td><td><code>crew/agent/runtime.py</code>、team member 的 subagent_drain_fn 旁路。</td></tr>
       <tr><td>2026-09-05</td><td>主 Agent、preview 与前后台子 Agent 改为消费生命周期 Agent Preset Contribution。</td><td>动态目录、父权限封顶、Generation Lease 与 Agent 缓存换代。</td></tr>
+      <tr><td>2026-09-08</td><td>外援执行器与工具改为消费 <code>ExternalAgentCatalog</code> Protocol；外援 SQLite Store 拆出 Team 表/CRUD（阶段 4A-1 存储边界，见 ADR-0027）。</td><td><code>crew/agent/external</code>、<code>crew/agent/executor/external.py</code>；Team 门面见 Team 模块文档。</td></tr>
     </tbody>
   </table>
 

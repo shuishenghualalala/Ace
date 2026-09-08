@@ -27,6 +27,7 @@ from crew.agent.external.acp_adapter import (
     AcpAdapterError,
     AcpPermissionRequest,
 )
+from crew.agent.external.catalog import ExternalAgentCatalog
 from crew.agent.external.cli_adapter import ExternalCliConfig, ExternalCliError, run_external_cli
 from crew.agent.external.codex_adapter import CodexAdapterError
 from crew.agent.external.runtime_adapter import (
@@ -68,7 +69,7 @@ class ClientExecutorConfig:
     function: str = ""        # 可选函数名；为空时自动尝试 run_agent/run/execute/main
     external_agent_id: str = ""
     cwd: str = "."
-    external_store: Any = None
+    external_store: ExternalAgentCatalog | None = None
     options: dict[str, Any] = field(default_factory=dict)
 
 
@@ -85,7 +86,7 @@ class ExternalExecutorConfig:
     timeout: float = DEFAULT_EXTERNAL_IDLE_SECONDS
     hard_timeout: float | None = None
     timeout_policy: dict[str, Any] = field(default_factory=dict)
-    external_store: Any = None
+    external_store: ExternalAgentCatalog | None = None
     interaction_bridge: Any = None
     plan_manager: Any = None
     crew_session_id: str = ""  # Team 模式可显式传 member_session_id 作为原生 session 绑定键

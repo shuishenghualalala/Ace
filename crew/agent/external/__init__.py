@@ -7,10 +7,12 @@ from crew.agent.external.detector import (
     scan_kimi_runtime,
     scan_runtimes,
 )
+from crew.agent.external.catalog import ExternalAgentCatalog
 from crew.agent.external.store import ExternalAgentStore
 
 __all__ = [
     "ExternalAgentStore",
+    "ExternalAgentCatalog",
     "scan_claude_runtime",
     "scan_codex_runtime",
     "scan_hermes_runtime",

@@ -121,7 +121,7 @@ flowchart TB
     class NextExternal,NextKanban next
 ```
 
-这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。阶段 2 的 Driver、Context、Feature Event、Route Gate 和声明式 Core Feature 已形成扩展主链。阶段 3A 的 Cron、Sites 与 Browser 已完成真实资源所有权验证。阶段 3B Foundation 建立了 `knowledge` 稳定 Service、Local Provider 和 `product.wiki` Bundle；Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context 与 Home 导读后台 Task 共享同一 restart Generation。第二切片把 Wiki REST 与聊天附件捕获迁为 Service Consumer；第三切片把全部 Wiki CLI 叶子命令迁为动态 Consumer；第四切片建立 Feature Event Contributor Registry；第五切片建立 Agent Preset Registry；第六切片把 Wiki REST route 迁入 Bundle。阶段 3C 已把 WorkService、八个 Store、Hook 和 REST Route 收入同一 restart Generation，并以可选 KnowledgeService Lease 解除对 Wiki Store 的长期持有；全部 38 个 Work CLI 叶子命令动态租用 Registry Service，生产装配 smoke 证明停用后 fail-closed，Runtime 契约测试证明更新时在途命令持有旧代且后续命令解析新代。阶段 5 首个切片已将 Desktop/Web 的 Wiki 导航接入构建期可信 Registry：导航贡献可排序、冲突失败、撤销，`wiki.enabled` 控制入口和程序化切换，禁用时安全回落 Chat，并保留 Assistant/Work 原有共享导航语义。页面生命周期、API Client、Feature Event Reducer 和其他 Feature UI Contribution 仍未迁移。下一优先级为阶段 4A 外援和阶段 4B Dynamic Kanban 的 feature-local 生命周期首切片并行开发，中心装配串行合入。
+这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。阶段 2 的 Driver、Context、Feature Event、Route Gate 和声明式 Core Feature 已形成扩展主链。阶段 3A 的 Cron、Sites 与 Browser 已完成真实资源所有权验证。阶段 3B Foundation 建立了 `knowledge` 稳定 Service、Local Provider 和 `product.wiki` Bundle；Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context 与 Home 导读后台 Task 共享同一 restart Generation。第二切片把 Wiki REST 与聊天附件捕获迁为 Service Consumer；第三切片把全部 Wiki CLI 叶子命令迁为动态 Consumer；第四切片建立 Feature Event Contributor Registry；第五切片建立 Agent Preset Registry；第六切片把 Wiki REST route 迁入 Bundle。阶段 3C 已把 WorkService、八个 Store、Hook 和 REST Route 收入同一 restart Generation，并以可选 KnowledgeService Lease 解除对 Wiki Store 的长期持有；全部 38 个 Work CLI 叶子命令动态租用 Registry Service，生产装配 smoke 证明停用后 fail-closed，Runtime 契约测试证明更新时在途命令持有旧代且后续命令解析新代。阶段 5 首个切片已将 Desktop/Web 的 Wiki 导航接入构建期可信 Registry：导航贡献可排序、冲突失败、撤销，`wiki.enabled` 控制入口和程序化切换，禁用时安全回落 Chat，并保留 Assistant/Work 原有共享导航语义。页面生命周期、API Client、Feature Event Reducer 和其他 Feature UI Contribution 仍未迁移。阶段 4A-1 外援中立 Catalog/Profile 与 Team 存储边界已完成（见 ADR-0027），下一优先级为阶段 4A-2 外援 Provider/Run 生命周期与阶段 4B Dynamic Kanban 的 feature-local 生命周期首切片并行开发，中心装配串行合入。
 
 ## 0. 执行摘要
 
@@ -1384,10 +1384,11 @@ Desktop 和 Web 不应分别发明一套 Feature 协议。建议共享：
 
 #### 4A. 外援
 
-- 将公共 Agent 描述移出 Team 具体类型。
-- 定义 `ExternalAgentCatalog` 和 `AgentRuntimeProvider`。
+- 将公共 Agent 描述移出 Team 具体类型。（已完成：共享 Profile 与能力词汇迁入 `crew/agent/external`，Team 保留兼容转出）
+- 定义 `ExternalAgentCatalog` 和 `AgentRuntimeProvider`。（Catalog Protocol 已完成；独立 SQLite Store 不再建 Team 表；`AgentRuntimeProvider` 与 Provider 生命周期待 4A-2）
+- Team 表/CRUD/迁移移入 Team 拥有的 `TeamExternalAgentStore` 兼容门面；生产组合根在 4A-2 前继续构造该门面，`enable_team=False` 语义不变。（已完成，见 ADR-0027）
 - ACP、CLI、Codex Adapter 作为 Provider 内部实现。
-- 默认 Agent 和 Team 通过服务接口调用外援。
+- 默认 Agent 和 Team 通过服务接口调用外援。（Executor/工具已按 Catalog Protocol 消费；服务接口化待 4A-2）
 - 外援关闭时，其工具、API、后台资源和 UI 状态一致消失。
 - ACP、CLI、Codex 的子进程、reader/writer/stderr Task 全部由 External Agent Generation 持有。
 

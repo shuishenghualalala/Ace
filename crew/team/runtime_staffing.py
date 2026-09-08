@@ -13,6 +13,7 @@ from typing import Any
 
 from crew.core.errors import ToolError
 from crew.core.followup import CANCELLED_MARKER
+from crew.agent.external.catalog import ExternalAgentCatalog
 from crew.team import flow_builder
 from crew.team.agent_profile import evaluate_capability_coverage
 from crew.team.capabilities import normalize_capabilities
@@ -32,8 +33,8 @@ class RuntimeStaffingPolicy:
     def __init__(
         self,
         *,
-        external_store: Any | None,
-        external_store_provider: Callable[[], Any | None] | None = None,
+        external_store: ExternalAgentCatalog | None,
+        external_store_provider: Callable[[], ExternalAgentCatalog | None] | None = None,
         resolve_member_profile: Callable[[TeamMemberSpec, str], Any | None],
     ) -> None:
         self.external_store = external_store
@@ -103,14 +104,16 @@ class RuntimeStaffingPolicy:
         trigger_type: str,
         required_capabilities: list[str],
     ) -> str:
-        identity = "\x1f".join([
-            plan.plan_id,
-            node.node_id,
-            trigger_type,
-            ",".join(normalize_capabilities(required_capabilities)),
-            str(node.attempt_count),
-            str(node.delegate_task_id or ""),
-        ])
+        identity = "\x1f".join(
+            [
+                plan.plan_id,
+                node.node_id,
+                trigger_type,
+                ",".join(normalize_capabilities(required_capabilities)),
+                str(node.attempt_count),
+                str(node.delegate_task_id or ""),
+            ]
+        )
         return f"staffing_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:20]}"
 
     def trigger(
@@ -182,7 +185,9 @@ class RuntimeStaffingPolicy:
                 "reason": f"当前成员 {node.assignee} 的 Runtime/model 不可用或能力画像无法确认。",
             }
         if coverage.status != "covered":
-            missing = list(dict.fromkeys([*coverage.missing, *coverage.unavailable, *coverage.unknown]))
+            missing = list(
+                dict.fromkeys([*coverage.missing, *coverage.unavailable, *coverage.unknown])
+            )
             return {
                 "trigger_type": "capability_gap",
                 "required_capabilities": missing,
@@ -222,18 +227,22 @@ class RuntimeStaffingPolicy:
             return candidates
         role_key = role_key_for_capabilities(required_capabilities)
         preset = role_preset(role_key)
-        candidates.append({
-            "candidate_type": "runtime",
-            "selection_source": "new_managed_agent",
-            "runtime_id": str(recommended.get("runtime_id") or ""),
-            "runtime_name": str(recommended.get("runtime_name") or recommended.get("runtime_id") or "Runtime"),
-            "model_id": str(recommended.get("model_id") or ""),
-            "role_key": role_key,
-            "role_label": str(preset.get("label") or role_key),
-            "covered_capabilities": list(required_capabilities),
-            "profile_version": 0,
-            "reason": "创建一个隐藏的 Runtime 托管 Agent；仅挂载到本次 WorkflowRun，后续实证继续更新其 AgentProfile。",
-        })
+        candidates.append(
+            {
+                "candidate_type": "runtime",
+                "selection_source": "new_managed_agent",
+                "runtime_id": str(recommended.get("runtime_id") or ""),
+                "runtime_name": str(
+                    recommended.get("runtime_name") or recommended.get("runtime_id") or "Runtime"
+                ),
+                "model_id": str(recommended.get("model_id") or ""),
+                "role_key": role_key,
+                "role_label": str(preset.get("label") or role_key),
+                "covered_capabilities": list(required_capabilities),
+                "profile_version": 0,
+                "reason": "创建一个隐藏的 Runtime 托管 Agent；仅挂载到本次 WorkflowRun，后续实证继续更新其 AgentProfile。",
+            }
+        )
         return candidates[:3]
 
     @staticmethod

@@ -21,11 +21,6 @@ source_modules =
 forbidden_modules =
     crew.team
 allow_indirect_imports = True
-# 阶段 4A：中立化 External Agent Profile 后删除以下三项豁免。
-ignore_imports =
-    crew.agent.external.store -> crew.team.agent_profile
-    crew.agent.external.store -> crew.team.capabilities
-    crew.agent.external.store -> crew.team.roles
 
 [importlinter:contract:agent-gateway-boundary]
 name = Agent must not add direct Gateway dependencies
@@ -53,11 +48,6 @@ source_modules =
 forbidden_modules =
     crew.team
 allow_indirect_imports = True
-# 阶段 4A：External Agent Store 改用稳定契约后删除以下豁免。
-ignore_imports =
-    crew.agent.external.store -> crew.team.agent_profile
-    crew.agent.external.store -> crew.team.capabilities
-    crew.agent.external.store -> crew.team.roles
 
 [importlinter:contract:security-feature-boundary]
 name = Security must not depend on product features or hosts

@@ -3526,7 +3526,9 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     from crew.state.channel_bindings import ChannelBindingsStore
 
     channel_bindings = ChannelBindingsStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
-    external_agents = ExternalAgentStore(cfg.db_path)
+    from crew.team.external_store import TeamExternalAgentStore
+
+    external_agents = TeamExternalAgentStore(cfg.db_path)
     from crew.state.plugin_preferences import PluginPreferencesStore
 
     plugin_prefs = PluginPreferencesStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)

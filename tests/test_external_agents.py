@@ -68,6 +68,7 @@ from crew.agent.external.runtime_adapter import (
 )
 from crew.agent.external.store import ExternalAgentStore
 from crew.agent.external.tools import register_external_agent_tools
+from crew.team.external_store import TeamExternalAgentStore
 from crew.agent.plan import PlanModeManager
 from crew.agent.skills import SkillActivation, SkillEntrypoint
 from crew.core.envelope import ResponseChunk
@@ -740,12 +741,18 @@ async def test_external_cli_cancellation_terminates_runtime_process_tree(tmp_pat
         cwd=str(tmp_path),
         timeout=120,
     )))
+    pids = None
     for _ in range(100):
         if pid_file.exists():
-            break
+            try:
+                candidate = json.loads(pid_file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                candidate = None
+            if isinstance(candidate, dict) and {"parent", "child"} <= candidate.keys():
+                pids = candidate
+                break
         await asyncio.sleep(0.01)
-    assert pid_file.exists()
-    pids = json.loads(pid_file.read_text(encoding="utf-8"))
+    assert pids is not None
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1881,7 +1888,7 @@ def test_external_runtime_missing_identity_uses_neutral_fallback(tmp_path):
 
 
 def test_external_agents_and_teams_are_owner_private_while_runtime_is_global(tmp_path):
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "shared-runtime",
         "provider": "hermes",
@@ -2509,7 +2516,7 @@ def _hermes_runtime(runtime_id: str, executable_path: str, metadata: dict) -> di
 
 
 def test_runtime_sync_rebinds_agents_and_retires_replaced_installation(tmp_path):
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     old_runtime = store.upsert_runtime(_hermes_runtime("hermes-old-path", "/old/bin/hermes", {
         "runtime_descriptor_source": "builtin",
         "adapter_id": "acp-stdio",
@@ -2763,7 +2770,7 @@ def test_external_agent_store_refreshes_v1_profiles_without_schema_change(tmp_pa
 
 
 def test_external_team_persists_independent_formation_plan(tmp_path):
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "kimi_test",
         "provider": "kimi",
@@ -2807,7 +2814,7 @@ def test_external_team_persists_independent_formation_plan(tmp_path):
 
 def test_store_migrates_legacy_embedded_formation_plan(tmp_path):
     db = tmp_path / "crew.db"
-    store = ExternalAgentStore(str(db))
+    store = TeamExternalAgentStore(str(db))
     runtime = store.upsert_runtime({
         "id": "kimi_test",
         "provider": "kimi",
@@ -2843,7 +2850,7 @@ def test_store_migrates_legacy_embedded_formation_plan(tmp_path):
             (json.dumps(legacy_spec), team["id"]),
         )
 
-    migrated = ExternalAgentStore(str(db)).get_team(team["id"], owner_account_id="local")
+    migrated = TeamExternalAgentStore(str(db)).get_team(team["id"], owner_account_id="local")
 
     assert "formation" not in migrated["team_spec"]
     assert migrated["formation_plan"]["leader_agent_id"] == agent["id"]
@@ -2866,7 +2873,7 @@ def test_role_markdown_is_complete():
 
 
 def test_delete_team_archives_team_and_unblocks_agent_delete(tmp_path):
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "kimi_test",
         "provider": "kimi",
@@ -2908,7 +2915,7 @@ def test_team_role_presets_and_suggestion_are_goal_aware():
 
 
 def test_external_team_member_role_metadata_persists(tmp_path):
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "kimi_test",
         "provider": "kimi",
@@ -2953,7 +2960,7 @@ def test_external_team_member_role_metadata_persists(tmp_path):
 
 
 def test_external_team_accepts_crew_builtin_as_leader_and_member(tmp_path):
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "kimi_test",
         "provider": "kimi",
@@ -2985,7 +2992,7 @@ def test_external_team_accepts_crew_builtin_as_leader_and_member(tmp_path):
 
 async def test_delegate_to_external_agent_runs_kimi_via_acp(tmp_path):
     kimi = _fake_kimi(tmp_path)
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "kimi_test",
         "provider": "kimi",

@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from crew.agent.executor import BuiltinExecutor
 from crew.agent.executor.external import AcpExecutor
 from crew.agent.external.store import ExternalAgentStore
+from crew.team.external_store import TeamExternalAgentStore
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.errors import ToolError
 from crew.core.interfaces import LLMProvider
@@ -1330,7 +1331,7 @@ def test_leader_review_revise_reopens_member_then_approve_releases_review():
 
 
 def test_external_agent_profile_observation_uses_final_leader_review_attempt(tmp_path):
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "profile-runtime",
         "provider": "custom",
@@ -9200,7 +9201,7 @@ async def test_runtime_staffing_e2e_reassigns_executes_and_learns_without_mutati
     tmp_path,
     monkeypatch,
 ):
-    external_store = ExternalAgentStore(str(tmp_path / "external.db"))
+    external_store = TeamExternalAgentStore(str(tmp_path / "external.db"))
     runtime = external_store.upsert_runtime({
         "id": "runtime-ready",
         "provider": "custom",
@@ -9396,7 +9397,7 @@ async def test_runtime_staffing_e2e_reassigns_executes_and_learns_without_mutati
 
 @pytest.mark.asyncio
 async def test_runtime_staffing_timeout_never_auto_approves(tmp_path, monkeypatch):
-    external_store = ExternalAgentStore(str(tmp_path / "external.db"))
+    external_store = TeamExternalAgentStore(str(tmp_path / "external.db"))
     runtime = external_store.upsert_runtime({
         "id": "runtime-ready",
         "provider": "custom",

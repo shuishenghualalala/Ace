@@ -6,7 +6,7 @@ from typing import Any
 
 from crew.agent.executor.base import ExecutionContext
 from crew.agent.executor.external import ExternalExecutor
-from crew.agent.external.store import ExternalAgentStore
+from crew.agent.external.catalog import ExternalAgentCatalog
 from crew.core.runctx import current_agent_workdir, current_owner_account_id, current_session_id
 from crew.tools.registry import Registry, tool_error, tool_result
 
@@ -31,7 +31,7 @@ DELEGATE_EXTERNAL_AGENT_SCHEMA = {
 
 def register_external_agent_tools(
     registry: Registry,
-    store: ExternalAgentStore,
+    store: ExternalAgentCatalog,
     *,
     interaction_bridge_getter=None,
 ) -> None:
@@ -54,17 +54,19 @@ def register_external_agent_tools(
         provider = str(agent["provider"]).lower()
         session_id = current_session_id.get() or "delegate_to_external_agent"
         bridge = interaction_bridge_getter() if callable(interaction_bridge_getter) else None
-        executor = ExternalExecutor({
-            "external_agent_id": agent_id,
-            "external_store": store,
-            "interaction_bridge": bridge,
-            "cwd": cwd,
-            "crew_session_id": f"{session_id}::delegate::{agent_id}",
-            "display_session_id": session_id,
-            "control_session_id": session_id,
-            # 临时委派不与外部单 Agent 的长期会话混用。
-            "persist_runtime_session": False,
-        })
+        executor = ExternalExecutor(
+            {
+                "external_agent_id": agent_id,
+                "external_store": store,
+                "interaction_bridge": bridge,
+                "cwd": cwd,
+                "crew_session_id": f"{session_id}::delegate::{agent_id}",
+                "display_session_id": session_id,
+                "control_session_id": session_id,
+                # 临时委派不与外部单 Agent 的长期会话混用。
+                "persist_runtime_session": False,
+            }
+        )
         ctx = ExecutionContext(
             session_id=f"{session_id}::delegate::{agent_id}",
             request_id="delegate_to_external_agent",
@@ -79,11 +81,13 @@ def register_external_agent_tools(
                 output = str(chunk.body.get("text") or "")
             elif chunk.kind == "error":
                 return tool_error(str(chunk.body.get("message") or "外部智能体调用失败"))
-        return tool_result({
-            "agent_id": agent_id,
-            "provider": provider,
-            "output": output,
-        })
+        return tool_result(
+            {
+                "agent_id": agent_id,
+                "provider": provider,
+                "output": output,
+            }
+        )
 
     registry.register(
         name="delegate_to_external_agent",
