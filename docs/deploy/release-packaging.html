@@ -27,6 +27,19 @@
   <h1>三平台桌面发行包发布</h1>
   <div class="sub">macOS、Linux（UOS / Kylin）、Windows 安装包的制作内容与 GitHub Release 发布流程。</div>
 
+  <h2>打包架构</h2>
+  <p>安装包内 gateway 以<strong>源码形态</strong>携带（不再是 PyInstaller 二进制）：desktop 主进程用安装包内嵌的 Python 以 <code>python -m crew.gateway.server</code> 直接启动（<code>CREW_PACKAGED=1</code> 标记打包态）。gateway 与技能脚本共用同一个内嵌 Python，消除了原先 PyInstaller 解释器与技能运行时重复携带一套 Python 的体积浪费。</p>
+  <table>
+    <tr><th>目录</th><th>内容</th></tr>
+    <tr><td><code>crew-gateway/crew/</code></td><td>gateway 源码全量（含 skills/scenarios/mcp_servers，排除 __pycache__）</td></tr>
+    <tr><td><code>crew-gateway/plugins/</code></td><td>内置插件</td></tr>
+    <tr><td><code>crew-gateway/config/</code></td><td>仅 .env.example、config.yaml.example、prompts/；构建期有安全检查，真实 .env / config.yaml 出现即失败</td></tr>
+    <tr><td><code>crew-gateway/runtimes/python/</code></td><td>python-build-standalone 3.11.9 + gateway 依赖 + 技能依赖（pandas/pikepdf/pdfplumber 等）</td></tr>
+    <tr><td><code>crew-gateway/runtimes/node/</code></td><td>Node.js 20.18.3 portable（裁剪 corepack/docs，保留 npm 供 docx/webapp 技能使用）</td></tr>
+    <tr><td><code>crew-desktop/</code></td><td>Electron 桌面端（locales 只保留 en-US / zh-CN；macOS 保留 en/zh_CN/zh_TW lproj）</td></tr>
+  </table>
+  <p>内嵌 Python 依赖的唯一数据源：<code>pyproject.toml</code>（核心 dependencies + wiki/pdf/docx/xlsx extras）与 <code>deb-package/runtime-requirements.txt</code>（技能脚本补充依赖）；markitdown 以 --no-deps 单独安装（其可选依赖链超 100MB）。运行时缓存（dist/runtimes-cache）以依赖清单哈希为戳，不变则跨构建复用。</p>
+
   <h2>发布入口</h2>
   <p>仓库新增 workflow <code>.github/workflows/release-desktop.yml</code>，两种触发方式：</p>
   <table>
@@ -42,7 +55,7 @@
     <tr>
       <td>macOS arm64</td>
       <td><code>crew-desktop_&lt;版本&gt;_arm64.dmg</code></td>
-      <td rowspan="2">Electron 桌面端 + PyInstaller Gateway + 内嵌 Python/Node 运行时 + macOS 安全运行组件</td>
+      <td rowspan="2">Electron 桌面端 + gateway 源码树（内嵌 Python 直跑）+ 内嵌 Python/Node 运行时 + macOS 安全运行组件</td>
     </tr>
     <tr>
       <td>macOS x64</td>
@@ -51,7 +64,7 @@
     <tr>
       <td>Linux UOS</td>
       <td><code>crew-desktop_&lt;版本&gt;_uos_amd64.deb</code></td>
-      <td rowspan="2">/opt/crew-desktop（Electron + bwrap + 安全运行组件）+ /opt/crew-gateway（PyInstaller Gateway）+ 内嵌运行时</td>
+      <td rowspan="2">/opt/crew-desktop（Electron + bwrap + 安全运行组件）+ /opt/crew-gateway（源码树 + 内嵌运行时）</td>
     </tr>
     <tr>
       <td>Linux Kylin</td>
@@ -60,14 +73,14 @@
     <tr>
       <td>Windows x64</td>
       <td><code>Crew_Setup_v&lt;版本&gt;.exe</code></td>
-      <td>win-unpacked 桌面端 + PyInstaller Gateway + 内嵌 Python/Node 运行时 + Windows 安全运行组件，Inno Setup 安装器</td>
+      <td>win-unpacked 桌面端 + gateway 源码树与内嵌 Python/Node 运行时 + Windows 安全运行组件，Inno Setup 安装器</td>
     </tr>
   </table>
   <p>Release 同时附带 <code>SHA256SUMS</code> 校验文件和各平台体积报告。</p>
 
   <h2>打包内容约定</h2>
   <p>三个平台的安装包都不包含 <code>web/</code> 目录及其构建产物 <code>web/dist</code>。桌面端界面来自 <code>desktop/dist</code>；Gateway 缺少 web 静态资源时，浏览器直连管理台显示“前端未构建”占位页，桌面端功能不受影响。</p>
-  <p>内置 skills 随 Gateway 进入包内 <code>_internal/crew/skills</code>；用户自定义 skills 保留在 <code>~/.Crew/skills</code>，安装包不覆盖、不写入用户数据。docs、测试、源码、本地配置与密钥一律不进包。</p>
+  <p>内置 skills 随安装包以源码携带于 <code>crew-gateway/crew/skills</code>，首次运行时释放到 <code>~/.Crew/skills</code>；用户自定义 skills 保留在用户目录，安装包不覆盖、不写入用户数据。docs、测试、桌面端源码、本地配置与密钥一律不进包。</p>
 
   <h2>桌面端「更新」按钮的下载指向</h2>
   <p>桌面端设置页「关于我们」里的「更新」按钮，点击后由主进程请求 <code>GET https://api.github.com/repos/shuishenghualalala/Ace/releases/latest</code>，按当前系统/架构匹配对应安装包并打开下载页：</p>
@@ -97,11 +110,13 @@ git push origin v1.1.0</pre>
   <h2>注意事项</h2>
   <ul>
     <li>当前产物未做 Apple 签名与公证，macOS 首次打开需要右键打开；Windows 侧未做 Authenticode 签名时 SmartScreen 可能拦截。</li>
-    <li>每个构建任务都在目标原生平台 runner 上执行，PyInstaller / Electron 不做交叉编译。</li>
+    <li>每个构建任务都在目标原生平台 runner 上执行，不做交叉编译。</li>
     <li>Linux 构建依赖 Docker，Windows 构建依赖 Inno Setup 6，workflow 已自动安装。</li>
+    <li>打包脚本已不依赖本机 Python 环境（无需 .venv / uv / PyInstaller），仅需 Node 22+ 与 Rust 工具链；内嵌运行时与依赖由脚本自动下载安装。</li>
+    <li>本地运行 <code>pack_exe.ps1</code> 时如遇 electron-builder 下载超时，脚本已内置 npmmirror 镜像（可用 ELECTRON_MIRROR / ELECTRON_BUILDER_BINARIES_MIRROR 环境变量覆盖）。</li>
   </ul>
 
-  <div class="nav">相关文件：deb-package/pack_mac.sh · deb-package/pack_deb.ps1 · deb-package/pack_exe.ps1 · Dockerfile.pack · .github/workflows/release-desktop.yml</div>
+  <div class="nav">相关文件：deb-package/pack_mac.sh · deb-package/pack_deb.ps1 · deb-package/pack_exe.ps1 · deb-package/runtime-requirements.txt · Dockerfile.pack · .github/workflows/release-desktop.yml</div>
 </div>
 </body>
 </html>

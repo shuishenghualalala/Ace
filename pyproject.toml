@@ -9,6 +9,9 @@ authors = [
     { name = "Crew Contributors" },
 ]
 requires-python = ">=3.11"
+# 核心依赖同时也是安装包内嵌 Python 的 gateway 依赖；
+# 改动 dependencies 与 wiki/pdf/docx/xlsx extras 会直接改变发行包内容，
+# 打包侧唯一数据源见 deb-package/runtime-requirements.txt 的说明。
 dependencies = [
     "openai>=1.30",
     "fastapi>=0.110",
@@ -64,14 +67,14 @@ wiki = [
     "youtube-transcript-api>=1.0.0",
 ]
 # PDF 处理 skill（crew/skills/pdf）：创建/处理 PDF + 视觉 QA。
-# 创建：reportlab + matplotlib（图表）。
+# 创建：reportlab。复杂图表的 matplotlib 由技能文档指导运行时按需安装（PIP_USER 机制），
+# 不再预装以控制发行包体积。
 # 处理（提取/合并/填表/旋转）：pikepdf + pdfplumber。
 # Markdown→PDF（swarm 报告）：markdown2 + xhtml2pdf（底层复用 reportlab）。
 # 视觉 QA（SKILL.md 强制要求）：pypdfium2 + Pillow。
 # 不加入核心依赖；按需安装 `.[pdf]`。
 pdf = [
     "reportlab>=4.0",
-    "matplotlib>=3.8",
     "pikepdf>=8.0",
     "pdfplumber>=0.10",
     "markdown2>=2.5",
