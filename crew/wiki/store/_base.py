@@ -303,6 +303,24 @@ class WikiStore(ABC):
         """从结构化 index 导航召回页面；不支持的存储实现可返回空结果。"""
         return []
 
+    def search_vectors(
+        self,
+        query: str,
+        top_k: int = 5,
+        owner_account_id: str = "",
+        kb_id: str = "default",
+    ) -> list[WikiPage]:
+        """语义向量召回页面；未启用 embedding 的存储实现返回空结果。"""
+        return []
+
+    def rebuild_vector_index(
+        self,
+        owner_account_id: str = "",
+        kb_id: str = "default",
+    ) -> int:
+        """重建向量索引并返回嵌入页数；未启用 embedding 的实现返回 0。"""
+        return 0
+
     @abstractmethod
     def get_graph(
         self,

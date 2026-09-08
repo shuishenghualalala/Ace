@@ -52,6 +52,15 @@ def create_config_router(crew, dispatcher=None) -> APIRouter:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
         return JSONResponse(_visible_config_body(request))
 
+    @router.put("/api/config/wiki-semantic")
+    async def update_wiki_semantic(request: Request, payload: dict) -> JSONResponse:
+        owner = account_from_request(request).owner_account_id
+        try:
+            crew.update_semantic_config(owner, payload)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+        return JSONResponse({"ok": True, **_visible_config_body(request)})
+
     # ---- 模型 profile CRUD：运行时增删改 + 持久化到 config.yaml / .env ----
     # 不直接改 yaml，统一走 CrewApp.add_model/update_model/remove_model（与 use_model
     # 共享副作用：重建 Provider + 清缓存）。API Key 明文仅接受在 body，由后端写 .env。

@@ -11,7 +11,7 @@ import time
 from contextlib import contextmanager
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING, Callable
 
 from crew.state.home import get_owner_runtime_home, owner_path_segment
 from crew.state.logging import get_logger
@@ -19,6 +19,10 @@ from crew.wiki.schemas import HomeIntro, KnowledgeBase, LintIssue, RawSource, Wi
 from crew.wiki.sources import SOURCE_DIRS
 from crew.wiki._utils import normalize_page_key, query_terms
 from crew.wiki.search import SQLiteFTS5SearchIndex, WikiSearchIndex
+from crew.wiki.vector import SQLiteVectorIndex, WikiVectorIndex
+
+if TYPE_CHECKING:
+    from crew.wiki.embedding import EmbeddingProvider
 from crew.wiki.store._base import WikiStore
 from crew.wiki.store._ids import (
     _DEFAULT_KB_ID,
@@ -58,6 +62,11 @@ class FileSystemWikiStore(WikiStore):
         base_dir: Path | str | None = None,
         *,
         storage_root: Path | str | None = None,
+        embedding_provider: "EmbeddingProvider | None" = None,
+        provider_for_owner: "Callable[[str], EmbeddingProvider | None] | None" = None,
+        semantic_rank_weight: float = 40.0,
+        semantic_min_similarity: float = 0.0,
+        semantic_batch_size: int = 64,
     ) -> None:
         if base_dir and storage_root:
             raise ValueError("base_dir 与 storage_root 不能同时设置")
@@ -66,6 +75,13 @@ class FileSystemWikiStore(WikiStore):
         self._locks: dict[str, threading.Lock] = {}
         self._global_lock = threading.Lock()
         self._search_indexes: dict[str, WikiSearchIndex] = {}
+        self._vector_indexes: dict[str, WikiVectorIndex] = {}
+        self._sim_cache: dict[tuple[str, str, str], dict[str, float]] = {}
+        self._embedding_provider = embedding_provider
+        self._provider_for_owner = provider_for_owner
+        self._semantic_rank_weight = float(semantic_rank_weight)
+        self._semantic_min_similarity = float(semantic_min_similarity)
+        self._semantic_batch_size = int(semantic_batch_size)
 
     def _owner_home(self, owner_account_id: str = "") -> Path:
         """返回 owner 级运行时 home（不依赖 kb_id）。"""
@@ -128,10 +144,182 @@ class FileSystemWikiStore(WikiStore):
 
     def _search_index(self, owner_account_id: str, kb_id: str) -> WikiSearchIndex:
         key = self._search_index_key(owner_account_id, kb_id)
-        if key not in self._search_indexes:
-            db_path = self._dir(owner_account_id, kb_id) / ".crew" / "index" / "fts.db"
-            self._search_indexes[key] = SQLiteFTS5SearchIndex(db_path)
-        return self._search_indexes[key]
+        with self._global_lock:
+            if key not in self._search_indexes:
+                db_path = self._dir(owner_account_id, kb_id) / ".crew" / "index" / "fts.db"
+                self._search_indexes[key] = SQLiteFTS5SearchIndex(db_path)
+            return self._search_indexes[key]
+
+    def _embedding_provider_for_owner(
+        self,
+        owner_account_id: str = "",
+    ) -> "EmbeddingProvider | None":
+        """解析 owner 生效的 embedding provider；未注入解析器时回退全局 provider。"""
+        if self._provider_for_owner is not None:
+            return self._provider_for_owner(owner_account_id)
+        return self._embedding_provider
+
+    def _vector_index(self, owner_account_id: str, kb_id: str) -> WikiVectorIndex | None:
+        """惰性创建向量索引；该 owner 未解析出 embedding provider 时返回 None。"""
+        provider = self._embedding_provider_for_owner(owner_account_id)
+        if provider is None:
+            return None
+        key = self._search_index_key(owner_account_id, kb_id)
+        with self._global_lock:
+            if key not in self._vector_indexes:
+                db_path = self._dir(owner_account_id, kb_id) / ".crew" / "index" / "vectors.db"
+                self._vector_indexes[key] = SQLiteVectorIndex(
+                    db_path,
+                    embed_fn=provider.embed,
+                    model=provider.model,
+                    dim=provider.dim,
+                    batch_size=self._semantic_batch_size,
+                )
+            return self._vector_indexes[key]
+
+    def _sync_vector(self, owner_account_id: str, kb_id: str, page: WikiPage) -> None:
+        """把页面同步到向量索引；未启用 embedding 时跳过。"""
+        index = self._vector_index(owner_account_id, kb_id)
+        if index is not None:
+            index.sync_page(page)
+
+    def _delete_vectors(self, owner_account_id: str, kb_id: str, page_ids: list[str]) -> None:
+        """从向量索引删除页面；未启用 embedding 时跳过。"""
+        if not page_ids:
+            return
+        index = self._vector_index(owner_account_id, kb_id)
+        if index is not None:
+            index.delete_pages(page_ids)
+
+    def _ensure_vectors(self, owner_account_id: str, kb_id: str) -> WikiVectorIndex | None:
+        """返回可用向量索引；模型/维度变更或首次使用有存量页面时惰性重建。"""
+        index = self._vector_index(owner_account_id, kb_id)
+        if index is None:
+            return None
+        provider = self._embedding_provider_for_owner(owner_account_id)
+        if provider is None:
+            return None
+        if index.stored_model is None:
+            if self.count_pages(owner_account_id, kb_id) > 0:
+                self.rebuild_vector_index(owner_account_id, kb_id)
+        elif index.stored_model != provider.model or (
+            provider.dim and index.stored_dim and index.stored_dim != provider.dim
+        ):
+            self.rebuild_vector_index(owner_account_id, kb_id)
+        return index
+
+    def _query_similarities(
+        self,
+        query: str,
+        owner_account_id: str,
+        kb_id: str,
+    ) -> dict[str, float]:
+        """查询向量与各页向量的 cosine 相似度，按 (owner, kb, query) 缓存。"""
+        index = self._ensure_vectors(owner_account_id, kb_id)
+        if index is None:
+            return {}
+        cache_key = (owner_account_id or "__default__", normalize_kb_id(kb_id), query)
+        cached = self._sim_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        provider = self._embedding_provider_for_owner(owner_account_id)
+        if provider is None:
+            return {}
+        try:
+            query_vec = provider.embed_query(query)
+            scored = index.search_by_vector(
+                query_vec,
+                top_k=self.count_pages(owner_account_id, kb_id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("语义检索查询嵌入失败: %s", exc)
+            return {}
+        similarities = {pid: score for pid, score in scored}
+        self._sim_cache[cache_key] = similarities
+        if len(self._sim_cache) > 128:
+            self._sim_cache.clear()
+        return similarities
+
+    def search_vectors(
+        self,
+        query: str,
+        top_k: int = 5,
+        owner_account_id: str = "",
+        kb_id: str = "default",
+    ) -> list[WikiPage]:
+        """语义向量召回，复用 ``_query_similarities`` 的缓存，过滤被取代的 source 页。"""
+        query = str(query or "").strip()
+        if not query or top_k <= 0:
+            return []
+        similarities = self._query_similarities(query, owner_account_id, kb_id)
+        if not similarities:
+            return []
+        superseded = self.superseded_source_ids(owner_account_id, kb_id)
+        by_id = {page.id: page for page in self._iter_pages(owner_account_id, kb_id)}
+        results: list[WikiPage] = []
+        for pid, score in sorted(similarities.items(), key=lambda item: item[1], reverse=True):
+            if score <= self._semantic_min_similarity:
+                break
+            page = by_id.get(pid)
+            if page is None:
+                continue
+            if superseded and page.page_type == "source" and any(
+                sid in superseded for sid in page.sources
+            ):
+                continue
+            results.append(page)
+            if len(results) >= top_k:
+                break
+        return results
+
+    def invalidate_embedding(self) -> None:
+        """丢弃全部向量索引与相似度缓存，供全局 provider 变更后重建。"""
+        indexes = list(self._vector_indexes.values())
+        self._vector_indexes.clear()
+        for index in indexes:
+            try:
+                index.close()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("关闭 Wiki 向量索引失败: %s", exc)
+        self._sim_cache.clear()
+
+    def invalidate_owner_embedding(self, owner_account_id: str = "") -> None:
+        """丢弃某 owner 的向量索引与相似度缓存，供 per-owner provider 变更后重建。"""
+        owner = str(owner_account_id or "").strip()
+        if not owner:
+            self.invalidate_embedding()
+            return
+        prefix = f"{owner}:"
+        for key in [k for k in self._vector_indexes if k.startswith(prefix)]:
+            index = self._vector_indexes.pop(key, None)
+            if index is not None:
+                try:
+                    index.close()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("关闭 Wiki 向量索引失败: %s", exc)
+        for key in [k for k in self._sim_cache if k[0] == owner]:
+            self._sim_cache.pop(key, None)
+
+    def rebuild_vector_index(
+        self,
+        owner_account_id: str = "",
+        kb_id: str = "default",
+    ) -> int:
+        """重新嵌入全部页面并写回向量索引，返回嵌入页数。"""
+        index = self._vector_index(owner_account_id, kb_id)
+        if index is None:
+            return 0
+        pages = list(self._iter_pages(owner_account_id, kb_id))
+        if pages:
+            log.info(
+                "重建 Wiki 向量索引 owner=%s kb=%s 页面数=%d",
+                owner_account_id or "__default__",
+                kb_id,
+                len(pages),
+            )
+        index.rebuild(pages)
+        self._sim_cache.clear()
+        return len(pages)
 
     @contextmanager
     def batch_index(
@@ -139,11 +327,16 @@ class FileSystemWikiStore(WikiStore):
         owner_account_id: str = "",
         kb_id: str = "default",
     ) -> Iterator[None]:
-        with self._search_index(owner_account_id, kb_id).batch():
+        vector = self._vector_index(owner_account_id, kb_id)
+        if vector is None:
+            with self._search_index(owner_account_id, kb_id).batch():
+                yield
+            return
+        with self._search_index(owner_account_id, kb_id).batch(), vector.batch():
             yield
 
     def close(self) -> None:
-        """关闭各知识库的 FTS 连接。"""
+        """关闭各知识库的 FTS/向量连接。embedding provider 由 App 统一持有并关闭。"""
         indexes = list(self._search_indexes.values())
         self._search_indexes.clear()
         for index in indexes:
@@ -151,6 +344,13 @@ class FileSystemWikiStore(WikiStore):
                 index.close()
             except Exception as exc:  # noqa: BLE001
                 log.warning("关闭 Wiki FTS 索引失败: %s", exc)
+        vector_indexes = list(self._vector_indexes.values())
+        self._vector_indexes.clear()
+        for index in vector_indexes:
+            try:
+                index.close()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("关闭 Wiki 向量索引失败: %s", exc)
 
     def _source_dir(
         self,
@@ -264,6 +464,7 @@ class FileSystemWikiStore(WikiStore):
                 path = base / page.file_path
                 path.write_text(serialize_page(page), encoding="utf-8")
                 self._search_index(owner_account_id, kb_id).sync_page(page)
+                self._sync_vector(owner_account_id, kb_id, page)
         meta["relation_schema_version"] = 2
         self._kb_meta_path(base).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
@@ -327,10 +528,16 @@ class FileSystemWikiStore(WikiStore):
         base = self._kb_root(owner_account_id) / kb_id
         if not base.exists():
             return False
+        cleanup = getattr(self, "query_cleanup", None)
+        if cleanup is not None:
+            cleanup(owner_account_id, kb_id)
         index_key = self._search_index_key(owner_account_id, kb_id)
         index = self._search_indexes.pop(index_key, None)
         if index is not None:
             index.close()
+        vector = self._vector_indexes.pop(index_key, None)
+        if vector is not None:
+            vector.close()
         try:
             shutil.rmtree(base)
             return True
@@ -512,6 +719,10 @@ class FileSystemWikiStore(WikiStore):
             if not meta_path.exists() and not legacy_raw_path.exists() and not legacy_parsed_path.exists():
                 return False
 
+            cleanup = getattr(self, "query_cleanup", None)
+            if cleanup is not None:
+                cleanup(owner_account_id, kb_id)
+
             deleted_page_ids: list[str] = []
             for page in self._iter_pages(owner_account_id, kb_id):
                 if source_id not in page.sources:
@@ -536,6 +747,7 @@ class FileSystemWikiStore(WikiStore):
                     try:
                         page_path.write_text(serialize_page(page), encoding="utf-8")
                         self._search_index(owner_account_id, kb_id).sync_page(page)
+                        self._sync_vector(owner_account_id, kb_id, page)
                     except Exception as exc:  # noqa: BLE001
                         log.warning("删除 source %s 后更新合并来源页失败 %s: %s", source_id, page.id, exc)
                     continue
@@ -576,6 +788,7 @@ class FileSystemWikiStore(WikiStore):
                     page.updated_at = time.time()
                     page_path.write_text(serialize_page(page), encoding="utf-8")
                     self._search_index(owner_account_id, kb_id).sync_page(page)
+                    self._sync_vector(owner_account_id, kb_id, page)
                 except Exception as exc:  # noqa: BLE001
                     log.warning(
                         "删除 source %s 后更新聚合页面失败 %s: %s",
@@ -586,6 +799,7 @@ class FileSystemWikiStore(WikiStore):
 
             if deleted_page_ids:
                 self._search_index(owner_account_id, kb_id).delete_pages(deleted_page_ids)
+                self._delete_vectors(owner_account_id, kb_id, deleted_page_ids)
 
             try:
                 meta_path.unlink(missing_ok=True)
@@ -661,6 +875,7 @@ class FileSystemWikiStore(WikiStore):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(serialize_page(page), encoding="utf-8")
             self._search_index(owner_account_id, kb_id).sync_page(page)
+            self._sync_vector(owner_account_id, kb_id, page)
             return page
 
     def _read_page_head(self, path: Path, max_bytes: int = 8192) -> str:
@@ -765,6 +980,7 @@ class FileSystemWikiStore(WikiStore):
             if old_path != path and old_path.is_file():
                 old_path.unlink()
             self._search_index(owner_account_id, kb_id).sync_page(page)
+            self._sync_vector(owner_account_id, kb_id, page)
             return page
 
     def delete(
@@ -781,6 +997,7 @@ class FileSystemWikiStore(WikiStore):
             try:
                 path.unlink(missing_ok=True)
                 self._search_index(owner_account_id, kb_id).delete_pages([page_id_str])
+                self._delete_vectors(owner_account_id, kb_id, [page_id_str])
                 return True
             except Exception as exc:  # noqa: BLE001
                 log.warning("删除 Wiki 页面失败 %s: %s", path, exc)
@@ -877,6 +1094,7 @@ class FileSystemWikiStore(WikiStore):
         if not terms and not query_key:
             return []
         scored: list[tuple[float, WikiPage]] = []
+        similarities = self._query_similarities(query, owner_account_id, kb_id)
         for page in pages:
             title_key = normalize_page_key(page.title)
             alias_keys = {
@@ -911,6 +1129,11 @@ class FileSystemWikiStore(WikiStore):
                 for term in terms
                 if term in haystack
             )
+            if similarities:
+                relevance += max(
+                    self._semantic_min_similarity,
+                    similarities.get(page.id, 0.0),
+                ) * self._semantic_rank_weight
             if relevance <= 0:
                 continue
             score = relevance
@@ -1467,6 +1690,7 @@ class FileSystemWikiStore(WikiStore):
             target.write_text(serialize_page(page), encoding="utf-8")
             path.unlink()
             self._search_index(owner_account_id, kb_id).sync_page(page)
+            self._sync_vector(owner_account_id, kb_id, page)
             classified_source_pages += 1
 
         raws = self.list_raws(owner_account_id, kb_id)

@@ -98,6 +98,13 @@ xlsx = [
     "defusedxml>=0.7",
     "pandas>=2.0",
 ]
+# Wiki 语义检索的本地 embedding（fastembed/onnxruntime）。numpy 已是传递依赖，
+# 此处显式声明以支撑向量索引的 numpy 快速路径。云端 OpenAI embedding 无需此 extra。
+# 不加入核心依赖；本地语义检索请安装 `.[semantic]`。
+semantic = [
+    "fastembed>=0.3",
+    "numpy>=1.26",
+]
 
 [project.urls]
 Homepage = "https://github.com/shuishenghualalala/Ace"

@@ -104,6 +104,77 @@ class WikiIngestConfig:
 
 
 @dataclass
+class WikiQueryConfig:
+    loop_enabled: bool = True
+    max_tool_calls: int = 24
+    max_tokens: int = 120000
+    max_seconds: int = 180
+    final_output_tokens: int = 2000
+    step_output_tokens: int = 8192
+    read_chars: int = 6000
+
+    @classmethod
+    def from_raw(cls, raw: Any) -> "WikiQueryConfig":
+        if not isinstance(raw, dict):
+            return cls()
+        config = cls()
+        value = raw.get("loop_enabled", True)
+        config.loop_enabled = value if isinstance(value, bool) else str(value).lower() in {"true", "1", "yes", "on"}
+        for name in ("max_tool_calls", "max_tokens", "max_seconds", "final_output_tokens", "step_output_tokens", "read_chars"):
+            if name in raw:
+                try:
+                    value = int(raw[name])
+                except (ValueError, TypeError) as exc:
+                    raise ValueError(f"wiki.query.{name} 必须为正整数") from exc
+                if value <= 0:
+                    raise ValueError(f"wiki.query.{name} 必须为正整数")
+                setattr(config, name, value)
+        return config
+
+
+@dataclass
+class WikiSemanticConfig:
+    """Wiki 语义检索（embedding）配置。
+
+    默认关闭；开启后在 FTS/关键词之外增加向量召回与相似度重排，失败时回退纯词法。
+    """
+
+    enabled: bool = False
+    provider: str = "openai"    # openai | local
+    model: str = ""             # openai 模型名，或 provider=local 时的 HF 模型 id
+    base_url: str = ""          # 语义专用 OpenAI 兼容端点；空则回退主模型 base_url
+    api_key_env: str = ""       # 语义专用 api key 的环境变量名；空则回退主模型 key
+    rank_weight: float = 40.0   # store.search 里 sim→relevance 乘数
+    fuse_weight: float = 0.9    # RRF 第三通道（向量）权重
+    min_similarity: float = 0.0  # 重排信号下限（丢弃负 cosine 噪声）
+    batch_size: int = 64        # rebuild 每次 embed 文本数
+
+    @classmethod
+    def from_raw(cls, raw: Any) -> "WikiSemanticConfig":
+        if not isinstance(raw, dict):
+            return cls()
+
+        def _bool(value: Any, default: bool) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+            return default
+
+        return cls(
+            enabled=_bool(raw.get("enabled"), False),
+            provider=str(raw.get("provider") or "openai").strip().lower(),
+            model=str(raw.get("model") or "").strip(),
+            base_url=str(raw.get("base_url") or "").strip(),
+            api_key_env=str(raw.get("api_key_env") or "").strip(),
+            rank_weight=float(raw.get("rank_weight", 40.0)),
+            fuse_weight=float(raw.get("fuse_weight", 0.9)),
+            min_similarity=float(raw.get("min_similarity", 0.0)),
+            batch_size=int(raw.get("batch_size", 64)),
+        )
+
+
+@dataclass
 class WikiConfig:
     """Wiki 功能配置。
 
@@ -118,6 +189,8 @@ class WikiConfig:
     storage: WikiStorageConfig = field(default_factory=WikiStorageConfig)
     ingest: WikiIngestConfig = field(default_factory=WikiIngestConfig)
     multimodal: WikiMultimodalConfig = field(default_factory=WikiMultimodalConfig)
+    query: WikiQueryConfig = field(default_factory=WikiQueryConfig)
+    semantic: WikiSemanticConfig = field(default_factory=WikiSemanticConfig)
 
     @classmethod
     def from_raw(cls, raw: Any) -> "WikiConfig":
@@ -135,11 +208,14 @@ class WikiConfig:
         mm_raw = raw.get("multimodal")
         ingest_raw = raw.get("ingest")
         storage_raw = raw.get("storage")
+        semantic_raw = raw.get("semantic")
         return cls(
             enabled=_bool(raw.get("enabled"), True),
             model=str(raw.get("model") or "").strip(),
             capture_attachments=_bool(raw.get("capture_attachments"), True),
             storage=WikiStorageConfig.from_raw(storage_raw),
             ingest=WikiIngestConfig.from_raw(ingest_raw),
+            query=WikiQueryConfig.from_raw(raw.get("query")),
+            semantic=WikiSemanticConfig.from_raw(semantic_raw) if isinstance(semantic_raw, dict) else WikiSemanticConfig(),
             multimodal=WikiMultimodalConfig.from_raw(mm_raw) if isinstance(mm_raw, dict) else WikiMultimodalConfig(),
         )

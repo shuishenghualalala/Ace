@@ -18,7 +18,7 @@ from dotenv import dotenv_values, load_dotenv
 from crew.browser.types import BrowserConfig
 from crew.security.outbound import NetworkConfig
 from crew.state.access_control import AccessControlConfig
-from crew.wiki.config import WikiConfig
+from crew.wiki.config import WikiConfig, WikiSemanticConfig
 
 from crew.state.logging import get_logger
 
@@ -454,6 +454,31 @@ class Config:
                 profiles[str(model_id)] = profile
         return profiles
 
+    def owner_semantic_config(self, owner_account_id: str | None = None) -> WikiSemanticConfig:
+        """返回 owner 生效的语义检索配置：全局默认 + owner overlay 逐字段覆盖。
+
+        不在此解析 api_key（``WikiSemanticConfig`` 只存 ``api_key_env`` 变量名）；
+        key 由调用方经 ``owner_env_map`` + ``_lookup_api_key`` 解析。
+        """
+        global_cfg = self.wiki.semantic
+        overlay = self.owner_overlay_data(owner_account_id)
+        raw = (overlay.get("wiki") or {}).get("semantic")
+        if not isinstance(raw, dict):
+            return global_cfg
+        return WikiSemanticConfig.from_raw(
+            {
+                "enabled": raw.get("enabled", global_cfg.enabled),
+                "provider": raw.get("provider", global_cfg.provider),
+                "model": raw.get("model", global_cfg.model),
+                "base_url": raw.get("base_url", global_cfg.base_url),
+                "api_key_env": raw.get("api_key_env", global_cfg.api_key_env),
+                "rank_weight": raw.get("rank_weight", global_cfg.rank_weight),
+                "fuse_weight": raw.get("fuse_weight", global_cfg.fuse_weight),
+                "min_similarity": raw.get("min_similarity", global_cfg.min_similarity),
+                "batch_size": raw.get("batch_size", global_cfg.batch_size),
+            }
+        )
+
     def owner_active_model_id(self, owner_account_id: str | None = None) -> str:
         """解析 owner 的默认兜底模型。
 
@@ -577,6 +602,39 @@ class Config:
                 for model_id, profile in model_profiles.items()
                 if not profile.builtin
             }
+            yaml_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
+            with tmp_path.open("w", encoding="utf-8") as f:
+                yaml.safe_dump(
+                    data,
+                    f,
+                    allow_unicode=True,
+                    sort_keys=False,
+                    default_flow_style=False,
+                )
+            tmp_path.replace(yaml_path)
+            return yaml_path
+
+    def persist_owner_semantic_config(
+        self,
+        owner_account_id: str,
+        semantic: dict[str, Any],
+    ) -> Path:
+        """把 owner 的语义检索配置写回 owner overlay 的 ``wiki.semantic`` 段。
+
+        仅写该段、不碰共享 config.yaml；api_key 由调用方另行写 owner .env。
+        """
+        owner = str(owner_account_id or "").strip()
+        if not owner:
+            raise ValueError("owner_account_id 不能为空")
+        with _CONFIG_WRITE_LOCK:
+            yaml_path = owner_overlay_config_path(owner)
+            data = _read_yaml_file(yaml_path)
+            wiki = data.get("wiki")
+            if not isinstance(wiki, dict):
+                wiki = {}
+                data["wiki"] = wiki
+            wiki["semantic"] = semantic
             yaml_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
             with tmp_path.open("w", encoding="utf-8") as f:

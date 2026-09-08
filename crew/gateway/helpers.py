@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from crew.agent.capabilities import capability_profile_ids
 from crew.agent.external.runtime_registry import resolve_runtime_display_badge
 from crew.gateway.session_context import SessionSource, build_session_key
-from crew.state.config import is_owner_overridable_model_profile
+from crew.state.config import _lookup_api_key, is_owner_overridable_model_profile
 from crew.team.formation import (
     build_team_draft as build_team_draft,
     confirmed_formation_plan as confirmed_formation_plan,
@@ -124,6 +124,31 @@ def status_frame(session_id: str, message: str) -> dict[str, Any]:
     }
 
 
+def _mask_api_key(key: str) -> str:
+    """脱敏 api_key 仅供展示（前 4 + ****；过短全掩，无 key 为空）。"""
+    if not key:
+        return ""
+    return "****" if len(key) <= 8 else f"{key[:4]}****"
+
+
+def _semantic_config_dict(crew: CrewApp, owner_account_id: str = "") -> dict[str, Any]:
+    """构造 wiki.semantic 配置体：per-owner 解析 + key 存在性与脱敏展示。"""
+    semantic = crew.config.owner_semantic_config(owner_account_id)
+    env_map = crew.config.owner_env_map(owner_account_id)
+    fallback_global = crew.config._owner_builtin_allows_global_key_fallback(owner_account_id)
+    key = _lookup_api_key(semantic.api_key_env, env_map, fallback_global=fallback_global)
+    return {
+        "enabled": semantic.enabled,
+        "provider": semantic.provider,
+        "model": semantic.model,
+        "base_url": semantic.base_url,
+        "api_key_env": semantic.api_key_env,
+        "has_key": bool(key),
+        "api_key_masked": _mask_api_key(key),
+        "editable": True,
+    }
+
+
 def config_body(
     crew: CrewApp,
     *,
@@ -169,6 +194,7 @@ def config_body(
         "is_gateway_admin": is_gateway_admin,
         "wiki": {
             "enabled": crew.config.wiki.enabled,
+            "semantic": _semantic_config_dict(crew, owner_account_id),
         },
         "external_agents": {
             "enabled": bool(getattr(crew.config, "external_agents_enabled", True)),

@@ -20,8 +20,9 @@ log = get_logger("wiki.query")
 class WikiQuerier:
     """从 Wiki 检索相关页面，供主 agent 合成答案。"""
 
-    def __init__(self, store: WikiStore) -> None:
+    def __init__(self, store: WikiStore, *, fuse_weight: float = 0.9) -> None:
         self.store = store
+        self._fuse_weight = float(fuse_weight)
 
     def query(
         self,
@@ -144,10 +145,23 @@ class WikiQuerier:
             owner_account_id=owner_account_id,
             kb_id=kb_id,
         )
-        seeds = _fuse_seed_channels(search_seeds, index_seeds, top_k)
+        vector_seeds = self.store.search_vectors(
+            query,
+            top_k=candidate_limit,
+            owner_account_id=owner_account_id,
+            kb_id=kb_id,
+        )
+        seeds = _fuse_seed_channels(
+            search_seeds,
+            index_seeds,
+            vector_seeds,
+            top_k,
+            fuse_weight=self._fuse_weight,
+        )
         return seeds, {
             "search_seed_page_ids": [page.id for page in search_seeds],
             "index_seed_page_ids": [page.id for page in index_seeds],
+            "vector_seed_page_ids": [page.id for page in vector_seeds],
             "seed_page_ids": [page.id for page in seeds],
         }
 
@@ -155,14 +169,21 @@ class WikiQuerier:
 def _fuse_seed_channels(
     search_pages: list[WikiPage],
     index_pages: list[WikiPage],
+    vector_pages: list[WikiPage],
     limit: int,
+    *,
+    fuse_weight: float = 0.9,
 ) -> list[WikiPage]:
-    """用加权 RRF 合并正文搜索与 index 导航候选。"""
+    """用加权 RRF 合并正文搜索、index 导航与语义向量候选。"""
     pages: dict[str, WikiPage] = {}
     scores: dict[str, float] = {}
     first_seen: dict[str, int] = {}
     seen_order = 0
-    for weight, channel in ((1.0, search_pages), (0.9, index_pages)):
+    for weight, channel in (
+        (1.0, search_pages),
+        (0.9, index_pages),
+        (fuse_weight, vector_pages),
+    ):
         for rank, page in enumerate(channel):
             pages[page.id] = page
             scores[page.id] = scores.get(page.id, 0.0) + weight / (60 + rank)

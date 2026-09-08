@@ -17,7 +17,7 @@ import sys
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
-from typing import Any, AsyncIterator, Callable, Coroutine
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Coroutine
 
 from crew.agent.compact import ContextCompactor, SummaryStore
 from crew.agent.capabilities import (
@@ -50,6 +50,7 @@ from crew.state.config import (
     Config,
     ModelProfile,
     _build_profile_from_payload,
+    _lookup_api_key,
     is_placeholder_model_profile,
     is_owner_overridable_model_profile,
     load_config,
@@ -73,6 +74,10 @@ from crew.tools.policy import (
     select_requested_tools,
 )
 from crew.tasks import TaskRuntime
+
+if TYPE_CHECKING:
+    from crew.wiki.config import WikiSemanticConfig
+    from crew.wiki.embedding import EmbeddingProvider
 
 log = get_logger("app")
 OwnerSessionKey = tuple[str, str]
@@ -512,6 +517,12 @@ class CrewApp:
         self._stale_owner_team_providers: dict[int, LLMProvider] = {}
         # 显式功能级模型（当前为 wiki.model）创建的独立 Provider。
         self._auxiliary_providers: list[LLMProvider] = []
+        # 语义检索（embedding）per-owner Provider 缓存；值可为 None（已解析且禁用）。
+        self._owner_embedding_providers: dict[str, "EmbeddingProvider | None"] = {}
+        # owner 切换 embedding 后，可能仍有后台任务持有旧客户端；保留到 shutdown 关闭。
+        self._stale_owner_embedding_providers: dict[int, "EmbeddingProvider"] = {}
+        # 全局默认 embedding provider（config.yaml wiki.semantic），owner 回退用。
+        self._embedding_provider: "EmbeddingProvider | None" = None
         self._shutdown_lock = asyncio.Lock()
         self._shutdown_complete = False
 
@@ -1698,11 +1709,34 @@ class CrewApp:
             except Exception:  # noqa: BLE001 - continue closing remaining owner resources
                 log.exception("关闭辅助 Provider 失败: %s", type(provider).__name__)
 
+    def _close_owner_embedding_providers(self) -> None:
+        """关闭所有 embedding provider（全局 + per-owner + 待退役），按 id 去重。"""
+        providers = list({
+            id(provider): provider
+            for provider in [
+                self._embedding_provider,
+                *[p for p in self._owner_embedding_providers.values() if p is not None],
+                *self._stale_owner_embedding_providers.values(),
+            ]
+            if provider is not None
+        }.values())
+        self._owner_embedding_providers.clear()
+        self._stale_owner_embedding_providers.clear()
+        for provider in providers:
+            close = getattr(provider, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - continue closing remaining providers
+                log.exception("关闭 embedding provider 失败: %s", type(provider).__name__)
+
     async def _shutdown_provider_resources(self) -> None:
         """Close Agent and Provider resources in ownership order."""
         await self.agents.aclose()
         await self._drain_provider_retirements()
         await self._close_owner_team_providers()
+        self._close_owner_embedding_providers()
         await self._close_current_provider()
 
     @staticmethod
@@ -2056,6 +2090,78 @@ class CrewApp:
         clear_kanban = getattr(self.dynamic_kanban, "clear_provider_state", None)
         if callable(clear_kanban):
             clear_kanban()
+
+    def owner_embedding_provider(self, owner_account_id: str = "") -> "EmbeddingProvider | None":
+        """返回 owner 生效的语义检索 provider，按 owner 缓存（含 None=禁用）。
+
+        owner 未配置专属后端/key 时回退全局 provider；多租户下各账号可自带 key。
+        """
+        from crew.wiki.embedding import build_embedding_provider
+
+        owner = str(owner_account_id or "").strip()
+        if owner in self._owner_embedding_providers:
+            return self._owner_embedding_providers[owner]
+        if not owner:
+            provider = self._embedding_provider
+        else:
+            semantic = self.config.owner_semantic_config(owner)
+            if not semantic.enabled:
+                provider = None
+            elif semantic.provider == "local":
+                provider = build_embedding_provider(semantic)
+            else:
+                env_map = self.config.owner_env_map(owner)
+                fallback_global = self.config._owner_builtin_allows_global_key_fallback(owner)
+                key = _lookup_api_key(semantic.api_key_env, env_map, fallback_global=fallback_global)
+                if key:
+                    provider = build_embedding_provider(
+                        semantic,
+                        api_key=key,
+                        base_url=semantic.base_url or self.config.base_url,
+                    )
+                else:
+                    provider = self._embedding_provider
+        self._owner_embedding_providers[owner] = provider
+        return provider
+
+    def _invalidate_owner_embedding_provider(self, owner_account_id: str = "") -> None:
+        """丢弃 owner 的 embedding 缓存，并让 store 重建该 owner 的向量索引。"""
+        owner = str(owner_account_id or "").strip()
+        if owner:
+            provider = self._owner_embedding_providers.pop(owner, None)
+            if provider is not None:
+                self._stale_owner_embedding_providers[id(provider)] = provider
+            store = getattr(self, "_wiki_store", None)
+            invalidate = getattr(store, "invalidate_owner_embedding", None)
+            if callable(invalidate):
+                invalidate(owner)
+            return
+        providers = list(self._owner_embedding_providers.values())
+        self._owner_embedding_providers.clear()
+        for provider in providers:
+            if provider is not None:
+                self._stale_owner_embedding_providers[id(provider)] = provider
+        store = getattr(self, "_wiki_store", None)
+        invalidate_all = getattr(store, "invalidate_embedding", None)
+        if callable(invalidate_all):
+            invalidate_all()
+
+    def update_semantic_config(self, owner_account_id: str, payload: dict) -> "WikiSemanticConfig":
+        """更新 owner 的语义检索配置：写 owner .env（key）→ 持久化 overlay → 失效。"""
+        owner = str(owner_account_id or "").strip()
+        if not owner:
+            raise ValueError("owner_account_id 不能为空")
+        allowed = {"enabled", "provider", "model", "base_url", "api_key_env"}
+        semantic_raw = {k: payload[k] for k in allowed if k in payload}
+        api_key = str(payload.get("api_key") or "").strip()
+        api_key_env = str(semantic_raw.get("api_key_env") or "").strip()
+        if api_key:
+            if not api_key_env:
+                raise ValueError("提供 api_key 时必须提供 api_key_env")
+            self._apply_api_key_to_env(api_key_env, api_key, owner_account_id=owner)
+        self.config.persist_owner_semantic_config(owner, semantic_raw)
+        self._invalidate_owner_embedding_provider(owner)
+        return self.config.owner_semantic_config(owner)
 
     @asynccontextmanager
     async def owner_provider(
@@ -2882,10 +2988,25 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         WikiSessionManager,
         WikiQuerier,
         WikiSummarizer,
+        build_embedding_provider,
     )
     from crew.wiki.tools import register_wiki_tools
     wiki_storage_root = cfg.wiki.storage.resolved_root() if cfg.wiki else None
-    app._wiki_store = FileSystemWikiStore(storage_root=wiki_storage_root)
+    semantic = cfg.wiki.semantic if cfg.wiki else None
+    embedding_provider = build_embedding_provider(
+        semantic,
+        api_key=cfg.api_key,
+        base_url=cfg.base_url,
+    )
+    app._embedding_provider = embedding_provider
+    app._wiki_store = FileSystemWikiStore(
+        storage_root=wiki_storage_root,
+        embedding_provider=embedding_provider,
+        provider_for_owner=app.owner_embedding_provider,
+        semantic_rank_weight=semantic.rank_weight if semantic else 40.0,
+        semantic_min_similarity=semantic.min_similarity if semantic else 0.0,
+        semantic_batch_size=semantic.batch_size if semantic else 64,
+    )
     if wiki_storage_root is not None:
         log.info("Wiki 独立存储根目录: %s", wiki_storage_root)
     app.wiki_manager = WikiSessionManager(store=app._wiki_store)
@@ -2931,7 +3052,10 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         summarizer=app._wiki_summarizer,
         provider_for_owner=wiki_provider_resolver,
     )
-    app._wiki_querier = WikiQuerier(app._wiki_store)
+    app._wiki_querier = WikiQuerier(
+        app._wiki_store,
+        fuse_weight=semantic.fuse_weight if semantic else 0.9,
+    )
     register_wiki_tools(
         registry,
         app._wiki_store,
