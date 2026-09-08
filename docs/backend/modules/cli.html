@@ -51,7 +51,7 @@
       <tr><td><code>crew/cli/knowledge.py</code></td><td>wiki / skill；Wiki 命令动态消费 Knowledge Service，并在完整命令周期持有 Generation Lease。</td></tr>
       <tr><td><code>crew/cli/integration.py</code></td><td>mcp / plugin / channel / runtime / browser / weixin-login。</td></tr>
       <tr><td><code>crew/cli/security.py</code></td><td>security：审批模式、请求决策、规则、审计、capabilities。</td></tr>
-      <tr><td><code>crew/cli/content.py</code></td><td>site / work。</td></tr>
+      <tr><td><code>crew/cli/content.py</code></td><td>site / work；38 个 Work 叶子命令在调用期动态租用同代 Work Service。</td></tr>
       <tr><td><code>crew/cli/weixin_login.py</code></td><td>微信扫码登录（保留旧入口）。</td></tr>
     </tbody>
   </table>
@@ -116,15 +116,21 @@
   <p>每个 Wiki 叶子命令都在真正执行时调用 <code>acquire_service_lease(KNOWLEDGE_SERVICE_KEY)</code>。同步命令在返回或异常时释放 Lease；异步命令在整个 await 周期持有 Lease。这样新命令只会看到当前 Active Generation，旧 Provider 会等待在途命令结束后再关闭。</p>
   <p>没有 <code>product.wiki</code> 运行记录的嵌入宿主可以提供外部 <code>knowledge_service</code>；一旦产品 Feature 存在但不可用，CLI 不回退到旧对象。SessionStore 仍属于 Host，但 Wiki Agent 会话命令同样先经过 Service Gate。文件读取只处理用户传入的本地路径，上传解析、媒体处理和 Wiki 数据目录均留在 Provider。</p>
 
+  <h3>5.1 Work Service 消费边界</h3>
+  <p>Work 命令通过 <code>_set_work_handler</code> 显式注册，入口解析 <code>WORK_SERVICE_KEY</code> 并把同代 Service 限定在命令上下文。同步返回、异常及异步取消都释放 Lease；同步 callable 返回 awaitable 时，Lease 与 Service 上下文延续至 awaitable 完成或取消，同时普通同步 handler 仍直接返回 <code>CliResult</code>。存在 <code>product.work</code> 记录时不回退到宿主残留字段；无该记录的嵌入式宿主仍可注入外部 Service。参数、Owner 和业务返回结构保持兼容。见 <a href="../adr/0026-work-cli-service-consumer.html">ADR-0026</a>。</p>
+
   <h2>6. 测试</h2>
+  <p>Work 命令的全叶子门控与 Lease 契约测试位于 <code>tests/test_work_cli_lifecycle.py</code>，与 CLI、Wiki CLI 和 Work Feature 回归联合验证。</p>
   <p>通用 CLI 自动化测试在 <code>tests/test_cli.py</code>；Wiki Service、Gate、Generation Lease 与上传结果契约在 <code>tests/test_cli_wiki_service.py</code>。运行：</p>
-  <pre><code>pytest tests/test_cli.py tests/test_cli_wiki_service.py -q
-ruff check crew/cli tests/test_cli.py tests/test_cli_wiki_service.py</code></pre>
+  <pre><code>pytest tests/test_work_cli_lifecycle.py tests/test_work_feature.py tests/test_cli_wiki_service.py -q
+pytest tests/test_cli.py::test_help_lists_all_command_groups tests/test_cli.py::test_readonly_content_commands -q
+ruff check crew/cli/content.py tests/test_work_cli_lifecycle.py tests/test_cli_wiki_service.py tests/test_work_feature.py</code></pre>
 
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-09-08</td><td>Work CLI 改为动态 Work Service Consumer。</td><td>全部 Work 叶子命令、生产装配 smoke、同代 Lease、停用、awaitable 返回与异常释放。</td></tr>
       <tr><td>2026-09-05</td><td>Wiki CLI 改为动态 Knowledge Service Consumer，并为每个命令绑定同代 Lease。</td><td>全部 Wiki 子命令、Feature Gate、Provider 替换与上传边界。</td></tr>
     </tbody>
   </table>

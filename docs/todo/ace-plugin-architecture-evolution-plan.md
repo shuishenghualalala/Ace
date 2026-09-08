@@ -5,9 +5,9 @@
 > 基线核查日期：2026-08-31  
 > 目标读者：Ace 后端、桌面端、Web 端及独立功能模块的维护者  
 > 修订记录：2026-08-31 评审追加——workspace_guard 依赖核查（§2.3.3、§11、§17）、第一方/第三方插件契约收口（§2.3.8）、effect 诊断与启动审计（§6.3）、服务作用域维度（§6.4）、拦截器语义（§7.5）、螺旋式迁移节奏与依赖检查工具（§10、§13.3）、配置与数据命名空间约定（§12.5）、Adapter 保质期（§15.2）、ADR 机制（§16）、新增验收指标（§14）；同日补充——演进紧迫性论证与中心文件基线数据（§1.1.1）、接口层多租户地基（§2.2）；同日范围校正——明确 dsh 广义 Plugin 与 Ace 当前 `plugins/` 的区别，将目标提升为全部 Feature 的统一可逆生命周期，补充 Feature Generation、业务数据边界、全量迁移地图和工作量评估（§0、§3.3、§5、§6、§8、§10、§16、§18、§19）；同日——§2.1、§5.1 增加耦合视角与装配视角两张架构对比图（离线渲染版：docs/todo/ace-arch-compare.html）
-> 实施进度：2026-09-07 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver、Context Contributor 主链均已落地。Cron Trigger Reminder Contributor、后台结果通知 Contributor、Feature Event 命名空间、Route Registry 与 Core Feature 声明化均已完成；阶段 3A 的 Cron、Sites、Browser 三个 Runtime Feature 验证切片已完成。阶段 3B 已完成 Foundation、Gateway Consumer、CLI Consumer、Event Contribution、Agent Preset Contribution 与 Wiki Route Contribution 六个切片：`KnowledgeService`、`LocalWikiProvider` 与 `product.wiki` Bundle 统一拥有本地 Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context、Home 导读后台 Task、cards/changes Event Contributors、Wiki Agent prompt、完整策略和 REST route；`build_app()` 不再逐项构造 Wiki 内部对象；Wiki REST、聊天附件捕获和全部 Wiki CLI 叶子命令通过动态 Service + Generation Lease 访问能力，Route Registry 在请求入口原子选择并持有同代 Route Lease，KnowledgeService 绑定同一 Generation，停用/更新期间新请求返回 503 且在途请求完成后再 drain，WS 通过中立 Event Registry 顺序投递 Feature-owned 事件，主 Agent 与前后台子 Agent 通过中立 Preset Registry 在完整执行期持有同代 Lease。阶段 3C 已完成 Work Foundation + API Consumer：`product.work` Generation 统一拥有 `WorkService`、八个 SQLite Store、agent:end Hook 与 52 个 REST endpoint，声明可选 `knowledge` 与提供 `work` Service；个人知识按调用租用 KnowledgeService，Route 与 Service 精确绑定同代 Generation，`build_app()`、startup、shutdown 和 Gateway 不再手工构造、启停或固定挂载 Work。阶段 5 首个 UI 切片已完成：Desktop/Web 建立构建期可信 UI Navigation Registry，Wiki 以独立 descriptor 注册导航；核心导航 inventory 与 render 分支不再硬编码 Wiki descriptor，但宿主 capability state 以及现有 `SidebarView`/`TabKey` 兼容类型仍在迁移期保留。`wiki.enabled` 作为兼容能力来源，禁用时隐藏入口、拒绝程序化切换并从 Wiki 安全回落 Chat；注册支持确定性排序、冲突失败、可逆 unregister，Assistant/Work 原有导航语义保持不变。页面生命周期、API Client、Feature Event Reducer，以及外援、Team 等其他 UI Contribution 仍待迁移。下一优先级为阶段 4A 外援中立 Catalog/Provider/Run 生命周期与阶段 4B Dynamic Kanban feature-local Bundle 并行首切片；中心装配仍串行收口。当前分支为 `refactor/plugin-architecture-stage-0`，阶段 3A 验证记录见 `docs/testing/plugin-architecture-stage-3a-*-runtime.html`，阶段 3B Wiki 切片记录见 `docs/testing/plugin-architecture-stage-3b-wiki-*.html`，阶段 3C 记录见 `docs/testing/plugin-architecture-stage-3c-work-feature.html`，阶段 5 UI 首切片记录见 `docs/testing/plugin-architecture-stage-5-wiki-ui-navigation.html`。
+> 实施进度：2026-09-08 阶段 0 边界治理、阶段 1 控制面和阶段 2 Execution Driver、Context Contributor 主链均已落地。Cron Trigger Reminder Contributor、后台结果通知 Contributor、Feature Event 命名空间、Route Registry 与 Core Feature 声明化均已完成；阶段 3A 的 Cron、Sites、Browser 三个 Runtime Feature 验证切片已完成。阶段 3B 已完成 Foundation、Gateway Consumer、CLI Consumer、Event Contribution、Agent Preset Contribution 与 Wiki Route Contribution 六个切片：`KnowledgeService`、`LocalWikiProvider` 与 `product.wiki` Bundle 统一拥有本地 Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context、Home 导读后台 Task、cards/changes Event Contributors、Wiki Agent prompt、完整策略和 REST route；`build_app()` 不再逐项构造 Wiki 内部对象；Wiki REST、聊天附件捕获和全部 Wiki CLI 叶子命令通过动态 Service + Generation Lease 访问能力，Route Registry 在请求入口原子选择并持有同代 Route Lease，KnowledgeService 绑定同一 Generation，停用/更新期间新请求返回 503 且在途请求完成后再 drain，WS 通过中立 Event Registry 顺序投递 Feature-owned 事件，主 Agent 与前后台子 Agent 通过中立 Preset Registry 在完整执行期持有同代 Lease。阶段 3C 已完成 Work Foundation、API Consumer 与 CLI Consumer：`product.work` Generation 统一拥有 `WorkService`、八个 SQLite Store、agent:end Hook 与 52 个 REST endpoint，声明可选 `knowledge` 与提供 `work` Service；个人知识按调用租用 KnowledgeService，Route、REST 与全部 38 个 Work CLI 叶子命令通过 Registry 获取同代 Service 并持有 Generation Lease；真实 `build_app() → PluginManager → argparse/CLI handler` 测试证明生产装配从 Registry 取 Service 且停用后不回退宿主残留字段；阶段 5 首个 UI 切片已完成：Desktop/Web 建立构建期可信 UI Navigation Registry，Wiki 以独立 descriptor 注册导航；核心导航 inventory 与 render 分支不再硬编码 Wiki descriptor，但宿主 capability state 以及现有 `SidebarView`/`TabKey` 兼容类型仍在迁移期保留。`wiki.enabled` 作为兼容能力来源，禁用时隐藏入口、拒绝程序化切换并从 Wiki 安全回落 Chat；注册支持确定性排序、冲突失败、可逆 unregister，Assistant/Work 原有导航语义保持不变。页面生命周期、API Client、Feature Event Reducer，以及外援、Team 等其他 UI Contribution 仍待迁移。下一优先级为阶段 4A 外援中立 Catalog/Provider/Run 生命周期与阶段 4B Dynamic Kanban feature-local Bundle 并行首切片；中心装配仍串行收口。当前分支为 `refactor/plugin-architecture-stage-0`，阶段 3A 验证记录见 `docs/testing/plugin-architecture-stage-3a-*-runtime.html`，阶段 3B Wiki 切片记录见 `docs/testing/plugin-architecture-stage-3b-wiki-*.html`，阶段 3C 记录见 `docs/testing/plugin-architecture-stage-3c-work-feature.html`，阶段 5 UI 首切片记录见 `docs/testing/plugin-architecture-stage-5-wiki-ui-navigation.html`。
 
-## 当前实施进度图（2026-09-07）
+## 当前实施进度图（2026-09-08）
 
 绿色表示已经落地并通过相关回归的区域，蓝色表示紧接着要实施的切片，灰色表示尚未开始。当前已完成**阶段 0、阶段 1，以及阶段 2 的 Driver / Context Contributor 主链**，不是整份演进方案已经完成。
 
@@ -106,7 +106,8 @@ flowchart TB
     WikiRoute --> WikiRouteTests["Wiki Route 验证<br/>原子 lease · drain · 同代 Service · 503"]
     WikiRouteTests --> UiRegistry["阶段 5 首切片 ✅<br/>Wiki UI Navigation Registry"]
     UiRegistry --> WorkFeature["阶段 3C · Work Feature<br/>Service · Stores · Hook · Route"]
-    WorkFeature --> WorkFeatureTests["Work 生命周期验证<br/>optional knowledge · 同代 Lease · 关闭所有权"]
+    WorkFeature --> WorkCli["阶段 3C · Work CLI Consumer<br/>Registry · Generation Lease"]
+    WorkCli --> WorkFeatureTests["Work 生命周期验证<br/>生产装配 · update/deactivate · fail-closed"]
     WorkFeatureTests --> NextExternal["下一优先级 4A<br/>External Catalog · Provider · Run"]
     WorkFeatureTests --> NextKanban["下一优先级 4B<br/>Dynamic Kanban Feature Bundle"]
 
@@ -116,11 +117,11 @@ flowchart TB
     class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed,Scope,Token,Rollback,RuntimeTests,Services,Dependencies,Config,ServiceTests,Runtime,Adapter,Phases,Browser,Shutdown,AdapterTests,Manifest,Ordered,Audit,ManifestTests,Lease,StopPolicy,StopAudit,LeaseTests,Update,Generation,Recovery,UpdateTests,Stage1Done,Drivers,DriverLease,DefaultDriver,PluginDriver,DriverTests,Adapters,DriverAdapterTests done
     class ContextRegistry,PathContext,BrowserContext,ContextTests done
     class SessionContext,SessionTests,WikiContext,WikiTests,CronContext,CronTests,BgContext,QueueOwner,TeamDrain,BgTests,FeatureEvent,EventCompat,EventTests,RouteReg,RouteGate,RouteTests,CoreDecl,Required,CoreTests done
-    class CronRuntime,CronRuntimeTests,SitesRuntime,SitesRuntimeTests,BrowserRuntime,BrowserRuntimeTests,WikiFoundation,WikiFoundationTests,WikiGateway,WikiGatewayTests,WikiCli,WikiCliTests,WikiEvents,WikiEventTests,WikiPreset,WikiPresetTests,WikiRoute,WikiRouteTests,UiRegistry,WorkFeature,WorkFeatureTests done
+    class CronRuntime,CronRuntimeTests,SitesRuntime,SitesRuntimeTests,BrowserRuntime,BrowserRuntimeTests,WikiFoundation,WikiFoundationTests,WikiGateway,WikiGatewayTests,WikiCli,WikiCliTests,WikiEvents,WikiEventTests,WikiPreset,WikiPresetTests,WikiRoute,WikiRouteTests,UiRegistry,WorkFeature,WorkCli,WorkFeatureTests done
     class NextExternal,NextKanban next
 ```
 
-这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。阶段 2 的 Driver、Context、Feature Event、Route Gate 和声明式 Core Feature 已形成扩展主链。阶段 3A 的 Cron、Sites 与 Browser 已完成真实资源所有权验证。阶段 3B Foundation 建立了 `knowledge` 稳定 Service、Local Provider 和 `product.wiki` Bundle；Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context 与 Home 导读后台 Task 共享同一 restart Generation。第二切片把 Wiki REST 与聊天附件捕获迁为 Service Consumer；第三切片把全部 Wiki CLI 叶子命令迁为动态 Consumer；第四切片建立 Feature Event Contributor Registry；第五切片建立 Agent Preset Registry；第六切片把 Wiki REST route 迁入 Bundle。阶段 3C 已把 WorkService、八个 Store、Hook 和 REST Route 收入同一 restart Generation，并以可选 KnowledgeService Lease 解除对 Wiki Store 的长期持有。阶段 5 首个切片已将 Desktop/Web 的 Wiki 导航接入构建期可信 Registry：导航贡献可排序、冲突失败、撤销，`wiki.enabled` 控制入口和程序化切换，禁用时安全回落 Chat，并保留 Assistant/Work 原有共享导航语义。页面生命周期、API Client、Feature Event Reducer 和其他 Feature UI Contribution 仍未迁移。下一优先级为阶段 4A 外援和阶段 4B Dynamic Kanban 的 feature-local 生命周期首切片并行开发，中心装配串行合入。
+这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。阶段 2 的 Driver、Context、Feature Event、Route Gate 和声明式 Core Feature 已形成扩展主链。阶段 3A 的 Cron、Sites 与 Browser 已完成真实资源所有权验证。阶段 3B Foundation 建立了 `knowledge` 稳定 Service、Local Provider 和 `product.wiki` Bundle；Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context 与 Home 导读后台 Task 共享同一 restart Generation。第二切片把 Wiki REST 与聊天附件捕获迁为 Service Consumer；第三切片把全部 Wiki CLI 叶子命令迁为动态 Consumer；第四切片建立 Feature Event Contributor Registry；第五切片建立 Agent Preset Registry；第六切片把 Wiki REST route 迁入 Bundle。阶段 3C 已把 WorkService、八个 Store、Hook 和 REST Route 收入同一 restart Generation，并以可选 KnowledgeService Lease 解除对 Wiki Store 的长期持有；全部 38 个 Work CLI 叶子命令动态租用 Registry Service，生产装配 smoke 证明停用后 fail-closed，Runtime 契约测试证明更新时在途命令持有旧代且后续命令解析新代。阶段 5 首个切片已将 Desktop/Web 的 Wiki 导航接入构建期可信 Registry：导航贡献可排序、冲突失败、撤销，`wiki.enabled` 控制入口和程序化切换，禁用时安全回落 Chat，并保留 Assistant/Work 原有共享导航语义。页面生命周期、API Client、Feature Event Reducer 和其他 Feature UI Contribution 仍未迁移。下一优先级为阶段 4A 外援和阶段 4B Dynamic Kanban 的 feature-local 生命周期首切片并行开发，中心装配串行合入。
 
 ## 0. 执行摘要
 
@@ -1370,9 +1371,10 @@ Desktop 和 Web 不应分别发明一套 Feature 协议。建议共享：
 - 将 Wiki Compiler 内部创建的后台 Task 收入 Scope Task Factory，停用时能够 drain/cancel。（Home 导读刷新已完成）
 - disable 只撤销运行时能力，Wiki 数据目录和索引不被删除。（第一切片已完成）
 
-#### 3C. Work
+#### 3C. Work（Foundation、API Consumer 与 CLI Consumer 已完成）
 
-- 将 WorkService、多个 Store、后台处理和 API 统一收入 Work Feature。（已完成；CLI Consumer 后续独立迁移）
+- 将 WorkService、多个 Store、后台处理和 API 统一收入 Work Feature。（已完成）
+- 将全部 Work CLI 叶子命令迁为动态 Service Consumer；同步、异步及同步 callable 返回的 awaitable 均在完整调用期持有同代 Lease，停用后 fail-closed。（已完成）
 - 对 Wiki 的使用改成 optional `KnowledgeService`，Wiki 不存在时明确降级，不直接持有 Wiki Store。（已完成）
 - 统一同步 Store `close()` 与异步 Service `stop()` 的 disposer 语义。（已完成）
 

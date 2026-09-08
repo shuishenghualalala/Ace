@@ -62,7 +62,7 @@
       <tr><td><code>product.work</code></td><td>以 DRAIN + RESTART 管理 Service、Route、Hook 与八个 SQLite Store。</td><td>已落地</td></tr>
       <tr><td><code>WorkKnowledgeStore</code></td><td>个人知识按调用租用 KnowledgeService；组织知识、发布请求与索引状态保持 Work 本地边界。</td><td>已落地</td></tr>
       <tr><td>REST Consumer</td><td>52 个 endpoint 从 Feature Route Contribution 装配，owner 来自认证后的 request state，同代 Service fail-closed。</td><td>已落地</td></tr>
-      <tr><td>CLI Consumer</td><td>现阶段保留 <code>app.work_service</code> 兼容入口，后续迁为动态 Service Lease。</td><td>待迁移</td></tr>
+      <tr><td>CLI Consumer</td><td>38 个 Work 叶子命令在执行时解析 Service，并在完整调用期持有同代 Lease。</td><td>已接入</td></tr>
     </tbody>
   </table>
 
@@ -73,6 +73,7 @@
       <tr><td><code>crew/work/feature.py</code></td><td>Work Feature Definition、Generation 资源工厂、依赖声明与 reversible install。</td></tr>
       <tr><td><code>crew/work/service.py</code></td><td><code>WORK_SERVICE_KEY</code> 与领域应用服务。</td></tr>
       <tr><td><code>crew/work/routes.py</code></td><td>Feature-owned REST Router、认证 owner 解析、Route/Service Generation Lease。</td></tr>
+      <tr><td><code>crew/cli/content.py</code></td><td>Work 命令注册、执行期 Service 解析、同步与异步 Lease 释放。</td></tr>
       <tr><td><code>crew/work/knowledge.py</code></td><td>可选 KnowledgeService Consumer 与 Work 本地知识状态。</td></tr>
       <tr><td><code>crew/work/{items,references,preferences,sources,briefs,settings,templates}.py</code></td><td>按子域拆分的 SQLite Store 和数据模型。</td></tr>
     </tbody>
@@ -89,10 +90,10 @@ build_work_feature(host, *, db_path, wal_enabled, ...)
   - stop policy: drain
   - update strategy: restart</code></pre>
   <p>REST 请求先持有 Route Generation Lease，再按该 Generation 获取 <code>WORK_SERVICE_KEY</code>；任一步不可用都返回 503。个人知识操作独立获取并释放 KnowledgeService Lease，使 Wiki 重启时不会保留旧 Provider。</p>
+  <p>CLI 在叶子命令入口租用当前 Work Service。已管理的 Feature 停用或 draining 后拒绝新命令；在途命令继续持有原代资源直至返回、失败或取消。同步 callable 返回 awaitable 时，包装器在 awaitable 的完整执行期保留同代 Lease，同时普通同步命令仍直接返回。只有未安装 Work Feature 的嵌入式宿主可以使用其显式提供的 <code>work_service</code>。决策见 <a href="../adr/0026-work-cli-service-consumer.html">ADR-0026</a>。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>Work CLI 仍通过迁移期兼容字段取 Service，后续应改为动态 Service Consumer。</li>
     <li>Desktop/Web 的 Work 页面、API Client 与事件 reducer 尚未进入 UI Contribution 生命周期。</li>
     <li>当前本地 Knowledge 页面模型仍使用 Wiki 公共 Schema；远程 Knowledge Provider 落地时需核验该 DTO 是否应提升为独立契约。</li>
   </ul>
@@ -101,6 +102,7 @@ build_work_feature(host, *, db_path, wal_enabled, ...)
   <ul>
     <li>新增领域能力优先扩展现有子域 Store 和 WorkService，不在 <code>CrewApp</code> 增加业务分支。</li>
     <li>新增 API 放入 <code>crew/work/routes.py</code>，并保持 <code>request.state.account</code> owner 与同代 Service Lease。</li>
+    <li>新增 Work CLI 叶子命令通过 <code>_set_work_handler</code> 注册，保持统一租用和错误释放。</li>
     <li>新增外部知识实现通过 KnowledgeService 注册；Work 不导入 Provider 内部对象。</li>
     <li>逃逸请求调用栈的 Task 必须由 Work Generation 的 FeatureScope 创建和回收。</li>
   </ul>
@@ -109,6 +111,7 @@ build_work_feature(host, *, db_path, wal_enabled, ...)
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-09-08</td><td>Work CLI 接入动态 Service Consumer 与完整命令期 Lease。</td><td>38 个叶子命令、生产装配 smoke、停用门控、代际切换、awaitable 返回与异常释放。</td></tr>
       <tr><td>2026-09-07</td><td>完成 Work Feature 生命周期、可选 KnowledgeService 与 REST Route Contribution。</td><td>Work、Gateway、Feature Runtime 装配与关闭顺序</td></tr>
     </tbody>
   </table>
