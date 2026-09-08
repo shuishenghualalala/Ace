@@ -12,7 +12,7 @@
    以及各自的通知机制（工具侧发会话 pending change；HTTP 侧由响应直接告知调用方）。
 
 默认都不做 LLM 深度整理（生成 entity/topic/relationship），
-深度整理需要用户通过 wiki_list_inbox 查看推荐后确认，或显式调用 wiki_plan_ingest。
+深度整理需要用户通过 wiki_list_sources(view="inbox") 查看推荐后确认，或显式调用 wiki_plan_ingest。
 """
 
 from __future__ import annotations

@@ -583,6 +583,75 @@ async def test_wiki_list_sources_uses_active_kb_and_status_filter(wiki_mocks):
     assert result.count('"source_id"') == 2
 
 
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ({"view": "inbox"}, ["retry", "recommended", "pending"]),
+        ({"view": "inbox", "include_history": True}, ["retry", "recommended", "pending"]),
+        ({"view": "inbox", "status": "parsed", "limit": 2}, ["retry", "recommended"]),
+        ({"view": "inbox", "status": "failed"}, []),
+        ({"status": "failed"}, ["parse_failed"]),
+        ({}, ["parse_failed", "unparsed", "ignored", "ingested", "not_recommended", "retry", "recommended", "pending"]),
+        ({"include_history": True, "limit": 2}, ["historical", "parse_failed"]),
+    ],
+)
+async def test_list_sources_views_preserve_inbox_and_history_semantics(wiki_mocks, args, expected):
+    import json
+
+    from crew.wiki.schemas import RawSource
+
+    variants = [
+        ("pending", {}),
+        ("recommended", {"ingest_status": "recommended"}),
+        ("retry", {"ingest_status": "failed"}),
+        ("not_recommended", {"ingest_recommend": False}),
+        ("ingested", {"ingest_status": "ingested"}),
+        ("ignored", {"ingest_status": "ignored"}),
+        ("unparsed", {"parse_status": "pending"}),
+        ("parse_failed", {"parse_status": "failed"}),
+        ("historical", {"superseded_by": "pending"}),
+    ]
+    raws = []
+    for i, (source_id, overrides) in enumerate(variants):
+        fields = dict(parse_status="parsed", ingest_status="pending", ingest_recommend=True)
+        fields.update(overrides)
+        raws.append(RawSource(
+            id=source_id, title=source_id, source_type="paste", parsed_path="",
+            created_at=float(i), summary="摘要", tags=["标签"], doc_type="article",
+            ingest_reason="适合整理", **fields,
+        ))
+    wiki_mocks["store"].list_raws.return_value = raws
+    _set_context()
+    result = json.loads(await wiki_mocks["registry"].get("wiki_list_sources").run({
+        **args, "kb_id": "other_kb",
+    }))
+    assert [r["source_id"] for r in result["sources"]] == expected
+    assert result["count"] == len(expected)
+    assert result["kb_id"] == "other_kb"
+    wiki_mocks["store"].list_raws.assert_called_once_with(owner_account_id="owner", kb_id="other_kb")
+    for source in result["sources"]:
+        assert source["summary"] == "摘要"
+        assert source["tags"] == ["标签"]
+        assert source["doc_type"] == "article"
+        assert source["ingest_reason"] == "适合整理"
+        raw = next(r for r in raws if r.id == source["source_id"])
+        assert source["parse_status"] == raw.parse_status
+        assert source["ingest_status"] == raw.ingest_status
+        assert source["ingest_recommend"] == raw.ingest_recommend
+
+
+async def test_list_sources_rejects_unknown_view_and_removes_duplicate_tool(wiki_mocks):
+    from crew.core.errors import ToolNotFoundError
+
+    registry = wiki_mocks["registry"]
+    with pytest.raises(ToolNotFoundError):
+        registry.get("wiki_list_inbox")
+    assert "wiki_list_inbox" not in WIKI_READ_TOOLS
+    result = await registry.get("wiki_list_sources").run({"view": "unknown"})
+    assert "无效的 view" in result
+    wiki_mocks["store"].list_raws.assert_not_called()
+
+
 # ---- wiki_delete_source ----
 
 async def test_wiki_delete_source_uses_active_kb(wiki_mocks):

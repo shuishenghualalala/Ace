@@ -100,7 +100,14 @@ WIKI_LIST_SOURCES_PROMPT = """列出当前 Wiki 知识库中的所有 raw source
 有附件则对每个附件调用 wiki_capture_attachment 捕获为 RawSource 后继续入库流程；
 仅当本轮消息确实没有附件时，才请用户通过 Wiki Composer 附件区上传；不得使用通用文件搜索猜测本地路径。
 
-参数 status 可按 parse_status 过滤：all（全部，默认）、parsed、failed、pending。
+当用户说「看看待整理素材」「有哪些素材可以整理」时，使用 view="inbox"。它仅返回当前版本中
+已解析、系统建议整理且 ingest_status 为 pending/recommended/failed 的素材；不包含历史版本。
+列表统一返回摘要、标签、推荐理由及解析/整理状态，不需要再调用其他素材列表工具。
+用户已明确要求整理时直接进入入库流程；仅查看列表不代表授权深度整理。
+
+参数 view：all（全部素材，默认）或 inbox（待整理）。
+参数 status 可按 parse_status 过滤：all（全部，默认）、parsed、failed、pending，与 view 取交集。
+注意 status="failed" 指解析失败；整理失败的已解析素材可在 view="inbox" 中查看 ingest_status。
 参数 limit 限制返回数量，默认 50。
 参数 kb_id 可指定知识库；未指定时使用当前活跃知识库。"""
 
@@ -108,11 +115,6 @@ WIKI_LIST_KBS_PROMPT = """列出当前用户拥有的所有 Wiki 知识库。
 
 当用户提到"另一个知识库"、"切换到 xx 知识库"或需要跨库操作时，先调用此工具获取所有可用知识库列表。
 返回每个知识库的 id、显示名称、页面数和来源数。"""
-
-WIKI_LIST_INBOX_PROMPT = """列出当前知识库中已捕获但尚未深度整理的素材（待整理 inbox）。
-
-当用户说"整理我刚上传的文件"、"看看待整理的素材"、"有哪些素材可以入库"或类似意思时调用。
-返回每个素材的 source_id、标题、类型、轻量摘要、标签和系统是否建议整理。用户确认后再调用 wiki_plan_ingest(source_id) 生成深度整理计划。"""
 
 # --------------------------------------------------------------------------- #
 # Wiki Agent 系统 prompt

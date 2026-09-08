@@ -48,7 +48,6 @@ from .prompts import (
     WIKI_DIGEST_PROMPT,
     WIKI_FETCH_URL_PROMPT,
     WIKI_LINT_PROMPT,
-    WIKI_LIST_INBOX_PROMPT,
     WIKI_LIST_KBS_PROMPT,
     WIKI_LIST_SOURCES_PROMPT,
     WIKI_ORIENT_PROMPT,
@@ -96,7 +95,6 @@ WIKI_READ_TOOLS = [
     "wiki_read",
     "wiki_list_sources",
     "wiki_list_kbs",
-    "wiki_list_inbox",
 ]
 
 WIKI_MANAGE_TOOLS = [
@@ -330,6 +328,12 @@ _WIKI_LIST_SOURCES_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
+            "view": {
+                "type": "string",
+                "enum": ["all", "inbox"],
+                "description": "all 列出素材；inbox 仅列当前版本中已解析、系统建议整理且尚未完成整理的素材（含整理失败），默认 all。与 status 取交集；inbox 不包含历史版本",
+                "default": "all",
+            },
             "status": {
                 "type": "string",
                 "enum": ["all", "parsed", "failed", "pending"],
@@ -356,23 +360,6 @@ _WIKI_LIST_KBS_SCHEMA = {
     "name": "wiki_list_kbs",
     "description": WIKI_LIST_KBS_PROMPT,
     "parameters": {"type": "object", "properties": {}, "required": []},
-}
-
-_WIKI_LIST_INBOX_SCHEMA = {
-    "name": "wiki_list_inbox",
-    "description": WIKI_LIST_INBOX_PROMPT,
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "limit": {
-                "type": "integer",
-                "description": "最多返回多少条，默认 50",
-                "default": 50,
-            },
-            **_KB_ID_PARAM,
-        },
-        "required": [],
-    },
 }
 
 _WIKI_UPDATE_PAGE_SCHEMA = {
@@ -1585,14 +1572,24 @@ def register_wiki_tools(
         )
 
     def _handle_list_sources(args: dict[str, Any]) -> str:
+        view = str(args.get("view") or "all").strip().lower()
+        if view not in ("all", "inbox"):
+            return tool_error("无效的 view；可选 all 或 inbox")
         status = str(args.get("status") or "all").strip().lower()
         include_history = bool(args.get("include_history", False))
         limit = max(1, int(args.get("limit", 50)))
         raws = store.list_raws(owner_account_id=_owner(), kb_id=_kb_id(args))
         # 默认只列当前版本；被取代的旧版本需显式 include_history=true 才返回，
         # 避免旧版本在列表中与当前版本混淆。
-        if not include_history:
+        if not include_history or view == "inbox":
             raws = [r for r in raws if r.is_current]
+        if view == "inbox":
+            raws = [
+                r for r in raws
+                if (r.parse_status or "pending") == "parsed"
+                and r.ingest_recommend
+                and r.ingest_status in ("pending", "recommended", "failed")
+            ]
         if status != "all":
             raws = [r for r in raws if (r.parse_status or "pending") == status]
         raws = sorted(raws, key=lambda r: r.created_at, reverse=True)[:limit]
@@ -1611,6 +1608,12 @@ def register_wiki_tools(
                     "drift_from": r.drift_from,
                     "last_refresh_at": r.last_refresh_at or None,
                     "last_refresh_error": r.last_refresh_error,
+                    "doc_type": r.doc_type,
+                    "summary": r.summary,
+                    "tags": r.tags,
+                    "ingest_recommend": r.ingest_recommend,
+                    "ingest_reason": r.ingest_reason,
+                    "ingest_status": r.ingest_status,
                 }
                 for r in raws
             ],
@@ -1633,40 +1636,6 @@ def register_wiki_tools(
                 for kb in kbs
             ],
             count=len(kbs),
-        )
-
-    def _handle_list_inbox(args: dict[str, Any]) -> str:
-        """列出已解析且系统建议深度整理、但尚未 ingest 的素材。"""
-        limit = max(1, int(args.get("limit", 50)))
-        kb_id = _kb_id(args)
-        raws = store.list_raws(owner_account_id=_owner(), kb_id=kb_id)
-        inbox = [
-            raw
-            for raw in raws
-            if raw.is_current
-            and (raw.parse_status or "pending") == "parsed"
-            and raw.ingest_recommend
-            and raw.ingest_status in ("pending", "recommended", "failed")
-        ]
-        inbox = sorted(inbox, key=lambda r: r.created_at, reverse=True)[:limit]
-        return tool_result(
-            sources=[
-                {
-                    "source_id": r.id,
-                    "title": r.title,
-                    "source_type": r.source_type,
-                    "doc_type": r.doc_type,
-                    "summary": r.summary,
-                    "tags": r.tags,
-                    "ingest_recommend": r.ingest_recommend,
-                    "ingest_reason": r.ingest_reason,
-                    "ingest_status": r.ingest_status,
-                    "created_at": r.created_at,
-                }
-                for r in inbox
-            ],
-            count=len(inbox),
-            kb_id=kb_id,
         )
 
     def _handle_create_page(args: dict[str, Any]) -> str:
@@ -2310,9 +2279,8 @@ def register_wiki_tools(
         (_WIKI_DELETE_KB_SCHEMA, _handle_delete_kb, False, "🗑️", "删除知识库", "删除知识库 {kb_id}", "wiki delete knowledge base remove kb"),
         (_WIKI_DELETE_SOURCE_SCHEMA, _handle_delete_source, False, "🗑️", "删除 Raw Source", "删除 Raw Source {source_id}", "wiki delete raw source remove"),
         (_WIKI_PARSE_SOURCE_SCHEMA, _handle_parse_source, True, "🔧", "重新解析 Raw Source", "重新解析 {source_id}", "wiki parse source reparse document extract text"),
-        (_WIKI_LIST_SOURCES_SCHEMA, _handle_list_sources, False, "📋", "列出 Raw Sources", "列出 Raw Sources", "wiki list sources raw files pending parsed failed"),
+        (_WIKI_LIST_SOURCES_SCHEMA, _handle_list_sources, False, "📋", "列出素材", "列出素材", "wiki list sources raw files inbox pending parsed failed recommend ingest"),
         (_WIKI_LIST_KBS_SCHEMA, _handle_list_kbs, False, "📚", "列出知识库", "列出知识库", "wiki list knowledge bases kbs"),
-        (_WIKI_LIST_INBOX_SCHEMA, _handle_list_inbox, False, "📥", "列出待整理素材", "列出待整理素材", "wiki list inbox pending sources recommend ingest"),
         (_WIKI_UPDATE_PAGE_SCHEMA, _handle_update_page, False, "✏️", "更新 Wiki 页面", "更新页面 {page_id}", "wiki update page edit content tags related aliases"),
         (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "盘算 {source_id} 该写进哪些页面", "wiki plan ingest preview changes proposed pages"),
         (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "把 {source_id} 的改动写进知识库", "wiki apply ingest write pages confirm plan"),
