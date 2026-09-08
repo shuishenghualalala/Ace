@@ -663,27 +663,71 @@ def register_wiki_tools(
             return located
         return _kb_id(args)
 
+    def _source_title_for_display(
+        source_id: str,
+        args: dict[str, Any] | None = None,
+        kb_id: str | None = None,
+    ) -> str:
+        """解析用户可读素材标题；找不到时不回退到内部 source_id。"""
+        source_id = str(source_id or "").strip()
+        if not source_id:
+            return "这份素材"
+        title = ""
+        try:
+            resolved_kb_id = kb_id or _kb_id_for_source(args or {}, source_id)
+            titles = store.get_source_titles(
+                [source_id],
+                owner_account_id=_owner(),
+                kb_id=resolved_kb_id,
+            )
+            candidate = titles.get(source_id) if isinstance(titles, dict) else ""
+            if isinstance(candidate, str) and candidate.strip() and candidate.strip() != source_id:
+                title = candidate.strip()
+        except Exception:  # noqa: BLE001 - UI metadata must not block the tool call
+            title = ""
+        return title or "这份素材"
+
     def _source_title_for_ui_label(
         ui_args: dict[str, Any],
         runtime_args: dict[str, Any],
     ) -> dict[str, Any]:
         """用素材标题 enrich 工具标题，但不把 source_id 带进用户界面。"""
-        source_id = str(runtime_args.get("source_id") or "").strip()
-        title = ""
-        if source_id:
-            try:
-                kb_id = _kb_id_for_source(runtime_args, source_id)
-                titles = store.get_source_titles(
-                    [source_id],
-                    owner_account_id=_owner(),
-                    kb_id=kb_id,
-                )
-                candidate = titles.get(source_id) if isinstance(titles, dict) else ""
-                if isinstance(candidate, str) and candidate.strip() and candidate.strip() != source_id:
-                    title = candidate.strip()
-            except Exception:  # noqa: BLE001 - UI metadata must not block the tool call
-                title = ""
-        return {**ui_args, "source_title": title or "这份素材"}
+        return {
+            **ui_args,
+            "source_title": _source_title_for_display(
+                str(runtime_args.get("source_id") or ""),
+                runtime_args,
+            ),
+        }
+
+    def _source_titles_for_display(
+        source_ids: list[str],
+        *,
+        args: dict[str, Any] | None = None,
+        kb_id: str | None = None,
+    ) -> list[str]:
+        return [
+            _source_title_for_display(source_id, args=args, kb_id=kb_id)
+            for source_id in source_ids
+        ]
+
+    def _batch_status_for_display(
+        items: Any,
+        *,
+        args: dict[str, Any] | None = None,
+        kb_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """把批量结果中的 source_id 换成标题，供确认卡展示。"""
+        displayed: list[dict[str, Any]] = []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            value = dict(item)
+            source_id = str(value.pop("source_id", "") or "").strip()
+            if source_id:
+                value["title"] = _source_title_for_display(source_id, args=args, kb_id=kb_id)
+            displayed.append(value)
+        return displayed
 
     def _build_progress_callback() -> Callable[[str, int, dict[str, Any]], Awaitable[None]] | None:
         """构建 Wiki ingest 进度回调：保活当前任务，并在可用时推送到前端。"""
@@ -1081,15 +1125,16 @@ def register_wiki_tools(
             )
             return tool_result(**result, auto_applied=True)
         planned_ids = list(result["succeeded"])
+        display_impact = {
+            "sources": _source_titles_for_display(planned_ids, args=args, kb_id=kb_id),
+            "skipped": _batch_status_for_display(result.get("skipped"), args=args, kb_id=kb_id),
+            "failed": _batch_status_for_display(result.get("failed"), args=args, kb_id=kb_id),
+        }
         decision = await _ask_blocking_confirmation(
             action="apply_batch_ingest",
             kb_id=kb_id,
             summary=f"应用 {len(planned_ids)} 份素材的 Wiki 批量计划",
-            impact={
-                "source_ids": planned_ids,
-                "skipped": result["skipped"],
-                "failed": result["failed"],
-            },
+            impact=display_impact,
         )
         if decision == "unavailable":
             confirmation = manager.issue_confirmation(
@@ -1350,6 +1395,11 @@ def register_wiki_tools(
         raw = store.load_raw(source_id, owner_account_id=_owner(), kb_id=kb_id)
         if raw is None:
             return tool_error(f"Raw source 不存在: {source_id}")
+        source_title = str(getattr(raw, "title", "") or "").strip() or _source_title_for_display(
+            source_id,
+            args=args,
+            kb_id=kb_id,
+        )
 
         linked_pages = store.list_pages_by_source(source_id, owner_account_id=_owner(), kb_id=kb_id)
 
@@ -1358,7 +1408,7 @@ def register_wiki_tools(
             decision = await _ask_blocking_confirmation(
                 action="delete_source",
                 kb_id=kb_id,
-                summary=f"删除 RawSource {source_id} 及关联页面",
+                summary=f"删除《{source_title}》及关联页面",
                 impact={
                     "linked_pages": len(linked_pages),
                     "linked_page_titles": [p.title for p in linked_pages[:20]],
@@ -1370,7 +1420,7 @@ def register_wiki_tools(
                     action="delete_source",
                     kb_id=kb_id,
                     payload={"source_id": source_id},
-                    summary=f"删除 RawSource {source_id} 及关联页面",
+                    summary=f"删除《{source_title}》及关联页面",
                     impact={
                         "linked_pages": len(linked_pages),
                         "linked_page_titles": [p.title for p in linked_pages[:20]],
@@ -1380,7 +1430,7 @@ def register_wiki_tools(
             if decision == "timeout":
                 return tool_error("等待确认超时，RawSource 未删除，可重试")
             if decision != "confirmed":
-                return tool_result(cancelled=True, message=f"用户已取消，未删除 RawSource: {source_id}")
+                return tool_result(cancelled=True, message=f"用户已取消，未删除《{source_title}》")
         elif str(confirmed.get("source_id") or "") != source_id:
             return tool_error("确认内容与当前 source 参数不一致，请重新生成确认卡")
 
@@ -1393,7 +1443,7 @@ def register_wiki_tools(
             "source_deleted",
             source_ids=[source_id],
         )
-        return tool_result(message=f"已删除 raw source 及其关联页面: {source_id}")
+        return tool_result(message=f"已删除《{source_title}》及其关联页面")
 
     def _handle_describe_image(args: dict[str, Any]) -> str:
         if config is None or not config.multimodal.enabled:
@@ -1931,6 +1981,7 @@ def register_wiki_tools(
                 apply_issues=applied.issues,
                 message="深度整理计划已按 wiki.ingest.auto_apply=true 自动应用。",
             )
+        source_title = _source_title_for_display(source_id, args=args, kb_id=kb_id)
         confirmation = manager.issue_confirmation(
             current_session_id.get(),
             action="apply_ingest",

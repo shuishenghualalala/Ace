@@ -10,6 +10,7 @@ import json
 # 结果本身有界（子任务摘要 × 批量上限 8），不防碍 WS/历史载荷体积。
 SUBAGENT_FULL_RESULT_TOOLS = frozenset({"delegate_task", "run_agent"})
 WIKI_SOURCE_ID_TOOLS = frozenset({
+    "wiki_batch_ingest",
     "wiki_delete_source",
     "wiki_parse_source",
     "wiki_plan_ingest",
@@ -21,7 +22,6 @@ _WIKI_INTERNAL_RESULT_KEYS = frozenset({
     "source_ids",
     "existing_source_id",
     "duplicate_of",
-    "confirmation_id",
     "kb_id",
 })
 
@@ -51,10 +51,7 @@ def tool_result_detail_for_ui(name: str, content: str, *, max_len: int = 1200) -
     if isinstance(data, dict):
         if name in WIKI_SOURCE_ID_TOOLS:
             data = _redact_wiki_internal_result(data)
-            for key in ("output", "content", "text", "result", "message"):
-                value = data.get(key)
-                if isinstance(value, str) and value.strip():
-                    return _clip(value.strip(), max_len)
+            return _clip(json.dumps(data, ensure_ascii=False), max_len)
         surface = data.get("surface")
         if name in {"Widget", "Canvas", "publish_site"} and isinstance(surface, dict):
             return _clip(json.dumps({"ok": bool(data.get("ok", True)), "surface": surface},
@@ -76,6 +73,9 @@ def _redact_wiki_internal_result(value: object, *, nested_source: bool = False) 
         result: dict[str, object] = {}
         for key, item in value.items():
             if key in _WIKI_INTERNAL_RESULT_KEYS:
+                continue
+            if key == "succeeded" and isinstance(item, list):
+                result["succeeded_count"] = len(item)
                 continue
             # RawSource payloads use ``id`` rather than ``source_id``.
             if nested_source and key == "id":

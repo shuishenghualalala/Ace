@@ -719,7 +719,8 @@ async def test_wiki_delete_source_requires_confirmation(wiki_mocks):
 
     store.delete_raw.assert_not_called()
     assert "requires_confirmation" in result
-    assert "s1" in result
+    assert "a.xlsx" in result
+    assert "s1" not in result
 
 
 async def test_wiki_delete_source_returns_error_when_not_found(wiki_mocks):
@@ -1035,8 +1036,10 @@ async def test_wiki_plan_ingest_returns_confirmation_when_auto_apply_disabled(wi
     from crew.wiki.schemas import PlanResult
 
     registry = wiki_mocks["registry"]
+    store = wiki_mocks["store"]
     compiler = wiki_mocks["compiler"]
     manager = wiki_mocks["manager"]
+    store.get_source_titles.return_value = {"s1": "资料标题"}
     manager.issue_confirmation.return_value = {
         "requires_confirmation": True,
         "confirmation_id": "wcf_manual",
@@ -1053,6 +1056,7 @@ async def test_wiki_plan_ingest_returns_confirmation_when_auto_apply_disabled(wi
     assert '"confirmation_id": "wcf_manual"' in result
     compiler.apply_ingest.assert_not_awaited()
     manager.issue_confirmation.assert_called_once()
+    assert manager.issue_confirmation.call_args.kwargs["summary"] == "应用《资料标题》的 Wiki 变更计划"
 
 
 async def test_capture_attachment_only_accepts_current_turn_allowlist(tmp_path, fs_wiki):
@@ -1464,6 +1468,9 @@ async def test_blocking_confirm_allow_once_executes(wiki_mocks, monkeypatch):
 
     assert len(calls) == 1
     assert calls[0]["record_history"] is False
+    question = calls[0]["questions"][0]["question"]
+    assert "删除《a.xlsx》及关联页面" in question
+    assert "s1" not in question
     store.delete_raw.assert_called_once()
 
 

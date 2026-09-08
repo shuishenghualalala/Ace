@@ -33,14 +33,17 @@ def test_non_terminal_json_prefers_output_field():
 
 
 def test_wiki_source_result_hides_internal_identifiers():
+  import json
+
   payload = (
       '{"source_id":"paste_123", "confirmation_id":"wcf_123", '
       '"message":"已生成《知识库概览》的整理计划"}'
   )
   detail = tool_result_detail_for_ui("wiki_plan_ingest", payload)
-  assert detail == "已生成《知识库概览》的整理计划"
+  shown = json.loads(detail)
+  assert shown["message"] == "已生成《知识库概览》的整理计划"
+  assert shown["confirmation_id"] == "wcf_123"
   assert "paste_123" not in detail
-  assert "wcf_123" not in detail
 
 
 def test_plain_text_is_clipped():
