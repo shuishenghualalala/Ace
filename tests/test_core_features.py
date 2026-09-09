@@ -105,8 +105,14 @@ class TestBuiltinCoreFeatures:
             assert record is not None, feature_id
             assert record.state is FeatureState.ACTIVE, feature_id
             assert record.definition.required_by_product is True, feature_id
-        # product.* 适配器保持可选
-        assert records["product.team-driver-adapter"].definition.required_by_product is False
+        # product.team 作为可选 managed feature 进入 Runtime，team driver 由它提供
+        team_record = records.get("product.team")
+        assert team_record is not None
+        assert team_record.state is FeatureState.ACTIVE
+        assert team_record.definition.required_by_product is False
+        assert app.execution_drivers.get("team") is not None
+        # 旧的独立 driver-adapter feature 不再由 build_app 注册
+        assert "product.team-driver-adapter" not in records
         # 默认 Agent Driver 行为不变
         assert app.execution_drivers.get("agent") is not None
         assert app.execution_drivers.get("agent.default") is not None

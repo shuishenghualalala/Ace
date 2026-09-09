@@ -50,7 +50,7 @@
   <ul>
     <li>管理 Team roster、任务协作、成员通信、共享历史与结果呈现。</li>
     <li>通过 <code>mode=team</code> Execution Driver 对外提供一次协作请求，不参与核心 mode 路由。</li>
-    <li>当前 Manager 仍由 Host 构造；完整 Product Feature 生命周期将在复杂并发迁移阶段收口。</li>
+    <li><code>product.team</code> Feature Bundle 统一拥有 <code>InProcessTeamManager</code>、<code>mode=team</code> Execution Driver 与 owner Provider 缓存生命周期（阶段 4C-1）。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
@@ -62,7 +62,7 @@
       <tr><td>协作编排</td><td>Formation、成员调度、任务图、mailbox 与协作历史。</td><td>已落地</td></tr>
       <tr><td>外援存储门面</td><td><code>TeamExternalAgentStore</code> 继承纯外援 Catalog，拥有 <code>external_team</code>/<code>external_team_member</code> 表、历史 formation 迁移、Team CRUD 与删除守卫事务；组合根用它维持 <code>app.external_agents</code> 既有行为。</td><td>已落地（4A-1）</td></tr>
       <tr><td>看板 Consumer</td><td>生产装配注入动态 Consumer Provider；TeamPlanStore 与 Manager 按调用读取当前代，并在同步操作期间持有 Lease。停用后不回退旧 Store，业务行保留。</td><td>已落地（4B-1）</td></tr>
-      <tr><td>完整 Feature 所有权</td><td>Manager、后台任务、Provider 与活动协作状态迁入 Team Generation。</td><td>待迁移</td></tr>
+      <tr><td>完整 Feature 所有权</td><td>Manager、后台任务、Provider 与活动协作状态迁入 Team Generation；通过 <code>build_team_feature()</code> 装配，<code>CrewApp</code> 不再手写构造 Manager/Driver。</td><td>已落地（4C-1）</td></tr>
     </tbody>
   </table>
 
@@ -70,22 +70,23 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
+      <tr><td><code>crew/team/feature.py</code></td><td>Team Product Feature Bundle：构造 Manager、注册 <code>mode=team</code> Driver 与 <code>team</code> Service，接入 Feature Runtime。</td></tr>
       <tr><td><code>crew/team/team_manager.py</code></td><td>Team 协作入口与运行状态。</td></tr>
       <tr><td><code>crew/team/external_store.py</code></td><td>Team 外援存储门面：Team 表、迁移与 CRUD，仍满足外援 Catalog 契约。</td></tr>
-      <tr><td><code>crew/app.py</code></td><td>迁移期 Team Driver Adapter 的同步装配。</td></tr>
+      <tr><td><code>crew/app.py</code></td><td>生产装配调用 <code>build_team_feature()</code>；保留 <code>set_team_manager</code> 与 <code>app.team</code> 兼容表面。</td></tr>
       <tr><td><code>crew/features/drivers.py</code></td><td>mode 注册、解析与请求 Lease。</td></tr>
     </tbody>
   </table>
 
   <h2>4. 数据模型与接口</h2>
-  <p>Host 启用 Team 时注册一个独立桥接 Generation；请求期间 Registry 自动持有 Lease。</p>
-  <pre><code>mode = "team"
-generation = "product.team-driver-adapter@g1"
-execute = InProcessTeamManager.interact</code></pre>
+  <p>Host 启用 Team 时由 <code>build_team_feature()</code> 激活 <code>product.team</code> Generation；Generation 拥有 Manager、Driver 与 <code>team</code> Service。请求期间 Registry 自动持有 Lease。</p>
+  <pre><code>feature_id = "product.team"
+mode = "team"
+service = ServiceKey("team")  # InProcessTeamManager
+execute = build_team_feature(...).definition</code></pre>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>桥接 Scope 当前只拥有 Driver 入口，尚未拥有 Team Manager 和内部后台任务。</li>
     <li><code>team_internal</code> 仍是 Core ResponseChunk kind，后续迁入命名空间 Feature Event。</li>
   </ul>
 
@@ -109,11 +110,11 @@ execute = InProcessTeamManager.interact</code></pre>
       <tr><td>2026-09-03</td><td>Team 请求入口迁入 Feature-owned Execution Driver Adapter。</td><td><code>mode=team</code>、请求 Lease、核心路由。</td></tr>
       <tr><td>2026-09-03</td><td>内部协作消息改发命名空间事件 <code>team.internal_message v1</code>（feature_event），旧 team_internal 帧由 Gateway 出口适配器生成；持久投影 role 不变。</td><td><code>_team_internal_chunk</code>、流式响应协议。</td></tr>
       <tr><td>2026-09-08</td><td>Team 表/CRUD/迁移从外援 Store 移入 <code>TeamExternalAgentStore</code> 门面；生产组合根与 Team 用例改用该门面（阶段 4A-1，见 ADR-0027）。</td><td><code>crew/team/external_store.py</code>、<code>crew/app.py</code>、Team 相关测试。</td></tr>
-      <tr><td>2026-09-09</td><td>Team 改经动态 Provider 消费外援 Catalog 与看板 Consumer（阶段 4A-2/4B-1，见 ADR-0028/0029）：不再持有裸 Store；看板同步操作持有 Generation Lease，停用后 fail-closed。</td><td><code>crew/team/team_manager.py</code>、<code>crew/team/team_builder.py</code>、<code>crew/team/team_plan_store.py</code>。</td></tr>
+      <tr><td>2026-09-09</td><td>Team 进入 Feature 生命周期（阶段 4C-1，见 ADR-0031）：<code>build_team_feature()</code> 统一构造 Manager、注册 Driver 与 Service；<code>InProcessTeamManager</code> 新增 <code>shutdown()</code> 与 <code>_closed</code> 守卫；App 级 owner Provider 缓存由 Bundle 注入，同时保留 <code>app.team</code> 兼容表面。</td><td><code>crew/team/feature.py</code>、<code>crew/team/team_manager.py</code>、<code>crew/app.py</code>、<code>crew/gateway/app.py</code>、Team 生命周期测试。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0008-team-kanban-driver-adapters.html">ADR-0008</a> · <a href="../../testing/plugin-architecture-stage-2-driver-adapters.html">测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0008-team-kanban-driver-adapters.html">ADR-0008</a> · <a href="../adr/0031-team-feature-lifecycle.html">ADR-0031</a> · <a href="../../testing/plugin-architecture-stage-4c1-team-feature.html">测试记录</a></div>
 </div>
 </body>
 </html>
