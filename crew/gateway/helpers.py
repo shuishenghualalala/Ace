@@ -27,7 +27,7 @@ from crew.core.text_parsing import extract_json_object  # noqa: F401 - re-export
 
 if TYPE_CHECKING:
     from crew.app import CrewApp
-    from crew.gateway.channel_manager import ChannelManager
+    from crew.channels.channel_manager import ChannelManager
 
 # 静态前端目录（PyInstaller frozen 时从 _MEIPASS 取）
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):

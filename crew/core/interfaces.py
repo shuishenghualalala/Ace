@@ -371,6 +371,28 @@ class Channel(ABC):
         """启动渠道，注入消息处理器。"""
         ...
 
+    async def stop(self) -> None:
+        """停止渠道，释放网络与任务资源。"""
+
+    def bind_app(self, app: Any) -> None:
+        """注入 CrewApp，供需要调用后端能力的渠道插件使用。"""
+
+    async def send_to_target(
+        self,
+        target: str,
+        text: str,
+        origin: Any | None = None,
+    ) -> bool:
+        """投递 outbound 文本到指定目标。"""
+        return False
+
+    def status_detail(self) -> dict[str, Any]:
+        """返回渠道运行态的扩展诊断信息。"""
+        return {}
+
+    def apply_config(self, config: Any) -> None:
+        """热应用非连接类配置变更。"""
+
 
 # --------------------------------------------------------------------------- #
 # 多智能体 Team

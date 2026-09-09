@@ -23,11 +23,9 @@ from crew.gateway.auth import (
     is_loopback_host,
 )
 from crew.gateway.auth_policy import requires_gateway_auth
-from crew.gateway.broadcast import make_broadcasting_handler
-from crew.gateway.channel_config import channel_raw as resolved_channel_raw
-from crew.gateway.channel_manager import ChannelManager
+from crew.channels import CHANNELS_SERVICE_KEY
+from crew.channels.broadcast import make_broadcasting_handler
 from crew.gateway.connections import ConnectionManager
-from crew.gateway.delivery import DeliveryRouter
 from crew.gateway.helpers import (
     DIST_DIR,
     EXTERNAL_AGENTS_DISABLED_BODY,
@@ -38,7 +36,6 @@ from crew.gateway.hooks import hook_registry
 from crew.security.settings import strict_security_enabled
 from crew.gateway.interaction_bridge import create_interaction_router, interaction_bridge
 from crew.gateway.logout import LogoutCoordinator
-from crew.gateway.platform_registry import platform_registry
 from crew.gateway.routers.auth_session import create_auth_session_router
 from crew.gateway.routers.channels import create_channels_router
 from crew.gateway.routers.browser import create_browser_router
@@ -57,98 +54,9 @@ from crew.gateway.routers.system import create_system_router
 from crew.gateway.routers.security import create_security_router
 from crew.gateway.routers.sites import create_sites_router
 from crew.gateway.ws import create_ws_router
-from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID, normalize_owner_account_id
 from crew.state.logging import get_logger
 
 log = get_logger("gateway")
-
-
-def _register_platform_channel(
-    crew: CrewApp,
-    channel_manager: ChannelManager,
-    entry,
-    *,
-    owner_account_id: str,
-    include_env: bool,
-) -> bool:
-    owner = normalize_owner_account_id(owner_account_id)
-    try:
-        raw = resolved_channel_raw(crew.config, entry.name, owner)
-        pconfig = entry.build_config(raw, include_env=include_env)
-    except Exception as exc:  # noqa: BLE001 - 单个平台配置异常不应阻断其它渠道启动
-        log.warning("平台 %s 配置解析失败，跳过启动: %s", entry.name, exc)
-        channel_manager.record_error(entry.name, "platform config invalid", owner)
-        return False
-
-    if not pconfig.enabled:
-        return False
-    if not entry.configured(pconfig):
-        hint = entry.install_hint or "请补全平台凭证或设置 enabled: false"
-        log.warning(
-            "平台 %s 已由 owner=%s 启用但配置不完整，跳过启动（%s）",
-            entry.name,
-            owner,
-            hint,
-        )
-        channel_manager.record_error(entry.name, "platform config incomplete", owner)
-        return False
-    try:
-        channel = platform_registry.create_channel(entry.name, pconfig)
-    except Exception as exc:  # noqa: BLE001 - 单个平台构造失败按渠道隔离
-        log.exception("平台通道创建失败: %s", entry.name)
-        channel_manager.record_error(entry.name, str(exc), owner)
-        return False
-    # 注入 CrewApp：供需要调用后端能力的渠道插件使用。
-    if hasattr(channel, "bind_app"):
-        channel.bind_app(crew)
-    channel_manager.register(channel, owner_account_id=owner)
-    log.info("平台通道已归属 owner: %s owner=%s", entry.name, owner)
-    return True
-
-
-def _register_enabled_platform_channels(crew: CrewApp, channel_manager: ChannelManager) -> None:
-    entries = platform_registry.all_entries()
-    bindings = getattr(crew, "channel_bindings", None)
-    bound_owners: dict[str, list[str]] = {}
-    if bindings is not None:
-        for entry in entries:
-            try:
-                owners = [
-                    str(row.get("owner_account_id") or "").strip()
-                    for row in bindings.list_for_platform(entry.name)
-                ]
-            except Exception as exc:  # noqa: BLE001 - 绑定存储异常不能影响其它渠道启动
-                log.warning("读取平台绑定失败: %s: %s", entry.name, exc)
-                continue
-            bound_owners[entry.name] = [owner for owner in owners if owner]
-
-    for entry in entries:
-        owners = bound_owners.get(entry.name, [])
-        if owners:
-            # 显式绑定的渠道：凭证来自 owner overlay，不读进程 env
-            for owner in owners:
-                _register_platform_channel(
-                    crew, channel_manager, entry, owner_account_id=owner, include_env=False
-                )
-            continue
-        # 未绑定渠道归本机 owner（local）；env 凭证启用语义保留（决策⑦）
-        _register_platform_channel(
-            crew, channel_manager, entry, owner_account_id=LOCAL_OWNER_ACCOUNT_ID, include_env=True
-        )
-
-
-def _wire_delivery_senders(
-    channel_manager: ChannelManager, delivery_router: DeliveryRouter
-) -> None:
-    """把各渠道的 send_to_target 注册进 DeliveryRouter。
-
-    cron 投递经 app._cron_runner 读 crew.delivery_router.deliver()，不需要再把
-    router 挂到 cron_service 上。
-    """
-    for name, owner, channel in channel_manager.iter_channels():
-        sender = getattr(channel, "send_to_target", None)
-        if callable(sender):
-            delivery_router.register(name, sender, owner_account_id=owner)
 
 
 def make_route_gate(route_registry: Any, contribution_id: str) -> Any:
@@ -215,21 +123,40 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     crew.interaction_bridge = interaction_bridge
     if crew.team is not None:
         crew.team.interaction_bridge = interaction_bridge
-    channel_manager = ChannelManager()
-    delivery_router = DeliveryRouter()
-    crew.channel_manager = channel_manager
-    crew.delivery_router = delivery_router
+    channel_manager = crew.channel_manager
+    delivery_router = crew.delivery_router
+    if channel_manager is None or delivery_router is None:
+        from crew.channels import build_channels_feature
 
-    _register_enabled_platform_channels(crew, channel_manager)
-    _wire_delivery_senders(channel_manager, delivery_router)
+        fallback = build_channels_feature(
+            crew,
+            registry=getattr(crew, "registry", None),
+            session_store=crew.session_store,
+        ).service
+        channel_manager = channel_manager or fallback.channel_manager
+        delivery_router = delivery_router or fallback.delivery_router
+        crew.channel_manager = channel_manager
+        crew.delivery_router = delivery_router
+
+    def _resolve_channels_service() -> Any:
+        return crew.plugins.resolve_service(CHANNELS_SERVICE_KEY)
+
+    async def _stop_all_channels(reason: str = "disconnected") -> None:
+        service = _resolve_channels_service()
+        if service is None:
+            return
+        await service.channel_manager.stop_all(reason=reason)
     logout_coordinator = LogoutCoordinator(
         active_owner=crew.active_owner,
         dispatcher=dispatcher,
         task_runtime=crew.tasks,
-        channel_manager=channel_manager,
         connections=connections,
         channel_handler=crew.channel_handler,
         cron_service_getter=lambda: crew.cron_service,
+        channels_service_getter=lambda: crew.plugins.acquire_service_lease(
+            CHANNELS_SERVICE_KEY,
+            label="logout:channels",
+        ),
         team_manager=crew.team,
         interaction_bridge=interaction_bridge,
         security_service=crew.security_service,
@@ -266,7 +193,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             )
         # Registered channels remain physically and logically disconnected
         # until a verified Active Owner is activated after Crew startup.
-        await channel_manager.stop_all(reason="login_required")
+        await _stop_all_channels(reason="login_required")
 
         # 从旧版 local 免登录切换到 email/remote 登录时，SQLite 里可能仍保留
         # local 的排他租约。该租约没有可恢复的登录凭据，却会阻止新账号接管，
@@ -298,7 +225,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
                     for lease in leases:
                         logout_coordinator.activate_owner(lease.owner_account_id)
                 else:
-                    await channel_manager.stop_all(reason="login_required")
+                    await _stop_all_channels(reason="login_required")
                 cron_error = str(getattr(crew.cron_service, "start_error", "") or "")
                 if cron_error:
                     log.warning("Gateway 基础能力已就绪，但 CronService 启动失败")
@@ -325,7 +252,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             await asyncio.gather(startup_task, return_exceptions=True)
             startup_task = None
             await logout_coordinator.shutdown()
-            await channel_manager.stop_all()
+            await _stop_all_channels()
             await crew.shutdown()
             # 反注册本实例的渠道会话通知钩子：hook_registry 是全局单例，
             # create_app 每次调用都会新建闭包，不注销会跨实例累积扇出
@@ -450,7 +377,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             log.warning("插件 API 挂载失败 %s: %s", contribution.prefix, exc)
 
-    from crew.gateway.channel_sessions import channel_platform_from_session_id, is_channel_session_id
+    from crew.channels.channel_sessions import channel_platform_from_session_id, is_channel_session_id
 
     async def _notify_channel_session_updated(_event: str, ctx: dict) -> None:
         sid = str(ctx.get("session_id") or "")

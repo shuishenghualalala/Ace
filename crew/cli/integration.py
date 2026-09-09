@@ -12,11 +12,11 @@ from urllib.parse import unquote, urlsplit
 from urllib.request import url2pathname
 
 from crew.cli.app import CliContext, CliError, CliResult, parse_json
-from crew.gateway.channel_config import channel_raw as resolved_channel_raw
-from crew.gateway.channel_manager import ChannelManager
-from crew.gateway.channel_sessions import bind_channel_platform_for_owner
+from crew.channels.channel_config import channel_raw as resolved_channel_raw
+from crew.channels.channel_manager import ChannelManager
+from crew.channels.channel_sessions import bind_channel_platform_for_owner
 from crew.gateway.helpers import require_external_agents_enabled
-from crew.gateway.platform_registry import platform_registry
+from crew.channels.platform_registry import platform_registry
 from crew.gateway.routers.channels import (
     _account_remove_keys,
     _apply_environment_preset,

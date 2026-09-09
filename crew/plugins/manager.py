@@ -771,7 +771,7 @@ class PluginContext:
         description: str = "",
         **entry_kwargs: Any,
     ) -> None:
-        from crew.gateway.platform_registry import PlatformEntry, platform_registry
+        from crew.channels.platform_registry import PlatformEntry, platform_registry
 
         entry_kwargs.setdefault("plugin_name", self.manifest.name)
         entry_kwargs.setdefault("optional_env", list(optional_env or []))
@@ -1506,7 +1506,7 @@ class PluginManager:
 
     def _clear_plugin_platform_entries(self) -> None:
         try:
-            from crew.gateway.platform_registry import platform_registry
+            from crew.channels.platform_registry import platform_registry
 
             platform_registry.clear_plugin_entries()
         except Exception as exc:  # noqa: BLE001

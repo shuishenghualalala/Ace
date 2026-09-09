@@ -2,7 +2,7 @@
 
 import pytest
 
-from crew.gateway.delivery import DeliveryRouter, DeliveryTarget
+from crew.channels.delivery import DeliveryRouter, DeliveryTarget
 from crew.gateway.session_context import SessionSource
 
 

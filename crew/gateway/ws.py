@@ -36,7 +36,7 @@ from crew.gateway.helpers import (
     resolve_session_id,
     status_frame,
 )
-from crew.gateway.broadcast import stream_and_broadcast
+from crew.channels.broadcast import stream_and_broadcast
 from crew.gateway.session_context import session_context_from_envelope
 from crew.state.logging import get_logger
 from crew.core.followup import get_followup_waiter
@@ -214,7 +214,7 @@ def create_ws_router(
                         return
 
         async def _run(envelope: Envelope) -> None:
-            from crew.gateway.channel_sessions import (
+            from crew.channels.channel_sessions import (
                 build_outbound_channel_envelope,
                 deliver_channel_session_reply,
                 is_channel_session_id,

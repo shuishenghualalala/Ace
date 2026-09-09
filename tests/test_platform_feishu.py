@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from crew.core.envelope import ResponseChunk
-from crew.gateway.platform_registry import PlatformConfig, platform_registry
+from crew.channels.platform_registry import PlatformConfig, platform_registry
 from crew.plugins.manager import PluginManager
 from crew.tools.registry import Registry
 from plugins.platforms.feishu.access import (

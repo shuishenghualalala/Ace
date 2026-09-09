@@ -13,8 +13,8 @@ from starlette.testclient import TestClient
 
 from crew.app import build_app
 from crew.core.interfaces import Channel, MessageHandler
-from crew.gateway import channel_config
-from crew.gateway.platform_registry import PlatformConfig, PlatformEntry, platform_registry
+from crew.channels import channel_config
+from crew.channels.platform_registry import PlatformConfig, PlatformEntry, platform_registry
 from crew.gateway.routers.channels import _platform_error_kind
 from crew.gateway.server import create_app
 from crew.state.config import load_config, owner_overlay_config_path, resolve_writable_env_path, write_env_key

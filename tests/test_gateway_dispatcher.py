@@ -21,9 +21,9 @@ from crew.core.interfaces import Channel, MessageHandler
 from crew.core.mocks import InMemorySessionStore
 from crew.core.runctx import current_owner_account_id, LOCAL_OWNER_ACCOUNT_ID
 from crew.core.types import Message
-from crew.gateway.channel_manager import ChannelManager
+from crew.channels.channel_manager import ChannelManager
 from crew.gateway.connections import ConnectionManager, _MAX_CONSECUTIVE_FAILURES
-from crew.gateway.delivery import DeliveryRouter
+from crew.channels.delivery import DeliveryRouter
 from crew.gateway.dispatcher import BusyMode, SessionDispatcher
 from crew.gateway.hooks import hook_registry
 
@@ -492,6 +492,7 @@ async def test_channel_manager_lifecycle_dispatches_through_session_dispatcher()
             "error": "",
             "operation": "",
             "reason": "",
+            "detail": {},
         }
     ]
     assert seen[0].channel == "fake"
@@ -509,6 +510,7 @@ async def test_channel_manager_lifecycle_dispatches_through_session_dispatcher()
             "error": "",
             "operation": "",
             "reason": "disconnected",
+            "detail": {},
         }
     ]
 

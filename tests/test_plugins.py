@@ -238,7 +238,7 @@ async def test_feishu_doc_read_uses_tenant_token(monkeypatch):
 
 
 def test_platform_plugin_registers_feishu_channel(monkeypatch):
-    from crew.gateway.platform_registry import PlatformConfig, platform_registry
+    from crew.channels.platform_registry import PlatformConfig, platform_registry
 
     if not lark_available():
         pytest.skip("lark-oapi 未安装")
@@ -369,7 +369,7 @@ provides:
 
 
 def test_platform_registration_accepts_extended_kwargs(tmp_path):
-    from crew.gateway.platform_registry import PlatformConfig, platform_registry
+    from crew.channels.platform_registry import PlatformConfig, platform_registry
 
     plugin_dir = tmp_path / "rich_platform"
     plugin_dir.mkdir()
@@ -435,7 +435,7 @@ def register(ctx):
 
 
 def test_disabled_platform_plugin_does_not_leave_registry_entry(tmp_path):
-    from crew.gateway.platform_registry import platform_registry
+    from crew.channels.platform_registry import platform_registry
 
     plugin_dir = tmp_path / "leaky_platform"
     plugin_dir.mkdir()

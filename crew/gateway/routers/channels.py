@@ -13,29 +13,29 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from crew.gateway.auth import account_from_request
-from crew.gateway.channel_config import (
+from crew.channels.channel_config import (
     PLATFORM_ACCOUNT_FIELDS as _PLATFORM_ACCOUNT_FIELDS,
 )
-from crew.gateway.channel_config import (
+from crew.channels.channel_config import (
     PLATFORM_ENV_FIELDS as _PLATFORM_ENV_FIELDS,
 )
-from crew.gateway.channel_config import (
+from crew.channels.channel_config import (
     PLATFORM_SECRET_ENV as _PLATFORM_SECRET_ENV,
 )
-from crew.gateway.channel_config import (
+from crew.channels.channel_config import (
     channel_raw as _resolved_channel_raw,
 )
-from crew.gateway.channel_config import (
+from crew.channels.channel_config import (
     owner_env_map as _owner_env_map,
 )
-from crew.gateway.channel_presets import (
+from crew.channels.channel_presets import (
     detect_environment,
     has_environment_presets,
     list_environment_presets,
     resolve_environment_preset,
 )
-from crew.gateway.channel_sessions import bind_channel_platform_for_owner
-from crew.gateway.platform_registry import PlatformConfig, platform_registry
+from crew.channels.channel_sessions import bind_channel_platform_for_owner
+from crew.channels.platform_registry import PlatformConfig, platform_registry
 from crew.state.config import remove_env_key, resolve_writable_env_path, write_env_key
 from crew.state.logging import get_logger
 

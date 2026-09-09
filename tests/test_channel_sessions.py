@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from crew.app import build_app
 from crew.core.envelope import Envelope
 from crew.core.types import Message
-from crew.gateway.channel_sessions import (
+from crew.channels.channel_sessions import (
     channel_platform_from_session_id,
     is_channel_session_id,
     list_channel_session_groups,

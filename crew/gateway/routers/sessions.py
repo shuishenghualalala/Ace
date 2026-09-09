@@ -325,8 +325,8 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
     @router.get("/api/channel-sessions")
     async def channel_sessions(request: Request) -> JSONResponse:
         """绑定者可见的渠道会话（按平台分组，仅绑定后有消息的会话）。"""
-        from crew.gateway.channel_sessions import list_channel_session_groups
-        from crew.gateway.platform_registry import platform_registry
+        from crew.channels.channel_sessions import list_channel_session_groups
+        from crew.channels.platform_registry import platform_registry
 
         owner = _owner(request)
         bindings = getattr(crew, "channel_bindings", None)

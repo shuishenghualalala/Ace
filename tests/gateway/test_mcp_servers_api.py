@@ -15,7 +15,7 @@ from httpx import ASGITransport, AsyncClient
 pytest.importorskip("mcp")
 
 from crew.app import build_app
-from crew.gateway.platform_registry import platform_registry
+from crew.channels.platform_registry import platform_registry
 from crew.gateway.server import create_app
 from crew.state.config import Config
 

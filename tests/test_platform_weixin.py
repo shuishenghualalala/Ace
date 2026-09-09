@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from crew.core.envelope import ResponseChunk
-from crew.gateway.platform_registry import PlatformConfig, platform_registry
+from crew.channels.platform_registry import PlatformConfig, platform_registry
 from crew.gateway.routers.channels import create_channels_router
 from crew.plugins.manager import PluginManager
 from crew.tools.registry import Registry

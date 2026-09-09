@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 
-from crew.gateway.delivery import DeliveryRouter
+from crew.channels.delivery import DeliveryRouter
 
 
 def _router_with_capture(platform: str):

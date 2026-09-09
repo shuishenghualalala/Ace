@@ -428,7 +428,10 @@ class CrewApp:
 
     _UNSET_BROWSER_MANAGER = object()
     _UNSET_KNOWLEDGE_SERVICE = object()
+    _UNSET_CHANNEL_MANAGER = object()
+    _UNSET_DELIVERY_ROUTER = object()
     _KNOWLEDGE_SERVICE_KEY = ServiceKey[Any]("knowledge")
+    _CHANNELS_SERVICE_KEY = ServiceKey[Any]("channels")
 
     def __init__(
         self,
@@ -672,7 +675,8 @@ class CrewApp:
         # cron / mcp 由 build_app 装配后赋值；startup/shutdown 统一拉起与关闭
         self.cron_store = None
         self.cron_service = None
-        self.delivery_router = None
+        self._channel_manager_override = self._UNSET_CHANNEL_MANAGER
+        self._delivery_router_override = self._UNSET_DELIVERY_ROUTER
         self.mcp_manager = None
         # An explicitly assigned manager is reserved for embedded hosts and
         # tests.  Production resolves the active Browser Generation Service
@@ -712,6 +716,32 @@ class CrewApp:
     def browser_manager(self, manager: Any) -> None:
         """Inject a manager explicitly for tests or an embedding host."""
         self._browser_manager_override = manager
+
+    @property
+    def channel_manager(self) -> Any:
+        """Return the explicit manager or the currently active Channels Service manager."""
+        override = self._channel_manager_override
+        if override is not self._UNSET_CHANNEL_MANAGER:
+            return override
+        return self._resolve_channels_service_attr("channel_manager")
+
+    @channel_manager.setter
+    def channel_manager(self, manager: Any) -> None:
+        """Inject a manager explicitly for tests or an embedding host."""
+        self._channel_manager_override = manager
+
+    @property
+    def delivery_router(self) -> Any:
+        """Return the explicit router or the currently active Channels Service router."""
+        override = self._delivery_router_override
+        if override is not self._UNSET_DELIVERY_ROUTER:
+            return override
+        return self._resolve_channels_service_attr("delivery_router")
+
+    @delivery_router.setter
+    def delivery_router(self, router: Any) -> None:
+        """Inject a router explicitly for tests or an embedding host."""
+        self._delivery_router_override = router
 
     def acquire_external_services(self):
         """Open a same-generation external Catalog/Delegation lease."""
@@ -2001,7 +2031,7 @@ class CrewApp:
     async def dispatch(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
         """共享调度入口：gateway/cron/平台入口都走同一 SessionDispatcher。"""
         from crew.core.runctx import current_push_fn
-        from crew.gateway.channel_sessions import prepare_inbound_channel_envelope
+        from crew.channels.channel_sessions import prepare_inbound_channel_envelope
 
         prepare_inbound_channel_envelope(self, envelope)
 
@@ -2118,6 +2148,17 @@ class CrewApp:
     def knowledge_service(self, value: Any) -> None:
         """Inject an externally-owned service for embedded hosts/tests."""
         self._knowledge_service_override = value
+
+    def _resolve_channels_service_attr(self, name: str) -> Any:
+        """Resolve one attribute from the active Channels Service, or None."""
+        runtime = self.plugins.feature_runtime
+        record = runtime.get("product.channels")
+        if record is not None and record.state is not FeatureState.ACTIVE:
+            return None
+        service = runtime.services.get(self._CHANNELS_SERVICE_KEY)
+        if service is None:
+            return None
+        return getattr(service, name, None)
 
     def _wiki_component(self, name: str) -> Any:
         service = self.knowledge_service
@@ -3569,7 +3610,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
     # Skill 扫描纳入已加载插件的 skills/ 根（动态取值：插件卸载后下轮不再出现）
     configure_plugin_skill_roots(plugins.plugin_skill_roots)
-    from crew.gateway.platform_registry import platform_registry
+    from crew.channels.platform_registry import platform_registry
 
     cfg.apply_platform_config_bridges(platform_registry.all_entries())
 
@@ -3605,9 +3646,16 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     app.declare_managed_feature(sites_feature.definition)
     app.channel_bindings = channel_bindings
     app.plugin_prefs = plugin_prefs
-    from crew.gateway.channel_sessions import register_channel_session_tools
+    from crew.channels import build_channels_feature
 
-    register_channel_session_tools(registry, session_store)
+    channels_feature = build_channels_feature(
+        app,
+        registry=registry,
+        session_store=session_store,
+    )
+    app.channel_manager = channels_feature.service.channel_manager
+    app.delivery_router = channels_feature.service.delivery_router
+    app.declare_managed_feature(channels_feature.definition)
     external_feature = build_external_agent_feature(
         app,
         registry=registry,
