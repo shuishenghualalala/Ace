@@ -295,6 +295,11 @@ class FeatureLease:
     def released(self) -> bool:
         return self._released
 
+    @property
+    def generation(self) -> FeatureGeneration:
+        """Generation kept alive by this lease."""
+        return self._scope.generation
+
     def snapshot(self) -> FeatureLeaseSnapshot:
         return FeatureLeaseSnapshot(
             label=self.label,
@@ -310,6 +315,10 @@ class FeatureLease:
         owner = self._owner_task
         if owner is not None and owner is not asyncio.current_task() and not owner.done():
             owner.cancel()
+
+    def detach_owner(self) -> None:
+        """Disable task interruption for work with an explicit cancel owner."""
+        self._owner_task = None
 
     def release(self) -> None:
         """Release this claim once; repeated release is a no-op."""

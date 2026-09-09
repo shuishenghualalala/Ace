@@ -9,6 +9,19 @@ from crew.agent.external.detector import (
 )
 from crew.agent.external.catalog import ExternalAgentCatalog
 from crew.agent.external.store import ExternalAgentStore
+from crew.agent.external.feature import (
+    AGENT_RUNTIME_PROVIDER_SERVICE_KEY,
+    AdapterRuntimeProvider,
+    AgentRuntimeProvider,
+    DELEGATION_SERVICE_KEY,
+    DelegationService,
+    EXTERNAL_AGENT_CATALOG_SERVICE_KEY,
+    EXTERNAL_AGENT_FEATURE_ID,
+    ExternalAgentFeatureBundle,
+    ExternalAgentRun,
+    ExternalRunError,
+    build_external_agent_feature,
+)
 
 __all__ = [
     "ExternalAgentStore",
@@ -18,4 +31,15 @@ __all__ = [
     "scan_hermes_runtime",
     "scan_kimi_runtime",
     "scan_runtimes",
+    "AGENT_RUNTIME_PROVIDER_SERVICE_KEY",
+    "AdapterRuntimeProvider",
+    "AgentRuntimeProvider",
+    "DELEGATION_SERVICE_KEY",
+    "DelegationService",
+    "EXTERNAL_AGENT_CATALOG_SERVICE_KEY",
+    "EXTERNAL_AGENT_FEATURE_ID",
+    "ExternalAgentFeatureBundle",
+    "ExternalAgentRun",
+    "ExternalRunError",
+    "build_external_agent_feature",
 ]

@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from crew.agent.capabilities import canonicalize_capability_config
 from crew.agent.external.runtime_profile import canonical_runtime_model_id, normalize_runtime_models
+from crew.agent.external.feature import EXTERNAL_AGENT_CATALOG_SERVICE_KEY
 from crew.core.errors import ToolError
 from crew.agent.loop.tool_result_display import (
     SUBAGENT_FULL_RESULT_TOOLS,
@@ -46,6 +47,21 @@ from crew.team.history_projection import (
 from crew.team.roles import CREW_BUILTIN_AGENT_ID, is_crew_builtin_agent
 
 log = logging.getLogger(__name__)
+
+
+def _external_catalog(crew):
+    """Resolve the active Catalog generation and fail closed when unavailable."""
+    require_external_agents_enabled(crew)
+    plugins = getattr(crew, "plugins", None)
+    resolver = getattr(plugins, "resolve_service", None)
+    if callable(resolver):
+        service = resolver(EXTERNAL_AGENT_CATALOG_SERVICE_KEY, default=None)
+        if service is not None:
+            return service
+    catalog = getattr(crew, "external_agents", None)
+    if catalog is None:
+        raise RuntimeError("外部智能体存储未初始化")
+    return catalog
 
 
 def _tool_result_for_history(tool_call: ToolCall, paired_results: dict[str, str]) -> str:
@@ -674,7 +690,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         external_agent_id = session_external_agent_id(config)
         if not external_agent_id:
             return None
-        agent, runtime = crew.external_agents.agent_with_runtime(
+        agent, runtime = _external_catalog(crew).agent_with_runtime(
             external_agent_id,
             owner_account_id=owner,
         )
@@ -726,7 +742,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         require_external_agents_enabled(crew)
         stored, team = materialize_team_member_model_bindings(
             crew.session_store,
-            crew.external_agents,
+            _external_catalog(crew),
             session_id,
             owner_account_id=owner,
             builtin_model_id=crew.config.owner_default_model_id(owner),
@@ -777,7 +793,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 runtime_id = "builtin"
                 model_label = selected.label if selected is not None else selected_model_id
             else:
-                agent, runtime = crew.external_agents.agent_with_runtime(
+                agent, runtime = _external_catalog(crew).agent_with_runtime(
                     agent_id,
                     owner_account_id=owner,
                 )
@@ -964,7 +980,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 canonical_model_id = profile.id
             else:
                 try:
-                    agent, runtime = crew.external_agents.agent_with_runtime(
+                    agent, runtime = _external_catalog(crew).agent_with_runtime(
                         member_id,
                         owner_account_id=owner,
                     )
@@ -991,7 +1007,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                         },
                         status_code=409,
                     )
-                crew.external_agents.resolve_agent_profile(
+                _external_catalog(crew).resolve_agent_profile(
                     agent["id"],
                     canonical_model_id,
                     owner_account_id=owner,
@@ -1207,7 +1223,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
 
         if executor in {"external", "acp"}:
             try:
-                _, runtime = crew.external_agents.agent_with_runtime(
+                _, runtime = _external_catalog(crew).agent_with_runtime(
                     external_agent_id,
                     owner_account_id=owner,
                 )
@@ -1225,7 +1241,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 )
         if executor == "team" and external_team_id:
             try:
-                crew.external_agents.get_team(
+                _external_catalog(crew).get_team(
                     external_team_id,
                     owner_account_id=owner,
                 )

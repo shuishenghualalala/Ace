@@ -15,6 +15,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from crew.agent.external.detector import discover_local_runtimes
+from crew.agent.external.feature import EXTERNAL_AGENT_CATALOG_SERVICE_KEY
 from crew.agent.external.runtime_profile import normalize_runtime_models
 from crew.agent.external.runtime_registry import resolve_runtime_display_badge
 from crew.core.errors import ProviderError
@@ -541,6 +542,12 @@ def create_runtimes_router(crew) -> APIRouter:
 
     def _external_store():
         require_external_agents_enabled(crew)
+        plugins = getattr(crew, "plugins", None)
+        resolver = getattr(plugins, "resolve_service", None)
+        if callable(resolver):
+            service = resolver(EXTERNAL_AGENT_CATALOG_SERVICE_KEY, default=None)
+            if service is not None:
+                return service
         if crew.external_agents is None:
             raise RuntimeError("外部智能体存储未初始化")
         return crew.external_agents

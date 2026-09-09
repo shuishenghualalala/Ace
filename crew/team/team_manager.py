@@ -187,8 +187,11 @@ class InProcessTeamManager(TeamManager):
         tasks: TaskManager,
         config: Config,
         external_store: Any | None = None,
+        external_store_provider: Callable[[], Any | None] | None = None,
+        external_services_acquirer: Callable[[], Any] | None = None,
         interaction_bridge: Any | None = None,
         kanban_store: Any | None = None,
+        kanban_consumer_provider: Callable[[], Any | None] | None = None,
         context_contributors: Any | None = None,
         provider_for_owner: Callable[[str], LLMProvider] | None = None,
         provider_for_member_model: Callable[[str, str], LLMProvider] | None = None,
@@ -207,8 +210,11 @@ class InProcessTeamManager(TeamManager):
         self.tasks = tasks
         self.config = config
         self.external_store = external_store
+        self.external_store_provider = external_store_provider
+        self.external_services_acquirer = external_services_acquirer
         self.interaction_bridge = interaction_bridge
         self.kanban_store = kanban_store
+        self.kanban_consumer_provider = kanban_consumer_provider
         # 共享的 Context Contributor 注册表：注入给 member agent，使 PROMPT 阶段
         # contributor（如后台子任务完成通知）在 member 回合内求值，覆盖 member
         # 不经 app.handle 的旁路。
@@ -233,6 +239,7 @@ class InProcessTeamManager(TeamManager):
         self._staffing_locks: dict[TeamKey, asyncio.Lock] = {}
         self._plan_store = TeamPlanStore(
             kanban_store=self.kanban_store,
+            kanban_consumer_provider=self.kanban_consumer_provider,
             plans=self._plans,
             plan_workflows=self._plan_workflows,
             plan_node_tasks=self._plan_node_tasks,
@@ -241,7 +248,7 @@ class InProcessTeamManager(TeamManager):
         )
         self._runtime_staffing_policy = RuntimeStaffingPolicy(
             external_store=self.external_store,
-            external_store_provider=lambda: self.external_store,
+            external_store_provider=self._current_external_store,
             resolve_member_profile=lambda member, owner: self._resolve_member_profile(
                 member,
                 owner_account_id=owner,
@@ -254,7 +261,8 @@ class InProcessTeamManager(TeamManager):
             plugins=self.plugins,
             config=self.config,
             external_store=self.external_store,
-            external_store_provider=lambda: self.external_store,
+            external_store_provider=self._current_external_store,
+            external_services_acquirer=self.external_services_acquirer,
             interaction_bridge=self.interaction_bridge,
             provider_for_member=lambda spec, owner: self._provider_for_member(spec, owner),
             context_contributors=self.context_contributors,
@@ -270,6 +278,11 @@ class InProcessTeamManager(TeamManager):
             if resolved is not None:
                 return resolved
         return self.provider
+
+    def _current_external_store(self) -> Any | None:
+        if callable(self.external_store_provider):
+            return self.external_store_provider()
+        return self.external_store
 
     def _provider_for_member(
         self,
@@ -296,12 +309,13 @@ class InProcessTeamManager(TeamManager):
     ) -> AgentProfile:
         """Resolve one model-aware profile from the current Runtime snapshot."""
 
-        if self.external_store is None:
+        external_store = self._current_external_store()
+        if external_store is None:
             raise KeyError(agent_id)
         resolved_agent, resolved_runtime = (
             (agent, runtime)
             if isinstance(agent, dict) and isinstance(runtime, dict)
-            else self.external_store.agent_with_runtime(
+            else external_store.agent_with_runtime(
                 agent_id,
                 owner_account_id=owner_account_id,
             )
@@ -459,9 +473,10 @@ class InProcessTeamManager(TeamManager):
         if spec is not None and spec.member_id in member_profiles:
             profile = member_profiles[spec.member_id]
             profile_version = int(profile.version)
-        if agent_id and self.external_store is not None:
+        external_store = self._current_external_store()
+        if agent_id and external_store is not None:
             try:
-                agent, runtime = self.external_store.agent_with_runtime(
+                agent, runtime = external_store.agent_with_runtime(
                     agent_id,
                     owner_account_id=owner_account_id,
                 )
@@ -566,6 +581,9 @@ class InProcessTeamManager(TeamManager):
         return key[1]
 
     def _kanban_store_for_owner(self, owner_account_id: str) -> Any | None:
+        if callable(self.kanban_consumer_provider):
+            consumer = self.kanban_consumer_provider()
+            return consumer.for_owner(owner_account_id) if consumer is not None else None
         store = self.kanban_store
         if store is None:
             return None
@@ -3043,7 +3061,8 @@ class InProcessTeamManager(TeamManager):
     ) -> bool:
         """Persist one settled External Agent execution fact without blocking the workflow."""
 
-        if self.external_store is None or node.assignee == "leader":
+        external_store = self._current_external_store()
+        if external_store is None or node.assignee == "leader":
             return False
         attempt_id = str(source_attempt_id or node.delegate_task_id or "").strip()
         snapshot = self._execution_snapshot_for_attempt(
@@ -3065,7 +3084,7 @@ class InProcessTeamManager(TeamManager):
         if not capabilities or not attempt_id:
             return False
         try:
-            result = self.external_store.record_agent_profile_observation(
+            result = external_store.record_agent_profile_observation(
                 owner_account_id=owner_account_id,
                 external_agent_id=external_agent_id,
                 source_run_id=plan.plan_id,
@@ -4224,7 +4243,7 @@ class InProcessTeamManager(TeamManager):
         final_summary: str,
     ) -> None:
         workflow_id = self._plan_workflows.get(self._key(plan.team_session_id, owner_account_id))
-        if self.kanban_store is None or not workflow_id:
+        if (self.kanban_store is None and not callable(self.kanban_consumer_provider)) or not workflow_id:
             return
         patches = await self._extract_final_display_metadata(
             plan,
@@ -4369,7 +4388,8 @@ class InProcessTeamManager(TeamManager):
                 "action": action,
                 "message": f"{decision.get('message') or '审阅未通过'} {reason}".strip(),
             }
-            if revision_exhausted and target is not None and self.external_store is not None:
+            external_store = self._current_external_store()
+            if revision_exhausted and target is not None and external_store is not None:
                 target_meta = dict(target.metadata or {})
                 target_meta["runtime_staffing_trigger"] = "review_exhausted"
                 target_meta["runtime_staffing_trigger_reason"] = reason
@@ -6373,14 +6393,15 @@ class InProcessTeamManager(TeamManager):
         leader_spec: TeamMemberSpec | None = None
         persisted_team_spec: dict[str, Any] = {}
         model_bindings: dict[str, Any] = {}
-        if external_team_id and self.external_store is not None:
+        external_store = self._current_external_store()
+        if external_team_id and external_store is not None:
             try:
                 model_bindings = self._model_bindings_for_session(
                     session_id,
                     external_team_id,
                     owner_account_id=owner_account_id,
                 )
-                external_team = self.external_store.get_team(
+                external_team = external_store.get_team(
                     external_team_id,
                     owner_account_id=owner_account_id,
                 )

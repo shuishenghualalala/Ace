@@ -34,6 +34,7 @@ class TeamMemberFactory:
         config: Config,
         external_store: Any | None,
         external_store_provider: Callable[[], Any | None] | None,
+        external_services_acquirer: Callable[[], Any] | None = None,
         interaction_bridge: Any | None,
         provider_for_member: Callable[[TeamMemberSpec, str], LLMProvider],
         context_contributors: Any | None = None,
@@ -45,6 +46,7 @@ class TeamMemberFactory:
         self.config = config
         self.external_store = external_store
         self.external_store_provider = external_store_provider
+        self.external_services_acquirer = external_services_acquirer
         self.interaction_bridge = interaction_bridge
         self.provider_for_member = provider_for_member
         self.context_contributors = context_contributors
@@ -227,6 +229,8 @@ class TeamMemberFactory:
         external_store = self._external_store()
         if external_store is not None:
             config["external_store"] = external_store
+        if callable(self.external_services_acquirer):
+            config["external_services_acquirer"] = self.external_services_acquirer
         if self.interaction_bridge is not None:
             config["interaction_bridge"] = self.interaction_bridge
         config["crew_session_id"] = member_session_id

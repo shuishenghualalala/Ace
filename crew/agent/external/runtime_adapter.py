@@ -355,6 +355,9 @@ class RuntimeExecutionRequest:
     hard_deadline: float | None = None
     hard_timeout_enabled: bool = False
     permission_handler: Any = None
+    # Adapter identity is separate from provider identity (for example a
+    # provider may switch between ACP and Codex app-server implementations).
+    adapter_id: str = ""
 
     def __post_init__(self) -> None:
         self.mcp_servers = [

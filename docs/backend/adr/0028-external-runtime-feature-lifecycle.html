@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0028 · 外援 Provider 与 Run 生命周期</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0028 · 外援 Provider 与 Run 生命周期</h1>
+<p>状态：切片已确认，契约实施与验证中 · 日期：2026-09-08 · 阶段：4A-2。</p>
+<h2>背景与候选方案</h2>
+<p>ADR-0027 已拆开外援 Catalog 与 Team 存储边界，但宿主和消费者仍长期持有对象，Adapter 运行也尚未整体归属 Feature Generation。仅在宿主退出时清理进程不能保护配置更新、单独停用和激活失败。</p>
+<h2>架构约束</h2>
+<p>外援通过稳定的 Catalog 与 AgentRuntimeProvider 能力接口供消费者调用，Adapter 保持 Provider 内部实现。复用已有 Feature Runtime、Service Registry、Generation 和 Lease，不引入第二套生命周期引擎。</p>
+<p>每次运行持有同代服务至事件流与清理全部完成；后台任务及协议 reader、writer、stderr 任务必须有明确运行所有者。停止接收新请求后取消或等待在途工作，完成进程回收和任务等待后才能关闭底层资源。路径与进程控制沿用已有跨平台安全抽象。</p>
+<p>Team 的兼容存储门面继续由 Team 模块维护。生命周期迁移必须保留编队引用删除守卫和原有事务边界，不能让 Team 通过残留宿主字段访问已关闭代。兼容入口需要明确消费者和退出阶段。</p>
+<h2>验证、交付与回退</h2>
+<p>2026-09-09 收口审查补充：Factory 在 Generation 安装阶段创建资源，创建后立即纳入回滚所有权；生产 Executor 必须按次解析同代 Catalog 与 Delegation 并覆盖完整执行期，不能只增加可选配置接口。尚未消费的 Run、部分消费的流和并发关闭均须有确定的取消与清理完成语义，Lease 只能在清理完成后释放。取消处理不能依赖等待 Lease 归零之后才运行的 Provider disposer。</p>
+<p>外援 Bundle 遵守 Agent 不直接导入 Gateway/Team 的现有架构契约。Gateway 作为服务消费者接入请求门控；Team 的存储兼容路径须保留引用删除守卫与事务语义，并明确运行期对象的所有者。开发与独立测试并行，共享装配文件由主审串行分配。</p>
+<p>独立测试覆盖激活、失败回滚、重复启停、代际更新、关闭后新增请求拒绝、活跃流取消、子进程及任务释放，并检查生产装配和 Team 消费路径。工具与 API 的可用性必须跟随生命周期。完整 UI Contribution 迁移仍按阶段 5 分切片实施。</p>
+<p>停用和更新不删除外援、会话绑定或编队历史数据。本 ADR 尚不代表验证通过；完成后由测试记录列出实际命令、结果及 macOS、Linux、Windows 的实测或模拟覆盖。切片独立提交，回退通过撤销对应提交恢复前一装配，不执行数据删除。</p>
+<p><a href="0027-external-agent-catalog.html">前置 Catalog 决策</a> · <a href="../modules/agent.html">Agent 模块</a> · <a href="../modules/team.html">Team 模块</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

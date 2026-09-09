@@ -27,7 +27,11 @@ from crew.agent.capabilities import (
 )
 from crew.agent.executor import create_executor
 from crew.agent.external.store import ExternalAgentStore
-from crew.agent.external.tools import register_external_agent_tools
+from crew.agent.external.feature import (
+    AdapterRuntimeProvider,
+    acquire_external_service_lease,
+    build_external_agent_feature,
+)
 from crew.agent.runtime import SingleAgent
 from crew.agent.subagent.context import (
     SubagentNotificationQueue,
@@ -708,6 +712,17 @@ class CrewApp:
         """Inject a manager explicitly for tests or an embedding host."""
         self._browser_manager_override = manager
 
+    def acquire_external_services(self):
+        """Open a same-generation external Catalog/Delegation lease."""
+        return acquire_external_service_lease(self.plugins)
+
+    def current_external_catalog(self) -> Any | None:
+        """Resolve the active external Catalog for compatibility consumers."""
+        resolver = getattr(self.plugins, "resolve_service", None)
+        if callable(resolver):
+            return resolver(ServiceKey[Any]("external-agent-catalog"), default=None)
+        return None
+
     def _on_task_event(self, task: dict[str, Any]) -> None:
         """Push normalized task events to connected clients."""
         if self._push_fn is None:
@@ -1323,6 +1338,7 @@ class CrewApp:
                 **executor_config,
                 "timeout_policy": executor_config.get("timeout_policy", cfg.timeout_policy),
                 "external_store": self.external_agents,
+                "external_services_acquirer": self.acquire_external_services,
                 "interaction_bridge": self.interaction_bridge,
             }
         if executor_kind == "client" and isinstance(executor_config, dict):
@@ -3528,7 +3544,6 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     channel_bindings = ChannelBindingsStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
     from crew.team.external_store import TeamExternalAgentStore
 
-    external_agents = TeamExternalAgentStore(cfg.db_path)
     from crew.state.plugin_preferences import PluginPreferencesStore
 
     plugin_prefs = PluginPreferencesStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
@@ -3589,15 +3604,19 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     app.declare_managed_feature(sites_feature.definition)
     app.channel_bindings = channel_bindings
     app.plugin_prefs = plugin_prefs
-    app.external_agents = external_agents
     from crew.gateway.channel_sessions import register_channel_session_tools
 
     register_channel_session_tools(registry, session_store)
-    register_external_agent_tools(
-        registry,
-        external_agents,
+    external_feature = build_external_agent_feature(
+        app,
+        registry=registry,
+        catalog_factory=lambda: TeamExternalAgentStore(cfg.db_path),
+        provider_factory=AdapterRuntimeProvider,
         interaction_bridge_getter=lambda: app.interaction_bridge,
+        own_provider=True,
     )
+    app._install_builtin_feature(external_feature.definition)
+    app.declare_managed_feature(external_feature.definition)
     from crew.tasks.tools import register_task_tools
 
     register_task_tools(registry, app.tasks)
@@ -3748,7 +3767,9 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
                 plugins=plugins,
                 tasks=LegacyTaskManagerAdapter(app.tasks),
                 config=cfg,
-                external_store=app.external_agents,
+                external_store=None,
+                external_store_provider=app.current_external_catalog,
+                external_services_acquirer=app.acquire_external_services,
                 interaction_bridge=app.interaction_bridge,
                 kanban_store=dk_store,
                 context_contributors=app.context_contributors,

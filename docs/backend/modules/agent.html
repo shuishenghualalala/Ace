@@ -64,6 +64,7 @@
       <tr><td>通用上下文贡献</td><td>在 Request View 组装前消费已排序的 fragment 与 persistent message，不导入具体来源 Feature。</td><td>已落地</td></tr>
       <tr><td>Preset Consumer</td><td>主 Agent 与子 Agent 消费中立的 Feature-owned preset 策略；父权限、禁止嵌套、专属能力追加和 Generation Lease 使用统一装配路径。</td><td>已落地</td></tr>
       <tr><td>外援 Catalog 消费</td><td>Executor 与外援工具按 <code>ExternalAgentCatalog</code> Protocol 调用 Runtime/Agent/Profile/observation 能力，不依赖 Team 具体存储；具体实现（SQLite 或测试 Provider）由组合根注入。</td><td>已落地（4A-1 存储边界）</td></tr>
+      <tr><td>外援 Provider / Run 生命周期</td><td><code>product.external-agents</code> Generation 统一拥有 Catalog、<code>AdapterRuntimeProvider</code> 与 <code>DelegationService</code>；Executor、委派工具与 Gateway 经同代 Service Lease 消费；停用先关闭准入（delegation.close）再取消在途 Run，Factory 创建的 Catalog/Provider 随代际完整关闭。</td><td>已落地（4A-2）</td></tr>
     </tbody>
   </table>
 
@@ -77,6 +78,7 @@
       <tr><td><code>crew/agent/external/store.py</code></td><td>Catalog SQLite 实现；独立初始化只建外援表，不建 Team 表。</td></tr>
       <tr><td><code>crew/agent/external/capabilities.py</code></td><td>共享能力词汇与归一化。</td></tr>
       <tr><td><code>crew/agent/external/profile.py</code></td><td>共享 AgentProfile 构建与 ProfileEnvelope 持久化。</td></tr>
+      <tr><td><code>crew/agent/external/feature.py</code></td><td>外援 Feature Bundle：<code>AgentRuntimeProvider</code>/<code>ExternalAgentRun</code> 契约、<code>AdapterRuntimeProvider</code>、<code>DelegationService</code> 与同代 Lease 获取；install 注册三个 Service 与委派工具，停用按 Contribution → Resource 回收。</td></tr>
       <tr><td><code>crew/agent/compact/pipeline.py</code></td><td>L1/L2/L3 压缩编排、预算判断和摘要状态。</td></tr>
       <tr><td><code>crew/agent/compact/microcompact.py</code></td><td>按工具结果生命周期执行选择性微压缩。</td></tr>
       <tr><td><code>crew/agent/compact/post_compact.py</code></td><td>完整压缩后恢复 Skill 指令、资源和重要结果。</td></tr>
@@ -129,10 +131,11 @@ ToolResultRetention:
       <tr><td>2026-09-03</td><td>后台子任务/进程/任务结果通知改由来源模块的 Prompt Contributor 提供，删除三个格式化函数与 params 魔法 key 检查。</td><td><code>crew/agent/runtime.py</code>、team member 的 subagent_drain_fn 旁路。</td></tr>
       <tr><td>2026-09-05</td><td>主 Agent、preview 与前后台子 Agent 改为消费生命周期 Agent Preset Contribution。</td><td>动态目录、父权限封顶、Generation Lease 与 Agent 缓存换代。</td></tr>
       <tr><td>2026-09-08</td><td>外援执行器与工具改为消费 <code>ExternalAgentCatalog</code> Protocol；外援 SQLite Store 拆出 Team 表/CRUD（阶段 4A-1 存储边界，见 ADR-0027）。</td><td><code>crew/agent/external</code>、<code>crew/agent/executor/external.py</code>；Team 门面见 Team 模块文档。</td></tr>
+      <tr><td>2026-09-09</td><td>外援 Provider/Run 进入 Feature 生命周期（阶段 4A-2，见 ADR-0028）：<code>product.external-agents</code> 提供 catalog/agent-runtime-provider/delegation 三个 Service；生产 Executor 经 <code>external_services_acquirer</code> 持有同代 Lease；Team 改由 Catalog Provider 动态解析。</td><td><code>crew/agent/external/feature.py</code>、<code>crew/agent/executor/external.py</code>、<code>crew/team</code>、Gateway runtimes/sessions 路由。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0013-background-result-notification-contributors.html">ADR-0013</a> · <a href="../adr/0024-agent-preset-contribution-registry.html">ADR-0024</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-agent-preset.html">Agent Preset 测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0013-background-result-notification-contributors.html">ADR-0013</a> · <a href="../adr/0024-agent-preset-contribution-registry.html">ADR-0024</a> · <a href="../adr/0028-external-runtime-feature-lifecycle.html">ADR-0028</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-agent-preset.html">Agent Preset 测试记录</a> · <a href="../../testing/plugin-architecture-stage-4a-external-runtime.html">4A-2 测试记录</a></div>
 </div>
 </body>
 </html>

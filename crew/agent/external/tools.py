@@ -34,6 +34,8 @@ def register_external_agent_tools(
     store: ExternalAgentCatalog,
     *,
     interaction_bridge_getter=None,
+    delegation_service=None,
+    lease_factory=None,
 ) -> None:
     async def handle_delegate(args: dict[str, Any]) -> str:
         agent_id = str(args.get("agent_id") or "").strip()
@@ -43,51 +45,57 @@ def register_external_agent_tools(
             return tool_error("agent_id 不能为空")
         if not prompt:
             return tool_error("prompt 不能为空")
+        lease = lease_factory("tool:delegate_to_external_agent") if callable(lease_factory) else None
         try:
-            agent, _runtime = store.agent_with_runtime(
-                agent_id,
-                owner_account_id=current_owner_account_id.get(),
-            )
-        except KeyError:
-            return tool_error(f"外部智能体不存在: {agent_id}")
+            try:
+                agent, _runtime = store.agent_with_runtime(
+                    agent_id,
+                    owner_account_id=current_owner_account_id.get(),
+                )
+            except KeyError:
+                return tool_error(f"外部智能体不存在: {agent_id}")
 
-        provider = str(agent["provider"]).lower()
-        session_id = current_session_id.get() or "delegate_to_external_agent"
-        bridge = interaction_bridge_getter() if callable(interaction_bridge_getter) else None
-        executor = ExternalExecutor(
-            {
-                "external_agent_id": agent_id,
-                "external_store": store,
-                "interaction_bridge": bridge,
-                "cwd": cwd,
-                "crew_session_id": f"{session_id}::delegate::{agent_id}",
-                "display_session_id": session_id,
-                "control_session_id": session_id,
-                # 临时委派不与外部单 Agent 的长期会话混用。
-                "persist_runtime_session": False,
-            }
-        )
-        ctx = ExecutionContext(
-            session_id=f"{session_id}::delegate::{agent_id}",
-            request_id="delegate_to_external_agent",
-            system_prompt="",
-            messages=[],
-            query=prompt,
-            cwd=cwd,
-        )
-        output = ""
-        async for chunk in executor.execute(ctx):
-            if chunk.kind == "final":
-                output = str(chunk.body.get("text") or "")
-            elif chunk.kind == "error":
-                return tool_error(str(chunk.body.get("message") or "外部智能体调用失败"))
-        return tool_result(
-            {
-                "agent_id": agent_id,
-                "provider": provider,
-                "output": output,
-            }
-        )
+            provider = str(agent["provider"]).lower()
+            session_id = current_session_id.get() or "delegate_to_external_agent"
+            bridge = interaction_bridge_getter() if callable(interaction_bridge_getter) else None
+            executor = ExternalExecutor(
+                {
+                    "external_agent_id": agent_id,
+                    "external_store": store,
+                    "interaction_bridge": bridge,
+                    "cwd": cwd,
+                    "crew_session_id": f"{session_id}::delegate::{agent_id}",
+                    "display_session_id": session_id,
+                    "control_session_id": session_id,
+                    # 临时委派不与外部单 Agent 的长期会话混用。
+                    "persist_runtime_session": False,
+                    "delegation_service": delegation_service,
+                }
+            )
+            ctx = ExecutionContext(
+                session_id=f"{session_id}::delegate::{agent_id}",
+                request_id="delegate_to_external_agent",
+                system_prompt="",
+                messages=[],
+                query=prompt,
+                cwd=cwd,
+            )
+            output = ""
+            async for chunk in executor.execute(ctx):
+                if chunk.kind == "final":
+                    output = str(chunk.body.get("text") or "")
+                elif chunk.kind == "error":
+                    return tool_error(str(chunk.body.get("message") or "外部智能体调用失败"))
+            return tool_result(
+                {
+                    "agent_id": agent_id,
+                    "provider": provider,
+                    "output": output,
+                }
+            )
+        finally:
+            if lease is not None:
+                lease.release()
 
     registry.register(
         name="delegate_to_external_agent",

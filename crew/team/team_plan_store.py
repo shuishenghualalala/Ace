@@ -16,6 +16,43 @@ from crew.team.models import TeamMemberSpec, TeamPlan, TeamPlanEdge, TeamPlanNod
 from crew.team.workflow_plan import workflow_node_runtime_metadata
 
 log = get_logger("team.plan_store")
+
+
+class _OwnerScopedKanbanStore:
+    """Compatibility boundary for embedded stores with owner-scoped views."""
+
+    def __init__(self, store: Any, owner: str) -> None:
+        self._store = store.for_owner(owner) if hasattr(store, "for_owner") else store
+
+    def list_workflows_by_session_prefix(self, session_id: str, **_: Any) -> Any:
+        return self._store.list_workflows_by_session_prefix(session_id)
+
+    def get_board_state(self, workflow_id: str, **_: Any) -> Any:
+        return self._store.get_board_state(workflow_id)
+
+    def create_workflow_graph(self, session_id: str, title: str, **kwargs: Any) -> Any:
+        kwargs.pop("owner_account_id", None)
+        return self._store.create_workflow_graph(session_id, title, **kwargs)
+
+    def create_workflow(self, **kwargs: Any) -> Any:
+        kwargs.pop("owner_account_id", None)
+        return self._store.create_workflow(**kwargs)
+
+    def add_task(self, workflow_id: str, **kwargs: Any) -> Any:
+        kwargs.pop("owner_account_id", None)
+        return self._store.add_task(workflow_id, **kwargs)
+
+    def add_event(self, workflow_id: str, event_type: str, **kwargs: Any) -> Any:
+        kwargs.pop("owner_account_id", None)
+        return self._store.add_event(workflow_id, event_type, **kwargs)
+
+    def update_task_status(self, task_id: str, status: str, **kwargs: Any) -> Any:
+        kwargs.pop("owner_account_id", None)
+        return self._store.update_task_status(task_id, status, **kwargs)
+
+    def update_workflow_status(self, workflow_id: str, status: str, **kwargs: Any) -> Any:
+        kwargs.pop("owner_account_id", None)
+        return self._store.update_workflow_status(workflow_id, status, **kwargs)
 TeamKey = tuple[str, str]
 
 _TEAM_PLAN_TO_KANBAN_STATUS = {
@@ -123,6 +160,7 @@ class TeamPlanStore:
         self,
         *,
         kanban_store: Any | None,
+        kanban_consumer_provider: Callable[[], Any | None] | None = None,
         plans: dict[TeamKey, TeamPlan],
         plan_workflows: dict[TeamKey, str],
         plan_node_tasks: dict[tuple[str, str, str], str],
@@ -130,6 +168,7 @@ class TeamPlanStore:
         refresh_plan_status: Callable[[TeamPlan], None],
     ) -> None:
         self.kanban_store = kanban_store
+        self.kanban_consumer_provider = kanban_consumer_provider
         self.plans = plans
         self.plan_workflows = plan_workflows
         self.plan_node_tasks = plan_node_tasks
@@ -141,12 +180,12 @@ class TeamPlanStore:
         return owner_account_id, session_id
 
     def _store_for_owner(self, owner_account_id: str) -> Any | None:
+        if callable(self.kanban_consumer_provider):
+            return self.kanban_consumer_provider()
         store = self.kanban_store
         if store is None:
             return None
-        if hasattr(store, "for_owner"):
-            return store.for_owner(owner_account_id)
-        return store
+        return _OwnerScopedKanbanStore(store, owner_account_id)
 
     @staticmethod
     def _runtime_members_from_snapshot(raw_members: Any) -> dict[str, TeamMemberSpec]:
@@ -183,7 +222,9 @@ class TeamPlanStore:
         if store is None:
             return None
         try:
-            workflows = store.list_workflows_by_session_prefix(_visible_session_id(session_id))
+            workflows = store.list_workflows_by_session_prefix(
+                _visible_session_id(session_id), owner_account_id=owner_account_id
+            )
         except Exception as exc:  # noqa: BLE001
             log.warning("读取持久化 TeamPlan 失败 session=%s err=%s", session_id, exc)
             return None
@@ -215,7 +256,7 @@ class TeamPlanStore:
                     and not workflow_session_id.startswith(f"{requested_session_id}::turn::"):
                 continue
             try:
-                board = store.get_board_state(workflow.id)
+                board = store.get_board_state(workflow.id, owner_account_id=owner_account_id)
             except Exception as exc:  # noqa: BLE001
                 log.warning("读取 TeamPlan 看板失败 workflow=%s err=%s", workflow.id, exc)
                 continue
@@ -443,6 +484,7 @@ class TeamPlanStore:
                     event_type="team_plan_created",
                     event_payload=event_payload,
                     actor="team_runtime",
+                    owner_account_id=owner_account_id,
                 )
                 self.plan_workflows[key] = workflow.id
                 for node_id, task in tasks.items():
@@ -453,6 +495,7 @@ class TeamPlanStore:
                 session_id=plan.team_session_id,
                 title=plan.goal,
                 context=context,
+                owner_account_id=owner_account_id,
             )
             self.plan_workflows[key] = workflow.id
             node_to_task: dict[str, str] = {}
@@ -473,12 +516,14 @@ class TeamPlanStore:
                     parent_task_ids=parent_task_ids or None,
                     status=kanban_status(node.status),
                     auto_promote=False,
+                    owner_account_id=owner_account_id,
                 )
                 node_to_task[node.node_id] = task.id
                 self.plan_node_tasks[(owner_account_id, plan.team_session_id, node.node_id)] = task.id
             store.add_event(
                 workflow.id,
                 "team_plan_created",
+                owner_account_id=owner_account_id,
                 actor="team_runtime",
                 payload={**event_payload, "node_task_ids": node_to_task},
             )
@@ -498,15 +543,18 @@ class TeamPlanStore:
             store.update_task_status(
                 task_id,
                 kanban_status(node.status),
+                owner_account_id=owner_account_id,
                 result_summary=node.result_summary or node.last_error or None,
                 artifacts=node.artifact_refs or None,
                 assignee=node.assignee,
             )
-            if hasattr(store, "update_workflow_status"):
-                store.update_workflow_status(workflow_id, plan.status)
+            store.update_workflow_status(
+                workflow_id, plan.status, owner_account_id=owner_account_id
+            )
             store.add_event(
                 workflow_id,
                 "team_node_updated",
+                owner_account_id=owner_account_id,
                 task_id=task_id,
                 actor=node.assignee or "team_runtime",
                 payload={
