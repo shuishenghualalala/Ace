@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0030 · Channels Feature 生命周期</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0030 · Channels Feature 生命周期</h1>
+<p>状态：已实施并验证 · 日期：2026-09-09 · 阶段：4D-1。</p>
+<h2>背景与候选方案</h2>
+<p>渠道代码散落于 Gateway 包内，ChannelManager 与 DeliveryRouter 由 Gateway 装配函数手工构造，启停由 Lifespan 与 LogoutCoordinator 逐项编排，渠道契约仅靠鸭子类型隐式约定，整体不在 Feature Runtime 管辖内。仅把启停调用包一层代理而不迁移所有权，会让 Feature 停用后渠道实例仍被旧引用驱动。</p>
+<h2>决定</h2>
+<p>新建 <code>crew/channels/</code> 包，迁入 channel_manager、delivery、platform_registry、channel_sessions、channel_config、channel_presets、broadcast 七个模块；由 <code>product.channels</code> Generation 统一拥有 ChannelManager、DeliveryRouter、平台渠道注册与投递 sender 接线、<code>new_conversation</code> 工具注册，并发布 <code>channels</code> Service。更新策略为 restart，停用策略为 drain，停用必须先完成全部渠道 stop 再返回。</p>
+<p>渠道契约显式化：<code>crew/core/interfaces.py</code> 的 <code>Channel</code> ABC 扩展 stop/bind_app/send_to_target/status_detail/apply_config 默认实现，内核不反向依赖产品包；<code>crew/channels/contracts.py</code> 以同语义 Protocol 作为 Feature 内消费者边界。</p>
+<p>宿主经动态 compat 属性解析当前代 Manager/Router，显式注入保留给测试与嵌入宿主；Gateway Lifespan 与 LogoutCoordinator 的 Owner 粒度启停改经 channels Service 同代 Lease，Feature 停用或 draining 期间解析失败即 fail-closed，不回退旧 Generation 残留实例。</p>
+<h2>兼容、验证与回退</h2>
+<p>平台 Adapter（feishu/weixin 目录插件）注册路径不变，仍经 PluginManager 注册进 PlatformRegistry；REST 路由与 CLI 在本切片保持既有消费形态，经 compat 属性访问当前代实例。已知边界：路由闭包在 Feature restart 后仍持有候选实例引用，Adapter 线程与未跟踪任务的热停语义，均在 4D-2 收口。</p>
+<p>验证覆盖独立 Bundle 激活/停用/更新换代、消费方 fail-closed、生产装配来源核验，以及渠道会话、广播、投递、Logout、平台 Adapter 组合回归；停用不删除绑定与配置等持久数据。实现沿用 Python 生命周期与平台无关路径抽象。本切片独立提交，撤销本提交即恢复前一装配行为，回退不触碰持久数据。</p>
+<p><a href="../modules/gateway.html">Gateway 模块</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>
