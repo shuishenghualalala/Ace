@@ -71,7 +71,7 @@ import {
 import { mountSessionHistoryView } from './features/session-history-view';
 import { bindSettingsUi, registerConfigPaneRenderers } from './features/settings';
 import { mountSettingsDataPanes } from './features/settings-data';
-import { requireRendererLogin } from './features/auth-gate';
+import { isRendererLoggedIn, requireRendererLogin } from './features/auth-gate';
 import { initAuthFlow } from './features/login';
 import { initBackendStatusGuard, isBackendConnected, isBackendInitBypassActive, sealBackendInitBypass } from './features/backend-status-guard';
 import { bindHistoryPanelToggle, applyHistoryCollapsed } from './features/history-collapse';
@@ -152,6 +152,8 @@ import {
 } from './features/sidebar-nav';
 
 function setTab(tab: TabKey): boolean {
+  // 认证状态由主进程异步恢复；在恢复完成前不要触发 Wiki 的受保护请求。
+  if (tab === 'wiki' && !isRendererLoggedIn()) return false;
   // 后端服务未就绪时阻断页面切换，遮罩已由 backend-status-guard 展示。
   // init 阶段旁路：允许构建 UI 骨架（遮罩覆盖下用户看不到）。
   if (!isBackendInitBypassActive() && !isBackendConnected()) {
@@ -478,7 +480,8 @@ function bindGlobalEvents(): () => void {
   const disposeSkillsLifecycle = bindSkillsPageLifecycle(() => {
     activateTab('chat');
   });
-  bindWikiTab(() => activateTab('wiki'));
+  // Wiki 的 legacy tab 监听器自身负责刷新；这里只切换 tab，避免一次点击刷新两次。
+  bindWikiTab(() => setTab('wiki'));
   bindSitesTab({
     openInspirationAgent: async (item) => {
       if (!item.sessionId) throw new Error('这个灵感没有绑定创建对话');
@@ -567,6 +570,7 @@ function closeChannelModal(): void {
 
 async function init(
   registerDispose: (dispose: () => void) => void,
+  restoreProductMode: () => void,
 ): Promise<void> {
   installStreamDebugGlobal();
   // 安全 init 包装器：单步抛错不会阻断后续步骤；抛错时记日志 + 通知用户，
@@ -617,6 +621,8 @@ async function init(
   renderWorkspaceHistory(openSession);
   renderChat();
   updateGatewayDot();
+  // initAuthFlow 已完成后再恢复用户上次停留的位置，确保 Wiki 请求带上已恢复的 Cookie。
+  await safe('restoreProductMode', restoreProductMode);
   // 冷启动：当前会话若已有内存消息，补一次文件改动对账（清幽灵临时文件卡）
   const bootSid = state.activeSessionId;
   if (bootSid && getMessages(bootSid).length > 0) {
@@ -691,6 +697,7 @@ export function ensureRendererRoot(host: HTMLElement): RendererRoot {
 
 interface MountedApplicationShell {
   shell: ApplicationShell;
+  syncProductMode(): void;
   dispose(): void;
 }
 
@@ -937,6 +944,7 @@ function mountApplicationShell(
 
   return {
     shell,
+    syncProductMode: () => syncProductMode(productModeStore.get().productMode),
     dispose() {
       leaveWorkMode();
       setWorkHistoryCommands({});
@@ -968,7 +976,7 @@ export function mountRenderer(root: HTMLElement, adapter: RendererAdapter): () =
     else disposeEvents.push(dispose);
   };
 
-  void init(registerDispose).catch((error) => {
+  void init(registerDispose, mountedShell.syncProductMode).catch((error) => {
     console.error('[renderer] mount failed:', error);
     notify(`初始化 Renderer 失败：${(error as Error).message}`);
   });

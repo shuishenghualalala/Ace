@@ -2654,10 +2654,10 @@ export async function refreshWikiData(): Promise<void> {
   }
 }
 
-export function bindWikiTab(onTab: () => void): void {
+export function bindWikiTab(onTab: () => boolean | void): void {
   document.querySelector('[data-tab="wiki"]')?.addEventListener('click', () => {
-    onTab();
-    void refreshWikiData();
+    // setTab 返回 false 时通常表示尚未登录或后端尚未就绪，不要发起请求。
+    if (onTab() !== false) void refreshWikiData();
   });
 
   // 登录态变化（登录成功 / 退出）后重置缓存，下次进入 tab 重新拉取。

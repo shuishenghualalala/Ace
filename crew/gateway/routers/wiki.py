@@ -36,6 +36,27 @@ def create_wiki_router(crew) -> APIRouter:
         if compiler is not None:
             compiler.finalize_write(message, owner_account_id=owner, kb_id=kb_id)
     ingest_tasks: dict[tuple[str, str], asyncio.Task] = {}
+    tutorial_seed_tasks: dict[str, asyncio.Task[bool]] = {}
+
+    from crew.wiki.seed import ensure_tutorial_kb
+
+    async def _ensure_tutorial_kb_async(store: Any, owner: str) -> None:
+        """在工作线程初始化教程库，避免同步文件操作阻塞 Gateway 事件循环。
+
+        同一账号的并发首屏请求共享一个任务，避免 Wiki 页面、认证或重试请求
+        同时触发多次教程库复制。shield 防止某个已断开的请求取消共享初始化任务。
+        """
+        task = tutorial_seed_tasks.get(owner)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                asyncio.to_thread(ensure_tutorial_kb, store, owner),
+            )
+            tutorial_seed_tasks[owner] = task
+        try:
+            await asyncio.shield(task)
+        finally:
+            if task.done() and tutorial_seed_tasks.get(owner) is task:
+                tutorial_seed_tasks.pop(owner, None)
 
     def _owner(request: Request) -> str:
         return account_from_request(request).owner_account_id
@@ -331,10 +352,11 @@ def create_wiki_router(crew) -> APIRouter:
         store = getattr(crew, "_wiki_store", None)
         if store is None:
             return JSONResponse({"ok": False, "error": "Wiki 未启用"}, status_code=503)
-        from crew.wiki.seed import ensure_tutorial_kb
-
-        ensure_tutorial_kb(store, _owner(request))
-        kbs = store.list_kbs(_owner(request))
+        owner = _owner(request)
+        # 首次教程库初始化包含多次文件写入、索引同步和可选向量化，不能在
+        # async Gateway 事件循环中直接执行，否则会把聊天/会话请求一起卡住。
+        await _ensure_tutorial_kb_async(store, owner)
+        kbs = await asyncio.to_thread(store.list_kbs, owner)
         return {"ok": True, "kbs": [kb.to_dict() for kb in kbs]}
 
     @router.post("/kbs")

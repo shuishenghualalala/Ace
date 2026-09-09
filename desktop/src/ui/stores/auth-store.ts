@@ -11,10 +11,10 @@ export interface AuthStoreState {
 
 export const authStore: Store<AuthStoreState> = createStore<AuthStoreState>(
   {
-    // 兼容旧渲染组件的初始投影；真实登录态由主进程 auth:session-state
-    // 在启动时同步，不能把这里当作认证来源。
-    userInfo: { staffName: '本地账号', staffCode: 'local' },
-    isLoggedIn: true,
+    // 启动时先按未登录处理，等待主进程 auth:get-state 完成同步。
+    // 否则首屏可能在 Cookie 尚未恢复前就向 Gateway 发起受保护请求。
+    userInfo: null,
+    isLoggedIn: false,
   },
   'auth',
 );

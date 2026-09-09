@@ -1,13 +1,13 @@
-/**
- * Renderer-side login gates for local desktop workflows.
- *
- * The login wall and main-process Gateway enforce email/remote auth. These
- * legacy call sites remain no-ops until their individual flows are migrated.
- */
+/** Renderer-side login gates shared by features that call the Gateway. */
+import { notify } from '../state';
+import { authStore } from '../stores/auth-store';
+
 export function isRendererLoggedIn(): boolean {
-  return true;
+  return authStore.get().isLoggedIn;
 }
 
-export function requireRendererLogin(_message = '请先登录'): boolean {
-  return true;
+export function requireRendererLogin(message = '请先登录'): boolean {
+  if (isRendererLoggedIn()) return true;
+  if (message) notify(message);
+  return false;
 }

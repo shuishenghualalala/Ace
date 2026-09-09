@@ -219,6 +219,15 @@ describe('KB 加载与渲染', () => {
     expect(onTab).toHaveBeenCalled();
     await vi.waitFor(() => expect(api.wikiKBs).toHaveBeenCalled(), { timeout: 10000, interval: 20 });
   });
+
+  it('tab 切换被阻断时不发起知识库请求', async () => {
+    const onTab = vi.fn(() => false);
+    bindWikiTab(onTab);
+    document.querySelector('[data-tab="wiki"]')?.dispatchEvent(new Event('click'));
+    await flush();
+    expect(onTab).toHaveBeenCalled();
+    expect(api.wikiKBs).not.toHaveBeenCalled();
+  });
 });
 
 describe('Home.md 推荐问题', () => {
