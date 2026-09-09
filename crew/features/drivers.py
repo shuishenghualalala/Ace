@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import TypeAlias
@@ -203,5 +204,13 @@ class ExecutionDriverRegistry:
         """Execute through the resolved Generation while holding its request lease."""
         binding = self.resolve(envelope.mode)
         async with binding.acquire_lease(f"execution:{envelope.request_id}"):
-            async for chunk in binding.driver.execute(envelope):
-                yield chunk
+            stream = binding.driver.execute(envelope)
+            try:
+                async for chunk in stream:
+                    yield chunk
+            finally:
+                close = getattr(stream, "aclose", None)
+                if callable(close):
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result

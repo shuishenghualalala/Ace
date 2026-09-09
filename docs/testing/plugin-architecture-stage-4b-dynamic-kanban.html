@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 4B-1 · Dynamic Kanban 生命周期测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.note{font-weight:700;color:#8a6116}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 4B-1 · Dynamic Kanban Feature Bundle</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-09 · 编码：Luna 子 Agent · 验证：独立测试 Agent + 主 Agent 收口</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li><code>product.dynamic-kanban</code> Generation 统一拥有 Manager、SQLite Store、运行任务与 <code>mode=dynamic_kanban</code> Execution Driver、REST Route（Route Registry 挂载，gateway 中心装配删除直挂）。</li>
+    <li>Team 经 <code>kanban_consumer_provider</code> 动态解析当前代 Consumer；每个同步操作持有 Generation Lease；停用后不回退已关闭 Generation 的裸 Store。</li>
+    <li>Driver 与 SSE resume 在部分消费时关闭内部流；后台 consumer Task 由 Scope 创建并持有 Lease，停用时取消。</li>
+    <li>restart 更新分配全新 Manager/Store 且保留历史行业务行；Manager 构造失败时候选 Store 被关闭、Feature 进入失败态。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>看板生命周期契约（tests/test_dynamic_kanban_feature_lifecycle.py，8 项：激活发布/停用清理、更新换代并保留行、Driver 部分消费关流、SSE resume 部分消费、停用幂等且新代重开 Store、后台任务停用取消、构造失败关闭候选 Store、生产 build_app 装配与 Team Consumer 接线）</td><td class="ok">8 passed</td></tr>
+      <tr><td>Dynamic Kanban 既有回归（test_dynamic_kanban.py）</td><td class="ok">70 passed</td></tr>
+      <tr><td>Team 任务回归（kanban consumer 动态解析路径）</td><td class="ok">251 passed · 1 skipped</td></tr>
+      <tr><td>external / team / gateway / runtime 组合筛选回归</td><td class="ok">1186 passed；32 项失败与基线为同一组既有环境失败，无新增失败</td></tr>
+      <tr><td>Ruff、compileall、Import Linter</td><td class="ok">全部通过；6 contracts kept，0 broken</td></tr>
+    </tbody>
+  </table>
+  <p>组合筛选回归的 32 项失败（tests/gateway 401 鉴权、upload、browser schema、archive 423 等）在未改动基线上同样失败（基线 34 项），属既有环境问题，与本切片无关。生产装配测试以真实 <code>build_app()</code> 验证 Feature 激活、Team Consumer 接线与 Driver 注册；实际模型驱动的看板执行未在本机运行，以 FakeProvider 覆盖。</p>
+
+  <h2>生命周期核验要点</h2>
+  <ul>
+    <li>install 先注册 <code>manager.close</code> disposer 再装配依赖贡献，任何激活失败都走 Runtime 正常回滚；host 字段由 binding disposer 清空。</li>
+    <li><code>DynamicKanbanConsumer</code> 仅暴露 TeamPlanStore 使用的 Store 方法，每次调用 acquire/release 同代 Lease；停用后调用抛 <code>FeatureLeaseUnavailableError</code>。</li>
+    <li>后台化执行的 consumer Task 经 <code>scope.create_task</code> 归属 Generation；<code>manager.close()</code> 先 request_stop 全部 runtime，再取消后台任务、关闭 Store。</li>
+    <li>Execution Driver Registry 在流结束后兜底 aclose 内部生成器，保证部分消费不泄漏运行任务。</li>
+  </ul>
+
+  <div class="nav"><a href="../backend/adr/0029-dynamic-kanban-feature-lifecycle.html">ADR-0029</a> · <a href="../backend/modules/dynamickanban.html">Dynamic Kanban 模块</a> · <a href="../backend/modules/team.html">Team 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

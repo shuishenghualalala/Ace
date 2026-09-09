@@ -639,7 +639,7 @@ async def test_app_handle_dynamic_kanban(tmp_path: Path) -> None:
     app = build_app(config, enable_team=False)
     assert app.dynamic_kanban is not None
     binding = app.execution_drivers.resolve("dynamic_kanban")
-    assert binding.generation.feature_id == "product.dynamic-kanban-driver-adapter"
+    assert binding.generation.feature_id == "product.dynamic-kanban"
 
     try:
         env = Envelope.of("测试请求", session_id="session_1", mode="dynamic_kanban")

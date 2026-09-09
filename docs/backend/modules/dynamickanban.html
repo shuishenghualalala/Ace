@@ -50,7 +50,7 @@
   <ul>
     <li>规划并执行多智能体 DAG 工作流，维护工作流状态、任务依赖和结果。</li>
     <li>通过 <code>mode=dynamic_kanban</code> Execution Driver 对外提供交互入口，不参与核心 mode 路由。</li>
-    <li>当前 Manager 与 Store 仍由 Host 构造；完整 Product Feature 生命周期在复杂并发迁移阶段收口。</li>
+    <li><code>product.dynamic-kanban</code> Bundle 在安装时创建并拥有 Manager、Store、运行任务、Driver 与 Route；当前切片正在独立验收。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
@@ -60,7 +60,7 @@
     <tbody>
       <tr><td>Kanban Driver</td><td>桥接 <code>DynamicKanbanManager.interact()</code>，保留现有 mode 和流式行为。</td><td>已落地</td></tr>
       <tr><td>工作流运行</td><td>计划、DAG 调度、任务执行、暂停恢复与结果聚合。</td><td>已落地</td></tr>
-      <tr><td>完整 Feature 所有权</td><td>Manager、Store、运行 Task 与 Provider 状态迁入 Dynamic Kanban Generation。</td><td>待迁移</td></tr>
+      <tr><td>完整 Feature 所有权</td><td>Manager、Store 与运行 Task 由同一 Generation 关闭；宿主提供的 LLM Provider 仍由宿主拥有。</td><td>实施完成，待验收</td></tr>
     </tbody>
   </table>
 
@@ -71,21 +71,25 @@
       <tr><td><code>crew/dynamickanban/manager.py</code></td><td>工作流交互入口与运行时创建。</td></tr>
       <tr><td><code>crew/dynamickanban/orchestrator.py</code></td><td>DAG 工作流编排。</td></tr>
       <tr><td><code>crew/dynamickanban/store.py</code></td><td>按 Owner 隔离的工作流持久化。</td></tr>
-      <tr><td><code>crew/app.py</code></td><td>迁移期 Dynamic Kanban Driver Adapter 的同步装配。</td></tr>
+      <tr><td><code>crew/dynamickanban/feature.py</code></td><td>Bundle、Service 和按 Owner 租用看板的 Team Consumer；安装失败由 Runtime 回滚。</td></tr>
+      <tr><td><code>crew/app.py</code></td><td>同步激活 Bundle；显式嵌入用的旧 Driver setter 保留。</td></tr>
     </tbody>
   </table>
 
   <h2>4. 数据模型与接口</h2>
-  <p>Host 构造 Manager 后注册独立桥接 Generation；请求期间 Registry 自动持有 Lease。</p>
+  <p>Host 仅提交 Bundle 定义。安装时创建 Store 和 Manager，注册资源清理后再发布 Service、Route 与 Driver。请求入口持有同代 Lease，外层流关闭时逐层等待内部流清理。</p>
   <pre><code>mode = "dynamic_kanban"
-generation = "product.dynamic-kanban-driver-adapter@g1"
+generation = "product.dynamic-kanban@g1"
+service = "dynamic-kanban"
 execute = DynamicKanbanManager.interact</code></pre>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>桥接 Scope 当前只拥有 Driver 入口，尚未拥有 Store、运行 Task 和 Provider 状态。</li>
+    <li>独立生命周期与实际宿主装配的验收结果待测试记录收口；本页不代表阶段 4 全部完成。</li>
     <li>Gateway 对旧 mode 的 sidechain 规则仍是兼容逻辑，后续应由 Driver Descriptor 表达。</li>
   </ul>
+
+  <p>Team 通过动态 Consumer Provider 访问当前代；每个同步 Store 调用持有 Lease，停用后不回退裸 Store。数据库行在停用和更新时保留。实现复用 pathlib、SQLite 与 asyncio，不新增平台信号分支；实际平台执行结果见测试记录。</p>
 
   <h2>6. 扩展点</h2>
   <ul>
@@ -96,12 +100,13 @@ execute = DynamicKanbanManager.interact</code></pre>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-09-09</td><td>4B-1：Bundle 与资源所有权、Team Consumer、Route 与流清理收口，待独立验收。</td><td>Dynamic Kanban、Team、Gateway、Execution Driver Registry。</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
       <tr><td>2026-09-03</td><td>Dynamic Kanban 请求入口迁入 Feature-owned Execution Driver Adapter。</td><td><code>mode=dynamic_kanban</code>、请求 Lease、核心路由。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0008-team-kanban-driver-adapters.html">ADR-0008</a> · <a href="../../testing/plugin-architecture-stage-2-driver-adapters.html">测试记录</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0029-dynamic-kanban-feature-lifecycle.html">ADR-0029</a> · <a href="../adr/0008-team-kanban-driver-adapters.html">ADR-0008</a> · <a href="../../testing/plugin-architecture-stage-2-driver-adapters.html">测试记录</a></div>
 </div>
 </body>
 </html>

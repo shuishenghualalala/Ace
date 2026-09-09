@@ -7,5 +7,19 @@
 from __future__ import annotations
 
 from crew.dynamickanban.manager import DynamicKanbanManager
+from crew.dynamickanban.feature import (
+    DYNAMIC_KANBAN_FEATURE_ID,
+    DYNAMIC_KANBAN_MODE,
+    DynamicKanbanConsumer,
+    DynamicKanbanFeatureBundle,
+    build_dynamic_kanban_feature,
+)
 
-__all__ = ["DynamicKanbanManager"]
+__all__ = [
+    "DynamicKanbanManager",
+    "DYNAMIC_KANBAN_FEATURE_ID",
+    "DYNAMIC_KANBAN_MODE",
+    "DynamicKanbanConsumer",
+    "DynamicKanbanFeatureBundle",
+    "build_dynamic_kanban_feature",
+]

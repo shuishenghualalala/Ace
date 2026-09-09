@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 import json
 from typing import Any
 
@@ -19,17 +20,12 @@ from crew.core.envelope import Envelope, ResponseChunk
 from crew.gateway.auth import account_from_request
 
 
-def create_dynamic_kanban_router(crew) -> APIRouter:
+def create_dynamic_kanban_router(crew, *, service: Any) -> APIRouter:
     router = APIRouter()
-
-    def _dk_manager() -> Any | None:
-        return getattr(crew, "dynamic_kanban", None)
+    dk_manager = service.manager
 
     @router.get("/api/dynamic-kanban/{session_id}/board")
     async def dynamic_kanban_board(request: Request, session_id: str) -> JSONResponse:
-        dk_manager = _dk_manager()
-        if dk_manager is None:
-            return JSONResponse({"error": "Dynamic Kanban 未启用"}, status_code=503)
         owner = account_from_request(request).owner_account_id
         store = dk_manager.store.for_owner(owner)
         workflow = store.get_latest_workflow_by_session(session_id, exclude_source="team")
@@ -41,9 +37,6 @@ def create_dynamic_kanban_router(crew) -> APIRouter:
 
     @router.get("/api/dynamic-kanban/{session_id}/status")
     async def dynamic_kanban_status(request: Request, session_id: str) -> JSONResponse:
-        dk_manager = _dk_manager()
-        if dk_manager is None:
-            return JSONResponse({"error": "Dynamic Kanban 未启用"}, status_code=503)
         owner = account_from_request(request).owner_account_id
         status = dk_manager.status(session_id, owner_account_id=owner)
         if status is None:
@@ -56,9 +49,6 @@ def create_dynamic_kanban_router(crew) -> APIRouter:
         request: Request,
         reason: str = "用户请求暂停",
     ) -> JSONResponse:
-        dk_manager = _dk_manager()
-        if dk_manager is None:
-            return JSONResponse({"error": "Dynamic Kanban 未启用"}, status_code=503)
         owner = account_from_request(request).owner_account_id
         ok = dk_manager.pause(session_id, reason=reason, owner_account_id=owner)
         if not ok:
@@ -70,14 +60,6 @@ def create_dynamic_kanban_router(crew) -> APIRouter:
         session_id: str,
         request: Request,
     ) -> StreamingResponse:
-        dk_manager = _dk_manager()
-        if dk_manager is None:
-            return StreamingResponse(
-                _sse_error("Dynamic Kanban 未启用"),
-                media_type="text/event-stream",
-                status_code=503,
-            )
-
         account = account_from_request(request)
         envelope = Envelope(
             session_id=session_id,
@@ -90,13 +72,16 @@ def create_dynamic_kanban_router(crew) -> APIRouter:
         )
 
         async def event_stream():
-            async for chunk in dk_manager.resume_stream(
-                session_id,
-                envelope.request_id,
-                envelope,
-            ):
-                yield f"data: {json.dumps(_chunk_to_dict(chunk), ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
+            async with aclosing(
+                dk_manager.resume_stream(
+                    session_id,
+                    envelope.request_id,
+                    envelope,
+                )
+            ) as stream:
+                async for chunk in stream:
+                    yield f"data: {json.dumps(_chunk_to_dict(chunk), ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
 
         return StreamingResponse(
             event_stream(),

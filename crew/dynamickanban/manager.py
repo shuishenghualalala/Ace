@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 import threading
 import time
 from pathlib import Path
@@ -28,6 +29,12 @@ from crew.tools.registry import Registry
 log = get_logger("dynamickanban.manager")
 
 AgentFactory = Callable[..., Agent]
+
+
+class _StandaloneLease:
+    """Compatibility lease for embedded managers outside FeatureRuntime."""
+    def release(self) -> None:
+        return None
 
 
 class DynamicKanbanManager:
@@ -60,7 +67,20 @@ class DynamicKanbanManager:
         self._engines: dict[tuple[str, str], WorkflowRuntime] = {}
         self._lock = threading.Lock()
         self._session_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._closed = False
+        self._feature_scope: Any | None = None
         self._max_concurrent = getattr(config, "dk_max_concurrent", 0) or config.team_max_concurrent_children or 3
+
+    def bind_feature_scope(self, scope: Any) -> None:
+        """Attach the owning Generation for detached stream consumers."""
+        self._feature_scope = scope
+
+    def acquire_feature_lease(self, label: str) -> Any:
+        """Acquire the owning Generation lease for an external consumer."""
+        if self._feature_scope is None:
+            return _StandaloneLease()
+        return self._feature_scope.acquire_lease(label)
 
     def _provider_for_owner(self, owner_account_id: str) -> LLMProvider:
         resolver = self.provider_for_owner
@@ -316,8 +336,11 @@ class DynamicKanbanManager:
             with self._lock:
                 self._engines[engine_key] = runtime
             try:
-                async for chunk in runtime.run(workflow, definition, envelope.request_id, envelope):
-                    yield chunk
+                async with aclosing(
+                    runtime.run(workflow, definition, envelope.request_id, envelope)
+                ) as stream:
+                    async for chunk in stream:
+                        yield chunk
             finally:
                 with self._lock:
                     # 仅当登记的仍是当前 runtime 自己时才注销，避免把
@@ -337,16 +360,19 @@ class DynamicKanbanManager:
         original_session_id: str,
     ) -> AsyncIterator[ResponseChunk]:
         """直接走 workflow 并持久化运行状态到主会话历史。"""
-        async for chunk in self._stream_runtime_with_background(
-            self._run_workflow_core(query, envelope, original_session_id),
-            request_id=envelope.request_id,
-            envelope=envelope,
-            session_id=original_session_id,
-            background_after_seconds=getattr(
-                self.config, "tasks_auto_background_after_seconds", 0.0
-            ),
-        ):
-            yield chunk
+        async with aclosing(
+            self._stream_runtime_with_background(
+                self._run_workflow_core(query, envelope, original_session_id),
+                request_id=envelope.request_id,
+                envelope=envelope,
+                session_id=original_session_id,
+                background_after_seconds=getattr(
+                    self.config, "tasks_auto_background_after_seconds", 0.0
+                ),
+            )
+        ) as stream:
+            async for chunk in stream:
+                yield chunk
 
     async def _load_or_build_definition(
         self,
@@ -428,12 +454,15 @@ class DynamicKanbanManager:
             session_id=original_session_id,
         )
 
-        async for chunk in self._run_workflow_with_persistence(
-            query,
-            envelope,
-            original_session_id,
-        ):
-            yield chunk
+        async with aclosing(
+            self._run_workflow_with_persistence(
+                query,
+                envelope,
+                original_session_id,
+            )
+        ) as stream:
+            async for chunk in stream:
+                yield chunk
 
     def _persist_message(
         self,
@@ -475,9 +504,10 @@ class DynamicKanbanManager:
     ) -> AsyncIterator[ResponseChunk]:
         """流式输出 runtime 结果；超过后台化阈值后自动 detached 继续执行并返回提示。"""
         if background_after_seconds <= 0:
-            async for chunk in runtime_gen:
-                self._persist_runtime_chunk(envelope, chunk, session_id)
-                yield chunk
+            async with aclosing(runtime_gen) as stream:
+                async for chunk in stream:
+                    self._persist_runtime_chunk(envelope, chunk, session_id)
+                    yield chunk
             return
 
         queue: asyncio.Queue[ResponseChunk | None] = asyncio.Queue()
@@ -515,16 +545,33 @@ class DynamicKanbanManager:
         async def _consumer() -> None:
             log.info("Dynamic Kanban 后台 consumer 启动 session=%s request_id=%s", session_id, request_id)
             try:
-                async for chunk in runtime_gen:
-                    await _persist_and_maybe_push(chunk)
-                    await queue.put(chunk)
+                async with aclosing(runtime_gen) as stream:
+                    async for chunk in stream:
+                        await _persist_and_maybe_push(chunk)
+                        await queue.put(chunk)
             except Exception as exc:  # noqa: BLE001
                 log.warning("Dynamic Kanban 后台 consumer 异常 session=%s: %s", session_id, exc)
             finally:
                 log.info("Dynamic Kanban 后台 consumer 结束 session=%s", session_id)
                 await queue.put(None)
 
-        consumer_task = asyncio.create_task(_consumer())
+        async def _owned_consumer() -> None:
+            scope = self._feature_scope
+            if scope is None:
+                await _consumer()
+                return
+            async with scope.acquire_lease(f"runtime-background:{request_id}"):
+                await _consumer()
+
+        scope = self._feature_scope
+        if scope is not None:
+            consumer_task = scope.create_task(
+                _owned_consumer(), name=f"dynamic-kanban-background:{request_id}"
+            )
+        else:
+            consumer_task = asyncio.create_task(_owned_consumer())
+        self._background_tasks.add(consumer_task)
+        consumer_task.add_done_callback(self._background_tasks.discard)
         deadline = time.time() + background_after_seconds
         backgrounded = False
         try:
@@ -559,6 +606,7 @@ class DynamicKanbanManager:
             else:
                 # 前台正常结束但 consumer 可能还在收尾，温和等待
                 consumer_task.cancel()
+                await asyncio.gather(consumer_task, return_exceptions=True)
 
     def _persist_runtime_chunk(
         self,
@@ -759,16 +807,19 @@ class DynamicKanbanManager:
         with self._lock:
             self._engines[engine_key] = runtime
         try:
-            async for chunk in runtime.run(
-                workflow,
-                definition,
-                request_id,
-                envelope,
-            ):
-                # 与正常执行路径一致，把 status/final 落进会话历史，
-                # 否则 resume 的产出在客户端重载后丢失。
-                self._persist_runtime_chunk(envelope, chunk, session_id)
-                yield chunk
+            async with aclosing(
+                runtime.run(
+                    workflow,
+                    definition,
+                    request_id,
+                    envelope,
+                )
+            ) as stream:
+                async for chunk in stream:
+                    # 与正常执行路径一致，把 status/final 落进会话历史，
+                    # 否则 resume 的产出在客户端重载后丢失。
+                    self._persist_runtime_chunk(envelope, chunk, session_id)
+                    yield chunk
         finally:
             with self._lock:
                 if self._engines.get(engine_key) is runtime:
@@ -826,3 +877,27 @@ class DynamicKanbanManager:
     def clear(self) -> None:
         with self._lock:
             self._engines.clear()
+
+    async def close(self) -> None:
+        """Stop owned runtime tasks and release this Generation's Store."""
+        if self._closed:
+            return
+        self._closed = True
+        with self._lock:
+            runtimes = tuple(self._engines.values())
+            self._engines.clear()
+        for runtime in runtimes:
+            runtime.request_stop()
+        tasks = tuple(task for task in self._background_tasks if not task.done())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()
+        self._session_locks.clear()
+        self._orchestrators.clear()
+        close = getattr(self.store, "close", None)
+        if callable(close):
+            result = close()
+            if asyncio.iscoroutine(result):
+                await result

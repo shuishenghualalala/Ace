@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0029 · Dynamic Kanban Feature 生命周期</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0029 · Dynamic Kanban Feature 生命周期</h1>
+<p>状态：设计已确认，实施与验证中 · 日期：2026-09-08 · 阶段：4B-1。</p>
+<h2>背景与候选方案</h2>
+<p>宿主直接创建看板 Store 和 Manager，Team 同时持有该 Store。仅把 Manager 包装为可停用 Driver，会让 Team 在 Generation 退出后继续访问旧连接。宿主关闭顺序也不能替代运行期停用和更新的所有权约束。</p>
+<h2>决定</h2>
+<p>由模块自身 Bundle 声明 <code>product.dynamic-kanban</code>，每代独立创建并拥有 Store、Manager、运行状态及其后台任务，沿用已有 Service、Driver 和 Route Registry。外部执行协议继续使用 <code>mode="dynamic_kanban"</code>，HTTP 路径保持兼容。</p>
+<p>请求从当前 Service 取得同代 Lease；流式请求持有至迭代及子任务清理结束。停用关闭新增请求入口，取消并等待已有运行，再撤销贡献与关闭资源。不能在活跃请求尚未释放时关闭它正在使用的 Store。</p>
+<p>Team 使用显式消费者接口访问看板持久化能力，禁止长期缓存裸 Store 或停用后回退宿主残留字段。同步操作在 Lease 内完成，跨异步边界的同一操作保持代际一致性。worker 局部工具继续保留局部作用域，由其所属运行保护。</p>
+<h2>兼容、验证与回退</h2>
+<p>2026-09-09 收口审查补充：Driver Registry、Bundle、Manager 与 SSE 的每层异步流转发都须显式等待下层关闭，不能依赖垃圾回收触发 finally。Route 与 Service 保持同代；已接纳的请求不得因内部重复获取 Lease 而在 drain 时被误拒绝。Manager 构造失败、安装中途失败及宿主未启动即关闭的资源路径分别验证，不以重复调用 close 代替明确的资源所有权。</p>
+<p>更新重新打开现有数据库，不改变历史 workflow、task、run、event 和 runtime state 的数据归属；停用不删除业务数据。验证要求覆盖独立 Bundle、真实宿主装配、Team 消费、完整 SSE 生命周期、重复启停、更新失败恢复及取消后无遗留任务。测试结果将在独立测试记录中收口，本记录尚不代表验证通过。</p>
+<p>实现沿用 Python 生命周期及平台无关路径抽象。三平台实际运行与模拟覆盖分别记录。每个切片独立提交，可撤销本切片恢复前一装配行为，回退不得删除持久数据。</p>
+<p><a href="../modules/dynamickanban.html">Dynamic Kanban 模块</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

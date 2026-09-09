@@ -636,6 +636,7 @@ class CrewApp:
         self.team = None
         # Dynamic Kanban 管理器延迟装配（见 build_app）
         self.dynamic_kanban = None
+        self.dynamic_kanban_consumer = None
         # Work 业务域组合服务（由 build_app 装配；不进入 core）。
         self.work_service = None
         self.channel_bindings = None
@@ -1942,15 +1943,16 @@ class CrewApp:
     def set_dynamic_kanban_manager(self, manager) -> None:
         if self.dynamic_kanban is not None:
             raise RuntimeError("dynamic kanban manager is already configured")
-        self._register_execution_driver_scope(
-            "product.dynamic-kanban-driver-adapter",
-            ExecutionDriver(
-                mode="dynamic_kanban",
-                execute=self._run_dynamic_kanban_execution_driver,
-                capabilities=("dynamic-kanban.execute",),
-                description="Dynamic Kanban workflow execution",
-            ),
-        )
+        if not callable(getattr(manager, "bind_feature_scope", None)):
+            self._register_execution_driver_scope(
+                "product.dynamic-kanban-driver-adapter",
+                ExecutionDriver(
+                    mode="dynamic_kanban",
+                    execute=self._run_dynamic_kanban_execution_driver,
+                    capabilities=("dynamic-kanban.execute",),
+                    description="Dynamic Kanban workflow execution",
+                ),
+            )
         self.dynamic_kanban = manager
 
     def set_push(
@@ -2432,7 +2434,6 @@ class CrewApp:
             self.channel_bindings,
             self.active_owner,
             getattr(self, "cron_store", None),
-            getattr(getattr(self, "dynamic_kanban", None), "store", None),
             # A host may be closed before startup (for example ASGI tests that
             # use a transport without lifespan).  In that case the managed
             # Feature has not yet consumed its candidate Manager, so close its
@@ -3752,9 +3753,20 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     from crew.tools.mcp_client import MCPClientManager
     app.mcp_manager = MCPClientManager(cfg.mcp_servers)
 
-    from crew.dynamickanban.store import SQLiteKanbanStore
+    from crew.dynamickanban import build_dynamic_kanban_feature
 
-    dk_store = SQLiteKanbanStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
+    dk_feature = build_dynamic_kanban_feature(
+        app,
+        db_path=cfg.db_path,
+        wal_enabled=cfg.sqlite_wal,
+        provider=provider,
+        base_registry=registry,
+        session_store=session_store,
+        memory=memory,
+        plugins=plugins,
+        config=cfg,
+        provider_for_owner=app.owner_team_provider,
+    )
 
     if enable_team:
         from crew.team.team_manager import InProcessTeamManager
@@ -3771,28 +3783,16 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
                 external_store_provider=app.current_external_catalog,
                 external_services_acquirer=app.acquire_external_services,
                 interaction_bridge=app.interaction_bridge,
-                kanban_store=dk_store,
+                kanban_store=None,
+                kanban_consumer_provider=dk_feature.consumer_provider,
                 context_contributors=app.context_contributors,
                 provider_for_owner=app.owner_team_provider,
                 provider_for_member_model=app.owner_team_member_model_provider,
             )
         )
 
-    # Dynamic Kanban：独立的多智能体协同后端
-    from crew.dynamickanban.manager import DynamicKanbanManager
-
-    app.set_dynamic_kanban_manager(
-        DynamicKanbanManager(
-            store=dk_store,
-            provider=provider,
-            base_registry=registry,
-            session_store=session_store,
-            memory=memory,
-            plugins=plugins,
-            config=cfg,
-            provider_for_owner=app.owner_team_provider,
-        )
-    )
+    app._install_builtin_feature(dk_feature.definition)
+    app.declare_managed_feature(dk_feature.definition)
 
     from crew.gateway.hooks import hook_registry
 
