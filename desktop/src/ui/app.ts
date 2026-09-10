@@ -16,7 +16,7 @@ import { bindModelPicker } from './features/model-picker';
 import { bindComposerToolbar, syncCraftLabel } from './features/composer-toolbar';
 import { bindComposerContextRing } from './features/composer-context-ring';
 import { createComposerContextView } from './features/composer-context-view';
-import { activateAgentsPage, disposeAgentsPage, initAgentsPage } from './features/agents-page';
+import { createAgentsPageContribution, disposeAgentsPage, initAgentsPage } from './features/agents-page';
 import {
   activateSkillsPage,
   bindSkillsPageLifecycle,
@@ -168,6 +168,7 @@ function setTab(tab: TabKey): boolean {
     return false;
   }
   if (tab === 'wiki' && !canNavigateToWiki(state.config)) return false;
+  if (tab === 'agents' && !externalAgentsEnabled()) return false;
   void pageRegistry.activate(tab).catch((error) => notify(`打开页面失败：${(error as Error).message}`));
   state.activeTab = tab;
   const productState = productModeStore.get();
@@ -198,8 +199,7 @@ function setTab(tab: TabKey): boolean {
 
 function activateTab(tab: TabKey): boolean {
   if (!setTab(tab)) return false;
-  if (tab === 'agents') activateAgentsPage();
-  else if (tab === 'skills') activateSkillsPage();
+  if (tab === 'skills') activateSkillsPage();
   else if (tab === 'security') activateSecurityPage();
   else if (tab === 'sites') {
     syncSiteAnnotationEntry();
@@ -884,6 +884,7 @@ function mountApplicationShell(
     onProductModeChange: syncProductMode,
   });
   const disposeWikiPageContribution = pageRegistry.register(createWikiPageContribution());
+  const disposeAgentsPageContribution = pageRegistry.register(createAgentsPageContribution());
 
   const assistantContext = document.createElement('div');
   const workContext = document.createElement('aside');
@@ -948,6 +949,10 @@ function mountApplicationShell(
   rendererRoot.element.insertBefore(shell.element, rendererRoot.overlayHost);
   const disposeExternalAgentsFeature = bindExternalAgentsFeatureUi((enabled) => {
     shell.setFeatures({ agents: enabled ? 'available' : 'hidden' });
+    if (!enabled && state.activeTab === 'agents') {
+      void pageRegistry.deactivate();
+      activateTab('chat');
+    }
   });
   const disposeSecurityModuleFeature = bindSecurityModuleFeatureUi((enabled) => {
     shell.setFeatures({ security: enabled ? 'available' : 'unavailable' });
@@ -965,6 +970,7 @@ function mountApplicationShell(
     dispose() {
       void pageRegistry.deactivate();
       void disposeWikiPageContribution();
+      void disposeAgentsPageContribution();
       leaveWorkMode();
       setWorkHistoryCommands({});
       const restoredContext = document.createElement('div');

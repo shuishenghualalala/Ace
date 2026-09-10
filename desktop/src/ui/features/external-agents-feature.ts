@@ -32,8 +32,8 @@ export function isSessionVisibleWithExternalAgentsFlag(session: SessionRow): boo
 }
 
 export function syncExternalAgentsFeatureUi(): void {
-  const entry = document.querySelector<HTMLElement>('[data-tab="agents"]');
-  if (entry) entry.hidden = !externalAgentsEnabled();
+  // 入口显隐统一由 shell capability 与 page-registry isAvailable 驱动，
+  // 本函数保留触发事件的能力，供旧调用方继续感知配置变化。
   window.dispatchEvent(new CustomEvent('external-agents:config-change'));
 }
 

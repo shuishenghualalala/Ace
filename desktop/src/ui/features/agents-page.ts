@@ -35,6 +35,7 @@ import {
 } from './external-agents-feature';
 import { renderMarkdownHtml } from '../markdown';
 import { showConfirmDialog } from '../ui-feedback';
+import type { PageContribution, PageLifecycleContext } from './page-registry';
 
 type AgentsTab = 'mine' | 'runtime' | 'create-agent' | 'create-team';
 type AgentsSelectOption = {
@@ -156,12 +157,55 @@ let onSessionAgentAssigned: SessionAgentAssignedFn | null = null;
 let showTeamConstraints = false;
 let showCustomCapabilityInput = false;
 let agentsSelectPopover: HTMLElement | null = null;
-let agentsSelectGlobalBound = false;
 let agentHubView: AgentHubView | null = null;
 let agentsGuideMode: AgentsGuideMode = 'hidden';
 let agentsGuideStep: AgentsGuideStepNumber = 1;
 let agentsGuideLayoutFrame: number | null = null;
 let initialRuntimeScanStarted = false;
+
+// ── 页面生命周期状态 ──
+let agentsLifecycleSignal: AbortSignal | null = null;
+let agentsLifecycleEpoch = 0;
+let agentsGlobalEventsDispose: (() => void) | null = null;
+
+function agentsLifecycleAvailable(): boolean {
+  return !agentsLifecycleSignal || !agentsLifecycleSignal.aborted;
+}
+
+function renderIfActive(epoch: number): void {
+  if (epoch !== agentsLifecycleEpoch) return;
+  render();
+}
+
+function bindAgentsGlobalEvents(signal: AbortSignal): () => void {
+  const onMouseDown = (event: MouseEvent): void => {
+    const target = event.target as HTMLElement;
+    if (!agentsSelectPopover || target.closest('.agents-select-popover') || target.closest('[data-agents-select-key]')) return;
+    closeAgentsSelect();
+  };
+  const onKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape') closeAgentsSelect();
+  };
+  const onClick = (event: MouseEvent): void => {
+    const tab = (event.target as HTMLElement).closest<HTMLElement>('[data-tab]');
+    if (tab && tab.dataset.tab !== 'agents') removeAgentsGuide();
+  };
+
+  document.addEventListener('mousedown', onMouseDown, { signal });
+  document.addEventListener('keydown', onKeyDown, { signal });
+  document.addEventListener('click', onClick, { signal });
+  return () => {
+    document.removeEventListener('mousedown', onMouseDown);
+    document.removeEventListener('keydown', onKeyDown);
+    document.removeEventListener('click', onClick);
+  };
+}
+
+function resetAgentsNavigationState(): void {
+  activeTab = 'mine';
+  activeTeamId = '';
+  message = '';
+}
 
 function stopFormationElapsedTimer(): void {
   if (formationElapsedTimer === null) return;
@@ -617,6 +661,8 @@ function scheduleTeamDescriptionDraft(): void {
   syncSuggestTeamButton();
 
   descriptionDraftTimer = window.setTimeout(async () => {
+    const epoch = agentsLifecycleEpoch;
+    const signal = agentsLifecycleSignal;
     const name = teamName.trim();
     try {
       await backendApi.draftExternalTeamDescription(
@@ -624,14 +670,14 @@ function scheduleTeamDescriptionDraft(): void {
         {
           signal: controller.signal,
           onDescriptionDelta: (text) => {
-            if (controller.signal.aborted || descriptionDraftSeq !== requestId) return;
+            if (controller.signal.aborted || descriptionDraftSeq !== requestId || signal?.aborted || epoch !== agentsLifecycleEpoch) return;
             teamDescription = text;
             generatedTeamDescription = text;
             lastDescriptionDraftName = name;
             syncTeamDescriptionDraftUi();
           },
           onDraft: (draft, phase, meta) => {
-            if (controller.signal.aborted || descriptionDraftSeq !== requestId) return;
+            if (controller.signal.aborted || descriptionDraftSeq !== requestId || signal?.aborted || epoch !== agentsLifecycleEpoch) return;
             if (draft.description) {
               teamDescription = draft.description;
               generatedTeamDescription = draft.description;
@@ -643,9 +689,9 @@ function scheduleTeamDescriptionDraft(): void {
         },
       );
     } catch {
-      if (controller.signal.aborted || descriptionDraftSeq !== requestId) return;
+      if (controller.signal.aborted || descriptionDraftSeq !== requestId || signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     } finally {
-      if (descriptionDraftSeq === requestId) {
+      if (descriptionDraftSeq === requestId && epoch === agentsLifecycleEpoch) {
         if (descriptionDraftAbort === controller) descriptionDraftAbort = null;
         setTeamDescriptionDrafting(false);
         syncTeamDescriptionDraftUi();
@@ -1834,6 +1880,8 @@ function applyTeamSuggestion(suggestion: ExternalTeamSuggestion): void {
 }
 
 async function requestTeamSuggestion(requiredAgentIds: string[], forceRequiredAgentIds: string[] = []): Promise<void> {
+  const epoch = agentsLifecycleEpoch;
+  const signal = agentsLifecycleSignal;
   formationRequestAbort?.abort();
   const controller = new AbortController();
   formationRequestAbort = controller;
@@ -1846,7 +1894,7 @@ async function requestTeamSuggestion(requiredAgentIds: string[], forceRequiredAg
   formationAiAttempted = false;
   startFormationElapsedTimer(startedAt);
   message = '';
-  render();
+  renderIfActive(epoch);
   try {
     const constraints = buildTeamConstraintText();
     const description = [teamDescription.trim(), constraints && `组队约束：\n${constraints}`].filter(Boolean).join('\n\n');
@@ -1864,7 +1912,7 @@ async function requestTeamSuggestion(requiredAgentIds: string[], forceRequiredAg
     const suggestion = await backendApi.suggestExternalTeamAuto(request, {
       signal: controller.signal,
       onSuggestion: (snapshot, phase) => {
-        if (requestSeq !== formationRequestSeq) return;
+        if (requestSeq !== formationRequestSeq || signal?.aborted || epoch !== agentsLifecycleEpoch) return;
         const conflicts = snapshot.required_agent_conflicts || [];
         if (snapshot.decision_required && conflicts.length) {
           teamConstraintDecision = conflicts;
@@ -1878,17 +1926,17 @@ async function requestTeamSuggestion(requiredAgentIds: string[], forceRequiredAg
           formationStatus = resolveFormationUiStatus(snapshot);
           formationImprovements = snapshot.ai_material_improvements || [];
         }
-        render();
+        renderIfActive(epoch);
       },
       onStatus: () => {
-        if (requestSeq !== formationRequestSeq) return;
+        if (requestSeq !== formationRequestSeq || signal?.aborted || epoch !== agentsLifecycleEpoch) return;
         formationStatus = 'ai_reviewing';
         formationAiAttempted = true;
         message = '';
-        render();
+        renderIfActive(epoch);
       },
     });
-    if (requestSeq !== formationRequestSeq) return;
+    if (requestSeq !== formationRequestSeq || signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     const conflicts = suggestion.required_agent_conflicts || [];
     if (suggestion.decision_required && conflicts.length) {
       teamConstraintDecision = conflicts;
@@ -1900,13 +1948,13 @@ async function requestTeamSuggestion(requiredAgentIds: string[], forceRequiredAg
     formationStatus = resolveFormationUiStatus(suggestion);
     formationImprovements = suggestion.ai_material_improvements || [];
   } catch (error) {
-    if (requestSeq !== formationRequestSeq || (error as Error).name === 'AbortError') return;
+    if (requestSeq !== formationRequestSeq || signal?.aborted || epoch !== agentsLifecycleEpoch || (error as Error).name === 'AbortError') return;
     formationStatus = fastApplied ? 'ready_partial' : 'idle';
     message = fastApplied
       ? '初步团队方案已保留，智能检查暂未完成'
       : `智能组队失败：${(error as Error).message}`;
   } finally {
-    if (requestSeq === formationRequestSeq) {
+    if (requestSeq === formationRequestSeq && epoch === agentsLifecycleEpoch) {
       formationRequestAbort = null;
       formationElapsedMs = Date.now() - startedAt;
       stopFormationElapsedTimer();
@@ -1917,25 +1965,33 @@ async function requestTeamSuggestion(requiredAgentIds: string[], forceRequiredAg
 }
 
 async function scanRuntimes(): Promise<void> {
+  const epoch = agentsLifecycleEpoch;
+  const signal = agentsLifecycleSignal;
   const startedAt = performance.now();
   busy = true;
   runtimeScanning = true;
   message = '正在探测本机运行时与模型，请稍候…';
-  render();
+  renderIfActive(epoch);
   try {
     runtimes = await backendApi.scanRuntimes();
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
     message = `已刷新 ${runtimes.length} 个运行时，耗时 ${elapsed} 秒`;
   } catch (error) {
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     message = `刷新运行时失败：${(error as Error).message}`;
   } finally {
-    runtimeScanning = false;
-    busy = false;
-    render();
+    if (epoch === agentsLifecycleEpoch) {
+      runtimeScanning = false;
+      busy = false;
+      render();
+    }
   }
 }
 
 async function deleteRuntime(runtime: ExternalRuntime): Promise<void> {
+  const epoch = agentsLifecycleEpoch;
+  const signal = agentsLifecycleSignal;
   const confirmed = await showConfirmDialog({
     title: '删除运行时记录',
     message: `删除“${runtime.name || runtime.provider}”的发现记录？如果工具仍安装在电脑上，下次点“再找找”时它会重新出现。`,
@@ -1944,16 +2000,20 @@ async function deleteRuntime(runtime: ExternalRuntime): Promise<void> {
   if (!confirmed) return;
   busy = true;
   message = '';
-  render();
+  renderIfActive(epoch);
   try {
     await backendApi.deleteRuntime(runtime.id);
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     runtimes = runtimes.filter((item) => item.id !== runtime.id);
     message = `已删除 ${runtime.name || runtime.provider}`;
   } catch (error) {
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     message = `删除运行时失败：${(error as Error).message}`;
   } finally {
-    busy = false;
-    render();
+    if (epoch === agentsLifecycleEpoch) {
+      busy = false;
+      render();
+    }
   }
 }
 
@@ -1968,9 +2028,11 @@ async function createAgent(): Promise<void> {
     render();
     return;
   }
+  const epoch = agentsLifecycleEpoch;
+  const signal = agentsLifecycleSignal;
   busy = true;
   message = '';
-  render();
+  renderIfActive(epoch);
   try {
     const runtime = runtimes.find((item) => item.id === agentRuntimeId);
     const payload: Parameters<typeof backendApi.createExternalAgent>[0] = {
@@ -1979,17 +2041,22 @@ async function createAgent(): Promise<void> {
     };
     payload.model = agentModel.trim();
     const created = await backendApi.createExternalAgent(payload);
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     await refresh();
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     agentRuntimeId = '';
     agentName = '';
     agentModel = '';
     activeTab = 'mine';
     message = `已添加外援 ${created.name}`;
   } catch (error) {
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     message = `添加外援失败：${(error as Error).message}`;
   } finally {
-    busy = false;
-    render();
+    if (epoch === agentsLifecycleEpoch) {
+      busy = false;
+      render();
+    }
   }
 }
 
@@ -2022,9 +2089,11 @@ async function createTeam(): Promise<void> {
     render();
     return;
   }
+  const epoch = agentsLifecycleEpoch;
+  const signal = agentsLifecycleSignal;
   busy = true;
   message = '';
-  render();
+  renderIfActive(epoch);
   try {
     const plan = formationPlan;
     const confirmedFormationPlan = plan ? {
@@ -2058,15 +2127,20 @@ async function createTeam(): Promise<void> {
     if (teamSpec) payload.team_spec = teamSpec;
     if (confirmedFormationPlan) payload.formation_plan = confirmedFormationPlan;
     const created = await backendApi.createExternalTeam(payload);
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     await refresh();
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     resetTeamForm();
     activeTab = 'mine';
     message = `已创建团队 ${created.name}`;
   } catch (error) {
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     message = `创建团队失败：${(error as Error).message}`;
   } finally {
-    busy = false;
-    render();
+    if (epoch === agentsLifecycleEpoch) {
+      busy = false;
+      render();
+    }
   }
 }
 
@@ -2101,35 +2175,49 @@ function resetTeamForm(): void {
 
 async function deleteAgent(agent: ExternalAgent): Promise<void> {
   if (!window.confirm(`删除智能体「${agent.name}」？`)) return;
+  const epoch = agentsLifecycleEpoch;
+  const signal = agentsLifecycleSignal;
   busy = true;
   message = '';
-  render();
+  renderIfActive(epoch);
   try {
     await backendApi.deleteExternalAgent(agent.id);
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     await refresh();
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     message = `已删除 ${agent.name}`;
   } catch (error) {
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     message = `删除失败：${(error as Error).message}`;
   } finally {
-    busy = false;
-    render();
+    if (epoch === agentsLifecycleEpoch) {
+      busy = false;
+      render();
+    }
   }
 }
 
 async function deleteTeam(team: ExternalTeam): Promise<void> {
   if (!window.confirm(`删除团队「${team.name}」？`)) return;
+  const epoch = agentsLifecycleEpoch;
+  const signal = agentsLifecycleSignal;
   busy = true;
   message = '';
-  render();
+  renderIfActive(epoch);
   try {
     await backendApi.deleteExternalTeam(team.id);
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     await refresh();
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     message = `已删除团队 ${team.name}`;
   } catch (error) {
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     message = `删除团队失败：${(error as Error).message}`;
   } finally {
-    busy = false;
-    render();
+    if (epoch === agentsLifecycleEpoch) {
+      busy = false;
+      render();
+    }
   }
 }
 
@@ -2208,14 +2296,18 @@ export async function useTeam(team: ExternalTeam): Promise<void> {
 
 export async function loadAgentsPage(): Promise<void> {
   if (!externalAgentsEnabled()) return;
+  const epoch = agentsLifecycleEpoch;
+  const signal = agentsLifecycleSignal;
   busy = true;
-  render();
+  renderIfActive(epoch);
   let shouldScanRuntimes = false;
   try {
     await refresh();
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     shouldScanRuntimes = runtimes.length === 0 && !initialRuntimeScanStarted;
     if (shouldScanRuntimes) initialRuntimeScanStarted = true;
   } catch (error) {
+    if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     message = `外援阵容加载失败：${(error as Error).message}`;
   }
   busy = false;
@@ -2223,7 +2315,7 @@ export async function loadAgentsPage(): Promise<void> {
     await scanRuntimes();
     return;
   }
-  render();
+  renderIfActive(epoch);
 }
 
 export function renderAgentsPage(): void {
@@ -2242,8 +2334,32 @@ export function disposeAgentsPage(): void {
   cancelDescriptionDraftRequest();
   activeTab = 'mine';
   activeTeamId = '';
+  agentHubView?.element.remove();
   agentHubView?.dispose();
   agentHubView = null;
+}
+
+export function createAgentsPageContribution(): PageContribution {
+  return {
+    id: 'agents',
+    isAvailable: () => externalAgentsEnabled(),
+    activate: ({ signal }: PageLifecycleContext) => {
+      agentsLifecycleEpoch += 1;
+      agentsLifecycleSignal = signal;
+      agentsGlobalEventsDispose?.();
+      agentsGlobalEventsDispose = bindAgentsGlobalEvents(signal);
+      resetAgentsNavigationState();
+      render();
+      void loadAgentsPage();
+    },
+    deactivate: async () => {
+      agentsLifecycleEpoch += 1;
+      agentsLifecycleSignal = null;
+      agentsGlobalEventsDispose?.();
+      agentsGlobalEventsDispose = null;
+      disposeAgentsPage();
+    },
+  };
 }
 
 export async function initAgentsPage(options: {
@@ -2257,19 +2373,4 @@ export async function initAgentsPage(options: {
   agentsGuideMode = loadFromStorage(STORAGE_KEYS.externalAgentsGuideDismissed, false)
     ? 'hidden'
     : 'welcome';
-  if (!agentsSelectGlobalBound) {
-    agentsSelectGlobalBound = true;
-    document.addEventListener('mousedown', (event) => {
-      const target = event.target as HTMLElement;
-      if (!agentsSelectPopover || target.closest('.agents-select-popover') || target.closest('[data-agents-select-key]')) return;
-      closeAgentsSelect();
-    });
-    document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') closeAgentsSelect();
-    });
-    document.addEventListener('click', (event) => {
-      const tab = (event.target as HTMLElement).closest<HTMLElement>('[data-tab]');
-      if (tab && tab.dataset.tab !== 'agents') removeAgentsGuide();
-    });
-  }
 }

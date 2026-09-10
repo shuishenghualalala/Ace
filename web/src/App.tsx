@@ -3,10 +3,11 @@ import Sidebar, { type SidebarView } from "./components/Sidebar";
 import TopBar from "./components/TopBar";
 import ChatPanel from "./components/ChatPanel";
 import type { Props as ChatPanelProps } from "./components/ChatPanel";
-import AgentsHub from "./components/AgentsHub";
 import SkillsHub from "./components/SkillsHub";
 import { createWikiFeatureStore, installWikiPageContribution } from "./features/WikiFeature";
 import type { WikiPageContext } from "./features/WikiFeature";
+import { installAgentsPageContribution } from "./features/AgentsFeature";
+import type { AgentsPageContext } from "./features/AgentsFeature";
 import { UiPageRegistry } from "./lib/ui-feature-registry";
 import TaskBoard from "./components/TaskBoard";
 import WorkspaceModal from "./components/WorkspaceModal";
@@ -541,6 +542,85 @@ export default function App() {
     store: wikiFeatureStore,
   }});
 
+  const agentsPages = useMemo(() => {
+    const registry = new UiPageRegistry<string, AgentsPageContext, ReactNode>();
+    installAgentsPageContribution(registry);
+    return registry;
+  }, []);
+  const agentsPage = agentsPages.project("agents", {
+    agentsEnabled: externalAgentsEnabled,
+    props: {
+      onAssignAgent: async (agent) => {
+        const sid = genId();
+        await api.setSessionAgentConfig(
+          sid,
+          {
+            executor: "external",
+            external: { external_agent_id: agent.id },
+          },
+          {
+            workspace_id: currentWorkspaceId,
+            title: "新会话",
+          },
+        );
+        setCurrentSessionId(sid);
+        setMode("agent");
+        setView("chat");
+        chat.clearSession(sid);
+        setTasks([]);
+        await refreshSessions();
+      },
+      onAssignTeam: async (team) => {
+        const sid = genId();
+        await api.setSessionAgentConfig(
+          sid,
+          {
+            executor: "team",
+            team: { external_team_id: team.id },
+          },
+          {
+            workspace_id: currentWorkspaceId,
+            title: `${team.name} · 团队任务`,
+          },
+        );
+        setSessionExternalTeams((prev) => ({ ...prev, [sid]: team.id }));
+        setSessionTeamTiers((prev) => ({ ...prev, [sid]: "auto" }));
+        setExternalTeams((prev) => {
+          const rest = prev.filter((item) => item.id !== team.id);
+          return [team, ...rest];
+        });
+        setCurrentSessionId(sid);
+        setMode("team");
+        setBoardOpen(true);
+        setView("chat");
+        chat.clearSession(sid);
+        setTasks([]);
+        await refreshSessions();
+      },
+      onStartLeaderChat: async (agent) => {
+        const sid = genId();
+        const isBuiltin = agent.id === "crew::builtin";
+        await api.setSessionAgentConfig(
+          sid,
+          isBuiltin
+            ? { executor: "builtin" }
+            : { executor: "external", external: { external_agent_id: agent.id } },
+          {
+            workspace_id: currentWorkspaceId,
+            title: `与 ${agent.name} 对话`,
+          },
+        );
+        setCurrentSessionId(sid);
+        setMode("agent");
+        setView("chat");
+        setBoardOpen(false);
+        chat.clearSession(sid);
+        setTasks([]);
+        await refreshSessions();
+      },
+    },
+  });
+
   return (
     <div
       className={"app" + (boardOpen ? " with-board" : "")}
@@ -581,77 +661,8 @@ export default function App() {
         )}
         {view === "skills" ? (
           <SkillsHub />
-        ) : view === "agents" && externalAgentsEnabled ? (
-          <AgentsHub
-            onAssignAgent={async (agent) => {
-              const sid = genId();
-              await api.setSessionAgentConfig(
-                sid,
-                {
-                  executor: "external",
-                  external: { external_agent_id: agent.id },
-                },
-                {
-                  workspace_id: currentWorkspaceId,
-                  title: "新会话",
-                },
-              );
-              setCurrentSessionId(sid);
-              setMode("agent");
-              setView("chat");
-              chat.clearSession(sid);
-              setTasks([]);
-              await refreshSessions();
-            }}
-            onAssignTeam={async (team) => {
-              const sid = genId();
-              await api.setSessionAgentConfig(
-                sid,
-                {
-                  executor: "team",
-                  team: { external_team_id: team.id },
-                },
-                {
-                  workspace_id: currentWorkspaceId,
-                  title: `${team.name} · 团队任务`,
-                },
-              );
-              setSessionExternalTeams((prev) => ({ ...prev, [sid]: team.id }));
-              setSessionTeamTiers((prev) => ({ ...prev, [sid]: "auto" }));
-              setExternalTeams((prev) => {
-                const rest = prev.filter((item) => item.id !== team.id);
-                return [team, ...rest];
-              });
-              setCurrentSessionId(sid);
-              setMode("team");
-              setBoardOpen(true);
-              setView("chat");
-              chat.clearSession(sid);
-              setTasks([]);
-              await refreshSessions();
-            }}
-            onStartLeaderChat={async (agent) => {
-              const sid = genId();
-              const isBuiltin = agent.id === "crew::builtin";
-              await api.setSessionAgentConfig(
-                sid,
-                isBuiltin
-                  ? { executor: "builtin" }
-                  : { executor: "external", external: { external_agent_id: agent.id } },
-                {
-                  workspace_id: currentWorkspaceId,
-                  title: `与 ${agent.name} 对话`,
-                },
-              );
-              setCurrentSessionId(sid);
-              setMode("agent");
-              setView("chat");
-              setBoardOpen(false);
-              chat.clearSession(sid);
-              setTasks([]);
-              await refreshSessions();
-            }}
-          />
+        ) : agentsPage ? (
+          agentsPage
         ) : wikiPage ? (
           wikiPage
         ) : (

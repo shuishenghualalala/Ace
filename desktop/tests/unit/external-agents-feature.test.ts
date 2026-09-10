@@ -23,14 +23,19 @@ const session = (provider: string): SessionRow => ({
 
 beforeEach(() => {
   __resetAllStoresForTest();
-  document.body.innerHTML = '<button data-tab="agents" hidden>智能体</button>';
 });
 
 describe('external agents feature flag', () => {
   it('配置加载失败或字段缺失时默认关闭，明确 true 时才开启', () => {
+    const events: CustomEvent[] = [];
+    const handler = (event: Event): void => {
+      events.push(event as CustomEvent);
+    };
+    window.addEventListener('external-agents:config-change', handler);
+
     expect(externalAgentsEnabled()).toBe(false);
     syncExternalAgentsFeatureUi();
-    expect(document.querySelector<HTMLElement>('[data-tab="agents"]')?.hidden).toBe(true);
+    expect(events).toHaveLength(1);
 
     configStore.set({
       config: {
@@ -45,7 +50,9 @@ describe('external agents feature flag', () => {
     syncExternalAgentsFeatureUi();
 
     expect(externalAgentsEnabled()).toBe(true);
-    expect(document.querySelector<HTMLElement>('[data-tab="agents"]')?.hidden).toBe(false);
+    expect(events).toHaveLength(2);
+
+    window.removeEventListener('external-agents:config-change', handler);
   });
 
   it('只隐藏外部智能体和外部 Team，不影响 Crew 或 Client 会话', () => {
