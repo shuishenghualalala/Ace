@@ -472,6 +472,18 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   transform: rotate(90deg);
 }
 
+/* 流式回答的生成态：使用中性色的明暗流光，完成后自动消失。 */
+.chat-messages.web-flow {
+  --mw-chat-stream-gradient: linear-gradient(
+    105deg,
+    var(--mw-text-muted) 0%,
+    var(--mw-text-primary) 34%,
+    var(--mw-text-secondary) 50%,
+    var(--mw-text-primary) 66%,
+    var(--mw-text-muted) 100%
+  );
+}
+
 @property --mw-msg-fold-spinner-angle {
   syntax: '<angle>';
   inherits: false;
@@ -484,8 +496,11 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   border-radius: 50%;
   background: conic-gradient(
     from var(--mw-msg-fold-spinner-angle),
-    var(--mw-action-primary) 0deg 84deg,
-    color-mix(in srgb, var(--mw-status-info) 25%, transparent) 84deg 360deg
+    var(--mw-text-primary) 0deg 62deg,
+    var(--mw-text-secondary) 62deg 142deg,
+    color-mix(in srgb, var(--mw-text-primary) 58%, var(--mw-bg-surface)) 142deg 220deg,
+    color-mix(in srgb, var(--mw-text-primary) 28%, var(--mw-bg-surface)) 220deg 286deg,
+    color-mix(in srgb, var(--mw-text-primary) 12%, transparent) 286deg 360deg
   );
   -webkit-mask: radial-gradient(
     farthest-side,
@@ -507,6 +522,62 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
 .chat-messages.web-flow .msg__fold-summary--live {
   color: var(--mw-action-primary);
   font-weight: 500;
+}
+
+.chat-messages.web-flow .msg__fold-summary--live .msg__fold-label {
+  background-image: var(--mw-chat-stream-gradient);
+  background-position: 0% 50%;
+  background-size: 230% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: ace-chat-stream-shimmer 2.6s ease-in-out infinite;
+}
+
+/* 首 token 到达前保留等待态，但让三个点拥有与执行中一致的色彩语言。 */
+.chat-messages.web-flow .msg--typing .typing span {
+  background: var(--mw-text-secondary);
+  background-image: var(--mw-chat-stream-gradient);
+  background-position: 0% 50%;
+  background-size: 230% 100%;
+  animation: chat-typing-blink 1.2s infinite, ace-chat-stream-shimmer 1.8s ease-in-out infinite;
+}
+
+.chat-messages.web-flow .msg--typing .typing span:nth-child(2) { animation-delay: 0.2s; }
+.chat-messages.web-flow .msg--typing .typing span:nth-child(3) { animation-delay: 0.4s; }
+
+/* 正文只显示一枚细光标，避免对已经生成的 Markdown 内容做渐变染色。 */
+.chat-messages.web-flow .msg.msg--agent-turn[data-streaming='true'] .msg__text[data-text-for]:not([hidden])::after {
+  content: '';
+  display: inline-block;
+  width: 0.34em;
+  height: 1.08em;
+  margin-left: 0.18em;
+  vertical-align: -0.16em;
+  border-radius: 999px;
+  background-image: var(--mw-chat-stream-gradient);
+  background-position: 0% 50%;
+  background-size: 230% 100%;
+  animation: ace-chat-stream-caret 1.4s ease-in-out infinite;
+}
+
+@keyframes ace-chat-stream-shimmer {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+@keyframes ace-chat-stream-caret {
+  0%, 100% { opacity: 0.45; transform: scaleY(0.72); }
+  50% { opacity: 1; transform: scaleY(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-messages.web-flow .msg__fold-spinner,
+  .chat-messages.web-flow .msg__fold-summary--live .msg__fold-label,
+  .chat-messages.web-flow .msg--typing .typing span,
+  .chat-messages.web-flow .msg.msg--agent-turn[data-streaming='true'] .msg__text[data-text-for]::after {
+    animation: none;
+  }
 }
 
 .chat-messages.web-flow .msg__fold-content {

@@ -605,17 +605,32 @@ function appendToolProgressLines(parent: HTMLElement, tool: ToolCallInfo): void 
   parent.appendChild(progress);
 }
 
-function appendWikiIngestTaskActions(parent: HTMLElement, tool: ToolCallInfo): void {
+function createWikiIngestTaskActions(tool: ToolCallInfo): HTMLElement | null {
   const prefix = 'wiki-ingest-tool-';
-  if (tool.name !== 'wiki_plan_ingest' || tool.status !== 'running' || !tool.toolCallId.startsWith(prefix)) return;
+  if (tool.name !== 'wiki_plan_ingest' || tool.status !== 'running' || !tool.toolCallId.startsWith(prefix)) return null;
   const actions = document.createElement('div');
   actions.className = 'wiki-ingest-task__actions';
   const cancel = document.createElement('button');
   cancel.type = 'button';
+  cancel.className = 'wiki-ingest-task__cancel';
   cancel.dataset.wikiIngestCancel = tool.toolCallId.slice(prefix.length);
-  cancel.textContent = '停止整理';
+  cancel.title = '停止后台整理';
+  cancel.setAttribute('aria-label', '停止后台整理');
+  cancel.appendChild(createIcon('icon-stop', { size: 16 }));
+  const label = document.createElement('span');
+  label.textContent = '停止整理';
+  cancel.appendChild(label);
   actions.appendChild(cancel);
-  parent.appendChild(actions);
+  return actions;
+}
+
+function wrapWikiIngestTaskHeader(content: HTMLElement, tool: ToolCallInfo): HTMLElement {
+  const actions = createWikiIngestTaskActions(tool);
+  if (!actions) return content;
+  const header = document.createElement('div');
+  header.className = 'wiki-ingest-task__header';
+  header.append(content, actions);
+  return header;
 }
 
 function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
@@ -681,16 +696,15 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
     if (shotPath) {
       const contentWrap = document.createElement('div');
       contentWrap.className = 'process-timeline__tool-media';
-      contentWrap.appendChild(details);
+      contentWrap.appendChild(wrapWikiIngestTaskHeader(details, tool));
       appendToolProgressLines(contentWrap, tool);
       contentWrap.appendChild(buildInlineImage(shotPath, '页面截图', shotPath, 'tool'));
       return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
     }
     const contentWrap = document.createElement('div');
     contentWrap.className = 'process-timeline__tool';
-    contentWrap.appendChild(details);
+    contentWrap.appendChild(wrapWikiIngestTaskHeader(details, tool));
     appendToolProgressLines(contentWrap, tool);
-    appendWikiIngestTaskActions(contentWrap, tool);
     return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
   }
 
@@ -708,9 +722,8 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
   if (!initialDuration && !isActive) durSpan.remove();
   const contentWrap = document.createElement('div');
   contentWrap.className = 'process-timeline__tool';
-  contentWrap.appendChild(content);
+  contentWrap.appendChild(wrapWikiIngestTaskHeader(content, tool));
   appendToolProgressLines(contentWrap, tool);
-  appendWikiIngestTaskActions(contentWrap, tool);
   return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
 }
 
@@ -741,24 +754,47 @@ function parseWikiConfirmation(tool: ToolCallInfo): WikiConfirmationResult | nul
 
 function renderWikiConfirmationCard(value: WikiConfirmationResult): HTMLElement {
   const card = document.createElement('section');
-  card.className = 'wiki-confirmation-card';
-  const title = document.createElement('strong');
-  title.textContent = value.summary || '需要确认 Wiki 操作';
+  // Wiki confirmation is a side-channel approval. Keep it out of the message
+  // layout and reuse the same viewport-level presentation as security approval.
+  card.className = 'wiki-confirmation-card wiki-confirmation-card--popup composer-approval-panel composer-approval-panel--global';
+  card.setAttribute('aria-hidden', 'false');
+  card.setAttribute('role', 'dialog');
+  card.setAttribute('aria-modal', 'false');
+  card.setAttribute('aria-label', value.summary || '需要确认 Wiki 操作');
+
+  const head = document.createElement('div');
+  head.className = 'composer-approval-panel__head';
+  const title = document.createElement('span');
+  title.className = 'composer-approval-panel__title';
+  title.textContent = '需要你的确认';
+  const hint = document.createElement('span');
+  hint.className = 'composer-approval-panel__hint';
+  hint.textContent = '请核对 Wiki 知识库变更';
+  head.append(title, hint);
+
   const impact = document.createElement('pre');
-  impact.textContent = JSON.stringify(value.impact || {}, null, 2);
+  impact.className = 'composer-approval-panel__summary';
+  const impactText = value.impact && Object.keys(value.impact).length > 0
+    ? `影响\n${JSON.stringify(value.impact, null, 2)}`
+    : '';
+  impact.textContent = [value.summary || '需要确认 Wiki 操作', impactText]
+    .filter(Boolean)
+    .join('\n\n');
   const actions = document.createElement('div');
-  actions.className = 'wiki-confirmation-card__actions';
+  actions.className = 'composer-approval-panel__actions';
   const confirm = document.createElement('button');
   confirm.type = 'button';
+  confirm.className = 'btn btn-primary';
   confirm.dataset.wikiConfirm = value.confirmation_id || '';
   confirm.dataset.wikiAction = value.action || '';
   confirm.textContent = '确认执行';
   const cancel = document.createElement('button');
   cancel.type = 'button';
+  cancel.className = 'btn btn-danger';
   cancel.dataset.wikiCancel = value.confirmation_id || '';
   cancel.textContent = '取消';
-  actions.append(confirm, cancel);
-  card.append(title, impact, actions);
+  actions.append(cancel, confirm);
+  card.append(head, impact, actions);
   return card;
 }
 

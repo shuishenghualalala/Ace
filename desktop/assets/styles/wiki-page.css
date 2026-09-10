@@ -2626,43 +2626,70 @@
   white-space: pre-wrap;
 }
 
-.wiki-confirmation-card__actions {
-  display: flex;
-  gap: var(--mw-space-2);
+/* Wiki 确认复用安全审批浮层；覆盖旧消息卡的盒模型，避免它重新参与对话排版。 */
+.wiki-confirmation-card--popup {
+  margin: 0;
+  padding: var(--mw-space-3) var(--mw-space-4);
+  border: 0;
+  background: var(--mw-bg-surface);
 }
 
-.wiki-confirmation-card__actions button {
-  padding: var(--mw-space-1) var(--mw-space-2);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-3);
-  background: var(--mw-bg-surface);
+.wiki-confirmation-card--popup .composer-approval-panel__summary {
+  margin: 0;
   color: var(--mw-text-primary);
-  cursor: pointer;
+  font-size: calc(var(--mw-font-ui-size) - 1.5px);
+}
+
+.wiki-ingest-task__header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: var(--mw-space-3);
+}
+
+.wiki-ingest-task__header > .process-timeline__details,
+.wiki-ingest-task__header > .process-timeline__content {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .wiki-ingest-task__actions {
   display: flex;
-  margin-top: 8px;
+  flex: 0 0 auto;
+  align-items: center;
+  padding-top: 2px;
 }
 
 .wiki-ingest-task__actions button {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  gap: var(--mw-space-1);
+  padding: 3px 8px;
   border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-3);
+  border-radius: var(--mw-radius-full);
   background: transparent;
   color: var(--mw-text-secondary);
   cursor: pointer;
-  padding: 4px 9px;
   font: inherit;
+  font-size: var(--mw-type-caption-size);
+  white-space: nowrap;
+  transition: var(--mw-transition-interactive);
 }
 
 .wiki-ingest-task__actions button:hover:not(:disabled) {
-  color: var(--mw-text-primary);
-  border-color: var(--mw-border-strong);
+  border-color: color-mix(in srgb, var(--mw-status-danger) 45%, var(--mw-border-subtle));
+  background: var(--mw-status-danger-bg);
+  color: var(--mw-status-danger);
 }
 
 .wiki-ingest-task__actions button:disabled {
   cursor: default;
   opacity: 0.5;
+}
+
+.wiki-ingest-task__actions .mw-icon {
+  flex: 0 0 auto;
 }
 
 .wiki-ingest-result-card p {

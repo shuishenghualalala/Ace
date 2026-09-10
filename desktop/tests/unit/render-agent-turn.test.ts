@@ -592,7 +592,7 @@ describe('renderAgentTurn', () => {
       makeMessages({
         thinking: undefined,
         toolCalls: [{
-          toolCallId: 'wiki-1',
+          toolCallId: 'wiki-ingest-tool-wiki-1',
           name: 'wiki_plan_ingest',
           args: '{}',
           status: 'running',
@@ -606,6 +606,9 @@ describe('renderAgentTurn', () => {
     const lines = Array.from(root.querySelectorAll('.process-timeline__stage')).map((node) => node.textContent);
     expect(lines).toEqual(['读取文档…', '正在通读素材（1/2 段）…', '正在通读素材（2/2 段）…']);
     expect(root.querySelector('.process-timeline__title')?.textContent).not.toContain('正在通读素材');
+    const header = root.querySelector('.wiki-ingest-task__header');
+    expect(header?.querySelector('[data-wiki-ingest-cancel="wiki-1"]')).not.toBeNull();
+    expect(header?.nextElementSibling?.classList.contains('process-timeline__progress')).toBe(true);
   });
 
   it('run_agent 渲染 subagent 专用卡片：中文标题 + 任务描述 + 执行摘要', () => {
@@ -1321,7 +1324,7 @@ describe('renderAgentTurn', () => {
     expect(card.textContent).not.toContain('再显示');
   });
 
-  it('Wiki 工具的一次性确认结果渲染为消息流确认卡', () => {
+  it('Wiki 工具的一次性确认结果渲染为审批式浮层', () => {
     const root = renderAgentTurn(makeMessages({
       thinking: undefined,
       toolCalls: [{
@@ -1338,7 +1341,12 @@ describe('renderAgentTurn', () => {
       }],
     }), { isStreaming: false, userPinnedOpen: null, turnDurationMs: 1000 });
 
-    expect(root.querySelector('.wiki-confirmation-card')?.textContent).toContain('删除 2 个页面');
+    const card = root.querySelector('.wiki-confirmation-card');
+    expect(card?.textContent).toContain('删除 2 个页面');
+    expect(card?.classList.contains('wiki-confirmation-card--popup')).toBe(true);
+    expect(card?.classList.contains('composer-approval-panel--global')).toBe(true);
+    expect(card?.getAttribute('role')).toBe('dialog');
+    expect(card?.getAttribute('aria-hidden')).toBe('false');
     expect(root.querySelector('[data-wiki-confirm="wcf_123"]')).not.toBeNull();
     expect(root.querySelector('[data-wiki-cancel="wcf_123"]')).not.toBeNull();
   });

@@ -1201,6 +1201,7 @@ export function initWikiAgent(): void {
     const cancelIngest = target.closest<HTMLButtonElement>('[data-wiki-ingest-cancel]');
     if (cancelIngest?.dataset.wikiIngestCancel) {
       event.preventDefault();
+      event.stopPropagation();
       cancelIngest.disabled = true;
       void backendApi.cancelTask(cancelIngest.dataset.wikiIngestCancel)
         .then(() => notify('已停止 Wiki 深度整理'))
@@ -1213,14 +1214,22 @@ export function initWikiAgent(): void {
     const confirm = target.closest<HTMLElement>('[data-wiki-confirm]');
     if (confirm?.dataset.wikiConfirm) {
       event.preventDefault();
+      event.stopPropagation();
+      const popup = confirm.closest<HTMLElement>('.wiki-confirmation-card');
+      popup?.setAttribute('aria-hidden', 'true');
+      popup?.querySelectorAll<HTMLButtonElement>('button').forEach((button) => { button.disabled = true; });
       void sendEmbeddedPrompt(`我确认执行 ${confirm.dataset.wikiAction || 'Wiki 操作'}。`, confirm.dataset.wikiConfirm);
       return;
     }
     const cancel = target.closest<HTMLElement>('[data-wiki-cancel]');
     if (cancel?.dataset.wikiCancel) {
       event.preventDefault();
+      event.stopPropagation();
       const panel = embeddedByKb.get(activeEmbeddedKbId);
       if (!panel) return;
+      const popup = cancel.closest<HTMLElement>('.wiki-confirmation-card');
+      popup?.setAttribute('aria-hidden', 'true');
+      popup?.querySelectorAll<HTMLButtonElement>('button').forEach((button) => { button.disabled = true; });
       void backendApi.wikiCancelConfirmation(cancel.dataset.wikiCancel, panel.sessionId)
         .then(() => sendEmbeddedPrompt('已取消该 Wiki 操作。'))
         .catch((err) => notify(`取消失败：${(err as Error).message}`));
