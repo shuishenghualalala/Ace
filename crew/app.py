@@ -95,6 +95,7 @@ from crew.team.feature import (
     _run_team_execution_driver,
     build_team_feature,
 )
+from crew.dynamickanban.feature import DYNAMIC_KANBAN_SERVICE_KEY
 from crew.tools.policy import (
     ToolDisclosureMode,
     exclude_toolsets,
@@ -435,8 +436,11 @@ class CrewApp:
     _UNSET_KNOWLEDGE_SERVICE = object()
     _UNSET_CHANNEL_MANAGER = object()
     _UNSET_DELIVERY_ROUTER = object()
+    _UNSET_DYNAMIC_KANBAN = object()
+    _UNSET_DYNAMIC_KANBAN_CONSUMER = object()
     _KNOWLEDGE_SERVICE_KEY = ServiceKey[Any]("knowledge")
     _CHANNELS_SERVICE_KEY = ServiceKey[Any]("channels")
+    _DYNAMIC_KANBAN_SERVICE_KEY = DYNAMIC_KANBAN_SERVICE_KEY
 
     def __init__(
         self,
@@ -642,9 +646,10 @@ class CrewApp:
         self._knowledge_service_override = self._UNSET_KNOWLEDGE_SERVICE
         # Team 管理器由 product.team Feature Generation 拥有；此处仅保留测试注入用的覆盖位。
         self._team_override: Any | None = None
-        # Dynamic Kanban 管理器延迟装配（见 build_app）
-        self.dynamic_kanban = None
-        self.dynamic_kanban_consumer = None
+        # Dynamic Kanban 管理器与 Consumer 由 product.dynamic-kanban Feature
+        # Generation 拥有；此处仅保留测试注入用的覆盖位。
+        self._dynamic_kanban_override: Any = self._UNSET_DYNAMIC_KANBAN
+        self._dynamic_kanban_consumer_override: Any = self._UNSET_DYNAMIC_KANBAN_CONSUMER
         # Work 业务域组合服务（由 build_app 装配；不进入 core）。
         self.work_service = None
         self.channel_bindings = None
@@ -770,6 +775,62 @@ class CrewApp:
 
         team = self.team
         return team if isinstance(team, InProcessTeamManager) else None
+
+    def _active_dynamic_kanban_manager(self) -> Any:
+        """Return the current DynamicKanbanManager if it owns the active Generation."""
+        from crew.dynamickanban.manager import DynamicKanbanManager
+
+        manager = self.dynamic_kanban
+        return manager if isinstance(manager, DynamicKanbanManager) else None
+
+    def _sync_default_provider_to_features(self) -> None:
+        """把新默认 Provider 同步到当前 active Team/Dynamic Kanban Generation。"""
+        team = self._active_team_manager()
+        if team is not None:
+            set_provider = getattr(team, "set_provider", None)
+            if callable(set_provider):
+                set_provider(self.provider)
+        dk = self._active_dynamic_kanban_manager()
+        if dk is not None:
+            dk.set_provider(self.provider)
+            dk.clear()
+
+    def _resolve_dynamic_kanban_service_attr(self, name: str) -> Any:
+        """Resolve one attribute from the active Dynamic Kanban Service, or None."""
+        runtime = self.plugins.feature_runtime
+        record = runtime.get("product.dynamic-kanban")
+        if record is not None and record.state is not FeatureState.ACTIVE:
+            return None
+        service = runtime.services.get(self._DYNAMIC_KANBAN_SERVICE_KEY)
+        if service is None:
+            return None
+        return getattr(service, name, None)
+
+    @property
+    def dynamic_kanban(self) -> Any:
+        """Return the explicitly injected DK manager or the active Generation Service manager."""
+        override = self._dynamic_kanban_override
+        if override is not self._UNSET_DYNAMIC_KANBAN:
+            return override
+        return self._resolve_dynamic_kanban_service_attr("manager")
+
+    @dynamic_kanban.setter
+    def dynamic_kanban(self, manager: Any) -> None:
+        """Inject a Dynamic Kanban manager explicitly for tests or an embedding host."""
+        self._dynamic_kanban_override = manager
+
+    @property
+    def dynamic_kanban_consumer(self) -> Any:
+        """Return the explicitly injected DK consumer or the active Generation Service consumer."""
+        override = self._dynamic_kanban_consumer_override
+        if override is not self._UNSET_DYNAMIC_KANBAN_CONSUMER:
+            return override
+        return self._resolve_dynamic_kanban_service_attr("consumer")
+
+    @dynamic_kanban_consumer.setter
+    def dynamic_kanban_consumer(self, consumer: Any) -> None:
+        """Inject a Dynamic Kanban consumer explicitly for tests or an embedding host."""
+        self._dynamic_kanban_consumer_override = consumer
 
     def acquire_external_services(self):
         """Open a same-generation external Catalog/Delegation lease."""
@@ -2005,18 +2066,13 @@ class CrewApp:
         self.team = team
 
     def set_dynamic_kanban_manager(self, manager) -> None:
+        """注入一个显式 Dynamic Kanban manager（主要用于测试）。
+
+        生产环境由 product.dynamic-kanban Feature 注册 mode=dynamic_kanban 的 Driver，
+        此处不再重复注册 driver-adapter。
+        """
         if self.dynamic_kanban is not None:
             raise RuntimeError("dynamic kanban manager is already configured")
-        if not callable(getattr(manager, "bind_feature_scope", None)):
-            self._register_execution_driver_scope(
-                "product.dynamic-kanban-driver-adapter",
-                ExecutionDriver(
-                    mode="dynamic_kanban",
-                    execute=self._run_dynamic_kanban_execution_driver,
-                    capabilities=("dynamic-kanban.execute",),
-                    description="Dynamic Kanban workflow execution",
-                ),
-            )
         self.dynamic_kanban = manager
 
     def set_push(
@@ -2101,13 +2157,15 @@ class CrewApp:
                     return True
             except Exception:  # noqa: BLE001
                 log.exception("steer 失败 session=%s", session_id)
-        team_fn = getattr(self.team, "steer", None)
+        team = self._active_team_manager()
+        team_fn = getattr(team, "steer", None)
         if callable(team_fn):
             try:
                 return bool(team_fn(session_id, text, owner_account_id=owner_account_id))
             except Exception:  # noqa: BLE001
                 log.exception("team steer 失败 session=%s", session_id)
-        dk_fn = getattr(self.dynamic_kanban, "steer", None)
+        dk = self._active_dynamic_kanban_manager()
+        dk_fn = getattr(dk, "steer", None)
         if callable(dk_fn):
             try:
                 return bool(dk_fn(session_id, text, owner_account_id=owner_account_id))
@@ -2132,13 +2190,15 @@ class CrewApp:
                 interrupted = True
             except Exception:  # noqa: BLE001
                 log.exception("interrupt 失败 session=%s", session_id)
-        team_fn = getattr(self.team, "interrupt", None)
+        team = self._active_team_manager()
+        team_fn = getattr(team, "interrupt", None)
         if callable(team_fn):
             try:
                 interrupted = bool(team_fn(session_id, message, owner_account_id=owner_account_id)) or interrupted
             except Exception:  # noqa: BLE001
                 log.exception("team interrupt 失败 session=%s", session_id)
-        dk_fn = getattr(self.dynamic_kanban, "interrupt", None)
+        dk = self._active_dynamic_kanban_manager()
+        dk_fn = getattr(dk, "interrupt", None)
         if callable(dk_fn):
             try:
                 # DK store 的查询要求 owner scope；不传 owner 会在 _require_owner 抛
@@ -2273,7 +2333,8 @@ class CrewApp:
         """Snapshot tasks that may still hold the current App-owned Provider."""
         tasks = self.dispatcher.active_tasks_snapshot()
         tasks.update(task for task in self._subagent_bg_tasks if not task.done())
-        team_snapshot = getattr(self.team, "active_tasks_snapshot", None)
+        team = self._active_team_manager()
+        team_snapshot = getattr(team, "active_tasks_snapshot", None)
         if callable(team_snapshot):
             tasks.update(task for task in team_snapshot() if not task.done())
         try:
@@ -2714,6 +2775,7 @@ class CrewApp:
     def _invalidate_owner_team_provider(self, owner_account_id: str) -> None:
         owner = str(owner_account_id or "").strip()
         manager = self._active_team_manager()
+        dk = self._active_dynamic_kanban_manager()
         if owner:
             provider = self._owner_team_providers.pop(owner, None)
             if provider is not None and provider is not self.provider:
@@ -2724,9 +2786,8 @@ class CrewApp:
                     self._stale_owner_team_providers[id(provider)] = provider
             if manager is not None:
                 manager.invalidate_owner_provider(owner)
-            drop_kanban = getattr(self.dynamic_kanban, "drop_owner_provider_state", None)
-            if callable(drop_kanban):
-                drop_kanban(owner)
+            if dk is not None:
+                dk.drop_owner_provider_state(owner)
             return
 
         providers = list({
@@ -2743,9 +2804,8 @@ class CrewApp:
                 self._stale_owner_team_providers[id(provider)] = provider
         if manager is not None:
             manager.invalidate_owner_provider("")
-        clear_kanban = getattr(self.dynamic_kanban, "clear_provider_state", None)
-        if callable(clear_kanban):
-            clear_kanban()
+        if dk is not None:
+            dk.clear_provider_state()
 
     @asynccontextmanager
     async def owner_provider(
@@ -2822,13 +2882,7 @@ class CrewApp:
             self.provider = build_provider(self.config)
             self.agents.clear()
             self._invalidate_owner_team_provider(owner_account_id="")
-
-            if self.team is not None:
-                self.team.set_provider(self.provider)
-            if self.dynamic_kanban is not None:
-                self.dynamic_kanban.provider = self.provider
-                if hasattr(self.dynamic_kanban, "clear"):
-                    self.dynamic_kanban.clear()
+            self._sync_default_provider_to_features()
             if old_provider is not self.provider:
                 self._schedule_provider_retirement(old_provider)
         log.info("设置默认模型: %s model=%s base_url=%s", profile.id, profile.model, profile.base_url or "默认")
@@ -3074,12 +3128,7 @@ class CrewApp:
             cfg.activate_model(model_id)
             old_provider = self.provider
             self.provider = build_provider(cfg)
-            if self.team is not None:
-                self.team.set_provider(self.provider)
-            if self.dynamic_kanban is not None:
-                self.dynamic_kanban.provider = self.provider
-                if hasattr(self.dynamic_kanban, "clear"):
-                    self.dynamic_kanban.clear()
+            self._sync_default_provider_to_features()
             if old_provider is not self.provider:
                 self._schedule_provider_retirement(old_provider)
         log.info("更新模型 profile: %s (model=%s)", profile.id, profile.model)
@@ -3139,14 +3188,7 @@ class CrewApp:
                 self.provider = build_provider(cfg)
                 self.agents.clear()
                 self._invalidate_owner_team_provider()
-                if self.team is not None:
-                    set_team_provider = getattr(self.team, "set_provider", None)
-                    if callable(set_team_provider):
-                        set_team_provider(self.provider)
-                if self.dynamic_kanban is not None:
-                    self.dynamic_kanban.provider = self.provider
-                    if hasattr(self.dynamic_kanban, "clear"):
-                        self.dynamic_kanban.clear()
+                self._sync_default_provider_to_features()
                 if old_provider is not self.provider:
                     self._schedule_provider_retirement(old_provider)
         elif owner:
@@ -3350,19 +3392,6 @@ class CrewApp:
         if not refs:
             return None
         return ContextContribution(params={"referenced_paths": refs})
-
-    async def _run_dynamic_kanban_execution_driver(
-        self,
-        envelope: Envelope,
-    ) -> AsyncIterator[ResponseChunk]:
-        if self.dynamic_kanban is None:
-            yield ResponseChunk.error(
-                envelope.request_id,
-                "Dynamic Kanban 模式未启用",
-            )
-            return
-        async for chunk in self.dynamic_kanban.interact(envelope):
-            yield chunk
 
     async def handle(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
         """统一入口：完成公共前处理后解析可插拔执行 Driver。"""

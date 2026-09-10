@@ -599,14 +599,23 @@ def test_app_interrupt_passes_owner_scope_to_dynamic_kanban() -> None:
 
     早先这里断言 inspect.getsource 的字面子串——那是测排版不是测行为：把调用换成
     self.team 之类的真 bug 会照常绿，而 black 折行、局部变量改名却会假红。
+
+    4C-3 后 app.dynamic_kanban 改为 compat property，只把真正的
+    DynamicKanbanManager 实例视为 active manager；测试通过继承该类型并保持
+    行为录制能力来验证透传语义。
     """
     from types import SimpleNamespace
 
     from crew.app import CrewApp
+    from crew.dynamickanban.manager import DynamicKanbanManager
 
     seen: list[tuple[str, str | None, str]] = []
 
-    class _RecordingKanban:
+    class _RecordingKanban(DynamicKanbanManager):
+        def __init__(self) -> None:
+            # 跳过父类完整构造；本测试只验证 App 层透传，不需要真实 store/registry。
+            pass
+
         def interrupt(self, session_id, message=None, owner_account_id=""):
             seen.append((session_id, message, owner_account_id))
             return True
