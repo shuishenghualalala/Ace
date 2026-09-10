@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -18,7 +19,8 @@ from pathlib import Path
 from typing import Optional
 
 from crew.state.home import load_soul_md, load_memory_md, load_user_md
-from crew.agent.skills import build_skills_index_prompt, build_optional_skills_index_prompt
+from crew.agent.skills import abuild_skills_index_prompt, abuild_optional_skills_index_prompt
+from crew.tools.process_registry import current_shell_kind
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +137,26 @@ def build_context_files_prompt(cwd: str | None = None) -> str:
 # 静态/动态分离 System Prompt 构建
 # ---------------------------------------------------------------------------
 
-def build_prompt_parts(
+def _shell_facts_block() -> str:
+    """当前 shell 环境事实：与 spawn_local 实际执行 shell 保持同源。
+
+    只注入环境事实而非教学长文，避免模型照搬 skill 里的 bash 语法在
+    PowerShell 上触发 ParserError。lightweight 子 agent 同样注入。
+    """
+    if current_shell_kind() == "powershell":
+        return (
+            "- 内置 terminal 由 PowerShell 执行（pwsh/powershell -NoProfile）："
+            "禁止 `VAR=val && cmd` 之类 bash 语法，环境变量用 `$env:VAR = \"...\"` 单独语句；"
+            "`&&`/`||` 仅 PowerShell 7+ 可用，5.1 用 `;` 连接命令；"
+            "路径用反斜杠/正斜杠均可，但含空格必须加引号；"
+            "控制台默认代码页非 UTF-8，若输出乱码先执行 "
+            "`[Console]::OutputEncoding = [System.Text.Encoding]::UTF8` "
+            "或设置 `$env:PYTHONIOENCODING=\"utf-8\"`。"
+        )
+    return "- 内置 terminal 由 bash 执行，使用 POSIX 语法。"
+
+
+async def build_prompt_parts(
     workspace_instructions: str = "",
     memory_text: str = "",
     cwd: str | None = None,
@@ -155,11 +176,13 @@ def build_prompt_parts(
       - user_reminder: 项目文件 + workspace + skills + 记忆 + 用户画像 + 会话记忆 + 日期
                        （每轮可能变，通过 <system-reminder> 注入 user 消息）
 
+    async：磁盘读取（profile/SOUL/上下文文件/记忆/用户画像）经 asyncio.to_thread
+    移出事件循环；skills 索引走 SkillIndex 的 async 访问器，命中时纯内存。
     """
     # ── System Static 层（几乎不变） ──
     static_parts: list[str] = []
     if profile_path:
-        profile_content = _load_profile(profile_path)
+        profile_content = await asyncio.to_thread(_load_profile, profile_path)
         if profile_content:
             static_parts.append(profile_content)
 
@@ -172,7 +195,7 @@ def build_prompt_parts(
             static_parts.append(DEFAULT_OUTPUT_STYLE)
         else:
             t = time.perf_counter()
-            soul = load_soul_md()
+            soul = await asyncio.to_thread(load_soul_md)
             logger.debug("[PERF] load_soul_md       %.3fs", time.perf_counter() - t)
             if soul:
                 static_parts.append(soul)
@@ -201,7 +224,8 @@ def build_prompt_parts(
             "- 列目录、查找和读取文件时优先使用 glob、grep、file_read；这些工具与 terminal "
             "服从同一文件策略。用户拒绝任一安全审批后，必须立即停止本轮操作，不得换用其他工具重试。\n"
             "- runtime_crashed、runtime_protocol_mismatch 和 sandbox_unavailable 表示安全运行时故障，"
-            "不表示目标路径在沙箱外；不得据此改用其他文件工具。"
+            "不表示目标路径在沙箱外；不得据此改用其他文件工具。\n"
+            f"{_shell_facts_block()}"
         )
     # 子 agent（lightweight）：跳过全局 workspace/上下文文件/skills/记忆/用户画像注入，
     # 只保留日期，保持聚焦（用于 skip_memory / skip_context_files）。
@@ -209,18 +233,18 @@ def build_prompt_parts(
         if workspace_instructions.strip():
             reminder_parts.append(f"# 项目提示词\n{workspace_instructions.strip()}")
         t = time.perf_counter()
-        context_files = build_context_files_prompt(cwd)
+        context_files = await asyncio.to_thread(build_context_files_prompt, cwd)
         logger.debug("[PERF] context_files      %.3fs", time.perf_counter() - t)
         if context_files:
             reminder_parts.append(context_files)
         try:
             t = time.perf_counter()
-            skills_index = build_skills_index_prompt(
+            skills_index = await abuild_skills_index_prompt(
                 enabled=enabled_skills,
                 disabled=disabled_skills,
             )
             if include_optional_skills:
-                optional_index = build_optional_skills_index_prompt(
+                optional_index = await abuild_optional_skills_index_prompt(
                     enabled=enabled_skills,
                     disabled=disabled_skills,
                 )
@@ -233,12 +257,12 @@ def build_prompt_parts(
             pass  # skills 索引不影响主流程
 
         t = time.perf_counter()
-        memory_md = load_memory_md()
+        memory_md = await asyncio.to_thread(load_memory_md)
         logger.debug("[PERF] load_memory_md     %.3fs", time.perf_counter() - t)
         if memory_md:
             reminder_parts.append(f"# 持久记忆\n{memory_md}")
         t = time.perf_counter()
-        user_md = load_user_md()
+        user_md = await asyncio.to_thread(load_user_md)
         logger.debug("[PERF] load_user_md       %.3fs", time.perf_counter() - t)
         if user_md:
             reminder_parts.append(f"# 用户画像\n{user_md}")
@@ -248,7 +272,7 @@ def build_prompt_parts(
     # 对照 delegate_task 的 skills 参数——只放开 skills，不放开 workspace/记忆/用户画像。
     if lightweight and inject_skills:
         try:
-            skills_index = build_skills_index_prompt(
+            skills_index = await abuild_skills_index_prompt(
                 enabled=enabled_skills,
                 disabled=disabled_skills,
             )
@@ -269,7 +293,7 @@ def build_prompt_parts(
 # 向后兼容：旧版调用方式
 # ---------------------------------------------------------------------------
 
-def build_system_prompt_parts(
+async def build_system_prompt_parts(
     workspace_instructions: str = "",
     memory_text: str = "",
     cwd: str | None = None,
@@ -283,7 +307,7 @@ def build_system_prompt_parts(
     .. deprecated::
         请使用 :func:`build_prompt_parts` 代替。
     """
-    parts = build_prompt_parts(
+    parts = await build_prompt_parts(
         workspace_instructions=workspace_instructions,
         memory_text=memory_text,
         cwd=cwd,
@@ -300,7 +324,7 @@ def build_system_prompt_parts(
     }
 
 
-def build_system_prompt(
+async def build_system_prompt(
     base: str = "",
     memory_text: str = "",
     workspace_instructions: str = "",
@@ -314,7 +338,7 @@ def build_system_prompt(
 
     base 参数保留但不再作为主身份——身份由 SOUL.md 或 DEFAULT_AGENT_IDENTITY 决定。
     """
-    parts = build_prompt_parts(
+    parts = await build_prompt_parts(
         workspace_instructions=workspace_instructions,
         memory_text=memory_text,
         cwd=cwd,

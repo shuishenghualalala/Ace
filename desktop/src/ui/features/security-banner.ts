@@ -32,6 +32,12 @@ type SecuritySetupResult = { ok: boolean; exitCode: number | null; detail?: stri
 
 type BannerState = 'on' | 'off' | 'enabling' | 'failed' | 'missing' | 'stale' | 'hidden' | 'net-missing' | 'mac-incomplete' | 'restart-required';
 
+/**
+ * 安全能力当前整体下线，banner 全量屏蔽：不渲染、不拉 capabilities、不起周期刷新。
+ * 状态推导与安装流程保留，恢复时改回 true 即可。
+ */
+export const SECURITY_BANNER_ENABLED = false;
+
 const BANNER_ID = 'security-sandbox-banner';
 const SEED_RETRY_MS = 5000;        // 失败后至少间隔 5s 再重试，避免每帧打 gateway
 const REFRESH_INTERVAL_MS = 20000; // 周期刷新：覆盖 gateway 晚于桌面启动 / 沙箱状态变化
@@ -65,6 +71,7 @@ export function deriveState(c: SecurityCapabilities): BannerState {
 
 /** 拉取 capabilities 并重渲。网关不可达时不打扰（backend-status-guard 已有全屏提示）。 */
 export async function refreshSecurityBanner(): Promise<void> {
+  if (!SECURITY_BANNER_ENABLED) return;
   seeding = true;
   lastSeedAttempt = Date.now();
   try {
@@ -97,6 +104,7 @@ export async function refreshSecurityBanner(): Promise<void> {
 
 /** 启动 20s 周期刷新（幂等）；pagehide 时停掉，避免 renderer 卸载后继续触发。 */
 export function startSecurityBannerRefresh(): void {
+  if (!SECURITY_BANNER_ENABLED) return;
   if (refreshIntervalId != null) return;
   refreshIntervalId = window.setInterval(() => {
     void refreshSecurityBanner();
@@ -117,6 +125,10 @@ export function stopSecurityBannerRefresh(): void {
  * 周期刷新由 startSecurityBannerRefresh 维持，覆盖 gateway 晚于桌面启动等场景。
  */
 export function renderSecurityBanner(): void {
+  if (!SECURITY_BANNER_ENABLED) {
+    document.getElementById(BANNER_ID)?.remove();
+    return;
+  }
   const container = document.querySelector('.chat-composer');
   if (!container) return;
   const banner = ensureBanner(container);

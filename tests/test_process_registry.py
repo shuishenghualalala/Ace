@@ -272,5 +272,19 @@ def test_process_tool_handler_is_owner_scoped():
         current_owner_account_id.reset(token)
 
 
+def test_current_shell_kind_matches_host_platform(monkeypatch):
+    """两种平台取值：nt → powershell 家族，其余 → bash。"""
+    import crew.tools.process_registry as pr
+
+    monkeypatch.setattr(pr, "_IS_WINDOWS", True)
+    assert pr.current_shell_kind() == "powershell"
+    monkeypatch.setattr(pr, "_IS_WINDOWS", False)
+    assert pr.current_shell_kind() == "bash"
+    # 与宿主真实平台一致（spawn_local 同源判断）
+    monkeypatch.undo()
+    expected = "powershell" if os.name == "nt" else "bash"
+    assert pr.current_shell_kind() == expected
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

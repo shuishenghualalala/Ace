@@ -53,8 +53,9 @@ async def test_cron_run_now_background_task_strong_ref_drains(crew_env, auth_hea
     assert resp.status_code == 200
 
     # 后台任务被强引用持有过（至少一度进入集合），且最终排空（done_callback discard）
-    # 给事件循环几轮迭代让 _kick 跑完。
-    for _ in range(50):
+    # 后台 tick 会跑完整 agent turn（含 skills mtime 扫描，Windows 上约秒级），
+    # 轮询上限放宽到 10s，完成即提前退出。
+    for _ in range(1000):
         await asyncio.sleep(0.01)
         if not cron_mod._background_tasks:
             break

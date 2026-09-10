@@ -247,11 +247,9 @@ def skills_dir(tmp_path, monkeypatch):
     monkeypatch.setattr("crew.agent.skills.get_builtin_skills_dir", lambda: builtin_dir)
     monkeypatch.setattr("crew.agent.skills.get_user_skills_dir", lambda: user_dir)
 
-    # 清除缓存
+    # 清除缓存（含 mtime TTL 缓存）
     import crew.agent.skills as skills_mod
-    skills_mod._cache = {}
-    skills_mod._cache_key = ()
-    skills_mod._skills_index_cache.clear()
+    skills_mod._invalidate_cache()
 
     yield tmp_path
 
@@ -264,8 +262,13 @@ def test_scan_finds_builtin_and_user_skills(skills_dir):
     assert result["/custom"]["featured"] is False
 
 
-def test_get_skills_refreshes_when_skill_md_changes(skills_dir):
+def test_get_skills_refreshes_when_skill_md_changes(skills_dir, monkeypatch):
     from crew.agent.skills import get_skills
+
+    # 外部文件变更在 stat 回退通道有 _MTIME_KEY_TTL_S 短 TTL；本用例关闭 TTL 验证刷新
+    _force_stat_fallback(monkeypatch)
+    import crew.agent.skills as skills_mod
+    monkeypatch.setattr(skills_mod, "_MTIME_KEY_TTL_S", 0.0)
 
     initial = get_skills()
     assert initial["/greet"]["description"] == "问候技能"
@@ -1080,7 +1083,6 @@ def test_builtin_skills_are_generic_only():
         "pdf/SKILL.md",
         "process-doc/SKILL.md",
         "scientific-problem-selection/SKILL.md",
-        "seaborn-visualization/SKILL.md",
         "skill-creator/SKILL.md",
         "video-understanding/SKILL.md",
         "webapp-building/SKILL.md",
@@ -1096,7 +1098,7 @@ def test_builtin_skills_are_generic_only():
         assert body.strip(), f"{relative_path} 正文为空"
 
 
-def test_bundled_core_skills_can_be_viewed():
+async def test_bundled_core_skills_can_be_viewed():
     import json
 
     from crew.tools.skills_tools import handle_skill_view
@@ -1106,7 +1108,7 @@ def test_bundled_core_skills_can_be_viewed():
     assert "/crew-wiki-curator" in skills
     assert "/cua-driver" in skills
 
-    guide = json.loads(handle_skill_view({
+    guide = json.loads(await handle_skill_view({
         "name": "crew-guide",
         "file_path": "references/install-skill.md",
     }))
@@ -1114,12 +1116,12 @@ def test_bundled_core_skills_can_be_viewed():
     assert guide["name"] == "crew-guide"
     assert "CREW_HOME/skills/" in guide["content"]
 
-    curator = json.loads(handle_skill_view({"name": "crew-wiki-curator"}))
+    curator = json.loads(await handle_skill_view({"name": "crew-wiki-curator"}))
     assert curator["success"] is True
     assert curator["name"] == "crew-wiki-curator"
     assert "wiki.ingest.auto_apply=true" in curator["content"]
 
-    cua = json.loads(handle_skill_view({
+    cua = json.loads(await handle_skill_view({
         "name": "cua-driver",
         "file_path": "references/setup.md",
     }))
@@ -1200,12 +1202,12 @@ def test_resolve_skill_any_not_found(mismatch_env):
 # ── handle_skill_view 委托测试 ─────────────────────────────────────────────
 
 
-def test_handle_skill_view_by_frontmatter_name(mismatch_env):
+async def test_handle_skill_view_by_frontmatter_name(mismatch_env):
     """传 frontmatter name（目录名≠name）时成功返回 content 和 skill_dir。"""
     import json
     from crew.tools.skills_tools import handle_skill_view
 
-    result = json.loads(handle_skill_view({"name": "presentation-template-assistant"}))
+    result = json.loads(await handle_skill_view({"name": "presentation-template-assistant"}))
     assert result["success"] is True
     assert result["name"] == "presentation-template-assistant"
     assert "skill_dir" in result
@@ -1213,26 +1215,26 @@ def test_handle_skill_view_by_frontmatter_name(mismatch_env):
     assert "PPT 技能正文" in result["content"]
 
 
-def test_handle_skill_view_not_found_shows_available(mismatch_env):
+async def test_handle_skill_view_not_found_shows_available(mismatch_env):
     """找不到技能时报错且错误信息包含可用技能名列表。"""
     from crew.core.errors import ToolError
     from crew.tools.skills_tools import handle_skill_view
 
     with pytest.raises(ToolError) as exc_info:
-        handle_skill_view({"name": "totally-nonexistent"})
+        await handle_skill_view({"name": "totally-nonexistent"})
     msg = str(exc_info.value)
     assert "未找到技能" in msg
     # 错误信息里应包含可用技能（presentation-template-assistant）
     assert "presentation-template-assistant" in msg
 
 
-def test_handle_skill_view_path_traversal_blocked(mismatch_env):
+async def test_handle_skill_view_path_traversal_blocked(mismatch_env):
     """file_path 含 .. 路径穿越时被拒绝。"""
     from crew.core.errors import ToolError
     from crew.tools.skills_tools import handle_skill_view
 
     with pytest.raises(ToolError) as exc_info:
-        handle_skill_view({
+        await handle_skill_view({
             "name": "presentation-template-assistant",
             "file_path": "../../etc/passwd",
         })
@@ -1240,7 +1242,7 @@ def test_handle_skill_view_path_traversal_blocked(mismatch_env):
     assert "越权" in msg or "不存在" in msg
 
 
-def test_handle_skill_view_rejects_file_symlink_outside_skill(mismatch_env, tmp_path):
+async def test_handle_skill_view_rejects_file_symlink_outside_skill(mismatch_env, tmp_path):
     """指定文件读取必须校验最终 resolved target，而不只检查 ``..``。"""
     from crew.core.errors import ToolError
     from crew.tools.skills_tools import handle_skill_view
@@ -1250,14 +1252,14 @@ def test_handle_skill_view_rejects_file_symlink_outside_skill(mismatch_env, tmp_
     _symlink_or_skip(outside, mismatch_env["skill_dir"] / "leak.txt")
 
     with pytest.raises(ToolError) as exc_info:
-        handle_skill_view({
+        await handle_skill_view({
             "name": "presentation-template-assistant",
             "file_path": "leak.txt",
         })
     assert "越权" in str(exc_info.value)
 
 
-def test_handle_skill_view_allows_file_symlink_within_skill(mismatch_env):
+async def test_handle_skill_view_allows_file_symlink_within_skill(mismatch_env):
     """安全底线不提前决定禁链政策：最终目标仍在当前 Skill 根内时可读取。"""
     import json
 
@@ -1267,7 +1269,7 @@ def test_handle_skill_view_allows_file_symlink_within_skill(mismatch_env):
     target.write_text("internal note", encoding="utf-8")
     _symlink_or_skip(target, mismatch_env["skill_dir"] / "notes-link.txt")
 
-    result = json.loads(handle_skill_view({
+    result = json.loads(await handle_skill_view({
         "name": "presentation-template-assistant",
         "file_path": "notes-link.txt",
     }))
@@ -1312,7 +1314,7 @@ async def test_repair_skills_never_reads_or_writes_external_symlink(tmp_path, mo
     assert outside.read_text(encoding="utf-8") == original
 
 
-def test_handle_skills_list_respects_current_scope(mismatch_env):
+async def test_handle_skills_list_respects_current_scope(mismatch_env):
     """skills_list 应返回当前任务上下文允许的技能，而非全量。"""
     import json
     from crew.core.runctx import current_skill_scope
@@ -1320,7 +1322,7 @@ def test_handle_skills_list_respects_current_scope(mismatch_env):
 
     token = current_skill_scope.set((["presentation-template-assistant"], []))
     try:
-        result = json.loads(handle_skills_list({}))
+        result = json.loads(await handle_skills_list({}))
         slugs = {s["slug"] for s in result["skills"]}
         assert "presentation-template-assistant" in slugs
         # ppt-mismatch 不在本环境（mismatch_env 只创建 presentation-template-assistant），
@@ -1330,7 +1332,7 @@ def test_handle_skills_list_respects_current_scope(mismatch_env):
         current_skill_scope.reset(token)
 
 
-def test_handle_skill_view_respects_current_scope(mismatch_env):
+async def test_handle_skill_view_respects_current_scope(mismatch_env):
     """skill_view 应拒绝当前任务上下文未启用的技能。"""
     from crew.core.errors import ToolError
     from crew.core.runctx import current_skill_scope
@@ -1339,7 +1341,7 @@ def test_handle_skill_view_respects_current_scope(mismatch_env):
     token = current_skill_scope.set((["ppt-mismatch"], []))
     try:
         with pytest.raises(ToolError) as exc_info:
-            handle_skill_view({"name": "presentation-template-assistant"})
+            await handle_skill_view({"name": "presentation-template-assistant"})
         assert "在当前任务上下文中不可用" in str(exc_info.value)
     finally:
         current_skill_scope.reset(token)
@@ -1524,46 +1526,46 @@ def test_resolve_package_by_name(package_env):
     assert pkg is not None
 
 
-def test_skill_package_open_tool(package_env):
+async def test_skill_package_open_tool(package_env):
     import json
     from crew.core.runctx import current_active_skill_packages
     from crew.tools.skills_tools import handle_skill_package_open
 
     assert current_active_skill_packages.get() == set()
-    result = json.loads(handle_skill_package_open({"name": "business-travel"}))
+    result = json.loads(await handle_skill_package_open({"name": "business-travel"}))
     assert result["success"] is True
     assert result["package"] == "business-travel"
     assert len(result["members"]) == 2
     assert current_active_skill_packages.get() == {"business-travel"}
 
 
-def test_skill_view_reads_package(package_env):
+async def test_skill_view_reads_package(package_env):
     import json
     from crew.tools.skills_tools import handle_skill_view
 
-    result = json.loads(handle_skill_view({"name": "business-travel"}))
+    result = json.loads(await handle_skill_view({"name": "business-travel"}))
     assert result["success"] is True
     assert result["type"] == "package"
     assert result["slug"] == "business-travel"
     assert "商旅出行" in result["content"]
 
 
-def test_skill_view_reads_package_skill(package_env):
+async def test_skill_view_reads_package_skill(package_env):
     import json
     from crew.tools.skills_tools import handle_skill_view
 
-    result = json.loads(handle_skill_view({"name": "business-travel/query-flights"}))
+    result = json.loads(await handle_skill_view({"name": "business-travel/query-flights"}))
     assert result["success"] is True
     assert result["type"] == "skill"
     assert result["slug"] == "business-travel/query-flights"
     assert "航班查询正文" in result["content"]
 
 
-def test_skill_view_old_alias_still_works(package_env):
+async def test_skill_view_old_alias_still_works(package_env):
     import json
     from crew.tools.skills_tools import handle_skill_view
 
-    result = json.loads(handle_skill_view({"name": "query-flights"}))
+    result = json.loads(await handle_skill_view({"name": "query-flights"}))
     assert result["success"] is True
     assert result["type"] == "skill"
     assert result["slug"] == "business-travel/query-flights"
@@ -2050,3 +2052,160 @@ def test_update_path_cannot_bypass_the_replay_template(tmp_path, monkeypatch):
 
     # 合法的同模板改写仍然放行——校验不能把正常的技能维护也堵死
     assert update_skill_markdown(slug, good, source="evolution") is True
+
+
+# ── _mtime_key TTL 缓存 ────────────────────────────────────────────────────
+
+
+def test_mtime_key_ttl_avoids_rescan(monkeypatch):
+    """TTL 窗口内重复 get_skills() 不应重复扫描目录 mtime。"""
+    import crew.agent.skills as skills_mod
+
+    _force_stat_fallback(monkeypatch)
+    skills_mod._invalidate_cache()
+    # 第一次调用建立缓存
+    skills_mod.get_skills()
+
+    calls = 0
+    real_scan = skills_mod._scan_mtime_key
+
+    def counting_scan():
+        nonlocal calls
+        calls += 1
+        return real_scan()
+
+    monkeypatch.setattr(skills_mod, "_scan_mtime_key", counting_scan)
+    skills_mod.get_skills()
+    skills_mod.get_skills()
+    assert calls == 0, "TTL 窗口内不应重新扫描"
+
+    # TTL 过期后允许重新扫描
+    monkeypatch.setattr(skills_mod, "_MTIME_KEY_TTL_S", 0.0)
+    skills_mod.get_skills()
+    assert calls == 1
+
+
+def test_invalidate_cache_clears_mtime_ttl(monkeypatch):
+    """进程内安装/卸载触发的失效必须同时清掉 mtime TTL 缓存。"""
+    import crew.agent.skills as skills_mod
+
+    _force_stat_fallback(monkeypatch)
+    skills_mod.get_skills()
+    assert skills_mod._mtime_key_cache is not None
+    skills_mod._invalidate_cache()
+    assert skills_mod._mtime_key_cache is None
+    assert skills_mod._cache == {}
+
+
+# ── watcher 失效与 stat 回退 ────────────────────────────────────────────
+
+
+def _force_stat_fallback(monkeypatch):
+    """把索引切到 stat TTL 回退通道：watcher 工厂替换为启动失败的桩。"""
+    import crew.agent.skills.index as index_mod
+
+    class _FailingWatcher:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            return False
+
+        def sync(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(index_mod, "_watcher_factory", _FailingWatcher)
+    index_mod.skill_index().stop_watcher()
+
+
+def test_stat_fallback_when_watcher_unavailable(skills_dir, monkeypatch):
+    """watcher 启动失败时回退 stat TTL：外部变更在 TTL 关闭后立即可见。"""
+    import crew.agent.skills as skills_mod
+    import crew.agent.skills.index as index_mod
+    from crew.agent.skills import get_skills
+
+    _force_stat_fallback(monkeypatch)
+    monkeypatch.setattr(skills_mod, "_MTIME_KEY_TTL_S", 0.0)
+
+    initial = get_skills()
+    assert initial["/greet"]["description"] == "问候技能"
+    assert index_mod.skill_index()._watcher is None
+    assert index_mod.skill_index()._watcher_failed is True
+    assert "content" not in initial["/greet"]
+
+    skill_md = Path(initial["/greet"]["skill_md_path"])
+    skill_md.write_text(
+        "---\nname: greet\nfeatured: true\ndescription: 回退通道更新\n---\n你好！",
+        encoding="utf-8",
+    )
+    assert get_skills()["/greet"]["description"] == "回退通道更新"
+
+
+def test_watcher_event_invalidates_index(skills_dir):
+    """watcher 通道：SKILL.md 文件事件触发失效，无需等待任何 TTL。"""
+    import time
+
+    import crew.agent.skills.index as index_mod
+    from crew.agent.skills import get_skills
+
+    index_mod.skill_index().stop_watcher()
+    try:
+        initial = get_skills()
+        assert initial["/greet"]["description"] == "问候技能"
+        # watcher 懒启动成功（watchdog 不可用时跳过本用例的其余断言）
+        if index_mod.skill_index()._watcher is None:
+            pytest.skip("watchdog 不可用，索引处于 stat 回退通道")
+        assert "content" not in initial["/greet"]
+
+        skill_md = Path(initial["/greet"]["skill_md_path"])
+        skill_md.write_text(
+            "---\nname: greet\nfeatured: true\ndescription: watcher 通道更新\n---\n你好！",
+            encoding="utf-8",
+        )
+
+        deadline = time.monotonic() + 10.0
+        refreshed = initial
+        while time.monotonic() < deadline:
+            refreshed = get_skills()
+            if refreshed["/greet"]["description"] == "watcher 通道更新":
+                break
+            time.sleep(0.05)
+        assert refreshed["/greet"]["description"] == "watcher 通道更新"
+    finally:
+        index_mod.skill_index().stop_watcher()
+
+
+def test_skill_body_cache_follows_mtime(skills_dir, monkeypatch):
+    """body 缓存按 (path, mtime_ns) 失效：文件变更后读到新正文。"""
+    import crew.agent.skills as skills_mod
+    from crew.agent.skills import get_skill_body, get_skills
+
+    _force_stat_fallback(monkeypatch)
+    monkeypatch.setattr(skills_mod, "_MTIME_KEY_TTL_S", 0.0)
+
+    info = get_skills()["/greet"]
+    assert get_skill_body(info) == "你好！我是 Crew。"
+
+    skill_md = Path(info["skill_md_path"])
+    skill_md.write_text(
+        "---\nname: greet\ndescription: 问候技能\n---\n更新后的正文。",
+        encoding="utf-8",
+    )
+    assert get_skill_body(get_skills()["/greet"]) == "更新后的正文。"
+
+
+def test_build_optional_skills_index_prompt(optional_env):
+    """optional 索引 prompt 列出未安装的可安装 skill，不依赖 info.content。"""
+    from crew.agent.skills import build_optional_skills_index_prompt
+
+    scan_skills()
+    prompt = build_optional_skills_index_prompt()
+    assert "/opt-skill" in prompt
+    assert "可安装技能" in prompt
+
+    # 已安装的不再重复出现
+    install_skill("opt-skill")
+    assert "/opt-skill" not in build_optional_skills_index_prompt()

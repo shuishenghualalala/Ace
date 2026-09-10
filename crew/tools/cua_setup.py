@@ -253,16 +253,18 @@ class CuaDriverSetupService:
             task.add_log(f"已找到 cua-driver: {binary}")
             return binary
 
-        # Linux 冻结态优先用预制二进制：信创系统 glibc 太旧(buster 2.28)，
+        # Linux 打包态优先用预制二进制：信创系统 glibc 太旧(buster 2.28)，
         # 联网 curl|bash 装的官方 gnu 版需 glibc≥2.30 跑不起来(GLIBC_2.29 not found)。
         # 预制版随 .deb 内嵌、glibc≤2.28 兼容，既不联网也不受 glibc 限制。
         # force_reinstall 时预制版也无法重装(它是打包产物)，直接复用即可。
-        if plat == "linux" and getattr(sys, "frozen", False):
-            prebaked = _find_cua_binary(plat)
-            if prebaked:
-                task.add_log(f"使用预制 cua-driver（信创 glibc 兼容版）: {prebaked}")
-                return prebaked
-            task.add_log("未找到预制 cua-driver，回退联网下载（注意：信创系统可能因 glibc 过旧失败）")
+        if plat == "linux":
+            from crew.state.home import is_packaged
+            if is_packaged():
+                prebaked = _find_cua_binary(plat)
+                if prebaked:
+                    task.add_log(f"使用预制 cua-driver（信创 glibc 兼容版）: {prebaked}")
+                    return prebaked
+                task.add_log("未找到预制 cua-driver，回退联网下载（注意：信创系统可能因 glibc 过旧失败）")
 
         if force_reinstall and binary:
             task.add_log("force_reinstall=True，重新安装")
@@ -636,13 +638,13 @@ def _find_cua_binary(plat: str) -> str | None:
         Path.home() / ".local" / "bin" / "cua-driver",
         Path.home() / ".cargo" / "bin" / "cua-driver",
     ]
-    # 冻结态预制二进制：信创 deb 把 glibc≤2.28 兼容版 cua-driver 预制到
-    # _internal/runtimes/cua-driver/bin/（见 _bundled_runtime_paths）。联网装的
+    # 打包态预制二进制：信创 deb 把 glibc≤2.28 兼容版 cua-driver 预制到
+    # runtimes/cua-driver/bin/（见 _bundled_runtime_paths）。联网装的
     # 官方 gnu 版需 glibc≥2.30，信创系统跑不起来，故优先定位预制版。
-    if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).parent
-        # PyInstaller --onedir: exe 在 crew-gateway/，runtimes 在 _internal/runtimes/
-        candidates.insert(0, exe_dir / "_internal" / "runtimes" / "cua-driver" / "bin" / "cua-driver")
+    from crew.state.home import packaged_runtimes_dir
+    runtimes_dir = packaged_runtimes_dir()
+    if runtimes_dir is not None:
+        candidates.insert(0, runtimes_dir / "cua-driver" / "bin" / "cua-driver")
     if plat == "windows":
         localappdata = os.environ.get("LOCALAPPDATA")
         if localappdata:

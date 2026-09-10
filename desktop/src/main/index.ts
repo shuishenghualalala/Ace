@@ -1414,21 +1414,51 @@ function recycleGatewayForSecurityChange(): void {
   child.kill();
 }
 
+/**
+ * 打包态 gateway 统一布局（三平台一致，源码模式，不再使用 PyInstaller 二进制）：
+ *   <gatewayRoot>/crew/            — gateway 源码树（含 skills/scenarios/mcp_servers）
+ *   <gatewayRoot>/config/          — 可发布配置模板（.env.example / config.yaml.example / prompts/）
+ *   <gatewayRoot>/plugins/         — 内置插件
+ *   <gatewayRoot>/runtimes/python/ — 内嵌 Python（gateway 本体与技能脚本共用同一解释器）
+ *   <gatewayRoot>/runtimes/node/   — 内嵌 Node.js（技能脚本用）
+ * gateway 由安装包内嵌 Python 以 `-m crew.gateway.server` 直接跑源码启动。
+ * CREW_PACKAGED=1 让后端识别打包态（用户配置落 ~/ 而非安装目录）。
+ */
+function packagedGatewayLaunch(gatewayRoot: string): {
+  command: string;
+  args: string[];
+  envExtras: Record<string, string>;
+} {
+  const python = process.platform === 'win32'
+    ? path.join(gatewayRoot, 'runtimes', 'python', 'python.exe')
+    : path.join(gatewayRoot, 'runtimes', 'python', 'bin', 'python3');
+  return {
+    command: python,
+    args: ['-m', 'crew.gateway.server'],
+    envExtras: {
+      CREW_PACKAGED: '1',
+      PYTHONPATH: gatewayRoot,
+      // 安装目录可能只读（Program Files / /opt），禁止向源码树写 .pyc
+      PYTHONDONTWRITEBYTECODE: '1',
+    },
+  };
+}
+
 // ============================================================================
 // 🌟 核心新增：专供 Windows 打包态使用的绝对路径静默启动
 // ============================================================================
 /**
- * Windows 打包版专用：在指定端口启动 crew-gateway.exe。
+ * Windows 打包版专用：在指定端口启动 gateway（内嵌 Python 跑源码）。
  * 通过 GATEWAY_PORT 环境变量告知后端监听端口。
  */
 function startWindowsPackagedGateway(port: number): void {
   if (managedGateway) return;
 
   const exeDir = path.dirname(app.getPath('exe'));
-  const gatewayExePath = path.join(exeDir, '../crew-gateway/crew-gateway.exe');
-  const gatewayDir = path.dirname(gatewayExePath);
+  const gatewayRoot = path.resolve(exeDir, '..', 'crew-gateway');
+  const launch = packagedGatewayLaunch(gatewayRoot);
 
-  console.log(`[gateway] Starting packaged Windows gateway on port ${port}:`, gatewayExePath);
+  console.log(`[gateway] Starting packaged Windows gateway on port ${port}:`, launch.command);
 
   // 清理可能残留的僵尸 gateway 进程（上次 Electron 异常退出未清理）
   const killStart = Date.now();
@@ -1437,8 +1467,8 @@ function startWindowsPackagedGateway(port: number): void {
 
   try {
     const spawnStart = Date.now();
-    managedGateway = spawn(gatewayExePath, [], {
-      cwd: gatewayDir,
+    managedGateway = spawn(launch.command, launch.args, {
+      cwd: gatewayRoot,
       windowsHide: true,
       detached: false,
       // 不注入 CREW_TASK_WORKSPACE_ROOT，让后端从 config.yaml 自行计算
@@ -1446,8 +1476,9 @@ function startWindowsPackagedGateway(port: number): void {
         ...process.env,
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        ...launch.envExtras,
         ...packagedSecurityRuntimeEnv(),
-        // 与开发态一致：打包 exe 内嵌 Python 仍可能走 GBK 控制台
+        // 与开发态一致：内嵌 Python 仍可能走 GBK 控制台
         PYTHONIOENCODING: 'utf-8',
         ...(process.platform === 'win32' ? { PYTHONUTF8: '1' } : {}),
       },
@@ -1457,7 +1488,7 @@ function startWindowsPackagedGateway(port: number): void {
 
     // 记录 stdout/stderr 用于诊断启动问题
     attachGatewayLog(child);
-    writeGatewayLogLine(`[spawn] packaged win gateway pid=${child.pid} port=${port} exe=${gatewayExePath}`);
+    writeGatewayLogLine(`[spawn] packaged win gateway pid=${child.pid} port=${port} python=${launch.command}`);
     child.stdout.on('data', (chunk) => console.log('[gateway-win]', String(chunk).trim()));
     child.stderr.on('data', (chunk) => console.warn('[gateway-win]', String(chunk).trim()));
 
@@ -1500,19 +1531,19 @@ function startWindowsPackagedGateway(port: number): void {
 }
 
 /**
- * macOS 打包版专用：在指定端口启动 crew-gateway 二进制。
- * macOS .app 结构：Ace.app/Contents/Resources/crew-gateway/
+ * macOS 打包版专用：在指定端口启动 gateway（内嵌 Python 跑源码）。
+ * macOS .app 结构：crew-desktop.app/Contents/Resources/crew-gateway/
  */
 function startMacOSPackagedGateway(port: number): void {
   if (managedGateway) return;
 
   // macOS .app bundle: exe 位于 Contents/MacOS/crew-desktop，
-  // gateway 放在 Contents/Resources/crew-gateway/crew-gateway
+  // gateway 源码树放在 Contents/Resources/crew-gateway/
   const resourcesPath = path.join(path.dirname(app.getPath('exe')), '..', 'Resources');
-  const gatewayExePath = path.join(resourcesPath, 'crew-gateway', 'crew-gateway');
-  const gatewayDir = path.dirname(gatewayExePath);
+  const gatewayRoot = path.join(resourcesPath, 'crew-gateway');
+  const launch = packagedGatewayLaunch(gatewayRoot);
 
-  console.log(`[gateway] Starting packaged macOS gateway on port ${port}:`, gatewayExePath);
+  console.log(`[gateway] Starting packaged macOS gateway on port ${port}:`, launch.command);
 
   // 注意：不在此处调用 killZombieGatewayProcesses()。
   // macOS 上 killZombieGatewayProcesses 使用 `pkill -f crew-gateway`，
@@ -1521,20 +1552,21 @@ function startMacOSPackagedGateway(port: number): void {
   // 僵尸进程清理统一在 before-quit / uninstall 时执行即可。
 
   try {
-    managedGateway = spawn(gatewayExePath, [], {
-      cwd: gatewayDir,
+    managedGateway = spawn(launch.command, launch.args, {
+      cwd: gatewayRoot,
       detached: false,
       env: {
         ...process.env,
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        ...launch.envExtras,
         ...packagedSecurityRuntimeEnv(),
       },
     });
     const child = managedGateway;
 
     attachGatewayLog(child);
-    writeGatewayLogLine(`[spawn] packaged mac gateway pid=${child.pid} port=${port} exe=${gatewayExePath}`);
+    writeGatewayLogLine(`[spawn] packaged mac gateway pid=${child.pid} port=${port} python=${launch.command}`);
     child.stdout.on('data', (chunk) => console.log('[gateway-mac]', String(chunk).trim()));
     child.stderr.on('data', (chunk) => console.warn('[gateway-mac]', String(chunk).trim()));
 
@@ -1562,8 +1594,8 @@ function startMacOSPackagedGateway(port: number): void {
 }
 
 /**
- * Linux 打包版专用：在指定端口启动 crew-gateway 二进制。
- * deb 装在固定路径 /opt/crew-gateway/crew-gateway。
+ * Linux 打包版专用：在指定端口启动 gateway（内嵌 Python 跑源码）。
+ * deb 装在固定路径 /opt/crew-gateway/（源码树 + runtimes/）。
  *
  * 与 macOS/Windows 一致：desktop 子进程托管 gateway。废弃了原先的 systemd user
  * service 架构——多用户机器上各用户 systemd 服务都 enable-linger + Restart=always
@@ -1573,26 +1605,27 @@ function startMacOSPackagedGateway(port: number): void {
 function startLinuxPackagedGateway(port: number): void {
   if (managedGateway) return;
 
-  const gatewayExePath = '/opt/crew-gateway/crew-gateway';
-  const gatewayDir = path.dirname(gatewayExePath);
+  const gatewayRoot = '/opt/crew-gateway';
+  const launch = packagedGatewayLaunch(gatewayRoot);
 
-  console.log(`[gateway] Starting packaged Linux gateway on port ${port}:`, gatewayExePath);
+  console.log(`[gateway] Starting packaged Linux gateway on port ${port}:`, launch.command);
 
   try {
-    managedGateway = spawn(gatewayExePath, [], {
-      cwd: gatewayDir,
+    managedGateway = spawn(launch.command, launch.args, {
+      cwd: gatewayRoot,
       detached: false,
       env: {
         ...process.env,
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        ...launch.envExtras,
         ...packagedSecurityRuntimeEnv(),
       },
     });
     const child = managedGateway;
 
     attachGatewayLog(child);
-    writeGatewayLogLine(`[spawn] packaged linux gateway pid=${child.pid} port=${port} exe=${gatewayExePath}`);
+    writeGatewayLogLine(`[spawn] packaged linux gateway pid=${child.pid} port=${port} python=${launch.command}`);
     child.stdout.on('data', (chunk) => console.log('[gateway-linux]', String(chunk).trim()));
     child.stderr.on('data', (chunk) => console.warn('[gateway-linux]', String(chunk).trim()));
 
@@ -1627,8 +1660,14 @@ function startLinuxPackagedGateway(port: number): void {
 function killZombieGatewayProcesses(): void {
   if (process.platform === 'win32') {
     try {
-      // 查找所有 crew-gateway.exe 进程（排除当前 managedGateway）
-      const output = spawn('tasklist', ['/FI', 'IMAGENAME eq crew-gateway.exe', '/FO', 'CSV', '/NH'], {
+      // 打包态 gateway 是「内嵌 python.exe -m crew.gateway.server」，进程名不再
+      // 是 crew-gateway.exe，按命令行特征匹配（排除当前 managedGateway）。
+      const output = spawn('powershell', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" " +
+        "| Where-Object { $_.CommandLine -match 'crew\\.gateway\\.server' } " +
+        "| ForEach-Object { $_.ProcessId }",
+      ], {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'ignore'],
       });
@@ -1637,23 +1676,19 @@ function killZombieGatewayProcesses(): void {
       output.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
 
       output.on('close', () => {
-        const lines = stdout.split('\n').filter(line => line.includes('crew-gateway.exe'));
-        for (const line of lines) {
-          const match = line.match(/"crew-gateway\.exe","(\d+)"/);
-          if (match) {
-            const pid = parseInt(match[1], 10);
-            // 跳过当前管理的 gateway（如果存在）
-            if (managedGateway && managedGateway.pid === pid) continue;
+        const pids = stdout.split(/\r?\n/).map((line) => parseInt(line.trim(), 10)).filter(Number.isFinite);
+        for (const pid of pids) {
+          // 跳过当前管理的 gateway（如果存在）
+          if (managedGateway && managedGateway.pid === pid) continue;
 
-            console.warn(`[gateway] Killing zombie crew-gateway process: PID ${pid}`);
-            try {
-              spawn('taskkill', ['/PID', String(pid), '/F'], {
-                windowsHide: true,
-                stdio: 'ignore',
-              });
-            } catch (err) {
-              console.error(`[gateway] Failed to kill PID ${pid}:`, err);
-            }
+          console.warn(`[gateway] Killing zombie gateway process: PID ${pid}`);
+          try {
+            spawn('taskkill', ['/PID', String(pid), '/F'], {
+              windowsHide: true,
+              stdio: 'ignore',
+            });
+          } catch (err) {
+            console.error(`[gateway] Failed to kill PID ${pid}:`, err);
           }
         }
       });
@@ -1663,8 +1698,9 @@ function killZombieGatewayProcesses(): void {
   } else if (process.platform === 'linux') {
     try {
       // Linux 打包态 gateway 由本进程 spawn 托管（不再用 systemd user service）。
-      // 只杀当前用户的残留 crew-gateway，避免误杀别的用户各自的 gateway 实例。
-      spawn('pkill', ['-u', String(process.getuid?.() ?? 0), '-f', '/opt/crew-gateway/crew-gateway'], {
+      // 新形态命令行为 /opt/crew-gateway/runtimes/python/bin/python3 -m crew.gateway.server，
+      // 按安装路径匹配；只杀当前用户的残留实例，避免误杀别的用户各自的 gateway。
+      spawn('pkill', ['-u', String(process.getuid?.() ?? 0), '-f', '/opt/crew-gateway'], {
         stdio: 'ignore',
       });
     } catch (err) {
@@ -1909,7 +1945,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
     if (ensureGatewayPromise !== cachedPromise) return ensureGateway();
     ensureGatewayPromise = null;
     if (cached.managed) {
-      await stopManagedGateway('identity-mismatch');
+      await stopManagedGateway('health-reproof-failed');
     }
     logSupervisorDecision('instance-reprobe', {
       cachedBaseUrl: cached.baseUrl,
@@ -2348,7 +2384,7 @@ async function installDownloadedUpdate(): Promise<VersionUpdatePackageResult> {
           'n=0; while kill -0 "$1" 2>/dev/null && [ $n -lt 120 ]; do sleep 0.5; n=$((n+1)); done', // 等安装流程结束（≤60s）
           'n=0; while kill -0 "$2" 2>/dev/null && [ $n -lt 40 ]; do sleep 0.3; n=$((n+1)); done',  // 等旧 app 退出（≤12s）
           'sleep 1', // dpkg 换完文件后收尾
-          'pkill -u "$(id -u)" -f /opt/crew-gateway/crew-gateway 2>/dev/null', // 清旧 gateway
+          'pkill -u "$(id -u)" -f /opt/crew-gateway 2>/dev/null', // 清旧 gateway
           'sleep 1', // 等端口释放
           'exec crew-desktop',
         ].join('; ');

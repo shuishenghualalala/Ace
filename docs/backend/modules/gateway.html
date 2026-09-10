@@ -89,6 +89,7 @@
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
+      <tr><td>2026-09-03</td><td>事件循环阻塞治理：<code>POST /api/runtimes/scan</code> 的运行时探测（login shell + --version 子进程）与 <code>sync_runtimes</code> 入库改经 <code>asyncio.to_thread</code>，消除单次可达数十秒的事件循环冻结；提示词组装与记忆读写同步移出事件循环（详见 agent/memory 模块文档）。已知遗留：store 层同步 sqlite（session_store 全量历史读写、active_owner 中间件等）待系统性异步化。</td><td><code>crew/gateway/routers/runtimes.py</code>、<code>crew/agent/runtime.py</code>、<code>crew/agent/external/detector.py</code>、<code>crew/memory/simple.py</code>、<code>crew/agent/skills.py</code></td></tr>
     </tbody>
   </table>
 

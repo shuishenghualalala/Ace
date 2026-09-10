@@ -7,6 +7,7 @@ CLAUDE.md
 CONTEXT.md
 .codebase-memory/
 .codex-quarantine/
+.dsh/
 
 # Runtime data and user-generated content
 .crew/
@@ -116,5 +117,4 @@ Thumbs.db
 /crew-tui/
 
 # doc
-.docs/
 .doc/

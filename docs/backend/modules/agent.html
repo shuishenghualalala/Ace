@@ -110,6 +110,7 @@ ToolResultRetention:
       <tr><td>2026-08-31</td><td>普通 Agent 历史回放身份隔离</td><td>Gateway 会话历史投影只对 executor=team 的会话聚合子历史；Team 子会话必须含 member_id。</td></tr>
       <tr><td>2026-09-01</td><td>上下文微压缩由时间窗口改为工具结果生命周期；完整压缩后恢复指令、资源和重要结论。</td><td><code>crew/agent/compact</code>、工具循环上下文稳定性。</td></tr>
       <tr><td>2026-09-01</td><td><code>_safe_split</code> 接受 assistant 边界：单个长回合内的早期迭代可被 L3 摘要（修复回合内 L3 永不触发）；file_read 改 TEMPORARY + 压缩后按 path 磁盘重读；恢复预算移入 <code>agent.compaction.post_compact_*</code> 配置；摘要消息附 canonical 历史回溯指引。</td><td><code>crew/agent/compact/pipeline.py</code>、<code>post_compact.py</code>、<code>crew/state/config.py</code>、<code>crew/app.py</code></td></tr>
+      <tr><td>2026-09-03</td><td>事件循环阻塞治理：<code>_build_prompts</code> 中的 <code>build_prompt_parts</code>（含 skills mtime 扫描、CREW.md/SOUL.md/记忆文件读取）改经 <code>asyncio.to_thread</code> 移出事件循环，修复 gateway 繁忙时健康探测超时被桌面端误判死亡重启的问题；外部运行时探测（login shell / --version 子进程）同样移出事件循环。</td><td><code>crew/agent/runtime.py</code>、<code>crew/agent/external/detector.py</code>、<code>crew/gateway/routers/runtimes.py</code></td></tr>
     </tbody>
   </table>
 

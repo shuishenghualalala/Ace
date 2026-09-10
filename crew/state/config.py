@@ -47,10 +47,11 @@ def _bundled_config_template_path() -> Path:
 def _get_user_config_dir() -> Path:
     """返回用户配置目录。
 
-    - 冻结态（PyInstaller 打包后）：委托 get_crew_home()，与 CREW_HOME 保持一致
+    - 打包态（安装包形态）：委托 get_crew_home()，与 CREW_HOME 保持一致
     - 开发态：项目根/config（config.yaml 是被 Git 忽略的本地配置）
     """
-    if getattr(sys, "frozen", False):
+    from crew.state.home import is_packaged
+    if is_packaged():
         from crew.state.home import get_crew_home
         return get_crew_home()
     return ROOT / "config"
@@ -81,7 +82,8 @@ def _init_user_config_dir() -> Path:
         shutil.copy2(bundled_config, user_config)
         log.info("首次运行：已从 config.yaml.example 复制本地配置到 %s", user_config)
 
-    if getattr(sys, "frozen", False):
+    from crew.state.home import is_packaged
+    if is_packaged():
         # 1. 从空模板生成用户私有 .env；发布包绝不携带真实密钥
         bundled_env = ROOT / "config" / ".env.example"
         user_env = user_dir / ".env"
@@ -1382,10 +1384,12 @@ def _load_env_files() -> None:
     user_env = _get_user_config_dir() / ".env"
     if user_env not in candidates:
         candidates.append(user_env)
-    # PyInstaller 冻结态：把 .exe 同级路径追加在最后，最高优先级
-    if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).resolve().parent
-        candidates.append(exe_dir / ".env")
+    # 打包态：把 .exe 同级路径（PyInstaller 形态）与 Crew Home 追加在最后，最高优先级
+    from crew.state.home import is_packaged
+    if is_packaged():
+        if getattr(sys, "frozen", False):
+            exe_dir = Path(sys.executable).resolve().parent
+            candidates.append(exe_dir / ".env")
         from crew.state.home import get_crew_home
         candidates.append(get_crew_home() / ".env")
     env_home = os.environ.get("CREW_HOME", "").strip()

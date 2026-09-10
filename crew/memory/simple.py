@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from pathlib import Path
@@ -73,9 +74,14 @@ class SQLiteMemory(MemoryProvider):
             "SELECT text FROM memory WHERE owner_account_id = ? AND session_id = ? "
             f"AND ({like_clauses}) ORDER BY ts DESC LIMIT ?"
         )
-        with self._lock:
-            rows = self._conn.execute(sql, [*params, self._top_k]).fetchall()
-        return "\n".join(f"- {r[0]}" for r in rows)
+
+        def _query() -> str:
+            with self._lock:
+                rows = self._conn.execute(sql, [*params, self._top_k]).fetchall()
+            return "\n".join(f"- {r[0]}" for r in rows)
+
+        # 同步 sqlite 访问丢线程池，避免阻塞事件循环。
+        return await asyncio.to_thread(_query)
 
     async def write(self, session_id: str, messages: list[Message]) -> None:
         users = [m.content for m in messages if m.role == "user" and m.content]
@@ -89,7 +95,8 @@ class SQLiteMemory(MemoryProvider):
                 "INSERT INTO memory (owner_account_id, session_id, text, ts) VALUES (?, ?, ?, ?)",
                 (owner, session_id, users[-1], time.time()),
             )
-        self._writer.execute(_write)
+        # SQLiteWriteHelper 锁冲突时内含 time.sleep 重试，必须离开事件循环。
+        await asyncio.to_thread(self._writer.execute, _write)
 
     async def delete(self, session_id: str, owner_account_id: str | None = None) -> None:
         """删除某会话的全部记忆行，避免删会话后库膨胀。"""
@@ -105,4 +112,4 @@ class SQLiteMemory(MemoryProvider):
                 (owner, session_id),
             )
 
-        self._writer.execute(_write)
+        await asyncio.to_thread(self._writer.execute, _write)

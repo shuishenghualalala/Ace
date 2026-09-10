@@ -455,7 +455,9 @@ class SingleAgent(Agent):
             mem_sid, envelope.query
         )
         ws_instructions = envelope.params.get("workspace_instructions", "")
-        prompt_parts = build_prompt_parts(
+        # build_prompt_parts 是 async：磁盘读取内部走 asyncio.to_thread，
+        # skills 索引走 SkillIndex 的 async 访问器（命中时纯内存），直接 await 即可。
+        prompt_parts = await build_prompt_parts(
             workspace_instructions=ws_instructions,
             memory_text=memory_text,
             cwd=cwd,
