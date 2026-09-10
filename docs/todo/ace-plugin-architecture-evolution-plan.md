@@ -9,15 +9,16 @@
 
 ## 已完成并行批次（2026-09-08 启动，2026-09-09 收口）
 
-**4A-2 外援 Provider / Run 生命周期**、**4B-1 Dynamic Kanban 生命周期** 与 **4C-1 Team Feature Foundation** 已依次实施、独立验证并分别提交，阶段 4 的 4A/4B/4C 部分完成；4D Channels/同伴尚未开始。
+**4A-2 外援 Provider / Run 生命周期**、**4B-1 Dynamic Kanban 生命周期**、**4C-1 Team Feature Foundation** 与 **4D-1 Channels Feature Foundation** 已并行/依次实施、独立验证并分别提交，阶段 4 的 4A/4B/4C/4D-1 部分完成；4D-2（Channels Route/CLI/Adapter 收口）与阶段 5 UI Contribution 待续。
 
 - 外援（`d26a379`）：`product.external-agents` Generation 统一拥有 Catalog、`AdapterRuntimeProvider` 与 `DelegationService`，提供 external-agent-catalog / agent-runtime-provider / delegation 三个 Service；生产 Executor 经 `external_services_acquirer` 持有同代 Lease，委派工具与 Gateway runtimes/sessions 路由 Registry 优先解析；停用先关闭准入再取消在途 Run，激活失败关闭候选资源，restart 更新换代。验证记录：[阶段 4A-2 外援运行生命周期](../testing/plugin-architecture-stage-4a-external-runtime.html)。
 - Dynamic Kanban（本批第二个提交，位于 `d26a379` 之上）：`product.dynamic-kanban` Generation 统一拥有 Manager、Store、运行任务、`mode=dynamic_kanban` Driver 与 REST Route（Route Registry 挂载）；Team 经 `kanban_consumer_provider` 按调用持有同代 Lease，停用后不回退裸 Store；Driver/SSE 部分消费关流、后台任务归 Scope、restart 保留历史行。验证记录：[阶段 4B-1 Dynamic Kanban 生命周期](../testing/plugin-architecture-stage-4b-dynamic-kanban.html)。
 - Team Feature Foundation（本批第三个提交，位于 Dynamic Kanban 之上）：`product.team` Generation 统一拥有 `InProcessTeamManager`、`mode=team` Execution Driver 与 `ServiceKey("team")` 服务；App 级 owner Provider 缓存通过 Bundle 注入，Manager 新增 `shutdown()` 与 `_closed` fail-closed 守卫；Gateway 安全设置 `interaction_bridge`，`build_app(enable_team=True/False)` 分别验证激活与未声明路径。验证记录：[阶段 4C-1 Team Feature Foundation](../testing/plugin-architecture-stage-4c1-team-feature.html)。
-- 验证分工：4A-2/4B-1 生命周期契约测试 14 项全部通过；4C-1 新增生命周期契约测试 7 项全部通过；Team 任务回归 251 passed / 1 skipped；external/team/gateway/runtime 组合回归无新增失败；Ruff、compileall、Import Linter（6 contracts kept, 0 broken）全部通过。
-- 收口：主 agent 完成共享契约审查（`FeatureLease.generation` 公有属性、`detach_owner`、Driver 流 aclose 兜底）、模块 HTML、测试 HTML、ADR 与本计划更新；中心装配按切片顺序串行提交。后续 Channels/同伴及 UI 切片仍须逐项说明计划并取得确认。
+- Channels Feature Foundation（本批第四个提交，与 4C-1 并行开发，位于 Team 之上）：`product.channels` Generation 统一拥有 ChannelManager、DeliveryRouter、平台渠道注册、投递 sender 接线与 `new_conversation` 工具注册，发布 `channels` Service；新建 `crew/channels/` 包迁入七个渠道模块；Channel ABC 扩展显式生命周期契约；Lifespan 与 LogoutCoordinator 改经 Service 同代 Lease 启停；`crew.channel_manager`/`delivery_router` 改动态 compat 属性，Feature 非激活 fail-closed。验证记录：[阶段 4D-1 Channels 生命周期](../testing/plugin-architecture-stage-4d-channels.html)。
+- 验证分工：4A-2/4B-1 生命周期契约测试 14 项全部通过；4C-1 新增生命周期契约测试 7 项全部通过；4D-1 新增生命周期契约测试 6 项全部通过；Team 任务回归 251 passed / 1 skipped；external/team/gateway/runtime 组合回归无新增失败；渠道组合回归 217 passed（5 项失败为微信 Adapter 环境依赖既有问题）；Ruff、compileall、Import Linter（6 contracts kept, 0 broken）全部通过。
+- 收口：主 agent 完成共享契约审查（`FeatureLease.generation` 公有属性、`detach_owner`、Driver 流 aclose 兜底）、模块 HTML、测试 HTML、ADR 与本计划更新；中心装配按切片顺序串行提交。4C-1 与 4D-1 并行开发产生 `crew/app.py`、`crew/gateway/app.py` 冲突，由主 agent 解决并消除 `self.team.provider` 直写（改经 `set_provider` 显式接口）。后续 Channels 4D-2、同伴 Channel Bundle 及 UI 切片仍须逐项说明计划并取得确认。
 
-决策记录：[ADR-0028 外援运行生命周期](../backend/adr/0028-external-runtime-feature-lifecycle.html)、[ADR-0029 Dynamic Kanban 生命周期](../backend/adr/0029-dynamic-kanban-feature-lifecycle.html)、[ADR-0031 Team Feature 生命周期](../backend/adr/0031-team-feature-lifecycle.html)。三份记录已随对应切片验证收口。
+决策记录：[ADR-0028 外援运行生命周期](../backend/adr/0028-external-runtime-feature-lifecycle.html)、[ADR-0029 Dynamic Kanban 生命周期](../backend/adr/0029-dynamic-kanban-feature-lifecycle.html)、[ADR-0030 Channels 生命周期](../backend/adr/0030-channels-feature-lifecycle.html)、[ADR-0031 Team Feature 生命周期](../backend/adr/0031-team-feature-lifecycle.html)。四份记录已随对应切片验证收口。
 
 ## 当前实施进度图（2026-09-08）
 
@@ -124,8 +125,9 @@ flowchart TB
     WorkFeatureTests --> KanbanFeature["阶段 4B-1 ✅<br/>Dynamic Kanban Bundle · Consumer"]
     ExternalRuntime --> NextTeam["阶段 4C-1 ✅<br/>Team Feature Foundation"]
     KanbanFeature --> NextTeam
-    ExternalRuntime --> NextChannels["下一优先级 4D<br/>Channels / 同伴 Channel Bundle"]
-    KanbanFeature --> NextUI["后续阶段 5<br/>页面 · API Client · Reducer"]
+    ExternalRuntime --> NextChannels["阶段 4D-1 ✅<br/>Channels Feature Foundation"]
+    KanbanFeature --> NextChannels2["后续 4D-2<br/>Route · CLI · Adapter"]
+    NextTeam --> NextUI["后续阶段 5<br/>页面 · API Client · Reducer"]
 
     classDef done fill:#e8f6ee,stroke:#1e8449,color:#145a32,stroke-width:2px
     classDef next fill:#e6f0fb,stroke:#2471a3,color:#154360,stroke-width:2px
@@ -133,11 +135,11 @@ flowchart TB
     class Agent,Tools,CLI,Security,Terminal,Workspace,CI,Contracts,Tests,DoneMark,Removed,Scope,Token,Rollback,RuntimeTests,Services,Dependencies,Config,ServiceTests,Runtime,Adapter,Phases,Browser,Shutdown,AdapterTests,Manifest,Ordered,Audit,ManifestTests,Lease,StopPolicy,StopAudit,LeaseTests,Update,Generation,Recovery,UpdateTests,Stage1Done,Drivers,DriverLease,DefaultDriver,PluginDriver,DriverTests,Adapters,DriverAdapterTests done
     class ContextRegistry,PathContext,BrowserContext,ContextTests done
     class SessionContext,SessionTests,WikiContext,WikiTests,CronContext,CronTests,BgContext,QueueOwner,TeamDrain,BgTests,FeatureEvent,EventCompat,EventTests,RouteReg,RouteGate,RouteTests,CoreDecl,Required,CoreTests done
-    class CronRuntime,CronRuntimeTests,SitesRuntime,SitesRuntimeTests,BrowserRuntime,BrowserRuntimeTests,WikiFoundation,WikiFoundationTests,WikiGateway,WikiGatewayTests,WikiCli,WikiCliTests,WikiEvents,WikiEventTests,WikiPreset,WikiPresetTests,WikiRoute,WikiRouteTests,UiRegistry,WorkFeature,WorkCli,WorkFeatureTests,ExternalRuntime,KanbanFeature,NextTeam done
-    class NextChannels,NextUI next
+    class CronRuntime,CronRuntimeTests,SitesRuntime,SitesRuntimeTests,BrowserRuntime,BrowserRuntimeTests,WikiFoundation,WikiFoundationTests,WikiGateway,WikiGatewayTests,WikiCli,WikiCliTests,WikiEvents,WikiEventTests,WikiPreset,WikiPresetTests,WikiRoute,WikiRouteTests,UiRegistry,WorkFeature,WorkCli,WorkFeatureTests,ExternalRuntime,KanbanFeature,NextTeam,NextChannels done
+    class NextChannels2,NextUI next
 ```
 
-这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。阶段 2 的 Driver、Context、Feature Event、Route Gate 和声明式 Core Feature 已形成扩展主链。阶段 3A 的 Cron、Sites 与 Browser 已完成真实资源所有权验证。阶段 3B Foundation 建立了 `knowledge` 稳定 Service、Local Provider 和 `product.wiki` Bundle；Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context 与 Home 导读后台 Task 共享同一 restart Generation。第二切片把 Wiki REST 与聊天附件捕获迁为 Service Consumer；第三切片把全部 Wiki CLI 叶子命令迁为动态 Consumer；第四切片建立 Feature Event Contributor Registry；第五切片建立 Agent Preset Registry；第六切片把 Wiki REST route 迁入 Bundle。阶段 3C 已把 WorkService、八个 Store、Hook 和 REST Route 收入同一 restart Generation，并以可选 KnowledgeService Lease 解除对 Wiki Store 的长期持有；全部 38 个 Work CLI 叶子命令动态租用 Registry Service，生产装配 smoke 证明停用后 fail-closed，Runtime 契约测试证明更新时在途命令持有旧代且后续命令解析新代。阶段 5 首个切片已将 Desktop/Web 的 Wiki 导航接入构建期可信 Registry：导航贡献可排序、冲突失败、撤销，`wiki.enabled` 控制入口和程序化切换，禁用时安全回落 Chat，并保留 Assistant/Work 原有共享导航语义。页面生命周期、API Client、Feature Event Reducer 和其他 Feature UI Contribution 仍未迁移。阶段 4A-1 外援中立 Catalog/Profile 与 Team 存储边界已完成（见 ADR-0027）；阶段 4A-2 外援 Provider/Run 生命周期（ADR-0028）与阶段 4B Dynamic Kanban feature-local Bundle（ADR-0029）已并行完成、独立验证并分别提交。阶段 4C-1 Team Feature Foundation（ADR-0031）已完成：`product.team` Generation 统一拥有 `InProcessTeamManager`、`mode=team` Execution Driver 与 `team` Service，App 级 owner Provider 缓存通过 Bundle 注入，Manager 新增 `shutdown()` 与 fail-closed 守卫。下一优先级为阶段 4D Channels/同伴，中心装配串行合入。
+这张图描述的是当前分支相对 `dev@04a7e16` 的实际变化。绿色节点均已验证。阶段 2 的 Driver、Context、Feature Event、Route Gate 和声明式 Core Feature 已形成扩展主链。阶段 3A 的 Cron、Sites 与 Browser 已完成真实资源所有权验证。阶段 3B Foundation 建立了 `knowledge` 稳定 Service、Local Provider 和 `product.wiki` Bundle；Store/Compiler/Querier/Summarizer、24 个 Tools、Prompt Context 与 Home 导读后台 Task 共享同一 restart Generation。第二切片把 Wiki REST 与聊天附件捕获迁为 Service Consumer；第三切片把全部 Wiki CLI 叶子命令迁为动态 Consumer；第四切片建立 Feature Event Contributor Registry；第五切片建立 Agent Preset Registry；第六切片把 Wiki REST route 迁入 Bundle。阶段 3C 已把 WorkService、八个 Store、Hook 和 REST Route 收入同一 restart Generation，并以可选 KnowledgeService Lease 解除对 Wiki Store 的长期持有；全部 38 个 Work CLI 叶子命令动态租用 Registry Service，生产装配 smoke 证明停用后 fail-closed，Runtime 契约测试证明更新时在途命令持有旧代且后续命令解析新代。阶段 5 首个切片已将 Desktop/Web 的 Wiki 导航接入构建期可信 Registry：导航贡献可排序、冲突失败、撤销，`wiki.enabled` 控制入口和程序化切换，禁用时安全回落 Chat，并保留 Assistant/Work 原有共享导航语义。页面生命周期、API Client、Feature Event Reducer 和其他 Feature UI Contribution 仍未迁移。阶段 4A-1 外援中立 Catalog/Profile 与 Team 存储边界已完成（见 ADR-0027）；阶段 4A-2 外援 Provider/Run 生命周期（ADR-0028）与阶段 4B Dynamic Kanban feature-local Bundle（ADR-0029）已并行完成、独立验证并分别提交。阶段 4C-1 Team Feature Foundation（ADR-0031）已完成：`product.team` Generation 统一拥有 `InProcessTeamManager`、`mode=team` Execution Driver 与 `team` Service，App 级 owner Provider 缓存通过 Bundle 注入，Manager 新增 `shutdown()` 与 fail-closed 守卫。阶段 4D-1 Channels Feature Foundation（ADR-0030）已完成：`product.channels` Generation 统一拥有 ChannelManager、DeliveryRouter、平台渠道注册与工具注册，发布 `channels` Service，新建 `crew/channels/` 包迁入七个渠道模块，Lifespan 与 LogoutCoordinator 改经 Service 同代 Lease 启停。下一优先级为阶段 4D-2 Channels Route/CLI/Adapter 收口与阶段 5 UI Contribution，中心装配串行合入。
 
 ## 0. 执行摘要
 
