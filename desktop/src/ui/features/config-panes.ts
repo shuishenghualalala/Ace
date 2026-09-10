@@ -73,7 +73,7 @@ const DEFAULT_SEMANTIC_CONFIG: WikiSemanticConfig = {
   provider: 'openai',
   model: 'text-embedding-3-small',
   base_url: '',
-  api_key_env: 'OPENAI_API_KEY',
+  api_key_env: '',
   has_key: false,
 };
 
@@ -97,10 +97,8 @@ function syncSemanticPanelVisibility(): void {
 function syncSemanticProviderFields(provider?: string): void {
   const isOpenAI = (provider ?? (document.getElementById('cfg-wiki-semantic-provider') as HTMLSelectElement | null)?.value) !== 'local';
   const baseUrl = document.getElementById('cfg-wiki-semantic-base-url-wrap');
-  const keyEnv = document.getElementById('cfg-wiki-semantic-key-env-wrap');
   const apiKey = document.getElementById('cfg-wiki-semantic-api-key-wrap');
   if (baseUrl) baseUrl.hidden = !isOpenAI;
-  if (keyEnv) keyEnv.hidden = !isOpenAI;
   if (apiKey) apiKey.hidden = !isOpenAI;
   const hint = document.getElementById('cfg-wiki-semantic-provider-hint');
   if (hint) {
@@ -115,16 +113,14 @@ function fillSemanticConfigForm(config: WikiSemanticConfig = semanticConfig()): 
   const provider = document.getElementById('cfg-wiki-semantic-provider') as HTMLSelectElement | null;
   const model = document.getElementById('cfg-wiki-semantic-model') as HTMLInputElement | null;
   const baseUrl = document.getElementById('cfg-wiki-semantic-base-url') as HTMLInputElement | null;
-  const keyEnv = document.getElementById('cfg-wiki-semantic-key-env') as HTMLInputElement | null;
   const apiKey = document.getElementById('cfg-wiki-semantic-api-key') as HTMLInputElement | null;
   if (enabled) enabled.checked = Boolean(config.enabled);
   if (provider) provider.value = config.provider === 'local' ? 'local' : 'openai';
   if (model) model.value = config.model || (config.provider === 'local' ? 'BAAI/bge-small-zh-v1.5' : DEFAULT_SEMANTIC_CONFIG.model);
   if (baseUrl) baseUrl.value = config.base_url || '';
-  if (keyEnv) keyEnv.value = config.api_key_env || DEFAULT_SEMANTIC_CONFIG.api_key_env;
   if (apiKey) {
     apiKey.value = '';
-    apiKey.placeholder = config.has_key ? '已配置，留空则保留原 Key' : '输入 Embedding API Key';
+    apiKey.placeholder = config.has_key ? '已配置，留空则保留原 Key' : '输入专用 Embedding API Key';
   }
   syncSemanticProviderFields(provider?.value);
   syncSemanticPanelVisibility();
@@ -134,7 +130,7 @@ function fillSemanticConfigForm(config: WikiSemanticConfig = semanticConfig()): 
       ? '本地 Provider 不需要 API Key。'
       : config.has_key
         ? `已配置 Key${config.api_key_masked ? `（${config.api_key_masked}）` : ''}`
-        : '尚未配置 API Key；启用后将回退到关键词检索。';
+        : '尚未配置 Key；建议填写专用 Embedding Key。';
   }
   const summaryStatus = document.getElementById('cfg-wiki-semantic-summary-status');
   if (summaryStatus) {
@@ -157,7 +153,7 @@ export function readSemanticConfigForm(): {
     provider,
     model: semanticFieldValue('cfg-wiki-semantic-model'),
     base_url: semanticFieldValue('cfg-wiki-semantic-base-url'),
-    api_key_env: semanticFieldValue('cfg-wiki-semantic-key-env'),
+    api_key_env: semanticConfig().api_key_env,
     api_key: semanticFieldValue('cfg-wiki-semantic-api-key'),
   };
 }
@@ -202,14 +198,9 @@ function createSemanticConfigView(): HTMLElement {
             <input class="semantic-config__control" id="cfg-wiki-semantic-base-url" placeholder="可留空，复用主模型 Base URL">
             <span class="semantic-config__hint">需要时填写兼容接口地址，例如 https://api.openai.com/v1。</span>
           </div>
-          <div class="semantic-config__field semantic-config__field--openai" id="cfg-wiki-semantic-key-env-wrap">
-            <label class="semantic-config__label" for="cfg-wiki-semantic-key-env">API Key 环境变量</label>
-            <input class="semantic-config__control" id="cfg-wiki-semantic-key-env" placeholder="例如 OPENAI_API_KEY" autocomplete="off">
-            <span class="semantic-config__hint">Key 会保存到当前账号的环境文件，不会写入配置 YAML。</span>
-          </div>
           <div class="semantic-config__field semantic-config__field--openai semantic-config__field--wide" id="cfg-wiki-semantic-api-key-wrap">
-            <label class="semantic-config__label" for="cfg-wiki-semantic-api-key">API Key</label>
-            <input class="semantic-config__control" id="cfg-wiki-semantic-api-key" type="password" placeholder="输入 Embedding API Key" autocomplete="new-password">
+            <label class="semantic-config__label" for="cfg-wiki-semantic-api-key">专用 Embedding API Key</label>
+            <input class="semantic-config__control" id="cfg-wiki-semantic-api-key" type="password" placeholder="输入专用 Embedding API Key" autocomplete="new-password">
             <span class="semantic-config__hint" id="cfg-wiki-semantic-key-status"></span>
           </div>
         </div>
@@ -242,10 +233,6 @@ async function saveSemanticConfig(): Promise<void> {
   const form = readSemanticConfigForm();
   if (!form.model) {
     notify('请填写 Embedding 模型');
-    return;
-  }
-  if (form.provider === 'openai' && !form.api_key_env) {
-    notify('请填写 API Key 环境变量名');
     return;
   }
   savingSemanticConfig = true;

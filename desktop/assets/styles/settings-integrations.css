@@ -182,6 +182,8 @@
 .semantic-config__field {
   display: grid;
   min-width: 0;
+  grid-template-rows: 20px 40px minmax(18px, auto);
+  align-content: start;
   gap: var(--mw-space-2);
 }
 
@@ -197,6 +199,7 @@
   color: var(--mw-text-primary);
   font-size: var(--mw-type-compact-size);
   font-weight: 600;
+  line-height: 20px;
 }
 
 .semantic-config__control {

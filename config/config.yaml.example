@@ -237,7 +237,7 @@ wiki:
     provider: openai  # openai（OpenAI 兼容 API）或 local（本地 fastembed）
     model: text-embedding-3-small
     base_url: ""      # 留空则复用主模型 Base URL
-    api_key_env: OPENAI_API_KEY
+    api_key_env: ""      # 留空；填写专用 Key 时由系统自动管理 Embedding 密钥变量
 
 # 进程内 HTTP 边界（web_search/web_extract/Wiki 抓取）的上游代理。
 # 安全意味着“经过策略判断”，判断通过后把流量级联到用户已有的上游代理，

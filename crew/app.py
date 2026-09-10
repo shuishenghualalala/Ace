@@ -84,6 +84,7 @@ OwnerSessionKey = tuple[str, str]
 
 _MODEL_API_KEY_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MODEL_API_KEY_ENV_EXAMPLES = "CREW_API_KEY、OPENAI_API_KEY、ANTHROPIC_API_KEY 或 *_API_KEY*"
+_DEFAULT_SEMANTIC_API_KEY_ENV = "CREW_WIKI_EMBEDDING_API_KEY"
 
 # 子 agent 工具黑名单（按 toolset 维度），用于 DELEGATE_BLOCKED_TOOLS。
 # 一行可调：想放开飞书/定时任务，删掉对应项即可。
@@ -2154,10 +2155,12 @@ class CrewApp:
         allowed = {"enabled", "provider", "model", "base_url", "api_key_env"}
         semantic_raw = {k: payload[k] for k in allowed if k in payload}
         api_key = str(payload.get("api_key") or "").strip()
-        api_key_env = str(semantic_raw.get("api_key_env") or "").strip()
+        current = self.config.owner_semantic_config(owner)
+        api_key_env = str(semantic_raw.get("api_key_env") or current.api_key_env or "").strip()
         if api_key:
             if not api_key_env:
-                raise ValueError("提供 api_key 时必须提供 api_key_env")
+                api_key_env = _DEFAULT_SEMANTIC_API_KEY_ENV
+                semantic_raw["api_key_env"] = api_key_env
             self._apply_api_key_to_env(api_key_env, api_key, owner_account_id=owner)
         self.config.persist_owner_semantic_config(owner, semantic_raw)
         self._invalidate_owner_embedding_provider(owner)

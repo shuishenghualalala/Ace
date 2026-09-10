@@ -380,6 +380,25 @@ async def test_create_model_without_api_key_env_uses_isolated_env(api, tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_update_semantic_config_auto_manages_embedding_key_env(api, tmp_path: Path, auth_headers):
+    """Embedding 专用 Key 不要求用户填写环境变量名，由后端自动隔离保存。"""
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.put("/api/config/wiki-semantic", json={
+            "enabled": True,
+            "provider": "openai",
+            "model": "text-embedding-3-small",
+            "api_key": "sk-embedding-secret",
+        })
+
+    assert resp.status_code == 200, resp.text
+    semantic = resp.json()["wiki"]["semantic"]
+    assert semantic["api_key_env"] == "CREW_WIKI_EMBEDDING_API_KEY"
+    env_path = _owner_overlay_path(tmp_path).parent / ".env"
+    assert "CREW_WIKI_EMBEDDING_API_KEY=sk-embedding-secret" in env_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
 async def test_owner_model_without_key_does_not_fallback_to_shared_key(api, tmp_path: Path, auth_headers):
     """owner 私有 profile 缺 key 时，不应借用 CREW_API_KEY 的值。"""
     transport = ASGITransport(app=api)

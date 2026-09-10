@@ -11,7 +11,7 @@ const semantic = {
   provider: 'openai' as const,
   model: 'text-embedding-3-small',
   base_url: 'https://example.com/v1',
-  api_key_env: 'EMBEDDING_API_KEY',
+  api_key_env: 'CREW_WIKI_EMBEDDING_API_KEY',
   has_key: true,
   api_key_masked: 'sk-t****',
 };
@@ -40,6 +40,7 @@ describe('设置页 Embedding 配置', () => {
     await renderConfigModels();
 
     expect(document.querySelector('.semantic-config')?.textContent).toContain('Wiki 语义检索');
+    expect(document.getElementById('cfg-wiki-semantic-key-env')).toBeNull();
     expect((document.getElementById('cfg-wiki-semantic-enabled') as HTMLInputElement).checked).toBe(true);
     expect(document.getElementById('cfg-wiki-semantic-body')?.hidden).toBe(false);
     expect(readSemanticConfigForm()).toMatchObject({
@@ -47,7 +48,7 @@ describe('设置页 Embedding 配置', () => {
       provider: 'openai',
       model: 'text-embedding-3-small',
       base_url: 'https://example.com/v1',
-      api_key_env: 'EMBEDDING_API_KEY',
+      api_key_env: 'CREW_WIKI_EMBEDDING_API_KEY',
       api_key: '',
     });
     expect(document.getElementById('cfg-wiki-semantic-key-status')?.textContent).toContain('已配置 Key');
@@ -60,7 +61,6 @@ describe('设置页 Embedding 配置', () => {
     provider.dispatchEvent(new Event('change'));
 
     expect(document.getElementById('cfg-wiki-semantic-base-url-wrap')?.hidden).toBe(true);
-    expect(document.getElementById('cfg-wiki-semantic-key-env-wrap')?.hidden).toBe(true);
     expect(document.getElementById('cfg-wiki-semantic-api-key-wrap')?.hidden).toBe(true);
     expect(document.getElementById('cfg-wiki-semantic-provider-hint')?.textContent).toContain('本地 fastembed');
   });
@@ -94,7 +94,7 @@ describe('设置页 Embedding 配置', () => {
       provider: 'openai',
       model: 'text-embedding-3-small',
       base_url: 'https://example.com/v1',
-      api_key_env: 'EMBEDDING_API_KEY',
+      api_key_env: 'CREW_WIKI_EMBEDDING_API_KEY',
       api_key: 'new-secret',
     }));
     await vi.waitFor(() => expect(document.getElementById('cfg-wiki-semantic-save-status')?.textContent).toBe('已保存'));
