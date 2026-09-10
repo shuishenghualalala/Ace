@@ -110,6 +110,7 @@ import {
   toggleWikiBrowser,
   type WikiAgentEntryRequest,
 } from './wiki-page';
+import { wikiFeatureEnabled } from './wiki-feature';
 
 // ---------- 专用 Wiki Agent 会话状态 ----------
 
@@ -1217,7 +1218,53 @@ function wikiIngestProgressHandler(body: unknown, ctx: FeatureReducerContext): F
 let listenersBound = false;
 let featureEventsController: AbortController | null = null;
 
-let featureReducersRegistered = false;
+let featureReducerDisposers: Array<() => void> = [];
+
+function wikiChangedHandler(body: unknown, ctx: FeatureReducerContext): FeatureReducerResult {
+  const raw = (body ?? {}) as { changes?: Array<Record<string, unknown>> };
+  window.dispatchEvent(new CustomEvent('wiki:changed', {
+    detail: { sessionId: ctx.sessionId, changes: Array.isArray(raw.changes) ? raw.changes : [] },
+  }));
+  return emptyFeatureReducerResult();
+}
+
+function registerWikiReducers(): void {
+  if (featureReducerDisposers.length > 0 || !wikiFeatureEnabled()) return;
+  const pending: Array<() => void> = [];
+  try {
+    pending.push(featureEventRegistry.register({
+      feature: 'wiki',
+      event: 'cards',
+      version: 1,
+      reducer: (payload, ctx) => wikiCardsReducer(payload as Record<string, unknown>, ctx),
+    }));
+    pending.push(featureEventRegistry.register({
+      feature: 'wiki',
+      event: 'ingest_progress',
+      version: 1,
+      reducer: wikiIngestProgressHandler,
+    }));
+    pending.push(featureEventRegistry.register({
+      feature: 'wiki',
+      event: 'changed',
+      version: 1,
+      reducer: wikiChangedHandler,
+    }));
+    featureReducerDisposers = pending;
+  } catch (error) {
+    for (const dispose of pending.reverse()) dispose();
+    throw error;
+  }
+}
+
+function unregisterWikiReducers(): void {
+  for (const dispose of featureReducerDisposers.splice(0)) dispose();
+}
+
+function syncWikiReducerRegistration(): void {
+  if (wikiFeatureEnabled()) registerWikiReducers();
+  else unregisterWikiReducers();
+}
 
 /**
  * 初始化发送参数 resolver、登录态重置和 Wiki 卡片点击委托。
@@ -1233,27 +1280,14 @@ export function initWikiAgent(): void {
   setWikiAgentPanelRenderer(mountWikiAgentPanel);
   setWikiBrowserSurfaceRenderer(mountWikiBrowserSurface);
 
-  // Wiki 业务事件 reducer 注册到 Feature Event Registry（幂等，防止测试多次 init）。
-  if (!featureReducersRegistered) {
-    featureReducersRegistered = true;
-    featureEventRegistry.register({
-      feature: 'wiki',
-      event: 'cards',
-      version: 1,
-      reducer: (payload, ctx) => wikiCardsReducer(payload as Record<string, unknown>, ctx),
-    });
-    featureEventRegistry.register({
-      feature: 'wiki',
-      event: 'ingest_progress',
-      version: 1,
-      reducer: wikiIngestProgressHandler,
-    });
-  }
+  // Wiki 业务事件只在能力安装期注册；能力变化时原子撤销/重装，避免迟到帧进入核心 fallback。
+  syncWikiReducerRegistration();
 
   if (listenersBound) return;
   listenersBound = true;
   featureEventsController = new AbortController();
   const eventOptions = { signal: featureEventsController.signal };
+  window.addEventListener('wiki:config-change', syncWikiReducerRegistration, eventOptions);
 
   // 面板消息渲染的 store 订阅由 conversation-panel（autoRender）按实例持有，
   // 随挂载/卸载注册与释放，这里不再挂模块级订阅。
@@ -1335,6 +1369,7 @@ export function disposeWikiAgentPage(): void {
 }
 
 export function disposeWikiAgentFeature(): void {
+  unregisterWikiReducers();
   featureEventsController?.abort();
   featureEventsController = null;
   listenersBound = false;

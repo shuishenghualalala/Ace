@@ -6,13 +6,13 @@ import { mergeStreamingText } from "../lib/agentTurnState";
 import { normalizeTeamText } from "../lib/chunkNormalize";
 import { ChatSocket } from "../ws";
 import {
-  featureEventRegistry,
   compatFeatureEvent,
   parseFeatureEventBody,
   type Bookkeeping,
   type DeltaSpan,
   type FeatureEventContext,
   type FeatureEventEffect,
+  type FeatureEventRegistry,
 } from "../lib/feature-event-dispatcher";
 import type { Attachment, Chunk, FollowupQuestion, Mode, MsgRole, PendingMessage, PlanReview, TeamExecutionTier, TodoItem, ToolCallInfo, TurnFileChangeSummary, UiMessage, UserAgentMention, WikiIngestProgress, WikiPage, SessionStatus } from "../types";
 
@@ -329,7 +329,11 @@ export function applyToolChunk(
  * WS 帧带 session_id（见后端），handler 据此路由到对应会话，
  * 因此多对话互不串台，后台会话也能边生成边写入自己的桶、切回去仍是实时流式。
  */
-export function useChat(currentSessionId: string, onAfterFinal: () => void) {
+export function useChat(
+  currentSessionId: string,
+  onAfterFinal: () => void,
+  featureEventRegistry: FeatureEventRegistry,
+) {
   const [messagesMap, setMessagesMap] = useState<Record<string, UiMessage[]>>({});
   const [busyMap, setBusyMap] = useState<Record<string, boolean>>({});
   const [queueMap, setQueueMap] = useState<Record<string, string>>({});
@@ -351,6 +355,8 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
   const compactionTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const afterFinalRef = useRef(onAfterFinal);
   afterFinalRef.current = onAfterFinal;
+  const featureEventRegistryRef = useRef(featureEventRegistry);
+  featureEventRegistryRef.current = featureEventRegistry;
 
   // task 流式事件一轮可能来几十次：全量刷新（会话列表 + /api/tasks）做 1s 节流，
   // 避免每个 task 事件都各打一次请求（404 场景下会形成风暴）
@@ -658,7 +664,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
         const parsed = parseFeatureEventBody(c.body);
         if (parsed) {
           applyFeatureEventEffect(
-            featureEventRegistry.dispatch(
+            featureEventRegistryRef.current.dispatch(
               parsed.feature,
               parsed.event,
               parsed.version,
@@ -672,7 +678,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
       const compat = compatFeatureEvent(c);
       if (compat) {
         applyFeatureEventEffect(
-          featureEventRegistry.dispatch(
+          featureEventRegistryRef.current.dispatch(
             compat.feature,
             compat.event,
             compat.version,

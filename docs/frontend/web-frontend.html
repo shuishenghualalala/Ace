@@ -956,5 +956,11 @@ cd web && npm run build
   </ul>
   <p>验证：Web Team 回合渲染回归、CSS 引用扫描、TypeScript typecheck 与 production build 通过。</p>
 </div>
+<section>
+  <h2>Wiki 事件能力生命周期（2026-09-11）</h2>
+  <p>每个 App 宿主持有独立的 FeatureEventRegistry，并将其传入 useChat。事件处理器在 React 提交阶段安装，不在 render 中执行注册副作用；Wiki 注册随既有 wikiEnabled 状态变化，禁用和卸载撤销，再次启用恢复。</p>
+  <p>Team 与 Kanban 注册独立于 Wiki 开关。离开 Wiki 页面仍可接收启用功能的后台事件；关闭 Wiki 不删除历史数据或取消后端任务。未知配置继续使用已有能力默认值。</p>
+  <p>已验收：typecheck 与全量 217 tests 通过，记录见 <a href="../testing/plugin-architecture-stage-5-wiki-event-lifecycle.html">阶段 5-8 测试记录</a>。</p>
+</section>
 </body>
 </html>

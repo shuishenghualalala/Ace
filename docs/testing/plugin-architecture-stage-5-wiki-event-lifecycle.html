@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 5-8 · Wiki 事件能力生命周期</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 5-8 · Wiki 事件能力生命周期</h1>
+<p>2026-09-11。用户已确认 Desktop 与 Web 两个独立切片并行开发。基线提交 6d53445；已验收通过并随本记录提交。</p>
+<h2>范围与归属</h2>
+<p>补齐阶段 5 的明确要求：Wiki 禁用时不注册 Wiki 事件处理器。沿用已有能力状态来源，处理器由 Feature 安装期持有，页面切换不撤销；能力停用与宿主卸载才释放注册。关闭功能不删除历史数据或取消已发起的后端业务。</p>
+<p>Desktop 与 Web 开发分别由独立子 agent 执行，另一子 agent 独立编写及执行行为测试。主 agent 负责架构审查、记录和逐片提交。本批未修改 Team/Kanban 能力策略；Web 宿主注册方式调整后，其原有事件处理经验证继续有效。</p>
+<h2>验收契约</h2>
+<table><tr><th>场景</th><th>所需证据</th><th>状态</th></tr>
+<tr><td>初始禁用</td><td>真实宿主安装后 Wiki 处理器不在注册表中，旧帧与 feature_event 均无业务副作用</td><td>✅ Desktop <code>wiki-reducer-lifecycle.test.ts</code>「starts disabled…」；Web 真实 App 双宿主首帧 <code>dispatch</code> 返回 null</td></tr>
+<tr><td>启用、禁用、再次启用</td><td>cards、ingest_progress、changed 按当前能力处理；重复设置无重复订阅；撤销后晚到帧不写消息、进度或派发 Wiki DOM 事件</td><td>✅ Desktop 同文件「enables and disables atomically」「repeated init…」「drops cards and ingest progress…」「processes each Wiki frame…」；Web <code>App.wiki-lifecycle.test.tsx</code> 能力加载断言</td></tr>
+<tr><td>页面切换</td><td>离开 Wiki 页面仍接收启用状态下的合法后台事件</td><td>✅ Desktop 生命周期测试中 handler 注册独立于页面 <code>activate/deactivate</code>，仅 <code>disposeWikiAgentFeature</code> 撤销；Web 处理器挂在 App 宿主 <code>useLayoutEffect</code>，与 <code>wikiPage</code> 投影无关</td></tr>
+<tr><td>宿主卸载及重挂载</td><td>注册与能力监听全部释放；Web StrictMode 重放无泄漏、重复注册或永久失效</td><td>✅ Web 测试以两个 <code>StrictMode</code> 真实 App 宿主断言 registry 相互独立且可正常安装；Desktop「repeated init, config events, dispose and re-init」断言幂等</td></tr>
+<tr><td>其他功能与协议</td><td>Team/Kanban 行为保留；未知帧沿用可诊断的忽略语义；旧帧兼容保持</td><td>✅ Desktop「keeps team events available when Wiki is disabled」；Web 全量 33 文件回归含 feature-event-dispatcher 兼容用例</td></tr>
+<tr><td>注册冲突回滚</td><td>Feature 安装中途冲突时，本次已装条目全部回滚，不留半注册</td><td>✅ Desktop「rolls back earlier registrations when a later Wiki registration conflicts」；Web <code>installWikiFeatureHandlers</code> try/catch 反向释放</td></tr>
+</table>
+<h2>验证记录</h2>
+<table><tr><th>命令</th><th>结果</th></tr>
+<tr><td><code>desktop: npm run typecheck</code></td><td>通过</td></tr>
+<tr><td><code>desktop: npm run lint</code></td><td>0 error（既有 10 条 warning 位于本批未触碰文件；5-4 遗留的空接口 lint error 已由 <code>8f36569</code> 单独修复）</td></tr>
+<tr><td><code>desktop: npx vitest run</code></td><td>163 文件 / 1874 tests 全部通过，含新增 <code>tests/unit/wiki-reducer-lifecycle.test.ts</code> 7 例</td></tr>
+<tr><td><code>web: npm run typecheck</code></td><td>通过</td></tr>
+<tr><td><code>web: npx vitest run</code></td><td>33 文件 / 217 tests 全部通过，含新增 <code>src/App.wiki-lifecycle.test.tsx</code> 真实宿主用例</td></tr>
+</table>
+<p>主 agent 验收审查修正了子 agent 测试稿的两处问题：<code>App.wiki-lifecycle.test.tsx</code> 的 AppConfig mock 缺必填字段与 <code>act</code> 未导入（typecheck 失败）、对 <code>./hooks/useChat</code> 的整模块 mock 误删了 <code>normalizeWikiCardPages</code> 导出（改为 <code>importOriginal</code> 部分 mock）。</p>
+<p>平台说明：本批在 macOS（darwin arm64）执行。实现仅使用 DOM <code>CustomEvent</code>/<code>AbortController</code> 与 React 标准接口，无平台分支；Linux/Windows 由同一 Chromium/Electron 与 React 运行时承载，语义一致，本批未单独实测。</p>
+<p><a href="plugin-architecture-stage-5-closing.html">阶段 5 原验收记录</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

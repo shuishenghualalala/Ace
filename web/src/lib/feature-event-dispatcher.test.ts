@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   compatFeatureEvent,
   FeatureEventRegistry,
-  featureEventRegistry,
   parseFeatureEventBody,
 } from "./feature-event-dispatcher";
 import type { Chunk } from "../types";
@@ -160,7 +159,7 @@ describe("parseFeatureEventBody", () => {
 });
 
 describe("featureEventRegistry singleton", () => {
-  it("is a shared registry", () => {
-    expect(featureEventRegistry).toBeInstanceOf(FeatureEventRegistry);
+  it("is available as an isolated host registry", () => {
+    expect(new FeatureEventRegistry()).toBeInstanceOf(FeatureEventRegistry);
   });
 });

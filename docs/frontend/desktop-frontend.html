@@ -785,5 +785,11 @@
     <p>验证：Desktop Team 回合渲染回归、CSS 引用扫描、TypeScript typecheck 与 production build 通过。</p>
   </section>
 </div>
+<section>
+  <h2>Wiki 事件能力生命周期（2026-09-11）</h2>
+  <p>Wiki Feature 持有 cards、ingest_progress 和 changed 三类事件注册的 disposer。显式禁用 Wiki 时撤销注册，再次启用时重新安装；宿主卸载同时释放能力变化监听。普通页面切换保留后台事件接收，历史数据和后端任务不因撤销 UI 注册而删除或取消。</p>
+  <p>旧 wiki_changed 广播保留在历史加载与序号处理之前的时序，但 DOM 广播由 Wiki 自有 handler 执行。注册发生冲突时回滚本次已经安装的条目。未知配置仍沿用原有缺省可用规则，不改变导航兼容语义。</p>
+  <p>已验收：typecheck、lint（0 error）与全量 1874 tests 通过，记录见 <a href="../testing/plugin-architecture-stage-5-wiki-event-lifecycle.html">阶段 5-8 测试记录</a>。</p>
+</section>
 </body>
 </html>

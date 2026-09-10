@@ -3,7 +3,7 @@ import { state, type TabKey } from '../state';
 
 export const WIKI_DISABLED_MESSAGE = 'Wiki 功能暂未开放，请联系管理员开启。';
 
-/** Keep the pre-registry visible behavior while /api/config is unavailable. */
+/** Keep the existing visible-by-default behavior while /api/config is unavailable. */
 export function wikiFeatureEnabled(config: BackendConfig | null | undefined = state.config): boolean {
   return config?.wiki?.enabled !== false;
 }

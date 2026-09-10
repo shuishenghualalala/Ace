@@ -115,9 +115,6 @@ export class FeatureEventRegistry {
   }
 }
 
-/** 全局单例，App 初始化时由各 feature 注入 handler。 */
-export const featureEventRegistry = new FeatureEventRegistry();
-
 export interface CompatFeatureEvent {
   feature: string;
   event: string;

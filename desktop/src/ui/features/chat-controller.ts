@@ -98,6 +98,7 @@ import {
   USER_WAIT_CHUNK_KINDS,
   type UsagePayload,
 } from '../reducers/chat-reducer';
+import { featureEventRegistry } from './event-reducer-registry';
 import {
   $,
   addSubscribedSessions,
@@ -999,10 +1000,14 @@ export function applyChunk(incomingChunk: ChatChunk): void {
     return;
   }
   if (chunk.kind === 'wiki_changed') {
-    const body = (chunk.body ?? {}) as { changes?: Array<Record<string, unknown>> };
-    window.dispatchEvent(new CustomEvent('wiki:changed', {
-      detail: { sessionId: sid, changes: body.changes ?? [] },
-    }));
+    // owner 级广播保持在 history/sequence 之前；具体副作用由 Wiki feature handler 持有。
+    featureEventRegistry.dispatch('wiki', 'changed', 1, chunk.body, {
+      sessionId: sid,
+      messages: getMessages(sid),
+      book: bookFor(sid),
+      now: Date.now(),
+      sequence: typeof chunk.sequence === 'number' ? chunk.sequence : 0,
+    });
     return;
   }
   // history 正在加载：排队，等 loadBackendHistory 写回后统一 flush，防止被全量替换覆盖。

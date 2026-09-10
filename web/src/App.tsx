@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import Sidebar, { type SidebarView } from "./components/Sidebar";
 import TopBar from "./components/TopBar";
 import ChatPanel from "./components/ChatPanel";
@@ -16,7 +16,7 @@ import {
   installKanbanFeatureHandlers,
   installTeamFeatureHandlers,
 } from "./features/feature-events";
-import { featureEventRegistry } from "./lib/feature-event-dispatcher";
+import { FeatureEventRegistry } from "./lib/feature-event-dispatcher";
 import { UiPageRegistry } from "./lib/ui-feature-registry";
 import TaskBoard from "./components/TaskBoard";
 import WorkspaceModal from "./components/WorkspaceModal";
@@ -216,20 +216,21 @@ export default function App() {
     refreshTasks();
   }, [refreshSessions, refreshTasks]);
 
-  // 在 useChat 建立 WS 前完成 feature handler 注册，避免首帧到达时还未就绪。
-  const featureHandlerDisposersRef = useRef<(() => void)[]>([]);
-  if (featureHandlerDisposersRef.current.length === 0) {
-    featureHandlerDisposersRef.current = [
-      installWikiFeatureHandlers(featureEventRegistry),
-      installTeamFeatureHandlers(featureEventRegistry),
-      installKanbanFeatureHandlers(featureEventRegistry),
+  // Registry 属于 App 宿主；所有安装都在 commit 阶段完成，避免 render 期副作用。
+  const appFeatureEventRegistry = useMemo(() => new FeatureEventRegistry(), []);
+  useLayoutEffect(() => {
+    const disposers = [
+      installTeamFeatureHandlers(appFeatureEventRegistry),
+      installKanbanFeatureHandlers(appFeatureEventRegistry),
     ];
-  }
-  useEffect(() => {
-    return () => featureHandlerDisposersRef.current.forEach((d) => d());
-  }, []);
+    return () => disposers.forEach((dispose) => dispose());
+  }, [appFeatureEventRegistry]);
+  useLayoutEffect(() => {
+    if (!wikiEnabled) return;
+    return installWikiFeatureHandlers(appFeatureEventRegistry);
+  }, [appFeatureEventRegistry, wikiEnabled]);
 
-  const chat = useChat(currentSessionId, onAfterFinal);
+  const chat = useChat(currentSessionId, onAfterFinal, appFeatureEventRegistry);
   const currentExternalTeam = externalTeams.find((team) => team.id === sessionExternalTeams[currentSessionId]);
   const currentTeamMembers = useMemo(() => teamMembersForBoard(currentExternalTeam), [currentExternalTeam]);
 

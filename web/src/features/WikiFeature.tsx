@@ -176,8 +176,9 @@ export default function WikiFeature({
 }
 
 export function installWikiFeatureHandlers(registry: FeatureEventRegistry): () => void {
-  const disposers = [
-    registry.register({
+  const disposers: (() => void)[] = [];
+  try {
+    disposers.push(registry.register({
       feature: "wiki",
       event: "cards",
       version: 1,
@@ -207,8 +208,8 @@ export function installWikiFeatureHandlers(registry: FeatureEventRegistry): () =
           ],
         };
       },
-    }),
-    registry.register({
+    }));
+    disposers.push(registry.register({
       feature: "wiki",
       event: "ingest_progress",
       version: 1,
@@ -226,8 +227,8 @@ export function installWikiFeatureHandlers(registry: FeatureEventRegistry): () =
         };
         return { wikiProgress: progress };
       },
-    }),
-    registry.register({
+    }));
+    disposers.push(registry.register({
       feature: "wiki",
       event: "changed",
       version: 1,
@@ -236,7 +237,10 @@ export function installWikiFeatureHandlers(registry: FeatureEventRegistry): () =
           payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
         return { wikiChanged: (body.changes as unknown[]) ?? [] };
       },
-    }),
-  ];
+    }));
+  } catch (error) {
+    disposers.forEach((dispose) => dispose());
+    throw error;
+  }
   return () => disposers.forEach((d) => d());
 }
