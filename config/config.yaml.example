@@ -231,6 +231,13 @@ wiki:
   # 可填 llm.models 下的 profile key；留空时跟随当前会话模型，
   # 无会话上下文时回退当前账号的默认模型。
   model: ""
+  # 语义检索（embedding）配置。默认关闭，开启后在关键词检索之外增加向量召回。
+  semantic:
+    enabled: false
+    provider: openai  # openai（OpenAI 兼容 API）或 local（本地 fastembed）
+    model: text-embedding-3-small
+    base_url: ""      # 留空则复用主模型 Base URL
+    api_key_env: OPENAI_API_KEY
 
 # 进程内 HTTP 边界（web_search/web_extract/Wiki 抓取）的上游代理。
 # 安全意味着“经过策略判断”，判断通过后把流量级联到用户已有的上游代理，

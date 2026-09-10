@@ -6,7 +6,14 @@
  * 入口由 settings.ts 在切换 Pane 时调用，不在此处绑定点击事件。
  */
 
-import { backendApi, type ModelOption, type ModelPayload, type PlatformConfigResponse, type PlatformRow } from '../backend-client';
+import {
+  backendApi,
+  type ModelOption,
+  type ModelPayload,
+  type PlatformConfigResponse,
+  type PlatformRow,
+  type WikiSemanticConfig,
+} from '../backend-client';
 import { showConfirmDialog } from '../ui-feedback';
 import { $, escapeHtml, notify, state } from '../state';
 import { loadConfig } from './model-picker';
@@ -59,6 +66,214 @@ const CHANNEL_TOGGLES: Record<string, Array<{ key: string; label: string; hint?:
 let modelIntegrationView: SettingsIntegrationView | null = null;
 let channelIntegrationView: SettingsIntegrationView | null = null;
 let switchingDefaultModel = false;
+let savingSemanticConfig = false;
+
+const DEFAULT_SEMANTIC_CONFIG: WikiSemanticConfig = {
+  enabled: false,
+  provider: 'openai',
+  model: 'text-embedding-3-small',
+  base_url: '',
+  api_key_env: 'OPENAI_API_KEY',
+  has_key: false,
+};
+
+function semanticConfig(): WikiSemanticConfig {
+  return {
+    ...DEFAULT_SEMANTIC_CONFIG,
+    ...(state.config?.wiki?.semantic ?? {}),
+  };
+}
+
+function semanticFieldValue(id: string): string {
+  return (document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null)?.value.trim() ?? '';
+}
+
+function syncSemanticPanelVisibility(): void {
+  const enabled = Boolean((document.getElementById('cfg-wiki-semantic-enabled') as HTMLInputElement | null)?.checked);
+  const body = document.getElementById('cfg-wiki-semantic-body');
+  if (body) body.hidden = !enabled;
+}
+
+function syncSemanticProviderFields(provider?: string): void {
+  const isOpenAI = (provider ?? (document.getElementById('cfg-wiki-semantic-provider') as HTMLSelectElement | null)?.value) !== 'local';
+  const baseUrl = document.getElementById('cfg-wiki-semantic-base-url-wrap');
+  const keyEnv = document.getElementById('cfg-wiki-semantic-key-env-wrap');
+  const apiKey = document.getElementById('cfg-wiki-semantic-api-key-wrap');
+  if (baseUrl) baseUrl.hidden = !isOpenAI;
+  if (keyEnv) keyEnv.hidden = !isOpenAI;
+  if (apiKey) apiKey.hidden = !isOpenAI;
+  const hint = document.getElementById('cfg-wiki-semantic-provider-hint');
+  if (hint) {
+    hint.textContent = isOpenAI
+      ? '兼容 OpenAI / Azure / DeepSeek / Ollama 等 /embeddings 接口。'
+      : '使用本地 fastembed 模型；首次启用可能需要下载模型依赖。';
+  }
+}
+
+function fillSemanticConfigForm(config: WikiSemanticConfig = semanticConfig()): void {
+  const enabled = document.getElementById('cfg-wiki-semantic-enabled') as HTMLInputElement | null;
+  const provider = document.getElementById('cfg-wiki-semantic-provider') as HTMLSelectElement | null;
+  const model = document.getElementById('cfg-wiki-semantic-model') as HTMLInputElement | null;
+  const baseUrl = document.getElementById('cfg-wiki-semantic-base-url') as HTMLInputElement | null;
+  const keyEnv = document.getElementById('cfg-wiki-semantic-key-env') as HTMLInputElement | null;
+  const apiKey = document.getElementById('cfg-wiki-semantic-api-key') as HTMLInputElement | null;
+  if (enabled) enabled.checked = Boolean(config.enabled);
+  if (provider) provider.value = config.provider === 'local' ? 'local' : 'openai';
+  if (model) model.value = config.model || (config.provider === 'local' ? 'BAAI/bge-small-zh-v1.5' : DEFAULT_SEMANTIC_CONFIG.model);
+  if (baseUrl) baseUrl.value = config.base_url || '';
+  if (keyEnv) keyEnv.value = config.api_key_env || DEFAULT_SEMANTIC_CONFIG.api_key_env;
+  if (apiKey) {
+    apiKey.value = '';
+    apiKey.placeholder = config.has_key ? '已配置，留空则保留原 Key' : '输入 Embedding API Key';
+  }
+  syncSemanticProviderFields(provider?.value);
+  syncSemanticPanelVisibility();
+  const keyStatus = document.getElementById('cfg-wiki-semantic-key-status');
+  if (keyStatus) {
+    keyStatus.textContent = config.provider === 'local'
+      ? '本地 Provider 不需要 API Key。'
+      : config.has_key
+        ? `已配置 Key${config.api_key_masked ? `（${config.api_key_masked}）` : ''}`
+        : '尚未配置 API Key；启用后将回退到关键词检索。';
+  }
+  const summaryStatus = document.getElementById('cfg-wiki-semantic-summary-status');
+  if (summaryStatus) {
+    summaryStatus.textContent = config.enabled ? '已启用' : '可选 · 未启用';
+    summaryStatus.dataset.enabled = String(Boolean(config.enabled));
+  }
+}
+
+export function readSemanticConfigForm(): {
+  enabled: boolean;
+  provider: 'openai' | 'local';
+  model: string;
+  base_url: string;
+  api_key_env: string;
+  api_key: string;
+} {
+  const provider = semanticFieldValue('cfg-wiki-semantic-provider') === 'local' ? 'local' : 'openai';
+  return {
+    enabled: Boolean((document.getElementById('cfg-wiki-semantic-enabled') as HTMLInputElement | null)?.checked),
+    provider,
+    model: semanticFieldValue('cfg-wiki-semantic-model'),
+    base_url: semanticFieldValue('cfg-wiki-semantic-base-url'),
+    api_key_env: semanticFieldValue('cfg-wiki-semantic-key-env'),
+    api_key: semanticFieldValue('cfg-wiki-semantic-api-key'),
+  };
+}
+
+function createSemanticConfigView(): HTMLElement {
+  const section = document.createElement('section');
+  section.className = 'semantic-config';
+  section.innerHTML = `
+    <div class="semantic-config__row">
+      <div class="semantic-config__summary-copy">
+        <span class="semantic-config__summary-eyebrow">可选能力</span>
+        <strong class="semantic-config__summary-title">Wiki 语义检索</strong>
+        <span class="semantic-config__summary-desc">Embedding · 需要时再开启</span>
+      </div>
+      <div class="semantic-config__summary-meta">
+        <span class="semantic-config__summary-status" id="cfg-wiki-semantic-summary-status">可选 · 未启用</span>
+        <label class="set-v2-switch" aria-label="启用语义检索">
+          <input type="checkbox" id="cfg-wiki-semantic-enabled">
+          <span class="set-v2-switch__track"></span>
+        </label>
+      </div>
+    </div>
+    <div class="semantic-config__body" id="cfg-wiki-semantic-body">
+      <p class="semantic-config__desc">失败时会自动回退到关键词检索。配置按当前账号生效，API Key 只会保存到账号环境文件。</p>
+      <form class="semantic-config__form" id="cfg-wiki-semantic-form">
+        <div class="semantic-config__fields">
+          <div class="semantic-config__field">
+            <label class="semantic-config__label" for="cfg-wiki-semantic-provider">Embedding 提供方</label>
+            <select class="semantic-config__control" id="cfg-wiki-semantic-provider">
+              <option value="openai">OpenAI 兼容 API</option>
+              <option value="local">本地 fastembed</option>
+            </select>
+            <span class="semantic-config__hint" id="cfg-wiki-semantic-provider-hint"></span>
+          </div>
+          <div class="semantic-config__field">
+            <label class="semantic-config__label" for="cfg-wiki-semantic-model">Embedding 模型</label>
+            <input class="semantic-config__control" id="cfg-wiki-semantic-model" placeholder="例如 text-embedding-3-small">
+            <span class="semantic-config__hint">OpenAI 兼容服务填写服务端模型名；本地模式填写 Hugging Face 模型 ID。</span>
+          </div>
+          <div class="semantic-config__field semantic-config__field--openai" id="cfg-wiki-semantic-base-url-wrap">
+            <label class="semantic-config__label" for="cfg-wiki-semantic-base-url">Base URL</label>
+            <input class="semantic-config__control" id="cfg-wiki-semantic-base-url" placeholder="可留空，复用主模型 Base URL">
+            <span class="semantic-config__hint">需要时填写兼容接口地址，例如 https://api.openai.com/v1。</span>
+          </div>
+          <div class="semantic-config__field semantic-config__field--openai" id="cfg-wiki-semantic-key-env-wrap">
+            <label class="semantic-config__label" for="cfg-wiki-semantic-key-env">API Key 环境变量</label>
+            <input class="semantic-config__control" id="cfg-wiki-semantic-key-env" placeholder="例如 OPENAI_API_KEY" autocomplete="off">
+            <span class="semantic-config__hint">Key 会保存到当前账号的环境文件，不会写入配置 YAML。</span>
+          </div>
+          <div class="semantic-config__field semantic-config__field--openai semantic-config__field--wide" id="cfg-wiki-semantic-api-key-wrap">
+            <label class="semantic-config__label" for="cfg-wiki-semantic-api-key">API Key</label>
+            <input class="semantic-config__control" id="cfg-wiki-semantic-api-key" type="password" placeholder="输入 Embedding API Key" autocomplete="new-password">
+            <span class="semantic-config__hint" id="cfg-wiki-semantic-key-status"></span>
+          </div>
+        </div>
+        <div class="semantic-config__footer">
+          <span class="semantic-config__save-status" id="cfg-wiki-semantic-save-status" role="status"></span>
+          <button class="mw-button mw-button--secondary mw-button--small" type="submit" id="cfg-wiki-semantic-save">保存</button>
+        </div>
+      </form>
+    </div>
+  `;
+  const provider = section.querySelector<HTMLSelectElement>('#cfg-wiki-semantic-provider');
+  provider?.addEventListener('change', () => {
+    syncSemanticProviderFields(provider.value);
+    const model = section.querySelector<HTMLInputElement>('#cfg-wiki-semantic-model');
+    if (model && !model.value.trim()) model.value = provider.value === 'local' ? 'BAAI/bge-small-zh-v1.5' : DEFAULT_SEMANTIC_CONFIG.model;
+  });
+  section.querySelector<HTMLInputElement>('#cfg-wiki-semantic-enabled')?.addEventListener('change', () => {
+    syncSemanticPanelVisibility();
+    void saveSemanticConfig();
+  });
+  section.querySelector<HTMLFormElement>('#cfg-wiki-semantic-form')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void saveSemanticConfig();
+  });
+  return section;
+}
+
+async function saveSemanticConfig(): Promise<void> {
+  if (savingSemanticConfig) return;
+  const form = readSemanticConfigForm();
+  if (!form.model) {
+    notify('请填写 Embedding 模型');
+    return;
+  }
+  if (form.provider === 'openai' && !form.api_key_env) {
+    notify('请填写 API Key 环境变量名');
+    return;
+  }
+  savingSemanticConfig = true;
+  const button = document.getElementById('cfg-wiki-semantic-save') as HTMLButtonElement | null;
+  const status = document.getElementById('cfg-wiki-semantic-save-status');
+  if (button) {
+    button.disabled = true;
+    button.textContent = '保存中…';
+  }
+  if (status) status.textContent = '';
+  try {
+    const next = await backendApi.updateWikiSemantic(form);
+    state.config = next;
+    await loadConfig();
+    fillSemanticConfigForm(semanticConfig());
+    if (status) status.textContent = '已保存';
+    notify('Embedding 配置已更新');
+  } catch (error) {
+    if (status) status.textContent = '保存失败';
+    notify(`Embedding 配置保存失败：${(error as Error).message}`);
+  } finally {
+    savingSemanticConfig = false;
+    if (button) {
+      button.disabled = false;
+      button.textContent = '保存';
+    }
+  }
+}
 
 async function setDefaultModel(modelId: string): Promise<void> {
   const config = state.config;
@@ -114,6 +329,9 @@ function ensureModelIntegrationView(): SettingsIntegrationView | null {
     });
   }
   if (!pane.contains(modelIntegrationView.element)) pane.replaceChildren(modelIntegrationView.element);
+  if (!modelIntegrationView.trailing.querySelector('.semantic-config')) {
+    modelIntegrationView.trailing.appendChild(createSemanticConfigView());
+  }
   return modelIntegrationView;
 }
 
@@ -504,6 +722,8 @@ export async function renderConfigModels(): Promise<void> {
     });
     return;
   }
+
+  fillSemanticConfigForm(semanticConfig());
 
   const models = state.config.model_profiles ?? state.config.models ?? [];
   if (models.length === 0) {

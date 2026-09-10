@@ -437,6 +437,23 @@ export interface ModelPayload {
   capabilities?: string[];
 }
 
+/** Wiki 语义检索（embedding）配置；API Key 只返回是否存在和脱敏值。 */
+export interface WikiSemanticConfig {
+  enabled: boolean;
+  provider: 'openai' | 'local' | string;
+  model: string;
+  base_url: string;
+  api_key_env: string;
+  has_key: boolean;
+  api_key_masked?: string;
+  editable?: boolean;
+}
+
+export interface WikiConfigSummary {
+  enabled?: boolean;
+  semantic?: WikiSemanticConfig;
+}
+
 export interface BrowserPageState {
   owner_hash: string;
   session_hash: string;
@@ -480,6 +497,7 @@ export interface BackendConfig {
   models: ModelOption[];
   model_profiles?: ModelOption[];
   is_gateway_admin?: boolean;
+  wiki?: WikiConfigSummary;
   external_agents?: {
     enabled?: boolean;
   };
@@ -1646,6 +1664,17 @@ export const backendApi = {
       method: 'PUT',
       ...jsonBody(payload),
     }),
+  updateWikiSemantic: (payload: {
+    enabled: boolean;
+    provider: 'openai' | 'local';
+    model: string;
+    base_url?: string;
+    api_key_env?: string;
+    api_key?: string;
+  }) => getJSON<BackendConfig & { ok: boolean }>('/api/config/wiki-semantic', {
+    method: 'PUT',
+    ...jsonBody(payload),
+  }),
   deleteModel: (modelId: string, opts?: { force?: boolean }) => {
     const q = opts?.force ? '?force=true' : '';
     return getJSON<{ ok: boolean; removed: ModelOption; active_model_id: string; models: ModelOption[]; switched_to?: string; rebound_sessions?: string[]; busy_sessions?: string[] }>(

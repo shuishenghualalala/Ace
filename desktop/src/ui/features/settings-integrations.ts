@@ -31,6 +31,7 @@ export interface SettingsIntegrationSnapshot {
 export interface SettingsIntegrationView {
   element: HTMLElement;
   leading: HTMLElement;
+  trailing: HTMLElement;
   update(snapshot: SettingsIntegrationSnapshot): void;
 }
 
@@ -51,6 +52,7 @@ export function createSettingsIntegrationView(options: {
   const status = document.createElement('div');
   const leading = document.createElement('div');
   const list = document.createElement('div');
+  const trailing = document.createElement('div');
   let snapshot: SettingsIntegrationSnapshot = { state: 'loading', message: '', items: [] };
 
   element.className = 'settings-integrations';
@@ -80,7 +82,8 @@ export function createSettingsIntegrationView(options: {
   leading.className = 'settings-integrations__leading';
   list.className = 'settings-integrations__list';
   list.setAttribute('role', 'list');
-  element.append(header, status, leading, list);
+  trailing.className = 'settings-integrations__trailing';
+  element.append(header, status, leading, list, trailing);
 
   const selectItem = (id: string): void => {
     const item = snapshot.items.find((candidate) => candidate.id === id);
@@ -109,6 +112,7 @@ export function createSettingsIntegrationView(options: {
   return {
     element,
     leading,
+    trailing,
     update(nextSnapshot) {
       snapshot = nextSnapshot;
       status.dataset.state = nextSnapshot.state;
