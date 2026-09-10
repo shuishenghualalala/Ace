@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>阶段 5-5 外援 UI Contribution 测试记录</title>
+<style>body{font:16px/1.75 system-ui,sans-serif;max-width:960px;margin:auto;padding:40px 24px;color:#222}h2{border-bottom:1px solid #ddd}code{background:#f4f4f4;padding:2px 5px}a{color:#245a83}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 10px}</style></head>
+<body><main>
+<h1>阶段 5-5 · 外援 UI Contribution 生命周期化 测试记录</h1>
+<p>2026-09-10 · 提交 <code>1abb89e</code>。Node.js 本机执行（macOS）；DOM 生命周期与 React 挂载语义，无平台相关分支。</p>
+<h2>范围</h2>
+<table>
+<tr><th>端</th><th>改动</th></tr>
+<tr><td>Desktop</td><td><code>agents-page.ts</code> 封装为 <code>PageContribution</code>（<code>isAvailable</code> = <code>externalAgentsEnabled()</code>，signal/epoch 守卫，activate 绑定全局事件、deactivate 释放 popover/引导/draft/formation/agentHubView 并移除 DOM）；<code>app.ts</code> 删除 agents 硬编码分支，注册进 PageRegistry；<code>syncExternalAgentsFeatureUi()</code> 不再直改 DOM，入口显隐由 shell capability 统一驱动</td></tr>
+<tr><td>Web</td><td>新建 <code>features/AgentsFeature.tsx</code> 挂载单元（mountedRef 守卫），<code>App.tsx</code> 经 <code>UiPageRegistry</code> 投影 agents 页面，禁用时返回 null 不挂载不发请求</td></tr>
+</table>
+<h2>生命周期契约核验</h2>
+<ul>
+<li>禁用时：Desktop <code>setTab('agents')</code> 拒绝（返回 false）；当前在 agents 页则 <code>pageRegistry.deactivate()</code> + 回落 chat；Web <code>onViewChange</code> 门控 + capability 变化切走。</li>
+<li>晚到异步响应不回写已停用页面：Desktop 全部异步操作检查 <code>signal.aborted</code> 与 epoch；Web 卸载后 mountedRef 阻断 setState。</li>
+<li>离页不删业务数据、不停止后端会话；会话列表过滤与历史展示语义不回退。</li>
+<li>重复 activate 不累积监听/计时器（deactivate 经 signal 统一解绑）。</li>
+</ul>
+<h2>测试与类型（主 agent 独立复跑）</h2>
+<ul>
+<li>Desktop：新增 <code>agents-page.test.ts</code> 生命周期用例（重复 activate、deactivate 释放、isAvailable 门控、晚到响应不回写、禁用时 loadAgentsPage 短路）；<code>external-agents-feature.test.ts</code> 更新为事件派发语义。<code>npx vitest run</code> 159 文件 / 1843 测试通过（基线 158/1836）；<code>npx tsc --noEmit</code> 无错误。</li>
+<li>Web：新增 <code>AgentsFeature.test.tsx</code>（卸载守卫、registry 禁用返回 null、启用返回节点）。<code>npm test</code> 30 文件 / 193 测试通过（基线 29/190）；<code>npm run typecheck</code> 与 <code>npm run build</code> 通过。</li>
+</ul>
+<h2>回退</h2>
+<p>撤销提交 <code>1abb89e</code> 即恢复中心接线；无数据或协议变更。</p>
+<p><a href="plugin-architecture-stage-5-event-reducer-registry.html">阶段 5-4 Reducer Registry</a> · <a href="plugin-architecture-stage-5-api-client-split.html">阶段 5-3 API Client 拆分</a></p>
+</main></body></html>
