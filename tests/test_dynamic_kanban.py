@@ -1412,18 +1412,89 @@ async def test_runtime_emits_workflow_progress_chunks(
     )
     env = Envelope.of("progress test", session_id="s_progress")
     chunks = [c async for c in runtime.run(wf, definition, "req_progress", env)]
-    progress_chunks = [c for c in chunks if c.kind == "workflow_progress"]
+    progress_chunks = [
+        c for c in chunks
+        if c.kind == "feature_event"
+        and c.body.get("feature") == "kanban"
+        and c.body.get("event") == "workflow_progress"
+    ]
     assert len(progress_chunks) >= 3, f"应至少产生启动、进入阶段、完成等 progress 帧，实际 {len(progress_chunks)}"
 
     first = progress_chunks[0]
-    assert first.body["workflow_id"] == wf.id
-    assert first.body["status"] == "running"
-    assert first.body["current_phase"]["id"] == "phase_1"
+    payload = first.body["payload"]
+    assert payload["workflow_id"] == wf.id
+    assert payload["status"] == "running"
+    assert payload["current_phase"]["id"] == "phase_1"
 
     # 最终帧应标记为 done
     last_progress = progress_chunks[-1]
-    assert last_progress.body["status"] == "done"
-    assert last_progress.body.get("current_phase") is None or last_progress.body["current_phase"]["status"] == "done"
+    last_payload = last_progress.body["payload"]
+    assert last_payload["status"] == "done"
+    assert last_payload.get("current_phase") is None or last_payload["current_phase"]["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_manager_background_stream_blanks_request_id_for_feature_event(
+    db_path: str,
+) -> None:
+    """后台化后，feature_event kanban workflow_progress 帧也应清空 request_id 推送。"""
+    store = SQLiteKanbanStore(db_path).for_owner("local")
+    cfg = Config(db_path=db_path)
+    pushed: list[ResponseChunk] = []
+
+    def capture_chunk(session_id: str, chunk: ResponseChunk, owner: str) -> None:
+        pushed.append(chunk)
+
+    manager = DynamicKanbanManager(
+        store=store,
+        provider=FakeProvider(),
+        base_registry=Registry(),
+        session_store=InMemorySessionStore(),
+        memory=NullMemory(),
+        plugins=PluginManager([], registry=Registry()),
+        config=cfg,
+        on_runtime_chunk=capture_chunk,
+    )
+
+    async def _gen() -> AsyncIterator[ResponseChunk]:
+        yield ResponseChunk.delta("req_bg", "first", sequence=1)
+        # 让主循环越过后台化阈值；0.2s 足够覆盖前台 wait_for 0.1s 超时
+        await asyncio.sleep(0.2)
+        yield ResponseChunk.feature_event(
+            "req_bg",
+            "kanban",
+            "workflow_progress",
+            payload={"workflow_id": "wf1", "status": "running"},
+            sequence=2,
+        )
+
+    chunks = [
+        c async for c in manager._stream_runtime_with_background(
+            _gen(),
+            request_id="req_bg",
+            envelope=Envelope.of("q", session_id="s_bg"),
+            session_id="s_bg",
+            background_after_seconds=0.001,
+        )
+    ]
+    # 前台只拿到第一帧 delta + 后台化提示 status
+    assert any(c.kind == "delta" for c in chunks)
+    assert any(c.kind == "status" for c in chunks)
+
+    # 等待后台 consumer 把剩余帧推送完成
+    for _ in range(200):
+        if manager._background_tasks:
+            await asyncio.sleep(0.01)
+        else:
+            break
+
+    # 后台推送的 workflow_progress feature_event request_id 应被清空
+    assert len(pushed) == 1
+    pushed_chunk = pushed[0]
+    assert pushed_chunk.kind == "feature_event"
+    assert pushed_chunk.body["feature"] == "kanban"
+    assert pushed_chunk.body["event"] == "workflow_progress"
+    assert pushed_chunk.request_id == ""
 
 
 @pytest.mark.asyncio

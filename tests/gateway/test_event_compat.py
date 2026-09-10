@@ -60,6 +60,10 @@ class TestExpandOutgoingPayload:
             ("wiki", "cards", "wiki_cards"),
             ("wiki", "changed", "wiki_changed"),
             ("wiki", "ingest_progress", "wiki_ingest_progress"),
+            ("kanban", "started", "kanban"),
+            ("kanban", "board_changed", "kanban"),
+            ("kanban", "call_completed", "kanban"),
+            ("kanban", "workflow_progress", "workflow_progress"),
         ],
     )
     def test_registered_events_convert_to_legacy_kind(self, feature, event, legacy_kind):
@@ -68,7 +72,11 @@ class TestExpandOutgoingPayload:
         assert len(frames) == 1
         frame = frames[0]
         assert frame["kind"] == legacy_kind
-        assert frame["body"] == payload
+        expected_body = payload
+        if legacy_kind == "kanban":
+            # 旧 kanban 帧由 feature_event 重建 event 字段
+            expected_body = {"event": event, **payload}
+        assert frame["body"] == expected_body
         # 帧级字段透传
         assert frame["request_id"] == "req_1"
         assert frame["session_id"] == "s1"
@@ -171,3 +179,113 @@ class TestTeamInternalChunkContract:
         assert frame["kind"] == "team_internal"
         assert frame["body"]["text"] == "你好"
         assert frame["request_id"] == "req_1"
+
+
+class TestDynamicKanbanChunkContract:
+    def test_kanban_event_chunk_emits_feature_event(self):
+        chunk = ResponseChunk.feature_event(
+            "req_1", "kanban", "started", {"workflow_id": "wf1"}
+        )
+        assert chunk.kind == "feature_event"
+        assert chunk.body == {
+            "feature": "kanban",
+            "event": "started",
+            "version": 1,
+            "payload": {"workflow_id": "wf1"},
+        }
+
+    def test_workflow_progress_chunk_emits_feature_event(self):
+        chunk = ResponseChunk.feature_event(
+            "req_1",
+            "kanban",
+            "workflow_progress",
+            payload={"workflow_id": "wf1", "status": "running"},
+        )
+        assert chunk.kind == "feature_event"
+        assert chunk.body["feature"] == "kanban"
+        assert chunk.body["event"] == "workflow_progress"
+        assert chunk.body["version"] == 1
+        assert chunk.body["payload"]["workflow_id"] == "wf1"
+
+    def test_kanban_event_compat_reconstructs_legacy_body(self):
+        """feature_event 出口转换后，旧 kanban 帧 body 与迁移前逐字节一致。"""
+        legacy_chunk = ResponseChunk.kanban_event(
+            "req_1", "started", {"workflow_id": "wf1"}
+        )
+        feature_chunk = ResponseChunk.feature_event(
+            "req_1", "kanban", "started", {"workflow_id": "wf1"}
+        )
+
+        legacy_frame = expand_outgoing_payload(
+            {
+                "kind": legacy_chunk.kind,
+                "body": legacy_chunk.body,
+                "request_id": "req_1",
+                "session_id": "s1",
+            }
+        )[0]
+        converted_frame = expand_outgoing_payload(
+            {
+                "kind": "feature_event",
+                "body": feature_chunk.body,
+                "request_id": "req_1",
+                "session_id": "s1",
+            }
+        )[0]
+
+        assert converted_frame["kind"] == "kanban"
+        assert converted_frame["body"] == legacy_frame["body"]
+        assert converted_frame["body"] == {"event": "started", "workflow_id": "wf1"}
+
+    def test_workflow_progress_compat_reconstructs_legacy_body(self):
+        """feature_event 出口转换后，旧 workflow_progress 帧 body 与迁移前逐字节一致。"""
+        legacy_chunk = ResponseChunk.workflow_progress(
+            "req_1",
+            "wf1",
+            status="running",
+            current_phase={
+                "id": "p1",
+                "name": "阶段1",
+                "description": "",
+                "status": "running",
+            },
+        )
+        feature_chunk = ResponseChunk.feature_event(
+            "req_1",
+            "kanban",
+            "workflow_progress",
+            payload={
+                "workflow_id": "wf1",
+                "status": "running",
+                "current_phase": {
+                    "id": "p1",
+                    "name": "阶段1",
+                    "description": "",
+                    "status": "running",
+                },
+            },
+        )
+
+        legacy_frame = expand_outgoing_payload(
+            {
+                "kind": legacy_chunk.kind,
+                "body": legacy_chunk.body,
+                "request_id": "req_1",
+                "session_id": "s1",
+            }
+        )[0]
+        converted_frame = expand_outgoing_payload(
+            {
+                "kind": "feature_event",
+                "body": feature_chunk.body,
+                "request_id": "req_1",
+                "session_id": "s1",
+            }
+        )[0]
+
+        assert converted_frame["kind"] == "workflow_progress"
+        assert converted_frame["body"] == legacy_frame["body"]
+
+    def test_unknown_kanban_event_dropped(self, caplog):
+        frames = expand_outgoing_payload(_feature_frame("kanban", "not_registered", {}))
+        assert frames == []

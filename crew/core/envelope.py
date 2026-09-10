@@ -22,10 +22,11 @@ ChunkKind = Literal[
     "workflow_progress",
     # 命名空间业务事件：body = {"feature", "event", "version", "payload"}。
     "feature_event",
-    # 以下三个业务枚举处于迁移期：生产侧已改发 feature_event，旧帧由
+    # 以下业务枚举处于迁移期：生产侧已改发 feature_event，旧帧由
     # gateway event_compat 适配器在出口转换生成；前端 reducer 全部迁移后删除。
     "wiki_cards", "wiki_ingest_progress",
     "team_internal",
+    "kanban", "workflow_progress",
 ]
 Status = Literal["in_progress", "succeeded", "failed"]
 Mode = str
@@ -264,7 +265,11 @@ class ResponseChunk:
 
     @staticmethod
     def kanban_event(request_id: str, event: str, payload: dict[str, Any] | None = None, sequence: int = 0) -> "ResponseChunk":
-        """Dynamic Kanban 看板事件：如 workflow 启动/结束，供前端按需打开/关闭看板。"""
+        """Dynamic Kanban 看板事件（迁移期兼容工厂）。
+
+        生产侧已改发 feature_event(feature="kanban", event=..., version=1)；
+        本工厂保留至前端 reducer 全部迁移到 ace.feature-event.v1 后删除。
+        """
         return ResponseChunk(
             request_id,
             kind="kanban",
@@ -284,7 +289,10 @@ class ResponseChunk:
         message: str = "",
         sequence: int = 0,
     ) -> "ResponseChunk":
-        """Dynamic Kanban 工作流进度事件：结构化地描述当前阶段、已完成阶段和正在执行的调用。
+        """Dynamic Kanban 工作流进度事件（迁移期兼容工厂）。
+
+        生产侧已改发 feature_event(feature="kanban", event="workflow_progress", version=1)；
+        本工厂保留至前端 reducer 全部迁移到 ace.feature-event.v1 后删除。
 
         前端把它渲染成对话中始终可见的进度面板，避免大量阶段编排 status 文本被折叠到过程区。
         """

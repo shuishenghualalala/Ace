@@ -24,6 +24,10 @@ _LEGACY_KIND_BY_EVENT: dict[tuple[str, str, int], str] = {
     ("wiki", "cards", 1): "wiki_cards",
     ("wiki", "changed", 1): "wiki_changed",
     ("wiki", "ingest_progress", 1): "wiki_ingest_progress",
+    ("kanban", "started", 1): "kanban",
+    ("kanban", "board_changed", 1): "kanban",
+    ("kanban", "call_completed", 1): "kanban",
+    ("kanban", "workflow_progress", 1): "workflow_progress",
 }
 
 # 透传到旧帧的帧级字段（kind/body 由映射决定，gateway_sequence 由出口分配）。
@@ -59,6 +63,10 @@ def expand_outgoing_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
         "kind": legacy_kind,
         "body": body.get("payload") or {},
     }
+    # 旧 kanban 帧 body 约定以 event 字段开头，feature_event payload 不重复携带
+    # event 名，因此在这里重建，保证出口旧帧与迁移前逐字节一致。
+    if legacy_kind == "kanban":
+        frame["body"] = {"event": key[1], **dict(frame["body"])}
     for field in _PASSTHROUGH_FRAME_FIELDS:
         if field in payload:
             frame[field] = payload[field]

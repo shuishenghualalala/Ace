@@ -105,6 +105,10 @@ class DynamicKanbanManager:
     def clear_provider_state(self) -> None:
         self._orchestrators.clear()
 
+    def set_provider(self, provider: LLMProvider) -> None:
+        """更新全局默认 Provider；不清理已有的 owner 级编排缓存。"""
+        self.provider = provider
+
     def _default_agent_factory(
         self,
         *,
@@ -503,6 +507,17 @@ class DynamicKanbanManager:
         background_after_seconds: float,
     ) -> AsyncIterator[ResponseChunk]:
         """流式输出 runtime 结果；超过后台化阈值后自动 detached 继续执行并返回提示。"""
+
+        def _is_unattached_control_chunk(chunk: ResponseChunk) -> bool:
+            """status / workflow_progress 帧需要清空 request_id，作为无归属控制帧渲染。"""
+            if chunk.kind in {"status", "workflow_progress"} and chunk.request_id:
+                return True
+            # 迁移后 workflow_progress 改发 feature_event(feature="kanban", event="workflow_progress")
+            if chunk.kind == "feature_event" and chunk.request_id:
+                body = chunk.body
+                return body.get("feature") == "kanban" and body.get("event") == "workflow_progress"
+            return False
+
         if background_after_seconds <= 0:
             async with aclosing(runtime_gen) as stream:
                 async for chunk in stream:
@@ -519,7 +534,7 @@ class DynamicKanbanManager:
                 # 后台 status / workflow_progress 帧若仍携带原 request_id，桌面端回合封口后会按“旧回合迟到生成帧”丢弃。
                 # 清空 request_id 让桌面把它当作无归属控制帧，始终渲染。
                 push_chunk = chunk
-                if chunk.kind in {"status", "workflow_progress"} and chunk.request_id:
+                if _is_unattached_control_chunk(chunk):
                     push_chunk = ResponseChunk(
                         request_id="",
                         kind=chunk.kind,

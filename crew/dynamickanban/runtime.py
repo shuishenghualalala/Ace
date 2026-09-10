@@ -193,7 +193,9 @@ class WorkflowRuntime:
         self._active_definition = definition
         self._active_workflow_id = workflow.id
 
-        yield ResponseChunk.kanban_event(request_id, "started", {"workflow_id": workflow.id}, _seq())
+        yield ResponseChunk.feature_event(
+            request_id, "kanban", "started", {"workflow_id": workflow.id}, _seq()
+        )
         yield ResponseChunk.status_event(
             request_id,
             f"🚀 Workflow Runtime 已启动：{definition.summary}",
@@ -229,8 +231,8 @@ class WorkflowRuntime:
                         f"⏸ workflow 已暂停：{state.pause_reason}",
                         _seq(),
                     )
-                    yield ResponseChunk.kanban_event(
-                        request_id, "board_changed", {"workflow_id": workflow.id}, _seq()
+                    yield ResponseChunk.feature_event(
+                        request_id, "kanban", "board_changed", {"workflow_id": workflow.id}, _seq()
                     )
                     break
 
@@ -426,8 +428,8 @@ class WorkflowRuntime:
                 state.status = status
                 self.store.save_runtime_state(state)
 
-            yield ResponseChunk.kanban_event(
-                request_id, "board_changed", {"workflow_id": workflow.id}, _seq()
+            yield ResponseChunk.feature_event(
+                request_id, "kanban", "board_changed", {"workflow_id": workflow.id}, _seq()
             )
             final_message = ""
             if status == "done":
@@ -465,8 +467,8 @@ class WorkflowRuntime:
                     self.store.pause_workflow(workflow.id, state.pause_reason)
                 except ValueError:
                     pass  # 已是终态，无需再落 paused
-            yield ResponseChunk.kanban_event(
-                request_id, "board_changed", {"workflow_id": workflow.id}, _seq()
+            yield ResponseChunk.feature_event(
+                request_id, "kanban", "board_changed", {"workflow_id": workflow.id}, _seq()
             )
             raise
 
@@ -613,8 +615,9 @@ class WorkflowRuntime:
                 yield status_chunk
 
                 # 触发右侧看板刷新；详细结果仍保存在 runtime_state 中供 /status API 查询。
-                yield ResponseChunk.kanban_event(
+                yield ResponseChunk.feature_event(
                     request_id,
+                    "kanban",
                     "call_completed",
                     {
                         "workflow_id": workflow.id,
@@ -967,8 +970,8 @@ class WorkflowRuntime:
                 status="running",
                 message=f"自动重规划（原因：{reason[:80]}）",
             ),
-            ResponseChunk.kanban_event(
-                request_id, "board_changed", {"workflow_id": workflow.id}, seq_fn()
+            ResponseChunk.feature_event(
+                request_id, "kanban", "board_changed", {"workflow_id": workflow.id}, seq_fn()
             ),
         ]
 
@@ -1691,17 +1694,21 @@ class WorkflowRuntime:
                     "name": phase.name,
                     "status": "done",
                 })
-        return ResponseChunk.workflow_progress(
+        return ResponseChunk.feature_event(
             request_id,
-            workflow.id,
-            status=status or state.status or "running",
-            current_phase=current_phase,
-            completed_phases=completed_phases or None,
-            active_calls=[
-                {"call_id": c.id, "role": c.role or c.id, "phase_id": current_phase_id}
-                for c in (active_calls or [])
-            ] or None,
-            message=message,
+            "kanban",
+            "workflow_progress",
+            payload={
+                "workflow_id": workflow.id,
+                "status": status or state.status or "running",
+                "current_phase": current_phase,
+                "completed_phases": completed_phases or None,
+                "active_calls": [
+                    {"call_id": c.id, "role": c.role or c.id, "phase_id": current_phase_id}
+                    for c in (active_calls or [])
+                ] or None,
+                "message": message,
+            },
             sequence=sequence,
         )
 
