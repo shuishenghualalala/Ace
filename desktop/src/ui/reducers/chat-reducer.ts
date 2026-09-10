@@ -439,7 +439,7 @@ export function chunkRequestId(chunk: AnyChatChunk, fallback?: string): string |
   return typeof body.request_id === 'string' && body.request_id.trim() ? body.request_id : undefined;
 }
 
-export interface ReducerResult extends FeatureReducerResult {}
+export type ReducerResult = FeatureReducerResult;
 
 // ---------- 7 个 reducer ----------
 
