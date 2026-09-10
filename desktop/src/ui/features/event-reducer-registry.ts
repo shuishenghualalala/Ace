@@ -4,11 +4,11 @@
  * 桌面端业务事件统一入口：后端 Gateway compat 层仍发旧帧（wiki_cards / team_internal 等），
  * 但核心 Shell 只认插槽；Feature 按 (feature, event, version) 注册自己的 reducer。
  *
- * 注册时机说明（迁移期妥协）：
+ * 注册时机说明：
  * - Wiki Agent 在 initWikiAgent() 内显式注册；
- * - Dynamic Kanban / Team Collaboration 目前没有独立的生命周期 init，暂时在模块顶层
- *   import 时自注册。registry 提供幂等 disposer，后续 5-5/5-6 生命周期切片可平滑接管为
- *   显式注册/注销，无需改动 registry 本体。
+ * - Dynamic Kanban 在 initKanbanBoard() 内显式注册；
+ * - Team Collaboration 在 initTeamCollaborationBoard() 内显式注册；
+ * - 各 feature 的 dispose 函数负责撤销注册，registry 提供的 disposer 幂等。
  *
  * 安全行为：未知 feature/event 或版本不匹配时，dispatch 返回 null 并 console.warn 可诊断信息。
  */

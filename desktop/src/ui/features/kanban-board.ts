@@ -14,10 +14,10 @@ import type { ChatMessage, WorkflowProgressPayload } from '../chat-render';
 import {
   featureEventRegistry,
   emptyFeatureReducerResult,
-  uniqueMessageId,
   type FeatureReducerContext,
   type FeatureReducerResult,
 } from './event-reducer-registry';
+import { registerKanbanBoardCallbacks } from './board-hooks';
 import {
   activateWorkflowTimeline,
   buildWorkflowTimelineHtml,
@@ -167,41 +167,51 @@ export function isRelevantRuntimeTask(task: Task): boolean {
   return true;
 }
 
-export function bindTaskBoardResize(): void {
-  if (resizeBound) return;
+export function bindTaskBoardResize(): () => void {
+  if (resizeBound) return () => {};
   const handle = $('#task-board-resize-handle') as HTMLElement | null;
-  if (!handle) return;
+  if (!handle) return () => {};
 
   let resizing = false;
   let startX = 0;
   let startWidth = state.taskBoardWidth;
 
-  handle.addEventListener('mousedown', (e) => {
+  const onMouseDown = (e: MouseEvent): void => {
     resizing = true;
     startX = e.clientX;
     startWidth = state.taskBoardWidth;
     setRuntimeStyle(document.body, 'cursor', 'col-resize');
     setRuntimeStyle(document.body, 'userSelect', 'none');
     e.preventDefault();
-  });
+  };
 
-  window.addEventListener('mousemove', (e) => {
+  const onMouseMove = (e: MouseEvent): void => {
     if (!resizing) return;
     const delta = startX - e.clientX;
     const next = Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, startWidth + delta));
     state.taskBoardWidth = next;
     applyTaskBoardWidth(next);
-  });
+  };
 
-  window.addEventListener('mouseup', () => {
+  const onMouseUp = (): void => {
     if (!resizing) return;
     resizing = false;
     clearRuntimeStyle(document.body, 'cursor');
     clearRuntimeStyle(document.body, 'userSelect');
     saveToStorage(STORAGE_KEY, state.taskBoardWidth);
-  });
+  };
+
+  handle.addEventListener('mousedown', onMouseDown);
+  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('mouseup', onMouseUp);
 
   resizeBound = true;
+  return () => {
+    handle.removeEventListener('mousedown', onMouseDown);
+    window.removeEventListener('mousemove', onMouseUp);
+    window.removeEventListener('mouseup', onMouseUp);
+    resizeBound = false;
+  };
 }
 
 function applyTaskBoardWidth(width: number): void {
@@ -583,11 +593,67 @@ export function workflowProgressReducer(
   };
 }
 
-// 迁移期妥协：Dynamic Kanban 目前没有独立生命周期 init，先在模块 import 时自注册。
-// registry 已提供幂等 disposer，后续 5-5/5-6 生命周期切片可平滑接管为显式注册/注销。
-featureEventRegistry.register({
-  feature: 'kanban',
-  event: 'workflow_progress',
-  version: 1,
-  reducer: (payload, ctx) => workflowProgressReducer(payload as WorkflowProgressBody, ctx),
-});
+let kanbanInitDisposer: (() => void) | null = null;
+
+function resetKanbanBoardState(): void {
+  state.kanbanBoard = { tasks: [], dependencies: [], events: [] };
+  latestStatus = null;
+  state.tasks = [];
+  stopKanbanStatusPolling();
+  if (kanbanRefreshTimer !== null) {
+    window.clearTimeout(kanbanRefreshTimer);
+    kanbanRefreshTimer = null;
+  }
+}
+
+function createKanbanBoardDisposer(
+  disposeReducer: () => void,
+  disposeResize: () => void,
+  disposeHooks: () => void,
+): () => void {
+  return (): void => {
+    disposeReducer();
+    disposeResize();
+    disposeHooks();
+    resetKanbanBoardState();
+  };
+}
+
+/**
+ * 初始化 Dynamic Kanban 看板生命周期：
+ * - 注册 feature event reducer（kanban/workflow_progress@1）；
+ * - 向 board-hooks 注册中心调用回调；
+ * - 绑定任务面板 resize。
+ * 返回的 disposer 与 disposeKanbanBoard() 共享同一条清理路径。
+ */
+export function initKanbanBoard(): () => void {
+  if (kanbanInitDisposer) return kanbanInitDisposer;
+
+  const disposeReducer = featureEventRegistry.register({
+    feature: 'kanban',
+    event: 'workflow_progress',
+    version: 1,
+    reducer: (payload, ctx) => workflowProgressReducer(payload as WorkflowProgressBody, ctx),
+  });
+  const disposeResize = bindTaskBoardResize();
+  const disposeHooks = registerKanbanBoardCallbacks({
+    refresh: refreshKanbanBoard,
+    scheduleRefresh: scheduleRefreshKanbanBoard,
+    render: renderKanbanBoard,
+  });
+
+  kanbanInitDisposer = createKanbanBoardDisposer(disposeReducer, disposeResize, disposeHooks);
+  return kanbanInitDisposer;
+}
+
+/** 显式销毁 Dynamic Kanban 看板：撤销 reducer、注销回调、释放计时器与状态。 */
+export function disposeKanbanBoard(): void {
+  kanbanInitDisposer?.();
+  kanbanInitDisposer = null;
+}
+
+/** 测试隔离用：重置模块级状态并清理生命周期。 */
+export function __resetKanbanBoardForTest(): void {
+  disposeKanbanBoard();
+  resetKanbanBoardState();
+}

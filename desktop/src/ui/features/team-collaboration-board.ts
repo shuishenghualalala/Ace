@@ -27,6 +27,7 @@ import {
   type FeatureReducerContext,
   type FeatureReducerResult,
 } from './event-reducer-registry';
+import { registerTeamBoardCallbacks } from './board-hooks';
 
 const CREW_BUILTIN_AGENT_ID = 'crew::builtin';
 const TEAM_PLAN_SOURCES = new Set(['team_plan', 'team_kanban', 'team_flow_fallback']);
@@ -794,15 +795,8 @@ export function stopTeamCollaborationPolling(): void {
 
 /** 清理模块级 UI 快照；仅供单元测试隔离用。 */
 export function __resetTeamCollaborationBoardForTest(): void {
-  stopTeamCollaborationPolling();
-  snapshots.clear();
-  stableNodes.clear();
-  expandedTurns.clear();
-  knownTurns.clear();
-  expandedNodes.clear();
-  filesOpen.clear();
-  stableProgress.clear();
-  refreshInFlight.clear();
+  disposeTeamCollaborationBoard();
+  resetTeamCollaborationState();
 }
 
 export function teamCollaborationTaskCount(sessionId: string | null | undefined = state.activeSessionId): number {
@@ -1251,11 +1245,56 @@ export function teamInternalReducer(body: TeamInternalBody, ctx: FeatureReducerC
   };
 }
 
-// 迁移期妥协：Team Collaboration 目前没有独立生命周期 init，先在模块 import 时自注册。
-// registry 已提供幂等 disposer，后续 5-5/5-6 生命周期切片可平滑接管为显式注册/注销。
-featureEventRegistry.register({
-  feature: 'team',
-  event: 'internal_message',
-  version: 1,
-  reducer: (payload, ctx) => teamInternalReducer(payload as TeamInternalBody, ctx),
-});
+let teamInitDisposer: (() => void) | null = null;
+
+function resetTeamCollaborationState(): void {
+  stopTeamCollaborationPolling();
+  snapshots.clear();
+  stableNodes.clear();
+  expandedTurns.clear();
+  knownTurns.clear();
+  expandedNodes.clear();
+  filesOpen.clear();
+  stableProgress.clear();
+  refreshInFlight.clear();
+}
+
+function createTeamCollaborationBoardDisposer(
+  disposeReducer: () => void,
+  disposeHooks: () => void,
+): () => void {
+  return (): void => {
+    disposeReducer();
+    disposeHooks();
+    resetTeamCollaborationState();
+  };
+}
+
+/**
+ * 初始化 Team Collaboration 看板生命周期：
+ * - 注册 feature event reducer（team/internal_message@1）；
+ * - 向 board-hooks 注册中心调用回调。
+ * 返回的 disposer 与 disposeTeamCollaborationBoard() 共享同一条清理路径。
+ */
+export function initTeamCollaborationBoard(): () => void {
+  if (teamInitDisposer) return teamInitDisposer;
+
+  const disposeReducer = featureEventRegistry.register({
+    feature: 'team',
+    event: 'internal_message',
+    version: 1,
+    reducer: (payload, ctx) => teamInternalReducer(payload as TeamInternalBody, ctx),
+  });
+  const disposeHooks = registerTeamBoardCallbacks({
+    primeTeamIdentity: primeTeamCollaborationIdentity,
+  });
+
+  teamInitDisposer = createTeamCollaborationBoardDisposer(disposeReducer, disposeHooks);
+  return teamInitDisposer;
+}
+
+/** 显式销毁 Team Collaboration 看板：撤销 reducer、注销回调、释放轮询与状态。 */
+export function disposeTeamCollaborationBoard(): void {
+  teamInitDisposer?.();
+  teamInitDisposer = null;
+}

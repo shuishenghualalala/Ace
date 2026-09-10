@@ -39,7 +39,15 @@ import { openWorkItemDrawer } from './features/work/item-space';
 import type { WorkItem } from './backend-client';
 import { setNotificationClickHandler } from './features/work/notifications';
 import { initSystemTrayStatus } from './features/system-tray';
-import { refreshKanbanBoard, renderKanbanBoard } from './features/kanban-board';
+import {
+  disposeKanbanBoard,
+  initKanbanBoard,
+} from './features/kanban-board';
+import {
+  disposeTeamCollaborationBoard,
+  initTeamCollaborationBoard,
+} from './features/team-collaboration-board';
+import { refreshKanbanBoard, renderKanbanBoard } from './features/board-hooks';
 import { bindSystemTab, disposeSystemTab, renderSystemLogs, renderSystemOverview } from './features/system-page';
 import { initUsagePage } from './features/usage-panel';
 import { activateCronPage, renderCronTaskBoard, setCronCallbacks } from './features/cron-page';
@@ -617,6 +625,10 @@ async function init(
   });
   registerDispose(disposeWikiAgentFeature);
   registerDispose(installWikiFeature());
+  await safe('initKanbanBoard', () => { initKanbanBoard(); });
+  registerDispose(disposeKanbanBoard);
+  await safe('initTeamCollaborationBoard', () => { initTeamCollaborationBoard(); });
+  registerDispose(disposeTeamCollaborationBoard);
   await safe('setSessionControllerSetTab', () => setSessionControllerSetTab(setTab));
   await safe('bindGlobalEvents', () => {
     registerDispose(bindGlobalEvents());

@@ -11,7 +11,7 @@
 import { BackendChatSocket, backendApi } from '../backend-client';
 import type { PlanReviewStatus } from '../chat-render';
 import { renderWorkspaceHistory } from './workspaces';
-import { refreshKanbanBoard } from './kanban-board';
+import { refreshKanbanBoard } from './board-hooks';
 import { refreshCronJobs } from './cron-page';
 import { findChannelSession, loadChannelSessions } from './channel-sessions';
 import { discardDraft, loadWorkspaces, loadSessionsList, refreshSidebarAfterHydrate } from './workspaces';

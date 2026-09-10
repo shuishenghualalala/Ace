@@ -3,11 +3,15 @@
  *
  * dispatch 开回合与 applyChunk gate：首帧必须在 turnSealed=false + activeRequestId 绑定后到达。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // 共享 mock 必须先于 chat-controller 加载，见 helpers/mock-chat-controller-deps.ts
 import './helpers/mock-chat-controller-deps';
 import { applyChunk } from '../../src/ui/features/chat-controller';
 import { openTurnForRequest } from '../../src/ui/features/session-busy';
+import {
+  disposeTeamCollaborationBoard,
+  initTeamCollaborationBoard,
+} from '../../src/ui/features/team-collaboration-board';
 import { resolveTurnGate } from '../../src/ui/reducers/chat-reducer';
 import { __resetAllStoresForTest, messageStore, sessionStore } from '../../src/ui/stores/stores';
 import { appendSessionMessage, setActiveExternalTeamForSession, setActiveSessionId } from '../../src/ui/state';
@@ -37,6 +41,11 @@ beforeEach(() => {
   __resetAllStoresForTest();
   setActiveSessionId('sid-1');
   document.body.innerHTML = '<div id="chat-messages"></div><div id="composer-controls"></div><div class="chat-running-intro"></div>';
+  initTeamCollaborationBoard();
+});
+
+afterEach(() => {
+  disposeTeamCollaborationBoard();
 });
 
 describe('dispatch turn gate', () => {

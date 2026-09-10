@@ -1,8 +1,13 @@
 /**
  * chat-reducer 单测：覆盖 7 个 kind + unknown 兜底。
+ *
+ * reduceChunk dispatch 测试依赖 feature reducer 注册；kanban-board 的 init 会
+ * 访问 DOM 绑定 resize，因此需要 happy-dom 环境。
+ *
+ * @vitest-environment happy-dom
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   reduceChunk,
   normalizeChunk,
@@ -19,7 +24,7 @@ import {
   followupQuestionReducer,
   type ReducerSnapshot,
 } from '../../src/ui/reducers/chat-reducer';
-import { workflowProgressReducer } from '../../src/ui/features/kanban-board';
+import { workflowProgressReducer, initKanbanBoard, disposeKanbanBoard } from '../../src/ui/features/kanban-board';
 import type { Bookkeeping, FileChange } from '../../src/ui/state';
 import type { ChatMessage } from '../../src/ui/chat-render';
 
@@ -985,6 +990,14 @@ describe('workflowProgressReducer', () => {
 });
 
 describe('reduceChunk dispatch', () => {
+  beforeEach(() => {
+    disposeKanbanBoard();
+    initKanbanBoard();
+  });
+  afterEach(() => {
+    disposeKanbanBoard();
+  });
+
   it('routes each kind to its reducer', () => {
     const snap = makeSnapshot();
     expect(reduceChunk({ kind: 'delta', body: {}, sequence: 1 }, snap).statusHint).toBe('running');

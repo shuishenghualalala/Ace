@@ -47,8 +47,11 @@ import {
   type OpenSessionFn,
 } from './workspaces';
 import { syncComposerWorkspaceLabel } from './composer-toolbar';
-import { refreshKanbanBoard, scheduleRefreshKanbanBoard } from './kanban-board';
-import { primeTeamCollaborationIdentity } from './team-collaboration-board';
+import {
+  primeTeamCollaborationIdentity,
+  refreshKanbanBoard,
+  scheduleRefreshKanbanBoard,
+} from './board-hooks';
 import { syncCraftLabel, syncComposerModelLabel } from './composer-toolbar';
 import { syncModelUi } from './model-picker';
 import { resetToAgentMode } from './session-mode';
