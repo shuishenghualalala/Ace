@@ -768,7 +768,7 @@ export interface SessionPlanState {
 export interface Task {
   id: string;
   task_id?: string;
-  kind?: 'shell' | 'subagent' | 'agent_turn' | 'team';
+  kind?: 'shell' | 'subagent' | 'agent_turn' | 'team' | 'wiki_ingest';
   session_id?: string;
   title: string;
   detail?: string;

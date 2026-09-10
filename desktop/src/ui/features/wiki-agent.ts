@@ -70,6 +70,7 @@ import {
 } from './session-model';
 import {
   appendMessage,
+  applyChunk,
   bookFor,
   dispatchWs,
   editQueueItem,
@@ -338,6 +339,7 @@ async function activateEmbeddedSession(
   ensureWikiSessionRow(sessionId);
   subscribeSessions([sessionId]);
   await loadBackendHistory(sessionId);
+  await loadEmbeddedWikiTasks(sessionId);
   await loadEmbeddedTodos(sessionId);
   ensureWikiSessionRow(sessionId);
   scheduleEmbeddedRender();
@@ -347,6 +349,35 @@ async function activateEmbeddedSession(
     activeRingControl?.refresh();
   });
   return item;
+}
+
+async function loadEmbeddedWikiTasks(sessionId: string): Promise<void> {
+  try {
+    const tasks = await backendApi.tasks(sessionId);
+    tasks
+      .filter((task) => task.kind === 'wiki_ingest')
+      .sort((left, right) => Number(left.created_at || 0) - Number(right.created_at || 0))
+      .forEach((task) => {
+        applyChunk({
+          kind: 'task',
+          body: {
+            task_id: task.task_id || task.id,
+            task_kind: task.kind,
+            status: task.status,
+            phase: task.status,
+            progress: task.progress || {},
+            output_ref: task.output_ref || '',
+            summary: task.result || task.error || '',
+            rehydrated: true,
+          },
+          is_final: ['completed', 'failed', 'cancelled', 'timed_out'].includes(task.status),
+          sequence: 0,
+          session_id: sessionId,
+        });
+      });
+  } catch {
+    // 兼容旧后端或离线状态；在线任务仍会通过 task WS 事件更新。
+  }
 }
 
 async function loadEmbeddedTodos(sessionId: string): Promise<void> {
@@ -1165,6 +1196,18 @@ export function initWikiAgent(): void {
       event.preventDefault();
       const pageId = viewBtn.getAttribute('data-wiki-view-page') ?? '';
       openWikiPageInHub(pageId);
+      return;
+    }
+    const cancelIngest = target.closest<HTMLButtonElement>('[data-wiki-ingest-cancel]');
+    if (cancelIngest?.dataset.wikiIngestCancel) {
+      event.preventDefault();
+      cancelIngest.disabled = true;
+      void backendApi.cancelTask(cancelIngest.dataset.wikiIngestCancel)
+        .then(() => notify('已停止 Wiki 深度整理'))
+        .catch((err) => {
+          cancelIngest.disabled = false;
+          notify(`停止失败：${(err as Error).message}`);
+        });
       return;
     }
     const confirm = target.closest<HTMLElement>('[data-wiki-confirm]');

@@ -164,6 +164,44 @@ async def test_capture_document_publish_failure_does_not_break_capture(store):
     assert raw.parse_status == "parsed"
 
 
+async def test_capture_document_publishes_source_before_metadata_finishes(store, monkeypatch):
+    """轻量元数据仍在生成时，全文 Source 页面已经可以被 Wiki 读取。"""
+    import asyncio
+
+    metadata_started = asyncio.Event()
+    release_metadata = asyncio.Event()
+
+    async def _metadata(_provider, _text):
+        metadata_started.set()
+        await release_metadata.wait()
+        return {
+            "summary": "摘要",
+            "tags": ["标签"],
+            "doc_type": "note",
+            "ingest_recommend": True,
+            "ingest_reason": "值得整理",
+        }
+
+    monkeypatch.setattr("crew.wiki.capture.generate_source_metadata", _metadata)
+    compiler = SimpleNamespace(publish_source_page=Mock())
+    task = asyncio.create_task(capture_upload_to_wiki(
+        store,
+        compiler,
+        WikiConfig(),
+        "note.txt",
+        b"hello wiki",
+        owner_account_id="A:uid-a",
+        provider=object(),
+    ))
+
+    await metadata_started.wait()
+    assert compiler.publish_source_page.call_count == 1
+    release_metadata.set()
+    raw = await task
+    assert raw is not None
+    assert compiler.publish_source_page.call_count == 2
+
+
 async def test_capture_never_raises(store, monkeypatch):
     """底层异常（如磁盘错误）被吞掉并返回 None，不影响上传主链路。"""
     monkeypatch.setattr(store, "_source_dir", Mock(side_effect=RuntimeError("disk full")))

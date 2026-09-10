@@ -2640,6 +2640,36 @@
   cursor: pointer;
 }
 
+.wiki-ingest-task__actions {
+  display: flex;
+  margin-top: 8px;
+}
+
+.wiki-ingest-task__actions button {
+  border: 1px solid var(--mw-border-subtle);
+  border-radius: var(--mw-radius-3);
+  background: transparent;
+  color: var(--mw-text-secondary);
+  cursor: pointer;
+  padding: 4px 9px;
+  font: inherit;
+}
+
+.wiki-ingest-task__actions button:hover:not(:disabled) {
+  color: var(--mw-text-primary);
+  border-color: var(--mw-border-strong);
+}
+
+.wiki-ingest-task__actions button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.wiki-ingest-result-card p {
+  margin: 8px 0 0;
+  color: var(--mw-text-secondary);
+}
+
 /* ── 分栏拖拽把手（对齐 web ResizablePanels sash） ── */
 
 .wiki-sash {

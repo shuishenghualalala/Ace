@@ -9,6 +9,7 @@ import {
   deltaReducer,
   thinkingReducer,
   toolReducer,
+  wikiIngestTaskReducer,
   statusReducer,
   finalReducer,
   applyOrderedDelta,
@@ -567,6 +568,99 @@ describe('toolReducer', () => {
     const updated = r.replaceBook?.toolMap.get('t1');
     expect(updated?.status).toBe('done');
     expect(updated?.progressText).toBeUndefined();
+  });
+});
+
+describe('wikiIngestTaskReducer', () => {
+  it('keeps a background ingest independent from the foreground turn book', () => {
+    const snap = makeSnapshot({ book: { ...emptyBook(), turnSealed: true } });
+    const r = wikiIngestTaskReducer({
+      kind: 'task',
+      body: {
+        task_id: 'task-wiki-1',
+        task_kind: 'wiki_ingest',
+        status: 'running',
+        progress: {
+          source_title: '产品资料',
+          stage: 'analyzing_chunks',
+          label: '已分析第 2/5 个分块',
+        },
+      },
+      sequence: 1,
+    }, snap);
+
+    expect(r.replaceBook).toBeNull();
+    expect(r.statusHint).toBeUndefined();
+    expect(r.messageUpserts[0]?.message?.id).toBe('wiki-ingest-task-wiki-1');
+    expect(r.messageUpserts[0]?.message?.streaming).toBe(true);
+    expect(r.messageUpserts[0]?.message?.toolCalls?.[0]).toMatchObject({
+      name: 'wiki_plan_ingest',
+      status: 'running',
+      uiLabel: '后台整理《产品资料》',
+      progressText: '已分析第 2/5 个分块',
+    });
+  });
+
+  it('turns the same task card into a confirmation result', () => {
+    const first = wikiIngestTaskReducer({
+      kind: 'task',
+      body: {
+        task_id: 'task-wiki-2',
+        task_kind: 'wiki_ingest',
+        status: 'running',
+        progress: { source_title: '调研', label: '正在通读素材…' },
+      },
+      sequence: 1,
+    }, makeSnapshot());
+    const existing = first.messageUpserts[0]?.message;
+    const done = wikiIngestTaskReducer({
+      kind: 'task',
+      body: {
+        task_id: 'task-wiki-2',
+        task_kind: 'wiki_ingest',
+        status: 'completed',
+        progress: {
+          source_title: '调研',
+          stage: 'needs_confirmation',
+          label: '整理计划已就绪，等待确认',
+          result: { requires_confirmation: true, confirmation_id: 'wcf-bg' },
+        },
+      },
+      sequence: 2,
+    }, makeSnapshot({ messages: existing ? [existing] : [], now: 1_700_000_001_000 }));
+
+    expect(done.messageUpserts[0]?.op).toBe('patch');
+    expect(done.messageUpserts[0]?.patch?.streaming).toBe(false);
+    expect(done.messageUpserts[0]?.patch?.toolCalls?.[0]?.status).toBe('done');
+    expect(done.messageUpserts[0]?.patch?.toolCalls?.[0]?.result).toContain('wcf-bg');
+  });
+
+  it('coalesces granular chunk counters instead of growing an unbounded timeline', () => {
+    const first = wikiIngestTaskReducer({
+      kind: 'task',
+      body: {
+        task_id: 'task-wiki-chunks',
+        task_kind: 'wiki_ingest',
+        status: 'running',
+        progress: { source_title: '长文档', label: '正在通读素材（1/20 段）…' },
+      },
+      sequence: 1,
+    }, makeSnapshot());
+    const existing = first.messageUpserts[0]?.message;
+    const next = wikiIngestTaskReducer({
+      kind: 'task',
+      body: {
+        task_id: 'task-wiki-chunks',
+        task_kind: 'wiki_ingest',
+        status: 'running',
+        progress: { source_title: '长文档', label: '正在通读素材（12/20 段）…' },
+      },
+      sequence: 2,
+    }, makeSnapshot({ messages: existing ? [existing] : [] }));
+
+    expect(next.messageUpserts[0]?.patch?.toolCalls?.[0]?.progressHistory).toEqual([
+      '正在通读素材（12/20 段）…',
+    ]);
   });
 });
 

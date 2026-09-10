@@ -189,9 +189,9 @@ export interface TodoUpdatedChunk {
   session_id?: string;
 }
 
-/** 后台任务进度帧：crew/core/envelope.py ResponseChunk.task() 产生。
- *  桌面端当前通过 REST /api/tasks 驱动 kanban，WS task 帧仅作进度提示，
- *  故 reducer 走空实现（不丢帧、不报错，保留未来切换到 WS 驱动的入口）。 */
+/** 后台任务进度帧：crew/core/envelope.py ResponseChunk.task_event() 产生。
+ *  普通任务仍由 REST /api/tasks 驱动 kanban；Wiki 深度整理使用 WS 事件更新
+ *  对话内常驻卡片，并通过 REST 在页面恢复时补齐最新状态。 */
 export interface TaskChunk {
   kind: 'task';
   body: {
@@ -202,6 +202,8 @@ export interface TaskChunk {
     progress?: Record<string, unknown>;
     output_ref?: string;
     summary?: string;
+    /** REST 恢复的历史任务不重复弹完成通知。 */
+    rehydrated?: boolean;
   };
   sequence: number;
   session_id?: string;
@@ -332,7 +334,6 @@ export const TURN_SCOPED_CHUNK_KINDS = new Set<ChatChunkKind>([
   'file_changes',
   'wiki_cards',
   'kanban',
-  'task',
   'workflow_progress',
 ]);
 
@@ -376,6 +377,7 @@ export type TurnGateDecision =
  * - request_id 不匹配当前回合的帧，直接丢弃，避免旧回合附属帧污染当前 book。
  * - request_id 匹配且回合已封口的生成帧，是同一回合迟到帧，直接丢弃。
  * - 新发送/恢复/重连打开 acceptingNewRequest 后，首个带 request_id 的生成帧绑定当前回合。
+ * - task 是跨回合的后台生命周期事件，不参与 request gate。
  * - 无 request_id 的控制帧保持兼容；无法证明归属时只按 sealed 处理生成帧。
  */
 export function resolveTurnGate(
@@ -807,6 +809,94 @@ export function toolReducer(chunk: ToolChunk, snapshot: ReducerSnapshot): Reduce
     replaceBook: book,
     statusHint: 'running',
     queueHint: '',
+    finalize: false,
+  };
+}
+
+/**
+ * Wiki 深度整理是独立后台任务，不占用 Agent 回合。任务事件用稳定 message id
+ * 原地更新一张时间线卡，因此用户可以同时继续在同一 Wiki 会话中提问。
+ */
+export function wikiIngestTaskReducer(chunk: TaskChunk, snapshot: ReducerSnapshot): ReducerResult {
+  if (chunk.body.task_kind !== 'wiki_ingest') return emptyReducer(snapshot);
+  const taskId = typeof chunk.body.task_id === 'string' ? chunk.body.task_id.trim() : '';
+  if (!taskId) return emptyReducer(snapshot);
+
+  const messageId = `wiki-ingest-${taskId}`;
+  const existingMessage = snapshot.messages.find((message) => message.id === messageId);
+  const existingTool = existingMessage?.toolCalls?.[0];
+  const progress = chunk.body.progress && typeof chunk.body.progress === 'object'
+    ? chunk.body.progress
+    : {};
+  const label = typeof progress.label === 'string' && progress.label.trim()
+    ? progress.label.trim()
+    : '正在后台深度整理…';
+  const sourceTitle = typeof progress.source_title === 'string' && progress.source_title.trim()
+    ? progress.source_title.trim()
+    : '这份素材';
+  const status = String(chunk.body.status || 'running');
+  const running = status === 'pending' || status === 'running';
+  const failed = status === 'failed' || status === 'cancelled' || status === 'timed_out';
+  const history = existingTool?.progressHistory ? [...existingTool.progressHistory] : [];
+  if (label && history.at(-1) !== label) {
+    const isChunkCounter = (value: string): boolean => (
+      /通读素材（\d+\/\d+\s*段）/.test(value)
+      || /(?:分析第|已分析第?)\s*\d+\/\d+/.test(value)
+    );
+    if (history.length > 0 && isChunkCounter(label) && isChunkCounter(history.at(-1) ?? '')) {
+      history[history.length - 1] = label;
+    } else {
+      history.push(label);
+    }
+    if (history.length > 8) history.splice(0, history.length - 8);
+  }
+
+  let result: string | undefined;
+  const structuredResult = progress.result;
+  if (!running && structuredResult && typeof structuredResult === 'object') {
+    result = JSON.stringify(structuredResult);
+  } else if (!running && typeof chunk.body.summary === 'string' && chunk.body.summary.trim()) {
+    result = chunk.body.summary;
+  }
+  const stage = typeof progress.stage === 'string' ? progress.stage : '';
+  const uiLabel = failed
+    ? `整理《${sourceTitle}》失败`
+    : stage === 'needs_confirmation'
+      ? `《${sourceTitle}》的整理计划已就绪`
+      : running
+        ? `后台整理《${sourceTitle}》`
+        : `已整理《${sourceTitle}》`;
+  const startedAt = existingTool?.startedAt ?? snapshot.now;
+  const tool: ToolCallInfo = {
+    toolCallId: `wiki-ingest-tool-${taskId}`,
+    name: 'wiki_plan_ingest',
+    uiLabel,
+    status: failed ? 'error' : running ? 'running' : 'done',
+    startedAt,
+    ...(running ? {} : { duration: Math.max(0, snapshot.now - startedAt) }),
+    ...(result ? { result } : {}),
+    progressText: label,
+    progressHistory: history,
+  };
+  const message: ChatMessage = {
+    id: messageId,
+    role: 'assistant',
+    content: '',
+    timestamp: existingMessage?.timestamp ?? snapshot.now,
+    streaming: running,
+    segmentRole: 'process',
+    toolCalls: [tool],
+    turnStartedAt: existingMessage?.turnStartedAt ?? snapshot.now,
+    ...(!running ? { turnDurationMs: tool.duration ?? 0 } : {}),
+  };
+  return {
+    messageUpserts: existingMessage
+      ? [{ op: 'patch', messageId, patch: message }]
+      : [{ op: 'append', message }],
+    toolUpserts: [],
+    replaceBook: null,
+    statusHint: undefined,
+    queueHint: undefined,
     finalize: false,
   };
 }
@@ -1458,7 +1548,7 @@ export function reduceChunk(chunk: AnyChatChunk, snapshot: ReducerSnapshot): Red
     case 'todo_updated': return todoUpdatedReducer(chunk, snapshot);
     case 'file_changes': return fileChangesReducer(chunk, snapshot);
     case 'wiki_cards': return wikiCardsReducer(chunk, snapshot);
-    case 'task': return emptyReducer(snapshot); // 桌面端走 REST /api/tasks 驱动 kanban，WS task 帧仅保留入口
+    case 'task': return wikiIngestTaskReducer(chunk, snapshot);
     case 'team_internal': return emptyReducer(snapshot); // 需要跨消息合并，由 chat-controller 在 gate 后处理
     default: return unknownReducer(chunk, snapshot);
   }

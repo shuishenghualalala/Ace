@@ -1059,6 +1059,61 @@ async def test_wiki_plan_ingest_returns_confirmation_when_auto_apply_disabled(wi
     assert manager.issue_confirmation.call_args.kwargs["summary"] == "应用《资料标题》的 Wiki 变更计划"
 
 
+async def test_wiki_plan_ingest_launches_background_runtime_task(wiki_mocks, tmp_path):
+    """有统一任务运行时时，plan 工具立即返回，完整分析在独立任务中完成。"""
+    import json
+
+    from crew.tasks.runtime import TaskRuntime
+    from crew.wiki.schemas import PlanResult
+
+    store = wiki_mocks["store"]
+    compiler = wiki_mocks["compiler"]
+    manager = wiki_mocks["manager"]
+    store.get_source_titles.return_value = {"s1": "资料标题"}
+    manager.issue_confirmation.return_value = {
+        "requires_confirmation": True,
+        "confirmation_id": "wcf_background",
+        "action": "apply_ingest",
+        "summary": "应用《资料标题》的 Wiki 变更计划",
+        "impact": {"create": 1},
+    }
+
+    async def _plan(*_args, progress, **_kwargs):
+        await progress("正在通读素材并识别可沉淀的知识…")
+        return PlanResult(source_id="s1", total_new=1, plan_fingerprint="fp")
+
+    compiler.plan_ingest = AsyncMock(side_effect=_plan)
+    runtime = TaskRuntime(str(tmp_path / "tasks.db"))
+    workers = []
+    registry = Registry()
+    register_wiki_tools(
+        registry,
+        store,
+        compiler,
+        wiki_mocks["querier"],
+        manager,
+        config=wiki_mocks["config"],
+        task_runtime=runtime,
+        track_background_task=workers.append,
+    )
+    _set_context()
+
+    launched = json.loads(await registry.get("wiki_plan_ingest").run({"source_id": "s1"}))
+    assert launched["status"] == "launched"
+    assert launched["background"] is True
+    assert launched["task_id"]
+    assert workers
+
+    await workers[0]
+    task = runtime.get(launched["task_id"], owner_account_id="owner")
+    assert task["kind"] == "wiki_ingest"
+    assert task["status"] == "completed"
+    assert task["progress"]["stage"] == "needs_confirmation"
+    assert task["progress"]["result"]["confirmation_id"] == "wcf_background"
+    assert task["progress"]["result"]["background_task"] is True
+    runtime.close()
+
+
 async def test_capture_attachment_only_accepts_current_turn_allowlist(tmp_path, fs_wiki):
     uploads = tmp_path / "uploads"
     uploads.mkdir()

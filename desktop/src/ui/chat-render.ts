@@ -605,6 +605,19 @@ function appendToolProgressLines(parent: HTMLElement, tool: ToolCallInfo): void 
   parent.appendChild(progress);
 }
 
+function appendWikiIngestTaskActions(parent: HTMLElement, tool: ToolCallInfo): void {
+  const prefix = 'wiki-ingest-tool-';
+  if (tool.name !== 'wiki_plan_ingest' || tool.status !== 'running' || !tool.toolCallId.startsWith(prefix)) return;
+  const actions = document.createElement('div');
+  actions.className = 'wiki-ingest-task__actions';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.dataset.wikiIngestCancel = tool.toolCallId.slice(prefix.length);
+  cancel.textContent = '停止整理';
+  actions.appendChild(cancel);
+  parent.appendChild(actions);
+}
+
 function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
   if (SUBAGENT_CARD_TOOLS.has(tool.name)) return renderSubagentCard(tool, messageId);
   const isActive = tool.status === 'running' || tool.status === 'generating';
@@ -677,6 +690,7 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
     contentWrap.className = 'process-timeline__tool';
     contentWrap.appendChild(details);
     appendToolProgressLines(contentWrap, tool);
+    appendWikiIngestTaskActions(contentWrap, tool);
     return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
   }
 
@@ -696,6 +710,7 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
   contentWrap.className = 'process-timeline__tool';
   contentWrap.appendChild(content);
   appendToolProgressLines(contentWrap, tool);
+  appendWikiIngestTaskActions(contentWrap, tool);
   return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
 }
 
@@ -706,6 +721,12 @@ interface WikiConfirmationResult {
   summary?: string;
   impact?: Record<string, unknown>;
   expires_at?: number;
+}
+
+interface WikiBackgroundResult {
+  background_task?: boolean;
+  background_status?: string;
+  message?: string;
 }
 
 function parseWikiConfirmation(tool: ToolCallInfo): WikiConfirmationResult | null {
@@ -738,6 +759,30 @@ function renderWikiConfirmationCard(value: WikiConfirmationResult): HTMLElement 
   cancel.textContent = '取消';
   actions.append(confirm, cancel);
   card.append(title, impact, actions);
+  return card;
+}
+
+function parseWikiBackgroundResult(tool: ToolCallInfo): WikiBackgroundResult | null {
+  if (tool.name !== 'wiki_plan_ingest' || !tool.result) return null;
+  try {
+    const value = JSON.parse(tool.result) as WikiBackgroundResult & WikiConfirmationResult;
+    if (!value.background_task || value.requires_confirmation) return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function renderWikiBackgroundResultCard(value: WikiBackgroundResult): HTMLElement {
+  const card = document.createElement('section');
+  card.className = 'wiki-confirmation-card wiki-ingest-result-card';
+  const title = document.createElement('strong');
+  title.textContent = value.background_status === 'failed' ? 'Wiki 深度整理失败' : 'Wiki 深度整理完成';
+  const detail = document.createElement('p');
+  detail.textContent = value.message || (value.background_status === 'failed'
+    ? '整理没有完成，可以稍后重试。'
+    : '整理结果已经写入知识库。');
+  card.append(title, detail);
   return card;
 }
 
@@ -1108,6 +1153,8 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
       for (const t of m.toolCalls) {
         const confirmation = parseWikiConfirmation(t);
         if (confirmation) textParts.push(renderWikiConfirmationCard(confirmation));
+        const backgroundResult = parseWikiBackgroundResult(t);
+        if (backgroundResult) textParts.push(renderWikiBackgroundResultCard(backgroundResult));
         const interaction = renderToolInteractionCard(t);
         if (interaction) textParts.push(interaction);
       }

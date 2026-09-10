@@ -207,7 +207,19 @@ async def _capture_document(ctx: _Ctx, raw: RawSource, content: bytes, filename:
     raw.parsed_path = ctx.store.save_parsed_markdown(raw.id, text, ctx.owner_account_id, ctx.kb_id)
     raw.parse_status = "parsed"
 
+    # 解析完成即持久化并发布全文 Source 页面。轻量元数据同样需要调用 LLM，
+    # 不应成为素材在 Wiki 中可见的前置条件；用户可以先阅读原文，后续整理继续进行。
+    ctx.store.save_raw(raw, ctx.owner_account_id, ctx.kb_id)
+    source_page_published = False
+    if ctx.compiler is not None:
+        try:
+            ctx.compiler.publish_source_page(raw.id, ctx.owner_account_id, ctx.kb_id)
+            source_page_published = True
+        except Exception:  # noqa: BLE001
+            log.warning("聊天附件发布来源页失败 source=%s", raw.id, exc_info=True)
+
     # 第二层：自动生成轻量摘要/标签/整理建议
+    metadata_updated = False
     if ctx.config.ingest.auto_summarize and ctx.provider is not None:
         try:
             metadata = await generate_source_metadata(ctx.provider, text)
@@ -216,19 +228,18 @@ async def _capture_document(ctx: _Ctx, raw: RawSource, content: bytes, filename:
             raw.doc_type = metadata["doc_type"]
             raw.ingest_recommend = metadata["ingest_recommend"]
             raw.ingest_reason = metadata["ingest_reason"]
+            metadata_updated = True
         except Exception:  # noqa: BLE001
             log.warning("生成 source 元数据失败 source=%s", raw.id, exc_info=True)
 
     ctx.store.save_raw(raw, ctx.owner_account_id, ctx.kb_id)
 
-    # 发布来源页让附件在 Wiki 文件树「来源摘要」中可见：Wiki 树只渲染 page，
-    # 仅落 raw source 的附件在桌面端/ Web 端都无处可见。publish_source_page
-    # 不做 LLM 结构化分析，与 capture 的轻量定位一致；失败不阻断 capture。
-    if ctx.compiler is not None:
+    # 元数据成功后刷新一次已发布页面，把摘要补回页面；首次发布失败时也顺带重试。
+    if ctx.compiler is not None and (metadata_updated or not source_page_published):
         try:
             ctx.compiler.publish_source_page(raw.id, ctx.owner_account_id, ctx.kb_id)
         except Exception:  # noqa: BLE001
-            log.warning("聊天附件发布来源页失败 source=%s", raw.id, exc_info=True)
+            log.warning("聊天附件刷新来源页失败 source=%s", raw.id, exc_info=True)
 
     # 第三层：默认不自动深度 ingest；显式开启 auto_ingest 即表示用户确认。
     if ctx.config.ingest.auto_ingest and ctx.compiler is not None:

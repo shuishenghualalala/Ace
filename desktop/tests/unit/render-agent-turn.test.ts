@@ -1342,4 +1342,25 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('[data-wiki-confirm="wcf_123"]')).not.toBeNull();
     expect(root.querySelector('[data-wiki-cancel="wcf_123"]')).not.toBeNull();
   });
+
+  it('后台 Wiki 整理完成后渲染常驻结果卡', () => {
+    const root = renderAgentTurn(makeMessages({
+      content: '',
+      thinking: undefined,
+      toolCalls: [{
+        toolCallId: 'wiki-ingest-tool-task-1',
+        name: 'wiki_plan_ingest',
+        status: 'done',
+        startedAt: 1,
+        result: JSON.stringify({
+          background_task: true,
+          background_status: 'completed',
+          message: '已写入 3 个页面',
+        }),
+      }],
+    }), { isStreaming: false, userPinnedOpen: null, turnDurationMs: 1000 });
+
+    expect(root.querySelector('.wiki-ingest-result-card')?.textContent).toContain('Wiki 深度整理完成');
+    expect(root.querySelector('.wiki-ingest-result-card')?.textContent).toContain('已写入 3 个页面');
+  });
 });
