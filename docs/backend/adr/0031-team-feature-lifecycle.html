@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0031 · Team Feature 生命周期</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0031 · Team Feature 生命周期</h1>
+<p>状态：已实施并验证 · 日期：2026-09-09 · 阶段：4C-1。</p>
+<h2>背景与候选方案</h2>
+<p><code>CrewApp</code> 直接在组合根构造 <code>InProcessTeamManager</code>，并通过单独的桥接 Scope 注册 <code>mode=team</code> Driver。Manager 的生命周期、owner Provider 缓存与 Driver 注册分散在宿主和桥接代码中，停用/更新时无法保证 Manager 与 Driver 同代，且 <code>app.team</code> 在停用后仍可能指向已关闭实例。</p>
+<h2>决定</h2>
+<p>由模块自身声明 <code>product.team</code> Feature Bundle，统一拥有 <code>InProcessTeamManager</code>、<code>mode=team</code> Execution Driver 与 <code>ServiceKey("team")</code> 服务。宿主通过 <code>build_team_feature()</code> 构造 Bundle，按需同步激活并 <code>declare_managed_feature()</code> 纳入 Runtime 审计。</p>
+<p>Bundle 安装时先注册 <code>manager.shutdown()</code> 资源清理器，再注册 Driver 与 Service；激活失败时 Runtime 按 LIFO 回滚。Manager 新增 <code>shutdown()</code> 方法设置 <code>_closed</code> 标志、取消在途 delegate/recovery 任务并关闭内部资源；<code>interact()</code> 在关闭后拒绝新请求。停用/更新由 Feature Runtime 的 drain/restart 策略驱动，保证在途请求完成后再切换 Generation。</p>
+<p>App 级 owner Provider 缓存继续由 <code>CrewApp</code> 维护，但通过 <code>provider_for_owner</code> / <code>provider_for_member_model</code> 可调用对象注入 Manager；Manager 内部也保留同代缓存，避免重复解析。模型切换时宿主调用 <code>manager.invalidate_owner_provider()</code>，同时清空 App 与 Manager 缓存。测试兼容路径 <code>set_team_manager()</code> 保留，用于直接注入 Manager 实例，但不再由生产装配使用。</p>
+<h2>兼容、验证与回退</h2>
+<p>生产装配 <code>build_app(enable_team=True)</code> 验证 <code>product.team</code> 处于 ACTIVE 状态、<code>mode=team</code> Driver 可用、<code>app.team</code> 指向同代 Manager；<code>enable_team=False</code> 时 Feature 未声明且 Driver 不存在。Wiki 在 <code>enable_team=False</code> 模式下仍可通过 <code>set_team_manager()</code> 注入旧 Manager，回归通过。</p>
+<p>新增 7 项生命周期契约测试覆盖激活/停用、更新换代、shutdown 幂等、停用后请求 fail-closed、生产装配与 disabled 模式；相关 Team 任务回归、external/team/gateway/runtime 组合回归未引入新失败。Ruff、compileall、Import Linter（6 contracts kept，0 broken）全部通过。</p>
+<p>停用不删除 Team 业务数据；回退本切片可恢复桥接装配行为，但 4C-1 之前的代码已在当前分支被后续提交覆盖，回退需整体撤销本 commit。</p>
+<p><a href="../modules/team.html">Team 模块</a> · <a href="../../testing/plugin-architecture-stage-4c1-team-feature.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

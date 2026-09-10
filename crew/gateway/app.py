@@ -121,8 +121,10 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         crew=crew,
     )
     crew.interaction_bridge = interaction_bridge
-    if crew.team is not None:
-        crew.team.interaction_bridge = interaction_bridge
+    # Team 可能未启用或 Generation 未就绪；通过动态 getter 取值避免直接写 None 时抛异常。
+    team = getattr(crew, "team", None)
+    if team is not None:
+        team.interaction_bridge = interaction_bridge
     channel_manager = crew.channel_manager
     delivery_router = crew.delivery_router
     if channel_manager is None or delivery_router is None:

@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import hashlib
 import inspect
+import json
 import os
 import re
 import time
@@ -19,20 +19,21 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncIterator, Callable, Coroutine
 
-from crew.agent.compact import ContextCompactor, SummaryStore
 from crew.agent.capabilities import (
     CapabilityProfileRegistry,
     capability_profile_ids,
     merge_disabled_skills,
 )
+from crew.agent.compact import ContextCompactor, SummaryStore
 from crew.agent.executor import create_executor
-from crew.agent.external.store import ExternalAgentStore
 from crew.agent.external.feature import (
     AdapterRuntimeProvider,
     acquire_external_service_lease,
     build_external_agent_feature,
 )
+from crew.agent.external.store import ExternalAgentStore
 from crew.agent.runtime import SingleAgent
+from crew.agent.skills import configure_skill_filter
 from crew.agent.subagent.context import (
     SubagentNotificationQueue,
     build_subagent_notification_handler,
@@ -41,6 +42,8 @@ from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.interfaces import Agent, LLMProvider, MemoryProvider, SessionStore, WorkspaceStore
 from crew.evolution import EvolutionManager, EvolutionQueue
 from crew.features import (
+    AgentPresetBinding,
+    AgentPresetUnavailableError,
     ContextContribution,
     ContextContributionFailedError,
     ContextContributor,
@@ -50,8 +53,6 @@ from crew.features import (
     FeatureScope,
     FeatureState,
     FeatureStopPolicy,
-    AgentPresetBinding,
-    AgentPresetUnavailableError,
     ServiceKey,
     run_async_compat,
 )
@@ -70,6 +71,8 @@ from crew.security.context import SecurityContext
 from crew.security.grants import GrantRegistry
 from crew.security.rule_store import SQLiteRuleStore
 from crew.security.service import SecurityApprovalService
+from crew.state._migration import OWNER_TABLE_LABELS, inspect_and_backfill_legacy_owners
+from crew.state.active_owner import ActiveOwnerLeaseStore
 from crew.state.config import (
     Config,
     ModelProfile,
@@ -82,13 +85,16 @@ from crew.state.config import (
 )
 from crew.state.credentials import delete_stored_key, store_key
 from crew.state.home import ensure_crew_home
-from crew.agent.skills import configure_skill_filter
 from crew.state.logging import get_logger, setup_logging
-from crew.state._migration import OWNER_TABLE_LABELS, inspect_and_backfill_legacy_owners
 from crew.state.session_store import SQLiteSessionStore
-from crew.state.active_owner import ActiveOwnerLeaseStore
 from crew.state.workspace_store import SQLiteWorkspaceStore
-from crew.tools.registry import Registry, register_builtin_tools
+from crew.tasks import TaskRuntime
+from crew.tasks.context import contribute_task_notifications
+from crew.team.feature import (
+    TEAM_SERVICE_KEY,
+    _run_team_execution_driver,
+    build_team_feature,
+)
 from crew.tools.policy import (
     ToolDisclosureMode,
     exclude_toolsets,
@@ -96,8 +102,7 @@ from crew.tools.policy import (
     ordered_intersection,
     select_requested_tools,
 )
-from crew.tasks import TaskRuntime
-from crew.tasks.context import contribute_task_notifications
+from crew.tools.registry import Registry, register_builtin_tools
 
 log = get_logger("app")
 
@@ -635,8 +640,8 @@ class CrewApp:
         # Knowledge Service is resolved dynamically from the Feature Runtime;
         # an explicit override is reserved for embedded hosts and test doubles.
         self._knowledge_service_override = self._UNSET_KNOWLEDGE_SERVICE
-        # Team 管理器延迟装配（见 set_team_manager），避免 core 之外的循环依赖
-        self.team = None
+        # Team 管理器由 product.team Feature Generation 拥有；此处仅保留测试注入用的覆盖位。
+        self._team_override: Any | None = None
         # Dynamic Kanban 管理器延迟装配（见 build_app）
         self.dynamic_kanban = None
         self.dynamic_kanban_consumer = None
@@ -659,7 +664,8 @@ class CrewApp:
         self._pending_provider_retirements: dict[int, tuple[LLMProvider, set[asyncio.Task]]] = {}
         self._retiring_provider_ids: set[int] = set()
         # 外部 Team 的内置 Leader/规划器会跨多个请求复用 Agent，因此 owner 默认
-        # Provider 也需由 App 持有并统一关闭；普通一次性生成接口仍走 owner_provider。
+        # Provider 也由 App 持有并统一关闭；Team Feature 通过 app.owner_team_provider
+        # 复用同一份缓存，保证 Wiki/Team 在任意 enable_team 配置下得到同一实例。
         self._owner_team_providers: dict[str, LLMProvider] = {}
         # Team 内置成员的显式模型绑定。key 含 owner 与 profile id，避免不同
         # 账号或不同模型错误复用同一个持久连接。
@@ -742,6 +748,28 @@ class CrewApp:
     def delivery_router(self, router: Any) -> None:
         """Inject a router explicitly for tests or an embedding host."""
         self._delivery_router_override = router
+
+    @property
+    def team(self) -> Any:
+        """Return the explicitly injected Team manager or the active Generation Service."""
+        if self._team_override is not None:
+            return self._team_override
+        plugins = getattr(self, "plugins", None)
+        if plugins is None:
+            return None
+        return plugins.resolve_service(TEAM_SERVICE_KEY)
+
+    @team.setter
+    def team(self, manager: Any) -> None:
+        """Inject a Team manager explicitly for tests or an embedding host."""
+        self._team_override = manager
+
+    def _active_team_manager(self) -> Any:
+        """Return the current InProcessTeamManager if it owns the active Generation."""
+        from crew.team.team_manager import InProcessTeamManager
+
+        team = self.team
+        return team if isinstance(team, InProcessTeamManager) else None
 
     def acquire_external_services(self):
         """Open a same-generation external Catalog/Delegation lease."""
@@ -1957,17 +1985,23 @@ class CrewApp:
         )
 
     def set_team_manager(self, team) -> None:
+        """注入一个显式 Team manager（主要用于测试）。
+
+        生产环境由 product.team Feature 注册 mode=team 的 Driver；
+        若当前尚无 team driver（如 enable_team=False 的测试），则顺带声明一个。
+        """
         if self.team is not None:
             raise RuntimeError("team manager is already configured")
-        self._register_execution_driver_scope(
-            "product.team-driver-adapter",
-            ExecutionDriver(
-                mode="team",
-                execute=self._run_team_execution_driver,
-                capabilities=("team.coordinate",),
-                description="Team coordination execution",
-            ),
-        )
+        if "team" not in self.execution_drivers.modes():
+            self._register_execution_driver_scope(
+                "product.team-driver-adapter",
+                ExecutionDriver(
+                    mode="team",
+                    execute=lambda envelope: _run_team_execution_driver(self, team, envelope),
+                    capabilities=("team.coordinate",),
+                    description="Team coordination execution",
+                ),
+            )
         self.team = team
 
     def set_dynamic_kanban_manager(self, manager) -> None:
@@ -2317,6 +2351,7 @@ class CrewApp:
             log.exception("关闭 App-owned Provider 失败: %s", type(self.provider).__name__)
 
     async def _close_owner_team_providers(self) -> None:
+        """关闭 owner Team Provider 缓存与功能级独立 Provider（如 wiki.model）。"""
         providers = list({
             **self._stale_owner_team_providers,
             **{id(provider): provider for provider in self._owner_team_providers.values()},
@@ -2433,12 +2468,7 @@ class CrewApp:
         self._subagent_bg_tasks.clear()
         # 关闭异步进化队列，等待后台 evolution 任务完成
         await self._evolution_queue.shutdown()
-        team_shutdown = getattr(self.team, "shutdown", None)
-        if callable(team_shutdown):
-            try:
-                await team_shutdown()
-            except Exception:  # noqa: BLE001 - 继续释放其他 App-owned 资源
-                log.exception("Team shutdown 失败")
+        # product.team 已由 managed feature 停用路径关闭；此处保留 App-owned Provider 收尾
         await self._shutdown_provider_resources_with_deadline(provider_timeout)
         if self.mcp_manager is not None:
             await self.mcp_manager.aclose()
@@ -2683,6 +2713,7 @@ class CrewApp:
 
     def _invalidate_owner_team_provider(self, owner_account_id: str) -> None:
         owner = str(owner_account_id or "").strip()
+        manager = self._active_team_manager()
         if owner:
             provider = self._owner_team_providers.pop(owner, None)
             if provider is not None and provider is not self.provider:
@@ -2691,9 +2722,8 @@ class CrewApp:
                 provider = self._owner_team_member_model_providers.pop(key)
                 if provider is not self.provider:
                     self._stale_owner_team_providers[id(provider)] = provider
-            drop = getattr(self.team, "drop_owner_teams", None)
-            if callable(drop):
-                drop(owner)
+            if manager is not None:
+                manager.invalidate_owner_provider(owner)
             drop_kanban = getattr(self.dynamic_kanban, "drop_owner_provider_state", None)
             if callable(drop_kanban):
                 drop_kanban(owner)
@@ -2711,9 +2741,8 @@ class CrewApp:
         for provider in providers:
             if provider is not self.provider:
                 self._stale_owner_team_providers[id(provider)] = provider
-        clear = getattr(self.team, "clear", None)
-        if callable(clear):
-            clear()
+        if manager is not None:
+            manager.invalidate_owner_provider("")
         clear_kanban = getattr(self.dynamic_kanban, "clear_provider_state", None)
         if callable(clear_kanban):
             clear_kanban()
@@ -2795,7 +2824,7 @@ class CrewApp:
             self._invalidate_owner_team_provider(owner_account_id="")
 
             if self.team is not None:
-                self.team.provider = self.provider
+                self.team.set_provider(self.provider)
             if self.dynamic_kanban is not None:
                 self.dynamic_kanban.provider = self.provider
                 if hasattr(self.dynamic_kanban, "clear"):
@@ -3046,7 +3075,7 @@ class CrewApp:
             old_provider = self.provider
             self.provider = build_provider(cfg)
             if self.team is not None:
-                self.team.provider = self.provider
+                self.team.set_provider(self.provider)
             if self.dynamic_kanban is not None:
                 self.dynamic_kanban.provider = self.provider
                 if hasattr(self.dynamic_kanban, "clear"):
@@ -3111,7 +3140,9 @@ class CrewApp:
                 self.agents.clear()
                 self._invalidate_owner_team_provider()
                 if self.team is not None:
-                    self.team.provider = self.provider
+                    set_team_provider = getattr(self.team, "set_provider", None)
+                    if callable(set_team_provider):
+                        set_team_provider(self.provider)
                 if self.dynamic_kanban is not None:
                     self.dynamic_kanban.provider = self.provider
                     if hasattr(self.dynamic_kanban, "clear"):
@@ -3319,29 +3350,6 @@ class CrewApp:
         if not refs:
             return None
         return ContextContribution(params={"referenced_paths": refs})
-
-    async def _run_team_execution_driver(
-        self,
-        envelope: Envelope,
-    ) -> AsyncIterator[ResponseChunk]:
-        if self.team is None:
-            yield ResponseChunk.error(envelope.request_id, "Team 模式未启用")
-            return
-        if not envelope.params.get("external_team_id"):
-            config = self._session_agent_config(
-                envelope.session_id,
-                owner_account_id=envelope.user_id,
-            )
-            team_config = config.get("team")
-            if not isinstance(team_config, dict):
-                team_config = {}
-            external_team_id = str(
-                team_config.get("external_team_id") or ""
-            ).strip()
-            if external_team_id:
-                envelope.params["external_team_id"] = external_team_id
-        async for chunk in self.team.interact(envelope):
-            yield chunk
 
     async def _run_dynamic_kanban_execution_driver(
         self,
@@ -3584,9 +3592,8 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     from crew.state.channel_bindings import ChannelBindingsStore
 
     channel_bindings = ChannelBindingsStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
-    from crew.team.external_store import TeamExternalAgentStore
-
     from crew.state.plugin_preferences import PluginPreferencesStore
+    from crew.team.external_store import TeamExternalAgentStore
 
     plugin_prefs = PluginPreferencesStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
     memory = SQLiteMemory(
@@ -3816,28 +3823,32 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         provider_for_owner=app.owner_team_provider,
     )
 
+    from crew.tasks.task_manager import LegacyTaskManagerAdapter
+
+    team_feature = build_team_feature(
+        app,
+        registry=registry,
+        session_store=session_store,
+        memory=memory,
+        plugins=plugins,
+        tasks=LegacyTaskManagerAdapter(app.tasks),
+        config=cfg,
+        external_store=None,
+        external_store_provider=app.current_external_catalog,
+        external_services_acquirer=app.acquire_external_services,
+        interaction_bridge=app.interaction_bridge,
+        kanban_store=None,
+        kanban_consumer_provider=dk_feature.consumer_provider,
+        context_contributors=app.context_contributors,
+        provider=provider,
+        provider_for_owner=app.owner_team_provider,
+        provider_for_member_model=app.owner_team_member_model_provider,
+        enabled=enable_team,
+        runtime=plugins.feature_runtime,
+        activate=enable_team,
+    )
     if enable_team:
-        from crew.team.team_manager import InProcessTeamManager
-        app.set_team_manager(
-            InProcessTeamManager(
-                provider=provider,
-                registry=registry,
-                session_store=session_store,
-                memory=memory,
-                plugins=plugins,
-                tasks=LegacyTaskManagerAdapter(app.tasks),
-                config=cfg,
-                external_store=None,
-                external_store_provider=app.current_external_catalog,
-                external_services_acquirer=app.acquire_external_services,
-                interaction_bridge=app.interaction_bridge,
-                kanban_store=None,
-                kanban_consumer_provider=dk_feature.consumer_provider,
-                context_contributors=app.context_contributors,
-                provider_for_owner=app.owner_team_provider,
-                provider_for_member_model=app.owner_team_member_model_provider,
-            )
-        )
+        app.declare_managed_feature(team_feature.definition)
 
     app._install_builtin_feature(dk_feature.definition)
     app.declare_managed_feature(dk_feature.definition)

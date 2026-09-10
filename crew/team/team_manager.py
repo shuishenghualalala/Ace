@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -56,11 +57,10 @@ from crew.security.launch import use_process_launch
 from crew.state.config import Config
 from crew.state.home import safe_path_segment, task_workspace_path
 from crew.state.logging import get_logger
-from crew.team import flow_builder
+from crew.team import flow_builder, workflow_plan
 from crew.team import result_presenter as team_presenter
-from crew.team import workflow_plan
-from crew.team.bus import TeamBus, register_team_bus_tools
 from crew.team.agent_profile import AgentProfile, build_agent_profile
+from crew.team.bus import TeamBus, register_team_bus_tools
 from crew.team.capabilities import normalize_capabilities
 from crew.team.communication import TeamAskCoordinator, TeamCommunicationRouter
 from crew.team.delegate_tool import (
@@ -74,16 +74,6 @@ from crew.team.delegate_tool import (
 from crew.team.formation import role_key_for_capabilities
 from crew.team.graph_planner import TeamGraphPlanner, schedule_planning_provider_warmup
 from crew.team.history_projection import project_team_event_history
-from crew.team.team_spec import persisted_team_spec_for_turn
-from crew.team.team_plan_store import (
-    TeamPlanStore,
-    kanban_status,
-    node_event_index,
-    taskboard_status,
-)
-from crew.team.runtime_staffing import RuntimeStaffingPolicy
-from crew.team.team_builder import TeamMemberFactory
-from crew.team.team_workflow_runtime import TeamWorkflowRuntime
 from crew.team.models import (
     RuntimeStaffingRequest,
     TeamMemberSpec,
@@ -100,6 +90,16 @@ from crew.team.roles import (
     role_preset,
     teammate_prompt,
 )
+from crew.team.runtime_staffing import RuntimeStaffingPolicy
+from crew.team.team_builder import TeamMemberFactory
+from crew.team.team_plan_store import (
+    TeamPlanStore,
+    kanban_status,
+    node_event_index,
+    taskboard_status,
+)
+from crew.team.team_spec import persisted_team_spec_for_turn
+from crew.team.team_workflow_runtime import TeamWorkflowRuntime
 from crew.team.turn_decision import (
     TeamStatusQuery,
     TeamTurnDecision,
@@ -195,7 +195,17 @@ class InProcessTeamManager(TeamManager):
         context_contributors: Any | None = None,
         provider_for_owner: Callable[[str], LLMProvider] | None = None,
         provider_for_member_model: Callable[[str, str], LLMProvider] | None = None,
+        provider_factory: Callable[[Any], LLMProvider] | None = None,
     ) -> None:
+        # 跨请求复用的 owner 级 Provider 缓存。未显式注入解析器时由 Manager 自身维护，
+        # 但 production 通常由 App 注入 owner_team_provider / owner_team_member_model_provider，
+        # 以便与 Wiki、Gateway 测试补丁及 App 级 Provider 生命周期保持一致。
+        self._owner_team_providers: dict[str, LLMProvider] = {}
+        self._owner_team_member_model_providers: dict[tuple[str, str], LLMProvider] = {}
+        self._stale_owner_team_providers: dict[int, LLMProvider] = {}
+        self._provider_factory = provider_factory
+        self._closed = False
+
         self.provider = provider
         # TeamManager 是多 owner 共享实例。规划器和内置 Leader 不能固定借用
         # 进程级 provider，否则远程登录用户在“设置 → 模型”选择的默认模型不会生效。
@@ -297,6 +307,149 @@ class InProcessTeamManager(TeamManager):
             if resolved is not None:
                 return resolved
         return self._provider_for_owner(owner_account_id)
+
+    def owner_team_provider(self, owner_account_id: str) -> LLMProvider:
+        """返回 owner 默认 Provider；缓存按 owner 维度保存并由 Feature 生命周期关闭。"""
+
+        owner = str(owner_account_id or "").strip()
+        if not owner:
+            return self.provider
+        cached = self._owner_team_providers.get(owner)
+        if cached is not None:
+            return cached
+        profile = self.config.owner_default_model_profile(owner)
+        if profile is None or not profile.has_key:
+            return self.provider
+        factory = self._provider_factory
+        provider = factory(profile) if factory is not None else self.provider
+        self._owner_team_providers[owner] = provider
+        return provider
+
+    def owner_team_member_model_provider(
+        self,
+        owner_account_id: str,
+        model_profile_id: str = "",
+    ) -> LLMProvider:
+        """返回显式绑定到某个 Team 内置成员的 Provider。"""
+
+        owner = str(owner_account_id or "").strip()
+        model_id = str(model_profile_id or "").strip()
+        if not model_id or model_id == self.config.owner_default_model_id(owner):
+            return self.owner_team_provider(owner)
+        profiles = (
+            self.config.owner_model_profiles(owner)
+            if owner
+            else self.config.model_profiles
+        )
+        profile = profiles.get(model_id)
+        if profile is None or not profile.loaded or not profile.has_key:
+            return self.owner_team_provider(owner)
+        key = (owner, model_id)
+        cached = self._owner_team_member_model_providers.get(key)
+        if cached is not None:
+            return cached
+        factory = self._provider_factory
+        provider = factory(profile) if factory is not None else self.provider
+        self._owner_team_member_model_providers[key] = provider
+        return provider
+
+    def invalidate_owner_provider(self, owner_account_id: str) -> None:
+        """淘汰 owner 对应的 Team Provider 缓存并清掉该 owner 的 Team 实例。
+
+        空字符串表示全局模型切换，需要清掉所有 owner 缓存。
+        """
+
+        owner = str(owner_account_id or "").strip()
+        if owner:
+            provider = self._owner_team_providers.pop(owner, None)
+            if provider is not None and provider is not self.provider:
+                self._stale_owner_team_providers[id(provider)] = provider
+            for key in [key for key in self._owner_team_member_model_providers if key[0] == owner]:
+                provider = self._owner_team_member_model_providers.pop(key)
+                if provider is not self.provider:
+                    self._stale_owner_team_providers[id(provider)] = provider
+            self.drop_owner_teams(owner)
+            return
+
+        providers = list(
+            {
+                id(provider): provider
+                for provider in [
+                    *self._owner_team_providers.values(),
+                    *self._owner_team_member_model_providers.values(),
+                ]
+            }.values()
+        )
+        self._owner_team_providers.clear()
+        self._owner_team_member_model_providers.clear()
+        for provider in providers:
+            if provider is not self.provider:
+                self._stale_owner_team_providers[id(provider)] = provider
+        self.clear()
+
+    def set_provider(self, provider: LLMProvider) -> None:
+        """更新全局默认 Provider；不清理已有的 owner 级缓存。"""
+
+        self.provider = provider
+
+    async def shutdown(self, timeout: float = 5.0) -> None:
+        """停止接收新 run，取消并等待在途任务，关闭 owner Provider 缓存。
+
+        幂等；可安全作为 Feature Generation 的 resource disposer。
+        """
+
+        if self._closed:
+            return
+        self._closed = True
+
+        with self._active_lock:
+            delegate_tasks = {
+                task
+                for tasks in self._delegate_tasks.values()
+                for task in tasks
+                if not task.done()
+            }
+            recovery_tasks = {
+                task
+                for task in self._recovery_tasks.values()
+                if not task.done()
+            }
+        live_tasks = delegate_tasks | recovery_tasks
+        for task in live_tasks:
+            task.cancel()
+        if live_tasks:
+            try:
+                await asyncio.wait(live_tasks, timeout=timeout)
+            except Exception:  # noqa: BLE001
+                log.warning("Team shutdown 等待任务取消被中断")
+
+        self.clear()
+
+        providers = list(
+            {
+                id(provider): provider
+                for provider in [
+                    *self._owner_team_providers.values(),
+                    *self._owner_team_member_model_providers.values(),
+                    *self._stale_owner_team_providers.values(),
+                ]
+            }.values()
+        )
+        self._owner_team_providers.clear()
+        self._owner_team_member_model_providers.clear()
+        self._stale_owner_team_providers.clear()
+        for provider in providers:
+            if provider is self.provider:
+                continue
+            close = getattr(provider, "aclose", None)
+            if not callable(close):
+                continue
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                log.exception("关闭 Team owner Provider 失败")
 
     def _resolve_external_agent_profile(
         self,
@@ -6971,6 +7124,9 @@ class InProcessTeamManager(TeamManager):
         }
 
     async def interact(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
+        if self._closed:
+            yield ResponseChunk.error(envelope.request_id, "Team 已停用")
+            return
         external_team_id = str(envelope.params.get("external_team_id") or "").strip()
         try:
             team = self._get_or_create(
