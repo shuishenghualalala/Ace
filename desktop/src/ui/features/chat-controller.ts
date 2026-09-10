@@ -18,7 +18,6 @@ import {
   type ChatMessage,
   type MessageRole,
   type SessionStatus,
-  type ToolCallInfo,
   renderEmptyState,
   renderTodoProgressPanelHtml,
   renderWorkEmptyState,
@@ -81,7 +80,7 @@ import {
 } from '../followup';
 import type { FollowupAnswer } from '../backend-client';
 import type { ChatChunk, WikiIngestProgress } from '../backend-client';
-import { backendDurationToMs, makeSessionTitle, mergeTeamInternalMessage, normalizeTurnFileChanges } from './history-mapping';
+import { makeSessionTitle } from './history-mapping';
 import { applyFoldState, createChatRenderCoalescer, createStreamingPatchCoalescer } from '../render-utils';
 import { getToolFold, setToolFold } from './fold-state';
 import { renderSecurityBanner } from './security-banner';
@@ -94,7 +93,6 @@ import {
   resolveBusyTransition,
   resolveTurnGate,
   USER_WAIT_CHUNK_KINDS,
-  type TeamInternalChunk,
   type UsagePayload,
 } from '../reducers/chat-reducer';
 import {
@@ -195,22 +193,10 @@ export function setWikiIngestProgressCallback(cb: ((progress: WikiIngestProgress
   wikiIngestProgressCallback = cb;
 }
 
-/** 规范化 wiki_ingest_progress body（对齐 web useChat.ts 的字段裁剪）并转发给订阅者。 */
-function forwardWikiIngestProgress(chunk: ChatChunk, sid: string): void {
-  if (!wikiIngestProgressCallback) return;
-  const body = (chunk.body ?? {}) as Record<string, unknown>;
-  const progress: WikiIngestProgress = {
-    stage: String(body.stage ?? ''),
-    percent: Math.max(0, Math.min(100, Number(body.percent ?? 0) || 0)),
-    label: String(body.label ?? body.stage ?? ''),
-    source_id: String(body.source_id ?? ''),
-    session_id: sid,
-  };
-  if (typeof body.error === 'string') progress.error = body.error;
-  if (body.detail && typeof body.detail === 'object') {
-    progress.detail = body.detail as Record<string, unknown>;
-  }
-  wikiIngestProgressCallback(progress);
+/** 供 wiki feature reducer 触发已注册的 wiki_ingest_progress 订阅者。
+ *  业务处理归属 wiki feature，callback pub-sub 暂留 chat-controller。 */
+export function invokeWikiIngestProgressCallback(progress: WikiIngestProgress): void {
+  wikiIngestProgressCallback?.(progress);
 }
 
 // ---------- 专用 Wiki Agent 发送参数 ----------
@@ -896,122 +882,6 @@ function recordUsageTurn(
 
 // ---------- applyChunk（dispatch + apply + 副作用） ----------
 
-function normalizeTeamText(value: unknown): string {
-  if (value == null) return '';
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-  if (typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    for (const key of ['message', 'text', 'content', 'summary']) {
-      if (typeof record[key] === 'string' && String(record[key]).trim()) return String(record[key]);
-    }
-    try { return JSON.stringify(value); } catch { return ''; }
-  }
-  return String(value);
-}
-
-function backendSecondsToMs(value: unknown, fallback = Date.now()): number {
-  const number = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(number) || number <= 0) return fallback;
-  return number < 1_000_000_000_000 ? number * 1000 : number;
-}
-
-function normalizeTeamToolCalls(raw: unknown): ToolCallInfo[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const calls = raw.map((item, index): ToolCallInfo => {
-    const value = item && typeof item === 'object' ? item as Record<string, unknown> : {};
-    const status = value.status === 'running' || value.status === 'generating' || value.status === 'error'
-      ? value.status
-      : 'done';
-    const args = typeof value.arguments === 'string'
-      ? value.arguments
-      : JSON.stringify(value.arguments || {});
-    return {
-      toolCallId: String(value.id || value.tool_call_id || `team_tool_${index}`),
-      name: String(value.name || 'unknown'),
-      ...(typeof value.ui_label === 'string' ? { uiLabel: value.ui_label } : {}),
-      args,
-      ...(typeof value.result === 'string' ? { result: value.result } : {}),
-      status,
-      startedAt: backendSecondsToMs(value.started_at, 0),
-      ...(typeof value.duration === 'number' && backendDurationToMs(value.duration) > 0
-        ? { duration: backendDurationToMs(value.duration) }
-        : {}),
-    };
-  });
-  return calls.length ? calls : undefined;
-}
-
-function applyTeamInternalChunk(sessionId: string, chunk: TeamInternalChunk): void {
-  const body = chunk.body;
-  const book = bookFor(sessionId);
-  const assistantId = book.assistantId;
-  if (!book.hadTeamInternal && assistantId) {
-    // Desktop 在发送时会预建一个空 assistant；Web 不会把它当 Team 发言。
-    // 第一条成员消息到达即移除空占位，避免它固定在 DAG/派活消息之前。
-    const messages = getMessages(sessionId);
-    const assistant = messages.find((message) => message.id === assistantId);
-    const isEmptyOptimistic = assistant?.role === 'assistant'
-      && !assistant.content.trim()
-      && !assistant.thinking?.trim()
-      && !assistant.toolCalls?.length;
-    if (isEmptyOptimistic) {
-      messageStore.set({
-        messages: {
-          ...messageStore.get().messages,
-          [sessionId]: messages.filter((message) => message.id !== assistantId),
-        },
-      });
-      patchBook(sessionId, { assistantId: null, firstChunkAt: null });
-    }
-  }
-  patchBook(sessionId, { hadTeamInternal: true });
-  const timestamp = backendSecondsToMs(body.timestamp);
-  const toolCalls = normalizeTeamToolCalls(body.tool_calls);
-  const turnFileChanges = normalizeTurnFileChanges(body.turn_file_changes);
-  const streaming = body.display_mode === 'stream' || body.event_type === 'team_stream';
-  const incoming: ChatMessage = {
-    id: newMessageId('team'),
-    role: 'team_internal',
-    content: typeof body.text === 'string' ? body.text : '',
-    timestamp,
-    segmentRole: 'answer',
-    streaming,
-    ...(typeof body.source_session_id === 'string' ? { sourceSessionId: body.source_session_id } : {}),
-    ...(typeof body.agent_id === 'string' ? { agentId: body.agent_id } : {}),
-    ...(typeof body.agent_name === 'string' ? { agentName: body.agent_name } : {}),
-    ...(typeof body.agent_role === 'string' ? { agentRole: body.agent_role } : {}),
-    ...(typeof body.agent_tone === 'number' ? { agentTone: body.agent_tone } : {}),
-    ...(typeof body.is_leader === 'boolean' ? { isLeader: body.is_leader } : {}),
-    ...(typeof body.event_type === 'string' ? { eventType: body.event_type } : {}),
-    ...(typeof body.node_id === 'string' ? { nodeId: body.node_id } : {}),
-    ...(typeof body.mention_from === 'string' ? { mentionFrom: body.mention_from } : {}),
-    ...(Array.isArray(body.mention_to) ? { mentionTo: body.mention_to.map(String) } : {}),
-    ...(typeof body.mention_intent === 'string' ? { mentionIntent: body.mention_intent } : {}),
-    ...(typeof body.communication_kind === 'string' ? { communicationKind: body.communication_kind } : {}),
-    ...(typeof body.communication_status === 'string' ? { communicationStatus: body.communication_status } : {}),
-    ...(typeof body.request_id === 'string' ? { requestId: body.request_id } : {}),
-    ...(typeof body.reply_to === 'string' ? { replyTo: body.reply_to } : {}),
-    ...(typeof body.communication_request_text === 'string' ? { communicationRequestText: body.communication_request_text } : {}),
-    ...(typeof body.display_mode === 'string' ? { displayMode: body.display_mode } : {}),
-    ...(typeof body.collapsed_title === 'string' ? { collapsedTitle: body.collapsed_title } : {}),
-    ...(typeof body.process_text === 'string' ? { processText: body.process_text } : {}),
-    ...(Array.isArray(body.artifacts) ? { artifacts: body.artifacts } : {}),
-    ...(turnFileChanges ? { turnFileChanges } : {}),
-    ...(body.thinking != null ? { thinking: normalizeTeamText(body.thinking) } : {}),
-    ...(toolCalls ? { toolCalls } : {}),
-    ...(typeof body.turn_started_at === 'number'
-      ? { turnStartedAt: backendSecondsToMs(body.turn_started_at) }
-      : streaming ? { turnStartedAt: Date.now() } : {}),
-    ...(typeof body.turn_duration === 'number' ? { turnDurationMs: Math.max(0, body.turn_duration * 1000) } : {}),
-  };
-  const merged = mergeTeamInternalMessage(getMessages(sessionId), incoming, { append: body.append === true });
-  messageStore.set({ messages: { ...messageStore.get().messages, [sessionId]: merged } });
-  setQueueHintWithUi(sessionId, '');
-  setBusyWithUi(sessionId, true);
-  setStatusWithUi(sessionId, 'running');
-}
-
 // T3：把 applyChunk 改造成 dispatch + apply + 副作用 的薄适配层。
 // 状态迁移全部走 chat-reducer，避免在 index.ts 重复实现 7 个 kind 的迁移逻辑。
 function visibleFollowupSessionId(sessionId: string): string {
@@ -1125,13 +995,6 @@ export function applyChunk(incomingChunk: ChatChunk): void {
     }
     return;
   }
-  if (chunk.kind === 'wiki_ingest_progress') {
-    // Wiki 编译进度：带外帧，与对话回合无关；转发给订阅者后直接返回。
-    // 与 session_title 等侧信道 kind 一样不参与 gateway_sequence 去重——
-    // 进度更新按 source_id 幂等，重连 replay 的重复帧无副作用。
-    forwardWikiIngestProgress(chunk, sid);
-    return;
-  }
   if (chunk.kind === 'wiki_changed') {
     const body = (chunk.body ?? {}) as { changes?: Array<Record<string, unknown>> };
     window.dispatchEvent(new CustomEvent('wiki:changed', {
@@ -1199,17 +1062,6 @@ export function applyChunk(incomingChunk: ChatChunk): void {
 
   handleBlueprintSurfaceToolChunk(chunk, sid);
 
-  if (parsed.kind === 'team_internal') {
-    if (bindRequestId) patchBook(sid, { activeRequestId: bindRequestId, acceptingNewRequest: false });
-    applyTeamInternalChunk(sid, parsed);
-    renderChat();
-    renderWorkspaceHistory(openSessionFn);
-    syncTurnDurationTicker();
-    // Team 流式帧沿用现有 sticky-bottom 软追随；用户上滑后不得被下一帧强制拉回底部。
-    if (sid === state.activeSessionId) scrollChatToBottom();
-    return;
-  }
-
   const teamStatusMessage = parsed.kind === 'status' && typeof parsed.body.message === 'string'
     ? parsed.body.message
     : '';
@@ -1256,7 +1108,7 @@ export function applyChunk(incomingChunk: ChatChunk): void {
     openBrowserWorkbench({ createTab: false });
   }
 
-  const messages = getMessages(sid);
+  const messages = messageStore.get().messages[sid] ?? [];
   const snapshot = {
     sessionId: sid,
     messages,
@@ -1298,13 +1150,14 @@ export function applyChunk(incomingChunk: ChatChunk): void {
   } else if (bindRequestId) {
     patchBook(sid, { activeRequestId: bindRequestId, acceptingNewRequest: false });
   }
-  // 消息 upsert：append / patch，全部走 store 不可变更新
-  applyMessageUpserts(sid, result.messageUpserts);
-  if (result.messageUpserts.length > 0) {
+  // 消息 upsert：append / patch / 全量替换，全部走 store 不可变更新
+  const hasMessageChanges = result.messageUpserts.length > 0 || result.replaceMessages != null;
+  applyMessageUpserts(sid, result.messageUpserts, result.replaceMessages);
+  if (hasMessageChanges) {
     window.dispatchEvent(new CustomEvent('messages:changed', { detail: { sessionId: sid } }));
   }
 
-  if (isStreamDebugEnabled() && result.messageUpserts.length > 0) {
+  if (isStreamDebugEnabled() && hasMessageChanges) {
     const msgs = getMessages(sid);
     const lastAssistant = [...msgs].reverse().find((m) => m.role === 'assistant');
     logStream('apply-chunk', 'applied', {
@@ -1368,6 +1221,15 @@ export function applyChunk(incomingChunk: ChatChunk): void {
   );
   if (busyNext !== null) setBusyWithUi(sid, busyNext);
   if (typeof result.statusHint === 'string') setStatusWithUi(sid, result.statusHint);
+
+  // 迁移保护：team_internal 仍保留旧路径的副作用组合，保证行为字节一致。
+  if (parsed.kind === 'team_internal') {
+    renderChat();
+    renderWorkspaceHistory(openSessionFn);
+    syncTurnDurationTicker();
+    if (sid === state.activeSessionId) scrollChatToBottom();
+    return;
+  }
 
   // final / error：触发 finalize + usage + 全量重渲染
   if (result.finalize) {
@@ -1441,6 +1303,10 @@ export function applyChunk(incomingChunk: ChatChunk): void {
 
   // 其他 kind：合并到下一帧渲染
   if (sid === state.activeSessionId) {
+    if (parsed.kind === 'wiki_ingest_progress') {
+      // wiki_ingest_progress 只驱动回调/进度条，不写 messages，无需重绘聊天区。
+      return;
+    }
     scheduleChatRender();
     if (parsed.kind === 'todo_updated' || parsed.kind === 'file_changes' || parsed.kind === 'plan_review') {
       if (parsed.kind === 'todo_updated') renderTodoSlot();
@@ -1464,11 +1330,18 @@ export function applyChunk(incomingChunk: ChatChunk): void {
   // 非活跃会话的其它 chunk 同理不重绘侧栏（见上 delta 分支注释）。
 }
 
-/** T3：把 reducer 输出的 MessageUpsert 应用到 messageStore。 */
-function applyMessageUpserts(sessionId: string, upserts: ReturnType<typeof reduceChunk>['messageUpserts']): void {
-  if (upserts.length === 0) return;
+/** T3：把 reducer 输出的 MessageUpsert 应用到 messageStore；replaceMessages 为全量替换逃生口。 */
+function applyMessageUpserts(
+  sessionId: string,
+  upserts: ReturnType<typeof reduceChunk>['messageUpserts'],
+  replaceMessages?: ChatMessage[],
+): void {
+  if (upserts.length === 0 && !replaceMessages) return;
   const cur = getMessages(sessionId);
   let next = cur;
+  if (replaceMessages) {
+    next = replaceMessages;
+  }
   for (const u of upserts) {
     if (u.op === 'append' && u.message) {
       next = [...next, u.message];

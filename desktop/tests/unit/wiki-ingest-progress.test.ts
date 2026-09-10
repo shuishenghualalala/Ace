@@ -8,6 +8,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyChunk, setWikiIngestProgressCallback } from '../../src/ui/features/chat-controller';
+import { initWikiAgent } from '../../src/ui/features/wiki-agent';
 import type { WikiIngestProgress } from '../../src/ui/backend-client';
 import { __resetAllStoresForTest, messageStore, sessionStore } from '../../src/ui/stores/stores';
 
@@ -55,6 +56,7 @@ beforeEach(() => {
   __resetAllStoresForTest();
   sessionStore.set({ activeSessionId: 'sid-1' });
   setWikiIngestProgressCallback(null);
+  initWikiAgent();
   document.body.innerHTML = '';
 });
 

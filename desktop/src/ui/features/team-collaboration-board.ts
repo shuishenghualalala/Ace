@@ -13,9 +13,20 @@ import {
   type Task,
   type TeamMemberModelBinding,
 } from '../backend-client';
-import type { ChatMessage } from '../chat-render';
-import { escapeHtml, notify, state } from '../state';
+import type { ChatMessage, ToolCallInfo } from '../chat-render';
+import { escapeHtml, notify, state, newMessageId } from '../state';
 import { setRuntimeStyle } from '../components/runtime-style';
+import {
+  backendDurationToMs,
+  mergeTeamInternalMessage,
+  normalizeTurnFileChanges,
+} from './history-mapping';
+import {
+  featureEventRegistry,
+  emptyFeatureReducerResult,
+  type FeatureReducerContext,
+  type FeatureReducerResult,
+} from './event-reducer-registry';
 
 const CREW_BUILTIN_AGENT_ID = 'crew::builtin';
 const TEAM_PLAN_SOURCES = new Set(['team_plan', 'team_kanban', 'team_flow_fallback']);
@@ -1086,3 +1097,165 @@ export function activateTeamCollaborationBoard(sessionId: string | null | undefi
     document.getElementById('task-board-toggle')?.click();
   });
 }
+
+function backendSecondsToMs(value: unknown, fallback = Date.now()): number {
+  const number = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(number) || number <= 0) return fallback;
+  return number < 1_000_000_000_000 ? number * 1000 : number;
+}
+
+function normalizeTeamToolCalls(raw: unknown): ToolCallInfo[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const calls = raw.map((item, index): ToolCallInfo => {
+    const value = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+    const status = value.status === 'running' || value.status === 'generating' || value.status === 'error'
+      ? value.status
+      : 'done';
+    const args = typeof value.arguments === 'string'
+      ? value.arguments
+      : JSON.stringify(value.arguments || {});
+    return {
+      toolCallId: String(value.id || value.tool_call_id || `team_tool_${index}`),
+      name: String(value.name || 'unknown'),
+      ...(typeof value.ui_label === 'string' ? { uiLabel: value.ui_label } : {}),
+      args,
+      ...(typeof value.result === 'string' ? { result: value.result } : {}),
+      status,
+      startedAt: backendSecondsToMs(value.started_at, 0),
+      ...(typeof value.duration === 'number' && backendDurationToMs(value.duration) > 0
+        ? { duration: backendDurationToMs(value.duration) }
+        : {}),
+    };
+  });
+  return calls.length ? calls : undefined;
+}
+
+function normalizeTeamText(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    for (const key of ['message', 'text', 'content', 'summary']) {
+      if (typeof record[key] === 'string' && String(record[key]).trim()) return String(record[key]);
+    }
+    try { return JSON.stringify(value); } catch { return ''; }
+  }
+  return String(value);
+}
+
+export interface TeamInternalBody {
+  text?: string;
+  source_session_id?: string;
+  agent_id?: string;
+  agent_name?: string;
+  agent_role?: string;
+  agent_tone?: number;
+  is_leader?: boolean;
+  event_type?: string;
+  node_id?: string;
+  mention_from?: string;
+  mention_to?: string[];
+  mention_intent?: string;
+  communication_kind?: string;
+  communication_status?: string;
+  request_id?: string;
+  reply_to?: string;
+  communication_request_text?: string;
+  display_mode?: string;
+  collapsed_title?: string;
+  process_text?: string;
+  artifacts?: ChatMessage['artifacts'];
+  turn_file_changes?: ChatMessage['turnFileChanges'];
+  thinking?: unknown;
+  tool_calls?: unknown[];
+  turn_started_at?: number;
+  turn_duration?: number;
+  timestamp?: number;
+  append?: boolean;
+}
+
+function buildTeamInternalMessage(body: TeamInternalBody, ctx: FeatureReducerContext): ChatMessage {
+  const timestamp = backendSecondsToMs(body.timestamp);
+  const toolCalls = normalizeTeamToolCalls(body.tool_calls);
+  const turnFileChanges = normalizeTurnFileChanges(body.turn_file_changes);
+  const streaming = body.display_mode === 'stream' || body.event_type === 'team_stream';
+  return {
+    id: newMessageId('team'),
+    role: 'team_internal',
+    content: typeof body.text === 'string' ? body.text : '',
+    timestamp,
+    segmentRole: 'answer',
+    streaming,
+    ...(typeof body.source_session_id === 'string' ? { sourceSessionId: body.source_session_id } : {}),
+    ...(typeof body.agent_id === 'string' ? { agentId: body.agent_id } : {}),
+    ...(typeof body.agent_name === 'string' ? { agentName: body.agent_name } : {}),
+    ...(typeof body.agent_role === 'string' ? { agentRole: body.agent_role } : {}),
+    ...(typeof body.agent_tone === 'number' ? { agentTone: body.agent_tone } : {}),
+    ...(typeof body.is_leader === 'boolean' ? { isLeader: body.is_leader } : {}),
+    ...(typeof body.event_type === 'string' ? { eventType: body.event_type } : {}),
+    ...(typeof body.node_id === 'string' ? { nodeId: body.node_id } : {}),
+    ...(typeof body.mention_from === 'string' ? { mentionFrom: body.mention_from } : {}),
+    ...(Array.isArray(body.mention_to) ? { mentionTo: body.mention_to.map(String) } : {}),
+    ...(typeof body.mention_intent === 'string' ? { mentionIntent: body.mention_intent } : {}),
+    ...(typeof body.communication_kind === 'string' ? { communicationKind: body.communication_kind } : {}),
+    ...(typeof body.communication_status === 'string' ? { communicationStatus: body.communication_status } : {}),
+    ...(typeof body.request_id === 'string' ? { requestId: body.request_id } : {}),
+    ...(typeof body.reply_to === 'string' ? { replyTo: body.reply_to } : {}),
+    ...(typeof body.communication_request_text === 'string'
+      ? { communicationRequestText: body.communication_request_text }
+      : {}),
+    ...(typeof body.display_mode === 'string' ? { displayMode: body.display_mode } : {}),
+    ...(typeof body.collapsed_title === 'string' ? { collapsedTitle: body.collapsed_title } : {}),
+    ...(typeof body.process_text === 'string' ? { processText: body.process_text } : {}),
+    ...(Array.isArray(body.artifacts) ? { artifacts: body.artifacts } : {}),
+    ...(turnFileChanges ? { turnFileChanges } : {}),
+    ...(body.thinking != null ? { thinking: normalizeTeamText(body.thinking) } : {}),
+    ...(toolCalls ? { toolCalls } : {}),
+    ...(typeof body.turn_started_at === 'number'
+      ? { turnStartedAt: backendSecondsToMs(body.turn_started_at) }
+      : streaming ? { turnStartedAt: Date.now() } : {}),
+    ...(typeof body.turn_duration === 'number' ? { turnDurationMs: Math.max(0, body.turn_duration * 1000) } : {}),
+  };
+}
+
+export function teamInternalReducer(body: TeamInternalBody, ctx: FeatureReducerContext): FeatureReducerResult {
+  const assistantId = ctx.book.assistantId;
+  let messages = ctx.messages;
+  const bookPatch: Partial<FeatureReducerContext['book']> = { hadTeamInternal: true };
+
+  if (!ctx.book.hadTeamInternal && assistantId) {
+    const assistant = messages.find((m) => m.id === assistantId);
+    const isEmptyOptimistic = assistant?.role === 'assistant'
+      && !assistant.content.trim()
+      && !assistant.thinking?.trim()
+      && !assistant.toolCalls?.length;
+    if (isEmptyOptimistic) {
+      messages = messages.filter((m) => m.id !== assistantId);
+      bookPatch.assistantId = null;
+      bookPatch.firstChunkAt = null;
+    }
+  }
+
+  const incoming = buildTeamInternalMessage(body, ctx);
+  const merged = mergeTeamInternalMessage(messages, incoming, { append: body.append === true });
+
+  return {
+    messageUpserts: [],
+    toolUpserts: [],
+    replaceMessages: merged,
+    replaceBook: { ...ctx.book, ...bookPatch },
+    statusHint: 'running',
+    queueHint: '',
+    finalize: false,
+  };
+}
+
+// 迁移期妥协：Team Collaboration 目前没有独立生命周期 init，先在模块 import 时自注册。
+// registry 已提供幂等 disposer，后续 5-5/5-6 生命周期切片可平滑接管为显式注册/注销。
+featureEventRegistry.register({
+  feature: 'team',
+  event: 'internal_message',
+  version: 1,
+  reducer: (payload, ctx) => teamInternalReducer(payload as TeamInternalBody, ctx),
+});

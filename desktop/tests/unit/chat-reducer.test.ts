@@ -16,10 +16,10 @@ import {
   errorReducer,
   planReviewReducer,
   todoUpdatedReducer,
-  workflowProgressReducer,
   followupQuestionReducer,
   type ReducerSnapshot,
 } from '../../src/ui/reducers/chat-reducer';
+import { workflowProgressReducer } from '../../src/ui/features/kanban-board';
 import type { Bookkeeping, FileChange } from '../../src/ui/state';
 import type { ChatMessage } from '../../src/ui/chat-render';
 
@@ -51,6 +51,16 @@ function makeSnapshot(overrides: Partial<ReducerSnapshot> = {}): ReducerSnapshot
     currentStatus: 'idle',
     now: 1_700_000_000_000,
     ...overrides,
+  };
+}
+
+function featureCtxFromSnapshot(snap: ReducerSnapshot) {
+  return {
+    sessionId: snap.sessionId,
+    messages: snap.messages,
+    book: snap.book,
+    now: snap.now,
+    sequence: snap.sequence,
   };
 }
 
@@ -873,7 +883,7 @@ describe('workflowProgressReducer', () => {
       },
       sequence: 1,
     };
-    const r = workflowProgressReducer(chunk, snap);
+    const r = workflowProgressReducer(chunk.body, featureCtxFromSnapshot(snap));
     expect(r.messageUpserts).toHaveLength(1);
     const upsert = r.messageUpserts[0];
     expect(upsert.op).toBe('append');
@@ -917,7 +927,7 @@ describe('workflowProgressReducer', () => {
       },
       sequence: 2,
     };
-    const r = workflowProgressReducer(chunk, snap);
+    const r = workflowProgressReducer(chunk.body, featureCtxFromSnapshot(snap));
     expect(r.messageUpserts).toHaveLength(1);
     const upsert = r.messageUpserts[0];
     expect(upsert.op).toBe('patch');
@@ -929,8 +939,8 @@ describe('workflowProgressReducer', () => {
   it('drops chunk with missing workflow_id', () => {
     const snap = makeSnapshot();
     const r = workflowProgressReducer(
-      { kind: 'workflow_progress', body: { workflow_id: '' }, sequence: 1 },
-      snap,
+      { workflow_id: '' },
+      featureCtxFromSnapshot(snap),
     );
     expect(r.messageUpserts).toEqual([]);
   });
@@ -954,7 +964,7 @@ describe('workflowProgressReducer', () => {
       },
       sequence: 2,
     };
-    const r = workflowProgressReducer(chunk, snap);
+    const r = workflowProgressReducer(chunk.body, featureCtxFromSnapshot(snap));
     expect(r.statusHint).toBe('idle');
     expect(r.replaceBook?.assistantId).toBe('role-1');
     expect(r.messageUpserts).toHaveLength(2);
@@ -969,7 +979,7 @@ describe('workflowProgressReducer', () => {
       body: { workflow_id: 'wf-1', status: 'failed', message: 'Workflow 失败' },
       sequence: 1,
     };
-    const r = workflowProgressReducer(chunk, snap);
+    const r = workflowProgressReducer(chunk.body, featureCtxFromSnapshot(snap));
     expect(r.statusHint).toBe('error');
   });
 });

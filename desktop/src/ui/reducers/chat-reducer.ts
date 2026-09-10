@@ -15,6 +15,23 @@ import type { ChatMessage, PlanReviewStatus, SessionStatus, ToolCallInfo, TurnFi
 import type { Bookkeeping, FileChange, TodoItem } from '../state';
 import type { WikiPage } from '../backend-client';
 import { isPlanDocumentPath } from '../plan-document-path';
+import {
+  featureEventRegistry,
+  emptyFeatureReducerResult,
+  uniqueMessageId,
+  type FeatureReducerResult,
+  type FeatureReducerContext,
+  type MessageUpsert,
+  type StatusHint,
+  type ToolUpsert,
+} from '../features/event-reducer-registry';
+
+// Re-export shared reducer types so existing importers keep working.
+export type {
+  MessageUpsert,
+  ToolUpsert,
+  StatusHint,
+} from '../features/event-reducer-registry';
 
 // ---------- 输入 chunk 类型（窄化版，避免 Record<string, any>） ----------
 
@@ -33,7 +50,9 @@ export type ChatChunkKind =
   | 'file_changes'
   | 'workflow_progress'
   | 'wiki_cards'
-  | 'team_internal';
+  | 'wiki_ingest_progress'
+  | 'team_internal'
+  | 'feature_event';
 
 export interface DeltaChunk {
   kind: 'delta';
@@ -258,6 +277,27 @@ export interface WikiCardsChunk {
   session_id?: string;
 }
 
+/** Wiki 知识库摄取进度帧：只驱动进度回调，不写消息。 */
+export interface WikiIngestProgressChunk {
+  kind: 'wiki_ingest_progress';
+  body: Record<string, unknown>;
+  sequence: number;
+  session_id?: string;
+}
+
+/** 后端 feature_event 统一命名空间帧（Gateway compat 层仍并行发旧帧）。 */
+export interface FeatureEventChunk {
+  kind: 'feature_event';
+  body: {
+    feature?: string;
+    event?: string;
+    version?: number;
+    payload?: unknown;
+  };
+  sequence: number;
+  session_id?: string;
+}
+
 export type AnyChatChunk =
   | DeltaChunk
   | ThinkingChunk
@@ -271,9 +311,11 @@ export type AnyChatChunk =
   | TodoUpdatedChunk
   | FileChangesChunk
   | WikiCardsChunk
+  | WikiIngestProgressChunk
   | TaskChunk
   | WorkflowProgressChunk
-  | TeamInternalChunk;
+  | TeamInternalChunk
+  | FeatureEventChunk;
 
 // ---------- reducer 输入快照 ----------
 
@@ -295,17 +337,7 @@ export interface ReducerSnapshot {
  * status/tool 等旁路帧）下会撞 id；撞 id 后 patch/render 按 id 匹配会命中
  * 第一条同名消息，表现为内容错位/乱序。已存在同名 id 时追加递增后缀避让。
  */
-export function uniqueMessageId(snapshot: ReducerSnapshot, prefix: string): string {
-  const base = `${prefix}-${snapshot.now}-${snapshot.sequence}`;
-  if (!snapshot.messages.some((m) => m.id === base)) return base;
-  let suffix = 1;
-  while (snapshot.messages.some((m) => m.id === `${base}-${suffix}`)) suffix += 1;
-  return `${base}-${suffix}`;
-}
-
 // ---------- reducer 输出 ----------
-
-export type StatusHint = 'running' | 'queued' | 'idle' | 'error';
 
 /** Agent 挂起等待用户点选/审批：后端 turn 可能仍 live，但 UI 不应显示「生成中」。 */
 export const USER_WAIT_CHUNK_KINDS = new Set<ChatChunkKind>([
@@ -407,51 +439,7 @@ export function chunkRequestId(chunk: AnyChatChunk, fallback?: string): string |
   return typeof body.request_id === 'string' && body.request_id.trim() ? body.request_id : undefined;
 }
 
-export interface ReducerResult {
-  /** 增量 patch，apply 端按需应用到 state.messages / book。 */
-  messageUpserts: MessageUpsert[];
-  /** 工具调用增量（start / end / error）。 */
-  toolUpserts: ToolUpsert[];
-  /** 把 book 整体替换。null = 不改。 */
-  replaceBook: Bookkeeping | null;
-  /** sessionStatus 写入（undefined = 不改）。 */
-  statusHint: StatusHint | undefined;
-  /** queueHints 写入（空字符串 = 清空）。 */
-  queueHint: string | undefined;
-  /** final/error 时输出回合统计，apply 端写 usage。 */
-  turn?: {
-    status: number;
-    turnDurationMs: number;
-    firstTokenMs: number | undefined;
-    assistantId: string | null;
-    usage?: UsagePayload;
-  };
-  /** 标记本回合结束（final/error）。apply 端负责 finalizeTurn + renderChat。 */
-  finalize: boolean;
-}
-
-export interface MessageUpsert {
-  /** 消息变更：append 追加、patch 修改、remove 删除临时/重复消息。 */
-  op: 'append' | 'patch' | 'remove';
-  messageId?: string;
-  message?: ChatMessage;
-  patch?: Partial<ChatMessage>;
-}
-
-export interface ToolUpsert {
-  toolCallId: string;
-  name: string;
-  uiLabel?: string;
-  args?: string;
-  result?: string;
-  status: ToolCallInfo['status'];
-  startedAt: number;
-  duration?: number;
-  /** 最近一条运行中工具的阶段进度文案。 */
-  progressText?: string;
-  /** 按到达顺序保留的阶段进度行，避免前端只显示最后一条。 */
-  progressHistory?: string[];
-}
+export interface ReducerResult extends FeatureReducerResult {}
 
 // ---------- 7 个 reducer ----------
 
@@ -483,8 +471,10 @@ export function normalizeChunk(raw: unknown): AnyChatChunk | null {
     case 'todo_updated': return { kind: 'todo_updated', body: body as TodoUpdatedChunk['body'], sequence, ...base };
     case 'file_changes': return { kind: 'file_changes', body: body as FileChangesChunk['body'], sequence, ...base };
     case 'wiki_cards': return { kind: 'wiki_cards', body: body as WikiCardsChunk['body'], sequence, ...base };
+    case 'wiki_ingest_progress': return { kind: 'wiki_ingest_progress', body: body as WikiIngestProgressChunk['body'], sequence, ...base };
     case 'task': return { kind: 'task', body: body as TaskChunk['body'], sequence, ...base };
     case 'team_internal': return { kind: 'team_internal', body: body as TeamInternalChunk['body'], sequence, ...base };
+    case 'feature_event': return { kind: 'feature_event', body: body as FeatureEventChunk['body'], sequence, ...base };
     default: return null;
   }
 }
@@ -562,14 +552,7 @@ export function resolveFinalContent(accumulated: string, finalText: string): str
 }
 
 function emptyReducer(_snapshot: ReducerSnapshot): ReducerResult {
-  return {
-    messageUpserts: [],
-    toolUpserts: [],
-    replaceBook: null,
-    statusHint: undefined,
-    queueHint: undefined,
-    finalize: false,
-  };
+  return emptyFeatureReducerResult();
 }
 
 /** 上一轮工具均已结束，可开始新的模型轮次（与后端每轮 Message.assistant 对齐）。 */
@@ -1268,182 +1251,56 @@ export function fileChangesReducer(chunk: FileChangesChunk, snapshot: ReducerSna
   };
 }
 
-/** 规范化 wiki_cards 帧的页面数组（对齐 web normalizeWikiCardPages：pages 或 cards 字段）。
- *  reducer 层容错：缺字段给默认值，保证渲染层拿到完整 WikiPage 形状。 */
-export function normalizeWikiCardPages(body: Record<string, unknown>): WikiPage[] {
-  const raw = Array.isArray(body.pages) ? body.pages : Array.isArray(body.cards) ? body.cards : [];
-  return raw
-    .filter((p): p is Record<string, unknown> => typeof p === 'object' && p !== null)
-    .map((p) => ({
-      id: typeof p.id === 'string' ? p.id : '',
-      page_type: (['entity', 'topic', 'source', 'comparison', 'synthesis'].includes(String(p.page_type))
-        ? p.page_type
-        : 'entity') as WikiPage['page_type'],
-      title: typeof p.title === 'string' ? p.title : '',
-      ...(typeof p.content === 'string' ? { content: p.content } : {}),
-      ...(typeof p.summary === 'string' ? { summary: p.summary } : {}),
-      file_path: typeof p.file_path === 'string' ? p.file_path : '',
-      sources: Array.isArray(p.sources) ? (p.sources as string[]) : [],
-      related: Array.isArray(p.related) ? (p.related as string[]) : [],
-      status: (['published', 'deprecated'].includes(String(p.status)) ? p.status : 'published') as WikiPage['status'],
-      tags: Array.isArray(p.tags) ? (p.tags as string[]) : [],
-      created_at: typeof p.created_at === 'number' ? p.created_at : 0,
-      updated_at: typeof p.updated_at === 'number' ? p.updated_at : 0,
-      aliases: Array.isArray(p.aliases) ? (p.aliases as string[]) : [],
-      claims: Array.isArray(p.claims) ? (p.claims as NonNullable<WikiPage['claims']>) : [],
-      claim_count: typeof p.claim_count === 'number' ? p.claim_count : 0,
-      confidence: (['high', 'medium', 'low'].includes(String(p.confidence))
-        ? (p.confidence as NonNullable<WikiPage['confidence']>)
-        : null),
-      contested: p.contested === true,
-      contradictions: Array.isArray(p.contradictions) ? (p.contradictions as string[]) : [],
-      relations: Array.isArray(p.relations)
-        ? (p.relations as NonNullable<WikiPage['relations']>)
-        : [],
-    }))
-    .filter((p) => p.id || p.title);
-}
-
-/** wiki_cards：卡片挂到当前回合最后一条 assistant 消息（帧在回合结束后到达，
- *  book.assistantId 已随 finalize 清空，故按消息列表定位）；无 assistant 时新建一条空载体。
- *  对齐 web useChat 的 ensureAssistantMessage(sid, { wikiCards })。 */
-export function wikiCardsReducer(chunk: WikiCardsChunk, snapshot: ReducerSnapshot): ReducerResult {
-  const pages = normalizeWikiCardPages(chunk.body as Record<string, unknown>);
-  if (pages.length === 0) return emptyReducer(snapshot);
-  const upserts: MessageUpsert[] = [];
-  const lastAssistant = [...snapshot.messages].reverse().find((m) => m.role === 'assistant');
-  if (lastAssistant) {
-    upserts.push({ op: 'patch', messageId: lastAssistant.id, patch: { wikiCards: pages } });
-  } else {
-    upserts.push({
-      op: 'append',
-      message: {
-        id: uniqueMessageId(snapshot, 'wikicards'),
-        role: 'assistant',
-        content: '',
-        timestamp: snapshot.now,
-        wikiCards: pages,
-      },
-    });
-  }
-  return {
-    messageUpserts: upserts,
-    toolUpserts: [],
-    replaceBook: null,
-    statusHint: undefined,
-    queueHint: undefined,
-    finalize: false,
-  };
-}
-
-export function workflowProgressReducer(chunk: WorkflowProgressChunk, snapshot: ReducerSnapshot): ReducerResult {
-  const body = chunk.body;
-  const workflow_id = typeof body.workflow_id === 'string' ? body.workflow_id : '';
-  if (!workflow_id) return emptyReducer(snapshot);
-
-  const messageId = `wp-${workflow_id}`;
-  const existing = snapshot.messages.find((m) => m.id === messageId);
-
-  const current_phase = body.current_phase && typeof body.current_phase === 'object'
-    ? {
-        id: String(body.current_phase.id ?? ''),
-        name: String(body.current_phase.name ?? ''),
-        description: typeof body.current_phase.description === 'string' ? body.current_phase.description : '',
-        status: String(body.current_phase.status ?? 'running'),
-      }
-    : undefined;
-
-  const completed_phases = Array.isArray(body.completed_phases)
-    ? body.completed_phases.map((p) => ({
-        id: String(p.id ?? ''),
-        name: String(p.name ?? ''),
-        description: typeof p.description === 'string' ? p.description : '',
-        status: String(p.status ?? 'done'),
-      }))
-    : [];
-
-  const active_calls = Array.isArray(body.active_calls)
-    ? body.active_calls.map((c) => {
-        const call: { call_id: string; role: string; phase_id?: string } = {
-          call_id: String(c.call_id ?? ''),
-          role: String(c.role ?? ''),
-        };
-        if (typeof c.phase_id === 'string') call.phase_id = c.phase_id;
-        return call;
-      })
-    : [];
-
-  const payload: WorkflowProgressPayload = {
-    workflow_id,
-    status: typeof body.status === 'string' ? body.status : 'running',
-    completed_phases,
-    active_calls,
-    message: typeof body.message === 'string' ? body.message : '',
-  };
-  if (current_phase) payload.current_phase = current_phase;
-
-  const upserts: MessageUpsert[] = [];
-  if (existing) {
-    upserts.push({ op: 'patch', messageId, patch: { workflowProgress: payload } });
-  } else {
-    upserts.push({
-      op: 'append',
-      message: {
-        id: messageId,
-        role: 'status',
-        content: '',
-        timestamp: snapshot.now,
-        workflowProgress: payload,
-      },
-    });
-  }
-
-  // workflow 完成/失败/暂停时：释放 busy，并把最后一条有内容的角色输出提升为最终回复。
-  // Dynamic Kanban 的专家团会话里，角色输出就是交付物；synthesize 后的 final chunk 可能因
-  // 后台化、限流或静默检测没有到达桌面端，导致会话一直转圈。这里用 workflow_progress 的
-  // 终态作为兜底，确保左侧消息列表的转圈能消失。
-  let statusHint: StatusHint | undefined = payload.status === 'running' ? 'running' : undefined;
-  let replaceBook: Bookkeeping | null = null;
-  if (payload.status === 'done' || payload.status === 'failed' || payload.status === 'paused') {
-    statusHint = payload.status === 'failed' ? 'error' : 'idle';
-    if (payload.status === 'done') {
-      const lastAgentRoleIdx = [...snapshot.messages].reverse().findIndex(
-        (m) => m.role === 'status' && m.agentName && m.content?.trim(),
-      );
-      if (lastAgentRoleIdx >= 0) {
-        const idx = snapshot.messages.length - 1 - lastAgentRoleIdx;
-        const msg = snapshot.messages[idx];
-        upserts.push({
-          op: 'patch',
-          messageId: msg.id,
-          patch: {
-            role: 'assistant',
-            segmentRole: 'answer',
-          },
-        });
-        // 把 book.assistantId 指向这条消息，使随后到达的 final chunk 能 patch 到同一处，
-        // 避免产生重复的最终回复。
-        replaceBook = { ...snapshot.book, assistantId: msg.id };
-      }
-    }
-  }
-
-  return {
-    messageUpserts: upserts,
-    toolUpserts: [],
-    replaceBook,
-    statusHint,
-    queueHint: undefined,
-    finalize: false,
-  };
-}
-
 export function unknownReducer(_chunk: AnyChatChunk, _snapshot: ReducerSnapshot): ReducerResult {
   return emptyReducer(_snapshot);
 }
 
+function featureReducerContextFromSnapshot(snapshot: ReducerSnapshot): FeatureReducerContext {
+  return {
+    sessionId: snapshot.sessionId,
+    messages: snapshot.messages,
+    book: snapshot.book,
+    now: snapshot.now,
+    sequence: snapshot.sequence,
+  };
+}
+
+/**
+ * 把旧帧与 feature_event 新帧统一转调 Feature Event Reducer Registry。
+ * 未命中（包括模块未加载导致的未注册）返回 null，让 reduceChunk 回退到原有 switch/unknownReducer，
+ * 保证未注册旧帧行为逐字不变。
+ */
+function dispatchFeatureEventFromChunk(
+  chunk: AnyChatChunk,
+  snapshot: ReducerSnapshot,
+): ReducerResult | null {
+  const ctx = featureReducerContextFromSnapshot(snapshot);
+  switch (chunk.kind) {
+    case 'wiki_cards':
+      return featureEventRegistry.dispatch('wiki', 'cards', 1, chunk.body, ctx);
+    case 'wiki_ingest_progress':
+      return featureEventRegistry.dispatch('wiki', 'ingest_progress', 1, chunk.body, ctx);
+    case 'team_internal':
+      return featureEventRegistry.dispatch('team', 'internal_message', 1, chunk.body, ctx);
+    case 'workflow_progress':
+      return featureEventRegistry.dispatch('kanban', 'workflow_progress', 1, chunk.body, ctx);
+    case 'feature_event': {
+      const body = chunk.body;
+      const feature = typeof body.feature === 'string' ? body.feature : '';
+      const event = typeof body.event === 'string' ? body.event : '';
+      const version = typeof body.version === 'number' ? body.version : 1;
+      return featureEventRegistry.dispatch(feature, event, version, body.payload, ctx);
+    }
+    default:
+      return null;
+  }
+}
+
 /** 顶层 dispatch：根据 chunk.kind 选 reducer；未知 kind 返回空 patch（不抛错）。 */
 export function reduceChunk(chunk: AnyChatChunk, snapshot: ReducerSnapshot): ReducerResult {
+  const featureResult = dispatchFeatureEventFromChunk(chunk, snapshot);
+  if (featureResult) return featureResult;
+
   switch (chunk.kind) {
     case 'delta': return deltaReducer(chunk, snapshot);
     case 'thinking': return thinkingReducer(chunk, snapshot);
@@ -1454,12 +1311,9 @@ export function reduceChunk(chunk: AnyChatChunk, snapshot: ReducerSnapshot): Red
     case 'plan_review': return planReviewReducer(chunk, snapshot);
     case 'followup_question': return followupQuestionReducer(chunk, snapshot);
     case 'kanban': return emptyReducer(snapshot);
-    case 'workflow_progress': return workflowProgressReducer(chunk, snapshot);
     case 'todo_updated': return todoUpdatedReducer(chunk, snapshot);
     case 'file_changes': return fileChangesReducer(chunk, snapshot);
-    case 'wiki_cards': return wikiCardsReducer(chunk, snapshot);
     case 'task': return emptyReducer(snapshot); // 桌面端走 REST /api/tasks 驱动 kanban，WS task 帧仅保留入口
-    case 'team_internal': return emptyReducer(snapshot); // 需要跨消息合并，由 chat-controller 在 gate 后处理
     default: return unknownReducer(chunk, snapshot);
   }
 }

@@ -27,7 +27,9 @@ import {
   type Attachment,
   type FollowupAnswer,
   type WikiAgentSessionSummary,
+  type WikiPage,
 } from '../backend-client';
+import type { ChatMessage } from '../chat-render';
 import { clearRuntimeStyle, setRuntimeStyle } from '../components/runtime-style';
 import { createChatRenderCoalescer } from '../render-utils';
 import { formatFollowupAnswerMessage } from '../followup';
@@ -73,12 +75,20 @@ import {
   bookFor,
   dispatchWs,
   editQueueItem,
+  invokeWikiIngestProgressCallback,
   isBusy,
   setWikiSendExtrasResolver,
   steerQueuedItem,
   subscribeSessions,
   stopGeneration,
 } from './chat-controller';
+import {
+  featureEventRegistry,
+  emptyFeatureReducerResult,
+  uniqueMessageId,
+  type FeatureReducerContext,
+  type FeatureReducerResult,
+} from './event-reducer-registry';
 import { ensureFileChangesDelegation } from './conversation-renderer';
 import { renderDiffPanelHtml } from '../diff-lines';
 import { showFileOpenMenu } from './file-open-menu';
@@ -1109,10 +1119,105 @@ export function buildWikiAssistPrompt(assist: { fileName: string; error: string;
   return assist.sourceId ? `${base}（source_id: ${assist.sourceId}）。` : `${base}。`;
 }
 
+// ---------- Feature Event Reducers ----------
+
+/** 规范化 wiki_cards 帧的页面数组（对齐 web normalizeWikiCardPages：pages 或 cards 字段）。
+ *  reducer 层容错：缺字段给默认值，保证渲染层拿到完整 WikiPage 形状。 */
+export function normalizeWikiCardPages(body: Record<string, unknown>): WikiPage[] {
+  const raw = Array.isArray(body.pages) ? body.pages : Array.isArray(body.cards) ? body.cards : [];
+  return raw
+    .filter((p): p is Record<string, unknown> => typeof p === 'object' && p !== null)
+    .map((p) => ({
+      id: typeof p.id === 'string' ? p.id : '',
+      page_type: (['entity', 'topic', 'source', 'comparison', 'synthesis'].includes(String(p.page_type))
+        ? p.page_type
+        : 'entity') as WikiPage['page_type'],
+      title: typeof p.title === 'string' ? p.title : '',
+      ...(typeof p.content === 'string' ? { content: p.content } : {}),
+      ...(typeof p.summary === 'string' ? { summary: p.summary } : {}),
+      file_path: typeof p.file_path === 'string' ? p.file_path : '',
+      sources: Array.isArray(p.sources) ? (p.sources as string[]) : [],
+      related: Array.isArray(p.related) ? (p.related as string[]) : [],
+      status: (['published', 'deprecated'].includes(String(p.status)) ? p.status : 'published') as WikiPage['status'],
+      tags: Array.isArray(p.tags) ? (p.tags as string[]) : [],
+      created_at: typeof p.created_at === 'number' ? p.created_at : 0,
+      updated_at: typeof p.updated_at === 'number' ? p.updated_at : 0,
+      aliases: Array.isArray(p.aliases) ? (p.aliases as string[]) : [],
+      claims: Array.isArray(p.claims) ? (p.claims as NonNullable<WikiPage['claims']>) : [],
+      claim_count: typeof p.claim_count === 'number' ? p.claim_count : 0,
+      confidence: (['high', 'medium', 'low'].includes(String(p.confidence))
+        ? (p.confidence as NonNullable<WikiPage['confidence']>)
+        : null),
+      contested: p.contested === true,
+      contradictions: Array.isArray(p.contradictions) ? (p.contradictions as string[]) : [],
+      relations: Array.isArray(p.relations)
+        ? (p.relations as NonNullable<WikiPage['relations']>)
+        : [],
+    }))
+    .filter((p) => p.id || p.title);
+}
+
+/** wiki_cards：卡片挂到当前回合最后一条 assistant 消息（帧在回合结束后到达，
+ *  book.assistantId 已随 finalize 清空，故按消息列表定位）；无 assistant 时新建一条空载体。
+ *  对齐 web useChat 的 ensureAssistantMessage(sid, { wikiCards })。 */
+export function wikiCardsReducer(
+  body: Record<string, unknown>,
+  ctx: FeatureReducerContext,
+): FeatureReducerResult {
+  const pages = normalizeWikiCardPages(body);
+  if (pages.length === 0) return emptyFeatureReducerResult();
+  const upserts: FeatureReducerResult['messageUpserts'] = [];
+  const lastAssistant = [...ctx.messages].reverse().find((m) => m.role === 'assistant');
+  if (lastAssistant) {
+    upserts.push({ op: 'patch', messageId: lastAssistant.id, patch: { wikiCards: pages } });
+  } else {
+    upserts.push({
+      op: 'append',
+      message: {
+        id: uniqueMessageId(ctx, 'wikicards'),
+        role: 'assistant',
+        content: '',
+        timestamp: ctx.now,
+        wikiCards: pages,
+      } as ChatMessage,
+    });
+  }
+  return {
+    messageUpserts: upserts,
+    toolUpserts: [],
+    replaceBook: null,
+    statusHint: undefined,
+    queueHint: undefined,
+    finalize: false,
+  };
+}
+
+/** wiki_ingest_progress：带外进度帧，不进 reducer、不写消息。
+ *  规范化后通过 chat-controller 的 callback 订阅机制转发给 wiki-page 等订阅者。
+ *  这是迁移期边界：业务处理归属 wiki feature，callback pub-sub 暂留 chat-controller。 */
+function wikiIngestProgressHandler(body: unknown, ctx: FeatureReducerContext): FeatureReducerResult {
+  const raw = (body ?? {}) as Record<string, unknown>;
+  const progress: import('../backend-client').WikiIngestProgress = {
+    stage: String(raw.stage ?? ''),
+    percent: Math.max(0, Math.min(100, Number(raw.percent ?? 0) || 0)),
+    label: String(raw.label ?? raw.stage ?? ''),
+    source_id: String(raw.source_id ?? ''),
+    session_id: ctx.sessionId,
+  };
+  if (typeof raw.error === 'string') progress.error = raw.error;
+  if (raw.detail && typeof raw.detail === 'object') {
+    progress.detail = raw.detail as Record<string, unknown>;
+  }
+  invokeWikiIngestProgressCallback(progress);
+  return emptyFeatureReducerResult();
+}
+
 // ---------- 组合根接线（index.ts init 调用一次） ----------
 
 let listenersBound = false;
 let featureEventsController: AbortController | null = null;
+
+let featureReducersRegistered = false;
 
 /**
  * 初始化发送参数 resolver、登录态重置和 Wiki 卡片点击委托。
@@ -1127,6 +1232,23 @@ export function initWikiAgent(): void {
   });
   setWikiAgentPanelRenderer(mountWikiAgentPanel);
   setWikiBrowserSurfaceRenderer(mountWikiBrowserSurface);
+
+  // Wiki 业务事件 reducer 注册到 Feature Event Registry（幂等，防止测试多次 init）。
+  if (!featureReducersRegistered) {
+    featureReducersRegistered = true;
+    featureEventRegistry.register({
+      feature: 'wiki',
+      event: 'cards',
+      version: 1,
+      reducer: (payload, ctx) => wikiCardsReducer(payload as Record<string, unknown>, ctx),
+    });
+    featureEventRegistry.register({
+      feature: 'wiki',
+      event: 'ingest_progress',
+      version: 1,
+      reducer: wikiIngestProgressHandler,
+    });
+  }
 
   if (listenersBound) return;
   listenersBound = true;

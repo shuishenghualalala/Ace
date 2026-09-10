@@ -24,6 +24,7 @@ import {
   openWikiAgent,
   forgetWikiAgentKb,
   initWikiAgent,
+  normalizeWikiCardPages,
 } from '../../src/ui/features/wiki-agent';
 import {
   applyChunk,
@@ -40,7 +41,6 @@ import {
 } from '../../src/ui/features/wiki-page';
 import {
   normalizeChunk,
-  normalizeWikiCardPages,
   reduceChunk,
   type AnyChatChunk,
   type ReducerSnapshot,

@@ -10,6 +10,14 @@ import { backendApi, type DynamicKanbanStatus, type Task } from '../backend-clie
 import { taskStatusLabel } from '../../shared/task-status';
 import { $, escapeHtml, isDynamicKanbanSession, notify, saveToStorage, state } from '../state';
 import { clearRuntimeStyle, setRuntimeStyle, setRuntimeToken } from '../components/runtime-style';
+import type { ChatMessage, WorkflowProgressPayload } from '../chat-render';
+import {
+  featureEventRegistry,
+  emptyFeatureReducerResult,
+  uniqueMessageId,
+  type FeatureReducerContext,
+  type FeatureReducerResult,
+} from './event-reducer-registry';
 import {
   activateWorkflowTimeline,
   buildWorkflowTimelineHtml,
@@ -454,3 +462,132 @@ export function renderKanbanBoard(): void {
   hideLegacyTaskBoardPanel();
   refreshKanbanInspectorIfMounted();
 }
+
+interface WorkflowProgressPhase {
+  id: string;
+  name: string;
+  description?: string;
+  status: string;
+}
+
+interface WorkflowProgressCall {
+  call_id: string;
+  role: string;
+  phase_id?: string;
+}
+
+interface WorkflowProgressBody {
+  workflow_id: string;
+  status: string;
+  current_phase?: WorkflowProgressPhase;
+  completed_phases?: WorkflowProgressPhase[];
+  active_calls?: WorkflowProgressCall[];
+  message?: string;
+}
+
+export function workflowProgressReducer(
+  body: WorkflowProgressBody,
+  ctx: FeatureReducerContext,
+): FeatureReducerResult {
+  const workflow_id = typeof body.workflow_id === 'string' ? body.workflow_id : '';
+  if (!workflow_id) return emptyFeatureReducerResult();
+
+  const messageId = `wp-${workflow_id}`;
+  const existing = ctx.messages.find((m) => m.id === messageId);
+
+  const current_phase = body.current_phase && typeof body.current_phase === 'object'
+    ? {
+        id: String(body.current_phase.id ?? ''),
+        name: String(body.current_phase.name ?? ''),
+        description: typeof body.current_phase.description === 'string' ? body.current_phase.description : '',
+        status: String(body.current_phase.status ?? 'running'),
+      }
+    : undefined;
+
+  const completed_phases = Array.isArray(body.completed_phases)
+    ? body.completed_phases.map((p) => ({
+        id: String(p.id ?? ''),
+        name: String(p.name ?? ''),
+        description: typeof p.description === 'string' ? p.description : '',
+        status: String(p.status ?? 'done'),
+      }))
+    : [];
+
+  const active_calls = Array.isArray(body.active_calls)
+    ? body.active_calls.map((c) => {
+        const call: { call_id: string; role: string; phase_id?: string } = {
+          call_id: String(c.call_id ?? ''),
+          role: String(c.role ?? ''),
+        };
+        if (typeof c.phase_id === 'string') call.phase_id = c.phase_id;
+        return call;
+      })
+    : [];
+
+  const payload: WorkflowProgressPayload = {
+    workflow_id,
+    status: typeof body.status === 'string' ? body.status : 'running',
+    completed_phases,
+    active_calls,
+    message: typeof body.message === 'string' ? body.message : '',
+  };
+  if (current_phase) payload.current_phase = current_phase;
+
+  const upserts: FeatureReducerResult['messageUpserts'] = [];
+  if (existing) {
+    upserts.push({ op: 'patch', messageId, patch: { workflowProgress: payload } });
+  } else {
+    upserts.push({
+      op: 'append',
+      message: {
+        id: messageId,
+        role: 'status',
+        content: '',
+        timestamp: ctx.now,
+        workflowProgress: payload,
+      } as ChatMessage,
+    });
+  }
+
+  let statusHint: FeatureReducerResult['statusHint'] = payload.status === 'running' ? 'running' : undefined;
+  let replaceBook: FeatureReducerResult['replaceBook'] = null;
+  if (payload.status === 'done' || payload.status === 'failed' || payload.status === 'paused') {
+    statusHint = payload.status === 'failed' ? 'error' : 'idle';
+    if (payload.status === 'done') {
+      const lastAgentRoleIdx = [...ctx.messages].reverse().findIndex(
+        (m) => m.role === 'status' && m.agentName && m.content?.trim(),
+      );
+      if (lastAgentRoleIdx >= 0) {
+        const idx = ctx.messages.length - 1 - lastAgentRoleIdx;
+        const msg = ctx.messages[idx];
+        upserts.push({
+          op: 'patch',
+          messageId: msg.id,
+          patch: {
+            role: 'assistant',
+            segmentRole: 'answer',
+          },
+        });
+        replaceBook = { ...ctx.book, assistantId: msg.id };
+      }
+    }
+  }
+
+  return {
+    messageUpserts: upserts,
+    toolUpserts: [],
+    replaceBook,
+    statusHint,
+    queueHint: undefined,
+    finalize: false,
+  };
+}
+
+// 迁移期妥协：Dynamic Kanban 目前没有独立生命周期 init，先在模块 import 时自注册。
+// registry 已提供幂等 disposer，后续 5-5/5-6 生命周期切片可平滑接管为显式注册/注销。
+featureEventRegistry.register({
+  feature: 'kanban',
+  event: 'workflow_progress',
+  version: 1,
+  reducer: (payload, ctx) => workflowProgressReducer(payload as WorkflowProgressBody, ctx),
+});
