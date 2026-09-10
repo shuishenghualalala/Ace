@@ -44,9 +44,11 @@ import { $, escapeHtml, notify, state } from '../state';
 import { mountFoldedMarkdown, type FoldedMarkdownHandle } from '../markdown-fold';
 import { showContextMenu, type ContextMenuItem } from '../lib/context-menu';
 import { showConfirmDialog, showPromptDialog } from '../ui-feedback';
-import { __resetWikiGraphForTest, invalidateWikiGraph, mountWikiGraph } from './wiki-graph';
+import { __resetWikiGraphForTest, disposeWikiGraph, invalidateWikiGraph, mountWikiGraph } from './wiki-graph';
 import { mountWikiEditor, type WikiEditorHandle } from './wiki-editor';
 import { maybeStartWikiTourOnce, startWikiTour } from './wiki-tour';
+import type { PageContribution, PageLifecycleContext } from './page-registry';
+import { disposeWikiAgentPage } from './wiki-agent';
 
 // ── Wiki Agent 入口（Phase 4） ──
 // 「上传」按钮（打开对话区附件选择）与失败任务「让 AI 处理」共用同一挂点；回调由 index.ts
@@ -594,7 +596,11 @@ const initializedKbIds = new Set<string>();
 let kbCreateOpen = false;
 let kbCreateDraft = '';
 let kbCreateSubmitting = false;
-let wikiChangedBound = false;
+let wikiLifecycleSignal: AbortSignal | null = null;
+let disposeWikiLifecycleEvents: (() => void) | null = null;
+let wikiLifecycleEpoch = 0;
+
+function wikiLifecycleAvailable(): boolean { return !wikiLifecycleSignal || !wikiLifecycleSignal.aborted; }
 
 // ── 分栏宽度：拖拽 + 双击复位 + localStorage 持久化（知识库面板 / 图谱视图共用一套机制） ──
 
@@ -768,7 +774,8 @@ function resetWikiViewState(): void {
   } catch {
     wikiBrowserOpen = true;
   }
-  loadSeq = 0;
+  loadSeq += 1;
+  wikiLifecycleEpoch += 1;
   autoInitAttempted = false;
   initializedKbIds.clear();
   kbCreateOpen = false;
@@ -787,7 +794,11 @@ function resetWikiViewState(): void {
 export function __resetWikiViewForTest(): void {
   resetWikiViewState();
   graphWidth = null;
-  loadSeq = 0;
+  loadSeq += 1;
+  wikiLifecycleEpoch += 1;
+  wikiLifecycleSignal = null;
+  disposeWikiLifecycleEvents?.();
+  disposeWikiLifecycleEvents = null;
   listScrollMemory = null;
   __resetWikiGraphForTest();
 }
@@ -1234,6 +1245,8 @@ async function saveWikiPageDraft(groupId: string, pageId: string): Promise<void>
   const current = view.pageDetails[pageId];
   if (!current || !group || group.selectedId !== pageId) return;
   const draft = pageDraftFromDom(groupId, current, groupDetails.get(groupId)?.editor?.flush() ?? current.content ?? '');
+  const lifecycleSignal = wikiLifecycleSignal;
+  const lifecycleEpoch = wikiLifecycleEpoch;
   setWikiSaveState(groupId, 'saving');
   localSaveInFlight = true;
   try {
@@ -1244,6 +1257,7 @@ async function saveWikiPageDraft(groupId: string, pageId: string): Promise<void>
       sources: draft.sources,
       relations: draft.relations ?? [],
     }, view.kbId);
+    if (lifecycleSignal !== wikiLifecycleSignal || lifecycleEpoch !== wikiLifecycleEpoch || !wikiLifecycleAvailable()) return;
     view.pageDetails = { ...view.pageDetails, [pageId]: result.page };
     view.sourcePages = {
       ...view.sourcePages,
@@ -1262,6 +1276,7 @@ async function saveWikiPageDraft(groupId: string, pageId: string): Promise<void>
     setWikiSaveState(groupId, 'saved');
     invalidateWikiGraph();
   } catch (error) {
+    if (lifecycleSignal !== wikiLifecycleSignal || lifecycleEpoch !== wikiLifecycleEpoch || !wikiLifecycleAvailable()) return;
     setWikiSaveState(groupId, 'error');
     notify(`保存 Wiki 页面失败：${errMsg(error)}`);
   } finally {
@@ -1301,6 +1316,17 @@ function flushGroupDirty(group: WikiDetailGroup): void {
   }
   detail.dirty = false;
   void saveWikiPageDraft(group.id, group.selectedId);
+}
+
+async function flushWikiPageEdits(): Promise<void> {
+  const pending = Array.from(groupDetails.entries()).filter(([, detail]) => detail.dirty).map(([groupId, detail]) => {
+    const group = groupById(groupId);
+    if (!group?.selectedId || !detail.editor) return Promise.resolve();
+    if (detail.timer) clearTimeout(detail.timer);
+    detail.timer = null;
+    return saveWikiPageDraft(groupId, group.selectedId);
+  });
+  await Promise.allSettled(pending);
 }
 
 export async function openWikiPageByTitle(title: string): Promise<boolean> {
@@ -1663,6 +1689,7 @@ function renderShell(): void {
 // ── 数据加载 ──
 
 async function loadKbs(): Promise<void> {
+  if (!wikiLifecycleAvailable()) return;
   const seq = ++loadSeq;
   try {
     let res = await backendApi.wikiKBs();
@@ -1712,6 +1739,7 @@ async function loadKbs(): Promise<void> {
 }
 
 async function loadPages(): Promise<void> {
+  if (!wikiLifecycleAvailable()) return;
   if (!view.kbId) {
     // KB 为空或加载失败：复位 loading 并重绘，否则页面停在「知识库加载中…」空转。
     if (view.loading) {
@@ -1745,6 +1773,7 @@ async function loadPages(): Promise<void> {
 }
 
 async function loadMorePages(): Promise<void> {
+  if (!wikiLifecycleAvailable()) return;
   if (!view.kbId || view.loadingMore || !view.hasMore) return;
   const seq = loadSeq;
   view.loadingMore = true;
@@ -1770,10 +1799,13 @@ async function loadMorePages(): Promise<void> {
 
 async function loadPageDetail(pageId: string): Promise<void> {
   if (!view.kbId || loadingDetails.has(pageId)) return;
+  if (!wikiLifecycleAvailable()) return;
+  const seq = loadSeq;
   loadingDetails.add(pageId);
   renderShell();
   try {
     const res = await backendApi.wikiPage(pageId, view.kbId);
+    if (seq !== loadSeq || !wikiLifecycleAvailable()) return;
     view.pageDetails = { ...view.pageDetails, [pageId]: res.page };
     view.sourcePages = { ...view.sourcePages, [pageId]: res.source_pages ?? [] };
     view.relationPages = { ...view.relationPages, [pageId]: res.relation_pages ?? [] };
@@ -1783,7 +1815,7 @@ async function loadPageDetail(pageId: string): Promise<void> {
   } finally {
     loadingDetails.delete(pageId);
   }
-  renderShell();
+  if (seq === loadSeq && wikiLifecycleAvailable()) renderShell();
 }
 
 /**
@@ -2639,15 +2671,74 @@ export function renderWikiPage(): void {
   renderShell();
 }
 
+function installWikiLifecycleEvents(): () => void {
+  const wikiChanged = (event: Event): void => {
+    const changes = ((event as CustomEvent<{ changes?: Array<{ kb_id?: string }> }>).detail?.changes ?? []);
+    if (!view.kbId || !changes.some((change) => change.kb_id === view.kbId)) return;
+    if (localSaveInFlight || Date.now() < ignoreWikiChangedUntil) return;
+    invalidateWikiGraph();
+    void reloadAll();
+  };
+  window.addEventListener('wiki:changed', wikiChanged);
+  return () => {
+    window.removeEventListener('wiki:changed', wikiChanged);
+  };
+}
+
+/** Feature-install resource: invalidate account-scoped cache even while the page is inactive. */
+export function installWikiFeature(): () => void {
+  const loginChanged = (): void => {
+    resetWikiViewState();
+    disposeWikiGraph();
+    if (state.activeTab === 'wiki') {
+      renderShell();
+      void refreshWikiData();
+    }
+  };
+  window.addEventListener('user:login-changed', loginChanged);
+  return () => window.removeEventListener('user:login-changed', loginChanged);
+}
+
+export function createWikiPageContribution(): PageContribution {
+  return {
+    id: 'wiki',
+    isAvailable: () => state.config?.wiki?.enabled !== false,
+    activate: ({ signal }: PageLifecycleContext) => {
+      wikiLifecycleEpoch += 1;
+      wikiLifecycleSignal = signal;
+      disposeWikiLifecycleEvents?.();
+      disposeWikiLifecycleEvents = installWikiLifecycleEvents();
+      renderShell();
+      void refreshWikiData();
+    },
+    deactivate: async () => {
+      loadSeq += 1;
+      wikiLifecycleEpoch += 1;
+      disposeWikiLifecycleEvents?.();
+      disposeWikiLifecycleEvents = null;
+      await flushWikiPageEdits();
+      for (const groupId of Array.from(groupDetails.keys())) disposeGroupDetail(groupId);
+      disposeWikiGraph();
+      disposeWikiAgentPage();
+      // Keep the aborted signal so callbacks from this activation remain unavailable.
+    },
+  };
+}
+
 /** 切入 Wiki tab 时调用：首次加载（加载失败不置 loaded，下次切入自动重试）。 */
 export async function refreshWikiData(): Promise<void> {
+  const lifecycleSignal = wikiLifecycleSignal;
+  const lifecycleEpoch = wikiLifecycleEpoch;
+  if (!wikiLifecycleAvailable()) return;
   if (view.loaded) {
-    renderShell();
+    if (lifecycleSignal === wikiLifecycleSignal && lifecycleEpoch === wikiLifecycleEpoch && wikiLifecycleAvailable()) renderShell();
     return;
   }
   await reloadAll();
+  if (lifecycleSignal !== wikiLifecycleSignal || lifecycleEpoch !== wikiLifecycleEpoch || !wikiLifecycleAvailable()) return;
   // 仅首次加载成功才置位：失败（如网络异常）时保持 false，下次切回 tab 自动重试。
   if (!view.kbsLoadFailed) {
+    if (lifecycleSignal !== wikiLifecycleSignal || lifecycleEpoch !== wikiLifecycleEpoch || !wikiLifecycleAvailable()) return;
     view.loaded = true;
     // 首次成功进入 Wiki 页时启动界面导览（localStorage 标记，只启动一次）。
     maybeStartWikiTourOnce();
@@ -2660,25 +2751,4 @@ export function bindWikiTab(onTab: () => void): void {
     void refreshWikiData();
   });
 
-  // 登录态变化（登录成功 / 退出）后重置缓存，下次进入 tab 重新拉取。
-  window.addEventListener('user:login-changed', () => {
-    resetWikiViewState();
-    invalidateWikiGraph();
-    renderShell();
-    // 登录成功且当前停在 Wiki tab：立即自动拉取（登出则停在登录引导态）。
-    if (state.activeTab === 'wiki') {
-      void refreshWikiData();
-    }
-  });
-
-  if (!wikiChangedBound) {
-    wikiChangedBound = true;
-    window.addEventListener('wiki:changed', (event) => {
-      const changes = ((event as CustomEvent<{ changes?: Array<{ kb_id?: string }> }>).detail?.changes ?? []);
-      if (!view.kbId || !changes.some((change) => change.kb_id === view.kbId)) return;
-      if (localSaveInFlight || Date.now() < ignoreWikiChangedUntil) return;
-      invalidateWikiGraph();
-      void reloadAll();
-    });
-  }
 }

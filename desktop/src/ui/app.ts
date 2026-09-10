@@ -44,12 +44,13 @@ import { bindSystemTab, disposeSystemTab, renderSystemLogs, renderSystemOverview
 import { initUsagePage } from './features/usage-panel';
 import { activateCronPage, renderCronTaskBoard, setCronCallbacks } from './features/cron-page';
 import {
-  bindWikiTab,
-  refreshWikiData,
+  createWikiPageContribution,
+  installWikiFeature,
   setWikiAgentEntryHandler,
   setWikiAgentKbDeletedHandler,
 } from './features/wiki-page';
-import { enterWikiAgentMode, forgetWikiAgentKb, initWikiAgent } from './features/wiki-agent';
+import { PageRegistry } from './features/page-registry';
+import { disposeWikiAgentFeature, enterWikiAgentMode, forgetWikiAgentKb, initWikiAgent } from './features/wiki-agent';
 import {
   assignSessionAgentDisplay,
   bindWorkspaceUi,
@@ -158,6 +159,8 @@ import {
   type WorkLocation,
 } from './features/sidebar-nav';
 
+const pageRegistry = new PageRegistry();
+
 function setTab(tab: TabKey): boolean {
   // 后端服务未就绪时阻断页面切换，遮罩已由 backend-status-guard 展示。
   // init 阶段旁路：允许构建 UI 骨架（遮罩覆盖下用户看不到）。
@@ -165,6 +168,7 @@ function setTab(tab: TabKey): boolean {
     return false;
   }
   if (tab === 'wiki' && !canNavigateToWiki(state.config)) return false;
+  void pageRegistry.activate(tab).catch((error) => notify(`打开页面失败：${(error as Error).message}`));
   state.activeTab = tab;
   const productState = productModeStore.get();
   if (
@@ -197,7 +201,6 @@ function activateTab(tab: TabKey): boolean {
   if (tab === 'agents') activateAgentsPage();
   else if (tab === 'skills') activateSkillsPage();
   else if (tab === 'security') activateSecurityPage();
-  else if (tab === 'wiki') void refreshWikiData();
   else if (tab === 'sites') {
     syncSiteAnnotationEntry();
     void renderSitesPage();
@@ -486,7 +489,6 @@ function bindGlobalEvents(): () => void {
   const disposeSkillsLifecycle = bindSkillsPageLifecycle(() => {
     activateTab('chat');
   });
-  bindWikiTab(() => activateTab('wiki'));
   bindSitesTab({
     openInspirationAgent: async (item) => {
       if (!item.sessionId) throw new Error('这个灵感没有绑定创建对话');
@@ -613,6 +615,8 @@ async function init(
       void enterWikiAgentMode(req);
     });
   });
+  registerDispose(disposeWikiAgentFeature);
+  registerDispose(installWikiFeature());
   await safe('setSessionControllerSetTab', () => setSessionControllerSetTab(setTab));
   await safe('bindGlobalEvents', () => {
     registerDispose(bindGlobalEvents());
@@ -755,6 +759,7 @@ function mountApplicationShell(
     });
   }
   function showWorkWorkbench(): void {
+    void pageRegistry.activate('workbench');
     setWorkItemContext(null);
     setWorkOverviewVisible(true);
     workContext.hidden = false;
@@ -765,6 +770,7 @@ function mountApplicationShell(
     activateWorkLocation('workbench', workOverview);
   }
   function showWorkPage(location: WorkLocation, options: { itemId?: string } = {}): void {
+    void pageRegistry.activate(location);
     setWorkItemContext(null);
     setWorkOverviewVisible(false);
     workContext.hidden = location === 'items';
@@ -786,6 +792,7 @@ function mountApplicationShell(
     initialMessage?: string,
     item: WorkItem | null = null,
   ): Promise<void> {
+    void pageRegistry.activate('workbench');
     updateProductModeView({ lastPosition: 'workbench' });
     setWorkItemContext(item);
     setWorkOverviewVisible(false);
@@ -876,6 +883,7 @@ function mountApplicationShell(
     },
     onProductModeChange: syncProductMode,
   });
+  const disposeWikiPageContribution = pageRegistry.register(createWikiPageContribution());
 
   const assistantContext = document.createElement('div');
   const workContext = document.createElement('aside');
@@ -947,6 +955,7 @@ function mountApplicationShell(
   const disposeWikiFeature = bindWikiFeatureUi((enabled) => {
     shell.setFeatures({ wiki: enabled ? 'available' : 'hidden' });
     const nextTab = resolveTabAfterWikiCapabilityChange(state.activeTab, enabled);
+    if (!enabled) void pageRegistry.deactivate();
     if (nextTab !== state.activeTab) activateTab(nextTab);
   });
   syncProductMode(productModeStore.get().productMode);
@@ -954,6 +963,8 @@ function mountApplicationShell(
   return {
     shell,
     dispose() {
+      void pageRegistry.deactivate();
+      void disposeWikiPageContribution();
       leaveWorkMode();
       setWorkHistoryCommands({});
       const restoredContext = document.createElement('div');

@@ -101,6 +101,34 @@ describe('createChatRenderCoalescer', () => {
     void schedule;
     expect(renderCalls).toBe(0);
   });
+
+  it('cancel before flush suppresses the queued render', () => {
+    const queue: Array<() => void> = [];
+    const scheduler = (cb: () => void) => queue.push(cb);
+    let renderCalls = 0;
+    const schedule = createChatRenderCoalescer(() => { renderCalls += 1; }, scheduler);
+
+    schedule();
+    schedule.cancel();
+    queue.splice(0).forEach((fn) => fn());
+    expect(renderCalls).toBe(0);
+  });
+
+  it('cancel then reschedule keeps the old callback from consuming the new render', () => {
+    const queue: Array<() => void> = [];
+    const scheduler = (cb: () => void) => queue.push(cb);
+    let renderCalls = 0;
+    const schedule = createChatRenderCoalescer(() => { renderCalls += 1; }, scheduler);
+
+    schedule();
+    schedule.cancel();
+    schedule();
+    expect(queue).toHaveLength(2);
+    queue.shift()?.();
+    expect(renderCalls).toBe(0);
+    queue.shift()?.();
+    expect(renderCalls).toBe(1);
+  });
 });
 
 describe('createStreamingPatchCoalescer', () => {

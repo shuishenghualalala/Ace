@@ -44,16 +44,21 @@ export function applyToolFoldState(key: string, open: boolean, map: Map<string, 
 export function createChatRenderCoalescer(
   render: () => void,
   scheduler: (cb: () => void) => void,
-): () => void {
+): (() => void) & { cancel: () => void } {
   let scheduled = false;
-  return function scheduleChatRender(): void {
+  let generation = 0;
+  const scheduleChatRender = function scheduleChatRender(): void {
     if (scheduled) return;
     scheduled = true;
+    const token = ++generation;
     scheduler(() => {
+      if (token !== generation) return;
       scheduled = false;
       render();
     });
   };
+  scheduleChatRender.cancel = () => { generation += 1; scheduled = false; };
+  return scheduleChatRender;
 }
 
 export interface StreamingPatchTarget {

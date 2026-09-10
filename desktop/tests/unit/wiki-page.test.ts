@@ -23,8 +23,11 @@ import {
   setWikiAgentEntryHandler,
   setWikiAgentKbDeletedHandler,
   summaryOf,
+  createWikiPageContribution,
+  installWikiFeature,
 } from '../../src/ui/features/wiki-page';
 import { __resetAllStoresForTest, sessionStore } from '../../src/ui/stores/stores';
+import { state } from '../../src/ui/state';
 import { showContextMenu } from '../../src/ui/lib/context-menu';
 
 const { mockShowConfirmDialog, mockShowPromptDialog } = vi.hoisted(() => ({
@@ -218,6 +221,46 @@ describe('KB 加载与渲染', () => {
     document.querySelector('[data-tab="wiki"]')?.dispatchEvent(new Event('click'));
     expect(onTab).toHaveBeenCalled();
     await vi.waitFor(() => expect(api.wikiKBs).toHaveBeenCalled(), { timeout: 10000, interval: 20 });
+  });
+});
+
+describe('Wiki 页面生命周期', () => {
+  it('离页后旧 refresh 完成不会继续加载页面数据', async () => {
+    const pendingKbs = new Promise<{ ok: true; kbs: [] }>((resolve) => {
+      setTimeout(() => resolve({ ok: true, kbs: [] }), 0);
+    });
+    api.wikiKBs.mockReturnValue(pendingKbs);
+    const contribution = createWikiPageContribution();
+    const signalController = new AbortController();
+
+    contribution.activate({ signal: signalController.signal });
+    const deactivation = contribution.deactivate();
+    signalController.abort();
+    await deactivation;
+    await pendingKbs;
+    await flush();
+
+    expect(api.wikiPages).not.toHaveBeenCalled();
+  });
+
+  it('账号 reset 会释放 feature 监听，并让旧页面请求失效', async () => {
+    const pendingKbs = new Promise<{ ok: true; kbs: [] }>((resolve) => {
+      setTimeout(() => resolve({ ok: true, kbs: [] }), 0);
+    });
+    api.wikiKBs.mockReturnValue(pendingKbs);
+    state.activeTab = 'wiki';
+    const disposeFeature = installWikiFeature();
+    const contribution = createWikiPageContribution();
+    const controller = new AbortController();
+    contribution.activate({ signal: controller.signal });
+    window.dispatchEvent(new Event('user:login-changed'));
+    controller.abort();
+    await contribution.deactivate();
+    disposeFeature();
+    await pendingKbs;
+    await flush();
+
+    expect(api.wikiPages).not.toHaveBeenCalled();
   });
 });
 

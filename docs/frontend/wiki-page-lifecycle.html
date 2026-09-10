@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wiki 页面生命周期 · 阶段 5</title>
+<style>body{font:16px/1.75 system-ui,sans-serif;max-width:960px;margin:auto;padding:40px 24px;color:#222}h2{border-bottom:1px solid #ddd}code{background:#f4f4f4;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>Wiki 页面生命周期</h1>
+<p>2026-09-09 · 用户已确认 Desktop、Web 两个独立切片并行实施。<strong>状态：2026-09-10 已收口验收并提交</strong>。</p>
+<p>2026-09-10 接续核查：前轮子 agent 已停止且未留下产品实现，按已确认范围重新派发开发与独立测试。阶段 4 当前的合并冲突不属于本切片，提交前须确认仓库已退出合并状态。</p>
+<h2>背景与决定</h2>
+<p>两端已有可撤销的 Wiki 导航贡献，但宿主仍直接装配页面及会话行为。桌面页面和 Wiki Agent 存在全局监听，Web 的新建、删除会话及知识库加载存在跨页面、跨知识库的异步回写边界。</p>
+<p>沿用构建期可信 Feature Registry，增加页面贡献与页面宿主调度。Desktop 使用可释放的页面控制器，Web 使用 React 挂载和卸载；二者遵守同一资源归属与可用性语义，不要求使用相同组件实现。</p>
+<h2>生命周期契约</h2>
+<ul>
+<li>注册返回幂等 disposer；旧 disposer 不得删除后来注册的贡献。</li>
+<li>激活前检查能力状态。离页时释放页面拥有的监听、计时器、观察器、编辑器和渲染资源。</li>
+<li>页面活动身份或知识库身份变化后，旧请求的响应不得更新新页面或加载旧会话历史；禁用后不得发起新的页面请求。</li>
+<li>活动身份不能在重置时归零复用。校验同时覆盖结果回写和后续请求调度，包括上传后编译与批量下一项。</li>
+<li>编辑器待保存内容在释放视图前交给明确的保存流程；不得仅清理 debounce 计时器而丢失用户编辑。保存完成后仍需检查视图身份。</li>
+<li>跨页入口和发送参数解析归 Feature 安装期，页面 DOM 与渲染订阅归页面活动期。离页不停止后端会话，也不删除历史数据。</li>
+<li>普通离页与登录身份重置分别处理：离页释放 DOM、订阅和渲染任务，但保留未发送草稿及附件；不能复用身份重置函数而丢失用户输入。</li>
+<li>离页重进保留已有知识库选择语义；Desktop 的 Wiki 仍可作为 Work 模式的共享页面显示，活动状态由实际可见页面决定。</li>
+<li>重复激活、退出、禁用、重新启用不累积监听和资源。能力禁用后的导航回落沿用现有 Chat 行为。</li>
+</ul>
+<h2>实施边界</h2>
+<p>两名 Luna 开发 agent 分别负责 desktop 与 web 产品代码，独立 Luna 测试 agent 负责行为验证。主 agent 负责契约、差异审查、模块 HTML 与测试记录收口。每个通过验证的切片单独提交；阶段 4 的后端改造由另一任务负责，本批不修改其文件。</p>
+<h2>验收与回退</h2>
+<p>2026-09-10 恢复记录：三个原 Luna agent 已重新运行，工作区重新出现 Desktop 宿主、图谱和 Web 页面宿主的实现差异。继续按两个已确认切片开发；额度中断前的测试报告不沿用为最终证据。审查补充要求：异步清理完成前不得安装下一页面，重复激活不得使当前激活失效，图谱释放必须结束所有待决布局任务。</p>
+<p>2026-09-10 接续中断记录：Desktop、Web 开发及独立测试的三个 Luna agent 均返回额度耗尽错误。本批未通过主审，未由本任务提交。此前测试报告不能作为最终验收依据。</p>
+<h2>收口记录（2026-09-10）</h2>
+<p>主 agent 审查确认：Desktop 侧 <code>page-registry.ts</code>（注册冲突失败、幂等 disposer、串行切换、清理链、防串代 version）与 <code>wiki-page.ts</code>/<code>wiki-graph.ts</code>/<code>wiki-agent.ts</code> 生命周期接线符合上述契约；Web 侧 <code>WikiFeature.tsx</code> 挂载/卸载与 <code>WikiHub</code> generation 守卫符合同一语义。收口时修复两处缺陷并复验：Desktop 测试钩子 <code>__resetWikiViewForTest()</code> 补清理生命周期 signal 与事件句柄；Web <code>refreshHistory</code> 声明重排消除 TDZ 引用。未削弱任何测试断言。最终验证：Desktop 全量 156 文件 / 1818 测试通过、<code>tsc --noEmit</code> 无新增错误；Web 190 测试、typecheck 与 build 通过。详见<a href="../testing/wiki-page-lifecycle-tests.html">测试记录</a>。</p>
+<ul>
+<li>Desktop 待核验：连续导航不能跳过旧页面清理；待激活注册被撤销后不得安装；重置不能复用请求身份；图谱 worker、Wiki Agent 页面资源及安装期监听必须有真实释放路径。</li>
+<li>Web 待核验：页面投影必须使用当前 view，防止 Chat 被 Wiki 替换；注册 disposer 必须由宿主持有；StrictMode 重放后会话操作有效；补齐真实 WikiHub 请求链、拖拽资源和失败回写的身份保护。</li>
+<li>独立测试须验证真实宿主路由与 WikiHub，不能仅用模拟 WikiHub 的控制器测试证明页面生命周期完成。</li>
+<li>最后一次工作区核验显示共享仓库 HEAD 已推进到 4d9a782，此前多数 tracked 前端差异已不在工作区差异中，而新增 registry、feature 与测试仍为 untracked。恢复时须先核对当前源码与历史，不能依赖前轮 diff 或覆盖其他任务的修改。</li>
+</ul>
+<p>验证覆盖实际宿主调度、重复挂载清理、能力禁用、旧请求晚到、知识库切换、新建和删除会话竞态，以及原有 Wiki/Chat 行为；执行各端相关测试、类型检查和构建。跨平台代码使用浏览器与 React 标准接口，测试记录区分本机执行与尚未实测的平台。</p>
+<p>本页记录设计，不能替代测试结果。各切片通过后更新对应前端模块文档与测试 HTML；回退使用相应切片提交，不迁移或删除业务数据。</p>
+<p><a href="desktop-frontend.html">Desktop 模块</a> · <a href="web-frontend.html">Web 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

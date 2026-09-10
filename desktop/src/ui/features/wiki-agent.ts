@@ -274,6 +274,7 @@ function createEmbeddedPanelAttachments(kbId: string): PanelAttachments {
 
 /** 清空右栏面板全部 per-KB 状态（登录态变化 / 测试重置共用，防两处漂移漏清）。 */
 function clearEmbeddedPanelState(): void {
+  scheduleEmbeddedRender.cancel();
   activePanel?.dispose();
   activePanel = null;
   embeddedByKb.clear();
@@ -282,6 +283,20 @@ function clearEmbeddedPanelState(): void {
   embeddedDrafts.clear();
   embeddedExpanded.clear();
   embeddedAttachmentListeners.clear();
+  activeModelControl?.dispose();
+  activeModelControl = null;
+  activeRingControl?.dispose();
+  activeRingControl = null;
+  embeddedInputFocused = false;
+  activeEmbeddedRoot = null;
+  activeEmbeddedKbId = '';
+  embeddedMountVersion += 1;
+}
+
+function disposeEmbeddedPagePanel(): void {
+  scheduleEmbeddedRender.cancel();
+  activePanel?.dispose();
+  activePanel = null;
   activeModelControl?.dispose();
   activeModelControl = null;
   activeRingControl?.dispose();
@@ -1097,6 +1112,7 @@ export function buildWikiAssistPrompt(assist: { fileName: string; error: string;
 // ---------- 组合根接线（index.ts init 调用一次） ----------
 
 let listenersBound = false;
+let featureEventsController: AbortController | null = null;
 
 /**
  * 初始化发送参数 resolver、登录态重置和 Wiki 卡片点击委托。
@@ -1114,6 +1130,8 @@ export function initWikiAgent(): void {
 
   if (listenersBound) return;
   listenersBound = true;
+  featureEventsController = new AbortController();
+  const eventOptions = { signal: featureEventsController.signal };
 
   // 面板消息渲染的 store 订阅由 conversation-panel（autoRender）按实例持有，
   // 随挂载/卸载注册与释放，这里不再挂模块级订阅。
@@ -1124,14 +1142,14 @@ export function initWikiAgent(): void {
     if ((event.target as Element | null)?.matches?.('[data-wiki-agent-panel] [data-composer-input]')) {
       embeddedInputFocused = true;
     }
-  });
+  }, eventOptions);
   document.addEventListener('focusout', (event) => {
     if (!(event.target as Element | null)?.matches?.('[data-wiki-agent-panel] [data-composer-input]')) return;
     queueMicrotask(() => {
       const el = document.activeElement as Element | null;
       if (!el?.closest?.('[data-wiki-agent-panel]')) embeddedInputFocused = false;
     });
-  });
+  }, eventOptions);
 
   // 登录态变化：重置专用 Wiki Agent 会话状态。
   window.addEventListener('user:login-changed', () => {
@@ -1140,7 +1158,7 @@ export function initWikiAgent(): void {
     setBrowserPanelSession(null);
     closeWikiBrowserSurface();
     clearEmbeddedPanelState();
-  });
+  }, eventOptions);
 
   window.addEventListener('browser-workbench:command', (event) => {
     const action = (event as CustomEvent<{ action?: string }>).detail?.action;
@@ -1148,13 +1166,13 @@ export function initWikiAgent(): void {
     hideBrowserPanelView();
     setBrowserPanelSession(null);
     closeWikiBrowserSurface();
-  });
+  }, eventOptions);
 
   window.addEventListener('messages:changed', (event) => {
     const sid = (event as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
     const panel = embeddedByKb.get(activeEmbeddedKbId);
     if (panel && sid === panel.sessionId) scheduleEmbeddedRender();
-  });
+  }, eventOptions);
 
   // 专用 Wiki Agent 卡片交互：「查看」在 Wiki 页内打开详情，建议追问继续发给当前 Agent。
   document.addEventListener('click', (event) => {
@@ -1182,7 +1200,26 @@ export function initWikiAgent(): void {
         .then(() => sendEmbeddedPrompt('已取消该 Wiki 操作。'))
         .catch((err) => notify(`取消失败：${(err as Error).message}`));
     }
-  });
+  }, eventOptions);
+
+}
+
+/** Release page-owned panel state while preserving the backend Wiki session. */
+export function disposeWikiAgentPage(): void {
+  disposeEmbeddedPagePanel();
+  hideBrowserPanelView();
+  setBrowserPanelSession(null);
+  closeWikiBrowserSurface();
+}
+
+export function disposeWikiAgentFeature(): void {
+  featureEventsController?.abort();
+  featureEventsController = null;
+  listenersBound = false;
+  clearEmbeddedPanelState();
+  setWikiSendExtrasResolver(null);
+  setWikiAgentPanelRenderer(null);
+  setWikiBrowserSurfaceRenderer(null);
 }
 
 /** 测试钩子：重置模块级会话状态；全局监听器保留。 */
