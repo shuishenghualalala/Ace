@@ -1,6 +1,5 @@
 import { useState, type ReactNode } from "react";
-import type { Session, Workspace } from "../types";
-import type { SessionStatus } from "../hooks/useChat";
+import type { Session, SessionStatus, Workspace } from "../types";
 import crewLogo from "../assets/crew-logo.png";
 import externalAgentIcon from "../assets/external-agent.png";
 import { externalAgentInitial, externalAgentTone } from "./ExternalAgentAvatar";

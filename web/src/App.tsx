@@ -4,10 +4,19 @@ import TopBar from "./components/TopBar";
 import ChatPanel from "./components/ChatPanel";
 import type { Props as ChatPanelProps } from "./components/ChatPanel";
 import SkillsHub from "./components/SkillsHub";
-import { createWikiFeatureStore, installWikiPageContribution } from "./features/WikiFeature";
+import {
+  createWikiFeatureStore,
+  installWikiPageContribution,
+  installWikiFeatureHandlers,
+} from "./features/WikiFeature";
 import type { WikiPageContext } from "./features/WikiFeature";
 import { installAgentsPageContribution } from "./features/AgentsFeature";
 import type { AgentsPageContext } from "./features/AgentsFeature";
+import {
+  installKanbanFeatureHandlers,
+  installTeamFeatureHandlers,
+} from "./features/feature-events";
+import { featureEventRegistry } from "./lib/feature-event-dispatcher";
 import { UiPageRegistry } from "./lib/ui-feature-registry";
 import TaskBoard from "./components/TaskBoard";
 import WorkspaceModal from "./components/WorkspaceModal";
@@ -206,6 +215,19 @@ export default function App() {
     refreshSessions();
     refreshTasks();
   }, [refreshSessions, refreshTasks]);
+
+  // 在 useChat 建立 WS 前完成 feature handler 注册，避免首帧到达时还未就绪。
+  const featureHandlerDisposersRef = useRef<(() => void)[]>([]);
+  if (featureHandlerDisposersRef.current.length === 0) {
+    featureHandlerDisposersRef.current = [
+      installWikiFeatureHandlers(featureEventRegistry),
+      installTeamFeatureHandlers(featureEventRegistry),
+      installKanbanFeatureHandlers(featureEventRegistry),
+    ];
+  }
+  useEffect(() => {
+    return () => featureHandlerDisposersRef.current.forEach((d) => d());
+  }, []);
 
   const chat = useChat(currentSessionId, onAfterFinal);
   const currentExternalTeam = externalTeams.find((team) => team.id === sessionExternalTeams[currentSessionId]);

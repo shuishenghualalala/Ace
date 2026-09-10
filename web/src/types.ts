@@ -68,7 +68,8 @@ export type ChunkKind =
   | "wiki_cards"
   | "wiki_ingest_progress"
   | "wiki_changed"
-  | "team_internal";
+  | "team_internal"
+  | "feature_event";
 
 export interface TodoItem {
   id: string;
@@ -118,6 +119,13 @@ export interface ToolCallInfo {
   status: "generating" | "running" | "done" | "error";
   startedAt: number;
   duration?: number;
+}
+
+export interface FeatureEventBody {
+  feature: string;
+  event: string;
+  version?: number;
+  payload?: Record<string, any>;
 }
 
 export interface Chunk {
@@ -592,6 +600,8 @@ export interface DebugEvent {
 }
 
 export type MsgRole = "user" | "assistant" | "tool" | "status" | "error" | "team_internal";
+
+export type SessionStatus = "idle" | "running" | "queued" | "error";
 
 /** 附件类型 */
 export interface Attachment {

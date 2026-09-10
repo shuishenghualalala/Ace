@@ -2,11 +2,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { api } from "../api";
 import { mapHistoryItems, mergeHistoryWithLiveMessages, normalizeTurnFileChanges, preserveLocalProcessDetails } from "../lib/historyMap";
-import { mergeTeamInternalMessage } from "../lib/teamMessageMerge";
 import { mergeStreamingText } from "../lib/agentTurnState";
-import { backendDurationToMs, backendSecondsToMs } from "../lib/backendTime";
+import { normalizeTeamText } from "../lib/chunkNormalize";
 import { ChatSocket } from "../ws";
-import type { Attachment, Chunk, FollowupQuestion, Mode, MsgRole, PendingMessage, PlanReview, TeamExecutionTier, TodoItem, ToolCallInfo, TurnFileChangeSummary, UiMessage, UserAgentMention, WikiIngestProgress, WikiPage } from "../types";
+import {
+  featureEventRegistry,
+  compatFeatureEvent,
+  parseFeatureEventBody,
+  type Bookkeeping,
+  type DeltaSpan,
+  type FeatureEventContext,
+  type FeatureEventEffect,
+} from "../lib/feature-event-dispatcher";
+import type { Attachment, Chunk, FollowupQuestion, Mode, MsgRole, PendingMessage, PlanReview, TeamExecutionTier, TodoItem, ToolCallInfo, TurnFileChangeSummary, UiMessage, UserAgentMention, WikiIngestProgress, WikiPage, SessionStatus } from "../types";
 
 let _seq = 0;
 const newId = () => `m${Date.now()}_${_seq++}`;
@@ -15,43 +23,6 @@ const HISTORY_LOAD_TIMEOUT_MS = 8000;
 
 function isHistoryLoadingMessage(msg: UiMessage): boolean {
   return msg.role === "assistant" && msg.text === HISTORY_LOADING_TEXT && !msg.thinking && !msg.toolCalls?.length;
-}
-
-function normalizeTeamText(value: unknown): string {
-  if (value == null) return "";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    for (const key of ["message", "text", "content", "summary"]) {
-      const candidate = record[key];
-      if (typeof candidate === "string" && candidate.trim()) return candidate;
-    }
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return "";
-    }
-  }
-  return String(value);
-}
-
-function normalizeChunkToolCalls(raw: unknown): ToolCallInfo[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const calls = raw.map((item, index) => {
-    const value = item && typeof item === "object" ? item as Record<string, unknown> : {};
-    return {
-      toolCallId: String(value.id || value.tool_call_id || `team_tool_${index}`),
-      name: String(value.name || "unknown"),
-      uiLabel: typeof value.ui_label === "string" ? value.ui_label : undefined,
-      args: typeof value.arguments === "string" ? value.arguments : JSON.stringify(value.arguments || {}),
-      result: typeof value.result === "string" ? value.result : "",
-      status: value.status === "running" || value.status === "error" ? value.status : "done",
-      startedAt: typeof value.started_at === "number" ? value.started_at * 1000 : 0,
-      duration: typeof value.duration === "number" ? backendDurationToMs(value.duration) || undefined : undefined,
-    } satisfies ToolCallInfo;
-  });
-  return calls.length > 0 ? calls : undefined;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -154,8 +125,6 @@ export function resolveFinalText(accumulated: string, finalText: string): string
 }
 
 /** 会话运行态（驱动左侧栏状态点）。 */
-export type SessionStatus = "idle" | "running" | "queued" | "error";
-
 type PlanState = { active: boolean; review: PlanReview | null };
 interface SendOptions {
   subScenario?: string;
@@ -166,18 +135,6 @@ interface SendOptions {
 }
 
 /** 单会话的聚合记账（不直接驱动渲染，放 ref）。 */
-interface Bookkeeping {
-  toolMap: Map<string, ToolCallInfo>;
-  assistantId: string | null;
-  turnStartedAt: number | null;
-  awaitingAssistantAfterTool: boolean;
-  deltaSpans: DeltaSpan[];
-  legacyDeltaText: string;
-  hadTeamInternal: boolean;
-  fileChanges: TurnFileChangeSummary[];
-  fileChangeSignatures: Record<string, string>;
-  prevTurnFileSignature: Record<string, string>;
-}
 
 function fileChangeSignature(file: TurnFileChangeSummary, raw?: unknown): string {
   const base = `${file.status}|${file.added}|${file.removed}|${file.binary ? "1" : "0"}`;
@@ -209,11 +166,6 @@ function currentTurnFileChanges(book: Bookkeeping): TurnFileChangeSummary[] {
   );
 }
 
-export interface DeltaSpan {
-  start: number;
-  end: number;
-  text: string;
-}
 
 export interface DeltaAccumulator {
   deltaSpans: DeltaSpan[];
@@ -667,6 +619,70 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
       if (isSuppressedRequest(suppressedRequestKey(sid, chunkRequestId), suppressedRequestIdsRef.current)) return;
       const book = bookFor(sid);
 
+      const buildFeatureEventCtx = (): FeatureEventContext => ({
+        sessionId: sid,
+        now: Date.now(),
+        startLocalTurn: () => startLocalTurn(sid),
+        newId,
+        book,
+        messages: messagesMap[sid] ?? [],
+      });
+
+      const applyFeatureEventEffect = (effect: FeatureEventEffect | null) => {
+        if (!effect) return;
+        if (effect.hadTeamInternal) book.hadTeamInternal = true;
+        if (effect.statusHint) setStatus(sid, effect.statusHint);
+        if (effect.queueHint !== undefined) setQueue(sid, effect.queueHint);
+        if (effect.messages) {
+          loadedSessionsRef.current.add(sid);
+          setMessagesMap((prev) => ({ ...prev, [sid]: effect.messages!(prev[sid] ?? []) }));
+        }
+        if (effect.wikiProgress) {
+          flushSync(() => {
+            setWikiProgressMap((prev) => {
+              const sourceId = effect.wikiProgress!.source_id || sid;
+              const next = { ...prev, [sourceId]: effect.wikiProgress! };
+              wikiProgressRef.current = next;
+              return next;
+            });
+          });
+        }
+        if (effect.wikiChanged) {
+          window.dispatchEvent(
+            new CustomEvent("crew:wiki-changed", { detail: effect.wikiChanged }),
+          );
+        }
+      };
+
+      if (c.kind === "feature_event") {
+        const parsed = parseFeatureEventBody(c.body);
+        if (parsed) {
+          applyFeatureEventEffect(
+            featureEventRegistry.dispatch(
+              parsed.feature,
+              parsed.event,
+              parsed.version,
+              parsed.payload,
+              buildFeatureEventCtx(),
+            ),
+          );
+        }
+        return;
+      }
+      const compat = compatFeatureEvent(c);
+      if (compat) {
+        applyFeatureEventEffect(
+          featureEventRegistry.dispatch(
+            compat.feature,
+            compat.event,
+            compat.version,
+            compat.payload,
+            buildFeatureEventCtx(),
+          ),
+        );
+        return;
+      }
+
       if (c.kind === "delta") {
         const text = normalizeTeamText(c.body.text);
         const turnStartedAt = startLocalTurn(sid);
@@ -742,93 +758,12 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
         }
       } else if (c.kind === "task") {
         fireAfterFinalThrottled();
-      } else if (c.kind === "team_internal") {
-        book.hadTeamInternal = true;
-        setQueue(sid, "");
-        setStatus(sid, "running");
-        const sourceSessionId = c.body.source_session_id;
-        const agentId = c.body.agent_id;
-        const text = c.body.text ?? "";
-        const eventType = c.body.event_type;
-        const nodeId = c.body.node_id;
-        const mentionIntent = c.body.mention_intent;
-        loadedSessionsRef.current.add(sid);
-        setMessagesMap((prev) => {
-          const list = prev[sid] ?? [];
-          const incoming: UiMessage = {
-            id: newId(),
-            role: "team_internal",
-            text,
-            sourceSessionId,
-            agentId,
-            agentName: c.body.agent_name,
-            agentRole: c.body.agent_role,
-            agentTone: c.body.agent_tone,
-            isLeader: c.body.is_leader,
-            eventType,
-            nodeId,
-            mentionFrom: c.body.mention_from,
-            mentionTo: c.body.mention_to,
-            mentionIntent,
-            communicationKind: c.body.communication_kind,
-            communicationStatus: c.body.communication_status,
-            requestId: c.body.request_id,
-            replyTo: c.body.reply_to,
-            communicationRequestText: c.body.communication_request_text,
-            displayMode: c.body.display_mode,
-            collapsedTitle: c.body.collapsed_title,
-            thinking: normalizeTeamText(c.body.thinking),
-            toolCalls: normalizeChunkToolCalls(c.body.tool_calls),
-            artifacts: c.body.artifacts,
-            turnFileChanges: normalizeTurnFileChanges(c.body.turn_file_changes),
-            timestamp: backendSecondsToMs(c.body.timestamp) ?? Date.now(),
-            turnStartedAt: backendSecondsToMs(c.body.turn_started_at) ?? startLocalTurn(sid),
-            turnDurationMs: c.body.turn_duration != null ? backendDurationToMs(c.body.turn_duration) : undefined,
-          };
-          return {
-            ...prev,
-            [sid]: mergeTeamInternalMessage(list, incoming, { append: Boolean(c.body.append) }),
-          };
-        });
       } else if (c.kind === "file_changes") {
         book.fileChanges = normalizeTurnFileChanges(c.body.files) ?? [];
         book.fileChangeSignatures = snapshotFileSignatures(book.fileChanges, c.body.files);
       } else if (c.kind === "todo_updated") {
         const todos = normalizeTodos(c.body.todos);
         setTodos(sid, todos);
-      } else if (c.kind === "wiki_cards") {
-        const pages = normalizeWikiCardPages(c.body);
-        if (pages.length > 0) {
-          ensureAssistantMessage(sid, { wikiCards: pages });
-        }
-      } else if (c.kind === "wiki_ingest_progress") {
-        const progress: WikiIngestProgress = {
-          stage: String(c.body.stage ?? ""),
-          percent: Math.max(0, Math.min(100, Number(c.body.percent ?? 0))),
-          label: String(c.body.label ?? c.body.stage ?? ""),
-          source_id: String(c.body.source_id ?? ""),
-          session_id: sid,
-          error: typeof c.body.error === "string" ? c.body.error : undefined,
-          detail: c.body.detail && typeof c.body.detail === "object" ? c.body.detail : undefined,
-        };
-        console.log("[wiki progress] received", sid, progress);
-        // 使用 flushSync 强制同步刷新，避免 React 自动批处理把密集到达的
-        // entities / topics 等快速阶段合并成一次渲染，导致中间阶段被跳过。
-        // key 用 source_id 而非 session_id，保证多文件同时上传时进度互不覆盖。
-        flushSync(() => {
-          setWikiProgressMap((prev) => {
-            const sourceId = progress.source_id || sid;
-            const next = { ...prev, [sourceId]: progress };
-            wikiProgressRef.current = next;
-            return next;
-          });
-        });
-      } else if (c.kind === "wiki_changed") {
-        // Wiki 数据被本会话（含其委派的 Wiki 子代理）修改：广播给 WikiHub 等视图刷新，
-        // 避免知识库/页面变更后必须重新进入页面才能看到。
-        window.dispatchEvent(
-          new CustomEvent("crew:wiki-changed", { detail: c.body?.changes ?? [] }),
-        );
       } else if (c.kind === "status") {
         const msg = c.body.message ?? "";
         if (c.body.activity === "context_compaction") {

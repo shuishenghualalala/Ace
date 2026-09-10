@@ -2,8 +2,13 @@ import { createElement, useCallback, useEffect, useMemo, useRef, useState, type 
 import WikiHub from "../components/WikiHub";
 import type { Props as ChatPanelProps } from "../components/ChatPanel";
 import { api } from "../api";
-import type { Attachment, Mode, Session } from "../types";
+import type { Attachment, Mode, Session, WikiIngestProgress } from "../types";
 import type { useChat } from "../hooks/useChat";
+import { normalizeWikiCardPages } from "../hooks/useChat";
+import {
+  type FeatureEventEffect,
+  type FeatureEventRegistry,
+} from "../lib/feature-event-dispatcher";
 import { UiPageRegistry, type UiPageContribution } from "../lib/ui-feature-registry";
 
 type WikiAgentSessionBinding = { kbId: string; sessionId: string };
@@ -168,4 +173,70 @@ export default function WikiFeature({
       onPendingWikiLinkHandled={onPendingWikiLinkHandled}
     />
   );
+}
+
+export function installWikiFeatureHandlers(registry: FeatureEventRegistry): () => void {
+  const disposers = [
+    registry.register({
+      feature: "wiki",
+      event: "cards",
+      version: 1,
+      handler(payload, ctx): FeatureEventEffect | null {
+        const pages = normalizeWikiCardPages(payload as Record<string, unknown>);
+        if (pages.length === 0) return null;
+        const { book } = ctx;
+        const turnStartedAt = ctx.startLocalTurn();
+        if (book.assistantId) {
+          return {
+            messages: (prev) =>
+              prev.map((m) => (m.id === book.assistantId ? { ...m, wikiCards: pages } : m)),
+          };
+        }
+        const id = ctx.newId();
+        book.assistantId = id;
+        return {
+          messages: (prev) => [
+            ...prev,
+            {
+              id,
+              role: "assistant",
+              text: "",
+              wikiCards: pages,
+              turnStartedAt,
+            },
+          ],
+        };
+      },
+    }),
+    registry.register({
+      feature: "wiki",
+      event: "ingest_progress",
+      version: 1,
+      handler(payload, ctx): FeatureEventEffect | null {
+        const body =
+          payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+        const progress: WikiIngestProgress = {
+          stage: String(body.stage ?? ""),
+          percent: Math.max(0, Math.min(100, Number(body.percent ?? 0))),
+          label: String(body.label ?? body.stage ?? ""),
+          source_id: String(body.source_id ?? ""),
+          session_id: ctx.sessionId,
+          error: typeof body.error === "string" ? body.error : undefined,
+          detail: body.detail && typeof body.detail === "object" ? body.detail : undefined,
+        };
+        return { wikiProgress: progress };
+      },
+    }),
+    registry.register({
+      feature: "wiki",
+      event: "changed",
+      version: 1,
+      handler(payload): FeatureEventEffect | null {
+        const body =
+          payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+        return { wikiChanged: (body.changes as unknown[]) ?? [] };
+      },
+    }),
+  ];
+  return () => disposers.forEach((d) => d());
 }
