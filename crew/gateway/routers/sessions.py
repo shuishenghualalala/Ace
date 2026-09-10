@@ -36,15 +36,6 @@ from crew.state.team_member_model import (
     materialize_team_member_model_bindings,
     set_team_member_model_binding,
 )
-from crew.team.history_projection import (
-    direct_mention_request_ids,
-    is_duplicate_team_parent_final,
-    team_child_member_id,
-    team_internal_history_items,
-    team_tasks_with_plan_projection,
-    team_visible_history_items,
-)
-from crew.team.roles import CREW_BUILTIN_AGENT_ID, is_crew_builtin_agent
 
 log = logging.getLogger(__name__)
 
@@ -525,6 +516,14 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
 
     @router.get("/api/session/{session_id}")
     async def session_history(request: Request, session_id: str) -> JSONResponse:
+        from crew.team.history_projection import (
+            direct_mention_request_ids,
+            is_duplicate_team_parent_final,
+            team_child_member_id,
+            team_internal_history_items,
+            team_visible_history_items,
+        )
+
         owner = _owner(request)
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
@@ -727,6 +726,8 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         session_id: str,
         owner: str,
     ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        from crew.team.roles import CREW_BUILTIN_AGENT_ID, is_crew_builtin_agent
+
         getter = getattr(crew.session_store, "get_agent_config", None)
         if not callable(getter):
             return None
@@ -754,7 +755,12 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             else {}
         )
         leader_agent_id = str(team.get("leader_agent_id") or "")
-        team_member_state = getattr(crew.team, "team_member_switch_state", None)
+        team_manager = crew.team
+        team_member_state = (
+            getattr(team_manager, "team_member_switch_state", None)
+            if team_manager is not None
+            else None
+        )
         dispatcher_state = dispatcher.status(session_id, owner_account_id=owner)
         session_is_running = dispatcher_state.get("live") != "idle"
         owner_profiles = crew.owner_model_profiles(owner)
@@ -901,6 +907,8 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
 
     @router.put("/api/session/{session_id}/model")
     async def put_session_model(request: Request, session_id: str, payload: dict) -> JSONResponse:
+        from crew.team.roles import is_crew_builtin_agent
+
         owner = _owner(request)
         model_id = str(payload.get("model_profile_id") or "").strip()
         if not model_id:
@@ -1025,7 +1033,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     {"ok": False, "code": "invalid_revision", "error": "expected_revision 必须是整数"},
                     status_code=400,
                 )
-            team_manager = getattr(crew, "team", None)
+            team_manager = crew.team
             member_lock_factory = getattr(team_manager, "member_model_lock", None)
             lock_context = (
                 member_lock_factory(session_id, runtime_member_id, owner)
@@ -1102,7 +1110,11 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                         {"ok": False, "code": exc.code, "error": exc.message},
                         status_code=status_code,
                     )
-                drop_team = getattr(crew.team, "drop_session_team", None)
+                drop_team = (
+                    getattr(team_manager, "drop_session_team", None)
+                    if team_manager is not None
+                    else None
+                )
                 if callable(drop_team):
                     drop_team(session_id, owner_account_id=owner)
             refreshed = team_session_model_binding(session_id, owner)
@@ -1289,7 +1301,12 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             return JSONResponse({"ok": False, "error": "session agent config store 不可用"}, status_code=500)
         stored = setter(session_id, config, owner_account_id=owner)
         crew.agents.drop(session_id, owner_account_id=owner)
-        drop_team = getattr(crew.team, "drop_session_team", None)
+        team_manager = crew.team
+        drop_team = (
+            getattr(team_manager, "drop_session_team", None)
+            if team_manager is not None
+            else None
+        )
         if callable(drop_team):
             drop_team(session_id, owner_account_id=owner)
         if title and is_placeholder_title(title):
@@ -1416,6 +1433,8 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         status: str | None = None,
         limit: int = 200,
     ) -> JSONResponse:
+        from crew.team.history_projection import team_tasks_with_plan_projection
+
         try:
             owner = _owner(request)
             if session_id and not _session_owned(session_id, owner):
@@ -1451,7 +1470,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         owner = _owner(request)
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
-        team_manager = getattr(crew, "team", None)
+        team_manager = crew.team
         recover = getattr(team_manager, "recover_plan_node", None)
         if not callable(recover):
             return JSONResponse({"ok": False, "error": "Team Runtime 不可用"}, status_code=409)

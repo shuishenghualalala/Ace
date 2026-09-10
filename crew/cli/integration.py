@@ -37,7 +37,7 @@ from crew.gateway.routers.plugins import (
     _plugin_states,
     browser_runtime_status,
 )
-from crew.gateway.routers.runtimes import (
+from crew.team.payloads import (
     _external_agent_payloads,
     _external_team_payloads,
     _runtime_availability,
@@ -767,7 +767,7 @@ def _runtime_delete(args: Any, ctx: CliContext) -> CliResult:
 
 
 def _runtime_agents_list(args: Any, ctx: CliContext) -> CliResult:
-    from crew.gateway.routers.runtimes import _managed_temporary_agent_ids
+    from crew.team.payloads import _managed_temporary_agent_ids
 
     store = _external_store(ctx.app)
     hidden = _managed_temporary_agent_ids(store, owner_account_id=ctx.owner)

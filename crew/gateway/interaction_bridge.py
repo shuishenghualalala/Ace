@@ -30,7 +30,6 @@ from crew.security.models import (
     SandboxPermissions,
 )
 from crew.state.logging import get_logger
-from crew.team.delegate_tool import TEAM_RESULT_STATUSES, require_team_result_status
 
 log = get_logger("interaction_bridge")
 
@@ -229,6 +228,8 @@ class InteractionBridge:
         use the app-server's explicit client callback while keeping all business
         authorization in :meth:`invoke_tool`.
         """
+        from crew.team.delegate_tool import TEAM_RESULT_STATUSES
+
         tools: list[dict[str, Any]] = []
         if binding.context_type == "standalone" or binding.team_role == "leader":
             tools.append({
@@ -371,11 +372,13 @@ class InteractionBridge:
 
         if binding.context_type != "team":
             raise PermissionError("当前 Binding 不属于 Team")
-        team = getattr(crew, "team", None)
+        team = crew.team
         if team is None:
             raise ValueError("Team 模式未启用")
 
         if name == "team_mention":
+            from crew.team.delegate_tool import require_team_result_status
+
             intent = str(data.get("intent") or "broadcast").strip().lower()
             result_status = require_team_result_status(intent, data.get("result_status"))
             leader_intents = {"assign", "submit", "review", "ask", "broadcast", "handoff"}
