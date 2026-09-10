@@ -141,6 +141,55 @@ describe('applyChunk turn identity gate', () => {
     expect(document.querySelector('.msg__text')?.textContent).toContain('第二段正文');
   });
 
+  it('后台任务与当前问答同时 streaming 时只更新当前回答', async () => {
+    vi.useFakeTimers();
+    openTurn('req-current');
+    appendSessionMessage('sid-1', {
+      id: 'wiki-ingest-background',
+      role: 'assistant',
+      content: '',
+      timestamp: Date.now() - 2_000,
+      turnStartedAt: Date.now() - 2_000,
+      streaming: true,
+      segmentRole: 'process',
+      toolCalls: [{
+        toolCallId: 'wiki-ingest-tool-background',
+        name: 'wiki_plan_ingest',
+        status: 'running',
+        startedAt: Date.now() - 2_000,
+      }],
+    });
+    appendSessionMessage('sid-1', {
+      id: 'user-current',
+      role: 'user',
+      content: '继续回答我的问题',
+      timestamp: Date.now() - 1_000,
+    });
+    appendSessionMessage('sid-1', {
+      id: 'turn-current',
+      role: 'assistant',
+      content: '开头',
+      timestamp: Date.now(),
+      turnStartedAt: Date.now(),
+      streaming: true,
+      segmentRole: 'answer',
+    });
+    patchBook('sid-1', { assistantId: 'turn-current' });
+    renderChat();
+
+    const liveTurns = document.querySelectorAll('.msg[data-streaming="true"]');
+    const currentBubble = document.querySelector<HTMLElement>('[data-message-id="turn-current"]');
+    expect(liveTurns).toHaveLength(2);
+    expect(currentBubble).not.toBeNull();
+
+    applyChunk(chunk('delta', 'req-current', { text: '继续' }));
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(document.querySelector('[data-message-id="turn-current"]')).toBe(currentBubble);
+    expect(currentBubble?.querySelector('[data-text-for="turn-current"]')?.textContent).toContain('开头继续');
+    expect(document.querySelector('[data-message-id="wiki-ingest-background"]')?.textContent).not.toContain('继续');
+  });
+
   it('流式 thinking 在内部滚动区位于底部时继续跟随新增内容', async () => {
     vi.useFakeTimers();
     openTurn('req-thinking-scroll');

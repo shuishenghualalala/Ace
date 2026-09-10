@@ -439,6 +439,57 @@ describe('thinkingReducer', () => {
     expect(r.replaceBook?.firstChunkAt).toBe(5_000);
     expect(r.replaceBook?.assistantId).toBe(assistantId);
   });
+
+  it('starts a new thinking segment after a settled tool so timeline order stays chronological', () => {
+    const assistantId = 'm-tool-step';
+    const toolMap = new Map();
+    toolMap.set('t1', {
+      toolCallId: 't1',
+      name: 'file_read',
+      status: 'done' as const,
+      startedAt: 1_100,
+      duration: 200,
+    });
+    const messages: ChatMessage[] = [{
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      thinking: '先读取文件',
+      timestamp: 1_000,
+      streaming: true,
+      segmentRole: 'process',
+      turnStartedAt: 1_000,
+      toolCalls: Array.from(toolMap.values()),
+    }];
+    const snap = makeSnapshot({
+      messages,
+      book: { ...emptyBook(), assistantId, toolMap, firstChunkAt: 1_050 },
+      now: 2_000,
+      sequence: 7,
+    });
+
+    const r = thinkingReducer({
+      kind: 'thinking',
+      body: { text: '先读取文件，然后核对结果' },
+      sequence: 7,
+    }, snap);
+
+    expect(r.messageUpserts).toHaveLength(2);
+    expect(r.messageUpserts[0]).toMatchObject({
+      op: 'patch',
+      messageId: assistantId,
+      patch: { streaming: false, segmentRole: 'process' },
+    });
+    expect(r.messageUpserts[1]?.message).toMatchObject({
+      role: 'assistant',
+      thinking: '，然后核对结果',
+      streaming: true,
+      segmentRole: 'process',
+      turnStartedAt: 1_000,
+    });
+    expect(r.replaceBook?.assistantId).toBe(r.messageUpserts[1]?.message?.id);
+    expect(r.replaceBook?.toolMap.size).toBe(0);
+  });
 });
 
 describe('toolReducer', () => {
@@ -801,6 +852,53 @@ describe('finalReducer', () => {
     const patches = r.messageUpserts.filter((u) => u.op === 'patch' && u.messageId === assistantId);
     const lastRole = [...patches].reverse().find((u) => u.patch?.segmentRole)?.patch?.segmentRole;
     expect(lastRole).toBe('process');
+  });
+
+  it('appends a visible answer when final text arrives directly after tools', () => {
+    const assistantId = 'm-with-tools-and-final';
+    const toolMap = new Map();
+    toolMap.set('t1', {
+      toolCallId: 't1',
+      name: 'terminal',
+      status: 'done' as const,
+      startedAt: 1_100,
+      duration: 200,
+    });
+    const messages: ChatMessage[] = [{
+      id: assistantId,
+      role: 'assistant',
+      content: '我先检查一下。',
+      timestamp: 1_000,
+      streaming: true,
+      turnStartedAt: 1_000,
+      segmentRole: 'process',
+      toolCalls: Array.from(toolMap.values()),
+    }];
+    const snap = makeSnapshot({
+      messages,
+      book: { ...emptyBook(), assistantId, toolMap, firstChunkAt: 1_050 },
+      now: 2_000,
+      sequence: 9,
+    });
+
+    const r = finalReducer({
+      kind: 'final',
+      body: { text: '检查完成，这是最终答案。' },
+      sequence: 9,
+    }, snap);
+
+    const oldSegment = r.messageUpserts.find((u) => u.op === 'patch' && u.messageId === assistantId);
+    const answer = r.messageUpserts.find((u) => u.op === 'append')?.message;
+    expect(oldSegment?.patch).toMatchObject({ streaming: false, segmentRole: 'process' });
+    expect(answer).toMatchObject({
+      role: 'assistant',
+      content: '检查完成，这是最终答案。',
+      streaming: false,
+      segmentRole: 'answer',
+    });
+    expect(r.turn?.assistantId).toBe(answer?.id);
+    expect(r.replaceBook?.assistantId).toBe(answer?.id);
+    expect(r.replaceBook?.toolMap.size).toBe(0);
   });
 
   it('patches assistant content and marks finalize', () => {

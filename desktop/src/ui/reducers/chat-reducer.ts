@@ -697,7 +697,48 @@ export function thinkingReducer(chunk: ThinkingChunk, snapshot: ReducerSnapshot)
   const text = textOf(chunk.body);
   const upserts: MessageUpsert[] = [];
   if (book.firstChunkAt == null && book.assistantId) book.firstChunkAt = snapshot.now;
-  if (book.assistantId) {
+  if (book.assistantId && text.trim() && allToolsSettled(book.toolMap)) {
+    const currentId = book.assistantId;
+    const current = snapshot.messages.find((m) => m.id === currentId);
+    const mergedThinking = mergeStreamingText(current?.thinking, text);
+    const nextThinking = current?.thinking && mergedThinking.startsWith(current.thinking)
+      ? mergedThinking.slice(current.thinking.length)
+      : text;
+
+    // 工具完成后的 thinking 属于下一次模型推进，时序应为
+    // thinking(1) -> tool(1) -> thinking(2)，不能继续追加进工具上方的旧 thinking 块。
+    // 与 deltaReducer 的工具后切段保持一致：封存旧段，清当前工具批次，新建 process 段。
+    if (nextThinking.trim()) {
+      const startedAt = current?.turnStartedAt;
+      upserts.push({
+        op: 'patch',
+        messageId: currentId,
+        patch: {
+          streaming: false,
+          segmentRole: 'process',
+          turnDurationMs: startedAt != null ? Math.max(0, snapshot.now - startedAt) : 0,
+        },
+      });
+      const nextId = uniqueMessageId(snapshot, 'm');
+      book.assistantId = nextId;
+      book.toolMap = new Map();
+      book.deltaSpans = [];
+      book.legacyDeltaText = '';
+      upserts.push({
+        op: 'append',
+        message: {
+          id: nextId,
+          role: 'assistant',
+          content: '',
+          thinking: nextThinking,
+          timestamp: snapshot.now,
+          streaming: true,
+          segmentRole: 'process',
+          turnStartedAt: startedAt ?? snapshot.now,
+        },
+      });
+    }
+  } else if (book.assistantId && text.trim()) {
     const existing = snapshot.messages.find((m) => m.id === book.assistantId);
     upserts.push({
       op: 'patch',
@@ -1008,33 +1049,94 @@ export function finalReducer(chunk: FinalChunk, snapshot: ReducerSnapshot): Redu
     assistantId = null;
     book.assistantId = null;
   } else if (assistantId) {
-    const startedAt = snapshot.messages.find((m) => m.id === assistantId)?.turnStartedAt;
+    const currentId = assistantId;
+    const current = snapshot.messages.find((m) => m.id === currentId);
+    const startedAt = current?.turnStartedAt;
     turnDurationMs = snapshot.now - (startedAt ?? snapshot.now);
     if (book.firstChunkAt != null && startedAt != null) firstTokenMs = book.firstChunkAt - startedAt;
-    // 修法2（配合 stream-reassembly 的按序重组）：累积正文现已按 gateway_sequence 重组为序号权威，
-    // 乱序不再需要这里兜底。覆盖只在「final.text 是累积正文的超集前缀」时发生——即 acc 是 text 的
-    // 前缀（text.startsWith(acc)），此时 text ⊇ acc，覆盖只补全（单段回合丢尾帧的合法恢复），不丢
-    // 任何已累积文字。其它情况一律保留累积正文：多步回合的 final 只含末段（builtin executor，
-    // crew/agent/executor/builtin.py），中段丢帧时 acc 也不是 final 的前缀——这两种若拿 final 覆盖
-    // 都会丢前言。真缺口（推送降级 / 回放缓冲淘汰）留给重连后的 history 回填自愈。
-    const acc = snapshot.messages.find((m) => m.id === assistantId)?.content ?? '';
-    const forceReplace = !!chunk.body.replace_content;
-    const resolved = resolveFinalContent(acc, text);
-    // 硬事件：本段仍挂工具 → process；无工具 → 升格 answer（纯文字回复确认）
-    const segmentRole = book.toolMap.size > 0 ? 'process' : 'answer';
-    if (text && (forceReplace || resolved !== acc)) {
-      const finalContent = forceReplace ? text : resolved;
+
+    // final 是整个回合的硬边界。即使 tool 的 result/end 尾帧丢失，也要把仍在运行的
+    // 工具结算并留在旧 process 段，不能让最终答案继续挂在工具上方。
+    let finalToolCalls: ToolCallInfo[] | undefined;
+    if (book.toolMap.size > 0) {
+      const settledToolMap = new Map(book.toolMap);
+      for (const [id, tool] of settledToolMap) {
+        if (tool.status === 'running' || tool.status === 'generating') {
+          settledToolMap.set(id, {
+            ...tool,
+            status: 'done',
+            duration: snapshot.now - tool.startedAt,
+          });
+        }
+      }
+      book.toolMap = settledToolMap;
+      finalToolCalls = Array.from(settledToolMap.values());
+    }
+
+    const startsAnswerAfterTools = Boolean(text.trim())
+      && book.toolMap.size > 0;
+    if (startsAnswerAfterTools) {
       upserts.push({
         op: 'patch',
-        messageId: assistantId,
-        patch: { content: finalContent, streaming: false, turnDurationMs, timestamp: snapshot.now, segmentRole },
+        messageId: currentId,
+        patch: {
+          streaming: false,
+          turnDurationMs,
+          timestamp: snapshot.now,
+          segmentRole: 'process',
+          ...(finalToolCalls ? { toolCalls: finalToolCalls } : {}),
+        },
+      });
+      const answerId = uniqueMessageId(snapshot, 'm');
+      assistantId = answerId;
+      book.assistantId = answerId;
+      book.toolMap = new Map();
+      upserts.push({
+        op: 'append',
+        message: {
+          id: answerId,
+          role: 'assistant',
+          content: text,
+          timestamp: snapshot.now,
+          streaming: false,
+          turnDurationMs,
+          segmentRole: 'answer',
+          turnStartedAt: startedAt ?? snapshot.now,
+        },
       });
     } else {
-      upserts.push({
-        op: 'patch',
-        messageId: assistantId,
-        patch: { streaming: false, turnDurationMs, timestamp: snapshot.now, segmentRole },
-      });
+      // 修法2（配合 stream-reassembly 的按序重组）：累积正文现已按 gateway_sequence 重组为序号权威，
+      // 乱序不再需要这里兜底。覆盖只在「final.text 是累积正文的超集前缀」时发生——即 acc 是 text 的
+      // 前缀（text.startsWith(acc)），此时 text ⊇ acc，覆盖只补全（单段回合丢尾帧的合法恢复），不丢
+      // 任何已累积文字。其它情况一律保留累积正文：多步回合的 final 只含末段（builtin executor，
+      // crew/agent/executor/builtin.py），中段丢帧时 acc 也不是 final 的前缀——这两种若拿 final 覆盖
+      // 都会丢前言。真缺口（推送降级 / 回放缓冲淘汰）留给重连后的 history 回填自愈。
+      const acc = current?.content ?? '';
+      const forceReplace = !!chunk.body.replace_content;
+      const resolved = resolveFinalContent(acc, text);
+      // 硬事件：本段仍挂工具 → process；无工具 → 升格 answer（纯文字回复确认）
+      const segmentRole = book.toolMap.size > 0 ? 'process' : 'answer';
+      const commonPatch: Partial<ChatMessage> = {
+        streaming: false,
+        turnDurationMs,
+        timestamp: snapshot.now,
+        segmentRole,
+        ...(finalToolCalls ? { toolCalls: finalToolCalls } : {}),
+      };
+      if (text && (forceReplace || resolved !== acc)) {
+        const finalContent = forceReplace ? text : resolved;
+        upserts.push({
+          op: 'patch',
+          messageId: currentId,
+          patch: { ...commonPatch, content: finalContent },
+        });
+      } else {
+        upserts.push({
+          op: 'patch',
+          messageId: currentId,
+          patch: commonPatch,
+        });
+      }
     }
   } else if (text) {
     assistantId = uniqueMessageId(snapshot, 'm');
@@ -1049,27 +1151,6 @@ export function finalReducer(chunk: FinalChunk, snapshot: ReducerSnapshot): Redu
       },
     });
   }
-  if (assistantId && book.toolMap.size > 0) {
-    const settledToolMap = new Map(book.toolMap);
-    let changed = false;
-    for (const [id, tool] of settledToolMap) {
-      if (tool.status === 'running' || tool.status === 'generating') {
-        settledToolMap.set(id, {
-          ...tool,
-          status: 'done',
-          duration: snapshot.now - tool.startedAt,
-        });
-        changed = true;
-      }
-    }
-    if (changed) book.toolMap = settledToolMap;
-    upserts.push({
-      op: 'patch',
-      messageId: assistantId,
-      patch: { toolCalls: Array.from((changed ? settledToolMap : book.toolMap).values()), segmentRole: 'process' },
-    });
-  }
-
   // 「仅本轮」文件改动差集：与上一轮结束签名比对，patch 到本回合 assistant 消息，
   // 供 chat-render 在正文下方渲染「已编辑 N 个文件」卡。基准无条件前进到当前快照。
   const turnFiles = computeTurnFileDelta(book.fileChanges ?? [], book.prevTurnFileSignature);
