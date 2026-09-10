@@ -16,6 +16,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from crew.app import CrewApp, build_app
+from crew.channels import CHANNELS_SERVICE_KEY
+from crew.channels.broadcast import make_broadcasting_handler
 from crew.gateway.auth import (
     AuthenticationError,
     authenticate_http_request,
@@ -23,8 +25,6 @@ from crew.gateway.auth import (
     is_loopback_host,
 )
 from crew.gateway.auth_policy import requires_gateway_auth
-from crew.channels import CHANNELS_SERVICE_KEY
-from crew.channels.broadcast import make_broadcasting_handler
 from crew.gateway.connections import ConnectionManager
 from crew.gateway.helpers import (
     DIST_DIR,
@@ -33,27 +33,27 @@ from crew.gateway.helpers import (
     ExternalAgentsDisabledError,
 )
 from crew.gateway.hooks import hook_registry
-from crew.security.settings import strict_security_enabled
 from crew.gateway.interaction_bridge import create_interaction_router, interaction_bridge
 from crew.gateway.logout import LogoutCoordinator
 from crew.gateway.routers.auth_session import create_auth_session_router
-from crew.gateway.routers.channels import create_channels_router
 from crew.gateway.routers.browser import create_browser_router
+from crew.gateway.routers.channels import create_channels_router
 from crew.gateway.routers.config import create_config_router
 from crew.gateway.routers.cron import create_cron_router
-from crew.gateway.routers.misc import create_misc_router
 from crew.gateway.routers.mcp_servers import create_mcp_servers_router
 from crew.gateway.routers.mcp_setup import create_mcp_setup_router
+from crew.gateway.routers.misc import create_misc_router
 from crew.gateway.routers.notifications import create_notifications_router
 from crew.gateway.routers.plugins import create_plugins_router
 from crew.gateway.routers.remote_auth import create_remote_auth_router
 from crew.gateway.routers.runtimes import create_runtimes_router
 from crew.gateway.routers.scenarios import create_scenarios_router
-from crew.gateway.routers.sessions import create_sessions_router
-from crew.gateway.routers.system import create_system_router
 from crew.gateway.routers.security import create_security_router
+from crew.gateway.routers.sessions import create_sessions_router
 from crew.gateway.routers.sites import create_sites_router
+from crew.gateway.routers.system import create_system_router
 from crew.gateway.ws import create_ws_router
+from crew.security.settings import strict_security_enabled
 from crew.state.logging import get_logger
 
 log = get_logger("gateway")
@@ -238,7 +238,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
                 startup_error = "cancelled"
                 _app.state.deferred_startup_status = "failed"
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 startup_error = type(exc).__name__
                 _app.state.deferred_startup_status = "failed"
                 log.exception("Gateway 延迟初始化失败（部分功能可能不可用）")
@@ -287,16 +287,15 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             client_host = request.client.host if request.client else None
             if not is_loopback_client(client_host):
                 return JSONResponse({"ok": False, "error": "仅允许本机访问"}, status_code=401)
-        if path.startswith("/api/") and path != "/api/health":
-            if not await _wait_for_gateway_startup():
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "error": "Gateway 初始化失败",
-                        "code": "GATEWAY_STARTUP_FAILED",
-                    },
-                    status_code=503,
-                )
+        if path.startswith("/api/") and path != "/api/health" and not await _wait_for_gateway_startup():
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "Gateway 初始化失败",
+                    "code": "GATEWAY_STARTUP_FAILED",
+                },
+                status_code=503,
+            )
         if requires_gateway_auth(path):
             try:
                 account = await authenticate_http_request(request, crew.config)
@@ -339,7 +338,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     api.include_router(create_cron_router(crew))
     api.include_router(create_runtimes_router(crew))
     api.include_router(create_scenarios_router(crew))
-    api.include_router(create_channels_router(crew, dispatcher, channel_manager))
+    api.include_router(create_channels_router(crew, dispatcher))
     api.include_router(create_notifications_router(crew))
     api.include_router(create_misc_router(crew))
     api.include_router(create_plugins_router(crew))
@@ -379,7 +378,10 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             log.warning("插件 API 挂载失败 %s: %s", contribution.prefix, exc)
 
-    from crew.channels.channel_sessions import channel_platform_from_session_id, is_channel_session_id
+    from crew.channels.channel_sessions import (
+        channel_platform_from_session_id,
+        is_channel_session_id,
+    )
 
     async def _notify_channel_session_updated(_event: str, ctx: dict) -> None:
         sid = str(ctx.get("session_id") or "")

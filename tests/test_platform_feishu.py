@@ -14,8 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from crew.core.envelope import ResponseChunk
 from crew.channels.platform_registry import PlatformConfig, platform_registry
+from crew.core.envelope import ResponseChunk
 from crew.plugins.manager import PluginManager
 from crew.tools.registry import Registry
 from plugins.platforms.feishu.access import (
@@ -222,7 +222,7 @@ def test_dm_allowlist():
 
 
 def test_group_policies():
-    base = dict(chat_type="group", chat_id="oc_g", mentions=[{"open_id": "ou_bot"}])  # @了机器人
+    base = {"chat_type": "group", "chat_id": "oc_g", "mentions": [{"open_id": "ou_bot"}]}  # @了机器人
     # open
     s_open = FeishuSettings.from_extra(_CREDS)
     assert decide(_parsed(**base), s_open, _BOT)[0] is True
@@ -562,7 +562,7 @@ def test_feishu_platform_registers(monkeypatch):
     monkeypatch.setenv("FEISHU_APP_SECRET", "secret")
     plugins = PluginManager(registry=Registry())
     plugins.discover_and_load([Path("plugins")], enabled=["feishu-platform"])
-    loaded = [p for p in plugins.loaded_plugins if p.manifest.name == "feishu-platform"][0]
+    loaded = next(p for p in plugins.loaded_plugins if p.manifest.name == "feishu-platform")
     assert loaded.enabled and loaded.platforms_registered == ["feishu"]
     entry = platform_registry.get("feishu")
     assert entry.available() is True  # lark 已装
@@ -663,6 +663,71 @@ async def test_serve_ws_runs_on_fresh_loop_under_running_loop():
         assert seen.get("ran") is True                   # run_until_complete 成功，无 already-running
     finally:
         ws_mod.loop = original
+
+
+async def test_serve_ws_stop_event_closes_connection():
+    """stop_event 被设置后，_serve_ws 应调用 ws_client.stop() 并退出线程。"""
+    pytest.importorskip("lark_oapi")
+    import threading
+
+    import lark_oapi.ws.client as ws_mod
+
+    original = ws_mod.loop
+    seen: dict = {}
+
+    class FakeWS:
+        def start(self):
+            seen["started"] = True
+            # 模拟阻塞型 start，等待 stop_event 被设置
+            while not seen.get("stopped"):
+                threading.Event().wait(timeout=0.05)
+
+        def stop(self):
+            seen["stopped"] = True
+
+    stop_event = threading.Event()
+
+    def _delayed_stop():
+        # 稍等确保 start 已经进入循环
+        threading.Event().wait(timeout=0.1)
+        stop_event.set()
+
+    stopper = threading.Thread(target=_delayed_stop, daemon=True)
+    stopper.start()
+
+    t = threading.Thread(target=_serve_ws, args=(FakeWS(), stop_event), daemon=True)
+    t.start()
+    t.join(2)
+
+    try:
+        assert seen.get("started") is True
+        assert seen.get("stopped") is True
+        assert not t.is_alive()
+    finally:
+        ws_mod.loop = original
+
+
+async def test_channel_stop_triggers_ws_stop():
+    """FeishuChannel.stop() 设置 stop_event 并尝试调用 ws_client.stop()。"""
+    import threading
+
+    class FakeWSClient:
+        def __init__(self) -> None:
+            self.stop_called = False
+
+        def stop(self):
+            self.stop_called = True
+
+    ch = FeishuChannel(PlatformConfig(name="feishu", extra={"appId": "a", "appSecret": "s"}))
+    ch._ws_client = FakeWSClient()
+    ch._ws_stop_event = threading.Event()
+    ch._ws_thread = threading.Thread(target=lambda: None, daemon=True)
+
+    await ch.stop()
+
+    assert ch._stopped is True
+    assert ch._ws_stop_event.is_set()
+    assert ch._ws_client.stop_called is True
 
 
 def test_detect_send_intent_for_outbound_file_hint():

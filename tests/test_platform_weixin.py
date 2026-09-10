@@ -14,8 +14,8 @@ import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from crew.core.envelope import ResponseChunk
 from crew.channels.platform_registry import PlatformConfig, platform_registry
+from crew.core.envelope import ResponseChunk
 from crew.gateway.routers.channels import create_channels_router
 from crew.plugins.manager import PluginManager
 from crew.tools.registry import Registry
@@ -474,6 +474,39 @@ async def test_poll_failure_marks_disconnected(tmp_path, monkeypatch):
         await ch.stop()
 
 
+async def test_stop_cancels_fire_and_forget_tasks():
+    """stop() 应 cancel 并等待 _fire_and_forget_tasks 中的任务。"""
+    ch = _channel()
+    ch._stopped = False
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def tracked_task():
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    task = asyncio.create_task(tracked_task())
+    ch._track_fire_and_forget(task)
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert len(ch._fire_and_forget_tasks) == 1
+        await ch.stop()
+        assert cancelled.is_set()
+        assert len(ch._fire_and_forget_tasks) == 0
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
 # --------------------------------------------------------------------------- #
 # 扫码登录接口
 # --------------------------------------------------------------------------- #
@@ -577,7 +610,7 @@ def test_weixin_platform_registers(monkeypatch):
     monkeypatch.setenv("WEIXIN_TOKEN", "tok_env")
     plugins = PluginManager(registry=Registry())
     plugins.discover_and_load([Path("plugins")], enabled=["weixin-platform"])
-    loaded = [p for p in plugins.loaded_plugins if p.manifest.name == "weixin-platform"][0]
+    loaded = next(p for p in plugins.loaded_plugins if p.manifest.name == "weixin-platform")
     assert loaded.enabled and loaded.platforms_registered == ["weixin"]
 
     entry = platform_registry.get("weixin")
