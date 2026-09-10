@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 import yaml
@@ -12,12 +12,17 @@ from httpx import ASGITransport, AsyncClient
 from starlette.testclient import TestClient
 
 from crew.app import build_app
-from crew.core.interfaces import Channel, MessageHandler
 from crew.channels import channel_config
 from crew.channels.platform_registry import PlatformConfig, PlatformEntry, platform_registry
-from crew.gateway.routers.channels import _platform_error_kind
+from crew.channels.router_helpers import _platform_error_kind
+from crew.core.interfaces import Channel, MessageHandler
 from crew.gateway.server import create_app
-from crew.state.config import load_config, owner_overlay_config_path, resolve_writable_env_path, write_env_key
+from crew.state.config import (
+    load_config,
+    owner_overlay_config_path,
+    resolve_writable_env_path,
+    write_env_key,
+)
 
 OWNER_A = "A:uid-a"
 
@@ -41,7 +46,7 @@ class DummyChannel(Channel):
     starts: int = 0
     stops: int = 0
     stop_delay: float = 0.0
-    started_configs: list[dict[str, Any]] = []
+    started_configs: ClassVar[list[dict[str, Any]]] = []
 
     def __init__(self, config: PlatformConfig) -> None:
         self.config = config
@@ -84,7 +89,7 @@ class DummySecureChatChannel(Channel):
 class DummyFeishuChannel(Channel):
     name = "feishu"
     starts: int = 0
-    started_configs: list[dict[str, Any]] = []
+    started_configs: ClassVar[list[dict[str, Any]]] = []
 
     def __init__(self, config: PlatformConfig) -> None:
         self.config = config

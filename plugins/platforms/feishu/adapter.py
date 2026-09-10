@@ -26,9 +26,9 @@ import threading
 import time
 from typing import Any
 
+from crew.channels.platform_registry import PlatformConfig  # noqa: F401 - 类型参考/对外
 from crew.core.envelope import Envelope
 from crew.core.interfaces import Channel, MessageHandler
-from crew.channels.platform_registry import PlatformConfig  # noqa: F401 - 类型参考/对外
 from crew.gateway.response_filters import apply_text_filters
 from crew.gateway.session_context import SessionSource, build_session_key
 from crew.state.logging import get_logger
@@ -64,20 +64,54 @@ def lark_available() -> bool:
     return importlib.util.find_spec("lark_oapi") is not None
 
 
-def _serve_ws(ws_client: Any) -> None:
+def _serve_ws(ws_client: Any, stop_event: threading.Event | None = None) -> None:
     """ws 后台线程主体:在本线程建独立事件循环并覆盖 lark 的模块级全局 loop,再跑 ws 客户端。
 
     lark 的 ws.client 在 *import 时* 用 asyncio.get_event_loop() 抓一个模块级全局 loop,
     其 start() 直接 loop.run_until_complete(...)。我们在 Crew 运行中的事件循环里懒加载它,
     它抓到的就是正在运行的主 loop → start() 会报 "This event loop is already running"。
     故在本后台线程内建独立的新 loop 并覆盖该全局,让 ws 客户端跑在自己的循环上。
+
+    热停语义:stop_event 被设置后,本线程会尝试调用 lark SDK 的 ws_client.stop() 断开连接,
+    随后退出事件循环。ws 线程本身仍是 daemon,不保证被 join,但 stop() 之后连接会真正关闭。
     """
     import lark_oapi.ws.client as _ws_mod
 
     thread_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(thread_loop)
     _ws_mod.loop = thread_loop
-    ws_client.start()
+
+    stop_event = stop_event or threading.Event()
+    if stop_event.is_set():
+        return
+
+    start_done = threading.Event()
+    start_exc: list[BaseException] = []
+
+    def _run_start() -> None:
+        try:
+            ws_client.start()
+        except BaseException as exc:  # noqa: BLE001 — 仅用于线程间传递异常
+            start_exc.append(exc)
+        finally:
+            start_done.set()
+
+    runner = threading.Thread(target=_run_start, name="feishu-ws-runner", daemon=True)
+    runner.start()
+
+    # 等待 stop 信号或 start 自然结束(出错/断开)
+    while not stop_event.is_set() and not start_done.is_set():
+        stop_event.wait(timeout=0.2)
+
+    if stop_event.is_set() and not start_done.is_set():
+        stopper = getattr(ws_client, "stop", None)
+        if callable(stopper):
+            try:
+                stopper()
+            except Exception:
+                log.debug("Feishu ws_client.stop() 异常", exc_info=True)
+
+    runner.join(timeout=5.0)
 
 
 def fetch_bot_identity(app_id: str, app_secret: str, domain: str) -> BotIdentity | None:
@@ -94,7 +128,7 @@ def fetch_bot_identity(app_id: str, app_secret: str, domain: str) -> BotIdentity
             headers["Authorization"] = f"Bearer {token}"
         method = "POST" if body is not None else "GET"
         req = urllib.request.Request(domain + path, data=data, headers=headers, method=method)
-        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 - 显式集成
+        with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode("utf-8", errors="replace"))
 
     try:
@@ -125,6 +159,8 @@ class FeishuChannel(Channel):
         self._handler: MessageHandler | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_thread: threading.Thread | None = None
+        self._ws_stop_event: threading.Event | None = None
+        self._ws_client: Any = None
         self._client: Any = None
         self._stopped = False
         self._bot = BotIdentity(self.settings.bot_open_id, self.settings.bot_user_id, self.settings.bot_name)
@@ -216,8 +252,15 @@ class FeishuChannel(Channel):
             self.settings.app_id, self.settings.app_secret,
             event_handler=dispatcher, domain=self.settings.domain,
         )
+        self._ws_client = ws_client
+        self._ws_stop_event = threading.Event()
         self._start_ingress(handler)
-        self._ws_thread = threading.Thread(target=_serve_ws, args=(ws_client,), name="feishu-ws", daemon=True)
+        self._ws_thread = threading.Thread(
+            target=_serve_ws,
+            args=(ws_client, self._ws_stop_event),
+            name="feishu-ws",
+            daemon=True,
+        )
         self._ws_thread.start()
         for warning in self.settings.collect_warnings():
             log.warning("Feishu 配置提示: %s", warning)
@@ -227,8 +270,8 @@ class FeishuChannel(Channel):
     async def stop(self) -> None:
         """停止逻辑入口，丢弃排队消息并取消正在执行的渠道对话。
 
-        lark SDK 未暴露可靠的热 stop；物理断连仍由 Gateway 受控重启完成。这里先关闭
-        所有业务入口，确保退出期间不再解析、分发或回包。
+        触发 ws 线程的 stop_event，并尝试调用 lark SDK 的 ws_client.stop() 主动断连。
+        ws 线程仍是 daemon，不保证被 join，但 stop() 之后 ws 连接会真正关闭、事件循环退出。
         """
         self._stopped = True
         self._handler = None
@@ -254,6 +297,17 @@ class FeishuChannel(Channel):
         if self._dedup_persisted_revision < self._dedup_revision:
             await asyncio.to_thread(self._persist_dedup)
             self._dedup_persisted_revision = self._dedup_revision
+
+        stop_event = self._ws_stop_event
+        if stop_event is not None:
+            stop_event.set()
+        ws_client = self._ws_client
+        stopper = getattr(ws_client, "stop", None)
+        if callable(stopper):
+            try:
+                await asyncio.to_thread(stopper)
+            except Exception:
+                log.debug("Feishu ws_client.stop() 异常", exc_info=True)
 
     def status_detail(self) -> dict[str, Any]:
         return {
@@ -386,7 +440,7 @@ class FeishuChannel(Channel):
                 await self._handle(parsed)
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - 单条外部事件失败不能终止入口 worker
+            except Exception:
                 log.exception("Feishu 入站处理失败 transport=%s", transport)
             finally:
                 queue.task_done()
@@ -498,7 +552,7 @@ class FeishuChannel(Channel):
                         error = chunk.body.get("message", "")
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.exception("Feishu 分发失败: %s", parsed["message_id"])
                 error = str(exc)
             finally:
@@ -656,8 +710,8 @@ class FeishuChannel(Channel):
                 return True
             log.warning("Feishu create 失败 type=%s code=%s msg=%s", msg_type,
                         getattr(resp, "code", "?"), getattr(resp, "msg", "?"))
-        except Exception as exc:  # noqa: BLE001
-            log.exception("Feishu create 异常: %s", exc)
+        except Exception:
+            log.exception("Feishu create 异常")
         return False
 
     # -- reaction(best-effort,失败不影响主流程)---------------------------- #

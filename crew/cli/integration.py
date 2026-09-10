@@ -11,13 +11,10 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 from urllib.request import url2pathname
 
-from crew.cli.app import CliContext, CliError, CliResult, parse_json
 from crew.channels.channel_config import channel_raw as resolved_channel_raw
-from crew.channels.channel_manager import ChannelManager
 from crew.channels.channel_sessions import bind_channel_platform_for_owner
-from crew.gateway.helpers import require_external_agents_enabled
 from crew.channels.platform_registry import platform_registry
-from crew.gateway.routers.channels import (
+from crew.channels.router_helpers import (
     _account_remove_keys,
     _apply_environment_preset,
     _enrich_platform_row,
@@ -28,9 +25,13 @@ from crew.gateway.routers.channels import (
     _sanitize_for_yaml,
     _validate_platform_config_ready,
     _validate_secret_fields,
-    _wait_for_live_connected,
     _write_env_fields,
 )
+from crew.channels.router_helpers import (
+    _restart_channel as _restart_platform,
+)
+from crew.cli.app import CliContext, CliError, CliResult, parse_json
+from crew.gateway.helpers import require_external_agents_enabled
 from crew.gateway.routers.mcp_servers import _NAME_RE, _redact_config, _validate_server_payload
 from crew.gateway.routers.plugins import (
     _drop_owner_agent_cache,
@@ -419,11 +420,10 @@ def _register_channel(subparsers) -> None:
     status.set_defaults(handler=_channel_qr_status)
 
 
-def _channel_manager(app: Any) -> ChannelManager:
+def _channel_manager(app: Any) -> Any:
     manager = getattr(app, "channel_manager", None)
     if manager is None:
-        manager = ChannelManager()
-        app.channel_manager = manager
+        raise CliError("渠道服务未就绪", exit_code=503)
     return manager
 
 
@@ -436,7 +436,7 @@ def _channel_context(ctx: CliContext, platform: str) -> tuple[Any, str]:
     return app, name
 
 
-def _channel_row(app: Any, name: str, manager: ChannelManager, owner: str) -> dict[str, Any]:
+def _channel_row(app: Any, name: str, manager: Any, owner: str) -> dict[str, Any]:
     raw = resolved_channel_raw(app.config, name, owner)
     entry = platform_registry.get(name)
     cfg = entry.build_config(raw, include_env=not bool(owner))
@@ -519,32 +519,9 @@ def _channel_config_save(args: Any, ctx: CliContext) -> CliResult:
     )
 
 
-async def _restart_channel(app: Any, manager: ChannelManager, name: str, owner: str) -> tuple[bool, dict[str, Any]]:
-    if manager.is_busy(name, owner):
-        raise CliError("渠道正在重连，请稍后再操作", exit_code=409)
-    entry = platform_registry.get(name)
-    raw = resolved_channel_raw(app.config, name, owner)
-    cfg = entry.build_config(raw, include_env=not bool(owner))
-    if not cfg.enabled:
-        await manager.stop_one(name, owner)
-        return True, _channel_row(app, name, manager, owner)
-    try:
-        channel = platform_registry.create_channel(name, cfg)
-    except Exception as exc:  # noqa: BLE001
-        manager.record_error(name, str(exc), owner)
-        return False, _channel_row(app, name, manager, owner)
-    if hasattr(channel, "bind_app"):
-        channel.bind_app(app)
-    handler = getattr(app, "channel_handler", None) or app.dispatch
-    state = await manager.restart_one(name, channel, handler, owner_account_id=owner)
-    if not state.running:
-        return False, _channel_row(app, name, manager, owner)
-    live_ok, live_err = await _wait_for_live_connected(manager, name, owner)
-    if not live_ok:
-        await manager.stop_one(name, owner)
-        manager.record_error(name, live_err, owner)
-        return False, _channel_row(app, name, manager, owner)
-    return True, _channel_row(app, name, manager, owner)
+async def _restart_channel(app: Any, manager: Any, name: str, owner: str) -> tuple[bool, dict[str, Any]]:
+    ok, _status = await _restart_platform(app, name, owner, channel_manager=manager)
+    return ok, _channel_row(app, name, manager, owner)
 
 
 async def _channel_connect(args: Any, ctx: CliContext) -> CliResult:
