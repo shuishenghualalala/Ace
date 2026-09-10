@@ -17,6 +17,7 @@ import {
   type CapabilityHubView,
 } from './capability-hub';
 import { invalidateSkills } from './skill-store';
+import type { PageContribution, PageLifecycleContext } from './page-registry';
 
 type PageTab = 'skills' | 'plugins';
 
@@ -78,6 +79,14 @@ let skillsLoading = false;
 let togglingEvolution = false;
 /** 自进化配置 */
 let evolutionConfig = { auto_trigger: false, auto_full_cycle: false, visible: false };
+
+// ── 页面生命周期状态 ──
+let skillsLifecycleSignal: AbortSignal | null = null;
+let skillsLifecycleEpoch = 0;
+
+function skillsLifecycleAvailable(): boolean {
+  return !skillsLifecycleSignal || !skillsLifecycleSignal.aborted;
+}
 
 const SKILL_CATEGORY_MEMORY_KEY = 'crew.skill.category-by-slug';
 
@@ -583,15 +592,19 @@ function closeModal(): void {
 async function loadStore(): Promise<void> {
   skillsLoading = true;
   renderShell();
+  const epoch = skillsLifecycleEpoch;
+  const signal = skillsLifecycleSignal;
   try {
     const [skillData, pluginData] = await Promise.all([
       backendApi.skillStore(),
       backendApi.plugins().catch(() => [] as PluginItem[]),
     ]);
+    if (signal !== skillsLifecycleSignal || epoch !== skillsLifecycleEpoch || !skillsLifecycleAvailable()) return;
     store = skillData;
     plugins = pluginData;
     if (skillData.evolution) evolutionConfig = skillData.evolution;
   } catch {
+    if (signal !== skillsLifecycleSignal || epoch !== skillsLifecycleEpoch || !skillsLifecycleAvailable()) return;
     store = { installed: [], optional: [] };
     plugins = [];
   }
@@ -618,8 +631,33 @@ export function bindSkillsPageLifecycle(onNavigateToChat: () => void): () => voi
   return () => {
     if (navigateToChat === onNavigateToChat) navigateToChat = null;
     window.removeEventListener('user:login-changed', onLoginChanged);
-    capabilityHubView?.dispose();
-    capabilityHubView = null;
+    disposeSkillsPage();
+  };
+}
+
+function disposeSkillsPage(): void {
+  if (localSearchTimer) {
+    window.clearTimeout(localSearchTimer);
+    localSearchTimer = null;
+  }
+  capabilityHubView?.dispose();
+  capabilityHubView = null;
+}
+
+export function createSkillsPageContribution(): PageContribution {
+  return {
+    id: 'skills',
+    activate: ({ signal }: PageLifecycleContext) => {
+      skillsLifecycleEpoch += 1;
+      skillsLifecycleSignal = signal;
+      renderShell();
+      void loadStore();
+    },
+    deactivate: async () => {
+      skillsLifecycleEpoch += 1;
+      skillsLifecycleSignal = null;
+      disposeSkillsPage();
+    },
   };
 }
 

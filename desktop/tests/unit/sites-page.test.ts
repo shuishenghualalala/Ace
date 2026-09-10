@@ -1,4 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
+/**
+ * @vitest-environment happy-dom
+ *
+ * sites-page 单测：协议解析、annotation prompt、DOM 生命周期。
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({ protocol: { handle: vi.fn() } }));
 
@@ -244,5 +249,77 @@ describe('sites page annotation handoff', () => {
     expect(controller).toContain('composeBlueprintAnnotationMessage');
     expect(composerContext).toContain("blueprintAnnotationPreview.id = 'chat-blueprint-annotation-preview'");
     expect(inspector).toContain("'blueprint-surface-open'");
+  });
+});
+
+vi.mock('../../src/ui/backend-client', () => ({
+  backendApi: {
+    inspirations: vi.fn(async () => ({ inspirations: [] })),
+    sites: vi.fn(async () => ({ sites: [] })),
+  },
+}));
+
+import { backendApi } from '../../src/ui/backend-client';
+import { createSitesPageContribution } from '../../src/ui/features/sites-page';
+
+const api = backendApi as unknown as {
+  inspirations: ReturnType<typeof vi.fn>;
+};
+
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+describe('Sites 页面生命周期', () => {
+  beforeEach(() => {
+    document.body.innerHTML = `
+      <button class="nav-item" data-tab="sites">Sites</button>
+      <section id="sites-tab" class="tab-pane"><div id="sites-page-root"></div></section>
+    `;
+  });
+
+  it('activate 渲染 sites 页面并触发加载', async () => {
+    const contribution = createSitesPageContribution();
+    contribution.activate({ signal: new AbortController().signal });
+    await flush();
+
+    const root = document.querySelector('#sites-page-root');
+    expect(root).not.toBeNull();
+    expect(api.inspirations).toHaveBeenCalled();
+  });
+
+  it('deactivate 释放计时器并清空根节点', async () => {
+    const contribution = createSitesPageContribution();
+    contribution.activate({ signal: new AbortController().signal });
+    await flush();
+
+    await contribution.deactivate();
+
+    expect(document.querySelector('#sites-page-root')?.children.length).toBe(0);
+  });
+
+  it('离页后旧加载响应不回写页面', async () => {
+    let resolveInspirations!: (value: unknown) => void;
+    api.inspirations.mockReturnValue(new Promise((resolve) => { resolveInspirations = resolve; }));
+
+    const contribution = createSitesPageContribution();
+    const controller = new AbortController();
+    contribution.activate({ signal: controller.signal });
+    await flush();
+
+    controller.abort();
+    await contribution.deactivate();
+    resolveInspirations({
+      inspirations: [
+        {
+          id: 'late',
+          title: 'Late Inspiration',
+          description: '',
+          sourcePath: '/x',
+          updatedAt: 1,
+        },
+      ],
+    });
+    await flush();
+
+    expect(document.querySelector('#sites-page-root')?.textContent).not.toContain('Late Inspiration');
   });
 });

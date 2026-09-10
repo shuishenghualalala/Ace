@@ -14,6 +14,7 @@
 
 import { backendApi, type CronDeliveryTarget, type CronJob, type CronJobRun } from '../backend-client';
 import { $, escapeHtml, notify, state, type TabKey } from '../state';
+import type { PageContribution, PageLifecycleContext } from './page-registry';
 
 export type FilterKey = 'all' | 'enabled' | 'disabled' | 'interval' | 'once';
 
@@ -88,6 +89,14 @@ let cronPageSlots: {
   list: HTMLElement;
   drawer: HTMLElement;
 } | null = null;
+
+// ── 页面生命周期状态 ──
+let cronLifecycleSignal: AbortSignal | null = null;
+let cronLifecycleEpoch = 0;
+
+function cronLifecycleAvailable(): boolean {
+  return !cronLifecycleSignal || !cronLifecycleSignal.aborted;
+}
 
 const FILTER_LABELS: Record<FilterKey, string> = {
   all: '全部',
@@ -492,6 +501,8 @@ async function loadCron(opts: { silent?: boolean } = {}): Promise<void> {
   }
   if (loadCronInFlight) return;
   loadCronInFlight = true;
+  const epoch = cronLifecycleEpoch;
+  const signal = cronLifecycleSignal;
   if (!opts.silent) {
     view.loading = true;
     if (view.drawer === 'create') {
@@ -503,11 +514,13 @@ async function loadCron(opts: { silent?: boolean } = {}): Promise<void> {
   try {
     const sid = view.scope === 'current' ? (state.activeSessionId || undefined) : undefined;
     const list = await backendApi.cronJobs(sid);
+    if (signal !== cronLifecycleSignal || epoch !== cronLifecycleEpoch || !cronLifecycleAvailable()) return;
     view.jobs = list.jobs || [];
     view.stats = computeStats(view.jobs);
     view.error = null;
     view.lastLoadedAt = Date.now();
   } catch (err) {
+    if (signal !== cronLifecycleSignal || epoch !== cronLifecycleEpoch || !cronLifecycleAvailable()) return;
     if (!opts.silent) {
       view.error = (err as Error)?.message || '加载失败';
       view.jobs = [];
@@ -529,6 +542,9 @@ async function loadCron(opts: { silent?: boolean } = {}): Promise<void> {
 }
 
 async function loadJobDetail(jobId: string, opts: { silent?: boolean } = {}): Promise<void> {
+  if (!cronLifecycleAvailable()) return;
+  const epoch = cronLifecycleEpoch;
+  const signal = cronLifecycleSignal;
   if (!opts.silent) {
     view.detailRunsLoading = true;
     view.detailRuns = [];
@@ -536,8 +552,10 @@ async function loadJobDetail(jobId: string, opts: { silent?: boolean } = {}): Pr
   }
   try {
     const detail = await backendApi.cronJobDetail(jobId);
+    if (signal !== cronLifecycleSignal || epoch !== cronLifecycleEpoch || !cronLifecycleAvailable()) return;
     view.detailRuns = detail.runs || [];
   } catch {
+    if (signal !== cronLifecycleSignal || epoch !== cronLifecycleEpoch || !cronLifecycleAvailable()) return;
     if (!opts.silent) view.detailRuns = [];
   } finally {
     view.detailRunsLoading = false;
@@ -1184,6 +1202,35 @@ function bindListEvents(): void {
 export function __resetCronListEventsForTest(): void {
   listEventsBound = false;
   cronPageSlots = null;
+}
+
+function disposeCronPage(): void {
+  if (cronPollTimer) {
+    clearInterval(cronPollTimer);
+    cronPollTimer = null;
+  }
+  closeDrawer();
+  cronPageSlots?.shell.remove();
+  cronPageSlots?.drawer.remove();
+  cronPageSlots = null;
+  listEventsBound = false;
+  loadCronInFlight = false;
+}
+
+export function createCronPageContribution(): PageContribution {
+  return {
+    id: 'cron',
+    activate: ({ signal }: PageLifecycleContext) => {
+      cronLifecycleEpoch += 1;
+      cronLifecycleSignal = signal;
+      void loadCron();
+    },
+    deactivate: async () => {
+      cronLifecycleEpoch += 1;
+      cronLifecycleSignal = null;
+      disposeCronPage();
+    },
+  };
 }
 
 /** 测试钩子：覆盖 view 的可过滤状态（用于 filteredJobs 单测）。 */

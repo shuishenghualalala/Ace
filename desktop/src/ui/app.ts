@@ -10,7 +10,7 @@
 
 import { bindChannelConfigModal, bindModelConfigModal, openChannelConfigModal, renderConfigModels, renderPlatforms, toggleChannelConnection } from './features/config-panes';
 import { backendApi } from './backend-client';
-import { bindSitesTab, renderSitesPage, syncSiteAnnotationEntry, syncSiteComposerMarker } from './features/sites-page';
+import { bindSitesTab, createSitesPageContribution, syncSiteComposerMarker } from './features/sites-page';
 import { bindBlueprintSurface } from './features/blueprint-surface';
 import { bindModelPicker } from './features/model-picker';
 import { bindComposerToolbar, syncCraftLabel } from './features/composer-toolbar';
@@ -18,8 +18,8 @@ import { bindComposerContextRing } from './features/composer-context-ring';
 import { createComposerContextView } from './features/composer-context-view';
 import { createAgentsPageContribution, disposeAgentsPage, initAgentsPage } from './features/agents-page';
 import {
-  activateSkillsPage,
   bindSkillsPageLifecycle,
+  createSkillsPageContribution,
   initSkillsPage,
 } from './features/skills-page';
 import {
@@ -50,7 +50,7 @@ import {
 import { refreshKanbanBoard, renderKanbanBoard } from './features/board-hooks';
 import { bindSystemTab, disposeSystemTab, renderSystemLogs, renderSystemOverview } from './features/system-page';
 import { initUsagePage } from './features/usage-panel';
-import { activateCronPage, renderCronTaskBoard, setCronCallbacks } from './features/cron-page';
+import { createCronPageContribution, renderCronTaskBoard, setCronCallbacks } from './features/cron-page';
 import {
   createWikiPageContribution,
   installWikiFeature,
@@ -138,7 +138,7 @@ import {
 } from './features/session-controller';
 import { hydrateMissingTurnFileCounts } from './features/turn-file-counts';
 import { bindSecurityApprovalUi } from './features/security-approval';
-import { activateSecurityPage, initSecurityPage } from './features/security-center';
+import { createSecurityPageContribution, initSecurityPage } from './features/security-center';
 import { stopStreamWatchdog } from './features/stream-watchdog';
 import type { RendererAdapter } from './adapters/renderer-adapter';
 import { createApplicationShell, type ApplicationShell } from './layouts/application-shell';
@@ -206,15 +206,7 @@ function setTab(tab: TabKey): boolean {
 }
 
 function activateTab(tab: TabKey): boolean {
-  if (!setTab(tab)) return false;
-  if (tab === 'skills') activateSkillsPage();
-  else if (tab === 'security') activateSecurityPage();
-  else if (tab === 'sites') {
-    syncSiteAnnotationEntry();
-    void renderSitesPage();
-  }
-  else if (tab === 'cron') activateCronPage();
-  return true;
+  return setTab(tab);
 }
 
 function setSystemPanel(panel: SystemPanelKey): void {
@@ -897,6 +889,10 @@ function mountApplicationShell(
   });
   const disposeWikiPageContribution = pageRegistry.register(createWikiPageContribution());
   const disposeAgentsPageContribution = pageRegistry.register(createAgentsPageContribution());
+  const disposeSkillsPageContribution = pageRegistry.register(createSkillsPageContribution());
+  const disposeSecurityPageContribution = pageRegistry.register(createSecurityPageContribution());
+  const disposeSitesPageContribution = pageRegistry.register(createSitesPageContribution());
+  const disposeCronPageContribution = pageRegistry.register(createCronPageContribution());
 
   const assistantContext = document.createElement('div');
   const workContext = document.createElement('aside');
@@ -983,6 +979,10 @@ function mountApplicationShell(
       void pageRegistry.deactivate();
       void disposeWikiPageContribution();
       void disposeAgentsPageContribution();
+      void disposeSkillsPageContribution();
+      void disposeSecurityPageContribution();
+      void disposeSitesPageContribution();
+      void disposeCronPageContribution();
       leaveWorkMode();
       setWorkHistoryCommands({});
       const restoredContext = document.createElement('div');
