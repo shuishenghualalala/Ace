@@ -104,8 +104,6 @@ class WikiQuerier:
                 f"{' '.join(page.tags)} {page.content} {claim_text}"
             ).casefold()
             score += sum(6 for term in terms if term and term in searchable)
-            if page.page_type != "source":
-                score += 8
             if page.confidence == "high":
                 score += 3
             elif page.confidence == "low":

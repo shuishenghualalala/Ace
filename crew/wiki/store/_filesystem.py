@@ -1088,8 +1088,8 @@ class FileSystemWikiStore(WikiStore):
                 )
             ]
 
-        # 精确标题/alias、FTS 与关键词信号统一重排；Source 页面作为证据层，
-        # 在相关度相当时排在规范知识页之后。
+        # 精确标题/alias、FTS 与关键词信号统一重排；页面类型不参与打分，
+        # source 与知识页统一按相关度和质量信号（confidence/contested）排序。
         terms = [t.lower() for t in re.split(r"\s+", query) if t]
         if not terms and not query_key:
             return []
@@ -1137,8 +1137,6 @@ class FileSystemWikiStore(WikiStore):
             if relevance <= 0:
                 continue
             score = relevance
-            if page.page_type != "source":
-                score += 20
             if page.confidence == "high":
                 score += 8
             elif page.confidence == "low":
@@ -1199,8 +1197,6 @@ class FileSystemWikiStore(WikiStore):
                     score += 15
             if score <= 0:
                 continue
-            if page.page_type != "source":
-                score += 10
             if page.confidence == "high":
                 score += 3
             elif page.confidence == "low":
