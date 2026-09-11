@@ -392,6 +392,7 @@
       <tr><td>2026-09-11</td><td>初始建立：§12.5 约定正式落地 + 六类资源全量只读审计（基线 refactor/plugin-architecture-stage-0）</td><td>仅文档，无生产代码改动</td></tr>
     <tr><td>2026-09-11</td><td>P1-3 已修复：Config.wiki 改原始 dict 透传 + wiki_enabled 轻量布尔，解析移回 wiki 侧，新增 import-linter 契约 state-wiki-boundary（阶段 6E）</td><td>crew/state/config.py、crew/app.py、crew/gateway/helpers.py、crew/gateway/routers/misc.py、plugins/wiki_learning</td></tr>
     <tr><td>2026-09-11</td><td>P2-4 底座已建：schema 版本表助手 + migrate feature CLI，work 试点 v1（阶段 6H）；P1-2 数据耦合已解除：外键/JOIN/直删改经 ExternalAgentLifecycle 窄协议 + 快照列，继承残留待组合化（阶段 6G，ADR-0036）</td><td>crew/state/schema_version.py、crew/cli/management.py、crew/work/feature.py、crew/team/external_store.py、crew/agent/external/catalog.py</td></tr>
+    <tr><td>2026-09-11</td><td>P1-2 完全收口：Store 继承改组合（含生产递归 bug 修复，阶段 6G-2）；P2-7 前半已修：Config.browser 改原始 dict 透传，state 契约扩展至 wiki+team+agent.external+browser 四项（阶段 6I/6J/6K，workspace 必修①②③④解除）</td><td>crew/team/external_store.py、crew/state/config.py、crew/state/team_member_model.py→crew/team/、crew/wiki/tools.py、plugins/browser、crew/gateway/routers/browser.py、crew/cli/integration.py、.importlinter</td></tr>
     </tbody>
   </table>
 
