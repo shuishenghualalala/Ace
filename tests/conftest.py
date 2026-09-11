@@ -40,6 +40,22 @@ def _restore_process_env():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_machine_config(tmp_path, monkeypatch, _restore_process_env):
+    """每个用例与开发机真实配置文件隔离：config.ROOT 与 CREW_HOME 指向用例私有目录。
+
+    开发态 load_config() 读 ROOT/config/config.yaml（被 gitignore 的本机文件，
+    首跑自动从 config.yaml.example 复制），其中 auth.mode、security.enabled 等
+    键随机器/版本漂移——例如 example 默认 auth.mode=email，所有依赖本机免登录
+    的 gateway 用例会稳定吃到 401。CREW_HOME 未隔离的用例还会读写真实 ~/.crew
+    （含 owner overlay config.yaml），是另一处非确定性来源。重定向后
+    load_config() 只剩代码默认值；需要特定配置的用例自行 monkeypatch ROOT 或
+    setenv CREW_HOME 覆盖（monkeypatch 后写生效，互不冲突）。
+    """
+    monkeypatch.setattr("crew.state.config.ROOT", tmp_path)
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+
+
+@pytest.fixture(autouse=True)
 def _close_live_crew_apps():
     """兜底释放本用例构建、但未走 ASGI lifespan 的 CrewApp 句柄。
 
