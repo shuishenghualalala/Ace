@@ -16,7 +16,11 @@ from crew.core.runctx import (
 )
 from crew.state.config import Config
 from crew.state.plugin_preferences import PluginPreferencesStore
-from plugins.browser.tool import BROWSER_USE_SCHEMA, BrowserUseTool, validate_args
+from plugins.browser.tool import (
+    BROWSER_USE_ADVANCED_SCHEMA,
+    BrowserUseTool,
+    validate_args,
+)
 from tests.test_browser_use import FakeBrowserDriver
 
 
@@ -51,7 +55,10 @@ class RunCodeDriver(FakeBrowserDriver):
 
 
 def test_run_code_schema_and_runtime_validation_match_optional_union() -> None:
-    validator = Draft202012Validator(BROWSER_USE_SCHEMA["parameters"])
+    # run_code_unsafe 属高级动作：281b70b 起 browser_use 按 progressive disclosure
+    # 拆成 core/advanced 两个 schema，run_code_unsafe 的 enum 与 code/filename
+    # 参数只存在于 BROWSER_USE_ADVANCED_SCHEMA。
+    validator = Draft202012Validator(BROWSER_USE_ADVANCED_SCHEMA["parameters"])
     valid = (
         {"action": "run_code_unsafe", "code": ""},
         {"action": "run_code_unsafe", "filename": ""},
