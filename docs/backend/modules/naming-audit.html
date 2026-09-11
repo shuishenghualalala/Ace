@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>配置与数据命名空间约定 · 全量审计 · Ace 后端模块</title>
+<style>
+  :root{
+    --text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:1080px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:28px;font-weight:800;margin:0 0 4px}
+  .crumb{color:var(--t3);font-size:13px;margin-bottom:6px}
+  .sub{color:var(--t3);margin-bottom:36px}
+  h2{font-size:19px;font-weight:700;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:16px;font-weight:700;margin:24px 0 8px}
+  p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin:8px 0}
+  th,td{border:1px solid var(--border);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:var(--soft);font-weight:600}
+  .logo{width:28px;height:28px;border-radius:7px;background:var(--black);color:#fff;display:inline-grid;place-items:center;font-weight:800;vertical-align:middle;margin-right:8px}
+  ul{padding-left:20px}
+  .nav{margin-top:40px;color:var(--t3);font-size:13px}
+  a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}a:hover{border-bottom-color:var(--text)}
+  .ok{display:inline-block;font-size:12px;padding:0 6px;border:1px solid var(--border);border-radius:4px;background:var(--soft);white-space:nowrap}
+  .dev{display:inline-block;font-size:12px;padding:0 6px;border:1px solid #d8b0b0;border-radius:4px;background:#faf3f3;white-space:nowrap}
+  .gray{display:inline-block;font-size:12px;padding:0 6px;border:1px solid var(--border);border-radius:4px;color:var(--t3);white-space:nowrap}
+  .p1{display:inline-block;font-size:12px;padding:0 6px;border-radius:4px;background:#111;color:#fff;white-space:nowrap}
+  .p2{display:inline-block;font-size:12px;padding:0 6px;border:1px solid #111;border-radius:4px;white-space:nowrap}
+  .p3{display:inline-block;font-size:12px;padding:0 6px;border:1px solid var(--border);border-radius:4px;color:var(--t3);white-space:nowrap}
+  .meta{font-size:13px;color:var(--t3);border:1px solid var(--border);border-radius:8px;padding:10px 14px;background:var(--soft);margin-bottom:28px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="crumb">Ace / 后端模块 / 配置与数据命名空间约定</div>
+  <h1><span class="logo">A</span>配置与数据命名空间约定 · 全量审计</h1>
+  <div class="sub">演进计划 §12.5 的正式落地页 + 各 Feature 六类资源的事实审计（只读代码，不改生产代码）。</div>
+
+  <div class="meta">
+    <b>审计日期</b>：2026-09-11 · <b>基线分支</b>：<code>refactor/plugin-architecture-stage-0</code> ·
+    <b>依据</b>：<code>docs/todo/ace-plugin-architecture-evolution-plan.md</code> §12.5 ·
+    <b>方法</b>：对 <code>crew/</code> 全量 grep（配置读取 / 数据目录 / CREATE TABLE / 外键与 JOIN / migrate / ServiceKey / feature_event）并逐处读码核实，所有结论附 <code>file:line</code> 证据。
+  </div>
+
+  <h2>1. 命名空间约定（正式约定页）</h2>
+  <p>以下六条自本页发布起作为开发约定。命名空间一经发布视为公共契约，变更走与 API 相同的兼容流程。</p>
+  <table>
+    <thead><tr><th>资源</th><th>约定</th><th>示例</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>配置 key</td>
+        <td><code>features.&lt;name&gt;.*</code>；核心保留 <code>core.*</code></td>
+        <td><code>features.wiki.provider</code></td>
+        <td>每个 Feature 只读自己的子树；env 覆盖变量统一 <code>CREW_&lt;NAME&gt;_*</code> 风格并在 Feature 内声明。</td>
+      </tr>
+      <tr>
+        <td>数据目录</td>
+        <td><code>crew_data/&lt;name&gt;/</code>；Feature 不得读写其他 Feature 的目录</td>
+        <td><code>crew_data/wiki/</code></td>
+        <td>owner 隔离由统一入口（<code>get_owner_runtime_home()</code>）派生，Feature 不自行拼 <code>accounts/</code> 路径。</td>
+      </tr>
+      <tr>
+        <td>数据库表</td>
+        <td>统一表前缀 <code>&lt;name&gt;_</code>；跨 Feature 不建外键、不 JOIN 他人表</td>
+        <td><code>wiki_documents</code>、<code>team_tasks</code></td>
+        <td>跨 Feature 关联只能经 Service 接口或冗余快照字段；表结构变更必须向后兼容。</td>
+      </tr>
+      <tr>
+        <td>Migration 入口</td>
+        <td>每个 Feature 独立入口与版本表</td>
+        <td><code>ace wiki migrate</code></td>
+        <td>每张库表归属唯一 Feature；版本表记录该 Feature 的 schema 版本，禁止在别处隐式改表。</td>
+      </tr>
+      <tr>
+        <td>Service Key</td>
+        <td>稳定命名空间，带主版本</td>
+        <td><code>knowledge.v1</code></td>
+        <td>key 常量只在 owning Feature 定义一次；消费方只 import 常量，不重复写字面量。</td>
+      </tr>
+      <tr>
+        <td>Feature Event</td>
+        <td><code>&lt;feature&gt;.&lt;event&gt;</code> + <code>version</code> 字段</td>
+        <td><code>wiki.cards v1</code></td>
+        <td>feature 段与 Feature ID 的尾段一致；新事件必须登记总目录（本页 §5）。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>2. 六类资源总体符合度</h2>
+  <table>
+    <thead><tr><th>资源</th><th>总体结论</th><th>P1</th><th>P2</th><th>要点</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>配置 key</td>
+        <td><span class="dev">不符合（系统性偏差，可渐进迁移）</span></td>
+        <td>1</td><td>2</td>
+        <td>全部 Feature 用 config.yaml 顶层节（<code>wiki:</code> / <code>cron:</code> / <code>team:</code> / <code>tasks:</code> / <code>external_agents:</code> / <code>channels:</code>）或 Config 平铺字段，无 <code>features.*</code>；<code>crew/state/config.py:22</code> 反向导入 <code>crew.wiki.config</code>。</td>
+      </tr>
+      <tr>
+        <td>数据目录</td>
+        <td><span class="ok">精神符合、字面不符</span></td>
+        <td>0</td><td>1</td>
+        <td>目录按 Feature 名分区（<code>wiki_lib/</code>、<code>sites/</code>、<code>browser/</code>、<code>evolution/</code>、<code>task_workspaces/</code>），但根是 <code>{CREW_HOME}</code> 而非 <code>crew_data/&lt;name&gt;/</code>；未发现 Feature 互写他人目录。</td>
+      </tr>
+      <tr>
+        <td>数据库表</td>
+        <td><span class="dev">部分符合</span></td>
+        <td>2</td><td>1</td>
+        <td>前缀覆盖率高（<code>kanban_*</code> / <code>cron_*</code> / <code>work_*</code> / <code>site_*</code> / <code>external_*</code>）；但全 Feature 共用一个 <code>crew.db</code>，且 team 的 <code>external_team*</code> 表外键/JOIN 引用 external-agents 的 <code>external_agent</code> 表。</td>
+      </tr>
+      <tr>
+        <td>Migration 入口</td>
+        <td><span class="dev">不符合</span></td>
+        <td>0</td><td>1</td>
+        <td>无 per-feature migrate 命令与版本表；现状是 Store 构造器内 ensure-schema + 列检查 ALTER + 个别 rebuild；全局仅 <code>migrate claim-legacy</code>。</td>
+      </tr>
+      <tr>
+        <td>Service Key</td>
+        <td><span class="gray">部分符合</span></td>
+        <td>0</td><td>1</td>
+        <td>命名空间稳定（8 个 key），但无一携带主版本（<code>ServiceKey</code> 类型本身无 version 字段）；<code>app.py</code> 内两处字符串重复定义形成双源。</td>
+      </tr>
+      <tr>
+        <td>Feature Event</td>
+        <td><span class="ok">基本符合</span></td>
+        <td>0</td><td>1</td>
+        <td><code>FeatureEvent</code> 强类型校验（小写标识符、version≥1），compat 登记表 8 条 v1 事件；唯一偏差：<code>kanban</code> 命名空间与 Feature ID（<code>dynamic-kanban</code>）尾段不一致。</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>P1 合计 <b>3</b> 项、P2 合计 <b>7</b> 项、P3 合计 <b>4</b> 项，明细见 §6。</p>
+
+  <h2>3. 审计矩阵：Feature × 六类资源</h2>
+  <p>图例：<span class="ok">符合</span> = 已符合约定；<span class="gray">灰色</span> = 约定未覆盖/中性（如尚无此类资源）；<span class="dev">偏差</span> = 与约定不一致。<b>粗体</b> 表示构成 P1。</p>
+  <table>
+    <thead><tr><th>Feature</th><th>配置 key</th><th>数据目录</th><th>数据库表</th><th>Migration</th><th>Service Key</th><th>Feature Event</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>wiki</code><br><span style="color:var(--t3)">product.wiki<br>crew/wiki/feature.py:47</span></td>
+        <td><span class="dev">偏差</span> 顶层节 <code>wiki:</code>（crew/state/config.py:1637）＋ env <code>CREW_WIKI_HOME</code>（crew/wiki/config.py:28）</td>
+        <td><span class="gray">灰色</span> <code>{owner_home}/wiki_lib/</code>（crew/wiki/store/_filesystem.py:94）；每 KB FTS 索引 <code>.crew/index/fts.db</code>（_filesystem.py:132）</td>
+        <td><span class="ok">符合</span> 不占 <code>crew.db</code>，纯文件系统 + 每 KB 独立 SQLite</td>
+        <td><span class="gray">灰色</span> meta 文件 <code>relation_schema_version</code>（_filesystem.py:233,267），非版本表</td>
+        <td><span class="dev">偏差</span> <code>knowledge</code> 无版本（crew/wiki/service.py:713）；app.py:441 字面量双源</td>
+        <td><span class="ok">符合</span> <code>wiki.cards/changed</code>（crew/wiki/feature.py:301,309）、<code>wiki.ingest_progress</code>（crew/wiki/routes.py:638,679），均已登记 compat</td>
+      </tr>
+      <tr>
+        <td><code>team</code><br><span style="color:var(--t3)">product.team<br>crew/team/feature.py:31</span></td>
+        <td><span class="dev">偏差</span> 顶层节 <code>team:</code> 原始 dict 透传（crew/state/config.py:1556 → <code>team_config</code>:295）</td>
+        <td><span class="gray">灰色</span> 无专属数据目录；<code>ensure_crew_home</code> 会建 <code>teams/</code> 但无人读写（crew/state/home.py:660）</td>
+        <td><b><span class="dev">偏差 P1</span></b> <code>external_team</code>/<code>external_team_member</code>（crew/team/external_store.py:27,39）<b>外键引用 <code>external_agent</code></b>（:33,44-45）并 <b>JOIN 他人表</b>（:252,293）</td>
+        <td><span class="dev">偏差</span> 无版本表/入口</td>
+        <td><span class="dev">偏差</span> <code>team</code> 无版本（crew/team/feature.py:33）</td>
+        <td><span class="ok">符合</span> <code>team.internal_message</code>（crew/team/team_manager.py:5828），compat 已登记</td>
+      </tr>
+      <tr>
+        <td><code>external-agents</code><br><span style="color:var(--t3)">product.external-agents<br>crew/agent/external/feature.py:36</span></td>
+        <td><span class="dev">偏差</span> 顶层节 <code>external_agents:</code>（crew/state/config.py:1557-1566）</td>
+        <td><span class="ok">符合</span> 会话工作区归 task_workspaces <code>external_sessions/</code>（crew/state/home.py:836-864）</td>
+        <td><span class="ok">符合</span> <code>external_*</code> 前缀 4 表（crew/agent/external/store.py:58,74,97,122），外键均为 Feature 内部（:91,115,135-136,284-285）</td>
+        <td><span class="gray">灰色</span> rebuild 模式迁移（store.py:272-285），无版本表</td>
+        <td><span class="dev">偏差</span> <code>external-agent-catalog</code> / <code>agent-runtime-provider</code> / <code>delegation</code> 均无版本（feature.py:37-43）</td>
+        <td><span class="gray">灰色</span> 暂无事件</td>
+      </tr>
+      <tr>
+        <td><code>dynamic-kanban</code><br><span style="color:var(--t3)">product.dynamic-kanban<br>crew/dynamickanban/feature.py:22</span></td>
+        <td><span class="dev">偏差</span> 平铺进 <code>runtime.</code>：<code>dk_task_timeout_seconds</code> / <code>dk_verification_gate_enabled</code>（crew/state/config.py:214,217,1484）</td>
+        <td><span class="gray">灰色</span> 工作产物在工作空间 <code>workflows/&lt;id&gt;</code>（crew/dynamickanban/runtime.py:118），无专属数据目录</td>
+        <td><span class="ok">符合</span> <code>kanban_*</code> 前缀 6 表，外键均 Feature 内部（crew/dynamickanban/store.py:87-198）</td>
+        <td><span class="gray">灰色</span> Workflow definition 带 <code>WORKFLOW_DEFINITION_SCHEMA_VERSION=2</code>（runtime_models.py:19）；表结构无版本表</td>
+        <td><span class="dev">偏差</span> <code>dynamic-kanban</code> 无版本（feature.py:24）</td>
+        <td><span class="dev">偏差</span> 事件命名空间为 <code>kanban</code>，与 Feature ID 尾段 <code>dynamic-kanban</code> 不一致（runtime.py:197,235,432,471,618,973,1697）</td>
+      </tr>
+      <tr>
+        <td><code>cron</code><br><span style="color:var(--t3)">product.cron<br>crew/cron/feature.py:29</span></td>
+        <td><span class="dev">偏差</span> 顶层节 <code>cron:</code>（crew/state/config.py:1649-1658）；废弃 <code>tick_seconds</code> 已显式拒绝</td>
+        <td><span class="ok">符合</span> 无专属目录，全部落库</td>
+        <td><span class="ok">符合</span> <code>cron_jobs</code>/<code>cron_job_runs</code>（crew/cron/jobs.py:419,457），外键 Feature 内部（:471），JOIN 均内部（:906,1049,1117）</td>
+        <td><span class="dev">偏差</span> 无版本表/入口</td>
+        <td><span class="gray">灰色</span> 无 ServiceKey（调度/工具型）</td>
+        <td><span class="gray">灰色</span> 暂无事件</td>
+      </tr>
+      <tr>
+        <td><code>sites</code><br><span style="color:var(--t3)">product.sites<br>crew/sites/feature.py:24</span></td>
+        <td><span class="gray">灰色</span> 无专属配置节</td>
+        <td><span class="ok">符合</span> <code>{owner_home}/sites/</code>（crew/sites/manager.py:69,284）＋ blueprint widgets <code>sites/blueprint/widgets/</code>（crew/sites/blueprint.py:535）</td>
+        <td><span class="gray">灰色</span> <code>site_*</code> 前缀 9 表（store.py:47,64,77,95；blueprint.py:70-124）；离群表名 <code>inspiration_annotations</code>（store.py:95）与 <code>sites</code> 本身</td>
+        <td><span class="gray">灰色</span> rebuild 列表集中管理（store.py:128），无版本表</td>
+        <td><span class="gray">灰色</span> 无 ServiceKey</td>
+        <td><span class="gray">灰色</span> 暂无事件</td>
+      </tr>
+      <tr>
+        <td><code>work</code><br><span style="color:var(--t3)">product.work<br>crew/work/feature.py:35</span></td>
+        <td><span class="gray">灰色</span> 无专属配置节</td>
+        <td><span class="ok">符合</span> 无专属目录</td>
+        <td><span class="ok">符合</span> <code>work_*</code> 前缀 13 表，外键均 Feature 内部（crew/work/items.py:59,97,107-108；references.py:82-115；sources.py:114,127,146-147；preferences.py:77-111；briefs.py:78,101；knowledge.py:73,87；settings.py:44；templates.py:66）</td>
+        <td><span class="dev">偏差</span> 无版本表/入口</td>
+        <td><span class="dev">偏差</span> <code>work</code> 无版本（crew/work/service.py:31）</td>
+        <td><span class="gray">灰色</span> 暂无事件</td>
+      </tr>
+      <tr>
+        <td><code>channels</code><br><span style="color:var(--t3)">product.channels<br>crew/channels/feature.py:27</span></td>
+        <td><span class="dev">偏差</span> 顶层节 <code>channels:</code> + 旧 <code>platforms:</code> 兼容合并（crew/state/config.py:1552-1555,940-961）</td>
+        <td><span class="ok">符合</span> 无专属目录</td>
+        <td><span class="gray">灰色</span> 自身不建表；绑定/路由表由 core state 持有：<code>channel_bindings</code>（crew/state/channel_bindings.py:33）、<code>channel_session_routes</code>（crew/state/session_store.py:91）——命名空间对，归属在 core</td>
+        <td><span class="dev">偏差</span> v2 rebuild（channel_bindings.py:46），无版本表</td>
+        <td><span class="dev">偏差</span> <code>channels</code> 无版本（feature.py:28）；app.py:442 字面量双源</td>
+        <td><span class="gray">灰色</span> 暂无事件</td>
+      </tr>
+      <tr>
+        <td><code>tasks</code><br><span style="color:var(--t3)">统一长任务运行时</span></td>
+        <td><span class="dev">偏差</span> 顶层节 <code>tasks:</code>（crew/state/config.py:1568-1618）</td>
+        <td><span class="ok">符合</span> <code>task_workspaces/</code>（crew/state/home.py:771-810）</td>
+        <td><span class="gray">灰色</span> 表名 <code>runtime_tasks</code>（crew/tasks/runtime.py:67），前缀与 Feature 名（tasks）不一致</td>
+        <td><span class="gray">灰色</span> 列检查 + <code>ALTER TABLE ADD COLUMN</code> + backfill（runtime.py:102-113），无版本表</td>
+        <td><span class="gray">灰色</span> 无 ServiceKey</td>
+        <td><span class="gray">灰色</span> 暂无事件</td>
+      </tr>
+      <tr>
+        <td><code>browser</code><br><span style="color:var(--t3)">未生命周期化</span></td>
+        <td><span class="dev">偏差</span> 嵌在 <code>tools.browser</code> 下（crew/state/config.py:1629-1631）</td>
+        <td><span class="ok">符合</span> <code>{crew_home}/browser/profile</code> 与 <code>artifacts/</code>（crew/browser/manager.py:934,960）</td>
+        <td><span class="ok">符合</span> 无关系表</td>
+        <td><span class="gray">灰色</span> 录制契约带 <code>_RECORDING_SCHEMA_VERSION=10</code>（crew/browser/electron_bridge.py:1043）</td>
+        <td><span class="gray">灰色</span> 无（无 feature.py，未接入生命周期）</td>
+        <td><span class="gray">灰色</span> 暂无事件</td>
+      </tr>
+      <tr>
+        <td><code>subagent</code><br><span style="color:var(--t3)">core.subagent-context<br>crew/agent/subagent/</span></td>
+        <td><span class="dev">偏差</span> <code>config.yaml.example:109-113</code> 文档了顶层 <code>subagent:</code> 节，但 <code>load_config</code> 从不读取（crew/state/config.py 仅 :303-307 默认值、:1591 读 <code>tasks.subagent</code>）——死配置</td>
+        <td><span class="ok">符合</span> 无持久目录（内存注册表）</td>
+        <td><span class="ok">符合</span> 无表</td>
+        <td><span class="gray">灰色</span> 不适用</td>
+        <td><span class="gray">灰色</span> 以 host Feature <code>core.subagent-context</code> 注册 contributor（crew/app.py:607）</td>
+        <td><span class="gray">灰色</span> 暂无事件</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>3.1 其余模块（非产品 Feature 或 host 侧）</h3>
+  <table>
+    <thead><tr><th>模块</th><th>现状与证据</th></tr></thead>
+    <tbody>
+      <tr><td><code>core / host</code></td><td>保留命名 <code>core.*</code> 已在使用：host 内置 Feature ID <code>core.agent-driver</code> / <code>core.subagent-context</code> / <code>core.process-context</code> / <code>core.task-context</code> / <code>core.agent-presets</code>（crew/app.py:562,607,619,631,3760）；另有 <code>host.structured-path-context</code>、<code>gateway.session-context</code>（app.py:577,589）与 <code>product.team-driver-adapter</code>（app.py:2058）未纳入约定前缀清单（P3）。</td></tr>
+      <tr><td><code>state</code>（core）</td><td>core 表：<code>sessions</code> / <code>session_agent_config</code> / <code>channel_session_routes</code>（crew/state/session_store.py:59,80,91）、<code>workspaces</code>（workspace_store.py:58）、<code>owner_session_lease</code> / <code>owner_logout_intent</code>（active_owner.py:34-35）、<code>channel_bindings</code>（channel_bindings.py:33）、<code>plugin_preferences</code>（plugin_preferences.py:36）。</td></tr>
+      <tr><td><code>agent 压缩</code></td><td><code>compaction_summaries</code>（crew/agent/compact/store.py:52），rebuild 迁移（:68）。</td></tr>
+      <tr><td><code>security</code></td><td><code>security_rules</code>（crew/security/rule_store.py:43，含 <code>_SCHEMA_VERSION=1</code> 行级版本 :18,238）、<code>security_audit_events</code>（crew/security/audit.py:222）。<code>crew_data/</code> 与 <code>logs/</code> 在托管路径清单内（crew/security/file_policy.py:115-116），属 core 视角，非跨 Feature 读写。</td></tr>
+      <tr><td><code>notifications</code></td><td><code>notifications</code> 表（crew/notifications/store.py:38），由 app.py:499 直接装配（config.db_path），尚未 Feature 生命周期化；表名即 Feature 名、无 <code>notifications_</code> 前缀（P3 灰色）。</td></tr>
+      <tr><td><code>memory</code></td><td>独立 <code>memory.db</code>（crew/memory/simple.py:35,55）＋ owner home 下 <code>tool_memory.db</code>（crew/tools/memory_tools.py:36-42），表名 <code>memory</code> 无前缀；同语义存储双入口（P3）。</td></tr>
+      <tr><td><code>evolution</code></td><td><code>{crew_home}/evolution/</code>（logs/ + index.json + clusters.json，crew/evolution/log_store.py:25-30）；目录按名分区，符合精神。</td></tr>
+      <tr><td><code>scenarios</code></td><td>仓库内置 yaml（crew/scenarios/registry.py:36-46）＋ crew_home 根部散文件覆盖（<code>scenarios.yaml</code> 等，registry.py:51-58），文件散在 home 根而非专属目录（P3）。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. 共享底座事实（审计前提）</h2>
+  <ul>
+    <li><b>单一关系库</b>：默认 <code>db_path = crew_data/crew.db</code>（crew/state/config.py:208），相对路径统一落到 <code>{CREW_HOME}/crew_data/</code>（config.py:1850-1854）；app.py 将同一 <code>cfg.db_path</code> 注入 sessions / workspaces / cron / kanban / sites / work / notifications / external / security 等全部 Store（app.py:3619-3844）。这是跨 Feature JOIN/外键成立的前提，也是 P1-1。</li>
+    <li><b>Home 布局</b>：根目录 <code>.Crew/</code>（crew/state/home.py:42，冻结态 <code>~/.Crew</code>），owner 隔离为 <code>accounts/&lt;acct_hash&gt;/</code>（home.py:379,711-726）；<code>wiki_lib</code>、<code>sites</code>、<code>browser</code>、<code>evolution</code>、<code>task_workspaces</code> 在 owner 场景下随 owner home 派生。</li>
+    <li><b>事件出口兼容</b>：<code>feature_event</code> 信封（crew/core/envelope.py:316-341）经 <code>gateway/event_compat.py:22-31</code> 在 WS 出口翻译为旧 kind 帧；未登记的事件被丢弃并告警（event_compat.py:53-61）。</li>
+    <li><b>迁移现状</b>：全局只有 <code>migrate claim-legacy</code>（crew/cli/management.py:1188-1213），按表清单认领 legacy owner 数据（crew/state/_migration.py:15-25）；各 Store 的 schema 演进是构造器内 <code>CREATE TABLE IF NOT EXISTS</code> + <code>PRAGMA table_info</code> 列检查 + <code>ALTER TABLE</code>/<code>_new 表 rebuild</code>（如 crew/tasks/runtime.py:102-113、crew/state/session_store.py:144,184、crew/state/workspace_store.py:102、crew/state/channel_bindings.py:46、crew/agent/external/store.py:272、crew/agent/compact/store.py:68），无任何 per-feature 版本表。</li>
+  </ul>
+
+  <h2>5. Feature Event 总目录（现行登记）</h2>
+  <p>生产事件一律经 <code>ResponseChunk.feature_event()</code> / <code>feature_event_body()</code> / <code>FeatureEvent</code> 产出（crew/features/events.py:38-56 做小写与 version≥1 校验）；下表为出口 compat 登记表（crew/gateway/event_compat.py:22-31）与发射点的对照。</p>
+  <table>
+    <thead><tr><th>事件（feature.event v）</th><th>旧 kind 帧</th><th>发射点</th></tr></thead>
+    <tbody>
+      <tr><td><code>team.internal_message v1</code></td><td><code>team_internal</code></td><td>crew/team/team_manager.py:5828</td></tr>
+      <tr><td><code>wiki.cards v1</code></td><td><code>wiki_cards</code></td><td>crew/wiki/feature.py:301</td></tr>
+      <tr><td><code>wiki.changed v1</code></td><td><code>wiki_changed</code></td><td>crew/wiki/feature.py:309</td></tr>
+      <tr><td><code>wiki.ingest_progress v1</code></td><td><code>wiki_ingest_progress</code></td><td>crew/wiki/routes.py:638,679</td></tr>
+      <tr><td><code>kanban.started v1</code></td><td><code>kanban</code></td><td>crew/dynamickanban/runtime.py:197</td></tr>
+      <tr><td><code>kanban.board_changed v1</code></td><td><code>kanban</code></td><td>crew/dynamickanban/runtime.py:235,432,471,973</td></tr>
+      <tr><td><code>kanban.call_completed v1</code></td><td><code>kanban</code></td><td>crew/dynamickanban/runtime.py:618</td></tr>
+      <tr><td><code>kanban.workflow_progress v1</code></td><td><code>workflow_progress</code></td><td>crew/dynamickanban/runtime.py:1697</td></tr>
+    </tbody>
+  </table>
+
+  <h2>6. 偏差分级清单</h2>
+
+  <h3>P1 —— 阻碍未来物理拆分（3 项）</h3>
+  <table>
+    <thead><tr><th>#</th><th>偏差</th><th>证据</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="p1">P1-1</span></td>
+        <td>全部关系型 Feature 共用单一 <code>crew.db</code></td>
+        <td>crew/state/config.py:208；crew/app.py:3619-3844（同一 <code>cfg.db_path</code> 注入所有 Store）</td>
+        <td>拆库（db-per-feature）前，任何 Feature 的表都无法独立搬迁；这是下述 P1-2 成立的前提。拆分时需按表前缀归属迁移到各自库文件。</td>
+      </tr>
+      <tr>
+        <td><span class="p1">P1-2</span></td>
+        <td>team 的表外键/JOIN 引用 external-agents 的表</td>
+        <td>crew/team/external_store.py:33（<code>leader_agent_id → external_agent(id)</code>）、:44-45（member FK）、:252 与 :293（LEFT JOIN <code>external_agent</code>）</td>
+        <td>唯一一组跨 Feature 外键 + 跨 Feature JOIN。违反"跨 Feature 不建外键"；拆库后直接断裂。</td>
+      </tr>
+      <tr>
+        <td><span class="p1">P1-3</span></td>
+        <td>core 状态模块反向导入 Feature 代码</td>
+        <td>crew/state/config.py:22（<code>from crew.wiki.config import WikiConfig</code>，:335 字段、:1637 加载）</td>
+        <td>wiki 物理拆出后 host 无法构建（config 装载硬依赖 wiki 模块）。同型但较轻：config.py:18 导入 <code>crew.browser.types.BrowserConfig</code>（仅类型契约，列 P2-7）。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>P2 —— 命名/结构不规范，可渐进修复（7 项）</h3>
+  <table>
+    <thead><tr><th>#</th><th>偏差</th><th>证据</th></tr></thead>
+    <tbody>
+      <tr><td><span class="p2">P2-1</span></td><td>配置节均为顶层节/平铺字段，无 <code>features.&lt;name&gt;.*</code>（wiki/cron/team/tasks/external_agents/channels/subagent/platforms 及 <code>runtime.dk_*</code>、<code>tools.browser</code>）</td><td>crew/state/config.py:1476-1743（load_config 各节）、:214-217（dk_*）、:1629-1631（tools.browser）；config/config.yaml.example:95-241</td></tr>
+      <tr><td><span class="p2">P2-2</span></td><td>ServiceKey 无主版本（类型无 version 字段），且 8 个 key 均裸名</td><td>crew/features/services.py:33-42；crew/wiki/service.py:713、crew/team/feature.py:33、crew/work/service.py:31、crew/channels/feature.py:28、crew/dynamickanban/feature.py:24、crew/agent/external/feature.py:37-43</td></tr>
+      <tr><td><span class="p2">P2-3</span></td><td>ServiceKey 字面量双源：app.py 重复定义 <code>"knowledge"</code>/<code>"channels"</code>，未复用 Feature 常量</td><td>crew/app.py:441-442</td></tr>
+      <tr><td><span class="p2">P2-4</span></td><td>无 per-feature migrate 入口与版本表；schema 演进散在 Store 构造器（ALTER/rebuild），全局仅 <code>migrate claim-legacy</code></td><td>crew/cli/management.py:1188-1213；crew/state/_migration.py:15-25；§4 所列各 Store</td></tr>
+      <tr><td><span class="p2">P2-5</span></td><td>表前缀离群/冲突：<code>runtime_tasks</code>（tasks）、<code>notifications</code>、<code>memory</code>、<code>inspiration_annotations</code>（sites）；team 复用 <code>external_</code> 前缀（<code>external_team*</code>）与 external-agents 命名空间重叠</td><td>crew/tasks/runtime.py:67；crew/notifications/store.py:38；crew/memory/simple.py:55；crew/sites/store.py:95；crew/team/external_store.py:27,39</td></tr>
+      <tr><td><span class="p2">P2-6</span></td><td>kanban 事件命名空间与 Feature ID 尾段不一致（<code>kanban.*</code> vs <code>product.dynamic-kanban</code> / <code>dynamic-kanban</code>）</td><td>crew/dynamickanban/runtime.py:197 等；feature.py:22,24</td></tr>
+      <tr><td><span class="p2">P2-7</span></td><td>channels 的绑定/路由表由 core state 持有（归属与命名空间错位）；config 模块导入 browser 类型</td><td>crew/state/channel_bindings.py:33；crew/state/session_store.py:91；crew/state/config.py:18</td></tr>
+    </tbody>
+  </table>
+
+  <h3>P3 —— 纯文档性 / 低风险（4 项）</h3>
+  <table>
+    <thead><tr><th>#</th><th>偏差</th><th>证据</th></tr></thead>
+    <tbody>
+      <tr><td><span class="p3">P3-1</span></td><td><code>subagent:</code> 顶层节在 example 中有文档但 loader 从不读取（死配置，用户改了无效）</td><td>config/config.yaml.example:109-113；crew/state/config.py（无 <code>data.get("subagent")</code>）</td></tr>
+      <tr><td><span class="p3">P3-2</span></td><td><code>ensure_crew_home</code> 每次创建 <code>teams/</code> 目录但无任何读写（死目录）</td><td>crew/state/home.py:660</td></tr>
+      <tr><td><span class="p3">P3-3</span></td><td>host 侧 scope id 前缀（<code>host.*</code> / <code>gateway.*</code> / <code>product.team-driver-adapter</code>）未纳入约定前缀清单</td><td>crew/app.py:577,589,2058</td></tr>
+      <tr><td><span class="p3">P3-4</span></td><td>仓库根 <code>crew_data/</code> 为历史运行产物（默认 home 已是 <code>.Crew/</code>，且 .gitignore 已忽略）；memory 双入口（<code>memory.db</code> 与 <code>tool_memory.db</code>）</td><td>.gitignore:13-14；crew/memory/simple.py:35；crew/tools/memory_tools.py:36</td></tr>
+    </tbody>
+  </table>
+
+  <h2>7. 修复建议（供后续切片逐项处理，本切片未改代码）</h2>
+  <table>
+    <thead><tr><th>优先级</th><th>建议</th><th>对应偏差</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>1</td>
+        <td><b>解除 team → external_agent 数据耦合</b>：去掉两个外键与两处 JOIN，改为经 <code>ExternalAgentCatalog</code> Service 查询，或在 <code>external_team_member</code> 内冗余 <code>agent_name/agent_provider</code> 快照字段（外部 Agent 改名不影响 team 历史）。</td>
+        <td>P1-2</td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td><b>消除 state → wiki 的模块反向依赖</b>：Config 对 wiki 节改为原始 dict 透传（与 <code>team_config</code> 同法），<code>WikiConfig.from_raw</code> 的解析移回 <code>crew/wiki/</code> 内在装配时执行。</td>
+        <td>P1-3</td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td><b>ServiceKey 加主版本并单一事实源</b>：<code>ServiceKey(name, version=1)</code>（默认 v1 保持兼容），8 个 key 一次性带上版本；删除 app.py:441-442 的字面量，改 import Feature 常量。</td>
+        <td>P2-2、P2-3</td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td><b>建立 per-feature schema 版本底座</b>：提供共享的 <code>&lt;prefix&gt;_schema_version</code> 表助手 + <code>ace &lt;feature&gt; migrate</code> 命令骨架；先把现有 rebuild/ALTER 逻辑挂到版本号下，为 P1-1 拆库铺路。</td>
+        <td>P2-4、P1-1</td>
+      </tr>
+      <tr>
+        <td>5</td>
+        <td><b>配置节迁移到 <code>features.*</code></b>：分两步——先让 loader 同时读旧节与 <code>features.&lt;name&gt;</code>（新节优先），example 给出目标形态；再按 Feature 逐个切换并删除旧节。</td>
+        <td>P2-1、P3-1</td>
+      </tr>
+      <tr>
+        <td>6</td>
+        <td><b>表前缀归一</b>：<code>runtime_tasks → tasks_*</code>（或 Feature 更名）、<code>inspiration_annotations → site_inspiration_annotations</code>、notifications/memory 表加前缀；team 的 <code>external_team*</code> 更名 <code>team_external_*</code>。均需带兼容视图或迁移。</td>
+        <td>P2-5</td>
+      </tr>
+      <tr>
+        <td>7</td>
+        <td><b>事件命名空间决策</b>：正式确认 <code>kanban</code> 为已发布契约（文档注明与 Feature ID 尾段的映射），或安排一次带 compat 的更名；新 Feature 一律取 Feature ID 尾段。</td>
+        <td>P2-6</td>
+      </tr>
+      <tr>
+        <td>8</td>
+        <td><b>清理项</b>：删除 <code>teams/</code> 死目录创建；host scope 前缀清单写入约定页；channels 绑定/路由表随生命周期化迁回 Feature 自己的 Store。</td>
+        <td>P3-2、P3-3、P2-7</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>8. 主审复核（2026-09-11）</h2>
+  <p>主 agent 对本审计做了独立抽查，全部证实：P1-2 的两处外键（<code>external_store.py:33,45</code>）、跨 Feature LEFT JOIN（:252）与存在性检查（:285）；P1-3 的 <code>crew/state/config.py:22</code> 反向导入。复核另发现一处审计未列的更深耦合：team 兼容门面在删除路径直接 DELETE external-agents 的三张表（<code>external_store.py:300,304,308</code>），属 P1-2 同一修复面（去直写、改经 Catalog Service），修复切片需一并覆盖。</p>
+
+  <h2>9. 变更记录</h2>
+  <table>
+    <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
+    <tbody>
+      <tr><td>2026-09-11</td><td>初始建立：§12.5 约定正式落地 + 六类资源全量只读审计（基线 refactor/plugin-architecture-stage-0）</td><td>仅文档，无生产代码改动</td></tr>
+    </tbody>
+  </table>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · 约定来源：<a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划 §12.5</a></div>
+</div>
+</body>
+</html>
