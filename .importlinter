@@ -60,3 +60,12 @@ forbidden_modules =
     crew.team
     crew.wiki
 allow_indirect_imports = True
+
+[importlinter:contract:state-wiki-boundary]
+name = State must not add direct Wiki dependencies
+type = forbidden
+source_modules =
+    crew.state
+forbidden_modules =
+    crew.wiki
+allow_indirect_imports = True

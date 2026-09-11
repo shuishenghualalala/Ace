@@ -3722,15 +3722,17 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     # 与后台任务。Bundle 的兼容模式在同步 build_app 中立即激活，使旧 CLI、
     # ASGI transport 和 Work 暂存适配器仍能读取动态兼容视图。
     from crew.wiki import build_wiki_feature
+    from crew.wiki.config import WikiConfig
 
-    wiki_storage_root = cfg.wiki.storage.resolved_root() if cfg.wiki else None
+    wiki_feature_config = WikiConfig.from_raw(cfg.wiki_config)
+    wiki_storage_root = wiki_feature_config.storage.resolved_root()
     if wiki_storage_root is not None:
         log.info("Wiki 独立存储根目录: %s", wiki_storage_root)
     wiki_feature = build_wiki_feature(
         app,
         registry,
         provider=provider,
-        config=cfg.wiki,
+        config=wiki_feature_config,
         storage_root=wiki_storage_root,
         session_store=session_store,
         workspace_store=workspace_store,

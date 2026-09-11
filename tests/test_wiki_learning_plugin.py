@@ -12,6 +12,7 @@ from crew.core.types import Message, ToolCall
 from crew.plugins.manager import PluginManager
 from crew.state.config import Config
 from crew.tools.registry import Registry
+from crew.wiki.config import WikiConfig
 from crew.wiki.schemas import WikiPage
 from crew.wiki.store._filesystem import FileSystemWikiStore
 from plugins.wiki_learning.store import WikiLearningStore
@@ -35,14 +36,16 @@ def _load_plugin(
     tmp_path: Path,
 ) -> tuple[Registry, PluginManager, Config, FileSystemWikiStore, str]:
     config = Config(db_path=str(tmp_path / "crew.db"))
-    config.wiki.storage.root = str(tmp_path / "wiki")
+    config.wiki_config = {"storage": {"root": str(tmp_path / "wiki")}}
     registry = Registry()
     manager = PluginManager(registry=registry, services={"config": config})
     plugin_dir = Path(__file__).parents[1] / "plugins" / "wiki_learning"
     manifest = manager._read_manifest(plugin_dir, key="wiki_learning", source="bundled")
     assert manifest is not None
     manager._load_plugin(manifest)
-    wiki_store = FileSystemWikiStore(storage_root=config.wiki.storage.resolved_root())
+    wiki_store = FileSystemWikiStore(
+        storage_root=WikiConfig.from_raw(config.wiki_config).storage.resolved_root()
+    )
     page = wiki_store.save_page(
         WikiPage(
             id="top_python",

@@ -19,7 +19,6 @@ from crew.browser.types import BrowserConfig
 from crew.security.outbound import NetworkConfig
 from crew.state.access_control import AccessControlConfig
 from crew.state.credentials import read_stored_key
-from crew.wiki.config import WikiConfig
 
 from crew.state.logging import get_logger
 
@@ -332,7 +331,11 @@ class Config:
     session_idle_timeout: int = 0      # 会话空闲超时（分钟），0=不自动过期
 
     # --- wiki ---
-    wiki: WikiConfig = field(default_factory=WikiConfig)
+    # Feature 原始配置透传（与 team_config 同一模式）：core 只保存 config.yaml
+    # 的 wiki 节，WikiConfig 的解析与默认值由 wiki Feature 侧负责。
+    wiki_config: dict[str, Any] = field(default_factory=dict)
+    # /api/config 能力上报用的轻量开关（取自 wiki 节的 enabled，默认开启）。
+    wiki_enabled: bool = True
 
     access_control: AccessControlConfig = field(default_factory=AccessControlConfig)
     browser: BrowserConfig = field(default_factory=_default_browser_config)
@@ -1043,6 +1046,19 @@ def _as_bool(value: Any, default: bool) -> bool:
     return bool(value)
 
 
+def _as_flag(value: Any, default: bool) -> bool:
+    """宽松开关解析：bool 直取；字符串只认常见开/关字面量；其余一律回退默认值。
+
+    与各 Feature config 的 from_raw 布尔规则一致（非 bool/str 的值不猜测，
+    保持默认），避免 core 侧轻量字段与 Feature 侧解析结果分叉。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
 def _model_capabilities(raw: dict[str, Any]) -> list[str]:
     value = raw.get("capabilities")
     if isinstance(value, list):
@@ -1634,7 +1650,11 @@ def load_config(config_path: str | Path | None = None) -> Config:
         if isinstance(session_cfg, dict) and session_cfg:
             cfg.session_idle_timeout = int(session_cfg.get("idle_timeout_minutes", cfg.session_idle_timeout))
 
-        cfg.wiki = WikiConfig.from_raw(data.get("wiki", {}))
+        wiki_raw = data.get("wiki") or {}
+        if not isinstance(wiki_raw, dict):
+            wiki_raw = {}
+        cfg.wiki_config = dict(wiki_raw)
+        cfg.wiki_enabled = _as_flag(wiki_raw.get("enabled"), cfg.wiki_enabled)
         cfg.network = NetworkConfig.from_raw(data.get("network", {}))
         # 把 config 的 network 段注入 outbound 作为进程级默认代理，
         # 供 web_search/web_extract/Wiki 等未显式传参的调用方使用。

@@ -121,7 +121,7 @@ class _DrainAfterAcquirePlugins(_RegistryPlugins):
 def _capture_crew(registry):
     return SimpleNamespace(
         config=SimpleNamespace(
-            wiki=SimpleNamespace(enabled=True, capture_attachments=True),
+            wiki_config={"enabled": True, "capture_attachments": True},
         ),
         plugins=_RegistryPlugins(registry),
         knowledge_service=None,
@@ -305,7 +305,8 @@ async def test_upload_captures_attachment_into_default_wiki(crew_home, auth_head
 async def test_upload_skips_wiki_capture_when_disabled(crew_home, auth_headers):
     """wiki.capture_attachments=false 时上传行为与现状一致，不写入知识库。"""
     crew = build_app(enable_team=False)
-    crew.config.wiki.capture_attachments = False
+    # 上传捕获入口在请求时才解析 wiki 配置，build 后改原始配置节同样生效
+    crew.config.wiki_config = {"capture_attachments": False}
     app = create_app(crew)
     content = base64.b64encode(b"no capture").decode()
     transport = ASGITransport(app=app)

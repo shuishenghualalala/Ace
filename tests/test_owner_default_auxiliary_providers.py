@@ -10,7 +10,6 @@ from crew.app import build_app
 from crew.core.mocks import FakeProvider
 from crew.core.runctx import current_provider
 from crew.state.config import Config, ModelProfile
-from crew.wiki.config import WikiConfig
 
 
 @pytest.mark.asyncio
@@ -103,7 +102,7 @@ def test_explicit_wiki_model_overrides_current_session_provider(tmp_path, monkey
     }
     config.active_model_id = "default"
     config.default_model_id = "default"
-    config.wiki = WikiConfig(model="wiki-fast")
+    config.wiki_config = {"model": "wiki-fast"}
     app_provider = FakeProvider()
     wiki_provider = FakeProvider()
     session_provider = FakeProvider()

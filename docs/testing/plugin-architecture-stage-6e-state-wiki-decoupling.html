@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6E · state→wiki 反向依赖消除</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6E · state→wiki 反向依赖消除</h1>
+<p>2026-09-11。命名空间审计 P1-3 修复：core 状态模块不再导入 wiki Feature 代码，wiki 物理拆分的前置编译障碍解除。基线提交 70e1478；已验收通过并随本记录提交。</p>
+<h2>改动</h2>
+<ul>
+<li><code>Config.wiki: WikiConfig</code> → <code>wiki_config: dict</code> 原始透传（与 <code>team_config</code> 同一模式）+ 轻量 <code>wiki_enabled: bool</code>（新 <code>_as_flag</code> 与 <code>WikiConfig._bool</code> 规则逐行一致，含非 bool/str 回退默认，避免与既有 <code>_as_bool</code> 的 int 语义分叉）。</li>
+<li>解析移回 wiki 侧：<code>build_app()</code> 装配时 <code>WikiConfig.from_raw(cfg.wiki_config)</code> 一次（惰性导入）；<code>gateway/routers/misc.py</code> 上传捕获路径与 <code>plugins/wiki_learning</code> 注册处各自 <code>from_raw</code>（保留"capture 时二次读取"的新鲜度语义）。</li>
+<li><code>/api/config</code> 改读 <code>wiki_enabled</code>，响应 JSON 形状不变。</li>
+<li><code>from_raw({})</code> 与默认构造逐字段等价已断言验证；6 个测试文件随新配置形状更新。</li>
+<li>.importlinter 新增第 7 条契约 <code>state-wiki-boundary</code>（crew.state 禁止导入 crew.wiki）。</li>
+</ul>
+<h2>验证记录（子 agent 执行后主 agent 复跑）</h2>
+<table><tr><th>命令</th><th>结果</th></tr>
+<tr><td><code>pytest tests/wiki tests/gateway/test_wiki_router.py tests/test_wiki_learning_plugin.py tests/test_owner_default_auxiliary_providers.py tests/test_work_cli_lifecycle.py -q</code></td><td>446 passed</td></tr>
+<tr><td><code>pytest tests/ -q -k "config"</code></td><td>152 passed, 1 skipped</td></tr>
+<tr><td><code>lint-imports</code></td><td>Contracts: 7 kept, 0 broken</td></tr>
+<tr><td><code>ruff check crew plugins tests</code> / <code>compileall -q crew plugins</code></td><td>全部通过</td></tr>
+<tr><td>内联等价性脚本（默认值 / yaml 加载 / <code>_as_flag</code> 全输入类对齐）</td><td>ALL PARITY CHECKS PASSED</td></tr>
+</table>
+<h2>语义边界与已知事项</h2>
+<ul>
+<li>运行时可变语义微变：旧实现 Config.wiki 与 Feature 共享实例、build 后原地修改可传播；现 Feature 持有 build 时解析的实例。生产代码无运行时修改点，misc.py 捕获入口保留每请求重解析。</li>
+<li>本机 <code>config/config.yaml</code> 的真实配置（email 鉴权、真实模型）导致 test_upload.py 4 个完整鉴权用例本机 401 且全量超慢——属既有环境失败，由存量失败修复切片处理，与本切片无关（改动前后同败已复核）。</li>
+<li>后续 crew.state→browser/team 反向导入收窄时，直接向 <code>state-wiki-boundary</code> 的 forbidden_modules 追加即可。</li>
+</ul>
+<p><a href="../backend/modules/naming-audit.html">命名空间审计（P1-3）</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

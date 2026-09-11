@@ -149,7 +149,7 @@ def config_body(
         "model_profiles": profiles,
         "is_gateway_admin": is_gateway_admin,
         "wiki": {
-            "enabled": crew.config.wiki.enabled,
+            "enabled": crew.config.wiki_enabled,
         },
         "external_agents": {
             "enabled": bool(getattr(crew.config, "external_agents_enabled", True)),

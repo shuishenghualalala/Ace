@@ -8,6 +8,7 @@ from typing import Any
 
 from crew.core.runctx import current_owner_account_id
 from crew.wiki._utils import is_wiki_agent_session
+from crew.wiki.config import WikiConfig
 from crew.wiki.store._filesystem import FileSystemWikiStore
 from crew.wiki.store._ids import normalize_kb_id
 
@@ -35,7 +36,8 @@ def register(ctx: Any) -> None:
     config = ctx.resolve_service("config")
 
     store = WikiLearningStore(config.db_path, wal_enabled=config.sqlite_wal)
-    wiki_store = FileSystemWikiStore(storage_root=config.wiki.storage.resolved_root())
+    wiki_config = WikiConfig.from_raw(config.wiki_config)
+    wiki_store = FileSystemWikiStore(storage_root=wiki_config.storage.resolved_root())
     tools = WikiLearningTools(store, wiki_store)
     skill_path = Path(__file__).parent / "skills" / "crew-wiki-learning-coach" / "SKILL.md"
     skill_context = _skill_body(skill_path)

@@ -25,7 +25,6 @@ from crew.features import (
 )
 from crew.work.service import WORK_SERVICE_KEY
 from crew.state.config import Config
-from crew.wiki.config import WikiConfig, WikiStorageConfig
 
 
 OWNER = "work-cli-owner"
@@ -165,10 +164,10 @@ def test_build_app_plugin_manager_argparse_handler_uses_registry_and_fails_close
         memory_db_path=str(tmp_path / "memory.db"),
         cron_enabled=False,
         plugins_enabled=[],
-        wiki=WikiConfig(
-            enabled=False,
-            storage=WikiStorageConfig(root=str(tmp_path / "wiki")),
-        ),
+        wiki_config={
+            "enabled": False,
+            "storage": {"root": str(tmp_path / "wiki")},
+        },
     )
     app = build_app(config=config, enable_team=False)
     ctx = CliContext(owner=OWNER, _app=app)

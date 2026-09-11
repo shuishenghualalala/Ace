@@ -25,6 +25,7 @@ from crew.gateway.instance_auth import (
     is_valid_gateway_instance_challenge,
 )
 from crew.state.logging import get_logger
+from crew.wiki.config import WikiConfig
 from crew.wiki.service import KNOWLEDGE_SERVICE_KEY, KnowledgeService
 
 log = get_logger("gateway.routers.misc")
@@ -91,16 +92,20 @@ def create_misc_router(crew) -> APIRouter:
         kb_id: str = "",
     ) -> None:
         """上传成功后把附件后台收入对应 wiki 知识库（wiki.capture_attachments 控制）。"""
-        wiki_cfg = getattr(getattr(crew, "config", None), "wiki", None)
-        if wiki_cfg is None:
+        wiki_raw = getattr(getattr(crew, "config", None), "wiki_config", None)
+        if wiki_raw is None:
             return
+        wiki_cfg = WikiConfig.from_raw(wiki_raw)
         if not wiki_cfg.enabled or not wiki_cfg.capture_attachments:
             return
         owner = account_from_request(request).owner_account_id
 
         async def _capture() -> None:
-            current_cfg = getattr(getattr(crew, "config", None), "wiki", None)
-            if current_cfg is None or not current_cfg.enabled or not current_cfg.capture_attachments:
+            current_raw = getattr(getattr(crew, "config", None), "wiki_config", None)
+            if current_raw is None:
+                return
+            current_cfg = WikiConfig.from_raw(current_raw)
+            if not current_cfg.enabled or not current_cfg.capture_attachments:
                 return
             plugins = getattr(crew, "plugins", None)
             acquire = getattr(plugins, "acquire_service_lease", None)

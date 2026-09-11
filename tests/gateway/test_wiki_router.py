@@ -24,18 +24,19 @@ from crew.wiki.service import KNOWLEDGE_SERVICE_KEY
 OWNER = "A:uid-a"
 
 
-def _client(tmp_path):
+def _client(tmp_path, wiki_config=None):
     os.environ["CREW_HOME"] = str(tmp_path / ".crew")
     crew_home = tmp_path / ".crew"
-    app = build_app(
-        config=Config(
-            api_key="",
-            db_path=str(crew_home / "crew_data" / "crew.db"),
-            memory_db_path=str(crew_home / "crew_data" / "memory.db"),
-            log_level="INFO",
-        ),
-        enable_team=False,
+    config = Config(
+        api_key="",
+        db_path=str(crew_home / "crew_data" / "crew.db"),
+        memory_db_path=str(crew_home / "crew_data" / "memory.db"),
+        log_level="INFO",
     )
+    if wiki_config is not None:
+        # wiki 配置在 build_app 装配 Feature 时解析，必须在构建前传入
+        config.wiki_config = wiki_config
+    app = build_app(config=config, enable_team=False)
     return TestClient(create_app(crew=app)), app
 
 
@@ -1435,9 +1436,10 @@ def test_wiki_upload_video_returns_needs_confirmation(tmp_path, auth_headers):
 
 def test_wiki_upload_video_auto_ingests_when_configured(tmp_path, auth_headers):
     """配置 auto_video + video_upload_confirmed 后，前端上传视频自动 ingest。"""
-    client, app = _client(tmp_path)
-    app.config.wiki.multimodal.auto_video = True
-    app.config.wiki.multimodal.video_upload_confirmed = True
+    client, app = _client(
+        tmp_path,
+        wiki_config={"multimodal": {"auto_video": True, "video_upload_confirmed": True}},
+    )
 
     fake_result = MagicMock()
     fake_result.pages = [MagicMock(to_dict=lambda: {"title": "狗", "page_type": "entity"})]
@@ -1464,8 +1466,7 @@ def test_wiki_upload_video_auto_ingests_when_configured(tmp_path, auth_headers):
 
 def test_wiki_upload_multimodal_disabled_rejects_media(tmp_path, auth_headers):
     """多模态总开关关闭时，上传图片/视频被拒绝。"""
-    client, app = _client(tmp_path)
-    app.config.wiki.multimodal.enabled = False
+    client, app = _client(tmp_path, wiki_config={"multimodal": {"enabled": False}})
 
     res = client.post(
         "/api/wiki/upload",
