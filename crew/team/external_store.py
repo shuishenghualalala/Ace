@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from crew.agent.external.catalog import (
     CREW_BUILTIN_AGENT_ID,
-    is_builtin_agent,
+    ExternalAgentLifecycle,
     builtin_agent_public,
+    is_builtin_agent,
 )
 from crew.agent.external.capabilities import normalize_capabilities
 from crew.agent.external.store import ExternalAgentStore, _now
@@ -17,34 +19,85 @@ from crew.state._migration import backfill_empty_owner_rows
 from crew.team.roles import infer_role_key, role_preset
 
 
+class _InheritedLifecycle:
+    """Embedded-mode view of the external lifecycle served by the base store.
+
+    Cross-feature operations always go through the ``ExternalAgentLifecycle``
+    surface. When no provider is injected the facade itself still owns the
+    catalog implementation, so this view dispatches to the inherited base
+    methods and keeps the team-side ``delete_agent`` override out of the
+    external deletion path.
+    """
+
+    def __init__(self, store: ExternalAgentStore) -> None:
+        self._store = store
+
+    def get_agent(self, agent_id: str, *, owner_account_id: str) -> dict[str, Any]:
+        return self._store.get_agent(agent_id, owner_account_id=owner_account_id)
+
+    def delete_agent(self, agent_id: str, *, owner_account_id: str) -> None:
+        ExternalAgentStore.delete_agent(self._store, agent_id, owner_account_id=owner_account_id)
+
+
 class TeamExternalAgentStore(ExternalAgentStore):
     """Compatibility facade that adds Team-owned tables and operations."""
 
+    # 命名空间约定：跨 Feature 不建外键。leader_agent_id / agent_id 只是普通
+    # 字符串引用；成员展示信息走写入时快照列，读取不再 JOIN 外援表。
+    _EXTERNAL_TEAM_DDL = """
+        CREATE TABLE IF NOT EXISTS {table} (
+          id TEXT PRIMARY KEY, owner_account_id TEXT NOT NULL DEFAULT '',
+          name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+          leader_agent_id TEXT NOT NULL, instructions TEXT NOT NULL DEFAULT '',
+          team_spec_json TEXT NOT NULL DEFAULT '{{}}', formation_plan_json TEXT NOT NULL DEFAULT '{{}}',
+          archived_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        )
+    """
+
+    _EXTERNAL_TEAM_MEMBER_DDL = """
+        CREATE TABLE IF NOT EXISTS {table} (
+          id TEXT PRIMARY KEY, team_id TEXT NOT NULL, agent_id TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT '', role_key TEXT NOT NULL DEFAULT '',
+          role_label TEXT NOT NULL DEFAULT '', capabilities_json TEXT NOT NULL DEFAULT '[]',
+          workflow_lane TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL, agent_name TEXT NOT NULL DEFAULT '',
+          agent_provider TEXT NOT NULL DEFAULT '',
+          FOREIGN KEY(team_id) REFERENCES external_team(id), UNIQUE(team_id, agent_id)
+        )
+    """
+
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        external_catalog_provider: Callable[[], ExternalAgentLifecycle | None] | None = None,
+    ) -> None:
+        super().__init__(db_path)
+        self._external_catalog_provider = external_catalog_provider
+
+    def _external_lifecycle(self) -> ExternalAgentLifecycle:
+        """Resolve the external-agent lifecycle for cross-feature operations.
+
+        Without an injected provider the facade keeps its embedded
+        compatibility role and serves the lifecycle from the inherited catalog
+        implementation. With a provider, resolution follows the active external
+        feature generation; an inactive external feature fails closed instead
+        of falling back to raw SQL against the external tables.
+        """
+        if self._external_catalog_provider is None:
+            return _InheritedLifecycle(self)
+        catalog = self._external_catalog_provider()
+        if catalog is None:
+            raise RuntimeError("外部智能体服务未激活")
+        return catalog
+
     def _create_schema(self, conn) -> None:
         super()._create_schema(conn)
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS external_team (
-              id TEXT PRIMARY KEY, owner_account_id TEXT NOT NULL DEFAULT '',
-              name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
-              leader_agent_id TEXT NOT NULL, instructions TEXT NOT NULL DEFAULT '',
-              team_spec_json TEXT NOT NULL DEFAULT '{}', formation_plan_json TEXT NOT NULL DEFAULT '{}',
-              archived_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-              FOREIGN KEY(leader_agent_id) REFERENCES external_agent(id)
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS external_team_member (
-              id TEXT PRIMARY KEY, team_id TEXT NOT NULL, agent_id TEXT NOT NULL,
-              role TEXT NOT NULL DEFAULT '', role_key TEXT NOT NULL DEFAULT '',
-              role_label TEXT NOT NULL DEFAULT '', capabilities_json TEXT NOT NULL DEFAULT '[]',
-              workflow_lane TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0,
-              created_at TEXT NOT NULL, FOREIGN KEY(team_id) REFERENCES external_team(id),
-              FOREIGN KEY(agent_id) REFERENCES external_agent(id), UNIQUE(team_id, agent_id)
-            )
-            """
+        conn.execute(self._EXTERNAL_TEAM_DDL.format(table="external_team"))
+        conn.execute(self._EXTERNAL_TEAM_MEMBER_DDL.format(table="external_team_member"))
+        self._drop_cross_feature_foreign_keys(conn, "external_team", self._EXTERNAL_TEAM_DDL)
+        self._drop_cross_feature_foreign_keys(
+            conn, "external_team_member", self._EXTERNAL_TEAM_MEMBER_DDL
         )
         self._ensure_column(conn, "external_team", "owner_account_id", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column(conn, "external_team", "archived_at", "TEXT")
@@ -62,11 +115,82 @@ class TeamExternalAgentStore(ExternalAgentStore):
         self._ensure_column(
             conn, "external_team_member", "workflow_lane", "TEXT NOT NULL DEFAULT ''"
         )
+        self._ensure_column(conn, "external_team_member", "agent_name", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column(
+            conn, "external_team_member", "agent_provider", "TEXT NOT NULL DEFAULT ''"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_external_team_owner ON external_team(owner_account_id, archived_at, created_at)"
         )
         backfill_empty_owner_rows(conn, ["external_team"])
+        self._backfill_member_agent_snapshots(conn)
         self._migrate_embedded_formation_plans(conn)
+
+    @staticmethod
+    def _drop_cross_feature_foreign_keys(conn, table: str, ddl_template: str) -> bool:
+        """Rebuild ``table`` without foreign keys into the external namespace.
+
+        ``leader_agent_id`` and ``agent_id`` stay plain string references per
+        the namespace rules. The rebuild follows the repository's create, copy,
+        drop and rename migration shape, copies the intersection of old and new
+        columns, and is idempotent.
+        """
+        references = {
+            str(row["table"])
+            for row in conn.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+        }
+        if "external_agent" not in references:
+            return False
+        conn.execute(f"DROP TABLE IF EXISTS {table}_new")
+        conn.execute(ddl_template.format(table=f"{table}_new"))
+        old_columns = [
+            str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        ]
+        new_columns = {
+            str(row["name"])
+            for row in conn.execute(f"PRAGMA table_info({table}_new)").fetchall()
+        }
+        shared = ", ".join(name for name in old_columns if name in new_columns)
+        conn.execute(f"INSERT INTO {table}_new ({shared}) SELECT {shared} FROM {table}")
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+        return True
+
+    @staticmethod
+    def _backfill_member_agent_snapshots(conn) -> None:
+        """One-time backfill of member name/provider snapshots from the catalog.
+
+        This is the only place team persistence still reads external_agent
+        rows: legacy members with empty snapshots are resolved through the
+        same owner-scoped lookup the removed LEFT JOIN used. Rows created
+        after this migration carry write-time snapshots and stay untouched.
+        """
+        owners = conn.execute(
+            "SELECT DISTINCT owner_account_id FROM external_team"
+        ).fetchall()
+        for owner_row in owners:
+            owner = str(owner_row["owner_account_id"] or "")
+            conn.execute(
+                """
+                UPDATE external_team_member
+                SET agent_name = COALESCE((
+                      SELECT ea.name FROM external_agent ea
+                      WHERE ea.id = external_team_member.agent_id
+                        AND ea.owner_account_id = ?
+                    ), ''),
+                    agent_provider = COALESCE((
+                      SELECT ea.provider FROM external_agent ea
+                      WHERE ea.id = external_team_member.agent_id
+                        AND ea.owner_account_id = ?
+                    ), '')
+                WHERE agent_name = ''
+                  AND agent_provider = ''
+                  AND team_id IN (
+                    SELECT id FROM external_team WHERE owner_account_id = ?
+                  )
+                """,
+                (owner, owner, owner),
+            )
 
     @staticmethod
     def _migrate_embedded_formation_plans(conn) -> None:
@@ -170,16 +294,30 @@ class TeamExternalAgentStore(ExternalAgentStore):
         team_spec: dict[str, Any] | None = None,
         formation_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        lifecycle = self._external_lifecycle()
+        snapshots: dict[str, tuple[str, str]] = {}
+
+        def agent_snapshot(agent_id: str) -> tuple[str, str]:
+            """Resolve name/provider through the catalog; unknown ids raise KeyError."""
+            cached = snapshots.get(agent_id)
+            if cached is None:
+                if is_builtin_agent(agent_id):
+                    builtin = builtin_agent_public()
+                    cached = (str(builtin["name"]), str(builtin["provider"]))
+                else:
+                    agent = lifecycle.get_agent(agent_id, owner_account_id=owner_account_id)
+                    cached = (str(agent.get("name") or ""), str(agent.get("provider") or ""))
+                snapshots[agent_id] = cached
+            return cached
+
         leader_agent_id = str(leader_agent_id or "").strip() or CREW_BUILTIN_AGENT_ID
-        if not is_builtin_agent(leader_agent_id):
-            self.get_agent(leader_agent_id, owner_account_id=owner_account_id)
+        agent_snapshot(leader_agent_id)
         rows, seen = [], set()
         for member in members:
             agent_id = str(member.get("agent_id") or "").strip()
             if not agent_id or agent_id in seen:
                 continue
-            if not is_builtin_agent(agent_id):
-                self.get_agent(agent_id, owner_account_id=owner_account_id)
+            agent_snapshot(agent_id)
             seen.add(agent_id)
             rows.append(dict(member, agent_id=agent_id))
         if leader_agent_id not in seen:
@@ -203,6 +341,7 @@ class TeamExternalAgentStore(ExternalAgentStore):
             )
             for index, member in enumerate(rows):
                 agent_id = member["agent_id"]
+                agent_name, agent_provider = agent_snapshot(agent_id)
                 role_key = str(member.get("role_key") or "") or infer_role_key(
                     str(member.get("role") or ""), is_leader=agent_id == leader_agent_id
                 )
@@ -214,7 +353,7 @@ class TeamExternalAgentStore(ExternalAgentStore):
                     or []
                 )
                 conn.execute(
-                    "INSERT OR REPLACE INTO external_team_member (id, team_id, agent_id, role, role_key, role_label, capabilities_json, workflow_lane, sort_order, created_at) VALUES (COALESCE((SELECT id FROM external_team_member WHERE team_id = ? AND agent_id = ?), ?), ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO external_team_member (id, team_id, agent_id, role, role_key, role_label, capabilities_json, workflow_lane, sort_order, created_at, agent_name, agent_provider) VALUES (COALESCE((SELECT id FROM external_team_member WHERE team_id = ? AND agent_id = ?), ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         team_id,
                         agent_id,
@@ -228,6 +367,8 @@ class TeamExternalAgentStore(ExternalAgentStore):
                         str(member.get("workflow_lane") or preset.get("workflow_lane") or ""),
                         int(member.get("sort_order", index) or index),
                         now,
+                        agent_name,
+                        agent_provider,
                     ),
                 )
         return self.get_team(team_id, owner_account_id=owner_account_id)
@@ -249,8 +390,8 @@ class TeamExternalAgentStore(ExternalAgentStore):
             if row is None:
                 raise KeyError(team_id)
             member_rows = conn.execute(
-                "SELECT tm.*, ea.name AS agent_name, ea.provider AS agent_provider FROM external_team_member tm LEFT JOIN external_agent ea ON ea.id = tm.agent_id AND ea.owner_account_id = ? WHERE tm.team_id = ? ORDER BY tm.sort_order, tm.created_at",
-                (owner_account_id, team_id),
+                "SELECT * FROM external_team_member WHERE team_id = ? ORDER BY sort_order, created_at",
+                (team_id,),
             ).fetchall()
         team = dict(row)
         for key in ("team_spec_json", "formation_plan_json"):
@@ -278,16 +419,16 @@ class TeamExternalAgentStore(ExternalAgentStore):
             )
 
     def delete_agent(self, agent_id: str, *, owner_account_id: str) -> None:
+        """Delete an external agent after refusing active team memberships.
+
+        Existence and the external-side deletion (observations, then session
+        bindings, then the agent row) are owned by the external feature and
+        reached through the injected lifecycle; this facade only contributes
+        the team-membership guard over its own tables.
+        """
+        lifecycle = self._external_lifecycle()
+        lifecycle.get_agent(agent_id, owner_account_id=owner_account_id)
         with self._conn() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            if (
-                conn.execute(
-                    "SELECT 1 FROM external_agent WHERE id = ? AND owner_account_id = ?",
-                    (agent_id, owner_account_id),
-                ).fetchone()
-                is None
-            ):
-                raise KeyError(agent_id)
             if (
                 conn.execute(
                     "SELECT 1 FROM external_team t LEFT JOIN external_team_member tm ON tm.team_id = t.id WHERE t.archived_at IS NULL AND t.owner_account_id = ? AND (t.leader_agent_id = ? OR tm.agent_id = ?) LIMIT 1",
@@ -296,18 +437,7 @@ class TeamExternalAgentStore(ExternalAgentStore):
                 is not None
             ):
                 raise ValueError("智能体已在团队中，暂不能删除")
-            conn.execute(
-                "DELETE FROM external_agent_profile_observation WHERE owner_account_id = ? AND external_agent_id = ?",
-                (owner_account_id, agent_id),
-            )
-            conn.execute(
-                "DELETE FROM external_runtime_session_binding WHERE owner_account_id = ? AND external_agent_id = ?",
-                (owner_account_id, agent_id),
-            )
-            conn.execute(
-                "DELETE FROM external_agent WHERE id = ? AND owner_account_id = ?",
-                (agent_id, owner_account_id),
-            )
+        lifecycle.delete_agent(agent_id, owner_account_id=owner_account_id)
 
     @staticmethod
     def _team_member_dict(row) -> dict[str, Any]:

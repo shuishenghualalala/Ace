@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 CREW_BUILTIN_AGENT_ID = "crew::builtin"
 LEGACY_CREW_BUILTIN_AGENT_ID = "crew"
@@ -26,6 +26,21 @@ def builtin_agent_public() -> dict[str, Any]:
         "created_at": "",
         "updated_at": "",
     }
+
+
+@runtime_checkable
+class ExternalAgentLifecycle(Protocol):
+    """Narrow lifecycle surface consumed across the Team feature boundary.
+
+    Cross-feature consumers resolve existence and deletion through this
+    protocol instead of touching external tables directly. The catalog
+    implementation cleans up observations, then session bindings, then the
+    agent row itself.
+    """
+
+    def get_agent(self, agent_id: str, *, owner_account_id: str) -> dict[str, Any]: ...
+
+    def delete_agent(self, agent_id: str, *, owner_account_id: str) -> None: ...
 
 
 class ExternalAgentCatalog(Protocol):

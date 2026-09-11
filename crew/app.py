@@ -3695,7 +3695,12 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     external_feature = build_external_agent_feature(
         app,
         registry=registry,
-        catalog_factory=lambda: TeamExternalAgentStore(cfg.db_path),
+        catalog_factory=lambda: TeamExternalAgentStore(
+            cfg.db_path,
+            # 跨 Feature 生命周期经动态解析的 Catalog 走显式接口；
+            # external-agents Generation 未激活时门面 fail-closed。
+            external_catalog_provider=app.current_external_catalog,
+        ),
         provider_factory=AdapterRuntimeProvider,
         interaction_bridge_getter=lambda: app.interaction_bridge,
         own_provider=True,
