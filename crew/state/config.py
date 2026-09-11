@@ -15,7 +15,6 @@ from typing import Any
 import yaml
 from dotenv import dotenv_values, load_dotenv
 
-from crew.browser.types import BrowserConfig
 from crew.security.outbound import NetworkConfig
 from crew.state.access_control import AccessControlConfig
 from crew.state.credentials import read_stored_key
@@ -31,10 +30,6 @@ else:
 log = get_logger("config")
 _CONFIG_WRITE_LOCK = threading.Lock()
 _LEGACY_CRON_TICK_WARNING_EMITTED = False
-
-def _default_browser_config() -> BrowserConfig:
-    return BrowserConfig()
-
 
 def _bundled_config_template_path() -> Path:
     """Return the publishable config template, with legacy package fallback."""
@@ -338,7 +333,10 @@ class Config:
     wiki_enabled: bool = True
 
     access_control: AccessControlConfig = field(default_factory=AccessControlConfig)
-    browser: BrowserConfig = field(default_factory=_default_browser_config)
+    # Feature 原始配置透传（与 wiki_config/team_config 同一模式）：core 只保存
+    # config.yaml 的 tools.browser 节，BrowserConfig 的解析与默认值由 browser
+    # Feature 侧装配时负责。
+    browser_config: dict[str, Any] = field(default_factory=dict)
     # 进程内 HTTP 边界（web_search/web_extract/Wiki）上游代理；空=读环境变量
     network: NetworkConfig = field(default_factory=NetworkConfig)
 
@@ -1644,7 +1642,10 @@ def load_config(config_path: str | Path | None = None) -> Config:
 
         tools = data.get("tools", {})
         if isinstance(tools, dict):
-            cfg.browser = BrowserConfig.from_raw(tools.get("browser", {}))
+            browser_raw = tools.get("browser") or {}
+            if not isinstance(browser_raw, dict):
+                browser_raw = {}
+            cfg.browser_config = dict(browser_raw)
 
         session_cfg = data.get("session", {})
         if isinstance(session_cfg, dict) and session_cfg:

@@ -879,9 +879,11 @@ def _browser_safe_error(exc: BaseException) -> str:
 
 def _browser_doctor(args: Any, ctx: CliContext) -> CliResult:
     from crew.browser.electron_driver import runtime_doctor
+    from crew.browser.types import BrowserConfig
 
     runtime_key = f"crew_{hashlib.sha256(ctx.owner.encode('utf-8')).hexdigest()[:12]}"
-    return CliResult(data=runtime_doctor(ctx.app.config.browser, runtime_key))
+    browser_config = BrowserConfig.from_raw(ctx.app.config.browser_config)
+    return CliResult(data=runtime_doctor(browser_config, runtime_key))
 
 
 def _browser_allowed(app: Any, owner: str, session_id: str) -> bool:

@@ -70,4 +70,5 @@ forbidden_modules =
     crew.wiki
     crew.team
     crew.agent.external
+    crew.browser
 allow_indirect_imports = True

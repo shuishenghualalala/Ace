@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from crew.browser.driver import BrowserDriverError
 from crew.browser.electron_bridge import electron_browser_bridge
 from crew.browser.electron_driver import runtime_doctor
+from crew.browser.types import BrowserConfig
 from crew.gateway.auth import (
     AuthenticationError,
     account_from_request,
@@ -162,7 +163,9 @@ def create_browser_router(crew) -> APIRouter:
         if not _browser_instance_token_matches(request.headers):
             return JSONResponse({"ok": False, "error": "实例校验失败"}, status_code=401)
         runtime_key = f"crew_{_opaque(account.owner_account_id)}"
-        result = runtime_doctor(crew.config.browser, runtime_key)
+        result = runtime_doctor(
+            BrowserConfig.from_raw(crew.config.browser_config), runtime_key
+        )
         return JSONResponse(result)
 
     @router.get("/api/browser/{session_id}/state")
@@ -350,11 +353,14 @@ def create_browser_router(crew) -> APIRouter:
         async def registered() -> None:
             # Reset the newly authenticated Host first. This is idempotent when
             # it has no owner and closes stale WebContents after a reconnect.
+            bridge_timeout = BrowserConfig.from_raw(
+                crew.config.browser_config
+            ).command_timeout_seconds
             await electron_browser_bridge.request(
                 runtime_key,
                 "close_owner",
                 {},
-                timeout=crew.config.browser.command_timeout_seconds,
+                timeout=bridge_timeout,
                 mutating=True,
                 _allow_unready=True,
             )

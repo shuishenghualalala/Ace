@@ -16,6 +16,7 @@ from crew.browser.tab_reading import (
     format_browser_tab_references,
     resolve_browser_tab_references,
 )
+from crew.browser.types import BrowserConfig
 from crew.core.envelope import Envelope
 from crew.features import ContextContribution
 from crew.state.logging import get_logger
@@ -38,7 +39,8 @@ async def register(ctx) -> None:
     config = ctx.resolve_service("config")
     plugin_prefs = ctx.get_service("plugin_prefs")
 
-    browser_manager = BrowserManager(config.browser)
+    browser_config = BrowserConfig.from_raw(config.browser_config)
+    browser_manager = BrowserManager(browser_config)
     manager = browser_manager
     # Register cleanup before startup so every partial installation can be
     # rolled back by FeatureTransaction, including a failed driver startup.
@@ -51,7 +53,7 @@ async def register(ctx) -> None:
         priority=200,
         timeout_seconds=max(
             1.0,
-            float(config.browser.command_timeout_seconds) + 1.0,
+            float(browser_config.command_timeout_seconds) + 1.0,
         ),
         predicate=lambda envelope: bool(
             BROWSER_TAB_REFERENCE_RE.search(str(envelope.query or ""))

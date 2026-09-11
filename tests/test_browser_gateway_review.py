@@ -11,7 +11,6 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from fastapi import WebSocketDisconnect
 
-from crew.browser.types import BrowserConfig
 from crew.core.types import ToolCall, ToolResult, tool_arguments_for_history, tool_arguments_for_ui
 from crew.gateway.auth import AccountContext
 from crew.gateway.routers.browser import (
@@ -608,7 +607,7 @@ def _host_crew(manager, *, dev: bool = False, browser_use: bool = True):
             gateway_dev_mode=dev,
             gateway_dev_account="dev:dev",
             access_control=_HostAccessControl(browser_use=browser_use),
-            browser=BrowserConfig(command_timeout_seconds=3),
+            browser_config={"command_timeout_seconds": 3},
         ),
         registry=_registry_with_browser_tool(),
         session_store=_HostSessionStore(),
