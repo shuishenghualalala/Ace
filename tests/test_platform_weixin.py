@@ -380,6 +380,8 @@ async def test_send_to_target_without_session_returns_false():
 
 
 async def test_start_requires_account_and_token(monkeypatch):
+    # start() 依赖 ilink 运行时（aiohttp），未装 weixin extra 时干净跳过而非报错
+    pytest.importorskip("aiohttp", reason="weixin 平台运行依赖 aiohttp（pip install .[weixin]）")
     monkeypatch.delenv("WEIXIN_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("WEIXIN_TOKEN", raising=False)
     ch = WeixinChannel(PlatformConfig(name="weixin", extra={}))
@@ -397,6 +399,8 @@ async def test_start_requires_account_and_token(monkeypatch):
 
 async def test_start_probe_marks_connected(tmp_path, monkeypatch):
     """启动握手成功：status_detail 报 connected，stop 后回落。"""
+    # start() 依赖 ilink 运行时（aiohttp），未装 weixin extra 时干净跳过而非报错
+    pytest.importorskip("aiohttp", reason="weixin 平台运行依赖 aiohttp（pip install .[weixin]）")
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
 
     async def fake_get_updates(session, *, base_url, token, sync_buf, timeout_ms):
@@ -423,6 +427,8 @@ async def test_start_probe_marks_connected(tmp_path, monkeypatch):
 
 async def test_start_probe_session_expired_raises(tmp_path, monkeypatch):
     """握手发现会话过期：启动直接报错，提示重新扫码。"""
+    # start() 依赖 ilink 运行时（aiohttp），未装 weixin extra 时干净跳过而非报错
+    pytest.importorskip("aiohttp", reason="weixin 平台运行依赖 aiohttp（pip install .[weixin]）")
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
 
     async def fake_get_updates(session, *, base_url, token, sync_buf, timeout_ms):
@@ -443,6 +449,8 @@ async def test_start_probe_session_expired_raises(tmp_path, monkeypatch):
 
 async def test_poll_failure_marks_disconnected(tmp_path, monkeypatch):
     """长轮询持续失败：connected 回落并记录 last_error。"""
+    # start() 依赖 ilink 运行时（aiohttp），未装 weixin extra 时干净跳过而非报错
+    pytest.importorskip("aiohttp", reason="weixin 平台运行依赖 aiohttp（pip install .[weixin]）")
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
     calls = {"n": 0}
 
@@ -606,6 +614,8 @@ def test_weixin_qr_login_redirect_tracks_base_url(monkeypatch):
 # 注册
 # --------------------------------------------------------------------------- #
 def test_weixin_platform_registers(monkeypatch):
+    # 插件加载经 check_weixin_requirements 门禁（aiohttp），未装 weixin extra 时干净跳过
+    pytest.importorskip("aiohttp", reason="weixin 平台运行依赖 aiohttp（pip install .[weixin]）")
     monkeypatch.setenv("WEIXIN_ACCOUNT_ID", "bot_env")
     monkeypatch.setenv("WEIXIN_TOKEN", "tok_env")
     plugins = PluginManager(registry=Registry())
