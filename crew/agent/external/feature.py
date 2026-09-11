@@ -23,6 +23,11 @@ from crew.agent.external.runtime_adapter import (
     RuntimeExecutionRequest,
     get_runtime_adapter,
 )
+from crew.agent.external.runtime_registry import (
+    resolve_runtime_adapter_id,
+    resolve_runtime_credential_home_paths,
+    resolve_runtime_network_endpoints,
+)
 from crew.features import (
     FeatureDefinition,
     FeatureInstallContext,
@@ -41,11 +46,75 @@ AGENT_RUNTIME_PROVIDER_SERVICE_KEY: ServiceKey["AgentRuntimeProvider"] = Service
     "agent-runtime-provider"
 )
 DELEGATION_SERVICE_KEY: ServiceKey["DelegationService"] = ServiceKey("delegation")
+EXTERNAL_RUNTIME_SUPPORT_SERVICE_KEY: ServiceKey["ExternalRuntimeSupport"] = ServiceKey(
+    "external-runtime-support"
+)
+
+
+def ensure_builtin_runtime_adapters() -> None:
+    """Import the built-in protocol adapters once so their registrations run.
+
+    Adapter 注册属于本实现包：消费方（Executor / Provider / detector）只经
+    :class:`ExternalRuntimeSupport` 或 Provider 默认解析器触达，不再自己导入
+    适配器模块。
+    """
+
+    from crew.agent.external import acp_adapter, cli_adapter, codex_adapter  # noqa: F401
+
+
+def _resolve_builtin_runtime_adapter(request: RuntimeExecutionRequest) -> RuntimeAdapter:
+    """Default provider resolver: make sure built-in adapters are registered."""
+
+    ensure_builtin_runtime_adapters()
+    return get_runtime_adapter(request.adapter_id or request.provider)
+
+
+class ExternalRuntimeSupport:
+    """实现包对消费者的运行支持门面（同代 Lease 服务）。
+
+    Adapter 注册表、runtime 描述符解析与 CLI runner 都属于 external 实现包；
+    消费者（Executor/宿主）只依赖中性契约与本门面，不直接导入任何实现模块。
+    """
+
+    def adapter(self, adapter_id: str) -> RuntimeAdapter:
+        ensure_builtin_runtime_adapters()
+        return get_runtime_adapter(adapter_id)
+
+    def resolve_adapter_id(
+        self,
+        *,
+        provider: str,
+        protocol: str,
+        metadata: dict[str, object] | None = None,
+    ) -> str:
+        return resolve_runtime_adapter_id(provider=provider, protocol=protocol, metadata=metadata)
+
+    def resolve_credential_home_paths(
+        self,
+        *,
+        provider: str,
+        metadata: dict[str, object] | None = None,
+    ) -> tuple[str, ...]:
+        return resolve_runtime_credential_home_paths(provider=provider, metadata=metadata)
+
+    def resolve_network_endpoints(
+        self,
+        *,
+        provider: str,
+        metadata: dict[str, object] | None = None,
+    ) -> tuple[str, ...]:
+        return resolve_runtime_network_endpoints(provider=provider, metadata=metadata)
+
+    async def run_cli(self, config: Any) -> str:
+        ensure_builtin_runtime_adapters()
+        from crew.agent.external.cli_adapter import run_external_cli
+
+        return await run_external_cli(config)
 
 
 @contextmanager
 def acquire_external_service_lease(plugins: Any):
-    """Acquire Catalog and Delegation from one visible Feature generation."""
+    """Acquire Catalog, Delegation and RuntimeSupport from one Feature generation."""
     catalog_binding = plugins.acquire_service_lease(
         EXTERNAL_AGENT_CATALOG_SERVICE_KEY,
         label="external:catalog",
@@ -63,9 +132,20 @@ def acquire_external_service_lease(plugins: Any):
         catalog_lease.release()
         raise ExternalRunError("external delegation service is unavailable")
     delegation, delegation_lease = delegation_binding
+    support_binding = plugins.acquire_service_lease(
+        EXTERNAL_RUNTIME_SUPPORT_SERVICE_KEY,
+        label="external:runtime-support",
+        generation=generation,
+    )
+    if support_binding is None:
+        delegation_lease.release()
+        catalog_lease.release()
+        raise ExternalRunError("external runtime support service is unavailable")
+    support, support_lease = support_binding
     try:
-        yield catalog, delegation
+        yield catalog, delegation, support
     finally:
+        support_lease.release()
         delegation_lease.release()
         catalog_lease.release()
 
@@ -180,9 +260,7 @@ class AdapterRuntimeProvider:
         self,
         adapter_resolver: Callable[[RuntimeExecutionRequest], RuntimeAdapter] | None = None,
     ) -> None:
-        self._adapter_resolver = adapter_resolver or (
-            lambda request: get_runtime_adapter(request.adapter_id or request.provider)
-        )
+        self._adapter_resolver = adapter_resolver or _resolve_builtin_runtime_adapter
         self._runs: set[_AdapterRun] = set()
         self._closed = False
 
@@ -411,6 +489,11 @@ def build_external_agent_feature(
             delegation,
             label="service:delegation",
         )
+        context.register_service(
+            EXTERNAL_RUNTIME_SUPPORT_SERVICE_KEY,
+            ExternalRuntimeSupport(),
+            label="service:external-runtime-support",
+        )
         if registry is not None:
             from crew.agent.external.tools import register_external_agent_tools
 
@@ -444,6 +527,7 @@ def build_external_agent_feature(
                     EXTERNAL_AGENT_CATALOG_SERVICE_KEY,
                     AGENT_RUNTIME_PROVIDER_SERVICE_KEY,
                     DELEGATION_SERVICE_KEY,
+                    EXTERNAL_RUNTIME_SUPPORT_SERVICE_KEY,
                 )
                 if enabled
                 else ()
@@ -474,6 +558,13 @@ def _clear_host_catalog(host: ExternalAgentFeatureHost, catalog: ExternalAgentCa
         setattr(host, "external_agents", None)
 
 
+# 实现包装配时的反向贡献：把运行支持工厂注入 Executor 的兜底解析 seam。
+# Executor 对本包零导入；无 acquirer 的直连场景（单测/最小宿主）经该工厂
+# 解析实现，工厂缺失时 Executor 按 fail-closed 处理。
+from crew.agent.executor.external import set_default_runtime_support_factory  # noqa: E402
+
+set_default_runtime_support_factory(ExternalRuntimeSupport)
+
 __all__ = [
     "acquire_external_service_lease",
     "AGENT_RUNTIME_PROVIDER_SERVICE_KEY",
@@ -483,9 +574,12 @@ __all__ = [
     "DelegationService",
     "EXTERNAL_AGENT_CATALOG_SERVICE_KEY",
     "EXTERNAL_AGENT_FEATURE_ID",
+    "EXTERNAL_RUNTIME_SUPPORT_SERVICE_KEY",
     "ExternalAgentFeatureBundle",
     "ExternalAgentFeatureHost",
     "ExternalAgentRun",
     "ExternalRunError",
+    "ExternalRuntimeSupport",
     "build_external_agent_feature",
+    "ensure_builtin_runtime_adapters",
 ]

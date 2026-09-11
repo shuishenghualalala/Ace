@@ -1,4 +1,10 @@
-"""Normalized runtime and model discovery data for external agents."""
+"""Normalized runtime and model discovery data for external agents.
+
+Model-id normalization（RuntimeModelProfile 与 canonical_runtime_model_id 一族）
+is neutral and lives in :mod:`crew.core.interfaces`; this module keeps the
+external runtime record shapes and re-exports the moved names during the
+migration（条件与删除时点见 interfaces.py 对应段落）.
+"""
 
 from __future__ import annotations
 
@@ -7,32 +13,16 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from crew.core.interfaces import (
+    RuntimeModelProfile,
+    canonical_runtime_model_id,
+    normalize_runtime_models as normalize_runtime_models,
+    runtime_model,
+    runtime_model_migrations as runtime_model_migrations,
+)
+
 RuntimeAvailability = Literal["ready", "degraded", "unavailable"]
 ModelBindingStatus = Literal["valid", "missing", "unverified"]
-
-
-@dataclass(frozen=True)
-class RuntimeModelProfile:
-    id: str
-    label: str
-    provider: str = ""
-    default: bool = False
-    capabilities: tuple[str, ...] = ()
-    thinking_levels: tuple[str, ...] = ()
-    context_window: int | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "id": self.id,
-            "label": self.label or self.id,
-            "provider": self.provider,
-            "default": self.default,
-            "capabilities": list(self.capabilities),
-            "thinking_levels": list(self.thinking_levels),
-        }
-        if self.context_window is not None:
-            payload["context_window"] = self.context_window
-        return payload
 
 
 @dataclass(frozen=True)
@@ -98,85 +88,6 @@ class RuntimeProfile:
             "protocol": self.protocol,
             "metadata": metadata,
         }
-
-
-def normalize_runtime_models(raw: Any) -> list[RuntimeModelProfile]:
-    """Normalize current structured models and legacy string catalogs."""
-
-    if not isinstance(raw, list):
-        return []
-    result: list[RuntimeModelProfile] = []
-    seen: set[str] = set()
-    for entry in raw:
-        if isinstance(entry, str):
-            model_id = entry.strip()
-            payload: dict[str, Any] = {}
-        elif isinstance(entry, dict):
-            model_id = str(entry.get("id") or entry.get("model_id") or entry.get("modelId") or "").strip()
-            payload = entry
-        else:
-            continue
-        if not model_id or model_id in seen:
-            continue
-        seen.add(model_id)
-        capabilities = payload.get("capabilities") or []
-        thinking = payload.get("thinking_levels") or payload.get("thinkingLevels") or []
-        raw_context_window = (
-            payload.get("context_window")
-            if payload.get("context_window") is not None
-            else payload.get("contextWindow")
-            if payload.get("contextWindow") is not None
-            else payload.get("max_context_tokens")
-        )
-        try:
-            context_window = int(raw_context_window) if raw_context_window is not None else None
-        except (TypeError, ValueError):
-            context_window = None
-        if context_window is not None and context_window <= 0:
-            context_window = None
-        result.append(RuntimeModelProfile(
-            id=model_id,
-            label=str(payload.get("label") or payload.get("name") or model_id).strip() or model_id,
-            provider=str(payload.get("provider") or "").strip(),
-            default=bool(payload.get("default")),
-            capabilities=tuple(str(item).strip() for item in capabilities if str(item).strip())
-            if isinstance(capabilities, list) else (),
-            thinking_levels=tuple(str(item).strip() for item in thinking if str(item).strip())
-            if isinstance(thinking, list) else (),
-            context_window=context_window,
-        ))
-    return result
-
-
-def runtime_model(runtime: dict[str, Any] | None, model_id: str) -> RuntimeModelProfile | None:
-    metadata = runtime.get("metadata") if isinstance(runtime, dict) else None
-    models = normalize_runtime_models(metadata.get("models") if isinstance(metadata, dict) else None)
-    wanted = canonical_runtime_model_id(runtime, model_id)
-    if not wanted:
-        default_id = str(metadata.get("default_model_id") or "").strip() if isinstance(metadata, dict) else ""
-        wanted = default_id
-    return next((model for model in models if model.id == wanted), None)
-
-
-def canonical_runtime_model_id(runtime: dict[str, Any] | None, model_id: str) -> str:
-    """Resolve an adapter-declared legacy model id without provider branching."""
-
-    wanted = str(model_id or "").strip()
-    return runtime_model_migrations(runtime).get(wanted, wanted) if wanted else ""
-
-
-def runtime_model_migrations(runtime: dict[str, Any] | None) -> dict[str, str]:
-    """Return only adapter migrations whose targets exist in the current catalog."""
-
-    metadata = runtime.get("metadata") if isinstance(runtime, dict) else None
-    if not isinstance(metadata, dict) or not isinstance(metadata.get("model_migrations"), dict):
-        return {}
-    known_ids = {model.id for model in normalize_runtime_models(metadata.get("models"))}
-    return {
-        str(source).strip(): str(target).strip()
-        for source, target in metadata["model_migrations"].items()
-        if str(source).strip() and str(target).strip() in known_ids
-    }
 
 
 def model_binding_status(runtime: dict[str, Any] | None, model_id: str) -> ModelBindingStatus:

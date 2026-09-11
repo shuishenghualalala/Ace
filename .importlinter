@@ -49,6 +49,15 @@ forbidden_modules =
     crew.team
 allow_indirect_imports = True
 
+[importlinter:contract:executor-external-boundary]
+name = Agent Executor must not import the external agent implementation package
+type = forbidden
+source_modules =
+    crew.agent.executor
+forbidden_modules =
+    crew.agent.external
+allow_indirect_imports = True
+
 [importlinter:contract:security-feature-boundary]
 name = Security must not depend on product features or hosts
 type = forbidden

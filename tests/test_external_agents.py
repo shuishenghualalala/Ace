@@ -3513,15 +3513,15 @@ async def test_acp_executor_runs_codex_cli(tmp_path):
 
 
 async def test_acp_executor_prefers_session_model_override(tmp_path, monkeypatch):
-    from crew.agent.executor import external as external_executor
+    from crew.agent.external.feature import ExternalRuntimeSupport
 
     captured = {}
 
-    async def fake_run(config):
-        captured["model"] = config.model
-        return "ok"
+    class _FakeRuntimeSupport(ExternalRuntimeSupport):
+        async def run_cli(self, config):
+            captured["model"] = config.model
+            return "ok"
 
-    monkeypatch.setattr(external_executor, "run_external_cli", fake_run)
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "codex-session-model",
@@ -3551,6 +3551,7 @@ async def test_acp_executor_prefers_session_model_override(tmp_path, monkeypatch
             "external_agent_id": agent["id"],
             "external_store": store,
             "model": "session-override",
+            "runtime_support": _FakeRuntimeSupport(),
         }).execute(ctx)
     ]
 
@@ -3559,13 +3560,13 @@ async def test_acp_executor_prefers_session_model_override(tmp_path, monkeypatch
     assert ctx.messages[-1].model == "session-override"
 
 
-async def test_cli_executor_rewrites_missing_followup_tool_as_cli_limit(tmp_path, monkeypatch):
-    from crew.agent.executor import external as external_executor
+async def test_cli_executor_rewrites_missing_followup_tool_as_cli_limit(tmp_path):
+    from crew.agent.external.feature import ExternalRuntimeSupport
 
-    async def fake_run(_config):
-        return "我当前没有 ask_followup_question 工具，可能需要切换 Plan 模式。"
+    class _FakeRuntimeSupport(ExternalRuntimeSupport):
+        async def run_cli(self, _config):
+            return "我当前没有 ask_followup_question 工具，可能需要切换 Plan 模式。"
 
-    monkeypatch.setattr(external_executor, "run_external_cli", fake_run)
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "codex-cli-followup",
@@ -3589,6 +3590,7 @@ async def test_cli_executor_rewrites_missing_followup_tool_as_cli_limit(tmp_path
         chunk async for chunk in AcpExecutor({
             "external_agent_id": agent["id"],
             "external_store": store,
+            "runtime_support": _FakeRuntimeSupport(),
         }).execute(ctx)
     ]
 

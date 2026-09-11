@@ -9,6 +9,13 @@
   ExternalExecutor —— Runtime-backed 外部 agent（如 Kimi/Codex/Claude）
                      经统一 RuntimeAdapter 接入。协议差异只存在于 Adapter；
                      Executor 负责 Crew 会话、权限、MCP 与事件归一。
+
+【实现解析】本模块对 external 实现包（crew.agent.external）零导入：
+  * 协议/错误/DTO 等中性契约来自 crew.core.interfaces；
+  * Adapter/CLI/描述符等实现经同代 Service Lease（external_services_acquirer
+    返回的第三个元素）解析；
+  * 无 acquirer 的直连场景（单测/最小宿主）由实现包装配时注入的兜底工厂解析；
+  * 三者皆缺则 fail-closed（对话错误帧），绝不静态依赖实现包。
 """
 
 from __future__ import annotations
@@ -17,31 +24,12 @@ import asyncio
 import importlib
 import inspect
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
 from crew.agent.executor.base import AgentExecutor, ExecutionContext
-from crew.agent.external.acp_adapter import (
-    AcpAdapterError,
-    AcpPermissionRequest,
-)
-from crew.agent.external.catalog import ExternalAgentCatalog
-from crew.agent.external.cli_adapter import ExternalCliConfig, ExternalCliError, run_external_cli
-from crew.agent.external.codex_adapter import CodexAdapterError
-from crew.agent.external.runtime_adapter import (
-    ExternalStreamEvent,
-    RuntimeExecutionRequest,
-    RuntimeResumeRejected,
-    get_runtime_adapter,
-)
-from crew.agent.external.runtime_profile import canonical_runtime_model_id
-from crew.agent.external.runtime_registry import (
-    resolve_runtime_adapter_id,
-    resolve_runtime_credential_home_paths,
-    resolve_runtime_network_endpoints,
-)
 from crew.agent.file_changes import (
     TurnFileChangeTracker,
     persist_file_changes,
@@ -50,12 +38,39 @@ from crew.agent.file_changes import (
 from crew.agent.skills import SkillActivation
 from crew.core.envelope import ResponseChunk
 from crew.core.followup import drain_followup_answer_messages
+from crew.core.interfaces import (
+    AcpAdapterError,
+    AcpPermissionRequest,
+    CodexAdapterError,
+    ExternalAgentCatalog,
+    ExternalCliConfig,
+    ExternalCliError,
+    ExternalStreamEvent,
+    RuntimeExecutionRequest,
+    RuntimeResumeRejected,
+    canonical_runtime_model_id,
+)
 from crew.core.runctx import current_owner_account_id
 from crew.core.timeout_policy import DEFAULT_EXTERNAL_IDLE_SECONDS, TimeoutPolicy
 from crew.core.types import Message, ToolCall
 from crew.security.models import AdditionalPermissionProfile
 from crew.state.home import get_owner_runtime_home
 from crew.security.workspace_guard import check_workspace_guard, classify_external_permission
+
+
+# ---------------------------------------------------------------------------
+# 实现包兜底解析 seam
+# ---------------------------------------------------------------------------
+# 生产路径永远经 external_services_acquirer 持同代 Lease；该工厂只在直连场景
+# 兜底，由 external 实现包在装配时注入（见 crew.agent.external.feature 模块尾），
+# 使 Executor 保持对实现包零导入、可独立拆包。
+default_runtime_support_factory: Callable[[], Any] | None = None
+
+
+def set_default_runtime_support_factory(factory: Callable[[], Any]) -> None:
+    """注入外部实现包的运行支持工厂（由实现包/宿主装配时调用）。"""
+    global default_runtime_support_factory
+    default_runtime_support_factory = factory
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +105,10 @@ class ExternalExecutorConfig:
     # Feature Runtime consumer seam. When supplied, the executor never calls
     # an Adapter directly; the Generation-owned DelegationService owns the Run.
     delegation_service: Any = None
+    # Same-generation runtime-support facade (adapter registry, descriptor
+    # resolvers, CLI runner). Resolved from the lease when absent; direct
+    # callers (tests/minimal hosts) may inject a stub here.
+    runtime_support: Any = None
     # Resolve both surfaces at execution start so one turn never mixes a
     # Catalog from one generation with a DelegationService from another.
     external_services_acquirer: Any = None
@@ -109,6 +128,28 @@ def _coerce(config: Any, cls: type) -> Any:
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
         return cls(**{k: v for k, v in config.items() if k in known})
     return cls()
+
+
+def _unpack_external_services(acquired: Any) -> tuple[Any, Any, Any]:
+    """把 acquirer 的返回归一成 (catalog, delegation, runtime_support)。
+
+    兼容两种形状：三元组（当前 Service Lease 契约）、二元组（迁移期旧契约）
+    以及带同名属性的宿主对象。
+    """
+    if isinstance(acquired, tuple):
+        if len(acquired) == 3:
+            return acquired
+        if len(acquired) == 2:
+            return acquired[0], acquired[1], None
+        raise ValueError(
+            "external_services_acquirer must return (catalog, delegation) "
+            "or (catalog, delegation, runtime_support)"
+        )
+    return (
+        getattr(acquired, "catalog", None),
+        getattr(acquired, "delegation", None),
+        getattr(acquired, "runtime_support", None),
+    )
 
 
 PayloadMode = Literal["single_agent", "team_chat", "team_relay", "team_execute"]
@@ -942,8 +983,12 @@ class ExternalExecutor(AgentExecutor):
             return
         external_store = self.config.external_store
         delegation_service = self.config.delegation_service
+        runtime_support = self.config.runtime_support
         if resolved_services is not None:
-            external_store, delegation_service = resolved_services
+            external_store, delegation_service, leased_support = _unpack_external_services(
+                resolved_services
+            )
+            runtime_support = leased_support or runtime_support
             acquirer = None
         else:
             acquirer = self.config.external_services_acquirer
@@ -951,16 +996,21 @@ class ExternalExecutor(AgentExecutor):
             acquired = acquirer()
             if inspect.isawaitable(acquired):
                 acquired = await acquired
-            if isinstance(acquired, tuple):
-                if len(acquired) != 2:
-                    raise ValueError("external_services_acquirer must return (catalog, delegation)")
-                external_store, delegation_service = acquired
-            else:
-                external_store = getattr(acquired, "catalog", None)
-                delegation_service = getattr(acquired, "delegation", None)
+            external_store, delegation_service, leased_support = _unpack_external_services(acquired)
+            runtime_support = leased_support or runtime_support
         if external_store is None:
             yield ResponseChunk.error(ctx.request_id, "ExternalExecutor 缺少 ExternalAgentStore")
             return
+        if runtime_support is None:
+            factory = default_runtime_support_factory
+            if factory is None:
+                # fail-closed：实现包既未持 Lease 提供也未注入兜底工厂。
+                yield ResponseChunk.error(
+                    ctx.request_id,
+                    "外部智能体运行支持未装配：缺少 external agent feature 或 runtime_support 注入",
+                )
+                return
+            runtime_support = factory()
 
         owner_account_id = current_owner_account_id.get()
         try:
@@ -980,15 +1030,15 @@ class ExternalExecutor(AgentExecutor):
         prompt = ctx.query
         protocol = str(runtime.get("protocol") or "").lower()
         runtime_metadata = runtime.get("metadata") if isinstance(runtime.get("metadata"), dict) else {}
-        credential_home_paths = resolve_runtime_credential_home_paths(
+        credential_home_paths = runtime_support.resolve_credential_home_paths(
             provider=provider,
             metadata=runtime_metadata,
         )
-        network_endpoints = resolve_runtime_network_endpoints(
+        network_endpoints = runtime_support.resolve_network_endpoints(
             provider=provider,
             metadata=runtime_metadata,
         )
-        adapter_id = resolve_runtime_adapter_id(
+        adapter_id = runtime_support.resolve_adapter_id(
             provider=provider,
             protocol=protocol,
             metadata=runtime_metadata,
@@ -1217,7 +1267,7 @@ class ExternalExecutor(AgentExecutor):
                         reset_memory=reset_memory,
                         active_skills=ctx.active_skills,
                     )
-                    adapter = get_runtime_adapter(adapter_id)
+                    adapter = runtime_support.adapter(adapter_id)
                     configured_launch_args = (
                         runtime_metadata.get("launch_args")
                         if "launch_args" in runtime_metadata
@@ -1353,7 +1403,7 @@ class ExternalExecutor(AgentExecutor):
                     external_store.delete_runtime_session_binding(**binding_key)
                 output = "".join(parts).strip()
             elif protocol == "cli":
-                output = await run_external_cli(
+                output = await runtime_support.run_cli(
                     ExternalCliConfig(
                         provider=provider,
                         executable_path=runtime["executable_path"],

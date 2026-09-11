@@ -3,6 +3,10 @@
 Descriptors select an adapter by ``adapter_id``.  Adapters own protocol
 probing and execution; callers consume one normalized event stream without
 branching on provider names.
+
+The stream/execution protocol dataclasses and error contracts live in
+:mod:`crew.core.interfaces`; they are re-exported here during the migration
+(条件与删除时点见 interfaces.py 对应段落).
 """
 
 from __future__ import annotations
@@ -16,7 +20,13 @@ from typing import Any, AsyncIterator, Literal, Protocol, Sequence
 from urllib.parse import urlsplit
 
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
-from crew.core.timeout_policy import DEFAULT_EXTERNAL_IDLE_SECONDS
+from crew.core.interfaces import (
+    ExternalStreamEvent,
+    ExternalToolEvent as ExternalToolEvent,
+    RuntimeExecutionRequest,
+    RuntimeMcpServer as RuntimeMcpServer,
+    RuntimeResumeRejected as RuntimeResumeRejected,
+)
 from crew.security.models import (
     AdditionalPermissionProfile,
     NetworkAccess,
@@ -239,55 +249,6 @@ def merge_additional_permission_profiles(
     )
 
 
-class RuntimeResumeRejected(RuntimeError):
-    """Adapter rejected a native session/thread before current-turn work began."""
-
-
-@dataclass(frozen=True)
-class RuntimeMcpServer:
-    """Protocol-neutral, argv-only MCP server declaration."""
-
-    name: str
-    command: str
-    args: tuple[str, ...] = ()
-    env: tuple[tuple[str, str], ...] = ()
-
-    @classmethod
-    def from_mapping(cls, raw: dict[str, Any]) -> "RuntimeMcpServer":
-        name = str(raw.get("name") or raw.get("id") or "").strip()
-        command = str(raw.get("command") or "").strip()
-        if not name or not command:
-            raise ValueError("Runtime MCP server 必须包含 name 和 command")
-        raw_args = raw.get("args")
-        args = tuple(str(item) for item in raw_args) if isinstance(raw_args, list) else ()
-        raw_env = raw.get("env")
-        env: list[tuple[str, str]] = []
-        if isinstance(raw_env, dict):
-            env.extend((str(key), str(value)) for key, value in raw_env.items())
-        elif isinstance(raw_env, list):
-            for item in raw_env:
-                if not isinstance(item, dict):
-                    continue
-                key = str(item.get("name") or "").strip()
-                if key:
-                    env.append((key, str(item.get("value") or "")))
-        return cls(name=name, command=command, args=args, env=tuple(env))
-
-    def stdio_config(self, *, env_as_list: bool = False) -> dict[str, Any]:
-        config: dict[str, Any] = {
-            "name": self.name,
-            "command": self.command,
-            "args": list(self.args),
-        }
-        if self.env:
-            config["env"] = (
-                [{"name": key, "value": value} for key, value in self.env]
-                if env_as_list
-                else {key: value for key, value in self.env}
-            )
-        return config
-
-
 @dataclass(frozen=True)
 class RuntimeAdapterProbe:
     models: list[RuntimeModelProfile]
@@ -295,26 +256,6 @@ class RuntimeAdapterProbe:
     capabilities: RuntimeCapabilities
     source: str
     model_migrations: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass
-class ExternalToolEvent:
-    name: str
-    phase: str
-    detail: str = ""
-    tool_call_id: str = ""
-    args: str = ""
-
-
-@dataclass
-class ExternalStreamEvent:
-    kind: str
-    text: str = ""
-    tool: ExternalToolEvent | None = None
-    session_id: str = ""
-    session_resumed: bool = False
-    session_reset: bool = False
-    usage: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -326,44 +267,6 @@ class ExternalPermissionRequest:
 
 
 PermissionDecision = Literal["allow", "deny"]
-
-
-@dataclass
-class RuntimeExecutionRequest:
-    executable_path: str
-    provider: str
-    prompt: str
-    model: str = ""
-    cwd: str = "."
-    system_prompt: str = ""
-    launch_args: list[str] = field(default_factory=list)
-    custom_args: list[str] = field(default_factory=list)
-    custom_env: dict[str, str] = field(default_factory=dict)
-    credential_home_paths: tuple[str, ...] = ()
-    network_endpoints: tuple[str, ...] = ()
-    mcp_servers: list[RuntimeMcpServer] = field(default_factory=list)
-    additional_permissions: AdditionalPermissionProfile = field(
-        default_factory=AdditionalPermissionProfile
-    )
-    dynamic_tools: list[dict[str, Any]] = field(default_factory=list)
-    dynamic_tool_handler: Any = None
-    resume_session_id: str = ""
-    timeout: float = DEFAULT_EXTERNAL_IDLE_SECONDS
-    # Absolute monotonic deadline for the whole external turn.  The boolean
-    # distinguishes an explicitly unlimited policy (deadline=None) from old
-    # direct adapter callers that still expect their legacy watchdog.
-    hard_deadline: float | None = None
-    hard_timeout_enabled: bool = False
-    permission_handler: Any = None
-    # Adapter identity is separate from provider identity (for example a
-    # provider may switch between ACP and Codex app-server implementations).
-    adapter_id: str = ""
-
-    def __post_init__(self) -> None:
-        self.mcp_servers = [
-            item if isinstance(item, RuntimeMcpServer) else RuntimeMcpServer.from_mapping(item)
-            for item in self.mcp_servers
-        ]
 
 
 class NativeInteractiveLineTransport:

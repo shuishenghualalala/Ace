@@ -26,13 +26,10 @@ from crew.agent.external.runtime_adapter import (
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
+from crew.core.interfaces import CodexAdapterError
 from crew.core.timeout_policy import remaining_seconds
 
 CODEX_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
-
-
-class CodexAdapterError(RuntimeError):
-    pass
 
 
 class CodexAppServerUnsupported(CodexAdapterError):

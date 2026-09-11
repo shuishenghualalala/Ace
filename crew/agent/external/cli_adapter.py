@@ -16,7 +16,7 @@ import re
 import tempfile
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -40,15 +40,13 @@ from crew.agent.external.runtime_adapter import (
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
-from crew.core.timeout_policy import DEFAULT_EXTERNAL_IDLE_SECONDS, remaining_seconds
+from crew.core.interfaces import ExternalCliConfig as ExternalCliConfig
+from crew.core.interfaces import ExternalCliError
+from crew.core.timeout_policy import remaining_seconds
 from crew.security.runtime_client import NativeRuntimeError, RuntimeErrorCode
 from crew.state.logging import get_logger
 
 log = get_logger("agent.cli")
-
-
-class ExternalCliError(RuntimeError):
-    pass
 
 
 def _request_read_timeout(request: RuntimeExecutionRequest) -> float:
@@ -416,23 +414,6 @@ def _diagnostic_tail(value: str, *, max_chars: int = 16000) -> str:
     if len(text) <= max_chars:
         return text
     return f"...<truncated>\n{text[-max_chars:]}"
-
-
-@dataclass
-class ExternalCliConfig:
-    provider: str
-    executable_path: str
-    prompt: str
-    model: str = ""
-    cwd: str = "."
-    system_prompt: str = ""
-    custom_args: list[str] = field(default_factory=list)
-    custom_env: dict[str, str] = field(default_factory=dict)
-    credential_home_paths: tuple[str, ...] = ()
-    network_endpoints: tuple[str, ...] = ()
-    # ``None`` means no wall-clock hard deadline; the caller may still impose
-    # an idle deadline at the runtime-adapter layer.
-    timeout: float | None = DEFAULT_EXTERNAL_IDLE_SECONDS
 
 
 @dataclass(frozen=True)

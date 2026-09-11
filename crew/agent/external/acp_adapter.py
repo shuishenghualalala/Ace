@@ -24,6 +24,7 @@ from crew.agent.external.runtime_adapter import (
     register_runtime_adapter,
 )
 from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeModelProfile
+from crew.core.interfaces import AcpAdapterError, AcpPermissionRequest
 from crew.core.timeout_policy import DEFAULT_EXTERNAL_IDLE_SECONDS, TimeoutPolicy
 from crew.security.models import AdditionalPermissionProfile
 from crew.security.runtime_client import NativeRuntimeError
@@ -35,27 +36,7 @@ ACP_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 ACP_RUNTIME_PROBE_TIMEOUT_SECONDS = 15.0
 HERMES_RUNTIME_PROBE_TIMEOUT_SECONDS = 30.0
 
-
-class AcpAdapterError(RuntimeError):
-    pass
-
-
 PermissionDecision = Literal["allow", "deny"]
-
-
-@dataclass(frozen=True)
-class AcpPermissionRequest:
-    """Normalized inbound ACP permission request.
-
-    Policy stays outside the protocol adapter.  The adapter only validates the
-    runtime-advertised options and maps an allow/deny decision back to one of
-    those exact option ids.
-    """
-
-    session_id: str
-    tool_call: dict[str, Any]
-    options: tuple[dict[str, Any], ...]
-    raw_params: dict[str, Any]
 
 
 PermissionHandler = Callable[[AcpPermissionRequest], Awaitable[PermissionDecision]]

@@ -22,12 +22,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Protocol, runtime_checkable
 
 from crew.core.envelope import Envelope, ResponseChunk
+from crew.core.timeout_policy import DEFAULT_EXTERNAL_IDLE_SECONDS
 from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall, ToolOutput, ToolResult
+from crew.security.models import AdditionalPermissionProfile
 
 
 # --------------------------------------------------------------------------- #
@@ -510,3 +512,415 @@ class Scheduler(ABC):
 
     @abstractmethod
     async def stop(self) -> None: ...
+
+
+# --------------------------------------------------------------------------- #
+# 外部 Runtime 执行契约
+# --------------------------------------------------------------------------- #
+# Executor（消费者）与 external 实现包（Provider 侧）共用的中性协议面：
+# 错误契约、流事件/执行请求 DTO、Catalog 协议与模型归一纯函数。
+# 实现包不得整体搬入 core；实现细节经同代 Service Lease / 注入解析。
+# 这些名字历史上定义在 crew.agent.external.*，原位置保留迁移期薄 re-export，
+# 待 crew-agent 与 crew-external-agents 正式拆包且消费方全部改用本模块后删除。
+
+
+class AcpAdapterError(RuntimeError):
+    """ACP 协议适配失败（executor 据此生成对话错误帧并标记会话绑定）。"""
+
+
+class ExternalCliError(RuntimeError):
+    """外部 CLI runtime 一次性执行失败。"""
+
+
+class CodexAdapterError(RuntimeError):
+    """Codex app-server 协议适配失败。"""
+
+
+class RuntimeResumeRejected(RuntimeError):
+    """Adapter rejected a native session/thread before current-turn work began."""
+
+
+PermissionDecision = Literal["allow", "deny"]
+
+
+@dataclass(frozen=True)
+class AcpPermissionRequest:
+    """Normalized inbound ACP permission request.
+
+    Policy stays outside the protocol adapter.  The adapter only validates the
+    runtime-advertised options and maps an allow/deny decision back to one of
+    those exact option ids.
+    """
+
+    session_id: str
+    tool_call: dict[str, Any]
+    options: tuple[dict[str, Any], ...]
+    raw_params: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RuntimeMcpServer:
+    """Protocol-neutral, argv-only MCP server declaration."""
+
+    name: str
+    command: str
+    args: tuple[str, ...] = ()
+    env: tuple[tuple[str, str], ...] = ()
+
+    @classmethod
+    def from_mapping(cls, raw: dict[str, Any]) -> "RuntimeMcpServer":
+        name = str(raw.get("name") or raw.get("id") or "").strip()
+        command = str(raw.get("command") or "").strip()
+        if not name or not command:
+            raise ValueError("Runtime MCP server 必须包含 name 和 command")
+        raw_args = raw.get("args")
+        args = tuple(str(item) for item in raw_args) if isinstance(raw_args, list) else ()
+        raw_env = raw.get("env")
+        env: list[tuple[str, str]] = []
+        if isinstance(raw_env, dict):
+            env.extend((str(key), str(value)) for key, value in raw_env.items())
+        elif isinstance(raw_env, list):
+            for item in raw_env:
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("name") or "").strip()
+                if key:
+                    env.append((key, str(item.get("value") or "")))
+        return cls(name=name, command=command, args=tuple(args), env=tuple(env))
+
+    def stdio_config(self, *, env_as_list: bool = False) -> dict[str, Any]:
+        config: dict[str, Any] = {
+            "name": self.name,
+            "command": self.command,
+            "args": list(self.args),
+        }
+        if self.env:
+            config["env"] = (
+                [{"name": key, "value": value} for key, value in self.env]
+                if env_as_list
+                else {key: value for key, value in self.env}
+            )
+        return config
+
+
+@dataclass
+class ExternalToolEvent:
+    name: str
+    phase: str
+    detail: str = ""
+    tool_call_id: str = ""
+    args: str = ""
+
+
+@dataclass
+class ExternalStreamEvent:
+    kind: str
+    text: str = ""
+    tool: ExternalToolEvent | None = None
+    session_id: str = ""
+    session_resumed: bool = False
+    session_reset: bool = False
+    usage: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class RuntimeExecutionRequest:
+    executable_path: str
+    provider: str
+    prompt: str
+    model: str = ""
+    cwd: str = "."
+    system_prompt: str = ""
+    launch_args: list[str] = field(default_factory=list)
+    custom_args: list[str] = field(default_factory=list)
+    custom_env: dict[str, str] = field(default_factory=dict)
+    credential_home_paths: tuple[str, ...] = ()
+    network_endpoints: tuple[str, ...] = ()
+    mcp_servers: list[RuntimeMcpServer] = field(default_factory=list)
+    additional_permissions: AdditionalPermissionProfile = field(
+        default_factory=AdditionalPermissionProfile
+    )
+    dynamic_tools: list[dict[str, Any]] = field(default_factory=list)
+    dynamic_tool_handler: Any = None
+    resume_session_id: str = ""
+    timeout: float = DEFAULT_EXTERNAL_IDLE_SECONDS
+    # Absolute monotonic deadline for the whole external turn.  The boolean
+    # distinguishes an explicitly unlimited policy (deadline=None) from old
+    # direct adapter callers that still expect their legacy watchdog.
+    hard_deadline: float | None = None
+    hard_timeout_enabled: bool = False
+    permission_handler: Any = None
+    # Adapter identity is separate from provider identity (for example a
+    # provider may switch between ACP and Codex app-server implementations).
+    adapter_id: str = ""
+
+    def __post_init__(self) -> None:
+        self.mcp_servers = [
+            item if isinstance(item, RuntimeMcpServer) else RuntimeMcpServer.from_mapping(item)
+            for item in self.mcp_servers
+        ]
+
+
+@dataclass
+class ExternalCliConfig:
+    """外部 CLI runtime 一次性执行的请求 DTO（实现方为 external 包的 CLI runner）。"""
+
+    provider: str
+    executable_path: str
+    prompt: str
+    model: str = ""
+    cwd: str = "."
+    system_prompt: str = ""
+    custom_args: list[str] = field(default_factory=list)
+    custom_env: dict[str, str] = field(default_factory=dict)
+    credential_home_paths: tuple[str, ...] = ()
+    network_endpoints: tuple[str, ...] = ()
+    # ``None`` means no wall-clock hard deadline; the caller may still impose
+    # an idle deadline at the runtime-adapter layer.
+    timeout: float | None = DEFAULT_EXTERNAL_IDLE_SECONDS
+
+
+@dataclass(frozen=True)
+class RuntimeModelProfile:
+    id: str
+    label: str
+    provider: str = ""
+    default: bool = False
+    capabilities: tuple[str, ...] = ()
+    thinking_levels: tuple[str, ...] = ()
+    context_window: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": self.id,
+            "label": self.label or self.id,
+            "provider": self.provider,
+            "default": self.default,
+            "capabilities": list(self.capabilities),
+            "thinking_levels": list(self.thinking_levels),
+        }
+        if self.context_window is not None:
+            payload["context_window"] = self.context_window
+        return payload
+
+
+def normalize_runtime_models(raw: Any) -> list[RuntimeModelProfile]:
+    """Normalize current structured models and legacy string catalogs."""
+
+    if not isinstance(raw, list):
+        return []
+    result: list[RuntimeModelProfile] = []
+    seen: set[str] = set()
+    for entry in raw:
+        if isinstance(entry, str):
+            model_id = entry.strip()
+            payload: dict[str, Any] = {}
+        elif isinstance(entry, dict):
+            model_id = str(entry.get("id") or entry.get("model_id") or entry.get("modelId") or "").strip()
+            payload = entry
+        else:
+            continue
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        capabilities = payload.get("capabilities") or []
+        thinking = payload.get("thinking_levels") or payload.get("thinkingLevels") or []
+        raw_context_window = (
+            payload.get("context_window")
+            if payload.get("context_window") is not None
+            else payload.get("contextWindow")
+            if payload.get("contextWindow") is not None
+            else payload.get("max_context_tokens")
+        )
+        try:
+            context_window = int(raw_context_window) if raw_context_window is not None else None
+        except (TypeError, ValueError):
+            context_window = None
+        if context_window is not None and context_window <= 0:
+            context_window = None
+        result.append(RuntimeModelProfile(
+            id=model_id,
+            label=str(payload.get("label") or payload.get("name") or model_id).strip() or model_id,
+            provider=str(payload.get("provider") or "").strip(),
+            default=bool(payload.get("default")),
+            capabilities=tuple(str(item).strip() for item in capabilities if str(item).strip())
+            if isinstance(capabilities, list) else (),
+            thinking_levels=tuple(str(item).strip() for item in thinking if str(item).strip())
+            if isinstance(thinking, list) else (),
+            context_window=context_window,
+        ))
+    return result
+
+
+def runtime_model(runtime: dict[str, Any] | None, model_id: str) -> RuntimeModelProfile | None:
+    metadata = runtime.get("metadata") if isinstance(runtime, dict) else None
+    models = normalize_runtime_models(metadata.get("models") if isinstance(metadata, dict) else None)
+    wanted = canonical_runtime_model_id(runtime, model_id)
+    if not wanted:
+        default_id = str(metadata.get("default_model_id") or "").strip() if isinstance(metadata, dict) else ""
+        wanted = default_id
+    return next((model for model in models if model.id == wanted), None)
+
+
+def canonical_runtime_model_id(runtime: dict[str, Any] | None, model_id: str) -> str:
+    """Resolve an adapter-declared legacy model id without provider branching."""
+
+    wanted = str(model_id or "").strip()
+    return runtime_model_migrations(runtime).get(wanted, wanted) if wanted else ""
+
+
+def runtime_model_migrations(runtime: dict[str, Any] | None) -> dict[str, str]:
+    """Return only adapter migrations whose targets exist in the current catalog."""
+
+    metadata = runtime.get("metadata") if isinstance(runtime, dict) else None
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("model_migrations"), dict):
+        return {}
+    known_ids = {model.id for model in normalize_runtime_models(metadata.get("models"))}
+    return {
+        str(source).strip(): str(target).strip()
+        for source, target in metadata["model_migrations"].items()
+        if str(source).strip() and str(target).strip() in known_ids
+    }
+
+
+@runtime_checkable
+class ExternalAgentCatalog(Protocol):
+    """External Runtime, Agent, Profile, observation and session persistence."""
+
+    def upsert_runtime(self, runtime: dict[str, Any]) -> dict[str, Any]: ...
+
+    def sync_runtimes(self, runtimes: list[dict[str, Any]]) -> list[dict[str, Any]]: ...
+
+    def list_runtimes(self) -> list[dict[str, Any]]: ...
+
+    def get_runtime(self, runtime_id: str) -> dict[str, Any]: ...
+
+    def delete_runtime(self, runtime_id: str) -> None: ...
+
+    def create_agent(
+        self,
+        *,
+        owner_account_id: str,
+        name: str,
+        runtime_id: str,
+        model: str = "",
+        system_prompt: str = "",
+        custom_args: list[str] | None = None,
+        custom_env: dict[str, str] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def get_or_create_managed_agent(
+        self,
+        *,
+        owner_account_id: str,
+        managed_kind: str,
+        managed_key: str,
+        name: str,
+        runtime_id: str,
+        model: str = "",
+        system_prompt: str = "",
+    ) -> dict[str, Any]: ...
+
+    def list_agents(
+        self,
+        *,
+        owner_account_id: str,
+        include_managed: bool = True,
+    ) -> list[dict[str, Any]]: ...
+
+    def get_agent(self, agent_id: str, *, owner_account_id: str) -> dict[str, Any]: ...
+
+    def delete_agent(self, agent_id: str, *, owner_account_id: str) -> None: ...
+
+    def agent_with_runtime(
+        self,
+        agent_id: str,
+        *,
+        owner_account_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]: ...
+
+    def refresh_agent_profile(
+        self,
+        agent_id: str,
+        *,
+        runtime: dict[str, Any] | None = None,
+        owner_account_id: str,
+    ) -> dict[str, Any]: ...
+
+    def resolve_agent_profile(
+        self,
+        agent_id: str,
+        model_id: str,
+        *,
+        owner_account_id: str,
+    ) -> dict[str, Any]: ...
+
+    def record_agent_profile_observation(
+        self,
+        *,
+        owner_account_id: str,
+        external_agent_id: str,
+        source_run_id: str,
+        source_node_id: str,
+        source_attempt_id: str,
+        capabilities: list[str],
+        assessment_source: str,
+        outcome: str,
+        quality_weight: float,
+        failure_kind: str = "",
+        observed_at: str | None = None,
+        runtime_id: str = "",
+        model_id: str = "",
+        model_fingerprint: str = "",
+        model_binding_source: str = "",
+    ) -> dict[str, Any]: ...
+
+    def list_agent_profile_observations(
+        self,
+        external_agent_id: str,
+        *,
+        owner_account_id: str,
+    ) -> list[dict[str, Any]]: ...
+
+    def get_runtime_session_binding(
+        self,
+        *,
+        owner_account_id: str,
+        crew_session_id: str,
+        external_agent_id: str,
+        runtime_id: str,
+        adapter_id: str,
+        cwd: str = "",
+    ) -> dict[str, Any] | None: ...
+
+    def save_runtime_session_binding(
+        self,
+        *,
+        owner_account_id: str,
+        crew_session_id: str,
+        external_agent_id: str,
+        runtime_id: str,
+        adapter_id: str,
+        native_session_id: str,
+        cwd: str = "",
+        session_profile: str | None = None,
+        status: str = "active",
+    ) -> dict[str, Any]: ...
+
+    def delete_runtime_session_binding(
+        self,
+        *,
+        owner_account_id: str,
+        crew_session_id: str,
+        external_agent_id: str,
+        runtime_id: str,
+        adapter_id: str,
+        cwd: str = "",
+    ) -> None: ...
+
+    def delete_runtime_bindings_for_session(
+        self,
+        crew_session_id: str,
+        *,
+        owner_account_id: str,
+    ) -> int: ...
