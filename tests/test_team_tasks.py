@@ -3859,7 +3859,17 @@ async def test_team_ask_serializes_same_target_and_records_queue_status():
                 {"to": ["leader"], "intent": "ask", "content": "问题一"},
             )
         ))
-        await asyncio.sleep(0.005)
+        # 确定性屏障：等第一个 ask 真正进入临界区（bus 出现 delivered 事件，
+        # 即已持有 target 锁）再发第二个 ask。固定 sleep(0.005) 在套件负载高时
+        # 会让第二个 ask 抢先于第一个拿锁，queued 事件随之消失（时序 flake）。
+        for _ in range(1000):
+            delivered = any(
+                item["type"] == "message_status_changed" and item["status"] == "delivered"
+                for item in team.bus.events("communication_queue_s1")
+            )
+            if delivered or first.done():
+                break
+            await asyncio.sleep(0.002)
         second = asyncio.create_task(team.teammates["coder"].registry.execute(
             ToolCall(
                 "mention-ask-queue-2",
