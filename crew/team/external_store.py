@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import time
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from crew.agent.external.catalog import (
@@ -14,33 +17,24 @@ from crew.agent.external.catalog import (
     is_builtin_agent,
 )
 from crew.agent.external.capabilities import normalize_capabilities
-from crew.agent.external.store import ExternalAgentStore, _now
+from crew.agent.external.store import ExternalAgentStore
 from crew.state._migration import backfill_empty_owner_rows
 from crew.team.roles import infer_role_key, role_preset
 
 
-class _InheritedLifecycle:
-    """Embedded-mode view of the external lifecycle served by the base store.
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    Cross-feature operations always go through the ``ExternalAgentLifecycle``
-    surface. When no provider is injected the facade itself still owns the
-    catalog implementation, so this view dispatches to the inherited base
-    methods and keeps the team-side ``delete_agent`` override out of the
-    external deletion path.
+
+class TeamExternalAgentStore:
+    """Team tables and operations composed over an owned external catalog.
+
+    The external catalog surface (``ExternalAgentCatalog`` protocol plus its
+    ACP compatibility aliases) is owned by a composed ``ExternalAgentStore``
+    instance and forwarded via ``__getattr__``; the facade only adds its own
+    Team namespace and the membership-guarded ``delete_agent``. This keeps the
+    team package free of implementation inheritance from the external store.
     """
-
-    def __init__(self, store: ExternalAgentStore) -> None:
-        self._store = store
-
-    def get_agent(self, agent_id: str, *, owner_account_id: str) -> dict[str, Any]:
-        return self._store.get_agent(agent_id, owner_account_id=owner_account_id)
-
-    def delete_agent(self, agent_id: str, *, owner_account_id: str) -> None:
-        ExternalAgentStore.delete_agent(self._store, agent_id, owner_account_id=owner_account_id)
-
-
-class TeamExternalAgentStore(ExternalAgentStore):
-    """Compatibility facade that adds Team-owned tables and operations."""
 
     # 命名空间约定：跨 Feature 不建外键。leader_agent_id / agent_id 只是普通
     # 字符串引用；成员展示信息走写入时快照列，读取不再 JOIN 外援表。
@@ -72,59 +66,102 @@ class TeamExternalAgentStore(ExternalAgentStore):
         *,
         external_catalog_provider: Callable[[], ExternalAgentLifecycle | None] | None = None,
     ) -> None:
-        super().__init__(db_path)
+        self.db_path = str(Path(db_path).expanduser())
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        # 先建 external 命名空间（catalog 角色的存储面），再建 team 命名空间：
+        # 成员快照回填是唯一的 legacy external 行读取点，依赖 catalog 表先行就绪。
+        self._catalog = ExternalAgentStore(self.db_path)
         self._external_catalog_provider = external_catalog_provider
+        self._init_team_schema()
+
+    def __getattr__(self, name: str) -> Any:
+        """Forward the catalog surface to the composed ``ExternalAgentStore``.
+
+        Production assembly registers this facade as the catalog service, so
+        gateway/CLI/team consumers resolve every Runtime/Agent/Profile/binding
+        operation onto this object. Composition replaces the former base-class
+        inheritance: anything the owned catalog implements is reachable here,
+        while underscore-prefixed names stay private to the facade.
+        """
+        if name.startswith("_"):
+            raise AttributeError(f"{type(self).__name__} has no attribute {name!r}")
+        return getattr(self._catalog, name)
 
     def _external_lifecycle(self) -> ExternalAgentLifecycle:
         """Resolve the external-agent lifecycle for cross-feature operations.
 
         Without an injected provider the facade keeps its embedded
-        compatibility role and serves the lifecycle from the inherited catalog
-        implementation. With a provider, resolution follows the active external
+        compatibility role and serves the lifecycle from its owned catalog
+        instance. With a provider, resolution follows the active external
         feature generation; an inactive external feature fails closed instead
-        of falling back to raw SQL against the external tables.
+        of falling back to raw SQL against the external tables. When the
+        provider resolves back to this facade (production registers the facade
+        itself as the catalog service), the owned catalog instance answers so
+        the deletion path never re-enters the facade's own guard.
         """
         if self._external_catalog_provider is None:
-            return _InheritedLifecycle(self)
+            return self._catalog
         catalog = self._external_catalog_provider()
         if catalog is None:
             raise RuntimeError("外部智能体服务未激活")
+        if catalog is self:
+            return self._catalog
         return catalog
 
-    def _create_schema(self, conn) -> None:
-        super()._create_schema(conn)
-        conn.execute(self._EXTERNAL_TEAM_DDL.format(table="external_team"))
-        conn.execute(self._EXTERNAL_TEAM_MEMBER_DDL.format(table="external_team_member"))
-        self._drop_cross_feature_foreign_keys(conn, "external_team", self._EXTERNAL_TEAM_DDL)
-        self._drop_cross_feature_foreign_keys(
-            conn, "external_team_member", self._EXTERNAL_TEAM_MEMBER_DDL
-        )
-        self._ensure_column(conn, "external_team", "owner_account_id", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column(conn, "external_team", "archived_at", "TEXT")
-        self._ensure_column(conn, "external_team", "created_at", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column(conn, "external_team", "updated_at", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column(conn, "external_team", "team_spec_json", "TEXT NOT NULL DEFAULT '{}'")
-        self._ensure_column(
-            conn, "external_team", "formation_plan_json", "TEXT NOT NULL DEFAULT '{}'"
-        )
-        self._ensure_column(conn, "external_team_member", "role_key", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column(conn, "external_team_member", "role_label", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column(
-            conn, "external_team_member", "capabilities_json", "TEXT NOT NULL DEFAULT '[]'"
-        )
-        self._ensure_column(
-            conn, "external_team_member", "workflow_lane", "TEXT NOT NULL DEFAULT ''"
-        )
-        self._ensure_column(conn, "external_team_member", "agent_name", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column(
-            conn, "external_team_member", "agent_provider", "TEXT NOT NULL DEFAULT ''"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_external_team_owner ON external_team(owner_account_id, archived_at, created_at)"
-        )
-        backfill_empty_owner_rows(conn, ["external_team"])
-        self._backfill_member_agent_snapshots(conn)
-        self._migrate_embedded_formation_plans(conn)
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _init_team_schema(self) -> None:
+        """Create the Team namespace tables and run their migrations."""
+        with self._conn() as conn:
+            conn.execute(self._EXTERNAL_TEAM_DDL.format(table="external_team"))
+            conn.execute(self._EXTERNAL_TEAM_MEMBER_DDL.format(table="external_team_member"))
+            self._drop_cross_feature_foreign_keys(conn, "external_team", self._EXTERNAL_TEAM_DDL)
+            self._drop_cross_feature_foreign_keys(
+                conn, "external_team_member", self._EXTERNAL_TEAM_MEMBER_DDL
+            )
+            self._ensure_column(
+                conn, "external_team", "owner_account_id", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._ensure_column(conn, "external_team", "archived_at", "TEXT")
+            self._ensure_column(conn, "external_team", "created_at", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "external_team", "updated_at", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "external_team", "team_spec_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(
+                conn, "external_team", "formation_plan_json", "TEXT NOT NULL DEFAULT '{}'"
+            )
+            self._ensure_column(
+                conn, "external_team_member", "role_key", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._ensure_column(
+                conn, "external_team_member", "role_label", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._ensure_column(
+                conn, "external_team_member", "capabilities_json", "TEXT NOT NULL DEFAULT '[]'"
+            )
+            self._ensure_column(
+                conn, "external_team_member", "workflow_lane", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._ensure_column(
+                conn, "external_team_member", "agent_name", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._ensure_column(
+                conn, "external_team_member", "agent_provider", "TEXT NOT NULL DEFAULT ''"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_external_team_owner ON external_team(owner_account_id, archived_at, created_at)"
+            )
+            backfill_empty_owner_rows(conn, ["external_team"])
+            self._backfill_member_agent_snapshots(conn)
+            self._migrate_embedded_formation_plans(conn)
 
     @staticmethod
     def _drop_cross_feature_foreign_keys(conn, table: str, ddl_template: str) -> bool:
