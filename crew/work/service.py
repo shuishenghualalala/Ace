@@ -28,7 +28,7 @@ from crew.features.services import ServiceKey
 
 log = get_logger("work.service")
 
-WORK_SERVICE_KEY: ServiceKey["WorkService"] = ServiceKey("work")
+WORK_SERVICE_KEY: ServiceKey["WorkService"] = ServiceKey("work", version=1)
 
 WORK_PRODUCT_CONTEXT = """## Crew 办公助手
 

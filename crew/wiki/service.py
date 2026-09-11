@@ -710,7 +710,7 @@ class LocalWikiProvider:
             close()
 
 
-KNOWLEDGE_SERVICE_KEY: ServiceKey[KnowledgeService] = ServiceKey("knowledge")
+KNOWLEDGE_SERVICE_KEY: ServiceKey[KnowledgeService] = ServiceKey("knowledge", version=1)
 
 
 def normalize_kb_id(kb_id: str | None) -> str:

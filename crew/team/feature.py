@@ -30,7 +30,7 @@ from crew.team.team_manager import InProcessTeamManager
 
 TEAM_FEATURE_ID = "product.team"
 TEAM_MODE = "team"
-TEAM_SERVICE_KEY: ServiceKey[InProcessTeamManager] = ServiceKey("team")
+TEAM_SERVICE_KEY: ServiceKey[InProcessTeamManager] = ServiceKey("team", version=1)
 
 
 class TeamFeatureHost(Protocol):

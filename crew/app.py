@@ -28,6 +28,7 @@ from crew.agent.compact import ContextCompactor, SummaryStore
 from crew.agent.executor import create_executor
 from crew.agent.external.feature import (
     AdapterRuntimeProvider,
+    EXTERNAL_AGENT_CATALOG_SERVICE_KEY,
     acquire_external_service_lease,
     build_external_agent_feature,
 )
@@ -90,12 +91,14 @@ from crew.state.session_store import SQLiteSessionStore
 from crew.state.workspace_store import SQLiteWorkspaceStore
 from crew.tasks import TaskRuntime
 from crew.tasks.context import contribute_task_notifications
+from crew.channels import CHANNELS_SERVICE_KEY
 from crew.team.feature import (
     TEAM_SERVICE_KEY,
     _run_team_execution_driver,
     build_team_feature,
 )
 from crew.dynamickanban.feature import DYNAMIC_KANBAN_SERVICE_KEY
+from crew.wiki import KNOWLEDGE_SERVICE_KEY
 from crew.tools.policy import (
     ToolDisclosureMode,
     exclude_toolsets,
@@ -438,8 +441,9 @@ class CrewApp:
     _UNSET_DELIVERY_ROUTER = object()
     _UNSET_DYNAMIC_KANBAN = object()
     _UNSET_DYNAMIC_KANBAN_CONSUMER = object()
-    _KNOWLEDGE_SERVICE_KEY = ServiceKey[Any]("knowledge")
-    _CHANNELS_SERVICE_KEY = ServiceKey[Any]("channels")
+    # 宿主只复用 owning Feature 的 key 常量，不在装配层重复定义 ServiceKey。
+    _KNOWLEDGE_SERVICE_KEY = KNOWLEDGE_SERVICE_KEY
+    _CHANNELS_SERVICE_KEY = CHANNELS_SERVICE_KEY
     _DYNAMIC_KANBAN_SERVICE_KEY = DYNAMIC_KANBAN_SERVICE_KEY
 
     def __init__(
@@ -840,7 +844,7 @@ class CrewApp:
         """Resolve the active external Catalog for compatibility consumers."""
         resolver = getattr(self.plugins, "resolve_service", None)
         if callable(resolver):
-            return resolver(ServiceKey[Any]("external-agent-catalog"), default=None)
+            return resolver(EXTERNAL_AGENT_CATALOG_SERVICE_KEY, default=None)
         return None
 
     def _on_task_event(self, task: dict[str, Any]) -> None:

@@ -25,7 +25,7 @@ from crew.state.logging import get_logger
 log = get_logger("gateway.channels")
 
 CHANNELS_FEATURE_ID = "product.channels"
-CHANNELS_SERVICE_KEY: ServiceKey["ChannelsService"] = ServiceKey("channels")
+CHANNELS_SERVICE_KEY: ServiceKey["ChannelsService"] = ServiceKey("channels", version=1)
 
 
 @dataclass(frozen=True, slots=True)

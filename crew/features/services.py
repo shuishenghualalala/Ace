@@ -31,15 +31,33 @@ def _normalize_identifier(value: str | None, name: str) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class ServiceKey(Generic[T]):
-    """Typed, stable identity for a runtime capability."""
+    """Typed, stable identity for a runtime capability.
+
+    A stable namespace carries a major ``version``: equality and hashing
+    include it, and the registry routes by ``(name, version)``, so a future
+    v2 registration coexists with v1 instead of replacing it.  ``version``
+    defaults to ``1``, keeping ``ServiceKey("name")`` and
+    ``ServiceKey("name", 1)`` interchangeable.  The canonical string form is
+    ``"<name>@v<version>"``.
+    """
 
     name: str
+    version: int = 1
 
     def __post_init__(self) -> None:
         normalized = self.name.strip()
         if not normalized:
             raise ValueError("service key must not be empty")
+        if (
+            not isinstance(self.version, int)
+            or isinstance(self.version, bool)
+            or self.version < 1
+        ):
+            raise ValueError("service key version must be a positive integer")
         object.__setattr__(self, "name", normalized)
+
+    def __str__(self) -> str:
+        return f"{self.name}@v{self.version}"
 
 
 class ServiceScopeKind(str, Enum):
@@ -184,7 +202,7 @@ class ServiceNotFoundError(CrewError):
     """No visible service matched a requested key and tenant path."""
 
 
-ServiceAddress = tuple[str, ServiceScopeKind, tuple[str, ...]]
+ServiceAddress = tuple[str, int, ServiceScopeKind, tuple[str, ...]]
 
 
 class ServiceRegistry:
@@ -199,7 +217,7 @@ class ServiceRegistry:
         scope_kind: ServiceScopeKind,
         scope_path: ServiceScopePath,
     ) -> ServiceAddress:
-        return (key.name, scope_kind, scope_path.identity(scope_kind))
+        return (key.name, key.version, scope_kind, scope_path.identity(scope_kind))
 
     def register(
         self,
@@ -233,7 +251,7 @@ class ServiceRegistry:
             conflicting = conflicting or current[0]
         if conflicting is not None:
             raise ServiceConflictError(
-                f"service {key.name!r} at {scope_kind.value}:{path.identity(scope_kind)!r} "
+                f"service {key} at {scope_kind.value}:{path.identity(scope_kind)!r} "
                 f"is already owned by {conflicting.owner.generation.key}"
             )
 
@@ -287,7 +305,7 @@ class ServiceRegistry:
                 )
                 return cast(ServiceBinding[T], entry.snapshot())
         raise ServiceNotFoundError(
-            f"service {key.name!r} is not available for scope {path!r}"
+            f"service {key} is not available for scope {path!r}"
         )
 
     def acquire_lease(
@@ -370,6 +388,7 @@ class ServiceRegistry:
                 snapshots,
                 key=lambda item: (
                     item.key.name,
+                    item.key.version,
                     item.scope_kind.value,
                     item.scope_path.identity(item.scope_kind),
                 ),
@@ -388,6 +407,7 @@ class ServiceRegistry:
                 ),
                 key=lambda item: (
                     item.key.name,
+                    item.key.version,
                     item.scope_kind.value,
                     item.scope_path.identity(item.scope_kind),
                 ),
@@ -400,13 +420,13 @@ class ServiceRegistry:
     ) -> tuple[ServiceKey[Any], ...]:
         """Return stable keys resolvable from one tenant path."""
         path = scope_path or ServiceScopePath.global_scope()
-        keys = {
-            address[0]: entries[0].key
+        keys: dict[tuple[str, int], ServiceKey[Any]] = {
+            address[:2]: entries[0].key
             for address, entries in self._entries.items()
             if entries
         }
         return tuple(
-            keys[name]
-            for name in sorted(keys)
-            if self.contains(keys[name], path)
+            keys[item]
+            for item in sorted(keys)
+            if self.contains(keys[item], path)
         )

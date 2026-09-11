@@ -21,7 +21,7 @@ from crew.features import (
 
 DYNAMIC_KANBAN_FEATURE_ID = "product.dynamic-kanban"
 DYNAMIC_KANBAN_MODE = "dynamic_kanban"
-DYNAMIC_KANBAN_SERVICE_KEY = ServiceKey("dynamic-kanban")
+DYNAMIC_KANBAN_SERVICE_KEY = ServiceKey("dynamic-kanban", version=1)
 
 
 class DynamicKanbanHost(Protocol):

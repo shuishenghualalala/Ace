@@ -40,6 +40,26 @@ def test_service_scope_path_validates_nested_identity():
         ServiceScopePath(workspace_id="workspace", session_id="session")
 
 
+def test_service_key_defaults_to_major_version_one():
+    assert ServiceKey[str]("knowledge") == ServiceKey[str]("knowledge", 1)
+    assert ServiceKey[str]("knowledge", version=1) == ServiceKey[str]("knowledge")
+    assert hash(ServiceKey[str]("knowledge")) == hash(ServiceKey[str]("knowledge", 1))
+    assert str(ServiceKey[str]("knowledge")) == "knowledge@v1"
+
+
+def test_service_key_major_versions_are_distinct_identities():
+    v1 = ServiceKey[object]("knowledge", 1)
+    v2 = ServiceKey[object]("knowledge", 2)
+
+    assert v1 != v2
+    assert hash(v1) != hash(v2)
+    assert len({v1, v2}) == 2
+    assert str(v2) == "knowledge@v2"
+
+    with pytest.raises(ValueError, match="version must be a positive integer"):
+        ServiceKey[object]("knowledge", 0)
+
+
 def test_registry_resolves_nearest_service_scope():
     registry = ServiceRegistry()
     knowledge = ServiceKey[str]("knowledge")
@@ -339,3 +359,19 @@ def test_registry_lists_visible_keys_and_exact_scope_ownership():
     owned = registry.bindings_owned_by(activating)
     assert [binding.key for binding in owned] == [knowledge]
     assert not owned[0].visible
+
+
+def test_registry_routes_by_name_and_major_version():
+    registry = ServiceRegistry()
+    v1 = ServiceKey[str]("knowledge", version=1)
+    v2 = ServiceKey[str]("knowledge", version=2)
+    registry.register(_active_scope("provider-v1"), v1, "v1-value")
+    registry.register(_active_scope("provider-v2"), v2, "v2-value")
+
+    assert registry.resolve(ServiceKey[str]("knowledge")) == "v1-value"
+    assert registry.resolve(v1) == "v1-value"
+    assert registry.resolve(v2) == "v2-value"
+    assert registry.available_keys() == (v1, v2)
+
+    with pytest.raises(ServiceNotFoundError, match="knowledge@v3"):
+        registry.resolve(ServiceKey[str]("knowledge", 3))

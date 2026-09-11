@@ -40,14 +40,14 @@ from crew.features import (
 
 EXTERNAL_AGENT_FEATURE_ID = "product.external-agents"
 EXTERNAL_AGENT_CATALOG_SERVICE_KEY: ServiceKey[ExternalAgentCatalog] = ServiceKey(
-    "external-agent-catalog"
+    "external-agent-catalog", version=1
 )
 AGENT_RUNTIME_PROVIDER_SERVICE_KEY: ServiceKey["AgentRuntimeProvider"] = ServiceKey(
-    "agent-runtime-provider"
+    "agent-runtime-provider", version=1
 )
-DELEGATION_SERVICE_KEY: ServiceKey["DelegationService"] = ServiceKey("delegation")
+DELEGATION_SERVICE_KEY: ServiceKey["DelegationService"] = ServiceKey("delegation", version=1)
 EXTERNAL_RUNTIME_SUPPORT_SERVICE_KEY: ServiceKey["ExternalRuntimeSupport"] = ServiceKey(
-    "external-runtime-support"
+    "external-runtime-support", version=1
 )
 
 
