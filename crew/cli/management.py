@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from crew.cli.app import CliContext, CliError, CliResult, parse_json
@@ -1192,6 +1195,9 @@ def _register_migrate(subparsers) -> None:
     claim.add_argument("--account", required=True, help="目标 owner_account_id，例如 owner:user-a")
     claim.add_argument("--dry-run", action="store_true", help="只统计，不写入")
     claim.set_defaults(handler=_claim_legacy)
+    feature = cmds.add_parser("feature", help="核对 Feature 级 schema 版本")
+    feature.add_argument("name", help="Feature 注册名，例如 work")
+    feature.set_defaults(handler=_migrate_feature)
 
 
 def _claim_legacy(args: Any, ctx: CliContext) -> CliResult:
@@ -1217,6 +1223,79 @@ def _claim_legacy(args: Any, ctx: CliContext) -> CliResult:
         text = "没有未归属数据。"
     remaining_view = {table: count for table, count in remaining.items() if count}
     return CliResult(data={"changed": changed, "remaining": remaining_view}, text=text)
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureMigrationReport:
+    """一次 Feature schema 版本核对的结果快照。"""
+
+    feature: str
+    current_version: int
+    target_version: int
+
+
+FeatureMigrator = Callable[[Any], FeatureMigrationReport]
+
+
+def _run_main_db_migrator(app: Any, *, feature: str, latest_version: int) -> FeatureMigrationReport:
+    """Ensure the feature's version table on the main database, then snapshot versions."""
+    from crew.state.schema_version import stamp_baseline
+    from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
+
+    conn = connect_sqlite(app.config.db_path, wal_enabled=app.config.sqlite_wal)
+    try:
+        writer = SQLiteWriteHelper(conn, threading.Lock())
+        current = writer.execute(
+            lambda c: stamp_baseline(c, feature, version=latest_version)
+        )
+    finally:
+        conn.close()
+    return FeatureMigrationReport(
+        feature=feature,
+        current_version=current,
+        target_version=latest_version,
+    )
+
+
+def _migrate_work(app: Any) -> FeatureMigrationReport:
+    from crew.work.feature import WORK_SCHEMA_FEATURE, WORK_SCHEMA_VERSION
+
+    return _run_main_db_migrator(
+        app,
+        feature=WORK_SCHEMA_FEATURE,
+        latest_version=WORK_SCHEMA_VERSION,
+    )
+
+
+# Feature → 迁移入口注册表：新 Feature 接入版本化迁移只需在这里加一行，
+# CLI 不写 if 链。入口接收 app，负责把该 Feature 的版本表弄就绪并返回快照。
+FEATURE_MIGRATIONS: dict[str, FeatureMigrator] = {
+    "work": _migrate_work,
+}
+
+
+def _migrate_feature(args: Any, ctx: CliContext) -> CliResult:
+    name = str(getattr(args, "name", "") or "").strip()
+    migrator = FEATURE_MIGRATIONS.get(name)
+    if migrator is None:
+        registered = "、".join(sorted(FEATURE_MIGRATIONS)) or "无"
+        raise CliError(f"Feature '{name}' 尚无版本化迁移（已注册: {registered}）")
+    report = migrator(ctx.app)
+    if report.current_version >= report.target_version:
+        text = f"{report.feature} schema 已是最新：v{report.current_version}"
+    else:
+        text = (
+            f"{report.feature} schema 当前 v{report.current_version}，"
+            f"待迁移到 v{report.target_version}"
+        )
+    return CliResult(
+        data={
+            "feature": report.feature,
+            "current_version": report.current_version,
+            "target_version": report.target_version,
+        },
+        text=text,
+    )
 
 
 __all__ = ["register"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -17,6 +18,8 @@ from crew.features import (
     RegistrationPhase,
     run_async_compat,
 )
+from crew.state.schema_version import stamp_baseline
+from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 from crew.wiki.service import KNOWLEDGE_SERVICE_KEY as WORK_KNOWLEDGE_SERVICE_KEY
 
 from .briefs import WorkBriefStore
@@ -33,6 +36,10 @@ from .sources import WorkSourceAdapter, WorkSourceStore
 from .templates import WorkTemplateStore
 
 WORK_FEATURE_ID = "product.work"
+# Feature 级 schema 版本：整个 work 域共用一张 work_schema_version 表，
+# 当前 schema 结构登记为基线 v1；后续表结构演进在此号上递增并配迁移步骤。
+WORK_SCHEMA_FEATURE = "work"
+WORK_SCHEMA_VERSION = 1
 
 
 class WorkFeatureHost(Protocol):
@@ -94,6 +101,22 @@ def _default_knowledge_acquirer(host: WorkFeatureHost) -> KnowledgeServiceAcquir
     return acquire
 
 
+def _stamp_schema_version(*, db_path: str | Path, wal_enabled: bool) -> None:
+    """Register the Feature-level schema baseline for this database (幂等).
+
+    各 Store 构造时已完成各自的 ensure-schema；这里在装配入口统一补写
+    ``work_schema_version`` 记录。首次运行写入 v1，已有库保持原样。
+    """
+    conn = connect_sqlite(db_path, wal_enabled=wal_enabled)
+    try:
+        writer = SQLiteWriteHelper(conn, threading.Lock())
+        writer.execute(
+            lambda c: stamp_baseline(c, WORK_SCHEMA_FEATURE, version=WORK_SCHEMA_VERSION)
+        )
+    finally:
+        conn.close()
+
+
 def _store_factory(
     host: WorkFeatureHost,
     *,
@@ -113,7 +136,7 @@ def _store_factory(
     workspace_store = getattr(host, "workspace_store", None)
     if session_store is None or workspace_store is None:
         raise ValueError("Work Feature requires session_store and workspace_store")
-    return WorkService(
+    service = WorkService(
         references=WorkReferenceStore(
             db_path,
             session_store=session_store,
@@ -146,6 +169,8 @@ def _store_factory(
         preference_notifier=preference_notifier,
         hook_registry=hook_registry,
     )
+    _stamp_schema_version(db_path=db_path, wal_enabled=wal_enabled)
+    return service
 
 
 def build_work_feature(
