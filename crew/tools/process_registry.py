@@ -56,7 +56,11 @@ SessionKey = tuple[str, str]
 # helper, classifier, or sandbox ever run (H-1). The launcher below runs under
 # ``-I`` (no PYTHONPATH / user site) and rebuilds ``sys.path`` to drop ``cwd`` and
 # prepend only this trusted root.
-_CREW_TRUST_ROOT = str(Path(_crew_pkg.__file__).resolve().parent.parent)
+# 顶层 crew 是 PEP 420 命名空间包（ADR-0037），没有 __file__；
+# 取首个搜索路径 portion（即 crew/ 目录本身）向上一级得到安装根。
+# 三种发行形态下与旧版 crew.__file__ 推导等价：
+# editable 开发态 → 仓库根；site-packages 安装态 → site-packages；PyInstaller 冻结态 → _MEIPASS。
+_CREW_TRUST_ROOT = str(Path(next(iter(_crew_pkg.__path__))).resolve().parent)
 _BACKGROUND_BRIDGE_LAUNCHER = (
     "import sys; "
     "sys.path[:] = [p for p in sys.path if p not in ('', '.')]; "

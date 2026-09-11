@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import crew as _crew_pkg
 from crew.state.logging import get_logger
 
 log = get_logger("wiki.multimodal")
@@ -30,9 +31,21 @@ class MediaUnderstandingError(RuntimeError):
 IMAGE_MIME_PREFIXES = ("image/jpeg", "image/png", "image/webp", "image/bmp", "image/gif")
 VIDEO_MIME_PREFIXES = ("video/mp4", "video/quicktime", "video/webm", "video/x-msvideo", "video/x-matroska")
 
-# skill 脚本路径
-_IMAGE_UNDERSTAND_SCRIPT = Path(__file__).resolve().parents[1] / "skills" / "image-understanding" / "scripts" / "image_understand.py"
-_VIDEO_UNDERSTAND_SCRIPT = Path(__file__).resolve().parents[1] / "skills" / "video-understanding" / "scripts" / "video_understand.py"
+# skill 脚本路径。skills 数据归属根发行版 crew（ADR-0037 拆包后与 wiki 不同发行版），
+# 顶层 crew 为 PEP 420 命名空间包，遍历其搜索路径 portion 定位 skills/，
+# 避免「以 wiki 自身目录回溯包外资源」的文件系统耦合：
+# editable 开发态 → 仓库根 crew/skills；site-packages 安装态 → 合并目录；
+# PyInstaller 冻结态 → _MEIPASS/crew/skills（--add-data 收录）。
+def _crew_skills_dir() -> Path:
+    for portion in _crew_pkg.__path__:
+        candidate = Path(portion) / "skills"
+        if candidate.is_dir():
+            return candidate.resolve()
+    return (Path(next(iter(_crew_pkg.__path__))) / "skills").resolve()
+
+
+_IMAGE_UNDERSTAND_SCRIPT = _crew_skills_dir() / "image-understanding" / "scripts" / "image_understand.py"
+_VIDEO_UNDERSTAND_SCRIPT = _crew_skills_dir() / "video-understanding" / "scripts" / "video_understand.py"
 
 # 缓存加载的模块
 _loaded_modules: dict[str, Any] = {}

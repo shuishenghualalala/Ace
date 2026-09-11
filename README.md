@@ -147,7 +147,7 @@ cd Ace
 # 安装 Python 依赖
 uv venv .venv --python 3.11
 source .venv/bin/activate
-uv pip install -e ".[dev,wiki]"
+uv sync --extra dev --extra wiki
 
 # 创建本地配置和环境变量文件（两者均已被 Git 忽略）
 cp config/config.yaml.example config/config.yaml
@@ -168,7 +168,7 @@ cd Ace
 # 安装 Python 依赖
 uv venv .venv --python 3.11
 .\.venv\Scripts\Activate.ps1
-uv pip install -e ".[dev,wiki]"
+uv sync --extra dev --extra wiki
 
 # 创建本地配置和环境变量文件（两者均已被 Git 忽略）
 Copy-Item config\config.yaml.example config\config.yaml
@@ -322,7 +322,7 @@ Skill 就是船员的职业技能包，装上就会，卸了就忘。仓库随�
 | `crew/state` | 配置、会话、工作空间与日志 |
 | `crew/gateway` | FastAPI REST / WebSocket Gateway |
 | `crew/tasks` / `crew/cron` | 后台任务与定时任务 |
-| `crew/wiki` | 本地知识库 |
+| `crew.wiki`（成员包 `packages/crew-wiki`） | 本地知识库 |
 | `crew/skills` / `plugins` | 技能与插件扩展 |
 | `desktop` | Electron 桌面端 |
 | `web` | Web 客户端 |

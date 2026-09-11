@@ -14,7 +14,7 @@
 #
 # 做的事：
 #   1. 确保 uv 可用（缺失时按官方方式安装到 ~/.local/bin）
-#   2. uv 创建 .venv（Python 3.11）并安装 crew 后端
+#   2. uv 创建 .venv（Python 3.11）并以 uv sync 安装 crew 后端（含 workspace 成员包）
 #   3. 缺失时从 *.example 复制 config/config.yaml 与 config/.env
 #   4. 可选：Web / Desktop 的 npm install 与构建（需要 Node.js >= 22.12）
 # 不做的事：不写入系统目录、不修改 shell 配置文件、不配置任何模型密钥。
@@ -75,22 +75,18 @@ fi
 info "uv: $(uv --version)"
 
 # ----- 2. Python 虚拟环境与后端依赖 -----
-EXTRAS=""
-[ "$WITH_WIKI" = "1" ] && EXTRAS="wiki"
-if [ "$WITH_DEV" = "1" ]; then
-    EXTRAS="${EXTRAS:+$EXTRAS,}dev"
-fi
+# 仓库是 uv workspace（成员包位于 packages/*，共享单份 uv.lock，见 ADR-0037），
+# 统一用 `uv sync` 安装：根包与全部成员一并 editable 装入 .venv，
+# extras 语义与 README「验证安装」一致。
+SYNC_ARGS=(--python 3.11)
+[ "$WITH_WIKI" = "1" ] && SYNC_ARGS+=(--extra wiki)
+[ "$WITH_DEV" = "1" ] && SYNC_ARGS+=(--extra dev)
 
 info "创建 .venv（Python 3.11）"
 uv venv .venv --python 3.11
 
-if [ -n "$EXTRAS" ]; then
-    info "安装后端依赖（extras: $EXTRAS）"
-    uv pip install -e ".[$EXTRAS]"
-else
-    info "安装后端依赖"
-    uv pip install -e .
-fi
+info "安装后端依赖（uv sync ${SYNC_ARGS[*]}）"
+uv sync "${SYNC_ARGS[@]}"
 
 # ----- 3. 本地配置模板（已存在则不覆盖） -----
 [ -f config/config.yaml ] || cp config/config.yaml.example config/config.yaml

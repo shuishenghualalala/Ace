@@ -5,7 +5,7 @@
 <style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
 <body><main>
 <h1>ADR-0037 · uv workspace 首个试点（crew-wiki）提案</h1>
-<p>状态：已批准（用户确认 2026-09-11），实施进行中 · 日期：2026-09-11 · 阶段：6 收官。</p>
+<p>状态：试点已实施（2026-09-11，本地全量验证通过；Docker/CI/打包态待远程验证） · 日期：2026-09-11 · 阶段：6 收官。</p>
 <h2>背景与候选方案</h2>
 <p>workspace 评估报告（<a href="../../todo/ace-workspace-split-assessment.md">ace-workspace-split-assessment.md</a>）确认 uv workspace 多包化可行，并列出 6 项必修逻辑拆分。截至本 ADR 撰写时，6 项已全部解除并有 9 条 import-linter 契约保护：① state→team/external（6I）、② team→external 数据耦合与 Store 继承（6G/6G-2，ADR-0036）、③ wiki→gateway 私有导入（6J）、④ state→browser 类型（6K）、⑤ gateway 协议设施下沉（6L）、⑥ executor→external 直连（6M）。ServiceKey 版本化（6N）进行中。</p>
 <p>候选方案：A. 直接全量拆包（8 个成员包一次到位）——回退面大、CI/Docker/桌面打包链路一次冲击；B. 单包试点（crew-wiki）先行，验证四条交付链后再逐批拆；C. 暂不物理拆包，仅维持契约——放弃包管理器物理强制的收益。</p>
@@ -24,6 +24,11 @@
 <li>desktop 开发态 spawn（<code>python -m crew.gateway.server</code>，desktop/src/main/index.ts:1382）与打包态 PyInstaller 产物启动通过。</li>
 </ol>
 <p>试点完成后的第二批（crew-external-agents）与第三批（粗粒度收尾）按评估报告 §5.2 顺序推进；.importlinter 契约在每批拆包后对应简化为物理事实。</p>
+<h2>实施补充决定：顶层 crew 转 PEP 420 命名空间包</h2>
+<p>实施中发现"目录迁移零代码改动"前提不成立：hatchling editable 安装是朴素路径 .pth（各发行版只把各自目录前缀塞进 sys.path），顶层 <code>crew</code> 保留 <code>__init__.py</code> 即为 regular 包，<code>__path__</code> 被截断在仓库根，成员的 <code>crew.wiki</code> 必然不可导入；且 import-linter（grimp）只经 <code>find_spec</code> 扫描文件系统，pkgutil 式 <code>__path__</code> 扩展对它不可见。最小可行解经独立探针工程实证：删 <code>crew/__init__.py</code>（原内容仅 docstring + 版本号，版本迁 <code>crew/version.py</code>），顶层 crew 成为 PEP 420 原生命名空间包，<code>crew.__path__</code> 跨仓库根与成员 src 双 portion。暴露点修复三处：mcp_server 版本导入、process_registry trust root 改 portion 推导、wiki multimodal 的 skills 定位改遍历 portions（顺带消除一处拆包必断的文件系统耦合）。成员 hatch wheel 配置 <code>packages=["src/crew"]</code>（保 namespace 语义，wheel 内容不变）。</p>
+<h2>实施验证状态</h2>
+<p>本地已验证：uv lock/sync 单锁（成员 editable）、全量测试 4133 passed / 0 failed（weixin 5 例因 uv sync 精确剪除可选依赖转 skip，与 CI 行为一致）、ruff/compileall/lint-imports（9 kept）全绿、成员 wheel 资产收录核验、gateway 启动冒烟（desktop spawn 同款命令）。待远程验证：CI 矩阵实跑、Dockerfile.pack 构建、mac/Windows PyInstaller 冻结产物对跨目录 namespace 包的收集（回退预案：pack 脚本改双非 editable 安装）。</p>
+
 <h2>回退方式</h2>
 <p>试点为纯目录/构建结构变化，业务代码零改动；回退 = 还原目录迁移提交 + 根 pyproject 的 workspace 段，uv.lock 重新生成。</p>
 <h2>待用户确认的输入</h2>

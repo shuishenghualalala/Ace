@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6P · uv workspace 试点 crew-wiki</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6P · uv workspace 试点 crew-wiki（ADR-0037）</h1>
+<p>2026-09-11。首个 workspace 成员包落地：<code>crew/wiki</code>（44 文件）git mv 至 <code>packages/crew-wiki/src/crew/wiki</code>，import 名保持 <code>crew.wiki</code>，全仓调用方零改动。顶层 crew 转 PEP 420 命名空间包（详见 ADR-0037 实施补充）。</p>
+<h2>验收</h2>
+<table><tr><th>项</th><th>结果（子 agent 执行后主 agent 复跑一致）</th></tr>
+<tr><td>uv lock / uv sync --extra dev --extra wiki</td><td>单锁两成员（crew + crew-wiki editable），<code>import crew.wiki</code> 通，namespace 双 portion</td></tr>
+<tr><td>全量测试</td><td><b>4133 passed / 43 skipped / 0 failed</b>（weixin 5 例因 uv sync 精确剪除可选依赖转 skip，与 CI 行为一致）</td></tr>
+<tr><td>ruff / compileall / lint-imports</td><td>全绿 / OK / 9 kept 0 broken</td></tr>
+<tr><td>git rename 检测</td><td>44 个 R（历史保留 100%）</td></tr>
+<tr><td>成员 wheel</td><td>47 项 = 27 py + seed 16 md + presets 1 md，无多余 __init__；根 wheel 350 py 零 wiki 泄漏</td></tr>
+<tr><td>gateway 冒烟（desktop spawn 同款命令）</td><td>真实启动 exit 0</td></tr>
+</table>
+<h2>交付链状态</h2>
+<p>uv sync ✅ 本地；CI ✅ 静态核对零改动 + 本地等价验证（待 PR 矩阵实跑）；Dockerfile.pack ✅ 逻辑核对（待 docker build）；打包态冻结 ✅ spawn 冒烟（待 mac/win PyInstaller 实测，回退预案：pack 脚本改双非 editable 安装）。</p>
+<h2>环境注意</h2>
+<p>uv sync 为精确安装：本地调试微信渠道需 <code>uv sync --extra dev --extra wiki --extra weixin</code>。</p>
+<p><a href="../backend/adr/0037-uv-workspace-pilot-proposal.html">ADR-0037</a> · <a href="ace-workspace-split-assessment.html">workspace 评估</a> · <a href="ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

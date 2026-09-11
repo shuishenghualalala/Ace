@@ -67,6 +67,9 @@ if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
 if (-not (Test-Path ".\.venv\Scripts\pyinstaller.exe")) {
     Write-Host "正在安装项目与 PyInstaller..." -ForegroundColor Yellow
     uv pip install -e ".[dev]"
+    # ADR-0037：wiki 位于 uv workspace 成员包 packages/crew-wiki（import 名仍为 crew.wiki），
+    # 一并 --no-deps 安装，保证 PyInstaller 分析时 crew.wiki 可解析。
+    uv pip install --no-deps -e "./packages/crew-wiki"
     uv pip install pyinstaller
 }
 

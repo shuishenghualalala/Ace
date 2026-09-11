@@ -15,10 +15,10 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from crew import __version__
 from crew.app import CrewApp
 from crew.core.envelope import Envelope
 from crew.state.logging import get_logger
+from crew.version import __version__
 
 log = get_logger("gateway.mcp")
 

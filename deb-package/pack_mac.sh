@@ -96,7 +96,9 @@ command -v hdiutil >/dev/null || { echo "❌ 未找到 hdiutil（应为 macOS �
 # ----- 1) PyInstaller 打包 crew-gateway -----
 echo ""
 echo "→ [1/6] PyInstaller 打包 crew-gateway..."
-venv_pip_install --no-deps .
+# ADR-0037：wiki 位于 uv workspace 成员包 packages/crew-wiki（import 名仍为 crew.wiki），
+# 与根包一并 --no-deps 安装，保证 PyInstaller 分析时 crew.wiki 可解析。
+venv_pip_install --no-deps . ./packages/crew-wiki
 rm -rf dist build
 .venv/bin/pyinstaller --name crew-gateway \
     --onedir --noconfirm --clean \

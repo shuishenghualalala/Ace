@@ -50,18 +50,11 @@ weixin = [
     "cryptography>=42",
     "qrcode>=8.0",
 ]
-# Wiki 文件上传解析：HTML 需要 markdownify，PDF 需要 pymupdf，DOCX 需要 python-docx，
-# XLSX 需要 openpyxl，PPTX 需要 python-pptx，文本编码探测需要 charset-normalizer。
-# 旧版 DOC/XLS/PPT 在运行期通过系统 LibreOffice 转换，不额外引入 Python 包。
-# 不加入核心依赖以避免基础包体积过大；完整 wiki 体验请安装 `.[wiki]`。
+# Wiki 功能自 ADR-0037（6P）起随 workspace 成员包 crew-wiki 发布
+# （packages/crew-wiki，import 名保持 crew.wiki）。此 extra 只保留既有安装入口
+# （`uv sync --extra wiki` / `pip install .[wiki]`），实际依赖清单随成员包走。
 wiki = [
-    "charset-normalizer>=3.4.0",
-    "markdownify>=0.13.1",
-    "pymupdf>=1.28.0",
-    "python-docx>=1.2.0",
-    "openpyxl>=3.1.0",
-    "python-pptx>=1.0.0",
-    "youtube-transcript-api>=1.0.0",
+    "crew-wiki[wiki]",
 ]
 # PDF 处理 skill（crew/skills/pdf）：创建/处理 PDF + 视觉 QA。
 # 创建：reportlab + matplotlib（图表）。
@@ -111,6 +104,15 @@ crew = "crew.cli.main:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# ── uv workspace（ADR-0037）：成员包位于 packages/*，共享单份 uv.lock ────────
+# 试点成员 crew-wiki；后续批次按评估报告 §5.2 顺序逐批迁入。
+# 顶层 crew 为 PEP 420 命名空间包（发行版间 import 名保持 crew.*）。
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+crew-wiki = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["crew"]

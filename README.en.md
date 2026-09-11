@@ -142,7 +142,7 @@ cd Ace
 # Install Python dependencies
 uv venv .venv --python 3.11
 source .venv/bin/activate
-uv pip install -e ".[dev,wiki]"
+uv sync --extra dev --extra wiki
 
 # Create local config and env files (both git-ignored)
 cp config/config.yaml.example config/config.yaml
@@ -163,7 +163,7 @@ cd Ace
 # Install Python dependencies
 uv venv .venv --python 3.11
 .\.venv\Scripts\Activate.ps1
-uv pip install -e ".[dev,wiki]"
+uv sync --extra dev --extra wiki
 
 # Create local config and env files (both git-ignored)
 Copy-Item config\config.yaml.example config\config.yaml
@@ -310,7 +310,7 @@ Key directories:
 | `crew/state` | Config, sessions, workspaces, and logs |
 | `crew/gateway` | FastAPI REST / WebSocket Gateway |
 | `crew/tasks` / `crew/cron` | Background and scheduled tasks |
-| `crew/wiki` | Local knowledge base |
+| `crew.wiki` (member package `packages/crew-wiki`) | Local knowledge base |
 | `crew/skills` / `plugins` | Skills and plugin extensions |
 | `desktop` | Electron desktop app |
 | `web` | Web client |

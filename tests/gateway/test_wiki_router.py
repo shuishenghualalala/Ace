@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import crew.wiki
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 import pytest
@@ -159,7 +160,8 @@ def test_wiki_gateway_static_boundary_does_not_import_local_store_or_parser():
     assert "gateway.routers.wiki" not in gateway_source
 
     feature_source = (
-        Path(__file__).parents[2] / "crew" / "wiki" / "feature.py"
+        # ADR-0037：wiki 源码位于成员包 packages/crew-wiki，以包自身定位源文件
+        Path(crew.wiki.__file__).parent / "feature.py"
     ).read_text(encoding="utf-8")
     assert "create_wiki_router(host)" in feature_source
 
