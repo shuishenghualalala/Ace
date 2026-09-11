@@ -1373,7 +1373,7 @@ async def test_auto_stream_emits_fast_then_final_without_ai_when_gate_passes(
     fake = FakeProvider()
     crew.provider = fake
     monkeypatch.setattr(
-        "crew.gateway.routers.runtimes.formation_auto_decision",
+        "crew.team.formation.formation_auto_decision",
         lambda payload, baseline: (False, []),
     )
     api = create_app(crew)
@@ -1409,7 +1409,7 @@ async def test_auto_stream_emits_ai_status_and_one_final_after_fast(
     fake = FakeProvider(script=[ChatResponse(text="invalid json")])
     crew.provider = fake
     monkeypatch.setattr(
-        "crew.gateway.routers.runtimes.formation_auto_decision",
+        "crew.team.formation.formation_auto_decision",
         lambda payload, baseline: (True, ["structured_multi_role_task"]),
     )
     api = create_app(crew)
