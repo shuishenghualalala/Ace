@@ -251,6 +251,9 @@ async def test_app_uses_host_and_browser_owned_context_contributors(
         ),
         enable_team=False,
     )
+    # browser 插件 activation_phase=startup（c147420 迁入宿主事件循环生命周期），
+    # 其 ContextContributor 与 browser_manager 都要走 startup 才会注册。
+    await app.startup(start_cron=False)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     referenced = workspace / "notes.md"

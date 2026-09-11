@@ -530,12 +530,18 @@ def test_verification_preset_is_background():
     assert reg.get("Explore").background is False
 
 
-def test_verification_preset_can_actually_receive_browser_use():
+async def test_verification_preset_can_actually_receive_browser_use():
     """tools 白名单与 toolsets 取交集；必须显式包含 browser toolset。"""
     app = build_app(config=Config(max_iterations=5))
-    verification = SubagentRegistry().get("verification")
+    # browser 插件 activation_phase=startup（c147420 迁入宿主事件循环生命周期），
+    # browser_use 工具要走 startup 才会注册进 registry。
+    await app.startup(start_cron=False)
+    try:
+        verification = SubagentRegistry().get("verification")
 
-    names = app._subagent_tool_filter(verification.toolsets, verification.tools)
+        names = app._subagent_tool_filter(verification.toolsets, verification.tools)
+    finally:
+        await app.shutdown()
 
     assert "browser_use" in names
 

@@ -89,22 +89,29 @@ def test_removing_owner_model_drops_only_that_owners_agent_cache(
     assert app.agents.peek("other-session", owner_account_id="owner-b") is other_agent
 
 
-def test_inherited_text_only_subagent_cannot_use_browser_vision() -> None:
+@pytest.mark.asyncio
+async def test_inherited_text_only_subagent_cannot_use_browser_vision() -> None:
     cfg = Config(
         active_model_id="text",
         model_profiles={"text": _profile("text", capabilities=["text", "tools"])},
     )
     app = build_app(config=cfg, enable_team=False)
-    app.browser_manager.driver.available = lambda: True
-    token = current_model_capabilities.set(("text", "tools"))
+    # browser 插件 activation_phase=startup（c147420 迁入宿主事件循环生命周期），
+    # 必须先走 startup 才有 browser_manager 与 browser_use 工具。
+    await app.startup(start_cron=False)
     try:
-        child = app._make_subagent({"model": "inherit"})
-    finally:
-        current_model_capabilities.reset(token)
+        app.browser_manager.driver.available = lambda: True
+        token = current_model_capabilities.set(("text", "tools"))
+        try:
+            child = app._make_subagent({"model": "inherit"})
+        finally:
+            current_model_capabilities.reset(token)
 
-    assert "browser_use" in (child.tool_filter or [])
-    assert "browser_vision" not in (child.tool_filter or [])
-    assert child.model_capabilities == ("text", "tools")
+        assert "browser_use" in (child.tool_filter or [])
+        assert "browser_vision" not in (child.tool_filter or [])
+        assert child.model_capabilities == ("text", "tools")
+    finally:
+        await app.shutdown()
 
 
 def test_explicit_no_tools_subagent_has_empty_tool_filter(monkeypatch: pytest.MonkeyPatch) -> None:
