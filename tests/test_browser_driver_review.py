@@ -459,6 +459,7 @@ async def test_electron_driver_maps_execute_and_control_mode_to_host_rpc(
             "command_deadline_ms": 1_004_000,
             "proxy_url": "http://127.0.0.1:4567",
             "download_dir": str(download_dir.resolve()),
+            "max_transfer_bytes": 104857600,
             "mutating": True,
         },
         6,
@@ -571,6 +572,7 @@ async def test_electron_driver_uses_independent_atomic_replay_rpcs(
                 **transaction,
                 "proxy_url": "http://127.0.0.1:4567",
                 "download_dir": str(download_dir.resolve()),
+                "max_transfer_bytes": 104857600,
             },
             6,
             {
@@ -850,7 +852,8 @@ def test_owner_profile_falls_back_to_effective_global_profile(
     assert cfg.owner_active_model_profile("owner") is profile
 
 
-def test_text_only_model_does_not_receive_browser_vision(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_text_only_model_does_not_receive_browser_vision(tmp_path: Path) -> None:
     profile = ModelProfile(
         id="text",
         api_key="test-key",
@@ -866,11 +869,17 @@ def test_text_only_model_does_not_receive_browser_vision(tmp_path: Path) -> None
     )
     cfg.activate_model("text")
     app = build_app(config=cfg, enable_team=False)
-    app.browser_manager.driver.available = lambda: True
+    # browser 插件 activation_phase=startup（c147420 迁入宿主事件循环生命周期），
+    # 必须先走 startup 才有 browser_manager；测试结束统一 shutdown 回收。
+    await app.startup(start_cron=False)
+    try:
+        app.browser_manager.driver.available = lambda: True
 
-    agent = app._make_agent({}, owner_account_id="owner")
+        agent = app._make_agent({}, owner_account_id="owner")
 
-    # 单一 browser_use 工具保留在工具集中；vision action 由工具的
-    # permission_resolver 按模型能力拒绝（见 plugins/browser/tool.py）。
-    assert "browser_use" in (agent.tool_filter or [])
-    assert "browser_vision" not in (agent.tool_filter or [])
+        # 单一 browser_use 工具保留在工具集中；vision action 由工具的
+        # permission_resolver 按模型能力拒绝（见 plugins/browser/tool.py）。
+        assert "browser_use" in (agent.tool_filter or [])
+        assert "browser_vision" not in (agent.tool_filter or [])
+    finally:
+        await app.shutdown()
