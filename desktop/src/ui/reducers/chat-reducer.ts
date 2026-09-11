@@ -680,10 +680,14 @@ export function thinkingReducer(chunk: ThinkingChunk, snapshot: ReducerSnapshot)
   if (book.firstChunkAt == null && book.assistantId) book.firstChunkAt = snapshot.now;
   if (book.assistantId) {
     const existing = snapshot.messages.find((m) => m.id === book.assistantId);
+    const patch: Partial<ChatMessage> = { thinking: mergeStreamingText(existing?.thinking, text) };
+    // 首个 thinking 帧到达时刻记为思考流起点（只记一次，后续帧不重置），
+    // 供回合封口时计算 thinkingDurationMs 与思考块时长展示。
+    if (existing && existing.thinkingStartedAt == null) patch.thinkingStartedAt = snapshot.now;
     upserts.push({
       op: 'patch',
       messageId: book.assistantId,
-      patch: { thinking: mergeStreamingText(existing?.thinking, text) },
+      patch,
     });
   }
   return {
@@ -901,9 +905,19 @@ export function finalReducer(chunk: FinalChunk, snapshot: ReducerSnapshot): Redu
     assistantId = null;
     book.assistantId = null;
   } else if (assistantId) {
-    const startedAt = snapshot.messages.find((m) => m.id === assistantId)?.turnStartedAt;
+    const existingMsg = snapshot.messages.find((m) => m.id === assistantId);
+    const startedAt = existingMsg?.turnStartedAt;
     turnDurationMs = snapshot.now - (startedAt ?? snapshot.now);
     if (book.firstChunkAt != null && startedAt != null) firstTokenMs = book.firstChunkAt - startedAt;
+    // 思考流随回合封口一并结算：有思考内容且起点已记录、尚未结算时写回总耗时。
+    const thinkingSeal: { thinkingDurationMs?: number } = {};
+    if (
+      existingMsg?.thinking?.trim()
+      && existingMsg.thinkingStartedAt != null
+      && existingMsg.thinkingDurationMs == null
+    ) {
+      thinkingSeal.thinkingDurationMs = snapshot.now - existingMsg.thinkingStartedAt;
+    }
     // 修法2（配合 stream-reassembly 的按序重组）：累积正文现已按 gateway_sequence 重组为序号权威，
     // 乱序不再需要这里兜底。覆盖只在「final.text 是累积正文的超集前缀」时发生——即 acc 是 text 的
     // 前缀（text.startsWith(acc)），此时 text ⊇ acc，覆盖只补全（单段回合丢尾帧的合法恢复），不丢
@@ -920,13 +934,13 @@ export function finalReducer(chunk: FinalChunk, snapshot: ReducerSnapshot): Redu
       upserts.push({
         op: 'patch',
         messageId: assistantId,
-        patch: { content: finalContent, streaming: false, turnDurationMs, timestamp: snapshot.now, segmentRole },
+        patch: { content: finalContent, streaming: false, turnDurationMs, timestamp: snapshot.now, segmentRole, ...thinkingSeal },
       });
     } else {
       upserts.push({
         op: 'patch',
         messageId: assistantId,
-        patch: { streaming: false, turnDurationMs, timestamp: snapshot.now, segmentRole },
+        patch: { streaming: false, turnDurationMs, timestamp: snapshot.now, segmentRole, ...thinkingSeal },
       });
     }
   } else if (text) {
@@ -989,13 +1003,23 @@ export function errorReducer(chunk: ErrorChunk, snapshot: ReducerSnapshot): Redu
   let turnDurationMs = 0;
   let firstTokenMs: number | undefined;
   if (book.assistantId) {
-    const startedAt = snapshot.messages.find((m) => m.id === book.assistantId)?.turnStartedAt;
+    const existingMsg = snapshot.messages.find((m) => m.id === book.assistantId);
+    const startedAt = existingMsg?.turnStartedAt;
     turnDurationMs = snapshot.now - (startedAt ?? snapshot.now);
     if (book.firstChunkAt != null && startedAt != null) firstTokenMs = book.firstChunkAt - startedAt;
+    const patch: Partial<ChatMessage> = { streaming: false, turnDurationMs, timestamp: snapshot.now };
+    // 出错封口同样结算思考耗时，思考块能给出最终时长而不是停留在「持续了几秒」。
+    if (
+      existingMsg?.thinking?.trim()
+      && existingMsg.thinkingStartedAt != null
+      && existingMsg.thinkingDurationMs == null
+    ) {
+      patch.thinkingDurationMs = snapshot.now - existingMsg.thinkingStartedAt;
+    }
     upserts.push({
       op: 'patch',
       messageId: book.assistantId,
-      patch: { streaming: false, turnDurationMs, timestamp: snapshot.now },
+      patch,
     });
   }
   upserts.push({

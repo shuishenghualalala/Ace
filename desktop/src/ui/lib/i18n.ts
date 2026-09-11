@@ -159,6 +159,11 @@ const zh: Record<string, string> = {
   'nav.system': '系统',
   'nav.newChat': '新对话',
 
+  // == 对话过程时间线 ==
+  'chat.turn.working': '已工作 {duration}',
+  'chat.thinking.brief': '思考 · 持续了几秒',
+  'chat.thinking.measured': '思考 · 持续了 {seconds} 秒',
+
   // == 初始化 ==
   'init.failed': '初始化 {name} 失败：{error}',
 };
@@ -295,6 +300,11 @@ const en: Record<string, string> = {
   'nav.cron': 'Cron',
   'nav.system': 'System',
   'nav.newChat': 'New Chat',
+
+  // == Chat process timeline ==
+  'chat.turn.working': 'Worked {duration}',
+  'chat.thinking.brief': 'Thinking · a few seconds',
+  'chat.thinking.measured': 'Thinking · {seconds}s',
 
   // == Init ==
   'init.failed': 'Failed to initialize {name}: {error}',

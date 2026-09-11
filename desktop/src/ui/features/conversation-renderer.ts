@@ -444,7 +444,7 @@ function sigTeamInternal(msg: ChatMessage, isStreaming: boolean): string {
   const files = (msg.turnFileChanges || []).map((file) =>
     `${file.path}|${file.status}|${file.added}|${file.removed}|${file.binary ? '1' : '0'}`,
   ).join(';');
-  return `team|${msg.id}|${msg.content}|${msg.thinking || ''}|${tools}|${artifacts}|${files}|${msg.agentId || ''}|${msg.agentName || ''}|${msg.agentRole || ''}|${msg.agentTone || 0}|${msg.eventType || ''}|${msg.nodeId || ''}|${msg.displayMode || ''}|${msg.collapsedTitle || ''}|${msg.processText || ''}|${msg.communicationKind || ''}|${msg.communicationStatus || ''}|${msg.requestId || ''}|${msg.replyTo || ''}|${msg.communicationRequestText || ''}|${durationBucket}|${isStreaming ? '1' : '0'}`;
+  return `team|${msg.id}|${msg.content}|${msg.thinking || ''}|${msg.thinkingStartedAt ?? ''}|${msg.thinkingDurationMs ?? ''}|${tools}|${artifacts}|${files}|${msg.agentId || ''}|${msg.agentName || ''}|${msg.agentRole || ''}|${msg.agentTone || 0}|${msg.eventType || ''}|${msg.nodeId || ''}|${msg.displayMode || ''}|${msg.collapsedTitle || ''}|${msg.processText || ''}|${msg.communicationKind || ''}|${msg.communicationStatus || ''}|${msg.requestId || ''}|${msg.replyTo || ''}|${msg.communicationRequestText || ''}|${durationBucket}|${isStreaming ? '1' : '0'}`;
 }
 
 /** 一段 batch（同一回合的连续 agent 消息）的 sig。
@@ -453,7 +453,8 @@ function sigTeamInternal(msg: ChatMessage, isStreaming: boolean): string {
  *  流结束时 streaming/tool 状态本身会改变 sig，届时再渲染最终时长。
  *
  *  覆盖 renderAgentTurn 的全部输入：isStreaming / userPinnedOpen / turnDurationMs 桶 /
- *  batch 内每条消息的 role|content|thinking|toolCalls|planReview|todoSnapshot|turnFileChanges|
+ *  batch 内每条消息的 role|content|thinking|thinkingStartedAt|thinkingDurationMs|
+ *  toolCalls|planReview|todoSnapshot|turnFileChanges|
  *  streaming|agentName|model|timestamp。
  *  toolCall 逐项展开（name/args/result/status/startedAt/duration）确保工具状态变化触发 patch。
  *  planReview / todoSnapshot / turnFileChanges 同样展开，否则 todo_updated / plan_review /
@@ -490,7 +491,7 @@ function sigAgentTurn(
     const wc = m.wikiCards
       ? m.wikiCards.map((p) => `${p.id}|${p.title}`).join(US)
       : '';
-    return `${m.id}|${m.role}|${m.content}|${m.thinking ?? ''}|${m.segmentRole ?? ''}|${tc}|${pr}|${ts}|${tfc}|${wc}|${m.streaming ? '1' : '0'}|${m.agentName ?? ''}|${m.model ?? ''}|${m.timestamp}`;
+    return `${m.id}|${m.role}|${m.content}|${m.thinking ?? ''}|${m.thinkingStartedAt ?? ''}|${m.thinkingDurationMs ?? ''}|${m.segmentRole ?? ''}|${tc}|${pr}|${ts}|${tfc}|${wc}|${m.streaming ? '1' : '0'}|${m.agentName ?? ''}|${m.model ?? ''}|${m.timestamp}`;
   });
   return `t|${isStreaming ? '1' : '0'}|${userPinnedOpen === null ? '_' : userPinnedOpen ? '1' : '0'}|${parts.join('||')}`;
 }

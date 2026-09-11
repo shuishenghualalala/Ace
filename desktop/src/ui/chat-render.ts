@@ -25,6 +25,8 @@ import { buildChippedNodes } from './features/composer-mention';
 import { isPlanDocumentPath } from './plan-document-path';
 import { createIcon, type IconId } from './components/icon';
 import { renderToolInteractionCard } from './components/interaction-card';
+import { getLocale, t } from './lib/i18n';
+import { spriteSymbolRef } from './lib/sprite-symbol';
 
 export type MessageRole = 'user' | 'assistant' | 'status' | 'error' | 'team_internal';
 
@@ -95,6 +97,11 @@ export interface ChatMessage {
   /** 多轮工具 loop 内该 assistant 段是过程还是最终答案；由 reducer 写入，历史回放可推断。 */
   segmentRole?: SegmentRole | undefined;
   thinking?: string | undefined;
+  /** 思考流起点（首个 thinking 帧到达时刻，由 thinkingReducer 记录）。
+   *  纯前端计时，历史回放无此数据时思考块不展示时长。 */
+  thinkingStartedAt?: number | undefined;
+  /** 思考流总耗时（ms）：回合 final/error 封口时由 reducer 依据 thinkingStartedAt 计算写回。 */
+  thinkingDurationMs?: number | undefined;
   toolCalls?: ToolCallInfo[] | undefined;
   streaming?: boolean | undefined;
   attachments?: Attachment[] | undefined;
@@ -184,7 +191,7 @@ function createChatAvatar(): HTMLElement {
   svg.setAttribute('viewBox', '0 0 32 32');
   svg.setAttribute('aria-hidden', 'true');
   const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-  use.setAttribute('href', CHAT_BOT_AVATAR_SYMBOL);
+  use.setAttribute('href', spriteSymbolRef(CHAT_BOT_AVATAR_SYMBOL));
   svg.appendChild(use);
   avatar.appendChild(svg);
   return avatar;
@@ -328,6 +335,9 @@ const PROCESS_SUBAGENT_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><
 const PROCESS_MEMORY_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>';
 const PROCESS_SKILL_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l2.4 7.2H22l-6 4.8 2.3 7.2-6.3-4.5-6.3 4.5L8 14 2 9.2h7.6z"/></svg>';
 
+/** 时间线可展开项的折叠箭头（chevron），details[open] 时由 CSS 旋转 90° 朝向下。 */
+const TIMELINE_CHEVRON_SVG = '<svg class="process-timeline__chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 6 15 12 9 18"></polyline></svg>';
+
 /** 工具时间线图标类别。 */
 export type ToolIconKind =
   | 'write' | 'read' | 'search' | 'web' | 'todo' | 'team' | 'memory' | 'skill' | 'cron' | 'terminal';
@@ -381,28 +391,37 @@ function prettyBlock(value?: string): string {
   }
 }
 
-function renderThinkingBlock(thinking: string, messageId: string, streaming: boolean): HTMLElement {
-  // 时间线项默认态对齐 web：思考中展开、完成后收起。
+function renderThinkingBlock(message: ChatMessage, turnLive: boolean): HTMLElement {
+  // 「思考进行中」判定：消息仍在流式、且正文/工具尚未落到同一条消息上
+  // （thinking 帧先到达，content/toolCalls 到达即视为思考阶段结束）。
   // data-thinking-for 供流式分片定点更新 body（patchStreamingTurn），保持外层 DOM 不变。
+  const streaming = Boolean(
+    message.streaming && turnLive && !message.content?.trim() && !(message.toolCalls?.length),
+  );
+  const seconds = message.thinkingDurationMs != null
+    ? Math.round(Math.max(0, message.thinkingDurationMs) / 1000)
+    : 0;
+  const title = !streaming && seconds >= 3
+    ? t('chat.thinking.measured', { seconds })
+    : t('chat.thinking.brief');
   const details = createTrustedElement<HTMLDetailsElement>(
     `<details class="process-timeline__content process-timeline__details">
       <summary class="process-timeline__row">
         <span class="process-timeline__title"></span>
-        <span class="process-timeline__chevron">›</span>
+        ${TIMELINE_CHEVRON_SVG}
       </summary>
       <div class="process-timeline__thinking"></div>
     </details>`,
   );
   details.open = streaming;
-  details.querySelector<HTMLElement>('.process-timeline__title')!.textContent =
-    streaming ? '思考中' : '思考已完成';
-  details.querySelector<HTMLElement>('.process-timeline__thinking')!.textContent = thinking;
+  details.querySelector<HTMLElement>('.process-timeline__title')!.textContent = title;
+  details.querySelector<HTMLElement>('.process-timeline__thinking')!.textContent = message.thinking ?? '';
   const item = renderTimelineItem(
     PROCESS_THINKING_ICON_SVG,
     streaming ? 'process-timeline__icon--running' : '',
     details,
   );
-  item.dataset.thinkingFor = messageId;
+  item.dataset.thinkingFor = message.id;
   return item;
 }
 
@@ -515,7 +534,7 @@ function renderSubagentCard(tool: ToolCallInfo, messageId: string): HTMLElement 
       <summary class="process-timeline__row subagent-card__header">
         <span class="process-timeline__title subagent-card__title"></span>
         <span class="process-timeline__duration" ${durationAttr} ${startedAtAttr}>${initialDuration}</span>
-        <span class="process-timeline__chevron">›</span>
+        ${TIMELINE_CHEVRON_SVG}
       </summary>
       <div class="subagent-card__body"></div>
     </details>`,
@@ -633,7 +652,7 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
         <summary class="process-timeline__row">
           <span class="process-timeline__title"></span>
           <span class="process-timeline__duration" ${durationAttr} ${startedAtAttr}>${initialDuration}</span>
-          <span class="process-timeline__chevron">›</span>
+          ${TIMELINE_CHEVRON_SVG}
         </summary>
         <div class="process-timeline__detail">
           <section class="process-code-block" data-section="args">
@@ -782,6 +801,28 @@ export function formatDuration(ms: number): string {
 }
 
 /**
+ * 回合级计时头的时长格式：跟随界面语言。
+ * 中文输出「42 秒 / 10 分 22 秒 / 1 小时 5 分」；英文复用 formatDuration 的短形式。
+ * 显示秒最小取 1，避免流式首秒出现「0 秒」。 */
+export function formatTurnDuration(ms: number): string {
+  const safe = Math.max(0, ms);
+  if (getLocale() !== 'zh-CN') return formatDuration(safe);
+  const totalSec = Math.max(1, Math.floor(safe / 1000));
+  if (totalSec < 60) return `${totalSec} 秒`;
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m < 60) return s > 0 ? `${m} 分 ${s} 秒` : `${m} 分`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm > 0 ? `${h} 小时 ${rm} 分` : `${h} 小时`;
+}
+
+/** 回合顶部计时头文案：「已工作 X 分 X 秒」，流式中由 ticker 每秒原地刷新。 */
+export function resolveTurnHeaderLabel(durationMs: number): string {
+  return t('chat.turn.working', { duration: formatTurnDuration(durationMs) });
+}
+
+/**
  * 从同一回合 batch 推导展示用耗时。
  * - 执行中：以首条 assistant 的 turnStartedAt 为起点实时累加（工具阶段 last 条可能已非 streaming）。
  * - 已结束：优先取 batch 内任意 assistant 已写入的 turnDurationMs（final 通常写在末条）；
@@ -876,6 +917,8 @@ export interface AgentTurnOptions {
    *  由 renderChat 从回合 assistant 消息的 turnStartedAt/turnDurationMs 推导后传入，
    *  替代原先用首末消息 timestamp 相减的错误算法（timestamp 不随 patch 更新）。 */
   turnDurationMs: number;
+  /** 覆盖回合顶部计时头文案（Team 规划等专属标题用）；缺省走统一「已工作 X 分 X 秒」。 */
+  turnHeaderLabel?: string | undefined;
   /** 嵌入式对话可隐藏助手身份行；主对话默认显示。 */
   showAssistantName?: boolean;
   /** 仅外部 ACP Agent / 外部 Team 传入；缺省继续走原 Crew 头像与名称。 */
@@ -1079,7 +1122,7 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
     }
     // assistant：thinking + tools 进折叠区（空白 thinking 同样跳过，避免只显示标题的空思考项）
     if (m.thinking?.trim()) {
-      processParts.push(renderThinkingBlock(m.thinking, m.id, Boolean(m.streaming && options.isStreaming)));
+      processParts.push(renderThinkingBlock(m, options.isStreaming));
     }
 
     // Markdown 渲染入口：只看消息是否仍在流式或被截断，不看 session busy。
@@ -1099,7 +1142,10 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
       div.className = 'process-timeline__narration msg__text md-body chat-markdown';
       if (m.streaming && i === lastTextIdx) div.dataset.textFor = m.id;
       div.appendChild(createTrustedFragment(md));
-      processParts.push(renderTimelineItem('', 'process-timeline__icon--ghost', div));
+      // 旁白不占图标列：通栏渲染，文字左缘与折叠区外正文顶格对齐（ghost 图标列空白会显得悬空）。
+      const item = renderTimelineItem('', 'process-timeline__icon--ghost', div);
+      item.classList.add('process-timeline__item--narration');
+      processParts.push(item);
     }
 
     if (m.toolCalls && m.toolCalls.length > 0) {
@@ -1151,7 +1197,6 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
   });
 
   const answerTextStarted = hasVisibleAnswerText(messages);
-  const hasProcess = processParts.length > 0 || turnHasProcessContent(messages);
 
   // open 状态：
   //   手动折叠 → 永远尊重；
@@ -1164,25 +1209,19 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
   else if (options.userPinnedOpen === true) open = true;
   else open = true;
 
-  // summary 文案：空乐观占位「正在思考」；一旦有过程或正文流式输出 →「正在执行」；
-  // 结束：有工具调用 →「已执行 Xs，已调用 N 个工具」；纯思考回合 →「已思考 Xs」。
-  const liveLabel = resolveLiveFoldLabel(durationMs, hasProcess || answerTextStarted);
-  const toolCallCount = messages.reduce((n, m) => n + (m.toolCalls?.length ?? 0), 0);
-  const doneLabel = toolCallCount > 0
-    ? `已执行 ${formatDuration(durationMs)}，已调用 ${toolCallCount} 个工具`
-    : `已思考 ${formatDuration(durationMs)}`;
-  const label = isLive ? liveLabel : doneLabel;
+  // 顶部计时头文案：统一「已工作 X 分 X 秒」（Team 等专属回合由 turnHeaderLabel 覆盖）。
+  const label = options.turnHeaderLabel ?? resolveTurnHeaderLabel(durationMs);
 
-  // 折叠条显示条件：
+  // 计时头显示条件：
   // - 有过程内容（thinking/tools/旁白/status）→ 始终显示；
-  // - live 回合 → 始终显示（含「仅旁白、工具未到」的计划模式前奏），避免「正在执行」闪没；
+  // - live 回合 → 始终显示（含「仅旁白、工具未到」的计划模式前奏），避免计时头闪没；
   // - 已结束且无过程 → 不显示（纯正文回答）。
   if (processParts.length > 0 || isLive) {
     const details = document.createElement('details');
     details.className = `msg__foldable${isLive ? ' msg__foldable--live' : ''}`;
     if (open) details.open = true;
     const summary = document.createElement('summary');
-    summary.className = `msg__fold-summary${isLive ? ' msg__fold-summary--live' : ''}`;
+    summary.className = `msg__turn-header${isLive ? ' msg__fold-summary--live' : ''}`;
     if (isLive) {
       const spinner = document.createElement('span');
       spinner.className = 'msg__fold-spinner';
@@ -1423,6 +1462,8 @@ export function renderTeamInternalMessage(
     // 其他 Team Agent Turn 继续完全沿用普通回合规则。
     userPinnedOpen: isPlanning && !isStreaming ? false : null,
     turnDurationMs,
+    // Team 回合保留专属计时头文案（规划标题 / 「已思考 X」），不套用统一「已工作」。
+    turnHeaderLabel: resolveTeamTurnFoldLabel(message, turnDurationMs, isStreaming),
     identity: isPlanning
       ? { kind: 'team', name, badge: '' }
       : { kind: 'external', name, badge: name.slice(0, 1).toUpperCase() },
@@ -1491,10 +1532,6 @@ export function renderTeamInternalMessage(
     if (actions.childElementCount > 0) bubble.appendChild(actions);
   }
 
-  if (isPlanning) {
-    const label = bubble.querySelector<HTMLElement>('.msg__fold-label');
-    if (label) label.textContent = resolveTeamTurnFoldLabel(message, turnDurationMs, isStreaming);
-  }
   // 历史回放可能只留下一个没有正文、过程或产物的规划事件。不要把这个
   // 空事件渲染成浅绿色气泡；流式中的空事件仍需保留，用于显示规划进度。
   if (!isStreaming && bubble.childElementCount === 0) {
