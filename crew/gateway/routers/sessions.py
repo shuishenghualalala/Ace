@@ -31,7 +31,7 @@ from crew.gateway.helpers import (
 from crew.gateway.hooks import hook_registry
 from crew.security.settings import strict_security_enabled
 from crew.state.session_store import SessionOwnershipError, is_placeholder_title
-from crew.state.team_member_model import (
+from crew.team.team_member_model import (
     TeamMemberModelBindingError,
     materialize_team_member_model_bindings,
     set_team_member_model_binding,

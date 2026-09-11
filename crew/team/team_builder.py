@@ -11,7 +11,7 @@ from crew.core.errors import ToolError
 from crew.core.interfaces import LLMProvider, MemoryProvider, SessionStore
 from crew.plugins.manager import PluginManager
 from crew.state.config import Config
-from crew.state.team_member_model import materialize_team_member_model_bindings
+from crew.team.team_member_model import materialize_team_member_model_bindings
 from crew.team.models import TeamMemberSpec
 from crew.team.roles import CREW_BUILTIN_AGENT_ID, DEFAULT_MEMBERS, is_crew_builtin_agent
 from crew.tools.registry import Registry
