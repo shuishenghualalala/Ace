@@ -15,6 +15,7 @@ from crew.state.home import (
     export_crew_runtime_env,
     get_crew_home,
     get_owner_runtime_home,
+    get_upload_dir,
     get_task_workspace_root,
     load_memory_md,
     load_soul_md,
@@ -213,6 +214,26 @@ def test_owner_runtime_home_and_workspace_are_owner_scoped(tmp_path, monkeypatch
     assert ws_a == owner_home / "task_workspaces" / "default"
     assert ws_b == home / "accounts" / owner_b_segment / "task_workspaces" / "default"
     assert ws_a != ws_b
+
+
+def test_upload_dir_is_owner_scoped(tmp_path, monkeypatch):
+    """上传目录语义：owner 场景落 owner home/uploads；无 owner 回退基础 CREW_HOME/uploads。"""
+    from crew.core.runctx import current_owner_account_id
+
+    home = tmp_path / ".crew"
+    monkeypatch.setenv("CREW_HOME", str(home))
+
+    owner_home = get_owner_runtime_home("owner:user-a")
+    assert get_upload_dir("owner:user-a") == owner_home / "uploads"
+    assert get_upload_dir("owner:user-a") == (
+        home / "accounts" / owner_path_segment("owner:user-a") / "uploads"
+    )
+
+    token = current_owner_account_id.set("")
+    try:
+        assert get_upload_dir() == home / "uploads"
+    finally:
+        current_owner_account_id.reset(token)
 
 
 def test_owner_runtime_env_file_is_owner_scoped(tmp_path, monkeypatch):

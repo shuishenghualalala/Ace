@@ -864,13 +864,13 @@ def build_wiki_tools(
         import uuid
         from pathlib import Path
 
-        from crew.gateway.context import _get_upload_dir
+        from crew.state.home import get_upload_dir
         from crew.wiki.multimodal import is_image_mime, is_video_mime
 
         from .schemas import RawSource
 
         candidate = Path(path).expanduser().resolve()
-        uploads_root = _get_upload_dir(_owner()).expanduser().resolve()
+        uploads_root = get_upload_dir(_owner()).expanduser().resolve()
         try:
             candidate.relative_to(uploads_root)
         except ValueError:

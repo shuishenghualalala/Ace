@@ -16,7 +16,7 @@ from crew.browser.tab_reading import (
     resolve_browser_tab_references as resolve_browser_tab_references,
 )
 from crew.state.logging import get_logger
-from crew.state.home import get_owner_runtime_home, task_workspace_path
+from crew.state.home import get_owner_runtime_home, get_upload_dir, task_workspace_path
 
 log = get_logger("context")
 
@@ -26,8 +26,8 @@ _STRUCTURED_PATH_REFERENCE_RE = re.compile(
     r"(?:^|\s)@(?P<kind>file|folder|image):(?P<path>[^\s@]+)"
 )
 def _get_upload_dir(owner_account_id: str | None = None) -> Path:
-    """返回上传文件存储根目录（延迟求值，确保 load_config 已设置 CREW_HOME）。"""
-    return get_owner_runtime_home(owner_account_id) / "uploads"
+    """返回上传文件存储根目录；实现收敛在 crew.state.home，此别名仅为 gateway 内部兼容。"""
+    return get_upload_dir(owner_account_id)
 
 
 def _ensure_upload_dir(owner_account_id: str | None = None) -> Path:

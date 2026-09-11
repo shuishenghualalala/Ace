@@ -395,6 +395,11 @@ def get_owner_runtime_home(
     return path
 
 
+def get_upload_dir(owner_account_id: str | None = None) -> Path:
+    """返回 owner 上传附件存储根目录（延迟求值，确保 CREW_HOME 已就绪）。"""
+    return get_owner_runtime_home(owner_account_id) / "uploads"
+
+
 def runtime_env_overrides(
     env_file: str | Path | None = None,
     *,

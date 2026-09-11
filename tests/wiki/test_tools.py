@@ -966,7 +966,7 @@ async def test_capture_attachment_only_accepts_current_turn_allowlist(tmp_path, 
     registry = fs_wiki["registry"]
     current_attachment_paths.set((str(allowed),))
 
-    with patch("crew.gateway.context._get_upload_dir", return_value=uploads):
+    with patch("crew.state.home.get_upload_dir", return_value=uploads):
         rejected = await registry.get("wiki_capture_attachment").run({"path": str(old)})
         accepted = await registry.get("wiki_capture_attachment").run({"path": str(allowed)})
 
@@ -991,7 +991,7 @@ async def test_capture_attachment_uses_original_name_and_content_type_not_displa
     current_attachment_paths.set((str(stored),))
     current_attachment_files.set(((str(stored), "机票预订单.pdf"),))
 
-    with patch("crew.gateway.context._get_upload_dir", return_value=uploads):
+    with patch("crew.state.home.get_upload_dir", return_value=uploads):
         result = await registry.get("wiki_capture_attachment").run({"path": str(stored)})
         titled_result = await registry.get("wiki_capture_attachment").run({
             "path": str(stored),
