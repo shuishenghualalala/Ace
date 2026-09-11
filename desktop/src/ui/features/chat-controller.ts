@@ -95,6 +95,7 @@ import {
   reduceChunk,
   resolveBusyTransition,
   resolveTurnGate,
+  toLegacyEventFrame,
   USER_WAIT_CHUNK_KINDS,
   type UsagePayload,
 } from '../reducers/chat-reducer';
@@ -902,20 +903,25 @@ export function applyChunk(incomingChunk: ChatChunk): void {
   // 旧后端可能把 Team sidechain 的 Followup 推到内部 session。归并到可见父
   // session 时不能沿用子 session 自己的 gateway_sequence 命名空间，否则会被
   // 父 session 的较高水位误判为 replay 重复帧。
-  const chunk: ChatChunk = sid === sourceSid
+  const wireChunk: ChatChunk = sid === sourceSid
     ? incomingChunk
     : { ...incomingChunk, session_id: sid };
-  if (sid !== sourceSid) delete chunk.gateway_sequence;
+  if (sid !== sourceSid) delete wireChunk.gateway_sequence;
   logStream('apply-chunk', 'recv', {
     sid,
     source_sid: sourceSid === sid ? undefined : sourceSid,
-    kind: chunk.kind,
-    request_id: chunk.request_id,
-    sequence: chunk.sequence,
-    gateway_sequence: chunk.gateway_sequence,
-    is_final: chunk.is_final,
+    kind: wireChunk.kind,
+    request_id: wireChunk.request_id,
+    sequence: wireChunk.sequence,
+    gateway_sequence: wireChunk.gateway_sequence,
+    is_final: wireChunk.is_final,
     activeSessionId: state.activeSessionId,
   });
+  // 两代协议入口归一：feature_event 新帧先映射回等价旧 kind 帧（已登记的 v1 事件，
+  // 与 Gateway 出口兼容层同一资格集），使 wiki_changed 早期分支、回合 gate、
+  // kanban 刷新白名单、team_internal 渲染副作用对两代帧走完全相同的代码路径——
+  // 兼容层删除后到达 Desktop 的 feature_event 帧行为不变。
+  const chunk: ChatChunk = toLegacyEventFrame(wireChunk);
   // 撤回/中断后忽略该会话的迟到分片，避免重建已被删除的幽灵助手消息。
   if (state.suppressChunks.has(sid)) {
     logStream('apply-chunk', 'drop-suppressed', { sid, kind: chunk.kind });

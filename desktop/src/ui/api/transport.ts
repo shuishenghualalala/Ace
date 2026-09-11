@@ -38,6 +38,7 @@ export type ChunkKind =
   | 'wiki_ingest_progress'
   | 'wiki_cards'
   | 'wiki_changed'
+  | 'feature_event'
   | 'ping'
   | 'pong';
 

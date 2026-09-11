@@ -625,6 +625,12 @@ function createKanbanBoardDisposer(
  * - 向 board-hooks 注册中心调用回调；
  * - 绑定任务面板 resize。
  * 返回的 disposer 与 disposeKanbanBoard() 共享同一条清理路径。
+ *
+ * started / board_changed / call_completed 有意不注册 reducer：这三个事件经
+ * chat-reducer.toLegacyEventFrame 归一为旧 kanban 帧形态，与旧帧走同一条路径——
+ * 回合 gate 按 TURN_SCOPED 分类，chat-controller 在看板会话守卫内触发
+ * scheduleRefreshKanbanBoard，reducer 落空实现。旧 kanban 帧从不进 registry，
+ * 因此这里不存在需要「消音」的 unhandled 警告；注册空 handler 只会复制既有行为。
  */
 export function initKanbanBoard(): () => void {
   if (kanbanInitDisposer) return kanbanInitDisposer;

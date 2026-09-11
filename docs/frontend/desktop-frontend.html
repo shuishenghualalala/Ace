@@ -791,5 +791,13 @@
   <p>旧 wiki_changed 广播保留在历史加载与序号处理之前的时序，但 DOM 广播由 Wiki 自有 handler 执行。注册发生冲突时回滚本次已经安装的条目。未知配置仍沿用原有缺省可用规则，不改变导航兼容语义。</p>
   <p>已验收：typecheck、lint（0 error）与全量 1874 tests 通过，记录见 <a href="../testing/plugin-architecture-stage-5-wiki-event-lifecycle.html">阶段 5-8 测试记录</a>。</p>
 </section>
+<section>
+  <h2>feature_event 流路径语义补齐（2026-09-11）</h2>
+  <p>后端生产侧业务事件只产出 <code>feature_event</code> 帧，Gateway 出口兼容层目前把它们翻译回旧 kind 帧（team_internal、wiki_cards、wiki_changed、wiki_ingest_progress、kanban、workflow_progress）发给客户端；为兼容层删除做准备，本阶段补齐 Desktop 对 feature_event 帧的完整处理语义，使同一事件无论以旧帧还是新帧到达，最终行为完全一致。只新增 feature_event 路径的正确处理，不删除旧帧路径，不改后端。</p>
+  <p><b>入口归一</b>是唯一机制：<code>chat-reducer.ts</code> 新增 <code>toLegacyEventFrame</code> 与映射表（与 Gateway <code>event_compat.py</code> 同一资格集，仅已登记的 v1 事件），<code>normalizeChunk</code> 的 feature_event 分支与 <code>applyChunk</code> 入口（wire 日志之后、所有分支之前）都先做归一，此后下游全部只面对旧 kind 形态。未登记事件与未知版本原样放行，仍由 registry 的可诊断忽略语义兜底（console.warn、不抛错）。</p>
+  <p>四处旧帧硬依赖的补齐方式：① <b>kanban 刷新</b>——feature_event(kanban, started/board_changed/call_completed/workflow_progress) 归一为 kanban / workflow_progress kind，落入既有刷新白名单与看板会话守卫，<code>scheduleRefreshKanbanBoard</code> 照常触发；kanban-board 不为前三个事件注册空 reducer（归一后与旧 kanban 帧同路径，旧帧从不进 registry，无需消音）。② <b>team_internal 副作用</b>——feature_event(team, internal_message) 归一为 team_internal kind，进入既有渲染副作用分支（renderChat + renderWorkspaceHistory + 计时同步 + 滚动 + early return），副作用列表零复制。③ <b>回合 gate</b>——按 body 映射出的 kind 分类：team.internal_message 获得 TURN_GENERATION 语义，wiki.cards、kanban 全部事件获得 TURN_SCOPED 语义，裸 "feature_event" 不进任何 kind 集合，迟到帧丢弃判定与旧帧逐字一致。④ <b>wiki_changed 时序</b>——feature_event(wiki, changed) 归一后走同一早期分支，在 history 排队与 gateway sequence 去重之前派发 DOM 事件，历史加载窗口与重放场景行为等价；normalizeChunk/reduceChunk 同时补齐 wiki_changed 形态表示与 registry 转调，保证绕过 applyChunk 的调用方也等价。</p>
+  <p>另有 <code>transport.ts</code> 的 ChunkKind 枚举补上缺失的 <code>feature_event</code> 成员（此前运行时容错、类型层欠账）。</p>
+  <p>已验收：<code>npm run typecheck</code> 通过；<code>npm run lint</code> 0 error（改动文件无新增告警）；<code>npm test</code> 全量 1888 tests 通过（新增 <code>tests/unit/feature-event-stream.test.ts</code> 14 用例，锁定映射表、看板刷新触发与守卫、team_internal 副作用与 gate 丢弃、wiki changed 早期分支时序/去重/加载窗口、未知事件与版本保真）。</p>
+</section>
 </body>
 </html>
