@@ -122,7 +122,15 @@ ContextContributor(
     <li>新增 Provider 实现 <code>KnowledgeService</code>，不得让消费者依赖本地文件布局。</li>
   </ul>
 
-  <h2>7. 变更记录</h2>
+  <h2>7. KnowledgeService 契约一致性测试（2026-09-11）</h2>
+  <p>演进计划阶段 6 首个切片：<code>tests/wiki/test_service_contract.py</code> 把 <code>KnowledgeService</code> 协议面的行为断言写成与实现无关的参数化套件，为未来 Local/Remote Provider 替换建立统一契约门禁。</p>
+  <ul>
+    <li><strong>工厂参数化</strong>：套件通过 <code>PROVIDER_FACTORIES</code> 注册表按工厂 id 参数化；当前只接入 <code>local</code>（<code>LocalWikiProvider</code>）。工厂走与生产 Bundle（<code>feature.make_provider</code>）相同的组件构造路径——真实 FileSystemWikiStore、WikiQuerier、WikiCompiler、WikiSummarizer、WikiSessionManager，不 mock 存储/检索组件；仅 LLM 边界使用脚本化 FakeProvider（与 compiler 单测同一策略）。未来 Remote Provider 只需注册一个新工厂，全部用例自动复跑。</li>
+    <li><strong>断言语义而非"不抛错"</strong>：覆盖协议全部方法——query/search/search_pages、ingest（progress 阶段序与回调容错、预取消抛 <code>CancelledError</code> 且零写入）、read_document、index_status、initialize 幂等、KB 增删列（default/tutorial 保护与缺失返回 False）、页面增删改与分页/brief 列表、related_pages 方向与去重、vault 文档、upload→source 面（source_pages/source_titles/source_files/source_file/delete_source）、capture_text 去重与校验、capture_attachment、compile_all/lint/graph、session_kb_id/cancel_confirmation 默认值，以及 owner 与 kb 两个维度的隔离性。</li>
+    <li><strong>序列化边界结论</strong>：协议返回的 DTO 中，KnowledgeQuery、KnowledgeIndexStatus、KnowledgeVaultDocument、KnowledgeBase、WikiPage（dataclass 载荷）、WikiPageRelation、IngestResult、RawSource、CompileResult、WikiGraph、lint issue dict 均可无损 JSON round-trip（严格 <code>json.dumps</code> 无需 default），证明其传输无关。锁定现状形态的三处：<code>KnowledgeSourceFile.content</code> 为 bytes，严格序列化抛 TypeError、<code>default=str</code> 后退化为不可还原的 repr 字符串（远程化前需 base64 等显式编码）；<code>KnowledgeUploadResult.pages/issues</code> 的 tuple 经 JSON 后到达对端为 list；<code>WikiPage.to_dict</code> 完整模式不含 summary（仅 brief 模式携带，且 brief 读取端用正文头部摘录覆盖显式 summary）。</li>
+  </ul>
+
+  <h2>8. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
@@ -133,6 +141,7 @@ ContextContributor(
       <tr><td>2026-09-05</td><td>Wiki CLI 全部叶子命令迁为动态 Knowledge Service Consumer。</td><td>命令 Gate、同步/异步 Lease、外部 Provider、上传与 Host SessionStore 边界。</td></tr>
       <tr><td>2026-09-05</td><td>Wiki cards/changes 注册为生命周期 Event Contributor，Gateway WS 删除 Manager 特判。</td><td>事件顺序、Generation replace、drain、失败隔离与旧帧出口兼容。</td></tr>
       <tr><td>2026-09-05</td><td>Wiki Agent Preset 资产与完整策略归属 Bundle，通用 Agent 装配删除名称特判。</td><td>动态目录、前后台 Lease、父权限、普通 Agent 隔离与缓存换代。</td></tr>
+      <tr><td>2026-09-11</td><td>新增 KnowledgeService 契约一致性测试套件（工厂参数化 + 全协议方法 + DTO 序列化边界锁定）。</td><td><code>tests/wiki/test_service_contract.py</code>；未来 Remote Provider 复用同一套件，不改生产代码。</td></tr>
     </tbody>
   </table>
 

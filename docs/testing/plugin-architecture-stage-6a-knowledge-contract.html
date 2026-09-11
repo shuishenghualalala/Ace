@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6A · KnowledgeService 契约一致性测试</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6A · KnowledgeService 契约一致性测试</h1>
+<p>2026-09-11。演进计划阶段 6 首个切片：建立 Local/Remote Provider 契约一致性测试（暂不提供生产远程服务）。基线提交 8f36569；已验收通过并随本记录提交。</p>
+<h2>范围与归属</h2>
+<p>新增 <code>tests/wiki/test_service_contract.py</code>（31 用例）：以 <code>PROVIDER_FACTORIES</code> 注册表参数化的实现无关契约套件，当前接入唯一实现 <code>local</code>——工厂按生产 Bundle（<code>feature.make_provider</code>）相同路径组装真实 FileSystemWikiStore / WikiQuerier / WikiCompiler / WikiSummarizer / WikiSessionManager，仅 LLM 边界使用脚本化 FakeProvider。未来 Remote Provider 注册一个工厂即全量复跑。</p>
+<p>本切片不改任何生产代码、不创建无消费者的 Remote 空壳。开发由独立子 agent 执行，主 agent 审查后提交。</p>
+<h2>验收契约</h2>
+<table><tr><th>场景</th><th>证据</th><th>状态</th></tr>
+<tr><td>协议全方法行为断言</td><td>query/search/search_pages、ingest（progress 阶段序 load→analyze→done、回调抛错不中断、预取消 CancelledError 且零写入）、read_document、index_status、initialize 幂等、KB 生命周期（default/tutorial 保护、缺失返回 False）、页面增删改与分页/brief、related_pages 双向去重、vault 文档、upload→source 全链路（source_pages/titles/files/file/delete_source）、capture 去重与校验、compile/lint/graph、session 默认值</td><td>✅ 31 用例</td></tr>
+<tr><td>隔离性</td><td>owner 与 kb 两个维度互不可见（页/来源/读取/列表）</td><td>✅ test_owner_isolation / test_kb_isolation_within_owner</td></tr>
+<tr><td>序列化边界</td><td>全部协议 DTO 严格 JSON round-trip 无损；三处现状形态锁定（KnowledgeSourceFile.content bytes 不可还原、UploadResult tuple→list、to_dict 完整模式不含 summary）</td><td>✅ 序列化段 12 用例 + 端到端 transport-clean 用例</td></tr>
+<tr><td>跨平台</td><td>pathlib + tmp_path，无硬编码分隔符；用例结束统一 close() 释放 SQLite/FTS 句柄（Windows 文件锁友好）</td><td>✅ 代码审查确认</td></tr>
+</table>
+<h2>验证记录</h2>
+<table><tr><th>命令</th><th>结果（子 agent 执行后主 agent 复跑）</th></tr>
+<tr><td><code>.venv/bin/python -m pytest tests/wiki -q</code></td><td>374 passed（含新增 31 例）</td></tr>
+<tr><td><code>.venv/bin/python -m ruff check tests/wiki crew/wiki</code></td><td>All checks passed</td></tr>
+<tr><td><code>.venv/bin/python -m compileall -q crew/wiki tests/wiki</code></td><td>退出码 0</td></tr>
+</table>
+<p>平台说明：在 macOS（darwin arm64）执行；套件仅用标准库与真实组件，Linux/Windows CI 语义一致。</p>
+<h2>远程化前置发现（供 Remote Provider 切片处理）</h2>
+<ul>
+<li><code>KnowledgeSourceFile.content: bytes</code> 无法无损 JSON round-trip，远程化前需 base64 显式编码或元数据/内容双通道。</li>
+<li>KB 删除后读取得到静默空视图（惰性重建空目录），协议层无法区分"空库"与"已删库"——远程实现需先定语义。</li>
+<li>ingest 取消语义不一致：analyze 期间取消返回 issues=["已取消"]，检查点之间取消抛 CancelledError。</li>
+<li><code>source_file</code> 与 <code>source_files</code> 的 location 语义不一致（标题 vs 绝对路径）；绝对路径远程化后无意义。</li>
+<li>教程库播种是 <code>list_knowledge_bases</code> 的惰性副作用，全新 owner 列表无 default。</li>
+</ul>
+<p><a href="../backend/modules/wiki.html">Wiki 模块文档</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>
