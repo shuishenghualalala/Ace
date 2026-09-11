@@ -58,7 +58,7 @@ from crew.features import (
 )
 from crew.gateway.dispatcher import BusyMode, SessionDispatcher
 from crew.gateway.helpers import session_external_agent_id
-from crew.gateway.session_context import build_session_context_contribution
+from crew.features.session_context import build_session_context_contribution
 from crew.memory.simple import SQLiteMemory
 from crew.plugins.builtin import LoggingPlugin
 from crew.plugins.manager import PluginManager
@@ -2489,7 +2489,7 @@ class CrewApp:
 
     async def _shutdown_resources(self, *, provider_timeout: float) -> None:
         """Execute the ordered App shutdown sequence."""
-        from crew.gateway.hooks import hook_registry
+        from crew.features.hooks import hook_registry
 
         promote_hook = getattr(self, "_promote_session_model_hook", None)
         if promote_hook is not None:
@@ -3770,7 +3770,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         )
     )
 
-    from crew.gateway.hooks import hook_registry
+    from crew.features.hooks import hook_registry
     from crew.work import LLMPreferenceExtractor, build_work_feature
 
     async def _notify_work_owner(owner_account_id: str, payload: dict[str, Any]) -> None:
@@ -3889,7 +3889,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     app._install_builtin_feature(dk_feature.definition)
     app.declare_managed_feature(dk_feature.definition)
 
-    from crew.gateway.hooks import hook_registry
+    from crew.features.hooks import hook_registry
 
     async def _promote_session_model_on_agent_end(_event: str, ctx: dict) -> None:
         sid = str(ctx.get("session_id") or "")

@@ -1,4 +1,4 @@
-"""Gateway-owned session source, delivery metadata, and context contribution.
+"""Session source, delivery metadata, and context contribution contracts.
 
 This module keeps the routing data contract independent from SessionStore and
 publishes its model-visible snapshot through the shared Context Contributor path.

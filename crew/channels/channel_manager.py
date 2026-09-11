@@ -8,7 +8,7 @@ from types import MappingProxyType
 from typing import Any
 
 from crew.core.interfaces import Channel, MessageHandler
-from crew.gateway.hooks import hook_registry
+from crew.features.hooks import hook_registry
 from crew.state.logging import get_logger
 
 log = get_logger("gateway")

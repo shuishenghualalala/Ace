@@ -37,7 +37,7 @@ from crew.gateway.helpers import (
     status_frame,
 )
 from crew.channels.broadcast import stream_and_broadcast
-from crew.gateway.session_context import session_context_from_envelope
+from crew.features.session_context import session_context_from_envelope
 from crew.state.logging import get_logger
 from crew.core.followup import get_followup_waiter
 

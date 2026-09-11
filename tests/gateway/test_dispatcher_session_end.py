@@ -13,7 +13,7 @@ import pytest
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.gateway.dispatcher import SessionDispatcher
-from crew.gateway.hooks import hook_registry
+from crew.features.hooks import hook_registry
 from crew.tasks.runtime import TaskRuntime
 
 OWNER = "A:uid-a"

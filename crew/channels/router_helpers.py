@@ -1,7 +1,6 @@
 """渠道路由与 CLI 共享的纯函数/配置工具。
 
-本模块从 crew.gateway.routers.channels 下沉，供 router 与 CLI 共同消费，
-避免 CLI 反向依赖 gateway router 的私有实现。
+供 Gateway Router 与 CLI 共同消费，避免 CLI 依赖 Gateway Router 的私有实现。
 """
 
 from __future__ import annotations

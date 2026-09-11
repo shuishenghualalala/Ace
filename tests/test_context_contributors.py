@@ -24,7 +24,7 @@ from crew.features import (
     FeatureState,
     FeatureStopPolicy,
 )
-from crew.gateway.session_context import SessionContext, SessionSource
+from crew.features.session_context import SessionContext, SessionSource
 from crew.state.config import Config
 
 

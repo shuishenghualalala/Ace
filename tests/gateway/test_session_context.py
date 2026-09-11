@@ -2,7 +2,7 @@
 
 
 from crew.core.envelope import Envelope
-from crew.gateway.session_context import (
+from crew.features.session_context import (
     SessionContext,
     SessionSource,
     build_session_context_contribution,

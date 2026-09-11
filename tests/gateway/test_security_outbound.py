@@ -1,8 +1,8 @@
 """Gateway 安全基线：密钥过滤与静默回复检测。"""
 
-from crew.gateway.outbound import format_outbound_payload, should_skip_chunk
+from crew.features.outbound import format_outbound_payload, should_skip_chunk
 from crew.gateway.helpers import status_frame
-from crew.gateway.response_filters import is_silent_reply, redact_secrets
+from crew.features.response_filters import is_silent_reply, redact_secrets
 from crew.core.envelope import ResponseChunk
 
 

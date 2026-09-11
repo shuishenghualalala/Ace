@@ -27,8 +27,8 @@ from typing import Any
 from crew.channels.platform_registry import PlatformConfig  # noqa: F401 - 类型参考/对外
 from crew.core.envelope import Envelope
 from crew.core.interfaces import Channel, MessageHandler
-from crew.gateway.response_filters import apply_text_filters
-from crew.gateway.session_context import SessionSource, build_session_key
+from crew.features.response_filters import apply_text_filters
+from crew.features.session_context import SessionSource, build_session_key
 from crew.state.logging import get_logger
 
 from . import ilink

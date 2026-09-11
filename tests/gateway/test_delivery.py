@@ -3,7 +3,7 @@
 import pytest
 
 from crew.channels.delivery import DeliveryRouter, DeliveryTarget
-from crew.gateway.session_context import SessionSource
+from crew.features.session_context import SessionSource
 
 
 def test_delivery_target_parse_origin():

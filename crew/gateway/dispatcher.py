@@ -30,8 +30,8 @@ from crew.core.errors import ProviderError, ToolError
 from crew.core.runctx import current_owner_account_id, normalize_owner_account_id
 from crew.core.interfaces import MessageHandler, SessionStore
 from crew.core.types import Message
-from crew.gateway.hooks import hook_registry
-from crew.gateway.outbound import enrich_error_chunk
+from crew.features.hooks import hook_registry
+from crew.features.outbound import enrich_error_chunk
 from crew.state.logging import get_logger
 
 log = get_logger("gateway.dispatcher")

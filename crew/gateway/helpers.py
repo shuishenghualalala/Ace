@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from crew.agent.capabilities import capability_profile_ids
 from crew.agent.external.runtime_registry import resolve_runtime_display_badge
-from crew.gateway.session_context import SessionSource, build_session_key
+from crew.features.session_context import SessionSource, build_session_key
 from crew.team.formation import (
     build_team_draft as build_team_draft,
     confirmed_formation_plan as confirmed_formation_plan,

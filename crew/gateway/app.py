@@ -32,7 +32,7 @@ from crew.gateway.helpers import (
     NOT_BUILT_HTML,
     ExternalAgentsDisabledError,
 )
-from crew.gateway.hooks import hook_registry
+from crew.features.hooks import hook_registry
 from crew.gateway.interaction_bridge import create_interaction_router, interaction_bridge
 from crew.gateway.logout import LogoutCoordinator
 from crew.gateway.routers.auth_session import create_auth_session_router

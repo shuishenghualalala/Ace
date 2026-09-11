@@ -7,7 +7,7 @@ import uuid
 from typing import Any
 
 from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
-from crew.gateway.session_context import SessionContext, SessionSource, session_context_from_envelope
+from crew.features.session_context import SessionContext, SessionSource, session_context_from_envelope
 from crew.state.logging import get_logger
 
 log = get_logger("gateway.channel_sessions")

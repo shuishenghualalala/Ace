@@ -12,7 +12,7 @@ from typing import Any
 
 from crew.cli.app import CliContext, CliError, CliResult, parse_json
 from crew.gateway.helpers import config_body, with_session_agent_labels
-from crew.gateway.hooks import hook_registry
+from crew.features.hooks import hook_registry
 from crew.gateway.routers.sessions import _session_has_blocking_cron, _teardown_session_resources
 from crew.state.logging import query_logs
 from crew.state.session_store import SessionOwnershipError

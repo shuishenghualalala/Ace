@@ -21,7 +21,7 @@ import time
 from typing import Any, AsyncIterator, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk
-from crew.gateway.outbound import format_outbound_payload
+from crew.features.outbound import format_outbound_payload
 from crew.core.runctx import normalize_owner_account_id
 from crew.state.logging import get_logger
 

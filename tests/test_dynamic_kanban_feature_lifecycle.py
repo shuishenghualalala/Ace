@@ -10,7 +10,7 @@ import pytest
 from crew.core.mocks import FakeProvider, InMemorySessionStore, NullMemory
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.app import build_app
-from crew.gateway.routers.dynamic_kanban import create_dynamic_kanban_router
+from crew.dynamickanban.routes import create_dynamic_kanban_router
 from crew.gateway.auth import AccountContext
 from starlette.requests import Request
 from crew.state.config import Config

@@ -8,8 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from crew.gateway.response_filters import apply_text_filters
-from crew.gateway.session_context import SessionSource
+from crew.features.response_filters import apply_text_filters
+from crew.features.session_context import SessionSource
 from crew.state.logging import get_logger
 
 log = get_logger("gateway.delivery")

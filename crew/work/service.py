@@ -196,7 +196,7 @@ class WorkService:
         self.preference_extractor = preference_extractor
         self.preference_notifier = preference_notifier
         if hook_registry is None:
-            from crew.gateway.hooks import hook_registry as gateway_hooks
+            from crew.features.hooks import hook_registry as gateway_hooks
 
             hook_registry = gateway_hooks
         self._hooks = hook_registry

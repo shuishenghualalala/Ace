@@ -1,7 +1,7 @@
 """测试响应过滤器。"""
 
 
-from crew.gateway.response_filters import (
+from crew.features.response_filters import (
     ResponseFilterChain,
     normalize_line_breaks,
     strip_thinking_tags,
@@ -135,7 +135,7 @@ def test_strip_thinking_tags_gated_by_channel():
 
 def test_apply_text_filters_strips_thinking_only_for_im():
     """全局过滤链对 IM 渠道剥离 thinking、对 Web 不剥离；密钥过滤对所有渠道生效。"""
-    from crew.gateway.response_filters import apply_text_filters
+    from crew.features.response_filters import apply_text_filters
 
     text = "<thinking>r</thinking> sk-abcdefgh1234"
     im_out = apply_text_filters(text, {"channel": "feishu"})
@@ -150,7 +150,7 @@ def test_apply_text_filters_strips_thinking_only_for_im():
 
 def test_redact_secrets_failure_returns_safe_placeholder():
     """redact_secrets 自身异常时，链必须返回安全占位，绝不能把含密钥的原文泄露出去。"""
-    from crew.gateway.response_filters import (
+    from crew.features.response_filters import (
         REDACT_FAILURE_PLACEHOLDER,
         ResponseFilterChain,
         strip_thinking_tags,

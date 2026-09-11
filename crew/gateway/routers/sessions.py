@@ -28,7 +28,7 @@ from crew.gateway.helpers import (
     session_external_agent_id,
     with_session_agent_labels,
 )
-from crew.gateway.hooks import hook_registry
+from crew.features.hooks import hook_registry
 from crew.security.settings import strict_security_enabled
 from crew.state.session_store import SessionOwnershipError, is_placeholder_title
 from crew.team.team_member_model import (

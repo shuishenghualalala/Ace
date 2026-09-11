@@ -196,7 +196,7 @@ def build_dynamic_kanban_feature(
             phase=RegistrationPhase.CONTRIBUTION,
         )
         context.register_service(DYNAMIC_KANBAN_SERVICE_KEY, service, label="service:dynamic-kanban")
-        from crew.gateway.routers.dynamic_kanban import create_dynamic_kanban_router
+        from crew.dynamickanban.routes import create_dynamic_kanban_router
         context.register_api_router(
             create_dynamic_kanban_router(host, service=service),
             contribution_id=DYNAMIC_KANBAN_FEATURE_ID,

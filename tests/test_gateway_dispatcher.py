@@ -25,7 +25,7 @@ from crew.channels.channel_manager import ChannelManager
 from crew.gateway.connections import ConnectionManager, _MAX_CONSECUTIVE_FAILURES
 from crew.channels.delivery import DeliveryRouter
 from crew.gateway.dispatcher import BusyMode, SessionDispatcher
-from crew.gateway.hooks import hook_registry
+from crew.features.hooks import hook_registry
 
 OWNER = "local"
 
@@ -1073,7 +1073,7 @@ async def test_push_payload_final_flushes_pending_before_final():
 
 async def test_session_start_hook_fires_once_per_session():
     """session:start 只在每个会话生命周期内首次运行时触发；同会话第二次不再触发。"""
-    from crew.gateway.hooks import hook_registry
+    from crew.features.hooks import hook_registry
 
     store = InMemorySessionStore()
 
@@ -1099,7 +1099,7 @@ async def test_session_start_hook_fires_once_per_session():
 
 async def test_agent_start_hook_includes_owner_account_id():
     """agent:start hook 须携带 owner_account_id，供渠道会话实时广播时对齐订阅桶。"""
-    from crew.gateway.hooks import hook_registry
+    from crew.features.hooks import hook_registry
 
     store = InMemorySessionStore()
 

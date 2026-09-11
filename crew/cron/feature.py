@@ -20,7 +20,7 @@ from crew.features import (
     FeatureUpdateStrategy,
     RegistrationPhase,
 )
-from crew.gateway.session_context import SessionContext, SessionSource
+from crew.features.session_context import SessionContext, SessionSource
 from crew.state.logging import get_logger
 from crew.tools.registry import FunctionTool, Registry
 

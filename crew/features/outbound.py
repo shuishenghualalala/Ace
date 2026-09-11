@@ -6,7 +6,7 @@ from typing import Any
 
 from crew.core.envelope import ResponseChunk
 from crew.core.errors import CrewError, ProviderError, ToolError
-from crew.gateway.response_filters import apply_text_filters, is_silent_reply
+from crew.features.response_filters import apply_text_filters, is_silent_reply
 
 
 def _error_category_from_exception(exc: Exception) -> str:

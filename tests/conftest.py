@@ -68,7 +68,7 @@ def _close_live_crew_apps():
     yield
 
     from crew.app import _LIVE_APPS
-    from crew.gateway.hooks import hook_registry
+    from crew.features.hooks import hook_registry
     from crew.tools.process_registry import process_registry
 
     while _LIVE_APPS:

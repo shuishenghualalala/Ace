@@ -1,8 +1,7 @@
 """Team / External Agent 相关 payload 投影函数。
 
-这些函数原本位于 `crew.gateway.routers.runtimes`，被 Gateway Router 与 CLI 共同消费。
-把它们下沉到 `crew.team` 包后，CLI 不再反向依赖 Gateway Router，同时保持
-Runtime 端点的展示行为不变。
+这些函数属于 `crew.team` 包，被 Gateway Router 与 CLI 共同消费：
+CLI 不依赖 Gateway Router，同时保持 Runtime 端点的展示行为不变。
 """
 
 from __future__ import annotations

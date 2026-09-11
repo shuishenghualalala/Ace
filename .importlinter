@@ -72,3 +72,17 @@ forbidden_modules =
     crew.agent.external
     crew.browser
 allow_indirect_imports = True
+
+[importlinter:contract:feature-host-boundary]
+name = Feature packages must not import the Gateway host
+type = forbidden
+source_modules =
+    crew.channels
+    crew.cron
+    crew.work
+    crew.wiki
+    crew.team
+    crew.dynamickanban
+forbidden_modules =
+    crew.gateway
+allow_indirect_imports = True
