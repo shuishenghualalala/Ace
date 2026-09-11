@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ADR-0037 · uv workspace 首个试点（crew-wiki）提案</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0037 · uv workspace 首个试点（crew-wiki）提案</h1>
+<p>状态：已批准（用户确认 2026-09-11），实施进行中 · 日期：2026-09-11 · 阶段：6 收官。</p>
+<h2>背景与候选方案</h2>
+<p>workspace 评估报告（<a href="../../todo/ace-workspace-split-assessment.md">ace-workspace-split-assessment.md</a>）确认 uv workspace 多包化可行，并列出 6 项必修逻辑拆分。截至本 ADR 撰写时，6 项已全部解除并有 9 条 import-linter 契约保护：① state→team/external（6I）、② team→external 数据耦合与 Store 继承（6G/6G-2，ADR-0036）、③ wiki→gateway 私有导入（6J）、④ state→browser 类型（6K）、⑤ gateway 协议设施下沉（6L）、⑥ executor→external 直连（6M）。ServiceKey 版本化（6N）进行中。</p>
+<p>候选方案：A. 直接全量拆包（8 个成员包一次到位）——回退面大、CI/Docker/桌面打包链路一次冲击；B. 单包试点（crew-wiki）先行，验证四条交付链后再逐批拆；C. 暂不物理拆包，仅维持契约——放弃包管理器物理强制的收益。</p>
+<h2>决定（建议）</h2>
+<p>采用方案 B。试点成员 <strong>crew-wiki</strong>（评估报告 §5.2 论证：演进计划指定的首个 Feature Bundle 试点、不占 crew.db、依赖最干净、契约测试就位——6A 的 KnowledgeService 契约套件即其包级验收门禁）。</p>
+<ul>
+<li>目录：<code>packages/crew-wiki/pyproject.toml</code> + <code>packages/crew-wiki/src/crew/wiki/</code>（整个 <code>crew/wiki/</code> 原样迁入）；发行版间 import 名保持 <code>crew.*</code>（评估报告：Dockerfile.pack、desktop spawn <code>PYTHONPATH</code>、PyInstaller spec 改动最小化的前提）。</li>
+<li>根 pyproject 增加 <code>[tool.uv.workspace]</code> members = ["packages/*"]；根包继续拥有其余模块；uv 单锁（uv.lock 共享）。</li>
+<li>依赖声明：crew-wiki 依赖 crew（根包，wiki extras 随迁：charset-normalizer/markdownify/pymupdf/...）；反向（crew 依赖 crew-wiki 的装配点）通过根包对成员的可选依赖或宿主装配层表达——试点期由 build_app 的既有惰性导入承载。</li>
+</ul>
+<h2>四条交付链验证清单（试点的验收门）</h2>
+<ol>
+<li><code>uv sync --extra dev --extra wiki</code> 单锁安装，editable 生效；</li>
+<li>CI（.github/workflows/ci.yml）矩阵全绿（ruff/lint-imports/pytest 全量）；</li>
+<li>Dockerfile.pack 构建通过（COPY 成员 + 安装 + PyInstaller datas/pathex 调整）；</li>
+<li>desktop 开发态 spawn（<code>python -m crew.gateway.server</code>，desktop/src/main/index.ts:1382）与打包态 PyInstaller 产物启动通过。</li>
+</ol>
+<p>试点完成后的第二批（crew-external-agents）与第三批（粗粒度收尾）按评估报告 §5.2 顺序推进；.importlinter 契约在每批拆包后对应简化为物理事实。</p>
+<h2>回退方式</h2>
+<p>试点为纯目录/构建结构变化，业务代码零改动；回退 = 还原目录迁移提交 + 根 pyproject 的 workspace 段，uv.lock 重新生成。</p>
+<h2>待用户确认的输入</h2>
+<ul>
+<li>是否按本提案开工试点（涉及 CI/Docker/桌面打包链，建议醒后确认）；</li>
+<li>旧流事件兼容层删除（Step 3）的已发布客户端最低支持版本决策（前置已全部就绪：6D 双协议、6F 灰度开关、存量失败清零）。</li>
+</ul>
+<p><a href="../../todo/ace-workspace-split-assessment.md">workspace 评估报告</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>
