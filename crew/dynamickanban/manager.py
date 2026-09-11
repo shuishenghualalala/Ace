@@ -509,10 +509,10 @@ class DynamicKanbanManager:
         """流式输出 runtime 结果；超过后台化阈值后自动 detached 继续执行并返回提示。"""
 
         def _is_unattached_control_chunk(chunk: ResponseChunk) -> bool:
-            """status / workflow_progress 帧需要清空 request_id，作为无归属控制帧渲染。"""
-            if chunk.kind in {"status", "workflow_progress"} and chunk.request_id:
+            """status / kanban workflow_progress 帧需要清空 request_id，作为无归属控制帧渲染。"""
+            if chunk.kind == "status" and chunk.request_id:
                 return True
-            # 迁移后 workflow_progress 改发 feature_event(feature="kanban", event="workflow_progress")
+            # kanban 工作流进度以 feature_event(feature="kanban", event="workflow_progress") 出口
             if chunk.kind == "feature_event" and chunk.request_id:
                 body = chunk.body
                 return body.get("feature") == "kanban" and body.get("event") == "workflow_progress"

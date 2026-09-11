@@ -91,7 +91,7 @@ from crew.tools.registry import Registry, register_builtin_tools
 
 
 def _is_team_internal(chunk) -> bool:
-    """team_internal 流式断言的迁移期等价物：生产侧已改发 feature_event。"""
+    """team 内部消息帧断言：feature_event(feature="team", event="internal_message")。"""
     return (
         chunk.kind == "feature_event"
         and chunk.body.get("feature") == "team"
@@ -100,7 +100,7 @@ def _is_team_internal(chunk) -> bool:
 
 
 def _team_internal_body(chunk) -> dict:
-    """取 team.internal_message 事件的业务 payload（旧 chunk.body 的等价物）。"""
+    """取 team.internal_message 事件的业务 payload。"""
     return chunk.body.get("payload") or {}
 
 

@@ -1,26 +1,21 @@
-"""CREW_GATEWAY_FEATURE_EVENT_PASSTHROUGH 出口透传灰度开关的契约测试。
+"""Gateway WS 出口契约测试：出口只认 envelope，feature_event 原帧透传。
 
-覆盖：
-- 开关解析：布尔环境变量归一，缺省关闭；
-- 关闭（默认）：push_payload 出口与回放缓存维持旧协议，逐字节与既有
-  test_event_compat 契约一致；
-- 开启：feature_event 帧原样透传（已登记事件不再转换、未登记的插件事件
-  不再丢弃），回放缓存与直发帧形态一致；
-- 开关关闭后出口恢复现状。
+历史背景：迁移期出口曾有 event_compat 适配器把 feature_event 转回旧 kind 帧
+（未登记事件丢弃），由灰度开关控制；无旧客户端需要兼容后适配器与开关一并
+删除，透传成为唯一行为。本文件固定删除后的出口契约：
 
-测试通过 monkeypatch 替换 connections 模块级缓存开关，不依赖进程环境，
-互不泄漏（测试结束时自动还原）。
+- 已登记来源的 feature_event 原帧到达（不做任何 kind 转换）；
+- 未登记的插件事件不被丢弃，原样到达客户端；
+- 出口不做版本门控（任何 version 的 feature_event 都透传）；
+- kanban 事件 body 保持中立 payload，出口不重建 event 字段；
+- 非 feature_event 帧原样透传，仅追加出口分配的 gateway_sequence；
+- 断线回放缓存与直发帧逐字节一致。
 """
 
 from __future__ import annotations
 
-import pytest
-
-import crew.gateway.connections as connections_module
 from crew.core.envelope import feature_event_body
 from crew.gateway.connections import ConnectionManager
-
-_SWITCH = "CREW_GATEWAY_FEATURE_EVENT_PASSTHROUGH"
 
 
 def _feature_frame(feature: str, event: str, payload: dict, **fields: object) -> dict:
@@ -51,105 +46,16 @@ def _connected_manager(owner: str = "owner-1", session: str = "s1") -> tuple[Con
     return cm, ws
 
 
-class TestSwitchResolution:
-    """开关解析：布尔归一，缺省关闭；进程级只在模块加载时读一次环境变量。"""
+class TestOutboundContract:
+    """WS 出口契约：feature_event 原帧透传，回放与直发同形态。"""
 
-    def test_unset_env_defaults_to_off(self, monkeypatch):
-        monkeypatch.delenv(_SWITCH, raising=False)
-        assert connections_module._env_flag_enabled(_SWITCH) is False
-
-    @pytest.mark.parametrize("raw", ["1", "true", "yes", "on", "TRUE", "On"])
-    def test_truthy_values_enable(self, monkeypatch, raw):
-        monkeypatch.setenv(_SWITCH, raw)
-        assert connections_module._env_flag_enabled(_SWITCH) is True
-
-    @pytest.mark.parametrize("raw", ["0", "false", "no", "off", ""])
-    def test_other_values_keep_off(self, monkeypatch, raw):
-        monkeypatch.setenv(_SWITCH, raw)
-        assert connections_module._env_flag_enabled(_SWITCH) is False
-
-
-class TestPassthroughOffMatchesLegacy:
-    """开关关闭（默认路径）：出口与旧协议契约逐字节一致。"""
-
-    @pytest.fixture(autouse=True)
-    def _switch_off(self, monkeypatch):
-        monkeypatch.setattr(connections_module, "FEATURE_EVENT_PASSTHROUGH", False)
-
-    async def test_registered_event_converts_and_sends_legacy_frame(self):
+    async def test_feature_event_passes_through_unchanged(self):
         cm, ws = _connected_manager()
         frame = _feature_frame("wiki", "cards", {"pages": [{"title": "T"}]})
 
         await cm.push_payload("s1", frame, owner_account_id="owner-1")
 
-        # 整帧相等：旧 kind + 透传帧级字段 + 出口分配的 gateway_sequence
-        assert ws.sent == [
-            {
-                "kind": "wiki_cards",
-                "body": {"pages": [{"title": "T"}]},
-                "is_final": False,
-                "sequence": 0,
-                "request_id": "req_1",
-                "session_id": "s1",
-                "gateway_sequence": 1,
-            }
-        ]
-
-    async def test_unregistered_plugin_event_dropped(self):
-        cm, ws = _connected_manager()
-
-        await cm.push_payload(
-            "s1",
-            _feature_frame("plugin_demo", "custom_signal", {"n": 1}),
-            owner_account_id="owner-1",
-        )
-
-        assert ws.sent == []
-
-    async def test_replay_serves_legacy_frames(self):
-        cm = ConnectionManager(min_interval=0)
-        await cm.push_payload(
-            "s1",
-            _feature_frame("team", "internal_message", {"text": "hi"}),
-            owner_account_id="owner-1",
-        )
-        ws = _FakeSocket()
-
-        await cm.replay("s1", ws, owner_account_id="owner-1")
-
-        assert [frame["kind"] for frame in ws.sent] == ["team_internal"]
-        assert ws.sent[0]["body"] == {"text": "hi"}
-
-    async def test_non_feature_frames_unaffected(self):
-        cm, ws = _connected_manager()
-        payload = {
-            "kind": "delta",
-            "body": {"text": "hi"},
-            "is_final": False,
-            "sequence": 0,
-            "request_id": "req_1",
-            "session_id": "s1",
-        }
-
-        await cm.push_payload("s1", payload, owner_account_id="owner-1")
-
-        assert ws.sent == [{**payload, "gateway_sequence": 1}]
-
-
-class TestPassthroughOn:
-    """开关开启：feature_event 帧原样透传，未登记事件不再丢弃。"""
-
-    @pytest.fixture(autouse=True)
-    def _switch_on(self, monkeypatch):
-        monkeypatch.setattr(connections_module, "FEATURE_EVENT_PASSTHROUGH", True)
-
-    async def test_registered_event_passes_through_unchanged(self):
-        cm, ws = _connected_manager()
-        frame = _feature_frame("wiki", "cards", {"pages": [{"title": "T"}]})
-
-        await cm.push_payload("s1", frame, owner_account_id="owner-1")
-
-        # 已登记事件不再转成旧 kind：帧与入参一致，仅追加 gateway_sequence
+        # 帧与入参一致，仅追加出口分配的 gateway_sequence
         assert ws.sent == [{**frame, "gateway_sequence": 1}]
         assert ws.sent[0]["body"] == feature_event_body("wiki", "cards", {"pages": [{"title": "T"}]})
 
@@ -159,7 +65,7 @@ class TestPassthroughOn:
 
         await cm.push_payload("s1", frame, owner_account_id="owner-1")
 
-        # 旧协议出口会在 kanban body 顶部重建 event 字段；透传模式保持中立 payload
+        # 旧协议出口会在 kanban body 顶部重建 event 字段；透传契约保持中立 payload
         assert ws.sent[0]["body"] == feature_event_body("kanban", "started", {"workflow_id": "wf1"})
         assert "event" not in ws.sent[0]["body"]["payload"]
 
@@ -179,7 +85,8 @@ class TestPassthroughOn:
         assert frame["body"]["event"] == "custom_signal"
         assert frame["body"]["payload"] == {"n": 7}
 
-    async def test_unknown_version_not_dropped(self):
+    async def test_any_version_not_filtered(self):
+        # 出口不做版本门控：登记表已不存在，任何 version 都透传
         cm, ws = _connected_manager()
         frame = _feature_frame("team", "internal_message", {})
         frame["body"]["version"] = 2
@@ -223,35 +130,3 @@ class TestPassthroughOn:
         assert replay_ws.sent == [
             {**frame, "gateway_sequence": seq} for seq, frame in enumerate(frames, start=1)
         ]
-
-
-class TestSwitchToggle:
-    """开关关闭即恢复现状：同进程内切换开关，出口行为随之切换。"""
-
-    async def test_disabling_restores_legacy_contract(self, monkeypatch):
-        monkeypatch.setattr(connections_module, "FEATURE_EVENT_PASSTHROUGH", True)
-        cm, ws = _connected_manager()
-        await cm.push_payload(
-            "s1",
-            _feature_frame("plugin_demo", "custom_signal", {"n": 1}),
-            owner_account_id="owner-1",
-        )
-        assert ws.sent[0]["kind"] == "feature_event"
-
-        monkeypatch.setattr(connections_module, "FEATURE_EVENT_PASSTHROUGH", False)
-        await cm.push_payload(
-            "s1",
-            _feature_frame("plugin_demo", "custom_signal", {"n": 2}),
-            owner_account_id="owner-1",
-        )
-        await cm.push_payload(
-            "s1",
-            _feature_frame("wiki", "cards", {"pages": []}),
-            owner_account_id="owner-1",
-        )
-
-        # 关闭后恢复：未登记事件回到丢弃（不占用 gateway_sequence，与既有
-        # 丢弃契约一致），已登记事件回到旧 kind 转换
-        assert len(ws.sent) == 2
-        assert ws.sent[1]["kind"] == "wiki_cards"
-        assert ws.sent[1]["gateway_sequence"] == 2

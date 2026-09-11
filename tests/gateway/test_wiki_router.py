@@ -1030,8 +1030,7 @@ def test_wiki_ingest_with_session_id_accepts_progress_target(tmp_path, auth_head
     assert data["source_id"] == source_id
     assert "pages" in data
     # router 在返回前 gather 等待 progress task，因此可以断言推送内容
-    #（生产侧产出命名空间 feature_event；旧 wiki_ingest_progress 帧由出口
-    # event_compat 适配器转换，见 tests/gateway/test_event_compat.py）
+    #（出口只认 envelope：feature_event 帧原样透传，见 tests/gateway/test_event_passthrough.py）
     assert len(calls) > 0
     assert calls[0]["session_id"] == "sess_progress_1"
     assert calls[0]["payload"]["kind"] == "feature_event"

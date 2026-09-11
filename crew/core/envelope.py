@@ -17,16 +17,11 @@ from crew.core.types import tool_arguments_for_ui
 
 ChunkKind = Literal[
     "delta", "tool", "task", "thinking", "final", "error", "status", "plan_review",
-    "kanban", "followup_question",
+    "followup_question",
     "todo_updated", "todo_reminder", "file_changes",
-    "workflow_progress",
     # 命名空间业务事件：body = {"feature", "event", "version", "payload"}。
+    # 具体业务事件不进核心枚举，插件贡献的未登记事件同样以本 kind 出口。
     "feature_event",
-    # 以下业务枚举处于迁移期：生产侧已改发 feature_event，旧帧由
-    # gateway event_compat 适配器在出口转换生成；前端 reducer 全部迁移后删除。
-    "wiki_cards", "wiki_ingest_progress",
-    "team_internal",
-    "kanban", "workflow_progress",
 ]
 Status = Literal["in_progress", "succeeded", "failed"]
 Mode = str
@@ -264,55 +259,6 @@ class ResponseChunk:
         )
 
     @staticmethod
-    def kanban_event(request_id: str, event: str, payload: dict[str, Any] | None = None, sequence: int = 0) -> "ResponseChunk":
-        """Dynamic Kanban 看板事件（迁移期兼容工厂）。
-
-        生产侧已改发 feature_event(feature="kanban", event=..., version=1)；
-        本工厂保留至前端 reducer 全部迁移到 ace.feature-event.v1 后删除。
-        """
-        return ResponseChunk(
-            request_id,
-            kind="kanban",
-            body={"event": event, **(payload or {})},
-            sequence=sequence,
-        )
-
-    @staticmethod
-    def workflow_progress(
-        request_id: str,
-        workflow_id: str,
-        *,
-        status: str = "running",
-        current_phase: dict[str, Any] | None = None,
-        completed_phases: list[dict[str, Any]] | None = None,
-        active_calls: list[dict[str, Any]] | None = None,
-        message: str = "",
-        sequence: int = 0,
-    ) -> "ResponseChunk":
-        """Dynamic Kanban 工作流进度事件（迁移期兼容工厂）。
-
-        生产侧已改发 feature_event(feature="kanban", event="workflow_progress", version=1)；
-        本工厂保留至前端 reducer 全部迁移到 ace.feature-event.v1 后删除。
-
-        前端把它渲染成对话中始终可见的进度面板，避免大量阶段编排 status 文本被折叠到过程区。
-        """
-        body: dict[str, Any] = {"workflow_id": workflow_id, "status": status}
-        if current_phase is not None:
-            body["current_phase"] = current_phase
-        if completed_phases is not None:
-            body["completed_phases"] = completed_phases
-        if active_calls is not None:
-            body["active_calls"] = active_calls
-        if message:
-            body["message"] = message
-        return ResponseChunk(
-            request_id,
-            kind="workflow_progress",
-            body=body,
-            sequence=sequence,
-        )
-
-    @staticmethod
     def feature_event(
         request_id: str,
         feature: str,
@@ -325,8 +271,7 @@ class ResponseChunk:
         """命名空间业务事件：核心协议只认识 envelope，不认识具体 Feature。
 
         body 固定为 {"feature", "event", "version", "payload"}，事件名形如
-        team.internal_message / wiki.cards；迁移期由 gateway event_compat
-        适配器在出口转换为旧 kind 帧，前端升级后旧帧删除。
+        team.internal_message / wiki.cards；WS 出口原样透传本帧。
         """
         return ResponseChunk(
             request_id,

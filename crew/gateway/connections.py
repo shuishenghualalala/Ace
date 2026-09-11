@@ -18,14 +18,12 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from collections import defaultdict, deque
 from typing import Any, Callable
 
 from fastapi import WebSocket
 
-from crew.gateway.event_compat import expand_outgoing_payload
 from crew.state.logging import get_logger
 
 log = get_logger("gateway.connections")
@@ -34,35 +32,6 @@ log = get_logger("gateway.connections")
 _MAX_CONSECUTIVE_FAILURES = 3
 # 每个 session 缓存的 WS payload 上限，用于断线重连后回放
 _CHUNK_BUFFER_SIZE = 2000
-
-
-def _env_flag_enabled(name: str) -> bool:
-    """解析布尔环境变量开关：1/true/yes/on（大小写不敏感）视为开启。"""
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-# feature_event 出口透传灰度开关（迁移期临时机制，删除条件 = 迁移 Step 3：
-# 摘除 event_compat 出口适配时随本开关一并删除）。
-# - 默认关闭：出口维持旧协议——已登记 feature_event 转回旧 kind 帧、未登记
-#   事件丢弃，线上帧与回放缓存与迁移前逐字节一致。
-# - 开启（CREW_GATEWAY_FEATURE_EVENT_PASSTHROUGH=1）：出口对 feature_event
-#   帧原样透传，插件贡献的未登记事件也到达客户端（前端未注册 handler 时按
-#   既有 console.warn 诊断忽略），回放缓存与线上帧同为新协议形态。
-# 模块加载时解析一次并缓存，避免推送热路径每帧读环境变量。环境变量名大小写：
-# Linux/macOS 区分大小写，Windows 不区分；统一使用全大写变量名即可。
-FEATURE_EVENT_PASSTHROUGH = _env_flag_enabled("CREW_GATEWAY_FEATURE_EVENT_PASSTHROUGH")
-
-
-def _outgoing_frames(payload: dict) -> list[dict]:
-    """按出口模式展开待发帧。
-
-    透传开启时 feature_event 帧跳过旧协议适配原样直发；其余情形（含开关
-    关闭时的全部帧）经 event_compat 展开——非 feature_event 帧在展开中
-    恒为原样返回，不受开关影响。
-    """
-    if FEATURE_EVENT_PASSTHROUGH and payload.get("kind") == "feature_event":
-        return [payload]
-    return expand_outgoing_payload(payload)
 
 
 class ConnectionManager:
@@ -446,15 +415,10 @@ class ConnectionManager:
     ) -> None:
         """把已格式化的 WS payload 推送给该 session 的所有活跃连接。
 
-        迁移期适配：默认（FEATURE_EVENT_PASSTHROUGH 关闭）把 kind ==
-        "feature_event" 的帧先经 event_compat 展开为旧 kind 帧（未登记的
-        事件丢弃），回放缓存与线上帧因此保持旧协议不变；设置
-        CREW_GATEWAY_FEATURE_EVENT_PASSTHROUGH 开启透传后，feature_event
-        帧原样直发（含插件贡献的未登记事件），回放缓存同步存透传后的帧。
-        前端迁移到 feature_event 后（Step 3）删除该适配与开关。
+        出口只认 envelope，不做任何 kind 转换：feature_event 帧（含插件
+        贡献的未登记事件）原样透传给客户端，回放缓存与线上帧同形态。
         """
-        for frame in _outgoing_frames(payload):
-            await self._push_payload_frame(session_id, frame, owner_account_id=owner_account_id)
+        await self._push_payload_frame(session_id, payload, owner_account_id=owner_account_id)
 
     async def _push_payload_frame(
         self,
