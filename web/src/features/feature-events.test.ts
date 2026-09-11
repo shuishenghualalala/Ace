@@ -185,7 +185,7 @@ describe("installTeamFeatureHandlers", () => {
 });
 
 describe("installKanbanFeatureHandlers", () => {
-  it("registers a no-op handler for workflow_progress compat", () => {
+  it("registers a no-op handler for kanban workflow_progress frames", () => {
     const registry = new FeatureEventRegistry();
     installKanbanFeatureHandlers(registry);
     const ctx = makeCtx();

@@ -64,11 +64,6 @@ export type ChunkKind =
   | "todo_updated"
   | "todo_reminder"
   | "file_changes"
-  | "workflow_progress"
-  | "wiki_cards"
-  | "wiki_ingest_progress"
-  | "wiki_changed"
-  | "team_internal"
   | "feature_event";
 
 export interface TodoItem {

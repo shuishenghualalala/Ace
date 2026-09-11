@@ -1,5 +1,4 @@
 import type {
-  Chunk,
   SessionStatus,
   ToolCallInfo,
   TurnFileChangeSummary,
@@ -112,31 +111,6 @@ export class FeatureEventRegistry {
       return null;
     }
     return reg.handler(payload, ctx) ?? null;
-  }
-}
-
-export interface CompatFeatureEvent {
-  feature: string;
-  event: string;
-  version: number;
-  payload: unknown;
-}
-
-/** 旧业务帧映射到命名空间事件。 */
-export function compatFeatureEvent(chunk: Chunk): CompatFeatureEvent | null {
-  switch (chunk.kind) {
-    case "wiki_cards":
-      return { feature: "wiki", event: "cards", version: 1, payload: chunk.body };
-    case "wiki_ingest_progress":
-      return { feature: "wiki", event: "ingest_progress", version: 1, payload: chunk.body };
-    case "wiki_changed":
-      return { feature: "wiki", event: "changed", version: 1, payload: chunk.body };
-    case "team_internal":
-      return { feature: "team", event: "internal_message", version: 1, payload: chunk.body };
-    case "workflow_progress":
-      return { feature: "kanban", event: "workflow_progress", version: 1, payload: chunk.body };
-    default:
-      return null;
   }
 }
 

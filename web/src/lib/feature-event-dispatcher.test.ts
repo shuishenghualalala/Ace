@@ -1,10 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  compatFeatureEvent,
   FeatureEventRegistry,
   parseFeatureEventBody,
 } from "./feature-event-dispatcher";
-import type { Chunk } from "../types";
 
 describe("FeatureEventRegistry", () => {
   it("registers and dispatches a handler", () => {
@@ -97,38 +95,6 @@ describe("FeatureEventRegistry", () => {
   });
 });
 
-describe("compatFeatureEvent", () => {
-  it.each([
-    ["wiki_cards", "wiki", "cards", 1],
-    ["wiki_ingest_progress", "wiki", "ingest_progress", 1],
-    ["wiki_changed", "wiki", "changed", 1],
-    ["team_internal", "team", "internal_message", 1],
-    ["workflow_progress", "kanban", "workflow_progress", 1],
-  ] as const)(
-    "maps %s to feature=%s event=%s version=%s",
-    (kind, feature, event, version) => {
-      const chunk: Chunk = {
-        kind,
-        body: { value: 1 },
-        is_final: false,
-        sequence: 1,
-      };
-      const mapped = compatFeatureEvent(chunk);
-      expect(mapped).toEqual({ feature, event, version, payload: { value: 1 } });
-    },
-  );
-
-  it("returns null for non-business frames", () => {
-    const chunk: Chunk = {
-      kind: "delta",
-      body: { text: "hi" },
-      is_final: false,
-      sequence: 1,
-    };
-    expect(compatFeatureEvent(chunk)).toBeNull();
-  });
-});
-
 describe("parseFeatureEventBody", () => {
   it("parses feature_event body with explicit payload", () => {
     expect(
@@ -155,6 +121,31 @@ describe("parseFeatureEventBody", () => {
     expect(parseFeatureEventBody({})).toBeNull();
     expect(parseFeatureEventBody({ feature: "", event: "x" })).toBeNull();
     expect(parseFeatureEventBody("invalid")).toBeNull();
+  });
+
+  it("parsed body dispatches through the registry in the feature/event namespace", () => {
+    const registry = new FeatureEventRegistry();
+    const handler = vi.fn(() => ({ statusHint: "running" as const }));
+    registry.register({ feature: "wiki", event: "cards", version: 1, handler });
+
+    const parsed = parseFeatureEventBody({
+      feature: "wiki",
+      event: "cards",
+      version: 1,
+      payload: { pages: [{ id: "p1" }] },
+    });
+    const ctx = {
+      sessionId: "s1",
+      now: 1,
+      startLocalTurn: () => 1,
+      newId: () => "id",
+      book: {} as any,
+      messages: [],
+    };
+    const result = registry.dispatch(parsed!.feature, parsed!.event, parsed!.version, parsed!.payload, ctx);
+
+    expect(handler).toHaveBeenCalledWith({ pages: [{ id: "p1" }] }, ctx);
+    expect(result).toEqual({ statusHint: "running" });
   });
 });
 

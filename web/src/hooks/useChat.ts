@@ -6,7 +6,6 @@ import { mergeStreamingText } from "../lib/agentTurnState";
 import { normalizeTeamText } from "../lib/chunkNormalize";
 import { ChatSocket } from "../ws";
 import {
-  compatFeatureEvent,
   parseFeatureEventBody,
   type Bookkeeping,
   type DeltaSpan,
@@ -673,19 +672,6 @@ export function useChat(
             ),
           );
         }
-        return;
-      }
-      const compat = compatFeatureEvent(c);
-      if (compat) {
-        applyFeatureEventEffect(
-          featureEventRegistryRef.current.dispatch(
-            compat.feature,
-            compat.event,
-            compat.version,
-            compat.payload,
-            buildFeatureEventCtx(),
-          ),
-        );
         return;
       }
 

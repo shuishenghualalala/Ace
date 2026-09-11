@@ -450,7 +450,7 @@ export default function WikiHub({
   }, [refreshKbs]);
 
   // 其他会话（如主对话委派的 Wiki 子代理）或本页 Wiki 会话改动 Wiki 数据后，
-  // 后端会推 wiki_changed；收到后刷新知识库列表与当前库页面，避免必须重新进入页面。
+  // 后端会推 wiki/changed@1 feature event；收到后刷新知识库列表与当前库页面，避免必须重新进入页面。
   useEffect(() => {
     const handler = (e: Event) => {
       const changes = (e as CustomEvent).detail as
