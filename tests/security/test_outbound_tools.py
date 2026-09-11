@@ -314,6 +314,12 @@ def test_http_tunnel_rejects_non_2xx(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_loopback_proxy_blocked_when_disallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     """allow_loopback_proxy=False 时，loopback 代理地址必须被拒绝。"""
     _clear_proxy_env(monkeypatch)
+    # 公网性校验需要解析目标域；用固定公网地址替代真实 DNS，保证离线环境可测。
+    monkeypatch.setattr(
+        outbound.socket,
+        "getaddrinfo",
+        lambda host, port, **_k: [(outbound.socket.AF_INET, outbound.socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))],
+    )
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
     with pytest.raises(ValueError, match="loopback"):
         outbound.fetch_public_http(
