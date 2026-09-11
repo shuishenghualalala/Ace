@@ -25,7 +25,7 @@ from crew.gateway.auth import (
     is_loopback_host,
 )
 from crew.gateway.auth_policy import requires_gateway_auth
-from crew.gateway.connections import ConnectionManager
+from crew.gateway.connections import ConnectionManager, FEATURE_EVENT_PASSTHROUGH
 from crew.gateway.helpers import (
     DIST_DIR,
     EXTERNAL_AGENTS_DISABLED_BODY,
@@ -104,6 +104,11 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     # 会话调度器在 CrewApp 内共享：gateway、cron、后续平台入口走同一队列/全局并发上限。
     dispatcher = crew.dispatcher
     log.info("调度器忙时策略: %s", crew.config.gateway_busy_mode)
+    # 出口协议模式随启动日志输出，运维可据此确认 WS 出口是否处于透传灰度
+    log.info(
+        "WS 出口协议模式: %s（开关 CREW_GATEWAY_FEATURE_EVENT_PASSTHROUGH）",
+        "feature_event 透传" if FEATURE_EVENT_PASSTHROUGH else "旧 kind 兼容转换",
+    )
     # 连接管理器：session → 活跃 WS，供 cron/后台任务主动推送
     connections = ConnectionManager(min_interval=crew.config.gateway_push_min_interval)
     crew.set_push(connections.push, push_payload_fn=connections.push_payload, notify_owner_fn=connections.notify_owner)
