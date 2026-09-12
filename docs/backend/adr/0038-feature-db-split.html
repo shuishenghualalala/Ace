@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ADR-0038 · Feature 数据库拆分（db-per-feature）</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0038 · Feature 数据库拆分（db-per-feature，P1-1）</h1>
+<p>状态：已批准方向，切片实施中 · 日期：2026-09-12 · 阶段：6。</p>
+<h2>背景与候选方案</h2>
+<p>命名空间审计 P1-1：全部关系型 Feature 共用单一 <code>crew_data/crew.db</code>（config.py:202 默认；app.py 把同一 <code>cfg.db_path</code> 注入全部 Store）。这是拆出仓库/独立部署的最后一块数据耦合。前置已就位：6G 消除了唯一跨 Feature 外键/JOIN/直写；6H 提供 per-feature schema 版本表；各 Store 本就自持连接（构造器收 db_path 字符串，无共享连接对象）；全仓无 ATTACH 跨库 SQL；<code>memory_db_path</code> 已是分库先例（"便于测试隔离"）。</p>
+<p>候选方案：A. 保持单库，仅靠表前缀约定——迁出仓库时需按前缀手工剥离，迁移脚本永远欠着；B. 一次性全量拆库——回退面大，claim-legacy 等跨表工具一次冲击；C. 螺旋式：建共享拆分机制 + 单 Feature 试点，验证后按批推进。</p>
+<h2>决定</h2>
+<p>采用方案 C。</p>
+<ul>
+<li><strong>路径方案</strong>：每个 Feature 一个库文件 <code>crew_data/&lt;feature&gt;.db</code>（与既有 crew.db、memory.db 同层；host 级多 owner 语义不变——owner 隔离仍由表内 owner_account_id 列承载，与现状一致）。配置沿用 memory_db_path 先例：过渡期顶层 <code>&lt;feature&gt;_db_path</code> 键覆盖（P2-1 配置节迁移后再归位 features.*）。</li>
+<li><strong>归属划分</strong>：crew.db 保留给 core 状态（sessions、session_agent_config、workspaces、owner_session_lease、owner_logout_intent、plugin_preferences、security_rules、security_audit_events）。Feature 表分批迁出：cron（cron_jobs/cron_job_runs，试点）→ work（work_* 13 表）→ dynamic-kanban（kanban_* 6）→ external-agents（external_* 4）+ team（external_team* 2，经组合实例与注入同批）→ sites/tasks/notifications → channels 表（channel_bindings/channel_session_routes，随 P2-7 归位一并）。</li>
+<li><strong>迁移语义：copy-on-first-activate</strong>。Feature Store 首次在目标库初始化 schema 后，若旧 crew.db 存在本 Feature 表且目标库为空，则单事务整表复制行（幂等：目标库已有行即跳过）。<strong>旧表保留在 crew.db 不删</strong>——天然回退与备份；稳定一个版本周期后由显式清理命令删除（disable/uninstall/delete-data 三动作分离原则）。gate 用 6H 的 <code>&lt;feature&gt;_schema_version</code>。</li>
+<li><strong>连接与并发</strong>：Store 连接拓扑不变（各自 connect_sqlite + WAL），分库后写锁互不阻塞（work 写入不再阻塞 team），是并发收益而非成本。</li>
+<li><strong>跨表工具适配</strong>：<code>crew migrate claim-legacy</code> 与启动期 <code>inspect_and_backfill_legacy_owners</code>（app.py startup）当前按 cfg.db_path 单库读全部 Feature 表——每批拆分时同步改为按 Feature 解析各自库路径。</li>
+</ul>
+<h2>试点验收（cron 批）</h2>
+<ol>
+<li>新装环境：cron 表只出现在 <code>crew_data/cron.db</code>，crew.db 无 cron 表；</li>
+<li>存量环境：带数据的 crew.db 启动后，cron.db 完整复制（行数一致）、cron 功能正常、crew.db 旧行保留；重复启动幂等零重复；</li>
+<li>cron Feature activate/update/deactivate 全周期正常（restart 策略）；</li>
+<li>claim-legacy 对 cron 表继续工作（读新库）；</li>
+<li>全量测试 0 failed。</li>
+</ol>
+<h2>回退方式</h2>
+<p>每批独立提交可 revert；数据层回退 = 把 Feature 的 db_path 配置指回 crew.db（旧表未删，原地可用）。</p>
+<p><a href="../modules/naming-audit.html">命名空间审计（P1-1）</a> · <a href="0036-team-external-data-decoupling.html">ADR-0036</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>
