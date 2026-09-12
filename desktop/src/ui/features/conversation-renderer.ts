@@ -803,14 +803,15 @@ export function renderConversation(
     }
   }
 
-  // 4) 强制 DOM 顺序 == next 顺序：按 nextMetas 顺序对每个 present 单元 appendChild。
-  //    appendChild 一个已挂载节点 = 移动它（cheap）；新建节点首次挂载也是 appendChild。
-  //    缺席单元（absent / 不在 Map）跳过 —— 它们本就不该出现在 DOM 里。
-  //    这一步同时把 anchor 排到最后（它是 nextMetas 最后一项）。
+  // 只移动位置确实变化的节点，保留历史消息的浏览器滚动锚点与选区。
+  // 每帧把全部节点 append 到末尾会暂时拆散整个列表，即使最终顺序相同。
+  let cursor = wrapper.firstChild;
   for (const meta of nextMetas) {
     if (absentKeys.has(meta.key)) continue;
     const node = lastUnits.get(meta.key);
-    if (node) wrapper.appendChild(node);
+    if (!node) continue;
+    if (node !== cursor) wrapper.insertBefore(node, cursor);
+    cursor = node.nextSibling;
   }
 
   // ---- 副作用：全部与主对话 renderChat 保持一致 ----

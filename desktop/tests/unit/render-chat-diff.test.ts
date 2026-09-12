@@ -254,8 +254,15 @@ describe('conversation-renderer 双实例隔离', () => {
 
     // A 追加消息重渲：B 的 DOM 节点身份不变（各自的 diff 缓存互不影响）
     const bFirst = panelB.querySelector('.msg');
+    const wrapper = panelA.querySelector('.messages__inner')!;
+    const history = wrapper.firstChild;
+    const mutations = new MutationObserver(() => {});
+    mutations.observe(wrapper, { childList: true });
     appendSessionMessage('sid-a', { id: 'u-a2', role: 'user', content: '面板A第二条', timestamp: 2 });
     renderConversation(panelA, 'panel-a', 'sid-a');
+    expect(mutations.takeRecords().some((record) => Array.from(record.removedNodes).includes(history!))).toBe(false);
+    expect(wrapper.firstChild).toBe(history);
+    mutations.disconnect();
     expect(panelA.textContent).toContain('面板A第二条');
     expect(panelB.querySelector('.msg')).toBe(bFirst);
 
