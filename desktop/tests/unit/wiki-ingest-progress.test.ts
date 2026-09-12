@@ -42,10 +42,10 @@ vi.mock('../../src/ui/features/session-model', async (importOriginal) => {
     persistDraftSessionModel: vi.fn(async () => undefined),
   };
 });
-function progressChunk(body: Record<string, unknown>, sessionId = 'sid-1') {
+function progressChunk(payload: Record<string, unknown>, sessionId = 'sid-1') {
   return {
-    kind: 'wiki_ingest_progress' as const,
-    body,
+    kind: 'feature_event' as const,
+    body: { feature: 'wiki', event: 'ingest_progress', version: 1, payload },
     is_final: false,
     sequence: 0,
     session_id: sessionId,
@@ -60,7 +60,7 @@ beforeEach(() => {
   document.body.innerHTML = '';
 });
 
-describe('wiki_ingest_progress 帧分发', () => {
+describe('wiki.ingest_progress 帧分发', () => {
   it('规范化 body 后转发给注册回调，且不写对话消息', () => {
     const cb = vi.fn();
     setWikiIngestProgressCallback(cb);

@@ -2,7 +2,6 @@
  * Wiki 知识库客户端：/api/wiki/* 的类型化封装。
  */
 import { getJSON, jsonBody, uploadJSON, withKb } from './transport';
-import type { ChatChunk } from './transport';
 
 export type WikiPageStatus = 'published' | 'deprecated';
 export type WikiPageType = 'entity' | 'concept' | 'topic' | 'source' | 'comparison' | 'synthesis';
@@ -125,18 +124,6 @@ export interface WikiIngestProgress {
   detail?: Record<string, unknown>;
 }
 
-/** wiki_ingest_progress 帧：/api/wiki/ingest 编译期间经 WS 推送的进度（body 为 WikiIngestProgress）。 */
-export interface WikiIngestProgressChunk extends Omit<ChatChunk, 'kind' | 'body'> {
-  kind: 'wiki_ingest_progress';
-  body: WikiIngestProgress;
-}
-
-/** wiki_cards 帧：Wiki Agent 回合结束后经 WS 推送的引用页面卡片（body.pages 为 WikiPage 数组）。 */
-export interface WikiCardsChunk extends Omit<ChatChunk, 'kind' | 'body'> {
-  kind: 'wiki_cards';
-  body: { pages?: WikiPage[]; cards?: WikiPage[] };
-}
-
 export interface WikiUploadResult {
   ok: boolean;
   source_id: string;
@@ -252,7 +239,7 @@ export const wikiApi = {
   /** 上传本地文件（走主进程 gateway:upload IPC，一次一个文件）。 */
   wikiUpload: (filePath: string, kbId?: string) =>
     uploadJSON<WikiUploadResult>(withKb('/api/wiki/upload', kbId), filePath),
-  /** 编译 source 为 Wiki 页面；传 sessionId 时后端经 WS 推送 wiki_ingest_progress。 */
+  /** 编译 source 为 Wiki 页面；传 sessionId 时后端经 WS 推送 wiki.ingest_progress feature_event。 */
   wikiIngest: (sourceId: string, kbId?: string, sessionId?: string) =>
     getJSON<{ ok: boolean; source_id: string; pages: WikiPage[]; issues: string[] }>(
       withKb('/api/wiki/ingest', kbId),

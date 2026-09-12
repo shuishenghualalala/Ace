@@ -145,8 +145,6 @@ export type {
   WikiGraphNode,
   WikiGraphEdge,
   WikiIngestProgress,
-  WikiIngestProgressChunk,
-  WikiCardsChunk,
   WikiUploadResult,
   WikiAgentSessionSummary,
 } from './api/feature-wiki';

@@ -90,12 +90,12 @@ import { renderSecurityBanner } from './security-banner';
 import { renderModelFallbackBanner } from './model-fallback-banner';
 import {
   chunkRequestId,
+  featureEventFrameOf,
   isPlanControlStatus,
   normalizeChunk,
   reduceChunk,
   resolveBusyTransition,
   resolveTurnGate,
-  toLegacyEventFrame,
   USER_WAIT_CHUNK_KINDS,
   type UsagePayload,
 } from '../reducers/chat-reducer';
@@ -190,7 +190,7 @@ export async function openSessionInChat(sessionId: string): Promise<void> {
 }
 
 // ---------- Wiki ingest 进度帧转发（Phase 2） ----------
-// wiki_ingest_progress 是 /api/wiki/ingest 推到某个会话的带外进度帧，不属于对话回合，
+// wiki.ingest_progress 是 /api/wiki/ingest 推到某个会话的带外进度事件，不属于对话回合，
 // 不进 reducer；经回调转发给订阅者（wiki-page 由 index.ts 组合根注入，chat 侧不 import wiki-page）。
 let wikiIngestProgressCallback: ((progress: WikiIngestProgress) => void) | null = null;
 
@@ -198,7 +198,7 @@ export function setWikiIngestProgressCallback(cb: ((progress: WikiIngestProgress
   wikiIngestProgressCallback = cb;
 }
 
-/** 供 wiki feature reducer 触发已注册的 wiki_ingest_progress 订阅者。
+/** 供 wiki feature reducer 触发已注册的 wiki.ingest_progress 订阅者。
  *  业务处理归属 wiki feature，callback pub-sub 暂留 chat-controller。 */
 export function invokeWikiIngestProgressCallback(progress: WikiIngestProgress): void {
   wikiIngestProgressCallback?.(progress);
@@ -903,25 +903,24 @@ export function applyChunk(incomingChunk: ChatChunk): void {
   // 旧后端可能把 Team sidechain 的 Followup 推到内部 session。归并到可见父
   // session 时不能沿用子 session 自己的 gateway_sequence 命名空间，否则会被
   // 父 session 的较高水位误判为 replay 重复帧。
-  const wireChunk: ChatChunk = sid === sourceSid
+  const chunk: ChatChunk = sid === sourceSid
     ? incomingChunk
     : { ...incomingChunk, session_id: sid };
-  if (sid !== sourceSid) delete wireChunk.gateway_sequence;
+  if (sid !== sourceSid) delete chunk.gateway_sequence;
   logStream('apply-chunk', 'recv', {
     sid,
     source_sid: sourceSid === sid ? undefined : sourceSid,
-    kind: wireChunk.kind,
-    request_id: wireChunk.request_id,
-    sequence: wireChunk.sequence,
-    gateway_sequence: wireChunk.gateway_sequence,
-    is_final: wireChunk.is_final,
+    kind: chunk.kind,
+    request_id: chunk.request_id,
+    sequence: chunk.sequence,
+    gateway_sequence: chunk.gateway_sequence,
+    is_final: chunk.is_final,
     activeSessionId: state.activeSessionId,
   });
-  // 两代协议入口归一：feature_event 新帧先映射回等价旧 kind 帧（已登记的 v1 事件，
-  // 与 Gateway 出口兼容层同一资格集），使 wiki_changed 早期分支、回合 gate、
-  // kanban 刷新白名单、team_internal 渲染副作用对两代帧走完全相同的代码路径——
-  // 兼容层删除后到达 Desktop 的 feature_event 帧行为不变。
-  const chunk: ChatChunk = toLegacyEventFrame(wireChunk);
+  // feature_event 原生管线：业务事件以 (feature, event, version) 寻址，入口解析一次，
+  // 供 wiki.changed 早期分支、回合 gate、kanban 刷新白名单、team.internal_message 渲染
+  // 副作用四个行为点复用，避免各分支重复解 body。
+  const featureEvent = featureEventFrameOf(chunk);
   // 撤回/中断后忽略该会话的迟到分片，避免重建已被删除的幽灵助手消息。
   if (state.suppressChunks.has(sid)) {
     logStream('apply-chunk', 'drop-suppressed', { sid, kind: chunk.kind });
@@ -1005,9 +1004,9 @@ export function applyChunk(incomingChunk: ChatChunk): void {
     }
     return;
   }
-  if (chunk.kind === 'wiki_changed') {
+  if (featureEvent?.feature === 'wiki' && featureEvent.event === 'changed') {
     // owner 级广播保持在 history/sequence 之前；具体副作用由 Wiki feature handler 持有。
-    featureEventRegistry.dispatch('wiki', 'changed', 1, chunk.body, {
+    featureEventRegistry.dispatch(featureEvent.feature, featureEvent.event, featureEvent.version, featureEvent.payload, {
       sessionId: sid,
       messages: getMessages(sid),
       book: bookFor(sid),
@@ -1056,7 +1055,7 @@ export function applyChunk(incomingChunk: ChatChunk): void {
 
   const book = bookFor(sid);
   const reqId = chunkRequestId(parsed, chunk.request_id);
-  const gate = resolveTurnGate(parsed.kind, reqId, {
+  const gate = resolveTurnGate(parsed, reqId, {
     turnSealed: book.turnSealed,
     activeRequestId: book.activeRequestId,
     acceptingNewRequest: book.acceptingNewRequest,
@@ -1099,8 +1098,13 @@ export function applyChunk(incomingChunk: ChatChunk): void {
 
   // Dynamic Kanban 看板：只在回合 gate 接收后刷新，避免旧 request 的迟到帧触发 UI 副作用。
   // 使用 per-session 专家团队状态判断，避免全局 state.mode 与后台会话不一致导致漏刷新。
-  // kanban 事件（call_completed / board_changed）到达后立即刷新右侧阶段，不必等轮询。
-  if (sid === state.activeSessionId && isDynamicKanbanSession(sid) && ['tool', 'status', 'final', 'error', 'kanban', 'workflow_progress'].includes(parsed.kind)) {
+  // kanban 的 feature_event 帧（started / board_changed / call_completed / workflow_progress）
+  // 到达后立即刷新右侧阶段，不必等轮询。
+  if (
+    sid === state.activeSessionId
+    && isDynamicKanbanSession(sid)
+    && (['tool', 'status', 'final', 'error'].includes(parsed.kind) || featureEvent?.feature === 'kanban')
+  ) {
     void scheduleRefreshKanbanBoard();
   }
 
@@ -1236,8 +1240,9 @@ export function applyChunk(incomingChunk: ChatChunk): void {
   if (busyNext !== null) setBusyWithUi(sid, busyNext);
   if (typeof result.statusHint === 'string') setStatusWithUi(sid, result.statusHint);
 
-  // 迁移保护：team_internal 仍保留旧路径的副作用组合，保证行为字节一致。
-  if (parsed.kind === 'team_internal') {
+  // team_internal 渲染副作用：team.internal_message 保持专用副作用组合，
+  // renderWorkspaceHistory 是该分支独有调用，普通合并渲染路径不经过它。
+  if (featureEvent?.feature === 'team' && featureEvent.event === 'internal_message') {
     renderChat();
     renderWorkspaceHistory(openSessionFn);
     syncTurnDurationTicker();
@@ -1317,8 +1322,8 @@ export function applyChunk(incomingChunk: ChatChunk): void {
 
   // 其他 kind：合并到下一帧渲染
   if (sid === state.activeSessionId) {
-    if (parsed.kind === 'wiki_ingest_progress') {
-      // wiki_ingest_progress 只驱动回调/进度条，不写 messages，无需重绘聊天区。
+    if (featureEvent?.feature === 'wiki' && featureEvent.event === 'ingest_progress') {
+      // wiki.ingest_progress 只驱动回调/进度条，不写 messages，无需重绘聊天区。
       return;
     }
     scheduleChatRender();

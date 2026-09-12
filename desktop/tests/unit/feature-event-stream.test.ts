@@ -1,11 +1,11 @@
 /**
  * @vitest-environment happy-dom
  *
- * feature_event 流路径语义补齐测试：注入 feature_event 新帧（body 含 feature/event/
- * version/payload）走 applyChunk / reduceChunk，断言与等价旧帧产生相同结果——
- * 看板刷新调度、team_internal 渲染副作用、回合 gate 分类、wiki_changed 早期分支时序、
- * 未登记事件安全忽略。归一入口：chat-reducer.toLegacyEventFrame（与 Gateway 出口
- * 兼容层同一资格集）+ applyChunk 入口统一。
+ * feature_event 流管线语义测试：业务事件只以 feature_event 帧（body 含 feature/event/
+ * version/payload）到达。覆盖四条原生行为路径——kanban 刷新调度、team_internal 渲染
+ * 副作用、回合 gate 按 (feature,event) 分类、wiki_changed 早期分支时序——以及未登记
+ * 事件的可诊断忽略。判定源：chat-reducer.featureEventFrameOf + featureEventTurnSemantics，
+ * feature_event 是内部管线的唯一协议形态（6D 归一层已删除）。
  */
 import './helpers/mock-chat-controller-deps';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -36,7 +36,6 @@ import {
   TURN_SCOPED_CHUNK_KINDS,
   normalizeChunk,
   resolveTurnGate,
-  toLegacyEventFrame,
 } from '../../src/ui/reducers/chat-reducer';
 import { openTurnForRequest } from '../../src/ui/features/session-busy';
 import { __resetAllStoresForTest, configStore, messageStore } from '../../src/ui/stores/stores';
@@ -55,10 +54,6 @@ vi.mock('../../src/ui/features/workspaces', () => ({
 const SID = 'sid-1';
 const DOM_STUB = '<div id="chat-messages"></div><div id="composer-controls"></div><div class="chat-running-intro"></div>';
 
-function legacyChunk(kind: ChatChunk['kind'], body: Record<string, unknown>, extra: Partial<ChatChunk> = {}): ChatChunk {
-  return { kind, body, is_final: false, sequence: 1, session_id: SID, ...extra };
-}
-
 function featureChunk(
   feature: string,
   event: string,
@@ -66,7 +61,14 @@ function featureChunk(
   extra: Partial<ChatChunk> = {},
   version = 1,
 ): ChatChunk {
-  return legacyChunk('feature_event', { feature, event, version, payload }, extra);
+  return {
+    kind: 'feature_event',
+    body: { feature, event, version, payload },
+    is_final: false,
+    sequence: 1,
+    session_id: SID,
+    ...extra,
+  };
 }
 
 function messages() {
@@ -101,46 +103,28 @@ afterEach(() => {
   _resetTurnDurationTickerForTests();
 });
 
-describe('toLegacyEventFrame / normalizeChunk 两代协议归一', () => {
-  it('已登记的 v1 事件映射为与 Gateway 出口逐字段等价的旧 kind 帧', () => {
+describe('normalizeChunk：feature_event 原生保留', () => {
+  it('feature_event 帧原样构造 FeatureEventChunk，body 逐字段保留', () => {
     expect(normalizeChunk(featureChunk('team', 'internal_message', { text: 'hi' }))).toEqual({
-      kind: 'team_internal', body: { text: 'hi' }, sequence: 1, session_id: SID,
-    });
-    expect(normalizeChunk(featureChunk('wiki', 'cards', { pages: [{ id: 'p1' }] }))).toEqual({
-      kind: 'wiki_cards', body: { pages: [{ id: 'p1' }] }, sequence: 1, session_id: SID,
-    });
-    expect(normalizeChunk(featureChunk('wiki', 'changed', { changes: [{ id: 'p1' }] }))).toEqual({
-      kind: 'wiki_changed', body: { changes: [{ id: 'p1' }] }, sequence: 1, session_id: SID,
-    });
-    expect(normalizeChunk(featureChunk('wiki', 'ingest_progress', { stage: 'compile', percent: 50 }))).toEqual({
-      kind: 'wiki_ingest_progress', body: { stage: 'compile', percent: 50 }, sequence: 1, session_id: SID,
-    });
-    // 旧 kanban 帧 body 约定以 event 字段开头，归一时重建（与 Gateway 出口一致）。
-    expect(normalizeChunk(featureChunk('kanban', 'started', { workflow_id: 'wf' }))).toEqual({
-      kind: 'kanban', body: { event: 'started', workflow_id: 'wf' }, sequence: 1, session_id: SID,
-    });
-    expect(normalizeChunk(featureChunk('kanban', 'board_changed', {}))).toEqual({
-      kind: 'kanban', body: { event: 'board_changed' }, sequence: 1, session_id: SID,
-    });
-    expect(normalizeChunk(featureChunk('kanban', 'call_completed', { call_id: 'c1' }))).toEqual({
-      kind: 'kanban', body: { event: 'call_completed', call_id: 'c1' }, sequence: 1, session_id: SID,
-    });
-    expect(normalizeChunk(featureChunk('kanban', 'workflow_progress', { workflow_id: 'wf', status: 'running' }))).toEqual({
-      kind: 'workflow_progress', body: { workflow_id: 'wf', status: 'running' }, sequence: 1, session_id: SID,
+      kind: 'feature_event',
+      body: { feature: 'team', event: 'internal_message', version: 1, payload: { text: 'hi' } },
+      sequence: 1,
+      session_id: SID,
     });
   });
 
-  it('未登记事件、未知版本原样保留 feature_event 形态；非 feature_event 帧原样返回', () => {
-    expect(normalizeChunk(featureChunk('future_feature', 'boom', { x: 1 }))?.kind).toBe('feature_event');
-    expect(normalizeChunk(featureChunk('wiki', 'changed', {}, {}, 2))?.kind).toBe('feature_event');
-    expect(normalizeChunk(featureChunk('kanban', 'started', {}, {}, 3))?.kind).toBe('feature_event');
-
-    const delta = legacyChunk('delta', { text: 'x' });
-    expect(toLegacyEventFrame(delta)).toBe(delta);
+  it('裸 feature_event 不进回合 kind 集合，分类只按 (feature,event)', () => {
+    expect(TURN_SCOPED_CHUNK_KINDS.has('feature_event')).toBe(false);
+    expect(TURN_GENERATION_CHUNK_KINDS.has('feature_event')).toBe(false);
   });
 
-  it('归一后的 kind 进入与旧帧相同的回合 gate 分类，裸 feature_event 不进 kind 集合', () => {
-    expect(TURN_GENERATION_CHUNK_KINDS.has(normalizeChunk(featureChunk('team', 'internal_message', {}))!.kind)).toBe(true);
+  it('feature_event 按 (feature,event) 获得回合 gate 语义', () => {
+    // 封口回合 + 活跃 request 已知：generation 帧拒收，turn-scoped 附属帧放行。
+    const sealedWithRequest = { turnSealed: true, activeRequestId: 'req-1', acceptingNewRequest: false };
+    // team.internal_message → generation 语义：封口回合迟到帧拒收。
+    expect(resolveTurnGate(normalizeChunk(featureChunk('team', 'internal_message', {}))!, 'req-1', sealedWithRequest))
+      .toEqual({ action: 'drop' });
+    // wiki.cards 与 kanban 全部事件 → turn-scoped 语义：同回合附属帧不因封口被拒收。
     for (const [feature, event] of [
       ['wiki', 'cards'],
       ['kanban', 'started'],
@@ -148,22 +132,23 @@ describe('toLegacyEventFrame / normalizeChunk 两代协议归一', () => {
       ['kanban', 'call_completed'],
       ['kanban', 'workflow_progress'],
     ] as const) {
-      expect(TURN_SCOPED_CHUNK_KINDS.has(normalizeChunk(featureChunk(feature, event, {}))!.kind)).toBe(true);
+      expect(resolveTurnGate(normalizeChunk(featureChunk(feature, event, {}))!, 'req-1', sealedWithRequest))
+        .toEqual({ action: 'accept' });
     }
-    expect(TURN_SCOPED_CHUNK_KINDS.has('feature_event')).toBe(false);
-    expect(TURN_GENERATION_CHUNK_KINDS.has('feature_event')).toBe(false);
-
-    // 映射后的 team_internal 具备旧帧的生成帧语义：封口回合迟到帧被拒收。
-    const sealed = { turnSealed: true, activeRequestId: null, acceptingNewRequest: false };
-    expect(resolveTurnGate(normalizeChunk(featureChunk('team', 'internal_message', {}))!.kind, 'req-1', sealed))
-      .toEqual({ action: 'drop' });
+    // owner 级带外事件与未知事件 → bypass：不参与回合 gate，request 不匹配也不拒收。
+    const openWithOtherRequest = { turnSealed: false, activeRequestId: 'req-active', acceptingNewRequest: false };
+    expect(resolveTurnGate(normalizeChunk(featureChunk('wiki', 'changed', {}))!, 'req-other', openWithOtherRequest))
+      .toEqual({ action: 'accept' });
+    expect(resolveTurnGate(normalizeChunk(featureChunk('future_feature', 'boom', {}))!, 'req-other', openWithOtherRequest))
+      .toEqual({ action: 'accept' });
   });
 });
 
-describe('看板刷新调度（kanban 白名单补齐）', () => {
+describe('看板刷新调度（kanban 事件白名单）', () => {
   // 共享 helper mock 掉了 kanban-board 模块（生产注册点 initKanbanBoard 不可用），
-  // 这里注册最小 handler 镜像「已注册」状态，避免 workflow_progress 事件触发 unhandled 警告噪声。
-  let disposeWorkflowProgress: (() => void) | null = null;
+  // 这里注册与生产一致的最小 handler 集：workflow_progress 空实现 + 三个无消息变更
+  // 事件的显式空 reducer，避免 registry 的 unhandled 警告噪声。
+  let disposers: Array<() => void> = [];
 
   function registerKanbanSpies() {
     const scheduleRefresh = vi.fn();
@@ -176,24 +161,26 @@ describe('看板刷新调度（kanban 白名单补齐）', () => {
   }
 
   beforeEach(() => {
-    disposeWorkflowProgress = featureEventRegistry.register({
+    disposers.push(featureEventRegistry.register({
       feature: 'kanban', event: 'workflow_progress', version: 1,
       reducer: () => emptyFeatureReducerResult(),
-    });
+    }));
+    for (const event of ['started', 'board_changed', 'call_completed'] as const) {
+      disposers.push(featureEventRegistry.register({
+        feature: 'kanban', event, version: 1,
+        reducer: () => emptyFeatureReducerResult(),
+      }));
+    }
   });
 
   afterEach(() => {
-    disposeWorkflowProgress?.();
-    disposeWorkflowProgress = null;
+    for (const dispose of disposers) dispose();
+    disposers = [];
   });
 
-  it('kanban 全部事件的 feature_event 帧与旧帧一样触发节流刷新调度', () => {
+  it('kanban 全部 4 个事件的 feature_event 帧触发节流刷新调度', () => {
     const scheduleRefresh = registerKanbanSpies();
     configStore.set({ mode: 'dynamic_kanban' });
-
-    applyChunk(legacyChunk('kanban', { event: 'started' }));
-    expect(scheduleRefresh).toHaveBeenCalledTimes(1);
-    scheduleRefresh.mockClear();
 
     for (const event of ['started', 'board_changed', 'call_completed']) {
       applyChunk(featureChunk('kanban', event, { workflow_id: 'wf-1' }));
@@ -214,12 +201,12 @@ describe('看板刷新调度（kanban 白名单补齐）', () => {
   });
 });
 
-describe('team_internal 渲染副作用（team 分支补齐）', () => {
+describe('team_internal 渲染副作用（team 分支）', () => {
   beforeEach(() => {
     initTeamCollaborationBoard();
   });
 
-  it('feature_event(team,internal_message) 与旧帧产生相同消息并触发相同副作用集', () => {
+  it('feature_event(team,internal_message) 写入 team_internal 消息并触发副作用集', () => {
     openTurnForRequest(SID, 'req-team');
     const teamBody = {
       agent_name: 'Crew',
@@ -229,53 +216,43 @@ describe('team_internal 渲染副作用（team 分支补齐）', () => {
       node_id: 'build',
     };
 
-    applyChunk(legacyChunk('team_internal', { ...teamBody, text: '旧帧消息' }, { request_id: 'req-team', sequence: 2 }));
-    const legacyMessages = messages();
-    const callsAfterLegacy = historyCalls();
-    expect(legacyMessages.at(-1)).toMatchObject({ role: 'team_internal', content: '旧帧消息', agentName: 'Crew' });
+    applyChunk(featureChunk('team', 'internal_message', { ...teamBody, text: '团队消息' }, { request_id: 'req-team', sequence: 2 }));
+    expect(messages().at(-1)).toMatchObject({ role: 'team_internal', content: '团队消息', agentName: 'Crew' });
     // team_internal 专属副作用分支：renderWorkspaceHistory 是该分支独有调用，通用合并路径不经过它。
-    expect(callsAfterLegacy).toBeGreaterThan(0);
-
-    applyChunk(featureChunk('team', 'internal_message', { ...teamBody, text: '新帧消息' }, { request_id: 'req-team', sequence: 3 }));
-    const all = messages();
-    expect(all).toHaveLength(legacyMessages.length + 1);
-    expect(all.at(-1)).toMatchObject({ role: 'team_internal', content: '新帧消息', agentName: 'Crew' });
-    expect(historyCalls()).toBe(callsAfterLegacy + 1);
+    expect(historyCalls()).toBeGreaterThan(0);
   });
 
-  it('封口回合迟到的 feature_event(team,internal_message) 与旧帧一样被 gate 丢弃', () => {
+  it('封口回合迟到的 feature_event(team,internal_message) 被 gate 丢弃', () => {
     const before = messages();
     const calls = historyCalls();
 
-    applyChunk(legacyChunk('team_internal', { text: '迟到旧帧' }, { request_id: 'req-stale', sequence: 2 }));
-    applyChunk(featureChunk('team', 'internal_message', { text: '迟到新帧' }, { request_id: 'req-stale', sequence: 3 }));
+    applyChunk(featureChunk('team', 'internal_message', { text: '迟到帧' }, { request_id: 'req-stale', sequence: 2 }));
 
     expect(messages()).toEqual(before);
     expect(historyCalls()).toBe(calls);
   });
 
-  it('封口回合迟到的 feature_event(wiki,cards) 与旧帧一样被 gate 丢弃', () => {
+  it('封口回合迟到的 feature_event(wiki,cards) 被 gate 丢弃', () => {
     // 安装 wiki handler，保证「gate 未丢弃 → 会写消息」可被观测，测试不空转。
     configStore.set({ config: wikiConfig(true) });
     initWikiAgent();
     const before = messages();
-    applyChunk(legacyChunk('wiki_cards', { pages: [{ id: 'p1' }] }, { request_id: 'req-stale', sequence: 2 }));
     applyChunk(featureChunk('wiki', 'cards', { pages: [{ id: 'p2' }] }, { request_id: 'req-stale', sequence: 3 }));
     expect(messages()).toEqual(before);
   });
 });
 
-describe('wiki_changed 时序（早期分支等价）', () => {
+describe('wiki_changed 时序（早期分支）', () => {
   beforeEach(() => {
     configStore.set({ config: wikiConfig(true) });
     initWikiAgent();
   });
 
-  it('feature_event(wiki,changed) 与旧帧一样派发 wiki:changed DOM 事件', () => {
+  it('feature_event(wiki,changed) 派发 wiki:changed DOM 事件', () => {
     const changed = vi.fn();
     window.addEventListener('wiki:changed', changed);
     try {
-      applyChunk(legacyChunk('wiki_changed', { changes: [{ id: 'p1' }] }, { sequence: 2 }));
+      applyChunk(featureChunk('wiki', 'changed', { changes: [{ id: 'p1' }] }, { sequence: 2 }));
       applyChunk(featureChunk('wiki', 'changed', { changes: [{ id: 'p2' }] }, { sequence: 3 }));
 
       expect(changed).toHaveBeenCalledTimes(2);
@@ -290,23 +267,23 @@ describe('wiki_changed 时序（早期分支等价）', () => {
     }
   });
 
-  it('历史加载窗口内 feature_event(wiki,changed) 与旧帧一样立即派发且不入队', () => {
+  it('历史加载窗口内 feature_event(wiki,changed) 立即派发且不入队', () => {
     const changed = vi.fn();
     window.addEventListener('wiki:changed', changed);
     setHistoryLoading(SID, true);
     try {
       applyChunk(featureChunk('wiki', 'changed', { changes: [{ id: 'p1' }] }));
       expect(changed).toHaveBeenCalledTimes(1);
-      // 未入队：队列应为空（旧帧同路径，history/sequence 之前处理）。
+      // 未入队：队列应为空（owner 级广播在 history/sequence 之前处理）。
       expect(flushPendingChunks(SID)).toBeNull();
 
       // 对照：主管道帧（wiki cards）在加载窗口内确实排队，证明上面的断言不是空转。
       applyChunk(featureChunk('wiki', 'cards', { pages: [{ id: 'p9' }] }));
       const queued = flushPendingChunks(SID);
       expect(queued).toHaveLength(1);
-      expect(queued?.[0]?.kind).toBe('wiki_cards');
+      expect(queued?.[0]?.kind).toBe('feature_event');
 
-      applyChunk(legacyChunk('wiki_changed', { changes: [{ id: 'p2' }] }));
+      applyChunk(featureChunk('wiki', 'changed', { changes: [{ id: 'p2' }] }));
       expect(changed).toHaveBeenCalledTimes(2);
     } finally {
       setHistoryLoading(SID, false);
@@ -314,7 +291,7 @@ describe('wiki_changed 时序（早期分支等价）', () => {
     }
   });
 
-  it('feature_event(wiki,changed) 与旧帧一样不受 gateway sequence 去重影响', () => {
+  it('feature_event(wiki,changed) 不受 gateway sequence 去重影响', () => {
     const changed = vi.fn();
     window.addEventListener('wiki:changed', changed);
     try {
@@ -326,24 +303,24 @@ describe('wiki_changed 时序（早期分支等价）', () => {
     }
   });
 
-  it('feature_event(wiki,cards / ingest_progress) 与旧帧产生相同结果', () => {
+  it('feature_event(wiki,cards / ingest_progress) 各自驱动卡片载体与进度回调', () => {
     const progress = vi.fn();
     setWikiIngestProgressCallback(progress);
-    applyChunk(legacyChunk('wiki_cards', { pages: [{ id: 'p1', title: '旧帧卡片' }] }, { sequence: 2 }));
+    applyChunk(featureChunk('wiki', 'cards', { pages: [{ id: 'p1', title: '卡片' }] }, { sequence: 2 }));
     applyChunk(featureChunk('wiki', 'ingest_progress', { stage: 'embed', percent: 80, source_id: 's1' }, { sequence: 3 }));
 
     const carrier = messages();
     expect(carrier).toHaveLength(1);
-    expect(carrier[0]?.wikiCards).toMatchObject([{ id: 'p1', title: '旧帧卡片' }]);
+    expect(carrier[0]?.wikiCards).toMatchObject([{ id: 'p1', title: '卡片' }]);
     expect(progress).toHaveBeenCalledTimes(1);
     expect(progress.mock.calls[0]?.[0]).toMatchObject({
       stage: 'embed', percent: 80, source_id: 's1', session_id: SID,
     });
 
-    // 新帧 cards 走同一 reducer：patch 到同一载体消息，而非追加第二条。
-    applyChunk(featureChunk('wiki', 'cards', { pages: [{ id: 'p2', title: '新帧卡片' }] }, { sequence: 4 }));
+    // cards 再到：patch 到同一载体消息，而非追加第二条。
+    applyChunk(featureChunk('wiki', 'cards', { pages: [{ id: 'p2', title: '新卡片' }] }, { sequence: 4 }));
     expect(messages()).toHaveLength(1);
-    expect(messages()[0]?.wikiCards).toMatchObject([{ id: 'p2', title: '新帧卡片' }]);
+    expect(messages()[0]?.wikiCards).toMatchObject([{ id: 'p2', title: '新卡片' }]);
   });
 });
 
@@ -361,7 +338,7 @@ describe('未知 feature_event 可诊断忽略', () => {
     }
   });
 
-  it('版本不匹配的已登记事件不映射为旧帧：不触发 DOM 副作用，registry 可诊断忽略', () => {
+  it('版本不匹配的已登记事件不触发 DOM 副作用，registry 可诊断忽略', () => {
     const changed = vi.fn();
     window.addEventListener('wiki:changed', changed);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

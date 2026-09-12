@@ -151,7 +151,7 @@ export interface ChatMessage {
   } | undefined;
   /** 被停止/断连截断的半截回复：不再显示执行中，但仍按流式 Markdown 容错渲染。 */
   interrupted?: boolean | undefined;
-  /** Wiki Agent 回合引用的 Wiki 页面卡片（wiki_cards 帧 → wikiCardsReducer patch 进来）；
+  /** Wiki Agent 回合引用的 Wiki 页面卡片（wiki.cards 事件 → wikiCardsReducer patch 进来）；
    *  chat-render 据此在正文下方渲染「Wiki 结果」卡片网格。 */
   wikiCards?: WikiPage[] | undefined;
 }
@@ -1861,7 +1861,7 @@ function renderWikiCard(page: WikiPage): HTMLElement {
   return card;
 }
 
-/** 「Wiki 结果」卡片网格（wiki_cards 帧渲染，对齐 web AgentTurn 的 wiki-cards-panel）。 */
+/** 「Wiki 结果」卡片网格（wiki.cards 事件渲染，对齐 web AgentTurn 的 wiki-cards-panel）。 */
 export function renderWikiCardsPanel(pages: WikiPage[]): HTMLElement {
   const panel = document.createElement('div');
   panel.className = 'wiki-cards-panel';

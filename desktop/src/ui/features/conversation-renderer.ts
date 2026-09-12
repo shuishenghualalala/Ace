@@ -486,7 +486,7 @@ function sigAgentTurn(
           .map((f) => `${f.path}|${f.added}|${f.removed}|${f.status}`)
           .join(US)
       : '';
-    // Wiki 卡片同样进 sig，否则 wiki_cards patch 后增量渲染复用旧 DOM。
+    // Wiki 卡片同样进 sig，否则 wiki.cards patch 后增量渲染复用旧 DOM。
     const wc = m.wikiCards
       ? m.wikiCards.map((p) => `${p.id}|${p.title}`).join(US)
       : '';

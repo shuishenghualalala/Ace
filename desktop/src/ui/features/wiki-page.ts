@@ -12,7 +12,7 @@
  *   1. 页头：KB 选择器（下拉）+ 新建 KB + 上传 + 批量管理 + 知识库面板收起/展开
  *      （「问 Wiki」已下线：对话面板常驻主区，无需入口按钮）
  *   2. 上传任务面板：每个 source 的进度条 + 阶段文案 + 错误态；进度经 WS
- *      wiki_ingest_progress 帧（chat-controller 回调转发）实时更新
+ *      wiki.ingest_progress 事件（chat-controller 回调转发）实时更新
  *   3. 左侧主区：Wiki Agent 对话面板（features/wiki-agent.ts 挂载，常驻，弹性宽度）
  *   4. 右侧知识库面板（.wiki-browser-pane，可拖拽调宽、可整体收起）：
  *      目录列表：分页「加载更多」；条目 = 标题 + 类型徽标 + 更新时间 + 摘要；

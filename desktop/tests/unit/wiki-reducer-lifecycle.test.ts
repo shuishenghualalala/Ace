@@ -90,8 +90,13 @@ function wikiConfig(enabled: boolean) {
 
 function wikiCardsChunk(): ChatChunk {
   return {
-    kind: 'wiki_cards',
-    body: { pages: [{ id: 'p1', title: 'Wiki page' }] },
+    kind: 'feature_event',
+    body: {
+      feature: 'wiki',
+      event: 'cards',
+      version: 1,
+      payload: { pages: [{ id: 'p1', title: 'Wiki page' }] },
+    },
     session_id: 'wiki-test-session',
     sequence: 1,
     is_final: false,
@@ -155,8 +160,8 @@ describe('Desktop Wiki reducer host lifecycle', () => {
     const before = document.body.innerHTML;
 
     applyChunk({
-      kind: 'wiki_ingest_progress',
-      body: { stage: 'compile', percent: 50, source_id: 'src-1' },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'ingest_progress', version: 1, payload: { stage: 'compile', percent: 50, source_id: 'src-1' } },
       session_id: 'wiki-test-session', sequence: 2, is_final: false,
     } as ChatChunk);
     applyChunk({ ...wikiCardsChunk(), sequence: 3 });
@@ -173,7 +178,8 @@ describe('Desktop Wiki reducer host lifecycle', () => {
     configStore.set({ config: wikiConfig(true) });
     initWikiAgent();
     applyChunk({
-      kind: 'wiki_ingest_progress', body: { stage: 'compile', percent: 50, source_id: 'src-1' },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'ingest_progress', version: 1, payload: { stage: 'compile', percent: 50, source_id: 'src-1' } },
       session_id: 'wiki-test-session', sequence: 10, is_final: false,
     } as ChatChunk);
     applyChunk({ ...wikiCardsChunk(), sequence: 11 });
@@ -184,7 +190,8 @@ describe('Desktop Wiki reducer host lifecycle', () => {
     window.dispatchEvent(new CustomEvent('wiki:config-change'));
     const beforeMessages = messageStore.get().messages;
     applyChunk({
-      kind: 'wiki_ingest_progress', body: { stage: 'disabled', percent: 90, source_id: 'src-2' },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'ingest_progress', version: 1, payload: { stage: 'disabled', percent: 90, source_id: 'src-2' } },
       session_id: 'wiki-test-session', sequence: 12, is_final: false,
     } as ChatChunk);
     applyChunk({ ...wikiCardsChunk(), sequence: 13 });
@@ -210,7 +217,8 @@ describe('Desktop Wiki reducer host lifecycle', () => {
     window.addEventListener('wiki:changed', wikiChange);
 
     applyChunk({
-      kind: 'wiki_changed', body: { changes: [{ id: 'p1' }] },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'changed', version: 1, payload: { changes: [{ id: 'p1' }] } },
       session_id: 'wiki-test-session', sequence: 3, is_final: false,
     } as ChatChunk);
 
@@ -232,14 +240,17 @@ describe('Desktop Wiki reducer host lifecycle', () => {
     configStore.set({ config: wikiConfig(false) });
     initWikiAgent();
     const team = reduceChunk({
-      kind: 'team_internal', body: { text: 'team' }, sequence: 1,
+      kind: 'feature_event',
+      body: { feature: 'team', event: 'internal_message', version: 1, payload: { text: 'team' } },
+      sequence: 1,
     }, snapshot());
     expect(team.messageUpserts[0]?.message?.role).toBe('team_internal');
 
     const wikiChange = vi.fn();
     window.addEventListener('wiki:changed', wikiChange);
     applyChunk({
-      kind: 'wiki_changed', body: { changes: [{ id: 'p1' }] },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'changed', version: 1, payload: { changes: [{ id: 'p1' }] } },
       session_id: 'wiki-test-session', sequence: 3, is_final: false,
     } as ChatChunk);
     expect(wikiChange).not.toHaveBeenCalled();

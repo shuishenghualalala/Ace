@@ -5,7 +5,7 @@
  * setWikiAgentEntryHandler 回调注入，互不 import）→ POST /api/wiki/agent-session 拿独立会话
  * → 右栏面板直接收发 → 发送时 payload 带 wiki_kb_id
  * （chat-controller 经 setWikiSendExtrasResolver 注册口取参数，chat 侧不 import 本模块）
- * → wiki_cards 帧经 reducer 挂到消息渲染。
+ * → wiki.cards feature_event 经 reducer 挂到消息渲染。
  *
  * 右栏面板（mountWikiAgentPanel）：面板头（标题 + 新建/历史/展开）是 wiki 自己的 DOM；
  * 对话区是**主对话面板本体**（conversation-panel.mountConversationPanel：同一套增量 diff
@@ -1122,7 +1122,7 @@ export function buildWikiAssistPrompt(assist: { fileName: string; error: string;
 
 // ---------- Feature Event Reducers ----------
 
-/** 规范化 wiki_cards 帧的页面数组（对齐 web normalizeWikiCardPages：pages 或 cards 字段）。
+/** 规范化 wiki.cards 事件的页面数组（对齐 web normalizeWikiCardPages：pages 或 cards 字段）。
  *  reducer 层容错：缺字段给默认值，保证渲染层拿到完整 WikiPage 形状。 */
 export function normalizeWikiCardPages(body: Record<string, unknown>): WikiPage[] {
   const raw = Array.isArray(body.pages) ? body.pages : Array.isArray(body.cards) ? body.cards : [];
@@ -1158,7 +1158,7 @@ export function normalizeWikiCardPages(body: Record<string, unknown>): WikiPage[
     .filter((p) => p.id || p.title);
 }
 
-/** wiki_cards：卡片挂到当前回合最后一条 assistant 消息（帧在回合结束后到达，
+/** wiki.cards：卡片挂到当前回合最后一条 assistant 消息（事件在回合结束后到达，
  *  book.assistantId 已随 finalize 清空，故按消息列表定位）；无 assistant 时新建一条空载体。
  *  对齐 web useChat 的 ensureAssistantMessage(sid, { wikiCards })。 */
 export function wikiCardsReducer(
@@ -1193,7 +1193,7 @@ export function wikiCardsReducer(
   };
 }
 
-/** wiki_ingest_progress：带外进度帧，不进 reducer、不写消息。
+/** wiki.ingest_progress：带外进度事件，不进 reducer、不写消息。
  *  规范化后通过 chat-controller 的 callback 订阅机制转发给 wiki-page 等订阅者。
  *  这是迁移期边界：业务处理归属 wiki feature，callback pub-sub 暂留 chat-controller。 */
 function wikiIngestProgressHandler(body: unknown, ctx: FeatureReducerContext): FeatureReducerResult {

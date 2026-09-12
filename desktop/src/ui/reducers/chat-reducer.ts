@@ -11,9 +11,8 @@
  * - 未知 kind / 异常 body 由 `unknown` reducer 兜底，不抛错
  */
 
-import type { ChatMessage, PlanReviewStatus, SessionStatus, ToolCallInfo, TurnFileChangeSummary, WorkflowProgressPayload } from '../chat-render';
+import type { ChatMessage, PlanReviewStatus, SessionStatus, ToolCallInfo, TurnFileChangeSummary } from '../chat-render';
 import type { Bookkeeping, FileChange, TodoItem } from '../state';
-import type { WikiPage } from '../backend-client';
 import { isPlanDocumentPath } from '../plan-document-path';
 import {
   featureEventRegistry,
@@ -45,14 +44,8 @@ export type ChatChunkKind =
   | 'thinking'
   | 'plan_review'
   | 'followup_question'
-  | 'kanban'
   | 'todo_updated'
   | 'file_changes'
-  | 'workflow_progress'
-  | 'wiki_cards'
-  | 'wiki_changed'
-  | 'wiki_ingest_progress'
-  | 'team_internal'
   | 'feature_event';
 
 export interface DeltaChunk {
@@ -168,40 +161,6 @@ export interface FollowupQuestionChunk {
   sequence: number;
   session_id?: string;
 }
-export interface KanbanChunk {
-  kind: 'kanban';
-  body: { event?: string; workflow_id?: string };
-  sequence: number;
-  session_id?: string;
-}
-
-export interface WorkflowProgressPhase {
-  id: string;
-  name: string;
-  description?: string;
-  status: string;
-}
-
-export interface WorkflowProgressCall {
-  call_id: string;
-  role: string;
-  phase_id?: string;
-}
-
-export interface WorkflowProgressChunk {
-  kind: 'workflow_progress';
-  body: {
-    workflow_id: string;
-    status: string;
-    current_phase?: WorkflowProgressPhase;
-    completed_phases?: WorkflowProgressPhase[];
-    active_calls?: WorkflowProgressCall[];
-    message?: string;
-  };
-  sequence: number;
-  session_id?: string;
-}
-
 export interface TodoUpdatedChunk {
   kind: 'todo_updated';
   body: { todos?: Array<{ id?: string; content?: string; status?: string }> };
@@ -234,68 +193,7 @@ export interface FileChangesChunk {
   session_id?: string;
 }
 
-export interface TeamInternalChunk {
-  kind: 'team_internal';
-  body: {
-    text?: string;
-    source_session_id?: string;
-    agent_id?: string;
-    agent_name?: string;
-    agent_role?: string;
-    agent_tone?: number;
-    is_leader?: boolean;
-    event_type?: string;
-    node_id?: string;
-    mention_from?: string;
-    mention_to?: string[];
-    mention_intent?: string;
-    communication_kind?: string;
-    communication_status?: string;
-    request_id?: string;
-    reply_to?: string;
-    communication_request_text?: string;
-    display_mode?: string;
-    collapsed_title?: string;
-    process_text?: string;
-    artifacts?: ChatMessage['artifacts'];
-    turn_file_changes?: ChatMessage['turnFileChanges'];
-    thinking?: unknown;
-    tool_calls?: unknown[];
-    turn_started_at?: number;
-    turn_duration?: number;
-    timestamp?: number;
-    append?: boolean;
-  };
-  sequence: number;
-  session_id?: string;
-}
-
-/** Wiki Agent 回合结束后推送的引用页面卡片（crew/gateway/ws.py，带本轮 request_id）。 */
-export interface WikiCardsChunk {
-  kind: 'wiki_cards';
-  body: { pages?: unknown[]; cards?: unknown[] };
-  sequence: number;
-  session_id?: string;
-}
-
-/** Wiki 知识库摄取进度帧：只驱动进度回调，不写消息。 */
-export interface WikiIngestProgressChunk {
-  kind: 'wiki_ingest_progress';
-  body: Record<string, unknown>;
-  sequence: number;
-  session_id?: string;
-}
-
-/** Wiki 知识库变更广播帧：owner 级带外事件，applyChunk 在 history/sequence 之前早期处理。
- *  reduceChunk 里同样登记了 registry 转调，供绕过 applyChunk 的直接调用方获得等价副作用。 */
-export interface WikiChangedChunk {
-  kind: 'wiki_changed';
-  body: { changes?: unknown[] };
-  sequence: number;
-  session_id?: string;
-}
-
-/** 后端 feature_event 统一命名空间帧（Gateway compat 层仍并行发旧帧）。 */
+/** 后端 feature_event 统一命名空间帧：业务事件以 (feature, event, version) 寻址，payload 携带业务数据。 */
 export interface FeatureEventChunk {
   kind: 'feature_event';
   body: {
@@ -317,15 +215,9 @@ export type AnyChatChunk =
   | ErrorChunk
   | PlanReviewChunk
   | FollowupQuestionChunk
-  | KanbanChunk
   | TodoUpdatedChunk
   | FileChangesChunk
-  | WikiCardsChunk
-  | WikiChangedChunk
-  | WikiIngestProgressChunk
   | TaskChunk
-  | WorkflowProgressChunk
-  | TeamInternalChunk
   | FeatureEventChunk;
 
 // ---------- reducer 输入快照 ----------
@@ -364,7 +256,6 @@ export const TURN_GENERATION_CHUNK_KINDS = new Set<ChatChunkKind>([
   'status',
   'final',
   'error',
-  'team_internal',
 ]);
 
 export const TURN_SCOPED_CHUNK_KINDS = new Set<ChatChunkKind>([
@@ -373,10 +264,7 @@ export const TURN_SCOPED_CHUNK_KINDS = new Set<ChatChunkKind>([
   'followup_question',
   'todo_updated',
   'file_changes',
-  'wiki_cards',
-  'kanban',
   'task',
-  'workflow_progress',
 ]);
 
 /**
@@ -412,6 +300,35 @@ export type TurnGateDecision =
   | { action: 'accept'; bindRequestId: string }
   | { action: 'drop' };
 
+/** 帧的回合归属语义：generation=生成期帧，turn-scoped=回合附属帧，bypass=不参与回合 gate。 */
+type TurnSemantics = 'generation' | 'turn-scoped' | 'bypass';
+
+/**
+ * feature_event 帧的回合归属分类（判定源是 (feature, event)，不把裸 feature_event 塞进 kind 集合）：
+ * - team.internal_message → generation（生成期帧）；
+ * - wiki.cards 与 kanban 全部事件 → turn-scoped（回合附属帧）；
+ * - 其余（wiki.changed / wiki.ingest_progress 等 owner 级带外事件、未知事件）→ bypass。
+ */
+function featureEventTurnSemantics(feature: string, event: string): TurnSemantics {
+  if (feature === 'team' && event === 'internal_message') return 'generation';
+  if (feature === 'wiki' && event === 'cards') return 'turn-scoped';
+  if (feature === 'kanban') return 'turn-scoped';
+  return 'bypass';
+}
+
+/** chunk → 回合归属语义：feature_event 按 (feature, event) 分类，普通 kind 查 kind 集合。 */
+function turnSemanticsOf(chunk: AnyChatChunk): TurnSemantics {
+  if (chunk.kind === 'feature_event') {
+    const featureEvent = featureEventFrameOf(chunk);
+    return featureEvent
+      ? featureEventTurnSemantics(featureEvent.feature, featureEvent.event)
+      : 'bypass';
+  }
+  if (TURN_GENERATION_CHUNK_KINDS.has(chunk.kind)) return 'generation';
+  if (TURN_SCOPED_CHUNK_KINDS.has(chunk.kind)) return 'turn-scoped';
+  return 'bypass';
+}
+
 /**
  * 决定 chunk 是否属于当前可接收回合。该 gate 必须在 reducer patch 写入 store 前执行。
  *
@@ -420,20 +337,23 @@ export type TurnGateDecision =
  * - request_id 匹配且回合已封口的生成帧，是同一回合迟到帧，直接丢弃。
  * - 新发送/恢复/重连打开 acceptingNewRequest 后，首个带 request_id 的生成帧绑定当前回合。
  * - 无 request_id 的控制帧保持兼容；无法证明归属时只按 sealed 处理生成帧。
+ * - 帧的回合归属语义由 turnSemanticsOf 统一给出：普通 kind 查 kind 集合，
+ *   feature_event 按 (feature, event) 分类。
  */
 export function resolveTurnGate(
-  kind: ChatChunkKind,
+  chunk: AnyChatChunk,
   requestId: string | undefined,
   gate: TurnGateState,
 ): TurnGateDecision {
-  if (!TURN_SCOPED_CHUNK_KINDS.has(kind)) return { action: 'accept' };
+  const semantics = turnSemanticsOf(chunk);
+  if (semantics === 'bypass') return { action: 'accept' };
   if (!requestId) {
-    if (!TURN_GENERATION_CHUNK_KINDS.has(kind)) return { action: 'accept' };
-    if (kind === 'status') return { action: 'accept' };
+    if (semantics !== 'generation') return { action: 'accept' };
+    if (chunk.kind === 'status') return { action: 'accept' };
     return gate.turnSealed ? { action: 'drop' } : { action: 'accept' };
   }
   if (gate.activeRequestId === requestId) {
-    return gate.turnSealed && TURN_GENERATION_CHUNK_KINDS.has(kind)
+    return gate.turnSealed && semantics === 'generation'
       ? { action: 'drop' }
       : { action: 'accept' };
   }
@@ -454,59 +374,38 @@ export type ReducerResult = FeatureReducerResult;
 
 // ---------- 7 个 reducer ----------
 
-// ---------- feature_event 帧归一（两代协议统一入口） ----------
+// ---------- feature_event 帧解析（业务事件的唯一协议形态） ----------
 
-/**
- * feature_event(v1) → 等价旧 kind 帧 的映射表，与 Gateway 出口兼容层保持同一资格集：
- * 生产侧业务事件只产出 feature_event，兼容层在 WS 出口把这些 v1 事件翻译回旧帧发给
- * 旧客户端；本表是同一翻译在客户端侧的镜像。兼容层删除后，Desktop 靠这张表在入口处
- * 把两代协议归一成单一内部形态——wiki_changed 早期分支、回合 gate（按 body 映射出的
- * kind 分类，而非把裸 feature_event 塞进 kind 集合）、kanban 刷新白名单、team_internal
- * 渲染副作用，全部只面对旧 kind 形态，无需感知帧代际。
- */
-const LEGACY_KIND_BY_FEATURE_EVENT: Readonly<Record<string, ChatChunkKind>> = {
-  'team:internal_message:1': 'team_internal',
-  'wiki:cards:1': 'wiki_cards',
-  'wiki:changed:1': 'wiki_changed',
-  'wiki:ingest_progress:1': 'wiki_ingest_progress',
-  'kanban:started:1': 'kanban',
-  'kanban:board_changed:1': 'kanban',
-  'kanban:call_completed:1': 'kanban',
-  'kanban:workflow_progress:1': 'workflow_progress',
-};
-
-/** 旧 kanban 帧 body 约定以 event 字段开头；feature_event payload 不重复携带事件名，归一时重建。 */
-function legacyKanbanBody(event: string, payload: Record<string, unknown>): Record<string, unknown> {
-  return { event, ...payload };
+/** feature_event 帧的规范化身份：(feature, event, version) 寻址 + 业务 payload。 */
+export interface FeatureEventFrame {
+  feature: string;
+  event: string;
+  version: number;
+  payload: unknown;
 }
 
 /**
- * 把 feature_event 帧映射回等价旧 kind 帧；非 feature_event 或未登记的 (feature, event,
- * version) 原样返回。只翻译上表中的 v1 事件；其余 feature_event 原样放行，交由
- * featureEventRegistry 的可诊断忽略语义兜底（console.warn，不抛错）。
+ * 从 chunk 解析 feature_event 身份；非 feature_event 帧返回 null。
+ * 字段容错：feature/event 缺失或非字符串记为空串，version 缺失回落 1（与 registry
+ * 的 v1 注册约定一致）；未登记的 (feature, event, version) 由 registry 在 dispatch 时
+ * console.warn 可诊断忽略。
  */
-export function toLegacyEventFrame<T extends { kind: string; body: Record<string, unknown> }>(chunk: T): T {
-  if (chunk.kind !== 'feature_event') return chunk;
-  const body = chunk.body as { feature?: unknown; event?: unknown; version?: unknown; payload?: unknown };
-  const feature = typeof body.feature === 'string' ? body.feature : '';
-  const event = typeof body.event === 'string' ? body.event : '';
-  const version = typeof body.version === 'number' ? body.version : 0;
-  const kind = LEGACY_KIND_BY_FEATURE_EVENT[`${feature}:${event}:${version}`];
-  if (!kind) return chunk;
-  const payload = body.payload !== null && typeof body.payload === 'object'
-    ? { ...(body.payload as Record<string, unknown>) }
-    : {};
+export function featureEventFrameOf(
+  chunk: { kind: string; body: Record<string, unknown> },
+): FeatureEventFrame | null {
+  if (chunk.kind !== 'feature_event') return null;
+  const body = chunk.body;
   return {
-    ...chunk,
-    kind,
-    body: kind === 'kanban' ? legacyKanbanBody(event, payload) : payload,
-  } as T;
+    feature: typeof body['feature'] === 'string' ? body['feature'] : '',
+    event: typeof body['event'] === 'string' ? body['event'] : '',
+    version: typeof body['version'] === 'number' ? body['version'] : 1,
+    payload: body['payload'],
+  };
 }
 
 /**
  * 解析 chunk → 统一 AnyChatChunk 形态。
  * 输入是 unknown（来自 IPC），reducer 层做容错。
- * feature_event 先经 toLegacyEventFrame 归一，见下方「两代协议统一入口」。
  */
 export function normalizeChunk(raw: unknown): AnyChatChunk | null {
   if (typeof raw !== 'object' || raw === null) return null;
@@ -527,22 +426,10 @@ export function normalizeChunk(raw: unknown): AnyChatChunk | null {
     case 'error': return { kind: 'error', body: body as ErrorChunk['body'], sequence, ...base };
     case 'plan_review': return { kind: 'plan_review', body: body as PlanReviewChunk['body'], sequence, ...base };
     case 'followup_question': return { kind: 'followup_question', body: body as FollowupQuestionChunk['body'], sequence, ...base };
-    case 'kanban': return { kind: 'kanban', body: body as KanbanChunk['body'], sequence, ...base };
-    case 'workflow_progress': return { kind: 'workflow_progress', body: body as WorkflowProgressChunk['body'], sequence, ...base };
     case 'todo_updated': return { kind: 'todo_updated', body: body as TodoUpdatedChunk['body'], sequence, ...base };
     case 'file_changes': return { kind: 'file_changes', body: body as FileChangesChunk['body'], sequence, ...base };
-    case 'wiki_cards': return { kind: 'wiki_cards', body: body as WikiCardsChunk['body'], sequence, ...base };
-    case 'wiki_changed': return { kind: 'wiki_changed', body: body as WikiChangedChunk['body'], sequence, ...base };
-    case 'wiki_ingest_progress': return { kind: 'wiki_ingest_progress', body: body as WikiIngestProgressChunk['body'], sequence, ...base };
     case 'task': return { kind: 'task', body: body as TaskChunk['body'], sequence, ...base };
-    case 'team_internal': return { kind: 'team_internal', body: body as TeamInternalChunk['body'], sequence, ...base };
-    case 'feature_event': {
-      // 先做两代协议归一：已登记的 v1 事件映射回等价旧 kind 后，递归重走同一构造路径，
-      // 保证 feature_event 与旧帧产出逐字段相同的 AnyChatChunk；未登记事件保持原样。
-      const wire: FeatureEventChunk = { kind: 'feature_event', body: body as FeatureEventChunk['body'], sequence, ...base };
-      const unified = toLegacyEventFrame(wire);
-      return unified.kind !== 'feature_event' ? normalizeChunk(unified) : unified;
-    }
+    case 'feature_event': return { kind: 'feature_event', body: body as FeatureEventChunk['body'], sequence, ...base };
     default: return null;
   }
 }
@@ -1334,38 +1221,24 @@ function featureReducerContextFromSnapshot(snapshot: ReducerSnapshot): FeatureRe
 }
 
 /**
- * 把旧帧与 feature_event 新帧统一转调 Feature Event Reducer Registry。
- * 未命中（包括模块未加载导致的未注册）返回 null，让 reduceChunk 回退到原有 switch/unknownReducer，
- * 保证未注册旧帧行为逐字不变。
+ * 把 feature_event 帧按 (feature, event, version) 转调 Feature Event Reducer Registry。
+ * 未命中（包括模块未加载导致的未注册）返回 null，让 reduceChunk 回退到 unknownReducer，
+ * 由 registry console.warn 提供可诊断信息，不抛错。
  */
 function dispatchFeatureEventFromChunk(
   chunk: AnyChatChunk,
   snapshot: ReducerSnapshot,
 ): ReducerResult | null {
-  const ctx = featureReducerContextFromSnapshot(snapshot);
-  switch (chunk.kind) {
-    case 'wiki_cards':
-      return featureEventRegistry.dispatch('wiki', 'cards', 1, chunk.body, ctx);
-    case 'wiki_changed':
-      // applyChunk 对 wiki_changed 在 history/sequence 之前早期分派并 return，
-      // 正常流不会走到这里；保留转调使绕过 applyChunk 的调用方行为等价。
-      return featureEventRegistry.dispatch('wiki', 'changed', 1, chunk.body, ctx);
-    case 'wiki_ingest_progress':
-      return featureEventRegistry.dispatch('wiki', 'ingest_progress', 1, chunk.body, ctx);
-    case 'team_internal':
-      return featureEventRegistry.dispatch('team', 'internal_message', 1, chunk.body, ctx);
-    case 'workflow_progress':
-      return featureEventRegistry.dispatch('kanban', 'workflow_progress', 1, chunk.body, ctx);
-    case 'feature_event': {
-      const body = chunk.body;
-      const feature = typeof body.feature === 'string' ? body.feature : '';
-      const event = typeof body.event === 'string' ? body.event : '';
-      const version = typeof body.version === 'number' ? body.version : 1;
-      return featureEventRegistry.dispatch(feature, event, version, body.payload, ctx);
-    }
-    default:
-      return null;
-  }
+  if (chunk.kind !== 'feature_event') return null;
+  const featureEvent = featureEventFrameOf(chunk);
+  if (!featureEvent) return null;
+  return featureEventRegistry.dispatch(
+    featureEvent.feature,
+    featureEvent.event,
+    featureEvent.version,
+    featureEvent.payload,
+    featureReducerContextFromSnapshot(snapshot),
+  );
 }
 
 /** 顶层 dispatch：根据 chunk.kind 选 reducer；未知 kind 返回空 patch（不抛错）。 */
@@ -1382,7 +1255,6 @@ export function reduceChunk(chunk: AnyChatChunk, snapshot: ReducerSnapshot): Red
     case 'error': return errorReducer(chunk, snapshot);
     case 'plan_review': return planReviewReducer(chunk, snapshot);
     case 'followup_question': return followupQuestionReducer(chunk, snapshot);
-    case 'kanban': return emptyReducer(snapshot);
     case 'todo_updated': return todoUpdatedReducer(chunk, snapshot);
     case 'file_changes': return fileChangesReducer(chunk, snapshot);
     case 'task': return emptyReducer(snapshot); // 桌面端走 REST /api/tasks 驱动 kanban，WS task 帧仅保留入口

@@ -607,40 +607,52 @@ function resetKanbanBoardState(): void {
 }
 
 function createKanbanBoardDisposer(
-  disposeReducer: () => void,
+  disposeReducers: () => void,
   disposeResize: () => void,
   disposeHooks: () => void,
 ): () => void {
   return (): void => {
-    disposeReducer();
+    disposeReducers();
     disposeResize();
     disposeHooks();
     resetKanbanBoardState();
   };
 }
 
+/** 不产生消息变更的 kanban 事件：注册空 reducer 显式消费，避免 registry 的 unhandled 告警噪声。 */
+const KANBAN_NOOP_EVENTS = ['started', 'board_changed', 'call_completed'] as const;
+
 /**
  * 初始化 Dynamic Kanban 看板生命周期：
- * - 注册 feature event reducer（kanban/workflow_progress@1）；
+ * - 注册 feature event reducer（kanban/workflow_progress@1 与空实现的 started /
+ *   board_changed / call_completed@1）；
  * - 向 board-hooks 注册中心调用回调；
  * - 绑定任务面板 resize。
  * 返回的 disposer 与 disposeKanbanBoard() 共享同一条清理路径。
  *
- * started / board_changed / call_completed 有意不注册 reducer：这三个事件经
- * chat-reducer.toLegacyEventFrame 归一为旧 kanban 帧形态，与旧帧走同一条路径——
- * 回合 gate 按 TURN_SCOPED 分类，chat-controller 在看板会话守卫内触发
- * scheduleRefreshKanbanBoard，reducer 落空实现。旧 kanban 帧从不进 registry，
- * 因此这里不存在需要「消音」的 unhandled 警告；注册空 handler 只会复制既有行为。
+ * started / board_changed / call_completed 不写消息：回合 gate 按 turn-scoped 分类后，
+ * chat-controller 在看板会话守卫内触发 scheduleRefreshKanbanBoard，reducer 侧空实现
+ * ——与「收到事件、看板数据以 REST 拉取为准」的语义一致；不注册则会触发 registry
+ * 的 unhandled 告警，故显式消费。
  */
 export function initKanbanBoard(): () => void {
   if (kanbanInitDisposer) return kanbanInitDisposer;
 
-  const disposeReducer = featureEventRegistry.register({
+  const disposers: Array<() => void> = [];
+  disposers.push(featureEventRegistry.register({
     feature: 'kanban',
     event: 'workflow_progress',
     version: 1,
     reducer: (payload, ctx) => workflowProgressReducer(payload as WorkflowProgressBody, ctx),
-  });
+  }));
+  for (const event of KANBAN_NOOP_EVENTS) {
+    disposers.push(featureEventRegistry.register({
+      feature: 'kanban',
+      event,
+      version: 1,
+      reducer: () => emptyFeatureReducerResult(),
+    }));
+  }
   const disposeResize = bindTaskBoardResize();
   const disposeHooks = registerKanbanBoardCallbacks({
     refresh: refreshKanbanBoard,
@@ -648,7 +660,10 @@ export function initKanbanBoard(): () => void {
     render: renderKanbanBoard,
   });
 
-  kanbanInitDisposer = createKanbanBoardDisposer(disposeReducer, disposeResize, disposeHooks);
+  const disposeReducers = (): void => {
+    for (const dispose of disposers) dispose();
+  };
+  kanbanInitDisposer = createKanbanBoardDisposer(disposeReducers, disposeResize, disposeHooks);
   return kanbanInitDisposer;
 }
 

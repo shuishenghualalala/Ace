@@ -1,8 +1,9 @@
 /**
  * Feature Event Reducer Registry
  *
- * 桌面端业务事件统一入口：后端 Gateway compat 层仍发旧帧（wiki_cards / team_internal 等），
- * 但核心 Shell 只认插槽；Feature 按 (feature, event, version) 注册自己的 reducer。
+ * 桌面端业务事件统一入口：业务事件以 feature_event 帧的 (feature, event, version) 寻址，
+ * 核心 Shell 只认插槽；Feature 注册自己的 reducer 消费对应事件，未注册的事件由 registry
+ * console.warn 可诊断忽略。
  *
  * 注册时机说明：
  * - Wiki Agent 在 initWikiAgent() 内显式注册；

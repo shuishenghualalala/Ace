@@ -283,8 +283,8 @@ beforeEach(() => {
 
 // ── Wiki Agent 结果卡片渲染 ──
 
-describe('wiki_cards 渲染', () => {
-  it('wiki_cards 挂到本回合 assistant 消息并渲染卡片网格（含查看按钮）', async () => {
+describe('wiki.cards 卡片渲染', () => {
+  it('wiki.cards 挂到本回合 assistant 消息并渲染卡片网格（含查看按钮）', async () => {
     await enterWiki();
     const rid = await sendAndGetRequestId('查一下');
 
@@ -297,8 +297,8 @@ describe('wiki_cards 渲染', () => {
       is_final: true,
     } as ChatChunk);
     applyChunk({
-      kind: 'wiki_cards',
-      body: { pages: [makePage({ id: 'p1', title: 'React 笔记', summary: 'Hooks 用法', tags: ['前端'] })] },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [makePage({ id: 'p1', title: 'React 笔记', summary: 'Hooks 用法', tags: ['前端'] })] } },
       session_id: WIKI_SID,
       request_id: rid,
       sequence: 3,
@@ -332,8 +332,8 @@ describe('wiki_cards 渲染', () => {
       is_final: true,
     } as ChatChunk);
     applyChunk({
-      kind: 'wiki_cards',
-      body: { pages: [makePage({ id: 'p1', title: 'React 笔记', summary: 'Hooks 用法' })] },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [makePage({ id: 'p1', title: 'React 笔记', summary: 'Hooks 用法' })] } },
       session_id: WIKI_SID,
       request_id: rid,
       sequence: 3,
@@ -388,7 +388,7 @@ describe('wiki_cards 渲染', () => {
     });
   });
 
-  it('旧 request_id 的迟到 wiki_cards 被 turn gate 丢弃', async () => {
+  it('旧 request_id 的迟到 wiki.cards 被 turn gate 丢弃', async () => {
     await enterWiki();
     const rid = await sendAndGetRequestId('查一下');
     applyChunk({
@@ -400,8 +400,8 @@ describe('wiki_cards 渲染', () => {
       is_final: true,
     } as ChatChunk);
     applyChunk({
-      kind: 'wiki_cards',
-      body: { pages: [makePage({})] },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [makePage({})] } },
       session_id: WIKI_SID,
       request_id: 'req-stale',
       sequence: 3,
@@ -910,7 +910,7 @@ describe('wiki reducer（纯函数）', () => {
     expect(normalizeWikiCardPages({})).toEqual([]);
   });
 
-  it('wiki_cards patch 到最后一条 assistant；无 assistant 时新建空载体消息', () => {
+  it('wiki.cards patch 到最后一条 assistant；无 assistant 时新建空载体消息', () => {
     const existing = {
       id: 'm-1',
       role: 'assistant' as const,
@@ -918,8 +918,8 @@ describe('wiki reducer（纯函数）', () => {
       timestamp: 1,
     };
     const chunk = normalizeChunk({
-      kind: 'wiki_cards',
-      body: { pages: [{ id: 'p1', title: 'A' }] },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [{ id: 'p1', title: 'A' }] } },
       sequence: 9,
     }) as AnyChatChunk;
     const patched = reduceChunk(chunk, snap({ messages: [existing] }));
@@ -936,8 +936,12 @@ describe('wiki reducer（纯函数）', () => {
     expect(appended.finalize).toBe(false);
   });
 
-  it('wiki_cards 空数组 no-op', () => {
-    const chunk = normalizeChunk({ kind: 'wiki_cards', body: { pages: [] }, sequence: 9 }) as AnyChatChunk;
+  it('wiki.cards 空数组 no-op', () => {
+    const chunk = normalizeChunk({
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [] } },
+      sequence: 9,
+    }) as AnyChatChunk;
     const result = reduceChunk(chunk, snap());
     expect(result.messageUpserts).toEqual([]);
   });
