@@ -138,6 +138,9 @@ export function mountConversationPanel(
   // ── Composer ──
   const ownComposerHost = !opts.composerHost;
   const composerHost = opts.composerHost ?? document.createElement('div');
+  // 自建面板中 Composer host 是消息区旁边的 flex 子项；显式标记它，
+  // 让嵌入式面板可以把高度约束传到 Composer，而不会被内容的最小尺寸撑出视口。
+  composerHost.classList.add('conversation-panel__composer-host');
   if (messagesEl) host.append(messagesEl, composerHost);
   else if (ownComposerHost) host.append(composerHost);
   const composer: ComposerView = createComposerView(composerHost, {
