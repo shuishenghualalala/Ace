@@ -1201,14 +1201,20 @@ def _register_migrate(subparsers) -> None:
 
 
 def _claim_legacy(args: Any, ctx: CliContext) -> CliResult:
-    from crew.state._migration import OWNER_TABLE_LABELS, claim_legacy_owner_database
+    from crew.state._migration import (
+        OWNER_TABLE_LABELS,
+        claim_legacy_owner_databases,
+        legacy_owner_scan_targets,
+    )
 
     app = ctx.app
     owner = args.account.strip()
     if not owner:
         raise CliError("--account 不能为空")
-    changed, remaining = claim_legacy_owner_database(
-        app.config.db_path,
+    # 按表归属解析对应库（ADR-0038）：cron 两表读 cron 库，其余读主库。
+    targets = legacy_owner_scan_targets(app.config.db_path, app.config.cron_db_path)
+    changed, remaining = claim_legacy_owner_databases(
+        targets,
         owner,
         dry_run=bool(args.dry_run),
         wal_enabled=app.config.sqlite_wal,
@@ -1237,12 +1243,21 @@ class FeatureMigrationReport:
 FeatureMigrator = Callable[[Any], FeatureMigrationReport]
 
 
-def _run_main_db_migrator(app: Any, *, feature: str, latest_version: int) -> FeatureMigrationReport:
-    """Ensure the feature's version table on the main database, then snapshot versions."""
+def _run_main_db_migrator(
+    app: Any,
+    *,
+    feature: str,
+    latest_version: int,
+    db_path: str | None = None,
+) -> FeatureMigrationReport:
+    """Ensure the feature's version table on its database, then snapshot versions.
+
+    缺省作用于主库；已拆独立库的 Feature（如 cron）经 ``db_path`` 指向自己的库。
+    """
     from crew.state.schema_version import stamp_baseline
     from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
-    conn = connect_sqlite(app.config.db_path, wal_enabled=app.config.sqlite_wal)
+    conn = connect_sqlite(db_path or app.config.db_path, wal_enabled=app.config.sqlite_wal)
     try:
         writer = SQLiteWriteHelper(conn, threading.Lock())
         current = writer.execute(
@@ -1267,10 +1282,23 @@ def _migrate_work(app: Any) -> FeatureMigrationReport:
     )
 
 
+def _migrate_cron(app: Any) -> FeatureMigrationReport:
+    from crew.cron.jobs import CRON_SCHEMA_FEATURE, CRON_SCHEMA_VERSION
+
+    # cron 已拆独立库（ADR-0038）：版本表 stamp 到 cron 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=CRON_SCHEMA_FEATURE,
+        latest_version=CRON_SCHEMA_VERSION,
+        db_path=app.config.cron_db_path,
+    )
+
+
 # Feature → 迁移入口注册表：新 Feature 接入版本化迁移只需在这里加一行，
 # CLI 不写 if 链。入口接收 app，负责把该 Feature 的版本表弄就绪并返回快照。
 FEATURE_MIGRATIONS: dict[str, FeatureMigrator] = {
     "work": _migrate_work,
+    "cron": _migrate_cron,
 }
 
 

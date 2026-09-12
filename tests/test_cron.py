@@ -43,6 +43,7 @@ async def test_cron_feature_owns_scheduler_tools_context_and_host_binding(
         Config(
             db_path=str(tmp_path / "crew.db"),
             memory_db_path=str(tmp_path / "memory.db"),
+            cron_db_path=str(tmp_path / "cron.db"),
             cron_enabled=True,
             api_key="",
         ),
@@ -163,6 +164,7 @@ async def test_cron_feature_start_failure_rolls_back_all_contributions(
         Config(
             db_path=str(tmp_path / "crew.db"),
             memory_db_path=str(tmp_path / "memory.db"),
+            cron_db_path=str(tmp_path / "cron.db"),
             cron_enabled=True,
             api_key="",
         ),

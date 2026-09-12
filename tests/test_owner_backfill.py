@@ -21,6 +21,7 @@ from crew.state._migration import (
     backfill_empty_owner_rows,
     inspect_and_backfill_legacy_owners,
     legacy_owner_counts,
+    legacy_owner_scan_targets,
 )
 from crew.state.channel_bindings import ChannelBindingsStore
 from crew.state.plugin_preferences import PluginPreferencesStore
@@ -105,7 +106,7 @@ def test_startup_backfill_smart_attribution_wins_over_local(tmp_path: Path):
     conn.commit()
     conn.close()
 
-    counts, _ = inspect_and_backfill_legacy_owners(db)
+    counts, _ = inspect_and_backfill_legacy_owners(legacy_owner_scan_targets(db, db))
 
     conn = sqlite3.connect(db)
     owners = dict(conn.execute("SELECT id, owner_account_id FROM cron_jobs").fetchall())
@@ -130,7 +131,7 @@ def test_startup_backfill_leaves_no_orphan_sessions(tmp_path: Path):
     conn.commit()
     conn.close()
 
-    counts, _ = inspect_and_backfill_legacy_owners(db)
+    counts, _ = inspect_and_backfill_legacy_owners(legacy_owner_scan_targets(db, db))
 
     conn = sqlite3.connect(db)
     rows = conn.execute("SELECT owner_account_id FROM sessions").fetchall()

@@ -3,13 +3,17 @@ import sqlite3
 from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
 from crew.core.types import Message
 from crew.cron import CronJobStore
-from crew.state._migration import claim_legacy_owner_database, inspect_and_backfill_legacy_owners
+from crew.state._migration import (
+    claim_legacy_owner_databases,
+    inspect_and_backfill_legacy_owners,
+    legacy_owner_scan_targets,
+)
 from crew.state.session_store import SQLiteSessionStore
 from crew.state.workspace_store import SQLiteWorkspaceStore
 from crew.tasks import TaskRuntime
 
 
-def test_claim_legacy_owner_database_claims_empty_owner_rows(tmp_path):
+def test_claim_legacy_owner_databases_claims_empty_owner_rows(tmp_path):
     db = tmp_path / "crew.db"
     sessions = SQLiteSessionStore(str(db))
     workspaces = SQLiteWorkspaceStore(str(db))
@@ -23,7 +27,10 @@ def test_claim_legacy_owner_database_claims_empty_owner_rows(tmp_path):
         cron.create(name="legacy cron", schedule="every 1m", query="hi", session_id="legacy-session", owner_account_id="")
         tasks.create_runtime(kind="team", session_id="legacy-session", title="legacy task", owner_account_id="")
 
-        changed, remaining = claim_legacy_owner_database(str(db), "A:uid-a")
+        # 单库形态（拆库前/回退配置）：cron 路径与主库同文件，映射自动合并
+        changed, remaining = claim_legacy_owner_databases(
+            legacy_owner_scan_targets(db, db), "A:uid-a"
+        )
     finally:
         tasks.close()
 
@@ -50,7 +57,7 @@ def test_startup_migration_backfills_only_unambiguous_cron_owner(tmp_path):
     owned_job = cron.create(name="owned", schedule="every 1m", query="hi", session_id="owned", owner_account_id="")
     shared_job = cron.create(name="shared", schedule="every 1m", query="hi", session_id="shared", owner_account_id="")
 
-    counts, backfilled = inspect_and_backfill_legacy_owners(str(db))
+    counts, backfilled = inspect_and_backfill_legacy_owners(legacy_owner_scan_targets(db, db))
 
     assert backfilled == 1
     # 智能回填后不再残留无主行：歧义任务归本机 local 兜底（owner 统一后无"无主"数据）。

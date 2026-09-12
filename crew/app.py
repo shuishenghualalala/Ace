@@ -17,6 +17,7 @@ import re
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Coroutine
 
 from crew.agent.capabilities import (
@@ -72,7 +73,11 @@ from crew.security.context import SecurityContext
 from crew.security.grants import GrantRegistry
 from crew.security.rule_store import SQLiteRuleStore
 from crew.security.service import SecurityApprovalService
-from crew.state._migration import OWNER_TABLE_LABELS, inspect_and_backfill_legacy_owners
+from crew.state._migration import (
+    OWNER_TABLE_LABELS,
+    inspect_and_backfill_legacy_owners,
+    legacy_owner_scan_targets,
+)
 from crew.state.active_owner import ActiveOwnerLeaseStore
 from crew.state.config import (
     Config,
@@ -2287,7 +2292,7 @@ class CrewApp:
         """拉起后台能力：连接外部 MCP server、启动 cron 引擎、会话过期定时器。失败静默降级。"""
         try:
             counts, backfilled = inspect_and_backfill_legacy_owners(
-                self.config.db_path,
+                legacy_owner_scan_targets(self.config.db_path, self.config.cron_db_path),
                 wal_enabled=self.config.sqlite_wal,
             )
             if backfilled:
@@ -3597,6 +3602,20 @@ def _provider_class(provider: str):
     raise ValueError(f"未知模型 provider: {provider}")
 
 
+def _resolve_cron_db_path(cfg: Config) -> str:
+    """把 cron 库相对路径归一到 crew_home 下（ADR-0038）。
+
+    load_config 已做同样归一；这里兜底覆盖直接构造 Config 的嵌入宿主/测试，
+    避免相对默认值落到进程 CWD 造成跨实例共享同一数据文件。
+    """
+    path = Path(cfg.cron_db_path).expanduser()
+    if path.is_absolute():
+        return str(path)
+    from crew.state.home import get_crew_home
+
+    return str(get_crew_home() / path)
+
+
 def build_app(config: Config | None = None, *, enable_team: bool = True) -> CrewApp:
     """工厂：从配置构建一个 CrewApp。"""
     cfg = config or load_config()
@@ -3829,9 +3848,15 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
     # Cron 数据平面在停用后仍保留，Scheduler/Tools/Context 则由同一
     # product.cron Generation 在宿主事件循环中事务激活。
+    # cron 表在独立库（ADR-0038）；legacy_db_path 触发 copy-on-first-activate
+    # 迁移：crew.db 里若还有旧 cron 表且 cron.db 为空，则单事务整表复制。
     from crew.cron import CronJobStore, build_cron_feature
 
-    app.cron_store = CronJobStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
+    app.cron_store = CronJobStore(
+        _resolve_cron_db_path(cfg),
+        wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
+    )
     cron_feature = build_cron_feature(
         app,
         registry,
