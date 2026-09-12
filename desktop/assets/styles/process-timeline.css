@@ -134,6 +134,20 @@
   white-space: normal;
 }
 
+/* 完成后折叠的长进度输出：摘要行与阶段行同款小号弱化字，避免调试输出常驻占屏。 */
+.mw-process-timeline .process-timeline__details--progress > summary {
+  min-height: 22px;
+}
+
+.mw-process-timeline .process-timeline__progress-label {
+  min-width: 0;
+  flex: 1;
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+  font-weight: var(--mw-type-body-weight);
+  overflow-wrap: anywhere;
+}
+
 .mw-process-timeline .process-timeline__duration {
   flex-shrink: 0;
   color: var(--mw-text-muted);
