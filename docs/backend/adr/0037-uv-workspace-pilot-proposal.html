@@ -5,7 +5,7 @@
 <style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
 <body><main>
 <h1>ADR-0037 · uv workspace 首个试点（crew-wiki）提案</h1>
-<p>状态：试点已实施（2026-09-11，本地全量验证通过；Docker/CI/打包态待远程验证） · 日期：2026-09-11 · 阶段：6 收官。</p>
+<p>状态：试点与第二批已实施（2026-09-11 crew-wiki / 2026-09-12 crew-external-agents，本地全量验证通过；Docker build/CI 矩阵/打包态待远程验证） · 日期：2026-09-11/12 · 阶段：6。</p>
 <h2>背景与候选方案</h2>
 <p>workspace 评估报告（<a href="../../todo/ace-workspace-split-assessment.md">ace-workspace-split-assessment.md</a>）确认 uv workspace 多包化可行，并列出 6 项必修逻辑拆分。截至本 ADR 撰写时，6 项已全部解除并有 9 条 import-linter 契约保护：① state→team/external（6I）、② team→external 数据耦合与 Store 继承（6G/6G-2，ADR-0036）、③ wiki→gateway 私有导入（6J）、④ state→browser 类型（6K）、⑤ gateway 协议设施下沉（6L）、⑥ executor→external 直连（6M）。ServiceKey 版本化（6N）进行中。</p>
 <p>候选方案：A. 直接全量拆包（8 个成员包一次到位）——回退面大、CI/Docker/桌面打包链路一次冲击；B. 单包试点（crew-wiki）先行，验证四条交付链后再逐批拆；C. 暂不物理拆包，仅维持契约——放弃包管理器物理强制的收益。</p>
@@ -29,6 +29,8 @@
 <h2>实施验证状态</h2>
 <p>本地已验证：uv lock/sync 单锁（成员 editable）、全量测试 4133 passed / 0 failed（weixin 5 例因 uv sync 精确剪除可选依赖转 skip，与 CI 行为一致）、ruff/compileall/lint-imports（9 kept）全绿、成员 wheel 资产收录核验、gateway 启动冒烟（desktop spawn 同款命令）。待远程验证：CI 矩阵实跑、Dockerfile.pack 构建、mac/Windows PyInstaller 冻结产物对跨目录 namespace 包的收集（回退预案：pack 脚本改双非 editable 安装）。</p>
 
+<h2>第二批实施记录（crew-external-agents，2026-09-12）</h2>
+<p>namespace 机制复用成功：中间层 <code>crew/agent</code> 同步 namespace 化（删 <code>__init__.py</code>，其 4 个 re-export 的消费方仅 5 处测试，机械改直连导入；生产代码因 6M 已 Lease 化而零改写）。<strong>依赖声明决策</strong>：<code>crew-external-agents</code> 列入根包 <code>[project].dependencies</code>（workspace 源）——app.py 对该成员是模块级硬导入，属核心依赖而非可选；uv sync 只装根包依赖闭包，硬依赖保证 CI 的 <code>uv sync --extra dev</code>（无 wiki）矩阵可用，CI 保持零改动。备选 <code>uv sync --all-packages</code> 未采用（会改 CI 先例）。全量 4094 passed / 0 failed、namespace 三 portion、gateway 冒烟 200。</p>
 <h2>回退方式</h2>
 <p>试点为纯目录/构建结构变化，业务代码零改动；回退 = 还原目录迁移提交 + 根 pyproject 的 workspace 段，uv.lock 重新生成。</p>
 <h2>待用户确认的输入</h2>

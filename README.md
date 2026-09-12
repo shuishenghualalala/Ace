@@ -312,7 +312,7 @@ Skill 就是船员的职业技能包，装上就会，卸了就忘。仓库随�
 | `crew/core` | 类型、消息信封与核心接口 |
 | `crew/providers` | OpenAI 兼容与 Anthropic 模型适配 |
 | `crew/agent` | Agent 对话循环、Plan、压缩与子智能体 |
-| `crew/agent/external` | 外部 Runtime、Agent 和 Team 适配 |
+| `crew.agent.external`（成员包 `packages/crew-external-agents`） | 外部 Runtime、Agent 和 Team 适配 |
 | `crew/team` | 多智能体 Team 与协作编排 |
 | `crew/dynamickanban` | 动态看板和任务图编排 |
 | `crew/evolution` | 实验性轨迹提取、Skill 优化与生成 |

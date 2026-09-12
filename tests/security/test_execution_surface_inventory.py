@@ -43,6 +43,14 @@ INDIRECT_SURFACES = {
     "crew/tools/web_tools.py",
     "crew/wiki/parser.py",
     "crew/wiki/tools.py",
+    # ADR-0037（6Q）：external agents 迁至 workspace 成员包
+    # packages/crew-external-agents/src/crew/agent/external/（import 名不变），
+    # 不再位于仓库 crew/ 扫描根下；清单行保留原路径登记其执行面。
+    "crew/agent/external/acp_adapter.py",
+    "crew/agent/external/cli_adapter.py",
+    "crew/agent/external/codex_adapter.py",
+    "crew/agent/external/detector.py",
+    "crew/agent/external/process_lifecycle.py",
 }
 DESKTOP_PROCESS_FILES = {
     "desktop/scripts/check-security.mjs",

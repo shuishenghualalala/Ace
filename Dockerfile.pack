@@ -65,12 +65,15 @@ RUN pip install --no-cache-dir \
     pyinstaller
 
 # 源码拷贝（代码变更只影响这一层及以下，依赖层保持缓存）
-# ADR-0037：wiki 位于 uv workspace 成员包 packages/crew-wiki（import 名仍为 crew.wiki）。
-# pip 安装用 --no-deps，成员对根包 crew 的依赖由同仓两个发行版同时装入 site-packages 满足。
+# ADR-0037：wiki（6P）与 external agents（6Q）位于 uv workspace 成员包 packages/*，
+# import 名保持 crew.wiki / crew.agent.external。
+# pip 安装用 --no-deps，成员对根包 crew 的依赖由同仓多个发行版同时装入 site-packages 满足。
 COPY crew ./crew
 COPY packages/crew-wiki/pyproject.toml ./packages/crew-wiki/pyproject.toml
 COPY packages/crew-wiki/src ./packages/crew-wiki/src
-RUN pip install --no-cache-dir --no-deps . ./packages/crew-wiki
+COPY packages/crew-external-agents/pyproject.toml ./packages/crew-external-agents/pyproject.toml
+COPY packages/crew-external-agents/src ./packages/crew-external-agents/src
+RUN pip install --no-cache-dir --no-deps . ./packages/crew-wiki ./packages/crew-external-agents
 
 COPY config ./config
 COPY plugins ./plugins

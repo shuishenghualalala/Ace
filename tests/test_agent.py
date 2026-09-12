@@ -1055,7 +1055,7 @@ async def test_feature_context_fragments_are_dynamic_not_static():
 
 async def test_read_attachment_rejects_oversized_file(tmp_path, monkeypatch):
     """附件读取对超大文件应读前拒绝，而非整读进内存。"""
-    from crew.agent import runtime as rt
+    import crew.agent.runtime as rt
 
     big = tmp_path / "big.md"
     big.write_text("x" * 100, encoding="utf-8")
@@ -1068,7 +1068,7 @@ async def test_read_attachment_rejects_oversized_file(tmp_path, monkeypatch):
 
 async def test_read_attachment_reads_small_file(tmp_path):
     """小附件正常读取（路径经 resolve 后读取，避免符号链接组件报错）。"""
-    from crew.agent import runtime as rt
+    import crew.agent.runtime as rt
 
     small = tmp_path / "small.md"
     small.write_text("hello attachment", encoding="utf-8")

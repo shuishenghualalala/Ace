@@ -832,7 +832,9 @@ async def test_captured_execution_without_launch_context_refuses_host(tmp_path, 
 
 
 def test_managed_acp_has_a_native_transport_path() -> None:
-    source = Path("crew/agent/external/acp_adapter.py").read_text(encoding="utf-8")
+    source = Path(
+        "packages/crew-external-agents/src/crew/agent/external/acp_adapter.py"
+    ).read_text(encoding="utf-8")
     assert "SecurityExecutionBroker" in source
     assert "open_interactive" in source
     assert "_NativeAcpTransport" in source

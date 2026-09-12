@@ -135,7 +135,7 @@ def test_scan_skills_skips_external_symlink(tmp_path, monkeypatch):
 
 def test_scan_skills_skips_package_metadata_symlink_outside_root(tmp_path, monkeypatch):
     """PACKAGE.md cannot expose a file outside its registered package directory."""
-    from crew.agent import skills as skills_mod
+    import crew.agent.skills as skills_mod
 
     builtin_dir = tmp_path / "builtin"
     user_dir = tmp_path / "user"

@@ -300,7 +300,7 @@ Key directories:
 | `crew/core` | Types, message envelopes, and core interfaces |
 | `crew/providers` | OpenAI-compatible and Anthropic model adapters |
 | `crew/agent` | Agent conversation loop, planning, compaction, and sub-agents |
-| `crew/agent/external` | External Runtime, Agent, and Team adapters |
+| `crew.agent.external` (member package `packages/crew-external-agents`) | External Runtime, Agent, and Team adapters |
 | `crew/team` | Multi-agent teams and collaboration orchestration |
 | `crew/dynamickanban` | Dynamic Kanban and task-graph orchestration |
 | `crew/evolution` | Experimental trajectory extraction, skill optimization, and generation |

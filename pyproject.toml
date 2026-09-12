@@ -25,6 +25,12 @@ dependencies = [
     "requests>=2.34.2",
     "wcmatch>=8.4",
     "jsonschema>=4.0",
+    # External agents（外部 Runtime/Agent 适配）自 ADR-0037（6Q）起随 workspace
+    # 成员包 crew-external-agents 发布（packages/crew-external-agents，import 名
+    # 保持 crew.agent.external）。app.py 顶层硬 import 该成员，属核心依赖：
+    # uv sync 只安装根包依赖闭包、不会自动装入 workspace 成员，此声明使
+    # `uv sync --extra dev`（CI security 矩阵 / pack 脚本）下成员一并 editable 安装。
+    "crew-external-agents",
 ]
 
 [project.optional-dependencies]
@@ -106,13 +112,15 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 # ── uv workspace（ADR-0037）：成员包位于 packages/*，共享单份 uv.lock ────────
-# 试点成员 crew-wiki；后续批次按评估报告 §5.2 顺序逐批迁入。
+# 成员：crew-wiki（6P 试点）、crew-external-agents（6Q 第二批）；
+# 后续批次按评估报告 §5.2 顺序逐批迁入。
 # 顶层 crew 为 PEP 420 命名空间包（发行版间 import 名保持 crew.*）。
 [tool.uv.workspace]
 members = ["packages/*"]
 
 [tool.uv.sources]
 crew-wiki = { workspace = true }
+crew-external-agents = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["crew"]
