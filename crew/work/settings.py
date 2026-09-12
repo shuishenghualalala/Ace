@@ -26,7 +26,7 @@ class WorkSettingsStore:
 
     def __init__(
         self,
-        db_path: str | Path = "crew_data/crew.db",
+        db_path: str | Path = "crew_data/work.db",
         *,
         workspace_store: WorkspaceValidator | None = None,
         wal_enabled: bool = True,

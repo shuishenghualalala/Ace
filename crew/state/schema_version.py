@@ -118,9 +118,6 @@ def _copy_legacy_rows(
             raise SchemaVersionError(
                 f"目标库缺少表 {table}：copy 前必须先完成目标库 ensure-schema"
             )
-        if int(target_conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) > 0:
-            copied[table] = 0
-            continue
         columns = [str(row[1]) for row in legacy_conn.execute(f"PRAGMA table_info({table})")]
         column_list = ", ".join(f'"{name}"' for name in columns)
         placeholders = ", ".join("?" for _ in columns)
@@ -142,7 +139,10 @@ def copy_legacy_feature_rows(
     语义（ADR-0038 copy-on-first-activate）：
 
     - 旧库文件缺失，或某表在旧库不存在 → 跳过该表（计 0 行）；
-    - 目标库对应表已有任何行 → 跳过（幂等：目标库已有行即整体不复制）；
+    - 目标库任何一张本 Feature 表已有行 → 整体跳过（幂等：目标库已有行即
+      整体不复制）。gate 是域级的而非逐表的：逐表跳过会在域内存在外键时
+      复制出跨表孤儿——父表因已有行被跳过后，空的子表仍会从旧库复制引用
+      父表的行；
     - 其余情况整表复制，全部写入发生在同一个 SAVEPOINT 内——任一失败
       整体回滚，目标库不产生半写；
     - 旧表保留在旧库不删，作为天然回退与备份。
@@ -158,6 +158,14 @@ def copy_legacy_feature_rows(
     legacy_path = Path(legacy_db_path)
     if not legacy_path.exists():
         return {table: 0 for table in tables}
+    for table in tables:
+        exists = target_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone()
+        if exists is not None and int(
+            target_conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        ) > 0:
+            return {table: 0 for table in tables}
     legacy_conn = sqlite3.connect(str(legacy_path), timeout=1.0)
     try:
         target_conn.execute("SAVEPOINT copy_legacy_feature_rows")

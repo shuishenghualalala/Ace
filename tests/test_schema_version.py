@@ -189,7 +189,11 @@ def test_work_rebuild_does_not_rewrite_version_record(tmp_path):
 
 def _cli_app(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
-        config=SimpleNamespace(db_path=str(tmp_path / "crew.db"), sqlite_wal=False)
+        config=SimpleNamespace(
+            db_path=str(tmp_path / "crew.db"),
+            work_db_path=str(tmp_path / "work.db"),
+            sqlite_wal=False,
+        )
     )
 
 
@@ -209,8 +213,9 @@ def test_migrate_feature_work_reports_and_prepares_version_table(tmp_path):
         "target_version": 1,
     }
     assert "v1" in result.text
-    # 版本表在主库就绪
-    conn = sqlite3.connect(str(tmp_path / "crew.db"))
+    # work 已拆独立库（ADR-0038）：版本表在 work 库就绪，不触碰主库
+    assert (tmp_path / "work.db").exists()
+    conn = sqlite3.connect(str(tmp_path / "work.db"))
     try:
         assert current_version(conn, "work") == 1
     finally:
@@ -218,7 +223,7 @@ def test_migrate_feature_work_reports_and_prepares_version_table(tmp_path):
     # 再次运行幂等：版本不变、仍单行
     again = _invoke_migrate_feature("work", app)
     assert again.data == result.data
-    conn = sqlite3.connect(str(tmp_path / "crew.db"))
+    conn = sqlite3.connect(str(tmp_path / "work.db"))
     try:
         assert len(conn.execute("SELECT 1 FROM work_schema_version").fetchall()) == 1
     finally:

@@ -18,7 +18,9 @@ from crew.features import (
     RegistrationPhase,
     run_async_compat,
 )
-from crew.state.schema_version import stamp_baseline
+from crew.state._migration import WORK_DB_TABLES
+from crew.state.logging import get_logger
+from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 from crew.wiki.service import KNOWLEDGE_SERVICE_KEY as WORK_KNOWLEDGE_SERVICE_KEY
 
@@ -40,6 +42,8 @@ WORK_FEATURE_ID = "product.work"
 # 当前 schema 结构登记为基线 v1；后续表结构演进在此号上递增并配迁移步骤。
 WORK_SCHEMA_FEATURE = "work"
 WORK_SCHEMA_VERSION = 1
+
+log = get_logger("work.feature")
 
 
 class WorkFeatureHost(Protocol):
@@ -117,11 +121,34 @@ def _stamp_schema_version(*, db_path: str | Path, wal_enabled: bool) -> None:
         conn.close()
 
 
+def _copy_legacy_work_rows(*, db_path: str | Path, legacy_db_path: str | Path, wal_enabled: bool) -> None:
+    """copy-on-first-activate：目标库为空时从旧主库整表复制 work 域行。
+
+    gate 在 ensure-schema（8 个 Store 构造）+ work_schema_version stamp 之后，
+    15 张表在同一个 SAVEPOINT 内一次复制完成——任一表失败整体回滚不半写，
+    目标库已有行即整体跳过（重复启动幂等零重复）。旧表保留在旧库不删
+    （ADR-0038 回退备份）。回退配置把 work 库指回 crew.db 时同文件直接跳过。
+    """
+    if Path(legacy_db_path).resolve() == Path(db_path).resolve():
+        return
+    conn = connect_sqlite(db_path, wal_enabled=wal_enabled)
+    try:
+        writer = SQLiteWriteHelper(conn, threading.Lock())
+        copied = writer.execute(
+            lambda c: copy_legacy_feature_rows(legacy_db_path, c, WORK_DB_TABLES)
+        )
+    finally:
+        conn.close()
+    if any(copied.values()):
+        log.info("已从 %s 迁移 work 历史数据: %s", legacy_db_path, copied)
+
+
 def _store_factory(
     host: WorkFeatureHost,
     *,
     db_path: str | Path,
     wal_enabled: bool,
+    legacy_db_path: str | Path | None = None,
     knowledge_service_acquirer: KnowledgeServiceAcquirer,
     organization_provider: Callable[[], Any] | None,
     preference_extractor: Any,
@@ -170,6 +197,12 @@ def _store_factory(
         hook_registry=hook_registry,
     )
     _stamp_schema_version(db_path=db_path, wal_enabled=wal_enabled)
+    # 顺序保证（6R 沉淀）：ensure-schema → stamp → copy。全部 work 表在
+    # 一个公共点一次复制，而不是 8 个 Store 各自复制——13+ 表单事务更原子。
+    if legacy_db_path is not None:
+        _copy_legacy_work_rows(
+            db_path=db_path, legacy_db_path=legacy_db_path, wal_enabled=wal_enabled
+        )
     return service
 
 
@@ -178,6 +211,7 @@ def build_work_feature(
     *,
     db_path: str | Path | None = None,
     wal_enabled: bool = True,
+    legacy_db_path: str | Path | None = None,
     enabled: bool = True,
     desired_config_revision: int = 1,
     knowledge_service_acquirer: KnowledgeServiceAcquirer | None = None,
@@ -201,7 +235,9 @@ def build_work_feature(
 
     if db_path is None:
         config = getattr(host, "config", None)
-        db_path = getattr(config, "db_path", None)
+        # 拆库后（ADR-0038）装配默认跟随 work 独立库；未声明该键的嵌入宿主
+        # 回落主库，与既有行为兼容。
+        db_path = getattr(config, "work_db_path", None) or getattr(config, "db_path", None)
     if db_path is None and service_factory is None:
         raise ValueError("build_work_feature requires db_path")
     if knowledge_service_acquirer is None:
@@ -222,6 +258,7 @@ def build_work_feature(
                 host,
                 db_path=db_path,
                 wal_enabled=wal_enabled,
+                legacy_db_path=legacy_db_path,
                 knowledge_service_acquirer=knowledge_service_acquirer,
                 organization_provider=organization_provider,
                 preference_extractor=preference_extractor,

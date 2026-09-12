@@ -45,7 +45,7 @@ class WorkKnowledgeStore:
 
     def __init__(
         self,
-        db_path: str | Path = "crew_data/crew.db",
+        db_path: str | Path = "crew_data/work.db",
         *,
         knowledge_service_acquirer: KnowledgeServiceAcquirer | None = None,
         knowledge_service_resolver: Callable[[], KnowledgeService | None] | None = None,

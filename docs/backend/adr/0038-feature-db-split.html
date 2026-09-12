@@ -5,7 +5,7 @@
 <style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
 <body><main>
 <h1>ADR-0038 · Feature 数据库拆分（db-per-feature，P1-1）</h1>
-<p>状态：已批准方向，切片实施中 · 日期：2026-09-12 · 阶段：6。</p>
+<p>状态：已批准方向，切片实施中（cron 试点与 work 批次已落地） · 日期：2026-09-12 · 阶段：6。</p>
 <h2>背景与候选方案</h2>
 <p>命名空间审计 P1-1：全部关系型 Feature 共用单一 <code>crew_data/crew.db</code>（config.py:202 默认；app.py 把同一 <code>cfg.db_path</code> 注入全部 Store）。这是拆出仓库/独立部署的最后一块数据耦合。前置已就位：6G 消除了唯一跨 Feature 外键/JOIN/直写；6H 提供 per-feature schema 版本表；各 Store 本就自持连接（构造器收 db_path 字符串，无共享连接对象）；全仓无 ATTACH 跨库 SQL；<code>memory_db_path</code> 已是分库先例（"便于测试隔离"）。</p>
 <p>候选方案：A. 保持单库，仅靠表前缀约定——迁出仓库时需按前缀手工剥离，迁移脚本永远欠着；B. 一次性全量拆库——回退面大，claim-legacy 等跨表工具一次冲击；C. 螺旋式：建共享拆分机制 + 单 Feature 试点，验证后按批推进。</p>
@@ -26,6 +26,8 @@
 <li>claim-legacy 对 cron 表继续工作（读新库）；</li>
 <li>全量测试 0 failed。</li>
 </ol>
+<h2>实施订正与批次记录</h2>
+<p><strong>work 批次（2026-09-12）</strong>：work 域实际 15 张表（本 ADR 初稿低估为 13，以 CREATE TABLE grep 为准）；FK 复制顺序 items→events/links→references、sources→records，其余无域内外键。<strong>机制修正</strong>：copy-on-first-activate 的幂等 gate 由逐表改为<strong>域级</strong>——逐表跳过在域内存在外键时会复制出跨表孤儿（父表因已有行被跳过后，空子表仍复制引用行，实测触发外键约束失败）；域级 gate 下任一目标表有行即整体跳过，cron 单链场景语义不变。共用相对路径归一提炼为 <code>_resolve_crew_home_path()</code>（cron/work 共享）。</p>
 <h2>回退方式</h2>
 <p>每批独立提交可 revert；数据层回退 = 把 Feature 的 db_path 配置指回 crew.db（旧表未删，原地可用）。</p>
 <p><a href="../modules/naming-audit.html">命名空间审计（P1-1）</a> · <a href="0036-team-external-data-decoupling.html">ADR-0036</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>

@@ -90,7 +90,7 @@ class WorkSourceStore:
 
     def __init__(
         self,
-        db_path: str | Path = "crew_data/crew.db",
+        db_path: str | Path = "crew_data/work.db",
         *,
         approved_source_keys: set[str],
         adapters: Mapping[str, WorkSourceAdapter],

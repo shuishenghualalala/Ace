@@ -1211,8 +1211,10 @@ def _claim_legacy(args: Any, ctx: CliContext) -> CliResult:
     owner = args.account.strip()
     if not owner:
         raise CliError("--account 不能为空")
-    # 按表归属解析对应库（ADR-0038）：cron 两表读 cron 库，其余读主库。
-    targets = legacy_owner_scan_targets(app.config.db_path, app.config.cron_db_path)
+    # 按表归属解析对应库（ADR-0038）：cron/work 表读各自独立库，其余读主库。
+    targets = legacy_owner_scan_targets(
+        app.config.db_path, app.config.cron_db_path, app.config.work_db_path
+    )
     changed, remaining = claim_legacy_owner_databases(
         targets,
         owner,
@@ -1275,10 +1277,12 @@ def _run_main_db_migrator(
 def _migrate_work(app: Any) -> FeatureMigrationReport:
     from crew.work.feature import WORK_SCHEMA_FEATURE, WORK_SCHEMA_VERSION
 
+    # work 已拆独立库（ADR-0038）：版本表 stamp 到 work 库而非主库。
     return _run_main_db_migrator(
         app,
         feature=WORK_SCHEMA_FEATURE,
         latest_version=WORK_SCHEMA_VERSION,
+        db_path=app.config.work_db_path,
     )
 
 

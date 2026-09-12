@@ -46,7 +46,7 @@ class WorkTemplateStore:
 
     def __init__(
         self,
-        db_path: str | Path = "crew_data/crew.db",
+        db_path: str | Path = "crew_data/work.db",
         *,
         system_provider: TemplateProvider | None = None,
         organization_provider: TemplateProvider | None = None,

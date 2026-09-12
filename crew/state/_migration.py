@@ -25,8 +25,30 @@ OWNER_TABLE_LABELS = {
 }
 
 # Feature 拆库归属（ADR-0038）：cron 两表已迁至独立库（crew_data/cron.db），
-# 其余 owner 表仍留在主库。后续批次拆库时在此登记新归属，扫描函数即可按库路由。
+# work 域 15 表已迁至独立库（crew_data/work.db），其余 owner 表仍留在主库。
+# 后续批次拆库时在此登记新归属，扫描函数即可按库路由。
 CRON_DB_TABLES: tuple[str, ...] = ("cron_jobs", "cron_job_runs")
+# work 域表按外键依赖排序（connect_sqlite 开启 foreign_keys=ON，
+# copy_legacy_feature_rows 整表复制必须父表先于子表写入）：
+# work_items ← work_item_events / work_session_links ← work_references；
+# work_sources ← work_source_records。其余表域内无外键。
+WORK_DB_TABLES: tuple[str, ...] = (
+    "work_items",
+    "work_item_events",
+    "work_session_links",
+    "work_references",
+    "work_sources",
+    "work_source_records",
+    "work_preferences",
+    "work_preference_settings",
+    "work_preference_evidence",
+    "work_daily_briefs",
+    "work_period_reports",
+    "work_publish_requests",
+    "work_workspace_index_status",
+    "work_settings",
+    "work_templates",
+)
 
 
 def primary_key_columns(conn: sqlite3.Connection, table: str) -> list[str]:
@@ -168,19 +190,25 @@ def backfill_empty_owner_rows(
 def legacy_owner_scan_targets(
     main_db_path: str | Path,
     cron_db_path: str | Path | None = None,
+    work_db_path: str | Path | None = None,
 ) -> dict[Path, list[str]]:
     """把 owner 表清单按归属库解析为 ``路径→表清单`` 扫描映射。
 
-    cron 两表归 cron 库（ADR-0038），其余表归主库；两路径指向同一文件时
-    （回退配置把 cron_db_path 指回 crew.db）自动合并到同一条目。
+    cron 两表归 cron 库、work 域表归 work 库（ADR-0038），其余表归主库；
+    任一 Feature 路径与主库指向同一文件时（回退配置把 Feature 库指回
+    crew.db）自动合并到同一条目。
     """
 
     targets: dict[Path, list[str]] = {Path(main_db_path): []}
     targets[Path(main_db_path)].extend(
-        table for table in OWNER_TABLE_LABELS if table not in CRON_DB_TABLES
+        table
+        for table in OWNER_TABLE_LABELS
+        if table not in CRON_DB_TABLES and table not in WORK_DB_TABLES
     )
     cron_path = Path(cron_db_path) if cron_db_path else Path(main_db_path)
     targets.setdefault(cron_path, []).extend(CRON_DB_TABLES)
+    work_path = Path(work_db_path) if work_db_path else Path(main_db_path)
+    targets.setdefault(work_path, []).extend(WORK_DB_TABLES)
     return targets
 
 

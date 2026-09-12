@@ -203,6 +203,8 @@ class Config:
     memory_db_path: str = "crew_data/memory.db"  # SQLiteMemory 独立路径，便于测试隔离
     # cron Feature 独立库（ADR-0038 拆库试点）：与主库分文件，回退时把本键指回 crew.db 即可
     cron_db_path: str = "crew_data/cron.db"
+    # work Feature 独立库（ADR-0038 拆库第二批）：与主库分文件，回退时把本键指回 crew.db 即可
+    work_db_path: str = "crew_data/work.db"
     log_level: str = "INFO"
     log_file: str = ""  # 空=不写文件；填路径则同时写文件（支持 ~ 展开）
     llm_trace: bool = True  # 是否把每次 LLM 收发全量写入 {crew_home}/logs/llm.jsonl，便于排查
@@ -1492,6 +1494,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
         runtime = data.get("runtime", {})
         cfg.db_path = runtime.get("db_path", cfg.db_path)
         cfg.cron_db_path = runtime.get("cron_db_path", cfg.cron_db_path)
+        cfg.work_db_path = runtime.get("work_db_path", cfg.work_db_path)
         cfg.log_level = runtime.get("log_level", cfg.log_level)
         cfg.log_file = runtime.get("log_file", cfg.log_file)
         cfg.crew_home = runtime.get("crew_home", cfg.crew_home)
@@ -1891,5 +1894,10 @@ def load_config(config_path: str | Path | None = None) -> Config:
         if not cron_path.is_absolute():
             cron_path = home / cron_path
         cfg.cron_db_path = str(cron_path)
+    if cfg.work_db_path:
+        work_path = Path(cfg.work_db_path).expanduser()
+        if not work_path.is_absolute():
+            work_path = home / work_path
+        cfg.work_db_path = str(work_path)
 
     return cfg

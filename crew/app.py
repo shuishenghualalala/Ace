@@ -2292,7 +2292,11 @@ class CrewApp:
         """拉起后台能力：连接外部 MCP server、启动 cron 引擎、会话过期定时器。失败静默降级。"""
         try:
             counts, backfilled = inspect_and_backfill_legacy_owners(
-                legacy_owner_scan_targets(self.config.db_path, self.config.cron_db_path),
+                legacy_owner_scan_targets(
+                    self.config.db_path,
+                    self.config.cron_db_path,
+                    self.config.work_db_path,
+                ),
                 wal_enabled=self.config.sqlite_wal,
             )
             if backfilled:
@@ -3602,13 +3606,14 @@ def _provider_class(provider: str):
     raise ValueError(f"未知模型 provider: {provider}")
 
 
-def _resolve_cron_db_path(cfg: Config) -> str:
-    """把 cron 库相对路径归一到 crew_home 下（ADR-0038）。
+def _resolve_crew_home_path(raw_path: str) -> str:
+    """把 Feature 库相对路径归一到 crew_home 下（ADR-0038）。
 
     load_config 已做同样归一；这里兜底覆盖直接构造 Config 的嵌入宿主/测试，
     避免相对默认值落到进程 CWD 造成跨实例共享同一数据文件。
+    cron.db / work.db 等 Feature 独立库共用此归一。
     """
-    path = Path(cfg.cron_db_path).expanduser()
+    path = Path(raw_path).expanduser()
     if path.is_absolute():
         return str(path)
     from crew.state.home import get_crew_home
@@ -3802,8 +3807,12 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
     work_feature = build_work_feature(
         app,
-        db_path=cfg.db_path,
+        # work 域 15 表在独立库（ADR-0038 第二批）；legacy_db_path 触发
+        # copy-on-first-activate：crew.db 里若还有旧 work 表且 work.db 为空，
+        # 则 15 表单事务整表复制，旧行保留作回退备份。
+        db_path=_resolve_crew_home_path(cfg.work_db_path),
         wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
         preference_extractor=LLMPreferenceExtractor(provider),
         preference_notifier=_notify_work_owner,
         hook_registry=hook_registry,
@@ -3853,7 +3862,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     from crew.cron import CronJobStore, build_cron_feature
 
     app.cron_store = CronJobStore(
-        _resolve_cron_db_path(cfg),
+        _resolve_crew_home_path(cfg.cron_db_path),
         wal_enabled=cfg.sqlite_wal,
         legacy_db_path=cfg.db_path,
     )
