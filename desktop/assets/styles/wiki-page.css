@@ -2616,36 +2616,9 @@
   line-height: 1.55;
 }
 
-/* 对话工具结果中的一次性确认卡。 */
-
-.wiki-confirmation-card {
-  margin: var(--mw-space-2) 0;
-  padding: var(--mw-space-3);
-  border: 1px solid color-mix(in srgb, var(--mw-action-primary) 40%, var(--mw-border-subtle));
-  border-radius: var(--mw-radius-4);
-  background: var(--mw-bg-selected);
-}
-
-.wiki-confirmation-card pre {
-  overflow-x: auto;
-  margin: var(--mw-space-2) 0;
-  color: var(--mw-text-secondary);
-  font-size: var(--mw-type-caption-size);
-  white-space: pre-wrap;
-}
-
-/* Wiki 确认复用安全审批浮层；覆盖旧消息卡的盒模型，避免它重新参与对话排版。 */
-.wiki-confirmation-card--popup {
-  margin: 0;
-  padding: var(--mw-space-3) var(--mw-space-4);
-  border: 0;
-  background: var(--mw-bg-surface);
-}
-
-.wiki-confirmation-card--popup .composer-approval-panel__summary {
-  margin: 0;
-  color: var(--mw-text-primary);
-  font-size: calc(var(--mw-font-ui-size) - 1.5px);
+/* Wiki 确认复用权限审批卡；这里只保留它的关闭态，盒模型与定位由 chat.css 统一维护。 */
+.wiki-confirmation-card-wrap[aria-hidden='true'] {
+  display: none;
 }
 
 .wiki-ingest-result-card p {

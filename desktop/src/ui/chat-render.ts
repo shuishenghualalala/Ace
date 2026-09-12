@@ -725,49 +725,77 @@ function parseWikiConfirmation(tool: ToolCallInfo): WikiConfirmationResult | nul
 }
 
 function renderWikiConfirmationCard(value: WikiConfirmationResult): HTMLElement {
+  const confirmationId = value.confirmation_id || '';
+  const dialogId = `wiki-permission-${confirmationId.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+  const wrap = document.createElement('div');
+  // Wiki 变更确认与其他受控操作共用 permission card 的浮层定位和盒模型。
+  wrap.className = 'followup-card-wrap followup-card-wrap--permission wiki-confirmation-card-wrap';
+  wrap.setAttribute('aria-hidden', 'false');
+
   const card = document.createElement('section');
-  // Wiki confirmation is a side-channel approval. Keep it out of the message
-  // layout and reuse the same viewport-level presentation as security approval.
-  card.className = 'wiki-confirmation-card wiki-confirmation-card--popup composer-approval-panel composer-approval-panel--global';
-  card.setAttribute('aria-hidden', 'false');
+  card.className = 'followup-card followup-card--permission wiki-confirmation-card';
   card.setAttribute('role', 'dialog');
   card.setAttribute('aria-modal', 'false');
-  card.setAttribute('aria-label', value.summary || '需要确认 Wiki 操作');
+  card.setAttribute('aria-labelledby', `${dialogId}-title`);
+  card.setAttribute('aria-describedby', `${dialogId}-description`);
 
   const head = document.createElement('div');
-  head.className = 'composer-approval-panel__head';
-  const title = document.createElement('span');
-  title.className = 'composer-approval-panel__title';
-  title.textContent = '需要你的确认';
-  const hint = document.createElement('span');
-  hint.className = 'composer-approval-panel__hint';
-  hint.textContent = '请核对 Wiki 知识库变更';
-  head.append(title, hint);
+  head.className = 'followup-card__header';
+  const icon = document.createElement('span');
+  icon.className = 'followup-card__header-icon';
+  icon.appendChild(createTrustedElement<SVGElement>('<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>'));
+  const headerCopy = document.createElement('div');
+  headerCopy.className = 'followup-card__header-copy';
+  const title = document.createElement('div');
+  title.className = 'followup-card__title';
+  title.id = `${dialogId}-title`;
+  title.textContent = '允许执行 Crew 笔记操作？';
+  const hint = document.createElement('div');
+  hint.className = 'followup-card__subtitle';
+  hint.id = `${dialogId}-description`;
+  hint.textContent = 'Crew 请求执行以下操作';
+  headerCopy.append(title, hint);
+  head.append(icon, headerCopy);
 
-  const impact = document.createElement('pre');
-  impact.className = 'composer-approval-panel__summary';
+  const body = document.createElement('div');
+  body.className = 'permission-dialog__body';
+  const operation = document.createElement('div');
+  operation.className = 'permission-dialog__operation';
+  const context = document.createElement('span');
+  context.className = 'permission-dialog__context';
+  context.textContent = 'Crew 笔记（Wiki）';
+  const summary = document.createElement('strong');
+  summary.className = 'permission-dialog__summary';
+  summary.textContent = value.summary || '执行知识库变更操作';
+  operation.append(context, summary);
   const impactText = value.impact && Object.keys(value.impact).length > 0
     ? `影响\n${JSON.stringify(value.impact, null, 2)}`
     : '';
-  impact.textContent = [value.summary || '需要确认 Wiki 操作', impactText]
-    .filter(Boolean)
-    .join('\n\n');
+  if (impactText) {
+    const impact = document.createElement('code');
+    impact.className = 'permission-dialog__command';
+    impact.textContent = impactText;
+    operation.appendChild(impact);
+  }
+  body.appendChild(operation);
+
   const actions = document.createElement('div');
-  actions.className = 'composer-approval-panel__actions';
+  actions.className = 'permission-dialog__actions';
   const confirm = document.createElement('button');
   confirm.type = 'button';
-  confirm.className = 'btn btn-primary';
-  confirm.dataset.wikiConfirm = value.confirmation_id || '';
+  confirm.className = 'permission-dialog__button permission-dialog__button--primary';
+  confirm.dataset.wikiConfirm = confirmationId;
   confirm.dataset.wikiAction = value.action || '';
   confirm.textContent = '确认执行';
   const cancel = document.createElement('button');
   cancel.type = 'button';
-  cancel.className = 'btn btn-danger';
-  cancel.dataset.wikiCancel = value.confirmation_id || '';
+  cancel.className = 'permission-dialog__button permission-dialog__button--secondary';
+  cancel.dataset.wikiCancel = confirmationId;
   cancel.textContent = '取消';
   actions.append(cancel, confirm);
-  card.append(head, impact, actions);
-  return card;
+  card.append(head, body, actions);
+  wrap.appendChild(card);
+  return wrap;
 }
 
 function parseWikiBackgroundResult(tool: ToolCallInfo): WikiBackgroundResult | null {

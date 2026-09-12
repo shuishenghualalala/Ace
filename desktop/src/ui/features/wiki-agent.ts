@@ -1202,7 +1202,8 @@ export function initWikiAgent(): void {
     if (confirm?.dataset.wikiConfirm) {
       event.preventDefault();
       event.stopPropagation();
-      const popup = confirm.closest<HTMLElement>('.wiki-confirmation-card');
+      const popup = confirm.closest<HTMLElement>('.wiki-confirmation-card-wrap')
+        ?? confirm.closest<HTMLElement>('.wiki-confirmation-card');
       popup?.setAttribute('aria-hidden', 'true');
       popup?.querySelectorAll<HTMLButtonElement>('button').forEach((button) => { button.disabled = true; });
       void sendEmbeddedPrompt(`我确认执行 ${confirm.dataset.wikiAction || 'Wiki 操作'}。`, confirm.dataset.wikiConfirm);
@@ -1214,7 +1215,8 @@ export function initWikiAgent(): void {
       event.stopPropagation();
       const panel = embeddedByKb.get(activeEmbeddedKbId);
       if (!panel) return;
-      const popup = cancel.closest<HTMLElement>('.wiki-confirmation-card');
+      const popup = cancel.closest<HTMLElement>('.wiki-confirmation-card-wrap')
+        ?? cancel.closest<HTMLElement>('.wiki-confirmation-card');
       popup?.setAttribute('aria-hidden', 'true');
       popup?.querySelectorAll<HTMLButtonElement>('button').forEach((button) => { button.disabled = true; });
       void backendApi.wikiCancelConfirmation(cancel.dataset.wikiCancel, panel.sessionId)

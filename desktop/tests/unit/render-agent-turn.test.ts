@@ -1322,7 +1322,7 @@ describe('renderAgentTurn', () => {
     expect(card.textContent).not.toContain('再显示');
   });
 
-  it('Wiki 工具的一次性确认结果渲染为审批式浮层', () => {
+  it('Wiki 工具的一次性确认结果复用权限审批卡样式', () => {
     const root = renderAgentTurn(makeMessages({
       thinking: undefined,
       toolCalls: [{
@@ -1341,10 +1341,13 @@ describe('renderAgentTurn', () => {
 
     const card = root.querySelector('.wiki-confirmation-card');
     expect(card?.textContent).toContain('删除 2 个页面');
-    expect(card?.classList.contains('wiki-confirmation-card--popup')).toBe(true);
-    expect(card?.classList.contains('composer-approval-panel--global')).toBe(true);
+    expect(card?.classList.contains('followup-card--permission')).toBe(true);
+    expect(card?.closest('.wiki-confirmation-card-wrap')?.classList.contains('followup-card-wrap--permission')).toBe(true);
+    expect(card?.querySelector('.permission-dialog__operation')).not.toBeNull();
+    expect(card?.querySelector('.permission-dialog__button--primary')).not.toBeNull();
+    expect(card?.classList.contains('composer-approval-panel')).toBe(false);
     expect(card?.getAttribute('role')).toBe('dialog');
-    expect(card?.getAttribute('aria-hidden')).toBe('false');
+    expect(card?.closest('.wiki-confirmation-card-wrap')?.getAttribute('aria-hidden')).toBe('false');
     expect(root.querySelector('[data-wiki-confirm="wcf_123"]')).not.toBeNull();
     expect(root.querySelector('[data-wiki-cancel="wcf_123"]')).not.toBeNull();
   });
