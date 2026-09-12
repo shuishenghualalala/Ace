@@ -21,6 +21,7 @@ import {
 } from './composer-input';
 import { getUserAgentMentions, serializeMentionInput, type UserAgentMention } from './composer-mention';
 import { registerPrimaryComposerRoot } from './composer-scope';
+import { registerRunningIntroTarget } from './running-intro';
 import type { PanelAttachments } from './attachments';
 
 const MAX_INPUT_HEIGHT = 180;
@@ -406,6 +407,8 @@ export function createComposerView(
   const unsubscribeUi = uiStore.subscribe(refresh);
   const unsubscribeSession = sessionStore.subscribe(refresh);
   const unsubscribeMessages = messageStore.subscribe(refresh);
+  // running-intro 槽位按本实例自己的会话来源注册：主对话与 Wiki 面板各自独立显示。
+  const unregisterRunningIntro = registerRunningIntroTarget(runningSlot, getSessionId);
   refresh();
 
   return {
@@ -421,6 +424,7 @@ export function createComposerView(
       unsubscribeUi();
       unsubscribeSession();
       unsubscribeMessages();
+      unregisterRunningIntro();
       for (const { source, nodes } of movedContext) source.append(...nodes);
       host.replaceChildren();
     },
