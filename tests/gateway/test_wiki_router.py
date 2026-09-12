@@ -343,6 +343,8 @@ def test_cancel_confirmation_is_owner_and_session_scoped(tmp_path, auth_headers)
         owner_account_id=OWNER,
     )
     cid = issued["confirmation_id"]
+    status_url = f"/api/wiki/confirmations/{cid}"
+    assert client.get(status_url, headers=auth_headers).json() == {"pending": True}
     wrong = client.post(
         f"/api/wiki/confirmations/{cid}/cancel",
         json={"session_id": "other-session"},
@@ -356,6 +358,7 @@ def test_cancel_confirmation_is_owner_and_session_scoped(tmp_path, auth_headers)
     )
     assert ok.status_code == 200
     assert ok.json()["cancelled"] is True
+    assert client.get(status_url, headers=auth_headers).json() == {"pending": False}
 
 
 def test_wiki_page_response_includes_source_titles(tmp_path, auth_headers):

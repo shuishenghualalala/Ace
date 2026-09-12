@@ -546,10 +546,10 @@ class PlannedPage:
             "existing_title": self.existing_title,
             "aliases": list(self.aliases),
             "reason": self.reason,
-            "claims": [claim.to_dict() for claim in self.claims],
+            "claims": [] if brief else [claim.to_dict() for claim in self.claims],
             "confidence": self.confidence,
             "contested": self.contested,
-            "contradictions": list(self.contradictions),
+            "contradictions": list(self.contradictions[:3] if brief else self.contradictions),
             "target_page_id": self.target_page_id,
             "target_content_sha256": self.target_content_sha256,
         }

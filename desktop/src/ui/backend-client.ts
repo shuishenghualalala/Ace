@@ -2139,6 +2139,8 @@ export const backendApi = {
     getJSON<{ ok: boolean; kb_id: string; sessions: WikiAgentSessionSummary[] }>(
       withKb('/api/wiki/agent-sessions', kbId),
     ),
+  wikiConfirmationStatus: (confirmationId: string) =>
+    getJSON<{ pending: boolean }>(`/api/wiki/confirmations/${encodeURIComponent(confirmationId)}`),
   wikiCancelConfirmation: (confirmationId: string, sessionId: string) =>
     getJSON<{ ok: boolean; cancelled: boolean }>(
       `/api/wiki/confirmations/${encodeURIComponent(confirmationId)}/cancel`,

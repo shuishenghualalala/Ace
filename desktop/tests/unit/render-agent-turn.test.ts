@@ -7,6 +7,7 @@
  * @vitest-environment happy-dom
  */
 import { describe, it, expect, vi } from 'vitest';
+import { backendApi } from '../../src/ui/backend-client';
 import {
   renderAgentTurn,
   renderTeamInternalMessage,
@@ -607,6 +608,92 @@ describe('renderAgentTurn', () => {
     expect(lines).toEqual(['读取文档…', '正在通读素材（1/2 段）…', '正在通读素材（2/2 段）…']);
     expect(root.querySelector('.process-timeline__title')?.textContent).not.toContain('正在通读素材');
     expect(root.querySelector('[data-wiki-ingest-cancel]')).toBeNull();
+  });
+
+  it('工具完成后长进度输出默认折叠为「实时输出 · N 行」', () => {
+    // terminal 进度按 ~0.5s 增量整块推送：一个 entry 可含多行，折叠按实际行数判定。
+    const root = renderAgentTurn(
+      makeMessages({
+        thinking: undefined,
+        toolCalls: [{
+          toolCallId: 'term-1',
+          name: 'terminal',
+          args: '{"command":"ls -la plans"}',
+          status: 'done',
+          startedAt: 1_700_000_000_000,
+          duration: 120,
+          result: JSON.stringify({ success: true, output: 'total 224\ndrwxr-xr-x 5 yyangqin staff 160 Sep 12 17:02 .' }),
+          progressText: '=== plan overview ===\nsource: upload_112273839546',
+          progressHistory: [
+            'total 224\ndrwxr-xr-x 5 yyangqin staff 160 Sep 12 17:02 .',
+            '=== plan overview ===\nsource: upload_112273839546',
+          ],
+        }],
+      }),
+      { isStreaming: false, userPinnedOpen: null, turnDurationMs: 5_000 },
+    );
+    const details = root.querySelector('details.process-timeline__details--progress');
+    expect(details).not.toBeNull();
+    expect(details?.hasAttribute('open')).toBe(false);
+    expect(details?.getAttribute('data-fold-key')).toBe('tool:turn-1:term-1:progress');
+    expect(details?.querySelector('.process-timeline__progress-label')?.textContent).toBe('实时输出 · 4 行');
+    // 折叠块外的平铺进度行不再出现
+    const flatLines = Array.from(
+      root.querySelectorAll(':scope .process-timeline__tool > .process-timeline__progress .process-timeline__stage'),
+    );
+    expect(flatLines).toEqual([]);
+    const foldedLines = Array.from(details!.querySelectorAll('.process-timeline__stage')).map((node) => node.textContent);
+    expect(foldedLines).toEqual([
+      'total 224\ndrwxr-xr-x 5 yyangqin staff 160 Sep 12 17:02 .',
+      '=== plan overview ===\nsource: upload_112273839546',
+    ]);
+  });
+
+  it('工具完成后单条超长进度（无换行但超字符阈值）也折叠', () => {
+    const longLine = 'x'.repeat(200);
+    const root = renderAgentTurn(
+      makeMessages({
+        thinking: undefined,
+        toolCalls: [{
+          toolCallId: 'term-2',
+          name: 'terminal',
+          args: '{}',
+          status: 'error',
+          startedAt: 1_700_000_000_000,
+          duration: 5,
+          result: '{}',
+          progressText: longLine,
+          progressHistory: [longLine],
+        }],
+      }),
+      { isStreaming: false, userPinnedOpen: null, turnDurationMs: 5_000 },
+    );
+    const details = root.querySelector('details.process-timeline__details--progress');
+    expect(details).not.toBeNull();
+    expect(details?.querySelector('.process-timeline__progress-label')?.textContent).toBe('实时输出 · 1 行');
+  });
+
+  it('工具完成后 1~2 行短进度保持平铺', () => {
+    const root = renderAgentTurn(
+      makeMessages({
+        thinking: undefined,
+        toolCalls: [{
+          toolCallId: 'wiki-2',
+          name: 'wiki_plan_ingest',
+          args: '{}',
+          status: 'done',
+          startedAt: 1_700_000_000_000,
+          duration: 12,
+          result: '{}',
+          progressText: '完成',
+          progressHistory: ['读取文档…', '完成'],
+        }],
+      }),
+      { isStreaming: false, userPinnedOpen: null, turnDurationMs: 5_000 },
+    );
+    expect(root.querySelector('details.process-timeline__details--progress')).toBeNull();
+    const lines = Array.from(root.querySelectorAll('.process-timeline__stage')).map((node) => node.textContent);
+    expect(lines).toEqual(['读取文档…', '完成']);
   });
 
   it('run_agent 渲染 subagent 专用卡片：中文标题 + 任务描述 + 执行摘要', () => {
@@ -1323,6 +1410,7 @@ describe('renderAgentTurn', () => {
   });
 
   it('Wiki 工具的一次性确认结果复用权限审批卡样式', () => {
+    const status = vi.spyOn(backendApi, 'wikiConfirmationStatus').mockResolvedValue({ pending: false });
     const root = renderAgentTurn(makeMessages({
       thinking: undefined,
       toolCalls: [{
@@ -1347,9 +1435,10 @@ describe('renderAgentTurn', () => {
     expect(card?.querySelector('.permission-dialog__button--primary')).not.toBeNull();
     expect(card?.classList.contains('composer-approval-panel')).toBe(false);
     expect(card?.getAttribute('role')).toBe('dialog');
-    expect(card?.closest('.wiki-confirmation-card-wrap')?.getAttribute('aria-hidden')).toBe('false');
+    expect(card?.closest('.wiki-confirmation-card-wrap')?.getAttribute('aria-hidden')).toBe('true');
     expect(root.querySelector('[data-wiki-confirm="wcf_123"]')).not.toBeNull();
     expect(root.querySelector('[data-wiki-cancel="wcf_123"]')).not.toBeNull();
+    status.mockRestore();
   });
 
   it('后台 Wiki 整理完成后渲染常驻结果卡', () => {

@@ -1056,6 +1056,7 @@ class WikiCompiler:
         use_chunking: bool | None = None,
         skip_index: bool = False,
         progress: Callable[[str], Awaitable[None]] | None = None,
+        force: bool = False,
     ) -> PlanResult:
         """对 source 做只读分析，返回变更计划，不写入任何页面。
 
@@ -1065,6 +1066,16 @@ class WikiCompiler:
         raw = self.store.load_raw(source_id, owner_account_id, kb_id)
         if raw is None:
             return PlanResult(source_id=source_id, issues=["source 不存在"])
+
+        # A retry must not replace the plan that an outstanding approval refers to.
+        existing_plan = self._load_plan(source_id, owner_account_id, kb_id)
+        if (
+            not force and existing_plan is not None
+            and raw.content_sha256
+            and existing_plan.source_content_sha256 == raw.content_sha256
+            and (existing_plan.planned_pages or existing_plan.issues)
+        ):
+            return existing_plan
 
         # 检查重复/漂移
         issues: list[str] = []
@@ -1120,12 +1131,15 @@ class WikiCompiler:
                 progress=progress,
             )
         except Exception as exc:  # noqa: BLE001
-            return PlanResult(
+            failed_plan = PlanResult(
                 source_id=source_id,
                 source_title=raw.title,
                 source_content_sha256=raw.content_sha256 or "",
                 issues=issues + [f"LLM 分析失败: {exc}"],
             )
+            failed_plan.plan_fingerprint = compute_plan_fingerprint(failed_plan)
+            self._save_plan(failed_plan, owner_account_id, kb_id)
+            return failed_plan
         if progress is not None:
             try:
                 await progress("正在盘算要改哪些页面…")
@@ -1241,6 +1255,13 @@ class WikiCompiler:
                 source_id=source_id,
                 issues=["未找到 ingest 计划；请先重新调用 wiki_plan_ingest"],
             )
+
+        if plan.analysis_stats.get("failed_chunks", 0) or any(
+            issue.startswith(("LLM 分析失败:", "LLM 分析部分失败:")) for issue in plan.issues
+        ):
+            return IngestResult(source_id=source_id, issues=[
+                "分析未完成，未应用计划。请报告缺失部分，等待用户决定是否重试。"
+            ])
 
         if cancel_event and cancel_event.is_set():
             return IngestResult(source_id=source_id, issues=["已取消"])
@@ -1366,6 +1387,9 @@ class WikiCompiler:
         except Exception:  # noqa: BLE001
             log.warning("追加 Wiki 日志失败 source=%s", source_id)
 
+        if raw is not None and approved_titles is None and not skipped_titles:
+            raw.ingest_status = "ingested"
+            self.store.save_raw(raw, owner_account_id, kb_id)
         return IngestResult(source_id=source_id, pages=applied_pages, issues=plan.issues)
 
     def _save_plan(
@@ -1844,6 +1868,15 @@ class WikiCompiler:
                     "reason": f"parse_status={raw.parse_status}",
                 })
                 continue
+            existing_plan = self._load_plan(source_id, owner_account_id, kb_id)
+            if (
+                raw.ingest_status == "ingested"
+                and existing_plan is not None
+                and raw.content_sha256
+                and existing_plan.source_content_sha256 == raw.content_sha256
+            ):
+                skipped.append({"source_id": source_id, "reason": "该版本已完成整理"})
+                continue
             try:
                 if use_existing_plans:
                     plan = self._load_plan(source_id, owner_account_id, kb_id)
@@ -1868,10 +1901,10 @@ class WikiCompiler:
                     skipped.append({"source_id": source_id, "reason": "重复素材"})
                     continue
                 analysis_failed = any(
-                    issue.startswith("LLM 分析失败:")
+                    issue.startswith(("LLM 分析失败:", "LLM 分析部分失败:"))
                     or "source content 为空" in issue
                     for issue in plan.issues
-                )
+                ) or bool(plan.analysis_stats.get("failed_chunks", 0))
                 if analysis_failed:
                     failed.append({
                         "source_id": source_id,

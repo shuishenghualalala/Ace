@@ -21,6 +21,21 @@ def test_pending_cards(manager: WikiSessionManager):
     assert manager.take_pending_cards("s1") == []
 
 
+def test_ingest_confirmation_retry_reuses_id_and_scopes_owner(manager):
+    args = {
+        "action": "apply_ingest", "kb_id": "kb1", "payload": {"plan_fingerprint": "fp"},
+        "summary": "应用计划", "impact": {"create": 1},
+    }
+    first = manager.issue_confirmation("s1", owner_account_id="a", **args)
+    repeated = manager.issue_confirmation("s1", owner_account_id="a", **args)
+    assert repeated["confirmation_id"] == first["confirmation_id"]
+    assert repeated["requires_confirmation"] is False
+    assert repeated["confirmation_pending"] is True
+    assert manager.issue_confirmation("s1", owner_account_id="b", **args)["confirmation_id"] != first["confirmation_id"]
+    args["payload"] = {"plan_fingerprint": "new"}
+    assert manager.issue_confirmation("s1", owner_account_id="a", **args)["confirmation_id"] != first["confirmation_id"]
+
+
 def test_kb_id_default(manager: WikiSessionManager):
     assert manager.get_kb_id("s1") == "default"
 
@@ -49,6 +64,8 @@ def test_confirmation_is_scoped_and_consumed_once(manager: WikiSessionManager):
         owner_account_id="owner1",
     )
     cid = issued["confirmation_id"]
+    assert manager.is_confirmation_pending(cid, owner_account_id="owner1")
+    assert not manager.is_confirmation_pending(cid, owner_account_id="owner2")
     assert manager.consume_confirmation(
         "s1", cid, action="delete_pages", kb_id="kb1", owner_account_id="owner2"
     ) is None

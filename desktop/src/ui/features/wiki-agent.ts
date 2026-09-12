@@ -91,6 +91,7 @@ import {
 } from './browser-panel';
 import { resumeSessionGeneration } from './session-busy';
 import { loadBackendHistory } from './session-controller';
+import { dismissWikiConfirmation, restoreWikiConfirmation } from './wiki-confirmation-state';
 import {
   openWikiPageInHub,
   closeWikiBrowserSurface,
@@ -487,6 +488,8 @@ async function sendEmbeddedPrompt(
       // 回合结算时由 chat-controller.consumePending 依次派出。
       // 注意：携带 wiki_confirmation_id 的确认消息不排队（确认有时效，过期无意义）。
       if (wikiConfirmationId) {
+        restoreWikiConfirmation(wikiConfirmationId);
+        scheduleEmbeddedRender();
         notify('Wiki Agent 正在处理上一条消息');
         return;
       }
@@ -510,6 +513,10 @@ async function sendEmbeddedPrompt(
     });
   } catch (err) {
     notify(`发送 Wiki 问答失败：${(err as Error).message}`);
+    if (wikiConfirmationId) {
+      restoreWikiConfirmation(wikiConfirmationId);
+      scheduleEmbeddedRender();
+    }
   }
 }
 
@@ -1202,6 +1209,9 @@ export function initWikiAgent(): void {
     if (confirm?.dataset.wikiConfirm) {
       event.preventDefault();
       event.stopPropagation();
+      const panel = embeddedByKb.get(activeEmbeddedKbId);
+      if (!panel || isBusy(panel.sessionId)) return;
+      dismissWikiConfirmation(confirm.dataset.wikiConfirm);
       const popup = confirm.closest<HTMLElement>('.wiki-confirmation-card-wrap')
         ?? confirm.closest<HTMLElement>('.wiki-confirmation-card');
       popup?.setAttribute('aria-hidden', 'true');
@@ -1215,13 +1225,21 @@ export function initWikiAgent(): void {
       event.stopPropagation();
       const panel = embeddedByKb.get(activeEmbeddedKbId);
       if (!panel) return;
+      dismissWikiConfirmation(cancel.dataset.wikiCancel);
       const popup = cancel.closest<HTMLElement>('.wiki-confirmation-card-wrap')
         ?? cancel.closest<HTMLElement>('.wiki-confirmation-card');
       popup?.setAttribute('aria-hidden', 'true');
       popup?.querySelectorAll<HTMLButtonElement>('button').forEach((button) => { button.disabled = true; });
       void backendApi.wikiCancelConfirmation(cancel.dataset.wikiCancel, panel.sessionId)
-        .then(() => sendEmbeddedPrompt('已取消该 Wiki 操作。'))
-        .catch((err) => notify(`取消失败：${(err as Error).message}`));
+        .then(() => {
+          dismissWikiConfirmation(cancel.dataset.wikiCancel!);
+          return sendEmbeddedPrompt('已取消该 Wiki 操作。');
+        })
+        .catch((err) => {
+          restoreWikiConfirmation(cancel.dataset.wikiCancel!);
+          scheduleEmbeddedRender();
+          notify(`取消失败：${(err as Error).message}`);
+        });
     }
   });
 }

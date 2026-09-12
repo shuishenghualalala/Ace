@@ -25,6 +25,7 @@ import { buildChippedNodes } from './features/composer-mention';
 import { isPlanDocumentPath } from './plan-document-path';
 import { createIcon, type IconId } from './components/icon';
 import { renderToolInteractionCard } from './components/interaction-card';
+import { revealPendingWikiConfirmation } from './features/wiki-confirmation-state';
 
 export type MessageRole = 'user' | 'assistant' | 'status' | 'error' | 'team_internal';
 
@@ -585,8 +586,21 @@ function renderSubagentCard(tool: ToolCallInfo, messageId: string): HTMLElement 
   return renderTimelineItem(PROCESS_SUBAGENT_ICON_SVG, iconClass, details);
 }
 
-/** 将工具阶段进度按产生顺序渲染成独立行，不把最新状态挤进工具标题行。 */
-function appendToolProgressLines(parent: HTMLElement, tool: ToolCallInfo): void {
+/** 进度折叠阈值：完成后实际行数超过该值（或总字符超长）才收进折叠块；短状态保持平铺。 */
+const PROGRESS_FOLD_LINES = 2;
+const PROGRESS_FOLD_CHARS = 160;
+
+/**
+ * 将工具阶段进度按产生顺序渲染成独立行，不把最新状态挤进工具标题行。
+ * 运行中平铺实时输出；工具结束后长输出默认折叠成「实时输出 · N 行」，
+ * 避免 terminal 等命令的调试输出在完成后仍常驻占屏（展开选择经 fold-state 持久化）。
+ * 注意 terminal 进度按 ~0.5s 增量整块推送，一个 entry 可含多行，须按实际行数判定。
+ */
+function appendToolProgressLines(
+  parent: HTMLElement,
+  tool: ToolCallInfo,
+  ctx: { isActive: boolean; foldKey: string },
+): void {
   const lines = tool.progressHistory?.length
     ? tool.progressHistory
     : tool.progressText
@@ -594,15 +608,44 @@ function appendToolProgressLines(parent: HTMLElement, tool: ToolCallInfo): void 
       : [];
   if (lines.length === 0) return;
 
-  const progress = document.createElement('div');
-  progress.className = 'process-timeline__progress';
-  for (const line of lines) {
-    const item = document.createElement('div');
-    item.className = 'process-timeline__stage';
-    item.textContent = line;
-    progress.appendChild(item);
+  const lineCount = lines.reduce((sum, s) => sum + s.split('\n').length, 0);
+  const charCount = lines.reduce((sum, s) => sum + s.length, 0);
+
+  const appendLines = (container: HTMLElement): void => {
+    for (const line of lines) {
+      const item = document.createElement('div');
+      item.className = 'process-timeline__stage';
+      item.textContent = line;
+      container.appendChild(item);
+    }
+  };
+
+  if (ctx.isActive || (lineCount <= PROGRESS_FOLD_LINES && charCount <= PROGRESS_FOLD_CHARS)) {
+    const progress = document.createElement('div');
+    progress.className = 'process-timeline__progress';
+    appendLines(progress);
+    parent.appendChild(progress);
+    return;
   }
-  parent.appendChild(progress);
+
+  // 复用工具卡片 fold 委托（details.process-timeline__details + data-fold-key），
+  // 折叠键派生 :progress 后缀，与 Request/Response 主详情的折叠偏好互不影响。
+  const foldKey = `${ctx.foldKey}:progress`;
+  const details = createTrustedElement<HTMLDetailsElement>(
+    `<details class="process-timeline__details process-timeline__details--progress">
+      <summary class="process-timeline__row">
+        <span class="process-timeline__progress-label"></span>
+        <span class="process-timeline__chevron">›</span>
+      </summary>
+      <div class="process-timeline__progress"></div>
+    </details>`,
+  );
+  details.open = getToolFold(foldKey) ?? false;
+  details.setAttribute('data-fold-key', foldKey);
+  details.querySelector<HTMLElement>('.process-timeline__progress-label')!.textContent =
+    `实时输出 · ${lineCount} 行`;
+  appendLines(details.querySelector<HTMLElement>('.process-timeline__progress')!);
+  parent.appendChild(details);
 }
 
 function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
@@ -669,14 +712,14 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
       const contentWrap = document.createElement('div');
       contentWrap.className = 'process-timeline__tool-media';
       contentWrap.appendChild(details);
-      appendToolProgressLines(contentWrap, tool);
+      appendToolProgressLines(contentWrap, tool, { isActive, foldKey });
       contentWrap.appendChild(buildInlineImage(shotPath, '页面截图', shotPath, 'tool'));
       return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
     }
     const contentWrap = document.createElement('div');
     contentWrap.className = 'process-timeline__tool';
     contentWrap.appendChild(details);
-    appendToolProgressLines(contentWrap, tool);
+    appendToolProgressLines(contentWrap, tool, { isActive, foldKey });
     return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
   }
 
@@ -695,7 +738,7 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
   const contentWrap = document.createElement('div');
   contentWrap.className = 'process-timeline__tool';
   contentWrap.appendChild(content);
-  appendToolProgressLines(contentWrap, tool);
+  appendToolProgressLines(contentWrap, tool, { isActive, foldKey });
   return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
 }
 
@@ -718,6 +761,7 @@ function parseWikiConfirmation(tool: ToolCallInfo): WikiConfirmationResult | nul
   if (!tool.name.startsWith('wiki_') || !tool.result) return null;
   try {
     const value = JSON.parse(tool.result) as WikiConfirmationResult;
+    if (value.expires_at && value.expires_at * 1000 <= Date.now()) return null;
     return value.requires_confirmation && value.confirmation_id ? value : null;
   } catch {
     return null;
@@ -730,7 +774,8 @@ function renderWikiConfirmationCard(value: WikiConfirmationResult): HTMLElement 
   const wrap = document.createElement('div');
   // Wiki 变更确认与其他受控操作共用 permission card 的浮层定位和盒模型。
   wrap.className = 'followup-card-wrap followup-card-wrap--permission wiki-confirmation-card-wrap';
-  wrap.setAttribute('aria-hidden', 'false');
+  wrap.setAttribute('aria-hidden', 'true');
+  void revealPendingWikiConfirmation(confirmationId, wrap);
 
   const card = document.createElement('section');
   card.className = 'followup-card followup-card--permission wiki-confirmation-card';

@@ -837,6 +837,38 @@ async def test_wiki_apply_ingest_passes_chunk_options(wiki_mocks):
     assert call_kwargs["use_chunking"] is True
 
 
+async def test_ingest_concurrent_confirmation_retry_writes_once(wiki_mocks):
+    import asyncio
+    import json
+
+    from crew.wiki.schemas import IngestResult, PlanResult, WikiPage
+
+    compiler = wiki_mocks["compiler"]
+    manager = wiki_mocks["manager"]
+    manager.consume_confirmation.side_effect = [{
+        "source_id": "s1", "plan_fingerprint": "fp",
+        "source_content_sha256": "sh", "planned_titles": ["Topic"],
+    }, None]
+    compiler.load_plan.return_value = PlanResult(
+        source_id="s1", plan_fingerprint="fp", source_content_sha256="sh",
+    )
+    compiler.apply_ingest = AsyncMock(return_value=IngestResult(
+        source_id="s1", pages=[WikiPage(id="p1", title="Topic", page_type="topic", file_path="wiki/Topic.md", content="x" * 60000)],
+    ))
+    _set_context()
+    tool = wiki_mocks["registry"].get("wiki_apply_ingest")
+    args = {"source_id": "s1", "confirmation_id": "wcf_once"}
+    first, second = await asyncio.gather(tool.run(args), tool.run(args))
+    assert first == second
+    assert len(first) < 1000
+    assert json.loads(first)["pages"][0]["id"] == "p1"
+    compiler.apply_ingest.assert_awaited_once()
+    manager.consume_confirmation.assert_called_once()
+    _set_context(owner="other")
+    assert "error" in json.loads(await tool.run(args))
+    compiler.apply_ingest.assert_awaited_once()
+
+
 async def test_wiki_apply_ingest_progress_touches_current_task(wiki_mocks):
     """Wiki 自己推送的分块进度同样要保活当前 agent turn。"""
     from crew.wiki.schemas import PlanResult
@@ -978,7 +1010,34 @@ async def test_wiki_plan_ingest_returns_brief_content(wiki_mocks):
     assert result.count("C") < 1000  # 不应包含完整长内容
 
 
-async def test_wiki_plan_ingest_capacity_failure_does_not_issue_confirmation(wiki_mocks):
+async def test_wiki_plan_ingest_brief_result_omits_claim_payload(wiki_mocks):
+    import json
+
+    from crew.wiki.schemas import PlannedPage, PlanResult, WikiClaim, WikiEvidence
+
+    compiler = wiki_mocks["compiler"]
+    compiler.plan_ingest = AsyncMock(return_value=PlanResult(
+        source_id="s1",
+        planned_pages=[PlannedPage(
+            title="Topic",
+            page_type="topic",
+            action="create",
+            claims=[WikiClaim(
+                statement="重要结论",
+                evidence=[WikiEvidence(source_id="s1", excerpt="证据")],
+            )],
+        )],
+    ))
+    _set_context()
+    result = await wiki_mocks["registry"].get("wiki_plan_ingest").run({"source_id": "s1"})
+    assert json.loads(result)["planned_pages"][0]["claims"] == []
+
+
+@pytest.mark.parametrize("issue", [
+    "LLM 分析失败: 2/2 个分块全部失败；已解析内容仍保留，可稍后重试",
+    "LLM 分析部分失败: 1/2 个分块未提取到内容；已解析内容仍保留",
+])
+async def test_wiki_plan_ingest_capacity_failure_does_not_issue_confirmation(wiki_mocks, issue):
     from crew.wiki.schemas import PlanResult
 
     registry = wiki_mocks["registry"]
@@ -987,7 +1046,7 @@ async def test_wiki_plan_ingest_capacity_failure_does_not_issue_confirmation(wik
     compiler.plan_ingest = AsyncMock(
         return_value=PlanResult(
             source_id="s1",
-            issues=["LLM 分析失败: 2/2 个分块全部失败；已解析内容仍保留，可稍后重试"],
+            issues=[issue],
         )
     )
 
@@ -996,6 +1055,8 @@ async def test_wiki_plan_ingest_capacity_failure_does_not_issue_confirmation(wik
 
     assert '"analysis_status": "failed"' in result
     assert '"retryable": true' in result
+    assert '"automatic_retry": false' in result
+    assert '"next_action": "report_incomplete"' in result
     assert "已解析 Markdown 与 Source 页面仍保留" in result
     manager.issue_confirmation.assert_not_called()
 

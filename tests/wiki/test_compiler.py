@@ -864,6 +864,10 @@ async def test_plan_ingest_reuses_successful_chunk_cache(store, compiler):
     call_count = len(compiler.provider.calls)
     second = await compiler.plan_ingest(raw.id)
 
+    assert second.plan_fingerprint == first.plan_fingerprint
+    assert second.analysis_stats == first.analysis_stats
+    second = await compiler.plan_ingest(raw.id, force=True)
+
     assert call_count == chunk_count
     assert len(compiler.provider.calls) == call_count
     assert first.analysis_stats["analyzed_chunks"] == chunk_count
@@ -1184,6 +1188,13 @@ async def test_batch_ingest_is_bounded_and_returns_cursor(store, compiler):
     assert first["remaining"] == 1
     assert second["succeeded"] == ["batch_1"]
     assert second["next_cursor"] is None
+
+    calls_before_retry = len(compiler.provider.calls)
+    replay = await compiler.batch_ingest(source_ids=source_ids, apply=True)
+    assert replay["succeeded"] == []
+    assert len(replay["skipped"]) == 2
+    assert len(compiler.provider.calls) == calls_before_retry
+    assert store.load_raw("batch_0").ingest_status == "ingested"
 
 
 # ---------------------------------------------------------------------------

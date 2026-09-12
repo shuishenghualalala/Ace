@@ -331,6 +331,13 @@ def create_wiki_router(crew) -> APIRouter:
         )
         return {"ok": True, "session_id": session_id, "kb_id": kb_id}
 
+    @router.get("/confirmations/{confirmation_id}")
+    async def wiki_confirmation_status(confirmation_id: str, request: Request):
+        manager = getattr(crew, "wiki_manager", None)
+        return {"pending": bool(manager and manager.is_confirmation_pending(
+            confirmation_id, owner_account_id=_owner(request),
+        ))}
+
     @router.post("/confirmations/{confirmation_id}/cancel")
     async def wiki_cancel_confirmation(confirmation_id: str, request: Request):
         data = await request.json()

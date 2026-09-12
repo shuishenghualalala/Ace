@@ -25,7 +25,9 @@ parsed source。返回成功、跳过、失败、剩余数量和 next_cursor。�
 Entity 或 Topic 上限；知识单元按质量、独立性、复用价值和证据完整性筛选，
 并复用分块缓存、plan/apply 和来源去重。
 
-wiki.ingest.auto_apply=true 时自动应用本批计划；关闭时先返回整批计划和一次性确认 ID。"""
+wiki.ingest.auto_apply=true 时自动应用本批计划；关闭时先返回整批计划和一次性确认 ID。
+分析不完整的素材归入 failed，不进入应用审批；内部重试耗尽后报告失败原因，不要在本轮
+对失败素材再次调用 batch/plan 或调整分块反复补漏。可按 next_cursor 继续尚未处理的素材。"""
 
 WIKI_SEARCH_PROMPT = """检索 Wiki 页面并返回与问题相关的证据上下文。
 
@@ -150,9 +152,13 @@ WIKI_PLAN_INGEST_PROMPT = """对 raw source 执行轻量知识单元提取，确
 
 每个知识单元只包含一个规范 subject、一条主张、短证据和必要关系；工具不会让每个分块撰写完整
 页面或生成无上限知识图谱。只有核心主题，或由两条以上独立主张支持的辅助主题才会新建页面。
-成功分块按 source 持久化，重复调用会复用缓存并只重试未完成块；截断响应保留已闭合的完整
+成功分块按 source 持久化，用户明确要求重试时复用缓存并只重试未完成块；截断响应保留已闭合的完整
 unit。返回的 analysis_stats 提供 total_chunks、analyzed_chunks、cache_hits、failed_chunks、
 truncated_chunks 与 elapsed_ms。
+
+若工具返回 analysis_status=failed 或 next_action=report_incomplete，说明内部重试后仍有缺失。
+本轮应报告缺失部分并结束，等待用户决定是否重试；不要先应用不完整计划再循环补漏、调整分块或反复请求审批。
+收到 already_applied=true 表示该素材版本已经完成，直接报告结果，不得再次生成计划。
 
 执行边界由 config.yaml 的 wiki.ingest.auto_apply 控制：
 - true（默认）：计划成功后立即自动应用，并返回 auto_applied=true 和实际写入结果。
@@ -161,6 +167,7 @@ truncated_chunks 与 elapsed_ms。
 可选参数：
 - chunk_size（整数）：长文档分块分析的字符阈值。未指定时使用系统默认值。
 - use_chunking（布尔）：是否强制启用/禁用分块分析。未指定时系统按文档长度自动判断。
+- force（布尔）：仅用户明确要求重新分析时使用；普通重复调用不得传 true。
 
 通常保持默认分块即可；只有用户明确要求诊断切分质量时才调整 chunk_size/use_chunking。"""
 
@@ -172,7 +179,8 @@ WIKI_APPLY_INGEST_PROMPT = """执行已生成的编译计划，将 raw source �
 
 可选参数 chunk_size / use_chunking 仅在未找到已有 plan、回退到完整 ingest 时生效；正常情况下 plan 已在 plan_ingest 阶段确定。
 
-执行成功后工具会自动维护 index、log、搜索索引和摘要状态，不要重复调用内部收尾工具。"""
+执行成功后工具会自动维护 index、log、搜索索引和摘要状态，不要重复调用内部收尾工具。
+确认回合执行一次已确认计划后报告结果并结束，不要自动再次 plan_ingest 或以补漏为由发起新审批。"""
 
 WIKI_FETCH_URL_PROMPT = """抓取指定 URL 的网页内容，自动将 HTML 转为 Markdown，并创建 wiki raw source。
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -409,6 +410,11 @@ _WIKI_PLAN_INGEST_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
+            "force": {
+                "type": "boolean",
+                "description": "仅用户明确要求重新整理或解决旧计划冲突时设为 true；普通重试复用已有计划。",
+                "default": False,
+            },
             "source_id": {
                 "type": "string",
                 "description": "要分析的 raw source ID",
@@ -1127,8 +1133,21 @@ def register_wiki_tools(
                 source_ids=result["succeeded"],
                 page_ids=result["page_ids"],
             )
-            return tool_result(**result, auto_applied=True)
+            incomplete = bool(result.get("failed"))
+            return tool_result(
+                **result,
+                auto_applied=True,
+                automatic_retry=False if incomplete else None,
+                next_action="report_incomplete" if incomplete else "report_result",
+            )
         planned_ids = list(result["succeeded"])
+        if not planned_ids:
+            return tool_result(
+                **result,
+                auto_applied=False,
+                automatic_retry=False if result.get("failed") else None,
+                next_action="report_incomplete" if result.get("failed") else "report_result",
+            )
         display_impact = {
             "sources": _source_titles_for_display(planned_ids, args=args, kb_id=kb_id),
             "skipped": _batch_status_for_display(result.get("skipped"), args=args, kb_id=kb_id),
@@ -1939,6 +1958,17 @@ def register_wiki_tools(
             use_chunking = bool(use_chunking)
 
         kb_id = _kb_id_for_source(args, source_id)
+        raw = store.load_raw(source_id, owner_account_id=_owner(), kb_id=kb_id)
+        existing_plan = compiler.load_plan(source_id, owner_account_id=_owner(), kb_id=kb_id)
+        if (
+            not args.get("force") and raw is not None and raw.ingest_status == "ingested"
+            and existing_plan is not None and raw.content_sha256
+            and existing_plan.source_content_sha256 == raw.content_sha256
+        ):
+            return tool_result(
+                source_id=source_id, already_applied=True,
+                message="该素材版本已完成整理，无需再次生成计划或审批。",
+            )
         result = await compiler.plan_ingest(
             source_id,
             owner_account_id=_owner(),
@@ -1946,11 +1976,12 @@ def register_wiki_tools(
             chunk_size=chunk_size,
             use_chunking=use_chunking,
             progress=progress,
+            force=bool(args.get("force", False)),
         )
         analysis_failed = any(
-            str(issue).startswith("LLM 分析失败:")
+            str(issue).startswith(("LLM 分析失败:", "LLM 分析部分失败:"))
             for issue in result.issues
-        )
+        ) or bool(result.analysis_stats.get("failed_chunks", 0))
         if analysis_failed:
             # parsed Markdown 和全文 Source 已经独立完成；模型容量不足时不签发一个
             # 只有 source 页的误导性 apply 确认，交还 Agent 稍后重试分析。
@@ -1958,7 +1989,9 @@ def register_wiki_tools(
                 **result.to_dict(brief=True),
                 analysis_status="failed",
                 retryable=True,
-                message="LLM 分析未完成；已解析 Markdown 与 Source 页面仍保留，可切换模型或稍后重试。",
+                automatic_retry=False,
+                next_action="report_incomplete",
+                message="LLM 分析未完成；已解析 Markdown 与 Source 页面仍保留。不要应用不完整计划或再次请求审批；报告缺失部分，等待用户决定是否重试。",
             )
         duplicate_skipped = not result.planned_pages and any(
             "重复 source" in str(issue) for issue in result.issues
@@ -1980,7 +2013,7 @@ def register_wiki_tools(
             return tool_result(
                 **result.to_dict(brief=True),
                 auto_applied=True,
-                applied_pages=[page.to_dict(brief=True) for page in applied.pages],
+                applied_pages=[{"id": page.id, "title": page.title, "page_type": page.page_type} for page in applied.pages],
                 apply_issues=applied.issues,
                 message="深度整理计划已按 wiki.ingest.auto_apply=true 自动应用。",
             )
@@ -2019,11 +2052,9 @@ def register_wiki_tools(
                 if raw is not None:
                     if payload.get("error") or payload.get("analysis_status") == "failed":
                         raw.ingest_status = "failed"
-                    elif payload.get("auto_applied"):
-                        raw.ingest_status = "ingested"
                     elif payload.get("skipped"):
                         raw.ingest_status = "ignored"
-                    elif payload.get("requires_confirmation"):
+                    elif payload.get("requires_confirmation") or payload.get("confirmation_pending"):
                         raw.ingest_status = "recommended"
                     store.save_raw(raw, owner_account_id=_owner(), kb_id=kb_id)
             except Exception:
@@ -2037,7 +2068,7 @@ def register_wiki_tools(
         kb_id = _kb_id_for_source(args, source_id)
         confirmed = _consume_confirmation(args, action="apply_ingest", kb_id=kb_id)
         if confirmed is None or str(confirmed.get("source_id") or "") != source_id:
-            return tool_error("缺少有效的 ingest 确认；请重新调用 wiki_plan_ingest 并等待用户确认")
+            return tool_error("确认不可用或已使用；请先检查素材和计划状态，不要自动重新整理或重复请求审批")
 
         # 计划指纹绑定：确认卡记录的是用户当时看到的计划指纹。
         # 若确认前系统又为同一 source 生成新计划，磁盘 plan 指纹会变化，旧确认作废。
@@ -2057,6 +2088,10 @@ def register_wiki_tools(
             return tool_error(
                 "确认的计划与当前 source 内容版本不一致；请重新调用 wiki_plan_ingest"
             )
+        if disk_plan.analysis_stats.get("failed_chunks", 0) or any(
+            issue.startswith(("LLM 分析失败:", "LLM 分析部分失败:")) for issue in disk_plan.issues
+        ):
+            return tool_error("该计划分析未完成，未执行写入；请报告缺失部分，等待用户决定是否重试")
 
         approved_titles = args.get("approved_titles")
         if approved_titles is not None:
@@ -2086,7 +2121,8 @@ def register_wiki_tools(
         )
         return tool_result(
             source_id=result.source_id,
-            pages=[p.to_dict() for p in result.pages],
+            next_action="report_result",
+            pages=[{"id": p.id, "title": p.title, "page_type": p.page_type} for p in result.pages],
             issues=result.issues,
         )
 
@@ -2393,8 +2429,38 @@ def register_wiki_tools(
         (_WIKI_DELETE_PAGES_SCHEMA, _handle_delete_pages, False, "🗑️", "删除 Wiki 页面", "删除 Wiki 页面", "wiki delete pages remove"),
         (_WIKI_RENAME_PAGE_SCHEMA, _handle_rename_page, False, "✏️", "重命名 Wiki 页面", "重命名 {page_id}", "wiki rename page title change"),
     ]
+    # Serialize plan/apply/batch within a vault so parallel tool calls cannot
+    # overwrite an approved plan. Receipts are scoped to owner and conversation.
+    ingest_locks: dict[tuple[str, str], asyncio.Lock] = {}
+    ingest_receipts: OrderedDict[tuple[str, ...], str] = OrderedDict()
+
+    def _guard_ingest(name: str, run: Callable[[dict[str, Any]], Awaitable[str]]):
+        async def guarded(args: dict[str, Any]) -> str:
+            source_id = str(args.get("source_id") or "")
+            kb_id = _kb_id_for_source(args, source_id) if source_id else _kb_id(args)
+            owner = _owner()
+            lock = ingest_locks.setdefault((owner, kb_id), asyncio.Lock())
+            receipt_key = (
+                owner, current_session_id.get(), kb_id, name,
+                json.dumps(args, sort_keys=True, ensure_ascii=False),
+            )
+            async with lock:
+                if args.get("confirmation_id") and receipt_key in ingest_receipts:
+                    ingest_receipts.move_to_end(receipt_key)
+                    return ingest_receipts[receipt_key]
+                output = await run(args)
+                payload = json.loads(output)
+                if args.get("confirmation_id") and not payload.get("error"):
+                    ingest_receipts[receipt_key] = output
+                    if len(ingest_receipts) > 256:
+                        ingest_receipts.popitem(last=False)
+                return output
+        return guarded
+
     read_tools = set(WIKI_READ_TOOLS)
     for schema, handler, is_async, emoji, display_name, ui_label, search_hint in _TOOLS:
+        if schema["name"] in {"wiki_plan_ingest", "wiki_apply_ingest", "wiki_batch_ingest"}:
+            handler = _guard_ingest(schema["name"], handler)
         toolset = WIKI_READ_TOOLSET if schema["name"] in read_tools else WIKI_MANAGE_TOOLSET
         result_kwargs: dict[str, Any] = {}
         if schema["name"] == "wiki_read":
