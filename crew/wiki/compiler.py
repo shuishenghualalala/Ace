@@ -2201,17 +2201,24 @@ class WikiCompiler:
             ]
         finally:
             self._analysis_owner.reset(owner_token)
-        for coro in asyncio.as_completed(tasks):
-            try:
-                index, result = await coro
-                results_by_index[index] = result
-                if not result.get("_chunk_failed"):
-                    cache_state[current_keys[index]] = result
-                    _save_analysis_cache(cache_path, cache_state)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Wiki 分块分析异常，跳过该块: %s", exc)
-            if len(chunks) > 1:
-                await _emit(f"正在通读素材（{len(results_by_index)}/{len(chunks)} 段）…")
+        try:
+            for coro in asyncio.as_completed(tasks):
+                try:
+                    index, result = await coro
+                    results_by_index[index] = result
+                    if not result.get("_chunk_failed"):
+                        cache_state[current_keys[index]] = result
+                        _save_analysis_cache(cache_path, cache_state)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Wiki 分块分析异常，跳过该块: %s", exc)
+                if len(chunks) > 1:
+                    await _emit(f"正在通读素材（{len(results_by_index)}/{len(chunks)} 段）…")
+        finally:
+            # 当前对话停止时，一并回收尚未完成的分块分析。
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         results = [
             results_by_index.get(

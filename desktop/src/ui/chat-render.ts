@@ -605,34 +605,6 @@ function appendToolProgressLines(parent: HTMLElement, tool: ToolCallInfo): void 
   parent.appendChild(progress);
 }
 
-function createWikiIngestTaskActions(tool: ToolCallInfo): HTMLElement | null {
-  const prefix = 'wiki-ingest-tool-';
-  if (tool.name !== 'wiki_plan_ingest' || tool.status !== 'running' || !tool.toolCallId.startsWith(prefix)) return null;
-  const actions = document.createElement('div');
-  actions.className = 'wiki-ingest-task__actions';
-  const cancel = document.createElement('button');
-  cancel.type = 'button';
-  cancel.className = 'wiki-ingest-task__cancel';
-  cancel.dataset.wikiIngestCancel = tool.toolCallId.slice(prefix.length);
-  cancel.title = '停止后台整理';
-  cancel.setAttribute('aria-label', '停止后台整理');
-  cancel.appendChild(createIcon('icon-stop', { size: 16 }));
-  const label = document.createElement('span');
-  label.textContent = '停止整理';
-  cancel.appendChild(label);
-  actions.appendChild(cancel);
-  return actions;
-}
-
-function wrapWikiIngestTaskHeader(content: HTMLElement, tool: ToolCallInfo): HTMLElement {
-  const actions = createWikiIngestTaskActions(tool);
-  if (!actions) return content;
-  const header = document.createElement('div');
-  header.className = 'wiki-ingest-task__header';
-  header.append(content, actions);
-  return header;
-}
-
 function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
   if (SUBAGENT_CARD_TOOLS.has(tool.name)) return renderSubagentCard(tool, messageId);
   const isActive = tool.status === 'running' || tool.status === 'generating';
@@ -696,14 +668,14 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
     if (shotPath) {
       const contentWrap = document.createElement('div');
       contentWrap.className = 'process-timeline__tool-media';
-      contentWrap.appendChild(wrapWikiIngestTaskHeader(details, tool));
+      contentWrap.appendChild(details);
       appendToolProgressLines(contentWrap, tool);
       contentWrap.appendChild(buildInlineImage(shotPath, '页面截图', shotPath, 'tool'));
       return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
     }
     const contentWrap = document.createElement('div');
     contentWrap.className = 'process-timeline__tool';
-    contentWrap.appendChild(wrapWikiIngestTaskHeader(details, tool));
+    contentWrap.appendChild(details);
     appendToolProgressLines(contentWrap, tool);
     return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
   }
@@ -722,7 +694,7 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
   if (!initialDuration && !isActive) durSpan.remove();
   const contentWrap = document.createElement('div');
   contentWrap.className = 'process-timeline__tool';
-  contentWrap.appendChild(wrapWikiIngestTaskHeader(content, tool));
+  contentWrap.appendChild(content);
   appendToolProgressLines(contentWrap, tool);
   return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
 }

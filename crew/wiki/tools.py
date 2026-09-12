@@ -18,7 +18,6 @@ from crew.core.runctx import (
     current_attachment_files,
     current_attachment_paths,
     current_owner_account_id,
-    current_parent_task_id,
     current_push_fn,
     current_request_id,
     current_session_id,
@@ -633,8 +632,6 @@ def register_wiki_tools(
     session_store: Any = None,
     workspace_store: Any = None,
     security_service: Any = None,
-    task_runtime: Any = None,
-    track_background_task: Callable[[asyncio.Task[Any]], None] | None = None,
 ) -> None:
     """把 Wiki 工具注册到 registry（toolset='wiki'）。"""
 
@@ -2010,193 +2007,28 @@ def register_wiki_tools(
         # 计划预览不返回 source 全文，避免大文档撑满 Agent 上下文。
         return tool_result(**result.to_dict(brief=True), **confirmation)
 
-    def _background_result_for_ui(payload: dict[str, Any]) -> dict[str, Any]:
-        """裁剪后台任务事件，只保留状态卡与确认卡真正需要的字段。"""
-        keys = {
-            "requires_confirmation",
-            "confirmation_id",
-            "action",
-            "summary",
-            "impact",
-            "expires_at",
-            "analysis_status",
-            "retryable",
-            "auto_applied",
-            "skipped",
-            "message",
-            "apply_issues",
-        }
-        return {key: payload[key] for key in keys if key in payload}
-
     async def _handle_plan_ingest(args: dict[str, Any]) -> str:
+        # 整理直接属于当前工具调用，进度、结果及取消均沿用当前对话生命周期。
+        output = await _run_plan_ingest(args, progress=emit_tool_progress)
+        payload = json.loads(output)
         source_id = str(args.get("source_id", "")).strip()
-        if not source_id:
-            return tool_error("缺少 source_id")
-
-        session_id = current_session_id.get()
-        owner = _owner()
-        kb_id = _kb_id_for_source(args, source_id)
-        if task_runtime is None or not session_id:
-            return await _run_plan_ingest(args, progress=emit_tool_progress)
-
-        # 同一会话、同一素材只允许一个活跃的深度整理任务，避免用户/Agent 重试时
-        # 重复消耗模型调用并相互覆盖 plan 文件。
-        for existing in task_runtime.list_tasks(
-            session_id=session_id,
-            status="running",
-            limit=200,
-            owner_account_id=owner,
-        ):
-            progress = existing.get("progress") or {}
-            if (
-                existing.get("kind") == "wiki_ingest"
-                and progress.get("source_id") == source_id
-                and progress.get("kb_id") == kb_id
-            ):
-                return tool_result(
-                    status="running",
-                    background=True,
-                    task_id=existing.get("task_id") or existing.get("id"),
-                    message="这份素材已在后台深度整理；你可以继续提问，完成后会在这里通知。",
-                )
-
-        source_title = _source_title_for_display(source_id, args=args, kb_id=kb_id)
-        initial_progress = {
-            "stage": "waiting",
-            "label": "已进入后台整理队列",
-            "source_id": source_id,
-            "source_title": source_title,
-            "kb_id": kb_id,
-        }
-        task = task_runtime.create_runtime(
-            kind="wiki_ingest",
-            session_id=session_id,
-            request_id=current_request_id.get(),
-            parent_task_id=current_parent_task_id.get(),
-            title=f"深度整理《{source_title}》",
-            detail="使用当前 Wiki Agent 模型生成完整知识整理计划",
-            execution_timeout=float(getattr(task_runtime, "defaults", {}).get("agent_turn_execution", 3600.0)),
-            inactivity_timeout=float(getattr(task_runtime, "defaults", {}).get("agent_turn_inactivity", 600.0)),
-            backgrounded=True,
-            owner_account_id=owner,
-        )
-        task_id = str(task.get("task_id") or task.get("id") or "")
-        task_runtime.update(task_id, owner_account_id=owner, progress=initial_progress)
-        task_runtime.mark_running(task_id)
-
-        async def _background_progress(label: str) -> None:
-            text = str(label or "").strip()
-            if not text:
-                return
-            stage = "analyzing"
-            if (
-                "分块" in text
-                or "分析第" in text
-                or "已分析" in text
-                or ("通读素材" in text and "/" in text and "段" in text)
-            ):
-                stage = "analyzing_chunks"
-            elif "汇总" in text or "合并" in text:
-                stage = "synthesizing"
-            elif "盘算" in text or "页面" in text:
-                stage = "planning"
+        if source_id:
+            kb_id = _kb_id_for_source(args, source_id)
             try:
-                task_runtime.touch_activity(task_id, {
-                    **initial_progress,
-                    "stage": stage,
-                    "label": text,
-                })
-            except KeyError:
-                pass
-
-        async def _worker() -> None:
-            try:
-                output = await _run_plan_ingest(args, progress=_background_progress)
-                try:
-                    payload = json.loads(output)
-                except json.JSONDecodeError:
-                    payload = {"message": output}
-                failed = bool(payload.get("error")) or payload.get("analysis_status") == "failed"
-                needs_confirmation = bool(payload.get("requires_confirmation"))
-                final_stage = "failed" if failed else "needs_confirmation" if needs_confirmation else "completed"
-                if failed:
-                    final_label = str(payload.get("message") or payload.get("error") or "深度整理失败")
-                elif needs_confirmation:
-                    final_label = "整理计划已就绪，等待确认"
-                else:
-                    final_label = str(payload.get("message") or "深度整理已完成")
-                try:
-                    raw = store.load_raw(source_id, owner_account_id=owner, kb_id=kb_id)
-                    if raw is not None:
-                        if failed:
-                            raw.ingest_status = "failed"
-                        elif payload.get("auto_applied"):
-                            raw.ingest_status = "ingested"
-                        elif payload.get("skipped"):
-                            raw.ingest_status = "ignored"
-                        elif needs_confirmation:
-                            raw.ingest_status = "recommended"
-                        store.save_raw(raw, owner_account_id=owner, kb_id=kb_id)
-                except Exception:  # 状态标记失败不应覆盖已生成的计划
-                    log.warning("更新后台 Wiki ingest 状态失败 source=%s", source_id, exc_info=True)
-                final_progress = {
-                    **initial_progress,
-                    "stage": final_stage,
-                    "label": final_label,
-                    "result": {
-                        **_background_result_for_ui(payload),
-                        "message": final_label,
-                        "background_task": True,
-                        "background_status": final_stage,
-                    },
-                }
-                task_runtime.finish(
-                    task_id,
-                    owner_account_id=owner,
-                    status="failed" if failed else "completed",
-                    result=output,
-                    error=final_label if failed else "",
-                    progress=final_progress,
-                )
-            except asyncio.CancelledError:
-                try:
-                    task_runtime.finish(
-                        task_id,
-                        owner_account_id=owner,
-                        status="cancelled",
-                        error="已取消 Wiki 深度整理",
-                        progress={**initial_progress, "stage": "cancelled", "label": "已取消"},
-                    )
-                except KeyError:
-                    pass
-                raise
-            except Exception as exc:
-                log.exception("后台 Wiki ingest plan 失败 source=%s", source_id)
-                try:
-                    task_runtime.finish(
-                        task_id,
-                        owner_account_id=owner,
-                        status="failed",
-                        error=str(exc),
-                        progress={
-                            **initial_progress,
-                            "stage": "failed",
-                            "label": f"深度整理失败：{exc}",
-                        },
-                    )
-                except KeyError:
-                    pass
-
-        worker = asyncio.create_task(_worker())
-        task_runtime.attach_worker(task_id, worker)
-        if track_background_task is not None:
-            track_background_task(worker)
-        return tool_result(
-            status="launched",
-            background=True,
-            task_id=task_id,
-            message="全文 Source 页面已可阅读；完整深度整理正在后台继续，你可以继续使用 Wiki，完成后会在当前对话通知。",
-        )
+                raw = store.load_raw(source_id, owner_account_id=_owner(), kb_id=kb_id)
+                if raw is not None:
+                    if payload.get("error") or payload.get("analysis_status") == "failed":
+                        raw.ingest_status = "failed"
+                    elif payload.get("auto_applied"):
+                        raw.ingest_status = "ingested"
+                    elif payload.get("skipped"):
+                        raw.ingest_status = "ignored"
+                    elif payload.get("requires_confirmation"):
+                        raw.ingest_status = "recommended"
+                    store.save_raw(raw, owner_account_id=_owner(), kb_id=kb_id)
+            except Exception:
+                log.warning("更新 Wiki ingest 状态失败 source=%s", source_id, exc_info=True)
+        return output
 
     async def _handle_apply_ingest(args: dict[str, Any]) -> str:
         source_id = str(args.get("source_id", "")).strip()

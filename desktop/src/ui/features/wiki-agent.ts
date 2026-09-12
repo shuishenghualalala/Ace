@@ -1198,19 +1198,6 @@ export function initWikiAgent(): void {
       openWikiPageInHub(pageId);
       return;
     }
-    const cancelIngest = target.closest<HTMLButtonElement>('[data-wiki-ingest-cancel]');
-    if (cancelIngest?.dataset.wikiIngestCancel) {
-      event.preventDefault();
-      event.stopPropagation();
-      cancelIngest.disabled = true;
-      void backendApi.cancelTask(cancelIngest.dataset.wikiIngestCancel)
-        .then(() => notify('已停止 Wiki 深度整理'))
-        .catch((err) => {
-          cancelIngest.disabled = false;
-          notify(`停止失败：${(err as Error).message}`);
-        });
-      return;
-    }
     const confirm = target.closest<HTMLElement>('[data-wiki-confirm]');
     if (confirm?.dataset.wikiConfirm) {
       event.preventDefault();

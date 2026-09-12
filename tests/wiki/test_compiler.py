@@ -876,6 +876,35 @@ async def test_plan_ingest_reuses_successful_chunk_cache(store, compiler):
 
 
 @pytest.mark.asyncio
+async def test_cancel_analysis_drains_chunk_workers(compiler):
+    import asyncio
+
+    started = asyncio.Event()
+    workers = []
+
+    async def analyze_chunk(*_args, **_kwargs):
+        workers.append(asyncio.current_task())
+        started.set()
+        await asyncio.Event().wait()
+
+    compiler._analyze_chunk = AsyncMock(side_effect=analyze_chunk)
+    task = asyncio.create_task(compiler._analyze(
+        "# A\n\n" + "材料。" * 4000,
+        chunk_size=1000,
+        use_chunking=True,
+    ))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert workers
+        assert all(worker.done() and worker.cancelled() for worker in workers)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_chunk_cache_resumes_only_failed_chunks(tmp_path, compiler):
     section_a = "# A\n\n" + ("A 内容。" * 4_000)
     section_b = "# B\n\n" + ("B 内容。" * 4_000)

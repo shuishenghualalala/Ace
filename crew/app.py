@@ -3060,11 +3060,6 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         fuse_weight=semantic.fuse_weight if semantic else 0.9,
     )
 
-    def _track_wiki_background_task(task: asyncio.Task[Any]) -> None:
-        """Wiki 深度整理与其他后台 Agent 共享 App 生命周期托管。"""
-        app._subagent_bg_tasks.add(task)
-        task.add_done_callback(app._subagent_bg_tasks.discard)
-
     register_wiki_tools(
         registry,
         app._wiki_store,
@@ -3075,8 +3070,6 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         session_store=session_store,
         workspace_store=workspace_store,
         security_service=app.security_service,
-        task_runtime=app.tasks,
-        track_background_task=_track_wiki_background_task,
     )
 
     from crew.work.briefs import WorkBriefStore

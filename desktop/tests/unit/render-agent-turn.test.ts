@@ -592,7 +592,7 @@ describe('renderAgentTurn', () => {
       makeMessages({
         thinking: undefined,
         toolCalls: [{
-          toolCallId: 'wiki-ingest-tool-wiki-1',
+          toolCallId: 'wiki-1',
           name: 'wiki_plan_ingest',
           args: '{}',
           status: 'running',
@@ -606,9 +606,7 @@ describe('renderAgentTurn', () => {
     const lines = Array.from(root.querySelectorAll('.process-timeline__stage')).map((node) => node.textContent);
     expect(lines).toEqual(['读取文档…', '正在通读素材（1/2 段）…', '正在通读素材（2/2 段）…']);
     expect(root.querySelector('.process-timeline__title')?.textContent).not.toContain('正在通读素材');
-    const header = root.querySelector('.wiki-ingest-task__header');
-    expect(header?.querySelector('[data-wiki-ingest-cancel="wiki-1"]')).not.toBeNull();
-    expect(header?.nextElementSibling?.classList.contains('process-timeline__progress')).toBe(true);
+    expect(root.querySelector('[data-wiki-ingest-cancel]')).toBeNull();
   });
 
   it('run_agent 渲染 subagent 专用卡片：中文标题 + 任务描述 + 执行摘要', () => {
