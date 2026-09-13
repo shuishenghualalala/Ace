@@ -80,6 +80,7 @@ forbidden_modules =
     crew.team
     crew.agent.external
     crew.browser
+    crew.channels
 allow_indirect_imports = True
 
 [importlinter:contract:feature-host-boundary]

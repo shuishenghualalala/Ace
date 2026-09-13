@@ -48,7 +48,7 @@ def _public_agent_config(config: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def resolve_channel_session(
-    store: Any,
+    routes: Any,
     session_key: str,
     owner_account_id: str,
 ) -> str:
@@ -56,9 +56,11 @@ def resolve_channel_session(
 
     Legacy channel sessions use the stable key itself as the session ID. Keeping
     that as the initial target preserves existing history without migration.
+    路由表归位在 ChannelSessionRouteStore（channels 库）；宿主未接线（routes
+    为 None）或存储缺方法时回落稳定 key，语义与拆分前一致。
     """
-    getter = getattr(store, "get_channel_session", None)
-    setter = getattr(store, "set_channel_session", None)
+    getter = getattr(routes, "get_channel_session", None)
+    setter = getattr(routes, "set_channel_session", None)
     active = getter(session_key, owner_account_id=owner_account_id) if callable(getter) else None
     if active:
         return str(active)
@@ -68,37 +70,43 @@ def resolve_channel_session(
 
 
 def rotate_channel_session(
-    store: Any,
+    session_store: Any,
+    routes: Any,
     session_key: str,
     owner_account_id: str,
     *,
     workspace_id: str = "default",
 ) -> str:
-    """Create and activate a fresh conversation while retaining channel routing."""
-    current = resolve_channel_session(store, session_key, owner_account_id)
+    """Create and activate a fresh conversation while retaining channel routing.
+
+    会话本体（ensure/agent_config）仍走 sessions 库的 session_store；路由行
+    写 channels 库的 routes 存储（P2-7 归位 + ADR-0038 拆库）。
+    """
+    current = resolve_channel_session(routes, session_key, owner_account_id)
     new_session_id = _new_channel_session_id(session_key)
     inherited = _public_agent_config(
-        store.get_agent_config(current, owner_account_id=owner_account_id)
+        session_store.get_agent_config(current, owner_account_id=owner_account_id)
     )
     inherited["channel_session_key"] = session_key
-    store.ensure_session(
+    session_store.ensure_session(
         new_session_id,
-        workspace_id=store.get_workspace_id(current, owner_account_id=owner_account_id)
+        workspace_id=session_store.get_workspace_id(current, owner_account_id=owner_account_id)
         or workspace_id
         or "default",
         owner_account_id=owner_account_id,
     )
     if inherited:
-        store.set_agent_config(
+        session_store.set_agent_config(
             new_session_id,
             inherited,
             owner_account_id=owner_account_id,
         )
-    store.set_channel_session(
-        session_key,
-        new_session_id,
-        owner_account_id=owner_account_id,
-    )
+    if routes is not None:
+        routes.set_channel_session(
+            session_key,
+            new_session_id,
+            owner_account_id=owner_account_id,
+        )
     return new_session_id
 
 
@@ -185,11 +193,13 @@ def prepare_inbound_channel_envelope(crew: Any, envelope: Any) -> None:
     envelope.user_id = binder
     session_key = str(envelope.session_id or "")
     envelope.params["channel_session_key"] = session_key
-    active_session_id = resolve_channel_session(crew.session_store, session_key, binder)
+    routes = getattr(crew, "channel_session_routes", None)
+    active_session_id = resolve_channel_session(routes, session_key, binder)
     command = str(getattr(envelope, "query", "") or "").strip().lower()
     if command in _RESET_COMMANDS:
         active_session_id = rotate_channel_session(
             crew.session_store,
+            routes,
             session_key,
             binder,
             workspace_id=str(getattr(envelope, "workspace_id", "default") or "default"),
@@ -200,8 +210,12 @@ def prepare_inbound_channel_envelope(crew: Any, envelope: Any) -> None:
     ensure_channel_source_config(crew.session_store, envelope)
 
 
-def register_channel_session_tools(registry: Any, store: Any) -> None:
-    """Register the model-callable equivalent of channel /new and /reset."""
+def register_channel_session_tools(registry: Any, session_store: Any, routes: Any) -> None:
+    """Register the model-callable equivalent of channel /new and /reset.
+
+    session_store 走 sessions 库（会话本体），routes 走 channels 库（路由行），
+    与拆库后的归属一一对应。
+    """
     from crew.core.runctx import (
         current_owner_account_id,
         current_session_id,
@@ -217,19 +231,20 @@ def register_channel_session_tools(registry: Any, store: Any) -> None:
             return tool_error("当前不是微信或飞书等渠道会话，不能切换渠道对话")
         owner = current_owner_account_id.get()
         current_sid = current_session_id.get()
-        key_getter = getattr(store, "get_channel_session_key", None)
+        key_getter = getattr(routes, "get_channel_session_key", None)
         session_key = (
             key_getter(current_sid, owner_account_id=owner)
             if callable(key_getter)
             else None
         )
         if not session_key:
-            config = store.get_agent_config(current_sid, owner_account_id=owner) or {}
+            config = session_store.get_agent_config(current_sid, owner_account_id=owner) or {}
             session_key = str(config.get("channel_session_key") or "")
         if not session_key:
             return tool_error("当前渠道会话缺少路由信息，无法新建对话")
         new_session_id = rotate_channel_session(
-            store,
+            session_store,
+            routes,
             session_key,
             owner,
             workspace_id=current_workspace_id.get(),

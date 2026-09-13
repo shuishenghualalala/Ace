@@ -86,17 +86,6 @@ class SQLiteSessionStore(SessionStore):
             )
             """
         )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS channel_session_routes (
-                owner_account_id TEXT NOT NULL,
-                session_key     TEXT NOT NULL,
-                session_id      TEXT NOT NULL,
-                updated_at      REAL NOT NULL,
-                PRIMARY KEY (owner_account_id, session_key)
-            )
-            """
-        )
         cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
         migrations = {
             "owner_account_id": "ALTER TABLE sessions ADD COLUMN owner_account_id TEXT NOT NULL DEFAULT ''",
@@ -122,16 +111,12 @@ class SQLiteSessionStore(SessionStore):
         self._migrate_owned_aux_tables(conn)
         self._migrate_sessions_pk(conn)
         # 历史 owner='' 行归属本机 local（owner 统一后不存在无主会话）。
-        backfill_empty_owner_rows(
-            conn,
-            ["sessions", "session_agent_config", "channel_session_routes"],
-        )
+        # channel_session_routes 已归位 channels 库（P2-7 + ADR-0038 拆库），
+        # 由 channels 侧 store 自管建表与回填；主库若还留着拆库前的旧表，
+        # 旧行作为回退备份原样保留，不再被本库触碰。
+        backfill_empty_owner_rows(conn, ["sessions", "session_agent_config"])
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_updated ON sessions(owner_account_id, updated_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_workspace ON sessions(owner_account_id, workspace_id, updated_at DESC)")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_channel_session_routes_active "
-            "ON channel_session_routes(owner_account_id, session_id)"
-        )
 
     def _migrate_sessions_pk(self, conn) -> None:
         """Migrate sessions from global session_id to owner-scoped identity."""
@@ -789,50 +774,3 @@ class SQLiteSessionStore(SessionStore):
                 (session_id, owner_account_id),
             )
         self._writer.execute(_write)
-
-    # ---- 渠道稳定 key -> 当前实际 session ----
-    def get_channel_session(self, session_key: str, owner_account_id: str) -> str | None:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT session_id FROM channel_session_routes "
-                "WHERE owner_account_id = ? AND session_key = ?",
-                (owner_account_id, session_key),
-            ).fetchone()
-        return str(row[0]) if row else None
-
-    def set_channel_session(
-        self,
-        session_key: str,
-        session_id: str,
-        owner_account_id: str,
-    ) -> None:
-        now = time.time()
-
-        def _write(conn):
-            conn.execute(
-                """
-                INSERT INTO channel_session_routes (
-                    owner_account_id, session_key, session_id, updated_at
-                ) VALUES (?, ?, ?, ?)
-                ON CONFLICT(owner_account_id, session_key) DO UPDATE SET
-                    session_id = excluded.session_id,
-                    updated_at = excluded.updated_at
-                """,
-                (owner_account_id, session_key, session_id, now),
-            )
-
-        self._writer.execute(_write)
-
-    def get_channel_session_key(
-        self,
-        session_id: str,
-        owner_account_id: str,
-    ) -> str | None:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT session_key FROM channel_session_routes "
-                "WHERE owner_account_id = ? AND session_id = ? "
-                "ORDER BY updated_at DESC LIMIT 1",
-                (owner_account_id, session_id),
-            ).fetchone()
-        return str(row[0]) if row else None

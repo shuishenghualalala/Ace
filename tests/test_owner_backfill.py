@@ -23,7 +23,7 @@ from crew.state._migration import (
     legacy_owner_counts,
     legacy_owner_scan_targets,
 )
-from crew.state.channel_bindings import ChannelBindingsStore
+from crew.channels.channel_bindings import ChannelBindingsStore
 from crew.state.plugin_preferences import PluginPreferencesStore
 
 

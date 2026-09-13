@@ -674,6 +674,8 @@ class CrewApp:
         # Work 业务域组合服务（由 build_app 装配；不进入 core）。
         self.work_service = None
         self.channel_bindings = None
+        # 渠道会话路由存储（channels 库，由 build_app 装配；不进入 core）。
+        self.channel_session_routes = None
         # 用户级插件开关偏好（由 build_app 装配后赋值）
         self.plugin_prefs = None
         # subagent：预设注册表 + 活跃子 agent 跟踪 + 后台任务（由 build_app 装配后赋值）
@@ -2312,6 +2314,8 @@ class CrewApp:
             # 显式登记仅供未来域专用认领工具消费。
             # 不传 sites_db_path（有意缺省）：sites 域 10 表同样不在
             # OWNER_TABLE_LABELS，语义同 external/team（见 _migration 注释）。
+            # channels_db_path 照 cron/work 语义传入：routes 表在 OWNER_TABLE_
+            # LABELS 内随库扫描；bindings 表不在清单内不参与扫描。
             counts, backfilled = inspect_and_backfill_legacy_owners(
                 legacy_owner_scan_targets(
                     self.config.db_path,
@@ -2319,6 +2323,7 @@ class CrewApp:
                     self.config.work_db_path,
                     tasks_db_path=self.config.tasks_db_path,
                     notifications_db_path=self.config.notifications_db_path,
+                    channels_db_path=self.config.channels_db_path,
                 ),
                 wal_enabled=self.config.sqlite_wal,
             )
@@ -2600,6 +2605,7 @@ class CrewApp:
             self.security_rules,
             self.security_audit,
             self.channel_bindings,
+            self.channel_session_routes,
             self.active_owner,
             getattr(self, "cron_store", None),
             # A host may be closed before startup (for example ASGI tests that
@@ -3669,9 +3675,23 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
     session_store = SQLiteSessionStore(cfg.db_path)
     workspace_store = SQLiteWorkspaceStore(cfg.db_path)
-    from crew.state.channel_bindings import ChannelBindingsStore
+    from crew.channels.channel_bindings import ChannelBindingsStore
+    from crew.channels.channel_session_routes import ChannelSessionRouteStore
 
-    channel_bindings = ChannelBindingsStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
+    # channels 域 2 表在独立库（ADR-0038 拆库最后一批，随 P2-7 归属迁移）；
+    # legacy_db_path 触发 copy-on-first-activate（crew.db 旧行保留作回退备份）。
+    # 本切片只拆库与归位，生命周期形态（build_app 直构、随 App 存亡）不变。
+    channels_db_path = _resolve_crew_home_path(cfg.channels_db_path)
+    channel_bindings = ChannelBindingsStore(
+        channels_db_path,
+        wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
+    )
+    channel_session_routes = ChannelSessionRouteStore(
+        channels_db_path,
+        wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
+    )
     from crew.state.plugin_preferences import PluginPreferencesStore
     from crew.team.external_store import TeamExternalAgentStore
 
@@ -3738,6 +3758,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     app.sites = sites_feature.manager
     app.declare_managed_feature(sites_feature.definition)
     app.channel_bindings = channel_bindings
+    app.channel_session_routes = channel_session_routes
     app.plugin_prefs = plugin_prefs
     from crew.channels import build_channels_feature
 

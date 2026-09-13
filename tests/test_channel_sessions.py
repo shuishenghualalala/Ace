@@ -9,16 +9,17 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from crew.app import build_app
-from crew.core.envelope import Envelope
-from crew.core.types import Message
+from crew.channels.channel_bindings import ChannelBindingsStore
+from crew.channels.channel_session_routes import ChannelSessionRouteStore
 from crew.channels.channel_sessions import (
     channel_platform_from_session_id,
     is_channel_session_id,
     list_channel_session_groups,
     prepare_inbound_channel_envelope,
 )
+from crew.core.envelope import Envelope
+from crew.core.types import Message
 from crew.gateway.server import create_app
-from crew.state.channel_bindings import ChannelBindingsStore
 from crew.state.config import Config
 from crew.state.session_store import SQLiteSessionStore
 
@@ -32,7 +33,12 @@ def store(tmp_path):
 
 @pytest.fixture
 def bindings(tmp_path):
-    return ChannelBindingsStore(str(tmp_path / "crew.db"))
+    return ChannelBindingsStore(str(tmp_path / "channels.db"))
+
+
+@pytest.fixture
+def routes(tmp_path):
+    return ChannelSessionRouteStore(str(tmp_path / "channels.db"))
 
 
 def test_is_channel_session_id():
@@ -136,7 +142,7 @@ def test_list_channel_session_groups_filters_by_bound_at_and_message_count(store
     assert [s["session_id"] for s in groups[0]["sessions"]] == [new_sid]
 
 
-def test_prepare_inbound_remaps_owner(store, bindings):
+def test_prepare_inbound_remaps_owner(store, bindings, routes):
     bindings.bind_on_connect("feishu", OWNER)
     store.ensure_session("agent:main:feishu:dm:u1", owner_account_id="platform-user")
 
@@ -148,6 +154,7 @@ def test_prepare_inbound_remaps_owner(store, bindings):
 
     class _Crew:
         channel_bindings = bindings
+        channel_session_routes = routes
         session_store = store
 
     env = _Env()
@@ -157,7 +164,7 @@ def test_prepare_inbound_remaps_owner(store, bindings):
     assert cfg.get("channel_source")
 
 
-def test_bound_channel_message_is_listed_for_desktop_owner(store, bindings):
+def test_bound_channel_message_is_listed_for_desktop_owner(store, bindings, routes):
     bindings.bind_on_connect("feishu", OWNER)
     sid = "agent:main:feishu:dm:u1"
 
@@ -169,6 +176,7 @@ def test_bound_channel_message_is_listed_for_desktop_owner(store, bindings):
 
     class _Crew:
         channel_bindings = bindings
+        channel_session_routes = routes
         session_store = store
 
     env = _Env()

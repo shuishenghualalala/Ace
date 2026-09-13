@@ -1211,20 +1211,21 @@ def _claim_legacy(args: Any, ctx: CliContext) -> CliResult:
     owner = args.account.strip()
     if not owner:
         raise CliError("--account 不能为空")
-    # 按表归属解析对应库（ADR-0038）：cron/work/tasks/notifications 表读各自
-    # 独立库，其余读主库。
+    # 按表归属解析对应库（ADR-0038）：cron/work/tasks/notifications/channels
+    # 表读各自独立库，其余读主库。
     # 不传 kanban_db_path（有意缺省）：通用认领会改写 kanban_workflows 的
     # legacy_ambiguous 歧义行，接入需先补全 kanban 专用认领语义
     # （见 _migration.KANBAN_DB_TABLES 注释）。
     # 不传 external/team/sites 路径（有意缺省）：三域表不在 OWNER_TABLE_LABELS，
     # owner 归一由各自 store 构造时自带（见 _migration.EXTERNAL_DB_TABLES /
-    # SITES_DB_TABLES 注释）。
+    # SITES_DB_TABLES 注释）。channels 只传 routes 表：bindings 表同豁免语义。
     targets = legacy_owner_scan_targets(
         app.config.db_path,
         app.config.cron_db_path,
         app.config.work_db_path,
         tasks_db_path=app.config.tasks_db_path,
         notifications_db_path=app.config.notifications_db_path,
+        channels_db_path=app.config.channels_db_path,
     )
     changed, remaining = claim_legacy_owner_databases(
         targets,
@@ -1385,6 +1386,22 @@ def _migrate_notifications(app: Any) -> FeatureMigrationReport:
     )
 
 
+def _migrate_channels(app: Any) -> FeatureMigrationReport:
+    from crew.channels.channel_bindings import (
+        CHANNELS_SCHEMA_FEATURE,
+        CHANNELS_SCHEMA_VERSION,
+    )
+
+    # channels 已拆独立库（ADR-0038 最后一批）：版本表 stamp 到 channels 库
+    # 而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=CHANNELS_SCHEMA_FEATURE,
+        latest_version=CHANNELS_SCHEMA_VERSION,
+        db_path=app.config.channels_db_path,
+    )
+
+
 # Feature → 迁移入口注册表：新 Feature 接入版本化迁移只需在这里加一行，
 # CLI 不写 if 链。入口接收 app，负责把该 Feature 的版本表弄就绪并返回快照。
 FEATURE_MIGRATIONS: dict[str, FeatureMigrator] = {
@@ -1396,6 +1413,7 @@ FEATURE_MIGRATIONS: dict[str, FeatureMigrator] = {
     "sites": _migrate_sites,
     "tasks": _migrate_tasks,
     "notifications": _migrate_notifications,
+    "channels": _migrate_channels,
 }
 
 

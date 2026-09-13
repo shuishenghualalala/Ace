@@ -30,7 +30,9 @@ OWNER_TABLE_LABELS = {
 # 迁至独立库（crew_data/external.db、crew_data/team.db），收尾批三小域——
 # sites 域 10 表、tasks 域 runtime_tasks、notifications 域 notifications——已分别
 # 迁至独立库（crew_data/sites.db、crew_data/tasks.db、crew_data/notifications.db），
-# 其余 owner 表仍留在主库。后续批次拆库时在此登记新归属，扫描函数即可按库路由。
+# channels 域 2 表已随 P2-7 归属迁移迁至独立库（crew_data/channels.db，最后一批）。
+# 至此 ADR-0038 批次清单全部拆完，主库仅保留 core 状态表（见各批表清单之外
+# 的 OWNER_TABLE_LABELS 成员）。
 CRON_DB_TABLES: tuple[str, ...] = ("cron_jobs", "cron_job_runs")
 # work 域表按外键依赖排序（connect_sqlite 开启 foreign_keys=ON，
 # copy_legacy_feature_rows 整表复制必须父表先于子表写入）：
@@ -113,6 +115,16 @@ SITES_DB_TABLES: tuple[str, ...] = SITES_STORE_DB_TABLES + SITES_BLUEPRINT_DB_TA
 TASKS_DB_TABLES: tuple[str, ...] = ("runtime_tasks",)
 # notifications 域 1 表（收尾批）：同在 OWNER_TABLE_LABELS，照 cron/work 语义接入。
 NOTIFICATIONS_DB_TABLES: tuple[str, ...] = ("notifications",)
+# channels 域 2 表（6W 最后一批，随 P2-7 归属迁移）：channel_bindings 与
+# channel_session_routes 迁独立库（crew_data/channels.db），表代码同批从 core
+# state 归位 crew/channels/。域内零外键，两表各由自己的 store 构造时复制
+# （同 sites 两半语义）。巡检语义分化：channel_session_routes 在
+# OWNER_TABLE_LABELS，照 cron/work 语义接入通用巡检/认领；
+# channel_bindings 不在清单内，与 external/team/sites 同显式豁免语义
+# （owner 归一由 ChannelBindingsStore 构造时的 backfill 自带）。
+CHANNELS_BINDINGS_DB_TABLES: tuple[str, ...] = ("channel_bindings",)
+CHANNELS_ROUTES_DB_TABLES: tuple[str, ...] = ("channel_session_routes",)
+CHANNELS_DB_TABLES: tuple[str, ...] = CHANNELS_BINDINGS_DB_TABLES + CHANNELS_ROUTES_DB_TABLES
 
 
 def primary_key_columns(conn: sqlite3.Connection, table: str) -> list[str]:
@@ -261,12 +273,14 @@ def legacy_owner_scan_targets(
     sites_db_path: str | Path | None = None,
     tasks_db_path: str | Path | None = None,
     notifications_db_path: str | Path | None = None,
+    channels_db_path: str | Path | None = None,
 ) -> dict[Path, list[str]]:
     """把 owner 表清单按归属库解析为 ``路径→表清单`` 扫描映射。
 
-    cron 两表归 cron 库、work 域表归 work 库、tasks/notifications 两域归
-    各自独立库（ADR-0038），其余表归主库；任一 Feature 路径与主库指向同一
-    文件时（回退配置把 Feature 库指回 crew.db）自动合并到同一条目。
+    cron 两表归 cron 库、work 域表归 work 库、tasks/notifications/channels
+    （routes 表）归各自独立库（ADR-0038），其余表归主库；任一 Feature 路径
+    与主库指向同一文件时（回退配置把 Feature 库指回 crew.db）自动合并到
+    同一条目。
 
     kanban / external / team / sites 四域与 cron/work 的缺省语义不同：只在
     **显式传入路径时**登记为独立条目（指向与主库同一文件时按回退语义并入该
@@ -275,6 +289,8 @@ def legacy_owner_scan_targets(
     OWNER_TABLE_LABELS，owner 归一由各自 store 构造时自带。生产巡检/认领
     调用点不传即天然豁免（含 crew.db 里的拆库备份行），显式传入仅供未来的
     域专用认领工具消费（见 EXTERNAL_DB_TABLES / SITES_DB_TABLES 注释）。
+    channels 域两表分属两种语义：routes 表照 cron/work 缺省并入，bindings
+    表不在 OWNER_TABLE_LABELS 不参与扫描（见 CHANNELS_DB_TABLES 注释）。
     """
 
     targets: dict[Path, list[str]] = {Path(main_db_path): []}
@@ -288,6 +304,7 @@ def legacy_owner_scan_targets(
         and table not in TEAM_DB_TABLES
         and table not in TASKS_DB_TABLES
         and table not in NOTIFICATIONS_DB_TABLES
+        and table not in CHANNELS_DB_TABLES
     )
     cron_path = Path(cron_db_path) if cron_db_path else Path(main_db_path)
     targets.setdefault(cron_path, []).extend(CRON_DB_TABLES)
@@ -307,6 +324,9 @@ def legacy_owner_scan_targets(
         Path(notifications_db_path) if notifications_db_path else Path(main_db_path)
     )
     targets.setdefault(notifications_path, []).extend(NOTIFICATIONS_DB_TABLES)
+    # channels 只登记 OWNER_TABLE_LABELS 内的 routes 表；bindings 表豁免扫描。
+    channels_path = Path(channels_db_path) if channels_db_path else Path(main_db_path)
+    targets.setdefault(channels_path, []).extend(CHANNELS_ROUTES_DB_TABLES)
     return targets
 
 

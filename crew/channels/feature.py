@@ -149,10 +149,19 @@ def build_channels_feature(
     *,
     registry: Any,
     session_store: Any,
+    session_routes: Any | None = None,
     enabled: bool = True,
     desired_config_revision: int = 1,
 ) -> ChannelsFeatureBundle:
-    """Build the Channels Feature definition and its candidate runtime service."""
+    """Build the Channels Feature definition and its candidate runtime service.
+
+    ``session_routes`` 是 channels 库的路由存储（ChannelSessionRouteStore）；
+    缺省经宿主绑定 ``crew.channel_session_routes`` 解析（build_app 在装配前
+    已接线），未接线的嵌入宿主回落 None，/new 工具改经 agent_config 携带的
+    路由键降级工作。
+    """
+    if session_routes is None:
+        session_routes = getattr(crew, "channel_session_routes", None)
 
     service = ChannelsService(
         channel_manager=ChannelManager(),
@@ -190,7 +199,7 @@ def build_channels_feature(
         _register_enabled_platform_channels(crew, manager)
         _wire_delivery_senders(manager, router)
 
-        register_channel_session_tools(registry, session_store)
+        register_channel_session_tools(registry, session_store, session_routes)
         context.register_disposer(
             lambda: registry.unregister("new_conversation"),
             label="tool:new_conversation",

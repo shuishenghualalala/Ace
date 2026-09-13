@@ -1,16 +1,26 @@
-"""按平台与 Owner 保存渠道连接绑定。"""
+"""按平台与 Owner 保存渠道连接绑定。表：channel_bindings（独立库 crew_data/channels.db）。"""
 
 from __future__ import annotations
 
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
-from crew.state._migration import backfill_empty_owner_rows
+from crew.state._migration import CHANNELS_BINDINGS_DB_TABLES, backfill_empty_owner_rows
 from crew.state.logging import get_logger
+from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
 
-log = get_logger("state.channel_bindings")
+log = get_logger("channels.channel_bindings")
+
+# Feature 级 schema 版本（6H）：channels 域（本 store 的 channel_bindings 表与
+# channel_session_routes 模块的 channel_session_routes 表，同住 channels.db）共用
+# 一张 channels_schema_version 表，当前结构登记为基线 v1；表结构演进在此号上
+# 递增并配迁移步骤。常量放在本模块（与 sites.store 同法）：routes store /
+# management 反向导入这里，放别处会构成循环导入。
+CHANNELS_SCHEMA_FEATURE = "channels"
+CHANNELS_SCHEMA_VERSION = 1
 
 
 class ChannelBindingsStore:
@@ -18,13 +28,43 @@ class ChannelBindingsStore:
 
     _TABLE = "channel_bindings"
 
-    def __init__(self, db_path: str, *, wal_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        db_path: str = "crew_data/channels.db",
+        *,
+        wal_enabled: bool = True,
+        legacy_db_path: str | Path | None = None,
+    ) -> None:
         self._db_path = db_path
         self._lock = threading.RLock()
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         if wal_enabled:
             self._conn.execute("PRAGMA journal_mode=WAL")
         self._ensure_schema()
+        if legacy_db_path is not None:
+            self._migrate_legacy_rows(Path(legacy_db_path))
+
+    def _migrate_legacy_rows(self, legacy_path: Path) -> None:
+        """copy-on-first-activate：目标库为空时从旧主库整表复制绑定行。
+
+        gate 在 ensure-schema + channels_schema_version stamp 之后（构造顺序
+        保证）。channel_session_routes 表由同库的 ChannelSessionRouteStore
+        构造时各自复制（域内无外键，两表独立 gate 无孤儿风险）。旧表保留在
+        旧库不删（ADR-0038 回退备份）；目标表已有行即整体跳过，重复构造幂等
+        零重复；复制走单事务，失败不半写。回退配置把 channels 库指回旧库
+        同一文件时直接跳过。
+        """
+
+        if legacy_path.resolve() == Path(self._db_path).resolve():
+            return
+        with self._lock:
+            copied = copy_legacy_feature_rows(
+                legacy_path, self._conn, CHANNELS_BINDINGS_DB_TABLES
+            )
+            self._conn.commit()
+        if any(copied.values()):
+            log.info("已从 %s 迁移渠道绑定历史数据: %s", legacy_path, copied)
 
     def _ensure_schema(self) -> None:
         with self._lock:
@@ -66,6 +106,9 @@ class ChannelBindingsStore:
             )
             # 历史 owner='' 行归属本机 local（owner 统一后不存在无主绑定）。
             backfill_empty_owner_rows(self._conn, [self._TABLE])
+            # 6H：Feature 级 schema 版本登记（幂等），必须先于 legacy 行复制，
+            # 保证 copy-on-first-activate 的 gate 顺序（ensure-schema → stamp → copy）。
+            stamp_baseline(self._conn, CHANNELS_SCHEMA_FEATURE, version=CHANNELS_SCHEMA_VERSION)
             self._conn.commit()
 
     @staticmethod

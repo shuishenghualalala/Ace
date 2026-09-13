@@ -1,5 +1,5 @@
 """ADR-0038 Feature 拆库契约测试（cron 试点 + work 第二批 + kanban 第三批
-+ external/team 第四批 + sites/tasks/notifications 收尾批）。
++ external/team 第四批 + sites/tasks/notifications 收尾批 + channels 最后一批）。
 
 覆盖拆库的三类契约：
 1. 路径与装配：Config.<feature>_db_path 读取/归一；新装 Feature 表只出现在
@@ -11,7 +11,9 @@
    legacy_ambiguous 歧义行分库后仍保持 owner='' 隔离，通用回填不可改写。
    external/team 双库另锁定快照回填语义：成员快照回填（唯一跨命名空间读点）
    在分库复制前移到旧库执行，team 库内守卫跳过。sites 域两半（store/blueprint）
-   同住 sites.db 各自复制；tasks/notifications 照 cron/work 语义接入通用巡检。
+   同住 sites.db 各自复制；tasks/notifications 照 cron/work 语义接入通用巡检；
+   channels 两表随 P2-7 归属迁移最后拆出——routes 表照 cron/work 语义接入，
+   bindings 表不在 OWNER_TABLE_LABELS 走显式豁免。
 """
 
 from __future__ import annotations
@@ -26,6 +28,12 @@ import pytest
 from crew.agent.external.catalog import CREW_BUILTIN_AGENT_ID
 from crew.agent.external.store import ExternalAgentStore
 from crew.app import build_app
+from crew.channels.channel_bindings import (
+    CHANNELS_SCHEMA_FEATURE,
+    CHANNELS_SCHEMA_VERSION,
+    ChannelBindingsStore,
+)
+from crew.channels.channel_session_routes import ChannelSessionRouteStore
 from crew.core.interfaces import Notification
 from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
 from crew.core.types import Message
@@ -49,6 +57,8 @@ from crew.sites.store import (
     SQLiteSiteStore,
 )
 from crew.state._migration import (
+    CHANNELS_DB_TABLES,
+    CHANNELS_ROUTES_DB_TABLES,
     CRON_DB_TABLES,
     EXTERNAL_DB_TABLES,
     KANBAN_DB_TABLES,
@@ -2186,6 +2196,252 @@ def test_migrate_small_domain_features_stamp_own_dbs(tmp_path):
                 ).fetchone()[0]
                 == version
             )
+
+
+# ---------------------------------------------------------------------------
+# channels 批（ADR-0038 最后一批，随 P2-7 归属迁移）：channel_bindings /
+# channel_session_routes 2 表迁 channels.db，表代码同批归位 crew/channels/
+# ---------------------------------------------------------------------------
+
+def test_load_config_reads_and_normalizes_channels_db_path(tmp_path, monkeypatch):
+    """runtime.channels_db_path 与 db_path 同法：可配置，相对路径归一到 crew_home。"""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "runtime:\n  channels_db_path: custom/channels.db\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("crew.state.config.ROOT", tmp_path)
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+
+    cfg = load_config()
+
+    assert cfg.channels_db_path == str(tmp_path / "home" / "custom" / "channels.db")
+
+
+def test_load_config_channels_db_path_defaults_next_to_main_db(tmp_path, monkeypatch):
+    monkeypatch.setattr("crew.state.config.ROOT", tmp_path)
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+
+    cfg = load_config()
+
+    assert cfg.channels_db_path == str(tmp_path / "home" / "crew_data" / "channels.db")
+
+
+def test_fresh_install_channels_tables_live_only_in_channels_db(tmp_path):
+    """验收 1（新装探针）：真实 build_app 后两表 + 版本表只在 channels.db，
+    crew.db 无 channels 域任何表。"""
+
+    main_db = tmp_path / "crew.db"
+    channels_db = tmp_path / "channels.db"
+    crew = build_app(
+        config=Config(
+            db_path=str(main_db),
+            channels_db_path=str(channels_db),
+            cron_enabled=False,
+        ),
+        enable_team=False,
+    )
+    try:
+        assert crew.channel_bindings is not None
+        assert crew.channel_session_routes is not None
+    finally:
+        crew.channel_bindings.close()
+        crew.channel_session_routes.close()
+
+    main_tables = _table_names(main_db)
+    channels_tables = _table_names(channels_db)
+    # 主库确实是 core 状态库（确认看的是对的文件）
+    assert "sessions" in main_tables
+    expected = set(CHANNELS_DB_TABLES) | {f"{CHANNELS_SCHEMA_FEATURE}_schema_version"}
+    assert expected <= channels_tables
+    assert main_tables.isdisjoint(expected)
+    with closing(sqlite3.connect(channels_db)) as conn:
+        version = conn.execute(
+            f"SELECT version FROM {CHANNELS_SCHEMA_FEATURE}_schema_version "
+            "WHERE singleton = 1"
+        ).fetchone()[0]
+    assert version == CHANNELS_SCHEMA_VERSION
+
+
+def test_legacy_channels_rows_copied_on_first_activate_and_idempotent(tmp_path):
+    """验收 2：存量 crew.db 激活后 channels.db 行数一致、旧行保留、幂等零重复。"""
+
+    legacy_db = tmp_path / "crew.db"
+    channels_db = tmp_path / "channels.db"
+    legacy_bindings = ChannelBindingsStore(str(legacy_db))
+    legacy_routes = ChannelSessionRouteStore(str(legacy_db))
+    try:
+        legacy_bindings.bind_on_connect("feishu", "A:u1")
+        legacy_routes.set_channel_session("agent:main:feishu:dm:u1", "s-legacy", "A:u1")
+    finally:
+        legacy_bindings.close()
+        legacy_routes.close()
+
+    bindings = ChannelBindingsStore(
+        str(channels_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    routes = ChannelSessionRouteStore(
+        str(channels_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert bindings.get_binding("feishu", "A:u1") == "A:u1"
+        assert routes.get_channel_session("agent:main:feishu:dm:u1", "A:u1") == "s-legacy"
+    finally:
+        bindings.close()
+        routes.close()
+    assert _count(legacy_db, "channel_bindings") == 1  # 旧行保留（回退备份）
+    assert _count(legacy_db, "channel_session_routes") == 1
+    assert _count(channels_db, "channel_bindings") == 1
+    assert _count(channels_db, "channel_session_routes") == 1
+
+    again_bindings = ChannelBindingsStore(
+        str(channels_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    again_routes = ChannelSessionRouteStore(
+        str(channels_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert len(again_bindings.list_for_owner("A:u1")) == 1
+        assert again_routes.get_channel_session_key("s-legacy", "A:u1") == (
+            "agent:main:feishu:dm:u1"
+        )
+    finally:
+        again_bindings.close()
+        again_routes.close()
+    assert _count(channels_db, "channel_bindings") == 1
+    assert _count(channels_db, "channel_session_routes") == 1
+
+
+def test_build_app_migrates_legacy_channels_rows(tmp_path):
+    """真实 build_app 触发 copy-on-first-activate：渠道功能读新库，旧行保留。"""
+
+    legacy_db = tmp_path / "crew.db"
+    channels_db = tmp_path / "channels.db"
+    legacy_bindings = ChannelBindingsStore(str(legacy_db))
+    legacy_routes = ChannelSessionRouteStore(str(legacy_db))
+    try:
+        legacy_bindings.bind_on_connect("feishu", "A:u1")
+        legacy_routes.set_channel_session("agent:main:feishu:dm:u1", "s-legacy", "A:u1")
+    finally:
+        legacy_bindings.close()
+        legacy_routes.close()
+
+    crew = build_app(
+        config=Config(
+            db_path=str(legacy_db),
+            channels_db_path=str(channels_db),
+            cron_enabled=False,
+        ),
+        enable_team=False,
+    )
+    try:
+        assert crew.channel_bindings.list_for_platform("feishu")[0]["owner_account_id"] == "A:u1"
+        assert crew.channel_session_routes.get_channel_session(
+            "agent:main:feishu:dm:u1", "A:u1"
+        ) == "s-legacy"
+    finally:
+        crew.channel_bindings.close()
+        crew.channel_session_routes.close()
+    # crew.db 旧行不删（ADR-0038 回退备份）
+    assert _count(legacy_db, "channel_bindings") == 1
+    assert _count(legacy_db, "channel_session_routes") == 1
+
+
+def test_channels_copy_skipped_when_target_has_rows(tmp_path):
+    """目标库已有行即整体跳过：绝不覆盖/合并进已存在的目标数据。"""
+
+    legacy_db = tmp_path / "crew.db"
+    channels_db = tmp_path / "channels.db"
+    legacy_bindings = ChannelBindingsStore(str(legacy_db))
+    legacy_routes = ChannelSessionRouteStore(str(legacy_db))
+    try:
+        legacy_bindings.bind_on_connect("feishu", "A:u1")
+        legacy_routes.set_channel_session("agent:main:feishu:dm:u1", "s-legacy", "A:u1")
+    finally:
+        legacy_bindings.close()
+        legacy_routes.close()
+
+    first_bindings = ChannelBindingsStore(str(channels_db), wal_enabled=False)
+    first_routes = ChannelSessionRouteStore(str(channels_db), wal_enabled=False)
+    try:
+        first_bindings.bind_on_connect("weixin", "B:u2")
+        first_routes.set_channel_session("agent:main:weixin:dm:x", "s-fresh", "B:u2")
+    finally:
+        first_bindings.close()
+        first_routes.close()
+
+    bindings = ChannelBindingsStore(
+        str(channels_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    routes = ChannelSessionRouteStore(
+        str(channels_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert bindings.list_for_platform("feishu") == []
+        assert bindings.list_for_owner("B:u2") != []
+        assert routes.get_channel_session("agent:main:feishu:dm:u1", "A:u1") is None
+        assert routes.get_channel_session("agent:main:weixin:dm:x", "B:u2") == "s-fresh"
+    finally:
+        bindings.close()
+        routes.close()
+    assert _count(channels_db, "channel_bindings") == 1
+    assert _count(channels_db, "channel_session_routes") == 1
+    # 旧库未被触碰
+    assert _count(legacy_db, "channel_bindings") == 1
+    assert _count(legacy_db, "channel_session_routes") == 1
+
+
+def test_legacy_owner_scan_targets_route_channels_tables(tmp_path):
+    """巡检语义分化：routes 表在 OWNER_TABLE_LABELS 照 cron/work 语义接入
+    （缺省并入主库条目、显式传参得独立条目）；bindings 表不在清单内，
+    任何配置下都不参与通用扫描（显式豁免）。"""
+
+    main_db = tmp_path / "crew.db"
+    channels_db = tmp_path / "channels.db"
+
+    targets = legacy_owner_scan_targets(main_db, channels_db_path=channels_db)
+    assert set(targets) == {main_db, channels_db}
+    assert set(targets[channels_db]) == set(CHANNELS_ROUTES_DB_TABLES)
+    # 主库条目不再含 routes 表（已从 OWNER 清单摘除）；bindings 表本就不在清单
+    assert "channel_session_routes" not in targets[main_db]
+    assert "channel_bindings" not in targets[main_db]
+    assert "channel_bindings" not in targets[channels_db]
+
+    # 回退配置（channels 库指回主库同一文件）：routes 表按回退语义并入该条目
+    db = tmp_path / "fallback.db"
+    merged = legacy_owner_scan_targets(db, channels_db_path=db)
+    assert set(merged) == {db}
+    assert "channel_session_routes" in merged[db]
+    assert "channel_bindings" not in merged[db]
+
+
+def test_migrate_channels_feature_stamps_channels_db(tmp_path):
+    """`migrate feature channels` 的版本表 stamp 到 channels 库，不触碰主库。"""
+
+    from crew.cli.management import _migrate_channels
+
+    app = SimpleNamespace(
+        config=SimpleNamespace(
+            db_path=str(tmp_path / "crew.db"),
+            channels_db_path=str(tmp_path / "channels.db"),
+            sqlite_wal=False,
+        )
+    )
+
+    report = _migrate_channels(app)
+
+    assert report.feature == CHANNELS_SCHEMA_FEATURE
+    assert report.current_version == CHANNELS_SCHEMA_VERSION
+    assert report.target_version == CHANNELS_SCHEMA_VERSION
+    assert (tmp_path / "channels.db").exists()
+    assert not (tmp_path / "crew.db").exists()
+    with closing(sqlite3.connect(tmp_path / "channels.db")) as conn:
+        version = conn.execute(
+            f"SELECT version FROM {CHANNELS_SCHEMA_FEATURE}_schema_version "
+            "WHERE singleton = 1"
+        ).fetchone()[0]
+    assert version == CHANNELS_SCHEMA_VERSION
 
 
 if __name__ == "__main__":
