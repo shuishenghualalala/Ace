@@ -1212,6 +1212,9 @@ def _claim_legacy(args: Any, ctx: CliContext) -> CliResult:
     if not owner:
         raise CliError("--account 不能为空")
     # 按表归属解析对应库（ADR-0038）：cron/work 表读各自独立库，其余读主库。
+    # 不传 kanban_db_path（有意缺省）：通用认领会改写 kanban_workflows 的
+    # legacy_ambiguous 歧义行，接入需先补全 kanban 专用认领语义
+    # （见 _migration.KANBAN_DB_TABLES 注释）。
     targets = legacy_owner_scan_targets(
         app.config.db_path, app.config.cron_db_path, app.config.work_db_path
     )
@@ -1298,11 +1301,24 @@ def _migrate_cron(app: Any) -> FeatureMigrationReport:
     )
 
 
+def _migrate_kanban(app: Any) -> FeatureMigrationReport:
+    from crew.dynamickanban.store import KANBAN_SCHEMA_FEATURE, KANBAN_SCHEMA_VERSION
+
+    # kanban 已拆独立库（ADR-0038）：版本表 stamp 到 kanban 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=KANBAN_SCHEMA_FEATURE,
+        latest_version=KANBAN_SCHEMA_VERSION,
+        db_path=app.config.kanban_db_path,
+    )
+
+
 # Feature → 迁移入口注册表：新 Feature 接入版本化迁移只需在这里加一行，
 # CLI 不写 if 链。入口接收 app，负责把该 Feature 的版本表弄就绪并返回快照。
 FEATURE_MIGRATIONS: dict[str, FeatureMigrator] = {
     "work": _migrate_work,
     "cron": _migrate_cron,
+    "kanban": _migrate_kanban,
 }
 
 

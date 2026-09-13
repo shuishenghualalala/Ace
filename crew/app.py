@@ -2291,6 +2291,10 @@ class CrewApp:
     async def startup(self, *, start_cron: bool = True) -> None:
         """拉起后台能力：连接外部 MCP server、启动 cron 引擎、会话过期定时器。失败静默降级。"""
         try:
+            # 不传 kanban_db_path（有意缺省）：通用 backfill 会把
+            # kanban_workflows 的 legacy_ambiguous 歧义行（owner=''）改写/清除，
+            # 破坏 store 隔离留给人工认领的语义；接入需先补全 kanban 专用
+            # 认领逻辑（见 _migration.KANBAN_DB_TABLES 注释）。
             counts, backfilled = inspect_and_backfill_legacy_owners(
                 legacy_owner_scan_targets(
                     self.config.db_path,
@@ -3886,8 +3890,12 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
     dk_feature = build_dynamic_kanban_feature(
         app,
-        db_path=cfg.db_path,
+        # kanban 域 6 表在独立库（ADR-0038 第三批）；legacy_db_path 触发
+        # copy-on-first-activate：crew.db 里若还有旧 kanban 表且 kanban.db 为空，
+        # 则 6 表单事务整表复制，旧行保留作回退备份。
+        db_path=_resolve_crew_home_path(cfg.kanban_db_path),
         wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
         provider=provider,
         base_registry=registry,
         session_store=session_store,

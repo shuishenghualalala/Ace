@@ -25,7 +25,8 @@ OWNER_TABLE_LABELS = {
 }
 
 # Feature 拆库归属（ADR-0038）：cron 两表已迁至独立库（crew_data/cron.db），
-# work 域 15 表已迁至独立库（crew_data/work.db），其余 owner 表仍留在主库。
+# work 域 15 表已迁至独立库（crew_data/work.db），dynamic-kanban 域 6 表已迁至
+# 独立库（crew_data/kanban.db），其余 owner 表仍留在主库。
 # 后续批次拆库时在此登记新归属，扫描函数即可按库路由。
 CRON_DB_TABLES: tuple[str, ...] = ("cron_jobs", "cron_job_runs")
 # work 域表按外键依赖排序（connect_sqlite 开启 foreign_keys=ON，
@@ -48,6 +49,21 @@ WORK_DB_TABLES: tuple[str, ...] = (
     "work_workspace_index_status",
     "work_settings",
     "work_templates",
+)
+# kanban 域 6 表按外键依赖排序：kanban_tasks / kanban_events / kanban_runtime_states
+# 指向 kanban_workflows，kanban_dependencies / kanban_task_runs 指向 kanban_tasks。
+# 注意：kanban 域只登记拆库归属，不接入本模块的通用 owner 巡检/认领扫描——
+# kanban_workflows 的无主行语义由 store 自带的 isolation_state 迁移负责
+# （legacy_ambiguous 歧义行必须保持 owner='' 隔离留给人工认领，通用
+# backfill 会把它的 owner 静默改写为 local）。表清单供 copy_legacy_feature_rows
+# 与 legacy_owner_scan_targets（结构登记/回退合并）使用。
+KANBAN_DB_TABLES: tuple[str, ...] = (
+    "kanban_workflows",
+    "kanban_tasks",
+    "kanban_dependencies",
+    "kanban_task_runs",
+    "kanban_events",
+    "kanban_runtime_states",
 )
 
 
@@ -191,24 +207,36 @@ def legacy_owner_scan_targets(
     main_db_path: str | Path,
     cron_db_path: str | Path | None = None,
     work_db_path: str | Path | None = None,
+    kanban_db_path: str | Path | None = None,
 ) -> dict[Path, list[str]]:
     """把 owner 表清单按归属库解析为 ``路径→表清单`` 扫描映射。
 
     cron 两表归 cron 库、work 域表归 work 库（ADR-0038），其余表归主库；
     任一 Feature 路径与主库指向同一文件时（回退配置把 Feature 库指回
     crew.db）自动合并到同一条目。
+
+    kanban 域（第四参）与 cron/work 的缺省语义不同：kanban 表**只在显式传入
+    路径时**登记为独立条目（指向与主库同一文件时按回退语义并入该条目）。
+    缺省（None）时不并入任何条目——无主行在 kanban 域是隔离语义
+    （legacy_ambiguous 留给人工认领），通用 owner 工具不感知 isolation_state
+    模型，生产巡检/认领调用点不传即天然豁免（含 crew.db 里的拆库备份行）。
+    显式传入仅供未来的 kanban 专用认领工具消费（见 KANBAN_DB_TABLES 注释）。
     """
 
     targets: dict[Path, list[str]] = {Path(main_db_path): []}
     targets[Path(main_db_path)].extend(
         table
         for table in OWNER_TABLE_LABELS
-        if table not in CRON_DB_TABLES and table not in WORK_DB_TABLES
+        if table not in CRON_DB_TABLES
+        and table not in WORK_DB_TABLES
+        and table not in KANBAN_DB_TABLES
     )
     cron_path = Path(cron_db_path) if cron_db_path else Path(main_db_path)
     targets.setdefault(cron_path, []).extend(CRON_DB_TABLES)
     work_path = Path(work_db_path) if work_db_path else Path(main_db_path)
     targets.setdefault(work_path, []).extend(WORK_DB_TABLES)
+    if kanban_db_path:
+        targets.setdefault(Path(kanban_db_path), []).extend(KANBAN_DB_TABLES)
     return targets
 
 

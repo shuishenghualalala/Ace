@@ -147,11 +147,18 @@ def build_dynamic_kanban_feature(
     on_runtime_chunk: Any = None,
     provider_for_owner: Any = None,
     wal_enabled: bool = True,
+    legacy_db_path: str | None = None,
     desired_config_revision: int = 1,
 ) -> DynamicKanbanFeatureBundle:
     """Create a restartable Bundle; activation owns fresh runtime resources."""
     def new_manager() -> DynamicKanbanManager:
-        store = SQLiteKanbanStore(db_path, wal_enabled=wal_enabled)
+        # legacy_db_path 触发 store 构造器内的 copy-on-first-activate（ADR-0038）：
+        # 每次激活重建 store 时重复传入是安全的——目标库已有行即整体跳过。
+        store = SQLiteKanbanStore(
+            db_path,
+            wal_enabled=wal_enabled,
+            legacy_db_path=legacy_db_path,
+        )
         try:
             return DynamicKanbanManager(
                 store=store,

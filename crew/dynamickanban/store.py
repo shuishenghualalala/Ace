@@ -25,9 +25,18 @@ from crew.dynamickanban.models import (
     Workflow,
 )
 from crew.dynamickanban.runtime_models import RuntimeState
+from crew.state._migration import KANBAN_DB_TABLES
+from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 log = logging.getLogger(__name__)
+
+# Feature 级 schema 版本（6H）：kanban 域共用一张 kanban_schema_version 表，
+# 当前结构登记为基线 v1；表结构演进在此号上递增并配迁移步骤。
+# 常量放在 store 模块（与 cron 同法）：stamp 发生在 store 的 _init_schema，
+# 而 feature.py 反向依赖 store，放 feature 会构成循环导入。
+KANBAN_SCHEMA_FEATURE = "kanban"
+KANBAN_SCHEMA_VERSION = 1
 
 
 def _is_path_under(path: Path, root: Path) -> bool:
@@ -42,7 +51,13 @@ def _is_path_under(path: Path, root: Path) -> bool:
 class SQLiteKanbanStore:
     """SQLite 驱动的 Dynamic Kanban 持久化。"""
 
-    def __init__(self, db_path: str | Path, wal_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        db_path: str | Path = "crew_data/kanban.db",
+        *,
+        wal_enabled: bool = True,
+        legacy_db_path: str | Path | None = None,
+    ) -> None:
         self._db_path = str(db_path)
         self._conn = connect_sqlite(db_path, wal_enabled=wal_enabled, row_factory=True)
         self._lock = threading.Lock()
@@ -50,6 +65,8 @@ class SQLiteKanbanStore:
         self._owner_account_id = ""
         self._owns_connection = True
         self._init_schema()
+        if legacy_db_path is not None:
+            self._migrate_legacy_rows(Path(legacy_db_path))
 
     def for_owner(self, owner_account_id: str) -> SQLiteKanbanStore:
         """Return a lightweight owner-scoped view sharing this Store connection."""
@@ -199,8 +216,29 @@ class SQLiteKanbanStore:
                 )
                 """
             )
+            # 6H：Feature 级 schema 版本登记（幂等），必须先于 legacy 行复制，
+            # 保证 copy-on-first-activate 的 gate 顺序（ensure-schema → stamp → copy）。
+            stamp_baseline(conn, KANBAN_SCHEMA_FEATURE, version=KANBAN_SCHEMA_VERSION)
 
         self._writer.execute(_create)
+
+    def _migrate_legacy_rows(self, legacy_path: Path) -> None:
+        """copy-on-first-activate：目标库为空时从旧主库整表复制 kanban 行。
+
+        gate 在 ensure-schema + kanban_schema_version stamp 之后（构造顺序保证）。
+        旧表保留在旧库不删（ADR-0038 回退备份）；目标库已有行即整体跳过，
+        重复启动幂等零重复；复制走单事务，失败不半写。legacy_ambiguous
+        歧义行随整表复制原样保留（owner='' + isolation_state 不变），
+        隔离语义由 isolation_state 承载，不经本方法改写。
+        """
+
+        if legacy_path.resolve() == Path(self._db_path).resolve():
+            return
+        copied = self._writer.execute(
+            lambda conn: copy_legacy_feature_rows(legacy_path, conn, KANBAN_DB_TABLES)
+        )
+        if any(copied.values()):
+            log.info("已从 %s 迁移 kanban 历史数据: %s", legacy_path, copied)
 
     @staticmethod
     def _migrate_workflow_ownership(conn: sqlite3.Connection) -> None:
@@ -228,11 +266,16 @@ class SQLiteKanbanStore:
             """
         ).fetchone()
         if sessions_exists is None:
+            # 拆库后（ADR-0038）kanban 库不含 sessions 表：本分支只负责初次
+            # 分类（legacy_unclassified → legacy_orphaned，随后归一 local）。
+            # 已分类行必须保持原状——整表复制迁入的 legacy_ambiguous 歧义行
+            # 若被无脑改写，会在每次重启时降级成 orphaned，再被下方规则静默
+            # 归一为 local，隔离留给人工认领的语义随之失效。
             conn.execute(
                 """
                 UPDATE kanban_workflows
                 SET isolation_state = 'legacy_orphaned'
-                WHERE owner_account_id = ''
+                WHERE owner_account_id = '' AND isolation_state = 'legacy_unclassified'
                 """
             )
             return

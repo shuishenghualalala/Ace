@@ -1,4 +1,4 @@
-"""ADR-0038 Feature 拆库契约测试（cron 试点 + work 第二批）。
+"""ADR-0038 Feature 拆库契约测试（cron 试点 + work 第二批 + kanban 第三批）。
 
 覆盖拆库的三类契约：
 1. 路径与装配：Config.<feature>_db_path 读取/归一；新装 Feature 表只出现在
@@ -6,7 +6,8 @@
 2. copy-on-first-activate：存量复制、幂等零重复、目标非空/旧库缺表跳过、
    复制失败单事务整体回滚不半写；
 3. 跨表工具适配：claim-legacy 与启动期 owner 巡检按库归属扫描；CLI migrate
-   feature 的版本表 stamp 到各自独立库。
+   feature 的版本表 stamp 到各自独立库。kanban 域另锁定隔离语义：
+   legacy_ambiguous 歧义行分库后仍保持 owner='' 隔离，通用回填不可改写。
 """
 
 from __future__ import annotations
@@ -23,8 +24,15 @@ from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
 from crew.core.types import Message
 from crew.cron import CronJobStore
 from crew.cron.jobs import CRON_SCHEMA_FEATURE, CRON_SCHEMA_VERSION
+from crew.dynamickanban.runtime_models import RuntimeState
+from crew.dynamickanban.store import (
+    KANBAN_SCHEMA_FEATURE,
+    KANBAN_SCHEMA_VERSION,
+    SQLiteKanbanStore,
+)
 from crew.state._migration import (
     CRON_DB_TABLES,
+    KANBAN_DB_TABLES,
     WORK_DB_TABLES,
     claim_legacy_owner_databases,
     inspect_and_backfill_legacy_owners,
@@ -836,6 +844,350 @@ def test_migrate_work_feature_stamps_work_db(tmp_path):
             "SELECT version FROM work_schema_version WHERE singleton = 1"
         ).fetchone()[0]
     assert version == WORK_SCHEMA_VERSION
+
+
+# ---------------------------------------------------------------------------
+# kanban 批（ADR-0038 第三批）：kanban 域 6 表迁 crew_data/kanban.db
+# ---------------------------------------------------------------------------
+
+
+def _seed_legacy_kanban_rows(legacy_db):
+    """在旧主库中预置带数据的 kanban 域 6 表（真实 store 语义，覆盖 FK 链）。
+
+    kanban_tasks / kanban_dependencies / kanban_task_runs / kanban_events /
+    kanban_runtime_states 逐层外键指向 kanban_workflows / kanban_tasks，
+    恰好验证整表复制的父表先于子表顺序。另按 isolation_state 稳态语义构造
+    一条 legacy_ambiguous 歧义行（多 owner 会话无法证明归属，store 保持
+    owner='' 隔离留给人工认领），锁定分库复制不改写隔离态。歧义行的归属
+    证据（多 owner sessions）留在真实主库，这里直接以最终隔离态构造——
+    语义载体是 isolation_state 本身，不依赖种子库里的 sessions 表。
+    """
+    store = SQLiteKanbanStore(str(legacy_db), wal_enabled=False)
+    try:
+        owner = store.for_owner("A:u1")
+        wf = owner.create_workflow("s-legacy", "旧看板")
+        task_a = owner.add_task(wf.id, "旧任务甲", auto_promote=False)
+        task_b = owner.add_task(
+            wf.id, "旧任务乙", parent_task_ids=[task_a.id], auto_promote=False
+        )
+        owner.start_run(task_b.id, "run-1")
+        owner.add_event(wf.id, "task_created", task_id=task_a.id)
+        owner.save_runtime_state(RuntimeState(workflow_id=wf.id))
+    finally:
+        store.close()
+    # 歧义行按真实稳态经原生 SQL 构造（store 层禁止空 owner）：
+    # 与 _migrate_workflow_ownership 留下的隔离态完全一致。
+    with closing(sqlite3.connect(legacy_db)) as conn:
+        conn.execute(
+            "INSERT INTO kanban_workflows (id, session_id, owner_account_id, "
+            "isolation_state, schema_version, title, status, context, "
+            "created_at, updated_at) VALUES "
+            "('wf-ambiguous', 's-amb', '', 'legacy_ambiguous', 2, '歧义看板', "
+            "'active', '{}', 1, 1)"
+        )
+        conn.commit()
+    return SimpleNamespace(
+        workflow_id=wf.id,
+        expected={
+            "kanban_workflows": 2,
+            "kanban_tasks": 2,
+            "kanban_dependencies": 1,
+            "kanban_task_runs": 1,
+            "kanban_events": 1,
+            "kanban_runtime_states": 1,
+        },
+    )
+
+
+def _ambiguous_row(db_path):
+    with closing(sqlite3.connect(db_path)) as conn:
+        return conn.execute(
+            "SELECT owner_account_id, isolation_state FROM kanban_workflows "
+            "WHERE id = 'wf-ambiguous'"
+        ).fetchone()
+
+
+def test_load_config_reads_and_normalizes_kanban_db_path(tmp_path, monkeypatch):
+    """runtime.kanban_db_path 与 cron/work 同法：可配置，相对路径归一到 crew_home。"""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "runtime:\n  kanban_db_path: custom/kanban.db\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("crew.state.config.ROOT", tmp_path)
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+
+    cfg = load_config()
+
+    assert cfg.kanban_db_path == str(tmp_path / "home" / "custom" / "kanban.db")
+
+
+def test_load_config_kanban_db_path_defaults_next_to_main_db(tmp_path, monkeypatch):
+    monkeypatch.setattr("crew.state.config.ROOT", tmp_path)
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+
+    cfg = load_config()
+
+    assert cfg.kanban_db_path == str(tmp_path / "home" / "crew_data" / "kanban.db")
+
+
+def test_fresh_install_kanban_tables_live_only_in_kanban_db(tmp_path):
+    """验收 1：新装环境 kanban 6 表 + 版本表只出现在 kanban.db，crew.db 无 kanban 表。"""
+
+    main_db = tmp_path / "crew.db"
+    kanban_db = tmp_path / "kanban.db"
+    crew = build_app(
+        config=Config(
+            db_path=str(main_db), kanban_db_path=str(kanban_db), cron_enabled=False
+        ),
+        enable_team=False,
+    )
+    crew.dynamic_kanban.store.close()
+
+    main_tables = _table_names(main_db)
+    kanban_tables = _table_names(kanban_db)
+    # 主库确实是 core 状态库（确认看的是对的文件）
+    assert "sessions" in main_tables
+    expected = set(KANBAN_DB_TABLES) | {f"{KANBAN_SCHEMA_FEATURE}_schema_version"}
+    assert expected <= kanban_tables
+    assert main_tables.isdisjoint(expected)
+    with closing(sqlite3.connect(kanban_db)) as conn:
+        version = conn.execute(
+            f"SELECT version FROM {KANBAN_SCHEMA_FEATURE}_schema_version "
+            "WHERE singleton = 1"
+        ).fetchone()[0]
+    assert version == KANBAN_SCHEMA_VERSION
+
+
+def test_legacy_kanban_rows_copied_on_first_activate_and_idempotent(tmp_path):
+    """验收 2：存量 crew.db 激活后 kanban.db 行数一致、旧行保留、重复激活零重复；
+    legacy_ambiguous 歧义行复制后保持隔离，重启（重跑分类迁移）不被改写。"""
+
+    legacy_db = tmp_path / "crew.db"
+    kanban_db = tmp_path / "kanban.db"
+    seed = _seed_legacy_kanban_rows(legacy_db)
+
+    store = SQLiteKanbanStore(
+        str(kanban_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert store.for_owner("A:u1").get_workflow(seed.workflow_id) is not None
+        # 歧义行对任何 owner 不可见（owner='' 隔离）
+        assert store.for_owner("A:u1").get_workflow("wf-ambiguous") is None
+    finally:
+        store.close()
+
+    for table, count in seed.expected.items():
+        assert _count(kanban_db, table) == count, table
+        assert _count(legacy_db, table) == count, table  # 旧行保留（回退备份）
+    assert _ambiguous_row(kanban_db) == ("", "legacy_ambiguous")
+
+    # 重复激活幂等零重复；重启重跑 _init_schema 分类不得改写歧义行
+    again = SQLiteKanbanStore(
+        str(kanban_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert again.for_owner("A:u1").get_workflow(seed.workflow_id) is not None
+        assert _ambiguous_row(kanban_db) == ("", "legacy_ambiguous")
+    finally:
+        again.close()
+    for table, count in seed.expected.items():
+        assert _count(kanban_db, table) == count, table
+
+
+def test_build_app_migrates_legacy_kanban_rows(tmp_path):
+    """验收 2 走真实装配线：build_app 传入 legacy 路径触发 copy-on-first-activate。"""
+
+    main_db = tmp_path / "crew.db"
+    kanban_db = tmp_path / "kanban.db"
+    seed = _seed_legacy_kanban_rows(main_db)
+
+    crew = build_app(
+        config=Config(
+            db_path=str(main_db), kanban_db_path=str(kanban_db), cron_enabled=False
+        ),
+        enable_team=False,
+    )
+    crew.dynamic_kanban.store.close()
+
+    assert _count(kanban_db, "kanban_workflows") == 2
+    assert _count(kanban_db, "kanban_tasks") == 2
+    assert _count(kanban_db, "kanban_task_runs") == 1
+    assert _count(main_db, "kanban_workflows") == 2  # 旧行保留（回退备份）
+    assert _ambiguous_row(kanban_db) == ("", "legacy_ambiguous")
+    with closing(sqlite3.connect(kanban_db)) as conn:
+        title = conn.execute(
+            "SELECT title FROM kanban_workflows WHERE id = ?", (seed.workflow_id,)
+        ).fetchone()[0]
+    assert title == "旧看板"
+
+
+def test_kanban_copy_skipped_when_target_has_rows(tmp_path):
+    """目标库已有行即整体跳过：绝不覆盖/合并进已存在的目标数据。"""
+
+    legacy_db = tmp_path / "crew.db"
+    kanban_db = tmp_path / "kanban.db"
+    _seed_legacy_kanban_rows(legacy_db)
+
+    first = SQLiteKanbanStore(str(kanban_db), wal_enabled=False)
+    try:
+        fresh = first.for_owner("B:u2").create_workflow("s-fresh", "新装看板")
+    finally:
+        first.close()
+
+    again = SQLiteKanbanStore(
+        str(kanban_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert again.for_owner("B:u2").get_workflow(fresh.id) is not None
+        assert again.for_owner("A:u1").list_workflows_by_session("s-legacy") == []
+    finally:
+        again.close()
+    assert _count(kanban_db, "kanban_workflows") == 1
+    # 旧库未被触碰
+    assert _count(legacy_db, "kanban_workflows") == 2
+
+
+def test_kanban_copy_skipped_when_legacy_missing_or_lacks_kanban_tables(tmp_path):
+    """旧库文件缺失或旧库没有 kanban 表：安全跳过，不报错不复制。"""
+
+    kanban_db = tmp_path / "kanban.db"
+    store = SQLiteKanbanStore(
+        str(kanban_db), wal_enabled=False, legacy_db_path=str(tmp_path / "not_exists.db")
+    )
+    store.close()
+
+    legacy_only_sessions = tmp_path / "legacy_main.db"
+    sessions = SQLiteSessionStore(str(legacy_only_sessions))
+    sessions.save("s1", [Message.user("hi")], owner_account_id="A:u1")
+    sessions.close()
+
+    other = SQLiteKanbanStore(
+        str(tmp_path / "kanban2.db"), wal_enabled=False, legacy_db_path=str(legacy_only_sessions)
+    )
+    try:
+        assert other.for_owner("A:u1").list_workflows_by_session("s1") == []
+    finally:
+        other.close()
+    assert _count(legacy_only_sessions, "sessions") == 1
+
+
+def test_kanban_copy_failure_rolls_back_whole_transaction(tmp_path):
+    """跨库事务边界：子表外键冲突时，父表已复制的行一并回滚（不半写）。"""
+
+    legacy_db = tmp_path / "legacy.db"
+    with closing(sqlite3.connect(legacy_db)) as conn:
+        conn.execute(
+            "CREATE TABLE kanban_workflows ("
+            "id TEXT PRIMARY KEY, session_id TEXT NOT NULL, "
+            "title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', "
+            "context TEXT NOT NULL DEFAULT '{}', "
+            "created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO kanban_workflows VALUES ('wf-a', 's1', '旧看板', 'active', '{}', 1, 1)"
+        )
+        # workflow_id 指向不存在的 workflow：这行会让 kanban_tasks 的复制失败
+        conn.execute(
+            "CREATE TABLE kanban_tasks ("
+            "id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, title TEXT NOT NULL, "
+            "detail TEXT NOT NULL DEFAULT '', assignee TEXT, "
+            "status TEXT NOT NULL DEFAULT 'pending', "
+            "result_summary TEXT NOT NULL DEFAULT '', "
+            "artifact_paths TEXT NOT NULL DEFAULT '[]', "
+            "retry_count INTEGER NOT NULL DEFAULT 0, "
+            "max_retries INTEGER NOT NULL DEFAULT 2, "
+            "claimed_by TEXT, claimed_at REAL, done_at REAL, "
+            "created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO kanban_tasks (id, workflow_id, title, created_at, updated_at) "
+            "VALUES ('task-a', 'wf-missing', '孤儿任务', 1, 1)"
+        )
+        conn.commit()
+
+    target_db = tmp_path / "kanban.db"
+    SQLiteKanbanStore(str(target_db), wal_enabled=False).close()
+    conn = connect_sqlite(str(target_db), wal_enabled=False)
+    try:
+        writer = SQLiteWriteHelper(conn, threading.Lock())
+        with pytest.raises(sqlite3.IntegrityError):
+            writer.execute(
+                lambda c: copy_legacy_feature_rows(legacy_db, c, KANBAN_DB_TABLES)
+            )
+        # 复制失败不半写：先成功的 kanban_workflows 行也被回滚
+        assert conn.execute("SELECT COUNT(*) FROM kanban_workflows").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM kanban_tasks").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_legacy_owner_scan_targets_route_kanban_tables(tmp_path):
+    """claim-legacy 扫描结构：kanban 6 表按归属路由到 kanban 库；
+    回退配置（kanban 库指回 crew.db）时合并到同一文件条目。"""
+
+    main_db = tmp_path / "crew.db"
+    cron_db = tmp_path / "cron.db"
+    work_db = tmp_path / "work.db"
+    kanban_db = tmp_path / "kanban.db"
+
+    targets = legacy_owner_scan_targets(main_db, cron_db, work_db, kanban_db)
+    assert set(targets) == {main_db, cron_db, work_db, kanban_db}
+    assert set(targets[kanban_db]) == set(KANBAN_DB_TABLES)
+    # kanban 表不进主库条目（`table not in KANBAN_DB_TABLES` 守卫）
+    assert set(targets[main_db]).isdisjoint(KANBAN_DB_TABLES)
+
+    db = tmp_path / "fallback.db"
+    merged = legacy_owner_scan_targets(db, db, db, db)
+    assert set(merged) == {db}
+    assert set(merged[db]) >= {"sessions", "cron_jobs", *KANBAN_DB_TABLES}
+
+
+def test_startup_backfill_leaves_kanban_quarantine_intact(tmp_path):
+    """生产形状的启动期巡检（不含 kanban 路径）不触碰 kanban 歧义行：
+    owner='' + legacy_ambiguous 的隔离留给人工认领，不被通用回填改写。"""
+
+    kanban_db = tmp_path / "kanban.db"
+    _seed_legacy_kanban_rows(kanban_db)
+
+    main_db = tmp_path / "crew.db"
+    targets = legacy_owner_scan_targets(
+        main_db, tmp_path / "cron.db", tmp_path / "work.db"
+    )
+    assert set(targets[main_db]).isdisjoint(KANBAN_DB_TABLES)
+
+    counts, _backfilled = inspect_and_backfill_legacy_owners(targets)
+
+    assert counts.get("kanban_workflows") is None
+    assert _ambiguous_row(kanban_db) == ("", "legacy_ambiguous")
+
+
+def test_migrate_kanban_feature_stamps_kanban_db(tmp_path):
+    """`migrate feature kanban` 的版本表 stamp 到 kanban 库，不触碰主库。"""
+
+    from crew.cli.management import _migrate_kanban
+
+    app = SimpleNamespace(
+        config=SimpleNamespace(
+            db_path=str(tmp_path / "crew.db"),
+            kanban_db_path=str(tmp_path / "kanban.db"),
+            sqlite_wal=False,
+        )
+    )
+
+    report = _migrate_kanban(app)
+
+    assert report.feature == KANBAN_SCHEMA_FEATURE
+    assert report.current_version == KANBAN_SCHEMA_VERSION
+    assert report.target_version == KANBAN_SCHEMA_VERSION
+    assert (tmp_path / "kanban.db").exists()
+    assert not (tmp_path / "crew.db").exists()
+    with closing(sqlite3.connect(tmp_path / "kanban.db")) as conn:
+        version = conn.execute(
+            "SELECT version FROM kanban_schema_version WHERE singleton = 1"
+        ).fetchone()[0]
+    assert version == KANBAN_SCHEMA_VERSION
 
 
 if __name__ == "__main__":
