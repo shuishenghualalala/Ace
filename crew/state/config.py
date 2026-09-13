@@ -1462,6 +1462,96 @@ def _resolve_active_model_id(cfg: Config) -> str:
     raise ValueError("没有已加载的模型配置，不能启动对话")
 
 
+# --- features.* 命名空间（命名审计 P2-1 · 双读渐进第一步）---
+#
+# 目标形态：每个 Feature 的配置收敛到 features.<name>.* 子树（约定见
+# docs/backend/modules/naming-audit.html §1）。迁移期 loader 同时读旧节与
+# features.<name>：读取各节前先把 features 子树按下面两张显式映射表合并回
+# 旧位置（同名键 features 侧获胜、旧节兜底），此后所有既有读取代码零改动，
+# 下游与 Feature 侧解析均不感知双读。没有 features 节时原样返回，旧配置
+# 文件的解析结果逐字节不变。
+#
+# 映射表分两类：
+# - SECTION_MAP：features.<name> 整节 → 旧顶层节（或某节下的子节），
+#   节内容与旧节逐字兼容；
+# - FLAT_MAP：features.<name>.<key> → 旧平铺键。dynamic-kanban 历史上
+#   平铺在 runtime.dk_*（无独立顶层节），目标子键去掉 dk_ 前缀。
+#
+# 库路径（runtime.<feature>_db_path）不进 features.*：db 文件由 core 装配层
+# 消费并注入各 Store（Feature 自身不读自己的库路径），按"谁消费谁归属"留在
+# runtime.*，属于终态而非过渡态。platforms 是 channels 的更旧别名（读取侧
+# 已在 channel_config 合并），不单独映射，随第二步旧节退役一并处理。
+_FEATURES_SECTION_MAP: dict[str, tuple[str, ...]] = {
+    "wiki": ("wiki",),
+    "cron": ("cron",),
+    "team": ("team",),
+    "tasks": ("tasks",),
+    "external_agents": ("external_agents",),
+    "channels": ("channels",),
+    "browser": ("tools", "browser"),
+}
+_FEATURES_FLAT_MAP: dict[tuple[str, str], tuple[str, ...]] = {
+    ("dynamic_kanban", "task_timeout_seconds"): ("runtime", "dk_task_timeout_seconds"),
+    ("dynamic_kanban", "verification_gate_enabled"): ("runtime", "dk_verification_gate_enabled"),
+}
+
+
+def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """递归合并两个配置 dict：override 同名键获胜，两侧 dict 值逐层合并。"""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _ensure_container(data: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any]:
+    """沿 path 逐层取（必要时创建）dict 容器，返回 path 末段所在的父节点。"""
+    node = data
+    for part in path[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            node[part] = child
+        node = child
+    return node
+
+
+def _apply_features_namespace(data: dict[str, Any]) -> dict[str, Any]:
+    """把 features.* 子树按映射表合并回旧配置位置（新节优先、旧节兜底）。
+
+    直接在读入的 data 上原地合并并返回同一对象；features 节本身保留在
+    结果里，raw_config 仍能观察完整原始配置。features 节缺失或不是映射
+    时原样返回；单个子节类型不合法时跳过该节并告警，不影响其余配置。
+    """
+    features = data.get("features")
+    if not isinstance(features, dict):
+        return data
+
+    for name, target_path in _FEATURES_SECTION_MAP.items():
+        section = features.get(name)
+        if section is None:
+            continue
+        if not isinstance(section, dict):
+            log.warning("features.%s 必须是键值映射，已忽略该节", name)
+            continue
+        parent = _ensure_container(data, target_path)
+        leaf_key = target_path[-1]
+        leaf = parent.get(leaf_key)
+        parent[leaf_key] = _deep_merge_dicts(leaf if isinstance(leaf, dict) else {}, section)
+
+    for (name, key), target_path in _FEATURES_FLAT_MAP.items():
+        section = features.get(name)
+        if not isinstance(section, dict) or key not in section:
+            continue
+        parent = _ensure_container(data, target_path)
+        parent[target_path[-1]] = section[key]
+
+    return data
+
+
 def load_config(config_path: str | Path | None = None) -> Config:
     """加载配置。顺序：默认值 < config.yaml < 环境变量(.env)。
 
@@ -1489,6 +1579,10 @@ def load_config(config_path: str | Path | None = None) -> Config:
         # 记录加载路径，供运行时 CRUD 写回使用
         cfg.config_path = str(path)
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if isinstance(data, dict):
+            # features.* 命名空间双读（P2-1 渐进第一步）：先按映射表把
+            # features 子树合并回旧节位置，再进入下方各节读取。
+            data = _apply_features_namespace(data)
         cfg.raw_config = data if isinstance(data, dict) else {}
         llm = data.get("llm", {})
         cfg.active_model_id = str(llm.get("active", cfg.active_model_id) or cfg.active_model_id)

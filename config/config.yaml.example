@@ -106,11 +106,8 @@ external_agents:
   # 默认 false；该开关不影响内建工具的会话安全边界。
   security_enabled: false
 
-subagent:
-  max_concurrent: 3
-  max_tasks: 8
-  idle_timeout_seconds: 120
-  timeout_seconds: 1800
+# 子 agent（delegate_task / run_agent）的超时在 tasks.subagent 配置；
+# 顶层 subagent: 节从未被 loader 读取（历史死配置），已移除。
 tasks:
   auto_background_after_seconds: 15
   heartbeat_interval_seconds: 10
@@ -120,6 +117,8 @@ tasks:
   shell:
     inactivity_timeout_seconds: 600
     execution_timeout_seconds: 0
+  # 子 agent（delegate_task / run_agent）长任务超时：
+  # 空闲 N 秒零输出中止；绝对运行上限兜底。0 表示不限。
   subagent:
     inactivity_timeout_seconds: 120
     execution_timeout_seconds: 1800
@@ -244,3 +243,49 @@ network:
   upstream_proxy: ""
   # 是否允许代理本身监听在 127.0.0.1/::1（本地 Clash 等场景）。
   allow_loopback_proxy: true
+
+# ============================================================================
+# features.*：Feature 配置的目标命名空间（迁移期双读，新节优先）。
+#
+# 约定：每个 Feature 只读自己的 features.<name> 子树，子键结构与旧顶层节
+# 逐字兼容（features.wiki 的内容 = 现 wiki: 节的内容）。迁移期 loader 同时
+# 读旧节与本节：同名键一律 features 侧获胜，未在 features 出现的键回落旧节
+# （上面各旧节在迁移完成前保持有效，将按 Feature 逐个退役）。
+# 注意：数据库路径（runtime.<feature>_db_path）由 core 装配层统一消费注入，
+# 属基础设施配置，不进 features.*；dynamic-kanban 的目标子键去掉 dk_ 前缀。
+# ============================================================================
+features:
+  # 即 wiki: 节的目标形态（结构逐字兼容，此处仅列常用键示例）。
+  wiki:
+    capture_attachments: true
+    model: ""
+    ingest:
+      auto_apply: false
+      auto_summarize: true
+      auto_ingest: false
+  # 即 cron: 节。
+  cron:
+    enabled: true
+    max_parallel_jobs: 2
+  # 即 team: 节。
+  team:
+    max_concurrent_children: 3
+  # 即 tasks: 节（含 shell/subagent/agent_turn 子节）。
+  tasks:
+    auto_background_after_seconds: 15
+    wait_timeout_seconds: 30
+  # 即 external_agents: 节。
+  external_agents:
+    enabled: true
+    security_enabled: false
+  # 即 channels: 节（各通道配置按通道名作为子键）。
+  channels: {}
+  # 即 tools.browser 节。
+  browser:
+    enabled: true
+    governance_mode: confirm_sensitive
+  # dynamic-kanban 历史上平铺在 runtime.dk_*，目标形态为独立子树
+  # （task_timeout_seconds / verification_gate_enabled）。
+  dynamic_kanban:
+    task_timeout_seconds: 3600
+    verification_gate_enabled: true
