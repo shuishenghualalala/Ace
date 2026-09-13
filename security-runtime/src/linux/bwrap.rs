@@ -557,7 +557,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn full_disk_read_mounts_host_root_read_only_before_writable_and_denied_roots() {
+        // This fixture relies on '/' making sibling host directories visible.
+        // Windows drive-prefixed paths cannot model that Unix root relationship.
         let workspace = tempfile::tempdir().unwrap();
         let denied = tempfile::tempdir().unwrap();
         let request = LinuxRunRequest {
@@ -616,6 +619,58 @@ mod tests {
             plan.args[home_index + 2],
             std::env::var("HOME").unwrap_or_else(|_| "/tmp/ace-home".to_string())
         );
+    }
+
+    #[test]
+    fn denied_directory_is_masked_after_its_writable_parent() {
+        let workspace = tempfile::tempdir().unwrap();
+        let denied = workspace.path().join("secret");
+        std::fs::create_dir(&denied).unwrap();
+        let workspace_path = workspace.path().canonicalize().unwrap();
+        let denied_path = denied.canonicalize().unwrap();
+
+        // Explicit roots exercise the deny precedence on every host, including
+        // Windows, without assuming that host paths are descendants of '/'.
+        for full_disk_read in [false, true] {
+            let request = LinuxRunRequest {
+                command: vec!["/bin/true".to_string()],
+                cwd: workspace_path.clone(),
+                writable_roots: vec![workspace_path.clone()],
+                readable_roots: vec![],
+                readonly_roots: vec![],
+                denied_roots: vec![denied_path.clone()],
+                full_disk_read,
+                network_enabled: false,
+                network_rules: vec![],
+                allow_local_binding: false,
+                proxy_socket_dir: None,
+                max_output_bytes: 1024,
+                stdin: None,
+                env_overrides: Default::default(),
+                home_files: Default::default(),
+            };
+            let plan = build_args(&request).unwrap();
+            let workspace_write = plan
+                .args
+                .windows(3)
+                .position(|args| {
+                    args[0] == "--bind"
+                        && args[1] == workspace_path.to_string_lossy()
+                        && args[2] == workspace_path.to_string_lossy()
+                })
+                .expect("writable parent must be mounted");
+            let denied_mask = plan
+                .args
+                .windows(4)
+                .position(|args| {
+                    args[0] == "--perms"
+                        && args[1] == "000"
+                        && args[2] == "--tmpfs"
+                        && args[3] == denied_path.to_string_lossy()
+                })
+                .expect("denied child must be masked with no permissions");
+            assert!(workspace_write < denied_mask);
+        }
     }
 
     #[test]

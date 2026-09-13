@@ -126,3 +126,16 @@ npm run dist:mac
 应在与目标一致的操作系统上执行。产物位于 `desktop/release/`；正式分发前仍需配置代码签名、公证、安装权限与更新来源。
 
 包含 Gateway 和运行时的完整安装器构建方式，见根目录 [README](../README.md#构建桌面发行包可选)。
+
+## GitHub Actions 三平台打包
+
+统一使用 `release-desktop`，同时构建 macOS arm64/x64 DMG、Linux UOS/Kylin deb 和 Windows exe：
+
+- 分支开发包：手动运行时在 **Use workflow from** 选择 `dev`，`tag` 留空。
+  `version` 可填 `1.1.0` 这样的三段数字版本，留空读取所选提交的 `deb-package/version.txt`。
+  从本次运行的 Artifacts 下载 `release-windows` 等产物；不会创建或覆盖 GitHub Release。
+- Tag 发布：推送 `v*` tag 自动构建并发布；也可手动填写已存在的 `tag` 重建，`version` 留空。
+  此时构建 tag 指向的提交，而不是分支选择器指向的提交。
+
+三平台共用预检解析出的提交 SHA 和版本。单个平台构建成功后即可下载其 artifact，
+GitHub Release 则需要所有平台成功后才发布。开发分支普通 push 不会自动触发完整打包。
