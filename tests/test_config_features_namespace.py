@@ -154,9 +154,20 @@ def test_dynamic_kanban_flat_keys_map_from_features(tmp_path: Path):
     cfg = load_config(config_path=str(config_path))
 
     assert cfg.dk_task_timeout_seconds == 42.5
-    # verification_gate_enabled 落位到旧平铺键 runtime.dk_*；该键当前 loader
-    # 本就不读（存量缺口，见报告），映射仅保证新节落位与旧键同位置。
+    assert cfg.dk_verification_gate_enabled is False
     assert cfg.raw_config["runtime"]["dk_verification_gate_enabled"] is False
+
+
+def test_dynamic_kanban_verification_gate_reads_legacy_flat_key(tmp_path: Path):
+    """存量缺口修复：runtime.dk_verification_gate_enabled 自 loader 起真正生效。"""
+    config_path = _write_config(
+        tmp_path,
+        {"runtime": {"dk_verification_gate_enabled": False}},
+    )
+
+    cfg = load_config(config_path=str(config_path))
+
+    assert cfg.dk_verification_gate_enabled is False
 
 
 def test_dynamic_kanban_features_key_wins_over_runtime_flat_key(tmp_path: Path):

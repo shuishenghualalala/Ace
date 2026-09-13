@@ -1625,6 +1625,9 @@ def load_config(config_path: str | Path | None = None) -> Config:
             runtime.get("dk_task_timeout_seconds", cfg.dk_task_timeout_seconds),
             cfg.dk_task_timeout_seconds,
         )
+        cfg.dk_verification_gate_enabled = bool(
+            runtime.get("dk_verification_gate_enabled", cfg.dk_verification_gate_enabled)
+        )
         raw_timeout_policy = runtime.get("timeout_policy", cfg.timeout_policy)
         cfg.timeout_policy = raw_timeout_policy if isinstance(raw_timeout_policy, dict) else {}
         cfg.sqlite_wal = bool(runtime.get("sqlite_wal", cfg.sqlite_wal))
