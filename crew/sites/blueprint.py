@@ -26,8 +26,14 @@ from crew.security.outbound import (
     request_public_http,
     validate_public_http_target,
 )
+from crew.sites.store import SITES_SCHEMA_FEATURE, SITES_SCHEMA_VERSION
+from crew.state._migration import SITES_BLUEPRINT_DB_TABLES
 from crew.state.home import get_owner_runtime_home, safe_path_segment
+from crew.state.logging import get_logger
+from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
+
+log = get_logger("sites.blueprint")
 
 
 def _json(value: Any) -> str:
@@ -48,12 +54,41 @@ def _id(prefix: str) -> str:
 class BlueprintStore:
     """按 owner 隔离保存 Blueprint 六类资产与运行记录。"""
 
-    def __init__(self, db_path: str, *, wal_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        db_path: str = "crew_data/sites.db",
+        *,
+        wal_enabled: bool = True,
+        legacy_db_path: str | Path | None = None,
+    ) -> None:
         self._lock = threading.RLock()
         self._closed = False
+        self._db_path = Path(db_path)
         self._conn = connect_sqlite(Path(db_path), wal_enabled=wal_enabled)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
+        if legacy_db_path is not None:
+            self._migrate_legacy_rows(Path(legacy_db_path))
+
+    def _migrate_legacy_rows(self, legacy_path: Path) -> None:
+        """copy-on-first-activate：目标库为空时从旧主库整表复制 blueprint 6 表。
+
+        gate 在 ensure-schema + sites_schema_version stamp 之后（构造顺序保证）。
+        store 半域 4 表由 SQLiteSiteStore 构造时各自复制（域内无外键，两半独立
+        gate 无孤儿风险）。旧表保留在旧库不删（ADR-0038 回退备份）；目标库已有
+        行即整体跳过，重复构造幂等零重复；复制走单事务，失败不半写。回退配置
+        把 sites 库指回旧库同一文件时直接跳过。
+        """
+
+        if legacy_path.resolve() == self._db_path.resolve():
+            return
+        copied = self._writer.execute(
+            lambda conn: copy_legacy_feature_rows(
+                legacy_path, conn, SITES_BLUEPRINT_DB_TABLES
+            )
+        )
+        if any(copied.values()):
+            log.info("已从 %s 迁移 sites blueprint 历史数据: %s", legacy_path, copied)
 
     def close(self) -> None:
         """关闭 Blueprint SQLite 连接；持久化资产不会随 Feature 停用删除。"""
@@ -134,6 +169,10 @@ class BlueprintStore:
                 ON site_bindings(owner_account_id,widget_id,active);
             """
         )
+        # 6H：sites 域 schema 版本登记（与 store 半域共用同一张版本表，幂等），
+        # 必须先于 legacy 行复制，保证 copy-on-first-activate 的 gate 顺序
+        # （ensure-schema → stamp → copy）。
+        stamp_baseline(conn, SITES_SCHEMA_FEATURE, version=SITES_SCHEMA_VERSION)
 
     @staticmethod
     def _canvas(row) -> dict[str, Any]:

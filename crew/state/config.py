@@ -212,6 +212,12 @@ class Config:
     # 回退时把对应键指回 crew.db 即可
     external_db_path: str = "crew_data/external.db"
     team_db_path: str = "crew_data/team.db"
+    # sites / tasks / notifications Feature 独立库（ADR-0038 拆库收尾批，三小域）：
+    # sites 域 10 表归 sites.db、runtime_tasks 归 tasks.db、notifications 归
+    # notifications.db；回退时把对应键指回 crew.db 即可
+    sites_db_path: str = "crew_data/sites.db"
+    tasks_db_path: str = "crew_data/tasks.db"
+    notifications_db_path: str = "crew_data/notifications.db"
     log_level: str = "INFO"
     log_file: str = ""  # 空=不写文件；填路径则同时写文件（支持 ~ 展开）
     llm_trace: bool = True  # 是否把每次 LLM 收发全量写入 {crew_home}/logs/llm.jsonl，便于排查
@@ -1505,6 +1511,11 @@ def load_config(config_path: str | Path | None = None) -> Config:
         cfg.kanban_db_path = runtime.get("kanban_db_path", cfg.kanban_db_path)
         cfg.external_db_path = runtime.get("external_db_path", cfg.external_db_path)
         cfg.team_db_path = runtime.get("team_db_path", cfg.team_db_path)
+        cfg.sites_db_path = runtime.get("sites_db_path", cfg.sites_db_path)
+        cfg.tasks_db_path = runtime.get("tasks_db_path", cfg.tasks_db_path)
+        cfg.notifications_db_path = runtime.get(
+            "notifications_db_path", cfg.notifications_db_path
+        )
         cfg.log_level = runtime.get("log_level", cfg.log_level)
         cfg.log_file = runtime.get("log_file", cfg.log_file)
         cfg.crew_home = runtime.get("crew_home", cfg.crew_home)
@@ -1924,5 +1935,13 @@ def load_config(config_path: str | Path | None = None) -> Config:
         if not team_path.is_absolute():
             team_path = home / team_path
         cfg.team_db_path = str(team_path)
+    for attr in ("sites_db_path", "tasks_db_path", "notifications_db_path"):
+        raw_value = getattr(cfg, attr)
+        if not raw_value:
+            continue
+        raw = Path(raw_value).expanduser()
+        if not raw.is_absolute():
+            raw = home / raw
+        setattr(cfg, attr, str(raw))
 
     return cfg

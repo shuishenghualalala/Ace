@@ -9,12 +9,30 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from crew.state._migration import backfill_empty_owner_rows
+from crew.state._migration import SITES_STORE_DB_TABLES, backfill_empty_owner_rows
+from crew.state.logging import get_logger
+from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
+
+log = get_logger("sites.store")
+
+# Feature 级 schema 版本（6H）：sites 域（本 store 4 表 + blueprint 6 表，同住
+# sites.db）共用一张 sites_schema_version 表，当前结构登记为基线 v1；表结构
+# 演进在此号上递增并配迁移步骤。常量放在 store 模块（与 kanban 同法）：
+# blueprint / feature / management 反向依赖 store，放别处会构成循环导入；
+# blueprint 的 stamp 经本模块常量复用同一张版本表（幂等）。
+SITES_SCHEMA_FEATURE = "sites"
+SITES_SCHEMA_VERSION = 1
 
 
 class SQLiteSiteStore:
-    def __init__(self, db_path: str, *, wal_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        db_path: str = "crew_data/sites.db",
+        *,
+        wal_enabled: bool = True,
+        legacy_db_path: str | Path | None = None,
+    ) -> None:
         self._path = Path(db_path)
         self._wal_enabled = wal_enabled
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -23,6 +41,26 @@ class SQLiteSiteStore:
         self._conn = connect_sqlite(self._path, wal_enabled=wal_enabled)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
+        if legacy_db_path is not None:
+            self._migrate_legacy_rows(Path(legacy_db_path))
+
+    def _migrate_legacy_rows(self, legacy_path: Path) -> None:
+        """copy-on-first-activate：目标库为空时从旧主库整表复制本 store 4 表。
+
+        gate 在 ensure-schema + sites_schema_version stamp 之后（构造顺序保证）。
+        blueprint 6 表由同文件的 BlueprintStore 构造时各自复制（域内无外键，
+        两半独立 gate 无孤儿风险）。旧表保留在旧库不删（ADR-0038 回退备份）；
+        目标库已有行即整体跳过，重复构造幂等零重复；复制走单事务，失败不半写。
+        回退配置把 sites 库指回旧库同一文件时直接跳过。
+        """
+
+        if legacy_path.resolve() == self._path.resolve():
+            return
+        copied = self._writer.execute(
+            lambda conn: copy_legacy_feature_rows(legacy_path, conn, SITES_STORE_DB_TABLES)
+        )
+        if any(copied.values()):
+            log.info("已从 %s 迁移 sites 历史数据: %s", legacy_path, copied)
 
     def close(self) -> None:
         """关闭底层 SQLite 连接（WAL 模式下每库持有多个 fd，必须显式释放）。"""
@@ -127,6 +165,9 @@ class SQLiteSiteStore:
             conn,
             ["sites", "site_releases", "site_annotations", "inspiration_annotations"],
         )
+        # 6H：Feature 级 schema 版本登记（幂等），必须先于 legacy 行复制，
+        # 保证 copy-on-first-activate 的 gate 顺序（ensure-schema → stamp → copy）。
+        stamp_baseline(conn, SITES_SCHEMA_FEATURE, version=SITES_SCHEMA_VERSION)
 
     @staticmethod
     def _site_row(row) -> dict[str, Any]:

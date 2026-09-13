@@ -18,13 +18,24 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any, Callable
 
-from crew.state._migration import backfill_empty_owner_rows
+from crew.state._migration import TASKS_DB_TABLES, backfill_empty_owner_rows
+from crew.state.logging import get_logger
+from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 from crew.tasks.models import RuntimeTask, TaskKind, normalize_task_status
 from crew.tools.process_registry import terminate_process_tree
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
 _WORKER_STOP_GRACE_SECONDS = 3.0
+
+log = get_logger("tasks.runtime")
+
+# Feature 级 schema 版本（6H）：tasks 域单表 runtime_tasks，一张单行版本表，
+# 当前结构登记为基线 v1；表结构演进在此号上递增并配迁移步骤。
+# 常量放在 runtime 模块（与 cron/kanban 同法，避免循环导入）：stamp 发生在
+# 本模块的 _init_schema，management 的 migrate 入口反向导入这里。
+TASKS_SCHEMA_FEATURE = "tasks"
+TASKS_SCHEMA_VERSION = 1
 
 
 class TaskRuntime:
@@ -39,7 +50,9 @@ class TaskRuntime:
         heartbeat_interval: float = 10.0,
         wait_timeout: float = 30.0,
         finished_retention_days: int = 7,
+        legacy_db_path: str | Path | None = None,
     ) -> None:
+        self._db_path = str(db_path)
         self._conn = connect_sqlite(db_path, wal_enabled=wal_enabled, row_factory=True)
         self._lock = threading.RLock()
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
@@ -60,6 +73,8 @@ class TaskRuntime:
         # 与任务同生命周期；任务完成占坑时移除）。
         self._notify_suppressed: set[tuple[str, str]] = set()
         self._init_schema()
+        if legacy_db_path is not None:
+            self._migrate_legacy_rows(Path(legacy_db_path))
 
     def _init_schema(self) -> None:
         self._conn.execute(
@@ -111,6 +126,26 @@ class TaskRuntime:
         )
         # 历史 owner='' 行归属本机 local（owner 统一后不存在无主任务）。
         backfill_empty_owner_rows(self._conn, ["runtime_tasks"])
+        # 6H：Feature 级 schema 版本登记（幂等），必须先于 legacy 行复制，
+        # 保证 copy-on-first-activate 的 gate 顺序（ensure-schema → stamp → copy）。
+        stamp_baseline(self._conn, TASKS_SCHEMA_FEATURE, version=TASKS_SCHEMA_VERSION)
+
+    def _migrate_legacy_rows(self, legacy_path: Path) -> None:
+        """copy-on-first-activate：目标库为空时从旧主库整表复制任务行。
+
+        gate 在 ensure-schema + tasks_schema_version stamp 之后（构造顺序保证）。
+        旧表保留在旧库不删（ADR-0038 回退备份）；目标库已有行即整体跳过，
+        重复构造幂等零重复；复制走单事务，失败不半写。回退配置把 tasks 库
+        指回旧库同一文件时直接跳过。
+        """
+
+        if legacy_path.resolve() == Path(self._db_path).resolve():
+            return
+        copied = self._writer.execute(
+            lambda conn: copy_legacy_feature_rows(legacy_path, conn, TASKS_DB_TABLES)
+        )
+        if any(copied.values()):
+            log.info("已从 %s 迁移 tasks 历史数据: %s", legacy_path, copied)
 
     def set_callbacks(
         self,

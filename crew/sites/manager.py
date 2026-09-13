@@ -41,10 +41,21 @@ def _within(path: Path, root: Path) -> bool:
 
 
 class SiteManager:
-    def __init__(self, store: SQLiteSiteStore) -> None:
+    def __init__(
+        self,
+        store: SQLiteSiteStore,
+        *,
+        legacy_db_path: str | Path | None = None,
+    ) -> None:
         self.store = store
+        # blueprint 与 store 同住 sites.db（ADR-0038 拆库收尾批）；legacy 路径
+        # 由装配线传入并转发给 BlueprintStore，两半各自 copy-on-first-activate。
         self.blueprint = BlueprintManager(
-            BlueprintStore(str(store.db_path), wal_enabled=store.wal_enabled)
+            BlueprintStore(
+                str(store.db_path),
+                wal_enabled=store.wal_enabled,
+                legacy_db_path=legacy_db_path,
+            )
         )
         self._closed = False
 

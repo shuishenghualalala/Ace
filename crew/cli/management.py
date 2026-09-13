@@ -1211,14 +1211,20 @@ def _claim_legacy(args: Any, ctx: CliContext) -> CliResult:
     owner = args.account.strip()
     if not owner:
         raise CliError("--account 不能为空")
-    # 按表归属解析对应库（ADR-0038）：cron/work 表读各自独立库，其余读主库。
+    # 按表归属解析对应库（ADR-0038）：cron/work/tasks/notifications 表读各自
+    # 独立库，其余读主库。
     # 不传 kanban_db_path（有意缺省）：通用认领会改写 kanban_workflows 的
     # legacy_ambiguous 歧义行，接入需先补全 kanban 专用认领语义
     # （见 _migration.KANBAN_DB_TABLES 注释）。
-    # 不传 external/team 路径（有意缺省）：两域表不在 OWNER_TABLE_LABELS，
-    # owner 归一由各自 store 构造时自带（见 _migration.EXTERNAL_DB_TABLES 注释）。
+    # 不传 external/team/sites 路径（有意缺省）：三域表不在 OWNER_TABLE_LABELS，
+    # owner 归一由各自 store 构造时自带（见 _migration.EXTERNAL_DB_TABLES /
+    # SITES_DB_TABLES 注释）。
     targets = legacy_owner_scan_targets(
-        app.config.db_path, app.config.cron_db_path, app.config.work_db_path
+        app.config.db_path,
+        app.config.cron_db_path,
+        app.config.work_db_path,
+        tasks_db_path=app.config.tasks_db_path,
+        notifications_db_path=app.config.notifications_db_path,
     )
     changed, remaining = claim_legacy_owner_databases(
         targets,
@@ -1339,6 +1345,46 @@ def _migrate_team(app: Any) -> FeatureMigrationReport:
     )
 
 
+def _migrate_sites(app: Any) -> FeatureMigrationReport:
+    from crew.sites.store import SITES_SCHEMA_FEATURE, SITES_SCHEMA_VERSION
+
+    # sites 已拆独立库（ADR-0038 收尾批）：版本表 stamp 到 sites 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=SITES_SCHEMA_FEATURE,
+        latest_version=SITES_SCHEMA_VERSION,
+        db_path=app.config.sites_db_path,
+    )
+
+
+def _migrate_tasks(app: Any) -> FeatureMigrationReport:
+    from crew.tasks.runtime import TASKS_SCHEMA_FEATURE, TASKS_SCHEMA_VERSION
+
+    # tasks 已拆独立库（ADR-0038 收尾批）：版本表 stamp 到 tasks 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=TASKS_SCHEMA_FEATURE,
+        latest_version=TASKS_SCHEMA_VERSION,
+        db_path=app.config.tasks_db_path,
+    )
+
+
+def _migrate_notifications(app: Any) -> FeatureMigrationReport:
+    from crew.notifications.store import (
+        NOTIFICATIONS_SCHEMA_FEATURE,
+        NOTIFICATIONS_SCHEMA_VERSION,
+    )
+
+    # notifications 已拆独立库（ADR-0038 收尾批）：版本表 stamp 到
+    # notifications 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=NOTIFICATIONS_SCHEMA_FEATURE,
+        latest_version=NOTIFICATIONS_SCHEMA_VERSION,
+        db_path=app.config.notifications_db_path,
+    )
+
+
 # Feature → 迁移入口注册表：新 Feature 接入版本化迁移只需在这里加一行，
 # CLI 不写 if 链。入口接收 app，负责把该 Feature 的版本表弄就绪并返回快照。
 FEATURE_MIGRATIONS: dict[str, FeatureMigrator] = {
@@ -1347,6 +1393,9 @@ FEATURE_MIGRATIONS: dict[str, FeatureMigrator] = {
     "kanban": _migrate_kanban,
     "external": _migrate_external,
     "team": _migrate_team,
+    "sites": _migrate_sites,
+    "tasks": _migrate_tasks,
+    "notifications": _migrate_notifications,
 }
 
 

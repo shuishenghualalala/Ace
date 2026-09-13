@@ -505,7 +505,14 @@ class CrewApp:
         from crew.notifications import NotificationCenterService, NotificationStore
 
         self.notifications = NotificationCenterService(
-            NotificationStore(config.db_path, wal_enabled=config.sqlite_wal)
+            NotificationStore(
+                # notifications 表在独立库（ADR-0038 拆库收尾批）；legacy_db_path
+                # 触发 copy-on-first-activate。本切片只拆库，生命周期形态
+                # （__init__ 直构、随 App 存亡）保持不变。
+                _resolve_crew_home_path(config.notifications_db_path),
+                wal_enabled=config.sqlite_wal,
+                legacy_db_path=config.db_path,
+            )
         )
         self.security_service.set_notification_hooks(
             on_created=self._on_approval_created,
@@ -524,12 +531,17 @@ class CrewApp:
             wal_enabled=config.sqlite_wal,
         )
         self.tasks = TaskRuntime(
-            config.db_path,
+            # runtime_tasks 是统一长任务运行时的存储（非 product feature，不设
+            # Feature Definition），在独立库（ADR-0038 拆库收尾批）；本切片只
+            # 拆库，生命周期形态（App 直构、随 App 存亡）保持不变。legacy_db_path
+            # 触发 copy-on-first-activate。
+            _resolve_crew_home_path(config.tasks_db_path),
             wal_enabled=config.sqlite_wal,
             monitor_interval=config.tasks_monitor_interval_seconds,
             heartbeat_interval=config.tasks_heartbeat_interval_seconds,
             wait_timeout=config.tasks_wait_timeout_seconds,
             finished_retention_days=config.tasks_finished_retention_days,
+            legacy_db_path=config.db_path,
         )
         self.tasks.auto_background_after = config.tasks_auto_background_after_seconds
         self.tasks.defaults = {
@@ -2298,11 +2310,15 @@ class CrewApp:
             # 不传 external/team 路径（有意缺省）：两域 6 表均不在
             # OWNER_TABLE_LABELS，owner 归一由各自 store 构造时自带；
             # 显式登记仅供未来域专用认领工具消费。
+            # 不传 sites_db_path（有意缺省）：sites 域 10 表同样不在
+            # OWNER_TABLE_LABELS，语义同 external/team（见 _migration 注释）。
             counts, backfilled = inspect_and_backfill_legacy_owners(
                 legacy_owner_scan_targets(
                     self.config.db_path,
                     self.config.cron_db_path,
                     self.config.work_db_path,
+                    tasks_db_path=self.config.tasks_db_path,
+                    notifications_db_path=self.config.notifications_db_path,
                 ),
                 wal_enabled=self.config.sqlite_wal,
             )
@@ -3706,8 +3722,14 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     sites_feature = build_sites_feature(
         app,
         registry,
-        db_path=cfg.db_path,
+        # sites 域 10 表（store 4 + blueprint 6，同库）在 crew_data/sites.db
+        # （ADR-0038 拆库收尾批）；legacy_db_path 触发 copy-on-first-activate：
+        # crew.db 里若还有旧 sites 表且 sites.db 对应半域为空，则各半域单事务
+        # 整表复制，旧行保留作回退备份。公共构造点是 feature 的 Manager 工厂
+        # （每次 Generation 新建 store 时都会带上 legacy 参数，域级 gate 幂等）。
+        db_path=_resolve_crew_home_path(cfg.sites_db_path),
         wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
         workspace_store=workspace_store,
         security_service=app.security_service,
     )

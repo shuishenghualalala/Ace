@@ -1,5 +1,5 @@
 """ADR-0038 Feature 拆库契约测试（cron 试点 + work 第二批 + kanban 第三批
-+ external/team 第四批）。
++ external/team 第四批 + sites/tasks/notifications 收尾批）。
 
 覆盖拆库的三类契约：
 1. 路径与装配：Config.<feature>_db_path 读取/归一；新装 Feature 表只出现在
@@ -10,7 +10,8 @@
    feature 的版本表 stamp 到各自独立库。kanban 域另锁定隔离语义：
    legacy_ambiguous 歧义行分库后仍保持 owner='' 隔离，通用回填不可改写。
    external/team 双库另锁定快照回填语义：成员快照回填（唯一跨命名空间读点）
-   在分库复制前移到旧库执行，team 库内守卫跳过。
+   在分库复制前移到旧库执行，team 库内守卫跳过。sites 域两半（store/blueprint）
+   同住 sites.db 各自复制；tasks/notifications 照 cron/work 语义接入通用巡检。
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import pytest
 from crew.agent.external.catalog import CREW_BUILTIN_AGENT_ID
 from crew.agent.external.store import ExternalAgentStore
 from crew.app import build_app
+from crew.core.interfaces import Notification
 from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
 from crew.core.types import Message
 from crew.cron import CronJobStore
@@ -35,11 +37,25 @@ from crew.dynamickanban.store import (
     KANBAN_SCHEMA_VERSION,
     SQLiteKanbanStore,
 )
+from crew.notifications.store import (
+    NOTIFICATIONS_SCHEMA_FEATURE,
+    NOTIFICATIONS_SCHEMA_VERSION,
+    NotificationStore,
+)
+from crew.sites.blueprint import BlueprintStore
+from crew.sites.store import (
+    SITES_SCHEMA_FEATURE,
+    SITES_SCHEMA_VERSION,
+    SQLiteSiteStore,
+)
 from crew.state._migration import (
     CRON_DB_TABLES,
     EXTERNAL_DB_TABLES,
     KANBAN_DB_TABLES,
+    NOTIFICATIONS_DB_TABLES,
+    SITES_DB_TABLES,
     TEAM_DB_TABLES,
+    TASKS_DB_TABLES,
     WORK_DB_TABLES,
     claim_legacy_owner_databases,
     inspect_and_backfill_legacy_owners,
@@ -49,6 +65,8 @@ from crew.state.config import Config, load_config
 from crew.state.schema_version import copy_legacy_feature_rows
 from crew.state.session_store import SQLiteSessionStore
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
+from crew.tasks import TaskRuntime
+from crew.tasks.runtime import TASKS_SCHEMA_FEATURE, TASKS_SCHEMA_VERSION
 from crew.team.external_store import (
     EXTERNAL_SCHEMA_FEATURE,
     EXTERNAL_SCHEMA_VERSION,
@@ -1600,6 +1618,574 @@ def test_migrate_external_and_team_feature_stamp_own_dbs(tmp_path):
             ).fetchone()[0]
             == TEAM_SCHEMA_VERSION
         )
+
+
+# ---------------------------------------------------------------------------
+# sites + tasks + notifications 收尾批（ADR-0038 第五批）：三小域各迁独立库。
+# sites 域 10 表（store 4 + blueprint 6）同住 sites.db 两半各自复制；
+# tasks/notifications 各 1 表，照 cron/work 语义接入通用巡检/认领。
+# ---------------------------------------------------------------------------
+
+def _seed_legacy_sites_rows(legacy_db):
+    """在旧主库中预置带数据的 sites 10 表（走真实 store 语义）。
+
+    store 半域经 upsert_site / release / 两类 annotation 各造一行，
+    blueprint 半域造一个 canvas。返回 site_id 与各表期望行数。
+    """
+    store = SQLiteSiteStore(str(legacy_db))
+    try:
+        site = store.upsert_site(
+            owner="A:u1", workspace_id="ws1", session_id="s1", name="旧站点",
+            source_path="src", build_command="npm run build", output_directory="dist",
+        )
+        release = store.create_release("A:u1", site["id"])
+        store.finish_release("A:u1", site["id"], release["id"], status="ready")
+        store.create_annotation("A:u1", site["id"], release["id"], {"comment": "改这里"})
+        store.create_inspiration_annotation(
+            "A:u1", "insp-1", "widget", "rev-1", {"comment": "灵感笔记"}
+        )
+    finally:
+        store.close()
+    blueprint = BlueprintStore(str(legacy_db))
+    try:
+        blueprint.create_canvas("A:u1", "ws1", "s1", "旧看板", "回顾")
+    finally:
+        blueprint.close()
+    expected = {
+        "sites": 1,
+        "site_releases": 1,
+        "site_annotations": 1,
+        "inspiration_annotations": 2,
+        "site_canvases": 1,
+    }
+    return SimpleNamespace(site_id=site["id"], expected=expected)
+
+
+def test_load_config_reads_and_normalizes_sites_db_path(tmp_path, monkeypatch):
+    """runtime.sites_db_path 与 db_path 同法：可配置，相对路径归一到 crew_home。"""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "runtime:\n  sites_db_path: custom/sites.db\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("crew.state.config.ROOT", tmp_path)
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+
+    cfg = load_config()
+
+    assert cfg.sites_db_path == str(tmp_path / "home" / "custom" / "sites.db")
+
+
+def test_load_config_three_small_domain_db_paths_default_next_to_main_db(tmp_path, monkeypatch):
+    """收尾批三库缺省与 cron/work/kanban 同层：crew_data/<feature>.db。"""
+
+    monkeypatch.setattr("crew.state.config.ROOT", tmp_path)
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+
+    cfg = load_config()
+
+    data_dir = tmp_path / "home" / "crew_data"
+    assert cfg.sites_db_path == str(data_dir / "sites.db")
+    assert cfg.tasks_db_path == str(data_dir / "tasks.db")
+    assert cfg.notifications_db_path == str(data_dir / "notifications.db")
+
+
+def test_fresh_install_sites_tables_live_only_in_sites_db(tmp_path):
+    """验收 1：新装环境 sites 10 表 + 版本表只出现在 sites.db，crew.db 无 sites 表。"""
+
+    main_db = tmp_path / "crew.db"
+    sites_db = tmp_path / "sites.db"
+    crew = build_app(
+        config=Config(
+            db_path=str(main_db), sites_db_path=str(sites_db), cron_enabled=False
+        ),
+        enable_team=False,
+    )
+    crew.sites.store.close()
+    crew.sites.blueprint.store.close()
+
+    main_tables = _table_names(main_db)
+    sites_tables = _table_names(sites_db)
+    # 主库确实是 core 状态库（确认看的是对的文件）
+    assert "sessions" in main_tables
+    expected = set(SITES_DB_TABLES) | {f"{SITES_SCHEMA_FEATURE}_schema_version"}
+    assert expected <= sites_tables
+    assert main_tables.isdisjoint(expected)
+    with closing(sqlite3.connect(sites_db)) as conn:
+        version = conn.execute(
+            f"SELECT version FROM {SITES_SCHEMA_FEATURE}_schema_version "
+            "WHERE singleton = 1"
+        ).fetchone()[0]
+    assert version == SITES_SCHEMA_VERSION
+
+
+def test_build_app_migrates_legacy_sites_rows(tmp_path):
+    """验收 2 走真实装配线：build_app 经 Manager 工厂传入 legacy 路径触发
+    copy-on-first-activate，store 与 blueprint 两半各自复制。"""
+
+    main_db = tmp_path / "crew.db"
+    sites_db = tmp_path / "sites.db"
+    seed = _seed_legacy_sites_rows(main_db)
+
+    crew = build_app(
+        config=Config(
+            db_path=str(main_db), sites_db_path=str(sites_db), cron_enabled=False
+        ),
+        enable_team=False,
+    )
+    assert crew.sites.store.get_site("A:u1", seed.site_id)["name"] == "旧站点"
+    crew.sites.store.close()
+    crew.sites.blueprint.store.close()
+
+    for table, count in seed.expected.items():
+        assert _count(sites_db, table) == count, table
+        assert _count(main_db, table) == count, table  # 旧行保留（回退备份）
+    assert _count(sites_db, "site_canvases") == 1
+
+
+def test_legacy_sites_rows_copied_on_first_activate_and_idempotent(tmp_path):
+    """验收 2：存量 crew.db 激活后 sites.db 两半行数一致、旧行保留、重复激活零重复。"""
+
+    legacy_db = tmp_path / "crew.db"
+    sites_db = tmp_path / "sites.db"
+    seed = _seed_legacy_sites_rows(legacy_db)
+
+    store = SQLiteSiteStore(
+        str(sites_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    blueprint = BlueprintStore(
+        str(sites_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert store.get_site("A:u1", seed.site_id)["name"] == "旧站点"
+        assert len(blueprint.list_canvases("A:u1")) == 1
+    finally:
+        blueprint.close()
+        store.close()
+
+    for table, count in seed.expected.items():
+        assert _count(sites_db, table) == count, table
+        assert _count(legacy_db, table) == count, table  # 旧行保留（回退备份）
+
+    # 重复激活幂等零重复
+    again = SQLiteSiteStore(
+        str(sites_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    blueprint_again = BlueprintStore(
+        str(sites_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert again.get_site("A:u1", seed.site_id) is not None
+        assert len(blueprint_again.list_canvases("A:u1")) == 1
+    finally:
+        blueprint_again.close()
+        again.close()
+    for table, count in seed.expected.items():
+        assert _count(sites_db, table) == count, table
+
+
+def test_sites_copy_skipped_when_target_has_rows(tmp_path):
+    """目标库任一半域已有行即该半域整体跳过：绝不覆盖/合并进已存在的目标数据。"""
+
+    legacy_db = tmp_path / "crew.db"
+    sites_db = tmp_path / "sites.db"
+    _seed_legacy_sites_rows(legacy_db)
+
+    first = SQLiteSiteStore(str(sites_db), wal_enabled=False)
+    try:
+        first.upsert_site(
+            owner="B:u2", workspace_id="ws2", session_id="s2", name="新装站点",
+            source_path="src", build_command="", output_directory="dist",
+        )
+    finally:
+        first.close()
+
+    store = SQLiteSiteStore(
+        str(sites_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert [s["name"] for s in store.list_sites("B:u2")] == ["新装站点"]
+        assert _count(sites_db, "sites") == 1
+        assert _count(sites_db, "inspiration_annotations") == 0
+    finally:
+        store.close()
+    # 旧库未被触碰
+    assert _count(legacy_db, "sites") == 1
+
+    # blueprint 半域独立 gate：目标为空则照常复制
+    blueprint = BlueprintStore(
+        str(sites_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert len(blueprint.list_canvases("A:u1")) == 1
+    finally:
+        blueprint.close()
+    assert _count(sites_db, "site_canvases") == 1
+
+
+def test_legacy_owner_scan_targets_route_sites_tables(tmp_path):
+    """claim-legacy 扫描结构：sites 表不在 OWNER_TABLE_LABELS，按 external/team
+    显式语义登记——显式传参才有条目、缺省不进任何条目、回退配置并入同一文件。"""
+
+    main_db = tmp_path / "crew.db"
+    cron_db = tmp_path / "cron.db"
+    work_db = tmp_path / "work.db"
+    sites_db = tmp_path / "sites.db"
+
+    # 生产形状（不传 sites 路径）：sites 表不登记进任何条目
+    default_targets = legacy_owner_scan_targets(main_db, cron_db, work_db)
+    assert all(
+        set(tables).isdisjoint(SITES_DB_TABLES)
+        for tables in default_targets.values()
+    )
+
+    targets = legacy_owner_scan_targets(
+        main_db, cron_db, work_db, sites_db_path=sites_db
+    )
+    assert set(targets) == {main_db, cron_db, work_db, sites_db}
+    assert set(targets[sites_db]) == set(SITES_DB_TABLES)
+    assert set(targets[main_db]).isdisjoint(SITES_DB_TABLES)
+
+    # 回退配置（sites 库指回主库同一文件）：按回退语义并入该条目
+    db = tmp_path / "fallback.db"
+    merged = legacy_owner_scan_targets(db, sites_db_path=db)
+    assert set(merged) == {db}
+    assert set(merged[db]) >= set(SITES_DB_TABLES)
+
+
+def test_fresh_install_runtime_tasks_live_only_in_tasks_db(tmp_path):
+    """验收 1：新装环境 runtime_tasks + 版本表只出现在 tasks.db，crew.db 无该表。"""
+
+    main_db = tmp_path / "crew.db"
+    tasks_db = tmp_path / "tasks.db"
+    crew = build_app(
+        config=Config(
+            db_path=str(main_db), tasks_db_path=str(tasks_db), cron_enabled=False
+        ),
+        enable_team=False,
+    )
+    crew.tasks.close()
+
+    main_tables = _table_names(main_db)
+    tasks_tables = _table_names(tasks_db)
+    assert "sessions" in main_tables
+    expected = set(TASKS_DB_TABLES) | {f"{TASKS_SCHEMA_FEATURE}_schema_version"}
+    assert expected <= tasks_tables
+    assert main_tables.isdisjoint(expected)
+    with closing(sqlite3.connect(tasks_db)) as conn:
+        version = conn.execute(
+            f"SELECT version FROM {TASKS_SCHEMA_FEATURE}_schema_version "
+            "WHERE singleton = 1"
+        ).fetchone()[0]
+    assert version == TASKS_SCHEMA_VERSION
+
+
+def test_legacy_runtime_tasks_copied_on_first_activate_and_idempotent(tmp_path):
+    """验收 2：存量 crew.db 激活后 tasks.db 行数一致、旧行保留、重复激活零重复。"""
+
+    legacy_db = tmp_path / "crew.db"
+    tasks_db = tmp_path / "tasks.db"
+    legacy = TaskRuntime(str(legacy_db))
+    try:
+        seeded = legacy.create_runtime(
+            kind="team", session_id="s-legacy", title="旧任务",
+            owner_account_id="A:u1",
+        )
+    finally:
+        legacy.close()
+
+    store = TaskRuntime(str(tasks_db), wal_enabled=False, legacy_db_path=str(legacy_db))
+    try:
+        assert store.get(seeded["task_id"], owner_account_id="A:u1")["title"] == "旧任务"
+    finally:
+        store.close()
+    assert _count(legacy_db, "runtime_tasks") == 1  # 旧行保留（回退备份）
+    assert _count(tasks_db, "runtime_tasks") == 1
+
+    again = TaskRuntime(str(tasks_db), wal_enabled=False, legacy_db_path=str(legacy_db))
+    try:
+        assert len(again.list_tasks(owner_account_id="A:u1")) == 1
+    finally:
+        again.close()
+    assert _count(tasks_db, "runtime_tasks") == 1
+
+
+def test_tasks_copy_skipped_when_target_has_rows(tmp_path):
+    """目标库已有行即整体跳过：绝不覆盖/合并进已存在的目标数据。"""
+
+    legacy_db = tmp_path / "crew.db"
+    tasks_db = tmp_path / "tasks.db"
+    legacy = TaskRuntime(str(legacy_db))
+    try:
+        legacy.create_runtime(
+            kind="team", session_id="s-legacy", title="旧任务",
+            owner_account_id="A:u1",
+        )
+    finally:
+        legacy.close()
+
+    first = TaskRuntime(str(tasks_db), wal_enabled=False)
+    try:
+        fresh = first.create_runtime(
+            kind="team", session_id="s-fresh", title="新装任务",
+            owner_account_id="B:u2",
+        )
+    finally:
+        first.close()
+
+    store = TaskRuntime(str(tasks_db), wal_enabled=False, legacy_db_path=str(legacy_db))
+    try:
+        assert [
+            t["task_id"] for t in store.list_tasks(owner_account_id="B:u2")
+        ] == [fresh["task_id"]]
+    finally:
+        store.close()
+    assert _count(tasks_db, "runtime_tasks") == 1
+    # 旧库未被触碰
+    assert _count(legacy_db, "runtime_tasks") == 1
+
+
+def test_fresh_install_notifications_live_only_in_notifications_db(tmp_path):
+    """验收 1：新装环境 notifications 表 + 版本表只在 notifications.db。"""
+
+    main_db = tmp_path / "crew.db"
+    notifications_db = tmp_path / "notifications.db"
+    build_app(
+        config=Config(
+            db_path=str(main_db),
+            notifications_db_path=str(notifications_db),
+            cron_enabled=False,
+        ),
+        enable_team=False,
+    )
+
+    main_tables = _table_names(main_db)
+    notification_tables = _table_names(notifications_db)
+    assert "sessions" in main_tables
+    expected = set(NOTIFICATIONS_DB_TABLES) | {
+        f"{NOTIFICATIONS_SCHEMA_FEATURE}_schema_version"
+    }
+    assert expected <= notification_tables
+    assert main_tables.isdisjoint(expected)
+    with closing(sqlite3.connect(notifications_db)) as conn:
+        version = conn.execute(
+            f"SELECT version FROM {NOTIFICATIONS_SCHEMA_FEATURE}_schema_version "
+            "WHERE singleton = 1"
+        ).fetchone()[0]
+    assert version == NOTIFICATIONS_SCHEMA_VERSION
+
+
+def test_legacy_notifications_copied_on_first_activate_and_idempotent(tmp_path):
+    """验收 2：存量 crew.db 激活后 notifications.db 行数一致、旧行保留、幂等。"""
+
+    legacy_db = tmp_path / "crew.db"
+    notifications_db = tmp_path / "notifications.db"
+    legacy = NotificationStore(str(legacy_db))
+    try:
+        legacy.insert(
+            Notification(
+                owner_account_id="A:u1", source="test", kind="info", title="旧通知"
+            )
+        )
+    finally:
+        legacy.close()
+
+    store = NotificationStore(
+        str(notifications_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert [n.title for n in store.list("A:u1")] == ["旧通知"]
+    finally:
+        store.close()
+    assert _count(legacy_db, "notifications") == 1  # 旧行保留（回退备份）
+    assert _count(notifications_db, "notifications") == 1
+
+    again = NotificationStore(
+        str(notifications_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert len(again.list("A:u1")) == 1
+    finally:
+        again.close()
+    assert _count(notifications_db, "notifications") == 1
+
+
+def test_notifications_copy_skipped_when_target_has_rows(tmp_path):
+    """目标库已有行即整体跳过：绝不覆盖/合并进已存在的目标数据。"""
+
+    legacy_db = tmp_path / "crew.db"
+    notifications_db = tmp_path / "notifications.db"
+    legacy = NotificationStore(str(legacy_db))
+    try:
+        legacy.insert(
+            Notification(
+                owner_account_id="A:u1", source="test", kind="info", title="旧通知"
+            )
+        )
+    finally:
+        legacy.close()
+
+    first = NotificationStore(str(notifications_db), wal_enabled=False)
+    try:
+        first.insert(
+            Notification(
+                owner_account_id="B:u2", source="test", kind="info", title="新装通知"
+            )
+        )
+    finally:
+        first.close()
+
+    store = NotificationStore(
+        str(notifications_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert [n.title for n in store.list("B:u2")] == ["新装通知"]
+        assert store.list("A:u1") == []
+    finally:
+        store.close()
+    assert _count(notifications_db, "notifications") == 1
+    # 旧库未被触碰
+    assert _count(legacy_db, "notifications") == 1
+
+
+def test_legacy_owner_scan_targets_route_tasks_and_notifications_tables(tmp_path):
+    """claim-legacy 扫描结构：tasks/notifications 两域在 OWNER_TABLE_LABELS，
+    照 cron/work 语义接入——缺省并入主库条目（回退），显式传参得独立条目。"""
+
+    main_db = tmp_path / "crew.db"
+    cron_db = tmp_path / "cron.db"
+    work_db = tmp_path / "work.db"
+    tasks_db = tmp_path / "tasks.db"
+    notifications_db = tmp_path / "notifications.db"
+
+    targets = legacy_owner_scan_targets(
+        main_db,
+        cron_db,
+        work_db,
+        tasks_db_path=tasks_db,
+        notifications_db_path=notifications_db,
+    )
+    assert set(targets) == {
+        main_db,
+        cron_db,
+        work_db,
+        tasks_db,
+        notifications_db,
+    }
+    assert set(targets[tasks_db]) == set(TASKS_DB_TABLES)
+    assert set(targets[notifications_db]) == set(NOTIFICATIONS_DB_TABLES)
+    # 主库条目只剩 core 表（tasks/notifications 已从主库清单摘除）
+    assert set(targets[main_db]).isdisjoint(
+        set(TASKS_DB_TABLES) | set(NOTIFICATIONS_DB_TABLES)
+    )
+
+    # 回退配置（两库指回主库同一文件）：按回退语义并入该条目
+    db = tmp_path / "fallback.db"
+    merged = legacy_owner_scan_targets(
+        db, tasks_db_path=db, notifications_db_path=db
+    )
+    assert set(merged) == {db}
+    assert set(merged[db]) >= {
+        "sessions",
+        "cron_jobs",
+        *TASKS_DB_TABLES,
+        *NOTIFICATIONS_DB_TABLES,
+    }
+
+
+def test_claim_legacy_spans_main_tasks_and_notifications_databases(tmp_path):
+    """验收 4：claim-legacy 按表归属跨库扫描，三库无主行各自认领。"""
+
+    main_db = tmp_path / "crew.db"
+    tasks_db = tmp_path / "tasks.db"
+    notifications_db = tmp_path / "notifications.db"
+
+    sessions = SQLiteSessionStore(str(main_db))
+    sessions.save("s-legacy", [Message.user("hi")], owner_account_id="")
+    sessions.close()
+    tasks = TaskRuntime(str(tasks_db))
+    try:
+        tasks.create_runtime(
+            kind="team", session_id="s-legacy", title="旧任务", owner_account_id=""
+        )
+    finally:
+        tasks.close()
+    notifications = NotificationStore(str(notifications_db))
+    try:
+        notifications.insert(
+            Notification(owner_account_id="", source="test", kind="info", title="旧通知")
+        )
+    finally:
+        notifications.close()
+
+    targets = legacy_owner_scan_targets(
+        main_db, tasks_db_path=tasks_db, notifications_db_path=notifications_db
+    )
+    changed, remaining = claim_legacy_owner_databases(targets, "A:uid-1")
+    assert changed["sessions"] == 1
+    assert changed["runtime_tasks"] == 1
+    assert changed["notifications"] == 1
+    assert remaining["runtime_tasks"] == 0
+    assert remaining["notifications"] == 0
+
+    with closing(sqlite3.connect(tasks_db)) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM runtime_tasks WHERE owner_account_id = 'A:uid-1'"
+        ).fetchone()[0] == 1
+    with closing(sqlite3.connect(notifications_db)) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE owner_account_id = 'A:uid-1'"
+        ).fetchone()[0] == 1
+
+
+def test_migrate_small_domain_features_stamp_own_dbs(tmp_path):
+    """`migrate feature sites/tasks/notifications` 的版本表各自 stamp 到自己的库。"""
+
+    from crew.cli.management import (
+        _migrate_notifications,
+        _migrate_sites,
+        _migrate_tasks,
+    )
+
+    app = SimpleNamespace(
+        config=SimpleNamespace(
+            db_path=str(tmp_path / "crew.db"),
+            sites_db_path=str(tmp_path / "sites.db"),
+            tasks_db_path=str(tmp_path / "tasks.db"),
+            notifications_db_path=str(tmp_path / "notifications.db"),
+            sqlite_wal=False,
+        )
+    )
+
+    sites_report = _migrate_sites(app)
+    assert sites_report.feature == SITES_SCHEMA_FEATURE
+    assert sites_report.current_version == SITES_SCHEMA_VERSION
+
+    tasks_report = _migrate_tasks(app)
+    assert tasks_report.feature == TASKS_SCHEMA_FEATURE
+    assert tasks_report.current_version == TASKS_SCHEMA_VERSION
+
+    notifications_report = _migrate_notifications(app)
+    assert notifications_report.feature == NOTIFICATIONS_SCHEMA_FEATURE
+    assert notifications_report.current_version == NOTIFICATIONS_SCHEMA_VERSION
+
+    assert (tmp_path / "sites.db").exists()
+    assert (tmp_path / "tasks.db").exists()
+    assert (tmp_path / "notifications.db").exists()
+    assert not (tmp_path / "crew.db").exists()
+    for db_name, feature, version in (
+        ("sites.db", SITES_SCHEMA_FEATURE, SITES_SCHEMA_VERSION),
+        ("tasks.db", TASKS_SCHEMA_FEATURE, TASKS_SCHEMA_VERSION),
+        ("notifications.db", NOTIFICATIONS_SCHEMA_FEATURE, NOTIFICATIONS_SCHEMA_VERSION),
+    ):
+        with closing(sqlite3.connect(tmp_path / db_name)) as conn:
+            assert (
+                conn.execute(
+                    f"SELECT version FROM {feature}_schema_version WHERE singleton = 1"
+                ).fetchone()[0]
+                == version
+            )
 
 
 if __name__ == "__main__":

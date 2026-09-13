@@ -42,9 +42,17 @@ class SitesFeatureBundle:
 def _manager_factory(
     db_path: str,
     wal_enabled: bool,
+    legacy_db_path: str | None = None,
 ) -> Callable[[], SiteManager]:
     def create() -> SiteManager:
-        return SiteManager(SQLiteSiteStore(db_path, wal_enabled=wal_enabled))
+        return SiteManager(
+            SQLiteSiteStore(
+                db_path,
+                wal_enabled=wal_enabled,
+                legacy_db_path=legacy_db_path,
+            ),
+            legacy_db_path=legacy_db_path,
+        )
 
     return create
 
@@ -100,6 +108,7 @@ def build_sites_feature(
     *,
     db_path: str | None = None,
     wal_enabled: bool = True,
+    legacy_db_path: str | None = None,
     enabled: bool = True,
     desired_config_revision: int = 1,
     manager_factory: Callable[[], SiteManager] | None = None,
@@ -114,6 +123,10 @@ def build_sites_feature(
     binding captured during construction is only a predecessor marker; it is
     not used as the candidate and is never implicitly closed as an external
     dependency.
+
+    ``legacy_db_path`` 触发 copy-on-first-activate（ADR-0038 拆库收尾批）：
+    每个 Generation 新建的 Manager 在 sites.db 为空时从旧主库分半复制
+    （store 4 表 + blueprint 6 表），重复激活幂等零复制。
     """
 
     if manager_factory is None:
@@ -122,12 +135,14 @@ def build_sites_feature(
             wal_enabled = store.wal_enabled
 
             def manager_factory() -> SiteManager:
+                # 外部传入的 store 自带迁移语义；重建 Manager 沿用其库路径，
+                # 不重复注入 legacy（copy 已由首次构造完成并受域级 gate 保护）。
                 return SiteManager(SQLiteSiteStore(db_path, wal_enabled=wal_enabled))
 
         elif not db_path:
             raise ValueError("build_sites_feature requires db_path or store")
         else:
-            manager_factory = _manager_factory(db_path, wal_enabled)
+            manager_factory = _manager_factory(db_path, wal_enabled, legacy_db_path)
     factory = manager_factory
     predecessor = getattr(host, "sites", None)
     predecessor_marker = getattr(host, "_sites_feature_manager", None)

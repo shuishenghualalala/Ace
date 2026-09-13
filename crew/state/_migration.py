@@ -27,8 +27,10 @@ OWNER_TABLE_LABELS = {
 # Feature 拆库归属（ADR-0038）：cron 两表已迁至独立库（crew_data/cron.db），
 # work 域 15 表已迁至独立库（crew_data/work.db），dynamic-kanban 域 6 表已迁至
 # 独立库（crew_data/kanban.db），external-agents 域 4 表与 team 域 2 表已分别
-# 迁至独立库（crew_data/external.db、crew_data/team.db），其余 owner 表仍留在
-# 主库。后续批次拆库时在此登记新归属，扫描函数即可按库路由。
+# 迁至独立库（crew_data/external.db、crew_data/team.db），收尾批三小域——
+# sites 域 10 表、tasks 域 runtime_tasks、notifications 域 notifications——已分别
+# 迁至独立库（crew_data/sites.db、crew_data/tasks.db、crew_data/notifications.db），
+# 其余 owner 表仍留在主库。后续批次拆库时在此登记新归属，扫描函数即可按库路由。
 CRON_DB_TABLES: tuple[str, ...] = ("cron_jobs", "cron_job_runs")
 # work 域表按外键依赖排序（connect_sqlite 开启 foreign_keys=ON，
 # copy_legacy_feature_rows 整表复制必须父表先于子表写入）：
@@ -81,6 +83,36 @@ EXTERNAL_DB_TABLES: tuple[str, ...] = (
 )
 # team 域 2 表按外键依赖排序：external_team_member 指向 external_team。
 TEAM_DB_TABLES: tuple[str, ...] = ("external_team", "external_team_member")
+# sites 域 10 表（收尾批）：store 4 表（sites/site_releases/site_annotations/
+# inspiration_annotations）与 blueprint 6 表（site_canvases/site_widgets/
+# site_canvas_placements/site_automations/site_automation_runs/site_bindings）
+# 同住 sites.db，各由自己的 store 在构造时复制。域内全部是普通列关联、无任何
+# 外键，整表复制顺序无关。sites 表不在 OWNER_TABLE_LABELS，与 external/team
+# 同用"显式传参才登记"语义：owner 归一由 store 构造时自带（backfill 只覆盖
+# store 半域——blueprint 6 表 owner 列 NOT NULL 无缺省，不存在空 owner 行），
+# 通用巡检/认领无需感知；表清单供 copy_legacy_feature_rows 与
+# legacy_owner_scan_targets（结构登记/回退合并）使用。
+SITES_STORE_DB_TABLES: tuple[str, ...] = (
+    "sites",
+    "site_releases",
+    "site_annotations",
+    "inspiration_annotations",
+)
+SITES_BLUEPRINT_DB_TABLES: tuple[str, ...] = (
+    "site_canvases",
+    "site_widgets",
+    "site_canvas_placements",
+    "site_automations",
+    "site_automation_runs",
+    "site_bindings",
+)
+SITES_DB_TABLES: tuple[str, ...] = SITES_STORE_DB_TABLES + SITES_BLUEPRINT_DB_TABLES
+# tasks 域 1 表（收尾批）：runtime_tasks 是统一长任务运行时的存储（非 product
+# feature）。表在 OWNER_TABLE_LABELS，与 cron/work 同语义接入通用巡检/认领
+# （无主行由 store 构造时的 backfill 与启动巡检归一）。
+TASKS_DB_TABLES: tuple[str, ...] = ("runtime_tasks",)
+# notifications 域 1 表（收尾批）：同在 OWNER_TABLE_LABELS，照 cron/work 语义接入。
+NOTIFICATIONS_DB_TABLES: tuple[str, ...] = ("notifications",)
 
 
 def primary_key_columns(conn: sqlite3.Connection, table: str) -> list[str]:
@@ -226,20 +258,23 @@ def legacy_owner_scan_targets(
     kanban_db_path: str | Path | None = None,
     external_db_path: str | Path | None = None,
     team_db_path: str | Path | None = None,
+    sites_db_path: str | Path | None = None,
+    tasks_db_path: str | Path | None = None,
+    notifications_db_path: str | Path | None = None,
 ) -> dict[Path, list[str]]:
     """把 owner 表清单按归属库解析为 ``路径→表清单`` 扫描映射。
 
-    cron 两表归 cron 库、work 域表归 work 库（ADR-0038），其余表归主库；
-    任一 Feature 路径与主库指向同一文件时（回退配置把 Feature 库指回
-    crew.db）自动合并到同一条目。
+    cron 两表归 cron 库、work 域表归 work 库、tasks/notifications 两域归
+    各自独立库（ADR-0038），其余表归主库；任一 Feature 路径与主库指向同一
+    文件时（回退配置把 Feature 库指回 crew.db）自动合并到同一条目。
 
-    kanban / external / team 三域与 cron/work 的缺省语义不同：只**在显式传入
-    路径时**登记为独立条目（指向与主库同一文件时按回退语义并入该条目）。
-    缺省（None）时不并入任何条目——kanban 的无主行是隔离语义
-    （legacy_ambiguous 留给人工认领）；external/team 两域表均不在
+    kanban / external / team / sites 四域与 cron/work 的缺省语义不同：只在
+    **显式传入路径时**登记为独立条目（指向与主库同一文件时按回退语义并入该
+    条目）。缺省（None）时不并入任何条目——kanban 的无主行是隔离语义
+    （legacy_ambiguous 留给人工认领）；external/team/sites 三域表均不在
     OWNER_TABLE_LABELS，owner 归一由各自 store 构造时自带。生产巡检/认领
     调用点不传即天然豁免（含 crew.db 里的拆库备份行），显式传入仅供未来的
-    域专用认领工具消费（见 EXTERNAL_DB_TABLES / TEAM_DB_TABLES 注释）。
+    域专用认领工具消费（见 EXTERNAL_DB_TABLES / SITES_DB_TABLES 注释）。
     """
 
     targets: dict[Path, list[str]] = {Path(main_db_path): []}
@@ -251,6 +286,8 @@ def legacy_owner_scan_targets(
         and table not in KANBAN_DB_TABLES
         and table not in EXTERNAL_DB_TABLES
         and table not in TEAM_DB_TABLES
+        and table not in TASKS_DB_TABLES
+        and table not in NOTIFICATIONS_DB_TABLES
     )
     cron_path = Path(cron_db_path) if cron_db_path else Path(main_db_path)
     targets.setdefault(cron_path, []).extend(CRON_DB_TABLES)
@@ -262,6 +299,14 @@ def legacy_owner_scan_targets(
         targets.setdefault(Path(external_db_path), []).extend(EXTERNAL_DB_TABLES)
     if team_db_path:
         targets.setdefault(Path(team_db_path), []).extend(TEAM_DB_TABLES)
+    if sites_db_path:
+        targets.setdefault(Path(sites_db_path), []).extend(SITES_DB_TABLES)
+    tasks_path = Path(tasks_db_path) if tasks_db_path else Path(main_db_path)
+    targets.setdefault(tasks_path, []).extend(TASKS_DB_TABLES)
+    notifications_path = (
+        Path(notifications_db_path) if notifications_db_path else Path(main_db_path)
+    )
+    targets.setdefault(notifications_path, []).extend(NOTIFICATIONS_DB_TABLES)
     return targets
 
 
