@@ -566,7 +566,9 @@ async def test_team_session_model_materializes_and_switches_one_member(tmp_path,
     stored = crew.session_store.get_agent_config("team-model", owner_account_id=OWNER_A)
     assert set(stored["team"]["member_model_bindings"]) == {leader["id"], member["id"]}
     assert stored["team"]["member_model_bindings"][member["id"]]["model_id"] == "model-a"
-    with sqlite3.connect(db_path) as conn:
+    # external 域表在拆库后（ADR-0038）位于 catalog 门面的 external 库，不在主库。
+    external_db = crew.current_external_catalog().db_path
+    with sqlite3.connect(external_db) as conn:
         envelope = json.loads(conn.execute(
             "SELECT profile_json FROM external_agent WHERE id = ?",
             (leader["id"],),

@@ -1,4 +1,5 @@
-"""ADR-0038 Feature 拆库契约测试（cron 试点 + work 第二批 + kanban 第三批）。
+"""ADR-0038 Feature 拆库契约测试（cron 试点 + work 第二批 + kanban 第三批
++ external/team 第四批）。
 
 覆盖拆库的三类契约：
 1. 路径与装配：Config.<feature>_db_path 读取/归一；新装 Feature 表只出现在
@@ -8,6 +9,8 @@
 3. 跨表工具适配：claim-legacy 与启动期 owner 巡检按库归属扫描；CLI migrate
    feature 的版本表 stamp 到各自独立库。kanban 域另锁定隔离语义：
    legacy_ambiguous 歧义行分库后仍保持 owner='' 隔离，通用回填不可改写。
+   external/team 双库另锁定快照回填语义：成员快照回填（唯一跨命名空间读点）
+   在分库复制前移到旧库执行，team 库内守卫跳过。
 """
 
 from __future__ import annotations
@@ -19,6 +22,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from crew.agent.external.catalog import CREW_BUILTIN_AGENT_ID
+from crew.agent.external.store import ExternalAgentStore
 from crew.app import build_app
 from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
 from crew.core.types import Message
@@ -32,7 +37,9 @@ from crew.dynamickanban.store import (
 )
 from crew.state._migration import (
     CRON_DB_TABLES,
+    EXTERNAL_DB_TABLES,
     KANBAN_DB_TABLES,
+    TEAM_DB_TABLES,
     WORK_DB_TABLES,
     claim_legacy_owner_databases,
     inspect_and_backfill_legacy_owners,
@@ -42,6 +49,13 @@ from crew.state.config import Config, load_config
 from crew.state.schema_version import copy_legacy_feature_rows
 from crew.state.session_store import SQLiteSessionStore
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
+from crew.team.external_store import (
+    EXTERNAL_SCHEMA_FEATURE,
+    EXTERNAL_SCHEMA_VERSION,
+    TEAM_SCHEMA_FEATURE,
+    TEAM_SCHEMA_VERSION,
+    TeamExternalAgentStore,
+)
 from crew.work.briefs import WorkBriefStore
 from crew.work.feature import WORK_SCHEMA_FEATURE, WORK_SCHEMA_VERSION, build_work_feature
 from crew.work.items import WorkItemStore
@@ -1188,6 +1202,404 @@ def test_migrate_kanban_feature_stamps_kanban_db(tmp_path):
             "SELECT version FROM kanban_schema_version WHERE singleton = 1"
         ).fetchone()[0]
     assert version == KANBAN_SCHEMA_VERSION
+
+
+# ---------------------------------------------------------------------------
+# external + team 批（ADR-0038 第四批）：external 域 4 表迁 external.db、
+# team 域 2 表迁 team.db（同一门面一次双库）
+# ---------------------------------------------------------------------------
+
+_EXTERNAL_RUNTIME = {
+    "id": "runtime-a",
+    "provider": "kimi",
+    "name": "Kimi",
+    "executable_path": "/bin/kimi",
+    "version": "1.2.3",
+}
+
+
+def _seed_legacy_external_and_team_rows(legacy_db):
+    """在旧主库中预置带数据的 external 4 表 + team 2 表（真实 store 语义）。
+
+    external_agent / observations / bindings 逐层外键指向 external_runtime
+    与 external_agent，external_team_member 指向 external_team，恰好验证两域
+    整表复制的父表先于子表顺序。返回 agent/team 标识与各表期望行数。
+    """
+    catalog = ExternalAgentStore(str(legacy_db))
+    catalog.upsert_runtime(dict(_EXTERNAL_RUNTIME))
+    agent = catalog.create_agent(
+        owner_account_id="A:u1", name="外援甲", runtime_id="runtime-a"
+    )
+    catalog.save_runtime_session_binding(
+        owner_account_id="A:u1",
+        crew_session_id="s-legacy",
+        external_agent_id=agent["id"],
+        runtime_id="runtime-a",
+        adapter_id="acp-stdio",
+        native_session_id="native-1",
+    )
+    catalog.record_agent_profile_observation(
+        owner_account_id="A:u1",
+        external_agent_id=agent["id"],
+        source_run_id="run-1",
+        source_node_id="node-1",
+        source_attempt_id="attempt-1",
+        capabilities=["implementation"],
+        assessment_source="probe",
+        outcome="success",
+        quality_weight=0.5,
+    )
+    facade = TeamExternalAgentStore(str(legacy_db))
+    team = facade.create_team(
+        owner_account_id="A:u1",
+        name="旧团队",
+        leader_agent_id=agent["id"],
+        members=[{"agent_id": agent["id"], "role": "Leader"}],
+    )
+    return SimpleNamespace(
+        agent_id=agent["id"],
+        team_id=team["id"],
+        expected={
+            "external_runtime": 1,
+            "external_agent": 1,
+            "external_agent_profile_observation": 1,
+            "external_runtime_session_binding": 1,
+            "external_team": 1,
+            "external_team_member": 1,
+        },
+    )
+
+
+def test_load_config_reads_and_normalizes_external_and_team_db_paths(
+    tmp_path, monkeypatch
+):
+    """runtime.external_db_path / team_db_path 与前几批同法：可配置，相对路径归一。"""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "runtime:\n"
+        "  external_db_path: custom/external.db\n"
+        "  team_db_path: custom/team.db\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("crew.state.config.ROOT", tmp_path)
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+
+    cfg = load_config()
+
+    assert cfg.external_db_path == str(tmp_path / "home" / "custom" / "external.db")
+    assert cfg.team_db_path == str(tmp_path / "home" / "custom" / "team.db")
+
+
+def test_load_config_external_and_team_db_paths_default_next_to_main_db(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("crew.state.config.ROOT", tmp_path)
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+
+    cfg = load_config()
+
+    assert cfg.external_db_path == str(tmp_path / "home" / "crew_data" / "external.db")
+    assert cfg.team_db_path == str(tmp_path / "home" / "crew_data" / "team.db")
+
+
+def test_fresh_install_external_and_team_tables_live_in_their_own_dbs(tmp_path):
+    """验收 1：新装环境 external 4 表 + 版本表只在 external.db，team 2 表 +
+    版本表只在 team.db，主库两域皆无。"""
+
+    main_db = tmp_path / "crew.db"
+    external_db = tmp_path / "external.db"
+    team_db = tmp_path / "team.db"
+    build_app(
+        config=Config(
+            db_path=str(main_db),
+            external_db_path=str(external_db),
+            team_db_path=str(team_db),
+            cron_enabled=False,
+        ),
+        enable_team=False,
+    )
+
+    main_tables = _table_names(main_db)
+    assert "sessions" in main_tables  # 主库确实是 core 状态库
+    external_expected = set(EXTERNAL_DB_TABLES) | {
+        f"{EXTERNAL_SCHEMA_FEATURE}_schema_version"
+    }
+    team_expected = set(TEAM_DB_TABLES) | {f"{TEAM_SCHEMA_FEATURE}_schema_version"}
+    assert external_expected <= _table_names(external_db)
+    assert team_expected <= _table_names(team_db)
+    assert main_tables.isdisjoint(external_expected | team_expected)
+    with closing(sqlite3.connect(external_db)) as conn:
+        external_version = conn.execute(
+            f"SELECT version FROM {EXTERNAL_SCHEMA_FEATURE}_schema_version "
+            "WHERE singleton = 1"
+        ).fetchone()[0]
+    with closing(sqlite3.connect(team_db)) as conn:
+        team_version = conn.execute(
+            f"SELECT version FROM {TEAM_SCHEMA_FEATURE}_schema_version "
+            "WHERE singleton = 1"
+        ).fetchone()[0]
+    assert external_version == EXTERNAL_SCHEMA_VERSION
+    assert team_version == TEAM_SCHEMA_VERSION
+
+
+def test_legacy_external_and_team_rows_copied_on_first_activate_and_idempotent(
+    tmp_path,
+):
+    """验收 2：存量 crew.db 构造分库门面后两域行数一致、旧行保留、
+    重复构造幂等零重复；team 库内跨命名空间回填守卫不触表报错。"""
+
+    legacy_db = tmp_path / "crew.db"
+    external_db = tmp_path / "external.db"
+    team_db = tmp_path / "team.db"
+    seed = _seed_legacy_external_and_team_rows(legacy_db)
+
+    store = TeamExternalAgentStore(
+        str(external_db), team_db_path=str(team_db), legacy_db_path=str(legacy_db)
+    )
+    assert store.get_agent(seed.agent_id, owner_account_id="A:u1")["name"] == "外援甲"
+    assert store.get_team(seed.team_id, owner_account_id="A:u1")["name"] == "旧团队"
+
+    for table, count in seed.expected.items():
+        target_db = team_db if table in TEAM_DB_TABLES else external_db
+        assert _count(target_db, table) == count, table
+        assert _count(legacy_db, table) == count, table  # 旧行保留（回退备份）
+
+    # 重复构造幂等零重复（catalog_factory 每次激活重建门面的真实形状）
+    again = TeamExternalAgentStore(
+        str(external_db), team_db_path=str(team_db), legacy_db_path=str(legacy_db)
+    )
+    assert again.get_team(seed.team_id, owner_account_id="A:u1") is not None
+    for table, count in seed.expected.items():
+        target_db = team_db if table in TEAM_DB_TABLES else external_db
+        assert _count(target_db, table) == count, table
+
+
+def test_build_app_migrates_legacy_external_and_team_rows(tmp_path):
+    """验收 2 走真实装配线：build_app 传入双库路径 + legacy 触发分域复制；
+    current_external_catalog 动态解析链在分库后照常工作。"""
+
+    main_db = tmp_path / "crew.db"
+    external_db = tmp_path / "external.db"
+    team_db = tmp_path / "team.db"
+    seed = _seed_legacy_external_and_team_rows(main_db)
+
+    crew = build_app(
+        config=Config(
+            db_path=str(main_db),
+            external_db_path=str(external_db),
+            team_db_path=str(team_db),
+            cron_enabled=False,
+        ),
+        enable_team=False,
+    )
+
+    assert _count(external_db, "external_agent") == 1
+    assert _count(team_db, "external_team") == 1
+    assert _count(main_db, "external_agent") == 1  # 旧行保留（回退备份）
+    catalog = crew.current_external_catalog()
+    assert catalog is not None
+    assert catalog.get_agent(seed.agent_id, owner_account_id="A:u1")["name"] == "外援甲"
+    assert catalog.get_team(seed.team_id, owner_account_id="A:u1")["name"] == "旧团队"
+
+
+def test_external_team_copy_skipped_when_target_has_rows(tmp_path):
+    """域级 gate 相互独立：team 库已有行则 team 域整体跳过（不合并旧行、
+    不触碰旧库），external 库为空则 external 域照常复制。"""
+
+    legacy_db = tmp_path / "crew.db"
+    external_db = tmp_path / "external.db"
+    team_db = tmp_path / "team.db"
+    seed = _seed_legacy_external_and_team_rows(legacy_db)
+
+    first = TeamExternalAgentStore(str(external_db), team_db_path=str(team_db))
+    fresh_team = first.create_team(
+        owner_account_id="B:u2",
+        name="新装团队",
+        leader_agent_id=CREW_BUILTIN_AGENT_ID,
+        members=[],
+    )
+
+    again = TeamExternalAgentStore(
+        str(external_db), team_db_path=str(team_db), legacy_db_path=str(legacy_db)
+    )
+    assert again.get_team(fresh_team["id"], owner_account_id="B:u2") is not None
+    with pytest.raises(KeyError):
+        again.get_team(seed.team_id, owner_account_id="A:u1")  # 旧 team 行未并入
+    assert _count(team_db, "external_team") == 1
+    assert _count(legacy_db, "external_team") == 1  # 旧库未被触碰
+    # external 库此场景为空：external 域独立照常复制
+    assert _count(external_db, "external_agent") == 1
+
+
+def test_external_team_copy_skipped_when_legacy_missing_or_lacks_tables(tmp_path):
+    """旧库文件缺失或旧库没有两域表：安全跳过，不报错不复制。"""
+
+    external_db = tmp_path / "external.db"
+    team_db = tmp_path / "team.db"
+    TeamExternalAgentStore(
+        str(external_db),
+        team_db_path=str(team_db),
+        legacy_db_path=str(tmp_path / "not_exists.db"),
+    )
+    assert _count(team_db, "external_team") == 0
+
+    legacy_only_sessions = tmp_path / "legacy_main.db"
+    sessions = SQLiteSessionStore(str(legacy_only_sessions))
+    sessions.save("s1", [Message.user("hi")], owner_account_id="A:u1")
+    sessions.close()
+
+    TeamExternalAgentStore(
+        str(tmp_path / "external2.db"),
+        team_db_path=str(tmp_path / "team2.db"),
+        legacy_db_path=str(legacy_only_sessions),
+    )
+    assert _count(tmp_path / "team2.db", "external_team") == 0
+    assert _count(tmp_path / "external2.db", "external_agent") == 0
+    assert _count(legacy_only_sessions, "sessions") == 1
+
+
+def test_split_copy_backfills_member_snapshots_against_legacy_first(tmp_path):
+    """快照回填处置（迁移时序方案）的行为锁定：分库复制前先在旧库完成
+    成员快照回填——两命名空间此刻仍同库，回填语义与拆库前一致；复制进
+    team 库的成员行因此与同库布局等价（空快照行被补齐）。"""
+
+    legacy_db = tmp_path / "crew.db"
+    external_db = tmp_path / "external.db"
+    team_db = tmp_path / "team.db"
+    seed = _seed_legacy_external_and_team_rows(legacy_db)
+    # 制造 legacy 空快照行（模拟快照列引入前写入的成员行）
+    with closing(sqlite3.connect(legacy_db)) as conn:
+        conn.execute(
+            "UPDATE external_team_member SET agent_name = '', agent_provider = ''"
+        )
+        conn.commit()
+
+    store = TeamExternalAgentStore(
+        str(external_db), team_db_path=str(team_db), legacy_db_path=str(legacy_db)
+    )
+
+    member = store.get_team(seed.team_id, owner_account_id="A:u1")["members"][0]
+    assert member["agent_name"] == "外援甲"
+    assert member["agent_provider"] == "kimi"
+    # 旧库行同步被回填（复制前的等价执行点，幂等只填空快照）
+    with closing(sqlite3.connect(legacy_db)) as conn:
+        legacy_row = conn.execute(
+            "SELECT agent_name, agent_provider FROM external_team_member"
+        ).fetchone()
+    assert legacy_row == ("外援甲", "kimi")
+
+
+def test_team_schema_init_skips_cross_namespace_backfill_when_split(tmp_path):
+    """分库后 team 库没有 external_agent 表：快照回填守卫按 sqlite_master
+    存在性跳过，重复构造不再触发跨命名空间 SQL（旧实现会抛 no such table）；
+    无从解析的空快照行保持原样，读侧 builtin 回退语义不变。"""
+
+    external_db = tmp_path / "external.db"
+    team_db = tmp_path / "team.db"
+    store = TeamExternalAgentStore(str(external_db), team_db_path=str(team_db))
+    team = store.create_team(
+        owner_account_id="A:u1",
+        name="内置团队",
+        leader_agent_id=CREW_BUILTIN_AGENT_ID,
+        members=[],
+    )
+    with closing(sqlite3.connect(team_db)) as conn:
+        conn.execute(
+            "UPDATE external_team_member SET agent_name = '', agent_provider = ''"
+        )
+        conn.commit()
+
+    again = TeamExternalAgentStore(
+        str(external_db),
+        team_db_path=str(team_db),
+        legacy_db_path=str(tmp_path / "missing.db"),
+    )
+    member = again.get_team(team["id"], owner_account_id="A:u1")["members"][0]
+    assert member["agent_id"] == CREW_BUILTIN_AGENT_ID
+    with closing(sqlite3.connect(team_db)) as conn:
+        row = conn.execute(
+            "SELECT agent_name, agent_provider FROM external_team_member"
+        ).fetchone()
+    assert row == ("", "")
+
+
+def test_legacy_owner_scan_targets_route_external_and_team_tables(tmp_path):
+    """claim-legacy 扫描结构：external/team 两域按 kanban 显式语义登记——
+    显式传参才有条目、缺省不进任何条目、回退配置并入同一文件条目。"""
+
+    main_db = tmp_path / "crew.db"
+    cron_db = tmp_path / "cron.db"
+    work_db = tmp_path / "work.db"
+    kanban_db = tmp_path / "kanban.db"
+    external_db = tmp_path / "external.db"
+    team_db = tmp_path / "team.db"
+
+    targets = legacy_owner_scan_targets(
+        main_db, cron_db, work_db, kanban_db, external_db, team_db
+    )
+    assert set(targets) == {main_db, cron_db, work_db, kanban_db, external_db, team_db}
+    assert set(targets[external_db]) == set(EXTERNAL_DB_TABLES)
+    assert set(targets[team_db]) == set(TEAM_DB_TABLES)
+    domain_tables = set(EXTERNAL_DB_TABLES) | set(TEAM_DB_TABLES)
+    assert set(targets[main_db]).isdisjoint(domain_tables)
+
+    # 生产形状（不传 external/team 路径）：两域不登记进任何条目
+    default_targets = legacy_owner_scan_targets(main_db, cron_db, work_db)
+    assert set(default_targets) == {main_db, cron_db, work_db}
+    assert all(
+        set(tables).isdisjoint(domain_tables) for tables in default_targets.values()
+    )
+
+    # 回退配置（两域指回主库同一文件）：按回退语义并入该条目
+    db = tmp_path / "fallback.db"
+    merged = legacy_owner_scan_targets(db, db, db, db, db, db)
+    assert set(merged) == {db}
+    assert set(merged[db]) >= {"sessions", *EXTERNAL_DB_TABLES, *TEAM_DB_TABLES}
+
+
+def test_migrate_external_and_team_feature_stamp_own_dbs(tmp_path):
+    """`migrate feature external` / `team` 的版本表各自 stamp 到自己的库。"""
+
+    from crew.cli.management import _migrate_external, _migrate_team
+
+    app = SimpleNamespace(
+        config=SimpleNamespace(
+            db_path=str(tmp_path / "crew.db"),
+            external_db_path=str(tmp_path / "external.db"),
+            team_db_path=str(tmp_path / "team.db"),
+            sqlite_wal=False,
+        )
+    )
+
+    external_report = _migrate_external(app)
+    assert external_report.feature == EXTERNAL_SCHEMA_FEATURE
+    assert external_report.current_version == EXTERNAL_SCHEMA_VERSION
+    assert external_report.target_version == EXTERNAL_SCHEMA_VERSION
+
+    team_report = _migrate_team(app)
+    assert team_report.feature == TEAM_SCHEMA_FEATURE
+    assert team_report.current_version == TEAM_SCHEMA_VERSION
+    assert team_report.target_version == TEAM_SCHEMA_VERSION
+
+    assert (tmp_path / "external.db").exists()
+    assert (tmp_path / "team.db").exists()
+    assert not (tmp_path / "crew.db").exists()
+    with closing(sqlite3.connect(tmp_path / "external.db")) as conn:
+        assert (
+            conn.execute(
+                "SELECT version FROM external_schema_version WHERE singleton = 1"
+            ).fetchone()[0]
+            == EXTERNAL_SCHEMA_VERSION
+        )
+    with closing(sqlite3.connect(tmp_path / "team.db")) as conn:
+        assert (
+            conn.execute(
+                "SELECT version FROM team_schema_version WHERE singleton = 1"
+            ).fetchone()[0]
+            == TEAM_SCHEMA_VERSION
+        )
 
 
 if __name__ == "__main__":

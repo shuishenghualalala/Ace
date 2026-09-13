@@ -1215,6 +1215,8 @@ def _claim_legacy(args: Any, ctx: CliContext) -> CliResult:
     # 不传 kanban_db_path（有意缺省）：通用认领会改写 kanban_workflows 的
     # legacy_ambiguous 歧义行，接入需先补全 kanban 专用认领语义
     # （见 _migration.KANBAN_DB_TABLES 注释）。
+    # 不传 external/team 路径（有意缺省）：两域表不在 OWNER_TABLE_LABELS，
+    # owner 归一由各自 store 构造时自带（见 _migration.EXTERNAL_DB_TABLES 注释）。
     targets = legacy_owner_scan_targets(
         app.config.db_path, app.config.cron_db_path, app.config.work_db_path
     )
@@ -1313,12 +1315,38 @@ def _migrate_kanban(app: Any) -> FeatureMigrationReport:
     )
 
 
+def _migrate_external(app: Any) -> FeatureMigrationReport:
+    from crew.team.external_store import EXTERNAL_SCHEMA_FEATURE, EXTERNAL_SCHEMA_VERSION
+
+    # external 已拆独立库（ADR-0038）：版本表 stamp 到 external 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=EXTERNAL_SCHEMA_FEATURE,
+        latest_version=EXTERNAL_SCHEMA_VERSION,
+        db_path=app.config.external_db_path,
+    )
+
+
+def _migrate_team(app: Any) -> FeatureMigrationReport:
+    from crew.team.external_store import TEAM_SCHEMA_FEATURE, TEAM_SCHEMA_VERSION
+
+    # team 已拆独立库（ADR-0038）：版本表 stamp 到 team 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=TEAM_SCHEMA_FEATURE,
+        latest_version=TEAM_SCHEMA_VERSION,
+        db_path=app.config.team_db_path,
+    )
+
+
 # Feature → 迁移入口注册表：新 Feature 接入版本化迁移只需在这里加一行，
 # CLI 不写 if 链。入口接收 app，负责把该 Feature 的版本表弄就绪并返回快照。
 FEATURE_MIGRATIONS: dict[str, FeatureMigrator] = {
     "work": _migrate_work,
     "cron": _migrate_cron,
     "kanban": _migrate_kanban,
+    "external": _migrate_external,
+    "team": _migrate_team,
 }
 
 

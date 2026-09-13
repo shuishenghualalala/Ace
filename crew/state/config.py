@@ -207,6 +207,11 @@ class Config:
     work_db_path: str = "crew_data/work.db"
     # dynamic-kanban Feature 独立库（ADR-0038 拆库第三批）：与主库分文件，回退时把本键指回 crew.db 即可
     kanban_db_path: str = "crew_data/kanban.db"
+    # external-agents / team Feature 独立库（ADR-0038 拆库第四批，一次双库）：
+    # external_* 4 表归 external.db、external_team* 2 表归 team.db；
+    # 回退时把对应键指回 crew.db 即可
+    external_db_path: str = "crew_data/external.db"
+    team_db_path: str = "crew_data/team.db"
     log_level: str = "INFO"
     log_file: str = ""  # 空=不写文件；填路径则同时写文件（支持 ~ 展开）
     llm_trace: bool = True  # 是否把每次 LLM 收发全量写入 {crew_home}/logs/llm.jsonl，便于排查
@@ -1498,6 +1503,8 @@ def load_config(config_path: str | Path | None = None) -> Config:
         cfg.cron_db_path = runtime.get("cron_db_path", cfg.cron_db_path)
         cfg.work_db_path = runtime.get("work_db_path", cfg.work_db_path)
         cfg.kanban_db_path = runtime.get("kanban_db_path", cfg.kanban_db_path)
+        cfg.external_db_path = runtime.get("external_db_path", cfg.external_db_path)
+        cfg.team_db_path = runtime.get("team_db_path", cfg.team_db_path)
         cfg.log_level = runtime.get("log_level", cfg.log_level)
         cfg.log_file = runtime.get("log_file", cfg.log_file)
         cfg.crew_home = runtime.get("crew_home", cfg.crew_home)
@@ -1907,5 +1914,15 @@ def load_config(config_path: str | Path | None = None) -> Config:
         if not kanban_path.is_absolute():
             kanban_path = home / kanban_path
         cfg.kanban_db_path = str(kanban_path)
+    if cfg.external_db_path:
+        external_path = Path(cfg.external_db_path).expanduser()
+        if not external_path.is_absolute():
+            external_path = home / external_path
+        cfg.external_db_path = str(external_path)
+    if cfg.team_db_path:
+        team_path = Path(cfg.team_db_path).expanduser()
+        if not team_path.is_absolute():
+            team_path = home / team_path
+        cfg.team_db_path = str(team_path)
 
     return cfg

@@ -2295,6 +2295,9 @@ class CrewApp:
             # kanban_workflows 的 legacy_ambiguous 歧义行（owner=''）改写/清除，
             # 破坏 store 隔离留给人工认领的语义；接入需先补全 kanban 专用
             # 认领逻辑（见 _migration.KANBAN_DB_TABLES 注释）。
+            # 不传 external/team 路径（有意缺省）：两域 6 表均不在
+            # OWNER_TABLE_LABELS，owner 归一由各自 store 构造时自带；
+            # 显式登记仅供未来域专用认领工具消费。
             counts, backfilled = inspect_and_backfill_legacy_owners(
                 legacy_owner_scan_targets(
                     self.config.db_path,
@@ -3727,8 +3730,15 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     external_feature = build_external_agent_feature(
         app,
         registry=registry,
+        # external 域 4 表在 crew_data/external.db、team 域 2 表在
+        # crew_data/team.db（ADR-0038 第四批，一次双库）；legacy_db_path 触发
+        # copy-on-first-activate：crew.db 里若还有旧表且分库为空，则分域单事务
+        # 整表复制，旧行保留作回退备份。唯一构造点在 catalog_factory，team
+        # feature 经 external_store_provider 动态解析同一门面实例。
         catalog_factory=lambda: TeamExternalAgentStore(
-            cfg.db_path,
+            _resolve_crew_home_path(cfg.external_db_path),
+            team_db_path=_resolve_crew_home_path(cfg.team_db_path),
+            legacy_db_path=cfg.db_path,
             # 跨 Feature 生命周期经动态解析的 Catalog 走显式接口；
             # external-agents Generation 未激活时门面 fail-closed。
             external_catalog_provider=app.current_external_catalog,

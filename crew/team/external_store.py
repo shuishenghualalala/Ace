@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -18,8 +19,26 @@ from crew.agent.external.catalog import (
 )
 from crew.agent.external.capabilities import normalize_capabilities
 from crew.agent.external.store import ExternalAgentStore
-from crew.state._migration import backfill_empty_owner_rows
+from crew.state._migration import (
+    EXTERNAL_DB_TABLES,
+    TEAM_DB_TABLES,
+    backfill_empty_owner_rows,
+)
+from crew.state.logging import get_logger
+from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
+from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 from crew.team.roles import infer_role_key, role_preset
+
+log = get_logger("team.external_store")
+
+# Feature 级 schema 版本（6H）：external / team 两域各自一张单行版本表，
+# 当前结构登记为基线 v1；表结构演进在各自号上递增并配迁移步骤。
+# 常量放在门面（与 cron/kanban 同法，避免循环导入）：external 域的
+# ensure-schema 在子包 ExternalAgentStore 内，stamp 由门面代持。
+EXTERNAL_SCHEMA_FEATURE = "external"
+EXTERNAL_SCHEMA_VERSION = 1
+TEAM_SCHEMA_FEATURE = "team"
+TEAM_SCHEMA_VERSION = 1
 
 
 def _now() -> str:
@@ -34,6 +53,10 @@ class TeamExternalAgentStore:
     instance and forwarded via ``__getattr__``; the facade only adds its own
     Team namespace and the membership-guarded ``delete_agent``. This keeps the
     team package free of implementation inheritance from the external store.
+
+    Since ADR-0038, the two namespaces can live in separate database files
+    (external.db / team.db); a single-path construction keeps the legacy
+    combined layout.
     """
 
     # 命名空间约定：跨 Feature 不建外键。leader_agent_id / agent_id 只是普通
@@ -64,15 +87,117 @@ class TeamExternalAgentStore:
         self,
         db_path: str,
         *,
+        team_db_path: str | None = None,
+        legacy_db_path: str | None = None,
         external_catalog_provider: Callable[[], ExternalAgentLifecycle | None] | None = None,
     ) -> None:
+        """``db_path`` 承载 external 命名空间（4 表），``team_db_path`` 承载
+        team 命名空间（2 表，ADR-0038 拆库第四批）。
+
+        ``team_db_path`` 缺省回落 ``db_path``：旧的单路径构造（嵌入宿主/测试）
+        保持两命名空间同库的布局，同库 SQL 与既有行为不变。
+        ``legacy_db_path`` 触发 copy-on-first-activate：分库为空时从旧主库
+        分域整表复制（见 :meth:`_migrate_legacy_rows`），重复构造幂等。
+        """
         self.db_path = str(Path(db_path).expanduser())
+        self._team_db_path = str(
+            Path(team_db_path if team_db_path is not None else db_path).expanduser()
+        )
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        # 先建 external 命名空间（catalog 角色的存储面），再建 team 命名空间：
-        # 成员快照回填是唯一的 legacy external 行读取点，依赖 catalog 表先行就绪。
+        Path(self._team_db_path).parent.mkdir(parents=True, exist_ok=True)
+        # 先建 external 命名空间（catalog 角色的存储面）并 stamp 其版本表，
+        # 再建 team 命名空间：成员快照回填是唯一的 legacy external 行读取点，
+        # 依赖 catalog 表先行就绪（分库布局下该读取点已前移到复制前的旧库，
+        # 见 _prepare_legacy_member_snapshots）。
         self._catalog = ExternalAgentStore(self.db_path)
+        self._stamp_external_schema_version()
         self._external_catalog_provider = external_catalog_provider
         self._init_team_schema()
+        if legacy_db_path is not None:
+            self._migrate_legacy_rows(Path(legacy_db_path))
+
+    def _stamp_external_schema_version(self) -> None:
+        """external 域版本表 stamp 到 external 库（幂等；子包 ensure-schema 之后）。"""
+
+        self._write_on(
+            self.db_path,
+            lambda conn: stamp_baseline(
+                conn, EXTERNAL_SCHEMA_FEATURE, version=EXTERNAL_SCHEMA_VERSION
+            ),
+        )
+
+    def _migrate_legacy_rows(self, legacy_path: Path) -> None:
+        """copy-on-first-activate：分库为空时从旧主库分域整表复制（ADR-0038）。
+
+        external 域 4 表复制进 external 库、team 域 2 表复制进 team 库：两域
+        各自域级 gate（目标库任一表已有行即整体跳过，重复构造幂等零重复）、
+        各自单事务不半写（复制助手内 SAVEPOINT 保证）；旧表保留在旧库不删
+        （回退备份）。回退配置把域库指回旧库同一文件时该域直接跳过。
+        team 域复制前先在旧库完成成员快照回填（见
+        _prepare_legacy_member_snapshots），保证复制进 team 库的行与拆库前
+        同库布局下的行等价。
+        """
+
+        if legacy_path.resolve() != Path(self.db_path).resolve():
+            copied = self._write_on(
+                self.db_path,
+                lambda conn: copy_legacy_feature_rows(
+                    legacy_path, conn, EXTERNAL_DB_TABLES
+                ),
+            )
+            if any(copied.values()):
+                log.info("已从 %s 迁移 external 历史数据: %s", legacy_path, copied)
+        if legacy_path.resolve() != Path(self._team_db_path).resolve():
+            self._prepare_legacy_member_snapshots(legacy_path)
+            copied = self._write_on(
+                self._team_db_path,
+                lambda conn: copy_legacy_feature_rows(legacy_path, conn, TEAM_DB_TABLES),
+            )
+            if any(copied.values()):
+                log.info("已从 %s 迁移 team 历史数据: %s", legacy_path, copied)
+
+    def _prepare_legacy_member_snapshots(self, legacy_path: Path) -> None:
+        """复制前在旧库完成成员快照回填——快照回填在分库布局下的等价执行点。
+
+        成员快照回填的 SQL 读同库 external_agent 行（team 命名空间对 external
+        命名空间唯一的跨域读）。分库后 team 库不再有 external_agent，于是把
+        这次回填提前到复制之前的旧库上执行：两命名空间此刻仍同库，回填语义
+        （只填空快照行，幂等）与拆库前完全一致。旧库缺任一相关表、或 team 域
+        目标库已有行（复制将被域级 gate 跳过）时不触碰旧库，保持回退备份冻结。
+        """
+
+        if not self._legacy_has_snapshot_tables(legacy_path):
+            return
+        if not self._team_domain_is_empty():
+            return
+        conn = sqlite3.connect(legacy_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            self._backfill_member_agent_snapshots(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _legacy_has_snapshot_tables(legacy_path: Path) -> bool:
+        conn = sqlite3.connect(legacy_path)
+        try:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
+                "('external_team', 'external_team_member', 'external_agent')"
+            ).fetchall()
+        finally:
+            conn.close()
+        return len(rows) == 3
+
+    def _team_domain_is_empty(self) -> bool:
+        """team 域目标库是否没有任何行（与 copy_legacy_feature_rows 的域级 gate 一致）。"""
+
+        with self._conn() as conn:
+            return all(
+                int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) == 0
+                for table in TEAM_DB_TABLES
+            )
 
     def __getattr__(self, name: str) -> Any:
         """Forward the catalog surface to the composed ``ExternalAgentStore``.
@@ -109,9 +234,17 @@ class TeamExternalAgentStore:
         return catalog
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self._team_db_path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _write_on(self, db_path: str, operation: Callable[[sqlite3.Connection], Any]) -> Any:
+        """在指定库上以写事务执行一次操作（版本 stamp / 域级复制共用出口）。"""
+        conn = connect_sqlite(db_path, wal_enabled=False)
+        try:
+            return SQLiteWriteHelper(conn, threading.Lock()).execute(operation)
+        finally:
+            conn.close()
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -162,6 +295,9 @@ class TeamExternalAgentStore:
             backfill_empty_owner_rows(conn, ["external_team"])
             self._backfill_member_agent_snapshots(conn)
             self._migrate_embedded_formation_plans(conn)
+            # 6H：team 域 schema 版本登记（幂等），先于 legacy 行复制，
+            # 保证 copy-on-first-activate 的 gate 顺序（ensure-schema → stamp → copy）。
+            stamp_baseline(conn, TEAM_SCHEMA_FEATURE, version=TEAM_SCHEMA_VERSION)
 
     @staticmethod
     def _drop_cross_feature_foreign_keys(conn, table: str, ddl_template: str) -> bool:
@@ -201,7 +337,15 @@ class TeamExternalAgentStore:
         rows: legacy members with empty snapshots are resolved through the
         same owner-scoped lookup the removed LEFT JOIN used. Rows created
         after this migration carry write-time snapshots and stay untouched.
+
+        分库布局（ADR-0038）下 team 库没有 external_agent 表，本回填整体
+        跳过——等价执行点移到复制前的旧库（_prepare_legacy_member_snapshots）；
+        两命名空间同库的布局（旧的单路径构造、回退配置）照常执行。
         """
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'external_agent'"
+        ).fetchone() is None:
+            return
         owners = conn.execute(
             "SELECT DISTINCT owner_account_id FROM external_team"
         ).fetchall()
