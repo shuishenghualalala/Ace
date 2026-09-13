@@ -301,8 +301,10 @@ Key directories:
 | `crew/providers` | OpenAI-compatible and Anthropic model adapters |
 | `crew/agent` | Agent conversation loop, planning, compaction, and sub-agents |
 | `crew.agent.external` (member package `packages/crew-external-agents`) | External Runtime, Agent, and Team adapters |
-| `crew/team` | Multi-agent teams and collaboration orchestration |
-| `crew/dynamickanban` | Dynamic Kanban and task-graph orchestration |
+| `crew.team` (member package `packages/crew-team`) | Multi-agent teams and collaboration orchestration |
+| `crew.dynamickanban` (member package `packages/crew-dynamickanban`) | Dynamic Kanban and task-graph orchestration |
+| `crew.channels` (member package `packages/crew-channels`) | Messaging channel adapters, delivery, and session routing |
+| `crew.work` (member package `packages/crew-work`) | Office assistant domain (items, briefs, preferences, knowledge) |
 | `crew/evolution` | Experimental trajectory extraction, skill optimization, and generation |
 | `crew/browser` | In-app browser lifecycle, control, and security boundaries |
 | `crew/memory` | Local persistent memory |

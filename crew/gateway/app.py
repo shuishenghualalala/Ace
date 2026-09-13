@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from crew.app import CrewApp, build_app
-from crew.channels import CHANNELS_SERVICE_KEY
+from crew.channels.feature import CHANNELS_SERVICE_KEY
 from crew.channels.broadcast import make_broadcasting_handler
 from crew.gateway.auth import (
     AuthenticationError,
@@ -128,7 +128,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     channel_manager = crew.channel_manager
     delivery_router = crew.delivery_router
     if channel_manager is None or delivery_router is None:
-        from crew.channels import build_channels_feature
+        from crew.channels.feature import build_channels_feature
 
         fallback = build_channels_feature(
             crew,

@@ -108,7 +108,9 @@ async def test_work_route_binding_fails_closed_instead_of_drifting_generation():
 
 def test_legacy_work_router_is_only_a_compatibility_import():
     assert legacy_create_work_router is create_work_router
-    source = ast.parse(Path("crew/work/routes.py").read_text(encoding="utf-8"))
+    # ADR-0037（6Y）：work 迁至 workspace 成员包 packages/crew-work/src/crew/work/。
+    member_root = Path(__file__).resolve().parents[2] / "packages" / "crew-work" / "src"
+    source = ast.parse((member_root / "crew" / "work" / "routes.py").read_text(encoding="utf-8"))
     imports = {
         alias.name
         for node in ast.walk(source)

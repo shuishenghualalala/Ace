@@ -65,15 +65,24 @@ RUN pip install --no-cache-dir \
     pyinstaller
 
 # 源码拷贝（代码变更只影响这一层及以下，依赖层保持缓存）
-# ADR-0037：wiki（6P）与 external agents（6Q）位于 uv workspace 成员包 packages/*，
-# import 名保持 crew.wiki / crew.agent.external。
+# ADR-0037：wiki（6P）、external agents（6Q）与 team/dynamickanban/channels/work（6Y）
+# 位于 uv workspace 成员包 packages/*，import 名保持 crew.* 前缀。
 # pip 安装用 --no-deps，成员对根包 crew 的依赖由同仓多个发行版同时装入 site-packages 满足。
 COPY crew ./crew
 COPY packages/crew-wiki/pyproject.toml ./packages/crew-wiki/pyproject.toml
 COPY packages/crew-wiki/src ./packages/crew-wiki/src
 COPY packages/crew-external-agents/pyproject.toml ./packages/crew-external-agents/pyproject.toml
 COPY packages/crew-external-agents/src ./packages/crew-external-agents/src
-RUN pip install --no-cache-dir --no-deps . ./packages/crew-wiki ./packages/crew-external-agents
+COPY packages/crew-team/pyproject.toml ./packages/crew-team/pyproject.toml
+COPY packages/crew-team/src ./packages/crew-team/src
+COPY packages/crew-dynamickanban/pyproject.toml ./packages/crew-dynamickanban/pyproject.toml
+COPY packages/crew-dynamickanban/src ./packages/crew-dynamickanban/src
+COPY packages/crew-channels/pyproject.toml ./packages/crew-channels/pyproject.toml
+COPY packages/crew-channels/src ./packages/crew-channels/src
+COPY packages/crew-work/pyproject.toml ./packages/crew-work/pyproject.toml
+COPY packages/crew-work/src ./packages/crew-work/src
+RUN pip install --no-cache-dir --no-deps . ./packages/crew-wiki ./packages/crew-external-agents \
+    ./packages/crew-team ./packages/crew-dynamickanban ./packages/crew-channels ./packages/crew-work
 
 COPY config ./config
 COPY plugins ./plugins

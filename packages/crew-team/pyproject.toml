@@ -1,0 +1,33 @@
+[project]
+name = "crew-team"
+version = "0.1.0"
+description = "Crew team feature package - 多智能体 Team 与协作编排（import 名保持 crew.team，ADR-0037 第三批 workspace 成员）"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+# 依赖根包 crew（workspace 源）：team 的 core 契约（crew.core.interfaces）、
+# 状态设施（crew.state）、agent 运行时设施（crew.agent.runtime/executor 等）
+# 与宿主装配协议仍在根包；外部 agent 目录（crew.agent.external，ADR-0036 解耦后
+# 的数据边界）已随 6Q 成员包 crew-external-agents 发布，team 的
+# external_store/agent_profile 等模块级直连引用它，故同列 workspace 成员依赖。
+dependencies = [
+    "crew",
+    "crew-external-agents",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# 打包 src/crew 整层（editable 安装时 hatchling 会把 src/ 加进 sys.path，
+# 使顶层 crew 命名空间同时包含仓库根与成员 src 两部分）；src/crew 下只有 team，
+# 故 wheel 内容即 crew/team/**（纯 .py，无附加资产）。
+# 成员侧 crew/ 目录不放 __init__.py：纯 PEP 420 namespace portion，
+# 与根包的顶层 crew 命名空间（6P）同型；crew/team/ 亦不设 __init__.py，
+# 原 re-export 的消费方已改直连子模块导入（6Y）。
+[tool.hatch.build.targets.wheel]
+packages = ["src/crew"]
+
+[tool.uv.sources]
+# crew 即 workspace 根包（仓库根 pyproject），仅从 workspace 解析。
+crew = { workspace = true }
+crew-external-agents = { workspace = true }

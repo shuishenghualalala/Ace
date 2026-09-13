@@ -96,9 +96,12 @@ command -v hdiutil >/dev/null || { echo "❌ 未找到 hdiutil（应为 macOS �
 # ----- 1) PyInstaller 打包 crew-gateway -----
 echo ""
 echo "→ [1/6] PyInstaller 打包 crew-gateway..."
-# ADR-0037：wiki（6P）与 external agents（6Q）位于 uv workspace 成员包 packages/*，
-# 与根包一并 --no-deps 安装，保证 PyInstaller 分析时 crew.wiki / crew.agent.external 可解析。
-venv_pip_install --no-deps . ./packages/crew-wiki ./packages/crew-external-agents
+# ADR-0037：wiki（6P）、external agents（6Q）与 team/dynamickanban/channels/work（6Y）
+# 位于 uv workspace 成员包 packages/*，与根包一并 --no-deps 安装，
+# 保证 PyInstaller 分析时 crew.wiki / crew.agent.external / crew.team /
+# crew.dynamickanban / crew.channels / crew.work 可解析。
+venv_pip_install --no-deps . ./packages/crew-wiki ./packages/crew-external-agents \
+    ./packages/crew-team ./packages/crew-dynamickanban ./packages/crew-channels ./packages/crew-work
 rm -rf dist build
 .venv/bin/pyinstaller --name crew-gateway \
     --onedir --noconfirm --clean \

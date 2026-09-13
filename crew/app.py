@@ -96,7 +96,7 @@ from crew.state.session_store import SQLiteSessionStore
 from crew.state.workspace_store import SQLiteWorkspaceStore
 from crew.tasks import TaskRuntime
 from crew.tasks.context import contribute_task_notifications
-from crew.channels import CHANNELS_SERVICE_KEY
+from crew.channels.feature import CHANNELS_SERVICE_KEY
 from crew.team.feature import (
     TEAM_SERVICE_KEY,
     _run_team_execution_driver,
@@ -3760,7 +3760,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     app.channel_bindings = channel_bindings
     app.channel_session_routes = channel_session_routes
     app.plugin_prefs = plugin_prefs
-    from crew.channels import build_channels_feature
+    from crew.channels.feature import build_channels_feature
 
     channels_feature = build_channels_feature(
         app,
@@ -3856,7 +3856,8 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     )
 
     from crew.features.hooks import hook_registry
-    from crew.work import LLMPreferenceExtractor, build_work_feature
+    from crew.work.feature import build_work_feature
+    from crew.work.service import LLMPreferenceExtractor
 
     async def _notify_work_owner(owner_account_id: str, payload: dict[str, Any]) -> None:
         if app._notify_owner_fn is not None:
@@ -3939,7 +3940,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     from crew.tools.mcp_client import MCPClientManager
     app.mcp_manager = MCPClientManager(cfg.mcp_servers)
 
-    from crew.dynamickanban import build_dynamic_kanban_feature
+    from crew.dynamickanban.feature import build_dynamic_kanban_feature
 
     dk_feature = build_dynamic_kanban_feature(
         app,

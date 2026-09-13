@@ -31,6 +31,17 @@ dependencies = [
     # uv sync 只安装根包依赖闭包、不会自动装入 workspace 成员，此声明使
     # `uv sync --extra dev`（CI security 矩阵 / pack 脚本）下成员一并 editable 安装。
     "crew-external-agents",
+    # Team / Dynamic Kanban / Channels 自 ADR-0037（6Y）起随 workspace 成员包
+    # crew-team / crew-dynamickanban / crew-channels 发布（import 名保持
+    # crew.team / crew.dynamickanban / crew.channels）。app.py 顶层硬 import
+    # 三者的 feature/服务键模块，属核心依赖。
+    "crew-team",
+    "crew-dynamickanban",
+    "crew-channels",
+    # Work（办公助手）自 ADR-0037（6Y）起随成员包 crew-work 发布（import 名保持
+    # crew.work）。app.py 在 build_app 内无条件导入其 feature/service（非顶层但
+    # 启动必经），crew.cli.content 顶层引用其 service，同属核心依赖。
+    "crew-work",
 ]
 
 [project.optional-dependencies]
@@ -112,7 +123,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 # ── uv workspace（ADR-0037）：成员包位于 packages/*，共享单份 uv.lock ────────
-# 成员：crew-wiki（6P 试点）、crew-external-agents（6Q 第二批）；
+# 成员：crew-wiki（6P 试点）、crew-external-agents（6Q 第二批）、
+# crew-team / crew-dynamickanban / crew-channels / crew-work（6Y 第三批）。
 # 后续批次按评估报告 §5.2 顺序逐批迁入。
 # 顶层 crew 为 PEP 420 命名空间包（发行版间 import 名保持 crew.*）。
 [tool.uv.workspace]
@@ -121,6 +133,10 @@ members = ["packages/*"]
 [tool.uv.sources]
 crew-wiki = { workspace = true }
 crew-external-agents = { workspace = true }
+crew-team = { workspace = true }
+crew-dynamickanban = { workspace = true }
+crew-channels = { workspace = true }
+crew-work = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["crew"]

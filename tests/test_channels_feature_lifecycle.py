@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from crew.channels import (
+from crew.channels.feature import (
     CHANNELS_FEATURE_ID,
     CHANNELS_SERVICE_KEY,
     ChannelsService,

@@ -313,8 +313,10 @@ Skill 就是船员的职业技能包，装上就会，卸了就忘。仓库随�
 | `crew/providers` | OpenAI 兼容与 Anthropic 模型适配 |
 | `crew/agent` | Agent 对话循环、Plan、压缩与子智能体 |
 | `crew.agent.external`（成员包 `packages/crew-external-agents`） | 外部 Runtime、Agent 和 Team 适配 |
-| `crew/team` | 多智能体 Team 与协作编排 |
-| `crew/dynamickanban` | 动态看板和任务图编排 |
+| `crew.team`（成员包 `packages/crew-team`） | 多智能体 Team 与协作编排 |
+| `crew.dynamickanban`（成员包 `packages/crew-dynamickanban`） | 动态看板和任务图编排 |
+| `crew.channels`（成员包 `packages/crew-channels`） | 消息渠道适配、投递与会话路由 |
+| `crew.work`（成员包 `packages/crew-work`） | 办公助手业务域（事项、简报、偏好与知识） |
 | `crew/evolution` | 实验性轨迹提取、Skill 优化与生成 |
 | `crew/browser` | 应用内浏览器的生命周期、控制和安全边界 |
 | `crew/memory` | 本地持久记忆 |
