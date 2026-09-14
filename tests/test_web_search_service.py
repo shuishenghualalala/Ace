@@ -165,3 +165,48 @@ async def test_handler_uses_bocha_api_and_reports_fallback_chain(monkeypatch):
 
 async def _async_value(value):
     return value
+
+
+# ---------------------------------------------------------------------------
+# 注册即 effect：disposer 语义
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispose_removes_provider_and_is_idempotent():
+    provider = _provider("temp", results=[SearchResult(title="T", url="https://a.example")])
+    dispose = register_search_provider(provider)
+    configure_search({"providers": ["temp"]})
+
+    dispose()
+    assert dispose() is None  # 幂等：重复释放无副作用
+    with pytest.raises(ToolError, match="未注册的 provider"):
+        await search_with_fallback("q", 5, _CTX)
+
+
+@pytest.mark.asyncio
+async def test_dispose_after_reregister_does_not_remove_newer_entry():
+    old = _provider("dup", results=[SearchResult(title="old", url="https://a.example")])
+    old_dispose = register_search_provider(old)
+    new = _provider("dup", results=[SearchResult(title="new", url="https://b.example")])
+    register_search_provider(new)
+    configure_search({"providers": ["dup"]})
+
+    old_dispose()
+
+    outcome = await search_with_fallback("q", 5, _CTX)
+    assert outcome.provider_id == "dup"
+    assert outcome.results[0].title == "new"
+
+
+@pytest.mark.asyncio
+async def test_dispose_then_reregister_restores_provider():
+    provider = _provider("cycle", results=[SearchResult(title="T", url="https://a.example")])
+    dispose = register_search_provider(provider)
+    configure_search({"providers": ["cycle"]})
+    dispose()
+
+    register_search_provider(provider)
+
+    outcome = await search_with_fallback("q", 5, _CTX)
+    assert outcome.provider_id == "cycle"

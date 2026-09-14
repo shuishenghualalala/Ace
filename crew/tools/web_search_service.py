@@ -58,12 +58,28 @@ _CHAIN: list[str] | None = None
 _CONFIG: dict[str, Any] = {}
 
 
-def register_search_provider(provider: SearchProvider) -> None:
-    if provider.id in _PROVIDERS:
-        _PROVIDERS[provider.id] = provider
-        return
+def register_search_provider(provider: SearchProvider) -> Callable[[], None]:
+    """注册搜索 provider，返回 disposer（释放即注销，幂等）。
+
+    重复注册同 id 以新注册为准，旧 disposer 随之失效——释放只移除仍由
+    自己持有的条目，不会误删后来者。该 seam 迁移到 Feature Scope /
+    Service Registry 时，disposer 即 Registration Token 的语义载体。
+    """
+    if provider.id not in _PROVIDERS:
+        _PROVIDER_ORDER.append(provider.id)
     _PROVIDERS[provider.id] = provider
-    _PROVIDER_ORDER.append(provider.id)
+    return _disposer_for(provider)
+
+
+def _disposer_for(provider: SearchProvider) -> Callable[[], None]:
+    def dispose() -> None:
+        if _PROVIDERS.get(provider.id) is not provider:
+            return
+        del _PROVIDERS[provider.id]
+        if provider.id in _PROVIDER_ORDER:
+            _PROVIDER_ORDER.remove(provider.id)
+
+    return dispose
 
 
 def reset_search_providers() -> None:
