@@ -20,10 +20,13 @@ from crew.agent.loop import (
     ToolCallGuardrailConfig,
     ToolCallGuardrailController,
     TurnControl,
+    TOOL_NOT_STARTED,
+    TOOL_OUTCOME_UNKNOWN,
     is_context_overflow,
     is_empty_response,
     is_max_tokens_finish,
     provider_chain,
+    repair_orphan_tool_calls,
     should_continue,
     should_parallelize,
 )
@@ -570,6 +573,30 @@ async def test_loop_interrupt_strips_undispatched_tool_calls_from_history():
     assert assistant.content == "部分文本"
     assert assistant.tool_calls == []
     assert chunks[-1].kind == "final"
+
+
+def test_history_repair_two_semantics_and_idempotence():
+    """孤儿 tool_call 按执行痕迹合成两段语义 error 结果；重复扫描幂等。"""
+    started = ToolCall("c1", "file_write", {"path": "/tmp/a"}, status="running")
+    finished_no_result = ToolCall("c2", "terminal", {"command": "ls"}, duration=1.5)
+    not_started = ToolCall("c3", "file_read", {"path": "/tmp/b"})
+    answered = ToolCall("c4", "file_read", {"path": "/tmp/c"})
+    inline_result = ToolCall("c5", "browser_use", {"action": "snapshot"}, result="页面")
+    messages = [
+        Message.assistant("干活", [started, finished_no_result, not_started, answered, inline_result]),
+        Message.tool("c4", "已有结果", name="file_read"),
+    ]
+
+    repaired = repair_orphan_tool_calls(messages)
+
+    assert [m.tool_call_id for m in repaired] == ["c1", "c2", "c3"]
+    assert repaired[0].content.startswith(TOOL_OUTCOME_UNKNOWN)
+    assert repaired[1].content.startswith(TOOL_OUTCOME_UNKNOWN)  # duration 已写回 = 执行过
+    assert repaired[2].content.startswith(TOOL_NOT_STARTED)
+    assert all(m.role == "tool" for m in repaired)
+    # 输入不被修改；配平后的历史再次扫描为空（幂等，可安全持久化）
+    assert repair_orphan_tool_calls(messages) == repaired
+    assert repair_orphan_tool_calls(messages + repaired) == []
 
 
 async def test_loop_overflow_triggers_force_compact_then_succeeds():

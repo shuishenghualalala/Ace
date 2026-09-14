@@ -14,6 +14,11 @@
 from __future__ import annotations
 
 from crew.agent.loop.control import TurnControl
+from crew.agent.loop.history_repair import (
+    TOOL_NOT_STARTED,
+    TOOL_OUTCOME_UNKNOWN,
+    repair_orphan_tool_calls,
+)
 from crew.agent.loop.iteration_budget import IterationBudget
 from crew.agent.loop.resilience import (
     CONTINUATION_PROMPT,
@@ -59,4 +64,7 @@ __all__ = [
     "STREAM_INTERRUPT_STATUS_MESSAGE",
     "has_truncated_tool_args",
     "is_max_tokens_finish",
+    "TOOL_NOT_STARTED",
+    "TOOL_OUTCOME_UNKNOWN",
+    "repair_orphan_tool_calls",
 ]
