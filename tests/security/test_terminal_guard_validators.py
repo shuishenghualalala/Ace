@@ -7,6 +7,7 @@ hardline / dangerous 正则模式匹配。
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -556,13 +557,38 @@ def _check_terminal_layers(command: str) -> tuple[bool, str | None, str | None]:
 # 端到端测试：通过实际工具入口验证整条链路
 # ---------------------------------------------------------------------------
 
+class _FullAccessService:
+    """最小授权服务桩：FULL_ACCESS 模式下 authorize 直接放行。"""
+
+    db_path = Path("crew.db")
+    audit = None
+
+    @staticmethod
+    def mode_for(_context):
+        from crew.security.models import ConversationPermissionMode
+
+        return ConversationPermissionMode.FULL_ACCESS
+
+    @staticmethod
+    def authorize_exec_action(*_args, **_kwargs):
+        return True, None
+
+
 class TestE2ETerminalHandler:
     """端到端测试：直接调用 handle_terminal 验证整条命令执行链路。
 
-    不传 security_service，走简化路径：_check_terminal_command ->
-    如果 allowed=False 且 error_code != policy_denied -> 返回 error。
-    安全命令真正执行。
+    不传 security_service 时命令必须被拒（fail-closed）；安全命令在
+    FULL_ACCESS 服务桩下真正执行。
     """
+
+    @pytest.mark.asyncio
+    async def test_missing_security_service_refuses_execution(self) -> None:
+        from crew.tools.builtin import handle_terminal
+
+        result = await handle_terminal({"command": "echo ace_e2e_ok"}, timeout=5.0)
+        parsed = json.loads(result)
+        assert parsed["success"] is False
+        assert parsed["error_code"] == "approval_unavailable"
 
     @pytest.mark.asyncio
     async def test_hardline_blocked(self) -> None:
@@ -637,18 +663,60 @@ class TestE2ETerminalHandler:
         assert parsed["error_code"] == "approval_required"
 
     @pytest.mark.asyncio
-    async def test_safe_command_executes(self) -> None:
+    async def test_safe_command_executes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from crew.security.context import SecurityContext
         from crew.tools.builtin import handle_terminal
 
-        result = await handle_terminal({"command": "echo ace_e2e_ok"}, timeout=5.0)
+        context = SecurityContext(
+            os_user="os-a",
+            owner_account_id="owner-a",
+            workspace_id="project-a",
+            workspace_root=tmp_path,
+            session_id="session-a",
+            request_id="request-a",
+            task_id="task-a",
+            cwd=tmp_path,
+        )
+        monkeypatch.setattr("crew.security.context.build_security_context", lambda _store: context)
+        monkeypatch.setattr("crew.tools.builtin._resolve_base_dir", lambda: tmp_path)
+
+        result = await handle_terminal(
+            {"command": "echo ace_e2e_ok"},
+            timeout=5.0,
+            workspace_store=object(),
+            security_service=_FullAccessService(),
+        )
         parsed = json.loads(result)
         assert parsed["success"] is True
 
     @pytest.mark.asyncio
-    async def test_safe_pipe_command_executes(self) -> None:
+    async def test_safe_pipe_command_executes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from crew.security.context import SecurityContext
         from crew.tools.builtin import handle_terminal
 
-        result = await handle_terminal({"command": "echo hello | head -1"}, timeout=5.0)
+        context = SecurityContext(
+            os_user="os-a",
+            owner_account_id="owner-a",
+            workspace_id="project-a",
+            workspace_root=tmp_path,
+            session_id="session-a",
+            request_id="request-a",
+            task_id="task-a",
+            cwd=tmp_path,
+        )
+        monkeypatch.setattr("crew.security.context.build_security_context", lambda _store: context)
+        monkeypatch.setattr("crew.tools.builtin._resolve_base_dir", lambda: tmp_path)
+
+        result = await handle_terminal(
+            {"command": "echo hello | head -1"},
+            timeout=5.0,
+            workspace_store=object(),
+            security_service=_FullAccessService(),
+        )
         parsed = json.loads(result)
         assert parsed["success"] is True
 

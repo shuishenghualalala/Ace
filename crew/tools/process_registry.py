@@ -43,6 +43,7 @@ from crew.security.launch import (
     shell_argv,
 )
 from crew.security.models import serialize_additional_permissions
+from crew.tools.child_env import build_spawn_env
 from crew.tools.output_filters import strip_ansi
 from crew.tools.registry import tool_error
 
@@ -262,6 +263,14 @@ class ProcessRegistry:
         # 创建入口统一归一：注册表里不再产生无主会话，读取端（工具 handler）同样归一。
         owner_account_id = normalize_owner_account_id(owner_account_id)
         child_env, secret_values = self._child_env(owner_account_id)
+        env = build_spawn_env(child_env)
+        from crew.tools.redact import sensitive_env_values
+
+        # 白名单值也可能带机密形态（如带凭据的代理 URL 之外的名形匹配），
+        # 输出脱敏以最终派生环境为准。
+        secret_values = tuple(
+            dict.fromkeys([*secret_values, *sensitive_env_values(env)])
+        )
         session = ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}",
             command=command,
@@ -278,8 +287,6 @@ class ProcessRegistry:
             _security_action=_security_action,
         )
 
-        env = dict(os.environ)
-        env.update(child_env)
         popen_args: list[str] | str = command
         shell = True
         if _IS_WINDOWS:
@@ -476,7 +483,7 @@ class ProcessRegistry:
                 [sys.executable, "-I", "-c", _BACKGROUND_BRIDGE_LAUNCHER],
                 shell=False, text=True, encoding="utf-8", errors="replace", cwd=session.cwd,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                env=build_spawn_env({"PYTHONUNBUFFERED": "1"}),
                 preexec_fn=None if _IS_WINDOWS else os.setsid, creationflags=flags,
             )
         except Exception:

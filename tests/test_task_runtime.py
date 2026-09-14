@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +27,7 @@ from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.mocks import InMemorySessionStore
 from crew.core.types import ToolCall
 from crew.gateway.dispatcher import SessionDispatcher
+from crew.security.models import ConversationPermissionMode
 from crew.tasks.runtime import TaskRuntime
 from crew.tools.builtin import handle_terminal
 from crew.tools.process_registry import process_registry
@@ -282,8 +284,37 @@ async def test_wait_timeout_does_not_cancel_task(tmp_path):
     runtime.close()
 
 
+class _FullAccessSecurityService:
+    """最小授权服务桩：FULL_ACCESS 模式下 authorize 直接放行。"""
+
+    db_path = Path("crew.db")
+    audit = None
+
+    @staticmethod
+    def mode_for(_context):
+        return ConversationPermissionMode.FULL_ACCESS
+
+    @staticmethod
+    def authorize_exec_action(*_args, **_kwargs):
+        return True, None
+
+
 @pytest.mark.asyncio
-async def test_shell_auto_background_reuses_running_process(tmp_path):
+async def test_shell_auto_background_reuses_running_process(tmp_path, monkeypatch):
+    from crew.security.context import SecurityContext
+
+    context = SecurityContext(
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+        workspace_root=tmp_path,
+        session_id="shell-session",
+        request_id="req-1",
+        task_id="",
+        cwd=tmp_path,
+    )
+    monkeypatch.setattr("crew.security.context.build_security_context", lambda _store: context)
+    monkeypatch.setattr("crew.tools.builtin._resolve_base_dir", lambda: tmp_path)
     runtime = _runtime(tmp_path, auto_background_after=0.05)
     process_registry.configure_task_runtime(runtime)
     tok_sid = current_session_id.set("shell-session")
@@ -294,7 +325,9 @@ async def test_shell_auto_background_reuses_running_process(tmp_path):
             await handle_terminal(
                 {
                     "command": "echo start; sleep 0.2; echo end"
-                }
+                },
+                workspace_store=object(),
+                security_service=_FullAccessSecurityService(),
             )
         )
         assert payload["background"] is True

@@ -8,6 +8,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -19,7 +20,14 @@ from crew.security.approvals import (
     ApprovalManager,
     ApprovalOutcome,
 )
-from crew.security.audit import AuditEvent, SQLiteSecurityAudit, format_action_for_audit
+from crew.security.audit import (
+    _DURABLE_ACTION_TYPES,
+    AuditBufferFullError,
+    AuditEvent,
+    AuditWriteError,
+    SQLiteSecurityAudit,
+    format_action_for_audit,
+)
 from crew.security.context import SecurityContext
 from crew.security.file_policy import (
     FilePolicyResult,
@@ -173,6 +181,9 @@ class SecurityApprovalService:
         # 阻塞等待中的工具调用；decide/撤销时唤醒。把"审批请求"与"工具执行"重新接通，
         # 否则工具只能抛 ToolError 让模型复述，污染正文且 turn 结束后无人恢复。
         self._waiters = _ApprovalWaiter()
+        # 授权规则内存快照 + 审计异步队列：authorize_* 决策锁内只做内存操作。
+        self._rule_cache = _RuleSnapshotCache()
+        self._audit_sink = _AsyncAuditSink(audit)
         self._session_modes: dict[tuple[str, str, str, str], ConversationPermissionMode] = {}
         self._recent_rejections: dict[tuple[str, str, str, str], float] = {}
         # 通知钩子（由装配层注入）：新审批请求创建 / 请求被决策后触发；缺席时无影响
@@ -351,6 +362,35 @@ class SecurityApprovalService:
         self._notify_request_created(context, public)
         return public
 
+    def _cached_rules(self, context: SecurityContext) -> tuple[ActionRule, ...]:
+        """授权规则内存快照读取；写路径失效后下一次读取自动重建。"""
+        return self._rule_cache.get_or_load(
+            os_user=context.os_user,
+            owner_account_id=context.owner_account_id,
+            workspace_id=context.workspace_id,
+            include_disabled=False,
+            loader=lambda: self.rules.list(
+                os_user=context.os_user,
+                owner_account_id=context.owner_account_id,
+                workspace_id=context.workspace_id,
+            ),
+        )
+
+    def _invalidate_rule_cache(self, context: SecurityContext) -> None:
+        self._rule_cache.invalidate(
+            os_user=context.os_user,
+            owner_account_id=context.owner_account_id,
+            workspace_id=context.workspace_id,
+        )
+
+    def flush_audit(self) -> int:
+        """审计异步队列 flush barrier（关停与测试路径使用）。"""
+        return self._audit_sink.flush()
+
+    def close(self) -> None:
+        """退出前 barrier：排空审计异步队列；store 连接由装配层随后关闭。"""
+        self._audit_sink.close()
+
     def authorize_file_action(
         self,
         context: SecurityContext,
@@ -379,11 +419,7 @@ class SecurityApprovalService:
         # back after execution has already started (H-7).
         with self._decision_lock:
             session_permissions = self.grants.session_permissions(context)
-            rules = self.rules.list(
-                os_user=context.os_user,
-                owner_account_id=context.owner_account_id,
-                workspace_id=context.workspace_id,
-            )
+            rules = self._cached_rules(context)
             # Persisted DENY is explicit owner policy and must short-circuit base
             # allow, FULL_ACCESS, allow rules, and transient grants.
             if any(
@@ -466,11 +502,7 @@ class SecurityApprovalService:
         # cannot be consumed after the session ended (H-6).
         with self._decision_lock:
             session_permissions = self.grants.session_permissions(context)
-            rules = self.rules.list(
-                os_user=context.os_user,
-                owner_account_id=context.owner_account_id,
-                workspace_id=context.workspace_id,
-            )
+            rules = self._cached_rules(context)
             if any(
                 rule.decision is RuleDecision.DENY
                 and _rule_applies_to_tool(rule, tool_name)
@@ -573,11 +605,7 @@ class SecurityApprovalService:
     ) -> ExecAuthorization:
         """Authorize an exact command already initiated by an authenticated UI gesture."""
         with self._decision_lock:
-            rules = self.rules.list(
-                os_user=context.os_user,
-                owner_account_id=context.owner_account_id,
-                workspace_id=context.workspace_id,
-            )
+            rules = self._cached_rules(context)
             if any(
                 rule.decision is RuleDecision.DENY
                 and _rule_applies_to_tool(rule, tool_name)
@@ -607,11 +635,7 @@ class SecurityApprovalService:
             return ExecAuthorization(False)
         with self._decision_lock:
             session_permissions = self.grants.session_permissions(context)
-            rules = self.rules.list(
-                os_user=context.os_user,
-                owner_account_id=context.owner_account_id,
-                workspace_id=context.workspace_id,
-            )
+            rules = self._cached_rules(context)
             if any(
                 rule.decision is RuleDecision.DENY
                 and _rule_applies_to_tool(rule, tool_name)
@@ -671,7 +695,7 @@ class SecurityApprovalService:
         source: str,
         tool_name: str,
     ) -> None:
-        self.audit.record(
+        self._audit_sink.record(
             AuditEvent.for_action(
                 context,
                 action,
@@ -691,7 +715,7 @@ class SecurityApprovalService:
         source: str,
         tool_name: str,
     ) -> None:
-        self.audit.record(
+        self._audit_sink.record(
             AuditEvent.for_action(
                 context,
                 action,
@@ -711,7 +735,7 @@ class SecurityApprovalService:
         source: str,
         tool_name: str,
     ) -> None:
-        self.audit.record(
+        self._audit_sink.record(
             AuditEvent.for_action(
                 context,
                 action,
@@ -813,6 +837,8 @@ class SecurityApprovalService:
                     workspace_id=context.workspace_id,
                 )
                 stored_rule = True
+                # 先持久化 → 再改内存：规则创建成功后失效快照，下一次 authorize 重建。
+                self._invalidate_rule_cache(context)
             event_context = replace(context, request_id=outcome.request.request_id)
             self.audit.record(
                 AuditEvent.for_action(
@@ -852,6 +878,7 @@ class SecurityApprovalService:
                     owner_account_id=context.owner_account_id,
                     workspace_id=context.workspace_id,
                 )
+                self._invalidate_rule_cache(context)
             if outcome.grant is not None:
                 self.grants.revoke(outcome.grant.grant_id)
             raise
@@ -930,6 +957,8 @@ class SecurityApprovalService:
         )
         if not changed:
             return False
+        # 先持久化 → 再改内存：enabled 变更成功后失效快照。
+        self._invalidate_rule_cache(context)
         try:
             self.audit.record(
                 AuditEvent.for_rule(
@@ -947,6 +976,7 @@ class SecurityApprovalService:
                 owner_account_id=context.owner_account_id,
                 workspace_id=context.workspace_id,
             )
+            self._invalidate_rule_cache(context)
             raise
         return True
 
@@ -980,6 +1010,8 @@ class SecurityApprovalService:
         )
         if not changed:
             return False
+        # 先持久化 → 再改内存：删除成功后失效快照。
+        self._invalidate_rule_cache(context)
         try:
             self.audit.record(
                 AuditEvent.for_rule(
@@ -1004,6 +1036,7 @@ class SecurityApprovalService:
                     owner_account_id=context.owner_account_id,
                     workspace_id=context.workspace_id,
                 )
+            self._invalidate_rule_cache(context)
             raise
         return True
 
@@ -1019,6 +1052,141 @@ class SecurityApprovalService:
             "action_digest": outcome.request.action_digest,
             "decision": outcome.decision.value,
         }
+
+
+class _RuleSnapshotCache:
+    """授权规则内存快照：authorize_* 热路径不再每次读 SQLite。
+
+    写路径（decide 的规则创建/回滚、set_rule_enabled、delete_rule）在持久化
+    成功后失效对应 identity 的快照，下一次读取按「先持久化 → 再改内存」的
+    顺序重建。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._snapshots: dict[tuple[str, str, str, bool], tuple[ActionRule, ...]] = {}
+
+    def get_or_load(
+        self,
+        *,
+        os_user: str,
+        owner_account_id: str,
+        workspace_id: str,
+        include_disabled: bool,
+        loader: Callable[[], Sequence[ActionRule]],
+    ) -> tuple[ActionRule, ...]:
+        key = (os_user, owner_account_id, workspace_id, include_disabled)
+        with self._lock:
+            snapshot = self._snapshots.get(key)
+            if snapshot is None:
+                snapshot = tuple(loader())
+                self._snapshots[key] = snapshot
+            return snapshot
+
+    def invalidate(
+        self,
+        *,
+        os_user: str,
+        owner_account_id: str,
+        workspace_id: str,
+    ) -> None:
+        with self._lock:
+            for include_disabled in (False, True):
+                self._snapshots.pop(
+                    (os_user, owner_account_id, workspace_id, include_disabled),
+                    None,
+                )
+
+
+class _AsyncAuditSink:
+    """authorize_* 热路径的审计异步入队：后台 flush + 退出前 flush barrier。
+
+    只承载普通决策事件（file/exec/network_decision 等）；durable 事件仍走
+    ``SQLiteSecurityAudit.record`` 同步落盘——decide 的 grant/rule 发布与
+    fail-closed 回滚依赖落库结果，保持在决策锁内同步完成。
+    """
+
+    def __init__(
+        self,
+        audit: SQLiteSecurityAudit,
+        *,
+        max_pending: int = 4096,
+        flush_interval: float = 0.5,
+        flush_batch: int = 256,
+    ) -> None:
+        self._audit = audit
+        self._max_pending = max_pending
+        self._flush_batch = flush_batch
+        self._flush_interval = flush_interval
+        self._cv = threading.Condition()
+        self._pending: deque[tuple[AuditEvent, float]] = deque()
+        self._closed = False
+        self._flusher: threading.Thread | None = None
+
+    def record(self, event: AuditEvent) -> str:
+        """入队一条普通决策事件；队列满即抛（与同步路径的缓冲语义一致）。"""
+        if event.action_type in _DURABLE_ACTION_TYPES:
+            return self._audit.record(event)
+        occurred_at = time.time()
+        with self._cv:
+            if self._closed:
+                return self._audit.record(event, timestamp=occurred_at)
+            if len(self._pending) >= self._max_pending:
+                raise AuditBufferFullError("安全审计异步队列已满")
+            self._pending.append((event, occurred_at))
+            self._cv.notify_all()
+            if self._flusher is None or not self._flusher.is_alive():
+                self._flusher = threading.Thread(
+                    target=self._flusher_loop,
+                    daemon=True,
+                    name="security-audit-flush",
+                )
+                self._flusher.start()
+        return event.event_id
+
+    def flush(self) -> int:
+        """Flush barrier：把队列（及遗留缓冲）中的事件落库后才返回。"""
+        with self._cv:
+            batch = list(self._pending)
+            self._pending.clear()
+        drained = 0
+        if batch:
+            try:
+                drained = self._audit.record_batch(batch)
+            except AuditWriteError:
+                # 整批已被收入内存缓冲，等待后续 flush 重试。
+                log.warning("安全审计异步落库失败，事件保留在内存缓冲", exc_info=True)
+        try:
+            drained += self._audit.flush()
+        except AuditWriteError:
+            log.warning("安全审计遗留缓冲刷新失败", exc_info=True)
+        return drained
+
+    def close(self) -> None:
+        """退出前 barrier：停后台线程并排空队列。"""
+        with self._cv:
+            self._closed = True
+            self._cv.notify_all()
+        flusher = self._flusher
+        if flusher is not None and flusher.is_alive():
+            flusher.join(timeout=5)
+        self.flush()
+
+    def _flusher_loop(self) -> None:
+        while True:
+            with self._cv:
+                self._cv.wait(timeout=self._flush_interval)
+                if not self._pending:
+                    if self._closed:
+                        return
+                    continue
+                batch = list(self._pending)[: self._flush_batch]
+                for _ in range(len(batch)):
+                    self._pending.popleft()
+            try:
+                self._audit.record_batch(batch)
+            except AuditWriteError:
+                log.warning("安全审计后台落库失败，事件保留在内存缓冲", exc_info=True)
 
 
 def _public_request(request, *, include_nonce: bool) -> dict:
