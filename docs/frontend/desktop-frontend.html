@@ -811,6 +811,9 @@
   <p>Team 与 Dynamic Kanban 两块看板不再随 App 引导无条件安装。新增 <code>features/board-capability.ts</code>：按 <code>/api/config</code> 的 <code>feature_capabilities</code>（<code>product.team</code> / <code>product.dynamic-kanban</code>）独立推导可用性——config 未加载或字段缺席（旧后端）时保持可用（legacy-safe），映射存在而条目缺席或 <code>available ≠ true</code> 时不可用。<code>loadConfig()</code> 拉取后广播 <code>team-kanban:config-change</code>，<code>installTeamKanbanBoards()</code> 安装单元据此独立启停两板（enable → init、disable → dispose，幂等）；app.ts 删除对 kanban-board / team-collaboration-board 的直接导入，中心文件只经 board-hooks 门面与安装单元交互。</p>
   <p>会话内一致性：能力下线时，team/kanban 模式会话的 Inspector 默认 Tab 回落 <code>context</code>，不留死面板。能力刷新仍是拉取式（引导、网关重连恢复、模型 CRUD 后重拉），无推送通道。</p>
   <p>已验收：typecheck、lint（改动文件 0 error）与全量 1899 tests 通过（新增 <code>tests/unit/board-capability.test.ts</code> 11 用例），记录见 <a href="../testing/plugin-architecture-stage-6ac-team-kanban-ui-lifecycle.html">6AC 测试记录</a>，决策见 <a href="../backend/adr/0041-team-kanban-ui-capability-lifecycle.html">ADR-0041</a>。</p>
+  <h2>看板在途请求代际隔离（2026-09-14）</h2>
+  <p>修复看板卸载后迟到响应回写与轮询重启：Dynamic Kanban 的 <code>refreshKanbanBoard</code> 与 Team 看板的 <code>refreshTeamCollaborationBoard</code> / <code>primeTeamCollaborationIdentity</code> 此前在 <code>await</code> 后无生命周期守卫——卸载或重装后返回的旧请求仍回写 state / snapshots、触发渲染与多余更新事件，实测卸载后出现旧任务并新增一个轮询 interval。修复采用模块内聚的安装代计数器（init 装新一代 +1、dispose/测试重置销毁一代 +1）：请求发起前快照当前代，返回后若代际变化即整体丢弃（kanban 侧另保留会话一致性校验；Team 侧会话隔离由 snapshots 按会话键控结构承担，保留多会话预热语义）。外援页 <code>agents-page.ts</code> 的扫描 finally 同族修复：模块级 <code>busy</code> 标志无条件复位、渲染保留代际守卫，消除 epoch 变化后扫描永久卡 busy 的隐患。</p>
+  <p>新增 <code>tests/unit/kanban-board-lifecycle.test.ts</code>（5 用例）与 <code>team-collaboration-board.test.ts</code> 生命周期 describe（4 用例），覆盖卸载、dispose→重装、切会话三种迟到场景与正常路径回归。验证见 <a href="../testing/review-fixes-batch-2026-09-14.html">整改批次测试记录</a>。</p>
 </section>
 </body>
 </html>

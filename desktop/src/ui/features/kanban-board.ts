@@ -88,11 +88,15 @@ export async function refreshKanbanBoard(sessionId?: string | null): Promise<voi
     renderKanbanBoard();
     return;
   }
+  const generation = kanbanGeneration;
   const [board, status, tasks] = await Promise.all([
     backendApi.dynamicKanbanBoard(sid).catch(() => ({ tasks: [], dependencies: [], events: [] })),
     backendApi.dynamicKanbanStatus(sid).catch(() => null),
     backendApi.tasks(sid).catch(() => []),
   ]);
+  // 在途守卫：请求期间看板被卸载/重装（代际变化）或会话已切换时，
+  // 迟到响应整体丢弃 —— 不回写 state、不渲染、不重启轮询。
+  if (generation !== kanbanGeneration || sid !== state.activeSessionId) return;
   state.kanbanBoard = board as unknown as KanbanBoard;
   latestStatus = status;
   // 过滤掉整轮对话的 agent_turn 容器任务，避免用户 query / 流式 chunk 摘要混入看板。
@@ -595,7 +599,14 @@ export function workflowProgressReducer(
 
 let kanbanInitDisposer: (() => void) | null = null;
 
+// 安装代计数：initKanbanBoard 装新一代、dispose/测试重置销毁一代时各 +1。
+// refreshKanbanBoard 发起请求前快照当前代，响应返回后若代已变则整体丢弃，
+// 保证卸载/重装后的在途迟到响应不回写状态、不渲染、不重启轮询。
+let kanbanGeneration = 0;
+
 function resetKanbanBoardState(): void {
+  // 代际 +1：使本代所有在途请求在 await 检查点失效。
+  kanbanGeneration += 1;
   state.kanbanBoard = { tasks: [], dependencies: [], events: [] };
   latestStatus = null;
   state.tasks = [];
@@ -638,6 +649,8 @@ const KANBAN_NOOP_EVENTS = ['started', 'board_changed', 'call_completed'] as con
 export function initKanbanBoard(): () => void {
   if (kanbanInitDisposer) return kanbanInitDisposer;
 
+  // 新一代安装：与上一代（含其在途请求）彻底隔离。
+  kanbanGeneration += 1;
   const disposers: Array<() => void> = [];
   disposers.push(featureEventRegistry.register({
     feature: 'kanban',

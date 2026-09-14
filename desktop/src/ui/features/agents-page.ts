@@ -1981,11 +1981,11 @@ async function scanRuntimes(): Promise<void> {
     if (signal?.aborted || epoch !== agentsLifecycleEpoch) return;
     message = `刷新运行时失败：${(error as Error).message}`;
   } finally {
-    if (epoch === agentsLifecycleEpoch) {
-      runtimeScanning = false;
-      busy = false;
-      render();
-    }
+    // runtimeScanning/busy 是模块级状态，跨页面生命周期存活，
+    // 必须无条件复位；只有渲染需要生命周期守卫。
+    runtimeScanning = false;
+    busy = false;
+    renderIfActive(epoch);
   }
 }
 

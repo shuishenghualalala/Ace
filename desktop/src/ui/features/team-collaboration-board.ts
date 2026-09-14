@@ -733,7 +733,10 @@ async function loadConfiguredTeam(sessionId: string): Promise<{ name: string; me
 export async function primeTeamCollaborationIdentity(sessionId: string): Promise<void> {
   const previous = snapshots.get(sessionId);
   if (previous?.members.length && previous.teamName) return;
+  const generation = teamBoardGeneration;
   const configured = await loadConfiguredTeam(sessionId);
+  // 在途守卫：预热期间看板被卸载/重装时，迟到响应不写入快照。
+  if (generation !== teamBoardGeneration) return;
   if (!configured.members.length && !configured.name) return;
   snapshots.set(sessionId, {
     sessionId,
@@ -748,6 +751,7 @@ export async function primeTeamCollaborationIdentity(sessionId: string): Promise
 export async function refreshTeamCollaborationBoard(sessionId: string | null | undefined = state.activeSessionId): Promise<void> {
   if (!sessionId || refreshInFlight.has(sessionId)) return;
   refreshInFlight.add(sessionId);
+  const generation = teamBoardGeneration;
   try {
     const previous = snapshots.get(sessionId);
     const [tasks, runtime, configured] = await Promise.all([
@@ -757,6 +761,9 @@ export async function refreshTeamCollaborationBoard(sessionId: string | null | u
         ? Promise.resolve({ name: previous.teamName, members: previous.members })
         : loadConfiguredTeam(sessionId),
     ]);
+    // 在途守卫：请求期间看板被卸载/重装（代际变化）时，迟到响应整体丢弃
+    // —— 不写 snapshots/stableNodes、不派发更新事件（finally 仍会放行 in-flight 标记）。
+    if (generation !== teamBoardGeneration) return;
     const next: TeamBoardSnapshot = {
       sessionId,
       tasks,
@@ -1247,7 +1254,15 @@ export function teamInternalReducer(body: TeamInternalBody, ctx: FeatureReducerC
 
 let teamInitDisposer: (() => void) | null = null;
 
+// 安装代计数：initTeamCollaborationBoard 装新一代、dispose/测试重置销毁一代时各 +1。
+// 异步刷新/预热发起前快照当前代，返回后若代已变则整体丢弃，
+// 保证卸载/重装后的迟到响应不写 snapshots、不派发更新事件。
+// 会话隔离仍由 snapshots 按会话键控承担：迟到响应只允许写回自己那个会话的缓存。
+let teamBoardGeneration = 0;
+
 function resetTeamCollaborationState(): void {
+  // 代际 +1：使本代所有在途请求在 await 检查点失效。
+  teamBoardGeneration += 1;
   stopTeamCollaborationPolling();
   snapshots.clear();
   stableNodes.clear();
@@ -1279,6 +1294,8 @@ function createTeamCollaborationBoardDisposer(
 export function initTeamCollaborationBoard(): () => void {
   if (teamInitDisposer) return teamInitDisposer;
 
+  // 新一代安装：与上一代（含其在途请求）彻底隔离。
+  teamBoardGeneration += 1;
   const disposeReducer = featureEventRegistry.register({
     feature: 'team',
     event: 'internal_message',

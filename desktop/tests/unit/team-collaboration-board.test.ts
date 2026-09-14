@@ -13,6 +13,8 @@ import {
   __resetTeamCollaborationBoardForTest,
   activateTeamCollaborationBoard,
   buildTeamCollaborationBoardHtml,
+  disposeTeamCollaborationBoard,
+  initTeamCollaborationBoard,
   makeTeamFlowNodes,
   makeTeamFlowTurns,
   normalizeTeamFlowStatus,
@@ -21,10 +23,23 @@ import {
   refreshTeamCollaborationBoard,
   resolveTeamCollaborationMember,
   resolveTeamCollaborationName,
+  teamCollaborationTaskCount,
 } from '../../src/ui/features/team-collaboration-board';
 import { __resetAllStoresForTest, messageStore } from '../../src/ui/stores/stores';
+import { setActiveSessionId } from '../../src/ui/state';
 
 const SESSION_ID = 'team-session-board';
+
+type SessionAgentConfigResponse = Awaited<ReturnType<typeof backendApi.getSessionAgentConfig>>;
+
+/** 手工控制 resolve 时机的 Promise，用于构造「在途迟到」场景。 */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 const tasks: Task[] = [
   {
@@ -343,5 +358,78 @@ describe('协作看板 HTML', () => {
     expect(html).toContain('还没有流程节点');
     expect(html).toContain('pixel-empty');
     expect(html).toContain('暂无运行或排队会话');
+  });
+});
+
+describe('卸载/切会话后在途请求守卫', () => {
+  it('卸载后迟到的刷新响应不得复活缓存或派发更新事件', async () => {
+    initTeamCollaborationBoard();
+    const deferredTasks = deferred<Task[]>();
+    vi.mocked(backendApi.tasks).mockReturnValueOnce(deferredTasks.promise);
+    let updates = 0;
+    const listener = (): void => { updates += 1; };
+    window.addEventListener('team-collaboration:updated', listener);
+
+    const refreshing = refreshTeamCollaborationBoard(SESSION_ID);
+    disposeTeamCollaborationBoard();
+    deferredTasks.resolve(tasks);
+    await refreshing;
+
+    window.removeEventListener('team-collaboration:updated', listener);
+    // 卸载后迟到响应不得把已清空的快照缓存"复活"
+    expect(teamCollaborationTaskCount(SESSION_ID)).toBe(0);
+    expect(updates).toBe(0);
+  });
+
+  it('dispose → init 后上一代刷新失效，新一代刷新正常', async () => {
+    initTeamCollaborationBoard();
+    const deferredTasks = deferred<Task[]>();
+    vi.mocked(backendApi.tasks).mockReturnValueOnce(deferredTasks.promise);
+    let updates = 0;
+    const listener = (): void => { updates += 1; };
+    window.addEventListener('team-collaboration:updated', listener);
+
+    const stale = refreshTeamCollaborationBoard(SESSION_ID);
+    disposeTeamCollaborationBoard();
+    initTeamCollaborationBoard();
+    deferredTasks.resolve(tasks);
+    await stale;
+    expect(teamCollaborationTaskCount(SESSION_ID)).toBe(0);
+
+    // 新一代刷新正常回写并恰好派发一次更新事件
+    await refreshTeamCollaborationBoard(SESSION_ID);
+    window.removeEventListener('team-collaboration:updated', listener);
+    expect(teamCollaborationTaskCount(SESSION_ID)).toBe(tasks.length);
+    expect(updates).toBe(1);
+  });
+
+  it('卸载后迟到的身份预热不得写入快照', async () => {
+    initTeamCollaborationBoard();
+    const deferredConfig = deferred<SessionAgentConfigResponse>();
+    vi.mocked(backendApi.getSessionAgentConfig).mockReturnValueOnce(deferredConfig.promise);
+
+    const priming = primeTeamCollaborationIdentity(SESSION_ID);
+    disposeTeamCollaborationBoard();
+    deferredConfig.resolve({ team: { external_team_id: 'team-product' } });
+    await priming;
+
+    expect(resolveTeamCollaborationName(SESSION_ID)).toBeUndefined();
+  });
+
+  it('切换会话后迟到响应不污染新会话看板（按会话键控隔离）', async () => {
+    initTeamCollaborationBoard();
+    setActiveSessionId('session-b');
+    const deferredTasks = deferred<Task[]>();
+    vi.mocked(backendApi.tasks).mockReturnValueOnce(deferredTasks.promise);
+
+    const refreshing = refreshTeamCollaborationBoard(SESSION_ID);
+    deferredTasks.resolve(tasks);
+    await refreshing;
+
+    // 新会话视图不被旧会话的迟到响应污染
+    expect(teamCollaborationTaskCount('session-b')).toBe(0);
+    expect(resolveTeamCollaborationName('session-b')).toBeUndefined();
+    // 旧会话自身缓存按键控正常更新（切回时数据可用）
+    expect(teamCollaborationTaskCount(SESSION_ID)).toBe(tasks.length);
   });
 });
