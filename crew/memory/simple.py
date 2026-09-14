@@ -1,8 +1,10 @@
 """简单记忆实现。
 
-- NullMemory：空实现（默认）。
+- NullMemory：空实现，也是**默认装配**（内置记忆默认关闭）。
 - SQLiteMemory：把每轮 user 输入存入 SQLite，prefetch 时按关键词朴素召回。
-  足够 demo 演示"跨会话记忆"概念，向量检索等留作扩展点。
+  召回质量是 demo 级——「有记忆但召回差」比没有更伤产品观感，因此只在对
+  应配置（runtime.memory_enabled: true）显式开启时才会被装配；向量检索等
+  Provider 留作扩展点，中期路线是 MCP memory server。
 """
 
 from __future__ import annotations

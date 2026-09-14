@@ -202,6 +202,10 @@ class Config:
     # --- 运行时 ---
     db_path: str = "crew_data/crew.db"
     memory_db_path: str = "crew_data/memory.db"  # SQLiteMemory 独立路径，便于测试隔离
+    # 内置记忆默认关闭：SQLiteMemory 的关键词朴素召回是 demo 级，「有记忆但召回差」
+    # 比没有更伤产品观感。显式开启：runtime.memory_enabled: true（中期路线是接入
+    # MCP memory server，见 docs/todo/ace-weaknesses-dsh-remediation-plan.md §7.3）。
+    memory_enabled: bool = False
     # cron Feature 独立库（ADR-0038 拆库试点）：与主库分文件，回退时把本键指回 crew.db 即可
     cron_db_path: str = "crew_data/cron.db"
     # work Feature 独立库（ADR-0038 拆库第二批）：与主库分文件，回退时把本键指回 crew.db 即可
@@ -1634,6 +1638,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
             cfg.timeout = _as_float(llm.get("timeout", cfg.timeout), cfg.timeout)
         runtime = data.get("runtime", {})
         cfg.db_path = runtime.get("db_path", cfg.db_path)
+        cfg.memory_enabled = bool(runtime.get("memory_enabled", cfg.memory_enabled))
         cfg.cron_db_path = runtime.get("cron_db_path", cfg.cron_db_path)
         cfg.work_db_path = runtime.get("work_db_path", cfg.work_db_path)
         cfg.kanban_db_path = runtime.get("kanban_db_path", cfg.kanban_db_path)

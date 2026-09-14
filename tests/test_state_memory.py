@@ -321,3 +321,28 @@ def test_load_config_resolves_memory_db_path_under_crew_home(tmp_path, monkeypat
     cfg = load_config()
     assert cfg.memory_db_path == str(home / "crew_data" / "memory.db")
     assert Path(cfg.memory_db_path).is_absolute()
+
+
+def test_memory_enabled_defaults_to_off(tmp_path, monkeypatch):
+    """内置记忆默认关闭（H4）：默认装配 NullMemory，不产生 demo 级召回。"""
+    from crew.state.config import load_config
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("CREW_HOME", str(home))
+    cfg = load_config()
+    assert cfg.memory_enabled is False
+
+
+def test_memory_enabled_explicit_on_via_yaml(tmp_path, monkeypatch):
+    """显式开启路径：runtime.memory_enabled: true 仍可用（装配 SQLiteMemory）。"""
+    from crew.state.config import load_config
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("CREW_HOME", str(home))
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text(
+        "runtime:\n  memory_enabled: true\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(config_path=str(yaml_path))
+    assert cfg.memory_enabled is True

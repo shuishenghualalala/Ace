@@ -60,7 +60,7 @@ from crew.features import (
 from crew.gateway.dispatcher import BusyMode, SessionDispatcher
 from crew.gateway.helpers import session_external_agent_id
 from crew.features.session_context import build_session_context_contribution
-from crew.memory.simple import SQLiteMemory
+from crew.memory.simple import NullMemory, SQLiteMemory
 from crew.plugins.builtin import LoggingPlugin
 from crew.plugins.manager import PluginManager
 from crew.providers.anthropic_provider import AnthropicProvider
@@ -3727,11 +3727,17 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     from crew.team.external_store import TeamExternalAgentStore
 
     plugin_prefs = PluginPreferencesStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
-    memory = SQLiteMemory(
-        db_path=cfg.memory_db_path,
-        wal_enabled=cfg.sqlite_wal,
-    )
-    log.info("memory.db 路径: %s", cfg.memory_db_path)
+    # 内置记忆默认关闭（memory_enabled=false，见 Config 字段注释）：默认装配
+    # NullMemory；显式开启后才用 SQLiteMemory（demo 级关键词召回）。
+    if cfg.memory_enabled:
+        memory: MemoryProvider = SQLiteMemory(
+            db_path=cfg.memory_db_path,
+            wal_enabled=cfg.sqlite_wal,
+        )
+        log.info("memory.db 路径: %s", cfg.memory_db_path)
+    else:
+        memory = NullMemory()
+        log.info("内置记忆已关闭（runtime.memory_enabled=false）；如需跨会话记忆请显式开启，或接入 MCP memory server")
     plugins = PluginManager(
         [LoggingPlugin()],
         registry=registry,

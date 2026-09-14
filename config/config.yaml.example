@@ -18,6 +18,9 @@ llm:
 runtime:
   crew_home: .Crew
   db_path: crew_data/crew.db
+  # 内置记忆默认关闭：SQLiteMemory 的关键词朴素召回是 demo 级，召回差比没有更
+  # 伤观感。需要跨会话记忆时改为 true 显式开启，或接入 MCP memory server。
+  memory_enabled: false
   log_level: INFO
   log_file: logs/crew.log
   llm_trace: false
