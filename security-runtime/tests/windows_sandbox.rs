@@ -26,9 +26,10 @@ fn dedicated_identity_writes_workspace_but_not_denied_or_protected_paths() {
     // NOTE: cmd.exe expands %VAR% for the whole compound line at parse time,
     // before `set /p` runs, so the prompt check must use delayed expansion
     // (`/v:on` + `!INPUT!`); %CUSTOM_ENV% is safe because it arrives via the
-    // child environment and exists before the line is parsed.
+    // child environment and exists before the line is parsed. The dir/echo
+    // diagnostics are emitted so CI logs show what the sandboxed child saw.
     let script = format!(
-        "set /p INPUT= && if not \"!INPUT!\"==\"prompt\" exit /b 43 && if not \"%CUSTOM_ENV%\"==\"custom\" exit /b 44 && echo allowed>allowed.txt && type .git\\config >NUL 2>NUL || exit /b 48 && (type \"{}\" >NUL 2>NUL && exit /b 41 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 45 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 46 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 47 || ver>NUL) && (echo denied>.git\\config && exit /b 42 || exit /b 0)",
+        "echo CWD=%CD% & dir /b & set /p INPUT= && if not \"!INPUT!\"==\"prompt\" exit /b 43 && if not \"%CUSTOM_ENV%\"==\"custom\" exit /b 44 && echo allowed>allowed.txt && echo WRITE-OK & dir /b & if not exist allowed.txt exit /b 49 && type .git\\config >NUL 2>NUL || exit /b 48 && (type \"{}\" >NUL 2>NUL && exit /b 41 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 45 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 46 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 47 || ver>NUL) && (echo denied>.git\\config && exit /b 42 || exit /b 0)",
         denied.path().join("secret.txt").display(),
         state_dir.join("windows-sandbox-identity.json").display(),
         state_dir.join("windows-capability-sids.json").display(),
@@ -69,6 +70,7 @@ fn dedicated_identity_writes_workspace_but_not_denied_or_protected_paths() {
     drop(stdin);
     let mut started = false;
     let mut exit_code = None;
+    let mut transcript = String::new();
     loop {
         line.clear();
         if stdout.read_line(&mut line).unwrap() == 0 {
@@ -77,6 +79,14 @@ fn dedicated_identity_writes_workspace_but_not_denied_or_protected_paths() {
         let event: serde_json::Value = serde_json::from_str(&line).unwrap();
         match event["type"].as_str() {
             Some("started") => started = true,
+            Some("stdout") | Some("stderr") => {
+                if let Some(data) = event["data_b64"].as_str() {
+                    use base64::Engine;
+                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) {
+                        transcript.push_str(&String::from_utf8_lossy(&bytes));
+                    }
+                }
+            }
             Some("completed") => {
                 exit_code = event["exit_code"].as_i64();
                 break;
@@ -86,8 +96,11 @@ fn dedicated_identity_writes_workspace_but_not_denied_or_protected_paths() {
         }
     }
     assert!(started);
-    assert_eq!(exit_code, Some(0));
-    assert!(workspace.path().join("allowed.txt").exists());
+    assert_eq!(exit_code, Some(0), "child transcript:\n{transcript}");
+    assert!(
+        workspace.path().join("allowed.txt").exists(),
+        "child transcript:\n{transcript}"
+    );
     assert_eq!(
         std::fs::read_to_string(workspace.path().join(".git/config")).unwrap(),
         "original"
