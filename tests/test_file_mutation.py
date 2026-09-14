@@ -400,3 +400,122 @@ async def test_registry_schema_rejects_non_dict_args_without_crashing(registry, 
     result2 = await registry.execute(ToolCall("c2", "patch", {"path": str(target), "old": "hi"}))
     assert result2.is_error
     assert "new" in result2.content
+
+
+# ---------------------------------------------------------------------------
+# C6 read-before-edit 观察策略
+# ---------------------------------------------------------------------------
+
+
+class _PolicyConfig:
+    def __init__(self, enabled: bool):
+        self.raw_config = {"tools": {"file": {"require_read_before_edit": enabled}}}
+
+
+@pytest.fixture
+def policy_on(monkeypatch):
+    monkeypatch.setattr(
+        "crew.state.config.load_config", lambda: _PolicyConfig(True)
+    )
+
+
+async def test_patch_without_read_rejected_with_remedy(registry, tmp_path, policy_on):
+    target = tmp_path / "demo.txt"
+    target.write_text("hello\n", encoding="utf-8")
+    token = current_session_id.set("sess-c6")
+    try:
+        result = await registry.execute(
+            ToolCall("c1", "patch", {"path": str(target), "old": "hello", "new": "hi"})
+        )
+        assert result.is_error
+        assert "has not been read" in result.content
+        assert "file_read" in result.content  # 补救动作
+        assert target.read_text(encoding="utf-8") == "hello\n"
+    finally:
+        current_session_id.reset(token)
+
+
+async def test_patch_after_read_allowed(registry, tmp_path, policy_on):
+    target = tmp_path / "demo.txt"
+    target.write_text("hello\n", encoding="utf-8")
+    token = current_session_id.set("sess-c6")
+    try:
+        read = await registry.execute(ToolCall("c0", "file_read", {"path": str(target)}))
+        assert not read.is_error
+
+        result = await registry.execute(
+            ToolCall("c1", "patch", {"path": str(target), "old": "hello", "new": "hi"})
+        )
+        assert not result.is_error
+        assert target.read_text(encoding="utf-8") == "hi\n"
+    finally:
+        current_session_id.reset(token)
+
+
+async def test_patch_after_external_change_is_stale(registry, tmp_path, policy_on):
+    target = tmp_path / "demo.txt"
+    target.write_text("hello\n", encoding="utf-8")
+    token = current_session_id.set("sess-c6")
+    try:
+        read = await registry.execute(ToolCall("c0", "file_read", {"path": str(target)}))
+        assert not read.is_error
+
+        target.write_text("hello world\n", encoding="utf-8")  # 会话外修改
+
+        result = await registry.execute(
+            ToolCall("c1", "patch", {"path": str(target), "old": "hello world", "new": "hi"})
+        )
+        assert result.is_error
+        assert "重新读取" in result.content
+        assert target.read_text(encoding="utf-8") == "hello world\n"
+    finally:
+        current_session_id.reset(token)
+
+
+async def test_file_write_new_file_allowed_without_read(registry, tmp_path, policy_on):
+    token = current_session_id.set("sess-c6")
+    try:
+        target = tmp_path / "new.txt"
+        result = await registry.execute(
+            ToolCall("c1", "file_write", {"path": str(target), "content": "created"})
+        )
+        assert not result.is_error
+        assert target.read_text(encoding="utf-8") == "created"
+    finally:
+        current_session_id.reset(token)
+
+
+async def test_file_write_existing_without_read_rejected(registry, tmp_path, policy_on):
+    target = tmp_path / "demo.txt"
+    target.write_text("hello\n", encoding="utf-8")
+    token = current_session_id.set("sess-c6")
+    try:
+        result = await registry.execute(
+            ToolCall("c1", "file_write", {"path": str(target), "content": "overwrite"})
+        )
+        assert result.is_error
+        assert "has not been read" in result.content
+        assert target.read_text(encoding="utf-8") == "hello\n"
+    finally:
+        current_session_id.reset(token)
+
+
+async def test_observation_isolated_per_session(registry, tmp_path, policy_on):
+    target = tmp_path / "demo.txt"
+    target.write_text("hello\n", encoding="utf-8")
+    token_a = current_session_id.set("sess-a")
+    try:
+        read = await registry.execute(ToolCall("c0", "file_read", {"path": str(target)}))
+        assert not read.is_error
+    finally:
+        current_session_id.reset(token_a)
+
+    token_b = current_session_id.set("sess-b")
+    try:
+        result = await registry.execute(
+            ToolCall("c1", "patch", {"path": str(target), "old": "hello", "new": "hi"})
+        )
+        assert result.is_error
+        assert "has not been read" in result.content
+    finally:
+        current_session_id.reset(token_b)

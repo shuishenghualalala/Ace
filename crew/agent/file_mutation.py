@@ -401,6 +401,7 @@ class _PathLockTable:
 # ---------------------------------------------------------------------------
 
 _observed: dict[str, dict[str, tuple[int, int, int, int]]] = {}
+_OBSERVED_SESSION_LIMIT = 500
 
 
 def _read_before_edit_enabled() -> bool:
@@ -417,6 +418,8 @@ def _record_observation(path: Path, key: tuple[int, int, int, int]) -> None:
     session = current_session_id.get()
     if not session:
         return
+    if len(_observed) >= _OBSERVED_SESSION_LIMIT and session not in _observed:
+        _observed.pop(next(iter(_observed)))
     _observed.setdefault(session, {})[str(path)] = key
 
 
@@ -441,6 +444,8 @@ def guard_file_edit(path: Path) -> tuple[int, int, int, int] | None:
     key = str(Path(path))
     observed = _observed.get(session, {}).get(key)
     if observed is None:
+        if not Path(path).exists():
+            return None  # 目标尚不存在 = 新建，不受先读策略约束
         raise FileNotObservedError(
             f'cannot modify "{path}": file has not been read — '
             "read the file, then retry（请先用 file_read 读取该文件，再重新调用本工具）"
