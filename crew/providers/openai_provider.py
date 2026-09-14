@@ -26,6 +26,7 @@ from crew.core.types import (
     StreamChunk,
     ToolCall,
 )
+from crew.providers.keying import ApiKeyResolver
 from crew.providers.vendors import REASONING_LEVELS, VendorCompat
 from crew.state.logging import llm_trace
 
@@ -386,6 +387,7 @@ class OpenAIProvider(LLMProvider):
         timeout: float | httpx.Timeout = 120.0,
         vision: bool = True,
         compat: VendorCompat | None = None,
+        api_key_resolver: ApiKeyResolver | None = None,
     ) -> None:
         # 延迟导入，避免未装 openai 时整个包不可用
         from openai import AsyncOpenAI
@@ -417,6 +419,17 @@ class OpenAIProvider(LLMProvider):
         self.vision = vision
         # 厂商差异开关：装配层按 crew.providers.vendors 档案传入；缺省 = 通用 OpenAI 行为
         self._compat = compat if compat is not None else VendorCompat()
+        self._api_key_resolver = api_key_resolver
+
+    def _auth_headers(self) -> dict[str, str] | None:
+        """resolver 模式下每次请求取一次凭据快照写进 Authorization 头。
+
+        快照只作用于本次发起的请求；已在飞行中的流不受影响。无 resolver
+        时返回 None，沿用客户端构造时的静态 key（测试/外部直构造路径）。
+        """
+        if self._api_key_resolver is None:
+            return None
+        return {"Authorization": f"Bearer {self._api_key_resolver()}"}
 
     async def aclose(self) -> None:
         """Close the owned SDK client exactly once, including concurrent callers."""
@@ -464,7 +477,9 @@ class OpenAIProvider(LLMProvider):
         })
 
         try:
-            resp = await self._client.chat.completions.create(**payload)
+            resp = await self._client.chat.completions.create(
+                **payload, extra_headers=self._auth_headers()
+            )
         except Exception as exc:  # noqa: BLE001 - 统一包装成 ProviderError
             llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
             raise _provider_error("LLM 调用失败", exc, payload["messages"]) from exc
@@ -556,7 +571,9 @@ class OpenAIProvider(LLMProvider):
         })
 
         try:
-            stream = await self._client.chat.completions.create(**payload)
+            stream = await self._client.chat.completions.create(
+                **payload, extra_headers=self._auth_headers()
+            )
         except Exception as exc:
             llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
             raise _provider_error("LLM 流式调用失败", exc, payload["messages"]) from exc
