@@ -808,6 +808,50 @@ async def test_parallel_tools_preserve_order():
     assert [m.tool_call_id for m in tool_msgs] == ["a", "b"]
 
 
+async def test_parallel_results_land_in_request_order_despite_completion_order():
+    """并发段按完成序执行、按请求序回灌：后发起的先完成也不能改变上下文顺序。"""
+    reg = Registry()
+
+    async def delayed_read(args):
+        await asyncio.sleep({ "p1": 0.03, "p2": 0.01, "p3": 0.0 }[args["path"]])
+        return tool_result(path=args["path"])
+
+    reg.register(
+        name="file_read",
+        toolset="file",
+        schema={"name": "file_read", "parameters": {}},
+        handler=delayed_read,
+        is_async=True,
+    )
+    calls = [
+        ToolCall("p1", "file_read", {"path": "p1"}),
+        ToolCall("p2", "file_read", {"path": "p2"}),
+        ToolCall("p3", "file_read", {"path": "p3"}),
+    ]
+
+    class ThreeReadsThenDone(FakeProvider):
+        def __init__(self):
+            super().__init__()
+            self._n = 0
+
+        async def chat(self, messages, tools=None):
+            self.calls.append(list(messages))
+            self._n += 1
+            if self._n == 1:
+                return ChatResponse(tool_calls=calls)
+            return ChatResponse(text="完成", finish_reason="stop")
+
+    provider = ThreeReadsThenDone()
+    ex = _executor(provider, reg)
+    ctx = _ctx()
+    await _collect(ex, ctx)
+
+    tool_msgs = [m for m in ctx.messages if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_msgs] == ["p1", "p2", "p3"]
+    # 发给模型的第二轮请求视图里，toolResult 序同样 == toolCall 序
+    assert [m.tool_call_id for m in provider.calls[1] if m.role == "tool"] == ["p1", "p2", "p3"]
+
+
 async def test_parallel_tool_execution_respects_worker_cap():
     reg = Registry()
     active = 0
