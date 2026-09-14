@@ -23,8 +23,12 @@ fn dedicated_identity_writes_workspace_but_not_denied_or_protected_paths() {
     std::fs::write(denied.path().join("secret.txt"), "host-only").unwrap();
     let command =
         std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".to_string());
+    // NOTE: cmd.exe expands %VAR% for the whole compound line at parse time,
+    // before `set /p` runs, so the prompt check must use delayed expansion
+    // (`/v:on` + `!INPUT!`); %CUSTOM_ENV% is safe because it arrives via the
+    // child environment and exists before the line is parsed.
     let script = format!(
-        "set /p INPUT= && if not \"%INPUT%\"==\"prompt\" exit /b 43 && if not \"%CUSTOM_ENV%\"==\"custom\" exit /b 44 && echo allowed>allowed.txt && type .git\\config >NUL 2>NUL || exit /b 48 && (type \"{}\" >NUL 2>NUL && exit /b 41 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 45 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 46 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 47 || ver>NUL) && (echo denied>.git\\config && exit /b 42 || exit /b 0)",
+        "set /p INPUT= && if not \"!INPUT!\"==\"prompt\" exit /b 43 && if not \"%CUSTOM_ENV%\"==\"custom\" exit /b 44 && echo allowed>allowed.txt && type .git\\config >NUL 2>NUL || exit /b 48 && (type \"{}\" >NUL 2>NUL && exit /b 41 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 45 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 46 || ver>NUL) && (type \"{}\" >NUL 2>NUL && exit /b 47 || ver>NUL) && (echo denied>.git\\config && exit /b 42 || exit /b 0)",
         denied.path().join("secret.txt").display(),
         state_dir.join("windows-sandbox-identity.json").display(),
         state_dir.join("windows-capability-sids.json").display(),
@@ -50,7 +54,7 @@ fn dedicated_identity_writes_workspace_but_not_denied_or_protected_paths() {
         "nonce": "windows-native-sandbox-nonce",
         "request": {
             "op": "run",
-            "command": [command, "/d", "/s", "/c", script],
+            "command": [command, "/v:on", "/d", "/s", "/c", script],
             "cwd": workspace.path(),
             "writable_roots": [workspace.path()],
             "readonly_roots": [workspace.path().join(".git")],
