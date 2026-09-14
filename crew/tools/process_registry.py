@@ -172,6 +172,8 @@ class ProcessSession:
     _reader_thread: threading.Thread | None = field(default=None, repr=False)
     _heartbeat_thread: threading.Thread | None = field(default=None, repr=False)
     _owner: ProcessOwner | None = field(default=None, repr=False)
+    # 完全结算事件：reader 收尾 / kill / detached 结算时 set，wait() 条件唤醒（无轮询）
+    _done_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _secret_values: tuple[str, ...] = field(default=(), repr=False)
     task_id: str = ""
     output_ref: str = ""
@@ -679,8 +681,9 @@ class ProcessRegistry:
             session.exit_code = session.process.returncode
             self._audit_process_result(session)
             self._move_to_finished(session)
-            # 句柄完全结算（输出落地 + 审计 + 归档）后才移出 live set
+            # 句柄完全结算（输出落地 + 审计 + 归档）后才移出 live set、唤醒 wait()
             release_live(session._owner)
+            session._done_event.set()
 
     @staticmethod
     def _audit_process_result(session: ProcessSession) -> None:
@@ -859,6 +862,7 @@ class ProcessRegistry:
             session.exited = True
             session.exit_code = None  # 无句柄可 wait，真实退出码不可得
         release_live(session._owner)
+        session._done_event.set()
         self._move_to_finished(session)
         return session
 
@@ -917,24 +921,21 @@ class ProcessRegistry:
         return result
 
     def wait(self, session_id: str, timeout: int | None = None, *, owner_account_id: str) -> dict[str, Any]:
-        """阻塞直到进程退出或超时。"""
+        """阻塞直到进程完全结算或超时（per-session 事件条件唤醒，无轮询）。"""
         session = self.get(session_id, owner_account_id=owner_account_id)
         if session is None:
             return {"status": "not_found", "error": f"无此进程: {session_id}"}
         effective_timeout = float(timeout) if timeout and timeout > 0 else 180.0
-        deadline = time.monotonic() + effective_timeout
-        while time.monotonic() < deadline:
-            if session.exited:
-                return {
-                    "status": "exited",
-                    "exit_code": session.exit_code,
-                    "output": strip_ansi(session.output_buffer[-2000:]),
-                }
-            time.sleep(0.5)
+        if not session._done_event.wait(effective_timeout):
+            return {
+                "status": "timeout",
+                "output": strip_ansi(session.output_buffer[-1000:]),
+                "timeout_note": f"已等待 {int(effective_timeout)}s，进程仍在运行",
+            }
         return {
-            "status": "timeout",
-            "output": strip_ansi(session.output_buffer[-1000:]),
-            "timeout_note": f"已等待 {int(effective_timeout)}s，进程仍在运行",
+            "status": "exited",
+            "exit_code": session.exit_code,
+            "output": strip_ansi(session.output_buffer[-2000:]),
         }
 
     def kill_process(self, session_id: str, owner_account_id: str) -> dict[str, Any]:
@@ -950,6 +951,7 @@ class ProcessRegistry:
                 session.exited = True
                 session.exit_code = None
                 release_live(session._owner)
+                session._done_event.set()
                 self._move_to_finished(session)
                 return {"status": "already_exited", "exit_code": None}
             owner = session._owner or ProcessOwner.for_pid(
@@ -960,6 +962,7 @@ class ProcessRegistry:
             session.exited = True
             session.exit_code = -15  # SIGTERM
             self._move_to_finished(session)
+            session._done_event.set()
             return {"status": "killed", "session_id": session.id}
         except Exception as exc:  # noqa: BLE001
             return {"status": "error", "error": str(exc)}
