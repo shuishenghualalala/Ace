@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from crew.core.types import Message
@@ -311,5 +312,153 @@ def test_clear_purges_events_and_lease_rows(tmp_path):
         finally:
             conn.close()
         assert store.load("s1", owner_account_id="") == []
+    finally:
+        store.close()
+
+
+def _insert_event(conn, owner: str, session_id: str, seq: int, etype: str, payload: str):
+    conn.execute(
+        "INSERT OR REPLACE INTO session_events (owner_account_id, session_id, seq, type, payload, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (owner, session_id, seq, etype, payload, 0.0),
+    )
+
+
+def test_reader_uses_leaf_seq_snapshot(tmp_path):
+    """leaf 指针之后的行（如撕裂写另一半）对读者不可见。"""
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user("q1")], owner_account_id="")
+        store.load("s1", owner_account_id="")  # 建立缓存
+
+        # 模拟写一半的外部状态：seq=2 的行已存在，但 leaf 仍停在 1
+        conn = _raw_conn(db)
+        try:
+            _insert_event(
+                conn,
+                "",
+                "s1",
+                2,
+                "user_message",
+                json.dumps(SQLiteSessionStore._message_to_dict(Message.user("phantom"))),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        assert [m.content for m in store.load("s1", owner_account_id="")] == ["q1"]
+
+        # leaf 推进后（另一半提交完成），同一读者即可见
+        conn = _raw_conn(db)
+        try:
+            conn.execute("UPDATE sessions SET leaf_seq = 2 WHERE session_id = 's1'")
+            conn.commit()
+        finally:
+            conn.close()
+        assert [m.content for m in store.load("s1", owner_account_id="")] == ["q1", "phantom"]
+    finally:
+        store.close()
+
+
+def test_gap_in_event_stream_fails_closed(tmp_path):
+    import pytest
+
+    from crew.state.session_store import SessionEventLogError
+
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user("a"), Message.user("b")], owner_account_id="")
+        store.load("s1", owner_account_id="")  # 建立游标缓存
+        # 制造前向缺口：外部写入了 seq 3 与 5（跳过 4），leaf 推进到 5
+        conn = _raw_conn(db)
+        try:
+            for seq, content in ((3, "c"), (5, "e")):
+                _insert_event(
+                    conn,
+                    "",
+                    "s1",
+                    seq,
+                    "user_message",
+                    json.dumps(SQLiteSessionStore._message_to_dict(Message.user(content))),
+                )
+            conn.execute("UPDATE sessions SET leaf_seq = 5 WHERE session_id = 's1' AND owner_account_id = ''")
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(SessionEventLogError):
+            store.load("s1", owner_account_id="")
+    finally:
+        store.close()
+
+
+def test_unknown_event_type_fails_closed(tmp_path):
+    import pytest
+
+    from crew.state.session_store import SessionEventLogError
+
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user("a")], owner_account_id="")
+        conn = _raw_conn(db)
+        try:
+            _insert_event(conn, "", "s1", 2, "mystery_event", "{}")
+            conn.execute("UPDATE sessions SET leaf_seq = 2 WHERE session_id = 's1' AND owner_account_id = ''")
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(SessionEventLogError):
+            store.load("s1", owner_account_id="")
+    finally:
+        store.close()
+
+
+def test_catch_up_recovers_after_external_rewrite(tmp_path):
+    """外部（另一进程）整体重写事件后，读者按代际标记重建投影，不沿用旧前缀。"""
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    store2 = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user("old-1"), Message.user("old-2")], owner_account_id="")
+        store.load("s1", owner_account_id="")  # 缓存 old
+
+        store2.save(
+            "s1",
+            [Message.user("new-1"), Message.user("new-2"), Message.user("new-3"), Message.user("new-4")],
+            owner_account_id="",
+        )
+
+        assert [m.content for m in store.load("s1", owner_account_id="")] == [
+            "new-1",
+            "new-2",
+            "new-3",
+            "new-4",
+        ]
+        # 重写方自己的读写一致
+        assert [m.content for m in store2.load("s1", owner_account_id="")] == [
+            "new-1",
+            "new-2",
+            "new-3",
+            "new-4",
+        ]
+    finally:
+        store.close()
+        store2.close()
+
+
+def test_load_child_sessions_reads_events(tmp_path):
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("parent::turn::1::leader", [Message.user("child-msg")], owner_account_id="")
+        children = store.load_child_sessions("parent", owner_account_id="")
+        assert len(children) == 1
+        sid, messages = children[0]
+        assert sid == "parent::turn::1::leader"
+        assert [m.content for m in messages] == ["child-msg"]
     finally:
         store.close()
