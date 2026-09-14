@@ -172,8 +172,8 @@ class MissingProvidedServicesError(CrewError):
     def __init__(self, feature_id: str, missing: tuple[ServiceKey[Any], ...]) -> None:
         self.feature_id = feature_id
         self.missing = missing
-        names = ", ".join(key.name for key in missing)
-        super().__init__(f"feature {feature_id!r} did not register provided services: {names}")
+        keys = ", ".join(str(key) for key in missing)
+        super().__init__(f"feature {feature_id!r} did not register provided services: {keys}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -716,14 +716,16 @@ class FeatureRuntime:
                 raise StaleFeatureGenerationError(
                     f"feature {generation.key} no longer matches desired config revision"
                 )
+            # 承诺的服务必须按完整 key（含 version）逐个兑现：
+            # provides v2 却只注册 v1 视为未兑现，事务回滚。
             published = {
-                binding.key.name
+                binding.key
                 for binding in self.services.bindings_owned_by(transaction.scope)
             }
             missing_provided = tuple(
                 key
                 for key in definition.dependencies.provides
-                if key.name not in published
+                if key not in published
             )
             if missing_provided:
                 raise MissingProvidedServicesError(

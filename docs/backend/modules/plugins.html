@@ -222,6 +222,10 @@ await runtime.event_contributors.dispatch(envelope, push_feature_event)</code></
   <p><code>FeatureRuntime.capability_snapshot()</code> 同步读取真实 records，以 Feature ID 为键提供 <code>state / available / generation</code>。当前 Scope 可接受新 Lease 时才报告可用；未声明项缺席，drain、失败、停用不可用；replace 候选安装期间仍投影正在服务的旧代。读取不创建 Lease，也不导出错误、配置或完整诊断。</p>
   <p>此快照表示宿主运行时准入，不替代账号权限。Team 和 Dynamic Kanban 保持各自身份，不在 Runtime 中新增业务枚举。见 <a href="../adr/0040-feature-capability-snapshot.html">ADR-0040</a> 与 <a href="../../testing/plugin-architecture-stage-6ab-feature-capabilities.html">6AB 测试记录</a>。</p>
 
+  <h2>ServiceKey 版本化依赖契约（2026-09-14）</h2>
+  <p>依赖层与激活校验全面使用完整 <code>ServiceKey</code>（eq/hash 含 version，6N 语义），消除按裸 name 识别的版本混淆。改动七处：声明去重与 required/optional/provides 交叉检查、<code>FeatureDependencyGraph</code> 的 provider 索引、<code>plan_activation</code> 可用集与 blocked 判定、<code>undeclared_required_services</code>、<code>_install_generation</code> 的 published/missing_provided 校验、<code>MissingProvidedServicesError</code> 消息（<code>name@vN</code> 形态）。语义决策：同名不同版本是不同服务——requires v1+v2 合法、provides v1 + requires v2 合法（运行时按 (name, version) 路由，二者是不同服务地址，误配会被 plan blocked 或 WAITING 暴露）；精确同 key 的三条互斥约束保留。展示层（startup_audit 的 services 投影）有意保留 <code>key.name</code>，属序列化契约不参与匹配。</p>
+  <p>验收：v1/v2 共存与分别解析、错版本安装（provides v2 只注册 v1）激活失败并事务回滚、启动顺序按完整 key、停用 provider 索引按完整 key。验证见 <a href="../../testing/review-fixes-batch-2026-09-14.html">整改批次测试记录</a>。</p>
+
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>

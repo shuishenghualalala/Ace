@@ -375,3 +375,65 @@ def test_registry_routes_by_name_and_major_version():
 
     with pytest.raises(ServiceNotFoundError, match="knowledge@v3"):
         registry.resolve(ServiceKey[str]("knowledge", 3))
+
+
+def test_feature_declarations_treat_major_versions_as_distinct_services():
+    v1 = ServiceKey[object]("knowledge", 1)
+    v2 = ServiceKey[object]("knowledge", 2)
+
+    FeatureServiceDependencies("consumer", requires=(v1, v2))
+    FeatureServiceDependencies("consumer", requires=(v1,), optional=(v2,))
+    FeatureServiceDependencies("bridge", requires=(v2,), provides=(v1,))
+
+    with pytest.raises(ValueError, match="duplicate service keys"):
+        FeatureServiceDependencies("consumer", requires=(v1, ServiceKey[object]("knowledge", 1)))
+    with pytest.raises(ValueError, match="both required and optional"):
+        FeatureServiceDependencies("consumer", requires=(v2,), optional=(v2,))
+    with pytest.raises(ValueError, match="service it provides"):
+        FeatureServiceDependencies("bridge", requires=(v2,), provides=(v2,))
+
+
+def test_dependency_graph_resolves_and_indexes_services_by_major_version():
+    registry = ServiceRegistry()
+    v1 = ServiceKey[str]("knowledge", 1)
+    v2 = ServiceKey[str]("knowledge", 2)
+    registry.register(_active_scope("provider-v1"), v1, "v1-value")
+    registry.register(_active_scope("provider-v2"), v2, "v2-value")
+
+    graph = FeatureDependencyGraph()
+    graph.add(FeatureServiceDependencies("consumer-v1", requires=(v1,)))
+    graph.add(FeatureServiceDependencies("consumer-v2", requires=(v2,)))
+    graph.add(FeatureServiceDependencies("provider-v1", provides=(v1,)))
+    graph.add(FeatureServiceDependencies("provider-v2", provides=(v2,)))
+
+    resolved_v1 = graph.resolve("consumer-v1", registry)
+    resolved_v2 = graph.resolve("consumer-v2", registry)
+    assert resolved_v1.ready and resolved_v2.ready
+    assert [binding.value for binding in resolved_v1.required] == ["v1-value"]
+    assert [binding.value for binding in resolved_v2.required] == ["v2-value"]
+
+    assert graph.providers(v1) == ("provider-v1",)
+    assert graph.providers(v2) == ("provider-v2",)
+
+    assert graph.remove("provider-v2")
+    assert graph.providers(v2) == ()
+    assert graph.providers(v1) == ("provider-v1",)
+
+
+def test_activation_plan_requires_exact_major_version_matches():
+    v1 = ServiceKey[object]("catalog", 1)
+    v2 = ServiceKey[object]("catalog", 2)
+    graph = FeatureDependencyGraph()
+    graph.add(FeatureServiceDependencies("consumer-v1", requires=(v1,)))
+    graph.add(FeatureServiceDependencies("consumer-v2", requires=(v2,)))
+    graph.add(FeatureServiceDependencies("provider-v2", provides=(v2,)))
+
+    plan = graph.plan_activation()
+    assert plan.batches == (("provider-v2",), ("consumer-v2",))
+    assert [(block.feature_id, block.unavailable_services) for block in plan.blocked] == [
+        ("consumer-v1", (v1,))
+    ]
+
+    hosted = graph.plan_activation(host_services=(v1,))
+    assert hosted.complete
+    assert hosted.batches == (("consumer-v1", "provider-v2"), ("consumer-v2",))

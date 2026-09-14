@@ -7,6 +7,7 @@ import asyncio
 import pytest
 
 from crew.features import (
+    FeatureActivationError,
     FeatureDefinition,
     FeatureDrainTimeoutError,
     FeatureRuntime,
@@ -652,3 +653,107 @@ async def test_concurrent_updates_serialize_by_feature_generation():
     assert record is not None
     assert record.desired_config_revision == 3
     assert record.effective_config_revision == 3
+
+
+async def test_runtime_resolves_each_required_major_version_to_its_own_service():
+    runtime = FeatureRuntime()
+    v1 = ServiceKey[str]("catalog", 1)
+    v2 = ServiceKey[str]("catalog", 2)
+    resolved: list[tuple[str, str]] = []
+
+    def install_consumer(context) -> None:
+        resolved.append(("v1", context.resolve_service(v1)))
+        resolved.append(("v2", context.resolve_service(v2)))
+
+    records = await runtime.activate_many(
+        [
+            FeatureDefinition(
+                "a-consumer",
+                install_consumer,
+                dependencies=FeatureServiceDependencies(
+                    "a-consumer",
+                    requires=(v1, v2),
+                ),
+            ),
+            FeatureDefinition(
+                "provider-v1",
+                lambda context: context.register_service(v1, "v1-value"),
+                dependencies=FeatureServiceDependencies("provider-v1", provides=(v1,)),
+            ),
+            FeatureDefinition(
+                "provider-v2",
+                lambda context: context.register_service(v2, "v2-value"),
+                dependencies=FeatureServiceDependencies("provider-v2", provides=(v2,)),
+            ),
+        ]
+    )
+
+    assert [record.state for record in records] == [FeatureState.ACTIVE] * 3
+    assert resolved == [("v1", "v1-value"), ("v2", "v2-value")]
+
+
+async def test_runtime_blocks_consumer_waiting_for_exact_major_version():
+    runtime = FeatureRuntime()
+    v1 = ServiceKey[object]("catalog", 1)
+    v2 = ServiceKey[object]("catalog", 2)
+
+    records = await runtime.activate_many(
+        [
+            FeatureDefinition(
+                "consumer-v1",
+                lambda _context: None,
+                dependencies=FeatureServiceDependencies("consumer-v1", requires=(v1,)),
+            ),
+            FeatureDefinition(
+                "provider-v2",
+                lambda context: context.register_service(v2, "v2-value"),
+                dependencies=FeatureServiceDependencies("provider-v2", provides=(v2,)),
+            ),
+        ]
+    )
+
+    provider, consumer = records
+    assert provider.state is FeatureState.ACTIVE
+    assert consumer.state is FeatureState.WAITING
+    assert consumer.dependency_resolution is not None
+    assert consumer.dependency_resolution.missing_required == (v1,)
+
+
+async def test_wrong_major_version_install_fails_activation_and_rolls_back():
+    runtime = FeatureRuntime()
+    v1 = ServiceKey[str]("catalog", 1)
+    v2 = ServiceKey[str]("catalog", 2)
+
+    def wrong_install(context) -> None:
+        context.register_service(v1, "v1-value")
+
+    record = await runtime.activate(
+        FeatureDefinition(
+            "publisher",
+            wrong_install,
+            dependencies=FeatureServiceDependencies("publisher", provides=(v2,)),
+        )
+    )
+
+    assert record.state is FeatureState.FAILED
+    assert isinstance(record.error, FeatureActivationError)
+    assert isinstance(record.error.cause, MissingProvidedServicesError)
+    assert record.error.cause.missing == (v2,)
+    assert "catalog@v2" in str(record.error.cause)
+    assert record.scope is not None
+    assert record.scope.state is FeatureState.DISPOSED
+    assert runtime.services.bindings() == ()
+    assert not runtime.services.contains(v1)
+
+    def correct_install(context) -> None:
+        context.register_service(v2, "v2-value")
+
+    retry = await runtime.activate(
+        FeatureDefinition(
+            "publisher",
+            correct_install,
+            dependencies=FeatureServiceDependencies("publisher", provides=(v2,)),
+        )
+    )
+    assert retry.state is FeatureState.ACTIVE
+    assert runtime.services.resolve(v2) == "v2-value"

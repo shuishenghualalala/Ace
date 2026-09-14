@@ -19,8 +19,7 @@ def _unique_service_keys(
     field_name: str,
 ) -> tuple[ServiceKey[Any], ...]:
     normalized = tuple(values)
-    names = [key.name for key in normalized]
-    if len(names) != len(set(names)):
+    if len(normalized) != len(set(normalized)):
         raise ValueError(f"{field_name} contains duplicate service keys")
     return normalized
 
@@ -41,12 +40,14 @@ class FeatureServiceDependencies:
         requires = _unique_service_keys(tuple(self.requires), "requires")
         optional = _unique_service_keys(tuple(self.optional), "optional")
         provides = _unique_service_keys(tuple(self.provides), "provides")
-        required_names = {key.name for key in requires}
-        optional_names = {key.name for key in optional}
-        provided_names = {key.name for key in provides}
-        if required_names & optional_names:
+        # ServiceKey 的 eq/hash 含 version：同名不同版本是不同服务，
+        # 交叉约束（required/optional/provides 互斥）必须按完整 key 判断。
+        required_keys = set(requires)
+        optional_keys = set(optional)
+        provided_keys = set(provides)
+        if required_keys & optional_keys:
             raise ValueError("a service cannot be both required and optional")
-        if required_names & provided_names:
+        if required_keys & provided_keys:
             raise ValueError("a feature cannot require a service it provides")
         object.__setattr__(self, "feature_id", feature_id)
         object.__setattr__(self, "requires", requires)
@@ -90,11 +91,15 @@ class FeatureActivationPlan:
 
 
 class FeatureDependencyGraph:
-    """Bipartite graph between features and their declared service capabilities."""
+    """Bipartite graph between features and their declared service capabilities.
+
+    Provider edges are indexed by the full ``ServiceKey`` (name and major
+    version), so a v2 provider never satisfies a v1 consumer.
+    """
 
     def __init__(self) -> None:
         self._features: dict[str, FeatureServiceDependencies] = {}
-        self._providers: dict[str, set[str]] = {}
+        self._providers: dict[ServiceKey[Any], set[str]] = {}
 
     def add(self, dependencies: FeatureServiceDependencies) -> None:
         current = self._features.get(dependencies.feature_id)
@@ -106,19 +111,19 @@ class FeatureDependencyGraph:
             )
         self._features[dependencies.feature_id] = dependencies
         for key in dependencies.provides:
-            self._providers.setdefault(key.name, set()).add(dependencies.feature_id)
+            self._providers.setdefault(key, set()).add(dependencies.feature_id)
 
     def remove(self, feature_id: str) -> bool:
         dependencies = self._features.pop(feature_id, None)
         if dependencies is None:
             return False
         for key in dependencies.provides:
-            providers = self._providers.get(key.name)
+            providers = self._providers.get(key)
             if providers is None:
                 continue
             providers.discard(feature_id)
             if not providers:
-                self._providers.pop(key.name, None)
+                self._providers.pop(key, None)
         return True
 
     def get(self, feature_id: str) -> FeatureServiceDependencies:
@@ -128,7 +133,7 @@ class FeatureDependencyGraph:
             raise KeyError(f"unknown feature {feature_id!r}") from error
 
     def providers(self, key: ServiceKey[Any]) -> tuple[str, ...]:
-        return tuple(sorted(self._providers.get(key.name, ())))
+        return tuple(sorted(self._providers.get(key, ())))
 
     def resolve(
         self,
@@ -180,7 +185,7 @@ class FeatureDependencyGraph:
         runtime resolution. A provider failure can still leave later features
         waiting even when they appear in a planned batch.
         """
-        available = {key.name for key in host_services}
+        available = set(host_services)
         remaining = dict(self._features)
         batches: list[tuple[str, ...]] = []
         while remaining:
@@ -188,7 +193,7 @@ class FeatureDependencyGraph:
                 sorted(
                     feature_id
                     for feature_id, dependencies in remaining.items()
-                    if all(key.name in available for key in dependencies.requires)
+                    if all(key in available for key in dependencies.requires)
                 )
             )
             if not ready:
@@ -196,13 +201,13 @@ class FeatureDependencyGraph:
             batches.append(ready)
             for feature_id in ready:
                 dependencies = remaining.pop(feature_id)
-                available.update(key.name for key in dependencies.provides)
+                available.update(dependencies.provides)
 
         blocked = tuple(
             FeatureDependencyBlock(
                 feature_id=feature_id,
                 unavailable_services=tuple(
-                    key for key in dependencies.requires if key.name not in available
+                    key for key in dependencies.requires if key not in available
                 ),
             )
             for feature_id, dependencies in sorted(remaining.items())
@@ -214,13 +219,13 @@ class FeatureDependencyGraph:
         *,
         host_services: tuple[ServiceKey[Any], ...] = (),
     ) -> dict[str, tuple[ServiceKey[Any], ...]]:
-        host_names = {key.name for key in host_services}
+        host_keys = set(host_services)
         missing: dict[str, tuple[ServiceKey[Any], ...]] = {}
         for feature_id, dependencies in self._features.items():
             keys = tuple(
                 key
                 for key in dependencies.requires
-                if key.name not in self._providers and key.name not in host_names
+                if key not in self._providers and key not in host_keys
             )
             if keys:
                 missing[feature_id] = keys
