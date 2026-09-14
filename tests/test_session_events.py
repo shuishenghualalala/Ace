@@ -297,7 +297,7 @@ def test_clear_purges_events_and_lease_rows(tmp_path):
         conn = _raw_conn(db)
         try:
             conn.execute(
-                "INSERT INTO writer_leases (owner_account_id, session_id, owner_pid, fence, expires_at) "
+                "INSERT OR REPLACE INTO writer_leases (owner_account_id, session_id, owner_pid, fence, expires_at) "
                 "VALUES ('', 's1', 'p', 1, 0)"
             )
             conn.commit()
@@ -418,13 +418,16 @@ def test_unknown_event_type_fails_closed(tmp_path):
 
 
 def test_catch_up_recovers_after_external_rewrite(tmp_path):
-    """外部（另一进程）整体重写事件后，读者按代际标记重建投影，不沿用旧前缀。"""
+    """外部（另一进程）接管并整体重写事件后，读者按代际标记重建投影，不沿用旧前缀。"""
+    import time
+
     db = str(tmp_path / "crew.db")
-    store = SQLiteSessionStore(db)
+    store = SQLiteSessionStore(db, lease_ttl_seconds=0.3, lease_heartbeat_seconds=60.0)
     store2 = SQLiteSessionStore(db)
     try:
         store.save("s1", [Message.user("old-1"), Message.user("old-2")], owner_account_id="")
         store.load("s1", owner_account_id="")  # 缓存 old
+        time.sleep(0.4)  # store 的租约过期，store2 可接管
 
         store2.save(
             "s1",
@@ -462,3 +465,93 @@ def test_load_child_sessions_reads_events(tmp_path):
         assert [m.content for m in messages] == ["child-msg"]
     finally:
         store.close()
+
+
+def test_writer_lease_conflicts_second_process(tmp_path):
+    import pytest
+
+    from crew.state.session_store import SessionWriteConflict
+
+    db = str(tmp_path / "crew.db")
+    store1 = SQLiteSessionStore(db)
+    store2 = SQLiteSessionStore(db)
+    try:
+        store1.save("s1", [Message.user("from-p1")], owner_account_id="")
+        # 第二进程打开同一会话：有效租约期内写入被拒
+        with pytest.raises(SessionWriteConflict):
+            store2.save("s1", [Message.user("from-p2")], owner_account_id="")
+        # 其他会话不受影响
+        store2.save("s2", [Message.user("other")], owner_account_id="")
+        # 第一进程自己续约续写正常
+        store1.save("s1", [Message.user("from-p1"), Message.user("more")], owner_account_id="")
+        assert [m.content for m in store1.load("s1", owner_account_id="")] == ["from-p1", "more"]
+    finally:
+        store1.close()
+        store2.close()
+
+
+def test_writer_lease_takeover_after_expiry(tmp_path):
+    import time
+
+    import pytest
+
+    from crew.state.session_store import SessionWriteConflict
+
+    db = str(tmp_path / "crew.db")
+    store1 = SQLiteSessionStore(db, lease_ttl_seconds=0.3, lease_heartbeat_seconds=60.0)
+    store2 = SQLiteSessionStore(db, lease_ttl_seconds=0.3, lease_heartbeat_seconds=60.0)
+    try:
+        store1.save("s1", [Message.user("p1")], owner_account_id="")
+        time.sleep(0.4)
+        # TTL 到期自动接管：fence+1，写入成功
+        store2.save("s1", [Message.user("p1"), Message.user("p2")], owner_account_id="")
+        # 旧写者租约已被抢占：下一次写入被拒（fence 语义，防脑裂）
+        with pytest.raises(SessionWriteConflict):
+            store1.save("s1", [Message.user("p1"), Message.user("p2"), Message.user("p1-again")], owner_account_id="")
+        assert [m.content for m in store2.load("s1", owner_account_id="")] == ["p1", "p2"]
+        # 读路径不受租约限制
+        assert [m.content for m in store1.load("s1", owner_account_id="")] == ["p1", "p2"]
+    finally:
+        store1.close()
+        store2.close()
+
+
+def test_writer_lease_released_on_close(tmp_path):
+    db = str(tmp_path / "crew.db")
+    store1 = SQLiteSessionStore(db, lease_ttl_seconds=30.0)
+    store1.save("s1", [Message.user("p1")], owner_account_id="")
+    store1.close()
+
+    store2 = SQLiteSessionStore(db, lease_ttl_seconds=30.0)
+    try:
+        store2.save("s1", [Message.user("p1"), Message.user("p2")], owner_account_id="")
+        assert [m.content for m in store2.load("s1", owner_account_id="")] == ["p1", "p2"]
+    finally:
+        store2.close()
+
+
+def test_writer_lease_heartbeat_keeps_ownership(tmp_path):
+    import asyncio
+    import time
+
+    from crew.state.session_store import SessionWriteConflict
+
+    db = str(tmp_path / "crew.db")
+    store1 = SQLiteSessionStore(db, lease_ttl_seconds=0.6, lease_heartbeat_seconds=0.2)
+    store2 = SQLiteSessionStore(db, lease_ttl_seconds=0.6, lease_heartbeat_seconds=0.2)
+
+    async def main():
+        await store1.save_async("s1", [Message.user("p1")], owner_account_id="")
+        # 超过 TTL 但心跳持续续约：第二进程仍拿不到租约
+        await asyncio.sleep(1.0)
+        try:
+            await store2.save_async("s1", [Message.user("p2")], owner_account_id="")
+            raise AssertionError("expected SessionWriteConflict")
+        except SessionWriteConflict:
+            pass
+
+    try:
+        asyncio.run(main())
+    finally:
+        store1.close()
+        store2.close()

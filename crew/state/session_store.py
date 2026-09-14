@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import asdict
 from enum import Enum
@@ -100,10 +102,12 @@ class _SessionWriteQueue:
     flush barrier = 带 ack 的往返：调用方 enqueue 后 await ack，leaf 指针与
     事件批次在同一事务提交后 ack 才完成，调用方 await 到 ack 即视为持久化。
     写失败保留队列项重试一次；队列 task 的注册返回 disposer（注册即 effect）。
+    队列空转时按租约心跳周期续约本进程持有的 writer 租约。
     """
 
-    def __init__(self, writer: "SQLiteWriteHelper", loop: asyncio.AbstractEventLoop) -> None:
-        self._writer = writer
+    def __init__(self, store: "SQLiteSessionStore", loop: asyncio.AbstractEventLoop) -> None:
+        self._store = store
+        self._writer = store._writer
         self._loop = loop
         self._queue: asyncio.Queue = asyncio.Queue()
         # 串行化「diff 计算 → 入队 → await ack」整段，防止并发 save_async 用同一
@@ -122,7 +126,13 @@ class _SessionWriteQueue:
 
         log = logging.getLogger(__name__)
         while True:
-            fn, fut = await self._queue.get()
+            try:
+                fn, fut = await asyncio.wait_for(
+                    self._queue.get(), timeout=self._store._lease_heartbeat_seconds
+                )
+            except asyncio.TimeoutError:
+                await self._renew_held_leases()
+                continue
             try:
                 result = await self._writer.execute_async(fn)
             except Exception:  # noqa: BLE001
@@ -136,6 +146,36 @@ class _SessionWriteQueue:
             if not fut.done():
                 fut.set_result(result)
 
+    async def _renew_held_leases(self) -> None:
+        """心跳续约：持有者仍是本进程且 fence 未变才续期；被接管则让出。"""
+        store = self._store
+        held = list(store._held_leases.items())
+
+        def _renew(conn) -> None:
+            now = time.time()
+            for (owner, session_id), fence in held:
+                cursor = conn.execute(
+                    "UPDATE writer_leases SET expires_at = ? "
+                    "WHERE owner_account_id = ? AND session_id = ? "
+                    "AND owner_pid = ? AND fence = ? AND expires_at > ?",
+                    (
+                        now + store._lease_ttl_seconds,
+                        owner,
+                        session_id,
+                        store._writer_pid,
+                        fence,
+                        now,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    # 租约已被抢占（fence 变化或过期接管），停止为其心跳
+                    store._held_leases.pop((owner, session_id), None)
+
+        try:
+            await self._writer.execute_async(_renew)
+        except Exception:  # noqa: BLE001
+            pass
+
     def dispose(self) -> None:
         if self._disposed:
             return
@@ -144,7 +184,18 @@ class _SessionWriteQueue:
 
 
 class SQLiteSessionStore(SessionStore):
-    def __init__(self, db_path: str = "crew_data/crew.db", *, wal_enabled: bool = True) -> None:
+    # writer 租约：TTL 30s + 心跳 10s + fence 抢占（ADR-0042）。
+    DEFAULT_LEASE_TTL_SECONDS = 30.0
+    DEFAULT_LEASE_HEARTBEAT_SECONDS = 10.0
+
+    def __init__(
+        self,
+        db_path: str = "crew_data/crew.db",
+        *,
+        wal_enabled: bool = True,
+        lease_ttl_seconds: float | None = None,
+        lease_heartbeat_seconds: float | None = None,
+    ) -> None:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -153,6 +204,17 @@ class SQLiteSessionStore(SessionStore):
         self._writer.execute(self._init_schema)
         self._projections: dict[tuple[str, str], _SessionProjection] = {}
         self._queues: dict[tuple[str, str], tuple[asyncio.AbstractEventLoop, _SessionWriteQueue]] = {}
+        # 进程内区分多个 store 实例（gateway/CLI 同进程双实例也互斥）
+        self._writer_pid = f"{os.getpid()}:{uuid.uuid4().hex[:12]}"
+        self._lease_ttl_seconds = (
+            self.DEFAULT_LEASE_TTL_SECONDS if lease_ttl_seconds is None else lease_ttl_seconds
+        )
+        self._lease_heartbeat_seconds = (
+            self.DEFAULT_LEASE_HEARTBEAT_SECONDS
+            if lease_heartbeat_seconds is None
+            else lease_heartbeat_seconds
+        )
+        self._held_leases: dict[tuple[str, str], int] = {}
 
     def transaction(self, fn: Callable[[Any], T]) -> T:
         """Run related session/workspace writes atomically on this store connection."""
@@ -163,8 +225,67 @@ class SQLiteSessionStore(SessionStore):
         for _, queue in list(self._queues.values()):
             queue.dispose()
         self._queues.clear()
+
+        def _release(conn) -> None:
+            conn.execute(
+                "DELETE FROM writer_leases WHERE owner_pid = ?",
+                (self._writer_pid,),
+            )
+
+        try:
+            self._writer.execute(_release)
+        except Exception:  # noqa: BLE001
+            pass
+        self._held_leases.clear()
         with self._lock:
             self._conn.close()
+
+    def _ensure_writer_lease(self, conn, owner: str, session_id: str, now: float) -> int:
+        """原子取租/续约，返回 fence。有效租约被其他进程持有时抛 SessionWriteConflict。
+
+        每批写入都经此校验 fence：租约被抢占（fence 变化或过期接管）后，
+        旧进程的下一次写入即被拒绝，防脑裂。
+        """
+        row = conn.execute(
+            "SELECT owner_pid, fence, expires_at FROM writer_leases "
+            "WHERE owner_account_id = ? AND session_id = ?",
+            (owner, session_id),
+        ).fetchone()
+        expires = now + self._lease_ttl_seconds
+        if row is None:
+            conn.execute(
+                "INSERT INTO writer_leases (owner_account_id, session_id, owner_pid, fence, expires_at) "
+                "VALUES (?, ?, ?, 1, ?)",
+                (owner, session_id, self._writer_pid, expires),
+            )
+            self._held_leases[(owner, session_id)] = 1
+            return 1
+        holder, fence, expires_at = str(row[0]), int(row[1]), float(row[2])
+        if holder == self._writer_pid:
+            # 续约；自己过期后重新拿起 fence+1，吊销期间可能发生的旧写入
+            new_fence = fence if expires_at > now else fence + 1
+            conn.execute(
+                "UPDATE writer_leases SET fence = ?, expires_at = ? "
+                "WHERE owner_account_id = ? AND session_id = ?",
+                (new_fence, expires, owner, session_id),
+            )
+            self._held_leases[(owner, session_id)] = new_fence
+            return new_fence
+        if expires_at > now:
+            raise SessionWriteConflict(
+                f"会话 {session_id} 的写者租约被进程 {holder} 持有"
+                f"（{expires_at - now:.0f}s 后到期）"
+            )
+        # 过期接管：条件 UPDATE + rows_affected 原子抢占，fence+1
+        cursor = conn.execute(
+            "UPDATE writer_leases SET owner_pid = ?, fence = fence + 1, expires_at = ? "
+            "WHERE owner_account_id = ? AND session_id = ? AND expires_at <= ?",
+            (self._writer_pid, expires, owner, session_id, now),
+        )
+        if cursor.rowcount != 1:
+            raise SessionWriteConflict(f"会话 {session_id} 的写者租约接管失败（并发抢占）")
+        self._held_leases[(owner, session_id)] = fence + 1
+        return fence + 1
 
     def _get_write_queue(self, key: tuple[str, str]) -> _SessionWriteQueue:
         """取会话的单写队列；事件循环变化时重建旧队列（旧队列 dispose）。"""
@@ -174,7 +295,7 @@ class SQLiteSessionStore(SessionStore):
             return existing[1]
         if existing is not None:
             existing[1].dispose()
-        queue = _SessionWriteQueue(self._writer, loop)
+        queue = _SessionWriteQueue(self, loop)
         self._queues[key] = (loop, queue)
         return queue
 
@@ -602,6 +723,7 @@ class SQLiteSessionStore(SessionStore):
             )
 
         def _write(conn) -> tuple[int, int, int]:
+            self._ensure_writer_lease(conn, owner_account_id, session_id, now)
             base_row = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0), "
                 "(SELECT events_generation FROM sessions "
