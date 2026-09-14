@@ -48,6 +48,7 @@ class LLMProvider(ABC):
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
         reasoning_mode: str | None = None,
+        purpose: str | None = None,
     ) -> ChatResponse:
         """一次（非流式）补全。返回归一化的 ChatResponse。
 
@@ -60,6 +61,9 @@ class LLMProvider(ABC):
         ``reasoning_mode`` 取值：None = 模型默认行为；"off"/"disabled" = 关闭思考；
         其余为思考等级（minimal/low/medium/high/xhigh/max），由厂商档案
         （crew.providers.vendors）映射为各家专属参数，不支持的档位被忽略。
+
+        ``purpose`` 是辅助调用的元数据标记（如 ``"compaction"`` 摘要、标题生成），
+        不进请求体；provider 可把它写进调用 trace 以便审计与计费归类。
         """
         raise NotImplementedError
 

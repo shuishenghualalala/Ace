@@ -606,7 +606,8 @@ async def test_loop_overflow_triggers_force_compact_then_succeeds():
 
         async def force_compact(self, messages, session_id=None):
             self.calls += 1
-            return messages
+            # 兜底压缩必须让投影前进，否则 executor 判定「无法进一步压缩」不再重试
+            return [messages[-1]] if messages else messages
 
         async def compact_view(
             self,
@@ -625,7 +626,9 @@ async def test_loop_overflow_triggers_force_compact_then_succeeds():
         script=[ChatResponse(text="压缩后成功", finish_reason="stop")],
     )
     ex = _executor(provider, compactor=spy)
-    chunks = await _collect(ex, _ctx())
+    chunks = await _collect(
+        ex, _ctx(messages=[Message.user(f"第{i}条历史") for i in range(5)])
+    )
     final = chunks[-1]
     assert final.kind == "final" and final.body["text"] == "压缩后成功"
     assert spy.calls >= 1  # 命中溢出后调用了兜底压缩

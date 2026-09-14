@@ -12,7 +12,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -1899,17 +1898,10 @@ class SkillGenerator:
         )
 
     def _run_llm_chat(self, messages: list[Any]) -> Any:
-        """同步调用 async LLM stream_chat，兼容线程内和事件循环内调用。"""
-        coro = self._stream_chat_full(messages)
-        try:
-            asyncio.get_running_loop()
-            # 已在事件循环中（不应发生在 asyncio.to_thread 路径，但防御性处理）
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(asyncio.run, coro).result()
-        except RuntimeError:
-            # 无运行中的事件循环，直接 asyncio.run
-            return asyncio.run(coro)
+        """同步调用 async LLM stream_chat（显式协议见 crew.core.asyncio_bridge）。"""
+        from crew.core.asyncio_bridge import run_sync
+
+        return run_sync(self._stream_chat_full(messages))
 
     # ── 内部方法 ──────────────────────────────────────────────────────────
 

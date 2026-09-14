@@ -740,7 +740,10 @@ async def test_compactor_summarizes_old_and_keeps_recent_from_safe_boundary():
     for i in range(6):
         msgs.append(Message.user("问题" * 500 + str(i)))
         msgs.append(Message.assistant("回答" * 500 + str(i)))
-    compactor = ContextCompactor(FakeProvider(), token_budget=10, keep_recent=3)
+    compactor = ContextCompactor(
+        FakeProvider(script=[ChatResponse(text="历史摘要：此前讨论了六个问题")]),
+        token_budget=10, keep_recent=3,
+    )
     assert estimate_tokens(msgs) > 10
     out = await compactor.maybe_compact(msgs)
     # 第一条应是摘要 system
@@ -772,6 +775,107 @@ async def test_compaction_does_not_destroy_persisted_history():
         assert original in saved
     assert any(m.role == "user" and m.content == "新一轮提问" for m in saved)
     assert len(saved) > len(seed)
+
+
+# ---------------------------------------------------------------------------
+# overflow 后 compact-retry-once（投影前进才重试）
+# ---------------------------------------------------------------------------
+def _seed_long_store(n_pairs: int = 25) -> InMemorySessionStore:
+    store = InMemorySessionStore()
+    seed: list[Message] = []
+    for i in range(n_pairs):
+        seed.append(Message.user(f"第{i:03d}轮问题 " + "长文本占位" * 200))
+        seed.append(Message.assistant(f"第{i:03d}轮回答 " + "长文本占位" * 200))
+    store.save("ov", seed, owner_account_id="local")
+    return store
+
+
+def _always_overflow(provider: FakeProvider) -> dict[str, int]:
+    """把 stream_chat 换成「每次必抛上下文溢出」，返回计数 dict。"""
+    state = {"requests": 0}
+
+    async def _overflow(messages, tools=None, **kwargs):  # noqa: ANN001
+        state["requests"] += 1
+        raise ProviderError("maximum context length exceeded", retryable=False)
+        yield  # noqa: E501 -- 让本函数成为 async generator，异常在迭代时被分类
+
+    provider.stream_chat = _overflow
+    return state
+
+
+class ShortSummaryProvider(FakeProvider):
+    """chat 永远返回短摘要（不受 script 限制），stream 由调用方覆盖。"""
+
+    async def chat(self, messages, tools=None, **kw):  # noqa: ANN001
+        self.calls.append(list(messages))
+        return ChatResponse(text="压缩摘要")
+
+
+async def test_overflow_compacts_then_retries_once_then_errors():
+    """overflow → 兜底压缩使投影前进 → 重试一次 → 再溢出则报错（不无限重试）。"""
+    store = _seed_long_store()
+    provider = ShortSummaryProvider()
+    state = _always_overflow(provider)
+    compactor = ContextCompactor(provider, token_budget=10, keep_recent=4)
+    agent = _agent(provider, session_store=store, compactor=compactor)
+
+    chunks = []
+    async for ch in agent.run(Envelope.of("继续", session_id="ov")):
+        chunks.append(ch)
+
+    errors = [c for c in chunks if c.kind == "error"]
+    assert errors and "上下文超长" in errors[-1].body.get("message", "")
+    # 只重试一次：两次 LLM 请求（原始 + 重试），第三次溢出不再压缩重试
+    assert state["requests"] == 2
+    # 摘要调用 = 预检 maybe_compact 1 次 + overflow 兜底压缩 1 次
+    assert len(provider.calls) == 2
+
+
+async def test_overflow_no_progress_no_retry():
+    """兜底压缩未使投影前进（压缩器关闭）→ 不重试、不再发请求，直接报错。"""
+    store = _seed_long_store()
+    provider = FakeProvider()
+    state = _always_overflow(provider)
+    compactor = ContextCompactor(provider, token_budget=10, keep_recent=4, enabled=False)
+    agent = _agent(provider, session_store=store, compactor=compactor)
+
+    chunks = []
+    async for ch in agent.run(Envelope.of("继续", session_id="ov")):
+        chunks.append(ch)
+
+    errors = [c for c in chunks if c.kind == "error"]
+    assert errors and "上下文超长" in errors[-1].body.get("message", "")
+    assert state["requests"] == 1  # 投影未前进：没有重试请求
+
+
+async def test_file_manifest_persisted_into_canonical_history():
+    """文件清单作为 is_meta 持久会话信息写入 canonical：跨轮继承，压缩后仍回注视图。"""
+    from crew.agent.compact.file_manifest import is_file_manifest_message
+
+    store = InMemorySessionStore()
+    seed = _history_with_file_ops_seed()
+    store.save("fm", seed, owner_account_id="local")
+
+    agent = _agent(FakeProvider(), session_store=store)
+    async for _ in agent.run(Envelope.of("继续", session_id="fm")):
+        pass
+
+    saved = store.load("fm", owner_account_id="local")
+    manifests = [m for m in saved if is_file_manifest_message(m)]
+    assert len(manifests) == 1, "canonical 应持久化恰好一条文件清单"
+    assert manifests[0].is_meta
+    assert "/a.py" in (manifests[0].content or "")
+
+
+def _history_with_file_ops_seed() -> list[Message]:
+    return [
+        Message.user("看下文件"),
+        Message.assistant(
+            "读取",
+            tool_calls=[ToolCall(id="r1", name="file_read", arguments={"path": "/a.py"})],
+        ),
+        Message.tool("r1", "内容", name="file_read"),
+    ]
 
 
 # ---------------------------------------------------------------------------

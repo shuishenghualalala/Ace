@@ -203,9 +203,10 @@ class SingleAgent(Agent):
         self.system_prompt = system_prompt
         self.tool_filter = tool_filter  # None=全部工具；否则只暴露子集
         self.max_iterations = max_iterations
-        # 未注入 executor 时默认走自带循环，保持向后兼容（Team 即走此路径）
+        # 未注入 executor 时默认走自带循环，保持向后兼容（Team 即走此路径）。
+        # compactor 同步注入默认 executor：否则溢出兜底与每轮 compact_view 静默关闭。
         self.executor = executor or BuiltinExecutor(
-            provider, registry, plugins, max_iterations=max_iterations
+            provider, registry, plugins, max_iterations=max_iterations, compactor=compactor
         )
         self.compactor = compactor
         self.enable_title = enable_title
@@ -759,6 +760,12 @@ class SingleAgent(Agent):
                 sid,
                 len(repaired),
             )
+        if not self.lightweight:
+            # 文件清单持久会话信息：从工具调用历史提取 read/modified 清单写入
+            # canonical（原地刷新 is_meta 消息），压缩遮蔽后由压缩管线重新注入视图。
+            from crew.agent.compact.file_manifest import upsert_file_manifest
+
+            upsert_file_manifest(history)
         # usage 只代表最近一次 Provider 请求；新回合开始时先清掉旧值，
         # 否则在本回合尚未收到 usage 时，UI 会把上一回合的真实值误认为当前值。
         clear_prompt_usage = getattr(self.session_store, "clear_prompt_usage", None)
@@ -832,6 +839,9 @@ class SingleAgent(Agent):
 
         # 3. 上下文压缩：仅作用于「发给 LLM 的视图」llm_messages，
         #    不破坏 history（旧的详细历史仍完整持久化）。
+        #    工具 schema 提前解析：摘要调用的 KV 前缀复用需要复放 tools 块。
+        effective_tool_filter = self._effective_tool_filter(task_sid, owner_account_id=owner)
+        tool_schemas = self.registry.list_schemas(effective_tool_filter)
         llm_messages = list(history)  # 拷贝，避免 executor 追加时污染 canonical
         if self.compactor is not None:
             t = time.perf_counter()
@@ -839,6 +849,8 @@ class SingleAgent(Agent):
                 llm_messages,
                 task_sid,
                 owner_account_id=owner,
+                system_prompt=system_static,
+                tools=tool_schemas,
             )
             log.info("[PERF] compactor          %.3fs", time.perf_counter() - t)
 
@@ -861,7 +873,6 @@ class SingleAgent(Agent):
         )
 
         # 4. 组执行上下文，委托 executor（executor 把本轮新消息追加到 llm_messages）
-        effective_tool_filter = self._effective_tool_filter(task_sid, owner_account_id=owner)
         authorized_tool_names = frozenset(
             effective_tool_filter if effective_tool_filter is not None else self.registry.names()
         )
@@ -881,7 +892,7 @@ class SingleAgent(Agent):
                 for attachment in (envelope.attachments or [])
                 if isinstance(attachment, dict)
             ],
-            tool_schemas=self.registry.list_schemas(effective_tool_filter),
+            tool_schemas=tool_schemas,
             authorized_tool_names=authorized_tool_names,
             enforce_tool_scope=True,
             params=dict(envelope.params),

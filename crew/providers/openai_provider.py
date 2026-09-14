@@ -450,6 +450,7 @@ class OpenAIProvider(LLMProvider):
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
         reasoning_mode: str | None = None,
+        purpose: str | None = None,
     ) -> ChatResponse:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -473,6 +474,7 @@ class OpenAIProvider(LLMProvider):
         session = _current_session()
         llm_trace("request", {
             "session_id": session, "model": self.model, "stream": False,
+            "purpose": purpose or "",
             "messages": payload["messages"],
             "tools": [t.get("function", {}).get("name") for t in (tools or [])],
         })
