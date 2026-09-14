@@ -123,6 +123,39 @@ def status_frame(session_id: str, message: str) -> dict[str, Any]:
     }
 
 
+# 需要叠加产品配置开关的 UI 边界能力：product.wiki / product.external-agents
+# 在 app.py 装配时不受其配置开关约束（build_wiki_feature / build_external_agent_feature
+# 均未传 enabled=），因此 Runtime 快照的 available 只反映运行态激活。此处按
+# Feature ID 建立「配置标志 → 能力」映射，值取自对应 Feature 的常量
+# （packages/crew-wiki 的 WIKI_FEATURE_ID / packages/crew-external-agents 的
+# EXTERNAL_AGENT_FEATURE_ID）。
+_WIKI_FEATURE_ID = "product.wiki"
+_EXTERNAL_AGENTS_FEATURE_ID = "product.external-agents"
+
+
+def _apply_config_availability_overrides(
+    snapshot: dict[str, dict[str, Any]],
+    config: Any,
+) -> dict[str, dict[str, Any]]:
+    """把产品配置开关叠加到能力快照上，产出 UI 消费的最终可用性。
+
+    这些 Feature 的激活不随配置开关变化，Runtime 快照无法表达「配置已禁用」，
+    因此在这里做单向覆写：对应配置标志为假时 available 翻为 False，条目保留
+    （state / generation 原样），缺席条目不动。Runtime 快照保持纯运行态投影，
+    app.py 的激活行为不变。
+    """
+    for feature_id, flag_name in (
+        (_WIKI_FEATURE_ID, "wiki_enabled"),
+        (_EXTERNAL_AGENTS_FEATURE_ID, "external_agents_enabled"),
+    ):
+        entry = snapshot.get(feature_id)
+        if entry is None:
+            continue
+        if not getattr(config, flag_name, True):
+            entry["available"] = False
+    return snapshot
+
+
 def config_body(
     crew: CrewApp,
     *,
@@ -141,8 +174,9 @@ def config_body(
     active = crew.owner_default_model_profile(owner_account_id)
     runtime = getattr(getattr(crew, "plugins", None), "feature_runtime", None)
     capability_snapshot = getattr(runtime, "capability_snapshot", None)
-    feature_capabilities = (
-        capability_snapshot() if callable(capability_snapshot) else {}
+    feature_capabilities = _apply_config_availability_overrides(
+        capability_snapshot() if callable(capability_snapshot) else {},
+        crew.config,
     )
     return {
         "model": active.model,

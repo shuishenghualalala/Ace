@@ -110,3 +110,103 @@ async def test_real_team_and_kanban_states_are_independent_in_config_response(
         )
     finally:
         await crew.shutdown()
+
+
+WIKI_FEATURE_ID = "product.wiki"
+EXTERNAL_AGENTS_FEATURE_ID = "product.external-agents"
+
+
+def _config_body_crew(*, snapshot: dict, wiki_enabled: bool, external_agents_enabled: bool) -> SimpleNamespace:
+    """Build a config_body host whose Runtime snapshot and config flags are both controllable."""
+
+    class FakeRuntime:
+        def capability_snapshot(self) -> dict:
+            return dict(snapshot)
+
+    class FakePlugins:
+        feature_runtime = FakeRuntime()
+
+    return SimpleNamespace(
+        plugins=FakePlugins(),
+        config=SimpleNamespace(
+            wiki_enabled=wiki_enabled,
+            external_agents_enabled=external_agents_enabled,
+            security_enabled=False,
+        ),
+        owner_visible_model_profiles=lambda *_args, **_kwargs: (),
+        owner_default_model_profile=lambda *_args: SimpleNamespace(
+            model="test", has_key=False, base_url="", id="default"
+        ),
+        owner_public_model_options=lambda *_args: [],
+    )
+
+
+@pytest.mark.parametrize(
+    "feature_id, flag_name",
+    [
+        (WIKI_FEATURE_ID, "wiki_enabled"),
+        (EXTERNAL_AGENTS_FEATURE_ID, "external_agents_enabled"),
+    ],
+)
+@pytest.mark.parametrize("config_enabled", [False, True])
+@pytest.mark.parametrize("runtime_available", [False, True])
+def test_config_body_capability_available_is_config_enabled_and_runtime_active(
+    feature_id, flag_name, config_enabled, runtime_available,
+):
+    crew = _config_body_crew(
+        snapshot={
+            feature_id: {
+                "state": "active",
+                "available": runtime_available,
+                "generation": f"{feature_id}@g1",
+            }
+        },
+        wiki_enabled=config_enabled if flag_name == "wiki_enabled" else True,
+        external_agents_enabled=config_enabled if flag_name == "external_agents_enabled" else True,
+    )
+
+    capability = config_body(crew, owner_account_id="owner")["feature_capabilities"][feature_id]
+
+    assert capability["available"] is (config_enabled and runtime_available)
+    assert capability["state"] == "active"
+    assert capability["generation"] == f"{feature_id}@g1"
+
+
+def test_config_body_capability_override_preserves_entries_and_leaves_absent_untouched():
+    snapshot = {
+        WIKI_FEATURE_ID: {"state": "active", "available": True, "generation": f"{WIKI_FEATURE_ID}@g2"},
+        EXTERNAL_AGENTS_FEATURE_ID: {
+            "state": "active", "available": True, "generation": f"{EXTERNAL_AGENTS_FEATURE_ID}@g1",
+        },
+        "product.other": {"state": "active", "available": True, "generation": "product.other@g1"},
+    }
+    crew = _config_body_crew(
+        snapshot=snapshot,
+        wiki_enabled=False,
+        external_agents_enabled=False,
+    )
+
+    capabilities = config_body(crew, owner_account_id="owner")["feature_capabilities"]
+
+    assert capabilities[WIKI_FEATURE_ID]["available"] is False
+    assert capabilities[EXTERNAL_AGENTS_FEATURE_ID]["available"] is False
+    assert capabilities[WIKI_FEATURE_ID]["state"] == "active"
+    assert capabilities[WIKI_FEATURE_ID]["generation"] == f"{WIKI_FEATURE_ID}@g2"
+    assert capabilities[EXTERNAL_AGENTS_FEATURE_ID]["generation"] == f"{EXTERNAL_AGENTS_FEATURE_ID}@g1"
+    assert capabilities["product.other"] == snapshot["product.other"]
+
+
+def test_config_body_capability_override_never_adds_undeclared_features():
+    crew = _config_body_crew(
+        snapshot={
+            "product.other": {"state": "active", "available": True, "generation": "product.other@g1"},
+        },
+        wiki_enabled=False,
+        external_agents_enabled=False,
+    )
+
+    capabilities = config_body(crew, owner_account_id="owner")["feature_capabilities"]
+
+    assert WIKI_FEATURE_ID not in capabilities
+    assert EXTERNAL_AGENTS_FEATURE_ID not in capabilities
+    assert capabilities["product.other"]["available"] is True
