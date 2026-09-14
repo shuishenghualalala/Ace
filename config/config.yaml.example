@@ -173,6 +173,9 @@ tools:
     - wiki.manage
   file:
     read_max_chars: 100000
+    # read-before-edit 观察策略：true 时 patch/file_write 要求当前会话先 file_read
+    # 过目标文件（观察到的版本同时作为写入 CAS 基），未读即拒并提示补救动作。
+    require_read_before_edit: false
   terminal:
     max_timeout: 600
 plugins:

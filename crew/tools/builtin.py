@@ -17,13 +17,17 @@ from pathlib import Path
 from pathlib import PureWindowsPath
 from typing import Any
 
+from crew.agent.file_mutation import (
+    file_mutation,
+    guard_file_edit,
+    record_file_observation,
+)
 from crew.core.errors import ToolError
 from crew.core.interfaces import ToolResultRetention
 from crew.core.runctx import emit_tool_progress
 from crew.tools.file_utils import (
     _apply_line_pagination,
     _check_sensitive_path,
-    _detect_line_ending,
     _format_read_result,
     _get_max_read_chars,
     _has_binary_extension,
@@ -32,8 +36,6 @@ from crew.tools.file_utils import (
     _normalize_read_pagination,
     _resolve_base_dir,
     _strip_bom,
-    atomic_replace_bytes,
-    read_verified_bytes,
     snapshot_file,
     MAX_READ_FILE_BYTES,
 )
@@ -970,10 +972,14 @@ async def handle_file_read(
         return f"[二进制文件，跳过文本读取]: {path}"
     try:
         # 阻塞 I/O 丢线程池，避免卡住事件循环（拖垮网关心跳）
-        raw_bytes = await asyncio.to_thread(read_verified_bytes, path, max_bytes=MAX_READ_FILE_BYTES)
-        text = raw_bytes.decode("utf-8", errors="replace")
+        version = await asyncio.to_thread(snapshot_file, path, max_bytes=MAX_READ_FILE_BYTES)
     except Exception as exc:  # noqa: BLE001
         raise ToolError(f"读取失败: {exc}") from exc
+    if not version.exists:
+        raise ToolError(f"文件不存在: {path}")
+    record_file_observation(path, version)
+    raw_bytes = version.data
+    text = raw_bytes.decode("utf-8", errors="replace")
 
     # BOM / line-ending preservation (Hermes-compatible)
     text, had_bom = _strip_bom(text.replace("\r\r\n", "\r\n"))
@@ -1015,41 +1021,6 @@ async def handle_file_read(
     )
 
 
-def _write_file_sync(path: Path, content: str, append: bool) -> dict[str, Any]:
-    """同步执行文件写入（含 BOM / 行尾保留）。阻塞 I/O，由调用方丢线程池执行。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    version = snapshot_file(path, max_bytes=MAX_READ_FILE_BYTES)
-
-    # Preserve existing file's BOM and line endings (Hermes-compatible)
-    original_ending = None
-    had_bom = False
-    if path.exists() and path.is_file() and not append:
-        try:
-            raw = version.data
-            existing = raw.decode("utf-8", errors="replace")
-            existing, had_bom = _strip_bom(existing)
-            original_ending = _detect_line_ending(existing)
-        except Exception:
-            pass
-
-    if original_ending is not None:
-        content = _normalize_line_endings(content, original_ending)
-    if had_bom and not content.startswith("﻿"):
-        content = "﻿" + content
-
-    encoded = content.encode("utf-8")
-    if append and version.exists:
-        encoded = version.data + encoded
-    atomic_replace_bytes(path, encoded, version)
-
-    return {
-        "success": True,
-        "path": str(path),
-        "bytes_written": len(content.encode("utf-8")),
-        "append": append,
-    }
-
-
 async def handle_file_write(
     args: dict[str, Any],
     *,
@@ -1072,11 +1043,26 @@ async def handle_file_write(
         raise ToolError(sensitive)
 
     try:
-        # 阻塞 I/O 丢线程池，避免卡住事件循环（拖垮网关心跳）
-        result = await asyncio.to_thread(_write_file_sync, path, content, append)
+        outcome = await file_mutation.write_text(
+            path,
+            content,
+            append=append,
+            expected=guard_file_edit(path),
+            max_bytes=MAX_READ_FILE_BYTES,
+        )
+    except ToolError:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise ToolError(f"写入失败: {exc}") from exc
-    return json.dumps(result, ensure_ascii=False)
+    return json.dumps(
+        {
+            "success": True,
+            "path": str(path),
+            "bytes_written": outcome.bytes_written,
+            "append": append,
+        },
+        ensure_ascii=False,
+    )
 
 
 def _delete_file_sync(path: Path) -> dict[str, Any]:

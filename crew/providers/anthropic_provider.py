@@ -21,6 +21,7 @@ from crew.core.types import (
     Message,
     StreamChunk,
     ToolCall,
+    coerce_tool_arguments,
 )
 from crew.state.logging import llm_trace
 
@@ -334,7 +335,7 @@ class AnthropicProvider(LLMProvider):
                 return None
             raw = acc.get("input_json") or "{}"
             try:
-                args = json.loads(raw)
+                args = coerce_tool_arguments(json.loads(raw))
             except json.JSONDecodeError:
                 args = {"_raw": raw}
             tool = ToolCall(id=acc.get("id", ""), name=acc.get("name", ""), arguments=args)
