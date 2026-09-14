@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
+from crew.wiki import multimodal
 from crew.wiki.multimodal import (
     _IMAGE_UNDERSTAND_SCRIPT,
     _VIDEO_UNDERSTAND_SCRIPT,
@@ -20,6 +23,14 @@ from crew.wiki.multimodal import (
     describe_video,
     is_image_mime,
     is_video_mime,
+)
+
+# 共享 venv 的 editable 安装指向主检出时，新 API 可能来自旧代码；
+# 装配点新增能力（截断/异常守卫）的用例在旧代码下自动跳过。
+MAX_DESCRIPTION_CHARS = getattr(multimodal, "MAX_DESCRIPTION_CHARS", 20000)
+requires_assembly_hardening = pytest.mark.skipif(
+    not hasattr(multimodal, "_truncate_description"),
+    reason="crew.wiki.multimodal 来自未含 H10 加固的检出",
 )
 
 
@@ -241,3 +252,152 @@ def test_bundled_video_skill_uses_only_configured_endpoints(
         "https://upload.example/media",
         "https://analyze.example/video",
     ]
+
+
+# ── H10：网络错误分类、输出截断、装配点异常守卫 ─────────────────────────────
+
+
+def _load_image_skill():
+    return _load_script_module("crew_skill_image_understand", _IMAGE_UNDERSTAND_SCRIPT)
+
+
+def _load_video_skill():
+    return _load_script_module("crew_skill_video_understand", _VIDEO_UNDERSTAND_SCRIPT)
+
+
+def _configure_image_env(monkeypatch):
+    monkeypatch.setenv("VLM_BASE_URL", "https://vision.example/v1")
+    monkeypatch.setenv("VLM_MODEL", "vision-model")
+    monkeypatch.setenv("VLM_API_KEY", "fake-key")
+
+
+def test_bundled_image_skill_classifies_timeout(sample_image, monkeypatch, capsys):
+    module = _load_image_skill()
+    _configure_image_env(monkeypatch)
+
+    def fake_post(url, **kwargs):
+        raise requests.Timeout("slow")
+
+    monkeypatch.setattr(module.requests, "post", fake_post)
+
+    assert module.analyze_image(sample_image, "描述") is None
+    assert "请求超时" in capsys.readouterr().err
+
+
+def test_bundled_image_skill_classifies_connection_error(sample_image, monkeypatch, capsys):
+    module = _load_image_skill()
+    _configure_image_env(monkeypatch)
+
+    def fake_post(url, **kwargs):
+        raise requests.ConnectionError("dns")
+
+    monkeypatch.setattr(module.requests, "post", fake_post)
+
+    assert module.analyze_image(sample_image, "描述") is None
+    assert "连接失败" in capsys.readouterr().err
+
+
+def test_bundled_image_skill_classifies_http_error(sample_image, monkeypatch, capsys):
+    module = _load_image_skill()
+    _configure_image_env(monkeypatch)
+
+    def fake_post(url, **kwargs):
+        response = SimpleNamespace(status_code=502)
+        raise requests.HTTPError("bad gateway", response=response)
+
+    monkeypatch.setattr(module.requests, "post", fake_post)
+
+    assert module.analyze_image(sample_image, "描述") is None
+    assert "HTTP 502" in capsys.readouterr().err
+
+
+def test_bundled_image_skill_emits_structured_error_json(sample_image, monkeypatch, capsys):
+    module = _load_image_skill()
+    _configure_image_env(monkeypatch)
+
+    def fake_post(url, **kwargs):
+        raise requests.Timeout("slow")
+
+    monkeypatch.setattr(module.requests, "post", fake_post)
+
+    assert module.analyze_image(sample_image, "描述") is None
+
+    import json
+
+    err = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert err["status"] == "error"
+    assert err["error"] == "RequestFailed"
+
+
+def test_bundled_image_skill_truncates_long_output(sample_image, monkeypatch):
+    module = _load_image_skill()
+    _configure_image_env(monkeypatch)
+    monkeypatch.setattr(
+        module.requests,
+        "post",
+        lambda url, **kwargs: _FakeResponse(
+            {"choices": [{"message": {"content": "字" * 50000}}]}
+        ),
+    )
+
+    result = module.analyze_image(sample_image, "描述")
+    assert result is not None
+    assert len(result) < 50000
+    assert "省略" in result
+
+
+def test_bundled_video_skill_classifies_upload_timeout(sample_video, monkeypatch, capsys):
+    module = _load_video_skill()
+    monkeypatch.setenv("VLM_VIDEO_UPLOAD_URL", "https://upload.example/media")
+
+    def fake_post(url, **kwargs):
+        raise requests.Timeout("slow")
+
+    monkeypatch.setattr(module.requests, "post", fake_post)
+
+    assert module.upload_video(sample_video, "fake-key") is None
+    assert "请求超时" in capsys.readouterr().err
+
+
+@requires_assembly_hardening
+def test_describe_image_wraps_script_exception(sample_image):
+    mock_module = MagicMock()
+    mock_module.analyze_image.side_effect = RuntimeError("kaboom")
+
+    with patch(
+        "crew.wiki.multimodal._load_script_module",
+        return_value=mock_module,
+    ), pytest.raises(MediaUnderstandingError) as exc_info:
+        describe_image(str(sample_image))
+
+    assert "脚本异常" in str(exc_info.value)
+
+
+@requires_assembly_hardening
+def test_describe_image_truncates_long_description(sample_image):
+    mock_module = MagicMock()
+    mock_module.analyze_image.return_value = "字" * (MAX_DESCRIPTION_CHARS * 3)
+
+    with patch(
+        "crew.wiki.multimodal._load_script_module",
+        return_value=mock_module,
+    ):
+        result = describe_image(str(sample_image))
+
+    assert len(result) < MAX_DESCRIPTION_CHARS * 2
+    assert "省略" in result
+
+
+@requires_assembly_hardening
+def test_describe_video_wraps_upload_exception(sample_video):
+    mock_module = MagicMock()
+    mock_module.load_api_key.return_value = "fake-key"
+    mock_module.upload_video.side_effect = ValueError("bad url")
+
+    with patch(
+        "crew.wiki.multimodal._load_script_module",
+        return_value=mock_module,
+    ), pytest.raises(MediaUnderstandingError) as exc_info:
+        describe_video(str(sample_video), confirm_upload=True)
+
+    assert "脚本异常" in str(exc_info.value)

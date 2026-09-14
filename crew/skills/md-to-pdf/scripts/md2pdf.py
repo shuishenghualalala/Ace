@@ -9,6 +9,16 @@ import os
 import subprocess
 from pathlib import Path
 
+CONVERT_TIMEOUT_SECONDS = 120
+ERROR_OUTPUT_TAIL_CHARS = 2000
+
+
+def _tail(text, limit: int = ERROR_OUTPUT_TAIL_CHARS) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"…（前部省略 {len(text) - limit} 字符）…{text[-limit:]}"
+
 # Default CSS for Chinese documents
 CHINESE_CSS = """
 @page {
@@ -92,9 +102,9 @@ hr {
 def check_command(cmd):
     """Check if a command is available"""
     try:
-        subprocess.run([cmd, '--version'], capture_output=True, check=True)
+        subprocess.run([cmd, '--version'], capture_output=True, check=True, timeout=10)
         return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 def method_pandoc_xelatex(md_path, pdf_path):
@@ -112,10 +122,12 @@ def method_pandoc_xelatex(md_path, pdf_path):
             '-V', 'geometry:margin=2.5cm',
             '--toc'
         ]
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=CONVERT_TIMEOUT_SECONDS)
         return True, "pandoc+xelatex"
     except subprocess.CalledProcessError as e:
-        return False, f"pandoc failed: {e.stderr}"
+        return False, f"pandoc failed: {_tail(e.stderr)}"
+    except subprocess.TimeoutExpired:
+        return False, f"pandoc 超时（>{CONVERT_TIMEOUT_SECONDS}s）"
 
 def method_pandoc_wkhtmltopdf(md_path, pdf_path):
     """Method 2: Pandoc + wkhtmltopdf (good Chinese support)"""
@@ -134,7 +146,7 @@ def method_pandoc_wkhtmltopdf(md_path, pdf_path):
             '--standalone', '--toc',
             '--metadata', f'title={md_path.stem}'
         ]
-        subprocess.run(cmd_md2html, check=True, capture_output=True)
+        subprocess.run(cmd_md2html, check=True, capture_output=True, timeout=CONVERT_TIMEOUT_SECONDS)
 
         # Create CSS file
         with open(css_path, 'w', encoding='utf-8') as f:
@@ -154,11 +166,13 @@ def method_pandoc_wkhtmltopdf(md_path, pdf_path):
             '--footer-font-size', '9',
             str(html_path), str(pdf_path)
         ]
-        subprocess.run(cmd_html2pdf, check=True, capture_output=True)
+        subprocess.run(cmd_html2pdf, check=True, capture_output=True, text=True, timeout=CONVERT_TIMEOUT_SECONDS)
 
         return True, "pandoc+wkhtmltopdf"
-    except subprocess.CalledProcessError:
-        return False, "wkhtmltopdf failed"
+    except subprocess.CalledProcessError as e:
+        return False, f"wkhtmltopdf failed: {_tail(e.stderr)}"
+    except subprocess.TimeoutExpired:
+        return False, f"pandoc/wkhtmltopdf 超时（>{CONVERT_TIMEOUT_SECONDS}s）"
     finally:
         # Always cleanup temp files
         html_path.unlink(missing_ok=True)
