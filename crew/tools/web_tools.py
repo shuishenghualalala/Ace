@@ -7,7 +7,9 @@ Browser Use 由 ``crew.browser`` 通过 Electron 内置 Chromium 实现；本模
 from __future__ import annotations
 
 import asyncio
+import base64
 import html
+import io
 import json
 import os
 import re
@@ -15,11 +17,12 @@ import struct
 import urllib.parse
 from functools import partial
 from html.parser import HTMLParser
-from pathlib import Path
 from typing import Any
 
 from crew.core.errors import ToolError
 from crew.core.interfaces import ToolResultRetention
+from crew.core.runctx import current_model_capabilities
+from crew.core.types import MediaPart, ToolOutput
 from crew.security.outbound import (
     PublicRedirectApprovalRequired,
     fetch_public_http,
@@ -431,7 +434,11 @@ async def _authorized_fetch(
 
 VISION_ANALYZE_SCHEMA = {
     "name": "vision_analyze",
-    "description": "分析本地图片的基础元信息；当前支持 PNG/JPEG 尺寸识别。",
+    "description": (
+        "读取本地图片，把图像内容送入模型上下文做视觉分析（自动按像素预算缩放、"
+        "修正 EXIF 方向并去除元数据）。当前模型不支持视觉时会明确报错——"
+        "需要网页截图/交互分析时请改用 browser 工具。"
+    ),
     "parameters": {
         "type": "object",
         "properties": {"path": {"type": "string", "description": "本地图片路径"}},
@@ -439,13 +446,33 @@ VISION_ANALYZE_SCHEMA = {
     },
 }
 
+# 源文件大小闸口（base64 后约 +33%，再经像素预算缩放）。
+_VISION_MAX_SOURCE_BYTES = 10 * 1024 * 1024
+# 像素预算：超过则等比缩放（面积优先，长边其次）。
+_VISION_MAX_PIXELS = 1_600_000
+_VISION_MAX_DIMENSION = 2048
 
-def _image_size(path: Path) -> dict[str, Any]:
-    data = read_verified_bytes(path, max_bytes=64 * 1024 * 1024)
-    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+
+def _sniff_image_mime(data: bytes) -> str | None:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data.startswith(b"BM"):
+        return "image/bmp"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _image_size(data: bytes) -> dict[str, Any]:
+    mime = _sniff_image_mime(data)
+    if mime == "image/png" and len(data) >= 24:
         width, height = struct.unpack(">II", data[16:24])
         return {"format": "png", "width": width, "height": height}
-    if data.startswith(b"\xff\xd8"):
+    if mime == "image/jpeg":
         i = 2
         while i + 9 < len(data):
             if data[i] != 0xFF:
@@ -458,7 +485,72 @@ def _image_size(path: Path) -> dict[str, Any]:
                 width = int.from_bytes(data[i + 7 : i + 9], "big")
                 return {"format": "jpeg", "width": width, "height": height}
             i += 2 + size
-    return {"format": "unknown"}
+    return {"format": (mime or "unknown").rsplit("/", 1)[-1]}
+
+
+def _normalize_with_pillow(data: bytes) -> tuple[bytes, str, dict[str, Any], bool] | None:
+    """Pillow 全像素解码、EXIF 方向修正、像素预算缩放与重编码。
+
+    返回 None 表示 Pillow 不可用或解码失败；调用方降级为魔数嗅探 + 原始字节
+    直通（部分 JPEG 变体 Pillow 无法解析但模型端可解）。
+    """
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return None
+    try:
+        source = Image.open(io.BytesIO(data))
+        source.verify()
+        image = Image.open(io.BytesIO(data))
+        width, height = image.size
+        meta: dict[str, Any] = {
+            "format": (image.format or "unknown").lower(),
+            "width": width,
+            "height": height,
+        }
+        image = ImageOps.exif_transpose(image)
+        scale = min(
+            1.0,
+            (_VISION_MAX_PIXELS / max(1, width * height)) ** 0.5,
+            _VISION_MAX_DIMENSION / max(width, height),
+        )
+        resized = scale < 1.0
+        if resized:
+            image = image.resize(
+                (max(1, round(width * scale)), max(1, round(height * scale))),
+                Image.LANCZOS,
+            )
+        has_alpha = image.mode in {"RGBA", "LA"} or (
+            image.mode == "P" and "transparency" in image.info
+        )
+        buffer = io.BytesIO()
+        if has_alpha:
+            image.convert("RGBA").save(buffer, format="PNG", optimize=True)
+            return buffer.getvalue(), "image/png", meta, resized
+        image.convert("RGB").save(buffer, format="JPEG", quality=88)
+        return buffer.getvalue(), "image/jpeg", meta, resized
+    except Exception:  # noqa: BLE001 - 解码失败按直通处理，不阻断可用图片
+        return None
+
+
+def _prepare_image(data: bytes) -> tuple[bytes, str, dict[str, Any], bool]:
+    """魔数嗅探 →（有 Pillow 时）归一化 → 可进上下文的编码字节。"""
+    normalized = _normalize_with_pillow(data)
+    if normalized is not None:
+        return normalized
+    mime = _sniff_image_mime(data)
+    if mime is None:
+        raise ToolError("不支持的图片格式（仅支持 PNG/JPEG/GIF/BMP/WebP）")
+    return data, mime, _image_size(data), False
+
+
+def _vision_capable() -> bool:
+    capabilities = current_model_capabilities.get()
+    if capabilities is None:
+        # 无运行时上下文（直接调用/单测）不预设能力；provider 层仍会按
+        # 模型 vision 开关把图片块降级为确定性占位文本，不会打挂请求。
+        return True
+    return "vision" in {str(item).strip().lower() for item in capabilities}
 
 
 async def handle_vision_analyze(
@@ -466,8 +558,13 @@ async def handle_vision_analyze(
     *,
     workspace_store: Any | None = None,
     security_service: Any | None = None,
-) -> str:
-    """Inspect one image only after the same canonical file authorization as file_read."""
+) -> str | ToolOutput:
+    """经与 file_read 相同的文件授权后，把图片作为视觉输入送入模型上下文。"""
+    if not _vision_capable():
+        raise ToolError(
+            "当前模型不支持视觉输入，无法分析图片；请切换到支持视觉的模型，"
+            "或改用 browser 工具的 snapshot/DOM 分析。"
+        )
     path = await authorize_file_tool(
         args,
         operation="read",
@@ -477,9 +574,21 @@ async def handle_vision_analyze(
     )
     if not path.is_file():
         raise ToolError(f"图片不存在: {path}")
-    info = _image_size(path)
-    info.update({"path": str(path), "size": path.stat().st_size})
-    return tool_result(success=True, image=info)
+    data = read_verified_bytes(path, max_bytes=_VISION_MAX_SOURCE_BYTES)
+    payload, mime, meta, resized = _prepare_image(data)
+    meta.update({"path": str(path), "size": len(data), "resized": resized})
+    data_url = f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
+    return ToolOutput(
+        content=tool_result(success=True, image=meta),
+        media=[
+            MediaPart(
+                mime_type=mime,
+                data_url=data_url,
+                alt=f"待分析的图片 {path.name}",
+                detail="high",
+            )
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +646,7 @@ def register_web_tools(
         display_name="分析图片",
         ui_label_template="分析图片 {path}",
         should_defer=True,
-        search_hint="vision image analyze dimensions local picture",
+        search_hint="vision image analyze look at picture screenshot read local image",
         # 视觉结论可能昂贵且无法从普通文本工具恢复，按重要结果保护。
         result_retention=ToolResultRetention.IMPORTANT,
     )

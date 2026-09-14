@@ -433,7 +433,12 @@ async def test_vision_analyze_png(registry, tmp_path):
     ))
     result = await registry.execute(ToolCall("v1", "vision_analyze", {"path": str(png)}))
     assert not result.is_error
-    assert '"width": 1' in result.content
+    payload = json.loads(result.content)
+    assert payload["image"]["width"] == 1
+    # 图片必须真进上下文：media 通路携带 base64 data URL。
+    assert len(result.media) == 1
+    assert result.media[0].data_url.startswith("data:image/")
+    assert "base64," in result.media[0].data_url
 
 
 async def test_vision_analyze_uses_file_authorization(tmp_path, monkeypatch):
@@ -450,13 +455,15 @@ async def test_vision_analyze_uses_file_authorization(tmp_path, monkeypatch):
         return png
 
     monkeypatch.setattr(web_tools, "authorize_file_tool", authorize)
-    payload = json.loads(await web_tools.handle_vision_analyze(
+    output = await web_tools.handle_vision_analyze(
         {"path": "/untrusted/model/path.png"},
         workspace_store=object(),
         security_service=object(),
-    ))
+    )
+    payload = json.loads(output.content)
 
     assert payload["image"]["path"] == str(png)
+    assert len(output.media) == 1
     assert seen["operation"] == "read"
     assert seen["tool_name"] == "vision_analyze"
 
