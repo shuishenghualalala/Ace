@@ -350,3 +350,53 @@ async def test_patch_edits_count_not_allowed(registry, tmp_path):
     )
     assert result.is_error
     assert "count" in result.content
+
+
+# ---------------------------------------------------------------------------
+# C3 参数宽进严出
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_tool_arguments_unwraps_stringified_json():
+    from crew.core.types import coerce_tool_arguments
+
+    inner = {"path": "/tmp/a.txt", "old": "x", "new": "y"}
+    assert coerce_tool_arguments(__import__("json").dumps(inner)) == inner
+
+
+def test_coerce_tool_arguments_passthrough_and_failure():
+    import json
+
+    from crew.core.types import coerce_tool_arguments
+
+    assert coerce_tool_arguments("plain text") == "plain text"
+    assert coerce_tool_arguments(42) == 42
+    # 二次解析失败：原样保留，交给下游 schema 严校验拒绝
+    broken = '{"path": "/tmp/a.txt", '
+    assert coerce_tool_arguments(broken) == broken
+    # 字符串化的数组也展开（由 schema 层判定是否为合法对象）
+    assert coerce_tool_arguments(json.dumps([1, 2])) == [1, 2]
+
+
+def test_openai_parse_tool_arguments_unwraps_stringified_json():
+    import json
+
+    from crew.providers.openai_provider import _parse_tool_arguments
+
+    inner = {"path": "/tmp/a.txt", "old": "x", "new": "y"}
+    parsed = _parse_tool_arguments(json.dumps(json.dumps(inner)), "patch")
+    assert parsed == inner
+
+
+async def test_registry_schema_rejects_non_dict_args_without_crashing(registry, tmp_path):
+    """严出：结构非法的参数转成 error toolResult 回模型自纠，不崩循环。"""
+    target = tmp_path / "demo.txt"
+    target.write_text("hi\n", encoding="utf-8")
+
+    result = await registry.execute(ToolCall("c1", "patch", ["not", "a", "dict"]))
+    assert result.is_error
+    assert "工具参数必须是对象" in result.content
+
+    result2 = await registry.execute(ToolCall("c2", "patch", {"path": str(target), "old": "hi"}))
+    assert result2.is_error
+    assert "new" in result2.content

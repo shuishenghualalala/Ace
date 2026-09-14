@@ -25,6 +25,7 @@ from crew.core.types import (
     Message,
     StreamChunk,
     ToolCall,
+    coerce_tool_arguments,
 )
 from crew.providers.vendors import REASONING_LEVELS, VendorCompat
 from crew.state.logging import llm_trace
@@ -90,7 +91,7 @@ def _repair_leaked_parameter_json(raw: str) -> str | None:
 def _parse_tool_arguments(raw: str, tool_name: str) -> Any:
     """解析工具参数；仅在检测到已知协议泄漏时尝试一次受限修复。"""
     try:
-        return _normalize_tool_arguments(json.loads(raw or "{}"), tool_name)
+        parsed = json.loads(raw or "{}")
     except json.JSONDecodeError as original_exc:
         repaired = _repair_leaked_parameter_json(raw)
         if repaired is None:
@@ -100,7 +101,7 @@ def _parse_tool_arguments(raw: str, tool_name: str) -> Any:
         except json.JSONDecodeError:
             raise original_exc
         log.warning("修复模型泄漏标签导致的损坏 JSON tool=%s", tool_name)
-        return _normalize_tool_arguments(parsed, tool_name)
+    return _normalize_tool_arguments(coerce_tool_arguments(parsed), tool_name)
 
 
 def _merge_tool_argument_fragment(current: str, fragment: str) -> tuple[str, str]:
