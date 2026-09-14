@@ -35,6 +35,21 @@
 </ol>
 <h2>不照搬</h2>
 <p>zstd 帧压缩与世代迁移链（SQLite 行追加天然免整文件压缩）；按 cwd 目录分组 + 无超时 flock（多租户服务端按 owner 维度 + 租约/超时）；dsh「回退=遮蔽投影」的完整语义（首期用 parent 树 + leaf 指针，遮蔽只在压缩里用）；pi/codex 的「完全不 fsync」（WAL 默认持久性语义即可）；codex 的 Copied/Referenced 双轨 fork。</p>
+<h2>codex 对照修订（2026-09-14）</h2>
+<p>对 codex-rs（rollout/recorder、thread-store/local/{live_writer,writer_lock,revert_thread,paginated_fork}、context_manager/normalize、session/rollout_reconstruction）源码精读后的吸收结论：</p>
+<ul>
+<li><strong>flush barrier 语义</strong>：leaf 指针与投影推进必须 await 单写队列 flush 的 ack 往返；写失败保留队列重试一次；投影允许滞后、禁止超前（SQLite 投影即可重建视图）。leaf 的 UPDATE 要么与事件批次同事务，要么在 barrier 之后单独提交。</li>
+<li><strong>writer 互斥选型修正</strong>：确认选 pi v4 式 SQLite writer_leases（TTL 30s + 心跳 + fence），不选 codex 的 flock（劝告锁、无 fence、无 TTL，服务端多进程下无法区分「持有者已死」与「只是慢」）；原子取租用条件 UPDATE + rows_affected，每批写入校验 fence 吊销慢进程旧写入。</li>
+<li><strong>compaction 事件自包含</strong>：单行内联完整 replacement payload + 窗口代际元数据 + 重锚定 token 估算；事件表只增不改，旧 checkpoint 永不覆盖；恢复 = 定位最近 checkpoint seq 后正序重放（一条 SQL 可得），无需全表反向扫描。</li>
+<li><strong>分支指针模型</strong>：分支/回退指针存 (source_session_id, parent_seq) 二元组；指针切换用 <code>UPDATE ... WHERE head_seq=?</code> 的 CAS，affected≠1 即 Conflict 并回滚；fork 在行模型下 O(1) 不复制行（优于 codex 的文件前缀引用）；字节偏移在行模型下禁止作为指针。</li>
+<li><strong>孤儿合成 id 规范</strong>：固定 namespace 常量 + 类型前缀 + 源调用唯一 id 派生（不用随机 id），模型可见文案逐字固定，幂等读时合成不落表（codex normalize.rs 语义；W1 已落地初版，W5 对齐此规范）。</li>
+<li><strong>TokenMeter 锚点</strong>：usage 快照作为 meter_checkpoint 事件追加；compaction 事件内联重锚定估算；delta 计算 max(0) 钳制；保留真实累计值，禁止用 context_window 整数值覆盖（codex 的 fill_to_context_window 是展示层妥协，不学）。</li>
+<li><strong>配平游标对账</strong>：projected_seq 等游标遇缺口必须报错重试，不可静默跳过；游标与数据单事务推进；批次写入以 (session_id, seq) 唯一约束兜底去重。</li>
+<li><strong>SQLite pragma 基线</strong>：WAL / synchronous=NORMAL / busy_timeout≥5s / auto_vacuum=INCREMENTAL（仅新库）；禁止启动时 VACUUM；compaction 只逻辑截断（leaf 前移）不物理删除旧事件。</li>
+<li><strong>durable/transient 事件分类</strong>：事件类型枚举标注是否落盘，瞬态事件（错误、进度、队列变化）不写 session_events。</li>
+<li><strong>读一致性边界</strong>：读者以 leaf/head_seq 快照读取（WHERE seq &lt;= head_seq）；游标绑定 session_id 校验防串会话；写者推进 leaf 不影响读者。</li>
+</ul>
+<p>明确排除（文件存储特有、SQLite 事务模型下无对应问题）：逐行 flush / torn-tail 补换行 / 坏行跳过 / 压缩文件物化 / 文件系统扫描双通道列表。</p>
 <h2>回退方式</h2>
 <p>双格式窗口内旧 blob 列保留不删，读取端配置切回 blob 模式即原地回退；窗口关闭（删旧列）前所有回退路径可用。每批次独立提交可 revert。</p>
 <p><a href="0038-feature-db-split.html">ADR-0038</a> · <a href="../../todo/ace-weaknesses-dsh-remediation-plan.md">修复技术方案 §1</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
