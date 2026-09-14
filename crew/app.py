@@ -1610,6 +1610,11 @@ class CrewApp:
         meter_checkpoint_loader = getattr(self.session_store, "load_meter_checkpoint", None)
         if not callable(meter_checkpoint_loader):
             meter_checkpoint_loader = None
+        # compaction 事件自包含落库（ADR-0042 W5）：压缩成功即把 replacement 摘要 +
+        # 重锚定估算内联为会话事件；store 无该能力时压缩仍走 SummaryStore 单轨。
+        compaction_sink = getattr(self.session_store, "record_compaction_checkpoint", None)
+        if not callable(compaction_sink):
+            compaction_sink = None
         # 触发阈值：compaction_token_budget>0 绝对值优先；否则按 ratio × context_window
         # 动态计算并取保守的 0.75，避免硬编码小值导致过早压缩。
         if cfg.compaction_token_budget > 0:
@@ -1640,6 +1645,7 @@ class CrewApp:
             store=self.summary_store,
             result_policy_resolver=self.registry.result_policy,
             meter_checkpoint_loader=meter_checkpoint_loader,
+            event_sink=compaction_sink,
         )
         from crew.agent.loop import ToolCallGuardrailConfig
 

@@ -1059,6 +1059,81 @@ class SQLiteSessionStore(SessionStore):
             return None
         return payload if isinstance(payload, dict) else None
 
+    # ---- compaction 自包含 checkpoint（codex 对照修订第 3 条） ----
+    def record_compaction_checkpoint(
+        self,
+        session_id: str,
+        *,
+        owner_account_id: str,
+        summary: str,
+        covered_count: int,
+        view_estimate: int,
+    ) -> None:
+        """压缩落库时内联一条自包含 compaction 事件：replacement 摘要 + 重锚定
+        token 估算。事件表只增不改，旧 checkpoint 永不覆盖；恢复 = 定位最近
+        compaction 事件后正序重放（load_compaction_checkpoint）。"""
+        now = time.time()
+        payload = json.dumps(
+            {
+                "summary": summary,
+                "covered_count": int(covered_count),
+                "view_estimate": int(view_estimate),
+                "recorded_at": now,
+            },
+            ensure_ascii=False,
+        )
+
+        def _write(conn) -> None:
+            self._ensure_writer_lease(conn, owner_account_id, session_id, now)
+            base_row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0), "
+                "(SELECT leaf_seq FROM sessions "
+                "WHERE owner_account_id = ? AND session_id = ?) "
+                "FROM session_events WHERE owner_account_id = ? AND session_id = ?",
+                (owner_account_id, session_id, owner_account_id, session_id),
+            ).fetchone()
+            base = int(base_row[0])
+            current_leaf = int(base_row[1] or 0)
+            conn.execute(
+                "INSERT OR IGNORE INTO session_events "
+                "(owner_account_id, session_id, seq, parent_seq, type, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    owner_account_id,
+                    session_id,
+                    base + 1,
+                    current_leaf or None,
+                    SessionEventType.COMPACTION.value,
+                    payload,
+                    now,
+                ),
+            )
+            conn.execute(
+                "UPDATE sessions SET leaf_seq = ? WHERE owner_account_id = ? AND session_id = ?",
+                (base + 1, owner_account_id, session_id),
+            )
+
+        self._writer.execute(_write)
+
+    def load_compaction_checkpoint(
+        self, session_id: str, owner_account_id: str
+    ) -> dict[str, Any] | None:
+        """最近一条 compaction 事件 payload（摘要状态跨重启恢复 + 计量重锚定）。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload FROM session_events "
+                "WHERE owner_account_id = ? AND session_id = ? AND type = ? "
+                "ORDER BY seq DESC LIMIT 1",
+                (owner_account_id, session_id, SessionEventType.COMPACTION.value),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row[0])
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
     def record_meter_checkpoint(
         self,
         session_id: str,

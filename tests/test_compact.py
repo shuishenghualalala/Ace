@@ -1421,3 +1421,41 @@ async def test_compact_view_circuit_breaker_after_consecutive_failures():
         await comp.compact_view(msgs, "s1")  # 3 次失败，累计断路器
     out = await comp.compact_view(msgs, "s1")  # 第 4 次：断路器跳过
     assert len(out) == len(msgs)  # 原样返回
+
+
+async def test_compaction_success_emits_self_contained_event():
+    """压缩落库经 event_sink 内联 replacement 摘要 + 重锚定估算（W5）。"""
+    events: list[tuple] = []
+    comp = ContextCompactor(
+        FakeProvider(reply="短摘要"),
+        token_budget=10,
+        keep_recent=2,
+        event_sink=lambda sid, owner, summary, covered, estimate: events.append(
+            (sid, owner, summary, covered, estimate)
+        ),
+    )
+    history = await _big_history(10)
+    view = await comp.maybe_compact(history, "sess-evt", owner_account_id="A:uid-a")
+    assert view[0].content.startswith(SUMMARY_MARKER)
+    assert len(events) == 1
+    sid, owner, summary, covered, estimate = events[0]
+    assert sid == "sess-evt"
+    assert owner == "A:uid-a"
+    assert summary == "短摘要"
+    assert covered > 0
+    assert estimate > 0
+
+
+async def test_compaction_event_sink_failure_does_not_break_compact():
+    def _boom(*args):  # noqa: ANN002, ANN003
+        raise RuntimeError("db down")
+
+    comp = ContextCompactor(
+        FakeProvider(reply="短摘要"),
+        token_budget=10,
+        keep_recent=2,
+        event_sink=_boom,
+    )
+    history = await _big_history(10)
+    view = await comp.maybe_compact(history, "sess-evt2")
+    assert view[0].content.startswith(SUMMARY_MARKER)

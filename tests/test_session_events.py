@@ -1113,3 +1113,30 @@ def test_cron_start_registers_recovery_into_unified_sequence(tmp_path):
         assert "cron.running_fires" in results
     finally:
         recovery.clear_startup_recovery()
+
+
+# ---- W5：compaction 事件自包含（codex 对照修订第 3 条） ----
+
+
+def test_compaction_checkpoint_event_roundtrip(tmp_path):
+    owner = "A:uid-a"
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user(f"m{i}") for i in range(3)], owner_account_id=owner)
+        assert store.load_compaction_checkpoint("s1", owner) is None
+        store.record_compaction_checkpoint(
+            "s1", owner_account_id=owner, summary="摘要A", covered_count=2, view_estimate=120
+        )
+        store.record_compaction_checkpoint(
+            "s1", owner_account_id=owner, summary="摘要B", covered_count=3, view_estimate=90
+        )
+        checkpoint = store.load_compaction_checkpoint("s1", owner)
+        # 旧 checkpoint 永不覆盖：读取端取最新一行
+        assert checkpoint["summary"] == "摘要B"
+        assert checkpoint["covered_count"] == 3
+        assert checkpoint["view_estimate"] == 90
+        # 事件链不被 compaction 事件破坏：投影消息不变
+        assert [m.content for m in store.load("s1", owner_account_id=owner)] == ["m0", "m1", "m2"]
+    finally:
+        store.close()
