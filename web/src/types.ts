@@ -236,6 +236,13 @@ export interface AppConfig {
   external_agents?: {
     enabled: boolean;
   };
+  feature_capabilities?: Record<string, FeatureCapability>;
+}
+
+export interface FeatureCapability {
+  state: string;
+  available: boolean;
+  generation: string | null;
 }
 
 export type WikiPageType = "entity" | "topic" | "source" | "comparison" | "synthesis";

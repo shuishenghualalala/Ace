@@ -122,6 +122,10 @@ async with lease:
     <li>出站内容处理：归 <code>response_filters.py</code> 过滤链，不在各 adapter 里私写。</li>
   </ul>
 
+  <h2>Feature 能力状态响应（6AB）</h2>
+  <p><code>GET /api/config</code> 及共用 <code>config_body()</code> 的模型配置响应新增 <code>feature_capabilities</code>，直接消费 Runtime 的精简快照。无 Runtime 的兼容测试宿主返回空映射；现有 Wiki、外援字段保持原契约。真实 Runtime 错误不会被静默转为空结果。</p>
+  <p>状态不含配置、路径、错误和 Lease 明细，也不代替鉴权。Desktop/Web 类型以可选字段承接；Team/Kanban UI 动态装卸仍属后续切片。见 <a href="../adr/0040-feature-capability-snapshot.html">ADR-0040</a> 与 <a href="../../testing/plugin-architecture-stage-6ab-feature-capabilities.html">6AB 测试记录</a>。</p>
+
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>

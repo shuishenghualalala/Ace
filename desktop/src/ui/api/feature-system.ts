@@ -71,10 +71,17 @@ export interface BackendConfig {
   external_agents?: {
     enabled?: boolean;
   };
+  feature_capabilities?: Record<string, FeatureCapability>;
   security?: {
     enabled?: boolean;
     default_mode?: 'request_approval' | 'auto_review' | 'full_access';
   };
+}
+
+export interface FeatureCapability {
+  state: string;
+  available: boolean;
+  generation: string | null;
 }
 
 // ── plugins / platforms ──

@@ -512,6 +512,35 @@ class FeatureRuntime:
     def records(self) -> tuple[FeatureRecord, ...]:
         return tuple(self._records[key] for key in sorted(self._records))
 
+    def capability_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Return the minimal host capability state for each declared feature.
+
+        Availability follows the admission boundary of the current generation:
+        a generation is available only while its scope is active and can accept
+        new leases.  Lifecycle details, errors, registrations, and retiring
+        generations stay inside the runtime diagnostic surface.
+        """
+        snapshot: dict[str, dict[str, Any]] = {}
+        for record in self.records:
+            scope = record.scope
+            generation = (
+                scope.generation
+                if scope is not None
+                and scope.state not in {FeatureState.FAILED, FeatureState.DISPOSED}
+                else None
+            )
+            available = bool(
+                generation is not None
+                and scope is not None
+                and scope.state is FeatureState.ACTIVE
+            )
+            snapshot[record.definition.feature_id] = {
+                "state": record.state.value,
+                "available": available,
+                "generation": generation.key if generation is not None else None,
+            }
+        return snapshot
+
     def get(self, feature_id: str) -> FeatureRecord | None:
         return self._records.get(feature_id)
 

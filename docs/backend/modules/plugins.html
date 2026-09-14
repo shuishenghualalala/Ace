@@ -218,6 +218,10 @@ await runtime.event_contributors.dispatch(envelope, push_feature_event)</code></
     <li>新增插件工具时在插件注册处声明结果语义，不向 Agent 压缩器添加插件工具名判断。</li>
   </ul>
 
+  <h2>宿主能力状态投影（6AB）</h2>
+  <p><code>FeatureRuntime.capability_snapshot()</code> 同步读取真实 records，以 Feature ID 为键提供 <code>state / available / generation</code>。当前 Scope 可接受新 Lease 时才报告可用；未声明项缺席，drain、失败、停用不可用；replace 候选安装期间仍投影正在服务的旧代。读取不创建 Lease，也不导出错误、配置或完整诊断。</p>
+  <p>此快照表示宿主运行时准入，不替代账号权限。Team 和 Dynamic Kanban 保持各自身份，不在 Runtime 中新增业务枚举。见 <a href="../adr/0040-feature-capability-snapshot.html">ADR-0040</a> 与 <a href="../../testing/plugin-architecture-stage-6ab-feature-capabilities.html">6AB 测试记录</a>。</p>
+
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>

@@ -139,6 +139,11 @@ def config_body(
         )
     ]
     active = crew.owner_default_model_profile(owner_account_id)
+    runtime = getattr(getattr(crew, "plugins", None), "feature_runtime", None)
+    capability_snapshot = getattr(runtime, "capability_snapshot", None)
+    feature_capabilities = (
+        capability_snapshot() if callable(capability_snapshot) else {}
+    )
     return {
         "model": active.model,
         "has_key": active.has_key,
@@ -154,6 +159,7 @@ def config_body(
         "external_agents": {
             "enabled": bool(getattr(crew.config, "external_agents_enabled", True)),
         },
+        "feature_capabilities": feature_capabilities,
         "security": {
             "enabled": bool(getattr(crew.config, "security_enabled", False)),
             "default_mode": (

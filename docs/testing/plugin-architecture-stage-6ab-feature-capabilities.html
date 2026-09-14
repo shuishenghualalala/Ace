@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6AB · UI Feature 运行时能力状态源</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6AB · UI Feature 运行时能力状态源</h1>
+<p>2026-09-14。Team/Kanban 双端 reducer 已具备 init/dispose，但缺少可靠的功能启停状态来源，UI 无法据以动态装卸。本片交付后端精简能力快照与双端可选类型，为后续 UI 动态装卸切片提供统一状态源；设计与决策见 <a href="../backend/adr/0040-feature-capability-snapshot.html">ADR-0040</a>。</p>
+<h2>处置</h2>
+<ul>
+<li><strong>Runtime 快照</strong>：<code>FeatureRuntime.capability_snapshot()</code> 按 Feature ID 返回 <code>state / available / generation</code> 三字段。可用性对应当前有效 Generation 的请求准入——Scope 处于 <code>active</code> 才可用；drain、失败、停用立即不可用；replace 候选安装期间仍投影正在服务的旧代；读取不创建 Lease、不改变生命周期，也不导出错误、配置修订等诊断明细。</li>
+<li><strong>Gateway 投影</strong>：<code>config_body()</code> 经 <code>crew.plugins.feature_runtime</code> 读取快照，新增 <code>feature_capabilities</code> 字段；经 <code>getattr</code> 链探测，无 Runtime 的兼容测试宿主返回空映射，现有 Wiki、外援字段契约不变。</li>
+<li><strong>双端类型</strong>：Desktop <code>BackendConfig</code> 与 Web <code>AppConfig</code> 各新增可选 <code>feature_capabilities</code> 字段与 <code>FeatureCapability</code> 类型，仅类型承接、无行为改动；Desktop/Web 对该状态源的消费（reducer 动态装卸、board hooks、页面投影）属后续切片，本片不宣称 UI 生命周期闭环。</li>
+</ul>
+<h2>验证记录（子 agent 开发，主 agent 审查后复跑）</h2>
+<table><tr><th>命令</th><th>结果</th></tr>
+<tr><td><code>uv run python -m pytest tests/test_feature_capabilities.py tests/gateway/test_feature_capabilities_api.py -q</code></td><td>12 passed（覆盖：发现/激活/停用轨迹、激活失败 fail-closed、replace 期间旧代快照、waiting 不可用、drain 持 lease 立即不可用、候选发布先于旧代 drain、失败 replace 保留旧代、restart 失败恢复旧能力为新代、只读不取 Lease、API 最小字段、无 Runtime 替身空映射、真实 Team/Kanban 独立投影）</td></tr>
+<tr><td>后端全量 <code>pytest tests/ -q</code></td><td>4213 passed / 43 skipped / 20 deselected（0 failed，246.87s，主 agent 复跑）</td></tr>
+<tr><td>Desktop <code>npm run typecheck &amp;&amp; npm run test</code></td><td>通过 / 1888 passed</td></tr>
+<tr><td>Web <code>npm run typecheck &amp;&amp; npm run test</code></td><td>通过 / 212 passed</td></tr>
+</table>
+<p>平台说明：纯 Python/JSON 契约与 TypeScript 类型，无平台分支；本轮实测为 macOS 本机，三平台打包态验证待远程矩阵，不以单机结果替代。</p>
+<p><a href="../backend/adr/0040-feature-capability-snapshot.html">ADR-0040</a> · <a href="../backend/modules/plugins.html">Plugins 模块文档</a> · <a href="../backend/modules/gateway.html">Gateway 模块文档</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>
