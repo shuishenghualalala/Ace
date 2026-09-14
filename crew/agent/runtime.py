@@ -833,6 +833,9 @@ class SingleAgent(Agent):
 
         # 3. 上下文压缩：仅作用于「发给 LLM 的视图」llm_messages，
         #    不破坏 history（旧的详细历史仍完整持久化）。
+        #    工具 schema 提前解析：摘要调用的 KV 前缀复用需要复放 tools 块。
+        effective_tool_filter = self._effective_tool_filter(task_sid, owner_account_id=owner)
+        tool_schemas = self.registry.list_schemas(effective_tool_filter)
         llm_messages = list(history)  # 拷贝，避免 executor 追加时污染 canonical
         if self.compactor is not None:
             t = time.perf_counter()
@@ -840,6 +843,8 @@ class SingleAgent(Agent):
                 llm_messages,
                 task_sid,
                 owner_account_id=owner,
+                system_prompt=system_static,
+                tools=tool_schemas,
             )
             log.info("[PERF] compactor          %.3fs", time.perf_counter() - t)
 
@@ -862,7 +867,6 @@ class SingleAgent(Agent):
         )
 
         # 4. 组执行上下文，委托 executor（executor 把本轮新消息追加到 llm_messages）
-        effective_tool_filter = self._effective_tool_filter(task_sid, owner_account_id=owner)
         authorized_tool_names = frozenset(
             effective_tool_filter if effective_tool_filter is not None else self.registry.names()
         )
@@ -882,7 +886,7 @@ class SingleAgent(Agent):
                 for attachment in (envelope.attachments or [])
                 if isinstance(attachment, dict)
             ],
-            tool_schemas=self.registry.list_schemas(effective_tool_filter),
+            tool_schemas=tool_schemas,
             authorized_tool_names=authorized_tool_names,
             enforce_tool_scope=True,
             params=dict(envelope.params),

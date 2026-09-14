@@ -13,7 +13,11 @@ from crew.agent.compact.microcompact import (
 )
 from crew.agent.compact.pipeline import ContextCompactor
 from crew.agent.compact.store import SummaryState, SummaryStore
-from crew.agent.compact.summary import SUMMARY_MARKER
+from crew.agent.compact.summary import (
+    FULL_SUMMARY_PROMPT,
+    SUMMARY_MARKER,
+    summarize_full,
+)
 from crew.core.errors import ProviderError
 from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
 from crew.core.types import ChatResponse, Message, ToolCall
@@ -974,6 +978,96 @@ class OverflowThenOkProvider:
 
     async def stream_chat(self, messages, tools=None):  # noqa: ANN001
         yield  # pragma: no cover
+
+
+# --------------------------------------------------------------------------- #
+# 摘要调用策略：KV 前缀复用 / 隔离 + purpose + maxTokens 封顶
+# --------------------------------------------------------------------------- #
+class DeepSeekStyleProvider:
+    """记录调用入参；model 含 deepseek → 命中前缀复用策略。"""
+
+    model = "deepseek-chat"
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        self.calls.append({"messages": list(messages), "tools": tools, "kwargs": dict(kwargs)})
+        return ChatResponse(text="结构化摘要")
+
+
+class TruncatingProvider(DeepSeekStyleProvider):
+    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        self.calls.append({"messages": list(messages), "tools": tools, "kwargs": dict(kwargs)})
+        return ChatResponse(text="半截摘要", finish_reason="length")
+
+
+async def _old_segment(n: int = 6) -> list[Message]:
+    return await _big_history(n)
+
+
+async def test_summary_prefix_reuse_replays_conversation_prefix():
+    """DeepSeek/Anthropic 前缀缓存场景：复放原 system+消息前缀，指令作最后一条 user。"""
+    provider = DeepSeekStyleProvider()
+    old = await _old_segment()
+    out = await summarize_full(
+        provider, old,
+        system_prompt="原会话系统提示",
+        tools=[{"type": "function", "function": {"name": "terminal"}}],
+        max_tokens=4096,
+    )
+    assert out == "结构化摘要"
+    call = provider.calls[0]
+    req = call["messages"]
+    assert req[0].role == "system" and req[0].content == "原会话系统提示"
+    assert req[-1].role == "user"
+    assert "压缩" in (req[-1].content or "")
+    # 原消息前缀被复放（结构化 Message，而非纯文本 transcript）
+    replayed = req[1:-1]
+    assert len(replayed) == len(old)
+    assert replayed[0].content == old[0].content
+    # tools 随前缀透传以命中 KV cache
+    assert call["tools"] is not None
+    # purpose 标记与 maxTokens 封顶
+    assert call["kwargs"]["purpose"] == "compaction"
+    assert call["kwargs"]["max_tokens"] == 4096
+
+
+async def test_summary_isolated_for_unknown_provider():
+    """其他 provider 走隔离调用：独立压缩器 system、不带 tools、不透传前缀。"""
+    provider = FakeProvider(reply="结构化摘要")
+    old = await _old_segment()
+    out = await summarize_full(
+        provider, old,
+        system_prompt="原会话系统提示",
+        tools=[{"type": "function"}],
+        max_tokens=4096,
+    )
+    assert out == "结构化摘要"
+    req = provider.calls[0]
+    assert req[0].role == "system" and "对话历史压缩器" in req[0].content
+    assert req[0].content == FULL_SUMMARY_PROMPT
+    # 原前缀不复放：只有压缩器 system + 单条 transcript user
+    assert len(req) == 2
+    assert "问题0" in (req[1].content or "")
+
+
+async def test_summary_prefix_reuse_disabled_by_config():
+    """summary_prefix_reuse=False 时即使 DeepSeek provider 也走隔离调用。"""
+    provider = DeepSeekStyleProvider()
+    old = await _old_segment()
+    await summarize_full(provider, old, system_prompt="原系统", prefix_reuse=False)
+    req = provider.calls[0]["messages"]
+    assert req[0].content == FULL_SUMMARY_PROMPT
+    assert provider.calls[0]["tools"] is None
+
+
+async def test_summary_truncation_is_failure():
+    """maxTokens 截断（finish_reason=length）视为失败，返回 None。"""
+    provider = TruncatingProvider()
+    old = await _old_segment()
+    assert await summarize_full(provider, old, max_tokens=8192) is None
+    assert len(provider.calls) == 1  # 截断不触发 PTL 砍头重试
 
 
 async def test_l3_ptl_truncates_head_and_retries():

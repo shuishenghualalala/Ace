@@ -38,6 +38,7 @@ class FakeProvider(LLMProvider):
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
         reasoning_mode: str | None = None,
+        purpose: str | None = None,
     ) -> ChatResponse:
         self.calls.append(list(messages))
         if self._script:

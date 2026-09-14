@@ -504,10 +504,15 @@ class BuiltinExecutor(AgentExecutor):
                         accepts_owner = "owner_account_id" in params or any(
                             p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
                         )
+                        accepts_prefix = "system_prompt" in params and "tools" in params
                     except (TypeError, ValueError):
                         accepts_owner = True
+                        accepts_prefix = True
                     if accepts_owner:
                         kwargs["owner_account_id"] = current_owner_account_id.get()
+                    if accepts_prefix:
+                        kwargs["system_prompt"] = ctx.system_prompt
+                        kwargs["tools"] = original_tools
                     view_messages = await force_compact(ctx.messages, ctx.session_id, **kwargs)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("force_compact 失败，按原视图发送：%s", exc)
@@ -551,6 +556,8 @@ class BuiltinExecutor(AgentExecutor):
                         ctx.session_id,
                         owner_account_id=owner_account_id,
                         prompt_overhead_tokens=prompt_overhead_tokens,
+                        system_prompt=ctx.system_prompt,
+                        tools=original_tools,
                     )
                 finally:
                     if show_compaction:

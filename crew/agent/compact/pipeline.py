@@ -86,6 +86,8 @@ class ContextCompactor:
         store: SummaryStore | None = None,
         result_policy_resolver: ResultPolicyResolver | None = None,
         max_overflow_retries: int = 1,
+        summary_max_tokens: int = 8192,
+        summary_prefix_reuse: bool = True,
     ) -> None:
         self.provider = provider
         self.enabled = enabled
@@ -107,6 +109,10 @@ class ContextCompactor:
         self.result_policy_resolver = result_policy_resolver
         # overflow 后 compact-retry 次数上限（每次 overflow 序列只压缩重试一次）。
         self.max_overflow_retries = max(0, max_overflow_retries)
+        # 摘要调用策略：maxTokens 封顶（截断视为失败）；prefix_reuse 决定复用会话
+        # 前缀（KV cache）还是隔离调用，按 provider 能力再细化。
+        self.summary_max_tokens = max(0, summary_max_tokens)
+        self.summary_prefix_reuse = summary_prefix_reuse
         # store 为 None 时退化为进程内缓存（重启即失，自动降级 L3）。
         self._mem: dict[SummaryKey, SummaryState] = {}
         # 每个 session 连续摘要失败次数，用于断路器。
@@ -243,6 +249,8 @@ class ContextCompactor:
         session_id: str | None = None,
         owner_account_id: str | None = None,
         prompt_overhead_tokens: int = 0,
+        system_prompt: str = "",
+        tools: list[dict] | None = None,
     ) -> list[Message]:
         """executor 循环内每轮调用的视图压缩。
 
@@ -282,7 +290,10 @@ class ContextCompactor:
 
         before = estimate_tokens(messages)
         # state=None → _summarize_old 直走 L3 全量，不触碰 canonical L2 缓存
-        result, new_state, skipped = await self._summarize_old(messages, None, self.keep_recent, session_id=session_id)
+        result, new_state, skipped = await self._summarize_old(
+            messages, None, self.keep_recent,
+            session_id=session_id, system_prompt=system_prompt, tools=tools,
+        )
         if skipped:
             return result  # old 段太小主动跳过，不计失败
         if new_state is None:
@@ -319,6 +330,8 @@ class ContextCompactor:
         messages: list[Message],
         session_id: str | None = None,
         owner_account_id: str | None = None,
+        system_prompt: str = "",
+        tools: list[dict] | None = None,
     ) -> list[Message]:
         """预检式压缩：L1 每轮跑；仍超预算才走 L2/L3（带防抖 + 断路器）。"""
         if not self.enabled:
@@ -349,7 +362,10 @@ class ContextCompactor:
             return messages
 
         before = estimate_tokens(messages)
-        result, new_state, skipped = await self._summarize_old(messages, state, self.keep_recent, session_id=session_id)
+        result, new_state, skipped = await self._summarize_old(
+            messages, state, self.keep_recent,
+            session_id=session_id, system_prompt=system_prompt, tools=tools,
+        )
         if skipped:
             return result  # old 段太小主动跳过，不计失败、不触发断路器
         if new_state is None:
@@ -371,6 +387,8 @@ class ContextCompactor:
         messages: list[Message],
         session_id: str | None = None,
         owner_account_id: str | None = None,
+        system_prompt: str = "",
+        tools: list[dict] | None = None,
     ) -> list[Message]:
         """兜底式压缩：上下文溢出时调用，比预检更激进（保留窗口砍半）。
 
@@ -391,7 +409,10 @@ class ContextCompactor:
         )
         keep = max(2, self.keep_recent // 2)
         state = self._get_state(session_id, owner_account_id)
-        result, new_state, _skipped = await self._summarize_old(messages, state, keep, session_id=session_id)
+        result, new_state, _skipped = await self._summarize_old(
+            messages, state, keep,
+            session_id=session_id, system_prompt=system_prompt, tools=tools,
+        )
         if new_state is not None:
             # 兜底压缩成功即视为「有效压缩」，清零防抖计数与断路器计数
             new_state.ineffective_count = 0
@@ -404,6 +425,8 @@ class ContextCompactor:
         messages: list[Message],
         session_id: str | None = None,
         owner_account_id: str | None = None,
+        system_prompt: str = "",
+        tools: list[dict] | None = None,
     ) -> tuple[list[Message], bool]:
         """手动压缩入口（idle 维护窗口）：不依赖水位、防抖与断路器，立即压缩一段历史。
 
@@ -416,7 +439,8 @@ class ContextCompactor:
         messages = self.compact_preview_view(messages)
         state = self._get_state(session_id, owner_account_id)
         result, new_state, skipped = await self._summarize_old(
-            messages, state, self.keep_recent, session_id=session_id
+            messages, state, self.keep_recent,
+            session_id=session_id, system_prompt=system_prompt, tools=tools,
         )
         if new_state is None:
             return result, False
@@ -442,6 +466,8 @@ class ContextCompactor:
         state: SummaryState | None,
         keep_recent: int,
         session_id: str | None = None,
+        system_prompt: str = "",
+        tools: list[dict] | None = None,
     ) -> tuple[list[Message], SummaryState | None, bool]:
         """把 keep_recent 之前的历史摘要成一条 system 消息（L2 复用 / L3 全量）。
 
@@ -479,13 +505,23 @@ class ContextCompactor:
                 summary = state.text
                 log.info("L2 纯规则复用 session新增=%d 条", len(new_old))
             else:
-                summary = await summarize_incremental(self.provider, state.text, new_old)
+                summary = await summarize_incremental(
+                    self.provider, state.text, new_old,
+                    system_prompt=system_prompt, tools=tools,
+                    max_tokens=self.summary_max_tokens,
+                    prefix_reuse=None if self.summary_prefix_reuse else False,
+                )
                 if summary:
                     log.info("L2 增量摘要 新增=%d 条", len(new_old))
 
         # ---- L3：无可复用摘要（或 L2 失败）→ 全量 ----
         if summary is None:
-            summary = await summarize_full(self.provider, old)
+            summary = await summarize_full(
+                self.provider, old,
+                system_prompt=system_prompt, tools=tools,
+                max_tokens=self.summary_max_tokens,
+                prefix_reuse=None if self.summary_prefix_reuse else False,
+            )
             if summary:
                 log.info("L3 全量摘要 旧=%d 条", len(old))
 

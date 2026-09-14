@@ -285,11 +285,12 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
         reasoning_mode: str | None = None,
+        purpose: str | None = None,
     ) -> ChatResponse:
         self._sync_api_key()
         payload = self._payload(messages, tools, max_tokens_override=max_tokens)
         session = _current_session()
-        llm_trace("request", {"session_id": session, "model": self.model, "stream": False, "messages": payload["messages"]})
+        llm_trace("request", {"session_id": session, "model": self.model, "stream": False, "purpose": purpose or "", "messages": payload["messages"]})
         try:
             response = await self._client.post(self._url, headers=self._headers, json=payload)
             response.raise_for_status()
