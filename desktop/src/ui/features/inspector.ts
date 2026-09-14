@@ -42,6 +42,7 @@ import {
   resolveSessionModelWindow,
   isExternalTeamSession,
 } from './session-model';
+import { kanbanBoardEnabled, teamBoardEnabled } from './board-capability';
 import { renderDiffPanelHtml, applyDiffSyntaxHighlights, buildDiffFromTexts, countDiffRows, expandCollapsedRegion, clearDiffExpandsForPath, type BackendDiffRow, type DiffRegionExpandMap } from '../diff-lines';
 import { isPlanDocumentPath } from '../plan-document-path';
 import { renderMarkdownHtml } from '../markdown';
@@ -2238,9 +2239,12 @@ function openInspector(): void {
 export function defaultInspectorTabForSession(
   sessionId: string | null | undefined = state.activeSessionId,
 ): TabKey {
+  // 能力被下线的看板不留死面板：对应模式会话回退「上下文」Tab。
   return isExternalTeamSession(sessionId)
-    ? 'collaboration'
-    : isDynamicKanbanSession(sessionId)
+    ? teamBoardEnabled()
+      ? 'collaboration'
+      : 'context'
+    : isDynamicKanbanSession(sessionId) && kanbanBoardEnabled()
       ? 'kanban'
       : 'context';
 }

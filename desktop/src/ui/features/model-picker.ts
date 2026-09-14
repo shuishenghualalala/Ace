@@ -21,6 +21,7 @@ import { syncExternalAgentsFeatureUi } from './external-agents-feature';
 import { maybeStartModelTourOnce } from './model-tour';
 import { syncSecurityModuleFeatureUi } from './security-mode';
 import { syncWikiFeatureUi } from './wiki-feature';
+import { syncBoardCapabilityUi } from './board-capability';
 
 let dropdownOpen = false;
 
@@ -318,6 +319,7 @@ export async function loadConfig(): Promise<void> {
     syncExternalAgentsFeatureUi();
     syncSecurityModuleFeatureUi();
     syncWikiFeatureUi();
+    syncBoardCapabilityUi();
     maybeStartModelTourOnce(state.config);
     // 模型 CRUD / Key 变化会改变服务端 demo_mode 判定；刷新当前会话绑定，
     // 让演示模式横幅不必等下次会话切换才更新（草稿会话无服务端绑定，跳过）。
@@ -329,5 +331,6 @@ export async function loadConfig(): Promise<void> {
     syncExternalAgentsFeatureUi();
     syncSecurityModuleFeatureUi();
     syncWikiFeatureUi();
+    syncBoardCapabilityUi();
   }
 }

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6AC · Team/Kanban UI 能力驱动装卸</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6AC · Team/Kanban UI 能力驱动装卸</h1>
+<p>2026-09-14。ADR-0040 交付了按 Feature ID 索引的运行时能力状态源（<code>feature_capabilities</code>），但双端 Team/Kanban 处理器仍随 App 无条件安装。本片让 Desktop/Web 消费统一状态源，按 <code>product.team</code> / <code>product.dynamic-kanban</code> 独立推导可用性做动态装卸——reducer、board hooks 与页面随能力开/关独立启停；设计与决策见 <a href="../backend/adr/0041-team-kanban-ui-capability-lifecycle.html">ADR-0041</a>。</p>
+<h2>处置</h2>
+<ul>
+<li><strong>Desktop 能力接线</strong>：新建 <code>desktop/src/ui/features/board-capability.ts</code> 单一模块持有两个 Feature ID 的可用性推导（config 未加载 / 旧后端无 <code>feature_capabilities</code> 字段按 legacy-safe 视为可用，字段存在时项缺席或 <code>available ≠ true</code> 即不可用）、<code>team-kanban:config-change</code> 窗口事件与 <code>installTeamKanbanBoards()</code> 安装单元——能力开则 init 对应 board、关则 dispose，两板独立、幂等；app 引导不再无条件 init，中心文件不经由新导入认识具体 board 模块。</li>
+<li><strong>Desktop 会话内一致性</strong>：<code>defaultInspectorTabForSession</code> 在 team/kanban 能力下线时对对应模式会话回退 <code>context</code>；<code>loadConfig()</code> 成功/失败分支均广播能力事件，能力变化在引导、网关重连与模型 CRUD 后拉取式反映。</li>
+<li><strong>Web 宿主门控</strong>：<code>web/src/lib/featureFlags.ts</code> 新增 <code>teamFeatureAvailable</code>/<code>kanbanFeatureAvailable</code>（同一 legacy-safe 规则，与 Desktop 推导逐字同构）；App 宿主按能力分别条件安装 team/kanban feature-event handler，TaskBoard 挂载增加能力门，能力关闭时收起已开看板。</li>
+</ul>
+<h2>验证记录（子 agent 开发，主 agent 审查后复跑）</h2>
+<table><tr><th>命令</th><th>结果</th></tr>
+<tr><td>Desktop 聚焦 <code>npx vitest run tests/unit/board-capability.test.ts</code></td><td>12 passed（可用性判定全表、两板独立启停含安装时 team 已下线与翻转补装的对称路径、disposer 幂等/可重装/事件撤销、Inspector 默认 Tab 回退）</td></tr>
+<tr><td>Desktop 全量 <code>npm run test</code>（desktop/）</td><td>165 文件 / 1900 passed（0 failed，主 agent 审查修正后复跑）</td></tr>
+<tr><td>Desktop <code>npm run typecheck</code>（desktop/）</td><td>无错误</td></tr>
+<tr><td>Web 聚焦 <code>npx vitest run src/lib/featureFlags.test.ts src/App.team-kanban-lifecycle.test.tsx</code></td><td>25 passed（可用性规则全表与独立性、App 宿主 handler 按能力装卸、registered-null 与 unregistered-null 区分、legacy config 兼容、TaskBoard 能力门开/关）</td></tr>
+<tr><td>Web 全量 <code>npm run typecheck &amp;&amp; npm test</code>（web/）</td><td>通过 / 237 passed（0 failed）</td></tr>
+</table>
+<p>平台说明：本片为纯 TypeScript 前端生命周期接线，无平台分支；本轮实测为 macOS 本机。桌面打包态由 nightly-desktop 三平台覆盖；ci.yml python 门禁三平台矩阵首跑结果待推送后回填，不以单机结果替代。</p>
+<p>已知边界（ADR-0041 明示）：能力变化无推送通道，刷新仍是拉取式；config 拉取失败按 legacy-safe 视为可用、已下线板可能短暂回退激活，与既有 wiki 范式一致。Web <code>act(...)</code> 环境提示与既有 <code>App.wiki-lifecycle.test.tsx</code> 同型，为仓库既有测试环境共性、非本片新增。</p>
+<p>主 agent 审查修正：Web <code>featureFlags.ts</code> 两处 JSDoc 中「条目缺席按可用处理」的歧义表述改为精确规则（映射存在而条目缺席是不可用；可用兜底仅指 config 未加载 / 字段缺席）。另记录一项观察：既有 <code>App.wiki-lifecycle.test.tsx</code> 首宿主断言疑似依赖 StrictMode 丢弃渲染的空 registry「侥幸通过」（潜在假阳性），本片未动该文件，留待独立小切片核实。</p>
+<p><a href="../backend/adr/0041-team-kanban-ui-capability-lifecycle.html">ADR-0041</a> · <a href="../backend/adr/0040-feature-capability-snapshot.html">ADR-0040</a> · <a href="../frontend/desktop-frontend.html">Desktop 前端文档</a> · <a href="../frontend/web-frontend.html">Web 前端文档</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

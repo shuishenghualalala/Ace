@@ -25,7 +25,7 @@ import { useSessions } from "./hooks/useSessions";
 import { useWorkspaces } from "./hooks/useWorkspaces";
 import { useChat } from "./hooks/useChat";
 import { api, ApiError } from "./api";
-import { externalAgentsAvailable } from "./lib/featureFlags";
+import { externalAgentsAvailable, kanbanFeatureAvailable, teamFeatureAvailable } from "./lib/featureFlags";
 import {
   canNavigateToSidebarView,
   resolveSidebarViewAfterCapabilitiesChange,
@@ -176,6 +176,8 @@ export default function App() {
   const [configRetryKey, setConfigRetryKey] = useState(0);
   const externalAgentsEnabled = externalAgentsAvailable(config);
   const wikiEnabled = wikiNavigationEnabled(config);
+  const teamAvailable = teamFeatureAvailable(config);
+  const kanbanAvailable = kanbanFeatureAvailable(config);
   const [currentWorkspaceId, setCurrentWorkspaceId] = useState("default");
   const [currentSessionId, setCurrentSessionId] = useState<string>(genId);
   const [expanded, setExpanded] = useState<Set<string>>(new Set(["default"]));
@@ -219,12 +221,13 @@ export default function App() {
   // Registry 属于 App 宿主；所有安装都在 commit 阶段完成，避免 render 期副作用。
   const appFeatureEventRegistry = useMemo(() => new FeatureEventRegistry(), []);
   useLayoutEffect(() => {
-    const disposers = [
-      installTeamFeatureHandlers(appFeatureEventRegistry),
-      installKanbanFeatureHandlers(appFeatureEventRegistry),
-    ];
-    return () => disposers.forEach((dispose) => dispose());
-  }, [appFeatureEventRegistry]);
+    if (!teamAvailable) return;
+    return installTeamFeatureHandlers(appFeatureEventRegistry);
+  }, [appFeatureEventRegistry, teamAvailable]);
+  useLayoutEffect(() => {
+    if (!kanbanAvailable) return;
+    return installKanbanFeatureHandlers(appFeatureEventRegistry);
+  }, [appFeatureEventRegistry, kanbanAvailable]);
   useLayoutEffect(() => {
     if (!wikiEnabled) return;
     return installWikiFeatureHandlers(appFeatureEventRegistry);
@@ -288,6 +291,11 @@ export default function App() {
     const nextView = resolveSidebarViewAfterCapabilitiesChange(view, config);
     if (nextView !== view) setView(nextView);
   }, [config, view]);
+
+  // Team 能力关闭时收起看板并让挂载点同步门控，避免残留空看板布局。
+  useEffect(() => {
+    if (!teamAvailable && boardOpen) setBoardOpen(false);
+  }, [teamAvailable, boardOpen]);
 
   const jumpToMessage = useCallback((messageId: string) => {
     const target = document.getElementById(`message-${messageId}`);
@@ -753,7 +761,7 @@ export default function App() {
           </>
         )}
       </main>
-      {boardOpen && (
+      {boardOpen && teamAvailable && (
         <TaskBoard
           sessionId={currentSessionId}
           tasks={tasks}

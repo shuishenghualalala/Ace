@@ -962,5 +962,12 @@ cd web && npm run build
   <p>Team 与 Kanban 注册独立于 Wiki 开关。离开 Wiki 页面仍可接收启用功能的后台事件；关闭 Wiki 不删除历史数据或取消后端任务。未知配置继续使用已有能力默认值。</p>
   <p>已验收：typecheck 与全量 217 tests 通过，记录见 <a href="../testing/plugin-architecture-stage-5-wiki-event-lifecycle.html">阶段 5-8 测试记录</a>。</p>
 </section>
+
+<section>
+  <h2>Team/Kanban 处理器能力驱动装卸（2026-09-14）</h2>
+  <p>Team 与 Kanban 的 feature event 处理器不再随 App 宿主无条件安装。<code>lib/featureFlags.ts</code> 新增 <code>teamFeatureAvailable</code> / <code>kanbanFeatureAvailable</code>：按 <code>/api/config</code> 的 <code>feature_capabilities</code>（<code>product.team</code> / <code>product.dynamic-kanban</code>）独立推导，config 未加载或字段缺席（旧后端）时保持可用（legacy-safe），映射存在而条目缺席或 <code>available ≠ true</code> 时不可用。App 宿主的两个 useLayoutEffect 分别按能力条件安装（与 Wiki 安装同形），禁用即撤销、启用即恢复。</p>
+  <p>会话内一致性：Team 能力下线时收起并门控 TaskBoard 挂载（<code>boardOpen &amp;&amp; teamAvailable</code>），不残留空看板布局。能力刷新仍是拉取式（启动加载与切换模型），无推送通道。</p>
+  <p>已验收：typecheck 与全量 237 tests 通过（新增 <code>App.team-kanban-lifecycle.test.tsx</code> 6 例 + <code>featureFlags.test.ts</code> 19 例规则表），记录见 <a href="../testing/plugin-architecture-stage-6ac-team-kanban-ui-lifecycle.html">6AC 测试记录</a>，决策见 <a href="../backend/adr/0041-team-kanban-ui-capability-lifecycle.html">ADR-0041</a>。</p>
+</section>
 </body>
 </html>

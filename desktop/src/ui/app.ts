@@ -39,14 +39,7 @@ import { openWorkItemDrawer } from './features/work/item-space';
 import type { WorkItem } from './backend-client';
 import { setNotificationClickHandler } from './features/work/notifications';
 import { initSystemTrayStatus } from './features/system-tray';
-import {
-  disposeKanbanBoard,
-  initKanbanBoard,
-} from './features/kanban-board';
-import {
-  disposeTeamCollaborationBoard,
-  initTeamCollaborationBoard,
-} from './features/team-collaboration-board';
+import { disposeTeamKanbanBoards, installTeamKanbanBoards } from './features/board-capability';
 import { refreshKanbanBoard, renderKanbanBoard } from './features/board-hooks';
 import { bindSystemTab, disposeSystemTab, renderSystemLogs, renderSystemOverview } from './features/system-page';
 import { initUsagePage } from './features/usage-panel';
@@ -617,10 +610,9 @@ async function init(
   });
   registerDispose(disposeWikiAgentFeature);
   registerDispose(installWikiFeature());
-  await safe('initKanbanBoard', () => { initKanbanBoard(); });
-  registerDispose(disposeKanbanBoard);
-  await safe('initTeamCollaborationBoard', () => { initTeamCollaborationBoard(); });
-  registerDispose(disposeTeamCollaborationBoard);
+  // Team / Dynamic Kanban 看板：按 feature_capabilities 安装，能力变化时独立启停。
+  await safe('installTeamKanbanBoards', () => { installTeamKanbanBoards(); });
+  registerDispose(disposeTeamKanbanBoards);
   await safe('setSessionControllerSetTab', () => setSessionControllerSetTab(setTab));
   await safe('bindGlobalEvents', () => {
     registerDispose(bindGlobalEvents());
