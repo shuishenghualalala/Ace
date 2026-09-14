@@ -45,8 +45,6 @@ async def test_stream_aux_aggregates_stream_into_result() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_aux_forwards_max_tokens_and_purpose_to_provider() -> None:
-    provider = FakeProvider()
-
     class _Recorder(FakeProvider):
         def __init__(self) -> None:
             super().__init__()
