@@ -25,19 +25,19 @@ from typing import Any, Callable
 
 import wcmatch.glob as wcglob
 
+from crew.agent.file_mutation import (
+    EditOp,
+    file_mutation,
+    guard_file_edit,
+)
 from crew.core.errors import ToolError
 from crew.core.interfaces import ToolResultRetention
 from crew.tools.file_utils import (
     _check_sensitive_path,
-    _detect_line_ending,
     _has_binary_extension,
-    _normalize_line_endings,
-    _strip_bom,
     _truncate,
     FileConflictError,
-    atomic_replace_bytes,
     read_verified_bytes,
-    snapshot_file,
     stat_verified_file,
     MAX_READ_FILE_BYTES,
 )
@@ -653,23 +653,58 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
 
 
 # ---------------------------------------------------------------------------
-# patch 工具（保留，未改动）
+# patch 工具（匹配/写入载体下沉到 crew.agent.file_mutation，这里只做参数与呈现）
 # ---------------------------------------------------------------------------
 
 PATCH_SCHEMA = {
     "name": "patch",
-    "description": "对文本文件执行替换补丁：把 old 替换为 new。保留原文件行尾符和 UTF-8 BOM；拒绝写入敏感系统路径。",
+    "description": (
+        "对文本文件执行替换补丁：把 old 替换为 new。匹配在 LF 归一化域进行"
+        "（CRLF 文件写回时按原行尾还原），保留原文件 UTF-8 BOM；"
+        "拒绝写入敏感系统路径。old 默认必须唯一匹配；匹配失败会给出含行号的诊断。"
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "要修改的文本文件"},
             "old": {"type": "string", "description": "要被替换的原文本"},
             "new": {"type": "string", "description": "替换后的新文本"},
-            "count": {"type": "integer", "description": "最多替换次数，默认 1；0 表示全部"},
+            "count": {"type": "integer", "description": "最多替换次数，默认 1（要求唯一）；0 表示全部"},
         },
         "required": ["path", "old", "new"],
     },
 }
+
+
+def _parse_patch_ops(args: dict[str, Any]) -> list[EditOp]:
+    """把 patch 参数规整为编辑操作列表：edits[] 优先，否则 old/new/count。"""
+    edits = args.get("edits")
+    if isinstance(edits, list) and edits:
+        ops: list[EditOp] = []
+        for index, item in enumerate(edits):
+            if not isinstance(item, dict):
+                raise ToolError(f"edits[{index}] 必须是对象")
+            old = item.get("old")
+            new = item.get("new")
+            if not isinstance(old, str) or not old:
+                raise ToolError(f"edits[{index}].old 必须是非空字符串")
+            if not isinstance(new, str):
+                raise ToolError(f"edits[{index}].new 必须是字符串")
+            if item.get("count") not in (None, 1):
+                raise ToolError("edits[] 模式要求每处编辑唯一匹配，不支持 count，请拆分调用")
+            ops.append(EditOp(old=old, new=new))
+        return ops
+    old = args.get("old")
+    new = args.get("new")
+    if not isinstance(old, str) or not old:
+        raise ToolError("old 不能为空")
+    if not isinstance(new, str):
+        raise ToolError("new 必须是字符串")
+    try:
+        count = int(args.get("count", 1))
+    except (TypeError, ValueError) as exc:
+        raise ToolError(f"count 必须是整数，得到 {args.get('count')!r}") from exc
+    return [EditOp(old=old, new=new, count=count)]
 
 
 async def handle_patch(
@@ -685,45 +720,24 @@ async def handle_patch(
         workspace_store=workspace_store,
         security_service=security_service,
     )
-    old = str(args.get("old", ""))
-    new = str(args.get("new", ""))
-    count = int(args.get("count", 1))
-
     sensitive = _check_sensitive_path(str(args.get("path", "")))
     if sensitive:
         raise ToolError(sensitive)
-
     if not path.is_file():
         raise ToolError(f"文件不存在: {path}")
-    if not old:
-        raise ToolError("old 不能为空")
 
-    try:
-        version = await asyncio.to_thread(snapshot_file, path, max_bytes=MAX_READ_FILE_BYTES)
-    except ValueError as exc:
-        raise ToolError(f"文件过大，无法整体读取做替换: {path}") from exc
-    text_bytes = version.data
-    text = text_bytes.decode("utf-8", errors="replace")
-    text, had_bom = _strip_bom(text)
-    original_ending = _detect_line_ending(text)
-
-    if old not in text:
-        raise ToolError("未找到 old 文本，未修改文件")
-
-    replace_count = text.count(old) if count == 0 else min(text.count(old), count)
-    updated = text.replace(old, new, count if count > 0 else -1)
-
-    if original_ending is not None:
-        updated = _normalize_line_endings(updated, original_ending)
-    if had_bom and not updated.startswith("﻿"):
-        updated = "﻿" + updated
-
-    await asyncio.to_thread(atomic_replace_bytes, path, updated.encode("utf-8"), version)
+    ops = _parse_patch_ops(args)
+    outcome = await file_mutation.edit_text(
+        path,
+        ops,
+        expected=guard_file_edit(path),
+        max_bytes=MAX_READ_FILE_BYTES,
+    )
 
     diff = "".join(
         difflib.unified_diff(
-            text.splitlines(keepends=True),
-            updated.splitlines(keepends=True),
+            outcome.before.splitlines(keepends=True),
+            outcome.after.splitlines(keepends=True),
             fromfile=str(path),
             tofile=str(path),
         )
@@ -731,10 +745,11 @@ async def handle_patch(
     return tool_result(
         success=True,
         path=str(path),
-        replacements=replace_count,
+        replacements=len(outcome.plan.matches),
+        matches=[match.__dict__ for match in outcome.plan.matches],
         diff=_truncate(diff, 4000),
-        bom_preserved=had_bom,
-        line_ending=repr(original_ending)[1:-1] if original_ending else "\\n",
+        bom_preserved=outcome.had_bom,
+        line_ending=repr(outcome.line_ending)[1:-1] if outcome.line_ending else "\\n",
     )
 
 
