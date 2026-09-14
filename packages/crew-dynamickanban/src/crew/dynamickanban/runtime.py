@@ -32,6 +32,7 @@ from crew.dynamickanban.runtime_models import (
 from crew.agent.compact import estimate_tokens
 from crew.dynamickanban.prompts import build_handoff_context, runtime_worker_system_prompt
 from crew.dynamickanban.store import SQLiteKanbanStore
+from crew.providers import stream_aux
 from crew.state.home import task_workspace_path
 from crew.state.logging import get_logger, log_role_prefix
 from crew.tools.registry import Registry
@@ -1628,7 +1629,12 @@ class WorkflowRuntime:
         )
         synth_start = time.time()
         try:
-            resp = await self.provider.chat([Message.user(prompt)])
+            resp = await stream_aux(
+                self.provider,
+                [Message.user(prompt)],
+                purpose="workflow-summary",
+                timeout=120.0,
+            )
             result = warning_text + (resp.text.strip() or "所有任务已执行完毕。")
             log.info("[DK Runtime] 综合结果完成，耗时 %.2fs", time.time() - synth_start)
             return result

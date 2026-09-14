@@ -141,3 +141,24 @@ async def test_stream_aux_respects_zero_retry() -> None:
     with pytest.raises(ProviderError):
         await stream_aux(provider, [Message.user("x")], purpose="team-planning", timeout=5.0, retry=0)
     assert provider.stream_calls_made == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_aux_drops_unsupported_kwargs_for_narrow_signature() -> None:
+    """窄签名 provider（不认 response_format 等 kwarg）按名剔除后原样重试。"""
+
+    class _Narrow(FakeProvider):
+        async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+            async for chunk in super().stream_chat(messages, tools):
+                yield chunk
+
+    provider = _Narrow()
+    result = await stream_aux(
+        provider,
+        [Message.user("hi")],
+        purpose="wiki-completion",
+        timeout=5.0,
+        response_format={"type": "json_object"},
+        retry=0,
+    )
+    assert result.text == "[fake] 收到: hi"

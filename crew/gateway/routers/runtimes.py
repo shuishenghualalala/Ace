@@ -18,6 +18,7 @@ from crew.core.errors import ProviderError
 from crew.core.interfaces import LLMProvider
 from crew.core.types import Message
 from crew.gateway.auth import AuthenticationError, account_from_request, require_admin
+from crew.providers import stream_aux
 from crew.gateway.helpers import (
     build_team_draft,
     confirmed_formation_plan,
@@ -236,10 +237,15 @@ async def _run_formation_ai(
     response_chars = 0
     reasoning_chars = 0
     try:
-        resp = await provider.chat([
-            Message.system("只输出可解析 JSON；不要输出分析过程。"),
-            Message.user(prompt),
-        ])
+        resp = await stream_aux(
+            provider,
+            [
+                Message.system("只输出可解析 JSON；不要输出分析过程。"),
+                Message.user(prompt),
+            ],
+            purpose="formation-audit",
+            timeout=120.0,
+        )
         usage = dict(resp.usage or {})
         response_chars = len(resp.text or "")
         reasoning_chars = len(resp.reasoning_content or "")

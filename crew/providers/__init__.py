@@ -72,25 +72,42 @@ async def _collect(
     response_format: dict[str, Any] | None,
     reasoning_mode: str | None,
 ) -> AuxResult:
+    kwargs: dict[str, Any] = {
+        "tools": None,
+        "max_tokens": max_tokens,
+        "response_format": response_format,
+        "reasoning_mode": reasoning_mode,
+    }
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
     usage: dict[str, int] = {}
     finish_reason: str | None = None
-    async for chunk in provider.stream_chat(
-        messages,
-        tools=None,
-        max_tokens=max_tokens,
-        response_format=response_format,
-        reasoning_mode=reasoning_mode,
-    ):
-        if chunk.delta_text:
-            text_parts.append(chunk.delta_text)
-        if chunk.reasoning_content:
-            reasoning_parts.append(chunk.reasoning_content)
-        if chunk.done:
-            finish_reason = chunk.finish_reason
-            if chunk.usage:
-                usage = dict(chunk.usage)
+    while True:
+        text_parts.clear()
+        reasoning_parts.clear()
+        usage = {}
+        finish_reason = None
+        try:
+            async for chunk in provider.stream_chat(messages, **kwargs):
+                if chunk.delta_text:
+                    text_parts.append(chunk.delta_text)
+                if chunk.reasoning_content:
+                    reasoning_parts.append(chunk.reasoning_content)
+                if chunk.done:
+                    finish_reason = chunk.finish_reason
+                    if chunk.usage:
+                        usage = dict(chunk.usage)
+            break
+        except TypeError as exc:
+            # 窄签名 provider（测试桩/外部适配器）不认某个 kwarg 时，按名剔除后原样重试。
+            message = str(exc)
+            dropped = next(
+                (name for name in kwargs if name in message),
+                None,
+            )
+            if dropped is None:
+                raise
+            kwargs.pop(dropped)
     return AuxResult(
         text="".join(text_parts),
         finish_reason=finish_reason,
