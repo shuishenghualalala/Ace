@@ -21,8 +21,11 @@ from typing import Any, TypeVar
 from crew.core.interfaces import SessionStore
 from crew.core.types import Message, ToolCall
 from crew.state._migration import backfill_empty_owner_rows, rebuild_table_pk
+from crew.state.logging import get_logger
 from crew.state.schema_version import stamp_baseline
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
+
+log = get_logger("state.session_store")
 
 T = TypeVar("T")
 
@@ -122,9 +125,6 @@ class _SessionWriteQueue:
         return fut
 
     async def _run(self) -> None:
-        import logging
-
-        log = logging.getLogger(__name__)
         while True:
             try:
                 fn, fut = await asyncio.wait_for(
@@ -195,13 +195,18 @@ class SQLiteSessionStore(SessionStore):
         wal_enabled: bool = True,
         lease_ttl_seconds: float | None = None,
         lease_heartbeat_seconds: float | None = None,
+        read_mode: str = "auto",
     ) -> None:
+        if read_mode not in ("auto", "blob"):
+            raise ValueError(f"read_mode 只能是 auto/blob: {read_mode!r}")
+        self._read_mode = read_mode
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn = connect_sqlite(self._path, wal_enabled=wal_enabled)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
+        self._writer.execute(self._backfill_legacy_blobs)
         self._projections: dict[tuple[str, str], _SessionProjection] = {}
         self._queues: dict[tuple[str, str], tuple[asyncio.AbstractEventLoop, _SessionWriteQueue]] = {}
         # 进程内区分多个 store 实例（gateway/CLI 同进程双实例也互斥）
@@ -472,6 +477,50 @@ class SQLiteSessionStore(SessionStore):
             conn.execute(f"DROP TABLE {table}")
             conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
 
+    def _backfill_legacy_blobs(self, conn) -> int:
+        """一次性迁移：blob-only 的旧会话逐会话导入为事件行（幂等）。
+
+        已有事件行的会话跳过（重复执行零重复行）；坏 blob 保持原样，
+        读取端 blob 回退仍可用。返回本次导入的会话数。
+        """
+        rows = conn.execute(
+            "SELECT owner_account_id, session_id, messages FROM sessions WHERE messages != '[]'"
+        ).fetchall()
+        now = time.time()
+        imported = 0
+        for owner, session_id, raw in rows:
+            has_events = conn.execute(
+                "SELECT 1 FROM session_events WHERE owner_account_id = ? AND session_id = ? LIMIT 1",
+                (owner, session_id),
+            ).fetchone()
+            if has_events is not None:
+                continue
+            try:
+                messages = self._load(str(raw))
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                log.warning(
+                    "会话 %s 的 blob 迁移跳过（解析失败）: %s", session_id, exc
+                )
+                continue
+            seq = 1
+            for message in messages:
+                encoded = self._event_row_for_message(message)
+                if encoded is None:
+                    continue
+                conn.execute(
+                    "INSERT OR IGNORE INTO session_events "
+                    "(owner_account_id, session_id, seq, type, payload, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (owner, session_id, seq, encoded[0], encoded[1], now),
+                )
+                seq += 1
+            conn.execute(
+                "UPDATE sessions SET leaf_seq = ? WHERE owner_account_id = ? AND session_id = ?",
+                (seq - 1, owner, session_id),
+            )
+            imported += 1
+        return imported
+
     # ---- 序列化 ----
     @staticmethod
     def _message_to_dict(m: Message) -> dict:
@@ -650,6 +699,14 @@ class SQLiteSessionStore(SessionStore):
 
     # ---- SessionStore 接口 ----
     def load(self, session_id: str, owner_account_id: str) -> list[Message]:
+        if self._read_mode == "blob":
+            # 双格式窗口的紧急回退：强制旧 blob 读取（save 仍双写，blob 保持最新）
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT messages FROM sessions WHERE session_id = ? AND owner_account_id = ?",
+                    (session_id, owner_account_id),
+                ).fetchone()
+            return self._load(row[0]) if row else []
         return list(self._catch_up_projection(owner_account_id, session_id).messages)
 
     def load_child_sessions(

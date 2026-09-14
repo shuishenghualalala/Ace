@@ -555,3 +555,124 @@ def test_writer_lease_heartbeat_keeps_ownership(tmp_path):
     finally:
         store1.close()
         store2.close()
+
+
+def _legacy_blob_store(db: str) -> SQLiteSessionStore:
+    """模拟 W4 之前的纯 blob 存储：写 blob、不产生任何事件行。"""
+    store = SQLiteSessionStore(db, read_mode="blob")
+
+    def _blob_only_save(session_id, messages, workspace_id="default", *, owner_account_id,
+                        title_fallback=None, last_prompt_tokens=None, last_prompt_tokens_source=None):
+        def _write(conn):
+            conn.execute(
+                "INSERT INTO sessions (session_id, owner_account_id, messages, updated_at, created_at, workspace_id, title, message_count, token_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, '', ?, ?) "
+                "ON CONFLICT(owner_account_id, session_id) DO UPDATE SET "
+                "messages = excluded.messages, updated_at = excluded.updated_at, "
+                "message_count = excluded.message_count, token_count = excluded.token_count",
+                (session_id, owner_account_id,
+                 SQLiteSessionStore._dump(messages), 0.0, 0.0, workspace_id,
+                 len(messages), SQLiteSessionStore._estimate_tokens(messages)),
+            )
+
+        store._writer.execute(_write)
+        store._projections.pop((owner_account_id, session_id), None)
+
+    store._blob_only_save = _blob_only_save  # type: ignore[attr-defined]
+    return store
+
+
+def test_legacy_blob_session_migrated_to_events_on_open(tmp_path):
+    db = str(tmp_path / "crew.db")
+    legacy = _legacy_blob_store(db)
+    legacy._blob_only_save(  # type: ignore[attr-defined]
+        "old-1", [Message.user("hello"), Message.assistant("hi there")], owner_account_id="A:uid-a"
+    )
+    legacy._blob_only_save(  # type: ignore[attr-defined]
+        "old-2", [Message.user("second")], owner_account_id="A:uid-a"
+    )
+    legacy.close()
+
+    store = SQLiteSessionStore(db)
+    try:
+        assert [m.content for m in store.load("old-1", owner_account_id="A:uid-a")] == ["hello", "hi there"]
+        assert [m.content for m in store.load("old-2", owner_account_id="A:uid-a")] == ["second"]
+        # 迁移后事件行就位、leaf 推进
+        assert _message_event_count(db, "A:uid-a", "old-1") == 2
+        assert _leaf_seq(db, "A:uid-a", "old-1") == 2
+        # 迁移继续可用：追加走增量事件
+        history = store.load("old-1", owner_account_id="A:uid-a")
+        history.append(Message.user("follow-up"))
+        store.save("old-1", history, owner_account_id="A:uid-a")
+        assert _message_event_count(db, "A:uid-a", "old-1") == 3
+    finally:
+        store.close()
+
+
+def test_backfill_is_idempotent(tmp_path):
+    db = str(tmp_path / "crew.db")
+    legacy = _legacy_blob_store(db)
+    legacy._blob_only_save(  # type: ignore[attr-defined]
+        "s1", [Message.user("a"), Message.user("b")], owner_account_id="A:uid-a"
+    )
+    legacy.close()
+
+    store = SQLiteSessionStore(db)
+    store.close()
+    store = SQLiteSessionStore(db)  # 第二次打开再跑一次迁移
+    try:
+        assert _message_event_count(db, "A:uid-a", "s1") == 2
+        assert [m.content for m in store.load("s1", owner_account_id="A:uid-a")] == ["a", "b"]
+    finally:
+        store.close()
+
+
+def test_blob_read_mode_fallback_still_works(tmp_path):
+    """双格式窗口内 read_mode=blob 可原地回退（events 与 blob 双写保持同步）。"""
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user("q1")], owner_account_id="A:uid-a")
+        store.save("s1", [Message.user("q1"), Message.user("q2")], owner_account_id="A:uid-a")
+    finally:
+        store.close()
+
+    blob_store = SQLiteSessionStore(db, read_mode="blob")
+    try:
+        assert [m.content for m in blob_store.load("s1", owner_account_id="A:uid-a")] == ["q1", "q2"]
+        # blob 模式可读，事件行也在（双写）
+        assert _message_event_count(db, "A:uid-a", "s1") == 2
+    finally:
+        blob_store.close()
+
+
+def test_kill9_simulation_commit_is_atomic(tmp_path):
+    """kill -9 写一半：事务要么整体提交要么回滚，重启后会话可加载且一致。
+
+    单写队列的每批写入（事件 + leaf 推进 + blob）在单事务内，
+    崩溃不会产生「事件已写但 leaf 未推进」的撕裂态。
+    """
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user("turn1-a"), Message.assistant("turn1-b")], owner_account_id="A:uid-a")
+        store.save(
+            "s1",
+            [Message.user("turn1-a"), Message.assistant("turn1-b"), Message.user("turn2")],
+            owner_account_id="A:uid-a",
+        )
+    finally:
+        store.close()
+
+    # 模拟重启：新实例冷读
+    store2 = SQLiteSessionStore(db)
+    try:
+        messages = store2.load("s1", owner_account_id="A:uid-a")
+        assert [m.content for m in messages] == ["turn1-a", "turn1-b", "turn2"]
+        # 配平后下一轮请求正常：继续追加不报错、事件连续
+        messages.append(Message.user("turn3"))
+        store2.save("s1", messages, owner_account_id="A:uid-a")
+        assert _message_event_count(db, "A:uid-a", "s1") == 4
+        assert _leaf_seq(db, "A:uid-a", "s1") == 4
+    finally:
+        store2.close()

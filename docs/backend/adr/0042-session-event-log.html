@@ -5,7 +5,7 @@
 <style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
 <body><main>
 <h1>ADR-0042 · 会话存储增量事件表（session_events，W4/W5）</h1>
-<p>状态：<strong>提案（待评审）</strong> · 日期：2026-09-14 · 批次：dsh-remediation W4（存储）/ W5（树形与恢复）。</p>
+<p>状态：<strong>已批准，W4 已实施（W5 树形与恢复待做）</strong> · 日期：2026-09-14 · 批次：dsh-remediation W4（存储）/ W5（树形与恢复）。</p>
 <h2>背景与候选方案</h2>
 <p>现状：<code>sessions</code> 表把整条消息列表序列化为<strong>一个 JSON blob</strong> 存 <code>messages</code> 字段——每回合 <code>json.dumps</code> 全量重写（O(历史大小)）、load 全量 <code>json.loads</code> 逐字段重建；无增量 append、无分页、无树形/回退/fork、无回合级崩溃恢复语义；token 估算全程 chars/4 粗估，压缩水位判断误差大。W0 已把 save/load 包 <code>to_thread</code> 止血（消除事件循环冻结），但写放大与能力缺口未解。</p>
 <p>参照系结论（dsh / pi v3·v4 / codex 三方源码对照，详见 docs/todo/ace-weaknesses-dsh-remediation-plan.md §1.2–1.3）：三家都以 append-only 日志为格式根解法；Ace 选 SQLite 后物理防撕裂整体免写（事务原子性），真正要拿的是数据模型（parent 树 + leaf 指针）、多进程租约（pi v4 writer_leases）与语义修复（孤儿合成，W1 已落地配平扫描）。</p>
@@ -50,6 +50,15 @@
 <li><strong>读一致性边界</strong>：读者以 leaf/head_seq 快照读取（WHERE seq &lt;= head_seq）；游标绑定 session_id 校验防串会话；写者推进 leaf 不影响读者。</li>
 </ul>
 <p>明确排除（文件存储特有、SQLite 事务模型下无对应问题）：逐行 flush / torn-tail 补换行 / 坏行跳过 / 压缩文件物化 / 文件系统扫描双通道列表。</p>
+<h2>实施订正与批次记录</h2>
+<p><strong>W4 存储批次（2026-09-14，分支 fix/dsh-w4-session-events）</strong>已落地 D1a–D1e 与 D6，实施中的订正如下：</p>
+<ul>
+<li><strong>events_generation 代际列（D1c 新增）</strong>：sessions 表在 leaf_seq 之外增加 <code>events_generation</code>，事件流被整体重写（调用方改写历史）时 +1。仅 leaf 游标无法区分「正常追加」与「跨进程整体重写」——读者会把新尾部增量拼在已过时的前缀上。读者按 (leaf_seq, events_generation) 快照对账：代际变化即全量重建投影。追加路径零成本。</li>
+<li><strong>双格式窗口的双写成本（D1e 声明）</strong>：窗口期内 save 同时维护事件行与旧 blob 列（同事务），blob 重写是窗口的回退成本；读取端 <code>read_mode=&quot;blob&quot;</code> 可紧急切回纯 blob 读取。兼容 Adapter 声明：<em>deprecated_after = v1.3.0</em>；消费者清单 = SQLiteSessionStore.load/load_child_sessions/load_async 读取端、runtime.py 冷读配平、gateway sessions router、channel sessions、Team 子会话聚合（load_child_sessions）；窗口关闭条件 = W5 树形批次上线后观察一个版本窗口（v1.2.x 全周期）且 blob 回退路径验证无回归，于 v1.3.0 删除 messages 双写与 blob 读取回退。</li>
+<li><strong>租约心跳挂在单写队列 task 上</strong>（而非独立 per-session task）：队列空转超时即批量续约本进程持有的全部租约，少一类后台任务；close() 释放本进程全部租约。</li>
+<li><strong>schema_version 登记</strong>：sessions 域按主库 schema_version 机制 stamp 基线 v2（v1 = 单表 blob）；表结构演进仍走 sessions 自有的幂等 ALTER/PK 重建迁移。</li>
+</ul>
+<p><strong>批次 commit 记录</strong>：D1a schema 与 pragma 基线 → D1b 写路径单写队列 → D1c 读路径投影缓存 → D1d writer 租约 → D1e 兼容迁移 → D6 TokenMeter。</p>
 <h2>回退方式</h2>
 <p>双格式窗口内旧 blob 列保留不删，读取端配置切回 blob 模式即原地回退；窗口关闭（删旧列）前所有回退路径可用。每批次独立提交可 revert。</p>
 <p><a href="0038-feature-db-split.html">ADR-0038</a> · <a href="../../todo/ace-weaknesses-dsh-remediation-plan.md">修复技术方案 §1</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
