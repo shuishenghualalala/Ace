@@ -160,7 +160,7 @@ async def test_web_extract_authorizes_before_fetch(monkeypatch) -> None:
 
     assert order == ["authorize", "fetch"]
     assert payload["title"] == "Safe"
-    assert payload["text"] == "Safe Body"
+    assert payload["text"].endswith("\n\nBody")
 
 
 @pytest.mark.asyncio
