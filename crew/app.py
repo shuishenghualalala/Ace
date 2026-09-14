@@ -2348,15 +2348,18 @@ class CrewApp:
                     )
         except Exception:  # noqa: BLE001
             log.exception("legacy owner 检查失败")
-        # 崩溃恢复：按 host PID 重新认领上次未结束的后台进程
+        # 崩溃恢复注册（D5）：processes.json 后台进程认领登记进统一恢复序列，
+        # 实际执行在 managed features 激活之后（cron 等步骤也在那时注册完毕）。
         try:
+            from crew.state.recovery import register_startup_recovery
             from crew.tools.process_registry import process_registry
 
-            recovered = process_registry.recover_from_checkpoint()
-            if recovered:
-                log.info("崩溃恢复：认领 %d 个后台进程", recovered)
+            register_startup_recovery(
+                "process_registry",
+                process_registry.recover_from_checkpoint,
+            )
         except Exception:  # noqa: BLE001
-            log.exception("后台进程崩溃恢复失败")
+            log.exception("后台进程恢复注册失败")
         await self.tasks.start()
         if self.mcp_manager is not None:
             try:
@@ -2375,6 +2378,17 @@ class CrewApp:
         # CrewApp 按具体 Manager 手写启动。
         excluded = frozenset() if start_cron else frozenset({"product.cron"})
         await self._activate_managed_features(excluded=excluded)
+        # 启动恢复序列（D5）：processes.json 后台进程认领、cron running fires 等
+        # checkpoint 的统一恢复入口（各子系统装配时已注册）。
+        try:
+            from crew.state.recovery import run_startup_recovery
+
+            recovery_results = run_startup_recovery()
+            recovered_processes = recovery_results.get("process_registry") or 0
+            if recovered_processes:
+                log.info("崩溃恢复：认领 %d 个后台进程", recovered_processes)
+        except Exception:  # noqa: BLE001
+            log.exception("启动恢复序列失败")
         # 启动会话过期定时器
         if self.config.session_idle_timeout > 0:
             self._expiry_task = asyncio.create_task(self._session_expiry_loop())

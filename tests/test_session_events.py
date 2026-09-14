@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 
@@ -1067,3 +1068,48 @@ async def test_gateway_sessions_list_includes_breakpoint(tmp_path, auth_headers)
         # q1 在 turn_start 之前落库，开放回合内尚无消息事件
         assert items[0]["breakpoint"]["step"] == 0
         assert items[0]["breakpoint"]["turn_start_seq"] == 2
+
+
+# ---- W5：启动恢复序列统一入口（ADR-0042 D5） ----
+
+
+def test_startup_recovery_sequence_dedupes_and_isolates_failures():
+    from crew.state import recovery
+
+    recovery.clear_startup_recovery()
+    try:
+        calls: list[str] = []
+        recovery.register_startup_recovery("step.a", lambda: calls.append("a") or 1)
+        recovery.register_startup_recovery("step.a", lambda: calls.append("dup") or 2)
+        recovery.register_startup_recovery("step.b", lambda: 1 / 0)
+
+        results = recovery.run_startup_recovery()
+
+        assert calls == ["a"]  # 同名步骤只注册一次
+        assert results["step.a"] == 1
+        assert results["step.b"] is None  # 单步失败不阻断、不外抛
+    finally:
+        recovery.clear_startup_recovery()
+
+
+def test_cron_start_registers_recovery_into_unified_sequence(tmp_path):
+    from crew.cron.jobs import CronJobStore
+    from crew.cron.scheduler import CronService
+    from crew.state import recovery
+
+    recovery.clear_startup_recovery()
+    store = CronJobStore(str(tmp_path / "cron.db"))
+    service = CronService(store, runner=None)
+
+    async def _run() -> dict:
+        await service.start()
+        try:
+            return recovery.run_startup_recovery()
+        finally:
+            await service.stop()
+
+    try:
+        results = asyncio.run(_run())
+        assert "cron.running_fires" in results
+    finally:
+        recovery.clear_startup_recovery()
