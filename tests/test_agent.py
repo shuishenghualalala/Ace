@@ -891,10 +891,11 @@ async def test_generate_session_title_user_only_ignores_assistant():
     max_token_values: list[int | None] = []
 
     class _CapturingProvider:
-        async def chat(self, messages, tools=None, *, max_tokens=None):
+        async def stream_chat(self, messages, tools=None, *, max_tokens=None, **kwargs):
             seen.append(list(messages))
             max_token_values.append(max_tokens)
-            return ChatResponse(text="问候")
+            yield StreamChunk(delta_text="问候")
+            yield StreamChunk(delta_text="", done=True, finish_reason="stop")
 
     title = await generate_session_title(
         _CapturingProvider(),
@@ -943,6 +944,104 @@ async def test_title_task_deduplicated_while_inflight():
         _rt.generate_session_title = real
 
 
+async def test_cancel_title_task_supersedes_inflight_generation():
+    """supersede：取消在途标题任务后，迟到的旧标题不得落库。"""
+    import crew.agent.runtime as _rt
+
+    store = InMemorySessionStore()
+    agent = _agent(FakeProvider(), session_store=store, enable_title=True)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    written: list[str] = []
+    real_set_title = store.set_title
+
+    def _spy_set_title(session_id, title, owner_account_id=""):
+        written.append(title)
+        return real_set_title(session_id, title, owner_account_id=owner_account_id)
+
+    store.set_title = _spy_set_title
+
+    async def _hanging(provider, messages, *, user_only=False):
+        started.set()
+        await release.wait()
+        return "过期标题"
+
+    real = _rt.generate_session_title
+    _rt.generate_session_title = _hanging
+    try:
+        agent._spawn_title_task("s1", "local", [Message.user("hi")], None)
+        await started.wait()
+        assert ("local", "s1") in agent._title_inflight
+        agent._cancel_title_task("s1", "local")
+        release.set()
+        if agent._title_tasks:
+            await asyncio.gather(*agent._title_tasks, return_exceptions=True)
+        assert written == []
+    finally:
+        release.set()
+        _rt.generate_session_title = real
+
+
+async def test_new_user_turn_supersedes_inflight_title_task():
+    """新用户回合开始即在途标题生成被 abort；本回合的标题随后正常生成。"""
+    import crew.agent.runtime as _rt
+
+    store = InMemorySessionStore()
+    agent = _agent(
+        FakeProvider(script=[ChatResponse(text="完成"), ChatResponse(text="完成2")]),
+        session_store=store,
+        enable_title=True,
+    )
+    first_started = asyncio.Event()
+    first_release = asyncio.Event()
+    written: list[str] = []
+    real_set_title = store.set_title
+
+    def _spy_set_title(session_id, title, owner_account_id=""):
+        written.append(title)
+        return real_set_title(session_id, title, owner_account_id=owner_account_id)
+
+    store.set_title = _spy_set_title
+    calls = {"n": 0}
+
+    async def _hanging(provider, messages, *, user_only=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            first_started.set()
+            await first_release.wait()
+            return "过期标题"
+        return "新标题"
+
+    real = _rt.generate_session_title
+    _rt.generate_session_title = _hanging
+    try:
+        async for _ch in agent.run(Envelope.of("问题一", session_id="sup")):
+            pass
+        await first_started.wait()
+        assert ("local", "sup") in agent._title_inflight
+
+        async def _drain(stream):
+            async for _ in stream:
+                pass
+
+        turn2 = asyncio.ensure_future(_drain(agent.run(Envelope.of("问题二", session_id="sup"))))
+        # run() 开头即 supersede：在途标题任务同步出表
+        for _ in range(100):
+            if ("local", "sup") not in agent._title_inflight:
+                break
+            await asyncio.sleep(0.01)
+        assert ("local", "sup") not in agent._title_inflight
+        first_release.set()
+        await turn2
+        if agent._title_tasks:
+            await asyncio.gather(*agent._title_tasks, return_exceptions=True)
+        assert "过期标题" not in written
+        assert written == ["新标题"]
+    finally:
+        first_release.set()
+        _rt.generate_session_title = real
+
+
 async def test_title_spawn_scheduled_only_after_main_response(monkeypatch):
     """自动标题必须移出主推理窗口，并在主 final 后最多调度一次。"""
     store = InMemorySessionStore()
@@ -971,15 +1070,16 @@ async def test_main_stream_gets_provider_before_title_request():
         def __init__(self) -> None:
             self.call_order: list[str] = []
 
-        async def chat(self, messages, tools=None, *, max_tokens=None):
-            self.call_order.append("title")
-            return ChatResponse(text="天气查询")
-
-        async def stream_chat(self, messages, tools=None, *, max_tokens=None):
-            self.call_order.append("main")
+        async def stream_chat(self, messages, tools=None, *, max_tokens=None, **kwargs):
+            is_title = any(
+                "不超过 12 个字" in (m.content or "")
+                for m in messages
+                if m.role == "system"
+            )
+            self.call_order.append("title" if is_title else "main")
             await asyncio.sleep(0.01)
             yield StreamChunk(delta_text="完成")
-            self.call_order.append("main_done")
+            self.call_order.append("title_done" if is_title else "main_done")
             yield StreamChunk(done=True, finish_reason="stop")
 
     provider = _OrderedProvider()
@@ -990,7 +1090,7 @@ async def test_main_stream_gets_provider_before_title_request():
     if agent._title_tasks:
         await asyncio.gather(*agent._title_tasks)
 
-    assert provider.call_order == ["main", "main_done", "title"]
+    assert provider.call_order == ["main", "main_done", "title", "title_done"]
 
 
 async def test_title_timeout_falls_back_to_first_query():
@@ -1002,8 +1102,9 @@ async def test_title_timeout_falls_back_to_first_query():
     aux._TITLE_TIMEOUT = 0.05  # 缩短超时，快速验证
 
     class _HangingProvider:
-        async def chat(self, messages, tools=None, *, max_tokens=None):
-            await asyncio.Event().wait()  # 永不返回，模拟 minimax 非流式挂起
+        async def stream_chat(self, messages, tools=None, *, max_tokens=None, **kwargs):
+            await asyncio.Event().wait()  # 永不返回，模拟网关流式挂起
+            yield  # 让本函数保持 async generator 形态
 
     try:
         title = await generate_session_title(

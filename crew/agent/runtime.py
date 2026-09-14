@@ -247,8 +247,8 @@ class SingleAgent(Agent):
         # 后台标题生成任务引用集合：防止 fire-and-forget task 被 GC 中断，
         # done 后自动清出。标题生成不得阻塞 final 帧发送（见 _spawn_title_task）。
         self._title_tasks: set[asyncio.Task] = set()
-        # 同一 (owner, title_sid) 在途标题任务去重，避免 early + 回合末 fallback 双发 LLM。
-        self._title_inflight: set[tuple[str, str]] = set()
+        # 同一 (owner, title_sid) 的在途标题任务：spawn 去重 + 新用户回合 supersede 取消。
+        self._title_inflight: dict[tuple[str, str], asyncio.Task] = {}
         # Provider ownership is declared by the composition root. Executor/compactor and
         # ``self.provider`` may all reference borrowed App resources, so references alone
         # must never imply ownership.
@@ -286,6 +286,7 @@ class SingleAgent(Agent):
                 task.cancel()
             if title_tasks:
                 await asyncio.gather(*title_tasks, return_exceptions=True)
+            self._title_inflight.clear()
 
             seen: set[int] = set()
             for provider in self._owned_providers:
@@ -748,6 +749,8 @@ class SingleAgent(Agent):
 
         t = time.perf_counter()
         owner = envelope.user_id
+        # 新用户回合 supersede 上一回合在途的标题生成：旧标题不应覆盖新会话内容。
+        self._cancel_title_task(task_sid, owner)
         history = await self.session_store.load_async(sid, owner_account_id=owner)
         # 冷读配平：为崩溃/旧数据留下的孤儿 tool_call 合成 error 结果（幂等，
         # 随本轮落库持久化；平衡的历史扫描为空，不每轮产生开销）。
@@ -1290,7 +1293,6 @@ class SingleAgent(Agent):
         inflight_key = (owner, title_sid)
         if inflight_key in self._title_inflight:
             return
-        self._title_inflight.add(inflight_key)
 
         async def _run() -> None:
             try:
@@ -1328,12 +1330,23 @@ class SingleAgent(Agent):
                         log.debug("推送会话标题失败：%s", exc)
             except Exception as exc:  # noqa: BLE001
                 log.debug("后台标题生成失败：%s", exc)
-            finally:
-                self._title_inflight.discard(inflight_key)
 
         task = asyncio.create_task(_run())
+
+        def _discard(done_task: asyncio.Task) -> None:
+            self._title_tasks.discard(done_task)
+            if self._title_inflight.get(inflight_key) is done_task:
+                self._title_inflight.pop(inflight_key, None)
+
+        self._title_inflight[inflight_key] = task
         self._title_tasks.add(task)
-        task.add_done_callback(self._title_tasks.discard)
+        task.add_done_callback(_discard)
+
+    def _cancel_title_task(self, title_sid: str, owner: str) -> None:
+        """新用户回合 supersede 在途标题生成：取消旧任务，失败/取消不进入用户回合路径。"""
+        task = self._title_inflight.pop((owner, title_sid), None)
+        if task is not None and not task.done():
+            task.cancel()
 
     async def _persist_turn(
         self,
