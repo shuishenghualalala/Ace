@@ -83,15 +83,29 @@ async def test_chat_text_prefers_stream():
 
 
 @pytest.mark.asyncio
-async def test_chat_text_falls_back_to_chat_on_stream_error():
+async def test_chat_text_retries_stream_via_stream_aux_on_transient_error():
+    """流式通道瞬时故障时经 stream_aux 重试恢复，不回退一次性非流式调用。"""
+    from crew.core.errors import ProviderError
+
     provider = _ScriptedProvider(
-        stream_error=RuntimeError("stream 通道不可用"),
-        chat_text='{"ok": true}',
+        stream_chunks=[StreamChunk(delta_text='{"ok": true}', done=True)],
+        chat_text="should-not-be-used",
     )
+    real_stream = provider.stream_chat
+    state = {"n": 0}
+
+    async def _flaky(messages, tools=None, *, max_tokens=None):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise ProviderError("stream 通道不可用", retryable=True)
+        async for chunk in real_stream(messages, tools, max_tokens=max_tokens):
+            yield chunk
+
+    provider.stream_chat = _flaky
     text = await chat_text(provider, [Message.user("hi")])
     assert text == '{"ok": true}'
-    assert provider.stream_calls == 1
-    assert provider.chat_calls == 1
+    assert state["n"] == 2
+    assert provider.chat_calls == 0
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,7 @@ from crew.dynamickanban.runtime_models import (
     VerificationGate,
     WorkflowDefinition,
 )
+from crew.providers import stream_aux
 from crew.state.logging import get_logger
 
 log = get_logger("dynamickanban.orchestrator")
@@ -106,7 +107,12 @@ class WorkflowOrchestrator:
         start = time.time()
         for attempt in range(self.max_retries + 1):
             try:
-                resp = await self.provider.chat([Message.system(system), Message.user(user)])
+                resp = await stream_aux(
+                    self.provider,
+                    [Message.system(system), Message.user(user)],
+                    purpose="workflow-definition",
+                    retry=0,
+                )
                 data = self._extract_json(resp.text or "")
                 if data and isinstance(data, dict) and data.get("phases"):
                     definition = WorkflowDefinition.from_dict(data)
@@ -203,7 +209,11 @@ class WorkflowOrchestrator:
             "- phase id 必须以 repair_ 开头。\n"
             "- 不要输出 edges，调用方负责把修复阶段接入现有 DAG。\n"
         )
-        resp = await self.provider.chat([Message.system(system), Message.user(user)])
+        resp = await stream_aux(
+            self.provider,
+            [Message.system(system), Message.user(user)],
+            purpose="workflow-repair",
+        )
         data = self._extract_json(resp.text or "")
         if not data or not isinstance(data, dict) or not data.get("phases"):
             raise ValueError("LLM 未返回合法修复阶段")

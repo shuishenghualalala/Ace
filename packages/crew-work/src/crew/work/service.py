@@ -14,6 +14,7 @@ from crew.core.runctx import normalize_owner_account_id
 from crew.core.envelope import Envelope
 from crew.core.interfaces import LLMProvider, SessionStore, WorkspaceStore
 from crew.core.types import Message
+from crew.providers import stream_aux
 from crew.state.logging import get_logger
 from crew.work.briefs import WorkBriefStore, WorkPeriodReport
 from crew.work.items import WorkItemEvent, WorkItemStore
@@ -131,7 +132,8 @@ class LLMPreferenceExtractor:
         if not source:
             return []
         source = source[-self._max_source_chars :]
-        response = await self._provider.chat(
+        response = await stream_aux(
+            self._provider,
             [
                 Message.system(
                     "提取用户可跨会话复用的办公偏好。只提取稳定的方法、格式、语气或流程偏好，"
@@ -141,7 +143,7 @@ class LLMPreferenceExtractor:
                 ),
                 Message.user(f"最近用户文本：\n{source}"),
             ],
-            tools=None,
+            purpose="preference-extraction",
             max_tokens=800,
         )
         raw_items = _parse_json_array(response.text)

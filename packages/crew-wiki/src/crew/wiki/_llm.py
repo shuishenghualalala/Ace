@@ -11,6 +11,7 @@ import asyncio
 
 from crew.core.interfaces import LLMProvider
 from crew.core.types import Message
+from crew.providers import stream_aux
 from crew.state.logging import get_logger
 
 log = get_logger("wiki.llm")
@@ -74,11 +75,11 @@ async def chat_text(
     timeout: float = LLM_CALL_TIMEOUT,
     max_tokens: int | None = None,
 ) -> str:
-    """流式优先的文本补全；流式通道本身不可用时回退非流式 chat。
+    """流式优先的文本补全；流式通道本身不可用时回退再试一次。
 
-    流式传输中超时（已在出字但被掐断）时不回退——非流式在同一网关上只会
+    流式传输中超时（已在出字但被掐断）时不回退——重试在同一网关上只会
     更慢，直接抛给上层重试。429/503/并发已满同样不回退，因为同一端点的
-    非流式请求不会获得额外容量。
+    重试请求不会获得额外容量。
     """
     try:
         return await asyncio.wait_for(
@@ -89,11 +90,15 @@ async def chat_text(
         raise
     except Exception as exc:  # noqa: BLE001
         if _is_capacity_error(exc):
-            log.warning("wiki LLM 端点限流或并发已满，不向同一端点回退非流式: %s", exc)
+            log.warning("wiki LLM 端点限流或并发已满，不回退重试: %s", exc)
             raise
-        log.warning("wiki LLM 流式调用失败，回退非流式: %s", exc)
-    resp = await asyncio.wait_for(
-        provider.chat(messages, tools=None, max_tokens=max_tokens),
+        log.warning("wiki LLM 流式调用失败，回退重试: %s", exc)
+    result = await stream_aux(
+        provider,
+        messages,
+        purpose="wiki-completion",
         timeout=timeout,
+        max_tokens=max_tokens,
+        retry=1,
     )
-    return resp.text
+    return result.text
