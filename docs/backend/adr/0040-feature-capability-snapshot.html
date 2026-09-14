@@ -3,7 +3,7 @@
 <title>ADR-0040 · UI Feature 运行时能力状态源</title>
 <style>body{font:16px/1.75 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}code{background:#f4f4f4}a{color:#245a83}</style></head><body><main>
 <h1>ADR-0040 · UI Feature 运行时能力状态源</h1>
-<p>2026-09-14 · 阶段 6AB · 状态：已实施（capability 套件 12 passed，后端全量与双端 typecheck/test 通过；三平台打包态验证待远程矩阵）。</p>
+<p>2026-09-14 · 阶段 6AB · 状态：已实施（capability 套件 12 passed，后端全量与双端 typecheck/test 通过；ci.yml python 门禁已扩 ubuntu/windows/macos 三平台矩阵，首跑结果随推送回填，桌面打包态由 nightly-desktop 三平台覆盖）。</p>
 <h2>背景与候选</h2><p>Team/Kanban 的双端 reducer 已具备 init/dispose，但仍随整个 App 安装，缺乏可靠的功能启停状态来源。会话 mode 不能证明运行资源可用；新增布尔配置会复制 Runtime 状态；完整诊断响应包含 UI 不需要的配置修订、错误与 Lease 信息。</p>
 <h2>决定</h2><p>由中立 Feature Runtime 提供按 Feature ID 索引的精简快照，经现有 config_body 的 feature_capabilities 字段返回。每项仅包含 state、available、generation；核心不枚举具体业务。product.team 与 product.dynamic-kanban 独立投影，缺席视为不可用。</p>
 <p>可用性对应当前有效 Generation 的请求准入。drain 后新请求不可进入时立即不可用；replace 候选尚未发布而旧代仍可服务时保持旧代快照。读取不获取 Lease、不改变生命周期。该字段表示宿主运行时状态，不替代账号授权或后端请求门控。</p>

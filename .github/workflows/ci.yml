@@ -1,8 +1,10 @@
 name: ci
 
-# PR 门禁：Python 测试 + ruff + 架构依赖契约、Web 构建与测试、Desktop 完整检查。
+# PR 门禁：Python 测试（Linux/Windows/macOS 三平台矩阵，配置与状态等
+# 平台敏感路径不得只靠单机结果兜底）+ ruff + 架构依赖契约（Linux 单跑，
+# 纯静态检查不随 OS 变化）、Web 构建与测试、Desktop 完整检查。
 # 安全运行时（Rust）的专项门禁见 security-*.yml，Playwright 协议契约见
-# playwright-core-contract.yml，本 workflow 不重复覆盖。
+# playwright-core-contract.yml，桌面三平台打包态由 nightly-desktop.yml 覆盖。
 
 on:
   pull_request:
@@ -19,9 +21,13 @@ concurrency:
 
 jobs:
   python:
-    name: pytest + ruff + architecture
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    name: pytest (${{ matrix.runs-on }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runs-on: [ubuntu-24.04, windows-2025, macos-14]
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -29,8 +35,11 @@ jobs:
           python-version: '3.11'
       # wiki extra 与 README「验证安装」一节保持一致；e2e 标记默认跳过
       - run: uv sync --extra dev --extra wiki
+      # 静态检查与 OS 无关，只在 Linux 一份上跑，避免矩阵三倍重复
       - run: uv run ruff check .
+        if: runner.os == 'Linux'
       - run: uv run lint-imports
+        if: runner.os == 'Linux'
       # tests/security 需要构建 Rust 原生运行时，由 security-*.yml 专门覆盖
       - run: uv run pytest -q --ignore=tests/security
 
