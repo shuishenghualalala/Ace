@@ -465,6 +465,41 @@ fn canonical_optional(path: &Path) -> Result<Option<PathBuf>, String> {
     }
 }
 
+/// Canonicalize an absolute path that may not exist yet by resolving the
+/// nearest existing ancestor and re-appending the missing suffix. Matches
+/// the macOS/Linux `canonicalize_allow_missing`: on Windows `canonicalize`
+/// returns verbatim `\\?\` paths, so falling back to the raw path would
+/// never satisfy `starts_with` against canonicalized writable roots.
+fn canonical_allow_missing(path: &Path) -> Result<PathBuf, String> {
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    loop {
+        match ancestor.canonicalize() {
+            Ok(mut canonical) => {
+                for name in suffix.iter().rev() {
+                    canonical.push(name);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = ancestor.file_name().ok_or_else(|| {
+                    format!("cannot resolve ACL root ancestor: {}", path.display())
+                })?;
+                suffix.push(name.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    format!("cannot resolve ACL root ancestor: {}", path.display())
+                })?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "cannot resolve ACL root {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+}
+
 fn reject_reparse_point(path: &Path) -> Result<(), String> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
@@ -496,7 +531,7 @@ fn readonly_targets(
                     .components()
                     .any(|part| matches!(part, std::path::Component::ParentDir)) =>
             {
-                path.clone()
+                canonical_allow_missing(path)?
             }
             None => {
                 return Err(format!(
@@ -597,6 +632,26 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("read-only root must be inside"), "{error}");
+    }
+
+    #[test]
+    fn missing_readonly_root_inside_writable_root_is_accepted() {
+        // Readiness-probe regression: the writable root arrives canonicalized
+        // (verbatim `\\?\` on Windows) while an explicit read-only root that
+        // does not exist yet must still resolve inside it.
+        let writable = tempfile::tempdir().unwrap();
+        let missing = writable.path().join("probe").join(".git");
+
+        let targets =
+            readonly_targets(&[writable.path().canonicalize().unwrap()], &[missing]).unwrap();
+
+        let resolved = writable
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("probe")
+            .join(".git");
+        assert!(targets.contains_key(&resolved));
     }
 
     #[test]
