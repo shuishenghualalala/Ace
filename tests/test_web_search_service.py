@@ -118,7 +118,8 @@ async def test_no_available_provider_fails_closed_with_config_guidance():
 
 @pytest.mark.asyncio
 async def test_handler_fails_closed_when_nothing_configured(monkeypatch):
-    # 未配置 bocha key / searxng 地址时，工具不得触网，直接结构化报错。
+    # 未配置 exa key / bocha key / searxng 地址时，工具不得触网，直接结构化报错。
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
     monkeypatch.delenv("BOCHA_API_KEY", raising=False)
     configure_search(None)
 
@@ -219,3 +220,140 @@ async def test_dispose_then_reregister_restores_provider():
 
     outcome = await search_with_fallback("q", 5, _CTX)
     assert outcome.provider_id == "cycle"
+
+
+# ---------------------------------------------------------------------------
+# Exa provider：请求形态、highlights 映射、错误信息提取
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_exa_maps_first_nonblank_highlight_to_snippet(monkeypatch):
+    monkeypatch.setenv("EXA_API_KEY", "exa-key")
+    configure_search({"providers": ["exa"]})
+    posted = {}
+
+    async def fake_post(url, payload, *, api_key, tool_name, ctx):
+        posted.update(url=url, payload=payload, api_key=api_key)
+        return {
+            "results": [
+                {
+                    "url": "https://a.example/page",
+                    "title": "  First\t Result ",
+                    "publishedDate": "2026-09-01",
+                    "highlights": ["", "   ", "actual snippet"],
+                },
+                {
+                    "url": "https://b.example/no-title",
+                    "highlights": ["second snippet"],
+                },
+            ]
+        }
+
+    monkeypatch.setattr(web_tools, "_authorized_json_post", fake_post)
+
+    outcome = await search_with_fallback("q", 5, _CTX)
+
+    assert outcome.provider_id == "exa"
+    assert posted["url"] == "https://api.exa.ai/search"
+    assert posted["api_key"] == "exa-key"
+    assert posted["payload"]["type"] == "auto"
+    assert posted["payload"]["numResults"] == 5
+    assert posted["payload"]["contents"] == {"highlights": {"highlightsPerUrl": 1}}
+    assert outcome.results[0].title == "First Result"
+    assert outcome.results[0].snippet == "actual snippet"
+    # 上游无 title 时保持空串，不编造。
+    assert outcome.results[1].title == ""
+    assert outcome.results[1].snippet == "second snippet"
+
+
+@pytest.mark.asyncio
+async def test_exa_drops_entries_without_highlight(monkeypatch):
+    monkeypatch.setenv("EXA_API_KEY", "exa-key")
+    configure_search({"providers": ["exa"]})
+
+    async def fake_post(url, payload, *, api_key, tool_name, ctx):
+        return {
+            "results": [
+                {"url": "https://a.example/with", "title": "A", "highlights": ["ok"]},
+                {"url": "https://b.example/without", "title": "B"},
+                {"url": "https://c.example/blank", "title": "C", "highlights": ["  "]},
+                {"url": "notaurl", "title": "D", "highlights": ["ok"]},
+            ]
+        }
+
+    monkeypatch.setattr(web_tools, "_authorized_json_post", fake_post)
+
+    outcome = await search_with_fallback("q", 5, _CTX)
+
+    assert [item.url for item in outcome.results] == ["https://a.example/with"]
+
+
+def test_exa_available_requires_key_and_valid_base_url(monkeypatch):
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    configure_search(None)
+    assert web_tools._exa_available() is False
+
+    monkeypatch.setenv("EXA_API_KEY", "exa-key")
+    assert web_tools._exa_available() is True
+
+    configure_search({"exa_base_url": "http://127.0.0.1:8080"})
+    assert web_tools._exa_available() is False
+
+
+def test_post_json_url_extracts_error_detail_from_http_error_body(monkeypatch):
+    from crew.security.outbound import PublicHttpError
+
+    def raise_http_error(*a, **k):
+        raise PublicHttpError(401, b'{"error":"missing authorization"}')
+
+    monkeypatch.setattr(web_tools, "request_public_http", raise_http_error)
+
+    with pytest.raises(ToolError, match=r"HTTP 401: missing authorization"):
+        web_tools._post_json_url("https://api.exa.ai/search", {}, "key", set())
+
+
+def test_post_json_url_falls_back_to_status_when_body_not_parseable(monkeypatch):
+    from crew.security.outbound import PublicHttpError
+
+    def raise_http_error(*a, **k):
+        raise PublicHttpError(503, b"<html>Service Unavailable</html>")
+
+    monkeypatch.setattr(web_tools, "request_public_http", raise_http_error)
+
+    with pytest.raises(ToolError, match=r"HTTP 503"):
+        web_tools._post_json_url("https://api.exa.ai/search", {}, "key", set())
+
+
+@pytest.mark.asyncio
+async def test_handler_prefers_exa_in_default_chain(monkeypatch):
+    # 默认链按注册序（exa 最先）：只配置 exa key 时命中 exa。
+    monkeypatch.delenv("BOCHA_API_KEY", raising=False)
+    monkeypatch.setenv("EXA_API_KEY", "exa-key")
+    configure_search(None)
+
+    async def fake_post(url, payload, *, api_key, tool_name, ctx):
+        assert url == "https://api.exa.ai/search"
+        return {
+            "results": [
+                {
+                    "url": "https://a.example",
+                    "title": "Exa Result",
+                    "highlights": ["snippet"],
+                }
+            ]
+        }
+
+    async def forbidden_get(*a, **k):
+        raise AssertionError("默认链不应走到 GET 类 provider")
+
+    monkeypatch.setattr(web_tools, "_authorized_json_post", fake_post)
+    monkeypatch.setattr(web_tools, "_authorized_fetch", forbidden_get)
+
+    payload = json.loads(await web_tools.handle_web_search({"query": "example"}))
+
+    assert payload["provider"] == "exa"
+    assert payload["notice"] == web_tools._UNTRUSTED_CONTENT_NOTICE
+    assert payload["results"] == [
+        {"title": "Exa Result", "url": "https://a.example", "snippet": "snippet"}
+    ]

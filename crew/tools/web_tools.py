@@ -23,6 +23,7 @@ from crew.core.interfaces import ToolResultRetention
 from crew.core.runctx import current_model_capabilities
 from crew.core.types import MediaPart, ToolOutput
 from crew.security.outbound import (
+    PublicHttpError,
     PublicRedirectApprovalRequired,
     fetch_public_http,
     parse_public_http_target,
@@ -116,8 +117,67 @@ _TRUNCATION_FOOTER = (
 
 
 # ---------------------------------------------------------------------------
-# 搜索 provider：博查 API、SearXNG（纯 API，无 HTML 刮取兜底）
+# 搜索 provider：Exa、博查 API、SearXNG（纯 API，无 HTML 刮取兜底）
 # ---------------------------------------------------------------------------
+
+_EXA_BASE_URL = "https://api.exa.ai"
+
+
+def _exa_api_key() -> str:
+    env_name = search_config("exa_api_key_env", "EXA_API_KEY")
+    return os.environ.get(env_name, "").strip()
+
+
+def _exa_base_url() -> str:
+    return search_config("exa_base_url", _EXA_BASE_URL).rstrip("/")
+
+
+def _exa_available() -> bool:
+    if not _exa_api_key():
+        return False
+    try:
+        parse_public_http_target(f"{_exa_base_url()}/search")
+    except ValueError:
+        return False
+    return True
+
+
+async def _exa_search(query: str, limit: int, ctx: SearchContext) -> list[SearchResult]:
+    key = _exa_api_key()
+    if not key:
+        raise ToolError("exa API key 未配置")
+    payload = await _authorized_json_post(
+        f"{_exa_base_url()}/search",
+        {
+            "query": query,
+            "type": "auto",
+            "numResults": limit,
+            "contents": {"highlights": {"highlightsPerUrl": 1}},
+        },
+        api_key=key,
+        tool_name="web_search",
+        ctx=ctx,
+    )
+    values = payload.get("results") if isinstance(payload, dict) else None
+    results = []
+    for item in values or []:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        title = re.sub(r"\s+", " ", str(item.get("title") or "")).strip()
+        highlights = item.get("highlights") or []
+        snippet = next(
+            (str(h).strip() for h in highlights if str(h).strip()),
+            None,
+        )
+        # 没有摘要的条目直接丢弃：seam 没有别的字段可推导摘要，编造等于说谎。
+        if not url.startswith(("http://", "https://")) or not snippet:
+            continue
+        results.append(SearchResult(title=title, url=url, snippet=snippet))
+        if len(results) >= limit:
+            break
+    return results
+
 
 _BOCHA_API_URL = "https://api.bocha.cn/v1/ai-search"
 
@@ -197,6 +257,9 @@ async def _searxng_search(query: str, limit: int, ctx: SearchContext) -> list[Se
 
 
 def _register_default_search_providers() -> None:
+    register_search_provider(
+        SearchProvider(id="exa", available=_exa_available, search=_exa_search)
+    )
     register_search_provider(
         SearchProvider(id="bocha", available=_bocha_available, search=_bocha_search)
     )
@@ -295,21 +358,37 @@ async def _authorized_json_post(
     raise ToolError("网页重定向次数过多")
 
 
+def _http_error_detail(body: bytes) -> str:
+    """从 API 错误响应体提取 error/message 字段；解析失败返回空串。"""
+    try:
+        payload = json.loads(body.decode("utf-8", errors="replace"))
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    message = str(payload.get("error") or payload.get("message") or "").strip()
+    return message[:200]
+
+
 def _post_json_url(
     url: str,
     payload: dict[str, Any],
     api_key: str,
     allowed_targets: set[tuple[str, int, str]],
 ) -> Any:
-    response = request_public_http(
-        url,
-        method="POST",
-        timeout=10.0,
-        max_bytes=2_000_000,
-        headers={"User-Agent": _USER_AGENT, "Authorization": f"Bearer {api_key}"},
-        json_body=payload,
-        allowed_targets=allowed_targets,
-    )
+    try:
+        response = request_public_http(
+            url,
+            method="POST",
+            timeout=10.0,
+            max_bytes=2_000_000,
+            headers={"User-Agent": _USER_AGENT, "Authorization": f"Bearer {api_key}"},
+            json_body=payload,
+            allowed_targets=allowed_targets,
+        )
+    except PublicHttpError as exc:
+        detail = _http_error_detail(exc.body)
+        raise ToolError(f"HTTP {exc.status}: {detail}" if detail else f"HTTP {exc.status}") from exc
     return json.loads(response.body.decode(response.charset, errors="replace"))
 
 
