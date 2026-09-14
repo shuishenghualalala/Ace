@@ -21,6 +21,10 @@ from __future__ import annotations
 
 import asyncio
 
+from crew.agent.compact.file_manifest import (
+    is_file_manifest_message,
+    shadowed_manifest_message,
+)
 from crew.agent.compact.microcompact import (
     ResultPolicyResolver,
     micro_compact,
@@ -569,6 +573,12 @@ class ContextCompactor:
                 self.post_compact_max_chars_per_file,
             )
         compacted = [summary_message, *attachments, *recent]
+        # 文件清单被摘要遮蔽时重新注入视图：它是持久会话信息（canonical 每轮刷新），
+        # 压缩后「你读过/改过这些文件」不能丢。
+        if not any(is_file_manifest_message(m) for m in recent):
+            manifest = shadowed_manifest_message(old)
+            if manifest is not None:
+                compacted = [summary_message, manifest, *attachments, *recent]
         # 「摘要必须更小」校验：压缩后视图不小于原视图则整个事务失败，历史不变。
         before_tokens = estimate_tokens(messages)
         after_tokens = estimate_tokens(compacted)

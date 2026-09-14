@@ -722,6 +722,99 @@ async def test_compact_now_returns_unchanged_when_nothing_to_compact():
     assert view[0].content.startswith("问题0")
 
 
+# --------------------------------------------------------------------------- #
+# 文件清单：从工具历史提取 read/modified，作为持久会话信息跨轮继承
+# --------------------------------------------------------------------------- #
+def _history_with_file_ops() -> list[Message]:
+    return [
+        Message.user("看下文件"),
+        Message.assistant(
+            "读取",
+            tool_calls=[ToolCall(id="r1", name="file_read", arguments={"path": "/a.py"})],
+        ),
+        Message.tool("r1", "内容", name="file_read"),
+        Message.assistant(
+            "再读并修改",
+            tool_calls=[
+                ToolCall(id="r2", name="file_read", arguments={"path": "/b.py"}),
+                ToolCall(id="w1", name="file_write", arguments={"path": "/a.py"}),
+                ToolCall(id="p1", name="patch", arguments={"path": "/c.py"}),
+            ],
+        ),
+        Message.tool("r2", "内容", name="file_read"),
+        Message.tool("w1", "已写", name="file_write"),
+        Message.tool("p1", "已改", name="patch"),
+    ]
+
+
+def test_extract_file_manifest_read_and_modified():
+    from crew.agent.compact.file_manifest import extract_file_manifest
+
+    read, modified = extract_file_manifest(_history_with_file_ops())
+    assert read == ["/a.py", "/b.py"]  # 首次出现顺序去重
+    assert modified == ["/a.py", "/c.py"]
+
+
+def test_upsert_file_manifest_appends_then_refreshes_in_place():
+    from crew.agent.compact.file_manifest import (
+        FILE_MANIFEST_MARKER,
+        is_file_manifest_message,
+        upsert_file_manifest,
+    )
+
+    history = _history_with_file_ops()
+    upsert_file_manifest(history)
+    manifests = [m for m in history if is_file_manifest_message(m)]
+    assert len(manifests) == 1
+    manifest = manifests[0]
+    assert manifest.is_meta
+    assert manifest.content.startswith(FILE_MANIFEST_MARKER)
+    assert "/a.py" in manifest.content and "/c.py" in manifest.content
+
+    # 新工具调用出现 → 原地刷新，不追加第二条
+    history.append(
+        Message.assistant(
+            "又改了",
+            tool_calls=[ToolCall(id="w2", name="file_write", arguments={"path": "/d.py"})],
+        )
+    )
+    upsert_file_manifest(history)
+    manifests = [m for m in history if is_file_manifest_message(m)]
+    assert len(manifests) == 1
+    assert "/d.py" in manifests[0].content
+
+
+def test_upsert_file_manifest_noop_without_file_ops():
+    from crew.agent.compact.file_manifest import upsert_file_manifest
+
+    history = [Message.user("hi"), Message.assistant("hello")]
+    assert upsert_file_manifest(history) is history
+    assert len(history) == 2  # 无文件操作不注入空清单
+
+
+async def test_compact_reinjects_shadowed_file_manifest():
+    """压缩把清单摘要进 old 段时，清单作为持久会话信息重新注入视图。"""
+    from crew.agent.compact.file_manifest import is_file_manifest_message, upsert_file_manifest
+
+    provider = FakeProvider(reply="压缩摘要")
+    comp = ContextCompactor(provider, token_budget=10, keep_recent=2)
+    history = _history_with_file_ops()
+    # 模拟 runtime：清单已随 canonical 注入
+    upsert_file_manifest(history)
+    # 再垫几轮把清单挤进 old 段
+    for i in range(6):
+        history.append(Message.user(f"后续问题{i} " * 100))
+        history.append(Message.assistant(f"后续回答{i} " * 100))
+
+    out = await comp.maybe_compact(history, "sess-manifest")
+    assert out[0].content.startswith(SUMMARY_MARKER)
+    # 清单消息在压缩后的视图里存活（被重新注入）
+    assert any(is_file_manifest_message(m) for m in out)
+    manifest = next(m for m in out if is_file_manifest_message(m))
+    assert "/a.py" in (manifest.content or "")
+
+
+
 def test_safe_split_pairing_counter_falls_back_toward_head():
     """切点落在「未闭合 toolCall 之后」的 assistant 上时（配对余额非 0），
     向头部回退到最近余额为 0 的边界，绝不拆散 toolCall/results 组。"""

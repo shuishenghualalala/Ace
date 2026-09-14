@@ -848,6 +848,36 @@ async def test_overflow_no_progress_no_retry():
     assert state["requests"] == 1  # 投影未前进：没有重试请求
 
 
+async def test_file_manifest_persisted_into_canonical_history():
+    """文件清单作为 is_meta 持久会话信息写入 canonical：跨轮继承，压缩后仍回注视图。"""
+    from crew.agent.compact.file_manifest import is_file_manifest_message
+
+    store = InMemorySessionStore()
+    seed = _history_with_file_ops_seed()
+    store.save("fm", seed, owner_account_id="local")
+
+    agent = _agent(FakeProvider(), session_store=store)
+    async for _ in agent.run(Envelope.of("继续", session_id="fm")):
+        pass
+
+    saved = store.load("fm", owner_account_id="local")
+    manifests = [m for m in saved if is_file_manifest_message(m)]
+    assert len(manifests) == 1, "canonical 应持久化恰好一条文件清单"
+    assert manifests[0].is_meta
+    assert "/a.py" in (manifests[0].content or "")
+
+
+def _history_with_file_ops_seed() -> list[Message]:
+    return [
+        Message.user("看下文件"),
+        Message.assistant(
+            "读取",
+            tool_calls=[ToolCall(id="r1", name="file_read", arguments={"path": "/a.py"})],
+        ),
+        Message.tool("r1", "内容", name="file_read"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 会话标题
 # ---------------------------------------------------------------------------

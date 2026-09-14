@@ -760,6 +760,12 @@ class SingleAgent(Agent):
                 sid,
                 len(repaired),
             )
+        if not self.lightweight:
+            # 文件清单持久会话信息：从工具调用历史提取 read/modified 清单写入
+            # canonical（原地刷新 is_meta 消息），压缩遮蔽后由压缩管线重新注入视图。
+            from crew.agent.compact.file_manifest import upsert_file_manifest
+
+            upsert_file_manifest(history)
         # usage 只代表最近一次 Provider 请求；新回合开始时先清掉旧值，
         # 否则在本回合尚未收到 usage 时，UI 会把上一回合的真实值误认为当前值。
         clear_prompt_usage = getattr(self.session_store, "clear_prompt_usage", None)
