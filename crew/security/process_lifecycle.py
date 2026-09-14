@@ -18,6 +18,7 @@ PID 复用防御：spawn 后现读进程启动时刻建立 ``ProcessIdentity`` �
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
 import os
 import shutil
@@ -465,3 +466,98 @@ def terminate_process_tree_sync(
     """
     owner = ProcessOwner.for_pid(pid)
     owner.signal(signal.SIGTERM)
+
+
+# ---- live set：句柄完全结算才移出，宿主退出三时机清杀 ----
+
+_live_lock = threading.Lock()
+_live_owners: set[ProcessOwner] = set()
+_host_exit_hooks_installed = False
+
+
+def register_live(owner: ProcessOwner) -> None:
+    """登记未结算句柄进 live set（spawn / 崩溃恢复认领即注册即 effect）。"""
+    _install_host_exit_hooks()
+    with _live_lock:
+        _live_owners.add(owner)
+
+
+def release_live(owner: ProcessOwner | None) -> None:
+    """句柄完全结算后移出 live set。"""
+    if owner is None:
+        return
+    with _live_lock:
+        _live_owners.discard(owner)
+
+
+def live_owner_count() -> int:
+    with _live_lock:
+        return len(_live_owners)
+
+
+def terminate_all_for_host_exit() -> None:
+    """宿主可观察退出点：同步强杀全部未结算句柄，不启动计时器。"""
+    with _live_lock:
+        owners = list(_live_owners)
+    for owner in owners:
+        try:
+            owner.terminate_for_host_exit()
+        except Exception:  # noqa: BLE001 - 单个目标失败不阻断其余
+            pass
+
+
+def _chained_termination_handler(previous: Any) -> Any:
+    """SIGTERM/SIGINT 清杀后链到原处理器：自定义处理器原样调用，默认处置
+    重新递送（SIGTERM 终止 / SIGINT 由 Python 默认处理器转 KeyboardInterrupt）。"""
+
+    def _handler(signum: int, frame: Any) -> None:
+        terminate_all_for_host_exit()
+        if callable(previous):
+            previous(signum, frame)
+        elif previous == signal.SIG_DFL:
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+        # SIG_IGN：信号被宿主显式忽略，清杀后保持忽略
+
+    return _handler
+
+
+def _install_host_exit_hooks() -> None:
+    """装配一次：signal handler（SIGTERM/SIGINT）+ atexit 同步强杀；
+    asyncio 关停的异步排干由 drain_live_processes 显式调用。"""
+    global _host_exit_hooks_installed
+    with _live_lock:
+        if _host_exit_hooks_installed:
+            return
+        _host_exit_hooks_installed = True
+    atexit.register(terminate_all_for_host_exit)
+    try:
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(signum, _chained_termination_handler(signal.getsignal(signum)))
+    except ValueError:
+        # 非主线程（pytest worker 等）：信号钩子装不上，atexit 兜底仍生效。
+        pass
+
+
+def reset_host_exit_hooks_for_tests() -> None:
+    """测试边界：清掉钩子装配标记（不撤销 atexit/已装处理器）。"""
+    global _host_exit_hooks_installed
+    with _live_lock:
+        _host_exit_hooks_installed = False
+
+
+async def drain_live_processes(*, grace_ms: int | float | None = None) -> None:
+    """asyncio 关停路径的异步排干：TERM → 宽限 → KILL，逐个结算后移出 live set。
+
+    排干失败的句柄同步强杀兜底（随后 atexit 仍是最后防线）。
+    """
+    with _live_lock:
+        owners = list(_live_owners)
+    results = await asyncio.gather(
+        *(owner.terminate(grace_ms=grace_ms) for owner in owners),
+        return_exceptions=True,
+    )
+    for owner, result in zip(owners, results):
+        if isinstance(result, BaseException):
+            owner.terminate_for_host_exit()
+        release_live(owner)

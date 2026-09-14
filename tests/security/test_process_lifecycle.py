@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -301,3 +302,105 @@ async def test_terminate_already_exited_is_noop():
     await proc.wait()
     owner = pl.ProcessOwner.capture(proc)
     await owner.terminate(grace_ms=50)  # 不抛错、不等待
+
+
+# ---- F5：live set + 宿主退出三时机清杀 ----
+
+@pytest.fixture(autouse=True)
+def _neutralize_host_hooks(monkeypatch):
+    """单测不真改进程级 signal/atexit：记录调用即可。"""
+    calls: list = []
+    monkeypatch.setattr(pl.atexit, "register", lambda fn: calls.append(("atexit", fn)))
+    monkeypatch.setattr(pl.signal, "signal", lambda sig, h: calls.append(("signal", sig, h)))
+    pl.reset_host_exit_hooks_for_tests()
+    yield
+    pl.reset_host_exit_hooks_for_tests()
+
+
+def test_register_and_release_live_owner():
+    before = pl.live_owner_count()
+    owner = pl.ProcessOwner(1, identity=pl.ProcessIdentity(1, None))
+    pl.register_live(owner)
+    assert pl.live_owner_count() == before + 1
+    pl.register_live(owner)  # 幂等
+    assert pl.live_owner_count() == before + 1
+    pl.release_live(owner)
+    assert pl.live_owner_count() == before
+    pl.release_live(None)  # 容忍空属主
+
+
+def test_host_exit_hooks_installed_once():
+    pl._install_host_exit_hooks()
+    pl._install_host_exit_hooks()
+    assert pl._host_exit_hooks_installed is True
+
+
+def test_terminate_all_for_host_exit_kills_registered_tree():
+    proc = _spawn_sleeper_tree()
+    owner = pl.ProcessOwner.capture(proc)
+    pl.register_live(owner)
+    try:
+        pl.terminate_all_for_host_exit()
+        # SIGKILL 后句柄必然结算（wait 回收退出码）
+        proc.wait(timeout=5)
+        assert proc.returncode is not None, "宿主退出同步强杀未结算句柄"
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            proc.wait()
+        pl.release_live(owner)
+
+
+def test_chained_termination_handler_calls_previous():
+    called: list = []
+    monkey_prev = lambda signum, frame: called.append(signum)  # noqa: E731
+    handler = pl._chained_termination_handler(monkey_prev)
+    handler(signal.SIGTERM, None)
+    assert called == [signal.SIGTERM]
+
+
+def test_chained_termination_handler_ignores_ignored_signal():
+    handler = pl._chained_termination_handler(pl.signal.SIG_IGN)
+    handler(signal.SIGTERM, None)  # 不抛错、不递送
+
+
+@pytest.mark.asyncio
+async def test_drain_live_processes_settles_and_clears():
+    proc, _ = await pl.spawn_tracked(
+        sys.executable, "-c", "import time; time.sleep(60)",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    owner = pl.ProcessOwner.capture(proc)
+    pl.register_live(owner)
+    try:
+        await pl.drain_live_processes(grace_ms=500)
+        assert proc.returncode is not None
+        assert pl.live_owner_count() == 0 or owner not in pl._live_owners
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        pl.release_live(owner)
+
+
+def test_registry_session_settles_out_of_live_set():
+    from crew.tools.process_registry import ProcessRegistry
+
+    before = pl.live_owner_count()
+    reg = ProcessRegistry()
+    # 命令必须在宿主 shell 下合法：进程存活 ~1s，覆盖 注册→结算 全窗口
+    reg.spawn_local(
+        f"{shlex.quote(sys.executable)} -c {shlex.quote('import time; time.sleep(1)')}",
+        session_key="live-set",
+        owner_account_id="local",
+    )
+    deadline = time.monotonic() + 5
+    while pl.live_owner_count() == before and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert pl.live_owner_count() == before + 1, "spawn 后未登记进 live set"
+    deadline = time.monotonic() + 10
+    while pl.live_owner_count() > before and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert pl.live_owner_count() == before, "reader 完全结算后未移出 live set"

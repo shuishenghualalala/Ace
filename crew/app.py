@@ -2583,6 +2583,14 @@ class CrewApp:
                 ", ".join(plugin_shutdown_failures),
             )
         await self.tasks.stop()
+        # 孤儿回收三时机之一（asyncio shutdown 异步排干；signal handler 与
+        # atexit 同步强杀由 process_lifecycle 在首个句柄注册时装配）。
+        from crew.security.process_lifecycle import drain_live_processes
+
+        try:
+            await asyncio.wait_for(drain_live_processes(), timeout=10.0)
+        except asyncio.TimeoutError:
+            log.warning("App shutdown 排干后台进程超时，剩余由 atexit 同步强杀兜底")
         bindings = getattr(self, "channel_bindings", None)
         if bindings is not None and hasattr(bindings, "close"):
             bindings.close()

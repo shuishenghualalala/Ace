@@ -45,6 +45,8 @@ from crew.security.launch import (
 from crew.security.models import serialize_additional_permissions
 from crew.security.process_lifecycle import (
     ProcessOwner,
+    register_live,
+    release_live,
     scope_alive,
     wrap_argv_for_containment,
 )
@@ -334,6 +336,7 @@ class ProcessRegistry:
         session.pid = proc.pid
         session.scope_unit = scope_unit
         session._owner = ProcessOwner.capture(proc, scope_unit=scope_unit or None)
+        register_live(session._owner)
 
         with self._lock:
             self._prune_if_needed()
@@ -499,6 +502,7 @@ class ProcessRegistry:
         session.pid = proc.pid
         session.scope_unit = scope_unit
         session._owner = ProcessOwner.capture(proc, scope_unit=scope_unit or None)
+        register_live(session._owner)
         with self._lock:
             self._prune_if_needed()
             self._running[session.id] = session
@@ -675,6 +679,8 @@ class ProcessRegistry:
             session.exit_code = session.process.returncode
             self._audit_process_result(session)
             self._move_to_finished(session)
+            # 句柄完全结算（输出落地 + 审计 + 归档）后才移出 live set
+            release_live(session._owner)
 
     @staticmethod
     def _audit_process_result(session: ProcessSession) -> None:
@@ -852,6 +858,7 @@ class ProcessRegistry:
                 return session
             session.exited = True
             session.exit_code = None  # 无句柄可 wait，真实退出码不可得
+        release_live(session._owner)
         self._move_to_finished(session)
         return session
 
@@ -942,6 +949,7 @@ class ProcessRegistry:
                 # 崩溃恢复认领的进程已死：按退出结算
                 session.exited = True
                 session.exit_code = None
+                release_live(session._owner)
                 self._move_to_finished(session)
                 return {"status": "already_exited", "exit_code": None}
             owner = session._owner or ProcessOwner.for_pid(
@@ -1081,6 +1089,7 @@ class ProcessRegistry:
                 output_ref=entry.get("output_ref", ""),
                 _owner=ProcessOwner.for_pid(pid or 0, scope_unit=scope_unit or None),
             )
+            register_live(session._owner)
             with self._lock:
                 self._running[session.id] = session
             recovered += 1
