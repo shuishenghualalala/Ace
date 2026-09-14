@@ -609,7 +609,7 @@ class SingleAgent(Agent):
         session_token = current_session_id.set(session_id)
         workspace_token = current_workspace_id.set(envelope.workspace_id)
         try:
-            history = self.session_store.load(session_id, owner_account_id=owner)
+            history = await self.session_store.load_async(session_id, owner_account_id=owner)
             context_messages = await self._contribute_prompt_context(envelope)
             system_static, user_reminder = await self._build_prompts(
                 envelope, [], cwd, task_sid=session_id
@@ -747,7 +747,7 @@ class SingleAgent(Agent):
 
         t = time.perf_counter()
         owner = envelope.user_id
-        history = self.session_store.load(sid, owner_account_id=owner)
+        history = await self.session_store.load_async(sid, owner_account_id=owner)
         # usage 只代表最近一次 Provider 请求；新回合开始时先清掉旧值，
         # 否则在本回合尚未收到 usage 时，UI 会把上一回合的真实值误认为当前值。
         clear_prompt_usage = getattr(self.session_store, "clear_prompt_usage", None)
@@ -783,7 +783,7 @@ class SingleAgent(Agent):
             # 由 finally 块调度（见下方 _spawn_title_task 调用），不抢占主推理窗口。
             if not self._session_needs_title(task_sid, owner):
                 try:
-                    self.session_store.save(
+                    await self.session_store.save_async(
                         task_sid,
                         history,
                         workspace_id=envelope.workspace_id,
@@ -1341,7 +1341,7 @@ class SingleAgent(Agent):
 
         无论本轮是正常结束、被硬停（CancelledError）还是异常，都会调用，保证
         user 消息与已完成的工具调用一定落库（否则停止后刷新即丢、下一轮无上下文）。
-        持久化用同步 session_store.save（不可被取消打断）；memory.write 用 shield
+        持久化用 save_async（线程池执行，同样不可被取消打断）；memory.write 用 shield
         兜底，被取消时 best-effort。子 agent（lightweight）用完即弃，不落库不写记忆。
         session_store 按 sidechain 的 session_id 存（transcript 隔离机制，不能改）；
         memory 按 task_sid（稳定主会话 id）存，否则会落到 ::turn:: 临时 id 下。
@@ -1409,7 +1409,7 @@ class SingleAgent(Agent):
                 # title_fallback：enable_title=True 时留空占位，等下方 generate_session_title
                 # 生成摘要后由 set_title 写入；否则保留旧行为（首条 user 消息截断作标题）。
                 # 避免「先 save 写入截断用户原话 → 摘要生成失败 → 标题永久停在原话」。
-                self.session_store.save(
+                await self.session_store.save_async(
                     sid,
                     history,
                     workspace_id=envelope.workspace_id,

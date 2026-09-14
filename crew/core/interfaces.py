@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -234,6 +235,33 @@ class SessionStore(ABC):
           request_view，后者表示按本次实际发送视图（system/message/tools）计算。
         """
         ...
+
+    async def load_async(self, session_id: str, *, owner_account_id: str) -> list[Message]:
+        """异步读路径：同步实现的 store 默认在线程池执行，不阻塞事件循环。"""
+        return await asyncio.to_thread(self.load, session_id, owner_account_id=owner_account_id)
+
+    async def save_async(
+        self,
+        session_id: str,
+        messages: list[Message],
+        workspace_id: str = "default",
+        *,
+        owner_account_id: str,
+        title_fallback: str | None = None,
+        last_prompt_tokens: int | None = None,
+        last_prompt_tokens_source: str | None = None,
+    ) -> None:
+        """异步写路径：同步实现的 store 默认在线程池执行，不阻塞事件循环。"""
+        await asyncio.to_thread(
+            self.save,
+            session_id,
+            messages,
+            workspace_id=workspace_id,
+            owner_account_id=owner_account_id,
+            title_fallback=title_fallback,
+            last_prompt_tokens=last_prompt_tokens,
+            last_prompt_tokens_source=last_prompt_tokens_source,
+        )
 
     @abstractmethod
     def clear_prompt_usage(self, session_id: str, owner_account_id: str) -> None:

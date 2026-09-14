@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -287,17 +288,17 @@ class SQLiteSessionStore(SessionStore):
             ).fetchall()
         return [(str(row[0]), self._load(row[1])) for row in rows]
 
-    def save(
+    def _save_write(
         self,
         session_id: str,
         messages: list[Message],
-        workspace_id: str = "default",
+        workspace_id: str,
         *,
         owner_account_id: str,
-        title_fallback: str | None = None,
-        last_prompt_tokens: int | None = None,
-        last_prompt_tokens_source: str | None = None,
-    ) -> None:
+        title_fallback: str | None,
+        last_prompt_tokens: int | None,
+        last_prompt_tokens_source: str | None,
+    ) -> Callable[[Any], None]:
         now = time.time()
         # title_fallback=None 保持旧行为（首条 user 消息截断），兼容未传该参数的调用方；
         # title_fallback="" 显式留空占位，等 set_title 写入摘要标题（enable_title=True 时
@@ -341,7 +342,56 @@ class SQLiteSessionStore(SessionStore):
                     last_prompt_tokens_source,
                 ),
             )
-        self._writer.execute(_write)
+        return _write
+
+    def save(
+        self,
+        session_id: str,
+        messages: list[Message],
+        workspace_id: str = "default",
+        *,
+        owner_account_id: str,
+        title_fallback: str | None = None,
+        last_prompt_tokens: int | None = None,
+        last_prompt_tokens_source: str | None = None,
+    ) -> None:
+        self._writer.execute(
+            self._save_write(
+                session_id,
+                messages,
+                workspace_id,
+                owner_account_id=owner_account_id,
+                title_fallback=title_fallback,
+                last_prompt_tokens=last_prompt_tokens,
+                last_prompt_tokens_source=last_prompt_tokens_source,
+            )
+        )
+
+    async def save_async(
+        self,
+        session_id: str,
+        messages: list[Message],
+        workspace_id: str = "default",
+        *,
+        owner_account_id: str,
+        title_fallback: str | None = None,
+        last_prompt_tokens: int | None = None,
+        last_prompt_tokens_source: str | None = None,
+    ) -> None:
+        await self._writer.execute_async(
+            self._save_write(
+                session_id,
+                messages,
+                workspace_id,
+                owner_account_id=owner_account_id,
+                title_fallback=title_fallback,
+                last_prompt_tokens=last_prompt_tokens,
+                last_prompt_tokens_source=last_prompt_tokens_source,
+            )
+        )
+
+    async def load_async(self, session_id: str, *, owner_account_id: str) -> list[Message]:
+        return await asyncio.to_thread(self.load, session_id, owner_account_id=owner_account_id)
 
     def clear_prompt_usage(self, session_id: str, owner_account_id: str) -> None:
         """清除上一轮 Provider usage，避免新回合暂未返回 usage 时显示旧值。"""
