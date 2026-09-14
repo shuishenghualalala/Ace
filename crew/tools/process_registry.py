@@ -84,6 +84,7 @@ MAX_OUTPUT_CHARS = 200_000      # 200KB 滚动输出缓冲
 FINISHED_TTL_SECONDS = 1800     # 已结束进程保留 30 分钟
 MAX_PROCESSES = 64              # 最大并发跟踪进程数（超出按最旧 LRU 淘汰）
 MAX_PENDING_PER_SESSION = 20    # 每 session 待注入通知上限，防无限堆积
+_MAX_STDIN_WRITE_CHARS = 1_000_000  # 单次 stdin 批量写入上限（半交互喂入）
 
 # ---- watch_patterns 限流（单 session）----
 # 硬规则：每 WATCH_MIN_INTERVAL_SECONDS 至多发一条 watch 命中通知。冷却窗口内到达的
@@ -328,7 +329,7 @@ class ProcessRegistry:
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,  # 半交互（sudo -S 等）：经 write_stdin 批量写入
             preexec_fn=None if _IS_WINDOWS else os.setsid,  # 自成进程组，便于整树 kill
             # Windows 进程组仍共享父控制台；taskkill /T /F 可能把控制信号回传给
             # Gateway。后台 shell 无交互控制台需求，创建无窗口独立进程组才能安全整树终止。
@@ -967,6 +968,50 @@ class ProcessRegistry:
         except Exception as exc:  # noqa: BLE001
             return {"status": "error", "error": str(exc)}
 
+    def write_stdin(
+        self,
+        session_id: str,
+        chunks: str | list[str],
+        *,
+        owner_account_id: str,
+        close: bool = False,
+    ) -> dict[str, Any]:
+        """向后台进程批量写入 stdin（半交互场景如 sudo -S 喂密码）。
+
+        chunks 为一批按序写入的文本；close=True 写完即关管（EOF）。
+        写入内容不进任何日志/通知（可能含机密）。
+        """
+        session = self.get(session_id, owner_account_id=owner_account_id)
+        if session is None:
+            return {"status": "not_found", "error": f"无此进程: {session_id}"}
+        if isinstance(chunks, str):
+            chunks = [chunks]
+        total = sum(len(chunk) for chunk in chunks)
+        if total > _MAX_STDIN_WRITE_CHARS:
+            return {
+                "status": "error",
+                "error": f"单次写入超限（{total} > {_MAX_STDIN_WRITE_CHARS} 字符）",
+            }
+        if session.exited or session.process is None or session.process.stdin is None:
+            return {"status": "error", "error": "进程已退出或无 stdin 管道"}
+        try:
+            for chunk in chunks:
+                session.process.stdin.write(chunk)
+            session.process.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError) as exc:
+            return {"status": "error", "error": f"stdin 写入失败: {exc}"}
+        if close:
+            try:
+                session.process.stdin.close()
+            except OSError:
+                pass
+        return {
+            "status": "written",
+            "session_id": session.id,
+            "chars": total,
+            "closed": close,
+        }
+
     def list_sessions(self, owner_account_id: str) -> list[dict[str, Any]]:
         with self._lock:
             all_sessions = list(self._running.values()) + list(self._finished.values())
@@ -1183,14 +1228,16 @@ PROCESS_SCHEMA = {
     "description": (
         "管理 terminal(background=true) 启动的后台进程。actions: "
         "'list'（列出全部）、'poll'（查状态+最新输出）、'log'（完整输出，支持分页）、"
-        "'wait'（阻塞至结束或超时）、'kill'（终止）。"
+        "'wait'（阻塞至结束或超时）、'kill'（终止）、'stdin'（批量写入标准输入，"
+        "覆盖 sudo -S 等半交互场景；写完可 close 送出 EOF）。后台进程 stdin 为管道，"
+        "需要输入时必须用本 action 喂入。"
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list", "poll", "log", "wait", "kill"],
+                "enum": ["list", "poll", "log", "wait", "kill", "stdin"],
                 "description": "对后台进程执行的操作",
             },
             "session_id": {
@@ -1211,6 +1258,17 @@ PROCESS_SCHEMA = {
                 "description": "log 操作最多返回行数",
                 "minimum": 1,
             },
+            "input": {
+                "description": "stdin 操作写入的内容：字符串或按序写入的字符串数组",
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}},
+                ],
+            },
+            "close": {
+                "type": "boolean",
+                "description": "stdin 操作写完即关闭管道（送出 EOF），默认 false",
+            },
         },
         "required": ["action"],
     },
@@ -1229,8 +1287,8 @@ def _handle_process(args: dict[str, Any]) -> str:
             {"processes": process_registry.list_sessions(owner_account_id=owner_account_id)},
             ensure_ascii=False,
         )
-    if action not in {"poll", "log", "wait", "kill"}:
-        return tool_error(f"未知 action: {action}。可用: list, poll, log, wait, kill")
+    if action not in {"poll", "log", "wait", "kill", "stdin"}:
+        return tool_error(f"未知 action: {action}。可用: list, poll, log, wait, kill, stdin")
     if not session_id:
         return tool_error(f"{action} 需要 session_id")
     if action == "poll":
@@ -1254,6 +1312,16 @@ def _handle_process(args: dict[str, Any]) -> str:
                 session_id,
                 timeout=args.get("timeout"),
                 owner_account_id=owner_account_id,
+            ),
+            ensure_ascii=False,
+        )
+    if action == "stdin":
+        return json.dumps(
+            process_registry.write_stdin(
+                session_id,
+                args.get("input") or "",
+                owner_account_id=owner_account_id,
+                close=bool(args.get("close", False)),
             ),
             ensure_ascii=False,
         )
