@@ -648,6 +648,8 @@ async def handle_terminal(
             # 阻塞等待 owner 决策：抛/回灌审批请求会让模型复述进正文、且 turn 结束后
             # grant 无人消费（"对话停了"）。批准则继续，拒绝则回干净错误让模型自适应。
             outcome = await security_service.await_decision(approval["request_id"])
+            # 闭合词表：只有显式的批准决策才授权执行；无应答/超时/词表外
+            # 返回值一律归一按拒绝处理（fail-closed）。
             if outcome is None:
                 return json.dumps(
                     {
@@ -657,12 +659,23 @@ async def handle_terminal(
                     },
                     ensure_ascii=False,
                 )
-            if outcome.decision is ApprovalDecision.REJECT:
+            if outcome.decision not in (
+                ApprovalDecision.ONCE,
+                ApprovalDecision.SESSION,
+                ApprovalDecision.ALWAYS,
+            ):
+                rejected = outcome.decision is ApprovalDecision.REJECT
                 return json.dumps(
                     {
                         "success": False,
-                        "error": "用户拒绝了该命令",
-                        "error_code": "approval_rejected",
+                        "error": (
+                            "用户拒绝了该命令"
+                            if rejected
+                            else "审批结果无效，已按拒绝处理"
+                        ),
+                        "error_code": (
+                            "approval_rejected" if rejected else "approval_unavailable"
+                        ),
                     },
                     ensure_ascii=False,
                 )
@@ -717,6 +730,17 @@ async def handle_terminal(
             {"success": False, "error": reason, "error_code": error_code},
             ensure_ascii=False,
         )
+    else:
+        # 审批器不可用（security_service/workspace_store 缺席）：fail-closed，
+        # 拒绝执行而不是退回无审批、无审计的 spawn_local。
+        return json.dumps(
+            {
+                "success": False,
+                "error": "审批服务不可用，已拒绝执行该命令",
+                "error_code": "approval_unavailable",
+            },
+            ensure_ascii=False,
+        )
 
     from crew.core.runctx import (
         current_owner_account_id,
@@ -767,10 +791,10 @@ async def handle_terminal(
         try:
             if runtime is not None and task_id:
                 runtime.mark_running(task_id)
-            spawn = process_registry.spawn_security if launch is not None else process_registry.spawn_local
-            session = spawn(
+            # launch 恒非 None：走到这里必然经过了上面的授权路径。
+            session = process_registry.spawn_security(
                 command,
-                **({"launch": launch} if launch is not None else {}),
+                launch=launch,
                 cwd=cwd,
                 session_key=current_session_id.get(),
                 owner_account_id=owner,
@@ -806,10 +830,9 @@ async def handle_terminal(
     # foreground command is reclassified in place; it is never restarted.
     if runtime is not None and task_id:
         runtime.mark_running(task_id)
-    spawn = process_registry.spawn_security if launch is not None else process_registry.spawn_local
-    session = spawn(
+    session = process_registry.spawn_security(
         command,
-        **({"launch": launch} if launch is not None else {}),
+        launch=launch,
         cwd=cwd,
         session_key=current_session_id.get(),
         owner_account_id=owner,
