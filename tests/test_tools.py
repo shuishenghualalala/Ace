@@ -2,12 +2,56 @@
 
 import base64
 import json
+from pathlib import Path
 
 import pytest
 
 from crew.core.runctx import current_agent_workdir
 from crew.core.types import ToolCall
 from crew.tools.registry import FunctionTool, Registry, register_builtin_tools, tool_result
+
+
+class _FullAccessService:
+    """最小授权服务桩：FULL_ACCESS 模式下 authorize 直接放行。
+
+    F2 fail-closed 后 terminal 工具要求审批链路可用；本文件 terminal 用例
+    聚焦命令执行行为本身，用 FULL_ACCESS 桩接通审批路径（危险命令仍被
+    terminal_guard 策略拦截，不经授权）。
+    """
+
+    db_path = Path("crew.db")
+    audit = None
+
+    @staticmethod
+    def mode_for(_context):
+        from crew.security.models import ConversationPermissionMode
+
+        return ConversationPermissionMode.FULL_ACCESS
+
+    @staticmethod
+    def authorize_exec_action(*_args, **_kwargs):
+        return True, None
+
+
+def _terminal_registry(monkeypatch, tmp_path):
+    """接通审批链路的注册表：安全上下文与基准目录固定在 tmp_path。"""
+    from crew.security.context import SecurityContext
+
+    context = SecurityContext(
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+        workspace_root=tmp_path,
+        session_id="session-a",
+        request_id="request-a",
+        task_id="",
+        cwd=tmp_path,
+    )
+    monkeypatch.setattr("crew.security.context.build_security_context", lambda _store: context)
+    monkeypatch.setattr("crew.tools.builtin._resolve_base_dir", lambda: tmp_path)
+    r = Registry()
+    register_builtin_tools(r, workspace_store=object(), security_service=_FullAccessService())
+    return r
 
 
 @pytest.fixture
@@ -36,7 +80,8 @@ def _isolate_task_runtime():
         process_registry._task_runtime = saved
 
 
-async def test_terminal_tool_executes(registry):
+async def test_terminal_tool_executes(monkeypatch, tmp_path):
+    registry = _terminal_registry(monkeypatch, tmp_path)
     tc = ToolCall(id="c1", name="terminal", arguments={"command": "echo hi-crew"})
     result = await registry.execute(tc)
     assert not result.is_error
@@ -157,7 +202,8 @@ async def test_builtin_file_tools_resolve_relative_paths_from_agent_workdir(regi
         current_agent_workdir.reset(token)
 
 
-async def test_terminal_runs_inside_agent_workdir(registry, tmp_path):
+async def test_terminal_runs_inside_agent_workdir(monkeypatch, tmp_path):
+    registry = _terminal_registry(monkeypatch, tmp_path)
     token = current_agent_workdir.set(str(tmp_path))
     try:
         # 输出重定向（>）现需宿主审批（terminal_guard），用 pwd stdout 验证 cwd。
@@ -564,7 +610,8 @@ async def test_terminal_dangerous_command_with_force(registry, tmp_path):
         current_agent_workdir.reset(token)
 
 
-async def test_terminal_background(registry, tmp_path):
+async def test_terminal_background(monkeypatch, tmp_path):
+    registry = _terminal_registry(monkeypatch, tmp_path)
     token = current_agent_workdir.set(str(tmp_path))
     try:
         r = await registry.execute(ToolCall("c1", "terminal", {"command": "sleep 0.1", "background": True}))
@@ -907,7 +954,8 @@ def test_redact_sensitive_text_masks_secrets():
     assert redact_sensitive_text("hello world") == "hello world"
 
 
-async def test_terminal_output_is_cleaned_and_redacted(registry, tmp_path):
+async def test_terminal_output_is_cleaned_and_redacted(monkeypatch, tmp_path):
+    registry = _terminal_registry(monkeypatch, tmp_path)
     token = current_agent_workdir.set(str(tmp_path))
     try:
         # 输出里同时含 ANSI 颜色码和一个 key
