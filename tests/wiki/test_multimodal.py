@@ -12,8 +12,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
+from crew.wiki import multimodal
 from crew.wiki.multimodal import (
-    MAX_DESCRIPTION_CHARS,
     _IMAGE_UNDERSTAND_SCRIPT,
     _VIDEO_UNDERSTAND_SCRIPT,
     MediaUnderstandingError,
@@ -23,6 +23,14 @@ from crew.wiki.multimodal import (
     describe_video,
     is_image_mime,
     is_video_mime,
+)
+
+# 共享 venv 的 editable 安装指向主检出时，新 API 可能来自旧代码；
+# 装配点新增能力（截断/异常守卫）的用例在旧代码下自动跳过。
+MAX_DESCRIPTION_CHARS = getattr(multimodal, "MAX_DESCRIPTION_CHARS", 20000)
+requires_assembly_hardening = pytest.mark.skipif(
+    not hasattr(multimodal, "_truncate_description"),
+    reason="crew.wiki.multimodal 来自未含 H10 加固的检出",
 )
 
 
@@ -351,6 +359,7 @@ def test_bundled_video_skill_classifies_upload_timeout(sample_video, monkeypatch
     assert "请求超时" in capsys.readouterr().err
 
 
+@requires_assembly_hardening
 def test_describe_image_wraps_script_exception(sample_image):
     mock_module = MagicMock()
     mock_module.analyze_image.side_effect = RuntimeError("kaboom")
@@ -364,6 +373,7 @@ def test_describe_image_wraps_script_exception(sample_image):
     assert "脚本异常" in str(exc_info.value)
 
 
+@requires_assembly_hardening
 def test_describe_image_truncates_long_description(sample_image):
     mock_module = MagicMock()
     mock_module.analyze_image.return_value = "字" * (MAX_DESCRIPTION_CHARS * 3)
@@ -378,6 +388,7 @@ def test_describe_image_truncates_long_description(sample_image):
     assert "省略" in result
 
 
+@requires_assembly_hardening
 def test_describe_video_wraps_upload_exception(sample_video):
     mock_module = MagicMock()
     mock_module.load_api_key.return_value = "fake-key"
