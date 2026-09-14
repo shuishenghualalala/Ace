@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from pathlib import Path
@@ -76,8 +77,12 @@ class SQLiteMemory(MemoryProvider):
             "SELECT text FROM memory WHERE owner_account_id = ? AND session_id = ? "
             f"AND ({like_clauses}) ORDER BY ts DESC LIMIT ?"
         )
-        with self._lock:
-            rows = self._conn.execute(sql, [*params, self._top_k]).fetchall()
+
+        def _query():
+            with self._lock:
+                return self._conn.execute(sql, [*params, self._top_k]).fetchall()
+
+        rows = await asyncio.to_thread(_query)
         return "\n".join(f"- {r[0]}" for r in rows)
 
     async def write(self, session_id: str, messages: list[Message]) -> None:
@@ -92,7 +97,7 @@ class SQLiteMemory(MemoryProvider):
                 "INSERT INTO memory (owner_account_id, session_id, text, ts) VALUES (?, ?, ?, ?)",
                 (owner, session_id, users[-1], time.time()),
             )
-        self._writer.execute(_write)
+        await self._writer.execute_async(_write)
 
     async def delete(self, session_id: str, owner_account_id: str | None = None) -> None:
         """删除某会话的全部记忆行，避免删会话后库膨胀。"""
@@ -108,4 +113,4 @@ class SQLiteMemory(MemoryProvider):
                 (owner, session_id),
             )
 
-        self._writer.execute(_write)
+        await self._writer.execute_async(_write)
