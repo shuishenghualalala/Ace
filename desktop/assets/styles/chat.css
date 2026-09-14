@@ -756,9 +756,9 @@ button.chat-message-file:hover {
     background: var(--mw-bg-selected);
     color: var(--mw-text-primary);
     border: 1px solid var(--mw-border-subtle);
-    border-radius: var(--mw-radius-1);
-    padding: 1px var(--mw-space-1);
-    font-size: var(--mw-type-caption-size);
+    border-radius: var(--mw-radius-2);
+    padding: 1px 5px;
+    font-size: 0.85em;
 }
 
 .chat-markdown .chat-md-code {

@@ -453,6 +453,42 @@ describe('thinkingReducer', () => {
     expect(r.replaceBook?.firstChunkAt).toBe(5_000);
     expect(r.replaceBook?.assistantId).toBe(assistantId);
   });
+
+  it('首个 thinking 帧记录 thinkingStartedAt，后续帧不重置', () => {
+    const assistantId = 'm-thinking-clock';
+    const snap = makeSnapshot({
+      now: 5_000,
+      messages: [{
+        id: assistantId,
+        role: 'assistant',
+        content: '',
+        timestamp: 1_000,
+        streaming: true,
+      }],
+      book: { ...emptyBook(), assistantId },
+    });
+    const first = thinkingReducer({ kind: 'thinking', body: { text: '先' }, sequence: 1 }, snap);
+    expect(first.messageUpserts[0]?.patch?.thinkingStartedAt).toBe(5_000);
+
+    const second = thinkingReducer(
+      { kind: 'thinking', body: { text: '再想' }, sequence: 2 },
+      makeSnapshot({
+        now: 8_000,
+        messages: [{
+          id: assistantId,
+          role: 'assistant',
+          content: '',
+          timestamp: 1_000,
+          streaming: true,
+          thinking: '先',
+          thinkingStartedAt: 5_000,
+        }],
+        book: { ...emptyBook(), assistantId },
+      }),
+    );
+    expect(second.messageUpserts[0]?.patch?.thinking).toBe('先再想');
+    expect(second.messageUpserts[0]?.patch?.thinkingStartedAt).toBeUndefined();
+  });
 });
 
 describe('toolReducer', () => {
@@ -810,6 +846,40 @@ describe('finalReducer', () => {
   it('uses final content when accumulated text is likely reordered', () => {
     expect(resolveFinalContent('lohel', 'hello')).toBe('hello');
   });
+
+  it('封口时结算 thinkingDurationMs（依据首个 thinking 帧起点）', () => {
+    const assistantId = 'm-thinking-final';
+    const messages: ChatMessage[] = [{
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      timestamp: 1000,
+      streaming: true,
+      turnStartedAt: 1000,
+      thinking: '推理过程',
+      thinkingStartedAt: 1200,
+    }];
+    const snap = makeSnapshot({ messages, book: { ...emptyBook(), assistantId, firstChunkAt: 1200 } });
+    const r = finalReducer({ kind: 'final', body: { text: '答案' }, sequence: 99 }, { ...snap, now: 5000 });
+    const patch = r.messageUpserts.find((u) => u.op === 'patch' && u.messageId === assistantId);
+    expect(patch && patch.op === 'patch' ? patch.patch.thinkingDurationMs : undefined).toBe(3800);
+  });
+
+  it('无 thinking 内容或已结算时不写 thinkingDurationMs', () => {
+    const assistantId = 'm-no-thinking';
+    const messages: ChatMessage[] = [{
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      timestamp: 1000,
+      streaming: true,
+      turnStartedAt: 1000,
+    }];
+    const snap = makeSnapshot({ messages, book: { ...emptyBook(), assistantId, firstChunkAt: 1100 } });
+    const r = finalReducer({ kind: 'final', body: { text: '答案' }, sequence: 99 }, { ...snap, now: 1500 });
+    const patch = r.messageUpserts.find((u) => u.op === 'patch' && u.messageId === assistantId);
+    expect(patch && patch.op === 'patch' ? patch.patch.thinkingDurationMs : undefined).toBeUndefined();
+  });
 });
 
 describe('errorReducer', () => {
@@ -825,6 +895,24 @@ describe('errorReducer', () => {
     expect(patch && patch.op === 'patch' ? patch.patch.timestamp : undefined).toBe(200);
     expect(patch && patch.op === 'patch' ? patch.patch.streaming : undefined).toBe(false);
     expect(r.messageUpserts.some((u) => u.op === 'append' && u.message?.role === 'error')).toBe(true);
+  });
+
+  it('出错封口同样结算 thinkingDurationMs', () => {
+    const assistantId = 'm-thinking-error';
+    const messages: ChatMessage[] = [{
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      timestamp: 100,
+      streaming: true,
+      turnStartedAt: 100,
+      thinking: '推理到一半',
+      thinkingStartedAt: 120,
+    }];
+    const snap = makeSnapshot({ messages, book: { ...emptyBook(), assistantId, firstChunkAt: 120 } });
+    const r = errorReducer({ kind: 'error', body: { message: 'boom' }, sequence: 5 }, { ...snap, now: 500 });
+    const patch = r.messageUpserts.find((u) => u.op === 'patch' && u.messageId === assistantId);
+    expect(patch && patch.op === 'patch' ? patch.patch.thinkingDurationMs : undefined).toBe(380);
   });
 });
 

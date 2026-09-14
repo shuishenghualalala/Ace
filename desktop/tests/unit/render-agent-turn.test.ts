@@ -14,6 +14,7 @@ import {
   toolIconKind,
   type ChatMessage,
 } from '../../src/ui/chat-render';
+import { setLocale } from '../../src/ui/lib/i18n';
 
 function makeMessages(overrides: Partial<ChatMessage> = {}): ChatMessage[] {
   return [
@@ -355,7 +356,7 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('.team-internal__bubble')).toBeNull();
   });
 
-  it('已完成回合保留「已思考」入口且有正文时默认折叠过程区', () => {
+  it('已完成回合保留「已工作」计时头且有正文时默认折叠过程区', () => {
     const root = renderAgentTurn(makeMessages(), {
       isStreaming: false,
       userPinnedOpen: null,
@@ -363,8 +364,8 @@ describe('renderAgentTurn', () => {
     });
     const html = root.outerHTML;
     const details = root.querySelector('details.msg__foldable');
-    expect(html).toContain('已思考 5s');
-    expect(root.querySelector('.msg__fold-label')?.textContent).toBe('已思考 5s');
+    expect(html).toContain('已工作 5 秒');
+    expect(root.querySelector('.msg__fold-label')?.textContent).toBe('已工作 5 秒');
     expect(html).not.toContain('正在执行');
     expect(html).not.toContain('msg__fold-spinner');
     expect(details).not.toBeNull();
@@ -373,7 +374,42 @@ describe('renderAgentTurn', () => {
     expect(details?.classList.contains('msg__foldable--live')).toBe(false);
   });
 
-  it('thinking 渲染为时间线项，完成后默认收起', () => {
+  it('回合顶部计时头是独立 summary 头：文案 + chevron，live 态不带 spinner 类区分', () => {
+    const done = renderAgentTurn(makeMessages(), {
+      isStreaming: false,
+      userPinnedOpen: null,
+      turnDurationMs: 5_000,
+    });
+    const header = done.querySelector('summary.msg__turn-header');
+    expect(header).not.toBeNull();
+    expect(header?.querySelector('.msg__fold-caret')).not.toBeNull();
+    expect(header?.classList.contains('msg__fold-summary--live')).toBe(false);
+
+    const live = renderAgentTurn(makeMessages({ streaming: true, content: '' }), {
+      isStreaming: true,
+      userPinnedOpen: null,
+      turnDurationMs: 5_000,
+    });
+    const liveHeader = live.querySelector('summary.msg__turn-header');
+    expect(liveHeader?.classList.contains('msg__fold-summary--live')).toBe(true);
+    expect(liveHeader?.querySelector('.msg__fold-spinner')).not.toBeNull();
+  });
+
+  it('英文界面下计时头显示 Worked …', () => {
+    setLocale('en');
+    try {
+      const root = renderAgentTurn(makeMessages(), {
+        isStreaming: false,
+        userPinnedOpen: null,
+        turnDurationMs: 622_000,
+      });
+      expect(root.querySelector('.msg__fold-label')?.textContent).toBe('Worked 10m 22s');
+    } finally {
+      setLocale('zh-CN');
+    }
+  });
+
+  it('thinking 渲染为时间线项，完成后默认收起且时长未知时显示「持续了几秒」', () => {
     const root = renderAgentTurn(makeMessages(), {
       isStreaming: false,
       userPinnedOpen: true,
@@ -385,11 +421,21 @@ describe('renderAgentTurn', () => {
     expect(item).not.toBeNull();
     const details = item?.querySelector('details.process-timeline__details');
     expect(details?.open).toBe(false);
-    expect(item?.querySelector('.process-timeline__title')?.textContent).toBe('思考已完成');
+    expect(item?.querySelector('.process-timeline__title')?.textContent).toBe('思考 · 持续了几秒');
     expect(item?.querySelector('.process-timeline__thinking')?.textContent).toBe('思考过程内容');
   });
 
-  it('流式思考中时间线项默认展开且标题为「思考中」', () => {
+  it('thinking 时长 ≥3 秒时标题显示「持续了 N 秒」', () => {
+    const root = renderAgentTurn(makeMessages({ thinkingStartedAt: 1_700_000_000_000, thinkingDurationMs: 5_400 }), {
+      isStreaming: false,
+      userPinnedOpen: true,
+      turnDurationMs: 9_000,
+    });
+    const item = root.querySelector('.process-timeline__item[data-thinking-for]');
+    expect(item?.querySelector('.process-timeline__title')?.textContent).toBe('思考 · 持续了 5 秒');
+  });
+
+  it('流式思考中时间线项默认展开且标题为「持续了几秒」', () => {
     const root = renderAgentTurn(makeMessages({ streaming: true, content: '' }), {
       isStreaming: true,
       userPinnedOpen: null,
@@ -397,8 +443,19 @@ describe('renderAgentTurn', () => {
     });
     const item = root.querySelector('.process-timeline__item[data-thinking-for]');
     expect(item?.querySelector('details.process-timeline__details')?.open).toBe(true);
-    expect(item?.querySelector('.process-timeline__title')?.textContent).toBe('思考中');
+    expect(item?.querySelector('.process-timeline__title')?.textContent).toBe('思考 · 持续了几秒');
     expect(item?.querySelector('.process-timeline__icon--running')).not.toBeNull();
+  });
+
+  it('正文落到同一条消息后思考块视为结束，不再保持展开态', () => {
+    const root = renderAgentTurn(
+      makeMessages({ streaming: true, content: '边想边说', thinkingDurationMs: 5_000 }),
+      { isStreaming: true, userPinnedOpen: null, turnDurationMs: 3_000 },
+    );
+    const item = root.querySelector('.process-timeline__item[data-thinking-for]');
+    expect(item?.querySelector('details.process-timeline__details')?.open).toBe(false);
+    expect(item?.querySelector('.process-timeline__title')?.textContent).toBe('思考 · 持续了 5 秒');
+    expect(item?.querySelector('.process-timeline__icon--running')).toBeNull();
   });
 
   it('已完成用户手动展开时保持展开', () => {
@@ -410,7 +467,7 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('details.msg__foldable')?.open).toBe(true);
   });
 
-  it('执行中（isStreaming=true）有过程内容时显示「正在执行」+ 已等待时间 + spinner 且默认展开', () => {
+  it('执行中（isStreaming=true）有过程内容时显示「已工作」计时 + spinner 且默认展开', () => {
     const root = renderAgentTurn(makeMessages({ streaming: true, content: '' }), {
       isStreaming: true,
       userPinnedOpen: null,
@@ -418,7 +475,7 @@ describe('renderAgentTurn', () => {
     });
     const html = root.outerHTML;
     const details = root.querySelector('details.msg__foldable');
-    expect(html).toContain('正在执行 · 已等待 3s');
+    expect(html).toContain('已工作 3 秒');
     expect(html).not.toContain('正在思考');
     expect(html).not.toContain('已处理');
     expect(html).toContain('msg__fold-spinner');
@@ -427,7 +484,7 @@ describe('renderAgentTurn', () => {
     expect(details?.open).toBe(true);
   });
 
-  it('发送后尚无过程内容时显示「正在思考」折叠条（乐观占位）', () => {
+  it('发送后尚无过程内容时显示「已工作」计时头（乐观占位）', () => {
     const root = renderAgentTurn(
       [{
         id: 'turn-optimistic',
@@ -445,12 +502,12 @@ describe('renderAgentTurn', () => {
     );
     const html = root.outerHTML;
     const details = root.querySelector('details.msg__foldable');
-    expect(html).toContain('正在思考 · 已等待 12s');
+    expect(html).toContain('已工作 12 秒');
     expect(html).not.toContain('正在执行');
     expect(html).toContain('msg__fold-spinner');
     expect(details).not.toBeNull();
     expect(details?.open).toBe(true);
-    // 折叠条本身已是活着感，不再叠一层 typing 三点
+    // 计时头本身已是活着感，不再叠一层 typing 三点
     expect(root.querySelector('.typing-inline')).toBeNull();
   });
 
@@ -468,7 +525,7 @@ describe('renderAgentTurn', () => {
     vi.restoreAllMocks();
   });
 
-  it('乐观占位在首个 thinking 到达后文案切到「正在执行」', () => {
+  it('乐观占位在首个 thinking 到达后保持「已工作」计时头', () => {
     const root = renderAgentTurn(
       [{
         id: 'turn-1',
@@ -485,7 +542,7 @@ describe('renderAgentTurn', () => {
         turnDurationMs: 5_000,
       },
     );
-    expect(root.outerHTML).toContain('正在执行 · 已等待 5s');
+    expect(root.outerHTML).toContain('已工作 5 秒');
     expect(root.outerHTML).not.toContain('正在思考');
   });
 
@@ -806,6 +863,7 @@ describe('renderAgentTurn', () => {
     expect(items).toHaveLength(2);
     // 时间线顺序跟随产出时序：旁白项在前、工具项在后。
     expect(items[0]?.querySelector('.process-timeline__narration')).not.toBeNull();
+    expect(items[0]?.classList.contains('process-timeline__item--narration')).toBe(true);
     expect(items[1]?.querySelector('.process-timeline__row--static')).not.toBeNull();
   });
 
@@ -980,7 +1038,7 @@ describe('renderAgentTurn', () => {
     expect(details).not.toBeNull();
     expect(details?.open).toBe(true);
     expect(details?.classList.contains('msg__foldable--live')).toBe(true);
-    expect(root.querySelector('.msg__fold-label')?.textContent).toContain('正在执行');
+    expect(root.querySelector('.msg__fold-label')?.textContent).toContain('已工作');
     expect(root.querySelector('.msg__fold-content')?.textContent).toContain('我来帮你规划');
     expect(root.querySelector('.msg__body > .msg__text')).toBeNull();
   });
@@ -1037,9 +1095,9 @@ describe('renderAgentTurn', () => {
     const activities = Array.from(root.querySelectorAll('.process-timeline__item'))
       .filter((el) => el.textContent?.includes('中…') || el.textContent?.includes('完成…'));
     expect(activities).toHaveLength(0);
-    // 工具项保留、折叠条正常计数
+    // 工具项保留、计时头正常
     expect(root.textContent).toContain('技能列表');
-    expect(root.querySelector('.msg__fold-label')?.textContent).toBe('已执行 17s，已调用 1 个工具');
+    expect(root.querySelector('.msg__fold-label')?.textContent).toBe('已工作 17 秒');
   });
 
   it('工具之间仅含空白的旁白不渲染占位项（时间线保持紧凑）', () => {
@@ -1073,7 +1131,7 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('.msg__body > .msg__text')?.textContent).toContain('写好了。');
   });
 
-  it('完成回合有工具调用时折叠条显示「已执行 Xs，已调用 N 个工具」', () => {
+  it('完成回合有工具调用时计时头仍显示「已工作 X 分 X 秒」（工具数不聚合进头部）', () => {
     const root = renderAgentTurn(
       makeMessages({
         content: '最终回答。',
@@ -1086,11 +1144,11 @@ describe('renderAgentTurn', () => {
       {
         isStreaming: false,
         userPinnedOpen: null,
-        turnDurationMs: 24_000,
+        turnDurationMs: 622_000,
       },
     );
     const label = root.querySelector('.msg__fold-label')?.textContent;
-    expect(label).toBe('已执行 24s，已调用 2 个工具');
+    expect(label).toBe('已工作 10 分 22 秒');
   });
 
   it('多段回合 footer 时间取末段 assistant（完成时间）而非批次首条', () => {

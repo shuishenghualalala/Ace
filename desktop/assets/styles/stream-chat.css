@@ -95,6 +95,17 @@
   word-break: normal;
 }
 
+/* 旁白项通栏：不占 28px 图标列，文字与折叠区外正文顶格对齐；虚线连接也不穿过文字 */
+.process-timeline__item--narration {
+  grid-template-columns: minmax(0, 1fr);
+}
+.process-timeline__item--narration .process-timeline__icon {
+  display: none;
+}
+.process-timeline__item--narration::after {
+  display: none;
+}
+
 /* 旁白/思考块内 markdown 段落去首尾边距，保持时间线紧凑 */
 .process-timeline__narration > :first-child,
 .process-timeline__thinking > :first-child {
@@ -151,9 +162,10 @@
 
 .process-timeline__chevron {
   flex-shrink: 0;
+  display: block;
+  width: 14px;
+  height: 14px;
   color: var(--mw-text-muted);
-  font-size: var(--mw-font-2xl);
-  line-height: 1;
   transition: var(--mw-transition-interactive);
 }
 
@@ -285,10 +297,10 @@
   width: 100%;
   min-width: 0;
   margin-top: var(--mw-space-1);
-  padding: var(--mw-space-2) var(--mw-space-3);
-  border-radius: var(--mw-radius-3);
-  background: var(--mw-bg-subtle);
-  color: var(--mw-text-secondary);
+  padding: var(--mw-space-1) var(--mw-space-3);
+  border-left: 2px solid var(--mw-border-default);
+  border-radius: 0 var(--mw-radius-3) var(--mw-radius-3) 0;
+  color: var(--mw-text-muted);
   font-size: var(--mw-type-caption-size);
   line-height: 1.65;
   white-space: pre-wrap;

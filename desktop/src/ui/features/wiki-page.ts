@@ -43,6 +43,7 @@ import {
 import { $, escapeHtml, notify, state } from '../state';
 import { mountFoldedMarkdown, type FoldedMarkdownHandle } from '../markdown-fold';
 import { showContextMenu, type ContextMenuItem } from '../lib/context-menu';
+import { spriteSymbolRef } from '../lib/sprite-symbol';
 import { showConfirmDialog, showPromptDialog } from '../ui-feedback';
 import { __resetWikiGraphForTest, disposeWikiGraph, invalidateWikiGraph, mountWikiGraph } from './wiki-graph';
 import { mountWikiEditor, type WikiEditorHandle } from './wiki-editor';
@@ -807,7 +808,7 @@ export function __resetWikiViewForTest(): void {
 
 /** 工具栏/标签用线性图标（crew-ui-symbols 雪碧图，风格与全局一致）。 */
 function uiIcon(symbolId: string): string {
-  return `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="./crew-ui-symbols.svg#${symbolId}"></use></svg>`;
+  return `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="${spriteSymbolRef(`./crew-ui-symbols.svg#${symbolId}`)}"></use></svg>`;
 }
 
 function wikiIcon(name: 'folder' | 'caret', size: number): string {

@@ -50,7 +50,7 @@ import {
   finalizeStreamingTurn,
   updateGatewayDot,
 } from './chat-controller';
-import { mapBackendHistoryItem, mergeTeamInternalMessages } from './history-mapping';
+import { mapBackendHistoryItems, mergeTeamInternalMessages } from './history-mapping';
 import { mergeBackendHistory } from './history-merge';
 import { hydrateMissingTurnFileCounts } from './turn-file-counts';
 import { getLastGatewaySequences } from './gateway-sequence';
@@ -194,7 +194,7 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
       renderWorkspaceHistory(openSession);
       return;
     }
-    const history = mergeTeamInternalMessages(items.map((item) => mapBackendHistoryItem(item, sessionId)));
+    const history = mergeTeamInternalMessages(mapBackendHistoryItems(items, sessionId));
     if (st?.last_status === 'failed' && st.last_error) {
       history.push({
         id: newMessageId('error'),

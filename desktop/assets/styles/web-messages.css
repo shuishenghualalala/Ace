@@ -514,6 +514,49 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   gap: var(--mw-space-1);
 }
 
+/* ---------- 回合顶部计时头（已工作 X 分 X 秒 + chevron + 细分隔线） ---------- */
+.chat-messages.web-flow .msg__turn-header {
+  display: flex;
+  align-items: center;
+  gap: var(--mw-space-2);
+  width: 100%;
+  padding: var(--mw-space-1) 0 var(--mw-space-2);
+  margin: 0 0 var(--mw-space-2);
+  border-bottom: 1px solid var(--mw-border-subtle);
+  border-radius: 0;
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-messages.web-flow .msg__foldable > summary.msg__turn-header:hover,
+.chat-messages.web-flow .msg__turn-header:hover {
+  background: transparent;
+  color: var(--mw-text-secondary);
+}
+
+.chat-messages.web-flow .msg__turn-header .msg__fold-label {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.chat-messages.web-flow .msg__turn-header .msg__fold-caret {
+  flex-shrink: 0;
+}
+
+.chat-messages.web-flow .msg__foldable[open] > .msg__turn-header > .msg__fold-caret {
+  transform: rotate(90deg);
+}
+
+.chat-messages.web-flow .msg__turn-header.msg__fold-summary--live {
+  color: var(--mw-text-secondary);
+  font-weight: 500;
+}
+
+.chat-messages.web-flow .msg__turn-header.msg__fold-summary--live .msg__fold-label {
+  color: var(--mw-action-primary);
+}
+
 .chat-messages.web-flow .msg__text {
   max-width: 100%;
   overflow-wrap: anywhere;

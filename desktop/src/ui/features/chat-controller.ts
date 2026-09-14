@@ -21,11 +21,10 @@ import {
   renderEmptyState,
   renderTodoProgressPanelHtml,
   renderWorkEmptyState,
-  resolveLiveFoldLabel,
   resolveTeamTurnFoldLabel,
   resolveTurnDurationMs,
+  resolveTurnHeaderLabel,
   shouldShowTodoPanel,
-  turnHasProcessContent,
 } from '../chat-render';
 import { patchTranscriptMarkdown } from '../components/transcript';
 import { recordTurn } from './usage-tracker';
@@ -484,7 +483,8 @@ function patchStreamingTurnLabel(sid: string, assistantId: string): boolean {
   const labelEl = turnEl.querySelector<HTMLElement>('.msg__fold-label');
   if (!labelEl) return false;
   const durationMs = resolveTurnDurationMs(batch, { isLive: true });
-  labelEl.textContent = resolveLiveFoldLabel(durationMs, turnHasProcessContent(batch));
+  // 顶部计时头统一「已工作 X 分 X 秒」；Liveness 由 spinner + --live 样式表达。
+  labelEl.textContent = resolveTurnHeaderLabel(durationMs);
   return true;
 }
 
