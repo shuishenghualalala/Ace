@@ -2584,6 +2584,8 @@ class CrewApp:
         if bindings is not None and hasattr(bindings, "close"):
             bindings.close()
         self.active_owner.close()
+        # 退出前 flush barrier：先排空安全审计异步队列，再关 store 连接。
+        self.security_service.close()
         self.security_rules.close()
         self.security_audit.close()
         self._close_persistent_stores()
