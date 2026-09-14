@@ -43,9 +43,16 @@ from crew.security.launch import (
     shell_argv,
 )
 from crew.security.models import serialize_additional_permissions
+from crew.security.process_lifecycle import (
+    ProcessOwner,
+    scope_alive,
+    wrap_argv_for_containment,
+)
 from crew.tools.child_env import build_spawn_env
 from crew.tools.output_filters import strip_ansi
 from crew.tools.registry import tool_error
+
+_SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 SessionKey = tuple[str, str]
 
@@ -90,29 +97,11 @@ _WINDOWS_PROCESS_FLAGS = (
 )
 
 
-def terminate_process_tree(pid: int) -> None:
-    """Best-effort terminate one process and its complete child process tree.
-
-    Windows ``Popen.terminate()`` only stops the top-level process, so command
-    chains such as PowerShell → Node → LibreOffice can otherwise leave orphaned
-    children. POSIX processes are started in their own group and terminate as a
-    group; Windows uses ``taskkill /T /F``.
-    """
-    if pid <= 0:
-        return
-    try:
-        if _IS_WINDOWS:
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        else:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError, subprocess.SubprocessError):
-        return
+def _session_alive(session: "ProcessSession") -> bool:
+    """进程是否存活：scope 收容看单元状态，其余看 host PID。"""
+    if session.scope_unit:
+        return scope_alive(session.scope_unit)
+    return _pid_alive(session.pid)
 
 
 def _checkpoint_path() -> Path:
@@ -162,6 +151,7 @@ class ProcessSession:
     pid: int | None = None
     process: subprocess.Popen | None = None
     cwd: str | None = None
+    scope_unit: str = ""                          # linux-scope 收容的 systemd 单元名
     started_at: float = 0.0
     exited: bool = False
     exit_code: int | None = None
@@ -179,6 +169,7 @@ class ProcessSession:
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _reader_thread: threading.Thread | None = field(default=None, repr=False)
     _heartbeat_thread: threading.Thread | None = field(default=None, repr=False)
+    _owner: ProcessOwner | None = field(default=None, repr=False)
     _secret_values: tuple[str, ...] = field(default=(), repr=False)
     task_id: str = ""
     output_ref: str = ""
@@ -289,6 +280,7 @@ class ProcessRegistry:
 
         popen_args: list[str] | str = command
         shell = True
+        scope_unit = ""
         if _IS_WINDOWS:
             # Use PowerShell on Windows so commands run in the same shell family
             # as the desktop/runtime environment; cmd.exe breaks common commands
@@ -317,6 +309,11 @@ class ProcessRegistry:
                 command,
             ]
             shell = False
+        else:
+            # Linux 可用时包进 user systemd scope（整树由 systemd 收容），
+            # 失败回退 setsid 进程组；命令统一为 argv 形式由 wrap 决定。
+            popen_args, scope_unit = wrap_argv_for_containment(["/bin/sh", "-c", command])
+            shell = False
         proc = subprocess.Popen(
             popen_args,
             shell=shell,
@@ -335,6 +332,8 @@ class ProcessRegistry:
         )
         session.process = proc
         session.pid = proc.pid
+        session.scope_unit = scope_unit
+        session._owner = ProcessOwner.capture(proc, scope_unit=scope_unit or None)
 
         with self._lock:
             self._prune_if_needed()
@@ -478,9 +477,13 @@ class ProcessRegistry:
             _security_result_path=result_path, _security_result_nonce=result_nonce,
         )
         flags = _WINDOWS_PROCESS_FLAGS if _IS_WINDOWS else 0
+        scope_unit = ""
+        bridge_argv = [sys.executable, "-I", "-c", _BACKGROUND_BRIDGE_LAUNCHER]
+        if not _IS_WINDOWS:
+            bridge_argv, scope_unit = wrap_argv_for_containment(bridge_argv)
         try:
             proc = subprocess.Popen(
-                [sys.executable, "-I", "-c", _BACKGROUND_BRIDGE_LAUNCHER],
+                bridge_argv,
                 shell=False, text=True, encoding="utf-8", errors="replace", cwd=session.cwd,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 env=build_spawn_env({"PYTHONUNBUFFERED": "1"}),
@@ -494,6 +497,8 @@ class ProcessRegistry:
         proc.stdin.close()
         session.process = proc
         session.pid = proc.pid
+        session.scope_unit = scope_unit
+        session._owner = ProcessOwner.capture(proc, scope_unit=scope_unit or None)
         with self._lock:
             self._prune_if_needed()
             self._running[session.id] = session
@@ -654,7 +659,18 @@ class ProcessRegistry:
             try:
                 session.process.wait(timeout=5)
             except Exception:  # noqa: BLE001
-                pass
+                # 句柄结算超时：TERM 被忽略的树由属主升级到 KILL，再给它一次结算机会。
+                owner = session._owner or (
+                    ProcessOwner.capture(session.process, scope_unit=session.scope_unit or None)
+                    if session.process is not None
+                    else None
+                )
+                if owner is not None and not owner.exited():
+                    owner.signal(_SIGKILL)
+                    try:
+                        session.process.wait(timeout=5)
+                    except Exception:  # noqa: BLE001
+                        pass
             session.exited = True
             session.exit_code = session.process.returncode
             self._audit_process_result(session)
@@ -826,10 +842,10 @@ class ProcessRegistry:
         return session
 
     def _refresh_detached(self, session: ProcessSession | None) -> ProcessSession | None:
-        """崩溃恢复认领的进程没有 Popen 句柄，靠 host PID 存活检测判定是否已退出。"""
+        """崩溃恢复认领的进程没有 Popen 句柄，靠存活检测判定是否已退出。"""
         if session is None or session.exited or not session.detached:
             return session
-        if _pid_alive(session.pid):
+        if _session_alive(session):
             return session
         with session._lock:
             if session.exited:
@@ -915,38 +931,24 @@ class ProcessRegistry:
         }
 
     def kill_process(self, session_id: str, owner_account_id: str) -> dict[str, Any]:
-        """杀掉一个后台进程（含子进程树）。"""
+        """杀掉一个后台进程（含子进程树），统一走 security 的 ProcessOwner。"""
         session = self.get(session_id, owner_account_id=owner_account_id)
         if session is None:
             return {"status": "not_found", "error": f"无此进程: {session_id}"}
         if session.exited:
             return {"status": "already_exited", "exit_code": session.exit_code}
         try:
-            if session.process is not None:
-                if _IS_WINDOWS:
-                    terminate_process_tree(session.process.pid)
-                else:
-                    try:
-                        os.killpg(os.getpgid(session.process.pid), signal.SIGTERM)
-                    except (ProcessLookupError, PermissionError, OSError):
-                        session.process.kill()
-            elif session.detached and session.pid:
-                # 崩溃恢复认领的进程：无 Popen 句柄，按 host PID 杀
-                if not _pid_alive(session.pid):
-                    session.exited = True
-                    session.exit_code = None
-                    self._move_to_finished(session)
-                    return {"status": "already_exited", "exit_code": None}
-                try:
-                    if _IS_WINDOWS:
-                        terminate_process_tree(session.pid)
-                    else:
-                        os.killpg(os.getpgid(session.pid), signal.SIGTERM)
-                except (ProcessLookupError, PermissionError, OSError):
-                    try:
-                        os.kill(session.pid, signal.SIGTERM)
-                    except OSError:
-                        pass
+            if session.detached and not _session_alive(session):
+                # 崩溃恢复认领的进程已死：按退出结算
+                session.exited = True
+                session.exit_code = None
+                self._move_to_finished(session)
+                return {"status": "already_exited", "exit_code": None}
+            owner = session._owner or ProcessOwner.for_pid(
+                session.pid or 0,
+                scope_unit=session.scope_unit or None,
+            )
+            owner.signal(signal.SIGTERM)
             session.exited = True
             session.exit_code = -15  # SIGTERM
             self._move_to_finished(session)
@@ -1023,6 +1025,7 @@ class ProcessRegistry:
                         "watch_patterns": s.watch_patterns,
                         "task_id": s.task_id,
                         "output_ref": s.output_ref,
+                        "scope_unit": s.scope_unit,
                     }
                     for s in self._running.values()
                     if not s.exited and s.pid
@@ -1051,21 +1054,32 @@ class ProcessRegistry:
         recovered = 0
         for entry in entries:
             pid = entry.get("pid")
-            if not pid or not _pid_alive(pid):
+            scope_unit = str(entry.get("scope_unit") or "")
+            probe = ProcessSession(
+                id=entry.get("session_id") or f"proc_{uuid.uuid4().hex[:12]}",
+                command=entry.get("command", "unknown"),
+                pid=pid,
+                scope_unit=scope_unit,
+            )
+            if not pid and not scope_unit:
+                continue
+            if not _session_alive(probe):
                 continue
             session = ProcessSession(
-                id=entry.get("session_id") or f"proc_{uuid.uuid4().hex[:12]}",
+                id=probe.id,
                 command=entry.get("command", "unknown"),
                 session_key=entry.get("session_key", ""),
                 owner_account_id=normalize_owner_account_id(entry.get("owner_account_id")),
                 pid=pid,
                 cwd=entry.get("cwd"),
+                scope_unit=scope_unit,
                 started_at=entry.get("started_at", time.time()),
                 detached=True,
                 notify_on_complete=entry.get("notify_on_complete", False),
                 watch_patterns=entry.get("watch_patterns", []),
                 task_id=entry.get("task_id", ""),
                 output_ref=entry.get("output_ref", ""),
+                _owner=ProcessOwner.for_pid(pid or 0, scope_unit=scope_unit or None),
             )
             with self._lock:
                 self._running[session.id] = session
