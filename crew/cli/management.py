@@ -1198,6 +1198,8 @@ def _register_migrate(subparsers) -> None:
     feature = cmds.add_parser("feature", help="核对 Feature 级 schema 版本")
     feature.add_argument("name", help="Feature 注册名，例如 work")
     feature.set_defaults(handler=_migrate_feature)
+    orphans = cmds.add_parser("orphans", help="扫描主库未被任何归属清单覆盖的表（只读诊断）")
+    orphans.set_defaults(handler=_migrate_orphans)
 
 
 def _claim_legacy(args: Any, ctx: CliContext) -> CliResult:
@@ -1456,6 +1458,17 @@ def _migrate_feature(args: Any, ctx: CliContext) -> CliResult:
         },
         text=text,
     )
+
+
+def _migrate_orphans(args: Any, ctx: CliContext) -> CliResult:
+    from crew.state._migration import orphan_main_db_tables
+
+    orphans = orphan_main_db_tables(ctx.app.config.db_path)
+    if orphans:
+        text = "主库存在未被归属清单覆盖的表: " + "、".join(orphans)
+    else:
+        text = "主库所有表均被归属清单覆盖，无孤儿表。"
+    return CliResult(data={"orphans": orphans}, text=text)
 
 
 __all__ = ["register"]

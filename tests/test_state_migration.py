@@ -4,9 +4,11 @@ from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
 from crew.core.types import Message
 from crew.cron import CronJobStore
 from crew.state._migration import (
+    CORE_MAIN_DB_TABLES,
     claim_legacy_owner_databases,
     inspect_and_backfill_legacy_owners,
     legacy_owner_scan_targets,
+    orphan_main_db_tables,
 )
 from crew.state.session_store import SQLiteSessionStore
 from crew.state.workspace_store import SQLiteWorkspaceStore
@@ -64,3 +66,39 @@ def test_startup_migration_backfills_only_unambiguous_cron_owner(tmp_path):
     assert counts["cron_jobs"] == 0
     assert cron.get(owned_job["id"], owner_account_id="A:uid-a")["owner_account_id"] == "A:uid-a"
     assert cron.get(shared_job["id"], _all_owners=True, owner_account_id="")["owner_account_id"] == LOCAL_OWNER_ACCOUNT_ID
+
+
+def _create_table(conn: sqlite3.Connection, name: str) -> None:
+    conn.execute(f"CREATE TABLE {name} (id TEXT)")
+
+
+def test_orphan_main_db_tables_reports_only_unlisted_tables(tmp_path):
+    db = tmp_path / "crew.db"
+    conn = sqlite3.connect(db)
+    try:
+        _create_table(conn, "sessions")  # OWNER_TABLE_LABELS
+        _create_table(conn, "work_items")  # WORK_DB_TABLES（拆库备份沿用原名）
+        _create_table(conn, "active_owner_lease")  # CORE_MAIN_DB_TABLES
+        _create_table(conn, "work_schema_version")  # *_schema_version 版本表
+        _create_table(conn, "companion_profile")  # 人工未知表
+        # sqlite 内部表（sqlite_stat1）由 ANALYZE 生成，检测器应忽略。
+        conn.execute("CREATE INDEX idx_sessions_id ON sessions(id)")
+        conn.execute("ANALYZE")
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert orphan_main_db_tables(db) == ["companion_profile"]
+
+
+def test_orphan_main_db_tables_empty_when_all_known(tmp_path):
+    db = tmp_path / "crew.db"
+    conn = sqlite3.connect(db)
+    try:
+        for table in ("sessions", "work_items", *CORE_MAIN_DB_TABLES, "work_schema_version"):
+            _create_table(conn, table)
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert orphan_main_db_tables(db) == []

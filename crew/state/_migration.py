@@ -468,3 +468,63 @@ def rebuild_table_pk(
     conn.execute(f"DROP TABLE {table}")
     conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
     return True
+
+
+# 主库中不属于任何 Feature 拆库清单、但由 core 状态模块自建并有意保留的表。
+# 它们不是孤儿：各自 store/模块在构造时 ensure-schema 自建，owner 归一由自身
+# 语义负责（见 plugin_preferences / security / active_owner），不进
+# OWNER_TABLE_LABELS 与 *_DB_TABLES。孤儿表检测必须豁免它们，否则会把 core
+# 状态表误报为未归属。wiki_learning_schema 是 wiki_learning 插件的组件版本表
+# （自管、不参与复制、恒非空），同理豁免。
+CORE_MAIN_DB_TABLES: frozenset[str] = frozenset({
+    "active_owner_lease",
+    "active_owner_logout_intent",
+    "owner_session_lease",
+    "owner_logout_intent",
+    "security_rules",
+    "security_audit_events",
+    "plugin_preferences",
+    "wiki_learning_schema",
+})
+
+# 版本 stamp 表命名约定（schema_version.version_table_name）。
+_SCHEMA_VERSION_SUFFIX = "_schema_version"
+
+
+def orphan_main_db_tables(db_path: str | Path) -> list[str]:
+    """返回主库中未被任何归属清单覆盖的表名（只读诊断）。
+
+    覆盖集 = OWNER_TABLE_LABELS ∪ 全部 *_DB_TABLES（拆库后旧表备份沿用原名，
+    天然被清单覆盖）∪ CORE_MAIN_DB_TABLES ∪ ``*_schema_version`` 版本表；
+    sqlite 内部表（sqlite_sequence / sqlite_stat1 等）一并排除。以 mode=ro
+    打开，只读不建表、不改表、不触发任何迁移/巡检路径。返回排序后的表名列表。
+    """
+
+    known: set[str] = set(OWNER_TABLE_LABELS)
+    known.update(CRON_DB_TABLES)
+    known.update(WORK_DB_TABLES)
+    known.update(KANBAN_DB_TABLES)
+    known.update(EXTERNAL_DB_TABLES)
+    known.update(TEAM_DB_TABLES)
+    known.update(SITES_DB_TABLES)
+    known.update(TASKS_DB_TABLES)
+    known.update(NOTIFICATIONS_DB_TABLES)
+    known.update(CHANNELS_DB_TABLES)
+    known.update(WIKI_LEARNING_DB_TABLES)
+    known.update(CORE_MAIN_DB_TABLES)
+
+    conn = sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    return sorted(
+        name
+        for (name,) in rows
+        if name not in known
+        and not name.startswith("sqlite_")
+        and not name.endswith(_SCHEMA_VERSION_SUFFIX)
+    )

@@ -44,8 +44,8 @@ crew/notifications/  service.py (NotificationCenterService) · store.py (Notific
     ▲ 实现
 crew/core/interfaces.py  Notification dataclass · NotificationCenter ABC
     ▲ publish()            publish()         publish()        publish()
-crew/cron            crew/tasks      crew/security     crew/companion   crew/core      crew/gateway
-scheduler 完成点      app.py 完成回调   approvals 审批     gateway 入站消息   followup 追问  ws plan_review</code></pre>
+crew/cron            crew/tasks      crew/security                crew/core      crew/gateway
+scheduler 完成点      app.py 完成回调   approvals 审批               followup 追问  ws plan_review</code></pre>
 
   <h2>3. 分层职责</h2>
   <table>
@@ -54,7 +54,7 @@ scheduler 完成点      app.py 完成回调   approvals 审批     gateway 入�
       <tr><td>契约</td><td><code>crew/core/interfaces.py</code></td><td><code>Notification</code> dataclass（id/owner/source/kind/title/body/payload/created_at/read_at）与 <code>NotificationCenter</code> ABC：publish / list / unread_count / mark_read / mark_all_read / mark_read_by_payload / clear。</td></tr>
       <tr><td>实现</td><td><code>crew/notifications/store.py</code></td><td>SQLite <code>notifications</code> 表（共享 <code>crew_data/crew.db</code>，走 <code>connect_sqlite</code> + <code>SQLiteWriteHelper</code> 惯例）；insert 同事务内按 (owner, source) 裁剪到最近 200 条；<code>mark_read_by_payload</code> 用 json_each 匹配 payload 顶层值。</td></tr>
       <tr><td>实现</td><td><code>crew/notifications/service.py</code></td><td>实现 ABC；publish 写库后经可选 async <code>push_fn(owner, payload)</code> 广播 <code>{"kind":"notification",...}</code>（fire-and-forget，推送失败只记日志不影响写库）。</td></tr>
-      <tr><td>装配</td><td><code>crew/app.py</code></td><td>构造 service；<code>set_push</code> 时把 <code>notify_owner</code> 延迟注入为 push_fn；向 cron / security 注入回调；tasks 完成回调、companion 入站消息处直接 publish。</td></tr>
+      <tr><td>装配</td><td><code>crew/app.py</code></td><td>构造 service；<code>set_push</code> 时把 <code>notify_owner</code> 延迟注入为 push_fn；向 cron / security 注入回调；tasks 完成回调处直接 publish。</td></tr>
       <tr><td>网关</td><td><code>crew/gateway/routers/notifications.py</code></td><td>REST 面（见第 5 节）。</td></tr>
     </tbody>
   </table>
@@ -86,7 +86,6 @@ scheduler 完成点      app.py 完成回调   approvals 审批     gateway 入�
       <tr><td><code>cron</code></td><td><code>crew/cron/scheduler.py</code> _run_claimed_fire finally</td><td>定时任务执行完成 / 失败</td></tr>
       <tr><td><code>tasks</code></td><td><code>crew/app.py</code> _on_task_completion → _should_notify_task</td><td>agent_turn 回合终态（完成 / 失败 / 超时；cancelled 不通知，中间任务不单独通知）</td></tr>
       <tr><td><code>approval</code></td><td><code>crew/security/service.py</code> request_action / _decide_locked</td><td>新审批到达；决策后按 payload.request_id 自动已读</td></tr>
-      <tr><td><code>companion</code></td><td><code>crew/gateway/routers/companion.py</code> link-state 入站分支</td><td>同伴消息 / 同伴 agent 执行结果</td></tr>
       <tr><td><code>followup</code></td><td><code>crew/core/followup.py</code> send_followup_question_to / FollowupWaiter resolve·cancel·wait</td><td>追问发出（仅 record_history=True，权限 side-channel 不重复通知）；回答 / 取消 / 超时后按 payload.question_id 自动已读。经 <code>set_followup_notification_hooks</code> 注入回调，owner 由 app 侧 session store 反查（<code>resolve_owner_account_id</code>）</td></tr>
       <tr><td><code>plan</code></td><td><code>crew/gateway/ws.py</code> plan_review 帧推送 / plan_* 决策分支</td><td>计划待审批（仅非 empty 的可审批卡片）；批准 / 拒绝 / 退出后按 payload.session_id 自动已读</td></tr>
     </tbody>
