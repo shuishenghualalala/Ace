@@ -211,3 +211,265 @@ async def test_shutdown_cancels_incomplete_start_with_one_total_budget(monkeypat
 
     assert elapsed < 0.1
     assert manager._start_task is None
+
+
+# --------------------------------------------------------------------- #
+# 断线重连 supervisor：指数退避、共享预算、稳定重置、耗尽显式失败
+# --------------------------------------------------------------------- #
+
+
+class _ScriptedSession:
+    """按脚本表现的可编程假 session。
+
+    call_behavior: 每次 call_tool 调用的协程，签名为 async (name) -> result。
+    ping: None=未配置 send_ping；协程则按脚本执行。
+    """
+
+    def __init__(self, tools=("t1",), call_behavior=None, ping=None):
+        self._tools = [SimpleNamespace(name=n, description="", input_schema={}) for n in tools]
+        self._call_behavior = call_behavior
+        self._ping = ping
+
+    async def list_tools(self):
+        return SimpleNamespace(tools=list(self._tools))
+
+    async def call_tool(self, name, _args):
+        if self._call_behavior is None:
+            return SimpleNamespace(
+                content=[SimpleNamespace(text=f"ok:{name}")], is_error=False
+            )
+        return await self._call_behavior(name)
+
+
+async def _dead_call(name):
+    raise RuntimeError(f"boom:{name}")
+
+
+async def _dead_ping():
+    raise ConnectionError("transport lost")
+
+
+async def _ok_call(name):
+    return SimpleNamespace(content=[SimpleNamespace(text=f"ok:{name}")], is_error=False)
+
+
+def _attach_ping(session, ping):
+    session.send_ping = ping
+    return session
+
+
+async def _wait_for(predicate, timeout=5.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("等待条件超时")
+
+
+async def _scripted_worker(monkeypatch, cfg, sessions, delays):
+    """造一个 _open 按脚本吐 session、_sleep 记录退避时长的 worker。"""
+    from crew.tools import mcp_client as mcp_client_module
+
+    worker = _ServerWorker(
+        "flaky",
+        cfg,
+        Registry(),
+        call_timeout=1.0,
+        startup_timeout=0.2,
+    )
+    scripted = list(sessions)
+
+    async def open_scripted(_stack):
+        if not scripted:
+            raise RuntimeError("脚本耗尽：不应再有连接尝试")
+        session = scripted.pop(0)
+        if isinstance(session, Exception):
+            raise session
+        return session
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(worker, "_open", open_scripted)
+    monkeypatch.setattr(mcp_client_module, "_sleep", fake_sleep)
+    return worker
+
+
+@pytest.mark.asyncio
+async def test_reconnect_after_disconnect_with_exponential_backoff(monkeypatch):
+    delays: list[float] = []
+    dying = _attach_ping(_ScriptedSession(call_behavior=_dead_call), _dead_ping)
+    healthy = _ScriptedSession(call_behavior=_ok_call)
+    worker = await _scripted_worker(monkeypatch, {}, [dying, healthy], delays)
+
+    assert await worker.start()
+    first = await worker._make_handler("t1")({})
+    assert "连接已断开" in _error(first)
+
+    await _wait_for(lambda: worker.is_connected)
+    second = await worker._make_handler("t1")({})
+    assert "ok:t1" in second
+    assert delays == [0.5]  # 首次退避 = initial_delay
+    await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_queued_call_survives_reconnect_within_deadline(monkeypatch):
+    delays: list[float] = []
+    dying = _attach_ping(_ScriptedSession(call_behavior=_dead_call), _dead_ping)
+    healthy = _ScriptedSession(call_behavior=_ok_call)
+    worker = await _scripted_worker(monkeypatch, {}, [dying, healthy], delays)
+
+    assert await worker.start()
+    first = asyncio.create_task(worker._make_handler("t1")({}))
+    await _wait_for(lambda: "连接已断开" in (first.done() and _error(first.result()) or ""))
+    # 退避期间发起的调用排队等待，重连成功后在截止时间前被服务。
+    second = asyncio.create_task(worker._make_handler("t1")({}))
+    assert "ok:t1" in await second
+    await first
+    await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaustion_unregisters_tools_and_fails_explicitly(monkeypatch):
+    delays: list[float] = []
+    dying = _attach_ping(_ScriptedSession(call_behavior=_dead_call), _dead_ping)
+    cfg = {"reconnect": {"initial_delay": 0.5, "max_delay": 30.0, "max_attempts": 2}}
+    worker = await _scripted_worker(
+        monkeypatch,
+        cfg,
+        [dying, RuntimeError("still down"), RuntimeError("still down")],
+        delays,
+    )
+    registry = worker.registry
+
+    assert await worker.start()
+    assert "flaky__t1" in registry.names()
+    await worker._make_handler("t1")({})  # 触发断线进入重连循环
+
+    await _wait_for(lambda: worker._task is not None and worker._task.done())
+    assert "flaky__t1" not in registry.names()
+    assert "预算" in worker.error and "重载" in worker.error
+    result = await worker._make_handler("t1")({})
+    assert "连接已放弃" in _error(result)
+    assert delays == [0.5, 1.0]  # 500ms 翻倍；第三次失败超出预算直接放弃
+
+
+@pytest.mark.asyncio
+async def test_stable_uptime_past_max_delay_resets_attempt_budget(monkeypatch):
+    delays: list[float] = []
+    cfg = {
+        "reconnect": {"initial_delay": 0.01, "max_delay": 0.05, "max_attempts": 2},
+        "ping_interval": 0,
+    }
+
+    async def slow_death(name):
+        await asyncio.sleep(0.08)  # 存活超过 max_delay(0.05s) 后才断
+        raise RuntimeError(f"boom:{name}")
+
+    sessions = [
+        _attach_ping(_ScriptedSession(call_behavior=_dead_call), _dead_ping),
+        _attach_ping(_ScriptedSession(call_behavior=slow_death), _dead_ping),
+        _attach_ping(_ScriptedSession(call_behavior=_dead_call), _dead_ping),
+        _attach_ping(_ScriptedSession(call_behavior=_dead_call), _dead_ping),
+        RuntimeError("still down"),
+    ]
+    worker = await _scripted_worker(monkeypatch, cfg, sessions, delays)
+
+    assert await worker.start()
+    for _ in range(4):
+        await worker._make_handler("t1")({})
+
+    await _wait_for(lambda: worker._task is not None and worker._task.done())
+    # 第 2 代连接稳定超窗 → 预算重置：退避序列从头开始，第 4 次断线才耗尽。
+    assert delays == [0.01, 0.01, 0.02]
+    assert "预算" in worker.error
+
+
+@pytest.mark.asyncio
+async def test_fail_on_startup_error_makes_activation_fail(monkeypatch):
+    delays: list[float] = []
+    cfg = {"fail_on_startup_error": True}
+    worker = await _scripted_worker(monkeypatch, cfg, [RuntimeError("refused")], delays)
+
+    assert not await worker.start()
+    assert "refused" in worker.error
+    await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_idle_ping_probe_detects_dead_connection(monkeypatch):
+    delays: list[float] = []
+    cfg = {"ping_interval": 0.02}
+    dead_idle = _attach_ping(_ScriptedSession(call_behavior=_ok_call), _dead_ping)
+    healthy = _ScriptedSession(call_behavior=_ok_call)
+    worker = await _scripted_worker(monkeypatch, cfg, [dead_idle, healthy], delays)
+
+    assert await worker.start()
+    await _wait_for(lambda: worker.is_connected and worker._session is healthy)
+    result = await worker._make_handler("t1")({})
+    assert "ok:t1" in result
+    await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_ping_method_not_found_disables_probe(monkeypatch):
+    delays: list[float] = []
+    cfg = {"ping_interval": 0.02}
+
+    class _McpMethodNotFound(Exception):
+        def __init__(self):
+            super().__init__("Method not found")
+            self.error = SimpleNamespace(code=-32601)
+
+    async def no_ping():
+        raise _McpMethodNotFound()
+
+    session = _attach_ping(_ScriptedSession(call_behavior=_ok_call), no_ping)
+    worker = await _scripted_worker(monkeypatch, cfg, [session], delays)
+
+    assert await worker.start()
+    await asyncio.sleep(0.1)
+    assert worker.is_connected
+    assert worker._ping_supported is False
+    assert worker._session is session  # 未触发无谓重连
+    await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_resync_failure_keeps_last_good_tool_list(monkeypatch):
+    delays: list[float] = []
+    session = _ScriptedSession(tools=("t1",))
+    worker = await _scripted_worker(monkeypatch, {}, [session], delays)
+    assert await worker.start()
+    assert "flaky__t1" in worker.registry.names()
+
+    async def broken_list_tools():
+        raise ConnectionError("gone")
+
+    session.list_tools = broken_list_tools
+    await worker._resync_tools(session)
+    assert worker.tool_names == ["t1"]
+    assert "flaky__t1" in worker.registry.names()
+
+    await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_resync_replaces_tool_list_in_registry(monkeypatch):
+    delays: list[float] = []
+    session = _ScriptedSession(tools=("t1",))
+    worker = await _scripted_worker(monkeypatch, {}, [session], delays)
+    assert await worker.start()
+    assert "flaky__t1" in worker.registry.names()
+
+    session._tools = [SimpleNamespace(name="t2", description="", input_schema={})]
+    await worker._resync_tools(session)
+    assert worker.tool_names == ["t2"]
+    assert "flaky__t2" in worker.registry.names()
+    assert "flaky__t1" not in worker.registry.names()
+
+    await worker.stop()
