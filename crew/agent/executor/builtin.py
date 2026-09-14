@@ -69,6 +69,19 @@ VISION_CAPABILITY_RECOVERY_PROMPT = (
 )
 
 
+def _accepts_prefix_kwargs(fn: Any) -> bool:
+    """探测压缩类回调是否接受 ``system_prompt`` / ``tools`` 关键字。
+
+    executor 注入的 compactor 可能是测试替身或旧实现，签名探测失败时
+    按支持处理，保证生产实现（pipeline.Compactor）能拿到前缀与工具清单。
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return True
+    return "system_prompt" in params and "tools" in params
+
+
 def _without_image_inputs(messages: list[Message]) -> list[Message]:
     """Build a request-only text view while preserving canonical multimodal history."""
     sanitized: list[Message] = []
@@ -493,6 +506,7 @@ class BuiltinExecutor(AgentExecutor):
             if (overflow_mode or overflow_pending) and self.compactor is not None:
                 overflow_pending = False
                 overflow_before = estimate_tokens(view_messages)
+                overflow_count_before = len(view_messages)
                 yield ResponseChunk.compaction_event(rid, True, next_seq())
                 try:
                     from crew.core.runctx import current_owner_account_id
@@ -504,13 +518,11 @@ class BuiltinExecutor(AgentExecutor):
                         accepts_owner = "owner_account_id" in params or any(
                             p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
                         )
-                        accepts_prefix = "system_prompt" in params and "tools" in params
                     except (TypeError, ValueError):
                         accepts_owner = True
-                        accepts_prefix = True
                     if accepts_owner:
                         kwargs["owner_account_id"] = current_owner_account_id.get()
-                    if accepts_prefix:
+                    if _accepts_prefix_kwargs(force_compact):
                         kwargs["system_prompt"] = ctx.system_prompt
                         kwargs["tools"] = original_tools
                     view_messages = await force_compact(ctx.messages, ctx.session_id, **kwargs)
@@ -520,8 +532,10 @@ class BuiltinExecutor(AgentExecutor):
                 finally:
                     yield ResponseChunk.compaction_event(rid, False, next_seq())
                 overflow_after = estimate_tokens(view_messages)
-                if overflow_after >= overflow_before:
-                    # 投影未前进：再发一次同样的请求必然再溢出，不再重试
+                overflow_count_after = len(view_messages)
+                if overflow_after >= overflow_before and overflow_count_after >= overflow_count_before:
+                    # 投影未前进：再发一次同样的请求必然再溢出，不再重试。
+                    # token 估算在极小历史上会退化为 0，用消息数兜底判断。
                     log.warning(
                         "overflow 兜底压缩未使历史投影前进（%d → %d tokens），不再重试 session=%s",
                         overflow_before,
@@ -551,13 +565,16 @@ class BuiltinExecutor(AgentExecutor):
                 if show_compaction:
                     yield ResponseChunk.compaction_event(rid, True, next_seq())
                 try:
+                    compact_kwargs: dict[str, Any] = {}
+                    if _accepts_prefix_kwargs(self.compactor.compact_view):
+                        compact_kwargs["system_prompt"] = ctx.system_prompt
+                        compact_kwargs["tools"] = original_tools
                     view_messages = await self.compactor.compact_view(
                         view_messages,
                         ctx.session_id,
                         owner_account_id=owner_account_id,
                         prompt_overhead_tokens=prompt_overhead_tokens,
-                        system_prompt=ctx.system_prompt,
-                        tools=original_tools,
+                        **compact_kwargs,
                     )
                 finally:
                     if show_compaction:
