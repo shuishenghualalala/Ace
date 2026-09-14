@@ -121,4 +121,4 @@ Thumbs.db
 .doc/
 
 # Mimosa 安全扫描器本地运行数据
-/.mimosa/
+.mimosa/
