@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from crew.core.types import Message
 from crew.core.text_parsing import extract_json_object
+from crew.providers import stream_aux
 
 
 TurnKind = Literal["direct_chat", "status_query", "new_workflow", "uncertain"]
@@ -189,12 +190,13 @@ def new_workflow_decision(
 
 
 async def _chat(provider: Any, messages: list[Message], *, max_tokens: int) -> Any:
-    try:
-        return await provider.chat(messages, tools=None, max_tokens=max_tokens)
-    except TypeError as exc:
-        if "max_tokens" not in str(exc):
-            raise
-        return await provider.chat(messages, tools=None)
+    return await stream_aux(
+        provider,
+        messages,
+        purpose="team-turn-decision",
+        max_tokens=max_tokens,
+        retry=0,
+    )
 
 
 def _json_from_text(text: str) -> dict[str, Any]:

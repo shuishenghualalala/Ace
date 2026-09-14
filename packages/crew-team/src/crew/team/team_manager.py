@@ -52,6 +52,7 @@ from crew.core.interfaces import (
 )
 from crew.core.text_parsing import extract_json_object
 from crew.core.types import Message
+from crew.providers import stream_aux
 from crew.plugins.manager import PluginManager
 from crew.security.launch import use_process_launch
 from crew.state.config import Config
@@ -1501,31 +1502,16 @@ class InProcessTeamManager(TeamManager):
         }
         try:
             provider = self._provider_for_owner(owner_account_id)
-            response = await asyncio.wait_for(
-                provider.chat(
-                    [Message.system(system), Message.user(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))],
-                    tools=None,
-                    max_tokens=800,
-                ),
+            response = await stream_aux(
+                provider,
+                [Message.system(system), Message.user(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))],
+                purpose="team-status-summary",
                 timeout=8.0,
+                max_tokens=800,
             )
             text = str(response.text or "").strip()
             if text:
                 return text
-        except TypeError:
-            try:
-                response = await asyncio.wait_for(
-                    provider.chat(
-                        [Message.system(system), Message.user(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))],
-                        tools=None,
-                    ),
-                    timeout=8.0,
-                )
-                text = str(response.text or "").strip()
-                if text:
-                    return text
-            except Exception:  # noqa: BLE001
-                pass
         except Exception:  # noqa: BLE001
             pass
         return self._fallback_team_status_summary(snapshot)
