@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ADR-0039 · Channels 配置命名空间读写闭环</title>
+<style>body{font:16px/1.75 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}code{background:#f4f4f4}a{color:#245a83}</style></head><body><main>
+<h1>ADR-0039 · Channels 配置命名空间读写闭环</h1>
+<p>2026-09-14 · 阶段 6AA · 状态：已实施（主 agent 审查修正 owner 分支 platforms 回读漂移后，命名空间套件 30 passed，后端全量与双端测试通过；三平台打包态验证待远程矩阵）。</p>
+<h2>背景</h2><p>6X 的双读使 features.channels 优先于顶层 channels，但保存仍仅更新顶层。隔离复现确认保存成功后重新加载恢复为新节中的旧值；owner overlay 则完全忽略新节。</p>
+<h2>决定</h2><p>在 state 配置模块统一渠道配置读写规则。保留旧格式兼容；存在有效新节时向新节保存有效配置，owner 使用相同的新节优先规则且不继承全局渠道凭据。保存时将当前渠道的完整有效值归入选定节，清除该渠道的旧别名，避免删除字段或清空 extra 在下次合并时复活；未知字段先并入有效值，其他渠道和其他 owner 保留。owner 延续不读取 platforms 旧别名的已有边界。</p>
+<p>不采用单纯双写作为长期模型，也不退役所有旧配置。沿用锁、临时文件与原子替换，不引入渠道业务依赖或新的存储系统。</p>
+<h2>验收与回退</h2><p>独立测试覆盖全局和 owner 的读写重载、混合格式、删除和 extra、输入不变性、未知字段与隔离。使用 pathlib 和 pytest 临时目录，平台实测范围在测试记录中单独标注。回退代码前先备份配置；如需旧版本消费新节，显式导出有效渠道配置到顶层，不能直接丢弃新节。</p>
+<p><a href="../modules/state.html">State 模块</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

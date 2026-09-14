@@ -106,6 +106,10 @@
     <li>owner 隔离的新存储文件放 <code>get_owner_runtime_home(owner)</code> 下，全局的放 <code>get_crew_home()</code> 下。</li>
   </ul>
 
+  <h2>Channels 配置读写闭环（6AA）</h2>
+  <p><code>features.channels</code> 与旧 <code>channels</code> 的双读优先级沿用 6X。保存当前渠道时，将完整有效值写入选定节并清除该渠道的旧别名，避免更新后重载恢复旧值，以及删除字段、清空 <code>extra</code> 后再次被兜底补回。其他渠道、未知有效字段和其他 owner 保留；owner 仅读取自身 overlay，不继承全局渠道配置或旧 <code>platforms</code>。</p>
+  <p>仍使用配置写锁、系统路径与临时文件原子替换。设计与回退见 <a href="../adr/0039-channels-config-namespace-roundtrip.html">ADR-0039</a>，验证见 <a href="../../testing/plugin-architecture-stage-6aa-channel-config.html">6AA 测试记录</a>。</p>
+
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>

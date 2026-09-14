@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6AA · Channels 配置命名空间读写闭环</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6AA · Channels 配置命名空间读写闭环</h1>
+<p>2026-09-14。6X 的 <code>features.channels</code> 双读只有读侧归一：保存路径仍只写顶层 <code>channels</code>，导致新节配置下「保存成功、重载回退旧值」；owner overlay 则完全不识别新节。本片在 <code>crew/state/config.py</code> 内统一读写规则，设计与决策见 <a href="../backend/adr/0039-channels-config-namespace-roundtrip.html">ADR-0039</a>。</p>
+<h2>处置</h2>
+<ul>
+<li><strong>写入收敛</strong>：新增模块级 <code>_write_channel_config()</code>，全局与 owner 两条持久化路径共用。以磁盘原始数据判定目标节——存在有效 <code>features.channels</code> 时写入新节，否则落回旧 <code>channels</code> 节；无论落点，都把该渠道的完整有效值（platforms ⊕ channels ⊕ 新节 ⊕ 本次 payload，owner 不含 platforms）归入选定节，并清除该渠道在其他别名节中的残留，杜绝删除字段、清空 <code>extra</code> 在下次合并时复活。</li>
+<li><strong>owner 新节读取</strong>：<code>owner_overlay_data()</code> 接入与主配置相同的 <code>_apply_features_namespace()</code> 归一，owner 分支经归一后的 <code>channels</code> 布局读取（新节优先、旧节兜底），写入与读取对称。</li>
+<li><strong>内存态同步</strong>：全局保存后同步刷新 <code>self.channels</code>、<code>self.platforms</code> 与 <code>raw_config</code>，保存后同进程读取与重载结果一致。</li>
+<li><strong>主 agent 审查修正</strong>：子 agent 初版在 owner 读取分支引入了 <code>overlay.platforms</code> 旧别名回读，与 ADR-0039「owner 延续不读取 platforms 旧别名」的已确认契约及其测试 <code>test_owner_channel_config_does_not_fallback_to_owner_platforms</code> 冲突（复现 1 failed）。修正为 owner 仅读 channels 布局并保留 deepcopy 隔离，套件恢复 30 passed。</li>
+</ul>
+<h2>验证记录（子 agent 开发，主 agent 审查后复跑）</h2>
+<table><tr><th>命令</th><th>结果</th></tr>
+<tr><td><code>uv run python -m pytest tests/test_config_features_namespace.py -q</code></td><td>30 passed（含新增 10 例：新节写入清残留、platforms 删除、空 payload 保有效视图、owner 新节读写、owner 隔离、owner 不回读 platforms、输入不变性、mixed extra 重载、非法新节兼容、extra 替换/清除）</td></tr>
+<tr><td>后端全量 <code>pytest tests/ -q</code></td><td>4213 passed / 43 skipped / 20 deselected（0 failed，246.87s，主 agent 修正后复跑）</td></tr>
+<tr><td>Desktop <code>npm run typecheck &amp;&amp; npm run test</code></td><td>通过 / 1888 passed</td></tr>
+<tr><td>Web <code>npm run typecheck &amp;&amp; npm run test</code></td><td>通过 / 212 passed</td></tr>
+</table>
+<p>平台说明：实现仅使用 pathlib、PyYAML 与临时文件原子替换，无平台分支；本轮实测为 macOS 本机，Windows/Linux 以 CI 矩阵为准，不以单机结果替代。</p>
+<p><a href="../backend/adr/0039-channels-config-namespace-roundtrip.html">ADR-0039</a> · <a href="../backend/modules/state.html">State 模块文档</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

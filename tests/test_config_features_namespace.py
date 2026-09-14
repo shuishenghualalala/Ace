@@ -11,10 +11,12 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
 import yaml
 
+import crew.state.config as config_module
 from crew.state.config import _apply_features_namespace, load_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -285,6 +287,210 @@ def test_apply_features_namespace_without_features_returns_same_object():
     data = {"wiki": {"model": "m"}}
 
     assert _apply_features_namespace(data) is data
+
+
+def test_channel_persistence_writes_existing_features_namespace_and_removes_fallback(tmp_path: Path):
+    config_path = _write_config(
+        tmp_path,
+        {
+            "channels": {"feishu": {"token": "legacy", "keep": "yes", "extra": {"old": 1}}},
+            "features": {
+                "channels": {"feishu": {"token": "new", "extra": {"new": 2}, "unknown": "kept"}}
+            },
+        },
+    )
+    cfg = load_config(config_path=config_path)
+    payload = {"token": "updated", "_remove_keys": ["unknown", "old"]}
+
+    cfg.persist_channel_config("feishu", payload)
+
+    assert payload == {"token": "updated", "_remove_keys": ["unknown", "old"]}
+    written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert written["features"]["channels"]["feishu"] == {
+        "token": "updated",
+        "keep": "yes",
+        "extra": {"new": 2},
+    }
+    assert "feishu" not in written["channels"]
+    assert load_config(config_path=config_path).channel_config("feishu") == {
+        "token": "updated",
+        "keep": "yes",
+        "extra": {"new": 2},
+    }
+
+
+def test_channel_persistence_removes_keys_from_platforms_fallback(tmp_path: Path):
+    config_path = _write_config(
+        tmp_path,
+        {
+            "platforms": {"feishu": {"token": "legacy", "obsolete": True}},
+            "channels": {"feishu": {"token": "current"}},
+        },
+    )
+    cfg = load_config(config_path=config_path)
+
+    cfg.persist_channel_config("feishu", {"_remove_keys": ["obsolete"]})
+
+    assert load_config(config_path=config_path).channel_config("feishu") == {"token": "current"}
+    assert cfg.channel_config("feishu") == {"token": "current"}
+
+
+def test_channel_persistence_empty_payload_preserves_effective_view(tmp_path: Path):
+    config_path = _write_config(
+        tmp_path,
+        {
+            "platforms": {"feishu": {"extra": {"hidden": 1}, "token": "platform"}},
+            "channels": {"feishu": {"extra": {}, "token": "channel"}},
+        },
+    )
+    cfg = load_config(config_path=config_path)
+    before = cfg.channel_config("feishu")
+
+    cfg.persist_channel_config("feishu", {})
+
+    assert load_config(config_path=config_path).channel_config("feishu") == before
+
+
+def test_owner_channel_overlay_reads_and_writes_features_namespace(tmp_path: Path, monkeypatch):
+    overlay_path = tmp_path / "owner" / "config.yaml"
+    overlay_path.parent.mkdir(parents=True)
+    overlay_path.write_text(
+        yaml.safe_dump({"features": {"channels": {"feishu": {"token": "owner-old"}}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_module, "owner_overlay_config_path", lambda _owner: overlay_path)
+    cfg = load_config(config_path=_write_config(tmp_path / "global", {}))
+
+    assert cfg.channel_config("feishu", owner_account_id="owner-a") == {"token": "owner-old"}
+    cfg.persist_channel_config("feishu", {"token": "owner-new"}, owner_account_id="owner-a")
+
+    written = yaml.safe_load(overlay_path.read_text(encoding="utf-8"))
+    assert written["features"]["channels"]["feishu"]["token"] == "owner-new"
+    assert cfg.channel_config("feishu", owner_account_id="owner-a") == {"token": "owner-new"}
+
+
+def test_owner_channel_overlays_are_isolated_and_do_not_change_global_config(
+    tmp_path: Path, monkeypatch
+):
+    overlays = {
+        owner: tmp_path / owner / "config.yaml"
+        for owner in ("owner-a", "owner-b")
+    }
+    for owner, path in overlays.items():
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            yaml.safe_dump(
+                {"features": {"channels": {"feishu": {"token": owner}}}}
+            ),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(
+        config_module,
+        "owner_overlay_config_path",
+        lambda owner: overlays[str(owner)],
+    )
+    global_path = _write_config(
+        tmp_path / "global",
+        {"features": {"channels": {"feishu": {"token": "global"}}}},
+    )
+    cfg = load_config(config_path=global_path)
+
+    assert cfg.channel_config("feishu", owner_account_id="owner-a") == {"token": "owner-a"}
+    assert cfg.channel_config("feishu", owner_account_id="owner-b") == {"token": "owner-b"}
+    cfg.persist_channel_config("feishu", {"token": "owner-a-new"}, owner_account_id="owner-a")
+
+    assert cfg.channel_config("feishu", owner_account_id="owner-a") == {"token": "owner-a-new"}
+    assert cfg.channel_config("feishu", owner_account_id="owner-b") == {"token": "owner-b"}
+    assert cfg.channel_config("feishu") == {"token": "global"}
+
+
+def test_owner_channel_config_does_not_fallback_to_owner_platforms(
+    tmp_path: Path, monkeypatch
+):
+    overlay_path = tmp_path / "owner" / "config.yaml"
+    overlay_path.parent.mkdir(parents=True)
+    overlay_path.write_text(
+        yaml.safe_dump({"platforms": {"feishu": {"token": "legacy-owner"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_module, "owner_overlay_config_path", lambda _owner: overlay_path)
+    cfg = load_config(config_path=_write_config(tmp_path / "global", {}))
+
+    assert cfg.channel_config("feishu", owner_account_id="owner-a") == {}
+
+
+def test_channel_persistence_preserves_other_channels_and_does_not_mutate_nested_input(
+    tmp_path: Path,
+):
+    config_path = _write_config(
+        tmp_path,
+        {
+            "features": {
+                "channels": {
+                    "feishu": {"token": "old", "extra": {"old": 1}},
+                    "weixin": {"token": "keep"},
+                }
+            }
+        },
+    )
+    cfg = load_config(config_path=config_path)
+    payload = {"token": "new", "extra": {"nested": {"enabled": True}}}
+    original = deepcopy(payload)
+
+    cfg.persist_channel_config("feishu", payload)
+
+    assert payload == original
+    reloaded = load_config(config_path=config_path)
+    assert reloaded.channel_config("feishu") == {
+        "token": "new", "extra": {"nested": {"enabled": True}}
+    }
+    assert reloaded.channel_config("weixin") == {"token": "keep"}
+
+
+def test_global_empty_extra_replaces_mixed_legacy_extra_on_reload(tmp_path: Path):
+    config_path = _write_config(
+        tmp_path,
+        {
+            "platforms": {"feishu": {"token": "platform", "extra": {"old": 1}}},
+            "channels": {"feishu": {"token": "channel", "extra": {"legacy": 2}}},
+            "features": {
+                "channels": {"feishu": {"token": "feature", "extra": {"new": 3}}}
+            },
+        },
+    )
+    cfg = load_config(config_path=config_path)
+    cfg.persist_channel_config("feishu", {"extra": {}})
+
+    assert load_config(config_path=config_path).channel_config("feishu") == {
+        "token": "feature", "extra": {}
+    }
+
+
+def test_invalid_features_channel_node_keeps_legacy_channel_compatibility(tmp_path: Path):
+    config_path = _write_config(
+        tmp_path,
+        {
+            "channels": {"feishu": {"token": "legacy"}},
+            "features": {"channels": "old-format"},
+        },
+    )
+
+    cfg = load_config(config_path=config_path)
+
+    assert cfg.channel_config("feishu") == {"token": "legacy"}
+
+
+def test_channel_persistence_preserves_extra_replacement_and_clear_semantics(tmp_path: Path):
+    config_path = _write_config(
+        tmp_path,
+        {"channels": {"feishu": {"extra": {"old": 1, "keep": 2}, "token": "t"}}},
+    )
+    cfg = load_config(config_path=config_path)
+
+    cfg.persist_channel_config("feishu", {"extra": {"new": 3}})
+    assert load_config(config_path=config_path).channel_config("feishu")["extra"] == {"new": 3}
+    cfg.persist_channel_config("feishu", {"_remove_keys": ["extra"]})
+    assert "extra" not in load_config(config_path=config_path).channel_config("feishu")
 
 
 # ----------------------- P3-1：subagent 死配置 -----------------------

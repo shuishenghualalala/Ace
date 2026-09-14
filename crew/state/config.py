@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import shutil
 import threading
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -421,7 +422,7 @@ class Config:
 
     def owner_overlay_data(self, owner_account_id: str | None = None) -> dict[str, Any]:
         """读取 owner 私有 overlay 配置。"""
-        return _read_yaml_file(owner_overlay_config_path(owner_account_id))
+        return _apply_features_namespace(_read_yaml_file(owner_overlay_config_path(owner_account_id)))
 
     def owner_env_map(self, owner_account_id: str | None = None) -> dict[str, str]:
         """读取 owner 私有 .env，不污染全局进程环境。"""
@@ -630,24 +631,7 @@ class Config:
     def _persist_owner_channel_config_locked(self, owner_account_id: str, name: str, config_data: dict[str, Any]) -> Path:
         yaml_path = owner_overlay_config_path(owner_account_id)
         data = _read_yaml_file(yaml_path)
-        channels = data.get("channels")
-        if not isinstance(channels, dict):
-            channels = {}
-            data["channels"] = channels
-
-        remove_keys = set(config_data.pop("_remove_keys", []) or [])
-        current = channels.get(name)
-        if not isinstance(current, dict):
-            current = {}
-        for key in remove_keys:
-            current.pop(str(key), None)
-            extra = current.get("extra")
-            if isinstance(extra, dict):
-                extra.pop(str(key), None)
-                if not extra:
-                    current.pop("extra", None)
-        merged = {**current, **config_data}
-        channels[name] = merged
+        merged = _write_channel_config(data, name, config_data, include_platforms=False)
 
         yaml_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
@@ -928,27 +912,11 @@ class Config:
         else:
             data = {}
 
-        channels = data.get("channels")
-        if not isinstance(channels, dict):
-            channels = {}
-            data["channels"] = channels
-
-        remove_keys = set(config_data.pop("_remove_keys", []) or [])
-
-        current = channels.get(name)
-        if not isinstance(current, dict):
-            current = {}
-        for key in remove_keys:
-            current.pop(str(key), None)
-            extra = current.get("extra")
-            if isinstance(extra, dict):
-                extra.pop(str(key), None)
-                if not extra:
-                    current.pop("extra", None)
-        merged = {**current, **config_data}
-        channels[name] = merged
+        merged = _write_channel_config(data, name, config_data)
 
         self.channels[name] = dict(merged)
+        platforms = data.get("platforms")
+        self.platforms = platforms if isinstance(platforms, dict) else {}
         self.raw_config = data
 
         yaml_path.parent.mkdir(parents=True, exist_ok=True)
@@ -971,19 +939,21 @@ class Config:
         """
         owner = str(owner_account_id or "").strip()
         if owner:
+            # owner overlay 只认 channels 布局（含归一后的 features.channels），
+            # 不回落 platforms 旧别名，避免全局渠道凭据经 overlay 复活。
             overlay = self.owner_overlay_data(owner)
             channels = overlay.get("channels")
             channel_raw = channels.get(name) if isinstance(channels, dict) else {}
             if isinstance(channel_raw, dict):
-                return dict(channel_raw)
+                return deepcopy(channel_raw)
             return {}
         platform_raw = self.platforms.get(name) if isinstance(self.platforms, dict) else {}
         channel_raw = self.channels.get(name) if isinstance(self.channels, dict) else {}
         merged: dict[str, Any] = {}
         if isinstance(platform_raw, dict):
-            merged.update(platform_raw)
+            merged.update(deepcopy(platform_raw))
         if isinstance(channel_raw, dict):
-            merged.update(channel_raw)
+            merged.update(deepcopy(channel_raw))
         return merged
 
     def apply_platform_config_bridges(self, entries: list[Any]) -> None:
@@ -1508,6 +1478,59 @@ def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[st
             merged[key] = _deep_merge_dicts(merged[key], value)
         else:
             merged[key] = value
+    return merged
+
+
+def _write_channel_config(
+    data: dict[str, Any],
+    name: str,
+    config_data: dict[str, Any],
+    *,
+    include_platforms: bool = True,
+) -> dict[str, Any]:
+    """Materialize one channel into the canonical namespace and return its value."""
+    platforms = data.get("platforms")
+    platform_map = platforms if isinstance(platforms, dict) else {}
+    channels = data.get("channels")
+    channel_map = channels if isinstance(channels, dict) else {}
+    features = data.get("features")
+    if isinstance(features, dict) and isinstance(features.get("channels"), dict):
+        target = features["channels"]
+        fallback_maps = ([platform_map, channel_map] if include_platforms else [channel_map])
+    else:
+        if not isinstance(channels, dict):
+            data["channels"] = channel_map
+        target = channel_map
+        fallback_maps = [platform_map] if include_platforms else []
+
+    payload = deepcopy(config_data)
+    raw_remove = payload.pop("_remove_keys", [])
+    if isinstance(raw_remove, (str, bytes)):
+        remove_keys = {str(raw_remove)}
+    else:
+        try:
+            remove_keys = {str(key) for key in (raw_remove or [])}
+        except TypeError:
+            remove_keys = set()
+    platform_value = platform_map.get(name) if include_platforms else {}
+    channel_value = channel_map.get(name)
+    target_value = target.get(name) if isinstance(target.get(name), dict) else {}
+    channel_effective = _deep_merge_dicts(
+        channel_value if isinstance(channel_value, dict) else {}, target_value
+    )
+    current = dict(platform_value) if isinstance(platform_value, dict) else {}
+    current.update(channel_effective)
+    for key in remove_keys:
+        current.pop(key, None)
+        extra = current.get("extra")
+        if isinstance(extra, dict):
+            extra.pop(key, None)
+            if not extra:
+                current.pop("extra", None)
+    merged = {**current, **deepcopy(payload)}
+    target[name] = merged
+    for fallback in fallback_maps:
+        fallback.pop(name, None)
     return merged
 
 
