@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ADR-0042 · 会话存储增量事件表（session_events，W4）</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0042 · 会话存储增量事件表（session_events，W4/W5）</h1>
+<p>状态：<strong>提案（待评审）</strong> · 日期：2026-09-14 · 批次：dsh-remediation W4（存储）/ W5（树形与恢复）。</p>
+<h2>背景与候选方案</h2>
+<p>现状：<code>sessions</code> 表把整条消息列表序列化为<strong>一个 JSON blob</strong> 存 <code>messages</code> 字段——每回合 <code>json.dumps</code> 全量重写（O(历史大小)）、load 全量 <code>json.loads</code> 逐字段重建；无增量 append、无分页、无树形/回退/fork、无回合级崩溃恢复语义；token 估算全程 chars/4 粗估，压缩水位判断误差大。W0 已把 save/load 包 <code>to_thread</code> 止血（消除事件循环冻结），但写放大与能力缺口未解。</p>
+<p>参照系结论（dsh / pi v3·v4 / codex 三方源码对照，详见 docs/todo/ace-weaknesses-dsh-remediation-plan.md §1.2–1.3）：三家都以 append-only 日志为格式根解法；Ace 选 SQLite 后物理防撕裂整体免写（事务原子性），真正要拿的是数据模型（parent 树 + leaf 指针）、多进程租约（pi v4 writer_leases）与语义修复（孤儿合成，W1 已落地配平扫描）。</p>
+<p>候选方案：A. 保持 blob + 全异步化——止血已做，但每回合写放大依旧，分支/恢复能力永远欠着；B. JSONL append-only 文件（pi v3 式）——本地 CLI 的取舍，服务端多进程/多租户下无锁互斥与撕裂恢复都要自建，放弃 SQLite 事务优势；C. SQLite 增量事件表 + per-session 单写队列 + leaf 指针。</p>
+<h2>决定</h2>
+<p>采用方案 C。分两个批次：W4 做存储格式与计量，W5 做树形与恢复。</p>
+<ul>
+<li><strong>表结构（W4）</strong>：<code>session_events(owner_account_id, session_id, seq INTEGER, type TEXT, payload JSON, created_at)</code>，主键 (owner, session, seq)，seq 会话内连续；<code>sessions</code> 表加 <code>leaf_seq</code> 指针列，元数据轻量化。<strong>数据边界声明</strong>：session 是 core 域（sessions 本在主库 9 表清单内），session_events 作为 core 状态表进 crew.db，不破坏 ADR-0038「主库无 Feature/插件表」终态。</li>
+<li><strong>写路径（W4）</strong>：每回合只 INSERT 本回合新事件（O(新事件)），经 per-session 单写队列（一个写 task + asyncio.Queue）串行落库——对应 dsh 的 per-handle promise 链；不再有全量 dump。</li>
+<li><strong>读路径（W4）</strong>：按 seq 流式读行 + per-session 内存投影缓存（derive_messages 等价物：只解析自上次以来的新事件，O(增量)）。</li>
+<li><strong>多进程互斥（W4）</strong>：gateway 与 CLI 可能打开同一会话，sessions 侧加 writer 租约（模板取 pi v4 SQLite 后端 writer_leases：TTL 30s + 心跳 10s + fence 抢占，进程崩溃后 TTL 到期自动可接管）。</li>
+<li><strong>兼容迁移（W4）</strong>：保留旧 blob 列，一次性迁移脚本逐会话导入为事件行；读取端双格式兼容一个版本窗口后删旧列。该兼容 Adapter 创建时即声明 deprecated_after（目标删除版本）与消费者清单，窗口关闭条件写进批次记录。</li>
+<li><strong>TokenMeter（W4）</strong>：per-session 增量计量——锚点 = 最近一次真实 usage（复用条件：请求信封一致且 usage ≥ 锚点启发式估价），锚后 delta 按 chars/4 保守累加；接口返回三值 {exact|estimated|none}，精确/估算/零值从不混淆；compact/tokens.py 的水位判断改消费它。</li>
+<li><strong>树形（W5）</strong>：事件加 parent_seq（可空，默认前一条）；回退/rewind-and-edit = 校验目标 seq 合法（不在开放回合中）→ 移 leaf 指针，旧分支保留可回；fork/clone = 复制前缀 + 切口写 end_seed 型标记。</li>
+<li><strong>崩溃恢复（W5）</strong>：会话加载后跑配平扫描（W1 的 repair_orphan_tool_calls 直接复用）；启动时扫描各会话开放回合向用户报告断点（「上次会话在第 N 步被中断」，断点报告不自动续跑）；未知事件类型 fail-closed 拒绝加载。</li>
+<li><strong>checkpoint 收敛（W5）</strong>：processes.json / tasks 表等多份 checkpoint 统一恢复入口；未来检索索引定位为可弃读模型，损坏即重建。</li>
+</ul>
+<h2>验收要点</h2>
+<ol>
+<li>断言每回合 INSERT 行数 == 本回合新消息数（写放大 O(新事件)）；</li>
+<li>kill -9 注入中途崩溃 → 重启后会话可加载、孤儿 tool_call 有合成结果、下一轮 LLM 请求不报错；</li>
+<li>rewind 后旧分支可导航回来；leaf 指针移动不改写任何已存在行；</li>
+<li>token：有真实 usage 的会话测量 kind=exact 且与 usage 一致；无 usage 时 kind=estimated/none，绝不伪装精确；</li>
+<li>迁移幂等：重复执行零重复行；旧 blob 列在窗口期内可回退读取；</li>
+<li>writer 租约：两个进程打开同一会话时后者被拒绝或抢占（fence 防脑裂）；</li>
+<li>全量测试 0 failed（不含基线 flake）。</li>
+</ol>
+<h2>不照搬</h2>
+<p>zstd 帧压缩与世代迁移链（SQLite 行追加天然免整文件压缩）；按 cwd 目录分组 + 无超时 flock（多租户服务端按 owner 维度 + 租约/超时）；dsh「回退=遮蔽投影」的完整语义（首期用 parent 树 + leaf 指针，遮蔽只在压缩里用）；pi/codex 的「完全不 fsync」（WAL 默认持久性语义即可）；codex 的 Copied/Referenced 双轨 fork。</p>
+<h2>回退方式</h2>
+<p>双格式窗口内旧 blob 列保留不删，读取端配置切回 blob 模式即原地回退；窗口关闭（删旧列）前所有回退路径可用。每批次独立提交可 revert。</p>
+<p><a href="0038-feature-db-split.html">ADR-0038</a> · <a href="../../todo/ace-weaknesses-dsh-remediation-plan.md">修复技术方案 §1</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>
