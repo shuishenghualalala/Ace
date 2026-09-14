@@ -532,7 +532,6 @@ def test_writer_lease_released_on_close(tmp_path):
 
 def test_writer_lease_heartbeat_keeps_ownership(tmp_path):
     import asyncio
-    import time
 
     from crew.state.session_store import SessionWriteConflict
 
