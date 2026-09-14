@@ -26,6 +26,7 @@ from crew.agent.loop.resilience import (
     has_truncated_tool_args,
     is_context_overflow,
     is_empty_response,
+    is_max_tokens_finish,
     is_stream_interrupt_recoverable,
     provider_chain,
     should_continue,
@@ -57,4 +58,5 @@ __all__ = [
     "STREAM_INTERRUPT_PROMPT",
     "STREAM_INTERRUPT_STATUS_MESSAGE",
     "has_truncated_tool_args",
+    "is_max_tokens_finish",
 ]

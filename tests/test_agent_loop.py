@@ -22,6 +22,7 @@ from crew.agent.loop import (
     TurnControl,
     is_context_overflow,
     is_empty_response,
+    is_max_tokens_finish,
     provider_chain,
     should_continue,
     should_parallelize,
@@ -472,8 +473,13 @@ def test_resilience_pure_helpers():
     assert not is_empty_response("hi", [], "")
     assert not is_empty_response("", [ToolCall("c", "t", {})], "")
     assert should_continue("length", [])
+    assert should_continue("max_tokens", [])
     assert not should_continue("stop", [])
     assert not should_continue("length", [ToolCall("c", "t", {})])
+    assert is_max_tokens_finish("length")
+    assert is_max_tokens_finish("max_tokens")
+    assert not is_max_tokens_finish("stop")
+    assert not is_max_tokens_finish(None)
     assert is_context_overflow(ProviderError("maximum context length exceeded"))
     assert not is_context_overflow(ProviderError("rate limited"))
     p, f1, f2 = object(), object(), object()
@@ -499,6 +505,71 @@ async def test_loop_continuation_on_length_truncation():
     ex = _executor(provider)
     chunks = await _collect(ex, _ctx())
     assert chunks[-1].kind == "final" and chunks[-1].body["text"] == "后半段"
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "max_tokens", "model_context_window_exceeded"])
+async def test_loop_max_tokens_message_rejects_tool_execution(finish_reason):
+    """stop_reason=length 一族的消息即使携带完整 tool_calls 也整批拒执行：
+    历史只保留文本前缀，随后走截断续写让模型重新发起完整调用。"""
+    calls: list[str] = []
+    reg = Registry()
+    reg.register(
+        name="file_write",
+        toolset="file",
+        schema={"name": "file_write", "parameters": {"type": "object"}},
+        handler=lambda args: calls.append(args.get("path")) or tool_result(ok=True),
+    )
+    provider = ScriptStreamProvider(script=[
+        ChatResponse(
+            text="先写一点",
+            tool_calls=[ToolCall("w1", "file_write", {"path": "/tmp/x", "content": "y"})],
+            finish_reason=finish_reason,
+        ),
+        ChatResponse(text="后半段", finish_reason="stop"),
+    ])
+    ctx = _ctx()
+    chunks = await _collect(_executor(provider, reg), ctx)
+
+    assert calls == []  # 截断消息的工具未执行
+    assert chunks[-1].kind == "final" and chunks[-1].body["text"] == "后半段"
+    truncated = next(m for m in ctx.messages if m.role == "assistant")
+    assert truncated.content == "先写一点"
+    assert truncated.tool_calls == []  # 写入历史的截断消息不含工具调用
+    assert any((m.content or "").startswith("（系统提示：上一条回复因长度上限被截断") for m in ctx.messages)
+
+
+async def test_loop_interrupt_strips_undispatched_tool_calls_from_history():
+    """模型响应后、工具派发前被中断：未派发的 tool_calls 不写入历史，只保留文本前缀。"""
+    control = TurnControl()
+    calls: list[str] = []
+    reg = Registry()
+    reg.register(
+        name="file_write",
+        toolset="file",
+        schema={"name": "file_write", "parameters": {"type": "object"}},
+        handler=lambda args: calls.append(args.get("path")) or tool_result(ok=True),
+    )
+
+    class InterruptBeforeDispatchProvider(FakeProvider):
+        async def stream_chat(self, messages, tools=None):
+            self.stream_calls.append(list(messages))
+            yield StreamChunk(delta_text="部分文本")
+            control.interrupt()  # 模型响应完整返回后、主循环派发工具前命中中断
+            yield StreamChunk(
+                delta_text="",
+                done=True,
+                tool_calls=[ToolCall("w1", "file_write", {"path": "/tmp/x", "content": "y"})],
+                finish_reason="stop",
+            )
+
+    ctx = _ctx(control=control)
+    chunks = await _collect(_executor(InterruptBeforeDispatchProvider(), reg), ctx)
+
+    assert calls == []  # 中断后工具未派发
+    assistant = next(m for m in ctx.messages if m.role == "assistant")
+    assert assistant.content == "部分文本"
+    assert assistant.tool_calls == []
+    assert chunks[-1].kind == "final"
 
 
 async def test_loop_overflow_triggers_force_compact_then_succeeds():
