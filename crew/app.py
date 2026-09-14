@@ -64,6 +64,7 @@ from crew.memory.simple import SQLiteMemory
 from crew.plugins.builtin import LoggingPlugin
 from crew.plugins.manager import PluginManager
 from crew.providers.anthropic_provider import AnthropicProvider
+from crew.providers.keying import ApiKeyResolver
 from crew.providers.openai_provider import OpenAIProvider
 from crew.providers.vendors import VendorProfile, compat_for_model, resolve_vendor
 from crew.security.approvals import ApprovalManager
@@ -82,9 +83,11 @@ from crew.state.config import (
     Config,
     ModelProfile,
     _build_profile_from_payload,
+    _load_env_map,
     is_placeholder_model_profile,
     load_config,
     remove_env_key,
+    resolve_profile_api_key,
     resolve_writable_env_path,
     write_env_key,
 )
@@ -1146,7 +1149,7 @@ class CrewApp:
             if profile is None or not getattr(profile, "has_key", False):
                 log.warning("fallback 模型 %s 不存在或未配置 key，跳过", mid)
                 continue
-            providers.append(build_provider_for_profile(profile, cfg.stream_read_timeout))
+            providers.append(build_provider_for_profile(profile, cfg.stream_read_timeout, owner_account_id=owner))
         return providers
 
     def _default_agent_config(self) -> dict:
@@ -1455,7 +1458,7 @@ class CrewApp:
             self._resolve_session_provider_profile(owner, session_model)
         )
         provider = (
-            build_provider_for_profile(provider_profile, cfg.stream_read_timeout)
+            build_provider_for_profile(provider_profile, cfg.stream_read_timeout, owner_account_id=owner)
             if owns_provider
             else self.provider
         )
@@ -1821,7 +1824,7 @@ class CrewApp:
             profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
             profile = profiles.get(model)
             if profile and profile.has_key:
-                provider = build_provider_for_profile(profile, cfg.stream_read_timeout)
+                provider = build_provider_for_profile(profile, cfg.stream_read_timeout, owner_account_id=owner)
                 sub_profile = profile
                 effective_capabilities = list(profile.capabilities)
             else:
@@ -2789,7 +2792,7 @@ class CrewApp:
         profile = self.config.owner_default_model_profile(owner)
         if profile is None or not profile.has_key:
             return self.provider
-        provider = build_provider_for_profile(profile, self.config.stream_read_timeout)
+        provider = build_provider_for_profile(profile, self.config.stream_read_timeout, owner_account_id=owner)
         self._owner_team_providers[owner] = provider
         return provider
 
@@ -2811,7 +2814,7 @@ class CrewApp:
         cached = self._owner_team_member_model_providers.get(key)
         if cached is not None:
             return cached
-        provider = build_provider_for_profile(profile, self.config.stream_read_timeout)
+        provider = build_provider_for_profile(profile, self.config.stream_read_timeout, owner_account_id=owner)
         self._owner_team_member_model_providers[key] = provider
         return provider
 
@@ -2868,7 +2871,7 @@ class CrewApp:
         profile = self.config.owner_default_model_profile(owner) if owner else None
         owns_provider = bool(owner and profile is not None and profile.has_key)
         provider = (
-            build_provider_for_profile(profile, self.config.stream_read_timeout)
+            build_provider_for_profile(profile, self.config.stream_read_timeout, owner_account_id=owner)
             if owns_provider and profile is not None
             else self.provider
         )
@@ -3549,6 +3552,7 @@ def _construct_llm_provider(
     max_tokens: int | None,
     timeout: float,
     vision: bool,
+    api_key_resolver: ApiKeyResolver | None = None,
 ) -> LLMProvider:
     """装配 LLM Provider。
 
@@ -3556,9 +3560,17 @@ def _construct_llm_provider(
     （档案默认环境变量）、vision 取档案默认值，用户显式配置优先；OpenAI 协议
     厂商按模型修正 compat 后传入。未命中走通用 openai/anthropic，未知 id
     由 _provider_class 抛 ValueError。
+
+    api_key_resolver 存在时按请求重新解析凭据（厂商 env 兜底挂在 resolver
+    外层），api_key 仅作初始快照。
     """
     vendor = resolve_vendor(provider_id, base_url, model)
     api_key = _vendor_llm_key(api_key, vendor)
+    if api_key_resolver is not None:
+        base_resolver = api_key_resolver
+
+        def api_key_resolver() -> str:  # noqa: F811 - 包装厂商 env 兜底后回写同名局部
+            return _vendor_llm_key(base_resolver(), vendor)
     if vendor is not None:
         base_url = base_url or vendor.base_url
         vm = vendor.model(model)
@@ -3571,6 +3583,7 @@ def _construct_llm_provider(
             "max_tokens": max_tokens,
             "timeout": timeout,
             "vision": vision,
+            "api_key_resolver": api_key_resolver,
         }
         if vendor.protocol == "openai":
             return OpenAIProvider(compat=compat_for_model(vendor, model), **common)
@@ -3583,10 +3596,33 @@ def _construct_llm_provider(
         max_tokens=max_tokens,
         timeout=timeout,
         vision=vision,
+        api_key_resolver=api_key_resolver,
     )
 
 
-def build_provider_for_profile(profile: ModelProfile, stream_read_timeout: float | None = None) -> LLMProvider:
+def _profile_key_resolver(profile: ModelProfile, owner_account_id: str = "") -> ApiKeyResolver:
+    """按 profile 装配每次请求执行的凭据解析链（凭证库 → owner .env → env）。"""
+    owner = str(owner_account_id or "").strip()
+
+    def resolve() -> str:
+        env_map = _load_env_map(resolve_writable_env_path(owner)) if owner else None
+        return resolve_profile_api_key(
+            profile.id,
+            profile.api_key_env,
+            env_map=env_map,
+            fallback_global=not bool(owner),
+            owner_account_id=owner,
+        )
+
+    return resolve
+
+
+def build_provider_for_profile(
+    profile: ModelProfile,
+    stream_read_timeout: float | None = None,
+    *,
+    owner_account_id: str = "",
+) -> LLMProvider:
     """按指定 ModelProfile 直接创建 Provider（fallback 用，不改全局激活模型）。"""
     return _construct_llm_provider(
         provider_id=profile.provider,
@@ -3597,6 +3633,7 @@ def build_provider_for_profile(profile: ModelProfile, stream_read_timeout: float
         max_tokens=profile.max_tokens,
         timeout=stream_read_timeout if stream_read_timeout is not None else profile.timeout,
         vision=profile.supports_vision,
+        api_key_resolver=_profile_key_resolver(profile, owner_account_id),
     )
 
 
@@ -3608,6 +3645,7 @@ def build_provider(cfg: Config) -> LLMProvider:
     # 因为顶层 api_key 为空而误落 FakeProvider。
     active_profile_key = cfg.active_model.api_key
     if cfg.has_llm_key or active_profile_key or bool(vendor and os.environ.get(vendor.api_key_env)):
+        active_profile = cfg.active_model
         provider: LLMProvider = _construct_llm_provider(
             provider_id=cfg.provider,
             api_key=cfg.api_key or active_profile_key,
@@ -3617,6 +3655,12 @@ def build_provider(cfg: Config) -> LLMProvider:
             max_tokens=cfg.max_tokens,
             timeout=cfg.stream_read_timeout,
             vision=cfg.active_model.supports_vision,
+            api_key_resolver=lambda: resolve_profile_api_key(
+                active_profile.id,
+                active_profile.api_key_env,
+                fallback_global=True,
+                owner_account_id="",
+            ),
         )
         log.info("使用 %s Provider，profile=%s model=%s base_url=%s", cfg.provider, cfg.active_model_id, cfg.model, cfg.base_url or "默认")
         return provider

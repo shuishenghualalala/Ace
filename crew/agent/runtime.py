@@ -47,6 +47,7 @@ from crew.agent.executor import AgentExecutor, BuiltinExecutor, ExecutionContext
 from crew.tools.file_utils import MAX_READ_FILE_BYTES, read_verified_bytes
 from crew.tools.policy import ToolDisclosureMode
 from crew.agent.loop.control import TurnControl
+from crew.agent.loop.history_repair import repair_orphan_tool_calls
 from crew.agent.plan import get_plan_mode_attachment_messages
 from crew.agent.prompt_builder import DEFAULT_AGENT_IDENTITY, build_prompt_parts
 from crew.plugins.manager import PluginManager, TerminalOutcome
@@ -748,6 +749,16 @@ class SingleAgent(Agent):
         t = time.perf_counter()
         owner = envelope.user_id
         history = await self.session_store.load_async(sid, owner_account_id=owner)
+        # 冷读配平：为崩溃/旧数据留下的孤儿 tool_call 合成 error 结果（幂等，
+        # 随本轮落库持久化；平衡的历史扫描为空，不每轮产生开销）。
+        repaired = repair_orphan_tool_calls(history)
+        if repaired:
+            history.extend(repaired)
+            log.warning(
+                "历史配平：合成孤儿 tool_call 错误结果 session=%s count=%d",
+                sid,
+                len(repaired),
+            )
         # usage 只代表最近一次 Provider 请求；新回合开始时先清掉旧值，
         # 否则在本回合尚未收到 usage 时，UI 会把上一回合的真实值误认为当前值。
         clear_prompt_usage = getattr(self.session_store, "clear_prompt_usage", None)

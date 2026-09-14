@@ -66,6 +66,39 @@ async def test_agent_plain_answer_no_tools():
     assert "你好" in final
 
 
+async def test_agent_repairs_orphan_tool_calls_on_cold_load():
+    """冷读历史里的孤儿 tool_call（崩溃残留）先合成 error 结果再进入本轮，
+    且随本轮落库持久化——再次冷读扫描为空，不重复合成。"""
+    from crew.agent.loop import TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN
+
+    store = InMemorySessionStore()
+    store.save("orphan-s", [
+        Message.user("改文件"),
+        Message.assistant("我来写", [
+            ToolCall("c1", "file_write", {"path": "/tmp/a", "content": "x"}, status="running"),
+            ToolCall("c2", "file_read", {"path": "/tmp/b"}),
+        ]),
+    ], owner_account_id="local")
+    provider = FakeProvider()
+    agent = _agent(provider, session_store=store)
+
+    async for _ in agent.run(Envelope.of("继续", session_id="orphan-s")):
+        pass
+
+    history = store.load("orphan-s", owner_account_id="local")
+    tool_msgs = [m for m in history if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_msgs] == ["c1", "c2"]
+    assert tool_msgs[0].content.startswith(TOOL_OUTCOME_UNKNOWN)
+    assert tool_msgs[1].content.startswith(TOOL_NOT_STARTED)
+    # provider 本轮收到的视图里，两个 tool_call 均已有配对结果
+    assert {m.tool_call_id for m in provider.calls[-1] if m.role == "tool"} == {"c1", "c2"}
+
+    async for _ in agent.run(Envelope.of("再来", session_id="orphan-s")):
+        pass
+    history2 = store.load("orphan-s", owner_account_id="local")
+    assert [m.tool_call_id for m in history2 if m.role == "tool"] == ["c1", "c2"]
+
+
 async def test_context_preview_counts_same_l1_view_used_before_send():
     store = InMemorySessionStore()
     history: list[Message] = [Message.user("开始调研")]

@@ -45,7 +45,16 @@ CONTINUATION_PROMPT = (
 
 def should_continue(finish_reason: str | None, tool_calls: Sequence) -> bool:
     """是否应触发续写：因长度截断且本轮没有发起工具调用。"""
-    return finish_reason == "length" and not tool_calls
+    return is_max_tokens_finish(finish_reason) and not tool_calls
+
+
+# 各家 provider 对「输出撞上长度上限」的 finish_reason 命名。
+MAX_TOKENS_FINISH_REASONS = frozenset({"length", "max_tokens", "model_context_window_exceeded"})
+
+
+def is_max_tokens_finish(finish_reason: str | None) -> bool:
+    """本轮是否因输出长度上限被截断（stop_reason == length 一族）。"""
+    return finish_reason in MAX_TOKENS_FINISH_REASONS
 
 
 # --------------------------------------------------------------------------- #
@@ -75,7 +84,7 @@ def has_truncated_tool_args(tool_calls: Sequence, finish_reason: str | None) -> 
     arguments 只剩 ``_raw`` 键（provider json.loads 失败的兜底标记）。两者同时
     命中才认定为截断，避免把模型正常产出的 ``_raw``（极少见）误判为截断。
     """
-    if finish_reason not in {"length", "max_tokens", "model_context_window_exceeded"}:
+    if not is_max_tokens_finish(finish_reason):
         return False
     for tc in tool_calls or []:
         args = getattr(tc, "arguments", None)

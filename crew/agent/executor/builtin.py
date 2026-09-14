@@ -37,6 +37,7 @@ from crew.agent.loop import (
     has_truncated_tool_args,
     is_context_overflow,
     is_empty_response,
+    is_max_tokens_finish,
     is_stream_interrupt_recoverable,
     provider_chain,
     should_continue,
@@ -719,6 +720,17 @@ class BuiltinExecutor(AgentExecutor):
                     next_seq(),
                 )
                 return
+            if tool_calls and is_max_tokens_finish(finish_reason):
+                # stop_reason=length 时消息必然不完整：整批拒执行，历史只保留文本前缀，
+                # 随后走截断续写让模型重新发起完整调用（决策与写入历史同源）。
+                await runner.cancel_prewarms()
+                log.warning(
+                    "截断消息拒执行工具 session=%s tool_count=%d finish_reason=%s",
+                    ctx.session_id,
+                    len(tool_calls),
+                    finish_reason,
+                )
+                tool_calls = []
             if tool_calls:
                 tool_calls = plan_tool_calls(
                     tool_calls,
@@ -747,6 +759,10 @@ class BuiltinExecutor(AgentExecutor):
             # ---- 中断检查（模型刚产出后 / 流式被中途打断）----
             #   带上已生成的半截文本作 final：前端保留、历史持久化，优雅停止。
             if control is not None and control.interrupted:
+                if tool_calls:
+                    # 中断收尾：未派发的工具调用不写入历史，部分消息只保留文本前缀。
+                    tool_calls = []
+                    assistant_msg.tool_calls = []
                 await self.plugins.post_llm_call(
                     ctx.session_id,
                     ctx.messages,
