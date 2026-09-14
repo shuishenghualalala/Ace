@@ -66,6 +66,10 @@ class SessionOwnershipError(ValueError):
     """Raised when a client-selected session id is already owned by another account."""
 
 
+class SessionEventLogError(RuntimeError):
+    """事件流与投影游标不一致（缺口/未知类型），拒绝加载。"""
+
+
 PLACEHOLDER_TITLES = frozenset({"", "新会话", "新对话"})
 
 
@@ -73,6 +77,65 @@ def is_placeholder_title(title: str | None) -> bool:
     """未自定义标题时的占位文案（空串或默认「新会话/新对话」）。"""
     normalized = (title or "").strip()
     return normalized in PLACEHOLDER_TITLES or normalized.lower().startswith("[fake]")
+
+
+class _SessionProjection:
+    """per-session 内存投影：已解析的消息 + 已应用的事件游标。"""
+
+    __slots__ = ("messages", "seq")
+
+    def __init__(self) -> None:
+        self.messages: list[Message] = []
+        self.seq: int = 0
+
+
+class _SessionWriteQueue:
+    """per-session 单写队列：一个写 task + asyncio.Queue 串行落库。
+
+    flush barrier = 带 ack 的往返：调用方 enqueue 后 await ack，leaf 指针与
+    事件批次在同一事务提交后 ack 才完成，调用方 await 到 ack 即视为持久化。
+    写失败保留队列项重试一次；队列 task 的注册返回 disposer（注册即 effect）。
+    """
+
+    def __init__(self, writer: "SQLiteWriteHelper", loop: asyncio.AbstractEventLoop) -> None:
+        self._writer = writer
+        self._loop = loop
+        self._queue: asyncio.Queue = asyncio.Queue()
+        # 串行化「diff 计算 → 入队 → await ack」整段，防止并发 save_async 用同一
+        # 过期投影各算各的 diff 导致事件重复。
+        self.lock = asyncio.Lock()
+        self._task = loop.create_task(self._run())
+        self._disposed = False
+
+    def enqueue(self, fn: Callable[[Any], T]) -> "asyncio.Future[T]":
+        fut: asyncio.Future = self._loop.create_future()
+        self._queue.put_nowait((fn, fut))
+        return fut
+
+    async def _run(self) -> None:
+        import logging
+
+        log = logging.getLogger(__name__)
+        while True:
+            fn, fut = await self._queue.get()
+            try:
+                result = await self._writer.execute_async(fn)
+            except Exception:  # noqa: BLE001
+                try:
+                    result = await self._writer.execute_async(fn)
+                except Exception as second_exc:  # noqa: BLE001
+                    if not fut.done():
+                        fut.set_exception(second_exc)
+                    log.warning("会话事件写入重试一次后仍失败: %s", second_exc)
+                    continue
+            if not fut.done():
+                fut.set_result(result)
+
+    def dispose(self) -> None:
+        if self._disposed:
+            return
+        self._disposed = True
+        self._task.cancel()
 
 
 class SQLiteSessionStore(SessionStore):
@@ -83,6 +146,8 @@ class SQLiteSessionStore(SessionStore):
         self._conn = connect_sqlite(self._path, wal_enabled=wal_enabled)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
+        self._projections: dict[tuple[str, str], _SessionProjection] = {}
+        self._queues: dict[tuple[str, str], tuple[asyncio.AbstractEventLoop, _SessionWriteQueue]] = {}
 
     def transaction(self, fn: Callable[[Any], T]) -> T:
         """Run related session/workspace writes atomically on this store connection."""
@@ -90,8 +155,23 @@ class SQLiteSessionStore(SessionStore):
 
     def close(self) -> None:
         """关闭底层 SQLite 连接（WAL 模式下每库持有多个 fd，必须显式释放）。"""
+        for _, queue in list(self._queues.values()):
+            queue.dispose()
+        self._queues.clear()
         with self._lock:
             self._conn.close()
+
+    def _get_write_queue(self, key: tuple[str, str]) -> _SessionWriteQueue:
+        """取会话的单写队列；事件循环变化时重建旧队列（旧队列 dispose）。"""
+        loop = asyncio.get_running_loop()
+        existing = self._queues.get(key)
+        if existing is not None and existing[0] is loop:
+            return existing[1]
+        if existing is not None:
+            existing[1].dispose()
+        queue = _SessionWriteQueue(self._writer, loop)
+        self._queues[key] = (loop, queue)
+        return queue
 
     def _init_schema(self, conn) -> None:
         conn.execute(
@@ -325,14 +405,79 @@ class SQLiteSessionStore(SessionStore):
     def _load(cls, raw: str) -> list[Message]:
         return [cls._message_from_dict(d) for d in json.loads(raw)]
 
-    # ---- SessionStore 接口 ----
-    def load(self, session_id: str, owner_account_id: str) -> list[Message]:
+    # ---- 事件投影 ----
+    def _get_projection(self, owner: str, session_id: str) -> _SessionProjection:
+        key = (owner, session_id)
+        proj = self._projections.get(key)
+        if proj is None:
+            proj = self._build_projection(owner, session_id)
+            self._projections[key] = proj
+        return proj
+
+    def _read_leaf_seq(self, owner: str, session_id: str) -> int | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT messages FROM sessions WHERE session_id = ? AND owner_account_id = ?",
-                (session_id, owner_account_id),
+                "SELECT leaf_seq FROM sessions WHERE owner_account_id = ? AND session_id = ?",
+                (owner, session_id),
             ).fetchone()
-        return self._load(row[0]) if row else []
+        return int(row[0]) if row is not None else None
+
+    def _fetch_event_rows(
+        self, owner: str, session_id: str, after_seq: int, upto_seq: int
+    ) -> list[tuple[int, str, str]]:
+        with self._lock:
+            return [
+                (int(row[0]), str(row[1]), str(row[2]))
+                for row in self._conn.execute(
+                    "SELECT seq, type, payload FROM session_events "
+                    "WHERE owner_account_id = ? AND session_id = ? AND seq > ? AND seq <= ? "
+                    "ORDER BY seq ASC",
+                    (owner, session_id, after_seq, upto_seq),
+                ).fetchall()
+            ]
+
+    @staticmethod
+    def _apply_event_rows(proj: _SessionProjection, rows: list[tuple[int, str, str]]) -> None:
+        for seq, etype, payload in rows:
+            try:
+                event_type = SessionEventType(etype)
+            except ValueError as exc:
+                raise SessionEventLogError(f"未知事件类型 {etype!r}（seq={seq}），拒绝加载") from exc
+            if event_type in _ROLE_EVENT_TYPES.values():
+                proj.messages.append(SQLiteSessionStore._message_from_dict(json.loads(payload)))
+            proj.seq = seq
+
+    def _build_projection(self, owner: str, session_id: str) -> _SessionProjection:
+        """全量构建投影：事件流优先，无事件的旧会话回退读 blob。"""
+        proj = _SessionProjection()
+        leaf = self._read_leaf_seq(owner, session_id)
+        if leaf is None:
+            return proj
+        rows = self._fetch_event_rows(owner, session_id, 0, leaf)
+        if rows:
+            self._apply_event_rows(proj, rows)
+            return proj
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT messages FROM sessions WHERE owner_account_id = ? AND session_id = ?",
+                (owner, session_id),
+            ).fetchone()
+        if row is not None:
+            proj.messages = self._load(row[0])
+        return proj
+
+    @staticmethod
+    def _event_row_for_message(message: Message) -> tuple[str, str] | None:
+        event_type = _ROLE_EVENT_TYPES.get(message.role)
+        if event_type is None or not event_type.durable:
+            return None
+        return event_type.value, json.dumps(
+            SQLiteSessionStore._message_to_dict(message), ensure_ascii=False
+        )
+
+    # ---- SessionStore 接口 ----
+    def load(self, session_id: str, owner_account_id: str) -> list[Message]:
+        return list(self._get_projection(owner_account_id, session_id).messages)
 
     def load_child_sessions(
         self,
@@ -368,7 +513,7 @@ class SQLiteSessionStore(SessionStore):
         title_fallback: str | None,
         last_prompt_tokens: int | None,
         last_prompt_tokens_source: str | None,
-    ) -> Callable[[Any], None]:
+    ) -> Callable[[Any], tuple[int, int]]:
         now = time.time()
         # title_fallback=None 保持旧行为（首条 user 消息截断），兼容未传该参数的调用方；
         # title_fallback="" 显式留空占位，等 set_title 写入摘要标题（enable_title=True 时
@@ -376,11 +521,73 @@ class SQLiteSessionStore(SessionStore):
         fallback_title = (
             title_fallback if title_fallback is not None else self._first_user_title(messages)
         )
-        def _write(conn):
+        # 增量 diff：投影前缀与传入消息一致 → 只把新增尾部转事件（O(新事件)）；
+        # 不一致（调用方整体改写历史）→ 重写该会话的全部事件行。
+        proj = self._get_projection(owner_account_id, session_id)
+        prefix = len(proj.messages)
+        is_append = messages[:prefix] == proj.messages
+        tail = messages[prefix:] if is_append else messages
+        event_rows: list[tuple[str, str]] = []
+        for message in tail:
+            encoded = self._event_row_for_message(message)
+            if encoded is not None:
+                event_rows.append(encoded)
+        checkpoint_payload: str | None = None
+        if last_prompt_tokens is not None:
+            checkpoint_payload = json.dumps(
+                {
+                    "prompt_tokens": last_prompt_tokens,
+                    "source": last_prompt_tokens_source,
+                    "recorded_at": now,
+                },
+                ensure_ascii=False,
+            )
+
+        def _write(conn) -> tuple[int, int]:
+            base = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(seq), 0) FROM session_events "
+                    "WHERE owner_account_id = ? AND session_id = ?",
+                    (owner_account_id, session_id),
+                ).fetchone()[0]
+            )
+            if is_append:
+                seq = base + 1
+            else:
+                conn.execute(
+                    "DELETE FROM session_events WHERE owner_account_id = ? AND session_id = ?",
+                    (owner_account_id, session_id),
+                )
+                seq = 1
+            for etype, payload in event_rows:
+                # (owner, session, seq) 主键唯一约束兜底去重
+                conn.execute(
+                    "INSERT OR IGNORE INTO session_events "
+                    "(owner_account_id, session_id, seq, type, payload, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (owner_account_id, session_id, seq, etype, payload, now),
+                )
+                seq += 1
+            if checkpoint_payload is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO session_events "
+                    "(owner_account_id, session_id, seq, type, payload, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        owner_account_id,
+                        session_id,
+                        seq,
+                        SessionEventType.METER_CHECKPOINT.value,
+                        checkpoint_payload,
+                        now,
+                    ),
+                )
+                seq += 1
+            new_leaf = seq - 1
             conn.execute(
                 "INSERT INTO sessions "
-                "(session_id, owner_account_id, messages, updated_at, created_at, workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "(session_id, owner_account_id, messages, updated_at, created_at, workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source, leaf_seq) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(owner_account_id, session_id) DO UPDATE SET "
                 "  messages = excluded.messages, "
                 "  updated_at = excluded.updated_at, "
@@ -392,6 +599,7 @@ class SQLiteSessionStore(SessionStore):
                 "  last_prompt_tokens = COALESCE(excluded.last_prompt_tokens, sessions.last_prompt_tokens), "
                 "  last_prompt_tokens_source = CASE WHEN excluded.last_prompt_tokens IS NOT NULL "
                 "THEN excluded.last_prompt_tokens_source ELSE sessions.last_prompt_tokens_source END, "
+                "  leaf_seq = excluded.leaf_seq, "
                 "  title = CASE "
                 "WHEN sessions.title IS NULL OR TRIM(sessions.title) = '' "
                 "OR sessions.title IN ('新会话', '新对话') "
@@ -410,9 +618,20 @@ class SQLiteSessionStore(SessionStore):
                     self._estimate_tokens(messages),
                     last_prompt_tokens,
                     last_prompt_tokens_source,
+                    new_leaf,
                 ),
             )
+            return new_leaf, len(event_rows)
+
         return _write
+
+    def _apply_saved_projection(
+        self, owner_account_id: str, session_id: str, messages: list[Message], new_leaf: int
+    ) -> None:
+        # 写序不变量：先持久化（事务已提交）→ 再改内存投影。
+        proj = self._get_projection(owner_account_id, session_id)
+        proj.messages = list(messages)
+        proj.seq = new_leaf
 
     def save(
         self,
@@ -425,7 +644,7 @@ class SQLiteSessionStore(SessionStore):
         last_prompt_tokens: int | None = None,
         last_prompt_tokens_source: str | None = None,
     ) -> None:
-        self._writer.execute(
+        new_leaf, _ = self._writer.execute(
             self._save_write(
                 session_id,
                 messages,
@@ -436,6 +655,7 @@ class SQLiteSessionStore(SessionStore):
                 last_prompt_tokens_source=last_prompt_tokens_source,
             )
         )
+        self._apply_saved_projection(owner_account_id, session_id, messages, new_leaf)
 
     async def save_async(
         self,
@@ -448,8 +668,11 @@ class SQLiteSessionStore(SessionStore):
         last_prompt_tokens: int | None = None,
         last_prompt_tokens_source: str | None = None,
     ) -> None:
-        await self._writer.execute_async(
-            self._save_write(
+        queue = self._get_write_queue((owner_account_id, session_id))
+        # flush barrier：leaf 与事件批次同事务提交、ack 往返完成后才视为持久化。
+        async with queue.lock:
+            fn = await asyncio.to_thread(
+                self._save_write,
                 session_id,
                 messages,
                 workspace_id,
@@ -458,7 +681,8 @@ class SQLiteSessionStore(SessionStore):
                 last_prompt_tokens=last_prompt_tokens,
                 last_prompt_tokens_source=last_prompt_tokens_source,
             )
-        )
+            new_leaf, _ = await queue.enqueue(fn)
+        self._apply_saved_projection(owner_account_id, session_id, messages, new_leaf)
 
     async def load_async(self, session_id: str, *, owner_account_id: str) -> list[Message]:
         return await asyncio.to_thread(self.load, session_id, owner_account_id=owner_account_id)
@@ -513,6 +737,14 @@ class SQLiteSessionStore(SessionStore):
     def clear(self, session_id: str, owner_account_id: str) -> None:
         def _write(conn):
             conn.execute(
+                "DELETE FROM session_events WHERE session_id = ? AND owner_account_id = ?",
+                (session_id, owner_account_id),
+            )
+            conn.execute(
+                "DELETE FROM writer_leases WHERE session_id = ? AND owner_account_id = ?",
+                (session_id, owner_account_id),
+            )
+            conn.execute(
                 "DELETE FROM sessions WHERE session_id = ? AND owner_account_id = ?",
                 (session_id, owner_account_id),
             )
@@ -520,7 +752,28 @@ class SQLiteSessionStore(SessionStore):
                 "DELETE FROM session_agent_config WHERE session_id = ? AND owner_account_id = ?",
                 (session_id, owner_account_id),
             )
+
         self._writer.execute(_write)
+        self._projections.pop((owner_account_id, session_id), None)
+
+    @staticmethod
+    def _delete_session_rows(conn, session_id: str, owner_account_id: str) -> None:
+        conn.execute(
+            "DELETE FROM session_events WHERE session_id = ? AND owner_account_id = ?",
+            (session_id, owner_account_id),
+        )
+        conn.execute(
+            "DELETE FROM writer_leases WHERE session_id = ? AND owner_account_id = ?",
+            (session_id, owner_account_id),
+        )
+        conn.execute(
+            "DELETE FROM sessions WHERE session_id = ? AND owner_account_id = ?",
+            (session_id, owner_account_id),
+        )
+        conn.execute(
+            "DELETE FROM session_agent_config WHERE session_id = ? AND owner_account_id = ?",
+            (session_id, owner_account_id),
+        )
 
     def delete_sessions_for_workspace(
         self,
@@ -538,19 +791,18 @@ class SQLiteSessionStore(SessionStore):
             ).fetchall()
             ids = [str(row[0]) for row in rows]
             for sid in ids:
-                writer.execute(
-                    "DELETE FROM sessions WHERE session_id = ? AND owner_account_id = ?",
-                    (sid, owner_account_id),
-                )
-                writer.execute(
-                    "DELETE FROM session_agent_config WHERE session_id = ? AND owner_account_id = ?",
-                    (sid, owner_account_id),
-                )
+                self._delete_session_rows(writer, sid, owner_account_id)
             return ids
         rows = self.list_sessions(workspace_id, owner_account_id=owner_account_id)
         ids = [str(r["session_id"]) for r in rows]
+
+        def _write(conn):
+            for sid in ids:
+                self._delete_session_rows(conn, sid, owner_account_id)
+
+        self._writer.execute(_write)
         for sid in ids:
-            self.clear(sid, owner_account_id=owner_account_id)
+            self._projections.pop((owner_account_id, sid), None)
         return ids
 
     def set_title(self, session_id: str, title: str, owner_account_id: str) -> None:
@@ -780,14 +1032,33 @@ class SQLiteSessionStore(SessionStore):
             params.extend(exclude_session_ids)
 
         def _write(conn):
-            cursor = conn.execute(
-                f"DELETE FROM sessions "
-                f"WHERE updated_at < ? AND last_status IN ({status_placeholders}) "
-                f"AND session_id NOT LIKE '%::%'" + exclude_clause,
+            where = (
+                f"updated_at < ? AND last_status IN ({status_placeholders}) "
+                f"AND session_id NOT LIKE '%::%'" + exclude_clause
+            )
+            expired = conn.execute(
+                f"SELECT owner_account_id, session_id FROM sessions WHERE {where}", params
+            ).fetchall()
+            # 先清事件与租约（子查询仍能命中待删的 sessions 行），再删会话本体。
+            conn.execute(
+                "DELETE FROM session_events WHERE (owner_account_id, session_id) IN "
+                f"(SELECT owner_account_id, session_id FROM sessions WHERE {where})",
                 params,
             )
+            conn.execute(
+                "DELETE FROM writer_leases WHERE (owner_account_id, session_id) IN "
+                f"(SELECT owner_account_id, session_id FROM sessions WHERE {where})",
+                params,
+            )
+            cursor = conn.execute(f"DELETE FROM sessions WHERE {where}", params)
+            self._expired_keys = [(str(o), str(s)) for o, s in expired]
             return cursor.rowcount
-        return self._writer.execute(_write)
+
+        deleted = self._writer.execute(_write)
+        for key in getattr(self, "_expired_keys", ()):
+            self._projections.pop(key, None)
+        self._expired_keys = []
+        return deleted
 
     # ---- Session 级 AgentConfig ----
     @staticmethod
