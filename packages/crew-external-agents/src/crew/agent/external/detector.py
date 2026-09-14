@@ -512,7 +512,7 @@ async def probe_runtime(candidate: RuntimeCandidate) -> RuntimeProfile:
 async def discover_local_runtimes() -> list[dict[str, Any]]:
     """Discover known local agents and probe all candidates concurrently."""
 
-    detected = _scan_descriptors(runtime_descriptors())
+    detected = await asyncio.to_thread(_scan_descriptors, runtime_descriptors())
     semaphore = asyncio.Semaphore(4)
 
     async def bounded_probe(candidate: RuntimeCandidate) -> RuntimeProfile:
