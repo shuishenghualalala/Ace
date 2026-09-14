@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
+import os
 import re
 import struct
 import urllib.parse
@@ -22,10 +24,19 @@ from crew.security.outbound import (
     PublicRedirectApprovalRequired,
     fetch_public_http,
     parse_public_http_target,
+    request_public_http,
 )
 from crew.tools.file_utils import _truncate, read_verified_bytes
 from crew.tools.registry import Registry, tool_result
 from crew.tools.security_guard import authorize_file_tool, authorize_network_tool
+from crew.tools.web_search_service import (
+    SearchContext,
+    SearchProvider,
+    SearchResult,
+    register_search_provider,
+    search_config,
+    search_with_fallback,
+)
 
 _MAX_OUTPUT = 12000
 _TEXT_RE = re.compile(r"<[^>]+>")
@@ -65,7 +76,10 @@ def _html_to_text(source: str) -> str:
 
 WEB_SEARCH_SCHEMA = {
     "name": "web_search",
-    "description": "使用公开搜索页面做轻量网页搜索，返回标题和链接。",
+    "description": (
+        "搜索公开网页，返回标题与链接。按配置的有序链路逐个降级"
+        "（API 引擎 → 搜索页刮取兜底），全部失败时报告已尝试链路。"
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -135,26 +149,17 @@ def _search_result_url(raw: str) -> str:
     return href
 
 
-async def handle_web_search(
-    args: dict[str, Any],
-    *,
-    workspace_store: Any | None = None,
-    security_service: Any | None = None,
-) -> str:
-    query = str(args.get("query", "")).strip()
-    limit = max(1, min(20, int(args.get("limit") or 5)))
-    if not query:
-        raise ToolError("query 不能为空")
+async def _bing_html_search(query: str, limit: int, ctx: SearchContext) -> list[SearchResult]:
     url = "https://cn.bing.com/search?" + urllib.parse.urlencode({"q": query})
     try:
         _, source = await _authorized_fetch(
             url,
             tool_name="web_search",
-            workspace_store=workspace_store,
-            security_service=security_service,
+            workspace_store=ctx.workspace_store,
+            security_service=ctx.security_service,
         )
     except (OSError, ValueError) as exc:
-        raise ToolError(f"网页搜索失败: {exc}") from exc
+        raise ToolError(f"搜索页抓取失败: {exc}") from exc
     parser = _BingResults()
     parser.feed(source)
     results = []
@@ -166,10 +171,146 @@ async def handle_web_search(
             result_url = _search_result_url(href)
         except ValueError:
             continue
-        results.append({"title": text, "url": result_url})
+        results.append(SearchResult(title=text, url=result_url))
         if len(results) >= limit:
             break
-    return tool_result(success=True, query=query, results=results)
+    if not results:
+        raise ToolError("未解析到搜索结果")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 搜索 provider：博查 API、SearXNG、Bing 搜索页刮取兜底
+# ---------------------------------------------------------------------------
+
+_BOCHA_API_URL = "https://api.bocha.cn/v1/ai-search"
+
+
+def _bocha_api_key() -> str:
+    env_name = search_config("bocha_api_key_env", "BOCHA_API_KEY")
+    return os.environ.get(env_name, "").strip()
+
+
+def _bocha_available() -> bool:
+    return bool(_bocha_api_key())
+
+
+async def _bocha_search(query: str, limit: int, ctx: SearchContext) -> list[SearchResult]:
+    key = _bocha_api_key()
+    if not key:
+        raise ToolError("bocha API key 未配置")
+    payload = await _authorized_json_post(
+        _BOCHA_API_URL,
+        {"query": query, "freshness": "noLimit", "answer": False, "stream": False},
+        api_key=key,
+        tool_name="web_search",
+        ctx=ctx,
+    )
+    data = payload.get("data") if isinstance(payload, dict) else None
+    pages = (data or {}).get("webPages") or {}
+    values = pages.get("value") or []
+    results = []
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        title = re.sub(r"\s+", " ", str(item.get("name") or "")).strip()
+        if not title or not url.startswith(("http://", "https://")):
+            continue
+        snippet = str(item.get("snippet") or "").strip() or None
+        results.append(SearchResult(title=title, url=url, snippet=snippet))
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _searxng_base_url() -> str:
+    return search_config("searxng_base_url", "").rstrip("/")
+
+
+def _searxng_available() -> bool:
+    return bool(_searxng_base_url())
+
+
+async def _searxng_search(query: str, limit: int, ctx: SearchContext) -> list[SearchResult]:
+    base = _searxng_base_url()
+    if not base:
+        raise ToolError("searxng_base_url 未配置")
+    url = f"{base}/search?" + urllib.parse.urlencode({"q": query, "format": "json"})
+    _, source = await _authorized_fetch(
+        url,
+        tool_name="web_search",
+        workspace_store=ctx.workspace_store,
+        security_service=ctx.security_service,
+    )
+    payload = json.loads(source)
+    values = payload.get("results") or []
+    results = []
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        title = re.sub(r"\s+", " ", str(item.get("title") or "")).strip()
+        if not title or not url.startswith(("http://", "https://")):
+            continue
+        snippet = str(item.get("content") or "").strip() or None
+        results.append(SearchResult(title=title, url=url, snippet=snippet))
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _register_default_search_providers() -> None:
+    register_search_provider(
+        SearchProvider(id="bocha", available=_bocha_available, search=_bocha_search)
+    )
+    register_search_provider(
+        SearchProvider(id="searxng", available=_searxng_available, search=_searxng_search)
+    )
+    register_search_provider(
+        SearchProvider(
+            id="bing_html",
+            available=lambda: True,
+            search=_bing_html_search,
+            degraded=True,
+        )
+    )
+
+
+_register_default_search_providers()
+
+
+async def handle_web_search(
+    args: dict[str, Any],
+    *,
+    workspace_store: Any | None = None,
+    security_service: Any | None = None,
+) -> str:
+    query = str(args.get("query", "")).strip()
+    limit = max(1, min(20, int(args.get("limit") or 5)))
+    if not query:
+        raise ToolError("query 不能为空")
+    outcome = await search_with_fallback(
+        query,
+        limit,
+        SearchContext(workspace_store=workspace_store, security_service=security_service),
+    )
+    results = []
+    for item in outcome.results[:limit]:
+        entry: dict[str, Any] = {"title": item.title, "url": item.url}
+        if item.snippet:
+            entry["snippet"] = item.snippet
+        results.append(entry)
+    payload: dict[str, Any] = {
+        "query": query,
+        "provider": outcome.provider_id,
+        "results": results,
+    }
+    if outcome.degraded:
+        payload["degraded"] = True
+    if outcome.attempted:
+        payload["fallback_from"] = list(outcome.attempted)
+    return tool_result(**payload)
 
 
 async def handle_web_extract(
@@ -193,6 +334,50 @@ async def handle_web_extract(
     title_match = _TITLE_RE.search(source)
     title = _html_to_text(title_match.group(1)) if title_match else ""
     return tool_result(success=True, url=final_url, title=title, text=_truncate(_html_to_text(source)))
+
+
+async def _authorized_json_post(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    api_key: str,
+    tool_name: str,
+    ctx: SearchContext,
+) -> Any:
+    """Authorize the API host (and every redirect hop), POST JSON, decode body."""
+    next_target = url
+    allowed: set[tuple[str, int, str]] = set()
+    for _attempt in range(6):
+        await authorize_network_tool(
+            next_target,
+            tool_name=tool_name,
+            workspace_store=ctx.workspace_store,
+            security_service=ctx.security_service,
+        )
+        allowed.add(parse_public_http_target(next_target).authority)
+        try:
+            return await asyncio.to_thread(_post_json_url, url, payload, api_key, allowed)
+        except PublicRedirectApprovalRequired as exc:
+            next_target = exc.url
+    raise ToolError("网页重定向次数过多")
+
+
+def _post_json_url(
+    url: str,
+    payload: dict[str, Any],
+    api_key: str,
+    allowed_targets: set[tuple[str, int, str]],
+) -> Any:
+    response = request_public_http(
+        url,
+        method="POST",
+        timeout=10.0,
+        max_bytes=2_000_000,
+        headers={"User-Agent": _USER_AGENT, "Authorization": f"Bearer {api_key}"},
+        json_body=payload,
+        allowed_targets=allowed_targets,
+    )
+    return json.loads(response.body.decode(response.charset, errors="replace"))
 
 
 async def _authorized_fetch(

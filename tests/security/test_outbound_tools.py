@@ -127,6 +127,10 @@ async def test_web_search_returns_only_real_result_links(monkeypatch) -> None:
       </h2></li></ol>
       <a href="#feedback">Feedback</a>
     """
+    monkeypatch.delenv("BOCHA_API_KEY", raising=False)
+    from crew.tools.web_search_service import configure_search
+
+    configure_search({"providers": ["bing_html"]})
     monkeypatch.setattr(web_tools, "authorize_network_tool", allow)
     monkeypatch.setattr(web_tools, "_fetch_url", lambda _url, *_args: (_url, source))
 

@@ -153,6 +153,15 @@ tools:
     allowed_private_cidrs: []
     blocked_hosts: []
     allow_file_urls: false
+  # web_search 引擎配置。providers 为显式有序 fallback 列表（按序逐个降级，
+  # 全败时工具返回已尝试链路）；留空 = 默认链（全部可用 provider 按注册序，
+  # bing_html 刮取兜底恒在链尾并在结果中标注 degraded）。
+  # bocha：博查 AI 搜索，需 BOCHA_API_KEY（或 bocha_api_key_env 指定的环境变量）；
+  # searxng：需可公网到达的实例地址（SSRF 防护不允许私网主机）。
+  web_search:
+    providers: []
+    bocha_api_key_env: BOCHA_API_KEY
+    searxng_base_url: ""
   # 大结果落盘阈值：工具结果字符数超过此值时，完整内容写入
   # {CREW_HOME}/tool-results/{tool_call_id}.txt，模型只收「路径 + 头尾预览 + 截断标记」。
   # 默认阈值为 50000 字符。
