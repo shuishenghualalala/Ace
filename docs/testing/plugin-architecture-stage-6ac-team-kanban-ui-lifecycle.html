@@ -22,6 +22,6 @@
 </table>
 <p>平台说明：本片为纯 TypeScript 前端生命周期接线，无平台分支；本轮实测为 macOS 本机。桌面打包态由 nightly-desktop 三平台覆盖；ci.yml python 门禁三平台矩阵首跑结果待推送后回填，不以单机结果替代。</p>
 <p>已知边界（ADR-0041 明示）：能力变化无推送通道，刷新仍是拉取式；config 拉取失败按 legacy-safe 视为可用、已下线板可能短暂回退激活，与既有 wiki 范式一致。Web <code>act(...)</code> 环境提示与既有 <code>App.wiki-lifecycle.test.tsx</code> 同型，为仓库既有测试环境共性、非本片新增。</p>
-<p>主 agent 审查修正：Web <code>featureFlags.ts</code> 两处 JSDoc 中「条目缺席按可用处理」的歧义表述改为精确规则（映射存在而条目缺席是不可用；可用兜底仅指 config 未加载 / 字段缺席）。另记录一项观察：既有 <code>App.wiki-lifecycle.test.tsx</code> 首宿主断言疑似依赖 StrictMode 丢弃渲染的空 registry「侥幸通过」（潜在假阳性），本片未动该文件，留待独立小切片核实。</p>
+<p>主 agent 审查修正：Web <code>featureFlags.ts</code> 两处 JSDoc 中「条目缺席按可用处理」的歧义表述改为精确规则（映射存在而条目缺席是不可用；可用兜底仅指 config 未加载 / 字段缺席）。另记录一项观察：既有 <code>App.wiki-lifecycle.test.tsx</code> 首宿主断言疑似依赖 StrictMode 丢弃渲染的空 registry「侥幸通过」（潜在假阳性）——<strong>后续切片已确认并修复</strong>：假阳性成立且更深一层（断言对象是从未 commit 的杂散 registry，恒绿无意义），测试经共享 <code>test-utils/appHostLifecycle.tsx</code>（每宿主双份 config + 取 commit 实例）重写并以 unhandled 告警区分真未注册，变异测试证明判别力。</p>
 <p><a href="../backend/adr/0041-team-kanban-ui-capability-lifecycle.html">ADR-0041</a> · <a href="../backend/adr/0040-feature-capability-snapshot.html">ADR-0040</a> · <a href="../frontend/desktop-frontend.html">Desktop 前端文档</a> · <a href="../frontend/web-frontend.html">Web 前端文档</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
 </main></body></html>
