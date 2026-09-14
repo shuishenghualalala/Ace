@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>边界探针整改批次测试记录（2026-09-14）</title>
+<style>body{font:16px/1.75 system-ui,sans-serif;max-width:960px;margin:auto;padding:40px 24px;color:#222}h2{border-bottom:1px solid #ddd}h3{margin-top:28px}code{background:#f4f4f4;padding:2px 5px}a{color:#245a83}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 10px}pre{background:#f6f8fa;padding:10px;overflow-x:auto}</style>
+</head>
+<body>
+<h1>边界探针整改批次测试记录</h1>
+<p>2026-09-14 · 基线 <code>d8e7fcb</code> · 执行方式：A/B1/B2/C 四个子 agent 并行开发（先补能失败的行为测试再修实现）+ 两个补充修复，主 agent 差异审查与独立验证，逐片提交。既有相关测试 93 项通过不足以证明收口，本批新增边界探针全部先行复现失败（红）再修复（绿）。</p>
+
+<h2>提交清单</h2>
+<table>
+<thead><tr><th>切片</th><th>提交</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td>A</td><td><code>6f9f93d</code></td><td>配置写回隔离与事务（含补修 model_profiles/evolution 两处同类缺陷）</td></tr>
+<tr><td>B-1</td><td><code>30dbe3b</code></td><td>看板在途请求代际隔离（Dynamic Kanban + Team 看板 + 外援页扫描同族修复）</td></tr>
+<tr><td>B-2</td><td><code>45ee3bb</code></td><td>Wiki 入口能力门控统一（Desktop/Web 双端）</td></tr>
+<tr><td>C</td><td><code>07c0366</code></td><td>ServiceKey 版本化依赖契约（依赖去重/图索引/启动顺序/发布校验）</td></tr>
+<tr><td>D</td><td><code>c6d42dc</code></td><td>pack_exe.ps1 清理列表移除 pandas/numpy（静态确认，Windows 打包态实测待回填）</td></tr>
+</tbody>
+</table>
+
+<h2>A · 配置隔离与事务（crew/state/config.py）</h2>
+<h3>A-1 隔离：anchor 共享 extra 串改</h3>
+<p><strong>根因</strong>：<code>_write_channel_config</code> 中 <code>current = dict(platform_value)</code> 为浅拷贝，<code>_deep_merge_dicts</code> 结果的嵌套 dict 与源对象共享引用；remove-keys 循环 <code>extra.pop(key)</code> 原地修改共享对象，YAML anchor 让两个渠道共享 <code>extra</code> 时删除 A 的字段同时删掉 B 的字段并污染输入。<strong>修法</strong>：构造写入对象前 <code>deepcopy(platform_value)</code> + <code>deepcopy(channel_effective)</code> 与源数据脱钩。</p>
+<h3>A-2 事务：内存先于磁盘发布</h3>
+<p><strong>根因</strong>：<code>_persist_channel_config_locked</code> 等四个 persist 在 <code>Path.replace()</code> 之前更新 <code>self.channels / self.platforms / self.raw_config</code>，写盘失败后内存是新值、磁盘是旧值。<strong>修法</strong>：提取 <code>_atomic_write_yaml</code>（tmp 写入 + 原子替换 + 失败清理残留并重抛，文件内 5 处写盘点收敛）；channel / mcp_servers / model_profiles / evolution 四个 persist 统一为磁盘提交成功后再发布内存状态。</p>
+<p><strong>测试</strong>：<code>tests/test_channel_config_write_isolation.py</code> 10 用例（anchor 共享 platform/channel 嵌套 extra 删除隔离、输入与兄弟渠道不串改、tmp 写失败 / replace 失败 / mcp / model_profiles / evolution 写失败注入、成功路径）。修复前 6+2 用例红 → 修复后 10 全绿。回归 <code>test_config_crud.py</code> + <code>test_config_features_namespace.py</code> + <code>test_channel_config_api.py</code> + <code>test_channel_sessions.py</code> 全过。</p>
+
+<h2>B-1 · 看板在途请求隔离（desktop）</h2>
+<p><strong>根因</strong>：<code>refreshKanbanBoard</code> 在 <code>await Promise.all</code> 后无守卫，卸载后迟到的 board/status/tasks 响应仍回写 state、渲染并重启轮询 interval（实测复现：卸载后看板出现旧任务 + 新增一个 <code>setInterval</code>）。Team 看板 <code>refreshTeamCollaborationBoard</code> / <code>primeTeamCollaborationIdentity</code> 同型（迟到响应"复活"已清空缓存并派发多余事件）。<strong>修法</strong>：模块内聚安装代计数器（init +1 / dispose 与测试重置 +1），请求发起前快照代际，返回后过期即整体丢弃；kanban 侧保留会话一致性校验，Team 侧保留按会话键控的多会话缓存语义。外援页 <code>agents-page.ts</code> 扫描 finally 同族修复（<code>busy</code> 标志无条件复位、渲染保留代际守卫）。</p>
+<p><strong>测试</strong>：探针转正式回归 <code>tests/unit/kanban-board-lifecycle.test.ts</code> 5 用例（卸载、dispose→init、切会话、dispose 停轮询、正常路径）+ <code>team-collaboration-board.test.ts</code> 生命周期 describe 4 用例。修复前 3+3 红 → 修复后全绿；关联回归 5 文件 47 tests 全过。</p>
+
+<h2>B-2 · Wiki 能力门控统一（desktop + web）</h2>
+<p><strong>根因</strong>：双端 Wiki 入口只读旧 <code>wiki.enabled</code>，Runtime <code>failed / available=false</code> 时仍判定可用，入口、页面、reducer 不同步停用。<strong>修法</strong>：Desktop <code>wiki-feature.ts</code> 新增 <code>WIKI_FEATURE_ID</code>，<code>wikiFeatureEnabled</code> 改能力优先 + legacy 回落；页面 PageContribution <code>isAvailable</code> 第二源消除、reducer 注册门同源。Web <code>featureFlags.ts</code> 新增 <code>WIKI_FEATURE_ID</code> / <code>wikiFeatureAvailable</code>，<code>wikiNavigationEnabled</code> 同语义改造。</p>
+<p><strong>语义真值表</strong>：能力字段缺席 → 旧 <code>wiki.enabled !== false</code> 默认可见；字段存在且条目 <code>available=true</code> → 可用（能力优先）；条目缺席或 <code>available=false</code> → 不可用（<code>state=failed</code> 时 <code>wiki.enabled=true</code> 也不可见）。</p>
+<p><strong>测试</strong>：探针转两端正式用例（<code>wiki-feature-capability.test.ts</code> 7 例、wiki-page / wiki-reducer-lifecycle 扩展、web wiki-navigation / featureFlags 能力用例）。修复前 desktop 4 failed / web 10 failed → 修复后全绿；双端 typecheck 通过。</p>
+
+<h2>C · ServiceKey 版本化依赖契约（crew/features）</h2>
+<p><strong>根因</strong>：依赖层按裸 name 识别服务——<code>_unique_service_keys</code> 把同名 v1+v2 当 duplicate；发布校验 <code>published = {binding.key.name}</code> 使"声明 provides v2、实际注册 v1"静默通过。<strong>修法</strong>：七处统一完整 <code>ServiceKey</code>（声明去重与交叉检查、provider 图索引、<code>plan_activation</code> 可用集与 blocked、<code>undeclared_required_services</code>、published/missing_provided、错误消息 <code>name@vN</code>）。语义决策：同名不同版本是不同服务（requires v1+v2 / provides v1 + requires v2 合法），精确同 key 三条互斥约束保留；startup_audit 展示投影有意保留 name（序列化契约）。</p>
+<p><strong>测试</strong>：<code>test_feature_services.py</code> +3、<code>test_feature_manager.py</code> +3。修复前 5 红 → 修复后 44 全绿；五组核心生命周期 115 passed；features 相邻 7 文件 134 passed。</p>
+
+<h2>D · pack_exe.ps1 打包依赖矛盾（静态确认）</h2>
+<p>脚本 293/337 行为办公技能有意安装 pandas/matplotlib（含 numpy 依赖），355 行 staging 清理列表却删除 pandas/numpy（连同 dist-info），打包态 <code>import pandas / matplotlib</code> 必然 ImportError。修法：清理列表收敛为 sympy/onnxruntime/scipy 并加注释防护；体积代价（约 +100MB）为功能正确性既定取舍。<strong>Windows 打包态实际 import 实测待回填</strong>。</p>
+
+<h2>独立验证汇总（主 agent 复跑）</h2>
+<table>
+<thead><tr><th>范围</th><th>命令</th><th>结果</th></tr></thead>
+<tbody>
+<tr><td>后端全量</td><td><code>uv run pytest -q</code></td><td>4241 passed / 43 skipped（3 failed 为三套全量并行抢 CPU 的时序 flake，单跑复验 3 passed）</td></tr>
+<tr><td>桌面全量</td><td><code>npx vitest run</code> + <code>npx tsc --noEmit</code></td><td>169 文件 1947 tests 全过；typecheck 0 error</td></tr>
+<tr><td>Web 全量</td><td><code>npm test</code> + <code>npm run typecheck</code></td><td>35 文件 259 tests 全过；typecheck 通过</td></tr>
+<tr><td>静态门禁</td><td><code>uv run ruff check</code> + <code>uv run lint-imports</code></td><td>All checks passed；9 contracts kept, 0 broken</td></tr>
+</tbody>
+</table>
+
+<h2>遗留与后续</h2>
+<ul>
+<li>D 切片 Windows 打包态 import 实测待回填（需要在 Windows 构建产物上验证 pandas/matplotlib 实际可导入）。</li>
+<li>C 切片发现 startup_audit 展示层同名跨版本显示歧义（两个相同 name），升级为 <code>name@vN</code> 需同步 CLI 打印与既有断言，列后续小任务。</li>
+<li>三条时序敏感测试（mcp 持久化 / provider 停机期限 / team 串行化）在高负载并行下可 flake，CI 串行环境未见复现。</li>
+</ul>
+</body>
+</html>
