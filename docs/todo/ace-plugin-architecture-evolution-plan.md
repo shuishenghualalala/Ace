@@ -11,7 +11,7 @@
 >
 > > **切片 A 同伴数据卫生（本提交）**：审查发现本地主库残留 8 张无属主代码的 `companion_*` 空表（历史原型分支 2db4cb4/9efc3a0 废弃后未清理，不在任何归属清单），已按用户确认删除并归档完整 schema；新增 `crew migrate orphans` 只读诊断（`orphan_main_db_tables`：覆盖集 = OWNER_TABLE_LABELS ∪ 全部 *_DB_TABLES ∪ 新增 `CORE_MAIN_DB_TABLES` 核心表豁免 ∪ `*_schema_version` 版本表，排除 sqlite 内部表；拆库备份表沿用原名天然被清单覆盖），`companion.html` 模板改为状态文档、`notifications.html` 清除对已不存在 companion 路由的残留引用。验证：迁移相关四文件 100 passed、ruff + compileall 通过、CLI 端到端可用。
 >
-> 下一步：6AC 已完成，Team/Kanban 的 UI Contribution 生命周期收口。剩余待逐项说明计划并取得确认：**P2-1 第二步旧节退役**（features.* 双读已落地，旧顶层节按映射表退役，机械低风险，可交给子 agent 并行）；**阶段 5 剩余 UI Contribution**（页面生命周期、API Client、Feature Event Reducer 等）与**同伴 Channel Bundle**（缺既有业务实现，按新 Channel Bundle 的产品范围另行明确）。三平台验证：ci.yml python 门禁已扩为 ubuntu/windows/macos 矩阵（静态检查保持 Linux 单跑），桌面打包态由 nightly-desktop 三平台覆盖；矩阵首跑结果待推送后回填。
+> 下一步：6AC 已完成，Team/Kanban 的 UI Contribution 生命周期收口；**同伴 Channel Bundle 产品范围已确认**（ADR-0042，AHUAMAO 拍板：同伴以 nearby 渠道平台身份进入 `product.channels`，不建独立 Feature、复用渠道会话管道与 channels.db 路由，实施列后续切片）。剩余待逐项说明计划并取得确认：**P2-1 第二步旧节退役**（features.* 双读已落地，旧顶层节按映射表退役，写侧已统一产 features.channels，机械低风险，可交给子 agent 并行）与**阶段 5 剩余 UI Contribution**（页面生命周期、API Client、Feature Event Reducer 等）。三平台验证：ci.yml python 门禁已扩为 ubuntu/windows/macos 矩阵（静态检查保持 Linux 单跑），桌面打包态由 nightly-desktop 三平台覆盖；矩阵首跑结果待推送后回填。
 >
 > 渐进/后续范围：P2-1 已完成 features.* 双读，旧节退役尚未实施；P2-5 表前缀仍为渐进项；根包余下物理拆分为后续范围。P2-6 kanban 事件命名空间已决定保留发布契约，pnpm workspace 已降为观察项；6Y/6Z 已完成第三批拆包与 wiki_learning 表归属决策。同伴缺少既有业务实现，按新 Channel Bundle 的产品范围另行明确，不将占位实现当作迁移完成。
 
