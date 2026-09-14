@@ -5,7 +5,7 @@
 <style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
 <body><main>
 <h1>ADR-0029 · Dynamic Kanban Feature 生命周期</h1>
-<p>状态：设计已确认，实施与验证中 · 日期：2026-09-08 · 阶段：4B-1。</p>
+<p>状态：已实施并验证（阶段 4B-1 Dynamic Kanban 生命周期，2026-09-10 提交随 4B 批次落地，验证记录见 <a href="../../testing/plugin-architecture-stage-4b-dynamic-kanban.html">阶段 4B-1 测试记录</a>）· 日期：2026-09-08 · 阶段：4B-1。</p>
 <h2>背景与候选方案</h2>
 <p>宿主直接创建看板 Store 和 Manager，Team 同时持有该 Store。仅把 Manager 包装为可停用 Driver，会让 Team 在 Generation 退出后继续访问旧连接。宿主关闭顺序也不能替代运行期停用和更新的所有权约束。</p>
 <h2>决定</h2>

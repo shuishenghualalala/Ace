@@ -5,7 +5,7 @@
 <style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
 <body><main>
 <h1>ADR-0028 · 外援 Provider 与 Run 生命周期</h1>
-<p>状态：切片已确认，契约实施与验证中 · 日期：2026-09-08 · 阶段：4A-2。</p>
+<p>状态：已实施并验证（阶段 4A-2 外援 Provider/Run 生命周期，2026-09-10 提交 `d26a379`，验证记录见 <a href="../../testing/plugin-architecture-stage-4a-external-runtime.html">阶段 4A-2 测试记录</a>）· 日期：2026-09-08 · 阶段：4A-2。</p>
 <h2>背景与候选方案</h2>
 <p>ADR-0027 已拆开外援 Catalog 与 Team 存储边界，但宿主和消费者仍长期持有对象，Adapter 运行也尚未整体归属 Feature Generation。仅在宿主退出时清理进程不能保护配置更新、单独停用和激活失败。</p>
 <h2>架构约束</h2>

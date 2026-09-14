@@ -14,13 +14,14 @@ from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 log = get_logger("migration")
 
 OWNER_TABLE_LABELS = {
+    # 主库 core 状态表（owner 归一由通用巡检/认领扫描）。
+    # 已拆库的 Feature 表（cron_jobs / runtime_tasks / notifications /
+    # channel_session_routes 等）不再列入：它们在各自 *_DB_TABLES 清单内，
+    # 主库同名旧表只是 ADR-0038 的回退备份、不参与 owner 扫描；
+    # legacy_owner_scan_targets 的排除条件（table not in *_DB_TABLES）据此保持。
     "sessions": "会话",
     "session_agent_config": "会话 Agent 配置",
-    "channel_session_routes": "渠道会话路由",
     "workspaces": "工作空间",
-    "cron_jobs": "定时任务",
-    "runtime_tasks": "任务",
-    "notifications": "通知",
     "compaction_summaries": "压缩摘要",
 }
 

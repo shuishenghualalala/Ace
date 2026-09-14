@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6Y · 第三批 workspace 拆包 team/dynamickanban/channels/work</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6Y · 第三批 workspace 拆包 team/dynamickanban/channels/work</h1>
+<p>2026-09-14 · 提交 <code>1b725af</code>（ADR-0037 第三批，用户批准立项）。team / dynamickanban / channels / work 四个顶层 Feature 目录迁成员包。</p>
+<h2>处置</h2>
+<ul>
+<li>66 文件 rename；4 个 <code>__init__.py</code> 删除成纯 portion；7 处 re-export 消费方改直连。</li>
+<li><strong>跨成员依赖显式声明</strong>：crew-work→crew-wiki、crew-team→crew-external-agents（workspace 源）。</li>
+<li>四成员列根包依赖保 CI 零改动。遗留：根包收敛批（browser/sites/memory/tasks/cron/tools 细拆与 agent 中间层）为后续范围。</li>
+</ul>
+<h2>验证记录（子 agent 实施，主 agent 审查后复跑）</h2>
+<table><tr><th>项</th><th>结果</th></tr>
+<tr><td>后端全量 <code>pytest tests/ -q</code></td><td>4183 passed / 0 failed</td></tr>
+<tr><td>冒烟</td><td>/health 200</td></tr>
+</table>
+<p>平台说明：import 名不变、跨成员依赖声明走 workspace 源；Docker/打包态待远程验证。ci.yml python 门禁三平台矩阵首跑结果待推送后回填。</p>
+<p><a href="../backend/adr/0037-uv-workspace-pilot-proposal.html">ADR-0037</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

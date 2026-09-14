@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6S · 拆库 work 批次</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6S · 拆库 work 批次</h1>
+<p>2026-09-14 · 提交 <code>445111e</code>（ADR-0038 第二批）。work 域实际 15 表迁 <code>crew_data/work.db</code>，主库同名旧表保留为回退备份。设计与批次清单见 <a href="../backend/adr/0038-feature-db-split.html">ADR-0038</a>。</p>
+<h2>处置</h2>
+<ul>
+<li><code>_store_factory</code> 公共点统一 ensure-schema → stamp → 单事务整域复制；FK 序：items→events/links→references、sources→records。</li>
+<li><strong>机制修正</strong>：copy 幂等 gate 由逐表改域级——逐表跳过在域内 FK 下会复制跨表孤儿，实测触发约束失败；cron 单链语义不变。</li>
+<li>相对路径归一提炼 <code>_resolve_crew_home_path()</code> 共用；claim-legacy 三库映射。</li>
+</ul>
+<h2>验证记录（子 agent 开发，主 agent 审查后复跑）</h2>
+<table><tr><th>项</th><th>结果</th></tr>
+<tr><td>新增契约测试</td><td>11 个（整域复制幂等、FK 序、域级 gate、claim-legacy 三库映射等）</td></tr>
+<tr><td>后端全量 <code>pytest tests/ -q</code></td><td>4118 passed / 0 failed（双跑一致）</td></tr>
+</table>
+<p>平台说明：纯 SQLite/路径语义，无平台分支；本轮实测为 macOS 本机。ci.yml python 门禁三平台矩阵首跑结果待推送后回填。</p>
+<p><a href="../backend/adr/0038-feature-db-split.html">ADR-0038</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>
