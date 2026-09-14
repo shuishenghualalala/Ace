@@ -631,7 +631,7 @@ class Config:
     def _persist_owner_channel_config_locked(self, owner_account_id: str, name: str, config_data: dict[str, Any]) -> Path:
         yaml_path = owner_overlay_config_path(owner_account_id)
         data = _read_yaml_file(yaml_path)
-        merged = _write_channel_config(data, name, config_data, include_platforms=False)
+        _write_channel_config(data, name, config_data, include_platforms=False)
 
         yaml_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
@@ -1454,7 +1454,9 @@ def _resolve_active_model_id(cfg: Config) -> str:
 # 库路径（runtime.<feature>_db_path）不进 features.*：db 文件由 core 装配层
 # 消费并注入各 Store（Feature 自身不读自己的库路径），按"谁消费谁归属"留在
 # runtime.*，属于终态而非过渡态。platforms 是 channels 的更旧别名（读取侧
-# 已在 channel_config 合并），不单独映射，随第二步旧节退役一并处理。
+# 已在 channel_config 合并），不单独映射；P2-1 第二步起写侧统一生产
+# features.channels（见 _write_channel_config），旧节仅保留读取兼容、不再由
+# 模板或运行时写回产出。
 _FEATURES_SECTION_MAP: dict[str, tuple[str, ...]] = {
     "wiki": ("wiki",),
     "cron": ("cron",),
@@ -1488,20 +1490,30 @@ def _write_channel_config(
     *,
     include_platforms: bool = True,
 ) -> dict[str, Any]:
-    """Materialize one channel into the canonical namespace and return its value."""
+    """Materialize one channel into the canonical ``features.channels`` namespace.
+
+    写侧终态契约（P2-1 第二步）：通道配置一律写回 features.channels，不再
+    生产旧顶层 channels 节。磁盘上同名条目的旧位置（platforms/channels）仍
+    作为本次生效值的合并来源参与计算，写回后按通道名逐个清理（legacy
+    positions cleaned per channel）。remove-keys 与合并语义保持不变。
+    """
     platforms = data.get("platforms")
     platform_map = platforms if isinstance(platforms, dict) else {}
     channels = data.get("channels")
     channel_map = channels if isinstance(channels, dict) else {}
     features = data.get("features")
-    if isinstance(features, dict) and isinstance(features.get("channels"), dict):
-        target = features["channels"]
-        fallback_maps = ([platform_map, channel_map] if include_platforms else [channel_map])
-    else:
-        if not isinstance(channels, dict):
-            data["channels"] = channel_map
-        target = channel_map
-        fallback_maps = [platform_map] if include_platforms else []
+    if not isinstance(features, dict):
+        if features is not None:
+            log.warning("features 节必须是键值映射，通道写回时已重置为空映射")
+        features = {}
+        data["features"] = features
+    target = features.get("channels")
+    if not isinstance(target, dict):
+        if target is not None:
+            log.warning("features.channels 必须是键值映射，通道写回时已重置为空映射")
+        target = {}
+        features["channels"] = target
+    fallback_maps = [platform_map, channel_map] if include_platforms else [channel_map]
 
     payload = deepcopy(config_data)
     raw_remove = payload.pop("_remove_keys", [])

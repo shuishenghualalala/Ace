@@ -248,9 +248,10 @@ async def test_save_platform_config_persists_without_secret(channel_api, auth_he
     assert "TESTCHAT_API_KEY=sk-secret" in env_text
 
     persisted = yaml.safe_load(_owner_overlay_path(config_yaml.parent).read_text(encoding="utf-8"))
-    assert persisted["channels"]["testchat"]["enabled"] is True
-    assert persisted["channels"]["testchat"]["serverUrl"] == "wss://dummy.example/ws"
-    assert "apiKey" not in persisted["channels"]["testchat"]
+    # 写侧终态：overlay 首次写回即创建 features.channels，不再生产旧 channels 节
+    assert persisted["features"]["channels"]["testchat"]["enabled"] is True
+    assert persisted["features"]["channels"]["testchat"]["serverUrl"] == "wss://dummy.example/ws"
+    assert "apiKey" not in persisted["features"]["channels"]["testchat"]
 
 
 @pytest.mark.asyncio
@@ -533,7 +534,7 @@ async def test_local_owner_can_save_platform_config(channel_api, auth_headers):
     body = resp.json()
     assert body["ok"] is True
     persisted = yaml.safe_load(_owner_overlay_path(config_yaml.parent).read_text(encoding="utf-8"))
-    assert persisted["channels"]["testchat"]["enabled"] is True
+    assert persisted["features"]["channels"]["testchat"]["enabled"] is True
 
 
 @pytest.mark.asyncio
@@ -618,8 +619,8 @@ async def test_disconnect_platform_stops_channel_without_deleting_account(channe
     env_text = (_owner_overlay_path(config_yaml.parent).parent / ".env").read_text(encoding="utf-8")
     assert "TESTCHAT_API_KEY=sk-secret" in env_text
     persisted = yaml.safe_load(_owner_overlay_path(config_yaml.parent).read_text(encoding="utf-8"))
-    assert persisted["channels"]["testchat"]["enabled"] is False
-    assert persisted["channels"]["testchat"]["serverUrl"] == "wss://dummy.example/ws"
+    assert persisted["features"]["channels"]["testchat"]["enabled"] is False
+    assert persisted["features"]["channels"]["testchat"]["serverUrl"] == "wss://dummy.example/ws"
 
 
 @pytest.mark.asyncio
@@ -641,7 +642,9 @@ async def test_delete_platform_account_clears_id_and_key_but_keeps_fixed_url(cha
                             "client_id": "nested-client",
                             "keep": "kept",
                         },
-                    }
+                    },
+                    # 其它 legacy 通道条目：不受写回影响，仍可读
+                    "feishu": {"token": "keep-me"},
                 },
             },
             allow_unicode=True,
@@ -664,12 +667,19 @@ async def test_delete_platform_account_clears_id_and_key_but_keeps_fixed_url(cha
     assert "TESTCHAT_API_KEY" not in env_text
 
     persisted = yaml.safe_load(_owner_overlay_path(config_yaml.parent).read_text(encoding="utf-8"))
-    testchat = persisted["channels"]["testchat"]
+    # 写侧终态：legacy-only overlay 的写回落 features.channels，旧位置按通道清理
+    assert "testchat" not in persisted["channels"]
+    testchat = persisted["features"]["channels"]["testchat"]
     assert testchat["enabled"] is False
     assert testchat["serverUrl"] == "wss://fixed.example/ws"
     assert "clientId" not in testchat
     assert "apiKey" not in testchat
     assert testchat["extra"] == {"keep": "kept"}
+    # 未写回的其它 legacy 条目原样保留，读取路径（双读归一）仍然生效
+    assert persisted["channels"]["feishu"] == {"token": "keep-me"}
+    assert app.state.crew.config.channel_config("feishu", owner_account_id=OWNER_A) == {
+        "token": "keep-me"
+    }
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,6 @@ runtime:
   log_file: logs/crew.log
   llm_trace: false
   max_iterations: 0
-  dk_task_timeout_seconds: 3600
   # 外部 Runtime 统一超时策略。hard_timeout_seconds: 0 表示不设硬截止；
   # 缺省时保持各协议现有兼容默认（ACP 仍为 idle×4 或 idle+900）。
   timeout_policy:
@@ -92,67 +91,7 @@ auth:
     login_path: /auth/login-by-code
     timeout_seconds: 10
     session_ttl_seconds: 604800
-team:
-  max_concurrent_children: 3
-  members:
-  - name: researcher
-    role: 负责查资料、读取文件、搜集与整理信息
-  - name: coder
-    role: 负责编写代码、执行命令、文件读写等工程操作
-# 外部智能体与外部 Team 的产品入口开关。关闭时仅隐藏/禁用，历史数据仍保留。
-external_agents:
-  enabled: true
-  # true: 外援经过 Ace native runtime；false: 外援按旧 runtime 直联。
-  # 默认 false；该开关不影响内建工具的会话安全边界。
-  security_enabled: false
-
-# 子 agent（delegate_task / run_agent）的超时在 tasks.subagent 配置；
-# 顶层 subagent: 节从未被 loader 读取（历史死配置），已移除。
-tasks:
-  auto_background_after_seconds: 15
-  heartbeat_interval_seconds: 10
-  monitor_interval_seconds: 5
-  wait_timeout_seconds: 30
-  finished_retention_days: 7
-  shell:
-    inactivity_timeout_seconds: 600
-    execution_timeout_seconds: 0
-  # 子 agent（delegate_task / run_agent）长任务超时：
-  # 空闲 N 秒零输出中止；绝对运行上限兜底。0 表示不限。
-  subagent:
-    inactivity_timeout_seconds: 120
-    execution_timeout_seconds: 1800
-  agent_turn:
-    inactivity_timeout_seconds: 600
-    execution_timeout_seconds: 3600
-cron:
-  enabled: true
-  max_parallel_jobs: 2
 tools:
-  browser:
-    enabled: true
-    runtime: electron
-    display: in_app
-    # 不创建独立浏览器窗口；页面需要展示时挂载到 Crew 的 WebContentsView 面板。
-    headed: false
-    idle_timeout_seconds: 600
-    command_timeout_seconds: 30
-    navigation_timeout_seconds: 60
-    queue_timeout_seconds: 30
-    max_output_chars: 30000
-    max_transfer_bytes: 104857600
-    artifact_ttl_hours: 24
-    # 动作治理档位：
-    # - off：全部放行，不弹任何审批
-    # - confirm_sensitive：默认。提交表单/回车/上传/下载/接受弹窗/页面内执行代码等
-    #   传「或高危」动作在桌面端弹一次性审批卡（allow once）；普通读写动作不打扰
-    # - confirm_writes：所有写交互（click/type/press/select/check/drag/fill_form/drop）都弹审批
-    # - read_only：写交互与高危动作直接拒绝
-    governance_mode: confirm_sensitive
-    allowed_private_hosts: []
-    allowed_private_cidrs: []
-    blocked_hosts: []
-    allow_file_urls: false
   # 大结果落盘阈值：工具结果字符数超过此值时，完整内容写入
   # {CREW_HOME}/tool-results/{tool_call_id}.txt，模型只收「路径 + 头尾预览 + 截断标记」。
   # 默认阈值为 50000 字符。
@@ -182,8 +121,6 @@ plugins:
   - feishu
   - weixin
   disabled:
-
-channels: {}
 mcp_servers:
   cua-driver:
     command: cua-driver
@@ -206,31 +143,6 @@ access_control:
     - '*'
     disabled_skills: ["browser-use"]   # browser-use skill 依赖内置浏览器；external 的 browser toolset 已在 disabled_toolsets 里禁用，避免展示无法使用的“死 skill”
 
-wiki:
-  # 聊天中上传的附件是否自动收入 default 知识库。
-  # true（默认）：保存原文件并解析成 markdown，并自动生成轻量摘要/标签；
-  # 深度整理（生成 entity/topic/relationship）默认不自动执行，需要用户确认。
-  capture_attachments: true
-  ingest:
-    # 是否在深度整理计划生成成功后自动应用计划。
-    # true：capture → parse → orient → plan → apply 同一轮完成，不展示确认卡。
-    # false（默认）：plan 后展示创建/更新/跳过计划并等待用户确认，后续回合再 apply。
-    # 该配置只影响实体/概念/主题/关系的深度整理；删除、归档、视频外传仍必须人工确认。
-    auto_apply: false
-    # 捕获后是否自动生成轻量摘要、标签和是否建议整理的标记（第二层）。
-    auto_summarize: true
-    # 捕获后是否自动深度整理（第三层）。默认关闭，避免自动把临时文件写入知识库。
-    auto_ingest: false
-  # Wiki 数据独立存储目录。留空时保持现状：
-  # {runtime.crew_home}/accounts/{owner_hash}/wiki_lib/。
-  # 也可通过 CREW_WIKI_HOME 环境变量覆盖。
-  storage:
-    root: ""
-  # Wiki 提取可选用独立的、适合稳定结构化输出的模型。
-  # 可填 llm.models 下的 profile key；留空时跟随当前会话模型，
-  # 无会话上下文时回退当前账号的默认模型。
-  model: ""
-
 # 进程内 HTTP 边界（web_search/web_extract/Wiki 抓取）的上游代理。
 # 安全意味着“经过策略判断”，判断通过后把流量级联到用户已有的上游代理，
 # 而不是强制直连。留空时回退到环境变量
@@ -245,45 +157,105 @@ network:
   allow_loopback_proxy: true
 
 # ============================================================================
-# features.*：Feature 配置的目标命名空间（迁移期双读，新节优先）。
+# features.*：Feature 配置的规范命名空间（P2-1 第二步起为模板唯一布局）。
 #
 # 约定：每个 Feature 只读自己的 features.<name> 子树，子键结构与旧顶层节
-# 逐字兼容（features.wiki 的内容 = 现 wiki: 节的内容）。迁移期 loader 同时
-# 读旧节与本节：同名键一律 features 侧获胜，未在 features 出现的键回落旧节
-# （上面各旧节在迁移完成前保持有效，将按 Feature 逐个退役）。
+# 逐字兼容（features.wiki 的内容 = 旧 wiki: 节的内容）。历史上平铺的
+# runtime.dk_* 键对应 features.dynamic_kanban（子键去掉 dk_ 前缀）；
+# tools.browser 对应 features.browser。
+# 兼容性：手工编辑的旧配置（顶层 wiki/cron/team/tasks/external_agents/
+# channels/platforms、tools.browser、runtime.dk_*）仍可正常读取——同名键
+# features 侧获胜、未在 features 出现的键回落旧节；但产品不再生成这些旧
+# 位置，运行时写回统一落在 features.channels。
 # 注意：数据库路径（runtime.<feature>_db_path）由 core 装配层统一消费注入，
-# 属基础设施配置，不进 features.*；dynamic-kanban 的目标子键去掉 dk_ 前缀。
+# 属基础设施配置，不进 features.*。
 # ============================================================================
 features:
-  # 即 wiki: 节的目标形态（结构逐字兼容，此处仅列常用键示例）。
   wiki:
+    # 聊天中上传的附件是否自动收入 default 知识库。
+    # true（默认）：保存原文件并解析成 markdown，并自动生成轻量摘要/标签；
+    # 深度整理（生成 entity/topic/relationship）默认不自动执行，需要用户确认。
     capture_attachments: true
-    model: ""
     ingest:
+      # 是否在深度整理计划生成成功后自动应用计划。
+      # true：capture → parse → orient → plan → apply 同一轮完成，不展示确认卡。
+      # false（默认）：plan 后展示创建/更新/跳过计划并等待用户确认，后续回合再 apply。
+      # 该配置只影响实体/概念/主题/关系的深度整理；删除、归档、视频外传仍必须人工确认。
       auto_apply: false
+      # 捕获后是否自动生成轻量摘要、标签和是否建议整理的标记（第二层）。
       auto_summarize: true
+      # 捕获后是否自动深度整理（第三层）。默认关闭，避免自动把临时文件写入知识库。
       auto_ingest: false
-  # 即 cron: 节。
+    # Wiki 数据独立存储目录。留空时保持现状：
+    # {runtime.crew_home}/accounts/{owner_hash}/wiki_lib/。
+    # 也可通过 CREW_WIKI_HOME 环境变量覆盖。
+    storage:
+      root: ""
+    # Wiki 提取可选用独立的、适合稳定结构化输出的模型。
+    # 可填 llm.models 下的 profile key；留空时跟随当前会话模型，
+    # 无会话上下文时回退当前账号的默认模型。
+    model: ""
   cron:
     enabled: true
     max_parallel_jobs: 2
-  # 即 team: 节。
   team:
     max_concurrent_children: 3
-  # 即 tasks: 节（含 shell/subagent/agent_turn 子节）。
+    members:
+    - name: researcher
+      role: 负责查资料、读取文件、搜集与整理信息
+    - name: coder
+      role: 负责编写代码、执行命令、文件读写等工程操作
+  # 子 agent（delegate_task / run_agent）的超时在 tasks.subagent 配置；
+  # 顶层 subagent: 节从未被 loader 读取（历史死配置），已移除。
   tasks:
     auto_background_after_seconds: 15
+    heartbeat_interval_seconds: 10
+    monitor_interval_seconds: 5
     wait_timeout_seconds: 30
-  # 即 external_agents: 节。
+    finished_retention_days: 7
+    shell:
+      inactivity_timeout_seconds: 600
+      execution_timeout_seconds: 0
+    # 子 agent（delegate_task / run_agent）长任务超时：
+    # 空闲 N 秒零输出中止；绝对运行上限兜底。0 表示不限。
+    subagent:
+      inactivity_timeout_seconds: 120
+      execution_timeout_seconds: 1800
+    agent_turn:
+      inactivity_timeout_seconds: 600
+      execution_timeout_seconds: 3600
+  # 外部智能体与外部 Team 的产品入口开关。关闭时仅隐藏/禁用，历史数据仍保留。
   external_agents:
     enabled: true
+    # true: 外援经过 Ace native runtime；false: 外援按旧 runtime 直联。
+    # 默认 false；该开关不影响内建工具的会话安全边界。
     security_enabled: false
-  # 即 channels: 节（各通道配置按通道名作为子键）。
+  # 各通道配置按通道名作为子键；运行时写回也统一落在此处。
   channels: {}
-  # 即 tools.browser 节。
   browser:
     enabled: true
+    runtime: electron
+    display: in_app
+    # 不创建独立浏览器窗口；页面需要展示时挂载到 Crew 的 WebContentsView 面板。
+    headed: false
+    idle_timeout_seconds: 600
+    command_timeout_seconds: 30
+    navigation_timeout_seconds: 60
+    queue_timeout_seconds: 30
+    max_output_chars: 30000
+    max_transfer_bytes: 104857600
+    artifact_ttl_hours: 24
+    # 动作治理档位：
+    # - off：全部放行，不弹任何审批
+    # - confirm_sensitive：默认。提交表单/回车/上传/下载/接受弹窗/页面内执行代码等
+    #   传「或高危」动作在桌面端弹一次性审批卡（allow once）；普通读写动作不打扰
+    # - confirm_writes：所有写交互（click/type/press/select/check/drag/fill_form/drop）都弹审批
+    # - read_only：写交互与高危动作直接拒绝
     governance_mode: confirm_sensitive
+    allowed_private_hosts: []
+    allowed_private_cidrs: []
+    blocked_hosts: []
+    allow_file_urls: false
   # dynamic-kanban 历史上平铺在 runtime.dk_*，目标形态为独立子树
   # （task_timeout_seconds / verification_gate_enabled）。
   dynamic_kanban:

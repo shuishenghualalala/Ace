@@ -1,4 +1,4 @@
-"""features.* 配置命名空间双读测试（命名审计 P2-1 · 渐进第一步）。
+"""features.* 配置命名空间测试（命名审计 P2-1）。
 
 锁定 load_config 的通用双读语义：
 - 同名键 features 侧获胜，旧节兜底（含嵌套 dict 深合并、list 整体替换）
@@ -7,6 +7,8 @@
 - runtime.dk_* 平铺键映射到 features.dynamic_kanban、tools.browser 映射到 features.browser
 - 库路径（runtime.<feature>_db_path）不进 features.*（core 基础设施，锁定设计决策）
 - 顶层 subagent: 节保持死配置语义，example 模板已移除该段（P3-1）
+- 写侧终态（P2-1 第二步）：persist_channel_config 一律落 features.channels，
+  旧 channels/platforms 条目按通道名清理，example 模板不再生产旧节
 """
 
 from __future__ import annotations
@@ -331,6 +333,11 @@ def test_channel_persistence_removes_keys_from_platforms_fallback(tmp_path: Path
 
     cfg.persist_channel_config("feishu", {"_remove_keys": ["obsolete"]})
 
+    # 写侧终态：一律落 features.channels，旧位置按通道名清理
+    written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert written["features"]["channels"]["feishu"] == {"token": "current"}
+    assert "feishu" not in written["channels"]
+    assert "feishu" not in written["platforms"]
     assert load_config(config_path=config_path).channel_config("feishu") == {"token": "current"}
     assert cfg.channel_config("feishu") == {"token": "current"}
 
@@ -488,9 +495,71 @@ def test_channel_persistence_preserves_extra_replacement_and_clear_semantics(tmp
     cfg = load_config(config_path=config_path)
 
     cfg.persist_channel_config("feishu", {"extra": {"new": 3}})
+    # 旧 channels-only 文件写入后同样迁移到 features.channels 并清理旧条目
+    written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert written["features"]["channels"]["feishu"] == {"extra": {"new": 3}, "token": "t"}
+    assert "feishu" not in written["channels"]
     assert load_config(config_path=config_path).channel_config("feishu")["extra"] == {"new": 3}
     cfg.persist_channel_config("feishu", {"_remove_keys": ["extra"]})
     assert "extra" not in load_config(config_path=config_path).channel_config("feishu")
+
+
+def test_channel_persistence_fresh_install_creates_features_channels(tmp_path: Path):
+    """全新安装（无 features 节）：首次写回创建 features.channels 并落盘可读回。"""
+    config_path = _write_config(
+        tmp_path,
+        {"runtime": {"log_level": "WARNING"}},
+    )
+    cfg = load_config(config_path=config_path)
+
+    cfg.persist_channel_config("feishu", {"token": "t", "extra": {"a": 1}})
+
+    written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert written["features"]["channels"]["feishu"] == {"token": "t", "extra": {"a": 1}}
+    # 不再生产旧顶层 channels/platforms 节
+    assert "channels" not in written
+    assert "platforms" not in written
+    assert load_config(config_path=config_path).channel_config("feishu") == {
+        "token": "t", "extra": {"a": 1}
+    }
+
+
+def test_channel_persistence_replaces_non_dict_features_garbage(tmp_path: Path, caplog):
+    """features 节本身非法：写回告警并重置，产物仍是合法可加载的配置。"""
+    config_path = _write_config(
+        tmp_path,
+        {"channels": {"feishu": {"token": "legacy"}}, "features": "garbage"},
+    )
+    cfg = load_config(config_path=config_path)
+
+    with caplog.at_level("WARNING", logger="crew.config"):
+        cfg.persist_channel_config("feishu", {"token": "new"})
+
+    assert any("features 节必须是键值映射" in record.message for record in caplog.records)
+    written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert written["features"]["channels"]["feishu"] == {"token": "new"}
+    assert "feishu" not in written["channels"]
+    assert load_config(config_path=config_path).channel_config("feishu") == {"token": "new"}
+
+
+def test_channel_persistence_replaces_non_dict_features_channels_garbage(tmp_path: Path, caplog):
+    """features.channels 子节点非法：写回告警并重置，其余 features 子节保留。"""
+    config_path = _write_config(
+        tmp_path,
+        {
+            "features": {"channels": [1, 2], "cron": {"enabled": False}},
+        },
+    )
+    cfg = load_config(config_path=config_path)
+
+    with caplog.at_level("WARNING", logger="crew.config"):
+        cfg.persist_channel_config("feishu", {"token": "new"})
+
+    assert any("features.channels 必须是键值映射" in record.message for record in caplog.records)
+    written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert written["features"]["channels"]["feishu"] == {"token": "new"}
+    assert written["features"]["cron"] == {"enabled": False}
+    assert load_config(config_path=config_path).channel_config("feishu") == {"token": "new"}
 
 
 # ----------------------- P3-1：subagent 死配置 -----------------------
@@ -514,7 +583,11 @@ def test_top_level_subagent_section_remains_dead(tmp_path: Path):
 
 
 def test_example_template_targets_features_namespace():
-    """example 给出 features 目标形态、保留旧节、且已移除顶层 subagent 死段。"""
+    """example 模板已收敛为 features.* 唯一布局（P2-1 第二步）。
+
+    mapped 旧节全部退场（含 platforms 别名、tools.browser 子树、runtime.dk_*
+    平铺键），旧节内容无损并入 features.*；unmapped 节原样保留。
+    """
     data = yaml.safe_load(
         (REPO_ROOT / "config" / "config.yaml.example").read_text(encoding="utf-8")
     )
@@ -531,6 +604,18 @@ def test_example_template_targets_features_namespace():
         "browser",
         "dynamic_kanban",
     } <= set(features)
-    # 迁移期旧节全部保留
-    for legacy in ("wiki", "cron", "team", "tasks", "external_agents", "channels"):
-        assert legacy in data
+    # mapped 旧节不再出现在模板里
+    for legacy in ("wiki", "cron", "team", "tasks", "external_agents", "channels", "platforms"):
+        assert legacy not in data
+    assert "browser" not in data["tools"]
+    assert not any(key.startswith("dk_") for key in data["runtime"])
+    # unmapped 节保持不变
+    for section in ("llm", "security", "agent", "gateway", "auth", "mcp_servers", "network"):
+        assert section in data
+    assert "evolution" in data["agent"]
+    # 旧节内容无损并入 features.*（抽查仅旧节携带的键）
+    assert data["features"]["team"]["members"]
+    assert "storage" in data["features"]["wiki"]
+    assert "shell" in data["features"]["tasks"]
+    assert "idle_timeout_seconds" in data["features"]["browser"]
+    assert data["features"]["dynamic_kanban"]["task_timeout_seconds"] == 3600
