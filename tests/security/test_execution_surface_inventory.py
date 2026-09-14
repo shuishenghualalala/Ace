@@ -34,6 +34,7 @@ PROCESS_CALLS = {
 INDIRECT_SURFACES = {
     "crew/browser/manager.py",
     "crew/cron/scheduler.py",
+    "crew/security/launch.py",
     "crew/sites/manager.py",
     "crew/skills/html-to-pdf/scripts/convert.cjs",
     "crew/team/team_manager.py",

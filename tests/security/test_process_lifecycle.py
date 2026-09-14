@@ -163,7 +163,7 @@ async def test_terminate_process_tree_kills_whole_group():
                 break
             time.sleep(0.05)
         assert child_pid is not None, "孙进程未启动"
-        await pl.terminate_process_tree(proc, timeout=5.0)
+        await pl.terminate_process_tree(proc, grace_ms=5000)
         assert proc.returncode is not None
         # 整树：孙进程也必须在宽限内被回收
         deadline = time.monotonic() + 5
@@ -226,3 +226,78 @@ def test_owner_for_pid_exited_detection():
     proc.wait(timeout=5)
     owner = pl.ProcessOwner.for_pid(proc.pid)
     assert owner.exited() is True
+
+
+# ---- F4：统一宽限 + 终末超时 ----
+
+def test_resolve_grace_ms_defaults_and_clamps():
+    assert pl.resolve_grace_ms(None) == pl.DEFAULT_GRACE_MS == 3000
+    assert pl.resolve_grace_ms(1500) == 1500
+    assert pl.resolve_grace_ms(-5) == 0
+
+
+class _UnkillableProcess:
+    """句柄永远不结算的假进程：模拟 D-state 等不可杀场景。"""
+
+    pid = 987654
+    returncode = None
+
+    async def wait(self):
+        await asyncio.Event().wait()
+
+
+@pytest.mark.asyncio
+async def test_terminate_returns_error_within_bounds_for_unkillable(monkeypatch):
+    monkeypatch.setattr(pl.os, "killpg", lambda pgid, sig: True)
+    monkeypatch.setattr(pl, "_pid_alive", lambda pid: True)
+    owner = pl.ProcessOwner(987654, process=_UnkillableProcess())
+    started = time.monotonic()
+    with pytest.raises(pl.ProcessTerminationTimeout):
+        await owner.terminate(grace_ms=200)
+    elapsed = time.monotonic() - started
+    # 升级宽限 + 终末等待各一次：必须返回错误而非挂起
+    assert elapsed < 1.5
+
+
+@pytest.mark.asyncio
+async def test_terminate_escalates_term_to_kill(tmp_path):
+    """忽略 SIGTERM 的进程在宽限后收到 SIGKILL 并在终末等待内结算。"""
+    import signal as _signal
+
+    ready = tmp_path / "ready"
+    code = (
+        "import signal, sys, time, pathlib;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        f"pathlib.Path({str(ready)!r}).write_text('1');"
+        "time.sleep(30)"
+    )
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", code,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 5
+    while not ready.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    owner = pl.ProcessOwner.capture(proc)
+    try:
+        await owner.terminate(grace_ms=300)
+        assert proc.returncode is not None
+        assert proc.returncode == -getattr(_signal, "SIGKILL", _signal.SIGTERM)
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_terminate_already_exited_is_noop():
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", "pass",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()
+    owner = pl.ProcessOwner.capture(proc)
+    await owner.terminate(grace_ms=50)  # 不抛错、不等待

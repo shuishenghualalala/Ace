@@ -28,6 +28,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Sequence
 
 logger = logging.getLogger(__name__)
@@ -38,8 +39,16 @@ _WINDOWS_CREATE_FLAGS = (
 )
 _SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
-# TERM→KILL 升级宽限（秒），与终末等待同量级；F4 起收敛为单一 grace_ms。
-_GRACE_SECONDS = 2.0
+# 统一宽限（毫秒）：一个配置项两个语义——exit 后输出管道 drain 宽限 ==
+# SIGTERM→SIGKILL 升级宽限，同时也是终末等待的上界。
+DEFAULT_GRACE_MS = 3000
+
+
+def resolve_grace_ms(value: int | float | None) -> int:
+    """归一宽限配置：None 取默认；其余取非负整毫秒。"""
+    if value is None:
+        return DEFAULT_GRACE_MS
+    return max(0, int(value))
 
 
 class ProcessTerminationTimeout(TimeoutError):
@@ -311,7 +320,18 @@ class ProcessOwner:
             return False
 
     async def wait_for_exit(self, timeout: float | None = None) -> bool:
-        """结果等待：事件驱动等直接句柄退出；无句柄退化为有界轮询（仅清理路径）。"""
+        """结果等待：事件驱动等直接句柄退出；无句柄退化为有界轮询（仅清理路径）。
+
+        spawn_tracked 产出的句柄经协议 future 拿到真 exit 事件（不受管道 EOF
+        耦合拖住）；其余句柄回退原生 wait()。
+        """
+        exited_future = getattr(getattr(self.process, "_protocol", None), "exited_future", None)
+        if exited_future is not None:
+            try:
+                await asyncio.wait_for(exited_future, timeout=timeout)
+                return True
+            except asyncio.TimeoutError:
+                return False
         if self.process is None:
             return self._poll_dead(timeout)
         try:
@@ -362,30 +382,74 @@ class ProcessOwner:
             except OSError:
                 pass
 
-    async def terminate(self, *, grace_seconds: float = _GRACE_SECONDS) -> None:
-        """TERM → 宽限 → KILL → 终末等待。终末等待在 F4 起有界并返回错误。"""
+    async def terminate(self, *, grace_ms: int | float | None = None) -> None:
+        """TERM → 宽限 → KILL → 终末有界等待；终末超时返回错误而非永久挂起。
+
+        不可杀进程（如 D-state）在升级宽限 + 终末等待耗尽后抛
+        ProcessTerminationTimeout，调用方决定如何报告。
+        """
+        grace = resolve_grace_ms(grace_ms) / 1000
         if self.exited():
             return
-        if os.name == "nt":
-            self.signal(signal.SIGTERM)
-            await self.wait_for_exit(timeout=grace_seconds)
-            return
         self.signal(signal.SIGTERM)
-        if await self.wait_for_exit(timeout=grace_seconds):
+        if await self.wait_for_exit(timeout=grace):
             return
         self.signal(_SIGKILL)
-        await self.wait_for_exit(timeout=None)
+        if await self.wait_for_exit(timeout=grace):
+            return
+        raise ProcessTerminationTimeout(
+            f"进程树 {self.pid} 在 SIGKILL 后 {grace}s 内仍未退出（不可杀进程）"
+        )
+
+
+# ---- 事件驱动的结果等待 ----
+
+class _ExitNotifiedProtocol(asyncio.subprocess.SubprocessStreamProtocol):
+    """补 process_exited 即时通知：原生 Process.wait() 在 PIPE 模式下被管道
+    EOF 耦合（继承 fd 的孙进程持管时永久挂起）；退出事件经 future 先行唤醒，
+    管道排干走独立宽限。"""
+
+    def __init__(self, limit: int, loop: asyncio.AbstractEventLoop) -> None:
+        super().__init__(limit=limit, loop=loop)
+        self.exited_future: asyncio.Future[None] = loop.create_future()
+
+    def process_exited(self) -> None:
+        super().process_exited()
+        if not self.exited_future.done():
+            self.exited_future.set_result(None)
+
+
+async def spawn_tracked(
+    *args: Any,
+    limit: int = 2**16,
+    **kwargs: Any,
+) -> tuple[asyncio.subprocess.Process, asyncio.Future[None]]:
+    """``create_subprocess_exec`` 等价物，额外返回 exit 事件 future。
+
+    结果等待（exit 事件，事件驱动、必然结算）与管道排干（exit 后宽限收尾）
+    由此分离：调用方 await future 拿退出，再按 grace 排干管道。
+    """
+    loop = asyncio.get_running_loop()
+    protocol_factory = partial(_ExitNotifiedProtocol, limit=limit, loop=loop)
+    transport, protocol = await loop.subprocess_exec(protocol_factory, *args, **kwargs)
+    return asyncio.subprocess.Process(transport, protocol, loop), protocol.exited_future
 
 
 async def terminate_process_tree(
     process: asyncio.subprocess.Process,
     *,
-    timeout: float = _GRACE_SECONDS,
+    grace_ms: int | float | None = None,
 ) -> None:
-    """异步整树终止：launch.py / runtime_client 的共享入口（清理路径不抛错）。"""
+    """异步整树终止：launch.py / runtime_client 的共享入口。
+
+    清理路径语义：不可杀进程的终止超时只记 warning，不遮蔽调用方原始异常；
+    需要错误报告的调用方直接用 ProcessOwner.terminate。
+    """
     owner = ProcessOwner.capture(process)
     try:
-        await owner.terminate(grace_seconds=timeout)
+        await owner.terminate(grace_ms=grace_ms)
+    except ProcessTerminationTimeout:
+        logger.warning("进程树 %s 终止超时（不可杀进程）", process.pid)
     except Exception:  # noqa: BLE001 - 清理失败不遮蔽调用方原始异常
         logger.warning("进程树 %s 终止失败", process.pid, exc_info=True)
 
@@ -393,7 +457,7 @@ async def terminate_process_tree(
 def terminate_process_tree_sync(
     pid: int,
     *,
-    grace_seconds: float = _GRACE_SECONDS,
+    grace_ms: int | float | None = None,
 ) -> None:
     """线程侧整树终止（任务运行时取消 / 注册表杀进程）。
 
