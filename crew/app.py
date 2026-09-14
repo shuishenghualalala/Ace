@@ -17,7 +17,6 @@ import re
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
-from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Coroutine
 
 from crew.agent.capabilities import (
@@ -90,7 +89,7 @@ from crew.state.config import (
     write_env_key,
 )
 from crew.state.credentials import delete_stored_key, store_key
-from crew.state.home import ensure_crew_home
+from crew.state.home import ensure_crew_home, resolve_crew_home_path
 from crew.state.logging import get_logger, setup_logging
 from crew.state.session_store import SQLiteSessionStore
 from crew.state.workspace_store import SQLiteWorkspaceStore
@@ -509,7 +508,7 @@ class CrewApp:
                 # notifications 表在独立库（ADR-0038 拆库收尾批）；legacy_db_path
                 # 触发 copy-on-first-activate。本切片只拆库，生命周期形态
                 # （__init__ 直构、随 App 存亡）保持不变。
-                _resolve_crew_home_path(config.notifications_db_path),
+                resolve_crew_home_path(config.notifications_db_path),
                 wal_enabled=config.sqlite_wal,
                 legacy_db_path=config.db_path,
             )
@@ -535,7 +534,7 @@ class CrewApp:
             # Feature Definition），在独立库（ADR-0038 拆库收尾批）；本切片只
             # 拆库，生命周期形态（App 直构、随 App 存亡）保持不变。legacy_db_path
             # 触发 copy-on-first-activate。
-            _resolve_crew_home_path(config.tasks_db_path),
+            resolve_crew_home_path(config.tasks_db_path),
             wal_enabled=config.sqlite_wal,
             monitor_interval=config.tasks_monitor_interval_seconds,
             heartbeat_interval=config.tasks_heartbeat_interval_seconds,
@@ -3635,20 +3634,6 @@ def _provider_class(provider: str):
     raise ValueError(f"未知模型 provider: {provider}")
 
 
-def _resolve_crew_home_path(raw_path: str) -> str:
-    """把 Feature 库相对路径归一到 crew_home 下（ADR-0038）。
-
-    load_config 已做同样归一；这里兜底覆盖直接构造 Config 的嵌入宿主/测试，
-    避免相对默认值落到进程 CWD 造成跨实例共享同一数据文件。
-    cron.db / work.db 等 Feature 独立库共用此归一。
-    """
-    path = Path(raw_path).expanduser()
-    if path.is_absolute():
-        return str(path)
-    from crew.state.home import get_crew_home
-
-    return str(get_crew_home() / path)
-
 
 def build_app(config: Config | None = None, *, enable_team: bool = True) -> CrewApp:
     """工厂：从配置构建一个 CrewApp。"""
@@ -3681,7 +3666,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     # channels 域 2 表在独立库（ADR-0038 拆库最后一批，随 P2-7 归属迁移）；
     # legacy_db_path 触发 copy-on-first-activate（crew.db 旧行保留作回退备份）。
     # 本切片只拆库与归位，生命周期形态（build_app 直构、随 App 存亡）不变。
-    channels_db_path = _resolve_crew_home_path(cfg.channels_db_path)
+    channels_db_path = resolve_crew_home_path(cfg.channels_db_path)
     channel_bindings = ChannelBindingsStore(
         channels_db_path,
         wal_enabled=cfg.sqlite_wal,
@@ -3747,7 +3732,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         # crew.db 里若还有旧 sites 表且 sites.db 对应半域为空，则各半域单事务
         # 整表复制，旧行保留作回退备份。公共构造点是 feature 的 Manager 工厂
         # （每次 Generation 新建 store 时都会带上 legacy 参数，域级 gate 幂等）。
-        db_path=_resolve_crew_home_path(cfg.sites_db_path),
+        db_path=resolve_crew_home_path(cfg.sites_db_path),
         wal_enabled=cfg.sqlite_wal,
         legacy_db_path=cfg.db_path,
         workspace_store=workspace_store,
@@ -3779,8 +3764,8 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         # 整表复制，旧行保留作回退备份。唯一构造点在 catalog_factory，team
         # feature 经 external_store_provider 动态解析同一门面实例。
         catalog_factory=lambda: TeamExternalAgentStore(
-            _resolve_crew_home_path(cfg.external_db_path),
-            team_db_path=_resolve_crew_home_path(cfg.team_db_path),
+            resolve_crew_home_path(cfg.external_db_path),
+            team_db_path=resolve_crew_home_path(cfg.team_db_path),
             legacy_db_path=cfg.db_path,
             # 跨 Feature 生命周期经动态解析的 Catalog 走显式接口；
             # external-agents Generation 未激活时门面 fail-closed。
@@ -3868,7 +3853,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         # work 域 15 表在独立库（ADR-0038 第二批）；legacy_db_path 触发
         # copy-on-first-activate：crew.db 里若还有旧 work 表且 work.db 为空，
         # 则 15 表单事务整表复制，旧行保留作回退备份。
-        db_path=_resolve_crew_home_path(cfg.work_db_path),
+        db_path=resolve_crew_home_path(cfg.work_db_path),
         wal_enabled=cfg.sqlite_wal,
         legacy_db_path=cfg.db_path,
         preference_extractor=LLMPreferenceExtractor(provider),
@@ -3920,7 +3905,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     from crew.cron import CronJobStore, build_cron_feature
 
     app.cron_store = CronJobStore(
-        _resolve_crew_home_path(cfg.cron_db_path),
+        resolve_crew_home_path(cfg.cron_db_path),
         wal_enabled=cfg.sqlite_wal,
         legacy_db_path=cfg.db_path,
     )
@@ -3947,7 +3932,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         # kanban 域 6 表在独立库（ADR-0038 第三批）；legacy_db_path 触发
         # copy-on-first-activate：crew.db 里若还有旧 kanban 表且 kanban.db 为空，
         # 则 6 表单事务整表复制，旧行保留作回退备份。
-        db_path=_resolve_crew_home_path(cfg.kanban_db_path),
+        db_path=resolve_crew_home_path(cfg.kanban_db_path),
         wal_enabled=cfg.sqlite_wal,
         legacy_db_path=cfg.db_path,
         provider=provider,

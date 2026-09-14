@@ -1,5 +1,6 @@
 """ADR-0038 Feature 拆库契约测试（cron 试点 + work 第二批 + kanban 第三批
-+ external/team 第四批 + sites/tasks/notifications 收尾批 + channels 最后一批）。
++ external/team 第四批 + sites/tasks/notifications 收尾批 + channels 最后一批
++ wiki_learning 清单外补充批）。
 
 覆盖拆库的三类契约：
 1. 路径与装配：Config.<feature>_db_path 读取/归一；新装 Feature 表只出现在
@@ -13,7 +14,9 @@
    在分库复制前移到旧库执行，team 库内守卫跳过。sites 域两半（store/blueprint）
    同住 sites.db 各自复制；tasks/notifications 照 cron/work 语义接入通用巡检；
    channels 两表随 P2-7 归属迁移最后拆出——routes 表照 cron/work 语义接入，
-   bindings 表不在 OWNER_TABLE_LABELS 走显式豁免。
+   bindings 表不在 OWNER_TABLE_LABELS 走显式豁免。wiki_learning 补充批为
+   目录插件形态：装配点在插件 register（经 PluginManager 装载），组件版本表
+   wiki_learning_schema 与 6H 版本表不同名共存，主库自此收敛为 core 9 表终态。
 """
 
 from __future__ import annotations
@@ -67,6 +70,7 @@ from crew.state._migration import (
     TEAM_DB_TABLES,
     TASKS_DB_TABLES,
     WORK_DB_TABLES,
+    WIKI_LEARNING_DB_TABLES,
     claim_legacy_owner_databases,
     inspect_and_backfill_legacy_owners,
     legacy_owner_scan_targets,
@@ -93,6 +97,11 @@ from crew.work.references import WorkReferenceStore
 from crew.work.settings import WorkSettingsStore
 from crew.work.sources import SourceRecordInput, SourceSyncBatch, WorkSourceStore
 from crew.work.templates import WorkTemplateStore
+from plugins.wiki_learning.store import (
+    WIKI_LEARNING_SCHEMA_FEATURE,
+    WIKI_LEARNING_SCHEMA_VERSION,
+    WikiLearningStore,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -2442,6 +2451,268 @@ def test_migrate_channels_feature_stamps_channels_db(tmp_path):
             "WHERE singleton = 1"
         ).fetchone()[0]
     assert version == CHANNELS_SCHEMA_VERSION
+
+
+# ---------------------------------------------------------------------------
+# wiki_learning 补充批（ADR-0038 清单外）：目录插件 plugins/wiki_learning 自有
+# 6 表（5 张数据表 + 组件版本表 wiki_learning_schema）迁插件独立库
+# crew_data/wiki_learning.db。装配点在插件 register——生产装配线即 build_app
+# 的 discover_and_load 经 PluginManager 装载。6 表均不在 OWNER_TABLE_LABELS，
+# 走 external/team/sites 显式豁免语义。
+# ---------------------------------------------------------------------------
+
+# 主库 core 状态 9 表终态（P1-1 全清）：wiki_learning 拆出后主库不再有任何
+# Feature/插件表。
+_CORE_MAIN_DB_TABLES = frozenset(
+    {
+        "sessions",
+        "session_agent_config",
+        "workspaces",
+        "owner_session_lease",
+        "owner_logout_intent",
+        "plugin_preferences",
+        "security_rules",
+        "security_audit_events",
+        "compaction_summaries",
+    }
+)
+
+# 插件自有表全集 = 5 张数据表 + 自管组件版本表（不参与行复制，见
+# _migration.WIKI_LEARNING_DB_TABLES 注释）。
+_WIKI_PLUGIN_TABLES = frozenset(WIKI_LEARNING_DB_TABLES) | {"wiki_learning_schema"}
+
+
+def _seed_legacy_wiki_learning_rows(legacy_db):
+    """在旧主库中预置带数据的 wiki_learning 5 张数据表（真实 store 语义，
+    覆盖 open → activity → assess → mastery 全链）。域内零外键，复制顺序无关。"""
+
+    store = WikiLearningStore(str(legacy_db), wal_enabled=False)
+    try:
+        episode = store.open_episode("A:u1", "s-legacy", "kb-study", goal="面试复习")
+        activity = store.create_activity(
+            episode["id"],
+            "A:u1",
+            "s-legacy",
+            "kb-study",
+            activity_type="interview",
+            prompt="线程与 asyncio 分别适合什么场景？",
+            evidence_page_ids=["page-1"],
+            evidence_fingerprints={"page-1": "fp-1"},
+            knowledge_keys=["python.concurrency"],
+            reveal_policy="on_assess",
+            public_payload={"schema": "crew.interaction.v1"},
+            request_id="req-create",
+        )
+        store.record_assessment(
+            activity["id"],
+            "A:u1",
+            "s-legacy",
+            request_id="req-assess",
+            response_text="线程适合阻塞 I/O；asyncio 适合协作式并发。",
+            response_hash="hash-1",
+            summary="方向正确",
+            score=0.85,
+            strengths=["场景判断正确"],
+            gaps=["可补充调度模型"],
+            signals={"python.concurrency": 0.85},
+            evidence_page_ids=["page-1"],
+        )
+    finally:
+        store.close()
+    expected = {
+        "wiki_learning_episodes": 1,
+        "wiki_learning_activities": 1,
+        "wiki_learning_assessments": 1,
+        "wiki_learning_mastery_events": 1,
+        "wiki_learning_mastery_state": 1,
+    }
+    return SimpleNamespace(episode_id=episode["id"], expected=expected)
+
+
+def test_load_config_reads_and_normalizes_wiki_learning_db_path(tmp_path, monkeypatch):
+    """runtime.wiki_learning_db_path 与前几批同法：可配置，相对路径归一到 crew_home。"""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "runtime:\n  wiki_learning_db_path: custom/wiki_learning.db\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("crew.state.config.ROOT", tmp_path)
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+
+    cfg = load_config()
+
+    assert cfg.wiki_learning_db_path == str(
+        tmp_path / "home" / "custom" / "wiki_learning.db"
+    )
+
+
+def test_load_config_wiki_learning_db_path_defaults_next_to_main_db(tmp_path, monkeypatch):
+    monkeypatch.setattr("crew.state.config.ROOT", tmp_path)
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+
+    cfg = load_config()
+
+    assert cfg.wiki_learning_db_path == str(
+        tmp_path / "home" / "crew_data" / "wiki_learning.db"
+    )
+
+
+def test_fresh_install_wiki_learning_tables_live_only_in_plugin_db(tmp_path):
+    """验收 1（新装探针，真实装配线）：build_app 经 PluginManager 装载插件后，
+    自有 6 表 + 双版本登记只在 wiki_learning.db，crew.db 无任何 wiki_learning
+    表；主库收敛为 core 9 表终态（P1-1 全清）。"""
+
+    main_db = tmp_path / "crew.db"
+    wiki_db = tmp_path / "wiki_learning.db"
+    crew = build_app(
+        config=Config(
+            db_path=str(main_db),
+            wiki_learning_db_path=str(wiki_db),
+            cron_enabled=False,
+        ),
+        enable_team=False,
+    )
+    assert crew.plugins.unload_plugin("wiki_learning") is True  # 经 disposer 关插件库句柄
+
+    main_tables = _table_names(main_db)
+    wiki_tables = _table_names(wiki_db)
+    assert "sessions" in main_tables  # 主库确实是 core 状态库（确认看的是对的文件）
+    expected = _WIKI_PLUGIN_TABLES | {
+        f"{WIKI_LEARNING_SCHEMA_FEATURE}_schema_version"
+    }
+    assert expected <= wiki_tables
+    assert main_tables.isdisjoint(expected)
+    # 双版本登记同库共存不冲突：插件自管组件表（wiki_learning_schema）与
+    # 6H Feature 版本表（wiki_learning_schema_version）不同名、各自成立。
+    with closing(sqlite3.connect(wiki_db)) as conn:
+        component = conn.execute(
+            "SELECT version FROM wiki_learning_schema WHERE component = 'wiki_learning'"
+        ).fetchone()[0]
+        feature_version = conn.execute(
+            f"SELECT version FROM {WIKI_LEARNING_SCHEMA_FEATURE}_schema_version "
+            "WHERE singleton = 1"
+        ).fetchone()[0]
+    assert component == 1
+    assert feature_version == WIKI_LEARNING_SCHEMA_VERSION
+    # 主库最终清单复核（P1-1 全清终态）：只剩 core 状态 9 表。
+    assert main_tables == _CORE_MAIN_DB_TABLES
+
+
+def test_legacy_wiki_learning_rows_copied_on_first_activate_and_idempotent(tmp_path):
+    """验收 2：存量 crew.db 构造插件库后行数一致、旧行保留、重复构造幂等零重复；
+    组件版本表不参与复制（目标库由 ensure-schema 自行重建单行 stamp）。"""
+
+    legacy_db = tmp_path / "crew.db"
+    wiki_db = tmp_path / "wiki_learning.db"
+    seed = _seed_legacy_wiki_learning_rows(legacy_db)
+
+    store = WikiLearningStore(
+        str(wiki_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        episode = store.get_episode(seed.episode_id, "A:u1", "s-legacy")
+        assert episode is not None
+        assert episode["goal"] == "面试复习"
+        assert store.mastery_snapshot("A:u1", "kb-study")[0]["level"] == "proficient"
+    finally:
+        store.close()
+
+    for table, count in seed.expected.items():
+        assert _count(wiki_db, table) == count, table
+        assert _count(legacy_db, table) == count, table  # 旧行保留（回退备份）
+
+    # 重复构造幂等零重复
+    again = WikiLearningStore(
+        str(wiki_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert again.get_episode(seed.episode_id, "A:u1", "s-legacy") is not None
+    finally:
+        again.close()
+    for table, count in seed.expected.items():
+        assert _count(wiki_db, table) == count, table
+    assert _count(wiki_db, "wiki_learning_schema") == 1
+
+
+def test_wiki_learning_copy_skipped_when_target_has_rows(tmp_path):
+    """目标库已有行即整体跳过：绝不覆盖/合并进已存在的目标数据。"""
+
+    legacy_db = tmp_path / "crew.db"
+    wiki_db = tmp_path / "wiki_learning.db"
+    seed = _seed_legacy_wiki_learning_rows(legacy_db)
+
+    first = WikiLearningStore(str(wiki_db), wal_enabled=False)
+    try:
+        fresh = first.open_episode("B:u2", "s-fresh", "kb-study", goal="新装目标")
+    finally:
+        first.close()
+
+    store = WikiLearningStore(
+        str(wiki_db), wal_enabled=False, legacy_db_path=str(legacy_db)
+    )
+    try:
+        assert store.get_episode(fresh["id"], "B:u2", "s-fresh") is not None
+        assert store.get_episode(seed.episode_id, "A:u1", "s-legacy") is None
+    finally:
+        store.close()
+    assert _count(wiki_db, "wiki_learning_episodes") == 1
+    # 旧库未被触碰
+    assert _count(legacy_db, "wiki_learning_episodes") == 1
+
+
+def test_legacy_owner_scan_targets_route_wiki_learning_tables(tmp_path):
+    """巡检语义：wiki_learning 表均不在 OWNER_TABLE_LABELS，按 external/team/sites
+    显式豁免语义——显式传参才有条目（且只含 5 张数据表）、缺省不进任何条目、
+    回退配置并入同一文件条目。"""
+
+    main_db = tmp_path / "crew.db"
+    wiki_db = tmp_path / "wiki_learning.db"
+
+    default_targets = legacy_owner_scan_targets(main_db)
+    assert all(
+        set(tables).isdisjoint(_WIKI_PLUGIN_TABLES)
+        for tables in default_targets.values()
+    )
+
+    targets = legacy_owner_scan_targets(main_db, wiki_learning_db_path=wiki_db)
+    assert set(targets) == {main_db, wiki_db}
+    assert set(targets[wiki_db]) == set(WIKI_LEARNING_DB_TABLES)
+    assert set(targets[main_db]).isdisjoint(_WIKI_PLUGIN_TABLES)
+
+    # 回退配置（插件库指回主库同一文件）：按回退语义并入该条目
+    db = tmp_path / "fallback.db"
+    merged = legacy_owner_scan_targets(db, wiki_learning_db_path=db)
+    assert set(merged) == {db}
+    assert set(merged[db]) >= set(WIKI_LEARNING_DB_TABLES)
+
+
+def test_migrate_wiki_learning_feature_stamps_plugin_db(tmp_path):
+    """`migrate feature wiki_learning` 的版本表 stamp 到插件库，不触碰主库。"""
+
+    from crew.cli.management import _migrate_wiki_learning
+
+    app = SimpleNamespace(
+        config=SimpleNamespace(
+            db_path=str(tmp_path / "crew.db"),
+            wiki_learning_db_path=str(tmp_path / "wiki_learning.db"),
+            sqlite_wal=False,
+        )
+    )
+
+    report = _migrate_wiki_learning(app)
+
+    assert report.feature == WIKI_LEARNING_SCHEMA_FEATURE
+    assert report.current_version == WIKI_LEARNING_SCHEMA_VERSION
+    assert report.target_version == WIKI_LEARNING_SCHEMA_VERSION
+    assert (tmp_path / "wiki_learning.db").exists()
+    assert not (tmp_path / "crew.db").exists()
+    with closing(sqlite3.connect(tmp_path / "wiki_learning.db")) as conn:
+        version = conn.execute(
+            f"SELECT version FROM {WIKI_LEARNING_SCHEMA_FEATURE}_schema_version "
+            "WHERE singleton = 1"
+        ).fetchone()[0]
+    assert version == WIKI_LEARNING_SCHEMA_VERSION
 
 
 if __name__ == "__main__":

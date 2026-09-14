@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from crew.core.runctx import current_owner_account_id
+from crew.state.home import resolve_crew_home_path
 from crew.wiki._utils import is_wiki_agent_session
 from crew.wiki.config import WikiConfig
 from crew.wiki.store._filesystem import FileSystemWikiStore
@@ -35,7 +36,14 @@ def _skill_body(path: Path) -> str:
 def register(ctx: Any) -> None:
     config = ctx.resolve_service("config")
 
-    store = WikiLearningStore(config.db_path, wal_enabled=config.sqlite_wal)
+    # 插件自有 6 表在独立库 crew_data/wiki_learning.db（ADR-0038 清单外补充批）：
+    # 相对路径在消费侧归一（load_config 已做同样归一，这里兜底裸 Config 宿主）；
+    # legacy_db_path 触发 copy-on-first-activate，crew.db 旧行保留作回退备份。
+    store = WikiLearningStore(
+        resolve_crew_home_path(config.wiki_learning_db_path),
+        wal_enabled=config.sqlite_wal,
+        legacy_db_path=config.db_path,
+    )
     wiki_config = WikiConfig.from_raw(config.wiki_config)
     wiki_store = FileSystemWikiStore(storage_root=wiki_config.storage.resolved_root())
     tools = WikiLearningTools(store, wiki_store)

@@ -31,8 +31,9 @@ OWNER_TABLE_LABELS = {
 # sites 域 10 表、tasks 域 runtime_tasks、notifications 域 notifications——已分别
 # 迁至独立库（crew_data/sites.db、crew_data/tasks.db、crew_data/notifications.db），
 # channels 域 2 表已随 P2-7 归属迁移迁至独立库（crew_data/channels.db，最后一批）。
-# 至此 ADR-0038 批次清单全部拆完，主库仅保留 core 状态表（见各批表清单之外
-# 的 OWNER_TABLE_LABELS 成员）。
+# ADR-0038 批次清单拆完后另有一笔清单外补充批：wiki_learning 目录插件自有 6 表
+# 迁插件独立库（crew_data/wiki_learning.db）。至此主库仅保留 core 状态表
+# （见各批表清单之外的 OWNER_TABLE_LABELS 成员）。
 CRON_DB_TABLES: tuple[str, ...] = ("cron_jobs", "cron_job_runs")
 # work 域表按外键依赖排序（connect_sqlite 开启 foreign_keys=ON，
 # copy_legacy_feature_rows 整表复制必须父表先于子表写入）：
@@ -125,6 +126,23 @@ NOTIFICATIONS_DB_TABLES: tuple[str, ...] = ("notifications",)
 CHANNELS_BINDINGS_DB_TABLES: tuple[str, ...] = ("channel_bindings",)
 CHANNELS_ROUTES_DB_TABLES: tuple[str, ...] = ("channel_session_routes",)
 CHANNELS_DB_TABLES: tuple[str, ...] = CHANNELS_BINDINGS_DB_TABLES + CHANNELS_ROUTES_DB_TABLES
+# wiki_learning 插件域 5 张数据表（ADR-0038 清单外补充批）：目录插件
+# plugins/wiki_learning 自有 schema（5 张数据表 + 组件版本表 wiki_learning_schema）
+# 迁插件独立库 crew_data/wiki_learning.db，装配点在插件 register。wiki_learning_schema
+# 不参与复制——它是插件自管的组件版本表，store 每次 ensure-schema 幂等 upsert
+# 单行 stamp（目标库自行重建），恒非空的它若进清单会误触 copy_legacy_feature_rows
+# 的域级 gate。5 张数据表域内零外键，整表复制顺序无关；owner_account_id 全部
+# NOT NULL 且写入路径必带 owner，不存在空 owner 行来源。6 表均不在
+# OWNER_TABLE_LABELS，与 external/team/sites 同显式豁免语义：不进通用巡检/认领，
+# 表清单供 copy_legacy_feature_rows 与 legacy_owner_scan_targets（结构登记/
+# 回退合并）使用，显式传入仅供未来的域专用认领工具消费。
+WIKI_LEARNING_DB_TABLES: tuple[str, ...] = (
+    "wiki_learning_episodes",
+    "wiki_learning_activities",
+    "wiki_learning_assessments",
+    "wiki_learning_mastery_events",
+    "wiki_learning_mastery_state",
+)
 
 
 def primary_key_columns(conn: sqlite3.Connection, table: str) -> list[str]:
@@ -274,6 +292,7 @@ def legacy_owner_scan_targets(
     tasks_db_path: str | Path | None = None,
     notifications_db_path: str | Path | None = None,
     channels_db_path: str | Path | None = None,
+    wiki_learning_db_path: str | Path | None = None,
 ) -> dict[Path, list[str]]:
     """把 owner 表清单按归属库解析为 ``路径→表清单`` 扫描映射。
 
@@ -282,13 +301,14 @@ def legacy_owner_scan_targets(
     与主库指向同一文件时（回退配置把 Feature 库指回 crew.db）自动合并到
     同一条目。
 
-    kanban / external / team / sites 四域与 cron/work 的缺省语义不同：只在
-    **显式传入路径时**登记为独立条目（指向与主库同一文件时按回退语义并入该
-    条目）。缺省（None）时不并入任何条目——kanban 的无主行是隔离语义
-    （legacy_ambiguous 留给人工认领）；external/team/sites 三域表均不在
-    OWNER_TABLE_LABELS，owner 归一由各自 store 构造时自带。生产巡检/认领
-    调用点不传即天然豁免（含 crew.db 里的拆库备份行），显式传入仅供未来的
-    域专用认领工具消费（见 EXTERNAL_DB_TABLES / SITES_DB_TABLES 注释）。
+    kanban / external / team / sites / wiki_learning 五域与 cron/work 的缺省
+    语义不同：只在**显式传入路径时**登记为独立条目（指向与主库同一文件时按
+    回退语义并入该条目）。缺省（None）时不并入任何条目——kanban 的无主行是
+    隔离语义（legacy_ambiguous 留给人工认领）；external/team/sites/wiki_learning
+    四域表均不在 OWNER_TABLE_LABELS，owner 归一由各自 store/插件写入语义自带。
+    生产巡检/认领调用点不传即天然豁免（含 crew.db 里的拆库备份行），显式传入
+    仅供未来的域专用认领工具消费（见 EXTERNAL_DB_TABLES / SITES_DB_TABLES /
+    WIKI_LEARNING_DB_TABLES 注释）。
     channels 域两表分属两种语义：routes 表照 cron/work 缺省并入，bindings
     表不在 OWNER_TABLE_LABELS 不参与扫描（见 CHANNELS_DB_TABLES 注释）。
     """
@@ -305,6 +325,7 @@ def legacy_owner_scan_targets(
         and table not in TASKS_DB_TABLES
         and table not in NOTIFICATIONS_DB_TABLES
         and table not in CHANNELS_DB_TABLES
+        and table not in WIKI_LEARNING_DB_TABLES
     )
     cron_path = Path(cron_db_path) if cron_db_path else Path(main_db_path)
     targets.setdefault(cron_path, []).extend(CRON_DB_TABLES)
@@ -327,6 +348,9 @@ def legacy_owner_scan_targets(
     # channels 只登记 OWNER_TABLE_LABELS 内的 routes 表；bindings 表豁免扫描。
     channels_path = Path(channels_db_path) if channels_db_path else Path(main_db_path)
     targets.setdefault(channels_path, []).extend(CHANNELS_ROUTES_DB_TABLES)
+    # wiki_learning 同 kanban/external/team/sites：显式传参才登记（豁免语义）。
+    if wiki_learning_db_path:
+        targets.setdefault(Path(wiki_learning_db_path), []).extend(WIKI_LEARNING_DB_TABLES)
     return targets
 
 

@@ -369,6 +369,20 @@ def get_crew_home() -> Path:
     return ROOT / DEFAULT_HOME_DIRNAME
 
 
+def resolve_crew_home_path(raw_path: str | Path) -> str:
+    """把 Feature 库相对路径归一到 crew_home 下（ADR-0038 db-per-feature）。
+
+    load_config 已对 ``runtime.<feature>_db_path`` 做同样归一；这里兜底覆盖
+    直接构造 Config 的嵌入宿主/测试，避免相对默认值落到进程 CWD 造成跨实例
+    共享同一数据文件。cron.db / work.db / wiki_learning.db 等 Feature 独立库
+    共用此归一（core 装配层与目录插件装配点各自在消费侧调用）。
+    """
+    path = Path(raw_path).expanduser()
+    if path.is_absolute():
+        return str(path)
+    return str(get_crew_home() / path)
+
+
 def get_owner_runtime_home(
     owner_account_id: str | None = None,
     *,

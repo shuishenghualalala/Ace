@@ -222,6 +222,10 @@ class Config:
     # channel_bindings / channel_session_routes 2 表归 channels.db；
     # 回退时把本键指回 crew.db 即可
     channels_db_path: str = "crew_data/channels.db"
+    # wiki_learning 目录插件自有库（ADR-0038 清单外补充批）：插件 6 表归
+    # crew_data/wiki_learning.db；装配点在插件 register（消费侧归一），
+    # 回退时把本键指回 crew.db 即可
+    wiki_learning_db_path: str = "crew_data/wiki_learning.db"
     log_level: str = "INFO"
     log_file: str = ""  # 空=不写文件；填路径则同时写文件（支持 ~ 展开）
     llm_trace: bool = True  # 是否把每次 LLM 收发全量写入 {crew_home}/logs/llm.jsonl，便于排查
@@ -1615,6 +1619,9 @@ def load_config(config_path: str | Path | None = None) -> Config:
             "notifications_db_path", cfg.notifications_db_path
         )
         cfg.channels_db_path = runtime.get("channels_db_path", cfg.channels_db_path)
+        cfg.wiki_learning_db_path = runtime.get(
+            "wiki_learning_db_path", cfg.wiki_learning_db_path
+        )
         cfg.log_level = runtime.get("log_level", cfg.log_level)
         cfg.log_file = runtime.get("log_file", cfg.log_file)
         cfg.crew_home = runtime.get("crew_home", cfg.crew_home)
@@ -2037,7 +2044,13 @@ def load_config(config_path: str | Path | None = None) -> Config:
         if not team_path.is_absolute():
             team_path = home / team_path
         cfg.team_db_path = str(team_path)
-    for attr in ("sites_db_path", "tasks_db_path", "notifications_db_path", "channels_db_path"):
+    for attr in (
+        "sites_db_path",
+        "tasks_db_path",
+        "notifications_db_path",
+        "channels_db_path",
+        "wiki_learning_db_path",
+    ):
         raw_value = getattr(cfg, attr)
         if not raw_value:
             continue

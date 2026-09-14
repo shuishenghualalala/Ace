@@ -1402,6 +1402,22 @@ def _migrate_channels(app: Any) -> FeatureMigrationReport:
     )
 
 
+def _migrate_wiki_learning(app: Any) -> FeatureMigrationReport:
+    from plugins.wiki_learning.store import (
+        WIKI_LEARNING_SCHEMA_FEATURE,
+        WIKI_LEARNING_SCHEMA_VERSION,
+    )
+
+    # wiki_learning 插件自有表已拆独立库（ADR-0038 清单外补充批）：版本表
+    # stamp 到插件库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=WIKI_LEARNING_SCHEMA_FEATURE,
+        latest_version=WIKI_LEARNING_SCHEMA_VERSION,
+        db_path=app.config.wiki_learning_db_path,
+    )
+
+
 # Feature → 迁移入口注册表：新 Feature 接入版本化迁移只需在这里加一行，
 # CLI 不写 if 链。入口接收 app，负责把该 Feature 的版本表弄就绪并返回快照。
 FEATURE_MIGRATIONS: dict[str, FeatureMigrator] = {
@@ -1414,6 +1430,7 @@ FEATURE_MIGRATIONS: dict[str, FeatureMigrator] = {
     "tasks": _migrate_tasks,
     "notifications": _migrate_notifications,
     "channels": _migrate_channels,
+    "wiki_learning": _migrate_wiki_learning,
 }
 
 

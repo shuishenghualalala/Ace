@@ -36,6 +36,9 @@ def _load_plugin(
     tmp_path: Path,
 ) -> tuple[Registry, PluginManager, Config, FileSystemWikiStore, str]:
     config = Config(db_path=str(tmp_path / "crew.db"))
+    # 插件自有表归插件独立库（ADR-0038 清单外补充批）：测试显式指向 tmp 下的
+    # 插件库，与生产 crew_data/wiki_learning.db 同构。
+    config.wiki_learning_db_path = str(tmp_path / "wiki_learning.db")
     config.wiki_config = {"storage": {"root": str(tmp_path / "wiki")}}
     registry = Registry()
     manager = PluginManager(registry=registry, services={"config": config})
@@ -185,7 +188,7 @@ async def test_plugin_learning_flow_captures_answer_privately(tmp_path):
     assert payload["assessment"]["response_chars"] == len(raw_answer)
     assert payload["mastery"][0]["level"] == "proficient"
 
-    conn = sqlite3.connect(config.db_path)
+    conn = sqlite3.connect(config.wiki_learning_db_path)
     stored_answer = conn.execute(
         "SELECT response_text FROM wiki_learning_assessments WHERE activity_id=?", (activity_id,)
     ).fetchone()[0]
