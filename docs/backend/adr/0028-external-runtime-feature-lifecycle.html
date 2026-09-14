@@ -17,5 +17,9 @@
 <p>外援 Bundle 遵守 Agent 不直接导入 Gateway/Team 的现有架构契约。Gateway 作为服务消费者接入请求门控；Team 的存储兼容路径须保留引用删除守卫与事务语义，并明确运行期对象的所有者。开发与独立测试并行，共享装配文件由主审串行分配。</p>
 <p>独立测试覆盖激活、失败回滚、重复启停、代际更新、关闭后新增请求拒绝、活跃流取消、子进程及任务释放，并检查生产装配和 Team 消费路径。工具与 API 的可用性必须跟随生命周期。完整 UI Contribution 迁移仍按阶段 5 分切片实施。</p>
 <p>停用和更新不删除外援、会话绑定或编队历史数据。本 ADR 尚不代表验证通过；完成后由测试记录列出实际命令、结果及 macOS、Linux、Windows 的实测或模拟覆盖。切片独立提交，回退通过撤销对应提交恢复前一装配，不执行数据删除。</p>
+<h2>后续延伸 · 2026-09-10</h2>
+<p>本 ADR 确立的 <code>AgentRuntimeProvider</code> 与 <code>DelegationService</code> 原本服务 Executor、Team 与 Gateway 三类消费者。后续设计把同一套能力扩展为 Subagent seam 的一种传输实现（<code>external:&lt;agent_id&gt;</code> provider，按外援 Catalog 注册，注册方向 external → subagent），使其同时成为子智能体委派的后端。</p>
+<p>该扩展不修改本 ADR 的任何契约与生命周期决定：Catalog、Adapter、Store、Run 与 Generation 所有权全部不变，只新增一个消费者与一层适配。差异集中在三点：子智能体侧的 provider 能力位按适配器如实声明（<code>agent_options</code> / <code>tool_filter</code> / <code>output_schema</code> 默认不支持）；连续对话能力只有在适配器声明 <code>resume_session_id</code> 支持时才存在，且一旦事件流报出 <code>session_reset</code> 即作废并向父级说明；子智能体发起的外援 run 注入拒绝型审批 handler，不进入本 ADR 既有的人类审批链路。</p>
+<p>设计与取舍见《Subagent 强化方案》§5.7 与 §6 D14–D16（<a href="../modules/subagent-strengthening-plan.md">subagent-strengthening-plan.md</a>，已随本延伸节一并入库；方案为设计稿，实施另行立项）。</p>
 <p><a href="0027-external-agent-catalog.html">前置 Catalog 决策</a> · <a href="../modules/agent.html">Agent 模块</a> · <a href="../modules/team.html">Team 模块</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
 </main></body></html>
