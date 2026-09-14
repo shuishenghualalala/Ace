@@ -153,6 +153,20 @@ tools:
     allowed_private_cidrs: []
     blocked_hosts: []
     allow_file_urls: false
+  # web_search 引擎配置（纯 API provider，无 HTML 刮取）。providers 为显式有序
+  # fallback 列表（按序逐个降级，全败时返回结构化错误与已尝试链路）；
+  # 留空 = 默认链（全部可用 provider 按注册序，exa → bocha → searxng）。
+  # 一个都不可用时工具直接报错，引导用户完成下列配置。
+  # exa：需 EXA_API_KEY（或 exa_api_key_env 指定的环境变量）；exa_base_url 默认
+  # https://api.exa.ai；
+  # bocha：博查 AI 搜索，需 BOCHA_API_KEY（或 bocha_api_key_env 指定的环境变量）；
+  # searxng：需可公网到达的实例地址（SSRF 防护不允许私网主机）。
+  web_search:
+    providers: []
+    exa_api_key_env: EXA_API_KEY
+    exa_base_url: ""
+    bocha_api_key_env: BOCHA_API_KEY
+    searxng_base_url: ""
   # 大结果落盘阈值：工具结果字符数超过此值时，完整内容写入
   # {CREW_HOME}/tool-results/{tool_call_id}.txt，模型只收「路径 + 头尾预览 + 截断标记」。
   # 默认阈值为 50000 字符。

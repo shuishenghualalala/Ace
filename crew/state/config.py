@@ -363,6 +363,9 @@ class Config:
     # config.yaml 的 tools.browser 节，BrowserConfig 的解析与默认值由 browser
     # Feature 侧装配时负责。
     browser_config: dict[str, Any] = field(default_factory=dict)
+    # tools.web_search 节透传：provider 有序降级链、API key 环境变量名等，
+    # 解析由 web_search_service 负责（加载时经 configure_search 注入）。
+    web_search_config: dict[str, Any] = field(default_factory=dict)
     # 进程内 HTTP 边界（web_search/web_extract/Wiki）上游代理；空=读环境变量
     network: NetworkConfig = field(default_factory=NetworkConfig)
 
@@ -1805,6 +1808,14 @@ def load_config(config_path: str | Path | None = None) -> Config:
             if not isinstance(browser_raw, dict):
                 browser_raw = {}
             cfg.browser_config = dict(browser_raw)
+            web_search_raw = tools.get("web_search") or {}
+            if not isinstance(web_search_raw, dict):
+                web_search_raw = {}
+            cfg.web_search_config = dict(web_search_raw)
+            # 把 tools.web_search 节注入搜索 seam（provider 有序降级链与 key 环境变量名）。
+            from crew.tools.web_search_service import configure_search
+
+            configure_search(cfg.web_search_config)
 
         session_cfg = data.get("session", {})
         if isinstance(session_cfg, dict) and session_cfg:

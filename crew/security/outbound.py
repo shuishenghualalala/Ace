@@ -54,6 +54,15 @@ class PublicRedirectApprovalRequired(ValueError):
         self.url = url
 
 
+class PublicHttpError(ValueError):
+    """HTTP 非 2xx：携带状态码与响应体，供调用方解析错误详情。"""
+
+    def __init__(self, status: int, body: bytes) -> None:
+        super().__init__(f"URL 返回 HTTP {status}")
+        self.status = status
+        self.body = body
+
+
 def parse_public_http_target(url: str) -> PublicHttpTarget:
     value = str(url or "").strip()
     if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
@@ -535,7 +544,7 @@ def request_public_http(
                     }
                 continue
             if not 200 <= response.status < 300:
-                raise ValueError(f"URL 返回 HTTP {response.status}")
+                raise PublicHttpError(response.status, response.read(65536))
             raw = response.read(max_bytes + 1)
             if len(raw) > max_bytes:
                 raise ValueError(f"URL 响应超过 {max_bytes} 字节限制")
