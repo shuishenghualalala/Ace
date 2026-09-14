@@ -3566,7 +3566,9 @@ def _construct_llm_provider(
     api_key = _vendor_llm_key(api_key, vendor)
     if api_key_resolver is not None:
         base_resolver = api_key_resolver
-        api_key_resolver = lambda: _vendor_llm_key(base_resolver(), vendor)
+
+        def api_key_resolver() -> str:  # noqa: F811 - 包装厂商 env 兜底后回写同名局部
+            return _vendor_llm_key(base_resolver(), vendor)
     if vendor is not None:
         base_url = base_url or vendor.base_url
         vm = vendor.model(model)
