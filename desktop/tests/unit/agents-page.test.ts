@@ -50,7 +50,9 @@ function enableExternalAgents(): void {
       base_url: '',
       active_model_id: 'test',
       models: [],
-      external_agents: { enabled: true },
+      feature_capabilities: {
+        'product.external-agents': { state: 'active', available: true, generation: 'g1' },
+      },
     },
   });
 }
@@ -63,7 +65,9 @@ function disableExternalAgents(): void {
       base_url: '',
       active_model_id: 'test',
       models: [],
-      external_agents: { enabled: false },
+      feature_capabilities: {
+        'product.external-agents': { state: 'discovered', available: false, generation: null },
+      },
     },
   });
 }

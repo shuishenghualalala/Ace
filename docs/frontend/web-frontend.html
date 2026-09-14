@@ -969,5 +969,11 @@ cd web && npm run build
   <p>会话内一致性：Team 能力下线时收起并门控 TaskBoard 挂载（<code>boardOpen &amp;&amp; teamAvailable</code>），不残留空看板布局。能力刷新仍是拉取式（启动加载与切换模型），无推送通道。</p>
   <p>已验收：typecheck 与全量 237 tests 通过（新增 <code>App.team-kanban-lifecycle.test.tsx</code> 6 例 + <code>featureFlags.test.ts</code> 19 例规则表），记录见 <a href="../testing/plugin-architecture-stage-6ac-team-kanban-ui-lifecycle.html">6AC 测试记录</a>，决策见 <a href="../backend/adr/0041-team-kanban-ui-capability-lifecycle.html">ADR-0041</a>。</p>
 </section>
+
+<section>
+  <h2>外援入口能力驱动装卸（2026-09-14）</h2>
+  <p>外援（AgentsHub / 侧边栏入口）可用性从配置标志迁移到统一能力状态源（阶段 5-9，ADR-0041 legacy-safe 规则）：<code>lib/featureFlags.ts</code> 新增 <code>EXTERNAL_AGENTS_FEATURE_ID = product.external-agents</code>，<code>externalAgentsAvailable</code> 改按 <code>feature_capabilities</code> 推导——config 未加载或字段缺席（旧后端）保持可用，映射存在而条目缺席或 <code>available ≠ true</code> 不可用；复用既有 <code>featureCapabilityAvailable</code> 助手与参数化规则表，与 team/kanban 独立。<code>App.tsx</code> / <code>Composer.tsx</code> 等调用点零改动；受其门控的 agents 页面在能力下线时不可达（导航被拦）。</p>
+  <p>已验收：typecheck 与全量 248 tests 通过（featureFlags 规则表补外援条目 + 独立性 3 例；Composer / App.team-kanban 用例 fixture 迁移到能力映射）。</p>
+</section>
 </body>
 </html>

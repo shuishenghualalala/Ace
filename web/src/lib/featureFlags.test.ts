@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  externalAgentsAvailable,
+  EXTERNAL_AGENTS_FEATURE_ID,
   kanbanFeatureAvailable,
   KANBAN_FEATURE_ID,
   teamFeatureAvailable,
@@ -29,6 +31,7 @@ function configWithCapabilities(caps: Record<string, FeatureCapability>): AppCon
 const FEATURES: Array<{ id: string; available: (config: AppConfig | null) => boolean }> = [
   { id: TEAM_FEATURE_ID, available: teamFeatureAvailable },
   { id: KANBAN_FEATURE_ID, available: kanbanFeatureAvailable },
+  { id: EXTERNAL_AGENTS_FEATURE_ID, available: externalAgentsAvailable },
 ];
 
 describe("feature capability availability rules (ADR-0041 legacy-safe)", () => {
@@ -87,6 +90,40 @@ describe("team/kanban availability are independent", () => {
       [KANBAN_FEATURE_ID]: capability(true),
     });
     expect(teamFeatureAvailable(config)).toBe(false);
+    expect(kanbanFeatureAvailable(config)).toBe(true);
+  });
+});
+
+describe("external-agents availability is independent of team/kanban", () => {
+  it("外援不可用 + team/kanban 可用 → 分别推导互不影响", () => {
+    const config = configWithCapabilities({
+      [EXTERNAL_AGENTS_FEATURE_ID]: capability(false),
+      [TEAM_FEATURE_ID]: capability(true),
+      [KANBAN_FEATURE_ID]: capability(true),
+    });
+    expect(externalAgentsAvailable(config)).toBe(false);
+    expect(teamFeatureAvailable(config)).toBe(true);
+    expect(kanbanFeatureAvailable(config)).toBe(true);
+  });
+
+  it("外援可用 + team/kanban 不可用 → 分别推导互不影响", () => {
+    const config = configWithCapabilities({
+      [EXTERNAL_AGENTS_FEATURE_ID]: capability(true),
+      [TEAM_FEATURE_ID]: capability(false),
+      [KANBAN_FEATURE_ID]: capability(false),
+    });
+    expect(externalAgentsAvailable(config)).toBe(true);
+    expect(teamFeatureAvailable(config)).toBe(false);
+    expect(kanbanFeatureAvailable(config)).toBe(false);
+  });
+
+  it("外援缺席不被显式可用的 team/kanban 拯救，也不拖累它们", () => {
+    const config = configWithCapabilities({
+      [TEAM_FEATURE_ID]: capability(true),
+      [KANBAN_FEATURE_ID]: capability(true),
+    });
+    expect(externalAgentsAvailable(config)).toBe(false);
+    expect(teamFeatureAvailable(config)).toBe(true);
     expect(kanbanFeatureAvailable(config)).toBe(true);
   });
 });

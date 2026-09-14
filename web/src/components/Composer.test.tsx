@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import Composer, { formatTeamMentionToken, teamMemberMentionId } from "./Composer";
 import ExternalAgentAvatar from "./ExternalAgentAvatar";
+import { EXTERNAL_AGENTS_FEATURE_ID } from "../lib/featureFlags";
 import type { AppConfig } from "../types";
 
 const noop = () => {};
@@ -12,7 +13,13 @@ const config = (externalAgentsEnabled: boolean): AppConfig => ({
   active_model_id: "test",
   models: [],
   wiki: { enabled: true },
-  external_agents: { enabled: externalAgentsEnabled },
+  feature_capabilities: {
+    [EXTERNAL_AGENTS_FEATURE_ID]: {
+      state: externalAgentsEnabled ? "enabled" : "disabled",
+      available: externalAgentsEnabled,
+      generation: null,
+    },
+  },
 });
 
 describe("Composer team execution tier picker", () => {

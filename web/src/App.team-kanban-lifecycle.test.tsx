@@ -2,6 +2,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import {
+  EXTERNAL_AGENTS_FEATURE_ID,
   KANBAN_FEATURE_ID,
   TEAM_FEATURE_ID,
 } from "./lib/featureFlags";
@@ -121,7 +122,13 @@ describe("real App team/kanban host lifecycle", () => {
   });
 
   it("hides the TaskBoard for team sessions while product.team is unavailable", async () => {
-    enqueueHostConfig(appConfig({ feature_capabilities: { [TEAM_FEATURE_ID]: capability(false) } }));
+    enqueueHostConfig(appConfig({
+      feature_capabilities: {
+        // 走到 agents 页面需要外援可用；这里只关 Team，验证看板随 Team 能力隐藏。
+        [EXTERNAL_AGENTS_FEATURE_ID]: capability(true),
+        [TEAM_FEATURE_ID]: capability(false),
+      },
+    }));
     const { container } = await mountAppHost();
 
     await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="nav-agents"]')!.click(); });
@@ -133,7 +140,12 @@ describe("real App team/kanban host lifecycle", () => {
   });
 
   it("keeps the TaskBoard for team sessions while product.team is available", async () => {
-    enqueueHostConfig(appConfig({ feature_capabilities: { [TEAM_FEATURE_ID]: capability(true) } }));
+    enqueueHostConfig(appConfig({
+      feature_capabilities: {
+        [EXTERNAL_AGENTS_FEATURE_ID]: capability(true),
+        [TEAM_FEATURE_ID]: capability(true),
+      },
+    }));
     const { container } = await mountAppHost();
 
     await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="nav-agents"]')!.click(); });

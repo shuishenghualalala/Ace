@@ -11,7 +11,9 @@
 >
 > > **切片 A 同伴数据卫生（本提交）**：审查发现本地主库残留 8 张无属主代码的 `companion_*` 空表（历史原型分支 2db4cb4/9efc3a0 废弃后未清理，不在任何归属清单），已按用户确认删除并归档完整 schema；新增 `crew migrate orphans` 只读诊断（`orphan_main_db_tables`：覆盖集 = OWNER_TABLE_LABELS ∪ 全部 *_DB_TABLES ∪ 新增 `CORE_MAIN_DB_TABLES` 核心表豁免 ∪ `*_schema_version` 版本表，排除 sqlite 内部表；拆库备份表沿用原名天然被清单覆盖），`companion.html` 模板改为状态文档、`notifications.html` 清除对已不存在 companion 路由的残留引用。验证：迁移相关四文件 100 passed、ruff + compileall 通过、CLI 端到端可用。
 >
-> 下一步：6AC、切片 A、P2-1、B 均已完成——Team/Kanban UI Contribution 生命周期收口、孤儿 companion 表清理、P2-1 旧节退役（`0f4ade1`）、**半接状态源对齐**（`7ccd5c5`，ADR-0043：`config_body` 叠加配置标志，能力快照 available = 配置启用 ∧ Runtime 激活，消除 wiki/external-agents 双事实源；参数化 8 例 + 回归 104 passed）；同伴范围已确认（ADR-0042：nearby 作为 `product.channels` 第三平台，实施列后续切片）。剩余待逐项说明计划并取得确认：**阶段 5 剩余 UI Contribution**（页面生命周期、API Client、Feature Event Reducer 等）与**同伴 nearby 渠道平台实施**。三平台验证：ci.yml python 门禁已扩为 ubuntu/windows/macos 矩阵（静态检查保持 Linux 单跑），桌面打包态由 nightly-desktop 三平台覆盖；矩阵首跑结果待推送后回填。
+> > **切片 H 外援 UI Contribution 生命周期化（本提交，阶段 5-9）**：Desktop/Web 双端外援（External-Agents）入口可用性从配置标志迁移到统一能力状态源（ADR-0041 legacy-safe 规则）——Desktop <code>external-agents-feature.ts</code> 新增 <code>EXTERNAL_AGENTS_FEATURE_ID</code> 与 <code>externalAgentsCapabilityEnabled()</code>，Web <code>featureFlags.ts</code> 的 <code>externalAgentsAvailable</code> 改经共享 <code>featureCapabilityAvailable</code> 推导；顺带修正 Desktop 旧 <code>enabled === true</code> 与 Web <code>!== false</code> 的默认语义不一致。验证：Desktop 聚焦 46 passed + 全量 1908 passed、Web 聚焦 44 passed + 全量 248 passed，双端 typecheck 通过。
+>
+> 下一步：6AC、切片 A、P2-1、B、H 均已完成——Team/Kanban/外援的 UI Contribution 已按统一状态源驱动；P2-1 旧节退役、半接状态源对齐（ADR-0043）已收口；同伴范围已确认（ADR-0042：nearby 作为 `product.channels` 第三平台）。剩余待逐项说明计划并取得确认：**阶段 5 剩余 UI Contribution**（Wiki 页面生命周期、API Client、Feature Event Reducer 等）与**同伴 nearby 渠道平台实施**。三平台验证：ci.yml python 门禁已扩为 ubuntu/windows/macos 矩阵（静态检查保持 Linux 单跑），桌面打包态由 nightly-desktop 三平台覆盖；矩阵首跑结果待推送后回填。
 >
 > 渐进/后续范围：P2-1 已全部完成（双读 + 写侧统一 features.* 旧节退役）；P2-5 表前缀仍为渐进项；根包余下物理拆分为后续范围。P2-6 kanban 事件命名空间已决定保留发布契约，pnpm workspace 已降为观察项；6Y/6Z 已完成第三批拆包与 wiki_learning 表归属决策。同伴产品范围已按 ADR-0042 确认（nearby 作为 channels 第三平台），实施列后续切片。
 

@@ -620,7 +620,9 @@ describe('composer 外援入口', () => {
         base_url: '',
         active_model_id: 'test',
         models: [],
-        external_agents: { enabled: false },
+        feature_capabilities: {
+          'product.external-agents': { state: 'discovered', available: false, generation: null },
+        },
       },
     });
     const agents = vi.spyOn(backendApi, 'externalAgents');

@@ -1,12 +1,25 @@
-/** 外部智能体/Team 产品开关：仅控制入口与日常历史展示，不删除任何会话数据。 */
+/**
+ * 外部智能体/Team 产品开关：仅控制入口与日常历史展示，不删除任何会话数据。
+ *
+ * 后端 /api/config 返回的 feature_capabilities 决定入口是否可用（ADR-0041 legacy-safe）：
+ * - config 未加载（null）或旧后端未返回 feature_capabilities 字段 → 视为可用；
+ * - 否则按 EXTERNAL_AGENTS_FEATURE_ID 查 available。
+ */
 
 import type { BackendConfig, SessionAgentBinding } from '../backend-client';
 import { state, type SessionRow } from '../state';
 
 export const EXTERNAL_AGENTS_DISABLED_MESSAGE = '外援功能暂未开放，请联系管理员开启。';
 
+export const EXTERNAL_AGENTS_FEATURE_ID = 'product.external-agents';
+
+function externalAgentsCapabilityEnabled(config: BackendConfig | null | undefined): boolean {
+  if (config == null || config.feature_capabilities == null) return true;
+  return Boolean(config.feature_capabilities[EXTERNAL_AGENTS_FEATURE_ID]?.available);
+}
+
 export function externalAgentsEnabled(config: BackendConfig | null | undefined = state.config): boolean {
-  return config?.external_agents?.enabled === true;
+  return externalAgentsCapabilityEnabled(config);
 }
 
 export function isExternalAgentSession(
