@@ -764,6 +764,21 @@ class SingleAgent(Agent):
                 len(repaired),
             )
         if not self.lightweight:
+            # 崩溃恢复：上轮被 kill -9 留下的开放回合补 turn_end{interrupted} 闭合
+            # （断点报告在 D4 会话列表扫描，不自动续跑），再为本轮记 turn_start。
+            close_open_turn = getattr(self.session_store, "close_open_turn", None)
+            if callable(close_open_turn) and close_open_turn(sid, owner_account_id=owner):
+                log.warning("上轮会话被中断：已闭合悬挂回合 session=%s", sid)
+            record_turn = getattr(self.session_store, "record_turn_event", None)
+            if callable(record_turn):
+                from crew.state.session_store import SessionEventType
+
+                record_turn(
+                    sid,
+                    owner_account_id=owner,
+                    kind=SessionEventType.TURN_START,
+                )
+        if not self.lightweight:
             # 文件清单持久会话信息：从工具调用历史提取 read/modified 清单写入
             # canonical（原地刷新 is_meta 消息），压缩遮蔽后由压缩管线重新注入视图。
             from crew.agent.compact.file_manifest import upsert_file_manifest
@@ -967,6 +982,17 @@ class SingleAgent(Agent):
                     last_prompt_tokens_source=last_prompt_tokens_source,
                 )
                 persisted = True
+                if not self.lightweight:
+                    record_turn = getattr(self.session_store, "record_turn_event", None)
+                    if callable(record_turn):
+                        from crew.state.session_store import SessionEventType
+
+                        record_turn(
+                            sid,
+                            owner_account_id=owner,
+                            kind=SessionEventType.TURN_END,
+                            status=terminal_outcome,
+                        )
                 if last_prompt_tokens is not None:
                     await self._record_meter_checkpoint(
                         envelope,

@@ -950,3 +950,55 @@ async def test_gateway_rewind_fork_branches_endpoints(tmp_path, auth_headers):
         # 不存在的会话 → 404
         resp = await client.post("/api/session/nope/rewind", json={"target_seq": 1})
         assert resp.status_code == 404
+
+
+# ---- W5：崩溃恢复定稿（ADR-0042 D3） ----
+
+
+def test_kill9_mid_turn_reopen_and_close_open_turn(tmp_path):
+    """kill -9 中途崩溃（turn_start 无 turn_end）：重开后可加载、悬挂回合可闭合。"""
+    from crew.core.types import ToolCall
+
+    owner = "A:uid-a"
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user("q")], owner_account_id=owner)
+        store.record_turn_event("s1", kind=SessionEventType.TURN_START, owner_account_id=owner)
+        store.save(
+            "s1",
+            [Message.user("q"), Message.assistant(tool_calls=[ToolCall(id="call_1", name="read_file", arguments={})])],
+            owner_account_id=owner,
+        )
+        # 模拟 kill -9：不落 turn_end、不 close，直接弃实例
+    finally:
+        store.close()
+
+    store2 = SQLiteSessionStore(db)
+    try:
+        messages = store2.load("s1", owner_account_id=owner)
+        assert [m.role for m in messages] == ["user", "assistant"]
+        # 悬挂回合被识别并闭合（interrupted），再次闭合为空操作
+        assert store2.close_open_turn("s1", owner_account_id=owner) is True
+        assert store2.close_open_turn("s1", owner_account_id=owner) is False
+        # 闭合后回合边界完整，下一回合正常追加
+        store2.record_turn_event("s1", kind=SessionEventType.TURN_START, owner_account_id=owner)
+        store2.save(
+            "s1",
+            [*messages, Message.user("next")],
+            owner_account_id=owner,
+        )
+        assert [m.content for m in store2.load("s1", owner_account_id=owner)][-1] == "next"
+    finally:
+        store2.close()
+
+
+def test_close_open_turn_on_closed_session_is_noop(tmp_path):
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user("a")], owner_account_id="")
+        assert store.close_open_turn("s1", owner_account_id="") is False
+        assert store.close_open_turn("ghost", owner_account_id="") is False
+    finally:
+        store.close()
