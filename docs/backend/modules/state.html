@@ -110,6 +110,9 @@
   <p><code>features.channels</code> 与旧 <code>channels</code> 的双读优先级沿用 6X。保存当前渠道时，将完整有效值写入选定节并清除该渠道的旧别名，避免更新后重载恢复旧值，以及删除字段、清空 <code>extra</code> 后再次被兜底补回。其他渠道、未知有效字段和其他 owner 保留；owner 仅读取自身 overlay，不继承全局渠道配置或旧 <code>platforms</code>。</p>
   <p>仍使用配置写锁、系统路径与临时文件原子替换。设计与回退见 <a href="../adr/0039-channels-config-namespace-roundtrip.html">ADR-0039</a>，验证见 <a href="../../testing/plugin-architecture-stage-6aa-channel-config.html">6AA 测试记录</a>。</p>
 
+  <h2>配置写回隔离与事务（2026-09-14）</h2>
+  <p>渠道配置写回的两个契约修复：<strong>隔离性</strong>——<code>_write_channel_config</code> 在构造目标渠道有效配置前对平台值与渠道有效合并结果做深拷贝，YAML anchor 使两个渠道共享嵌套 <code>extra</code> 时，删除一方字段不再串改另一方或调用方传入对象；<strong>事务性</strong>——提取 <code>_atomic_write_yaml</code>（tmp 写入 + 原子替换 + 失败清理残留并重抛），channel / mcp_servers / model_profiles / evolution 四个 persist 统一为磁盘提交成功后再发布内存状态，写盘或替换失败时内存与磁盘一致保留旧值。验证见 <a href="../../testing/review-fixes-batch-2026-09-14.html">整改批次测试记录</a>。</p>
+
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>

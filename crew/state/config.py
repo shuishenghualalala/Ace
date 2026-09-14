@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import shutil
 import threading
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -633,17 +634,7 @@ class Config:
         data = _read_yaml_file(yaml_path)
         _write_channel_config(data, name, config_data, include_platforms=False)
 
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data,
-                f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
+        _atomic_write_yaml(yaml_path, data)
         return yaml_path
 
     # ---- 模型 profile CRUD（运行时增删改 + 持久化到 config.yaml）----
@@ -780,20 +771,9 @@ class Config:
             pid: _serialize_profile_for_yaml(p) for pid, p in self.model_profiles.items()
         }
 
-        # 同步 raw_config（让运行时观察者看到一致状态）
+        # 磁盘提交成功后再发布内存状态：写回失败时内存与磁盘一致保留旧值。
+        _atomic_write_yaml(yaml_path, data)
         self.raw_config = data
-
-        # 写回（先写临时文件再原子替换，防止中途崩溃损坏 config.yaml）
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data, f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
         return yaml_path
 
     def persist_evolution_config(self) -> Path:
@@ -829,18 +809,9 @@ class Config:
             "visible": self.evolution_visible,
         }
 
+        # 磁盘提交成功后再发布内存状态：写回失败时内存与磁盘一致保留旧值。
+        _atomic_write_yaml(yaml_path, data)
         self.raw_config = data
-
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data, f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
         return yaml_path
 
     def set_mcp_server(self, name: str, cfg: dict[str, Any]) -> None:
@@ -883,18 +854,9 @@ class Config:
         for key, value in (self.mcp_servers or {}).items():
             mcp_servers[key] = dict(value) if isinstance(value, dict) else {}
 
+        # 磁盘提交成功后再发布内存状态：写回失败时内存与磁盘一致保留旧值。
+        _atomic_write_yaml(yaml_path, data)
         self.raw_config = data
-
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data, f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
         return yaml_path
 
     def _persist_channel_config_locked(self, name: str, config_data: dict[str, Any]) -> Path:
@@ -914,21 +876,12 @@ class Config:
 
         merged = _write_channel_config(data, name, config_data)
 
+        # 磁盘提交成功后再发布内存状态：写回失败时内存与磁盘一致保留旧值。
+        _atomic_write_yaml(yaml_path, data)
         self.channels[name] = dict(merged)
         platforms = data.get("platforms")
         self.platforms = platforms if isinstance(platforms, dict) else {}
         self.raw_config = data
-
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data, f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
         return yaml_path
 
     def channel_config(self, name: str, owner_account_id: str | None = None) -> dict[str, Any]:
@@ -1472,6 +1425,30 @@ _FEATURES_FLAT_MAP: dict[tuple[str, str], tuple[str, ...]] = {
 }
 
 
+def _atomic_write_yaml(yaml_path: Path, data: dict[str, Any]) -> None:
+    """把 data 原子写入 yaml_path：先写同目录 tmp 文件，成功后原子替换。
+
+    中途失败（写 tmp 或替换）时清理残留 tmp 并原样重抛异常，目标文件保持
+    旧内容不动；内存状态（channels/platforms/raw_config 等）的发布由调用方
+    放在本函数成功返回之后，保证失败时内存与磁盘一致保留旧值。
+    """
+    yaml_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                data, f,
+                allow_unicode=True,
+                sort_keys=False,
+                default_flow_style=False,
+            )
+        tmp_path.replace(yaml_path)
+    except BaseException:
+        with suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """递归合并两个配置 dict：override 同名键获胜，两侧 dict 值逐层合并。"""
     merged = dict(base)
@@ -1530,8 +1507,11 @@ def _write_channel_config(
     channel_effective = _deep_merge_dicts(
         channel_value if isinstance(channel_value, dict) else {}, target_value
     )
-    current = dict(platform_value) if isinstance(platform_value, dict) else {}
-    current.update(channel_effective)
+    # 与源数据深拷贝脱钩：platform 值与渠道有效合并结果的嵌套 dict 可能经
+    # YAML anchor / 复用入参在渠道间共享引用，下方 remove-keys 会原地 pop，
+    # 浅拷贝会把删除泄漏到兄弟渠道条目（或调用方对象）上。
+    current = deepcopy(platform_value) if isinstance(platform_value, dict) else {}
+    current.update(deepcopy(channel_effective))
     for key in remove_keys:
         current.pop(key, None)
         extra = current.get("extra")
