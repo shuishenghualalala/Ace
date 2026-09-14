@@ -1629,6 +1629,7 @@ class CrewApp:
             post_compact_max_important_chars=cfg.compaction_post_compact_max_important_chars,
             post_compact_max_total_chars=cfg.compaction_post_compact_max_total_chars,
             max_tool_result_chars=cfg.compaction_max_tool_result_chars,
+            max_overflow_retries=cfg.compaction_max_overflow_retries,
             history_db_path=cfg.db_path,
             store=self.summary_store,
             result_policy_resolver=self.registry.result_policy,

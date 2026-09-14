@@ -21,7 +21,11 @@ from __future__ import annotations
 
 import asyncio
 
-from crew.agent.compact.microcompact import ResultPolicyResolver, micro_compact
+from crew.agent.compact.microcompact import (
+    ResultPolicyResolver,
+    micro_compact,
+    prune_tool_results,
+)
 from crew.agent.compact.post_compact import (
     build_post_compact_attachments,
     build_post_compact_file_attachments,
@@ -81,6 +85,7 @@ class ContextCompactor:
         history_db_path: str = "",
         store: SummaryStore | None = None,
         result_policy_resolver: ResultPolicyResolver | None = None,
+        max_overflow_retries: int = 1,
     ) -> None:
         self.provider = provider
         self.enabled = enabled
@@ -100,6 +105,8 @@ class ContextCompactor:
         self.history_db_path = history_db_path
         self.store = store
         self.result_policy_resolver = result_policy_resolver
+        # overflow 后 compact-retry 次数上限（每次 overflow 序列只压缩重试一次）。
+        self.max_overflow_retries = max(0, max_overflow_retries)
         # store 为 None 时退化为进程内缓存（重启即失，自动降级 L3）。
         self._mem: dict[SummaryKey, SummaryState] = {}
         # 每个 session 连续摘要失败次数，用于断路器。
@@ -367,10 +374,14 @@ class ContextCompactor:
     ) -> list[Message]:
         """兜底式压缩：上下文溢出时调用，比预检更激进（保留窗口砍半）。
 
-        不受防抖与断路器限制——溢出时必须尽力压缩。
+        先无模型剪枝超长 tool result（阈值 8192、头 4096/尾 1024），再 L1 清理、
+        L2/L3 摘要；不受防抖与断路器限制——溢出时必须尽力压缩。
+        调用方必须用「历史投影确实前进」（压缩后视图 token 数变小）来门控重试，
+        否则无进展压缩 + 重试会形成死循环。
         """
         if not self.enabled:
             return messages
+        messages = prune_tool_results(messages)
         keep_tools = max(2, self.keep_recent_tools // 2)
         messages = micro_compact(
             messages,
@@ -387,6 +398,32 @@ class ContextCompactor:
             self._put_state(session_id, new_state, owner_account_id)
             self._failure_counts[self._key(session_id, owner_account_id) or ("", "")] = 0
         return result
+
+    async def compact_now(
+        self,
+        messages: list[Message],
+        session_id: str | None = None,
+        owner_account_id: str | None = None,
+    ) -> tuple[list[Message], bool]:
+        """手动压缩入口（idle 维护窗口）：不依赖水位、防抖与断路器，立即压缩一段历史。
+
+        调用方必须保证会话处于空闲维护窗口（无正在执行的回合），忙时不得调用；
+        压缩结果写入 L2 摘要状态，下一轮按需复用。canonical 历史不被修改。
+        返回 (压缩后视图, 是否发生了压缩)。
+        """
+        if not self.enabled:
+            return messages, False
+        messages = self.compact_preview_view(messages)
+        state = self._get_state(session_id, owner_account_id)
+        result, new_state, skipped = await self._summarize_old(
+            messages, state, self.keep_recent, session_id=session_id
+        )
+        if new_state is None:
+            return result, False
+        new_state.ineffective_count = 0
+        self._put_state(session_id, new_state, owner_account_id)
+        self._failure_counts[self._key(session_id, owner_account_id) or ("", "")] = 0
+        return result, not skipped
 
     def _history_hint(self, session_id: str | None) -> str:
         """摘要消息尾部附完整历史回溯指引（canonical 历史 append-only 落库）。"""

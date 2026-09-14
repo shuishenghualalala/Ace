@@ -256,6 +256,7 @@ class Config:
     compaction_post_compact_max_important_chars: int = 5000  # 单条恢复重要结论最大字符数
     compaction_post_compact_max_total_chars: int = 140000  # 恢复附件总字符闸口
     compaction_max_tool_result_chars: int = 20000  # 单条 tool result 最大字符数，超长截断
+    compaction_max_overflow_retries: int = 1  # 上下文 overflow 后 compact-retry 次数上限（每次溢出序列一次）
     retry_max: int = 2
     retry_backoff: float = 1.0
     title_auto: bool = True
@@ -1883,6 +1884,9 @@ def load_config(config_path: str | Path | None = None) -> Config:
             )
             cfg.compaction_max_tool_result_chars = int(
                 comp.get("max_tool_result_chars", cfg.compaction_max_tool_result_chars)
+            )
+            cfg.compaction_max_overflow_retries = max(
+                0, int(comp.get("max_overflow_retries", cfg.compaction_max_overflow_retries))
             )
             retry = agent.get("retry", {}) or {}
             cfg.retry_max = int(retry.get("max_retries", cfg.retry_max))

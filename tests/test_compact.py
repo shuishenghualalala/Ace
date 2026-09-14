@@ -664,6 +664,60 @@ def test_safe_split_falls_back_without_boundary():
     assert ContextCompactor._safe_split(msgs, keep_recent=2) == 0
 
 
+# --------------------------------------------------------------------------- #
+# overflow 兜底：无模型剪枝 + compact_now 手动入口
+# --------------------------------------------------------------------------- #
+def test_prune_tool_results_keeps_head_and_tail():
+    """单条 tool result 超 8192 字符时无模型剪枝：保留头 4096 + 尾 1024，幂等。"""
+    from crew.agent.compact.microcompact import prune_tool_results
+
+    long_content = "A" * 20000
+    msgs = [
+        Message.user("执行"),
+        Message.assistant("执行", tool_calls=[ToolCall(id="c1", name="terminal")]),
+        Message.tool("c1", long_content, name="terminal"),
+    ]
+    out = prune_tool_results(msgs)
+    pruned = [m for m in out if m.role == "tool"][0].content
+    assert len(pruned) < len(long_content)
+    assert pruned.startswith("A" * 100)
+    assert pruned.endswith("A" * 100)
+    assert "tool result 已截断" in pruned
+    # 幂等：二次剪枝不再改写
+    out2 = prune_tool_results(out)
+    assert [m.content for m in out2] == [m.content for m in out]
+
+
+def test_prune_tool_results_leaves_short_results_untouched():
+    from crew.agent.compact.microcompact import prune_tool_results
+
+    msgs = [Message.tool("c1", "短结果", name="terminal")]
+    assert prune_tool_results(msgs) is msgs  # 同一引用，无超长线
+
+
+async def test_compact_now_runs_without_watermark():
+    """手动 compact_now 不依赖水位/防抖/断路器：低水位历史也能立即压缩。"""
+    provider = FakeProvider(reply="手动摘要")
+    comp = ContextCompactor(provider, token_budget=10**9, keep_recent=2)
+    history = await _big_history(10)
+    view, changed = await comp.compact_now(history, "sess-now")
+    assert changed
+    assert view[0].content.startswith(SUMMARY_MARKER)
+    assert len(provider.calls) == 1
+    # L2 状态已写入：下一轮低水位也能复用
+    assert comp._get_state("sess-now") is not None
+
+
+async def test_compact_now_returns_unchanged_when_nothing_to_compact():
+    provider = FakeProvider(reply="手动摘要")
+    comp = ContextCompactor(provider, token_budget=10**9, keep_recent=50)
+    history = await _big_history(2)
+    view, changed = await comp.compact_now(history, "sess-now2")
+    assert not changed
+    assert len(provider.calls) == 0
+    assert view[0].content.startswith("问题0")
+
+
 def test_safe_split_pairing_counter_falls_back_toward_head():
     """切点落在「未闭合 toolCall 之后」的 assistant 上时（配对余额非 0），
     向头部回退到最近余额为 0 的边界，绝不拆散 toolCall/results 组。"""

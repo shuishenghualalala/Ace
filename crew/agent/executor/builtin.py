@@ -432,7 +432,9 @@ class BuiltinExecutor(AgentExecutor):
         max_output_tokens_escalated = False
         stream_continuation_count = 0
         streamed_text = ""  # 流式中断续写累计文本
-        overflow_mode = False  # 命中上下文溢出后，发给 LLM 的视图持续走 force_compact
+        overflow_mode = False  # 命中上下文溢出且兜底压缩使投影前进后，后续轮持续走 force_compact
+        overflow_pending = False  # 命中溢出待压缩：下一轮开头先做剪枝+摘要，再决定是否重试
+        overflow_retries = 0  # 本轮已消耗的 overflow compact-retry 次数（上限 compactor.max_overflow_retries）
         vision_downgraded = False  # 上游实际拒绝图片后，本轮余下请求只发送文本视图
 
         from crew.core.runctx import current_agent_workdir, current_session_id
@@ -469,7 +471,9 @@ class BuiltinExecutor(AgentExecutor):
 
             # ---- 组装发给 LLM 的视图 ----
             #   每轮 compact_view 做水位压缩，未触水位时近乎零成本。
-            #   overflow_mode 是 provider 报溢出后的紧急兜底，从全量 ctx.messages 重新激进压缩。
+            #   overflow_pending/overflow_mode 是 provider 报溢出后的紧急兜底：先做无模型
+            #   剪枝（超长 tool result 头 4096/尾 1024）再摘要；仅当历史投影确实前进
+            #   （压缩后视图 token 数变小）才重试，否则不再重试，直接报错。
             provisional_view = self.build_request_view(
                 ctx.system_prompt,
                 view_messages,
@@ -486,7 +490,9 @@ class BuiltinExecutor(AgentExecutor):
                 0,
                 provisional_view.estimated_prompt_tokens() - estimate_tokens(view_messages),
             )
-            if overflow_mode and self.compactor is not None:
+            if (overflow_mode or overflow_pending) and self.compactor is not None:
+                overflow_pending = False
+                overflow_before = estimate_tokens(view_messages)
                 yield ResponseChunk.compaction_event(rid, True, next_seq())
                 try:
                     from crew.core.runctx import current_owner_account_id
@@ -508,6 +514,24 @@ class BuiltinExecutor(AgentExecutor):
                     view_messages = list(ctx.messages)
                 finally:
                     yield ResponseChunk.compaction_event(rid, False, next_seq())
+                overflow_after = estimate_tokens(view_messages)
+                if overflow_after >= overflow_before:
+                    # 投影未前进：再发一次同样的请求必然再溢出，不再重试
+                    log.warning(
+                        "overflow 兜底压缩未使历史投影前进（%d → %d tokens），不再重试 session=%s",
+                        overflow_before,
+                        overflow_after,
+                        ctx.session_id,
+                    )
+                    yield ResponseChunk.error(rid, "上下文超长且无法进一步压缩", next_seq())
+                    return
+                overflow_mode = True
+                log.info(
+                    "overflow 兜底压缩后投影前进（%d → %d tokens），重试本轮 session=%s",
+                    overflow_before,
+                    overflow_after,
+                    ctx.session_id,
+                )
             elif self.compactor is not None:
                 will_compact_view = getattr(self.compactor, "will_compact_view", None)
                 show_compaction = bool(
@@ -616,11 +640,22 @@ class BuiltinExecutor(AgentExecutor):
                 )
                 return
             if result.get("overflow"):
-                if self.compactor is not None and not overflow_mode:
-                    # 首次命中溢出：静默开启压缩模式并重试本轮（退还本轮预算）
-                    overflow_mode = True
+                max_overflow_retries = (
+                    getattr(self.compactor, "max_overflow_retries", 1)
+                    if self.compactor is not None
+                    else 0
+                )
+                if self.compactor is not None and overflow_retries < max_overflow_retries:
+                    # 首次/第 N 次命中溢出：先剪枝再摘要，仅当投影前进才重试（防无进展死循环）
+                    overflow_retries += 1
+                    overflow_pending = True
                     budget.refund()
-                    log.info("命中上下文溢出，启用兜底压缩后重试 session=%s", ctx.session_id)
+                    log.info(
+                        "命中上下文溢出，启用兜底压缩后重试（第 %d/%d 次）session=%s",
+                        overflow_retries,
+                        max_overflow_retries,
+                        ctx.session_id,
+                    )
                     continue
                 yield ResponseChunk.error(rid, "上下文超长且无法进一步压缩", next_seq())
                 return

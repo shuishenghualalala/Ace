@@ -203,9 +203,10 @@ class SingleAgent(Agent):
         self.system_prompt = system_prompt
         self.tool_filter = tool_filter  # None=全部工具；否则只暴露子集
         self.max_iterations = max_iterations
-        # 未注入 executor 时默认走自带循环，保持向后兼容（Team 即走此路径）
+        # 未注入 executor 时默认走自带循环，保持向后兼容（Team 即走此路径）。
+        # compactor 同步注入默认 executor：否则溢出兜底与每轮 compact_view 静默关闭。
         self.executor = executor or BuiltinExecutor(
-            provider, registry, plugins, max_iterations=max_iterations
+            provider, registry, plugins, max_iterations=max_iterations, compactor=compactor
         )
         self.compactor = compactor
         self.enable_title = enable_title

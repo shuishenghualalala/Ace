@@ -30,6 +30,11 @@ INSTRUCTION_REPLACED_STUB = "[已加载指令的旧版本已替换: {identity}]"
 # 用于 _summarize_tool_result（agent/context_compressor.py:400），适配 Crew 工具名。
 TOOL_SUMMARY_PREFIX = "[已压缩工具摘要] "
 
+# overflow 兜底的无模型剪枝：单条 tool result 超阈值时保留头/尾片段。
+OVERFLOW_PRUNE_THRESHOLD_CHARS = 8192
+OVERFLOW_PRUNE_HEAD_CHARS = 4096
+OVERFLOW_PRUNE_TAIL_CHARS = 1024
+
 
 ResultPolicyResolver = Callable[[str, dict[str, Any]], ToolResultPolicy]
 
@@ -139,6 +144,31 @@ def _summarize_tool_result(
         body = f"[{tool_name}]{first_arg} ({content_len:,} chars result)"
 
     return f"{TOOL_SUMMARY_PREFIX}{body}"
+
+
+def prune_tool_results(
+    messages: list[Message],
+    *,
+    threshold_chars: int = OVERFLOW_PRUNE_THRESHOLD_CHARS,
+    head_chars: int = OVERFLOW_PRUNE_HEAD_CHARS,
+    tail_chars: int = OVERFLOW_PRUNE_TAIL_CHARS,
+) -> list[Message]:
+    """overflow 兜底的无模型剪枝：单条 tool result 超过阈值时保留头/尾片段。
+
+    与 _truncate_tool_result 同一幂等标记，已剪枝的分不会被二次改写。
+    返回新列表；无超长线时返回原列表（同一引用）。
+    """
+    if threshold_chars <= 0:
+        return messages
+    result: list[Message] = []
+    changed = False
+    for m in messages:
+        if m.role == "tool" and m.content and len(m.content) > threshold_chars:
+            result.append(replace(m, content=_truncate_tool_result(m.content, head_chars + tail_chars)))
+            changed = True
+        else:
+            result.append(m)
+    return result if changed else messages
 
 
 def micro_compact(
