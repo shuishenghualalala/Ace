@@ -1606,6 +1606,10 @@ class CrewApp:
         （供 delegate_task 继承主 agent 技能）。
         """
         cfg = self.config
+        # TokenMeter 跨重启重锚定：SQLite store 提供 checkpoint 读取，其他实现忽略。
+        meter_checkpoint_loader = getattr(self.session_store, "load_meter_checkpoint", None)
+        if not callable(meter_checkpoint_loader):
+            meter_checkpoint_loader = None
         # 触发阈值：compaction_token_budget>0 绝对值优先；否则按 ratio × context_window
         # 动态计算并取保守的 0.75，避免硬编码小值导致过早压缩。
         if cfg.compaction_token_budget > 0:
@@ -1632,6 +1636,7 @@ class CrewApp:
             history_db_path=cfg.db_path,
             store=self.summary_store,
             result_policy_resolver=self.registry.result_policy,
+            meter_checkpoint_loader=meter_checkpoint_loader,
         )
         from crew.agent.loop import ToolCallGuardrailConfig
 

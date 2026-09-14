@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 
+from crew.agent.compact.meter import CheckpointLoader, TokenMeter
 from crew.agent.compact.microcompact import ResultPolicyResolver, micro_compact
 from crew.agent.compact.post_compact import (
     build_post_compact_attachments,
@@ -81,6 +82,7 @@ class ContextCompactor:
         history_db_path: str = "",
         store: SummaryStore | None = None,
         result_policy_resolver: ResultPolicyResolver | None = None,
+        meter_checkpoint_loader: CheckpointLoader | None = None,
     ) -> None:
         self.provider = provider
         self.enabled = enabled
@@ -100,6 +102,8 @@ class ContextCompactor:
         self.history_db_path = history_db_path
         self.store = store
         self.result_policy_resolver = result_policy_resolver
+        # 水位判断的消费入口：无锚点时退化为 estimate_tokens，行为与旧实现一致。
+        self._meter = TokenMeter(meter_checkpoint_loader)
         # store 为 None 时退化为进程内缓存（重启即失，自动降级 L3）。
         self._mem: dict[SummaryKey, SummaryState] = {}
         # 每个 session 连续摘要失败次数，用于断路器。
@@ -107,6 +111,34 @@ class ContextCompactor:
         # compact_view 专用防抖状态（与 canonical L2 state 隔离，不读写 store）。
         # key 带 __view__:: 前缀，与 canonical _key 不冲突，可安全共用 _failure_counts。
         self._view_mem: dict[SummaryKey, SummaryState] = {}
+
+    def record_meter_usage(
+        self,
+        session_id: str,
+        owner_account_id: str,
+        *,
+        prompt_tokens: int,
+        source: str,
+        fingerprint: str,
+        view_estimate: int,
+    ) -> bool:
+        """把本轮真实 usage 记为计量锚点（delta 自此按视图增量累加）。"""
+        return self._meter.record_usage(
+            session_id,
+            owner_account_id,
+            prompt_tokens=prompt_tokens,
+            source=source,
+            fingerprint=fingerprint,
+            view_estimate=view_estimate,
+        )
+
+    def _measured_tokens(
+        self, session_id: str | None, owner_account_id: str | None, messages: list[Message]
+    ) -> int:
+        if not session_id:
+            return estimate_tokens(messages)
+        owner = current_owner_account_id.get() if owner_account_id is None else owner_account_id
+        return self._meter.measure(session_id, owner or "", messages).tokens
 
     # ---- 摘要状态读写：有 store 走 SQLite，否则走进程内 ---- #
     @staticmethod
@@ -198,7 +230,7 @@ class ContextCompactor:
         if not self.enabled:
             return False
         view = self.compact_preview_view(messages)
-        if estimate_tokens(view) + max(0, int(prompt_overhead_tokens)) <= self.token_budget:
+        if self._measured_tokens(session_id, owner_account_id, view) + max(0, int(prompt_overhead_tokens)) <= self.token_budget:
             return False
         vkey = self._view_key(session_id, owner_account_id)
         failure_key = vkey or ("", "")
@@ -231,7 +263,7 @@ class ContextCompactor:
         if not self.enabled:
             return messages
         messages = self.compact_preview_view(messages)
-        if estimate_tokens(messages) + max(0, int(prompt_overhead_tokens)) <= self.token_budget:
+        if self._measured_tokens(session_id, owner_account_id, messages) + max(0, int(prompt_overhead_tokens)) <= self.token_budget:
             return messages  # L1 已够，无需 LLM 摘要
 
         vkey = self._view_key(session_id, owner_account_id)
@@ -297,7 +329,7 @@ class ContextCompactor:
         if not self.enabled:
             return messages
         messages = self.compact_preview_view(messages)
-        if estimate_tokens(messages) <= self.token_budget:
+        if self._measured_tokens(session_id, owner_account_id, messages) <= self.token_budget:
             return messages  # L1 已够
 
         key = self._key(session_id, owner_account_id)

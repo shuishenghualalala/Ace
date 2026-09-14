@@ -57,6 +57,7 @@
 <li><strong>双格式窗口的双写成本（D1e 声明）</strong>：窗口期内 save 同时维护事件行与旧 blob 列（同事务），blob 重写是窗口的回退成本；读取端 <code>read_mode=&quot;blob&quot;</code> 可紧急切回纯 blob 读取。兼容 Adapter 声明：<em>deprecated_after = v1.3.0</em>；消费者清单 = SQLiteSessionStore.load/load_child_sessions/load_async 读取端、runtime.py 冷读配平、gateway sessions router、channel sessions、Team 子会话聚合（load_child_sessions）；窗口关闭条件 = W5 树形批次上线后观察一个版本窗口（v1.2.x 全周期）且 blob 回退路径验证无回归，于 v1.3.0 删除 messages 双写与 blob 读取回退。</li>
 <li><strong>租约心跳挂在单写队列 task 上</strong>（而非独立 per-session task）：队列空转超时即批量续约本进程持有的全部租约，少一类后台任务；close() 释放本进程全部租约。</li>
 <li><strong>schema_version 登记</strong>：sessions 域按主库 schema_version 机制 stamp 基线 v2（v1 = 单表 blob）；表结构演进仍走 sessions 自有的幂等 ALTER/PK 重建迁移。</li>
+<li><strong>TokenMeter 计量基准（D6）</strong>：锚点除 prompt_tokens 外持久化 <code>baseline_estimate</code>（锚定时刻发送视图的保守估算值），锚后 delta = 当前视图估算 − baseline_estimate 并 max(0) 钳制——与水位判断所测列表基准一致，压缩收缩视图时计量不回落。请求信封指纹 = provider 类型 + 模型名；指纹一致且 usage ≥ 旧锚点估价视为链延续，否则重锚定（真实数据优先，不丢弃）。save 回合写基础 checkpoint 行，runtime 在回合结束后追加带完整信封的版本，读取端取最新一行。</li>
 </ul>
 <p><strong>批次 commit 记录</strong>：D1a schema 与 pragma 基线 → D1b 写路径单写队列 → D1c 读路径投影缓存 → D1d writer 租约 → D1e 兼容迁移 → D6 TokenMeter。</p>
 <h2>回退方式</h2>

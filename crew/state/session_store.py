@@ -948,6 +948,79 @@ class SQLiteSessionStore(SessionStore):
 
         self._writer.execute(_write)
 
+    def load_meter_checkpoint(
+        self, session_id: str, owner_account_id: str
+    ) -> dict[str, Any] | None:
+        """最新 meter_checkpoint 事件 payload（TokenMeter 跨重启重锚定用）。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload FROM session_events "
+                "WHERE owner_account_id = ? AND session_id = ? AND type = ? "
+                "ORDER BY seq DESC LIMIT 1",
+                (owner_account_id, session_id, SessionEventType.METER_CHECKPOINT.value),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row[0])
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def record_meter_checkpoint(
+        self,
+        session_id: str,
+        *,
+        owner_account_id: str,
+        prompt_tokens: int,
+        source: str = "provider",
+        fingerprint: str = "",
+        baseline_estimate: int | None = None,
+    ) -> None:
+        """追加带完整请求信封信息的 meter_checkpoint 事件（增量计量重锚定）。"""
+        now = time.time()
+        payload = json.dumps(
+            {
+                "prompt_tokens": int(prompt_tokens),
+                "source": source,
+                "fingerprint": fingerprint,
+                "baseline_estimate": (
+                    int(prompt_tokens) if baseline_estimate is None else int(baseline_estimate)
+                ),
+                "recorded_at": now,
+            },
+            ensure_ascii=False,
+        )
+
+        def _write(conn):
+            self._ensure_writer_lease(conn, owner_account_id, session_id, now)
+            base = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(seq), 0) FROM session_events "
+                    "WHERE owner_account_id = ? AND session_id = ?",
+                    (owner_account_id, session_id),
+                ).fetchone()[0]
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO session_events "
+                "(owner_account_id, session_id, seq, type, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    owner_account_id,
+                    session_id,
+                    base + 1,
+                    SessionEventType.METER_CHECKPOINT.value,
+                    payload,
+                    now,
+                ),
+            )
+            conn.execute(
+                "UPDATE sessions SET leaf_seq = ? WHERE owner_account_id = ? AND session_id = ?",
+                (base + 1, owner_account_id, session_id),
+            )
+
+        self._writer.execute(_write)
+
     def ensure_session(
         self,
         session_id: str,
