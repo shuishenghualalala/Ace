@@ -815,5 +815,11 @@
   <p>修复看板卸载后迟到响应回写与轮询重启：Dynamic Kanban 的 <code>refreshKanbanBoard</code> 与 Team 看板的 <code>refreshTeamCollaborationBoard</code> / <code>primeTeamCollaborationIdentity</code> 此前在 <code>await</code> 后无生命周期守卫——卸载或重装后返回的旧请求仍回写 state / snapshots、触发渲染与多余更新事件，实测卸载后出现旧任务并新增一个轮询 interval。修复采用模块内聚的安装代计数器（init 装新一代 +1、dispose/测试重置销毁一代 +1）：请求发起前快照当前代，返回后若代际变化即整体丢弃（kanban 侧另保留会话一致性校验；Team 侧会话隔离由 snapshots 按会话键控结构承担，保留多会话预热语义）。外援页 <code>agents-page.ts</code> 的扫描 finally 同族修复：模块级 <code>busy</code> 标志无条件复位、渲染保留代际守卫，消除 epoch 变化后扫描永久卡 busy 的隐患。</p>
   <p>新增 <code>tests/unit/kanban-board-lifecycle.test.ts</code>（5 用例）与 <code>team-collaboration-board.test.ts</code> 生命周期 describe（4 用例），覆盖卸载、dispose→重装、切会话三种迟到场景与正常路径回归。验证见 <a href="../testing/review-fixes-batch-2026-09-14.html">整改批次测试记录</a>。</p>
 </section>
+
+<section>
+  <h2>Wiki 入口能力门控统一（2026-09-14）</h2>
+  <p>Wiki 入口可用性接入统一能力状态源（ADR-0041 legacy-safe）：<code>wiki-feature.ts</code> 新增 <code>WIKI_FEATURE_ID = product.wiki</code>，<code>wikiFeatureEnabled</code> 改为能力优先推导——<code>feature_capabilities</code> 字段存在时以 <code>product.wiki</code> 条目为准（条目缺席或 <code>available ≠ true</code> 不可用），字段缺席回落旧 <code>wiki.enabled</code> 语义。三处消费方收敛到同一函数：导航入口（<code>canNavigateToWiki</code> / shell features 投影）、Wiki 页面 PageContribution 的 <code>isAvailable</code>（原独立第二源已消除）、wiki reducer/事件注册门——Runtime <code>failed</code> 时入口、页面、reducer 同步停用，能力恢复后正确重装。</p>
+  <p>新增 <code>tests/unit/wiki-feature-capability.test.ts</code>，扩展 wiki-page / wiki-reducer-lifecycle 能力用例。验证见 <a href="../testing/review-fixes-batch-2026-09-14.html">整改批次测试记录</a>。</p>
+</section>
 </body>
 </html>

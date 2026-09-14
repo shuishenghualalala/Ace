@@ -48,6 +48,7 @@ import { showConfirmDialog, showPromptDialog } from '../ui-feedback';
 import { __resetWikiGraphForTest, disposeWikiGraph, invalidateWikiGraph, mountWikiGraph } from './wiki-graph';
 import { mountWikiEditor, type WikiEditorHandle } from './wiki-editor';
 import { maybeStartWikiTourOnce, startWikiTour } from './wiki-tour';
+import { wikiFeatureEnabled } from './wiki-feature';
 import type { PageContribution, PageLifecycleContext } from './page-registry';
 import { disposeWikiAgentPage } from './wiki-agent';
 
@@ -2703,7 +2704,8 @@ export function installWikiFeature(): () => void {
 export function createWikiPageContribution(): PageContribution {
   return {
     id: 'wiki',
-    isAvailable: () => state.config?.wiki?.enabled !== false,
+    // 与导航入口 / reducer 注册同源：wikiFeatureEnabled 统一推导能力快照与旧配置回落。
+    isAvailable: () => wikiFeatureEnabled(),
     activate: ({ signal }: PageLifecycleContext) => {
       wikiLifecycleEpoch += 1;
       wikiLifecycleSignal = signal;

@@ -975,5 +975,11 @@ cd web && npm run build
   <p>外援（AgentsHub / 侧边栏入口）可用性从配置标志迁移到统一能力状态源（阶段 5-9，ADR-0041 legacy-safe 规则）：<code>lib/featureFlags.ts</code> 新增 <code>EXTERNAL_AGENTS_FEATURE_ID = product.external-agents</code>，<code>externalAgentsAvailable</code> 改按 <code>feature_capabilities</code> 推导——config 未加载或字段缺席（旧后端）保持可用，映射存在而条目缺席或 <code>available ≠ true</code> 不可用；复用既有 <code>featureCapabilityAvailable</code> 助手与参数化规则表，与 team/kanban 独立。<code>App.tsx</code> / <code>Composer.tsx</code> 等调用点零改动；受其门控的 agents 页面在能力下线时不可达（导航被拦）。</p>
   <p>已验收：typecheck 与全量 248 tests 通过（featureFlags 规则表补外援条目 + 独立性 3 例；Composer / App.team-kanban 用例 fixture 迁移到能力映射）。</p>
 </section>
+
+<section>
+  <h2>Wiki 入口能力门控统一（2026-09-14）</h2>
+  <p>Wiki 入口可用性从旧配置标志迁到统一能力状态源：<code>lib/featureFlags.ts</code> 新增 <code>WIKI_FEATURE_ID = product.wiki</code> 与 <code>wikiFeatureAvailable</code>（复用共享 <code>featureCapabilityAvailable</code>）；<code>wiki-navigation.ts</code> 的 <code>wikiNavigationEnabled</code> 改为能力优先——<code>feature_capabilities</code> 字段存在时以 <code>product.wiki</code> 条目为准（条目缺席或 <code>available ≠ true</code> 不可用，Runtime <code>failed</code> 时入口/页面同步下线），字段缺席（旧后端 / 加载中）回落旧 <code>wiki.enabled</code> 语义（<code>!== false</code> 默认可见）。<code>canNavigateToSidebarView</code> / <code>resolveSidebarViewAfterCapabilitiesChange</code> 参数放宽为 <code>AppConfig</code>，宿主 <code>App.tsx</code> 传入的 <code>wikiEnabled</code> 上下文来源对齐，Sidebar / 页面投影 / wiki 事件 handler 安装门 / 视图回退全部同源。</p>
+  <p>已验收：typecheck 与全量 259 tests 通过（wiki-navigation / featureFlags 能力用例：failed 不可见、恢复可见、legacy 回落）。验证见 <a href="../testing/review-fixes-batch-2026-09-14.html">整改批次测试记录</a>。</p>
+</section>
 </body>
 </html>

@@ -6,6 +6,8 @@ import {
   KANBAN_FEATURE_ID,
   teamFeatureAvailable,
   TEAM_FEATURE_ID,
+  wikiFeatureAvailable,
+  WIKI_FEATURE_ID,
 } from "./featureFlags";
 import type { AppConfig, FeatureCapability } from "../types";
 
@@ -32,6 +34,8 @@ const FEATURES: Array<{ id: string; available: (config: AppConfig | null) => boo
   { id: TEAM_FEATURE_ID, available: teamFeatureAvailable },
   { id: KANBAN_FEATURE_ID, available: kanbanFeatureAvailable },
   { id: EXTERNAL_AGENTS_FEATURE_ID, available: externalAgentsAvailable },
+  // Wiki 能力条目与其它 feature 同一推导；旧 wiki.enabled 回落语义由 wiki-navigation 组合。
+  { id: WIKI_FEATURE_ID, available: wikiFeatureAvailable },
 ];
 
 describe("feature capability availability rules (ADR-0041 legacy-safe)", () => {

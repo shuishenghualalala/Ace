@@ -15,6 +15,7 @@ import {
   initWikiAgent,
 } from '../../src/ui/features/wiki-agent';
 import { featureEventRegistry } from '../../src/ui/features/event-reducer-registry';
+import { WIKI_FEATURE_ID } from '../../src/ui/features/wiki-feature';
 import {
   normalizeChunk,
   reduceChunk,
@@ -88,6 +89,20 @@ function wikiConfig(enabled: boolean) {
   return { wiki: { enabled } } as Parameters<typeof configStore.set>[0]['config'];
 }
 
+/** 统一能力快照驱动：wiki.enabled 恒为 true，可用性只由 product.wiki 能力决定。 */
+function wikiCapabilityConfig(available: boolean) {
+  return {
+    wiki: { enabled: true },
+    feature_capabilities: {
+      [WIKI_FEATURE_ID]: {
+        state: available ? 'active' : 'failed',
+        available,
+        generation: available ? 'g1' : null,
+      },
+    },
+  } as Parameters<typeof configStore.set>[0]['config'];
+}
+
 function wikiCardsChunk(): ChatChunk {
   return {
     kind: 'feature_event',
@@ -130,6 +145,18 @@ describe('Desktop Wiki reducer host lifecycle', () => {
     configStore.set({ config: wikiConfig(false) });
     window.dispatchEvent(new CustomEvent('wiki:config-change'));
     expect(reduceChunk(normalizeChunk(wikiCardsChunk())!, snapshot()).messageUpserts).toEqual([]);
+  });
+
+  it('follows the unified capability snapshot: a failed product.wiki keeps reducers off until recovery', () => {
+    // wiki.enabled=true 但 product.wiki 能力 failed → reducer 不安装（与入口同一判定，无双源）。
+    configStore.set({ config: wikiCapabilityConfig(false) });
+    initWikiAgent();
+    expect(reduceChunk(normalizeChunk(wikiCardsChunk())!, snapshot()).messageUpserts).toEqual([]);
+
+    // 能力恢复（available=true）后经 config-change 重新安装。
+    configStore.set({ config: wikiCapabilityConfig(true) });
+    window.dispatchEvent(new CustomEvent('wiki:config-change'));
+    expect(reduceChunk(normalizeChunk(wikiCardsChunk())!, snapshot()).messageUpserts[0]?.op).toBe('append');
   });
 
   it('repeated init, config events, dispose and re-init do not duplicate registrations', () => {

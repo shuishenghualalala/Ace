@@ -6,7 +6,7 @@
  *       首次加载失败重试（Phase 2 修复）、上传队列、视频确认、进度帧、单条/批量删除。
  * mock 方式与现有页面单测一致（vi.mock backend-client + happy-dom 容器）。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { backendApi, type WikiPage } from '../../src/ui/backend-client';
 
 // 本文件含 200 条目的整页 innerHTML 重渲染，全量并行（90+ 测试文件争 CPU）时
@@ -26,7 +26,8 @@ import {
   createWikiPageContribution,
   installWikiFeature,
 } from '../../src/ui/features/wiki-page';
-import { __resetAllStoresForTest, sessionStore } from '../../src/ui/stores/stores';
+import { __resetAllStoresForTest, configStore, sessionStore } from '../../src/ui/stores/stores';
+import { WIKI_FEATURE_ID } from '../../src/ui/features/wiki-feature';
 import { state } from '../../src/ui/state';
 import { showContextMenu } from '../../src/ui/lib/context-menu';
 
@@ -1695,5 +1696,37 @@ describe('条目 ⋯ 操作菜单', () => {
     void items.find((i) => i.id === 'delete')?.onSelect();
     await vi.waitFor(() => expect(api.wikiDeletePage).toHaveBeenCalledWith('p1', 'default'));
     expect(mockShowConfirmDialog).toHaveBeenCalled();
+  });
+});
+
+describe('页面 isAvailable 与统一能力快照（ADR-0041 legacy-safe）', () => {
+  afterEach(() => {
+    __resetAllStoresForTest();
+  });
+
+  it('product.wiki 能力不可用时页面不可用，恢复后重新可用；导航入口与页面消费同一判定', () => {
+    const page = createWikiPageContribution();
+
+    configStore.set({ config: {
+      wiki: { enabled: true },
+      feature_capabilities: { [WIKI_FEATURE_ID]: { state: 'failed', available: false, generation: null } },
+    } as Parameters<typeof configStore.set>[0]['config'] });
+    expect(page.isAvailable()).toBe(false);
+
+    configStore.set({ config: {
+      wiki: { enabled: true },
+      feature_capabilities: { [WIKI_FEATURE_ID]: { state: 'active', available: true, generation: 'g1' } },
+    } as Parameters<typeof configStore.set>[0]['config'] });
+    expect(page.isAvailable()).toBe(true);
+  });
+
+  it('旧响应（无 feature_capabilities 字段）回落 wiki.enabled 语义', () => {
+    const page = createWikiPageContribution();
+
+    configStore.set({ config: { wiki: { enabled: false } } as Parameters<typeof configStore.set>[0]['config'] });
+    expect(page.isAvailable()).toBe(false);
+
+    configStore.set({ config: { wiki: { enabled: true } } as Parameters<typeof configStore.set>[0]['config'] });
+    expect(page.isAvailable()).toBe(true);
   });
 });
