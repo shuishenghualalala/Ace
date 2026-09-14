@@ -5,7 +5,8 @@
 
 降级语义：配置 ``providers`` 列表（config.yaml tools.web_search 节）即
 显式 fallback 链——按序逐个尝试，全部失败抛出携带已尝试链路的结构化错误；
-未配置时按注册顺序使用所有可用 provider（公开搜索页刮取兜底恒在链尾）。
+未配置时按注册顺序使用所有可用 provider。纯 API provider，无 HTML 刮取
+兜底：一个都不可用时 fail-closed，错误文案引导用户完成配置。
 """
 
 from __future__ import annotations
@@ -39,16 +40,13 @@ class SearchProvider:
     id: str
     available: Callable[[], bool]
     search: Callable[[str, int, SearchContext], Awaitable[list[SearchResult]]]
-    #: True = 公开搜索页 HTML 刮取兜底，结果精度有限，输出需向模型标注 degraded。
-    degraded: bool = False
 
 
 @dataclass(frozen=True)
 class SearchOutcome:
     provider_id: str
-    degraded: bool
     results: list[SearchResult]
-    #: 成功之前被跳过/失败的链路记录（"id(原因)"），供结构化错误与降级标注。
+    #: 成功之前被跳过/失败的链路记录（"id(原因)"），供结构化错误使用。
     attempted: tuple[str, ...] = ()
 
 
@@ -129,7 +127,10 @@ async def search_with_fallback(
     """按解析出的链路逐个降级，全败抛出携带已尝试链路的 ToolError。"""
     chain = _resolve_chain()
     if not chain:
-        raise ToolError("没有可用的搜索源（未配置 API key 且刮取兜底缺失）")
+        raise ToolError(
+            "没有可用的搜索源：请在 config.yaml tools.web_search 配置 "
+            "bocha（BOCHA_API_KEY）或 searxng（searxng_base_url）"
+        )
     attempted: list[str] = []
     for pid in chain:
         provider = _PROVIDERS[pid]
@@ -144,7 +145,6 @@ async def search_with_fallback(
             continue
         return SearchOutcome(
             provider_id=pid,
-            degraded=provider.degraded,
             results=results,
             attempted=tuple(attempted),
         )

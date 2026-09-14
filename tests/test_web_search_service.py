@@ -102,29 +102,39 @@ async def test_default_chain_uses_available_providers_in_registration_order():
 
 
 @pytest.mark.asyncio
-async def test_handler_marks_degraded_bing_html_result(monkeypatch):
-    configure_search({"providers": ["bing_html"]})
-    html = (
-        '<ol><li class="b_algo"><h2>'
-        '<a href="https://example.com/docs">Example Docs</a>'
-        "</h2></li></ol>"
-    )
-    monkeypatch.setattr(
-        web_tools,
-        "_authorized_fetch",
-        lambda *a, **k: _async_value(("https://cn.bing.com/search?q=x", html)),
-    )
+async def test_no_available_provider_fails_closed_with_config_guidance():
+    reset_search_providers()
+    register_search_provider(_provider("nokey", available=False))
 
-    payload = json.loads(await web_tools.handle_web_search({"query": "example"}))
+    with pytest.raises(ToolError) as excinfo:
+        await search_with_fallback("q", 5, _CTX)
 
-    assert payload["provider"] == "bing_html"
-    assert payload["degraded"] is True
-    assert payload["results"] == [{"title": "Example Docs", "url": "https://example.com/docs"}]
+    message = str(excinfo.value)
+    assert "没有可用的搜索源" in message
+    assert "tools.web_search" in message
+    assert "BOCHA_API_KEY" in message
+    assert "searxng_base_url" in message
 
 
 @pytest.mark.asyncio
-async def test_handler_uses_bocha_api_and_reports_fallback_chain(monkeypatch):
-    configure_search({"providers": ["bocha", "bing_html"]})
+async def test_handler_fails_closed_when_nothing_configured(monkeypatch):
+    # 未配置 bocha key / searxng 地址时，工具不得触网，直接结构化报错。
+    monkeypatch.delenv("BOCHA_API_KEY", raising=False)
+    configure_search(None)
+
+    async def forbidden_fetch(*a, **k):
+        raise AssertionError("fail-closed 路径不应发起网络请求")
+
+    monkeypatch.setattr(web_tools, "_authorized_fetch", forbidden_fetch)
+    monkeypatch.setattr(web_tools, "_authorized_json_post", forbidden_fetch)
+
+    with pytest.raises(ToolError, match="没有可用的搜索源"):
+        await web_tools.handle_web_search({"query": "example"})
+
+
+@pytest.mark.asyncio
+async def test_handler_uses_bocha_api_and_prefixes_untrusted_notice(monkeypatch):
+    configure_search({"providers": ["bocha", "searxng"]})
     monkeypatch.setenv("BOCHA_API_KEY", "test-key")
     body = {
         "data": {
@@ -145,26 +155,25 @@ async def test_handler_uses_bocha_api_and_reports_fallback_chain(monkeypatch):
         posted.update(url=url, payload=payload, api_key=api_key)
         return body
 
-    async def fail_bing(*a, **k):
-        raise ToolError("不应走到兜底")
+    async def fail_searxng(*a, **k):
+        raise AssertionError("bocha 可用时不应降级到 searxng")
 
     monkeypatch.setattr(web_tools, "_authorized_json_post", fake_post)
-    monkeypatch.setattr(web_tools, "_authorized_fetch", fail_bing)
+    monkeypatch.setattr(web_tools, "_authorized_fetch", fail_searxng)
 
-    payload = json.loads(await web_tools.handle_web_search({"query": "example", "limit": 3}))
+    raw = await web_tools.handle_web_search({"query": "example", "limit": 3})
+    payload = json.loads(raw)
 
     assert posted["url"] == web_tools._BOCHA_API_URL
     assert posted["payload"]["query"] == "example"
     assert posted["api_key"] == "test-key"
+    # 不可信标记恒在结果文本最前（payload 首键）。
+    assert payload["notice"] == web_tools._UNTRUSTED_CONTENT_NOTICE
+    assert list(payload)[0] == "notice"
     assert payload["provider"] == "bocha"
-    assert "degraded" not in payload
     assert payload["results"] == [
         {"title": "BoCha Result", "url": "https://result.example", "snippet": "snippet text"}
     ]
-
-
-async def _async_value(value):
-    return value
 
 
 # ---------------------------------------------------------------------------

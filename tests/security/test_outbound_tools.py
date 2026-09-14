@@ -114,35 +114,6 @@ async def test_site_build_authorization_waits_and_rechecks_exact_action(
 
 
 @pytest.mark.asyncio
-async def test_web_search_returns_only_real_result_links(monkeypatch) -> None:
-    authorized: list[str] = []
-
-    async def allow(url: str, **_kwargs) -> None:
-        authorized.append(url)
-
-    source = """
-      <header><a href="/">Bing</a></header>
-      <ol><li class="b_algo"><h2>
-        <a href="https://example.com/docs">Example Docs</a>
-      </h2></li></ol>
-      <a href="#feedback">Feedback</a>
-    """
-    monkeypatch.delenv("BOCHA_API_KEY", raising=False)
-    from crew.tools.web_search_service import configure_search
-
-    configure_search({"providers": ["bing_html"]})
-    monkeypatch.setattr(web_tools, "authorize_network_tool", allow)
-    monkeypatch.setattr(web_tools, "_fetch_url", lambda _url, *_args: (_url, source))
-
-    payload = json.loads(await web_tools.handle_web_search({"query": "example"}))
-
-    assert len(authorized) == 1
-    assert payload["results"] == [
-        {"title": "Example Docs", "url": "https://example.com/docs"}
-    ]
-
-
-@pytest.mark.asyncio
 async def test_web_extract_authorizes_before_fetch(monkeypatch) -> None:
     order: list[str] = []
 

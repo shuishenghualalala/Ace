@@ -153,9 +153,10 @@ tools:
     allowed_private_cidrs: []
     blocked_hosts: []
     allow_file_urls: false
-  # web_search 引擎配置。providers 为显式有序 fallback 列表（按序逐个降级，
-  # 全败时工具返回已尝试链路）；留空 = 默认链（全部可用 provider 按注册序，
-  # bing_html 刮取兜底恒在链尾并在结果中标注 degraded）。
+  # web_search 引擎配置（纯 API provider，无 HTML 刮取）。providers 为显式有序
+  # fallback 列表（按序逐个降级，全败时返回结构化错误与已尝试链路）；
+  # 留空 = 默认链（全部可用 provider 按注册序）。一个都不可用时工具直接报错，
+  # 引导用户完成下列配置。
   # bocha：博查 AI 搜索，需 BOCHA_API_KEY（或 bocha_api_key_env 指定的环境变量）；
   # searxng：需可公网到达的实例地址（SSRF 防护不允许私网主机）。
   web_search:
