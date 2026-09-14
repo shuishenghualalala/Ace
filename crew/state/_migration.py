@@ -15,6 +15,8 @@ log = get_logger("migration")
 
 OWNER_TABLE_LABELS = {
     "sessions": "会话",
+    "session_events": "会话事件",
+    "writer_leases": "会话写者租约",
     "session_agent_config": "会话 Agent 配置",
     "channel_session_routes": "渠道会话路由",
     "workspaces": "工作空间",

@@ -967,6 +967,14 @@ class SingleAgent(Agent):
                     last_prompt_tokens_source=last_prompt_tokens_source,
                 )
                 persisted = True
+                if last_prompt_tokens is not None:
+                    await self._record_meter_checkpoint(
+                        envelope,
+                        task_sid,
+                        llm_messages,
+                        last_prompt_tokens,
+                        last_prompt_tokens_source,
+                    )
             finally:
                 try:
                     await self.plugins.on_session_end(
@@ -1358,6 +1366,51 @@ class SingleAgent(Agent):
         task = self._title_inflight.pop((owner, title_sid), None)
         if task is not None and not task.done():
             task.cancel()
+
+    async def _record_meter_checkpoint(
+        self,
+        envelope: Envelope,
+        task_sid: str,
+        llm_messages: list[Message],
+        last_prompt_tokens: int,
+        last_prompt_tokens_source: str | None,
+    ) -> None:
+        """本轮真实 usage 喂给压缩器计量锚点，并以 meter_checkpoint 事件落库。
+
+        在 _persist_turn 之后调用：save 已写好基础 checkpoint 行，
+        这里追加带完整请求信封（fingerprint + 锚定视图估算）的版本，
+        TokenMeter 跨重启按最新一行重锚定。
+        """
+        from crew.agent.compact.tokens import estimate_tokens
+
+        owner = envelope.user_id
+        fingerprint = f"{type(self.provider).__name__}:{getattr(self.provider, 'model', '')}"
+        view_estimate = estimate_tokens(llm_messages)
+        source = last_prompt_tokens_source or "provider"
+        if self.compactor is not None:
+            self.compactor.record_meter_usage(
+                task_sid,
+                owner,
+                prompt_tokens=last_prompt_tokens,
+                source=source,
+                fingerprint=fingerprint,
+                view_estimate=view_estimate,
+            )
+        record = getattr(self.session_store, "record_meter_checkpoint", None)
+        if not callable(record):
+            return
+        try:
+            await asyncio.to_thread(
+                record,
+                task_sid,
+                owner_account_id=owner,
+                prompt_tokens=last_prompt_tokens,
+                source=source,
+                fingerprint=fingerprint,
+                baseline_estimate=view_estimate,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("meter_checkpoint 落库失败 session=%s", task_sid)
 
     async def _persist_turn(
         self,

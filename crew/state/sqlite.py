@@ -73,6 +73,7 @@ def apply_wal_with_fallback(conn: sqlite3.Connection, *, db_label: str) -> None:
 def connect_sqlite(path: str | Path, *, wal_enabled: bool = True, row_factory: bool = False) -> sqlite3.Connection:
     db_path = Path(path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    is_new_db = not db_path.exists() or db_path.stat().st_size == 0
     conn = sqlite3.connect(
         str(db_path),
         check_same_thread=False,
@@ -81,8 +82,13 @@ def connect_sqlite(path: str | Path, *, wal_enabled: bool = True, row_factory: b
     )
     if row_factory:
         conn.row_factory = sqlite3.Row
+    if is_new_db:
+        # 必须先于 journal_mode 切换：新库切 WAL 会把 auto_vacuum 重置回 0。
+        conn.execute("PRAGMA auto_vacuum=2")  # INCREMENTAL
     if wal_enabled:
         apply_wal_with_fallback(conn, db_label=db_path.name)
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
