@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import mimetypes
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,33 @@ import requests
 DEFAULT_PROMPT = "描述一下这张图片"
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_OUTPUT_CHARS = 20_000
+
+
+def _emit_error(error: str, message: str) -> None:
+    print(
+        json.dumps({"status": "error", "error": error, "message": message}, ensure_ascii=False),
+        file=sys.stderr,
+    )
+
+
+def _classify_request_error(exc: requests.RequestException) -> str:
+    if isinstance(exc, requests.Timeout):
+        return f"请求超时（>{_timeout_seconds():.0f}s），请检查 VLM_BASE_URL 连通性或调大 VLM_TIMEOUT_SECONDS"
+    if isinstance(exc, requests.ConnectionError):
+        return "连接失败（DNS 解析失败或服务不可达），请检查 VLM_BASE_URL"
+    if isinstance(exc, requests.HTTPError):
+        status = exc.response.status_code if exc.response is not None else "未知"
+        return f"HTTP {status}，请检查 VLM_API_KEY 与服务端状态"
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _truncate_output(text: str) -> str:
+    if len(text) <= MAX_OUTPUT_CHARS:
+        return text
+    keep = MAX_OUTPUT_CHARS // 2
+    omitted = len(text) - keep * 2
+    return f"{text[:keep]}\n…（中间省略 {omitted} 字符）…\n{text[-keep:]}"
 
 
 def _env_file_value(key: str) -> str:
@@ -61,13 +90,13 @@ def _timeout_seconds() -> float:
 def validate_image(image_path: str | Path) -> bool:
     path = Path(image_path)
     if not path.is_file():
-        print(f"错误：图片文件不存在 - {path}")
+        _emit_error("FileNotFound", f"图片文件不存在 - {path}")
         return False
     if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-        print(f"错误：不支持的图片格式 - {path.suffix.lower()}")
+        _emit_error("UnsupportedFormat", f"不支持的图片格式 - {path.suffix.lower()}")
         return False
     if path.stat().st_size > MAX_IMAGE_BYTES:
-        print("错误：图片文件超过 10 MB")
+        _emit_error("FileTooLarge", "图片文件超过 10 MB")
         return False
     return True
 
@@ -104,7 +133,7 @@ def analyze_image(image_path: str | Path, prompt: str | None = None) -> str | No
     endpoint = _chat_endpoint()
     model = _config_value("VLM_MODEL")
     if not endpoint or not model:
-        print("错误：请配置 VLM_BASE_URL 和 VLM_MODEL")
+        _emit_error("MissingConfig", "请配置 VLM_BASE_URL 和 VLM_MODEL")
         return None
     if not validate_image(image_path):
         return None
@@ -129,13 +158,16 @@ def analyze_image(image_path: str | Path, prompt: str | None = None) -> str | No
         response = requests.post(endpoint, headers=headers, json=body, timeout=_timeout_seconds())
         response.raise_for_status()
         text = _response_text(response.json())
-    except (requests.RequestException, ValueError, OSError) as exc:
-        print(f"错误：图片理解请求失败 - {type(exc).__name__}")
+    except requests.RequestException as exc:
+        _emit_error("RequestFailed", f"图片理解请求失败 - {_classify_request_error(exc)}")
+        return None
+    except (ValueError, OSError) as exc:
+        _emit_error("ResponseParseFailed", f"图片理解响应解析失败 - {type(exc).__name__}: {exc}")
         return None
     if not text:
-        print("错误：模型服务未返回图片描述")
+        _emit_error("EmptyResponse", "模型服务未返回图片描述")
         return None
-    return text
+    return _truncate_output(text)
 
 
 def main() -> None:
@@ -143,10 +175,14 @@ def main() -> None:
     parser.add_argument("image_path", help="本地图片路径")
     parser.add_argument("--prompt", "-p", help="针对图片的问题")
     args = parser.parse_args()
-    result = analyze_image(args.image_path, args.prompt)
+    try:
+        result = analyze_image(args.image_path, args.prompt)
+    except Exception as exc:
+        _emit_error("UnexpectedError", f"图片理解脚本异常 - {type(exc).__name__}: {exc}")
+        raise SystemExit(1)
     if not result:
         raise SystemExit(1)
-    print(result)
+    print(_truncate_output(result))
 
 
 if __name__ == "__main__":
