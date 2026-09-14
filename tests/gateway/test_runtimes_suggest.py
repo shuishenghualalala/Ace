@@ -425,7 +425,7 @@ async def test_team_ai_routes_use_current_owner_model_and_close_request_provider
     ]
     built_profiles: list[ModelProfile] = []
 
-    def build_owner_provider(profile: ModelProfile, stream_read_timeout=None):
+    def build_owner_provider(profile: ModelProfile, stream_read_timeout=None, **_kw):
         built_profiles.append(profile)
         return owner_providers[len(built_profiles) - 1]
 
