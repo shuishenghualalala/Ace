@@ -12,15 +12,54 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict
+from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
 
 from crew.core.interfaces import SessionStore
 from crew.core.types import Message, ToolCall
 from crew.state._migration import backfill_empty_owner_rows, rebuild_table_pk
+from crew.state.schema_version import stamp_baseline
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 T = TypeVar("T")
+
+# sessions 域 schema 版本：v1 = 单表 blob 基线；v2 = 增量事件表（ADR-0042 W4）。
+SESSIONS_SCHEMA_FEATURE = "sessions"
+SESSIONS_SCHEMA_VERSION = 2
+
+
+class SessionWriteConflict(RuntimeError):
+    """另一进程持有该会话的有效 writer 租约，本进程写入被拒绝。"""
+
+
+class SessionEventType(str, Enum):
+    """session_events 事件类型；durable=False 的瞬态事件不落盘。"""
+
+    USER_MESSAGE = "user_message"
+    ASSISTANT_MESSAGE = "assistant_message"
+    TOOL_RESULT = "tool_result"
+    SYSTEM_MESSAGE = "system_message"
+    METER_CHECKPOINT = "meter_checkpoint"
+    TURN_PROGRESS = "turn_progress"  # 瞬态：进度推送
+    ERROR = "error"  # 瞬态：错误通知
+    QUEUE_STATE = "queue_state"  # 瞬态：调度队列变化
+
+    @property
+    def durable(self) -> bool:
+        return self not in (
+            SessionEventType.TURN_PROGRESS,
+            SessionEventType.ERROR,
+            SessionEventType.QUEUE_STATE,
+        )
+
+
+_ROLE_EVENT_TYPES = {
+    "user": SessionEventType.USER_MESSAGE,
+    "assistant": SessionEventType.ASSISTANT_MESSAGE,
+    "tool": SessionEventType.TOOL_RESULT,
+    "system": SessionEventType.SYSTEM_MESSAGE,
+}
 
 
 class SessionOwnershipError(ValueError):
@@ -87,6 +126,31 @@ class SQLiteSessionStore(SessionStore):
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_events (
+                owner_account_id TEXT NOT NULL DEFAULT '',
+                session_id  TEXT NOT NULL,
+                seq         INTEGER NOT NULL,
+                type        TEXT NOT NULL,
+                payload     TEXT NOT NULL,
+                created_at  REAL NOT NULL,
+                PRIMARY KEY (owner_account_id, session_id, seq)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS writer_leases (
+                owner_account_id TEXT NOT NULL DEFAULT '',
+                session_id  TEXT NOT NULL,
+                owner_pid   TEXT NOT NULL,
+                fence       INTEGER NOT NULL,
+                expires_at  REAL NOT NULL,
+                PRIMARY KEY (owner_account_id, session_id)
+            )
+            """
+        )
         cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
         migrations = {
             "owner_account_id": "ALTER TABLE sessions ADD COLUMN owner_account_id TEXT NOT NULL DEFAULT ''",
@@ -101,6 +165,7 @@ class SQLiteSessionStore(SessionStore):
             "last_error": "ALTER TABLE sessions ADD COLUMN last_error TEXT NOT NULL DEFAULT ''",
             "archived": "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             "pinned": "ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+            "leaf_seq": "ALTER TABLE sessions ADD COLUMN leaf_seq INTEGER NOT NULL DEFAULT 0",
         }
         for col, ddl in migrations.items():
             if col not in cols:
@@ -115,7 +180,8 @@ class SQLiteSessionStore(SessionStore):
         # channel_session_routes 已归位 channels 库（P2-7 + ADR-0038 拆库），
         # 由 channels 侧 store 自管建表与回填；主库若还留着拆库前的旧表，
         # 旧行作为回退备份原样保留，不再被本库触碰。
-        backfill_empty_owner_rows(conn, ["sessions", "session_agent_config"])
+        backfill_empty_owner_rows(conn, ["sessions", "session_agent_config", "session_events", "writer_leases"])
+        stamp_baseline(conn, SESSIONS_SCHEMA_FEATURE, version=SESSIONS_SCHEMA_VERSION)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_updated ON sessions(owner_account_id, updated_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_workspace ON sessions(owner_account_id, workspace_id, updated_at DESC)")
 
@@ -143,6 +209,7 @@ class SQLiteSessionStore(SessionStore):
                     last_error    TEXT NOT NULL DEFAULT '',
                     archived      INTEGER NOT NULL DEFAULT 0,
                     pinned        INTEGER NOT NULL DEFAULT 0,
+                    leaf_seq      INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (owner_account_id, session_id)
                 )
             """,
@@ -150,12 +217,12 @@ class SQLiteSessionStore(SessionStore):
                 INSERT OR IGNORE INTO sessions_new (
                     session_id, owner_account_id, messages, updated_at, created_at,
                     workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source, last_status, last_error,
-                    archived, pinned
+                    archived, pinned, leaf_seq
                 )
                 SELECT
                     session_id, owner_account_id, messages, updated_at, created_at,
                     workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source, last_status, last_error,
-                    COALESCE(archived, 0), COALESCE(pinned, 0)
+                    COALESCE(archived, 0), COALESCE(pinned, 0), COALESCE(leaf_seq, 0)
                 FROM sessions
             """,
         )
@@ -199,8 +266,12 @@ class SQLiteSessionStore(SessionStore):
 
     # ---- 序列化 ----
     @staticmethod
-    def _dump(messages: list[Message]) -> str:
-        return json.dumps([asdict(m) for m in messages], ensure_ascii=False)
+    def _message_to_dict(m: Message) -> dict:
+        return asdict(m)
+
+    @classmethod
+    def _dump(cls, messages: list[Message]) -> str:
+        return json.dumps([cls._message_to_dict(m) for m in messages], ensure_ascii=False)
 
     @staticmethod
     def _estimate_tokens(messages: list[Message]) -> int:
@@ -221,39 +292,38 @@ class SQLiteSessionStore(SessionStore):
         return ""
 
     @staticmethod
-    def _load(raw: str) -> list[Message]:
-        out: list[Message] = []
-        for d in json.loads(raw):
-            tcs: list[ToolCall] = []
-            for raw_tc in d.get("tool_calls", []):
-                tc = dict(raw_tc)
-                tc.pop("source", None)  # 兼容 2026-06-21 短暂写入过 source 的历史记录
-                tcs.append(ToolCall(**tc))
-            out.append(
-                Message(
-                    role=d["role"],
-                    content=d.get("content", ""),
-                    tool_calls=tcs,
-                    tool_call_id=d.get("tool_call_id"),
-                    name=d.get("name"),
-                    model=d.get("model"),
-                    is_meta=d.get("is_meta", False),  # 向后兼容：旧消息默认 False
-                    timestamp=d.get("timestamp"),
-                    turn_started_at=d.get("turn_started_at"),
-                    turn_duration=d.get("turn_duration"),
-                    turn_file_changes=d.get("turn_file_changes"),
-                    thinking=d.get("thinking"),
-                    content_parts=d.get("content_parts"),
-                    attachment_type=d.get("attachment_type"),
-                    attachment_data=d.get("attachment_data"),
-                    communication_kind=d.get("communication_kind"),
-                    communication_status=d.get("communication_status"),
-                    request_id=d.get("request_id"),
-                    reply_to=d.get("reply_to"),
-                    communication_request_text=d.get("communication_request_text"),
-                )
-            )
-        return out
+    def _message_from_dict(d: dict) -> Message:
+        tcs: list[ToolCall] = []
+        for raw_tc in d.get("tool_calls", []):
+            tc = dict(raw_tc)
+            tc.pop("source", None)  # 兼容 2026-06-21 短暂写入过 source 的历史记录
+            tcs.append(ToolCall(**tc))
+        return Message(
+            role=d["role"],
+            content=d.get("content", ""),
+            tool_calls=tcs,
+            tool_call_id=d.get("tool_call_id"),
+            name=d.get("name"),
+            model=d.get("model"),
+            is_meta=d.get("is_meta", False),  # 向后兼容：旧消息默认 False
+            timestamp=d.get("timestamp"),
+            turn_started_at=d.get("turn_started_at"),
+            turn_duration=d.get("turn_duration"),
+            turn_file_changes=d.get("turn_file_changes"),
+            thinking=d.get("thinking"),
+            content_parts=d.get("content_parts"),
+            attachment_type=d.get("attachment_type"),
+            attachment_data=d.get("attachment_data"),
+            communication_kind=d.get("communication_kind"),
+            communication_status=d.get("communication_status"),
+            request_id=d.get("request_id"),
+            reply_to=d.get("reply_to"),
+            communication_request_text=d.get("communication_request_text"),
+        )
+
+    @classmethod
+    def _load(cls, raw: str) -> list[Message]:
+        return [cls._message_from_dict(d) for d in json.loads(raw)]
 
     # ---- SessionStore 接口 ----
     def load(self, session_id: str, owner_account_id: str) -> list[Message]:
