@@ -234,3 +234,119 @@ async def test_file_write_uses_service_and_guard_disabled_by_default(registry, t
         assert target.read_text(encoding="utf-8") == "hi"
     finally:
         current_session_id.reset(token)
+
+
+# ---------------------------------------------------------------------------
+# C2 多编辑 edits[]（事务化）
+# ---------------------------------------------------------------------------
+
+
+async def test_patch_edits_applies_multiple_in_order(registry, tmp_path):
+    target = tmp_path / "demo.txt"
+    target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    before = target.read_bytes()
+
+    result = await registry.execute(
+        ToolCall(
+            "c1",
+            "patch",
+            {
+                "path": str(target),
+                "edits": [
+                    {"old": "gamma", "new": "GAMMA"},
+                    {"old": "alpha", "new": "ALPHA"},
+                ],
+            },
+        )
+    )
+    assert not result.is_error
+    payload = json.loads(result.content)
+    assert payload["replacements"] == 2
+    assert target.read_text(encoding="utf-8") == "ALPHA\nbeta\nGAMMA\n"
+    # matches 按文中位置排序上报
+    assert [m["edit_index"] for m in payload["matches"]] == [1, 0]
+    assert before != target.read_bytes()
+
+
+async def test_patch_edits_partial_failure_leaves_file_byte_identical(registry, tmp_path):
+    target = tmp_path / "demo.txt"
+    original = "alpha\nbeta\ngamma\n"
+    target.write_text(original, encoding="utf-8")
+    before = target.read_bytes()
+
+    result = await registry.execute(
+        ToolCall(
+            "c1",
+            "patch",
+            {
+                "path": str(target),
+                "edits": [
+                    {"old": "alpha", "new": "ALPHA"},
+                    {"old": "missing", "new": "X"},
+                ],
+            },
+        )
+    )
+    assert result.is_error
+    assert "edits[1]" in result.content
+    assert target.read_bytes() == before
+
+
+async def test_patch_edits_overlap_rejected(registry, tmp_path):
+    target = tmp_path / "demo.txt"
+    target.write_text("abcdef\n", encoding="utf-8")
+    before = target.read_bytes()
+
+    result = await registry.execute(
+        ToolCall(
+            "c1",
+            "patch",
+            {
+                "path": str(target),
+                "edits": [
+                    {"old": "abc", "new": "x"},
+                    {"old": "cde", "new": "y"},
+                ],
+            },
+        )
+    )
+    assert result.is_error
+    assert "重叠" in result.content
+    assert target.read_bytes() == before
+
+
+async def test_patch_edits_duplicate_old_rejected(registry, tmp_path):
+    target = tmp_path / "demo.txt"
+    target.write_text("one two\n", encoding="utf-8")
+    before = target.read_bytes()
+
+    result = await registry.execute(
+        ToolCall(
+            "c1",
+            "patch",
+            {
+                "path": str(target),
+                "edits": [
+                    {"old": "one", "new": "1"},
+                    {"old": "one", "new": "2"},
+                ],
+            },
+        )
+    )
+    assert result.is_error
+    assert target.read_bytes() == before
+
+
+async def test_patch_edits_count_not_allowed(registry, tmp_path):
+    target = tmp_path / "demo.txt"
+    target.write_text("a b a\n", encoding="utf-8")
+
+    result = await registry.execute(
+        ToolCall(
+            "c1",
+            "patch",
+            {"path": str(target), "edits": [{"old": "a", "new": "x", "count": 0}]},
+        )
+    )
+    assert result.is_error
+    assert "count" in result.content

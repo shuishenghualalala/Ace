@@ -663,17 +663,30 @@ PATCH_SCHEMA = {
         "（CRLF 文件写回时按原行尾还原），保留原文件 UTF-8 BOM；"
         "拒绝写入敏感系统路径。old 默认必须唯一匹配；精确失败时自动做模糊兜底"
         "（行尾空白/智能引号/Unicode 破折号归一化），命中方式与得分随结果上报；"
-        "匹配失败与多处歧义都会给出含行号的诊断。"
+        "匹配失败与多处歧义都会给出含行号的诊断。可用 edits 一次事务化应用多处编辑。"
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "要修改的文本文件"},
-            "old": {"type": "string", "description": "要被替换的原文本"},
-            "new": {"type": "string", "description": "替换后的新文本"},
+            "old": {"type": "string", "description": "要被替换的原文本（与 new 二选一；使用 edits 时不必填）"},
+            "new": {"type": "string", "description": "替换后的新文本（与 old 二选一；使用 edits 时不必填）"},
             "count": {"type": "integer", "description": "最多替换次数，默认 1（要求唯一）；0 表示全部"},
+            "edits": {
+                "type": "array",
+                "description": "一次调用按序应用多处编辑（事务化：全部匹配成功才统一写入，"
+                "任一处失败文件保持原样）。每处 old 必须唯一匹配且与其它编辑互不重叠。",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old": {"type": "string", "description": "要被替换的原文本"},
+                        "new": {"type": "string", "description": "替换后的新文本"},
+                    },
+                    "required": ["old", "new"],
+                },
+            },
         },
-        "required": ["path", "old", "new"],
+        "required": ["path"],
     },
 }
 
@@ -699,7 +712,7 @@ def _parse_patch_ops(args: dict[str, Any]) -> list[EditOp]:
     old = args.get("old")
     new = args.get("new")
     if not isinstance(old, str) or not old:
-        raise ToolError("old 不能为空")
+        raise ToolError("必须提供非空的 old/new，或非空的 edits 列表")
     if not isinstance(new, str):
         raise ToolError("new 必须是字符串")
     try:
