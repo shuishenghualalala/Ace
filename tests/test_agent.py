@@ -740,7 +740,10 @@ async def test_compactor_summarizes_old_and_keeps_recent_from_safe_boundary():
     for i in range(6):
         msgs.append(Message.user("问题" * 500 + str(i)))
         msgs.append(Message.assistant("回答" * 500 + str(i)))
-    compactor = ContextCompactor(FakeProvider(), token_budget=10, keep_recent=3)
+    compactor = ContextCompactor(
+        FakeProvider(script=[ChatResponse(text="历史摘要：此前讨论了六个问题")]),
+        token_budget=10, keep_recent=3,
+    )
     assert estimate_tokens(msgs) > 10
     out = await compactor.maybe_compact(msgs)
     # 第一条应是摘要 system

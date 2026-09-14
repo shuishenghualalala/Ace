@@ -664,6 +664,88 @@ def test_safe_split_falls_back_without_boundary():
     assert ContextCompactor._safe_split(msgs, keep_recent=2) == 0
 
 
+def test_safe_split_pairing_counter_falls_back_toward_head():
+    """切点落在「未闭合 toolCall 之后」的 assistant 上时（配对余额非 0），
+    向头部回退到最近余额为 0 的边界，绝不拆散 toolCall/results 组。"""
+    msgs = [
+        Message.user("q1"),
+        Message.assistant("回答1"),
+        Message.user("q2"),
+        Message.assistant("有调用无结果", [ToolCall(id="c1", name="terminal")]),
+        Message.assistant("接续文本"),
+        Message.user("q3"),
+    ]
+    # 倒数 2 处是 assistant「接续文本」：角色上是边界，但前面 c1 未闭合（余额 +1），
+    # 必须回退到「有调用无结果」之前（bal=0）而不是落在「接续文本」。
+    split = ContextCompactor._safe_split(msgs, keep_recent=2)
+    assert split == 3
+    assert msgs[split].role == "assistant"
+    # recent 以未闭合调用自身开头：call 与（未来的）result 不会被切点拆散
+    assert msgs[split].tool_calls[0].id == "c1"
+
+
+def test_safe_split_open_pair_blocks_cut_before_tool_result():
+    """cut 不得出现在 tool result 前（call 在 old、result 在 recent）。"""
+    msgs = [
+        Message.user("q1"),
+        Message.assistant("调用", [ToolCall(id="c1", name="terminal")]),
+        Message.tool("c1", "结果1"),
+        Message.assistant("再次调用", [ToolCall(id="c2", name="terminal")]),
+        Message.tool("c2", "结果2"),
+        Message.user("q2"),
+        Message.assistant("回答"),
+    ]
+    for keep in range(1, 4):
+        split = ContextCompactor._safe_split(msgs, keep_recent=keep)
+        if split > 0:
+            assert msgs[split].role in ("user", "assistant")
+
+
+async def test_summary_must_be_smaller_or_transaction_fails():
+    """「摘要必须更小」校验失败 → 整个压缩事务失败，历史不变，且计一次失败。"""
+    provider = FakeProvider(reply="冗长摘要 " * 5000)  # 比任何 old 段都长
+    comp = ContextCompactor(provider, token_budget=10, keep_recent=2)
+    history = await _big_history(10)
+
+    out = await comp.maybe_compact(history, "sess-smaller")
+    assert out is history or [m.content for m in out] == [m.content for m in history]
+    assert out[0].content == history[0].content
+    # 事务失败：无摘要状态写入，断路器计数 +1
+    assert comp._get_state("sess-smaller") is None
+    assert comp._failure_counts[("local", "sess-smaller")] == 1
+
+
+async def test_compact_pairing_fallback_rejects_unbalanced_cut():
+    """_safe_split 返回的切点若落在 tool result 上（异常输入），提交前再校验回退。"""
+    provider = FakeProvider(reply="短摘要")
+    comp = ContextCompactor(provider, token_budget=10, keep_recent=2)
+    history = [
+        Message.user("q1 " * 50),
+        Message.assistant("调用1", [ToolCall(id="c1", name="terminal")]),
+        Message.tool("c1", "结果1 " * 50),
+        Message.user("q2 " * 50),
+        Message.assistant("调用2", [ToolCall(id="c2", name="terminal")]),
+        Message.tool("c2", "结果2 " * 50),
+    ]
+    original_safe_split = ContextCompactor._safe_split
+
+    def _lying_split(messages, keep_recent):  # 模拟异常选区：切点落在 tool result 上
+        return len(messages) - 1
+
+    ContextCompactor._safe_split = staticmethod(_lying_split)
+    try:
+        out = await comp.maybe_compact(history, "sess-pairing")
+    finally:
+        ContextCompactor._safe_split = staticmethod(original_safe_split)
+    # 回退到最近余额为 0 的消息边界（调用2 之前）：recent 以未闭合配对的 call 开头，
+    # result 紧随其后，绝不拆散；q2 被正常摘要。
+    assert out[0].role == "system" and out[0].content.startswith(SUMMARY_MARKER)
+    assert out[1].role == "assistant" and out[1].tool_calls[0].id == "c2"
+    assert out[2].role == "tool" and out[2].tool_call_id == "c2"
+    state = comp._get_state("sess-pairing")
+    assert state is not None and state.covered_count == 4
+
+
 def test_builtin_file_read_is_temporary():
     """内置 file_read 声明为 TEMPORARY：旧分片由 L1 清理，恢复靠磁盘重读。"""
     from crew.tools.builtin import register_builtin_tools
@@ -878,10 +960,14 @@ async def test_anti_thrash_skips_after_two_ineffective():
 
 
 async def test_ineffective_count_increments_on_low_savings():
-    # summary 巨大 → 压缩后反而更大 → 省 <10% → 计数 +1
-    provider = FakeProvider(reply="摘要" * 50000)
+    # summary 只略小于 old（recent 占比巨大）→ 全视图省 <10% → 压缩成功但计数 +1
+    provider = FakeProvider(reply="摘" * 300)
     comp = ContextCompactor(provider, token_budget=10, keep_recent=2)
-    history = await _big_history(10)
+    history = await _big_history(8)
+    history += [
+        Message.user("最新问题 " + "x" * 200000),
+        Message.assistant("最新回答 " + "y" * 200000),
+    ]
     await comp.maybe_compact(history, "t2")
     assert comp._mem[("local", "t2")].ineffective_count == 1
 
@@ -1042,18 +1128,18 @@ async def test_compact_view_under_budget_no_llm():
 async def test_compact_view_includes_fixed_request_overhead_in_threshold():
     """system/tools 等统一请求开销必须参与 compact 水位判断。"""
     provider = FakeProvider(reply="短摘要")
-    comp = ContextCompactor(provider, token_budget=100, keep_recent=2)
-    msgs = [Message.user("small") for _ in range(5)]
+    comp = ContextCompactor(provider, token_budget=100_000, keep_recent=2)
+    msgs = [Message.user("hello world " * 500) for _ in range(5)]
 
     assert comp.will_compact_view(
         msgs,
         "s-overhead",
-        prompt_overhead_tokens=1_000,
+        prompt_overhead_tokens=1_000_000,
     ) is True
     out = await comp.compact_view(
         msgs,
         "s-overhead",
-        prompt_overhead_tokens=1_000,
+        prompt_overhead_tokens=1_000_000,
     )
 
     assert len(provider.calls) == 1

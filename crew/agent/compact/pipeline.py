@@ -139,17 +139,35 @@ class ContextCompactor:
             self._mem[key] = state
 
     @staticmethod
+    def _pairing_balances(messages: list[Message]) -> list[int]:
+        """工具配对余额前缀和：assistant 按 tool-call 块数 +N，tool result −1。
+
+        切点（cut before i）平衡当且仅当 bal[i] == 0——切点两侧不拆散
+        toolCall 与其 results 组，否则下一轮请求违反 provider 配对约束。
+        """
+        bal = [0] * (len(messages) + 1)
+        for i, m in enumerate(messages):
+            if m.role == "assistant":
+                delta = len(m.tool_calls)
+            elif m.role == "tool":
+                delta = -1
+            else:
+                delta = 0
+            bal[i + 1] = bal[i] + delta
+        return bal
+
+    @staticmethod
     def _safe_split(messages: list[Message], keep_recent: int) -> int:
         """返回 recent 段起始下标，确保不切断 assistant(tool_calls)↔tool 配对。
 
-        安全边界为 user 或 assistant 消息：recent 以 assistant 开头时，其
-        tool_calls 的结果紧随其后、同在 recent 内，配对完整。长回合内只有
-        回合开头一个 user 边界，接受 assistant 边界才能让回合内早期迭代
-        被摘要——否则整个回合都受保护，回合内 L3 永不触发。
+        安全边界为「user 或 assistant 且配对余额为 0」的消息：recent 以
+        assistant 开头时，其 tool_calls 的结果紧随其后、同在 recent 内，配对完整。
+        长回合内只有回合开头一个 user 边界，接受 assistant 边界才能让回合内早期
+        迭代被摘要——否则整个回合都受保护，回合内 L3 永不触发。
 
         策略（按优先级）：
         1. 从倒数 keep_recent 处出发；
-        2. 若该处已是安全边界（user/assistant），直接返回；
+        2. 若该处已是安全边界，直接返回；
         3. 优先向后（往最近消息）找安全边界：收缩 recent，让 old 可压缩；
         4. 向后找不到则向前（往更早消息）找：扩展 recent，保住完整配对；
         5. 保底：找不到安全边界则返回 0（安全降级，不压缩）。
@@ -158,8 +176,10 @@ class ContextCompactor:
         if n <= keep_recent:
             return 0
 
+        bal = ContextCompactor._pairing_balances(messages)
+
         def _is_boundary(index: int) -> bool:
-            return messages[index].role in ("user", "assistant")
+            return messages[index].role in ("user", "assistant") and bal[index] == 0
 
         start = max(0, n - keep_recent)
         if _is_boundary(start):
@@ -396,6 +416,13 @@ class ContextCompactor:
         if len(messages) <= keep_recent:
             return messages, None, True
         split = self._safe_split(messages, keep_recent)
+        # 事务提交前双侧再校验：切点绝不落在 toolResult 上（余额非 0 或非消息边界
+        # 则向头部回退），回退不到平衡切点则整个事务放弃。
+        bal = self._pairing_balances(messages)
+        while split > 0 and (
+            bal[split] != 0 or messages[split].role not in ("user", "assistant")
+        ):
+            split -= 1
         if split <= 0:
             return messages, None, True  # 无可压缩的旧消息
 
@@ -468,5 +495,16 @@ class ContextCompactor:
                 len(attachments),
                 self.post_compact_max_chars_per_file,
             )
-            return [summary_message, *attachments, *recent], new_state, False
-        return [summary_message, *recent], new_state, False
+        compacted = [summary_message, *attachments, *recent]
+        # 「摘要必须更小」校验：压缩后视图不小于原视图则整个事务失败，历史不变。
+        before_tokens = estimate_tokens(messages)
+        after_tokens = estimate_tokens(compacted)
+        if after_tokens >= before_tokens:
+            log.warning(
+                "压缩事务放弃：摘要后视图未变小（%d → %d tokens）session=%s",
+                before_tokens,
+                after_tokens,
+                session_id,
+            )
+            return messages, None, False
+        return compacted, new_state, False
