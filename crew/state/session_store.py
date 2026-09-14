@@ -1425,6 +1425,49 @@ class SQLiteSessionStore(SessionStore):
             ).fetchone()
         return str(row[0]) if row is not None else None
 
+    def scan_breakpoints(self, owner_account_id: str) -> list[dict[str, Any]]:
+        """扫描各会话开放回合（turn_start 无 turn_end），产出断点报告（D4）。
+
+        「上次会话在第 N 步被中断」：N = 开放回合内已落盘的消息事件数。
+        只报告、不自动续跑；Team 子会话（'::'）与无事件会话跳过。
+        """
+        role_types = tuple(e.value for e in _ROLE_EVENT_TYPES.values())
+        marks = ",".join("?" for _ in role_types)
+        reports: list[dict[str, Any]] = []
+        with self._lock:
+            sessions = self._conn.execute(
+                "SELECT session_id, title, leaf_seq FROM sessions "
+                "WHERE owner_account_id = ? AND session_id NOT LIKE '%::%' AND leaf_seq > 0",
+                (owner_account_id,),
+            ).fetchall()
+        for sid, title, leaf in sessions:
+            sid = str(sid)
+            leaf = int(leaf)
+            if self._last_turn_event(owner_account_id, sid, leaf) != SessionEventType.TURN_START.value:
+                continue
+            with self._lock:
+                turn_row = self._conn.execute(
+                    "SELECT MAX(seq) FROM session_events "
+                    "WHERE owner_account_id = ? AND session_id = ? AND seq <= ? AND type = ?",
+                    (owner_account_id, sid, leaf, SessionEventType.TURN_START.value),
+                ).fetchone()
+                step_row = self._conn.execute(
+                    f"SELECT COUNT(*) FROM session_events "
+                    f"WHERE owner_account_id = ? AND session_id = ? AND seq > ? AND seq <= ? "
+                    f"AND type IN ({marks})",
+                    (owner_account_id, sid, int(turn_row[0]), leaf, *role_types),
+                ).fetchone()
+            reports.append(
+                {
+                    "session_id": sid,
+                    "title": str(title or ""),
+                    "turn_start_seq": int(turn_row[0]),
+                    "last_event_seq": leaf,
+                    "step": int(step_row[0]),
+                }
+            )
+        return reports
+
     def ensure_session(
         self,
         session_id: str,

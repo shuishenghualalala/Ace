@@ -343,17 +343,28 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         include_archived: bool = False,
     ) -> JSONResponse:
         owner = account_from_request(request).owner_account_id
-        return JSONResponse(
-            with_session_agent_labels(
-                crew,
-                crew.session_store.list_sessions(
-                    workspace_id,
-                    owner_account_id=owner,
-                    include_archived=include_archived,
-                ),
+        items = with_session_agent_labels(
+            crew,
+            crew.session_store.list_sessions(
+                workspace_id,
                 owner_account_id=owner,
-            )
+                include_archived=include_archived,
+            ),
+            owner_account_id=owner,
         )
+        # D4 断点报告：开放回合（上次会话在第 N 步被中断）随列表下发，不自动续跑
+        scan = getattr(crew.session_store, "scan_breakpoints", None)
+        if callable(scan):
+            breakpoints = {b["session_id"]: b for b in scan(owner)}
+            for item in items:
+                bp = breakpoints.get(item.get("session_id"))
+                if bp:
+                    item["breakpoint"] = {
+                        "step": bp["step"],
+                        "turn_start_seq": bp["turn_start_seq"],
+                        "last_event_seq": bp["last_event_seq"],
+                    }
+        return JSONResponse(items)
 
     @router.post("/api/session/{session_id}/ensure")
     async def ensure_session(request: Request, session_id: str, payload: dict) -> JSONResponse:

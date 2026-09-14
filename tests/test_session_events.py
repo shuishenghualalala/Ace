@@ -1002,3 +1002,68 @@ def test_close_open_turn_on_closed_session_is_noop(tmp_path):
         assert store.close_open_turn("ghost", owner_account_id="") is False
     finally:
         store.close()
+
+
+# ---- W5：断点报告（ADR-0042 D4） ----
+
+
+def test_scan_breakpoints_reports_open_turn_with_step(tmp_path):
+    owner = "A:uid-a"
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        # 会话 A：上一回合被 kill -9 打断（turn_start 无 turn_end）
+        store.save("sa", [Message.user("q1")], owner_account_id=owner)
+        store.record_turn_event("sa", kind=SessionEventType.TURN_START, owner_account_id=owner)
+        store.save(
+            "sa",
+            [Message.user("q1"), Message.assistant("a1"), Message.user("q2"), Message.assistant("a2")],
+            owner_account_id=owner,
+        )
+        # 会话 B：正常闭合，无断点
+        store.save("sb", [Message.user("x")], owner_account_id=owner)
+        store.record_turn_event("sb", kind=SessionEventType.TURN_START, owner_account_id=owner)
+        store.save("sb", [Message.user("x"), Message.assistant("y")], owner_account_id=owner)
+        store.record_turn_event(
+            "sb", kind=SessionEventType.TURN_END, owner_account_id=owner, status="completed"
+        )
+        # Team 子会话：排除
+        store.save("p::turn::1::leader", [Message.user("c")], owner_account_id=owner)
+        store.record_turn_event("p::turn::1::leader", kind=SessionEventType.TURN_START, owner_account_id=owner)
+
+        reports = store.scan_breakpoints(owner)
+        assert [r["session_id"] for r in reports] == ["sa"]
+        report = reports[0]
+        assert report["step"] == 3  # 开放回合内 a1/q2/a2 三条消息事件（q1 在回合前）
+        assert report["last_event_seq"] == 5
+        # 断点报告不自动续跑：扫描本身不写任何事件
+        assert _event_row_count(db, owner, "sa") == 5
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_sessions_list_includes_breakpoint(tmp_path, auth_headers):
+    from httpx import ASGITransport, AsyncClient
+
+    from crew.app import build_app
+    from crew.gateway.server import create_app
+    from crew.state.config import Config
+
+    owner = "A:uid-a"
+    crew = build_app(
+        config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False),
+        enable_team=False,
+    )
+    crew.session_store.save("s1", [Message.user("q1")], owner_account_id=owner)
+    crew.session_store.record_turn_event("s1", kind=SessionEventType.TURN_START, owner_account_id=owner)
+    app = create_app(crew)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.get("/api/sessions")
+        assert resp.status_code == 200
+        items = resp.json()
+        assert len(items) == 1
+        # q1 在 turn_start 之前落库，开放回合内尚无消息事件
+        assert items[0]["breakpoint"]["step"] == 0
+        assert items[0]["breakpoint"]["turn_start_seq"] == 2
