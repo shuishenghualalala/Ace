@@ -1,9 +1,9 @@
 """文件变更服务：编辑/写入类工具的内核载体。
 
-匹配（LF 归一化域精确匹配）→ per-path FIFO 串行 → 版本 CAS → 原子写，全部收敛
-在这一层；工具 handler 只负责参数解析、授权与结果呈现。写入安全语义（快照 +
-冲突检测 + 原子写 + BOM/CRLF 保真）由 crew.tools.file_utils 提供，这里只组合
-不另起炉灶。
+匹配阶梯（LF 归一化域精确 → 模糊兜底，模糊只定位上报、写回保留原文未触碰行）
+→ per-path FIFO 串行 → 版本 CAS → 原子写，全部收敛在这一层；工具 handler 只
+负责参数解析、授权与结果呈现。写入安全语义（快照 + 冲突检测 + 原子写 +
+BOM/CRLF 保真）由 crew.tools.file_utils 提供，这里只组合不另起炉灶。
 
 观察策略（read-before-edit）挂在同一模块：file_read 的观察版本记入
 session → {path → version} 映射，编辑/写入以观察版本为 CAS 基；未读即拒并附
@@ -14,6 +14,8 @@ session → {path → version} 映射，编辑/写入以观察版本为 CAS 基�
 from __future__ import annotations
 
 import asyncio
+import difflib
+import unicodedata
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,6 +111,102 @@ def _normalize_lf(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+_FUZZY_TRANSLATION = str.maketrans(
+    {
+        **{ord(ch): "'" for ch in "‘’‚‛"},
+        **{ord(ch): '"' for ch in "“”„‟"},
+        **{ord(ch): "-" for ch in "‐‑‒–—―−"},
+        **{ord(ch): " " for ch in "            　"},
+    }
+)
+
+
+def _normalize_for_fuzzy(text: str) -> str:
+    """模糊匹配域：NFKC + 行尾空白剥离 + 智能引号/Unicode 破折号/特殊空格归一化。"""
+    normalized = unicodedata.normalize("NFKC", text)
+    lines = [line.rstrip() for line in normalized.split("\n")]
+    return "\n".join(lines).translate(_FUZZY_TRANSLATION)
+
+
+def _split_lines_lf(text: str) -> list[str]:
+    """只按 \n 切行并保留行尾（str.splitlines 会按 \v 等额外分隔符切，不用）。"""
+    if not text:
+        return []
+    parts = text.split("\n")
+    lines = [part + "\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def _line_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    offset = 0
+    for line in _split_lines_lf(text):
+        spans.append((offset, offset + len(line)))
+        offset += len(line)
+    return spans
+
+
+def _line_range_for(spans: Sequence[tuple[int, int]], start: int, end: int) -> tuple[int, int]:
+    start_line = -1
+    for index, (line_start, line_end) in enumerate(spans):
+        if line_start <= start < line_end:
+            start_line = index
+            break
+    if start_line == -1:
+        raise EditMatchError("匹配区域越出文件末尾")
+    end_line = start_line
+    while end_line < len(spans) and spans[end_line][1] < end:
+        end_line += 1
+    if end_line >= len(spans):
+        raise EditMatchError("匹配区域越出文件末尾")
+    return start_line, end_line + 1
+
+
+def _fuzzy_score(base: str, domain: str, start: int, length: int, old_lf: str) -> float:
+    """模糊命中得分：模型给出的 old 与文件原文对应行段的相似度（0..1，写入仍定位原文）。"""
+    spans = _line_spans(domain)
+    start_line, end_line = _line_range_for(spans, start, start + length)
+    base_lines = _split_lines_lf(base)
+    span_text = "".join(base_lines[start_line:end_line])
+    return difflib.SequenceMatcher(None, old_lf, span_text).ratio()
+
+
+def _apply_preserving_lines(
+    original: str,
+    base: str,
+    replacements: Sequence[tuple[int, int, str]],
+) -> str:
+    """在模糊域上替换后，把未触碰的行按原文逐字节贴回（保留原行尾/空白/引号）。"""
+    original_lines = _split_lines_lf(original)
+    base_spans = _line_spans(base)
+    if len(original_lines) != len(base_spans):
+        raise EditMatchError("模糊匹配域与原文行数不一致，未修改文件")
+
+    groups: list[dict[str, Any]] = []
+    for start, length, new_text in sorted(replacements, key=lambda r: r[0]):
+        start_line, end_line = _line_range_for(base_spans, start, start + length)
+        if groups and start_line < groups[-1]["end"]:
+            groups[-1]["end"] = max(groups[-1]["end"], end_line)
+            groups[-1]["repls"].append((start, length, new_text))
+        else:
+            groups.append({"start": start_line, "end": end_line, "repls": [(start, length, new_text)]})
+
+    chunks: list[str] = []
+    cursor = 0
+    for group in groups:
+        chunks.extend(original_lines[cursor : group["start"]])
+        group_start = base_spans[group["start"]][0]
+        group_end = base_spans[group["end"] - 1][1]
+        chunk = base[group_start:group_end]
+        relative = [(s - group_start, length, t) for s, length, t in group["repls"]]
+        chunks.append(_apply_replacements(chunk, relative))
+        cursor = group["end"]
+    chunks.extend(original_lines[cursor:])
+    return "".join(chunks)
+
+
 def _find_all(haystack: str, needle: str) -> list[int]:
     if not needle:
         return []
@@ -150,7 +248,6 @@ def _ambiguous_message(
     edit_index: int,
     total: int,
     starts: Sequence[int],
-    needle: str,
 ) -> str:
     where = "old" if total == 1 else f"edits[{edit_index}].old"
     lines = _match_lines(domain, starts)
@@ -164,42 +261,75 @@ def _ambiguous_message(
 
 
 def plan_edits(original: str, ops: Sequence[EditOp]) -> EditPlan:
-    """在 LF 归一化匹配域上做精确匹配，返回定位结果与应用后的文本。
+    """匹配阶梯：先在 LF 归一化域精确匹配；精确失败且要求唯一的编辑模糊兜底。
 
-    匹配是纯计算：任何一步失败抛 EditMatchError，调用方保证此时文件未被触碰，
-    从而实现「先全部匹配、后统一写入」的事务语义。
+    模糊域只做定位与上报，写回时未触碰的行保持原文逐字节不变。匹配是纯计算：
+    任何一步失败抛 EditMatchError，调用方保证此时文件未被触碰，从而实现
+    「先全部匹配、后统一写入」的事务语义。
     """
     base = _normalize_lf(original)
-    matches: list[EditMatch] = []
-    replacements: list[tuple[int, int, str]] = []
-    for index, op in enumerate(ops):
+    for op in ops:
         if not op.old:
             raise EditMatchError("old 不能为空")
         if op.count < 0:
             raise EditMatchError("count 不能为负")
+
+    # 探测：任一编辑在模糊域命中，则整批切换到模糊域统一替换（单域偏移才稳定）。
+    fuzzy_base: str | None = None
+    fuzzy_needed = False
+    for op in ops:
+        if _find_all(base, _normalize_lf(op.old)) or op.count != 1:
+            continue
+        if fuzzy_base is None:
+            fuzzy_base = _normalize_for_fuzzy(base)
+        if _find_all(fuzzy_base, _normalize_for_fuzzy(_normalize_lf(op.old))):
+            fuzzy_needed = True
+    domain = fuzzy_base if (fuzzy_needed and fuzzy_base is not None) else base
+
+    matches: list[EditMatch] = []
+    replacements: list[tuple[int, int, str]] = []
+    for index, op in enumerate(ops):
         old_lf = _normalize_lf(op.old)
-        starts = _find_all(base, old_lf)
+        exact_in_base = bool(_find_all(base, old_lf))
+        needle = old_lf
+        starts = _find_all(domain, needle)
+        mode = "exact"
         if not starts:
-            raise EditMatchError(_not_found_message(index, len(ops), tried_fuzzy=False))
+            needle = _normalize_for_fuzzy(old_lf)
+            starts = _find_all(domain, needle)
+            mode = "fuzzy"
+        if not exact_in_base:
+            # 原文里并不字面包含 old，只是在归一化后才能定位：如实上报模糊命中。
+            mode = "fuzzy"
+        if not starts:
+            raise EditMatchError(
+                _not_found_message(index, len(ops), tried_fuzzy=(op.count == 1))
+            )
         if op.count == 1 and len(starts) > 1:
-            raise EditMatchError(_ambiguous_message(base, index, len(ops), starts, old_lf))
+            raise EditMatchError(_ambiguous_message(domain, index, len(ops), starts))
         chosen = starts if op.count == 0 else starts[: max(op.count, 1)]
         for start in chosen:
+            score = 1.0 if mode == "exact" else _fuzzy_score(base, domain, start, len(needle), old_lf)
             matches.append(
                 EditMatch(
                     edit_index=index,
                     start=start,
-                    length=len(old_lf),
-                    mode="exact",
-                    score=1.0,
-                    line=_line_number_at(base, start),
+                    length=len(needle),
+                    mode=mode,
+                    score=round(score, 4),
+                    line=_line_number_at(domain, start),
                 )
             )
-            replacements.append((start, len(old_lf), _normalize_lf(op.new)))
+            replacements.append((start, len(needle), _normalize_lf(op.new)))
 
     matches.sort(key=lambda m: (m.start, m.edit_index))
     _check_overlap(matches)
-    return EditPlan(matches=tuple(matches), before=base, after=_apply_replacements(base, replacements))
+    after = (
+        _apply_preserving_lines(base, domain, replacements)
+        if fuzzy_needed
+        else _apply_replacements(domain, replacements)
+    )
+    return EditPlan(matches=tuple(matches), before=base, after=after)
 
 
 def _check_overlap(matches: Sequence[EditMatch]) -> None:

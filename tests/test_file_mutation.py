@@ -74,6 +74,62 @@ def test_plan_edits_overlap_rejected():
 
 
 # ---------------------------------------------------------------------------
+# C1 模糊匹配阶梯
+# ---------------------------------------------------------------------------
+
+
+def test_plan_edits_fuzzy_smart_quotes_and_dash():
+    original = 'print(“hello”)\nvalue = 10−5\n'
+    plan = plan_edits(original, [EditOp(old='print("hello")', new="pass")])
+    assert plan.matches[0].mode == "fuzzy"
+    assert 0 < plan.matches[0].score <= 1.0
+    assert plan.after == "pass\nvalue = 10−5\n"
+    # 未触碰行保持原文逐字节（Unicode 减号未被改写）
+    assert "10−5" in plan.after
+
+
+def test_plan_edits_fuzzy_trailing_whitespace_and_crlf_preserved():
+    original = "def f():   \r\n    return 1\r\nkeep‘this\n"
+    plan = plan_edits(original, [EditOp(old="def f():\n    return 1", new="def g():\n    return 2")])
+    assert plan.matches[0].mode == "fuzzy"
+    # 匹配行按模糊域重写，未触碰行逐字节保留（智能引号不被改写）
+    assert plan.after == "def g():\n    return 2\nkeep‘this\n"
+
+
+async def test_edit_fuzzy_writes_back_with_original_endings(tmp_path):
+    target = tmp_path / "demo.txt"
+    target.write_bytes(b"def f():   \r\n    return 1\r\nkeep\xe2\x80\x98this\xe2\x80\x99\n")
+
+    outcome = await file_mutation.edit_text(
+        target, [EditOp(old="def f():\n    return 1", new="def g():\n    return 2")]
+    )
+
+    data = target.read_bytes()
+    assert outcome.plan.matches[0].mode == "fuzzy"
+    # 未触碰行内容逐字节保留；行尾按采样到的 dominant ending 统一还原（既有语义）
+    assert data == "def g():\r\n    return 2\r\nkeep‘this’\r\n".encode("utf-8")
+
+
+def test_plan_edits_fuzzy_ambiguous_reports_lines():
+    original = "‘a’\nmiddle\n‘a’\n"
+    with pytest.raises(EditMatchError, match=r"行号: 1, 3"):
+        plan_edits(original, [EditOp(old="'a'", new="x")])
+
+
+def test_plan_edits_exact_wins_over_fuzzy():
+    # 文件中同时存在 ASCII 原文与智能引号变体：精确命中优先，不变道模糊。
+    original = "say 'hi'\nsay ‘hi’\n"
+    plan = plan_edits(original, [EditOp(old="say 'hi'", new="x")])
+    assert plan.matches[0].mode == "exact"
+    assert plan.after == "x\nsay ‘hi’\n"
+
+
+def test_plan_edits_not_found_mentions_fuzzy_attempt():
+    with pytest.raises(EditMatchError, match="模糊"):
+        plan_edits("completely different\n", [EditOp(old="not there", new="x")])
+
+
+# ---------------------------------------------------------------------------
 # 服务：串行锁 / CAS / 事务
 # ---------------------------------------------------------------------------
 
