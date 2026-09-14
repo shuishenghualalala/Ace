@@ -858,15 +858,27 @@ async def handle_terminal(
     wait_budget = min(effective_timeout, auto_after) if auto_after > 0 else effective_timeout
     started = time.monotonic()
     # OCC Stage 5 onProgress：前台阻塞期按已累计输出增量推给前端，让用户实时看到命令输出。
+    # 事件驱动等完全结算事件（reader 收尾 set），零状态轮询；0.5s 仅是进度节流的
+    # 上限节拍，进程一结算立即唤醒。
     emitted_len = 0
-    last_emit = 0.0
-    while not session.exited and time.monotonic() - started < wait_budget:
-        await asyncio.sleep(0.1)
-        buf = session.output_buffer
-        if len(buf) > emitted_len and (time.monotonic() - last_emit) >= 0.5:
-            await emit_tool_progress(buf[emitted_len:])
-            emitted_len = len(buf)
-            last_emit = time.monotonic()
+    exited_waiter = asyncio.ensure_future(asyncio.to_thread(session._done_event.wait))
+    try:
+        while True:
+            remaining_budget = wait_budget - (time.monotonic() - started)
+            if remaining_budget <= 0:
+                break
+            done, _ = await asyncio.wait(
+                {exited_waiter}, timeout=min(0.5, remaining_budget)
+            )
+            buf = session.output_buffer
+            if len(buf) > emitted_len:
+                await emit_tool_progress(buf[emitted_len:])
+                emitted_len = len(buf)
+            if done:
+                break
+    finally:
+        if not exited_waiter.done():
+            exited_waiter.cancel()
 
     if not session.exited:
         elapsed = time.monotonic() - started

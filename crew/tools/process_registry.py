@@ -43,9 +43,18 @@ from crew.security.launch import (
     shell_argv,
 )
 from crew.security.models import serialize_additional_permissions
+from crew.security.process_lifecycle import (
+    ProcessOwner,
+    register_live,
+    release_live,
+    scope_alive,
+    wrap_argv_for_containment,
+)
 from crew.tools.child_env import build_spawn_env
 from crew.tools.output_filters import strip_ansi
 from crew.tools.registry import tool_error
+
+_SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 SessionKey = tuple[str, str]
 
@@ -75,6 +84,7 @@ MAX_OUTPUT_CHARS = 200_000      # 200KB 滚动输出缓冲
 FINISHED_TTL_SECONDS = 1800     # 已结束进程保留 30 分钟
 MAX_PROCESSES = 64              # 最大并发跟踪进程数（超出按最旧 LRU 淘汰）
 MAX_PENDING_PER_SESSION = 20    # 每 session 待注入通知上限，防无限堆积
+_MAX_STDIN_WRITE_CHARS = 1_000_000  # 单次 stdin 批量写入上限（半交互喂入）
 
 # ---- watch_patterns 限流（单 session）----
 # 硬规则：每 WATCH_MIN_INTERVAL_SECONDS 至多发一条 watch 命中通知。冷却窗口内到达的
@@ -90,29 +100,11 @@ _WINDOWS_PROCESS_FLAGS = (
 )
 
 
-def terminate_process_tree(pid: int) -> None:
-    """Best-effort terminate one process and its complete child process tree.
-
-    Windows ``Popen.terminate()`` only stops the top-level process, so command
-    chains such as PowerShell → Node → LibreOffice can otherwise leave orphaned
-    children. POSIX processes are started in their own group and terminate as a
-    group; Windows uses ``taskkill /T /F``.
-    """
-    if pid <= 0:
-        return
-    try:
-        if _IS_WINDOWS:
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        else:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError, subprocess.SubprocessError):
-        return
+def _session_alive(session: "ProcessSession") -> bool:
+    """进程是否存活：scope 收容看单元状态，其余看 host PID。"""
+    if session.scope_unit:
+        return scope_alive(session.scope_unit)
+    return _pid_alive(session.pid)
 
 
 def _checkpoint_path() -> Path:
@@ -162,6 +154,7 @@ class ProcessSession:
     pid: int | None = None
     process: subprocess.Popen | None = None
     cwd: str | None = None
+    scope_unit: str = ""                          # linux-scope 收容的 systemd 单元名
     started_at: float = 0.0
     exited: bool = False
     exit_code: int | None = None
@@ -179,6 +172,9 @@ class ProcessSession:
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _reader_thread: threading.Thread | None = field(default=None, repr=False)
     _heartbeat_thread: threading.Thread | None = field(default=None, repr=False)
+    _owner: ProcessOwner | None = field(default=None, repr=False)
+    # 完全结算事件：reader 收尾 / kill / detached 结算时 set，wait() 条件唤醒（无轮询）
+    _done_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _secret_values: tuple[str, ...] = field(default=(), repr=False)
     task_id: str = ""
     output_ref: str = ""
@@ -289,6 +285,7 @@ class ProcessRegistry:
 
         popen_args: list[str] | str = command
         shell = True
+        scope_unit = ""
         if _IS_WINDOWS:
             # Use PowerShell on Windows so commands run in the same shell family
             # as the desktop/runtime environment; cmd.exe breaks common commands
@@ -317,6 +314,11 @@ class ProcessRegistry:
                 command,
             ]
             shell = False
+        else:
+            # Linux 可用时包进 user systemd scope（整树由 systemd 收容），
+            # 失败回退 setsid 进程组；命令统一为 argv 形式由 wrap 决定。
+            popen_args, scope_unit = wrap_argv_for_containment(["/bin/sh", "-c", command])
+            shell = False
         proc = subprocess.Popen(
             popen_args,
             shell=shell,
@@ -327,7 +329,7 @@ class ProcessRegistry:
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,  # 半交互（sudo -S 等）：经 write_stdin 批量写入
             preexec_fn=None if _IS_WINDOWS else os.setsid,  # 自成进程组，便于整树 kill
             # Windows 进程组仍共享父控制台；taskkill /T /F 可能把控制信号回传给
             # Gateway。后台 shell 无交互控制台需求，创建无窗口独立进程组才能安全整树终止。
@@ -335,6 +337,9 @@ class ProcessRegistry:
         )
         session.process = proc
         session.pid = proc.pid
+        session.scope_unit = scope_unit
+        session._owner = ProcessOwner.capture(proc, scope_unit=scope_unit or None)
+        register_live(session._owner)
 
         with self._lock:
             self._prune_if_needed()
@@ -478,9 +483,13 @@ class ProcessRegistry:
             _security_result_path=result_path, _security_result_nonce=result_nonce,
         )
         flags = _WINDOWS_PROCESS_FLAGS if _IS_WINDOWS else 0
+        scope_unit = ""
+        bridge_argv = [sys.executable, "-I", "-c", _BACKGROUND_BRIDGE_LAUNCHER]
+        if not _IS_WINDOWS:
+            bridge_argv, scope_unit = wrap_argv_for_containment(bridge_argv)
         try:
             proc = subprocess.Popen(
-                [sys.executable, "-I", "-c", _BACKGROUND_BRIDGE_LAUNCHER],
+                bridge_argv,
                 shell=False, text=True, encoding="utf-8", errors="replace", cwd=session.cwd,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 env=build_spawn_env({"PYTHONUNBUFFERED": "1"}),
@@ -494,6 +503,9 @@ class ProcessRegistry:
         proc.stdin.close()
         session.process = proc
         session.pid = proc.pid
+        session.scope_unit = scope_unit
+        session._owner = ProcessOwner.capture(proc, scope_unit=scope_unit or None)
+        register_live(session._owner)
         with self._lock:
             self._prune_if_needed()
             self._running[session.id] = session
@@ -654,11 +666,25 @@ class ProcessRegistry:
             try:
                 session.process.wait(timeout=5)
             except Exception:  # noqa: BLE001
-                pass
+                # 句柄结算超时：TERM 被忽略的树由属主升级到 KILL，再给它一次结算机会。
+                owner = session._owner or (
+                    ProcessOwner.capture(session.process, scope_unit=session.scope_unit or None)
+                    if session.process is not None
+                    else None
+                )
+                if owner is not None and not owner.exited():
+                    owner.signal(_SIGKILL)
+                    try:
+                        session.process.wait(timeout=5)
+                    except Exception:  # noqa: BLE001
+                        pass
             session.exited = True
             session.exit_code = session.process.returncode
             self._audit_process_result(session)
             self._move_to_finished(session)
+            # 句柄完全结算（输出落地 + 审计 + 归档）后才移出 live set、唤醒 wait()
+            release_live(session._owner)
+            session._done_event.set()
 
     @staticmethod
     def _audit_process_result(session: ProcessSession) -> None:
@@ -826,16 +852,18 @@ class ProcessRegistry:
         return session
 
     def _refresh_detached(self, session: ProcessSession | None) -> ProcessSession | None:
-        """崩溃恢复认领的进程没有 Popen 句柄，靠 host PID 存活检测判定是否已退出。"""
+        """崩溃恢复认领的进程没有 Popen 句柄，靠存活检测判定是否已退出。"""
         if session is None or session.exited or not session.detached:
             return session
-        if _pid_alive(session.pid):
+        if _session_alive(session):
             return session
         with session._lock:
             if session.exited:
                 return session
             session.exited = True
             session.exit_code = None  # 无句柄可 wait，真实退出码不可得
+        release_live(session._owner)
+        session._done_event.set()
         self._move_to_finished(session)
         return session
 
@@ -894,65 +922,95 @@ class ProcessRegistry:
         return result
 
     def wait(self, session_id: str, timeout: int | None = None, *, owner_account_id: str) -> dict[str, Any]:
-        """阻塞直到进程退出或超时。"""
+        """阻塞直到进程完全结算或超时（per-session 事件条件唤醒，无轮询）。"""
         session = self.get(session_id, owner_account_id=owner_account_id)
         if session is None:
             return {"status": "not_found", "error": f"无此进程: {session_id}"}
         effective_timeout = float(timeout) if timeout and timeout > 0 else 180.0
-        deadline = time.monotonic() + effective_timeout
-        while time.monotonic() < deadline:
-            if session.exited:
-                return {
-                    "status": "exited",
-                    "exit_code": session.exit_code,
-                    "output": strip_ansi(session.output_buffer[-2000:]),
-                }
-            time.sleep(0.5)
+        if not session._done_event.wait(effective_timeout):
+            return {
+                "status": "timeout",
+                "output": strip_ansi(session.output_buffer[-1000:]),
+                "timeout_note": f"已等待 {int(effective_timeout)}s，进程仍在运行",
+            }
         return {
-            "status": "timeout",
-            "output": strip_ansi(session.output_buffer[-1000:]),
-            "timeout_note": f"已等待 {int(effective_timeout)}s，进程仍在运行",
+            "status": "exited",
+            "exit_code": session.exit_code,
+            "output": strip_ansi(session.output_buffer[-2000:]),
         }
 
     def kill_process(self, session_id: str, owner_account_id: str) -> dict[str, Any]:
-        """杀掉一个后台进程（含子进程树）。"""
+        """杀掉一个后台进程（含子进程树），统一走 security 的 ProcessOwner。"""
         session = self.get(session_id, owner_account_id=owner_account_id)
         if session is None:
             return {"status": "not_found", "error": f"无此进程: {session_id}"}
         if session.exited:
             return {"status": "already_exited", "exit_code": session.exit_code}
         try:
-            if session.process is not None:
-                if _IS_WINDOWS:
-                    terminate_process_tree(session.process.pid)
-                else:
-                    try:
-                        os.killpg(os.getpgid(session.process.pid), signal.SIGTERM)
-                    except (ProcessLookupError, PermissionError, OSError):
-                        session.process.kill()
-            elif session.detached and session.pid:
-                # 崩溃恢复认领的进程：无 Popen 句柄，按 host PID 杀
-                if not _pid_alive(session.pid):
-                    session.exited = True
-                    session.exit_code = None
-                    self._move_to_finished(session)
-                    return {"status": "already_exited", "exit_code": None}
-                try:
-                    if _IS_WINDOWS:
-                        terminate_process_tree(session.pid)
-                    else:
-                        os.killpg(os.getpgid(session.pid), signal.SIGTERM)
-                except (ProcessLookupError, PermissionError, OSError):
-                    try:
-                        os.kill(session.pid, signal.SIGTERM)
-                    except OSError:
-                        pass
+            if session.detached and not _session_alive(session):
+                # 崩溃恢复认领的进程已死：按退出结算
+                session.exited = True
+                session.exit_code = None
+                release_live(session._owner)
+                session._done_event.set()
+                self._move_to_finished(session)
+                return {"status": "already_exited", "exit_code": None}
+            owner = session._owner or ProcessOwner.for_pid(
+                session.pid or 0,
+                scope_unit=session.scope_unit or None,
+            )
+            owner.signal(signal.SIGTERM)
             session.exited = True
             session.exit_code = -15  # SIGTERM
             self._move_to_finished(session)
+            session._done_event.set()
             return {"status": "killed", "session_id": session.id}
         except Exception as exc:  # noqa: BLE001
             return {"status": "error", "error": str(exc)}
+
+    def write_stdin(
+        self,
+        session_id: str,
+        chunks: str | list[str],
+        *,
+        owner_account_id: str,
+        close: bool = False,
+    ) -> dict[str, Any]:
+        """向后台进程批量写入 stdin（半交互场景如 sudo -S 喂密码）。
+
+        chunks 为一批按序写入的文本；close=True 写完即关管（EOF）。
+        写入内容不进任何日志/通知（可能含机密）。
+        """
+        session = self.get(session_id, owner_account_id=owner_account_id)
+        if session is None:
+            return {"status": "not_found", "error": f"无此进程: {session_id}"}
+        if isinstance(chunks, str):
+            chunks = [chunks]
+        total = sum(len(chunk) for chunk in chunks)
+        if total > _MAX_STDIN_WRITE_CHARS:
+            return {
+                "status": "error",
+                "error": f"单次写入超限（{total} > {_MAX_STDIN_WRITE_CHARS} 字符）",
+            }
+        if session.exited or session.process is None or session.process.stdin is None:
+            return {"status": "error", "error": "进程已退出或无 stdin 管道"}
+        try:
+            for chunk in chunks:
+                session.process.stdin.write(chunk)
+            session.process.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError) as exc:
+            return {"status": "error", "error": f"stdin 写入失败: {exc}"}
+        if close:
+            try:
+                session.process.stdin.close()
+            except OSError:
+                pass
+        return {
+            "status": "written",
+            "session_id": session.id,
+            "chars": total,
+            "closed": close,
+        }
 
     def list_sessions(self, owner_account_id: str) -> list[dict[str, Any]]:
         with self._lock:
@@ -1023,6 +1081,7 @@ class ProcessRegistry:
                         "watch_patterns": s.watch_patterns,
                         "task_id": s.task_id,
                         "output_ref": s.output_ref,
+                        "scope_unit": s.scope_unit,
                     }
                     for s in self._running.values()
                     if not s.exited and s.pid
@@ -1051,22 +1110,34 @@ class ProcessRegistry:
         recovered = 0
         for entry in entries:
             pid = entry.get("pid")
-            if not pid or not _pid_alive(pid):
+            scope_unit = str(entry.get("scope_unit") or "")
+            probe = ProcessSession(
+                id=entry.get("session_id") or f"proc_{uuid.uuid4().hex[:12]}",
+                command=entry.get("command", "unknown"),
+                pid=pid,
+                scope_unit=scope_unit,
+            )
+            if not pid and not scope_unit:
+                continue
+            if not _session_alive(probe):
                 continue
             session = ProcessSession(
-                id=entry.get("session_id") or f"proc_{uuid.uuid4().hex[:12]}",
+                id=probe.id,
                 command=entry.get("command", "unknown"),
                 session_key=entry.get("session_key", ""),
                 owner_account_id=normalize_owner_account_id(entry.get("owner_account_id")),
                 pid=pid,
                 cwd=entry.get("cwd"),
+                scope_unit=scope_unit,
                 started_at=entry.get("started_at", time.time()),
                 detached=True,
                 notify_on_complete=entry.get("notify_on_complete", False),
                 watch_patterns=entry.get("watch_patterns", []),
                 task_id=entry.get("task_id", ""),
                 output_ref=entry.get("output_ref", ""),
+                _owner=ProcessOwner.for_pid(pid or 0, scope_unit=scope_unit or None),
             )
+            register_live(session._owner)
             with self._lock:
                 self._running[session.id] = session
             recovered += 1
@@ -1157,14 +1228,16 @@ PROCESS_SCHEMA = {
     "description": (
         "管理 terminal(background=true) 启动的后台进程。actions: "
         "'list'（列出全部）、'poll'（查状态+最新输出）、'log'（完整输出，支持分页）、"
-        "'wait'（阻塞至结束或超时）、'kill'（终止）。"
+        "'wait'（阻塞至结束或超时）、'kill'（终止）、'stdin'（批量写入标准输入，"
+        "覆盖 sudo -S 等半交互场景；写完可 close 送出 EOF）。后台进程 stdin 为管道，"
+        "需要输入时必须用本 action 喂入。"
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list", "poll", "log", "wait", "kill"],
+                "enum": ["list", "poll", "log", "wait", "kill", "stdin"],
                 "description": "对后台进程执行的操作",
             },
             "session_id": {
@@ -1185,6 +1258,17 @@ PROCESS_SCHEMA = {
                 "description": "log 操作最多返回行数",
                 "minimum": 1,
             },
+            "input": {
+                "description": "stdin 操作写入的内容：字符串或按序写入的字符串数组",
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}},
+                ],
+            },
+            "close": {
+                "type": "boolean",
+                "description": "stdin 操作写完即关闭管道（送出 EOF），默认 false",
+            },
         },
         "required": ["action"],
     },
@@ -1203,8 +1287,8 @@ def _handle_process(args: dict[str, Any]) -> str:
             {"processes": process_registry.list_sessions(owner_account_id=owner_account_id)},
             ensure_ascii=False,
         )
-    if action not in {"poll", "log", "wait", "kill"}:
-        return tool_error(f"未知 action: {action}。可用: list, poll, log, wait, kill")
+    if action not in {"poll", "log", "wait", "kill", "stdin"}:
+        return tool_error(f"未知 action: {action}。可用: list, poll, log, wait, kill, stdin")
     if not session_id:
         return tool_error(f"{action} 需要 session_id")
     if action == "poll":
@@ -1228,6 +1312,16 @@ def _handle_process(args: dict[str, Any]) -> str:
                 session_id,
                 timeout=args.get("timeout"),
                 owner_account_id=owner_account_id,
+            ),
+            ensure_ascii=False,
+        )
+    if action == "stdin":
+        return json.dumps(
+            process_registry.write_stdin(
+                session_id,
+                args.get("input") or "",
+                owner_account_id=owner_account_id,
+                close=bool(args.get("close", False)),
             ),
             ensure_ascii=False,
         )
