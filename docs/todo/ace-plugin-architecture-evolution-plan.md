@@ -13,7 +13,7 @@
 >
 > 下一步：6AC 已完成，Team/Kanban 的 UI Contribution 生命周期收口；**同伴 Channel Bundle 产品范围已确认**（ADR-0042，AHUAMAO 拍板：同伴以 nearby 渠道平台身份进入 `product.channels`，不建独立 Feature、复用渠道会话管道与 channels.db 路由，实施列后续切片）。剩余待逐项说明计划并取得确认：**P2-1 第二步旧节退役**（features.* 双读已落地，旧顶层节按映射表退役，写侧已统一产 features.channels，机械低风险，可交给子 agent 并行）与**阶段 5 剩余 UI Contribution**（页面生命周期、API Client、Feature Event Reducer 等）。三平台验证：ci.yml python 门禁已扩为 ubuntu/windows/macos 矩阵（静态检查保持 Linux 单跑），桌面打包态由 nightly-desktop 三平台覆盖；矩阵首跑结果待推送后回填。
 >
-> 渐进/后续范围：P2-1 已完成 features.* 双读，旧节退役尚未实施；P2-5 表前缀仍为渐进项；根包余下物理拆分为后续范围。P2-6 kanban 事件命名空间已决定保留发布契约，pnpm workspace 已降为观察项；6Y/6Z 已完成第三批拆包与 wiki_learning 表归属决策。同伴缺少既有业务实现，按新 Channel Bundle 的产品范围另行明确，不将占位实现当作迁移完成。
+> 渐进/后续范围：P2-1 已全部完成（双读 + 写侧统一 features.* 旧节退役）；P2-5 表前缀仍为渐进项；根包余下物理拆分为后续范围。P2-6 kanban 事件命名空间已决定保留发布契约，pnpm workspace 已降为观察项；6Y/6Z 已完成第三批拆包与 wiki_learning 表归属决策。同伴产品范围已按 ADR-0042 确认（nearby 作为 channels 第三平台），实施列后续切片。
 
 ## 已完成并行批次（2026-09-08 启动，2026-09-10 收口）
 
