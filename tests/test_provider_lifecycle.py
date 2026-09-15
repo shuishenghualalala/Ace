@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from crew.agent.runtime import SingleAgent
 from crew.app import AgentManager, build_app
@@ -16,7 +16,7 @@ from crew.plugins.manager import PluginManager
 from crew.providers.anthropic_provider import AnthropicProvider
 from crew.providers.openai_provider import OpenAIProvider
 from crew.tools.registry import Registry
-from crew.state.config import Config
+from crew.state.config import Config, load_config
 
 
 class _AsyncCloseClient:
@@ -317,23 +317,38 @@ async def test_use_model_installs_new_provider_before_retiring_old_one(tmp_path,
 
     old_provider = _ClosableProvider()
     new_provider = _ClosableProvider()
-    cfg = Config(
-        db_path=str(tmp_path / "crew.db"),
-        memory_db_path=str(tmp_path / "memory.db"),
-        crew_home=str(tmp_path / ".crew"),
+    # use_model 走 Config 候选值事务（候选值 → 持久化 → 发布），需要 yaml 落点
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "llm": {
+                    "active": "cur",
+                    "models": {
+                        "cur": {"model": "cur-model", "loaded": True},
+                        "next": {"model": "next-model", "loaded": True},
+                    },
+                },
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
     )
+    cfg = load_config(config_path=str(config_path))
+    cfg.db_path = str(tmp_path / "crew.db")
+    cfg.memory_db_path = str(tmp_path / "memory.db")
+    cfg.crew_home = str(tmp_path / ".crew")
     app = build_app(config=cfg, enable_team=False)
     app.cron_service = None
     app.mcp_manager = None
     app.provider = old_provider
-    profile = SimpleNamespace(id="next", model="next-model", base_url="")
-    monkeypatch.setattr(app.config, "activate_model", lambda _model_id: profile)
     monkeypatch.setattr(app_module, "build_provider", lambda _cfg: new_provider)
 
     selected = app.use_model("next", owner_account_id="")
 
-    assert selected is profile
+    assert selected.id == "next"
     assert app.provider is new_provider
+    assert cfg.active_model_id == "next"
     await app._drain_provider_retirements()
     assert old_provider.close_calls == 1
     assert new_provider.close_calls == 0

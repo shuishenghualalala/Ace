@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
+import yaml
 from httpx import ASGITransport, AsyncClient
 
 pytest.importorskip("mcp")
@@ -242,3 +244,215 @@ async def test_secret_env_redacted_in_get(api):
     srv = next(s for s in resp.json()["servers"] if s["name"] == "secret")
     assert srv["config"]["env"]["API_KEY"] == "***"
     assert srv["config"]["env"]["PATH_EXTRA"] == "/usr/bin"
+
+
+# ---- 配置事务（S2）：持久化失败不得污染内存/磁盘/运行资源 ----
+#
+# 从真实 HTTP 入口注入磁盘写入失败（yaml.safe_dump / Path.replace），
+# 核对业务字段 cfg.mcp_servers、raw_config、磁盘回读与运行管理器调用次数。
+
+
+class _SpyMcpManager:
+    """记录运行资源调用的假 manager：保存失败路径必须零调用。"""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def start(self, _registry) -> None:
+        self.calls.append("start")
+
+    def register_pending(self, name, _cfg) -> None:
+        self.calls.append(f"register_pending:{name}")
+
+    async def add_server(self, name, _cfg) -> bool:
+        self.calls.append(f"add_server:{name}")
+        return True
+
+    async def reload_one(self, name, _cfg=None) -> bool:
+        self.calls.append(f"reload_one:{name}")
+        return True
+
+    async def remove_server(self, name) -> bool:
+        self.calls.append(f"remove_server:{name}")
+        return True
+
+    def status(self) -> list[dict]:
+        return []
+
+
+def _break_safe_dump(monkeypatch) -> None:
+    def _boom(*_args, **_kwargs):
+        raise OSError("injected safe_dump failure")
+
+    monkeypatch.setattr(yaml, "safe_dump", _boom)
+
+
+def _break_replace(monkeypatch, config_yaml: Path) -> None:
+    original = Path.replace
+
+    def _replace(self, target):
+        if Path(target) == config_yaml:
+            raise OSError("injected replace failure")
+        return original(self, target)
+
+    monkeypatch.setattr(Path, "replace", _replace)
+
+
+def _seed_server(crew, name: str, command: str) -> None:
+    """不经 HTTP 直接种一个 server 到内存+磁盘（走遗留 set+persist 入口）。"""
+    crew.config.set_mcp_server(name, {"command": command})
+    crew.config.persist_mcp_servers()
+
+
+def _assert_server_on_disk(config_yaml: Path, name: str, command: str | None) -> dict:
+    data = yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
+    servers = data.get("mcp_servers") or {}
+    if command is None:
+        assert name not in servers
+    else:
+        assert servers[name] == {"command": command}
+    return data
+
+
+async def test_create_persist_failure_keeps_memory_disk_and_runtime_untouched(api, monkeypatch):
+    client, crew, config_yaml = api
+    _seed_server(crew, "keep", "keep-cmd")
+    spy = _SpyMcpManager()
+    crew.mcp_manager = spy
+    _break_safe_dump(monkeypatch)
+
+    resp = await client.post(
+        "/api/mcp/servers",
+        json={"name": "fresh", "command": "new-cmd"},
+        headers=LOCAL_HEADERS,
+    )
+
+    assert resp.status_code == 500
+    assert resp.json()["ok"] is False
+    # 业务字段：内存保持旧值
+    assert "fresh" not in crew.config.mcp_servers
+    assert crew.config.mcp_servers["keep"]["command"] == "keep-cmd"
+    # 磁盘与 raw_config 保持旧值
+    _assert_server_on_disk(config_yaml, "fresh", None)
+    assert crew.config.mcp_servers["keep"]["command"] == "keep-cmd"
+    assert crew.config.raw_config["mcp_servers"] == {"keep": {"command": "keep-cmd"}}
+    # 运行管理器零调用
+    assert spy.calls == []
+    assert not config_yaml.with_suffix(config_yaml.suffix + ".tmp").exists()
+
+
+@pytest.mark.parametrize("inject", ["safe_dump", "replace"])
+async def test_update_persist_failure_keeps_memory_disk_and_runtime_untouched(
+    api, monkeypatch, inject
+):
+    client, crew, config_yaml = api
+    _seed_server(crew, "echo", "old-cmd")
+    spy = _SpyMcpManager()
+    crew.mcp_manager = spy
+    if inject == "safe_dump":
+        _break_safe_dump(monkeypatch)
+    else:
+        _break_replace(monkeypatch, config_yaml)
+
+    resp = await client.put(
+        "/api/mcp/servers/echo",
+        json={"command": "new-cmd"},
+        headers=LOCAL_HEADERS,
+    )
+
+    assert resp.status_code == 500
+    assert resp.json()["ok"] is False
+    assert crew.config.mcp_servers["echo"]["command"] == "old-cmd"
+    _assert_server_on_disk(config_yaml, "echo", "old-cmd")
+    assert crew.config.raw_config["mcp_servers"] == {"echo": {"command": "old-cmd"}}
+    assert spy.calls == []
+    assert not config_yaml.with_suffix(config_yaml.suffix + ".tmp").exists()
+
+
+async def test_delete_persist_failure_keeps_memory_disk_and_runtime_untouched(api, monkeypatch):
+    client, crew, config_yaml = api
+    _seed_server(crew, "echo", "old-cmd")
+    spy = _SpyMcpManager()
+    crew.mcp_manager = spy
+    _break_safe_dump(monkeypatch)
+
+    resp = await client.delete("/api/mcp/servers/echo", headers=LOCAL_HEADERS)
+
+    assert resp.status_code == 500
+    assert resp.json()["ok"] is False
+    assert crew.config.mcp_servers["echo"]["command"] == "old-cmd"
+    _assert_server_on_disk(config_yaml, "echo", "old-cmd")
+    assert crew.config.raw_config["mcp_servers"] == {"echo": {"command": "old-cmd"}}
+    assert spy.calls == []
+    assert not config_yaml.with_suffix(config_yaml.suffix + ".tmp").exists()
+
+
+async def test_update_failure_then_retry_applies_change_without_losing_updates(api, monkeypatch):
+    client, crew, config_yaml = api
+    _seed_server(crew, "echo", "v1")
+    _seed_server(crew, "other", "stable")
+    spy = _SpyMcpManager()
+    crew.mcp_manager = spy
+
+    real_safe_dump = yaml.safe_dump
+    state = {"calls": 0}
+
+    def flaky_safe_dump(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise OSError("injected safe_dump failure")
+        return real_safe_dump(*args, **kwargs)
+
+    monkeypatch.setattr(yaml, "safe_dump", flaky_safe_dump)
+
+    first = await client.put(
+        "/api/mcp/servers/echo", json={"command": "v2"}, headers=LOCAL_HEADERS
+    )
+    assert first.status_code == 500
+    assert crew.config.mcp_servers["echo"]["command"] == "v1"
+    assert crew.config.mcp_servers["other"]["command"] == "stable"
+    assert spy.calls == []
+
+    second = await client.put(
+        "/api/mcp/servers/echo", json={"command": "v2"}, headers=LOCAL_HEADERS
+    )
+    assert second.status_code == 200
+    assert crew.config.mcp_servers["echo"]["command"] == "v2"
+    assert crew.config.mcp_servers["other"]["command"] == "stable"
+    # stdio payload 经 _validate_server_payload 规范化会带 args=[]，只核对 command
+    disk = yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
+    assert disk["mcp_servers"]["echo"]["command"] == "v2"
+    assert disk["mcp_servers"]["other"] == {"command": "stable"}
+    # 重试成功后才允许运行资源操作（后台 reload；让出事件循环使其落地）
+    import asyncio as _asyncio
+
+    for _ in range(5):
+        await _asyncio.sleep(0)
+    assert "reload_one:echo" in spy.calls
+
+
+async def test_delete_saved_but_runtime_remove_failure_reports_honestly(api, monkeypatch):
+    """持久化成功 + 运行资源操作失败：磁盘与内存保持新值，错误如实上报。"""
+    client, crew, config_yaml = api
+    _seed_server(crew, "echo", "cmd")
+    spy = _SpyMcpManager()
+
+    async def _boom(name):
+        spy.calls.append(f"remove_server:{name}")
+        raise RuntimeError("worker stop failed")
+
+    spy.remove_server = _boom
+    crew.mcp_manager = spy
+
+    resp = await client.delete("/api/mcp/servers/echo", headers=LOCAL_HEADERS)
+
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["ok"] is False
+    assert "配置已保存" in body["error"]
+    # _ensure_mgr_started 先触发一次 start，随后才移除运行实例
+    assert spy.calls == ["start", "remove_server:echo"]
+    # 配置（磁盘+内存）保持"已删除"的新值，不得回滚伪装成保存失败
+    assert "echo" not in crew.config.mcp_servers
+    _assert_server_on_disk(config_yaml, "echo", None)
+    assert "echo" not in crew.config.raw_config.get("mcp_servers", {})

@@ -49,7 +49,8 @@ def test_removing_non_active_global_model_clears_all_agent_cache(
     app.agents = AgentManager(lambda _config, owner_account_id="": object())
     app.agents.get("bound-to-removed", owner_account_id="owner-a")
     app.agents.get("other-session", owner_account_id="owner-b")
-    monkeypatch.setattr(cfg, "persist_model_profiles", lambda: tmp_path / "config.yaml")
+    # remove_model 是候选值事务（候选值 → 持久化 → 发布），需要 yaml 落点
+    cfg.config_path = str(tmp_path / "config.yaml")
     monkeypatch.setattr("crew.app.remove_env_key", lambda *_args, **_kwargs: None)
 
     app.remove_model("removed", owner_account_id="")

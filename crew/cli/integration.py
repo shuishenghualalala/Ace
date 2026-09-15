@@ -188,11 +188,13 @@ async def _mcp_servers_add(args: Any, ctx: CliContext) -> CliResult:
     cfg, err = _validate_server_payload(payload)
     if err is not None:
         raise CliError(err)
-    app.config.set_mcp_server(name, cfg)
+    # 统一配置事务（Config.add_mcp_server）：候选值 → 持久化 → 发布。
+    # 持久化失败时内存与磁盘一致保留旧值，先报错返回，不做运行资源操作。
     try:
-        app.config.persist_mcp_servers()
+        app.config.add_mcp_server(name, cfg)
+    except ValueError as exc:
+        raise CliError(str(exc), exit_code=409) from exc
     except Exception as exc:
-        app.config.remove_mcp_server(name)
         raise CliError(f"持久化失败: {exc}") from exc
     await _ensure_mcp_started(app)
     if app.mcp_manager is not None:
@@ -211,9 +213,12 @@ async def _mcp_servers_update(args: Any, ctx: CliContext) -> CliResult:
     cfg, err = _validate_server_payload(payload)
     if err is not None:
         raise CliError(err)
-    app.config.set_mcp_server(name, cfg)
+    # 统一配置事务（Config.update_mcp_server）：候选值 → 持久化 → 发布，
+    # 持久化失败内存与磁盘保持旧 command，不会出现"内存已改、磁盘仍旧"。
     try:
-        app.config.persist_mcp_servers()
+        app.config.update_mcp_server(name, cfg)
+    except KeyError:
+        raise CliError(f"MCP server 不存在: {name}", exit_code=404) from None
     except Exception as exc:
         raise CliError(f"持久化失败: {exc}") from exc
     await _ensure_mcp_started(app)
@@ -227,14 +232,23 @@ async def _mcp_servers_delete(args: Any, ctx: CliContext) -> CliResult:
     name = args.name
     if name not in (app.config.mcp_servers or {}):
         raise CliError(f"MCP server 不存在: {name}", exit_code=404)
-    app.config.remove_mcp_server(name)
+    # 统一配置事务（Config.delete_mcp_server）：候选值 → 持久化 → 发布。
+    # 持久化失败时内存与磁盘均保留该 server，运行中的实例原样不动，可直接重试。
     try:
-        app.config.persist_mcp_servers()
+        app.config.delete_mcp_server(name)
+    except KeyError:
+        raise CliError(f"MCP server 不存在: {name}", exit_code=404) from None
     except Exception as exc:
-        raise CliError(f"持久化失败，磁盘配置可能未更新: {exc}") from exc
+        raise CliError(f"持久化失败: {exc}") from exc
     await _ensure_mcp_started(app)
     if app.mcp_manager is not None:
-        await app.mcp_manager.remove_server(name)
+        try:
+            await app.mcp_manager.remove_server(name)
+        except Exception as exc:
+            # 已保存但连接失败：配置（磁盘+内存）保持已删除的新值，如实上报运行
+            # 资源操作错误，不回滚伪装成保存失败。运行实例可能残留至进程重启或
+            # 下一次 reload；配置侧重试 DELETE 幂等（404）。
+            raise CliError(f"配置已保存，但移除运行实例失败: {exc}") from exc
     return CliResult(data={"ok": True, "servers": _mcp_servers_view(app)}, text=f"已删除 MCP server {name}")
 
 

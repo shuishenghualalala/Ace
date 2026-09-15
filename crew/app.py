@@ -2915,10 +2915,10 @@ class CrewApp:
             self.agents.drop_owner(owner)
             self._invalidate_owner_team_provider(owner)
         else:
-            profile = self.config.activate_model(model_id)
-            self.config.default_model_id = model_id
-            if self.config.config_path:
-                self.config.persist_model_profiles()
+            # 全局共享层走 Config 候选值事务：磁盘提交成功后才发布内存，
+            # 持久化失败时 active/default 与磁盘一致保留旧值，且不触碰任何
+            # 运行资源（Provider 重建、会话缓存清空只在持久化成功后进行）。
+            profile = self.config.set_active_model(model_id)
             old_provider = self.provider
             self.provider = build_provider(self.config)
             self.agents.clear()
@@ -2931,9 +2931,11 @@ class CrewApp:
 
     # ---- 模型 profile CRUD（运行时增删改 + 持久化 + Provider 同步）----
     #
-    # 与 use_model 共享副作用路径：写 yaml → 写 env（仅当传 api_key）→ 改 cfg →
-    # 激活模型变动时重建 Provider + 清缓存。CRUD 是配置层动作，不切换激活模型，
-    # 但删除激活模型时自动切到剩余的第一个（按用户决策）。
+    # 与 use_model 共享副作用路径：写 env（仅当传 api_key，作为候选 profile 的
+    # key 解析输入）→ Config 候选值事务（候选值 → 持久化 → 发布）→ 激活模型
+    # 变动时重建 Provider + 清缓存。CRUD 是配置层动作，不切换激活模型，但删除
+    # 激活模型时自动切到剩余的第一个（按用户决策）。持久化失败时内存与磁盘
+    # 一致保留旧值，直接向调用方报错，不做任何运行资源操作。
     def _apply_api_key_to_env(
         self,
         api_key_env: str,
@@ -3062,8 +3064,9 @@ class CrewApp:
                 self._invalidate_owner_team_provider(owner)
                 log.info("首个可用模型已自动设为 owner 默认模型: %s", model_id)
         else:
+            # Config 候选值事务：持久化成功才发布内存；失败时磁盘与内存一致
+            # 保留旧值，且不触碰任何运行资源。
             profile = cfg.add_model(payload)
-            cfg.persist_model_profiles()
         log.info("新增模型 profile: %s (model=%s)", profile.id, profile.model)
         return profile
 
@@ -3156,8 +3159,9 @@ class CrewApp:
             # 都要淘汰对应 Team/Provider 缓存，下一轮才会使用新配置。
             self._invalidate_owner_team_provider(owner)
         else:
+            # Config 候选值事务：持久化成功才发布内存；失败时磁盘与内存一致
+            # 保留旧值，会话缓存与 Provider 均不触碰。
             profile = cfg.update_model(model_id, payload)
-            cfg.persist_model_profiles()
             # Session cache keys contain the selected profile id, not the
             # mutable profile contents. Clear even for a non-active shared
             # model because existing sessions may be explicitly bound to it.
@@ -3204,45 +3208,48 @@ class CrewApp:
             if not loaded_replacements:
                 raise ValueError("删除当前激活模型前，至少需要另一个已加载模型")
 
+        switched_to: str | None = None
         if owner:
+            # owner 私有层：候选值在 overlay 视图副本上计算，磁盘提交成功后才
+            # 清理 env/凭证与失效缓存；持久化失败时 overlay 与候选值一致保留
+            # 旧值，env/凭证/缓存均不触碰。
             removed = profiles.pop(model_id)
+            if active_model_id == model_id:
+                # 按 id 字典序切到剩余的第一个，行为可预测
+                new_id = sorted(mid for mid, profile in profiles.items() if profile.loaded)[0]
+                switched_to = new_id
+                cfg.persist_owner_model_profiles(owner, profiles, active_model_id=new_id)
+            else:
+                cfg.persist_owner_model_profiles(owner, profiles, active_model_id=cfg.owner_active_model_id(owner))
+            self._invalidate_owner_team_provider(owner)
             if not any(profile.api_key_env == removed.api_key_env for profile in profiles.values()):
                 remove_env_key(resolve_writable_env_path(owner_account_id), removed.api_key_env, sync_process_env=False)
+            # 删除模型同时清理凭证库条目（owner 私有层，随持久化成功一起收尾）
+            delete_stored_key(owner, model_id)
+            self.agents.drop_owner(owner)
         else:
+            # 全局共享层：Config 候选值事务；持久化失败时磁盘与内存一致保留该
+            # 模型，env/凭证/会话缓存/Provider 全部不动，可直接重试。
             removed = cfg.remove_model(model_id)  # 内部校验"最后一个"
-            if not any(profile.api_key_env == removed.api_key_env for profile in cfg.model_profiles.values()):
-                remove_env_key(resolve_writable_env_path(owner_account_id), removed.api_key_env)
-        # 删除模型同时清理凭证库条目（owner 重定向后 owner 变量为实际作用域）
-        delete_stored_key(owner, model_id)
-        switched_to: str | None = None
-        if active_model_id == model_id:
-            # 按 id 字典序切到剩余的第一个，行为可预测
-            new_id = sorted(mid for mid, profile in profiles.items() if profile.loaded)[0]
-            switched_to = new_id
-            if owner:
-                cfg.persist_owner_model_profiles(owner, profiles, active_model_id=new_id)
-                self._invalidate_owner_team_provider(owner)
-            else:
-                cfg.activate_model(new_id)
-                cfg.default_model_id = new_id
+            if active_model_id == model_id:
+                # 按 id 字典序切到剩余的第一个，行为可预测
+                new_id = sorted(mid for mid, profile in cfg.model_profiles.items() if profile.loaded)[0]
+                switched_to = new_id
+                cfg.set_active_model(new_id)
                 old_provider = self.provider
                 self.provider = build_provider(cfg)
-                self.agents.clear()
-                self._invalidate_owner_team_provider()
+                self._invalidate_owner_team_provider(owner_account_id="")
                 self._sync_default_provider_to_features()
                 if old_provider is not self.provider:
                     self._schedule_provider_retirement(old_provider)
-        elif owner:
-            cfg.persist_owner_model_profiles(owner, profiles, active_model_id=cfg.owner_active_model_id(owner))
-            self._invalidate_owner_team_provider(owner)
-        else:
-            cfg.persist_model_profiles()
-            self._invalidate_owner_team_provider(owner_account_id="")
-        # Cache keys only contain the selected profile id, not mutable profile contents.
-        # A deleted non-active profile can still be pinned by an existing session.
-        if owner:
-            self.agents.drop_owner(owner)
-        else:
+            else:
+                self._invalidate_owner_team_provider(owner_account_id="")
+            if not any(profile.api_key_env == removed.api_key_env for profile in cfg.model_profiles.values()):
+                remove_env_key(resolve_writable_env_path(owner_account_id), removed.api_key_env)
+            # 删除模型同时清理凭证库条目（owner 重定向后 owner 变量为实际作用域）
+            delete_stored_key(owner, model_id)
+            # Cache keys only contain the selected profile id, not mutable profile contents.
+            # A deleted non-active profile can still be pinned by an existing session.
             self.agents.clear()
         log.info(
             "删除模型 profile: %s%s",

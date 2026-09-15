@@ -637,9 +637,32 @@ class Config:
         _atomic_write_yaml(yaml_path, data)
         return yaml_path
 
-    # ---- 模型 profile CRUD（运行时增删改 + 持久化到 config.yaml）----
+    # ---- 模型 profile 配置事务（候选值 → 持久化 → 发布）----
     #
-    # 设计要点：
+    # 顺序契约（与 _commit_mcp_servers 一致，app.py 等调用方共用单一入口）：
+    #   1. 候选值：在 model_profiles 的副本上计算新增/更新/删除后的完整映射，
+    #      不触碰已发布的内存状态；
+    #   2. 校验：存在性/唯一性前置条件不满足时抛 ValueError/KeyError，
+    #      磁盘与内存均不变；
+    #   3. 持久化：读盘 → 用候选值整体替换 llm 段 → _atomic_write_yaml 原子替换
+    #      （失败清理残留 tmp 并重抛，目标文件保持旧内容）；
+    #   4. 发布：磁盘提交成功后才把候选值发布为 self.model_profiles / active /
+    #      default_model_id，并刷新 raw_config。
+    #
+    # owner 作用域：模型配置分两层——全局共享层（config.yaml 的 llm 段，本事务
+    # 的唯一写入范围）与 owner 私有层（每个 owner 独立的 overlay yaml，经
+    # persist_owner_model_profiles 按候选值写入）。本事务不触碰任何 owner
+    # overlay，owner 之间按文件天然隔离，一个 owner 的操作不会影响其他 owner；
+    # owner 私有模型的失败语义由其独立事务（persist_owner_model_profiles）保证。
+    #
+    # 失败语义：与 _commit_mcp_servers 一致——持久化失败（步骤 3 抛错）时内存与
+    # 磁盘一致保留旧值，直接重试本入口即可，不丢更新；调用方收到异常后不得重建
+    # Provider、不得切换激活、不得清理凭证/env、不得失效任何会话缓存。持久化
+    # 成功后的运行资源操作失败（如 Provider 构建/退役失败）属于"已保存但切换
+    # 失败"：磁盘与内存保持新值，调用方必须如实上报，不得回滚磁盘与内存伪装成
+    # 保存失败。
+    #
+    # 其余设计要点：
     # 1. yaml 写回：使用 PyYAML 整体重写 config.yaml。这会丢失原注释（PyYAML 固有限制），
     #    但保证结构稳定、字段顺序可读。引入 ruamel.yaml 仅为此功能会破坏最小依赖原则。
     # 2. yaml 中只写非敏感字段（name/api_key_env/base_url/model/temperature/max_tokens/
@@ -647,8 +670,46 @@ class Config:
     # 3. .env 写入：单独函数处理（_write_env_key），按"已存在则替换该行，否则追加"策略，
     #    写完同步 os.environ 让当前进程立即可用。
     # 4. 边界：删除最后一个模型禁止（409）；删除激活模型由调用方负责切换激活。
+    def _commit_model_profiles(
+        self,
+        candidate: dict[str, ModelProfile],
+        *,
+        active_model_id: str | None = None,
+        default_model_id: str | None = None,
+    ) -> Path:
+        """统一写入边界：候选值 → 持久化 → 发布（顺序契约见上）。"""
+        with _CONFIG_WRITE_LOCK:
+            if not self.config_path:
+                raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
+            normalized = {str(pid): replace(p) for pid, p in candidate.items()}
+            yaml_path = Path(self.config_path)
+            data = _read_config_yaml_for_write(yaml_path)
+
+            # 仅重写 llm 段，保留其它段（runtime/agent/gateway 等）原样
+            llm = data.get("llm")
+            if not isinstance(llm, dict):
+                llm = {}
+                data["llm"] = llm
+            llm["active"] = active_model_id if active_model_id is not None else self.active_model_id
+            default_id = default_model_id if default_model_id is not None else self.default_model_id
+            if default_id:
+                llm["default"] = default_id
+            llm["models"] = {
+                pid: _serialize_profile_for_yaml(p) for pid, p in normalized.items()
+            }
+
+            # 磁盘提交成功后才发布内存状态：写回失败时内存与磁盘一致保留旧值。
+            _atomic_write_yaml(yaml_path, data)
+            self.model_profiles = normalized
+            if active_model_id is not None:
+                self.active_model_id = active_model_id
+            if default_model_id is not None:
+                self.default_model_id = default_model_id
+            self.raw_config = data
+            return yaml_path
+
     def add_model(self, profile_data: dict[str, Any]) -> ModelProfile:
-        """新增一个模型 profile。
+        """新增一个模型 profile：候选值 → 持久化 → 发布（顺序契约见上）。
 
         Args:
             profile_data: 必须含 id；其它字段缺省时取 ModelProfile 默认值。
@@ -658,7 +719,9 @@ class Config:
             新建的 ModelProfile。
 
         Raises:
-            ValueError: id 为空或已存在；或写回失败。
+            ValueError: id 为空或已存在（磁盘与内存均不变）。
+            RuntimeError: config_path 为空（未通过 yaml 加载）。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
         """
         model_id = str(profile_data.get("id") or "").strip()
         if not model_id:
@@ -668,11 +731,11 @@ class Config:
 
         # 构建 profile（不含 api_key；key 由调用方处理 env 写入）
         profile = _build_profile_from_payload(model_id, profile_data, owner_account_id="")
-        self.model_profiles[model_id] = profile
+        self._commit_model_profiles({**self.model_profiles, model_id: profile})
         return profile
 
     def update_model(self, model_id: str, profile_data: dict[str, Any]) -> ModelProfile:
-        """更新已存在的模型 profile。
+        """更新已存在的模型 profile：候选值 → 持久化 → 发布（顺序契约见上）。
 
         支持部分更新：未传入的字段保留原值。id 不可变（来自 path 参数）。
 
@@ -681,7 +744,8 @@ class Config:
             profile_data: 待覆盖字段。
 
         Raises:
-            KeyError: model_id 不存在。
+            KeyError: model_id 不存在（磁盘与内存均不变）。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
         """
         if model_id not in self.model_profiles:
             raise KeyError(model_id)
@@ -708,28 +772,58 @@ class Config:
         # - api_key_env 改到不存在的变量 → 取到空串，has_key=False（反映真实状态）
         # - 什么都不改 → 取到原值（os.environ 在 load_config 时已设置）
         profile = _build_profile_from_payload(model_id, merged, owner_account_id="")
-        self.model_profiles[model_id] = profile
+        self._commit_model_profiles({**self.model_profiles, model_id: profile})
         return profile
 
     def remove_model(self, model_id: str) -> ModelProfile:
-        """删除一个模型 profile。
+        """删除一个模型 profile：候选值 → 持久化 → 发布（顺序契约见上）。
 
         Args:
             model_id: 待删除的 profile id。
 
         Raises:
-            KeyError: model_id 不存在。
+            KeyError: model_id 不存在（磁盘与内存均不变）。
             ValueError: 试图删除最后一个模型（至少保留一个）。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
         """
         if model_id not in self.model_profiles:
             raise KeyError(model_id)
         if len(self.model_profiles) <= 1:
             raise ValueError("至少保留一个模型配置，禁止删除最后一个")
 
-        return self.model_profiles.pop(model_id)
+        removed = self.model_profiles[model_id]
+        self._commit_model_profiles(
+            {pid: p for pid, p in self.model_profiles.items() if pid != model_id}
+        )
+        return removed
+
+    def set_active_model(self, model_id: str) -> ModelProfile:
+        """切换激活（默认兜底）模型：候选值 → 持久化 → 发布（顺序契约见上）。
+
+        与 activate_model（纯内存发布）的区别：磁盘提交成功后才发布内存，
+        持久化失败时 active/default 与磁盘一致保留旧值。use_model（app 层）与
+        删除激活模型后的自动切换共用本入口。
+
+        Raises:
+            KeyError: model_id 不存在。
+            ValueError: 模型未加载，不能用于对话。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
+        """
+        if model_id not in self.model_profiles:
+            raise KeyError(model_id)
+        if not self.model_profiles[model_id].loaded:
+            raise ValueError(f"模型未加载，不能用于对话: {model_id}")
+        self._commit_model_profiles(
+            dict(self.model_profiles),
+            active_model_id=model_id,
+            default_model_id=model_id,
+        )
+        # 激活派生字段（api_key/provider/base_url/model/...）在磁盘提交成功后
+        # 发布；activate_model 的存在性与 loaded 校验在此必然已通过。
+        return self.activate_model(model_id)
 
     def persist_model_profiles(self) -> Path:
-        """把当前 model_profiles 写回 config.yaml（整体重写 llm.models 段）。
+        """把当前 model_profiles 写回 config.yaml（遗留入口，失败语义见上）。
 
         注意：使用 PyYAML 整体重写，原注释会丢失。备份建议在 UI/CLI 提示用户。
 
@@ -739,140 +833,172 @@ class Config:
         Raises:
             RuntimeError: config_path 为空（未通过 yaml 加载）或写回失败。
         """
-        with _CONFIG_WRITE_LOCK:
-            return self._persist_model_profiles_locked()
+        return self._commit_model_profiles(dict(self.model_profiles))
 
-    def _persist_model_profiles_locked(self) -> Path:
-        """在持有配置写锁时执行 YAML 写回。"""
-        if not self.config_path:
-            raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
+    # ---- evolution 配置事务（候选值 → 持久化 → 发布）----
+    #
+    # 顺序契约与失败语义同模型 profile 事务：候选值只在副本上计算，磁盘提交
+    # 成功后才发布内存；持久化失败时内存与磁盘一致保留旧值，可直接重试。
+    # evolution 是全局开关（无 owner 维度），gateway misc 与 CLI knowledge
+    # 共用本入口。
+    def set_evolution_config(
+        self,
+        *,
+        auto_trigger: bool | None = None,
+        auto_full_cycle: bool | None = None,
+        visible: bool | None = None,
+    ) -> Path:
+        """更新 evolution 开关并持久化到 config.yaml 的 agent.evolution 段。
 
-        yaml_path = Path(self.config_path)
-        if not yaml_path.exists():
-            # 用户配置丢失（极端情况）：从空 dict 开始构建一个最小可用 yaml
-            data: dict[str, Any] = {}
-        else:
-            try:
-                data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-                if not isinstance(data, dict):
-                    data = {}
-            except yaml.YAMLError:
-                raise RuntimeError(f"config.yaml 解析失败，拒绝写回以保护原文件: {yaml_path}")
+        Args:
+            auto_trigger / auto_full_cycle / visible: None 表示保持原值。
 
-        # 仅重写 llm 段，保留其它段（runtime/agent/gateway 等）原样
-        llm = data.get("llm")
-        if not isinstance(llm, dict):
-            llm = {}
-            data["llm"] = llm
-        llm["active"] = self.active_model_id
-        if self.default_model_id:
-            llm["default"] = self.default_model_id
-        llm["models"] = {
-            pid: _serialize_profile_for_yaml(p) for pid, p in self.model_profiles.items()
+        Raises:
+            RuntimeError: config_path 为空（未通过 yaml 加载）。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
+        """
+        candidate = {
+            "auto_trigger": self.evolution_auto_trigger if auto_trigger is None else bool(auto_trigger),
+            "auto_full_cycle": (
+                self.evolution_auto_full_cycle if auto_full_cycle is None else bool(auto_full_cycle)
+            ),
+            "visible": self.evolution_visible if visible is None else bool(visible),
         }
+        with _CONFIG_WRITE_LOCK:
+            if not self.config_path:
+                raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
+            yaml_path = Path(self.config_path)
+            data = _read_config_yaml_for_write(yaml_path)
 
-        # 磁盘提交成功后再发布内存状态：写回失败时内存与磁盘一致保留旧值。
-        _atomic_write_yaml(yaml_path, data)
-        self.raw_config = data
-        return yaml_path
+            agent = data.get("agent")
+            if not isinstance(agent, dict):
+                agent = {}
+                data["agent"] = agent
+            agent["evolution"] = candidate
+
+            # 磁盘提交成功后再发布内存状态：写回失败时内存与磁盘一致保留旧值。
+            _atomic_write_yaml(yaml_path, data)
+            self.evolution_auto_trigger = candidate["auto_trigger"]
+            self.evolution_auto_full_cycle = candidate["auto_full_cycle"]
+            self.evolution_visible = candidate["visible"]
+            self.raw_config = data
+            return yaml_path
 
     def persist_evolution_config(self) -> Path:
-        """把当前 evolution 配置写回 config.yaml 的 agent.evolution 段。
+        """把当前 evolution 配置写回 config.yaml（遗留入口，失败语义见 set_evolution_config）。"""
+        return self.set_evolution_config()
 
-        遵循与 persist_model_profiles 相同的读-改-写原子策略。
-        """
-        with _CONFIG_WRITE_LOCK:
-            return self._persist_evolution_config_locked()
-
-    def _persist_evolution_config_locked(self) -> Path:
-        if not self.config_path:
-            raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
-
-        yaml_path = Path(self.config_path)
-        if not yaml_path.exists():
-            data: dict[str, Any] = {}
-        else:
-            try:
-                data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-                if not isinstance(data, dict):
-                    data = {}
-            except yaml.YAMLError:
-                raise RuntimeError(f"config.yaml 解析失败，拒绝写回以保护原文件: {yaml_path}")
-
-        agent = data.get("agent")
-        if not isinstance(agent, dict):
-            agent = {}
-            data["agent"] = agent
-        agent["evolution"] = {
-            "auto_trigger": self.evolution_auto_trigger,
-            "auto_full_cycle": self.evolution_auto_full_cycle,
-            "visible": self.evolution_visible,
+    # ---- MCP server 配置事务（候选值 → 持久化 → 发布）----
+    #
+    # 顺序契约（与 _atomic_write_yaml 配合，gateway Router 与 CLI 共用单一入口）：
+    #   1. 候选值：在 mcp_servers 的副本上计算新增/更新/删除后的完整映射，
+    #      不触碰已发布的内存状态；
+    #   2. 校验：存在性前置条件不满足时抛 ValueError/KeyError，磁盘与内存均不变；
+    #   3. 持久化：读盘 → 用候选值整体替换 mcp_servers 段 → _atomic_write_yaml
+    #      原子替换（失败清理残留 tmp 并重抛，目标文件保持旧内容）；
+    #   4. 发布：磁盘提交成功后才把候选值发布为 self.mcp_servers 并刷新
+    #      raw_config。
+    #
+    # 失败语义：
+    # - 持久化失败（步骤 3 抛错）时内存与磁盘一致保留旧值，直接重试本方法即可，
+    #   不丢更新；调用方收到异常后不得启动/重载/移除任何运行资源。
+    # - 持久化成功后的运行资源操作（连接/断开 MCP 子进程）失败属于
+    #   "已保存但连接失败"：磁盘与内存保持新值，调用方必须如实上报错误，
+    #   不得回滚磁盘与内存伪装成保存失败。
+    #
+    # 边界：本边界只保证单个 config.yaml 的原子替换与内存发布的先后一致，
+    # 不承诺多文件与外部运行资源（MCP 子进程、连接池）的分布式原子性。
+    def _commit_mcp_servers(self, candidate: dict[str, Any]) -> Path:
+        """统一写入边界：候选值 → 持久化 → 发布（顺序契约见上）。"""
+        normalized = {
+            str(key): dict(value) if isinstance(value, dict) else {}
+            for key, value in candidate.items()
         }
+        with _CONFIG_WRITE_LOCK:
+            if not self.config_path:
+                raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
+            yaml_path = Path(self.config_path)
+            data = _read_config_yaml_for_write(yaml_path)
+            servers = data.get("mcp_servers")
+            if not isinstance(servers, dict):
+                servers = {}
+                data["mcp_servers"] = servers
+            servers.clear()
+            servers.update(normalized)
+            _atomic_write_yaml(yaml_path, data)
+            self.mcp_servers = normalized
+            self.raw_config = data
+            return yaml_path
 
-        # 磁盘提交成功后再发布内存状态：写回失败时内存与磁盘一致保留旧值。
-        _atomic_write_yaml(yaml_path, data)
-        self.raw_config = data
-        return yaml_path
+    def add_mcp_server(self, name: str, server_cfg: dict[str, Any]) -> Path:
+        """新增 MCP server：候选值 → 持久化 → 发布。
+
+        Raises:
+            ValueError: server 已存在（磁盘与内存均不变）。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
+        """
+        servers = self.mcp_servers if isinstance(self.mcp_servers, dict) else {}
+        key = str(name)
+        if key in servers:
+            raise ValueError(f"MCP server 已存在: {key}")
+        return self._commit_mcp_servers({**servers, key: dict(server_cfg)})
+
+    def update_mcp_server(self, name: str, server_cfg: dict[str, Any]) -> Path:
+        """更新 MCP server：候选值 → 持久化 → 发布。
+
+        Raises:
+            KeyError: server 不存在（磁盘与内存均不变）。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
+        """
+        servers = self.mcp_servers if isinstance(self.mcp_servers, dict) else {}
+        key = str(name)
+        if key not in servers:
+            raise KeyError(f"MCP server 不存在: {key}")
+        return self._commit_mcp_servers({**servers, key: dict(server_cfg)})
+
+    def delete_mcp_server(self, name: str) -> Path:
+        """删除 MCP server：候选值 → 持久化 → 发布。
+
+        Raises:
+            KeyError: server 不存在（磁盘与内存均不变）。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
+        """
+        servers = self.mcp_servers if isinstance(self.mcp_servers, dict) else {}
+        key = str(name)
+        if key not in servers:
+            raise KeyError(f"MCP server 不存在: {key}")
+        return self._commit_mcp_servers(
+            {key_: value for key_, value in servers.items() if key_ != key}
+        )
 
     def set_mcp_server(self, name: str, cfg: dict[str, Any]) -> None:
-        """在运行时更新 mcp_servers 配置（不自动持久化）。"""
+        """在运行时更新 mcp_servers 配置（不自动持久化）。
+
+        遗留入口：先改内存、由调用方再调 persist_mcp_servers，两步之间失败
+        会造成内存与磁盘分叉。管理 API / CLI 必须改用 add/update/
+        delete_mcp_server 候选值事务；本方法仅为未迁移的内部调用方保留
+        （如 cua-setup）。
+        """
         if not isinstance(self.mcp_servers, dict):
             self.mcp_servers = {}
         self.mcp_servers[str(name)] = dict(cfg)
 
     def remove_mcp_server(self, name: str) -> None:
-        """在运行时移除 mcp_servers 配置（不自动持久化）。"""
+        """在运行时移除 mcp_servers 配置（不自动持久化）。遗留入口，见 set_mcp_server。"""
         if isinstance(self.mcp_servers, dict) and name in self.mcp_servers:
             self.mcp_servers.pop(name, None)
 
     def persist_mcp_servers(self) -> Path:
-        """把当前 mcp_servers 写回 config.yaml。"""
-        with _CONFIG_WRITE_LOCK:
-            return self._persist_mcp_servers_locked()
-
-    def _persist_mcp_servers_locked(self) -> Path:
-        if not self.config_path:
-            raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
-
-        yaml_path = Path(self.config_path)
-        if yaml_path.exists():
-            try:
-                data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-                if not isinstance(data, dict):
-                    data = {}
-            except yaml.YAMLError:
-                raise RuntimeError(f"config.yaml 解析失败，拒绝写回以保护原文件: {yaml_path}")
-        else:
-            data = {}
-
-        mcp_servers = data.get("mcp_servers")
-        if not isinstance(mcp_servers, dict):
-            mcp_servers = {}
-            data["mcp_servers"] = mcp_servers
-
-        mcp_servers.clear()
-        for key, value in (self.mcp_servers or {}).items():
-            mcp_servers[key] = dict(value) if isinstance(value, dict) else {}
-
-        # 磁盘提交成功后再发布内存状态：写回失败时内存与磁盘一致保留旧值。
-        _atomic_write_yaml(yaml_path, data)
-        self.raw_config = data
-        return yaml_path
+        """把当前 mcp_servers 写回 config.yaml（遗留入口，失败语义见 set_mcp_server）。"""
+        servers = self.mcp_servers if isinstance(self.mcp_servers, dict) else {}
+        return self._commit_mcp_servers(dict(servers))
 
     def _persist_channel_config_locked(self, name: str, config_data: dict[str, Any]) -> Path:
         if not self.config_path:
             raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
 
         yaml_path = Path(self.config_path)
-        if yaml_path.exists():
-            try:
-                data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-                if not isinstance(data, dict):
-                    data = {}
-            except yaml.YAMLError:
-                raise RuntimeError(f"config.yaml 解析失败，拒绝写回以保护原文件: {yaml_path}")
-        else:
-            data = {}
+        data = _read_config_yaml_for_write(yaml_path)
 
         merged = _write_channel_config(data, name, config_data)
 
@@ -1423,6 +1549,19 @@ _FEATURES_FLAT_MAP: dict[tuple[str, str], tuple[str, ...]] = {
     ("dynamic_kanban", "task_timeout_seconds"): ("runtime", "dk_task_timeout_seconds"),
     ("dynamic_kanban", "verification_gate_enabled"): ("runtime", "dk_verification_gate_enabled"),
 }
+
+
+def _read_config_yaml_for_write(yaml_path: Path) -> dict[str, Any]:
+    """读盘待写回：文件缺失按空 dict 构建；解析失败拒绝写回以保护原文件。"""
+    if not yaml_path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            return {}
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"config.yaml 解析失败，拒绝写回以保护原文件: {yaml_path}") from exc
+    return data
 
 
 def _atomic_write_yaml(yaml_path: Path, data: dict[str, Any]) -> None:

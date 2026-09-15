@@ -232,21 +232,20 @@ def create_misc_router(crew) -> APIRouter:
             require_admin(account_from_request(request), cfg)
         except AuthenticationError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=403)
-        changed = False
+        changed: dict[str, bool] = {}
         if "auto_trigger" in payload:
-            cfg.evolution_auto_trigger = bool(payload["auto_trigger"])
-            changed = True
+            changed["auto_trigger"] = bool(payload["auto_trigger"])
         if "auto_full_cycle" in payload:
-            cfg.evolution_auto_full_cycle = bool(payload["auto_full_cycle"])
-            changed = True
+            changed["auto_full_cycle"] = bool(payload["auto_full_cycle"])
         if "visible" in payload:
-            cfg.evolution_visible = bool(payload["visible"])
-            changed = True
+            changed["visible"] = bool(payload["visible"])
         if changed:
+            # 统一配置事务（Config.set_evolution_config）：候选值 → 持久化 →
+            # 发布。持久化失败时内存与磁盘一致保留旧值，直接报错返回。
             try:
-                cfg.persist_evolution_config()
-            except RuntimeError as exc:
-                return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+                cfg.set_evolution_config(**changed)
+            except Exception as exc:  # noqa: BLE001
+                return JSONResponse({"ok": False, "error": f"持久化失败: {exc}"}, status_code=500)
         return JSONResponse({
             "ok": True,
             "evolution": {

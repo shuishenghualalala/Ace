@@ -815,7 +815,7 @@ async def test_electron_driver_preserves_bridge_failure_flags(
     assert captured.value.stop_unconfirmed is True
 
 
-def test_partial_model_updates_preserve_capabilities() -> None:
+def test_partial_model_updates_preserve_capabilities(tmp_path) -> None:
     cfg = Config()
     cfg.model_profiles = {
         "vision": ModelProfile(
@@ -825,6 +825,8 @@ def test_partial_model_updates_preserve_capabilities() -> None:
         )
     }
     cfg.active_model_id = "vision"
+    # update_model 是候选值事务（候选值 → 持久化 → 发布），需要 yaml 落点
+    cfg.config_path = str(tmp_path / "config.yaml")
 
     cfg.update_model("vision", {"temperature": 0.2})
 

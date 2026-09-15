@@ -696,21 +696,20 @@ def _skill_uninstall(args: Any, ctx: CliContext) -> CliResult:
 
 def _skill_evolution(args: Any, ctx: CliContext) -> CliResult:
     cfg = ctx.app.config
-    changed = False
+    changes: dict[str, bool] = {}
     if args.auto_trigger is not None:
-        cfg.evolution_auto_trigger = args.auto_trigger
-        changed = True
+        changes["auto_trigger"] = bool(args.auto_trigger)
     if args.auto_full_cycle is not None:
-        cfg.evolution_auto_full_cycle = args.auto_full_cycle
-        changed = True
+        changes["auto_full_cycle"] = bool(args.auto_full_cycle)
     if args.visible is not None:
-        cfg.evolution_visible = args.visible
-        changed = True
-    if changed:
+        changes["visible"] = bool(args.visible)
+    if changes:
+        # 统一配置事务（Config.set_evolution_config）：候选值 → 持久化 → 发布。
+        # 持久化失败时内存与磁盘一致保留旧值，先报错返回，不做其他操作。
         try:
-            cfg.persist_evolution_config()
-        except RuntimeError as exc:
-            raise CliError(str(exc)) from exc
+            cfg.set_evolution_config(**changes)
+        except Exception as exc:
+            raise CliError(f"持久化失败: {exc}") from exc
     data = {
         "auto_trigger": cfg.evolution_auto_trigger,
         "auto_full_cycle": cfg.evolution_auto_full_cycle,

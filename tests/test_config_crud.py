@@ -1,9 +1,14 @@
-"""Config 层 ModelProfile CRUD 单元测试。
+"""Config 层 CRUD 单元测试。
 
 覆盖：
-- Config.add_model / update_model / remove_model 的语义
+- Config.add_model / update_model / remove_model / set_active_model 的语义
 - persist_model_profiles 写回 yaml（结构、不写敏感字段、原子替换）
 - write_env_key 写回 .env（新增 / 替换 / 创建）
+- MCP server 配置事务：add/update/delete_mcp_server（候选值 → 持久化 → 发布）
+  的失败语义，及其 CLI 同型入口（crew.cli.integration）
+- 模型 profile / evolution 配置事务（候选值 → 持久化 → 发布）：持久化失败时
+  内存、raw_config、磁盘一致保留旧值，真实入口（app / gateway misc / CLI
+  knowledge）零运行资源调用，owner 维度按 overlay 隔离
 - 边界：id 重复、id 不存在、删除最后一个
 - 加载后行为：load_config → CRUD → 再 load，验证持久化生效
 """
@@ -12,11 +17,14 @@ from __future__ import annotations
 
 import os
 import logging
+from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
+from crew.cli.app import CliContext, CliError
 from crew.state.config import (
     Config,
     _serialize_profile_for_yaml,
@@ -450,3 +458,666 @@ def test_legacy_vision_migrates_when_capabilities_are_absent(cfg: Config):
 
     assert profile.supports_vision is True
     assert "vision" in profile.capabilities
+
+
+# ----------------------- MCP 配置事务（候选值 → 持久化 → 发布）-----------------------
+
+
+def _mcp_config(tmp_path: Path) -> tuple[Config, Path]:
+    """带两个 MCP server 的临时 config.yaml。"""
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "mcp_servers": {
+                    "fs": {"command": "run-fs"},
+                    "other": {"command": "stable"},
+                },
+                "runtime": {"log_level": "INFO"},
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    return load_config(config_path=str(p)), p
+
+
+def test_add_mcp_server_persists_then_publishes(tmp_path: Path):
+    cfg, p = _mcp_config(tmp_path)
+
+    cfg.add_mcp_server("git", {"command": "run-git"})
+
+    assert cfg.mcp_servers == {
+        "fs": {"command": "run-fs"},
+        "other": {"command": "stable"},
+        "git": {"command": "run-git"},
+    }
+    reloaded = load_config(config_path=str(p))
+    assert reloaded.mcp_servers == cfg.mcp_servers
+    assert cfg.raw_config["mcp_servers"]["git"] == {"command": "run-git"}
+
+
+def test_add_mcp_server_duplicate_rejected_without_side_effects(tmp_path: Path):
+    cfg, p = _mcp_config(tmp_path)
+
+    with pytest.raises(ValueError, match="已存在"):
+        cfg.add_mcp_server("fs", {"command": "run-git"})
+
+    assert cfg.mcp_servers["fs"] == {"command": "run-fs"}
+    assert load_config(config_path=str(p)).mcp_servers["fs"] == {"command": "run-fs"}
+
+
+def test_update_delete_mcp_server_missing_rejected_without_side_effects(tmp_path: Path):
+    cfg, p = _mcp_config(tmp_path)
+
+    with pytest.raises(KeyError):
+        cfg.update_mcp_server("nope", {"command": "x"})
+    with pytest.raises(KeyError):
+        cfg.delete_mcp_server("nope")
+
+    reloaded = load_config(config_path=str(p))
+    assert reloaded.mcp_servers == {"fs": {"command": "run-fs"}, "other": {"command": "stable"}}
+
+
+def test_mcp_update_persist_failure_keeps_business_fields_and_disk(tmp_path: Path, monkeypatch):
+    """持久化失败：业务字段 cfg.mcp_servers、raw_config、磁盘一致保留旧值。"""
+    cfg, p = _mcp_config(tmp_path)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(yaml, "safe_dump", boom)
+    with pytest.raises(OSError, match="simulated write failure"):
+        cfg.update_mcp_server("fs", {"command": "run-fs-new"})
+
+    assert cfg.mcp_servers["fs"] == {"command": "run-fs"}
+    assert cfg.mcp_servers["other"] == {"command": "stable"}
+    assert cfg.raw_config["mcp_servers"]["fs"] == {"command": "run-fs"}
+    reloaded = load_config(config_path=str(p))
+    assert reloaded.mcp_servers["fs"] == {"command": "run-fs"}
+    # 失败不留残留 tmp
+    assert not p.with_suffix(p.suffix + ".tmp").exists()
+
+
+def test_mcp_update_failure_then_retry_applies_without_losing_updates(tmp_path: Path, monkeypatch):
+    """失败后重试不丢更新：v1 → (失败) → v1 → v2，other server 全程不受影响。"""
+    cfg, p = _mcp_config(tmp_path)
+
+    real_safe_dump = yaml.safe_dump
+    state = {"calls": 0}
+
+    def flaky(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise OSError("simulated write failure")
+        return real_safe_dump(*args, **kwargs)
+
+    monkeypatch.setattr(yaml, "safe_dump", flaky)
+
+    with pytest.raises(OSError):
+        cfg.update_mcp_server("fs", {"command": "v2"})
+    assert cfg.mcp_servers["fs"] == {"command": "run-fs"}
+
+    cfg.update_mcp_server("fs", {"command": "v2"})
+    assert cfg.mcp_servers["fs"] == {"command": "v2"}
+    assert cfg.mcp_servers["other"] == {"command": "stable"}
+    reloaded = load_config(config_path=str(p))
+    assert reloaded.mcp_servers["fs"] == {"command": "v2"}
+    assert reloaded.mcp_servers["other"] == {"command": "stable"}
+
+
+def test_mcp_delete_persist_failure_keeps_business_fields_and_disk(tmp_path: Path, monkeypatch):
+    cfg, p = _mcp_config(tmp_path)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(yaml, "safe_dump", boom)
+    with pytest.raises(OSError):
+        cfg.delete_mcp_server("fs")
+
+    assert "fs" in cfg.mcp_servers
+    assert cfg.raw_config["mcp_servers"]["fs"] == {"command": "run-fs"}
+    assert load_config(config_path=str(p)).mcp_servers["fs"] == {"command": "run-fs"}
+
+
+# ----------------------- MCP 配置事务的 CLI 同型入口 -----------------------
+
+
+class _SpyMcpManager:
+    """记录运行资源调用的假 manager：保存失败路径必须零调用。"""
+
+    def __init__(self, *, remove_raises: Exception | None = None) -> None:
+        self.calls: list[str] = []
+        self._remove_raises = remove_raises
+
+    async def start(self, _registry) -> None:
+        self.calls.append("start")
+
+    def register_pending(self, name, _cfg) -> None:
+        self.calls.append(f"register_pending:{name}")
+
+    async def add_server(self, name, _cfg) -> bool:
+        self.calls.append(f"add_server:{name}")
+        return True
+
+    async def reload_one(self, name, _cfg=None) -> bool:
+        self.calls.append(f"reload_one:{name}")
+        return True
+
+    async def remove_server(self, name) -> bool:
+        self.calls.append(f"remove_server:{name}")
+        if self._remove_raises is not None:
+            raise self._remove_raises
+        return True
+
+    def status(self) -> list[dict]:
+        return []
+
+
+def _cli_ctx(cfg: Config, manager) -> CliContext:
+    """CLI handler 只消费 config / mcp_manager / registry，最小假 app 即可。"""
+    return CliContext(owner="local", _app=SimpleNamespace(config=cfg, mcp_manager=manager, registry=None))
+
+
+def _cli_args(*argv: str):
+    from crew.cli.main import build_parser
+
+    return build_parser().parse_args(list(argv))
+
+
+def test_cli_update_persist_failure_keeps_state_and_skips_runtime(tmp_path: Path, monkeypatch):
+    from crew.cli.integration import _mcp_servers_update
+
+    cfg, p = _mcp_config(tmp_path)
+    manager = _SpyMcpManager()
+    ctx = _cli_ctx(cfg, manager)
+    args = _cli_args("mcp", "servers", "update", "--name", "fs", "--command", "v2")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(yaml, "safe_dump", boom)
+    with pytest.raises(CliError, match="持久化失败"):
+        _run(_mcp_servers_update(args, ctx))
+
+    assert cfg.mcp_servers["fs"] == {"command": "run-fs"}
+    assert load_config(config_path=str(p)).mcp_servers["fs"] == {"command": "run-fs"}
+    assert manager.calls == []
+
+
+def test_cli_delete_persist_failure_keeps_state_and_skips_runtime(tmp_path: Path, monkeypatch):
+    from crew.cli.integration import _mcp_servers_delete
+
+    cfg, p = _mcp_config(tmp_path)
+    manager = _SpyMcpManager()
+    ctx = _cli_ctx(cfg, manager)
+    args = _cli_args("mcp", "servers", "delete", "--name", "fs")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(yaml, "safe_dump", boom)
+    with pytest.raises(CliError, match="持久化失败"):
+        _run(_mcp_servers_delete(args, ctx))
+
+    assert "fs" in cfg.mcp_servers
+    assert load_config(config_path=str(p)).mcp_servers["fs"] == {"command": "run-fs"}
+    assert manager.calls == []
+
+
+def test_cli_delete_saved_but_runtime_failure_reports_honestly(tmp_path: Path):
+    from crew.cli.integration import _mcp_servers_delete
+
+    cfg, p = _mcp_config(tmp_path)
+    manager = _SpyMcpManager(remove_raises=RuntimeError("worker stop failed"))
+    ctx = _cli_ctx(cfg, manager)
+    args = _cli_args("mcp", "servers", "delete", "--name", "fs")
+
+    with pytest.raises(CliError, match="配置已保存"):
+        _run(_mcp_servers_delete(args, ctx))
+
+    # 配置（磁盘+内存）保持"已删除"的新值，运行资源操作错误如实上抛
+    assert "fs" not in cfg.mcp_servers
+    assert load_config(config_path=str(p)).mcp_servers == {"other": {"command": "stable"}}
+    assert manager.calls == ["start", "remove_server:fs"]
+
+
+def test_cli_add_persist_failure_keeps_state_and_skips_runtime(tmp_path: Path, monkeypatch):
+    from crew.cli.integration import _mcp_servers_add
+
+    cfg, p = _mcp_config(tmp_path)
+    manager = _SpyMcpManager()
+    ctx = _cli_ctx(cfg, manager)
+    args = _cli_args("mcp", "servers", "add", "--name", "git", "--command", "run-git")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(yaml, "safe_dump", boom)
+    with pytest.raises(CliError, match="持久化失败"):
+        _run(_mcp_servers_add(args, ctx))
+
+    assert "git" not in cfg.mcp_servers
+    assert load_config(config_path=str(p)).mcp_servers == {
+        "fs": {"command": "run-fs"},
+        "other": {"command": "stable"},
+    }
+    assert manager.calls == []
+
+
+def _run(awaitable):
+    import asyncio
+
+    return asyncio.run(awaitable)
+
+
+# ----------------------- 同型核查转正：模型 profile / evolution 配置事务 -----------------------
+#
+# S2 审查固化的两处"先改已发布内存、后调 persist"缺陷已修复：模型 profile 写路径
+# （Config.add/update/remove_model、set_active_model）与 evolution 写路径
+# （Config.set_evolution_config）均迁移到候选值事务（候选值 → 校验 →
+# _atomic_write_yaml 持久化 → 磁盘成功后发布内存）。持久化失败时内存业务字段、
+# raw_config、磁盘三者一致保留旧值，可直接重试。
+
+
+def test_model_profile_update_persist_failure_should_keep_memory_old_value(
+    cfg: Config, tmp_yaml: Path, monkeypatch
+):
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(yaml, "safe_dump", boom)
+    before = cfg.model_profiles["alpha"].temperature
+    before_raw = deepcopy(cfg.raw_config)
+    with pytest.raises(OSError, match="simulated write failure"):
+        cfg.update_model("alpha", {"temperature": 0.99})
+    # 内存业务字段保留旧值（缺陷已修：不再先改内存后持久化）
+    assert cfg.model_profiles["alpha"].temperature == before
+    assert cfg.raw_config == before_raw
+    # 磁盘同样保留旧值，失败不留残留 tmp
+    reloaded = load_config(config_path=str(tmp_yaml))
+    assert reloaded.model_profiles["alpha"].temperature == before
+    assert not tmp_yaml.with_suffix(tmp_yaml.suffix + ".tmp").exists()
+
+
+def test_evolution_persist_failure_should_keep_memory_old_value(
+    cfg: Config, tmp_yaml: Path, monkeypatch
+):
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(yaml, "safe_dump", boom)
+    before = (cfg.evolution_auto_trigger, cfg.evolution_auto_full_cycle, cfg.evolution_visible)
+    before_raw = deepcopy(cfg.raw_config)
+    with pytest.raises(OSError, match="simulated write failure"):
+        cfg.set_evolution_config(auto_trigger=True)
+    assert (cfg.evolution_auto_trigger, cfg.evolution_auto_full_cycle, cfg.evolution_visible) == before
+    assert cfg.raw_config == before_raw
+    reloaded = load_config(config_path=str(tmp_yaml))
+    assert "evolution" not in reloaded.raw_config.get("agent", {})
+    assert not tmp_yaml.with_suffix(tmp_yaml.suffix + ".tmp").exists()
+
+
+def test_model_update_failure_then_retry_applies_without_losing_updates(
+    cfg: Config, tmp_yaml: Path, monkeypatch
+):
+    """失败后重试不丢更新：0.5 → (失败) → 0.5 → 0.3。"""
+    real_safe_dump = yaml.safe_dump
+    state = {"calls": 0}
+
+    def flaky(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise OSError("simulated write failure")
+        return real_safe_dump(*args, **kwargs)
+
+    monkeypatch.setattr(yaml, "safe_dump", flaky)
+
+    with pytest.raises(OSError):
+        cfg.update_model("alpha", {"temperature": 0.2})
+    assert cfg.model_profiles["alpha"].temperature == 0.5
+
+    cfg.update_model("alpha", {"temperature": 0.3})
+    assert cfg.model_profiles["alpha"].temperature == 0.3
+    reloaded = load_config(config_path=str(tmp_yaml))
+    assert reloaded.model_profiles["alpha"].temperature == 0.3
+
+
+# ----------------------- Config.set_active_model（use_model / 激活切换共用事务）-----------------------
+
+
+def test_set_active_model_persists_active_and_default(cfg: Config, tmp_yaml: Path):
+    profile = cfg.set_active_model("beta")
+
+    assert profile.id == "beta"
+    assert cfg.active_model_id == "beta"
+    assert cfg.default_model_id == "beta"
+    # 激活派生字段跟随新激活模型发布
+    assert cfg.model == "beta-1"
+    reloaded = load_config(config_path=str(tmp_yaml))
+    assert reloaded.active_model_id == "beta"
+    assert reloaded.default_model_id == "beta"
+
+
+def test_set_active_model_rejects_unloaded_without_side_effects(cfg: Config, tmp_yaml: Path):
+    cfg.model_profiles["beta"].loaded = False
+    with pytest.raises(ValueError, match="未加载"):
+        cfg.set_active_model("beta")
+
+    assert cfg.active_model_id == "alpha"
+    assert load_config(config_path=str(tmp_yaml)).active_model_id == "alpha"
+
+
+def test_set_active_model_persist_failure_keeps_memory_and_disk(
+    cfg: Config, tmp_yaml: Path, monkeypatch
+):
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(yaml, "safe_dump", boom)
+    with pytest.raises(OSError, match="simulated write failure"):
+        cfg.set_active_model("beta")
+
+    assert cfg.active_model_id == "alpha"
+    assert cfg.model == "alpha-1"
+    reloaded = load_config(config_path=str(tmp_yaml))
+    assert reloaded.active_model_id == "alpha"
+    assert "default" not in (reloaded.raw_config.get("llm") or {})
+
+
+# ----------------------- 模型 CRUD / evolution 真实入口事务 -----------------------
+#
+# 从 app（use/add/update/remove_model）、gateway misc（PUT /api/skills/evolution）、
+# CLI knowledge（skill evolution）真实调用路径注入写盘失败：内存业务字段、
+# raw_config、磁盘三者一致保留旧值，运行资源操作零调用。
+
+
+def _model_app_config(tmp_path: Path) -> tuple[Config, Path]:
+    """带 2 个已加载模型的隔离 config.yaml（app 层真实入口用）。"""
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "llm": {
+                    "active": "alpha",
+                    "models": {
+                        "alpha": {
+                            "name": "Alpha",
+                            "api_key_env": "ALPHA_API_KEY",
+                            "base_url": "https://alpha.example.com/v1",
+                            "model": "alpha-1",
+                            "temperature": 0.5,
+                        },
+                        "beta": {
+                            "name": "Beta",
+                            "api_key_env": "BETA_API_KEY",
+                            "base_url": "https://beta.example.com/v1",
+                            "model": "beta-1",
+                        },
+                    },
+                },
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    return load_config(config_path=str(p)), p
+
+
+@pytest.fixture
+def model_app(tmp_path: Path, monkeypatch):
+    """yaml 化配置 + CrewApp（enable_team=False），env key 注入后清理。"""
+    from crew.app import build_app
+
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    os.environ["ALPHA_API_KEY"] = "sk-alpha"
+    os.environ["BETA_API_KEY"] = "sk-beta"
+    cfg, p = _model_app_config(tmp_path)
+    cfg.db_path = str(tmp_path / "crew.db")
+    cfg.memory_db_path = str(tmp_path / "memory.db")
+    app = build_app(config=cfg, enable_team=False)
+    yield app, cfg, p
+    os.environ.pop("ALPHA_API_KEY", None)
+    os.environ.pop("BETA_API_KEY", None)
+
+
+def _spy_model_runtime_resources(app, monkeypatch) -> list[str]:
+    """记录运行资源调用：持久化失败路径必须零调用。"""
+    import crew.app as app_module
+
+    calls: list[str] = []
+    monkeypatch.setattr(app_module, "build_provider", lambda _cfg: calls.append("build_provider"))
+    monkeypatch.setattr(app.agents, "clear", lambda *a, **k: calls.append("agents.clear"))
+    monkeypatch.setattr(app.agents, "drop_owner", lambda *a, **k: calls.append("agents.drop_owner"))
+    monkeypatch.setattr(
+        app, "_invalidate_owner_team_provider", lambda *a, **k: calls.append("invalidate_team_provider")
+    )
+    monkeypatch.setattr(
+        app, "_sync_default_provider_to_features", lambda *a, **k: calls.append("sync_features")
+    )
+    monkeypatch.setattr(
+        app, "_schedule_provider_retirement", lambda *a, **k: calls.append("retire_provider")
+    )
+    monkeypatch.setattr("crew.app.remove_env_key", lambda *a, **k: calls.append("remove_env_key"))
+    monkeypatch.setattr("crew.app.delete_stored_key", lambda *a, **k: calls.append("delete_stored_key"))
+    return calls
+
+
+def _write_boom(monkeypatch) -> None:
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(yaml, "safe_dump", boom)
+
+
+def test_app_use_model_persist_failure_keeps_state_and_skips_runtime(
+    model_app, monkeypatch
+):
+    app, cfg, p = model_app
+    calls = _spy_model_runtime_resources(app, monkeypatch)
+    _write_boom(monkeypatch)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        app.use_model("beta", owner_account_id="")
+
+    assert cfg.active_model_id == "alpha"
+    assert cfg.default_model_id == ""
+    assert cfg.model == "alpha-1"
+    assert cfg.raw_config["llm"]["active"] == "alpha"
+    assert load_config(config_path=str(p)).active_model_id == "alpha"
+    assert calls == []
+
+
+def test_app_use_model_failure_then_retry_persists_new_active(model_app, monkeypatch):
+    app, cfg, p = model_app
+    _spy_model_runtime_resources(app, monkeypatch)
+    real_safe_dump = yaml.safe_dump
+    state = {"calls": 0}
+
+    def flaky(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise OSError("simulated write failure")
+        return real_safe_dump(*args, **kwargs)
+
+    monkeypatch.setattr(yaml, "safe_dump", flaky)
+
+    with pytest.raises(OSError):
+        app.use_model("beta", owner_account_id="")
+    app.use_model("beta", owner_account_id="")
+
+    assert cfg.active_model_id == "beta"
+    reloaded = load_config(config_path=str(p))
+    assert reloaded.active_model_id == "beta"
+    assert reloaded.default_model_id == "beta"
+
+
+def test_app_add_model_persist_failure_keeps_state_and_skips_runtime(
+    model_app, monkeypatch
+):
+    app, cfg, p = model_app
+    calls = _spy_model_runtime_resources(app, monkeypatch)
+    _write_boom(monkeypatch)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        app.add_model({"id": "gamma", "model": "g-1"}, owner_account_id="")
+
+    assert "gamma" not in cfg.model_profiles
+    assert "gamma" not in cfg.raw_config["llm"]["models"]
+    assert "gamma" not in load_config(config_path=str(p)).model_profiles
+    assert calls == []
+
+
+def test_app_update_model_persist_failure_keeps_state_and_skips_runtime(
+    model_app, monkeypatch
+):
+    app, cfg, p = model_app
+    calls = _spy_model_runtime_resources(app, monkeypatch)
+    _write_boom(monkeypatch)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        app.update_model("alpha", {"temperature": 0.99}, owner_account_id="")
+
+    assert cfg.model_profiles["alpha"].temperature == 0.5
+    assert cfg.raw_config["llm"]["models"]["alpha"]["temperature"] == 0.5
+    reloaded = load_config(config_path=str(p))
+    assert reloaded.model_profiles["alpha"].temperature == 0.5
+    assert calls == []
+
+
+def test_app_remove_model_persist_failure_keeps_state_and_skips_runtime(
+    model_app, monkeypatch
+):
+    app, cfg, p = model_app
+    calls = _spy_model_runtime_resources(app, monkeypatch)
+    _write_boom(monkeypatch)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        app.remove_model("beta", owner_account_id="")
+
+    assert "beta" in cfg.model_profiles
+    assert "beta" in cfg.raw_config["llm"]["models"]
+    assert "beta" in load_config(config_path=str(p)).model_profiles
+    assert calls == []
+
+
+def test_app_remove_active_model_persist_failure_keeps_state_and_skips_runtime(
+    model_app, monkeypatch
+):
+    app, cfg, p = model_app
+    calls = _spy_model_runtime_resources(app, monkeypatch)
+    _write_boom(monkeypatch)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        app.remove_model("alpha", owner_account_id="")
+
+    assert "alpha" in cfg.model_profiles
+    assert cfg.active_model_id == "alpha"
+    assert load_config(config_path=str(p)).active_model_id == "alpha"
+    assert calls == []
+
+
+def test_app_remove_active_model_switch_is_persisted(model_app):
+    """删除激活模型：自动切换必须持久化到磁盘（active + default 同步落盘）。"""
+    app, cfg, p = model_app
+
+    result = app.remove_model("alpha", owner_account_id="")
+
+    assert result["switched_to"] == "beta"
+    assert cfg.active_model_id == "beta"
+    reloaded = load_config(config_path=str(p))
+    assert "alpha" not in reloaded.model_profiles
+    assert reloaded.active_model_id == "beta"
+    assert reloaded.default_model_id == "beta"
+
+
+def test_owner_model_persist_failure_is_isolated_per_owner(model_app, monkeypatch):
+    """owner 维度按 overlay 文件隔离：owner-a 持久化失败不影响 owner-b 与全局层。"""
+    from crew.state.config import Config as ConfigCls
+
+    app, cfg, p = model_app
+    original = ConfigCls.persist_owner_model_profiles
+
+    def flaky(self, owner, profiles, *, active_model_id=None):
+        if owner == "acc-a":
+            raise OSError("simulated overlay write failure")
+        return original(self, owner, profiles, active_model_id=active_model_id)
+
+    monkeypatch.setattr(ConfigCls, "persist_owner_model_profiles", flaky)
+
+    with pytest.raises(OSError, match="simulated overlay write failure"):
+        app.add_model({"id": "own-a", "model": "a-1"}, owner_account_id="acc-a")
+    app.add_model({"id": "own-b", "model": "b-1"}, owner_account_id="acc-b")
+
+    # 失败的 owner-a：overlay 不含新模型（可整体重试）
+    assert "own-a" not in (cfg.owner_overlay_data("acc-a").get("llm") or {}).get("models", {})
+    # 成功的 owner-b：私有模型只落在自己的 overlay
+    assert "own-b" in (cfg.owner_overlay_data("acc-b").get("llm") or {}).get("models", {})
+    # 全局共享层不受任何 owner 操作影响
+    assert "own-a" not in cfg.model_profiles
+    assert "own-b" not in cfg.model_profiles
+    assert "own-a" not in load_config(config_path=str(p)).model_profiles
+    assert "own-b" not in load_config(config_path=str(p)).model_profiles
+
+
+def test_gateway_evolution_persist_failure_keeps_state_and_disk(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from crew.gateway.auth import AccountContext
+    from crew.gateway.routers import misc as misc_router
+
+    cfg, p = _model_app_config(tmp_path)
+    crew = SimpleNamespace(config=cfg)
+
+    app = FastAPI()
+    app.include_router(misc_router.create_misc_router(crew))
+    client = TestClient(app)
+    monkeypatch.setattr(
+        misc_router, "account_from_request", lambda _request: AccountContext(owner_account_id="A:admin")
+    )
+    monkeypatch.setattr(misc_router, "require_admin", lambda _account, _cfg: None)
+    _write_boom(monkeypatch)
+
+    resp = client.put("/api/skills/evolution", json={"auto_trigger": True})
+
+    assert resp.status_code == 500
+    assert resp.json()["error"].startswith("持久化失败")
+    assert cfg.evolution_auto_trigger is False
+    assert "evolution" not in load_config(config_path=str(p)).raw_config.get("agent", {})
+    assert not p.with_suffix(p.suffix + ".tmp").exists()
+
+
+def test_cli_evolution_persist_failure_keeps_state_and_disk(tmp_path, monkeypatch):
+    from crew.cli.knowledge import _skill_evolution
+
+    cfg, p = _model_app_config(tmp_path)
+    ctx = CliContext(owner="local", _app=SimpleNamespace(config=cfg))
+    args = SimpleNamespace(auto_trigger=True, auto_full_cycle=None, visible=None)
+    _write_boom(monkeypatch)
+
+    with pytest.raises(CliError, match="持久化失败"):
+        _skill_evolution(args, ctx)
+
+    assert cfg.evolution_auto_trigger is False
+    assert "evolution" not in load_config(config_path=str(p)).raw_config.get("agent", {})
+
+
+def test_cli_evolution_success_persists_and_publishes(tmp_path):
+    from crew.cli.knowledge import _skill_evolution
+
+    cfg, p = _model_app_config(tmp_path)
+    ctx = CliContext(owner="local", _app=SimpleNamespace(config=cfg))
+    args = SimpleNamespace(auto_trigger=True, auto_full_cycle=None, visible=None)
+
+    result = _skill_evolution(args, ctx)
+
+    assert result.data["auto_trigger"] is True
+    reloaded = load_config(config_path=str(p))
+    assert reloaded.evolution_auto_trigger is True
+    assert reloaded.raw_config["agent"]["evolution"] == {
+        "auto_trigger": True,
+        "auto_full_cycle": False,
+        "visible": False,
+    }

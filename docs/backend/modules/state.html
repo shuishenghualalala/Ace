@@ -113,6 +113,9 @@
   <h2>配置写回隔离与事务（2026-09-14）</h2>
   <p>渠道配置写回的两个契约修复：<strong>隔离性</strong>——<code>_write_channel_config</code> 在构造目标渠道有效配置前对平台值与渠道有效合并结果做深拷贝，YAML anchor 使两个渠道共享嵌套 <code>extra</code> 时，删除一方字段不再串改另一方或调用方传入对象；<strong>事务性</strong>——提取 <code>_atomic_write_yaml</code>（tmp 写入 + 原子替换 + 失败清理残留并重抛），channel / mcp_servers / model_profiles / evolution 四个 persist 统一为磁盘提交成功后再发布内存状态，写盘或替换失败时内存与磁盘一致保留旧值。验证见 <a href="../../testing/review-fixes-batch-2026-09-14.html">整改批次测试记录</a>。</p>
 
+  <h2>配置操作完整事务（2026-09-15，第二轮整改 S2）</h2>
+  <p>配置写回从"先改内存再持久化"升级为<strong>候选值 → 校验 → 持久化 → 发布</strong>的统一事务边界，覆盖 MCP servers、模型 profiles（含激活/默认切换）、evolution 开关三类操作：MCP 的 <code>_commit_mcp_servers</code> 与模型的 <code>_commit_model_profiles</code> / <code>set_active_model</code> / <code>set_evolution_config</code> 都在候选副本上计算、经 <code>_atomic_write_yaml</code> 落盘成功后才发布内存（<code>mcp_servers</code>/<code>model_profiles</code>/<code>raw_config</code> 等）。持久化失败时内存与磁盘一致保留旧值、可直接重试，且<strong>不得触发任何运行资源操作</strong>（provider 重建、MCP 子进程启停等只在持久化成功后进行）；"已保存但连接失败"如实上报、不回滚伪装成保存失败。gateway Router（mcp_servers / misc）与 CLI（integration / knowledge）全部改走事务入口，遗留 <code>set_mcp_server</code>/<code>persist_model_profiles</code> 等两步式入口仅为未迁移调用方保留并标注。模型配置 owner 语义：全局事务只写 config.yaml 的 <code>llm</code> 段，owner overlay 层天然按文件隔离，互不影响。边界：不承诺多文件与外部运行资源的分布式原子性。</p>
+
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
