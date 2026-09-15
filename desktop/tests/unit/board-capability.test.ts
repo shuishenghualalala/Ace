@@ -21,6 +21,7 @@ import {
   TEAM_FEATURE_ID,
 } from '../../src/ui/features/board-capability';
 import { featureEventRegistry } from '../../src/ui/features/event-reducer-registry';
+import * as boardHooks from '../../src/ui/features/board-hooks';
 import { __resetKanbanBoardForTest } from '../../src/ui/features/kanban-board';
 import { __resetTeamCollaborationBoardForTest } from '../../src/ui/features/team-collaboration-board';
 import { defaultInspectorTabForSession } from '../../src/ui/features/inspector';
@@ -245,5 +246,101 @@ describe('Inspector 默认 Tab 回退', () => {
 
     setCapabilities({ [KANBAN_FEATURE_ID]: { state: 'discovered', available: false, generation: null } });
     expect(defaultInspectorTabForSession('sess-kanban')).toBe('context');
+  });
+});
+
+describe('组合层安装事务（一块失败不牵连另一块）', () => {
+  /** registry 未命中会 console.warn 噪声，断言「无残留」时抑制。 */
+  function silenceUnhandledWarns(): () => void {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    return () => warn.mockRestore();
+  }
+
+  it('kanban 安装失败：team 正常服务、kanban 无残留，总 disposer 只清理实际完成的安装，解除故障后重试成功', () => {
+    const original = featureEventRegistry.register.bind(featureEventRegistry);
+    const spy = vi.spyOn(featureEventRegistry, 'register').mockImplementation((reg) => {
+      if (reg.feature === 'kanban') throw new Error('注入：kanban 注册失败');
+      return original(reg);
+    });
+
+    // kanban 失败被组合层隔离：整体安装不抛错（旧实现此处直接上抛且总 disposer 未建立）
+    expect(() => installTeamKanbanBoards()).not.toThrow();
+
+    let restoreWarn = silenceUnhandledWarns();
+    try {
+      // team 不受牵连，正常服务
+      expect(dispatchTeam()).not.toBeNull();
+      // 失败的 kanban 已回滚到本次安装前状态
+      expect(dispatchKanban()).toBeNull();
+      // kanban hooks 未注册：board-hooks 门面调用 no-op，无副作用
+      const htmlBefore = document.body.innerHTML;
+      boardHooks.scheduleRefreshKanbanBoard('s1');
+      boardHooks.renderKanbanBoard();
+      expect(document.body.innerHTML).toBe(htmlBefore);
+    } finally {
+      restoreWarn();
+    }
+
+    // 总 disposer 覆盖实际完成的安装：team 被卸载
+    disposeTeamKanbanBoards();
+    restoreWarn = silenceUnhandledWarns();
+    try {
+      expect(dispatchTeam()).toBeNull();
+      expect(dispatchKanban()).toBeNull();
+    } finally {
+      restoreWarn();
+    }
+
+    // 解除故障后重试安装成功
+    spy.mockRestore();
+    installTeamKanbanBoards();
+    restoreWarn = silenceUnhandledWarns();
+    try {
+      expect(dispatchTeam()).not.toBeNull();
+      expect(dispatchKanban()).not.toBeNull();
+    } finally {
+      restoreWarn();
+    }
+  });
+
+  it('team 安装失败：kanban 正常服务、team 无残留；能力翻转的启停记录与实际状态一致，故障解除后翻转补装成功', () => {
+    const original = featureEventRegistry.register.bind(featureEventRegistry);
+    const spy = vi.spyOn(featureEventRegistry, 'register').mockImplementation((reg) => {
+      if (reg.feature === 'team') throw new Error('注入：team 注册失败');
+      return original(reg);
+    });
+
+    expect(() => installTeamKanbanBoards()).not.toThrow();
+
+    let restoreWarn = silenceUnhandledWarns();
+    try {
+      expect(dispatchKanban()).not.toBeNull(); // kanban 不受牵连
+      expect(dispatchTeam()).toBeNull();       // 失败的 team 无残留（旧实现 reducer 残留非 null）
+    } finally {
+      restoreWarn();
+    }
+
+    // 能力翻转（kanban 下线）只停 kanban，team 保持未安装（不误报）
+    setCapabilities(kanbanDisabled);
+    syncBoardCapabilityUi();
+    restoreWarn = silenceUnhandledWarns();
+    try {
+      expect(dispatchKanban()).toBeNull();
+      expect(dispatchTeam()).toBeNull();
+    } finally {
+      restoreWarn();
+    }
+
+    // 故障解除后翻转恢复：team 补装成功（无 already-registered 冲突），kanban 重装成功
+    spy.mockRestore();
+    setCapabilities(bothEnabled);
+    syncBoardCapabilityUi();
+    restoreWarn = silenceUnhandledWarns();
+    try {
+      expect(dispatchTeam()).not.toBeNull();
+      expect(dispatchKanban()).not.toBeNull();
+    } finally {
+      restoreWarn();
+    }
   });
 });

@@ -114,12 +114,17 @@ function shouldKeepPollingStatus(status: DynamicKanbanStatus | null): boolean {
   return wfStatus === 'active' || wfStatus === 'paused' || wfStatus === 'running';
 }
 
-async function refreshKanbanStatusOnly(sessionId: string): Promise<void> {
+async function refreshKanbanStatusOnly(sessionId: string, generation: number): Promise<void> {
+  // 代际守卫（入口）：tick 回调携带发起轮询那一代的安装代数，
+  // 卸载/重装后旧代残余触发直接失效，不再发起新请求。
+  if (generation !== kanbanGeneration) return;
   if (sessionId !== state.activeSessionId) return;
   if (!isDynamicKanbanSession(sessionId)) return;
   const status = await backendApi.dynamicKanbanStatus(sessionId).catch(() => null);
-  // 异步请求期间用户可能已切换会话，返回前再次校验
-  if (sessionId !== state.activeSessionId) return;
+  // 代际 + 会话双重守卫（返回前）：请求期间看板可能被卸载/重装或切换会话，
+  // 过期响应不回写 latestStatus、不刷新 DOM；旧代的「终态」也不得走到
+  // stopKanbanStatusPolling —— 否则停掉的是新代的轮询定时器。
+  if (generation !== kanbanGeneration || sessionId !== state.activeSessionId) return;
   latestStatus = status;
   refreshWorkflowTimelineDom(status);
   if (!shouldKeepPollingStatus(status)) {
@@ -135,8 +140,11 @@ function startKanbanStatusPolling(sessionId: string): void {
     stopKanbanStatusPolling();
   }
   kanbanStatusPollingSessionId = sessionId;
+  // 轮询句柄随代绑定：tick 回调闭包捕获发起时的安装代数，
+  // 旧代定时器在清理竞态下残余触发一次时也会因代际不匹配而整体失效。
+  const generation = kanbanGeneration;
   kanbanStatusPollingTimer = window.setInterval(() => {
-    void refreshKanbanStatusOnly(sessionId);
+    void refreshKanbanStatusOnly(sessionId, generation);
   }, KANBAN_STATUS_POLL_MS);
 }
 
@@ -212,7 +220,7 @@ export function bindTaskBoardResize(): () => void {
   resizeBound = true;
   return () => {
     handle.removeEventListener('mousedown', onMouseDown);
-    window.removeEventListener('mousemove', onMouseUp);
+    window.removeEventListener('mousemove', onMouseMove);
     window.removeEventListener('mouseup', onMouseUp);
     resizeBound = false;
   };
@@ -617,16 +625,41 @@ function resetKanbanBoardState(): void {
   }
 }
 
-function createKanbanBoardDisposer(
-  disposeReducers: () => void,
-  disposeResize: () => void,
-  disposeHooks: () => void,
-): () => void {
-  return (): void => {
-    disposeReducers();
-    disposeResize();
-    disposeHooks();
-    resetKanbanBoardState();
+/**
+ * 单 Feature 安装事务：安装步骤即时收集本次获得的 disposer，
+ * 任一步失败则逆序撤销已收集的贡献（每个清理单独兜底，一个失败不阻断其余）；
+ * 成功后发布的 disposer 复用同一条清理链，且幂等（二次调用 no-op，
+ * 不重复清理、不造成代际语义漂移）。
+ */
+function createKanbanInstallTransaction(scope: string): {
+  collect: (disposer: () => void) => void;
+  rollback: () => void;
+  publish: (finalize: () => void) => () => void;
+} {
+  const contributions: Array<() => void> = [];
+  const undoAll = (): void => {
+    for (let index = contributions.length - 1; index >= 0; index -= 1) {
+      try {
+        contributions[index]?.();
+      } catch (err) {
+        console.warn(`[${scope}] 安装贡献清理失败（已跳过，继续其余清理）`, err);
+      }
+    }
+  };
+  return {
+    collect: (disposer) => {
+      contributions.push(disposer);
+    },
+    rollback: undoAll,
+    publish: (finalize) => {
+      let disposed = false;
+      return (): void => {
+        if (disposed) return;
+        disposed = true;
+        undoAll();
+        finalize();
+      };
+    },
   };
 }
 
@@ -650,33 +683,40 @@ export function initKanbanBoard(): () => void {
   if (kanbanInitDisposer) return kanbanInitDisposer;
 
   // 新一代安装：与上一代（含其在途请求）彻底隔离。
+  // 幂等早退不递增代际；安装失败的回滚不额外递增（本次开始时已递增过，
+  // 该代的在途请求已全部失效），避免代际语义漂移。
   kanbanGeneration += 1;
-  const disposers: Array<() => void> = [];
-  disposers.push(featureEventRegistry.register({
-    feature: 'kanban',
-    event: 'workflow_progress',
-    version: 1,
-    reducer: (payload, ctx) => workflowProgressReducer(payload as WorkflowProgressBody, ctx),
-  }));
-  for (const event of KANBAN_NOOP_EVENTS) {
-    disposers.push(featureEventRegistry.register({
-      feature: 'kanban',
-      event,
-      version: 1,
-      reducer: () => emptyFeatureReducerResult(),
-    }));
-  }
-  const disposeResize = bindTaskBoardResize();
-  const disposeHooks = registerKanbanBoardCallbacks({
-    refresh: refreshKanbanBoard,
-    scheduleRefresh: scheduleRefreshKanbanBoard,
-    render: renderKanbanBoard,
-  });
 
-  const disposeReducers = (): void => {
-    for (const dispose of disposers) dispose();
-  };
-  kanbanInitDisposer = createKanbanBoardDisposer(disposeReducers, disposeResize, disposeHooks);
+  const tx = createKanbanInstallTransaction('kanban-board');
+  try {
+    tx.collect(featureEventRegistry.register({
+      feature: 'kanban',
+      event: 'workflow_progress',
+      version: 1,
+      reducer: (payload, ctx) => workflowProgressReducer(payload as WorkflowProgressBody, ctx),
+    }));
+    for (const event of KANBAN_NOOP_EVENTS) {
+      tx.collect(featureEventRegistry.register({
+        feature: 'kanban',
+        event,
+        version: 1,
+        reducer: () => emptyFeatureReducerResult(),
+      }));
+    }
+    tx.collect(bindTaskBoardResize());
+    tx.collect(registerKanbanBoardCallbacks({
+      refresh: refreshKanbanBoard,
+      scheduleRefresh: scheduleRefreshKanbanBoard,
+      render: renderKanbanBoard,
+    }));
+  } catch (err) {
+    // 中途失败：逆序撤销本次已获得的贡献，安装前已存在的贡献不受影响，
+    // kanbanInitDisposer 保持 null（本次安装视为未发生），重试可干净重装。
+    tx.rollback();
+    throw err;
+  }
+
+  kanbanInitDisposer = tx.publish(resetKanbanBoardState);
   return kanbanInitDisposer;
 }
 

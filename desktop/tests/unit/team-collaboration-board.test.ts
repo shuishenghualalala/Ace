@@ -27,18 +27,26 @@ import {
 } from '../../src/ui/features/team-collaboration-board';
 import { __resetAllStoresForTest, messageStore } from '../../src/ui/stores/stores';
 import { setActiveSessionId } from '../../src/ui/state';
+import { featureEventRegistry } from '../../src/ui/features/event-reducer-registry';
+import * as boardHooks from '../../src/ui/features/board-hooks';
 
 const SESSION_ID = 'team-session-board';
 
 type SessionAgentConfigResponse = Awaited<ReturnType<typeof backendApi.getSessionAgentConfig>>;
 
-/** 手工控制 resolve 时机的 Promise，用于构造「在途迟到」场景。 */
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+/** 手工控制 resolve/reject 时机与结果的 Promise，用于构造「在途迟到」场景。 */
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 const tasks: Task[] = [
@@ -431,5 +439,173 @@ describe('卸载/切会话后在途请求守卫', () => {
     expect(resolveTeamCollaborationName('session-b')).toBeUndefined();
     // 旧会话自身缓存按键控正常更新（切回时数据可用）
     expect(teamCollaborationTaskCount(SESSION_ID)).toBe(tasks.length);
+  });
+});
+
+describe('刷新占用的 token 所有权（旧代不得释放新代占用）', () => {
+  it('旧代刷新结束后再次发起刷新：不得绕过新代请求的占用标记', async () => {
+    initTeamCollaborationBoard();
+    const staleTasks = deferred<Task[]>();
+    vi.mocked(backendApi.tasks).mockReturnValueOnce(staleTasks.promise); // 第 1 次：旧代挂起
+    let updates = 0;
+    const listener = (): void => { updates += 1; };
+    window.addEventListener('team-collaboration:updated', listener);
+
+    const stale = refreshTeamCollaborationBoard(SESSION_ID);
+    disposeTeamCollaborationBoard();
+    initTeamCollaborationBoard();
+
+    const freshTasks = deferred<Task[]>();
+    vi.mocked(backendApi.tasks).mockReturnValueOnce(freshTasks.promise); // 第 2 次：新代挂起
+    const fresh = refreshTeamCollaborationBoard(SESSION_ID);
+
+    staleTasks.resolve([{ ...tasks[0], id: 'old-generation-only', task_id: 'old-generation-only' }]);
+    await stale;
+
+    // 旧代结束后的再次刷新必须被新代占用标记挡住：不并发、不提前回写
+    const thirdTasks = deferred<Task[]>();
+    vi.mocked(backendApi.tasks).mockReturnValueOnce(thirdTasks.promise); // 若被绕过会发出第 3 次
+    const third = refreshTeamCollaborationBoard(SESSION_ID);
+    thirdTasks.resolve([{ ...tasks[0], id: 'stale-third', task_id: 'stale-third' }]);
+    await third;
+
+    expect(backendApi.tasks).toHaveBeenCalledTimes(2);
+    expect(teamCollaborationTaskCount(SESSION_ID)).toBe(0); // 新代请求仍在途：无乱序回写
+
+    freshTasks.resolve(tasks);
+    await fresh;
+    expect(teamCollaborationTaskCount(SESSION_ID)).toBe(tasks.length);
+    expect(updates).toBe(1);
+
+    window.removeEventListener('team-collaboration:updated', listener);
+  });
+
+  it('旧代请求失败（reject）也不得清除新代请求的占用标记，占有者结束后正常释放', async () => {
+    initTeamCollaborationBoard();
+    const staleTasks = deferred<Task[]>();
+    vi.mocked(backendApi.tasks).mockReturnValueOnce(staleTasks.promise);
+    const stale = refreshTeamCollaborationBoard(SESSION_ID);
+    disposeTeamCollaborationBoard();
+    initTeamCollaborationBoard();
+
+    const freshTasks = deferred<Task[]>();
+    vi.mocked(backendApi.tasks).mockReturnValueOnce(freshTasks.promise);
+    const fresh = refreshTeamCollaborationBoard(SESSION_ID);
+
+    staleTasks.reject(new Error('旧代请求失败'));
+    await stale; // tasks 的 .catch 兜底 → 代际守卫丢弃 → finally 不释放新代 token
+
+    // 占用标记仍在：并发刷新被挡住，不发第三次请求
+    await refreshTeamCollaborationBoard(SESSION_ID);
+    expect(backendApi.tasks).toHaveBeenCalledTimes(2);
+
+    freshTasks.resolve(tasks);
+    await fresh;
+    expect(teamCollaborationTaskCount(SESSION_ID)).toBe(tasks.length);
+
+    // 占有者结束后正常释放：后续刷新可发起新请求
+    await refreshTeamCollaborationBoard(SESSION_ID);
+    expect(backendApi.tasks).toHaveBeenCalledTimes(3);
+  });
+
+  it('切会话后占用按会话键控隔离，互不阻塞', async () => {
+    initTeamCollaborationBoard();
+    const deferredA = deferred<Task[]>();
+    vi.mocked(backendApi.tasks).mockReturnValueOnce(deferredA.promise);
+    const pendingA = refreshTeamCollaborationBoard('session-a');
+
+    // B 会话不受 A 会话在途占用的影响
+    await refreshTeamCollaborationBoard('session-b');
+    expect(teamCollaborationTaskCount('session-b')).toBe(tasks.length);
+
+    deferredA.resolve(tasks);
+    await pendingA;
+    expect(teamCollaborationTaskCount('session-a')).toBe(tasks.length);
+  });
+});
+
+describe('team-collaboration-board 安装事务回滚（单 Feature 事务）', () => {
+  const dummyCtx = {
+    sessionId: 's1',
+    messages: [],
+    book: {
+      assistantId: null,
+      firstChunkAt: null,
+      activeRequestId: null,
+      turnSealed: false,
+      acceptingNewRequest: true,
+      hadTeamInternal: false,
+    },
+    now: Date.now(),
+    sequence: 0,
+  };
+
+  function dispatchInternalMessage(): ReturnType<typeof featureEventRegistry.dispatch> {
+    return featureEventRegistry.dispatch('team', 'internal_message', 1, { text: 'hello' }, dummyCtx);
+  }
+
+  /** registry 未命中会 console.warn 噪声，断言「无残留」时抑制。 */
+  function silenceUnhandledWarns(): () => void {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    return () => warn.mockRestore();
+  }
+
+  it('reducer 注册失败：无残留、解除故障后重试成功、重复 dispose 幂等', () => {
+    const original = featureEventRegistry.register.bind(featureEventRegistry);
+    const spy = vi.spyOn(featureEventRegistry, 'register').mockImplementation((reg) => {
+      if (reg.feature === 'team' && reg.event === 'internal_message') {
+        throw new Error('注入：team reducer 注册失败');
+      }
+      return original(reg);
+    });
+
+    expect(() => initTeamCollaborationBoard()).toThrow('注入：team reducer 注册失败');
+
+    const restoreWarn = silenceUnhandledWarns();
+    try {
+      expect(dispatchInternalMessage()).toBeNull();
+    } finally {
+      restoreWarn();
+    }
+
+    spy.mockRestore();
+    const disposer = initTeamCollaborationBoard();
+    expect(dispatchInternalMessage()).not.toBeNull();
+
+    disposer();
+    disposer();
+    const restoreWarn2 = silenceUnhandledWarns();
+    try {
+      expect(dispatchInternalMessage()).toBeNull();
+    } finally {
+      restoreWarn2();
+    }
+  });
+
+  it('hooks 注册失败：已注册的 reducer 逆序回滚，解除故障后重试成功', () => {
+    vi.spyOn(boardHooks, 'registerTeamBoardCallbacks').mockImplementationOnce(() => {
+      throw new Error('注入：team hooks 注册失败');
+    });
+
+    expect(() => initTeamCollaborationBoard()).toThrow('注入：team hooks 注册失败');
+
+    // 旧实现此处 reducer 残留（dispatch 非 null）且无清理路径，重试会撞 already registered
+    const restoreWarn = silenceUnhandledWarns();
+    try {
+      expect(dispatchInternalMessage()).toBeNull();
+    } finally {
+      restoreWarn();
+    }
+
+    initTeamCollaborationBoard();
+    expect(dispatchInternalMessage()).not.toBeNull();
+
+    disposeTeamCollaborationBoard();
+    const restoreWarn2 = silenceUnhandledWarns();
+    try {
+      expect(dispatchInternalMessage()).toBeNull();
+    } finally {
+      restoreWarn2();
+    }
   });
 });

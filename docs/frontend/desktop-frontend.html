@@ -821,5 +821,12 @@
   <p>Wiki 入口可用性接入统一能力状态源（ADR-0041 legacy-safe）：<code>wiki-feature.ts</code> 新增 <code>WIKI_FEATURE_ID = product.wiki</code>，<code>wikiFeatureEnabled</code> 改为能力优先推导——<code>feature_capabilities</code> 字段存在时以 <code>product.wiki</code> 条目为准（条目缺席或 <code>available ≠ true</code> 不可用），字段缺席回落旧 <code>wiki.enabled</code> 语义。三处消费方收敛到同一函数：导航入口（<code>canNavigateToWiki</code> / shell features 投影）、Wiki 页面 PageContribution 的 <code>isAvailable</code>（原独立第二源已消除）、wiki reducer/事件注册门——Runtime <code>failed</code> 时入口、页面、reducer 同步停用，能力恢复后正确重装。</p>
   <p>新增 <code>tests/unit/wiki-feature-capability.test.ts</code>，扩展 wiki-page / wiki-reducer-lifecycle 能力用例。验证见 <a href="../testing/review-fixes-batch-2026-09-14.html">整改批次测试记录</a>。</p>
 </section>
+
+<section>
+  <h2>看板请求所有权与安装事务（2026-09-15，第二轮整改 S1+S3）</h2>
+  <p><strong>S1 异步请求所有权收口</strong>：轮询路径补齐安装代守卫——<code>refreshKanbanStatusOnly</code> 增加代际参数并在入口与 await 返回后双重校验，旧代终态响应不再回写 <code>latestStatus</code>/DOM，也不会经 <code>stopKanbanStatusPolling</code> 停掉新代定时器（轮询句柄随代绑定，tick 回调闭包捕获发起代数）；Team 侧 <code>refreshInFlight</code> 由 Set 改为 <code>Map&lt;sessionId, token&gt;</code>，finally 仅在仍持有自己的 token 时释放占用——旧代迟到请求的清理不再误删新代同会话请求的占用标记，消除并发乱序回写。</p>
+  <p><strong>S3 安装事务回滚</strong>：两级事务边界——单 Feature（两板同构的 <code>create*InstallTransaction</code>）在安装过程中即时收集每步 disposer，任一步失败逆序撤销本次贡献（每个清理单独兜底、互不阻断），成功后发布幂等 disposer 复用同一清理链；组合层 <code>applyBoardCapability</code> 逐板隔离，一块安装/卸载失败不牵连另一块、不上抛，初始安装与能力翻转走同一路径，故障解除后翻转/重试自动补装。顺带修复 <code>bindTaskBoardResize</code> disposer 中 mousemove 移除错绑的既有 bug。</p>
+  <p>验证：6 测试文件 69 tests 全绿（新增组合层隔离 2 例 + 单 Feature 回滚 5 例 + S1 所有权 7 例，全部先红后绿）、tsc 0 error。见 <a href="../testing/review-followup-batch-2026-09-15.html">第二轮整改测试记录</a>。</p>
+</section>
 </body>
 </html>

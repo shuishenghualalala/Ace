@@ -49,20 +49,39 @@ export function disposeTeamKanbanBoards(): void {
 }
 
 /**
+ * 单块看板的组合层启停事务：init/dispose 异常就地隔离（console.warn 可诊断），
+ * 不上抛、不牵连另一块看板。失败看板的 initDisposer 保持 null（单 Feature 事务
+ * 已回滚干净），后续能力翻转或重试会再次尝试 init，故障解除后即可补装成功。
+ */
+function applyBoardCapability(
+  board: string,
+  enabled: boolean,
+  init: () => void,
+  dispose: () => void,
+): void {
+  try {
+    if (enabled) init();
+    else dispose();
+  } catch (err) {
+    console.warn(`[board-capability] ${board} 看板${enabled ? '安装' : '卸载'}失败，已隔离该看板`, err);
+  }
+}
+
+/**
  * 安装 Team / Dynamic Kanban 两块看板：
- * - 立即 init 能力可用的看板；
+ * - 两块看板各自是独立事务：一块安装失败不牵连另一块已正常安装的看板，
+ *   也不让整个安装函数上抛（隔离失败、其余正常服务）；
  * - 订阅能力变化，enable → init、disable → dispose，两块看板独立启停；
+ *   总 disposer 只清理实际完成的安装（未安装看板的 dispose 是幂等 no-op）；
  * - 返回的 disposer 与 disposeTeamKanbanBoards() 共享同一条清理路径，重复安装幂等。
  */
 export function installTeamKanbanBoards(): () => void {
   if (installDisposer) return disposeTeamKanbanBoards;
-  if (teamBoardEnabled()) initTeamCollaborationBoard();
-  if (kanbanBoardEnabled()) initKanbanBoard();
+  // bindBoardCapability 绑定即回调当前能力，完成初始安装；后续翻转走同一事务路径，
+  // 保证初始安装与动态启停的行为（含故障隔离与补装）完全一致。
   const unbind = bindBoardCapability((team, kanban) => {
-    if (team) initTeamCollaborationBoard();
-    else disposeTeamCollaborationBoard();
-    if (kanban) initKanbanBoard();
-    else disposeKanbanBoard();
+    applyBoardCapability('team', team, initTeamCollaborationBoard, disposeTeamCollaborationBoard);
+    applyBoardCapability('kanban', kanban, initKanbanBoard, disposeKanbanBoard);
   });
   installDisposer = (): void => {
     unbind();

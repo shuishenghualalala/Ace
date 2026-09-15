@@ -178,7 +178,10 @@ const knownTurns = new Map<string, Set<string>>();
 const expandedNodes = new Map<string, Set<string>>();
 const filesOpen = new Set<string>();
 const stableProgress = new Map<string, { turnId: string; completed: number; total: number; percent: number }>();
-const refreshInFlight = new Set<string>();
+// 请求占用以唯一 token 表示（会话 → 自增序号）：finally 只有在仍占有该 token 时才释放，
+// 旧代迟到请求的清理因此不会误删新代同会话请求的占用标记。
+const refreshInFlight = new Map<string, number>();
+let refreshInFlightSeq = 0;
 let refreshTimer: number | null = null;
 let pollingSessionId = '';
 
@@ -750,7 +753,8 @@ export async function primeTeamCollaborationIdentity(sessionId: string): Promise
 
 export async function refreshTeamCollaborationBoard(sessionId: string | null | undefined = state.activeSessionId): Promise<void> {
   if (!sessionId || refreshInFlight.has(sessionId)) return;
-  refreshInFlight.add(sessionId);
+  const token = ++refreshInFlightSeq;
+  refreshInFlight.set(sessionId, token);
   const generation = teamBoardGeneration;
   try {
     const previous = snapshots.get(sessionId);
@@ -762,7 +766,7 @@ export async function refreshTeamCollaborationBoard(sessionId: string | null | u
         : loadConfiguredTeam(sessionId),
     ]);
     // 在途守卫：请求期间看板被卸载/重装（代际变化）时，迟到响应整体丢弃
-    // —— 不写 snapshots/stableNodes、不派发更新事件（finally 仍会放行 in-flight 标记）。
+    // —— 不写 snapshots/stableNodes、不派发更新事件（finally 仍按 token 释放自己的占用）。
     if (generation !== teamBoardGeneration) return;
     const next: TeamBoardSnapshot = {
       sessionId,
@@ -780,7 +784,11 @@ export async function refreshTeamCollaborationBoard(sessionId: string | null | u
       window.dispatchEvent(new CustomEvent('team-collaboration:updated', { detail: { sessionId } }));
     }
   } finally {
-    refreshInFlight.delete(sessionId);
+    // token 所有权：只有 map 中仍是自己那个 token 时才允许释放，
+    // 旧代不得清除新代同会话请求的占用（否则后续刷新会并发执行、乱序回写）。
+    if (refreshInFlight.get(sessionId) === token) {
+      refreshInFlight.delete(sessionId);
+    }
   }
 }
 
@@ -1274,14 +1282,41 @@ function resetTeamCollaborationState(): void {
   refreshInFlight.clear();
 }
 
-function createTeamCollaborationBoardDisposer(
-  disposeReducer: () => void,
-  disposeHooks: () => void,
-): () => void {
-  return (): void => {
-    disposeReducer();
-    disposeHooks();
-    resetTeamCollaborationState();
+/**
+ * 单 Feature 安装事务：安装步骤即时收集本次获得的 disposer，
+ * 任一步失败则逆序撤销已收集的贡献（每个清理单独兜底，一个失败不阻断其余）；
+ * 成功后发布的 disposer 复用同一条清理链，且幂等（二次调用 no-op，
+ * 不重复清理、不造成代际语义漂移）。
+ */
+function createTeamBoardInstallTransaction(scope: string): {
+  collect: (disposer: () => void) => void;
+  rollback: () => void;
+  publish: (finalize: () => void) => () => void;
+} {
+  const contributions: Array<() => void> = [];
+  const undoAll = (): void => {
+    for (let index = contributions.length - 1; index >= 0; index -= 1) {
+      try {
+        contributions[index]?.();
+      } catch (err) {
+        console.warn(`[${scope}] 安装贡献清理失败（已跳过，继续其余清理）`, err);
+      }
+    }
+  };
+  return {
+    collect: (disposer) => {
+      contributions.push(disposer);
+    },
+    rollback: undoAll,
+    publish: (finalize) => {
+      let disposed = false;
+      return (): void => {
+        if (disposed) return;
+        disposed = true;
+        undoAll();
+        finalize();
+      };
+    },
   };
 }
 
@@ -1295,18 +1330,29 @@ export function initTeamCollaborationBoard(): () => void {
   if (teamInitDisposer) return teamInitDisposer;
 
   // 新一代安装：与上一代（含其在途请求）彻底隔离。
+  // 幂等早退不递增代际；安装失败的回滚不额外递增（本次开始时已递增过，
+  // 该代的在途请求已全部失效），避免代际语义漂移。
   teamBoardGeneration += 1;
-  const disposeReducer = featureEventRegistry.register({
-    feature: 'team',
-    event: 'internal_message',
-    version: 1,
-    reducer: (payload, ctx) => teamInternalReducer(payload as TeamInternalBody, ctx),
-  });
-  const disposeHooks = registerTeamBoardCallbacks({
-    primeTeamIdentity: primeTeamCollaborationIdentity,
-  });
 
-  teamInitDisposer = createTeamCollaborationBoardDisposer(disposeReducer, disposeHooks);
+  const tx = createTeamBoardInstallTransaction('team-collaboration-board');
+  try {
+    tx.collect(featureEventRegistry.register({
+      feature: 'team',
+      event: 'internal_message',
+      version: 1,
+      reducer: (payload, ctx) => teamInternalReducer(payload as TeamInternalBody, ctx),
+    }));
+    tx.collect(registerTeamBoardCallbacks({
+      primeTeamIdentity: primeTeamCollaborationIdentity,
+    }));
+  } catch (err) {
+    // 中途失败：逆序撤销本次已获得的贡献，安装前已存在的贡献不受影响，
+    // teamInitDisposer 保持 null（本次安装视为未发生），重试可干净重装。
+    tx.rollback();
+    throw err;
+  }
+
+  teamInitDisposer = tx.publish(resetTeamCollaborationState);
   return teamInitDisposer;
 }
 
