@@ -10,10 +10,11 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
-from crew.core.types import ChatResponse, Message
+from crew.core.types import Message
 from crew.core.text_parsing import extract_json_object
 from crew.dynamickanban.models import PlanEdge, PlanNode, PlanResult
 from crew.dynamickanban.plan_graph import PlanGraph
+from crew.providers import AuxResult, stream_aux
 from crew.team import flow_builder
 from crew.team.agent_profile import AgentProfile, evaluate_capability_coverage, is_agent_profile_available
 from crew.team.capabilities import normalize_capabilities, normalize_capability
@@ -1104,20 +1105,16 @@ async def _chat_provider_text(
     max_tokens: int,
     response_format: dict[str, Any] | None = None,
     reasoning_mode: str | None = None,
-) -> ChatResponse:
-    kwargs = _optional_provider_kwargs(
+) -> AuxResult:
+    return await stream_aux(
+        provider,
+        messages,
+        purpose="team-planning",
         max_tokens=max_tokens,
+        retry=0,
         response_format=response_format,
         reasoning_mode=reasoning_mode,
     )
-    while True:
-        try:
-            return await provider.chat(messages, **kwargs)
-        except TypeError as exc:
-            unsupported = _unsupported_provider_kwarg(exc, kwargs)
-            if unsupported is None:
-                raise
-            kwargs.pop(unsupported)
 
 
 async def _stream_provider_text(
@@ -1325,7 +1322,7 @@ async def _race_provider_text(
                 return "".join(stream_chunks)
         return "".join(stream_chunks)
 
-    async def collect_chat() -> ChatResponse:
+    async def collect_chat() -> AuxResult:
         return await _chat_provider_text(
             provider,
             messages,
@@ -1348,11 +1345,52 @@ async def _race_provider_text(
     try:
         deadline = started + race_timeout_s
         pending: set[asyncio.Task[Any]] = set(tasks)
+
+        def _record_finished_chat_leg(response: Any) -> None:
+            """stream 腿获胜时补记已完成的聚合腿诊断，保持 race 诊断契约完整。"""
+            chat_reasoning = str(getattr(response, "reasoning_content", "") or "")
+            diagnostics.update({
+                "chat_elapsed_ms": int((time.perf_counter() - started) * 1000),
+                "chat_reasoning_chars": len(chat_reasoning),
+                "chat_finish_reason": response.finish_reason,
+            })
+            text = str(response.text or "")
+            if text.strip():
+                text_status = _planning_decision_text_status(text, max_work_units=max_work_units)
+                if text_status == "non_json":
+                    diagnostics["chat_non_json"] = True
+                elif text_status == "schema_invalid":
+                    diagnostics["chat_schema_invalid"] = True
+
         while pending and time.perf_counter() < deadline:
             wait_s = max(0.0, deadline - time.perf_counter())
             done, pending = await asyncio.wait(pending, timeout=wait_s, return_when=asyncio.FIRST_COMPLETED)
             if not done:
                 break
+            if stream_task in done:
+                text = stream_task.result()
+                stream_text = text
+                diagnostics.update({"stream_elapsed_ms": int((time.perf_counter() - started) * 1000)})
+                if text.strip():
+                    text_status = _planning_decision_text_status(text, max_work_units=max_work_units)
+                    if text_status == "non_json":
+                        diagnostics["stream_non_json"] = True
+                    elif text_status == "schema_invalid":
+                        diagnostics["stream_schema_invalid"] = True
+                    else:
+                        chat_task.cancel()
+                        if chat_task.done():
+                            try:
+                                _record_finished_chat_leg(chat_task.result())
+                            except Exception:  # noqa: BLE001 - 诊断补记不阻断获胜路径
+                                pass
+                        diagnostics.update(stream_diag)
+                        diagnostics.update({
+                            "transport": "stream_race_won",
+                            "race_winner": "stream",
+                            "cancelled_transport": "chat",
+                        })
+                        return text, diagnostics
             if chat_task in done:
                 response = chat_task.result()
                 text = str(response.text or "")
@@ -1366,8 +1404,7 @@ async def _race_provider_text(
                 if text.strip():
                     text_status = _planning_decision_text_status(text, max_work_units=max_work_units)
                     if text_status == "non_json":
-                        # A provider may return explanatory chat text while
-                        # stream_chat still produces the structured decision.
+                        # 聚合腿可能先返回解释性文本，而 stream 腿仍在产出结构化决策。
                         diagnostics["chat_non_json"] = True
                     elif text_status == "schema_invalid":
                         diagnostics["chat_schema_invalid"] = True
@@ -1382,25 +1419,6 @@ async def _race_provider_text(
                             "cancelled_transport": "stream",
                         })
                         return text, diagnostics
-            if stream_task in done:
-                text = stream_task.result()
-                stream_text = text
-                diagnostics.update({"stream_elapsed_ms": int((time.perf_counter() - started) * 1000)})
-                if text.strip():
-                    text_status = _planning_decision_text_status(text, max_work_units=max_work_units)
-                    if text_status == "non_json":
-                        diagnostics["stream_non_json"] = True
-                    elif text_status == "schema_invalid":
-                        diagnostics["stream_schema_invalid"] = True
-                    else:
-                        chat_task.cancel()
-                        diagnostics.update(stream_diag)
-                        diagnostics.update({
-                            "transport": "stream_race_won",
-                            "race_winner": "stream",
-                            "cancelled_transport": "chat",
-                        })
-                        return text, diagnostics
 
         has_reasoning = int(stream_diag.get("reasoning_chars") or 0) > 0 or stream_diag.get("first_reasoning_ms") is not None
         if chat_task.done():
@@ -1408,6 +1426,16 @@ async def _race_provider_text(
                 response = chat_task.result()
                 diagnostics["chat_reasoning_chars"] = len(str(getattr(response, "reasoning_content", "") or ""))
                 diagnostics["chat_finish_reason"] = response.finish_reason
+                finished_chat_text = str(response.text or "")
+                if finished_chat_text.strip():
+                    finished_chat_status = _planning_decision_text_status(
+                        finished_chat_text,
+                        max_work_units=max_work_units,
+                    )
+                    if finished_chat_status == "non_json":
+                        diagnostics["chat_non_json"] = True
+                    elif finished_chat_status == "schema_invalid":
+                        diagnostics["chat_schema_invalid"] = True
             except Exception:
                 pass
         if not has_reasoning:
@@ -1990,18 +2018,18 @@ async def _build_ai_workflow_nodes_with_llm(
         timeout_s = float(budget.get("ai_planning_timeout") or 20.0)
     except (TypeError, ValueError):
         timeout_s = 20.0
-    response = await asyncio.wait_for(
-        provider.chat(
-            _ai_llm_prompt(
-                goal=goal,
-                spec=spec,
-                members=members,
-                profile=profile,
-                policy_report=policy_report,
-            ),
-            tools=None,
+    response = await stream_aux(
+        provider,
+        _ai_llm_prompt(
+            goal=goal,
+            spec=spec,
+            members=members,
+            profile=profile,
+            policy_report=policy_report,
         ),
+        purpose="team-planning",
         timeout=max(0.2, timeout_s),
+        retry=0,
     )
     data = _json_from_text(response.text)
     nodes, edges, notes = _coerce_llm_nodes(data=data, team=team, goal=goal)

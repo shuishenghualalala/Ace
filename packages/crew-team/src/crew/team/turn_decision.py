@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from crew.core.types import Message
 from crew.core.text_parsing import extract_json_object
+from crew.providers import stream_aux
 
 
 TurnKind = Literal["direct_chat", "status_query", "new_workflow", "uncertain"]
@@ -17,6 +19,41 @@ ExecutionMode = Literal["direct", "fast", "standard", "ai"]
 
 TEAM_TURN_DECISION_TIMEOUT = 4.0
 TEAM_TURN_DECISION_MAX_TOKENS = 512
+
+# 路由决策缓存：同 roster（context 摘要）+ 同问题形态（归一化 user message）命中
+# 即跳过 LLM。只缓存成功决策；短 TTL 避免「status_query 结论」长期过期。
+TEAM_TURN_DECISION_CACHE_TTL_SECONDS = 120.0
+_TEAM_TURN_DECISION_CACHE_MAX_ENTRIES = 512
+_team_turn_decision_cache: dict[str, tuple[float, TeamTurnDecision]] = {}
+
+
+def _turn_decision_cache_key(user_message: str, context: dict[str, Any]) -> str:
+    normalized = " ".join(str(user_message or "").split()).lower()[:240]
+    try:
+        context_json = json.dumps(context, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        context_json = repr(sorted(context))
+    digest = hashlib.sha256(context_json.encode("utf-8")).hexdigest()[:16]
+    return f"{digest}:{normalized}"
+
+
+def _cache_get_turn_decision(key: str) -> TeamTurnDecision | None:
+    entry = _team_turn_decision_cache.get(key)
+    if entry is None:
+        return None
+    cached_at, decision = entry
+    if time.monotonic() - cached_at > TEAM_TURN_DECISION_CACHE_TTL_SECONDS:
+        _team_turn_decision_cache.pop(key, None)
+        return None
+    _team_turn_decision_cache[key] = (time.monotonic(), decision)
+    return decision
+
+
+def _cache_put_turn_decision(key: str, decision: TeamTurnDecision) -> None:
+    if len(_team_turn_decision_cache) >= _TEAM_TURN_DECISION_CACHE_MAX_ENTRIES:
+        oldest = min(_team_turn_decision_cache, key=lambda k: _team_turn_decision_cache[k][0])
+        _team_turn_decision_cache.pop(oldest, None)
+    _team_turn_decision_cache[key] = (time.monotonic(), decision)
 
 
 @dataclass(frozen=True)
@@ -97,10 +134,18 @@ async def decide_team_turn(
     timeout_s: float = TEAM_TURN_DECISION_TIMEOUT,
 ) -> TeamTurnDecision:
     started = time.perf_counter()
-    messages = team_turn_decision_messages(user_message=user_message, context=context)
     diagnostics: dict[str, Any] = {
         "has_existing_workflow": bool(context.get("has_existing_workflow")),
     }
+    cache_key = _turn_decision_cache_key(user_message, context)
+    cached = _cache_get_turn_decision(cache_key)
+    if cached is not None:
+        return replace(
+            cached,
+            elapsed_ms=0,
+            diagnostics={**cached.diagnostics, "status": "cache_hit", "cache_hit": True},
+        )
+    messages = team_turn_decision_messages(user_message=user_message, context=context)
     try:
         response = await asyncio.wait_for(
             _chat(provider, messages, max_tokens=TEAM_TURN_DECISION_MAX_TOKENS),
@@ -110,7 +155,7 @@ async def decide_team_turn(
         diagnostics["partial_chars"] = len(text)
         data = _json_from_text(text)
         decision = coerce_team_turn_decision(data, has_existing_workflow=bool(context.get("has_existing_workflow")))
-        return TeamTurnDecision(
+        resolved = TeamTurnDecision(
             turn_kind=decision.turn_kind,
             execution_mode=decision.execution_mode,
             reason=decision.reason,
@@ -118,6 +163,8 @@ async def decide_team_turn(
             elapsed_ms=int((time.perf_counter() - started) * 1000),
             diagnostics={**diagnostics, "status": "success"},
         )
+        _cache_put_turn_decision(cache_key, resolved)
+        return resolved
     except Exception as exc:  # noqa: BLE001 - caller should fall back to existing routing
         return TeamTurnDecision(
             turn_kind="uncertain",
@@ -189,12 +236,13 @@ def new_workflow_decision(
 
 
 async def _chat(provider: Any, messages: list[Message], *, max_tokens: int) -> Any:
-    try:
-        return await provider.chat(messages, tools=None, max_tokens=max_tokens)
-    except TypeError as exc:
-        if "max_tokens" not in str(exc):
-            raise
-        return await provider.chat(messages, tools=None)
+    return await stream_aux(
+        provider,
+        messages,
+        purpose="team-turn-decision",
+        max_tokens=max_tokens,
+        retry=0,
+    )
 
 
 def _json_from_text(text: str) -> dict[str, Any]:

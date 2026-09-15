@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -47,6 +48,7 @@ class LLMProvider(ABC):
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
         reasoning_mode: str | None = None,
+        purpose: str | None = None,
     ) -> ChatResponse:
         """一次（非流式）补全。返回归一化的 ChatResponse。
 
@@ -59,6 +61,9 @@ class LLMProvider(ABC):
         ``reasoning_mode`` 取值：None = 模型默认行为；"off"/"disabled" = 关闭思考；
         其余为思考等级（minimal/low/medium/high/xhigh/max），由厂商档案
         （crew.providers.vendors）映射为各家专属参数，不支持的档位被忽略。
+
+        ``purpose`` 是辅助调用的元数据标记（如 ``"compaction"`` 摘要、标题生成），
+        不进请求体；provider 可把它写进调用 trace 以便审计与计费归类。
         """
         raise NotImplementedError
 
@@ -234,6 +239,33 @@ class SessionStore(ABC):
           request_view，后者表示按本次实际发送视图（system/message/tools）计算。
         """
         ...
+
+    async def load_async(self, session_id: str, *, owner_account_id: str) -> list[Message]:
+        """异步读路径：同步实现的 store 默认在线程池执行，不阻塞事件循环。"""
+        return await asyncio.to_thread(self.load, session_id, owner_account_id=owner_account_id)
+
+    async def save_async(
+        self,
+        session_id: str,
+        messages: list[Message],
+        workspace_id: str = "default",
+        *,
+        owner_account_id: str,
+        title_fallback: str | None = None,
+        last_prompt_tokens: int | None = None,
+        last_prompt_tokens_source: str | None = None,
+    ) -> None:
+        """异步写路径：同步实现的 store 默认在线程池执行，不阻塞事件循环。"""
+        await asyncio.to_thread(
+            self.save,
+            session_id,
+            messages,
+            workspace_id=workspace_id,
+            owner_account_id=owner_account_id,
+            title_fallback=title_fallback,
+            last_prompt_tokens=last_prompt_tokens,
+            last_prompt_tokens_source=last_prompt_tokens_source,
+        )
 
     @abstractmethod
     def clear_prompt_usage(self, session_id: str, owner_account_id: str) -> None:

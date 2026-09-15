@@ -81,7 +81,9 @@ from crew.team.team_manager import (
 from crew.team.team_spec import build_team_spec, persisted_team_spec_for_turn
 from crew.team.turn_decision import (
     TeamTurnDecision,
+    _team_turn_decision_cache,
     coerce_team_turn_decision,
+    decide_team_turn,
     new_workflow_decision,
 )
 from crew.team.turn_router import TeamTurnRouter
@@ -202,7 +204,10 @@ class JsonGraphProvider(LLMProvider):
 """)
 
     async def stream_chat(self, messages, tools=None, *, max_tokens=None):
-        yield StreamChunk(delta_text="", done=True)
+        resp = await self.chat(messages, tools, max_tokens=max_tokens)
+        if resp.text:
+            yield StreamChunk(delta_text=resp.text)
+        yield StreamChunk(delta_text="", done=True, finish_reason=resp.finish_reason)
 
 
 class SemanticPlanningProvider(LLMProvider):
@@ -258,7 +263,10 @@ class SemanticPlanningProvider(LLMProvider):
 """)
 
     async def stream_chat(self, messages, tools=None, *, max_tokens=None):
-        yield StreamChunk(delta_text="", done=True)
+        resp = await self.chat(messages, tools, max_tokens=max_tokens)
+        if resp.text:
+            yield StreamChunk(delta_text=resp.text)
+        yield StreamChunk(delta_text="", done=True, finish_reason=resp.finish_reason)
 
 
 class ParallelResearchPlanningProvider(LLMProvider):
@@ -316,7 +324,10 @@ class ParallelResearchPlanningProvider(LLMProvider):
 """)
 
     async def stream_chat(self, messages, tools=None, *, max_tokens=None):
-        yield StreamChunk(delta_text="", done=True)
+        resp = await self.chat(messages, tools, max_tokens=max_tokens)
+        if resp.text:
+            yield StreamChunk(delta_text=resp.text)
+        yield StreamChunk(delta_text="", done=True, finish_reason=resp.finish_reason)
 
 
 class DisplayMappingProvider(RoleProvider):
@@ -656,16 +667,26 @@ class ReasoningOnlyPlanningProvider(LLMProvider):
         self.stream_calls = 0
         self.chat_calls = 0
         self.stream_max_tokens = None
-        self.chat_max_tokens = None
+        self.retry_max_tokens = None
 
     async def chat(self, messages, tools=None, *, max_tokens=None):
         self.chat_calls += 1
-        self.chat_max_tokens = max_tokens
         return ChatResponse(text="", reasoning_content="继续推演但没有输出 JSON", finish_reason="length")
 
-    async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+    async def stream_chat(
+        self,
+        messages,
+        tools=None,
+        *,
+        max_tokens=None,
+        response_format=None,
+        reasoning_mode=None,
+    ):
         self.stream_calls += 1
-        self.stream_max_tokens = max_tokens
+        if reasoning_mode == "disabled":
+            self.retry_max_tokens = max_tokens
+        else:
+            self.stream_max_tokens = max_tokens
         yield StreamChunk(reasoning_content="先分析任务结构")
         yield StreamChunk(delta_text="", done=True, finish_reason="length")
 
@@ -708,11 +729,25 @@ class StructuredRetryPlanningProvider(LLMProvider):
         reasoning_mode=None,
     ):
         self.stream_calls += 1
+        if reasoning_mode == "disabled":
+            self.retry_kwargs = {
+                "max_tokens": max_tokens,
+                "response_format": response_format,
+                "reasoning_mode": reasoning_mode,
+            }
+            yield StreamChunk(delta_text=json.dumps(
+                P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"],
+                ensure_ascii=False,
+            ))
+            yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+            return
         yield StreamChunk(reasoning_content="先分析任务结构")
         yield StreamChunk(delta_text="", done=True, finish_reason="length")
 
 
 class ChatWinsPlanningProvider(LLMProvider):
+    """竞速建模：stream 腿（首调用）长推演不出结构化结果，聚合腿（次调用）快速给出 JSON。"""
+
     def __init__(self):
         self.stream_calls = 0
         self.chat_calls = 0
@@ -723,12 +758,21 @@ class ChatWinsPlanningProvider(LLMProvider):
 
     async def stream_chat(self, messages, tools=None, *, max_tokens=None):
         self.stream_calls += 1
-        yield StreamChunk(reasoning_content="持续推演但暂不输出 JSON")
-        await asyncio.sleep(1.0)
+        if self.stream_calls == 1:
+            yield StreamChunk(reasoning_content="持续推演但暂不输出 JSON")
+            await asyncio.sleep(1.0)
+            yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+            return
+        yield StreamChunk(delta_text=json.dumps(
+            P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"],
+            ensure_ascii=False,
+        ))
         yield StreamChunk(delta_text="", done=True, finish_reason="stop")
 
 
 class ChatNonJsonStreamPlanningProvider(LLMProvider):
+    """竞速建模：stream 腿（首调用）直接给出结构化决策，聚合腿（次调用）只返回解释性文本。"""
+
     def __init__(self):
         self.stream_calls = 0
         self.chat_calls = 0
@@ -739,33 +783,55 @@ class ChatNonJsonStreamPlanningProvider(LLMProvider):
 
     async def stream_chat(self, messages, tools=None, *, max_tokens=None):
         self.stream_calls += 1
+        call = self.stream_calls
         await asyncio.sleep(0.01)
-        yield StreamChunk(delta_text=json.dumps(
-            P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"],
-            ensure_ascii=False,
-        ))
+        if call == 1:
+            yield StreamChunk(delta_text=json.dumps(
+                P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"],
+                ensure_ascii=False,
+            ))
+        else:
+            yield StreamChunk(delta_text="我会先分析任务，再给出执行拆分。")
         yield StreamChunk(delta_text="", done=True, finish_reason="stop")
 
 
 class ChatNonJsonStreamReasoningPlanningProvider(ChatNonJsonStreamPlanningProvider):
+    """竞速建模：stream 腿（首调用）先推演再给 JSON；聚合腿（次调用）快速返回解释性文本。"""
+
     async def stream_chat(self, messages, tools=None, *, max_tokens=None):
         self.stream_calls += 1
-        yield StreamChunk(reasoning_content="持续推演规划")
-        await asyncio.sleep(0.3)
-        yield StreamChunk(delta_text=json.dumps(
-            P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"],
-            ensure_ascii=False,
-        ))
+        if self.stream_calls == 1:
+            yield StreamChunk(reasoning_content="持续推演规划")
+            await asyncio.sleep(0.3)
+            yield StreamChunk(delta_text=json.dumps(
+                P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"],
+                ensure_ascii=False,
+            ))
+            yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+            return
+        yield StreamChunk(delta_text="我会先分析任务，再给出执行拆分。")
         yield StreamChunk(delta_text="", done=True, finish_reason="stop")
 
 
 class ChatSchemaInvalidStreamPlanningProvider(ChatNonJsonStreamPlanningProvider):
-    async def chat(self, messages, tools=None, *, max_tokens=None):
-        self.chat_calls += 1
-        return ChatResponse(text=json.dumps({"work_units": []}, ensure_ascii=False))
+    """竞速建模：stream 腿（首调用）结构化决策获胜，聚合腿（次调用）返回 schema 非法 JSON。"""
+
+    async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+        self.stream_calls += 1
+        if self.stream_calls == 1:
+            yield StreamChunk(delta_text=json.dumps(
+                P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"],
+                ensure_ascii=False,
+            ))
+            yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+            return
+        yield StreamChunk(delta_text=json.dumps({"work_units": []}, ensure_ascii=False))
+        yield StreamChunk(delta_text="", done=True, finish_reason="stop")
 
 
 class StreamReasoningGracePlanningProvider(LLMProvider):
+    """竞速建模：stream 腿（首调用）出 reasoning 后给出 JSON；聚合腿（次调用）快速返回空结果。"""
+
     def __init__(self):
         self.stream_calls = 0
         self.chat_calls = 0
@@ -777,9 +843,12 @@ class StreamReasoningGracePlanningProvider(LLMProvider):
 
     async def stream_chat(self, messages, tools=None, *, max_tokens=None):
         self.stream_calls += 1
-        yield StreamChunk(reasoning_content="持续推演规划")
-        await asyncio.sleep(0.3)
-        yield StreamChunk(delta_text=json.dumps(P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"], ensure_ascii=False))
+        if self.stream_calls == 1:
+            yield StreamChunk(reasoning_content="持续推演规划")
+            await asyncio.sleep(0.3)
+            yield StreamChunk(delta_text=json.dumps(P0_STANDARD_SEMANTIC_SCENARIOS["synthesis"]["decision"], ensure_ascii=False))
+            yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+            return
         yield StreamChunk(delta_text="", done=True, finish_reason="stop")
 
 
@@ -821,7 +890,10 @@ class ScopePlanningProvider(LLMProvider):
 """.replace("__UNIT_KIND__", unit_kind))
 
     async def stream_chat(self, messages, tools=None, *, max_tokens=None):
-        yield StreamChunk(delta_text="", done=True)
+        resp = await self.chat(messages, tools, max_tokens=max_tokens)
+        if resp.text:
+            yield StreamChunk(delta_text=resp.text)
+        yield StreamChunk(delta_text="", done=True, finish_reason=resp.finish_reason)
 
 
 class CachePlanningProvider(SemanticPlanningProvider):
@@ -866,7 +938,10 @@ class MissingInfoPlanningProvider(LLMProvider):
 """)
 
     async def stream_chat(self, messages, tools=None, *, max_tokens=None):
-        yield StreamChunk(delta_text="", done=True)
+        resp = await self.chat(messages, tools, max_tokens=max_tokens)
+        if resp.text:
+            yield StreamChunk(delta_text=resp.text)
+        yield StreamChunk(delta_text="", done=True, finish_reason=resp.finish_reason)
 
 
 class DefaultableMissingInfoPlanningProvider(LLMProvider):
@@ -894,7 +969,10 @@ class DefaultableMissingInfoPlanningProvider(LLMProvider):
 """)
 
     async def stream_chat(self, messages, tools=None, *, max_tokens=None):
-        yield StreamChunk(delta_text="", done=True)
+        resp = await self.chat(messages, tools, max_tokens=max_tokens)
+        if resp.text:
+            yield StreamChunk(delta_text=resp.text)
+        yield StreamChunk(delta_text="", done=True, finish_reason=resp.finish_reason)
 
 
 class JsonProfileProvider(RoleProvider):
@@ -926,7 +1004,10 @@ class SlowPlanningProvider(LLMProvider):
         return ChatResponse(text="{}")
 
     async def stream_chat(self, messages, tools=None, *, max_tokens=None):
-        yield StreamChunk(delta_text="", done=True)
+        resp = await self.chat(messages, tools, max_tokens=max_tokens)
+        if resp.text:
+            yield StreamChunk(delta_text=resp.text)
+        yield StreamChunk(delta_text="", done=True, finish_reason=resp.finish_reason)
 
 
 class InvalidJsonPlanningProvider(LLMProvider):
@@ -934,7 +1015,10 @@ class InvalidJsonPlanningProvider(LLMProvider):
         return ChatResponse(text="这不是 JSON {{{")
 
     async def stream_chat(self, messages, tools=None, *, max_tokens=None):
-        yield StreamChunk(delta_text="", done=True)
+        resp = await self.chat(messages, tools, max_tokens=max_tokens)
+        if resp.text:
+            yield StreamChunk(delta_text=resp.text)
+        yield StreamChunk(delta_text="", done=True, finish_reason=resp.finish_reason)
 
 
 class LeaderQuestionProvider(RoleProvider):
@@ -7184,7 +7268,7 @@ async def test_team_graph_planner_standard_compiles_semantic_parallel_work_units
         provider=provider,
     )
 
-    assert provider.calls == 1
+    assert provider.calls == 2  # 竞速双腿（stream + 聚合）各一次调用
     prompt_body = provider.messages[-1].content
     assert "formation_members" not in prompt_body
     assert "team_requirements" not in prompt_body
@@ -7269,7 +7353,10 @@ async def test_team_graph_planner_drops_reserved_leader_control_work_units():
 """)
 
         async def stream_chat(self, messages, tools=None, *, max_tokens=None):
-            yield StreamChunk(delta_text="", done=True)
+            resp = await self.chat(messages, tools, max_tokens=max_tokens)
+            if resp.text:
+                yield StreamChunk(delta_text=resp.text)
+            yield StreamChunk(delta_text="", done=True, finish_reason=resp.finish_reason)
 
     tm, _ = _team(config=Config(
         max_iterations=3,
@@ -7352,7 +7439,10 @@ async def test_team_graph_planner_renames_repeated_review_and_keeps_summary_term
 """)
 
         async def stream_chat(self, messages, tools=None, *, max_tokens=None):
-            yield StreamChunk(delta_text="", done=True)
+            resp = await self.chat(messages, tools, max_tokens=max_tokens)
+            if resp.text:
+                yield StreamChunk(delta_text=resp.text)
+            yield StreamChunk(delta_text="", done=True, finish_reason=resp.finish_reason)
 
     tm, _ = _team(config=Config(
         max_iterations=3,
@@ -7704,8 +7794,8 @@ async def test_team_graph_planner_streams_planning_decision_and_records_diagnost
     )
 
     planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
-    assert provider.stream_calls == 1
-    assert provider.chat_calls <= 1
+    assert provider.stream_calls == 2  # 竞速双腿均走流式管线
+    assert provider.chat_calls == 0
     assert provider.stream_max_tokens == PLANNING_DECISION_MAX_TOKENS == 4096
     assert planning_decision["status"] == "success"
     assert planning_decision["transport"] == "stream_race_won"
@@ -7742,8 +7832,8 @@ async def test_team_graph_planner_uses_chat_when_chat_wins_planning_race():
     )
 
     planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
-    assert provider.stream_calls == 1
-    assert provider.chat_calls == 1
+    assert provider.stream_calls == 2  # stream 腿长推演，聚合腿（次调用）获胜
+    assert provider.chat_calls == 0
     assert planning_decision["status"] == "success"
     assert planning_decision["transport"] == "chat_race_won"
     assert planning_decision["race_winner"] == "chat"
@@ -7879,8 +7969,8 @@ async def test_team_graph_planner_keeps_waiting_stream_when_reasoning_after_chat
     )
 
     planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
-    assert provider.stream_calls == 1
-    assert provider.chat_calls == 1
+    assert provider.stream_calls == 2  # 聚合腿快速返回空结果，stream 腿经 reasoning grace 获胜
+    assert provider.chat_calls == 0
     assert planning_decision["status"] == "success"
     assert planning_decision["transport"] == "stream_reasoning_grace"
     assert planning_decision["race_winner"] == "stream"
@@ -7957,10 +8047,10 @@ async def test_team_graph_planner_classifies_reasoning_only_without_calling_stre
 
     planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
     labels = [str(event.get("label") or "") for event in events]
-    assert provider.stream_calls == 1
-    assert provider.chat_calls == 2
+    assert provider.stream_calls == 3  # 竞速双腿 + 结构化重试
+    assert provider.chat_calls == 0
     assert provider.stream_max_tokens == PLANNING_DECISION_MAX_TOKENS == 4096
-    assert provider.chat_max_tokens == PLANNING_DECISION_RETRY_MAX_TOKENS == 2048
+    assert provider.retry_max_tokens == PLANNING_DECISION_RETRY_MAX_TOKENS == 2048
     assert planning_decision["status"] == "fallback"
     assert planning_decision["error_type"] == "reasoning_only_length"
     assert planning_decision["first_reasoning_ms"] is not None
@@ -8000,8 +8090,8 @@ async def test_team_graph_planner_uses_structured_non_reasoning_retry():
     )
 
     planning_decision = graph_plan.workflow_plan["planning"]["planning_decision"]
-    assert provider.stream_calls == 1
-    assert provider.chat_calls == 2
+    assert provider.stream_calls == 3  # 竞速双腿 + 结构化重试
+    assert provider.chat_calls == 0
     assert provider.retry_kwargs == {
         "max_tokens": PLANNING_DECISION_RETRY_MAX_TOKENS,
         "response_format": {"type": "json_object"},
@@ -8048,7 +8138,7 @@ async def test_team_graph_planner_reuses_planning_decision_cache_for_same_inputs
         provider=provider,
     )
 
-    assert provider.calls == 1
+    assert provider.calls == 2  # 首次规划竞速双腿；第二次命中规划缓存不再调用
     assert first.workflow_plan["planning"]["planning_decision"]["cache_hit"] is False
     assert second.workflow_plan["planning"]["planning_decision"]["cache_hit"] is True
     assert second.workflow_plan["planning"]["planning_decision"]["transport"] == "cache"
@@ -8165,7 +8255,7 @@ async def test_team_planning_pauses_when_plan_only_conflicts_with_default_execut
         provider=provider,
     )
 
-    assert provider.calls == 1
+    assert provider.calls == 2  # 竞速双腿各一次调用
     assert graph_plan.nodes == []
     planning = graph_plan.workflow_plan["planning"]
     assert planning["scope_conflict"] is True
@@ -8436,7 +8526,10 @@ async def test_team_graph_planner_ai_missing_capability_contract_falls_back_to_s
 """)
 
         async def stream_chat(self, messages, tools=None, *, max_tokens=None):
-            yield StreamChunk(delta_text="", done=True)
+            resp = await self.chat(messages, tools, max_tokens=max_tokens)
+            if resp.text:
+                yield StreamChunk(delta_text=resp.text)
+            yield StreamChunk(delta_text="", done=True, finish_reason=resp.finish_reason)
 
     tm, _ = _team(config=Config(
         max_iterations=3,
@@ -8676,7 +8769,10 @@ async def test_team_graph_planner_auto_fast_uses_work_unit_capability_contract()
 """)
 
         async def stream_chat(self, messages, tools=None, *, max_tokens=None):
-            yield StreamChunk(delta_text="", done=True)
+            resp = await self.chat(messages, tools, max_tokens=max_tokens)
+            if resp.text:
+                yield StreamChunk(delta_text=resp.text)
+            yield StreamChunk(delta_text="", done=True, finish_reason=resp.finish_reason)
 
     tm, _ = _team(config=Config(
         max_iterations=3,
@@ -10030,6 +10126,96 @@ async def test_team_status_duration_query_reads_snapshot_without_new_workflow(tm
         and "节点数" in str(_team_internal_body(chunk).get("text") or "")
         for chunk in chunks
     )
+
+
+async def test_decide_team_turn_cache_hit_skips_llm_call():
+    class CountingDecisionProvider(LLMProvider):
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, messages, tools=None, *, max_tokens=None):
+            raise AssertionError("cache miss path must use stream_chat via stream_aux")
+
+        async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+            self.calls += 1
+            yield StreamChunk(delta_text=json.dumps({
+                "turn_kind": "direct_chat",
+                "execution_mode": "standard",
+                "reason": "轻量聊天",
+            }, ensure_ascii=False))
+            yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+
+    provider = CountingDecisionProvider()
+    context = {"has_existing_workflow": True, "member_ids": ["leader", "coder"]}
+    _team_turn_decision_cache.clear()
+    try:
+        first = await decide_team_turn(provider, user_message="现在整体情况如何", context=context)
+        second = await decide_team_turn(provider, user_message="现在整体情况如何", context=context)
+
+        assert provider.calls == 1
+        assert first.diagnostics.get("cache_hit") is not True
+        assert second.turn_kind == first.turn_kind
+        assert second.reason == first.reason
+        assert second.elapsed_ms == 0
+        assert second.diagnostics.get("status") == "cache_hit"
+        assert second.diagnostics.get("cache_hit") is True
+
+        await decide_team_turn(provider, user_message="接下来该做什么", context=context)
+        assert provider.calls == 2
+    finally:
+        _team_turn_decision_cache.clear()
+
+
+async def test_team_status_probe_runs_parallel_with_deterministic_routing(tmp_path):
+    routing_finished = asyncio.Event()
+
+    class SlowDecisionProvider(RoleProvider):
+        async def chat(self, messages, tools=None):
+            system = messages[0].content if messages else ""
+            if "TeamTurnDecision" in system:
+                await routing_finished.wait()
+                return ChatResponse(text=json.dumps({
+                    "turn_kind": "status_query",
+                    "execution_mode": "direct",
+                    "reason": "用户询问整体情况",
+                    "status_query": {
+                        "question": "现在整体情况如何",
+                        "scope": "latest_turn",
+                        "needs": ["nodes"],
+                    },
+                }, ensure_ascii=False))
+            if "TeamStatusSnapshot" in system:
+                payload = json.loads(messages[-1].content)
+                return ChatResponse(text=f"整体情况正常，节点数 {len(payload['TeamStatusSnapshot'].get('nodes') or [])}。")
+            return await super().chat(messages, tools)
+
+    store = SQLiteKanbanStore(tmp_path / "team-status-parallel.db")
+    tm, _ = _team(SlowDecisionProvider(), kanban_store=store)
+
+    first_chunks = [
+        chunk
+        async for chunk in tm.interact(Envelope.of("组队算1+1", session_id="status-parallel-team", mode="team"))
+    ]
+    assert any(_is_team_internal(chunk) for chunk in first_chunks)
+
+    original_route = tm.turn_router.route
+
+    def route_then_signal(query, **kwargs):
+        decision = original_route(query, **kwargs)
+        routing_finished.set()
+        return decision
+
+    tm.turn_router.route = route_then_signal
+    try:
+        chunks = [
+            chunk
+            async for chunk in tm.interact(Envelope.of("现在整体情况如何", session_id="status-parallel-team", mode="team"))
+        ]
+    finally:
+        tm.turn_router.route = original_route
+
+    final_text = next(chunk.body["text"] for chunk in chunks if chunk.kind == "final")
+    assert "节点数" in final_text
 
 
 async def test_direct_leader_continue_gets_team_context_summary():

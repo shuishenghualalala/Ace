@@ -20,6 +20,8 @@ OWNER_TABLE_LABELS = {
     # 主库同名旧表只是 ADR-0038 的回退备份、不参与 owner 扫描；
     # legacy_owner_scan_targets 的排除条件（table not in *_DB_TABLES）据此保持。
     "sessions": "会话",
+    "session_events": "会话事件",
+    "writer_leases": "会话写者租约",
     "session_agent_config": "会话 Agent 配置",
     "workspaces": "工作空间",
     "compaction_summaries": "压缩摘要",

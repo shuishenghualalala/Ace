@@ -52,6 +52,7 @@ from crew.core.interfaces import (
 )
 from crew.core.text_parsing import extract_json_object
 from crew.core.types import Message
+from crew.providers import stream_aux
 from crew.plugins.manager import PluginManager
 from crew.security.launch import use_process_launch
 from crew.state.config import Config
@@ -1501,31 +1502,16 @@ class InProcessTeamManager(TeamManager):
         }
         try:
             provider = self._provider_for_owner(owner_account_id)
-            response = await asyncio.wait_for(
-                provider.chat(
-                    [Message.system(system), Message.user(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))],
-                    tools=None,
-                    max_tokens=800,
-                ),
+            response = await stream_aux(
+                provider,
+                [Message.system(system), Message.user(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))],
+                purpose="team-status-summary",
                 timeout=8.0,
+                max_tokens=800,
             )
             text = str(response.text or "").strip()
             if text:
                 return text
-        except TypeError:
-            try:
-                response = await asyncio.wait_for(
-                    provider.chat(
-                        [Message.system(system), Message.user(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))],
-                        tools=None,
-                    ),
-                    timeout=8.0,
-                )
-                text = str(response.text or "").strip()
-                if text:
-                    return text
-            except Exception:  # noqa: BLE001
-                pass
         except Exception:  # noqa: BLE001
             pass
         return self._fallback_team_status_summary(snapshot)
@@ -1561,27 +1547,36 @@ class InProcessTeamManager(TeamManager):
             lines.append("需关注：" + "；".join(str(node.get("title") or node.get("node_id")) for node in problem_nodes[:4]))
         return "\n".join(lines)
 
-    async def _try_team_status_query(
+    async def _team_status_probe(
         self,
         envelope: Envelope,
-        *,
-        team: Team,
-    ) -> list[ResponseChunk] | None:
+    ) -> tuple[Any, TeamTurnDecision] | None:
+        """状态询问探针：workflow 查找 + 路由决策（确定性规则优先，歧义时 LLM）。
+
+        与 interact 的确定性路由并行调度，避免路由 LLM 等待串行叠加到主链路。
+        """
         workflow = self._latest_team_workflow_for_status(envelope.session_id, owner_account_id=envelope.user_id)
         if workflow is None:
             return None
-        context = self._team_turn_decision_context(workflow)
         user_message = str(envelope.query or "")
         decision = self._deterministic_team_status_query_decision(user_message)
         if decision is None:
+            context = self._team_turn_decision_context(workflow)
             decision = await decide_team_turn(
                 self._provider_for_owner(envelope.user_id),
                 user_message=user_message,
                 context=context,
             )
-        if not decision.is_status_query:
-            return None
+        return workflow, decision
+
+    async def _team_status_chunks(
+        self,
+        envelope: Envelope,
+        workflow: Any,
+        decision: TeamTurnDecision,
+    ) -> list[ResponseChunk]:
         snapshot = self._team_status_snapshot(workflow)
+        user_message = str(envelope.query or "")
         text = await self._leader_status_summary(
             user_message,
             snapshot,
@@ -7141,61 +7136,68 @@ class InProcessTeamManager(TeamManager):
             async for chunk in self._interact_user_mention(envelope, team=team):
                 yield chunk
             return
-        status_chunks = await self._try_team_status_query(envelope, team=team)
-        if status_chunks is not None:
-            for chunk in status_chunks:
+        # 状态询问探针与下方确定性路由并行：路由 LLM 决策期间主链路继续推进，
+        # 团队回合延迟不再叠加「路由 LLM 串行等待」。
+        status_probe = asyncio.create_task(self._team_status_probe(envelope))
+        try:
+            team_cfg = self.config.team_config or {}
+            required_workflow = bool(team_cfg.get("required_workflow", True))
+            raw_team_spec = envelope.params.get("team_spec")
+            team_spec = raw_team_spec if isinstance(raw_team_spec, dict) else None
+            if team_spec is None and team.team_spec:
+                team_spec = persisted_team_spec_for_turn(
+                    team.team_spec,
+                    str(envelope.query or ""),
+                )
+            explicit_profile = envelope.params.get("team_execution_profile")
+            route_team_spec = team_spec
+            base_turn_decision = self.turn_router.route(
+                str(envelope.query or ""),
+                team_spec=route_team_spec,
+            )
+            intent_spec = (
+                base_turn_decision.diagnostics.get("team_spec")
+                if isinstance(base_turn_decision.diagnostics.get("team_spec"), dict)
+                else {}
+            )
+            if team_spec is None and intent_spec:
+                team_spec = intent_spec
+            intent_profile = intent_spec.get("task_profile") if isinstance(intent_spec.get("task_profile"), dict) else {}
+            explicit_mode = (
+                str(explicit_profile.get("requested_mode") or "").strip().lower()
+                if isinstance(explicit_profile, dict)
+                else ""
+            )
+            turn_decision = self._turn_decision_for_execution_profile(
+                base_turn_decision,
+                explicit_mode=explicit_mode,
+            )
+            direct_leader = turn_decision.is_direct_chat
+            execution_profile = self._execution_profile_for_turn(
+                envelope,
+                intent_profile=intent_profile,
+                turn_decision=turn_decision,
+            )
+            log.info(
+                "[Team] turn_decision session=%s turn_kind=%s execution_mode=%s source=%s reason=%s task_kind=%s complexity=%s required_workflow=%s query=%r",
+                envelope.session_id,
+                turn_decision.turn_kind,
+                turn_decision.execution_mode,
+                turn_decision.diagnostics.get("source"),
+                turn_decision.reason,
+                intent_profile.get("intent"),
+                intent_profile.get("complexity"),
+                required_workflow,
+                str(envelope.query or "")[:80],
+            )
+            probed = await status_probe
+        except BaseException:
+            status_probe.cancel()
+            raise
+        if probed is not None and probed[1].is_status_query:
+            for chunk in await self._team_status_chunks(envelope, probed[0], probed[1]):
                 yield chunk
             return
-        team_cfg = self.config.team_config or {}
-        required_workflow = bool(team_cfg.get("required_workflow", True))
-        raw_team_spec = envelope.params.get("team_spec")
-        team_spec = raw_team_spec if isinstance(raw_team_spec, dict) else None
-        if team_spec is None and team.team_spec:
-            team_spec = persisted_team_spec_for_turn(
-                team.team_spec,
-                str(envelope.query or ""),
-            )
-        explicit_profile = envelope.params.get("team_execution_profile")
-        route_team_spec = team_spec
-        base_turn_decision = self.turn_router.route(
-            str(envelope.query or ""),
-            team_spec=route_team_spec,
-        )
-        intent_spec = (
-            base_turn_decision.diagnostics.get("team_spec")
-            if isinstance(base_turn_decision.diagnostics.get("team_spec"), dict)
-            else {}
-        )
-        if team_spec is None and intent_spec:
-            team_spec = intent_spec
-        intent_profile = intent_spec.get("task_profile") if isinstance(intent_spec.get("task_profile"), dict) else {}
-        explicit_mode = (
-            str(explicit_profile.get("requested_mode") or "").strip().lower()
-            if isinstance(explicit_profile, dict)
-            else ""
-        )
-        turn_decision = self._turn_decision_for_execution_profile(
-            base_turn_decision,
-            explicit_mode=explicit_mode,
-        )
-        direct_leader = turn_decision.is_direct_chat
-        execution_profile = self._execution_profile_for_turn(
-            envelope,
-            intent_profile=intent_profile,
-            turn_decision=turn_decision,
-        )
-        log.info(
-            "[Team] turn_decision session=%s turn_kind=%s execution_mode=%s source=%s reason=%s task_kind=%s complexity=%s required_workflow=%s query=%r",
-            envelope.session_id,
-            turn_decision.turn_kind,
-            turn_decision.execution_mode,
-            turn_decision.diagnostics.get("source"),
-            turn_decision.reason,
-            intent_profile.get("intent"),
-            intent_profile.get("complexity"),
-            required_workflow,
-            str(envelope.query or "")[:80],
-        )
         if required_workflow and team.teammates and turn_decision.is_new_workflow:
             async for chunk in self._run_required_workflow(
                 envelope,

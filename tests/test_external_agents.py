@@ -3621,11 +3621,16 @@ async def test_codex_cli_detaches_inherited_stdin(tmp_path, monkeypatch):
         async def wait(self):
             return self.returncode
 
-    async def fake_create_subprocess_exec(*args, **kwargs):
+    async def fake_spawn_tracked(*args, **kwargs):
         captured.update(kwargs)
-        return FakeProcess()
+        loop = asyncio.get_running_loop()
+        exit_future = loop.create_future()
+        # 读侧 EOF 与 exit 的先后由 _collect_host_output 的排干宽限兜住，
+        # 假进程下一拍即结算退出。
+        loop.call_soon(lambda: not exit_future.done() and exit_future.set_result(None))
+        return FakeProcess(), exit_future
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr("crew.security.launch.spawn_tracked", fake_spawn_tracked)
     output = await run_external_cli(ExternalCliConfig(
         provider="codex",
         executable_path="codex",

@@ -25,6 +25,26 @@ _BROWSER_REF_RE = re.compile(r"^p[1-9]\d*:[es][1-9]\d*$")
 _FORM_FIELD_TYPES = ("textbox", "combobox", "checkbox", "radio", "slider")
 
 
+def coerce_tool_arguments(value: Any) -> Any:
+    """宽进垫片：模型把整段参数又包成一层 JSON 字符串时做显式二次解析。
+
+    部分模型会把 arguments 序列化两次（首字符为 ``[``/``{`` 的字符串）。二次解析
+    成功则展开为真实结构；失败原样保留，交给下游 schema 校验（严出）拒绝并回灌
+    给模型自纠，不在这里崩循环。
+    """
+    if not isinstance(value, str):
+        return value
+    stripped = value.lstrip()
+    if not stripped.startswith(("[", "{")):
+        return value
+    import json
+
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        return value
+
+
 def safe_duration_seconds(value: Any) -> float | None:
     """Return a duration in seconds, dropping values that are epoch timestamps.
 

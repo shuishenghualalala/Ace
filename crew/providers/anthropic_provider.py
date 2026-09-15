@@ -15,12 +15,14 @@ from crew.core.errors import (
     is_unsupported_image_input_error,
 )
 from crew.core.interfaces import LLMProvider
+from crew.providers.keying import ApiKeyResolver
 from crew.core.types import (
     IMAGE_INPUT_UNAVAILABLE_NOTICE,
     ChatResponse,
     Message,
     StreamChunk,
     ToolCall,
+    coerce_tool_arguments,
 )
 from crew.state.logging import llm_trace
 
@@ -197,6 +199,7 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int | None = None,
         timeout: float | httpx.Timeout = 120.0,
         vision: bool = True,
+        api_key_resolver: ApiKeyResolver | None = None,
     ) -> None:
         if isinstance(timeout, (int, float)):
             timeout = httpx.Timeout(connect=10.0, read=float(timeout), write=10.0, pool=5.0)
@@ -220,6 +223,21 @@ class AnthropicProvider(LLMProvider):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.vision = vision
+        self._api_key_resolver = api_key_resolver
+        self._current_api_key = api_key
+
+    def _sync_api_key(self) -> None:
+        """resolver 模式下每次请求取一次凭据快照，变化时整体替换请求头。
+
+        替换成新 dict 而非原地改键：已发起的请求持有旧 headers 对象，
+        飞行中的流不受配置变更影响。无 resolver 时保持构造时的静态 key。
+        """
+        if self._api_key_resolver is None:
+            return
+        key = self._api_key_resolver()
+        if key != self._current_api_key:
+            self._current_api_key = key
+            self._headers = {**self._headers, "x-api-key": key}
 
     async def aclose(self) -> None:
         """Close the owned HTTP client exactly once, including concurrent callers."""
@@ -267,10 +285,12 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
         reasoning_mode: str | None = None,
+        purpose: str | None = None,
     ) -> ChatResponse:
+        self._sync_api_key()
         payload = self._payload(messages, tools, max_tokens_override=max_tokens)
         session = _current_session()
-        llm_trace("request", {"session_id": session, "model": self.model, "stream": False, "messages": payload["messages"]})
+        llm_trace("request", {"session_id": session, "model": self.model, "stream": False, "purpose": purpose or "", "messages": payload["messages"]})
         try:
             response = await self._client.post(self._url, headers=self._headers, json=payload)
             response.raise_for_status()
@@ -320,6 +340,7 @@ class AnthropicProvider(LLMProvider):
         response_format: dict[str, Any] | None = None,
         reasoning_mode: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
+        self._sync_api_key()
         payload = {**self._payload(messages, tools, max_tokens_override=max_tokens), "stream": True}
         session = _current_session()
         tool_acc: dict[int, dict[str, Any]] = {}
@@ -334,7 +355,7 @@ class AnthropicProvider(LLMProvider):
                 return None
             raw = acc.get("input_json") or "{}"
             try:
-                args = json.loads(raw)
+                args = coerce_tool_arguments(json.loads(raw))
             except json.JSONDecodeError:
                 args = {"_raw": raw}
             tool = ToolCall(id=acc.get("id", ""), name=acc.get("name", ""), arguments=args)

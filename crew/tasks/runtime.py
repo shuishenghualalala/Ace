@@ -23,7 +23,7 @@ from crew.state.logging import get_logger
 from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 from crew.tasks.models import RuntimeTask, TaskKind, normalize_task_status
-from crew.tools.process_registry import terminate_process_tree
+from crew.security.process_lifecycle import terminate_process_tree_sync
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
 _WORKER_STOP_GRACE_SECONDS = 3.0
@@ -886,7 +886,7 @@ class TaskRuntime:
     def kill_process_group(pid: int, _reason: str = "") -> None:
         if pid <= 0:
             return
-        terminate_process_tree(pid)
+        terminate_process_tree_sync(pid)
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

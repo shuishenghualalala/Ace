@@ -219,7 +219,7 @@ def _post_internal(gateway_url: str, token: str, path: str, payload: dict[str, A
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=310) as response:
+        with urllib.request.urlopen(request, timeout=60) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")

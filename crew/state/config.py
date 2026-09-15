@@ -203,6 +203,10 @@ class Config:
     # --- 运行时 ---
     db_path: str = "crew_data/crew.db"
     memory_db_path: str = "crew_data/memory.db"  # SQLiteMemory 独立路径，便于测试隔离
+    # 内置记忆默认关闭：SQLiteMemory 的关键词朴素召回是 demo 级，「有记忆但召回差」
+    # 比没有更伤产品观感。显式开启：runtime.memory_enabled: true（中期路线是接入
+    # MCP memory server，见 docs/todo/ace-weaknesses-dsh-remediation-plan.md §7.3）。
+    memory_enabled: bool = False
     # cron Feature 独立库（ADR-0038 拆库试点）：与主库分文件，回退时把本键指回 crew.db 即可
     cron_db_path: str = "crew_data/cron.db"
     # work Feature 独立库（ADR-0038 拆库第二批）：与主库分文件，回退时把本键指回 crew.db 即可
@@ -257,6 +261,9 @@ class Config:
     compaction_post_compact_max_important_chars: int = 5000  # 单条恢复重要结论最大字符数
     compaction_post_compact_max_total_chars: int = 140000  # 恢复附件总字符闸口
     compaction_max_tool_result_chars: int = 20000  # 单条 tool result 最大字符数，超长截断
+    compaction_max_overflow_retries: int = 1  # 上下文 overflow 后 compact-retry 次数上限（每次溢出序列一次）
+    compaction_summary_max_tokens: int = 8192  # 摘要调用 maxTokens 封顶（截断视为失败）
+    compaction_summary_prefix_reuse: bool = True  # 摘要调用是否允许 KV 前缀复用（按 provider 能力决策）
     retry_max: int = 2
     retry_backoff: float = 1.0
     title_auto: bool = True
@@ -364,6 +371,9 @@ class Config:
     # config.yaml 的 tools.browser 节，BrowserConfig 的解析与默认值由 browser
     # Feature 侧装配时负责。
     browser_config: dict[str, Any] = field(default_factory=dict)
+    # tools.web_search 节透传：provider 有序降级链、API key 环境变量名等，
+    # 解析由 web_search_service 负责（加载时经 configure_search 注入）。
+    web_search_config: dict[str, Any] = field(default_factory=dict)
     # 进程内 HTTP 边界（web_search/web_extract/Wiki）上游代理；空=读环境变量
     network: NetworkConfig = field(default_factory=NetworkConfig)
 
@@ -1762,6 +1772,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
             cfg.timeout = _as_float(llm.get("timeout", cfg.timeout), cfg.timeout)
         runtime = data.get("runtime", {})
         cfg.db_path = runtime.get("db_path", cfg.db_path)
+        cfg.memory_enabled = bool(runtime.get("memory_enabled", cfg.memory_enabled))
         cfg.cron_db_path = runtime.get("cron_db_path", cfg.cron_db_path)
         cfg.work_db_path = runtime.get("work_db_path", cfg.work_db_path)
         cfg.kanban_db_path = runtime.get("kanban_db_path", cfg.kanban_db_path)
@@ -1936,6 +1947,14 @@ def load_config(config_path: str | Path | None = None) -> Config:
             if not isinstance(browser_raw, dict):
                 browser_raw = {}
             cfg.browser_config = dict(browser_raw)
+            web_search_raw = tools.get("web_search") or {}
+            if not isinstance(web_search_raw, dict):
+                web_search_raw = {}
+            cfg.web_search_config = dict(web_search_raw)
+            # 把 tools.web_search 节注入搜索 seam（provider 有序降级链与 key 环境变量名）。
+            from crew.tools.web_search_service import configure_search
+
+            configure_search(cfg.web_search_config)
 
         session_cfg = data.get("session", {})
         if isinstance(session_cfg, dict) and session_cfg:
@@ -2003,6 +2022,15 @@ def load_config(config_path: str | Path | None = None) -> Config:
             )
             cfg.compaction_max_tool_result_chars = int(
                 comp.get("max_tool_result_chars", cfg.compaction_max_tool_result_chars)
+            )
+            cfg.compaction_max_overflow_retries = max(
+                0, int(comp.get("max_overflow_retries", cfg.compaction_max_overflow_retries))
+            )
+            cfg.compaction_summary_max_tokens = max(
+                0, int(comp.get("summary_max_tokens", cfg.compaction_summary_max_tokens))
+            )
+            cfg.compaction_summary_prefix_reuse = bool(
+                comp.get("summary_prefix_reuse", cfg.compaction_summary_prefix_reuse)
             )
             retry = agent.get("retry", {}) or {}
             cfg.retry_max = int(retry.get("max_retries", cfg.retry_max))

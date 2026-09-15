@@ -47,6 +47,7 @@ from crew.agent.executor import AgentExecutor, BuiltinExecutor, ExecutionContext
 from crew.tools.file_utils import MAX_READ_FILE_BYTES, read_verified_bytes
 from crew.tools.policy import ToolDisclosureMode
 from crew.agent.loop.control import TurnControl
+from crew.agent.loop.history_repair import repair_orphan_tool_calls
 from crew.agent.plan import get_plan_mode_attachment_messages
 from crew.agent.prompt_builder import DEFAULT_AGENT_IDENTITY, build_prompt_parts
 from crew.plugins.manager import PluginManager, TerminalOutcome
@@ -202,9 +203,10 @@ class SingleAgent(Agent):
         self.system_prompt = system_prompt
         self.tool_filter = tool_filter  # None=全部工具；否则只暴露子集
         self.max_iterations = max_iterations
-        # 未注入 executor 时默认走自带循环，保持向后兼容（Team 即走此路径）
+        # 未注入 executor 时默认走自带循环，保持向后兼容（Team 即走此路径）。
+        # compactor 同步注入默认 executor：否则溢出兜底与每轮 compact_view 静默关闭。
         self.executor = executor or BuiltinExecutor(
-            provider, registry, plugins, max_iterations=max_iterations
+            provider, registry, plugins, max_iterations=max_iterations, compactor=compactor
         )
         self.compactor = compactor
         self.enable_title = enable_title
@@ -246,8 +248,8 @@ class SingleAgent(Agent):
         # 后台标题生成任务引用集合：防止 fire-and-forget task 被 GC 中断，
         # done 后自动清出。标题生成不得阻塞 final 帧发送（见 _spawn_title_task）。
         self._title_tasks: set[asyncio.Task] = set()
-        # 同一 (owner, title_sid) 在途标题任务去重，避免 early + 回合末 fallback 双发 LLM。
-        self._title_inflight: set[tuple[str, str]] = set()
+        # 同一 (owner, title_sid) 的在途标题任务：spawn 去重 + 新用户回合 supersede 取消。
+        self._title_inflight: dict[tuple[str, str], asyncio.Task] = {}
         # Provider ownership is declared by the composition root. Executor/compactor and
         # ``self.provider`` may all reference borrowed App resources, so references alone
         # must never imply ownership.
@@ -285,6 +287,7 @@ class SingleAgent(Agent):
                 task.cancel()
             if title_tasks:
                 await asyncio.gather(*title_tasks, return_exceptions=True)
+            self._title_inflight.clear()
 
             seen: set[int] = set()
             for provider in self._owned_providers:
@@ -609,7 +612,7 @@ class SingleAgent(Agent):
         session_token = current_session_id.set(session_id)
         workspace_token = current_workspace_id.set(envelope.workspace_id)
         try:
-            history = self.session_store.load(session_id, owner_account_id=owner)
+            history = await self.session_store.load_async(session_id, owner_account_id=owner)
             context_messages = await self._contribute_prompt_context(envelope)
             system_static, user_reminder = await self._build_prompts(
                 envelope, [], cwd, task_sid=session_id
@@ -747,7 +750,40 @@ class SingleAgent(Agent):
 
         t = time.perf_counter()
         owner = envelope.user_id
-        history = self.session_store.load(sid, owner_account_id=owner)
+        # 新用户回合 supersede 上一回合在途的标题生成：旧标题不应覆盖新会话内容。
+        self._cancel_title_task(task_sid, owner)
+        history = await self.session_store.load_async(sid, owner_account_id=owner)
+        # 冷读配平：为崩溃/旧数据留下的孤儿 tool_call 合成 error 结果（幂等，
+        # 随本轮落库持久化；平衡的历史扫描为空，不每轮产生开销）。
+        repaired = repair_orphan_tool_calls(history)
+        if repaired:
+            history.extend(repaired)
+            log.warning(
+                "历史配平：合成孤儿 tool_call 错误结果 session=%s count=%d",
+                sid,
+                len(repaired),
+            )
+        if not self.lightweight:
+            # 崩溃恢复：上轮被 kill -9 留下的开放回合补 turn_end{interrupted} 闭合
+            # （断点报告在 D4 会话列表扫描，不自动续跑），再为本轮记 turn_start。
+            close_open_turn = getattr(self.session_store, "close_open_turn", None)
+            if callable(close_open_turn) and close_open_turn(sid, owner_account_id=owner):
+                log.warning("上轮会话被中断：已闭合悬挂回合 session=%s", sid)
+            record_turn = getattr(self.session_store, "record_turn_event", None)
+            if callable(record_turn):
+                from crew.state.session_store import SessionEventType
+
+                record_turn(
+                    sid,
+                    owner_account_id=owner,
+                    kind=SessionEventType.TURN_START,
+                )
+        if not self.lightweight:
+            # 文件清单持久会话信息：从工具调用历史提取 read/modified 清单写入
+            # canonical（原地刷新 is_meta 消息），压缩遮蔽后由压缩管线重新注入视图。
+            from crew.agent.compact.file_manifest import upsert_file_manifest
+
+            upsert_file_manifest(history)
         # usage 只代表最近一次 Provider 请求；新回合开始时先清掉旧值，
         # 否则在本回合尚未收到 usage 时，UI 会把上一回合的真实值误认为当前值。
         clear_prompt_usage = getattr(self.session_store, "clear_prompt_usage", None)
@@ -783,7 +819,7 @@ class SingleAgent(Agent):
             # 由 finally 块调度（见下方 _spawn_title_task 调用），不抢占主推理窗口。
             if not self._session_needs_title(task_sid, owner):
                 try:
-                    self.session_store.save(
+                    await self.session_store.save_async(
                         task_sid,
                         history,
                         workspace_id=envelope.workspace_id,
@@ -821,6 +857,9 @@ class SingleAgent(Agent):
 
         # 3. 上下文压缩：仅作用于「发给 LLM 的视图」llm_messages，
         #    不破坏 history（旧的详细历史仍完整持久化）。
+        #    工具 schema 提前解析：摘要调用的 KV 前缀复用需要复放 tools 块。
+        effective_tool_filter = self._effective_tool_filter(task_sid, owner_account_id=owner)
+        tool_schemas = self.registry.list_schemas(effective_tool_filter)
         llm_messages = list(history)  # 拷贝，避免 executor 追加时污染 canonical
         if self.compactor is not None:
             t = time.perf_counter()
@@ -828,6 +867,8 @@ class SingleAgent(Agent):
                 llm_messages,
                 task_sid,
                 owner_account_id=owner,
+                system_prompt=system_static,
+                tools=tool_schemas,
             )
             log.info("[PERF] compactor          %.3fs", time.perf_counter() - t)
 
@@ -850,7 +891,6 @@ class SingleAgent(Agent):
         )
 
         # 4. 组执行上下文，委托 executor（executor 把本轮新消息追加到 llm_messages）
-        effective_tool_filter = self._effective_tool_filter(task_sid, owner_account_id=owner)
         authorized_tool_names = frozenset(
             effective_tool_filter if effective_tool_filter is not None else self.registry.names()
         )
@@ -870,7 +910,7 @@ class SingleAgent(Agent):
                 for attachment in (envelope.attachments or [])
                 if isinstance(attachment, dict)
             ],
-            tool_schemas=self.registry.list_schemas(effective_tool_filter),
+            tool_schemas=tool_schemas,
             authorized_tool_names=authorized_tool_names,
             enforce_tool_scope=True,
             params=dict(envelope.params),
@@ -942,6 +982,25 @@ class SingleAgent(Agent):
                     last_prompt_tokens_source=last_prompt_tokens_source,
                 )
                 persisted = True
+                if not self.lightweight:
+                    record_turn = getattr(self.session_store, "record_turn_event", None)
+                    if callable(record_turn):
+                        from crew.state.session_store import SessionEventType
+
+                        record_turn(
+                            sid,
+                            owner_account_id=owner,
+                            kind=SessionEventType.TURN_END,
+                            status=terminal_outcome,
+                        )
+                if last_prompt_tokens is not None:
+                    await self._record_meter_checkpoint(
+                        envelope,
+                        task_sid,
+                        llm_messages,
+                        last_prompt_tokens,
+                        last_prompt_tokens_source,
+                    )
             finally:
                 try:
                     await self.plugins.on_session_end(
@@ -1279,7 +1338,6 @@ class SingleAgent(Agent):
         inflight_key = (owner, title_sid)
         if inflight_key in self._title_inflight:
             return
-        self._title_inflight.add(inflight_key)
 
         async def _run() -> None:
             try:
@@ -1317,12 +1375,68 @@ class SingleAgent(Agent):
                         log.debug("推送会话标题失败：%s", exc)
             except Exception as exc:  # noqa: BLE001
                 log.debug("后台标题生成失败：%s", exc)
-            finally:
-                self._title_inflight.discard(inflight_key)
 
         task = asyncio.create_task(_run())
+
+        def _discard(done_task: asyncio.Task) -> None:
+            self._title_tasks.discard(done_task)
+            if self._title_inflight.get(inflight_key) is done_task:
+                self._title_inflight.pop(inflight_key, None)
+
+        self._title_inflight[inflight_key] = task
         self._title_tasks.add(task)
-        task.add_done_callback(self._title_tasks.discard)
+        task.add_done_callback(_discard)
+
+    def _cancel_title_task(self, title_sid: str, owner: str) -> None:
+        """新用户回合 supersede 在途标题生成：取消旧任务，失败/取消不进入用户回合路径。"""
+        task = self._title_inflight.pop((owner, title_sid), None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _record_meter_checkpoint(
+        self,
+        envelope: Envelope,
+        task_sid: str,
+        llm_messages: list[Message],
+        last_prompt_tokens: int,
+        last_prompt_tokens_source: str | None,
+    ) -> None:
+        """本轮真实 usage 喂给压缩器计量锚点，并以 meter_checkpoint 事件落库。
+
+        在 _persist_turn 之后调用：save 已写好基础 checkpoint 行，
+        这里追加带完整请求信封（fingerprint + 锚定视图估算）的版本，
+        TokenMeter 跨重启按最新一行重锚定。
+        """
+        from crew.agent.compact.tokens import estimate_tokens
+
+        owner = envelope.user_id
+        fingerprint = f"{type(self.provider).__name__}:{getattr(self.provider, 'model', '')}"
+        view_estimate = estimate_tokens(llm_messages)
+        source = last_prompt_tokens_source or "provider"
+        if self.compactor is not None:
+            self.compactor.record_meter_usage(
+                task_sid,
+                owner,
+                prompt_tokens=last_prompt_tokens,
+                source=source,
+                fingerprint=fingerprint,
+                view_estimate=view_estimate,
+            )
+        record = getattr(self.session_store, "record_meter_checkpoint", None)
+        if not callable(record):
+            return
+        try:
+            await asyncio.to_thread(
+                record,
+                task_sid,
+                owner_account_id=owner,
+                prompt_tokens=last_prompt_tokens,
+                source=source,
+                fingerprint=fingerprint,
+                baseline_estimate=view_estimate,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("meter_checkpoint 落库失败 session=%s", task_sid)
 
     async def _persist_turn(
         self,
@@ -1341,7 +1455,7 @@ class SingleAgent(Agent):
 
         无论本轮是正常结束、被硬停（CancelledError）还是异常，都会调用，保证
         user 消息与已完成的工具调用一定落库（否则停止后刷新即丢、下一轮无上下文）。
-        持久化用同步 session_store.save（不可被取消打断）；memory.write 用 shield
+        持久化用 save_async（线程池执行，同样不可被取消打断）；memory.write 用 shield
         兜底，被取消时 best-effort。子 agent（lightweight）用完即弃，不落库不写记忆。
         session_store 按 sidechain 的 session_id 存（transcript 隔离机制，不能改）；
         memory 按 task_sid（稳定主会话 id）存，否则会落到 ::turn:: 临时 id 下。
@@ -1409,7 +1523,7 @@ class SingleAgent(Agent):
                 # title_fallback：enable_title=True 时留空占位，等下方 generate_session_title
                 # 生成摘要后由 set_title 写入；否则保留旧行为（首条 user 消息截断作标题）。
                 # 避免「先 save 写入截断用户原话 → 摘要生成失败 → 标题永久停在原话」。
-                self.session_store.save(
+                await self.session_store.save_async(
                     sid,
                     history,
                     workspace_id=envelope.workspace_id,

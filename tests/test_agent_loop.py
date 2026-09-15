@@ -20,9 +20,13 @@ from crew.agent.loop import (
     ToolCallGuardrailConfig,
     ToolCallGuardrailController,
     TurnControl,
+    TOOL_NOT_STARTED,
+    TOOL_OUTCOME_UNKNOWN,
     is_context_overflow,
     is_empty_response,
+    is_max_tokens_finish,
     provider_chain,
+    repair_orphan_tool_calls,
     should_continue,
     should_parallelize,
 )
@@ -472,8 +476,13 @@ def test_resilience_pure_helpers():
     assert not is_empty_response("hi", [], "")
     assert not is_empty_response("", [ToolCall("c", "t", {})], "")
     assert should_continue("length", [])
+    assert should_continue("max_tokens", [])
     assert not should_continue("stop", [])
     assert not should_continue("length", [ToolCall("c", "t", {})])
+    assert is_max_tokens_finish("length")
+    assert is_max_tokens_finish("max_tokens")
+    assert not is_max_tokens_finish("stop")
+    assert not is_max_tokens_finish(None)
     assert is_context_overflow(ProviderError("maximum context length exceeded"))
     assert not is_context_overflow(ProviderError("rate limited"))
     p, f1, f2 = object(), object(), object()
@@ -501,6 +510,104 @@ async def test_loop_continuation_on_length_truncation():
     assert chunks[-1].kind == "final" and chunks[-1].body["text"] == "后半段"
 
 
+@pytest.mark.parametrize("finish_reason", ["length", "max_tokens", "model_context_window_exceeded"])
+async def test_loop_max_tokens_message_rejects_tool_execution(finish_reason):
+    """stop_reason=length 一族的消息即使携带完整 tool_calls 也整批拒执行：
+    历史只保留文本前缀，随后走截断续写让模型重新发起完整调用。"""
+    calls: list[str] = []
+    reg = Registry()
+    reg.register(
+        name="file_write",
+        toolset="file",
+        schema={"name": "file_write", "parameters": {"type": "object"}},
+        handler=lambda args: calls.append(args.get("path")) or tool_result(ok=True),
+    )
+    provider = ScriptStreamProvider(script=[
+        ChatResponse(
+            text="先写一点",
+            tool_calls=[ToolCall("w1", "file_write", {"path": "/tmp/x", "content": "y"})],
+            finish_reason=finish_reason,
+        ),
+        ChatResponse(text="后半段", finish_reason="stop"),
+    ])
+    ctx = _ctx()
+    chunks = await _collect(_executor(provider, reg), ctx)
+
+    assert calls == []  # 截断消息的工具未执行
+    assert chunks[-1].kind == "final" and chunks[-1].body["text"] == "后半段"
+    truncated = next(m for m in ctx.messages if m.role == "assistant")
+    assert truncated.content == "先写一点"
+    assert truncated.tool_calls == []  # 写入历史的截断消息不含工具调用
+    assert any((m.content or "").startswith("（系统提示：上一条回复因长度上限被截断") for m in ctx.messages)
+
+
+async def test_loop_interrupt_strips_undispatched_tool_calls_from_history():
+    """模型响应后、工具派发前被中断：未派发的 tool_calls 不写入历史，只保留文本前缀。"""
+    control = TurnControl()
+    calls: list[str] = []
+    reg = Registry()
+    reg.register(
+        name="file_write",
+        toolset="file",
+        schema={"name": "file_write", "parameters": {"type": "object"}},
+        handler=lambda args: calls.append(args.get("path")) or tool_result(ok=True),
+    )
+
+    class InterruptBeforeDispatchProvider(FakeProvider):
+        async def stream_chat(self, messages, tools=None):
+            self.stream_calls.append(list(messages))
+            yield StreamChunk(delta_text="部分文本")
+            control.interrupt()  # 模型响应完整返回后、主循环派发工具前命中中断
+            yield StreamChunk(
+                delta_text="",
+                done=True,
+                tool_calls=[ToolCall("w1", "file_write", {"path": "/tmp/x", "content": "y"})],
+                finish_reason="stop",
+            )
+
+    ctx = _ctx(control=control)
+    chunks = await _collect(_executor(InterruptBeforeDispatchProvider(), reg), ctx)
+
+    assert calls == []  # 中断后工具未派发
+    assistant = next(m for m in ctx.messages if m.role == "assistant")
+    assert assistant.content == "部分文本"
+    assert assistant.tool_calls == []
+    assert chunks[-1].kind == "final"
+
+
+def test_history_repair_two_semantics_and_idempotence():
+    """孤儿 tool_call 按执行痕迹合成两段语义 error 结果；重复扫描幂等。"""
+    started = ToolCall("c1", "file_write", {"path": "/tmp/a"}, status="running")
+    finished_no_result = ToolCall("c2", "terminal", {"command": "ls"}, duration=1.5)
+    not_started = ToolCall("c3", "file_read", {"path": "/tmp/b"})
+    answered = ToolCall("c4", "file_read", {"path": "/tmp/c"})
+    inline_result = ToolCall("c5", "browser_use", {"action": "snapshot"}, result="页面")
+    messages = [
+        Message.assistant("干活", [started, finished_no_result, not_started, answered, inline_result]),
+        Message.tool("c4", "已有结果", name="file_read"),
+    ]
+
+    repaired = repair_orphan_tool_calls(messages)
+
+    assert [m.tool_call_id for m in repaired] == ["c1", "c2", "c3"]
+    assert repaired[0].content.startswith(TOOL_OUTCOME_UNKNOWN)
+    assert repaired[1].content.startswith(TOOL_OUTCOME_UNKNOWN)  # duration 已写回 = 执行过
+    assert repaired[2].content.startswith(TOOL_NOT_STARTED)
+    assert all(m.role == "tool" for m in repaired)
+    # 合成 id 确定性派生：固定 namespace + 类型前缀 + 源调用 id，不随机
+    from crew.agent.loop.history_repair import synthetic_result_id
+
+    assert [m.request_id for m in repaired] == [
+        synthetic_result_id("c1"),
+        synthetic_result_id("c2"),
+        synthetic_result_id("c3"),
+    ]
+    assert all(m.request_id.startswith("ace.synthetic:tool_result:") for m in repaired)
+    # 输入不被修改；配平后的历史再次扫描为空（幂等，可安全持久化）
+    assert repair_orphan_tool_calls(messages) == repaired
+    assert repair_orphan_tool_calls(messages + repaired) == []
+
+
 async def test_loop_overflow_triggers_force_compact_then_succeeds():
     class SpyCompactor:
         def __init__(self):
@@ -508,7 +615,8 @@ async def test_loop_overflow_triggers_force_compact_then_succeeds():
 
         async def force_compact(self, messages, session_id=None):
             self.calls += 1
-            return messages
+            # 兜底压缩必须让投影前进，否则 executor 判定「无法进一步压缩」不再重试
+            return [messages[-1]] if messages else messages
 
         async def compact_view(
             self,
@@ -527,7 +635,9 @@ async def test_loop_overflow_triggers_force_compact_then_succeeds():
         script=[ChatResponse(text="压缩后成功", finish_reason="stop")],
     )
     ex = _executor(provider, compactor=spy)
-    chunks = await _collect(ex, _ctx())
+    chunks = await _collect(
+        ex, _ctx(messages=[Message.user(f"第{i}条历史") for i in range(5)])
+    )
     final = chunks[-1]
     assert final.kind == "final" and final.body["text"] == "压缩后成功"
     assert spy.calls >= 1  # 命中溢出后调用了兜底压缩
@@ -708,6 +818,50 @@ async def test_parallel_tools_preserve_order():
     # 两条 tool 结果按原始 tool_call 顺序回灌
     tool_msgs = [m for m in ctx.messages if m.role == "tool"]
     assert [m.tool_call_id for m in tool_msgs] == ["a", "b"]
+
+
+async def test_parallel_results_land_in_request_order_despite_completion_order():
+    """并发段按完成序执行、按请求序回灌：后发起的先完成也不能改变上下文顺序。"""
+    reg = Registry()
+
+    async def delayed_read(args):
+        await asyncio.sleep({ "p1": 0.03, "p2": 0.01, "p3": 0.0 }[args["path"]])
+        return tool_result(path=args["path"])
+
+    reg.register(
+        name="file_read",
+        toolset="file",
+        schema={"name": "file_read", "parameters": {}},
+        handler=delayed_read,
+        is_async=True,
+    )
+    calls = [
+        ToolCall("p1", "file_read", {"path": "p1"}),
+        ToolCall("p2", "file_read", {"path": "p2"}),
+        ToolCall("p3", "file_read", {"path": "p3"}),
+    ]
+
+    class ThreeReadsThenDone(FakeProvider):
+        def __init__(self):
+            super().__init__()
+            self._n = 0
+
+        async def chat(self, messages, tools=None):
+            self.calls.append(list(messages))
+            self._n += 1
+            if self._n == 1:
+                return ChatResponse(tool_calls=calls)
+            return ChatResponse(text="完成", finish_reason="stop")
+
+    provider = ThreeReadsThenDone()
+    ex = _executor(provider, reg)
+    ctx = _ctx()
+    await _collect(ex, ctx)
+
+    tool_msgs = [m for m in ctx.messages if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_msgs] == ["p1", "p2", "p3"]
+    # 发给模型的第二轮请求视图里，toolResult 序同样 == toolCall 序
+    assert [m.tool_call_id for m in provider.calls[1] if m.role == "tool"] == ["p1", "p2", "p3"]
 
 
 async def test_parallel_tool_execution_respects_worker_cap():

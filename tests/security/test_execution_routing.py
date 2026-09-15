@@ -935,9 +935,11 @@ async def test_captured_execution_redacts_sensitive_env_value(tmp_path, monkeypa
             return 0
 
     async def fake_exec(*argv, **kwargs):
-        return _FakeProc()
+        done = asyncio.get_running_loop().create_future()
+        done.set_result(None)
+        return _FakeProc(), done
 
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr("crew.security.launch.spawn_tracked", fake_exec)
     token = current_process_launch.set(disabled_launch)
     try:
         result = await execute_captured(
@@ -998,7 +1000,9 @@ async def test_host_captured_timeout_and_cancel_terminate_process_tree(
 
     terminated = 0
     real_terminate = process_lifecycle.terminate_process_tree
-    real_spawn = asyncio.create_subprocess_exec
+    from crew.security import launch as _launch
+
+    real_spawn = _launch.spawn_tracked
 
     if cancel:
         first_spawn = True
@@ -1011,7 +1015,7 @@ async def test_host_captured_timeout_and_cancel_terminate_process_tree(
             return await real_spawn(*args, **kwargs)
 
         monkeypatch.setattr(
-            "crew.security.launch.asyncio.create_subprocess_exec",
+            "crew.security.launch.spawn_tracked",
             delayed_first_spawn,
         )
 
@@ -1044,3 +1048,35 @@ async def test_host_captured_timeout_and_cancel_terminate_process_tree(
         current_process_launch.reset(token)
 
     assert terminated == 1
+
+
+@pytest.mark.asyncio
+async def test_captured_exit_does_not_wait_forever_for_inherited_pipe(
+    tmp_path, monkeypatch
+):
+    """F4：leader 退出但孙进程继承 stdout fd 持管时，exit 后按统一 grace
+    排干返回（而非等孙进程退出/永久挂起），已产出输出不丢。"""
+    import time as _time
+
+    from crew.security import process_lifecycle
+
+    monkeypatch.setattr(process_lifecycle, "DEFAULT_GRACE_MS", 300)
+    code = (
+        "import subprocess, sys;"
+        "print('leader-out', flush=True);"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])"
+    )
+    token = current_process_launch.set(
+        ProcessLaunch(PermissionProfile(PermissionProfileKind.DISABLED))
+    )
+    started = _time.monotonic()
+    try:
+        result = await execute_captured(
+            (sys.executable, "-c", code), cwd=tmp_path, timeout=30
+        )
+    finally:
+        current_process_launch.reset(token)
+    elapsed = _time.monotonic() - started
+    assert "leader-out" in result.stdout
+    # leader 立即退出：总耗时 ~= 排干宽限（0.3s），远小于孙进程存活 10s
+    assert elapsed < 5

@@ -52,6 +52,7 @@ from crew.browser.types import (
     WORKFLOW_CAPABILITY_ORDER_V2,
     WORKFLOW_CAPABILITY_ORDER_V3,
 )
+from crew.providers import stream_aux
 
 logger = logging.getLogger(__name__)
 
@@ -2964,10 +2965,15 @@ async def generate_skill_metadata_with_model(skill_md: Path, frontmatter: dict, 
         "- 不要包含密钥、内部接口、绝对路径。\n\n"
         f"Skill 内容：\n{_skill_generation_context(skill_md, frontmatter, body)}"
     )
-    resp = await provider.chat([
-        Message.system("你是 Crew skill 元数据生成器，只输出严格 JSON。"),
-        Message.user(prompt),
-    ], tools=None)
+    resp = await stream_aux(
+        provider,
+        [
+            Message.system("你是 Crew skill 元数据生成器，只输出严格 JSON。"),
+            Message.user(prompt),
+        ],
+        purpose="skill-metadata",
+        timeout=profile.timeout,
+    )
     text = (resp.text or "").strip()
     return _validate_generated_metadata(_parse_metadata_json_response(text))
 

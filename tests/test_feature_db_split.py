@@ -2461,11 +2461,15 @@ def test_migrate_channels_feature_stamps_channels_db(tmp_path):
 # 走 external/team/sites 显式豁免语义。
 # ---------------------------------------------------------------------------
 
-# 主库 core 状态 9 表终态（P1-1 全清）：wiki_learning 拆出后主库不再有任何
-# Feature/插件表。
+# 主库 core 状态表终态（P1-1 全清 + ADR-0042 W4 增补）：wiki_learning 拆出后
+# 主库不再有任何 Feature/插件表；ADR-0042（用户已批准）把会话增量事件表、
+# writer 租约表与 sessions 版本登记表纳入 core 状态表，同驻主库。
 _CORE_MAIN_DB_TABLES = frozenset(
     {
         "sessions",
+        "session_events",
+        "writer_leases",
+        "sessions_schema_version",
         "session_agent_config",
         "workspaces",
         "owner_session_lease",
@@ -2561,7 +2565,7 @@ def test_load_config_wiki_learning_db_path_defaults_next_to_main_db(tmp_path, mo
 def test_fresh_install_wiki_learning_tables_live_only_in_plugin_db(tmp_path):
     """验收 1（新装探针，真实装配线）：build_app 经 PluginManager 装载插件后，
     自有 6 表 + 双版本登记只在 wiki_learning.db，crew.db 无任何 wiki_learning
-    表；主库收敛为 core 9 表终态（P1-1 全清）。"""
+    表；主库收敛为 core 状态表终态（P1-1 全清 + ADR-0042 W4 增补）。"""
 
     main_db = tmp_path / "crew.db"
     wiki_db = tmp_path / "wiki_learning.db"
@@ -2595,7 +2599,7 @@ def test_fresh_install_wiki_learning_tables_live_only_in_plugin_db(tmp_path):
         ).fetchone()[0]
     assert component == 1
     assert feature_version == WIKI_LEARNING_SCHEMA_VERSION
-    # 主库最终清单复核（P1-1 全清终态）：只剩 core 状态 9 表。
+    # 主库最终清单复核（P1-1 全清终态）：只剩 core 状态表（9 表 + ADR-0042 W4 增补 3 表）。
     assert main_tables == _CORE_MAIN_DB_TABLES
 
 

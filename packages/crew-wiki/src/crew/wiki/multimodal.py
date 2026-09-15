@@ -31,6 +31,17 @@ class MediaUnderstandingError(RuntimeError):
 IMAGE_MIME_PREFIXES = ("image/jpeg", "image/png", "image/webp", "image/bmp", "image/gif")
 VIDEO_MIME_PREFIXES = ("video/mp4", "video/quicktime", "video/webm", "video/x-msvideo", "video/x-matroska")
 
+# 返回给模型的描述长度上限（头尾保留，中间省略），防超长输出撑爆上下文
+MAX_DESCRIPTION_CHARS = 20_000
+
+
+def _truncate_description(text: str) -> str:
+    if len(text) <= MAX_DESCRIPTION_CHARS:
+        return text
+    keep = MAX_DESCRIPTION_CHARS // 2
+    omitted = len(text) - keep * 2
+    return f"{text[:keep]}\n…（中间省略 {omitted} 字符）…\n{text[-keep:]}"
+
 # skill 脚本路径。skills 数据归属根发行版 crew（ADR-0037 拆包后与 wiki 不同发行版），
 # 顶层 crew 为 PEP 420 命名空间包，遍历其搜索路径 portion 定位 skills/，
 # 避免「以 wiki 自身目录回溯包外资源」的文件系统耦合：
@@ -110,15 +121,21 @@ def describe_image(path: str | Path, prompt: str | None = None) -> str:
     analyze_image = getattr(image_module, "analyze_image")
 
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-        result = analyze_image(str(path), prompt)
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            result = analyze_image(str(path), prompt)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("图片理解脚本执行异常")
+        raise MediaUnderstandingError(
+            f"图片理解脚本异常: {type(exc).__name__}: {exc}"
+        ) from exc
 
     if result is None:
         output = buf.getvalue().strip()
         message = output or "图片理解失败，未返回描述"
         raise MediaUnderstandingError(message)
 
-    return str(result).strip()
+    return _truncate_description(str(result).strip())
 
 
 def describe_video(path: str | Path, prompt: str | None = None, *, confirm_upload: bool = False) -> str:
@@ -152,22 +169,34 @@ def describe_video(path: str | Path, prompt: str | None = None, *, confirm_uploa
         raise MediaUnderstandingError("未找到 VLM_API_KEY，无法分析视频")
 
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-        video_url = upload_video(str(path), api_key)
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            video_url = upload_video(str(path), api_key)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("视频上传脚本执行异常")
+        raise MediaUnderstandingError(
+            f"视频上传脚本异常: {type(exc).__name__}: {exc}"
+        ) from exc
 
     if not video_url:
         output = buf.getvalue().strip()
         raise MediaUnderstandingError(output or "视频上传失败")
 
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-        result = analyze_video(video_url, prompt or "描述下这个视频", api_key)
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            result = analyze_video(video_url, prompt or "描述下这个视频", api_key)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("视频分析脚本执行异常")
+        raise MediaUnderstandingError(
+            f"视频分析脚本异常: {type(exc).__name__}: {exc}"
+        ) from exc
 
     if result is None:
         output = buf.getvalue().strip()
         raise MediaUnderstandingError(output or "视频理解失败，未返回描述")
 
-    return str(result).strip()
+    return _truncate_description(str(result).strip())
 
 
 def describe_media(path: str | Path, mime: str, prompt: str | None = None, *, confirm_upload: bool = False) -> str:

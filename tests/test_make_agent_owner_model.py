@@ -302,7 +302,7 @@ async def test_make_agent_builds_only_final_dynamic_provider_and_declares_owners
     real_build = app_module.build_provider_for_profile
     built = []
 
-    def tracking_build(profile, stream_read_timeout=None):
+    def tracking_build(profile, stream_read_timeout=None, **_kw):
         provider = real_build(profile, stream_read_timeout)
         built.append(provider)
         return provider

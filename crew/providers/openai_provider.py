@@ -25,7 +25,9 @@ from crew.core.types import (
     Message,
     StreamChunk,
     ToolCall,
+    coerce_tool_arguments,
 )
+from crew.providers.keying import ApiKeyResolver
 from crew.providers.vendors import REASONING_LEVELS, VendorCompat
 from crew.state.logging import llm_trace
 
@@ -90,7 +92,7 @@ def _repair_leaked_parameter_json(raw: str) -> str | None:
 def _parse_tool_arguments(raw: str, tool_name: str) -> Any:
     """解析工具参数；仅在检测到已知协议泄漏时尝试一次受限修复。"""
     try:
-        return _normalize_tool_arguments(json.loads(raw or "{}"), tool_name)
+        parsed = json.loads(raw or "{}")
     except json.JSONDecodeError as original_exc:
         repaired = _repair_leaked_parameter_json(raw)
         if repaired is None:
@@ -100,7 +102,7 @@ def _parse_tool_arguments(raw: str, tool_name: str) -> Any:
         except json.JSONDecodeError:
             raise original_exc
         log.warning("修复模型泄漏标签导致的损坏 JSON tool=%s", tool_name)
-        return _normalize_tool_arguments(parsed, tool_name)
+    return _normalize_tool_arguments(coerce_tool_arguments(parsed), tool_name)
 
 
 def _merge_tool_argument_fragment(current: str, fragment: str) -> tuple[str, str]:
@@ -386,6 +388,7 @@ class OpenAIProvider(LLMProvider):
         timeout: float | httpx.Timeout = 120.0,
         vision: bool = True,
         compat: VendorCompat | None = None,
+        api_key_resolver: ApiKeyResolver | None = None,
     ) -> None:
         # 延迟导入，避免未装 openai 时整个包不可用
         from openai import AsyncOpenAI
@@ -417,6 +420,17 @@ class OpenAIProvider(LLMProvider):
         self.vision = vision
         # 厂商差异开关：装配层按 crew.providers.vendors 档案传入；缺省 = 通用 OpenAI 行为
         self._compat = compat if compat is not None else VendorCompat()
+        self._api_key_resolver = api_key_resolver
+
+    def _auth_headers(self) -> dict[str, str] | None:
+        """resolver 模式下每次请求取一次凭据快照写进 Authorization 头。
+
+        快照只作用于本次发起的请求；已在飞行中的流不受影响。无 resolver
+        时返回 None，沿用客户端构造时的静态 key（测试/外部直构造路径）。
+        """
+        if self._api_key_resolver is None:
+            return None
+        return {"Authorization": f"Bearer {self._api_key_resolver()}"}
 
     async def aclose(self) -> None:
         """Close the owned SDK client exactly once, including concurrent callers."""
@@ -436,6 +450,7 @@ class OpenAIProvider(LLMProvider):
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
         reasoning_mode: str | None = None,
+        purpose: str | None = None,
     ) -> ChatResponse:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -459,12 +474,15 @@ class OpenAIProvider(LLMProvider):
         session = _current_session()
         llm_trace("request", {
             "session_id": session, "model": self.model, "stream": False,
+            "purpose": purpose or "",
             "messages": payload["messages"],
             "tools": [t.get("function", {}).get("name") for t in (tools or [])],
         })
 
         try:
-            resp = await self._client.chat.completions.create(**payload)
+            resp = await self._client.chat.completions.create(
+                **payload, extra_headers=self._auth_headers()
+            )
         except Exception as exc:  # noqa: BLE001 - 统一包装成 ProviderError
             llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
             raise _provider_error("LLM 调用失败", exc, payload["messages"]) from exc
@@ -556,7 +574,9 @@ class OpenAIProvider(LLMProvider):
         })
 
         try:
-            stream = await self._client.chat.completions.create(**payload)
+            stream = await self._client.chat.completions.create(
+                **payload, extra_headers=self._auth_headers()
+            )
         except Exception as exc:
             llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
             raise _provider_error("LLM 流式调用失败", exc, payload["messages"]) from exc

@@ -29,7 +29,12 @@ from crew.security.models import (
     merge_additional_permissions,
 )
 from crew.security.policy import settings_for_mode
-from crew.security.process_lifecycle import isolated_process_kwargs, terminate_process_tree
+from crew.security.process_lifecycle import (
+    isolated_process_kwargs,
+    resolve_grace_ms,
+    spawn_tracked,
+    terminate_process_tree,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -211,7 +216,7 @@ async def execute_captured(
     # process tree instead of losing ownership of a child that was already created.
     process: asyncio.subprocess.Process | None = None
     spawn_task = asyncio.create_task(
-        asyncio.create_subprocess_exec(
+        spawn_tracked(
             *argv,
             cwd=str(cwd),
             env=host_env,
@@ -222,10 +227,11 @@ async def execute_captured(
         )
     )
     try:
-        process = await asyncio.shield(spawn_task)
+        process, exit_future = await asyncio.shield(spawn_task)
         _safe_activity_callback(on_started, process.pid)
         output_task = _collect_host_output(
             process,
+            exit_future=exit_future,
             stdin=stdin,
             max_output_bytes=max_output_bytes,
             on_output=on_output,
@@ -237,11 +243,12 @@ async def execute_captured(
     except asyncio.CancelledError:
         if process is None:
             try:
-                process = await asyncio.shield(spawn_task)
+                process, _ = await asyncio.shield(spawn_task)
             except Exception:
                 # The caller's cancellation remains the public outcome; a failed
                 # spawn produced no process handle that needs cleanup.
-                pass
+                process = None
+            exit_future = None
         if process is not None:
             await terminate_process_tree(process)
         audit_execution_result(
@@ -375,6 +382,7 @@ def audit_execution_result(
 async def _collect_host_output(
     process: asyncio.subprocess.Process,
     *,
+    exit_future: asyncio.Future[None] | None,
     stdin: bytes | None,
     max_output_bytes: int,
     on_output: Callable[[Literal["stdout", "stderr"]], None] | None,
@@ -386,6 +394,16 @@ async def _collect_host_output(
     stderr = bytearray()
     active_streams: set[str] = set()
     total_output = 0
+
+    # 早退路径（超时/取消/排干宽限耗尽）管道可能仍被孙进程持管，必须显式关
+    # 传输收尾；否则 transport 等不到 EOF，GC 时 loop 已关产生 unraisable。
+    def _close_transport() -> None:
+        transport = getattr(process, "_transport", None)
+        if transport is not None:
+            try:
+                transport.close()
+            except Exception:  # noqa: BLE001 - 收尾尽力而为
+                pass
 
     async def write_stdin() -> None:
         if process.stdin is None:
@@ -419,13 +437,48 @@ async def _collect_host_output(
                 active_streams.add(stream_name)
                 _safe_activity_callback(on_output, stream_name)
 
-    await asyncio.gather(
-        write_stdin(),
-        read_stream(process.stdout, stdout, "stdout"),
-        read_stream(process.stderr, stderr, "stderr"),
-        process.wait(),
-    )
-    return bytes(stdout), bytes(stderr)
+    # 结果等待与排干宽限分离：exit 由内核事件驱动、必然结算（spawn_tracked
+    # 的协议 future，不被管道 EOF 耦合拖住）；exit 之后管道再用同一个 grace
+    # 配置收尾（孙进程继承 fd 持管不回收时不再永久挂起）。
+    try:
+        exit_task = asyncio.ensure_future(exit_future) if exit_future is not None else asyncio.ensure_future(process.wait())
+        stdin_task = asyncio.ensure_future(write_stdin())
+        read_tasks = [
+            asyncio.ensure_future(read_stream(process.stdout, stdout, "stdout")),
+            asyncio.ensure_future(read_stream(process.stderr, stderr, "stderr")),
+        ]
+        pending_all: set[asyncio.Task] = {exit_task, stdin_task, *read_tasks}
+        while not exit_task.done():
+            done, pending_all = await asyncio.wait(pending_all, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                if task.cancelled():
+                    continue
+                exc = task.exception()
+                if exc is not None:
+                    for other in pending_all:
+                        other.cancel()
+                    raise exc
+        # exit 已结算：排干宽限 == TERM→KILL 升级宽限（同一 grace 配置两个语义）
+        remaining = {task for task in (stdin_task, *read_tasks) if not task.done()}
+        if remaining:
+            _, remaining = await asyncio.wait(remaining, timeout=resolve_grace_ms(None) / 1000)
+        for task in remaining:
+            task.cancel()
+        for task in remaining:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001 - 排干取消的残留读取不影响已收结果
+                pass
+        # 排干期内读端报错（如输出超限）仍要抛
+        for task in read_tasks:
+            if task.cancelled():
+                continue
+            exc = task.exception()
+            if exc is not None:
+                raise exc
+        return bytes(stdout), bytes(stderr)
+    finally:
+        _close_transport()
 
 
 def _safe_activity_callback(callback: Callable[[object], None] | None, value: object) -> None:

@@ -9,8 +9,14 @@ agent 即可像调内置工具一样调用它们（工具名 ``{server}__{tool}`
 
 仅复用 MCP SDK 的调用范式（stdio_client / streamable_http_client / sse_client +
 Client.list_tools/call_tool）。Client 使用 ``mode="auto"``，优先协商 MCP 2 的现代协议，
-并自动回退旧服务端。OAuth / 自动重试一律不做；生命周期采用有界预算。
-未安装 mcp 包或连接失败 → 跳过该 server，不影响主流程。
+并自动回退旧服务端。OAuth 不做。
+
+生命周期：每个 server 一个连接 supervisor——断线后按指数退避（500ms 翻倍封顶 30s）
+自动重连，每次 outage 共享 max_attempts=10 预算；连接稳定超过 max_delay 后预算重置
+（防 crash-loop）；预算耗尽 → 显式报错 + 注销该 server 全部工具，管理面板 reload 后才
+重试（不再静默跳过）。空闲时以 initialize 后轻量 ping 探活；服务端 tools/list_changed
+通知触发重同步，重同步失败保留上一代好列表。初始失败默认记日志进重连循环，配置
+``fail_on_startup_error: true`` 时激活失败。
 """
 
 from __future__ import annotations
@@ -39,6 +45,23 @@ MCP_QUEUE_CAPACITY = 32
 MCP_CALL_TIMEOUT_SECONDS = 60.0
 MCP_STARTUP_TIMEOUT_SECONDS = 30.0
 MCP_SHUTDOWN_TIMEOUT_SECONDS = 10.0
+
+# 重连 supervisor 的共享默认（可被单个 server 配置 reconnect.* 覆盖）
+MCP_RECONNECT_ENABLED = True
+MCP_RECONNECT_INITIAL_DELAY_SECONDS = 0.5
+MCP_RECONNECT_MAX_DELAY_SECONDS = 30.0
+MCP_RECONNECT_MAX_ATTEMPTS = 10
+# 轻量探活：空闲超过该间隔发一次 ping；单次 ping 超时判死。
+# ping_interval 配 0 可关闭探活。
+MCP_PING_INTERVAL_SECONDS = 30.0
+MCP_PING_TIMEOUT_SECONDS = 5.0
+# 连续调用失败达到该次数即按断线处理（覆盖不支持 ping 的服务端）。
+MCP_MAX_CONSECUTIVE_CALL_ERRORS = 3
+
+
+async def _sleep(delay: float) -> None:
+    """退避等待独立成函数，测试可 monkeypatch 加速。"""
+    await asyncio.sleep(delay)
 
 
 @dataclass(slots=True)
@@ -253,6 +276,11 @@ def _extract_text(result: Any) -> str:
     )
 
 
+def _is_method_not_found(exc: BaseException) -> bool:
+    """MCP 服务端不支持 ping（JSON-RPC -32601）——探活不可用，按存活处理。"""
+    return getattr(getattr(exc, "error", None), "code", None) == -32601
+
+
 class _ServerWorker:
     """单个 MCP server 的常驻连接 + 调用编组。"""
 
@@ -278,6 +306,32 @@ class _ServerWorker:
         self._task: asyncio.Task[None] | None = None
         self._current: _CallRequest | None = None
         self._closing = False
+        # ---- 重连 supervisor 策略（cfg.reconnect / cfg.fail_on_startup_error）----
+        reconnect = cfg.get("reconnect")
+        reconnect = reconnect if isinstance(reconnect, dict) else {}
+        self._reconnect_enabled = bool(reconnect.get("enabled", MCP_RECONNECT_ENABLED))
+        self._reconnect_initial_delay = float(
+            reconnect.get("initial_delay", MCP_RECONNECT_INITIAL_DELAY_SECONDS)
+        )
+        self._reconnect_max_delay = float(
+            reconnect.get("max_delay", MCP_RECONNECT_MAX_DELAY_SECONDS)
+        )
+        if self._reconnect_initial_delay > self._reconnect_max_delay:
+            self._reconnect_initial_delay = self._reconnect_max_delay
+        self._reconnect_max_attempts = int(
+            reconnect.get("max_attempts", MCP_RECONNECT_MAX_ATTEMPTS)
+        )
+        self._fail_on_startup_error = bool(cfg.get("fail_on_startup_error", False))
+        ping_interval = cfg.get("ping_interval", MCP_PING_INTERVAL_SECONDS)
+        self._ping_interval = float(ping_interval) if ping_interval else 0.0
+        self._ping_supported = True
+        # ---- supervisor 可变状态（只在 _run task 内改写，同 loop 单线程读安全）----
+        self._connected = False
+        self._permanent_error: Exception | None = None
+        self._session: Any = None
+        # 串行化「换代注册/注销」与 tools/list_changed 重同步，防止两代连接
+        # 交错改写 self._tools 与 Registry。
+        self._sync_lock = asyncio.Lock()
         # True when this worker was started as a host stdio subprocess (only possible
         # under ACE_ALLOW_HOST_MCP_STDIO=1 in a non-managed context). A worker
         # started that way must not be re-used by a later managed conversation: the
@@ -343,64 +397,179 @@ class _ServerWorker:
         else:
             raise ValueError("MCP server 配置需要 'command'（stdio）或 'url'（http/sse）")
 
-        return await stack.enter_async_context(Client(transport, mode="auto"))
+        holder: dict[str, Any] = {}
+        client = Client(
+            transport,
+            mode="auto",
+            message_handler=self._make_message_handler(holder),
+        )
+        session = await stack.enter_async_context(client)
+        holder["session"] = session
+        return session
+
+    def _make_message_handler(self, holder: dict[str, Any]):
+        """处理服务端通知：tools/list_changed → 串行重同步（失败保留上一代好列表）。
+
+        holder 延迟绑定 session 对象（Client 构造先于 enter_async_context）；
+        handler 内只认当前代（self._session is session），换代后旧通知直接丢弃。
+        """
+
+        async def _handler(message: Any) -> None:
+            if self._closing or self._session is None:
+                return
+            from mcp import types
+
+            if isinstance(message, types.ToolListChangedNotification):
+                session = holder.get("session")
+                if session is None or session is not self._session:
+                    return
+                await self._resync_tools(session)
+
+        return _handler
+
+    async def _resync_tools(self, session: Any) -> None:
+        """重拉工具列表并增量重注册；fetch 失败保留上一代好列表（dsh 同语义）。"""
+        try:
+            resp = await asyncio.wait_for(session.list_tools(), timeout=self._startup_timeout)
+        except Exception as exc:  # noqa: BLE001 - 通知路径，错误只落日志
+            log.error(
+                "MCP server %s 工具列表重同步失败，保留上一代工具列表：%s",
+                self.name,
+                exc,
+            )
+            return
+        if self._closing or self._session is not session:
+            return
+        new_tools = list(resp.tools)
+        async with self._sync_lock:
+            if self._closing or self._session is not session:
+                return
+            new_names = {getattr(t, "name", "") for t in new_tools}
+            stale = [t for t in self._tools if getattr(t, "name", "") not in new_names]
+            for tool in stale:
+                self.registry.unregister(f"{self.name}__{getattr(tool, 'name', '')}")
+            self._tools = new_tools
+            self._register_tools()
+        log.info("MCP server %s 工具列表已重同步（%d 个工具）", self.name, len(new_tools))
+
+    async def _probe_once(self, session: Any) -> bool:
+        """轻量 ping 探活：True=存活，False=按断线处理。无法判定时按存活处理。
+
+        服务端不支持 ping（-32601）时关闭探活，退化为连续调用失败计数判死。
+        """
+        ping = getattr(session, "send_ping", None)
+        if ping is None:
+            return True
+        try:
+            await asyncio.wait_for(ping(), timeout=MCP_PING_TIMEOUT_SECONDS)
+            return True
+        except Exception as exc:  # noqa: BLE001 - 探活失败是正常路径
+            if _is_method_not_found(exc):
+                self._ping_supported = False
+                return True
+            return False
 
     async def _run(self) -> None:
+        """连接 supervisor：连接 → 服务 → 断线退避重连，预算耗尽放弃并注销工具。"""
+        failed_attempts = 0
+        connected_at: float | None = None
+        first_attempt = True
         try:
-            async with AsyncExitStack() as stack:
-                session = await self._open(stack)
-                resp = await session.list_tools()
-                self._tools = list(resp.tools)
-                self._ready.set()
-                # 服务循环：在本 task 内执行所有 call_tool
-                while True:
-                    request = await self._queue.get()
-                    if request.future.done():
-                        continue
-                    if request.deadline <= asyncio.get_running_loop().time():
-                        self._complete(
-                            request,
-                            tool_error(
-                                f"MCP server {self.name} 调用在执行前已超过截止时间；"
-                                "远端未被调用"
-                            ),
+            while not self._closing:
+                stack = AsyncExitStack()
+                try:
+                    session = await self._open(stack)
+                    self._session = session
+                    resp = await session.list_tools()
+                    new_tools = list(resp.tools)
+                    async with self._sync_lock:
+                        self._tools = new_tools
+                        self._register_tools()
+                    now = asyncio.get_running_loop().time()
+                    if (
+                        connected_at is not None
+                        and now - connected_at >= self._reconnect_max_delay
+                    ):
+                        failed_attempts = 0
+                    connected_at = now
+                    self._error = None
+                    self._connected = True
+                    if first_attempt:
+                        first_attempt = False
+                        self._ready.set()
+                    elif failed_attempts:
+                        log.info(
+                            "MCP server %s 已重连并重新注册工具（第 %d/%d 次尝试）",
+                            self.name,
+                            failed_attempts,
+                            self._reconnect_max_attempts,
                         )
-                        continue
-                    self._current = request
-                    request.started = True
-                    try:
-                        async with asyncio.timeout_at(request.deadline):
-                            result = await session.call_tool(request.tool_name, request.args or {})
-                        extracted = _extract_text(result)
-                        if getattr(result, "is_error", False):
-                            try:
-                                message = str(json.loads(extracted).get("error") or extracted)
-                            except (AttributeError, json.JSONDecodeError):
-                                message = extracted
-                            self._fail(request, message)
-                        else:
-                            self._complete(request, extracted)
-                    except TimeoutError:
+                    await self._serve(session)
+                    return  # 仅关闭时服务循环才正常退出
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - 断线/连接失败统一走重连决策
+                    self._connected = False
+                    self._session = None
+                    if first_attempt:
+                        first_attempt = False
+                        self._error = exc
+                        self._ready.set()
+                    # 在途调用立即失败；排队请求保留，重连成功后仍可在截止时间内被服务。
+                    if self._current is not None:
                         self._complete(
-                            request,
+                            self._current,
                             tool_error(
-                                f"MCP server {self.name} 调用超过绝对截止时间；"
+                                f"MCP server {self.name} 连接已断开；"
                                 "远端最终副作用状态可能未知，系统不会自动重试"
                             ),
                         )
-                    except Exception as exc:  # noqa: BLE001 - 回填给调用方而非崩溃
-                        self._complete(request, tool_error(f"MCP 调用失败: {exc}"))
-                    finally:
-                        # CancelledError 会直接离开本层；保留 current 给外层 finally 完成 Future。
-                        if request.future.done():
-                            self._current = None
-        except Exception as exc:
-            self._error = exc
-            # 打完整 traceback 到日志，便于定位连接失败根因（如 WinError 448
-            # 不受信任挂载点——需看调用栈确认是 which/resolve/open_process 哪步抛的）。
-            log.exception("MCP server %s 连接异常", self.name)
+                        self._current = None
+                    log.warning("MCP server %s 连接异常：%s", self.name, exc)
+                    if connected_at is not None and (
+                        asyncio.get_running_loop().time() - connected_at
+                        >= self._reconnect_max_delay
+                    ):
+                        # 稳定运行超过 max_delay：上一次 outage 已结束，开新预算。
+                        failed_attempts = 0
+                    connected_at = None
+                    failed_attempts += 1
+                    if (
+                        not self._reconnect_enabled
+                        or failed_attempts > self._reconnect_max_attempts
+                    ):
+                        self._permanent_error = RuntimeError(
+                            f"MCP server {self.name} 重连失败"
+                            f"（预算 {self._reconnect_max_attempts} 次已耗尽）：{exc}。"
+                            "该 server 的全部工具已注销；在管理面板重载该 server 后才会重试"
+                        )
+                        self._error = self._permanent_error
+                        log.error("%s", self._permanent_error)
+                        async with self._sync_lock:
+                            self._unregister_tools()
+                        self._drain_queue(
+                            f"MCP server {self.name} 重连预算已耗尽，连接被放弃；"
+                            "请在管理面板重载该 server"
+                        )
+                        return
+                    delay = min(
+                        self._reconnect_max_delay,
+                        self._reconnect_initial_delay * 2 ** (failed_attempts - 1),
+                    )
+                    log.warning(
+                        "MCP server %s 连接失败，%.3g 秒后第 %d/%d 次重连",
+                        self.name,
+                        delay,
+                        failed_attempts,
+                        self._reconnect_max_attempts,
+                    )
+                    await _sleep(delay)
+                finally:
+                    await stack.aclose()
         finally:
             self._ready.set()  # 失败也要解除 start() 的等待
+            self._connected = False
+            self._session = None
 
             # worker 退出后不得遗留永久 pending 的调用；Future 只由 _complete 写一次。
             reason = (
@@ -414,7 +583,73 @@ class _ServerWorker:
                     tool_error(f"{reason}；远端最终副作用状态可能未知，系统不会自动重试"),
                 )
                 self._current = None
+            # 只有 supervisor 循环存活期间才保留排队请求（重连后仍可能被服务）；
+            # task 退出（取消/关闭/预算耗尽）时必须全部完成，不得遗留 pending。
             self._drain_queue(reason)
+
+    async def _serve(self, session: Any) -> None:
+        """服务循环：在本 task 内执行所有 call_tool；空闲时 ping 探活。"""
+        consecutive_errors = 0
+        while True:
+            if self._ping_supported and self._ping_interval > 0:
+                try:
+                    request = await asyncio.wait_for(
+                        self._queue.get(), timeout=self._ping_interval
+                    )
+                except TimeoutError:
+                    if not await self._probe_once(session):
+                        raise ConnectionError(f"MCP server {self.name} ping 探活失败")
+                    continue
+            else:
+                request = await self._queue.get()
+            if request.future.done():
+                continue
+            if request.deadline <= asyncio.get_running_loop().time():
+                self._complete(
+                    request,
+                    tool_error(
+                        f"MCP server {self.name} 调用在执行前已超过截止时间；"
+                        "远端未被调用"
+                    ),
+                )
+                continue
+            self._current = request
+            request.started = True
+            try:
+                async with asyncio.timeout_at(request.deadline):
+                    result = await session.call_tool(request.tool_name, request.args or {})
+                consecutive_errors = 0
+                extracted = _extract_text(result)
+                if getattr(result, "is_error", False):
+                    try:
+                        message = str(json.loads(extracted).get("error") or extracted)
+                    except (AttributeError, json.JSONDecodeError):
+                        message = extracted
+                    self._fail(request, message)
+                else:
+                    self._complete(request, extracted)
+            except TimeoutError:
+                consecutive_errors = 0
+                self._complete(
+                    request,
+                    tool_error(
+                        f"MCP server {self.name} 调用超过绝对截止时间；"
+                        "远端最终副作用状态可能未知，系统不会自动重试"
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - 需先判活再决定 tool_error 还是断线
+                consecutive_errors += 1
+                if (
+                    await self._probe_once(session)
+                    and consecutive_errors < MCP_MAX_CONSECUTIVE_CALL_ERRORS
+                ):
+                    self._complete(request, tool_error(f"MCP 调用失败: {exc}"))
+                else:
+                    raise
+            finally:
+                # CancelledError 会直接离开本层；保留 current 给外层 finally 完成 Future。
+                if request.future.done():
+                    self._current = None
 
     @staticmethod
     def _complete(request: _CallRequest, result: str) -> None:
@@ -479,8 +714,8 @@ class _ServerWorker:
         return (
             self._task is not None
             and not self._task.done()
-            and self._ready.is_set()
-            and self._error is None
+            and self._connected
+            and self._permanent_error is None
         )
 
     @property
@@ -530,12 +765,11 @@ class _ServerWorker:
                     )
                 except ToolError as exc:
                     return tool_error(str(exc))
-            if (
-                self._closing
-                or self._error is not None
-                or self._task is None
-                or self._task.done()
-            ):
+            if self._permanent_error is not None:
+                return tool_error(
+                    f"MCP server {self.name} 连接已放弃：{self._permanent_error}"
+                )
+            if self._closing or self._task is None or self._task.done():
                 return tool_error(f"MCP server {self.name} 连接已断开")
             loop = asyncio.get_running_loop()
             future: asyncio.Future[str] = loop.create_future()
@@ -575,7 +809,12 @@ class _ServerWorker:
         return handler
 
     async def start(self) -> bool:
-        """打开连接并注册工具。成功返回 True。"""
+        """打开连接（含首次工具注册）。返回是否接受激活。
+
+        初始连接失败不再静默跳过：默认记日志后进入指数退避重连循环（后台继续），
+        返回 True；配置 ``fail_on_startup_error: true`` 时激活失败返回 False
+        （重连循环仍在后台运行，管理面板 reload 该 server 可再触发）。
+        """
         if self._closing:
             return False
         self._task = asyncio.create_task(self._run())
@@ -594,9 +833,10 @@ class _ServerWorker:
             raise
         if self._error is not None:
             log.warning("MCP server %s 连接失败：%s", self.name, self._error)
-            return False
-        n = self._register_tools()
-        log.info("MCP server %s 已连接，注册 %d 个工具", self.name, n)
+            if self._fail_on_startup_error:
+                return False
+        else:
+            log.info("MCP server %s 已连接，注册 %d 个工具", self.name, len(self._tools))
         return True
 
     async def stop(self) -> None:
@@ -655,8 +895,10 @@ class MCPClientManager:
     async def start(self, registry: Registry) -> None:
         """后台连接所有 MCP server 并注册工具，立即返回不阻塞。
 
-        连接/工具注册在后台 task 内完成；单个 server 连接失败只 warning（见 _ServerWorker.start）
-        不影响主流程。连接完成前调用对应工具会返回“连接已断开”错误（_make_handler 守门），
+        连接/工具注册在后台 task 内完成；单个 server 初始连接失败默认进入
+        该 worker 自己的指数退避重连循环（见 _ServerWorker），只有重连预算耗尽
+        （或 reconnect.enabled=false）才会注销工具并给出显式错误。
+        连接完成前调用对应工具会排队等待重连，或在截止时间内返回错误，
         不会崩溃。工具用 should_defer=True，未就绪前不暴露给 LLM。
         """
         self._registry = registry
@@ -815,6 +1057,8 @@ class MCPClientManager:
 
         若已存在同名 worker，返回 False（调用方应先 remove 或 reload）。
         start() 未就绪（registry 未注入或后台 start 未完成）时拒绝并返回 False。
+        返回 True 表示已接受激活；初始连接失败时 worker 进入后台重连循环，
+        由配置 fail_on_startup_error 决定是否改为返回 False。
         """
         if self._registry is None or self._closing:
             return False
@@ -864,9 +1108,9 @@ class MCPClientManager:
         return True
 
     async def reload_one(self, name: str, cfg: dict[str, Any] | None = None) -> bool:
-        """重连单个 server。cfg 非空时先更新配置再重连。
+        """重连单个 server（也是预算耗尽后的恢复入口）。cfg 非空时先更新配置再重连。
 
-        停掉旧 worker（注销工具）→ 用新 cfg 起新 worker（注册工具）。
+        停掉旧 worker（注销工具）→ 用新 cfg 起新 worker（注册工具，重连预算清零）。
         其他 server 不受影响。配置里不存在该 name 返回 False。
         """
         if self._registry is None or self._closing:

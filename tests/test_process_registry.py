@@ -273,5 +273,123 @@ def test_process_tool_handler_is_owner_scoped():
         current_owner_account_id.reset(token)
 
 
+
+def test_wait_wakes_promptly_on_process_exit():
+    """F7：wait 由结算事件条件唤醒，进程一退出立即返回（无 0.5s 轮询粒度丢失）。"""
+    reg = ProcessRegistry()
+    s = reg.spawn_local(
+        _py_cmd("import time; time.sleep(0.3)"),
+        session_key="wait-prompt",
+        owner_account_id="local",
+    )
+    started = time.monotonic()
+    result = reg.wait(s.id, timeout=10, owner_account_id="local")
+    elapsed = time.monotonic() - started
+    assert result["status"] == "exited"
+    assert result["exit_code"] == 0
+    # 事件驱动：0.3s 进程 + reader 结算开销，远小于轮询最坏情况
+    assert elapsed < 3
+
+
+def test_wait_returns_timeout_status_for_running_process():
+    reg = ProcessRegistry()
+    s = reg.spawn_local(
+        _py_cmd("import time; time.sleep(10)"),
+        session_key="wait-timeout",
+        owner_account_id="local",
+    )
+    started = time.monotonic()
+    try:
+        result = reg.wait(s.id, timeout=1, owner_account_id="local")
+        elapsed = time.monotonic() - started
+        assert result["status"] == "timeout"
+        assert "timeout_note" in result
+        assert 0.5 < elapsed < 5
+    finally:
+        reg.kill_process(s.id, owner_account_id="local")
+
+
+def test_wait_after_kill_returns_settled_status():
+    reg = ProcessRegistry()
+    s = reg.spawn_local(
+        _py_cmd("import time; time.sleep(10)"),
+        session_key="wait-kill",
+        owner_account_id="local",
+    )
+    reg.kill_process(s.id, owner_account_id="local")
+    result = reg.wait(s.id, timeout=5, owner_account_id="local")
+    assert result["status"] == "exited"
+    assert result["exit_code"] == -15
+
+
+def test_stdin_pipe_batch_write_and_close():
+    """F8 一期：stdin=PIPE + 批量写入，覆盖 sudo -S 类半交互场景。"""
+    reg = ProcessRegistry()
+    # 模拟 sudo -S：打印提示 → 从 stdin 读一行 → 输出结果
+    s = reg.spawn_local(
+        _py_cmd(
+            "import sys; sys.stdout.write('[sudo] password: '); sys.stdout.flush();"
+            " line = sys.stdin.readline(); sys.stdout.write('ok:' + line.strip()[::-1])"
+        ),
+        session_key="stdin-half-interactive",
+        owner_account_id="local",
+    )
+    try:
+        w = reg.write_stdin(s.id, ["s3cr", "et-pw\n"], owner_account_id="local")
+        assert w["status"] == "written"
+        assert w["chars"] == len("s3cr" + "et-pw\n")
+        assert w["closed"] is False
+        r = reg.write_stdin(s.id, "", owner_account_id="local", close=True)
+        assert r["closed"] is True
+        result = reg.wait(s.id, timeout=10, owner_account_id="local")
+        assert result["status"] == "exited"
+        assert "ok:wp-terc3s" in result["output"]
+        assert "[sudo] password:" in result["output"]
+    finally:
+        reg.kill_process(s.id, owner_account_id="local")
+
+
+def test_stdin_write_via_process_tool_handler():
+    s = process_registry.spawn_local(
+        _py_cmd("import sys; sys.stdout.write(sys.stdin.readline().upper())"),
+        session_key="stdin-tool",
+        owner_account_id="local",
+    )
+    try:
+        w = json.loads(
+            _handle_process({"action": "stdin", "session_id": s.id, "input": "hello-stdin\n", "close": True})
+        )
+        assert w["status"] == "written"
+        result = json.loads(
+            _handle_process({"action": "wait", "session_id": s.id, "timeout": 10})
+        )
+        assert result["status"] == "exited"
+        assert "HELLO-STDIN" in result["output"]
+    finally:
+        process_registry.kill_process(s.id, owner_account_id="local")
+
+
+def test_stdin_write_to_exited_process_returns_error():
+    reg = ProcessRegistry()
+    s = reg.spawn_local(_py_cmd("print('bye')"), session_key="stdin-exited", owner_account_id="local")
+    _wait_exit(reg, s.id, owner_account_id="local")
+    r = reg.write_stdin(s.id, "x", owner_account_id="local")
+    assert r["status"] == "error"
+
+
+def test_stdin_write_size_limit():
+    reg = ProcessRegistry()
+    s = reg.spawn_local(
+        _py_cmd("import time; time.sleep(10)"),
+        session_key="stdin-limit",
+        owner_account_id="local",
+    )
+    try:
+        r = reg.write_stdin(s.id, "x" * 1_000_001, owner_account_id="local")
+        assert r["status"] == "error"
+        assert "超限" in r["error"]
+    finally:
+        reg.kill_process(s.id, owner_account_id="local")
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

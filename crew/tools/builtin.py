@@ -17,13 +17,17 @@ from pathlib import Path
 from pathlib import PureWindowsPath
 from typing import Any
 
+from crew.agent.file_mutation import (
+    file_mutation,
+    guard_file_edit,
+    record_file_observation,
+)
 from crew.core.errors import ToolError
 from crew.core.interfaces import ToolResultRetention
 from crew.core.runctx import emit_tool_progress
 from crew.tools.file_utils import (
     _apply_line_pagination,
     _check_sensitive_path,
-    _detect_line_ending,
     _format_read_result,
     _get_max_read_chars,
     _has_binary_extension,
@@ -32,8 +36,6 @@ from crew.tools.file_utils import (
     _normalize_read_pagination,
     _resolve_base_dir,
     _strip_bom,
-    atomic_replace_bytes,
-    read_verified_bytes,
     snapshot_file,
     MAX_READ_FILE_BYTES,
 )
@@ -648,6 +650,8 @@ async def handle_terminal(
             # 阻塞等待 owner 决策：抛/回灌审批请求会让模型复述进正文、且 turn 结束后
             # grant 无人消费（"对话停了"）。批准则继续，拒绝则回干净错误让模型自适应。
             outcome = await security_service.await_decision(approval["request_id"])
+            # 闭合词表：只有显式的批准决策才授权执行；无应答/超时/词表外
+            # 返回值一律归一按拒绝处理（fail-closed）。
             if outcome is None:
                 return json.dumps(
                     {
@@ -657,12 +661,23 @@ async def handle_terminal(
                     },
                     ensure_ascii=False,
                 )
-            if outcome.decision is ApprovalDecision.REJECT:
+            if outcome.decision not in (
+                ApprovalDecision.ONCE,
+                ApprovalDecision.SESSION,
+                ApprovalDecision.ALWAYS,
+            ):
+                rejected = outcome.decision is ApprovalDecision.REJECT
                 return json.dumps(
                     {
                         "success": False,
-                        "error": "用户拒绝了该命令",
-                        "error_code": "approval_rejected",
+                        "error": (
+                            "用户拒绝了该命令"
+                            if rejected
+                            else "审批结果无效，已按拒绝处理"
+                        ),
+                        "error_code": (
+                            "approval_rejected" if rejected else "approval_unavailable"
+                        ),
                     },
                     ensure_ascii=False,
                 )
@@ -717,6 +732,17 @@ async def handle_terminal(
             {"success": False, "error": reason, "error_code": error_code},
             ensure_ascii=False,
         )
+    else:
+        # 审批器不可用（security_service/workspace_store 缺席）：fail-closed，
+        # 拒绝执行而不是退回无审批、无审计的 spawn_local。
+        return json.dumps(
+            {
+                "success": False,
+                "error": "审批服务不可用，已拒绝执行该命令",
+                "error_code": "approval_unavailable",
+            },
+            ensure_ascii=False,
+        )
 
     from crew.core.runctx import (
         current_owner_account_id,
@@ -767,10 +793,10 @@ async def handle_terminal(
         try:
             if runtime is not None and task_id:
                 runtime.mark_running(task_id)
-            spawn = process_registry.spawn_security if launch is not None else process_registry.spawn_local
-            session = spawn(
+            # launch 恒非 None：走到这里必然经过了上面的授权路径。
+            session = process_registry.spawn_security(
                 command,
-                **({"launch": launch} if launch is not None else {}),
+                launch=launch,
                 cwd=cwd,
                 session_key=current_session_id.get(),
                 owner_account_id=owner,
@@ -806,10 +832,9 @@ async def handle_terminal(
     # foreground command is reclassified in place; it is never restarted.
     if runtime is not None and task_id:
         runtime.mark_running(task_id)
-    spawn = process_registry.spawn_security if launch is not None else process_registry.spawn_local
-    session = spawn(
+    session = process_registry.spawn_security(
         command,
-        **({"launch": launch} if launch is not None else {}),
+        launch=launch,
         cwd=cwd,
         session_key=current_session_id.get(),
         owner_account_id=owner,
@@ -833,15 +858,27 @@ async def handle_terminal(
     wait_budget = min(effective_timeout, auto_after) if auto_after > 0 else effective_timeout
     started = time.monotonic()
     # OCC Stage 5 onProgress：前台阻塞期按已累计输出增量推给前端，让用户实时看到命令输出。
+    # 事件驱动等完全结算事件（reader 收尾 set），零状态轮询；0.5s 仅是进度节流的
+    # 上限节拍，进程一结算立即唤醒。
     emitted_len = 0
-    last_emit = 0.0
-    while not session.exited and time.monotonic() - started < wait_budget:
-        await asyncio.sleep(0.1)
-        buf = session.output_buffer
-        if len(buf) > emitted_len and (time.monotonic() - last_emit) >= 0.5:
-            await emit_tool_progress(buf[emitted_len:])
-            emitted_len = len(buf)
-            last_emit = time.monotonic()
+    exited_waiter = asyncio.ensure_future(asyncio.to_thread(session._done_event.wait))
+    try:
+        while True:
+            remaining_budget = wait_budget - (time.monotonic() - started)
+            if remaining_budget <= 0:
+                break
+            done, _ = await asyncio.wait(
+                {exited_waiter}, timeout=min(0.5, remaining_budget)
+            )
+            buf = session.output_buffer
+            if len(buf) > emitted_len:
+                await emit_tool_progress(buf[emitted_len:])
+                emitted_len = len(buf)
+            if done:
+                break
+    finally:
+        if not exited_waiter.done():
+            exited_waiter.cancel()
 
     if not session.exited:
         elapsed = time.monotonic() - started
@@ -970,10 +1007,14 @@ async def handle_file_read(
         return f"[二进制文件，跳过文本读取]: {path}"
     try:
         # 阻塞 I/O 丢线程池，避免卡住事件循环（拖垮网关心跳）
-        raw_bytes = await asyncio.to_thread(read_verified_bytes, path, max_bytes=MAX_READ_FILE_BYTES)
-        text = raw_bytes.decode("utf-8", errors="replace")
+        version = await asyncio.to_thread(snapshot_file, path, max_bytes=MAX_READ_FILE_BYTES)
     except Exception as exc:  # noqa: BLE001
         raise ToolError(f"读取失败: {exc}") from exc
+    if not version.exists:
+        raise ToolError(f"文件不存在: {path}")
+    record_file_observation(path, version)
+    raw_bytes = version.data
+    text = raw_bytes.decode("utf-8", errors="replace")
 
     # BOM / line-ending preservation (Hermes-compatible)
     text, had_bom = _strip_bom(text.replace("\r\r\n", "\r\n"))
@@ -1015,41 +1056,6 @@ async def handle_file_read(
     )
 
 
-def _write_file_sync(path: Path, content: str, append: bool) -> dict[str, Any]:
-    """同步执行文件写入（含 BOM / 行尾保留）。阻塞 I/O，由调用方丢线程池执行。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    version = snapshot_file(path, max_bytes=MAX_READ_FILE_BYTES)
-
-    # Preserve existing file's BOM and line endings (Hermes-compatible)
-    original_ending = None
-    had_bom = False
-    if path.exists() and path.is_file() and not append:
-        try:
-            raw = version.data
-            existing = raw.decode("utf-8", errors="replace")
-            existing, had_bom = _strip_bom(existing)
-            original_ending = _detect_line_ending(existing)
-        except Exception:
-            pass
-
-    if original_ending is not None:
-        content = _normalize_line_endings(content, original_ending)
-    if had_bom and not content.startswith("﻿"):
-        content = "﻿" + content
-
-    encoded = content.encode("utf-8")
-    if append and version.exists:
-        encoded = version.data + encoded
-    atomic_replace_bytes(path, encoded, version)
-
-    return {
-        "success": True,
-        "path": str(path),
-        "bytes_written": len(content.encode("utf-8")),
-        "append": append,
-    }
-
-
 async def handle_file_write(
     args: dict[str, Any],
     *,
@@ -1072,11 +1078,26 @@ async def handle_file_write(
         raise ToolError(sensitive)
 
     try:
-        # 阻塞 I/O 丢线程池，避免卡住事件循环（拖垮网关心跳）
-        result = await asyncio.to_thread(_write_file_sync, path, content, append)
+        outcome = await file_mutation.write_text(
+            path,
+            content,
+            append=append,
+            expected=guard_file_edit(path),
+            max_bytes=MAX_READ_FILE_BYTES,
+        )
+    except ToolError:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise ToolError(f"写入失败: {exc}") from exc
-    return json.dumps(result, ensure_ascii=False)
+    return json.dumps(
+        {
+            "success": True,
+            "path": str(path),
+            "bytes_written": outcome.bytes_written,
+            "append": append,
+        },
+        ensure_ascii=False,
+    )
 
 
 def _delete_file_sync(path: Path) -> dict[str, Any]:

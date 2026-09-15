@@ -8,6 +8,7 @@ import logging
 import re
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from uuid import uuid4
@@ -287,6 +288,33 @@ class SQLiteSecurityAudit:
             # the successful record above; the buffer stays for the next attempt.
             self._flush_best_effort()
         return safe_event.event_id
+
+    def record_batch(self, items: Sequence[tuple[AuditEvent, float]]) -> int:
+        """Insert a batch of ordinary events in one write; retain in buffer on failure.
+
+        供异步审计队列的后台 flush 使用：全部成功则返回条数并顺带排空遗留缓冲；
+        任一落库失败则整批留在内存缓冲（有界），由下一次 flush 重试。
+        """
+        safe_items = [(_sanitize_event(event), occurred_at) for event, occurred_at in items]
+        if not safe_items:
+            return 0
+        if any(event.action_type in _DURABLE_ACTION_TYPES for event, _ in safe_items):
+            raise AuditWriteError("durable 事件不允许批量异步写入")
+        try:
+            self._writer.execute(
+                lambda conn: [
+                    _insert_event(conn, event, occurred_at)
+                    for event, occurred_at in safe_items
+                ]
+            )
+        except Exception as exc:
+            with self._buffer_lock:
+                if len(self._buffer) + len(safe_items) > self._max_buffer:
+                    raise AuditBufferFullError("安全审计内存缓冲已满") from exc
+                self._buffer.extend(safe_items)
+            raise AuditWriteError("安全审计批量持久化失败") from exc
+        self._flush_best_effort()
+        return len(safe_items)
 
     def _flush_best_effort(self) -> None:
         """Drain the ordinary-event buffer without surfacing failures to the caller."""
