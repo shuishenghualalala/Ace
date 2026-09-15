@@ -5,11 +5,12 @@ from __future__ import annotations
 import base64
 import io
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from crew.core.errors import ToolError
-from crew.core.runctx import current_model_capabilities
+from crew.core.runctx import current_model_capabilities, current_provider
 from crew.tools import web_tools
 
 _TINY_PNG = base64.b64decode(
@@ -123,8 +124,45 @@ async def test_pixel_budget_scales_large_images(authorized_png):
 
     payload = json.loads(output.content)
     assert payload["image"]["resized"] is True
+    assert payload["image"]["max_pixels"] == web_tools._VISION_MAX_PIXELS
     decoded = _decode_output_image(output)
     assert max(decoded.size) <= web_tools._VISION_MAX_DIMENSION
+    assert decoded.size[0] * decoded.size[1] <= web_tools._VISION_MAX_PIXELS
+
+
+@pytest.mark.asyncio
+async def test_provider_pixel_budget_overrides_default(authorized_png):
+    """厂商档案级像素预算（provider.vision_max_pixels）收紧缩放目标。"""
+    authorized_png.write_bytes(_make_jpeg((4000, 3000)))
+    provider = SimpleNamespace(vision_max_pixels=100_000)
+    token = current_provider.set(provider)
+    try:
+        output = await web_tools.handle_vision_analyze({"path": "x.png"})
+    finally:
+        current_provider.reset(token)
+
+    payload = json.loads(output.content)
+    assert payload["image"]["resized"] is True
+    assert payload["image"]["max_pixels"] == 100_000
+    decoded = _decode_output_image(output)
+    # 等比缩放按预算开方，逐边 round 可能略超预算（<2%）
+    assert decoded.size[0] * decoded.size[1] <= 100_000 * 1.02
+
+
+@pytest.mark.asyncio
+async def test_provider_without_pixel_budget_falls_back(authorized_png):
+    """档案未收录预算的 provider（属性缺省/无效）回落默认预算。"""
+    authorized_png.write_bytes(_make_jpeg((4000, 3000)))
+    provider = SimpleNamespace(vision_max_pixels=None)
+    token = current_provider.set(provider)
+    try:
+        output = await web_tools.handle_vision_analyze({"path": "x.png"})
+    finally:
+        current_provider.reset(token)
+
+    payload = json.loads(output.content)
+    assert payload["image"]["max_pixels"] == web_tools._VISION_MAX_PIXELS
+    decoded = _decode_output_image(output)
     assert decoded.size[0] * decoded.size[1] <= web_tools._VISION_MAX_PIXELS
 
 

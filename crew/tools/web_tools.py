@@ -437,9 +437,21 @@ VISION_ANALYZE_SCHEMA = {
 
 # 源文件大小闸口（base64 后约 +33%，再经像素预算缩放）。
 _VISION_MAX_SOURCE_BYTES = 10 * 1024 * 1024
-# 像素预算：超过则等比缩放（面积优先，长边其次）。
+# 默认像素预算：超过则等比缩放（面积优先，长边其次）。
+# 厂商档案（crew.providers.vendors）收录了 per-model 预算时按档案收紧。
 _VISION_MAX_PIXELS = 1_600_000
 _VISION_MAX_DIMENSION = 2048
+
+
+def _vision_pixel_budget() -> int:
+    """当前生效 provider 的视觉像素预算；档案未收录时回落默认预算。"""
+    from crew.core.runctx import current_provider
+
+    provider = current_provider.get()
+    budget = getattr(provider, "vision_max_pixels", None)
+    if isinstance(budget, int) and budget > 0:
+        return budget
+    return _VISION_MAX_PIXELS
 
 
 def _sniff_image_mime(data: bytes) -> str | None:
@@ -477,7 +489,9 @@ def _image_size(data: bytes) -> dict[str, Any]:
     return {"format": (mime or "unknown").rsplit("/", 1)[-1]}
 
 
-def _normalize_with_pillow(data: bytes) -> tuple[bytes, str, dict[str, Any], bool] | None:
+def _normalize_with_pillow(
+    data: bytes, *, max_pixels: int
+) -> tuple[bytes, str, dict[str, Any], bool] | None:
     """Pillow 全像素解码、EXIF 方向修正、像素预算缩放与重编码。
 
     返回 None 表示 Pillow 不可用或解码失败；调用方降级为魔数嗅探 + 原始字节
@@ -500,7 +514,7 @@ def _normalize_with_pillow(data: bytes) -> tuple[bytes, str, dict[str, Any], boo
         image = ImageOps.exif_transpose(image)
         scale = min(
             1.0,
-            (_VISION_MAX_PIXELS / max(1, width * height)) ** 0.5,
+            (max_pixels / max(1, width * height)) ** 0.5,
             _VISION_MAX_DIMENSION / max(width, height),
         )
         resized = scale < 1.0
@@ -522,9 +536,11 @@ def _normalize_with_pillow(data: bytes) -> tuple[bytes, str, dict[str, Any], boo
         return None
 
 
-def _prepare_image(data: bytes) -> tuple[bytes, str, dict[str, Any], bool]:
+def _prepare_image(
+    data: bytes, *, max_pixels: int
+) -> tuple[bytes, str, dict[str, Any], bool]:
     """魔数嗅探 →（有 Pillow 时）归一化 → 可进上下文的编码字节。"""
-    normalized = _normalize_with_pillow(data)
+    normalized = _normalize_with_pillow(data, max_pixels=max_pixels)
     if normalized is not None:
         return normalized
     mime = _sniff_image_mime(data)
@@ -564,8 +580,9 @@ async def handle_vision_analyze(
     if not path.is_file():
         raise ToolError(f"图片不存在: {path}")
     data = read_verified_bytes(path, max_bytes=_VISION_MAX_SOURCE_BYTES)
-    payload, mime, meta, resized = _prepare_image(data)
-    meta.update({"path": str(path), "size": len(data), "resized": resized})
+    max_pixels = _vision_pixel_budget()
+    payload, mime, meta, resized = _prepare_image(data, max_pixels=max_pixels)
+    meta.update({"path": str(path), "size": len(data), "resized": resized, "max_pixels": max_pixels})
     data_url = f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
     return ToolOutput(
         content=tool_result(success=True, image=meta),
