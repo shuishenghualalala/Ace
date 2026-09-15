@@ -224,7 +224,14 @@ async def test_app_shutdown_deadline_bounds_cancellation_resistant_provider_reti
         await app.shutdown(timeout=0.02)
         elapsed = asyncio.get_running_loop().time() - started_at
 
-        assert elapsed < 0.1
+        # 时序契约用事件断言而非墙钟：HangingProvider 只有在 release 置位后
+        # 才会从 aclose 返回并置 closed，而 release 在 finally 里才置位。因此
+        # shutdown 返回时 closed 仍未置位，即证明关停没有等待这个吞取消息的
+        # provider——0.02s 预算只约束 Provider 清理阶段，其余关停步骤（插件、
+        # 任务、后台进程排干）不受该 deadline 约束，总耗时断言 0.1s 是墙钟运气。
+        assert not hanging.closed.is_set()
+        # 宽松上限仅兜底真挂死（无界等待会永远阻塞在此），裕度为预算的数百倍。
+        assert elapsed < 5.0
         assert app._shutdown_complete is True
         with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
             app.active_owner.current()

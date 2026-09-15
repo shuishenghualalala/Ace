@@ -3933,7 +3933,11 @@ async def test_team_ask_serializes_same_target_and_records_queue_status():
     team = tm._build_team("communication_queue_s1", owner_account_id="local")
     coordinator = team.communication_router.ask_coordinator
     assert coordinator is not None
-    coordinator.timeout_seconds = 1.0
+    # 本测只验证同目标串行化与 queued 状态记录，与 ask 预算松紧无关；
+    # 目标 Agent 单回合包含 build_prompts 等随负载波动的固定开销，1.0s 预算
+    # 在套件负载下会被动击穿（首个 ask 自身即 expired）。超时契约由
+    # test_team_ask_timeout_returns_expired_and_replies 专职覆盖，这里沿用生产默认预算。
+    coordinator.timeout_seconds = 30.0
     member_token = current_agent_id.set("coder")
     try:
         first = asyncio.create_task(team.teammates["coder"].registry.execute(
