@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
+
+import pytest
 
 from crew.core.types import Message
 from crew.state.session_store import (
@@ -675,3 +678,465 @@ def test_kill9_simulation_commit_is_atomic(tmp_path):
         assert _leaf_seq(db, "A:uid-a", "s1") == 4
     finally:
         store2.close()
+
+
+# ---- W5：会话树（rewind/fork/list_branches，ADR-0042 D2/D3） ----
+
+
+def _event_row_count(db, owner: str, sid: str) -> int:
+    conn = _raw_conn(db)
+    try:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM session_events WHERE owner_account_id = ? AND session_id = ?",
+                (owner, sid),
+            ).fetchone()[0]
+        )
+    finally:
+        conn.close()
+
+
+def _leaf_seq(db, owner: str, sid: str) -> int:
+    conn = _raw_conn(db)
+    try:
+        return int(
+            conn.execute(
+                "SELECT leaf_seq FROM sessions WHERE owner_account_id = ? AND session_id = ?",
+                (owner, sid),
+            ).fetchone()[0]
+        )
+    finally:
+        conn.close()
+
+
+def test_events_carry_parent_seq_chain(tmp_path):
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user("a"), Message.user("b")], owner_account_id="")
+        conn = _raw_conn(db)
+        try:
+            rows = conn.execute(
+                "SELECT seq, parent_seq FROM session_events WHERE session_id = 's1' ORDER BY seq"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert [(int(r[0]), r[1]) for r in rows] == [(1, None), (2, 1)]
+    finally:
+        store.close()
+
+
+def test_rewind_moves_leaf_without_rewriting_rows(tmp_path):
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user(f"m{i}") for i in range(4)], owner_account_id="")
+        rows_before = _event_row_count(db, "", "s1")
+
+        store.rewind("s1", 2, owner_account_id="")
+        assert _leaf_seq(db, "", "s1") == 2
+        # 已存在行零改写：行数不变，旧分支完整保留
+        assert _event_row_count(db, "", "s1") == rows_before
+        assert [m.content for m in store.load("s1", owner_account_id="")] == ["m0", "m1"]
+        # blob 列同步回写（双格式窗口一致）
+        conn = _raw_conn(db)
+        try:
+            blob = json.loads(conn.execute("SELECT messages FROM sessions WHERE session_id = 's1'").fetchone()[0])
+        finally:
+            conn.close()
+        assert [m["content"] for m in blob] == ["m0", "m1"]
+    finally:
+        store.close()
+
+
+def test_rewind_then_append_creates_branch_and_can_navigate_back(tmp_path):
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user(f"m{i}") for i in range(4)], owner_account_id="")
+        store.rewind("s1", 2, owner_account_id="")
+        store.save("s1", [Message.user("m0"), Message.user("m1"), Message.user("b0"), Message.user("b1")], owner_account_id="")
+
+        # 新分支挂在前缀链上
+        assert [m.content for m in store.load("s1", owner_account_id="")] == ["m0", "m1", "b0", "b1"]
+        branches = store.list_branches("s1", owner_account_id="")
+        tails = [b for b in branches if b["kind"] == "tail"]
+        assert len(tails) == 1
+        assert tails[0]["cut_seq"] == 2
+        assert tails[0]["tip_seq"] == 4
+
+        # 导航回旧分支：leaf 移回旧尾，当前分支变成 tail 保留
+        store.rewind("s1", 4, owner_account_id="")
+        assert [m.content for m in store.load("s1", owner_account_id="")] == ["m0", "m1", "m2", "m3"]
+        tails = [b for b in store.list_branches("s1", owner_account_id="") if b["kind"] == "tail"]
+        assert len(tails) == 1
+        assert tails[0]["tip_seq"] == 6
+    finally:
+        store.close()
+
+
+def test_rewind_rejects_cut_inside_open_turn(tmp_path):
+    import pytest
+
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user("a"), Message.user("b")], owner_account_id="")
+        store.record_turn_event("s1", kind=SessionEventType.TURN_START, owner_account_id="")
+        store.save("s1", [Message.user("a"), Message.user("b"), Message.user("c")], owner_account_id="")
+        # 切口落在开放回合内（turn_start 之后）必须拒绝
+        with pytest.raises(ValueError, match="开放回合"):
+            store.rewind("s1", 3, owner_account_id="")
+        with pytest.raises(ValueError, match="开放回合"):
+            store.rewind("s1", 4, owner_account_id="")
+        # 开放回合之前的闭合前缀合法
+        store.rewind("s1", 2, owner_account_id="")
+        assert _leaf_seq(db, "", "s1") == 2
+    finally:
+        store.close()
+
+
+def test_rewind_rejects_unbalanced_tool_cut(tmp_path):
+    import pytest
+
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        from crew.core.types import ToolCall
+
+        tc = ToolCall(id="call_1", name="read_file", arguments={"path": "x"})
+        store.save(
+            "s1",
+            [Message.user("a"), Message.assistant(tool_calls=[tc])],
+            owner_account_id="",
+        )
+        with pytest.raises(ValueError, match="未闭合"):
+            store.rewind("s1", 2, owner_account_id="")
+    finally:
+        store.close()
+
+
+def test_rewind_cas_conflict_on_concurrent_leaf_move(tmp_path):
+    import time
+
+    import pytest
+
+    from crew.state.session_store import SessionWriteConflict
+
+    db = str(tmp_path / "crew.db")
+    # 短 TTL：让 store2 在竞速时能合法接管写者租约
+    store1 = SQLiteSessionStore(db, lease_ttl_seconds=0.3, lease_heartbeat_seconds=60.0)
+    store2 = SQLiteSessionStore(db)
+    try:
+        store1.save("s1", [Message.user(f"m{i}") for i in range(4)], owner_account_id="")
+        store1.load("s1", owner_account_id="")
+        time.sleep(0.4)  # store1 租约过期，store2 可接管
+
+        original = store1._chain_messages_upto
+
+        def _race(owner, sid, upto):
+            store2.rewind("s1", 1, owner_account_id="")
+            return original(owner, sid, upto)
+
+        store1._chain_messages_upto = _race
+        with pytest.raises(SessionWriteConflict):
+            store1.rewind("s1", 2, owner_account_id="")
+        store1._chain_messages_upto = original
+        # store2 的移动生效未被覆盖
+        assert _leaf_seq(db, "", "s1") == 1
+    finally:
+        store1.close()
+        store2.close()
+
+
+def test_fork_shares_prefix_without_copying_rows(tmp_path):
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user(f"m{i}") for i in range(4)], owner_account_id="")
+        source_rows_before = _event_row_count(db, "", "s1")
+
+        fork_id = store.fork("s1", 2, owner_account_id="")
+        # 源会话行数零变化：前缀共享不复制
+        assert _event_row_count(db, "", "s1") == source_rows_before
+        # fork 只有一条 end_seed 切口事件
+        assert _event_row_count(db, "", fork_id) == 1
+        assert [m.content for m in store.load(fork_id, owner_account_id="")] == ["m0", "m1"]
+
+        # fork 上续写不影响源会话
+        store.save(fork_id, [Message.user("m0"), Message.user("m1"), Message.user("f0")], owner_account_id="")
+        assert [m.content for m in store.load(fork_id, owner_account_id="")] == ["m0", "m1", "f0"]
+        assert [m.content for m in store.load("s1", owner_account_id="")] == ["m0", "m1", "m2", "m3"]
+
+        branches = store.list_branches("s1", owner_account_id="")
+        forks = [b for b in branches if b["kind"] == "fork"]
+        assert len(forks) == 1
+        assert forks[0]["session_id"] == fork_id
+        assert forks[0]["parent_seq"] == 2
+        assert forks[0]["tip_seq"] == 2
+    finally:
+        store.close()
+
+
+def test_fork_of_fork_resolves_nested_prefix(tmp_path):
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user(f"m{i}") for i in range(4)], owner_account_id="")
+        f1 = store.fork("s1", 2, owner_account_id="")
+        store.save(f1, [Message.user("m0"), Message.user("m1"), Message.user("x")], owner_account_id="")
+        # 边界 seq 是源会话（f1）事件表内的链上位置：1 = end_seed 切口
+        f2 = store.fork(f1, 1, owner_account_id="")
+        assert [m.content for m in store.load(f2, owner_account_id="")] == ["m0", "m1"]
+    finally:
+        store.close()
+
+
+def test_fork_rejects_bad_boundary(tmp_path):
+    import pytest
+
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user("a")], owner_account_id="")
+        with pytest.raises(ValueError):
+            store.fork("s1", 99, owner_account_id="")
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_rewind_fork_branches_endpoints(tmp_path, auth_headers):
+    from httpx import ASGITransport, AsyncClient
+
+    from crew.app import build_app
+    from crew.gateway.server import create_app
+    from crew.state.config import Config
+
+    crew = build_app(
+        config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False),
+        enable_team=False,
+    )
+    owner = "A:uid-a"
+    crew.session_store.save("s1", [Message.user(f"m{i}") for i in range(4)], owner_account_id=owner)
+    app = create_app(crew)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.post("/api/session/s1/rewind", json={"target_seq": 2})
+        assert resp.status_code == 200
+        assert resp.json()["leaf_seq"] == 2
+
+        # 非法切口 → 400
+        resp = await client.post("/api/session/s1/rewind", json={"target_seq": 99})
+        assert resp.status_code == 400
+
+        resp = await client.post("/api/session/s1/fork", json={"boundary_seq": 2, "title": "分支A"})
+        assert resp.status_code == 200
+        fork_id = resp.json()["session_id"]
+        assert resp.json()["source_session_id"] == "s1"
+
+        resp = await client.get("/api/session/s1/branches")
+        assert resp.status_code == 200
+        branches = resp.json()["branches"]
+        forks = [b for b in branches if b["kind"] == "fork"]
+        assert [f["session_id"] for f in forks] == [fork_id]
+        assert forks[0]["parent_seq"] == 2
+        tails = [b for b in branches if b["kind"] == "tail"]
+        assert tails and tails[0]["tip_seq"] == 4
+
+        # fork 出来的会话前缀可加载
+        resp = await client.get(f"/api/session/{fork_id}")
+        assert resp.status_code == 200
+
+        # 不存在的会话 → 404
+        resp = await client.post("/api/session/nope/rewind", json={"target_seq": 1})
+        assert resp.status_code == 404
+
+
+# ---- W5：崩溃恢复定稿（ADR-0042 D3） ----
+
+
+def test_kill9_mid_turn_reopen_and_close_open_turn(tmp_path):
+    """kill -9 中途崩溃（turn_start 无 turn_end）：重开后可加载、悬挂回合可闭合。"""
+    from crew.core.types import ToolCall
+
+    owner = "A:uid-a"
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user("q")], owner_account_id=owner)
+        store.record_turn_event("s1", kind=SessionEventType.TURN_START, owner_account_id=owner)
+        store.save(
+            "s1",
+            [Message.user("q"), Message.assistant(tool_calls=[ToolCall(id="call_1", name="read_file", arguments={})])],
+            owner_account_id=owner,
+        )
+        # 模拟 kill -9：不落 turn_end、不 close，直接弃实例
+    finally:
+        store.close()
+
+    store2 = SQLiteSessionStore(db)
+    try:
+        messages = store2.load("s1", owner_account_id=owner)
+        assert [m.role for m in messages] == ["user", "assistant"]
+        # 悬挂回合被识别并闭合（interrupted），再次闭合为空操作
+        assert store2.close_open_turn("s1", owner_account_id=owner) is True
+        assert store2.close_open_turn("s1", owner_account_id=owner) is False
+        # 闭合后回合边界完整，下一回合正常追加
+        store2.record_turn_event("s1", kind=SessionEventType.TURN_START, owner_account_id=owner)
+        store2.save(
+            "s1",
+            [*messages, Message.user("next")],
+            owner_account_id=owner,
+        )
+        assert [m.content for m in store2.load("s1", owner_account_id=owner)][-1] == "next"
+    finally:
+        store2.close()
+
+
+def test_close_open_turn_on_closed_session_is_noop(tmp_path):
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user("a")], owner_account_id="")
+        assert store.close_open_turn("s1", owner_account_id="") is False
+        assert store.close_open_turn("ghost", owner_account_id="") is False
+    finally:
+        store.close()
+
+
+# ---- W5：断点报告（ADR-0042 D4） ----
+
+
+def test_scan_breakpoints_reports_open_turn_with_step(tmp_path):
+    owner = "A:uid-a"
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        # 会话 A：上一回合被 kill -9 打断（turn_start 无 turn_end）
+        store.save("sa", [Message.user("q1")], owner_account_id=owner)
+        store.record_turn_event("sa", kind=SessionEventType.TURN_START, owner_account_id=owner)
+        store.save(
+            "sa",
+            [Message.user("q1"), Message.assistant("a1"), Message.user("q2"), Message.assistant("a2")],
+            owner_account_id=owner,
+        )
+        # 会话 B：正常闭合，无断点
+        store.save("sb", [Message.user("x")], owner_account_id=owner)
+        store.record_turn_event("sb", kind=SessionEventType.TURN_START, owner_account_id=owner)
+        store.save("sb", [Message.user("x"), Message.assistant("y")], owner_account_id=owner)
+        store.record_turn_event(
+            "sb", kind=SessionEventType.TURN_END, owner_account_id=owner, status="completed"
+        )
+        # Team 子会话：排除
+        store.save("p::turn::1::leader", [Message.user("c")], owner_account_id=owner)
+        store.record_turn_event("p::turn::1::leader", kind=SessionEventType.TURN_START, owner_account_id=owner)
+
+        reports = store.scan_breakpoints(owner)
+        assert [r["session_id"] for r in reports] == ["sa"]
+        report = reports[0]
+        assert report["step"] == 3  # 开放回合内 a1/q2/a2 三条消息事件（q1 在回合前）
+        assert report["last_event_seq"] == 5
+        # 断点报告不自动续跑：扫描本身不写任何事件
+        assert _event_row_count(db, owner, "sa") == 5
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_sessions_list_includes_breakpoint(tmp_path, auth_headers):
+    from httpx import ASGITransport, AsyncClient
+
+    from crew.app import build_app
+    from crew.gateway.server import create_app
+    from crew.state.config import Config
+
+    owner = "A:uid-a"
+    crew = build_app(
+        config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False),
+        enable_team=False,
+    )
+    crew.session_store.save("s1", [Message.user("q1")], owner_account_id=owner)
+    crew.session_store.record_turn_event("s1", kind=SessionEventType.TURN_START, owner_account_id=owner)
+    app = create_app(crew)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.get("/api/sessions")
+        assert resp.status_code == 200
+        items = resp.json()
+        assert len(items) == 1
+        # q1 在 turn_start 之前落库，开放回合内尚无消息事件
+        assert items[0]["breakpoint"]["step"] == 0
+        assert items[0]["breakpoint"]["turn_start_seq"] == 2
+
+
+# ---- W5：启动恢复序列统一入口（ADR-0042 D5） ----
+
+
+def test_startup_recovery_sequence_dedupes_and_isolates_failures():
+    from crew.state import recovery
+
+    recovery.clear_startup_recovery()
+    try:
+        calls: list[str] = []
+        recovery.register_startup_recovery("step.a", lambda: calls.append("a") or 1)
+        recovery.register_startup_recovery("step.a", lambda: calls.append("dup") or 2)
+        recovery.register_startup_recovery("step.b", lambda: 1 / 0)
+
+        results = recovery.run_startup_recovery()
+
+        assert calls == ["a"]  # 同名步骤只注册一次
+        assert results["step.a"] == 1
+        assert results["step.b"] is None  # 单步失败不阻断、不外抛
+    finally:
+        recovery.clear_startup_recovery()
+
+
+def test_cron_start_registers_recovery_into_unified_sequence(tmp_path):
+    from crew.cron.jobs import CronJobStore
+    from crew.cron.scheduler import CronService
+    from crew.state import recovery
+
+    recovery.clear_startup_recovery()
+    store = CronJobStore(str(tmp_path / "cron.db"))
+    service = CronService(store, runner=None)
+
+    async def _run() -> dict:
+        await service.start()
+        try:
+            return recovery.run_startup_recovery()
+        finally:
+            await service.stop()
+
+    try:
+        results = asyncio.run(_run())
+        assert "cron.running_fires" in results
+    finally:
+        recovery.clear_startup_recovery()
+
+
+# ---- W5：compaction 事件自包含（codex 对照修订第 3 条） ----
+
+
+def test_compaction_checkpoint_event_roundtrip(tmp_path):
+    owner = "A:uid-a"
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user(f"m{i}") for i in range(3)], owner_account_id=owner)
+        assert store.load_compaction_checkpoint("s1", owner) is None
+        store.record_compaction_checkpoint(
+            "s1", owner_account_id=owner, summary="摘要A", covered_count=2, view_estimate=120
+        )
+        store.record_compaction_checkpoint(
+            "s1", owner_account_id=owner, summary="摘要B", covered_count=3, view_estimate=90
+        )
+        checkpoint = store.load_compaction_checkpoint("s1", owner)
+        # 旧 checkpoint 永不覆盖：读取端取最新一行
+        assert checkpoint["summary"] == "摘要B"
+        assert checkpoint["covered_count"] == 3
+        assert checkpoint["view_estimate"] == 90
+        # 事件链不被 compaction 事件破坏：投影消息不变
+        assert [m.content for m in store.load("s1", owner_account_id=owner)] == ["m0", "m1", "m2"]
+    finally:
+        store.close()

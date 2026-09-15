@@ -594,6 +594,15 @@ def test_history_repair_two_semantics_and_idempotence():
     assert repaired[1].content.startswith(TOOL_OUTCOME_UNKNOWN)  # duration 已写回 = 执行过
     assert repaired[2].content.startswith(TOOL_NOT_STARTED)
     assert all(m.role == "tool" for m in repaired)
+    # 合成 id 确定性派生：固定 namespace + 类型前缀 + 源调用 id，不随机
+    from crew.agent.loop.history_repair import synthetic_result_id
+
+    assert [m.request_id for m in repaired] == [
+        synthetic_result_id("c1"),
+        synthetic_result_id("c2"),
+        synthetic_result_id("c3"),
+    ]
+    assert all(m.request_id.startswith("ace.synthetic:tool_result:") for m in repaired)
     # 输入不被修改；配平后的历史再次扫描为空（幂等，可安全持久化）
     assert repair_orphan_tool_calls(messages) == repaired
     assert repair_orphan_tool_calls(messages + repaired) == []

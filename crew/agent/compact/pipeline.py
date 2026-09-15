@@ -20,6 +20,8 @@ todo 状态不在此处重注入：Crew 由 runtime._plan_reminder_blocks 每轮
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Callable
 
 from crew.agent.compact.file_manifest import (
     is_file_manifest_message,
@@ -62,6 +64,10 @@ _MAX_CONSECUTIVE_FAILURES = 3
 _MIN_OLD_FOR_SUMMARY = 3
 SummaryKey = tuple[str, str]
 
+# compaction 事件自包含落库（session_events 只增不改）：
+# sink(session_id, owner_account_id, summary, covered_count, view_estimate)。
+CompactionEventSink = Callable[[str, str, str, int, int], None]
+
 
 class ContextCompactor:
     """三层渐进式上下文压缩。
@@ -95,6 +101,7 @@ class ContextCompactor:
         summary_max_tokens: int = 8192,
         summary_prefix_reuse: bool = True,
         meter_checkpoint_loader: CheckpointLoader | None = None,
+        event_sink: CompactionEventSink | None = None,
     ) -> None:
         self.provider = provider
         self.enabled = enabled
@@ -122,6 +129,9 @@ class ContextCompactor:
         self.summary_prefix_reuse = summary_prefix_reuse
         # 水位判断的消费入口：无锚点时退化为 estimate_tokens，行为与旧实现一致。
         self._meter = TokenMeter(meter_checkpoint_loader)
+        # compaction 事件自包含落库 sink（SQLiteSessionStore.record_compaction_checkpoint
+        # 形态）；None 时压缩结果只进 SummaryStore，不进会话事件流。
+        self._event_sink = event_sink
         # store 为 None 时退化为进程内缓存（重启即失，自动降级 L3）。
         self._mem: dict[SummaryKey, SummaryState] = {}
         # 每个 session 连续摘要失败次数，用于断路器。
@@ -362,6 +372,27 @@ class ContextCompactor:
             result_policy_resolver=self.result_policy_resolver,
         )
 
+    def _emit_compaction_event(
+        self,
+        session_id: str | None,
+        owner_account_id: str | None,
+        state: SummaryState,
+        view_estimate: int,
+    ) -> None:
+        """压缩成功落库后内联自包含 compaction 事件（事件表只增不改）。"""
+        if self._event_sink is None or not session_id:
+            return
+        try:
+            self._event_sink(
+                session_id,
+                owner_account_id or "",
+                state.text,
+                state.covered_count,
+                int(view_estimate),
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("compaction 事件落库失败 session=%s", session_id)
+
     async def maybe_compact(
         self,
         messages: list[Message],
@@ -417,6 +448,7 @@ class ContextCompactor:
         prev = state.ineffective_count if state is not None else 0
         new_state.ineffective_count = 0 if savings >= _INEFFECTIVE_SAVINGS_PCT else prev + 1
         self._put_state(session_id, new_state, owner_account_id)
+        self._emit_compaction_event(session_id, owner_account_id, new_state, after)
         return result
 
     async def force_compact(
@@ -455,6 +487,9 @@ class ContextCompactor:
             new_state.ineffective_count = 0
             self._put_state(session_id, new_state, owner_account_id)
             self._failure_counts[self._key(session_id, owner_account_id) or ("", "")] = 0
+            self._emit_compaction_event(
+                session_id, owner_account_id, new_state, estimate_tokens(result)
+            )
         return result
 
     async def compact_now(
@@ -484,6 +519,9 @@ class ContextCompactor:
         new_state.ineffective_count = 0
         self._put_state(session_id, new_state, owner_account_id)
         self._failure_counts[self._key(session_id, owner_account_id) or ("", "")] = 0
+        self._emit_compaction_event(
+            session_id, owner_account_id, new_state, estimate_tokens(result)
+        )
         return result, not skipped
 
     def _history_hint(self, session_id: str | None) -> str:

@@ -10,6 +10,9 @@
     写回）但结果没落盘，副作用可能已发生：先验证外部状态，只对只读/幂等
     操作重试。
   TOOL_NOT_STARTED    —— 没有任何开始执行的痕迹，可安全重试。
+
+合成结果的 id 走确定性派生（固定 namespace + 类型前缀 + 源调用 id），
+重复扫描/跨进程重放 id 稳定，不随机、不落表（读时合成）。
 """
 
 from __future__ import annotations
@@ -19,6 +22,10 @@ from crew.core.types import Message
 TOOL_NOT_STARTED = "TOOL_NOT_STARTED"
 TOOL_OUTCOME_UNKNOWN = "TOOL_OUTCOME_UNKNOWN"
 
+# 固定 namespace：变更会破坏跨重启的 id 稳定性（prompt cache 复用与幂等判重）。
+SYNTHETIC_RESULT_NAMESPACE = "ace.synthetic"
+SYNTHETIC_RESULT_TYPE_PREFIX = "tool_result"
+
 _OUTCOME_UNKNOWN_TEXT = (
     "工具调用在会话中断前已开始执行，但结果未落盘，结局未知。"
     "请根据工具语义决定是否重试：仅当操作只读或幂等时才可直接重试；"
@@ -26,6 +33,11 @@ _OUTCOME_UNKNOWN_TEXT = (
 )
 
 _NOT_STARTED_TEXT = "工具调用在会话中断前未开始执行。如仍需要该操作，可以直接重试。"
+
+
+def synthetic_result_id(tool_call_id: str) -> str:
+    """由源调用的唯一 id 确定性派生合成结果的 id（namespace:类型前缀:源 id）。"""
+    return f"{SYNTHETIC_RESULT_NAMESPACE}:{SYNTHETIC_RESULT_TYPE_PREFIX}:{tool_call_id}"
 
 
 def repair_orphan_tool_calls(messages: list[Message]) -> list[Message]:
@@ -48,5 +60,7 @@ def repair_orphan_tool_calls(messages: list[Message]) -> list[Message]:
                 code, text = TOOL_OUTCOME_UNKNOWN, _OUTCOME_UNKNOWN_TEXT
             else:
                 code, text = TOOL_NOT_STARTED, _NOT_STARTED_TEXT
-            repaired.append(Message.tool(tc.id, f"{code}: {text}", name=tc.name))
+            message = Message.tool(tc.id, f"{code}: {text}", name=tc.name)
+            message.request_id = synthetic_result_id(tc.id)
+            repaired.append(message)
     return repaired

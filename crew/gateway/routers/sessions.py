@@ -30,7 +30,11 @@ from crew.gateway.helpers import (
 )
 from crew.features.hooks import hook_registry
 from crew.security.settings import strict_security_enabled
-from crew.state.session_store import SessionOwnershipError, is_placeholder_title
+from crew.state.session_store import (
+    SessionOwnershipError,
+    SessionWriteConflict,
+    is_placeholder_title,
+)
 from crew.team.team_member_model import (
     TeamMemberModelBindingError,
     materialize_team_member_model_bindings,
@@ -339,17 +343,28 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         include_archived: bool = False,
     ) -> JSONResponse:
         owner = account_from_request(request).owner_account_id
-        return JSONResponse(
-            with_session_agent_labels(
-                crew,
-                crew.session_store.list_sessions(
-                    workspace_id,
-                    owner_account_id=owner,
-                    include_archived=include_archived,
-                ),
+        items = with_session_agent_labels(
+            crew,
+            crew.session_store.list_sessions(
+                workspace_id,
                 owner_account_id=owner,
-            )
+                include_archived=include_archived,
+            ),
+            owner_account_id=owner,
         )
+        # D4 断点报告：开放回合（上次会话在第 N 步被中断）随列表下发，不自动续跑
+        scan = getattr(crew.session_store, "scan_breakpoints", None)
+        if callable(scan):
+            breakpoints = {b["session_id"]: b for b in scan(owner)}
+            for item in items:
+                bp = breakpoints.get(item.get("session_id"))
+                if bp:
+                    item["breakpoint"] = {
+                        "step": bp["step"],
+                        "turn_start_seq": bp["turn_start_seq"],
+                        "last_event_seq": bp["last_event_seq"],
+                    }
+        return JSONResponse(items)
 
     @router.post("/api/session/{session_id}/ensure")
     async def ensure_session(request: Request, session_id: str, payload: dict) -> JSONResponse:
@@ -648,6 +663,65 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         pinned = bool(payload.get("pinned", True))
         crew.session_store.set_pinned(session_id, pinned, owner_account_id=owner)
         return JSONResponse({"ok": True, "pinned": pinned})
+
+    # ---- 会话树：rewind / fork / 分支枚举（ADR-0042 W5，store 能力缺席时 503） ----
+
+    @router.post("/api/session/{session_id}/rewind")
+    async def rewind_session(request: Request, session_id: str, payload: dict) -> JSONResponse:
+        """回退到目标 seq：leaf 指针 CAS 移动，旧分支保留可导航回来。body: {target_seq}。"""
+        owner = _owner(request)
+        rewind = getattr(crew.session_store, "rewind", None)
+        if not callable(rewind):
+            return JSONResponse({"ok": False, "error": "会话存储不支持回退"}, status_code=503)
+        if not _session_owned(session_id, owner):
+            return _not_found(session_id)
+        try:
+            target_seq = int(payload.get("target_seq"))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "target_seq 必须是整数"}, status_code=400)
+        try:
+            rewind(session_id, target_seq, owner_account_id=owner)
+        except SessionWriteConflict as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "session_id": session_id, "leaf_seq": target_seq})
+
+    @router.post("/api/session/{session_id}/fork")
+    async def fork_session(request: Request, session_id: str, payload: dict) -> JSONResponse:
+        """从边界 seq 分叉出新会话（前缀共享，不复制事件行）。body: {boundary_seq, title?}。"""
+        owner = _owner(request)
+        fork = getattr(crew.session_store, "fork", None)
+        if not callable(fork):
+            return JSONResponse({"ok": False, "error": "会话存储不支持分叉"}, status_code=503)
+        if not _session_owned(session_id, owner):
+            return _not_found(session_id)
+        try:
+            boundary_seq = int(payload.get("boundary_seq"))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "boundary_seq 必须是整数"}, status_code=400)
+        title = payload.get("title")
+        try:
+            new_id = fork(
+                session_id,
+                boundary_seq,
+                owner_account_id=owner,
+                title=str(title).strip() if isinstance(title, str) and title.strip() else None,
+            )
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "session_id": new_id, "source_session_id": session_id})
+
+    @router.get("/api/session/{session_id}/branches")
+    async def session_branches(request: Request, session_id: str) -> JSONResponse:
+        """枚举会话分支（fork 子会话 + rewind 留下的旧分支尾巴）。"""
+        owner = _owner(request)
+        list_branches = getattr(crew.session_store, "list_branches", None)
+        if not callable(list_branches):
+            return JSONResponse({"ok": False, "error": "会话存储不支持分支枚举"}, status_code=503)
+        if not _session_owned(session_id, owner):
+            return _not_found(session_id)
+        return JSONResponse({"ok": True, "branches": list_branches(session_id, owner_account_id=owner)})
 
     def is_external_session_config(config: dict[str, Any] | None) -> bool:
         if not isinstance(config, dict):
