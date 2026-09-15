@@ -48,7 +48,7 @@
 <table>
 <thead><tr><th>范围</th><th>命令</th><th>结果</th></tr></thead>
 <tbody>
-<tr><td>后端全量</td><td><code>uv run pytest -q</code></td><td>4241 passed / 43 skipped（3 failed 为三套全量并行抢 CPU 的时序 flake，单跑复验 3 passed）</td></tr>
+<tr><td>后端全量</td><td><code>uv run pytest -q</code></td><td>4241 passed / 43 skipped / 3 failed——失败三例（mcp 持久化、provider 停机期限、team 串行化）单独复跑均通过；<strong>失败原因未确认</strong>（当时机器上另有两套全量任务并行，竞争假说未经受控实验证实）。nodeid 与更正说明见 <a href="review-followup-batch-2026-09-15.html">第二轮整改测试记录</a></td></tr>
 <tr><td>桌面全量</td><td><code>npx vitest run</code> + <code>npx tsc --noEmit</code></td><td>169 文件 1947 tests 全过；typecheck 0 error</td></tr>
 <tr><td>Web 全量</td><td><code>npm test</code> + <code>npm run typecheck</code></td><td>35 文件 259 tests 全过；typecheck 通过</td></tr>
 <tr><td>静态门禁</td><td><code>uv run ruff check</code> + <code>uv run lint-imports</code></td><td>All checks passed；9 contracts kept, 0 broken</td></tr>
@@ -59,7 +59,7 @@
 <ul>
 <li>D 切片 Windows 打包态 import 实测待回填（需要在 Windows 构建产物上验证 pandas/matplotlib 实际可导入）。</li>
 <li>C 切片发现 startup_audit 展示层同名跨版本显示歧义（两个相同 name），升级为 <code>name@vN</code> 需同步 CLI 打印与既有断言，列后续小任务。</li>
-<li>三条时序敏感测试（mcp 持久化 / provider 停机期限 / team 串行化）在高负载并行下可 flake，CI 串行环境未见复现。</li>
+<li>三条全量失败（mcp 持久化 / provider 停机期限 / team 串行化）单跑通过、全量失败原因未确认（本条初稿曾定性为"CPU 竞争 flake"，证据不足已更正，详见第二轮记录的 S5 修正节）；第二轮已在无并发环境对冻结 HEAD 重跑全量。</li>
 </ul>
 </body>
 </html>

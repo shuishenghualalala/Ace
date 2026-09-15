@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>第二轮审查整改批次测试记录（2026-09-15）</title>
+<style>body{font:16px/1.75 system-ui,sans-serif;max-width:960px;margin:auto;padding:40px 24px;color:#222}h2{border-bottom:1px solid #ddd}h3{margin-top:28px}code{background:#f4f4f4;padding:2px 5px}a{color:#245a83}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 10px}</style>
+</head>
+<body>
+<h1>第二轮审查整改批次测试记录</h1>
+<p>2026-09-15 · 审查基线 <code>7b7a9f8</code> · 实施依据：<code>docs/todo/ace-plugin-review-followup-plan.md</code>（第二轮审查与整改方案）。执行方式：S1 与 S2 并行开发（Luna-UI / Luna-Backend），S2b（模型/evolution 同型迁移）与 S3（接续中断的红测试）随后并行；每片先红后绿，主 agent 差异审查与独立验证。</p>
+
+<h2>提交清单</h2>
+<table>
+<thead><tr><th>提交</th><th>覆盖切片</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td><code>f9e4675</code></td><td>S2 + S2b</td><td>配置操作完整事务：MCP / 模型 profile（含激活切换）/ evolution 统一"候选值 → 校验 → 持久化 → 发布"边界（S2 与 S2b 在 config.py 与 test_config_crud.py 同文件耦合，合并为一笔完整事务提交，均为测试过的状态、可整体回退）</td></tr>
+<tr><td><code>e8b2974</code></td><td>S1 + S3</td><td>看板请求所有权收口与安装事务回滚（S3 基于 S1 修改同两文件，同理由合并提交）</td></tr>
+</tbody>
+</table>
+
+<h2>S1 · UI 异步请求所有权收口</h2>
+<p><strong>缺陷</strong>：① <code>refreshKanbanStatusOnly()</code> 只校验会话、不校验安装代——同会话卸载重装后旧代轮询响应仍回写 <code>latestStatus</code>/DOM，旧代终态还会经 <code>stopKanbanStatusPolling()</code> 停掉新代定时器（句柄模块级单一份）；② <code>refreshTeamCollaborationBoard()</code> finally 无条件释放占用——旧代请求结束会误删新代同会话请求的占用标记，后续刷新并发乱序回写。</p>
+<p><strong>修法</strong>：轮询 tick 回调闭包捕获发起代数，<code>refreshKanbanStatusOnly(sessionId, generation)</code> 入口与 await 返回后双重代际+会话校验；Team 侧 <code>refreshInFlight</code> 改 <code>Map&lt;sessionId, token&gt;</code>（自增 token），finally 仅在仍持有自己 token 时释放。</p>
+<p><strong>测试</strong>：新增 7 用例（kanban 4 + team 3），全部确定性 deferred 屏障、零固定 sleep。修复前 4 红（<code>clearInterval</code> 被旧代多调一次、第三次刷新绕过占用）→ 修复后全绿；stash 基线核验 18/18 证明红均由缺陷引入。</p>
+
+<h2>S2 + S2b · 配置操作完整事务</h2>
+<p><strong>已复现缺陷</strong>（审查方经真实 Router + Config 注入 YAML 写入失败）：MCP PUT 500 后内存新 command / 磁盘旧 command；DELETE 500 后内存无 server / 磁盘保留；根因是调用方先改内存后持久化，<code>_atomic_write_yaml</code> 只管文件替换与 raw_config 发布顺序。<strong>同型核查</strong>：模型 profile（use/add/update/remove 四入口先激活/增改/pop 再 persist）与 evolution（misc.py / cli/knowledge.py 先赋值再 persist）存在同样分叉，已由 S2 固化为两个 xfail 证据测试。</p>
+<p><strong>修法</strong>：config.py 新增统一写入边界——<code>_commit_mcp_servers(candidate)</code> 与 <code>_commit_model_profiles(candidate, *, active_model_id, default_model_id)</code> / <code>set_active_model</code> / <code>set_evolution_config</code>，顺序契约：候选值（副本计算，不碰已发布内存）→ 前置校验 → <code>_atomic_write_yaml</code> 原子落盘 → 磁盘成功后发布内存。Router（mcp_servers / misc）与 CLI（integration / knowledge）全部改走事务入口；持久化失败先于任何运行资源操作返回（provider 重建 / MCP 子进程启停 / env 与凭证清理只在成功后）；"已保存但连接失败"如实上报、不回滚伪装。遗留两步式入口（<code>set_mcp_server</code> / <code>persist_model_profiles</code> 等）仅为未迁移调用方保留并 docstring 标注。owner 语义：全局事务只写 config.yaml <code>llm</code> 段，owner overlay 按文件天然隔离（新增用例锁定 acc-a 失败不影响 acc-b）。顺带修复"删除激活模型后切换不落盘"的隐性缺口。</p>
+<p><strong>测试</strong>：HTTP+CLI 真实入口注入 <code>yaml.safe_dump</code> OSError 与 <code>Path.replace</code> 失败，核对业务字段 + raw_config + 磁盘回读 + 运行管理器调用次数；两个 xfail 转正；模型四操作 + evolution 两入口 + owner 隔离 + 失败重试共新增约 30 用例。修复前红（HTTP 5 failed + 2 xfailed）→ 修复后 242 + 31 + 77 passed（分层回归）。</p>
+
+<h2>S3 · UI 安装失败的事务回滚</h2>
+<p><strong>缺陷</strong>：<code>installTeamKanbanBoards()</code> 两板装完才存总 disposer；<code>initKanbanBoard()</code> 逐个注册、全成才发布自己的 disposer——中途注册冲突时贡献残留、重试继续冲突、总 disposer 未建立。</p>
+<p><strong>修法</strong>：两级事务——单 Feature 的 <code>create*InstallTransaction</code> 即时收集每步 disposer，失败逆序撤销本次贡献（每个清理单独兜底、互不阻断），成功发布幂等 disposer 复用同一清理链；组合层 <code>applyBoardCapability</code> 逐板 try/catch 隔离，一块失败不牵连另一块、不上抛，初始安装与能力翻转同路径，故障解除后翻转/重试补装。顺带修复 <code>bindTaskBoardResize</code> disposer 中 mousemove 移除错绑的既有 bug。S1 的代际计数器/token 语义完全保留（失败回滚不走 dispose 路径、不额外递增代际）。</p>
+<p><strong>测试</strong>：6 个红用例（组合层隔离 2 + 单 Feature 回滚 4）由中断的前一 agent 写好、本 agent 核对断言零修正后修实现转绿；6 测试文件 69/69 全绿。</p>
+
+<h2>独立验证汇总（主 agent 复跑，冻结 HEAD）</h2>
+<table>
+<thead><tr><th>范围</th><th>命令</th><th>结果</th></tr></thead>
+<tbody>
+<tr><td>桌面全量</td><td><code>npx vitest run</code> + <code>npx tsc --noEmit</code></td><td id="desktop-result">169 文件 1960 tests 全过；typecheck 0 error</td></tr>
+<tr><td>后端全量</td><td><code>uv run pytest -q</code>（无并发任务环境，冻结 HEAD <code>e8b2974</code>）</td><td><strong>4277 passed / 43 skipped / 0 failed</strong>（4:52）——上一批三条失败用例在本次全量中亦通过</td></tr>
+<tr><td>静态门禁</td><td><code>uv run ruff check crew/</code> + <code>uv run lint-imports</code></td><td>All checks passed；9 contracts kept, 0 broken</td></tr>
+</tbody>
+</table>
+
+<h2>上一批记录修正（S5）</h2>
+<p>上一批测试记录（<a href="review-fixes-batch-2026-09-14.html">2026-09-14</a>）曾将三条全量失败定性为"三套全量并行抢 CPU 的时序 flake"，该定性<strong>证据不足，现更正为"原因未确认"</strong>。事实记录：基线 <code>d8e7fcb</code>，命令 <code>uv run pytest -q</code>，全量出现 3 例失败，nodeid 为——</p>
+<ul>
+<li><code>tests/gateway/test_mcp_servers_api.py::test_create_server_registers_tools_and_persists</code></li>
+<li><code>tests/test_provider_lifecycle.py::test_app_shutdown_deadline_bounds_cancellation_resistant_provider_retirement</code></li>
+<li><code>tests/test_team_tasks.py::test_team_ask_serializes_same_target_and_records_queue_status</code></li>
+</ul>
+<p>三例单独复跑均通过；当时机器上另有两套全量任务并行（进程可观测），但竞争假说未经受控实验证实，完整堆栈未捕获。本轮按 S5 要求在无并发任务的环境对冻结 HEAD 执行一次完整后端套件，结果见上表与下方补充。</p>
+
+<h2>遗留与后续</h2>
+<ul>
+<li><strong>S4 能力状态刷新与失效策略</strong>：存在产品行为选择，契约方案已由主 agent 起草，<strong>待用户确认后</strong>再开发（不扩大 legacy-safe 决策）。</li>
+<li><strong>Windows 打包态实测</strong>（pandas/numpy/matplotlib 导入与最小功能）：未验证，等待 Windows 环境；三平台 CI 回填需用户授权推送。</li>
+<li><strong>startup_audit 展示层</strong>仍为裸 name，跨版本显示歧义——低优先级单独小片（需同步 CLI 打印与序列化契约），不在本批。</li>
+</ul>
+</body>
+</html>
