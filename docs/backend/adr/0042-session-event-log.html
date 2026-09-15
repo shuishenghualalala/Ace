@@ -5,7 +5,7 @@
 <style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
 <body><main>
 <h1>ADR-0042 · 会话存储增量事件表（session_events，W4/W5）</h1>
-<p>状态：<strong>已批准，W4 已实施（W5 树形与恢复待做）</strong> · 日期：2026-09-14 · 批次：dsh-remediation W4（存储）/ W5（树形与恢复）。</p>
+<p>状态：<strong>已批准，W4/W5 已实施</strong> · 日期：2026-09-14 · 批次：dsh-remediation W4（存储）/ W5（树形与恢复）。</p>
 <h2>背景与候选方案</h2>
 <p>现状：<code>sessions</code> 表把整条消息列表序列化为<strong>一个 JSON blob</strong> 存 <code>messages</code> 字段——每回合 <code>json.dumps</code> 全量重写（O(历史大小)）、load 全量 <code>json.loads</code> 逐字段重建；无增量 append、无分页、无树形/回退/fork、无回合级崩溃恢复语义；token 估算全程 chars/4 粗估，压缩水位判断误差大。W0 已把 save/load 包 <code>to_thread</code> 止血（消除事件循环冻结），但写放大与能力缺口未解。</p>
 <p>参照系结论（dsh / pi v3·v4 / codex 三方源码对照，详见 docs/todo/ace-weaknesses-dsh-remediation-plan.md §1.2–1.3）：三家都以 append-only 日志为格式根解法；Ace 选 SQLite 后物理防撕裂整体免写（事务原子性），真正要拿的是数据模型（parent 树 + leaf 指针）、多进程租约（pi v4 writer_leases）与语义修复（孤儿合成，W1 已落地配平扫描）。</p>
@@ -60,6 +60,19 @@
 <li><strong>TokenMeter 计量基准（D6）</strong>：锚点除 prompt_tokens 外持久化 <code>baseline_estimate</code>（锚定时刻发送视图的保守估算值），锚后 delta = 当前视图估算 − baseline_estimate 并 max(0) 钳制——与水位判断所测列表基准一致，压缩收缩视图时计量不回落。请求信封指纹 = provider 类型 + 模型名；指纹一致且 usage ≥ 旧锚点估价视为链延续，否则重锚定（真实数据优先，不丢弃）。save 回合写基础 checkpoint 行，runtime 在回合结束后追加带完整信封的版本，读取端取最新一行。</li>
 </ul>
 <p><strong>批次 commit 记录</strong>：D1a schema 与 pragma 基线 → D1b 写路径单写队列 → D1c 读路径投影缓存 → D1d writer 租约 → D1e 兼容迁移 → D6 TokenMeter。</p>
+<p><strong>W5 树形与恢复批次（2026-09-14，分支 fix/dsh-w5-tree-recovery）</strong>已落地 D2/D3（树形与崩溃恢复）、D4（断点报告）、D5（checkpoint 收敛）与 compaction 事件自包含，实施中的订正如下：</p>
+<ul>
+<li><strong>投影回放从「seq 连续」改为「父链解析」（D2）</strong>：session_events 增加 <code>parent_seq</code> 列（可空，缺省语义 = 前一条，兼容 W4 旧行与撕裂写测试）。rewind 后新分支事件取 seq=MAX+1、链锚 = 当前 leaf——seq 不再要求连续覆盖到 leaf，链之外的行即被遗弃的分支尾巴。投影构建/追赶沿父链走，链断裂或成环 fail-closed；未知事件类型拒绝加载保持。<strong>代价声明</strong>：调用方整体改写历史（generation bump，DELETE 全部事件行）会破坏分支尾巴与 fork 前缀指针——会话树不支持该类调用方，rewind/fork 语义仅对追加型历史成立。</li>
+<li><strong>rewind 的 CAS 基准（D2）</strong>：leaf 移动为 <code>UPDATE sessions SET leaf_seq=? ... WHERE leaf_seq=?</code>，期望值取<strong>校验时刻的 leaf 快照</strong>（而非事务内重读）：校验在写事务外完成（事件只增不改，切口合法性不会被并发追加推翻），事务内只做 CAS——校验后 leaf 被并发移动即 affected≠1 抛 SessionWriteConflict，调用方重试。</li>
+<li><strong>fork 前缀共享（D2）</strong>：新会话行 + <code>sessions(source_session_id, source_parent_seq)</code> 头指针二元组 + fork 事件流 seq=1 的 <code>end_seed</code> 切口事件（载荷内联同样二元组，日志自包含）。投影解析到 end_seed 即递归拼接源会话前缀——O(1) 不复制行；fork 的 boundary_seq 是被 fork 会话<strong>事件表内的链上位置</strong>（fork-of-fork 时是中间会话的本地 seq）。fork 前缀读取不依赖源会话 leaf，源被 rewind 不破坏既有 fork。</li>
+<li><strong>切口校验（D2）</strong>：rewind/fork 统一三道校验——目标行存在、链上最后一个回合边界不是 turn_start（不在开放回合中）、消息工具配对余额为 0。</li>
+<li><strong>回合边界事件（D3/D4）</strong>：新增 turn_start/turn_end durable 事件，runtime 每回合记录（轻量子 agent 跳过，store 能力缺席时降级）。崩溃恢复冷读配平后调 <code>close_open_turn(status=interrupted)</code> 闭合悬挂回合——断点报告不自动续跑；孤儿合成结果 id 对齐确定性派生规范（固定 namespace <code>ace.synthetic</code> + 类型前缀 <code>tool_result</code> + 源调用 id），逐字固定文案不变。</li>
+<li><strong>断点报告接入（D4）</strong>：<code>scan_breakpoints(owner)</code> 扫描「链上最后一个回合边界是 turn_start」的会话（Team 子会话排除），step = 开放回合内消息事件数；<code>/api/sessions</code> 列表逐项注入 <code>breakpoint</code> 字段（step/turn_start_seq/last_event_seq），只读不写。</li>
+<li><strong>checkpoint 收敛（D5）</strong>：新增 <code>crew/state/recovery.py</code> 启动恢复序列注册表——processes.json 后台进程认领、cron running fires 遗弃标定等恢复入口改为装配时注册、CrewApp 启动流程统一执行（单步失败记日志不阻断，同名去重保证重复 start 幂等）；各 store 恢复实现原地不动。检索类索引（FTS 等）定位为可弃读模型，不进入恢复序列，损坏即重建。</li>
+<li><strong>compaction 事件自包含（codex 修订第 3 条落地）</strong>：压缩成功即经 event_sink 把 replacement 摘要 + covered_count + 重锚定视图估算内联为 <code>compaction</code> 事件（只增不改，旧 checkpoint 永不覆盖）；<code>load_compaction_checkpoint</code> 定位最近一条正序恢复。maybe_compact/force_compact/compact_now 三处成功路径统一触发，sink 失败只记日志不阻断压缩；TokenMeter 仍在下一次真实 usage 时重锚定（不拿估算值伪装 exact）。</li>
+<li><strong>schema v3 与双格式窗口</strong>：sessions 域 stamp v3（v3 = parent_seq 链 + 会话树）；sessions 表增 source_session_id/source_parent_seq 列（含 PK 重建 DDL 同步）。双格式窗口语义不动：rewind 同步回写 messages blob，blob 回退路径保持可用。</li>
+</ul>
+<p><strong>W5 批次 commit 记录</strong>：D2 树形 rewind/fork 与 leaf 指针 CAS → D3 崩溃恢复定稿（合成 id 规范 + 回合边界事件）→ D4 断点报告 → D5 统一启动恢复序列 → compaction 事件自包含。</p>
 <h2>回退方式</h2>
 <p>双格式窗口内旧 blob 列保留不删，读取端配置切回 blob 模式即原地回退；窗口关闭（删旧列）前所有回退路径可用。每批次独立提交可 revert。</p>
 <p><a href="0038-feature-db-split.html">ADR-0038</a> · <a href="../../todo/ace-weaknesses-dsh-remediation-plan.md">修复技术方案 §1</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
