@@ -199,6 +199,7 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int | None = None,
         timeout: float | httpx.Timeout = 120.0,
         vision: bool = True,
+        vision_max_pixels: int | None = None,
         api_key_resolver: ApiKeyResolver | None = None,
     ) -> None:
         if isinstance(timeout, (int, float)):
@@ -223,6 +224,8 @@ class AnthropicProvider(LLMProvider):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.vision = vision
+        # 视觉输入像素预算（装配层按厂商档案注入）；None = 工具层默认预算
+        self.vision_max_pixels = vision_max_pixels
         self._api_key_resolver = api_key_resolver
         self._current_api_key = api_key
 

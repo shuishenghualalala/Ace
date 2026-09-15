@@ -11,19 +11,19 @@
 - 其他 provider：隔离调用——独立压缩器 system prompt、不带 tools，
   避免按会话计费/路由污染等不利缓存语义。
 
-两者均带 purpose='compaction' 元数据标记；max_tokens 封顶，截断视为失败。
-失败/空结果时返回 ``None``，由上层决定是否降级（不影响主流程）。
+两者均经 ``stream_aux`` 统一辅助入口（purpose="compaction"），max_tokens 封顶，
+截断视为失败。失败/空结果时返回 ``None``，由上层决定是否降级（不影响主流程）。
 """
 
 from __future__ import annotations
 
-import inspect
 import re
 from typing import Any
 
 from crew.agent.loop.resilience import is_context_overflow, is_max_tokens_finish
 from crew.core.interfaces import LLMProvider
 from crew.core.types import Message
+from crew.providers import AuxResult, stream_aux
 from crew.state.logging import get_logger
 
 log = get_logger("agent.compact.summary")
@@ -32,11 +32,14 @@ log = get_logger("agent.compact.summary")
 # 对照 Crew compact.ts 的 truncateHeadForPTLRetry。
 _PTL_MAX_ATTEMPTS = 3
 
+# 单次摘要的整体超时（秒）：长 transcript 的辅助调用远超旁路默认 30s。
+_SUMMARY_TIMEOUT = 120.0
+
 # 长字符串截断阈值：工具参数/结果中的单个字符串值超过此长度时截断
 # 采用 trajectory_compressor.py 与 Crew 的长 value 截断策略。
 _MAX_STRING_VALUE_LENGTH = 3000
 
-# 辅助调用的元数据标记：provider 写入 trace 供审计/计费归类，不进请求体。
+# 摘要调用的 purpose 标记：stream_aux 写入 trace 供审计/计费归类，不进请求体。
 PURPOSE_COMPACTION = "compaction"
 
 # 摘要消息的前缀标记，供前端识别 / L2 兼容。
@@ -149,18 +152,23 @@ def _transcript(messages: list[Message]) -> str:
 # ---- 调用策略：KV 前缀复用 / 隔离，按 provider 决策 ---- #
 
 
-def _chat_kwargs(provider: LLMProvider, *, max_tokens: int | None) -> dict[str, Any]:
-    """按 provider 的 chat 签名能力过滤可选参数（测试替身与旧实现可能不接新参数）。"""
-    kwargs: dict[str, Any] = {"purpose": PURPOSE_COMPACTION}
-    if max_tokens is not None and max_tokens > 0:
-        kwargs["max_tokens"] = max_tokens
-    try:
-        params = inspect.signature(provider.chat).parameters
-    except (TypeError, ValueError):
-        return kwargs
-    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return kwargs
-    return {key: value for key, value in kwargs.items() if key in params}
+async def _summarize_chat(
+    provider: LLMProvider,
+    request: list[Message],
+    *,
+    tools: list[dict[str, Any]] | None,
+    max_tokens: int | None,
+) -> AuxResult:
+    """经 stream_aux 发起摘要调用：purpose 标记 + 超时 + 不重试（PTL 循环自带重试）。"""
+    return await stream_aux(
+        provider,
+        request,
+        purpose=PURPOSE_COMPACTION,
+        timeout=_SUMMARY_TIMEOUT,
+        max_tokens=max_tokens,
+        retry=0,
+        tools=tools,
+    )
 
 
 def supports_prefix_reuse(provider: LLMProvider) -> bool:
@@ -221,11 +229,8 @@ async def summarize_full(
             ]
             chat_tools = None
         try:
-            log.warning("[DEBUG summary] provider type=%s reuse=%s", type(provider), reuse)
-            resp = await provider.chat(
-                request,
-                tools=chat_tools,
-                **_chat_kwargs(provider, max_tokens=max_tokens),
+            resp = await _summarize_chat(
+                provider, request, tools=chat_tools, max_tokens=max_tokens
             )
             if is_max_tokens_finish(resp.finish_reason):
                 log.warning("L3 全量摘要被 max_tokens 截断，视为失败")
@@ -275,10 +280,8 @@ async def summarize_incremental(
             ]
             chat_tools = None
         try:
-            resp = await provider.chat(
-                request,
-                tools=chat_tools,
-                **_chat_kwargs(provider, max_tokens=max_tokens),
+            resp = await _summarize_chat(
+                provider, request, tools=chat_tools, max_tokens=max_tokens
             )
             if is_max_tokens_finish(resp.finish_reason):
                 log.warning("L2 增量摘要被 max_tokens 截断，视为失败")

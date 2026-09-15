@@ -303,6 +303,15 @@ def test_profile_vendor_vision_default_from_catalog():
     assert build_provider_for_profile(text_profile).vision is False
 
 
+def test_profile_vendor_vision_max_pixels_from_catalog():
+    """厂商档案收录的 per-model 像素预算随装配注入 provider；未收录模型为 None。"""
+    vision_profile = ModelProfile(id="ds", api_key="sk", provider="deepseek", model="deepseek-v4-flash-vision-exp")
+    assert build_provider_for_profile(vision_profile).vision_max_pixels == 640_000
+
+    text_profile = ModelProfile(id="ds", api_key="sk", provider="deepseek", model="deepseek-v4-pro")
+    assert build_provider_for_profile(text_profile).vision_max_pixels is None
+
+
 def test_profile_explicit_base_url_wins():
     profile = ModelProfile(id="ds", api_key="sk", provider="deepseek", model="deepseek-chat", base_url="https://proxy.example/v1")
     provider = build_provider_for_profile(profile)

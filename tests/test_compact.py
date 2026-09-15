@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from crew.agent.compact import estimate_tokens
 from crew.agent.compact.microcompact import (
     CLEARED_PLACEHOLDER,
@@ -20,14 +22,14 @@ from crew.agent.compact.summary import (
 )
 from crew.core.errors import ProviderError
 from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
-from crew.core.types import ChatResponse, Message, ToolCall
+from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
 
 
 # --------------------------------------------------------------------------- #
 # 测试替身
 # --------------------------------------------------------------------------- #
 class FakeProvider:
-    """记录每次 chat 的入参，返回固定摘要。"""
+    """记录每次流式调用的入参，返回固定摘要。"""
 
     def __init__(self, reply: str = "摘要内容") -> None:
         self.reply = reply
@@ -37,17 +39,19 @@ class FakeProvider:
         self.calls.append(messages)
         return ChatResponse(text=self.reply)
 
-    async def stream_chat(self, messages, tools=None):  # noqa: ANN001
-        yield  # pragma: no cover
+    async def stream_chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        self.calls.append(list(messages))
+        yield StreamChunk(delta_text=self.reply, done=True, finish_reason="stop")
 
 
 class BoomProvider:
-    """chat 永远抛异常，用于验证容错。"""
+    """调用永远抛异常，用于验证容错。"""
 
     async def chat(self, messages, tools=None):  # noqa: ANN001
         raise RuntimeError("provider down")
 
-    async def stream_chat(self, messages, tools=None):  # noqa: ANN001
+    async def stream_chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        raise RuntimeError("provider down")
         yield  # pragma: no cover
 
 
@@ -1069,15 +1073,18 @@ class OverflowThenOkProvider:
             raise ProviderError("maximum context length exceeded", retryable=False)
         return ChatResponse(text=self.reply)
 
-    async def stream_chat(self, messages, tools=None):  # noqa: ANN001
-        yield  # pragma: no cover
+    async def stream_chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        self.calls.append(list(messages))
+        if len(self.calls) <= self.fail_times:
+            raise ProviderError("maximum context length exceeded", retryable=False)
+        yield StreamChunk(delta_text=self.reply, done=True, finish_reason="stop")
 
 
 # --------------------------------------------------------------------------- #
 # 摘要调用策略：KV 前缀复用 / 隔离 + purpose + maxTokens 封顶
 # --------------------------------------------------------------------------- #
 class DeepSeekStyleProvider:
-    """记录调用入参；model 含 deepseek → 命中前缀复用策略。"""
+    """记录流式调用入参；model 含 deepseek → 命中前缀复用策略。"""
 
     model = "deepseek-chat"
 
@@ -1088,27 +1095,32 @@ class DeepSeekStyleProvider:
         self.calls.append({"messages": list(messages), "tools": tools, "kwargs": dict(kwargs)})
         return ChatResponse(text="结构化摘要")
 
+    async def stream_chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        self.calls.append({"messages": list(messages), "tools": tools, "kwargs": dict(kwargs)})
+        yield StreamChunk(delta_text="结构化摘要", done=True, finish_reason="stop")
+
 
 class TruncatingProvider(DeepSeekStyleProvider):
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def stream_chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
         self.calls.append({"messages": list(messages), "tools": tools, "kwargs": dict(kwargs)})
-        return ChatResponse(text="半截摘要", finish_reason="length")
+        yield StreamChunk(delta_text="半截摘要", done=True, finish_reason="length")
 
 
 async def _old_segment(n: int = 6) -> list[Message]:
     return await _big_history(n)
 
 
-async def test_summary_prefix_reuse_replays_conversation_prefix():
+async def test_summary_prefix_reuse_replays_conversation_prefix(caplog):
     """DeepSeek/Anthropic 前缀缓存场景：复放原 system+消息前缀，指令作最后一条 user。"""
     provider = DeepSeekStyleProvider()
     old = await _old_segment()
-    out = await summarize_full(
-        provider, old,
-        system_prompt="原会话系统提示",
-        tools=[{"type": "function", "function": {"name": "terminal"}}],
-        max_tokens=4096,
-    )
+    with caplog.at_level(logging.INFO, logger="crew.providers.aux"):
+        out = await summarize_full(
+            provider, old,
+            system_prompt="原会话系统提示",
+            tools=[{"type": "function", "function": {"name": "terminal"}}],
+            max_tokens=4096,
+        )
     assert out == "结构化摘要"
     call = provider.calls[0]
     req = call["messages"]
@@ -1121,9 +1133,10 @@ async def test_summary_prefix_reuse_replays_conversation_prefix():
     assert replayed[0].content == old[0].content
     # tools 随前缀透传以命中 KV cache
     assert call["tools"] is not None
-    # purpose 标记与 maxTokens 封顶
-    assert call["kwargs"]["purpose"] == "compaction"
+    # maxTokens 封顶；purpose 经 stream_aux 计量日志打点（不进 provider 请求体）
     assert call["kwargs"]["max_tokens"] == 4096
+    records = [r for r in caplog.records if r.name == "crew.providers.aux"]
+    assert any("purpose=compaction" in r.getMessage() for r in records)
 
 
 async def test_summary_isolated_for_unknown_provider():
@@ -1246,7 +1259,9 @@ class CountingBoomProvider:
         self.calls += 1
         raise RuntimeError("provider down")
 
-    async def stream_chat(self, messages, tools=None):  # noqa: ANN001
+    async def stream_chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        self.calls += 1
+        raise RuntimeError("provider down")
         yield  # pragma: no cover
 
 

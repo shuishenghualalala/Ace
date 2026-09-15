@@ -30,7 +30,6 @@ __all__ = ["AnthropicProvider", "AuxResult", "AuxPurpose", "OpenAIProvider", "st
 log = logging.getLogger("crew.providers.aux")
 
 #: 辅助调用的 purpose 分类：遥测/审计按此区分旁路请求与主对话。
-#: "compaction" 预留给压缩摘要（crew.agent.compact）接入。
 AuxPurpose = Literal[
     "session-title",
     "team-turn-decision",
@@ -68,12 +67,13 @@ async def _collect(
     provider: LLMProvider,
     messages: list[Message],
     *,
+    tools: list[dict[str, Any]] | None,
     max_tokens: int | None,
     response_format: dict[str, Any] | None,
     reasoning_mode: str | None,
 ) -> AuxResult:
     kwargs: dict[str, Any] = {
-        "tools": None,
+        "tools": tools,
         "max_tokens": max_tokens,
         "response_format": response_format,
         "reasoning_mode": reasoning_mode,
@@ -124,6 +124,7 @@ async def stream_aux(
     timeout: float = DEFAULT_AUX_TIMEOUT,
     max_tokens: int | None = None,
     retry: int = 1,
+    tools: list[dict[str, Any]] | None = None,
     response_format: dict[str, Any] | None = None,
     reasoning_mode: str | None = None,
 ) -> AuxResult:
@@ -134,6 +135,7 @@ async def stream_aux(
     - ``timeout`` 作用于单次尝试的整体耗时（含首 token 等待），超时抛 ``TimeoutError``；
     - ``retry`` 为额外重试次数，仅对瞬时错误（ProviderError.retryable / 超时）生效，
       重试前做线性退避；调用方自带重试循环时应传 ``retry=0``；
+    - ``tools`` 仅在需要复放主对话前缀（KV cache 命中）时传入，常规旁路调用保持 None；
     - 每次尝试写 llm_trace（带 purpose），每次调用写一条计量日志（purpose、
       耗时、usage、尝试次数），供遥测/审计按 purpose 区分辅助调用。
     """
@@ -147,12 +149,14 @@ async def stream_aux(
             "model": model,
             "attempt": attempt,
             "max_tokens": max_tokens,
+            "tools": bool(tools),
         })
         try:
             result = await asyncio.wait_for(
                 _collect(
                     provider,
                     messages,
+                    tools=tools,
                     max_tokens=max_tokens,
                     response_format=response_format,
                     reasoning_mode=reasoning_mode,

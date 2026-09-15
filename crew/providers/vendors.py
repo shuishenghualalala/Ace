@@ -32,6 +32,8 @@ class VendorModel:
     vision: bool = False
     context_window: int | None = None
     max_tokens: int | None = None
+    # 视觉输入的像素预算（宽×高上限）；None = 档案未收录，工具层用默认预算
+    vision_max_pixels: int | None = None
     # 统一思考等级 -> 厂商 effort 值；缺项 = 原样透传等级名，None = 该档不支持
     thinking_level_map: dict[str, str | None] = field(default_factory=dict)
 
@@ -81,7 +83,7 @@ class VendorProfile:
 _DEEPSEEK_MODELS = (
     VendorModel("deepseek-v4-flash", reasoning=True, context_window=1_000_000, max_tokens=384_000),
     VendorModel("deepseek-v4-pro", reasoning=True, context_window=1_000_000, max_tokens=384_000),
-    VendorModel("deepseek-v4-flash-vision-exp", reasoning=True, vision=True, context_window=1_000_000, max_tokens=384_000),
+    VendorModel("deepseek-v4-flash-vision-exp", reasoning=True, vision=True, context_window=1_000_000, max_tokens=384_000, vision_max_pixels=640_000),
     # 官方稳定别名（不带上下文元数据，仅用于能力标记与厂商识别）
     VendorModel("deepseek-chat"),
     VendorModel("deepseek-reasoner", reasoning=True),

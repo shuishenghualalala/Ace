@@ -3626,6 +3626,7 @@ def _construct_llm_provider(
             "max_tokens": max_tokens,
             "timeout": timeout,
             "vision": vision,
+            "vision_max_pixels": vm.vision_max_pixels if vm else None,
             "api_key_resolver": api_key_resolver,
         }
         if vendor.protocol == "openai":
