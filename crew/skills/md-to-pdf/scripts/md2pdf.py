@@ -2,6 +2,10 @@
 """
 Markdown to PDF converter - Chinese-friendly version
 Multiple fallback methods for maximum compatibility
+
+Scope: ad-hoc conversion of already-finished Markdown files. Markdown assembled
+by a swarm writing skill with standard footnote citations goes through the pdf
+skill's md2pdf route (citation normalization) instead.
 """
 
 import sys
