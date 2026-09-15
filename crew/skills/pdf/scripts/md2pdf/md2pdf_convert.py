@@ -10,7 +10,9 @@ Pandoc / typst / headless browser / TeX required. Citations render as in-text
 superscript links into a consolidated "References" section at the document end.
 
 This is the normalization exit for swarm-assembled Markdown. For one-off PDFs the
-user asks you to write, author natively via the ReportLab route instead.
+user asks you to write, author natively via the ReportLab route instead. For
+converting an already-finished Markdown file outside the swarm/citation
+scenario, use the md-to-pdf skill (pandoc/xelatex stack) instead.
 """
 import logging
 import json

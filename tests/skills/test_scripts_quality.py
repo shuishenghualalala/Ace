@@ -230,3 +230,31 @@ def test_pdf_missing_file_structured_error(pdf_tool_module, monkeypatch, capsys)
     err = json.loads(capsys.readouterr().err)
     assert err["error"] == "FileNotFound"
     assert "missing.pdf" in err["message"]
+
+
+# ── md-to-pdf 与 pdf/md2pdf 分工标注（H10 双转换器收敛） ─────────────────────
+
+MD_TO_PDF_DIR = SKILLS_DIR / "md-to-pdf"
+PDF_MD2PDF_CONVERT = SKILLS_DIR / "pdf" / "scripts" / "md2pdf" / "md2pdf_convert.py"
+
+
+def test_pdf_skill_gate_points_to_md_to_pdf_skill():
+    text = (SKILLS_DIR / "pdf" / "SKILL.md").read_text(encoding="utf-8")
+    assert "md-to-pdf" in text
+
+
+def test_md_to_pdf_skill_points_to_pdf_md2pdf_route():
+    text = (MD_TO_PDF_DIR / "SKILL.md").read_text(encoding="utf-8")
+    assert "md2pdf" in text and "pdf" in text
+
+
+def test_pdf_md2pdf_convert_docstring_declares_scope():
+    import ast
+
+    tree = ast.parse(PDF_MD2PDF_CONVERT.read_text(encoding="utf-8"))
+    docstring = ast.get_docstring(tree)
+    assert "md-to-pdf" in docstring
+
+
+def test_md_to_pdf_script_docstring_declares_scope(md2pdf_module):
+    assert "pdf" in md2pdf_module.__doc__
