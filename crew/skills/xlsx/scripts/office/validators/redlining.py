@@ -7,6 +7,9 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from defusedxml import ElementTree as ET
+from helpers.zip_utils import safe_extract_all
+
 
 class RedliningValidator:
 
@@ -29,8 +32,6 @@ class RedliningValidator:
             return False
 
         try:
-            import xml.etree.ElementTree as ET
-
             tree = ET.parse(modified_file)
             root = tree.getroot()
 
@@ -61,7 +62,7 @@ class RedliningValidator:
 
             try:
                 with zipfile.ZipFile(self.original_docx, "r") as zip_ref:
-                    zip_ref.extractall(temp_path)
+                    safe_extract_all(zip_ref, temp_path)
             except Exception as e:
                 print(f"FAILED - Error unpacking original docx: {e}")
                 return False
@@ -74,13 +75,11 @@ class RedliningValidator:
                 return False
 
             try:
-                import xml.etree.ElementTree as ET
-
                 modified_tree = ET.parse(modified_file)
                 modified_root = modified_tree.getroot()
                 original_tree = ET.parse(original_file)
                 original_root = original_tree.getroot()
-            except ET.ParseError as e:
+            except (ET.ParseError, ValueError) as e:
                 print(f"FAILED - Error parsing XML files: {e}")
                 return False
 
