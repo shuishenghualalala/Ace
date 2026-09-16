@@ -79,6 +79,9 @@ LLM_REQUEST_MIDDLEWARE = "llm_request"
 LLM_EXECUTION_MIDDLEWARE = "llm_execution"
 TerminalOutcome = Literal["completed", "failed", "interrupted"]
 _TERMINAL_ERROR_SUMMARY_LIMIT = 512
+# 同步回调已在线程中执行时，取消方愿意等待其收尾的最长时间；
+# 超时后放弃等待（线程无法强杀），记 warning 并让 CancelledError 传播。
+_SYNC_CALLBACK_CANCEL_GRACE_SECONDS = 2.0
 VALID_MIDDLEWARE = {
     TOOL_REQUEST_MIDDLEWARE,
     TOOL_EXECUTION_MIDDLEWARE,
@@ -342,12 +345,20 @@ class PluginContext:
                     try:
                         return await asyncio.shield(work)
                     except asyncio.CancelledError:
-                        while not work.done():
-                            try:
-                                await asyncio.shield(work)
-                            except asyncio.CancelledError:
-                                continue
-                        work.result()
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(work),
+                                timeout=_SYNC_CALLBACK_CANCEL_GRACE_SECONDS,
+                            )
+                            work.result()
+                        except TimeoutError:
+                            log.warning(
+                                "插件 %s 的同步回调 %s 取消后 %ss 内未结束，"
+                                "放弃等待（该线程回调将继续泄漏运行）",
+                                self.manifest.name,
+                                label,
+                                _SYNC_CALLBACK_CANCEL_GRACE_SECONDS,
+                            )
                         raise
                 result = callback(*args, **call_kwargs)
                 if inspect.isawaitable(result):
@@ -566,7 +577,11 @@ class PluginContext:
                 hook_name,
             )
         owner_key = self.manifest.key or self.manifest.name
-        leased_callback = self._lease_callback(callback, label=f"hook:{hook_name}")
+        leased_callback = self._lease_callback(
+            callback,
+            label=f"hook:{hook_name}",
+            run_sync_in_thread=not inspect.iscoroutinefunction(callback),
+        )
         self._manager._hooks.setdefault(hook_name, []).append(leased_callback)
         self._manager._hook_owners.setdefault(hook_name, []).append(
             (owner_key, leased_callback)
@@ -600,6 +615,7 @@ class PluginContext:
         leased_callback = self._lease_callback(
             callback,
             label=f"middleware:{kind}",
+            run_sync_in_thread=not inspect.iscoroutinefunction(callback),
         )
         self._manager._middleware.setdefault(kind, []).append(leased_callback)
         self._manager._middleware_owners.setdefault(kind, []).append(
