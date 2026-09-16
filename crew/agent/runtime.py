@@ -194,6 +194,7 @@ class SingleAgent(Agent):
         evolution_full_cycle: bool = False,
         evolution_visible: bool = False,
         evolution_queue: Any = None,
+        delegation_mode: str = "explicit",
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -242,6 +243,7 @@ class SingleAgent(Agent):
         # 轻量模式（子 agent）：跳过全局 SOUL/MEMORY/USER/上下文文件/skills 注入，
         # 对照 Hermes 子 agent 的 skip_memory / skip_context_files。
         self.lightweight = lightweight
+        self.delegation_mode = delegation_mode
         # 本 Agent 的可控性句柄（steer / interrupt）。AgentManager 按 session 缓存 Agent，
         # 故一个实例对应一个 session；gateway 经 CrewApp.steer/interrupt 路由到这里。
         self.control = TurnControl()
@@ -390,6 +392,7 @@ class SingleAgent(Agent):
             inject_skills=self.inject_skills,
             include_optional_skills=self.include_optional_skills,
             user_type=self.user_type,
+            delegation_mode=self.delegation_mode,
         )
 
         system_static = prompt_parts["system_static"]

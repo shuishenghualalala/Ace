@@ -28,6 +28,8 @@ from crew.agent.external.runtime_registry import (
     resolve_runtime_credential_home_paths,
     resolve_runtime_network_endpoints,
 )
+from crew.agent.subagent.service import SUBAGENT_SERVICE_KEY
+from crew.core.runctx import current_owner_account_id
 from crew.features import (
     FeatureDefinition,
     FeatureInstallContext,
@@ -454,12 +456,56 @@ def build_external_agent_feature(
             await _close_owned(active_provider if (own_provider or provider_factory) else None)
             await _close_owned(active_catalog if (own_catalog or catalog_factory) else None)
             raise
-        # Contribution teardown closes admission before resource teardown.
+
+        # Register delegation first so the later provider-family contribution
+        # is withdrawn before admission closes during reverse-order teardown.
         context.register_disposer(
             delegation.close,
             label="contribution:external.delegation",
             phase=RegistrationPhase.CONTRIBUTION,
         )
+
+        # The external feature is an optional consumer of the subagent
+        # service.  Keep the bridge here, at the external feature boundary,
+        # so the subagent runtime remains unaware of external-agent details.
+        subagent_service = context.get_service(SUBAGENT_SERVICE_KEY)
+        if subagent_service is not None:
+            from crew.agent.external.subagent_provider import ExternalDelegationProvider
+
+            def resolve_external_provider(
+                name: str,
+                owner_account_id: str | None,
+            ):
+                prefix = "external:"
+                normalized = str(name or "").strip()
+                if not normalized.startswith(prefix):
+                    return None
+                agent_id = normalized[len(prefix):].strip()
+                if not agent_id:
+                    return None
+                resolved_owner = owner_account_id or current_owner_account_id.get()
+                try:
+                    active_catalog.agent_with_runtime(
+                        agent_id,
+                        owner_account_id=resolved_owner,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    return None
+                return ExternalDelegationProvider(
+                    agent_id=agent_id,
+                    catalog=active_catalog,
+                    delegation=delegation,
+                )
+
+            registration = subagent_service.register_provider_resolver(
+                resolve_external_provider
+            )
+            context.register_disposer(
+                registration,
+                label="provider-family:external",
+                phase=RegistrationPhase.CONTRIBUTION,
+            )
+
         if own_provider or provider_factory:
             context.register_disposer(
                 active_provider.close,
@@ -522,6 +568,7 @@ def build_external_agent_feature(
         install,
         dependencies=FeatureServiceDependencies(
             EXTERNAL_AGENT_FEATURE_ID,
+            optional=(SUBAGENT_SERVICE_KEY,),
             provides=(
                 (
                     EXTERNAL_AGENT_CATALOG_SERVICE_KEY,

@@ -45,6 +45,7 @@ class SubagentDefinition:
     disclosure_mode: str = "progressive"
     reserved_toolsets: list[str] | None = None
     reserved_skills: list[str] | None = None
+    provider: str = "inprocess-spawn"
 
 
 def build_preset_spec(
@@ -73,6 +74,7 @@ def build_preset_spec(
         "disclosure_mode": definition.disclosure_mode,
         "reserved_toolsets": definition.reserved_toolsets,
         "reserved_skills": definition.reserved_skills,
+        "provider": definition.provider,
         "background": definition.background,
     }
 
@@ -94,6 +96,7 @@ def to_preset_contribution(definition: SubagentDefinition):
         disclosure_mode=definition.disclosure_mode,
         reserved_toolsets=tuple(definition.reserved_toolsets or ()),
         reserved_skills=tuple(definition.reserved_skills or ()),
+        provider=definition.provider,
         model=definition.model,
         max_iterations=definition.max_iterations,
         background=definition.background,
@@ -163,4 +166,6 @@ def parse_definition(path: str | Path, *, source: str = "builtin") -> SubagentDe
         disclosure_mode=str(fm.get("disclosure_mode") or "progressive").strip() or "progressive",
         reserved_toolsets=_as_list(fm.get("reserved_toolsets")),
         reserved_skills=_as_list(fm.get("reserved_skills")),
+        provider=str(fm.get("provider") or "inprocess-spawn").strip()
+        or "inprocess-spawn",
     )

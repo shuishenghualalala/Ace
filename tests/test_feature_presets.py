@@ -9,7 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from crew.agent.subagent.tools import register_subagent_tools
+from crew.agent.subagent.tools import build_subagent_tools, register_subagent_tools
+from crew.agent.subagent.runtime import SubagentRuntime
+from crew.agent.subagent.service import (
+    StartRequest,
+    SubagentCapabilities,
+    SubagentResult,
+    SubagentRun,
+)
 from crew.agent.subagent.registry import SubagentRegistry
 from crew.agent.subagent import registry as sub_registry_module
 from crew.core.envelope import ResponseChunk
@@ -53,6 +60,7 @@ def test_agent_preset_contribution_normalizes_and_validates_policy_fields():
         context_tags=["wiki", " wiki"],  # type: ignore[arg-type]
         reserved_toolsets="wiki.read",  # type: ignore[arg-type]
         reserved_skills=["crew-wiki-curator"],  # type: ignore[arg-type]
+        provider=" external:wiki-reviewer ",
     )
 
     assert contribution.name == "Wiki"
@@ -64,6 +72,8 @@ def test_agent_preset_contribution_normalizes_and_validates_policy_fields():
     assert contribution.toolset_additions == ("wiki.manage",)
     assert contribution.context_tags == ("wiki",)
     assert contribution.reserved_toolsets == ("wiki.read",)
+    assert contribution.provider == "external:wiki-reviewer"
+    assert contribution.as_spec()["provider"] == "external:wiki-reviewer"
     assert contribution.as_spec()["preset_skills"] == ["crew-wiki-curator"]
 
     with pytest.raises(ValueError, match="name"):
@@ -139,6 +149,114 @@ async def test_preset_lease_rejects_new_work_and_waits_for_inflight_work():
     lease.release()
     await stopping
     assert scope.state is FeatureState.DISPOSED
+
+
+@pytest.mark.asyncio
+async def test_run_agent_schema_and_handler_follow_selected_provider_capabilities():
+    class ExternalOnlyProvider:
+        name = "external:reviewer"
+        inherits_parent_context = False
+        capabilities = SubagentCapabilities()
+
+        async def start(self, request: StartRequest) -> SubagentRun:
+            return SubagentRun(
+                request.subagent_id or "external-run",
+                SubagentResult(output="reviewed"),
+            )
+
+    provider = ExternalOnlyProvider()
+    service = SubagentRuntime(provider)
+    registry = Registry()
+    presets = AgentPresetRegistry()
+    scope = FeatureScope(FeatureGeneration("product.external-agents", 1))
+    presets.register(
+        scope,
+        _preset("ExternalReview", provider=provider.name),
+        label="preset:external-review",
+    )
+    scope.activate()
+    build_subagent_tools(
+        registry,
+        SubagentRegistry(),
+        service,
+        preset_registry=presets,
+    )
+
+    tool = registry.get("run_agent")
+    schema = tool.current_parameters()
+    assert schema["properties"]["agent_type"]["enum"] == ["ExternalReview"]
+    assert "model" not in schema["properties"]
+    assert "self-contained goal and context" in tool.schema["description"]
+
+    rejected = await registry.execute(
+        ToolCall(
+            "model-override",
+            "run_agent",
+            {
+                "agent_type": "ExternalReview",
+                "goal": "review",
+                "model": "forbidden",
+            },
+        )
+    )
+    assert "error" in rejected.content
+    assert "does not support model override" in rejected.content
+
+    policy_token = presets.register(
+        scope,
+        _preset(
+            "ExternalWithSkills",
+            provider=provider.name,
+            fixed_skills=("review-skill",),
+        ),
+        label="preset:external-with-skills",
+    )
+    rejected_policy = await registry.execute(
+        ToolCall(
+            "tool-policy",
+            "run_agent",
+            {"agent_type": "ExternalWithSkills", "goal": "review"},
+        )
+    )
+    assert "error" in rejected_policy.content
+    assert "cannot honor" in rejected_policy.content
+    await policy_token.dispose()
+
+    class InternalProvider(ExternalOnlyProvider):
+        name = "inprocess-test"
+        capabilities = SubagentCapabilities(agent_options=True)
+
+    internal = InternalProvider()
+    internal_dispose = service.register_provider(internal)
+    preset_token = presets.register(
+        scope,
+        _preset("InternalReview", provider=internal.name),
+        label="preset:internal-review",
+    )
+    mixed = tool.current_parameters()
+    assert "model" not in mixed["properties"]
+    assert len(mixed["oneOf"]) == 2
+    capable_branch = next(
+        branch
+        for branch in mixed["oneOf"]
+        if "model" in branch["properties"]
+    )
+    assert capable_branch["properties"]["agent_type"]["enum"] == ["InternalReview"]
+
+    await preset_token.dispose()
+    internal_dispose()
+
+    unregister = service.unregister_provider(provider.name, expected=provider)
+    assert unregister is True
+    assert tool.current_parameters()["properties"]["agent_type"]["enum"] == []
+    unavailable = await registry.execute(
+        ToolCall(
+            "provider-gone",
+            "run_agent",
+            {"agent_type": "ExternalReview", "goal": "review"},
+        )
+    )
+    assert "error" in unavailable.content
 
 
 @pytest.mark.asyncio

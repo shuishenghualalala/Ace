@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Subagent Stage A2 测试记录</title>
+<style>body{font:15px/1.7 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code,pre{background:#f5f5f5}code{padding:2px 5px}pre{padding:14px;overflow:auto}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left;vertical-align:top}.ok{color:#176b2c}a{color:#245a83}</style></head>
+<body><main>
+<h1>Subagent Stage A2 · 外援 Provider 插件接入测试记录</h1>
+<p>日期：2026-09-16 · 分支：<code>codex/subagent-multiagent-upgrade</code> · 范围：A2-1–A2-5。</p>
+
+<h2>1. 验证目标</h2>
+<table><thead><tr><th>行为</th><th>断言</th><th>主要证据</th></tr></thead><tbody>
+  <tr><td>第二种真实传输</td><td>Catalog + DelegationService 可实现同一 SubagentProvider/Run 契约；Core Runtime 无外援分支。</td><td><code>test_external_subagent_provider.py</code></td></tr>
+  <tr><td>能力 fail-loud</td><td>External 的 agent_options、tool_filter、output_schema 在 submit 前逐项拒绝，Delegation 零调用。</td><td><code>test_external_subagent_provider.py</code>、<code>test_subagent_runtime_contract.py</code></td></tr>
+  <tr><td>事件折叠</td><td>text/tool/usage/session/session_reset/error 映射稳定；usage 取最后快照；失败保留部分输出。</td><td><code>test_external_subagent_provider.py</code></td></tr>
+  <tr><td>拒绝审批</td><td>外援执行请求的 permission handler 无条件返回 deny，不产生父级审批。</td><td><code>test_external_subagent_provider.py</code></td></tr>
+  <tr><td>插件生命周期</td><td>外援 Feature 可选解析 SubagentService；resolver 归 Scope；停用后 Provider 消失且新委派 fail-closed。</td><td><code>test_external_feature_lifecycle.py</code></td></tr>
+  <tr><td>Owner 与动态 roster</td><td>解析时按当前 owner 查询 Catalog；新建外援即时可见，其他 owner/缺失外援不可见。</td><td><code>test_external_feature_lifecycle.py</code></td></tr>
+  <tr><td>模型工具塑形</td><td>Provider 不可用的 preset 不进入 enum；External 隐藏/拒绝 model；零继承文案要求自包含简报。</td><td><code>test_feature_presets.py</code></td></tr>
+  <tr><td>资源竞态</td><td>取消/关闭幂等；完成后 dispose 不改写结局；Feature 停用关闭 admission 与在途 run。</td><td><code>test_external_subagent_provider.py</code>、<code>test_external_feature_lifecycle.py</code></td></tr>
+</tbody></table>
+
+<h2>2. 验证命令</h2>
+<pre><code>PYTHONPATH=.:packages/crew-external-agents/src \
+  /Users/ahuamao/Documents/Codes/Ace/.venv/bin/python -m pytest -q \
+  tests/test_external_subagent_provider.py \
+  tests/test_external_feature_lifecycle.py \
+  tests/test_subagent_runtime_contract.py \
+  tests/test_feature_presets.py tests/test_subagent.py \
+  tests/test_subagent_contract.py tests/test_config_features_namespace.py \
+  tests/test_external_agents.py tests/test_external_catalog_contract.py \
+  tests/test_external_agents_feature_flag.py
+
+PYTHONPATH=.:packages/crew-external-agents/src \
+  /Users/ahuamao/Documents/Codes/Ace/.venv/bin/lint-imports</code></pre>
+
+<h2>3. 结果</h2>
+<ul>
+  <li class="ok">A2 组合回归：307 项通过，0 项失败。</li>
+  <li class="ok">Ruff：本次 Python 改动全部通过。</li>
+  <li class="ok">Import Linter：新增 <code>subagent-isolation</code> 与 <code>external-subagent-transport-boundary</code>；合计 11 条契约全部保持。</li>
+  <li>全量 pytest、compileall 与 HTML 解析结果在最终交付检查完成后记录。</li>
+</ul>
+
+<h2>4. 插件化验收结论</h2>
+<p class="ok">外援接入只修改其自身 Feature 与 Provider 适配器；Subagent Core 只新增通用 resolver 扩展点。Provider 注册、撤销和在途运行清理由 Feature Generation/Scope 拥有，模型工具没有外援专有参数或分支。进程内与进程外 Provider 同时满足同一服务契约。</p>
+
+<h2>5. 跨平台检查</h2>
+<p>新增实现只使用 Python 值对象、<code>asyncio</code>、Feature disposer 与既有 Runtime adapter；不引入 signal、fork、Unix 权限位或平台路径拼接。外部命令的跨平台差异继续封装在既有 adapter/runtime registry 内。</p>
+
+<p><a href="../backend/modules/subagent.html">模块文档</a> · <a href="../backend/adr/0045-subagent-capability-seam.html">ADR-0045</a> · <a href="subagent-stage-a-semantic-runtime.html">Stage A 测试</a></p>
+</main></body></html>

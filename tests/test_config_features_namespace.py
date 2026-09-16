@@ -566,7 +566,7 @@ def test_channel_persistence_replaces_non_dict_features_channels_garbage(tmp_pat
 
 
 def test_top_level_subagent_section_remains_dead(tmp_path: Path):
-    """顶层 subagent: 节从未被 loader 读取（P3-1）；子 agent 超时归属 tasks.subagent。"""
+    """历史资源键保持无效；阶段 A 仅接入 delegation_mode。"""
     config_path = _write_config(
         tmp_path,
         {
@@ -580,6 +580,30 @@ def test_top_level_subagent_section_remains_dead(tmp_path: Path):
     assert cfg.subagent_max_concurrent == 3
     assert cfg.subagent_idle_timeout_seconds == 120.0
     assert cfg.tasks_subagent_inactivity_timeout_seconds == 30.0
+
+
+def test_features_subagent_runtime_policy_is_loaded_and_validated(tmp_path: Path):
+    proactive_path = _write_config(
+        tmp_path,
+        {
+            "features": {
+                "subagent": {
+                    "default_provider": "external:reviewer",
+                    "delegation_mode": "proactive",
+                }
+            }
+        },
+    )
+    cfg = load_config(config_path=str(proactive_path))
+    assert cfg.subagent_default_provider == "external:reviewer"
+    assert cfg.subagent_delegation_mode == "proactive"
+
+    invalid_path = tmp_path / "invalid.yaml"
+    invalid_path.write_text(
+        yaml.safe_dump({"features": {"subagent": {"delegation_mode": "surprise"}}}),
+        encoding="utf-8",
+    )
+    assert load_config(config_path=str(invalid_path)).subagent_delegation_mode == "explicit"
 
 
 def test_example_template_targets_features_namespace():
@@ -603,6 +627,7 @@ def test_example_template_targets_features_namespace():
         "channels",
         "browser",
         "dynamic_kanban",
+        "subagent",
     } <= set(features)
     # mapped 旧节不再出现在模板里
     for legacy in ("wiki", "cron", "team", "tasks", "external_agents", "channels", "platforms"):
@@ -617,5 +642,6 @@ def test_example_template_targets_features_namespace():
     assert data["features"]["team"]["members"]
     assert "storage" in data["features"]["wiki"]
     assert "shell" in data["features"]["tasks"]
+    assert data["features"]["subagent"]["default_provider"] == "inprocess-spawn"
     assert "idle_timeout_seconds" in data["features"]["browser"]
     assert data["features"]["dynamic_kanban"]["task_timeout_seconds"] == 3600

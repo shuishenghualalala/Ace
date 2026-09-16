@@ -204,7 +204,7 @@ async def test_subagent_error_does_not_crash_parent(tmp_path):
 async def test_many_parallel_children_under_cap(tmp_path, monkeypatch):
     """delegate_task 批量任务应受 subagent_max_concurrent 并发上限控制。
 
-    通过包装 _make_subagent 统计同时在途的子 agent 数，断言峰值 ≤ cap（2），
+    通过包装 AgentFactory 后面的 _build_subagent 统计同时在途的子 agent 数，断言峰值 ≤ cap（2），
     且峰值确实达到 2（证明发生了并行，而非串行巧合）。
     注意必须在 build_app 之前 patch 类方法——注册时捕获的是当时的绑定方法。
     """
@@ -214,7 +214,7 @@ async def test_many_parallel_children_under_cap(tmp_path, monkeypatch):
     cfg.crew_home = str(tmp_path / ".crew")
 
     stats = {"in_flight": 0, "peak": 0}
-    real_make_subagent = CrewApp._make_subagent
+    real_build_subagent = CrewApp._build_subagent
 
     class _TrackedChild:
         """包装子 agent：统计同时在途数，其余属性透传。"""
@@ -235,10 +235,10 @@ async def test_many_parallel_children_under_cap(tmp_path, monkeypatch):
             finally:
                 stats["in_flight"] -= 1
 
-    def tracking_make_subagent(self, spec):
-        return _TrackedChild(real_make_subagent(self, spec))
+    def tracking_build_subagent(self, request):
+        return _TrackedChild(real_build_subagent(self, request))
 
-    monkeypatch.setattr(CrewApp, "_make_subagent", tracking_make_subagent)
+    monkeypatch.setattr(CrewApp, "_build_subagent", tracking_build_subagent)
     app = build_app(config=cfg, enable_team=False)
 
     tasks = [{"goal": f"任务{i}"} for i in range(5)]

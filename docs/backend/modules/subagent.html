@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>subagent · Ace 后端模块</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:28px;font-weight:800;margin:0 0 4px}.crumb{color:var(--t3);font-size:13px;margin-bottom:6px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;font-weight:700;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow:auto;font-size:13px}table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft);font-weight:600}.logo{width:28px;height:28px;border-radius:7px;background:var(--black);color:#fff;display:inline-grid;place-items:center;font-weight:800;vertical-align:middle;margin-right:8px}.callout{background:var(--soft);border-left:3px solid var(--black);padding:12px 16px}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}a:hover{border-bottom-color:var(--text)}
+</style>
+</head>
+<body><div class="wrap">
+  <div class="crumb">Ace / 后端模块 / subagent</div>
+  <h1><span class="logo">A</span>crew/agent/subagent</h1>
+  <div class="sub">把“如何委派”与“在哪里运行”分开；Provider 由 Feature 插件贡献，模型只选择任务或专家，不接触传输路由。</div>
+
+  <p>本模块按“请求契约 → 策略收窄 → Provider 解析 → 能力预检 → 结果折叠 → 旧工具适配”运行。阶段 A 建立语义内核，阶段 A2 用进程外外援作为第二种真实传输验证抽象；持久身份、续聊、同构批量与 UI 贡献仍属于后续阶段。</p>
+  <table>
+    <thead><tr><th>层</th><th>回答的问题</th><th>阶段 A 状态</th></tr></thead>
+    <tbody>
+      <tr><td>契约</td><td>调用方请求了什么能力，Provider 能否诚实满足</td><td>已落地</td></tr>
+      <tr><td>策略</td><td>子智能体最终能看到哪些工具，是否可能越过父授权</td><td>已落地</td></tr>
+      <tr><td>运行时</td><td>谁负责发布、结局、超时、清理与批量隔离</td><td>已落地</td></tr>
+      <tr><td>传输</td><td>任务在哪执行、如何消费输出</td><td><code>inprocess-spawn</code> 与 <code>external:&lt;agent_id&gt;</code> 已落地</td></tr>
+      <tr><td>产品面</td><td>旧工具 schema、返回 JSON 与后台任务如何保持兼容</td><td>兼容适配保留</td></tr>
+    </tbody>
+  </table>
+
+  <h2>1. 职责与边界</h2>
+  <ul>
+    <li><strong>负责</strong>：能力预检、Provider 路由、一次性运行句柄、深度入口、双超时、部分输出、批量并发隔离、工具权限只收窄、旧返回格式适配。</li>
+    <li><strong>不负责</strong>：主 Agent 缓存、Team Formation、外援 Catalog 与进程安全、持久化 descriptor/run 日志、continuable 会话、fork 上下文继承和 UI。</li>
+    <li><strong>跨平台边界</strong>：只依赖 Python 的 <code>asyncio</code>、值对象和进程内回调；不依赖 Unix signal、<code>fork(2)</code>、文件锁或权限位。</li>
+  </ul>
+
+  <h2>2. 一次委派如何运行</h2>
+  <p>发布边界只有一处：请求在 Provider 启动前完成能力与深度校验；Provider 成功返回 <code>SubagentRun</code> 后才算发布。发布前异常向调用方抛出，运行中的异常则折叠为结果数据。</p>
+  <pre><code>工具参数
+  │ 参数校验 + ChildAgentRequest
+  ▼
+SubagentRuntime.start
+  ├─ 未知 Provider / 不支持能力 / 深度越界 ──► 直接失败，无活跃残留
+  └─ 生成 immutable descriptor
+           │
+           ▼
+Provider.start
+  ├─ inprocess-spawn：AgentFactory + chunk + idle/absolute timeout
+  └─ external:*：Catalog + DelegationService + external event stream
+           │
+           └─ 两条传输均折叠为 SubagentResult
+           │
+           ▼
+SubagentRun.dispose（并发与重复调用均只清理一次）
+           │
+           ▼
+工具适配器输出旧 JSON：agent/status/summary/duration_seconds/tool_calls/last_tool</code></pre>
+  <p class="callout">错误通道与模型输出分离：诊断进入 <code>diagnostic</code>，子智能体真正说出的内容进入 <code>output</code>/<code>partial_output</code>。清理失败只记录日志，不覆盖已确定的业务结局。</p>
+
+  <h2>3. 核心契约</h2>
+  <table>
+    <thead><tr><th>抽象</th><th>运行时含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>StartRequest</code></td><td>传输无关的启动意图；声明目标、父会话、生命周期、深度与所需能力。</td></tr>
+      <tr><td><code>SubagentCapabilities</code></td><td>Provider 对结构化输出、深度、工具过滤、persona、agent options 的五位诚实声明；不支持即 fail-loud。</td></tr>
+      <tr><td><code>SubagentDescriptor</code></td><td>发布时冻结的身份快照；阶段 A 仅驻留内存，后续阶段再持久化。</td></tr>
+      <tr><td><code>SubagentRun</code></td><td>已发布运行的句柄；暴露结果 awaitable 与幂等 <code>dispose()</code>。</td></tr>
+      <tr><td><code>SubagentResult</code></td><td>稳定结局：completed / aborted / error / max_tokens / refusal / timed_out，超时另带 idle / absolute 类型。</td></tr>
+      <tr><td><code>SubagentProvider</code></td><td>传输扩展点；阶段 A 的默认实现为 <code>inprocess-spawn</code>。</td></tr>
+      <tr><td><code>AgentFactory</code></td><td>由 <code>core.agent-factory</code> Feature 提供的 typed child 创建服务，避免 Provider 依赖 <code>CrewApp</code> 私有 dict 回调。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. 权限与委派纪律</h2>
+  <p>工具策略是纯函数。普通子智能体的工具集合按“父授权快照 ∩ 用户请求 ∩ access control − 黑名单 − reserved toolsets”计算；preset 的专用工具只能从预先计算的授权上限中加回，不能借 preset 扩权。无 tools 能力的模型得到空集合，文本模型会去掉视觉工具。</p>
+  <p>主 Agent 的静态提示词由 <code>features.subagent.delegation_mode</code> 控制：默认 <code>explicit</code>，只有用户、项目指令或技能明确要求委派/并行才允许使用；<code>proactive</code> 才允许在边界清晰且有并行收益时主动委派。轻量子智能体不注入这段主 Agent 纪律，其简报要求把自包含结果交回父级、不得直接向用户提问，并区分已验证事实与自述。</p>
+
+  <h2>5. 外援作为插件 Provider</h2>
+  <p><code>product.external-agents</code> 声明对 <code>ServiceKey("subagent")</code> 的可选依赖。安装时它只注册一个 <code>external:</code> Provider family resolver，注册 token 归当前 Feature Scope；Subagent Runtime 和工具层不导入、不判断任何外援类型。</p>
+  <pre><code>core.subagent Feature ──提供──► SubagentService
+                                      ▲ optional resolve
+product.external-agents Feature ──────┘
+  ├─ owner-aware Catalog 查询
+  ├─ 动态解析 external:&lt;agent_id&gt;
+  ├─ ExternalDelegationProvider → DelegationService
+  └─ Scope stop：先撤 resolver，再关闭 admission / run / resource</code></pre>
+  <p>resolver 每次按当前 owner 查 Catalog，因此不会在进程启动时把 <code>local</code> owner 固化为全局 roster；新建、删除或跨 owner 不可见的外援会即时反映为 Provider 可用性。外援 Feature 停用后 resolver 被撤销，preset roster 自动收缩，新委派返回 <code>UnknownProviderError</code>，不会回退到进程内执行。</p>
+  <p><code>ExternalDelegationProvider</code> 的五项能力全部为 false，且 <code>inherits_parent_context=false</code>。它把自包含简报、cwd、owner/workspace 与外援自身模型配置组装成 <code>RuntimeExecutionRequest</code>；权限请求固定拒绝。<code>text</code>、<code>tool</code>、<code>usage</code>、<code>session</code>/<code>session_reset</code> 与 <code>error</code> 事件被折叠为稳定结果，usage 采用最后快照而非重复累加。</p>
+
+  <h2>6. Preset 路由与能力塑形</h2>
+  <p>Preset 可在声明中绑定 <code>provider</code>，该字段从不进入模型参数。<code>run_agent</code> 只列出当前 owner 下 Provider 可解析的 preset；不支持 <code>agent_options</code> 的 Provider 不暴露 <code>model</code>，混合 roster 用互斥 schema 分支约束可覆盖模型的专家集合。零上下文继承的 Provider 会在工具文案中要求自包含 goal/context。</p>
+  <p class="callout">工具/技能范围、模型覆盖、结构化输出等请求先转成显式能力需求。Provider 不支持时由 Runtime 在发布前抛出 <code>SubagentCapabilityError</code>；不会忽略配置，也不会换一个 Provider 偷跑。</p>
+
+  <h2>7. 关键实现入口</h2>
+  <table>
+    <thead><tr><th>文件</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td><code>crew/agent/subagent/service.py</code></td><td>稳定值对象、错误、Provider/Service 协议与注册表。</td></tr>
+      <tr><td><code>crew/agent/subagent/runtime.py</code></td><td>唯一预检/发布边界、运行跟踪、批量隔离与关闭。</td></tr>
+      <tr><td><code>crew/agent/subagent/feature.py</code></td><td>以 Feature service 发布 SubagentService，供可选插件消费。</td></tr>
+      <tr><td><code>crew/agent/subagent/providers.py</code></td><td>进程内执行循环、chunk 折叠、双超时与资源释放。</td></tr>
+      <tr><td><code>crew/agent/subagent/policy.py</code></td><td>工具与模型能力的纯策略代数。</td></tr>
+      <tr><td><code>crew/agent/subagent/tools.py</code></td><td>参数校验、Runtime 调用、后台兼容壳和旧 JSON 输出。</td></tr>
+      <tr><td><code>packages/crew-external-agents/.../feature.py</code></td><td>外援插件安装、owner-aware Provider family 注册与 Scope 回收。</td></tr>
+      <tr><td><code>packages/crew-external-agents/.../subagent_provider.py</code></td><td>Catalog/Delegation 到 Subagent Provider/Run 的单向适配。</td></tr>
+      <tr><td><code>crew/agent/feature.py</code></td><td><code>core.agent-factory</code> Feature 与 typed factory 服务。</td></tr>
+      <tr><td><code>crew/core/interfaces.py</code></td><td><code>ChildAgentRequest</code>、模型解析结果与 <code>AgentFactory</code> 协议。</td></tr>
+      <tr><td><code>crew/agent/prompt_builder.py</code></td><td>主 Agent 委派纪律；轻量子 Agent 明确隔离。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>8. 已知边界与后续阶段</h2>
+  <ul>
+    <li>阶段 B/C：Feature 生命周期所有权、持久化 run/descriptor、事件与配置命名空间收敛。</li>
+    <li>阶段 D/E：continuable、通信控制面、同构批量、摘要兜底、fork 与结构化输出。</li>
+    <li>当前后台任务持久化仍由兼容适配器承接；语义执行、并发与超时已从 handler 移入 Runtime/Provider。</li>
+  </ul>
+
+  <h2>9. 变更记录</h2>
+  <table><thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead><tbody>
+    <tr><td>2026-09-16</td><td>阶段 A2：外援 Feature 以 owner-aware resolver 贡献 <code>external:*</code> Provider；preset 绑定传输，roster/schema 按 Provider 能力动态塑形。</td><td>新增第二种真实传输；模型工具不增加 provider 参数，停用外援后 fail-closed。</td></tr>
+    <tr><td>2026-09-16</td><td>阶段 A：建立 Capability Seam、Runtime、进程内 Provider、纯策略、Agent Factory，并薄化工具层；增加委派纪律配置。</td><td>内部架构重构；唯一预期可见变化为委派决策与子级交卷指引。</td></tr>
+  </tbody></table>
+
+  <h2>10. 小结</h2>
+  <p>Subagent 已从“工具文件里的内联执行循环”演进为“稳定语义内核 + Feature-owned Provider 插件”。进程内与进程外传输共用同一份请求、能力预检、发布边界和结局；新增传输不需要修改 Runtime 或模型工具协议。</p>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · 决策：<a href="../adr/0045-subagent-capability-seam.html">ADR-0045</a> · 测试：<a href="../../testing/subagent-stage-a-semantic-runtime.html">Stage A</a> / <a href="../../testing/subagent-stage-a2-external-provider.html">Stage A2</a></div>
+</div></body></html>

@@ -333,6 +333,8 @@ class Config:
     subagent_max_iterations: int = 200    # 子 agent 单轮工具迭代上限；主 agent 可配置为无限
     subagent_idle_timeout_seconds: float = 120.0  # 子 agent 空闲（无活动）超时：N 秒零输出才中止（防卡死），0=不限
     subagent_timeout_seconds: float = 1800.0  # 子 agent 绝对运行上限（全局兜底），0=不限
+    subagent_default_provider: str = "inprocess-spawn"  # 部署侧默认传输；模型不可见
+    subagent_delegation_mode: str = "explicit"  # explicit | proactive；只影响主 agent 的委派纪律
 
     # --- unified long-task runtime ---
     tasks_auto_background_after_seconds: float = 15.0
@@ -1554,6 +1556,7 @@ _FEATURES_SECTION_MAP: dict[str, tuple[str, ...]] = {
     "external_agents": ("external_agents",),
     "channels": ("channels",),
     "browser": ("tools", "browser"),
+    "subagent": ("subagent",),
 }
 _FEATURES_FLAT_MAP: dict[tuple[str, str], tuple[str, ...]] = {
     ("dynamic_kanban", "task_timeout_seconds"): ("runtime", "dk_task_timeout_seconds"),
@@ -1931,6 +1934,24 @@ def load_config(config_path: str | Path | None = None) -> Config:
                         getattr(cfg, f"{attr_prefix}_execution_timeout_seconds"),
                     ),
                 )
+
+        subagent = data.get("subagent", {})
+        if isinstance(subagent, dict):
+            default_provider = str(
+                subagent.get("default_provider", cfg.subagent_default_provider)
+                or cfg.subagent_default_provider
+            ).strip()
+            cfg.subagent_default_provider = default_provider or "inprocess-spawn"
+            delegation_mode = str(
+                subagent.get("delegation_mode", cfg.subagent_delegation_mode)
+                or cfg.subagent_delegation_mode
+            ).strip().lower()
+            if delegation_mode not in {"explicit", "proactive"}:
+                log.warning(
+                    "subagent.delegation_mode 仅支持 explicit/proactive，已回退为 explicit"
+                )
+                delegation_mode = "explicit"
+            cfg.subagent_delegation_mode = delegation_mode
 
         plugins = data.get("plugins", {})
         if isinstance(plugins, dict):

@@ -225,8 +225,14 @@ features:
       role: 负责查资料、读取文件、搜集与整理信息
     - name: coder
       role: 负责编写代码、执行命令、文件读写等工程操作
+  subagent:
+    # 部署侧默认传输；模型可见工具中不存在 provider 参数。
+    default_provider: inprocess-spawn
+    # explicit：仅在用户、项目指令或技能明确要求委派/并行时使用子智能体；
+    # proactive：主智能体可在确有收益时主动委派。
+    delegation_mode: explicit
   # 子 agent（delegate_task / run_agent）的超时在 tasks.subagent 配置；
-  # 顶层 subagent: 节从未被 loader 读取（历史死配置），已移除。
+  # 子 agent 运行时策略统一放在 features.subagent；超时仍由 tasks.subagent 管理。
   tasks:
     auto_background_after_seconds: 15
     heartbeat_interval_seconds: 10
