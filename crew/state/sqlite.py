@@ -32,6 +32,16 @@ _WRITE_RETRY_MAX_S = 0.150
 _CHECKPOINT_EVERY_N_WRITES = 50
 
 
+def _busy_retry_sleep(seconds: float) -> None:
+    """同步写重试的忙等。模块级可注入（测试可替换为 no-op）。
+
+    约束：只允许在非事件循环线程执行——execute() 是同步 API，事件循环上的写
+    必须走 execute_async（内部 asyncio.sleep + to_thread）。单次时长与重试次数
+    均由 _WRITE_RETRY_* 常量封顶（最坏约 15 × 150ms）。
+    """
+    time.sleep(seconds)
+
+
 def _on_disk_journal_mode(conn: sqlite3.Connection) -> Optional[str]:
     try:
         row = conn.execute("PRAGMA journal_mode").fetchone()
@@ -119,6 +129,12 @@ class SQLiteWriteHelper:
         return result
 
     def execute(self, fn: Callable[[sqlite3.Connection], T]) -> T:
+        """同步写入路径（BEGIN IMMEDIATE + busy 重试）。
+
+        只能在非事件循环线程调用；事件循环上的写一律用 execute_async。
+        个别存量同步 store（如任务看板 TaskManager）的写方法会被事件循环直接
+        调用，属于已知约束，消除方式是把调用方挪到 asyncio.to_thread。
+        """
         last_err: Optional[Exception] = None
         for attempt in range(_WRITE_MAX_RETRIES):
             try:
@@ -128,7 +144,7 @@ class SQLiteWriteHelper:
                 if "locked" in msg or "busy" in msg:
                     last_err = exc
                     if attempt < _WRITE_MAX_RETRIES - 1:
-                        time.sleep(random.uniform(_WRITE_RETRY_MIN_S, _WRITE_RETRY_MAX_S))
+                        _busy_retry_sleep(random.uniform(_WRITE_RETRY_MIN_S, _WRITE_RETRY_MAX_S))
                         continue
                 raise
         raise last_err or sqlite3.OperationalError("database is locked after max retries")

@@ -53,6 +53,40 @@ RUN_AGENT_TOOLSET = "subagent.preset"  # run_agent / collect_subagent 独立 too
 # 结构化 status → 任务看板 status
 _STATUS_TO_TASK = {"completed": "done", "timeout": "failed", "error": "failed"}
 
+# 已完成后台任务在 bg_events 中的保留时长：模型从不 collect 时的兜底清扫 TTL
+_BG_EVENT_TTL_SECONDS = 3600.0
+
+
+class _BgEventEntry:
+    """后台子任务的完成事件表项：事件 + 完成时间戳（done_at=None 表示仍在运行）。"""
+
+    __slots__ = ("event", "done_at")
+
+    def __init__(self, event: asyncio.Event) -> None:
+        self.event = event
+        self.done_at: float | None = None
+
+
+def _sweep_stale_bg_events(
+    entries: dict[str, _BgEventEntry], *, now: float, ttl: float,
+) -> None:
+    """清扫已完成且超过 TTL 的后台任务 entry（collect 之外的兜底，防永久驻留）。"""
+    for task_id, entry in list(entries.items()):
+        if entry.done_at is not None and now - entry.done_at > ttl:
+            entries.pop(task_id, None)
+
+
+def _error_result(label: str, exc: Exception) -> dict[str, Any]:
+    """把逃逸出单个子任务 runner 的异常折叠成该子任务的结构化失败结果。"""
+    return {
+        "agent": label,
+        "status": "error",
+        "summary": str(exc) or "子智能体执行出错",
+        "duration_seconds": 0,
+        "tool_calls": 0,
+        "last_tool": "",
+    }
+
 
 class ActiveSubagents:
     """按父 session 跟踪正在运行的子 agent。
@@ -458,14 +492,16 @@ async def _run_one_child_unleased(
         final_text = str(exc)
         log.exception("子智能体 %s 执行异常", label)
     finally:
-        try:
-            await gen.aclose()
-        except Exception:  # noqa: BLE001
-            pass
+        # 先下中断标志再关流：aclose() 会把 GeneratorExit 推进子 agent 的收尾逻辑，
+        # interrupt 必须在关流前设置，收尾阶段才观察得到
         if status == "timeout":
             interrupt_fn = getattr(child, "interrupt", None)
             if callable(interrupt_fn):
                 interrupt_fn("子任务超时")
+        try:
+            await gen.aclose()
+        except Exception:  # noqa: BLE001
+            pass
         close_fn = getattr(child, "aclose", None)
         if callable(close_fn):
             try:
@@ -572,7 +608,21 @@ async def _run_children(
                 preset_binding=item.get("preset_binding"),
             )
 
-    results = await asyncio.gather(*(_guarded(item) for item in specs))
+    # 异常隔离：单个子任务 runner 逃逸的异常折叠为该子任务的失败结果，
+    # 其余子任务结果照常返回（CancelledError 等 BaseException 不折叠，向上传播）
+    raw_results = await asyncio.gather(
+        *(_guarded(item) for item in specs), return_exceptions=True,
+    )
+    results: list[dict[str, Any]] = []
+    for item, raw in zip(specs, raw_results):
+        if isinstance(raw, dict):
+            results.append(raw)
+            continue
+        if isinstance(raw, Exception):
+            log.warning("子智能体 %s 执行异常: %s", item["label"], raw)
+            results.append(_error_result(item["label"], raw))
+            continue
+        raise raw
     return tool_result({"results": results})
 
 
@@ -589,7 +639,19 @@ async def _run_background(
     done_event: asyncio.Event,
     on_done: Callable[[str, dict[str, Any]], None] | None,
 ) -> None:
-    """后台跑一个子 agent：完成后落任务看板 + 回调通知。fire-and-forget。"""
+    """后台跑一个子 agent：完成后落任务看板 + 回调通知。fire-and-forget。
+
+    TaskManager 是同步写库（busy 重试会睡眠），事件循环上的调用一律挪到线程。
+    """
+    def _touch_progress(progress: dict[str, Any]) -> None:
+        # 活动戳是 best-effort 且每个 chunk 都可能触发：挪到线程，避免在事件循环上忙等
+        async def _do_touch() -> None:
+            try:
+                await asyncio.to_thread(tasks.touch_activity, task_id, progress)
+            except Exception:  # noqa: BLE001
+                log.debug("后台子任务活动落库失败 task_id=%s", task_id)
+        asyncio.ensure_future(_do_touch())
+
     result: dict[str, Any]
     try:
         result = await _run_one_child(
@@ -601,11 +663,7 @@ async def _run_background(
             active=active,
             idle_timeout=idle_timeout,
             max_runtime=max_runtime,
-            progress_callback=(
-                lambda progress: tasks.touch_activity(task_id, progress)
-                if hasattr(tasks, "touch_activity")
-                else None
-            ),
+            progress_callback=_touch_progress if hasattr(tasks, "touch_activity") else None,
             preset_binding=item.get("preset_binding"),
         )
     except asyncio.CancelledError:
@@ -618,7 +676,8 @@ async def _run_background(
     finally:
         # 落任务看板（result 存结构化 JSON）
         try:
-            tasks.update_status(
+            await asyncio.to_thread(
+                tasks.update_status,
                 task_id,
                 _STATUS_TO_TASK.get(result["status"], "failed"),
                 tool_result(result),
@@ -660,10 +719,11 @@ def register_subagent_tools(
     后台异步（run_agent 的 run_in_background / frontmatter background）需要 tasks +
     launch_background；未提供时自动降级为同步执行。
     """
-    # 后台任务的完成事件表：collect(wait=true) 据此阻塞等待
-    bg_events: dict[str, asyncio.Event] = {}
+    # 后台任务的完成事件表：collect(wait=true) 据此阻塞等待。
+    # entry 带完成时间戳，超过 TTL 由新任务起飞时顺带清扫兜底
+    bg_events: dict[str, _BgEventEntry] = {}
 
-    def _launch_one_bg(
+    async def _launch_one_bg(
         *,
         item: dict[str, Any],
         goal_text: str,
@@ -683,9 +743,11 @@ def register_subagent_tools(
         parent_session_id = (
             current_subagent_notify_session.get() or current_session_id.get() or ""
         )
+        # TaskManager 是同步写库（busy 重试会睡眠）：挪到线程，避免阻塞事件循环
         create_runtime = getattr(tasks, "create_runtime", None)
         if callable(create_runtime):
-            task = create_runtime(
+            task = await asyncio.to_thread(
+                create_runtime,
                 kind="subagent",
                 session_id=parent_session_id or "subagent",
                 parent_task_id=current_parent_task_id.get(),
@@ -697,9 +759,10 @@ def register_subagent_tools(
                 backgrounded=True,
                 owner_account_id=current_owner_account_id.get(),
             )
-            tasks.mark_running(task["task_id"])
+            await asyncio.to_thread(tasks.mark_running, task["task_id"])
         else:
-            task = tasks.create(
+            task = await asyncio.to_thread(
+                tasks.create,
                 parent_session_id or "subagent",
                 title=goal_text[:40],
                 detail=goal_text,
@@ -708,19 +771,31 @@ def register_subagent_tools(
             )
         task_id = task["id"]
         done_event = asyncio.Event()
-        bg_events[task_id] = done_event
-        launch_background(_run_background(
-            task_id=task_id,
-            item=item,
-            parent_session_id=parent_session_id,
-            build_child=build_child,
-            active=active,
-            idle_timeout=idle_timeout,
-            max_runtime=max_runtime,
-            tasks=tasks,
-            done_event=done_event,
-            on_done=on_background_done,
-        ))
+        # 写入前顺带清扫：模型从不 collect 时，已完成超 TTL 的 entry 在此兜底回收
+        _sweep_stale_bg_events(
+            bg_events, now=time.monotonic(), ttl=_BG_EVENT_TTL_SECONDS,
+        )
+        entry = _BgEventEntry(done_event)
+        bg_events[task_id] = entry
+
+        async def _run_and_mark_done() -> None:
+            try:
+                await _run_background(
+                    task_id=task_id,
+                    item=item,
+                    parent_session_id=parent_session_id,
+                    build_child=build_child,
+                    active=active,
+                    idle_timeout=idle_timeout,
+                    max_runtime=max_runtime,
+                    tasks=tasks,
+                    done_event=done_event,
+                    on_done=on_background_done,
+                )
+            finally:
+                entry.done_at = time.monotonic()
+
+        launch_background(_run_and_mark_done())
         return tool_result({
             "status": "launched",
             "task_id": task_id,
@@ -782,7 +857,7 @@ def register_subagent_tools(
             item = dict(specs[0])
             # 后台通知里展示的 agent 名用 goal 摘要，比默认的 task#0 更可读
             item["label"] = (item["goal_text"] or "")[:40] or item["label"]
-            return _launch_one_bg(
+            return await _launch_one_bg(
                 item=item,
                 goal_text=item["goal_text"],
                 agent_label=item["label"],
@@ -861,7 +936,7 @@ def register_subagent_tools(
             spec.get("background")
         )
         if want_bg and tasks is not None and launch_background is not None:
-            return _launch_one_bg(
+            return await _launch_one_bg(
                 item=item,
                 goal_text=item["goal_text"],
                 agent_label=item["label"],
@@ -906,15 +981,15 @@ def register_subagent_tools(
         if not bool(args.get("wait")):
             return tool_result({"status": "running", "task_id": task_id})
 
-        ev = bg_events.get(task_id)
-        if ev is not None:
+        entry = bg_events.get(task_id)
+        if entry is not None:
             try:
                 # 子 agent 自身有 idle/max 超时兜底，这里再加缓冲避免永久阻塞
                 _cap = max(idle_timeout or 0, max_runtime or 0)
                 if _cap > 0:
-                    await asyncio.wait_for(ev.wait(), timeout=_cap + 30)
+                    await asyncio.wait_for(entry.event.wait(), timeout=_cap + 30)
                 else:
-                    await ev.wait()
+                    await entry.event.wait()
             except asyncio.TimeoutError:
                 return tool_result({"status": "running", "task_id": task_id,
                                     "note": "等待超时，稍后再 collect"})

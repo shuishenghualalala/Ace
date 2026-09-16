@@ -457,6 +457,55 @@ async def test_subagent_absolute_runtime_backstop():
     assert "运行上限" in res["summary"]
 
 
+async def test_subagent_timeout_interrupts_before_closing_stream():
+    """🔴 超时收尾顺序：interrupt 必须先于 gen.aclose() 设置，关流时才观察得到。
+
+    用自定义异步迭代器在 aclose() 入口记录 interrupt 可见性；旧顺序（先关流后
+    interrupt）下该时刻标志尚未设置。
+    """
+    import asyncio as _asyncio
+    from crew.core.envelope import ResponseChunk
+
+    class _HungChild:
+        def __init__(self):
+            self.interrupted = False
+            self.interrupt_seen_at_stream_close = False
+
+        def run(self, env):
+            async def gen():
+                yield ResponseChunk.delta("r", "working")
+                await _asyncio.sleep(10)  # 卡死触发 idle 超时
+
+            inner = gen()
+            child = self
+
+            class _ObservedStream:
+                def __aiter__(self):
+                    return self
+
+                def __anext__(self):
+                    return inner.__anext__()
+
+                async def aclose(self):
+                    # 记录关流瞬间 interrupt 是否已可见：先关流后 interrupt 的旧顺序下为 False
+                    child.interrupt_seen_at_stream_close = child.interrupted
+                    await inner.aclose()
+
+            return _ObservedStream()
+
+        def interrupt(self, message=None):
+            self.interrupted = True
+
+        async def aclose(self):
+            pass
+
+    child = _HungChild()
+    res = await _one_child(lambda spec: child, idle=0.2, mx=0)
+    assert res["status"] == "timeout"
+    assert child.interrupted is True
+    assert child.interrupt_seen_at_stream_close is True
+
+
 def test_subagent_capped_by_parent_user_type():
     """🔴 防越权：外部受限用户的子 agent 不能拿到父本身拿不到的工具。"""
     cfg = Config(max_iterations=5)
@@ -679,6 +728,28 @@ async def test_collect_unknown_task_errors():
         ToolCall("b3", "collect_subagent", {"task_id": "nope"})
     )
     assert "error" in result.content and ("任务不存在" in result.content or "Task not found" in result.content)
+
+
+def test_bg_events_sweeps_entries_past_ttl():
+    """🔴 bg_events 兜底清扫：已完成且超 TTL 的 entry 被回收；新完成/运行中的保留。"""
+    import asyncio as _asyncio
+
+    from crew.agent.subagent.tools import (
+        _BG_EVENT_TTL_SECONDS,
+        _BgEventEntry,
+        _sweep_stale_bg_events,
+    )
+
+    entries: dict[str, _BgEventEntry] = {}
+    stale = _BgEventEntry(_asyncio.Event())
+    stale.done_at = 1000.0
+    fresh = _BgEventEntry(_asyncio.Event())
+    fresh.done_at = 1000.0 + _BG_EVENT_TTL_SECONDS - 10  # 未超 TTL
+    running = _BgEventEntry(_asyncio.Event())            # done_at=None：仍在运行
+    entries.update({"stale": stale, "fresh": fresh, "running": running})
+
+    _sweep_stale_bg_events(entries, now=5000.0, ttl=_BG_EVENT_TTL_SECONDS)
+    assert list(entries) == ["fresh", "running"]
 
 
 def test_child_agent_has_no_subagent_tools():

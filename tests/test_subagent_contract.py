@@ -201,6 +201,47 @@ async def test_subagent_error_does_not_crash_parent(tmp_path):
     assert "good" in statuses
 
 
+async def test_delegate_task_batch_isolates_child_exception(tmp_path):
+    """🔴 批量委派：某个子任务自身抛异常时，折叠为该子任务的失败结果，
+    其余子任务结果仍完整返回（gather 异常隔离）。"""
+
+    def flaky_build_child(spec):
+        if spec.get("boom"):
+            raise RuntimeError("子 agent 装配失败")
+
+        class OkAgent:
+            async def run(self, env):
+                yield type("Chunk", (), {"kind": "final", "body": {"text": "ok"}})()
+
+        return OkAgent()
+
+    from crew.agent.subagent.tools import _run_children
+
+    cfg = Config(max_iterations=5)
+    cfg.db_path = str(tmp_path / "crew.db")
+    cfg.memory_db_path = str(tmp_path / "memory.db")
+    cfg.crew_home = str(tmp_path / ".crew")
+    result = await _run_children(
+        [
+            {"label": "good-1", "goal_text": "a", "spec": {}},
+            {"label": "bad", "goal_text": "b", "spec": {"boom": True}},
+            {"label": "good-2", "goal_text": "c", "spec": {}},
+        ],
+        build_child=flaky_build_child,
+        max_concurrent=2,
+        active=None,
+        idle_timeout=10,
+        max_runtime=0,
+    )
+    payload = json.loads(result)
+    assert len(payload["results"]) == 3
+    by_agent = {r["agent"]: r for r in payload["results"]}
+    assert by_agent["bad"]["status"] == "error"
+    assert "装配失败" in by_agent["bad"]["summary"]
+    assert by_agent["good-1"]["status"] == "completed"
+    assert by_agent["good-2"]["status"] == "completed"
+
+
 async def test_many_parallel_children_under_cap(tmp_path, monkeypatch):
     """delegate_task 批量任务应受 subagent_max_concurrent 并发上限控制。
 
