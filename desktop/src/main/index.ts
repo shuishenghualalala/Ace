@@ -44,7 +44,9 @@ import {
   gatewayInstanceAccessToken,
   probeGatewayInstance,
   type GatewayComponentState,
+  type GatewayProbeFailureKind,
 } from './gateway-instance-auth';
+import { BackendHealthMonitor } from './backend-health-monitor';
 import { GatewayRestartController } from './gateway-restart-controller';
 import { isTrustedRendererFileUrl } from './trusted-renderer-url';
 import type {
@@ -206,11 +208,7 @@ let isQuitting = false;
 let gatewayGeneration = 0;
 // Backend health monitor state
 let backendConnected = false;
-let healthMonitorTimer: ReturnType<typeof setInterval> | null = null;
-// 连续健康检查失败次数。单次 /api/health 超时不代表 gateway 挂了——gateway 繁忙
-// （加载技能 / 构建大 prompt / 执行工具）时单线程 asyncio 可能 2s 内没响应 health。
-// 需连续 N 次失败才判 disconnected，避免误弹「智能体运行环境准备中」遮罩。
-let healthFailCount = 0;
+// ensureGateway 缓存重证明的容错次数，与健康监控阈值语义独立。
 const HEALTH_FAIL_THRESHOLD = 3;
 let gatewayComponents: Record<string, GatewayComponentState> | undefined;
 // Track the actually resolved gateway base URL (updated by ensureGateway)
@@ -225,6 +223,7 @@ const gatewayRestartController = new GatewayRestartController(async () => {
   if (isQuitting) return;
   gatewayGeneration += 1;
   ensureGatewayPromise = null;
+  backendHealthMonitor.markRestart();
   logSupervisorDecision('automatic-restart', { generation: gatewayGeneration });
   try {
     await ensureGateway();
@@ -1737,17 +1736,24 @@ function backendLogInfo(): { logPath: string } {
   return { logPath: gatewayLogPath() };
 }
 
-function backendStatusPayload(connected: boolean): {
+function backendStatusPayload(
+  connected: boolean,
+  detail: { failureKind?: GatewayProbeFailureKind; since?: number } = {},
+): {
   connected: boolean;
   baseUrl: string;
   logPath: string;
   components?: Record<string, GatewayComponentState>;
+  failureKind?: GatewayProbeFailureKind;
+  since?: number;
 } {
   return {
     connected,
     baseUrl: resolvedGatewayBaseUrl,
     ...backendLogInfo(),
     ...(gatewayComponents ? { components: gatewayComponents } : {}),
+    ...(detail.failureKind ? { failureKind: detail.failureKind } : {}),
+    ...(detail.since !== undefined ? { since: detail.since } : {}),
   };
 }
 
@@ -1843,56 +1849,42 @@ async function stopManagedGateway(reason: string): Promise<void> {
 // ============================================================================
 // Backend health monitor: periodically polls /api/health and pushes status
 // changes to the renderer via IPC ('backend:status').
+// 探针串行化（链式 setTimeout）、失败分类（unreachable/timeout/auth_failed/unknown）
+// 与启动/稳定双阈值详见 backend-health-monitor.ts。
 // ============================================================================
-// 🌟 启动优化：健康探测间隔从 1500ms 降至 1000ms，更快感知 gateway 就绪状态变化
-const HEALTH_CHECK_INTERVAL_MS = 1000;
+const backendHealthMonitor = new BackendHealthMonitor(
+  // 每次探测取当时的 resolvedGatewayBaseUrl（ensureGateway 端口选择后会更新）
+  () => probeHealthApi(resolvedGatewayBaseUrl),
+  (change) => {
+    gatewayComponents = change.connected ? change.components : undefined;
+    pushBackendStatus(change.connected, {
+      ...(change.failureKind ? { failureKind: change.failureKind } : {}),
+      ...(change.since !== undefined ? { since: change.since } : {}),
+    });
+  },
+);
 
-function pushBackendStatus(connected: boolean, options: { force?: boolean } = {}): void {
-  if (backendConnected === connected && !options.force) return;
+function pushBackendStatus(
+  connected: boolean,
+  detail: { failureKind?: GatewayProbeFailureKind; since?: number } = {},
+): void {
   backendConnected = connected;
-  console.log(`[main] backend status → ${connected ? 'connected' : 'disconnected'}`);
+  console.log(
+    `[main] backend status → ${connected ? 'connected' : `disconnected (${detail.failureKind ?? 'unknown'})`}`,
+  );
   try {
-    mainWindow?.webContents.send('backend:status', backendStatusPayload(connected));
+    mainWindow?.webContents.send('backend:status', backendStatusPayload(connected, detail));
   } catch {
     // webContents may be destroyed
   }
 }
 
-async function pollBackendHealth(): Promise<void> {
-  // Use the resolved gateway base URL (updated by ensureGateway after port selection)
-  const baseUrl = resolvedGatewayBaseUrl;
-  const probe = await probeHealthApi(baseUrl);
-  if (probe.verified) {
-    // 恢复要快：一旦成功立即重置并推送 connected（若先前被判 disconnected，遮罩立刻消失）
-    healthFailCount = 0;
-    const componentsChanged = JSON.stringify(gatewayComponents) !== JSON.stringify(probe.components);
-    gatewayComponents = probe.components;
-    pushBackendStatus(true, { force: componentsChanged });
-    return;
-  }
-  // 失败容错：连续 N 次失败才判 disconnected。gateway 繁忙时单次 health 超时属正常，
-  // 立即弹遮罩会误阻断用户操作（如点技能时 gateway 正在加载）。
-  healthFailCount += 1;
-  if (healthFailCount >= HEALTH_FAIL_THRESHOLD) {
-    gatewayComponents = undefined;
-    pushBackendStatus(false);
-  }
-}
-
 function startBackendHealthMonitor(): void {
-  if (healthMonitorTimer) return;
-  // Immediate first check
-  void pollBackendHealth();
-  healthMonitorTimer = setInterval(() => {
-    void pollBackendHealth();
-  }, HEALTH_CHECK_INTERVAL_MS);
+  backendHealthMonitor.start();
 }
 
 function stopBackendHealthMonitor(): void {
-  if (healthMonitorTimer) {
-    clearInterval(healthMonitorTimer);
-    healthMonitorTimer = null;
-  }
+  backendHealthMonitor.stop();
 }
 
 // ============================================================================
@@ -1905,7 +1897,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
     // A prior proof is not a permanent trust grant. Re-prove immediately before
     // every credential-bearing caller reuses the URL, so an unmanaged Gateway
     // restart cannot silently turn a stale cached port into a trusted service.
-    // 与 pollBackendHealth 容错对齐：gateway 单线程 asyncio 繁忙（摘要/工具执行）+
+    // 与 backendHealthMonitor 容错对齐：gateway 单线程 asyncio 繁忙（摘要/工具执行）+
     // Defender 扫描时，单次 3s health 超时属正常；连续失败才判定实例失效。
     // 否则一次抖动就清空缓存 → 全量重拉 → 旧实例占 8000 → 扫描选出 8001 →
     // spawn 被 managedGateway 短路 → 空等无进程端口，遮罩永不消失。
@@ -3419,6 +3411,7 @@ function registerIpc() {
     gatewayGeneration += 1;
     logSupervisorDecision('user-retry', { generation: gatewayGeneration });
     ensureGatewayPromise = null;
+    backendHealthMonitor.markRestart();
     await stopManagedGateway('user-retry');
     void ensureGateway()
       .then(() => scheduleBrowserHostConnection())
