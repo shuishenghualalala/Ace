@@ -17,6 +17,7 @@ import re
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
+from collections.abc import Mapping
 from typing import Any, AsyncIterator, Callable, Coroutine
 
 from crew.agent.capabilities import (
@@ -38,14 +39,16 @@ from crew.agent.runtime import SingleAgent
 from crew.agent.prompt_builder import append_subagent_handoff_guidance
 from crew.agent.skills import configure_skill_filter
 from crew.agent.subagent.context import (
+    ParentDeliveryState,
     SubagentNotificationQueue,
+    SubagentNotificationRouter,
     build_subagent_notification_handler,
 )
 from crew.agent.subagent.policy import (
     SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
-    SUBAGENT_BLOCKED_TOOLSETS,
     apply_model_capability_policy,
     apply_preset_tool_policy,
+    delegation_blocked_toolsets,
     resolve_subagent_tool_filter,
 )
 from crew.core.envelope import Envelope, ResponseChunk
@@ -430,6 +433,17 @@ _LIVE_APPS: list["CrewApp"] = []
 _NOTIFYWORTHY_TASK_STATUSES = frozenset({"completed", "failed", "timed_out"})
 # - 这些类型的后台任务完成后会触发恢复回合（"自动继续"，与通知无关）。
 _RESUMABLE_TASK_KINDS = frozenset({"shell", "subagent"})
+
+
+def _child_depth_of(spec: Mapping | None) -> int:
+    """子级委派深度只作记账，不作调用方权威：负数/非整数归零。"""
+
+    if not isinstance(spec, Mapping):
+        return 0
+    value = spec.get("_delegation_depth", spec.get("depth"))
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
 _TASK_NOTIFICATION_TITLES = {
     "completed": "任务已完成",
     "failed": "任务失败",
@@ -585,9 +599,12 @@ class CrewApp:
         # 再由共享 Runtime 按依赖图激活；Sites/Browser 后续复用同一入口。
         self._managed_feature_definitions: OrderedDict[str, FeatureDefinition] = OrderedDict()
         # 后台子任务完成结果的待注入队列（按父 session 分键）：实现在
-        # crew/agent/subagent/context.py，完成回调入队、PROMPT contributor drain、
-        # collect_subagent 摘除三端共享同一实例。
+        # crew/agent/subagent/context.py，完成回调路由、PROMPT contributor
+        # drain、collect_subagent 摘除三端共享同一实例。
         self._subagent_notifications = SubagentNotificationQueue()
+        self._subagent_router = SubagentNotificationRouter(
+            self._subagent_notifications
+        )
         self._register_execution_driver_scope(
             "core.agent-driver",
             ExecutionDriver(
@@ -715,6 +732,13 @@ class CrewApp:
         self._auxiliary_providers: list[LLMProvider] = []
         self._shutdown_lock = asyncio.Lock()
         self._shutdown_complete = False
+        # 拆除起点标志：shutdown() 进入即置位，供通知路由把"父拆除中"判为
+        # 只入队不唤醒（_shutdown_complete 在资源关闭后才置位，太晚）。
+        self._shutdown_started = False
+        # 肯定式"父已消失"证据：会话删除（teardown）时记录的有界集合。
+        # 通知路由只对记录在案的会话丢弃——"库里查无此行"不构成消失证据
+        # （隐藏子会话/测试环境可能从未落库但仍活着）。
+        self._vanished_sessions: OrderedDict[str, float] = OrderedDict()
 
         # cron / mcp 由 build_app 装配后赋值；startup/shutdown 统一拉起与关闭
         self.cron_store = None
@@ -1119,6 +1143,11 @@ class CrewApp:
         sid = str(task.get("session_id") or "")
         if not sid or not self._should_resume_completed_task(task):
             return
+        params: dict[str, Any] = {"internal_task_resume": True}
+        if str(task.get("kind") or "") != "subagent":
+            # shell 等任务的结果经恢复回合参数注入；subagent 的正文只走通知
+            # 队列一条通道（恢复轮 PROMPT drain），避免同一份结果双份注入。
+            params["task_notifications"] = [task]
         envelope = Envelope.of(
             "后台任务已完成，请根据结果继续原任务。",
             session_id=sid,
@@ -1129,10 +1158,7 @@ class CrewApp:
             ) or "default",
             user_id=str(task.get("owner_account_id") or ""),
             mode="agent",
-            params={
-                "internal_task_resume": True,
-                "task_notifications": [task],
-            },
+            params=params,
         )
         async for chunk in self.dispatch(envelope):
             if self._push_fn is not None:
@@ -1744,12 +1770,15 @@ class CrewApp:
         *,
         user_type: str = "internal",
         exclude_reserved: bool = True,
+        depth: int = 0,
     ) -> list[str]:
         """按 toolsets（不填=继承主 agent 全量）算工具名，tools 白名单取交集，
         并强制剔除子 agent 不该碰的工具集。
 
         同时按父 user_type 的 access_control 封顶——子 agent 不能拿到父本身
         拿不到的工具（用于 子/父 toolset 求交集，防外部用户越权）。
+        委派工具集的可见性由深度账本决定：``allow_nested`` 关闭或深度达上限
+        时维持全量黑名单（与旧行为逐字一致）。
         """
         ac = self.config.access_control.resolve_for(user_type)
         access_allowed = {
@@ -1774,7 +1803,11 @@ class CrewApp:
             parent_allowed,
             requested_toolsets=toolsets,
             requested_tools=tools,
-            blocked_toolsets=SUBAGENT_BLOCKED_TOOLSETS,
+            blocked_toolsets=delegation_blocked_toolsets(
+                depth,
+                allow_nested=self.config.subagent_allow_nested,
+                max_depth=self.config.subagent_max_depth,
+            ),
             blocked_toolset_prefixes=SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
             reserved_toolsets=(
                 self.agent_presets.reserved_toolsets()
@@ -1953,6 +1986,7 @@ class CrewApp:
                 None,
                 user_type=parent_user_type,
                 exclude_reserved=False,
+                depth=_child_depth_of(spec),
             )
             main_tools = exclude_toolsets(
                 self.registry,
@@ -1977,7 +2011,10 @@ class CrewApp:
                 self.agent_presets.reserved_skills(),
             )
             tool_filter = self._resolve_subagent_tool_scope(
-                spec.get("toolsets"), spec.get("tools"), user_type=parent_user_type
+                spec.get("toolsets"),
+                spec.get("tools"),
+                user_type=parent_user_type,
+                depth=_child_depth_of(spec),
             )
         tool_filter = self._apply_model_capability_filter(tool_filter, effective_capabilities)
 
@@ -2587,6 +2624,7 @@ class CrewApp:
         async with self._shutdown_lock:
             if self._shutdown_complete:
                 return
+            self._shutdown_started = True
             await self._shutdown_resources(provider_timeout=timeout)
             self._shutdown_complete = True
         with suppress(ValueError):
@@ -2684,6 +2722,7 @@ class CrewApp:
             self.channel_session_routes,
             self.active_owner,
             getattr(self, "cron_store", None),
+            getattr(self, "subagent_store", None),
             # A host may be closed before startup (for example ASGI tests that
             # use a transport without lifespan).  In that case the managed
             # Feature has not yet consumed its candidate Manager, so close its
@@ -3453,11 +3492,22 @@ class CrewApp:
             return None
 
     def _on_subagent_background_done(self, session_id: str, result: dict) -> None:
-        """后台子任务完成回调（在事件循环内同步调用）：入队 + 实时推送。"""
-        # 1) 入队，由 PROMPT contributor（subagent.background.reminder）在下一回合
-        #    drain 注入主 agent / 发起 member 的上下文（队列限长见 SubagentNotificationQueue）
-        self._subagent_notifications.enqueue(session_id, result)
-        # 2) 实时推送（best-effort，有活跃 WS 时；push_fn 为协程，fire-and-forget）
+        """后台子任务完成回调（在事件循环内同步调用）：四态路由 + 实时推送。
+
+        内容只经通知队列一条通道：busy 态 steer 成功即摘除队列副本；
+        idle 态由 TaskRuntime 的恢复回合 drain（恢复回合不再重复携带
+        task_notifications）；父已消失则整份丢弃。
+        """
+        state = self._classify_parent_delivery_state(session_id, result)
+        self._subagent_router.deliver(
+            session_id,
+            result,
+            state=state,
+            steer=lambda text: self._steer_subagent_notification(
+                session_id, text, result
+            ),
+        )
+        # 实时推送（best-effort，有活跃 WS 时；push_fn 为协程，fire-and-forget）
         if self._push_fn is not None:
             label = result.get("agent", "子智能体")
             status = result.get("status", "")
@@ -3472,6 +3522,61 @@ class CrewApp:
                     asyncio.ensure_future(fut)
             except RuntimeError:
                 pass  # 无运行中事件循环则跳过
+
+    def note_session_vanished(self, session_id: str) -> None:
+        """会话删除时登记"已消失"证据（有界，供通知路由四态分类）。"""
+
+        sid = str(session_id or "").strip()
+        if not sid:
+            return
+        self._vanished_sessions[sid] = time.monotonic()
+        while len(self._vanished_sessions) > 512:
+            self._vanished_sessions.popitem(last=False)
+
+    def _classify_parent_delivery_state(
+        self,
+        session_id: str,
+        result: dict,
+    ) -> ParentDeliveryState:
+        """按父级现状分类投递路径；观测失败按 IDLE 走（等同旧行为）。"""
+
+        if self._shutdown_started:
+            return ParentDeliveryState.DRAINING
+        sid = str(session_id or "")
+        vanished_at = self._vanished_sessions.get(sid)
+        if vanished_at is not None:
+            # 记录超过 1 小时的旧证据过期：避免同 id 复用的新会话被误伤。
+            if time.monotonic() - vanished_at > 3600.0:
+                self._vanished_sessions.pop(sid, None)
+            else:
+                return ParentDeliveryState.GONE
+        owner = str(result.get("owner_account_id") or "")
+        try:
+            if self.dispatcher.is_running(session_id, owner):
+                return ParentDeliveryState.BUSY
+        except Exception:  # noqa: BLE001
+            return ParentDeliveryState.IDLE
+        return ParentDeliveryState.IDLE
+
+    def _steer_subagent_notification(
+        self,
+        session_id: str,
+        text: str,
+        result: dict,
+    ) -> bool:
+        """把完成通知并入父级当前轮（steer）；失败返回 False 由队列兜底。"""
+
+        try:
+            return bool(
+                self.steer(
+                    session_id,
+                    text,
+                    owner_account_id=str(result.get("owner_account_id") or ""),
+                )
+            )
+        except Exception:  # noqa: BLE001 - steer 失败回退队列路径
+            log.debug("steer 后台子任务通知失败 session=%s", session_id, exc_info=True)
+            return False
 
     async def _run_default_execution_driver(
         self,
@@ -3898,12 +4003,24 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
     sub_registry = SubagentRegistry()
     app.subagent_active = ActiveSubagents()
+    # 阶段 B：runs/edges/descriptors 三表自有库（ADR-0038）。App 直构、随 App
+    # 存亡（与 TaskRuntime 同语义）；阶段 C 收进 Feature Bundle 时迁 Scope。
+    from crew.agent.subagent.store import SubagentStore
+
+    app.subagent_store = SubagentStore(
+        resolve_crew_home_path(cfg.subagent_db_path),
+        wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
+        retain_days=cfg.subagent_retain_runs_days,
+    )
     app.subagent_runtime = SubagentRuntime(
         build_child=app.agent_factory or app._make_subagent,
         active=app.subagent_active,
         default_provider=cfg.subagent_default_provider,
+        max_depth=cfg.subagent_max_depth,
         idle_timeout=cfg.tasks_subagent_inactivity_timeout_seconds,
         max_runtime=cfg.tasks_subagent_execution_timeout_seconds,
+        store=app.subagent_store,
     )
     subagent_feature = build_subagent_feature(app.subagent_runtime)
     app._install_builtin_feature(subagent_feature.definition)
@@ -3943,6 +4060,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     # File-backed Agent definitions are only sources. Their live visibility is
     # provided below by Feature-owned preset contributions.
     from crew.agent.subagent import build_subagent_tools
+    from crew.agent.subagent.runtime import BatchSchedulePolicy
 
     # Wiki：由 Product Feature Bundle 统一拥有 Store、Service、Tools、Context
     # 与后台任务。Bundle 的兼容模式在同步 build_app 中立即激活，使旧 CLI、
@@ -4046,6 +4164,12 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         background_capacity=lambda: len(app._subagent_bg_tasks) < cfg.subagent_max_concurrent,
         on_collected=app._subagent_notifications.remove,
         preset_registry=app.agent_presets,
+        batch_policy=BatchSchedulePolicy.from_config(cfg),
+        max_batch_items=cfg.subagent_max_batch_items,
+        summary_defaults={
+            "min_chars": cfg.subagent_summary_min_chars,
+            "retries": cfg.subagent_summary_retries,
+        },
     )
 
     # Cron 数据平面在停用后仍保留，Scheduler/Tools/Context 则由同一

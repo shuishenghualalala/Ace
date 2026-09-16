@@ -281,16 +281,23 @@ class SubagentResult:
         return diagnostic
 
     def to_legacy_dict(self, *, agent: str = "") -> dict[str, Any]:
-        """Return the stable JSON shape consumed by existing subagent tools."""
+        """Return the stable JSON shape consumed by existing subagent tools.
+
+        ``stop_reason``/``timeout_kind`` 是阶段 B 新增字段（只增不改）：旧
+        ``status`` 语义保持不变，消费方按需取用六态结局词汇。
+        """
 
         result: dict[str, Any] = {
             "agent": agent,
             "status": self.status,
+            "stop_reason": self.stop_reason,
             "summary": self.summary,
             "duration_seconds": round(self.duration_seconds, 2),
             "tool_calls": self.tool_calls,
             "last_tool": self.last_tool,
         }
+        if self.timeout_kind:
+            result["timeout_kind"] = self.timeout_kind
         return result
 
 

@@ -606,6 +606,58 @@ def test_features_subagent_runtime_policy_is_loaded_and_validated(tmp_path: Path
     assert load_config(config_path=str(invalid_path)).subagent_delegation_mode == "explicit"
 
 
+def test_subagent_stage_b_defaults_and_features_section(tmp_path: Path):
+    """阶段 B 扁平键默认值与 features.subagent 段覆盖。"""
+    cfg = load_config()
+    assert cfg.subagent_max_depth == 3
+    assert cfg.subagent_allow_nested is False
+    assert cfg.subagent_max_batch_items == 128
+    assert cfg.subagent_launch_initial == 5
+    assert cfg.subagent_launch_interval_ms == 700
+    assert cfg.subagent_rate_backoff_base_seconds == 3.0
+    assert cfg.subagent_rate_backoff_factor == 2.0
+    assert cfg.subagent_rate_max_retries == 6
+    assert cfg.subagent_rate_recover_seconds == 180.0
+    assert cfg.subagent_summary_min_chars == 200
+    assert cfg.subagent_summary_retries == 1
+    assert cfg.subagent_retain_runs_days == 30
+    assert cfg.subagent_db_path.endswith("subagent.db")
+
+    config_path = _write_config(
+        tmp_path,
+        {
+            "features": {
+                "subagent": {
+                    "max_depth": 2,
+                    "allow_nested": True,
+                    "launch_ramp": {"initial": 3, "interval_ms": 250},
+                    "rate_limit": {
+                        "backoff_base_seconds": 1.5,
+                        "backoff_factor": 3.0,
+                        "max_retries": 4,
+                        "recover_seconds": 60.0,
+                    },
+                    "summary_min_chars": 120,
+                    "summary_retries": 2,
+                    "retain_runs_days": 7,
+                }
+            }
+        },
+    )
+    cfg = load_config(config_path=str(config_path))
+    assert cfg.subagent_max_depth == 2
+    assert cfg.subagent_allow_nested is True
+    assert cfg.subagent_launch_initial == 3
+    assert cfg.subagent_launch_interval_ms == 250
+    assert cfg.subagent_rate_backoff_base_seconds == 1.5
+    assert cfg.subagent_rate_backoff_factor == 3.0
+    assert cfg.subagent_rate_max_retries == 4
+    assert cfg.subagent_rate_recover_seconds == 60.0
+    assert cfg.subagent_summary_min_chars == 120
+    assert cfg.subagent_summary_retries == 2
+    assert cfg.subagent_retain_runs_days == 7
+
+
 def test_example_template_targets_features_namespace():
     """example 模板已收敛为 features.* 唯一布局（P2-1 第二步）。
 

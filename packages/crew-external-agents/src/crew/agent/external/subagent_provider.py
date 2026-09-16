@@ -115,10 +115,12 @@ class _ExternalRunController:
         *,
         run_id: str,
         on_done: Callable[[], None],
+        run_log: Any | None = None,
     ) -> None:
         self._external_run = external_run
         self._run_id = run_id
         self._on_done = on_done
+        self._run_log = run_log
         self._started_at = time.perf_counter()
         self._text_parts: list[str] = []
         self._tool_calls = 0
@@ -146,6 +148,8 @@ class _ExternalRunController:
     async def _consume(self) -> SubagentResult:
         stop_reason = "completed"
         diagnostic = ""
+        if self._run_log is not None:
+            self._run_log.turn_start()
         try:
             async for event in self._external_run.stream():
                 event_diagnostic = self._fold_event(event)
@@ -181,6 +185,14 @@ class _ExternalRunController:
             self._notify_done()
 
         joined = "".join(self._text_parts)
+        if self._run_log is not None:
+            # 记账 turn 边界：结局用 dsh 词汇（refusal 记 blocked），交卷文本
+            # 进 output/final；与进程内 provider 共用同一条折叠入口。
+            self._run_log.turn_end(
+                "blocked" if stop_reason == "refusal" else stop_reason
+            )
+            if joined and stop_reason == "completed":
+                self._run_log.output_final(joined)
         successful = stop_reason == "completed"
         structured: dict[str, Any] = {}
         if self._usage:
@@ -359,6 +371,7 @@ class ExternalDelegationProvider:
             external_run,
             run_id=run_id,
             on_done=lambda: self._runs.discard(controller),
+            run_log=request.runtime_options.get("run_log"),
         )
         self._runs.add(controller)
         result_task = controller.start()

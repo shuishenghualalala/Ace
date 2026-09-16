@@ -20,10 +20,14 @@ from crew.agent.subagent.feature import (
     build_subagent_feature,
 )
 from crew.agent.subagent.runtime import (
+    BatchSchedulePolicy,
     LegacySubagentBackgroundRuntime,
+    RunLogRecorder,
     SubagentRuntime,
     fold_result,
+    fold_run_outcome,
     fold_subagent_result,
+    looks_rate_limited,
 )
 from crew.agent.subagent.service import (
     DuplicateProviderError,
@@ -51,8 +55,19 @@ from crew.agent.subagent.policy import (
     SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
     apply_model_capability_policy,
     apply_preset_tool_policy,
+    delegation_blocked_toolsets,
     normalize_policy_names,
     resolve_subagent_tool_filter,
+)
+from crew.agent.subagent.context import (
+    ParentDeliveryState,
+    SubagentNotificationQueue,
+    SubagentNotificationRouter,
+)
+from crew.agent.subagent.store import (
+    SUBAGENT_SCHEMA_FEATURE,
+    SUBAGENT_SCHEMA_VERSION,
+    SubagentStore,
 )
 from crew.agent.subagent.tools import (
     SUBAGENT_TOOLSET,
@@ -65,6 +80,17 @@ from crew.agent.subagent.tools import (
 )
 
 __all__ = [
+    "SUBAGENT_SCHEMA_VERSION",
+    "SUBAGENT_SCHEMA_FEATURE",
+    "SubagentStore",
+    "SubagentNotificationRouter",
+    "SubagentNotificationQueue",
+    "ParentDeliveryState",
+    "delegation_blocked_toolsets",
+    "looks_rate_limited",
+    "fold_run_outcome",
+    "RunLogRecorder",
+    "BatchSchedulePolicy",
     "SubagentDefinition",
     "parse_definition",
     "to_preset_contribution",

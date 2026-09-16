@@ -289,6 +289,8 @@ async def test_in_process_provider_applies_supported_request_options():
 
     assert result.stop_reason == "completed"
     assert captured == [{
+        # 阶段 B：深度账本值随 spec 下发（子级工具可见性按深度计算）
+        "_delegation_depth": 1,
         "toolsets": None,
         "tools": ["file_read"],
         "model": "fast",
@@ -399,14 +401,15 @@ async def test_runtime_cleanup_failure_does_not_overwrite_terminal_result():
         (
             SubagentResult(partial_output="delta only"),
             {
-                "agent": "worker", "status": "completed", "summary": "",
+                "agent": "worker", "status": "completed", "stop_reason": "completed",
+                "summary": "",
                 "duration_seconds": 0.0, "tool_calls": 0, "last_tool": "",
             },
         ),
         (
             SubagentResult(stop_reason="error", diagnostic="chunk failure"),
             {
-                "agent": "worker", "status": "error",
+                "agent": "worker", "status": "error", "stop_reason": "error",
                 "summary": "chunk failure\n部分输出：\nchunk failure",
                 "duration_seconds": 0.0, "tool_calls": 0, "last_tool": "",
             },
@@ -414,14 +417,16 @@ async def test_runtime_cleanup_failure_does_not_overwrite_terminal_result():
         (
             SubagentResult(output="truncated", stop_reason="max_tokens"),
             {
-                "agent": "worker", "status": "completed", "summary": "truncated",
+                "agent": "worker", "status": "completed", "stop_reason": "max_tokens",
+                "summary": "truncated",
                 "duration_seconds": 0.0, "tool_calls": 0, "last_tool": "",
             },
         ),
         (
             SubagentResult(output="declined", stop_reason="refusal"),
             {
-                "agent": "worker", "status": "completed", "summary": "declined",
+                "agent": "worker", "status": "completed", "stop_reason": "refusal",
+                "summary": "declined",
                 "duration_seconds": 0.0, "tool_calls": 0, "last_tool": "",
             },
         ),
@@ -535,6 +540,8 @@ def test_legacy_result_shape_remains_exact():
     assert result.to_legacy_dict(agent="worker") == {
         "agent": "worker",
         "status": "completed",
+        # 阶段 B 新增字段（只增不改）：六态结局随旧 status 一并下发
+        "stop_reason": "completed",
         "summary": "answer",
         "duration_seconds": 1.23,
         "tool_calls": 2,

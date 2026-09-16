@@ -123,3 +123,18 @@ forbidden_modules =
     crew.agent.subagent.runtime
     crew.agent.subagent.tools
 allow_indirect_imports = True
+
+[importlinter:contract:subagent-store-boundary]
+name = Subagent store is a persistence leaf, not a feature orchestrator
+type = forbidden
+source_modules =
+    crew.agent.subagent.store
+forbidden_modules =
+    crew.agent.subagent.feature
+    crew.agent.subagent.policy
+    crew.agent.subagent.providers
+    crew.agent.subagent.runtime
+    crew.agent.subagent.tools
+    crew.agent.subagent.context
+    crew.agent.external
+    crew.gateway

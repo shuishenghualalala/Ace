@@ -4,15 +4,21 @@ The runtime is the single preflight and publication boundary for one-shot
 delegations.  Providers execute work; this class validates capabilities,
 assigns the descriptor, and makes disposal observable and idempotent to the
 consumer.
+
+Stage B additions: an append-only run log whose folded outcome is the single
+derivation entry for ``stop_reason``; a persisted depth ledger (monotonic
+lower bound); and a ramped, rate-limit-aware batch scheduler.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import fields
+from dataclasses import asdict, dataclass, fields, replace
 from typing import Any
 
 from crew.agent.subagent.service import (
@@ -42,6 +48,192 @@ _LEGACY_TASK_STATUS = {
     "error": "failed",
 }
 
+# 记账 turn 的合法结局词汇（dsh 事件流同族）：
+# blocked = 审批拒绝/策略阻断；interrupted 与 aborted 同归 cancelled 家族。
+_TURN_END_REASONS = frozenset(
+    {"completed", "aborted", "interrupted", "error", "max_tokens", "blocked"}
+)
+
+
+class RunLogRecorder:
+    """Per-run append-only event log; the persisted run log is its snapshot."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    def append(self, kind: str, data: Mapping[str, Any] | None = None) -> None:
+        self.events.append({"event": kind, "data": dict(data or {})})
+
+    def turn_start(self) -> None:
+        self.append("turn/start")
+
+    def turn_end(self, reason: str) -> None:
+        normalized = str(reason or "").strip().lower().replace("-", "_")
+        if normalized == "timeout":
+            normalized = "timed_out"
+        self.append("turn/end", {"reason": normalized})
+
+    def output_final(self, text: str) -> None:
+        self.append("output/final", {"text": text})
+
+    def run_start(
+        self,
+        *,
+        subagent_id: str,
+        parent_session_id: str,
+        depth: int,
+        mode: str,
+        provider: str,
+    ) -> None:
+        self.append(
+            "run/start",
+            {
+                "subagent_id": subagent_id,
+                "parent_session_id": parent_session_id,
+                "depth": int(depth),
+                "mode": mode,
+                "provider": provider,
+            },
+        )
+
+    def run_settle(
+        self,
+        *,
+        stop_reason: str,
+        diagnostic: str = "",
+        timeout_kind: str | None = None,
+    ) -> None:
+        self.append(
+            "run/settle",
+            {
+                "stop_reason": stop_reason,
+                "diagnostic": diagnostic[:500],
+                "timeout_kind": timeout_kind or "",
+            },
+        )
+
+
+def fold_run_outcome(
+    events: Iterable[Mapping[str, Any]],
+    *,
+    fallback: str = "error",
+) -> str:
+    """Fold the run log into the terminal stop reason (唯一推导入口).
+
+    规则（对齐"日志是真相"）：取最后一次记账 ``turn/end`` 的 reason；
+    ``blocked`` 映射 ``refusal``；``aborted|interrupted`` 映射 ``aborted``；
+    ``max_tokens`` 直通；不可名状按 ``error``。**已记录的 ``error`` 优先于
+    其后的取消**——先失败后取消的算失败。没有任何记账 turn 时退回
+    ``fallback``（调用方给 provider 自报的结局）。超时不在此列：它是
+    运行时按 ``timeout_kind`` 生成的结论，不由 turn 结局推导。
+    """
+
+    last_reason: str | None = None
+    error_recorded = False
+    for item in events:
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("event") != "turn/end":
+            continue
+        data = item.get("data") or {}
+        reason = str(data.get("reason") or "").strip().lower().replace("-", "_")
+        if reason == "timeout":
+            reason = "timed_out"
+        if reason not in _TURN_END_REASONS:
+            reason = "error"
+        if reason == "error":
+            error_recorded = True
+        last_reason = reason
+    if last_reason is None:
+        return fallback
+    if last_reason in {"aborted", "interrupted"} and error_recorded:
+        return "error"
+    if last_reason == "interrupted":
+        return "aborted"
+    if last_reason == "blocked":
+        return "refusal"
+    if last_reason == "timed_out":
+        # 超时应由运行时按 timeout_kind 生成；出现在 turn 结局里按 error 复核
+        return "error"
+    return last_reason
+
+
+# 限流识别启发式：诊断文本命中即视为瞬时限流（可重试）。配额耗尽是终态，
+# 不与 429 混同——它不该被无限重排。
+_RATE_LIMIT_MARKERS = (
+    "429",
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "rate-limited",
+    "too many requests",
+    "too_many_requests",
+)
+
+
+def looks_rate_limited(diagnostic: str) -> bool:
+    text = str(diagnostic or "").strip().lower()
+    if not text:
+        return False
+    if "quota" in text and "429" not in text:
+        return False
+    return any(marker in text for marker in _RATE_LIMIT_MARKERS)
+
+
+def summary_policy_from_spec(
+    spec: Mapping[str, Any] | None,
+    floor: Mapping[str, int] | None,
+) -> dict[str, int] | None:
+    """摘要兜底策略：preset 声明覆盖全局默认；min_chars 或 retries 为 0 即关闭。"""
+
+    preset = spec.get("_preset_spec") if isinstance(spec, Mapping) else None
+    source = preset if isinstance(preset, Mapping) else (spec or {})
+    base = {
+        "min_chars": int((floor or {}).get("min_chars", 0) or 0),
+        "retries": int((floor or {}).get("retries", 0) or 0),
+    }
+    if source.get("summary_min_chars") is not None:
+        base["min_chars"] = max(0, int(source["summary_min_chars"]))
+    if source.get("summary_retries") is not None:
+        base["retries"] = max(0, int(source["summary_retries"]))
+    if base["min_chars"] <= 0 or base["retries"] <= 0:
+        return None
+    return base
+
+
+@dataclass(frozen=True, slots=True)
+class BatchSchedulePolicy:
+    """Batch launch pacing and rate-limit recovery knobs (all durations seconds)."""
+
+    max_concurrent: int = 3
+    initial_burst: int = 5
+    launch_interval: float = 0.7
+    backoff_base: float = 3.0
+    backoff_factor: float = 2.0
+    max_retries: int = 6
+    shrink_interval: float = 2.0
+    recover_interval: float = 180.0
+
+    @classmethod
+    def from_config(cls, cfg: Any) -> "BatchSchedulePolicy":
+        return cls(
+            max_concurrent=max(1, int(getattr(cfg, "subagent_max_concurrent", 3))),
+            initial_burst=max(1, int(getattr(cfg, "subagent_launch_initial", 5))),
+            launch_interval=max(
+                0.0, float(getattr(cfg, "subagent_launch_interval_ms", 700)) / 1000.0
+            ),
+            backoff_base=max(
+                0.0, float(getattr(cfg, "subagent_rate_backoff_base_seconds", 3.0))
+            ),
+            backoff_factor=max(
+                1.0, float(getattr(cfg, "subagent_rate_backoff_factor", 2.0))
+            ),
+            max_retries=max(0, int(getattr(cfg, "subagent_rate_max_retries", 6))),
+            recover_interval=max(
+                0.0, float(getattr(cfg, "subagent_rate_recover_seconds", 180.0))
+            ),
+        )
+
 
 class SubagentRuntime:
     """Validate and dispatch one-shot requests to named providers."""
@@ -58,6 +250,7 @@ class SubagentRuntime:
         active: Any | None = None,
         idle_timeout: float = 120.0,
         max_runtime: float = 1800.0,
+        store: Any | None = None,
     ) -> None:
         if provider_registry is not None and providers is not None:
             raise ValueError("provide either provider_registry or providers, not both")
@@ -70,6 +263,7 @@ class SubagentRuntime:
         if not self.default_provider:
             raise ValueError("default_provider must not be empty")
         self.max_depth = self._validate_non_negative_int(max_depth, "max_depth")
+        self.store = store
         self._runs: dict[str, SubagentRun] = {}
         self._closed = False
 
@@ -152,6 +346,7 @@ class SubagentRuntime:
         if request is None:
             raise ValueError("subagent start requires a request")
         start_request = coerce_start_request(request)
+        start_request = self._apply_depth_ledger(start_request)
         selected_provider = (
             provider_name
             or (provider if isinstance(provider, str) else "")
@@ -201,15 +396,41 @@ class SubagentRuntime:
             descriptor=descriptor,
             runtime_options=runtime_options,
         )
+        recorder = None
+        if isinstance(runtime_options, Mapping):
+            candidate_log = runtime_options.get("run_log")
+            if isinstance(candidate_log, RunLogRecorder):
+                recorder = candidate_log
+        if recorder is None:
+            recorder = RunLogRecorder()
+        recorder.run_start(
+            subagent_id=subagent_id,
+            parent_session_id=start_request.parent_session_id,
+            depth=descriptor.delegation_depth,
+            mode=start_request.lifecycle,
+            provider=selected_provider,
+        )
+        self._persist_publication(
+            descriptor,
+            start_request=start_request,
+            events=list(recorder.events),
+        )
         try:
             run = await provider_impl.start(resolved)
         except SubagentError:
+            self._settle_persisted_failure(subagent_id, events=list(recorder.events))
             raise
         except Exception as exc:  # noqa: BLE001 - provider setup is pre-publication
+            self._settle_persisted_failure(
+                subagent_id,
+                events=list(recorder.events),
+                diagnostic=str(exc),
+            )
             raise SubagentPublicationError(
                 f'failed to publish subagent "{label}": {exc}',
             ) from exc
         if not isinstance(run, SubagentRun):
+            self._settle_persisted_failure(subagent_id, events=list(recorder.events))
             raise SubagentPublicationError(
                 f'provider "{selected_provider}" returned an invalid subagent run',
             )
@@ -247,6 +468,8 @@ class SubagentRuntime:
             raise ValueError("pass either lease or lease_factory, not both")
         if lease_factory is not None:
             lease = lease_factory()
+        recorder = RunLogRecorder()
+        options.setdefault("run_log", recorder)
 
         async def execute_once() -> SubagentResult:
             run = await self.start(
@@ -255,19 +478,279 @@ class SubagentRuntime:
                 provider_name=provider_name,
                 runtime_options=options,
             )
+            subagent_id = (
+                run.descriptor.subagent_id if run.descriptor is not None else run.id
+            )
             try:
                 result = await run.result
-                return result if isinstance(result, SubagentResult) else fold_result(result)
+            except asyncio.CancelledError:
+                await self._dispose_and_settle(
+                    run,
+                    subagent_id,
+                    recorder=recorder,
+                    fallback_diag="已取消",
+                )
+                raise
+            except Exception as exc:  # noqa: BLE001 - infra failure still settles the log
+                await self._dispose_and_settle(
+                    run,
+                    subagent_id,
+                    recorder=recorder,
+                    fallback_diag=str(exc),
+                )
+                raise
+            try:
+                outcome = (
+                    result
+                    if isinstance(result, SubagentResult)
+                    else fold_result(result)
+                )
+                return self._settle_completed(
+                    subagent_id,
+                    outcome,
+                    recorder=recorder,
+                )
             finally:
                 try:
                     await run.dispose()
                 except Exception:  # noqa: BLE001 - cleanup never replaces the outcome
                     log.exception("关闭子智能体运行 %s 失败", run.id)
+                self._close_edge_quietly(subagent_id)
 
         if lease is None:
             return await execute_once()
         async with lease:
             return await execute_once()
+
+    async def execute_batch(
+        self,
+        items: Iterable[
+            tuple[StartRequest | Mapping[str, Any], Mapping[str, Any] | None]
+        ],
+        *,
+        policy: BatchSchedulePolicy | None = None,
+        now_fn: Callable[[], float] | None = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+    ) -> list[SubagentResult]:
+        """Execute a batch with launch ramp, rate-limit backoff and stable order.
+
+        调度语义：首发立即放 ``initial_burst`` 个，此后每 ``launch_interval``
+        放 1 个；并发受容量（初始 ``max_concurrent``）约束。识别为限流的结果
+        不落槽——条目按指数退避重排（同一请求原样重放，不要求父级重写简报），
+        容量收缩（进入限流时取已成功起跑数、此后按 ``shrink_interval`` 再降，
+        下限 1），``recover_interval`` 无新限流才 +1 恢复；重试超过
+        ``max_retries`` 或该条目已是唯一未完成槽时按失败落槽（防死等）。
+        结果按原始索引定序聚合。``now_fn``/``sleep`` 可注入假时钟做确定性
+        时序测试。
+        """
+
+        schedule = policy or BatchSchedulePolicy()
+        now_fn = now_fn or time.monotonic
+        sleep = sleep or asyncio.sleep
+        materialized = list(items)
+        total = len(materialized)
+        results: list[SubagentResult | None] = [None] * total
+        if total == 0:
+            return []
+
+        @dataclass(slots=True)
+        class _Item:
+            index: int
+            request: StartRequest | Mapping[str, Any]
+            options: Mapping[str, Any] | None
+            retry_count: int = 0
+            retry_ready_at: float = 0.0
+
+        pending: deque[_Item] = deque(
+            _Item(index, request_item, options)
+            for index, (request_item, options) in enumerate(materialized)
+        )
+        in_flight: dict[asyncio.Task[SubagentResult], _Item] = {}
+        wake = asyncio.Event()
+        capacity = max(1, int(schedule.max_concurrent))
+        launched_total = 0
+        last_launch_at = float("-inf")
+        successful_launches = 0
+        rate_limit_mode = False
+        last_rate_limit_at: float | None = None
+        last_shrink_at: float | None = None
+        last_recover_at: float | None = None
+        rate_launch_gate: float | None = None
+
+        def unfinished_slots() -> int:
+            return sum(1 for slot in results if slot is None)
+
+        def enter_rate_limit_mode(now: float) -> None:
+            nonlocal capacity, rate_limit_mode, rate_launch_gate
+            nonlocal last_rate_limit_at, last_shrink_at
+            if not rate_limit_mode:
+                # 进入限流：容量取此前成功起跑数，随后立即先收缩 1。
+                rate_limit_mode = True
+                capacity = max(1, successful_launches)
+                capacity = max(1, capacity - 1)
+                last_shrink_at = now
+            elif (
+                last_shrink_at is None
+                or now - last_shrink_at >= schedule.shrink_interval
+            ):
+                capacity = max(1, capacity - 1)
+                last_shrink_at = now
+            gate_base = now + schedule.backoff_base
+            rate_launch_gate = (
+                gate_base
+                if rate_launch_gate is None
+                else max(rate_launch_gate, gate_base)
+            )
+            last_rate_limit_at = now
+
+        def requeue(item: _Item, now: float) -> None:
+            delay = schedule.backoff_base * (
+                schedule.backoff_factor ** max(0, item.retry_count - 1)
+            )
+            item.retry_ready_at = now + delay
+            pending.appendleft(item)
+
+        async def run_item(item: _Item) -> SubagentResult:
+            try:
+                return await self.execute(
+                    item.request,
+                    runtime_options=item.options,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - isolate one batch item
+                return SubagentResult(stop_reason="error", diagnostic=str(exc))
+
+        def on_done(task: asyncio.Task[SubagentResult]) -> None:
+            wake.set()
+
+        try:
+            while True:
+                now = now_fn()
+                # 1) 收割已完成任务
+                for task in list(in_flight):
+                    if not task.done():
+                        continue
+                    item = in_flight.pop(task)
+                    try:
+                        result = task.result()
+                    except asyncio.CancelledError:
+                        results[item.index] = SubagentResult(
+                            stop_reason="aborted", diagnostic="已取消"
+                        )
+                        continue
+                    if looks_rate_limited(result.diagnostic):
+                        item.retry_count += 1
+                        # 两条终止路径：重试超上限；或该条目已是唯一未完成槽
+                        # （继续独自重排无法推进批次，防死等）。
+                        only_unfinished = (
+                            unfinished_slots() == 1 and not pending and not in_flight
+                        )
+                        hard_cap = item.retry_count > schedule.max_retries
+                        if hard_cap or only_unfinished:
+                            results[item.index] = result
+                        else:
+                            requeue(item, now)
+                            enter_rate_limit_mode(now)
+                            log.info(
+                                "批量条目 %d 疑似限流，第 %d 次重排（容量 %d）",
+                                item.index,
+                                item.retry_count,
+                                capacity,
+                            )
+                    else:
+                        successful_launches += 1
+                        results[item.index] = result
+                if all(slot is not None for slot in results):
+                    break
+
+                # 2) 容量恢复：限流静默足够久才 +1，逐次间隔 recover_interval
+                if (
+                    rate_limit_mode
+                    and capacity < schedule.max_concurrent
+                    and last_rate_limit_at is not None
+                ):
+                    reference = max(
+                        last_rate_limit_at, last_recover_at or float("-inf")
+                    )
+                    if now - reference >= schedule.recover_interval:
+                        capacity += 1
+                        last_recover_at = now
+                        # 恢复即放行发射闸门；条目级重试就绪时间仍独立生效。
+                        rate_launch_gate = None
+
+                # 3) 发射：并发 < 容量 且 过爬坡闸门 与 限流闸门 且 条目重试就绪
+                while pending and len(in_flight) < capacity:
+                    now = now_fn()
+                    if launched_total >= schedule.initial_burst:
+                        if now - last_launch_at < schedule.launch_interval:
+                            break
+                    if (
+                        rate_limit_mode
+                        and rate_launch_gate is not None
+                        and now < rate_launch_gate
+                    ):
+                        break
+                    ready = next(
+                        (
+                            entry
+                            for entry in pending
+                            if entry.retry_ready_at <= now
+                        ),
+                        None,
+                    )
+                    if ready is None:
+                        break
+                    pending.remove(ready)
+                    launched_total += 1
+                    last_launch_at = now
+                    task = asyncio.get_running_loop().create_task(run_item(ready))
+                    in_flight[task] = ready
+                    task.add_done_callback(on_done)
+                if all(slot is not None for slot in results):
+                    break
+
+                # 4) 等待：任一完成事件 或 下一个时间闸门
+                wake.clear()
+                now = now_fn()
+                wakeups: list[float] = []
+                if pending:
+                    if (
+                        launched_total >= schedule.initial_burst
+                        and schedule.launch_interval > 0
+                    ):
+                        wakeups.append(last_launch_at + schedule.launch_interval)
+                    if rate_limit_mode and rate_launch_gate is not None:
+                        wakeups.append(rate_launch_gate)
+                    for entry in pending:
+                        if entry.retry_ready_at > now:
+                            wakeups.append(entry.retry_ready_at)
+                delay = min(wakeups) - now if wakeups else None
+                waiters = {
+                    asyncio.ensure_future(wake.wait()),
+                }
+                if delay is not None and delay > 0:
+                    waiters.add(asyncio.ensure_future(sleep(delay)))
+                if len(waiters) == 1 and not in_flight and delay is None:
+                    # 无在途、无闸门、仍有 pending —— 条目全部未就绪且无唤醒源
+                    # 是不可达态（重试就绪时间必在 wakeups 里）；防御性让步。
+                    await asyncio.sleep(0)
+                    continue
+                done_waiters, _ = await asyncio.wait(
+                    waiters, return_when=asyncio.FIRST_COMPLETED
+                )
+                for waiter in waiters - done_waiters:
+                    waiter.cancel()
+        except asyncio.CancelledError:
+            for task in in_flight:
+                task.cancel()
+            if in_flight:
+                await asyncio.gather(*in_flight, return_exceptions=True)
+            raise
+
+        return [slot if slot is not None else SubagentResult(
+            stop_reason="error", diagnostic="批次调度提前结束"
+        ) for slot in results]
 
     async def execute_many(
         self,
@@ -277,38 +760,11 @@ class SubagentRuntime:
         *,
         max_concurrent: int,
     ) -> list[SubagentResult]:
-        """Execute independent requests with bounded, order-stable concurrency.
+        """Compatibility entry: bounded, order-stable batch with default pacing."""
 
-        A request that fails before publication becomes an error result for its
-        own batch slot; it never cancels sibling work. External cancellation of
-        the whole batch still propagates normally.
-        """
-
-        materialized = list(items)
-        semaphore = asyncio.Semaphore(max(1, int(max_concurrent)))
-
-        async def execute_one(
-            request_item: StartRequest | Mapping[str, Any],
-            options: Mapping[str, Any] | None,
-        ) -> SubagentResult:
-            async with semaphore:
-                try:
-                    return await self.execute(
-                        request_item,
-                        runtime_options=options,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # noqa: BLE001 - isolate one batch item
-                    return SubagentResult(
-                        stop_reason="error",
-                        diagnostic=str(exc),
-                    )
-
-        return list(
-            await asyncio.gather(
-                *(execute_one(request_item, options) for request_item, options in materialized)
-            )
+        return await self.execute_batch(
+            items,
+            policy=BatchSchedulePolicy(max_concurrent=max(1, int(max_concurrent))),
         )
 
     # Explicit alias makes the intent clear to callers migrating from a
@@ -332,6 +788,168 @@ class SubagentRuntime:
         self._runs.clear()
 
     close = aclose
+
+    async def _dispose_and_settle(
+        self,
+        run: SubagentRun,
+        subagent_id: str,
+        *,
+        recorder: RunLogRecorder,
+        fallback_diag: str,
+    ) -> None:
+        """Cancel/exception path: dispose first, then fold whatever was logged.
+
+        provider 的 finally 会把 turn 结局记入日志；dispose 等待其收尾后，
+        结算仍走同一条折叠入口，不留 running 悬行。
+        """
+
+        try:
+            await run.dispose()
+        except BaseException:  # noqa: BLE001 - 取消传播优先，结算尽力而为
+            log.debug("取消路径关闭子智能体运行 %s 失败", subagent_id, exc_info=True)
+        self._close_edge_quietly(subagent_id)
+        outcome = SubagentResult(
+            stop_reason=fold_run_outcome(recorder.events, fallback="error"),
+            diagnostic=fallback_diag,
+        )
+        self._settle_completed(subagent_id, outcome, recorder=recorder)
+
+    def _apply_depth_ledger(self, request: StartRequest) -> StartRequest:
+        """Depth ledger: the persisted parent depth is a monotonic lower bound.
+
+        持久值只抬高不降低——恢复/重放的子会话即便带着归零的运行时深度，
+        也无法借道持久层冒充顶层继续嵌套。
+        """
+
+        if self.store is None or not request.parent_session_id:
+            return request
+        parent_depth = max(0, int(request.parent_depth or 0))
+        try:
+            parent_run = self.store.get_run(request.parent_session_id)
+        except Exception:  # noqa: BLE001 - 账本读失败不阻断委派，按运行时值走
+            log.exception("深度账本读取失败 parent=%s", request.parent_session_id)
+            return request
+        if parent_run is not None:
+            parent_depth = max(parent_depth, int(parent_run.get("depth") or 0))
+        if parent_depth == request.parent_depth:
+            return request
+        return replace(request, parent_depth=parent_depth)
+
+    def _persist_publication(
+        self,
+        descriptor: SubagentDescriptor,
+        *,
+        start_request: StartRequest,
+        events: list[dict[str, Any]],
+    ) -> None:
+        """唯一发布点：runs 行 + descriptor(first-wins) + 父子边。"""
+
+        if self.store is None:
+            return
+        try:
+            self.store.record_run_start(
+                subagent_id=descriptor.subagent_id,
+                parent_session_id=start_request.parent_session_id,
+                owner_account_id=start_request.owner_account_id or "",
+                workspace_id=start_request.workspace_id,
+                depth=descriptor.delegation_depth,
+                mode=start_request.lifecycle,
+                provider=descriptor.provider,
+                label=descriptor.label,
+                events=events,
+            )
+            self.store.write_descriptor(asdict(descriptor))
+            if start_request.parent_session_id:
+                self.store.open_edge(
+                    descriptor.subagent_id, start_request.parent_session_id
+                )
+        except SubagentError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 落库失败=发布失败，fail-loud
+            raise SubagentPublicationError(
+                f'failed to persist subagent "{descriptor.label}": {exc}',
+            ) from exc
+
+    def _settle_persisted_failure(
+        self,
+        subagent_id: str,
+        *,
+        events: list[dict[str, Any]],
+        diagnostic: str = "",
+    ) -> None:
+        """发布后、provider 起跑失败：已落库的 run 按失败结算，不留 running 悬行。"""
+
+        if self.store is None:
+            return
+        try:
+            self.store.settle_run(
+                subagent_id,
+                stop_reason="error",
+                events=[
+                    *events,
+                    {"event": "run/settle", "data": {
+                        "stop_reason": "error",
+                        "diagnostic": diagnostic[:500],
+                        "timeout_kind": "",
+                    }},
+                ],
+            )
+            self.store.close_edge(subagent_id)
+        except Exception:  # noqa: BLE001 - 结算尽力而为，不掩盖原始失败
+            log.exception("失败结算落库失败 subagent_id=%s", subagent_id)
+
+    def _settle_completed(
+        self,
+        subagent_id: str,
+        result: SubagentResult,
+        *,
+        recorder: RunLogRecorder,
+    ) -> SubagentResult:
+        """Fold the run log, persist the terminal record, return the result.
+
+        折叠是结局的唯一推导入口：日志可复算的 ``stop_reason`` 优先于
+        provider 自报值；超时由运行时按 ``timeout_kind`` 生成（不进入折叠）。
+        """
+
+        folded = fold_run_outcome(recorder.events, fallback=result.stop_reason)
+        if result.timeout_kind:
+            stop_reason = "timed_out"
+        else:
+            stop_reason = folded
+        settled = result
+        if settled.stop_reason != stop_reason:
+            settled = replace(settled, stop_reason=stop_reason)  # type: ignore[arg-type]
+            log.warning(
+                "run log 折叠结局与 provider 自报不一致（%s -> %s）subagent_id=%s",
+                result.stop_reason,
+                stop_reason,
+                subagent_id,
+            )
+        if self.store is None:
+            return settled
+        recorder.run_settle(
+            stop_reason=settled.stop_reason,
+            diagnostic=settled.diagnostic,
+            timeout_kind=settled.timeout_kind,
+        )
+        try:
+            self.store.settle_run(
+                subagent_id,
+                stop_reason=settled.stop_reason,
+                timeout_kind=settled.timeout_kind,
+                events=recorder.events,
+            )
+        except Exception:  # noqa: BLE001 - 结算落库失败不吞掉子级结果
+            log.exception("run 结算落库失败 subagent_id=%s", subagent_id)
+        return settled
+
+    def _close_edge_quietly(self, subagent_id: str) -> None:
+        if self.store is None:
+            return
+        try:
+            self.store.close_edge(subagent_id)
+        except Exception:  # noqa: BLE001
+            log.debug("关闭父子边失败 subagent_id=%s", subagent_id, exc_info=True)
 
     def _validate_request(
         self,
@@ -424,6 +1042,7 @@ class LegacySubagentBackgroundRuntime:
         on_done: Callable[[str, dict[str, Any]], None] | None = None,
         on_collected: Callable[[str, str, str], None] | None = None,
         capacity: Callable[[], bool] | None = None,
+        summary_floor: Mapping[str, int] | None = None,
     ) -> None:
         self._service = service
         self._tasks = tasks
@@ -433,6 +1052,7 @@ class LegacySubagentBackgroundRuntime:
         self._on_done = on_done
         self._on_collected = on_collected
         self._capacity = capacity
+        self._summary_floor = dict(summary_floor or {})
         self._events: dict[str, asyncio.Event] = {}
 
     def launch(
@@ -528,6 +1148,9 @@ class LegacySubagentBackgroundRuntime:
             trusted = spec.get("_preset_spec")
             if isinstance(trusted, dict):
                 options["trusted_preset_spec"] = dict(trusted)
+        summary_policy = summary_policy_from_spec(spec, self._summary_floor)
+        if summary_policy is not None:
+            options["summary_policy"] = summary_policy
 
         result: dict[str, Any]
         try:
@@ -572,23 +1195,30 @@ class LegacySubagentBackgroundRuntime:
                 "tool_calls": 0,
             }
         finally:
+            # 先路由通知、后落库触发恢复回合：update_status 的 on_completion
+            # 会调度恢复轮，若它先于入队执行，恢复轮会 drain 到空队列。
+            if self._on_done is not None and parent_session_id:
+                try:
+                    result["task_id"] = task_id
+                    result["owner_account_id"] = owner_account_id
+                    self._on_done(parent_session_id, result)
+                except Exception:  # noqa: BLE001 - completion notification is best effort
+                    log.debug("后台子任务完成回调失败 task_id=%s", task_id, exc_info=True)
             try:
+                # 落库形状保持旧例：通知用注入键（task_id/owner）只进回调不进库。
+                persisted = {
+                    key: value
+                    for key, value in result.items()
+                    if key not in {"task_id", "owner_account_id"}
+                }
                 self._tasks.update_status(
                     task_id,
                     _LEGACY_TASK_STATUS.get(result["status"], "failed"),
-                    json.dumps(result, ensure_ascii=False),
+                    json.dumps(persisted, ensure_ascii=False),
                 )
             except Exception:  # noqa: BLE001 - notification still settles
                 log.exception("后台子任务落库失败 task_id=%s", task_id)
             done_event.set()
-
-        if self._on_done is not None and parent_session_id:
-            try:
-                result["task_id"] = task_id
-                result["owner_account_id"] = owner_account_id
-                self._on_done(parent_session_id, result)
-            except Exception:  # noqa: BLE001 - completion notification is best effort
-                log.debug("后台子任务完成回调失败 task_id=%s", task_id, exc_info=True)
 
     async def collect(
         self,
@@ -676,8 +1306,12 @@ fold_subagent_result = fold_result
 
 
 __all__ = [
+    "BatchSchedulePolicy",
     "LegacySubagentBackgroundRuntime",
+    "RunLogRecorder",
     "SubagentRuntime",
     "fold_result",
+    "fold_run_outcome",
     "fold_subagent_result",
+    "looks_rate_limited",
 ]

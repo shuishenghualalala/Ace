@@ -199,6 +199,15 @@ class Agent(ABC):
         yield  # pragma: no cover  (标记为 async generator)
 
 
+def _depth_of(value: Any) -> int:
+    """Depth values are runtime bookkeeping, never caller authority: negatives
+    and non-integers collapse to zero instead of raising."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
 @dataclass(frozen=True, slots=True)
 class ChildAgentRequest:
     """Typed request for constructing one one-shot child Agent.
@@ -222,6 +231,7 @@ class ChildAgentRequest:
     context_tags: tuple[str, ...] = ()
     disclosure_mode: str = "progressive"
     agent_id: str = "subagent"
+    depth: int = 0
 
     @classmethod
     def from_mapping(
@@ -285,6 +295,7 @@ class ChildAgentRequest:
                 or "progressive"
             ),
             agent_id=str(value.get("agent_id") or "subagent").strip() or "subagent",
+            depth=_depth_of(value.get("_delegation_depth", value.get("depth"))),
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -305,6 +316,7 @@ class ChildAgentRequest:
             "context_tags": list(self.context_tags),
             "disclosure_mode": self.disclosure_mode,
             "agent_id": self.agent_id,
+            "_delegation_depth": self.depth,
         }
         if self.preset_spec is not None:
             payload["_preset_spec"] = dict(self.preset_spec)

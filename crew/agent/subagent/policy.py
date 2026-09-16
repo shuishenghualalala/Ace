@@ -34,6 +34,31 @@ SUBAGENT_BLOCKED_TOOLSETS = frozenset(
 SUBAGENT_BLOCKED_TOOLSET_PREFIXES = ("feishu",)
 
 
+# 子智能体可见的委派工具集：allow_nested 且深度未达上限时才从黑名单放行。
+# 其余条目（外援/记忆/cron/任务面板）在任何深度都不放行——子级不能借外援
+# 通道绕过审批升级（结构性收窄，D16）。
+_NESTING_ALLOWED_TOOLSETS = frozenset({"subagent", "subagent.preset"})
+
+
+def delegation_blocked_toolsets(
+    depth: int,
+    *,
+    allow_nested: bool,
+    max_depth: int = 3,
+) -> frozenset[str]:
+    """Compute the child-side blocked toolset snapshot for one depth.
+
+    真值表：``allow_nested=false`` 或 ``depth >= max_depth`` → 全量黑名单
+    （与旧行为逐字一致）；否则只保留非委派条目。可见性是运行时策略而不是
+    开关藏刀——深度由账本单调记账，超限的子级看得见工具但启动会被拒。
+    """
+
+    base = set(SUBAGENT_BLOCKED_TOOLSETS)
+    if allow_nested and 0 <= int(depth) < int(max_depth):
+        base -= _NESTING_ALLOWED_TOOLSETS
+    return frozenset(base)
+
+
 def normalize_policy_names(value: Any) -> list[str] | None:
     """Normalize a model-supplied toolset/tool value without changing meaning.
 
@@ -163,6 +188,7 @@ __all__ = [
     "SUBAGENT_BLOCKED_TOOLSET_PREFIXES",
     "apply_model_capability_policy",
     "apply_preset_tool_policy",
+    "delegation_blocked_toolsets",
     "filter_model_capabilities",
     "normalize_policy_names",
     "resolve_subagent_tool_filter",

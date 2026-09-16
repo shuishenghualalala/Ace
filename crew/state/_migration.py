@@ -146,6 +146,17 @@ WIKI_LEARNING_DB_TABLES: tuple[str, ...] = (
     "wiki_learning_mastery_events",
     "wiki_learning_mastery_state",
 )
+# subagent 域 3 表（阶段 B 新增，清单外独立批）：runs/edges/descriptors 归
+# crew_data/subagent.db，装配点在 App 组合根构造 SubagentStore。域内零外键
+# （edges 只留普通字符串引用，不建跨域外键），整表复制顺序无关。三表均不在
+# OWNER_TABLE_LABELS，与 external/team/sites 同显式豁免语义：owner 归一由
+# SubagentStore 写入路径自带（owner 缺省空串行级可见），表清单供
+# copy_legacy_feature_rows 与结构登记使用。
+SUBAGENT_DB_TABLES: tuple[str, ...] = (
+    "subagent_runs",
+    "subagent_edges",
+    "subagent_descriptors",
+)
 
 
 def primary_key_columns(conn: sqlite3.Connection, table: str) -> list[str]:

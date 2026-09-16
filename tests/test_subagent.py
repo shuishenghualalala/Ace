@@ -137,15 +137,22 @@ def test_delegate_task_schema():
     schema = build_delegate_task_schema()
     props = schema["parameters"]["properties"]
     assert "goal" in props and "tasks" in props and "toolsets" in props
-    # goal / tasks 二选一：顶层不强制 goal，纯 tasks 批量模式才能过校验
+    # goal / tasks / prompt_template+items 三选一：顶层不强制字段
     assert schema["parameters"]["required"] == []
     # skills 与 toolsets 并列，单任务/批量子任务都暴露
     assert "skills" in props
     assert "skills" in props["tasks"]["items"]["properties"]
+    # 阶段 B：同构批量模板形态
+    assert "prompt_template" in props and "items" in props
+    assert "{item}" in props["prompt_template"]["description"]
 
 
 def test_model_visible_subagent_schemas_match_stage_a_baseline():
-    """Canonical snapshots keep all three public tool schemas byte-stable."""
+    """Canonical snapshots keep all three public tool schemas byte-stable.
+
+    阶段 B 修订：delegate_task 描述与参数新增同构批量（prompt_template/items，
+    只增不改），基线哈希随之更新；run_agent / collect_subagent 保持阶段 A 原值。
+    """
 
     schemas = {
         "delegate_task": build_delegate_task_schema(),
@@ -153,7 +160,7 @@ def test_model_visible_subagent_schemas_match_stage_a_baseline():
         "collect_subagent": build_collect_subagent_schema(),
     }
     expected = {
-        "delegate_task": "7715845d76be853211c34ff9995e7cee13a35575f40bb3ee830dc5781c4acc8a",
+        "delegate_task": "f0af92b7d3b9ed8feb24ed632436d65f0f4284e2f7abb4b0b67472e741f539c9",
         "run_agent": "0eaececd75209360c0e7648b2b234e3d3ce6e3c384d15ae0c66d4decc981414d",
         "collect_subagent": "28d7eb9404d0aae0bd105134da96787e4526c476bb6354b8c056339f8af4b2bd",
     }

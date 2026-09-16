@@ -54,7 +54,10 @@ Provider.start
 SubagentRun.dispose（并发与重复调用均只清理一次）
            │
            ▼
-工具适配器输出旧 JSON：agent/status/summary/duration_seconds/tool_calls/last_tool</code></pre>
+结算：run log 折叠 stop_reason（唯一推导入口）→ runs/edges/descriptors 落库
+           │
+           ▼
+工具适配器输出旧 JSON：agent/status/stop_reason/summary/duration_seconds/tool_calls/last_tool</code></pre>
   <p class="callout">错误通道与模型输出分离：诊断进入 <code>diagnostic</code>，子智能体真正说出的内容进入 <code>output</code>/<code>partial_output</code>。清理失败只记录日志，不覆盖已确定的业务结局。</p>
 
   <h2>3. 核心契约</h2>
@@ -111,9 +114,11 @@ product.external-agents Feature ──────┘
 
   <h2>8. 已知边界与后续阶段</h2>
   <ul>
-    <li>阶段 B/C：Feature 生命周期所有权、持久化 run/descriptor、事件与配置命名空间收敛。</li>
-    <li>阶段 D/E：continuable、通信控制面、同构批量、摘要兜底、fork 与结构化输出。</li>
-    <li>当前后台任务持久化仍由兼容适配器承接；语义执行、并发与超时已从 handler 移入 Runtime/Provider。</li>
+    <li>阶段 B 已交付：run log 与六态结局折叠、三张自有表（runs/edges/descriptors，first-wins descriptor + 软删除边 + 保留期清理）、深度账本（单调下界 + allow_nested 可见性真值表）、通知四态路由（消失丢弃/拆除只入队/忙 steer/空闲等恢复轮，内容单通道）、批量调度（爬坡 + 限流退避 + 定序聚合）与同构模板批量（prompt_template + items）、摘要兜底（preset 可覆盖阈值）。</li>
+    <li>阶段 C：Feature 生命周期所有权收口——工具/路由/事件/配置命名空间进 Scope，store 由 App 直构迁入 Bundle。</li>
+    <li>阶段 D/E：continuable（持久子身份、Activation、控制面工具、冷恢复）、fork、结构化输出、preset 收尾与 UI 贡献。</li>
+    <li>限流重试目前是"同一简报重放"（进程内 one-shot 子级无可复用轮次）；子级上下文复用型重试随阶段 D continuable 引入。</li>
+    <li>后台任务持久化仍由兼容适配器承接；语义执行、并发、超时与调度已从 handler 移入 Runtime/Provider。</li>
   </ul>
 
   <h2>9. 变更记录</h2>

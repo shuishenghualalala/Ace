@@ -231,6 +231,32 @@ features:
     # explicit：仅在用户、项目指令或技能明确要求委派/并行时使用子智能体；
     # proactive：主智能体可在确有收益时主动委派。
     delegation_mode: explicit
+    # 委派深度上限（单调记账：持久值只抬高不降低，恢复不回退）。
+    max_depth: 3
+    # 子智能体是否可见委派工具（默认关闭 = 与旧版行为一致；开启即允许
+    # 受深度与权限双重约束的嵌套委派）。
+    allow_nested: false
+    # 同构批量（prompt_template + items）单次条数上限。
+    max_batch_items: 128
+    # 批量爬坡：首发立即放 initial 个，此后每 interval_ms 放 1 个。
+    launch_ramp:
+      initial: 5
+      interval_ms: 700
+    # 限流退避：疑似 429/限流的条目按指数退避重排（同一简报重放），
+    # 并发容量收缩、静默 recover_seconds 后逐档恢复；max_retries 为单条目
+    # 重试上限（防无限重排）。配额耗尽属终态，不参与重试。
+    rate_limit:
+      backoff_base_seconds: 3.0
+      backoff_factor: 2.0
+      max_retries: 6
+      recover_seconds: 180
+    # 交卷兜底：正常完成但短于 min_chars 时追加一轮扩写（最多 retries 次）；
+    # 因 token 上限截断不视为交卷。preset 可用 summary_min_chars /
+    # summary_retries 覆盖全局值。
+    summary_min_chars: 200
+    summary_retries: 1
+    # run/descriptor/edge 保留期（天），超期在启动时清理。
+    retain_runs_days: 30
   # 子 agent（delegate_task / run_agent）的超时在 tasks.subagent 配置；
   # 子 agent 运行时策略统一放在 features.subagent；超时仍由 tasks.subagent 管理。
   tasks:

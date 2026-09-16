@@ -20,8 +20,10 @@ from crew.agent.prompt_builder import SUBAGENT_HANDOFF_GUIDANCE
 from crew.agent.subagent.providers import InProcessSpawnProvider
 from crew.agent.subagent.registry import SubagentRegistry
 from crew.agent.subagent.runtime import (
+    BatchSchedulePolicy,
     LegacySubagentBackgroundRuntime,
     SubagentRuntime,
+    summary_policy_from_spec,
 )
 from crew.agent.subagent.service import StartRequest, SubagentService
 from crew.features import AgentPresetBinding, AgentPresetRegistry, AgentPresetUnavailableError
@@ -124,6 +126,7 @@ _EPHEMERAL_PROMPT = (
 def build_delegate_task_schema(
     max_concurrent: int = 3,
     max_tasks: int = 8,
+    max_batch_items: int = 128,
 ) -> dict[str, Any]:
     """Build the delegate_task tool schema with current runtime limits.
 
@@ -178,10 +181,14 @@ def build_delegate_task_schema(
             "Each subagent gets its own conversation and toolset. "
             "Only the final summary is returned — intermediate tool results "
             "never enter your context window.\n\n"
-            "TWO MODES (one of 'goal' or 'tasks' is required):\n"
+            "THREE MODES (exactly one of 'goal' / 'tasks' / 'prompt_template+items'):\n"
             "1. Single task: provide 'goal' (+ optional context, toolsets, skills)\n"
-            f"2. Batch (parallel): provide 'tasks' array with up to {max_tasks} "
-            f"items; up to {max_concurrent} run concurrently.\n\n"
+            f"2. Heterogeneous batch: provide 'tasks' array with up to {max_tasks} "
+            f"items; up to {max_concurrent} run concurrently.\n"
+            f"3. Homogeneous batch: provide 'prompt_template' (must contain the "
+            f"placeholder {{item}}) plus 'items' (up to {max_batch_items} strings); "
+            "one subagent runs per item with the placeholder substituted — use it "
+            "when the same workflow applies to a list of targets.\n\n"
             "WHEN TO USE delegate_task:\n"
             "- Reasoning-heavy subtasks (debugging, code review, research synthesis)\n"
             "- Tasks that would flood your context with intermediate data\n"
@@ -192,20 +199,22 @@ def build_delegate_task_schema(
             "- Trivial mechanical work you can do in one or two tool calls\n\n"
             "IMPORTANT:\n"
             "- Subagents have NO memory of your conversation. Pass all relevant "
-            "info (file paths, error messages, constraints) via the 'context' field.\n"
+            "info (file paths, error messages, constraints) via the 'context' field "
+            "or inside the template.\n"
             "- Subagent summaries are SELF-REPORTS, not verified facts. A subagent "
             "that claims \"file written\" or \"search complete\" may be wrong. "
             "For critical operations, verify the result yourself before relying on it.\n"
             "- Subagents CANNOT delegate further (no nested subagents).\n"
-            "- Results are always returned as an array, one entry per task.\n\n"
+            "- Results are always returned as an array, one entry per task, in the "
+            "original order.\n\n"
             "BACKGROUND MODE:\n"
             "- Set run_in_background=true to launch a SINGLE task asynchronously: "
             "returns task_id immediately, you can keep working with the user, and the "
             "result is auto-injected into your next turn (or fetch via "
             "collect_subagent(task_id)).\n"
-            "- Background is single-task only: combining 'tasks' (batch) with "
-            "run_in_background is rejected -- delegate one goal at a time, or drop "
-            "run_in_background to run the batch synchronously."
+            "- Background is single-task only: combining 'tasks' or 'items' (batch) "
+            "with run_in_background is rejected -- delegate one goal at a time, or "
+            "drop run_in_background to run the batch synchronously."
         ),
         "parameters": {
             "type": "object",
@@ -217,14 +226,14 @@ def build_delegate_task_schema(
                         "Optional: run a single task asynchronously in background; "
                         "returns task_id immediately. Result is auto-injected into the "
                         "next turn or via collect_subagent. Rejected when combined with "
-                        "'tasks' (batch)."
+                        "'tasks'/'items' (batch)."
                     ),
                 },
                 "tasks": {
                     "type": "array",
                     "description": (
-                        f"Batch mode: tasks to run in parallel (up to {max_tasks} "
-                        f"items; up to {max_concurrent} run concurrently). "
+                        f"Heterogeneous batch mode: tasks to run in parallel (up to "
+                        f"{max_tasks} items; up to {max_concurrent} run concurrently). "
                         "Each gets its own subagent with isolated context. "
                         "When provided, top-level goal/context/toolsets/skills are ignored."
                     ),
@@ -234,10 +243,26 @@ def build_delegate_task_schema(
                         "required": ["goal"],
                     },
                 },
+                "prompt_template": {
+                    "type": "string",
+                    "description": (
+                        "Homogeneous batch mode: goal template containing the "
+                        "placeholder {item}. Each entry of 'items' is substituted "
+                        "into the template to build that subagent's goal. "
+                        "Mutually exclusive with 'goal' and 'tasks'."
+                    ),
+                },
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        f"One entry per subagent for the template expansion "
+                        f"(up to {max_batch_items}). Results keep this order."
+                    ),
+                },
             },
-            # goal / tasks 二选一：顶层不强制 goal，批量模式（仅传 tasks）才能过校验。
-            # 空输入的兜底在 handler 里（goal 空且无 tasks -> tool_error）。
-            # 用于 delegate_tool.py:2799（顶层 required: []）。
+            # goal / tasks / prompt_template+items 三选一：顶层不强制字段，
+            # 空输入与互斥校验的兜底在 handler 里（tool_error）。
             "required": [],
         },
     }
@@ -374,6 +399,34 @@ def _compose_goal(goal: str, context: str | None) -> str:
     return goal
 
 
+def _expand_template_items(
+    prompt_template: Any,
+    items: Any,
+    *,
+    max_batch_items: int,
+) -> list[str]:
+    """同构批量：模板必须含 {item} 占位、条目数受限、展开后重复即拒绝。"""
+
+    template = str(prompt_template or "").strip()
+    if not template:
+        raise ToolError("prompt_template 不能为空")
+    if "{item}" not in template:
+        raise ToolError("prompt_template 必须包含 {item} 占位符（每个 item 会替换它）")
+    if not isinstance(items, list) or not items:
+        raise ToolError("items 必须是非空字符串数组")
+    if any(not isinstance(item, str) or not item.strip() for item in items):
+        raise ToolError("items 的每一项都必须是非空字符串")
+    if len(items) > max_batch_items:
+        raise ToolError(
+            f"items 超出同构批量上限：max {max_batch_items}, got {len(items)}。"
+            "请分批委派。"
+        )
+    expanded = [template.replace("{item}", item) for item in items]
+    if len({goal.strip() for goal in expanded}) != len(expanded):
+        raise ToolError("模板展开后的任务目标存在重复项，请修正 items 或模板")
+    return expanded
+
+
 def _normalize_skills(skills: Any) -> list[str]:
     """把 delegate_task 的 skills 参数归一化为 slug 列表。
 
@@ -500,12 +553,16 @@ async def _execute_child(
     max_runtime: float,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     preset_binding: AgentPresetBinding | None = None,
+    summary_floor: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     options: dict[str, Any] = {
         "idle_timeout": idle_timeout,
         "max_runtime": max_runtime,
         "progress_callback": progress_callback,
     }
+    summary_policy = summary_policy_from_spec(spec, summary_floor)
+    if summary_policy is not None:
+        options["summary_policy"] = summary_policy
     if preset_binding is not None:
         options["lease_factory"] = lambda: preset_binding.acquire_lease(
             f"agent-preset:{label}"
@@ -602,8 +659,14 @@ async def _run_children(
     max_runtime: float,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     runtime: SubagentService | None = None,
+    batch_policy: BatchSchedulePolicy | None = None,
+    summary_floor: dict[str, int] | None = None,
 ) -> str:
-    """并发跑多个子 agent，结构化汇总（JSON）。specs 每项含 label/goal_text/spec。"""
+    """并发跑多个子 agent，结构化汇总（JSON）。specs 每项含 label/goal_text/spec。
+
+    批量走语义 runtime 的调度器（爬坡 + 限流退避 + 定序聚合）；无调度器时
+    回退 ``execute_many``（仅并发上限）。
+    """
     parent_session_id = current_session_id.get() or ""
     if runtime is None:
         if build_child is None:
@@ -621,6 +684,9 @@ async def _run_children(
             "max_runtime": max_runtime,
             "progress_callback": progress_callback,
         }
+        summary_policy = summary_policy_from_spec(item["spec"], summary_floor)
+        if summary_policy is not None:
+            options["summary_policy"] = summary_policy
         binding = item.get("preset_binding")
         if binding is not None:
             options["lease_factory"] = lambda binding=binding, label=item["label"]: (
@@ -638,10 +704,14 @@ async def _run_children(
             ),
             options,
         ))
-    results = await runtime.execute_many(
-        requests,
-        max_concurrent=max_concurrent,
-    )
+    execute_batch = getattr(runtime, "execute_batch", None)
+    if batch_policy is not None and callable(execute_batch):
+        results = await execute_batch(requests, policy=batch_policy)
+    else:
+        results = await runtime.execute_many(
+            requests,
+            max_concurrent=max_concurrent,
+        )
     return tool_result({
         "results": [
             result.to_legacy_dict(agent=item["label"])
@@ -668,13 +738,20 @@ def build_subagent_tools(
     background_capacity: Callable[[], bool] | None = None,
     on_collected: Callable[[str, str, str], None] | None = None,
     preset_registry: AgentPresetRegistry | None = None,
+    batch_policy: "BatchSchedulePolicy | None" = None,
+    max_batch_items: int = 128,
+    summary_defaults: dict[str, int] | None = None,
 ) -> None:
     """注册 delegate_task / run_agent / collect_subagent 工具到 toolset='subagent'。
 
     后台异步（run_agent 的 run_in_background / frontmatter background）需要 tasks +
-    launch_background；未提供时自动降级为同步执行。
+    launch_background；未提供时自动降级为同步执行。``batch_policy`` 控制批量的
+    爬坡与限流退避（缺省仅并发上限）；``summary_defaults`` 提供摘要兜底的全局
+    默认阈值（preset 可按名覆盖）。
     """
     subagent_service = service
+    schedule = batch_policy or BatchSchedulePolicy(max_concurrent=max_concurrent)
+    summary_floor = dict(summary_defaults or {})
     backgrounds = (
         LegacySubagentBackgroundRuntime(
             subagent_service,
@@ -685,6 +762,7 @@ def build_subagent_tools(
             on_done=on_background_done,
             on_collected=on_collected,
             capacity=background_capacity,
+            summary_floor=summary_floor,
         )
         if tasks is not None and launch_background is not None
         else None
@@ -692,15 +770,39 @@ def build_subagent_tools(
 
     # ---- delegate_task：自定义临时委派 ----
     async def handle_delegate_task(args: dict[str, Any]) -> str:
-        raw_tasks = args.get("tasks")
-        if isinstance(raw_tasks, list) and raw_tasks:
-            task_list = raw_tasks
+        template_mode = (
+            args.get("prompt_template") is not None or args.get("items") is not None
+        )
+        if template_mode:
+            if args.get("goal") or args.get("tasks"):
+                raise ToolError(
+                    "prompt_template+items 与 goal/tasks 互斥：同构批量用模板，"
+                    "异构批量用 tasks，单任务用 goal。"
+                )
+            expanded = _expand_template_items(
+                args.get("prompt_template"),
+                args.get("items"),
+                max_batch_items=max_batch_items,
+            )
+            task_list = [
+                {
+                    "goal": goal,
+                    "context": args.get("context"),
+                    "toolsets": args.get("toolsets"),
+                    "skills": args.get("skills"),
+                }
+                for goal in expanded
+            ]
         else:
-            task_list = [{
-                "goal": args.get("goal"),
-                "context": args.get("context"),
-                "toolsets": args.get("toolsets"),
-            }]
+            raw_tasks = args.get("tasks")
+            if isinstance(raw_tasks, list) and raw_tasks:
+                task_list = raw_tasks
+            else:
+                task_list = [{
+                    "goal": args.get("goal"),
+                    "context": args.get("context"),
+                    "toolsets": args.get("toolsets"),
+                }]
 
         if max_tasks and len(task_list) > max_tasks:
             # 超限是硬性拒绝（用于 守卫即报错）→ 抛 ToolError，registry 标记 is_error
@@ -770,6 +872,8 @@ def build_subagent_tools(
                 "subagent_last_chunk": progress.get("last_chunk", ""),
             }),
             runtime=subagent_service,
+            batch_policy=schedule,
+            summary_floor=summary_floor,
         )
 
     registry.register(
@@ -778,6 +882,7 @@ def build_subagent_tools(
         schema=build_delegate_task_schema(
             max_concurrent=max_concurrent,
             max_tasks=max_tasks,
+            max_batch_items=max_batch_items,
         ),
         handler=handle_delegate_task,
         is_async=True,
@@ -887,6 +992,8 @@ def build_subagent_tools(
             idle_timeout=idle_timeout,
             max_runtime=max_runtime,
             runtime=subagent_service,
+            batch_policy=schedule,
+            summary_floor=summary_floor,
         )
 
     # ---- collect_subagent：取回后台子任务结果 ----

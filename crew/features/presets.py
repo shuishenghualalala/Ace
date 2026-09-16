@@ -53,6 +53,8 @@ class AgentPresetContribution:
     reserved_toolsets: tuple[str, ...] = ()
     reserved_skills: tuple[str, ...] = ()
     provider: str = "inprocess-spawn"
+    summary_min_chars: int | None = None
+    summary_retries: int | None = None
     model: str = "inherit"
     max_iterations: int | None = None
     background: bool = False
@@ -78,6 +80,11 @@ class AgentPresetContribution:
             raise ValueError("agent preset disclosure mode must be progressive or direct")
         if self.max_iterations is not None:
             object.__setattr__(self, "max_iterations", int(self.max_iterations))
+        for field_name in ("summary_min_chars", "summary_retries"):
+            value = getattr(self, field_name)
+            object.__setattr__(
+                self, field_name, None if value is None else max(0, int(value))
+            )
         object.__setattr__(
             self,
             "provider",
@@ -100,6 +107,8 @@ class AgentPresetContribution:
             "reserved_toolsets": list(self.reserved_toolsets),
             "reserved_skills": list(self.reserved_skills),
             "provider": self.provider,
+            "summary_min_chars": self.summary_min_chars,
+            "summary_retries": self.summary_retries,
             "model": self.model,
             "max_iterations": self.max_iterations,
             "background": self.background,
