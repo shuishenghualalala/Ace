@@ -39,6 +39,10 @@ runtime:
   # 历史配对完整，回合继续推进，不会被一个挂死的工具冻结。0 = 关闭看门狗。
   # 用户点「停止」时另有 interrupt 取消语义（优雅窗口后强取消，输出 aborted by user）。
   tool_execution_timeout_seconds: 600
+  # 整回合 deadline（秒）：回合累计时长上限。到点走与 interrupt 相同的优雅收尾
+  # （中断标记 + 回合正常结束，历史/输出含 "deadline exceeded" 标记），在途工具
+  # 走 aborted 语义；0 = 不限（默认关闭）。
+  turn_deadline_seconds: 0
   # 独立线程 health 服务端口（桌面端优先探测，业务事件循环卡超时仍能感知进程
   # 活性）。0 表示自动（gateway 端口 + 1）；显式配置（如 8010）则覆盖默认值。
   health_port: 0

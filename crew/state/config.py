@@ -350,6 +350,10 @@ class Config:
     # 单工具执行段看门狗：超时取消该工具并合成 "timed out after X.Xs" 作为正常
     # tool output 回灌模型（tool_call/tool output 配对完整，回合继续推进），0=关闭。
     tool_execution_timeout_seconds: float = 600.0
+    # 整回合 deadline（秒）：回合累计时长上限。到点走与 interrupt 相同的优雅收尾
+    # （中断标记 + 回合正常结束，历史/输出含 "deadline exceeded" 标记），在途工具
+    # 走 aborted 语义；0 = 不限（默认关闭）。
+    turn_deadline_seconds: float = 0.0
 
     # --- mcp / cron ---
     mcp_servers: dict[str, Any] = field(default_factory=dict)  # 外部 MCP server 配置
@@ -1810,6 +1814,13 @@ def load_config(config_path: str | Path | None = None) -> Config:
         cfg.tool_execution_timeout_seconds = _as_float(
             runtime.get("tool_execution_timeout_seconds", cfg.tool_execution_timeout_seconds),
             cfg.tool_execution_timeout_seconds,
+        )
+        cfg.turn_deadline_seconds = max(
+            0.0,
+            _as_float(
+                runtime.get("turn_deadline_seconds", cfg.turn_deadline_seconds),
+                cfg.turn_deadline_seconds,
+            ),
         )
         health_port = _as_int_or_none(runtime.get("health_port", cfg.health_port))
         if health_port is not None:

@@ -1676,6 +1676,7 @@ class CrewApp:
             max_delegate_tool_calls=cfg.team_max_concurrent_children,
             plan_manager=plan_manager,
             tool_execution_timeout_seconds=cfg.tool_execution_timeout_seconds,
+            turn_deadline_seconds=cfg.turn_deadline_seconds,
         )
         kwargs: dict = dict(
             provider=provider,

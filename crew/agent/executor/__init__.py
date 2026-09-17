@@ -62,6 +62,7 @@ def create_executor(
     plan_manager: Any = None,
     stream_continuation_max: int = 3,
     tool_execution_timeout_seconds: float = 600.0,
+    turn_deadline_seconds: float = 0.0,
 ) -> AgentExecutor:
     """按 kind 创建执行内核。
 
@@ -87,6 +88,7 @@ def create_executor(
             plan_manager=plan_manager,
             stream_continuation_max=stream_continuation_max,
             tool_execution_timeout_seconds=tool_execution_timeout_seconds,
+            turn_deadline_seconds=turn_deadline_seconds,
         )
     if kind == "client":
         return ClientExecutor(config)

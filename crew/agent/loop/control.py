@@ -101,6 +101,17 @@ class TurnControl:
         with self._lock:
             return self._interrupt_message
 
+    def drain_interrupt_message(self) -> str | None:
+        """取出并清空中断消息；无则返回 None。
+
+        executor 在回合收尾时调用：消息作为历史标记消费一次即清空，
+        配合 reset() 双保险，不泄漏到下一回合。
+        """
+        with self._lock:
+            message = self._interrupt_message
+            self._interrupt_message = None
+            return message
+
     def reset(self) -> None:
         """新一轮开始时清空状态（SingleAgent 复用同一 control 实例时调用）。"""
         with self._lock:

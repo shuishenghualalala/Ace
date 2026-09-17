@@ -144,6 +144,9 @@ def _estimate_prompt_overhead(ctx: ExecutionContext, view: list, tools: list | N
     return {"system": sys_chars // 4, "reminder": rem_chars // 4, "tools": tool_chars // 4}
 
 
+_INTERRUPT_MARKER_TEMPLATE = "[回合中断] {message}"
+
+
 def _inject_steer(messages: list[Message], steer: str) -> None:
     """把 steer 文本注入对话：优先贴到最近一条 tool 结果后；无 tool 则作为 user 追加。
 
@@ -182,6 +185,7 @@ class BuiltinExecutor(AgentExecutor):
         stream_continuation_max: int = 2,
         stream_retry_jitter: bool = True,
         tool_execution_timeout_seconds: float = 600.0,
+        turn_deadline_seconds: float = 0.0,
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -202,6 +206,8 @@ class BuiltinExecutor(AgentExecutor):
         self.stream_retry_jitter = stream_retry_jitter
         # 执行段看门狗（秒）：经 ToolRunner 包裹单工具执行，超时合成 timed-out 输出，0=关闭。
         self.tool_execution_timeout_seconds = max(0.0, float(tool_execution_timeout_seconds or 0.0))
+        # 整回合 deadline（秒）：回合累计时长上限，到点走 interrupt 同款优雅收尾，0=不限。
+        self.turn_deadline_seconds = max(0.0, float(turn_deadline_seconds or 0.0))
         # 用于检测 plan 模式是否刚退出，以便注入一次性 exit reminder。
         self._plan_was_active = False
 
@@ -352,6 +358,28 @@ class BuiltinExecutor(AgentExecutor):
             usage=usage,
         )
 
+    async def _interrupt_notice_chunks(
+        self,
+        control,
+        rid: str,
+        next_seq,
+        ctx: ExecutionContext,
+    ) -> AsyncIterator[ResponseChunk]:
+        """消费 interrupt_message：写历史标记 + status 帧透出（各一次）。
+
+        TurnControl.interrupt(message=...) 的消息此前只存不取；回合收尾时 drain
+        取出并清空（reset() 再兜底，不泄漏到下一回合）。非空时作为一条 user 标记
+        消息追加到 canonical 历史（is_meta=False：落库且下回合进入 LLM 视图，模型
+        据此知晓上轮为何停止），并经既有 status 通道透出给前端。
+        """
+        if control is None:
+            return
+        message = control.drain_interrupt_message()
+        if not message:
+            return
+        ctx.messages.append(Message.user(_INTERRUPT_MARKER_TEMPLATE.format(message=message)))
+        yield ResponseChunk.status_event(rid, message, next_seq())
+
     # ------------------------------------------------------------------ #
     async def execute(self, ctx: ExecutionContext) -> AsyncIterator[ResponseChunk]:
         rid = ctx.request_id
@@ -380,6 +408,44 @@ class BuiltinExecutor(AgentExecutor):
         # 用 None 判而非 `or`，避免 0 被 `or` 当 falsy 跳过。
         max_iter = ctx.max_iterations if ctx.max_iterations is not None else self.max_iterations
         control = ctx.control
+
+        # 整回合 deadline（0=不限）：与 interrupt 共用检查点。到点转成 interrupt
+        # （带 deadline exceeded 消息 + interrupt_event），在途工具随即走上一批次的
+        # aborted 语义，本轮回合按 interrupt 路径优雅收尾，而非异常崩溃。
+        turn_deadline = self.turn_deadline_seconds
+        turn_deadline_started = time.perf_counter()
+
+        def _deadline_hit() -> bool:
+            """deadline 到点则写入 interrupt 并返回 True；未配置/未到点/已有
+            用户 interrupt（消息以用户为准）返回 False。"""
+            if turn_deadline <= 0:
+                return False
+            if time.perf_counter() - turn_deadline_started < turn_deadline:
+                return False
+            if control is not None:
+                if control.interrupted:
+                    return False
+                log.warning(
+                    "整回合 deadline 触发（%.1fs），优雅收尾 session=%s",
+                    turn_deadline,
+                    ctx.session_id,
+                )
+                control.interrupt(
+                    f"deadline exceeded：回合超过整回合时限（{turn_deadline:.0f}s），已自动停止"
+                )
+            return True
+
+        # view token 估算轻缓存：同一迭代内 provisional/overflow 两处全量估算
+        # 合并为一次。key = 消息数 + 末条消息长度；视图在本迭代内不变，下轮消息
+        # 追加自然失配，不会把旧估算错套到新视图上。
+        _view_token_cache: dict[tuple[int, int], int] = {}
+
+        def _cached_view_tokens(messages: list[Message]) -> int:
+            key = (len(messages), len(messages[-1].content) if messages else 0)
+            if key not in _view_token_cache:
+                _view_token_cache.clear()
+                _view_token_cache[key] = estimate_tokens(messages)
+            return _view_token_cache[key]
 
         # Plan 模式 per-turn 收紧：exit_plan_mode 反复失败（plan 文件为空时模型不死心）会
         # 死循环——同一无参工具失败 N 次后才 halt 太晚。plan 激活时临时加严 guardrail 阈值
@@ -470,10 +536,16 @@ class BuiltinExecutor(AgentExecutor):
             used_grace = grace
             grace = False
 
-            # ---- 中断检查（轮初安全点）----
+            # ---- 中断/deadline 检查（轮初安全点）----
             #   空 final：前端不覆盖已流式内容，仅结束本轮（保留之前已生成的部分）。
-            if control is not None and control.interrupted:
-                async for _fc in self._emit_final(rid, next_seq, ctx.session_id, owner_account_id, ""):
+            deadline_now = _deadline_hit()
+            if deadline_now or (control is not None and control.interrupted):
+                async for _nc in self._interrupt_notice_chunks(control, rid, next_seq, ctx):
+                    yield _nc
+                async for _fc in self._emit_final(
+                    rid, next_seq, ctx.session_id, owner_account_id, "",
+                    reason="deadline" if deadline_now else None,
+                ):
                     yield _fc
                 return
 
@@ -505,13 +577,14 @@ class BuiltinExecutor(AgentExecutor):
             )
             prompt_overhead_tokens = max(
                 0,
-                provisional_view.estimated_prompt_tokens() - estimate_tokens(view_messages),
+                provisional_view.estimated_prompt_tokens() - _cached_view_tokens(view_messages),
             )
             if (overflow_mode or overflow_pending) and self.compactor is not None:
                 overflow_pending = False
-                overflow_before = estimate_tokens(view_messages)
+                overflow_before = _cached_view_tokens(view_messages)
                 overflow_count_before = len(view_messages)
                 yield ResponseChunk.compaction_event(rid, True, next_seq())
+                compact_interrupted = False
                 try:
                     from crew.core.runctx import current_owner_account_id
 
@@ -529,12 +602,51 @@ class BuiltinExecutor(AgentExecutor):
                     if _accepts_prefix_kwargs(force_compact):
                         kwargs["system_prompt"] = ctx.system_prompt
                         kwargs["tools"] = original_tools
-                    view_messages = await force_compact(ctx.messages, ctx.session_id, **kwargs)
+                    # compact 段中断检查（前）：已在压缩前被中断则不启动本次压缩。
+                    wait_interrupted = getattr(control, "wait_interrupted", None)
+                    if control is not None and control.interrupted:
+                        compact_interrupted = True
+                    elif control is not None and callable(wait_interrupted):
+                        # 摘要调用与 interrupt 事件竞争：interrupt 先到即取消在途
+                        # 摘要（await 点可被取消，不侵入 compactor 内部流水线），
+                        # 放弃本次压缩走回合收尾。
+                        compact_task = asyncio.create_task(
+                            force_compact(ctx.messages, ctx.session_id, **kwargs)
+                        )
+                        interrupt_task = asyncio.create_task(wait_interrupted())
+                        try:
+                            done, _pending = await asyncio.wait(
+                                {compact_task, interrupt_task},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                        finally:
+                            interrupt_task.cancel()
+                        if compact_task in done:
+                            view_messages = compact_task.result()
+                            # compact 段中断检查（后）：压缩完成前/完成时到达的
+                            # interrupt 同样放弃本次压缩结果，走回合收尾。
+                            if control.interrupted:
+                                compact_interrupted = True
+                        else:
+                            compact_task.cancel()
+                            await asyncio.gather(compact_task, return_exceptions=True)
+                            compact_interrupted = True
+                    else:
+                        view_messages = await force_compact(
+                            ctx.messages, ctx.session_id, **kwargs
+                        )
                 except Exception as exc:  # noqa: BLE001
                     log.warning("force_compact 失败，按原视图发送：%s", exc)
                     view_messages = list(ctx.messages)
                 finally:
                     yield ResponseChunk.compaction_event(rid, False, next_seq())
+                if compact_interrupted:
+                    log.info("压缩期间被 interrupt，放弃本次压缩并收尾 session=%s", ctx.session_id)
+                    async for _nc in self._interrupt_notice_chunks(control, rid, next_seq, ctx):
+                        yield _nc
+                    async for _fc in self._emit_final(rid, next_seq, ctx.session_id, owner_account_id, ""):
+                        yield _fc
+                    return
                 overflow_after = estimate_tokens(view_messages)
                 overflow_count_after = len(view_messages)
                 if overflow_after >= overflow_before and overflow_count_after >= overflow_count_before:
@@ -819,9 +931,10 @@ class BuiltinExecutor(AgentExecutor):
             if reasoning and not result.get("thinking_emitted"):
                 yield ResponseChunk.thinking_event(rid, reasoning, next_seq())
 
-            # ---- 中断检查（模型刚产出后 / 流式被中途打断）----
+            # ---- 中断/deadline 检查（模型刚产出后 / 流式被中途打断）----
             #   带上已生成的半截文本作 final：前端保留、历史持久化，优雅停止。
-            if control is not None and control.interrupted:
+            deadline_now = _deadline_hit()
+            if deadline_now or (control is not None and control.interrupted):
                 if tool_calls:
                     # 中断收尾：未派发的工具调用不写入历史，部分消息只保留文本前缀。
                     tool_calls = []
@@ -836,9 +949,12 @@ class BuiltinExecutor(AgentExecutor):
                         "finish_reason": finish_reason,
                     },
                 )
+                async for _nc in self._interrupt_notice_chunks(control, rid, next_seq, ctx):
+                    yield _nc
                 async for _fc in self._emit_final(
                     rid, next_seq, ctx.session_id, owner_account_id, text,
                     replace_content=content_replaced, usage=result.get("usage"),
+                    reason="deadline" if deadline_now else None,
                 ):
                     yield _fc
                 return
@@ -934,10 +1050,16 @@ class BuiltinExecutor(AgentExecutor):
                     yield _fc
                 return
 
-            # 工具执行后再查一次中断（用户在工具运行期间点了停止）
+            # 工具执行后再查一次中断/deadline（用户在工具运行期间点了停止）
             #   空 final：保留已显示的工具结果与文本，仅结束本轮。
-            if control is not None and control.interrupted:
-                async for _fc in self._emit_final(rid, next_seq, ctx.session_id, owner_account_id, ""):
+            deadline_now = _deadline_hit()
+            if deadline_now or (control is not None and control.interrupted):
+                async for _nc in self._interrupt_notice_chunks(control, rid, next_seq, ctx):
+                    yield _nc
+                async for _fc in self._emit_final(
+                    rid, next_seq, ctx.session_id, owner_account_id, "",
+                    reason="deadline" if deadline_now else None,
+                ):
                     yield _fc
                 return
 
