@@ -21,7 +21,7 @@
 | P1-2.3 追问/权限确认无期限等待 | 已修复 `e99e58e`（`interaction_timeout_seconds` 默认有界 3600s；interrupt 取消联动默认拒绝） |
 | P2-3.1 串行事件入口（Op 队列） | 未做——架构级改造，另立项 |
 | P2-3.2 write-ahead 持久化 / resume | 未做——架构级改造，另立项 |
-| P2-3.3 错误类型化 | 未做——另立项 |
+| P2-3.3 错误类型化 | 已修复 `5080c47`（CrewErrorKind + is_retryable 白名单 + ProviderError kind/status/retry_delay + provider 分类收敛 + Retry-After 解析，ADR-0045）+ `81583a2`（重试消费 retry_delay 封顶 60s、error 帧结构化 kind/retryable/retry_delay、outbound/dispatcher 错误分支类型化） |
 | P2-3.4 沙箱/审批闭环策略 | 未做——另立项 |
 | P2-3.5 asyncio_bridge 死锁陷阱 / time.sleep 残留 / 取消路径 busy-spin | 部分修复：`time.sleep` 收进可注入 `_busy_retry_sleep`（`a8aa51b`）、`_lease_callback` busy-spin 去忙等（`71513d9`）；bridge"调用线程是否循环线程"检测未做 |
 | P3 子 agent 超时收尾顺序写反 | 已修复 `a8aa51b`（先 interrupt 后 aclose） |
@@ -30,6 +30,7 @@
 | P3 delegate_task 批量模式阻塞父回合（不可 steer） | 部分修复：`a8aa51b` 做了单个子任务异常隔离；"父回合等待期间可 steer"未做 |
 | P3 token 全量估算每迭代多次调用 | 已修复 `679ace7`（同迭代内 provisional/overflow 合并为一次，视图失配自然失效） |
 | §7 「智能体运行环境准备中」遮罩链路 | 第一阶段（探针串行化 + 失败分类 + 双阈值 `cccc05e`、遮罩改非阻断状态横幅 `2ffe5a6`）与第二阶段（health 独立线程 + loop_lag_ms 哨兵 `08f746f`、热路径治理 `94b37b5`、看门狗 `4ce7c1b`、hook 线程化 `71513d9`）已修复；第三阶段（per-session 状态机 + 连接即活性 + 可 resume，消灭全局健康状态）另立项 |
+| 清单外遗留：TaskManager 同步写跑在事件循环 | 已修复 `7be86ac`（TaskRuntime 19 个 async 门面方法，事件循环调用点全量迁移：dispatcher / handle_terminal / team delegate_tool / subagent tools / sessions 路由 / history_projection，ADR-0046） |
 
 验证记录：`docs/testing/agent-core-defects-batch-2026-09-17.html`。
 

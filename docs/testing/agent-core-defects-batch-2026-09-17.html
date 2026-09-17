@@ -53,6 +53,18 @@
 <h2>中途引入并已修复的回归（wiki_learning ContextVar 回传）</h2>
 <p><code>71513d9</code> 把同步 hook 回调挪进线程后，曾导致 3 个 <code>tests/test_wiki_learning_plugin.py</code> 用例失败：插件同步 <code>pre_llm_call</code> 钩子内对 ContextVar 的 <code>.set()</code> 发生在线程上下文副本里，无法回传事件循环侧调用方。已由 <code>f8d33e1</code> 修复：<code>_lease_callback</code> 的线程化路径改为 <code>contextvars.copy_context()</code> + 线程内 <code>ctx.run(...)</code> + await 完成后在调用协程里写回有变化的 ContextVar（异常/取消路径不写回）；同步工具 handler 走同一路径，天然覆盖。修复后上述 3 个用例转绿，批次 A 的"不阻塞事件循环 / 取消有界窗口"保护保持不变。</p>
 
+<h2>追加：TaskManager 异步门面 + P2-3.3 错误类型化（2026-09-17 第二阶段）</h2>
+<table>
+<thead><tr><th>提交</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td><code>3c8f140</code></td><td>ADR-0045（错误类型化与重试策略）+ ADR-0046（任务存储异步门面）</td></tr>
+<tr><td><code>7be86ac</code></td><td>TaskRuntime 19 个 async 门面方法；事件循环上的任务存储同步写调用点全量迁移（约 30 处：dispatcher / handle_terminal / team delegate_tool / subagent tools / sessions 路由 / history_projection）；新增 3 个测试（async 等价、并发互斥、ticker 不阻塞回归）</td></tr>
+<tr><td><code>5080c47</code></td><td>CrewErrorKind + RETRYABLE_KINDS 白名单；ProviderError kind/status/retry_delay；provider 分类收敛到 crew/providers/classify.py；Retry-After/body retry_delay 解析；新增 39 个分类矩阵测试</td></tr>
+<tr><td><code>81583a2</code></td><td>builtin 重试段消费 retry_delay（60s 封顶）；error 帧结构化（code=kind + retryable + retry_delay）；outbound/dispatcher 错误分支类型化；新增 10 个测试</td></tr>
+</tbody>
+</table>
+<p>验证：批次1 验收子集 749 passed；批次3 后全量 <code>uv run pytest -q --ignore=tests/security</code> 为 <strong>4171 passed / 3 failed</strong>（3 个均为基线已存在失败，清单见上节，零新增）；<code>ruff check</code> 通过；<code>lint-imports</code> 9 kept / 0 broken。行为变化两处（ADR-0045 裁定）：503 server_overloaded 与欠费 quota_exceeded 不再自动重试；429 usage_limit 经分类器显式 retryable 保留限流退避。</p>
+
 <h2>环境</h2>
 <ul>
 <li>macOS（Apple Silicon），Python 3.13.2（uv 管理），Node/npm（desktop 依赖 worktree 内 <code>desktop/node_modules</code>）。</li>

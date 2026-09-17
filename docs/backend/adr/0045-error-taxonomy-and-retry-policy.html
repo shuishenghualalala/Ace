@@ -21,7 +21,7 @@
 <h2>决定</h2>
 <ul>
 <li><strong>CrewErrorKind 枚举</strong>：<code>crew/core/errors.py</code> 扩展 <code>CrewErrorKind</code>：stream / timeout / context_window_exceeded / usage_limit / quota / server_overloaded / auth / forbidden / unsupported_capability / tool / config / cancelled / internal / unknown。unknown 兜底，枚举穷举保证新错误不会静默落入错误分支。</li>
-<li><strong>统一重试白名单</strong>：<code>CrewError.is_retryable()</code> 按 kind 判定，类级 <code>RETRYABLE_KINDS</code> 常量一处维护。timeout / quota / usage_limit / server_overloaded 可重试；<strong>server_overloaded 标记不可重试</strong>——overloaded 状态下对同一服务重试无意义（压测式重试只会加重过载）。调用点不再各自做类名启发式。</li>
+<li><strong>统一重试白名单</strong>：<code>CrewError.is_retryable()</code> 按 kind 判定，类级 <code>RETRYABLE_KINDS</code> 常量一处维护，仅 stream / timeout / internal 可重试；<strong>server_overloaded 与 quota_exceeded 不可重试</strong>——overloaded 状态下对同一服务重试无意义（压测式重试只会加重过载），欠费重试不会恢复额度；429（usage_limit）由分类器显式携带 <code>retryable=True</code> 保留限流退避语义，是白名单之外的唯一例外。调用点不再各自做类名启发式。</li>
 <li><strong>ProviderError 扩展</strong>：增 <code>kind</code> / <code>status</code> / <code>retry_delay</code>；<code>category</code> 保留为兼容别名（映射到 kind 的同名字符串），旧消费方不破坏。重试时优先使用 <code>retry_delay</code>，指数退避只作为无 retry_delay 时的兜底（封顶）。</li>
 <li><strong>provider 统一分类助手</strong>：openai / anthropic provider 共用一份分类逻辑——HTTP status + 错误体解析为 kind；<code>Retry-After</code> 解析为 retry_delay（<strong>header 优先，body 的 retry_delay 字段兜底</strong>），429 / 503 时随 ProviderError 一并携带。resilience.py 的类名白名单废弃，改读 kind。</li>
 <li><strong>error 帧</strong>：<code>ResponseChunk.error</code> 带 <code>{kind, retryable, retry_delay}</code> 结构化 body（code 参数投入使用），不再只有自由文本。</li>
