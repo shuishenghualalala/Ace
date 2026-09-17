@@ -14,6 +14,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from crew.core.errors import (
+    CrewErrorKind,
     ProviderError,
     contains_image_input,
     is_unsupported_image_input_error,
@@ -27,6 +28,7 @@ from crew.core.types import (
     ToolCall,
     coerce_tool_arguments,
 )
+from crew.providers.classify import classify_provider_error
 from crew.providers.keying import ApiKeyResolver
 from crew.providers.vendors import REASONING_LEVELS, VendorCompat
 from crew.state.logging import llm_trace
@@ -231,73 +233,6 @@ def _messages_for_openai(
     return out
 
 
-def _error_category(exc: Exception) -> str:
-    """将 openai 异常映射为 gateway 出站 error.category。"""
-    # httpx 原生异常优先用 isinstance 判定：openai SDK 流式消费时常让底层
-    # httpx 异常（如 RemoteProtocolError）原样冒泡，类名字符串匹配会漏判。
-    if isinstance(exc, httpx.TimeoutException):
-        return "timeout"
-    if isinstance(exc, httpx.TransportError):  # 含 RemoteProtocolError / ReadError / ConnectError 等
-        return "connection"
-    # openai SDK 常把底层 httpx 断连/超时包成 APIError，原异常挂在 __cause__ 上——
-    # 递归看 cause，并把消息文本也匹配上（"peer closed"/"incomplete chunked read"/"read timed out"）。
-    cause = exc.__cause__
-    if isinstance(cause, httpx.TimeoutException):
-        return "timeout"
-    if isinstance(cause, httpx.TransportError):
-        return "connection"
-    msg = str(exc).lower()
-    if any(s in msg for s in ("read timed out", "timed out", "timeout")):
-        return "timeout"
-    if any(s in msg for s in ("peer closed", "incomplete chunked read", "connection", "read error", "remote protocol")):
-        return "connection"
-    name = type(exc).__name__
-    status = getattr(exc, "status_code", None)
-    if name == "AuthenticationError" or status == 401:
-        return "auth"
-    if name == "PermissionDeniedError" or status == 403:
-        return "forbidden"
-    if name == "RateLimitError" or status == 429:
-        return "rate_limit"
-    if name in ("APITimeoutError", "TimeoutError"):
-        return "timeout"
-    if name == "APIConnectionError":
-        return "connection"
-    if name == "InternalServerError" or (isinstance(status, int) and status >= 500):
-        return "server"
-    return "provider"
-
-
-def _is_retryable(exc: Exception) -> bool:
-    """按异常类型判定是否瞬时错误（可重试）。
-
-    限流 / 超时 / 连接 / 5xx 视为可重试；鉴权、请求非法等不可重试。
-    用类名 + status_code 判定，避免硬依赖 openai 异常类（不同版本路径不一）。
-    httpx 原生异常（流式时 SDK 常原样冒泡）用 isinstance 兜底，避免漏判。
-    openai SDK 包成 APIError 时，看 __cause__ 与消息文本兜底。
-    """
-    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
-        return True
-    cause = exc.__cause__
-    if isinstance(cause, (httpx.TimeoutException, httpx.TransportError)):
-        return True
-    name = type(exc).__name__
-    if name in (
-        "RateLimitError", "APITimeoutError", "APIConnectionError", "InternalServerError",
-        "ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout", "TimeoutException",
-        "RemoteProtocolError", "ConnectError",
-    ):
-        return True
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int) and (status == 429 or status >= 500):
-        return True
-    # 消息文本兜底：SDK 包装后的连接/超时类错误（peer closed / read timed out 等）
-    msg = str(exc).lower()
-    if any(s in msg for s in ("read timed out", "timed out", "peer closed", "incomplete chunked read", "read error", "remote protocol")):
-        return True
-    return False
-
-
 def _provider_error(
     prefix: str,
     exc: Exception,
@@ -308,11 +243,20 @@ def _provider_error(
         request_has_images=contains_image_input(request_messages),
     )
     detail = str(exc) or "<无消息>"
+    if unsupported_image:
+        return ProviderError(
+            f"{prefix}: {detail}",
+            retryable=False,
+            category="unsupported_capability",
+            capability="vision",
+        )
+    c = classify_provider_error(exc)
     return ProviderError(
         f"{prefix}: {detail}",
-        retryable=False if unsupported_image else _is_retryable(exc),
-        category="unsupported_capability" if unsupported_image else _error_category(exc),
-        capability="vision" if unsupported_image else None,
+        retryable=c.retryable,
+        kind=c.kind,
+        status=c.status,
+        retry_delay=c.retry_delay,
     )
 
 
@@ -800,9 +744,11 @@ class OpenAIProvider(LLMProvider):
             # （accumulators 非空且文本极少，说明模型在产工具参数而非正文），不丢半截
             # tool args、不误走文本续写——改为产出 length 截断信号（partial tool_calls
             # 走 _raw 兜底 + finish_reason="length"），交主循环截断自愈（bump-retry +
-            # split-guidance）。仅对可恢复中断（timeout/connection）生效，auth 等不转。
-            recoverable = _is_retryable(exc) and _error_category(exc) in (
-                "timeout", "connection", "server", "rate_limit",
+            # split-guidance）。仅对可恢复中断生效，auth/配额/过载等不转。
+            classification = classify_provider_error(exc)
+            recoverable = classification.retryable and classification.kind in (
+                CrewErrorKind.STREAM, CrewErrorKind.TIMEOUT,
+                CrewErrorKind.INTERNAL, CrewErrorKind.USAGE_LIMIT,
             )
             partial_tools = [
                 acc for acc in tool_call_accumulators.values()

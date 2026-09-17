@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from crew.core.errors import ProviderError
+from crew.core.errors import CONTEXT_OVERFLOW_MARKERS, CrewError, CrewErrorKind
 
 
 # --------------------------------------------------------------------------- #
@@ -96,20 +96,8 @@ def has_truncated_tool_args(tool_calls: Sequence, finish_reason: str | None) -> 
 # --------------------------------------------------------------------------- #
 # 3. 上下文溢出检测
 # --------------------------------------------------------------------------- #
-# 各家 provider 在「上下文超长」时返回的典型报错关键词（小写匹配）。
-CONTEXT_OVERFLOW_MARKERS = (
-    "context length",
-    "context window",
-    "maximum context",
-    "too many tokens",
-    "maximum number of tokens",
-    "reduce the length",
-    "reduce the number of tokens",
-    "string too long",
-    "prompt is too long",
-    "input is too long",
-    "context_length_exceeded",
-)
+# 报错关键词清单收敛在 crew.core.errors，provider 分类（crew.providers.classify）
+# 与这里的溢出检测共用同一份，避免两处漂移。
 
 
 def is_context_overflow(exc: Exception) -> bool:
@@ -141,17 +129,27 @@ STREAM_INTERRUPT_PROMPT = (
 STREAM_INTERRUPT_STATUS_MESSAGE = "模型响应中断，已保留已生成内容"
 
 # 判定：异常是否属于"流式中途可续写"类型
-STREAM_INTERRUPT_RETRYABLE_CATEGORIES = ("timeout", "connection", "rate_limit", "server")
+# 续写要求异常可重试，且 kind 不属于鉴权/配额/取消等「重试无意义」类别。
+STREAM_INTERRUPT_FATAL_KINDS = frozenset({
+    CrewErrorKind.AUTH,
+    CrewErrorKind.FORBIDDEN,
+    CrewErrorKind.CANCELLED,
+    CrewErrorKind.CONTEXT_WINDOW_EXCEEDED,
+    CrewErrorKind.UNSUPPORTED_CAPABILITY,
+    CrewErrorKind.CONFIG,
+    CrewErrorKind.TOOL,
+    CrewErrorKind.UNKNOWN,
+})
 
 
 def is_stream_interrupt_recoverable(exc: Exception) -> bool:
     """流式中断后是否可尝试续写（保留已 emit 文本再发一次请求）。
 
-    仅当异常是 retryable 且不是 auth/forbidden 等不可重试类型时才续写。
-    对非 ProviderError 的异常（如 httpx.ReadTimeout），按类名推断。
+    CrewError 实例走类型化判定（is_retryable + kind）；裸异常（httpx / SDK
+    异常未经 provider 包装直接冒泡）退回类名启发式兜底。
     """
-    if isinstance(exc, ProviderError):
-        return exc.retryable and exc.category in STREAM_INTERRUPT_RETRYABLE_CATEGORIES
+    if isinstance(exc, CrewError):
+        return exc.is_retryable() and exc.kind not in STREAM_INTERRUPT_FATAL_KINDS
     name = type(exc).__name__
     return name in (
         "ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout",

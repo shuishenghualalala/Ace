@@ -15,6 +15,7 @@ from crew.core.errors import (
     is_unsupported_image_input_error,
 )
 from crew.core.interfaces import LLMProvider
+from crew.providers.classify import classify_provider_error
 from crew.providers.keying import ApiKeyResolver
 from crew.core.types import (
     IMAGE_INPUT_UNAVAILABLE_NOTICE,
@@ -43,28 +44,6 @@ def _current_session() -> str:
 def _endpoint(base_url: str | None) -> str:
     base = (base_url or _DEFAULT_BASE_URL).rstrip("/")
     return f"{base}/messages" if base.endswith("/v1") else f"{base}/v1/messages"
-
-
-def _category(exc: Exception, status: int | None = None) -> str:
-    if isinstance(exc, (httpx.TimeoutException,)):
-        return "timeout"
-    if isinstance(exc, httpx.TransportError):
-        return "connection"
-    if status == 401:
-        return "auth"
-    if status == 403:
-        return "forbidden"
-    if status == 429:
-        return "rate_limit"
-    if isinstance(status, int) and status >= 500:
-        return "server"
-    return "provider"
-
-
-def _retryable(exc: Exception, status: int | None = None) -> bool:
-    return isinstance(exc, (httpx.TimeoutException, httpx.TransportError)) or status == 429 or (
-        isinstance(status, int) and status >= 500
-    )
 
 
 def _text_blocks(text: str) -> list[dict[str, Any]]:
@@ -306,18 +285,31 @@ class AnthropicProvider(LLMProvider):
                 request_has_images=contains_image_input(payload["messages"]),
                 status=status,
             )
+            if unsupported_image:
+                raise ProviderError(
+                    f"Anthropic 调用失败: HTTP {status}: {exc.response.text}",
+                    retryable=False,
+                    category="unsupported_capability",
+                    capability="vision",
+                    status=status,
+                ) from exc
+            c = classify_provider_error(exc, status=status)
             raise ProviderError(
                 f"Anthropic 调用失败: HTTP {status}: {exc.response.text}",
-                retryable=False if unsupported_image else _retryable(exc, status),
-                category="unsupported_capability" if unsupported_image else _category(exc, status),
-                capability="vision" if unsupported_image else None,
+                retryable=c.retryable,
+                kind=c.kind,
+                status=c.status,
+                retry_delay=c.retry_delay,
             ) from exc
         except Exception as exc:  # noqa: BLE001
             llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
+            c = classify_provider_error(exc)
             raise ProviderError(
                 f"Anthropic 调用失败: {exc}",
-                retryable=_retryable(exc),
-                category=_category(exc),
+                retryable=c.retryable,
+                kind=c.kind,
+                status=c.status,
+                retry_delay=c.retry_delay,
             ) from exc
         result = _parse_response(data)
         llm_trace(
@@ -432,17 +424,30 @@ class AnthropicProvider(LLMProvider):
                 request_has_images=contains_image_input(payload["messages"]),
                 status=status,
             )
+            if unsupported_image:
+                raise ProviderError(
+                    f"Anthropic 流式调用失败: HTTP {status}: {exc.response.text}",
+                    retryable=False,
+                    category="unsupported_capability",
+                    capability="vision",
+                    status=status,
+                ) from exc
+            c = classify_provider_error(exc, status=status)
             raise ProviderError(
                 f"Anthropic 流式调用失败: HTTP {status}: {exc.response.text}",
-                retryable=False if unsupported_image else _retryable(exc, status),
-                category="unsupported_capability" if unsupported_image else _category(exc, status),
-                capability="vision" if unsupported_image else None,
+                retryable=c.retryable,
+                kind=c.kind,
+                status=c.status,
+                retry_delay=c.retry_delay,
             ) from exc
         except Exception as exc:  # noqa: BLE001
+            c = classify_provider_error(exc)
             raise ProviderError(
                 f"Anthropic 流式调用失败: {exc}",
-                retryable=_retryable(exc),
-                category=_category(exc),
+                retryable=c.retryable,
+                kind=c.kind,
+                status=c.status,
+                retry_delay=c.retry_delay,
             ) from exc
 
         usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
