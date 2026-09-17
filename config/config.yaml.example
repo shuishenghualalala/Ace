@@ -43,6 +43,10 @@ runtime:
   # （中断标记 + 回合正常结束，历史/输出含 "deadline exceeded" 标记），在途工具
   # 走 aborted 语义；0 = 不限（默认关闭）。
   turn_deadline_seconds: 0
+  # 追问/权限确认等待上限（秒）：wait_for_answer 调用方未显式传 timeout 时的默认
+  # 有界等待；超时按「用户未回答」收尾（返回空答案），追问工具与权限确认共用。
+  # 0 = 默认不限（维持旧的不限语义）。显式传 timeout（含 None/0）始终优先。
+  interaction_timeout_seconds: 3600
   # 独立线程 health 服务端口（桌面端优先探测，业务事件循环卡超时仍能感知进程
   # 活性）。0 表示自动（gateway 端口 + 1）；显式配置（如 8010）则覆盖默认值。
   health_port: 0

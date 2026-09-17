@@ -12,6 +12,7 @@ from crew.core.followup import (
     cancel_followup,
     resolve_answer,
     send_followup_question_to,
+    set_followup_default_timeout,
     set_followup_notification_hooks,
     wait_for_answer,
 )
@@ -496,6 +497,31 @@ async def test_followup_wait_keepalive_supports_infinite_timeout():
     assert pulses  # 心跳已上报，长等待不会被不活跃超时误杀
     assert resolve_answer(sid, question_id, [{"id": "q0", "answers": ["方案A"]}]) is True
     assert await waiter == [{"id": "q0", "answers": ["方案A"]}]
+
+
+async def test_followup_default_timeout_applies_when_caller_omits_timeout():
+    """调用方未传 timeout：使用装配层注入的默认上限，超时按「未回答」收尾。"""
+    set_followup_default_timeout(0.05)
+    try:
+        sid, question_id = await _send_one_followup("s-f7")
+        answers = await wait_for_answer(sid, question_id)
+        assert answers == []  # 默认超时生效：无人回答 → 显式超时收尾
+    finally:
+        set_followup_default_timeout(3600.0)
+
+
+async def test_followup_default_timeout_zero_means_unlimited():
+    """默认上限配置为 0：未传 timeout 的调用方维持不限语义，直到用户作答。"""
+    set_followup_default_timeout(0)
+    try:
+        sid, question_id = await _send_one_followup("s-f8")
+        waiter = asyncio.create_task(wait_for_answer(sid, question_id))
+        await asyncio.sleep(0.05)
+        assert not waiter.done()  # 默认不限：未作答不超时
+        assert resolve_answer(sid, question_id, [{"id": "q0", "answers": ["方案B"]}]) is True
+        assert await waiter == [{"id": "q0", "answers": ["方案B"]}]
+    finally:
+        set_followup_default_timeout(3600.0)
 
 
 # ---- plan 来源接入 ----

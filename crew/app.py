@@ -521,12 +521,15 @@ class CrewApp:
             on_decided=self._on_approval_decided,
         )
         # 追问通知：core/followup 只暴露注入钩子，owner 解析与 publish 在本侧完成
-        from crew.core.followup import set_followup_notification_hooks
+        from crew.core.followup import set_followup_default_timeout, set_followup_notification_hooks
 
         set_followup_notification_hooks(
             on_pending=self._on_followup_pending,
             on_resolved=self._on_followup_resolved,
         )
+        # 追问/权限确认默认等待上限：core 不反向依赖配置实现，由装配层注入
+        #（0/未配置经 config 解析后语义为「默认不限」）。
+        set_followup_default_timeout(config.interaction_timeout_seconds)
         # Gateway 级单活登录事实源；HTTP/WS、Cron 与渠道只消费这一份租约。
         self.active_owner = ActiveOwnerLeaseStore(
             config.db_path,

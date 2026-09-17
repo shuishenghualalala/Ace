@@ -87,13 +87,13 @@ async def handle_ask_followup_question(args: dict[str, Any]) -> str:
         raise ToolError("当前无会话，无法发送追问")
 
     session_id, question_id = await send_followup_question(validated, title=title)
-    # 选择卡片挂起期间回合必须保持运行中：无限等待（用户没选就一直等，取消/
-    # 回答/停止会话均可解除），并周期上报任务活动，防止任务运行时的不活跃超时
-    # 把回合误杀成 timed_out、进而误发"任务已超时"通知。
+    # 选择卡片挂起期间回合必须保持运行中：等待上限取 runtime.interaction_timeout_seconds
+    # 的默认有界超时（用户一直没选则按「未回答」收尾，返回空答案），并周期上报
+    # 任务活动，防止任务运行时的不活跃超时把回合误杀成 timed_out、进而误发
+    # "任务已超时"通知。
     answers = await wait_for_answer(
         session_id,
         question_id,
-        timeout=None,
         activity_fn=current_task_activity_fn.get(),
     )
 

@@ -401,6 +401,54 @@ async def test_tool_runner_permission_ask_denies_on_reject(monkeypatch):
     assert "用户拒绝" in block
 
 
+async def test_tool_runner_permission_wait_interrupted_denies_and_cleans_up(monkeypatch):
+    """权限等待期间 interrupt：权限按拒绝处理（安全默认），竞争失败的等待 task
+    被显式取消回收，不残留永久挂起的 task。"""
+    from crew.agent.loop.control import TurnControl
+    from crew.agent.loop.tool_guardrails import ToolCallGuardrailController
+    from crew.agent.loop.tool_runner import ToolRunner
+    from crew.plugins.manager import PluginManager
+
+    cfg = load_permission_config([{"tool": "terminal", "match": "git push:*", "behavior": "ask"}])
+    monkeypatch.setattr(pipeline, "get_permission_config", lambda: cfg)
+
+    async def fake_send(questions, title="", **kw):
+        return "s1", "qid"
+
+    cancelled: list = []
+
+    async def fake_wait(sid, qid, **kw):
+        try:
+            await asyncio.Event().wait()  # 模拟用户一直未作答
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    monkeypatch.setattr("crew.agent.loop.tool_runner.send_followup_question", fake_send)
+    monkeypatch.setattr("crew.agent.loop.tool_runner.wait_for_answer", fake_wait)
+
+    control = TurnControl()
+    runner = ToolRunner(
+        registry=Registry(), plugins=PluginManager([]),
+        guardrails=ToolCallGuardrailController(), session_id="s1", control=control,
+    )
+    task = asyncio.create_task(
+        runner._check_permission(
+            ToolCall("1", "terminal", {"command": "git push origin main"})
+        )
+    )
+    await asyncio.sleep(0.05)  # 进入权限等待段
+    control.interrupt()
+    block = await asyncio.wait_for(task, timeout=5)
+
+    assert block is not None
+    assert "未得到明确许可" in block  # 安全默认：interrupt 按拒绝处理
+    assert cancelled, "interrupt 先到时，竞争失败的等待 task 必须被显式取消"
+    await asyncio.sleep(0)  # 让取消回收落定
+    leftover = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    assert leftover == [], f"不得残留挂起 task: {leftover}"
+
+
 # --------------------------------------------------------------------------- #
 # 执行段看门狗：per-tool 超时 + interrupt 可取消在途工具
 # --------------------------------------------------------------------------- #

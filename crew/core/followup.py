@@ -20,12 +20,17 @@ from crew.core.runctx import (
     current_request_id,
     current_session_id,
 )
-from crew.core.timeout_policy import DEFAULT_INTERACTION_TIMEOUT_SECONDS
 from crew.state.logging import get_logger
 
 log = get_logger("followup")
 
-_DEFAULT_TIMEOUT = DEFAULT_INTERACTION_TIMEOUT_SECONDS
+# wait_for_answer 的 timeout 未传哨兵：区别于显式传 None/0（= 不限）。
+# 默认值只作用于「调用方没传 timeout」，显式传值（含不限）始终优先。
+_UNSET: Any = object()
+
+# 默认等待上限（秒）：装配层（crew/app.py）经 set_followup_default_timeout 注入
+# runtime.interaction_timeout_seconds；None 表示默认不限。core 不反向依赖配置实现。
+_default_timeout_seconds: float | None = 3600.0
 
 # 选择卡片挂起期间的任务活动心跳间隔：防止长等待被任务运行时的不活跃超时误杀。
 _ACTIVITY_PULSE_INTERVAL_SECONDS = 30.0
@@ -52,6 +57,23 @@ def set_followup_notification_hooks(
     global _on_pending_hook, _on_resolved_hook
     _on_pending_hook = on_pending
     _on_resolved_hook = on_resolved
+
+
+def set_followup_default_timeout(seconds: float | None) -> None:
+    """装配层注入默认等待上限（runtime.interaction_timeout_seconds）。
+
+    None 或 <= 0 表示默认不限（维持旧的不限语义）；显式传 timeout 的调用方
+    不受此值影响。
+    """
+    global _default_timeout_seconds
+    if seconds is None:
+        _default_timeout_seconds = None
+        return
+    try:
+        parsed = float(seconds)
+    except (TypeError, ValueError):
+        return
+    _default_timeout_seconds = parsed if parsed > 0 else None
 
 
 def _fire_pending(session_id: str, question_id: str, text: str) -> None:
@@ -120,15 +142,15 @@ class FollowupWaiter:
         session_id: str,
         question_id: str,
         *,
-        timeout: float | None = _DEFAULT_TIMEOUT,
+        timeout: float | None = None,
         activity_fn: Callable[[], None] | None = None,
         activity_interval: float = _ACTIVITY_PULSE_INTERVAL_SECONDS,
     ) -> list[dict[str, Any]]:
         """等待用户回答；超时返回空答案列表（让 LLM 自己处理）。
 
-        timeout=None 表示无限等待：选择卡片场景下用户没选，回合就一直保持运行中。
-        提供 activity_fn 时按 activity_interval 周期上报任务活动，防止长等待被
-        任务运行时的不活跃超时误杀。
+        timeout=None 表示无限等待；调用方负责传默认值（wait_for_answer 会解析
+        装配层注入的默认上限）。提供 activity_fn 时按 activity_interval 周期
+        上报任务活动，防止长等待被任务运行时的不活跃超时误杀。
         """
         future = self._futures.get(self._key(session_id, question_id))
         if future is None:
@@ -463,14 +485,23 @@ async def wait_for_answer(
     session_id: str,
     question_id: str,
     *,
-    timeout: float | None = _DEFAULT_TIMEOUT,
+    timeout: float | None | object = _UNSET,
     activity_fn: Callable[[], None] | None = None,
     activity_interval: float = _ACTIVITY_PULSE_INTERVAL_SECONDS,
 ) -> list[dict[str, Any]]:
+    """等待用户回答。timeout 未传时用装配层注入的默认上限（有界，可配置）。
+
+    显式传 timeout（含 None 或 0）始终优先：None/0 维持不限语义，正数为有界
+    等待；超时按「用户未回答」收尾（返回空答案）。
+    """
+    if timeout is _UNSET:
+        effective_timeout = _default_timeout_seconds
+    else:
+        effective_timeout = None if not timeout else float(timeout)  # type: ignore[arg-type]
     return await _followup_waiter.wait(
         session_id,
         question_id,
-        timeout=timeout,
+        timeout=effective_timeout,
         activity_fn=activity_fn,
         activity_interval=activity_interval,
     )

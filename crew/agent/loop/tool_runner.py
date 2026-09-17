@@ -35,6 +35,7 @@ from crew.agent.loop.tool_guardrails import ToolCallGuardrailController, append_
 from crew.agent.loop.tool_result_classification import file_mutation_result_landed
 from crew.core.envelope import ResponseChunk
 from crew.core.followup import (
+    cancel_followup,
     drain_followup_answer_messages,
     send_followup_question,
     wait_for_answer,
@@ -581,7 +582,7 @@ class ToolRunner:
             return json.dumps(
                 {"error": f"需要权限确认但当前环境无法交互：{exc}"}, ensure_ascii=False
             )
-        answers = await wait_for_answer(session_id, qid)
+        answers = await self._wait_permission_answer(session_id, qid)
         choice = ""
         if answers and isinstance(answers[0], dict):
             vals = answers[0].get("answers")
@@ -604,6 +605,42 @@ class ToolRunner:
         return json.dumps(
             {"error": "权限确认未得到明确许可（超时或未选择），按拒绝处理"}, ensure_ascii=False
         )
+
+    async def _wait_permission_answer(
+        self, session_id: str, question_id: str
+    ) -> list[dict[str, Any]]:
+        """权限回答等待与 interrupt 竞争（FIRST_COMPLETED 决胜）。
+
+        interrupt 先到：结算挂起的追问（cancel_followup 回灌取消标记、清理
+        waiter 注册），取消并回收竞争失败的等待 task，返回空答案——上层按
+        拒绝处理（安全默认），回合随后走 interrupt 收尾。回答/超时先到的，
+        interrupt 等待 task 立即取消，绝不残留永久挂起的 task。
+        """
+        wait_task = asyncio.create_task(wait_for_answer(session_id, question_id))
+        wait_interrupted = getattr(self.control, "wait_interrupted", None)
+        interrupt_task = (
+            asyncio.create_task(wait_interrupted())
+            if callable(wait_interrupted)
+            else None
+        )
+        try:
+            racers = {wait_task} | (
+                {interrupt_task} if interrupt_task is not None else set()
+            )
+            done, _pending = await asyncio.wait(
+                racers, return_when=asyncio.FIRST_COMPLETED
+            )
+            if wait_task in done:
+                return wait_task.result()
+            cancel_followup(session_id, question_id)
+            return []
+        finally:
+            tasks = [t for t in (wait_task, interrupt_task) if t is not None]
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     def _queue_media(self, tc, result: ToolResult) -> None:
         for part in result.media:

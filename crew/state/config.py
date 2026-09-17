@@ -354,6 +354,10 @@ class Config:
     # （中断标记 + 回合正常结束，历史/输出含 "deadline exceeded" 标记），在途工具
     # 走 aborted 语义；0 = 不限（默认关闭）。
     turn_deadline_seconds: float = 0.0
+    # 追问/权限确认等待上限（秒）：wait_for_answer 调用方未显式传 timeout 时的
+    # 默认有界等待；超时按「用户未回答」收尾（返回空答案）。0 = 默认不限
+    # （维持旧的不限语义）。显式传 timeout（含 None/0）始终优先于该默认值。
+    interaction_timeout_seconds: float = 3600.0
 
     # --- mcp / cron ---
     mcp_servers: dict[str, Any] = field(default_factory=dict)  # 外部 MCP server 配置
@@ -1820,6 +1824,13 @@ def load_config(config_path: str | Path | None = None) -> Config:
             _as_float(
                 runtime.get("turn_deadline_seconds", cfg.turn_deadline_seconds),
                 cfg.turn_deadline_seconds,
+            ),
+        )
+        cfg.interaction_timeout_seconds = max(
+            0.0,
+            _as_float(
+                runtime.get("interaction_timeout_seconds", cfg.interaction_timeout_seconds),
+                cfg.interaction_timeout_seconds,
             ),
         )
         health_port = _as_int_or_none(runtime.get("health_port", cfg.health_port))
