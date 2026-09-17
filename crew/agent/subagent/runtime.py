@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 import uuid
 from collections import deque
@@ -37,6 +38,7 @@ from crew.agent.subagent.service import (
     UnknownProviderError,
     coerce_start_request,
 )
+from crew.core.runctx import normalize_owner_account_id
 from crew.state.logging import get_logger
 
 
@@ -264,7 +266,10 @@ class SubagentRuntime:
             raise ValueError("default_provider must not be empty")
         self.max_depth = self._validate_non_negative_int(max_depth, "max_depth")
         self.store = store
+        self.active = active
         self._runs: dict[str, SubagentRun] = {}
+        self._lifecycle_events: dict[tuple[str, str], deque[dict[str, Any]]] = {}
+        self._lifecycle_events_lock = threading.Lock()
         self._closed = False
 
         if providers is not None:
@@ -321,6 +326,80 @@ class SubagentRuntime:
 
     def list_providers(self) -> list[str]:
         return self.providers.names()
+
+    def active_snapshot(
+        self,
+        parent_session_id: str | None = None,
+        *,
+        owner_account_id: str | None = None,
+    ) -> Any:
+        """Return the process-local active child view for the feature route."""
+
+        if self.active is None:
+            return [] if parent_session_id is not None else {}
+        snapshot = getattr(self.active, "snapshot", None)
+        if not callable(snapshot):
+            return [] if parent_session_id is not None else {}
+        return snapshot(parent_session_id, owner_account_id=owner_account_id)
+
+    def list_runs(
+        self,
+        *,
+        parent_session_id: str | None = None,
+        owner_account_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Expose the store's read-only run projection to Feature consumers."""
+
+        if self.store is None:
+            return []
+        return self.store.list_runs(
+            parent_session_id=parent_session_id,
+            owner_account_id=owner_account_id,
+            limit=limit,
+        )
+
+    def publish_lifecycle_event(
+        self,
+        *,
+        owner_account_id: str | None,
+        session_id: str,
+        event: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        """Queue one lifecycle event for the owning parent session.
+
+        The runtime stays independent from the Feature Event envelope.  The
+        Bundle turns these small records into versioned ``feature_event``
+        values when the current request boundary dispatches them.
+        """
+
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            return
+        key = (normalize_owner_account_id(owner_account_id), session_id)
+        record = {
+            "event": str(event or "").strip(),
+            "payload": dict(payload),
+        }
+        if not record["event"]:
+            return
+        with self._lifecycle_events_lock:
+            queue = self._lifecycle_events.setdefault(key, deque(maxlen=100))
+            queue.append(record)
+
+    def drain_lifecycle_events(
+        self,
+        *,
+        owner_account_id: str | None,
+        session_id: str,
+    ) -> list[dict[str, Any]]:
+        """Drain lifecycle events exactly once for one parent request."""
+
+        key = (normalize_owner_account_id(owner_account_id), str(session_id or ""))
+        with self._lifecycle_events_lock:
+            events = self._lifecycle_events.pop(key, None)
+        return list(events or ())
 
     async def start(
         self,
@@ -449,6 +528,18 @@ class SubagentRuntime:
             descriptor=descriptor,
         )
         self._runs[wrapped.id] = wrapped
+        self.publish_lifecycle_event(
+            owner_account_id=start_request.owner_account_id,
+            session_id=start_request.parent_session_id,
+            event="run_started",
+            payload={
+                "subagent_id": descriptor.subagent_id,
+                "label": descriptor.label or "subagent",
+                "provider": descriptor.provider,
+                "depth": descriptor.delegation_depth,
+                "lifecycle": descriptor.lifecycle,
+            },
+        )
         return wrapped
 
     async def execute(
@@ -882,6 +973,7 @@ class SubagentRuntime:
         if self.store is None:
             return
         try:
+            run = self.store.get_run(subagent_id)
             self.store.settle_run(
                 subagent_id,
                 stop_reason="error",
@@ -895,6 +987,17 @@ class SubagentRuntime:
                 ],
             )
             self.store.close_edge(subagent_id)
+            if run is not None:
+                self.publish_lifecycle_event(
+                    owner_account_id=run.get("owner_account_id"),
+                    session_id=str(run.get("parent_session_id") or ""),
+                    event="run_settled",
+                    payload={
+                        "subagent_id": subagent_id,
+                        "stop_reason": "error",
+                        "status": "settled",
+                    },
+                )
         except Exception:  # noqa: BLE001 - 结算尽力而为，不掩盖原始失败
             log.exception("失败结算落库失败 subagent_id=%s", subagent_id)
 
@@ -927,6 +1030,7 @@ class SubagentRuntime:
             )
         if self.store is None:
             return settled
+        run = self.store.get_run(subagent_id)
         recorder.run_settle(
             stop_reason=settled.stop_reason,
             diagnostic=settled.diagnostic,
@@ -941,6 +1045,17 @@ class SubagentRuntime:
             )
         except Exception:  # noqa: BLE001 - 结算落库失败不吞掉子级结果
             log.exception("run 结算落库失败 subagent_id=%s", subagent_id)
+        if run is not None:
+            self.publish_lifecycle_event(
+                owner_account_id=run.get("owner_account_id"),
+                session_id=str(run.get("parent_session_id") or ""),
+                event="run_settled",
+                payload={
+                    "subagent_id": subagent_id,
+                    "stop_reason": settled.stop_reason,
+                    "status": "settled",
+                },
+            )
         return settled
 
     def _close_edge_quietly(self, subagent_id: str) -> None:

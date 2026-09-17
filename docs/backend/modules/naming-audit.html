@@ -233,13 +233,12 @@
         <td><span class="gray">灰色</span> 暂无事件</td>
       </tr>
       <tr>
-        <td><code>subagent</code><br><span style="color:var(--t3)">core.subagent-context<br>crew/agent/subagent/</span></td>
+        <td><code>subagent</code><br><span style="color:var(--t3)">product.subagent<br>crew/agent/subagent/</span></td>
         <td><span class="dev">偏差</span> <code>config.yaml.example:109-113</code> 文档了顶层 <code>subagent:</code> 节，但 <code>load_config</code> 从不读取（crew/state/config.py 仅 :303-307 默认值、:1591 读 <code>tasks.subagent</code>）——死配置</td>
-        <td><span class="ok">符合</span> 无持久目录（内存注册表）</td>
-        <td><span class="ok">符合</span> 无表</td>
-        <td><span class="gray">灰色</span> 不适用</td>
-        <td><span class="gray">灰色</span> 以 host Feature <code>core.subagent-context</code> 注册 contributor（crew/app.py:607）</td>
-        <td><span class="gray">灰色</span> 暂无事件</td>
+        <td><span class="ok">符合</span> <code>crew_data/subagent.db</code>（Feature-owned store）</td>
+        <td><span class="ok">符合</span> <code>subagent_runs</code> / <code>subagent_edges</code> / <code>subagent_descriptors</code></td>
+        <td><span class="ok">符合</span> <code>product.subagent</code> Generation</td>
+        <td><span class="ok">符合</span> <code>subagent.background.reminder</code> + <code>subagent.lifecycle</code></td>
       </tr>
     </tbody>
   </table>
@@ -248,7 +247,7 @@
   <table>
     <thead><tr><th>模块</th><th>现状与证据</th></tr></thead>
     <tbody>
-      <tr><td><code>core / host</code></td><td>保留命名 <code>core.*</code> 已在使用：host 内置 Feature ID <code>core.agent-driver</code> / <code>core.subagent-context</code> / <code>core.process-context</code> / <code>core.task-context</code> / <code>core.agent-presets</code>（crew/app.py:562,607,619,631,3760）；另有 <code>host.structured-path-context</code>、<code>gateway.session-context</code>（app.py:577,589）与 <code>product.team-driver-adapter</code>（app.py:2058）未纳入约定前缀清单（P3）。</td></tr>
+      <tr><td><code>core / host</code></td><td>保留命名 <code>core.*</code> 已在使用：host 内置 Feature ID <code>core.agent-driver</code> / <code>core.process-context</code> / <code>core.task-context</code>（crew/app.py:562,619,631）；Subagent 已迁为可选 <code>product.subagent</code>，通用 preset 与通知不再属于 core。另有 <code>host.structured-path-context</code>、<code>gateway.session-context</code>（app.py:577,589）与 <code>product.team-driver-adapter</code>（app.py:2058）未纳入约定前缀清单（P3）。</td></tr>
       <tr><td><code>state</code>（core）</td><td>core 表：<code>sessions</code> / <code>session_agent_config</code> / <code>channel_session_routes</code>（crew/state/session_store.py:59,80,91）、<code>workspaces</code>（workspace_store.py:58）、<code>owner_session_lease</code> / <code>owner_logout_intent</code>（active_owner.py:34-35）、<code>channel_bindings</code>（channel_bindings.py:33）、<code>plugin_preferences</code>（plugin_preferences.py:36）。</td></tr>
       <tr><td><code>agent 压缩</code></td><td><code>compaction_summaries</code>（crew/agent/compact/store.py:52），rebuild 迁移（:68）。</td></tr>
       <tr><td><code>security</code></td><td><code>security_rules</code>（crew/security/rule_store.py:43，含 <code>_SCHEMA_VERSION=1</code> 行级版本 :18,238）、<code>security_audit_events</code>（crew/security/audit.py:222）。<code>crew_data/</code> 与 <code>logs/</code> 在托管路径清单内（crew/security/file_policy.py:115-116），属 core 视角，非跨 Feature 读写。</td></tr>

@@ -95,7 +95,6 @@ class TestBuiltinCoreFeatures:
         # 组合根内置能力全部进入 Feature Runtime 并被审计
         for feature_id in (
             "core.agent-driver",
-            "core.subagent-context",
             "core.process-context",
             "core.task-context",
             "host.structured-path-context",
@@ -105,6 +104,23 @@ class TestBuiltinCoreFeatures:
             assert record is not None, feature_id
             assert record.state is FeatureState.ACTIVE, feature_id
             assert record.definition.required_by_product is True, feature_id
+        subagent_record = records.get("product.subagent")
+        assert subagent_record is not None
+        assert subagent_record.state is FeatureState.ACTIVE
+        assert subagent_record.definition.required_by_product is False
+        assert subagent_record.definition.stop_policy.value == "drain"
+        assert subagent_record.definition.update_strategy.value == "restart"
+        context_ids = {
+            binding.contributor.contributor_id
+            for binding in app.plugins.feature_runtime.context_contributors.bindings()
+        }
+        assert "subagent.background.reminder" in context_ids
+        event_ids = {
+            binding.contributor.contributor_id
+            for binding in app.plugins.feature_runtime.event_contributors.bindings()
+        }
+        assert "subagent.lifecycle" in event_ids
+        assert app.plugins.feature_runtime.routes.resolve("product.subagent")
         # product.team 作为可选 managed feature 进入 Runtime，team driver 由它提供
         team_record = records.get("product.team")
         assert team_record is not None

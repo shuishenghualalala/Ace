@@ -38,12 +38,7 @@ from crew.agent.feature import build_agent_factory_feature
 from crew.agent.runtime import SingleAgent
 from crew.agent.prompt_builder import append_subagent_handoff_guidance
 from crew.agent.skills import configure_skill_filter
-from crew.agent.subagent.context import (
-    ParentDeliveryState,
-    SubagentNotificationQueue,
-    SubagentNotificationRouter,
-    build_subagent_notification_handler,
-)
+from crew.agent.subagent.context import ParentDeliveryState
 from crew.agent.subagent.policy import (
     SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
     apply_model_capability_policy,
@@ -598,13 +593,9 @@ class CrewApp:
         # 需要宿主事件循环的长生命周期 Feature 在 build_app 仅声明，startup
         # 再由共享 Runtime 按依赖图激活；Sites/Browser 后续复用同一入口。
         self._managed_feature_definitions: OrderedDict[str, FeatureDefinition] = OrderedDict()
-        # 后台子任务完成结果的待注入队列（按父 session 分键）：实现在
-        # crew/agent/subagent/context.py，完成回调路由、PROMPT contributor
-        # drain、collect_subagent 摘除三端共享同一实例。
-        self._subagent_notifications = SubagentNotificationQueue()
-        self._subagent_router = SubagentNotificationRouter(
-            self._subagent_notifications
-        )
+        # Subagent Feature 激活后绑定通知队列与路由；这里仅保留兼容属性。
+        self._subagent_notifications = None
+        self._subagent_router = None
         self._register_execution_driver_scope(
             "core.agent-driver",
             ExecutionDriver(
@@ -647,21 +638,7 @@ class CrewApp:
                 description="Normalized session source and delivery context",
             ),
         )
-        # 后台结果 → 模型可见 reminder：三条核心通知通路（子任务/进程/任务恢复回合）
-        # 均为 PROMPT 阶段瞬时 contributor，队列所有权在来源模块；priority 低于
-        # cron(50)/wiki(100)，保持 reminder 内原有相对次序。
-        self._register_context_contributor_scope(
-            "core.subagent-context",
-            ContextContributor(
-                contributor_id="subagent.background.reminder",
-                handler=build_subagent_notification_handler(self._subagent_notifications),
-                phase=ContextPhase.PROMPT,
-                priority=10,
-                model_visible=True,
-                persistent=False,
-                description="Background subagent completion notifications",
-            ),
-        )
+        # 后台结果提醒由 product.subagent Feature 在自己的 Generation 内注册。
         self._register_context_contributor_scope(
             "core.process-context",
             ContextContributor(
@@ -709,6 +686,7 @@ class CrewApp:
         self.subagent_active = None
         self.subagent_tasks = None
         self.subagent_runtime = None
+        self._subagent_feature_service = None
         # 后台子 agent 的 asyncio 任务强引用（防 GC），完成后自动移除
         self._subagent_bg_tasks: set[asyncio.Task] = set()
         # 异步进化队列：按 session 串行处理 evolution 任务，结果在下一轮交互中体现
@@ -3991,62 +3969,11 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     app.channel_manager = channels_feature.service.channel_manager
     app.delivery_router = channels_feature.service.delivery_router
     app.declare_managed_feature(channels_feature.definition)
-    # Publish the semantic Subagent service before optional transports install.
-    # External agents can then contribute Providers without creating a reverse
-    # dependency from the Subagent core to the external implementation package.
-    from crew.agent.subagent import (
-        ActiveSubagents,
-        SubagentRegistry,
-        SubagentRuntime,
-        build_subagent_feature,
-    )
+    from crew.agent.subagent import SubagentRegistry, build_subagent_feature
 
+    # Preset 文件先由 Registry 读取；Wiki Feature 会在后面 claim 自己的
+    # product-owned preset，通用 preset 随后由 product.subagent 发布。
     sub_registry = SubagentRegistry()
-    app.subagent_active = ActiveSubagents()
-    # 阶段 B：runs/edges/descriptors 三表自有库（ADR-0038）。App 直构、随 App
-    # 存亡（与 TaskRuntime 同语义）；阶段 C 收进 Feature Bundle 时迁 Scope。
-    from crew.agent.subagent.store import SubagentStore
-
-    app.subagent_store = SubagentStore(
-        resolve_crew_home_path(cfg.subagent_db_path),
-        wal_enabled=cfg.sqlite_wal,
-        legacy_db_path=cfg.db_path,
-        retain_days=cfg.subagent_retain_runs_days,
-    )
-    app.subagent_runtime = SubagentRuntime(
-        build_child=app.agent_factory or app._make_subagent,
-        active=app.subagent_active,
-        default_provider=cfg.subagent_default_provider,
-        max_depth=cfg.subagent_max_depth,
-        idle_timeout=cfg.tasks_subagent_inactivity_timeout_seconds,
-        max_runtime=cfg.tasks_subagent_execution_timeout_seconds,
-        store=app.subagent_store,
-    )
-    subagent_feature = build_subagent_feature(app.subagent_runtime)
-    app._install_builtin_feature(subagent_feature.definition)
-
-    external_feature = build_external_agent_feature(
-        app,
-        registry=registry,
-        # external 域 4 表在 crew_data/external.db、team 域 2 表在
-        # crew_data/team.db（ADR-0038 第四批，一次双库）；legacy_db_path 触发
-        # copy-on-first-activate：crew.db 里若还有旧表且分库为空，则分域单事务
-        # 整表复制，旧行保留作回退备份。唯一构造点在 catalog_factory，team
-        # feature 经 external_store_provider 动态解析同一门面实例。
-        catalog_factory=lambda: TeamExternalAgentStore(
-            resolve_crew_home_path(cfg.external_db_path),
-            team_db_path=resolve_crew_home_path(cfg.team_db_path),
-            legacy_db_path=cfg.db_path,
-            # 跨 Feature 生命周期经动态解析的 Catalog 走显式接口；
-            # external-agents Generation 未激活时门面 fail-closed。
-            external_catalog_provider=app.current_external_catalog,
-        ),
-        provider_factory=AdapterRuntimeProvider,
-        interaction_bridge_getter=lambda: app.interaction_bridge,
-        own_provider=True,
-    )
-    app._install_builtin_feature(external_feature.definition)
-    app.declare_managed_feature(external_feature.definition)
     from crew.tasks.tools import register_task_tools
 
     register_task_tools(registry, app.tasks)
@@ -4056,11 +3983,6 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
     app.plan_manager = PlanModeManager(session_store=session_store)
     register_plan_tools(registry, app.plan_manager)
-
-    # File-backed Agent definitions are only sources. Their live visibility is
-    # provided below by Feature-owned preset contributions.
-    from crew.agent.subagent import build_subagent_tools
-    from crew.agent.subagent.runtime import BatchSchedulePolicy
 
     # Wiki：由 Product Feature Bundle 统一拥有 Store、Service、Tools、Context
     # 与后台任务。Bundle 的兼容模式在同步 build_app 中立即激活，使旧 CLI、
@@ -4091,23 +4013,47 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     )
     app.declare_managed_feature(wiki_feature.definition)
 
-    # General presets are one small Core Feature; product-owned definitions have
-    # already been claimed by their Bundle and therefore cannot leak here.
-    from crew.agent.subagent.definition import to_preset_contribution
-
-    general_preset_definitions = tuple(sub_registry.list())
-
-    def install_agent_presets(context) -> None:
-        for definition in general_preset_definitions:
-            context.register_agent_preset(to_preset_contribution(definition))
-
-    app._install_builtin_feature(
-        FeatureDefinition(
-            "core.agent-presets",
-            install_agent_presets,
-            required_by_product=True,
-        )
+    # Subagent Feature owns its Generation-scoped store, runtime, tools,
+    # notifications, route, lifecycle events and preset contributions.
+    app.subagent_registry = sub_registry
+    subagent_feature = build_subagent_feature(
+        host=app,
+        sub_registry=sub_registry,
+        db_path=resolve_crew_home_path(cfg.subagent_db_path),
+        wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
+        retain_days=cfg.subagent_retain_runs_days,
+        default_provider=cfg.subagent_default_provider,
+        max_depth=cfg.subagent_max_depth,
+        idle_timeout=cfg.tasks_subagent_inactivity_timeout_seconds,
+        max_runtime=cfg.tasks_subagent_execution_timeout_seconds,
     )
+    app._install_builtin_feature(subagent_feature.definition)
+
+    # External runtimes optionally consume the Subagent service. Activating it
+    # after Subagent makes that service available without a reverse dependency.
+    external_feature = build_external_agent_feature(
+        app,
+        registry=registry,
+        # external 域 4 表在 crew_data/external.db、team 域 2 表在
+        # crew_data/team.db（ADR-0038 第四批，一次双库）；legacy_db_path 触发
+        # copy-on-first-activate：crew.db 里若还有旧表且分库为空，则分域单事务
+        # 整表复制，旧行保留作回退备份。唯一构造点在 catalog_factory，team
+        # feature 经 external_store_provider 动态解析同一门面实例。
+        catalog_factory=lambda: TeamExternalAgentStore(
+            resolve_crew_home_path(cfg.external_db_path),
+            team_db_path=resolve_crew_home_path(cfg.team_db_path),
+            legacy_db_path=cfg.db_path,
+            # 跨 Feature 生命周期经动态解析的 Catalog 走显式接口；
+            # external-agents Generation 未激活时门面 fail-closed。
+            external_catalog_provider=app.current_external_catalog,
+        ),
+        provider_factory=AdapterRuntimeProvider,
+        interaction_bridge_getter=lambda: app.interaction_bridge,
+        own_provider=True,
+    )
+    app._install_builtin_feature(external_feature.definition)
+    app.declare_managed_feature(external_feature.definition)
 
     from crew.features.hooks import hook_registry
     from crew.work.feature import build_work_feature
@@ -4136,41 +4082,6 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     # replacement, and the host binding remains a compatibility view.
     app.work_service = work_feature.service
     app.declare_managed_feature(work_feature.definition)
-
-    # subagent：预设注册表 + delegate_task / run_agent / collect_subagent（toolset='subagent'）
-    app.subagent_registry = sub_registry
-    from crew.tasks.task_manager import LegacyTaskManagerAdapter
-
-    app.subagent_tasks = LegacyTaskManagerAdapter(app.tasks)
-
-    def _launch_background(coro) -> None:
-        """把后台子 agent 协程起飞成 asyncio 任务并持有强引用，完成后移除。"""
-        task = asyncio.ensure_future(coro)
-        app._subagent_bg_tasks.add(task)
-        task.add_done_callback(app._subagent_bg_tasks.discard)
-
-    build_subagent_tools(
-        registry,
-        sub_registry,
-        app.subagent_runtime,
-        max_concurrent=cfg.subagent_max_concurrent,
-        max_tasks=cfg.subagent_max_tasks,
-        idle_timeout=cfg.tasks_subagent_inactivity_timeout_seconds,
-        max_runtime=cfg.tasks_subagent_execution_timeout_seconds,
-        active=app.subagent_active,
-        tasks=app.subagent_tasks,
-        launch_background=_launch_background,
-        on_background_done=app._on_subagent_background_done,
-        background_capacity=lambda: len(app._subagent_bg_tasks) < cfg.subagent_max_concurrent,
-        on_collected=app._subagent_notifications.remove,
-        preset_registry=app.agent_presets,
-        batch_policy=BatchSchedulePolicy.from_config(cfg),
-        max_batch_items=cfg.subagent_max_batch_items,
-        summary_defaults={
-            "min_chars": cfg.subagent_summary_min_chars,
-            "retries": cfg.subagent_summary_retries,
-        },
-    )
 
     # Cron 数据平面在停用后仍保留，Scheduler/Tools/Context 则由同一
     # product.cron Generation 在宿主事件循环中事务激活。

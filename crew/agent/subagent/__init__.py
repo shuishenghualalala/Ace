@@ -17,6 +17,7 @@ from crew.agent.subagent.providers import INPROCESS_SPAWN_PROVIDER, InProcessSpa
 from crew.agent.subagent.feature import (
     SUBAGENT_FEATURE_ID,
     SubagentFeatureBundle,
+    SubagentFeatureHost,
     build_subagent_feature,
 )
 from crew.agent.subagent.runtime import (
@@ -120,6 +121,7 @@ __all__ = [
     "INPROCESS_SPAWN_PROVIDER",
     "SUBAGENT_FEATURE_ID",
     "SubagentFeatureBundle",
+    "SubagentFeatureHost",
     "build_subagent_feature",
     "fold_result",
     "fold_subagent_result",

@@ -152,6 +152,7 @@ class InProcessSpawnProvider:
                         "label": label,
                         "agent": child,
                         "started_at": time.time(),
+                        "owner_account_id": owner_account_id,
                     },
                 )
         except Exception:

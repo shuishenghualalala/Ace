@@ -38,6 +38,7 @@ from crew.core.runctx import (
     current_session_id,
     current_subagent_notify_session,
     current_workspace_id,
+    normalize_owner_account_id,
     touch_current_task_activity,
 )
 from crew.state.logging import get_logger
@@ -98,16 +99,33 @@ class ActiveSubagents:
                 did = True
         return did
 
-    def snapshot(self, parent_session_id: str | None = None) -> Any:
+    def snapshot(
+        self,
+        parent_session_id: str | None = None,
+        *,
+        owner_account_id: str | None = None,
+    ) -> Any:
         def _public(rec: dict[str, Any]) -> dict[str, Any]:
             return {k: v for k, v in rec.items() if k != "agent"}
 
+        owner = normalize_owner_account_id(owner_account_id) if owner_account_id else None
+
+        def _visible(rec: dict[str, Any]) -> bool:
+            return owner is None or normalize_owner_account_id(
+                rec.get("owner_account_id")
+            ) == owner
+
         with self._lock:
             if parent_session_id is not None:
-                return [_public(r) for r in self._active.get(parent_session_id, {}).values()]
+                return [
+                    _public(record)
+                    for record in self._active.get(parent_session_id, {}).values()
+                    if _visible(record)
+                ]
             return {
-                sid: [_public(r) for r in children.values()]
+                sid: [_public(record) for record in children.values() if _visible(record)]
                 for sid, children in self._active.items()
+                if any(_visible(record) for record in children.values())
             }
 
 _EPHEMERAL_PROMPT = (
@@ -741,6 +759,7 @@ def build_subagent_tools(
     batch_policy: "BatchSchedulePolicy | None" = None,
     max_batch_items: int = 128,
     summary_defaults: dict[str, int] | None = None,
+    register_tool: Callable[..., None] | None = None,
 ) -> None:
     """注册 delegate_task / run_agent / collect_subagent 工具到 toolset='subagent'。
 
@@ -750,6 +769,7 @@ def build_subagent_tools(
     默认阈值（preset 可按名覆盖）。
     """
     subagent_service = service
+    publish_tool = register_tool or registry.register
     schedule = batch_policy or BatchSchedulePolicy(max_concurrent=max_concurrent)
     summary_floor = dict(summary_defaults or {})
     backgrounds = (
@@ -876,7 +896,7 @@ def build_subagent_tools(
             summary_floor=summary_floor,
         )
 
-    registry.register(
+    publish_tool(
         name="delegate_task",
         toolset=SUBAGENT_TOOLSET,
         schema=build_delegate_task_schema(
@@ -1019,7 +1039,7 @@ def build_subagent_tools(
         preset_registry.list() if preset_registry is not None else sub_registry.list(),
     )
     if available_initial:
-        registry.register(
+        publish_tool(
             name="run_agent",
             toolset=RUN_AGENT_TOOLSET,
             schema=_preset_schema(subagent_service, available_initial),
@@ -1041,7 +1061,7 @@ def build_subagent_tools(
         )
         # collect 仅在支持后台时才有意义
         if tasks is not None:
-            registry.register(
+            publish_tool(
                 name="collect_subagent",
                 toolset=RUN_AGENT_TOOLSET,
                 schema=build_collect_subagent_schema(),
