@@ -256,6 +256,7 @@ await runtime.event_contributors.dispatch(envelope, push_feature_event)</code></
       <tr><td>2026-09-05</td><td>增加 Feature Event Contributor Registry，Wiki cards/changes 来源进入 Bundle Scope。</td><td>Feature Runtime、PluginContext、Wiki Generation 与 WS 中立 dispatch。</td></tr>
       <tr><td>2026-09-05</td><td>增加 Agent Preset Contribution Registry，Wiki prompt 与工具策略进入 Bundle Scope。</td><td>动态目录、Generation Lease、Agent 缓存与普通会话能力隔离。</td></tr>
       <tr><td>2026-09-17</td><td><code>71513d9</code> <code>register_hook</code>/<code>register_middleware</code> 的同步回调自动线程化（与 Tool 对齐，不再内联阻塞事件循环）；同步回调取消路径去 busy-spin，改为 2s 有界优雅窗口，超时记 warning 并放弃等待。</td><td><code>crew/plugins/manager.py</code>；agent 主路径上的 hook/middleware 调用不再被同步插件冻结。</td></tr>
+      <tr><td>2026-09-17</td><td><code>f8d33e1</code> 同步回调线程化路径补 ContextVar 写回（copy_context + await 完成后回写变化值），修复 wiki_learning 插件上下文回传回归；异常/取消路径不写回。</td><td><code>crew/plugins/manager.py</code>；同步 hook/middleware/tool handler 的 ContextVar 语义与内联执行一致。</td></tr>
     </tbody>
   </table>
 
