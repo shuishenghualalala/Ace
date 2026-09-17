@@ -827,3 +827,35 @@ def test_refresh_owner_runtime_env_perf_log_is_redacted(tmp_path, monkeypatch, c
     assert "env_cache=" in text
     assert "system-secret" not in text
     assert "owner-secret" not in text
+
+
+async def test_refresh_owner_runtime_env_async_matches_sync(tmp_path, monkeypatch):
+    """异步入口行为与同步入口一致（同一 owner 的 env 覆盖结果相同）。"""
+    from crew.state.home import refresh_owner_runtime_env_async
+
+    root = tmp_path / "repo"
+    config_dir = root / "config"
+    config_dir.mkdir(parents=True)
+    crew_home = tmp_path / ".Crew"
+    owner = "owner:user-a"
+    owner_home = crew_home / "accounts" / owner_path_segment(owner)
+    owner_home.mkdir(parents=True)
+    (config_dir / ".env").write_text(
+        "CREW_ASYNC_SHARED=system-v1\n",
+        encoding="utf-8",
+    )
+    (owner_home / ".env").write_text(
+        "CREW_ASYNC_OWNER=owner-v1\n"
+        "CREW_ASYNC_SHARED=owner-v1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(home_module, "ROOT", root)
+    monkeypatch.setenv("CREW_HOME", str(crew_home))
+    monkeypatch.delenv("CREW_ASYNC_OWNER", raising=False)
+    monkeypatch.delenv("CREW_ASYNC_SHARED", raising=False)
+
+    values = await refresh_owner_runtime_env_async(owner)
+
+    assert os.environ["CREW_ASYNC_OWNER"] == "owner-v1"
+    assert os.environ["CREW_ASYNC_SHARED"] == "owner-v1"
+    assert values["CREW_ENV_FILE"] == str(owner_home / ".env")

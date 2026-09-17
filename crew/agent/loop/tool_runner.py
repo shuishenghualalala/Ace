@@ -57,6 +57,14 @@ _MAX_TOOL_WORKERS = 8  # Crew run_agent.py / agent.tool_executor default
 _INTERRUPT_GRACE_SECONDS = 0.1  # interrupt 后等工具自行收尾的优雅窗口
 
 
+def _read_media_data_url(part: MediaPart) -> str:
+    """同步读媒体文件并编码为 data URL（供 asyncio.to_thread 调用）。"""
+    path = Path(part.path)  # type: ignore[arg-type]
+    raw = path.read_bytes()
+    mime = part.mime_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
 class ToolRunner:
     """执行一批工具调用并产出 ResponseChunk 帧；原地把结果回灌进 messages。"""
 
@@ -214,7 +222,7 @@ class ToolRunner:
                 else:
                     async for chunk in self._run_sequential_segment(calls, messages, rid, next_seq, started_ids):
                         yield chunk
-            self._append_pending_media(messages)
+            await self._append_pending_media(messages)
         finally:
             # 清理本轮未被消费的 prewarm（被 plan_tool_calls 去重/裁剪掉的工具）。
             await self.cancel_prewarms()
@@ -646,7 +654,7 @@ class ToolRunner:
         for part in result.media:
             self._pending_media.append((tc.id, tc.name, part))
 
-    def _append_pending_media(self, messages: list[Message]) -> None:
+    async def _append_pending_media(self, messages: list[Message]) -> None:
         """Append hidden multimodal messages only after all tool results.
 
         Provider protocols require every assistant tool call to receive its
@@ -657,10 +665,7 @@ class ToolRunner:
             data_url = part.data_url
             if not data_url and part.path:
                 try:
-                    path = Path(part.path)
-                    raw = path.read_bytes()
-                    mime = part.mime_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-                    data_url = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+                    data_url = await asyncio.to_thread(_read_media_data_url, part)
                 except OSError as exc:
                     log.warning("读取工具媒体失败 tool=%s: %s", tool_name, type(exc).__name__)
                     continue

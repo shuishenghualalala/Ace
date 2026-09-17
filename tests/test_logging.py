@@ -9,7 +9,8 @@ from crew.core.runctx import current_owner_account_id
 
 
 def _reset_llm_trace():
-    """清理 crew.llm logger 的 handler 与全局开关，保证测试隔离。"""
+    """清理 crew.llm logger 的 handler、listener 与全局开关，保证测试隔离。"""
+    clog.shutdown_llm_trace()
     logger = logging.getLogger("crew.llm")
     for h in list(logger.handlers):
         logger.removeHandler(h)
@@ -26,13 +27,14 @@ def test_llm_trace_disabled_is_noop(tmp_path):
 
 
 def test_llm_trace_writes_jsonl(tmp_path):
-    """开启后请求/响应各写一行可解析的 JSON。"""
+    """开启后请求/响应各写一行可解析的 JSON（listener 队列异步落盘）。"""
     _reset_llm_trace()
     log_file = tmp_path / "logs" / "crew.log"
     try:
         clog._setup_llm_trace(str(log_file))
         clog.llm_trace("request", {"session_id": "s1", "model": "m", "messages": [{"role": "user", "content": "hi"}]})
         clog.llm_trace("response", {"session_id": "s1", "model": "m", "text": "hello"})
+        assert clog.flush_llm_trace(timeout=5.0)
 
         trace_file = log_file.parent / "llm.jsonl"
         lines = trace_file.read_text(encoding="utf-8").strip().splitlines()
@@ -42,6 +44,44 @@ def test_llm_trace_writes_jsonl(tmp_path):
         assert req["dir"] == "request" and req["session_id"] == "s1"
         assert resp["dir"] == "response" and resp["text"] == "hello"
         assert "ts" in req
+    finally:
+        _reset_llm_trace()
+
+
+def test_llm_trace_shutdown_flushes_without_hanging(tmp_path):
+    """关闭路径：队列中记录全部落盘，shutdown 不挂住，可重复调用。"""
+    _reset_llm_trace()
+    log_file = tmp_path / "logs" / "crew.log"
+    try:
+        clog._setup_llm_trace(str(log_file))
+        clog.llm_trace("request", {"session_id": "s-before-stop"})
+        clog.shutdown_llm_trace(timeout=5.0)
+
+        trace_file = log_file.parent / "llm.jsonl"
+        event = json.loads(trace_file.read_text(encoding="utf-8").strip())
+        assert event["session_id"] == "s-before-stop"
+        # 幂等：再次关闭不抛、不挂
+        clog.shutdown_llm_trace(timeout=5.0)
+    finally:
+        _reset_llm_trace()
+
+
+def test_llm_trace_setup_twice_replaces_listener(tmp_path):
+    """重复 setup 先停旧 listener，不叠加写文件。"""
+    _reset_llm_trace()
+    log_file = tmp_path / "logs" / "crew.log"
+    try:
+        clog._setup_llm_trace(str(log_file))
+        first_listener = clog._LLM_LISTENER
+        clog._setup_llm_trace(str(log_file))
+        assert clog._LLM_LISTENER is not first_listener
+        clog.llm_trace("request", {"session_id": "s-replaced"})
+        assert clog.flush_llm_trace(timeout=5.0)
+
+        trace_file = log_file.parent / "llm.jsonl"
+        lines = trace_file.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        assert json.loads(lines[0])["session_id"] == "s-replaced"
     finally:
         _reset_llm_trace()
 
@@ -56,6 +96,7 @@ def test_llm_trace_injects_current_owner(tmp_path):
     try:
         clog._setup_llm_trace(str(log_file))
         clog.llm_trace("request", {"session_id": "same"})
+        assert clog.flush_llm_trace(timeout=5.0)
 
         trace_file = log_file.parent / "llm.jsonl"
         event = json.loads(trace_file.read_text(encoding="utf-8").strip())

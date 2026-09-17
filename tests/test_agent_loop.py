@@ -1610,6 +1610,36 @@ async def test_tool_media_is_appended_only_after_complete_tool_result_batch():
     assert messages[-1].is_meta and isinstance(messages[-1].content_parts, list)
 
 
+async def test_tool_media_path_read_is_off_event_loop_thread(tmp_path, monkeypatch):
+    """path 型媒体（截图等）的 read_bytes 在工作线程执行，不在事件循环线程。"""
+    import threading
+
+    from pathlib import Path as _Path
+
+    main_ident = threading.get_ident()
+    read_idents: list[int] = []
+    real_read_bytes = _Path.read_bytes
+
+    def capture(self, *args, **kwargs):
+        read_idents.append(threading.get_ident())
+        return real_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "read_bytes", capture)
+
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"\x89PNG fake screenshot bytes")
+    runner = _runner(Registry())
+    runner._pending_media = [("vision", "browser_screenshot", MediaPart("image/png", path=str(image)))]
+    messages: list[Message] = []
+
+    await runner._append_pending_media(messages)
+
+    assert len(messages) == 1
+    url = messages[0].content_parts[1]["image_url"]["url"]
+    assert url.startswith("data:image/png;base64,")
+    assert read_idents and all(t != main_ident for t in read_idents)
+
+
 async def test_prewarm_ignores_unsafe_tool():
     """写工具不提前派发，留给 run_batch 顺序执行。"""
     reg = Registry()

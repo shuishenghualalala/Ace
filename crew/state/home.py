@@ -18,6 +18,7 @@ CREW_TASK_WORKSPACE_ROOT 覆盖。
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -634,6 +635,26 @@ def refresh_owner_runtime_env(
             env_cache_total,
         )
         return return_values
+
+
+async def refresh_owner_runtime_env_async(
+    owner_account_id: str | None = None,
+    *,
+    env_file: str | Path | None = None,
+    load_env_files: bool = True,
+) -> dict[str, str]:
+    """异步入口：把 :func:`refresh_owner_runtime_env` 放到工作线程执行。
+
+    事件循环热路径（每轮 envelope 处理）使用本函数；同步实现内部持
+    ``_ENV_LOCK``（threading.RLock）且读写文件/环境，线程内执行安全。
+    行为与同步入口完全一致。
+    """
+    return await asyncio.to_thread(
+        refresh_owner_runtime_env,
+        owner_account_id,
+        env_file=env_file,
+        load_env_files=load_env_files,
+    )
 
 
 def export_crew_runtime_env(
