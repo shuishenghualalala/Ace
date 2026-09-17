@@ -42,10 +42,10 @@ import {
   classifyCuaSetupAuthorityRequest,
   createDesktopSecurityProof,
   gatewayInstanceAccessToken,
-  probeGatewayInstance,
   type GatewayComponentState,
   type GatewayProbeFailureKind,
 } from './gateway-instance-auth';
+import { probeBackendHealth } from './backend-health-probe';
 import { BackendHealthMonitor } from './backend-health-monitor';
 import { GatewayRestartController } from './gateway-restart-controller';
 import { isTrustedRendererFileUrl } from './trusted-renderer-url';
@@ -1353,8 +1353,18 @@ async function hasHealthApi(baseUrl: string): Promise<boolean> {
   return (await probeHealthApi(baseUrl)).verified;
 }
 
+/**
+ * 最近一次经 health 线程端口探测拿到的 loop_lag_ms：断连日志里带上它，
+ * 便于区分「进程死」与「进程活但业务循环忙」（IPC payload 结构不变）。
+ */
+let lastGatewayLoopLagMs: number | undefined;
+
 async function probeHealthApi(baseUrl: string) {
-  return probeGatewayInstance(baseUrl, { crewHome: activeGatewayCrewHome() });
+  const result = await probeBackendHealth(baseUrl, { crewHome: activeGatewayCrewHome() });
+  if (result.verified && typeof result.loopLagMs === 'number') {
+    lastGatewayLoopLagMs = result.loopLagMs;
+  }
+  return result;
 }
 
 // 供开发态 / 回退使用的 Gateway
@@ -1870,7 +1880,10 @@ function pushBackendStatus(
 ): void {
   backendConnected = connected;
   console.log(
-    `[main] backend status → ${connected ? 'connected' : `disconnected (${detail.failureKind ?? 'unknown'})`}`,
+    `[main] backend status → ${connected ? 'connected' : `disconnected (${detail.failureKind ?? 'unknown'})`}`
+    + (!connected && lastGatewayLoopLagMs !== undefined
+      ? `，最近 loop_lag_ms=${Math.round(lastGatewayLoopLagMs)}`
+      : ''),
   );
   try {
     mainWindow?.webContents.send('backend:status', backendStatusPayload(connected, detail));

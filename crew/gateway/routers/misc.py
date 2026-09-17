@@ -18,11 +18,10 @@ from crew.agent.skills import (
 )
 from crew.gateway.auth import AuthenticationError, account_from_request, require_admin
 from crew.gateway.context import complete_path, save_upload
+from crew.gateway.health_server import build_health_components
 from crew.gateway.instance_auth import (
     GATEWAY_INSTANCE_CHALLENGE_HEADER,
-    GATEWAY_INSTANCE_PROOF_FIELD,
-    create_gateway_instance_proof,
-    is_valid_gateway_instance_challenge,
+    build_gateway_health_payload,
 )
 from crew.state.logging import get_logger
 from crew.wiki.config import WikiConfig
@@ -150,22 +149,7 @@ def create_misc_router(crew) -> APIRouter:
         startup_status = str(
             getattr(request.app.state, "deferred_startup_status", "starting") or "starting"
         )
-        startup = {"status": startup_status}
-        if startup_status == "failed":
-            startup["message"] = "运行环境组件初始化失败，请查看 Gateway 日志"
-        cron = getattr(crew, "cron_service", None)
-        if cron is None:
-            cron_status = {"status": "disabled"}
-        elif bool(getattr(cron, "is_running", False)):
-            cron_status = {"status": "ready"}
-        elif str(getattr(cron, "start_error", "") or ""):
-            cron_status = {
-                "status": "failed",
-                "message": "定时任务启动失败，请查看 Gateway 日志",
-            }
-        else:
-            cron_status = {"status": "starting"}
-        return {"startup": startup, "cron": cron_status}
+        return build_health_components(startup_status, getattr(crew, "cron_service", None))
 
     @router.get("/api/health")
     async def health(request: Request) -> JSONResponse:
@@ -177,29 +161,10 @@ def create_misc_router(crew) -> APIRouter:
         """
 
         challenge = request.headers.get(GATEWAY_INSTANCE_CHALLENGE_HEADER)
-        if challenge is None:
-            return JSONResponse({
-                "ok": True,
-                "service": "crew-gateway",
-                "components": _components(request),
-            })
-        if not is_valid_gateway_instance_challenge(challenge):
-            return JSONResponse(
-                {"ok": False, "error": "invalid gateway instance challenge"},
-                status_code=400,
-            )
-        proof = create_gateway_instance_proof(challenge)
-        if proof is None:
-            return JSONResponse(
-                {"ok": False, "error": "gateway instance identity unavailable"},
-                status_code=503,
-            )
-        return JSONResponse({
-            "ok": True,
-            "service": "crew-gateway",
-            GATEWAY_INSTANCE_PROOF_FIELD: proof,
-            "components": _components(request),
-        })
+        payload, status = build_gateway_health_payload(challenge)
+        if status == 200:
+            payload["components"] = _components(request)
+        return JSONResponse(payload, status_code=status)
 
     # ---- 技能 ----
     @router.get("/api/skills")
