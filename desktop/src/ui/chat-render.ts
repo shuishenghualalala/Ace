@@ -604,6 +604,13 @@ function renderSubagentCard(tool: ToolCallInfo, messageId: string): HTMLElement 
   return renderTimelineItem(PROCESS_SUBAGENT_ICON_SVG, iconClass, details);
 }
 
+/** 进度行预览窗口：最多 10 条且累计不超过 2000 字符，超出折叠为可点击展开的提示。 */
+const PROGRESS_PREVIEW_LINES = 10;
+const PROGRESS_PREVIEW_CHARS = 2_000;
+
+/** 已手动展开的进度区（按 toolCallId 记忆，流式重渲染后保持展开状态）。 */
+const expandedProgressTools = new Set<string>();
+
 /** 将工具阶段进度按产生顺序渲染成独立行，不把最新状态挤进工具标题行。 */
 function appendToolProgressLines(parent: HTMLElement, tool: ToolCallInfo): void {
   const lines = tool.progressHistory?.length
@@ -615,11 +622,57 @@ function appendToolProgressLines(parent: HTMLElement, tool: ToolCallInfo): void 
 
   const progress = document.createElement('div');
   progress.className = 'process-timeline__progress';
-  for (const line of lines) {
+
+  const appendStage = (text: string, extraClass = '') => {
     const item = document.createElement('div');
-    item.className = 'process-timeline__stage';
-    item.textContent = line;
+    item.className = `process-timeline__stage${extraClass}`;
+    item.textContent = text;
     progress.appendChild(item);
+  };
+
+  const renderAll = (expanded: boolean) => {
+    progress.textContent = '';
+    if (expanded && lines.length > PROGRESS_PREVIEW_LINES) {
+      const collapse = document.createElement('div');
+      collapse.className = 'process-timeline__stage process-timeline__stage--toggle';
+      collapse.textContent = `已展开全部 ${lines.length} 行，点击收起`;
+      collapse.addEventListener('click', () => {
+        expandedProgressTools.delete(tool.toolCallId);
+        renderPreview();
+      });
+      progress.appendChild(collapse);
+    }
+    for (const line of lines) appendStage(line);
+  };
+
+  const renderPreview = () => {
+    progress.textContent = '';
+    // 从尾部取窗口：至少 1 条，最多 PROGRESS_PREVIEW_LINES 条且累计不超 PROGRESS_PREVIEW_CHARS
+    let start = lines.length;
+    let chars = 0;
+    while (start > 0) {
+      const shown = lines.length - start;
+      if (shown >= PROGRESS_PREVIEW_LINES) break;
+      const next = lines[start - 1]!;
+      if (shown > 0 && chars + next.length > PROGRESS_PREVIEW_CHARS) break;
+      chars += next.length;
+      start--;
+    }
+    const toggle = document.createElement('div');
+    toggle.className = 'process-timeline__stage process-timeline__stage--toggle';
+    toggle.textContent = `… 还有 ${start} 行，点击展开`;
+    toggle.addEventListener('click', () => {
+      expandedProgressTools.add(tool.toolCallId);
+      renderAll(true);
+    });
+    progress.appendChild(toggle);
+    for (const line of lines.slice(start)) appendStage(line);
+  };
+
+  if (lines.length > PROGRESS_PREVIEW_LINES && !expandedProgressTools.has(tool.toolCallId)) {
+    renderPreview();
+  } else {
+    renderAll(expandedProgressTools.has(tool.toolCallId));
   }
   parent.appendChild(progress);
 }

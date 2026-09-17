@@ -134,6 +134,17 @@
   white-space: normal;
 }
 
+/* 长进度折叠后的展开/收起提示行。 */
+.mw-process-timeline .process-timeline__stage--toggle {
+  cursor: pointer;
+  font-style: italic;
+}
+
+.mw-process-timeline .process-timeline__stage--toggle:hover {
+  color: var(--mw-text-primary);
+  text-decoration: underline;
+}
+
 .mw-process-timeline .process-timeline__duration {
   flex-shrink: 0;
   color: var(--mw-text-muted);

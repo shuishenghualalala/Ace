@@ -34,6 +34,7 @@ from typing import Any
 
 from crew.core.errors import ToolError
 from crew.state.logging import get_logger
+from crew.tools.output_filters import truncate_output
 from crew.tools.registry import Registry, tool_error
 
 log = get_logger("tools.mcp")
@@ -627,7 +628,9 @@ class _ServerWorker:
                         message = extracted
                     self._fail(request, message)
                 else:
-                    self._complete(request, extracted)
+                    # 成功结果过长时按 terminal 同款头尾截断，避免超大结果灌进上下文与 UI
+                    truncated, _ = truncate_output(extracted)
+                    self._complete(request, truncated)
             except TimeoutError:
                 consecutive_errors = 0
                 self._complete(
