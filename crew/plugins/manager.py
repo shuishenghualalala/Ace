@@ -11,6 +11,7 @@ plugins/<plugin-name>/
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import importlib.util
 import inspect
 import sys
@@ -82,6 +83,7 @@ _TERMINAL_ERROR_SUMMARY_LIMIT = 512
 # 同步回调已在线程中执行时，取消方愿意等待其收尾的最长时间；
 # 超时后放弃等待（线程无法强杀），记 warning 并让 CancelledError 传播。
 _SYNC_CALLBACK_CANCEL_GRACE_SECONDS = 2.0
+_CONTEXT_WRITE_BACK_UNSET = object()
 VALID_MIDDLEWARE = {
     TOOL_REQUEST_MIDDLEWARE,
     TOOL_EXECUTION_MIDDLEWARE,
@@ -338,12 +340,27 @@ class PluginContext:
                 except (TypeError, ValueError):
                     pass
                 if run_sync_in_thread and not inspect.iscoroutinefunction(callback):
+                    # 同步回调必须离开事件循环执行（避免冻结 loop），但线程里运行的是
+                    # 调用方 ContextVar 上下文的副本，回调内的 ContextVar.set 不会
+                    # 回传到调用协程。因此先 copy_context，把副本交给线程执行，await
+                    # 成功后把副本中发生变化的值写回调用协程的上下文——语义与同步回调
+                    # 内联执行一致。写回安全的前提：await 期间调用协程处于挂起状态，
+                    # 其上下文不会被并发修改；只写回值不同的变量，避免无谓的 set。
+                    # 异常与取消路径不写回，保持"失败无副作用"。
+                    ctx = contextvars.copy_context()
+
+                    async def _run_in_copied_context() -> Any:
+                        loop = asyncio.get_running_loop()
+                        return await loop.run_in_executor(
+                            None, lambda: ctx.run(callback, *args, **call_kwargs)
+                        )
+
                     work = asyncio.create_task(
-                        asyncio.to_thread(callback, *args, **call_kwargs),
+                        _run_in_copied_context(),
                         name=f"plugin-sync-callback:{self.manifest.name}:{label}",
                     )
                     try:
-                        return await asyncio.shield(work)
+                        result = await asyncio.shield(work)
                     except asyncio.CancelledError:
                         try:
                             await asyncio.wait_for(
@@ -360,6 +377,11 @@ class PluginContext:
                                 _SYNC_CALLBACK_CANCEL_GRACE_SECONDS,
                             )
                         raise
+                    for var in ctx:
+                        new_value = ctx[var]
+                        if var.get(_CONTEXT_WRITE_BACK_UNSET) != new_value:
+                            var.set(new_value)
+                    return result
                 result = callback(*args, **call_kwargs)
                 if inspect.isawaitable(result):
                     return await result

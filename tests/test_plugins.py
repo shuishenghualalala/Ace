@@ -699,3 +699,60 @@ def register(ctx):
         assert "泄漏" in caplog.text
     finally:
         module.release.set()
+
+
+async def test_sync_hook_contextvar_writeback_reaches_caller_context(tmp_path):
+    _write_sync_callback_plugin(
+        tmp_path,
+        "contextvar_writeback_plugin",
+        """
+import contextvars
+
+probe = contextvars.ContextVar("contextvar_writeback_probe", default="unset")
+
+def capture_hook(**kwargs):
+    probe.set("from-hook")
+
+def register(ctx):
+    ctx.register_hook("pre_tool_call", capture_hook)
+""",
+    )
+    plugins = PluginManager(registry=Registry())
+    plugins.discover_and_load([tmp_path], enabled=["contextvar_writeback_plugin"])
+    module = sys.modules["crew_runtime_plugins.contextvar_writeback_plugin"]
+
+    assert module.probe.get() == "unset"
+    blocked = await plugins.pre_tool_call(ToolCall("c1", "demo", {}))
+    assert blocked is None
+    # 同步 hook 内联执行时 set 会直接生效；线程化后依赖 ContextVar 写回
+    assert module.probe.get() == "from-hook"
+
+
+async def test_sync_hook_contextvar_not_written_back_on_error(tmp_path, caplog):
+    _write_sync_callback_plugin(
+        tmp_path,
+        "contextvar_error_plugin",
+        """
+import contextvars
+
+probe = contextvars.ContextVar("contextvar_error_probe", default="unset")
+
+def failing_hook(**kwargs):
+    probe.set("from-hook")
+    raise RuntimeError("boom")
+
+def register(ctx):
+    ctx.register_hook("pre_tool_call", failing_hook)
+""",
+    )
+    plugins = PluginManager(registry=Registry())
+    plugins.discover_and_load([tmp_path], enabled=["contextvar_error_plugin"])
+    module = sys.modules["crew_runtime_plugins.contextvar_error_plugin"]
+
+    # hook 异常被 _call_hook 记日志后吞掉，调用本身不抛出、也不拦截
+    with caplog.at_level("WARNING"):
+        blocked = await plugins.pre_tool_call(ToolCall("c1", "demo", {}))
+    assert blocked is None
+    assert "boom" in caplog.text
+    # 失败路径不写回，保持"失败无副作用"
+    assert module.probe.get() == "unset"
