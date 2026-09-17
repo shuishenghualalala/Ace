@@ -96,8 +96,8 @@
       <tr><td><code>desktop/src/main/preload.ts</code></td><td>暴露 <code>MobileWork</code> IPC：含 <code>readTextFile</code>（读内容）与 <code>pathExists</code>（静默存在性探测，不抛 ENOENT）。幽灵文件过滤必须用后者。另有 <code>gatewayFetch</code>（REST 桥）与 <code>gatewayUpload</code>（本地文件 multipart 上传桥，Phase 2）。</td></tr>
       <tr><td><code>desktop/src/main/index.ts</code>（gateway 通道）</td><td><code>gateway:fetch</code> handler：hostname 钳制到本地 gateway + JWT/身份头注入 + header 黑名单过滤。<code>gateway:upload</code> handler（Phase 2）：renderer 传文件绝对路径数组，主进程 stat（isFile / 非空 / ≤200MB）→ 读文件 → Node 内置 FormData/Blob 逐文件组 multipart POST，认证与 host 钳制逻辑与 fetch 完全一致；本地失败合成 4xx JSON 错误体，逐文件返回结果。</td></tr>
       <tr><td><code>desktop/src/shared/ipc-schemas.ts</code> / <code>constants.ts</code></td><td>IPC 参数手写 validator（零依赖）。<code>GatewayUploadArgs</code>（Phase 2）：hostname 白名单 + pathname 精确匹配 <code>GATEWAY_UPLOAD_ALLOWED_PATHS</code>（仅 /api/wiki/upload，不走 /api/ 前缀）+ files 绝对路径数组（≤32 个、单路径 ≤1024 字符、禁 NUL）；单文件上限 <code>GATEWAY_UPLOAD_MAX_FILE_BYTES</code>（200MB，后端未设限，主进程自限防内存打满）。</td></tr>
-      <tr><td><code>desktop/src/main/index.ts</code> / <code>gateway-restart-controller.ts</code> / <code>gateway-instance-auth.ts</code></td><td>主进程 Gateway 监督：认证组件健康探测，以及托管进程退出/启动错误后的串行自动重拉与指数退避；重拉期间重复退出信号会合并但不丢失，退出软件时停止待执行重拉。</td></tr>
-      <tr><td><code>desktop/src/ui/features/backend-status-guard.ts</code></td><td>基础健康控制环境准备遮罩；组件失败不重新阻塞界面，Cron <code>failed</code> 状态只显示一次明确 toast。</td></tr>
+      <tr><td><code>desktop/src/main/index.ts</code> / <code>gateway-restart-controller.ts</code> / <code>gateway-instance-auth.ts</code> / <code>backend-health-monitor.ts</code> / <code>backend-health-probe.ts</code></td><td>主进程 Gateway 监督：托管进程退出/启动错误后的串行自动重拉与指数退避；重拉期间重复退出信号会合并但不丢失，退出软件时停止待执行重拉。健康监控收敛为 <code>BackendHealthMonitor</code>：链式 setTimeout 串行探针（1s 间隔，上次 probe 结束才排下一次，绝不叠加）、启动/稳定双阈值（宽限 30s 内连续 10 次失败才判 disconnected，之后 3 次）、失败分类（unreachable/timeout/auth_failed/unknown）与 outage 起始时间戳经 <code>backend:status</code> IPC 下发，一次成功立即恢复。探测优先打 health 线程端口（主端口+1，摘取 <code>loop_lag_ms</code>），验证失败回退主端口 <code>/api/health</code>。</td></tr>
+      <tr><td><code>desktop/src/ui/features/backend-status-guard.ts</code></td><td>后端服务状态横幅：页面顶部通栏的非阻断提示（starting/busy/restarting/error 四态，由 connected + failureKind + since 派生，失败分类文案 + 查看日志/重试按钮），恢复自动消失；不阻断页面切换等任何交互，聊天输入框禁用由 composer 依 <code>uiStore.backendConnected</code> 自行处理。全屏遮罩与 setTab 阻断已删除。</td></tr>
       <tr><td><code>desktop/src/ui/features/history-mapping.ts</code> / <code>turn-file-counts.ts</code></td><td>历史「已编辑」卡：<code>filterExistingTurnFileChanges</code> 用 <code>pathExists</code> 剔除磁盘已不存在的临时路径；<code>hydrateMissingTurnFileCounts</code> 补全 +/- 后触发重绘。</td></tr>
       <tr><td><code>desktop/src/ui/features/wiki-page.ts</code></td><td>Wiki 三栏页：左侧时间线/文件树/类型/图谱，中间 Markdown 页面详情，右侧挂载持久化 Wiki Agent；KB 选择、上传/编译进度、分页、单删与批量管理继续复用既有实现。Wiki Agent 返回的页面引用经 <code>openWikiPageInHub</code> 在中栏打开。</td></tr>
       <tr><td><code>desktop/src/ui/features/wiki-graph.ts</code></td><td>Wiki 知识图谱视图（Phase 3，对齐 web WikiGraphView）：<code>backendApi.wikiGraph</code> 拉全量节点/边 → SVG 渲染（节点按 page_type 着色、deprecated 置灰、source_of 边带箭头、原生 <code>&lt;text&gt;</code> 标签截断 + <code>&lt;title&gt;</code> 全文）；滚轮缩放 / 拖拽平移 / 双击适应 / 缩放条（+ − 适应 1:1）/「显示来源节点」开关；布局在 Web Worker 计算（无 Worker 环境回退同步纯函数）。模块自管数据/布局/视口状态，wiki-page 每次 renderShell 重挂载不丢状态。</td></tr>
@@ -828,5 +828,19 @@
   <p><strong>S3 安装事务回滚</strong>：两级事务边界——单 Feature（两板同构的 <code>create*InstallTransaction</code>）在安装过程中即时收集每步 disposer，任一步失败逆序撤销本次贡献（每个清理单独兜底、互不阻断），成功后发布幂等 disposer 复用同一清理链；组合层 <code>applyBoardCapability</code> 逐板隔离，一块安装/卸载失败不牵连另一块、不上抛，初始安装与能力翻转走同一路径，故障解除后翻转/重试自动补装。顺带修复 <code>bindTaskBoardResize</code> disposer 中 mousemove 移除错绑的既有 bug。</p>
   <p>验证：6 测试文件 69 tests 全绿（新增组合层隔离 2 例 + 单 Feature 回滚 5 例 + S1 所有权 7 例，全部先红后绿）、tsc 0 error。见 <a href="../testing/review-followup-batch-2026-09-15.html">第二轮整改测试记录</a>。</p>
 </section>
+<section>
+  <h2>后端健康监控：非阻断状态横幅 + 独立 health 端口探测（2026-09-17）</h2>
+  <p><strong>全屏遮罩删除</strong>：「智能体运行环境准备中」全屏 loading 与 <code>backend-loading.css</code> 整体移除，<code>setTab</code> 的后端连接阻断与 init 旁路（<code>isBackendInitBypassActive</code>/<code>sealBackendInitBypass</code>）同步删除——断连期间页面切换、浏览历史会话等只读操作照常可用，聊天输入框禁用由 composer 依 <code>uiStore.backendConnected</code> 自行处理。替代物是页面顶部通栏状态横幅（<code>.backend-banner</code>，样式收敛在 <code>web-messages.css</code>），状态机由 <code>connected + failureKind + since</code> 派生四态：</p>
+  <ul>
+    <li><code>starting</code>（尚未收到失败分类，首次连通前过渡态）→「正在启动后端」info 色；</li>
+    <li><code>busy</code>（探测超时，事件循环忙）→「后端繁忙，已等待 Ns」warn 色，秒级刷新；</li>
+    <li><code>restarting</code>（TCP 被拒，进程大概率已退出，自动重拉中）→「后端无响应，正在自动重启」warn 色；</li>
+    <li><code>error</code>（auth_failed/unknown）→「后端连接异常」danger 色，附查看日志/重试按钮。</li>
+  </ul>
+  <p><strong>探针串行化与双阈值</strong>：原 <code>setInterval</code> 1s 不 await 触发会自我叠加，事件循环卡 3s 时最多 3 个在途探针同时超时、瞬间判 disconnected。现收敛为 <code>BackendHealthMonitor</code> 链式 setTimeout（上次 probe 结束并间隔 1s 才排下一次，probe 超时不叠加）；启动宽限期 30s 内阈值放宽为连续 10 次失败，稳定期 3 次（gateway 繁忙时单次 3s health 超时不判死）；一次成功立即恢复并清空计数。失败按 <code>GatewayProbeFailureKind</code> 分类（unreachable/timeout/auth_failed/unknown）与 outage 起始时间戳 <code>since</code> 一起经 <code>backend:status</code> IPC 下发，只在 connected→disconnected 跃迁推送一次（启动后从未连上时不推 disconnected，避免闪跳）；gateway 重建（自动/手动重试）后 <code>markRestart()</code> 复位宽限与计数。</p>
+  <p><strong>health 端口优先探测</strong>：后端新增独立线程 health 服务（默认主端口+1，与业务事件循环隔离，见 gateway 模块文档）。桌面端 <code>backend-health-probe.ts</code> 由主端口推导 +1 优先探测（复用 <code>probeGatewayInstance</code> 的 challenge/proof 校验，不复制），从响应摘取 <code>loop_lag_ms</code>；验证失败（旧 gateway 无独立 health 线程）回退主端口 <code>/api/health</code>。断连日志带上最近的 <code>loop_lag_ms</code>，便于区分「进程死」与「进程活但业务循环忙」。</p>
+  <p>验证：<code>backend-health-monitor.test.ts</code>、<code>gateway-instance-auth.test.ts</code>、<code>backend-health-probe.test.ts</code>、<code>backend-status-guard.test.ts</code> 覆盖串行排程、双阈值、失败分类、四态派生与恢复路径；后端 <code>tests/gateway/test_health_server.py</code> 覆盖线程服务与哨兵。全量验证见 <a href="../testing/agent-core-defects-batch-2026-09-17.html">agent 核心缺陷批次测试记录</a>。</p>
+</section>
+
 </body>
 </html>

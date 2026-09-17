@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Agent 核心缺陷修复批次测试记录（2026-09-17）</title>
+<style>body{font:16px/1.75 system-ui,sans-serif;max-width:960px;margin:auto;padding:40px 24px;color:#222}h2{border-bottom:1px solid #ddd}h3{margin-top:28px}code{background:#f4f4f4;padding:2px 5px}a{color:#245a83}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 10px}th{background:#f8f8f8}.bad{color:#b00020;font-weight:600}</style>
+</head>
+<body>
+<h1>Agent 核心缺陷修复批次测试记录</h1>
+<p>2026-09-17 · 分支 <code>fix/agent-core-defects</code> · 验证 HEAD <code>94b37b5</code> · worktree <code>/Users/ahuamao/Documents/Codes/Ace/.worktrees/agent-core-defects</code> · 环境 macOS（Apple Silicon） · 依据清单：<code>docs/todo/kimi-2026-09-16-agent-core-defects.md</code>。</p>
+
+<h2>提交清单（9 个 commit）</h2>
+<table>
+<thead><tr><th>提交</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td><code>71513d9</code></td><td>插件 hook/middleware 同步回调线程化，取消路径 2s 有界优雅窗口去 busy-spin</td></tr>
+<tr><td><code>cccc05e</code></td><td>桌面端健康探针串行化 + 失败分类 + 启动/稳定双阈值</td></tr>
+<tr><td><code>a8aa51b</code></td><td>子 agent 收尾顺序 / bg_events TTL 清扫 / delegate_task 异常隔离；sqlite 重试睡眠可注入</td></tr>
+<tr><td><code>2ffe5a6</code></td><td>删除全屏后端遮罩，改为非阻断状态横幅（失败分类文案 + 手动重试）</td></tr>
+<tr><td><code>4ce7c1b</code></td><td>per-tool 超时看门狗 + interrupt 可取消在途工具（aborted/timed-out 合法输出语义）</td></tr>
+<tr><td><code>08f746f</code></td><td>health 端点独立线程隔离 + 循环活性哨兵 loop_lag_ms</td></tr>
+<tr><td><code>679ace7</code></td><td>整回合 deadline（默认关闭）+ interrupt_message 消费 + compact 段中断检查</td></tr>
+<tr><td><code>e99e58e</code></td><td>追问/权限等待有界超时 + interrupt 取消联动（默认拒绝）</td></tr>
+<tr><td><code>94b37b5</code></td><td>热路径同步 I/O 治理：prompt 缓存 / env to_thread / llm_trace 队列落盘 / 媒体读取线程化</td></tr>
+</tbody>
+</table>
+
+<h2>验证汇总</h2>
+<table>
+<thead><tr><th>范围</th><th>命令</th><th>结果</th></tr></thead>
+<tbody>
+<tr><td>后端全量</td><td><code>uv run pytest -q --ignore=tests/security</code></td><td><strong>4113 passed / 7 failed / 43 skipped</strong>（590s）。失败清单与定级见下两节。</td></tr>
+<tr><td>失败隔离复跑</td><td>7 个失败用例单独复跑</td><td>6 个确定性失败（复跑仍失败）；<code>test_cron_run_now_background_task_strong_ref_drains</code> 单独复跑通过——全量运行时序 flake。</td></tr>
+<tr><td>基线对照</td><td>在分支基点 <code>61d1c8b</code> 上复跑 6 个确定性失败用例</td><td>3 个失败（与分支一致，基线已存在，非本分支引入）；3 个 wiki_learning 用例在基线<strong>通过</strong>——判定为本分支引入，见下节。</td></tr>
+<tr><td>静态门禁</td><td><code>uv run ruff check crew/</code></td><td>All checks passed!</td></tr>
+<tr><td>import 契约</td><td><code>uv run lint-imports</code></td><td>9 contracts kept, 0 broken</td></tr>
+<tr><td>桌面端全量单测</td><td><code>cd desktop &amp;&amp; npx vitest run tests/unit/</code></td><td>169 files / <strong>1970 passed</strong> 全绿（106.7s）</td></tr>
+<tr><td>桌面端类型</td><td><code>cd desktop &amp;&amp; npx tsc --noEmit</code></td><td>exit 0，0 error</td></tr>
+</tbody>
+</table>
+
+<h2>基线失败清单（基线已存在，非本分支引入）</h2>
+<p>以下 3 个用例在分支基点 <code>61d1c8b</code> 上以同命令复跑<strong>同样失败</strong>，属基线已存在失败：</p>
+<ul>
+<li><code>tests/test_agent.py::test_overflow_compacts_then_retries_once_then_errors</code></li>
+<li><code>tests/test_tool_result_lifecycle.py::test_full_compaction_recovers_protected_results</code></li>
+<li><code>tests/test_tool_result_lifecycle.py::test_protected_attachments_survive_repeated_compactions</code></li>
+</ul>
+<p>另有 <code>tests/gateway/test_background_tasks.py::test_cron_run_now_background_task_strong_ref_drains</code> 仅在后端全量运行时失败、单独复跑通过，为全量时序 flake，非确定性失败。</p>
+
+<h2 class="bad">本分支引入的失败（待修复，不在本文档批次范围）</h2>
+<p>以下 3 个用例在基线 <code>61d1c8b</code> 通过、自本分支首个 commit <code>71513d9</code> 起失败（逐 commit 二分确认）：</p>
+<ul>
+<li><code>tests/test_wiki_learning_plugin.py::test_plugin_learning_flow_captures_answer_privately</code></li>
+<li><code>tests/test_wiki_learning_plugin.py::test_assessment_is_idempotent_per_request_and_not_same_turn</code></li>
+<li><code>tests/test_wiki_learning_plugin.py::test_activity_rejects_nested_private_answers</code></li>
+</ul>
+<p><strong>根因</strong>：<code>71513d9</code> 把同步 hook 回调挪进 <code>asyncio.to_thread</code> 后，<code>plugins/wiki_learning</code> 的同步 <code>pre_llm_call</code> 钩子内对 ContextVar（<code>plugins/wiki_learning/context.py</code> 的 <code>_active_kb_id</code> / <code>_latest_user_text</code>）的 <code>.set()</code> 发生在 <code>to_thread</code> 的上下文<b>副本</b>里，无法回传事件循环侧调用方；后续学习工具执行时 <code>active_kb_id()</code> 读到默认值，抛「当前知识库上下文缺失」。修复方向（供后续批次）：hook 侧有状态回传需求的插件改经返回值/消息传递状态，或在 manager 侧为同步回调保留调用方上下文合并语义。</p>
+
+<h2>环境</h2>
+<ul>
+<li>macOS（Apple Silicon），Python 3.13.2（uv 管理），Node/npm（desktop 依赖 worktree 内 <code>desktop/node_modules</code>）。</li>
+<li>所有命令在 worktree <code>/Users/ahuamao/Documents/Codes/Ace/.worktrees/agent-core-defects</code> 内执行，日期 2026-09-17。</li>
+</ul>
+</body>
+</html>

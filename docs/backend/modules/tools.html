@@ -185,7 +185,7 @@
   <table>
     <thead><tr><th>工具</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td><code>ask_followup_question</code></td><td>当需求高度不确定时，向前端弹出单选/多选/文本输入交互框澄清。</td></tr>
+      <tr><td><code>ask_followup_question</code></td><td>当需求高度不确定时，向前端弹出单选/多选/文本输入交互框澄清；等待有界（默认 <code>runtime.interaction_timeout_seconds</code>=3600s，0=默认不限），超时按「用户未回答」收尾返回空答案。</td></tr>
       <tr><td><code>memory</code></td><td>读写轻量持久记忆。</td></tr>
     </tbody>
   </table>
@@ -223,7 +223,7 @@
       <tr><td>内置工具集</td><td>文件、终端、搜索、浏览器、子 Agent、Team、Wiki、Cron、交互、记忆、技能、Blueprint 等 70+ 工具</td><td>已落地</td></tr>
       <tr><td>执行流水线</td><td><code>validate_arguments</code>（JSON Schema）→ <code>check_permission</code>（allow/deny/ask）→ <code>truncate_or_persist</code>（大结果落盘）</td><td>已落地</td></tr>
       <tr><td>渐进式工具披露</td><td><code>tool_search</code>：核心工具常驻，延迟工具按需加载，token 预算控制</td><td>已落地</td></tr>
-      <tr><td>安全审批</td><td><code>security_guard</code>：文件/网络/外部运行时授权，需审批时阻塞等待 owner 决策</td><td>已落地</td></tr>
+      <tr><td>安全审批</td><td><code>security_guard</code>：文件/网络/外部运行时授权，需审批时阻塞等待 owner 决策；等待与 interrupt 竞争（interrupt 先到按拒绝结算），默认有界超时（<code>runtime.interaction_timeout_seconds</code>）。</td><td>已落地</td></tr>
       <tr><td>敏感脱敏</td><td><code>redact</code>：日志与工具输出的密钥 / URL / 凭据脱敏</td><td>已落地</td></tr>
       <tr><td>输出处理</td><td><code>output_filters</code>：去 ANSI、头尾截断、阈值可配</td><td>已落地</td></tr>
       <tr><td>后台进程</td><td><code>process_registry</code>：terminal background 进程的跟踪、输出缓冲、回收</td><td>已落地</td></tr>
@@ -301,6 +301,10 @@ truncate_or_persist(...)                                         # Stage 6 结�
 read_verified_bytes(path, *, max_bytes=None) -> bytes  # 读前 metadata 预检 + take(max+1) 复查
 snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，拒绝多硬链接写入</code></pre>
 
+  <h2>交互等待语义：追问与权限确认（2026-09-17）</h2>
+  <p><code>wait_for_answer</code> 的等待默认有界：调用方未显式传 <code>timeout</code> 时使用装配层注入的默认上限 <code>runtime.interaction_timeout_seconds</code>（默认 3600s，配置 0 为默认不限）——用户一直不选，到点按「用户未回答」收尾（返回空答案），回合不再无限挂起。显式传 timeout（含 None/0 维持不限语义）始终优先于默认值。<code>ask_followup_question</code> 与权限确认共用这套语义。</p>
+  <p>权限确认等待（<code>ToolRunner._wait_permission_answer</code>）与 interrupt 竞争（FIRST_COMPLETED）：interrupt 先到即结算挂起的追问（<code>cancel_followup</code> 回灌取消标记、清理 waiter 注册），返回空答案——上层按<strong>拒绝</strong>处理（安全默认），回合随后走 interrupt 收尾；回答或超时先到则 interrupt 等待 task 立即取消，绝不残留永久挂起的 task。单工具的真实执行段另有看门狗与中断语义，见 agent 模块文档。</p>
+
   <h2>6. 当前存在的问题 / TODO</h2>
   <ul class="todo">
     <li><code>file_read</code> 对 ≤512 MiB 的大文本文件仍是「整读后截断」：读整个文件只为返回 <code>read_max_chars</code>（默认 100000 字符），存在内存浪费；后续可改为按 offset/limit 流式读取。</li>
@@ -329,6 +333,8 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
       <tr><td>2026-09-01</td><td>新增工具结果生命周期注册契约；核心工具按语义分类，未知与 MCP 工具安全默认保留。</td><td><code>Tool</code>、<code>Registry</code>、内置工具注册。</td></tr>
       <tr><td>2026-09-01</td><td><code>file_read</code> 结果生命周期由 <code>resource</code>（分片级 identity 去重）改为 <code>temporary</code>：旧分片由 L1 清成含 path/offset 的信息摘要，完整压缩后按 path 去重、从磁盘重读最新内容恢复。</td><td><code>crew/tools/builtin.py</code>、<code>crew/agent/compact/post_compact.py</code></td></tr>
       <tr><td>2026-09-05</td><td>FunctionTool 增加动态 schema 解析，并让模型披露与执行校验共享当前 parameters。</td><td><code>run_agent</code> 的生命周期 preset enum。</td></tr>
+      <tr><td>2026-09-17</td><td><code>e99e58e</code> 追问 <code>wait_for_answer</code> 默认有界超时（<code>runtime.interaction_timeout_seconds</code> 默认 3600s，0=默认不限，显式传值优先）；权限确认等待 interrupt 取消联动，interrupt 先到按拒绝结算（安全默认），竞争 task 不残留。</td><td><code>crew/core/followup.py</code>、<code>crew/tools/interaction.py</code>、<code>crew/agent/loop/tool_runner.py</code>、<code>crew/state/config.py</code>。</td></tr>
+      <tr><td>2026-09-17</td><td><code>4ce7c1b</code> 工具执行段看门狗（<code>_execute_guarded</code>）：超时/中断合成 <code>timed out</code> / <code>aborted by user</code> 合法 tool output，结果状态识别扩展 aborted 语义。</td><td><code>crew/agent/loop/tool_runner.py</code>（执行流水线本体在 agent loop，详见 agent 模块）。</td></tr>
     </tbody>
   </table>
 
