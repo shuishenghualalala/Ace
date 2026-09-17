@@ -641,13 +641,13 @@ async def _run_background(
 ) -> None:
     """后台跑一个子 agent：完成后落任务看板 + 回调通知。fire-and-forget。
 
-    TaskManager 是同步写库（busy 重试会睡眠），事件循环上的调用一律挪到线程。
+    任务存储走 TaskManager 异步门面（内部 to_thread），事件循环上的调用不直接同步写库。
     """
     def _touch_progress(progress: dict[str, Any]) -> None:
-        # 活动戳是 best-effort 且每个 chunk 都可能触发：挪到线程，避免在事件循环上忙等
+        # 活动戳是 best-effort 且每个 chunk 都可能触发：走异步门面调度，避免在事件循环上忙等
         async def _do_touch() -> None:
             try:
-                await asyncio.to_thread(tasks.touch_activity, task_id, progress)
+                await tasks.touch_activity_async(task_id, progress)
             except Exception:  # noqa: BLE001
                 log.debug("后台子任务活动落库失败 task_id=%s", task_id)
         asyncio.ensure_future(_do_touch())
@@ -663,7 +663,7 @@ async def _run_background(
             active=active,
             idle_timeout=idle_timeout,
             max_runtime=max_runtime,
-            progress_callback=_touch_progress if hasattr(tasks, "touch_activity") else None,
+            progress_callback=_touch_progress if hasattr(tasks, "touch_activity_async") else None,
             preset_binding=item.get("preset_binding"),
         )
     except asyncio.CancelledError:
@@ -676,8 +676,7 @@ async def _run_background(
     finally:
         # 落任务看板（result 存结构化 JSON）
         try:
-            await asyncio.to_thread(
-                tasks.update_status,
+            await tasks.update_status_async(
                 task_id,
                 _STATUS_TO_TASK.get(result["status"], "failed"),
                 tool_result(result),
@@ -743,11 +742,10 @@ def register_subagent_tools(
         parent_session_id = (
             current_subagent_notify_session.get() or current_session_id.get() or ""
         )
-        # TaskManager 是同步写库（busy 重试会睡眠）：挪到线程，避免阻塞事件循环
-        create_runtime = getattr(tasks, "create_runtime", None)
-        if callable(create_runtime):
-            task = await asyncio.to_thread(
-                create_runtime,
+        # 任务存储走异步门面（内部 to_thread），避免阻塞事件循环
+        create_runtime_async = getattr(tasks, "create_runtime_async", None)
+        if callable(create_runtime_async):
+            task = await create_runtime_async(
                 kind="subagent",
                 session_id=parent_session_id or "subagent",
                 parent_task_id=current_parent_task_id.get(),
@@ -759,10 +757,9 @@ def register_subagent_tools(
                 backgrounded=True,
                 owner_account_id=current_owner_account_id.get(),
             )
-            await asyncio.to_thread(tasks.mark_running, task["task_id"])
+            await tasks.mark_running_async(task["task_id"])
         else:
-            task = await asyncio.to_thread(
-                tasks.create,
+            task = await tasks.create_async(
                 parent_session_id or "subagent",
                 title=goal_text[:40],
                 detail=goal_text,
@@ -959,7 +956,7 @@ def register_subagent_tools(
         if not task_id:
             return tool_error("task_id is required")
         try:
-            task = tasks.get(task_id, owner_account_id=current_owner_account_id.get())
+            task = await tasks.get_async(task_id, owner_account_id=current_owner_account_id.get())
         except KeyError:
             return tool_error(f"Task not found: {task_id}")
 
@@ -993,7 +990,7 @@ def register_subagent_tools(
             except asyncio.TimeoutError:
                 return tool_result({"status": "running", "task_id": task_id,
                                     "note": "等待超时，稍后再 collect"})
-        return _consume(tasks.get(task_id, owner_account_id=current_owner_account_id.get()))
+        return _consume(await tasks.get_async(task_id, owner_account_id=current_owner_account_id.get()))
 
     # 无预设子智能体时不注册 run_agent——否则 agent_type 的 enum 为空数组，
     # 模型无合法值可选、部分 provider 也会拒绝空 enum。delegate_task 仍可用。

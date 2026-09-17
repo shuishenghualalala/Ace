@@ -18,6 +18,15 @@ def compact_history_content(value: Any) -> str:
     return " ".join(str(value or "").split())
 
 
+async def _list_runtime_tasks(crew, **kwargs: Any) -> list[dict[str, Any]]:
+    """查询统一任务库：TaskRuntime 走异步门面；纯内存的测试 fake 直接同步返回。"""
+    tasks = crew.tasks
+    list_async = getattr(tasks, "list_tasks_async", None)
+    if callable(list_async):
+        return await list_async(**kwargs)
+    return tasks.list_tasks(**kwargs)
+
+
 def team_child_member_id(child_session_id: str) -> str | None:
     """Return the member suffix from a Team child session id.
 
@@ -167,7 +176,7 @@ def direct_mention_request_ids(
     }
 
 
-def team_visible_history_items(
+async def team_visible_history_items(
     crew,
     session_id: str,
     owner_account_id: str,
@@ -176,7 +185,7 @@ def team_visible_history_items(
     suppressed_request_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     try:
-        tasks = crew.tasks.list_tasks(limit=1000, owner_account_id=owner_account_id)
+        tasks = await _list_runtime_tasks(crew, limit=1000, owner_account_id=owner_account_id)
     except Exception:  # noqa: BLE001
         return []
     parent_turns = [
@@ -421,7 +430,7 @@ def _child_session_history_items(
     return items
 
 
-def team_internal_history_items(
+async def team_internal_history_items(
     crew,
     session_id: str,
     child_sessions: list[tuple[str, list[Message]]],
@@ -485,7 +494,7 @@ def team_internal_history_items(
             pass
     items.extend(_child_session_history_items(child_sessions, profiles))
     try:
-        tasks = crew.tasks.list_tasks(limit=1000, owner_account_id=owner_account_id)
+        tasks = await _list_runtime_tasks(crew, limit=1000, owner_account_id=owner_account_id)
     except Exception:  # noqa: BLE001
         tasks = []
     prefix = f"{session_id}::turn::"
@@ -542,14 +551,15 @@ def _turn_group_id(session_id: str) -> str:
     return f"{head}{marker}{request_id}"
 
 
-def team_tasks_with_plan_projection(
+async def team_tasks_with_plan_projection(
     crew,
     session_id: str,
     status: str | None,
     limit: int,
     owner_account_id: str,
 ) -> list[dict[str, Any]]:
-    all_tasks = crew.tasks.list_tasks(
+    all_tasks = await _list_runtime_tasks(
+        crew,
         status=status,
         limit=max(int(limit or 200), 1000),
         owner_account_id=owner_account_id,

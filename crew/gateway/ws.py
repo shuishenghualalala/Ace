@@ -428,7 +428,7 @@ def create_ws_router(
                     if not _session_owned(session_id):
                         await _reject_missing_session(session_id)
                         continue
-                    stopped = dispatcher.stop(session_id, owner_account_id=owner)
+                    stopped = await dispatcher.stop(session_id, owner_account_id=owner)
                     if not stopped:
                         await _send_status(session_id, "当前没有正在运行的回复")
                     continue
@@ -456,7 +456,7 @@ def create_ws_router(
                     if not _session_owned(session_id):
                         await _reject_missing_session(session_id)
                         continue
-                    task_id = dispatcher.background(session_id, owner_account_id=owner)
+                    task_id = await dispatcher.background(session_id, owner_account_id=owner)
                     msg = f"当前任务已转后台：{task_id}" if task_id else "当前没有可后台化的运行任务"
                     await _send_status(session_id, msg)
                     continue

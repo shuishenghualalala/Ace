@@ -189,7 +189,7 @@ async def test_stop_cascades_to_sidechain_turn_tasks():
         disp._tasks[parent] = {parent_task}
         disp._tasks[sidechain] = {sidechain_task}
 
-        assert disp.stop("web_parent", owner_account_id=OWNER) is True
+        assert await disp.stop("web_parent", owner_account_id=OWNER) is True
         assert parent_task.cancelled() or parent_task.cancelling()
         assert sidechain_task.cancelled() or sidechain_task.cancelling()
         assert "web_parent" in controller.interrupted
@@ -201,7 +201,8 @@ async def test_stop_cascades_to_sidechain_turn_tasks():
         hook_registry.unregister("session:end", disp._on_session_end)
 
 
-def test_stop_cancels_runtime_sidechain_tasks_without_memory_task(tmp_path):
+@pytest.mark.asyncio
+async def test_stop_cancels_runtime_sidechain_tasks_without_memory_task(tmp_path):
     runtime = TaskRuntime(str(tmp_path / "tasks.db"))
     parent = runtime.create_runtime(
         kind="agent_turn",
@@ -219,7 +220,7 @@ def test_stop_cancels_runtime_sidechain_tasks_without_memory_task(tmp_path):
     runtime.mark_running(sidechain["task_id"])
     disp = SessionDispatcher(_make_inner(), _FakeStore(), task_runtime=runtime)
     try:
-        assert disp.stop("web_parent", owner_account_id=OWNER) is True
+        assert await disp.stop("web_parent", owner_account_id=OWNER) is True
         assert runtime.get(parent["task_id"], owner_account_id=OWNER)["status"] == "cancelled"
         assert runtime.get(sidechain["task_id"], owner_account_id=OWNER)["status"] == "cancelled"
     finally:

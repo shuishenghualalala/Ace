@@ -194,7 +194,7 @@ async def _teardown_session_resources(
     ``messages_snapshot``：删库后再清盘时传入删前历史，供 uploads 反查路径。
     """
     try:
-        running = crew.tasks.list_tasks(
+        running = await crew.tasks.list_tasks_async(
             session_id=session_id, status="running", owner_account_id=owner, limit=1000
         )
     except Exception:  # noqa: BLE001
@@ -562,14 +562,14 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 team_child_member_id(child_id)
                 for child_id, _ in child_sessions
             )
-            internal = team_internal_history_items(
+            internal = await team_internal_history_items(
                 crew,
                 session_id,
                 child_sessions,
                 owner_account_id=owner,
                 config=config,
             )
-            visible = team_visible_history_items(
+            visible = await team_visible_history_items(
                 crew,
                 session_id,
                 owner_account_id=owner,
@@ -1516,7 +1516,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             getter = getattr(crew.session_store, "get_agent_config", None)
             config = getter(session_id, owner_account_id=owner) if session_id and callable(getter) else None
             if session_id and str((config or {}).get("executor") or "").lower() == "team":
-                return JSONResponse(team_tasks_with_plan_projection(
+                return JSONResponse(await team_tasks_with_plan_projection(
                     crew,
                     session_id,
                     status,
@@ -1524,7 +1524,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     owner_account_id=owner,
                 ))
             return JSONResponse(
-                crew.tasks.list_tasks(
+                await crew.tasks.list_tasks_async(
                     session_id=session_id,
                     status=status,
                     limit=limit,
@@ -1568,11 +1568,11 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         """Task detail; legacy session IDs still return a task list."""
         owner = _owner(request)
         try:
-            return JSONResponse(crew.tasks.get(task_or_session_id, owner_account_id=owner))
+            return JSONResponse(await crew.tasks.get_async(task_or_session_id, owner_account_id=owner))
         except KeyError:
             if not _session_owned(task_or_session_id, owner):
                 return _not_found(task_or_session_id)
-            return JSONResponse(crew.tasks.list(task_or_session_id, owner_account_id=owner))
+            return JSONResponse(await crew.tasks.list_async(task_or_session_id, owner_account_id=owner))
 
     @router.post("/api/tasks/{task_id}/cancel")
     async def cancel_task(request: Request, task_id: str, payload: dict | None = None) -> JSONResponse:

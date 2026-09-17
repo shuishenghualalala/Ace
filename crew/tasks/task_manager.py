@@ -55,6 +55,30 @@ class InMemoryTaskManager(TaskManager):
     def list(self, session_id: str) -> list[dict[str, Any]]:
         return [t.to_dict() for t in self._tasks.values() if t.session_id == session_id]
 
+    # async 门面：纯内存实现无阻塞，直接同步转发（不经线程池）。
+    async def create_async(
+        self,
+        session_id: str,
+        title: str,
+        detail: str = "",
+        assignee: str | None = None,
+        *,
+        owner_account_id: str,
+    ) -> dict[str, Any]:
+        return self.create(session_id, title, detail, assignee, owner_account_id=owner_account_id)
+
+    async def assign_async(self, task_id: str, assignee: str) -> dict[str, Any]:
+        return self.assign(task_id, assignee)
+
+    async def update_status_async(self, task_id: str, status: str, result: str = "") -> dict[str, Any]:
+        return self.update_status(task_id, status, result)
+
+    async def get_async(self, task_id: str, *, owner_account_id: str = "") -> dict[str, Any]:
+        return self.get(task_id)
+
+    async def list_async(self, session_id: str, *, owner_account_id: str = "") -> list[dict[str, Any]]:
+        return self.list(session_id)
+
     # ---- internal ----
     def _get(self, task_id: str) -> Task:
         if task_id not in self._tasks:
@@ -103,6 +127,50 @@ class LegacyTaskManagerAdapter:
 
     def mark_running(self, task_id: str):
         return self._legacy(self.runtime.mark_running(task_id))
+
+    # async 门面：转发到 TaskRuntime 异步门面（内部统一 to_thread），再套用旧词表。
+    async def create_async(
+        self,
+        session_id: str,
+        title: str,
+        detail: str = "",
+        assignee: str | None = None,
+        *,
+        owner_account_id: str,
+    ):
+        return self._legacy(
+            await self.runtime.create_async(
+                session_id,
+                title,
+                detail,
+                assignee,
+                owner_account_id=owner_account_id,
+            )
+        )
+
+    async def create_runtime_async(self, **kwargs):
+        return self._legacy(await self.runtime.create_runtime_async(**kwargs))
+
+    async def mark_running_async(self, task_id: str):
+        return self._legacy(await self.runtime.mark_running_async(task_id))
+
+    async def assign_async(self, task_id: str, assignee: str):
+        return self._legacy(await self.runtime.assign_async(task_id, assignee))
+
+    async def update_status_async(self, task_id: str, status: str, result: str = ""):
+        return self._legacy(await self.runtime.update_status_async(task_id, status, result))
+
+    async def get_async(self, task_id: str, owner_account_id: str):
+        return self._legacy(await self.runtime.get_async(task_id, owner_account_id=owner_account_id))
+
+    async def list_async(self, session_id: str, owner_account_id: str):
+        return [
+            self._legacy(task)
+            for task in await self.runtime.list_async(session_id, owner_account_id=owner_account_id)
+        ]
+
+    async def touch_activity_async(self, task_id: str, progress: dict[str, Any] | None = None):
+        return self._legacy(await self.runtime.touch_activity_async(task_id, progress))
 
     def assign(self, task_id: str, assignee: str):
         return self._legacy(self.runtime.assign(task_id, assignee))

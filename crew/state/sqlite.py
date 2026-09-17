@@ -132,8 +132,8 @@ class SQLiteWriteHelper:
         """同步写入路径（BEGIN IMMEDIATE + busy 重试）。
 
         只能在非事件循环线程调用；事件循环上的写一律用 execute_async。
-        个别存量同步 store（如任务看板 TaskManager）的写方法会被事件循环直接
-        调用，属于已知约束，消除方式是把调用方挪到 asyncio.to_thread。
+        任务看板（TaskRuntime/TaskManager）已在 store 侧提供 async 门面
+        （内部 to_thread 转发到本方法），事件循环调用方不得绕过门面直接写。
         """
         last_err: Optional[Exception] = None
         for attempt in range(_WRITE_MAX_RETRIES):

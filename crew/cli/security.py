@@ -164,7 +164,8 @@ def _security_mode_get(args: Any, ctx: CliContext) -> CliResult:
     return CliResult(data={"mode": mode, "session_id": args.session_id}, text=mode)
 
 
-def _security_mode_set(args: Any, ctx: CliContext) -> CliResult:
+async def _security_mode_set(args: Any, ctx: CliContext) -> CliResult:
+    """dispatcher.stop 已异步化，本 handler 以协程返回（cli/main 统一 await）。"""
     app = ctx.app
     sec_ctx = _security_context(app, ctx, args.session_id, args.task_id)
     requested = ConversationPermissionMode(args.mode)
@@ -177,7 +178,7 @@ def _security_mode_set(args: Any, ctx: CliContext) -> CliResult:
     changed = app.security_service.set_mode(sec_ctx, requested)
     effective = app.security_service.mode_for(sec_ctx).value
     if changed and app.dispatcher.status(args.session_id, owner_account_id=ctx.owner).get("live") != "idle":
-        app.dispatcher.stop(
+        await app.dispatcher.stop(
             args.session_id,
             reason="安全模式已切换，请重新执行当前操作",
             owner_account_id=ctx.owner,

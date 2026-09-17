@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -405,7 +406,7 @@ async def test_background_agent_turn_releases_foreground_via_sidechain(tmp_path)
 
     first = asyncio.create_task(drain(Envelope.of("first", session_id="s1", user_id="local")))
     await asyncio.sleep(0.03)
-    first_task_id = dispatcher.background("s1", owner_account_id="local")
+    first_task_id = await dispatcher.background("s1", owner_account_id="local")
     assert first_task_id
     second = asyncio.create_task(drain(Envelope.of("second", session_id="s1", user_id="local")))
     await asyncio.sleep(0.03)
@@ -569,3 +570,110 @@ def test_late_completion_cannot_overwrite_logout_cancellation(tmp_path):
     assert late["result"] == ""
     runtime_a.close()
     runtime_b.close()
+
+
+# --------------------------------------------------------------------------- #
+# async 门面（ADRs-0046 批次1）：事件循环上的同步写全部迁移到 xxx_async
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_async_facade_writes_match_sync_writes(tmp_path):
+    sync_rt = _runtime(tmp_path / "sync")
+    async_rt = _runtime(tmp_path / "async")
+    try:
+        sync_task = sync_rt.create_runtime(
+            kind="subagent", session_id="s1", title="sync", owner_account_id="local"
+        )
+        async_task = await async_rt.create_runtime_async(
+            kind="subagent", session_id="s1", title="sync", owner_account_id="local",
+            task_id=sync_task["task_id"],
+        )
+        assert async_task["task_id"] == sync_task["task_id"]
+
+        await async_rt.mark_running_async(async_task["task_id"])
+        assert (await async_rt.get_async(async_task["task_id"], owner_account_id="local"))["status"] == "running"
+
+        touched = await async_rt.touch_activity_async(async_task["task_id"], {"step": 1})
+        assert touched["progress"] == {"step": 1}
+        assert await async_rt.heartbeat_async(async_task["task_id"])
+
+        finished = await async_rt.finish_async(
+            async_task["task_id"], owner_account_id="local", status="completed", result="ok"
+        )
+        assert finished["status"] == "completed"
+        assert finished["result"] == "ok"
+
+        listed = await async_rt.list_tasks_async(session_id="s1", owner_account_id="local")
+        assert [t["task_id"] for t in listed] == [async_task["task_id"]]
+        listed_legacy = await async_rt.list_async("s1", owner_account_id="local")
+        assert listed_legacy == listed
+    finally:
+        sync_rt.close()
+        async_rt.close()
+
+
+@pytest.mark.asyncio
+async def test_async_facade_concurrent_writes_do_not_tear_state(tmp_path):
+    runtime = _runtime(tmp_path)
+    try:
+        created = await runtime.create_runtime_async(
+            kind="subagent", session_id="s1", title="并发", owner_account_id="local"
+        )
+        task_id = created["task_id"]
+        await runtime.mark_running_async(task_id)
+
+        # 两个协程并发 async 写同一任务：RLock + BEGIN IMMEDIATE 串行化，
+        # 每次写都必须读到完整的前序状态（updated_at 单调、progress 不撕裂）。
+        async def _writer(offset: int) -> None:
+            for i in range(20):
+                await runtime.touch_activity_async(task_id, {"writer": offset, "i": i})
+
+        await asyncio.gather(_writer(0), _writer(1))
+        final = await runtime.get_async(task_id, owner_account_id="local")
+        assert final["status"] == "running"
+        assert set(final["progress"]) == {"writer", "i"}
+        rows = await runtime.list_tasks_async(session_id="s1", owner_account_id="local")
+        assert len(rows) == 1
+        assert rows[0]["updated_at"] >= created["updated_at"]
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_async_facade_does_not_block_event_loop(tmp_path):
+    """回归：async 门面等待持锁写时，事件循环上的 ticker 必须持续推进。
+
+    从工作线程持有 store 锁制造竞争窗口：若写落在事件循环上（旧行为），
+    ticker 会被整个锁窗口卡住；走 to_thread 的 async 门面则让出 loop。
+    """
+    runtime = _runtime(tmp_path)
+    ticks: list[float] = []
+    done = asyncio.Event()
+
+    async def _ticker() -> None:
+        while not done.is_set():
+            ticks.append(time.monotonic())
+            await asyncio.sleep(0.002)
+
+    def _hold_store_lock() -> None:
+        with runtime._lock:  # noqa: SLF001 - 回归测试需要制造 store 锁竞争
+            time.sleep(0.2)
+
+    try:
+        created = await runtime.create_runtime_async(
+            kind="subagent", session_id="s1", title="ticker", owner_account_id="local"
+        )
+        task_id = created["task_id"]
+        ticker = asyncio.create_task(_ticker())
+        holder = asyncio.ensure_future(asyncio.to_thread(_hold_store_lock))
+        await asyncio.sleep(0)  # 让持锁线程先拿到锁
+        for i in range(5):
+            await runtime.touch_activity_async(task_id, {"i": i})
+        await holder
+        done.set()
+        await ticker
+        # 0.2s 锁窗口内 ticker 至少推进数十次；若同步写阻塞 loop，ticker 会整窗停滞
+        assert len(ticks) >= 30, f"ticker 推进不足（{len(ticks)} 次），事件循环疑似被阻塞"
+        gaps = [b - a for a, b in zip(ticks, ticks[1:])]
+        assert max(gaps) < 0.05, f"ticker 出现大间隔（{max(gaps):.3f}s），事件循环疑似被阻塞"
+    finally:
+        runtime.close()

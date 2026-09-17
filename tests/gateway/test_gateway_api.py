@@ -510,7 +510,7 @@ async def test_team_session_model_materializes_and_switches_one_member(tmp_path,
                 "expected_revision": 3,
             },
         )
-        crew.team._mark_child_active({
+        await crew.team._mark_child_active({
             "child_id": "task-model::member",
             "parent_session_id": "team-model",
             "owner_account_id": OWNER_A,

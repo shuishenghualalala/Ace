@@ -458,6 +458,66 @@ class TaskRuntime:
             ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    # ---- async 门面 ----
+    # 事件循环上的调用一律经 asyncio.to_thread 转发到上面的同步实现
+    # （RLock + BEGIN IMMEDIATE 语义不变）；线程化决策只收敛在本文件。
+    async def create_runtime_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.create_runtime, *args, **kwargs)
+
+    async def create_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.create, *args, **kwargs)
+
+    async def assign_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.assign, *args, **kwargs)
+
+    async def update_status_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.update_status, *args, **kwargs)
+
+    async def mark_running_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.mark_running, *args, **kwargs)
+
+    async def update_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.update, *args, **kwargs)
+
+    async def touch_activity_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.touch_activity, *args, **kwargs)
+
+    async def heartbeat_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.heartbeat, *args, **kwargs)
+
+    async def set_backgrounded_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.set_backgrounded, *args, **kwargs)
+
+    async def finish_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.finish, *args, **kwargs)
+
+    async def mark_notified_async(self, *args: Any, **kwargs: Any) -> bool:
+        return await asyncio.to_thread(self.mark_notified, *args, **kwargs)
+
+    async def mark_resume_enqueued_async(self, *args: Any, **kwargs: Any) -> bool:
+        return await asyncio.to_thread(self.mark_resume_enqueued, *args, **kwargs)
+
+    async def prune_finished_async(self, *args: Any, **kwargs: Any) -> int:
+        return await asyncio.to_thread(self.prune_finished, *args, **kwargs)
+
+    async def reconcile_after_restart_async(self, *args: Any, **kwargs: Any) -> None:
+        await asyncio.to_thread(self.reconcile_after_restart, *args, **kwargs)
+
+    async def block_owner_async(self, *args: Any, **kwargs: Any) -> None:
+        await asyncio.to_thread(self.block_owner, *args, **kwargs)
+
+    async def activate_owner_async(self, *args: Any, **kwargs: Any) -> None:
+        await asyncio.to_thread(self.activate_owner, *args, **kwargs)
+
+    async def get_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.get, *args, **kwargs)
+
+    async def list_async(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.list, *args, **kwargs)
+
+    async def list_tasks_async(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.list_tasks, *args, **kwargs)
+
     def attach_worker(
         self,
         task_id: str,

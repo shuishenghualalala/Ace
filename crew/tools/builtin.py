@@ -761,7 +761,7 @@ async def handle_terminal(
     owner = current_owner_account_id.get()
     if runtime is not None:
         output_dir = get_owner_runtime_home(owner) / "tasks"
-        task = runtime.create_runtime(
+        task = await runtime.create_runtime_async(
             kind="shell",
             session_id=current_session_id.get() or "shell",
             owner_account_id=owner,
@@ -783,7 +783,7 @@ async def handle_terminal(
         )
         task_id = task["task_id"]
         output_ref = str(output_dir / f"{task_id}.log")
-        runtime.update(task_id, owner_account_id=owner, output_ref=output_ref)
+        await runtime.update_async(task_id, owner_account_id=owner, output_ref=output_ref)
 
     if background:
         watch_patterns = args.get("watch_patterns") or []
@@ -792,7 +792,7 @@ async def handle_terminal(
         notify_on_complete = bool(args.get("notify_on_complete", False))
         try:
             if runtime is not None and task_id:
-                runtime.mark_running(task_id)
+                await runtime.mark_running_async(task_id)
             # launch 恒非 None：走到这里必然经过了上面的授权路径。
             session = process_registry.spawn_security(
                 command,
@@ -806,9 +806,9 @@ async def handle_terminal(
                 output_ref=output_ref,
             )
             if runtime is not None and task_id:
-                current = runtime.get(task_id, owner_account_id=owner)
+                current = await runtime.get_async(task_id, owner_account_id=owner)
                 if current["status"] == "running":
-                    runtime.touch_activity(task_id, {"pid": session.pid, "process_session_id": session.id})
+                    await runtime.touch_activity_async(task_id, {"pid": session.pid, "process_session_id": session.id})
                     runtime.attach_worker(
                         task_id,
                         None,
@@ -831,7 +831,7 @@ async def handle_terminal(
     # Foreground and background share one managed process. A long-running
     # foreground command is reclassified in place; it is never restarted.
     if runtime is not None and task_id:
-        runtime.mark_running(task_id)
+        await runtime.mark_running_async(task_id)
     session = process_registry.spawn_security(
         command,
         launch=launch,
@@ -843,9 +843,9 @@ async def handle_terminal(
         output_ref=output_ref,
     )
     if runtime is not None and task_id:
-        current = runtime.get(task_id, owner_account_id=owner)
+        current = await runtime.get_async(task_id, owner_account_id=owner)
         if current["status"] == "running":
-            runtime.touch_activity(task_id, {"pid": session.pid, "process_session_id": session.id})
+            await runtime.touch_activity_async(task_id, {"pid": session.pid, "process_session_id": session.id})
             runtime.attach_worker(
                 task_id,
                 None,
@@ -885,7 +885,7 @@ async def handle_terminal(
         if timeout_explicit and effective_timeout <= auto_after and elapsed >= effective_timeout:
             process_registry.kill_process(session.id, owner_account_id=session.owner_account_id)
             if runtime is not None and task_id:
-                runtime.finish(
+                await runtime.finish_async(
                     task_id,
                     owner_account_id=owner,
                     status="timed_out",
@@ -893,7 +893,7 @@ async def handle_terminal(
                 )
             raise ToolError(f"命令超时（>{effective_timeout}s）")
         if runtime is not None and task_id:
-            runtime.set_backgrounded(task_id, automatic=True)
+            await runtime.set_backgrounded_async(task_id, automatic=True)
         return json.dumps({
             "success": True,
             "background": True,

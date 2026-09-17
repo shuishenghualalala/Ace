@@ -55,14 +55,26 @@ class _DummyTaskRuntime:
         }
         return {"task_id": task_id}
 
+    async def create_runtime_async(self, **kwargs: Any) -> dict[str, Any]:
+        return self.create_runtime(**kwargs)
+
     def update(self, task_id: str, **kwargs: Any) -> None:
         self._tasks.setdefault(task_id, {}).update(kwargs)
+
+    async def update_async(self, task_id: str, **kwargs: Any) -> None:
+        self.update(task_id, **kwargs)
 
     def get(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
         return self._tasks.get(task_id, {"backgrounded": False, "output_ref": "", "status": "running"})
 
+    async def get_async(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
+        return self.get(task_id, **kwargs)
+
     def mark_running(self, task_id: str) -> None:
         self._tasks.setdefault(task_id, {})["status"] = "running"
+
+    async def mark_running_async(self, task_id: str) -> None:
+        self.mark_running(task_id)
 
     def touch_activity(self, task_id: str, progress: Any = None, **kwargs: Any) -> None:
         pass
@@ -72,6 +84,9 @@ class _DummyTaskRuntime:
 
     def finish(self, task_id: str, **kwargs: Any) -> None:
         self._tasks.setdefault(task_id, {})["status"] = kwargs.get("status", "completed")
+
+    async def finish_async(self, task_id: str, **kwargs: Any) -> None:
+        self.finish(task_id, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -719,7 +734,7 @@ async def test_stop_cancels_all_tasks():
     t2 = asyncio.create_task(_drain(disp.run(_env("s1"))))
     await asyncio.sleep(0.02)
 
-    stopped = disp.stop("s1", owner_account_id=OWNER)
+    stopped = await disp.stop("s1", owner_account_id=OWNER)
     assert stopped
 
     gate.set()  # 解除阻塞（虽然已经被取消）
@@ -773,7 +788,7 @@ async def test_stop_reason_uses_owner_scoped_key():
     task = asyncio.create_task(_drain(disp.run(Envelope.of("a", session_id="same", user_id="A:uid-a"))))
     await asyncio.sleep(0.02)
 
-    assert disp.stop("same", reason="owner scoped stop", owner_account_id="A:uid-a")
+    assert await disp.stop("same", reason="owner scoped stop", owner_account_id="A:uid-a")
     gate.set()
     result = await task
 
@@ -1505,7 +1520,7 @@ async def test_global_slot_released_when_run_cancelled():
     assert disp.status("b", owner_account_id=OWNER)["waiting_for_global_slot"] == 1
 
     # 取消 a → 槽释放 → b 获得
-    assert disp.stop("a", owner_account_id=OWNER)
+    assert await disp.stop("a", owner_account_id=OWNER)
     await asyncio.sleep(0.05)
     assert started == ["a", "b"]
     gate.set()
