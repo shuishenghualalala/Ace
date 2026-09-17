@@ -133,6 +133,19 @@ def format_subagent_notifications(pending: object) -> str:
         agent = r.get("agent", "子智能体")
         status = r.get("status", "")
         dur = r.get("duration_seconds", "")
+        if r.get("source") == "subagent-settled":
+            settlement = r.get("settlement")
+            if not isinstance(settlement, dict):
+                settlement = {}
+            stop_reason = settlement.get("stop_reason") or r.get("stop_reason", "")
+            agent_message = str(r.get("agent_message") or "").strip()
+            if not agent_message:
+                agent_message = "（子智能体未提供自述）"
+            lines.append(
+                f"\n## [{agent}] status={status} 用时={dur}s"
+                f" stop_reason={stop_reason}\n{agent_message}"
+            )
+            continue
         summary = str(r.get("summary", "")).strip()
         lines.append(f"\n## [{agent}] status={status} 用时={dur}s\n{summary}")
     return "\n".join(lines)

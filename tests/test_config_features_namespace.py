@@ -598,6 +598,12 @@ def test_features_subagent_runtime_policy_is_loaded_and_validated(tmp_path: Path
     assert cfg.subagent_default_provider == "external:reviewer"
     assert cfg.subagent_delegation_mode == "proactive"
 
+    continuable_path = _write_config(
+        tmp_path / "continuable",
+        {"features": {"subagent": {"continuable": True}}},
+    )
+    assert load_config(config_path=str(continuable_path)).subagent_continuable is True
+
     invalid_path = tmp_path / "invalid.yaml"
     invalid_path.write_text(
         yaml.safe_dump({"features": {"subagent": {"delegation_mode": "surprise"}}}),

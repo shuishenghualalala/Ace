@@ -182,5 +182,30 @@ def test_schema_feature_registered_in_migration_registry():
         "subagent_runs",
         "subagent_edges",
         "subagent_descriptors",
+        "subagent_messages",
     }
     assert SUBAGENT_SCHEMA_FEATURE == "subagent"
+
+
+def test_continuable_inbox_survives_store_reopen(tmp_path):
+    path = tmp_path / "subagent.db"
+    first = SubagentStore(path)
+    message_id = first.enqueue_message(
+        subagent_id="sub::a::1",
+        parent_session_id="parent-1",
+        owner_account_id="local",
+        body="queued",
+    )
+    assert message_id.startswith("msg::")
+    assert first.has_pending_messages("sub::a::1", owner_account_id="local")
+    first.close()
+
+    second = SubagentStore(path)
+    rows = second.take_messages(
+        subagent_id="sub::a::1",
+        parent_session_id="parent-1",
+        owner_account_id="local",
+    )
+    assert [row["body"] for row in rows] == ["queued"]
+    assert not second.has_pending_messages("sub::a::1", owner_account_id="local")
+    second.close()

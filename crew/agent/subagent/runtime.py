@@ -19,7 +19,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Any
 
 from crew.agent.subagent.service import (
@@ -237,6 +237,19 @@ class BatchSchedulePolicy:
         )
 
 
+@dataclass(slots=True)
+class ContinuableActivation:
+    """Process-local residency for one persisted subagent identity."""
+
+    descriptor: SubagentDescriptor
+    owner_account_id: str
+    workspace_id: str | None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    running: bool = False
+    pending_messages: deque[str] = field(default_factory=deque)
+    last_result: SubagentResult | None = None
+
+
 class SubagentRuntime:
     """Validate and dispatch one-shot requests to named providers."""
 
@@ -253,6 +266,7 @@ class SubagentRuntime:
         idle_timeout: float = 120.0,
         max_runtime: float = 1800.0,
         store: Any | None = None,
+        continuable_enabled: bool = False,
     ) -> None:
         if provider_registry is not None and providers is not None:
             raise ValueError("provide either provider_registry or providers, not both")
@@ -267,7 +281,9 @@ class SubagentRuntime:
         self.max_depth = self._validate_non_negative_int(max_depth, "max_depth")
         self.store = store
         self.active = active
+        self.continuable_enabled = bool(continuable_enabled)
         self._runs: dict[str, SubagentRun] = {}
+        self._activations: dict[str, ContinuableActivation] = {}
         self._lifecycle_events: dict[tuple[str, str], deque[dict[str, Any]]] = {}
         self._lifecycle_events_lock = threading.Lock()
         self._closed = False
@@ -359,6 +375,62 @@ class SubagentRuntime:
             limit=limit,
         )
 
+    def list_agents(
+        self,
+        *,
+        parent_session_id: str,
+        owner_account_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return authorized direct children with derived residency state."""
+
+        owner = normalize_owner_account_id(owner_account_id)
+        if self.store is None:
+            return []
+        rows = self.store.list_runs(
+            parent_session_id=parent_session_id,
+            owner_account_id=owner,
+            limit=500,
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            subagent_id = str(row.get("subagent_id") or "")
+            descriptor = self.store.read_descriptor(subagent_id) or {}
+            activation = self._activations.get(subagent_id)
+            if activation is None:
+                state = (
+                    "ready"
+                    if descriptor.get("lifecycle") == "continuable"
+                    and self.store.has_pending_messages(subagent_id, owner_account_id=owner)
+                    else (
+                        "idle"
+                        if descriptor.get("lifecycle") == "continuable"
+                        else "settled"
+                    )
+                )
+            elif activation.running:
+                state = "running"
+            elif activation.pending_messages or self.store.has_pending_messages(
+                subagent_id, owner_account_id=owner
+            ):
+                state = "ready"
+            else:
+                state = "idle"
+            result.append({
+                "subagent_id": subagent_id,
+                "parent_session_id": row.get("parent_session_id"),
+                "owner_account_id": row.get("owner_account_id"),
+                "label": descriptor.get("label") or row.get("label"),
+                "provider": descriptor.get("provider") or row.get("provider"),
+                "lifecycle": descriptor.get("lifecycle") or row.get("mode"),
+                "depth": descriptor.get("delegation_depth", row.get("depth")),
+                "state": state,
+                "status": row.get("status"),
+                "stop_reason": row.get("stop_reason"),
+                "created_at": row.get("created_at"),
+                "settled_at": row.get("settled_at"),
+            })
+        return result
+
     def publish_lifecycle_event(
         self,
         *,
@@ -425,6 +497,10 @@ class SubagentRuntime:
         if request is None:
             raise ValueError("subagent start requires a request")
         start_request = coerce_start_request(request)
+        if start_request.lifecycle == "continuable":
+            start_request = replace(start_request, session_persistence="hidden")
+        elif start_request.session_persistence != "none":
+            raise ValueError("one-shot subagents cannot use hidden session persistence")
         start_request = self._apply_depth_ledger(start_request)
         selected_provider = (
             provider_name
@@ -468,6 +544,8 @@ class SubagentRuntime:
             tool_filter=self._as_tool_filter(start_request.tool_filter),
             delegation_depth=start_request.child_depth,
             subagent_id=subagent_id,
+            session_persistence=start_request.session_persistence,
+            spec=dict(start_request.spec),
         )
         resolved = self._resolved_request(
             start_request,
@@ -528,6 +606,12 @@ class SubagentRuntime:
             descriptor=descriptor,
         )
         self._runs[wrapped.id] = wrapped
+        if descriptor.lifecycle == "continuable":
+            self._ensure_activation(
+                descriptor,
+                owner_account_id=start_request.owner_account_id,
+                workspace_id=start_request.workspace_id,
+            )
         self.publish_lifecycle_event(
             owner_account_id=start_request.owner_account_id,
             session_id=start_request.parent_session_id,
@@ -553,6 +637,7 @@ class SubagentRuntime:
         """Run and dispose one child, returning its terminal data."""
 
         options = dict(runtime_options or {})
+        activation_locked = bool(options.pop("_activation_locked", False))
         lease = options.pop("lease", None)
         lease_factory = options.pop("lease_factory", None)
         if lease is not None and lease_factory is not None:
@@ -596,22 +681,174 @@ class SubagentRuntime:
                     if isinstance(result, SubagentResult)
                     else fold_result(result)
                 )
-                return self._settle_completed(
+                settled = self._settle_completed(
                     subagent_id,
                     outcome,
                     recorder=recorder,
                 )
+                if run.descriptor is not None and run.descriptor.lifecycle == "continuable":
+                    settled = replace(settled, subagent_id=subagent_id)
+                    activation = self._activations.get(subagent_id)
+                    if activation is not None:
+                        activation.last_result = settled
+                return settled
             finally:
                 try:
                     await run.dispose()
                 except Exception:  # noqa: BLE001 - cleanup never replaces the outcome
                     log.exception("关闭子智能体运行 %s 失败", run.id)
-                self._close_edge_quietly(subagent_id)
+                if run.descriptor is None or run.descriptor.lifecycle != "continuable":
+                    self._close_edge_quietly(subagent_id)
+                activation = self._activations.get(subagent_id)
+                if activation is not None:
+                    activation.running = False
+
+        continuable_request = None
+        raw_request = request
+        if raw_request is None and provider is not None and not isinstance(provider, str):
+            raw_request = provider
+        if raw_request is not None:
+            candidate = coerce_start_request(raw_request)
+            if candidate.lifecycle == "continuable":
+                subagent_id = candidate.subagent_id or (
+                    f"sub::{candidate.label or 'subagent'}::{uuid.uuid4().hex[:8]}"
+                )
+                continuable_request = replace(candidate, subagent_id=subagent_id)
+                request = continuable_request
+                if raw_request is provider:
+                    provider = None
+        activation_lock = None
+        if continuable_request is not None and not activation_locked:
+            activation_lock = self._activation_lock(continuable_request.subagent_id or "")
+
+        async def run_with_locks() -> SubagentResult:
+            if activation_lock is not None:
+                async with activation_lock:
+                    activation = self._activations.get(continuable_request.subagent_id or "")
+                    if activation is not None:
+                        activation.running = True
+                    return await execute_once()
+            return await execute_once()
 
         if lease is None:
-            return await execute_once()
+            return await run_with_locks()
         async with lease:
-            return await execute_once()
+            return await run_with_locks()
+
+    async def send_message(
+        self,
+        *,
+        subagent_id: str,
+        message: str,
+        parent_session_id: str,
+        owner_account_id: str | None = None,
+        trigger_turn: bool = True,
+    ) -> dict[str, Any]:
+        """Deliver a message to an authorized continuable child."""
+
+        message = str(message or "").strip()
+        if not message:
+            raise ValueError("message must not be empty")
+        if self.store is None:
+            raise ValueError("continuable subagents require persistence")
+        owner = normalize_owner_account_id(owner_account_id)
+        row = self.store.get_run(subagent_id)
+        if row is None or normalize_owner_account_id(row.get("owner_account_id")) != owner:
+            raise KeyError(subagent_id)
+        if str(row.get("parent_session_id") or "") != str(parent_session_id):
+            raise PermissionError("subagent is not owned by this parent session")
+        descriptor = self.store.read_descriptor(subagent_id)
+        if not descriptor or descriptor.get("lifecycle") != "continuable":
+            raise ValueError("subagent is not continuable")
+        activation = self._ensure_activation_from_payload(descriptor, row)
+        async with activation.lock:
+            if not trigger_turn:
+                self.store.enqueue_message(
+                    subagent_id=subagent_id,
+                    parent_session_id=parent_session_id,
+                    owner_account_id=owner,
+                    body=message,
+                )
+                return {
+                    "status": "queued",
+                    "subagent_id": subagent_id,
+                    "state": "ready",
+                }
+            pending_rows = self.store.take_messages(
+                subagent_id=subagent_id,
+                parent_session_id=parent_session_id,
+                owner_account_id=owner,
+            )
+            messages = [
+                *[str(row.get("body") or "") for row in pending_rows],
+                *activation.pending_messages,
+                message,
+            ]
+            activation.pending_messages.clear()
+            activation.running = True
+            try:
+                result = await self.execute(
+                    StartRequest(
+                        label=str(descriptor.get("label") or row.get("label") or "subagent"),
+                        goal_text="\n\n".join(messages),
+                        parent_session_id=parent_session_id,
+                        owner_account_id=owner,
+                        workspace_id=row.get("workspace_id"),
+                        provider=str(descriptor.get("provider") or row.get("provider") or self.default_provider),
+                        lifecycle="continuable",
+                        subagent_id=subagent_id,
+                        parent_depth=int(descriptor.get("delegation_depth") or row.get("depth") or 0) - 1,
+                        spec=descriptor.get("spec") if isinstance(descriptor.get("spec"), Mapping) else {},
+                    ),
+                    runtime_options={
+                        "_activation_locked": True,
+                        "trusted_preset_spec": (
+                            descriptor.get("spec", {}).get("_preset_spec")
+                            if isinstance(descriptor.get("spec"), Mapping)
+                            else None
+                        ),
+                    },
+                )
+            finally:
+                activation.running = False
+            return {
+                "status": result.status,
+                "subagent_id": subagent_id,
+                "state": "idle",
+                "result": result.to_legacy_dict(
+                    agent=str(descriptor.get("label") or row.get("label") or "subagent")
+                ),
+            }
+
+    def interrupt_agent(
+        self,
+        *,
+        subagent_id: str,
+        parent_session_id: str,
+        owner_account_id: str | None = None,
+        message: str | None = None,
+    ) -> bool:
+        if self.store is None:
+            return False
+        row = self.store.get_run(subagent_id)
+        if row is None:
+            return False
+        if normalize_owner_account_id(row.get("owner_account_id")) != normalize_owner_account_id(owner_account_id):
+            return False
+        if str(row.get("parent_session_id") or "") != str(parent_session_id):
+            return False
+        interrupt_child = getattr(self.active, "interrupt_child", None)
+        if callable(interrupt_child) and interrupt_child(subagent_id, message):
+            return True
+        activation = self._activations.get(subagent_id)
+        if activation is not None:
+            activation.pending_messages.clear()
+            self.store.cancel_messages(
+                subagent_id,
+                owner_account_id=normalize_owner_account_id(owner_account_id),
+            )
+            return True
+        return False
 
     async def execute_batch(
         self,
@@ -877,6 +1114,9 @@ class SubagentRuntime:
                 # quiescent runtime as far as the provider permits.
                 pass
         self._runs.clear()
+        for subagent_id in tuple(self._activations):
+            self._close_edge_quietly(subagent_id)
+        self._activations.clear()
 
     close = aclose
 
@@ -938,17 +1178,21 @@ class SubagentRuntime:
         if self.store is None:
             return
         try:
-            self.store.record_run_start(
-                subagent_id=descriptor.subagent_id,
-                parent_session_id=start_request.parent_session_id,
-                owner_account_id=start_request.owner_account_id or "",
-                workspace_id=start_request.workspace_id,
-                depth=descriptor.delegation_depth,
-                mode=start_request.lifecycle,
-                provider=descriptor.provider,
-                label=descriptor.label,
-                events=events,
-            )
+            existing = self.store.get_run(descriptor.subagent_id)
+            if existing is not None and descriptor.lifecycle == "continuable":
+                self.store.reopen_run(descriptor.subagent_id, events=events)
+            else:
+                self.store.record_run_start(
+                    subagent_id=descriptor.subagent_id,
+                    parent_session_id=start_request.parent_session_id,
+                    owner_account_id=start_request.owner_account_id or "",
+                    workspace_id=start_request.workspace_id,
+                    depth=descriptor.delegation_depth,
+                    mode=start_request.lifecycle,
+                    provider=descriptor.provider,
+                    label=descriptor.label,
+                    events=events,
+                )
             self.store.write_descriptor(asdict(descriptor))
             if start_request.parent_session_id:
                 self.store.open_edge(
@@ -1042,6 +1286,7 @@ class SubagentRuntime:
                 stop_reason=settled.stop_reason,
                 timeout_kind=settled.timeout_kind,
                 events=recorder.events,
+                append=bool(run and run.get("mode") == "continuable"),
             )
         except Exception:  # noqa: BLE001 - 结算落库失败不吞掉子级结果
             log.exception("run 结算落库失败 subagent_id=%s", subagent_id)
@@ -1057,6 +1302,81 @@ class SubagentRuntime:
                 },
             )
         return settled
+
+    def _activation_lock(self, subagent_id: str) -> asyncio.Lock:
+        activation = self._activations.get(subagent_id)
+        if activation is not None:
+            return activation.lock
+        return self._ensure_activation_placeholder(subagent_id).lock
+
+    def _ensure_activation_placeholder(self, subagent_id: str) -> ContinuableActivation:
+        activation = self._activations.get(subagent_id)
+        if activation is not None:
+            return activation
+        activation = ContinuableActivation(
+            descriptor=SubagentDescriptor(subagent_id=subagent_id, lifecycle="continuable"),
+            owner_account_id="",
+            workspace_id=None,
+        )
+        self._activations[subagent_id] = activation
+        return activation
+
+    def _ensure_activation(
+        self,
+        descriptor: SubagentDescriptor,
+        *,
+        owner_account_id: str | None,
+        workspace_id: str | None,
+    ) -> ContinuableActivation:
+        current = self._activations.get(descriptor.subagent_id)
+        if current is not None:
+            if not current.descriptor.spec and descriptor.spec:
+                current.descriptor = descriptor
+                current.owner_account_id = normalize_owner_account_id(owner_account_id)
+                current.workspace_id = workspace_id
+                return current
+            if current.descriptor != descriptor and current.descriptor.spec:
+                raise SubagentPublicationError(
+                    f'continuable descriptor collision for "{descriptor.subagent_id}"'
+                )
+            return current
+        activation = ContinuableActivation(
+            descriptor=descriptor,
+            owner_account_id=normalize_owner_account_id(owner_account_id),
+            workspace_id=workspace_id,
+        )
+        self._activations[descriptor.subagent_id] = activation
+        return activation
+
+    def _ensure_activation_from_payload(
+        self,
+        payload: Mapping[str, Any],
+        row: Mapping[str, Any],
+    ) -> ContinuableActivation:
+        descriptor = SubagentDescriptor(
+            version=int(payload.get("version", 1)),
+            lifecycle="continuable",
+            provider=str(payload.get("provider") or row.get("provider") or self.default_provider),
+            parent_session_id=str(payload.get("parent_session_id") or row.get("parent_session_id") or ""),
+            label=payload.get("label") or row.get("label"),
+            model=payload.get("model"),
+            persona=payload.get("persona"),
+            tool_filter=tuple(payload.get("tool_filter") or ()),
+            delegation_depth=int(payload.get("delegation_depth") or row.get("depth") or 1),
+            subagent_id=str(payload.get("subagent_id") or row.get("subagent_id") or ""),
+            session_persistence=(
+                "hidden"
+                if payload.get("session_persistence") == "hidden"
+                or payload.get("lifecycle") == "continuable"
+                else "none"
+            ),
+            spec=dict(payload.get("spec") or {}),
+        )
+        return self._ensure_activation(
+            descriptor,
+            owner_account_id=row.get("owner_account_id"),
+            workspace_id=row.get("workspace_id"),
+        )
 
     def _close_edge_quietly(self, subagent_id: str) -> None:
         if self.store is None:
@@ -1268,6 +1588,7 @@ class LegacySubagentBackgroundRuntime:
             options["summary_policy"] = summary_policy
 
         result: dict[str, Any]
+        agent_message = ""
         try:
             raw_agent_options = spec.get("_agent_options")
             requests_tool_filter = any(
@@ -1288,9 +1609,15 @@ class LegacySubagentBackgroundRuntime:
                     tool_filter=() if requests_tool_filter else None,
                     owner_account_id=owner_account_id,
                     workspace_id=workspace_id,
+                    lifecycle=(
+                        "continuable"
+                        if bool(getattr(self._service, "continuable_enabled", False))
+                        else "one_shot"
+                    ),
                 ),
                 runtime_options=options,
             )
+            agent_message = outcome.output
             result = outcome.to_legacy_dict(agent=label)
         except asyncio.CancelledError:
             result = {
@@ -1314,9 +1641,20 @@ class LegacySubagentBackgroundRuntime:
             # 会调度恢复轮，若它先于入队执行，恢复轮会 drain 到空队列。
             if self._on_done is not None and parent_session_id:
                 try:
-                    result["task_id"] = task_id
-                    result["owner_account_id"] = owner_account_id
-                    self._on_done(parent_session_id, result)
+                    notification = dict(result)
+                    notification.update(
+                        {
+                            "task_id": task_id,
+                            "owner_account_id": owner_account_id,
+                            "source": "subagent-settled",
+                            "agent_message": agent_message,
+                            "settlement": {
+                                "status": result.get("status"),
+                                "stop_reason": result.get("stop_reason"),
+                            },
+                        }
+                    )
+                    self._on_done(parent_session_id, notification)
                 except Exception:  # noqa: BLE001 - completion notification is best effort
                     log.debug("后台子任务完成回调失败 task_id=%s", task_id, exc_info=True)
             try:

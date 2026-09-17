@@ -338,6 +338,7 @@ class Config:
     subagent_timeout_seconds: float = 1800.0  # 子 agent 绝对运行上限（全局兜底），0=不限
     subagent_default_provider: str = "inprocess-spawn"  # 部署侧默认传输；模型不可见
     subagent_delegation_mode: str = "explicit"  # explicit | proactive；只影响主 agent 的委派纪律
+    subagent_continuable: bool = False          # 是否为新委派启用持久子身份与控制面
     # 阶段 B：深度账本 / 同构批量 / 爬坡与限流退避 / 摘要兜底 / 持久层
     subagent_max_depth: int = 3           # 委派深度上限（单调记账，运行期只能加深）
     subagent_allow_nested: bool = False   # 子 agent 是否可见委派工具（默认关闭=行为与旧版一致）
@@ -1969,6 +1970,9 @@ def load_config(config_path: str | Path | None = None) -> Config:
                 )
                 delegation_mode = "explicit"
             cfg.subagent_delegation_mode = delegation_mode
+            cfg.subagent_continuable = bool(
+                subagent.get("continuable", cfg.subagent_continuable)
+            )
             # 阶段 B 键：深度/批量/爬坡/限流退避/摘要兜底/保留期。扁平旧键与
             # 本段同名语义一一对应（见 SubagentConfig 兼容别名说明）。
             cfg.subagent_max_depth = max(

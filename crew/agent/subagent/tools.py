@@ -99,6 +99,22 @@ class ActiveSubagents:
                 did = True
         return did
 
+    def interrupt_child(self, child_id: str, message: str | None = None) -> bool:
+        with self._lock:
+            records = [
+                record
+                for children in self._active.values()
+                for key, record in children.items()
+                if key == child_id
+            ]
+        did = False
+        for record in records:
+            fn = getattr(record.get("agent"), "interrupt", None)
+            if callable(fn):
+                fn(message)
+                did = True
+        return did
+
     def snapshot(
         self,
         parent_session_id: str | None = None,
@@ -409,6 +425,54 @@ def build_collect_subagent_schema() -> dict[str, Any]:
     }
 
 
+def build_send_message_schema() -> dict[str, Any]:
+    return {
+        "name": "send_message",
+        "description": (
+            "Send a message to a continuable subagent owned by this parent session. "
+            "Set trigger_turn=false to queue the message without starting a new turn."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "subagent_id": {"type": "string"},
+                "message": {"type": "string"},
+                "trigger_turn": {"type": "boolean"},
+            },
+            "required": ["subagent_id", "message"],
+        },
+    }
+
+
+def build_list_agents_schema() -> dict[str, Any]:
+    return {
+        "name": "list_agents",
+        "description": "List continuable subagents directly owned by this parent session.",
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+        },
+    }
+
+
+def build_interrupt_agent_schema() -> dict[str, Any]:
+    return {
+        "name": "interrupt_agent",
+        "description": "Interrupt a currently running subagent owned by this parent session.",
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "subagent_id": {"type": "string"},
+                "message": {"type": "string"},
+            },
+            "required": ["subagent_id"],
+        },
+    }
+
+
 def _compose_goal(goal: str, context: str | None) -> str:
     goal = (goal or "").strip()
     context = (context or "").strip()
@@ -485,6 +549,7 @@ def _start_request(
     spec: dict[str, Any],
     goal_text: str,
     parent_session_id: str,
+    lifecycle: str = "one_shot",
 ) -> StartRequest:
     raw_options = spec.get("_agent_options")
     requests_tool_filter = _spec_requests_tool_policy(spec)
@@ -502,6 +567,7 @@ def _start_request(
         tool_filter=() if requests_tool_filter else None,
         owner_account_id=current_owner_account_id.get(),
         workspace_id=current_workspace_id.get(),
+        lifecycle=lifecycle,  # type: ignore[arg-type]
     )
 
 
@@ -594,6 +660,11 @@ async def _execute_child(
             spec=spec,
             goal_text=goal_text,
             parent_session_id=parent_session_id,
+            lifecycle=(
+                "continuable"
+                if bool(getattr(runtime, "continuable_enabled", False))
+                else "one_shot"
+            ),
         ),
         runtime_options=options,
     )
@@ -696,6 +767,11 @@ async def _run_children(
             max_runtime=max_runtime,
         )
     requests: list[tuple[StartRequest, dict[str, Any]]] = []
+    lifecycle = (
+        "continuable"
+        if bool(getattr(runtime, "continuable_enabled", False))
+        else "one_shot"
+    )
     for item in specs:
         options: dict[str, Any] = {
             "idle_timeout": idle_timeout,
@@ -719,6 +795,7 @@ async def _run_children(
                 spec=item["spec"],
                 goal_text=item["goal_text"],
                 parent_session_id=parent_session_id,
+                lifecycle=lifecycle,
             ),
             options,
         ))
@@ -1075,6 +1152,86 @@ def build_subagent_tools(
             )
     else:
         log.info("无预设子智能体，跳过注册 run_agent（delegate_task 仍可用）")
+
+    # ---- continuable control plane ----
+    if bool(getattr(subagent_service, "continuable_enabled", False)) and all(
+        callable(getattr(subagent_service, name, None))
+        for name in ("send_message", "list_agents", "interrupt_agent")
+    ):
+        async def handle_send_message(args: dict[str, Any]) -> str:
+            subagent_id = str(args.get("subagent_id") or "").strip()
+            message = str(args.get("message") or "").strip()
+            if not subagent_id or not message:
+                return tool_error("subagent_id and message are required")
+            try:
+                result = await subagent_service.send_message(
+                    subagent_id=subagent_id,
+                    message=message,
+                    parent_session_id=current_session_id.get() or "",
+                    owner_account_id=current_owner_account_id.get(),
+                    trigger_turn=bool(args.get("trigger_turn", True)),
+                )
+            except PermissionError:
+                return tool_error("Subagent is not owned by this parent session")
+            except KeyError:
+                return tool_error(f"Unknown subagent: {subagent_id}")
+            except ValueError as exc:
+                return tool_error(str(exc))
+            return tool_result(result)
+
+        async def handle_list_agents(_args: dict[str, Any]) -> str:
+            return tool_result(subagent_service.list_agents(
+                parent_session_id=current_session_id.get() or "",
+                owner_account_id=current_owner_account_id.get(),
+            ))
+
+        async def handle_interrupt_agent(args: dict[str, Any]) -> str:
+            subagent_id = str(args.get("subagent_id") or "").strip()
+            if not subagent_id:
+                return tool_error("subagent_id is required")
+            accepted = subagent_service.interrupt_agent(
+                subagent_id=subagent_id,
+                parent_session_id=current_session_id.get() or "",
+                owner_account_id=current_owner_account_id.get(),
+                message=str(args.get("message") or "").strip() or None,
+            )
+            return tool_result({
+                "status": "interrupted" if accepted else "not_running",
+                "subagent_id": subagent_id,
+            })
+
+        publish_tool(
+            name="send_message",
+            toolset=SUBAGENT_TOOLSET,
+            schema=build_send_message_schema(),
+            handler=handle_send_message,
+            is_async=True,
+            display_name="发送给子智能体",
+            ui_label_template="发送给子智能体 {subagent_id}",
+            should_defer=True,
+            result_retention="important",
+        )
+        publish_tool(
+            name="list_agents",
+            toolset=SUBAGENT_TOOLSET,
+            schema=build_list_agents_schema(),
+            handler=handle_list_agents,
+            is_async=True,
+            display_name="列出子智能体",
+            should_defer=True,
+            result_retention="important",
+        )
+        publish_tool(
+            name="interrupt_agent",
+            toolset=SUBAGENT_TOOLSET,
+            schema=build_interrupt_agent_schema(),
+            handler=handle_interrupt_agent,
+            is_async=True,
+            display_name="中断子智能体",
+            ui_label_template="中断子智能体 {subagent_id}",
+            should_defer=True,
+            result_retention="important",
+        )
 
 
 def register_subagent_tools(

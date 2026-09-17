@@ -27,6 +27,7 @@ StopReason: TypeAlias = Literal[
 ]
 TimeoutKind: TypeAlias = Literal["idle", "absolute"]
 LifecycleKind: TypeAlias = Literal["one_shot", "continuable"]
+SessionPersistenceKind: TypeAlias = Literal["none", "hidden"]
 
 
 def normalize_stop_reason(value: object) -> StopReason:
@@ -142,6 +143,8 @@ class SubagentDescriptor:
     tool_filter: tuple[str, ...] = ()
     delegation_depth: int = 0
     subagent_id: str = ""
+    session_persistence: SessionPersistenceKind = "none"
+    spec: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def backend(self) -> str:
@@ -179,6 +182,7 @@ class StartRequest:
     subagent_id: str | None = None
     provider: str = ""
     lifecycle: LifecycleKind = "one_shot"
+    session_persistence: SessionPersistenceKind = "none"
     output_schema: Mapping[str, Any] | None = None
     tool_filter: Any | None = None
     persona: str | None = None
@@ -229,6 +233,7 @@ class SubagentResult:
     tool_calls: int = 0
     last_tool: str = ""
     duration_seconds: float = 0.0
+    subagent_id: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "stop_reason", normalize_stop_reason(self.stop_reason))
@@ -298,6 +303,8 @@ class SubagentResult:
         }
         if self.timeout_kind:
             result["timeout_kind"] = self.timeout_kind
+        if self.subagent_id:
+            result["subagent_id"] = self.subagent_id
         return result
 
 
@@ -426,6 +433,35 @@ class SubagentService(Protocol):
         *,
         max_concurrent: int,
     ) -> list[SubagentResult]:
+        ...
+
+    def list_agents(
+        self,
+        *,
+        parent_session_id: str,
+        owner_account_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        ...
+
+    async def send_message(
+        self,
+        *,
+        subagent_id: str,
+        message: str,
+        parent_session_id: str,
+        owner_account_id: str | None = None,
+        trigger_turn: bool = True,
+    ) -> dict[str, Any]:
+        ...
+
+    def interrupt_agent(
+        self,
+        *,
+        subagent_id: str,
+        parent_session_id: str,
+        owner_account_id: str | None = None,
+        message: str | None = None,
+    ) -> bool:
         ...
 
 
@@ -590,6 +626,7 @@ def coerce_start_request(value: StartRequest | Mapping[str, Any]) -> StartReques
 __all__ = [
     "DuplicateProviderError",
     "LifecycleKind",
+    "SessionPersistenceKind",
     "ProviderRegistry",
     "ResolvedStartRequest",
     "SUBAGENT_SERVICE_KEY",

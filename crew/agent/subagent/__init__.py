@@ -22,6 +22,7 @@ from crew.agent.subagent.feature import (
 )
 from crew.agent.subagent.runtime import (
     BatchSchedulePolicy,
+    ContinuableActivation,
     LegacySubagentBackgroundRuntime,
     RunLogRecorder,
     SubagentRuntime,
@@ -77,6 +78,9 @@ from crew.agent.subagent.tools import (
     build_collect_subagent_schema,
     build_delegate_task_schema,
     build_run_agent_schema,
+    build_interrupt_agent_schema,
+    build_list_agents_schema,
+    build_send_message_schema,
     register_subagent_tools,
 )
 
@@ -92,6 +96,7 @@ __all__ = [
     "fold_run_outcome",
     "RunLogRecorder",
     "BatchSchedulePolicy",
+    "ContinuableActivation",
     "SubagentDefinition",
     "parse_definition",
     "to_preset_contribution",
@@ -131,6 +136,9 @@ __all__ = [
     "build_subagent_tools",
     "build_delegate_task_schema",
     "build_run_agent_schema",
+    "build_send_message_schema",
+    "build_list_agents_schema",
+    "build_interrupt_agent_schema",
     "build_collect_subagent_schema",
     "SUBAGENT_BLOCKED_TOOLSETS",
     "SUBAGENT_BLOCKED_TOOLSET_PREFIXES",

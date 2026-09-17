@@ -1,10 +1,11 @@
-"""Subagent 自有三表持久层（ADR-0038 db-per-feature）。
+"""Subagent 自有四表持久层（ADR-0038 db-per-feature）。
 
 `subagent_runs` 记子身份与结局（run log 以 JSON 列随行落库）；`subagent_edges`
 记父子边（child 为主键、软删除）；`subagent_descriptors` 存版本化不可变
-descriptor，写入采用 first-wins——同名后续声明不能改写已发布的出生证明。
+descriptor，写入采用 first-wins——同名后续声明不能改写已发布的出生证明；
+`subagent_messages` 保存 continuable 身份的待投递邮箱。
 
-三张表只引用不透明 id，不与 Team/Work/Wiki 等域建跨域外键；owner 隔离为
+四张表只引用不透明 id，不与 Team/Work/Wiki 等域建跨域外键；owner 隔离为
 行级 `owner_account_id` 列，与其他 Feature 域一致。
 """
 
@@ -20,13 +21,18 @@ from typing import Any
 
 from crew.state._migration import SUBAGENT_DB_TABLES
 from crew.state.logging import get_logger
-from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
+from crew.state.schema_version import (
+    apply_version,
+    copy_legacy_feature_rows,
+    current_version,
+    stamp_baseline,
+)
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 log = get_logger("subagent.store")
 
 SUBAGENT_SCHEMA_FEATURE = "subagent"
-SUBAGENT_SCHEMA_VERSION = 1
+SUBAGENT_SCHEMA_VERSION = 2
 
 DESCRIPTOR_VERSION = 1
 # 版本化 payload 的合法字段全集：未知字段在读写两侧都拒绝（fail-loud），
@@ -43,6 +49,8 @@ _DESCRIPTOR_FIELDS = frozenset(
         "tool_filter",
         "delegation_depth",
         "subagent_id",
+        "session_persistence",
+        "spec",
     }
 )
 
@@ -80,6 +88,18 @@ CREATE TABLE IF NOT EXISTS subagent_descriptors (
   payload     TEXT NOT NULL,
   created_at  REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS subagent_messages (
+  message_id        TEXT PRIMARY KEY,
+  subagent_id       TEXT NOT NULL,
+  parent_session_id TEXT NOT NULL,
+  owner_account_id  TEXT NOT NULL DEFAULT '',
+  body              TEXT NOT NULL,
+  status            TEXT NOT NULL,
+  created_at        REAL NOT NULL,
+  consumed_at       REAL
+);
+CREATE INDEX IF NOT EXISTS idx_subagent_messages_target
+  ON subagent_messages(subagent_id, owner_account_id, status, created_at);
 """
 
 
@@ -102,7 +122,7 @@ def validate_descriptor_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class SubagentStore:
-    """Feature 自有库表：runs / edges / descriptors。"""
+    """Feature 自有库表：runs / edges / descriptors / messages。"""
 
     def __init__(
         self,
@@ -130,9 +150,9 @@ class SubagentStore:
         for statement in _SCHEMA.split(";"):
             if statement.strip():
                 conn.execute(statement)
-        stamp_baseline(
-            conn, SUBAGENT_SCHEMA_FEATURE, version=SUBAGENT_SCHEMA_VERSION
-        )
+        stamp_baseline(conn, SUBAGENT_SCHEMA_FEATURE, version=1)
+        if current_version(conn, SUBAGENT_SCHEMA_FEATURE) < SUBAGENT_SCHEMA_VERSION:
+            apply_version(conn, SUBAGENT_SCHEMA_FEATURE, SUBAGENT_SCHEMA_VERSION)
 
     def _migrate_legacy_rows(self, legacy_path: Path) -> None:
         """copy-on-first-activate：目标库任一本域表已有行即整体跳过。"""
@@ -207,13 +227,25 @@ class SubagentStore:
         stop_reason: str,
         timeout_kind: str | None = None,
         events: Sequence[Mapping[str, Any]] = (),
+        append: bool = False,
     ) -> None:
         """终态落库：结局、超时种类与完整 run log（append-only 事件流）。"""
 
-        payload = json.dumps(list(events), ensure_ascii=False)
+        new_events = list(events)
         settled_at = time.time()
 
         def write(conn: sqlite3.Connection) -> None:
+            payload_events = new_events
+            if append:
+                existing = conn.execute(
+                    "SELECT run_log FROM subagent_runs WHERE subagent_id = ?",
+                    (str(subagent_id),),
+                ).fetchone()
+                try:
+                    prior = json.loads(existing[0] or "[]") if existing else []
+                except (TypeError, ValueError):
+                    prior = []
+                payload_events = [*prior, *new_events]
             conn.execute(
                 """UPDATE subagent_runs
                    SET status = 'settled', stop_reason = :stop_reason,
@@ -224,9 +256,38 @@ class SubagentStore:
                     "subagent_id": subagent_id,
                     "stop_reason": stop_reason,
                     "timeout_kind": timeout_kind,
-                    "run_log": payload,
+                    "run_log": json.dumps(payload_events, ensure_ascii=False),
                     "settled_at": settled_at,
                 },
+            )
+
+        self._writer.execute(write)
+
+    def reopen_run(
+        self,
+        subagent_id: str,
+        *,
+        events: Sequence[Mapping[str, Any]] = (),
+    ) -> None:
+        """Reopen a continuable identity without replacing its descriptor."""
+
+        new_events = list(events)
+
+        def write(conn: sqlite3.Connection) -> None:
+            existing = conn.execute(
+                "SELECT run_log FROM subagent_runs WHERE subagent_id = ?",
+                (str(subagent_id),),
+            ).fetchone()
+            try:
+                prior = json.loads(existing[0] or "[]") if existing else []
+            except (TypeError, ValueError):
+                prior = []
+            conn.execute(
+                """UPDATE subagent_runs
+                   SET status = 'running', stop_reason = NULL,
+                       timeout_kind = NULL, run_log = ?, settled_at = NULL
+                   WHERE subagent_id = ?""",
+                (json.dumps([*prior, *new_events], ensure_ascii=False), str(subagent_id)),
             )
 
         self._writer.execute(write)
@@ -337,6 +398,88 @@ class SubagentStore:
         # 读侧同样校验：库里已损坏/超前的版本不得静默进入运行时。
         return validate_descriptor_payload(payload)
 
+    # ---- continuable inbox ----
+
+    def enqueue_message(
+        self,
+        *,
+        subagent_id: str,
+        parent_session_id: str,
+        owner_account_id: str,
+        body: str,
+    ) -> str:
+        """Persist one queued message for a continuable identity."""
+
+        import uuid
+
+        message_id = f"msg::{uuid.uuid4().hex}"
+        self._writer.execute(
+            lambda conn: conn.execute(
+                """INSERT INTO subagent_messages(
+                       message_id, subagent_id, parent_session_id,
+                       owner_account_id, body, status, created_at)
+                   VALUES(?, ?, ?, ?, ?, 'queued', ?)""",
+                (
+                    message_id,
+                    str(subagent_id),
+                    str(parent_session_id),
+                    str(owner_account_id),
+                    str(body),
+                    time.time(),
+                ),
+            )
+        )
+        return message_id
+
+    def take_messages(
+        self,
+        *,
+        subagent_id: str,
+        parent_session_id: str,
+        owner_account_id: str,
+    ) -> list[dict[str, Any]]:
+        """Atomically claim queued messages in creation order."""
+
+        def write(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                """SELECT * FROM subagent_messages
+                   WHERE subagent_id = ? AND parent_session_id = ?
+                     AND owner_account_id = ? AND status = 'queued'
+                   ORDER BY created_at, message_id""",
+                (str(subagent_id), str(parent_session_id), str(owner_account_id)),
+            ).fetchall()
+            if rows:
+                conn.executemany(
+                    """UPDATE subagent_messages
+                       SET status = 'consumed', consumed_at = ?
+                       WHERE message_id = ?""",
+                    [(time.time(), str(row["message_id"])) for row in rows],
+                )
+            return [dict(row) for row in rows]
+
+        return list(self._writer.execute(write) or [])
+
+    def has_pending_messages(self, subagent_id: str, *, owner_account_id: str) -> bool:
+        row = self._conn.execute(
+            """SELECT 1 FROM subagent_messages
+               WHERE subagent_id = ? AND owner_account_id = ? AND status = 'queued'
+               LIMIT 1""",
+            (str(subagent_id), str(owner_account_id)),
+        ).fetchone()
+        return row is not None
+
+    def cancel_messages(self, subagent_id: str, *, owner_account_id: str) -> int:
+        def write(conn: sqlite3.Connection) -> int:
+            result = conn.execute(
+                """UPDATE subagent_messages
+                   SET status = 'cancelled', consumed_at = ?
+                   WHERE subagent_id = ? AND owner_account_id = ? AND status = 'queued'""",
+                (time.time(), str(subagent_id), str(owner_account_id)),
+            )
+            return int(result.rowcount)
+
+        return int(self._writer.execute(write) or 0)
+
     # ---- retention ----
 
     def purge_expired(self, retain_days: int, *, now: float | None = None) -> int:
@@ -365,6 +508,9 @@ class SubagentStore:
             )
             conn.execute(
                 f"DELETE FROM subagent_edges WHERE child_id IN ({marks})", ids
+            )
+            conn.execute(
+                f"DELETE FROM subagent_messages WHERE subagent_id IN ({marks})", ids
             )
             return len(ids)
 

@@ -231,6 +231,9 @@ features:
     # explicit：仅在用户、项目指令或技能明确要求委派/并行时使用子智能体；
     # proactive：主智能体可在确有收益时主动委派。
     delegation_mode: explicit
+    # 是否启用持久子身份与 send_message/list_agents/interrupt_agent 控制面。
+    # 关闭时 delegate_task/run_agent 保持 one-shot 语义。
+    continuable: false
     # 委派深度上限（单调记账：持久值只抬高不降低，恢复不回退）。
     max_depth: 3
     # 子智能体是否可见委派工具（默认关闭 = 与旧版行为一致；开启即允许

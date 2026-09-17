@@ -35,6 +35,14 @@ _PARTIAL_CAP = 2000
 _PARTIAL_TAIL = 800
 INPROCESS_SPAWN_PROVIDER = "inprocess-spawn"
 
+
+def _canonical_child_session_id(parent_session_id: str, subagent_id: str) -> str:
+    """Return the hidden Session Store id used by a continuable child."""
+
+    if not parent_session_id:
+        return subagent_id
+    return f"{parent_session_id}::subagent::{subagent_id}"
+
 # 摘要兜底的扩写指令：要求子级在不重跑工具的前提下补全自包含汇报。
 SUMMARY_CONTINUATION_PROMPT = (
     "你上一条回复过于简短。请基于已完成的工作，给出更完整的自包含结果汇报："
@@ -81,6 +89,16 @@ class InProcessSpawnProvider:
         self._idle_timeout = idle_timeout
         self._max_runtime = max_runtime
 
+    def prepare_continuable(self, _request: ResolvedStartRequest) -> None:
+        """Declare support for continuable identities.
+
+        The Agent runtime persists the child session under the stable
+        ``subagent_id``.  Each turn can therefore rebuild the lightweight
+        in-process Agent while retaining the canonical conversation history.
+        """
+
+        return None
+
     async def start(self, request: ResolvedStartRequest) -> SubagentRun:
         """Publish a child run and return its holder-owned handle."""
 
@@ -125,14 +143,25 @@ class InProcessSpawnProvider:
             f"sub::{label}::{uuid.uuid4().hex[:8]}"
         )
         parent_session_id = request.parent_session_id or ""
+        child_session_id = (
+            _canonical_child_session_id(parent_session_id, child_id)
+            if request.session_persistence == "hidden"
+            else child_id
+        )
         owner_account_id = request.owner_account_id or current_owner_account_id.get()
         workspace_id = request.workspace_id or current_workspace_id.get()
         env = Envelope.of(
             request.effective_prompt,
-            session_id=child_id,
+            session_id=child_session_id,
             params={
-                "task_session_id": parent_session_id or child_id,
+                "task_session_id": (
+                    child_session_id
+                    if request.session_persistence == "hidden"
+                    else parent_session_id or child_id
+                ),
+                "parent_session_id": parent_session_id,
                 "agent_id": label,
+                "subagent_id": child_id,
             },
             channel="subagent",
             mode="agent",
@@ -322,10 +351,16 @@ class InProcessSpawnProvider:
                 )
                 continuation = Envelope.of(
                     SUMMARY_CONTINUATION_PROMPT,
-                    session_id=child_id,
+                    session_id=child_session_id,
                     params={
-                        "task_session_id": parent_session_id or child_id,
+                        "task_session_id": (
+                            child_session_id
+                            if request.session_persistence == "hidden"
+                            else parent_session_id or child_id
+                        ),
+                        "parent_session_id": parent_session_id,
                         "agent_id": label,
+                        "subagent_id": child_id,
                     },
                     channel="subagent",
                     mode="agent",
@@ -433,6 +468,8 @@ class InProcessSpawnProvider:
                 tool_filter=descriptor.tool_filter,
                 delegation_depth=descriptor.delegation_depth,
                 subagent_id=child_id,
+                session_persistence=descriptor.session_persistence,
+                spec=descriptor.spec,
             )
         return SubagentRun(
             child_id,

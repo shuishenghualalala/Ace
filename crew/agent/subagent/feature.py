@@ -194,6 +194,7 @@ def _create_candidate(
     retain_days: int,
     default_provider: str,
     max_depth: int,
+    continuable_enabled: bool,
     idle_timeout: float,
     max_runtime: float,
 ) -> tuple[SubagentRuntime, ActiveSubagents, SubagentStore]:
@@ -211,6 +212,7 @@ def _create_candidate(
             active=active,
             default_provider=default_provider,
             max_depth=max_depth,
+            continuable_enabled=continuable_enabled,
             idle_timeout=idle_timeout,
             max_runtime=max_runtime,
             store=store,
@@ -232,6 +234,7 @@ def build_subagent_feature(
     retain_days: int = 30,
     default_provider: str = "inprocess-spawn",
     max_depth: int = 3,
+    continuable_enabled: bool = False,
     idle_timeout: float = 120.0,
     max_runtime: float = 1800.0,
     desired_config_revision: int = 1,
@@ -270,6 +273,7 @@ def build_subagent_feature(
             retain_days=retain_days,
             default_provider=default_provider,
             max_depth=max_depth,
+            continuable_enabled=continuable_enabled,
             idle_timeout=idle_timeout,
             max_runtime=max_runtime,
         )

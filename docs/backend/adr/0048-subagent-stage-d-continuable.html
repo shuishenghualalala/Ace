@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ADR-0048 · Subagent Continuable D1-D5</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code,pre{background:#f5f5f5}code{padding:2px 5px}pre{padding:14px;overflow:auto}a{color:#245a83}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;vertical-align:top;padding:8px}.ok{color:#176b2c}</style></head>
+<body><main>
+<h1>ADR-0048 · Subagent Stage D1-D5：Continuable 身份与控制面</h1>
+<p>状态：<strong>已实施</strong> · 日期：2026-09-17 · 分支：<code>codex/subagent-multiagent-upgrade</code> · 前置：<a href="0047-subagent-stage-c-feature-lifecycle.html">ADR-0047</a>。</p>
+
+<h2>背景</h2>
+<p>Stage C 已把 Subagent 资源纳入 Feature Generation，但每次委派仍是一次性运行。子身份无法被可靠寻址，父 Agent 不能在下一轮继续投递，也没有统一的 owner/parent 授权边界；同时，隐藏子会话的稳定命名还没有接入 continuable Provider。</p>
+
+<h2>决定</h2>
+<ol>
+  <li>增加 <code>features.subagent.continuable</code> 开关，默认关闭。关闭时模型面工具完全保持 one-shot，避免旧部署出现可见行为变化。</li>
+  <li>continuable 委派使用持久 <code>subagent_id</code>。descriptor 继续采用 first-wins，新增运行规格快照，使进程重启后可用同一 Provider、模型与工具约束恢复子会话。</li>
+  <li>Runtime 在进程内维护最多一个 <code>ContinuableActivation</code> 记录。每个身份拥有一把 <code>asyncio.Lock</code>，所有 <code>send_message</code> 按身份串行，状态由 activation 和待投递队列派生。</li>
+  <li>增加三个控制面工具：<code>send_message</code>、<code>list_agents</code>、<code>interrupt_agent</code>。模型参数不携带 provider、owner 或权限字段；Runtime 根据当前 Context 与持久父子边验证授权。</li>
+  <li>进程内 Provider 通过相同的子会话 id 重建轻量 Agent，交由现有 Session Store 保存跨轮历史；不依赖 Unix <code>fork</code>、signal 或平台专用进程 API。</li>
+  <li>continuable 的 <code>session_persistence</code> 固定为 <code>hidden</code>，canonical session 使用 <code>{parent_session_id}::subagent::{subagent_id}</code>；公开身份仍是不透明的 <code>subagent_id</code>，父子关系以 edges 与 descriptor 为准。</li>
+</ol>
+
+<h2>授权不变量</h2>
+<table><thead><tr><th>边界</th><th>规则</th></tr></thead><tbody>
+  <tr><td>owner</td><td>请求 owner 必须与 run 记录的 <code>owner_account_id</code> 归一值一致。</td></tr>
+  <tr><td>parent</td><td>请求 parent 必须与 descriptor/run 的直接 <code>parent_session_id</code> 一致。</td></tr>
+  <tr><td>descriptor</td><td>后续请求不能改写首份 provider、深度、工具规格或子身份。</td></tr>
+  <tr><td>并发</td><td>同一身份的多个消息不能同时进入子 Agent；不同身份仍可并行。</td></tr>
+</tbody></table>
+
+<h2>边界</h2>
+<p>本 ADR 已交付身份、驻留锁、控制面、持久邮箱和通知来源分离。<code>trigger_turn=false</code> 的消息写入 <code>subagent_messages</code>，消费时再次校验 owner/parent；后台结算通知以 <code>agent_message</code> 保存子级自述，以 <code>settlement</code> 保存运行时账目，格式化层不把诊断冒充自述。后续仍需补齐更细粒度的 cold-resume 身份验证、三态驻留事件。fork、结构化输出和 UI reducer 另属 Stage E。</p>
+
+<h2>验证</h2>
+<p class="ok">Stage D1-D5 专项测试覆盖跨轮恢复、隐藏 session、进程重启后 descriptor 与 inbox 恢复、owner/parent 隔离、消息串行、通知来源分离、配置开关和模型工具注册。</p>
+<p><a href="../modules/subagent.html">Subagent 模块文档</a> · <a href="../../testing/subagent-stage-d-continuable.html">测试记录</a></p>
+</main></body></html>

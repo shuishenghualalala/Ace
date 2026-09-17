@@ -4025,6 +4025,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         retain_days=cfg.subagent_retain_runs_days,
         default_provider=cfg.subagent_default_provider,
         max_depth=cfg.subagent_max_depth,
+        continuable_enabled=cfg.subagent_continuable,
         idle_timeout=cfg.tasks_subagent_inactivity_timeout_seconds,
         max_runtime=cfg.tasks_subagent_execution_timeout_seconds,
     )

@@ -15,7 +15,7 @@
   <h1><span class="logo">A</span>crew/agent/subagent</h1>
   <div class="sub">把“如何委派”与“在哪里运行”分开；Provider 由 Feature 插件贡献，模型只选择任务或专家，不接触传输路由。</div>
 
-  <p>本模块按“请求契约 → 策略收窄 → Provider 解析 → 能力预检 → 结果折叠 → 旧工具适配”运行。阶段 A 建立语义内核，阶段 A2 用进程外外援作为第二种真实传输验证抽象，阶段 B 补齐账本与调度，阶段 C 已将完整能力迁入 <code>product.subagent</code> Feature Generation；continuable、fork 与 UI 贡献仍属于后续阶段。</p>
+  <p>本模块按“请求契约 → 策略收窄 → Provider 解析 → 能力预检 → 结果折叠 → 旧工具适配”运行。阶段 A 建立语义内核，阶段 A2 用进程外外援作为第二种真实传输验证抽象，阶段 B 补齐账本与调度，阶段 C 将完整能力迁入 <code>product.subagent</code> Feature Generation；阶段 D1-D5 已补齐持久 continuable 身份、隐藏子会话、驻留控制面、父级授权、持久邮箱和通知来源分离，fork 与 UI 贡献仍属于后续切片。</p>
   <table>
     <thead><tr><th>层</th><th>回答的问题</th><th>阶段 A 状态</th></tr></thead>
     <tbody>
@@ -30,7 +30,7 @@
   <h2>1. 职责与边界</h2>
   <ul>
     <li><strong>负责</strong>：能力预检、Provider 路由、一次性运行句柄、深度入口、双超时、部分输出、批量并发隔离、工具权限只收窄、旧返回格式适配。</li>
-    <li><strong>不负责</strong>：主 Agent 缓存、Team Formation、外援 Catalog 与进程安全、持久化 descriptor/run 日志、continuable 会话、fork 上下文继承和 UI。</li>
+    <li><strong>不负责</strong>：主 Agent 缓存、Team Formation、外援 Catalog 与进程安全、fork 上下文继承和 UI；持久化身份的核心控制由本模块负责，Team 通信仍由独立方案承接。</li>
     <li><strong>跨平台边界</strong>：只依赖 Python 的 <code>asyncio</code>、值对象和进程内回调；不依赖 Unix signal、<code>fork(2)</code>、文件锁或权限位。</li>
   </ul>
 
@@ -124,23 +124,48 @@ product.subagent Generation
     </tbody>
   </table>
 
-  <h2>9. 已知边界与后续阶段</h2>
+  <h2>9. Continuable 身份与控制面（D1-D5）</h2>
+  <p>开启 <code>features.subagent.continuable</code> 后，新的 <code>delegate_task</code> / <code>run_agent</code> 委派以 <code>subagent_id</code> 作为持久身份，并把 <code>session_persistence</code> 固定为 <code>hidden</code>。进程内 Provider 每轮使用 <code>{parent}::subagent::{subagent_id}</code> 作为 canonical session，复用既有隐藏会话列表约定；descriptor 的 first-wins 规格保证恢复时不会被后续请求改写。</p>
+  <pre><code>parent session
+  │ owns + authorizes
+  ▼
+subagent_id ── descriptor(spec, provider, depth, hidden session) ── subagent.db
+  │
+  ├─ Activation.lock：同一身份的 send_message 串行
+  ├─ pending_messages：trigger_turn=false 时进入 ready
+  └─ state：running / idle / ready（由驻留与队列派生）</code></pre>
+  <table>
+    <thead><tr><th>工具</th><th>语义</th><th>授权边界</th></tr></thead>
+    <tbody>
+      <tr><td><code>send_message</code></td><td>向 continuable 子身份投递消息；可选择立即开轮或先排队。</td><td>必须同时匹配当前 owner 与直接 parent session。</td></tr>
+      <tr><td><code>list_agents</code></td><td>列出当前父会话的直接子身份与派生状态。</td><td>查询在 Store 层按 owner + parent 过滤。</td></tr>
+      <tr><td><code>interrupt_agent</code></td><td>中断正在执行的子轮次，或清空尚未开轮的待投递消息。</td><td>不接受任意 parent/owner 的跨身份操作。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>10. 已知边界与后续阶段</h2>
   <ul>
-    <li>阶段 B 已交付：run log 与六态结局折叠、三张自有表（runs/edges/descriptors，first-wins descriptor + 软删除边 + 保留期清理）、深度账本（单调下界 + allow_nested 可见性真值表）、通知四态路由（消失丢弃/拆除只入队/忙 steer/空闲等恢复轮，内容单通道）、批量调度（爬坡 + 限流退避 + 定序聚合）与同构模板批量（prompt_template + items）、摘要兜底（preset 可覆盖阈值）。</li>
+    <li>阶段 B 已交付：run log 与六态结局折叠、四张自有表（runs/edges/descriptors/messages，first-wins descriptor + 软删除边 + 保留期清理）、深度账本（单调下界 + allow_nested 可见性真值表）、通知四态路由（消失丢弃/拆除只入队/忙 steer/空闲等恢复轮，内容单通道）、批量调度（爬坡 + 限流退避 + 定序聚合）与同构模板批量（prompt_template + items）、摘要兜底（preset 可覆盖阈值）。</li>
     <li>阶段 C 已交付：<code>product.subagent</code> Feature 统一拥有 runtime/store/background tasks、通知、工具、通用 preset、路由和生命周期事件；配置仍从现有 Config 兼容入口读取，外援以 optional Service consumer 方式在其后激活。</li>
-    <li>阶段 D/E：continuable（持久子身份、Activation、控制面工具、冷恢复）、fork、结构化输出、preset 收尾与 UI 贡献。</li>
+    <li>阶段 D1-D3 已交付：continuable 身份、隐藏 canonical session、first-wins descriptor 中的运行规格、Activation 单身份串行锁、owner/parent 双重授权，以及 <code>send_message</code> / <code>list_agents</code> / <code>interrupt_agent</code> 控制面。<code>features.subagent.continuable=false</code> 时工具保持 one-shot 且控制面不注册。</li>
+    <li>阶段 D4 已交付基础持久邮箱：<code>trigger_turn=false</code> 的消息写入 <code>subagent_messages</code>，重启后仍可由授权父会话消费；D5 已补齐后台结算通知的结构化来源分离；D4-D6 余项为更细粒度冷恢复身份校验、三态驻留事件、task_id/subagent_id 分账和连续会话 UI 消费。</li>
+    <li>阶段 E：fork、结构化输出、preset 收尾与 UI Contribution。</li>
     <li>限流重试目前是"同一简报重放"（进程内 one-shot 子级无可复用轮次）；子级上下文复用型重试随阶段 D continuable 引入。</li>
     <li>后台任务持久化仍由兼容适配器承接；语义执行、并发、超时与调度已从 handler 移入 Runtime/Provider。</li>
   </ul>
 
-  <h2>10. 变更记录</h2>
+  <h2>11. 变更记录</h2>
   <table><thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead><tbody>
+    <tr><td>2026-09-17</td><td>阶段 D4：将 continuable 待投递消息落入独立 inbox 表，并纳入子域 schema 版本与保留期清理。</td><td><code>trigger_turn=false</code> 的消息跨 Store/Runtime 重启保留，消费仍按 owner/parent 双重授权。</td></tr>
+    <tr><td>2026-09-17</td><td>阶段 D5：后台结算通知增加 <code>source=subagent-settled</code>、<code>agent_message</code> 与 <code>settlement</code> 字段，格式化层分开呈现自述与运行时账目。</td><td>通知仍沿用原有四态路由；任务收集的兼容 JSON 不携带内部来源字段，避免改变旧输出。</td></tr>
+    <tr><td>2026-09-17</td><td>阶段 D1：为 continuable 增加 <code>session_persistence=hidden</code>，canonical session 固定为父会话下的隐藏子会话。</td><td>跨轮恢复复用稳定 session history，既有会话列表与统计自动排除 <code>::</code> 内部会话；one-shot 不变。</td></tr>
+    <tr><td>2026-09-17</td><td>阶段 D1-D3：启用可配置 continuable 身份，增加 Activation 串行保护、冷启动 descriptor 规格恢复，以及三项控制面工具。</td><td>开启 <code>features.subagent.continuable</code> 后新委派返回 <code>subagent_id</code>，可按 owner/parent 继续投递；默认关闭保持 one-shot。</td></tr>
     <tr><td>2026-09-17</td><td>阶段 C：Subagent 迁入 <code>product.subagent</code> Feature Bundle，收口 Generation 资源、工具、preset、通知、路由与生命周期事件；应用保留兼容视图。</td><td>停用/重启可控，<code>/api/subagents</code> 与 <code>subagent.lifecycle</code> 按代门控；外援 Feature 在其后消费 Subagent Service。</td></tr>
     <tr><td>2026-09-16</td><td>阶段 A2：外援 Feature 以 owner-aware resolver 贡献 <code>external:*</code> Provider；preset 绑定传输，roster/schema 按 Provider 能力动态塑形。</td><td>新增第二种真实传输；模型工具不增加 provider 参数，停用外援后 fail-closed。</td></tr>
     <tr><td>2026-09-16</td><td>阶段 A：建立 Capability Seam、Runtime、进程内 Provider、纯策略、Agent Factory，并薄化工具层；增加委派纪律配置。</td><td>内部架构重构；唯一预期可见变化为委派决策与子级交卷指引。</td></tr>
   </tbody></table>
 
-  <h2>11. 小结</h2>
+  <h2>12. 小结</h2>
   <p>Subagent 已从“工具文件里的内联执行循环”演进为“稳定语义内核 + Feature-owned Provider 插件”。进程内与进程外传输共用同一份请求、能力预检、发布边界和结局；新增传输不需要修改 Runtime 或模型工具协议。</p>
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · 决策：<a href="../adr/0045-subagent-capability-seam.html">ADR-0045</a> / <a href="../adr/0046-subagent-stage-b-runlog-depth-notify.html">ADR-0046</a> / <a href="../adr/0047-subagent-stage-c-feature-lifecycle.html">ADR-0047</a> · 测试：<a href="../../testing/subagent-stage-a-semantic-runtime.html">Stage A</a> / <a href="../../testing/subagent-stage-a2-external-provider.html">Stage A2</a> / <a href="../../testing/subagent-stage-c-feature-lifecycle.html">Stage C</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · 决策：<a href="../adr/0045-subagent-capability-seam.html">ADR-0045</a> / <a href="../adr/0046-subagent-stage-b-runlog-depth-notify.html">ADR-0046</a> / <a href="../adr/0047-subagent-stage-c-feature-lifecycle.html">ADR-0047</a> / <a href="../adr/0048-subagent-stage-d-continuable.html">ADR-0048</a> · 测试：<a href="../../testing/subagent-stage-a-semantic-runtime.html">Stage A</a> / <a href="../../testing/subagent-stage-a2-external-provider.html">Stage A2</a> / <a href="../../testing/subagent-stage-c-feature-lifecycle.html">Stage C</a> / <a href="../../testing/subagent-stage-d-continuable.html">Stage D1-D5</a></div>
 </div></body></html>

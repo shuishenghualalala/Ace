@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Subagent Stage D1-D5 测试记录</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code,pre{background:#f5f5f5}code{padding:2px 5px}pre{padding:14px;overflow:auto}a{color:#245a83}.ok{color:#176b2c}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;vertical-align:top}</style></head>
+<body><main>
+<h1>Subagent Stage D1-D5 · Continuable 测试记录</h1>
+<p>日期：2026-09-17 · 分支：<code>codex/subagent-multiagent-upgrade</code> · 范围：持久身份、隐藏子会话、Activation、控制面、持久邮箱和配置开关。</p>
+
+<h2>1. 覆盖面</h2>
+<table><thead><tr><th>测试面</th><th>验证内容</th><th>文件</th></tr></thead><tbody>
+  <tr><td>跨轮恢复</td><td>同一 <code>subagent_id</code> 可先开轮、排队消息、再合并投递；返回值带身份。</td><td><code>tests/test_subagent_stage_d.py</code></td></tr>
+  <tr><td>隐藏会话</td><td>continuable 使用 <code>{parent}::subagent::{subagent_id}</code> 作为 canonical session；one-shot 不启用隐藏持久化。</td><td><code>tests/test_subagent_stage_d.py</code></td></tr>
+  <tr><td>冷恢复</td><td>关闭 Runtime/Store 后重新打开，读取 first-wins descriptor 的运行规格并继续执行；Store 重开后 queued inbox 仍可消费。</td><td><code>tests/test_subagent_stage_d.py</code> / <code>tests/test_subagent_store.py</code></td></tr>
+  <tr><td>授权</td><td>不同 owner 或 parent 不能发送消息；越权中断返回 false。</td><td><code>tests/test_subagent_stage_d.py</code></td></tr>
+  <tr><td>并发</td><td>同一身份同时收到两条消息时 peak execution 保持为 1。</td><td><code>tests/test_subagent_stage_d.py</code></td></tr>
+  <tr><td>兼容开关</td><td>continuable=false 不注册控制面工具；true 注册三个控制面工具。</td><td><code>tests/test_subagent_stage_d.py</code></td></tr>
+  <tr><td>通知来源</td><td>后台结算通知将子级自述与运行时 <code>stop_reason</code> 分开，旧任务收集 JSON 不被内部字段污染。</td><td><code>tests/test_subagent_stage_d.py</code> / <code>tests/test_subagent.py</code></td></tr>
+  <tr><td>回归</td><td>Stage A/B/C、外援 Provider、Store 和原有工具行为保持。</td><td>Subagent 定向回归集合</td></tr>
+</tbody></table>
+
+<h2>2. 执行命令与结果</h2>
+<pre><code>.venv/bin/python -m pytest tests/test_subagent_stage_d.py \
+  tests/test_config_features_namespace.py::test_features_subagent_runtime_policy_is_loaded_and_validated -q
+# 7 passed
+
+.venv/bin/python -m pytest tests/test_subagent.py tests/test_subagent_contract.py \
+  tests/test_subagent_runtime_contract.py tests/test_subagent_batch.py \
+  tests/test_subagent_stage_b.py tests/test_subagent_stage_c.py \
+  tests/test_subagent_stage_d.py tests/test_subagent_store.py \
+  tests/test_external_subagent_provider.py tests/test_agent_factory_feature.py \
+  tests/test_config_features_namespace.py -q
+# 197 passed, 2 warnings
+
+.venv/bin/ruff check crew/agent/subagent crew/state/config.py crew/app.py \
+  tests/test_subagent_stage_d.py tests/test_config_features_namespace.py
+# All checks passed
+
+.venv/bin/python -m pytest -q
+# 4634 passed, 47 skipped, 20 deselected, 2 warnings
+# 8 unrelated setup errors: environment lacks defusedxml/openpyxl</code></pre>
+
+<h2>3. 结论</h2>
+<p class="ok">D1-D5 当前切片达到交付标准：默认部署无行为变化；开启 continuable 后，身份、控制面和待投递邮箱均由 Runtime/Store 按 owner/parent 双重边界执行；后台结算通知保留自述与账目两条结构化来源。下一切片继续补充更细粒度 cold resume、生命周期三态和 task_id/subagent_id 分账。</p>
+<p><a href="../backend/modules/subagent.html">模块文档</a> · <a href="../backend/adr/0048-subagent-stage-d-continuable.html">ADR-0048</a></p>
+</main></body></html>
