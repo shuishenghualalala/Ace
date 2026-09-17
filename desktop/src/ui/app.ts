@@ -75,7 +75,7 @@ import { bindSettingsUi, registerConfigPaneRenderers } from './features/settings
 import { mountSettingsDataPanes } from './features/settings-data';
 import { requireRendererLogin } from './features/auth-gate';
 import { initAuthFlow } from './features/login';
-import { initBackendStatusGuard, isBackendConnected, isBackendInitBypassActive, sealBackendInitBypass } from './features/backend-status-guard';
+import { initBackendStatusGuard, isBackendConnected } from './features/backend-status-guard';
 import { bindHistoryPanelToggle, applyHistoryCollapsed } from './features/history-collapse';
 import { bindInspectorUi, openInspectorToTab, refreshInspector, setPlanBoardActions } from './features/inspector';
 import { bindAttachments } from './features/attachments';
@@ -163,11 +163,6 @@ import {
 const pageRegistry = new PageRegistry();
 
 function setTab(tab: TabKey): boolean {
-  // 后端服务未就绪时阻断页面切换，遮罩已由 backend-status-guard 展示。
-  // init 阶段旁路：允许构建 UI 骨架（遮罩覆盖下用户看不到）。
-  if (!isBackendInitBypassActive() && !isBackendConnected()) {
-    return false;
-  }
   if (tab === 'wiki' && !canNavigateToWiki(state.config)) return false;
   if (tab === 'agents' && !externalAgentsEnabled()) return false;
   void pageRegistry.activate(tab).catch((error) => notify(`打开页面失败：${(error as Error).message}`));
@@ -636,8 +631,6 @@ async function init(
   }
 
   // Phase 3: 后台慢慢来（失败不影响首屏；用户已能看到 welcome/chat 再补这些）
-  // 关闭 init 旁路：此后 setTab 受后端状态守卫约束（遮罩展示时阻断用户切换）
-  sealBackendInitBypass();
   void safe('initSecurityPage', initSecurityPage);
   void safe('initUsagePage', initUsagePage);
   void safe('initAgentsPage', () => initAgentsPage({
