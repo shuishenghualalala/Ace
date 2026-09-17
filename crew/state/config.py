@@ -300,6 +300,7 @@ class Config:
     gateway_dev_account: str = "dev:dev"  # 开发环境 owner ID，dev 模式下自动 admin
     gateway_max_active_runs: int = 4      # 不同 session 同时运行的全局上限
     gateway_max_queue_depth_per_session: int = 20  # 单 session 等待队列上限
+    health_port: int = 0   # 独立线程 health 服务端口（runtime.health_port）；0 = 主端口+1
 
     # --- security ---
     # 默认关闭：工具以当前宿主用户权限运行，不启用沙箱或审批链路。
@@ -346,6 +347,9 @@ class Config:
     tasks_subagent_execution_timeout_seconds: float = 1800.0
     tasks_agent_turn_inactivity_timeout_seconds: float = 600.0
     tasks_agent_turn_execution_timeout_seconds: float = 3600.0
+    # 单工具执行段看门狗：超时取消该工具并合成 "timed out after X.Xs" 作为正常
+    # tool output 回灌模型（tool_call/tool output 配对完整，回合继续推进），0=关闭。
+    tool_execution_timeout_seconds: float = 600.0
 
     # --- mcp / cron ---
     mcp_servers: dict[str, Any] = field(default_factory=dict)  # 外部 MCP server 配置
@@ -1803,6 +1807,13 @@ def load_config(config_path: str | Path | None = None) -> Config:
         raw_timeout_policy = runtime.get("timeout_policy", cfg.timeout_policy)
         cfg.timeout_policy = raw_timeout_policy if isinstance(raw_timeout_policy, dict) else {}
         cfg.sqlite_wal = bool(runtime.get("sqlite_wal", cfg.sqlite_wal))
+        cfg.tool_execution_timeout_seconds = _as_float(
+            runtime.get("tool_execution_timeout_seconds", cfg.tool_execution_timeout_seconds),
+            cfg.tool_execution_timeout_seconds,
+        )
+        health_port = _as_int_or_none(runtime.get("health_port", cfg.health_port))
+        if health_port is not None:
+            cfg.health_port = max(0, health_port)
         gw = data.get("gateway", {})
         cfg.gateway_host = gw.get("host", cfg.gateway_host)
         cfg.gateway_port = gw.get("port", cfg.gateway_port)

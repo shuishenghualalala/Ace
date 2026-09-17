@@ -34,6 +34,14 @@ runtime:
     binding_grace_seconds: 30
     # hard_timeout_seconds: 0
   sqlite_wal: true
+  # 单工具执行看门狗（秒）：单个工具的执行段（不含权限等待）超过 N 秒后取消该工具，
+  # 合成 "timed out after X.Xs" 作为正常 tool output 回给模型——tool_call/tool output
+  # 历史配对完整，回合继续推进，不会被一个挂死的工具冻结。0 = 关闭看门狗。
+  # 用户点「停止」时另有 interrupt 取消语义（优雅窗口后强取消，输出 aborted by user）。
+  tool_execution_timeout_seconds: 600
+  # 独立线程 health 服务端口（桌面端优先探测，业务事件循环卡超时仍能感知进程
+  # 活性）。0 表示自动（gateway 端口 + 1）；显式配置（如 8010）则覆盖默认值。
+  health_port: 0
 agent:
   executor: builtin
   parallel_tools: true

@@ -181,6 +181,7 @@ class BuiltinExecutor(AgentExecutor):
         plan_manager: Any = None,
         stream_continuation_max: int = 2,
         stream_retry_jitter: bool = True,
+        tool_execution_timeout_seconds: float = 600.0,
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -199,6 +200,8 @@ class BuiltinExecutor(AgentExecutor):
         self.plan_manager = plan_manager
         self.stream_continuation_max = stream_continuation_max
         self.stream_retry_jitter = stream_retry_jitter
+        # 执行段看门狗（秒）：经 ToolRunner 包裹单工具执行，超时合成 timed-out 输出，0=关闭。
+        self.tool_execution_timeout_seconds = max(0.0, float(tool_execution_timeout_seconds or 0.0))
         # 用于检测 plan 模式是否刚退出，以便注入一次性 exit reminder。
         self._plan_was_active = False
 
@@ -412,6 +415,7 @@ class BuiltinExecutor(AgentExecutor):
             session_id=ctx.session_id,
             control=control,
             plan_manager=self.plan_manager,
+            tool_execution_timeout_seconds=self.tool_execution_timeout_seconds,
             tool_search_schemas=tool_search_assembly.original_tool_schemas,
             tool_search_config=tool_search_assembly.config,
             authorized_tool_names=ctx.authorized_tool_names,
