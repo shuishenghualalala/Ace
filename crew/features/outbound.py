@@ -5,17 +5,17 @@ from __future__ import annotations
 from typing import Any
 
 from crew.core.envelope import ResponseChunk
-from crew.core.errors import CrewError, ProviderError, ToolError
+from crew.core.errors import CrewError, CrewErrorKind, ProviderError, category_for_kind
 from crew.features.response_filters import apply_text_filters, is_silent_reply
 
 
 def _error_category_from_exception(exc: Exception) -> str:
+    # 类型化错误优先读 kind：ProviderError 的 category 本身即 kind 的兼容别名；
+    # 其余 CrewError 经统一映射取展示用 category。非类型化异常走文本兜底。
     if isinstance(exc, ProviderError):
         return exc.category
-    if isinstance(exc, ToolError):
-        return "tool"
     if isinstance(exc, CrewError):
-        return "agent"
+        return category_for_kind(exc.kind)
     msg = str(exc).lower()
     if "timeout" in msg or "timed out" in msg:
         return "timeout"
@@ -76,12 +76,24 @@ def format_outbound_payload(
 
 
 def enrich_error_chunk(chunk: ResponseChunk, exc: Exception | None = None) -> ResponseChunk:
-    """为 error 帧补充 category 字段。"""
+    """为 error 帧补充 category 字段。
+
+    category 来源优先级：显式 exc 的类型化分类 > body 里已有 kind code 反推 >
+    "unknown"。body 中既有的 code/retryable/retry_delay 原样透传。
+    """
     body = dict(chunk.body or {})
     if exc is not None:
         body["category"] = _error_category_from_exception(exc)
     elif "category" not in body:
-        body["category"] = "unknown"
+        # 无 exc 时从 body 的 kind code 反推 category；code 缺失或非法值保持 "unknown"。
+        code = body.get("code")
+        category = "unknown"
+        if code:
+            try:
+                category = category_for_kind(CrewErrorKind(str(code)))
+            except ValueError:
+                category = "unknown"
+        body["category"] = category
     return ResponseChunk(
         request_id=chunk.request_id,
         kind=chunk.kind,

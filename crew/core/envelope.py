@@ -167,10 +167,18 @@ class ResponseChunk:
         sequence: int = 0,
         *,
         code: str | None = None,
+        retryable: bool | None = None,
+        retry_delay: float | None = None,
     ) -> "ResponseChunk":
+        """错误帧。code 传 CrewErrorKind 值（如 "timeout"）；retryable/retry_delay
+        为类型化错误的结构化重试提示，有则附加，纯增量不改既有帧结构。"""
         body = {"message": message}
         if code:
             body["code"] = code
+        if retryable is not None:
+            body["retryable"] = retryable
+        if retry_delay:
+            body["retry_delay"] = retry_delay
         return ResponseChunk(
             request_id,
             kind="error",

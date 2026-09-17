@@ -126,6 +126,10 @@ deadline: runtime.turn_deadline_seconds         # 默认 0=不限
   <p>子 agent 收尾顺序固定为<strong>先下中断标志再关流</strong>：<code>interrupt()</code> 必须在 <code>gen.aclose()</code> 之前设置——aclose 会把 GeneratorExit 推进子 agent 收尾逻辑，interrupt 在关流后才设置则收尾阶段永远观察不到（超时场景）。批量 <code>delegate_task</code> 执行具异常隔离：<code>asyncio.gather(return_exceptions=True)</code> 把单个子任务 runner 逃逸的异常折叠成该子任务的结构化失败结果（<code>status=error</code>），其余子任务结果照常返回；<code>CancelledError</code> 等 BaseException 不折叠、向上传播。后台子任务的完成事件表 <code>bg_events</code> entry 带完成时间戳，已完成且超过 TTL（3600s）的 entry 在新后台任务起飞时顺带清扫——模型从不 <code>collect</code> 时不再永久驻留。</p>
   <p>后台子任务路径上的同步 TaskManager 写库（create/mark_running/update_status/touch_activity 的 sqlite busy 重试会睡眠）一律经 <code>asyncio.to_thread</code> 挪到工作线程；事件循环上只允许 <code>execute_async</code> 异步写路径（见 state 模块文档）。</p>
 
+  <h2>LLM 重试与 error 帧结构化（2026-09-17，ADR-0045 批次 3）</h2>
+  <p>重试判定从 <code>isinstance(exc, ProviderError) and exc.retryable</code> 收敛为 <code>isinstance(exc, CrewError) and exc.is_retryable()</code>（ProviderError 显式 retryable 优先语义不变）；等待时长优先取服务端建议的 <code>retry_delay</code>（Retry-After / body 字段，批次 2 解析），封顶 <code>_RETRY_DELAY_CAP_SECONDS = 60s</code> 防异常大值拖死重试循环，无建议值时维持本地指数退避 + jitter。非 CrewError 异常不重试、走既有兜底。<code>unsupported_capability</code> 降级分支改按 <code>exc.kind</code> 判定（不再比对字符串 category）。</p>
+  <p>LLM 路径 error 帧（重试耗尽 / 流中断不可恢复）统一经 <code>_llm_error_chunk</code> 发出：CrewError 时 <code>code</code> 传 kind 值（如 <code>"timeout"</code>），body 附加 <code>retryable</code> 与 <code>retry_delay</code>（有则带，纯增量）；非类型化异常保持纯 message 帧。出站 <code>enrich_error_chunk</code> 的 category 优先取类型化分类（无 exc 时可从 body 的 kind code 反推），文本兜底仅保留给非类型化异常。</p>
+
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
     <li>文件恢复只重读本会话 file_read 已成功授权读取过的路径，读取走身份校验句柄（防 TOCTOU），不引入新的文件访问。</li>
@@ -160,6 +164,7 @@ deadline: runtime.turn_deadline_seconds         # 默认 0=不限
       <tr><td>2026-09-17</td><td><code>679ace7</code> 整回合 deadline（默认关闭）+ <code>interrupt_message</code> 消费（[回合中断] 历史标记 + status 帧）+ compact 段中断检查 + <code>estimate_tokens</code> 迭代内缓存。</td><td><code>crew/agent/executor/builtin.py</code>、<code>crew/agent/loop/control.py</code>、<code>crew/agent/compact/pipeline.py</code>（<code>turn_deadline_seconds</code> 默认 0）。</td></tr>
       <tr><td>2026-09-17</td><td><code>a8aa51b</code> 子 agent 收尾顺序（先 interrupt 后 aclose）、<code>delegate_task</code> 批量异常隔离、bg_events TTL 3600s 清扫、后台子任务 TaskManager 写库线程化。</td><td><code>crew/agent/subagent/tools.py</code>、任务看板写路径。</td></tr>
       <tr><td>2026-09-17</td><td><code>94b37b5</code> 热路径同步 I/O 治理：prompt 文件 mtime 缓存 + <code>build_prompt_parts</code> 异步化、owner env 刷新 to_thread、工具媒体读盘线程化。</td><td><code>crew/agent/prompt_builder.py</code>、<code>crew/agent/runtime.py</code>、<code>crew/state/home.py</code>、<code>crew/agent/loop/tool_runner.py</code>。</td></tr>
+      <tr><td>2026-09-17</td><td>ADR-0045 批次 3：重试消费 <code>retry_delay</code>（封顶 60s）+ error 帧结构化 <code>code=kind</code>/<code>retryable</code>/<code>retry_delay</code> + <code>unsupported_capability</code> 按 kind 判定。</td><td><code>crew/agent/executor/builtin.py</code>、<code>crew/core/envelope.py</code>、<code>crew/core/errors.py</code>、<code>crew/features/outbound.py</code>、<code>crew/gateway/dispatcher.py</code>。</td></tr>
     </tbody>
   </table>
 

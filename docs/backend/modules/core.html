@@ -109,6 +109,7 @@
       <tr><td>2026-09-03</td><td>将 Envelope mode 改为开放标识，并为能力不可用响应增加稳定错误码。</td><td><code>Envelope</code>、<code>ResponseChunk.error</code>、Execution Driver 调用方。</td></tr>
       <tr><td>2026-09-03</td><td>新增开放业务事件帧 <code>feature_event</code>（feature/event/version/payload）与 <code>ResponseChunk.feature_event()</code> 工厂；wiki_cards、wiki_ingest_progress、team_internal 三个业务枚举进入迁移期，生产侧不再使用。</td><td><code>ChunkKind</code>、<code>ResponseChunk</code>、事件生产方。</td></tr>
       <tr><td>2026-09-17</td><td>错误类型化（ADR-0045 批次 2）：新增 <code>CrewErrorKind</code> 枚举与 <code>kind</code>/<code>retry_delay</code> 字段，<code>CrewError.RETRYABLE_KINDS</code> 类级白名单 + <code>is_retryable()</code>；<code>ProviderError</code> 增 kind/status/retry_delay，category 保留为兼容别名并与 kind 双向映射；<code>ToolError</code>/<code>ConfigError</code> 经 <code>DEFAULT_KIND</code> 落定 TOOL/CONFIG；上下文溢出关键词清单收敛至此供 provider 分类与 loop 检测共用。</td><td><code>crew/core/errors.py</code>、provider 包装点、<code>crew/agent/loop/resilience.py</code>（ADR-0045）。</td></tr>
+      <tr><td>2026-09-17</td><td>错误类型化（ADR-0045 批次 3）：<code>ResponseChunk.error</code> 增可选 <code>retryable</code>/<code>retry_delay</code>（纯增量，code 约定传 kind 值）；<code>_KIND_TO_CATEGORY</code> 补齐 TOOL/CONFIG/CANCELLED 展示映射（UNKNOWN 仍落默认 "provider"）。</td><td><code>crew/core/envelope.py</code>、<code>crew/core/errors.py</code>；消费侧见 agent / gateway 模块文档。</td></tr>
     </tbody>
   </table>
 

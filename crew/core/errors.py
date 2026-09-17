@@ -42,6 +42,9 @@ _KIND_TO_CATEGORY: dict[CrewErrorKind, str] = {
     CrewErrorKind.AUTH: "auth",
     CrewErrorKind.FORBIDDEN: "forbidden",
     CrewErrorKind.UNSUPPORTED_CAPABILITY: "unsupported_capability",
+    CrewErrorKind.TOOL: "tool",
+    CrewErrorKind.CONFIG: "config",
+    CrewErrorKind.CANCELLED: "cancelled",
     CrewErrorKind.INTERNAL: "server",
 }
 _DEFAULT_CATEGORY = "provider"

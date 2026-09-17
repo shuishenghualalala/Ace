@@ -12,6 +12,7 @@ import asyncio
 import pytest
 
 from crew.core.envelope import Envelope, ResponseChunk
+from crew.core.errors import ConfigError, CrewErrorKind, ProviderError
 from crew.gateway.dispatcher import SessionDispatcher
 from crew.features.hooks import hook_registry
 from crew.tasks.runtime import TaskRuntime
@@ -230,3 +231,53 @@ async def test_stop_cancels_runtime_sidechain_tasks_without_memory_task(tmp_path
 async def _drain(iterator):
     async for _ in iterator:
         pass
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_provider_error_frame_carries_kind_fields():
+    """ProviderError 分支：error 帧带 kind(code)/category/retryable/retry_delay。"""
+
+    async def inner(envelope):
+        raise ProviderError("超时", kind=CrewErrorKind.TIMEOUT, retryable=True, retry_delay=2.0)
+        yield  # pragma: no cover
+
+    disp = SessionDispatcher(inner, _FakeStore())
+    try:
+        chunks = [
+            c
+            async for c in disp.run(
+                Envelope.of("hi", session_id="s-err", channel="test", user_id=OWNER)
+            )
+        ]
+        error = chunks[-1]
+        assert error.kind == "error"
+        assert error.body["code"] == "timeout"
+        assert error.body["category"] == "timeout"
+        assert error.body["retryable"] is True
+        assert error.body["retry_delay"] == 2.0
+    finally:
+        hook_registry.unregister("session:end", disp._on_session_end)
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_crew_error_frame_uses_kind_category():
+    """非 Provider 的 CrewError 分支：category 由 kind 映射，兜底 Exception 分支不变。"""
+
+    async def inner(envelope):
+        raise ConfigError("配置缺失")
+        yield  # pragma: no cover
+
+    disp = SessionDispatcher(inner, _FakeStore())
+    try:
+        chunks = [
+            c
+            async for c in disp.run(
+                Envelope.of("hi", session_id="s-cfg", channel="test", user_id=OWNER)
+            )
+        ]
+        error = chunks[-1]
+        assert error.kind == "error"
+        assert error.body["code"] == "config"
+        assert error.body["category"] == "config"
+    finally:
+        hook_registry.unregister("session:end", disp._on_session_end)

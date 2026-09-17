@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk
-from crew.core.errors import ProviderError, ToolError
+from crew.core.errors import CrewError, ProviderError, ToolError, category_for_kind
 from crew.core.runctx import current_owner_account_id, normalize_owner_account_id
 from crew.core.interfaces import MessageHandler, SessionStore
 from crew.core.types import Message
@@ -850,14 +850,34 @@ class SessionDispatcher:
                     except ProviderError as exc:
                         failed, err = True, str(exc)
                         log.exception("Provider 异常 session=%s", sid)
-                        chunk = ResponseChunk.error(rid, str(exc))
+                        chunk = ResponseChunk.error(
+                            rid, str(exc),
+                            code=exc.kind.value,
+                            retryable=exc.retryable,
+                            retry_delay=exc.retry_delay,
+                        )
                         chunk.body["category"] = exc.category
                         deferred_terminal = chunk
                     except ToolError as exc:
                         failed, err = True, str(exc)
                         log.exception("工具异常 session=%s", sid)
-                        chunk = ResponseChunk.error(rid, str(exc))
+                        chunk = ResponseChunk.error(
+                            rid, str(exc),
+                            code=exc.kind.value,
+                            retryable=exc.is_retryable(),
+                        )
                         chunk.body["category"] = "tool"
+                        deferred_terminal = chunk
+                    except CrewError as exc:
+                        failed, err = True, str(exc)
+                        log.exception("业务异常 session=%s", sid)
+                        chunk = ResponseChunk.error(
+                            rid, str(exc),
+                            code=exc.kind.value,
+                            retryable=exc.is_retryable(),
+                            retry_delay=exc.retry_delay,
+                        )
+                        chunk.body["category"] = category_for_kind(exc.kind)
                         deferred_terminal = chunk
                     except Exception as exc:  # noqa: BLE001 — inner 执行委托 provider/tool/skill/plan 多条未知路径，请求最外层兜底须吞住并回报错帧
                         failed, err = True, str(exc)

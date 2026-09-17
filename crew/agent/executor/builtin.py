@@ -44,7 +44,7 @@ from crew.agent.loop import (
 )
 from crew.agent.loop.tool_dispatch_helpers import plan_tool_calls
 from crew.core.envelope import ResponseChunk
-from crew.core.errors import ProviderError
+from crew.core.errors import CrewError, CrewErrorKind, ProviderError
 from crew.core.interfaces import LLMProvider, ToolRegistry
 from crew.core.types import IMAGE_INPUT_UNAVAILABLE_NOTICE, Message, ToolResult
 from crew.plugins.manager import PluginManager
@@ -103,6 +103,32 @@ def _without_image_inputs(messages: list[Message]) -> list[Message]:
             replace(message, content="\n".join(text_parts), content_parts=None)
         )
     return sanitized
+
+
+# 服务端建议退避（Retry-After / body retry_delay）的封顶秒数：防异常大值拖死重试循环。
+_RETRY_DELAY_CAP_SECONDS = 60.0
+
+
+def _llm_error_chunk(
+    rid: str,
+    exc: BaseException,
+    sequence: int,
+    message: str | None = None,
+) -> ResponseChunk:
+    """LLM 路径的 error 帧：CrewError 带结构化 kind(code)/retryable/retry_delay，
+    非类型化异常保持纯 message 帧。message 覆盖默认的 str(exc)（友好文案场景）。"""
+    text = str(exc) if message is None else message
+    if isinstance(exc, CrewError):
+        return ResponseChunk.error(
+            rid,
+            text,
+            sequence,
+            code=exc.kind.value,
+            retryable=exc.is_retryable(),
+            retry_delay=exc.retry_delay,
+        )
+    return ResponseChunk.error(rid, text, sequence)
+
 
 def _dump_prompt(ctx: ExecutionContext, view: list, tools: list | None, iteration: int) -> None:
     """DEBUG 级别：打印本轮发送给 LLM 的完整 prompt（system + messages + tools）。"""
@@ -1402,10 +1428,11 @@ class BuiltinExecutor(AgentExecutor):
                         model=str(getattr(provider, "model", "") or ""),
                     )
                     if not is_stream_interrupt_recoverable(exc):
-                        yield ResponseChunk.error(
+                        yield _llm_error_chunk(
                             rid,
-                            f"模型响应中断，已保留已生成内容。错误：{exc}",
+                            exc,
                             next_seq(),
+                            message=f"模型响应中断，已保留已生成内容。错误：{exc}",
                         )
                         result["error"] = True
                         return
@@ -1417,7 +1444,7 @@ class BuiltinExecutor(AgentExecutor):
                     return
                 if (
                     isinstance(exc, ProviderError)
-                    and exc.category == "unsupported_capability"
+                    and exc.kind == CrewErrorKind.UNSUPPORTED_CAPABILITY
                     and exc.capability
                 ):
                     result.update(
@@ -1425,12 +1452,17 @@ class BuiltinExecutor(AgentExecutor):
                         provider_error=str(exc),
                     )
                     return
-                retryable = isinstance(exc, ProviderError) and exc.retryable
+                retryable = isinstance(exc, CrewError) and exc.is_retryable()
                 if retryable and attempt < self.max_retries:
                     attempt += 1
                     delay = self.backoff_seconds * (2 ** (attempt - 1))
                     if self.stream_retry_jitter:
                         delay = delay * (0.5 + random.random() * 0.5)
+                    # 服务端建议的退避（Retry-After / body retry_delay）优先于本地
+                    # 指数退避，并封顶防异常大值拖死重试循环。
+                    retry_delay = exc.retry_delay if isinstance(exc, CrewError) else None
+                    if retry_delay is not None and retry_delay > 0:
+                        delay = min(retry_delay, _RETRY_DELAY_CAP_SECONDS)
                     exc_info = f"{type(exc).__name__}: {str(exc) or '(无详情)'}"
                     log.warning("LLM 瞬时失败，第 %d 次重试（%.1fs 后）：%s", attempt, delay, exc_info)
                     await asyncio.sleep(delay)
@@ -1444,7 +1476,7 @@ class BuiltinExecutor(AgentExecutor):
                     continue
                 log.exception("LLM 调用异常，无 fallback 可用")
                 result["error"] = True
-                yield ResponseChunk.error(rid, str(exc), next_seq())
+                yield _llm_error_chunk(rid, exc, next_seq())
                 return
 
     @staticmethod
