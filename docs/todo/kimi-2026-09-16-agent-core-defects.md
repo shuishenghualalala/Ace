@@ -23,7 +23,7 @@
 | P2-3.2 write-ahead 持久化 / resume | 未做——架构级改造，另立项 |
 | P2-3.3 错误类型化 | 已修复 `5080c47`（CrewErrorKind + is_retryable 白名单 + ProviderError kind/status/retry_delay + provider 分类收敛 + Retry-After 解析，ADR-0045）+ `81583a2`（重试消费 retry_delay 封顶 60s、error 帧结构化 kind/retryable/retry_delay、outbound/dispatcher 错误分支类型化） |
 | P2-3.4 沙箱/审批闭环策略 | 未做——另立项 |
-| P2-3.5 asyncio_bridge 死锁陷阱 / time.sleep 残留 / 取消路径 busy-spin | 部分修复：`time.sleep` 收进可注入 `_busy_retry_sleep`（`a8aa51b`）、`_lease_callback` busy-spin 去忙等（`71513d9`）；bridge"调用线程是否循环线程"检测未做 |
+| P2-3.5 asyncio_bridge 死锁陷阱 / time.sleep 残留 / 取消路径 busy-spin | 已修复：`time.sleep` 收进可注入 `_busy_retry_sleep`（`a8aa51b`）、`_lease_callback` busy-spin 去忙等（`71513d9`），`run_sync` 增加桥接循环线程自调用检测（本批次） |
 | P3 子 agent 超时收尾顺序写反 | 已修复 `a8aa51b`（先 interrupt 后 aclose） |
 | P3 bg_events 泄漏 | 已修复 `a8aa51b`（entry 带完成时间戳，TTL 3600s 顺带清扫） |
 | P3 evolution_visible 同步扣留 final 帧 | 未做 |

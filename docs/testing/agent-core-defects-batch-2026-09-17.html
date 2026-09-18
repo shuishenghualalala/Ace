@@ -65,10 +65,13 @@
 </table>
 <p>验证：批次1 验收子集 749 passed；批次3 后全量 <code>uv run pytest -q --ignore=tests/security</code> 为 <strong>4171 passed / 3 failed</strong>（3 个均为基线已存在失败，清单见上节，零新增）；<code>ruff check</code> 通过；<code>lint-imports</code> 9 kept / 0 broken。行为变化两处（ADR-0045 裁定）：503 server_overloaded 与欠费 quota_exceeded 不再自动重试；429 usage_limit 经分类器显式 retryable 保留限流退避。</p>
 
+<h2>追加：asyncio_bridge 自循环线程保护（2026-09-18）</h2>
+<p><code>crew/core/asyncio_bridge.py</code> 记录桥接事件循环线程身份；<code>run_sync</code> 在该线程调用时立即关闭调用方创建的协程并抛出 <code>RuntimeError</code>，不再向自身事件循环投递后同步等待。新增 <code>tests/test_asyncio_bridge.py</code> 覆盖同步上下文、普通事件循环防御路径和桥接循环线程拒绝路径；测试使用标准 asyncio/concurrent.futures API，不依赖 Unix 专属机制。</p>
+<p>验证：<code>/Users/ahuamao/Documents/Codes/Ace/.venv/bin/python -m pytest tests/test_asyncio_bridge.py -q</code>：<strong>3 passed</strong>；<code>ruff check crew/core/asyncio_bridge.py tests/test_asyncio_bridge.py</code>：通过；Python 3.12.9 编译检查：通过。</p>
 <h2>环境</h2>
 <ul>
 <li>macOS（Apple Silicon），Python 3.13.2（uv 管理），Node/npm（desktop 依赖 worktree 内 <code>desktop/node_modules</code>）。</li>
-<li>所有命令在 worktree <code>/Users/ahuamao/Documents/Codes/Ace/.worktrees/agent-core-defects</code> 内执行，日期 2026-09-17。</li>
+<li>所有命令在 worktree <code>/Users/ahuamao/Documents/Codes/Ace/.worktrees/agent-core-defects</code> 内执行，日期 2026-09-18。</li>
 </ul>
 </body>
 </html>
