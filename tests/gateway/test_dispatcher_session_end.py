@@ -12,6 +12,7 @@ import asyncio
 import pytest
 
 from crew.core.envelope import Envelope, ResponseChunk
+from crew.core.errors import ConfigError, CrewErrorKind, ProviderError
 from crew.gateway.dispatcher import SessionDispatcher
 from crew.features.hooks import hook_registry
 from crew.tasks.runtime import TaskRuntime
@@ -189,7 +190,7 @@ async def test_stop_cascades_to_sidechain_turn_tasks():
         disp._tasks[parent] = {parent_task}
         disp._tasks[sidechain] = {sidechain_task}
 
-        assert disp.stop("web_parent", owner_account_id=OWNER) is True
+        assert await disp.stop("web_parent", owner_account_id=OWNER) is True
         assert parent_task.cancelled() or parent_task.cancelling()
         assert sidechain_task.cancelled() or sidechain_task.cancelling()
         assert "web_parent" in controller.interrupted
@@ -201,7 +202,8 @@ async def test_stop_cascades_to_sidechain_turn_tasks():
         hook_registry.unregister("session:end", disp._on_session_end)
 
 
-def test_stop_cancels_runtime_sidechain_tasks_without_memory_task(tmp_path):
+@pytest.mark.asyncio
+async def test_stop_cancels_runtime_sidechain_tasks_without_memory_task(tmp_path):
     runtime = TaskRuntime(str(tmp_path / "tasks.db"))
     parent = runtime.create_runtime(
         kind="agent_turn",
@@ -219,7 +221,7 @@ def test_stop_cancels_runtime_sidechain_tasks_without_memory_task(tmp_path):
     runtime.mark_running(sidechain["task_id"])
     disp = SessionDispatcher(_make_inner(), _FakeStore(), task_runtime=runtime)
     try:
-        assert disp.stop("web_parent", owner_account_id=OWNER) is True
+        assert await disp.stop("web_parent", owner_account_id=OWNER) is True
         assert runtime.get(parent["task_id"], owner_account_id=OWNER)["status"] == "cancelled"
         assert runtime.get(sidechain["task_id"], owner_account_id=OWNER)["status"] == "cancelled"
     finally:
@@ -229,3 +231,53 @@ def test_stop_cancels_runtime_sidechain_tasks_without_memory_task(tmp_path):
 async def _drain(iterator):
     async for _ in iterator:
         pass
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_provider_error_frame_carries_kind_fields():
+    """ProviderError 分支：error 帧带 kind(code)/category/retryable/retry_delay。"""
+
+    async def inner(envelope):
+        raise ProviderError("超时", kind=CrewErrorKind.TIMEOUT, retryable=True, retry_delay=2.0)
+        yield  # pragma: no cover
+
+    disp = SessionDispatcher(inner, _FakeStore())
+    try:
+        chunks = [
+            c
+            async for c in disp.run(
+                Envelope.of("hi", session_id="s-err", channel="test", user_id=OWNER)
+            )
+        ]
+        error = chunks[-1]
+        assert error.kind == "error"
+        assert error.body["code"] == "timeout"
+        assert error.body["category"] == "timeout"
+        assert error.body["retryable"] is True
+        assert error.body["retry_delay"] == 2.0
+    finally:
+        hook_registry.unregister("session:end", disp._on_session_end)
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_crew_error_frame_uses_kind_category():
+    """非 Provider 的 CrewError 分支：category 由 kind 映射，兜底 Exception 分支不变。"""
+
+    async def inner(envelope):
+        raise ConfigError("配置缺失")
+        yield  # pragma: no cover
+
+    disp = SessionDispatcher(inner, _FakeStore())
+    try:
+        chunks = [
+            c
+            async for c in disp.run(
+                Envelope.of("hi", session_id="s-cfg", channel="test", user_id=OWNER)
+            )
+        ]
+        error = chunks[-1]
+        assert error.kind == "error"
+        assert error.body["code"] == "config"
+        assert error.body["category"] == "config"
+    finally:
+        hook_registry.unregister("session:end", disp._on_session_end)

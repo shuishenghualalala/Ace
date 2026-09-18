@@ -63,8 +63,9 @@
       <tr><td><code>session_store.py</code> / <code>workspace_store.py</code></td><td>会话与工作区持久化（SQLite）。</td><td>已落地</td></tr>
       <tr><td><code>session_model.py</code></td><td>Session 显式模型绑定 / pending 绑定提升。</td><td>已落地</td></tr>
       <tr><td><code>access_control.py</code> / <code>active_owner.py</code> / <code>channel_bindings.py</code> / <code>plugin_preferences.py</code> / <code>team_member_model.py</code></td><td>访问控制配置、当前 owner 上下文、渠道绑定、插件偏好、团队成员模型。</td><td>已落地</td></tr>
-      <tr><td><code>logging.py</code></td><td><code>setup_logging</code> / <code>llm_trace</code> 结构化日志。</td><td>已落地</td></tr>
-      <tr><td><code>sqlite.py</code> / <code>_migration.py</code> / <code>models.py</code></td><td>SQLite 连接与迁移、共享数据模型。<code>_migration.py</code> 含存量 owner 回填：<code>backfill_empty_owner_rows</code>（<code>UPDATE OR IGNORE</code> 逐行归一为 <code>local</code>，与既有目标 owner 行主键冲突的空行跳过、收尾按"保归属行删无主行"清除）；主库多表 + memory / channel_bindings / plugin_preferences / sites / external 各库就地回填；cron 表先经 <code>backfill_cron_owner_from_sessions</code> 智能归属（session 唯一 owner 优先，其余归 local）；DK 多 owner 歧义行保留隔离（<code>legacy_ambiguous</code>），待 <code>claim-legacy</code> CLI 人工认领。启动时 <code>inspect_and_backfill_legacy_owners</code> 自动执行，永久有效。</td><td>已落地</td></tr>
+      <tr><td><code>logging.py</code></td><td><code>setup_logging</code> / <code>llm_trace</code> 结构化日志；llm_trace 走 QueueHandler/QueueListener 队列落盘（热路径只入队，序列化与写文件在 listener 线程）。</td><td>已落地</td></tr>
+      <tr><td><code>sqlite.py</code> / <code>_migration.py</code> / <code>models.py</code></td><td>SQLite 连接与迁移、共享数据模型。同步写路径 busy 重试的睡眠收进模块级可注入 <code>_busy_retry_sleep</code>（测试可替换 no-op）；事件循环上的写一律走 <code>execute_async</code>。<code>_migration.py</code> 含存量 owner 回填：<code>backfill_empty_owner_rows</code>（<code>UPDATE OR IGNORE</code> 逐行归一为 <code>local</code>，与既有目标 owner 行主键冲突的空行跳过、收尾按"保归属行删无主行"清除）；主库多表 + memory / channel_bindings / plugin_preferences / sites / external 各库就地回填；cron 表先经 <code>backfill_cron_owner_from_sessions</code> 智能归属（session 唯一 owner 优先，其余归 local）；DK 多 owner 歧义行保留隔离（<code>legacy_ambiguous</code>），待 <code>claim-legacy</code> CLI 人工认领。启动时 <code>inspect_and_backfill_legacy_owners</code> 自动执行，永久有效。</td><td>已落地</td></tr>
+      <tr><td><code>home.py</code>（运行期 env）</td><td><code>refresh_owner_runtime_env_async</code>：同步 env 刷新（持 <code>_ENV_LOCK</code>，读写文件/环境变量）的异步入口，每轮 envelope 热路径使用，整体 <code>asyncio.to_thread</code>。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -116,11 +117,25 @@
   <h2>配置操作完整事务（2026-09-15，第二轮整改 S2）</h2>
   <p>配置写回从"先改内存再持久化"升级为<strong>候选值 → 校验 → 持久化 → 发布</strong>的统一事务边界，覆盖 MCP servers、模型 profiles（含激活/默认切换）、evolution 开关三类操作：MCP 的 <code>_commit_mcp_servers</code> 与模型的 <code>_commit_model_profiles</code> / <code>set_active_model</code> / <code>set_evolution_config</code> 都在候选副本上计算、经 <code>_atomic_write_yaml</code> 落盘成功后才发布内存（<code>mcp_servers</code>/<code>model_profiles</code>/<code>raw_config</code> 等）。持久化失败时内存与磁盘一致保留旧值、可直接重试，且<strong>不得触发任何运行资源操作</strong>（provider 重建、MCP 子进程启停等只在持久化成功后进行）；"已保存但连接失败"如实上报、不回滚伪装成保存失败。gateway Router（mcp_servers / misc）与 CLI（integration / knowledge）全部改走事务入口，遗留 <code>set_mcp_server</code>/<code>persist_model_profiles</code> 等两步式入口仅为未迁移调用方保留并标注。模型配置 owner 语义：全局事务只写 config.yaml 的 <code>llm</code> 段，owner overlay 层天然按文件隔离，互不影响。边界：不承诺多文件与外部运行资源的分布式原子性。</p>
 
+  <h2>llm_trace 队列落盘与运行期超时配置（2026-09-17）</h2>
+  <p><code>llm_trace</code> 开启时热路径（每次工具 start/result）只做 <code>queue.put</code>：json 序列化与 .jsonl 文件写入都在 <code>QueueListener</code> 后台线程完成。队列为带排空等待的 <code>_TraceQueue</code>（put 计数 + task_done 条件通知），<code>flush</code> 可等全部已入队记录真正落盘；listener 随日志装配建立、atexit 收尾。工具媒体读盘、prompt 文件读取等其余热路径 I/O 治理见 agent 模块文档。</p>
+  <p>SQLite 同步写路径（BEGIN IMMEDIATE + busy 重试）的睡眠收进模块级 <code>_busy_retry_sleep</code>（可注入，测试替换为 no-op）：<strong>只允许在非事件循环线程执行</strong>——<code>execute()</code> 是同步 API，事件循环上的写必须走 <code>execute_async</code>（内部 asyncio.sleep + to_thread）；个别存量同步 store（如任务看板 TaskManager）的写方法会被事件循环直接调用，消除方式是把调用方挪到 <code>asyncio.to_thread</code>（后台子任务已治理，见 agent 模块）。</p>
+  <pre><code>runtime.tool_execution_timeout_seconds  # 单工具执行段看门狗，默认 600，0=关闭
+runtime.turn_deadline_seconds           # 整回合 deadline，默认 0=不限
+runtime.interaction_timeout_seconds     # 追问/权限默认等待上限，默认 3600，0=默认不限
+                                        #（显式传 timeout 含 None/0 始终优先于默认值）
+runtime.health_port                     # 独立线程 health 服务端口，默认 0=主端口+1</code></pre>
+  <p>追问默认上限由装配层（<code>crew/app.py</code> 的 <code>set_followup_default_timeout</code>）注入 core/followup，core 不反向依赖配置实现；<code>wait_for_answer</code> 未传 timeout 时用该默认值，超时按「用户未回答」收尾（返回空答案）。</p>
+
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
       <tr><td>2026-09-03</td><td>合并 owner 统一化改造（refactor/llm-provider → refactor/plugin-architecture-stage-0，merge 22af708）：方案 A 目录布局（所有 owner 含 local 统一住 <code>accounts/&lt;hash&gt;/</code>，基础 CREW_HOME 退役为安装级目录）；<code>_migration.py</code> 存量回填（<code>backfill_empty_owner_rows</code> + cron 智能归属 + DK 歧义行隔离待 <code>claim-legacy</code>）；凭证库 × owner 作用域整合（owner 私有 key 写 owner overlay，不同步进程环境）。</td><td>state 层目录布局与全部 owner 列存储</td></tr>
+      <tr><td>2026-09-17</td><td><code>94b37b5</code> llm_trace 改 QueueHandler/QueueListener 队列落盘（热路径只入队 + 可排空 flush）；<code>refresh_owner_runtime_env_async</code> 异步入口（env 刷新挪工作线程）。</td><td><code>crew/state/logging.py</code>、<code>crew/state/home.py</code>、<code>crew/agent/prompt_builder.py</code>。</td></tr>
+      <tr><td>2026-09-17</td><td><code>a8aa51b</code> sqlite busy 重试睡眠收进模块级可注入 <code>_busy_retry_sleep</code>，明确"同步 execute 只能在非事件循环线程"契约。</td><td><code>crew/state/sqlite.py</code>。</td></tr>
+      <tr><td>2026-09-17</td><td><code>e99e58e</code> 新增 <code>runtime.interaction_timeout_seconds</code>（默认 3600，0=默认不限）；追问/权限等待默认有界超时由装配层注入 core/followup。</td><td><code>crew/state/config.py</code>、<code>crew/core/followup.py</code>、<code>crew/app.py</code>。</td></tr>
+      <tr><td>2026-09-17</td><td><code>4ce7c1b</code>/<code>679ace7</code>/<code>08f746f</code> 新增 <code>runtime.tool_execution_timeout_seconds</code>（默认 600）、<code>runtime.turn_deadline_seconds</code>（默认 0）、<code>runtime.health_port</code>（默认 0=主端口+1）。</td><td><code>crew/state/config.py</code>、<code>config/config.yaml.example</code>；消费方见 agent/gateway 模块文档。</td></tr>
       <tr><td>2026-09-02</td><td>新增模型 API Key 凭证库 <code>credentials.py</code>（按 profile id + owner 作用域，JSON 原子写，POSIX 0600）；<code>config.py</code> 全部 profile 构建点统一走 <code>resolve_profile_api_key</code> 解析链；模型 CRUD 默认写凭证库，显式 <code>api_key_env</code> 才写 .env 并带共享名覆盖拦截（<code>overwrite_shared_key</code>）；<code>remove_model</code> 清理凭证条目；<code>build_provider</code> 门控纳入激活 profile 的 key。修复用户反馈"配置多个模型后所有 apikey 变成最新的 apikey"。</td><td>state/config、app 模型 CRUD、LLM 装配；存量 .env 部署零迁移（解析链保留 env 路径）</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
     </tbody>

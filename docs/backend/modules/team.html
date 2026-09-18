@@ -111,6 +111,7 @@ execute = build_team_feature(...).definition</code></pre>
       <tr><td>2026-09-03</td><td>内部协作消息改发命名空间事件 <code>team.internal_message v1</code>（feature_event），旧 team_internal 帧由 Gateway 出口适配器生成；持久投影 role 不变。</td><td><code>_team_internal_chunk</code>、流式响应协议。</td></tr>
       <tr><td>2026-09-08</td><td>Team 表/CRUD/迁移从外援 Store 移入 <code>TeamExternalAgentStore</code> 门面；生产组合根与 Team 用例改用该门面（阶段 4A-1，见 ADR-0027）。</td><td><code>crew/team/external_store.py</code>、<code>crew/app.py</code>、Team 相关测试。</td></tr>
       <tr><td>2026-09-09</td><td>Team 进入 Feature 生命周期（阶段 4C-1，见 ADR-0031）：<code>build_team_feature()</code> 统一构造 Manager、注册 Driver 与 Service；<code>InProcessTeamManager</code> 新增 <code>shutdown()</code> 与 <code>_closed</code> 守卫；App 级 owner Provider 缓存由 Bundle 注入，同时保留 <code>app.team</code> 兼容表面。</td><td><code>crew/team/feature.py</code>、<code>crew/team/team_manager.py</code>、<code>crew/app.py</code>、<code>crew/gateway/app.py</code>、Team 生命周期测试。</td></tr>
+      <tr><td>2026-09-17</td><td><code>7be86ac</code> Team 侧任务存储调用迁移到 async 门面（ADR-0046）：delegate_tool 的 create/touch_activity/update_status 与 history_projection 的 list_tasks 全部改 <code>await xxx_async</code>；team_manager 的 <code>_mark_child_active</code> 顺带转 async 并修复生产路径 get 缺 owner 参数的静默失败。</td><td><code>packages/crew-team/</code>delegate_tool.py、history_projection.py、team_manager.py；事件循环上不再出现 Team 路径的任务存储同步写。</td></tr>
     </tbody>
   </table>
 

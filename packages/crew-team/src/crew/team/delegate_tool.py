@@ -396,7 +396,7 @@ async def run_delegate_to_teammate(
         raise ToolError("instruction 不能为空")
     title = next((line.strip() for line in instruction.splitlines() if line.strip()), instruction)
 
-    task = tasks.create(
+    task = await tasks.create_async(
         session_id,
         title=title[:40],
         detail=instruction,
@@ -411,9 +411,9 @@ async def run_delegate_to_teammate(
         if isinstance(task_payload_meta, dict) and isinstance(task_payload_meta.get("execution_snapshot"), dict)
         else {},
     }
-    touch_activity = getattr(tasks, "touch_activity", None)
-    if callable(touch_activity):
-        task = touch_activity(task["id"], progress)
+    touch_activity_async = getattr(tasks, "touch_activity_async", None)
+    if callable(touch_activity_async):
+        task = await touch_activity_async(task["id"], progress)
     if on_task_created is not None:
         on_task_created({**task, "plan_node_id": plan_node_id})
     log.info("[Team] Leader 派发任务 #%s 给 %s: %s", task["id"], member, instruction[:60])
@@ -489,7 +489,7 @@ async def run_delegate_to_teammate(
             if chunk.kind == "final":
                 final_text = chunk.body.get("text", "")
             elif chunk.kind == "error":
-                tasks.update_status(task["id"], "failed", chunk.body.get("message", ""))
+                await tasks.update_status_async(task["id"], "failed", chunk.body.get("message", ""))
                 if on_task_finished is not None:
                     on_task_finished({
                         **task,
@@ -499,7 +499,7 @@ async def run_delegate_to_teammate(
                     })
                 raise ToolError(chunk.body.get("message", "队友执行出错"))
     except asyncio.CancelledError:
-        tasks.update_status(task["id"], "cancelled", "cancelled")
+        await tasks.update_status_async(task["id"], "cancelled", "cancelled")
         if on_task_finished is not None:
             on_task_finished({
                 **task,
@@ -511,7 +511,7 @@ async def run_delegate_to_teammate(
     except ToolError:
         raise
     except Exception as exc:  # noqa: BLE001
-        tasks.update_status(task["id"], "failed", str(exc))
+        await tasks.update_status_async(task["id"], "failed", str(exc))
         if on_task_finished is not None:
             on_task_finished({
                 **task,
@@ -524,7 +524,7 @@ async def run_delegate_to_teammate(
         if on_child_done is not None:
             on_child_done(session_id, child_id, owner)
 
-    tasks.update_status(task["id"], "done", final_text)
+    await tasks.update_status_async(task["id"], "done", final_text)
     if on_task_finished is not None:
         on_task_finished({
             **task,

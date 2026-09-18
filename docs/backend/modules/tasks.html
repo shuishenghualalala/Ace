@@ -56,8 +56,9 @@
   <table>
     <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
     <tbody>
-      <tr><td><code>feature-a</code></td><td>…</td><td>已落地</td></tr>
-      <tr><td><code>feature-b</code></td><td>…</td><td>待补充</td></tr>
+      <tr><td><code>TaskRuntime</code></td><td>任务运行时：任务创建/状态流转/活动保活/终态收敛/重启对账，SQLite 持久化（RLock + BEGIN IMMEDIATE + busy 重试）。</td><td>已落地</td></tr>
+      <tr><td><code>异步门面</code></td><td>TaskRuntime 的 19 个 <code>xxx_async</code> 方法（写 16 + 读 3），内部统一 <code>asyncio.to_thread</code> 走同步实现，事务语义不变；事件循环调用方一律走 async 门面，线程/CLI 调用方继续用同步 API（ADR-0046）。</td><td>已落地</td></tr>
+      <tr><td><code>TaskManager 适配</code></td><td><code>core/interfaces.py</code> 的 TaskManager ABC 提供非抽象默认 async 实现（to_thread 包装同步方法）；<code>InMemoryTaskManager</code> 内存直转；<code>LegacyTaskManagerAdapter</code> 转发 async 门面并套旧状态词表。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -65,7 +66,10 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/tasks/xxx.py</code></td><td>…</td></tr>
+      <tr><td><code>crew/tasks/runtime.py</code></td><td>TaskRuntime：任务存储与运行时（同步实现 + async 门面）。</td></tr>
+      <tr><td><code>crew/tasks/task_manager.py</code></td><td>InMemoryTaskManager（测试）与 LegacyTaskManagerAdapter（生产注入面）。</td></tr>
+      <tr><td><code>crew/tasks/tools.py</code></td><td>面向模型的任务查询工具（async 读走门面）。</td></tr>
+      <tr><td><code>tests/test_task_runtime.py</code></td><td>运行时契约测试（活动保活/超时/取消/重启对账/async 门面等价与并发互斥）。</td></tr>
     </tbody>
   </table>
 
@@ -90,6 +94,7 @@
     <tbody>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
       <tr><td>2026-08-31</td><td>Agent turn 活动保活与 watchdog 终态收敛</td><td>agent_turn 通过工具进度/Wiki 进度/子 agent chunk 刷新活动；TaskRuntime 记录终态意图；watchdog 错误保留原因。</td></tr>
+      <tr><td>2026-09-17</td><td><code>7be86ac</code> 任务存储异步门面（ADR-0046）：TaskRuntime 新增 19 个 <code>xxx_async</code>（内部 to_thread，RLock + BEGIN IMMEDIATE 不变）；事件循环上的同步写调用点全量迁移（gateway dispatcher、handle_terminal、team delegate_tool、subagent tools、sessions 路由、history_projection）；activity_fn 注入链改 fire-and-forget 调度；同步 API 保留给线程侧/CLI。</td><td><code>crew/tasks/runtime.py</code>、<code>core/interfaces.py</code>、dispatcher / tools / team / subagent 调用点；事件循环不再出现任务存储 busy 重试睡眠。</td></tr>
     </tbody>
   </table>
 

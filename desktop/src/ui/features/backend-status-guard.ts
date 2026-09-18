@@ -1,149 +1,182 @@
 /**
- * 后端服务状态守卫 —— 全局 UI 拦截与 Loading 遮罩。
+ * 后端服务状态横幅 —— 页面顶部的非阻断状态提示。
  *
  * 监听主进程推送的 `backend:status` IPC 事件（周期健康检查 /api/health），
- * 当后端不可用时展示全局遮罩阻断用户操作，恢复后自动隐藏。
+ * 后端不可用时在页面顶部展示状态横幅，恢复后自动消失。横幅不阻断任何
+ * 交互：页面切换、浏览历史会话等只读操作在断连时依然可用；聊天输入框
+ * 的禁用由 composer-view 依据 uiStore.backendConnected 自行处理。
  *
- * 与 auth-gate（登录墙）正交：登录墙管身份，此守卫管后端服务可用性。
+ * 状态机由 connected + failureKind + since 派生：
+ *   启动中（尚未收到失败分类）        「正在启动后端」
+ *   timeout（探测超时）               「后端繁忙，已等待 Ns」（秒级刷新）
+ *   unreachable（网关无响应）         「后端无响应，正在自动重启」
+ *   auth_failed / unknown             「后端连接异常」
+ *   connected=true                    隐藏
  *
- * 慢启动容错：遮罩持续超过 SLOW_THRESHOLD_MS 后，从「光秃秃转圈」升级为
- * 「仍在准备中（已等 Ns）+ 查看日志 / 重试 / 继续等待」，把无限静默转圈变成
- * 用户可动手的转圈（诊断 AV 卡 cacert / gateway 崩溃 traceback / 端口冲突等）。
+ * 与 auth-gate（登录墙）正交：登录墙管身份，此横幅管后端服务可用性。
  */
 
 import type { BackendChatSocket } from '../backend-client';
 import { notify } from '../state';
 import { uiStore } from '../stores/stores';
 
-const OVERLAY_ID = 'backend-loading-overlay';
-const ELAPSED_ID = 'backend-loading-elapsed';
-const ACTIONS_ID = 'backend-loading-actions';
-const LOG_BTN_ID = 'backend-loading-log';
-const RETRY_BTN_ID = 'backend-loading-retry';
-const DISMISS_BTN_ID = 'backend-loading-dismiss';
-/** 超过此阈值仍连不上，就升级为「仍在准备中」+ 操作按钮。 */
-const SLOW_THRESHOLD_MS = 20_000;
-const SLOW_TICK_MS = 1000;
+const BANNER_ID = 'backend-status-banner';
+const TICK_MS = 1000;
 
-let initialized = false;
-let overlayEl: HTMLElement | null = null;
-/** init 期间允许 setTab 绕过守卫，确保遮罩下方的 UI 骨架正常构建。 */
-let initBypassActive = true;
-/** 避免 health 抖动时重复触发恢复 hydrate。 */
-let recoverInFlight = false;
-
-// ── 慢启动计时 ──
-let slowTimer: number | null = null;
-let overlayShownAt = 0;
-let currentLogPath = '';
-/** 用户点了「继续等待」后本轮不再弹操作按钮，直到下次 disconnected 周期。 */
-let slowDismissed = false;
-let buttonsBound = false;
-let lastComponentWarning = '';
+type BackendFailureKind = 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
 
 type BackendStatus = {
   connected: boolean;
   logPath?: string;
   components?: Record<string, { status: string; message?: string }>;
+  failureKind?: BackendFailureKind;
+  /** 断开起始时间（epoch ms），仅 connected=false 时携带。 */
+  since?: number;
 };
 
-function resolveOverlay(): HTMLElement | null {
-  if (overlayEl) return overlayEl;
-  overlayEl = document.getElementById(OVERLAY_ID);
-  return overlayEl;
+type BannerState = 'starting' | 'busy' | 'restarting' | 'error' | 'hidden';
+
+let initialized = false;
+let unsubscribe: (() => void) | null = null;
+let bannerEl: HTMLElement | null = null;
+/** 当前横幅状态机。 */
+let currentState: BannerState = 'hidden';
+/** timeout 分支的断开起始时间，驱动「已等待 Ns」秒级刷新。 */
+let disconnectedSince: number | null = null;
+let tickTimer: number | null = null;
+let currentLogPath = '';
+/** 避免 health 抖动时重复触发恢复 hydrate。 */
+let recoverInFlight = false;
+let lastComponentWarning = '';
+
+function deriveState(status: BackendStatus | undefined): BannerState {
+  if (!status || status.connected) return 'hidden';
+  switch (status.failureKind) {
+    case 'timeout':
+      return 'busy';
+    case 'unreachable':
+      return 'restarting';
+    case 'auth_failed':
+    case 'unknown':
+      return 'error';
+    default:
+      // 尚未收到失败分类：应用刚启动、首次连通前的过渡态。
+      return 'starting';
+  }
 }
 
-/**
- * 根据当前后端连接状态更新遮罩可见性。
- * connected=true → 隐藏遮罩；connected=false → 展示遮罩。
- */
-function applyBackendOverlay(connected: boolean): void {
-  const el = resolveOverlay();
-  if (!el) return;
-  if (connected) {
-    el.hidden = true;
-    stopSlowTimer();
+function mountContainer(): Element | null {
+  return document.querySelector('.main-content');
+}
+
+function ensureBanner(): HTMLElement | null {
+  if (bannerEl && bannerEl.isConnected) return bannerEl;
+  const container = mountContainer();
+  if (!container) return null;
+  const el = document.createElement('div');
+  el.id = BANNER_ID;
+  el.className = 'backend-banner';
+  el.setAttribute('role', 'status');
+  el.setAttribute('aria-live', 'polite');
+  el.innerHTML =
+    '<span class="backend-banner__icon"></span>' +
+    '<span class="backend-banner__content">' +
+    '<strong class="backend-banner__title"></strong>' +
+    '<span class="backend-banner__text"></span>' +
+    '</span>' +
+    '<span class="backend-banner__actions"></span>';
+  container.insertBefore(el, container.firstChild);
+  // 事件委托一次：data-action="log" 打开日志，data-action="retry" 重启 gateway。
+  el.addEventListener('click', (event) => {
+    const target = event.target as HTMLElement;
+    if (target.dataset.action === 'log') openBackendLog();
+    else if (target.dataset.action === 'retry') void window.Crew?.retryGateway?.();
+  });
+  bannerEl = el;
+  return el;
+}
+
+function elapsedSeconds(): number | null {
+  if (disconnectedSince == null) return null;
+  return Math.max(0, Math.round((Date.now() - disconnectedSince) / 1000));
+}
+
+function applyState(el: HTMLElement): void {
+  const visible = currentState !== 'hidden';
+  el.classList.toggle('show', visible);
+  if (!visible) return;
+  el.classList.remove('is-info', 'is-warn', 'is-danger');
+  const icon = el.querySelector('.backend-banner__icon') as HTMLElement;
+  const title = el.querySelector('.backend-banner__title') as HTMLElement;
+  const text = el.querySelector('.backend-banner__text') as HTMLElement;
+  const actions = el.querySelector('.backend-banner__actions') as HTMLElement;
+  if (currentState === 'starting') {
+    el.classList.add('is-info');
+    icon.textContent = '…';
+    title.textContent = '正在启动后端';
+    text.textContent = '智能体运行环境准备中，请稍等';
+  } else if (currentState === 'busy') {
+    el.classList.add('is-warn');
+    icon.textContent = '!';
+    title.textContent = '后端繁忙';
+    const seconds = elapsedSeconds();
+    text.textContent = seconds == null ? '请求较多，请稍候' : `已等待 ${seconds} 秒，请稍候`;
+  } else if (currentState === 'restarting') {
+    el.classList.add('is-warn');
+    icon.textContent = '!';
+    title.textContent = '后端无响应';
+    text.textContent = '正在自动重启，请稍候';
   } else {
-    el.hidden = false;
-    startSlowTimer();
+    el.classList.add('is-danger');
+    icon.textContent = '!';
+    title.textContent = '后端连接异常';
+    text.textContent = '连接状态异常，请查看日志或重试';
+  }
+  actions.innerHTML =
+    (currentLogPath
+      ? '<button class="backend-banner__btn" data-action="log" type="button">查看日志</button>'
+      : '') +
+    '<button class="backend-banner__btn" data-action="retry" type="button">重试</button>';
+}
+
+/** 重渲横幅；挂载点尚不存在（DOM 未就绪）时跳过，等下一次状态推送再试。 */
+function renderBanner(): void {
+  const banner = ensureBanner();
+  if (banner) applyState(banner);
+}
+
+function startTick(): void {
+  if (tickTimer !== null) return;
+  tickTimer = window.setInterval(() => {
+    if (currentState === 'busy') renderBanner();
+    else stopTick();
+  }, TICK_MS);
+}
+
+function stopTick(): void {
+  if (tickTimer !== null) {
+    window.clearInterval(tickTimer);
+    tickTimer = null;
   }
 }
 
-function startSlowTimer(): void {
-  if (slowTimer !== null) return;
-  overlayShownAt = Date.now();
-  slowDismissed = false;
-  hideSlowActions();
-  slowTimer = window.setInterval(tickSlow, SLOW_TICK_MS);
-}
-
-function stopSlowTimer(): void {
-  if (slowTimer !== null) {
-    window.clearInterval(slowTimer);
-    slowTimer = null;
+/** 打开主进程下发的 Gateway 日志；Linux 打包态下发的是 `hint:` 前缀的排查命令串，直接展示。 */
+function openBackendLog(): void {
+  if (!currentLogPath) return;
+  if (currentLogPath.startsWith('hint:')) {
+    const banner = bannerEl;
+    const text = banner?.querySelector('.backend-banner__text');
+    if (text) text.textContent = currentLogPath.slice(5).trim();
+    return;
   }
-  hideSlowActions();
+  void window.Crew?.openPath?.(currentLogPath);
 }
 
-function tickSlow(): void {
-  const elapsed = Date.now() - overlayShownAt;
-  if (elapsed < SLOW_THRESHOLD_MS || slowDismissed) return;
-    const elapsedEl = document.getElementById(ELAPSED_ID);
-    if (elapsedEl) {
-      elapsedEl.textContent = `仍在准备中（已等待 ${Math.round(elapsed / 1000)} 秒）`;
-      elapsedEl.hidden = false;
-    }
-    const actions = document.getElementById(ACTIONS_ID);
-    if (actions) actions.hidden = false;
-  bindSlowButtons();
-}
-
-function hideSlowActions(): void {
-  const elapsed = document.getElementById(ELAPSED_ID);
-  const actions = document.getElementById(ACTIONS_ID);
-  if (elapsed) elapsed.hidden = true;
-  if (actions) actions.hidden = true;
-}
-
-function bindSlowButtons(): void {
-  if (buttonsBound) return;
-  buttonsBound = true;
-  document.getElementById(LOG_BTN_ID)?.addEventListener('click', () => {
-    if (!currentLogPath) return;
-    // Linux 打包态没有 desktop 可打开的启动日志——主进程改发 `hint:` 前缀的
-    // systemctl/journalctl 命令串。弹层显示台账助排查，而非 openPath 打开一个空文件。
-    if (currentLogPath.startsWith('hint:')) {
-      showLogHint(currentLogPath.slice(5).trim());
-      return;
-    }
-    void window.Crew?.openPath?.(currentLogPath);
-  });
-  document.getElementById(RETRY_BTN_ID)?.addEventListener('click', () => {
-    // 重新拉起 gateway；重置计时，新一轮重新判定 slow。
-    void window.Crew?.retryGateway?.();
-    overlayShownAt = Date.now();
-    slowDismissed = false;
-    hideSlowActions();
-  });
-  document.getElementById(DISMISS_BTN_ID)?.addEventListener('click', () => {
-    slowDismissed = true;
-    hideSlowActions();
-  });
-}
-
-/** 显示主进程下发的日志排查提示（Linux：systemctl/journalctl 命令）。 */
-function showLogHint(text: string): void {
-  let hint = document.getElementById('backend-loading-log-hint');
-  if (!hint) {
-    hint = document.createElement('div');
-    hint.id = 'backend-loading-log-hint';
-    hint.className = 'backend-loading-hint';
-    const card = overlayEl?.querySelector('.backend-loading-card');
-    card?.appendChild(hint);
-  }
-  // 提示是多行命令——按 •或换行分段显示，避免一长串挤成一团。
-  hint.textContent = text;
-  hint.hidden = false;
+function setBannerState(next: BannerState): void {
+  currentState = next;
+  if (next === 'busy') startTick();
+  else stopTick();
+  renderBanner();
 }
 
 /**
@@ -168,10 +201,10 @@ async function recoverAfterBackendConnected(): Promise<void> {
 }
 
 /**
- * 初始化后端状态守卫：
- * 1. 订阅主进程 backend:status 推送
- * 2. 同步 uiStore.backendConnected
- * 3. 控制全局 Loading 遮罩显隐
+ * 初始化后端状态横幅：
+ * 1. 立即展示「正在启动后端」（首帧就能看到）
+ * 2. 订阅主进程 backend:status 推送，按状态机重渲横幅
+ * 3. 同步 uiStore.backendConnected（composer 输入禁用等消费方依赖）
  *
  * 幂等：多次调用安全，仅绑定一次监听器。
  */
@@ -179,15 +212,15 @@ export function initBackendStatusGuard(): void {
   if (initialized) return;
   initialized = true;
 
-  // 初始态：后端尚未连接，立即展示遮罩（首帧就能看到）
-  applyBackendOverlay(false);
+  setBannerState('starting');
 
   const applyStatus = (status: BackendStatus): void => {
     const connected = !!status?.connected;
     const wasConnected = uiStore.get().backendConnected === true;
     if (status?.logPath) currentLogPath = status.logPath;
+    disconnectedSince = !connected && typeof status?.since === 'number' ? status.since : null;
     uiStore.set({ backendConnected: connected });
-    applyBackendOverlay(connected);
+    setBannerState(deriveState(status));
     const failedComponent = Object.values(status?.components ?? {})
       .find((component) => component.status === 'failed');
     const warning = connected && failedComponent
@@ -203,30 +236,32 @@ export function initBackendStatusGuard(): void {
   };
 
   // reload 后 did-finish-load 可能早于 renderer 完成认证恢复，那次推送会丢失。
-  // 先订阅后立即读一次主进程快照，保证已就绪时遮罩不会永久停留。
-  window.Crew?.onBackendStatus?.(applyStatus);
+  // 先订阅后立即读一次主进程快照，保证已就绪时横幅不会永久停留。
+  unsubscribe = window.Crew?.onBackendStatus?.(applyStatus) ?? null;
   void window.Crew?.getBackendStatus?.().then(applyStatus).catch(() => {
-    // 保持遮罩，后续健康状态推送会继续接管。
+    // 保持启动中横幅，后续健康状态推送会继续接管。
   });
 }
 
 /**
- * 关闭 init 阶段的旁路标记。由 init() 在所有 setTab/初始化完成后调用，
- * 此后 setTab 才会真正受后端状态守卫约束。
+ * 反初始化：解绑订阅、移除横幅 DOM、停掉计时器。
+ * 供测试与 renderer 热卸载使用；dispose 后可重新 init。
  */
-export function sealBackendInitBypass(): void {
-  initBypassActive = false;
+export function disposeBackendStatusGuard(): void {
+  unsubscribe?.();
+  unsubscribe = null;
+  initialized = false;
+  stopTick();
+  document.getElementById(BANNER_ID)?.remove();
+  bannerEl = null;
+  currentState = 'hidden';
+  disconnectedSince = null;
+  currentLogPath = '';
+  lastComponentWarning = '';
 }
 
 /**
- * 当前是否允许 setTab 绕过守卫（仅 init 阶段为 true）。
- */
-export function isBackendInitBypassActive(): boolean {
-  return initBypassActive;
-}
-
-/**
- * 查询当前后端是否已连接（供 setTab 等路由守卫使用）。
+ * 查询当前后端是否已连接（供 composer 等消费方使用）。
  * 直接读 uiStore 而非 state shim，避免 Proxy 开销。
  */
 export function isBackendConnected(): boolean {

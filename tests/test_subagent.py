@@ -195,17 +195,17 @@ def test_subagent_inherits_parent_skills():
         current_skill_scope.set((None, None))
 
 
-def test_lightweight_subagent_prompt_injects_skills_when_inherited():
+async def test_lightweight_subagent_prompt_injects_skills_when_inherited():
     """delegate_task 子 agent（lightweight+inject_skills）prompt 含 skills 索引；
     run_agent 路径（inject_skills=False）不含。"""
     from crew.agent.skills import list_skills
     if not list_skills():
         return  # 无 skill 环境 skip
 
-    inj = build_prompt_parts(lightweight=True, inject_skills=True)
+    inj = await build_prompt_parts(lightweight=True, inject_skills=True)
     assert "可用 Skills" in inj["user_reminder"]
 
-    no_inj = build_prompt_parts(lightweight=True, inject_skills=False)
+    no_inj = await build_prompt_parts(lightweight=True, inject_skills=False)
     assert "可用 Skills" not in no_inj["user_reminder"]
 
 
@@ -303,7 +303,7 @@ def test_subagent_inherits_parent_final_authorization_snapshot():
     assert inherited == ["file_read"]
 
 
-def test_lightweight_prompt_skips_global_context():
+async def test_lightweight_prompt_skips_global_context():
     """🔴 上下文隔离：lightweight 子 agent 不注入全局 workspace/记忆。"""
     app = build_app(config=Config(max_iterations=5))
     child = app._make_subagent(
@@ -311,21 +311,21 @@ def test_lightweight_prompt_skips_global_context():
          "model": "inherit", "max_iterations": 5}
     )
     assert child.lightweight is True
-    light = build_prompt_parts(workspace_instructions="组织规则X", lightweight=True)
-    full = build_prompt_parts(workspace_instructions="组织规则X", lightweight=False)
+    light = await build_prompt_parts(workspace_instructions="组织规则X", lightweight=True)
+    full = await build_prompt_parts(workspace_instructions="组织规则X", lightweight=False)
     assert "组织规则X" not in light["user_reminder"]
     assert "组织规则X" in full["user_reminder"]
 
 
-def test_prompt_marks_runtime_cwd_as_authoritative_workspace(tmp_path):
-    parts = build_prompt_parts(cwd=str(tmp_path), lightweight=True)
+async def test_prompt_marks_runtime_cwd_as_authoritative_workspace(tmp_path):
+    parts = await build_prompt_parts(cwd=str(tmp_path), lightweight=True)
 
     assert f"当前工作目录：`{tmp_path.resolve()}`" in parts["user_reminder"]
     assert "不要用它推导、验证或重建当前工作空间路径" in parts["user_reminder"]
 
 
-def test_workspace_prompt_explains_managed_host_paths_and_file_expansion(tmp_path):
-    reminder = build_prompt_parts(cwd=str(tmp_path), lightweight=True)["user_reminder"]
+async def test_workspace_prompt_explains_managed_host_paths_and_file_expansion(tmp_path):
+    reminder = (await build_prompt_parts(cwd=str(tmp_path), lightweight=True))["user_reminder"]
 
     assert "宿主用户目录" in reminder
     assert "with_additional_permissions" in reminder
@@ -455,6 +455,55 @@ async def test_subagent_absolute_runtime_backstop():
     res = await _one_child(lambda spec: _fake_child(chunks), idle=5.0, mx=0.5)
     assert res["status"] == "timeout"
     assert "运行上限" in res["summary"]
+
+
+async def test_subagent_timeout_interrupts_before_closing_stream():
+    """🔴 超时收尾顺序：interrupt 必须先于 gen.aclose() 设置，关流时才观察得到。
+
+    用自定义异步迭代器在 aclose() 入口记录 interrupt 可见性；旧顺序（先关流后
+    interrupt）下该时刻标志尚未设置。
+    """
+    import asyncio as _asyncio
+    from crew.core.envelope import ResponseChunk
+
+    class _HungChild:
+        def __init__(self):
+            self.interrupted = False
+            self.interrupt_seen_at_stream_close = False
+
+        def run(self, env):
+            async def gen():
+                yield ResponseChunk.delta("r", "working")
+                await _asyncio.sleep(10)  # 卡死触发 idle 超时
+
+            inner = gen()
+            child = self
+
+            class _ObservedStream:
+                def __aiter__(self):
+                    return self
+
+                def __anext__(self):
+                    return inner.__anext__()
+
+                async def aclose(self):
+                    # 记录关流瞬间 interrupt 是否已可见：先关流后 interrupt 的旧顺序下为 False
+                    child.interrupt_seen_at_stream_close = child.interrupted
+                    await inner.aclose()
+
+            return _ObservedStream()
+
+        def interrupt(self, message=None):
+            self.interrupted = True
+
+        async def aclose(self):
+            pass
+
+    child = _HungChild()
+    res = await _one_child(lambda spec: child, idle=0.2, mx=0)
+    assert res["status"] == "timeout"
+    assert child.interrupted is True
+    assert child.interrupt_seen_at_stream_close is True
 
 
 def test_subagent_capped_by_parent_user_type():
@@ -679,6 +728,28 @@ async def test_collect_unknown_task_errors():
         ToolCall("b3", "collect_subagent", {"task_id": "nope"})
     )
     assert "error" in result.content and ("任务不存在" in result.content or "Task not found" in result.content)
+
+
+def test_bg_events_sweeps_entries_past_ttl():
+    """🔴 bg_events 兜底清扫：已完成且超 TTL 的 entry 被回收；新完成/运行中的保留。"""
+    import asyncio as _asyncio
+
+    from crew.agent.subagent.tools import (
+        _BG_EVENT_TTL_SECONDS,
+        _BgEventEntry,
+        _sweep_stale_bg_events,
+    )
+
+    entries: dict[str, _BgEventEntry] = {}
+    stale = _BgEventEntry(_asyncio.Event())
+    stale.done_at = 1000.0
+    fresh = _BgEventEntry(_asyncio.Event())
+    fresh.done_at = 1000.0 + _BG_EVENT_TTL_SECONDS - 10  # 未超 TTL
+    running = _BgEventEntry(_asyncio.Event())            # done_at=None：仍在运行
+    entries.update({"stale": stale, "fresh": fresh, "running": running})
+
+    _sweep_stale_bg_events(entries, now=5000.0, ttl=_BG_EVENT_TTL_SECONDS)
+    assert list(entries) == ["fresh", "running"]
 
 
 def test_child_agent_has_no_subagent_tools():

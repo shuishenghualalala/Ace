@@ -937,13 +937,25 @@ class _DummyTaskRuntime:
         }
         return {"task_id": task_id}
 
+    async def create_runtime_async(self, **kwargs: Any) -> dict[str, Any]:
+        return self.create_runtime(**kwargs)
+
     def update(self, task_id: str, **kwargs: Any) -> None:
         self._tasks.setdefault(task_id, {}).update(kwargs)
+
+    async def update_async(self, task_id: str, **kwargs: Any) -> None:
+        self.update(task_id, **kwargs)
 
     def get(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
         return self._tasks.get(task_id, {"backgrounded": False, "output_ref": "", "status": "running"})
 
+    async def get_async(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
+        return self.get(task_id, **kwargs)
+
     def mark_running(self, task_id: str) -> None:
+        pass
+
+    async def mark_running_async(self, task_id: str) -> None:
         pass
 
     def touch_activity(self, task_id: str, progress: Any = None, **kwargs: Any) -> None:
@@ -954,6 +966,9 @@ class _DummyTaskRuntime:
 
     def finish(self, task_id: str, **kwargs: Any) -> None:
         self._tasks.setdefault(task_id, {})["status"] = kwargs.get("status", "completed")
+
+    async def finish_async(self, task_id: str, **kwargs: Any) -> None:
+        self.finish(task_id, **kwargs)
 
 
 @pytest.mark.asyncio

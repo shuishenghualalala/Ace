@@ -734,7 +734,6 @@ function visibleBlockingOverlay(): boolean {
     '.usage-edit-overlay',
     '.chat-image-viewer',
     '#force-update-overlay',
-    '#backend-loading-overlay',
   ].join(','));
   return Array.from(candidates).some((element) => {
     if (element.hidden) return false;

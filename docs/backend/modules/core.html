@@ -62,7 +62,8 @@
       <tr><td><code>types</code></td><td>消息、工具调用、模型响应等基础数据类型。</td><td>已落地</td></tr>
       <tr><td><code>interfaces</code></td><td>LLM、Memory、Session、Workspace、Tool、Agent 等稳定 Protocol。</td><td>已落地</td></tr>
       <tr><td><code>runctx</code></td><td>请求级用户、Workspace、权限与 Agent 运行上下文。</td><td>已落地</td></tr>
-      <tr><td><code>errors / followup</code></td><td>跨 Host 的错误和用户交互协议。</td><td>已落地</td></tr>
+      <tr><td><code>asyncio_bridge</code></td><td>同步代码显式调用异步能力；无事件循环时直接运行，有事件循环时投递到独立桥接线程，并拒绝在桥接线程自身同步等待，避免自循环死锁。</td><td>已落地</td></tr>
+      <tr><td><code>errors / followup</code></td><td>跨 Host 的错误和用户交互协议。<code>CrewErrorKind</code> 语义分类枚举 + <code>CrewError.RETRYABLE_KINDS</code> 可重试白名单；<code>ProviderError</code> 携带 kind/status/retry_delay，category 保留为兼容别名（与 kind 双向映射）。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -74,6 +75,7 @@
       <tr><td><code>crew/core/interfaces.py</code></td><td>跨模块能力接口。</td></tr>
       <tr><td><code>crew/core/types.py</code></td><td>基础消息与工具数据模型。</td></tr>
       <tr><td><code>crew/core/runctx.py</code></td><td>请求级 ContextVar。</td></tr>
+      <tr><td><code>crew/core/asyncio_bridge.py</code></td><td>同步↔异步桥接及桥接线程自调用保护。</td></tr>
       <tr><td><code>.importlinter</code></td><td>Core 与上层 Feature/Host 的依赖保护线。</td></tr>
     </tbody>
   </table>
@@ -108,6 +110,9 @@
       <tr><td>2026-09-02</td><td>建立 Core 对 Product Feature 与 Host 的声明式依赖保护线。</td><td>Python 架构、CI</td></tr>
       <tr><td>2026-09-03</td><td>将 Envelope mode 改为开放标识，并为能力不可用响应增加稳定错误码。</td><td><code>Envelope</code>、<code>ResponseChunk.error</code>、Execution Driver 调用方。</td></tr>
       <tr><td>2026-09-03</td><td>新增开放业务事件帧 <code>feature_event</code>（feature/event/version/payload）与 <code>ResponseChunk.feature_event()</code> 工厂；wiki_cards、wiki_ingest_progress、team_internal 三个业务枚举进入迁移期，生产侧不再使用。</td><td><code>ChunkKind</code>、<code>ResponseChunk</code>、事件生产方。</td></tr>
+      <tr><td>2026-09-17</td><td>错误类型化（ADR-0045 批次 2）：新增 <code>CrewErrorKind</code> 枚举与 <code>kind</code>/<code>retry_delay</code> 字段，<code>CrewError.RETRYABLE_KINDS</code> 类级白名单 + <code>is_retryable()</code>；<code>ProviderError</code> 增 kind/status/retry_delay，category 保留为兼容别名并与 kind 双向映射；<code>ToolError</code>/<code>ConfigError</code> 经 <code>DEFAULT_KIND</code> 落定 TOOL/CONFIG；上下文溢出关键词清单收敛至此供 provider 分类与 loop 检测共用。</td><td><code>crew/core/errors.py</code>、provider 包装点、<code>crew/agent/loop/resilience.py</code>（ADR-0045）。</td></tr>
+      <tr><td>2026-09-17</td><td>错误类型化（ADR-0045 批次 3）：<code>ResponseChunk.error</code> 增可选 <code>retryable</code>/<code>retry_delay</code>（纯增量，code 约定传 kind 值）；<code>_KIND_TO_CATEGORY</code> 补齐 TOOL/CONFIG/CANCELLED 展示映射（UNKNOWN 仍落默认 "provider"）。</td><td><code>crew/core/envelope.py</code>、<code>crew/core/errors.py</code>；消费侧见 agent / gateway 模块文档。</td></tr>
+      <tr><td>2026-09-18</td><td>同步↔异步桥接增加桥接循环线程自调用检测；从该线程调用 <code>run_sync</code> 立即报错并关闭待执行协程，避免向自身投递后永久阻塞。</td><td><code>crew/core/asyncio_bridge.py</code>、桥接契约单测。</td></tr>
     </tbody>
   </table>
 

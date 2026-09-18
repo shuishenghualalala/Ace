@@ -35,6 +35,7 @@ from crew.agent.loop.tool_guardrails import ToolCallGuardrailController, append_
 from crew.agent.loop.tool_result_classification import file_mutation_result_landed
 from crew.core.envelope import ResponseChunk
 from crew.core.followup import (
+    cancel_followup,
     drain_followup_answer_messages,
     send_followup_question,
     wait_for_answer,
@@ -53,6 +54,17 @@ from crew.tools.tool_search import ToolSearchConfig, dispatch_bridge_tool, is_br
 
 log = get_logger("agent.tool_runner")
 _MAX_TOOL_WORKERS = 8  # Crew run_agent.py / agent.tool_executor default
+_INTERRUPT_GRACE_SECONDS = 0.1  # interrupt 后等工具自行收尾的优雅窗口
+
+
+def _read_media_data_url(part: MediaPart) -> str:
+    """同步读媒体文件并编码为 data URL（供 asyncio.to_thread 调用）。"""
+    path = Path(part.path)  # type: ignore[arg-type]
+    raw = path.read_bytes()
+    mime = part.mime_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
 class ToolRunner:
     """执行一批工具调用并产出 ResponseChunk 帧；原地把结果回灌进 messages。"""
 
@@ -67,6 +79,7 @@ class ToolRunner:
         session_id: str = "",
         control: Any = None,
         plan_manager: Any = None,
+        tool_execution_timeout_seconds: float = 600.0,
         tool_search_schemas: list[dict[str, Any]] | None = None,
         tool_search_config: ToolSearchConfig | None = None,
         authorized_tool_names: frozenset[str] | None = None,
@@ -82,6 +95,8 @@ class ToolRunner:
         self.session_id = session_id
         self.control = control
         self.plan_manager = plan_manager
+        # 执行段看门狗（秒）：超时合成 timed-out 输出回灌模型，0=关闭。
+        self.tool_execution_timeout_seconds = max(0.0, float(tool_execution_timeout_seconds or 0.0))
         self.tool_search_schemas = list(tool_search_schemas or [])
         self.tool_search_config = tool_search_config
         self.authorized_tool_names = authorized_tool_names
@@ -207,7 +222,7 @@ class ToolRunner:
                 else:
                     async for chunk in self._run_sequential_segment(calls, messages, rid, next_seq, started_ids):
                         yield chunk
-            self._append_pending_media(messages)
+            await self._append_pending_media(messages)
         finally:
             # 清理本轮未被消费的 prewarm（被 plan_tool_calls 去重/裁剪掉的工具）。
             await self.cancel_prewarms()
@@ -400,7 +415,11 @@ class ToolRunner:
                 before_map[tc.id] = self._read_file_before(tc)
         results = await self._resolve_parallel(calls)
         for tc, result in zip(calls, results):
-            status = "cancelled" if "用户中断" in result.content else ("error" if result.is_error else "ok")
+            status = (
+                "cancelled"
+                if "用户中断" in result.content or "aborted by user" in result.content
+                else ("error" if result.is_error else "ok")
+            )
             yield self._result_event(tc, result, rid, next_seq, status=status)
             messages.append(Message.tool(tc.id, result.content, name=tc.name))
             self._attach_mcp_images(tc, result, messages)
@@ -571,7 +590,7 @@ class ToolRunner:
             return json.dumps(
                 {"error": f"需要权限确认但当前环境无法交互：{exc}"}, ensure_ascii=False
             )
-        answers = await wait_for_answer(session_id, qid)
+        answers = await self._wait_permission_answer(session_id, qid)
         choice = ""
         if answers and isinstance(answers[0], dict):
             vals = answers[0].get("answers")
@@ -595,11 +614,47 @@ class ToolRunner:
             {"error": "权限确认未得到明确许可（超时或未选择），按拒绝处理"}, ensure_ascii=False
         )
 
+    async def _wait_permission_answer(
+        self, session_id: str, question_id: str
+    ) -> list[dict[str, Any]]:
+        """权限回答等待与 interrupt 竞争（FIRST_COMPLETED 决胜）。
+
+        interrupt 先到：结算挂起的追问（cancel_followup 回灌取消标记、清理
+        waiter 注册），取消并回收竞争失败的等待 task，返回空答案——上层按
+        拒绝处理（安全默认），回合随后走 interrupt 收尾。回答/超时先到的，
+        interrupt 等待 task 立即取消，绝不残留永久挂起的 task。
+        """
+        wait_task = asyncio.create_task(wait_for_answer(session_id, question_id))
+        wait_interrupted = getattr(self.control, "wait_interrupted", None)
+        interrupt_task = (
+            asyncio.create_task(wait_interrupted())
+            if callable(wait_interrupted)
+            else None
+        )
+        try:
+            racers = {wait_task} | (
+                {interrupt_task} if interrupt_task is not None else set()
+            )
+            done, _pending = await asyncio.wait(
+                racers, return_when=asyncio.FIRST_COMPLETED
+            )
+            if wait_task in done:
+                return wait_task.result()
+            cancel_followup(session_id, question_id)
+            return []
+        finally:
+            tasks = [t for t in (wait_task, interrupt_task) if t is not None]
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
     def _queue_media(self, tc, result: ToolResult) -> None:
         for part in result.media:
             self._pending_media.append((tc.id, tc.name, part))
 
-    def _append_pending_media(self, messages: list[Message]) -> None:
+    async def _append_pending_media(self, messages: list[Message]) -> None:
         """Append hidden multimodal messages only after all tool results.
 
         Provider protocols require every assistant tool call to receive its
@@ -610,10 +665,7 @@ class ToolRunner:
             data_url = part.data_url
             if not data_url and part.path:
                 try:
-                    path = Path(part.path)
-                    raw = path.read_bytes()
-                    mime = part.mime_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-                    data_url = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+                    data_url = await asyncio.to_thread(_read_media_data_url, part)
                 except OSError as exc:
                     log.warning("读取工具媒体失败 tool=%s: %s", tool_name, type(exc).__name__)
                     continue
@@ -694,6 +746,60 @@ class ToolRunner:
             return await self._execute_one_body(tc)
         finally:
             self._mark_tool_finished(tc, started=started)
+
+    async def _execute_guarded(self, tc, invoke) -> ToolResult:
+        """执行段看门狗：工具 task 与 (interrupt 事件, 超时) 竞争，FIRST_COMPLETED 决胜。
+
+        只包裹真实执行段（registry.execute + execution middleware）；权限等待段不在此列。
+        超时/被中断都不走异常通道——合成正常 tool output 回灌，保证 tool_call/tool
+        output 历史配对完整。interrupt 触发时先给 ``_INTERRUPT_GRACE_SECONDS``
+        优雅窗口等工具自行收尾，窗口内完成则正常收取结果（不打断已完成工具）。
+        """
+        timeout = self.tool_execution_timeout_seconds
+        wait_interrupted = getattr(self.control, "wait_interrupted", None)
+        if timeout <= 0 and not callable(wait_interrupted):
+            return await invoke()
+        started = time.perf_counter()
+        exec_task = asyncio.create_task(invoke())
+        interrupt_task = (
+            asyncio.create_task(wait_interrupted())
+            if callable(wait_interrupted)
+            else None
+        )
+        try:
+            racers = {exec_task} | ({interrupt_task} if interrupt_task is not None else set())
+            done, _pending = await asyncio.wait(
+                racers,
+                timeout=timeout if timeout > 0 else None,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if exec_task in done:
+                # 完成优先：取消/超时到达前工具已正常收尾，原样收取结果。
+                return exec_task.result()
+            if interrupt_task is not None and interrupt_task in done:
+                grace, _ = await asyncio.wait({exec_task}, timeout=_INTERRUPT_GRACE_SECONDS)
+                if grace:
+                    return exec_task.result()
+                exec_task.cancel()
+                await asyncio.gather(exec_task, return_exceptions=True)
+                return self._aborted_result(tc, time.perf_counter() - started)
+            # wait 空 done：超时
+            exec_task.cancel()
+            await asyncio.gather(exec_task, return_exceptions=True)
+            return self._timeout_result(tc, timeout)
+        except asyncio.CancelledError:
+            # 外层取消（整批 interrupt 硬取消/回合中止）：执行 task 必带走；
+            # 若取消源于 interrupt，按 aborted 语义合成结果，不撕裂历史配对。
+            exec_task.cancel()
+            if interrupt_task is not None:
+                interrupt_task.cancel()
+            await asyncio.gather(exec_task, return_exceptions=True)
+            if self._interrupted:
+                return self._aborted_result(tc, time.perf_counter() - started)
+            raise
+        finally:
+            if interrupt_task is not None and not interrupt_task.done():
+                interrupt_task.cancel()
 
     async def _execute_one_body(self, tc) -> ToolResult:
         """单个工具：guardrails.before → plugins.pre → execute → transform → guardrails.after → plugins.post。"""
@@ -831,14 +937,17 @@ class ToolRunner:
                         )
                     return await self.registry.execute(exec_tc)
 
-                result = await self.plugins.run_tool_execution_middleware(
-                    tc.name,
-                    tc.arguments,
-                    _execute_with_args,
-                    tool_call=tc,
-                    tool_call_id=tc.id,
-                    session_id=self.session_id,
-                    original_args=mw.original_payload,
+                result = await self._execute_guarded(
+                    tc,
+                    lambda: self.plugins.run_tool_execution_middleware(
+                        tc.name,
+                        tc.arguments,
+                        _execute_with_args,
+                        tool_call=tc,
+                        tool_call_id=tc.id,
+                        session_id=self.session_id,
+                        original_args=mw.original_payload,
+                    ),
                 )
             finally:
                 from crew.core.runctx import current_tool_progress_fn
@@ -874,6 +983,14 @@ class ToolRunner:
     @staticmethod
     def _cancelled_result(tc) -> ToolResult:
         return ToolResult(tc.id, tc.name, "工具调用因用户中断而取消。", is_error=True)
+
+    @staticmethod
+    def _timeout_result(tc, timeout: float) -> ToolResult:
+        return ToolResult(tc.id, tc.name, f"timed out after {timeout:.1f}s", is_error=True)
+
+    @staticmethod
+    def _aborted_result(tc, elapsed: float) -> ToolResult:
+        return ToolResult(tc.id, tc.name, f"aborted by user after {elapsed:.1f}s", is_error=True)
 
     @staticmethod
     def _approval_fence_result(tc, *, approval_rejected: bool = True) -> ToolResult:

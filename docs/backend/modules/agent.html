@@ -65,6 +65,12 @@
       <tr><td>Preset Consumer</td><td>主 Agent 与子 Agent 消费中立的 Feature-owned preset 策略；父权限、禁止嵌套、专属能力追加和 Generation Lease 使用统一装配路径。</td><td>已落地</td></tr>
       <tr><td>外援 Catalog 消费</td><td>Executor 与外援工具按 <code>ExternalAgentCatalog</code> Protocol 调用 Runtime/Agent/Profile/observation 能力，不依赖 Team 具体存储；具体实现（SQLite 或测试 Provider）由组合根注入。</td><td>已落地（4A-1 存储边界）</td></tr>
       <tr><td>外援 Provider / Run 生命周期</td><td><code>product.external-agents</code> Generation 统一拥有 Catalog、<code>AdapterRuntimeProvider</code> 与 <code>DelegationService</code>；Executor、委派工具与 Gateway 经同代 Service Lease 消费；停用先关闭准入（delegation.close）再取消在途 Run，Factory 创建的 Catalog/Provider 随代际完整关闭。</td><td>已落地（4A-2）</td></tr>
+      <tr><td>单工具看门狗</td><td><code>ToolRunner._execute_guarded</code> 把真实执行段（registry.execute + execution middleware，不含权限等待）与 interrupt 事件、超时竞争（FIRST_COMPLETED）；超时/中断合成 <code>timed out after X.Xs</code> / <code>aborted by user after X.Xs</code> 合法 tool output 回灌模型，tool_call/tool output 配对完整，回合继续推进。超时上限 <code>runtime.tool_execution_timeout_seconds</code>（默认 600，0=关闭）。</td><td>已落地</td></tr>
+      <tr><td>整回合 deadline</td><td><code>runtime.turn_deadline_seconds</code>（默认 0=不限）。到点转成 interrupt（消息带 deadline exceeded），与 interrupt 共用检查点（轮初/模型后/工具后），在途工具走 aborted 语义，回合优雅收尾而非异常崩溃。</td><td>已落地（默认关闭）</td></tr>
+      <tr><td>中断即时唤醒</td><td><code>TurnControl</code> 除协作式轮询标志外持有 <code>asyncio.Event</code>：<code>interrupt()</code> 时 set，等在工具/权限等待/compact 内部的执行侧任务经 <code>wait_interrupted()</code> 即时感知（跨线程 set 失败时按 50ms 轮询兜底）。</td><td>已落地</td></tr>
+      <tr><td>interrupt_message 消费</td><td>回合收尾 <code>drain_interrupt_message()</code> 取出触发中断的消息：作为 <code>[回合中断] {message}</code> user 标记消息追加 canonical 历史（落库且下回合进入 LLM 视图），并经 status 帧透出一次；<code>reset()</code> 双保险不泄漏到下一回合。</td><td>已落地</td></tr>
+      <tr><td>compact 段中断检查</td><td>溢出压缩前检查 interrupt；摘要 LLM 调用与 interrupt 事件竞争（task + FIRST_COMPLETED），interrupt 先到即取消在途摘要、放弃本次压缩走回合收尾；完成后到达的 interrupt 同样丢弃本次压缩结果。</td><td>已落地</td></tr>
+      <tr><td>热路径 I/O 治理</td><td>SOUL/CREW.md/profile 等 prompt 文件按 resolved 路径 + mtime 缓存（未变直接命中），<code>build_prompt_parts</code> 缓存全命中时事件循环内执行、未命中整体 <code>asyncio.to_thread</code>；owner env 热刷新（<code>refresh_owner_runtime_env_async</code>）、工具媒体读盘（base64 编码）、后台子任务 TaskManager 写库均挪到工作线程；每迭代内 <code>estimate_tokens</code> 全量估算合并为一次（key=消息数+末条长度，视图失配自然失效）。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -86,7 +92,10 @@
       <tr><td><code>crew/agent/skills.py</code></td><td>Skill 扫描、索引、激活和提示构建。</td></tr>
       <tr><td><code>crew/agent/subagent/definition.py</code></td><td>文件预设定义及其到中立 Feature contribution 的适配。</td></tr>
       <tr><td><code>crew/agent/subagent/tools.py</code></td><td>动态预设目录、前后台子 Agent 执行与完整周期 Generation Lease。</td></tr>
-      <tr><td><code>crew/agent/runtime.py</code></td><td>执行 Agent Scope 的 Prompt Contributor，把通用 fragment 与 persistent message 并入请求视图。</td></tr>
+      <tr><td><code>crew/agent/runtime.py</code></td><td>执行 Agent Scope 的 Prompt Contributor，把通用 fragment 与 persistent message 并入请求视图；每轮 envelope 处理经 <code>refresh_owner_runtime_env_async</code> 热刷新 owner env（线程内执行）。</td></tr>
+      <tr><td><code>crew/agent/prompt_builder.py</code></td><td>静态/动态分离 System Prompt 组装；prompt 文件 mtime 缓存 + 异步组装（稳态全命中零线程调度）。</td></tr>
+      <tr><td><code>crew/agent/loop/control.py</code></td><td><code>TurnControl</code>：steer / interrupt / 中断事件（<code>wait_interrupted</code>）/ interrupt_message 存取，executor 每轮创建并轮询消费。</td></tr>
+      <tr><td><code>crew/agent/loop/tool_runner.py</code></td><td>并行/串行工具批执行、prewarm、guardrails、执行段看门狗（<code>_execute_guarded</code>）与权限等待 interrupt 竞争。</td></tr>
     </tbody>
   </table>
 
@@ -101,6 +110,25 @@ ToolResultRetention:
   IMPORTANT   # 用户决定、Agent 结论等不可重放结果</code></pre>
   <p>未声明生命周期的工具默认使用 <code>IMPORTANT</code>。L1 不再按“最近六个工具”统一清理；<code>keep_recent_tools</code> 只计算 <code>TEMPORARY</code> 工具。<code>file_read</code> 声明为 <code>TEMPORARY</code>：旧分片由 L1 清成含 path/offset 的一行摘要，完整压缩后按 path 去重、从磁盘重读最新内容恢复（不回放旧快照）。</p>
   <p>切分点（<code>_safe_split</code>）接受 user 或 assistant 边界——recent 以 assistant 开头时其 tool_calls 结果同在 recent，配对完整；因此单个长回合内的早期迭代也能被 L3 摘要，不再整回合受保护。摘要消息尾部附 canonical 历史回溯指引（会话数据库路径 + session_id）。恢复预算（指令 5 条 / 重要结论 8 条 / 附件总量等）见 <code>agent.compaction.post_compact_*</code> 配置。</p>
+
+  <h2>中断 / 超时 / deadline 语义（2026-09-17）</h2>
+  <p>中断是协作式的：<code>TurnControl.interrupt(message=...)</code> 置标志 + set 中断事件，executor 在轮初 / 模型产出后 / 工具执行后检查点消费；等在这些检查点之外的长操作（工具执行、权限等待、compact 摘要）通过 <code>wait_interrupted()</code> 与自身任务竞争，interrupt 先到即取消并走收尾。停止按钮因此对"卡在工具 await 里"的回合同样有效。</p>
+  <pre><code>控制面：  TurnControl.interrupt(message) / .steer(text) / .interrupted / .drain_steer()
+           TurnControl.wait_interrupted()      # 执行侧与在途操作竞争用
+           TurnControl.drain_interrupt_message()  # 回合收尾消费一次
+看门狗：  runtime.tool_execution_timeout_seconds  # 默认 600s，0=关闭
+deadline: runtime.turn_deadline_seconds         # 默认 0=不限
+等待上限： runtime.interaction_timeout_seconds   # 追问/权限默认等待，默认 3600s，0=默认不限</code></pre>
+  <p>看门狗只包裹真实执行段（不含权限等待）：超时或被中断都不走异常通道，而是合成 <code>timed out after X.Xs</code> / <code>aborted by user after X.Xs</code> 的 <code>is_error</code> tool output 回灌模型——tool_call 与 tool output 历史配对完整，回合继续推进，单个挂死工具不再冻结整轮回合。interrupt 触发时先给 0.1s 优雅窗口，窗口内完成的工具原样收取结果。deadline 到点复用同一套优雅收尾：写 interrupt（deadline exceeded 消息）、在途工具走 aborted 语义、final 带 <code>reason="deadline"</code>，历史/输出含 deadline 标记。权限确认等待被 interrupt 取消时按"用户未回答"结算（取消挂起追问 + 清理 waiter），上层按拒绝处理（安全默认）。</p>
+  <p>回合收尾时 <code>interrupt_message</code> 被消费一次：追加 <code>[回合中断] {message}</code> user 标记消息到 canonical 历史（is_meta=False，落库且下回合进入 LLM 视图，模型据此知晓上轮为何停止），同时经既有 status 通道透出给前端；与 codex 的 interrupted marker 历史语义对齐。</p>
+
+  <h2>子 Agent 收尾与后台任务（2026-09-17）</h2>
+  <p>子 agent 收尾顺序固定为<strong>先下中断标志再关流</strong>：<code>interrupt()</code> 必须在 <code>gen.aclose()</code> 之前设置——aclose 会把 GeneratorExit 推进子 agent 收尾逻辑，interrupt 在关流后才设置则收尾阶段永远观察不到（超时场景）。批量 <code>delegate_task</code> 执行具异常隔离：<code>asyncio.gather(return_exceptions=True)</code> 把单个子任务 runner 逃逸的异常折叠成该子任务的结构化失败结果（<code>status=error</code>），其余子任务结果照常返回；<code>CancelledError</code> 等 BaseException 不折叠、向上传播。后台子任务的完成事件表 <code>bg_events</code> entry 带完成时间戳，已完成且超过 TTL（3600s）的 entry 在新后台任务起飞时顺带清扫——模型从不 <code>collect</code> 时不再永久驻留。</p>
+  <p>后台子任务路径上的同步 TaskManager 写库（create/mark_running/update_status/touch_activity 的 sqlite busy 重试会睡眠）一律经 <code>asyncio.to_thread</code> 挪到工作线程；事件循环上只允许 <code>execute_async</code> 异步写路径（见 state 模块文档）。</p>
+
+  <h2>LLM 重试与 error 帧结构化（2026-09-17，ADR-0045 批次 3）</h2>
+  <p>重试判定从 <code>isinstance(exc, ProviderError) and exc.retryable</code> 收敛为 <code>isinstance(exc, CrewError) and exc.is_retryable()</code>（ProviderError 显式 retryable 优先语义不变）；等待时长优先取服务端建议的 <code>retry_delay</code>（Retry-After / body 字段，批次 2 解析），封顶 <code>_RETRY_DELAY_CAP_SECONDS = 60s</code> 防异常大值拖死重试循环，无建议值时维持本地指数退避 + jitter。非 CrewError 异常不重试、走既有兜底。<code>unsupported_capability</code> 降级分支改按 <code>exc.kind</code> 判定（不再比对字符串 category）。</p>
+  <p>LLM 路径 error 帧（重试耗尽 / 流中断不可恢复）统一经 <code>_llm_error_chunk</code> 发出：CrewError 时 <code>code</code> 传 kind 值（如 <code>"timeout"</code>），body 附加 <code>retryable</code> 与 <code>retry_delay</code>（有则带，纯增量）；非类型化异常保持纯 message 帧。出站 <code>enrich_error_chunk</code> 的 category 优先取类型化分类（无 exc 时可从 body 的 kind code 反推），文本兜底仅保留给非类型化异常。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
@@ -132,6 +160,11 @@ ToolResultRetention:
       <tr><td>2026-09-05</td><td>主 Agent、preview 与前后台子 Agent 改为消费生命周期 Agent Preset Contribution。</td><td>动态目录、父权限封顶、Generation Lease 与 Agent 缓存换代。</td></tr>
       <tr><td>2026-09-08</td><td>外援执行器与工具改为消费 <code>ExternalAgentCatalog</code> Protocol；外援 SQLite Store 拆出 Team 表/CRUD（阶段 4A-1 存储边界，见 ADR-0027）。</td><td><code>crew/agent/external</code>、<code>crew/agent/executor/external.py</code>；Team 门面见 Team 模块文档。</td></tr>
       <tr><td>2026-09-09</td><td>外援 Provider/Run 进入 Feature 生命周期（阶段 4A-2，见 ADR-0028）：<code>product.external-agents</code> 提供 catalog/agent-runtime-provider/delegation 三个 Service；生产 Executor 经 <code>external_services_acquirer</code> 持有同代 Lease；Team 改由 Catalog Provider 动态解析。</td><td><code>crew/agent/external/feature.py</code>、<code>crew/agent/executor/external.py</code>、<code>crew/team</code>、Gateway runtimes/sessions 路由。</td></tr>
+      <tr><td>2026-09-17</td><td><code>4ce7c1b</code> per-tool 超时看门狗：执行段与 interrupt/超时竞争，aborted/timed-out 合成合法 tool output 回灌。</td><td><code>crew/agent/loop/tool_runner.py</code>、<code>crew/agent/loop/control.py</code>、<code>crew/state/config.py</code>（<code>tool_execution_timeout_seconds</code> 默认 600）。</td></tr>
+      <tr><td>2026-09-17</td><td><code>679ace7</code> 整回合 deadline（默认关闭）+ <code>interrupt_message</code> 消费（[回合中断] 历史标记 + status 帧）+ compact 段中断检查 + <code>estimate_tokens</code> 迭代内缓存。</td><td><code>crew/agent/executor/builtin.py</code>、<code>crew/agent/loop/control.py</code>、<code>crew/agent/compact/pipeline.py</code>（<code>turn_deadline_seconds</code> 默认 0）。</td></tr>
+      <tr><td>2026-09-17</td><td><code>a8aa51b</code> 子 agent 收尾顺序（先 interrupt 后 aclose）、<code>delegate_task</code> 批量异常隔离、bg_events TTL 3600s 清扫、后台子任务 TaskManager 写库线程化。</td><td><code>crew/agent/subagent/tools.py</code>、任务看板写路径。</td></tr>
+      <tr><td>2026-09-17</td><td><code>94b37b5</code> 热路径同步 I/O 治理：prompt 文件 mtime 缓存 + <code>build_prompt_parts</code> 异步化、owner env 刷新 to_thread、工具媒体读盘线程化。</td><td><code>crew/agent/prompt_builder.py</code>、<code>crew/agent/runtime.py</code>、<code>crew/state/home.py</code>、<code>crew/agent/loop/tool_runner.py</code>。</td></tr>
+      <tr><td>2026-09-17</td><td>ADR-0045 批次 3：重试消费 <code>retry_delay</code>（封顶 60s）+ error 帧结构化 <code>code=kind</code>/<code>retryable</code>/<code>retry_delay</code> + <code>unsupported_capability</code> 按 kind 判定。</td><td><code>crew/agent/executor/builtin.py</code>、<code>crew/core/envelope.py</code>、<code>crew/core/errors.py</code>、<code>crew/features/outbound.py</code>、<code>crew/gateway/dispatcher.py</code>。</td></tr>
     </tbody>
   </table>
 

@@ -26,6 +26,12 @@ from crew.gateway.auth import (
 )
 from crew.gateway.auth_policy import requires_gateway_auth
 from crew.gateway.connections import ConnectionManager
+from crew.gateway.health_server import (
+    GatewayHealthServer,
+    build_health_components,
+    note_loop_tick,
+    set_health_components,
+)
 from crew.gateway.helpers import (
     DIST_DIR,
     EXTERNAL_AGENTS_DISABLED_BODY,
@@ -185,6 +191,29 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         startup_error = ""
         _app.state.deferred_startup_status = "starting"
 
+        # health 独立线程服务：与业务事件循环隔离，循环卡顿时桌面端仍能探测进程
+        # 活性。端口默认主端口+1（runtime.health_port 可显式覆盖），绑定失败仅
+        # 告警并降级为「仅主端口 /api/health」，不阻止启动。
+        health_port = int(getattr(crew.config, "health_port", 0) or 0) or (
+            int(crew.config.gateway_port) + 1
+        )
+        health_server = GatewayHealthServer(port=health_port)
+        health_server.start()
+
+        # 循环活性哨兵：每秒把 loop.time() 与 components 快照戳到模块级变量，
+        # health 线程据此在响应里附带 loop_lag_ms（区分「循环忙」与「进程死」）。
+        async def _health_loop_sentinel() -> None:
+            loop = asyncio.get_running_loop()
+            while True:
+                note_loop_tick(loop.time())
+                set_health_components(build_health_components(
+                    getattr(_app.state, "deferred_startup_status", "starting"),
+                    getattr(crew, "cron_service", None),
+                ))
+                await asyncio.sleep(1.0)
+
+        health_sentinel = asyncio.create_task(_health_loop_sentinel())
+
         # Restart-finalized logout is a physical disconnection boundary and
         # must complete before even health readiness becomes visible.
         completed_restart_logout = crew.active_owner.complete_restart_logout()
@@ -249,6 +278,8 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         try:
             yield
         finally:
+            health_sentinel.cancel()
+            await asyncio.gather(health_sentinel, return_exceptions=True)
             if not startup_task.done():
                 startup_task.cancel()
             await asyncio.gather(startup_task, return_exceptions=True)
@@ -262,6 +293,8 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             hook_registry.unregister("agent:end", _notify_channel_session_updated)
             # 触发 gateway:shutdown hook
             await hook_registry.emit("gateway:shutdown", {})
+            # 最后停 health 线程：shutdown 期间桌面端仍能看到进程活性与循环滞后。
+            health_server.stop()
 
     publish_api_docs = crew.config.gateway_dev_mode and not strict_security_enabled()
     api = FastAPI(

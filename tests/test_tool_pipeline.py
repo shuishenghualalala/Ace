@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 
 import pytest
 
@@ -397,3 +399,240 @@ async def test_tool_runner_permission_ask_denies_on_reject(monkeypatch):
     )
     assert block is not None
     assert "用户拒绝" in block
+
+
+async def test_tool_runner_permission_wait_interrupted_denies_and_cleans_up(monkeypatch):
+    """权限等待期间 interrupt：权限按拒绝处理（安全默认），竞争失败的等待 task
+    被显式取消回收，不残留永久挂起的 task。"""
+    from crew.agent.loop.control import TurnControl
+    from crew.agent.loop.tool_guardrails import ToolCallGuardrailController
+    from crew.agent.loop.tool_runner import ToolRunner
+    from crew.plugins.manager import PluginManager
+
+    cfg = load_permission_config([{"tool": "terminal", "match": "git push:*", "behavior": "ask"}])
+    monkeypatch.setattr(pipeline, "get_permission_config", lambda: cfg)
+
+    async def fake_send(questions, title="", **kw):
+        return "s1", "qid"
+
+    cancelled: list = []
+
+    async def fake_wait(sid, qid, **kw):
+        try:
+            await asyncio.Event().wait()  # 模拟用户一直未作答
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    monkeypatch.setattr("crew.agent.loop.tool_runner.send_followup_question", fake_send)
+    monkeypatch.setattr("crew.agent.loop.tool_runner.wait_for_answer", fake_wait)
+
+    control = TurnControl()
+    runner = ToolRunner(
+        registry=Registry(), plugins=PluginManager([]),
+        guardrails=ToolCallGuardrailController(), session_id="s1", control=control,
+    )
+    task = asyncio.create_task(
+        runner._check_permission(
+            ToolCall("1", "terminal", {"command": "git push origin main"})
+        )
+    )
+    await asyncio.sleep(0.05)  # 进入权限等待段
+    control.interrupt()
+    block = await asyncio.wait_for(task, timeout=5)
+
+    assert block is not None
+    assert "未得到明确许可" in block  # 安全默认：interrupt 按拒绝处理
+    assert cancelled, "interrupt 先到时，竞争失败的等待 task 必须被显式取消"
+    await asyncio.sleep(0)  # 让取消回收落定
+    leftover = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    assert leftover == [], f"不得残留挂起 task: {leftover}"
+
+
+# --------------------------------------------------------------------------- #
+# 执行段看门狗：per-tool 超时 + interrupt 可取消在途工具
+# --------------------------------------------------------------------------- #
+def _watchdog_registry(hang_cancelled: list | None = None) -> Registry:
+    """注册三个测试工具：永挂、快返回、慢但会完成（全部只读语义，无权限拦截）。"""
+    reg = Registry()
+
+    async def _hang(_args):
+        try:
+            await asyncio.sleep(3600)
+            return "unreachable"
+        except asyncio.CancelledError:
+            if hang_cancelled is not None:
+                hang_cancelled.append(True)
+            raise
+
+    async def _quick(_args):
+        return "quick-ok"
+
+    async def _slow(_args):
+        await asyncio.sleep(0.3)
+        return "slow-finished"
+
+    for name, handler in (
+        ("hang_tool", _hang),
+        ("quick_tool", _quick),
+        ("slow_ok_tool", _slow),
+        # 并发安全白名单名：让并行段测试走 _run_parallel_segment 真实路径。
+        ("web_search", _hang),
+        ("browser_snapshot", _quick),
+    ):
+        reg.register(
+            name=name,
+            toolset="test",
+            schema={"name": name, "parameters": {"type": "object", "properties": {}}},
+            handler=handler,
+            is_async=True,
+        )
+    return reg
+
+
+def _watchdog_runner(reg: Registry, *, tool_timeout: float = 0.1, control=None):
+    from crew.agent.loop.control import TurnControl
+    from crew.agent.loop.tool_guardrails import ToolCallGuardrailController, ToolCallGuardrailConfig
+    from crew.agent.loop.tool_runner import ToolRunner
+    from crew.plugins.manager import PluginManager
+
+    return ToolRunner(
+        registry=reg,
+        plugins=PluginManager([]),
+        guardrails=ToolCallGuardrailController(ToolCallGuardrailConfig()),
+        session_id="s1",
+        control=control if control is not None else TurnControl(),
+        tool_execution_timeout_seconds=tool_timeout,
+    )
+
+
+def _seq_counter():
+    n = 0
+
+    def nxt() -> int:
+        nonlocal n
+        n += 1
+        return n
+
+    return nxt
+
+
+async def _drive_batch(runner, calls, messages):
+    return [
+        c
+        async for c in runner.run_batch(calls, messages, "rid", _seq_counter())
+    ]
+
+
+async def test_tool_execution_watchdog_timeout_advances_turn():
+    """永挂工具在小超时下被看门狗取消：回合正常推进，tool output 为 timed out。"""
+    runner = _watchdog_runner(_watchdog_registry(), tool_timeout=0.1)
+    messages: list = []
+    calls = [ToolCall("h1", "hang_tool", {})]
+
+    started = time.monotonic()
+    await _drive_batch(runner, calls, messages)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5  # 没有被挂死工具冻结整回合
+    tool_msgs = [m for m in messages if m.role == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0].tool_call_id == "h1"  # tool_call/tool output 配对完整
+    assert "timed out after 0.1s" in tool_msgs[0].content
+
+
+async def test_tool_interrupt_aborts_inflight_tool_with_grace_window():
+    """工具执行期间 interrupt：100ms 优雅窗口后工具被取消，输出 aborted by user。"""
+    from crew.agent.loop.control import TurnControl
+
+    hang_cancelled: list = []
+    control = TurnControl()
+    runner = _watchdog_runner(
+        _watchdog_registry(hang_cancelled), tool_timeout=0, control=control
+    )
+    messages: list = []
+    task = asyncio.create_task(
+        _drive_batch(runner, [ToolCall("h1", "hang_tool", {})], messages)
+    )
+    await asyncio.sleep(0.05)  # 等工具进入执行段
+    control.interrupt()
+    await asyncio.wait_for(task, timeout=5)
+
+    tool_msgs = [m for m in messages if m.role == "tool"]
+    assert len(tool_msgs) == 1
+    assert "aborted by user after" in tool_msgs[0].content
+    assert hang_cancelled, "优雅窗口到期后 hang 工具应收到 cancel"
+
+
+async def test_tool_interrupt_parallel_batch_keeps_completed_results():
+    """并行段被 interrupt：在途工具走 aborted 语义，已完成工具结果原样保留。"""
+    from crew.agent.loop.control import TurnControl
+
+    control = TurnControl()
+    runner = _watchdog_runner(
+        _watchdog_registry(), tool_timeout=0, control=control
+    )
+    messages: list = []
+    calls = [
+        ToolCall("w1", "web_search", {}),        # 永挂（并发安全名 → 并行段）
+        ToolCall("b1", "browser_snapshot", {}),  # 立即完成
+    ]
+    task = asyncio.create_task(_drive_batch(runner, calls, messages))
+    await asyncio.sleep(0.05)
+    control.interrupt()
+    await asyncio.wait_for(task, timeout=5)
+
+    by_id = {m.tool_call_id: m.content for m in messages if m.role == "tool"}
+    assert set(by_id) == {"w1", "b1"}  # 整批结果配对完整，无孤儿 tool_call
+    assert by_id["b1"] == "quick-ok"   # 已完成工具不受 interrupt 影响
+    assert "aborted by user after" in by_id["w1"]
+
+
+async def test_tool_completed_during_grace_window_keeps_result():
+    """interrupt 后在优雅窗口内自行收尾的工具：正常收取结果，不被取消改写。"""
+    from crew.agent.loop.control import TurnControl
+
+    release = asyncio.Event()
+
+    async def _gated(_args):
+        await release.wait()
+        return "slow-finished"
+
+    reg = Registry()
+    reg.register(
+        name="gated_tool",
+        toolset="test",
+        schema={"name": "gated_tool", "parameters": {"type": "object", "properties": {}}},
+        handler=_gated,
+        is_async=True,
+    )
+    control = TurnControl()
+    runner = _watchdog_runner(reg, tool_timeout=0, control=control)
+    messages: list = []
+    task = asyncio.create_task(
+        _drive_batch(runner, [ToolCall("s1", "gated_tool", {})], messages)
+    )
+    await asyncio.sleep(0.05)
+    control.interrupt()
+    await asyncio.sleep(0.02)  # 100ms 优雅窗口内放行工具自行收尾
+    release.set()
+    await asyncio.wait_for(task, timeout=5)
+
+    tool_msgs = [m for m in messages if m.role == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0].content == "slow-finished"
+
+
+async def test_tool_execution_watchdog_disabled_when_zero():
+    """超时=0：看门狗关闭，短任务行为不变（正常收取结果）。"""
+    runner = _watchdog_runner(_watchdog_registry(), tool_timeout=0)
+    messages: list = []
+
+    await asyncio.wait_for(
+        _drive_batch(runner, [ToolCall("q1", "quick_tool", {})], messages),
+        timeout=5,
+    )
+
+    tool_msgs = [m for m in messages if m.role == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0].content == "quick-ok"

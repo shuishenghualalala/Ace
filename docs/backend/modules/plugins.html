@@ -72,7 +72,7 @@
       <tr><td>Browser Runtime Feature</td><td>startup-phase 在宿主事件循环激活；Manager、后台 Task、五个工具、Skill、Context 与动态 Service 归属同一 restart Scope。</td><td>已落地</td></tr>
       <tr><td>Manifest 服务依赖</td><td><code>requires</code>、<code>optional</code>、<code>provides</code> 映射到 Feature 服务图，按确定性批次激活。</td><td>已落地</td></tr>
       <tr><td>启动审计</td><td>输出状态、Generation、缺失服务和注册标签；CLI 可直接导出同一快照。</td><td>已落地</td></tr>
-      <tr><td>请求 Lease</td><td>插件 Tool、Hook、Middleware、Command 入口自动持有 Generation 租约；draining 后拒绝新请求。</td><td>已落地</td></tr>
+      <tr><td>请求 Lease</td><td>插件 Tool、Hook、Middleware、Command 入口自动持有 Generation 租约；draining 后拒绝新请求。同步 Hook/Middleware 回调与 Tool 对齐自动线程化（<code>run_sync_in_thread</code>），不在事件循环上内联执行。</td><td>已落地</td></tr>
       <tr><td>停用策略</td><td>Manifest 声明 drain/cancel/immediate/restart_required 与超时；失败不提前标记 disabled。</td><td>已落地</td></tr>
       <tr><td>配置 Generation 更新</td><td><code>replace</code> 原子发布新代后退役旧代；<code>restart</code> 先停旧代并在新代失败时恢复旧配置。</td><td>已落地</td></tr>
       <tr><td>Execution Driver Registry</td><td>开放 mode 的 Handler 由 FeatureScope 注册，执行自动持有 Lease；默认 Agent、Team 与 Dynamic Kanban 已接入。</td><td>已落地</td></tr>
@@ -161,7 +161,7 @@ drain_timeout_seconds: 30
 
 async with context.acquire_lease("request:42"):
     await execute_request()</code></pre>
-  <p>目录插件的 Tool、Hook、Middleware 和 Command 由 Adapter 自动持有 Lease。<code>drain</code> 等待旧请求，<code>cancel</code> 通知并取消活跃异步任务，<code>immediate</code> 直接清理并记录被越过的 Lease，<code>restart_required</code> 保留当前 Generation 到宿主关闭。同步 Tool 即使收到取消，也会等工作线程真正退出后才释放 Lease，避免后台线程继续使用已关闭资源。</p>
+  <p>目录插件的 Tool、Hook、Middleware 和 Command 由 Adapter 自动持有 Lease。<code>drain</code> 等待旧请求，<code>cancel</code> 通知并取消活跃异步任务，<code>immediate</code> 直接清理并记录被越过的 Lease，<code>restart_required</code> 保留当前 Generation 到宿主关闭。同步 Tool 即使收到取消，也会等工作线程真正退出后才释放 Lease，避免后台线程继续使用已关闭资源。同步 Hook/Middleware 回调同样在线程中执行；其取消路径有界：取消方等待同步回调收尾的优雅窗口为 2 秒（<code>_SYNC_CALLBACK_CANCEL_GRACE_SECONDS</code>），超时放弃等待（线程无法强杀），记 warning 并让 CancelledError 传播——不再对 hang 住的回调无限 busy-spin。</p>
   <pre><code>result = await runtime.update(
     FeatureDefinition(
         "provider",
@@ -255,6 +255,8 @@ await runtime.event_contributors.dispatch(envelope, push_feature_event)</code></
       <tr><td>2026-09-05</td><td>Wiki CLI 全部叶子命令通过 Host Facade 动态取得 Knowledge Service 与同代 Lease。</td><td>同步/异步 CLI 生命周期、Feature Gate 与 Provider 替换。</td></tr>
       <tr><td>2026-09-05</td><td>增加 Feature Event Contributor Registry，Wiki cards/changes 来源进入 Bundle Scope。</td><td>Feature Runtime、PluginContext、Wiki Generation 与 WS 中立 dispatch。</td></tr>
       <tr><td>2026-09-05</td><td>增加 Agent Preset Contribution Registry，Wiki prompt 与工具策略进入 Bundle Scope。</td><td>动态目录、Generation Lease、Agent 缓存与普通会话能力隔离。</td></tr>
+      <tr><td>2026-09-17</td><td><code>71513d9</code> <code>register_hook</code>/<code>register_middleware</code> 的同步回调自动线程化（与 Tool 对齐，不再内联阻塞事件循环）；同步回调取消路径去 busy-spin，改为 2s 有界优雅窗口，超时记 warning 并放弃等待。</td><td><code>crew/plugins/manager.py</code>；agent 主路径上的 hook/middleware 调用不再被同步插件冻结。</td></tr>
+      <tr><td>2026-09-17</td><td><code>f8d33e1</code> 同步回调线程化路径补 ContextVar 写回（copy_context + await 完成后回写变化值），修复 wiki_learning 插件上下文回传回归；异常/取消路径不写回。</td><td><code>crew/plugins/manager.py</code>；同步 hook/middleware/tool handler 的 ContextVar 语义与内联执行一致。</td></tr>
     </tbody>
   </table>
 

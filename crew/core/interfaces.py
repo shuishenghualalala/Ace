@@ -465,6 +465,38 @@ class TaskManager(ABC):
     @abstractmethod
     def list(self, session_id: str) -> list[dict[str, Any]]: ...
 
+    # async 门面：事件循环上的调用走 asyncio.to_thread 转发到同步实现，
+    # 线程化决策收敛在 store 侧。非抽象默认实现不影响既有第三方子类的实例化；
+    # owner_account_id 为存量同步契约的扩展参数（crew/tasks 实现必填）。
+    async def create_async(
+        self,
+        session_id: str,
+        title: str,
+        detail: str = "",
+        assignee: str | None = None,
+        *,
+        owner_account_id: str = "",
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.create, session_id, title, detail, assignee, owner_account_id=owner_account_id
+        )
+
+    async def assign_async(self, task_id: str, assignee: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self.assign, task_id, assignee)
+
+    async def update_status_async(self, task_id: str, status: str, result: str = "") -> dict[str, Any]:
+        return await asyncio.to_thread(self.update_status, task_id, status, result)
+
+    async def get_async(self, task_id: str, *, owner_account_id: str = "") -> dict[str, Any]:
+        if owner_account_id:
+            return await asyncio.to_thread(self.get, task_id, owner_account_id=owner_account_id)
+        return await asyncio.to_thread(self.get, task_id)
+
+    async def list_async(self, session_id: str, *, owner_account_id: str = "") -> list[dict[str, Any]]:
+        if owner_account_id:
+            return await asyncio.to_thread(self.list, session_id, owner_account_id=owner_account_id)
+        return await asyncio.to_thread(self.list, session_id)
+
 
 # --------------------------------------------------------------------------- #
 # 通知中心

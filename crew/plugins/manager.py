@@ -11,6 +11,7 @@ plugins/<plugin-name>/
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import importlib.util
 import inspect
 import sys
@@ -79,6 +80,10 @@ LLM_REQUEST_MIDDLEWARE = "llm_request"
 LLM_EXECUTION_MIDDLEWARE = "llm_execution"
 TerminalOutcome = Literal["completed", "failed", "interrupted"]
 _TERMINAL_ERROR_SUMMARY_LIMIT = 512
+# 同步回调已在线程中执行时，取消方愿意等待其收尾的最长时间；
+# 超时后放弃等待（线程无法强杀），记 warning 并让 CancelledError 传播。
+_SYNC_CALLBACK_CANCEL_GRACE_SECONDS = 2.0
+_CONTEXT_WRITE_BACK_UNSET = object()
 VALID_MIDDLEWARE = {
     TOOL_REQUEST_MIDDLEWARE,
     TOOL_EXECUTION_MIDDLEWARE,
@@ -335,20 +340,48 @@ class PluginContext:
                 except (TypeError, ValueError):
                     pass
                 if run_sync_in_thread and not inspect.iscoroutinefunction(callback):
+                    # 同步回调必须离开事件循环执行（避免冻结 loop），但线程里运行的是
+                    # 调用方 ContextVar 上下文的副本，回调内的 ContextVar.set 不会
+                    # 回传到调用协程。因此先 copy_context，把副本交给线程执行，await
+                    # 成功后把副本中发生变化的值写回调用协程的上下文——语义与同步回调
+                    # 内联执行一致。写回安全的前提：await 期间调用协程处于挂起状态，
+                    # 其上下文不会被并发修改；只写回值不同的变量，避免无谓的 set。
+                    # 异常与取消路径不写回，保持"失败无副作用"。
+                    ctx = contextvars.copy_context()
+
+                    async def _run_in_copied_context() -> Any:
+                        loop = asyncio.get_running_loop()
+                        return await loop.run_in_executor(
+                            None, lambda: ctx.run(callback, *args, **call_kwargs)
+                        )
+
                     work = asyncio.create_task(
-                        asyncio.to_thread(callback, *args, **call_kwargs),
+                        _run_in_copied_context(),
                         name=f"plugin-sync-callback:{self.manifest.name}:{label}",
                     )
                     try:
-                        return await asyncio.shield(work)
+                        result = await asyncio.shield(work)
                     except asyncio.CancelledError:
-                        while not work.done():
-                            try:
-                                await asyncio.shield(work)
-                            except asyncio.CancelledError:
-                                continue
-                        work.result()
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(work),
+                                timeout=_SYNC_CALLBACK_CANCEL_GRACE_SECONDS,
+                            )
+                            work.result()
+                        except TimeoutError:
+                            log.warning(
+                                "插件 %s 的同步回调 %s 取消后 %ss 内未结束，"
+                                "放弃等待（该线程回调将继续泄漏运行）",
+                                self.manifest.name,
+                                label,
+                                _SYNC_CALLBACK_CANCEL_GRACE_SECONDS,
+                            )
                         raise
+                    for var in ctx:
+                        new_value = ctx[var]
+                        if var.get(_CONTEXT_WRITE_BACK_UNSET) != new_value:
+                            var.set(new_value)
+                    return result
                 result = callback(*args, **call_kwargs)
                 if inspect.isawaitable(result):
                     return await result
@@ -566,7 +599,11 @@ class PluginContext:
                 hook_name,
             )
         owner_key = self.manifest.key or self.manifest.name
-        leased_callback = self._lease_callback(callback, label=f"hook:{hook_name}")
+        leased_callback = self._lease_callback(
+            callback,
+            label=f"hook:{hook_name}",
+            run_sync_in_thread=not inspect.iscoroutinefunction(callback),
+        )
         self._manager._hooks.setdefault(hook_name, []).append(leased_callback)
         self._manager._hook_owners.setdefault(hook_name, []).append(
             (owner_key, leased_callback)
@@ -600,6 +637,7 @@ class PluginContext:
         leased_callback = self._lease_callback(
             callback,
             label=f"middleware:{kind}",
+            run_sync_in_thread=not inspect.iscoroutinefunction(callback),
         )
         self._manager._middleware.setdefault(kind, []).append(leased_callback)
         self._manager._middleware_owners.setdefault(kind, []).append(

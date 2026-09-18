@@ -1,7 +1,10 @@
 """Crew 插件系统：目录插件加载、工具注册和拦截钩子。"""
 
+import asyncio
 from pathlib import Path
 import sys
+import threading
+import time
 
 import pytest
 
@@ -591,3 +594,165 @@ def register(ctx):
     loaded = [p for p in plugins.loaded_plugins if p.manifest.name == "home-plugin"][0]
     assert loaded.enabled
     assert loaded.commands_registered == ["home_status"]
+
+
+def _write_sync_callback_plugin(root, name: str, body: str):
+    plugin_dir = root / name
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        f"name: {name}\nkind: standalone\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(body.lstrip(), encoding="utf-8")
+    return plugin_dir
+
+
+async def test_sync_hook_and_middleware_run_in_thread_without_blocking_loop(tmp_path):
+    _write_sync_callback_plugin(
+        tmp_path,
+        "sync_callbacks_plugin",
+        """
+import threading
+import time
+
+calls = []
+
+def slow_hook(**kwargs):
+    time.sleep(0.3)
+    calls.append(("hook", threading.get_ident()))
+
+def slow_middleware(args, **kwargs):
+    time.sleep(0.3)
+    calls.append(("middleware", threading.get_ident()))
+    return {"args": dict(args)}
+
+def register(ctx):
+    ctx.register_hook("pre_tool_call", slow_hook)
+    ctx.register_middleware("tool_request", slow_middleware)
+""",
+    )
+    plugins = PluginManager(registry=Registry())
+    plugins.discover_and_load([tmp_path], enabled=["sync_callbacks_plugin"])
+    module = sys.modules["crew_runtime_plugins.sync_callbacks_plugin"]
+
+    ticks = 0
+    ticker_done = False
+
+    async def ticker():
+        nonlocal ticks
+        while not ticker_done:
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    ticker_task = asyncio.create_task(ticker())
+    try:
+        blocked = await plugins.pre_tool_call(ToolCall("c1", "demo", {}))
+        request = await plugins.apply_tool_request_middleware("demo", {"x": 1})
+    finally:
+        ticker_done = True
+        await ticker_task
+
+    assert blocked is None
+    assert request.payload == {"x": 1}
+    assert [name for name, _ in module.calls] == ["hook", "middleware"]
+    assert all(thread_id != threading.get_ident() for _, thread_id in module.calls)
+    # 0.3s 的同步回调若内联跑在事件循环上，ticker 在这段时间无法推进
+    assert ticks >= 10
+
+
+async def test_cancelling_sync_hook_waits_bounded_window_without_spin(tmp_path, caplog):
+    _write_sync_callback_plugin(
+        tmp_path,
+        "hanging_hook_plugin",
+        """
+import threading
+
+started = threading.Event()
+release = threading.Event()
+
+def hanging_hook(**kwargs):
+    started.set()
+    release.wait(10)
+
+def register(ctx):
+    ctx.register_hook("pre_tool_call", hanging_hook)
+""",
+    )
+    plugins = PluginManager(registry=Registry())
+    plugins.discover_and_load([tmp_path], enabled=["hanging_hook_plugin"])
+    module = sys.modules["crew_runtime_plugins.hanging_hook_plugin"]
+
+    caller = asyncio.create_task(plugins.pre_tool_call(ToolCall("c1", "demo", {})))
+    try:
+        assert await asyncio.to_thread(module.started.wait, 5)
+
+        caller.cancel()
+        started_at = time.monotonic()
+        with caplog.at_level("WARNING"):
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+        elapsed = time.monotonic() - started_at
+
+        # 有界优雅窗口：等待约 2s 后放弃；busy-spin 旧实现会一直等到回调自己结束
+        assert 1.5 <= elapsed < 4.0
+        assert "hook:pre_tool_call" in caplog.text
+        assert "泄漏" in caplog.text
+    finally:
+        module.release.set()
+
+
+async def test_sync_hook_contextvar_writeback_reaches_caller_context(tmp_path):
+    _write_sync_callback_plugin(
+        tmp_path,
+        "contextvar_writeback_plugin",
+        """
+import contextvars
+
+probe = contextvars.ContextVar("contextvar_writeback_probe", default="unset")
+
+def capture_hook(**kwargs):
+    probe.set("from-hook")
+
+def register(ctx):
+    ctx.register_hook("pre_tool_call", capture_hook)
+""",
+    )
+    plugins = PluginManager(registry=Registry())
+    plugins.discover_and_load([tmp_path], enabled=["contextvar_writeback_plugin"])
+    module = sys.modules["crew_runtime_plugins.contextvar_writeback_plugin"]
+
+    assert module.probe.get() == "unset"
+    blocked = await plugins.pre_tool_call(ToolCall("c1", "demo", {}))
+    assert blocked is None
+    # 同步 hook 内联执行时 set 会直接生效；线程化后依赖 ContextVar 写回
+    assert module.probe.get() == "from-hook"
+
+
+async def test_sync_hook_contextvar_not_written_back_on_error(tmp_path, caplog):
+    _write_sync_callback_plugin(
+        tmp_path,
+        "contextvar_error_plugin",
+        """
+import contextvars
+
+probe = contextvars.ContextVar("contextvar_error_probe", default="unset")
+
+def failing_hook(**kwargs):
+    probe.set("from-hook")
+    raise RuntimeError("boom")
+
+def register(ctx):
+    ctx.register_hook("pre_tool_call", failing_hook)
+""",
+    )
+    plugins = PluginManager(registry=Registry())
+    plugins.discover_and_load([tmp_path], enabled=["contextvar_error_plugin"])
+    module = sys.modules["crew_runtime_plugins.contextvar_error_plugin"]
+
+    # hook 异常被 _call_hook 记日志后吞掉，调用本身不抛出、也不拦截
+    with caplog.at_level("WARNING"):
+        blocked = await plugins.pre_tool_call(ToolCall("c1", "demo", {}))
+    assert blocked is None
+    assert "boom" in caplog.text
+    # 失败路径不写回，保持"失败无副作用"
+    assert module.probe.get() == "unset"

@@ -345,13 +345,25 @@ async def test_run_agent_background_lease_blocks_generation_stop_until_child_fin
         def create_runtime(self, **kwargs):
             return {"task_id": "bg-1", "id": "bg-1", **kwargs}
 
+        async def create_runtime_async(self, **kwargs):
+            return self.create_runtime(**kwargs)
+
         def mark_running(self, _task_id):
+            return None
+
+        async def mark_running_async(self, _task_id):
             return None
 
         def update_status(self, *_args):
             return None
 
+        async def update_status_async(self, *_args):
+            return None
+
         def touch_activity(self, *_args):
+            return None
+
+        async def touch_activity_async(self, *_args):
             return None
 
     register_subagent_tools(

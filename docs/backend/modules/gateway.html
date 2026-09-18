@@ -69,6 +69,8 @@
       <tr><td>Session Source Contributor（<code>session_context.py</code>）</td><td>拥有渠道来源数据和 formatter，通过 Feature Runtime 输出规范化 source 与动态模型上下文。</td><td>已落地</td></tr>
       <tr><td>Wiki Knowledge Consumer（<code>routers/wiki.py</code> / <code>routers/misc.py</code>）</td><td>REST 与附件捕获按请求解析 Knowledge Service 并持有 Generation Lease；能力停用统一返回 503 或跳过后台捕获。</td><td>已落地</td></tr>
       <tr><td>Feature Event Dispatch（<code>ws.py</code>）</td><td>回合结束只调度中立 Event Contributor Registry；事件来源与 Generation 属于各 Feature，Gateway 提供标准帧 sink。</td><td>已落地</td></tr>
+      <tr><td>独立线程 Health 服务（<code>health_server.py</code>）</td><td>与业务事件循环隔离的极简 HTTP health（stdlib <code>ThreadingHTTPServer</code> 跑在独立线程）：业务循环卡顿时桌面端仍能探测进程活性。端口 <code>runtime.health_port</code>（默认主端口+1），绑定失败仅告警并降级为仅主端口 <code>/api/health</code>，不阻止启动；生命周期挂在 FastAPI lifespan 内，shutdown 最后停止。响应复用主端点同一份 instance-proof 校验（<code>build_gateway_health_payload</code>）与 components 快照（<code>build_health_components</code>），并附带 <code>loop_lag_ms</code> 循环活性哨兵。</td><td>已落地</td></tr>
+      <tr><td>循环活性哨兵（<code>loop_lag_ms</code>）</td><td>业务循环上的哨兵 task 每秒把 <code>loop.time()</code> 与 components 快照戳到模块级变量（跨线程单值快照，锁开销可忽略）；health 线程读取时间戳算出滞后毫秒写进响应，桌面端据此区分「进程活但循环忙」与「进程死」。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -87,6 +89,8 @@
       <tr><td><code>crew/gateway/context.py</code></td><td>上传、路径解析与旧 Browser 引用 API 兼容出口；不再拥有注入注册表。</td></tr>
       <tr><td><code>crew/gateway/session_context.py</code></td><td>SessionSource/SessionContext 路由契约、prompt formatter 与 Contributor Handler。</td></tr>
       <tr><td><code>crew/gateway/routers/wiki.py</code></td><td>Provider-neutral Wiki HTTP 适配；只处理认证、参数与响应，不访问 Store、Parser 或本地目录。</td></tr>
+      <tr><td><code>crew/gateway/health_server.py</code></td><td>独立线程极简 health 服务（仅 <code>/api/health</code>）+ 循环活性哨兵快照（<code>note_loop_tick</code> / <code>read_loop_lag_ms</code> / components 快照）+ 与主端点共用的 <code>build_health_components</code>。</td></tr>
+      <tr><td><code>crew/gateway/instance_auth.py</code></td><td>实例证明校验；<code>build_gateway_health_payload</code> 为主端点与线程 health 服务共用的响应体计算（fail closed：非法 challenge 400，无实例密钥 503）。</td></tr>
       <tr><td><code>crew/state/channel_bindings.py</code></td><td>平台 ↔ owner 绑定的持久化（<code>bind_on_connect</code> / <code>get_binding</code> / <code>list_for_platform</code>）。</td></tr>
     </tbody>
   </table>
@@ -126,11 +130,24 @@ async with lease:
   <p><code>GET /api/config</code> 及共用 <code>config_body()</code> 的模型配置响应新增 <code>feature_capabilities</code>，直接消费 Runtime 的精简快照。无 Runtime 的兼容测试宿主返回空映射；现有 Wiki、外援字段保持原契约。真实 Runtime 错误不会被静默转为空结果。</p>
   <p>状态不含配置、路径、错误和 Lease 明细，也不代替鉴权。Desktop/Web 类型以可选字段承接；Team/Kanban UI 动态装卸仍属后续切片。见 <a href="../adr/0040-feature-capability-snapshot.html">ADR-0040</a> 与 <a href="../../testing/plugin-architecture-stage-6ab-feature-capabilities.html">6AB 测试记录</a>。</p>
 
+  <h2>独立线程 Health 服务与循环活性哨兵（2026-09-17）</h2>
+  <p>主 <code>/api/health</code> 与所有 agent 业务共用 uvicorn 的 asyncio 事件循环，业务卡顿时健康探测随之超时。健康端点因此拆成两层：</p>
+  <pre><code>GET /api/health（主端口）          FastAPI 路由；components 由 build_health_components 计算
+health 线程服务（默认主端口+1）     stdlib ThreadingHTTPServer 独立线程，仅 /api/health
+  runtime.health_port: 0 = 自动（主端口+1）；显式端口覆盖；绑定失败降级仅主端口，不阻止启动
+响应语义                            与主端点完全对齐：复用 build_gateway_health_payload
+                                    （instance proof fail closed）+ components 快照
+loop_lag_ms                         业务循环滞后毫秒：哨兵 task 每秒 note_loop_tick(loop.time())，
+                                    health 线程读时间戳差值；区分「进程活但循环忙」与「进程死」</code></pre>
+  <p>components 快照（startup / cron 状态）由业务循环上的哨兵 task 每秒戳到模块级变量，主端点与线程服务共用同一份 <code>build_health_components</code> 逻辑，两处响应不会出现语义分叉。线程服务生命周期挂在 FastAPI lifespan 内：启动早期拉起，shutdown 的最后一步停止——shutdown 期间桌面端仍能看到进程活性与循环滞后。桌面端探测优先打 health 线程端口（主端口 +1，<code>backend-health-probe.ts</code> 推导），验证失败（旧 gateway 无独立 health 线程）再回退主端口。</p>
+
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
       <tr><td>2026-09-09</td><td>阶段 4D-1：渠道代码迁入 <code>crew/channels/</code> 包（channel_manager / delivery / platform_registry / channel_sessions / channel_config / channel_presets / broadcast），<code>product.channels</code> Feature Generation 统一拥有 Manager/Router/平台注册/<code>new_conversation</code> 工具并发布 <code>channels</code> Service；Channel ABC 扩展显式生命周期契约；Lifespan 与 LogoutCoordinator 改经 Service 同代 Lease 启停；<code>crew.channel_manager</code>/<code>delivery_router</code> 改动态 compat 属性，Feature 非激活 fail-closed（ADR-0030）。</td><td>渠道装配与启停主权；gateway 不再手工构造渠道运行时</td></tr>
+      <tr><td>2026-09-17</td><td><code>08f746f</code> health 端点独立线程服务（<code>runtime.health_port</code> 默认主端口+1，占用降级不阻止启动）+ 循环活性哨兵 <code>loop_lag_ms</code>；主端点与线程服务共用 <code>build_gateway_health_payload</code>（instance proof fail closed）与 <code>build_health_components</code>。</td><td><code>crew/gateway/health_server.py</code>（新增）、<code>crew/gateway/instance_auth.py</code>、<code>crew/gateway/app.py</code>、<code>routers/misc.py</code>；桌面端优先探测 health 端口。</td></tr>
+      <tr><td>2026-09-17</td><td>ADR-0045 批次 3：dispatcher 错误分支类型化收敛——ProviderError/ToolError/CrewError 分支 error 帧带 <code>code=kind</code>/<code>retryable</code>/<code>retry_delay</code>（category 沿用 exc.category / "tool" / kind 映射），新增 CrewError 分支，Exception 文本兜底保留；<code>enrich_error_chunk</code> 无 exc 时可从 body 的 kind code 反推 category。</td><td><code>crew/gateway/dispatcher.py</code>、<code>crew/features/outbound.py</code>。</td></tr>
       <tr><td>2026-09-03</td><td>渠道归属统一（决策⑥⑦）重新落地：<code>ab0d596</code> 的实现曾被 <code>5434708</code> 签名清扫回卷，本次按当前代码契约重放——未绑定渠道注册归本机 owner <code>local</code>（<code>include_env=True</code>），显式绑定渠道 <code>include_env=False</code>；<code>channel_manager</code> 删除 <code>{"", "local", "dev:dev"}</code> 全局特判、register/unregister/record_error/start_all owner 必填；<code>delivery</code> 删除空 owner sender 回退；无绑定渠道入站消息归 <code>local</code>（平台原始 uid 严禁充当 owner）；<code>channel_bindings.get_binding</code> owner 必填、删除首条兼容视图；dispatcher session_end 归一 owner。<code>tools/builtin.py</code> kill 显式传 owner 与 <code>_has_active_children</code> owner 必填维持 5434708 收紧后的形态。</td><td>gateway 渠道注册/投递/入站归属语义；未绑定渠道行为变化：owner="" → local</td></tr>
       <tr><td>2026-09-03</td><td>合并 owner 统一化改造（refactor/llm-provider → refactor/plugin-architecture-stage-0，merge 22af708）：认证边界归一（<code>auth.py</code> loopback → <code>local</code>，经 <code>LOCAL_OWNER_ACCOUNT_ID</code>）；ContextVar set 点收口（<code>dispatcher.run</code> 统一 <code>normalize_owner_account_id</code>）；绑定渠道入站 binder 改写语义固定（平台原始 uid 不充当 owner）。</td><td>gateway 认证/分发边界、模型 CRUD 路由 owner 传参</td></tr>
       <tr><td>2026-09-03</td><td>移除静态 <code>REFERENCE_INJECTORS</code>；结构化路径与 Browser 标签页改由各自 Context Contributor 提供。</td><td><code>crew/gateway/context.py</code>、Agent 依赖边界。</td></tr>

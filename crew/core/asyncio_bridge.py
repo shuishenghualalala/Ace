@@ -21,6 +21,17 @@ log = logging.getLogger(__name__)
 
 _loop: asyncio.AbstractEventLoop | None = None
 _loop_lock = threading.Lock()
+_loop_thread_id: int | None = None
+
+
+def _run_bridge_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Run the bridge loop and retain its thread identity for deadlock checks."""
+    global _loop_thread_id
+    _loop_thread_id = threading.get_ident()
+    try:
+        loop.run_forever()
+    finally:
+        _loop_thread_id = None
 
 
 def _bridge_loop() -> asyncio.AbstractEventLoop:
@@ -33,7 +44,8 @@ def _bridge_loop() -> asyncio.AbstractEventLoop:
             return _loop
         loop = asyncio.new_event_loop()
         thread = threading.Thread(
-            target=loop.run_forever,
+            target=_run_bridge_loop,
+            args=(loop,),
             name="crew-asyncio-bridge",
             daemon=True,
         )
@@ -50,8 +62,19 @@ def run_sync(coro: Coroutine[Any, Any, Any]) -> Any:
     （防御路径，调用方不得是事件循环线程自身）。
     """
     try:
-        asyncio.get_running_loop()
+        running_loop = asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
-    future = asyncio.run_coroutine_threadsafe(coro, _bridge_loop())
+
+    bridge_loop = _bridge_loop()
+    if running_loop is bridge_loop or threading.get_ident() == _loop_thread_id:
+        # Do not submit to the same loop and then wait for its result: that
+        # permanently blocks the loop before the submitted coroutine can run.
+        # Closing the caller-created coroutine also avoids an unawaited warning.
+        coro.close()
+        raise RuntimeError(
+            "run_sync() cannot be called from the asyncio bridge loop thread"
+        )
+
+    future = asyncio.run_coroutine_threadsafe(coro, bridge_loop)
     return future.result()

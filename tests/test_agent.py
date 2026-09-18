@@ -16,9 +16,10 @@ from crew.agent.executor import (
     ExecutionContext,
     create_executor,
 )
+from crew.agent.executor.builtin import _RETRY_DELAY_CAP_SECONDS
 from crew.agent.runtime import SingleAgent
 from crew.core.envelope import Envelope, ResponseChunk
-from crew.core.errors import ConfigError, ProviderError
+from crew.core.errors import ConfigError, CrewErrorKind, ProviderError
 from crew.core.mocks import FakeProvider, InMemorySessionStore, NullMemory
 from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
 from crew.plugins.manager import PluginManager
@@ -436,6 +437,102 @@ async def test_builtin_executor_no_retry_when_fatal():
     )
     kinds = [ch.kind async for ch in ex.execute(ctx)]
     assert kinds[-1] == "error"
+
+
+class _DelayFlakyProvider(FakeProvider):
+    """前 fail_times 次抛同一个可重试 ProviderError（可带 retry_delay），之后正常。"""
+
+    def __init__(self, fail_times: int, error: ProviderError):
+        super().__init__()
+        self._fail_times = fail_times
+        self._error = error
+        self.calls = 0
+
+    async def stream_chat(self, messages, tools=None):
+        self.calls += 1
+        if self._fail_times > 0:
+            self._fail_times -= 1
+            raise self._error
+        yield StreamChunk(delta_text="好了")
+        yield StreamChunk(delta_text="", done=True)
+
+
+@pytest.fixture
+def _recorded_sleeps(monkeypatch):
+    """录下 retry 段的 asyncio.sleep 延迟并跳过真实等待。"""
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("crew.agent.executor.builtin.asyncio.sleep", fake_sleep)
+    return delays
+
+
+def _retry_executor(provider, *, max_retries=2, backoff_seconds=10.0) -> BuiltinExecutor:
+    return BuiltinExecutor(
+        provider, Registry(), PluginManager(),
+        max_retries=max_retries, backoff_seconds=backoff_seconds, stream_retry_jitter=False,
+    )
+
+
+def _retry_ctx() -> ExecutionContext:
+    return ExecutionContext(
+        session_id="s", request_id="r", system_prompt="sys", messages=[Message.user("hi")], query="hi"
+    )
+
+
+async def test_builtin_executor_retry_waits_server_retry_delay(_recorded_sleeps):
+    """服务端建议的 retry_delay 优先于本地指数退避（本地 backoff=10s，实际应等 0.05s）。"""
+    err = ProviderError("限流", kind=CrewErrorKind.USAGE_LIMIT, retryable=True, status=429, retry_delay=0.05)
+    provider = _DelayFlakyProvider(fail_times=1, error=err)
+    ex = _retry_executor(provider)
+    kinds = [ch.kind async for ch in ex.execute(_retry_ctx())]
+    assert kinds[-1] == "final"
+    assert _recorded_sleeps == [0.05]
+
+
+async def test_builtin_executor_retry_delay_capped(_recorded_sleeps):
+    """异常大的 retry_delay 被封顶，避免拖死重试循环。"""
+    err = ProviderError("限流", kind=CrewErrorKind.USAGE_LIMIT, retryable=True, status=429, retry_delay=7200.0)
+    provider = _DelayFlakyProvider(fail_times=1, error=err)
+    ex = _retry_executor(provider, backoff_seconds=0)
+    kinds = [ch.kind async for ch in ex.execute(_retry_ctx())]
+    assert kinds[-1] == "final"
+    assert _recorded_sleeps == [_RETRY_DELAY_CAP_SECONDS]
+
+
+async def test_builtin_executor_non_crew_error_not_retried(_recorded_sleeps):
+    """非 CrewError 异常维持原语义：不重试、不等待，直接 error 帧。"""
+
+    class _BoomProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def stream_chat(self, messages, tools=None):
+            self.calls += 1
+            raise ValueError("boom")
+
+    provider = _BoomProvider()
+    ex = _retry_executor(provider)
+    kinds = [ch.kind async for ch in ex.execute(_retry_ctx())]
+    assert kinds[-1] == "error"
+    assert provider.calls == 1
+    assert _recorded_sleeps == []
+
+
+async def test_builtin_executor_error_frame_carries_kind_fields():
+    """可重试错误耗尽重试后，error 帧 body 带 kind(code)/retryable/retry_delay。"""
+    err = ProviderError("超时", kind=CrewErrorKind.TIMEOUT, retryable=True, retry_delay=2.5)
+    provider = _DelayFlakyProvider(fail_times=3, error=err)
+    ex = _retry_executor(provider, max_retries=0)
+    chunks = [ch async for ch in ex.execute(_retry_ctx())]
+    error = chunks[-1]
+    assert error.kind == "error"
+    assert error.body["code"] == "timeout"
+    assert error.body["retryable"] is True
+    assert error.body["retry_delay"] == 2.5
 
 
 async def test_agent_session_end_reports_final_and_provider_failure_once():

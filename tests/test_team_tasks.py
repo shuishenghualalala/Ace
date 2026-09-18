@@ -5267,7 +5267,7 @@ def test_team_uses_crew_builtin_as_regular_member():
     assert team.leader.executor.config.external_agent_id == "agent_kk"
 
 
-def test_team_interrupt_only_stops_current_team_session_children():
+async def test_team_interrupt_only_stops_current_team_session_children():
     tm, _ = _team()
 
     class InterruptibleAgent:
@@ -5283,14 +5283,14 @@ def test_team_interrupt_only_stops_current_team_session_children():
     child_b = InterruptibleAgent()
     tm._teams[tm._key("team-a", "local")] = SimpleNamespace(leader=leader_a)
     tm._teams[tm._key("team-b", "local")] = SimpleNamespace(leader=leader_b)
-    tm._mark_child_active({
+    await tm._mark_child_active({
         "child_id": "task-a::kk",
         "parent_session_id": "team-a",
         "owner_account_id": "local",
         "member": "kk",
         "agent": child_a,
     })
-    tm._mark_child_active({
+    await tm._mark_child_active({
         "child_id": "task-b::kk",
         "parent_session_id": "team-b",
         "owner_account_id": "local",
@@ -5311,17 +5311,17 @@ def test_team_interrupt_only_stops_current_team_session_children():
     assert "owner_account_id" not in remaining[0]
 
 
-def test_team_member_switch_state_is_scoped_to_member_and_visible_session():
+async def test_team_member_switch_state_is_scoped_to_member_and_visible_session():
     tm, _ = _team()
     child = object()
-    tm._mark_child_active({
+    await tm._mark_child_active({
         "child_id": "task-a::coder",
         "parent_session_id": "team-a::turn::req_1",
         "owner_account_id": "local",
         "member": "coder",
         "agent": child,
     })
-    tm._mark_child_active({
+    await tm._mark_child_active({
         "child_id": "task-b::reviewer",
         "parent_session_id": "team-b",
         "owner_account_id": "local",
@@ -10475,7 +10475,7 @@ def test_team_parent_session_history_prefers_kanban_events_over_child_sessions(a
     assert [item["content"] for item in response.json()] == ["Leader 已完成最终总结。"]
 
 
-def test_team_history_restores_direct_mention_sender_identity_for_old_events():
+async def test_team_history_restores_direct_mention_sender_identity_for_old_events():
     class ExternalAgents:
         @staticmethod
         def get_team(team_id: str, *, owner_account_id: str = ""):
@@ -10509,7 +10509,7 @@ def test_team_history_restores_direct_mention_sender_identity_for_old_events():
         external_agents = ExternalAgents()
         team = Team()
 
-    items = team_internal_history_items(
+    items = await team_internal_history_items(
         Crew(),
         "team_parent",
         [],
@@ -10600,7 +10600,7 @@ def test_team_session_history_does_not_project_direct_mention_parent_as_crew(aut
     assert all(item.get("agent_name") != "Crew" for item in items if item["role"] == "team_internal")
 
 
-def test_team_history_keeps_direct_mention_child_with_existing_workflow_events():
+async def test_team_history_keeps_direct_mention_child_with_existing_workflow_events():
     class Team:
         @staticmethod
         def event_history_for_session(session_id: str, owner_account_id: str = ""):
@@ -10622,7 +10622,7 @@ def test_team_history_keeps_direct_mention_child_with_existing_workflow_events()
             def list_tasks(*args, **kwargs):
                 return []
 
-    items = team_internal_history_items(
+    items = await team_internal_history_items(
         Crew(),
         "team_parent",
         [(
@@ -10646,14 +10646,14 @@ def test_team_history_keeps_direct_mention_child_with_existing_workflow_events()
     assert items[1]["agent_id"] == "kk"
 
 
-def test_team_history_maps_legacy_crew_child_session_to_builtin_identity():
+async def test_team_history_maps_legacy_crew_child_session_to_builtin_identity():
     class Crew:
         class tasks:
             @staticmethod
             def list_tasks(*args, **kwargs):
                 return []
 
-    items = team_internal_history_items(
+    items = await team_internal_history_items(
         Crew(),
         "team_parent",
         [
@@ -10671,14 +10671,14 @@ def test_team_history_maps_legacy_crew_child_session_to_builtin_identity():
     assert items[0]["source_session_id"] == "team_parent::turn::req_1::crew"
 
 
-def test_team_history_keeps_distinct_communication_replies_with_same_text():
+async def test_team_history_keeps_distinct_communication_replies_with_same_text():
     class Crew:
         class tasks:
             @staticmethod
             def list_tasks(*args, **kwargs):
                 return []
 
-    items = team_internal_history_items(
+    items = await team_internal_history_items(
         Crew(),
         "team_parent",
         [
@@ -10717,14 +10717,14 @@ def test_team_history_keeps_distinct_communication_replies_with_same_text():
     assert items[0]["reply_to"] == "bus_1"
 
 
-def test_team_history_keeps_legacy_same_text_from_distinct_child_sessions():
+async def test_team_history_keeps_legacy_same_text_from_distinct_child_sessions():
     class Crew:
         class tasks:
             @staticmethod
             def list_tasks(*args, **kwargs):
                 return []
 
-    items = team_internal_history_items(
+    items = await team_internal_history_items(
         Crew(),
         "team_parent",
         [
@@ -10747,14 +10747,14 @@ def test_team_history_keeps_legacy_same_text_from_distinct_child_sessions():
     ]
 
 
-def test_team_history_preserves_terminal_user_mention_state_for_retry():
+async def test_team_history_preserves_terminal_user_mention_state_for_retry():
     class Crew:
         class tasks:
             @staticmethod
             def list_tasks(*args, **kwargs):
                 return []
 
-    items = team_internal_history_items(
+    items = await team_internal_history_items(
         Crew(),
         "team_parent",
         [
@@ -10964,7 +10964,7 @@ def test_team_parent_final_with_request_id_only_matches_same_request_summary():
     assert is_duplicate_team_parent_final(parent, summaries)
 
 
-def test_team_task_projection_does_not_match_different_requests_by_title():
+async def test_team_task_projection_does_not_match_different_requests_by_title():
     class Crew:
         class tasks:
             @staticmethod
@@ -11002,7 +11002,7 @@ def test_team_task_projection_does_not_match_different_requests_by_title():
                     },
                 }]
 
-    rows = team_tasks_with_plan_projection(Crew(), "team_parent", None, 200, owner_account_id="local")
+    rows = await team_tasks_with_plan_projection(Crew(), "team_parent", None, 200, owner_account_id="local")
 
     assert {row["task_id"] for row in rows} == {"plan-node-req-1", "parent-req-2"}
 

@@ -13,10 +13,13 @@
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import contextvars
 import json
 import logging
+import logging.handlers
+import queue
 import re
 import sys
 import threading
@@ -97,6 +100,10 @@ def log_role_prefix(prefix: str | None) -> Iterator[None]:
 _CONFIGURED = False
 _LLM_TRACE_ENABLED = False
 _LLM_TRACE_FILE = ".crew/logs/llm.jsonl"
+# llm_trace 队列与后台 listener（单进程单例）。热路径只做 queue.put，
+# json.dumps 与文件写入都在 listener 线程完成。
+_LLM_QUEUE: _TraceQueue | None = None
+_LLM_LISTENER: logging.handlers.QueueListener | None = None
 
 _BROWSER_BOUNDARY_RE = re.compile(
     r"<untrusted_browser_(?:content|console)>.*?</untrusted_browser_(?:content|console)>",
@@ -270,9 +277,67 @@ def query_logs(
     )
 
 
+class _TraceQueue(queue.Queue):
+    """llm_trace 专用队列：带排空等待，flush 可等所有已入队记录写完。
+
+    QueueListener 每处理完一条记录会调用 task_done（stdlib 行为），
+    这里在 task_done 上发条件变量通知，wait_drained 据此判断全部落盘。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(-1)
+        self._drain_cond = threading.Condition()
+        self._pending = 0
+
+    def put(self, item: Any, block: bool = True, timeout: float | None = None) -> None:
+        with self._drain_cond:
+            self._pending += 1
+        super().put(item, block=block, timeout=timeout)
+
+    def task_done(self) -> None:
+        super().task_done()
+        with self._drain_cond:
+            self._pending -= 1
+            self._drain_cond.notify_all()
+
+    def wait_drained(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        with self._drain_cond:
+            while self._pending > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._drain_cond.wait(remaining)
+        return True
+
+
+class _JsonlTraceFormatter(logging.Formatter):
+    """在 listener 线程里把 record 上的 llm_payload 序列化成一行 JSON。
+
+    json.dumps 移出事件循环热路径；序列化失败降级为占位行，不丢记录。
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = getattr(record, "llm_payload", None)
+        if payload is None:
+            return super().format(record)
+        try:
+            return json.dumps(payload, ensure_ascii=False, default=str)
+        except Exception:  # noqa: BLE001 - 序列化失败也不能影响主流程
+            return json.dumps(
+                {"ts": payload.get("ts"), "dir": payload.get("dir"), "_error": "serialize_failed"},
+                ensure_ascii=False,
+            )
+
+
 def _setup_llm_trace(log_file: str = "") -> None:
-    """配置专用的 LLM trace logger（crew.llm），独立写 jsonl，不污染主日志/控制台。"""
-    global _LLM_TRACE_ENABLED
+    """配置专用的 LLM trace logger（crew.llm），独立写 jsonl，不污染主日志/控制台。
+
+    采用 QueueHandler + QueueListener：热路径只做入队，json 序列化与落盘
+    都在 listener 后台线程完成。重复调用会先停掉旧 listener。
+    """
+    global _LLM_TRACE_ENABLED, _LLM_QUEUE, _LLM_LISTENER
+    shutdown_llm_trace()
     # trace 文件放在主日志同目录，否则用默认 .crew/logs/
     if log_file:
         trace_path = Path(log_file).expanduser().parent / "llm.jsonl"
@@ -282,16 +347,72 @@ def _setup_llm_trace(log_file: str = "") -> None:
     logger = logging.getLogger("crew.llm")
     logger.setLevel(logging.INFO)
     logger.propagate = False  # 只写自己的文件，不冒泡到 root（避免重复/截断）
-    handler = logging.FileHandler(trace_path, encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    logger.addHandler(handler)
+    file_handler = logging.FileHandler(trace_path, encoding="utf-8")
+    file_handler.setFormatter(_JsonlTraceFormatter("%(message)s"))
+    q: _TraceQueue = _TraceQueue()
+    listener = logging.handlers.QueueListener(q, file_handler, respect_handler_level=True)
+    listener.start()
+    logger.addHandler(logging.handlers.QueueHandler(q))
+    _LLM_QUEUE = q
+    _LLM_LISTENER = listener
     _LLM_TRACE_ENABLED = True
+    _ensure_llm_trace_atexit()
+
+
+def flush_llm_trace(timeout: float = 5.0) -> bool:
+    """等待队列中已入队的 trace 全部落盘。返回是否在超时前排空。"""
+    q = _LLM_QUEUE
+    if q is None:
+        return True
+    return q.wait_drained(timeout)
+
+
+def shutdown_llm_trace(timeout: float = 5.0) -> None:
+    """停止 listener：先入队哨兵（排在前序记录之后，保证不丢日志），
+
+    带超时 join 后台线程，再关闭文件 handler。任何阶段都不挂住调用方。
+    """
+    global _LLM_TRACE_ENABLED, _LLM_QUEUE, _LLM_LISTENER
+    listener = _LLM_LISTENER
+    _LLM_LISTENER = None
+    _LLM_QUEUE = None
+    _LLM_TRACE_ENABLED = False
+    if listener is None:
+        return
+    logger = logging.getLogger("crew.llm")
+    for h in list(logger.handlers):
+        if isinstance(h, logging.handlers.QueueHandler):
+            logger.removeHandler(h)
+    listener.enqueue_sentinel()
+    thread = getattr(listener, "_thread", None)
+    if thread is not None and thread.is_alive():
+        thread.join(timeout)
+    for h in listener.handlers:
+        try:
+            h.close()
+        except Exception:  # noqa: BLE001 - 关闭路径不能抛
+            pass
+
+
+_LLM_TRACE_ATEXIT_REGISTERED = False
+_LLM_TRACE_ATEXIT_LOCK = threading.Lock()
+
+
+def _ensure_llm_trace_atexit() -> None:
+    """注册一次解释器退出时的 trace 收尾，保证退出前把队列刷完且不挂住。"""
+    global _LLM_TRACE_ATEXIT_REGISTERED
+    with _LLM_TRACE_ATEXIT_LOCK:
+        if _LLM_TRACE_ATEXIT_REGISTERED:
+            return
+        _LLM_TRACE_ATEXIT_REGISTERED = True
+        atexit.register(shutdown_llm_trace)
 
 
 def llm_trace(direction: str, payload: dict[str, Any]) -> None:
     """把一次 LLM 收发写一行 JSON 到 llm.jsonl。direction = request | response。
 
     未开启（setup_logging 未传 llm_trace=True）时为 no-op，零开销。
+    热路径只做 sanitize + 入队；json.dumps 与写文件在 listener 线程完成。
     """
     if not _LLM_TRACE_ENABLED:
         return
@@ -299,11 +420,7 @@ def llm_trace(direction: str, payload: dict[str, Any]) -> None:
         # ContextVar 默认即本机 owner，归属恒非空、恒附加。
         payload = {**payload, "owner_account_id": current_owner_account_id.get()}
     record = _sanitize_llm_trace({"ts": round(time.time(), 3), "dir": direction, **payload})
-    try:
-        line = json.dumps(record, ensure_ascii=False, default=str)
-    except Exception:  # noqa: BLE001 - 序列化失败也不能影响主流程
-        line = json.dumps({"ts": record["ts"], "dir": direction, "_error": "serialize_failed"})
-    logging.getLogger("crew.llm").info(line)
+    logging.getLogger("crew.llm").info("llm_trace", extra={"llm_payload": record})
 
 
 def get_logger(name: str) -> logging.Logger:

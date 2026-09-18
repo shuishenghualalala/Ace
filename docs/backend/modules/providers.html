@@ -61,6 +61,7 @@
       <tr><td><code>anthropic_provider</code></td><td>Anthropic Messages API Provider（httpx 直连）。base_url 覆盖后同样服务走 Anthropic 协议的厂商端点（Kimi For Coding、MiniMax）。</td><td>已落地</td></tr>
       <tr><td><code>vendors（厂商档案）</code></td><td>厂商注册表：<code>VendorProfile</code>（协议 / base_url / api_key_env / 模型目录）+ <code>VendorCompat</code>（思考参数格式、reasoning_effort 支持、回传要求、等级映射）。收录 DeepSeek、ZAI（全球/CN coding 端点）、Moonshot（全球/CN）、Kimi For Coding（Anthropic 协议）、MiniMax（全球/CN，Anthropic 协议）、Qwen Token Plan。</td><td>已落地</td></tr>
       <tr><td><code>ssl_context</code></td><td>进程级共享 SSLContext（cadata 一次性加载），所有 provider 的 httpx/openai 客户端共用，避免 cacert.pem 病态微读拖慢启动。</td><td>已落地</td></tr>
+      <tr><td><code>classify（异常分类）</code></td><td>两个 provider 共用的异常分类助手：<code>classify_provider_error()</code> 把 SDK/httpx 异常解析为 <code>ErrorClassification(kind/status/retryable/retry_delay/category)</code>；吸收原有两份类名启发式（isinstance + __cause__ 递归 + 消息文本 + 类名/status）；429/503 解析 Retry-After（响应头秒数格式优先，body retry_delay 兜底，解析失败静默回落 None）；过载（503）与欠费从可重试中分离。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -72,6 +73,8 @@
       <tr><td><code>crew/providers/anthropic_provider.py</code></td><td>Anthropic Messages Provider（含 prompt cache_control 标注）。</td></tr>
       <tr><td><code>crew/providers/vendors.py</code></td><td>厂商档案表 + 解析函数（<code>resolve_vendor</code> / <code>match_vendor</code> / <code>compat_for_model</code>）。</td></tr>
       <tr><td><code>crew/providers/ssl_context.py</code></td><td>共享 SSLContext 单例。</td></tr>
+      <tr><td><code>crew/providers/classify.py</code></td><td>provider 异常统一分类（kind/status/retryable/retry_delay），Retry-After 解析。</td></tr>
+      <tr><td><code>tests/test_provider_error_classification.py</code></td><td>分类矩阵、Retry-After 解析、category↔kind 兼容映射、resilience 类型化判定的单测。</td></tr>
       <tr><td><code>tests/test_vendor_profiles.py</code></td><td>档案表、compat 翻译、payload 组装、装配默认值的离线单测。</td></tr>
     </tbody>
   </table>
@@ -112,6 +115,7 @@ model: deepseek-reasoner</code></pre>
       <tr><td>2026-09-03</td><td>厂商目录对前端开放：新增 <code>vendor_public_dict()</code> 公开视图（id/name/protocol/base_url/模型清单及 context_window、max_tokens、reasoning、vision 标记，不含 compat 与密钥），Gateway 新增只读 <code>GET /api/config/vendors</code>；桌面端模型配置弹层据此提供厂商下拉与自动填充，设置页模型列表按厂商分组。</td><td>vendors.py、gateway 配置路由（新增只读端点）；装配与协议层无改动</td></tr>
       <tr><td>2026-09-03</td><td>与 owner 统一化合并后，厂商装配的 key 解析链按 owner 作用域收口（凭证库按 owner 隔离，owner 私有 key 写 owner overlay <code>.env</code>，全局/内置模型走共享层）；<code>update_model</code> 内置模型（builtin）重定向全局作用域后，key 写入/读取作用域保持一致（修复合并整合点，见 <code>crew/app.py</code> 归置后 owner 注释）。</td><td>app 装配与模型 CRUD 的 key 作用域；厂商档案与 Provider 协议层无改动</td></tr>
       <tr><td>2026-09-02</td><td>新增厂商档案注册表 <code>vendors.py</code>（9 家厂商 + 模型目录 + compat 开关）；<code>openai_provider</code> 按 compat 注入思考参数、reasoning 字段别名、DeepSeek reasoning_content 回传，移除"URL/模型名含 deepseek"字符串嗅探；<code>app.py</code> 装配支持 <code>provider: &lt;厂商id&gt;</code>（base_url / 环境变量 key / vision 档案默认值）；新增 <code>tests/test_vendor_profiles.py</code>（40 例）与 <code>tests/test_model_binding_providers.py</code>（5 例，覆盖会话绑定 / wiki / 团队的 provider 组装链路）。</td><td>providers、app 装配、LLMProvider.reasoning_mode 取值扩展（向后兼容）；custom/存量配置行为不变（DeepSeek 端点经档案兜底识别后行为等价）</td></tr>
+      <tr><td>2026-09-17</td><td>provider 异常分类收敛（ADR-0045 批次 2）：新增 <code>classify.py</code>，openai/anthropic 两份 <code>_is_retryable</code>/<code>_error_category</code> 启发式并入 <code>classify_provider_error()</code>；429/503 的 Retry-After 与 body retry_delay 解析为 <code>retry_delay</code> 随 <code>ProviderError</code> 携带（此前丢弃）；<code>is_unsupported_image_input_error</code> 视觉特判不变。</td><td>openai_provider.py、anthropic_provider.py（包装点改为调分类助手）；新增 tests/test_provider_error_classification.py（39 例）；ADR-0045</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
     </tbody>
   </table>

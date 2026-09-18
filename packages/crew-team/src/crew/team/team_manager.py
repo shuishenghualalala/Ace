@@ -833,7 +833,7 @@ class InProcessTeamManager(TeamManager):
             tool_filter=tool_filter,
         )
 
-    def _mark_child_active(self, record: dict[str, Any]) -> None:
+    async def _mark_child_active(self, record: dict[str, Any]) -> None:
         parent_session_id = str(record.get("parent_session_id") or "")
         owner_account_id = str(record.get("owner_account_id") or "")
         child_id = str(record.get("child_id") or "")
@@ -861,23 +861,21 @@ class InProcessTeamManager(TeamManager):
                 owner_account_id=owner_account_id,
                 plan_node_id=str(record.get("plan_node_id") or ""),
             )
-            touch_activity = getattr(self.tasks, "touch_activity", None)
-            if callable(touch_activity) and str(record.get("task_id") or "").strip():
+            task_id = str(record.get("task_id") or "").strip()
+            touch_activity_async = getattr(self.tasks, "touch_activity_async", None)
+            if callable(touch_activity_async) and task_id:
                 progress: dict[str, Any] = {}
-                task_getter = getattr(self.tasks, "get", None)
+                task_getter = getattr(self.tasks, "get_async", None)
                 if callable(task_getter):
                     try:
-                        task = task_getter(str(record["task_id"]))
+                        task = await task_getter(task_id, owner_account_id=owner_account_id)
                         stored_progress = task.get("progress") if isinstance(task, dict) else {}
                         if isinstance(stored_progress, dict):
                             progress = dict(stored_progress)
                     except Exception:  # noqa: BLE001 - activity attribution must not block execution
                         pass
                 progress["execution_snapshot"] = dict(active_record["execution_snapshot"])
-                touch_activity(
-                    str(record["task_id"]),
-                    progress,
-                )
+                await touch_activity_async(task_id, progress)
             with self._active_lock:
                 self._active_children.setdefault(self._key(parent_session_id, owner_account_id), {})[
                     child_id
@@ -2233,7 +2231,7 @@ class InProcessTeamManager(TeamManager):
         except Exception as exc:  # noqa: BLE001
             log.warning("Team 事件同步到 kanban store 失败 session=%s type=%s err=%s", session_id, event_type, exc)
 
-    def _record_team_communication_lifecycle(
+    async def _record_team_communication_lifecycle(
         self,
         session_id: str,
         owner_account_id: str,
@@ -2257,7 +2255,7 @@ class InProcessTeamManager(TeamManager):
         request_id = str(event.get("request_id") or request_message.get("request_id") or "").strip()
         ask_child_id = f"ask::{request_id}::{target}" if request_id and target else ""
         if status == "delivered" and ask_child_id:
-            self._mark_child_active({
+            await self._mark_child_active({
                 "child_id": ask_child_id,
                 "parent_session_id": session_id,
                 "session_id": f"{session_id}::{target}",

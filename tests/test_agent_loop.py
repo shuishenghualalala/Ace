@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import AsyncIterator
 
 import pytest
@@ -1028,7 +1029,7 @@ async def test_user_interrupt_during_stream_failure_does_not_continue():
     assert final.kind == "final"
     assert final.body["text"] == "前半段"
     assert provider.stream_calls == 1
-    assert not any("续写" in (m.content or "") for m in chunks if m.kind == "status")
+    assert not any("续写" in (m.body.get("message") or "") for m in chunks if m.kind == "status")
 
 
 async def test_loop_stream_interrupt_max_reached():
@@ -1609,6 +1610,36 @@ async def test_tool_media_is_appended_only_after_complete_tool_result_batch():
     assert messages[-1].is_meta and isinstance(messages[-1].content_parts, list)
 
 
+async def test_tool_media_path_read_is_off_event_loop_thread(tmp_path, monkeypatch):
+    """path 型媒体（截图等）的 read_bytes 在工作线程执行，不在事件循环线程。"""
+    import threading
+
+    from pathlib import Path as _Path
+
+    main_ident = threading.get_ident()
+    read_idents: list[int] = []
+    real_read_bytes = _Path.read_bytes
+
+    def capture(self, *args, **kwargs):
+        read_idents.append(threading.get_ident())
+        return real_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "read_bytes", capture)
+
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"\x89PNG fake screenshot bytes")
+    runner = _runner(Registry())
+    runner._pending_media = [("vision", "browser_screenshot", MediaPart("image/png", path=str(image)))]
+    messages: list[Message] = []
+
+    await runner._append_pending_media(messages)
+
+    assert len(messages) == 1
+    url = messages[0].content_parts[1]["image_url"]["url"]
+    assert url.startswith("data:image/png;base64,")
+    assert read_idents and all(t != main_ident for t in read_idents)
+
+
 async def test_prewarm_ignores_unsafe_tool():
     """写工具不提前派发，留给 run_batch 顺序执行。"""
     reg = Registry()
@@ -2157,3 +2188,185 @@ async def test_max_iterations_cap_still_triggers_with_reason():
     chunks = await _collect(ex, _ctx())
     finals = [c for c in chunks if c.kind == "final"]
     assert finals and finals[-1].body.get("reason") == "max_iterations"
+
+
+# --------------------------------------------------------------------------- #
+# 12. 整回合 deadline + interrupt_message 消费 + compact 段中断检查
+# --------------------------------------------------------------------------- #
+class _SlowStreamProvider(LLMProvider):
+    """单次流式调用：吐结果前拖过 deadline，验证 deadline 优雅收尾。"""
+
+    def __init__(self, delay: float) -> None:
+        self.delay = delay
+        self.stream_calls = 0
+
+    async def chat(self, messages, tools=None):  # pragma: no cover - 未走到
+        return ChatResponse(text="unused")
+
+    async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamChunk]:
+        self.stream_calls += 1
+        await asyncio.sleep(self.delay)
+        yield StreamChunk(delta_text="慢悠悠的结果")
+        yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+
+
+async def test_turn_deadline_closes_gracefully_with_marker():
+    """deadline 到点：interrupt 同款优雅收尾，final 带 reason=deadline，
+    历史含 "deadline exceeded" 标记，已生成内容保留，不异常崩溃。"""
+    control = TurnControl()
+    provider = _SlowStreamProvider(delay=0.3)
+    ex = _executor(provider, turn_deadline_seconds=0.1, max_iterations=3)
+    ctx = _ctx(control=control)
+    started = time.perf_counter()
+    chunks = await asyncio.wait_for(_collect(ex, ctx), timeout=5)
+    elapsed = time.perf_counter() - started
+
+    finals = [c for c in chunks if c.kind == "final"]
+    assert len(finals) == 1
+    assert finals[0].body.get("reason") == "deadline"
+    assert finals[0].body.get("text") == "慢悠悠的结果"
+    # 历史标记：is_meta=False，落 canonical 且下回合进入 LLM 视图
+    markers = [m for m in ctx.messages if "deadline exceeded" in (m.content or "")]
+    assert len(markers) == 1 and not markers[0].is_meta
+    # 经既有 status 通道透出
+    assert any(
+        "deadline exceeded" in c.body.get("message", "")
+        for c in chunks if c.kind == "status"
+    )
+    # interrupt 语义已置位：runtime 据 control.interrupted 记 interrupted outcome
+    assert control.interrupted
+    assert elapsed < 2.0
+
+
+async def test_interrupt_message_written_to_history_and_chunk_then_drained():
+    """interrupt(message=...)：消息作为历史标记写入、经 status 帧透出，且只消费一次。"""
+    control = TurnControl()
+    control.interrupt("用户补充：改用更简短的回答")
+    ex = _executor(FakeProvider())  # 轮初即中断，模型不被调用
+    ctx = _ctx(control=control)
+    chunks = await _collect(ex, ctx)
+
+    markers = [
+        m for m in ctx.messages
+        if m.role == "user" and "[回合中断]" in (m.content or "")
+    ]
+    assert len(markers) == 1
+    assert "用户补充：改用更简短的回答" in markers[0].content
+    assert not markers[0].is_meta
+    assert any(
+        c.kind == "status" and c.body.get("message") == "用户补充：改用更简短的回答"
+        for c in chunks
+    )
+    assert chunks[-1].kind == "final"
+    # 消费后清理：不泄漏到下一回合
+    assert control.interrupt_message is None
+    control.reset()
+    chunks2 = await _collect(ex, _ctx(control=control))
+    assert not any(c.kind == "status" for c in chunks2)
+
+
+class _OverflowThenTextProvider(LLMProvider):
+    """首次 stream_chat 抛上下文溢出，之后按脚本返回文本。"""
+
+    def __init__(self, script: list[ChatResponse]) -> None:
+        self._script = list(script)
+        self.stream_calls = 0
+
+    async def chat(self, messages, tools=None):  # pragma: no cover - 未走到
+        return ChatResponse(text="unused")
+
+    async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamChunk]:
+        self.stream_calls += 1
+        if self.stream_calls == 1:
+            raise ProviderError("maximum context length exceeded")
+        resp = self._script.pop(0) if self._script else ChatResponse(text="done", finish_reason="stop")
+        if resp.text:
+            yield StreamChunk(delta_text=resp.text)
+        yield StreamChunk(delta_text="", done=True, tool_calls=resp.tool_calls, finish_reason=resp.finish_reason)
+
+
+class _FakeOverflowCompactor:
+    """溢出兜底压缩替身：compact_view 直通；force_compact 交给测试注入的协程。"""
+
+    max_overflow_retries = 1
+
+    def __init__(self, force_compact_coro=None) -> None:
+        self._force_compact_coro = force_compact_coro
+
+    async def compact_view(self, messages, session_id=None, **kwargs):
+        return messages
+
+    async def force_compact(self, messages, session_id=None, **kwargs):
+        if self._force_compact_coro is not None:
+            return await self._force_compact_coro(messages)
+        return messages[-1:]
+
+
+async def test_interrupt_during_force_compact_abandons_compact_and_closes():
+    """compact 期间 interrupt：取消在途摘要（放弃本次压缩），回合立即收尾而非卡到压缩完成。"""
+    control = TurnControl()
+    compact_started = asyncio.Event()
+    compact_cancelled = asyncio.Event()
+
+    async def hanging_force_compact(messages):
+        compact_started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            compact_cancelled.set()
+            raise
+        return messages[-1:]
+
+    provider = _OverflowThenTextProvider(script=[ChatResponse(text="不应到达", finish_reason="stop")])
+    compactor = _FakeOverflowCompactor(force_compact_coro=hanging_force_compact)
+    ex = _executor(provider, compactor=compactor, max_iterations=4)
+    ctx = _ctx(control=control)
+    chunks: list = []
+
+    async def run() -> None:
+        async for ch in ex.execute(ctx):
+            chunks.append(ch)
+
+    task = asyncio.create_task(run())
+    await asyncio.wait_for(compact_started.wait(), timeout=2)
+    control.interrupt("被用户中断")
+    await asyncio.wait_for(task, timeout=2)
+
+    assert compact_cancelled.is_set()  # 在途摘要被取消，本次压缩放弃
+    assert provider.stream_calls == 1  # 收尾后未再继续调模型
+    finals = [c for c in chunks if c.kind == "final"]
+    assert len(finals) == 1
+    assert any(
+        m.role == "user" and "[回合中断]" in (m.content or "")
+        for m in ctx.messages
+    )
+    assert any(
+        c.kind == "status" and c.body.get("message") == "被用户中断"
+        for c in chunks
+    )
+
+
+async def test_estimate_tokens_cached_for_unchanged_view(monkeypatch):
+    """同一迭代内 provisional/overflow 两处全量估算合并为一次；视图变化即重新估算。"""
+    import crew.agent.executor.builtin as builtin_mod
+
+    calls = {"n": 0}
+    real_estimate = builtin_mod.estimate_tokens
+
+    def counting(messages):
+        calls["n"] += 1
+        return real_estimate(messages)
+
+    monkeypatch.setattr(builtin_mod, "estimate_tokens", counting)
+
+    provider = _OverflowThenTextProvider(script=[
+        ChatResponse(text="压缩后的回答", finish_reason="stop"),
+    ])
+    ex = _executor(provider, compactor=_FakeOverflowCompactor(), max_iterations=4)
+    messages = [Message.user("hi"), Message.assistant("很长的历史内容" * 100)]
+    chunks = await _collect(ex, _ctx(messages=messages))
+    finals = [c for c in chunks if c.kind == "final"]
+    assert finals and finals[0].body.get("text") == "压缩后的回答"
+    # 共 2 次迭代：迭代1 压缩前估算 1 次；迭代2 压缩前 provisional/overflow 两处
+    # 命中缓存，压缩后新视图估算 1 次。无缓存时迭代2 压缩前会多算 2 次（总数 4）。
+    assert calls["n"] == 2

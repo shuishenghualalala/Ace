@@ -16,7 +16,6 @@
 @import './session-history.css' layer(shell);
 @import './workspace.css' layer(shell);
 @import './composer.css' layer(components);
-@import './backend-loading.css' layer(shell);
 /* KaTeX 数学公式样式（micromark-extension-math 输出需要）。bare import 由 esbuild css bundler 解析 node_modules。 */
 @import 'katex/dist/katex.min.css' layer(base);
 @import './layout.css' layer(shell);

@@ -36,18 +36,6 @@
 <body class="welcome-active">
   <div id="renderer-root" data-renderer-root>
     <div id="renderer-legacy-outlet" data-renderer-scope="legacy">
-<!-- 智能体运行环境准备中全局遮罩（由 backend-status-guard 控制显隐） -->
-  <div id="backend-loading-overlay" class="backend-loading-overlay" hidden>
-    <div class="backend-loading-card">
-      <div class="backend-loading-spinner"></div>
-      <p class="backend-loading-text">智能体运行环境准备中，请稍等</p>
-      <p id="backend-loading-elapsed" class="backend-loading-elapsed" hidden></p>
-      <div id="backend-loading-actions" class="backend-loading-actions" hidden>
-        <button id="backend-loading-log" class="backend-loading-btn" type="button">查看日志</button>
-        <button id="backend-loading-retry" class="backend-loading-btn backend-loading-btn-primary" type="button">重试</button>
-        <button id="backend-loading-dismiss" class="backend-loading-btn" type="button">继续等待</button>
-      </div>
-    </div>
     </div>
     <div id="legacy-context-content">
       <div id="session-history-root"></div>

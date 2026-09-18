@@ -379,7 +379,7 @@ class SingleAgent(Agent):
             mem_sid, envelope.query
         )
         ws_instructions = envelope.params.get("workspace_instructions", "")
-        prompt_parts = build_prompt_parts(
+        prompt_parts = await build_prompt_parts(
             workspace_instructions=ws_instructions,
             memory_text=memory_text,
             cwd=cwd,
@@ -698,9 +698,10 @@ class SingleAgent(Agent):
         current_workspace_id.set(envelope.workspace_id)
         current_owner_account_id.set(normalize_owner_account_id(envelope.user_id))
         # 热刷新当前 owner 的运行期 env：config/.env + owner .env + session.json。
-        from crew.state.home import refresh_owner_runtime_env
+        # 同步读盘放工作线程执行，避免阻塞事件循环（_ENV_LOCK 为 threading 锁，线程安全）。
+        from crew.state.home import refresh_owner_runtime_env_async
 
-        refresh_owner_runtime_env(envelope.user_id)
+        await refresh_owner_runtime_env_async(envelope.user_id)
         current_agent_workdir.set(cwd)
         guard = envelope.params.get("workspace_guard")
         current_workspace_guard.set(guard if isinstance(guard, dict) else None)

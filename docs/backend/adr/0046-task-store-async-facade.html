@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ADR-0046 · 任务存储异步门面</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0046 · 任务存储异步门面</h1>
+<p>状态：<strong>已批准</strong> · 日期：2026-09-17 · 批次：agent-core-defects 批次 0。</p>
+<h2>背景与候选方案</h2>
+<p>现状：<code>TaskRuntime</code>（<code>crew/tasks/runtime.py</code>）全部写方法为<strong>同步方法</strong>，内部 busy 重试带睡眠；事件循环上的直接调用点遍布 <code>gateway/dispatcher.py</code>（约 12 处）、<code>crew/tools/builtin.py::handle_terminal</code>（约 10 处）、<code>packages/crew-team/delegate_tool.py</code>（5 处）等。busy 重试的睡眠落在事件循环上即冻结所有会话——一次 sqlite busy 等待可能挂住 gateway 里全部活跃会话。</p>
+<p>候选方案：</p>
+<p><strong>A. 调用点各自 <code>asyncio.to_thread</code> 包裹</strong>——<em>否决</em>：线程化决策散落在各调用方，sqlite 重试封装刚治理过同类问题，散包会让边界腐烂（子 agent 路径曾这么做过，本次一并收口）。</p>
+<p><strong>B. TaskRuntime 全面 async 化（含线程侧调用方）</strong>——<em>否决</em>：<code>process_registry</code> 的 heartbeat / reader 线程与 CLI 同步路径会被迫反向 sync→async 桥接，进入 asyncio_bridge 死锁陷阱区。</p>
+<p><strong>C.（选定）store 层异步门面</strong>：<code>TaskRuntime</code> 新增 async 方法，内部统一 <code>to_thread</code> 走同步实现；RLock + BEGIN IMMEDIATE 事务语义不变；同步 API 保留给线程 / CLI 调用方。</p>
+<h2>决定</h2>
+<ul>
+<li><strong>store 层异步门面</strong>：<code>TaskRuntime</code> 新增 async 写/读方法（如 <code>create_async</code> / <code>update_async</code> / <code>complete_async</code> 等对应同步 API 的 async 变体），内部统一 <code>asyncio.to_thread</code> 包装同步实现。并发原语与事务语义不动：RLock 串行化 + BEGIN IMMEDIATE 事务保持原样。</li>
+<li><strong>TaskManager ABC 同步扩展</strong>：<code>core/interfaces.py</code> 的 <code>TaskManager</code> ABC 与 <code>LegacyTaskManagerAdapter</code>、<code>InMemoryTaskManager</code> 同步加 async 方法（默认实现可走 to_thread 包装同步方法），保证事件循环侧调用方依赖接口而非具体实现。</li>
+<li><strong>调用点迁移清单</strong>：gateway/dispatcher.py（约 12 处）、crew/tools/builtin.py::handle_terminal（约 10 处）、packages/crew-team/delegate_tool.py（5 处）、gateway sessions router、channel sessions 等事件循环上的直接调用点统一迁移到 async 方法；process_registry 心跳/reader 线程与 CLI 同步路径维持同步调用不动。</li>
+<li><strong>不借机改事务语义</strong>：<code>create()</code> 两步非原子维持现状（不作为本批次顺手修复项），避免行为变更与迁移混在一个批次里无法独立回退。</li>
+</ul>
+<h2>跨平台影响</h2>
+<p><code>asyncio.to_thread</code> 在 CPython 三平台行为一致（默认线程池执行器），不触碰平台相关系统调用，mac / linux / windows 无差异。</p>
+<h2>回退方式</h2>
+<p>同步 API 未删除（线程 / CLI 调用方依赖保留），回退 = 调用点改回同步调用 + 撤销 TaskManager ABC 的 async 方法；门面与迁移属同一批次提交，回退按批次整体 revert。</p>
+<p><a href="0045-error-taxonomy-and-retry-policy.html">ADR-0045</a> · <a href="../modules/tasks.html">Tasks 模块</a></p>
+</main></body></html>
