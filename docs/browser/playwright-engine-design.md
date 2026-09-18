@@ -1,6 +1,6 @@
 # 浏览器自动化引擎：内置 playwright-core（当前决策）
 
-目标：保留 Crew 的 Electron 登录态、面板、owner/session 生命周期和录制体验，同时把
+目标：保留 Crew 的 Electron 登录态、面板、owner/session 生命周期，同时把
 定位、actionability、输入、页面生命周期与通用 Playwright 能力交还给官方
 `playwright-core`。
 
@@ -20,7 +20,7 @@
 3. **CDP transport 保留，但只做 Electron 适配。** 它把 page 级
    `webContents.debugger` 合成为 Playwright 需要的 browser/root/page/child session
    拓扑，并补齐 Electron 缺失的少量协议语义；它不再实现 selector 或动作算法。
-4. **默认功能热路径追求官方语义和低开销。** snapshot、locate、普通动作和 replay
+4. **默认功能热路径追求官方语义和低开销。** snapshot、locate 和普通动作
    不计算 security digest、DOM/AX fingerprint，不做逐动作 approval/permit，也不设
    `MAX_FINGERPRINTS`、表单字段数、文件数、MIME 数等产品 cap。仍保留的 owner/tab
    归属、ref generation、参数形状、命令 deadline、strict Locator 和 Playwright
@@ -31,8 +31,8 @@
    默认动作的前置条件。
 6. **第二后端已经实现，尚未接入生产会话选择。** `ManagedChromiumEngine` 可以直接
    启动与 1.62.0 配套的官方 Chromium，并暴露完整 public
-   Browser/BrowserContext/Page；但现有 Browser RPC、面板与录制器仍固定使用 Electron
-   拓扑，不能声称生产已经自动切到 managed Chromium。
+   Browser/BrowserContext/Page；现有 Browser RPC 与面板仍固定使用 Electron 拓扑，
+   不能声称生产已经自动切到 managed Chromium。
 
 ---
 
@@ -55,19 +55,12 @@
 Python 再以 `pN` generation 防止跨快照误用。这是 ref 生命周期一致性，不是目标指纹
 授权。
 
-### 1.1 两条 selector 路径
+### 1.1 selector 路径
 
 - **模型即时动作：** `ariaSnapshot` 产生临时 aria-ref，动作直接构造 exact Locator。
-- **录制持久化：** 录制器把 1.62.0 包内的官方 InjectedScript/selector generator
-  注入每个 document，在 trusted DOM 事件回调里同步调用
-  `generateSelectorSimple()`；Host 只补权威 frame-owner 链。
-
 `Locator.normalize()` 和底层 `_selector` 仍由 compat 层提供并由真实契约覆盖，适合
-把已有 Locator 转成可持久化 selector。但生产录制器不能在 document-start
-instrumentation 后异步调用 `normalize()`：真实 Electron + OOPIF 上，这会卡住
-renderer Runtime 通道。因此当前录制不是 Crew 启发式，也不是事后 normalize，而是
-**同步运行同版本 Playwright 的官方 selector generator**。生成器不可用时录制被标记
-incomplete，不降级写入 `nth-of-type` 猜测。
+把已有 Locator 转成当前页面中的可执行 selector；默认浏览器动作不会把 selector
+持久化到浏览器运行时之外。
 
 ---
 
@@ -89,7 +82,6 @@ incomplete，不降级写入 `nth-of-type` 猜测。
 | 对话框 | alert/confirm/prompt、链式/延迟/onload/popup modal |
 | 下载 | click/goto/run_code、同动作多文件、public Download API 与 native 落盘 |
 | 通用代码 | public Page façade、route 长驻回调、timeout 撤销、并发归因 |
-| 录制/回放 | trace v11、replay.v3、视口、多页导航、popup、iframe/OOPIF、upload |
 
 以下新增协议能力有独立真实契约，不能只按“run_code 理论可达”来宣称：
 
@@ -173,11 +165,11 @@ debugger、targetId 和页面状态保持。
 
 ```text
 Python BrowserManager
-  owner/session、公开 ref generation、replay lease、artifact/下载目录
+  owner/session、公开 ref generation、artifact/下载目录
             │ Browser RPC
             ▼
 Electron BrowserHost
-  owner/profile/Session、WebContentsView、panel、recorder、download、modal
+  owner/profile/Session、WebContentsView、panel、download、modal
             │
             ├─ PlaywrightEngine（当前生产）
             │    ├─ AutomationHost
@@ -189,7 +181,7 @@ Electron BrowserHost
 ManagedChromiumEngine（已实现、可独立验证）
   playwright-core chromium.launch()
   → public Browser → full BrowserContextOptions → public Page
-  → 尚未接 BrowserHost / Browser RPC / recorder / panel
+  → 尚未接 BrowserHost / Browser RPC / panel
 ```
 
 per-owner 隔离由拓扑实现：一个 owner 对应一个 transport 和一个 Playwright Browser，
@@ -206,9 +198,7 @@ Browser。
 | --- | --- |
 | snapshot/find | tab list → 一次 aria snapshot |
 | ref 动作 | tab list → exact Locator action → tab list → snapshot |
-| locate 回放动作 | tab list → persisted selector strict locate → action |
 | mouse/keyboard/resize | tab list → public Page input |
-| replay.v3 | 一步一个 Host `execute_transaction` |
 
 默认路径的明确不变量：
 
@@ -218,8 +208,7 @@ Browser。
   `_target_still_matches_snapshot` 或 `_ref_marker_still_matches`；
 - permission resolver 只做调用形状与当前 ref/generation 检查，不发 approval challenge；
   `confirm_approval()` 在功能路径恒为 false；
-- replay.v3 不创建或消费 per-step permit；
-- recorder、trace、表单、文件、drop data 默认没有产品自定义数量/长度 cap。
+- 表单、文件和 drop data 默认没有产品自定义数量/长度 cap。
 
 `page_guard(include_security=false)` 仍可用于等待导航安静或读取 viewport/DPR；这不是
 security scan。旧 `securitySurface()` 已从 BrowserHost 删除；只有 snapshot 模块中
@@ -290,11 +279,10 @@ globals；`page.context()` 等 public 对象仍可使用。route/event callback 
 - **P0：保证功能闭环。** 保持 run-code 作为完整 public Page 逃生舱；优先把高频且需要
   结构化返回的 B 项提升为 typed RPC（cookies/storageState、route 生命周期、PDF、
   tracing/video、locator verification/generation），并为 D3 明确实现或明确拒绝，不再
-  用模糊 fallback。录制/回放继续以 trace v11 → replay.v3 为唯一新主线。
+  用模糊 fallback。
 - **P1：补齐官方 Browser/Context 拓扑。** 把已实现的 managed Chromium 通过会话创建
-  协议显式接入，服务多 context、完整 BrowserContextOptions、trace/video 和隔离回放。
-  录制仍固定 Electron；若回放切 managed，登录态通过显式 storageState 导入导出，不把
-  Electron Session 冒充另一个 BrowserContext。
+  协议显式接入，服务多 context 和完整 BrowserContextOptions，不把 Electron Session
+  冒充另一个 BrowserContext。
 
 不建议为追求“78 个名字相同”复制 upstream tool handler。Crew 应复用 public API，并
 只为产品需要的 typed surface 写薄适配。
@@ -326,15 +314,8 @@ globals；`page.context()` 等 public 对象仍可使用。route/event callback 
 
 ---
 
-## 9. 录制、回放和下载的生产边界
+## 9. 下载的生产边界
 
-- 新录制默认写 trace v11，编译为 `crew.browser.replay.v3`；详见
-  `docs/browser-record-to-skill-design.md`。
-- v11 保存 pageGuid、opener/popup 顺序、动作与 effect transaction、初始 viewport 和
-  resize；回放每一步由 Host 原子匹配 popup/navigation/download/dialog/page-close。
-- internal drag 保存 source/target selector 以及 Playwright padding-box 坐标；
-  external drop 保存目标 selector、同步可读 MIME data 和通过 `DOM.getFileInfo` 取得的
-  原生文件路径。
 - 普通动作无需调用方预判下载。任务下载目录由 tab 持有并被 popup/newPage 继承；
   Electron `will-download` 是唯一落盘事实源，public Download API 通过 transport 与其
   配对。
@@ -350,8 +331,6 @@ globals；`page.context()` 等 public 对象仍可使用。route/event callback 
 - Electron 后端是一个 owner 对应一个合成 persistent context，不支持 public
   `browser.newContext()`；需要多 context 时应选 managed，而不是扩张 transport 伪装。
 - B 类能力大多只有 run-code 可达，不等于都有稳定 typed UX 或 71 项契约中的独立覆盖。
-- document-start recorder + OOPIF 不能安全地在事件后调用 async normalize/ariaSnapshot；
-  当前同步官方 selector generator 是有真实失败用例支撑的取舍。
 - external drop 只能保真浏览器在 trusted drop 回调中同步暴露的
   `DataTransfer.types/items/getData()` 与 File wrapper。只通过异步
   `DataTransferItem.getAsString()` 或被 OS/Chromium 隐藏的数据不能宣称已捕获。
@@ -359,5 +338,5 @@ globals；`page.context()` 等 public 对象仍可使用。route/event callback 
   `page.mouse`，pen/touch 使用 public CDP session；pen 的 CDP mouse-event 协议不能
   恢复 width/height，多触点尚未实现，`touch-action:auto` 也可能按浏览器语义触发
   `pointercancel`。
-- 仍需持续补真实复杂站点、长时录制、跨 OS/CPU 安装包回归；71 是当前契约下限，
+- 仍需持续补真实复杂站点、跨 OS/CPU 安装包回归；71 是当前契约下限，
   不是“所有网站已经证明”的营销数字。

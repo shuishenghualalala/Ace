@@ -2,11 +2,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants, existsSync, realpathSync } from 'node:fs';
 import {
   chmod,
-  copyFile,
   lstat,
   open,
   readdir,
-  rename,
   stat,
   unlink,
   writeFile,
@@ -27,28 +25,12 @@ import {
   type WebPreferences,
 } from 'electron';
 
-import {
-  RECORDER_BINDING,
-  RECORDER_CONTROL,
-  RECORDER_EVENT_SCHEMA_VERSION,
-  RECORDER_PROVENANCE_SCHEMA_VERSION,
-  RECORDER_TARGET_STASH,
-  retainRecorderEvidence,
-  parseRecorderControlEvent,
-  parseRecorderEvent,
-  recorderScript,
-  type RecorderDialogAction,
-  type RecorderDialogType,
-  type RecorderEvent,
-  type RecorderEventType,
-} from './browser-recorder';
 import * as pwActions from './browser/playwright-actions';
 import * as pwConsole from './browser/playwright-console';
 import * as pwNetwork from './browser/playwright-network';
 import { PlaywrightEngine } from './browser/playwright-engine';
 import {
   locatorFromRef,
-  officialInjectedScriptSource,
 } from './browser/playwright-compat';
 import {
   captureSnapshot,
@@ -75,13 +57,10 @@ import type {
 
 const RUNTIME_KEY_RE = /^crew_[0-9a-f]{12}$/;
 const LABELED_TAB_RE = /^s([0-9a-f]{32})-([1-9][0-9]*)$/;
-// `@eN` 来自快照，`@sN` 来自 `locate`（技能存盘的稳定选择器）。两者进同一张 ref 表，
-// 因此动作层不必区分来路；前缀只是为了让日志与报错能一眼看出这个 ref 是怎么来的。
-const NATIVE_REF_RE = /^@[es]([1-9][0-9]*)$/;
+// `@eN` 来自当前快照，动作层只接受这类页面代次 ref。
+const NATIVE_REF_RE = /^@e([1-9][0-9]*)$/;
 const GUARD_KEY_RE = /^__crew_guard_[0-9a-f]{32}$/;
 const TOKEN_RE = /^[0-9a-f]{32}$/;
-const RECORDING_ID_RE = /^[0-9a-f]{8,32}$/;
-const PAGE_GUID_RE = /^p(?:0|[1-9][0-9]*)$/;
 // 快照与动作的超时。Playwright 默认 30s 对 agent 循环太长——一次卡死会吃掉整轮
 // 对话的耐心；Python 侧的 RPC 超时是外层的第二道闸门。
 const SNAPSHOT_TIMEOUT_MS = 15_000;
@@ -93,10 +72,6 @@ const MODAL_SETTLE_MS = 500;
 // bounded post-click grace period before falling back to the exact file input.
 const FILE_CHOOSER_GRACE_MS = 2_000;
 const DEBUGGER_SETUP_TIMEOUT_MS = 5_000;
-// Must settle before ElectronCdpTransport's 5s child-session barrier. The
-// transport timeout remains a final graph-liveness fuse; this earlier deadline
-// gives BrowserHost time to audit, stop and arm late-install cleanup first.
-const NATIVE_INPUT_PROOF_TTL_MS = 1_200;
 const ARTIFACT_SCHEME = 'crew-artifact';
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 25_000;
 const DOWNLOAD_DEADLINE_MARGIN_MS = 500;
@@ -172,45 +147,6 @@ interface DialogState {
   message: string;
   defaultValue: string;
   owner: 'playwright' | 'native';
-  causalId: number;
-}
-
-interface ExpectedDialog {
-  type: RecorderDialogType;
-  action: RecorderDialogAction;
-  text: string;
-  /** Resolved replay target for a page that already exists. */
-  targetId: string;
-  /** Resolved opener target for a popup created by the triggering action. */
-  openerTargetId: string;
-  /** One-based creation order among popups from the same opener. */
-  popupOrdinal: number | null;
-}
-
-interface ExpectedDialogObservation {
-  expectedIndex: number;
-  actualType: string;
-  /** Dialogs may be opened by a popup rather than the triggering page. */
-  targetId: string;
-  handlerDone: boolean;
-  closeDone: boolean;
-}
-
-interface ExpectedDialogRun {
-  sessionHash: string;
-  triggerTargetId: string;
-  timeoutMs: number;
-  dialogs: ExpectedDialog[];
-  /** Number of opening events already assigned to an expected slot. */
-  opened: number;
-  /** Number of fully type/result-validated slots, always advanced in FIFO order. */
-  index: number;
-  observations: ExpectedDialogObservation[];
-  actionFinished: boolean;
-  settled: boolean;
-  resolve: () => void;
-  reject: (error: BrowserHostError) => void;
-  timer: NodeJS.Timeout;
 }
 
 type ModalKind = 'dialog' | 'fileChooser';
@@ -233,169 +169,6 @@ interface AutomationFocusContinuation {
   name: string;
   domFingerprint: string;
   expiresAt: number;
-}
-
-interface RecordingLedger {
-  recordingId: string;
-  /** Frozen at start: changing the feature flag cannot mix rows in one trace. */
-  schemaVersion: 10 | 11;
-  startedAt: number;
-  steps: number;
-  forged: number;
-  /**
-   * A recording is a correctness artifact: one missing action makes the whole
-   * trace unsafe to compile.  Keep this on the shared popup ledger so failures
-   * in any member are reported by the eventual group stop.
-   */
-  incomplete: boolean;
-  dropped: number;
-  /** Set synchronously before group stop drains; no later popup may join. */
-  closing: boolean;
-  /** Global order across opener and every inherited popup. */
-  queue: Promise<void>;
-  /** Append-only v11 row order across every page in the shared recording. */
-  eventIndex: number;
-  /** Stable transaction ids are independent from event indices and timestamps. */
-  transactionCounter: number;
-  /** A browser task may produce late popup/navigation/dialog/download signals. */
-  transactionsByCausalId: Map<number, V11TransactionIdentity>;
-  reservedActions: WeakMap<RecorderEvent, V11TransactionIdentity>;
-  dialogCounter: number;
-  downloadCounter: number;
-  downloadOrdinals: Map<string, number>;
-  members: Set<BrowserTab>;
-  causalCounter: number;
-  /** Stable, recording-local page identities; never persist native target ids. */
-  pageCounter: number;
-  /** Per-opener creation order disambiguates several concurrent popups. */
-  popupOrdinals: Map<string, number>;
-  activeCausals: Map<string, {
-    seq: number;
-    causalId: number;
-    capturedAt: number;
-    eventType: RecorderEventType;
-    scope: 'event' | 'input';
-  }>;
-}
-
-interface V11TransactionIdentity {
-  transactionId: number;
-  step: number;
-  transactionKind: 'action' | 'observation';
-}
-
-type RecordedNavigationOperation = 'goto' | 'back' | 'forward' | 'reload';
-
-interface PendingRecordedNavigation {
-  operation: RecordedNavigationOperation;
-  /** Non-empty only for goto; history/reload preserve their native semantics. */
-  url: string;
-  state: RecordingState;
-  capturedAt: number;
-  committed: boolean;
-  cancelled: boolean;
-  observed: Promise<void>;
-  settleObserved: () => void;
-}
-
-interface RecordingState {
-  /** Shared by the opener and popups; session/controller state below remains per tab. */
-  ledger: RecordingLedger;
-  /** Stable page identity used by the compiler/replayer (p1, p2, ...). */
-  pageId: string;
-  openerPageId: string;
-  popupOrdinal: number;
-  /** Exact opener task that created this page, when creation was synchronous. */
-  createdByCausalId: number;
-  /** Observation transaction that introduced this popup when no action existed. */
-  createdByTransaction: V11TransactionIdentity | null;
-  /** The initial page-open anchor is queued exactly once. */
-  initialPageRecorded: boolean;
-  /** Concurrent start callers join one installation instead of double-injecting. */
-  installation: Promise<void> | null;
-  paused: boolean;
-  /** False as soon as stop begins; already queued events still drain into this state. */
-  accepting: boolean;
-  /** Allows only recorder-controller lifecycleFlush packets while pause/stop drains. */
-  drainingFlush: boolean;
-  /** Page listeners return immediately while false; kept separate from queue acceptance. */
-  captureEnabled: boolean;
-  /** Per-recording unpredictable main-world globals. */
-  bindingName: string;
-  targetStashName: string;
-  controlName: string;
-  /** Main page (`''`) and every live OOPIF own independent CDP registrations. */
-  sessions: Map<string, RecorderSessionState>;
-  lastPageDigest: string;
-  /**
-   * Last CSS viewport persisted for this recording-local page.
-   *
-   * Electron WebContentsView bounds are expressed in display-independent
-   * pixels, which are the renderer's CSS viewport pixels. Keep x/y out of this
-   * identity: moving the panel must not create a replay step.
-   */
-  lastRecordedViewport: { width: number; height: number } | null;
-  /** Runtime context ids are only unique inside one flattened CDP session. */
-  contexts: Set<string>;
-  /** Exact document frame id for each observed default-world execution context. */
-  contextFrames: Map<string, string>;
-  /** Page-local input burst token -> durable host causal identity. */
-  causalTokens: Map<string, {
-    causalId: number;
-    capturedAt: number;
-  }>;
-  /** Clicks are briefly buffered so a native dblclick becomes one replay action. */
-  pendingClicks: Map<string, RecorderEvent>;
-  supersededClicks: WeakSet<RecorderEvent>;
-  /**
-   * Exact action identity captured when the main-frame navigation starts.
-   *
-   * The originating document (and its Runtime execution context) is normally
-   * destroyed before Electron emits did-navigate. Reading activeCausals only at
-   * commit time therefore turns a click-triggered POST/redirect into a
-   * standalone goto. Keep the task identity across that document boundary.
-   */
-  pendingNavigationCausal: {
-    causalId: number;
-    capturedAt: number;
-  } | null;
-  /**
-   * Explicit human address-bar/history command armed at its dispatch boundary.
-   * did-navigate commits it synchronously so an unrelated later click/timer
-   * cannot be absorbed into the wrong transaction.
-   */
-  pendingRecordedNavigation: PendingRecordedNavigation | null;
-  /** Successful Playwright fallback commits whose Electron observer may arrive late. */
-  ignoredRecordedNavigationUrls: Array<{ url: string; expiresAt: number }>;
-  /** Prevent closeTab + WebContents.destroyed from emitting two tombstones. */
-  pageCloseRecorded: boolean;
-}
-
-interface RecorderSessionState {
-  scriptId: string;
-  bindingName: string;
-  bindingAdded: boolean;
-  installed: boolean;
-  cancelled: boolean;
-  installation: Promise<void>;
-}
-
-interface RecorderExecutionContext {
-  /** Empty means the WebContents' main page session. */
-  sessionId: string;
-  executionContextId: number;
-}
-
-type NativeProofKind = 'keyboard' | 'pointer' | 'scroll';
-type NativeProofEvent = Exclude<RecorderEvent['type'], 'navigate'>;
-
-interface NativeInputProof {
-  kind: NativeProofKind;
-  expiresAt: number;
-  /** 一个原生输入最多授权各一种有因果关系的派生事件，不是时间窗内无限放行。 */
-  remaining: Set<NativeProofEvent>;
-  /** 键盘事件额外绑定原生 key；input/submit 派生事件不要求该字段。 */
-  key: string;
 }
 
 /**
@@ -464,8 +237,6 @@ interface BrowserTab {
   webContentsId: number;
   mode: ControlMode;
   refs: Map<string, RefState>;
-  /** `locate` 解析出的 ref 计数，用来生成 `@sN`（与快照的 `@eN` 区分开）。 */
-  locateCounter: number;
   dialog: DialogState | null;
   /** Mirrors transport filtering; records who received the opening event. */
   dialogForwarding: boolean;
@@ -487,8 +258,6 @@ interface BrowserTab {
   downloadMaxBytes: number;
   mouseX: number;
   mouseY: number;
-  /** 至多 keyboard/pointer/scroll 各一个、按事件类型一次性消费的真人输入证明。 */
-  nativeInputProofs: NativeInputProof[];
   /** 最近一次真实接管请求的时间戳；750ms 内的重复输入只发一次接管请求。 */
   takeoverRequestAt: number;
   automationDepth: number;
@@ -503,10 +272,6 @@ interface BrowserTab {
   /** Host-owned guard identity; no page global or MutationObserver is installed. */
   guardStateKey: string;
   guardStateToken: string;
-  // 录制态。**正交于 `mode`**，不做成第四个 ControlMode 值：录制期间 AI 动作
-  // 依然要被 `_require_ai()` 拒绝，把它并进 ControlMode 会把这两件事的语义搅在
-  // 一起。每个 CDP session 的 script id 由 RecordingState.sessions 独立持有。
-  recording: RecordingState | null;
   // Main-frame navigation/title events form a host-owned transition epoch.
   // The isolated page marker alone can briefly expose a new DOM/title with an
   // old history URL while a same-document navigation is still settling.
@@ -562,21 +327,10 @@ interface BrowserOwner {
   reservedDownloadPaths: Set<string>;
   artifacts: Map<string, ArtifactGrant>;
   artifactProtocolRegistered: boolean;
-  /** One atomic expected-dialog transaction per logical browser session. */
-  expectedDialogRuns: Map<string, ExpectedDialogRun>;
   /** Original full command continuation retained while a modal is surfaced. */
   pendingModalActions: Map<string, PendingModalAction>;
   /** Waiters are armed before dispatch/accept to close every event-order race. */
   modalWaiters: Map<string, Set<(signal: SessionModalSignal) => void>>;
-  /** One replay.v3 transaction per logical browser session. */
-  atomicTransactions: Map<string, AtomicTransactionRun>;
-  /**
-   * Replay epoch state survives the gap between two execute_transaction RPCs.
-   * Timer-driven popup/navigation/dialog/download/close signals can otherwise
-   * happen after the triggering action returned but before its x-crew-wait*
-   * transaction was armed.
-   */
-  atomicReplayEpochs: Map<string, AtomicReplayEpoch>;
   lifecycle: 'active' | 'closing' | 'clearing';
   /**
    * 该账号的 Playwright 引擎。
@@ -586,129 +340,6 @@ interface BrowserOwner {
    * per-owner 隔离不依赖调用方自觉。
    */
   engine: PlaywrightEngine;
-}
-
-type AtomicEffect =
-  | { kind: 'navigation'; page: string; url: string }
-  | {
-    kind: 'popup';
-    page: string;
-    opener_page: string;
-    popup_index: number;
-    activate: boolean;
-    disposition: string;
-  }
-  | {
-    kind: 'download';
-    page: string;
-    alias: string;
-    ordinal: number;
-    suggested_filename: string;
-  }
-  | {
-    kind: 'dialog';
-    page: string;
-    alias: string;
-    type: RecorderDialogType;
-    accept: boolean;
-    text: string;
-  }
-  | { kind: 'page_closed'; page: string; reason: string };
-
-interface AtomicDownloadResult {
-  alias: string;
-  pageGuid: string;
-  ordinal: number;
-  suggestedFilename: string;
-  path: string;
-  state: string;
-  receivedBytes: number;
-}
-
-type AtomicJournalEvent =
-  | {
-    kind: 'navigation';
-    targetId: string;
-    url: string;
-  }
-  | {
-    kind: 'popup';
-    openerTargetId: string;
-    targetId: string;
-    popupOrdinal: number;
-    activate: boolean;
-    disposition: string;
-  }
-  | {
-    kind: 'download';
-    targetId: string;
-    ordinal: number;
-    suggestedFilename: string;
-    result: Omit<AtomicDownloadResult, 'alias' | 'pageGuid'>;
-    completion: Promise<void>;
-  }
-  | {
-    kind: 'dialog';
-    targetId: string;
-    type: RecorderDialogType;
-    accept: boolean;
-    text: string;
-  }
-  | {
-    kind: 'page_closed';
-    targetId: string;
-    reason: string;
-  };
-
-interface AtomicJournalEntry {
-  sequence: number;
-  event: AtomicJournalEvent;
-  consumed: boolean;
-}
-
-interface AtomicReplayEpoch {
-  sessionHash: string;
-  epochId: string;
-  lastTransactionId: number;
-  nextEventSequence: number;
-  /** Earliest sequence still eligible for the next observation-only wait. */
-  historicalFloor: number;
-  journal: AtomicJournalEntry[];
-  pageGuidByTargetId: Map<string, string>;
-  targetIdByPageGuid: Map<string, string>;
-  popupOrdinalBases: Map<string, number>;
-  closedPageGuids: Set<string>;
-  downloadOrdinals: Map<string, number>;
-  downloadDir: string;
-}
-
-interface AtomicTransactionRun {
-  transactionId: number;
-  sessionHash: string;
-  epoch: AtomicReplayEpoch;
-  /** Effects of ordinary actions must be newer than this arm point. */
-  armSequence: number;
-  /** Observation-only x-crew-wait* actions may consume the journal backlog. */
-  allowHistoricalEffects: boolean;
-  historicalFloor: number;
-  deadlineAt: number;
-  downloadDir: string;
-  expectedEffects: AtomicEffect[];
-  matchedEffects: AtomicEffect[];
-  effectCursor: number;
-  /** Primary x-crew-wait* effect is observed but omitted from matchedEffects. */
-  reportedEffectStart: number;
-  pageGuidByTargetId: Map<string, string>;
-  targetIdByPageGuid: Map<string, string>;
-  popupOrdinalBases: Map<string, number>;
-  closedPageGuids: Set<string>;
-  downloads: AtomicDownloadResult[];
-  downloadCompletions: Promise<void>[];
-  completion: Promise<void>;
-  resolve: () => void;
-  reject: (error: BrowserHostError) => void;
-  settled: boolean;
-  timer: NodeJS.Timeout;
 }
 
 interface AxValue {
@@ -783,162 +414,6 @@ function asString(value: unknown, label: string, _maximum?: number): string {
 
 function asBoolean(value: unknown, fallback = false): boolean {
   return typeof value === 'boolean' ? value : fallback;
-}
-
-function exactKeys(
-  value: Record<string, unknown>,
-  required: readonly string[],
-  optional: readonly string[] = [],
-): boolean {
-  const keys = Object.keys(value);
-  return (
-    required.every((key) => Object.prototype.hasOwnProperty.call(value, key))
-    && keys.every((key) => required.includes(key) || optional.includes(key))
-  );
-}
-
-function recordingV11Enabled(): boolean {
-  return process.env.CREW_BROWSER_RECORDING_V11_PHASE_A !== '0';
-}
-
-function strictPageGuid(value: unknown, label: string): string {
-  const pageGuid = asString(value, label);
-  if (!PAGE_GUID_RE.test(pageGuid)) {
-    throw new BrowserHostError(`${label}无效`, { code: 'invalid_transaction' });
-  }
-  return pageGuid;
-}
-
-function strictTransactionInteger(value: unknown, label: string): number {
-  if (!Number.isSafeInteger(value) || Number(value) <= 0) {
-    throw new BrowserHostError(`${label}必须是正安全整数`, {
-      code: 'invalid_transaction',
-    });
-  }
-  return Number(value);
-}
-
-function strictTransactionString(
-  value: unknown,
-  label: string,
-  allowEmpty = false,
-): string {
-  const text = asString(value, label);
-  if (!allowEmpty && !text) {
-    throw new BrowserHostError(`${label}不能为空`, { code: 'invalid_transaction' });
-  }
-  return text;
-}
-
-function strictTransactionPoint(
-  value: unknown,
-  label: string,
-): { x: number; y: number } | null {
-  if (value === null) return null;
-  const point = asRecord(value, label);
-  if (
-    !exactKeys(point, ['x', 'y'])
-    || typeof point.x !== 'number'
-    || typeof point.y !== 'number'
-    || !Number.isFinite(point.x)
-    || !Number.isFinite(point.y)
-    || point.x < 0
-    || point.y < 0
-  ) {
-    throw new BrowserHostError(`${label}无效`, { code: 'invalid_transaction' });
-  }
-  return { x: point.x, y: point.y };
-}
-
-const POINTER_TELEMETRY_RANGES = {
-  pressure: [0, 1],
-  tangentialPressure: [-1, 1],
-  tiltX: [-90, 90],
-  tiltY: [-90, 90],
-  twist: [0, 359],
-  width: [0, Number.POSITIVE_INFINITY],
-  height: [0, Number.POSITIVE_INFINITY],
-} as const;
-
-function strictTransactionPointerSample(
-  value: unknown,
-  label: string,
-  elapsed: false,
-): pwActions.PointerGestureStart;
-function strictTransactionPointerSample(
-  value: unknown,
-  label: string,
-  elapsed: true,
-): pwActions.PointerGesturePoint;
-function strictTransactionPointerSample(
-  value: unknown,
-  label: string,
-  elapsed: boolean,
-): pwActions.PointerGestureStart | pwActions.PointerGesturePoint {
-  const sample = asRecord(value, label);
-  const required = elapsed ? ['x', 'y', 'elapsedMs'] : ['x', 'y'];
-  const optional = Object.keys(POINTER_TELEMETRY_RANGES);
-  if (
-    !exactKeys(sample, required, optional)
-    || typeof sample.x !== 'number'
-    || typeof sample.y !== 'number'
-    || !Number.isFinite(sample.x)
-    || !Number.isFinite(sample.y)
-    || elapsed && (
-      typeof sample.elapsedMs !== 'number'
-      || !Number.isFinite(sample.elapsedMs)
-    )
-  ) {
-    throw new BrowserHostError(`${label}无效`, { code: 'invalid_transaction' });
-  }
-  const telemetry: Record<string, number> = {};
-  const telemetryNames = Object.keys(
-    POINTER_TELEMETRY_RANGES,
-  ) as Array<keyof typeof POINTER_TELEMETRY_RANGES>;
-  for (const name of telemetryNames) {
-    if (!Object.prototype.hasOwnProperty.call(sample, name)) continue;
-    const field = sample[name];
-    const [minimum, maximum] = POINTER_TELEMETRY_RANGES[name];
-    if (
-      typeof field !== 'number'
-      || !Number.isFinite(field)
-      || field < minimum
-      || field > maximum
-    ) {
-      throw new BrowserHostError(`${label}.${name}无效`, {
-        code: 'invalid_transaction',
-      });
-    }
-    telemetry[name] = field;
-  }
-  const point = {
-    x: sample.x,
-    y: sample.y,
-    ...telemetry,
-  };
-  return elapsed
-    ? {
-        ...point,
-        elapsedMs: sample.elapsedMs as number,
-      } as pwActions.PointerGesturePoint
-    : point as pwActions.PointerGestureStart;
-}
-
-function strictTransactionViewport(
-  value: unknown,
-  label: string,
-): { width: number; height: number } {
-  const viewport = asRecord(value, label);
-  if (
-    !exactKeys(viewport, ['width', 'height'])
-    || typeof viewport.width !== 'number'
-    || typeof viewport.height !== 'number'
-    || !Number.isFinite(viewport.width)
-    || !Number.isFinite(viewport.height)
-  ) {
-    throw new BrowserHostError(`${label}无效`, { code: 'invalid_transaction' });
-  }
-  return { width: viewport.width, height: viewport.height };
 }
 
 function navigationFlag(
@@ -1434,746 +909,7 @@ function parseUploadWithTriggerPayload(
   return { triggerSelector, inputSelector, files };
 }
 
-function parseExpectedDialogs(value: unknown): ExpectedDialog[] {
-  if (!Array.isArray(value) || value.length < 1) {
-    throw new BrowserHostError('回放 expected_dialogs 至少包含一项', {
-      code: 'invalid_expected_dialogs',
-    });
-  }
-  return value.map((raw, index) => {
-    const allowedKeys = new Set([
-      'type',
-      'accept',
-      'text',
-      // Compiler-facing diagnostics/topology aliases. BrowserManager resolves
-      // these to immutable runtime target ids before crossing the wire.
-      'page',
-      'label',
-      'opener_page',
-      'popup_ordinal',
-      'target_id',
-      'opener_target_id',
-    ]);
-    if (
-      !raw
-      || typeof raw !== 'object'
-      || Array.isArray(raw)
-      || Object.keys(raw as Record<string, unknown>).some((key) => !allowedKeys.has(key))
-    ) {
-      throw new BrowserHostError(`回放 expected_dialogs[${index}] 形状无效`, {
-        code: 'invalid_expected_dialogs',
-      });
-    }
-    const record = raw as Record<string, unknown>;
-    const targetId = record.target_id === undefined
-      ? ''
-      : asString(record.target_id, `expected_dialogs[${index}].target_id`).trim();
-    const openerTargetId = record.opener_target_id === undefined
-      ? ''
-      : asString(
-        record.opener_target_id,
-        `expected_dialogs[${index}].opener_target_id`,
-      ).trim();
-    const popupOrdinal = record.popup_ordinal === undefined
-      ? null
-      : (
-        Number.isSafeInteger(record.popup_ordinal)
-        && Number(record.popup_ordinal) >= 0
-          ? Number(record.popup_ordinal)
-          : NaN
-      );
-    if (
-      !Object.prototype.hasOwnProperty.call(record, 'type')
-      || !Object.prototype.hasOwnProperty.call(record, 'accept')
-      || !Object.prototype.hasOwnProperty.call(record, 'text')
-      || !['alert', 'confirm', 'prompt', 'beforeunload'].includes(String(record.type))
-      || typeof record.accept !== 'boolean'
-      || typeof record.text !== 'string'
-      || record.text.includes('\0')
-      || (record.type !== 'prompt' && record.text !== '')
-      || (record.accept === false && record.text !== '')
-      || Number.isNaN(popupOrdinal)
-    ) {
-      throw new BrowserHostError(`回放 expected_dialogs[${index}] 内容无效`, {
-        code: 'invalid_expected_dialogs',
-      });
-    }
-    return {
-      type: record.type as RecorderDialogType,
-      action: record.accept ? 'accept' : 'dismiss',
-      text: record.text,
-      targetId,
-      openerTargetId,
-      popupOrdinal,
-    };
-  });
-}
-
-interface AtomicAction {
-  name: string;
-  [key: string]: unknown;
-}
-
-function atomicModifiers(value: unknown, label: string): string[] {
-  const allowed = ['Alt', 'Control', 'Meta', 'Shift'] as const;
-  if (
-    !Array.isArray(value)
-    || value.some((item) => typeof item !== 'string' || !allowed.includes(
-      item as typeof allowed[number],
-    ))
-    || new Set(value).size !== value.length
-  ) {
-    throw new BrowserHostError(`${label}无效`, { code: 'invalid_transaction' });
-  }
-  return allowed.filter((modifier) => value.includes(modifier));
-}
-
-function parseAtomicAction(value: unknown): AtomicAction {
-  const action = asRecord(value, 'transaction action');
-  const name = strictTransactionString(action.name, 'transaction action.name');
-  const selector = (allowEmpty = false): string => strictTransactionString(
-    action.selector,
-    'transaction action.selector',
-    allowEmpty,
-  );
-  if (name === 'click') {
-    if (!exactKeys(action, [
-      'name', 'selector', 'button', 'modifiers', 'clickCount', 'position',
-    ])) {
-      throw new BrowserHostError('transaction click 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    const button = action.button;
-    if (
-      button !== 'left'
-      && button !== 'middle'
-      && button !== 'right'
-    ) {
-      throw new BrowserHostError('transaction click.button 无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      selector: selector(),
-      button,
-      modifiers: atomicModifiers(action.modifiers, 'transaction click.modifiers'),
-      clickCount: strictTransactionInteger(
-        action.clickCount,
-        'transaction click.clickCount',
-      ),
-      position: strictTransactionPoint(action.position, 'transaction click.position'),
-    };
-  }
-  if (name === 'hover') {
-    if (!exactKeys(action, ['name', 'selector', 'position'])) {
-      throw new BrowserHostError('transaction hover 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      selector: selector(),
-      position: strictTransactionPoint(action.position, 'transaction hover.position'),
-    };
-  }
-  if (name === 'fill') {
-    if (!exactKeys(action, ['name', 'selector', 'text'])) {
-      throw new BrowserHostError('transaction fill 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      selector: selector(),
-      text: strictTransactionString(action.text, 'transaction fill.text', true),
-    };
-  }
-  if (name === 'check' || name === 'uncheck') {
-    if (!exactKeys(action, ['name', 'selector'])) {
-      throw new BrowserHostError('transaction check 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return { name, selector: selector() };
-  }
-  if (name === 'handle_overlay') {
-    if (!exactKeys(action, ['name', 'selector'])) {
-      throw new BrowserHostError('transaction handle_overlay 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return { name, selector: selector() };
-  }
-  if (name === 'assert_state') {
-    if (!exactKeys(action, ['name', 'selector', 'state'])) {
-      throw new BrowserHostError('transaction assert_state 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      selector: selector(),
-      state: strictTransactionString(action.state, 'transaction assert_state.state'),
-    };
-  }
-  if (name === 'select') {
-    if (
-      !exactKeys(action, ['name', 'selector', 'options'])
-      || !Array.isArray(action.options)
-      || action.options.some((option) => typeof option !== 'string')
-    ) {
-      throw new BrowserHostError('transaction select 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return { name, selector: selector(), options: [...action.options] };
-  }
-  if (name === 'press') {
-    if (!exactKeys(action, ['name', 'selector', 'key', 'modifiers'])) {
-      throw new BrowserHostError('transaction press 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      selector: selector(true),
-      key: strictTransactionString(action.key, 'transaction press.key'),
-      modifiers: atomicModifiers(action.modifiers, 'transaction press.modifiers'),
-    };
-  }
-  if (name === 'setInputFiles') {
-    if (
-      !exactKeys(action, ['name', 'selector', 'files'])
-      || !Array.isArray(action.files)
-      || action.files.some((file) => typeof file !== 'string' || !file)
-    ) {
-      throw new BrowserHostError('transaction setInputFiles 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return { name, selector: selector(), files: [...action.files] };
-  }
-  if (name === 'x-crew-drop') {
-    if (
-      !exactKeys(action, ['name', 'selector', 'files', 'data'])
-      || !Array.isArray(action.files)
-      || action.files.some((file) => typeof file !== 'string' || !file)
-    ) {
-      throw new BrowserHostError('transaction x-crew-drop 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    const data = asRecord(action.data, 'transaction x-crew-drop.data');
-    if (Object.values(data).some((payload) => typeof payload !== 'string')) {
-      throw new BrowserHostError('transaction x-crew-drop.data 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      selector: selector(),
-      files: [...action.files],
-      data: Object.fromEntries(
-        Object.entries(data).map(([mime, payload]) => [mime, String(payload)]),
-      ),
-    };
-  }
-  if (name === 'navigate') {
-    if (!exactKeys(action, ['name', 'url'])) {
-      throw new BrowserHostError(`transaction ${name} 形状无效`, {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      url: strictTransactionString(action.url, `transaction ${name}.url`),
-    };
-  }
-  if (name === 'openPage') {
-    if (!exactKeys(action, ['name', 'url'], ['viewport'])) {
-      throw new BrowserHostError('transaction openPage 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      url: strictTransactionString(action.url, 'transaction openPage.url'),
-      ...(action.viewport === undefined
-        ? {}
-        : {
-            viewport: strictTransactionViewport(
-              action.viewport,
-              'transaction openPage.viewport',
-            ),
-          }),
-    };
-  }
-  if (
-    name === 'closePage'
-    || name === 'x-crew-activatePage'
-    || name === 'x-crew-snapshot'
-  ) {
-    if (!exactKeys(action, ['name'])) {
-      throw new BrowserHostError(`transaction ${name} 形状无效`, {
-        code: 'invalid_transaction',
-      });
-    }
-    return { name };
-  }
-  if (name === 'x-crew-navigate') {
-    if (!exactKeys(action, ['name', 'operation', 'url'])) {
-      throw new BrowserHostError('transaction x-crew-navigate 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    const operation = action.operation;
-    const url = strictTransactionString(
-      action.url,
-      'transaction x-crew-navigate.url',
-      true,
-    );
-    if (
-      operation !== 'goto'
-      && operation !== 'back'
-      && operation !== 'forward'
-      && operation !== 'reload'
-      || operation === 'goto' && !url
-      || operation !== 'goto' && Boolean(url)
-    ) {
-      throw new BrowserHostError('transaction x-crew-navigate 内容无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return { name, operation, url };
-  }
-  if (name === 'x-crew-resize') {
-    if (
-      !exactKeys(action, ['name', 'width', 'height'])
-      || typeof action.width !== 'number'
-      || typeof action.height !== 'number'
-      || !Number.isFinite(action.width)
-      || !Number.isFinite(action.height)
-    ) {
-      throw new BrowserHostError('transaction x-crew-resize 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      width: action.width,
-      height: action.height,
-    };
-  }
-  if (name === 'x-crew-drag') {
-    if (!exactKeys(action, [
-      'name',
-      'sourceSelector',
-      'targetSelector',
-      'sourcePosition',
-      'targetPosition',
-    ])) {
-      throw new BrowserHostError('transaction x-crew-drag 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      sourceSelector: strictTransactionString(
-        action.sourceSelector,
-        'transaction drag.sourceSelector',
-      ),
-      targetSelector: strictTransactionString(
-        action.targetSelector,
-        'transaction drag.targetSelector',
-      ),
-      sourcePosition: strictTransactionPoint(
-        action.sourcePosition,
-        'transaction drag.sourcePosition',
-      ),
-      targetPosition: strictTransactionPoint(
-        action.targetPosition,
-        'transaction drag.targetPosition',
-      ),
-    };
-  }
-  if (name === 'x-crew-pointerGesture') {
-    if (!exactKeys(action, [
-      'name', 'selector', 'button', 'modifiers', 'start', 'points',
-    ], ['pointerType'])) {
-      throw new BrowserHostError('transaction pointerGesture 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    if (
-      action.button !== 'left'
-      && action.button !== 'middle'
-      && action.button !== 'right'
-    ) {
-      throw new BrowserHostError('transaction pointerGesture.button 无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    const pointerType = action.pointerType ?? 'mouse';
-    if (
-      pointerType !== 'mouse'
-      && pointerType !== 'pen'
-      && pointerType !== 'touch'
-      || pointerType === 'touch' && action.button !== 'left'
-    ) {
-      throw new BrowserHostError('transaction pointerGesture.pointerType 无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    const start = strictTransactionPointerSample(
-      action.start,
-      'transaction pointerGesture.start',
-      false,
-    );
-    if (!Array.isArray(action.points) || action.points.length === 0) {
-      throw new BrowserHostError('transaction pointerGesture 内容无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    let previousElapsedMs = 0;
-    const points = action.points.map((rawPoint, index) => {
-      let point: pwActions.PointerGesturePoint;
-      try {
-        point = strictTransactionPointerSample(
-          rawPoint,
-          `transaction pointerGesture.points[${index}]`,
-          true,
-        );
-      } catch {
-        throw new BrowserHostError(
-          `transaction pointerGesture.points[${index}] 无效`,
-          { code: 'invalid_transaction' },
-        );
-      }
-      if (point.elapsedMs < previousElapsedMs) {
-        throw new BrowserHostError(
-          `transaction pointerGesture.points[${index}] 无效`,
-          { code: 'invalid_transaction' },
-        );
-      }
-      previousElapsedMs = point.elapsedMs;
-      return point;
-    });
-    return {
-      name,
-      selector: selector(),
-      button: action.button,
-      modifiers: atomicModifiers(
-        action.modifiers,
-        'transaction pointerGesture.modifiers',
-      ),
-      pointerType,
-      start,
-      points,
-    };
-  }
-  if (name === 'x-crew-scroll') {
-    if (!exactKeys(action, ['name', 'selector', 'deltaX', 'deltaY'])) {
-      throw new BrowserHostError('transaction x-crew-scroll 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    if (
-      typeof action.deltaX !== 'number'
-      || typeof action.deltaY !== 'number'
-      || !Number.isSafeInteger(action.deltaX)
-      || !Number.isSafeInteger(action.deltaY)
-      || action.deltaX === 0 && action.deltaY === 0
-    ) {
-      throw new BrowserHostError('transaction x-crew-scroll delta 无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      selector: selector(true),
-      deltaX: action.deltaX,
-      deltaY: action.deltaY,
-    };
-  }
-  if (name === 'x-crew-waitPopup') {
-    if (!exactKeys(action, [
-      'name', 'popupPageGuid', 'popupIndex', 'activate', 'disposition',
-    ])) {
-      throw new BrowserHostError('transaction waitPopup 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    if (typeof action.activate !== 'boolean') {
-      throw new BrowserHostError('transaction waitPopup.activate 无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      popupPageGuid: strictPageGuid(
-        action.popupPageGuid,
-        'transaction waitPopup.popupPageGuid',
-      ),
-      popupIndex: strictTransactionInteger(
-        action.popupIndex,
-        'transaction waitPopup.popupIndex',
-      ),
-      activate: action.activate,
-      disposition: strictTransactionString(
-        action.disposition,
-        'transaction waitPopup.disposition',
-      ),
-    };
-  }
-  if (name === 'x-crew-waitNavigation') {
-    if (!exactKeys(action, ['name', 'url'])) {
-      throw new BrowserHostError('transaction waitNavigation 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      url: strictTransactionString(action.url, 'transaction waitNavigation.url'),
-    };
-  }
-  if (name === 'x-crew-waitDownload') {
-    if (!exactKeys(action, [
-      'name', 'alias', 'ordinal', 'suggestedFilename',
-    ])) {
-      throw new BrowserHostError('transaction waitDownload 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      alias: strictTransactionString(action.alias, 'transaction waitDownload.alias'),
-      ordinal: strictTransactionInteger(
-        action.ordinal,
-        'transaction waitDownload.ordinal',
-      ),
-      suggestedFilename: strictTransactionString(
-        action.suggestedFilename,
-        'transaction waitDownload.suggestedFilename',
-        true,
-      ),
-    };
-  }
-  if (name === 'x-crew-waitDialog') {
-    if (!exactKeys(action, [
-      'name', 'alias', 'type', 'accept', 'text',
-    ])) {
-      throw new BrowserHostError('transaction waitDialog 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    if (
-      !['alert', 'confirm', 'prompt', 'beforeunload'].includes(String(action.type))
-      || typeof action.accept !== 'boolean'
-      || typeof action.text !== 'string'
-      || action.type !== 'prompt' && action.text
-      || action.accept === false && action.text
-    ) {
-      throw new BrowserHostError('transaction waitDialog 内容无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      alias: strictTransactionString(action.alias, 'transaction waitDialog.alias'),
-      type: action.type,
-      accept: action.accept,
-      text: action.text,
-    };
-  }
-  if (name === 'x-crew-waitPageClosed') {
-    if (!exactKeys(action, ['name', 'reason'])) {
-      throw new BrowserHostError('transaction waitPageClosed 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    return {
-      name,
-      reason: strictTransactionString(
-        action.reason,
-        'transaction waitPageClosed.reason',
-        true,
-      ),
-    };
-  }
-  throw new BrowserHostError(`不支持的 transaction action：${name}`, {
-    code: 'unsupported_transaction_action',
-  });
-}
-
-function parseAtomicEffects(value: unknown): AtomicEffect[] {
-  if (!Array.isArray(value)) {
-    throw new BrowserHostError('expectedEffects 必须是数组', {
-      code: 'invalid_transaction',
-    });
-  }
-  return value.map((raw, index): AtomicEffect => {
-    const effect = asRecord(raw, `expectedEffects[${index}]`);
-    const kind = effect.kind;
-    if (kind === 'navigation' && exactKeys(effect, ['kind', 'page', 'url'])) {
-      return {
-        kind,
-        page: strictPageGuid(effect.page, `expectedEffects[${index}].page`),
-        url: strictTransactionString(effect.url, `expectedEffects[${index}].url`),
-      };
-    }
-    if (
-      kind === 'popup'
-      && exactKeys(effect, [
-        'kind',
-        'page',
-        'opener_page',
-        'popup_index',
-        'activate',
-        'disposition',
-      ])
-      && typeof effect.activate === 'boolean'
-    ) {
-      return {
-        kind,
-        page: strictPageGuid(effect.page, `expectedEffects[${index}].page`),
-        opener_page: strictPageGuid(
-          effect.opener_page,
-          `expectedEffects[${index}].opener_page`,
-        ),
-        popup_index: strictTransactionInteger(
-          effect.popup_index,
-          `expectedEffects[${index}].popup_index`,
-        ),
-        activate: effect.activate,
-        disposition: strictTransactionString(
-          effect.disposition,
-          `expectedEffects[${index}].disposition`,
-        ),
-      };
-    }
-    if (
-      kind === 'download'
-      && exactKeys(effect, [
-        'kind', 'page', 'alias', 'ordinal', 'suggested_filename',
-      ])
-    ) {
-      return {
-        kind,
-        page: strictPageGuid(effect.page, `expectedEffects[${index}].page`),
-        alias: strictTransactionString(
-          effect.alias,
-          `expectedEffects[${index}].alias`,
-        ),
-        ordinal: strictTransactionInteger(
-          effect.ordinal,
-          `expectedEffects[${index}].ordinal`,
-        ),
-        suggested_filename: strictTransactionString(
-          effect.suggested_filename,
-          `expectedEffects[${index}].suggested_filename`,
-          true,
-        ),
-      };
-    }
-    if (
-      kind === 'dialog'
-      && exactKeys(effect, [
-        'kind', 'page', 'alias', 'type', 'accept', 'text',
-      ])
-      && ['alert', 'confirm', 'prompt', 'beforeunload'].includes(String(effect.type))
-      && typeof effect.accept === 'boolean'
-      && typeof effect.text === 'string'
-      && !(effect.type !== 'prompt' && effect.text)
-      && !(effect.accept === false && effect.text)
-    ) {
-      return {
-        kind,
-        page: strictPageGuid(effect.page, `expectedEffects[${index}].page`),
-        alias: strictTransactionString(
-          effect.alias,
-          `expectedEffects[${index}].alias`,
-        ),
-        type: effect.type as RecorderDialogType,
-        accept: effect.accept,
-        text: effect.text,
-      };
-    }
-    if (
-      kind === 'page_closed'
-      && exactKeys(effect, ['kind', 'page', 'reason'])
-    ) {
-      return {
-        kind,
-        page: strictPageGuid(effect.page, `expectedEffects[${index}].page`),
-        reason: strictTransactionString(
-          effect.reason,
-          `expectedEffects[${index}].reason`,
-          true,
-        ),
-      };
-    }
-    throw new BrowserHostError(`expectedEffects[${index}] 形状无效`, {
-      code: 'invalid_transaction',
-    });
-  });
-}
-
-function expectedDialogTimeoutMs(value: unknown, deadlineValue?: unknown): number {
-  let requested = ACTION_TIMEOUT_MS;
-  if (value !== undefined) {
-    if (
-      typeof value !== 'number'
-      || !Number.isFinite(value)
-      || value <= 0
-      || value > Number.MAX_SAFE_INTEGER
-    ) {
-      throw new BrowserHostError('command_timeout_ms 必须是正有限数', {
-        code: 'invalid_expected_dialogs',
-      });
-    }
-    requested = Math.max(1, Math.ceil(value));
-  }
-  if (deadlineValue === undefined) return requested;
-  if (
-    typeof deadlineValue !== 'number'
-    || !Number.isSafeInteger(deadlineValue)
-    || deadlineValue <= 0
-  ) {
-    throw new BrowserHostError('command_deadline_ms 必须是正安全整数', {
-      code: 'invalid_timeout',
-    });
-  }
-  const remaining = Math.floor(deadlineValue - Date.now());
-  if (remaining <= 0) {
-    throw new BrowserHostError('浏览器命令在宿主执行前已超过截止时间', {
-      code: 'command_timeout',
-      uncertain: false,
-    });
-  }
-  return Math.max(1, Math.min(requested, remaining));
-}
-
-function remainingCommandTimeoutMs(deadlineAt: number): number {
-  const remaining = Math.floor(deadlineAt - Date.now());
-  if (remaining <= 0) {
-    throw new BrowserHostError('浏览器命令已超过截止时间', {
-      code: 'command_timeout',
-      uncertain: false,
-    });
-  }
-  return remaining;
-}
-
-/**
- * Capture the first FileChooser emitted after `arm()`.
- *
- * The timeout intentionally starts only after the click resolves. Starting it
- * before Playwright's actionability wait would drop a legitimate chooser when
- * a transiently moving button takes longer than the grace period to become
- * clickable.
- */
+/** Capture the first FileChooser emitted after arming the listener. */
 function createFileChooserCapture(page: Page): {
   arm: () => void;
   wait: (timeoutMs: number) => Promise<FileChooser | null>;
@@ -2301,6 +1037,52 @@ function normalizeMode(value: unknown): ControlMode {
 
 function normalizedText(value: unknown, _maximum?: number): string {
   return String(value ?? '');
+}
+
+function resolveCommandTimeoutMs(value: unknown, deadlineValue?: unknown): number {
+  let requested = ACTION_TIMEOUT_MS;
+  if (value !== undefined) {
+    if (
+      typeof value !== 'number'
+      || !Number.isFinite(value)
+      || value <= 0
+      || value > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new BrowserHostError('command_timeout_ms 必须是正有限数', {
+        code: 'invalid_timeout',
+      });
+    }
+    requested = Math.max(1, Math.ceil(value));
+  }
+  if (deadlineValue === undefined) return requested;
+  if (
+    typeof deadlineValue !== 'number'
+    || !Number.isSafeInteger(deadlineValue)
+    || deadlineValue <= 0
+  ) {
+    throw new BrowserHostError('command_deadline_ms 必须是正安全整数', {
+      code: 'invalid_timeout',
+    });
+  }
+  const remaining = Math.floor(deadlineValue - Date.now());
+  if (remaining <= 0) {
+    throw new BrowserHostError('浏览器命令在宿主执行前已超过截止时间', {
+      code: 'command_timeout',
+      uncertain: false,
+    });
+  }
+  return Math.max(1, Math.min(requested, remaining));
+}
+
+function remainingCommandTimeoutMs(deadlineAt: number): number {
+  const remaining = Math.floor(deadlineAt - Date.now());
+  if (remaining <= 0) {
+    throw new BrowserHostError('浏览器命令已超过截止时间', {
+      code: 'command_timeout',
+      uncertain: false,
+    });
+  }
+  return remaining;
 }
 
 async function withDeadline<T>(
@@ -2572,24 +1354,6 @@ export class BrowserHost extends EventEmitter {
     super();
   }
 
-  /**
-   * Called by the Desktop transport when a recording frame could not be put on
-   * the authenticated loopback socket.  EventEmitter listeners are synchronous,
-   * so the originating tab/ledger still exists while this is called.
-   */
-  markRecordingIncomplete(targetId: string, recordingId = ''): void {
-    const entry = this.tabsByTarget.get(String(targetId || ''));
-    const ledger = entry?.tab.recording?.ledger;
-    if (!ledger || (recordingId && ledger.recordingId !== recordingId)) return;
-    ledger.incomplete = true;
-    ledger.dropped += 1;
-  }
-
-  private markRecordingStateIncomplete(state: RecordingState): void {
-    state.ledger.incomplete = true;
-    state.ledger.dropped += 1;
-  }
-
   async handleRpc(requestValue: unknown): Promise<unknown> {
     const request = asRecord(requestValue, 'RPC 请求') as unknown as BrowserRpcRequest;
     const key = runtimeKey(request.runtime_key);
@@ -2598,16 +1362,6 @@ export class BrowserHost extends EventEmitter {
     if (!method) throw new BrowserHostError('RPC method 不能为空', { code: 'invalid_request' });
 
     this.assertUsable();
-    if (method === 'capabilities') {
-      return {
-        recordingEventSchemas: [10, 11],
-        replayArtifactSchemas: [
-          'crew.browser.replay.v2',
-          'crew.browser.replay.v3',
-        ],
-        atomicReplayEffects: true,
-      };
-    }
     if (method === 'deny_downloads') return this.denyDownloads(key, params);
     if (method === 'close_owner') return this.closeOwner(key, params);
     if (method === 'clear_owner_data') return this.clearOwnerData(key, params);
@@ -2617,8 +1371,6 @@ export class BrowserHost extends EventEmitter {
       switch (method) {
         case 'execute':
           return this.execute(key, params);
-        case 'execute_transaction':
-          return this.executeTransaction(key, params);
         case 'page_guard':
           return this.pageGuard(key, params);
         case 'page_images':
@@ -2631,19 +1383,11 @@ export class BrowserHost extends EventEmitter {
           return this.download(key, params);
         case 'set_mode':
           return this.setMode(key, params);
-        case 'set_recording':
-          return this.setRecording(key, params);
         case 'doctor':
           return {
             ok: true,
             runtime: 'electron',
             engine: 'WebContentsView',
-            recordingEventSchemas: [10, 11],
-            replayArtifactSchemas: [
-              'crew.browser.replay.v2',
-              'crew.browser.replay.v3',
-            ],
-            atomicReplayEffects: true,
           };
         default:
           throw new BrowserHostError('不支持的浏览器 RPC method', { code: 'unsupported_method' });
@@ -2695,12 +1439,6 @@ export class BrowserHost extends EventEmitter {
       popupPanel.tab.view.setBounds(bounds);
       popupPanel.tab.view.setVisible(true);
       this.panel = { ...popupPanel, window, bounds };
-      this.recordViewportResize(
-        popupPanel.tab,
-        popupPanel.tab.recording,
-        bounds.width,
-        bounds.height,
-      );
       popupPanel.tab.view.webContents.focus();
       return;
     }
@@ -2746,14 +1484,6 @@ export class BrowserHost extends EventEmitter {
     tab.view.setBounds(bounds);
     tab.view.setVisible(true);
     this.panel = { owner, tab, window, bounds };
-    if (mode === 'human') {
-      this.recordViewportResize(
-        tab,
-        tab.recording,
-        bounds.width,
-        bounds.height,
-      );
-    }
     if (mode === 'human') tab.view.webContents.focus();
     else window.webContents.focus();
   }
@@ -2970,11 +1700,8 @@ export class BrowserHost extends EventEmitter {
       reservedDownloadPaths: new Set(),
       artifacts: new Map(),
       artifactProtocolRegistered: false,
-      expectedDialogRuns: new Map(),
       pendingModalActions: new Map(),
       modalWaiters: new Map(),
-      atomicTransactions: new Map(),
-      atomicReplayEpochs: new Map(),
       lifecycle: 'active',
       engine: new PlaywrightEngine(),
     };
@@ -3105,7 +1832,7 @@ export class BrowserHost extends EventEmitter {
         } catch (error) {
           // createTarget is transactional at the Host boundary. A failed
           // document/debugger/attach phase must not leave an untracked view.
-          this.closeTab(owner, tab, false);
+          this.closeTab(owner, tab);
           throw error;
         }
       },
@@ -3228,1247 +1955,6 @@ export class BrowserHost extends EventEmitter {
     owner.proxy = next;
   }
 
-  private atomicEffectEqual(left: AtomicEffect, right: AtomicEffect): boolean {
-    return JSON.stringify(left) === JSON.stringify(right);
-  }
-
-  private appendAtomicJournal(
-    owner: BrowserOwner,
-    epoch: AtomicReplayEpoch,
-    event: AtomicJournalEvent,
-  ): AtomicJournalEntry {
-    const entry: AtomicJournalEntry = {
-      sequence: ++epoch.nextEventSequence,
-      event,
-      consumed: false,
-    };
-    epoch.journal.push(entry);
-    const run = owner.atomicTransactions.get(epoch.sessionHash);
-    if (run && run.epoch === epoch) this.consumeAtomicJournal(owner, run);
-    // Keep a bounded tail. Consumed entries have no replay value; unconsumed
-    // lifecycle events are retained even across many short action RPCs.
-    if (epoch.journal.length > 2_048) {
-      const removable = epoch.journal.length - 2_048;
-      let removed = 0;
-      epoch.journal = epoch.journal.filter((candidate) => {
-        if (removed < removable && candidate.consumed) {
-          removed += 1;
-          return false;
-        }
-        return true;
-      });
-    }
-    return entry;
-  }
-
-  private atomicEpochOwnsTab(
-    epoch: AtomicReplayEpoch,
-    tab: BrowserTab,
-  ): boolean {
-    return epoch.pageGuidByTargetId.has(tab.targetId)
-      || Boolean(
-        tab.openerTargetId
-        && (
-          epoch.pageGuidByTargetId.has(tab.openerTargetId)
-          || epoch.journal.some((entry) => (
-            entry.event.kind === 'popup'
-            && entry.event.targetId === tab.openerTargetId
-          ))
-        )
-      )
-      || epoch.journal.some((entry) => (
-        entry.event.kind === 'popup'
-        && entry.event.targetId === tab.targetId
-      ));
-  }
-
-  private atomicJournalCandidate(
-    run: AtomicTransactionRun,
-    entry: AtomicJournalEntry,
-    expected: AtomicEffect,
-  ): AtomicEffect | null {
-    const observed = entry.event;
-    if (expected.kind !== observed.kind) return null;
-    if (observed.kind === 'popup' && expected.kind === 'popup') {
-      const openerPage = run.pageGuidByTargetId.get(observed.openerTargetId);
-      if (!openerPage) return null;
-      const base = run.popupOrdinalBases.get(observed.openerTargetId) ?? 0;
-      return {
-        kind: 'popup',
-        page: expected.page,
-        opener_page: openerPage,
-        popup_index: observed.popupOrdinal - base,
-        activate: observed.activate,
-        disposition: observed.disposition,
-      };
-    }
-    const targetId = observed.targetId;
-    const page = run.pageGuidByTargetId.get(targetId);
-    if (!page) return null;
-    if (observed.kind === 'navigation' && expected.kind === 'navigation') {
-      return { kind: 'navigation', page, url: observed.url };
-    }
-    if (observed.kind === 'download' && expected.kind === 'download') {
-      return {
-        kind: 'download',
-        page,
-        alias: expected.alias,
-        ordinal: observed.ordinal,
-        suggested_filename: observed.suggestedFilename,
-      };
-    }
-    if (observed.kind === 'dialog' && expected.kind === 'dialog') {
-      return {
-        kind: 'dialog',
-        page,
-        alias: expected.alias,
-        type: observed.type,
-        accept: observed.accept,
-        text: observed.text,
-      };
-    }
-    if (observed.kind === 'page_closed' && expected.kind === 'page_closed') {
-      return { kind: 'page_closed', page, reason: observed.reason };
-    }
-    return null;
-  }
-
-  private consumeAtomicJournal(owner: BrowserOwner, run: AtomicTransactionRun): void {
-    while (!run.settled) {
-      const expected = run.expectedEffects[run.effectCursor];
-      if (!expected) {
-        this.settleAtomicTransaction(owner, run);
-        return;
-      }
-      let matched: AtomicJournalEntry | undefined;
-      for (const entry of run.epoch.journal) {
-        if (
-          entry.consumed
-          || (
-            entry.sequence <= (
-              run.allowHistoricalEffects
-                ? run.historicalFloor
-                : run.armSequence
-            )
-          )
-        ) continue;
-        const candidate = this.atomicJournalCandidate(run, entry, expected);
-        if (!candidate) continue;
-        if (this.atomicEffectEqual(expected, candidate)) {
-          matched = entry;
-          break;
-        }
-        // Redirect hops are observations, not terminal failures. Keep waiting
-        // for the exact final URL (POST -> 302 -> destination is common).
-        if (expected.kind === 'navigation') continue;
-        const appearsLater = run.expectedEffects
-          .slice(run.effectCursor + 1)
-          .some((later) => {
-            const laterCandidate = this.atomicJournalCandidate(run, entry, later);
-            return Boolean(
-              laterCandidate
-              && this.atomicEffectEqual(later, laterCandidate),
-            );
-          });
-        if (appearsLater) {
-          this.settleAtomicTransaction(
-            owner,
-            run,
-            new BrowserHostError('原子事务 effect 顺序与录制不一致', {
-              code: 'transaction_effect_mismatch',
-              partial: run.effectCursor > 0,
-            }),
-          );
-          return;
-        }
-      }
-      if (!matched) return;
-      matched.consumed = true;
-      if (matched.event.kind === 'popup' && expected.kind === 'popup') {
-        run.pageGuidByTargetId.set(matched.event.targetId, expected.page);
-        run.targetIdByPageGuid.set(expected.page, matched.event.targetId);
-        run.popupOrdinalBases.set(
-          matched.event.targetId,
-          owner.popupOrdinals.get(
-            `${run.sessionHash}\u0000${matched.event.targetId}`,
-          ) ?? 0,
-        );
-      } else if (
-        matched.event.kind === 'download'
-        && expected.kind === 'download'
-      ) {
-        const downloadEvent = matched.event;
-        const responseDownload: AtomicDownloadResult = {
-          alias: expected.alias,
-          pageGuid: expected.page,
-          ...downloadEvent.result,
-        };
-        let completion = downloadEvent.completion.then(() => {
-          responseDownload.state = downloadEvent.result.state;
-          responseDownload.receivedBytes = downloadEvent.result.receivedBytes;
-        });
-        if (
-          run.downloadDir
-          && path.dirname(downloadEvent.result.path) !== run.downloadDir
-        ) {
-          const original = downloadEvent.result.path;
-          const relocated = path.join(
-            run.downloadDir,
-            `${run.epoch.epochId}-${downloadEvent.ordinal}-${randomUUID()}-${
-              path.basename(original)
-            }`,
-          );
-          completion = completion.then(async () => {
-            try {
-              await rename(original, relocated);
-            } catch {
-              await copyFile(original, relocated);
-              await unlink(original).catch(() => undefined);
-            }
-            downloadEvent.result.path = relocated;
-            responseDownload.path = relocated;
-          });
-        }
-        run.downloads.push(responseDownload);
-        run.downloadCompletions.push(completion);
-      } else if (
-        matched.event.kind === 'page_closed'
-        && expected.kind === 'page_closed'
-      ) {
-        run.closedPageGuids.add(expected.page);
-        run.epoch.closedPageGuids.add(expected.page);
-      }
-      this.advanceAtomicEffect(owner, run, expected);
-    }
-  }
-
-  private settleAtomicTransaction(
-    owner: BrowserOwner,
-    run: AtomicTransactionRun,
-    error?: BrowserHostError,
-  ): void {
-    if (run.settled) return;
-    run.settled = true;
-    clearTimeout(run.timer);
-    if (error) run.reject(error);
-    else run.resolve();
-    // Keep the run installed until executeTransaction's finally block. An
-    // already-started download may still append terminal bytes/state there.
-    if (error && owner.atomicTransactions.get(run.sessionHash) === run) {
-      owner.atomicTransactions.delete(run.sessionHash);
-    }
-  }
-
-  private advanceAtomicEffect(
-    owner: BrowserOwner,
-    run: AtomicTransactionRun,
-    candidate: AtomicEffect,
-  ): boolean {
-    if (run.settled) return false;
-    const expected = run.expectedEffects[run.effectCursor];
-    if (!expected) return false;
-    if (this.atomicEffectEqual(expected, candidate)) {
-      if (run.effectCursor >= run.reportedEffectStart) {
-        // Return the validated wire object, not a runtime-enriched variant.
-        run.matchedEffects.push(expected);
-      }
-      run.effectCursor += 1;
-      if (run.effectCursor === run.expectedEffects.length) {
-        this.settleAtomicTransaction(owner, run);
-      }
-      return true;
-    }
-    const sameIdentity = expected.kind !== 'navigation'
-      && expected.kind === candidate.kind && (
-      expected.kind === 'popup' && candidate.kind === 'popup'
-        ? expected.opener_page === candidate.opener_page
-          && expected.popup_index === candidate.popup_index
-        : expected.page === candidate.page
-      );
-    const appearsLater = run.expectedEffects
-      .slice(run.effectCursor + 1)
-      .some((effect) => this.atomicEffectEqual(effect, candidate));
-    if (sameIdentity || appearsLater) {
-      this.settleAtomicTransaction(
-        owner,
-        run,
-        new BrowserHostError(
-          `原子事务 effect 不一致：期望 ${expected.kind}，实际 ${candidate.kind}`,
-          {
-            code: 'transaction_effect_mismatch',
-            partial: run.effectCursor > 0,
-          },
-        ),
-      );
-    }
-    // Unrelated ambient lifecycle noise is ignored; page/topology-specific
-    // divergence above remains strict.
-    return false;
-  }
-
-  private observeAtomicPopup(
-    owner: BrowserOwner,
-    opener: BrowserTab,
-    popup: BrowserTab,
-    disposition: string,
-    activate: boolean,
-  ): void {
-    const epoch = owner.atomicReplayEpochs.get(opener.sessionHash);
-    if (!epoch || !this.atomicEpochOwnsTab(epoch, opener)) return;
-    this.appendAtomicJournal(owner, epoch, {
-      kind: 'popup',
-      openerTargetId: opener.targetId,
-      targetId: popup.targetId,
-      popupOrdinal: popup.popupOrdinal,
-      activate,
-      disposition,
-    });
-  }
-
-  private observeAtomicNavigation(owner: BrowserOwner, tab: BrowserTab): void {
-    const epoch = owner.atomicReplayEpochs.get(tab.sessionHash);
-    if (!epoch || !this.atomicEpochOwnsTab(epoch, tab)) return;
-    this.appendAtomicJournal(owner, epoch, {
-      kind: 'navigation',
-      targetId: tab.targetId,
-      url: this.tabUrl(tab),
-    });
-  }
-
-  private observeAtomicDialogClosed(
-    owner: BrowserOwner,
-    tab: BrowserTab,
-    dialog: DialogState,
-    params: Record<string, unknown>,
-  ): void {
-    const epoch = owner.atomicReplayEpochs.get(tab.sessionHash);
-    if (!epoch || !this.atomicEpochOwnsTab(epoch, tab)) return;
-    this.appendAtomicJournal(owner, epoch, {
-      kind: 'dialog',
-      targetId: tab.targetId,
-      type: dialog.type as RecorderDialogType,
-      accept: params.result === true,
-      text: (
-        params.result === true
-        && dialog.type === 'prompt'
-        && typeof params.userInput === 'string'
-      ) ? params.userInput : '',
-    });
-  }
-
-  private observeAtomicPageClosed(
-    owner: BrowserOwner,
-    tab: BrowserTab,
-    reason: string,
-  ): void {
-    const epoch = owner.atomicReplayEpochs.get(tab.sessionHash);
-    const page = epoch?.pageGuidByTargetId.get(tab.targetId);
-    if (!epoch || !this.atomicEpochOwnsTab(epoch, tab)) return;
-    if (page && epoch.closedPageGuids.has(page)) return;
-    if (page) epoch.closedPageGuids.add(page);
-    this.appendAtomicJournal(owner, epoch, {
-      kind: 'page_closed',
-      targetId: tab.targetId,
-      reason,
-    });
-  }
-
-  private observeAtomicDownload(
-    owner: BrowserOwner,
-    tab: BrowserTab,
-    item: DownloadItem,
-  ): boolean {
-    const epoch = owner.atomicReplayEpochs.get(tab.sessionHash);
-    if (
-      !epoch
-      || !this.atomicEpochOwnsTab(epoch, tab)
-      || !epoch.downloadDir
-    ) return false;
-    const ordinal = (epoch.downloadOrdinals.get(tab.targetId) ?? 0) + 1;
-    epoch.downloadOrdinals.set(tab.targetId, ordinal);
-    let suggestedFilename = '';
-    try {
-      suggestedFilename = item.getFilename();
-    } catch {
-      suggestedFilename = '';
-    }
-    const basename = path.basename(suggestedFilename) || 'download';
-    const target = path.join(
-      epoch.downloadDir,
-      `${epoch.epochId}-${ordinal}-${randomUUID()}-${basename}`,
-    );
-    try {
-      item.setSavePath(target);
-    } catch {
-      return false;
-    }
-    const result: Omit<AtomicDownloadResult, 'alias' | 'pageGuid'> = {
-      ordinal,
-      suggestedFilename,
-      path: target,
-      state: 'progressing',
-      receivedBytes: 0,
-    };
-    const completion = new Promise<void>((resolve) => {
-      item.once('done', (_event, state) => {
-        result.state = state;
-        try {
-          result.receivedBytes = item.getReceivedBytes();
-        } catch {
-          result.receivedBytes = 0;
-        }
-        resolve();
-      });
-    });
-    this.appendAtomicJournal(owner, epoch, {
-      kind: 'download',
-      targetId: tab.targetId,
-      ordinal,
-      suggestedFilename,
-      result,
-      completion,
-    });
-    return true;
-  }
-
-  private atomicExpectedDialogs(
-    run: AtomicTransactionRun,
-  ): ExpectedDialog[] {
-    return run.expectedEffects
-      .slice(run.effectCursor)
-      .filter((effect): effect is Extract<AtomicEffect, { kind: 'dialog' }> => (
-        effect.kind === 'dialog'
-      ))
-      .map((effect) => {
-        const directTarget = run.targetIdByPageGuid.get(effect.page) ?? '';
-        if (directTarget) {
-          return {
-            type: effect.type,
-            action: effect.accept ? 'accept' : 'dismiss',
-            text: effect.text,
-            targetId: directTarget,
-            openerTargetId: '',
-            popupOrdinal: null,
-          };
-        }
-        const popup = run.expectedEffects.find(
-          (candidate): candidate is Extract<AtomicEffect, { kind: 'popup' }> => (
-            candidate.kind === 'popup' && candidate.page === effect.page
-          ),
-        );
-        const openerTargetId = popup
-          ? run.targetIdByPageGuid.get(popup.opener_page) ?? ''
-          : '';
-        if (!popup || !openerTargetId) {
-          throw new BrowserHostError('dialog effect 引用了无法绑定的页面', {
-            code: 'invalid_transaction',
-          });
-        }
-        return {
-          type: effect.type,
-          action: effect.accept ? 'accept' : 'dismiss',
-          text: effect.text,
-          targetId: '',
-          openerTargetId,
-          popupOrdinal: (
-            run.popupOrdinalBases.get(openerTargetId) ?? 0
-          ) + popup.popup_index,
-        };
-      });
-  }
-
-  private async withAtomicSelectorRef<T>(
-    ctx: ActionContext,
-    selector: string,
-    operation: (ref: string) => Promise<T>,
-  ): Promise<T> {
-    const ref = `@transaction-${randomUUID()}`;
-    try {
-      await pwActions.locateBySelector(ctx, ref, selector, ctx.hash);
-      return await operation(ref);
-    } finally {
-      ctx.refs.delete(ref);
-    }
-  }
-
-  private async dispatchAtomicAction(
-    owner: BrowserOwner,
-    run: AtomicTransactionRun,
-    sourcePageGuid: string,
-    sourceTab: BrowserTab | null,
-    action: AtomicAction,
-  ): Promise<{ tab: BrowserTab | null; snapshot?: string }> {
-    let tab = sourceTab;
-    if (action.name === 'openPage') {
-      if (!tab || run.targetIdByPageGuid.size > 0 && !run.targetIdByPageGuid.has(sourcePageGuid)) {
-        const anchorTarget = run.targetIdByPageGuid.values().next().value as string | undefined;
-        const anchor = anchorTarget ? this.targetTab(owner, anchorTarget) : undefined;
-        if (!anchor) {
-          throw new BrowserHostError('openPage 缺少会话锚点', {
-            code: 'invalid_transaction_source',
-          });
-        }
-        tab = this.createTab(
-          owner,
-          `s${anchor.sessionHash}-${owner.tabCounter + 1}`,
-          anchor.sessionHash,
-          '',
-          'ai',
-        );
-        await this.initializeNewTab(tab, run.deadlineAt);
-      }
-      run.pageGuidByTargetId.set(tab.targetId, sourcePageGuid);
-      run.targetIdByPageGuid.set(sourcePageGuid, tab.targetId);
-      run.popupOrdinalBases.set(
-        tab.targetId,
-        owner.popupOrdinals.get(`${tab.sessionHash}\u0000${tab.targetId}`) ?? 0,
-      );
-      owner.activeTabId = tab.tabId;
-      if (action.viewport) {
-        const viewport = action.viewport as { width: number; height: number };
-        tab.visualEpoch = null;
-        await pwActions.resize(
-          await this.actionContext(
-            tab,
-            remainingCommandTimeoutMs(run.deadlineAt),
-          ),
-          viewport.width,
-          viewport.height,
-        );
-      }
-      await this.navigate(
-        owner,
-        tab,
-        String(action.url),
-        run.deadlineAt,
-      );
-      return { tab };
-    }
-    if (action.name.startsWith('x-crew-wait')) {
-      // A page_closed wait is intentionally executable from an immutable epoch
-      // tombstone after Electron has already destroyed the WebContents.
-      return { tab };
-    }
-    if (!tab) {
-      throw new BrowserHostError('transaction source 页面未绑定', {
-        code: 'invalid_transaction_source',
-      });
-    }
-    if (action.name === 'closePage') {
-      this.closeTab(owner, tab);
-      return { tab };
-    }
-    if (action.name === 'x-crew-activatePage') {
-      owner.activeTabId = tab.tabId;
-      return { tab };
-    }
-    if (action.name === 'x-crew-snapshot') {
-      const captured = await this.snapshot(
-        tab,
-        true,
-        true,
-        remainingCommandTimeoutMs(run.deadlineAt),
-      );
-      return { tab, snapshot: String(captured.snapshot ?? '') };
-    }
-    if (action.name === 'navigate') {
-      await this.navigate(owner, tab, String(action.url), run.deadlineAt);
-      return { tab };
-    }
-    const ctx = await this.actionContext(
-      tab,
-      remainingCommandTimeoutMs(run.deadlineAt),
-    );
-    if (action.name === 'x-crew-resize') {
-      tab.visualEpoch = null;
-      await pwActions.resize(
-        ctx,
-        Number(action.width),
-        Number(action.height),
-      );
-      return { tab };
-    }
-    if (action.name === 'x-crew-navigate') {
-      const operation = String(action.operation);
-      if (operation === 'goto') {
-        await this.navigate(owner, tab, String(action.url), run.deadlineAt);
-      } else if (operation === 'back') {
-        await pwActions.goBack(ctx);
-      } else if (operation === 'forward') {
-        await pwActions.goForward(ctx);
-      } else {
-        await pwActions.reload(ctx);
-      }
-      this.clearDocumentState(tab);
-      return { tab };
-    }
-    if (action.name === 'click') {
-      await this.withAtomicSelectorRef(ctx, String(action.selector), async (ref) => {
-        await pwActions.click(ctx, ref, {
-          button: action.button as pwActions.ClickButton,
-          clickCount: Number(action.clickCount),
-          modifiers: action.modifiers as NonNullable<ClickOptions['modifiers']>,
-          ...(action.position
-            ? { position: action.position as { x: number; y: number } }
-            : {}),
-        });
-      });
-      return { tab };
-    }
-    if (action.name === 'hover') {
-      await this.withAtomicSelectorRef(ctx, String(action.selector), async (ref) => {
-        await pwActions.hover(
-          ctx,
-          ref,
-          action.position as { x: number; y: number } | null ?? undefined,
-        );
-      });
-      return { tab };
-    }
-    if (action.name === 'fill') {
-      await this.withAtomicSelectorRef(ctx, String(action.selector), async (ref) => {
-        await pwActions.fill(ctx, ref, String(action.text), { submit: false });
-      });
-      return { tab };
-    }
-    if (action.name === 'check' || action.name === 'uncheck') {
-      await this.withAtomicSelectorRef(ctx, String(action.selector), async (ref) => {
-        await pwActions.setChecked(ctx, ref, action.name === 'check');
-      });
-      return { tab };
-    }
-    if (action.name === 'handle_overlay') {
-      // 直接用 selector，不走 withAtomicSelectorRef：处理器要跨越整场回放，
-      // 解析成一个当代的 ref 反而会让它在下一次快照后失效。
-      await pwActions.registerOverlayHandler(ctx, String(action.selector));
-      return { tab };
-    }
-    if (action.name === 'assert_state') {
-      // 断言不改变页面，所以它**不该**参与 withActionCompletion 那套
-      // "等导航/网络收束"的语义——那是给会产生副作用的动作用的。
-      // 断言只回答一个问题：当前页面是不是预期的样子。
-      await this.withAtomicSelectorRef(ctx, String(action.selector), async (ref) => {
-        await pwActions.assertState(ctx, ref, String(action.state));
-      });
-      return { tab };
-    }
-    if (action.name === 'select') {
-      await this.withAtomicSelectorRef(ctx, String(action.selector), async (ref) => {
-        await pwActions.selectOption(ctx, ref, action.options as string[]);
-      });
-      return { tab };
-    }
-    if (action.name === 'press') {
-      const modifiers = action.modifiers as string[];
-      const key = [...modifiers, String(action.key)].join('+');
-      if (String(action.selector)) {
-        await this.withAtomicSelectorRef(ctx, String(action.selector), async (ref) => {
-          await pwActions.press(ctx, key, ref);
-        });
-      } else {
-        await pwActions.press(ctx, key, undefined);
-      }
-      return { tab };
-    }
-    if (action.name === 'setInputFiles') {
-      const files = await this.approvedUploadFiles(
-        this.ownerOfTab(tab),
-        action.files as string[],
-      );
-      await this.withAtomicSelectorRef(ctx, String(action.selector), async (ref) => {
-        await pwActions.upload(ctx, ref, files);
-      });
-      return { tab };
-    }
-    if (action.name === 'x-crew-drop') {
-      const files = await this.approvedUploadFiles(
-        this.ownerOfTab(tab),
-        action.files as string[],
-      );
-      await this.withAtomicSelectorRef(ctx, String(action.selector), async (ref) => {
-        await pwActions.drop(ctx, ref, {
-          files,
-          data: action.data as Record<string, string>,
-        });
-      });
-      return { tab };
-    }
-    if (action.name === 'x-crew-drag') {
-      const sourceRef = `@transaction-source-${randomUUID()}`;
-      const targetRef = `@transaction-target-${randomUUID()}`;
-      try {
-        await pwActions.locateBySelector(
-          ctx,
-          sourceRef,
-          String(action.sourceSelector),
-          ctx.hash,
-        );
-        await pwActions.locateBySelector(
-          ctx,
-          targetRef,
-          String(action.targetSelector),
-          ctx.hash,
-        );
-        await pwActions.drag(ctx, sourceRef, targetRef, {
-          ...(action.sourcePosition
-            ? {
-                sourcePosition: action.sourcePosition as {
-                  x: number;
-                  y: number;
-                },
-              }
-            : {}),
-          ...(action.targetPosition
-            ? {
-                targetPosition: action.targetPosition as {
-                  x: number;
-                  y: number;
-                },
-              }
-            : {}),
-        });
-      } finally {
-        ctx.refs.delete(sourceRef);
-        ctx.refs.delete(targetRef);
-      }
-      return { tab };
-    }
-    if (action.name === 'x-crew-pointerGesture') {
-      await this.withAtomicSelectorRef(ctx, String(action.selector), async (ref) => {
-        await pwActions.pointerGesture(ctx, ref, {
-          pointerType: action.pointerType as pwActions.PointerDeviceType,
-          button: action.button as pwActions.ClickButton,
-          modifiers: action.modifiers as Array<'Alt' | 'Control' | 'Meta' | 'Shift'>,
-          start: action.start as { x: number; y: number },
-          points: action.points as pwActions.PointerGesturePoint[],
-        });
-      });
-      return { tab };
-    }
-    if (action.name === 'x-crew-scroll') {
-      if (String(action.selector)) {
-        await this.withAtomicSelectorRef(ctx, String(action.selector), async (ref) => {
-          await pwActions.hover(ctx, ref);
-          await pwActions.scrollDelta(
-            ctx,
-            Number(action.deltaX),
-            Number(action.deltaY),
-          );
-        });
-      } else {
-        await pwActions.scrollDelta(
-          ctx,
-          Number(action.deltaX),
-          Number(action.deltaY),
-        );
-      }
-      return { tab };
-    }
-    throw new BrowserHostError(`无法派发 transaction action：${action.name}`, {
-      code: 'unsupported_transaction_action',
-    });
-  }
-
-  private primaryAtomicEffect(
-    sourcePageGuid: string,
-    action: AtomicAction,
-  ): AtomicEffect | null {
-    if (action.name === 'x-crew-waitPopup') {
-      return {
-        kind: 'popup',
-        page: String(action.popupPageGuid),
-        opener_page: sourcePageGuid,
-        popup_index: Number(action.popupIndex),
-        activate: action.activate === true,
-        disposition: String(action.disposition),
-      };
-    }
-    if (action.name === 'x-crew-waitNavigation') {
-      return {
-        kind: 'navigation',
-        page: sourcePageGuid,
-        url: String(action.url),
-      };
-    }
-    if (action.name === 'x-crew-waitDownload') {
-      return {
-        kind: 'download',
-        page: sourcePageGuid,
-        alias: String(action.alias),
-        ordinal: Number(action.ordinal),
-        suggested_filename: String(action.suggestedFilename),
-      };
-    }
-    if (action.name === 'x-crew-waitDialog') {
-      return {
-        kind: 'dialog',
-        page: sourcePageGuid,
-        alias: String(action.alias),
-        type: action.type as RecorderDialogType,
-        accept: action.accept === true,
-        text: String(action.text),
-      };
-    }
-    if (action.name === 'x-crew-waitPageClosed') {
-      return {
-        kind: 'page_closed',
-        page: sourcePageGuid,
-        reason: String(action.reason),
-      };
-    }
-    return null;
-  }
-
-  private async executeTransaction(
-    key: string,
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    const required = [
-      'profile_dir',
-      'proxy_url',
-      'download_dir',
-      'schemaVersion',
-      'transactionId',
-      'source',
-      'knownPages',
-      'action',
-      'expectedEffects',
-      'timeoutMs',
-    ];
-    if (!exactKeys(params, required, ['max_transfer_bytes'])) {
-      throw new BrowserHostError('execute_transaction params 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    if (params.schemaVersion !== 1) {
-      throw new BrowserHostError('execute_transaction schemaVersion 无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    const transactionId = strictTransactionInteger(
-      params.transactionId,
-      'transactionId',
-    );
-    const timeoutMs = strictTransactionInteger(params.timeoutMs, 'timeoutMs');
-    const deadlineAt = Date.now() + timeoutMs;
-    const profile = profilePath(params.profile_dir, key);
-    const proxy = strictTransactionString(
-      params.proxy_url,
-      'proxy_url',
-      true,
-    ).trim();
-    const owner = await this.ensureOwner(key, profile, proxy);
-    const downloadDirRaw = strictTransactionString(
-      params.download_dir,
-      'download_dir',
-      true,
-    );
-    const downloadDir = downloadDirRaw ? canonicalPath(downloadDirRaw) : '';
-    const maxTransferBytes = transferLimit(params.max_transfer_bytes);
-    if (downloadDirRaw && !path.isAbsolute(downloadDirRaw)) {
-      throw new BrowserHostError('download_dir 必须是绝对路径', {
-        code: 'invalid_transaction',
-      });
-    }
-    const source = asRecord(params.source, 'transaction source');
-    if (!exactKeys(source, ['pageGuid'], ['targetId'])) {
-      throw new BrowserHostError('transaction source 形状无效', {
-        code: 'invalid_transaction',
-      });
-    }
-    const sourcePageGuid = strictPageGuid(source.pageGuid, 'source.pageGuid');
-    const sourceTargetId = source.targetId === undefined
-      ? ''
-      : strictTransactionString(source.targetId, 'source.targetId');
-    const action = parseAtomicAction(params.action);
-    if (!Array.isArray(params.knownPages)) {
-      throw new BrowserHostError('knownPages 必须是数组', {
-        code: 'invalid_transaction',
-      });
-    }
-    let targetIdByPageGuid = new Map<string, string>();
-    let pageGuidByTargetId = new Map<string, string>();
-    let tombstoneEpoch: AtomicReplayEpoch | undefined;
-    for (const [index, raw] of params.knownPages.entries()) {
-      const binding = asRecord(raw, `knownPages[${index}]`);
-      if (!exactKeys(binding, ['pageGuid', 'targetId'])) {
-        throw new BrowserHostError(`knownPages[${index}] 形状无效`, {
-          code: 'invalid_transaction',
-        });
-      }
-      const pageGuid = strictPageGuid(binding.pageGuid, `knownPages[${index}].pageGuid`);
-      const targetId = strictTransactionString(
-        binding.targetId,
-        `knownPages[${index}].targetId`,
-      );
-      if (targetIdByPageGuid.has(pageGuid) || pageGuidByTargetId.has(targetId)) {
-        throw new BrowserHostError('knownPages 包含重复绑定', {
-          code: 'invalid_transaction',
-        });
-      }
-      targetIdByPageGuid.set(pageGuid, targetId);
-      pageGuidByTargetId.set(targetId, pageGuid);
-      const live = this.tabsByTarget.get(targetId);
-      const tab = live?.owner === owner ? live.tab : null;
-      if (!tab) {
-        const historical = [...owner.atomicReplayEpochs.values()].find(
-          (candidate) => (
-            candidate.targetIdByPageGuid.get(pageGuid) === targetId
-            && (
-              candidate.closedPageGuids.has(pageGuid)
-              || candidate.journal.some((entry) => (
-                !entry.consumed
-                && entry.event.kind === 'page_closed'
-                && entry.event.targetId === targetId
-              ))
-            )
-          ),
-        );
-        if (action.name !== 'x-crew-waitPageClosed' || !historical) {
-          throw new BrowserHostError('knownPages 引用了不存在的页面', {
-            code: 'foreign_tab',
-          });
-        }
-        tombstoneEpoch = historical;
-      } else if (tab.crashed || tab.view.webContents.isDestroyed()) {
-        throw new BrowserHostError('knownPages 引用了已停止页面', {
-          code: 'tab_stopped',
-        });
-      } else {
-        tab.downloadMaxBytes = maxTransferBytes;
-      }
-    }
-    if (sourceTargetId) {
-      const known = targetIdByPageGuid.get(sourcePageGuid);
-      if (known && known !== sourceTargetId) {
-        throw new BrowserHostError('source 与 knownPages 绑定冲突', {
-          code: 'invalid_transaction_source',
-        });
-      }
-      const live = this.tabsByTarget.get(sourceTargetId);
-      if (live?.owner !== owner) {
-        const historical = [...owner.atomicReplayEpochs.values()].find(
-          (candidate) => (
-            candidate.targetIdByPageGuid.get(sourcePageGuid) === sourceTargetId
-            && (
-              candidate.closedPageGuids.has(sourcePageGuid)
-              || candidate.journal.some((entry) => (
-                !entry.consumed
-                && entry.event.kind === 'page_closed'
-                && entry.event.targetId === sourceTargetId
-              ))
-            )
-          ),
-        );
-        if (action.name !== 'x-crew-waitPageClosed' || !historical) {
-          throw new BrowserHostError('transaction source 页面不存在', {
-            code: 'invalid_transaction_source',
-          });
-        }
-        tombstoneEpoch = historical;
-      }
-      targetIdByPageGuid.set(sourcePageGuid, sourceTargetId);
-      pageGuidByTargetId.set(sourceTargetId, sourcePageGuid);
-    }
-    const additionalEffects = parseAtomicEffects(params.expectedEffects);
-    const primaryEffect = this.primaryAtomicEffect(sourcePageGuid, action);
-    const expectedEffects = [
-      ...(primaryEffect ? [primaryEffect] : []),
-      ...additionalEffects,
-    ];
-    if (
-      expectedEffects.some((effect) => effect.kind === 'download')
-      && !downloadDir
-    ) {
-      throw new BrowserHostError('下载事务必须提供 download_dir', {
-        code: 'invalid_transaction',
-      });
-    }
-    const liveTab = (targetId: string): BrowserTab | null => {
-      const found = this.tabsByTarget.get(targetId);
-      return found?.owner === owner ? found.tab : null;
-    };
-    let sourceTab = sourceTargetId
-      ? liveTab(sourceTargetId)
-      : targetIdByPageGuid.has(sourcePageGuid)
-        ? liveTab(targetIdByPageGuid.get(sourcePageGuid)!)
-        : null;
-    let anchor = sourceTab
-      ?? (
-        targetIdByPageGuid.size
-          ? [...targetIdByPageGuid.values()]
-              .map((targetId) => liveTab(targetId))
-              .find((candidate): candidate is BrowserTab => Boolean(candidate))
-          : owner.tabs.get(owner.activeTabId) ?? (
-              owner.tabs.size === 1 ? owner.tabs.values().next().value : undefined
-            )
-      );
-    if (
-      !anchor
-      && transactionId === 1
-      && action.name === 'openPage'
-      && targetIdByPageGuid.size === 0
-    ) {
-      const freshSessionHash = sessionHash(
-        `replay-v3:${key}:${randomUUID()}`,
-      );
-      anchor = this.createTab(
-        owner,
-        `s${freshSessionHash}-${owner.tabCounter + 1}`,
-        freshSessionHash,
-        '',
-        'ai',
-      );
-      await this.initializeNewTab(anchor, deadlineAt);
-      anchor.downloadMaxBytes = maxTransferBytes;
-      sourceTab = anchor;
-    }
-    const atomicSessionHash = anchor?.sessionHash ?? tombstoneEpoch?.sessionHash ?? '';
-    if (!atomicSessionHash) {
-      throw new BrowserHostError('原子事务缺少浏览器会话锚点', {
-        code: 'invalid_transaction_source',
-      });
-    }
-    // The first openPage reuses the already-created manager tab. Later root
-    // pages omit targetId while knownPages is non-empty and are created anew.
-    if (
-      action.name === 'openPage'
-      && !sourceTab
-      && targetIdByPageGuid.size === 0
-      && anchor
-    ) {
-      sourceTab = anchor;
-    }
-    if (
-      [...targetIdByPageGuid.values()].some(
-        (targetId) => {
-          const tab = liveTab(targetId);
-          if (tab) return tab.sessionHash !== atomicSessionHash;
-          return tombstoneEpoch?.sessionHash !== atomicSessionHash;
-        },
-      )
-    ) {
-      throw new BrowserHostError('knownPages 必须属于同一浏览器会话', {
-        code: 'invalid_transaction_source',
-      });
-    }
-    if (owner.atomicTransactions.has(atomicSessionHash)) {
-      throw new BrowserHostError('浏览器会话已有原子事务', {
-        code: 'transaction_busy',
-      });
-    }
-    if (owner.downloadGrant) {
-      throw new BrowserHostError('显式下载与原子事务不能并发', {
-        code: 'download_busy',
-      });
-    }
-    let epoch = owner.atomicReplayEpochs.get(atomicSessionHash);
-    if (transactionId === 1) {
-      epoch = {
-        sessionHash: atomicSessionHash,
-        epochId: randomUUID(),
-        lastTransactionId: 0,
-        nextEventSequence: 0,
-        historicalFloor: 0,
-        journal: [],
-        pageGuidByTargetId: new Map(),
-        targetIdByPageGuid: new Map(),
-        popupOrdinalBases: new Map(),
-        closedPageGuids: new Set(),
-        downloadOrdinals: new Map(),
-        downloadDir,
-      };
-      owner.atomicReplayEpochs.set(atomicSessionHash, epoch);
-    } else if (!epoch) {
-      throw new BrowserHostError('replay epoch 不存在，必须从 transactionId=1 开始', {
-        code: 'transaction_epoch_missing',
-      });
-    }
-    if (transactionId !== epoch.lastTransactionId + 1) {
-      throw new BrowserHostError(
-        `transactionId 必须连续递增（期望 ${epoch.lastTransactionId + 1}）`,
-        { code: 'transaction_sequence_invalid' },
-      );
-    }
-    epoch.downloadDir = downloadDir || epoch.downloadDir;
-    for (const [pageGuid, targetId] of targetIdByPageGuid) {
-      const previousTarget = epoch.targetIdByPageGuid.get(pageGuid);
-      const previousPage = epoch.pageGuidByTargetId.get(targetId);
-      if (
-        previousTarget && previousTarget !== targetId
-        || previousPage && previousPage !== pageGuid
-      ) {
-        throw new BrowserHostError('knownPages 与 replay epoch 绑定冲突', {
-          code: 'invalid_transaction_source',
-        });
-      }
-      epoch.targetIdByPageGuid.set(pageGuid, targetId);
-      epoch.pageGuidByTargetId.set(targetId, pageGuid);
-      if (!epoch.popupOrdinalBases.has(targetId)) {
-        epoch.popupOrdinalBases.set(
-          targetId,
-          owner.popupOrdinals.get(
-            `${atomicSessionHash}\u0000${targetId}`,
-          ) ?? 0,
-        );
-      }
-    }
-    targetIdByPageGuid = epoch.targetIdByPageGuid;
-    pageGuidByTargetId = epoch.pageGuidByTargetId;
-    const popupOrdinalBases = epoch.popupOrdinalBases;
-    let resolveCompletion!: () => void;
-    let rejectCompletion!: (error: BrowserHostError) => void;
-    const completion = new Promise<void>((resolve, reject) => {
-      resolveCompletion = resolve;
-      rejectCompletion = reject;
-    });
-    const run: AtomicTransactionRun = {
-      transactionId,
-      sessionHash: atomicSessionHash,
-      epoch,
-      armSequence: epoch.nextEventSequence,
-      allowHistoricalEffects: action.name.startsWith('x-crew-wait'),
-      historicalFloor: epoch.historicalFloor,
-      deadlineAt,
-      downloadDir,
-      expectedEffects,
-      matchedEffects: [],
-      effectCursor: 0,
-      reportedEffectStart: primaryEffect ? 1 : 0,
-      pageGuidByTargetId,
-      targetIdByPageGuid,
-      popupOrdinalBases,
-      closedPageGuids: new Set(),
-      downloads: [],
-      downloadCompletions: [],
-      completion,
-      resolve: resolveCompletion,
-      reject: rejectCompletion,
-      settled: false,
-      timer: setTimeout(() => undefined, 1),
-    };
-    clearTimeout(run.timer);
-    run.timer = setTimeout(() => {
-      this.settleAtomicTransaction(
-        owner,
-        run,
-        new BrowserHostError(
-          `原子事务未在期限内匹配全部 effect（${run.effectCursor}/${run.expectedEffects.length}）`,
-          {
-            code: 'transaction_effect_timeout',
-            uncertain: true,
-            partial: run.effectCursor > 0,
-          },
-        ),
-      );
-    }, remainingCommandTimeoutMs(deadlineAt));
-    run.timer.unref();
-    owner.atomicTransactions.set(atomicSessionHash, run);
-    if (!expectedEffects.length) {
-      this.settleAtomicTransaction(owner, run);
-    } else {
-      this.consumeAtomicJournal(owner, run);
-      if (
-        !run.settled
-        && primaryEffect?.kind === 'navigation'
-        && sourceTab
-        && this.tabUrl(sourceTab) === primaryEffect.url
-      ) {
-        this.appendAtomicJournal(owner, epoch, {
-          kind: 'navigation',
-          targetId: sourceTab.targetId,
-          url: primaryEffect.url,
-        });
-      }
-    }
-
-    let snapshot: string | undefined;
-    try {
-      const dialogs = this.atomicExpectedDialogs(run);
-      const dispatch = async (): Promise<void> => {
-        const result = await this.dispatchAtomicAction(
-          owner,
-          run,
-          sourcePageGuid,
-          sourceTab,
-          action,
-        );
-        sourceTab = result.tab;
-        snapshot = result.snapshot;
-      };
-      if (dialogs.length) {
-        if (!anchor) {
-          throw new BrowserHostError('dialog 事务缺少存活页面锚点', {
-            code: 'invalid_transaction_source',
-          });
-        }
-        await this.withExpectedDialogs(
-          anchor,
-          dialogs,
-          dispatch,
-          remainingCommandTimeoutMs(deadlineAt),
-        );
-      } else {
-        await dispatch();
-      }
-      await run.completion;
-      if (run.downloadCompletions.length) {
-        await withDeadline(
-          Promise.all(run.downloadCompletions).then(() => undefined),
-          remainingCommandTimeoutMs(deadlineAt),
-          () => new BrowserHostError('下载未在原子事务截止时间内完成', {
-            code: 'transaction_download_timeout',
-            uncertain: true,
-            partial: true,
-          }),
-        );
-      }
-      const activeTarget = owner.tabs.get(owner.activeTabId)?.targetId ?? '';
-      const response = {
-        matchedEffects: run.matchedEffects,
-        pageBindings: [...run.targetIdByPageGuid]
-          .filter(([pageGuid]) => (
-            !run.epoch.closedPageGuids.has(pageGuid)
-            || run.closedPageGuids.has(pageGuid)
-          ))
-          .map(([pageGuid, targetId]) => ({
-            pageGuid,
-            targetId,
-          })),
-        downloads: run.downloads,
-        activePageGuid: run.pageGuidByTargetId.get(activeTarget) ?? '',
-        closedPageGuids: [...run.closedPageGuids],
-        ...(snapshot !== undefined ? { snapshot } : {}),
-      };
-      epoch.lastTransactionId = transactionId;
-      epoch.historicalFloor = run.armSequence;
-      return response;
-    } catch (error) {
-      const failure = error instanceof BrowserHostError
-        ? error
-        : new BrowserHostError(
-            error instanceof Error ? error.message : '原子事务失败',
-            {
-              code: 'transaction_failed',
-              uncertain: true,
-              partial: run.effectCursor > 0,
-            },
-          );
-      this.settleAtomicTransaction(
-        owner,
-        run,
-        failure,
-      );
-      await run.completion.catch(() => undefined);
-      throw failure;
-    } finally {
-      clearTimeout(run.timer);
-      if (owner.atomicTransactions.get(atomicSessionHash) === run) {
-        owner.atomicTransactions.delete(atomicSessionHash);
-      }
-    }
-  }
-
   private async execute(key: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     const profile = profilePath(params.profile_dir, key);
     const proxy = asString(params.proxy_url, 'proxy_url', 4096).trim();
@@ -4500,17 +1986,11 @@ export class BrowserHost extends EventEmitter {
             this.setTabDownloadDir(tab, requestedDownloadDir);
           }
           tab.downloadMaxBytes = requestedTransferLimit;
-          // execute_transaction is the only producer of a live replay epoch.
-          // A later ordinary execute proves replay ownership has ended; clear
-          // its journal before a normal page download can be claimed as atomic.
-          if (!owner.atomicTransactions.has(tab.sessionHash)) {
-            owner.atomicReplayEpochs.delete(tab.sessionHash);
-          }
           const inner = operation;
           operation = () => this.withGenericDownloadCapture(
             owner,
             tab,
-            expectedDialogTimeoutMs(
+            resolveCommandTimeoutMs(
               params.command_timeout_ms,
               params.command_deadline_ms,
             ),
@@ -4608,7 +2088,7 @@ export class BrowserHost extends EventEmitter {
     params: Record<string, unknown>,
     modalRaceArmed = false,
   ): Promise<unknown> {
-    let commandTimeoutMs = expectedDialogTimeoutMs(
+    let commandTimeoutMs = resolveCommandTimeoutMs(
       params.command_timeout_ms,
       params.command_deadline_ms,
     );
@@ -4700,33 +2180,6 @@ export class BrowserHost extends EventEmitter {
         code: sessionDialogs.length ? 'dialog_pending' : 'file_chooser_pending',
       });
     }
-    if (Object.prototype.hasOwnProperty.call(params, 'expected_dialogs')) {
-      if (
-        !new Set([
-          'open', 'back', 'forward', 'reload', 'click', 'fill', 'fill_form',
-          'drag', 'select', 'check', 'scroll', 'press', 'keydown', 'keyup',
-          'mouse', 'drop', 'upload', 'upload_with_trigger', 'eval',
-          'run_code_unsafe',
-        ]).has(command)
-      ) {
-        throw new BrowserHostError('该命令不支持原子对话框回放', {
-          code: 'invalid_expected_dialogs',
-        });
-      }
-      const dialogs = parseExpectedDialogs(params.expected_dialogs);
-      const timeoutMs = expectedDialogTimeoutMs(
-        params.command_timeout_ms,
-        params.command_deadline_ms,
-      );
-      const innerParams = { ...params };
-      delete innerParams.expected_dialogs;
-      return this.withExpectedDialogs(
-        tab,
-        dialogs,
-        () => this.executeCommand(owner, command, args, innerParams, true),
-        timeoutMs,
-      );
-    }
     if (
       !modalRaceArmed
       && command !== 'dialog'
@@ -4756,42 +2209,34 @@ export class BrowserHost extends EventEmitter {
     }
     switch (command) {
       case 'open':
-        return this.navigate(owner, tab, args[0], commandDeadlineAt, true);
+        return this.navigate(owner, tab, args[0], commandDeadlineAt);
       case 'preview':
         return this.previewArtifact(owner, tab, args, commandDeadlineAt);
       case 'back': {
         if (args.length) invalidCommandArgs();
         const ctx = await this.actionContext(tab, commandTimeoutMs);
-        const recordedNavigation = this.beginRecordedNavigation(tab, 'back', '');
         try {
           await pwActions.goBack(ctx);
         } catch (error) {
-          this.cancelRecordedNavigation(tab, recordedNavigation);
-          // page.goBack() === null proves that no navigation was dispatched;
-          // keep the current ref generation usable in that deterministic case.
           if (!(error instanceof pwActions.ActionError && error.code === 'no_history')) {
             this.clearDocumentState(tab);
           }
           BrowserHost.rethrowAction(error);
         }
-        await this.completeRecordedNavigation(tab, recordedNavigation, ctx.page.url());
         this.clearDocumentState(tab);
         return {};
       }
       case 'forward': {
         if (args.length) invalidCommandArgs();
         const ctx = await this.actionContext(tab, commandTimeoutMs);
-        const recordedNavigation = this.beginRecordedNavigation(tab, 'forward', '');
         try {
           await pwActions.goForward(ctx);
         } catch (error) {
-          this.cancelRecordedNavigation(tab, recordedNavigation);
           if (!(error instanceof pwActions.ActionError && error.code === 'no_history')) {
             this.clearDocumentState(tab);
           }
           BrowserHost.rethrowAction(error);
         }
-        await this.completeRecordedNavigation(tab, recordedNavigation, ctx.page.url());
         this.clearDocumentState(tab);
         return {};
       }
@@ -4799,14 +2244,11 @@ export class BrowserHost extends EventEmitter {
         if (args.length) invalidCommandArgs();
         const ctx = await this.actionContext(tab, commandTimeoutMs);
         this.clearDocumentState(tab);
-        const recordedNavigation = this.beginRecordedNavigation(tab, 'reload', '');
         try {
           await pwActions.reload(ctx);
         } catch (error) {
-          this.cancelRecordedNavigation(tab, recordedNavigation);
           BrowserHost.rethrowAction(error);
         }
-        await this.completeRecordedNavigation(tab, recordedNavigation, ctx.page.url());
         return {};
       }
       case 'snapshot':
@@ -4984,7 +2426,7 @@ export class BrowserHost extends EventEmitter {
         return {};
       case 'handle_overlay':
         // 注册一次，之后由 Playwright 在每次 actionability 检查前自动触发。
-        // 参数是 selector（不是 ref）：处理器要跨越整场回放存活，而 ref 表
+        // 参数是 selector（不是 ref）：处理器要跨越整个操作存活，而 ref 表
         // 每次快照整张替换。
         if (args.length !== 1 || !args[0]) invalidCommandArgs();
         await pwActions.registerOverlayHandler(
@@ -5021,10 +2463,6 @@ export class BrowserHost extends EventEmitter {
         await pwActions.hover(await this.actionContext(tab, commandTimeoutMs), args[0])
           .catch(BrowserHost.rethrowAction);
         return {};
-      case 'locate':
-        // 回放入口：技能里存盘的稳定选择器 → 可执行 ref。
-        if (args.length !== 1 || !args[0]) invalidCommandArgs();
-        return this.locateBySelector(tab, args[0], commandTimeoutMs);
       case 'scroll':
         if (args[0] === '--delta-x') {
           if (args.length !== 4 || args[2] !== '--delta-y') invalidCommandArgs();
@@ -5147,78 +2585,6 @@ export class BrowserHost extends EventEmitter {
         throw new BrowserHostError('不支持的浏览器命令', { code: 'unsupported_command' });
     }
   }
-
-  /**
-   * Join a pre-existing human tab to the one unambiguous active recording in
-   * its Crew session, but only when the user explicitly selects or closes it.
-   *
-   * Existing background tabs are intentionally not enrolled at recording
-   * start: loading timers and unsolicited navigations on a tab the user never
-   * visits are not part of the demonstration. `startRecording` emits this
-   * page's openPage + current CSS viewport before the caller records activate
-   * or close, preserving replay topology and global ledger order.
-   */
-  private async lazyJoinHumanRecording(
-    owner: BrowserOwner,
-    tab: BrowserTab,
-    timeoutMs: number,
-  ): Promise<RecordingState | null> {
-    if (tab.recording) {
-      return (
-        !tab.recording.ledger.closing
-        && tab.recording.accepting
-        && !tab.recording.paused
-      ) ? tab.recording : null;
-    }
-    if (tab.mode !== 'human') return null;
-    const peersByLedger = new Map<RecordingLedger, RecordingState>();
-    for (const candidate of owner.tabs.values()) {
-      const state = candidate.recording;
-      if (
-        candidate === tab
-        || candidate.sessionHash !== tab.sessionHash
-        || !state
-        || state.ledger.closing
-        || !state.accepting
-        || state.paused
-      ) {
-        continue;
-      }
-      peersByLedger.set(state.ledger, state);
-    }
-    if (peersByLedger.size !== 1) return null;
-    const peer = peersByLedger.values().next().value as RecordingState;
-    try {
-      await this.startRecording(
-        owner,
-        tab,
-        peer.ledger.recordingId,
-        peer.ledger,
-        0,
-        timeoutMs,
-      );
-    } catch (error) {
-      // Never block the user's native tab operation because recorder bootstrap
-      // failed. The shared trace is explicitly non-compilable instead.
-      this.markRecordingStateIncomplete(peer);
-      this.emit('browser-error', {
-        runtimeKey: owner.runtimeKey,
-        targetId: tab.targetId,
-        code: 'recorder_lazy_join_failed',
-        error: error instanceof Error ? error.message : '无法录制已存在标签页',
-      });
-      return null;
-    }
-    // startRecording mutates the tab through a private helper; force a fresh
-    // read because TypeScript otherwise preserves the earlier null narrowing.
-    const joined = (tab as BrowserTab).recording as RecordingState | null;
-    return (
-      joined?.ledger === peer.ledger
-      && joined.accepting
-      && !joined.paused
-    ) ? joined : null;
-  }
-
   private async tabCommand(
     owner: BrowserOwner,
     args: string[],
@@ -5239,12 +2605,6 @@ export class BrowserHost extends EventEmitter {
           sessionHash: tab.sessionHash,
           openerTargetId: tab.openerTargetId,
           popupOrdinal: tab.popupOrdinal,
-          // Historical owner-side counter for direct children of this page.
-          // Unlike the live tab rows, this survives closed popups and therefore
-          // lets replay translate recording-local popup ordinals exactly.
-          popupOrdinalBase: owner.popupOrdinals.get(
-            `${tab.sessionHash}\u0000${tab.targetId}`,
-          ) ?? 0,
         })),
       };
     }
@@ -5272,13 +2632,6 @@ export class BrowserHost extends EventEmitter {
         throw new BrowserHostError('Crew 标签页 label 已存在', { code: 'duplicate_tab' });
       }
       const url = safeUrl(args.at(-1) ?? 'about:blank');
-      const inheritedRecording = userCreated
-        ? [...owner.tabs.values()].find((candidate) => (
-            candidate.sessionHash === match[1]
-            && candidate.recording
-            && !candidate.recording.ledger.closing
-          ))?.recording ?? null
-        : null;
       const tab = this.createTab(owner, label, match[1], '', userCreated ? 'human' : 'ai');
       if (downloadDir) this.setTabDownloadDir(tab, downloadDir);
       tab.downloadMaxBytes = downloadMaxBytes;
@@ -5292,18 +2645,8 @@ export class BrowserHost extends EventEmitter {
           remainingCommandTimeoutMs(commandDeadlineAt),
           () => this.navigate(owner, tab, url, commandDeadlineAt),
         ) as Record<string, unknown>;
-        if (inheritedRecording) {
-          await this.startRecording(
-            owner,
-            tab,
-            inheritedRecording.ledger.recordingId,
-            inheritedRecording.ledger,
-            0,
-            remainingCommandTimeoutMs(commandDeadlineAt),
-          );
-        }
       } catch (error) {
-        this.closeTab(owner, tab, false);
+        this.closeTab(owner, tab);
         throw error;
       }
       return {
@@ -5332,13 +2675,6 @@ export class BrowserHost extends EventEmitter {
           code: 'control_mode_blocked',
         });
       }
-      if (args[0] === 'close-user') {
-        await this.lazyJoinHumanRecording(
-          owner,
-          tab,
-          remainingCommandTimeoutMs(commandDeadlineAt),
-        );
-      }
       this.closeTab(owner, tab);
       return {};
     }
@@ -5349,33 +2685,9 @@ export class BrowserHost extends EventEmitter {
           code: 'control_mode_blocked',
         });
       }
-      const changed = owner.activeTabId !== tab.tabId;
-      if (changed && tab.mode === 'human') {
-        await this.lazyJoinHumanRecording(
-          owner,
-          tab,
-          remainingCommandTimeoutMs(commandDeadlineAt),
-        );
-      }
       if (downloadDir) this.setTabDownloadDir(tab, downloadDir);
       tab.downloadMaxBytes = downloadMaxBytes;
-      if (!owner.atomicTransactions.has(tab.sessionHash)) {
-        owner.atomicReplayEpochs.delete(tab.sessionHash);
-      }
       owner.activeTabId = tab.tabId;
-      if (
-        changed
-        && tab.mode === 'human'
-        && tab.recording?.ledger.schemaVersion === 11
-        && tab.recording.accepting
-        && !tab.recording.paused
-      ) {
-        this.appendV11HostAction(
-          tab,
-          tab.recording,
-          { name: 'x-crew-activatePage' },
-        );
-      }
       return {};
     }
     throw new BrowserHostError('tab 命令无效', { code: 'invalid_tab_command' });
@@ -5451,7 +2763,6 @@ export class BrowserHost extends EventEmitter {
       view,
       mode: initialMode,
       refs: new Map(),
-      locateCounter: 0,
       dialog: null,
       dialogForwarding: initialMode === 'ai',
       modalRaceDepth: 0,
@@ -5465,7 +2776,6 @@ export class BrowserHost extends EventEmitter {
         : DEFAULT_MAX_TRANSFER_BYTES,
       mouseX: DEFAULT_VIEWPORT.width / 2,
       mouseY: DEFAULT_VIEWPORT.height / 2,
-      nativeInputProofs: [],
       takeoverRequestAt: 0,
       automationDepth: 0,
       debuggerReady: null,
@@ -5476,7 +2786,6 @@ export class BrowserHost extends EventEmitter {
       guardLoaderId: '',
       guardStateKey: '',
       guardStateToken: '',
-      recording: null,
       navigationEpoch: 0,
       navigationPending: false,
       visualEpoch: null,
@@ -5545,16 +2854,7 @@ export class BrowserHost extends EventEmitter {
   // 单向门。现在：拦截保留（租约外输入仍会和在途自动化抢页面），推断取消，滚轮放行。
   private attachTabEvents(owner: BrowserOwner, tab: BrowserTab): void {
     const contents = tab.view.webContents;
-    contents.on('before-input-event', (event, input) => {
-      const native = input as unknown as Record<string, unknown>;
-      if (
-        tab.mode === 'human'
-        && tab.automationDepth === 0
-        && String(native.type || '') === 'keyDown'
-      ) {
-        const key = String(native.key || '');
-        this.recordNativeInputProof(tab, 'keyboard', ['key', 'input', 'submit'], key);
-      }
+    contents.on('before-input-event', (event, _input) => {
       // AI 模式下仍然拦截按键：租约外的原生输入会和自动化抢同一个页面。
       // 但**不再**据此推断接管——控制权只由显式动作改变。
       if (tab.mode !== 'human' && tab.automationDepth === 0) {
@@ -5570,17 +2870,6 @@ export class BrowserHost extends EventEmitter {
     };
     contentsWithMouseEvents.on('before-mouse-event', (event: Electron.Event, input: { type?: string }) => {
       const type = String(input.type || '');
-      if (tab.mode === 'human' && tab.automationDepth === 0) {
-        if (type === 'mouseDown') {
-          this.recordNativeInputProof(
-            tab,
-            'pointer',
-            ['click', 'dblclick', 'drag', 'drop', 'input', 'upload', 'submit'],
-          );
-        } else if (type === 'mouseWheel') {
-          this.recordNativeInputProof(tab, 'scroll', ['scroll', 'wheel']);
-        }
-      }
       if (tab.mode !== 'human' && tab.automationDepth === 0) {
         // 滚轮是**阅读**手势：用户滚动只是想看 AI 在做什么。既不拦截也不影响控制权，
         // 否则「想看一眼」都做不到。点击/按键仍拦截，避免和在途自动化抢页面。
@@ -5614,14 +2903,11 @@ export class BrowserHost extends EventEmitter {
       // synchronous handler closure because Electron's later createWindow
       // callback receives only BrowserWindow options, not the disposition.
       const opensInBackground = details.disposition === 'background-tab';
-      const createdByCausalId = tab.recording
-        ? this.activeRecorderCausal(tab.recording, tab, '')?.causalId ?? 0
-        : 0;
       return {
         action: 'allow',
         // Crew models every opened browsing context as a browser tab. Closing
         // an opener must therefore not let Electron tear down an independent
-        // OAuth/result/child tab before Playwright or replay can bind it.
+        // OAuth/result/child tab before Playwright can bind it.
         outlivesOpener: true,
         // Electron applies these preferences to an ordinary window.open's
         // provisional WebContents. Background-tab gestures may instead ask
@@ -5663,13 +2949,6 @@ export class BrowserHost extends EventEmitter {
             options.webPreferences,
             popupContents,
           );
-          this.observeAtomicPopup(
-            owner,
-            tab,
-            popup,
-            details.disposition || 'default',
-            !opensInBackground,
-          );
           if (!popupContents) {
             // Chromium does not navigate a WebContents constructed for
             // `background-tab` after createWindow returns (Electron 43 real
@@ -5685,64 +2964,6 @@ export class BrowserHost extends EventEmitter {
                   error: error instanceof Error
                     ? error.message
                     : 'background popup navigation failed',
-                });
-              });
-            });
-          }
-          const inheritedLedger = tab.recording?.ledger;
-          if (inheritedLedger && !inheritedLedger.closing) {
-            // A popup is part of the same human demonstration, not a second
-            // recording. Its CDP bindings/controllers remain per-WebContents,
-            // while ordering, step numbers and stop semantics share one ledger.
-            const popupRecording = this.attachRecordingState(
-              popup,
-              inheritedLedger.recordingId,
-              inheritedLedger,
-              createdByCausalId,
-            );
-            // Persist the page-open anchor before createWindow returns. The
-            // popup may synchronously navigate, document.write(), show a
-            // dialog, or even close before the next native turn.
-            if (popupRecording && !popupRecording.initialPageRecorded) {
-              popupRecording.initialPageRecorded = true;
-              if (popupRecording.ledger.schemaVersion === 11 && tab.recording) {
-                const transaction = this.appendV11Signal(
-                  tab,
-                  tab.recording,
-                  { name: 'popup', popupPageGuid: popupRecording.pageId },
-                  {
-                    openerPageGuid: tab.recording.pageId,
-                    popupIndex: popupRecording.popupOrdinal,
-                    disposition: details.disposition || 'default',
-                    activate: !opensInBackground,
-                  },
-                  {
-                    causalId: popupRecording.createdByCausalId,
-                    timestamp: Date.now(),
-                  },
-                );
-                popupRecording.createdByTransaction = transaction;
-              } else {
-                this.recordNavigation(owner, popup);
-              }
-            }
-            setImmediate(() => {
-              void this.startRecording(
-                owner,
-                popup,
-                inheritedLedger.recordingId,
-                inheritedLedger,
-                createdByCausalId,
-              ).catch((error: unknown) => {
-                inheritedLedger.incomplete = true;
-                inheritedLedger.dropped += 1;
-                this.emit('browser-error', {
-                  runtimeKey: owner.runtimeKey,
-                  targetId: popup.targetId,
-                  code: 'recorder_popup_partial',
-                  error: error instanceof Error
-                    ? error.message
-                    : 'popup recorder installation failed',
                 });
               });
             });
@@ -5830,9 +3051,6 @@ export class BrowserHost extends EventEmitter {
         tab.navigationEpoch += 1;
         tab.navigationPending = true;
       }
-      if (isMainFrame === true) {
-        this.freezeRecorderNavigationCausal(tab);
-      }
       if (isMainFrame === true && isSameDocument === false) {
         // backendNodeId is document-scoped. Across a form navigation retain
         // only a short-lived, value-free semantic proof for the exact
@@ -5848,19 +3066,10 @@ export class BrowserHost extends EventEmitter {
         this.clearDocumentState(tab, continuation);
       }
     });
-    contents.on('did-navigate', (_event, committedUrl) => {
+    contents.on('did-navigate', () => {
       tab.navigationEpoch += 1;
       tab.navigationPending = false;
       this.emit('tab-updated', this.publicTabEvent(owner, tab));
-      this.observeAtomicNavigation(owner, tab);
-      this.recordNavigation(
-        owner,
-        tab,
-        this.takeRecorderNavigationCausal(tab),
-        false,
-        undefined,
-        typeof committedUrl === 'string' && committedUrl ? committedUrl : undefined,
-      );
     });
     contents.on('did-navigate-in-page', (details, _legacyUrl, legacyIsMainFrame) => {
       const isMainFrame = navigationFlag(details, 'isMainFrame', legacyIsMainFrame);
@@ -5868,26 +3077,6 @@ export class BrowserHost extends EventEmitter {
         tab.navigationEpoch += 1;
         tab.navigationPending = false;
         this.emit('tab-updated', this.publicTabEvent(owner, tab));
-        this.observeAtomicNavigation(owner, tab);
-        // hash 路由（Vue/React）走的正是这条：整条路由在 fragment 里，
-        // 不记就等于 SPA 上的每一次页面切换都没录。
-        const committedUrl = (
-          details
-          && typeof details === 'object'
-          && typeof (details as unknown as Record<string, unknown>).url === 'string'
-        )
-          ? String((details as unknown as Record<string, unknown>).url)
-          : typeof _legacyUrl === 'string'
-            ? _legacyUrl
-            : undefined;
-        this.recordNavigation(
-          owner,
-          tab,
-          this.takeRecorderNavigationCausal(tab),
-          false,
-          undefined,
-          committedUrl || undefined,
-        );
       }
     });
     contents.on('did-fail-load', (
@@ -5920,7 +3109,6 @@ export class BrowserHost extends EventEmitter {
     contents.on('did-stop-loading', () => {
       tab.navigationEpoch += 1;
       tab.navigationPending = false;
-      if (tab.recording) tab.recording.pendingNavigationCausal = null;
     });
     contents.on('login', (event, _details, authInfo, callback) => {
       // Supply configured proxy credentials when applicable. For ordinary
@@ -5931,7 +3119,6 @@ export class BrowserHost extends EventEmitter {
     contents.on('render-process-gone', (_event, details) => {
       tab.navigationEpoch += 1;
       tab.navigationPending = false;
-      if (tab.recording) tab.recording.pendingNavigationCausal = null;
       tab.crashed = true;
       tab.debuggerReady = null;
       this.recoverPanelAfterTabFailure(owner, tab);
@@ -5943,13 +3130,10 @@ export class BrowserHost extends EventEmitter {
     contents.once('destroyed', () => {
       tab.navigationEpoch += 1;
       tab.navigationPending = false;
-      if (tab.recording) tab.recording.pendingNavigationCausal = null;
       this.recoverPanelAfterTabFailure(owner, tab);
       // Renderer-initiated close (window.close/OAuth popup) bypasses closeTab().
       // unregisterTab is idempotent, so the normal close path may safely reach
       // this handler after already unregistering.
-      this.observeAtomicPageClosed(owner, tab, 'window.close');
-      this.recordPageClosed(owner, tab, 'window.close', false);
       owner.engine.unregisterTab(tab.view);
       this.forgetTab(owner, tab);
     });
@@ -5998,49 +3182,6 @@ export class BrowserHost extends EventEmitter {
     });
   }
 
-
-  private recordNativeInputProof(
-    tab: BrowserTab,
-    kind: NativeProofKind,
-    allowed: NativeProofEvent[],
-    key = '',
-  ): void {
-    const now = Date.now();
-    // 连续打字会产生几十个 keyDown。只保留每种来源的最新一次，避免积攒出一批
-    // 可被页面脚本事后消费的“授权券”。
-    tab.nativeInputProofs = tab.nativeInputProofs.filter(
-      (proof) => proof.kind !== kind && proof.expiresAt >= now,
-    );
-    tab.nativeInputProofs.push({
-      kind,
-      expiresAt: now + NATIVE_INPUT_PROOF_TTL_MS,
-      remaining: new Set(allowed),
-      key,
-    });
-  }
-
-  private consumeNativeInputProof(tab: BrowserTab, event: RecorderEvent): boolean {
-    if (event.type === 'navigate') return true;
-    const now = Date.now();
-    tab.nativeInputProofs = tab.nativeInputProofs.filter((proof) => proof.expiresAt >= now);
-    for (let index = tab.nativeInputProofs.length - 1; index >= 0; index -= 1) {
-      const proof = tab.nativeInputProofs[index];
-      if (!proof?.remaining.has(event.type)) continue;
-      if (
-        event.type === 'key'
-        && proof.kind === 'keyboard'
-        && proof.key
-        && !event.key.endsWith(proof.key)
-      ) {
-        continue;
-      }
-      proof.remaining.delete(event.type);
-      if (proof.remaining.size === 0) tab.nativeInputProofs.splice(index, 1);
-      return true;
-    }
-    return false;
-  }
-
   private publicTabEvent(owner: BrowserOwner, tab: BrowserTab): Record<string, unknown> {
     return {
       runtimeKey: owner.runtimeKey,
@@ -6055,13 +3196,7 @@ export class BrowserHost extends EventEmitter {
     };
   }
 
-  /**
-   * Keep recorder installation aligned with Chromium's real flattened target
-   * graph. The transport does not expose `Target.attachedToTarget` to
-   * Playwright until this method settles, so an OOPIF cannot run past
-   * `Runtime.runIfWaitingForDebugger` before its document-world binding/script
-   * exist.
-   */
+  /** Keep the Host's child-session topology aligned with the Playwright page. */
   private async handleChildSessionLifecycle(
     owner: BrowserOwner,
     context: ChildSessionLifecycleContext,
@@ -6073,157 +3208,11 @@ export class BrowserHost extends EventEmitter {
     if (context.phase === 'detached') {
       tab.childSessions.delete(context.sessionId);
       tab.childSessionParents.delete(context.sessionId);
-      const state = tab.recording;
-      if (state) {
-        const recorderSession = state.sessions.get(context.sessionId);
-        if (recorderSession) {
-          recorderSession.cancelled = true;
-          recorderSession.installed = false;
-        }
-        state.sessions.delete(context.sessionId);
-        this.clearRecorderContextsForSession(state, context.sessionId);
-      }
       return;
     }
 
     tab.childSessions.set(context.sessionId, { ...context.targetInfo });
     tab.childSessionParents.set(context.sessionId, context.parentSessionId);
-    if (String(context.targetInfo.type ?? '') !== 'iframe') return;
-    const state = tab.recording;
-    if (!state || !state.accepting) return;
-    try {
-      await this.installRecorderSession(tab, state, context.sessionId, context.signal);
-    } catch (error) {
-      // An OOPIF may disappear while its debugger session is being installed.
-      // That frame is a partial-capability hole, but stopping the whole recording
-      // loses the main document and every healthy frame. Surface the degradation
-      // explicitly and keep recording everywhere that remains instrumented.
-      if (tab.recording === state) {
-        this.markRecordingStateIncomplete(state);
-        this.emit('browser-error', {
-          runtimeKey: owner.runtimeKey,
-          targetId: tab.targetId,
-          code: 'recorder_child_session_failed',
-          childSessionId: context.sessionId,
-          childTargetId: normalizedText(context.targetInfo.targetId, 256),
-          error: error instanceof Error
-            ? error.message
-            : 'OOPIF recorder installation failed',
-        });
-      }
-    }
-  }
-
-  private clearRecorderContextsForSession(
-    state: RecordingState,
-    sessionId: string,
-  ): void {
-    const prefix = `${sessionId}\u0000`;
-    for (const key of state.contexts) {
-      if (key.startsWith(prefix)) state.contexts.delete(key);
-    }
-    for (const key of state.contextFrames.keys()) {
-      if (key.startsWith(prefix)) state.contextFrames.delete(key);
-    }
-  }
-
-  private clearRecorderCausals(
-    state: RecordingState,
-    tab: BrowserTab,
-    childSessionId?: string,
-    executionContextId?: number,
-  ): void {
-    const base = `${tab.targetId}\u0000${childSessionId ?? ''}\u0000`;
-    const exact = executionContextId === undefined
-      ? ''
-      : `${base}${executionContextId}`;
-    for (const key of state.ledger.activeCausals.keys()) {
-      if (exact ? key === exact : key.startsWith(base)) {
-        state.ledger.activeCausals.delete(key);
-      }
-    }
-    const tokenBase = `${childSessionId ?? ''}\u0000`;
-    const tokenExact = executionContextId === undefined
-      ? ''
-      : `${tokenBase}${executionContextId}\u0000`;
-    for (const key of state.causalTokens.keys()) {
-      if (tokenExact ? key.startsWith(tokenExact) : key.startsWith(tokenBase)) {
-        state.causalTokens.delete(key);
-      }
-    }
-  }
-
-  private recorderContextKey(sessionId: string, executionContextId: number): string {
-    return `${sessionId}\u0000${executionContextId}`;
-  }
-
-  private activeRecorderCausal(
-    state: RecordingState,
-    tab: BrowserTab,
-    childSessionId: string,
-  ): { causalId: number; capturedAt: number } | undefined {
-    const tabPrefix = `${tab.targetId}\u0000`;
-    const sessionPrefix = `${tabPrefix}${childSessionId}\u0000`;
-    const actionable = (
-      entries: Array<[string, {
-        causalId: number;
-        capturedAt: number;
-        eventType: RecorderEventType;
-      }]>,
-    ) => entries.filter(([, entry]) => entry.eventType !== 'submit');
-    const sameSession = actionable(
-      [...state.ledger.activeCausals.entries()]
-        .filter(([key]) => key.startsWith(sessionPrefix)),
-    );
-    if (sameSession.length === 1) return sameSession[0][1];
-    if (sameSession.length > 1) return undefined;
-
-    // Page.javascriptDialogOpening is normally emitted on the top-level page
-    // session even when an OOPIF action opened it. Permit that one exact active
-    // task only; concurrent tasks in multiple frames are deliberately left
-    // standalone instead of guessing by timestamp.
-    const sameTab = actionable(
-      [...state.ledger.activeCausals.entries()]
-        .filter(([key]) => key.startsWith(tabPrefix)),
-    );
-    if (sameTab.length === 1) return sameTab[0][1];
-    if (sameTab.length > 1 || state.createdByCausalId <= 0) return undefined;
-    // A freshly-created popup has no local execution context yet. While the
-    // opener's exact task remains active, route bootstrap navigation/dialog
-    // events to that frozen causal id. Once causal-end removes the opener task,
-    // later timers on the popup remain standalone instead of being guessed.
-    const inherited = actionable(
-      [...state.ledger.activeCausals.entries()]
-        .filter(([, entry]) => entry.causalId === state.createdByCausalId),
-    );
-    return inherited.length === 1 ? inherited[0][1] : undefined;
-  }
-
-  /**
-   * Freeze the current task identity at navigation start, while the originating
-   * document and its recorder execution context still exist.
-   *
-   * A zero identity is intentional: it prevents an unrelated action that starts
-   * while the destination is committing from being attached retroactively.
-   */
-  private freezeRecorderNavigationCausal(tab: BrowserTab): void {
-    const state = tab.recording;
-    if (!state || state.paused || !state.accepting) return;
-    const active = this.activeRecorderCausal(state, tab, '');
-    state.pendingNavigationCausal = {
-      causalId: active?.causalId ?? 0,
-      capturedAt: Date.now(),
-    };
-  }
-
-  private takeRecorderNavigationCausal(
-    tab: BrowserTab,
-  ): { causalId: number; capturedAt: number } | undefined {
-    const state = tab.recording;
-    if (!state) return undefined;
-    const causal = state.pendingNavigationCausal ?? undefined;
-    state.pendingNavigationCausal = null;
-    return causal;
   }
 
   private handleDebuggerEvent(
@@ -6238,22 +3227,13 @@ export class BrowserHost extends EventEmitter {
         ? (paramsValue as Record<string, unknown>)
         : {};
     if (method === 'Page.javascriptDialogOpening') {
-      const activeCausal = tab.recording
-        ? this.activeRecorderCausal(tab.recording, tab, childSessionId)
-        : undefined;
       tab.dialog = {
         type: normalizedText(params.type),
         message: normalizedText(params.message),
         defaultValue: normalizedText(params.defaultPrompt),
         owner: tab.dialogForwarding ? 'playwright' : 'native',
-        causalId: activeCausal?.causalId ?? 0,
       };
       this.notifySessionModal(owner, tab, 'dialog');
-      const expectedRun = owner.expectedDialogRuns.get(tab.sessionHash);
-      if (expectedRun) {
-        void this.handleExpectedDialogOpening(owner, tab, expectedRun, tab.dialog.type);
-        return;
-      }
       this.emit('dialog', {
         ...this.publicTabEvent(owner, tab),
         dialog: {
@@ -6262,26 +3242,6 @@ export class BrowserHost extends EventEmitter {
           defaultValue: tab.dialog.defaultValue,
         },
       });
-      return;
-    }
-    if (method === 'Runtime.executionContextCreated') {
-      const state = tab.recording;
-      if (!state) return;
-      const context = asOptionalRecord(params.context);
-      const auxData = asOptionalRecord(context.auxData);
-      const executionContextId = Number(context.id);
-      const frameId = normalizedText(auxData.frameId, 256);
-      if (
-        Number.isSafeInteger(executionContextId)
-        && executionContextId > 0
-        && frameId
-        && auxData.isDefault !== false
-      ) {
-        state.contextFrames.set(
-          this.recorderContextKey(childSessionId, executionContextId),
-          frameId,
-        );
-      }
       return;
     }
     if (method === 'Runtime.executionContextsCleared') {
@@ -6294,10 +3254,6 @@ export class BrowserHost extends EventEmitter {
         tab.guardStateKey = '';
         tab.guardStateToken = '';
       }
-      if (tab.recording) {
-        this.clearRecorderContextsForSession(tab.recording, childSessionId);
-        this.clearRecorderCausals(tab.recording, tab, childSessionId);
-      }
       return;
     }
     if (method === 'Runtime.executionContextDestroyed') {
@@ -6309,194 +3265,9 @@ export class BrowserHost extends EventEmitter {
         tab.guardStateKey = '';
         tab.guardStateToken = '';
       }
-      if (tab.recording && Number.isSafeInteger(executionContextId)) {
-        const contextKey = this.recorderContextKey(childSessionId, executionContextId);
-        tab.recording.contexts.delete(contextKey);
-        tab.recording.contextFrames.delete(contextKey);
-        this.clearRecorderCausals(
-          tab.recording,
-          tab,
-          childSessionId,
-          executionContextId,
-        );
-      }
-      return;
-    }
-    if (method === 'Runtime.bindingCalled') {
-      if (!tab.recording) return;
-      const recordingState = tab.recording;
-      // Electron OOPIF 的稳定路径只能使用 document world。绑定名因此不是信任边界；
-      // 每段录制使用不可预测名称，并继续严格校验 session/schema/bounds/isTrusted。
-      if (normalizedText(params.name, 120) !== recordingState.bindingName) return;
-      const contextId = Number(params.executionContextId);
-      if (!Number.isSafeInteger(contextId) || contextId <= 0) return;
-      const recorderSession = recordingState.sessions.get(childSessionId);
-      if (!recorderSession?.installed) return;
-      // **接受当前已安装 session 的所有 frame 上下文，不只第一个。**
-      //
-      // 注入脚本会进入每一个 frame，主页面与每个 iframe 各有一份 document 上下文。
-      // 早先只认第一个上报的，于是主页面和 iframe 必然有一方被整个丢掉——工单
-      // 详情页的附件清单就在 iframe 里，用户在那里的操作一条都录不到；
-      // 更糟的情况是 iframe 先上报，主页面的所有操作反而全没了。
-      //
-      // Electron 的 OOPIF 路径不能可靠创建自定义隔离世界。严格 schema/bounds 和
-      // Event.isTrusted 是持久化基线；原生输入关联是非阻断审计信号。
-      recordingState.contexts.add(this.recorderContextKey(childSessionId, contextId));
-      const rawPayload = String(params.payload ?? '');
-      const causalKey = `${tab.targetId}\u0000${this.recorderContextKey(
-        childSessionId,
-        contextId,
-      )}`;
-      const control = parseRecorderControlEvent(rawPayload);
-      if (control) {
-        if (control.type === 'causal-begin') {
-          const tokenKey = `${this.recorderContextKey(
-            childSessionId,
-            contextId,
-          )}\u0000${control.token}`;
-          let token = recordingState.causalTokens.get(tokenKey);
-          if (!token) {
-            token = {
-              causalId: ++recordingState.ledger.causalCounter,
-              capturedAt: Date.now(),
-            };
-            recordingState.causalTokens.set(tokenKey, token);
-          }
-          recordingState.ledger.activeCausals.set(causalKey, {
-            seq: control.seq,
-            causalId: token.causalId,
-            capturedAt: token.capturedAt,
-            eventType: 'input',
-            scope: 'input',
-          });
-          return;
-        }
-        const active = recordingState.ledger.activeCausals.get(causalKey);
-        const controlScope = control.token > 0 ? 'input' : 'event';
-        if (active?.seq === control.seq && active.scope === controlScope) {
-          recordingState.ledger.activeCausals.delete(causalKey);
-        }
-        return;
-      }
-      const event = parseRecorderEvent(rawPayload);
-      if (!event) {
-        // This is the recorder's own random binding on a session whose bootstrap
-        // completed. An undecodable packet means Host and injected recorder lost
-        // their schema contract; silently skipping it would produce a trace that
-        // looks complete but is missing an observed browser event.
-        this.markRecordingStateIncomplete(recordingState);
-        return;
-      }
-      // Selector normalization, file resolution and earlier ledger entries can take
-      // seconds. Causal navigation matching must use when the browser event arrived,
-      // not when this event eventually reaches recordStep.
-      event.capturedAt = Date.now();
-      const causalToken = event.causalToken ?? 0;
-      const tokenKey = causalToken > 0
-        ? `${this.recorderContextKey(
-          childSessionId,
-          contextId,
-        )}\u0000${causalToken}`
-        : '';
-      const token = tokenKey
-        ? recordingState.causalTokens.get(tokenKey)
-        : undefined;
-      if (tokenKey) recordingState.causalTokens.delete(tokenKey);
-      if (causalToken > 0 && !token) {
-        // Preserve the action, but never certify a trace whose modal/action
-        // association was lost through a protocol or lifecycle mismatch.
-        this.markRecordingStateIncomplete(recordingState);
-      }
-      event.causalId = token?.causalId ?? ++recordingState.ledger.causalCounter;
-      if (recordingState.ledger.schemaVersion === 11) {
-        this.reserveV11Action(recordingState, event);
-      }
-      recordingState.ledger.activeCausals.set(causalKey, {
-        seq: event.seq,
-        causalId: event.causalId,
-        capturedAt: event.capturedAt,
-        eventType: event.type,
-        scope: 'event',
-      });
-      const ordinarilyAccepting = recordingState.accepting && !recordingState.paused;
-      if (!ordinarilyAccepting && !(recordingState.drainingFlush && event.lifecycleFlush)) {
-        return;
-      }
-      // 原生输入关联只做审计统计，不再作为持久化门槛。IME、粘贴、浏览器自动填充、
-      // 辅助技术与系统级文本服务不一定产生一一对应的 before-input-event；把证明当
-      // 硬门会系统性丢掉真实表单填写，录制结果无法通用复现。
-      const nativeCorrelated = this.consumeNativeInputProof(tab, event);
-      if (!nativeCorrelated) {
-        recordingState.ledger.forged += 1;
-      }
-      event.schemaVersion = RECORDER_EVENT_SCHEMA_VERSION;
-      event.provenance = {
-        ...(event.provenance ?? {
-          schemaVersion: RECORDER_PROVENANCE_SCHEMA_VERSION,
-          source: 'document-world',
-          capturePhase: 'event-callback',
-          browserTrusted: true,
-          targetEvidence: event.target ? 'synchronous' : 'none',
-        }),
-        nativeInput: nativeCorrelated ? 'correlated' : 'unverified',
-      };
-      const clickIdentity = JSON.stringify([
-        childSessionId,
-        event.target?.framePath ?? [],
-        event.target?.cssPath ?? '',
-        event.target?.id ?? '',
-        event.clickButton ?? '',
-        event.modifiers ?? [],
-      ]);
-      if (event.type === 'click') {
-        const previous = recordingState.pendingClicks.get(clickIdentity);
-        if ((event.clickCount ?? 1) > 1 && previous) {
-          recordingState.supersededClicks.add(previous);
-        }
-        recordingState.pendingClicks.set(clickIdentity, event);
-      } else if (event.type === 'dblclick') {
-        const previous = recordingState.pendingClicks.get(clickIdentity);
-        if (previous) recordingState.supersededClicks.add(previous);
-        recordingState.pendingClicks.delete(clickIdentity);
-      }
-      // Start the dblclick grace period at event arrival, not after every
-      // previous queued recordStep. Timers run concurrently while the ledger
-      // still commits events in arrival order, so 100 clicks cost ~275 ms
-      // rather than serially stalling stop/pause for ~27.5 seconds.
-      const clickReady = event.type === 'click'
-        ? new Promise<void>((resolve) => setTimeout(resolve, 500))
-        : Promise.resolve();
-      // 串行处理：recordStep 里有 await（取 backendNodeId、打快照），并发跑
-      // 会让步骤按完成顺序而非发生顺序落盘。把它们排成一条链，并把链尾存下来，
-      // 停止录制时 await 它——否则最后几个动作会在 stop 之后才处理完，而那时
-      // tab.recording 已经是 null，整段被丢掉。
-      const chain = recordingState.ledger.queue.then(async () => {
-        if (event.type === 'click') {
-          await clickReady;
-          if (recordingState.supersededClicks.has(event)) return;
-          if (recordingState.pendingClicks.get(clickIdentity) === event) {
-            recordingState.pendingClicks.delete(clickIdentity);
-          }
-        }
-        await this.recordStep(owner, tab, recordingState, event, {
-          sessionId: childSessionId,
-          executionContextId: contextId,
-        });
-      }).catch(() => {
-        // Never break the browser interaction or the remainder of the queue,
-        // but never call a trace complete after silently losing one action.
-        this.markRecordingStateIncomplete(recordingState);
-      });
-      recordingState.ledger.queue = chain;
       return;
     }
     if (method === 'Page.javascriptDialogClosed') {
-      const closedDialog = tab.dialog;
-      if (closedDialog) {
-        this.recordDialogDecision(owner, tab, closedDialog, params);
-        this.observeAtomicDialogClosed(owner, tab, closedDialog, params);
-      }
-      this.handleExpectedDialogClosed(owner, tab, params);
       tab.dialog = null;
       return;
     }
@@ -6607,7 +3378,7 @@ export class BrowserHost extends EventEmitter {
           // here, before ElectronCdpTransport has published that session, makes
           // Chromium emit executionContextCreated only to this out-of-band
           // listener. A later idempotent Runtime.enable from Playwright then
-          // receives no main-world replay, so locator utility worlds keep
+          // receives no main-world event, so locator utility worlds keep
           // working while page.evaluate waits forever after a modal dialog.
           // Runtime.evaluate itself does not require Runtime.enable.
           enableDomain('Overlay.enable'),
@@ -6667,7 +3438,6 @@ export class BrowserHost extends EventEmitter {
     tab: BrowserTab,
     value: unknown,
     commandDeadlineAt: number,
-    recordExplicitOperation = false,
   ): Promise<Record<string, unknown>> {
     const url = safeUrl(value);
     // Trusted address-bar/tool navigation may leave an artifact preview. Page
@@ -6694,21 +3464,15 @@ export class BrowserHost extends EventEmitter {
       resolveDownload();
     };
     ctx.page.on('download', downloadListener);
-    let recordedNavigation: PendingRecordedNavigation | null = null;
     try {
       try {
-        if (recordExplicitOperation) {
-          recordedNavigation = this.beginRecordedNavigation(tab, 'goto', url);
-        }
         await ctx.page.goto(url, {
           waitUntil: 'domcontentloaded',
           timeout: remainingCommandTimeoutMs(commandDeadlineAt),
         });
-        await this.completeRecordedNavigation(tab, recordedNavigation, ctx.page.url());
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (/Download is starting/i.test(message)) {
-          this.cancelRecordedNavigation(tab, recordedNavigation);
           if (!downloadSeen) {
             const waitMs = Math.min(
               3_000,
@@ -6763,7 +3527,6 @@ export class BrowserHost extends EventEmitter {
             download_started: true,
           };
         }
-        this.cancelRecordedNavigation(tab, recordedNavigation);
         if (/Timeout [0-9]+ms exceeded/i.test(message)) {
           contents.stop();
           throw new BrowserHostError('页面导航超过命令截止时间', {
@@ -6785,7 +3548,6 @@ export class BrowserHost extends EventEmitter {
       }
       return { url: ctx.page.url() };
     } catch (error) {
-      this.cancelRecordedNavigation(tab, recordedNavigation);
       if (error instanceof BrowserHostError) throw error;
       throw new BrowserHostError(
         `页面导航失败：${error instanceof Error ? error.message : 'unknown'}`,
@@ -7138,7 +3900,7 @@ export class BrowserHost extends EventEmitter {
    * `Accessibility.getFullAXTree` 拍平成行 + `backendNodeId` 登记 + 全量 DOM 索引
    * 查属性的做法整体退役。
    *
-   * `register` 为 false 时（录制期观察）不动 tab.refs —— 录制不能冲掉 AI 正在用的 ref 表。
+   * `register` 为 false 时不动 tab.refs，供只读的内部观察避免冲掉 AI 正在用的 ref 表。
    */
   private async snapshot(
     tab: BrowserTab,
@@ -7186,40 +3948,6 @@ export class BrowserHost extends EventEmitter {
       ...(Object.keys(snap.refActions).length
         ? { ref_actions: snap.refActions }
         : {}),
-    };
-  }
-
-  /**
-   * 把技能里存盘的稳定选择器解析成当前页面上的一个 ref。
-   *
-   * 登记出来的 ref 用 `@sN` 前缀与快照 ref（`@eN`）区分，但走的是同一张 ref 表，
-   * 因此后续 click/fill 直接复用同一套 Playwright Locator 动作与错误映射。
-   *
-   * 与快照 ref 一样，它在下一次 snapshot 时随整张表被替换。
-   */
-  private async locateBySelector(
-    tab: BrowserTab,
-    selector: string,
-    timeoutMs = ACTION_TIMEOUT_MS,
-  ): Promise<Record<string, unknown>> {
-    const value = asString(selector, 'selector', 4096);
-    if (!value) throw new BrowserHostError('选择器不能为空', { code: 'invalid_selector' });
-    const ctx = await this.actionContext(tab, timeoutMs);
-    tab.locateCounter += 1;
-    const nativeRef = `@s${tab.locateCounter}`;
-    const record = await pwActions
-      .locateBySelector(ctx, nativeRef, value, ctx.hash)
-      .catch(BrowserHost.rethrowAction);
-    return {
-      ref: nativeRef,
-      role: publicConsoleText(record.role),
-      name: publicConsoleText(record.name),
-      action: record.action,
-      action_kind: record.actionKind,
-      tag: record.tag,
-      input_type: record.inputType,
-      content_editable: record.contentEditable,
-      tier: record.fieldTier,
     };
   }
 
@@ -7420,7 +4148,7 @@ export class BrowserHost extends EventEmitter {
     const waiter = this.armSessionModalWaiter(owner, sessionHash, options.ignoreSignal);
     tab.modalRaceDepth += 1;
     // The waiter is already armed, so dispatch immediately. Besides preserving
-    // native event order this lets lifecycle commands (notably recording stop)
+    // native event order this lets lifecycle commands
     // flip their synchronous acceptance gates before the caller can enqueue a
     // tail event in the next microtask.
     let operationPromise: Promise<T>;
@@ -7490,13 +4218,11 @@ export class BrowserHost extends EventEmitter {
       timeoutMs: remainingTimeoutMs,
       deadlineAt,
       // Host owns the complete command race (including non-Locator mutations,
-      // popup modals and completion settling). Expected transactions own their
-      // own sequence. The action-level race remains available to direct users
-      // of playwright-actions and its parity contracts.
+      // popup modals and completion settling). The action-level race remains
+      // available to direct users of playwright-actions and its parity contracts.
       raceDialogs: (
         tab.modalRaceDepth === 0
         && !owner.modalWaiters.has(tab.sessionHash)
-        && !owner.expectedDialogRuns.has(tab.sessionHash)
       ),
       onModalActionPending: (pending) => {
         this.retainPendingModalAction(owner, tab, pending);
@@ -7549,7 +4275,7 @@ export class BrowserHost extends EventEmitter {
   }
 
   /**
-   * Replay one recorded upload without a click/file_upload RPC gap.
+   * Complete a triggered file upload without a click/file_upload RPC gap.
    *
    * A pending chooser is only a one-slot temporal mirror in PlaywrightEngine;
    * consuming it after a separate click can accidentally apply files to an old
@@ -7571,7 +4297,7 @@ export class BrowserHost extends EventEmitter {
     const directUpload = async (): Promise<Record<string, unknown>> => {
       const ref = `@upload-input-${randomUUID()}`;
       try {
-        await pwActions.locateBySelector(
+        await pwActions.resolveUniqueSelector(
           ctx,
           ref,
           payload.inputSelector,
@@ -7622,7 +4348,7 @@ export class BrowserHost extends EventEmitter {
 
       const triggerRef = `@upload-trigger-${randomUUID()}`;
       try {
-        await pwActions.locateBySelector(
+        await pwActions.resolveUniqueSelector(
           ctx,
           triggerRef,
           payload.triggerSelector,
@@ -8280,297 +5006,6 @@ export class BrowserHost extends EventEmitter {
     return { text: JSON.stringify(tab.network) };
   }
 
-  private settleExpectedDialogs(
-    owner: BrowserOwner,
-    run: ExpectedDialogRun,
-    error?: BrowserHostError,
-  ): void {
-    if (run.settled) return;
-    run.settled = true;
-    clearTimeout(run.timer);
-    if (error) run.reject(error);
-    else run.resolve();
-    // The transaction remains installed until its triggering action settles,
-    // so an additional chained dialog cannot escape through a short clear gap.
-    if (owner.expectedDialogRuns.get(run.sessionHash) !== run) {
-      clearTimeout(run.timer);
-    }
-  }
-
-  private maybeCompleteExpectedDialogs(owner: BrowserOwner, run: ExpectedDialogRun): void {
-    if (
-      !run.settled
-      && run.actionFinished
-      && run.opened === run.dialogs.length
-      && run.index === run.dialogs.length
-    ) {
-      this.settleExpectedDialogs(owner, run);
-    }
-  }
-
-  private completeExpectedDialogObservation(
-    owner: BrowserOwner,
-    run: ExpectedDialogRun,
-  ): void {
-    // Independent pages can surface their dialogs in a different scheduler
-    // order while still matching the exact recorded page topology. Count
-    // completed slots instead of forcing unrelated tabs through one FIFO.
-    run.index = run.observations.filter(
-      (observation) => observation.handlerDone && observation.closeDone,
-    ).length;
-    this.maybeCompleteExpectedDialogs(owner, run);
-  }
-
-  private expectedDialogMatches(tab: BrowserTab, expected: ExpectedDialog): boolean {
-    if (expected.targetId) return tab.targetId === expected.targetId;
-    if (expected.openerTargetId && tab.openerTargetId !== expected.openerTargetId) {
-      return false;
-    }
-    if (
-      expected.popupOrdinal !== null
-      && tab.popupOrdinal !== expected.popupOrdinal
-    ) {
-      return false;
-    }
-    return true;
-  }
-
-  private async handleExpectedDialogOpening(
-    owner: BrowserOwner,
-    tab: BrowserTab,
-    run: ExpectedDialogRun,
-    actualType: string,
-  ): Promise<void> {
-    if (owner.expectedDialogRuns.get(run.sessionHash) !== run) return;
-    const assigned = new Set(
-      run.observations.map((observation) => observation.expectedIndex),
-    );
-    const expectedIndex = run.dialogs.findIndex(
-      (expected, index) => !assigned.has(index) && this.expectedDialogMatches(tab, expected),
-    );
-    if (run.settled || expectedIndex < 0) {
-      const error = new BrowserHostError(
-        `动作触发了未录制的额外 JavaScript 对话框（${actualType || 'unknown'}）`,
-        {
-          code: 'replay_dialog_mismatch',
-          partial: true,
-        },
-      );
-      this.settleExpectedDialogs(owner, run, error);
-      // Always release the renderer. Leaving an unexpected modal open would
-      // turn a classified replay failure into an unrelated action timeout.
-      await this.ownerOfTab(tab).engine.handleDialog(tab.view, {
-        accept: false,
-        timeoutMs: run.timeoutMs,
-      })
-        .catch(() => undefined);
-      return;
-    }
-    const expected = run.dialogs[expectedIndex];
-    const observation: ExpectedDialogObservation = {
-      expectedIndex,
-      actualType,
-      targetId: tab.targetId,
-      handlerDone: false,
-      closeDone: false,
-    };
-    // Reserve the slot before the first await. Closing the current modal can
-    // synchronously resume page JavaScript and open the next one before
-    // Dialog.accept()/dismiss() resolves.
-    run.opened += 1;
-    run.observations.push(observation);
-    try {
-      const observed = await this.ownerOfTab(tab).engine.handleDialog(tab.view, {
-        accept: expected.action === 'accept',
-        expectedType: expected.type,
-        ...(expected.type === 'prompt' && expected.action === 'accept'
-          ? { promptText: expected.text }
-          : {}),
-        timeoutMs: run.timeoutMs,
-      });
-      const mismatch = !observed.matched
-        || observation.actualType !== expected.type
-        || observed.type !== expected.type;
-      if (mismatch) {
-        this.settleExpectedDialogs(
-          owner,
-          run,
-          new BrowserHostError(
-            `JavaScript 对话框类型不一致：录制为 ${expected.type}，实际为 ${observed.type || actualType || 'unknown'}`,
-            {
-              code: 'replay_dialog_mismatch',
-              partial: true,
-            },
-          ),
-        );
-        return;
-      }
-      observation.handlerDone = true;
-      this.completeExpectedDialogObservation(owner, run);
-    } catch (error) {
-      this.settleExpectedDialogs(
-        owner,
-        run,
-        new BrowserHostError(
-          `无法处理 JavaScript 对话框：${error instanceof Error ? error.message : 'unknown'}`,
-          {
-            code: 'replay_dialog_failed',
-            uncertain: true,
-            partial: true,
-          },
-        ),
-      );
-    }
-  }
-
-  private handleExpectedDialogClosed(
-    owner: BrowserOwner,
-    tab: BrowserTab,
-    params: Record<string, unknown>,
-  ): void {
-    const run = owner.expectedDialogRuns.get(tab.sessionHash);
-    if (!run || run.settled) return;
-    const observation = run.observations.find((candidate) => (
-      candidate.targetId === tab.targetId && !candidate.closeDone
-    ));
-    if (!observation) {
-      this.settleExpectedDialogs(
-        owner,
-        run,
-        new BrowserHostError('动作关闭了未观察到的 JavaScript 对话框', {
-          code: 'replay_dialog_mismatch',
-          partial: true,
-        }),
-      );
-      return;
-    }
-    const expected = run.dialogs[observation.expectedIndex];
-    const accepted = params.result === true;
-    const userInput = typeof params.userInput === 'string' ? params.userInput : '';
-    if (
-      accepted !== (expected.action === 'accept')
-      || (
-        expected.type === 'prompt'
-        && expected.action === 'accept'
-        && userInput !== expected.text
-      )
-    ) {
-      this.settleExpectedDialogs(
-        owner,
-        run,
-        new BrowserHostError('JavaScript 对话框结果与录制不一致', {
-          code: 'replay_dialog_mismatch',
-          partial: true,
-        }),
-      );
-      return;
-    }
-    observation.closeDone = true;
-    this.completeExpectedDialogObservation(owner, run);
-  }
-
-  private async withExpectedDialogs<T>(
-    tab: BrowserTab,
-    dialogs: ExpectedDialog[],
-    operation: () => Promise<T>,
-    timeoutMs: number,
-  ): Promise<T> {
-    const owner = this.ownerOfTab(tab);
-    if (owner.expectedDialogRuns.has(tab.sessionHash)) {
-      throw new BrowserHostError('该浏览器会话已有进行中的对话框事务', {
-        code: 'replay_dialog_busy',
-      });
-    }
-    let resolveCompletion!: () => void;
-    let rejectCompletion!: (error: BrowserHostError) => void;
-    const completion = new Promise<void>((resolve, reject) => {
-      resolveCompletion = resolve;
-      rejectCompletion = reject;
-    });
-    const run: ExpectedDialogRun = {
-      sessionHash: tab.sessionHash,
-      triggerTargetId: tab.targetId,
-      timeoutMs,
-      dialogs,
-      opened: 0,
-      index: 0,
-      observations: [],
-      actionFinished: false,
-      settled: false,
-      resolve: resolveCompletion,
-      reject: rejectCompletion,
-      timer: setTimeout(() => undefined, 1),
-    };
-    clearTimeout(run.timer);
-    run.timer = setTimeout(() => {
-      this.settleExpectedDialogs(
-        owner,
-        run,
-        new BrowserHostError(
-          `动作未在期限内触发完整的 JavaScript 对话框序列（${run.index}/${dialogs.length}）`,
-          {
-            code: 'replay_dialog_timeout',
-            partial: true,
-          },
-        ),
-      );
-    }, timeoutMs);
-    owner.expectedDialogRuns.set(tab.sessionHash, run);
-
-    // A timer-driven dialog can open after the triggering transaction returned
-    // and before its observation-only wait RPC is armed. The CDP opening event
-    // has already populated tab.dialog, so adopt that pending modal into this
-    // run instead of waiting for an opening event that will never repeat.
-    const pendingDialogs = Promise.all(
-      this.sessionDialogTabs(owner, tab.sessionHash).map((candidate) => (
-        this.handleExpectedDialogOpening(
-          owner,
-          candidate,
-          run,
-          candidate.dialog?.type ?? '',
-        )
-      )),
-    );
-    const action = operation().then(
-      (result) => {
-        run.actionFinished = true;
-        this.maybeCompleteExpectedDialogs(owner, run);
-        return result;
-      },
-      (error) => {
-        run.actionFinished = true;
-        if (!run.settled) {
-          this.settleExpectedDialogs(
-            owner,
-            run,
-            error instanceof BrowserHostError
-              ? error
-              : new BrowserHostError(
-                error instanceof Error ? error.message : '浏览器动作失败',
-                { code: 'command_failed', uncertain: true },
-              ),
-          );
-        }
-        throw error;
-      },
-    );
-    try {
-      const [result] = await Promise.all([action, completion, pendingDialogs]);
-      return result;
-    } catch (error) {
-      // A mismatch handler dismisses the modal immediately, so the action
-      // normally settles at once. Await it to avoid returning while a
-      // Playwright mutation is still live in the background.
-      await action.catch(() => undefined);
-      throw error;
-    } finally {
-      clearTimeout(run.timer);
-      if (owner.expectedDialogRuns.get(tab.sessionHash) === run) {
-        owner.expectedDialogRuns.delete(tab.sessionHash);
-      }
-    }
-  }
-
   private async dialogCommand(
     tab: BrowserTab,
     args: string[],
@@ -8883,2290 +5318,6 @@ export class BrowserHost extends EventEmitter {
     }
   }
 
-  /**
-   * 录制开关。`action` ∈ start | pause | resume | stop。
-   *
-   * 录制只能由用户从浏览器面板发起（见设计文档：模型不持有任何录制控制工具），
-   * 所以这里不做模型可达性检查——它压根不在模型的工具表里。
-   */
-  private async setRecording(
-    key: string,
-    params: Record<string, unknown>,
-    modalRaceArmed = false,
-  ): Promise<Record<string, unknown>> {
-    const owner = this.requireOwner(key);
-    this.verifyProfileIfPresent(owner, params.profile_dir);
-    const action = asString(params.action, 'recording action', 20).trim();
-    const commandTimeoutMs = expectedDialogTimeoutMs(
-      params.command_timeout_ms,
-      params.command_deadline_ms,
-    );
-    const commandDeadlineAt = Date.now() + commandTimeoutMs;
-    const requestedRecordingId = asString(params.recording_id, 'recording id', 64).trim().toLowerCase();
-    // pause/resume/stop 必须作用在**正在录制的那个标签页**上，不是当前活动的。
-    //
-    // 录制态挂在单个 BrowserTab 上，而用户完全可能在 A 页开录、随手打开 B 页
-    // （或被 target=_blank 带走）再点停止。按活动标签页发，停的是 B，A 还在录，
-    // 而 UI 已经显示「已停止」——一个还在写盘的隐形录制器。
-    const recording = [...owner.tabs.values()].find((candidate) => candidate.recording);
-    const tab = action === 'start'
-      ? this.targetTab(owner, params.target_id)
-      : (recording ?? this.targetTab(owner, params.target_id));
-    if (action === 'start' && recording) {
-      // 已经在录了就明确报错，**不能静默 no-op**：Crew 侧每次 start 都会换一个
-      // 新的 recording_id，宿主这边却什么都不做，于是后续事件被写进新目录、
-      // 前半段留在旧目录——同一段演示被拆成两半，编译时谁也拼不回去。
-      throw new BrowserHostError(
-        recording === tab
-          ? '该标签页已在录制中；如需重新开始请先停止'
-          : '已有其它标签页正在录制；请先停止那一段再开始新的录制',
-        { code: 'recording_conflict' },
-      );
-    }
-    if (!modalRaceArmed) {
-      this.releaseSettledModalAction(owner, tab.sessionHash);
-      if (this.sessionDialogTabs(owner, tab.sessionHash).length) {
-        throw new BrowserHostError(
-          '浏览器会话有待处理的 JavaScript 对话框；处理后可继续切换录制状态',
-          { code: 'dialog_pending' },
-        );
-      }
-      if (this.sessionFileChooserTabs(owner, tab.sessionHash).length) {
-        throw new BrowserHostError(
-          '浏览器会话有待处理的文件选择器；处理后可继续切换录制状态',
-          { code: 'file_chooser_pending' },
-        );
-      }
-      return this.withSessionModalRace(
-        owner,
-        tab,
-        () => this.setRecording(key, params, true),
-      );
-    }
-    type StoppedRecording = {
-      steps: number;
-      forged: number;
-      incomplete: boolean;
-      dropped: number;
-      recordingId: string;
-    };
-    // Validate the absolute budget before the async operation is constructed:
-    // an already-expired pause/resume/stop must not synchronously flip recorder
-    // state and only then discover that the caller has gone away.
-    const recordingTimeoutMs = remainingCommandTimeoutMs(commandDeadlineAt);
-    const operation = (async (): Promise<StoppedRecording | null> => {
-      switch (action) {
-        case 'start':
-          if (!RECORDING_ID_RE.test(requestedRecordingId)) {
-            throw new BrowserHostError('录制 ID 无效', { code: 'invalid_recording_id' });
-          }
-          await this.startRecording(
-            owner,
-            tab,
-            requestedRecordingId,
-            undefined,
-            0,
-            remainingCommandTimeoutMs(commandDeadlineAt),
-          );
-          return null;
-        case 'pause':
-          // Flush the focused dirty control while the binding still accepts packets, then make
-          // both current and future documents dormant. Typing followed by an immediate panel
-          // pause must not lose the final value merely because blur/change never fired.
-          if (tab.recording && !tab.recording.paused) {
-            const ledger = tab.recording.ledger;
-            const members = [...ledger.members].filter(
-              (member) => member.recording?.ledger === ledger,
-            );
-            for (const member of members) {
-              const state = member.recording!;
-              state.paused = true;
-              state.drainingFlush = true;
-            }
-            const paused = await Promise.allSettled(
-              members.map((member) =>
-                this.setRecorderCaptureEnabled(member, member.recording!, false)),
-            );
-            const pauseFailures = paused.filter(
-              (result): result is PromiseRejectedResult => result.status === 'rejected',
-            );
-            if (pauseFailures.length) {
-              ledger.incomplete = true;
-              ledger.dropped += pauseFailures.length;
-            }
-            await ledger.queue.catch(() => undefined);
-            for (const member of members) {
-              if (member.recording?.ledger === ledger) member.recording.drainingFlush = false;
-            }
-          }
-          for (const member of tab.recording?.ledger.members ?? [tab]) {
-            member.nativeInputProofs = [];
-          }
-          return null;
-        case 'resume':
-          if (tab.recording && tab.recording.paused) {
-            const ledger = tab.recording.ledger;
-            const members = [...ledger.members].filter(
-              (member) => member.recording?.ledger === ledger,
-            );
-            for (const member of members) {
-              member.nativeInputProofs = [];
-              const state = member.recording!;
-              state.drainingFlush = false;
-            }
-            const resumed = await Promise.allSettled(
-              members.map((member) =>
-                this.setRecorderCaptureEnabled(member, member.recording!, true)),
-            );
-            const resumeFailures = resumed.filter(
-              (result): result is PromiseRejectedResult => result.status === 'rejected',
-            );
-            if (resumeFailures.length) {
-              ledger.incomplete = true;
-              ledger.dropped += resumeFailures.length;
-              // Host-side paused remains authoritative even if one document was
-              // reactivated before another failed. Best-effort deactivate every
-              // member so a later retry starts from a coherent state.
-              await Promise.allSettled(
-                members.map((member) =>
-                  this.setRecorderCaptureEnabled(member, member.recording!, false)),
-              );
-              throw new BrowserHostError('无法在所有录制页面恢复事件捕获', {
-                code: 'recorder_control_failed',
-                partial: true,
-              });
-            }
-            for (const member of members) {
-              if (member.recording?.ledger !== ledger) continue;
-              member.recording.paused = false;
-              const bounds = member.view.getBounds();
-              this.recordViewportResize(
-                member,
-                member.recording,
-                bounds.width,
-                bounds.height,
-              );
-            }
-            await ledger.queue;
-          }
-          return null;
-        case 'stop':
-          return await this.stopRecordingGroup(tab);
-        default:
-          throw new BrowserHostError('不支持的录制操作', { code: 'invalid_request' });
-      }
-    })();
-    const stopped = await withDeadline(
-      operation,
-      recordingTimeoutMs,
-      () => new BrowserHostError(`录制${action}操作超过命令截止时间`, {
-        code: 'command_timeout',
-        uncertain: true,
-        partial: true,
-        phase: 'dispatching',
-      }),
-    );
-    return {
-      recording: Boolean(tab.recording),
-      paused: Boolean(tab.recording?.paused),
-      // stop 之后 tab.recording 已清空，统计只能取停止时留存下来的那份。
-      steps: stopped ? stopped.steps : (tab.recording?.ledger.steps ?? 0),
-      // 未关联到原生输入的事件数（非阻断审计）。IME/粘贴也可能增加该值。
-      forged: stopped ? stopped.forged : (tab.recording?.ledger.forged ?? 0),
-      incomplete: stopped ? stopped.incomplete : (tab.recording?.ledger.incomplete ?? false),
-      dropped: stopped ? stopped.dropped : (tab.recording?.ledger.dropped ?? 0),
-      recordingId: stopped?.recordingId ?? tab.recording?.ledger.recordingId ?? '',
-    };
-  }
-
-  /**
-   * 开始录制：注入捕获脚本并注册绑定。
-   *
-   * 脚本走 `addScriptToEvaluateOnNewDocument`，因此翻页、跳转后会自动重新注入，
-   * 不需要在每次导航后补一刀。Electron 的 OOPIF 兼容约束与来源校验见
-   * `installRecorderInCurrentDocuments`。
-   */
-  private async startRecording(
-    owner: BrowserOwner,
-    tab: BrowserTab,
-    recordingId: string,
-    inheritedLedger?: RecordingLedger,
-    createdByCausalId = 0,
-    timeoutMs = 0,
-  ): Promise<void> {
-    const state = tab.recording ?? this.attachRecordingState(
-      tab,
-      recordingId,
-      inheritedLedger,
-      createdByCausalId,
-    );
-    if (!state || state.ledger.closing) return;
-    if (state.installation) {
-      await state.installation;
-      return;
-    }
-    const installation = (async (): Promise<void> => {
-    try {
-      await this.ensureDebugger(tab);
-      await this.installRecorderSession(tab, state, '', undefined, timeoutMs);
-      const existingOopifs = [...tab.childSessions.entries()]
-        .filter(([, targetInfo]) => String(targetInfo.type ?? '') === 'iframe')
-        .map(([sessionId]) => sessionId);
-      await Promise.all(
-        existingOopifs.map((sessionId) =>
-          this.installRecorderSession(
-            tab,
-            state,
-            sessionId,
-            undefined,
-            timeoutMs,
-            true,
-          )),
-      );
-    } catch (error) {
-      state.accepting = false;
-      state.paused = true;
-      await this.stopRecording(tab);
-      throw new BrowserHostError(
-        `无法安装浏览器录制器：${error instanceof Error ? error.message : 'unknown'}`,
-        { code: 'recorder_unavailable' },
-      );
-    }
-
-    // 起始快照。
-    //
-    // 没有它，「已经在详情页上开始录制、只阅读、然后停止」这种纯查阅演示会得到
-    // **零步**——而那恰恰是工单场景最典型的一段。事件驱动的录制只在用户动手时
-    // 才记东西，可用户这次什么都没动，他要教的就是"看这一页的这些字段"。
-    //
-    // 走的是 recordNavigation 的同一条路：它本来就是"记录当前页面态"，
-    // 起始点与一次导航在语义上没有区别。
-    if (!state.initialPageRecorded) {
-      state.initialPageRecorded = true;
-      let viewport: { width: number; height: number };
-      try {
-        viewport = await this.currentCssViewport(owner, tab, timeoutMs);
-      } catch (error) {
-        state.accepting = false;
-        state.paused = true;
-        await this.stopRecording(tab);
-        throw new BrowserHostError(
-          `无法读取录制初始视口：${error instanceof Error ? error.message : 'unknown'}`,
-          { code: 'recorder_viewport_unavailable' },
-        );
-      }
-      this.recordNavigation(owner, tab, undefined, true, viewport);
-      this.recordViewportResize(
-        tab,
-        state,
-        viewport.width,
-        viewport.height,
-      );
-      // Make start's response deterministic and prove the initial page anchor
-      // and viewport have either been emitted or marked incomplete before the
-      // UI reports recording active.
-      await state.ledger.queue;
-    }
-    })();
-    state.installation = installation;
-    try {
-      await installation;
-    } finally {
-      if (state.installation === installation) state.installation = null;
-    }
-  }
-
-  /**
-   * Join a page to a recording synchronously.
-   *
-   * Popup createWindow callbacks cannot await debugger/script installation.
-   * Publishing membership and the recording-local page identity here, before
-   * returning the WebContents to Chromium, ensures early navigation/dialog
-   * events enter the correct ledger even while installation completes.
-   */
-  private attachRecordingState(
-    tab: BrowserTab,
-    recordingId: string,
-    inheritedLedger?: RecordingLedger,
-    createdByCausalId = 0,
-  ): RecordingState | null {
-    if (tab.recording) return tab.recording;
-    if (inheritedLedger?.closing) return null;
-    tab.nativeInputProofs = [];
-    const ledger: RecordingLedger = inheritedLedger ?? {
-      recordingId,
-      schemaVersion: recordingV11Enabled() ? 11 : 10,
-      startedAt: Date.now(),
-      steps: 0,
-      forged: 0,
-      incomplete: false,
-      dropped: 0,
-      closing: false,
-      queue: Promise.resolve(),
-      eventIndex: 0,
-      transactionCounter: 0,
-      transactionsByCausalId: new Map(),
-      reservedActions: new WeakMap(),
-      dialogCounter: 0,
-      downloadCounter: 0,
-      downloadOrdinals: new Map(),
-      members: new Set<BrowserTab>(),
-      causalCounter: 0,
-      pageCounter: 0,
-      popupOrdinals: new Map(),
-      activeCausals: new Map(),
-    };
-    const inheritedPeer = inheritedLedger
-      ? [...inheritedLedger.members].find(
-        (member) => member.recording?.ledger === inheritedLedger,
-      )?.recording
-      : null;
-    const inheritedPaused = inheritedPeer?.paused === true;
-    const openerEntry = tab.openerTargetId
-      ? this.tabsByTarget.get(tab.openerTargetId)
-      : undefined;
-    const openerState = openerEntry?.tab.recording?.ledger === ledger
-      ? openerEntry.tab.recording
-      : null;
-    const popupOrdinal = tab.openerTargetId
-      ? (ledger.popupOrdinals.get(tab.openerTargetId) ?? 0) + 1
-      : 0;
-    if (tab.openerTargetId) {
-      ledger.popupOrdinals.set(tab.openerTargetId, popupOrdinal);
-    }
-    const state: RecordingState = {
-      ledger,
-      pageId: `p${++ledger.pageCounter}`,
-      openerPageId: openerState?.pageId ?? '',
-      popupOrdinal,
-      createdByCausalId: Number.isSafeInteger(createdByCausalId) && createdByCausalId > 0
-        ? createdByCausalId
-        : 0,
-      createdByTransaction: null,
-      initialPageRecorded: false,
-      installation: null,
-      paused: inheritedPaused,
-      accepting: true,
-      drainingFlush: false,
-      captureEnabled: !inheritedPaused,
-      bindingName: `${RECORDER_BINDING}_${randomUUID().replaceAll('-', '')}`,
-      targetStashName: `${RECORDER_TARGET_STASH}_${randomUUID().replaceAll('-', '')}`,
-      controlName: `${RECORDER_CONTROL}_${randomUUID().replaceAll('-', '')}`,
-      sessions: new Map(),
-      lastPageDigest: '',
-      lastRecordedViewport: null,
-      contexts: new Set<string>(),
-      contextFrames: new Map<string, string>(),
-      causalTokens: new Map(),
-      pendingClicks: new Map(),
-      supersededClicks: new WeakSet(),
-      pendingNavigationCausal: null,
-      pendingRecordedNavigation: null,
-      ignoredRecordedNavigationUrls: [],
-      pageCloseRecorded: false,
-    };
-    tab.recording = state;
-    ledger.members.add(tab);
-    return state;
-  }
-
-  private async installRecorderSession(
-    tab: BrowserTab,
-    state: RecordingState,
-    childSessionId: string,
-    lifecycleSignal?: AbortSignal,
-    timeoutMs = 0,
-    activateCurrentDocument = false,
-  ): Promise<void> {
-    const existing = state.sessions.get(childSessionId);
-    if (existing) {
-      return await this.waitForRecorderSessionInstallation(
-        tab,
-        childSessionId,
-        existing,
-        lifecycleSignal,
-        timeoutMs,
-      );
-    }
-
-    const session: RecorderSessionState = {
-      scriptId: '',
-      bindingName: state.bindingName,
-      bindingAdded: false,
-      installed: false,
-      cancelled: false,
-      installation: Promise.resolve(),
-    };
-    session.installation = (async () => {
-      try {
-        const source = this.recorderSource(state);
-        await this.sendInSession(tab, childSessionId, 'Runtime.addBinding', {
-          name: state.bindingName,
-        });
-        session.bindingAdded = true;
-        if (session.cancelled) {
-          await this.cleanupRecorderSession(tab, childSessionId, session);
-          return;
-        }
-        const injected = (await this.sendInSession(
-          tab,
-          childSessionId,
-          'Page.addScriptToEvaluateOnNewDocument',
-          {
-            source,
-          },
-        )) as { identifier?: string };
-        session.scriptId = String(injected?.identifier ?? '');
-        if (session.cancelled) {
-          await this.cleanupRecorderSession(tab, childSessionId, session);
-          return;
-        }
-        const childTargetUrl = childSessionId
-          ? normalizedText(tab.childSessions.get(childSessionId)?.url, 2048)
-          : '';
-        // Target.attachedToTarget commonly reports url="" for an OOPIF and
-        // that stored attach-time TargetInfo does not receive later URL
-        // updates. A recording started after the page loaded must therefore
-        // activate every enumerated existing OOPIF explicitly. The live
-        // attach-before-resume path keeps activateCurrentDocument=false so it
-        // never evaluates into a debugger-paused provisional target; its
-        // addScriptToEvaluateOnNewDocument bootstrap covers the commit.
-        if (
-          !childSessionId
-          || activateCurrentDocument
-          || Boolean(childTargetUrl)
-        ) {
-          await this.installRecorderInCurrentDocuments(
-            tab,
-            childSessionId,
-            source,
-          );
-        }
-        if (session.cancelled) {
-          await this.cleanupRecorderSession(tab, childSessionId, session);
-          return;
-        }
-        session.installed = true;
-      } catch (error) {
-        session.cancelled = true;
-        await this.cleanupRecorderSession(tab, childSessionId, session);
-        throw error;
-      }
-    })();
-    // Publish before awaiting so a duplicate attach/start path joins the same
-    // installation instead of registering duplicate listeners.
-    state.sessions.set(childSessionId, session);
-    await this.waitForRecorderSessionInstallation(
-      tab,
-      childSessionId,
-      session,
-      lifecycleSignal,
-      timeoutMs,
-    );
-  }
-
-  /**
-   * Install the recorder into documents that already existed when recording
-   * started. `Page.addScriptToEvaluateOnNewDocument` covers future documents.
-   *
-   * Do not use `runImmediately` or create another isolated world here. Real
-   * Electron 43 / Chromium 150 can leave the main renderer's Runtime channel
-   * permanently unresponsive when either path is used on a page containing an
-   * OOPIF. Current main-session documents are activated through Playwright's
-   * existing frame contexts; a newly attached OOPIF is activated directly in
-   * that child session before the transport releases it to Playwright.
-   *
-   * The recorder therefore lives in the document world on this Electron path.
-   * The binding is not a trust boundary: BrowserHost accepts packets only for
-   * an installed session with a matching random name and validated schema/bounds.
-   */
-  private async installRecorderInCurrentDocuments(
-    tab: BrowserTab,
-    childSessionId: string,
-    source: string,
-  ): Promise<void> {
-    if (childSessionId) {
-      const evaluated = await this.sendInSession(
-        tab,
-        childSessionId,
-        'Runtime.evaluate',
-        {
-          expression: source,
-          returnByValue: true,
-          awaitPromise: false,
-        },
-      ) as { exceptionDetails?: unknown };
-      if (evaluated.exceptionDetails) {
-        throw new Error(`recorder activation failed: ${childSessionId}`);
-      }
-      return;
-    }
-
-    // Runtime.evaluate through Playwright's flattened main session can deadlock after a
-    // document-start script is registered on a page that already owns an OOPIF (reproduced on
-    // Electron 43 / Chromium 150). Electron's WebFrameMain executes in the same document world
-    // without entering that CDP routing cycle. Child attach-before-resume still uses its direct
-    // child Runtime session in the branch above.
-    const mainFrame = tab.view.webContents.mainFrame;
-    // `framesInSubtree` also contains OOPIF WebFrameMain proxies. Executing through
-    // those proxies while Playwright owns the flattened child target can wedge the
-    // renderer's Runtime channel even though executeJavaScript itself resolves.
-    // Main-session activation therefore stays inside the main renderer process;
-    // each OOPIF is activated exactly once through its direct child CDP session.
-    const frames = [...mainFrame.framesInSubtree]
-      .filter((frame) => frame.processId === mainFrame.processId);
-    if (!frames.length) throw new Error('recorder page has no current frame');
-    for (const frame of frames) {
-      if (frame.detached) continue;
-      try {
-        await frame.executeJavaScript(source, false);
-      } catch (error) {
-        if (frame === mainFrame) throw error;
-        // A subframe can navigate/detach during the pass. Its replacement is covered by the
-        // init script already registered before this snapshot.
-      }
-    }
-  }
-
-  private recorderSource(state: RecordingState): string {
-    return recorderScript({
-      bindingName: state.bindingName,
-      targetStashName: state.targetStashName,
-      controlName: state.controlName,
-      initiallyActive: state.captureEnabled,
-      recordingSchemaVersion: state.ledger.schemaVersion,
-      officialSelectorSource: officialInjectedScriptSource().source,
-    });
-  }
-
-  /**
-   * Keep future documents in the same active/dormant state as the current ones.
-   *
-   * Add the replacement first, then remove the old script. If navigation lands in the short
-   * overlap, recorderScript's idempotent controller branch applies the newer active state;
-   * there is no uninstrumented document gap.
-   */
-  private async replaceRecorderBootstrap(
-    tab: BrowserTab,
-    state: RecordingState,
-  ): Promise<void> {
-    const source = this.recorderSource(state);
-    await Promise.allSettled(
-      [...state.sessions.entries()].map(async ([childSessionId, session]) => {
-        if (!session.installed || session.cancelled) return;
-        const injected = await this.sendInSession(
-          tab,
-          childSessionId,
-          'Page.addScriptToEvaluateOnNewDocument',
-          { source },
-        ) as { identifier?: string };
-        const replacementId = String(injected?.identifier ?? '');
-        if (!replacementId) return;
-        const previousId = session.scriptId;
-        session.scriptId = replacementId;
-        if (previousId) {
-          await this.sendInSession(
-            tab,
-            childSessionId,
-            'Page.removeScriptToEvaluateOnNewDocument',
-            { identifier: previousId },
-          ).catch(() => undefined);
-        }
-      }),
-    );
-  }
-
-  /** Activate/deactivate the permanent page listeners in every live document. */
-  private async evaluateRecorderControl(
-    tab: BrowserTab,
-    state: RecordingState,
-    method: 'activate' | 'deactivate',
-  ): Promise<void> {
-    const expression = `globalThis[${JSON.stringify(state.controlName)}]?.${method}?.()`;
-    const operations: Array<Promise<unknown>> = [];
-    const mainFrame = tab.view.webContents.mainFrame;
-    for (const frame of mainFrame.framesInSubtree) {
-      if (!frame.detached && frame.processId === mainFrame.processId) {
-        operations.push(frame.executeJavaScript(expression, false));
-      }
-    }
-    // Child-session direct evaluation additionally covers an OOPIF attach that has not yet
-    // appeared in WebFrameMain.framesInSubtree.
-    for (const [childSessionId, session] of state.sessions) {
-      if (!childSessionId || !session.installed || session.cancelled) continue;
-      operations.push(this.sendInSession(tab, childSessionId, 'Runtime.evaluate', {
-        expression,
-        returnByValue: true,
-        awaitPromise: false,
-      }));
-    }
-    const results = await Promise.allSettled(operations);
-    const failures = results.filter(
-      (result): result is PromiseRejectedResult => result.status === 'rejected',
-    );
-    if (failures.length) {
-      throw new AggregateError(
-        failures.map((result) => result.reason),
-        `recorder control ${method} failed in ${failures.length} document(s)`,
-      );
-    }
-  }
-
-  private async setRecorderCaptureEnabled(
-    tab: BrowserTab,
-    state: RecordingState,
-    enabled: boolean,
-  ): Promise<void> {
-    state.captureEnabled = enabled;
-    await this.replaceRecorderBootstrap(tab, state);
-    await this.evaluateRecorderControl(tab, state, enabled ? 'activate' : 'deactivate');
-  }
-
-  private async waitForRecorderSessionInstallation(
-    tab: BrowserTab,
-    childSessionId: string,
-    session: RecorderSessionState,
-    lifecycleSignal?: AbortSignal,
-    timeoutMs = 0,
-  ): Promise<void> {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let removeAbortListener = (): void => {};
-    const deadline = new Promise<never>((_, reject) => {
-      const fail = (reason: unknown): void => {
-        const error = reason instanceof Error
-          ? reason
-          : new Error(`recorder session installation cancelled: ${childSessionId || '<main>'}`);
-        session.cancelled = true;
-        session.installed = false;
-        void this.cleanupRecorderSession(tab, childSessionId, session);
-        reject(error);
-      };
-      if (timeoutMs > 0) {
-        timer = setTimeout(() => {
-          fail(new Error(
-            `recorder session installation timeout: ${childSessionId || '<main>'}`,
-          ));
-        }, timeoutMs);
-      }
-      if (lifecycleSignal) {
-        const onAbort = (): void => fail(lifecycleSignal.reason);
-        if (lifecycleSignal.aborted) onAbort();
-        else {
-          lifecycleSignal.addEventListener('abort', onAbort, { once: true });
-          removeAbortListener = () => lifecycleSignal.removeEventListener('abort', onAbort);
-        }
-      }
-    });
-    try {
-      await Promise.race([session.installation, deadline]);
-      if (session.cancelled || !session.installed) {
-        throw new Error(
-          `recorder session installation cancelled: ${childSessionId || '<main>'}`,
-        );
-      }
-    } finally {
-      if (timer) clearTimeout(timer);
-      removeAbortListener();
-    }
-  }
-
-  private async cleanupRecorderSession(
-    tab: BrowserTab,
-    childSessionId: string,
-    session: RecorderSessionState,
-  ): Promise<void> {
-    session.installed = false;
-    if (childSessionId && !tab.childSessions.has(childSessionId)) return;
-    const scriptId = session.scriptId;
-    if (scriptId) {
-      await this.sendInSession(
-        tab,
-        childSessionId,
-        'Page.removeScriptToEvaluateOnNewDocument',
-        { identifier: scriptId },
-      ).catch(() => undefined);
-      if (session.scriptId === scriptId) session.scriptId = '';
-    }
-    if (session.bindingAdded) {
-      await this.sendInSession(
-        tab,
-        childSessionId,
-        'Runtime.removeBinding',
-        { name: session.bindingName },
-      ).catch(() => undefined);
-      session.bindingAdded = false;
-    }
-  }
-
-  /**
-   * Stop the opener/popup recording as one transaction. Mark every member
-   * draining before the first await so a still-live popup cannot append ordinary
-   * actions while another tab is already stopping.
-   */
-  private async stopRecordingGroup(
-    tab: BrowserTab,
-  ): Promise<{
-    steps: number;
-    forged: number;
-    incomplete: boolean;
-    dropped: number;
-    recordingId: string;
-  }> {
-    const ledger = tab.recording?.ledger;
-    if (!ledger) {
-      return {
-        steps: 0,
-        forged: 0,
-        incomplete: false,
-        dropped: 0,
-        recordingId: '',
-      };
-    }
-    // Close membership before the first await. createWindow/startRecording checks
-    // this bit synchronously, so a popup racing stop cannot inherit a ledger that
-    // has already begun teardown.
-    ledger.closing = true;
-    while (true) {
-      const members = [...ledger.members].filter(
-        (member) => member.recording?.ledger === ledger,
-      );
-      if (!members.length) break;
-      for (const member of members) {
-        const state = member.recording!;
-        state.accepting = false;
-        state.paused = true;
-        state.drainingFlush = true;
-      }
-      await Promise.allSettled(members.map((member) => this.stopRecording(member)));
-    }
-    await ledger.queue.catch(() => undefined);
-    return {
-      steps: ledger.steps,
-      forged: ledger.forged,
-      incomplete: ledger.incomplete,
-      dropped: ledger.dropped,
-      recordingId: ledger.recordingId,
-    };
-  }
-
-  private tabHasLiveContents(tab: BrowserTab): boolean {
-    try {
-      const contents = tab.view.webContents;
-      return Boolean(contents && !contents.isDestroyed());
-    } catch {
-      return false;
-    }
-  }
-
-  private tabUrl(tab: BrowserTab): string {
-    try {
-      return tab.view.webContents.getURL() || 'about:blank';
-    } catch {
-      return 'about:blank';
-    }
-  }
-
-  /** 停止录制：撤销注入与绑定。失败只记不抛——停止是用户动作，不该因清理失败而卡住。 */
-  private async stopRecording(
-    tab: BrowserTab,
-  ): Promise<{
-    steps: number;
-    forged: number;
-    incomplete: boolean;
-    dropped: number;
-    recordingId: string;
-  }> {
-    const state = tab.recording;
-    if (!state) {
-      return {
-        steps: 0,
-        forged: 0,
-        incomplete: false,
-        dropped: 0,
-        recordingId: '',
-      };
-    }
-    // First synchronously flush each document's focused dirty control while the binding still
-    // accepts packets. Setting accepting=false first loses the most common final step: type,
-    // then click the panel's Stop button without a page blur/change event.
-    state.accepting = false;
-    state.paused = true;
-    state.drainingFlush = true;
-    try {
-      if (this.tabHasLiveContents(tab)) {
-        await this.setRecorderCaptureEnabled(tab, state, false).catch(() => undefined);
-      }
-      // Every queued task captures this exact RecordingState. Drain flush
-      // packets and previously observed actions before removing registrations.
-      await state.ledger.queue.catch(() => undefined);
-    } finally {
-      state.drainingFlush = false;
-      tab.nativeInputProofs = [];
-      // Do not await installation promises here: a debugger command can hang
-      // forever. Mark cancellation first, then issue idempotent cleanup now.
-      for (const session of state.sessions.values()) {
-        session.cancelled = true;
-        session.installed = false;
-      }
-      if (tab.recording === state) tab.recording = null;
-      state.ledger.members.delete(tab);
-      if (this.tabHasLiveContents(tab)) {
-        await Promise.allSettled(
-          [...state.sessions.entries()].map(async ([childSessionId, session]) => {
-            await this.cleanupRecorderSession(tab, childSessionId, session);
-          }),
-        );
-      }
-      state.sessions.clear();
-      state.contexts.clear();
-      state.contextFrames.clear();
-      this.clearRecorderCausals(state, tab);
-    }
-    return {
-      steps: state.ledger.steps,
-      forged: state.ledger.forged,
-      incomplete: state.ledger.incomplete,
-      dropped: state.ledger.dropped,
-      recordingId: state.ledger.recordingId,
-    };
-  }
-
-  /**
-   * Persist the human's exact JavaScript-dialog decision from CDP.
-   *
-   * The page event recorder cannot observe native dialog buttons, and a later
-   * standalone replay command would deadlock behind the triggering Playwright
-   * action. The compiler therefore attaches this row to the causal action and
-   * Host replays the pair as one armed transaction.
-   */
-  private recordDialogDecision(
-    owner: BrowserOwner,
-    tab: BrowserTab,
-    dialog: DialogState,
-    params: Record<string, unknown>,
-  ): void {
-    const state = tab.recording;
-    if (!state || state.paused || !state.accepting) return;
-    if (!['alert', 'confirm', 'prompt', 'beforeunload'].includes(dialog.type)) {
-      this.markRecordingStateIncomplete(state);
-      return;
-    }
-    const accepted = params.result === true;
-    if (state.ledger.schemaVersion === 11) {
-      const dialogAlias = `dlg${++state.ledger.dialogCounter}`;
-      this.appendV11Signal(
-        tab,
-        state,
-        { name: 'dialog', dialogAlias },
-        {
-          type: dialog.type,
-          action: accepted ? 'accept' : 'dismiss',
-          promptText: (
-            accepted
-            && dialog.type === 'prompt'
-            && typeof params.userInput === 'string'
-          ) ? params.userInput : '',
-        },
-        {
-          causalId: dialog.causalId,
-          timestamp: Date.now(),
-        },
-      );
-      return;
-    }
-    const event: RecorderEvent = {
-      schemaVersion: RECORDER_EVENT_SCHEMA_VERSION,
-      provenance: {
-        schemaVersion: RECORDER_PROVENANCE_SCHEMA_VERSION,
-        source: 'browser-host',
-        capturePhase: 'host',
-        browserTrusted: false,
-        targetEvidence: 'none',
-        nativeInput: 'host',
-      },
-      seq: 0,
-      capturedAt: Date.now(),
-      causalId: dialog.causalId,
-      type: 'dialog',
-      url: this.tabUrl(tab),
-      hint: '',
-      target: null,
-      tier: 'plain',
-      value: '',
-      values: [],
-      valueTruncated: false,
-      key: '',
-      clickCount: 0,
-      position: null,
-      dragSourcePosition: null,
-      dragTargetPosition: null,
-      modifiers: [],
-      dialogAction: accepted ? 'accept' : 'dismiss',
-      dialogType: dialog.type as RecorderDialogType,
-      dialogText: (
-        accepted
-        && dialog.type === 'prompt'
-        && typeof params.userInput === 'string'
-      ) ? params.userInput : '',
-      scrollX: 0,
-      scrollY: 0,
-      uploadMode: '',
-      paths: [],
-      fileCount: 0,
-      multiple: false,
-      accept: '',
-      dropData: {},
-    };
-    state.ledger.queue = state.ledger.queue
-      .then(() => this.recordStep(owner, tab, state, event, {
-        sessionId: '',
-        executionContextId: 0,
-      }))
-      .catch(() => {
-        this.markRecordingStateIncomplete(state);
-      });
-  }
-
-  /**
-   * Read the renderer's actual CSS viewport at recording start.
-   *
-   * The panel supplies Electron bounds in DIP, but the durable replay contract
-   * is CSS pixels. At default zoom those coordinate spaces coincide; querying
-   * `innerWidth/innerHeight` through the public Playwright Page makes that an
-   * observed fact instead of an assumption and remains correct if Chromium's
-   * embedding behavior changes.
-   */
-  private async currentCssViewport(
-    owner: BrowserOwner,
-    tab: BrowserTab,
-    timeoutMs = 0,
-  ): Promise<{ width: number; height: number }> {
-    const boundedTimeoutMs = Math.max(
-      1,
-      Math.min(ACTION_TIMEOUT_MS, timeoutMs > 0 ? timeoutMs : ACTION_TIMEOUT_MS),
-    );
-    const page = await owner.engine.pageForView(tab.view, boundedTimeoutMs);
-    const viewport = await withDeadline(
-      page.evaluate(() => ({
-        width: window.innerWidth,
-        height: window.innerHeight,
-      })),
-      boundedTimeoutMs,
-      () => new BrowserHostError('读取页面 CSS viewport 超时', {
-        code: 'recorder_viewport_unavailable',
-      }),
-    );
-    if (
-      !viewport
-      || typeof viewport.width !== 'number'
-      || typeof viewport.height !== 'number'
-      || !Number.isFinite(viewport.width)
-      || !Number.isFinite(viewport.height)
-    ) {
-      throw new BrowserHostError('页面 CSS viewport 无效', {
-        code: 'recorder_viewport_unavailable',
-      });
-    }
-    return { width: viewport.width, height: viewport.height };
-  }
-
-  /**
-   * Persist a CSS viewport transition as an ordinary v11 action.
-   *
-   * `WebContentsView.setBounds()` uses display-independent pixels, the same
-   * coordinate space Chromium exposes to layout as CSS viewport pixels. Only
-   * width/height participate in deduplication, so dragging an unchanged panel
-   * around the desktop is intentionally silent. Product-side magnitude caps
-   * do not belong here; replay delegates browser validity to Playwright's
-   * public `page.setViewportSize()`.
-   */
-  private recordViewportResize(
-    tab: BrowserTab,
-    state: RecordingState | null,
-    width: number,
-    height: number,
-  ): void {
-    if (
-      !state
-      || state.ledger.schemaVersion !== 11
-      || state.paused
-      || !state.accepting
-    ) {
-      return;
-    }
-    if (!Number.isFinite(width) || !Number.isFinite(height)) {
-      this.markRecordingStateIncomplete(state);
-      return;
-    }
-    if (
-      state.lastRecordedViewport?.width === width
-      && state.lastRecordedViewport.height === height
-    ) {
-      return;
-    }
-    state.lastRecordedViewport = { width, height };
-    this.appendV11HostAction(
-      tab,
-      state,
-      { name: 'x-crew-resize', width, height },
-    );
-  }
-
-  /**
-   * Arm an explicit human navigation at the exact public Playwright dispatch
-   * boundary. No v11 identity is reserved yet: a deterministic `no_history` or
-   * a pre-dispatch failure must leave neither a ghost action nor a step gap.
-   */
-  private beginRecordedNavigation(
-    tab: BrowserTab,
-    operation: RecordedNavigationOperation,
-    url: string,
-  ): PendingRecordedNavigation | null {
-    const state = tab.recording;
-    if (
-      !state
-      || state.ledger.schemaVersion !== 11
-      || state.paused
-      || !state.accepting
-    ) {
-      return null;
-    }
-    const previous = state.pendingRecordedNavigation;
-    if (previous && !previous.committed) {
-      // Owner commands are serialized. Reaching this branch means an earlier
-      // dispatch escaped its completion boundary, so do not guess which native
-      // commit belongs to which command.
-      state.pendingRecordedNavigation = null;
-      previous.cancelled = true;
-      previous.settleObserved();
-      this.markRecordingStateIncomplete(state);
-    }
-    let settleObserved!: () => void;
-    const observed = new Promise<void>((resolve) => {
-      settleObserved = resolve;
-    });
-    const pending: PendingRecordedNavigation = {
-      operation,
-      url,
-      state,
-      capturedAt: Date.now(),
-      committed: false,
-      cancelled: false,
-      observed,
-      settleObserved,
-    };
-    state.pendingRecordedNavigation = pending;
-    return pending;
-  }
-
-  /**
-   * Commit the explicit action and its authoritative browser navigation signal
-   * into one v11 transaction. Electron's did-navigate hook normally calls this;
-   * the successful public Playwright return path is a bounded fallback for
-   * embedders that omit the Electron observer.
-   */
-  private commitRecordedNavigation(
-    tab: BrowserTab,
-    pending: PendingRecordedNavigation,
-    actualUrl: string,
-  ): boolean {
-    const state = pending.state;
-    if (pending.committed) return true;
-    if (
-      tab.recording !== state
-      || state.pendingRecordedNavigation !== pending
-      || state.ledger.schemaVersion !== 11
-      || state.paused
-      || !state.accepting
-    ) {
-      if (state.pendingRecordedNavigation === pending) {
-        state.pendingRecordedNavigation = null;
-      }
-      return false;
-    }
-    pending.committed = true;
-    state.pendingRecordedNavigation = null;
-    pending.settleObserved();
-    const committedUrl = actualUrl || this.tabUrl(tab);
-    const transaction = this.appendV11HostAction(
-      tab,
-      state,
-      {
-        name: 'x-crew-navigate',
-        operation: pending.operation,
-        url: pending.url,
-      },
-      {
-        timestamp: pending.capturedAt,
-        url: committedUrl,
-      },
-    );
-    this.appendV11Signal(
-      tab,
-      state,
-      { name: 'navigation', url: committedUrl },
-      {},
-      {
-        transaction,
-        timestamp: pending.capturedAt,
-      },
-    );
-    state.createdByTransaction = null;
-    return true;
-  }
-
-  private async completeRecordedNavigation(
-    tab: BrowserTab,
-    pending: PendingRecordedNavigation | null,
-    actualUrl: string,
-  ): Promise<void> {
-    if (!pending || pending.committed) return;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    try {
-      await Promise.race([
-        pending.observed,
-        new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, 500);
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-    if (pending.committed || pending.cancelled) return;
-    // Electron normally observes the same main-frame commit before this grace
-    // expires. Keep one exact URL tombstone if an embedder delays that event so
-    // it cannot be mistaken for the next explicit command.
-    pending.state.ignoredRecordedNavigationUrls.push({
-      url: actualUrl,
-      expiresAt: Date.now() + 5_000,
-    });
-    this.commitRecordedNavigation(tab, pending, actualUrl);
-  }
-
-  private cancelRecordedNavigation(
-    tab: BrowserTab,
-    pending: PendingRecordedNavigation | null,
-  ): void {
-    if (!pending || pending.committed) return;
-    pending.cancelled = true;
-    pending.settleObserved();
-    if (pending.state.pendingRecordedNavigation === pending) {
-      pending.state.pendingRecordedNavigation = null;
-    }
-    // Keep this helper tab-scoped: a stale completion from a detached tab must
-    // never clear a new recording attached to another page.
-    void tab;
-  }
-
-  /**
-   * 记录一次导航。
-   *
-   * 注入脚本捕获不到这些：地址栏输入、前进/后退、刷新、以及 hash 路由的
-   * `pushState`——它们不产生任何 DOM 事件。而「读工单」这类流程主干**就是**
-   * 导航，不记等于纯阅读的演示录出来是空的。
-   *
-   * 与页面事件走同一条串行队列，保证与点击、输入的先后顺序不乱。
-   */
-  private recordNavigation(
-    owner: BrowserOwner,
-    tab: BrowserTab,
-    frozenCausal?: { causalId: number; capturedAt: number },
-    initialPage = false,
-    initialViewport?: { width: number; height: number },
-    observedUrl?: string,
-  ): void {
-    const state = tab.recording;
-    if (!state || state.paused || !state.accepting) return;
-    const activeCausal = frozenCausal ?? this.activeRecorderCausal(state, tab, '');
-    if (state.ledger.schemaVersion === 11) {
-      const url = observedUrl || this.tabUrl(tab);
-      const now = Date.now();
-      state.ignoredRecordedNavigationUrls = state.ignoredRecordedNavigationUrls
-        .filter((entry) => entry.expiresAt >= now);
-      const ignoredIndex = state.ignoredRecordedNavigationUrls
-        .findIndex((entry) => entry.url === url);
-      if (ignoredIndex >= 0) {
-        state.ignoredRecordedNavigationUrls.splice(ignoredIndex, 1);
-        return;
-      }
-      const explicit = state.pendingRecordedNavigation;
-      if (explicit && this.commitRecordedNavigation(tab, explicit, url)) {
-        return;
-      }
-      const causalId = activeCausal?.causalId ?? 0;
-      const transaction = (
-        causalId > 0
-          ? state.ledger.transactionsByCausalId.get(causalId)
-          : undefined
-      ) ?? state.createdByTransaction ?? undefined;
-      if (initialPage && !state.openerPageId) {
-        if (!initialViewport) {
-          this.markRecordingStateIncomplete(state);
-          return;
-        }
-        state.lastRecordedViewport = { ...initialViewport };
-        this.appendV11HostAction(
-          tab,
-          state,
-          { name: 'openPage', url, viewport: initialViewport },
-          {
-            causalId,
-            url,
-            ...(activeCausal ? { timestamp: activeCausal.capturedAt } : {}),
-          },
-        );
-        return;
-      }
-      if (transaction) {
-        this.appendV11Signal(
-          tab,
-          state,
-          { name: 'navigation', url },
-          {},
-          {
-            causalId,
-            transaction,
-            ...(activeCausal ? { timestamp: activeCausal.capturedAt } : {}),
-          },
-        );
-        state.createdByTransaction = null;
-        return;
-      }
-      this.appendV11HostAction(
-        tab,
-        state,
-        { name: 'navigate', url },
-        {
-          causalId,
-          url,
-          ...(activeCausal ? { timestamp: activeCausal.capturedAt } : {}),
-        },
-      );
-      return;
-    }
-    const event: RecorderEvent = {
-      schemaVersion: RECORDER_EVENT_SCHEMA_VERSION,
-      provenance: {
-        schemaVersion: RECORDER_PROVENANCE_SCHEMA_VERSION,
-        source: 'host-navigation',
-        capturePhase: 'host',
-        browserTrusted: false,
-        targetEvidence: 'none',
-        nativeInput: 'host',
-      },
-      seq: 0,
-      capturedAt: activeCausal?.capturedAt ?? Date.now(),
-      causalId: activeCausal?.causalId ?? 0,
-      type: 'navigate',
-      url: this.tabUrl(tab),
-      hint: '',
-      target: null,
-      tier: 'plain',
-      value: '',
-      values: [],
-      valueTruncated: false,
-      key: '',
-      position: null,
-      dragSourcePosition: null,
-      dragTargetPosition: null,
-      modifiers: [],
-      dialogAction: '',
-      dialogType: '',
-      dialogText: '',
-      scrollX: 0,
-      scrollY: 0,
-      uploadMode: '',
-      paths: [],
-      fileCount: 0,
-      multiple: false,
-      accept: '',
-      dropData: {},
-    };
-    state.ledger.queue = state.ledger.queue
-      .then(() => this.recordStep(owner, tab, state, event, {
-        sessionId: '',
-        executionContextId: 0,
-      }))
-      .catch(() => {
-        this.markRecordingStateIncomplete(state);
-      });
-  }
-
-  private recordPageClosed(
-    owner: BrowserOwner,
-    tab: BrowserTab,
-    reason: string,
-    explicit: boolean,
-  ): void {
-    const state = tab.recording;
-    if (
-      !state
-      || state.pageCloseRecorded
-      || state.ledger.schemaVersion !== 11
-      || state.paused
-      || !state.accepting
-    ) {
-      return;
-    }
-    state.pageCloseRecorded = true;
-    const activeCausal = this.activeRecorderCausal(state, tab, '');
-    const causalId = activeCausal?.causalId ?? 0;
-    let transaction: V11TransactionIdentity | undefined;
-    if (explicit) {
-      transaction = this.appendV11HostAction(
-        tab,
-        state,
-        { name: 'closePage' },
-        { causalId, timestamp: Date.now() },
-      );
-    } else {
-      transaction = (
-        causalId > 0
-          ? state.ledger.transactionsByCausalId.get(causalId)
-          : undefined
-      ) ?? state.createdByTransaction ?? undefined;
-    }
-    this.appendV11Signal(
-      tab,
-      state,
-      {
-        name: 'x-crew-pageClosed',
-        closedPageGuid: state.pageId,
-        reason,
-      },
-      {},
-      {
-        causalId,
-        timestamp: Date.now(),
-        ...(transaction ? { transaction } : {}),
-      },
-    );
-    // Keep the owner reference in this synchronous lifecycle hook. It also
-    // proves that a foreign/detached tab can never append into another owner.
-    if (this.tabsByTarget.get(tab.targetId)?.owner !== owner) {
-      this.markRecordingStateIncomplete(state);
-    }
-  }
-
-  /**
-   * Build a persistent selector from evidence captured synchronously in the
-   * trusted event callback.
-   *
-   * Navigation can destroy the old document before Playwright normalize/count
-   * completes, and live locator probing is especially prone to stalling an
-   * OOPIF Runtime channel. Prefer the same durable signals codegen prefers
-   * (test id, id/name, role + accessible label) and retain the exact unique
-   * CSS path only as a last resort. Replay still resolves the stored selector
-   * through Playwright and rejects zero/multiple matches.
-   */
-  private async recorderFrameOwnerSelector(
-    tab: BrowserTab,
-    state: RecordingState,
-    ownerSessionId: string,
-    frameId: string,
-  ): Promise<string> {
-    const owner = await this.sendInSession(
-      tab,
-      ownerSessionId,
-      'DOM.getFrameOwner',
-      { frameId },
-    );
-    const backendNodeId = Number(owner?.backendNodeId ?? 0);
-    if (!Number.isSafeInteger(backendNodeId) || backendNodeId <= 0) return '';
-    const resolved = await this.sendInSession(
-      tab,
-      ownerSessionId,
-      'DOM.resolveNode',
-      { backendNodeId },
-    );
-    const objectId = String(resolved?.object?.objectId ?? '');
-    if (!objectId) return '';
-    try {
-      const evaluated = await this.sendInSession(
-        tab,
-        ownerSessionId,
-        'Runtime.callFunctionOn',
-        {
-          objectId,
-          functionDeclaration: `function(controlName){
-            const control = globalThis[controlName];
-            return control && typeof control.selectorFor === 'function'
-              ? control.selectorFor(this)
-              : '';
-          }`,
-          arguments: [{ value: state.controlName }],
-          returnByValue: true,
-          awaitPromise: false,
-          userGesture: false,
-        },
-      );
-      const selector = String(evaluated?.result?.value ?? '');
-      return selector
-        && selector !== 'error:notconnected'
-        ? selector
-        : '';
-    } finally {
-      await this.sendInSession(
-        tab,
-        ownerSessionId,
-        'Runtime.releaseObject',
-        { objectId },
-      ).catch(() => undefined);
-    }
-  }
-
-  private async recorderFrameInfo(
-    tab: BrowserTab,
-    sessionId: string,
-    frameId: string,
-  ): Promise<{ id: string; parentId: string; rootId: string } | null> {
-    const result = await this.sendInSession(tab, sessionId, 'Page.getFrameTree');
-    const root = asOptionalRecord(result?.frameTree);
-    const rootFrame = asOptionalRecord(root.frame);
-    const rootId = normalizedText(rootFrame.id, 256);
-    if (!rootId) return null;
-    const visit = (node: Record<string, unknown>): Record<string, unknown> | null => {
-      const frame = asOptionalRecord(node.frame);
-      if (normalizedText(frame.id, 256) === frameId) return frame;
-      const children = Array.isArray(node.childFrames) ? node.childFrames : [];
-      for (const child of children) {
-        if (!child || typeof child !== 'object' || Array.isArray(child)) continue;
-        const found = visit(child as Record<string, unknown>);
-        if (found) return found;
-      }
-      return null;
-    };
-    const found = visit(root);
-    if (!found) return null;
-    return {
-      id: frameId,
-      parentId: normalizedText(found.parentId, 256),
-      rootId,
-    };
-  }
-
-  /**
-   * Rebuild the exact frame locator chain from the binding execution context.
-   *
-   * URL matching is insufficient: dashboards routinely contain several
-   * same-src iframes, and an OOPIF's `window.frameElement` is intentionally
-   * unavailable. CDP's context frameId + flattened parent-session topology
-   * identifies the real iframe owner without guessing by URL.
-   */
-  private async recorderFramePath(
-    tab: BrowserTab,
-    state: RecordingState,
-    context: RecorderExecutionContext,
-    fallback: string[],
-  ): Promise<{ path: string[]; nonTop: boolean; resolved: boolean }> {
-    const contextKey = this.recorderContextKey(
-      context.sessionId,
-      context.executionContextId,
-    );
-    let frameId = state.contextFrames.get(contextKey) ?? '';
-    let sessionId = context.sessionId;
-
-    if (!frameId && sessionId) {
-      try {
-        const tree = await this.sendInSession(tab, sessionId, 'Page.getFrameTree');
-        frameId = normalizedText(asOptionalRecord(asOptionalRecord(tree.frameTree).frame).id, 256);
-      } catch {
-        frameId = '';
-      }
-    }
-    if (!frameId) {
-      if (fallback.length) return { path: [...fallback], nonTop: true, resolved: true };
-      if (sessionId) return { path: [], nonTop: true, resolved: false };
-      if (context.executionContextId > 0) {
-        try {
-          const topCheck = await this.sendInSession(tab, '', 'Runtime.evaluate', {
-            expression: 'window===window.top',
-            contextId: context.executionContextId,
-            returnByValue: true,
-            awaitPromise: false,
-          });
-          if (topCheck?.result?.value === false) {
-            return { path: [], nonTop: true, resolved: false };
-          }
-        } catch {
-          // Synchronous framePath is the only remaining evidence.
-        }
-      }
-      return { path: [], nonTop: false, resolved: true };
-    }
-
-    const path: string[] = [];
-    let currentFrameId = frameId;
-    const visited = new Set<string>();
-    while (currentFrameId) {
-      const topologyKey = `${sessionId}\u0000${currentFrameId}`;
-      if (visited.has(topologyKey)) {
-        return { path: [], nonTop: true, resolved: false };
-      }
-      visited.add(topologyKey);
-      let info = await this.recorderFrameInfo(tab, sessionId, currentFrameId)
-        .catch(() => null);
-      let ownerSessionId = sessionId;
-      if (!info && sessionId) {
-        ownerSessionId = tab.childSessionParents.get(sessionId) ?? '';
-        info = await this.recorderFrameInfo(tab, ownerSessionId, currentFrameId)
-          .catch(() => null);
-      } else if (info && sessionId && currentFrameId === info.rootId) {
-        ownerSessionId = tab.childSessionParents.get(sessionId) ?? '';
-        const parentInfo = await this.recorderFrameInfo(
-          tab,
-          ownerSessionId,
-          currentFrameId,
-        ).catch(() => null);
-        if (parentInfo) info = parentInfo;
-      }
-      if (!info) return { path: [], nonTop: true, resolved: false };
-      if (!info.parentId) {
-        return {
-          path,
-          nonTop: path.length > 0 || Boolean(context.sessionId),
-          resolved: true,
-        };
-      }
-      const fragment = await this.recorderFrameOwnerSelector(
-        tab,
-        state,
-        ownerSessionId,
-        currentFrameId,
-      ).catch(() => '');
-      if (!fragment) return { path: [], nonTop: true, resolved: false };
-      path.unshift(fragment);
-      currentFrameId = info.parentId;
-      sessionId = ownerSessionId;
-    }
-    return { path: [], nonTop: true, resolved: false };
-  }
-
-  private heuristicSelectorFor(
-    event: RecorderEvent,
-    framePath: string[],
-    unresolvedFrame: boolean,
-  ): string {
-    const target = event.target;
-    if (!target) return '';
-    if (unresolvedFrame) return '';
-
-    const quote = (value: string): string =>
-      value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const inFrames = (fragment: string): string =>
-      [...framePath, fragment]
-        .filter(Boolean)
-        .join(' >> internal:control=enter-frame >> ');
-
-    if (target.testId && target.testIdAttribute) {
-      return inFrames(`[${target.testIdAttribute}="${quote(target.testId)}"]`);
-    }
-    if (target.id) return inFrames(`[id="${quote(target.id)}"]`);
-    if (target.name) {
-      const tag = target.tag || '*';
-      const type = target.inputType ? `[type="${quote(target.inputType)}"]` : '';
-      return inFrames(`${tag}${type}[name="${quote(target.name)}"]`);
-    }
-
-    const explicitRole = target.role;
-    const inferredRole = explicitRole || (() => {
-      if (target.tag === 'a' && target.href) return 'link';
-      if (target.tag === 'button') return 'button';
-      if (target.tag === 'select') return 'combobox';
-      if (target.tag === 'textarea') return 'textbox';
-      if (target.tag !== 'input') return '';
-      if (target.inputType === 'checkbox') return 'checkbox';
-      if (target.inputType === 'radio') return 'radio';
-      if (target.inputType === 'range') return 'slider';
-      if (['button', 'submit', 'reset', 'image'].includes(target.inputType)) return 'button';
-      if (!['hidden'].includes(target.inputType)) return 'textbox';
-      return '';
-    })();
-    const accessibleName = target.ariaLabel || target.text;
-    if (inferredRole && accessibleName) {
-      let fragment = `internal:role=${inferredRole}`;
-      fragment += `[name=${JSON.stringify(accessibleName)}i]`;
-      // ordinal is captured among same-tag/same-text peers. Applying it to the
-      // aria-label selector is wrong because that ordinal used visible text.
-      // It is commensurate only when visible text itself supplied the name.
-      if (!target.ariaLabel && target.ordinal >= 1) {
-        fragment += ` >> nth=${target.ordinal - 1}`;
-      }
-      return inFrames(fragment);
-    }
-    if (target.ariaLabel) {
-      return inFrames(`[aria-label="${quote(target.ariaLabel)}"]`);
-    }
-    if (target.href && target.tag === 'a') {
-      return inFrames(`a[href="${quote(target.href)}"]`);
-    }
-    if (inferredRole) return inFrames(`internal:role=${inferredRole}`);
-    if (target.cssPath) return inFrames(target.cssPath);
-    return '';
-  }
-
-  /**
-   * Build a replayable selector only from evidence captured synchronously in
-   * the trusted DOM event callback.
-   *
-   * Do not call Locator.count()/normalize() here.  On real Electron + OOPIF,
-   * a Playwright Runtime request issued after the document-start recorder
-   * binding can wedge indefinitely and block every later action (the recorder
-   * contract catches this with keyboard activation).  A timeout race is not a
-   * fix because the unresolved protocol request keeps the channel poisoned.
-   *
-   * Replay still constructs an official Playwright Locator from this selector,
-   * so strict resolution/actionability remain Playwright-owned.
-   */
-  private stableSelectorFor(
-    event: RecorderEvent,
-    framePath: string[],
-    unresolvedFrame: boolean,
-    dragTarget = false,
-  ): string {
-    if (unresolvedFrame) return '';
-    if (event.selectorSource === 'playwright') {
-      const localSelector = dragTarget
-        ? event.recordedDragSelector ?? ''
-        : event.recordedSelector ?? '';
-      if (!localSelector) return '';
-      return [...framePath, localSelector]
-        .filter(Boolean)
-        .join(' >> internal:control=enter-frame >> ');
-    }
-    // Unversioned packets are accepted only for rolling-upgrade compatibility.
-    // New recordings never silently fall back to Crew's selector heuristic:
-    // if the installed Playwright generator is unavailable, the trace is
-    // explicitly incomplete and cannot be compiled as a reusable workflow.
-    if (event.schemaVersion === 1) {
-      return this.heuristicSelectorFor(event, framePath, false);
-    }
-    return '';
-  }
-
-  /**
-   * Resolve the exact File wrappers captured synchronously with upload/drop.
-   *
-   * The injected recorder stores `{ files: File[] | null }` for upload/drop entries.
-   * It deliberately does not read fakepath, file names or contents. Each File wrapper is
-   * materialised through Runtime.callFunctionOn in the event's own execution context/session,
-   * then Chromium's DOM.getFileInfo returns the native path. Any missing wrapper, protocol
-   * failure returns null so v10 upload becomes handoff and v11 refuses to
-   * persist a partial/wrong executable file list.
-   */
-  private async recorderFilePaths(
-    tab: BrowserTab,
-    context: RecorderExecutionContext,
-    stashEntryObjectId: string,
-    event: RecorderEvent,
-  ): Promise<string[] | null> {
-    if (event.type !== 'upload' && event.type !== 'drop') return null;
-    if (event.fileCount === 0) return [];
-    if (!stashEntryObjectId || event.fileCount < 0) return null;
-
-    const paths: string[] = [];
-    for (let index = 0; index < event.fileCount; index += 1) {
-      let fileObjectId = '';
-      try {
-        const file = await this.sendInSession(
-          tab,
-          context.sessionId,
-          'Runtime.callFunctionOn',
-          {
-            objectId: stashEntryObjectId,
-            functionDeclaration: `function(index){
-              const files = this && this.files;
-              return files && index >= 0 && index < files.length ? files[index] : null;
-            }`,
-            arguments: [{ value: index }],
-            returnByValue: false,
-            awaitPromise: false,
-            userGesture: false,
-          },
-        );
-        fileObjectId = typeof file?.result?.objectId === 'string'
-          ? file.result.objectId
-          : '';
-        if (!fileObjectId) return null;
-        const info = await this.sendInSession(
-          tab,
-          context.sessionId,
-          'DOM.getFileInfo',
-          { objectId: fileObjectId },
-        );
-        const nativePath = typeof info?.path === 'string' ? info.path : '';
-        if (!nativePath) return null;
-        paths.push(nativePath);
-      } catch {
-        return null;
-      } finally {
-        if (fileObjectId) {
-          await this.sendInSession(
-            tab,
-            context.sessionId,
-            'Runtime.releaseObject',
-            { objectId: fileObjectId },
-          ).catch(() => undefined);
-        }
-      }
-    }
-    return paths.length === event.fileCount ? paths : null;
-  }
-
-  private reserveV11Action(
-    state: RecordingState,
-    event: RecorderEvent,
-  ): V11TransactionIdentity {
-    const existing = state.ledger.reservedActions.get(event);
-    if (existing) return existing;
-    const identity: V11TransactionIdentity = {
-      transactionId: ++state.ledger.transactionCounter,
-      step: ++state.ledger.steps,
-      transactionKind: 'action',
-    };
-    state.ledger.reservedActions.set(event, identity);
-    const causalId = event.causalId ?? 0;
-    if (causalId > 0) {
-      state.ledger.transactionsByCausalId.set(causalId, identity);
-    }
-    return identity;
-  }
-
-  private reserveV11HostAction(
-    state: RecordingState,
-    causalId = 0,
-  ): V11TransactionIdentity {
-    const identity: V11TransactionIdentity = {
-      transactionId: ++state.ledger.transactionCounter,
-      step: ++state.ledger.steps,
-      transactionKind: 'action',
-    };
-    if (causalId > 0) {
-      state.ledger.transactionsByCausalId.set(causalId, identity);
-    }
-    return identity;
-  }
-
-  private reserveV11Observation(state: RecordingState): V11TransactionIdentity {
-    return {
-      transactionId: ++state.ledger.transactionCounter,
-      step: ++state.ledger.steps,
-      transactionKind: 'observation',
-    };
-  }
-
-  private v11Provenance(
-    source: 'document-world' | 'host-navigation' | 'browser-host',
-    event?: RecorderEvent,
-  ): Record<string, unknown> {
-    if (event?.provenance) {
-      return {
-        schemaVersion: RECORDER_PROVENANCE_SCHEMA_VERSION,
-        source: event.provenance.source,
-        capturePhase: event.provenance.capturePhase,
-        browserTrusted: event.provenance.browserTrusted,
-        targetEvidence: event.provenance.targetEvidence,
-        nativeInput: event.provenance.nativeInput ?? 'unverified',
-      };
-    }
-    return {
-      schemaVersion: RECORDER_PROVENANCE_SCHEMA_VERSION,
-      source,
-      capturePhase: 'host',
-      browserTrusted: false,
-      targetEvidence: 'none',
-      nativeInput: 'host',
-    };
-  }
-
-  private v11Evidence(
-    event?: RecorderEvent,
-    url = '',
-  ): Record<string, unknown> {
-    return {
-      url: event?.url || url,
-      hint: event?.hint ?? '',
-      tier: event?.tier ?? 'plain',
-      target: event?.target ?? null,
-      dragTarget: event?.dragTarget ?? null,
-      snapshot: '',
-      snapshotDropped: false,
-      backendNodeId: 0,
-    };
-  }
-
-  private emitV11Row(
-    tab: BrowserTab,
-    state: RecordingState,
-    transaction: V11TransactionIdentity,
-    body: Record<string, unknown>,
-    timestamp = Date.now(),
-  ): void {
-    const payload = {
-      schemaVersion: 11,
-      type: 'recording',
-      targetId: tab.targetId,
-      recordingId: state.ledger.recordingId,
-      step: transaction.step,
-      eventIndex: ++state.ledger.eventIndex,
-      transactionId: transaction.transactionId,
-      transactionKind: transaction.transactionKind,
-      recordKind: body.recordKind,
-      pageGuid: state.pageId,
-      timestamp: Math.max(0, Math.trunc(timestamp)),
-      provenance: body.provenance,
-      ...(body.recordKind === 'action'
-        ? { action: body.action, evidence: body.evidence }
-        : { signal: body.signal, details: body.details }),
-    };
-    this.emit('recording', payload);
-  }
-
-  private appendV11HostAction(
-    tab: BrowserTab,
-    state: RecordingState,
-    action: AtomicAction,
-    options: {
-      causalId?: number;
-      timestamp?: number;
-      url?: string;
-    } = {},
-  ): V11TransactionIdentity {
-    const transaction = this.reserveV11HostAction(
-      state,
-      options.causalId ?? 0,
-    );
-    const chain = state.ledger.queue.then(() => {
-      this.emitV11Row(
-        tab,
-        state,
-        transaction,
-        {
-          recordKind: 'action',
-          action,
-          evidence: this.v11Evidence(undefined, options.url || this.tabUrl(tab)),
-          provenance: this.v11Provenance(
-            action.name === 'navigate'
-              || action.name === 'openPage'
-              || action.name === 'x-crew-navigate'
-              ? 'host-navigation'
-              : 'browser-host',
-          ),
-        },
-        options.timestamp,
-      );
-    }).catch(() => {
-      this.markRecordingStateIncomplete(state);
-    });
-    state.ledger.queue = chain;
-    return transaction;
-  }
-
-  private appendV11Signal(
-    tab: BrowserTab,
-    state: RecordingState,
-    signal: Record<string, unknown>,
-    details: Record<string, unknown>,
-    options: {
-      causalId?: number;
-      transaction?: V11TransactionIdentity | null;
-      timestamp?: number;
-    } = {},
-  ): V11TransactionIdentity {
-    const causalId = options.causalId ?? 0;
-    const transaction = options.transaction
-      ?? (
-        causalId > 0
-          ? state.ledger.transactionsByCausalId.get(causalId)
-          : undefined
-      )
-      ?? this.reserveV11Observation(state);
-    const chain = state.ledger.queue.then(() => {
-      this.emitV11Row(
-        tab,
-        state,
-        transaction,
-        {
-          recordKind: 'signal',
-          signal,
-          details,
-          provenance: this.v11Provenance('browser-host'),
-        },
-        options.timestamp,
-      );
-    }).catch(() => {
-      this.markRecordingStateIncomplete(state);
-    });
-    state.ledger.queue = chain;
-    return transaction;
-  }
-
-  private v11ActionFromRecorderEvent(
-    event: RecorderEvent,
-    selector: string,
-    targetSelector: string,
-    filePaths: string[] | null,
-  ): AtomicAction | null {
-    if (event.type === 'click' || event.type === 'dblclick') {
-      return {
-        name: 'click',
-        selector,
-        button: event.clickButton ?? 'left',
-        modifiers: event.modifiers ?? [],
-        clickCount: event.type === 'dblclick'
-          ? 2
-          : Math.max(1, event.clickCount ?? 1),
-        position: event.position ?? null,
-      };
-    }
-    if (event.type === 'drag') {
-      return {
-        name: 'x-crew-drag',
-        sourceSelector: selector,
-        targetSelector,
-        sourcePosition: event.dragSourcePosition ?? null,
-        targetPosition: event.dragTargetPosition ?? null,
-      };
-    }
-    if (event.type === 'drop') {
-      if (event.fileCount > 0 && filePaths?.length !== event.fileCount) {
-        return null;
-      }
-      return {
-        name: 'x-crew-drop',
-        selector,
-        files: filePaths ?? [],
-        data: { ...event.dropData },
-      };
-    }
-    if (event.type === 'hover') {
-      return {
-        name: 'hover',
-        selector,
-        position: event.position ?? null,
-      };
-    }
-    if (event.type === 'pointerGesture') {
-      if (!event.gestureStart || !event.gesturePoints?.length) return null;
-      return {
-        name: 'x-crew-pointerGesture',
-        selector,
-        button: event.clickButton ?? 'left',
-        modifiers: event.modifiers ?? [],
-        pointerType: event.pointerType ?? 'mouse',
-        start: event.gestureStart,
-        points: event.gesturePoints,
-      };
-    }
-    if (event.type === 'upload') {
-      if (event.fileCount > 0 && filePaths?.length !== event.fileCount) {
-        return null;
-      }
-      return {
-        name: 'setInputFiles',
-        selector,
-        files: filePaths ?? [],
-      };
-    }
-    if (event.type === 'input') {
-      if (event.target?.tag === 'select') {
-        return {
-          name: 'select',
-          selector,
-          options: event.target.inputType === 'select-multiple'
-            ? [...event.values]
-            : [event.value],
-        };
-      }
-      if (
-        event.target?.inputType === 'checkbox'
-        || event.target?.inputType === 'radio'
-      ) {
-        return {
-          name: event.value === 'checked' ? 'check' : 'uncheck',
-          selector,
-        };
-      }
-      return { name: 'fill', selector, text: event.value };
-    }
-    if (event.type === 'key') {
-      let key = event.key;
-      const modifiers: string[] = [];
-      const prefixes: Array<[string, string]> = [
-        ['Ctrl+', 'Control'],
-        ['Meta+', 'Meta'],
-        ['Alt+', 'Alt'],
-        ['Shift+', 'Shift'],
-      ];
-      for (const [prefix, modifier] of prefixes) {
-        if (!key.startsWith(prefix)) continue;
-        modifiers.push(modifier);
-        key = key.slice(prefix.length);
-      }
-      if (!key) return null;
-      return {
-        name: 'press',
-        selector,
-        key,
-        modifiers,
-      };
-    }
-    if (event.type === 'scroll' || event.type === 'wheel') {
-      if (event.scrollX === 0 && event.scrollY === 0) return null;
-      return {
-        name: 'x-crew-scroll',
-        selector,
-        deltaX: event.scrollX,
-        deltaY: event.scrollY,
-      };
-    }
-    if (event.type === 'navigate') {
-      return { name: 'navigate', url: event.url };
-    }
-    return null;
-  }
-
-  private async recordStep(
-    owner: BrowserOwner,
-    tab: BrowserTab,
-    state: RecordingState,
-    event: RecorderEvent,
-    context: RecorderExecutionContext,
-  ): Promise<void> {
-    // URL is frozen synchronously with the browser event. Re-reading a live
-    // execution context here is racy: this queue can be delayed by selector
-    // normalization while the frame redirects again, causing several distinct
-    // navigation/input rows to collapse onto the final URL.
-    const documentUrl = event.url;
-    const backendNodeId = 0;
-    const fileAction = event.type === 'upload' || event.type === 'drop';
-    let filePaths: string[] | null = fileAction && event.fileCount === 0
-      ? []
-      : null;
-    if (
-      fileAction
-      &&
-      Number.isSafeInteger(context.executionContextId)
-      && context.executionContextId > 0
-    ) {
-      let stashEntryObjectId = '';
-      try {
-        const handle = (await this.sendInSession(tab, context.sessionId, 'Runtime.evaluate', {
-          expression: `(() => {
-            const stash = globalThis[${JSON.stringify(state.targetStashName)}];
-            if (!stash) return undefined;
-            const value = stash.get(${event.seq});
-            stash.delete(${event.seq});
-            return value;
-          })()`,
-          contextId: context.executionContextId,
-        })) as { result?: { objectId?: string } };
-        stashEntryObjectId = typeof handle?.result?.objectId === 'string'
-          ? handle.result.objectId
-          : '';
-        if (stashEntryObjectId) {
-          filePaths = await this.recorderFilePaths(
-            tab,
-            context,
-            stashEntryObjectId,
-            event,
-          );
-        }
-      } catch {
-        // 元素可能已经从 DOM 里消失（点完就跳走）。没有 backendNodeId 也要把这一步
-        // 记下来，编译期还能靠 hint 与前后快照兜底，丢掉才是真的丢信息。
-        // upload 的 File wrapper 解析失败也保留同一步，只降级为 handoff。
-      } finally {
-        if (stashEntryObjectId) {
-          await this.sendInSession(
-            tab,
-            context.sessionId,
-            'Runtime.releaseObject',
-            { objectId: stashEntryObjectId },
-          ).catch(() => undefined);
-        }
-      }
-    }
-    // Do not call Playwright ariaSnapshot while recording. On real Electron 43 /
-    // Chromium 150, issuing it after document-start instrumentation on a page
-    // with an OOPIF can wedge the renderer Runtime channel; the next ordinary
-    // locator operation then times out. Recording must never degrade the browser
-    // being demonstrated. Stable selectors and synchronous target evidence are
-    // sufficient for deterministic replay; page context can be captured by an
-    // explicit snapshot command outside the recorder lifecycle.
-    const page = '';
-    const pageTruncated = false;
-    // ★ 录制→复现的关键一步：把事件回调里同步算出的临时 CSS 路径升级成**可持久化
-    // 的稳定选择器**。用的是 Playwright codegen 同一套评分（test id → aria role →
-    // 面向用户属性 → 才轮到 CSS），跨 iframe 会自动补出 enter-frame 链。
-    //
-    // 失败不致命：拿不到稳定选择器就留空，编译期回退到 target 描述符 + 快照对齐的
-    // 语义匹配（guided skill 那条路）。但**不能拿 cssPath 顶包写进技能**——它带
-    // nth-of-type，页面一改就指到别的元素上，而技能是以后每次都要执行的。
-    const frameLocation = event.target
-      ? await this.recorderFramePath(
-        tab,
-        state,
-        context,
-        event.target.framePath,
-      ).catch(() => ({
-        path: [...event.target!.framePath],
-        nonTop: Boolean(context.sessionId || event.target!.framePath.length),
-        resolved: Boolean(event.target!.framePath.length),
-      }))
-      : { path: [] as string[], nonTop: false, resolved: true };
-    const selector = this.stableSelectorFor(
-      event,
-      frameLocation.path,
-      frameLocation.nonTop && !frameLocation.resolved,
-    );
-    const targetSelector = event.type === 'drag' && event.dragTarget
-      ? this.stableSelectorFor(
-        event,
-        frameLocation.path,
-        frameLocation.nonTop && !frameLocation.resolved,
-        true,
-      )
-      : '';
-    const targetRequired = [
-      'click', 'dblclick', 'drag', 'drop', 'hover', 'input', 'upload', 'pointerGesture',
-    ].includes(event.type);
-    const selectorRequired = targetRequired
-      || (
-        (event.type === 'scroll' || event.type === 'wheel')
-        && Boolean(event.target)
-      );
-    const selectorIncomplete = (targetRequired && !event.target)
-      || (selectorRequired && !selector)
-      || (event.type === 'drag' && (!event.dragTarget || !targetSelector));
-    if (selectorIncomplete) {
-      // A persisted action without its exact target cannot be replayed
-      // faithfully. Keep the diagnostic row, but make the shared recording
-      // explicitly incomplete so the UI never offers it as a valid skill.
-      this.markRecordingStateIncomplete(state);
-      this.emit('browser-error', {
-        runtimeKey: owner.runtimeKey,
-        targetId: tab.targetId,
-        code: 'recorder_selector_partial',
-        error: frameLocation.nonTop
-          ? '录制事件来自 iframe，但无法构造唯一 framePath/selector'
-          : '录制动作无法构造唯一 selector',
-      });
-    }
-
-    const durableUploadMode = event.type !== 'upload'
-      ? ''
-      : event.fileCount === 0
-        ? 'clear'
-        : filePaths?.length === event.fileCount
-        ? 'paths'
-        : 'handoff';
-    if (state.ledger.schemaVersion === 11) {
-      const action = this.v11ActionFromRecorderEvent(
-        event,
-        selector,
-        targetSelector,
-        filePaths,
-      );
-      if (!action) {
-        this.markRecordingStateIncomplete(state);
-        this.emit('browser-error', {
-          runtimeKey: owner.runtimeKey,
-          targetId: tab.targetId,
-          code: 'recorder_v11_action_unrepresentable',
-          error: `录制动作无法无损写入 v11：${event.type}`,
-        });
-        return;
-      }
-      const transaction = this.reserveV11Action(state, event);
-      this.emitV11Row(
-        tab,
-        state,
-        transaction,
-        {
-          recordKind: 'action',
-          action,
-          evidence: this.v11Evidence(event, documentUrl || this.tabUrl(tab)),
-          provenance: this.v11Provenance('document-world', event),
-        },
-        event.capturedAt,
-      );
-      return;
-    }
-
-    state.ledger.steps += 1;
-    const payload = retainRecorderEvidence({
-      schemaVersion: RECORDER_EVENT_SCHEMA_VERSION,
-      recordingId: state.ledger.recordingId,
-      causalId: event.causalId ?? 0,
-      selector,
-      targetSelector,
-      // 仅在页面态变化时携带整页快照，其余步骤为空串。
-      page,
-      pageTruncated,
-      // 信封判别位，与 debug 事件的 `type: 'debug'` 同级。动作类型放 `action`，
-      // 不要复用 `type`——Crew 侧的事件分发就是按这一位走的。
-      type: 'recording',
-      runtimeKey: owner.runtimeKey,
-      targetId: tab.targetId,
-      label: state.pageId,
-      openerPage: state.openerPageId,
-      popupOrdinal: state.popupOrdinal,
-      createdByCausalId: state.createdByCausalId,
-      step: state.ledger.steps,
-      action: event.type,
-      // URL 取宿主侧的权威值，不用页面自报的——页面自报的 URL 是不可信输入。
-      // 对 iframe 事件保存元素实际所属 document URL；顶层 webContents URL 会把
-      // frame origin 错写成父页面，导致回放的 frame host attestation 永远对不上。
-      url: documentUrl || event.url || this.tabUrl(tab),
-      hint: event.hint,
-      // 事件时刻同步取下的元素身份。跳页的点击拿不到 backendNodeId，编译期靠
-      // 这一份与动作前快照对齐。
-      target: event.target,
-      dragTarget: event.dragTarget ?? null,
-      tier: event.tier,
-      value: event.value,
-      values: event.values,
-      valueTruncated: event.valueTruncated === true,
-      key: event.key,
-      clickButton: event.clickButton ?? '',
-      clickCount: event.clickCount ?? 0,
-      position: event.position ?? null,
-      dragSourcePosition: event.dragSourcePosition ?? null,
-      dragTargetPosition: event.dragTargetPosition ?? null,
-      modifiers: event.modifiers ?? [],
-      dialogAction: event.type === 'dialog' ? event.dialogAction : '',
-      dialogType: event.type === 'dialog' ? event.dialogType : '',
-      dialogText: event.type === 'dialog' ? event.dialogText : '',
-      scrollX: event.scrollX,
-      scrollY: event.scrollY,
-      uploadMode: durableUploadMode,
-      paths: (
-        durableUploadMode === 'paths'
-        || event.type === 'drop' && filePaths?.length === event.fileCount
-      ) ? filePaths ?? [] : [],
-      fileCount: fileAction ? event.fileCount : 0,
-      multiple: event.type === 'upload' ? event.multiple : false,
-      accept: event.type === 'upload' ? event.accept : '',
-      dropData: event.type === 'drop' ? { ...event.dropData } : {},
-      backendNodeId,
-      timestamp: event.capturedAt ?? Date.now(),
-      provenance: {
-        ...(event.provenance ?? {
-          schemaVersion: RECORDER_PROVENANCE_SCHEMA_VERSION,
-          source: 'document-world',
-          capturePhase: 'event-callback',
-          browserTrusted: true,
-          targetEvidence: event.target ? 'synchronous' : 'none',
-        }),
-        nativeInput: event.type === 'navigate'
-          ? 'host'
-          : (event.provenance?.nativeInput ?? 'unverified'),
-      },
-    }, event.tier);
-    this.emit('recording', payload);
-  }
-
   private async pageGuard(
     key: string,
     params: Record<string, unknown>,
@@ -11190,7 +5341,7 @@ export class BrowserHost extends EventEmitter {
       );
     }
     await this.ensureDebugger(tab);
-    const commandTimeoutMs = expectedDialogTimeoutMs(params.command_timeout_ms);
+    const commandTimeoutMs = resolveCommandTimeoutMs(params.command_timeout_ms);
     const stateKey = asString(params.state_key, 'state_key', 100);
     const stateToken = asString(params.state_token, 'state_token', 100);
     if (!GUARD_KEY_RE.test(stateKey) || !TOKEN_RE.test(stateToken)) {
@@ -11265,7 +5416,7 @@ export class BrowserHost extends EventEmitter {
     this.verifyProfileIfPresent(owner, params.profile_dir);
     await this.applyProxy(owner, asString(params.proxy_url, 'proxy_url', 4096).trim());
     const tab = this.targetTab(owner, params.target_id);
-    const commandTimeoutMs = expectedDialogTimeoutMs(params.command_timeout_ms);
+    const commandTimeoutMs = resolveCommandTimeoutMs(params.command_timeout_ms);
     if (tab.mode !== 'ai') {
       throw new BrowserHostError('人工接管或暂停期间禁止读取页面图片', {
         code: 'control_mode_blocked',
@@ -11324,7 +5475,7 @@ export class BrowserHost extends EventEmitter {
   ): Promise<Record<string, unknown>> {
     const owner = this.requireOwner(key);
     this.verifyProfileIfPresent(owner, params.profile_dir);
-    const commandTimeoutMs = expectedDialogTimeoutMs(
+    const commandTimeoutMs = resolveCommandTimeoutMs(
       params.command_timeout_ms,
       params.command_deadline_ms,
     );
@@ -11333,9 +5484,6 @@ export class BrowserHost extends EventEmitter {
     const requestedDownloadDir = taskDownloadDirectory(params.download_dir);
     if (requestedDownloadDir) {
       this.setTabDownloadDir(tab, requestedDownloadDir);
-    }
-    if (!owner.atomicTransactions.has(tab.sessionHash)) {
-      owner.atomicReplayEpochs.delete(tab.sessionHash);
     }
     if (tab.mode !== 'ai') {
       throw new BrowserHostError('人工接管或暂停期间禁止坐标点击', {
@@ -11552,11 +5700,6 @@ export class BrowserHost extends EventEmitter {
 
   private assertCanSetTabMode(tab: BrowserTab, mode: ControlMode): void {
     const owner = this.ownerOfTab(tab);
-    if (owner.expectedDialogRuns.has(tab.sessionHash)) {
-      throw new BrowserHostError('该浏览器会话正在执行原子对话框动作，暂不能切换控制模式', {
-        code: 'replay_dialog_busy',
-      });
-    }
     if (
       mode !== 'ai'
       && this.sessionDialogTabs(owner, tab.sessionHash)
@@ -11602,7 +5745,6 @@ export class BrowserHost extends EventEmitter {
     }
     if (previousMode !== mode) {
       tab.visualEpoch = null;
-      tab.nativeInputProofs = [];
       // A pending AI fill must not authorize exposing a value entered later by
       // a human, and a human-era value must never survive return-to-AI.
       tab.lastFilled = null;
@@ -11692,7 +5834,6 @@ export class BrowserHost extends EventEmitter {
     if (owner.downloadGrant) {
       throw new BrowserHostError('账号已有进行中的下载', { code: 'download_busy' });
     }
-    owner.atomicReplayEpochs.delete(tab.sessionHash);
     const timeoutMs = downloadTimeoutMs(params);
     const commandDeadlineAt = Date.now() + timeoutMs;
     await withDeadline(
@@ -11963,43 +6104,6 @@ export class BrowserHost extends EventEmitter {
     const eventSequence = owner.downloadEventSequence;
     const grant = owner.downloadGrant;
     const found = this.tabsByWebContentsId.get(contents.id);
-    const recordingState = found?.owner === owner ? found.tab.recording : null;
-    if (
-      recordingState
-      && recordingState.ledger.schemaVersion === 11
-      && recordingState.accepting
-      && !recordingState.paused
-    ) {
-      const activeCausal = this.activeRecorderCausal(
-        recordingState,
-        found!.tab,
-        '',
-      );
-      const ordinal = (
-        recordingState.ledger.downloadOrdinals.get(recordingState.pageId) ?? 0
-      ) + 1;
-      recordingState.ledger.downloadOrdinals.set(recordingState.pageId, ordinal);
-      let suggestedFilename = '';
-      try {
-        suggestedFilename = item.getFilename();
-      } catch {
-        suggestedFilename = '';
-      }
-      this.appendV11Signal(
-        found!.tab,
-        recordingState,
-        {
-          name: 'download',
-          downloadAlias: `d${++recordingState.ledger.downloadCounter}`,
-        },
-        { ordinal, suggestedFilename },
-        {
-          causalId: activeCausal?.causalId ?? 0,
-          transaction: recordingState.createdByTransaction,
-          timestamp: Date.now(),
-        },
-      );
-    }
     const actionExpired = Boolean(grant?.actionActive && Date.now() > grant.actionDeadline);
     const sourceTab = grant ? owner.tabs.get(grant.tabId) : null;
     const sourceMatches = Boolean(
@@ -12020,7 +6124,7 @@ export class BrowserHost extends EventEmitter {
     );
     if (grant && !grant.claimed && matchesAction) {
       // Highest priority: browser_download owns one exact item and target.
-      // Return before either atomic or generic routing can call setSavePath.
+      // Return before generic routing can call setSavePath.
       grant.claimed = true;
       grant.actionActive = false;
       grant.item = item;
@@ -12074,15 +6178,7 @@ export class BrowserHost extends EventEmitter {
     }
     if (!found || found.owner !== owner) return;
 
-    // Second priority: replay.v3 must retain late effects across transaction
-    // gaps. Its observer both chooses the transaction path and journals the
-    // item, so a true return is an exclusive ownership claim.
-    if (!grant && this.observeAtomicDownload(owner, found.tab, item)) {
-      owner.engine.registerNativeDownload(found.tab.view, item);
-      return;
-    }
-
-    // Final fallback: every ordinary browser behavior is persisted to the
+    // Every ordinary browser behavior is persisted to the
     // current task directory, including concurrent and timer-driven items.
     this.saveGenericDownload(owner, found.tab, item);
     owner.engine.registerNativeDownload(found.tab.view, item);
@@ -12159,9 +6255,6 @@ export class BrowserHost extends EventEmitter {
     const owner = this.requireOwner(key);
     this.verifyProfileIfPresent(owner, params.profile_dir);
     const tab = this.targetTab(owner, params.target_id);
-    if (tab.mode === 'human') {
-      await this.lazyJoinHumanRecording(owner, tab, ACTION_TIMEOUT_MS);
-    }
     this.closeTab(owner, tab);
     return { closed: true };
   }
@@ -12202,7 +6295,7 @@ export class BrowserHost extends EventEmitter {
         cleanupError = error;
       }
       this.hidePanelIfOwner(owner);
-      for (const tab of [...owner.tabs.values()]) this.closeTab(owner, tab, false);
+      for (const tab of [...owner.tabs.values()]) this.closeTab(owner, tab);
       // Tabs are already closed, so no page can repopulate storage. Keep these
       // documented Session operations ordered: clear persistent state first,
       // then tear down any transport still held by the shared Session.
@@ -12239,7 +6332,7 @@ export class BrowserHost extends EventEmitter {
       cleanupError = error;
     }
     try {
-      for (const tab of [...owner.tabs.values()]) this.closeTab(owner, tab, false);
+      for (const tab of [...owner.tabs.values()]) this.closeTab(owner, tab);
       await owner.engine.dispose().catch(() => undefined);
       await owner.session.closeAllConnections().catch(() => undefined);
     } finally {
@@ -12254,16 +6347,7 @@ export class BrowserHost extends EventEmitter {
   private closeTab(
     owner: BrowserOwner,
     tab: BrowserTab,
-    recordExplicitClose = true,
   ): void {
-    this.observeAtomicPageClosed(
-      owner,
-      tab,
-      recordExplicitClose ? 'explicit' : 'lifecycle',
-    );
-    if (recordExplicitClose) {
-      this.recordPageClosed(owner, tab, 'explicit', true);
-    }
     if (this.panel?.tab === tab) this.hidePanel();
     if (owner.downloadGrant?.tabId === tab.tabId) {
       void this.cancelDownloadGrant(
@@ -12294,27 +6378,6 @@ export class BrowserHost extends EventEmitter {
     const activeFallback = owner.activeTabId === tab.tabId
       ? this.activeFallbackAfterClose(owner, tab)
       : undefined;
-    const recording = tab.recording;
-    if (recording) {
-      // Renderer-initiated window.close can bypass the async recorder stop
-      // path. Detach synchronously without touching the already-destroyed
-      // WebContents; queued events retain their captured state and can still
-      // commit from synchronous evidence.
-      recording.accepting = false;
-      recording.paused = true;
-      recording.drainingFlush = false;
-      recording.captureEnabled = false;
-      for (const session of recording.sessions.values()) {
-        session.cancelled = true;
-        session.installed = false;
-      }
-      recording.sessions.clear();
-      recording.contexts.clear();
-      recording.contextFrames.clear();
-      recording.ledger.members.delete(tab);
-      tab.recording = null;
-      tab.nativeInputProofs = [];
-    }
     owner.tabs.delete(tab.tabId);
     this.tabsByTarget.delete(tab.targetId);
     this.tabsByWebContentsId.delete(tab.webContentsId);

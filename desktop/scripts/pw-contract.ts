@@ -6,9 +6,8 @@
  *
  * 1. 桌面端的 vitest 跑在 node 环境，起不了 Electron，而这套地基的全部风险都在
  *    「Playwright 与真实 Electron 的接缝」上——单测只能覆盖 transport 的路由逻辑。
- * 2. 我们依赖两处**非文档化**表面（`normalize()` 返回值的 `_selector`、`aria-ref=`
- *    选择器引擎）。升级 playwright-core 时必须跑这个脚本，静默失效的代价是
- *    「录制出来的技能全部定位不到元素」，而且要到回放时才暴露。
+ * 2. 我们依赖一处**非文档化**表面（`aria-ref=` 选择器引擎）。升级
+ *    playwright-core 时必须跑这个脚本，确保快照 ref 仍能反查 Locator。
  * 3. 后台可用性依赖三个互相独立的条件（焦点模拟 / view 可见 / 挂在窗口上），
  *    任一条失效都只表现为「点击超时」，从报错看不出根因。这里逐条断言。
  *
@@ -19,7 +18,7 @@
  * 退出码非 0 即契约破裂。
  */
 
-import { app, BrowserWindow, clipboard, WebContentsView } from 'electron';
+import { app, BrowserWindow, WebContentsView } from 'electron';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -28,11 +27,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { BrowserHost } from '../src/main/browser-host';
-import {
-  parseRecorderEvent,
-  RECORDER_EVENT_SCHEMA_VERSION,
-  RECORDER_PROVENANCE_SCHEMA_VERSION,
-} from '../src/main/browser-recorder';
 import { AutomationHost, AUTOMATION_VIEWPORT } from '../src/main/browser/automation-host';
 import { ElectronCdpTransport } from '../src/main/browser/electron-cdp-transport';
 import * as actions from '../src/main/browser/playwright-actions';
@@ -42,8 +36,6 @@ import {
   connectOverCdp,
   enableFocusEmulation,
   locatorFromRef,
-  toReadableLocator,
-  toStableSelector,
 } from '../src/main/browser/playwright-compat';
 import {
   ariaIdentityForLocator,
@@ -54,9 +46,9 @@ import {
 import type { ActionContext } from '../src/main/browser/playwright-actions';
 import type { Dialog, Page } from '../src/main/browser/playwright-compat';
 
-// The recorder sub-contract owns and destroys its panel window. Keep the
-// contract process alive until every assertion and server cleanup has run,
-// even if that briefly leaves Electron with no ordinary BrowserWindow.
+// The contract owns and destroys its panel window. Keep the process alive until
+// every assertion and server cleanup has run, even if that briefly leaves
+// Electron with no ordinary BrowserWindow.
 app.on('window-all-closed', () => undefined);
 
 const hash = (value: string): string =>
@@ -150,7 +142,7 @@ app.whenReady().then(async () => {
       + '<base href="https://base-spoof.invalid/forged/">'
       + (
         late
-          ? '<button id="late-cross-origin-button">迟到跨域录制按钮</button>'
+          ? '<button id="late-cross-origin-button">迟到跨域按钮</button>'
           : '<button id="cross-origin-button">跨域框架按钮</button>'
             + '<input id="cross-origin-upload" type="file" multiple hidden '
             + 'accept=".pdf,image/*" aria-label="跨域附件">'
@@ -321,7 +313,7 @@ app.whenReady().then(async () => {
       );
       return;
     }
-    if (request.url?.startsWith('/host-record-nav-a')) {
+    if (request.url?.startsWith('/host-nav-a')) {
       response.end(
         '<!doctype html><meta charset="utf-8">'
         + '<title>Host record navigation A</title>'
@@ -329,15 +321,15 @@ app.whenReady().then(async () => {
       );
       return;
     }
-    if (request.url?.startsWith('/host-record-nav-b')) {
+    if (request.url?.startsWith('/host-nav-b')) {
       response.end(
         '<!doctype html><meta charset="utf-8">'
         + '<title>Host record navigation B</title>'
-        + '<a id="click-next" href="/host-record-nav-c">click-next</a>',
+        + '<a id="click-next" href="/host-nav-c">click-next</a>',
       );
       return;
     }
-    if (request.url?.startsWith('/host-record-nav-c')) {
+    if (request.url?.startsWith('/host-nav-c')) {
       response.end(
         '<!doctype html><meta charset="utf-8">'
         + '<title>Host record navigation C</title>'
@@ -345,7 +337,7 @@ app.whenReady().then(async () => {
       );
       return;
     }
-    if (request.url?.startsWith('/host-record-nav-background')) {
+    if (request.url?.startsWith('/host-nav-background')) {
       response.end(
         '<!doctype html><meta charset="utf-8">'
         + '<title>Host pre-existing background page</title>'
@@ -474,7 +466,7 @@ app.whenReady().then(async () => {
     if (request.url?.startsWith('/same-frame')) {
       response.end(
         '<meta charset="utf-8">'
-        + '<button id="same-origin-button">同源录制按钮</button>'
+        + '<button id="same-origin-button">同源按钮</button>'
         + '<input id="same-origin-upload" type="file" multiple hidden '
         + 'accept=".pdf,image/*" aria-label="同源附件">',
       );
@@ -501,17 +493,17 @@ app.whenReady().then(async () => {
       + '\'reveal-upload-state\').textContent=e.target.files[0]?.name||\'empty\');'
       + 'this.after(i);}">显示附件输入框</button>'
       + '<output id="reveal-upload-state">none</output>'
-      + '<form id="recorder-keyboard-form">'
-      + '<input id="recorder-enter-textbox" type="text" aria-label="回车查询">'
-      + '<button id="recorder-enter-submit" type="submit">提交查询</button>'
+      + '<form id="automation-keyboard-form">'
+      + '<input id="automation-enter-textbox" type="text" aria-label="回车查询">'
+      + '<button id="automation-enter-submit" type="submit">提交查询</button>'
       + '</form>'
-      + '<button id="recorder-keyboard-button" type="button">键盘激活按钮</button>'
-      + '<input id="recorder-shortcut-input" type="text" aria-label="快捷键输入">'
-      + '<input id="recorder-paste-input" type="text" aria-label="粘贴输入">'
-      + '<canvas id="recorder-canvas" width="320" height="160" '
+      + '<button id="automation-keyboard-button" type="button">键盘激活按钮</button>'
+      + '<input id="automation-shortcut-input" type="text" aria-label="快捷键输入">'
+      + '<input id="automation-paste-input" type="text" aria-label="粘贴输入">'
+      + '<canvas id="automation-canvas" width="320" height="160" '
       + 'style="display:block;width:320px;height:160px"></canvas>'
-      + '<output id="recorder-canvas-state">idle</output>'
-      + '<output id="recorder-keyboard-state">idle</output>'
+      + '<output id="automation-canvas-state">idle</output>'
+      + '<output id="automation-keyboard-state">idle</output>'
       + '<script>document.getElementById("top-upload").addEventListener("change",e=>{'
       + 'document.getElementById("top-upload-state").textContent='
       + 'Array.from(e.target.files).map(f=>f.name).join(",")||"empty";'
@@ -520,14 +512,14 @@ app.whenReady().then(async () => {
       + 'document.getElementById("delayed-upload-state").textContent='
       + 'Array.from(e.target.files).map(f=>f.name).join(",")||"empty";'
       + '});'
-      + 'document.getElementById("recorder-keyboard-form").addEventListener("submit",e=>{'
-      + 'e.preventDefault();document.getElementById("recorder-keyboard-state").textContent='
-      + '"submitted:"+document.getElementById("recorder-enter-textbox").value;'
+      + 'document.getElementById("automation-keyboard-form").addEventListener("submit",e=>{'
+      + 'e.preventDefault();document.getElementById("automation-keyboard-state").textContent='
+      + '"submitted:"+document.getElementById("automation-enter-textbox").value;'
       + '});'
-      + 'document.getElementById("recorder-keyboard-button").addEventListener("click",()=>{'
-      + 'document.getElementById("recorder-keyboard-state").textContent="button-activated";'
-      + '});document.getElementById("recorder-canvas").addEventListener("click",e=>{'
-      + 'document.getElementById("recorder-canvas-state").textContent='
+      + 'document.getElementById("automation-keyboard-button").addEventListener("click",()=>{'
+      + 'document.getElementById("automation-keyboard-state").textContent="button-activated";'
+      + '});document.getElementById("automation-canvas").addEventListener("click",e=>{'
+      + 'document.getElementById("automation-canvas-state").textContent='
       + 'e.offsetX+","+e.offsetY;'
       + '});</script>'
       + '<iframe id="same-origin-frame" src="/same-frame"></iframe>'
@@ -549,7 +541,7 @@ app.whenReady().then(async () => {
   // BrowserHost intentionally forces even loopback traffic through its policy
   // proxy (`<-loopback>`). Use a real forward proxy here rather than a dead
   // placeholder port, otherwise loadURL can wait indefinitely before the
-  // recorder contract even starts.
+  // browser contract even starts.
   const policyProxyServer = createServer(async (request, response) => {
     try {
       if (!request.url || request.method === 'CONNECT') {
@@ -1257,30 +1249,6 @@ app.whenReady().then(async () => {
     }
   });
 
-  // ── 录制 → 技能的闭环 ─────────────────────────────────────────────────
-  await check('normalize(): 主文档 ref → 稳定选择器 → 存盘 → 全新定位回放', async () => {
-    const match = /- button "延迟出现" \[ref=([ef\d]+)\]/.exec(snapshot);
-    if (!match) throw new Error('快照里找不到目标按钮');
-    const persisted = await toStableSelector(locatorFromRef(page, match[1]));
-    if (persisted.includes('aria-ref')) throw new Error(`选择器仍是临时身份: ${persisted}`);
-    await page.evaluate(() => {
-      const node = document.getElementById('late-result');
-      if (node) node.textContent = '';
-    });
-    await page.locator(persisted).click();
-    const replayed = await page.locator('#late-result').textContent();
-    if (replayed !== '延迟按钮已点击') throw new Error('回放未生效');
-    return persisted;
-  });
-
-  await check('normalize(): iframe 内元素自动补出跨帧链', async () => {
-    const inFrame = page.frameLocator('#frame').getByRole('button', { name: '框架内按钮' });
-    const persisted = await toStableSelector(inFrame);
-    if (!persisted.includes('enter-frame')) throw new Error(`未补出跨帧链: ${persisted}`);
-    await page.locator(persisted).click();
-    return persisted;
-  });
-
   await check('iframe 真实 document URL 不受 <base href> 伪造', async () => {
     const engine = new PlaywrightEngine();
     const crossView = new WebContentsView({
@@ -1299,9 +1267,8 @@ app.whenReady().then(async () => {
         .frameLocator('#cross-origin-frame')
         .getByRole('button', { name: '跨域框架按钮' });
       await target.waitFor({ state: 'visible', timeout: 5_000 });
-      const persisted = await toStableSelector(target);
       const identity = await fingerprintResolvedLocator(
-        crossPage.locator(persisted),
+        target,
         hash,
         5_000,
       );
@@ -1324,13 +1291,7 @@ app.whenReady().then(async () => {
     }
   });
 
-  await check('toReadableLocator 产出人类可读写法', async () => {
-    const readable = await toReadableLocator(page.getByRole('button', { name: '延迟出现' }));
-    if (!readable.includes('getByRole')) throw new Error(`不像代码写法: ${readable}`);
-    return readable;
-  });
-
-  // ── 裸 CDP 逃生舱（录制器要用隔离世界注入）────────────────────────────
+  // ── 裸 CDP 逃生舱 ─────────────────────────────────────────────────────
   await check('newCDPSession 隔离世界注入 + binding', async () => {
     const cdp = await context.newCDPSession(page);
     try {
@@ -1442,7 +1403,7 @@ app.whenReady().then(async () => {
     return `${ref} → ${record.name}`;
   });
 
-  await check('字段证明与录制器同源：tag / input type / contenteditable / tier', async () => {
+  await check('字段证明：tag / input type / contenteditable / tier', async () => {
     const password = await fingerprintResolvedLocator(page.locator('#password'), hash, 5_000);
     const otp = await fingerprintResolvedLocator(page.locator('#otp'), hash, 5_000);
     const rich = await fingerprintResolvedLocator(page.locator('#rich-note'), hash, 5_000);
@@ -1610,310 +1571,6 @@ app.whenReady().then(async () => {
     return `${events.length} events；clickCount=2；wheel=73；drag/drop`;
   });
 
-  const resetPointerContractSurface = async (): Promise<void> => {
-    await page.evaluate(() => {
-      document.getElementById('contract-pointer-canvas')?.remove();
-      const canvas = document.createElement('canvas');
-      canvas.id = 'contract-pointer-canvas';
-      canvas.width = 320;
-      canvas.height = 160;
-      canvas.style.cssText = [
-        'display:block',
-        'width:320px',
-        'height:160px',
-        'border:5px solid transparent',
-        'margin-top:16px',
-        'touch-action:none',
-      ].join(';');
-      document.body.append(canvas);
-      const globalState = globalThis as typeof globalThis & {
-        __crewPointerEvents?: Array<Record<string, unknown>>;
-        __crewPointerKeys?: string[];
-        __crewTouchEnds?: number;
-      };
-      globalState.__crewPointerEvents = [];
-      globalState.__crewPointerKeys = [];
-      globalState.__crewTouchEnds = 0;
-      for (const type of ['pointerdown', 'pointermove', 'pointerup'] as const) {
-        canvas.addEventListener(type, (event) => {
-          const rect = canvas.getBoundingClientRect();
-          globalState.__crewPointerEvents?.push({
-            type,
-            x: event.clientX - rect.left,
-            y: event.clientY - rect.top,
-            elapsed: event.timeStamp,
-            ctrlKey: event.ctrlKey,
-            shiftKey: event.shiftKey,
-            pointerType: event.pointerType,
-            pressure: event.pressure,
-            tangentialPressure: event.tangentialPressure,
-            tiltX: event.tiltX,
-            tiltY: event.tiltY,
-            twist: event.twist,
-            width: event.width,
-            height: event.height,
-            isPrimary: event.isPrimary,
-          });
-        });
-      }
-      canvas.addEventListener('touchend', (event) => {
-        if (event.touches.length === 0) {
-          globalState.__crewTouchEnds = (globalState.__crewTouchEnds ?? 0) + 1;
-        }
-      });
-      document.addEventListener('keydown', (event) => {
-        if (event.key === 'Control' || event.key === 'Shift') {
-          globalState.__crewPointerKeys?.push(`${event.key}:down`);
-        }
-      });
-      document.addEventListener('keyup', (event) => {
-        if (event.key === 'Control' || event.key === 'Shift') {
-          globalState.__crewPointerKeys?.push(`${event.key}:up`);
-        }
-      });
-    });
-  };
-
-  await check('连续指针手势：canvas border-box 浮点轨迹/时间/修饰键', async () => {
-    await resetPointerContractSurface();
-    const ref = '@pointer-gesture-contract';
-    await actions.locateBySelector(
-      ctx,
-      ref,
-      '#contract-pointer-canvas',
-      hash,
-    );
-    try {
-      await actions.pointerGesture(ctx, ref, {
-        button: 'left',
-        modifiers: ['Control', 'Shift'],
-        start: { x: 12.5, y: 18.25 },
-        points: [
-          { x: 80.75, y: 40.5, elapsedMs: 12 },
-          { x: 155.125, y: 90.75, elapsedMs: 24 },
-        ],
-      });
-    } finally {
-      ctx.refs.delete(ref);
-    }
-    const state = await page.evaluate(() => {
-      const globalState = globalThis as typeof globalThis & {
-        __crewPointerEvents?: Array<Record<string, unknown>>;
-        __crewPointerKeys?: string[];
-        __crewTouchEnds?: number;
-      };
-      return {
-        events: globalState.__crewPointerEvents ?? [],
-        keys: globalState.__crewPointerKeys ?? [],
-        touchEnds: globalState.__crewTouchEnds ?? 0,
-      };
-    });
-    const typed = state.events as Array<{
-      type?: string;
-      x?: number;
-      y?: number;
-      elapsed?: number;
-      ctrlKey?: boolean;
-      shiftKey?: boolean;
-      pointerType?: string;
-    }>;
-    if (
-      typed[0]?.type !== 'pointermove'
-      || !typed.some((event) => (
-        event.type === 'pointerdown'
-        && event.pointerType === 'mouse'
-        && event.ctrlKey === true
-        && event.shiftKey === true
-      ))
-      || typed.at(-1)?.type !== 'pointerup'
-    ) {
-      throw new Error(`pointer 事件/修饰键不完整: ${JSON.stringify(state)}`);
-    }
-    const endpoint = typed.findLast((event) => event.type === 'pointermove');
-    if (
-      !endpoint
-      || Math.abs(Number(endpoint.x) - 155.125) > 0.25
-      || Math.abs(Number(endpoint.y) - 90.75) > 0.25
-    ) {
-      throw new Error(`pointer border-box endpoint 漂移: ${JSON.stringify(state)}`);
-    }
-    const moves = typed.filter((event) => event.type === 'pointermove');
-    if (
-      moves.length < 3
-      || Number(moves.at(-1)?.elapsed) - Number(moves[0]?.elapsed) < 18
-    ) {
-      throw new Error(`pointer trajectory/timing 丢失: ${JSON.stringify(state)}`);
-    }
-    if (
-      !state.keys.includes('Control:down')
-      || !state.keys.includes('Shift:down')
-      || !state.keys.includes('Shift:up')
-      || !state.keys.includes('Control:up')
-      || state.keys.indexOf('Shift:up') > state.keys.indexOf('Control:up')
-    ) {
-      throw new Error(`modifier 未逆序完整释放: ${JSON.stringify(state.keys)}`);
-    }
-    return `${moves.length} moves；endpoint=${endpoint.x},${endpoint.y}；keys=${state.keys.join(',')}`;
-  });
-
-  await check('连续指针手势：pen 类型/压力/倾角/旋转精确抵达页面', async () => {
-    await resetPointerContractSurface();
-    const ref = '@pen-gesture-contract';
-    await actions.locateBySelector(ctx, ref, '#contract-pointer-canvas', hash);
-    try {
-      await actions.pointerGesture(ctx, ref, {
-        pointerType: 'pen',
-        button: 'left',
-        modifiers: [],
-        start: {
-          x: 20,
-          y: 25,
-          pressure: 0.3,
-          tangentialPressure: -0.4,
-          tiltX: 11,
-          tiltY: -12,
-          twist: 37,
-          width: 8,
-          height: 6,
-        },
-        points: [
-          {
-            x: 90,
-            y: 60,
-            elapsedMs: 8,
-            pressure: 0.75,
-            tangentialPressure: 0.2,
-            tiltX: 21,
-            tiltY: -22,
-            twist: 47,
-            width: 9,
-            height: 7,
-          },
-          {
-            x: 170,
-            y: 100,
-            elapsedMs: 16,
-            pressure: 0,
-            tiltX: 23,
-            tiltY: -24,
-            twist: 51,
-            width: 10,
-            height: 8,
-          },
-        ],
-      });
-    } finally {
-      ctx.refs.delete(ref);
-    }
-    const events = await page.evaluate(() => (
-      (globalThis as typeof globalThis & {
-        __crewPointerEvents?: Array<Record<string, unknown>>;
-      }).__crewPointerEvents ?? []
-    ));
-    const penEvents = events.filter((event) => event.pointerType === 'pen');
-    const down = penEvents.find((event) => event.type === 'pointerdown');
-    const pressuredMove = penEvents.find((event) => (
-      event.type === 'pointermove'
-      && Math.abs(Number(event.pressure) - 0.75) < 0.01
-    ));
-    const up = penEvents.findLast((event) => event.type === 'pointerup');
-    if (
-      !down
-      || Math.abs(Number(down.pressure) - 0.3) >= 0.01
-      || Math.abs(Number(down.tangentialPressure) - -0.4) >= 0.01
-      || down.tiltX !== 11
-      || down.tiltY !== -12
-      || down.twist !== 37
-      || down.isPrimary !== true
-      || !pressuredMove
-      || pressuredMove.tiltX !== 21
-      || pressuredMove.tiltY !== -22
-      || pressuredMove.twist !== 47
-      || !up
-      || Number(up.pressure) !== 0
-    ) {
-      throw new Error(`pen PointerEvent 语义丢失: ${JSON.stringify(events)}`);
-    }
-    return `pen down=${down.pressure}；move=${pressuredMove.pressure}；up=${up.pressure}`;
-  });
-
-  await check('连续指针手势：单主 touch 接触面/压力/结束完整抵达页面', async () => {
-    await resetPointerContractSurface();
-    const ref = '@touch-gesture-contract';
-    await actions.locateBySelector(ctx, ref, '#contract-pointer-canvas', hash);
-    try {
-      await actions.pointerGesture(ctx, ref, {
-        pointerType: 'touch',
-        button: 'left',
-        modifiers: [],
-        start: {
-          x: 25,
-          y: 30,
-          pressure: 0.6,
-          width: 12,
-          height: 10,
-        },
-        points: [
-          {
-            x: 100,
-            y: 70,
-            elapsedMs: 8,
-            pressure: 0.8,
-            width: 14,
-            height: 8,
-          },
-          {
-            x: 180,
-            y: 105,
-            elapsedMs: 16,
-            pressure: 0,
-            width: 16,
-            height: 6,
-          },
-        ],
-      });
-    } finally {
-      ctx.refs.delete(ref);
-    }
-    const state = await page.evaluate(() => {
-      const globalState = globalThis as typeof globalThis & {
-        __crewPointerEvents?: Array<Record<string, unknown>>;
-        __crewTouchEnds?: number;
-      };
-      return {
-        events: globalState.__crewPointerEvents ?? [],
-        touchEnds: globalState.__crewTouchEnds ?? 0,
-      };
-    });
-    const touchEvents = state.events.filter((event) => event.pointerType === 'touch');
-    const down = touchEvents.find((event) => event.type === 'pointerdown');
-    const pressuredMove = touchEvents.find((event) => (
-      event.type === 'pointermove'
-      && Math.abs(Number(event.pressure) - 0.8) < 0.01
-    ));
-    const up = touchEvents.findLast((event) => event.type === 'pointerup');
-    if (
-      !down
-      || Math.abs(Number(down.pressure) - 0.6) >= 0.01
-      || Math.abs(Number(down.width) - 12) >= 0.1
-      || Math.abs(Number(down.height) - 10) >= 0.1
-      || down.isPrimary !== true
-      || !pressuredMove
-      || Math.abs(Number(pressuredMove.width) - 14) >= 0.1
-      || Math.abs(Number(pressuredMove.height) - 8) >= 0.1
-      || !up
-      || Number(up.pressure) !== 0
-      || state.touchEnds !== 1
-    ) {
-      throw new Error(
-        'touch PointerEvent/结束语义丢失: '
-        + `down=${down?.pressure}/${down?.width}x${down?.height}/${down?.isPrimary};`
-        + `move=${pressuredMove?.pressure}/${pressuredMove?.width}x${pressuredMove?.height};`
-        + `up=${up?.pressure};touchEnds=${state.touchEnds}`,
-      );
-    }
-    return `touch down=${down.pressure}/${down.width}x${down.height}；end=${state.touchEnds}`;
-  });
 
   await check('官方 resize：真实 Page viewport 可改且可恢复', async () => {
     const original = page.viewportSize() ?? AUTOMATION_VIEWPORT;
@@ -2052,8 +1709,8 @@ app.whenReady().then(async () => {
     throw new Error('未拒绝');
   });
 
-  // 普通页面变化不再依赖 DOM/AX 指纹保持不变。动作层执行原始 aria-ref Locator，
-  // normalize 只验证录制存盘能力；动作返回后由调用方重新观察后置页面态。
+  // 普通页面变化不依赖 DOM/AX 指纹保持不变。动作层执行原始 aria-ref Locator，
+  // 动作返回后由调用方重新观察后置页面态。
   await check('动态属性变化后：exact aria-ref 仍可执行，并可取得后置快照', async () => {
     const snap = await captureSnapshot(page, { full: true, hash, timeoutMs: 10_000 });
     ctx = { page, refs: snap.refs, hash, timeoutMs: 10_000 };
@@ -2072,14 +1729,12 @@ app.whenReady().then(async () => {
       }, { once: true });
     });
 
-    const normalized = await toStableSelector(
-      entry[1].playwrightRef
-        ? locatorFromRef(page, entry[1].playwrightRef)
-        : page.locator(entry[1].selector),
-    );
-    const matches = await page.locator(normalized).count();
+    const target = entry[1].playwrightRef
+      ? locatorFromRef(page, entry[1].playwrightRef)
+      : page.locator(entry[1].selector);
+    const matches = await target.count();
     if (matches !== 1) {
-      throw new Error(`normalized Locator 必须唯一，实际 ${matches}: ${normalized}`);
+      throw new Error(`Locator 必须唯一，实际 ${matches}: ${entry[0]}`);
     }
     await actions.click(ctx, entry[0]);
     if (await page.locator('#mutable').getAttribute('data-contract-clicked') !== 'yes') {
@@ -2091,7 +1746,7 @@ app.whenReady().then(async () => {
     if (![...post.refs.values()].some((record) => record.name === '可变链接')) {
       throw new Error('动作返回后的新快照缺少目标');
     }
-    return `${normalized}；post=${post.refs.size} refs`;
+    return `${entry[0]}；post=${post.refs.size} refs`;
   });
 
   await check('动态 accessible name 变化后：exact aria-ref 执行并反映在后置快照', async () => {
@@ -2106,14 +1761,11 @@ app.whenReady().then(async () => {
       }, { once: true });
     });
 
-    const normalized = await toStableSelector(
-      entry[1].playwrightRef
-        ? locatorFromRef(page, entry[1].playwrightRef)
-        : page.locator(entry[1].selector),
-    );
-    const target = page.locator(normalized);
+    const target = entry[1].playwrightRef
+      ? locatorFromRef(page, entry[1].playwrightRef)
+      : page.locator(entry[1].selector);
     if (await target.count() !== 1) {
-      throw new Error(`accessible name 变化后 normalized Locator 不唯一: ${normalized}`);
+      throw new Error(`accessible name 变化后 Locator 不唯一: ${entry[0]}`);
     }
     await actions.click(ctx, entry[0]);
     if (await page.locator('#ax-swap').getAttribute('data-contract-clicked') !== 'yes') {
@@ -2126,7 +1778,7 @@ app.whenReady().then(async () => {
     if (!changed) {
       throw new Error('后置快照未反映新的 accessible name');
     }
-    return `${normalized}；post=${changed.role}:${changed.name}`;
+    return `${entry[0]}；post=${changed.role}:${changed.name}`;
   });
 
   await check('未知 ref 报 stale_ref 而不是静默失败', async () => {
@@ -2155,91 +1807,6 @@ app.whenReady().then(async () => {
     return '旧 ref 仍指向同一元素（编号复用，可接受）';
   });
 
-  // ── 录制路径：页面内 CSS 路径 → 跨帧链 → normalize → 回放 ────────────
-  // 这是 P4 的生产路径。注入脚本只产出「此刻唯一命中」的临时路径，稳定性完全由
-  // normalize() 负责；跨帧时要拼出 enter-frame 链。
-  await check('录制路径：主文档 cssPath → 稳定选择器 → 回放', async () => {
-    const cssPath = await page.evaluate(() => {
-      const el = document.getElementById('late');
-      const parts: string[] = [];
-      let node: Element | null = el;
-      while (node && parts.length < 64) {
-        const tag = node.tagName.toLowerCase();
-        const id = node.getAttribute('id');
-        if (id && document.querySelectorAll('#' + CSS.escape(id)).length === 1) {
-          parts.unshift('#' + CSS.escape(id));
-          break;
-        }
-        const parent: Element | null = node.parentElement;
-        if (!parent) { parts.unshift(tag); break; }
-        let index = 1;
-        for (const child of parent.children) {
-          if (child === node) break;
-          if (child.tagName.toLowerCase() === tag) index += 1;
-        }
-        parts.unshift(`${tag}:nth-of-type(${index})`);
-        node = parent;
-      }
-      return parts.join(' > ');
-    });
-    if (!cssPath) throw new Error('页面内未算出 cssPath');
-    const persisted = await toStableSelector(page.locator(cssPath));
-    if (/nth-of-type/.test(persisted)) {
-      throw new Error(`normalize 未升级掉脆弱路径: ${persisted}`);
-    }
-    await page.evaluate(() => {
-      const node = document.getElementById('late-result');
-      if (node) node.textContent = '';
-    });
-    await page.locator(persisted).click();
-    if ((await page.locator('#late-result').textContent()) !== '延迟按钮已点击') {
-      throw new Error('回放未生效');
-    }
-    return `${cssPath}  →  ${persisted}`;
-  });
-
-  await check('录制路径：iframe 内 cssPath + framePath → 跨帧稳定选择器 → 回放', async () => {
-    // 帧内路径（在子框架文档里算）
-    const inner = await page.frameLocator('#frame').locator('#fb').evaluate((el) => {
-      const parts: string[] = [];
-      let node: Element | null = el;
-      while (node && parts.length < 64) {
-        const tag = node.tagName.toLowerCase();
-        const id = node.getAttribute('id');
-        if (id && node.ownerDocument.querySelectorAll('#' + CSS.escape(id)).length === 1) {
-          parts.unshift('#' + CSS.escape(id));
-          break;
-        }
-        const parent: Element | null = node.parentElement;
-        if (!parent) { parts.unshift(tag); break; }
-        let index = 1;
-        for (const child of parent.children) {
-          if (child === node) break;
-          if (child.tagName.toLowerCase() === tag) index += 1;
-        }
-        parts.unshift(`${tag}:nth-of-type(${index})`);
-        node = parent;
-      }
-      return parts.join(' > ');
-    });
-    // 父文档里的 iframe 元素路径
-    const framePath = '#frame';
-    const chain = `${framePath} >> internal:control=enter-frame >> ${inner}`;
-    const persisted = await toStableSelector(page.locator(chain));
-    if (!persisted.includes('enter-frame')) throw new Error(`未补出跨帧链: ${persisted}`);
-    await page.evaluate(() => {
-      const node = document.getElementById('frame-result');
-      if (node) node.textContent = '未收到';
-    });
-    await page.locator(persisted).click();
-    await page.waitForFunction(
-      () => document.getElementById('frame-result')?.textContent === '框架按钮已点击',
-      null,
-      { timeout: 5000 },
-    );
-    return persisted;
-  });
-
   // ── 跨窗口迁移：AI 后台 ↔ 用户面板 ───────────────────────────────────
   const panel = new BrowserWindow({ ...AUTOMATION_VIEWPORT, show: false });
   await check('迁移到面板窗口后：debugger 保持、状态不丢、仍可点击', async () => {
@@ -2264,8 +1831,8 @@ app.whenReady().then(async () => {
       if (node) node.textContent = '';
     });
     await page.getByRole('button', { name: '延迟出现' }).click();
-    const replayed = await page.locator('#late-result').textContent();
-    if (replayed !== '延迟按钮已点击') throw new Error('迁回后点击失效');
+    const clicked = await page.locator('#late-result').textContent();
+    if (clicked !== '延迟按钮已点击') throw new Error('迁回后点击失效');
     return '正常';
   });
 
@@ -2745,13 +2312,16 @@ app.whenReady().then(async () => {
           downloadHost.off('download', listener);
         }
       };
-      const refFor = async (selector: string): Promise<string> => {
-        const located = await execute('locate', [selector]);
-        const ref = String(located.ref ?? '');
-        if (!ref) {
-          throw new Error(`自动下载 locate 缺少 ${selector}: ${JSON.stringify(located)}`);
-        }
-        return ref;
+      const refFor = async (label: string): Promise<string> => {
+        const observed = await execute('snapshot', ['--compact']) as {
+          snapshot?: string;
+        };
+        const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const match = new RegExp(`[^\\n]*"${escaped}"[^\\n]*\\[ref=(@?e\\d+)\\]`).exec(
+          String(observed.snapshot ?? ''),
+        );
+        if (!match) throw new Error(`自动下载 snapshot 缺少 ${label}`);
+        return match[1].startsWith('@') ? match[1] : `@${match[1]}`;
       };
       const responseDownloads = (
         response: Record<string, unknown>,
@@ -4308,10 +3878,9 @@ app.whenReady().then(async () => {
       const evaluation = enginePage.evaluate(() => window.confirm('宿主决定？'));
       const observed = await engine.handleDialog(engineView, {
         accept: false,
-        expectedType: 'confirm',
         timeoutMs: 5_000,
       });
-      if (!observed.matched || observed.message !== '宿主决定？') {
+      if (observed.message !== '宿主决定？') {
         throw new Error(`Dialog 观测异常: ${JSON.stringify(observed)}`);
       }
       if (await evaluation !== false) throw new Error('宿主 dismiss 未生效');
@@ -4372,12 +3941,10 @@ app.whenReady().then(async () => {
       const click = enginePage.locator('#engine-locator-confirm').click();
       const observed = await engine.handleDialog(engineView, {
         accept: true,
-        expectedType: 'confirm',
         timeoutMs: 5_000,
       });
       if (
-        !observed.matched
-        || observed.type !== 'confirm'
+        observed.type !== 'confirm'
         || observed.message !== 'engine-locator-confirm'
       ) {
         throw new Error(`Engine Locator dialog 观测异常: ${JSON.stringify(observed)}`);
@@ -4435,7 +4002,7 @@ app.whenReady().then(async () => {
       args?: string[],
       extra?: Record<string, unknown>,
     ) => Promise<unknown>;
-    locate: (selector: string, targetId?: string) => Promise<string>;
+    snapshotRef: (label: string, targetId?: string) => Promise<string>;
     dialogStatus: (targetId?: string) => Promise<Record<string, unknown>>;
   };
 
@@ -4532,15 +4099,16 @@ app.whenReady().then(async () => {
         20_000,
         `${contractName} execute ${command}`,
       );
-      const locate = async (selector: string, locateTargetId = targetId): Promise<string> => {
-        const located = await execute('locate', [selector], { target_id: locateTargetId }) as {
-          data?: { ref?: string };
-        };
-        const ref = String(located.data?.ref ?? '');
-        if (!/^@s\d+$/.test(ref)) {
-          throw new Error(`BrowserHost locate 未返回稳定 ref: ${JSON.stringify(located)}`);
-        }
-        return ref;
+      const snapshotRef = async (label: string, snapshotTargetId = targetId): Promise<string> => {
+        const observed = await execute('snapshot', ['--compact'], {
+          target_id: snapshotTargetId,
+        }) as { data?: { snapshot?: string } };
+        const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const match = new RegExp(`[^\\n]*"${escaped}"[^\\n]*\\[ref=(@?e\\d+)\\]`).exec(
+          String(observed.data?.snapshot ?? ''),
+        );
+        if (!match) throw new Error(`BrowserHost snapshot 缺少 ${label}`);
+        return match[1].startsWith('@') ? match[1] : `@${match[1]}`;
       };
       const dialogStatus = async (statusTargetId = targetId): Promise<Record<string, unknown>> => {
         const result = await execute('dialog', ['status'], {
@@ -4554,7 +4122,7 @@ app.whenReady().then(async () => {
         tab,
         page,
         execute,
-        locate,
+        snapshotRef,
         dialogStatus,
       });
     } finally {
@@ -4581,12 +4149,10 @@ app.whenReady().then(async () => {
         const click = page.locator('#sync-confirm').click();
         const observed = await owner.engine.handleDialog(tab.view, {
           accept: true,
-          expectedType: 'confirm',
           timeoutMs: 5_000,
         });
         if (
-          !observed.matched
-          || observed.type !== 'confirm'
+          observed.type !== 'confirm'
           || observed.message !== 'sync-confirm'
         ) {
           throw new Error(`Host 直连 Dialog 观测异常: ${JSON.stringify(observed)}`);
@@ -4639,11 +4205,11 @@ app.whenReady().then(async () => {
     withHostDialogHarness('sync-confirm', async ({
       page,
       execute,
-      locate,
+      snapshotRef,
       dialogStatus,
     }) => {
-      const syncRef = await locate('#sync-confirm');
-      console.log('      dialog sync: ref located');
+      const syncRef = await snapshotRef('sync-confirm');
+      console.log('      dialog sync: snapshot ref ready');
       await hostError(execute('click', [syncRef]), 'dialog_pending');
       console.log('      dialog sync: pending surfaced');
       const syncStatus = await dialogStatus();
@@ -4666,11 +4232,11 @@ app.whenReady().then(async () => {
       if (syncResult !== 'true') {
         throw new Error('同步 confirm accept 未恢复触发动作');
       }
-      const postRef = await locate('#post-dialog');
+      const postRef = await snapshotRef('post-dialog');
       await execute('click', [postRef]);
       console.log('      dialog sync: post locator action completed');
       if (await page.locator('#post-dialog-state').textContent() !== 'clicked') {
-        throw new Error('关闭同步 confirm 后 BrowserHost locate/click 失效');
+        throw new Error('关闭同步 confirm 后 BrowserHost snapshot-ref click 失效');
       }
       const evaluated = await contractDeadline(
         page.evaluate(() => {
@@ -4681,18 +4247,18 @@ app.whenReady().then(async () => {
         '同步 confirm 关闭后的 page.evaluate',
       );
       if (evaluated !== 'eval-ok') throw new Error('关闭同步 confirm 后 evaluate 失效');
-      return 'sync accept + Host locate/click + page.evaluate';
+      return 'sync accept + Host snapshot-ref click + page.evaluate';
     }));
 
   await check('BrowserHost 延时 confirm：动作完成后仍可发现、关闭并继续', async () =>
     withHostDialogHarness('delayed-confirm', async ({
       page,
       execute,
-      locate,
+      snapshotRef,
       dialogStatus,
     }) => {
-      const delayedRef = await locate('#delayed-confirm');
-      console.log('      dialog delayed: ref located');
+      const delayedRef = await snapshotRef('delayed-confirm');
+      console.log('      dialog delayed: snapshot ref ready');
       let surfacedDuringClick = false;
       try {
         await execute('click', [delayedRef]);
@@ -4719,22 +4285,22 @@ app.whenReady().then(async () => {
       if (await page.locator('#delayed-result').textContent() !== 'false') {
         throw new Error('延时 confirm dismiss 未恢复页面任务');
       }
-      const postRef = await locate('#post-dialog');
+      const postRef = await snapshotRef('post-dialog');
       await execute('click', [postRef]);
       if (await page.locator('#post-dialog-state').textContent() !== 'clicked') {
-        throw new Error('延时 confirm 关闭后 locate/click 失效');
+        throw new Error('延时 confirm 关闭后 snapshot-ref click 失效');
       }
       return `delayed dismiss + recovery；click-race=${surfacedDuringClick}`;
     }));
 
-  await check('BrowserHost alert→confirm 链：逐个处理与原子 expected 序列', async () =>
+  await check('BrowserHost alert→confirm 链：逐个处理', async () =>
     withHostDialogHarness('dialog-chain', async ({
       page,
       execute,
-      locate,
+      snapshotRef,
       dialogStatus,
     }) => {
-      const chainRef = await locate('#chain-dialog');
+      const chainRef = await snapshotRef('chain-dialog');
       await hostError(execute('click', [chainRef]), 'dialog_pending');
       const first = await dialogStatus();
       if (
@@ -4764,34 +4330,14 @@ app.whenReady().then(async () => {
         throw new Error('链式 confirm dismiss 未恢复原点击');
       }
 
-      await execute('click', [chainRef], {
-        command_timeout_ms: 10_000,
-        expected_dialogs: [
-          { type: 'alert', accept: true, text: '' },
-          { type: 'confirm', accept: false, text: '' },
-        ],
-      });
-      const afterExpected = await dialogStatus();
-      if (afterExpected.hasDialog !== false) {
-        throw new Error(`expected 链后仍残留 dialog: ${JSON.stringify(afterExpected)}`);
-      }
-      if (
-        await contractDeadline(
-          page.evaluate(() => document.title),
-          5_000,
-          'expected dialog 链后的 page.evaluate',
-        ) !== 'BrowserHost dialog harness'
-      ) {
-        throw new Error('expected 链后 evaluate 失效');
-      }
-      return 'manual chain + expected chain 均完成且无残留';
+      return 'manual chain 完成且无残留';
     }));
 
   await check('BrowserHost 导航 onload dialog：动作中断、关闭、后续 locator', async () =>
     withHostDialogHarness('dialog-onload', async ({
       page,
       execute,
-      locate,
+      snapshotRef,
       dialogStatus,
     }) => {
       await hostError(
@@ -4816,44 +4362,12 @@ app.whenReady().then(async () => {
       ) {
         throw new Error('onload confirm dismiss 未恢复导航脚本');
       }
-      const postRef = await locate('#onload-after');
+      const postRef = await snapshotRef('onload-after');
       await execute('click', [postRef]);
       if (await page.locator('#onload-after-state').textContent() !== 'clicked') {
-        throw new Error('onload dialog 后 locate/click 失效');
+        throw new Error('onload dialog 后 snapshot-ref click 失效');
       }
       return 'onload confirm 被 Host 捕获并可继续动作';
-    }));
-
-  await check('BrowserHost expected dialog 类型不符：确定性失败并可继续', async () =>
-    withHostDialogHarness('dialog-mismatch', async ({
-      page,
-      execute,
-      locate,
-      dialogStatus,
-    }) => {
-      const mismatchRef = await locate('#mismatch-confirm');
-      await hostError(
-        execute('click', [mismatchRef], {
-          command_timeout_ms: 10_000,
-          expected_dialogs: [
-            { type: 'alert', accept: true, text: '' },
-          ],
-        }),
-        'replay_dialog_mismatch',
-      );
-      const status = await dialogStatus();
-      if (status.hasDialog !== false) {
-        throw new Error(`mismatch 后 dialog 未自动清理: ${JSON.stringify(status)}`);
-      }
-      if (await page.locator('#mismatch-result').textContent() !== 'false') {
-        throw new Error('mismatch 未按 fail-closed dismiss 实际 confirm');
-      }
-      const postRef = await locate('#post-dialog');
-      await execute('click', [postRef]);
-      if (await page.locator('#post-dialog-state').textContent() !== 'clicked') {
-        throw new Error('mismatch 清理后 locate/click 失效');
-      }
-      return 'replay_dialog_mismatch + auto-dismiss + recovery';
     }));
 
   await check('BrowserHost 早期 popup about:blank + document.write alert 不丢事件', async () =>
@@ -4861,10 +4375,10 @@ app.whenReady().then(async () => {
       owner,
       tab,
       execute,
-      locate,
+      snapshotRef,
       dialogStatus,
     }) => {
-      const popupRef = await locate('#early-popup-dialog');
+      const popupRef = await snapshotRef('early-popup-dialog');
       await hostError(execute('click', [popupRef]), 'dialog_pending');
       const status = await dialogStatus();
       if (
@@ -4895,1712 +4409,13 @@ app.whenReady().then(async () => {
       ) {
         throw new Error(`早期 popup 文档异常: ${popupPage.url()}`);
       }
-      const afterRef = await locate('#popup-after', popupTab.targetId);
+      const afterRef = await snapshotRef('popup-after', popupTab.targetId);
       await execute('click', [afterRef], { target_id: popupTab.targetId });
       if (await popupPage.locator('#popup-after-state').textContent() !== 'clicked') {
-        throw new Error('popup alert 关闭后 popup locator/click 失效');
+        throw new Error('popup alert 关闭后 popup snapshot-ref click 失效');
       }
       return 'early popup alert + session routing + popup recovery';
     }));
-
-  await check('BrowserHost v11 viewport：面板去重录制 + 响应式原子回放', async () => {
-    const previousV11Gate = process.env.CREW_BROWSER_RECORDING_V11_PHASE_A;
-    process.env.CREW_BROWSER_RECORDING_V11_PHASE_A = '1';
-    const recorderDigest = createHash('sha256')
-      .update('pw-contract-v11-resize-recorder', 'utf8')
-      .digest('hex');
-    const replayDigest = createHash('sha256')
-      .update('pw-contract-v11-resize-replay', 'utf8')
-      .digest('hex');
-    const recorderRuntimeKey = `crew_${recorderDigest.slice(0, 12)}`;
-    const replayRuntimeKey = `crew_${replayDigest.slice(0, 12)}`;
-    const recorderSessionId = 'pw-contract-v11-resize-session';
-    const recorderSessionHash = createHash('sha256')
-      .update(recorderSessionId, 'utf8')
-      .digest('hex')
-      .slice(0, 32);
-    const recorderLabel = `s${recorderSessionHash}-1`;
-    const resizeURL = new URL('/host-responsive-resize', topOriginURL).href;
-    const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'crew-pw-v11-resize-'));
-    const recorderProfile = path.join(
-      tempRoot,
-      'accounts',
-      `acct_${recorderDigest.slice(0, 16)}`,
-      'browser',
-      'profile',
-    );
-    const replayProfile = path.join(
-      tempRoot,
-      'accounts',
-      `acct_${replayDigest.slice(0, 16)}`,
-      'browser',
-      'profile',
-    );
-    const replayDownloads = path.join(tempRoot, 'replay-downloads');
-    await Promise.all([
-      mkdir(recorderProfile, { recursive: true }),
-      mkdir(replayProfile, { recursive: true }),
-      mkdir(replayDownloads, { recursive: true }),
-    ]);
-    const recorderWindow = new BrowserWindow({
-      show: false,
-      width: 1100,
-      height: 800,
-      webPreferences: { sandbox: true },
-    });
-    const replayWindow = new BrowserWindow({
-      show: false,
-      width: 1100,
-      height: 800,
-      webPreferences: { sandbox: true },
-    });
-    const recorderHost = new BrowserHost(() => recorderWindow);
-    const replayHost = new BrowserHost(() => replayWindow);
-    const rows: Array<Record<string, unknown>> = [];
-    recorderHost.on('recording', (event: unknown) => {
-      if (event && typeof event === 'object' && !Array.isArray(event)) {
-        rows.push(event as Record<string, unknown>);
-      }
-    });
-    try {
-      const created = await recorderHost.handleRpc({
-        runtime_key: recorderRuntimeKey,
-        method: 'execute',
-        params: {
-          profile_dir: recorderProfile,
-          proxy_url: policyProxyURL,
-          command: 'tab',
-          args: ['new', '--label', recorderLabel, resizeURL],
-          mutating: true,
-        },
-      }) as { data?: { targetId?: string } };
-      const targetId = String(created.data?.targetId ?? '');
-      if (!targetId) throw new Error('viewport recorder tab 未创建');
-      await recorderHost.handleRpc({
-        runtime_key: recorderRuntimeKey,
-        method: 'set_mode',
-        params: {
-          profile_dir: recorderProfile,
-          target_id: targetId,
-          mode: 'human',
-        },
-      });
-      recorderHost.setPanel({
-        runtimeKey: recorderRuntimeKey,
-        sessionId: recorderSessionId,
-        tabLabel: recorderLabel,
-        mode: 'human',
-        bounds: { x: 0, y: 0, width: 900, height: 620 },
-        visible: true,
-      });
-      const recorderOwner = (
-        recorderHost as unknown as {
-          owners: Map<string, {
-            tabs: Map<string, { targetId: string; view: WebContentsView }>;
-            engine: PlaywrightEngine;
-          }>;
-        }
-      ).owners.get(recorderRuntimeKey);
-      const recorderTab = [...(recorderOwner?.tabs.values() ?? [])]
-        .find((candidate) => candidate.targetId === targetId);
-      if (!recorderOwner || !recorderTab) {
-        throw new Error('viewport recorder 拓扑不可用');
-      }
-      const recorderPage = await recorderOwner.engine.pageForView(recorderTab.view);
-      await recorderPage.waitForFunction(
-        ({ width, height }) => innerWidth === width && innerHeight === height,
-        { width: 900, height: 620 },
-        { timeout: 10_000 },
-      );
-      const recorderBounds = recorderTab.view.getBounds();
-      const recorderCssViewport = await recorderPage.evaluate(() => ({
-        width: innerWidth,
-        height: innerHeight,
-      }));
-      if (
-        recorderBounds.width !== recorderCssViewport.width
-        || recorderBounds.height !== recorderCssViewport.height
-      ) {
-        throw new Error(
-          `Electron DIP/CSS viewport 不一致: ${JSON.stringify({
-            recorderBounds,
-            recorderCssViewport,
-          })}`,
-        );
-      }
-      await recorderHost.handleRpc({
-        runtime_key: recorderRuntimeKey,
-        method: 'set_recording',
-        params: {
-          profile_dir: recorderProfile,
-          target_id: targetId,
-          recording_id: 'c0ffee88aabb5511',
-          action: 'start',
-        },
-      });
-
-      // Moving only x/y is layout chrome, not a browser viewport transition.
-      recorderHost.setPanel({
-        runtimeKey: recorderRuntimeKey,
-        sessionId: recorderSessionId,
-        tabLabel: recorderLabel,
-        mode: 'human',
-        bounds: { x: 30, y: 40, width: 900, height: 620 },
-        visible: true,
-      });
-      recorderHost.setPanel({
-        runtimeKey: recorderRuntimeKey,
-        sessionId: recorderSessionId,
-        tabLabel: recorderLabel,
-        mode: 'human',
-        bounds: { x: 0, y: 0, width: 640, height: 500 },
-        visible: true,
-      });
-      recorderHost.setPanel({
-        runtimeKey: recorderRuntimeKey,
-        sessionId: recorderSessionId,
-        tabLabel: recorderLabel,
-        mode: 'human',
-        bounds: { x: 20, y: 20, width: 640, height: 500 },
-        visible: true,
-      });
-      await recorderPage.waitForFunction(
-        () => (
-          innerWidth === 640
-          && innerHeight === 500
-          && matchMedia('(max-width:700px)').matches
-        ),
-        undefined,
-        { timeout: 10_000 },
-      );
-      await recorderHost.handleRpc({
-        runtime_key: recorderRuntimeKey,
-        method: 'set_recording',
-        params: {
-          profile_dir: recorderProfile,
-          target_id: targetId,
-          recording_id: 'c0ffee88aabb5511',
-          action: 'stop',
-        },
-      });
-
-      const actionRows = rows.filter(
-        (row) => row.recordKind === 'action'
-          && row.action
-          && typeof row.action === 'object',
-      );
-      const recordedActions = actionRows.map(
-        (row) => row.action as Record<string, unknown>,
-      );
-      if (
-        JSON.stringify(recordedActions) !== JSON.stringify([
-          {
-            name: 'openPage',
-            url: resizeURL,
-            viewport: { width: 900, height: 620 },
-          },
-          { name: 'x-crew-resize', width: 640, height: 500 },
-        ])
-      ) {
-        throw new Error(`viewport 录制/去重异常: ${JSON.stringify(recordedActions)}`);
-      }
-      const pageGuid = String(actionRows[0]?.pageGuid ?? '');
-      if (!pageGuid) throw new Error('viewport 录制缺少 pageGuid');
-
-      let replayTargetId = '';
-      let transactionId = 0;
-      const replayAction = async (
-        action: Record<string, unknown>,
-      ): Promise<Record<string, unknown>> => {
-        transactionId += 1;
-        const result = await replayHost.handleRpc({
-          runtime_key: replayRuntimeKey,
-          method: 'execute_transaction',
-          params: {
-            profile_dir: replayProfile,
-            proxy_url: policyProxyURL,
-            download_dir: replayDownloads,
-            schemaVersion: 1,
-            transactionId,
-            source: {
-              pageGuid,
-              ...(replayTargetId ? { targetId: replayTargetId } : {}),
-            },
-            knownPages: replayTargetId
-              ? [{ pageGuid, targetId: replayTargetId }]
-              : [],
-            action,
-            expectedEffects: [],
-            timeoutMs: 15_000,
-          },
-        }) as Record<string, unknown>;
-        const bindings = result.pageBindings;
-        if (Array.isArray(bindings)) {
-          const binding = bindings.find(
-            (candidate) => (
-              candidate
-              && typeof candidate === 'object'
-              && (candidate as { pageGuid?: unknown }).pageGuid === pageGuid
-            ),
-          ) as { targetId?: unknown } | undefined;
-          if (binding?.targetId) replayTargetId = String(binding.targetId);
-        }
-        return result;
-      };
-      for (const action of recordedActions) await replayAction(action);
-      if (!replayTargetId) throw new Error('viewport 回放未绑定目标页面');
-      await replayAction({
-        name: 'click',
-        selector: '#narrow-only',
-        button: 'left',
-        modifiers: [],
-        clickCount: 1,
-        position: null,
-      });
-
-      const replayOwner = (
-        replayHost as unknown as {
-          owners: Map<string, {
-            tabs: Map<string, { targetId: string; view: WebContentsView }>;
-            engine: PlaywrightEngine;
-          }>;
-        }
-      ).owners.get(replayRuntimeKey);
-      const replayTab = [...(replayOwner?.tabs.values() ?? [])]
-        .find((candidate) => candidate.targetId === replayTargetId);
-      if (!replayOwner || !replayTab) throw new Error('viewport replay 拓扑不可用');
-      const replayPage = await replayOwner.engine.pageForView(replayTab.view);
-      const replayViewport = replayPage.viewportSize();
-      const loadViewport = await replayPage.locator('#load-viewport').textContent();
-      const responsiveResult = await replayPage.locator('#responsive-result').textContent();
-      if (
-        replayViewport?.width !== 640
-        || replayViewport.height !== 500
-        || loadViewport !== '900x620'
-        || responsiveResult !== 'clicked:640x500:narrow'
-      ) {
-        throw new Error(
-          `viewport 响应式回放失败: ${JSON.stringify({
-            replayViewport,
-            loadViewport,
-            responsiveResult,
-          })}`,
-        );
-      }
-      return 'DIP=CSS；首次 DOMContentLoaded=900x620；→640x500；x/y 去重';
-    } finally {
-      await Promise.all([
-        recorderHost.dispose().catch(() => undefined),
-        replayHost.dispose().catch(() => undefined),
-      ]);
-      if (!recorderWindow.isDestroyed()) recorderWindow.destroy();
-      if (!replayWindow.isDestroyed()) replayWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
-      if (previousV11Gate === undefined) {
-        delete process.env.CREW_BROWSER_RECORDING_V11_PHASE_A;
-      } else {
-        process.env.CREW_BROWSER_RECORDING_V11_PHASE_A = previousV11Gate;
-      }
-    }
-  });
-
-  await check('BrowserHost v11 导航与既有标签：显式操作、点击因果、lazy join', async () => {
-    const previousV11Gate = process.env.CREW_BROWSER_RECORDING_V11_PHASE_A;
-    delete process.env.CREW_BROWSER_RECORDING_V11_PHASE_A;
-    const ownerDigest = createHash('sha256')
-      .update('pw-contract-v11-navigation-owner', 'utf8')
-      .digest('hex');
-    const runtimeKey = `crew_${ownerDigest.slice(0, 12)}`;
-    const accountDir = `acct_${ownerDigest.slice(0, 16)}`;
-    const sessionId = 'pw-contract-v11-navigation-session';
-    const sessionHash = createHash('sha256')
-      .update(sessionId, 'utf8')
-      .digest('hex')
-      .slice(0, 32);
-    const firstLabel = `s${sessionHash}-1`;
-    const secondLabel = `s${sessionHash}-2`;
-    const firstURL = new URL('/host-record-nav-a', topOriginURL).href;
-    const addressURL = new URL('/host-record-nav-b', topOriginURL).href;
-    const clickURL = new URL('/host-record-nav-c', topOriginURL).href;
-    const backgroundURL = new URL(
-      '/host-record-nav-background?phase=ready',
-      topOriginURL,
-    ).href;
-    const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'crew-pw-v11-navigation-'));
-    const profile = path.join(tempRoot, 'accounts', accountDir, 'browser', 'profile');
-    await mkdir(profile, { recursive: true });
-    const panelWindow = new BrowserWindow({
-      show: false,
-      width: 1100,
-      height: 800,
-      webPreferences: { sandbox: true },
-    });
-    const host = new BrowserHost(() => panelWindow);
-    const rows: Array<Record<string, unknown>> = [];
-    host.on('recording', (event: unknown) => {
-      if (event && typeof event === 'object' && !Array.isArray(event)) {
-        rows.push(event as Record<string, unknown>);
-      }
-    });
-    try {
-      const create = async (label: string, url: string): Promise<string> => {
-        const result = await host.handleRpc({
-          runtime_key: runtimeKey,
-          method: 'execute',
-          params: {
-            profile_dir: profile,
-            proxy_url: policyProxyURL,
-            command: 'tab',
-            args: ['new', '--label', label, url],
-            mutating: true,
-          },
-        }) as { data?: { targetId?: string } };
-        const targetId = String(result.data?.targetId ?? '');
-        if (!targetId) throw new Error(`未创建真实标签页: ${label}`);
-        return targetId;
-      };
-      const firstTargetId = await create(firstLabel, firstURL);
-      const secondTargetId = await create(
-        secondLabel,
-        new URL('/host-record-nav-background?phase=idle', topOriginURL).href,
-      );
-      await host.handleRpc({
-        runtime_key: runtimeKey,
-        method: 'set_mode',
-        params: {
-          profile_dir: profile,
-          target_id: firstTargetId,
-          mode: 'human',
-        },
-      });
-      const execute = (
-        command: string,
-        args: string[] = [],
-        targetId = firstTargetId,
-      ): Promise<unknown> => contractDeadline(
-        host.handleRpc({
-          runtime_key: runtimeKey,
-          method: 'execute',
-          params: {
-            profile_dir: profile,
-            proxy_url: policyProxyURL,
-            target_id: targetId,
-            command,
-            args,
-            mutating: true,
-          },
-        }),
-        20_000,
-        `v11 navigation ${command}`,
-      );
-      await execute('tab', [firstLabel]);
-      host.setPanel({
-        runtimeKey,
-        sessionId,
-        tabLabel: firstLabel,
-        mode: 'human',
-        bounds: { x: 0, y: 0, width: 900, height: 620 },
-        visible: true,
-      });
-
-      type NavigationTabProbe = {
-        targetId: string;
-        view: WebContentsView;
-      };
-      type NavigationOwnerProbe = {
-        tabs: Map<string, NavigationTabProbe>;
-        engine: PlaywrightEngine;
-      };
-      const owner = (
-        host as unknown as { owners: Map<string, NavigationOwnerProbe> }
-      ).owners.get(runtimeKey);
-      const firstTab = [...(owner?.tabs.values() ?? [])]
-        .find((candidate) => candidate.targetId === firstTargetId);
-      const secondTab = [...(owner?.tabs.values() ?? [])]
-        .find((candidate) => candidate.targetId === secondTargetId);
-      if (!owner || !firstTab || !secondTab) {
-        throw new Error('v11 navigation Host 拓扑不可用');
-      }
-      const firstPage = await owner.engine.pageForView(firstTab.view);
-      const secondPage = await owner.engine.pageForView(secondTab.view);
-      firstPage.setDefaultTimeout(10_000);
-      secondPage.setDefaultTimeout(10_000);
-      await host.handleRpc({
-        runtime_key: runtimeKey,
-        method: 'set_recording',
-        params: {
-          profile_dir: profile,
-          target_id: firstTargetId,
-          recording_id: 'a11ce055cc771122',
-          action: 'start',
-        },
-      });
-
-      await execute('open', [addressURL]);
-      if (firstPage.url() !== addressURL) {
-        throw new Error(`地址栏 goto 未落地: ${firstPage.url()}`);
-      }
-      await execute('back');
-      if (firstPage.url() !== firstURL) {
-        throw new Error(`history back 未落地: ${firstPage.url()}`);
-      }
-      await execute('forward');
-      if (firstPage.url() !== addressURL) {
-        throw new Error(`history forward 未落地: ${firstPage.url()}`);
-      }
-      await execute('reload');
-      if (firstPage.url() !== addressURL) {
-        throw new Error(`reload 未保留 URL: ${firstPage.url()}`);
-      }
-
-      // Drive a browser-trusted click without going through Host's explicit
-      // navigation command. The contract window is intentionally hidden, so
-      // re-enable Chromium focus emulation only for this synthetic human input.
-      // Its navigation must remain attached to the click.
-      await enableFocusEmulation(firstPage.context(), firstPage);
-      const next = firstPage.locator('#click-next');
-      const box = await next.boundingBox();
-      if (!box) throw new Error('click-next 没有真实布局框');
-      const x = box.x + box.width / 2;
-      const y = box.y + box.height / 2;
-      await firstTab.view.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
-        type: 'mousePressed',
-        x,
-        y,
-        button: 'left',
-        buttons: 1,
-        clickCount: 1,
-      });
-      await firstTab.view.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
-        type: 'mouseReleased',
-        x,
-        y,
-        button: 'left',
-        buttons: 0,
-        clickCount: 1,
-      });
-      await firstPage.waitForURL(clickURL, { timeout: 10_000 });
-
-      const explicitBeforeNoHistory = rows.filter(
-        (row) => (
-          row.recordKind === 'action'
-          && (row.action as { name?: unknown } | undefined)?.name === 'x-crew-navigate'
-        ),
-      ).length;
-      await hostError(execute('forward'), 'no_history');
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      const explicitAfterNoHistory = rows.filter(
-        (row) => (
-          row.recordKind === 'action'
-          && (row.action as { name?: unknown } | undefined)?.name === 'x-crew-navigate'
-        ),
-      ).length;
-      if (explicitAfterNoHistory !== explicitBeforeNoHistory) {
-        throw new Error('no_history 留下 ghost x-crew-navigate');
-      }
-
-      // A background page can navigate freely before selection without joining
-      // the trace. The explicit tab selection is the sole lazy-join boundary.
-      await secondPage.goto(backgroundURL, {
-        waitUntil: 'domcontentloaded',
-        timeout: 10_000,
-      });
-      if (
-        rows.some((row) => (
-          row.recordKind === 'action'
-          && row.pageGuid === 'p2'
-        ))
-      ) {
-        throw new Error('未选择的后台标签页提前进入录制 ledger');
-      }
-      await execute('tab', [secondLabel]);
-      await execute('tab', [firstLabel]);
-      await host.handleRpc({
-        runtime_key: runtimeKey,
-        method: 'close_target',
-        params: {
-          profile_dir: profile,
-          target_id: secondTargetId,
-        },
-      });
-      await host.handleRpc({
-        runtime_key: runtimeKey,
-        method: 'set_recording',
-        params: {
-          profile_dir: profile,
-          target_id: firstTargetId,
-          recording_id: 'a11ce055cc771122',
-          action: 'stop',
-        },
-      });
-
-      const actions = rows.filter(
-        (row) => (
-          row.recordKind === 'action'
-          && row.action
-          && typeof row.action === 'object'
-        ),
-      );
-      const explicit = actions.filter(
-        (row) => (row.action as { name?: unknown }).name === 'x-crew-navigate',
-      );
-      const explicitActions = explicit.map((row) => row.action);
-      const expectedExplicit = [
-        { name: 'x-crew-navigate', operation: 'goto', url: addressURL },
-        { name: 'x-crew-navigate', operation: 'back', url: '' },
-        { name: 'x-crew-navigate', operation: 'forward', url: '' },
-        { name: 'x-crew-navigate', operation: 'reload', url: '' },
-      ];
-      if (JSON.stringify(explicitActions) !== JSON.stringify(expectedExplicit)) {
-        throw new Error(`显式导航动作不精确: ${JSON.stringify(explicitActions)}`);
-      }
-      const committedUrls = [addressURL, firstURL, addressURL, addressURL];
-      explicit.forEach((action, index) => {
-        const signal = rows.find((row) => (
-          row.recordKind === 'signal'
-          && (row.signal as { name?: unknown } | undefined)?.name === 'navigation'
-          && row.transactionId === action.transactionId
-        ));
-        if (
-          !signal
-          || (signal.signal as { url?: unknown }).url !== committedUrls[index]
-          || signal.step !== action.step
-        ) {
-          throw new Error(`显式导航 signal 未同事务: ${JSON.stringify({ action, signal })}`);
-        }
-      });
-      const click = actions.find(
-        (row) => (
-          (row.action as { name?: unknown }).name === 'click'
-          && (
-            row.evidence as { target?: { id?: unknown } } | undefined
-          )?.target?.id === 'click-next'
-        ),
-      );
-      const clickSignal = click
-        ? rows.find((row) => (
-            row.recordKind === 'signal'
-            && (row.signal as { name?: unknown }).name === 'navigation'
-            && row.transactionId === click.transactionId
-          ))
-        : undefined;
-      if (
-        !click
-        || !clickSignal
-        || (clickSignal.signal as { url?: unknown }).url !== clickURL
-      ) {
-        throw new Error(
-          `点击导航未保持 click+signal 因果: ${JSON.stringify({ click, clickSignal })}`,
-        );
-      }
-      if (
-        actions.some(
-          (row) => (row.action as { name?: unknown }).name === 'navigate',
-        )
-      ) {
-        throw new Error('v11 导航退化成 generic navigate');
-      }
-
-      const topology = actions
-        .filter((row) => (
-          ['openPage', 'x-crew-activatePage', 'closePage'].includes(
-            String((row.action as { name?: unknown }).name ?? ''),
-          )
-        ))
-        .map((row) => ({
-          pageGuid: row.pageGuid,
-          action: row.action,
-        }));
-      const expectedTopology = [
-        {
-          pageGuid: 'p1',
-          action: {
-            name: 'openPage',
-            url: firstURL,
-            viewport: { width: 900, height: 620 },
-          },
-        },
-        {
-          pageGuid: 'p2',
-          action: {
-            name: 'openPage',
-            url: backgroundURL,
-            viewport: (topology[1]?.action as { viewport?: unknown } | undefined)?.viewport,
-          },
-        },
-        { pageGuid: 'p2', action: { name: 'x-crew-activatePage' } },
-        { pageGuid: 'p1', action: { name: 'x-crew-activatePage' } },
-        { pageGuid: 'p2', action: { name: 'closePage' } },
-      ];
-      if (
-        topology.length !== expectedTopology.length
-        || topology.some((entry, index) => {
-          const expected = expectedTopology[index];
-          if (entry.pageGuid !== expected?.pageGuid) return true;
-          const action = entry.action as Record<string, unknown>;
-          const expectedAction = expected.action as Record<string, unknown>;
-          if (action.name !== expectedAction.name || action.url !== expectedAction.url) return true;
-          if (
-            action.name === 'openPage'
-            && (
-              !action.viewport
-              || typeof action.viewport !== 'object'
-              || !Number.isFinite(Number((action.viewport as { width?: unknown }).width))
-              || !Number.isFinite(Number((action.viewport as { height?: unknown }).height))
-            )
-          ) {
-            return true;
-          }
-          return false;
-        })
-      ) {
-        throw new Error(`lazy join 拓扑/顺序异常: ${JSON.stringify(topology)}`);
-      }
-      const close = actions.find(
-        (row) => (
-          row.pageGuid === 'p2'
-          && (row.action as { name?: unknown }).name === 'closePage'
-        ),
-      );
-      const closedSignal = close
-        ? rows.find((row) => (
-            row.recordKind === 'signal'
-            && (row.signal as { name?: unknown }).name === 'x-crew-pageClosed'
-            && row.transactionId === close.transactionId
-          ))
-        : undefined;
-      if (!close || !closedSignal || closedSignal.pageGuid !== 'p2') {
-        throw new Error(`closePage signal 未同事务: ${JSON.stringify({ close, closedSignal })}`);
-      }
-      const steps = actions.map((row) => Number(row.step));
-      if (steps.some((step, index) => step !== index + 1)) {
-        throw new Error(`action step 存在 ghost/gap: ${JSON.stringify(steps)}`);
-      }
-      return 'goto/back/forward/reload 同事务；click 因果；p2 lazy join/activate/close';
-    } finally {
-      await host.dispose().catch(() => undefined);
-      if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
-      if (previousV11Gate === undefined) {
-        delete process.env.CREW_BROWSER_RECORDING_V11_PHASE_A;
-      } else {
-        process.env.CREW_BROWSER_RECORDING_V11_PHASE_A = previousV11Gate;
-      }
-    }
-  });
-
-  await check('BrowserHost recorder：键盘/粘贴 + frame/OOPIF/upload 全链路', async () => {
-    const ownerDigest = createHash('sha256')
-      .update('pw-contract-recorder-owner', 'utf8')
-      .digest('hex');
-    const runtimeKey = `crew_${ownerDigest.slice(0, 12)}`;
-    const accountDir = `acct_${ownerDigest.slice(0, 16)}`;
-    const sessionId = 'pw-contract-recorder-session';
-    const sessionHash = createHash('sha256')
-      .update(sessionId, 'utf8')
-      .digest('hex')
-      .slice(0, 32);
-    const tabLabel = `s${sessionHash}-1`;
-    const recordingId = 'c0ffee1234abcdef';
-    const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'crew-pw-recorder-'));
-    const profile = path.join(tempRoot, 'accounts', accountDir, 'browser', 'profile');
-    await mkdir(profile, { recursive: true });
-    const uploadOne = path.join(tempRoot, 'contract-one.pdf');
-    const uploadTwo = path.join(tempRoot, 'contract-two.png');
-    await writeFile(uploadOne, 'first recorder upload fixture', 'utf8');
-    await writeFile(uploadTwo, 'second recorder upload fixture', 'utf8');
-    const clipboardBeforeContract = clipboard.readText();
-    const panelWindow = new BrowserWindow({
-      show: false,
-      width: 1100,
-      height: 800,
-      webPreferences: { sandbox: true },
-    });
-    const recorderHost = new BrowserHost(() => panelWindow);
-    const recorded: Array<Record<string, unknown>> = [];
-    recorderHost.on('recording', (event: unknown) => {
-      if (!event || typeof event !== 'object' || Array.isArray(event)) return;
-      const row = event as Record<string, unknown>;
-      if (row.schemaVersion !== 11) {
-        recorded.push(row);
-        return;
-      }
-      if (
-        row.recordKind !== 'action'
-        || !row.action
-        || typeof row.action !== 'object'
-        || Array.isArray(row.action)
-      ) {
-        return;
-      }
-      // Keep the mature recorder behavior assertions below readable while
-      // exercising the default-on v11 wire contract. This is a test-only view
-      // over the exact v11 action/evidence pair, not a production conversion.
-      const action = row.action as Record<string, unknown>;
-      const evidence = (
-        row.evidence
-        && typeof row.evidence === 'object'
-        && !Array.isArray(row.evidence)
-      ) ? row.evidence as Record<string, unknown> : {};
-      const name = String(action.name ?? '');
-      const modifiers = Array.isArray(action.modifiers)
-        ? action.modifiers.map((modifier) => (
-            modifier === 'Control' ? 'Ctrl' : String(modifier)
-          ))
-        : [];
-      const legacyAction = name === 'openPage' || name === 'navigate'
-        ? 'navigate'
-        : name === 'press'
-          ? 'key'
-          : name === 'fill'
-            ? 'input'
-            : name === 'setInputFiles'
-              ? 'upload'
-              : name;
-      const files = Array.isArray(action.files)
-        ? action.files.filter((file): file is string => typeof file === 'string')
-        : [];
-      recorded.push({
-        ...row,
-        action: legacyAction,
-        target: evidence.target ?? null,
-        selector: action.selector ?? action.sourceSelector ?? '',
-        targetSelector: action.targetSelector ?? '',
-        url: evidence.url ?? action.url ?? '',
-        position: action.position ?? null,
-        pointerType: action.pointerType ?? '',
-        gestureStart: action.start ?? null,
-        gesturePoints: action.points ?? [],
-        key: name === 'press'
-          ? [...modifiers, String(action.key ?? '')].filter(Boolean).join('+')
-          : '',
-        value: name === 'fill' ? action.text ?? '' : '',
-        paths: files,
-        fileCount: files.length,
-        multiple: files.length > 1,
-        uploadMode: name === 'setInputFiles' ? 'paths' : '',
-      });
-    });
-
-    const waitFor = async (
-      predicate: () => boolean,
-      description: string,
-      timeoutMs = 10_000,
-    ): Promise<void> => {
-      const deadline = Date.now() + timeoutMs;
-      while (!predicate()) {
-        if (Date.now() >= deadline) throw new Error(`等待超时: ${description}`);
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      }
-    };
-
-    try {
-      const created = await recorderHost.handleRpc({
-        runtime_key: runtimeKey,
-        method: 'execute',
-        params: {
-          profile_dir: profile,
-          proxy_url: policyProxyURL,
-          command: 'tab',
-          args: ['new', '--label', tabLabel, topOriginURL],
-          mutating: true,
-        },
-      }) as { data?: { targetId?: string } };
-      const targetId = String(created.data?.targetId ?? '');
-      if (!targetId) throw new Error('BrowserHost 未创建 recorder tab');
-      console.log('      recorder: tab created');
-
-      type RecorderTabProbe = {
-        targetId: string;
-        view: WebContentsView;
-        mode: 'ai' | 'human' | 'paused';
-        childSessions: Map<string, Record<string, unknown>>;
-        recording: null | {
-          bindingName: string;
-          controlName: string;
-          sessions: Map<string, { installed: boolean }>;
-          contexts: Set<string>;
-        };
-      };
-      type RecorderOwnerProbe = {
-        tabs: Map<string, RecorderTabProbe>;
-        engine: PlaywrightEngine;
-      };
-      const internals = recorderHost as unknown as {
-        owners: Map<string, RecorderOwnerProbe>;
-      };
-      const recorderOwner = internals.owners.get(runtimeKey);
-      const recorderTab = [...(recorderOwner?.tabs.values() ?? [])]
-        .find((candidate) => candidate.targetId === targetId);
-      if (!recorderOwner || !recorderTab) throw new Error('无法取得 recorder tab 拓扑');
-
-      const recorderPage = await recorderOwner.engine.pageForView(recorderTab.view);
-      recorderPage.setDefaultTimeout(10_000);
-      let frameStage = 'same-origin';
-      try {
-        await recorderPage
-          .frameLocator('#same-origin-frame')
-          .locator('#same-origin-button')
-          .waitFor({ state: 'visible' });
-        frameStage = 'cross-origin';
-        await recorderPage
-          .frameLocator('#cross-origin-frame')
-          .locator('#cross-origin-button')
-          .waitFor({ state: 'visible' });
-      } catch (error) {
-        const navigationDiagnostic = {
-          stage: frameStage,
-          page: recorderPage.url(),
-          closed: recorderPage.isClosed(),
-          main: recorderPage.mainFrame().url(),
-          native: recorderTab.view.webContents.getURL(),
-          nativeFrames: recorderTab.view.webContents.mainFrame.framesInSubtree.map(
-            (frame) => ({
-              url: frame.url,
-              processId: frame.processId,
-              detached: frame.detached,
-            }),
-          ),
-          childSessions: [...recorderTab.childSessions.entries()],
-          crossOriginRequests: [...crossOriginRequests],
-          frames: recorderPage.frames().map((frame) => frame.url()),
-          sameFrameCount: await recorderPage.locator('#same-origin-frame').count(),
-          crossFrameCount: await recorderPage.locator('#cross-origin-frame').count(),
-          crossFrameSrc: await recorderPage
-            .locator('#cross-origin-frame')
-            .getAttribute('src'),
-          contextPages: recorderPage.context().pages().map((candidate) => ({
-            same: candidate === recorderPage,
-            closed: candidate.isClosed(),
-            url: candidate.url(),
-            frames: candidate.frames().map((frame) => frame.url()),
-          })),
-        };
-        console.log(
-          `      recorder navigation diagnostic: ${JSON.stringify(navigationDiagnostic)}`,
-        );
-        throw new Error(
-          `recorder 初始 frame 不可用: ${JSON.stringify(navigationDiagnostic)}; `
-          + `${error instanceof Error ? error.message.replace(/\s+/g, ' ') : String(error)}`,
-        );
-      }
-      console.log('      recorder: initial frames ready');
-      // Production recording uses a visible, focused human-mode view. This
-      // contract deliberately stays hidden and drives trusted browser input
-      // through Playwright, so it keeps AI focus emulation enabled. Native-input
-      // correlation is an audit signal, not a persistence prerequisite.
-      console.log('      recorder: starting');
-      await recorderHost.handleRpc({
-        runtime_key: runtimeKey,
-        method: 'set_recording',
-        params: {
-          profile_dir: profile,
-          target_id: targetId,
-          recording_id: recordingId,
-          action: 'start',
-        },
-      });
-      console.log('      recorder: started');
-      const startedRecording = recorderTab.recording;
-      if (!startedRecording) throw new Error('recorder start 后没有状态');
-      const bindingName = startedRecording.bindingName;
-      const controlName = startedRecording.controlName;
-      for (const frame of recorderTab.view.webContents.mainFrame.framesInSubtree) {
-        const probe = await frame.executeJavaScript(
-          `({
-            binding: typeof globalThis[${JSON.stringify(bindingName)}],
-            active: globalThis[${JSON.stringify(controlName)}]?.isActive?.() === true,
-          })`,
-          false,
-        ) as { binding?: string; active?: boolean };
-        if (probe.binding !== 'function' || probe.active !== true) {
-          throw new Error(`当前 frame 未安装 document-world recorder: ${frame.url}`);
-        }
-      }
-      await waitFor(
-        () => recorded.some((event) => event.action === 'navigate'),
-        'recorder 起始快照',
-        20_000,
-      );
-
-      // Upstream Playwright records an element-relative position only for CANVAS.
-      // This is essential for charts/maps/editors where the selector identifies
-      // the surface but not the intended point.
-      await recorderPage.locator('#recorder-canvas').click({
-        position: { x: 127, y: 42 },
-      });
-      await waitFor(
-        () => recorded.some(
-          (event) => event.action === 'click'
-            && (event.target as { id?: string } | null)?.id === 'recorder-canvas'
-            && (event.position as { x?: number; y?: number } | null)?.x === 127
-            && (event.position as { x?: number; y?: number } | null)?.y === 42,
-        ),
-        'canvas relative click position',
-      );
-      if (await recorderPage.locator('#recorder-canvas-state').textContent() !== '127,42') {
-        throw new Error('CANVAS 实际接收坐标与录制坐标不一致');
-      }
-
-      // A real Chromium pen stream must survive trusted browser input,
-      // document-world recording, Host parsing and v11 action persistence.
-      const penContext: ActionContext = {
-        page: recorderPage,
-        refs: new Map(),
-        hash,
-        timeoutMs: 10_000,
-      };
-      const penRef = '@recorder-pen-contract';
-      await actions.locateBySelector(
-        penContext,
-        penRef,
-        '#recorder-canvas',
-        hash,
-      );
-      try {
-        await actions.pointerGesture(penContext, penRef, {
-          pointerType: 'pen',
-          button: 'left',
-          modifiers: [],
-          start: {
-            x: 20,
-            y: 25,
-            pressure: 0.3,
-            tangentialPressure: -0.4,
-            tiltX: 11,
-            tiltY: -12,
-            twist: 37,
-          },
-          points: [
-            {
-              x: 90,
-              y: 60,
-              elapsedMs: 8,
-              pressure: 0.75,
-              tangentialPressure: 0.2,
-              tiltX: 21,
-              tiltY: -22,
-              twist: 47,
-            },
-            {
-              x: 170,
-              y: 100,
-              elapsedMs: 16,
-              pressure: 0,
-              tiltX: 23,
-              tiltY: -24,
-              twist: 51,
-            },
-          ],
-        });
-      } finally {
-        penContext.refs.delete(penRef);
-      }
-      await waitFor(
-        () => recorded.some(
-          (event) => (
-            event.action === 'x-crew-pointerGesture'
-            && event.pointerType === 'pen'
-            && (event.target as { id?: string } | null)?.id === 'recorder-canvas'
-          ),
-        ),
-        'real pen pointerGesture recording',
-      );
-      const recordedPen = recorded.find(
-        (event) => (
-          event.action === 'x-crew-pointerGesture'
-          && event.pointerType === 'pen'
-          && (event.target as { id?: string } | null)?.id === 'recorder-canvas'
-        ),
-      );
-      const recordedPenStart = recordedPen?.gestureStart as
-        | Record<string, unknown>
-        | undefined;
-      const recordedPenPoints = Array.isArray(recordedPen?.gesturePoints)
-        ? recordedPen.gesturePoints as Array<Record<string, unknown>>
-        : [];
-      if (
-        !recordedPenStart
-        || Math.abs(Number(recordedPenStart.pressure) - 0.3) >= 0.01
-        || recordedPenStart.tiltX !== 11
-        || recordedPenStart.tiltY !== -12
-        || recordedPenStart.twist !== 37
-        || !recordedPenPoints.some((point) => (
-          Math.abs(Number(point.pressure) - 0.75) < 0.01
-          && point.tiltX === 21
-          && point.tiltY === -22
-          && point.twist === 47
-        ))
-        || Number(recordedPenPoints.at(-1)?.pressure) !== 0
-      ) {
-        throw new Error(
-          `真实 pen 录制遥测不完整: ${JSON.stringify(recordedPen)}`,
-        );
-      }
-
-      // Playwright recorder assigns zero-detail clicks to their originating keyboard event.
-      // Enter must activate the page exactly once while the trace keeps only the key action.
-      await recorderPage.locator('#recorder-keyboard-button').press('Enter');
-      await recorderPage.locator('#recorder-keyboard-state').waitFor({ state: 'visible' });
-      if (await recorderPage.locator('#recorder-keyboard-state').textContent()
-        !== 'button-activated') {
-        throw new Error('Enter 没有激活真实 button');
-      }
-      await waitFor(
-        () => recorded.some(
-          (event) => event.action === 'key'
-            && event.key === 'Enter'
-            && (event.target as { id?: string } | null)?.id === 'recorder-keyboard-button',
-        ),
-        'button Enter key event',
-      );
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      const keyboardButtonEvents = recorded.filter(
-        (event) => (event.target as { id?: string } | null)?.id
-          === 'recorder-keyboard-button',
-      );
-      if (
-        keyboardButtonEvents.length !== 1
-        || keyboardButtonEvents[0]?.action !== 'key'
-        || keyboardButtonEvents[0]?.key !== 'Enter'
-      ) {
-        throw new Error(
-          `trusted detail=0 click 被重复记录: ${JSON.stringify(keyboardButtonEvents)}`,
-        );
-      }
-
-      // Single-line Enter commits the pending final input before the submit key. Chromium also
-      // emits a zero-detail click on the submitter; that derived click must not become a step.
-      const enterTextbox = recorderPage.locator('#recorder-enter-textbox');
-      await enterTextbox.fill('真实回车查询');
-      await enterTextbox.press('Enter');
-      await waitFor(
-        () => recorded.some(
-          (event) => event.action === 'input'
-            && event.value === '真实回车查询'
-            && (event.target as { id?: string } | null)?.id === 'recorder-enter-textbox',
-        ) && recorded.some(
-          (event) => event.action === 'key'
-            && event.key === 'Enter'
-            && (event.target as { id?: string } | null)?.id === 'recorder-enter-textbox',
-        ),
-        'textbox final input + Enter',
-      );
-      if (await recorderPage.locator('#recorder-keyboard-state').textContent()
-        !== 'submitted:真实回车查询') {
-        throw new Error('textbox Enter 没有保留真实 form submit 语义');
-      }
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      const implicitSubmitClicks = recorded.filter(
-        (event) => event.action === 'click'
-          && (event.target as { id?: string } | null)?.id === 'recorder-enter-submit',
-      );
-      if (implicitSubmitClicks.length) {
-        throw new Error(
-          `implicit submit 的 detail=0 click 被重复记录: ${JSON.stringify(implicitSubmitClicks)}`,
-        );
-      }
-
-      // Modifier keydowns are transport details, while the actual shortcuts remain durable.
-      const shortcutInput = recorderPage.locator('#recorder-shortcut-input');
-      await shortcutInput.fill('shortcut-contract');
-      for (const key of ['A', 'C', 'X', 'Z']) {
-        await shortcutInput.press(`ControlOrMeta+${key}`);
-      }
-      await recorderPage.locator('#recorder-paste-input').focus();
-      await waitFor(
-        () => {
-          const keys = recorded
-            .filter(
-              (event) => event.action === 'key'
-                && (event.target as { id?: string } | null)?.id
-                  === 'recorder-shortcut-input',
-            )
-            .map((event) => String(event.key ?? '').toLowerCase());
-          return ['a', 'c', 'x', 'z'].every(
-            (key) => keys.some((value) => /^(ctrl|meta)\+/.test(value) && value.endsWith(key)),
-          );
-        },
-        'ControlOrMeta+A/C/X/Z',
-      );
-      const shortcutKeys = recorded
-        .filter(
-          (event) => event.action === 'key'
-            && (event.target as { id?: string } | null)?.id === 'recorder-shortcut-input',
-        )
-        .map((event) => String(event.key ?? ''));
-      if (
-        shortcutKeys.length !== 4
-        || shortcutKeys.some((key) => /^(Control|Meta|Alt|Shift)\+\1$/.test(key))
-      ) {
-        throw new Error(`modifier/shortcut 记录异常: ${JSON.stringify(shortcutKeys)}`);
-      }
-
-      // A real OS clipboard paste must be represented only by the final trusted input.
-      clipboard.writeText('真实系统粘贴文本');
-      const pasteInput = recorderPage.locator('#recorder-paste-input');
-      await pasteInput.press('ControlOrMeta+V');
-      await recorderPage.locator('#recorder-keyboard-button').focus();
-      await waitFor(
-        () => recorded.some(
-          (event) => event.action === 'input'
-            && event.value === '真实系统粘贴文本'
-            && (event.target as { id?: string } | null)?.id === 'recorder-paste-input',
-        ),
-        'clipboard paste final input',
-      );
-      const pasteKeys = recorded.filter(
-        (event) => event.action === 'key'
-          && (event.target as { id?: string } | null)?.id === 'recorder-paste-input',
-      );
-      if (pasteKeys.length) {
-        throw new Error(`Cmd/Ctrl+V 被错误记录为 press: ${JSON.stringify(pasteKeys)}`);
-      }
-
-      // A hidden multi-file input is the common shape behind a styled "上传附件" button.
-      // The page event can only report count/target; BrowserHost must resolve the exact native
-      // File wrappers and paths without reading fakepath or file contents.
-      await recorderPage.locator('#top-upload').setInputFiles([uploadOne, uploadTwo]);
-      console.log('      recorder: top upload dispatched');
-      await waitFor(
-        () => recorded.some(
-          (event) => event.action === 'upload'
-            && (event.target as { id?: string } | null)?.id === 'top-upload'
-            && event.uploadMode === 'paths',
-        ),
-        '顶层隐藏多文件 upload',
-      );
-      const topUpload = recorded.find(
-        (event) => event.action === 'upload'
-          && (event.target as { id?: string } | null)?.id === 'top-upload'
-          && event.uploadMode === 'paths',
-      );
-      if (
-        topUpload?.fileCount !== 2
-        || topUpload.multiple !== true
-        || JSON.stringify(topUpload.paths) !== JSON.stringify([uploadOne, uploadTwo])
-      ) {
-        throw new Error(`顶层多文件路径未精确固化: ${JSON.stringify(topUpload)}`);
-      }
-      console.log('      recorder: top upload paths resolved');
-
-      // Styled button -> native FileChooser -> separate Host file_upload mirrors upstream
-      // browser_file_upload. This path is essential when no visible/ref-addressable input
-      // exists in the current snapshot.
-      await recorderPage.locator('#top-upload-button').click();
-      console.log('      recorder: chooser button clicked');
-      await waitFor(
-        () => recorderOwner.engine.hasPendingFileChooser(recorderTab.view),
-        'styled button pending FileChooser',
-      );
-      const pendingUpload = await recorderHost.handleRpc({
-        runtime_key: runtimeKey,
-        method: 'execute',
-        params: {
-          profile_dir: profile,
-          proxy_url: policyProxyURL,
-          target_id: targetId,
-          command: 'file_upload',
-          args: [uploadOne],
-          mutating: true,
-        },
-      }) as {
-        data?: { canceled?: boolean; uploaded?: number; multiple?: boolean };
-      };
-      if (
-        pendingUpload.data?.canceled !== false
-        || pendingUpload.data.uploaded !== 1
-        || pendingUpload.data.multiple !== true
-      ) {
-        throw new Error(`pending FileChooser 返回异常: ${JSON.stringify(pendingUpload)}`);
-      }
-      await recorderPage.locator('#top-upload-state').waitFor({ state: 'visible' });
-      const uploadState = await recorderPage.locator('#top-upload-state').textContent();
-      if (uploadState !== path.basename(uploadOne)) {
-        throw new Error(`pending FileChooser 未触发页面 change: ${uploadState}`);
-      }
-      if (recorderOwner.engine.hasPendingFileChooser(recorderTab.view)) {
-        throw new Error('完成后 FileChooser 未消费');
-      }
-
-      await recorderPage.locator('#top-upload-button').click();
-      await waitFor(
-        () => recorderOwner.engine.hasPendingFileChooser(recorderTab.view),
-        'cancel pending FileChooser',
-      );
-      const canceledChooser = await recorderHost.handleRpc({
-        runtime_key: runtimeKey,
-        method: 'execute',
-        params: {
-          profile_dir: profile,
-          proxy_url: policyProxyURL,
-          target_id: targetId,
-          command: 'file_upload',
-          args: ['--cancel'],
-          mutating: true,
-        },
-      }) as {
-        data?: { canceled?: boolean; uploaded?: number };
-      };
-      if (
-        canceledChooser.data?.canceled !== true
-        || canceledChooser.data.uploaded !== 0
-        || recorderOwner.engine.hasPendingFileChooser(recorderTab.view)
-      ) {
-        throw new Error(`FileChooser cancel 异常: ${JSON.stringify(canceledChooser)}`);
-      }
-      if (await recorderPage.locator('#top-upload-state').textContent() !== uploadState) {
-        throw new Error('FileChooser cancel 错误改写了已有选择');
-      }
-
-      let noChooserCode = '';
-      try {
-        await recorderHost.handleRpc({
-          runtime_key: runtimeKey,
-          method: 'execute',
-          params: {
-            profile_dir: profile,
-            proxy_url: policyProxyURL,
-            target_id: targetId,
-            command: 'file_upload',
-            args: [uploadTwo],
-            mutating: true,
-          },
-        });
-      } catch (error) {
-        noChooserCode = error && typeof error === 'object' && 'code' in error
-          ? String((error as { code?: unknown }).code ?? '')
-          : '';
-      }
-      if (noChooserCode !== 'no_file_chooser') {
-        throw new Error(`无 pending chooser 未明确拒绝: ${noChooserCode || 'no error'}`);
-      }
-
-      // Replay upload is one Host transaction. Seed chooser A from a different
-      // input, then make trigger B open its own chooser after 750ms. Only B may
-      // receive files; consuming the stale one would mutate top-upload-state.
-      await recorderPage.locator('#top-upload-button').click();
-      await waitFor(
-        () => recorderOwner.engine.hasPendingFileChooser(recorderTab.view),
-        'atomic upload stale chooser seed',
-      );
-      const topStateBeforeAtomic = await recorderPage
-        .locator('#top-upload-state')
-        .textContent();
-      const delayedAtomic = await recorderHost.handleRpc({
-        runtime_key: runtimeKey,
-        method: 'execute',
-        params: {
-          profile_dir: profile,
-          proxy_url: policyProxyURL,
-          target_id: targetId,
-          command: 'upload_with_trigger',
-          args: [],
-          trigger_selector: '#delayed-upload-button',
-          input_selector: '#delayed-upload',
-          files: [uploadTwo],
-          mutating: true,
-        },
-      }) as {
-        data?: { via?: string; uploaded?: number; multiple?: boolean };
-      };
-      if (
-        delayedAtomic.data?.via !== 'chooser'
-        || delayedAtomic.data.uploaded !== 1
-        || delayedAtomic.data.multiple !== true
-      ) {
-        throw new Error(`延迟原子 chooser 返回异常: ${JSON.stringify(delayedAtomic)}`);
-      }
-      await recorderPage.locator('#delayed-upload-state').waitFor({ state: 'visible' });
-      if (
-        await recorderPage.locator('#delayed-upload-state').textContent()
-          !== path.basename(uploadTwo)
-      ) {
-        throw new Error('750ms 延迟 chooser 未收到本次上传文件');
-      }
-      if (
-        await recorderPage.locator('#top-upload-state').textContent()
-          !== topStateBeforeAtomic
-      ) {
-        throw new Error('原子上传错误消费了旧 FileChooser');
-      }
-      if (recorderOwner.engine.hasPendingFileChooser(recorderTab.view)) {
-        throw new Error('延迟原子上传后仍残留 pending FileChooser');
-      }
-
-      // A trigger may only reveal/create the exact input instead of opening a
-      // native chooser. The same RPC must wait, then resolve that post-click
-      // selector and use setInputFiles.
-      const revealAtomic = await recorderHost.handleRpc({
-        runtime_key: runtimeKey,
-        method: 'execute',
-        params: {
-          profile_dir: profile,
-          proxy_url: policyProxyURL,
-          target_id: targetId,
-          command: 'upload_with_trigger',
-          args: [],
-          trigger_selector: '#reveal-upload-button',
-          input_selector: '#revealed-upload',
-          files: [uploadOne],
-          mutating: true,
-        },
-      }) as { data?: { via?: string; uploaded?: number } };
-      if (
-        revealAtomic.data?.via !== 'input'
-        || revealAtomic.data.uploaded !== 1
-        || await recorderPage.locator('#reveal-upload-state').textContent()
-          !== path.basename(uploadOne)
-      ) {
-        throw new Error(`原子 exact-input fallback 异常: ${JSON.stringify(revealAtomic)}`);
-      }
-      if (recorderOwner.engine.hasPendingFileChooser(recorderTab.view)) {
-        throw new Error('exact-input fallback 后仍残留 pending FileChooser');
-      }
-
-      // A missing/stale trigger is a proven pre-dispatch failure. It may skip
-      // directly to an already-valid exact input without a second RPC.
-      const missingTriggerAtomic = await recorderHost.handleRpc({
-        runtime_key: runtimeKey,
-        method: 'execute',
-        params: {
-          profile_dir: profile,
-          proxy_url: policyProxyURL,
-          target_id: targetId,
-          command: 'upload_with_trigger',
-          args: [],
-          trigger_selector: '#removed-upload-trigger',
-          input_selector: '#top-upload',
-          files: [uploadTwo],
-          mutating: true,
-        },
-      }) as { data?: { via?: string; uploaded?: number } };
-      if (
-        missingTriggerAtomic.data?.via !== 'input'
-        || missingTriggerAtomic.data.uploaded !== 1
-        || await recorderPage.locator('#top-upload-state').textContent()
-          !== path.basename(uploadTwo)
-      ) {
-        throw new Error(
-          `失效 trigger 未回退 exact input: ${JSON.stringify(missingTriggerAtomic)}`,
-        );
-      }
-
-      await recorderPage
-        .frameLocator('#cross-origin-frame')
-        .locator('#cross-origin-upload')
-        .setInputFiles(uploadOne);
-      await waitFor(
-        () => recorded.some(
-          (event) => event.action === 'upload'
-            && (event.target as { id?: string } | null)?.id === 'cross-origin-upload'
-            && event.uploadMode === 'paths',
-        ),
-        'OOPIF 隐藏文件 upload',
-      );
-      const oopifUpload = recorded.find(
-        (event) => event.action === 'upload'
-          && (event.target as { id?: string } | null)?.id === 'cross-origin-upload',
-      );
-      if (
-        oopifUpload?.fileCount !== 1
-        || JSON.stringify(oopifUpload.paths) !== JSON.stringify([uploadOne])
-        || !String(oopifUpload.selector ?? '').includes('enter-frame')
-      ) {
-        throw new Error(`OOPIF upload 路径/selector 异常: ${JSON.stringify(oopifUpload)}`);
-      }
-
-      const emitRecordedClick = async (
-        frameUrl: string,
-        frameSelector: string,
-        targetSelector: string,
-        seq: number,
-        allowMissingBinding = false,
-      ): Promise<void> => {
-        const frame = recorderTab.view.webContents.mainFrame.framesInSubtree
-          .find((candidate) => candidate.url === frameUrl);
-        if (!frame) throw new Error(`recorder event 未找到 frame: ${frameUrl}`);
-        const id = targetSelector.startsWith('#') ? targetSelector.slice(1) : '';
-        const recordedSelector = await frame.executeJavaScript(
-          `globalThis[${JSON.stringify(controlName)}]?.selectorFor?.(
-            document.querySelector(${JSON.stringify(targetSelector)})
-          ) || ''`,
-          false,
-        ) as string;
-        const recordedFrameSelector = await recorderTab.view.webContents.mainFrame
-          .executeJavaScript(
-            `globalThis[${JSON.stringify(controlName)}]?.selectorFor?.(
-              document.querySelector(${JSON.stringify(frameSelector)})
-            ) || ''`,
-            false,
-          ) as string;
-        if (!recordedSelector || !recordedFrameSelector) {
-          throw new Error(
-            `Playwright InjectedScript 未生成 selector: `
-            + `${JSON.stringify({ recordedSelector, recordedFrameSelector, frameUrl })}`,
-          );
-        }
-        const payload = {
-          schemaVersion: RECORDER_EVENT_SCHEMA_VERSION,
-          provenance: {
-            schemaVersion: RECORDER_PROVENANCE_SCHEMA_VERSION,
-            source: 'document-world',
-            capturePhase: 'event-callback',
-            browserTrusted: true,
-            targetEvidence: 'synchronous',
-            nativeInput: 'unverified',
-          },
-          seq,
-          causalId: 0,
-          causalToken: 0,
-          type: 'click',
-          url: frameUrl,
-          hint: id,
-          target: {
-            tag: 'button',
-            text: id,
-            ariaLabel: '',
-            href: '',
-            ordinal: 1,
-            id,
-            name: '',
-            role: '',
-            inputType: '',
-            contentEditable: false,
-            testId: '',
-            testIdAttribute: '',
-            cssPath: targetSelector,
-            framePath: [recordedFrameSelector],
-          },
-          recordedSelector,
-          recordedDragSelector: '',
-          selectorSource: 'playwright',
-          tier: 'plain',
-          value: '',
-          values: [],
-          valueTruncated: false,
-          lifecycleFlush: false,
-          key: '',
-          clickButton: 'left',
-          clickCount: 1,
-          position: null,
-          dragSourcePosition: null,
-          dragTargetPosition: null,
-          modifiers: [],
-          dialogAction: '',
-          dialogType: '',
-          dialogText: '',
-          scrollX: 0,
-          scrollY: 0,
-          uploadMode: '',
-          paths: [],
-          fileCount: 0,
-          multiple: false,
-          accept: '',
-          dropData: {},
-        } as const;
-        const rawPayload = JSON.stringify(payload);
-        if (!parseRecorderEvent(rawPayload)) {
-          throw new Error(`契约 fixture 事件未通过 recorder parser: ${frameUrl}`);
-        }
-        const emitted = await frame.executeJavaScript(
-          `(() => {
-            const element = document.querySelector(${JSON.stringify(targetSelector)});
-            if (!element) return false;
-            const binding = globalThis[${JSON.stringify(bindingName)}];
-            if (typeof binding !== 'function') return false;
-            binding(${JSON.stringify(rawPayload)});
-            return true;
-          })()`,
-          false,
-        ) as boolean;
-        if (!emitted && !allowMissingBinding) {
-          throw new Error(`recorder binding 不可用: ${frameUrl}`);
-        }
-      };
-
-      await emitRecordedClick(
-        new URL('/same-frame', topOriginURL).href,
-        '#same-origin-frame',
-        '#same-origin-button',
-        1,
-      );
-      console.log('      recorder: same-origin event');
-      await waitFor(
-        () => recorded.some(
-          (event) => (event.target as { id?: string } | null)?.id === 'same-origin-button',
-        ),
-        '同源 iframe click',
-      );
-      await emitRecordedClick(
-        crossOriginURL,
-        '#cross-origin-frame',
-        '#cross-origin-button',
-        2,
-      );
-      console.log('      recorder: current OOPIF event');
-      await waitFor(
-        () => recorded.some(
-          (event) => (event.target as { id?: string } | null)?.id === 'cross-origin-button',
-        ),
-        '当前 OOPIF click',
-      );
-
-      const lateCrossOriginURL = `${crossOriginURL}?late=1`;
-      await recorderTab.view.webContents.mainFrame.executeJavaScript(
-        `(() => {
-          const frame = document.createElement('iframe');
-          frame.id = 'late-cross-origin-frame';
-          frame.src = ${JSON.stringify(lateCrossOriginURL)};
-          document.getElementById('late-frame-host')?.append(frame);
-        })()`,
-        false,
-      );
-      await waitFor(
-        () => recorderTab.view.webContents.mainFrame.framesInSubtree.some(
-          (frame) => frame.url === lateCrossOriginURL,
-        ),
-        '迟到 OOPIF attach',
-      );
-      const lateFrame = recorderTab.view.webContents.mainFrame.framesInSubtree
-        .find((frame) => frame.url === lateCrossOriginURL);
-      if (!lateFrame) throw new Error('迟到 OOPIF WebFrameMain 缺失');
-      {
-        const deadline = Date.now() + 10_000;
-        while (true) {
-          const ready = await lateFrame.executeJavaScript(
-            `typeof globalThis[${JSON.stringify(bindingName)}] === 'function'
-              && globalThis[${JSON.stringify(controlName)}]?.isActive?.() === true`,
-            false,
-          ).catch(() => false);
-          if (ready) break;
-          if (Date.now() >= deadline) {
-            console.log(
-              '      recorder: late timeout topology',
-              [...recorderTab.childSessions],
-              [...(recorderTab.recording?.sessions.entries() ?? [])]
-                .map(([id, session]) => [id, session.installed]),
-            );
-            throw new Error(
-              `迟到 OOPIF recorder 安装超时: child=${JSON.stringify(
-                [...recorderTab.childSessions],
-              )}; sessions=${JSON.stringify(
-                [...(recorderTab.recording?.sessions.entries() ?? [])]
-                  .map(([id, session]) => [id, session.installed]),
-              )}`,
-            );
-          }
-          await new Promise((resolve) => setTimeout(resolve, 25));
-        }
-      }
-      await emitRecordedClick(
-        lateCrossOriginURL,
-        '#late-cross-origin-frame',
-        '#late-cross-origin-button',
-        3,
-      );
-      console.log('      recorder: late OOPIF event');
-      await waitFor(
-        () => recorded.some(
-          (event) => (event.target as { id?: string } | null)?.id
-            === 'late-cross-origin-button',
-        ),
-        '迟到 OOPIF click',
-      );
-
-      const activeRecording = recorderTab.recording;
-      if (!activeRecording) throw new Error('recorder 在 OOPIF click 前意外停止');
-      const oopifSessionIds = [...recorderTab.childSessions.entries()]
-        .filter(([, info]) => String(info.type ?? '') === 'iframe')
-        .map(([session]) => session);
-      if (oopifSessionIds.length < 2) {
-        throw new Error(`未建立两个真实 OOPIF child session: ${oopifSessionIds.length}`);
-      }
-      if (!oopifSessionIds.every(
-        (session) => activeRecording.sessions.get(session)?.installed === true,
-      )) {
-        throw new Error('当前/迟到 OOPIF 未全部安装 recorder session');
-      }
-      if (!oopifSessionIds.every(
-        (session) => [...activeRecording.contexts].some(
-          (contextKey) => contextKey.startsWith(`${session}\u0000`),
-        ),
-      )) {
-        throw new Error('OOPIF binding context 未按 (sessionId, contextId) 复合登记');
-      }
-
-      for (const id of [
-        'same-origin-button',
-        'cross-origin-button',
-        'late-cross-origin-button',
-        'top-upload',
-        'cross-origin-upload',
-      ]) {
-        const event = recorded.find(
-          (candidate) => (
-            (candidate.target as { id?: string } | null)?.id === id
-            && (id.endsWith('-upload') || candidate.action === 'click')
-          ),
-        );
-        if (!event) throw new Error(`缺少录制事件: ${id}`);
-        if (
-          id !== 'top-upload'
-          && !String(event.selector ?? '').includes('enter-frame')
-        ) {
-          throw new Error(`${id} 未生成可回放的跨帧稳定选择器`);
-        }
-      }
-
-      const stopped = await recorderHost.handleRpc({
-        runtime_key: runtimeKey,
-        method: 'set_recording',
-        params: {
-          profile_dir: profile,
-          target_id: targetId,
-          recording_id: recordingId,
-          action: 'stop',
-        },
-      }) as { recording?: boolean; forged?: number };
-      console.log('      recorder: stopped');
-      if (stopped.recording) {
-        throw new Error(`stop 状态异常: ${JSON.stringify(stopped)}`);
-      }
-      if ((stopped.forged ?? 0) < 3) {
-        throw new Error('未关联 native proof 的文档事件没有进入审计计数');
-      }
-      for (const id of [
-        'same-origin-button',
-        'cross-origin-button',
-        'late-cross-origin-button',
-      ]) {
-        const event = recorded.find(
-          (candidate) => (candidate.target as { id?: string } | null)?.id === id,
-        );
-        const selector = String(event?.selector ?? '');
-        if (!selector || await recorderPage.locator(selector).count() !== 1) {
-          throw new Error(`${id} 的持久 selector 无法唯一回放`);
-        }
-      }
-      const countAfterStop = recorded.length;
-      await emitRecordedClick(
-        lateCrossOriginURL,
-        '#late-cross-origin-frame',
-        '#late-cross-origin-button',
-        4,
-        true,
-      );
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      if (recorded.length !== countAfterStop) {
-        throw new Error('stop 后 OOPIF binding 仍能上报事件');
-      }
-      return `same + ${oopifSessionIds.length} OOPIF；${countAfterStop} steps；stop clean`;
-    } finally {
-      clipboard.writeText(clipboardBeforeContract);
-      await recorderHost.dispose().catch(() => undefined);
-      if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
 
   const failed = results.filter((r) => !r.ok);
   console.log('\n=== Playwright 契约测试（窗口全程不可见）===\n');

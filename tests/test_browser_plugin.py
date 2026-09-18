@@ -60,8 +60,6 @@ _OLD_BROWSER_TOOLS = {
     "browser_mouse_drag_xy",
     "browser_resize",
     "browser_drop",
-    # 回放入口：把技能里存盘的稳定选择器解析成当前页面的 ref
-    "browser_locate",
     "browser_type",
     "browser_fill_form",
     "browser_select",
@@ -137,14 +135,9 @@ async def test_build_app_exposes_only_browser_use(tmp_path):
         schemas = crew.registry.list_schemas(enabled_toolsets=["*"])
         browser_schemas = [s for s in schemas if s.get("_crew_toolset") == "browser"]
         browser_names = [(s.get("function") or {}).get("name") for s in browser_schemas]
-        # 两阶段发布：record_compile 只生成 owner-private immutable draft；
-        # record_install 必须一次性审批并在安装前复核 trace/draft 摘要。
         assert sorted(browser_names) == [
             "browser_use",
             "browser_use_advanced",
-            "record_compile",
-            "record_install",
-            "record_replay",
         ]
         # browser_use 直接进入主 schema；高级动作只在 tool_search 命中后加载。
         assert browser_schemas[0].get("_crew_should_defer") is False
@@ -177,9 +170,6 @@ async def test_plugin_loaded_and_skill_root_registered(tmp_path):
         assert labels["resource:_close_manager"] is RegistrationPhase.RESOURCE
         assert labels["tool:browser_use"] is RegistrationPhase.CONTRIBUTION
         assert labels["tool:browser_use_advanced"] is RegistrationPhase.CONTRIBUTION
-        assert labels["tool:record_compile"] is RegistrationPhase.CONTRIBUTION
-        assert labels["tool:record_install"] is RegistrationPhase.CONTRIBUTION
-        assert labels["tool:record_replay"] is RegistrationPhase.CONTRIBUTION
         assert (
             labels["context-contributor:browser.reference.tab"]
             is RegistrationPhase.CONTRIBUTION
@@ -215,9 +205,6 @@ async def test_browser_feature_unload_hides_tools_before_manager_cleanup_finishe
     assert not {
         "browser_use",
         "browser_use_advanced",
-        "record_compile",
-        "record_install",
-        "record_replay",
     } & set(crew.registry.names())
     assert not any(
         binding.contributor.contributor_id == "browser.reference.tab"
@@ -251,38 +238,6 @@ async def test_app_shutdown_disposes_browser_through_feature_scope(tmp_path, mon
     assert loaded.feature_record is not None
     assert loaded.feature_record.state is FeatureState.DISCOVERED
     assert "browser_use" not in crew.registry.names()
-
-
-async def test_record_publish_tools_reuse_browser_hot_disable_gate(tmp_path):
-    cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
-    crew = build_app(config=cfg, enable_team=False)
-    try:
-        await crew.startup(start_cron=False)
-        crew.plugin_prefs.set_enabled(OWNER, "browser", False)
-        tokens = [
-            (current_owner_account_id, current_owner_account_id.set(OWNER)),
-            (current_session_id, current_session_id.set(SESSION)),
-            (current_user_type, current_user_type.set("internal")),
-            (current_tool_call_id, current_tool_call_id.set("publish-call")),
-        ]
-        try:
-            compile_decision = crew.registry.get("record_compile").permission_resolver({})
-            install_decision = crew.registry.get("record_install").permission_resolver({})
-            replay_decision = crew.registry.get("record_replay").permission_resolver({})
-        finally:
-            for var, token in reversed(tokens):
-                var.reset(token)
-
-        assert compile_decision.behavior == "deny"
-        assert install_decision.behavior == "deny"
-        assert replay_decision.behavior == "deny"
-        assert "BROWSER_CAPABILITY_DISABLED" in compile_decision.reason
-        assert "BROWSER_CAPABILITY_DISABLED" in install_decision.reason
-        assert "BROWSER_CAPABILITY_DISABLED" in replay_decision.reason
-        assert compile_decision.allow_always is False
-        assert install_decision.allow_always is False
-    finally:
-        await crew.shutdown()
 
 
 # ---- 四态一致：system && role && user ----
@@ -412,7 +367,6 @@ def test_validate_args_rejects_invalid_combinations(args):
         {"action": "snapshot"},
         {"action": "find", "text": "Search"},
         {"action": "find", "regex": "/error/gi"},
-        {"action": "locate", "selector": "#search"},
         {"action": "click", "ref": "p1:e1"},
         {
             "action": "click",
@@ -617,10 +571,6 @@ def test_public_schema_exposes_action_specific_required_fields():
     )
     assert not list(validator.iter_errors({"action": "wait", "text": "Ready"}))
     assert list(validator.iter_errors({"action": "wait"}))
-    assert not list(
-        validator.iter_errors({"action": "locate", "selector": "#search"})
-    )
-    assert list(validator.iter_errors({"action": "locate"}))
     assert not list(advanced_validator.iter_errors({"action": "screenshot", "settled": False}))
     assert list(advanced_validator.iter_errors({"action": "screenshot", "settled": "false"}))
     assert not list(

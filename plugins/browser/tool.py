@@ -100,7 +100,6 @@ _ACTION_LOGICAL: dict[str, tuple[str, str | None]] = {
     "mouse_drag": ("browser_mouse_drag_xy", None),
     "resize": ("browser_resize", None),
     "drop": ("browser_drop", None),
-    "locate": ("browser_locate", None),
     "back": ("browser_back", None),
     "forward": ("browser_forward", None),
     "reload": ("browser_reload", None),
@@ -218,7 +217,6 @@ _ACTION_VARIANTS: list[dict[str, Any]] = [
             {"required": ["data"]},
         ],
     },
-    _action_variant("locate", "selector"),
     _action_variant("type", "ref", "text"),
     _action_variant("fill_form", "fields"),
     _action_variant("select", "ref", "values"),
@@ -297,7 +295,6 @@ _CORE_ACTIONS = frozenset(
         "reload",
         "press",
         "wait",
-        "locate",
         "tab_list",
         "tab_new",
         "tab_select",
@@ -367,20 +364,20 @@ BROWSER_USE_SCHEMA: dict[str, Any] = {
             },
             "ref": {
                 "type": "string",
-                "pattern": r"^p\d+:[es]\d+$",
+                "pattern": r"^p\d+:e\d+$",
                 "description": (
                     "当前页面 generation 的元素 ref；eN 来自 snapshot，"
-                    "sN 来自 locate，例如 p42:e17 或 p42:s3"
+                    "所有元素 ref 均来自当前 snapshot，例如 p42:e17"
                 ),
             },
             "start_ref": {
                 "type": "string",
-                "pattern": r"^p\d+:[es]\d+$",
+                "pattern": r"^p\d+:e\d+$",
                 "description": "drag 的起点元素 ref",
             },
             "end_ref": {
                 "type": "string",
-                "pattern": r"^p\d+:[es]\d+$",
+                "pattern": r"^p\d+:e\d+$",
                 "description": "drag 的终点元素 ref",
             },
             "text": {
@@ -433,7 +430,7 @@ BROWSER_USE_SCHEMA: dict[str, Any] = {
                                 "type": {"const": "textbox"},
                                 "ref": {
                                     "type": "string",
-                                    "pattern": r"^p\d+:[es]\d+$",
+                                    "pattern": r"^p\d+:e\d+$",
                                 },
                                 "value": {
                                     "type": "string",
@@ -448,7 +445,7 @@ BROWSER_USE_SCHEMA: dict[str, Any] = {
                                 "type": {"const": "slider"},
                                 "ref": {
                                     "type": "string",
-                                    "pattern": r"^p\d+:[es]\d+$",
+                                    "pattern": r"^p\d+:e\d+$",
                                 },
                                 "value": {
                                     "type": "string",
@@ -463,7 +460,7 @@ BROWSER_USE_SCHEMA: dict[str, Any] = {
                                 "type": {"const": "combobox"},
                                 "ref": {
                                     "type": "string",
-                                    "pattern": r"^p\d+:[es]\d+$",
+                                    "pattern": r"^p\d+:e\d+$",
                                 },
                                 "value": {
                                     "type": "string",
@@ -485,7 +482,7 @@ BROWSER_USE_SCHEMA: dict[str, Any] = {
                                 },
                                 "ref": {
                                     "type": "string",
-                                    "pattern": r"^p\d+:[es]\d+$",
+                                    "pattern": r"^p\d+:e\d+$",
                                 },
                                 "value": {"type": "boolean"},
                             },
@@ -545,10 +542,6 @@ BROWSER_USE_SCHEMA: dict[str, Any] = {
                     "click / mouse_click 的 mousedown 到 mouseup 延迟（毫秒）；"
                     "元素 ref click 要求整数，mouse_click 接受任意非负有限数字"
                 ),
-            },
-            "selector": {
-                "type": "string",
-                "description": "locate 用：技能里存盘的稳定选择器",
             },
             "function": {
                 "type": "string",
@@ -780,7 +773,7 @@ _CORE_SCHEMA_PROPERTIES = frozenset(
     {
         "action", "url", "ref", "start_ref", "end_ref", "text", "regex",
         "text_gone", "time_seconds", "values", "fields", "checked", "submit",
-        "slowly", "button", "click_count", "modifiers", "delay_ms", "selector",
+        "slowly", "button", "click_count", "modifiers", "delay_ms",
         "direction", "pixels", "key", "tab_id", "paths", "filename", "data",
         "full", "steps", "stop_on_error", "observation", "screenshot_id", "x", "y",
     }
@@ -802,7 +795,6 @@ BROWSER_USE_ADVANCED_SCHEMA["parameters"]["oneOf"] = _ADVANCED_ACTION_VARIANTS
 
 _REQUIRED: dict[str, tuple[str, ...]] = {
     "navigate": ("url",),
-    "locate": ("selector",),
     "drag": ("start_ref", "end_ref"),
     "mouse_move": ("x", "y"),
     "mouse_click": ("x", "y"),

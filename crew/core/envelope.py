@@ -33,7 +33,7 @@ def _new_id(prefix: str) -> str:
 
 def _tool_event_args_for_ui(name: str, args: str) -> str:
     needs_projection = (
-        name in {"file_write", "write_file", "record_replay"}
+        name in {"file_write", "write_file"}
         or name.startswith("browser_")
     )
     if not args or not needs_projection:
@@ -111,7 +111,7 @@ class ResponseChunk:
         """
         args = _tool_event_args_for_ui(name, args)
         if phase in {"generating", "start"} and (
-            name in {"file_write", "write_file", "record_replay"}
+            name in {"file_write", "write_file"}
             or name.startswith("browser_")
         ):
             detail = args

@@ -451,7 +451,7 @@ function sendBrowserHostFrame(
   try {
     const payload = JSON.stringify(value);
     // ws.send queues frames in call order. Rejecting on payload size
-    // silently dropped exact snapshots/recording steps and made
+    // silently dropped exact snapshots and made
     // large Playwright responses fail despite a healthy local connection.
     socket.send(payload);
     return true;
@@ -480,32 +480,6 @@ function ensureBrowserHost(): BrowserHost {
       const socket = browserHostSocket;
       if (!socket) return;
       sendBrowserHostFrame(socket, { type: 'event', event: record });
-    });
-    browserHost.on('recording', (event: unknown) => {
-      if (!event || typeof event !== 'object' || Array.isArray(event)) return;
-      const record = event as Record<string, unknown>;
-      const markIncomplete = (): void => {
-        browserHost?.markRecordingIncomplete(
-          typeof record.targetId === 'string' ? record.targetId : '',
-          typeof record.recordingId === 'string' ? record.recordingId : '',
-        );
-      };
-      const runtimeKey = currentBrowserRuntimeKey();
-      const v11 = record.schemaVersion === 11;
-      if (
-        !runtimeKey
-        || (!v11 && record.runtimeKey !== runtimeKey)
-        || (v11 && typeof record.runtimeKey === 'string' && record.runtimeKey !== runtimeKey)
-      ) {
-        markIncomplete();
-        return;
-      }
-      const socket = browserHostSocket;
-      if (!socket) {
-        markIncomplete();
-        return;
-      }
-      if (!sendBrowserHostFrame(socket, { type: 'event', event: record })) markIncomplete();
     });
     browserHost.on('tab-updated', (event: unknown) => {
       if (!event || typeof event !== 'object' || Array.isArray(event)) return;

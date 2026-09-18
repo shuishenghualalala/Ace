@@ -1257,35 +1257,11 @@ export const sessionApi = {
       `/api/browser/${encodeURIComponent(sessionId)}/read-tab`,
       { method: 'POST', ...jsonBody({ tab_id: tabId }) },
     ),
-  // record_* 动作返回 `recording` 而不是 `state`：录制态与页面控制态是正交的
-  // 两件事，录制不改变 ControlMode，所以不复用 state 字段。
   browserControl: (sessionId: string, action: string, value = '') =>
     getJSON<{
       ok: boolean;
       state: BrowserPageState;
       result?: string;
-      // record_discard 的返回：是否真的删掉了轨迹文件
-      discarded?: boolean;
-      recording?: {
-        recording: boolean;
-        paused: boolean;
-        steps: number;
-        incomplete?: boolean;
-        dropped_steps?: number;
-        recording_id?: string;
-        note?: string;
-        // 停止录制时一并返回：用户点「生成技能」之前要能看到自己要交出什么。
-        summary?: {
-          steps: number;
-          hosts: string[];
-          notes: string[];
-          masked_fields: number;
-          handoff_fields: number;
-          pages_captured: number;
-          incomplete?: boolean;
-          dropped_steps?: number;
-        };
-      };
     }>(`/api/browser/${encodeURIComponent(sessionId)}/control`, {
       method: 'POST',
       ...jsonBody({ action, value }),

@@ -1036,7 +1036,7 @@ class ToolRunner:
             "is_error": result.is_error,
             "content": (
                 "<browser_content_redacted>"
-                if str(tc.name).startswith("browser_") or tc.name == "record_replay"
+                if str(tc.name).startswith("browser_")
                 else result.content
             ),
         })

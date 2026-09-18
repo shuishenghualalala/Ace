@@ -78,12 +78,6 @@ BROWSER_SCHEMAS: dict[str, dict[str, Any]] = {
             "y": {"type": "integer"},
         },
     ),
-    "browser_locate": _schema(
-        "browser_locate",
-        "把技能里存盘的稳定选择器解析成当前页面的 ref；匹配到 0 个或多个都会报错，不会猜。",
-        {"selector": {"type": "string", "description": "技能里记录的稳定选择器"}},
-        ["selector"],
-    ),
     "browser_type": _schema(
         "browser_type",
         "清空并填写最近 snapshot 中的输入元素；普通填写自动执行，最终提交应点击明确目标。",
@@ -185,7 +179,6 @@ BROWSER_UI_LABELS = {
     "browser_snapshot": "查看网页快照",
     "browser_find": "查找网页内容",
     "browser_click": "点击网页元素 {ref}",
-    "browser_locate": "定位技能记录的元素",
     "browser_type": "填写网页内容",
     "browser_scroll": "滚动网页",
     "browser_back": "返回上一页",
@@ -317,12 +310,6 @@ def register_browser_tools(registry: Registry, manager: BrowserManager) -> None:
             workdir=workdir,
         )
 
-    async def locate(args):
-        owner, session, workdir = _ctx()
-        return await manager.locate(
-            owner, session, str(args.get("selector") or ""), workdir=workdir
-        )
-
     async def dialog(args):
         owner, session, workdir = _ctx()
         return await manager.dialog(
@@ -342,7 +329,6 @@ def register_browser_tools(registry: Registry, manager: BrowserManager) -> None:
         "browser_snapshot": snapshot,
         "browser_find": find,
         "browser_click": click,
-        "browser_locate": locate,
         "browser_type": fill,
         "browser_scroll": scroll,
         "browser_back": back,

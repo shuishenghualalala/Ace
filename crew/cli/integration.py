@@ -940,24 +940,6 @@ async def _browser_control(args: Any, ctx: CliContext) -> CliResult:
         if action in {"open", "new_tab"}:
             state = await mgr.open_for_user(ctx.owner, args.session_id, url=value, new_tab=action == "new_tab")
             return CliResult(data={"ok": True, "state": state})
-        if action == "record_discard":
-            removed = await asyncio.to_thread(mgr.discard_recording, ctx.owner, args.session_id, value)
-            return CliResult(data={"ok": True, "discarded": removed})
-        if action in {
-            "record_start",
-            "record_pause",
-            "record_resume",
-            "record_stop",
-            "record_note",
-            "record_status",
-        }:
-            recording = await mgr.user_recording(
-                ctx.owner,
-                args.session_id,
-                action.removeprefix("record_"),
-                value,
-            )
-            return CliResult(data={"ok": True, "recording": recording})
         if action in {"takeover", "return", "pause", "stop"}:
             result = await mgr.user_control(ctx.owner, args.session_id, action)
             return CliResult(data={"ok": True, "result": result, "state": mgr.state(ctx.owner, args.session_id)})

@@ -21,7 +21,7 @@ IMAGE_INPUT_UNAVAILABLE_NOTICE = (
 
 
 _FILE_WRITE_UI_ARG_KEYS = ("path", "file_path", "append")
-_BROWSER_REF_RE = re.compile(r"^p[1-9]\d*:[es][1-9]\d*$")
+_BROWSER_REF_RE = re.compile(r"^p[1-9]\d*:e[1-9]\d*$")
 _FORM_FIELD_TYPES = ("textbox", "combobox", "checkbox", "radio", "slider")
 
 
@@ -67,41 +67,6 @@ def safe_duration_seconds(value: Any) -> float | None:
     ):
         return None
     return duration
-
-
-def _record_replay_arguments_for_display(
-    arguments: dict[str, Any],
-) -> dict[str, Any]:
-    """Expose replay structure without retaining runtime form values."""
-
-    workflow_id = arguments.get("workflow_id")
-    inputs = arguments.get("inputs")
-    safe_inputs: dict[str, dict[str, Any]] = {}
-    if isinstance(inputs, dict):
-        for index, (key, value) in enumerate(inputs.items()):
-            if index >= 32:
-                break
-            if (
-                not isinstance(key, str)
-                or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key) is None
-            ):
-                continue
-            if isinstance(value, list):
-                safe_inputs[key] = {"type": "list", "count": len(value)}
-            elif isinstance(value, str):
-                safe_inputs[key] = {"type": "text"}
-            elif isinstance(value, bool):
-                safe_inputs[key] = {"type": "boolean"}
-            else:
-                safe_inputs[key] = {"type": type(value).__name__}
-    result: dict[str, Any] = {}
-    if isinstance(workflow_id, str) and re.fullmatch(
-        r"[0-9a-f]{64}",
-        workflow_id,
-    ):
-        result["workflow_id"] = workflow_id
-    result["inputs"] = safe_inputs
-    return result
 
 
 def _safe_browser_ref(value: Any) -> str:
@@ -157,8 +122,6 @@ def tool_arguments_for_ui(name: str, arguments: dict[str, Any] | None) -> dict[s
         return {}
     if name in {"file_write", "write_file"}:
         return {key: arguments[key] for key in _FILE_WRITE_UI_ARG_KEYS if key in arguments}
-    if name == "record_replay":
-        return _record_replay_arguments_for_display(arguments)
     if name in {"browser_type", "browser_dialog"}:
         return {key: value for key, value in arguments.items() if key not in {"text", "value", "password"}}
     if name == "browser_fill_form":
@@ -212,7 +175,6 @@ def tool_arguments_for_history(name: str, arguments: dict[str, Any] | None) -> d
         "browser_select",
         "browser_tabs",
         "browser_use",
-        "record_replay",
     }:
         return tool_arguments_for_ui(name, arguments)
     return arguments
