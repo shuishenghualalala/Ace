@@ -85,3 +85,34 @@ describe("external team draft streams", () => {
     expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("/api/external-teams/draft/formation");
   });
 });
+
+describe("subagent projection", () => {
+  it("requests the current session projection", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      items: [],
+      runs: [],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    await expect(api.subagents("parent/session")).resolves.toMatchObject({ ok: true });
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("/api/subagents?session_id=parent%2Fsession");
+  });
+
+  it("sends a message and interrupts through the owner-scoped control routes", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await api.sendSubagentMessage("child/1", "parent/session", "继续", true);
+    await api.interruptSubagent("child/1", "parent/session");
+
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe(
+      "/api/subagents/child%2F1/message?session_id=parent%2Fsession",
+    );
+    expect(vi.mocked(fetch).mock.calls[0]?.[1]).toMatchObject({ method: "POST" });
+    expect(vi.mocked(fetch).mock.calls[1]?.[0]).toBe(
+      "/api/subagents/child%2F1/interrupt?session_id=parent%2Fsession",
+    );
+  });
+});

@@ -48,6 +48,10 @@ current_owner_account_id: ContextVar[str] = ContextVar(
 current_agent_workdir: ContextVar[str] = ContextVar("current_agent_workdir", default="")
 current_workspace_guard: ContextVar[dict[str, Any] | None] = ContextVar("current_workspace_guard", default=None)
 current_agent_id: ContextVar[str] = ContextVar("current_agent_id", default="")
+current_structured_output_sink: ContextVar[Callable[[Any], None] | None] = ContextVar(
+    "current_structured_output_sink",
+    default=None,
+)
 current_session_source: ContextVar[dict[str, Any] | None] = ContextVar("current_session_source", default=None)
 # 当前用户回合显式携带的附件绝对路径。Wiki capture 工具以此做 turn 级 allowlist，
 # 即使模型猜到 owner uploads 目录中的旧文件路径也不能读取。

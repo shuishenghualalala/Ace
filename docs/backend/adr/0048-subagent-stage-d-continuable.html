@@ -27,9 +27,9 @@
 </tbody></table>
 
 <h2>边界</h2>
-<p>本 ADR 已交付身份、驻留锁、控制面、持久邮箱和通知来源分离。<code>trigger_turn=false</code> 的消息写入 <code>subagent_messages</code>，消费时再次校验 owner/parent；后台结算通知以 <code>agent_message</code> 保存子级自述，以 <code>settlement</code> 保存运行时账目，格式化层不把诊断冒充自述。后续仍需补齐更细粒度的 cold-resume 身份验证、三态驻留事件。fork、结构化输出和 UI reducer 另属 Stage E。</p>
+<p>本 ADR 已交付身份、驻留锁、控制面、持久邮箱和通知来源分离。<code>trigger_turn=false</code> 的消息写入 <code>subagent_messages</code>，消费时再次校验 owner/parent；后台结算通知以 <code>agent_message</code> 保存子级自述，以 <code>settlement</code> 保存运行时账目，格式化层不把诊断冒充自述。冷恢复身份验证、三态驻留事件和 task/subagent 分账已由 <a href="0050-subagent-stage-d6-finish.html">ADR-0050</a> 收尾。fork、结构化输出和 UI reducer 另属 Stage E。</p>
 
 <h2>验证</h2>
-<p class="ok">Stage D1-D5 专项测试覆盖跨轮恢复、隐藏 session、进程重启后 descriptor 与 inbox 恢复、owner/parent 隔离、消息串行、通知来源分离、配置开关和模型工具注册。</p>
+<p class="ok">Stage D1-D5 专项测试覆盖跨轮恢复、隐藏 session、进程重启后 descriptor 与 inbox 恢复、owner/parent 隔离、消息串行、通知来源分离、配置开关和模型工具注册；D6 收尾测试见 <a href="../../testing/subagent-stage-d6-finish.html">Stage D6</a>。</p>
 <p><a href="../modules/subagent.html">Subagent 模块文档</a> · <a href="../../testing/subagent-stage-d-continuable.html">测试记录</a></p>
 </main></body></html>

@@ -14,6 +14,7 @@ import { installAgentsPageContribution } from "./features/AgentsFeature";
 import type { AgentsPageContext } from "./features/AgentsFeature";
 import {
   installKanbanFeatureHandlers,
+  installSubagentFeatureHandlers,
   installTeamFeatureHandlers,
 } from "./features/feature-events";
 import { FeatureEventRegistry } from "./lib/feature-event-dispatcher";
@@ -232,6 +233,9 @@ export default function App() {
     if (!wikiEnabled) return;
     return installWikiFeatureHandlers(appFeatureEventRegistry);
   }, [appFeatureEventRegistry, wikiEnabled]);
+  useLayoutEffect(() => {
+    return installSubagentFeatureHandlers(appFeatureEventRegistry);
+  }, [appFeatureEventRegistry]);
 
   const chat = useChat(currentSessionId, onAfterFinal, appFeatureEventRegistry);
   const currentExternalTeam = externalTeams.find((team) => team.id === sessionExternalTeams[currentSessionId]);
@@ -528,6 +532,7 @@ export default function App() {
   };
 
   const chatProps: ChatPanelProps = {
+    sessionId: currentSessionId,
     messages: chat.messages,
     busy: chat.busy,
     queueHint: chat.queueHint,
@@ -714,6 +719,7 @@ export default function App() {
               />
             )}
             <ChatPanel
+              sessionId={currentSessionId}
               messages={chat.messages}
               busy={chat.busy}
               compactingContext={chat.compactingContext}

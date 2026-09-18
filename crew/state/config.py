@@ -337,6 +337,7 @@ class Config:
     subagent_idle_timeout_seconds: float = 120.0  # 子 agent 空闲（无活动）超时：N 秒零输出才中止（防卡死），0=不限
     subagent_timeout_seconds: float = 1800.0  # 子 agent 绝对运行上限（全局兜底），0=不限
     subagent_default_provider: str = "inprocess-spawn"  # 部署侧默认传输；模型不可见
+    subagent_fork_enabled: bool = False  # 是否注册父会话快照分叉 Provider
     subagent_delegation_mode: str = "explicit"  # explicit | proactive；只影响主 agent 的委派纪律
     subagent_continuable: bool = False          # 是否为新委派启用持久子身份与控制面
     # 阶段 B：深度账本 / 同构批量 / 爬坡与限流退避 / 摘要兜底 / 持久层
@@ -1960,6 +1961,9 @@ def load_config(config_path: str | Path | None = None) -> Config:
                 or cfg.subagent_default_provider
             ).strip()
             cfg.subagent_default_provider = default_provider or "inprocess-spawn"
+            cfg.subagent_fork_enabled = bool(
+                subagent.get("fork_enabled", cfg.subagent_fork_enabled)
+            )
             delegation_mode = str(
                 subagent.get("delegation_mode", cfg.subagent_delegation_mode)
                 or cfg.subagent_delegation_mode

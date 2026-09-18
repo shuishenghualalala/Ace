@@ -34,6 +34,8 @@ if TYPE_CHECKING:
 from crew.core.interfaces import Agent
 from crew.core.runctx import (
     current_owner_account_id,
+    current_agent_id,
+    current_structured_output_sink,
     current_parent_task_id,
     current_session_id,
     current_subagent_notify_session,
@@ -206,6 +208,14 @@ def build_delegate_task_schema(
                 "Subagents need the skills toolset to load skill content — "
                 "if you restrict toolsets, do not exclude the skills toolset."
             ),
+        },
+        "output_schema": {
+            "type": "object",
+            "description": (
+                "Optional JSON object schema. When provided, the child can submit one "
+                "validated structured_output result and that result ends the child run."
+            ),
+            "additionalProperties": True,
         },
     }
     return {
@@ -481,6 +491,43 @@ def _compose_goal(goal: str, context: str | None) -> str:
     return goal
 
 
+def build_structured_output_schema() -> dict[str, Any]:
+    """Schema for the child-only one-shot structured result tool."""
+
+    return {
+        "name": "structured_output",
+        "description": (
+            "Submit the single final structured result requested by the parent. "
+            "The value must be a JSON object matching the requested schema; "
+            "successful submission ends this child run."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "value": {
+                    "type": "object",
+                    "description": "The JSON object to submit as the final result.",
+                },
+            },
+            "required": ["value"],
+        },
+    }
+
+
+def handle_structured_output(args: dict[str, Any]) -> str:
+    """Validate and submit a child result through the active provider scope."""
+
+    sink = current_structured_output_sink.get()
+    if sink is None:
+        return tool_error("structured_output is only available to schema-bound subagents")
+    try:
+        sink(args.get("value"))
+    except (TypeError, ValueError) as exc:
+        return tool_error(str(exc))
+    return tool_result({"accepted": True, "terminal": True})
+
+
 def _expand_template_items(
     prompt_template: Any,
     items: Any,
@@ -568,6 +615,11 @@ def _start_request(
         owner_account_id=current_owner_account_id.get(),
         workspace_id=current_workspace_id.get(),
         lifecycle=lifecycle,  # type: ignore[arg-type]
+        output_schema=(
+            dict(spec["output_schema"])
+            if isinstance(spec.get("output_schema"), dict)
+            else None
+        ),
     )
 
 
@@ -600,7 +652,25 @@ def _available_presets(
     service: SubagentService,
     presets: list[Any],
 ) -> list[Any]:
-    return [preset for preset in presets if _provider_for_preset(service, preset) is not None]
+    current = current_agent_id.get().strip()
+    current_name = current.rsplit(":", 1)[-1] if current else ""
+    owner = next(
+        (
+            preset
+            for preset in presets
+            if str(getattr(preset, "name", "") or "").strip() in {current, current_name}
+            or str(getattr(preset, "agent_id", "") or "").strip() == current
+        ),
+        None,
+    )
+    allowed = getattr(owner, "delegatable_presets", None) if owner is not None else None
+    allowed_names = {str(item).strip() for item in (allowed or ()) if str(item).strip()}
+    visible = [
+        preset
+        for preset in presets
+        if allowed is None or str(getattr(preset, "name", "") or "").strip() in allowed_names
+    ]
+    return [preset for preset in visible if _provider_for_preset(service, preset) is not None]
 
 
 def _preset_schema(
@@ -887,6 +957,7 @@ def build_subagent_tools(
                     "context": args.get("context"),
                     "toolsets": args.get("toolsets"),
                     "skills": args.get("skills"),
+                    "output_schema": args.get("output_schema"),
                 }
                 for goal in expanded
             ]
@@ -899,6 +970,7 @@ def build_subagent_tools(
                     "goal": args.get("goal"),
                     "context": args.get("context"),
                     "toolsets": args.get("toolsets"),
+                    "output_schema": args.get("output_schema"),
                 }]
 
         if max_tasks and len(task_list) > max_tasks:
@@ -929,6 +1001,7 @@ def build_subagent_tools(
                     "max_iterations": None,
                     "inherit_skills": inherit_skills,
                     "skills": skills,
+                    "output_schema": t.get("output_schema"),
                 },
             })
         # 后台模式：仅支持单任务。batch + run_in_background 拒绝--多 task_id 管理 +
@@ -998,6 +1071,12 @@ def build_subagent_tools(
             return tool_error("agent_type is required")
         if not goal:
             return tool_error("goal is required")
+        catalog = preset_registry.list() if preset_registry is not None else sub_registry.list()
+        if agent_type not in {
+            str(getattr(item, "name", "") or "").strip()
+            for item in _available_presets(subagent_service, catalog)
+        }:
+            return tool_error(f"Preset subagent {agent_type!r} is not allowed by the current preset")
         binding = None
         if preset_registry is not None:
             try:

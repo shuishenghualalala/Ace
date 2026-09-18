@@ -249,6 +249,8 @@ class Message:
     model: str | None = None
     # 元信息消息：发送给 LLM 但前端不渲染（如 system-reminder、skill 展开内容）
     is_meta: bool = False
+    # 结构化消息来源；用于 fork/回放过滤，不依赖正文字符串匹配。
+    source_kind: str | None = None
     timestamp: float | None = None
     turn_started_at: float | None = None
     turn_duration: float | None = None
@@ -359,7 +361,12 @@ class Message:
             f"{content}\n"
             "</system-reminder>"
         )
-        return Message(role="user", content=wrapped, is_meta=True)
+        return Message(
+            role="user",
+            content=wrapped,
+            is_meta=True,
+            source_kind="system_reminder",
+        )
 
 
 @dataclass

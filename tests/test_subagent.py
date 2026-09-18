@@ -83,7 +83,7 @@ def test_registry_user_overrides_builtin(tmp_path, monkeypatch):
     user_dir = tmp_path / "agents"
     user_dir.mkdir()
     (user_dir / "explore.md").write_text(
-        "---\nname: Explore\ndescription: 用户覆盖版\n---\n用户自定义 explore\n",
+        "---\nname: Explore\ndescription: 用户覆盖版\noverride: true\n---\n用户自定义 explore\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(sub_registry_mod, "get_user_agents_dir", lambda: user_dir)
@@ -160,7 +160,7 @@ def test_model_visible_subagent_schemas_match_stage_a_baseline():
         "collect_subagent": build_collect_subagent_schema(),
     }
     expected = {
-        "delegate_task": "f0af92b7d3b9ed8feb24ed632436d65f0f4284e2f7abb4b0b67472e741f539c9",
+        "delegate_task": "854f5021318857ea81195fb2f844ec24a87e00de7fc80d7b18a034048cb8a272",
         "run_agent": "0eaececd75209360c0e7648b2b234e3d3ce6e3c384d15ae0c66d4decc981414d",
         "collect_subagent": "28d7eb9404d0aae0bd105134da96787e4526c476bb6354b8c056339f8af4b2bd",
     }

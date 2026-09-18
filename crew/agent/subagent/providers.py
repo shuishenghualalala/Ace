@@ -9,15 +9,18 @@ format model-facing tool responses; those concerns belong to
 from __future__ import annotations
 
 import asyncio
+import json
 import inspect
 import time
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from crew.core.envelope import Envelope
 from crew.core.runctx import (
     current_owner_account_id,
+    current_structured_output_sink,
     current_workspace_id,
 )
 from crew.state.logging import get_logger
@@ -25,8 +28,10 @@ from crew.state.logging import get_logger
 from crew.agent.subagent.service import (
     ResolvedStartRequest,
     SubagentCapabilities,
+    SubagentCapabilityError,
     SubagentResult,
     SubagentRun,
+    validate_structured_output,
 )
 
 log = get_logger("subagent")
@@ -34,6 +39,7 @@ log = get_logger("subagent")
 _PARTIAL_CAP = 2000
 _PARTIAL_TAIL = 800
 INPROCESS_SPAWN_PROVIDER = "inprocess-spawn"
+INPROCESS_FORK_PROVIDER = "inprocess-fork"
 
 
 def _canonical_child_session_id(parent_session_id: str, subagent_id: str) -> str:
@@ -69,7 +75,7 @@ class InProcessSpawnProvider:
     name = INPROCESS_SPAWN_PROVIDER
     inherits_parent_context = False
     capabilities = SubagentCapabilities(
-        output_schema=False,
+        output_schema=True,
         depth_limit=True,
         tool_filter=True,
         persona=False,
@@ -208,6 +214,17 @@ class InProcessSpawnProvider:
             max_runtime = runtime_options.get("max_runtime", self._max_runtime)
             progress_callback = runtime_options.get("progress_callback")
             summary_policy = runtime_options.get("summary_policy")
+            seed_messages = runtime_options.get("seed_messages")
+            seed_store = runtime_options.get("session_store")
+            if seed_messages and seed_store is not None:
+                save_async = getattr(seed_store, "save_async", None)
+                if callable(save_async):
+                    await save_async(
+                        child_session_id,
+                        list(seed_messages),
+                        workspace_id=workspace_id or "default",
+                        owner_account_id=owner_account_id,
+                    )
             summary_min_chars = 0
             summary_retries = 0
             if isinstance(summary_policy, Mapping):
@@ -217,9 +234,21 @@ class InProcessSpawnProvider:
                 summary_retries = max(
                     0, int(summary_policy.get("retries", 0) or 0)
                 )
+            submitted_structured: list[dict[str, Any]] = []
 
-            async def consume_turn(env: Envelope) -> tuple[str, str, str | None, str]:
-                """消费一个回合；返回 (stop_reason, diagnostic, timeout_kind, final_text)。
+            def submit_structured(value: Any) -> None:
+                if submitted_structured:
+                    raise ValueError("structured_output 只能提交一次")
+                if not isinstance(value, Mapping):
+                    raise TypeError("structured_output.value 必须是 JSON 对象")
+                if request.output_schema is not None:
+                    validate_structured_output(value, request.output_schema)
+                submitted_structured.append(dict(value))
+
+            async def consume_turn(
+                env: Envelope,
+            ) -> tuple[str, str, str | None, str, dict[str, Any] | None]:
+                """消费一个回合；返回结局、诊断、超时、正文和结构化结果。
 
                 记账 turn 边界：进入记 ``turn/start``，退出记 ``turn/end``（refusal
                 按 dsh 词汇记 ``blocked``，折叠端再映射回来）与 ``output/final``。
@@ -232,7 +261,11 @@ class InProcessSpawnProvider:
                 stop_reason = "completed"
                 diagnostic = ""
                 timeout_kind: str | None = None
+                structured_value: dict[str, Any] | None = None
                 generator: Any = None
+                sink_token = current_structured_output_sink.set(
+                    submit_structured if request.output_schema is not None else None
+                )
 
                 async def note_turn_end() -> None:
                     if recorder is None:
@@ -276,6 +309,9 @@ class InProcessSpawnProvider:
                         kind = str(getattr(chunk, "kind", "") or "")
                         if kind == "final":
                             final_text = str(_chunk_value(chunk, "text", "") or "")
+                            raw_structured = _chunk_value(chunk, "structured")
+                            if isinstance(raw_structured, Mapping):
+                                structured_value = dict(raw_structured)
                             reason = _chunk_value(chunk, "reason")
                             if reason:
                                 normalized = str(reason).strip().lower().replace("-", "_")
@@ -290,6 +326,10 @@ class InProcessSpawnProvider:
                         elif kind == "tool" and _chunk_value(chunk, "phase") == "start":
                             tool_calls += 1
                             last_tool = str(_chunk_value(chunk, "name", "") or last_tool)
+                        if submitted_structured:
+                            structured_value = dict(submitted_structured[0])
+                            final_text = json.dumps(structured_value, ensure_ascii=False)
+                            break
                         elif kind == "error":
                             stop_reason = "error"
                             diagnostic = str(
@@ -319,15 +359,45 @@ class InProcessSpawnProvider:
                     diagnostic = str(exc)
                     log.exception("子智能体 %s 执行异常", label)
                 finally:
-                    await note_turn_end()
                     if generator is not None:
                         try:
                             await generator.aclose()
                         except Exception:  # noqa: BLE001
                             log.debug("关闭子智能体迭代器 %s 失败", label, exc_info=True)
-                return stop_reason, diagnostic, timeout_kind, final_text
+                    current_structured_output_sink.reset(sink_token)
+                    if submitted_structured:
+                        structured_value = dict(submitted_structured[0])
+                    if request.output_schema is not None and stop_reason == "completed":
+                        candidate: Any = structured_value
+                        if candidate is None and final_text.strip():
+                            try:
+                                candidate = json.loads(final_text)
+                            except (TypeError, ValueError):
+                                candidate = None
+                        if not isinstance(candidate, Mapping):
+                            stop_reason = "error"
+                            diagnostic = "结构化输出缺失或不是 JSON 对象"
+                            final_text = ""
+                        else:
+                            try:
+                                validate_structured_output(candidate, request.output_schema)
+                            except ValueError as exc:
+                                stop_reason = "error"
+                                diagnostic = f"结构化输出校验失败：{exc}"
+                                structured_value = None
+                                final_text = ""
+                            else:
+                                structured_value = dict(candidate)
+                    await note_turn_end()
+                return stop_reason, diagnostic, timeout_kind, final_text, structured_value
 
-            stop_reason, diagnostic, timeout_kind, final_text = await consume_turn(env)
+            (
+                stop_reason,
+                diagnostic,
+                timeout_kind,
+                final_text,
+                structured_value,
+            ) = await consume_turn(env)
 
             # 摘要兜底：正常交卷但过短时，在同一子级上追加扩写轮。非正常交卷
             # （超时/取消/错误/上限/拒绝）与绝对预算耗尽都不触发；扩写轮只补
@@ -337,6 +407,7 @@ class InProcessSpawnProvider:
                 summary_min_chars > 0
                 and summary_retries > summary_attempts
                 and stop_reason == "completed"
+                and structured_value is None
                 and len((final_text or "").strip()) < summary_min_chars
                 and (not max_runtime or max_runtime <= 0
                      or time.perf_counter() - started < max_runtime)
@@ -367,11 +438,13 @@ class InProcessSpawnProvider:
                     workspace_id=workspace_id,
                     user_id=request.user_id or owner_account_id,
                 )
-                _reason, _diag, _kind, continued_text = await consume_turn(
+                _reason, _diag, _kind, continued_text, continued_structured = await consume_turn(
                     continuation
                 )
                 if continued_text and continued_text.strip():
                     final_text = continued_text
+                if continued_structured is not None:
+                    structured_value = continued_structured
                 if _reason != "completed":
                     break
 
@@ -408,6 +481,7 @@ class InProcessSpawnProvider:
                 diagnostic=diagnostic,
                 partial_output=partial[-_PARTIAL_TAIL:],
                 timeout_kind=timeout_kind,  # type: ignore[arg-type]
+                structured=structured_value,
                 tool_calls=tool_calls,
                 last_tool=last_tool,
                 duration_seconds=time.perf_counter() - started,
@@ -480,6 +554,66 @@ class InProcessSpawnProvider:
         )
 
 
+def fork_completed_prefix(messages: list[Any]) -> list[Any]:
+    """Keep the completed user-visible prefix for a forked child session."""
+
+    last_completed = -1
+    for index, message in enumerate(messages):
+        if (
+            getattr(message, "role", "") == "assistant"
+            and not getattr(message, "tool_calls", None)
+        ):
+            last_completed = index
+    if last_completed < 0:
+        return []
+    return [
+        message
+        for message in messages[: last_completed + 1]
+        if not bool(getattr(message, "is_meta", False))
+        and getattr(message, "source_kind", None)
+        not in {"system_reminder", "skill_context", "agent_reminder"}
+    ]
+
+
+class InProcessForkProvider(InProcessSpawnProvider):
+    """Start a child from a structurally filtered parent-session snapshot."""
+
+    name = INPROCESS_FORK_PROVIDER
+    inherits_parent_context = True
+    capabilities = SubagentCapabilities(
+        output_schema=True,
+        depth_limit=True,
+        tool_filter=True,
+        persona=False,
+        agent_options=False,
+    )
+
+    def __init__(self, *args: Any, session_store: Any | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._session_store = session_store
+
+    def prepare_continuable(self, _request: ResolvedStartRequest) -> None:
+        raise SubagentCapabilityError(self.name, "continuable")
+
+    async def start(self, request: ResolvedStartRequest) -> SubagentRun:
+        store = self._session_store or request.runtime_options.get("session_store")
+        if store is None:
+            raise ValueError("inprocess-fork requires a session store")
+        parent_session_id = request.parent_session_id.strip()
+        owner_account_id = request.owner_account_id or current_owner_account_id.get()
+        messages: list[Any] = []
+        if parent_session_id:
+            load_async = getattr(store, "load_async", None)
+            if callable(load_async):
+                messages = list(
+                    await load_async(parent_session_id, owner_account_id=owner_account_id)
+                )
+        options = dict(request.runtime_options)
+        options["session_store"] = store
+        options["seed_messages"] = fork_completed_prefix(messages)
+        return await super().start(replace(request, runtime_options=options))
+
+
 async def _await_task_quietly(task: asyncio.Task[Any]) -> None:
     try:
         await task
@@ -501,4 +635,10 @@ async def _close_child_quietly(child: Any, label: str, *, phase: str) -> None:
         log.exception("%s关闭子智能体 %s 失败", phase, label)
 
 
-__all__ = ["INPROCESS_SPAWN_PROVIDER", "InProcessSpawnProvider"]
+__all__ = [
+    "INPROCESS_FORK_PROVIDER",
+    "INPROCESS_SPAWN_PROVIDER",
+    "InProcessForkProvider",
+    "InProcessSpawnProvider",
+    "fork_completed_prefix",
+]

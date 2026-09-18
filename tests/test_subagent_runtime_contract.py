@@ -553,7 +553,7 @@ def test_in_process_provider_exposes_expected_one_shot_capability_matrix():
     provider = InProcessSpawnProvider(_child_factory)
 
     assert provider.capabilities == SubagentCapabilities(
-        output_schema=False,
+        output_schema=True,
         depth_limit=True,
         tool_filter=True,
         persona=False,

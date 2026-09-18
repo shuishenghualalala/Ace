@@ -46,6 +46,10 @@ class SubagentDefinition:
     reserved_toolsets: list[str] | None = None
     reserved_skills: list[str] | None = None
     provider: str = "inprocess-spawn"
+    extends: str | None = None
+    override: bool = False
+    read_only: bool = False
+    delegatable_presets: list[str] | None = None
     # 摘要兜底：正常交卷但短于 min_chars 时追加一轮扩写，最多 retries 次；
     # None=沿用全局默认（config subagent_summary_*）。
     summary_min_chars: int | None = None
@@ -79,6 +83,10 @@ def build_preset_spec(
         "reserved_toolsets": definition.reserved_toolsets,
         "reserved_skills": definition.reserved_skills,
         "provider": definition.provider,
+        "extends": definition.extends,
+        "override": definition.override,
+        "read_only": definition.read_only,
+        "delegatable_presets": definition.delegatable_presets,
         "summary_min_chars": definition.summary_min_chars,
         "summary_retries": definition.summary_retries,
         "background": definition.background,
@@ -109,6 +117,12 @@ def to_preset_contribution(definition: SubagentDefinition):
         max_iterations=definition.max_iterations,
         background=definition.background,
         source=definition.source,
+        read_only=definition.read_only,
+        delegatable_presets=(
+            None
+            if definition.delegatable_presets is None
+            else tuple(definition.delegatable_presets)
+        ),
     )
 
 
@@ -176,6 +190,10 @@ def parse_definition(path: str | Path, *, source: str = "builtin") -> SubagentDe
         reserved_skills=_as_list(fm.get("reserved_skills")),
         provider=str(fm.get("provider") or "inprocess-spawn").strip()
         or "inprocess-spawn",
+        extends=str(fm.get("extends") or "").strip() or None,
+        override=bool(fm.get("override", False)),
+        read_only=bool(fm.get("read_only", False)),
+        delegatable_presets=_as_list(fm.get("subagents")),
         summary_min_chars=(
             int(fm["summary_min_chars"])
             if fm.get("summary_min_chars") is not None

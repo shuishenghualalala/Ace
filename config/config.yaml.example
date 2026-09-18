@@ -228,6 +228,8 @@ features:
   subagent:
     # 部署侧默认传输；模型可见工具中不存在 provider 参数。
     default_provider: inprocess-spawn
+    # 是否启用从父会话已完成消息快照启动子智能体的 Provider。
+    fork_enabled: false
     # explicit：仅在用户、项目指令或技能明确要求委派/并行时使用子智能体；
     # proactive：主智能体可在确有收益时主动委派。
     delegation_mode: explicit

@@ -1995,6 +1995,12 @@ class CrewApp:
                 depth=_child_depth_of(spec),
             )
         tool_filter = self._apply_model_capability_filter(tool_filter, effective_capabilities)
+        if (
+            spec.get("output_schema") is not None
+            and "structured_output" in self.registry.names()
+            and "structured_output" not in (tool_filter or [])
+        ):
+            tool_filter = [*(tool_filter or []), "structured_output"]
 
         return self._build_single_agent(
             provider=provider,
@@ -2196,7 +2202,10 @@ class CrewApp:
 
         if self.subagent_active is None:
             return team_snap
-        sub_snap = self.subagent_active.snapshot(session_id)
+        sub_snap = self.subagent_active.snapshot(
+            session_id,
+            owner_account_id=owner_account_id,
+        )
 
         # 合并 team 与 subagent 的活跃记录（供 gateway/UI 展示）
         if session_id is not None:
@@ -4024,6 +4033,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         legacy_db_path=cfg.db_path,
         retain_days=cfg.subagent_retain_runs_days,
         default_provider=cfg.subagent_default_provider,
+        fork_enabled=cfg.subagent_fork_enabled,
         max_depth=cfg.subagent_max_depth,
         continuable_enabled=cfg.subagent_continuable,
         idle_timeout=cfg.tasks_subagent_inactivity_timeout_seconds,

@@ -512,7 +512,7 @@ def test_wiki_user_override_is_claimed_idempotently_and_keeps_fixed_security_pol
         encoding="utf-8",
     )
     (user_dir / "wiki.md").write_text(
-        f"---\nname: Wiki\ndescription: user\nskills: [custom-skill]\n---\n{body}\n",
+        f"---\nname: Wiki\ndescription: user\noverride: true\nskills: [custom-skill]\n---\n{body}\n",
         encoding="utf-8",
     )
     monkeypatch = pytest.MonkeyPatch()

@@ -248,6 +248,7 @@ class ContinuableActivation:
     running: bool = False
     pending_messages: deque[str] = field(default_factory=deque)
     last_result: SubagentResult | None = None
+    last_state: str | None = None
 
 
 class SubagentRuntime:
@@ -395,6 +396,13 @@ class SubagentRuntime:
         for row in rows:
             subagent_id = str(row.get("subagent_id") or "")
             descriptor = self.store.read_descriptor(subagent_id) or {}
+            if not self._persisted_identity_matches(
+                subagent_id=subagent_id,
+                parent_session_id=parent_session_id,
+                row=row,
+                descriptor=descriptor,
+            ):
+                continue
             activation = self._activations.get(subagent_id)
             if activation is None:
                 state = (
@@ -407,14 +415,8 @@ class SubagentRuntime:
                         else "settled"
                     )
                 )
-            elif activation.running:
-                state = "running"
-            elif activation.pending_messages or self.store.has_pending_messages(
-                subagent_id, owner_account_id=owner
-            ):
-                state = "ready"
             else:
-                state = "idle"
+                state = self._activation_state(activation)
             result.append({
                 "subagent_id": subagent_id,
                 "parent_session_id": row.get("parent_session_id"),
@@ -657,6 +659,9 @@ class SubagentRuntime:
             subagent_id = (
                 run.descriptor.subagent_id if run.descriptor is not None else run.id
             )
+            activation = self._activations.get(subagent_id)
+            if activation is not None:
+                self._publish_activation_state(activation)
             try:
                 result = await run.result
             except asyncio.CancelledError:
@@ -702,6 +707,7 @@ class SubagentRuntime:
                 activation = self._activations.get(subagent_id)
                 if activation is not None:
                     activation.running = False
+                    self._publish_activation_state(activation)
 
         continuable_request = None
         raw_request = request
@@ -760,6 +766,13 @@ class SubagentRuntime:
         descriptor = self.store.read_descriptor(subagent_id)
         if not descriptor or descriptor.get("lifecycle") != "continuable":
             raise ValueError("subagent is not continuable")
+        if not self._persisted_identity_matches(
+            subagent_id=subagent_id,
+            parent_session_id=parent_session_id,
+            row=row,
+            descriptor=descriptor,
+        ):
+            raise PermissionError("subagent identity does not match its persisted parent")
         activation = self._ensure_activation_from_payload(descriptor, row)
         async with activation.lock:
             if not trigger_turn:
@@ -769,6 +782,7 @@ class SubagentRuntime:
                     owner_account_id=owner,
                     body=message,
                 )
+                self._publish_activation_state(activation)
                 return {
                     "status": "queued",
                     "subagent_id": subagent_id,
@@ -786,6 +800,7 @@ class SubagentRuntime:
             ]
             activation.pending_messages.clear()
             activation.running = True
+            self._publish_activation_state(activation)
             try:
                 result = await self.execute(
                     StartRequest(
@@ -811,6 +826,7 @@ class SubagentRuntime:
                 )
             finally:
                 activation.running = False
+                self._publish_activation_state(activation)
             return {
                 "status": result.status,
                 "subagent_id": subagent_id,
@@ -837,6 +853,14 @@ class SubagentRuntime:
             return False
         if str(row.get("parent_session_id") or "") != str(parent_session_id):
             return False
+        descriptor = self.store.read_descriptor(subagent_id)
+        if not descriptor or not self._persisted_identity_matches(
+            subagent_id=subagent_id,
+            parent_session_id=parent_session_id,
+            row=row,
+            descriptor=descriptor,
+        ):
+            return False
         interrupt_child = getattr(self.active, "interrupt_child", None)
         if callable(interrupt_child) and interrupt_child(subagent_id, message):
             return True
@@ -847,6 +871,7 @@ class SubagentRuntime:
                 subagent_id,
                 owner_account_id=normalize_owner_account_id(owner_account_id),
             )
+            self._publish_activation_state(activation)
             return True
         return False
 
@@ -1321,6 +1346,66 @@ class SubagentRuntime:
         self._activations[subagent_id] = activation
         return activation
 
+    def _activation_state(self, activation: ContinuableActivation) -> str:
+        if activation.running:
+            return "running"
+        if activation.pending_messages:
+            return "ready"
+        if self.store is not None and self.store.has_pending_messages(
+            activation.descriptor.subagent_id,
+            owner_account_id=activation.owner_account_id,
+        ):
+            return "ready"
+        return "idle"
+
+    def _publish_activation_state(
+        self,
+        activation: ContinuableActivation,
+        *,
+        force: bool = False,
+    ) -> None:
+        descriptor = activation.descriptor
+        state = self._activation_state(activation)
+        if not descriptor.parent_session_id:
+            return
+        if not force and activation.last_state == state:
+            return
+        activation.last_state = state
+        self.publish_lifecycle_event(
+            owner_account_id=activation.owner_account_id,
+            session_id=descriptor.parent_session_id,
+            event=f"activation_{state}",
+            payload={
+                "subagent_id": descriptor.subagent_id,
+                "label": descriptor.label or "subagent",
+                "provider": descriptor.provider,
+                "lifecycle": descriptor.lifecycle,
+                "state": state,
+            },
+        )
+
+    @staticmethod
+    def _persisted_identity_matches(
+        *,
+        subagent_id: str,
+        parent_session_id: str,
+        row: Mapping[str, Any],
+        descriptor: Mapping[str, Any],
+    ) -> bool:
+        expected_id = str(subagent_id or "")
+        if not expected_id:
+            return False
+        if str(row.get("subagent_id") or expected_id) != expected_id:
+            return False
+        if str(descriptor.get("subagent_id") or "") != expected_id:
+            return False
+        expected_parent = str(parent_session_id or "")
+        if str(row.get("parent_session_id") or "") != expected_parent:
+            return False
+        if str(descriptor.get("parent_session_id") or "") != expected_parent:
+            return False
+        return descriptor.get("lifecycle") == "continuable"
+
     def _ensure_activation(
         self,
         descriptor: SubagentDescriptor,
@@ -1330,7 +1415,10 @@ class SubagentRuntime:
     ) -> ContinuableActivation:
         current = self._activations.get(descriptor.subagent_id)
         if current is not None:
-            if not current.descriptor.spec and descriptor.spec:
+            if (
+                not current.descriptor.parent_session_id
+                and descriptor.parent_session_id
+            ):
                 current.descriptor = descriptor
                 current.owner_account_id = normalize_owner_account_id(owner_account_id)
                 current.workspace_id = workspace_id
@@ -1535,6 +1623,16 @@ class LegacySubagentBackgroundRuntime:
         if not task_id:
             raise RuntimeError("background task manager returned no task id")
 
+        subagent_id = ""
+        if bool(getattr(self._service, "continuable_enabled", False)):
+            subagent_id = str(item.get("subagent_id") or "").strip() or (
+                f"sub::{label}::{uuid.uuid4().hex[:8]}"
+            )
+            item["subagent_id"] = subagent_id
+            touch_activity = getattr(self._tasks, "touch_activity", None)
+            if callable(touch_activity):
+                touch_activity(task_id, {"subagent_id": subagent_id})
+
         done_event = asyncio.Event()
         self._events[task_id] = done_event
         self._launch_background(
@@ -1550,6 +1648,7 @@ class LegacySubagentBackgroundRuntime:
         return {
             "status": "launched",
             "task_id": task_id,
+            **({"subagent_id": subagent_id} if subagent_id else {}),
             "agent": label,
             "hint": "用 collect_subagent(task_id) 取结果；完成时也会推送通知",
         }
@@ -1589,6 +1688,7 @@ class LegacySubagentBackgroundRuntime:
 
         result: dict[str, Any]
         agent_message = ""
+        subagent_id = str(item.get("subagent_id") or "").strip()
         try:
             raw_agent_options = spec.get("_agent_options")
             requests_tool_filter = any(
@@ -1609,6 +1709,7 @@ class LegacySubagentBackgroundRuntime:
                     tool_filter=() if requests_tool_filter else None,
                     owner_account_id=owner_account_id,
                     workspace_id=workspace_id,
+                    subagent_id=subagent_id or None,
                     lifecycle=(
                         "continuable"
                         if bool(getattr(self._service, "continuable_enabled", False))
@@ -1619,6 +1720,11 @@ class LegacySubagentBackgroundRuntime:
             )
             agent_message = outcome.output
             result = outcome.to_legacy_dict(agent=label)
+            subagent_id = str(outcome.subagent_id or subagent_id).strip()
+            if subagent_id:
+                touch_activity = getattr(self._tasks, "touch_activity", None)
+                if callable(touch_activity):
+                    touch_activity(task_id, {"subagent_id": subagent_id})
         except asyncio.CancelledError:
             result = {
                 "agent": label,
@@ -1626,6 +1732,7 @@ class LegacySubagentBackgroundRuntime:
                 "summary": "已取消",
                 "duration_seconds": 0,
                 "tool_calls": 0,
+                **({"subagent_id": subagent_id} if subagent_id else {}),
             }
             raise
         except Exception as exc:  # noqa: BLE001 - task failure is persisted as data
@@ -1635,8 +1742,12 @@ class LegacySubagentBackgroundRuntime:
                 "summary": str(exc),
                 "duration_seconds": 0,
                 "tool_calls": 0,
+                **({"subagent_id": subagent_id} if subagent_id else {}),
             }
         finally:
+            result["task_id"] = task_id
+            if subagent_id:
+                result["subagent_id"] = subagent_id
             # 先路由通知、后落库触发恢复回合：update_status 的 on_completion
             # 会调度恢复轮，若它先于入队执行，恢复轮会 drain 到空队列。
             if self._on_done is not None and parent_session_id:
@@ -1658,11 +1769,11 @@ class LegacySubagentBackgroundRuntime:
                 except Exception:  # noqa: BLE001 - completion notification is best effort
                     log.debug("后台子任务完成回调失败 task_id=%s", task_id, exc_info=True)
             try:
-                # 落库形状保持旧例：通知用注入键（task_id/owner）只进回调不进库。
+                # 任务与子身份账本需要能从 collect 和任务看板双向定位。
                 persisted = {
                     key: value
                     for key, value in result.items()
-                    if key not in {"task_id", "owner_account_id"}
+                    if key != "owner_account_id"
                 }
                 self._tasks.update_status(
                     task_id,

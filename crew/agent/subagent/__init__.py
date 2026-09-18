@@ -13,7 +13,13 @@ from crew.agent.subagent.definition import (
     to_preset_contribution,
 )
 from crew.agent.subagent.registry import SubagentRegistry
-from crew.agent.subagent.providers import INPROCESS_SPAWN_PROVIDER, InProcessSpawnProvider
+from crew.agent.subagent.providers import (
+    INPROCESS_FORK_PROVIDER,
+    INPROCESS_SPAWN_PROVIDER,
+    InProcessForkProvider,
+    InProcessSpawnProvider,
+    fork_completed_prefix,
+)
 from crew.agent.subagent.feature import (
     SUBAGENT_FEATURE_ID,
     SubagentFeatureBundle,
@@ -51,6 +57,7 @@ from crew.agent.subagent.service import (
     SubagentService,
     SubagentValidationError,
     UnknownProviderError,
+    validate_structured_output,
 )
 from crew.agent.subagent.policy import (
     SUBAGENT_BLOCKED_TOOLSETS,
@@ -75,6 +82,7 @@ from crew.agent.subagent.tools import (
     SUBAGENT_TOOLSET,
     ActiveSubagents,
     build_subagent_tools,
+    build_structured_output_schema,
     build_collect_subagent_schema,
     build_delegate_task_schema,
     build_run_agent_schema,
@@ -123,7 +131,11 @@ __all__ = [
     "SUBAGENT_SERVICE_KEY",
     "SUBAGENT_SERVICE",
     "InProcessSpawnProvider",
+    "InProcessForkProvider",
+    "INPROCESS_FORK_PROVIDER",
     "INPROCESS_SPAWN_PROVIDER",
+    "fork_completed_prefix",
+    "validate_structured_output",
     "SUBAGENT_FEATURE_ID",
     "SubagentFeatureBundle",
     "SubagentFeatureHost",
@@ -134,6 +146,7 @@ __all__ = [
     "ActiveSubagents",
     "register_subagent_tools",
     "build_subagent_tools",
+    "build_structured_output_schema",
     "build_delegate_task_schema",
     "build_run_agent_schema",
     "build_send_message_schema",

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from crew.agent.feature import AGENT_FACTORY_SERVICE_KEY
 from crew.agent.subagent.context import (
@@ -24,10 +24,16 @@ from crew.agent.subagent.context import (
 )
 from crew.agent.subagent.definition import to_preset_contribution
 from crew.agent.subagent.registry import SubagentRegistry
+from crew.agent.subagent.providers import InProcessForkProvider, InProcessSpawnProvider
 from crew.agent.subagent.runtime import BatchSchedulePolicy, SubagentRuntime
 from crew.agent.subagent.service import SUBAGENT_SERVICE_KEY, SubagentService
 from crew.agent.subagent.store import SubagentStore
-from crew.agent.subagent.tools import ActiveSubagents, build_subagent_tools
+from crew.agent.subagent.tools import (
+    ActiveSubagents,
+    build_structured_output_schema,
+    build_subagent_tools,
+    handle_structured_output,
+)
 from crew.core.runctx import normalize_owner_account_id
 from crew.features import (
     ContextContributor,
@@ -64,6 +70,7 @@ class SubagentFeatureHost(Protocol):
     subagent_store: SubagentStore | None
     subagent_tasks: Any
     _subagent_bg_tasks: set[asyncio.Task[Any]]
+    session_store: Any
 
     def _build_subagent(self, request: Any) -> Any: ...
 
@@ -106,7 +113,7 @@ def _host_owner(request: Request) -> str:
 
 
 def _create_subagent_router(host: SubagentFeatureHost) -> APIRouter:
-    """Create the read-only active/history projection for the current owner."""
+    """Create the owner-scoped projection and continuable control endpoints."""
 
     router = APIRouter(prefix="/api/subagents", tags=["subagents"])
 
@@ -182,6 +189,74 @@ def _create_subagent_router(host: SubagentFeatureHost) -> APIRouter:
                 ),
             }
 
+    async def _control_payload(request: Request) -> dict[str, Any]:
+        try:
+            payload = await request.json()
+        except Exception as exc:  # noqa: BLE001 - malformed input is a client error
+            raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+        return payload
+
+    def _control_session(session_id: str | None) -> str:
+        value = str(session_id or "").strip()
+        if not value:
+            raise HTTPException(status_code=400, detail="session_id is required")
+        return value
+
+    @router.post("/{subagent_id}/message")
+    async def send_subagent_message(
+        request: Request,
+        subagent_id: str,
+        session_id: str | None = None,
+    ) -> Any:
+        parent_session_id = _control_session(session_id)
+        payload = await _control_payload(request)
+        message = str(payload.get("message") or "").strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="message is required")
+        async with service_context(request) as service:
+            if service is None:
+                raise HTTPException(status_code=503, detail="Subagent 未启用")
+            try:
+                result = await service.send_message(
+                    subagent_id=str(subagent_id or "").strip(),
+                    message=message,
+                    parent_session_id=parent_session_id,
+                    owner_account_id=_host_owner(request),
+                    trigger_turn=bool(payload.get("trigger_turn", True)),
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="Subagent 不存在") from exc
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail="Subagent 不属于当前会话") from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return {"ok": True, **result}
+
+    @router.post("/{subagent_id}/interrupt")
+    async def interrupt_subagent(
+        request: Request,
+        subagent_id: str,
+        session_id: str | None = None,
+    ) -> Any:
+        parent_session_id = _control_session(session_id)
+        payload = await _control_payload(request)
+        async with service_context(request) as service:
+            if service is None:
+                raise HTTPException(status_code=503, detail="Subagent 未启用")
+            accepted = service.interrupt_agent(
+                subagent_id=str(subagent_id or "").strip(),
+                parent_session_id=parent_session_id,
+                owner_account_id=_host_owner(request),
+                message=str(payload.get("message") or "").strip() or None,
+            )
+            return {
+                "ok": True,
+                "status": "interrupted" if accepted else "not_running",
+                "subagent_id": subagent_id,
+            }
+
     return router
 
 
@@ -195,6 +270,7 @@ def _create_candidate(
     default_provider: str,
     max_depth: int,
     continuable_enabled: bool,
+    fork_enabled: bool,
     idle_timeout: float,
     max_runtime: float,
 ) -> tuple[SubagentRuntime, ActiveSubagents, SubagentStore]:
@@ -206,9 +282,28 @@ def _create_candidate(
         retain_days=retain_days,
     )
     child_factory = getattr(host, "agent_factory", None) or host._build_subagent
+    providers: list[Any] = [
+        InProcessSpawnProvider(
+            child_factory,
+            active=active,
+            idle_timeout=idle_timeout,
+            max_runtime=max_runtime,
+        )
+    ]
+    session_store = getattr(host, "session_store", None)
+    if fork_enabled and session_store is not None:
+        providers.append(
+            InProcessForkProvider(
+                child_factory,
+                active=active,
+                idle_timeout=idle_timeout,
+                max_runtime=max_runtime,
+                session_store=session_store,
+            )
+        )
     try:
         service = SubagentRuntime(
-            build_child=child_factory,
+            providers=providers,
             active=active,
             default_provider=default_provider,
             max_depth=max_depth,
@@ -235,6 +330,7 @@ def build_subagent_feature(
     default_provider: str = "inprocess-spawn",
     max_depth: int = 3,
     continuable_enabled: bool = False,
+    fork_enabled: bool = False,
     idle_timeout: float = 120.0,
     max_runtime: float = 1800.0,
     desired_config_revision: int = 1,
@@ -274,6 +370,7 @@ def build_subagent_feature(
             default_provider=default_provider,
             max_depth=max_depth,
             continuable_enabled=continuable_enabled,
+            fork_enabled=fork_enabled,
             idle_timeout=idle_timeout,
             max_runtime=max_runtime,
         )
@@ -438,6 +535,16 @@ def build_subagent_feature(
                 label=f"tool:{tool.name}",
                 phase=RegistrationPhase.CONTRIBUTION,
             )
+
+        register_owned_tool(
+            name="structured_output",
+            toolset="subagent.output",
+            schema=build_structured_output_schema(),
+            handler=handle_structured_output,
+            display_name="提交结构化结果",
+            should_defer=False,
+            search_hint="subagent structured output schema submit",
+        )
 
         build_subagent_tools(
             host.registry,

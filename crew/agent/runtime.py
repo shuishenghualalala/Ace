@@ -835,7 +835,9 @@ class SingleAgent(Agent):
         # Skill 展开内容写入 canonical history（is_meta=True，前端不渲染但模型可见）
         skill_meta = envelope.params.get("skill_meta")
         if skill_meta:
-            history.append(Message.user(skill_meta, is_meta=True))
+            skill_message = Message.user(skill_meta, is_meta=True)
+            skill_message.source_kind = "skill_context"
+            history.append(skill_message)
 
         # OCC-style hidden plan attachments: persist in canonical history so
         # future turns can see prior reminders and throttle by user turns.

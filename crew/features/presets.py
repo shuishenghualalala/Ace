@@ -53,6 +53,8 @@ class AgentPresetContribution:
     reserved_toolsets: tuple[str, ...] = ()
     reserved_skills: tuple[str, ...] = ()
     provider: str = "inprocess-spawn"
+    read_only: bool = False
+    delegatable_presets: tuple[str, ...] | None = None
     summary_min_chars: int | None = None
     summary_retries: int | None = None
     model: str = "inherit"
@@ -75,6 +77,11 @@ class AgentPresetContribution:
             "context_tags", "reserved_toolsets", "reserved_skills",
         ):
             object.__setattr__(self, field_name, _items(getattr(self, field_name)) or ())
+        object.__setattr__(
+            self,
+            "delegatable_presets",
+            _items(self.delegatable_presets),
+        )
         object.__setattr__(self, "disclosure_mode", str(self.disclosure_mode or "progressive").strip().lower())
         if self.disclosure_mode not in {"progressive", "direct"}:
             raise ValueError("agent preset disclosure mode must be progressive or direct")
@@ -107,6 +114,12 @@ class AgentPresetContribution:
             "reserved_toolsets": list(self.reserved_toolsets),
             "reserved_skills": list(self.reserved_skills),
             "provider": self.provider,
+            "read_only": self.read_only,
+            "delegatable_presets": (
+                list(self.delegatable_presets)
+                if self.delegatable_presets is not None
+                else None
+            ),
             "summary_min_chars": self.summary_min_chars,
             "summary_retries": self.summary_retries,
             "model": self.model,

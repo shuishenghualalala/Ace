@@ -232,6 +232,7 @@ class ChildAgentRequest:
     disclosure_mode: str = "progressive"
     agent_id: str = "subagent"
     depth: int = 0
+    output_schema: Mapping[str, Any] | None = None
 
     @classmethod
     def from_mapping(
@@ -296,6 +297,11 @@ class ChildAgentRequest:
             ),
             agent_id=str(value.get("agent_id") or "subagent").strip() or "subagent",
             depth=_depth_of(value.get("_delegation_depth", value.get("depth"))),
+            output_schema=(
+                dict(value["output_schema"])
+                if isinstance(value.get("output_schema"), Mapping)
+                else None
+            ),
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -317,6 +323,9 @@ class ChildAgentRequest:
             "disclosure_mode": self.disclosure_mode,
             "agent_id": self.agent_id,
             "_delegation_depth": self.depth,
+            "output_schema": (
+                dict(self.output_schema) if self.output_schema is not None else None
+            ),
         }
         if self.preset_spec is not None:
             payload["_preset_spec"] = dict(self.preset_spec)

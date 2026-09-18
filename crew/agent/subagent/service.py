@@ -53,6 +53,78 @@ def normalize_stop_reason(value: object) -> StopReason:
     return normalized  # type: ignore[return-value]
 
 
+def validate_structured_output(
+    value: Any,
+    schema: Mapping[str, Any],
+    *,
+    path: str = "$",
+) -> None:
+    """Validate the provider's structured result at the service boundary.
+
+    The subagent seam intentionally supports a small, transport-neutral JSON
+    Schema subset.  It covers the shapes needed by model-facing callers while
+    keeping validation deterministic and dependency-free across platforms.
+    """
+
+    if not isinstance(schema, Mapping):
+        raise ValueError(f"{path}: output_schema must be an object")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"{path}: value is not one of enum")
+
+    expected = schema.get("type")
+    if expected is None:
+        return
+    expected_types = (expected,) if isinstance(expected, str) else tuple(expected)
+    type_matches = {
+        "object": isinstance(value, Mapping),
+        "array": isinstance(value, list),
+        "string": isinstance(value, str),
+        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "boolean": isinstance(value, bool),
+        "null": value is None,
+    }
+    if not any(type_matches.get(item, False) for item in expected_types):
+        names = ", ".join(str(item) for item in expected_types)
+        raise ValueError(f"{path}: expected {names}")
+
+    if isinstance(value, Mapping) and "object" in expected_types:
+        required = schema.get("required", ())
+        for name in required:
+            if name not in value:
+                raise ValueError(f"{path}.{name}: required property is missing")
+        properties = schema.get("properties", {})
+        if not isinstance(properties, Mapping):
+            raise ValueError(f"{path}: properties must be an object")
+        if schema.get("additionalProperties") is False:
+            unknown = sorted(set(value) - set(properties))
+            if unknown:
+                raise ValueError(f"{path}.{unknown[0]}: additional property is not allowed")
+        for name, child_schema in properties.items():
+            if name in value:
+                validate_structured_output(value[name], child_schema, path=f"{path}.{name}")
+
+    if isinstance(value, list) and "array" in expected_types:
+        item_schema = schema.get("items")
+        if item_schema is not None:
+            for index, item in enumerate(value):
+                validate_structured_output(item, item_schema, path=f"{path}[{index}]")
+
+    if isinstance(value, str):
+        minimum = schema.get("minLength")
+        maximum = schema.get("maxLength")
+        if minimum is not None and len(value) < int(minimum):
+            raise ValueError(f"{path}: string is shorter than minLength")
+        if maximum is not None and len(value) > int(maximum):
+            raise ValueError(f"{path}: string is longer than maxLength")
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            raise ValueError(f"{path}: number is below minimum")
+        if "maximum" in schema and value > schema["maximum"]:
+            raise ValueError(f"{path}: number is above maximum")
+
+
 class SubagentError(CrewError):
     """Base error for failures before a one-shot run is published."""
 
@@ -305,6 +377,8 @@ class SubagentResult:
             result["timeout_kind"] = self.timeout_kind
         if self.subagent_id:
             result["subagent_id"] = self.subagent_id
+        if self.structured is not None:
+            result["structured"] = self.structured
         return result
 
 

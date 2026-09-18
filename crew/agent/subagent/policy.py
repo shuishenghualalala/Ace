@@ -25,6 +25,7 @@ SUBAGENT_BLOCKED_TOOLSETS = frozenset(
     {
         "subagent",
         "subagent.preset",
+        "subagent.output",
         "external_agent",
         "memory",
         "cron",
@@ -32,6 +33,10 @@ SUBAGENT_BLOCKED_TOOLSETS = frozenset(
     }
 )
 SUBAGENT_BLOCKED_TOOLSET_PREFIXES = ("feishu",)
+READ_ONLY_BLOCKED_TOOLSETS = frozenset({"terminal"})
+READ_ONLY_BLOCKED_TOOLS = frozenset(
+    {"terminal", "file_write", "write_file", "file_delete", "patch", "publish_site"}
+)
 
 
 # 子智能体可见的委派工具集：allow_nested 且深度未达上限时才从黑名单放行。
@@ -134,21 +139,26 @@ def apply_preset_tool_policy(
         requested_toolsets=normalize_policy_names(preset.get("toolsets")),
         requested_tools=normalize_policy_names(preset.get("tools")),
     )
-    if not allow_additions:
-        return selected
-
-    # Additions are still expected to be resolved by the caller against the
-    # ordinary child boundary.  This function only handles the preset's
-    # explicit policy and preserves the existing tool ordering.
     result = list(dict.fromkeys(selected))
-    seen = set(result)
-    ceiling = set(addition_ceiling)
-    additions = normalize_policy_names(preset.get("toolset_additions")) or []
-    for toolset in additions:
-        for name in catalog.names_for_toolset(toolset):
-            if name in ceiling and name not in seen:
-                result.append(name)
-                seen.add(name)
+    if allow_additions:
+        # Additions are still expected to be resolved by the caller against
+        # the ordinary child boundary.  This function only handles the
+        # preset's explicit policy and preserves the existing tool ordering.
+        seen = set(result)
+        ceiling = set(addition_ceiling)
+        additions = normalize_policy_names(preset.get("toolset_additions")) or []
+        for toolset in additions:
+            for name in catalog.names_for_toolset(toolset):
+                if name in ceiling and name not in seen:
+                    result.append(name)
+                    seen.add(name)
+    if bool(preset.get("read_only")):
+        result = exclude_toolsets(
+            catalog,
+            result,
+            exact=READ_ONLY_BLOCKED_TOOLSETS,
+        )
+        result = [name for name in result if name not in READ_ONLY_BLOCKED_TOOLS]
     return result
 
 
@@ -186,6 +196,8 @@ filter_model_capabilities = apply_model_capability_policy
 __all__ = [
     "SUBAGENT_BLOCKED_TOOLSETS",
     "SUBAGENT_BLOCKED_TOOLSET_PREFIXES",
+    "READ_ONLY_BLOCKED_TOOLSETS",
+    "READ_ONLY_BLOCKED_TOOLS",
     "apply_model_capability_policy",
     "apply_preset_tool_policy",
     "delegation_blocked_toolsets",
