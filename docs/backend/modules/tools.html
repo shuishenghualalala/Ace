@@ -52,7 +52,7 @@
   <table>
     <thead><tr><th>工具</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td><code>file_read</code></td><td>读取文本文件，支持 offset/limit 分页、保留行尾符、自动处理 UTF-8 BOM。</td></tr>
+      <tr><td><code>file_read</code></td><td>读取 UTF-8 文本文件，返回带行号内容（「行号: 内容」）；默认/最多 2000 行，offset 负数尾读；≥10 MiB 流式读取；头部嗅探拒绝二进制（引导 vision_analyze / wiki）；UTF-16 自动转码。</td></tr>
       <tr><td><code>file_write</code></td><td>写入文件（覆盖或追加），自动创建父目录；保留原文件行尾符与 BOM；拒绝敏感系统路径。</td></tr>
       <tr><td><code>file_delete</code></td><td>删除明确指定的文件，不递归删除目录；工作区外路径需精确授权。</td></tr>
       <tr><td><code>patch</code></td><td>对文本文件执行替换补丁（old → new），保留行尾符与 BOM。</td></tr>
@@ -305,9 +305,20 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
   <p><code>wait_for_answer</code> 的等待默认有界：调用方未显式传 <code>timeout</code> 时使用装配层注入的默认上限 <code>runtime.interaction_timeout_seconds</code>（默认 3600s，配置 0 为默认不限）——用户一直不选，到点按「用户未回答」收尾（返回空答案），回合不再无限挂起。显式传 timeout（含 None/0 维持不限语义）始终优先于默认值。<code>ask_followup_question</code> 与权限确认共用这套语义。</p>
   <p>权限确认等待（<code>ToolRunner._wait_permission_answer</code>）与 interrupt 竞争（FIRST_COMPLETED）：interrupt 先到即结算挂起的追问（<code>cancel_followup</code> 回灌取消标记、清理 waiter 注册），返回空答案——上层按<strong>拒绝</strong>处理（安全默认），回合随后走 interrupt 收尾；回答或超时先到则 interrupt 等待 task 立即取消，绝不残留永久挂起的 task。单工具的真实执行段另有看门狗与中断语义，见 agent 模块文档。</p>
 
+  <h2>file_read 读取引擎（2026-09-18）</h2>
+  <p><code>file_read</code> 由「整读后截断」改为完整的读取引擎（窗口语义对齐 dsh tool-fs 的 <code>read</code>，尾读与编码策略对齐 kimi agent-core 的 <code>Read</code>），核心在 <code>crew/tools/file_utils.py</code>，<code>builtin.py</code> 只做授权与编排：</p>
+  <ul>
+    <li><strong>窗口语义</strong>：默认返回前 2000 行（同时是上限，<code>tools.file.read_max_lines</code> 可调）；输出为「<code>行号: 内容</code>」（文件绝对行号），正文后附续读 footer（如「(已显示第 1-2000 行，共 54321 行。用 offset=2001 继续读取。)」）；单行超过 2000 字符中段截断并在 hint 标注行号；输出预算沿用 <code>tools.file.read_max_chars</code>（默认 100000），超限按<strong>整行取舍</strong>而非硬切字符串；offset 越界报错（空文件 offset=1 除外）。</li>
+    <li><strong>尾读</strong>：<code>offset</code> 为负数表示从文件末尾读取（如 <code>-100</code> 读最后 100 行，|offset| ≤ 2000）；<code>limit</code> 从尾窗口<strong>头部</strong>截取；输出预算超限时从窗口头部丢行，保留最接近末尾的内容。</li>
+    <li><strong>流式路由</strong>：stat 一次拿大小；&lt;10 MiB 整读，≥10 MiB 走身份校验句柄流式读取（<code>open_verified_read</code>，增量严格 UTF-8 解码）；行缓冲封顶 2001 字符，巨型单行内存恒定；total_lines 始终为全文件精确值。读取期间身份变化（size/mtime）仍按冲突拒绝。</li>
+    <li><strong>内容嗅探</strong>：头部 8192 字节判定——BOM（UTF-32/16/8）→ 魔数表（PNG/JPEG/GIF/ZIP/OLE/ELF/PDF 等）→ 无 BOM UTF-16 奇偶 NUL 启发式 → NUL 存在性 → 控制字符比例（&gt;30%，避免误伤 ANSI 日志）。扩展名黑名单保留为快速路径。二进制从「温和跳过」改为 <code>ToolError</code>，消息按类型引导：图片→<code>vision_analyze</code>，文档→<code>wiki_capture_attachment</code> / skills。</li>
+    <li><strong>编码策略</strong>：UTF-8 严格解码，失败显式报错并提示先用 <code>iconv</code> 转换（替代旧的静默替换）；UTF-16（BOM 与无 BOM）≤10 MiB 自动转码显示，hint 注明编码并提示编辑前先转 UTF-8；超限报错。</li>
+    <li><strong>写保护不变</strong>：成功读取后记录 <strong>stat-only</strong> <code>FileVersion</code>（观察只消费 device/inode/size/mtime_ns 四元组）；写入侧 stale 校验与 digest 复核仍在写入时刻整读完成，流式化不影响 CAS 语义。</li>
+    <li><strong>压缩恢复</strong>：<code>post_compact._reread_file_for_restore</code> 改用共享的 <code>slice_text_window</code>（宽容归一，负 offset 尾读语义与工具一致），恢复视图不再把负 offset 钳成 1。</li>
+  </ul>
+
   <h2>6. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li><code>file_read</code> 对 ≤512 MiB 的大文本文件仍是「整读后截断」：读整个文件只为返回 <code>read_max_chars</code>（默认 100000 字符），存在内存浪费；后续可改为按 offset/limit 流式读取。</li>
     <li><code>file_write</code> 覆盖写旧文件时 <code>snapshot_file</code> 整读旧文件（用于 BOM/行尾保留与写前校验）；append 场景下为必要读取，普通覆盖场景可优化为只读头部。</li>
     <li>各工具 schema 的参数枚举与必填校验主要依赖执行期业务校验，schema 层未做严格枚举约束。</li>
   </ul>
@@ -335,6 +346,7 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
       <tr><td>2026-09-05</td><td>FunctionTool 增加动态 schema 解析，并让模型披露与执行校验共享当前 parameters。</td><td><code>run_agent</code> 的生命周期 preset enum。</td></tr>
       <tr><td>2026-09-17</td><td><code>e99e58e</code> 追问 <code>wait_for_answer</code> 默认有界超时（<code>runtime.interaction_timeout_seconds</code> 默认 3600s，0=默认不限，显式传值优先）；权限确认等待 interrupt 取消联动，interrupt 先到按拒绝结算（安全默认），竞争 task 不残留。</td><td><code>crew/core/followup.py</code>、<code>crew/tools/interaction.py</code>、<code>crew/agent/loop/tool_runner.py</code>、<code>crew/state/config.py</code>。</td></tr>
       <tr><td>2026-09-17</td><td><code>4ce7c1b</code> 工具执行段看门狗（<code>_execute_guarded</code>）：超时/中断合成 <code>timed out</code> / <code>aborted by user</code> 合法 tool output，结果状态识别扩展 aborted 语义。</td><td><code>crew/agent/loop/tool_runner.py</code>（执行流水线本体在 agent loop，详见 agent 模块）。</td></tr>
+      <tr><td>2026-09-18</td><td><code>file_read</code> 读取引擎：默认/上限 2000 行 + 行号输出 + 行长 2000 截断 + read_max_chars 整行取舍预算 + 续读 footer；负 offset 尾读；≥10 MiB 流式（行缓冲封顶）；头部嗅探拒绝二进制并引导替代通道；UTF-8 严格解码（GBK 报错提示 iconv）、UTF-16 自动转码；观察改 stat-only（写保护 CAS 不变）；post_compact 恢复共享窗口切片。窗口/尾读/预算语义对齐 dsh <code>read</code> 与 kimi <code>Read</code>。</td><td><code>crew/tools/file_utils.py</code>、<code>crew/tools/builtin.py</code>、<code>crew/agent/compact/post_compact.py</code>、<code>config/config.yaml(.example)</code>。</td></tr>
     </tbody>
   </table>
 

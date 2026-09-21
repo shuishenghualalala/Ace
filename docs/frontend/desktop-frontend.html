@@ -842,5 +842,12 @@
   <p>验证：<code>backend-health-monitor.test.ts</code>、<code>gateway-instance-auth.test.ts</code>、<code>backend-health-probe.test.ts</code>、<code>backend-status-guard.test.ts</code> 覆盖串行排程、双阈值、失败分类、四态派生与恢复路径；后端 <code>tests/gateway/test_health_server.py</code> 覆盖线程服务与哨兵。全量验证见 <a href="../testing/agent-core-defects-batch-2026-09-17.html">agent 核心缺陷批次测试记录</a>。</p>
 </section>
 
+<section>
+  <h2>后端状态拆分与发送能力门控（2026-09-18）</h2>
+  <p><code>backend:status</code> 保留兼容字段 <code>connected</code>，同时下发 <code>processState</code>、<code>healthState</code>、<code>transportState</code> 和 <code>loopLagMs</code>。主进程从 Gateway 子进程 spawn/exit/error 与 supervisor 重启流程维护进程状态；独立 health 线程的 loop lag 使用连续样本迟滞判定 <code>healthy/degraded/stalled</code>；WS open/close/reconnect 只维护 transport 状态。</p>
+  <p>renderer 的 <code>uiStore</code> 增加 <code>backendCanSend</code> 能力字段：进程未 ready、health stalled 或 WS 不可用时仅禁用聊天发送，历史、设置、日志和会话浏览保持可用。非阻断顶部横幅按“身份异常 → 进程重启 → loop stalled → loop degraded → 组件告警”优先级展示，不再把任意连接变化渲染为全屏门禁。</p>
+  <p>验证覆盖：健康探针不重叠、loop lag 连续样本和恢复迟滞、状态横幅文案、legacy connected 兼容，以及发送能力在 transport 断开时的隔离。</p>
+</section>
+
 </body>
 </html>

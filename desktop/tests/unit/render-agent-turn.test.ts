@@ -1401,3 +1401,39 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('[data-wiki-cancel="wcf_123"]')).not.toBeNull();
   });
 });
+
+describe('renderAgentTurn 思考区 markdown 渲染', () => {
+  it('思考内容按 markdown 渲染，容器挂 md-body/chat-markdown', () => {
+    const root = renderAgentTurn(makeMessages({
+      thinking: '先 **分析** 问题：\n\n- 第一项\n- 第二项',
+    }), { isStreaming: false, userPinnedOpen: null, turnDurationMs: 1_000 });
+
+    const thinking = root.querySelector<HTMLElement>('.process-timeline__thinking');
+    expect(thinking?.classList.contains('md-body')).toBe(true);
+    expect(thinking?.classList.contains('chat-markdown')).toBe(true);
+    expect(thinking?.querySelector('strong')?.textContent).toBe('分析');
+    expect(thinking?.querySelectorAll('ul li')).toHaveLength(2);
+  });
+
+  it('思考内容中的原始 HTML 被消毒，不进入 DOM', () => {
+    const root = renderAgentTurn(makeMessages({
+      thinking: '正常文字 <script>alert(1)</script><img src=x onerror=alert(2)>',
+    }), { isStreaming: false, userPinnedOpen: null, turnDurationMs: 1_000 });
+
+    const thinking = root.querySelector<HTMLElement>('.process-timeline__thinking');
+    expect(thinking?.querySelector('script')).toBeNull();
+    expect(thinking?.querySelector('img')).toBeNull();
+    expect(thinking?.textContent).toContain('正常文字');
+  });
+
+  it('流式思考中未闭合的 ** 自动闭合渲染', () => {
+    const root = renderAgentTurn(makeMessages({
+      streaming: true,
+      content: '',
+      thinking: '正在 **推理',
+    }), { isStreaming: true, userPinnedOpen: null, turnDurationMs: 1_000 });
+
+    const thinking = root.querySelector<HTMLElement>('.process-timeline__thinking');
+    expect(thinking?.querySelector('strong')?.textContent).toBe('推理');
+  });
+});

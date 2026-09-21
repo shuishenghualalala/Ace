@@ -22,6 +22,7 @@
 import { notificationApi, type BackendNotification } from '../backend-client';
 import type { TrayNotificationSummary } from '../../shared/types';
 import { showToast } from '../components/overlays';
+import { renderMarkdownHtml } from '../markdown';
 import { openSessionInChat } from './chat-controller';
 import { markSystemTrayNotification } from './system-tray';
 import { uiStore } from '../stores/ui-store';
@@ -360,9 +361,12 @@ function renderList(): void {
 
     button.append(head, title);
     if (item.body) {
-      const body = document.createElement('span');
+      const body = document.createElement('div');
       body.className = 'mw-notification-item__body';
-      body.textContent = item.body;
+      // renderMarkdownHtml 内部 micromark escape + DOMPurify 消毒，覆盖推送内容的不可信输入。
+      const template = document.createElement('template');
+      template.innerHTML = renderMarkdownHtml(item.body);
+      body.appendChild(template.content.cloneNode(true));
       button.append(body);
     }
     button.addEventListener('click', () => void handleItemClick(item));

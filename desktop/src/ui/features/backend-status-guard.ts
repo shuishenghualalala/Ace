@@ -30,11 +30,15 @@ type BackendStatus = {
   logPath?: string;
   components?: Record<string, { status: string; message?: string }>;
   failureKind?: BackendFailureKind;
+  processState?: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
+  healthState?: 'unknown' | 'healthy' | 'degraded' | 'stalled';
+  transportState?: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
+  loopLagMs?: number;
   /** 断开起始时间（epoch ms），仅 connected=false 时携带。 */
   since?: number;
 };
 
-type BannerState = 'starting' | 'busy' | 'restarting' | 'error' | 'hidden';
+type BannerState = 'starting' | 'busy' | 'stalled' | 'restarting' | 'error' | 'hidden';
 
 let initialized = false;
 let unsubscribe: (() => void) | null = null;
@@ -50,13 +54,19 @@ let recoverInFlight = false;
 let lastComponentWarning = '';
 
 function deriveState(status: BackendStatus | undefined): BannerState {
-  if (!status || status.connected) return 'hidden';
+  if (!status) return 'hidden';
+  if (status.failureKind === 'auth_failed') return 'error';
+  if (status.processState === 'starting' && !status.connected) return 'starting';
+  if (status.processState === 'error') return 'error';
+  if (status.processState === 'restarting' || status.processState === 'offline') return 'restarting';
+  if (status.healthState === 'stalled') return 'stalled';
+  if (status.healthState === 'degraded') return 'busy';
+  if (status.connected) return 'hidden';
   switch (status.failureKind) {
     case 'timeout':
       return 'busy';
     case 'unreachable':
       return 'restarting';
-    case 'auth_failed':
     case 'unknown':
       return 'error';
     default:
@@ -120,7 +130,18 @@ function applyState(el: HTMLElement): void {
     icon.textContent = '!';
     title.textContent = '后端繁忙';
     const seconds = elapsedSeconds();
-    text.textContent = seconds == null ? '请求较多，请稍候' : `已等待 ${seconds} 秒，请稍候`;
+    const lag = lastStatus?.loopLagMs;
+    text.textContent = lag !== undefined
+      ? `业务循环延迟约 ${Math.round(lag)} ms，请稍候`
+      : seconds == null ? '请求较多，请稍候' : `已等待 ${seconds} 秒，请稍候`;
+  } else if (currentState === 'stalled') {
+    el.classList.add('is-danger');
+    icon.textContent = '!';
+    title.textContent = '智能体服务卡顿';
+    const lag = lastStatus?.loopLagMs;
+    text.textContent = lag === undefined
+      ? '业务循环暂时没有及时响应，可稍后重试'
+      : `业务循环延迟约 ${Math.round(lag)} ms，正在观察恢复`;
   } else if (currentState === 'restarting') {
     el.classList.add('is-warn');
     icon.textContent = '!';
@@ -179,8 +200,38 @@ function setBannerState(next: BannerState): void {
   renderBanner();
 }
 
+let lastStatus: BackendStatus | undefined;
+
+function statusAllowsSending(status: BackendStatus): boolean {
+  const processReady = !status.processState || status.processState === 'ready';
+  const healthReady = !status.healthState
+    || status.healthState === 'unknown'
+    || status.healthState === 'healthy'
+    || status.healthState === 'degraded';
+  const transportReady = !status.transportState
+    || status.transportState === 'unknown'
+    || status.transportState === 'connected';
+  return Boolean(status.connected && processReady && healthReady && transportReady);
+}
+
+/** WS 只更新发送能力，不把 transport 断开误写成进程/HTTP 探针断开。 */
+export function setBackendTransportState(
+  transportState: NonNullable<BackendStatus['transportState']>,
+): void {
+  const status: BackendStatus = {
+    ...(lastStatus ?? { connected: uiStore.get().backendConnected }),
+    transportState,
+  };
+  uiStore.set({
+    backendTransportState: transportState,
+    backendCanSend: statusAllowsSending(status),
+  });
+}
+
 /**
- * gateway 晚于登录 hydrate 就绪时：补连 WS 并重拉配置。
+ * gateway 晚于登录 hydrate 就绪时：补连 WS 并重放 hydrate。
+ * hydrateBackendState 覆盖会话列表 / 工作空间 / 模型配置 / 渠道会话并刷新侧栏，
+ * 冷启动首批请求打在未就绪 gateway 上留下的「加载失败」错误态随成功重拉自动清除。
  * 失败吞掉——下一次 backend:status / socket 自重连会再试。
  */
 async function recoverAfterBackendConnected(): Promise<void> {
@@ -192,7 +243,7 @@ async function recoverAfterBackendConnected(): Promise<void> {
       socket.connect();
     }
     const recoveries: Promise<unknown>[] = [
-      import('./model-picker').then((module) => module.loadConfig()),
+      import('./session-controller').then((module) => module.hydrateBackendState()),
     ];
     await Promise.allSettled(recoveries);
   } finally {
@@ -218,8 +269,16 @@ export function initBackendStatusGuard(): void {
     const connected = !!status?.connected;
     const wasConnected = uiStore.get().backendConnected === true;
     if (status?.logPath) currentLogPath = status.logPath;
+    lastStatus = status;
     disconnectedSince = !connected && typeof status?.since === 'number' ? status.since : null;
-    uiStore.set({ backendConnected: connected });
+    uiStore.set({
+      backendConnected: connected,
+      backendProcessState: status.processState ?? (connected ? 'ready' : 'starting'),
+      backendHealthState: status.healthState ?? (connected ? 'healthy' : 'unknown'),
+      backendTransportState: status.transportState ?? uiStore.get().backendTransportState,
+      backendLoopLagMs: typeof status.loopLagMs === 'number' ? status.loopLagMs : null,
+      backendCanSend: statusAllowsSending(status),
+    });
     setBannerState(deriveState(status));
     const failedComponent = Object.values(status?.components ?? {})
       .find((component) => component.status === 'failed');
@@ -257,6 +316,7 @@ export function disposeBackendStatusGuard(): void {
   currentState = 'hidden';
   disconnectedSince = null;
   currentLogPath = '';
+  lastStatus = undefined;
   lastComponentWarning = '';
 }
 
@@ -266,4 +326,8 @@ export function disposeBackendStatusGuard(): void {
  */
 export function isBackendConnected(): boolean {
   return uiStore.get().backendConnected === true;
+}
+
+export function canSendToBackend(): boolean {
+  return uiStore.get().backendCanSend === true;
 }

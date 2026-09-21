@@ -13,6 +13,7 @@ import base64
 import json
 import mimetypes
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -55,6 +56,7 @@ from crew.tools.tool_search import ToolSearchConfig, dispatch_bridge_tool, is_br
 log = get_logger("agent.tool_runner")
 _MAX_TOOL_WORKERS = 8  # Crew run_agent.py / agent.tool_executor default
 _INTERRUPT_GRACE_SECONDS = 0.1  # interrupt 后等工具自行收尾的优雅窗口
+_CLEANUP_GRACE_SECONDS = 0.25  # 取消后最多等待第三方协程自行退出的窗口
 
 
 def _read_media_data_url(part: MediaPart) -> str:
@@ -80,12 +82,14 @@ class ToolRunner:
         control: Any = None,
         plan_manager: Any = None,
         tool_execution_timeout_seconds: float = 600.0,
+        tool_total_timeout_seconds: float | None = None,
         tool_search_schemas: list[dict[str, Any]] | None = None,
         tool_search_config: ToolSearchConfig | None = None,
         authorized_tool_names: frozenset[str] | None = None,
         allowed_tool_names: set[str] | frozenset[str] | None = None,
         direct_tool_names: set[str] | frozenset[str] | None = None,
         discovered_tool_names: set[str] | frozenset[str] | None = None,
+        durable_event_sink: Callable[[str, dict[str, Any]], Any] | None = None,
     ) -> None:
         self.registry = registry
         self.plugins = plugins
@@ -97,6 +101,16 @@ class ToolRunner:
         self.plan_manager = plan_manager
         # 执行段看门狗（秒）：超时合成 timed-out 输出回灌模型，0=关闭。
         self.tool_execution_timeout_seconds = max(0.0, float(tool_execution_timeout_seconds or 0.0))
+        # 总预算覆盖 request/pre/执行/结果/post 全管线。未单独配置时与执行段预算一致，
+        # 保持现有配置形态，同时避免前后置 hook 把单工具调用无限延长。
+        self.tool_total_timeout_seconds = max(
+            0.0,
+            float(
+                self.tool_execution_timeout_seconds
+                if tool_total_timeout_seconds is None
+                else (tool_total_timeout_seconds or 0.0)
+            ),
+        )
         self.tool_search_schemas = list(tool_search_schemas or [])
         self.tool_search_config = tool_search_config
         self.authorized_tool_names = authorized_tool_names
@@ -108,6 +122,7 @@ class ToolRunner:
         # a provider must not bypass progressive disclosure by guessing a name.
         self.direct_tool_names = set(direct_tool_names) if direct_tool_names is not None else None
         self.discovered_tool_names = set(discovered_tool_names or ())
+        self.durable_event_sink = durable_event_sink
         if self.direct_tool_names is not None:
             self.direct_tool_names.update(self.discovered_tool_names)
         # 流式提前派发缓存（Crew earlyExecutions）：tc.id -> 正在执行/已完成的 asyncio.Task。
@@ -116,6 +131,7 @@ class ToolRunner:
         self._prewarm_keys: set[tuple[str, str]] = set()  # (name, repr(args)) 去重
         self._sem: asyncio.Semaphore | None = None  # 全轮共享并发闸门，懒创建
         self._pending_media: list[tuple[str, str, MediaPart]] = []
+        self._leaked_tasks: set[asyncio.Task[Any]] = set()
         self.approval_rejected = False
         self.security_boundary_failed = False
 
@@ -260,17 +276,12 @@ class ToolRunner:
         if key in self._prewarm_keys:
             return False
         self._prewarm_keys.add(key)
-        sem = self._ensure_sem()
-
         async def _run() -> ToolResult:
-            async with sem:
-                if self._interrupted:
-                    return self._cancelled_result(tc)
-                started = self._mark_tool_started(tc)
-                try:
-                    return await self._execute_one_body(tc)
-                finally:
-                    self._mark_tool_finished(tc, started=started)
+            if self._interrupted:
+                result = self._cancelled_result(tc)
+                await self._record_tool_result_commit(tc, result, status="cancelled")
+                return result
+            return await self._execute_one(tc)
 
         self._prewarm[tc.id] = asyncio.create_task(_run())
         return True
@@ -279,9 +290,7 @@ class ToolRunner:
         """取消并清空所有未消费的 prewarm 任务（重试/收尾时调用）。"""
         tasks = [t for t in self._prewarm.values() if not t.done()]
         for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await self._cancel_task_with_grace(task, "prewarm")
         self._prewarm.clear()
         self._prewarm_keys.clear()
 
@@ -448,13 +457,25 @@ class ToolRunner:
             try:
                 return await task
             except asyncio.CancelledError:
-                return self._cancelled_result(tc)
+                result = self._cancelled_result(tc)
+                await self._record_tool_result_commit(tc, result, status="cancelled")
+                return result
             except Exception as exc:  # noqa: BLE001
-                return ToolResult(tc.id, tc.name, f"工具异常: {exc}", is_error=True)
-        async with self._ensure_sem():
-            if self._interrupted:
-                return self._cancelled_result(tc)
-            return await self._execute_one(tc)
+                result = ToolResult(
+                    tc.id,
+                    tc.name,
+                    f"工具异常: {exc}",
+                    is_error=True,
+                    code="tool_error",
+                    side_effect_state="unknown",
+                )
+                await self._record_tool_result_commit(tc, result)
+                return result
+        if self._interrupted:
+            result = self._cancelled_result(tc)
+            await self._record_tool_result_commit(tc, result, status="cancelled")
+            return result
+        return await self._execute_one(tc)
 
     async def _resolve_parallel(self, calls) -> list[ToolResult]:
         tasks = [asyncio.create_task(self._resolve(tc)) for tc in calls]
@@ -463,8 +484,7 @@ class ToolRunner:
             done, pending = await asyncio.wait(pending, timeout=0.05, return_when=asyncio.FIRST_COMPLETED)
             if self._interrupted and pending:
                 for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
+                    await self._cancel_task_with_grace(task, "parallel")
                 break
             if not done and not pending:
                 break
@@ -472,14 +492,27 @@ class ToolRunner:
         results: list[ToolResult] = []
         for tc, task in zip(calls, tasks):
             if task.cancelled() or not task.done():
-                results.append(self._cancelled_result(tc))
+                result = self._cancelled_result(tc)
+                results.append(result)
+                await self._record_tool_result_commit(tc, result, status="cancelled")
                 continue
             try:
                 results.append(task.result())
             except asyncio.CancelledError:
-                results.append(self._cancelled_result(tc))
+                result = self._cancelled_result(tc)
+                results.append(result)
+                await self._record_tool_result_commit(tc, result, status="cancelled")
             except Exception as exc:  # noqa: BLE001
-                results.append(ToolResult(tc.id, tc.name, f"工具异常: {exc}", is_error=True))
+                result = ToolResult(
+                    tc.id,
+                    tc.name,
+                    f"工具异常: {exc}",
+                    is_error=True,
+                    code="tool_error",
+                    side_effect_state="unknown",
+                )
+                results.append(result)
+                await self._record_tool_result_commit(tc, result)
         return results
 
     # ------------------------------------------------------------------ #
@@ -740,12 +773,91 @@ class ToolRunner:
         return current_tool_progress_fn.set(_sink)
 
     async def _execute_one(self, tc, *, started_at: float | None = None) -> ToolResult:
-        """单个工具：guardrails.before → plugins.pre → execute → transform → guardrails.after → plugins.post。"""
+        """单个工具的完整管线，并受总预算保护。"""
         started = started_at if started_at is not None else self._mark_tool_started(tc)
         try:
-            return await self._execute_one_body(tc)
+            async def _run_pipeline() -> ToolResult:
+                async with self._ensure_sem():
+                    return await self._execute_one_body(tc)
+
+            result = await self._execute_total_guarded(
+                tc,
+                _run_pipeline,
+            )
+            return self._normalize_result(result)
         finally:
             self._mark_tool_finished(tc, started=started)
+
+    async def _cancel_task_with_grace(self, task: asyncio.Task[Any], label: str) -> bool:
+        """协作取消后有限等待；第三方吞掉 CancelledError 时不阻塞当前回合。"""
+        if task.done():
+            return True
+        task.cancel()
+        done, pending = await asyncio.wait({task}, timeout=_CLEANUP_GRACE_SECONDS)
+        if pending:
+            self._leaked_tasks.add(task)
+
+            def _forget(done_task: asyncio.Task[Any]) -> None:
+                self._leaked_tasks.discard(done_task)
+                try:
+                    done_task.exception()
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            task.add_done_callback(_forget)
+            log.warning("工具子任务未在取消宽限期内退出 tool=%s label=%s", label, label)
+            return False
+        return bool(done)
+
+    async def _execute_total_guarded(self, tc, invoke) -> ToolResult:
+        """完整工具管线看门狗：总预算与 interrupt 竞争。"""
+        timeout = self.tool_total_timeout_seconds
+        wait_interrupted = getattr(self.control, "wait_interrupted", None)
+        if timeout <= 0 and not callable(wait_interrupted):
+            return await invoke()
+        started = time.perf_counter()
+        pipeline_task = asyncio.create_task(invoke())
+        interrupt_task = (
+            asyncio.create_task(wait_interrupted())
+            if callable(wait_interrupted)
+            else None
+        )
+        try:
+            racers = {pipeline_task} | ({interrupt_task} if interrupt_task is not None else set())
+            done, _pending = await asyncio.wait(
+                racers,
+                timeout=timeout if timeout > 0 else None,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if pipeline_task in done:
+                return pipeline_task.result()
+            if interrupt_task is not None and interrupt_task in done:
+                await asyncio.wait(
+                    {pipeline_task},
+                    timeout=_INTERRUPT_GRACE_SECONDS,
+                )
+                if pipeline_task.done():
+                    return pipeline_task.result()
+                await self._cancel_task_with_grace(pipeline_task, tc.name)
+                result = self._aborted_result(tc, time.perf_counter() - started)
+                await self._record_tool_result_commit(tc, result, status="cancelled")
+                return result
+            await self._cancel_task_with_grace(pipeline_task, tc.name)
+            result = self._timeout_result(tc, timeout)
+            await self._record_tool_result_commit(tc, result)
+            return result
+        except asyncio.CancelledError:
+            await self._cancel_task_with_grace(pipeline_task, tc.name)
+            if interrupt_task is not None:
+                await self._cancel_task_with_grace(interrupt_task, f"{tc.name}:interrupt")
+            if self._interrupted:
+                result = self._aborted_result(tc, time.perf_counter() - started)
+                await self._record_tool_result_commit(tc, result, status="cancelled")
+                return result
+            raise
+        finally:
+            if interrupt_task is not None and not interrupt_task.done():
+                await self._cancel_task_with_grace(interrupt_task, f"{tc.name}:interrupt")
 
     async def _execute_guarded(self, tc, invoke) -> ToolResult:
         """执行段看门狗：工具 task 与 (interrupt 事件, 超时) 竞争，FIRST_COMPLETED 决胜。
@@ -780,26 +892,23 @@ class ToolRunner:
                 grace, _ = await asyncio.wait({exec_task}, timeout=_INTERRUPT_GRACE_SECONDS)
                 if grace:
                     return exec_task.result()
-                exec_task.cancel()
-                await asyncio.gather(exec_task, return_exceptions=True)
+                await self._cancel_task_with_grace(exec_task, tc.name)
                 return self._aborted_result(tc, time.perf_counter() - started)
             # wait 空 done：超时
-            exec_task.cancel()
-            await asyncio.gather(exec_task, return_exceptions=True)
+            await self._cancel_task_with_grace(exec_task, tc.name)
             return self._timeout_result(tc, timeout)
         except asyncio.CancelledError:
             # 外层取消（整批 interrupt 硬取消/回合中止）：执行 task 必带走；
             # 若取消源于 interrupt，按 aborted 语义合成结果，不撕裂历史配对。
-            exec_task.cancel()
+            await self._cancel_task_with_grace(exec_task, tc.name)
             if interrupt_task is not None:
-                interrupt_task.cancel()
-            await asyncio.gather(exec_task, return_exceptions=True)
+                await self._cancel_task_with_grace(interrupt_task, f"{tc.name}:interrupt")
             if self._interrupted:
                 return self._aborted_result(tc, time.perf_counter() - started)
             raise
         finally:
             if interrupt_task is not None and not interrupt_task.done():
-                interrupt_task.cancel()
+                await self._cancel_task_with_grace(interrupt_task, f"{tc.name}:interrupt")
 
     async def _execute_one_body(self, tc) -> ToolResult:
         """单个工具：guardrails.before → plugins.pre → execute → transform → guardrails.after → plugins.post。"""
@@ -918,6 +1027,14 @@ class ToolRunner:
                 return ToolResult(tc.id, tc.name, perm_block, is_error=True)
 
             # 3. 真正执行
+            await self._record_durable_event(
+                "tool_execution_intent",
+                {
+                    "tool_call_id": tc.id,
+                    "name": tc.name,
+                    "side_effect_state": "unknown",
+                },
+            )
             t = time.perf_counter()
             # 注入进度 sink，长任务（如 terminal 前台命令）
             # 可在执行中向前端流式发射增量。无 push_fn 时 sink 内部 no-op。
@@ -957,6 +1074,7 @@ class ToolRunner:
 
             # 4. plugin 结果变换
             result = await self.plugins.transform_tool_result(tc, result)
+            result = self._normalize_result(result)
 
             # 5. guardrail 事后记账（warn/halt → 把指引贴到结果上）
             failed = True if result.is_error else None
@@ -968,10 +1086,16 @@ class ToolRunner:
                     append_toolguard_guidance(result.content, post),
                     is_error=result.is_error,
                     media=list(result.media),
+                    code=result.code,
+                    retryable=result.retryable,
+                    retry_delay=result.retry_delay,
+                    side_effect_state=result.side_effect_state,
+                    details=dict(result.details),
                 )
 
             # 6. plugin 后置观测
             await self.plugins.post_tool_call(tc, result, session_id=self.session_id)
+            await self._record_tool_result_commit(tc, result)
             return result
         finally:
             current_tool_call_id.reset(tool_token)
@@ -980,17 +1104,80 @@ class ToolRunner:
     def _interrupted(self) -> bool:
         return bool(self.control is not None and getattr(self.control, "interrupted", False))
 
+    async def _record_durable_event(self, kind: str, payload: dict[str, Any]) -> None:
+        sink = self.durable_event_sink
+        if sink is None:
+            return
+        try:
+            value = sink(kind, payload)
+            if hasattr(value, "__await__"):
+                await value
+        except Exception:  # noqa: BLE001 - 审计边界失败不能吞掉工具结果
+            log.warning("工具 durable boundary 写入失败 session=%s kind=%s", self.session_id, kind)
+
+    async def _record_tool_result_commit(
+        self,
+        tc,
+        result: ToolResult,
+        *,
+        status: str | None = None,
+    ) -> None:
+        await self._record_durable_event(
+            "tool_result_commit",
+            {
+                "tool_call_id": tc.id,
+                "name": tc.name,
+                "status": status or ("error" if result.is_error else "ok"),
+                **result.protocol_metadata(),
+            },
+        )
+
+    @staticmethod
+    def _normalize_result(result: ToolResult) -> ToolResult:
+        """为未类型化的工具失败补齐稳定协议字段。"""
+        if not result.is_error or result.code:
+            return result
+        return replace(
+            result,
+            code="tool_error",
+            side_effect_state=(
+                "unknown" if result.side_effect_state == "none" else result.side_effect_state
+            ),
+        )
+
     @staticmethod
     def _cancelled_result(tc) -> ToolResult:
-        return ToolResult(tc.id, tc.name, "工具调用因用户中断而取消。", is_error=True)
+        return ToolResult(
+            tc.id,
+            tc.name,
+            "工具调用因用户中断而取消。",
+            is_error=True,
+            code="aborted",
+            side_effect_state="unknown",
+        )
 
     @staticmethod
     def _timeout_result(tc, timeout: float) -> ToolResult:
-        return ToolResult(tc.id, tc.name, f"timed out after {timeout:.1f}s", is_error=True)
+        return ToolResult(
+            tc.id,
+            tc.name,
+            f"timed out after {timeout:.1f}s",
+            is_error=True,
+            code="timeout",
+            retryable=False,
+            side_effect_state="unknown",
+        )
 
     @staticmethod
     def _aborted_result(tc, elapsed: float) -> ToolResult:
-        return ToolResult(tc.id, tc.name, f"aborted by user after {elapsed:.1f}s", is_error=True)
+        return ToolResult(
+            tc.id,
+            tc.name,
+            f"aborted by user after {elapsed:.1f}s",
+            is_error=True,
+            code="aborted",
+            side_effect_state="unknown",
+        )
 
     @staticmethod
     def _approval_fence_result(tc, *, approval_rejected: bool = True) -> ToolResult:
@@ -1013,6 +1200,8 @@ class ToolRunner:
                 ensure_ascii=False,
             ),
             is_error=True,
+            code="approval_rejected" if approval_rejected else "security_boundary_failed",
+            side_effect_state="none",
         )
 
     @staticmethod
@@ -1162,6 +1351,7 @@ class ToolRunner:
             rid, tc.name, "result", detail, next_seq(),
             tool_call_id=tc.id,
             ui_label=self._tool_ui_label(tc) if self._is_authorized(tc) else "",
+            result_metadata=result.protocol_metadata(),
         )
 
     def _tool_ui_label(self, tc) -> str:

@@ -131,6 +131,12 @@ const api = {
     baseUrl?: string;
     logPath?: string;
     components?: Record<string, { status: string; message?: string }>;
+    processState?: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
+    healthState?: 'unknown' | 'healthy' | 'degraded' | 'stalled';
+    transportState?: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
+    loopLagMs?: number;
+    failureKind?: 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
+    since?: number;
   }> => ipcRenderer.invoke('gateway:get-status'),
   retryGateway: () => ipcRenderer.invoke('gateway:retry'),
   gatewayFetch: (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) =>
@@ -322,12 +328,24 @@ const api = {
     baseUrl?: string;
     logPath?: string;
     components?: Record<string, { status: string; message?: string }>;
+    processState?: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
+    healthState?: 'unknown' | 'healthy' | 'degraded' | 'stalled';
+    transportState?: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
+    loopLagMs?: number;
+    failureKind?: 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
+    since?: number;
   }) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, status: {
       connected: boolean;
       baseUrl?: string;
       logPath?: string;
       components?: Record<string, { status: string; message?: string }>;
+      processState?: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
+      healthState?: 'unknown' | 'healthy' | 'degraded' | 'stalled';
+      transportState?: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
+      loopLagMs?: number;
+      failureKind?: 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
+      since?: number;
     }) => cb(status);
     ipcRenderer.on('backend:status', listener);
     return () => ipcRenderer.removeListener('backend:status', listener);

@@ -6,16 +6,19 @@
 
 from __future__ import annotations
 
+import codecs
 import errno
 import hashlib
 import os
 import secrets
 import stat
+from collections import deque
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import BinaryIO, Iterable, Iterator, Optional
 
+from crew.core.errors import ToolError
 from crew.core.runctx import current_agent_workdir
 
 
@@ -778,13 +781,15 @@ def _format_read_result(
     file_size: int,
     offset: int = 1,
     limit: int | None = None,
+    shown_lines: int | None = None,
     truncated: bool = False,
     hint: str = "",
 ) -> str:
     """把读取结果格式化为 JSON，与 Hermes 返回结构接近。"""
     import json
 
-    shown_lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+    if shown_lines is None:
+        shown_lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
     payload: dict = {
         "success": True,
         "content": content,
@@ -799,6 +804,548 @@ def _format_read_result(
     if hint:
         payload["hint"] = hint
     return json.dumps(payload, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# file_read 读取引擎：头部嗅探 → 编码/流式路由 → 行窗口 → 行号渲染
+# 窗口语义对齐 dsh tool-fs read（默认行数/行长截断/整行取舍预算/流式行缓冲），
+# 尾读与编码策略对齐 kimi agent-core Read（负 offset 尾窗口、UTF-16 转码、
+# 非 UTF-8 显式报错提示 iconv）。
+# ---------------------------------------------------------------------------
+
+#: 单次读取默认且最大的返回行数（tools.file.read_max_lines 可覆盖默认值）。
+FILE_READ_MAX_LINES = 2000
+#: 单行渲染上限；行缓冲封顶为该值 +1 字符，巨型单行内存恒定。
+FILE_READ_LINE_LENGTH = 2000
+#: 文件达到该大小改走流式读取（不整读进内存）。
+FILE_READ_STREAM_MIN_BYTES = 10 * 1024 * 1024
+#: 头部嗅探的采样字节数。
+TEXT_SAMPLE_BYTES = 8192
+#: UTF-16 自动转码的大小上限，超过要求先 iconv 转换。
+UTF16_TRANSCODE_MAX_BYTES = 10 * 1024 * 1024
+#: 流式读取的单块字节数。
+_READ_CHUNK_BYTES = 1024 * 1024
+
+#: 无 BOM UTF-16 奇偶 NUL 启发式只看前 512 字节（ASCII 的 UTF-16 高字节为 NUL，落单侧下标）。
+_UTF16_SNIFF_BYTES = 512
+_UTF16_MIN_NUL_RUNS = 2
+
+#: 魔数表只收 ≥4 字节无歧义前缀；MZ/BMP/FLV 等短前缀由 NUL 检测兜底，避免误伤正文文本。
+_MAGIC_PREFIXES: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image"),
+    (b"\xff\xd8\xff", "image"),  # JPEG（第三字节固定 Fx，文本不可能合法出现）
+    (b"GIF87a", "image"),
+    (b"GIF89a", "image"),
+    (b"II*\x00", "image"),  # TIFF
+    (b"MM\x00*", "image"),
+    (b"\x00\x00\x01\x00", "image"),  # ICO
+    (b"\x1a\x45\xdf\xa3", "video"),  # EBML（webm/mkv）
+    (b"%PDF", "binary"),
+    (b"PK\x03\x04", "binary"),  # zip 家族（docx/xlsx/jar）
+    (b"PK\x05\x06", "binary"),
+    (b"PK\x07\x08", "binary"),
+    (b"\xd0\xcf\x11\xe0", "binary"),  # OLE（doc/xls/ppt）
+    (b"\x7fELF", "binary"),
+    (b"\xfd7zXZ\x00", "binary"),
+    (b"7z\xbc\xaf\x27\x1c", "binary"),
+    (b"Rar!\x1a\x07", "binary"),
+    (b"SQLite format 3\x00", "binary"),
+)
+
+#: 二进制文档扩展名：错误消息里给出 wiki/skills 通道引导。
+_DOC_EXTENSIONS = frozenset({
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".odt", ".ods", ".odp", ".epub",
+})
+
+
+@dataclass(frozen=True)
+class HeadSniff:
+    """头部字节嗅探结果：encoding 为文本编码推断，media_kind 非空表示二进制。"""
+
+    encoding: str = "utf-8"  # utf-8 / utf-8-sig / utf-16-le / utf-16-be / utf-32
+    media_kind: str = ""  # image / video / binary；空串表示文本
+
+
+@dataclass(frozen=True)
+class WindowLine:
+    number: int  # 文件内 1-based 绝对行号
+    text: str  # 已剥 \r、已做行长截断的行文本
+
+
+@dataclass(frozen=True)
+class TextWindow:
+    lines: list[WindowLine]
+    total_lines: int  # 全文件精确行数（窗口集满后仍继续扫描统计）
+    truncated_by_budget: bool = False  # 输出预算整行取舍触发
+    truncated_line_numbers: list[int] = field(default_factory=list)  # 超长被截断的行号
+
+
+@dataclass(frozen=True)
+class FileReadOutcome:
+    content: str
+    total_lines: int
+    file_size: int
+    shown_lines: int
+    truncated: bool
+    hint: str
+    version: FileVersion  # stat-only：观察记录只消费 (device, inode, size, mtime_ns)
+
+
+def _sniff_head(head: bytes) -> HeadSniff:
+    """按 BOM → 魔数 → 无 BOM UTF-16 启发式 → NUL → 控制字符比例 判定头部。"""
+    if head.startswith(b"\xff\xfe\x00\x00") or head.startswith(b"\x00\x00\xfe\xff"):
+        return HeadSniff(encoding="utf-32")
+    if head.startswith(b"\xff\xfe"):
+        return HeadSniff(encoding="utf-16-le")
+    if head.startswith(b"\xfe\xff"):
+        return HeadSniff(encoding="utf-16-be")
+    if head.startswith(b"\xef\xbb\xbf"):
+        return HeadSniff(encoding="utf-8-sig")
+
+    if head[4:8] == b"ftyp":
+        return HeadSniff(media_kind="video")
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return HeadSniff(media_kind="image")
+    if head[:4] == b"RIFF" and head[8:12] == b"AVI ":
+        return HeadSniff(media_kind="video")
+    for prefix, kind in _MAGIC_PREFIXES:
+        if head.startswith(prefix):
+            return HeadSniff(media_kind=kind)
+
+    sample = head[:_UTF16_SNIFF_BYTES]
+    odd_nul = sum(1 for i in range(1, len(sample), 2) if sample[i] == 0)
+    even_nul = sum(1 for i in range(0, len(sample), 2) if sample[i] == 0)
+    if odd_nul >= _UTF16_MIN_NUL_RUNS and even_nul == 0:
+        return HeadSniff(encoding="utf-16-le")
+    if even_nul >= _UTF16_MIN_NUL_RUNS and odd_nul == 0:
+        return HeadSniff(encoding="utf-16-be")
+
+    if b"\x00" in head:
+        return HeadSniff(media_kind="binary")
+
+    # 控制字符比例：ANSI 转义序列在日志文本里常见，阈值取宽（>30%）避免误伤。
+    decoded = head.decode("utf-8", errors="ignore")
+    if decoded:
+        controls = sum(
+            1
+            for ch in decoded
+            if (ord(ch) < 0x20 and ch not in "\t\n\r\f\b") or 0x7F <= ord(ch) <= 0x9F
+        )
+        if controls / len(decoded) > 0.3:
+            return HeadSniff(media_kind="binary")
+    return HeadSniff()
+
+
+def binary_reject_message(path: Path) -> str:
+    """二进制内容的拒绝消息：按扩展名给出替代通道引导。"""
+    suffix = path.suffix.lower()
+    if suffix in _DOC_EXTENSIONS:
+        return (
+            f'"{path}" 是二进制文档（{suffix}），file_read 仅读取 UTF-8 文本；'
+            "可用 wiki_capture_attachment 摄取为知识库页面，或用 skills_list 加载对应文档技能处理。"
+        )
+    return (
+        f'"{path}" 不是可读的 UTF-8 文本（检测到二进制内容）。'
+        "图片请改用 vision_analyze；文档可用 wiki_capture_attachment 摄取。"
+    )
+
+
+def _iter_capped_lines(chunks: Iterable[str], cap: int) -> Iterator[str]:
+    """把文本 chunk 流切成行；行缓冲封顶 cap+1 字符，巨型单行内存恒定。
+
+    行尾 \\r 剥离（CRLF 显示按 LF）；文件不以换行结尾时最后一段也作为一行。
+    """
+    buffer_cap = cap + 1
+    buffer = ""
+
+    def append(segment: str) -> None:
+        nonlocal buffer
+        if len(buffer) >= buffer_cap:
+            return
+        buffer += segment
+        if len(buffer) > buffer_cap:
+            buffer = buffer[:buffer_cap]
+
+    for chunk in chunks:
+        start = 0
+        while True:
+            newline = chunk.find("\n", start)
+            if newline == -1:
+                break
+            append(chunk[start:newline])
+            line, buffer = buffer, ""
+            yield line[:-1] if line.endswith("\r") else line
+            start = newline + 1
+        append(chunk[start:])
+    if buffer:
+        yield buffer[:-1] if buffer.endswith("\r") else buffer
+
+
+def _clip_line(text: str, max_line_length: int, truncated_numbers: list[int], number: int) -> str:
+    if len(text) <= max_line_length:
+        return text
+    truncated_numbers.append(number)
+    return text[:max_line_length] + f"...（行已截断至 {max_line_length} 字符）"
+
+
+def build_text_window(
+    chunks: Iterable[str],
+    *,
+    offset: int,
+    limit: int,
+    max_line_length: int = FILE_READ_LINE_LENGTH,
+    max_chars: int = 100_000,
+) -> TextWindow:
+    """在文本 chunk 流上构建行窗口：offset≥1 为前向读取，offset<0 为尾读。"""
+    if offset >= 1:
+        return _build_window_forward(
+            chunks, offset=offset, limit=limit, max_line_length=max_line_length, max_chars=max_chars
+        )
+    return _build_window_tail(
+        chunks, offset=offset, limit=limit, max_line_length=max_line_length, max_chars=max_chars
+    )
+
+
+def _build_window_forward(
+    chunks: Iterable[str],
+    *,
+    offset: int,
+    limit: int,
+    max_line_length: int,
+    max_chars: int,
+) -> TextWindow:
+    lines: list[WindowLine] = []
+    truncated_line_numbers: list[int] = []
+    total = 0
+    used = 0
+    capped = False
+
+    def consume(raw: str) -> None:
+        nonlocal total, used, capped
+        total += 1
+        if capped or total < offset or len(lines) >= limit:
+            return
+        text = _clip_line(raw, max_line_length, truncated_line_numbers, total)
+        cost = len(text) + (1 if lines else 0)
+        if used + cost > max_chars:
+            capped = True
+            return
+        used += cost
+        lines.append(WindowLine(number=total, text=text))
+
+    for line in _iter_capped_lines(chunks, max_line_length):
+        consume(line)
+
+    if not capped and offset > total and not (total == 0 and offset == 1):
+        raise ToolError(f"offset {offset} 超出文件范围（共 {total} 行）")
+    shown = {line.number for line in lines}
+    return TextWindow(
+        lines=lines,
+        total_lines=total,
+        truncated_by_budget=capped,
+        truncated_line_numbers=[n for n in truncated_line_numbers if n in shown],
+    )
+
+
+def _build_window_tail(
+    chunks: Iterable[str],
+    *,
+    offset: int,
+    limit: int,
+    max_line_length: int,
+    max_chars: int,
+) -> TextWindow:
+    tail_count = -offset
+    truncated_line_numbers: list[int] = []
+    total = 0
+    window: deque[WindowLine] = deque(maxlen=tail_count)
+    for line in _iter_capped_lines(chunks, max_line_length):
+        total += 1
+        window.append(WindowLine(number=total, text=_clip_line(line, max_line_length, truncated_line_numbers, total)))
+
+    # limit 从尾窗口头部截取；预算超限时从头部丢行，保留最接近文件末尾的内容。
+    entries = list(window)[:limit]
+    kept: list[WindowLine] = []
+    used = 0
+    capped = False
+    for entry in reversed(entries):
+        cost = len(entry.text) + (1 if kept else 0)
+        if used + cost > max_chars:
+            capped = True
+            break
+        used += cost
+        kept.append(entry)
+    kept.reverse()
+    shown = {entry.number for entry in kept}
+    return TextWindow(
+        lines=kept,
+        total_lines=total,
+        truncated_by_budget=capped,
+        truncated_line_numbers=[n for n in truncated_line_numbers if n in shown],
+    )
+
+
+def render_read_window(window: TextWindow, *, offset: int) -> str:
+    """把窗口渲染为「行号: 内容」正文 + 续读提示 footer。"""
+    body = [f"{line.number}: {line.text}" for line in window.lines]
+    count = len(window.lines)
+    if offset >= 1:
+        end = window.lines[-1].number if count else max(0, offset - 1)
+        if window.truncated_by_budget:
+            footer = f"(输出已达上限。已显示第 {offset}-{end} 行。用 offset={end + 1} 继续读取。)"
+        elif end < window.total_lines:
+            footer = f"(已显示第 {offset}-{end} 行，共 {window.total_lines} 行。用 offset={end + 1} 继续读取。)"
+        else:
+            footer = f"(文件结束，共 {window.total_lines} 行)"
+    else:
+        if count:
+            start, end = window.lines[0].number, window.lines[-1].number
+            footer = f"(已读取 {count} 行（第 {start}-{end} 行），文件共 {window.total_lines} 行)"
+        else:
+            footer = f"(文件结束，共 {window.total_lines} 行)"
+        if window.truncated_by_budget:
+            footer = f"{footer} 输出已达字符上限，已保留最接近文件末尾的行；可用更小的 limit 分段读取。"
+    return "\n".join(body + ["", footer]) if body else footer
+
+
+def validate_read_window_args(
+    offset: object,
+    limit: object,
+    *,
+    max_lines: int | None = None,
+) -> tuple[int, int]:
+    """校验 file_read 的 offset/limit：正 offset 前向、负 offset 尾读。"""
+    if max_lines is None:
+        max_lines = _get_max_read_lines()
+    if offset is None:
+        offset = 1
+    else:
+        try:
+            offset = int(offset)
+        except (TypeError, ValueError):
+            raise ToolError("offset 必须是整数")
+        if offset == 0:
+            raise ToolError("offset 不能为 0：正数表示 1-based 起始行，负数表示从文件末尾读取")
+        if offset < 0 and -offset > max_lines:
+            raise ToolError(f"负 offset 的绝对值不能超过 {max_lines}")
+    if limit is None:
+        limit = max_lines
+    else:
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            raise ToolError("limit 必须是正整数")
+        if limit < 1:
+            raise ToolError("limit 必须是正整数")
+        if limit > max_lines:
+            raise ToolError(f"limit 不能超过 {max_lines}")
+    return offset, limit
+
+
+def _get_max_read_lines() -> int:
+    """读取配置的单次返回行数上限（tools.file.read_max_lines）。"""
+    try:
+        from crew.state.config import load_config
+
+        cfg = load_config()
+        val = cfg.raw_config.get("tools", {}).get("file", {}).get("read_max_lines")
+        if isinstance(val, (int, float)) and val > 0:
+            return int(val)
+    except Exception:
+        pass
+    return FILE_READ_MAX_LINES
+
+
+def _stream_utf8_chunks(handle: BinaryIO, *, strip_bom: bool) -> Iterator[str]:
+    """从已打开句柄流式产出严格解码的 UTF-8 文本块。"""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+    first = True
+    while True:
+        block = handle.read(_READ_CHUNK_BYTES)
+        if not block:
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                yield tail.removeprefix("\ufeff") if first and strip_bom else tail
+            return
+        piece = decoder.decode(block)
+        if piece:
+            if first and strip_bom:
+                piece = piece.removeprefix("\ufeff")
+            first = False
+            yield piece
+
+
+@contextmanager
+def open_verified_read(path: Path) -> Iterator[tuple[os.stat_result, BinaryIO]]:
+    """身份校验后打开只读句柄（不整读），供流式读取大文件。
+
+    校验规则与整读路径一致：拒绝符号链接/非常规文件/多硬链接，打开前后身份一致。
+    """
+    canonical = _lexical_absolute(path)
+    with _pinned_parent(canonical) as parent_descriptor:
+        if os.name == "nt":
+            before = canonical.lstat()
+
+            def opener(flags: int) -> int:
+                return os.open(canonical, flags)
+
+        else:
+            before = os.stat(canonical.name, dir_fd=parent_descriptor, follow_symlinks=False)
+
+            def opener(flags: int) -> int:
+                return os.open(canonical.name, flags, dir_fd=parent_descriptor)
+
+        descriptor, opened = _open_verified(before, opener)
+        handle = os.fdopen(descriptor, "rb")
+        try:
+            yield opened, handle
+        finally:
+            handle.close()
+
+
+def _utf16_label(encoding: str) -> str:
+    return "UTF-16 LE" if encoding == "utf-16-le" else "UTF-16 BE"
+
+
+def read_file_window(
+    path: Path,
+    *,
+    offset: int,
+    limit: int,
+) -> FileReadOutcome:
+    """file_read 主流程：嗅探 → 编码/流式路由 → 行窗口 → 行号渲染。
+
+    成功返回带 stat-only FileVersion 的结果；写入侧的 stale 校验只消费
+    stat 四元组，因此这里不整读、不计算内容摘要。
+    """
+    max_chars = _get_max_read_chars()
+    hints: list[str] = []
+
+    with open_verified_read(path) as (info, handle):
+        head = handle.read(TEXT_SAMPLE_BYTES)
+        handle.seek(0)
+        sniff = _sniff_head(head)
+
+        if sniff.encoding == "utf-32":
+            raise ToolError(
+                f'"{path}" 是 UTF-32 编码，file_read 不支持；请先用 terminal 执行 iconv 转为 UTF-8 后再读取。'
+            )
+        if sniff.media_kind == "image":
+            raise ToolError(f'"{path}" 是图片文件，file_read 仅读取文本；请改用 vision_analyze 分析图片。')
+        if sniff.media_kind == "video":
+            raise ToolError(f'"{path}" 是视频文件，file_read 仅读取文本。')
+        if sniff.media_kind == "binary":
+            raise ToolError(binary_reject_message(path))
+
+        def build(chunks: Iterable[str]) -> TextWindow:
+            return build_text_window(
+                chunks, offset=offset, limit=limit, max_chars=max_chars
+            )
+
+        if sniff.encoding == "utf-8-sig":
+            hints.append("文件包含 UTF-8 BOM，已自动剥离显示。")
+
+        try:
+            if sniff.encoding in ("utf-16-le", "utf-16-be"):
+                if info.st_size > UTF16_TRANSCODE_MAX_BYTES:
+                    raise ToolError(
+                        f'"{path}" 是 {_utf16_label(sniff.encoding)} 文本但超过转码上限'
+                        f"（{info.st_size} 字节 > {UTF16_TRANSCODE_MAX_BYTES}）；"
+                        "请先用 terminal 执行 iconv 转为 UTF-8 后再读取。"
+                    )
+                text = handle.read().decode(sniff.encoding, errors="replace")
+                window = build([text.removeprefix("\ufeff")])
+                hints.append(
+                    f"检测到 {_utf16_label(sniff.encoding)} 编码，已转码为 UTF-8 显示；"
+                    "编辑/写入要求 UTF-8，请先用 terminal 执行 iconv 转换文件编码。"
+                )
+            elif info.st_size >= FILE_READ_STREAM_MIN_BYTES:
+                window = build(_stream_utf8_chunks(handle, strip_bom=sniff.encoding == "utf-8-sig"))
+            else:
+                text = handle.read().decode("utf-8")
+                window = build([text.removeprefix("\ufeff") if sniff.encoding == "utf-8-sig" else text])
+        except UnicodeDecodeError as exc:
+            raise ToolError(
+                f'"{path}" 不是有效的 UTF-8 文本。'
+                "GBK 等其他编码请先用 terminal 执行 iconv 转换后再读取。"
+            ) from exc
+
+        after = os.fstat(handle.fileno())
+        if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise FileConflictError("文件在读取期间已变化，请重试")
+
+    if window.truncated_line_numbers:
+        shown_numbers = "、".join(str(n) for n in window.truncated_line_numbers[:20])
+        suffix = " 等" if len(window.truncated_line_numbers) > 20 else ""
+        hints.append(
+            f"第 {shown_numbers}{suffix} 行超过 {FILE_READ_LINE_LENGTH} 字符已截断；"
+            "可用 terminal 的 cut 或 sed 查看完整行。"
+        )
+
+    content = render_read_window(window, offset=offset)
+    end = window.lines[-1].number if window.lines else 0
+    truncated = end < window.total_lines or window.truncated_by_budget or bool(window.truncated_line_numbers)
+    version = FileVersion(
+        path=_lexical_absolute(path),
+        exists=True,
+        device=after.st_dev,
+        inode=after.st_ino,
+        size=after.st_size,
+        mtime_ns=after.st_mtime_ns,
+        mode=after.st_mode,
+    )
+    return FileReadOutcome(
+        content=content,
+        total_lines=window.total_lines,
+        file_size=info.st_size,
+        shown_lines=len(window.lines),
+        truncated=truncated,
+        hint="\n".join(hints),
+        version=version,
+    )
+
+
+def slice_text_window(
+    text: str,
+    offset: object,
+    limit: object,
+    *,
+    max_lines: int | None = None,
+) -> tuple[str, int, int]:
+    """把整段文本按 file_read 的 offset/limit 语义切片（负 offset = 尾读）。
+
+    宽容归一（不抛错）：供压缩恢复等只需要纯文本窗口的场景复用。
+    返回 (切片文本, 起始行号 ≥1, 总行数)。
+    """
+    if max_lines is None:
+        max_lines = _get_max_read_lines()
+    try:
+        offset_i = int(offset) if offset is not None else 1
+    except (TypeError, ValueError):
+        offset_i = 1
+    if offset_i == 0:
+        offset_i = 1
+    offset_i = max(offset_i, -max_lines)
+    try:
+        limit_i = int(limit) if limit is not None else max_lines
+    except (TypeError, ValueError):
+        limit_i = max_lines
+    limit_i = max(1, min(limit_i, max_lines))
+
+    lines = text.splitlines(keepends=True)
+    total = len(lines)
+    if offset_i < 0:
+        start = max(0, total + offset_i)
+    else:
+        start = min(offset_i - 1, total)
+    window = lines[start : start + limit_i]
+    return "".join(window), start + 1, total
 
 
 # ---------------------------------------------------------------------------

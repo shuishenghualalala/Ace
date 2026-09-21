@@ -73,38 +73,6 @@ export function createProcessItem(
   return item;
 }
 
-export function createThinkingProcess(
-  thinking: string,
-  messageId: string,
-  streaming: boolean,
-): HTMLElement {
-  const details = document.createElement('details');
-  details.className = 'process-timeline__content process-timeline__details';
-  details.open = streaming;
-  const summary = document.createElement('summary');
-  summary.className = 'process-timeline__row';
-  const title = document.createElement('span');
-  title.className = 'process-timeline__title';
-  title.textContent = streaming ? '思考中' : '思考已完成';
-  const chevron = document.createElement('span');
-  chevron.className = 'process-timeline__chevron';
-  chevron.textContent = '›';
-  chevron.setAttribute('aria-hidden', 'true');
-  const content = document.createElement('div');
-  content.className = 'process-timeline__thinking';
-  content.textContent = thinking;
-  summary.append(title, chevron);
-  details.append(summary, content);
-
-  const item = createProcessItem(
-    'process-thinking',
-    details,
-    streaming ? 'running' : 'idle',
-  );
-  item.dataset.thinkingFor = messageId;
-  return item;
-}
-
 function prettyBlock(value?: string): string {
   if (!value) return '';
   try {

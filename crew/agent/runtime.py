@@ -779,6 +779,15 @@ class SingleAgent(Agent):
                     owner_account_id=owner,
                     kind=SessionEventType.TURN_START,
                 )
+            reconcile_tools = getattr(self.session_store, "reconcile_open_tool_events", None)
+            if callable(reconcile_tools):
+                pending_tools = reconcile_tools(task_sid, owner_account_id=owner)
+                if pending_tools:
+                    log.warning(
+                        "恢复会话时关闭未完成工具边界 session=%s count=%d",
+                        task_sid,
+                        len(pending_tools),
+                    )
         if not self.lightweight:
             # 文件清单持久会话信息：从工具调用历史提取 read/modified 清单写入
             # canonical（原地刷新 is_meta 消息），压缩遮蔽后由压缩管线重新注入视图。
@@ -815,20 +824,16 @@ class SingleAgent(Agent):
         user_message.timestamp = turn_started_at
         history.append(user_message)
 
-        if is_new and self.enable_title and not self.lightweight:
-            # 只落占位标题，让会话立刻出现在列表里；标题生成延后到主响应结束后
-            # 由 finally 块调度（见下方 _spawn_title_task 调用），不抢占主推理窗口。
-            if not self._session_needs_title(task_sid, owner):
-                try:
-                    await self.session_store.save_async(
-                        task_sid,
-                        history,
-                        workspace_id=envelope.workspace_id,
-                        owner_account_id=owner,
-                        title_fallback="",
-                    )
-                except Exception:  # noqa: BLE001
-                    log.debug("创建会话标题占位失败 session=%s", task_sid)
+        if not self.lightweight:
+            # 用户边界先提交，再进入 prompt 构建和工具执行。这样即使进程在
+            # LLM/工具阶段退出，重启后仍能恢复到最后一个确定的用户输入。
+            await self.session_store.save_async(
+                task_sid,
+                history,
+                workspace_id=envelope.workspace_id,
+                owner_account_id=owner,
+                title_fallback="" if self.enable_title else None,
+            )
 
         # Skill 展开内容写入 canonical history（is_meta=True，前端不渲染但模型可见）
         skill_meta = envelope.params.get("skill_meta")
@@ -900,6 +905,24 @@ class SingleAgent(Agent):
         current_authorized_tool_names.set(authorized_tool_names)
         from crew.agent.skills import skill_activations_from_params
 
+        async def _durable_event_sink(kind: str, payload: dict[str, Any]) -> None:
+            record = getattr(self.session_store, "record_durable_event_async", None)
+            if not callable(record):
+                return
+            try:
+                from crew.state.session_store import SessionEventType
+
+                event_kind = SessionEventType(kind)
+            except (ImportError, ValueError):
+                log.warning("忽略未知 durable boundary kind=%s session=%s", kind, task_sid)
+                return
+            await record(
+                task_sid,
+                owner_account_id=owner,
+                kind=event_kind,
+                payload=payload,
+            )
+
         ctx = ExecutionContext(
             session_id=task_sid,
             request_id=envelope.request_id,
@@ -918,8 +941,13 @@ class SingleAgent(Agent):
             active_skills=skill_activations_from_params(envelope.params),
             cwd=cwd,
             max_iterations=self.max_iterations,
+            deadline_seconds=max(
+                0.0,
+                float(envelope.params.get("_turn_deadline_seconds") or 0.0),
+            ),
             control=self.control,
             tool_disclosure_mode=self.tool_disclosure_mode,
+            durable_event_sink=None if self.lightweight else _durable_event_sink,
         )
         t_exec = time.perf_counter()
         interrupted = False

@@ -77,6 +77,9 @@
   <p>对外暴露的关键类/方法、事件/消息约定、Schema。</p>
   <pre><code># 关键签名</code></pre>
 
+  <h2>Agent turn 根截止时间（2026-09-18）</h2>
+  <p>Gateway 创建 <code>agent_turn</code> 后将 TaskRuntime 的 <code>execution_timeout</code> 快照传入执行上下文。TaskRuntime 是标准 Gateway 回合的唯一根 deadline；超时或取消先通过回合控制句柄发出协作式 interrupt，再由 worker 停止宽限收尾。工具局部超时仍独立存在，用于保护单个工具而不改变其它会话状态。</p>
+
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
     <li>问题 1：…</li>

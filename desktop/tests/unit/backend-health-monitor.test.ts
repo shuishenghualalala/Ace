@@ -185,7 +185,40 @@ describe('BackendHealthMonitor', () => {
     expect(push.mock.calls[2]![0]).toEqual({
       connected: true,
       components: { cron: { status: 'ok' } },
+      healthState: 'healthy',
     });
+    monitor.stop();
+  });
+
+  it('requires consecutive lag samples before degraded/stalled transitions and recovery', async () => {
+    vi.useFakeTimers();
+    const { probe } = scriptedProbe([
+      { ...OK, loopLagMs: 100 },
+      { ...OK, loopLagMs: 3_500 },
+      { ...OK, loopLagMs: 3_600 },
+      { ...OK, loopLagMs: 100 },
+      { ...OK, loopLagMs: 100 },
+    ]);
+    const push = vi.fn();
+    const monitor = new BackendHealthMonitor(probe, push, {
+      intervalMs: 100,
+      startupGraceMs: 0,
+      lagTransitionSamples: 2,
+      stableFailThreshold: 1,
+    });
+    monitor.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(push.mock.calls[0]![0]).toMatchObject({ connected: true, healthState: 'healthy' });
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(push).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(push.mock.calls[1]![0]).toMatchObject({ connected: true, healthState: 'degraded' });
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(push).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(push.mock.calls[2]![0]).toMatchObject({ connected: true, healthState: 'healthy' });
     monitor.stop();
   });
 

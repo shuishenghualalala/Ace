@@ -26,17 +26,14 @@ from crew.core.errors import ToolError
 from crew.core.interfaces import ToolResultRetention
 from crew.core.runctx import emit_tool_progress
 from crew.tools.file_utils import (
-    _apply_line_pagination,
     _check_sensitive_path,
     _format_read_result,
-    _get_max_read_chars,
     _has_binary_extension,
     _is_blocked_device,
-    _normalize_line_endings,
-    _normalize_read_pagination,
     _resolve_base_dir,
-    _strip_bom,
-    snapshot_file,
+    binary_reject_message,
+    read_file_window,
+    validate_read_window_args,
     MAX_READ_FILE_BYTES,
 )
 from crew.tools.output_filters import strip_ansi, truncate_output
@@ -51,13 +48,25 @@ from crew.security.terminal_guard import (
 
 FILE_READ_SCHEMA = {
     "name": "file_read",
-    "description": "读取一个文本文件的内容。支持 offset/limit 分页、保留原始行尾符、自动处理 UTF-8 BOM。",
+    "description": (
+        "读取 UTF-8 文本文件，返回带行号的内容（「行号: 内容」）。"
+        "默认返回前 2000 行，用 offset/limit 分页；offset 为负数时从文件末尾读取"
+        "（如 -100 读最后 100 行，绝对值不超过 2000）。"
+        "UTF-16（含无 BOM）自动转码显示，其他编码需先转为 UTF-8；"
+        "单行超过 2000 字符会中段截断。"
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "文件路径（相对或绝对）"},
-            "offset": {"type": "integer", "description": "起始行号（从1开始），可选"},
-            "limit": {"type": "integer", "description": "最多返回行数，可选"},
+            "offset": {
+                "type": "integer",
+                "description": "起始行号（1-based）。负数表示尾读：-N 返回最后 N 行（|N| ≤ 2000）。默认 1。",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "最多返回行数，默认 2000，上限 2000。尾读时从尾窗口头部截取。",
+            },
         },
         "required": ["path"],
     },
@@ -1004,55 +1013,28 @@ async def handle_file_read(
     if not path.is_file():
         raise ToolError(f"不是文件: {path}")
     if _has_binary_extension(path):
-        return f"[二进制文件，跳过文本读取]: {path}"
+        raise ToolError(binary_reject_message(path))
+
+    offset, limit = validate_read_window_args(args.get("offset"), args.get("limit"))
+
+    # 阻塞 I/O（stat/嗅探/流式窗口）丢线程池，避免卡住事件循环（拖垮网关心跳）
     try:
-        # 阻塞 I/O 丢线程池，避免卡住事件循环（拖垮网关心跳）
-        version = await asyncio.to_thread(snapshot_file, path, max_bytes=MAX_READ_FILE_BYTES)
+        outcome = await asyncio.to_thread(read_file_window, path, offset=offset, limit=limit)
+    except ToolError:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise ToolError(f"读取失败: {exc}") from exc
-    if not version.exists:
-        raise ToolError(f"文件不存在: {path}")
-    record_file_observation(path, version)
-    raw_bytes = version.data
-    text = raw_bytes.decode("utf-8", errors="replace")
-
-    # BOM / line-ending preservation (Hermes-compatible)
-    text, had_bom = _strip_bom(text.replace("\r\r\n", "\r\n"))
-    if not had_bom:
-        # On Windows, test fixtures and user-created text files may be written
-        # with text-mode newline translation. Present ordinary reads as LF for
-        # stable model-facing output; BOM-tagged files keep their original CRLF.
-        text = _normalize_line_endings(text, "\n")
-
-    total_lines = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
-    offset, limit = _normalize_read_pagination(
-        total_lines,
-        args.get("offset"),
-        args.get("limit"),
-    )
-    sliced = _apply_line_pagination(text, offset, limit)
-    truncated = len(sliced) < len(text)
-
-    max_chars = _get_max_read_chars()
-    hint = ""
-    if len(sliced) > max_chars:
-        sliced = sliced[:max_chars]
-        truncated = True
-        hint = f"单次读取上限 {max_chars} 字符，请用 offset/limit 分段读取。"
-    elif raw_bytes and len(raw_bytes) > 512_000 and (args.get("limit") is None or int(args.get("limit") or 0) > 200):
-        hint = "文件较大，建议使用 offset/limit 读取目标片段。"
-
-    if had_bom:
-        hint = (hint + "\n" if hint else "") + "文件包含 UTF-8 BOM，已自动剥离显示。"
+    record_file_observation(path, outcome.version)
 
     return _format_read_result(
-        sliced,
-        total_lines=total_lines,
-        file_size=len(raw_bytes),
+        outcome.content,
+        total_lines=outcome.total_lines,
+        file_size=outcome.file_size,
         offset=offset,
         limit=limit,
-        truncated=truncated,
-        hint=hint.strip(),
+        shown_lines=outcome.shown_lines,
+        truncated=outcome.truncated,
+        hint=outcome.hint,
     )
 
 

@@ -438,7 +438,11 @@ class BuiltinExecutor(AgentExecutor):
         # 整回合 deadline（0=不限）：与 interrupt 共用检查点。到点转成 interrupt
         # （带 deadline exceeded 消息 + interrupt_event），在途工具随即走上一批次的
         # aborted 语义，本轮回合按 interrupt 路径优雅收尾，而非异常崩溃。
-        turn_deadline = self.turn_deadline_seconds
+        turn_deadline = (
+            max(0.0, float(ctx.deadline_seconds or 0.0))
+            if ctx.deadline_seconds > 0
+            else self.turn_deadline_seconds
+        )
         turn_deadline_started = time.perf_counter()
 
         def _deadline_hit() -> bool:
@@ -511,6 +515,7 @@ class BuiltinExecutor(AgentExecutor):
             tool_search_schemas=tool_search_assembly.original_tool_schemas,
             tool_search_config=tool_search_assembly.config,
             authorized_tool_names=ctx.authorized_tool_names,
+            durable_event_sink=ctx.durable_event_sink,
             allowed_tool_names=(
                 {
                     str((schema.get("function") or {}).get("name") or "")
@@ -953,6 +958,22 @@ class BuiltinExecutor(AgentExecutor):
                 assistant_msg.thinking = reasoning
             ctx.messages.append(assistant_msg)
             view_messages.append(assistant_msg)
+
+            if tool_calls and ctx.durable_event_sink is not None:
+                try:
+                    value = ctx.durable_event_sink(
+                        "assistant_tool_calls",
+                        {
+                            "tool_calls": [
+                                {"tool_call_id": tc.id, "name": tc.name}
+                                for tc in tool_calls
+                            ],
+                        },
+                    )
+                    if hasattr(value, "__await__"):
+                        await value
+                except Exception:  # noqa: BLE001 - durable boundary 不得中断主回合
+                    log.warning("assistant tool-call boundary 写入失败 session=%s", ctx.session_id)
 
             if reasoning and not result.get("thinking_emitted"):
                 yield ResponseChunk.thinking_event(rid, reasoning, next_seq())

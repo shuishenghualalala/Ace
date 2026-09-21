@@ -490,7 +490,13 @@ def _watchdog_registry(hang_cancelled: list | None = None) -> Registry:
     return reg
 
 
-def _watchdog_runner(reg: Registry, *, tool_timeout: float = 0.1, control=None):
+def _watchdog_runner(
+    reg: Registry,
+    *,
+    tool_timeout: float = 0.1,
+    total_timeout: float | None = None,
+    control=None,
+):
     from crew.agent.loop.control import TurnControl
     from crew.agent.loop.tool_guardrails import ToolCallGuardrailController, ToolCallGuardrailConfig
     from crew.agent.loop.tool_runner import ToolRunner
@@ -503,6 +509,7 @@ def _watchdog_runner(reg: Registry, *, tool_timeout: float = 0.1, control=None):
         session_id="s1",
         control=control if control is not None else TurnControl(),
         tool_execution_timeout_seconds=tool_timeout,
+        tool_total_timeout_seconds=total_timeout,
     )
 
 
@@ -539,6 +546,50 @@ async def test_tool_execution_watchdog_timeout_advances_turn():
     assert len(tool_msgs) == 1
     assert tool_msgs[0].tool_call_id == "h1"  # tool_call/tool output 配对完整
     assert "timed out after 0.1s" in tool_msgs[0].content
+
+
+async def test_tool_total_watchdog_covers_pipeline_before_execution():
+    """总预算包住整个工具管线，而不是只包真实 execute 段。"""
+    runner = _watchdog_runner(
+        _watchdog_registry(),
+        tool_timeout=0,
+        total_timeout=0.05,
+    )
+
+    async def hanging_pipeline(_tc):
+        await asyncio.sleep(3600)
+
+    runner._execute_one_body = hanging_pipeline
+    result = await asyncio.wait_for(
+        runner._execute_one(ToolCall("p1", "hang_tool", {})),
+        timeout=1,
+    )
+
+    assert result.code == "timeout"
+    assert result.side_effect_state == "unknown"
+
+
+async def test_tool_total_watchdog_includes_concurrency_queue_wait():
+    """并发槽排队也必须消耗同一个工具总预算。"""
+    runner = _watchdog_runner(
+        _watchdog_registry(),
+        tool_timeout=0,
+        total_timeout=0.05,
+    )
+    semaphore = runner._ensure_sem()
+    slots = runner.max_parallel_tool_calls
+    for _ in range(slots):
+        await semaphore.acquire()
+    try:
+        result = await asyncio.wait_for(
+            runner._execute_one(ToolCall("q1", "quick_tool", {})),
+            timeout=1,
+        )
+    finally:
+        for _ in range(slots):
+            semaphore.release()
+
+    assert result.code == "timeout"
 
 
 async def test_tool_interrupt_aborts_inflight_tool_with_grace_window():

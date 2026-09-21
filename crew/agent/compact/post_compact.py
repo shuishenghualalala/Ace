@@ -15,11 +15,10 @@ from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
 from crew.core.types import Message
 from crew.tools.file_utils import (
     MAX_READ_FILE_BYTES,
-    _apply_line_pagination,
     _has_binary_extension,
-    _normalize_read_pagination,
     _resolve_base_dir,
     read_verified_bytes,
+    slice_text_window,
 )
 
 
@@ -141,11 +140,10 @@ def _reread_file_for_restore(
             return None
         raw = read_verified_bytes(resolved, max_bytes=MAX_READ_FILE_BYTES)
         text = raw.decode("utf-8", errors="replace")
-        total_lines = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
-        offset, limit = _normalize_read_pagination(
-            total_lines, arguments.get("offset"), arguments.get("limit")
+        # 与 file_read 同语义的窗口切片（含负 offset 尾读），恢复视图与原调用一致。
+        sliced, offset, total_lines = slice_text_window(
+            text, arguments.get("offset"), arguments.get("limit")
         )
-        sliced = _apply_line_pagination(text, offset, limit)
         body = _trim_attachment(sliced, max_chars)
         return (
             f"### 文件：{resolved}（压缩后从磁盘重新读取；第 {offset} 行起，共 {total_lines} 行）\n"

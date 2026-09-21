@@ -325,7 +325,10 @@ export function createComposerView(
       ? options.attachments.list().length
       : messages.attachments.length;
     const hasDraft = Boolean(input.value.trim() || attachmentCount);
-    const blocked = !authStore.get().isLoggedIn || !uiStore.get().backendConnected;
+    const ui = uiStore.get();
+    const backendCanSend = ui.backendCanSend
+      || (ui.backendConnected && ui.backendTransportState === 'unknown');
+    const blocked = !authStore.get().isLoggedIn || !backendCanSend;
     input.disabled = blocked;
     send.disabled = blocked || submitting || !hasDraft;
     send.hidden = busy && !hasDraft;
@@ -337,7 +340,7 @@ export function createComposerView(
     editBanner.hidden = !(sessionId && session.editFromIdx[sessionId] != null);
     status.textContent = submitError || (!authStore.get().isLoggedIn
       ? '登录后可发送消息'
-      : (!uiStore.get().backendConnected ? '服务离线' : ''));
+      : (!backendCanSend ? '服务暂不可用' : ''));
     renderQueue();
   };
 

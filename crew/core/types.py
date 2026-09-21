@@ -362,6 +362,26 @@ class ToolResult:
     content: str
     is_error: bool = False
     media: list[MediaPart] = field(default_factory=list)
+    # 稳定的工具层协议字段。content 仍是模型兼容的主载荷；这些字段供
+    # Gateway、UI 和自动恢复逻辑使用，避免从自然语言错误中反推语义。
+    code: str = ""
+    retryable: bool = False
+    retry_delay: float | None = None
+    side_effect_state: Literal["none", "unknown", "committed"] = "none"
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def protocol_metadata(self) -> dict[str, Any]:
+        """返回不含正文的稳定工具错误/执行元数据。"""
+        metadata: dict[str, Any] = {
+            "code": self.code,
+            "retryable": bool(self.retryable),
+            "side_effect_state": self.side_effect_state,
+        }
+        if self.retry_delay is not None:
+            metadata["retry_delay"] = max(0.0, float(self.retry_delay))
+        if self.details:
+            metadata["details"] = dict(self.details)
+        return metadata
 
 
 @dataclass

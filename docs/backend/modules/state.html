@@ -95,6 +95,10 @@
   store 创建入口与存量回填；边界之内 owner 恒非空，<code>owner_account_id=""</code> 在存储层不再是合法模式，
   读取方不写任何 <code>if not owner</code> / <code>or "local"</code> 防御分支。</p>
 
+  <h2>回合内 durable boundary（2026-09-18）</h2>
+  <p><code>SessionEventType</code> 新增 <code>tool_execution_intent</code> 与 <code>tool_result_commit</code> 两类 durable 事件。它们和 session leaf 在同一写事务中提交，但不进入 Message 投影，因此不会污染下一次 Provider 请求。</p>
+  <p>Agent 在用户消息完成校验后先保存 canonical history；工具开始前记录 intent，结果（包括 timeout、aborted 和异常）记录 commit。启动恢复扫描 intent/commit 链，对未闭合的工具追加 <code>status=interrupted</code>、<code>side_effect_state=unknown</code> 的结果边界，保持幂等且不自动重放副作用。</p>
+
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
     <li>TODO：凭证库文件锁（当前单进程 + 原子替换足够；多进程部署出现时再引入）。</li>

@@ -25,6 +25,7 @@ import { buildChippedNodes } from './features/composer-mention';
 import { isPlanDocumentPath } from './plan-document-path';
 import { createIcon, type IconId } from './components/icon';
 import { renderToolInteractionCard } from './components/interaction-card';
+import { patchTranscriptMarkdown } from './components/transcript';
 import { getLocale, t } from './lib/i18n';
 import { spriteSymbolRef } from './lib/sprite-symbol';
 
@@ -410,12 +411,16 @@ function renderThinkingBlock(message: ChatMessage, turnLive: boolean): HTMLEleme
         <span class="process-timeline__title"></span>
         ${TIMELINE_CHEVRON_SVG}
       </summary>
-      <div class="process-timeline__thinking"></div>
+      <div class="process-timeline__thinking md-body chat-markdown"></div>
     </details>`,
   );
   details.open = streaming;
   details.querySelector<HTMLElement>('.process-timeline__title')!.textContent = title;
-  details.querySelector<HTMLElement>('.process-timeline__thinking')!.textContent = message.thinking ?? '';
+  patchTranscriptMarkdown(
+    details.querySelector<HTMLElement>('.process-timeline__thinking')!,
+    message.thinking ?? '',
+    streaming,
+  );
   const item = renderTimelineItem(
     PROCESS_THINKING_ICON_SVG,
     streaming ? 'process-timeline__icon--running' : '',

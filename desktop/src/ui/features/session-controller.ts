@@ -61,6 +61,7 @@ import { isRendererLoggedIn, requireRendererLogin } from './auth-gate';
 import { logStream } from '../stream-debug';
 import { sessionStore } from '../stores/stores';
 import { hydrateTurnFoldFromStorage } from './fold-state';
+import { setBackendTransportState } from './backend-status-guard';
 
 // setTab 由 index.ts 注入（避免 session-controller → index.ts 循环）
 let setTabFn: (tab: TabKey) => void = () => {};
@@ -380,7 +381,9 @@ export function bootstrapBackend(): void {
         activeSessionId: state.activeSessionId,
         transient: meta?.transient ?? false,
       });
-      state.backendConnected = meta?.transient && !open ? state.backendConnected : open;
+      setBackendTransportState(
+        open ? 'connected' : meta?.transient ? 'reconnecting' : 'disconnected',
+      );
       updateGatewayDot();
       if (!open) {
         // 主进程换 socket（close reason=reconnect）时紧接 open，不应结算 streaming / 封回合。

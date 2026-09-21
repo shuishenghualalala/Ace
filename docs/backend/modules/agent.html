@@ -130,6 +130,11 @@ deadline: runtime.turn_deadline_seconds         # 默认 0=不限
   <p>重试判定从 <code>isinstance(exc, ProviderError) and exc.retryable</code> 收敛为 <code>isinstance(exc, CrewError) and exc.is_retryable()</code>（ProviderError 显式 retryable 优先语义不变）；等待时长优先取服务端建议的 <code>retry_delay</code>（Retry-After / body 字段，批次 2 解析），封顶 <code>_RETRY_DELAY_CAP_SECONDS = 60s</code> 防异常大值拖死重试循环，无建议值时维持本地指数退避 + jitter。非 CrewError 异常不重试、走既有兜底。<code>unsupported_capability</code> 降级分支改按 <code>exc.kind</code> 判定（不再比对字符串 category）。</p>
   <p>LLM 路径 error 帧（重试耗尽 / 流中断不可恢复）统一经 <code>_llm_error_chunk</code> 发出：CrewError 时 <code>code</code> 传 kind 值（如 <code>"timeout"</code>），body 附加 <code>retryable</code> 与 <code>retry_delay</code>（有则带，纯增量）；非类型化异常保持纯 message 帧。出站 <code>enrich_error_chunk</code> 的 category 优先取类型化分类（无 exc 时可从 body 的 kind code 反推），文本兜底仅保留给非类型化异常。</p>
 
+  <h2>工具总预算与 durable boundary（2026-09-18）</h2>
+  <p><code>ToolRunner</code> 现在以 <code>_execute_total_guarded</code> 包住从 middleware、权限、执行到结果 hook 的完整管线；执行段保留更短的局部看门狗。取消只等待有限宽限期，无法及时退出的第三方 task 被登记并由完成回调清理，不再用无上限等待拖住当前回合。</p>
+  <p>工具结果统一带 <code>code</code>、<code>retryable</code>、<code>retry_delay</code>、<code>side_effect_state</code> 和 <code>details</code>，同时透传到 <code>ResponseChunk.tool_event</code> 的 <code>result_metadata</code>。持久会话在用户消息、工具执行 intent、工具结果 commit 处形成恢复边界；进程退出后有 intent 无结果的调用只标记为 <code>interrupted/unknown</code>，不自动重放副作用。</p>
+  <p>Gateway 创建 agent turn 时把 <code>TaskRuntime.execution_timeout</code> 注入 <code>ExecutionContext.deadline_seconds</code>，TaskRuntime 取消先触发 <code>TurnControl.interrupt</code>，再进入 worker 的硬取消宽限。直接调用 executor 时仍可使用 <code>turn_deadline_seconds</code> 作为兼容回退。</p>
+
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
     <li>文件恢复只重读本会话 file_read 已成功授权读取过的路径，读取走身份校验句柄（防 TOCTOU），不引入新的文件访问。</li>

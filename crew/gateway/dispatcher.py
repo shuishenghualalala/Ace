@@ -679,12 +679,36 @@ class SessionDispatcher:
                             await self._task_runtime.update_async(runtime_task_id, owner_account_id=owner, output_ref=output_ref)
                             self._run_task_ids[key] = runtime_task_id
                             await self._task_runtime.mark_running_async(runtime_task_id)
+                            # TaskRuntime 是 agent_turn 的根截止时间来源。将其快照
+                            # 注入本次 envelope，避免 dispatcher monitor 与 executor
+                            # 各自维护一套可能漂移的回合 deadline。
+                            task_deadline = float(task.get("execution_timeout") or 0.0)
+                            if task_deadline > 0:
+                                envelope.params["_turn_deadline_seconds"] = task_deadline
                             if current_task is not None:
                                 def _cancel_current_turn(
                                     _reason: str,
                                     *,
                                     owned: asyncio.Task = current_task,
                                 ) -> None:
+                                    interrupt_fn = getattr(self._controller, "interrupt", None)
+                                    if callable(interrupt_fn):
+                                        try:
+                                            target_session_id = self._control_session_id(key, sid)
+                                            try:
+                                                interrupt_fn(
+                                                    target_session_id,
+                                                    _reason,
+                                                    owner_account_id=owner,
+                                                )
+                                            except TypeError:
+                                                interrupt_fn(target_session_id, _reason)
+                                        except Exception:  # noqa: BLE001 - hard cancel 仍须继续
+                                            log.exception(
+                                                "TaskRuntime 协作式中断失败 session=%s task=%s",
+                                                sid,
+                                                runtime_task_id,
+                                            )
                                     if not owned.done():
                                         owned.cancel()
 

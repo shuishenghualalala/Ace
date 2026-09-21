@@ -42,11 +42,17 @@ import {
   classifyCuaSetupAuthorityRequest,
   createDesktopSecurityProof,
   gatewayInstanceAccessToken,
+  probeGatewayInstance,
   type GatewayComponentState,
   type GatewayProbeFailureKind,
 } from './gateway-instance-auth';
 import { probeBackendHealth } from './backend-health-probe';
 import { BackendHealthMonitor } from './backend-health-monitor';
+import type {
+  BackendHealthState,
+  BackendProcessState,
+  BackendTransportState,
+} from './backend-health-monitor';
 import { GatewayRestartController } from './gateway-restart-controller';
 import { isTrustedRendererFileUrl } from './trusted-renderer-url';
 import type {
@@ -208,6 +214,9 @@ let isQuitting = false;
 let gatewayGeneration = 0;
 // Backend health monitor state
 let backendConnected = false;
+let backendProcessState: BackendProcessState = 'starting';
+let backendHealthState: BackendHealthState = 'unknown';
+let backendTransportState: BackendTransportState = 'unknown';
 // ensureGateway 缓存重证明的容错次数，与健康监控阈值语义独立。
 const HEALTH_FAIL_THRESHOLD = 3;
 let gatewayComponents: Record<string, GatewayComponentState> | undefined;
@@ -224,6 +233,7 @@ const gatewayRestartController = new GatewayRestartController(async () => {
   gatewayGeneration += 1;
   ensureGatewayPromise = null;
   backendHealthMonitor.markRestart();
+  setBackendProcessState('restarting');
   logSupervisorDecision('automatic-restart', { generation: gatewayGeneration });
   try {
     await ensureGateway();
@@ -1324,7 +1334,13 @@ function createActiveGatewaySecurityProof(method: string, pathname: string, body
  * 但无法返回 HTTP 响应时 fetch 无限挂起。
  */
 async function hasHealthApi(baseUrl: string): Promise<boolean> {
-  return (await probeHealthApi(baseUrl)).verified;
+  const probe = await probeHealthApi(baseUrl);
+  if (!probe.verified) return false;
+  // 独立健康线程（主端口+1）先于主 API 端口绑定（uvicorn 在 lifespan 返回后
+  // 才 listen）。「就绪」必须以主 API 端口真正接受连接为准，否则 auth 配置拉取等
+  // 主进程内部消费方会在启动窗口内吃到 ECONNREFUSED，拿到错误的兜底状态。
+  const mainApi = await probeGatewayInstance(baseUrl, { crewHome: activeGatewayCrewHome() });
+  return mainApi.verified;
 }
 
 /**
@@ -1335,8 +1351,8 @@ let lastGatewayLoopLagMs: number | undefined;
 
 async function probeHealthApi(baseUrl: string) {
   const result = await probeBackendHealth(baseUrl, { crewHome: activeGatewayCrewHome() });
-  if (result.verified && typeof result.loopLagMs === 'number') {
-    lastGatewayLoopLagMs = result.loopLagMs;
+  if (result.verified) {
+    lastGatewayLoopLagMs = typeof result.loopLagMs === 'number' ? result.loopLagMs : undefined;
   }
   return result;
 }
@@ -1344,6 +1360,7 @@ async function probeHealthApi(baseUrl: string) {
 // 供开发态 / 回退使用的 Gateway
 function startManagedGateway(): void {
   if (managedGateway) return;
+  setBackendProcessState('starting');
   const root = repoRoot();
   const python = candidatePython();
   const crewHome = activeGatewayCrewHome();
@@ -1377,6 +1394,7 @@ function startManagedGateway(): void {
     if (managedGateway === child) {
       managedGateway = null;
       ensureGatewayPromise = null;
+      setBackendProcessState('offline');
       logSupervisorDecision('instance-exit', { platform: 'managed', code, signal });
       if (!isQuitting) gatewayRestartController.schedule();
     }
@@ -1386,6 +1404,7 @@ function startManagedGateway(): void {
     if (managedGateway === child) {
       managedGateway = null;
       ensureGatewayPromise = null;
+      setBackendProcessState('error');
       logSupervisorDecision('instance-error', { platform: 'managed', error: String(error) });
       if (!isQuitting) gatewayRestartController.schedule();
     }
@@ -1414,6 +1433,7 @@ function recycleGatewayForSecurityChange(): void {
  */
 function startWindowsPackagedGateway(port: number): void {
   if (managedGateway) return;
+  setBackendProcessState('starting');
 
   const exeDir = path.dirname(app.getPath('exe'));
   const gatewayExePath = path.join(exeDir, '../crew-gateway/crew-gateway.exe');
@@ -1472,6 +1492,7 @@ function startWindowsPackagedGateway(port: number): void {
       if (managedGateway === child) {
         managedGateway = null;
         ensureGatewayPromise = null;
+        setBackendProcessState('offline');
         logSupervisorDecision('instance-exit', { platform: 'win32', code, signal });
         if (!isQuitting) gatewayRestartController.schedule();
       }
@@ -1481,6 +1502,7 @@ function startWindowsPackagedGateway(port: number): void {
       if (managedGateway === child) {
         managedGateway = null;
         ensureGatewayPromise = null;
+        setBackendProcessState('error');
         logSupervisorDecision('instance-error', { platform: 'win32', error: String(err) });
         if (!isQuitting) gatewayRestartController.schedule();
       }
@@ -1496,6 +1518,7 @@ function startWindowsPackagedGateway(port: number): void {
  */
 function startMacOSPackagedGateway(port: number): void {
   if (managedGateway) return;
+  setBackendProcessState('starting');
 
   // macOS .app bundle: exe 位于 Contents/MacOS/crew-desktop，
   // gateway 放在 Contents/Resources/crew-gateway/crew-gateway
@@ -1534,6 +1557,7 @@ function startMacOSPackagedGateway(port: number): void {
       if (managedGateway === child) {
         managedGateway = null;
         ensureGatewayPromise = null;
+        setBackendProcessState('offline');
         logSupervisorDecision('instance-exit', { platform: 'darwin', code, signal });
         if (!isQuitting) gatewayRestartController.schedule();
       }
@@ -1543,6 +1567,7 @@ function startMacOSPackagedGateway(port: number): void {
       if (managedGateway === child) {
         managedGateway = null;
         ensureGatewayPromise = null;
+        setBackendProcessState('error');
         logSupervisorDecision('instance-error', { platform: 'darwin', error: String(err) });
         if (!isQuitting) gatewayRestartController.schedule();
       }
@@ -1563,6 +1588,7 @@ function startMacOSPackagedGateway(port: number): void {
  */
 function startLinuxPackagedGateway(port: number): void {
   if (managedGateway) return;
+  setBackendProcessState('starting');
 
   const gatewayExePath = '/opt/crew-gateway/crew-gateway';
   const gatewayDir = path.dirname(gatewayExePath);
@@ -1592,6 +1618,7 @@ function startLinuxPackagedGateway(port: number): void {
       if (managedGateway === child) {
         managedGateway = null;
         ensureGatewayPromise = null;
+        setBackendProcessState('offline');
         logSupervisorDecision('instance-exit', { platform: 'linux', code, signal });
         if (!isQuitting) gatewayRestartController.schedule();
       }
@@ -1601,6 +1628,7 @@ function startLinuxPackagedGateway(port: number): void {
       if (managedGateway === child) {
         managedGateway = null;
         ensureGatewayPromise = null;
+        setBackendProcessState('error');
         logSupervisorDecision('instance-error', { platform: 'linux', error: String(err) });
         if (!isQuitting) gatewayRestartController.schedule();
       }
@@ -1720,9 +1748,17 @@ function backendLogInfo(): { logPath: string } {
   return { logPath: gatewayLogPath() };
 }
 
+type BackendStatusDetail = {
+  failureKind?: GatewayProbeFailureKind;
+  since?: number;
+  healthState?: BackendHealthState;
+  loopLagMs?: number;
+  transportState?: BackendTransportState;
+};
+
 function backendStatusPayload(
   connected: boolean,
-  detail: { failureKind?: GatewayProbeFailureKind; since?: number } = {},
+  detail: BackendStatusDetail = {},
 ): {
   connected: boolean;
   baseUrl: string;
@@ -1730,6 +1766,10 @@ function backendStatusPayload(
   components?: Record<string, GatewayComponentState>;
   failureKind?: GatewayProbeFailureKind;
   since?: number;
+  processState: BackendProcessState;
+  healthState: BackendHealthState;
+  transportState: BackendTransportState;
+  loopLagMs?: number;
 } {
   return {
     connected,
@@ -1738,7 +1778,33 @@ function backendStatusPayload(
     ...(gatewayComponents ? { components: gatewayComponents } : {}),
     ...(detail.failureKind ? { failureKind: detail.failureKind } : {}),
     ...(detail.since !== undefined ? { since: detail.since } : {}),
+    processState: backendProcessState,
+    healthState: detail.healthState ?? backendHealthState,
+    transportState: detail.transportState ?? backendTransportState,
+    ...(detail.loopLagMs !== undefined
+      ? { loopLagMs: detail.loopLagMs }
+      : lastGatewayLoopLagMs !== undefined ? { loopLagMs: lastGatewayLoopLagMs } : {}),
   };
+}
+
+function setBackendProcessState(next: BackendProcessState): void {
+  if (backendProcessState === next) return;
+  backendProcessState = next;
+  try {
+    mainWindow?.webContents.send('backend:status', backendStatusPayload(backendConnected));
+  } catch {
+    // webContents may be destroyed during shutdown
+  }
+}
+
+function setBackendTransportState(next: BackendTransportState): void {
+  if (backendTransportState === next) return;
+  backendTransportState = next;
+  try {
+    mainWindow?.webContents.send('backend:status', backendStatusPayload(backendConnected));
+  } catch {
+    // webContents may be destroyed during shutdown
+  }
 }
 
 /** supervisor 杀/拉决策持久化到启动日志（复盘报告 B5：重拉/终止动作须可回溯）。 */
@@ -1841,18 +1907,27 @@ const backendHealthMonitor = new BackendHealthMonitor(
   () => probeHealthApi(resolvedGatewayBaseUrl),
   (change) => {
     gatewayComponents = change.connected ? change.components : undefined;
+    if (change.healthState) backendHealthState = change.healthState;
+    if (change.loopLagMs !== undefined) lastGatewayLoopLagMs = change.loopLagMs;
     pushBackendStatus(change.connected, {
       ...(change.failureKind ? { failureKind: change.failureKind } : {}),
       ...(change.since !== undefined ? { since: change.since } : {}),
+      ...(change.healthState ? { healthState: change.healthState } : {}),
+      ...(change.loopLagMs !== undefined ? { loopLagMs: change.loopLagMs } : {}),
     });
   },
 );
 
 function pushBackendStatus(
   connected: boolean,
-  detail: { failureKind?: GatewayProbeFailureKind; since?: number } = {},
+  detail: BackendStatusDetail = {},
 ): void {
   backendConnected = connected;
+  if (detail.healthState) backendHealthState = detail.healthState;
+  if (detail.loopLagMs !== undefined) lastGatewayLoopLagMs = detail.loopLagMs;
+  if (connected && (backendProcessState === 'starting' || backendProcessState === 'restarting')) {
+    backendProcessState = 'ready';
+  }
   console.log(
     `[main] backend status → ${connected ? 'connected' : `disconnected (${detail.failureKind ?? 'unknown'})`}`
     + (!connected && lastGatewayLoopLagMs !== undefined
@@ -2048,6 +2123,46 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
   return pending;
 }
 
+/**
+ * 冷启动/重启窗口内的有界重试 fetch。
+ * 「健康线程就绪」先于主 API 端口绑定（uvicorn 在 lifespan 返回后才 listen），
+ * 此窗口内打到 gateway 的请求会吃 ECONNREFUSED——这是进程启动与端口绑定的
+ * 时间差，不是故障。仅在网络级拒连且进程处于 starting/restarting 时等待重试；
+ * HTTP 状态错误与其他异常原样抛出，offline/error 态快速失败。
+ */
+const GATEWAY_FETCH_STARTUP_RETRY_MS = 15_000;
+const GATEWAY_FETCH_STARTUP_RETRY_INTERVAL_MS = 250;
+const GATEWAY_FETCH_RETRYABLE_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE']);
+
+function isGatewayStartupRetryable(error: unknown): boolean {
+  let current: unknown = error;
+  while (current && typeof current === 'object') {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string' && GATEWAY_FETCH_RETRYABLE_CODES.has(code)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+function gatewayFetchRetryWindowOpen(): boolean {
+  return !isQuitting
+    && (backendProcessState === 'starting' || backendProcessState === 'restarting');
+}
+
+async function fetchGatewayWithStartupRetry(url: string, init?: RequestInit): Promise<Response> {
+  const deadline = Date.now() + GATEWAY_FETCH_STARTUP_RETRY_MS;
+  for (;;) {
+    try {
+      return await fetch(url, init);
+    } catch (error) {
+      if (!isGatewayStartupRetryable(error) || !gatewayFetchRetryWindowOpen() || Date.now() >= deadline) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, GATEWAY_FETCH_STARTUP_RETRY_INTERVAL_MS));
+    }
+  }
+}
+
 async function securityGatewayRequest(
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   pathname: string,
@@ -2069,7 +2184,7 @@ async function securityGatewayRequest(
     ...(body ? { 'content-type': 'application/json' } : {}),
     ...(usesRemoteAuth ? { Authorization: `Bearer ${jwt}`, ...identityHeaders } : {}),
   };
-  const response = await fetch(`${baseUrl}${pathname}`, {
+  const response = await fetchGatewayWithStartupRetry(`${baseUrl}${pathname}`, {
     method,
     headers,
     ...(body ? { body } : {}),
@@ -2654,7 +2769,7 @@ function registerIpc() {
     const ensured = await ensureGateway();
     const kbId = args.kbId || 'default';
     const listPath = `/api/wiki/sources?kb_id=${encodeURIComponent(kbId)}`;
-    const res = await fetch(new URL(listPath, ensured.baseUrl).toString(), {
+    const res = await fetchGatewayWithStartupRetry(new URL(listPath, ensured.baseUrl).toString(), {
       headers: { ...gatewayAccessHeaders(listPath) },
     });
     if (!res.ok) {
@@ -3069,7 +3184,7 @@ function registerIpc() {
         'X-Crew-Security-Proof': createActiveGatewaySecurityProof(proofMethod, proofPath, proofBody),
       };
     }
-    const res = await fetch(targetUrl.toString(), fetchInit);
+    const res = await fetchGatewayWithStartupRetry(targetUrl.toString(), fetchInit);
     const body = await res.text();
     return {
       ok: res.ok,
@@ -3126,7 +3241,7 @@ function registerIpc() {
     gatewayStreamControllers.get(streamKey)?.abort();
     gatewayStreamControllers.set(streamKey, controller);
     try {
-      const response = await fetch(targetUrl.toString(), {
+      const response = await fetchGatewayWithStartupRetry(targetUrl.toString(), {
         method: args.init?.method || 'GET',
         headers,
         ...(args.init?.body !== undefined ? { body: args.init.body } : {}),
@@ -3261,7 +3376,7 @@ function registerIpc() {
       const form = new FormData();
       form.append('file', new Blob([new Uint8Array(content)]), path.basename(filePath));
       try {
-        const res = await fetch(uploadUrl, { method: 'POST', headers: authHeaders, body: form });
+        const res = await fetchGatewayWithStartupRetry(uploadUrl, { method: 'POST', headers: authHeaders, body: form });
         results.push({
           path: filePath,
           ok: res.ok,
@@ -3408,6 +3523,7 @@ function registerIpc() {
 
   trustedHandle('gateway-ws:connect', async (event) => {
     const senderId = event.sender.id;
+    setBackendTransportState('reconnecting');
     const previous = gatewaySockets.get(senderId);
     if (previous?.readyState === WebSocket.OPEN) {
       logMainStream('ws-connect-skip', { senderId, reason: 'already-open' });
@@ -3473,6 +3589,7 @@ function registerIpc() {
     };
     socket.on('open', () => {
       logMainStream('ws-open', { senderId, url: httpUrl.toString() });
+      setBackendTransportState('connected');
       sendEvent({ type: 'open' });
     });
     socket.on('message', (data) => {
@@ -3495,6 +3612,7 @@ function registerIpc() {
     socket.on('close', (code, reason) => {
       event.sender.removeListener('destroyed', handleRendererDestroyed);
       logMainStream('ws-close', { code, reason: reason.toString(), senderId });
+      setBackendTransportState(reason.toString() === 'reconnect' ? 'reconnecting' : 'disconnected');
       sendEvent({
         type: 'close',
         code,
@@ -3503,6 +3621,7 @@ function registerIpc() {
       if (gatewaySockets.get(senderId) === socket) gatewaySockets.delete(senderId);
     });
     socket.on('error', (err) => {
+      setBackendTransportState('disconnected');
       sendEvent({ type: 'error', error: err.message });
     });
     event.sender.once('destroyed', handleRendererDestroyed);
@@ -3537,6 +3656,7 @@ function registerIpc() {
       gatewaySockets.delete(senderId);
       try { socket.close(1000, 'client-close'); } catch { /* best effort */ }
     }
+    setBackendTransportState('disconnected');
     return { ok: true };
   });
 

@@ -64,6 +64,9 @@ def test_event_type_durability_classification():
     assert SessionEventType.TOOL_RESULT.durable
     assert SessionEventType.SYSTEM_MESSAGE.durable
     assert SessionEventType.METER_CHECKPOINT.durable
+    assert SessionEventType.ASSISTANT_TOOL_CALLS.durable
+    assert SessionEventType.TOOL_EXECUTION_INTENT.durable
+    assert SessionEventType.TOOL_RESULT_COMMIT.durable
     for transient in (
         SessionEventType.TURN_PROGRESS,
         SessionEventType.ERROR,
@@ -85,6 +88,40 @@ def test_pragma_baseline_on_new_database(tmp_path):
             raw.close()
         assert store._conn.execute("PRAGMA synchronous").fetchone()[0] == 1  # NORMAL
         assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        store.close()
+
+
+def test_open_tool_intent_is_reconciled_without_replaying_side_effect(tmp_path):
+    db = str(tmp_path / "crew.db")
+    store = SQLiteSessionStore(db)
+    try:
+        store.save("s1", [Message.user("执行任务")], owner_account_id="owner")
+        store.record_durable_event(
+            "s1",
+            owner_account_id="owner",
+            kind=SessionEventType.TOOL_EXECUTION_INTENT,
+            payload={"tool_call_id": "call-1", "name": "file_write"},
+        )
+
+        pending = store.reconcile_open_tool_events("s1", owner_account_id="owner")
+
+        assert pending == [{
+            "tool_call_id": "call-1",
+            "name": "file_write",
+            "recorded_at": pending[0]["recorded_at"],
+        }]
+        rows = store._conn.execute(
+            "SELECT type, payload FROM session_events "
+            "WHERE owner_account_id = ? AND session_id = ? ORDER BY seq",
+            ("owner", "s1"),
+        ).fetchall()
+        assert [row[0] for row in rows][-1] == SessionEventType.TOOL_RESULT_COMMIT.value
+        commit = json.loads(rows[-1][1])
+        assert commit["status"] == "interrupted"
+        assert commit["side_effect_state"] == "unknown"
+        assert [message.content for message in store.load("s1", owner_account_id="owner")] == ["执行任务"]
+        assert store.reconcile_open_tool_events("s1", owner_account_id="owner") == []
     finally:
         store.close()
 

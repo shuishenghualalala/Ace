@@ -129,7 +129,7 @@ import {
 } from '../state';
 import { takeAttachmentsForSend } from './attachments';
 import { renderAttachmentPreview } from './attachments';
-import { messageStore, sessionStore } from '../stores/stores';
+import { messageStore, sessionStore, uiStore } from '../stores/stores';
 import type { TabKey } from '../state';
 import { resolveChatRenderTargetId, openStudioChatPanel, isStudioView } from './studio-chrome-state';
 import { isStreamDebugEnabled, logStream } from '../stream-debug';
@@ -540,7 +540,7 @@ function patchStreamingTurn(sid: string, assistantId: string): boolean {
     const followThinkingOutput = (
       thinkingEl.scrollHeight - thinkingEl.scrollTop - thinkingEl.clientHeight
     ) <= 24;
-    thinkingEl.textContent = msg.thinking;
+    patchTranscriptMarkdown(thinkingEl, msg.thinking, true);
     if (followThinkingOutput) thinkingEl.scrollTop = thinkingEl.scrollHeight;
   }
   // 实时计时：以整回合 batch 为准（工具阶段可能无正文 data-text-for，但仍需刷新 label）。
@@ -1442,7 +1442,10 @@ export async function dispatchWs(
   }
   // 新一轮发送：解除对该会话的「迟到分片屏蔽」
   removeSuppressedSession(sessionId);
-  if (!state.socket || !state.backendConnected) {
+  const ui = uiStore.get();
+  const backendCanSend = ui.backendCanSend
+    || (ui.backendConnected && ui.backendTransportState === 'unknown');
+  if (!state.socket || !backendCanSend) {
     appendMessage(sessionId, 'error', '服务未连接，请稍后重试。');
     setBusyWithUi(sessionId, false);
     renderChat();

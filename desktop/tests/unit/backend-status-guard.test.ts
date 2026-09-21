@@ -3,11 +3,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const recoveryMocks = vi.hoisted(() => ({
-  loadConfig: vi.fn(async () => {}),
+  hydrateBackendState: vi.fn(async () => {}),
 }));
 
-vi.mock('../../src/ui/features/model-picker', () => ({
-  loadConfig: recoveryMocks.loadConfig,
+vi.mock('../../src/ui/features/session-controller', () => ({
+  hydrateBackendState: recoveryMocks.hydrateBackendState,
 }));
 
 type StatusPayload = {
@@ -50,7 +50,7 @@ describe('backend-status-guard 状态横幅', () => {
     statusCb = null;
     retryCalled = 0;
     initialStatus = { connected: false };
-    recoveryMocks.loadConfig.mockClear();
+    recoveryMocks.hydrateBackendState.mockClear();
     document.body.innerHTML = `
       <main class="main-content">
         <div class="top-bar"></div>
@@ -159,7 +159,7 @@ describe('backend-status-guard 状态横幅', () => {
     expect(retryCalled).toBe(1);
   });
 
-  it('connected 后横幅消失，并补拉配置恢复假阴性', async () => {
+  it('connected 后横幅消失，并重放 hydrate 恢复假阴性', async () => {
     await loadGuard();
     statusCb!({ connected: false, failureKind: 'timeout', since: Date.now() });
     expect(banner().classList.contains('show')).toBe(true);
@@ -167,7 +167,7 @@ describe('backend-status-guard 状态横幅', () => {
     statusCb!({ connected: true });
     expect(banner().classList.contains('show')).toBe(false);
 
-    await vi.waitFor(() => expect(recoveryMocks.loadConfig).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(recoveryMocks.hydrateBackendState).toHaveBeenCalledOnce());
   });
 
   it('快照兜底：就绪事件早于订阅时 init 后隐藏横幅', async () => {

@@ -102,6 +102,7 @@ class ResponseChunk:
         tool_call_id: str = "",
         args: str = "",
         ui_label: str = "",
+        result_metadata: dict[str, Any] | None = None,
     ) -> "ResponseChunk":
         """工具活动事件：phase = generating | start | result | error。
 
@@ -122,6 +123,8 @@ class ResponseChunk:
             body["args"] = args
         if ui_label:
             body["ui_label"] = ui_label
+        if result_metadata:
+            body["result_metadata"] = dict(result_metadata)
         return ResponseChunk(request_id, kind="tool", body=body, sequence=sequence)
 
     @staticmethod

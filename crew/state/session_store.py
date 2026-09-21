@@ -49,6 +49,9 @@ class SessionEventType(str, Enum):
     METER_CHECKPOINT = "meter_checkpoint"
     TURN_START = "turn_start"  # 回合边界（D4 断点扫描）
     TURN_END = "turn_end"
+    ASSISTANT_TOOL_CALLS = "assistant_tool_calls"
+    TOOL_EXECUTION_INTENT = "tool_execution_intent"
+    TOOL_RESULT_COMMIT = "tool_result_commit"
     END_SEED = "end_seed"  # fork 切口标记：载荷内联 (source_session_id, parent_seq)
     COMPACTION = "compaction"  # 压缩自包含 checkpoint（replacement + 重锚定估算）
     TURN_PROGRESS = "turn_progress"  # 瞬态：进度推送
@@ -1430,9 +1433,32 @@ class SQLiteSessionStore(SessionStore):
         """追加回合边界事件（turn_start/turn_end，D3/D4 断点扫描的判据）。"""
         if kind not in (SessionEventType.TURN_START, SessionEventType.TURN_END):
             raise ValueError(f"回合事件类型只能是 turn_start/turn_end: {kind}")
+        self.record_durable_event(
+            session_id,
+            owner_account_id=owner_account_id,
+            kind=kind,
+            payload={"status": status} if status else {},
+        )
+
+    def record_durable_event(
+        self,
+        session_id: str,
+        *,
+        owner_account_id: str,
+        kind: SessionEventType,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """追加一个不参与消息投影的 durable 边界事件。
+
+        事件和 session leaf 在同一事务提交。工具 intent/result 使用独立事件类型，
+        因而不会把临时执行元数据误当成可发送给 Provider 的 Message；最终历史仍由
+        ``save_async`` 以消息事件形式提交。
+        """
+        if not kind.durable:
+            raise ValueError(f"只能持久化 durable 事件: {kind}")
         now = time.time()
-        payload = json.dumps(
-            {"status": status, "recorded_at": now} if status else {"recorded_at": now},
+        encoded = json.dumps(
+            {**(payload or {}), "recorded_at": now},
             ensure_ascii=False,
         )
 
@@ -1451,14 +1477,81 @@ class SQLiteSessionStore(SessionStore):
                 "INSERT OR IGNORE INTO session_events "
                 "(owner_account_id, session_id, seq, parent_seq, type, payload, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (owner_account_id, session_id, base + 1, current_leaf or None, kind.value, payload, now),
+                (owner_account_id, session_id, base + 1, current_leaf or None, kind.value, encoded, now),
             )
             conn.execute(
-                "UPDATE sessions SET leaf_seq = ? WHERE owner_account_id = ? AND session_id = ?",
-                (base + 1, owner_account_id, session_id),
+                "UPDATE sessions SET leaf_seq = ?, updated_at = ? "
+                "WHERE owner_account_id = ? AND session_id = ?",
+                (base + 1, now, owner_account_id, session_id),
             )
 
         self._writer.execute(_write)
+
+    async def record_durable_event_async(
+        self,
+        session_id: str,
+        *,
+        owner_account_id: str,
+        kind: SessionEventType,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        await asyncio.to_thread(
+            self.record_durable_event,
+            session_id,
+            owner_account_id=owner_account_id,
+            kind=kind,
+            payload=payload,
+        )
+
+    def reconcile_open_tool_events(
+        self,
+        session_id: str,
+        *,
+        owner_account_id: str,
+    ) -> list[dict[str, Any]]:
+        """把上次进程退出时没有结果的工具 intent 标记为 interrupted。
+
+        这里只追加审计事件，不重放工具，也不伪造 Provider 消息；副作用状态保持
+        ``unknown``，由下一轮模型或用户决定是否重新发起新调用。
+        """
+        cursor = self._read_event_cursor(owner_account_id, session_id)
+        if cursor is None:
+            return []
+        rows = self._resolve_chain(owner_account_id, session_id, cursor[0])
+        intents: dict[str, dict[str, Any]] = {}
+        completed: set[str] = set()
+        for _sid, _seq, event_type, encoded in rows:
+            if event_type == SessionEventType.TOOL_EXECUTION_INTENT.value:
+                try:
+                    payload = json.loads(encoded)
+                except json.JSONDecodeError:
+                    continue
+                call_id = str(payload.get("tool_call_id") or "").strip()
+                if call_id:
+                    intents[call_id] = payload
+            elif event_type == SessionEventType.TOOL_RESULT_COMMIT.value:
+                try:
+                    payload = json.loads(encoded)
+                except json.JSONDecodeError:
+                    continue
+                call_id = str(payload.get("tool_call_id") or "").strip()
+                if call_id:
+                    completed.add(call_id)
+        pending = [payload for call_id, payload in intents.items() if call_id not in completed]
+        for payload in pending:
+            self.record_durable_event(
+                session_id,
+                owner_account_id=owner_account_id,
+                kind=SessionEventType.TOOL_RESULT_COMMIT,
+                payload={
+                    "tool_call_id": str(payload.get("tool_call_id") or ""),
+                    "name": str(payload.get("name") or ""),
+                    "status": "interrupted",
+                    "code": "interrupted",
+                    "side_effect_state": "unknown",
+                },
+            )
+        return pending
 
     def close_open_turn(
         self,

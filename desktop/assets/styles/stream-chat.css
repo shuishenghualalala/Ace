@@ -303,12 +303,28 @@
   color: var(--mw-text-muted);
   font-size: var(--mw-type-caption-size);
   line-height: 1.65;
-  white-space: pre-wrap;
+  white-space: normal;
   overflow-wrap: break-word;
   word-break: break-word;
   max-height: 240px;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+/* 思考区走 markdown 渲染后，压住通用 .md-body 正文规则，保持思考区弱化配色与字号。 */
+.chat-messages.web-flow .process-timeline__thinking.md-body,
+.process-timeline__thinking.md-body {
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+  line-height: 1.65;
+}
+
+.chat-messages.web-flow .process-timeline__thinking.md-body p,
+.process-timeline__thinking.md-body p,
+.process-timeline__thinking.md-body li,
+.process-timeline__thinking.md-body strong,
+.process-timeline__thinking.md-body b {
+  color: var(--mw-text-muted);
 }
 
 .process-timeline__error {

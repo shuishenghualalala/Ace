@@ -205,7 +205,7 @@
   padding: var(--mw-space-2) var(--mw-space-3);
   overflow-y: auto;
   color: var(--mw-text-secondary);
-  white-space: pre-wrap;
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 
