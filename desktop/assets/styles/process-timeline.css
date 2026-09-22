@@ -116,7 +116,7 @@
 .mw-process-timeline .process-timeline__progress {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--mw-space-fine-2);
   margin: 0 0 var(--mw-space-1);
   padding-left: var(--mw-space-2);
   border-left: 1px solid var(--mw-border-subtle);

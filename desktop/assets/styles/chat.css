@@ -757,7 +757,7 @@ button.chat-message-file:hover {
     color: var(--mw-text-primary);
     border: 1px solid var(--mw-border-subtle);
     border-radius: var(--mw-radius-2);
-    padding: 1px 5px;
+    padding: var(--mw-space-fine-1) var(--mw-space-fine-5);
     font-size: 0.85em;
 }
 
@@ -2981,11 +2981,11 @@ button.chat-message-file:hover {
 }
 .followup-card-wrap--permission {
   position: fixed;
-  left: var(--permission-card-left, auto);
-  right: var(--permission-card-right, clamp(var(--mw-space-4), 3vw, var(--mw-space-8)));
-  bottom: var(--permission-card-bottom, clamp(var(--mw-space-4), 3vw, var(--mw-space-8)));
+  left: var(--mw-permission-card-left, auto);
+  right: var(--mw-permission-card-right, clamp(var(--mw-space-4), 3vw, var(--mw-space-8)));
+  bottom: var(--mw-permission-card-bottom, clamp(var(--mw-space-4), 3vw, var(--mw-space-8)));
   z-index: var(--mw-z-dialog);
-  width: var(--permission-card-width, min(440px, calc(100vw - 32px)));
+  width: var(--mw-permission-card-width, min(440px, calc(100vw - 32px)));
   max-width: calc(100vw - 32px);
   pointer-events: none;
   animation: permission-floating-in 160ms cubic-bezier(.2, .8, .2, 1) both;
@@ -3020,7 +3020,7 @@ button.chat-message-file:hover {
   padding: 0;
   overflow: hidden;
   border-color: color-mix(in srgb, var(--mw-border-default) 88%, var(--mw-team-accent-base));
-  border-radius: 14px;
+  border-radius: var(--mw-radius-fine-14);
   background: var(--mw-bg-surface);
   box-shadow: var(--mw-shadow-dialog);
   animation: permission-dialog-in 160ms cubic-bezier(.2, .8, .2, 1) both;
@@ -3028,10 +3028,10 @@ button.chat-message-file:hover {
 .staffing-dialog__source {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 16px 22px 0;
+  gap: var(--mw-space-2);
+  padding: var(--mw-space-4) var(--mw-space-fine-22) 0;
   color: var(--mw-text-secondary);
-  font-size: 12px;
+  font-size: var(--mw-font-sm);
   font-weight: 600;
 }
 .staffing-dialog__source .session__team-logo {
@@ -3041,8 +3041,8 @@ button.chat-message-file:hover {
 }
 .staffing-dialog__header {
   align-items: flex-start;
-  padding-top: 15px;
-  padding-bottom: 16px;
+  padding-top: var(--mw-space-fine-15);
+  padding-bottom: var(--mw-space-4);
 }
 .staffing-dialog__header-icon {
   color: color-mix(in srgb, var(--mw-team-accent) 78%, var(--mw-text-primary));
@@ -3051,23 +3051,23 @@ button.chat-message-file:hover {
 }
 .staffing-dialog__header .followup-card__subtitle {
   max-width: 440px;
-  margin-top: 5px;
-  font-size: 13px;
+  margin-top: var(--mw-space-fine-5);
+  font-size: var(--mw-font-md);
   line-height: 1.55;
   white-space: pre-line;
 }
 .staffing-dialog__body {
-  padding: 0 22px 20px;
+  padding: 0 var(--mw-space-fine-22) var(--mw-space-5);
   overflow-y: auto;
 }
 .staffing-dialog__scope {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 18px;
-  padding: 10px 12px;
+  gap: var(--mw-space-2);
+  margin-bottom: var(--mw-space-fine-18);
+  padding: var(--mw-space-fine-10) var(--mw-space-3);
   border: 1px solid color-mix(in srgb, var(--mw-team-accent-border) 22%, var(--mw-border-default));
-  border-radius: 9px;
+  border-radius: var(--mw-radius-fine-9);
   color: color-mix(in srgb, var(--mw-team-accent-strong) 78%, var(--mw-text-primary));
   background: color-mix(in srgb, var(--mw-team-accent-soft) 11%, var(--mw-bg-app));
   font-size: 12.5px;
@@ -3079,7 +3079,7 @@ button.chat-message-file:hover {
   height: 17px;
 }
 .staffing-dialog__choice-title {
-  margin-bottom: 9px;
+  margin-bottom: var(--mw-space-fine-9);
   color: var(--mw-text-secondary);
   font-size: 12.5px;
   font-weight: 650;
@@ -3089,8 +3089,8 @@ button.chat-message-file:hover {
 }
 .followup-card--staffing .followup-card__option {
   min-height: 58px;
-  padding: 11px 13px;
-  border-radius: 9px;
+  padding: var(--mw-space-fine-11) var(--mw-space-fine-13);
+  border-radius: var(--mw-radius-fine-9);
   background: color-mix(in srgb, var(--mw-bg-app) 88%, var(--mw-bg-subtle));
 }
 .followup-card--staffing .followup-card__option:has(input:checked) {
@@ -3101,17 +3101,17 @@ button.chat-message-file:hover {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 9px;
-  padding: 14px 22px;
+  gap: var(--mw-space-fine-9);
+  padding: var(--mw-space-fine-14) var(--mw-space-fine-22);
   border-top: 1px solid color-mix(in srgb, var(--mw-border-default) 86%, transparent);
   background: color-mix(in srgb, var(--mw-bg-app) 68%, var(--mw-bg-surface));
 }
 .followup-card--staffing-status {
   display: flex;
   align-items: center;
-  gap: 13px;
+  gap: var(--mw-space-fine-13);
   min-height: 118px;
-  padding: 24px;
+  padding: var(--mw-space-6);
 }
 .staffing-dialog__status-icon {
   display: inline-flex;
@@ -3120,7 +3120,7 @@ button.chat-message-file:hover {
   flex: 0 0 auto;
   width: 42px;
   height: 42px;
-  border-radius: 11px;
+  border-radius: var(--mw-radius-fine-11);
   color: color-mix(in srgb, var(--mw-team-accent-muted) 82%, var(--mw-text-primary));
   background: color-mix(in srgb, var(--mw-team-accent-soft) 16%, var(--mw-bg-app));
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mw-team-accent) 20%, transparent);
@@ -3130,7 +3130,7 @@ button.chat-message-file:hover {
 }
 .staffing-dialog__status-copy .followup-card__title {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--mw-font-lg);
 }
 .followup-card--staffing-failed .staffing-dialog__status-icon {
   color: var(--mw-status-danger);
@@ -3307,7 +3307,7 @@ button.chat-message-file:hover {
   position: absolute;
   width: 1px;
   height: 1px;
-  margin: -1px;
+  margin: var(--mw-space-fine-neg-1);
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
@@ -3341,7 +3341,7 @@ button.chat-message-file:hover {
   min-width: 0;
   flex-direction: column;
   gap: var(--mw-space-1);
-  padding-top: 2px;
+  padding-top: var(--mw-space-fine-2);
 }
 .followup-card__option .followup-card__option-description {
   color: var(--mw-text-muted);

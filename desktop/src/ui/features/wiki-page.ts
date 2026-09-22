@@ -918,7 +918,7 @@ function treeNodesHtml(nodes: WikiTreeNode[], depth: number): string {
         const countHtml = count > 0 ? `<span class="wiki-tree__folder-count">${count}</span>` : '';
         return `
           <li class="wiki-tree__folder">
-            <button type="button" class="wiki-tree__folder-toggle${open ? ' is-open' : ''}" data-tree-path="${escapeHtml(node.path)}" style="padding-left: ${treeIndentPx(depth)}px">
+            <button type="button" class="wiki-tree__folder-toggle${open ? ' is-open' : ''}" data-tree-path="${escapeHtml(node.path)}" style="--mw-tree-indent: ${treeIndentPx(depth)}px">
               <span class="wiki-tree__caret">${wikiIcon('caret', 12)}</span>
               <span class="wiki-tree__folder-icon">${wikiIcon('folder', 14)}</span>
               <span class="wiki-tree__folder-name">${escapeHtml(vaultFolderLabel(node.path, node.name))}</span>
@@ -931,7 +931,7 @@ function treeNodesHtml(nodes: WikiTreeNode[], depth: number): string {
         const active = node.name === activeGroup().selectedDocumentName ? ' is-active' : '';
         return `
           <li class="wiki-tree__item wiki-tree__item--document${active}" data-vault-document="${escapeHtml(node.name)}">
-            <button type="button" class="wiki-tree__label" style="padding-left: ${depth * 16 + 6}px">
+            <button type="button" class="wiki-tree__label" style="--mw-tree-indent: ${depth * 16 + 6}px">
               <span class="wiki-badge">文件</span>
               <span class="wiki-tree__title">${escapeHtml(vaultDocumentLabel(node.name))}</span>
             </button>
@@ -942,8 +942,8 @@ function treeNodesHtml(nodes: WikiTreeNode[], depth: number): string {
       // ⋯ 菜单按钮是 <li> 的独立子元素（button 不能嵌套 button），
       // 由 CSS 绝对定位到文件名左侧的缩进空隙里，悬停时淡入。
       return `
-        <li class="wiki-tree__item${view.selecting ? ' wiki-item--selecting' : ''}${active}${checkedClass}" data-page-id="${escapeHtml(node.page.id)}" style="--tree-indent: ${treeIndentPx(depth)}px">
-          <button type="button" class="wiki-tree__label" style="padding-left: var(--tree-indent)">
+        <li class="wiki-tree__item${view.selecting ? ' wiki-item--selecting' : ''}${active}${checkedClass}" data-page-id="${escapeHtml(node.page.id)}" style="--mw-tree-indent: ${treeIndentPx(depth)}px">
+          <button type="button" class="wiki-tree__label">
             ${checkHtml}
             ${typeBadge(node.page.page_type)}
             <span class="wiki-tree__title">${escapeHtml(node.page.title)}</span>
@@ -1409,15 +1409,15 @@ let listScrollMemory: { key: string; top: number } | null = null;
 
 /** 知识库面板内联宽度：列表/树/类型视图固定持久化宽度；图谱视图拖拽后固定像素，未拖拽时沿用 browserWidth。 */
 function browserPaneStyleAttr(): string {
-  if (view.view === 'graph' && graphWidth != null) return ` style="width: ${graphWidth}px"`;
-  return ` style="width: ${browserWidth}px"`;
+  if (view.view === 'graph' && graphWidth != null) return ` style="--mw-wiki-browser-width: ${graphWidth}px"`;
+  return ` style="--mw-wiki-browser-width: ${browserWidth}px"`;
 }
 
 /** 目录/图谱画布内联宽度：列表/树/类型视图固定目录宽度，用 flex 简写输出，压过 CSS 里 240px/窄窗口 220px 的 flex-basis 档位；
  * 图谱模式未拖拽时走 1.5:1 比例分配不内联，拖拽后内联固定像素压过 --graph 的 flex 1.5。 */
 function catalogPaneStyleAttr(): string {
-  if (view.view === 'graph') return graphCanvasWidth != null ? ` style="flex: 0 0 ${graphCanvasWidth}px"` : '';
-  return ` style="flex: 0 0 ${catalogWidth}px"`;
+  if (view.view === 'graph') return graphCanvasWidth != null ? ` style="--mw-wiki-catalog-flex: 0 0 ${graphCanvasWidth}px"` : '';
+  return ` style="--mw-wiki-catalog-flex: 0 0 ${catalogWidth}px"`;
 }
 
 function renderShell(): void {
@@ -1492,7 +1492,7 @@ function renderShell(): void {
       .map((group, index) => {
         const flexStyle =
           view.detailGroups.length > 1
-            ? ` style="flex: ${index === 0 ? groupSplitRatio : 100 - groupSplitRatio} 1 0"`
+            ? ` style="--mw-wiki-group-flex: ${index === 0 ? groupSplitRatio : 100 - groupSplitRatio} 1 0"`
             : '';
         return `
           <section class="wiki-detail-group${group.id === view.activeGroupId ? ' is-focused' : ''}" data-wiki-group="${group.id}"${flexStyle}>
@@ -1502,7 +1502,7 @@ function renderShell(): void {
       })
       .join(groupSashHtml);
     const browserPaneMarkup = wikiBrowserSurfaceOpen
-      ? `<div class="wiki-browser-pane wiki-browser-pane--surface" style="width: ${browserWidth}px">
+      ? `<div class="wiki-browser-pane wiki-browser-pane--surface" style="--mw-wiki-browser-width: ${browserWidth}px">
           <div class="wiki-browser-surface" data-wiki-browser-surface data-session-id="${escapeHtml(wikiBrowserSurfaceSession)}"></div>
         </div>`
       : `<div class="wiki-browser-pane${graphMode ? ' wiki-browser-pane--graph' : ''}"${browserPaneStyleAttr()}>
@@ -2398,10 +2398,10 @@ function bindEvents(): void {
       onDrag: (w) => {
         if (view.view === 'graph') {
           graphWidth = graphWidthStore.clamp(w);
-          pane.style.width = `${graphWidth}px`;
+          pane.style.setProperty('--mw-wiki-browser-width', `${graphWidth}px`);
         } else {
           browserWidth = browserWidthStore.clamp(w);
-          pane.style.width = `${browserWidth}px`;
+          pane.style.setProperty('--mw-wiki-browser-width', `${browserWidth}px`);
         }
       },
       onCommit: () => (view.view === 'graph' ? graphWidthStore.persist(graphWidth) : browserWidthStore.persist(browserWidth)),
@@ -2427,7 +2427,7 @@ function bindEvents(): void {
       startWidth: () => catalogWidth,
       onDrag: (w) => {
         catalogWidth = catalogWidthStore.clamp(w);
-        pane.style.flex = `0 0 ${catalogWidth}px`;
+        pane.style.setProperty('--mw-wiki-catalog-flex', `0 0 ${catalogWidth}px`);
       },
       onCommit: () => catalogWidthStore.persist(catalogWidth),
       // 双击复位默认目录宽度
@@ -2448,7 +2448,7 @@ function bindEvents(): void {
       startWidth: () => graphCanvasWidth ?? pane.getBoundingClientRect().width,
       onDrag: (w) => {
         graphCanvasWidth = graphCanvasWidthStore.clamp(w);
-        pane.style.flex = `0 0 ${graphCanvasWidth}px`;
+        pane.style.setProperty('--mw-wiki-catalog-flex', `0 0 ${graphCanvasWidth}px`);
       },
       onCommit: () => graphCanvasWidthStore.persist(graphCanvasWidth),
       // 双击复位：清掉拖拽固定像素，回到 1.5:1 弹性分配
@@ -2614,16 +2614,16 @@ function bindEvents(): void {
       startWidth: () => (groupSplitRatio / 100) * containerSize(),
       onDrag: (w) => {
         groupSplitRatio = groupSplitStore.clamp((w / containerSize()) * 100);
-        first.style.flex = `${groupSplitRatio} 1 0`;
-        second.style.flex = `${100 - groupSplitRatio} 1 0`;
+        first.style.setProperty('--mw-wiki-group-flex', `${groupSplitRatio} 1 0`);
+        second.style.setProperty('--mw-wiki-group-flex', `${100 - groupSplitRatio} 1 0`);
       },
       onCommit: () => groupSplitStore.persist(groupSplitRatio),
       // 双击复位 50%（清存储，回默认）；直接改内联比例，不走 renderShell（保活子树会带回旧内联值）。
       onReset: () => {
         groupSplitRatio = 50;
         groupSplitStore.persist(null);
-        first.style.flex = '50 1 0';
-        second.style.flex = '50 1 0';
+        first.style.setProperty('--mw-wiki-group-flex', '50 1 0');
+        second.style.setProperty('--mw-wiki-group-flex', '50 1 0');
       },
     });
   });

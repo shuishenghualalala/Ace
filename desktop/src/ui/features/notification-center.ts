@@ -210,8 +210,9 @@ function positionPanel(): void {
     PANEL_VIEWPORT_GAP,
     window.innerHeight - PANEL_MAX_HEIGHT - PANEL_VIEWPORT_GAP,
   );
-  panel.style.left = `${Math.max(PANEL_VIEWPORT_GAP, left)}px`;
-  panel.style.top = `${Math.min(top, maxTop)}px`;
+  // 定位值通过 token 命名空间交给 CSS（面板布局留在样式表里）。
+  panel.style.setProperty('--mw-notification-panel-left', `${Math.max(PANEL_VIEWPORT_GAP, left)}px`);
+  panel.style.setProperty('--mw-notification-panel-top', `${Math.min(top, maxTop)}px`);
 }
 
 function openPanel(): void {
@@ -396,7 +397,7 @@ function renderPanel(): void {
 
   const list = document.createElement('div');
   list.className = 'mw-notification-panel__list';
-  list.style.maxHeight = `${PANEL_MAX_HEIGHT - 48}px`;
+  list.style.setProperty('--mw-notification-panel-list-max-height', `${PANEL_MAX_HEIGHT - 48}px`);
   panel.append(header, list);
   renderList();
 }

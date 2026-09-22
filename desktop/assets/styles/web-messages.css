@@ -3,8 +3,8 @@
 
 /* 沙箱开关 banner：与 .composer-edit-banner 同带，状态色用修饰类切换 */
 .security-banner {
-  --security-banner-accent: var(--mw-status-warning);
-  --security-banner-soft: var(--mw-status-warning-bg);
+  --mw-security-banner-accent: var(--mw-status-warning);
+  --mw-security-banner-soft: var(--mw-status-warning-bg);
   display: none;
   position: relative;
   align-items: center;
@@ -14,12 +14,12 @@
   margin: 0 auto var(--mw-space-2);
   min-height: 66px;
   padding: var(--mw-space-3) var(--mw-space-3) var(--mw-space-3) var(--mw-space-4);
-  border: 1px solid color-mix(in srgb, var(--security-banner-accent) 34%, var(--mw-border-subtle));
-  border-left: 4px solid var(--security-banner-accent);
+  border: 1px solid color-mix(in srgb, var(--mw-security-banner-accent) 34%, var(--mw-border-subtle));
+  border-left: 4px solid var(--mw-security-banner-accent);
   border-radius: var(--mw-radius-4);
-  background: var(--security-banner-soft);
+  background: var(--mw-security-banner-soft);
   color: var(--mw-text-primary);
-  box-shadow: 0 8px 20px color-mix(in srgb, var(--security-banner-accent) 12%, transparent);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--mw-security-banner-accent) 12%, transparent);
 }
 .security-banner.show { display: flex; }
 body.welcome-active .security-banner { width: min(720px, 100%); }
@@ -30,7 +30,7 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   flex: 0 0 32px;
   place-items: center;
   border-radius: var(--mw-radius-full);
-  background: var(--security-banner-accent);
+  background: var(--mw-security-banner-accent);
   color: var(--mw-text-inverse);
   font-size: var(--mw-type-body-size);
   font-weight: 700;
@@ -84,12 +84,12 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
 }
 .security-banner__btn[disabled] { opacity: 0.5; cursor: default; }
 .security-banner.is-info {
-  --security-banner-accent: var(--mw-status-info);
-  --security-banner-soft: var(--mw-status-info-bg);
+  --mw-security-banner-accent: var(--mw-status-info);
+  --mw-security-banner-soft: var(--mw-status-info-bg);
 }
 .security-banner.is-danger {
-  --security-banner-accent: var(--mw-status-danger);
-  --security-banner-soft: var(--mw-status-danger-bg);
+  --mw-security-banner-accent: var(--mw-status-danger);
+  --mw-security-banner-soft: var(--mw-status-danger-bg);
 }
 .security-banner.is-danger .security-banner__btn {
   border-color: var(--mw-status-danger);
@@ -103,8 +103,8 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
 
 /* 后端服务状态横幅：页面顶部通栏，非阻断提示（状态色用修饰类切换） */
 .backend-banner {
-  --backend-banner-accent: var(--mw-status-info);
-  --backend-banner-soft: var(--mw-status-info-bg);
+  --mw-backend-banner-accent: var(--mw-status-info);
+  --mw-backend-banner-soft: var(--mw-status-info-bg);
   display: none;
   position: relative;
   align-items: center;
@@ -112,8 +112,8 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   box-sizing: border-box;
   width: 100%;
   padding: var(--mw-space-2) var(--mw-space-4);
-  border-bottom: 1px solid color-mix(in srgb, var(--backend-banner-accent) 34%, var(--mw-border-subtle));
-  background: var(--backend-banner-soft);
+  border-bottom: 1px solid color-mix(in srgb, var(--mw-backend-banner-accent) 34%, var(--mw-border-subtle));
+  background: var(--mw-backend-banner-soft);
   color: var(--mw-text-primary);
 }
 .backend-banner.show { display: flex; }
@@ -124,7 +124,7 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   flex: 0 0 24px;
   place-items: center;
   border-radius: var(--mw-radius-full);
-  background: var(--backend-banner-accent);
+  background: var(--mw-backend-banner-accent);
   color: var(--mw-text-inverse);
   font-size: var(--mw-type-caption-size);
   font-weight: 700;
@@ -134,7 +134,7 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   display: grid;
   min-width: 0;
   flex: 1 1 auto;
-  gap: 2px;
+  gap: var(--mw-space-fine-2);
 }
 .backend-banner__title {
   color: var(--mw-text-primary);
@@ -176,16 +176,16 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
 }
 .backend-banner__btn[data-action="log"]:hover { background: var(--mw-bg-selected); }
 .backend-banner.is-info {
-  --backend-banner-accent: var(--mw-status-info);
-  --backend-banner-soft: var(--mw-status-info-bg);
+  --mw-backend-banner-accent: var(--mw-status-info);
+  --mw-backend-banner-soft: var(--mw-status-info-bg);
 }
 .backend-banner.is-warn {
-  --backend-banner-accent: var(--mw-status-warning);
-  --backend-banner-soft: var(--mw-status-warning-bg);
+  --mw-backend-banner-accent: var(--mw-status-warning);
+  --mw-backend-banner-soft: var(--mw-status-warning-bg);
 }
 .backend-banner.is-danger {
-  --backend-banner-accent: var(--mw-status-danger);
-  --backend-banner-soft: var(--mw-status-danger-bg);
+  --mw-backend-banner-accent: var(--mw-status-danger);
+  --mw-backend-banner-soft: var(--mw-status-danger-bg);
 }
 .backend-banner.is-danger .backend-banner__btn {
   border-color: var(--mw-status-danger);
@@ -902,14 +902,14 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
 }
 .chat-messages.web-flow .team-internal__communication-actions button {
   border: 1px solid var(--mw-border-subtle);
-  border-radius: 999px;
+  border-radius: var(--mw-radius-full);
   background: var(--mw-bg-surface);
   color: var(--mw-text-secondary);
   cursor: pointer;
   font: inherit;
   font-size: var(--mw-type-caption-size);
   line-height: 1.2;
-  padding: 4px 10px;
+  padding: var(--mw-space-1) var(--mw-space-fine-10);
 }
 .chat-messages.web-flow .team-internal__communication-actions button:hover {
   border-color: var(--mw-border-strong);

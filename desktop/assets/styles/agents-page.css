@@ -629,10 +629,7 @@
   padding: var(--mw-space-3);
   border: 1px solid var(--mw-border-strong);
   border-radius: var(--mw-radius-3);
-  background:
-    linear-gradient(90deg, color-mix(in srgb, var(--mw-black) 5%, transparent) 1px, transparent 1px),
-    linear-gradient(0deg, color-mix(in srgb, var(--mw-black) 5%, transparent) 1px, transparent 1px),
-    var(--mw-bg-surface);
+  background: var(--mw-pattern-dot-grid), var(--mw-bg-surface);
   background-size: 8px 8px;
   box-shadow: inset -2px -2px color-mix(in srgb, var(--mw-black) 6%, transparent), 0 4px 0 color-mix(in srgb, var(--mw-black) 5%, transparent);
 }

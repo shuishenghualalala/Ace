@@ -482,8 +482,8 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: 14px 16px;
+  gap: var(--mw-space-3);
+  padding: var(--mw-space-fine-14) var(--mw-space-4);
   border: 1px solid var(--mw-border-subtle);
   border-radius: var(--mw-radius-3);
   background: var(--mw-bg-subtle);
@@ -501,7 +501,7 @@
 .channel-connect-qr__image {
   width: 200px;
   height: 200px;
-  border-radius: 8px;
+  border-radius: var(--mw-radius-3);
   background: var(--mw-white);
   padding: var(--mw-space-2);
   box-shadow: var(--mw-shadow-qr);

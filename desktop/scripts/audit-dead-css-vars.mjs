@@ -25,7 +25,28 @@ import { walkCssFiles } from './audit-css-leaks.mjs';
 const VAR_REF_PATTERN = /var\(\s*(--[a-zA-Z0-9_-]+)\s*(?:,\s*([^)]*))?\s*\)/g;
 const VAR_DEF_PATTERN = /(--[a-zA-Z0-9_-]+)\s*:/g;
 const TS_VAR_DEF_PATTERN = /setProperty\(\s*['"](--[a-zA-Z0-9_-]+)['"]/g;
+/**
+ * 内联 `style="--x: ..."` 属性里的自定义属性定义（含模板字符串里的动态值）。
+ * 例：`<li style="--tree-indent: ${px}px">` —— 这是合法的运行时定义，
+ * 只认 CSS 声明与 setProperty 会把它误判成死引用。
+ */
+const INLINE_STYLE_ATTR_PATTERN = /\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)'|`([^`]*)`)/g;
 const RUNTIME_CONTRACT_PREFIX = '--mw-runtime-';
+
+/**
+ * Extract custom-property definitions declared through inline style attributes.
+ *
+ * @param {string} text
+ * @returns {Set<string>}
+ */
+export function parseInlineStyleDefinitions(text) {
+  const defined = new Set();
+  for (const match of text.matchAll(INLINE_STYLE_ATTR_PATTERN)) {
+    const styleText = match[1] ?? match[2] ?? match[3] ?? '';
+    for (const def of styleText.matchAll(VAR_DEF_PATTERN)) defined.add(def[1]);
+  }
+  return defined;
+}
 
 /**
  * Extract the set of CSS variable definitions in `text`.
@@ -93,6 +114,7 @@ export function auditDeadCssVars({ stylesDir, srcDir, variablesPath }) {
   for (const file of tsFiles) {
     const text = readFileSync(file, 'utf8');
     for (const match of text.matchAll(TS_VAR_DEF_PATTERN)) defined.add(match[1]);
+    for (const name of parseInlineStyleDefinitions(text)) defined.add(name);
   }
 
   /** @type {typeof auditDeadCssVars extends (o: any) => infer R ? R extends { refs: infer U } ? U : never : never} */

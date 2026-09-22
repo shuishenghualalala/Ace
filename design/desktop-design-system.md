@@ -395,7 +395,23 @@ Use a `4px` base grid.
 | `--mw-space-12` | `48px` |
 
 Values outside this scale require a geometry reason, such as icon dimensions or
-one-pixel borders.
+one-pixel borders. Those exact values live in a second, value-named tier:
+
+```text
+--mw-space-fine-1 / -2 / -3 / -5 / -6 / -7 / -9 / -10 / -11 / -13 / -14 /
+-15 / -18 / -22 / -28 / -72 / -100        exact pixels
+--mw-space-fine-neg-1 / -neg-6            optical negative nudges
+```
+
+Rules:
+
+- Prefer the `4px` grid. Reach for a fine step only when rounding to the grid
+  would move pixels (hairline padding, icon gaps, optical alignment).
+- Never introduce a raw `px` literal in a spacing declaration. The
+  `audit-design-system` gate rejects `margin` / `padding` / `gap` values that
+  contain a pixel literal, including inside `calc()`.
+- Adding a value that is neither on the grid nor in the fine tier means adding
+  a token, not a literal.
 
 ### 6.4 Radius
 
@@ -408,6 +424,13 @@ one-pixel borders.
 | `--mw-radius-full` | `9999px` | status dots, avatars, short badges only |
 
 Do not use `16px`, `20px`, or `24px` as routine card radii.
+
+Radii that the base scale cannot express are registered as exact-value fine
+steps (`--mw-radius-fine-7 / -9 / -10 / -11 / -14 / -16 / -18 / -19 / -20`).
+They exist so that existing geometry is expressed as a token instead of a
+literal; new surfaces should still start from `--mw-radius-1..4` or
+`--mw-radius-full`. A pill written as `999px` maps to `--mw-radius-full`:
+border-radius is clamped to half the box, so both render identically.
 
 ### 6.5 Elevation
 
@@ -428,7 +451,52 @@ Do not use `16px`, `20px`, or `24px` as routine card radii.
 | `--mw-ease-out` | `cubic-bezier(0.22, 1, 0.36, 1)` | entry and movement |
 | `--mw-ease-standard` | `cubic-bezier(0.4, 0, 0.2, 1)` | color and opacity |
 
-Never use `transition: all`.
+Never use `transition: all`. Every `transition` value must compose its timing
+from `--mw-duration-*` and `--mw-ease-*` (or a whole-value `--mw-transition-*`
+token); literal times such as `0.15s` and literal `cubic-bezier()` / `steps()`
+easings fail the audit. Named CSS keywords (`ease`, `linear`) are allowed.
+
+### 6.7 Effects and patterns
+
+Blur, filters, and decorative gradients are primitives, not component decisions.
+The literal only exists in `tokens.css`; consumers reference it:
+
+| Token | Value | Use |
+| --- | --- | --- |
+| `--mw-effect-backdrop-panel` | `blur(12px)` | floating card controls |
+| `--mw-effect-backdrop-panel-strong` | `blur(22px) saturate(150%)` | comment/dialog surfaces |
+| `--mw-effect-backdrop-bar` | `blur(18px)` | toolbar strips |
+| `--mw-effect-icon-invert` | `invert(1)` | dark-theme template-image icons |
+| `--mw-effect-hover-dim` | `brightness(0.96)` | subtle hover dimming |
+| `--mw-pattern-dot-grid` | two 1px `color-mix` gradients | canvas dot grid |
+
+`backdrop-filter`, `filter`, and `text-shadow` must be `none` or a single
+`var(--mw-effect-*)` reference. A checkmark or tick drawn with
+`linear-gradient(currentcolor …)` is exempt: `currentcolor` is not a hardcoded
+color.
+
+### 6.8 Runtime geometry bridge
+
+Runtime-computed geometry (drag widths, split ratios, popup positions, canvas
+placement, tree indentation) is published into the token namespace and consumed
+by a stylesheet rule:
+
+```ts
+pane.style.setProperty('--mw-wiki-browser-width', `${width}px`);
+```
+
+```css
+.wiki-browser-pane { width: var(--mw-wiki-browser-width, auto); }
+```
+
+Rules:
+
+- `element.style.setProperty('--mw-*')` and inline `style="--mw-*: …"` are the
+  only legal ways for TypeScript to influence layout. Direct assignment
+  (`el.style.width = …`) and non-`--mw-` custom properties fail the audit.
+- The consuming declaration carries the previous static value as the `var()`
+  fallback, so the element renders identically before the first publish.
+- Behavioral inline styles (`display`, `visibility`, `colorScheme`) stay exempt.
 
 ## 7. Semantic tokens
 
@@ -541,6 +609,18 @@ The production token names are:
 --mw-type-code-{size,line,weight}
 ```
 
+Steps the canonical scale cannot express are registered as exact intermediate
+sizes, still derived from the base font size:
+
+```text
+--mw-type-subhead-size     15px
+--mw-type-doc-h3-size      17px
+--mw-type-doc-h3-lg-size   19px
+--mw-type-doc-h2-size      21px
+--mw-type-glyph-size       22px   dialog close glyph
+--mw-type-doc-title-size   36px   wiki detail title
+```
+
 Rules:
 
 - Letter spacing is `0`.
@@ -548,9 +628,12 @@ Rules:
   intermediate text sizes use `calc()` from `--mw-font-ui-size` so the default
   remains exact and the user font-size preference still applies.
 - Pixel font sizes are reserved for glyphs inside fixed-geometry controls such
-  as close buttons, carets, avatars, and icon-only actions. Every exception is
-  registered by selector and value in `audit-font-sizes.mjs`; an unregistered
-  pixel size fails the audit.
+  as close buttons, carets, avatars, and icon-only actions. `audit-font-sizes`
+  classifies those as `mustKeepLiteral` (sub-pixel or glyph-only) and lets them
+  pass; every other literal is `shouldUseVar` (exact token) or `shouldUseCalc`
+  (needs a semantic step) and fails the gate. The scale-gap values
+  `15 / 17 / 19 / 21 / 22 / 28 / 36 / 56` must never be rounded to a
+  neighbouring token — that changes the rendered size.
 - Do not use uppercase transformation for Chinese table headers.
 - Use tabular numerals for metrics, durations, and aligned numeric columns.
 - Truncate only when the full value is available through a tooltip or detail

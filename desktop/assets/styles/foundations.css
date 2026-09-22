@@ -82,7 +82,7 @@ body {
 }
 
 :root[data-theme='dark'] .mw-icon--template-image image {
-  filter: invert(1);
+  filter: var(--mw-effect-icon-invert);
 }
 
 button,

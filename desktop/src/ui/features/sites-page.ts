@@ -60,7 +60,8 @@ function fitCardPreviews(): void {
   if (!previews.length) return;
   const fit = (preview: HTMLElement): void => {
     const frame = preview.querySelector('iframe');
-    if (frame) frame.style.transform = `scale(${preview.clientWidth / CARD_PREVIEW_WIDTH})`;
+    // 缩放系数随卡片宽度变化：只发布值，transform 规则留在 CSS。
+    if (frame) frame.style.setProperty('--mw-preview-scale', String(preview.clientWidth / CARD_PREVIEW_WIDTH));
   };
   cardPreviewObserver = new ResizeObserver((entries) => {
     for (const entry of entries) fit(entry.target as HTMLElement);

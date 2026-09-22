@@ -985,31 +985,31 @@ describe('详情编辑器组（拆分 / 移动 / 关闭 / 拖拽落点）', () =
 
   it('组间把手：拖拽调比例（钳制 20/80）并持久化，双击复位 50%', async () => {
     await setupTwoGroups();
-    // 默认 50/50（happy-dom 把 flex 简写归一化为 0px 基准）
-    expect(groupEls()[0].style.flex).toBe('50 1 0px');
-    expect(groupEls()[1].style.flex).toBe('50 1 0px');
+    // 默认 50/50：比例通过 --mw-wiki-group-flex 发布，值原样保留
+    expect(groupEls()[0].style.getPropertyValue('--mw-wiki-group-flex')).toBe('50 1 0');
+    expect(groupEls()[1].style.getPropertyValue('--mw-wiki-group-flex')).toBe('50 1 0');
 
     const sash = document.querySelector('[data-wiki-group-sash]') as HTMLElement;
     // happy-dom 容器 rect 恒 0 → 按 1000px 假定尺寸换算：起点 50% = 500px
     sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 600, bubbles: true }));
-    expect(groupEls()[0].style.flex).toBe('60 1 0px');
-    expect(groupEls()[1].style.flex).toBe('40 1 0px');
+    expect(groupEls()[0].style.getPropertyValue('--mw-wiki-group-flex')).toBe('60 1 0');
+    expect(groupEls()[1].style.getPropertyValue('--mw-wiki-group-flex')).toBe('40 1 0');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     expect(localStorage.getItem('crew.desktop.wikiDetailSplit.v1')).toBe('60');
 
     // 大幅右拖超过上限 → 钳到 80
     sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 5000, bubbles: true }));
-    expect(groupEls()[0].style.flex).toBe('80 1 0px');
+    expect(groupEls()[0].style.getPropertyValue('--mw-wiki-group-flex')).toBe('80 1 0');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     expect(localStorage.getItem('crew.desktop.wikiDetailSplit.v1')).toBe('80');
 
     // 双击复位 50%（清存储）
     sash.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     expect(localStorage.getItem('crew.desktop.wikiDetailSplit.v1')).toBeNull();
-    expect(groupEls()[0].style.flex).toBe('50 1 0px');
-    expect(groupEls()[1].style.flex).toBe('50 1 0px');
+    expect(groupEls()[0].style.getPropertyValue('--mw-wiki-group-flex')).toBe('50 1 0');
+    expect(groupEls()[1].style.getPropertyValue('--mw-wiki-group-flex')).toBe('50 1 0');
   });
 
   it('resolveTabDrop：edge 拆分 / group 移动 / 同组 no-op / 两组时 edge 退化为移动', async () => {
@@ -1325,14 +1325,14 @@ describe('分栏拖拽', () => {
     await refreshWikiData();
     document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
     const pane = document.querySelector('.wiki-browser-pane') as HTMLElement;
-    // 未拖拽：沿用知识库面板默认宽度
-    expect(pane.style.width).toBe('500px');
+    // 未拖拽：沿用知识库面板默认宽度（同样经 token 发布）
+    expect(pane.style.getPropertyValue('--mw-wiki-browser-width')).toBe('500px');
 
     const sash = document.querySelector('[data-wiki-browser-sash]') as HTMLElement;
     // happy-dom 的 getBoundingClientRect 恒为 0：startX=500 → move 到 0，sign=-1 即拖出 500px
     sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 0, bubbles: true }));
-    expect(pane.style.width).toBe('500px');
+    expect(pane.style.getPropertyValue('--mw-wiki-browser-width')).toBe('500px');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     expect(localStorage.getItem('crew.desktop.wikiGraphWidth.v2')).toBe('500');
 
@@ -1340,32 +1340,32 @@ describe('分栏拖拽', () => {
     document.querySelector('[data-wiki-view="timeline"]')?.dispatchEvent(new Event('click'));
     document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
     const rebuilt = document.querySelector('.wiki-browser-pane') as HTMLElement;
-    expect(rebuilt.style.width).toBe('500px');
+    expect(rebuilt.style.getPropertyValue('--mw-wiki-browser-width')).toBe('500px');
 
     // 双击复位回默认面板宽度
     document.querySelector('[data-wiki-browser-sash]')?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     const reset = document.querySelector('.wiki-browser-pane') as HTMLElement;
-    expect(reset.style.width).toBe('500px');
+    expect(reset.style.getPropertyValue('--mw-wiki-browser-width')).toBe('500px');
     expect(localStorage.getItem('crew.desktop.wikiGraphWidth.v2')).toBeNull();
   });
 
   it('拖拽调宽并持久化，超过下限被钳制', async () => {
     await refreshWikiData();
     const pane = document.querySelector('.wiki-browser-pane') as HTMLElement;
-    expect(pane.style.width).toBe('500px');
+    expect(pane.style.getPropertyValue('--mw-wiki-browser-width')).toBe('500px');
 
     const sash = document.querySelector('[data-wiki-browser-sash]') as HTMLElement;
     // 把手在面板左缘（sign=-1）：向右拖变窄
     sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 560, bubbles: true }));
-    expect(pane.style.width).toBe('440px');
+    expect(pane.style.getPropertyValue('--mw-wiki-browser-width')).toBe('440px');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     expect(localStorage.getItem('crew.desktop.wikiBrowserWidth.v2')).toBe('440');
 
     // 大幅右拖超过下限 → 钳到 340
     sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 5000, bubbles: true }));
-    expect(pane.style.width).toBe('340px');
+    expect(pane.style.getPropertyValue('--mw-wiki-browser-width')).toBe('340px');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     expect(localStorage.getItem('crew.desktop.wikiBrowserWidth.v2')).toBe('340');
   });
@@ -1379,42 +1379,42 @@ describe('分栏拖拽', () => {
 
     sash.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     const pane = document.querySelector('.wiki-browser-pane') as HTMLElement;
-    expect(pane.style.width).toBe('500px');
+    expect(pane.style.getPropertyValue('--mw-wiki-browser-width')).toBe('500px');
     expect(localStorage.getItem('crew.desktop.wikiBrowserWidth.v2')).toBe('500');
   });
 
   it('目录内层把手：默认 240，往右拖变宽，钳制 200/480，双击复位', async () => {
     await refreshWikiData();
     const pane = document.querySelector('.wiki-list-pane') as HTMLElement;
-    expect(pane.style.flex).toBe('0 0 240px');
+    expect(pane.style.getPropertyValue('--mw-wiki-catalog-flex')).toBe('0 0 240px');
 
     const sash = document.querySelector('[data-wiki-catalog-sash]') as HTMLElement;
     expect(sash).not.toBeNull();
     // 把手在目录右缘（sign=+1）：往右拖目录变宽
     sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 560, bubbles: true }));
-    expect(pane.style.flex).toBe('0 0 300px');
+    expect(pane.style.getPropertyValue('--mw-wiki-catalog-flex')).toBe('0 0 300px');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     expect(localStorage.getItem('crew.desktop.wikiCatalogWidth.v1')).toBe('300');
 
     // 大幅左拖超过下限 → 钳到 200
     sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 500, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: -5000, bubbles: true }));
-    expect(pane.style.flex).toBe('0 0 200px');
+    expect(pane.style.getPropertyValue('--mw-wiki-catalog-flex')).toBe('0 0 200px');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     expect(localStorage.getItem('crew.desktop.wikiCatalogWidth.v1')).toBe('200');
 
     // 大幅右拖超过上限 → 钳到 480
     sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 5000, bubbles: true }));
-    expect(pane.style.flex).toBe('0 0 480px');
+    expect(pane.style.getPropertyValue('--mw-wiki-catalog-flex')).toBe('0 0 480px');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     expect(localStorage.getItem('crew.desktop.wikiCatalogWidth.v1')).toBe('480');
 
     // 双击复位默认目录宽度
     sash.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     const reset = document.querySelector('.wiki-list-pane') as HTMLElement;
-    expect(reset.style.flex).toBe('0 0 240px');
+    expect(reset.style.getPropertyValue('--mw-wiki-catalog-flex')).toBe('0 0 240px');
     expect(localStorage.getItem('crew.desktop.wikiCatalogWidth.v1')).toBe('240');
   });
 
@@ -1422,7 +1422,7 @@ describe('分栏拖拽', () => {
     await refreshWikiData();
     document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
     expect(document.querySelector('[data-wiki-catalog-sash]')).toBeNull();
-    expect((document.querySelector('.wiki-list-pane') as HTMLElement).style.flex).toBe('');
+    expect((document.querySelector('.wiki-list-pane') as HTMLElement).style.getPropertyValue('--mw-wiki-catalog-flex')).toBe('');
   });
 
   it('图谱画布内层把手：默认弹性无内联，拖拽固定像素并持久化，钳制 240/800，双击恢复弹性', async () => {
@@ -1435,12 +1435,12 @@ describe('分栏拖拽', () => {
     expect(sash).not.toBeNull();
     expect(document.querySelector('[data-wiki-catalog-sash]')).toBeNull();
     // 未拖拽：1.5:1 弹性分配，无内联 flex
-    expect(pane.style.flex).toBe('');
+    expect(pane.style.getPropertyValue('--mw-wiki-catalog-flex')).toBe('');
 
     // happy-dom 的 getBoundingClientRect 恒为 0：startX=0 → move 到 400，sign=+1 即拖出 400px
     sash.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 400, bubbles: true }));
-    expect(pane.style.flex).toBe('0 0 400px');
+    expect(pane.style.getPropertyValue('--mw-wiki-catalog-flex')).toBe('0 0 400px');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     expect(localStorage.getItem('crew.desktop.wikiGraphCanvasWidth.v1')).toBe('400');
 
@@ -1448,27 +1448,27 @@ describe('分栏拖拽', () => {
     document.querySelector('[data-wiki-view="timeline"]')?.dispatchEvent(new Event('click'));
     document.querySelector('[data-wiki-view="graph"]')?.dispatchEvent(new Event('click'));
     const rebuilt = document.querySelector('.wiki-list-pane') as HTMLElement;
-    expect(rebuilt.style.flex).toBe('0 0 400px');
+    expect(rebuilt.style.getPropertyValue('--mw-wiki-catalog-flex')).toBe('0 0 400px');
 
     // 大幅左拖超过下限 → 钳到 240
     const sash2 = document.querySelector('[data-wiki-graph-canvas-sash]') as HTMLElement;
     sash2.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: -5000, bubbles: true }));
-    expect(rebuilt.style.flex).toBe('0 0 240px');
+    expect(rebuilt.style.getPropertyValue('--mw-wiki-catalog-flex')).toBe('0 0 240px');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     expect(localStorage.getItem('crew.desktop.wikiGraphCanvasWidth.v1')).toBe('240');
 
     // 大幅右拖超过上限 → 钳到 800
     sash2.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, bubbles: true }));
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 5000, bubbles: true }));
-    expect(rebuilt.style.flex).toBe('0 0 800px');
+    expect(rebuilt.style.getPropertyValue('--mw-wiki-catalog-flex')).toBe('0 0 800px');
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     expect(localStorage.getItem('crew.desktop.wikiGraphCanvasWidth.v1')).toBe('800');
 
     // 双击复位：恢复弹性（无内联 flex），存储清除
     sash2.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     const reset = document.querySelector('.wiki-list-pane') as HTMLElement;
-    expect(reset.style.flex).toBe('');
+    expect(reset.style.getPropertyValue('--mw-wiki-catalog-flex')).toBe('');
     expect(localStorage.getItem('crew.desktop.wikiGraphCanvasWidth.v1')).toBeNull();
     Object.defineProperty(window, 'innerWidth', { value: 1024, configurable: true });
   });

@@ -313,6 +313,9 @@
 .mw-notification-panel {
   position: fixed;
   z-index: 1200;
+  /* 由 notification-center.ts 发布（弹层位置依赖铃铛按钮的实测几何） */
+  left: var(--mw-notification-panel-left, auto);
+  top: var(--mw-notification-panel-top, auto);
   /* 面板头部落在 .mw-app-titlebar 的 40px 拖拽区内，必须显式排除，
      否则 Electron 把该区域的点击当作窗口拖拽，「全部已读」按钮只有 y>40 的下沿能点中。 */
   -webkit-app-region: no-drag;
@@ -375,6 +378,7 @@
 
 .mw-notification-panel__list {
   overflow-y: auto;
+  max-height: var(--mw-notification-panel-list-max-height, none);
 }
 
 .mw-notification-panel__empty {
@@ -388,7 +392,7 @@
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 2px;
+  gap: var(--mw-space-fine-2);
   width: 100%;
   padding: var(--mw-space-2) var(--mw-space-3);
   border: 0;
@@ -427,7 +431,7 @@
 }
 
 .mw-notification-item__source {
-  padding: 1px var(--mw-space-1);
+  padding: var(--mw-space-fine-1) var(--mw-space-1);
   border-radius: var(--mw-radius-1);
   background: var(--mw-bg-selected);
   color: var(--mw-text-secondary);

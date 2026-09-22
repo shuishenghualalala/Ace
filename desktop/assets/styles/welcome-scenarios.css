@@ -100,7 +100,7 @@ body.welcome-active
   width: 38px;
   height: 29px;
   border: 4px solid var(--mw-text-primary);
-  border-radius: 19px 19px 12px 12px;
+  border-radius: var(--mw-radius-fine-19) var(--mw-radius-fine-19) var(--mw-radius-4) var(--mw-radius-4);
   background: color-mix(in srgb, var(--mw-symbol-accent) 76%, var(--mw-bg-surface));
   color: var(--mw-text-primary);
 }
