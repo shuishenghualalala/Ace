@@ -2375,6 +2375,38 @@ export function renderQueueHintCard(hint: string): HTMLElement {
   return card;
 }
 
+/**
+ * 历史加载失败卡：历史回填失败且当前无消息可显示时的兜底可见态。
+ * 失败不再静默清空对话（用户看到的不再是"空会话"）；重试按钮经
+ * conversation-renderer 的事件委托重新触发 loadBackendHistory。
+ */
+export function renderHistoryErrorCard(): HTMLElement {
+  const card = document.createElement('div');
+  card.className = 'render-error-card';
+  const text = document.createElement('span');
+  text.className = 'render-error-card__text';
+  text.textContent = '会话历史加载失败，请检查网络后重试。';
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.className = 'render-error-card__retry';
+  retry.setAttribute('data-history-retry', '1');
+  retry.textContent = '重试';
+  card.appendChild(text);
+  card.appendChild(retry);
+  return card;
+}
+
+/** 单元构建失败的降级占位：一条坏消息只损失自己，其余单元照常渲染。 */
+export function renderUnitErrorCard(): HTMLElement {
+  const card = document.createElement('div');
+  card.className = 'render-error-card';
+  const text = document.createElement('span');
+  text.className = 'render-error-card__text';
+  text.textContent = '该消息渲染失败，重新打开会话可重试。';
+  card.appendChild(text);
+  return card;
+}
+
 export function renderQueuePanelHtml(queue: PendingMessage[], canSteer = true): string {
   // 注：renderQueueSlot 直接 slot.innerHTML = renderQueuePanelHtml(...)，X3a 显式 OUT OF SCOPE。
   // 此处保持字符串实现；所有用户派生文本均已 escapeHtml，安全边界已具备。

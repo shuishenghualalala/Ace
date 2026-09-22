@@ -99,6 +99,7 @@ import { bindNotificationCenter } from './features/notification-center';
 import { armSubScenario, clearScenarioChip } from './features/scenario-arm';
 import { loadRunningIntroCopy } from './features/running-intro';
 import { installStreamDebugGlobal } from './stream-debug';
+import { installGlobalErrorReporting } from './renderer-error-report';
 import { newTurnRequestId, resumeSessionGeneration } from './features/session-busy';
 import {
   $,
@@ -569,6 +570,9 @@ async function init(
   registerDispose: (dispose: () => void) => void,
 ): Promise<void> {
   installStreamDebugGlobal();
+  // 全局错误捕获（最早安装）：同步异常与未处理 Promise 拒绝统一上报主进程落盘，
+  // 不再只进 DevTools console——「静默失败」从源头可见。
+  installGlobalErrorReporting();
   // 安全 init 包装器：单步抛错不会阻断后续步骤；抛错时记日志 + 通知用户，
   // 避免「init 链路中途抛错 → 首屏空白 → 用户看不到任何东西」的白屏。
   // 每步独立 try-catch，单页初始化失败不会让 setTab('chat') 跑不到。

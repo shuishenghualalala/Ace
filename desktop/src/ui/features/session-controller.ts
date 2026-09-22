@@ -22,8 +22,10 @@ import { loadSessionModel, syncSessionModelUi } from './session-model';
 import { loadInspectorContext, refreshInspector } from './inspector';
 import { syncCraftLabel } from './composer-toolbar';
 import {
+  clearHistoryLoadError,
   ensureSessionMessages,
   isBusySession,
+  markHistoryLoadError,
   newMessageId,
   notify,
   replaceSessionMessages,
@@ -272,6 +274,7 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
     }
     if (todos.length > 0) setBookTodos(sessionId, todos);
     replaceSessionMessages(sessionId, merged);
+    clearHistoryLoadError(sessionId);
     // 修法3：历史替换后清掉已被替换掉的旧回合 delta 重组缓冲；保留仍在 live 流式的尾巴
     // （其 assistantId 在 merged 里）。避免旧回合缓冲残留导致泄漏 / 串轮。
     resetSessionExcept(sessionId, new Set(merged.map((m) => m.id)));
@@ -326,7 +329,15 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
     });
     renderWorkspaceHistory(openSession);
   } catch {
-    if (isLatestLoad()) replaceSessionMessages(sessionId, []);
+    // 历史加载失败不再静默清空：保留内存中已有消息；无消息可显示时置错误标记，
+    // 聊天区渲染「加载失败 + 重试」卡（__history_error 单元），失败对用户可见。
+    if (isLatestLoad()) {
+      const hadMessages = (state.messages[sessionId] ?? []).length > 0;
+      if (!hadMessages) markHistoryLoadError(sessionId);
+      logStream('history', 'load-failed', { sessionId });
+      notify('会话历史加载失败，可点击对话区「重试」');
+      if (state.activeSessionId === sessionId) renderChat();
+    }
   } finally {
     // history 写回完成：flush 期间排队的迟到分片（P2-2），再清 loading 标记。
     // 仅最新请求收尾：旧请求不得清 loading（新请求仍在排队窗口内）也不得 flush。

@@ -253,6 +253,7 @@ function buildSnapshot(): AppState {
     queueHints: m.queueHints,
     pendingQueues: m.pendingQueues,
     attachments: m.attachments,
+    historyLoadErrors: m.historyLoadErrors,
     tasks: t.tasks,
     taskBoardOpen: t.taskBoardOpen,
     taskBoardWidth: t.taskBoardWidth,
@@ -311,6 +312,7 @@ const FIELD_TO_STORE: Record<string, () => unknown> = {
   queueHints: () => messageStore,
   pendingQueues: () => messageStore,
   attachments: () => messageStore,
+  historyLoadErrors: () => messageStore,
   tasks: () => taskStore,
   taskBoardOpen: () => taskStore,
   taskBoardWidth: () => taskStore,
@@ -705,6 +707,11 @@ export function removeSessionState(sessionId: string): void {
     delete next[sessionId];
     messageStore.set({ pendingQueues: next });
   }
+  if (messageStore.get().historyLoadErrors.has(sessionId)) {
+    const nextErrors = new Set(messageStore.get().historyLoadErrors);
+    nextErrors.delete(sessionId);
+    messageStore.set({ historyLoadErrors: nextErrors });
+  }
   const curBooks = sessionStore.get().books;
   if (sessionId in curBooks) {
     const next = { ...curBooks };
@@ -829,6 +836,22 @@ export function setQueueHint(sessionId: string, hint: string): void {
 /** 读取某 session 的队列提示。 */
 export function getQueueHint(sessionId: string): string {
   return messageStore.get().queueHints[sessionId] ?? '';
+}
+
+/** 标记某 session 的历史回填失败（聊天区显示「加载失败 + 重试」卡）。 */
+export function markHistoryLoadError(sessionId: string): void {
+  if (messageStore.get().historyLoadErrors.has(sessionId)) return;
+  const next = new Set(messageStore.get().historyLoadErrors);
+  next.add(sessionId);
+  messageStore.set({ historyLoadErrors: next });
+}
+
+/** 清除某 session 的历史回填失败标记（回填成功 / 重新加载时）。 */
+export function clearHistoryLoadError(sessionId: string): void {
+  if (!messageStore.get().historyLoadErrors.has(sessionId)) return;
+  const next = new Set(messageStore.get().historyLoadErrors);
+  next.delete(sessionId);
+  messageStore.set({ historyLoadErrors: next });
 }
 
 /** 设置当前 workspace 选中。 */

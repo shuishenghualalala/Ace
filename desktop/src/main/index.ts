@@ -242,6 +242,16 @@ const gatewayRestartController = new GatewayRestartController(async () => {
     console.error('[gateway] automatic restart failed:', error);
     throw error;
   }
+}, {
+  // 用户重试作废旧 wait（GatewaySupersededError）不计失败，避免虚增退避指数。
+  isIgnorableError: (error) => error instanceof GatewaySupersededError,
+  // 熔断：连续 5 次短命/失败重启 → 停止自动拉起，置 error 终态等用户手动重试。
+  stableUptimeMs: 60_000,
+  maxConsecutiveFailures: 5,
+  onTripped: ({ consecutiveFailures }) => {
+    logSupervisorDecision('circuit-breaker-tripped', { consecutiveFailures });
+    setBackendProcessState('error');
+  },
 });
 
 function readCrewHomeFromConfig(): string | null {
@@ -754,6 +764,50 @@ process.on('uncaughtException', (err) => {
     });
   } catch {
     // swallow
+  }
+});
+
+// ── 渲染层错误上报落盘（renderer:report-error，preload 单向 send）──────────
+// 渲染层的 window.onerror / unhandledrejection / 渲染隔离兜底统一落
+// userData/logs/renderer-errors.log；单文件 5MB 轮转保留 1 份历史（.1）。
+const RENDERER_ERROR_LOG_MAX_BYTES = 5 * 1024 * 1024;
+
+function rendererErrorLogPath(): string {
+  return path.join(app.getPath('userData'), 'logs', 'renderer-errors.log');
+}
+
+function appendRendererErrorLog(report: unknown): void {
+  try {
+    const r = report as { source?: unknown; message?: unknown; stack?: unknown; context?: unknown };
+    if (typeof r?.message !== 'string') return;
+    const file = rendererErrorLogPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    try {
+      if (fs.statSync(file).size >= RENDERER_ERROR_LOG_MAX_BYTES) {
+        try { fs.rmSync(`${file}.1`, { force: true }); } catch { /* best-effort */ }
+        fs.renameSync(file, `${file}.1`);
+      }
+    } catch {
+      /* 尚无旧文件 */
+    }
+    const source = typeof r.source === 'string' ? r.source : 'unknown';
+    const context = r.context ? ` ${JSON.stringify(r.context)}` : '';
+    const stack = typeof r.stack === 'string' ? `\n${r.stack}` : '';
+    fs.appendFileSync(file, `[${new Date().toISOString()}] [${source}] ${r.message}${stack}${context}\n`, 'utf8');
+  } catch {
+    /* 日志失败不阻断 */
+  }
+}
+
+ipcMain.on('renderer:report-error', (_event, report) => appendRendererErrorLog(report));
+
+// 退出兜底：before-quit 的异步收割未及完成时，进程退出瞬间仍持有子进程句柄——
+// 同步补一刀 SIGKILL（Windows 上 kill() 即 TerminateProcess），杜绝孤儿 gateway。
+process.on('exit', () => {
+  try {
+    managedGateway?.kill('SIGKILL');
+  } catch {
+    /* already dead */
   }
 });
 
@@ -1361,6 +1415,8 @@ async function probeHealthApi(baseUrl: string) {
 function startManagedGateway(): void {
   if (managedGateway) return;
   setBackendProcessState('starting');
+  // spawn 前清理上次异常退出残留的开发态 gateway（28180 被占会让新实例绑定失败）。
+  killZombieGatewayProcesses();
   const root = repoRoot();
   const python = candidatePython();
   const crewHome = activeGatewayCrewHome();
@@ -1396,7 +1452,10 @@ function startManagedGateway(): void {
       ensureGatewayPromise = null;
       setBackendProcessState('offline');
       logSupervisorDecision('instance-exit', { platform: 'managed', code, signal });
-      if (!isQuitting) gatewayRestartController.schedule();
+      if (!isQuitting) {
+        gatewayRestartController.noteGatewayExit();
+        gatewayRestartController.schedule();
+      }
     }
   });
   child.on('error', (error) => {
@@ -1406,7 +1465,10 @@ function startManagedGateway(): void {
       ensureGatewayPromise = null;
       setBackendProcessState('error');
       logSupervisorDecision('instance-error', { platform: 'managed', error: String(error) });
-      if (!isQuitting) gatewayRestartController.schedule();
+      if (!isQuitting) {
+        gatewayRestartController.noteGatewayExit();
+        gatewayRestartController.schedule();
+      }
     }
   });
 }
@@ -1494,7 +1556,10 @@ function startWindowsPackagedGateway(port: number): void {
         ensureGatewayPromise = null;
         setBackendProcessState('offline');
         logSupervisorDecision('instance-exit', { platform: 'win32', code, signal });
-        if (!isQuitting) gatewayRestartController.schedule();
+        if (!isQuitting) {
+          gatewayRestartController.noteGatewayExit();
+          gatewayRestartController.schedule();
+        }
       }
     });
     child.on('error', (err) => {
@@ -1504,7 +1569,10 @@ function startWindowsPackagedGateway(port: number): void {
         ensureGatewayPromise = null;
         setBackendProcessState('error');
         logSupervisorDecision('instance-error', { platform: 'win32', error: String(err) });
-        if (!isQuitting) gatewayRestartController.schedule();
+        if (!isQuitting) {
+          gatewayRestartController.noteGatewayExit();
+          gatewayRestartController.schedule();
+        }
       }
     });
   } catch (err) {
@@ -1528,11 +1596,10 @@ function startMacOSPackagedGateway(port: number): void {
 
   console.log(`[gateway] Starting packaged macOS gateway on port ${port}:`, gatewayExePath);
 
-  // 注意：不在此处调用 killZombieGatewayProcesses()。
-  // macOS 上 killZombieGatewayProcesses 使用 `pkill -f crew-gateway`，
-  // 它会匹配命令行中包含 "crew-gateway" 的所有进程——包括本函数刚刚 spawn
-  // 出来的新 gateway，导致新进程被 SIGTERM 误杀（pkill 是异步的，无法按 PID 排除）。
-  // 僵尸进程清理统一在 before-quit / uninstall 时执行即可。
+  // spawn 之前收割上次异常退出残留的僵尸（此时本进程尚无托管实例，不会误杀自己）。
+  // 旧注释担忧 pkill 误杀「刚 spawn 的新实例」——那只在 spawn 之后清理才会发生；
+  // 现在清理先于 spawn 完成，且复用外部 gateway 的路径不会走到这里。
+  killZombieGatewayProcesses();
 
   try {
     managedGateway = spawn(gatewayExePath, [], {
@@ -1559,7 +1626,10 @@ function startMacOSPackagedGateway(port: number): void {
         ensureGatewayPromise = null;
         setBackendProcessState('offline');
         logSupervisorDecision('instance-exit', { platform: 'darwin', code, signal });
-        if (!isQuitting) gatewayRestartController.schedule();
+        if (!isQuitting) {
+          gatewayRestartController.noteGatewayExit();
+          gatewayRestartController.schedule();
+        }
       }
     });
     child.on('error', (err) => {
@@ -1569,7 +1639,10 @@ function startMacOSPackagedGateway(port: number): void {
         ensureGatewayPromise = null;
         setBackendProcessState('error');
         logSupervisorDecision('instance-error', { platform: 'darwin', error: String(err) });
-        if (!isQuitting) gatewayRestartController.schedule();
+        if (!isQuitting) {
+          gatewayRestartController.noteGatewayExit();
+          gatewayRestartController.schedule();
+        }
       }
     });
   } catch (err) {
@@ -1589,6 +1662,8 @@ function startMacOSPackagedGateway(port: number): void {
 function startLinuxPackagedGateway(port: number): void {
   if (managedGateway) return;
   setBackendProcessState('starting');
+  // spawn 前收割残留僵尸（此前仅 Windows 路径做，Linux/macOS 孤儿会持续占 8000+ 端口）。
+  killZombieGatewayProcesses();
 
   const gatewayExePath = '/opt/crew-gateway/crew-gateway';
   const gatewayDir = path.dirname(gatewayExePath);
@@ -1620,7 +1695,10 @@ function startLinuxPackagedGateway(port: number): void {
         ensureGatewayPromise = null;
         setBackendProcessState('offline');
         logSupervisorDecision('instance-exit', { platform: 'linux', code, signal });
-        if (!isQuitting) gatewayRestartController.schedule();
+        if (!isQuitting) {
+          gatewayRestartController.noteGatewayExit();
+          gatewayRestartController.schedule();
+        }
       }
     });
     child.on('error', (err) => {
@@ -1630,7 +1708,10 @@ function startLinuxPackagedGateway(port: number): void {
         ensureGatewayPromise = null;
         setBackendProcessState('error');
         logSupervisorDecision('instance-error', { platform: 'linux', error: String(err) });
-        if (!isQuitting) gatewayRestartController.schedule();
+        if (!isQuitting) {
+          gatewayRestartController.noteGatewayExit();
+          gatewayRestartController.schedule();
+        }
       }
     });
   } catch (err) {
@@ -1642,6 +1723,12 @@ function startLinuxPackagedGateway(port: number): void {
  * 清理可能残留的僵尸 gateway 进程。
  * 上次 Electron 异常退出时 managedGateway.kill() 可能未执行，
  * 导致旧 gateway 进程占着 8000 端口，新 gateway 无法启动。
+ *
+ * 只在「即将 spawn 自己的托管实例」前调用（managedGateway 为空）：
+ * - 复用外部 gateway 的路径绝不能跑（会把要复用的实例杀掉）；
+ * - 自家实例存活时也不能跑（pkill 按模式匹配无法排除它）。
+ * 模式同时覆盖打包二进制（crew-gateway）与开发态 Python（crew.gateway.server）；
+ * POSIX 侧带 -u 用户过滤，多用户机器不误杀他人实例。
  */
 function killZombieGatewayProcesses(): void {
   if (process.platform === 'win32') {
@@ -1666,7 +1753,8 @@ function killZombieGatewayProcesses(): void {
 
             console.warn(`[gateway] Killing zombie crew-gateway process: PID ${pid}`);
             try {
-              spawn('taskkill', ['/PID', String(pid), '/F'], {
+              // /T 连进程树一起收（gateway 可能带 grandchild 工具进程）
+              spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
                 windowsHide: true,
                 stdio: 'ignore',
               });
@@ -1679,21 +1767,16 @@ function killZombieGatewayProcesses(): void {
     } catch (err) {
       console.warn('[gateway] Failed to enumerate gateway processes:', err);
     }
-  } else if (process.platform === 'linux') {
+  } else if (process.platform === 'linux' || process.platform === 'darwin') {
     try {
-      // Linux 打包态 gateway 由本进程 spawn 托管（不再用 systemd user service）。
-      // 只杀当前用户的残留 crew-gateway，避免误杀别的用户各自的 gateway 实例。
-      spawn('pkill', ['-u', String(process.getuid?.() ?? 0), '-f', '/opt/crew-gateway/crew-gateway'], {
-        stdio: 'ignore',
-      });
+      // 只杀当前用户的残留实例（打包二进制或开发态 python -m crew.gateway.server）。
+      spawn(
+        'pkill',
+        ['-u', String(process.getuid?.() ?? 0), '-f', 'crew-gateway|crew\\.gateway\\.server'],
+        { stdio: 'ignore' },
+      );
     } catch (err) {
-      console.warn('[gateway] Failed to kill Linux gateway processes:', err);
-    }
-  } else if (process.platform === 'darwin') {
-    try {
-      spawn('pkill', ['-f', 'crew-gateway'], { stdio: 'ignore' });
-    } catch (err) {
-      console.warn('[gateway] Failed to kill macOS gateway processes:', err);
+      console.warn(`[gateway] Failed to kill ${process.platform} gateway processes:`, err);
     }
   }
 }
@@ -1701,10 +1784,12 @@ function killZombieGatewayProcesses(): void {
 // ── 托管 Gateway 启动日志捕获 ──────────────────────────────────────────────
 // 打包用户看不到主进程控制台；把 gateway stdout/stderr 落盘到
 // userData/logs/gateway-startup.log，供「查看日志」诊断冷启动卡顿（AV 扫 cacert、
-// 崩溃 traceback、端口冲突等）。每次 spawn 截断，只留本次尝试。
+// 崩溃 traceback、端口冲突等）。
+// append + 大小轮转（.1/.2，单份 2MB）：崩溃循环不被下一次 spawn 截断抹掉自己的历史。
 // spawn 与首次输出之间有窗口，先把 spawn 动作本身写进日志，避免开头长时间空白；
 // 显式 utf8，避免 Windows GBK 控制台输出落到文件成乱码。
 let gatewayLogStream: fs.WriteStream | null = null;
+const GATEWAY_LOG_MAX_BYTES = 2 * 1024 * 1024;
 
 function gatewayLogPath(): string {
   return path.join(app.getPath('userData'), 'logs', 'gateway-startup.log');
@@ -1718,12 +1803,25 @@ function writeGatewayLogLine(line: string): void {
   }
 }
 
+function rotateGatewayLogIfNeeded(file: string): void {
+  try {
+    if (fs.statSync(file).size < GATEWAY_LOG_MAX_BYTES) return;
+  } catch {
+    return; // 尚无文件
+  }
+  try { fs.rmSync(`${file}.2`, { force: true }); } catch { /* best-effort */ }
+  try { fs.renameSync(`${file}.1`, `${file}.2`); } catch { /* 尚无 .1 */ }
+  try { fs.renameSync(file, `${file}.1`); } catch { /* best-effort */ }
+}
+
 function attachGatewayLog(child: ChildProcessWithoutNullStreams): void {
   try {
     const file = gatewayLogPath();
     fs.mkdirSync(path.dirname(file), { recursive: true });
+    rotateGatewayLogIfNeeded(file);
     gatewayLogStream?.end();
-    gatewayLogStream = fs.createWriteStream(file, { flags: 'w', encoding: 'utf8' });
+    gatewayLogStream = fs.createWriteStream(file, { flags: 'a', encoding: 'utf8' });
+    gatewayLogStream.write(`\n===== gateway spawn @ ${new Date().toISOString()} =====\n`, 'utf8');
     const write = (prefix: string, chunk: Buffer | string): void => {
       const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
       gatewayLogStream?.write(
@@ -1817,13 +1915,19 @@ function logSupervisorDecision(action: string, detail?: Record<string, unknown>)
 /**
  * 等到 /api/health 实例证明通过。
  *
- * 冷启动没有合理的时间天花板（AV 扫 cacert 可拖到 90s+，下一次可能更久）。
- * 默认一直等到：ready / 子进程退出 / 应用退出 / 所属 ensureGateway 代际被作废（用户重试）。
- * 仅 logout 受控重启等有外部 deadline 的路径传 timeoutMs。
+ * 每个等待都有死线（冷启动可拖到 90s+ 的 AV 扫描已按 180s 上限覆盖）：
+ *   - spawn 后的冷启动等待：180s（GATEWAY_COLD_START_TIMEOUT_MS）
+ *   - 复用存活实例的等待：60s（进程声称活着却迟迟不健康，按卡死处理）
+ * 死线触发时若子进程仍活着则先收割再返回 false——否则下一轮 ensureGateway 会
+ * 在「旧实例占端口」的状态下扫出新端口，端口被无谓顶替。
+ * 也响应：ready / 子进程退出 / 应用退出 / 所属 ensureGateway 代际被作废（用户重试）。
  */
 class GatewaySupersededError extends Error {
   constructor() { super('gateway wait superseded by retry'); }
 }
+
+const GATEWAY_COLD_START_TIMEOUT_MS = 180_000;
+const GATEWAY_REUSE_WAIT_TIMEOUT_MS = 60_000;
 
 async function waitForHealthApi(
   baseUrl: string,
@@ -1852,6 +1956,11 @@ async function waitForHealthApi(
     }
     if (deadline !== null && Date.now() >= deadline) {
       console.warn(`[gateway] Health API timeout after ${Date.now() - started}ms (${attempts} attempts)`);
+      logSupervisorDecision('health-wait-timeout', { waitedMs: Date.now() - started, attempts });
+      const child = options.process;
+      if (child && child.exitCode === null) {
+        await stopManagedGateway('health-wait-timeout');
+      }
       return false;
     }
     const child = options.process;
@@ -1875,6 +1984,8 @@ async function stopManagedGateway(reason: string): Promise<void> {
   const child = managedGateway;
   if (!child) return;
   managedGateway = null;
+  // 主动回收（用户重试 / 卡死回收 / 健康等待死线）预期的退出不计熔断失败。
+  gatewayRestartController.noteIntentionalStop();
   await new Promise<void>((resolve) => {
     let settled = false;
     const finish = () => {
@@ -1915,8 +2026,34 @@ const backendHealthMonitor = new BackendHealthMonitor(
       ...(change.healthState ? { healthState: change.healthState } : {}),
       ...(change.loopLagMs !== undefined ? { loopLagMs: change.loopLagMs } : {}),
     });
+    updateStalledRecycle(change);
   },
 );
+
+// ── 卡死自动回收：进程活着但业务循环 stalled（loop_lag ≥10s 双样本去抖）────────
+// 持续 30s 仍 stalled → 主动收割（SIGTERM→3s→SIGKILL），exit handler 接力走既有
+// 重启梯子（退避 + 熔断）。此前 stalled 只挂横幅，用户是唯一恢复途径。
+const STALLED_RECYCLE_AFTER_MS = 30_000;
+let stalledRecycleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function updateStalledRecycle(change: { connected: boolean; healthState?: BackendHealthState }): void {
+  const stalled = change.connected && change.healthState === 'stalled';
+  if (!stalled) {
+    if (stalledRecycleTimer !== null && change.healthState !== undefined) {
+      clearTimeout(stalledRecycleTimer);
+      stalledRecycleTimer = null;
+    }
+    return;
+  }
+  if (stalledRecycleTimer !== null || isQuitting) return;
+  stalledRecycleTimer = setTimeout(() => {
+    stalledRecycleTimer = null;
+    if (isQuitting || backendHealthState !== 'stalled' || !managedGateway) return;
+    logSupervisorDecision('stalled-recycle', { loopLagMs: lastGatewayLoopLagMs });
+    setBackendProcessState('restarting');
+    void stopManagedGateway('stalled-recycle');
+  }, STALLED_RECYCLE_AFTER_MS);
+}
 
 function pushBackendStatus(
   connected: boolean,
@@ -1992,7 +2129,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
       if (managedGateway) {
         console.log('[gateway] Windows packaged: managed instance alive, waiting on existing port...');
         logSupervisorDecision('reuse-alive-instance', { platform: 'win32' });
-        if (await waitForHealthApi(resolvedGatewayBaseUrl, { process: managedGateway, generation })) {
+        if (await waitForHealthApi(resolvedGatewayBaseUrl, { process: managedGateway, generation, timeoutMs: GATEWAY_REUSE_WAIT_TIMEOUT_MS })) {
           return { baseUrl: resolvedGatewayBaseUrl, managed: true };
         }
       }
@@ -2016,7 +2153,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
       // 托管实例无冷启动时间天花板：等到 ready / 子进程退出 / 关应用 / 代际作废。
       resolvedGatewayBaseUrl = portUrl;
       startWindowsPackagedGateway(selectedPort);
-      if (await waitForHealthApi(portUrl, { process: managedGateway, generation, timeoutMs: 60_000 })) {
+      if (await waitForHealthApi(portUrl, { process: managedGateway, generation, timeoutMs: GATEWAY_COLD_START_TIMEOUT_MS })) {
         console.log(`[gateway] Total ensureGateway time: ${Date.now() - ensureStart}ms`);
         return { baseUrl: portUrl, managed: true };
       }
@@ -2045,7 +2182,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
       if (managedGateway) {
         console.log('[gateway] Linux packaged: managed instance alive, waiting on existing port...');
         logSupervisorDecision('reuse-alive-instance', { platform: 'linux' });
-        if (await waitForHealthApi(resolvedGatewayBaseUrl, { process: managedGateway, generation })) {
+        if (await waitForHealthApi(resolvedGatewayBaseUrl, { process: managedGateway, generation, timeoutMs: GATEWAY_REUSE_WAIT_TIMEOUT_MS })) {
           return { baseUrl: resolvedGatewayBaseUrl, managed: true };
         }
       }
@@ -2063,10 +2200,10 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
         console.log(`[gateway] Port ${port} is in use, trying ${port + 1}...`);
       }
       const portUrl = `http://127.0.0.1:${selectedPort}`;
-      // spawn 前暴露真实端口，wait 期间监控打对地址；最多等待 60 秒，child 提前退出则立即失败。
+      // spawn 前暴露真实端口，wait 期间监控打对地址；冷启动死线 180s，child 提前退出则立即失败。
       resolvedGatewayBaseUrl = portUrl;
       startLinuxPackagedGateway(selectedPort);
-      if (await waitForHealthApi(portUrl, { process: managedGateway, generation, timeoutMs: 60_000 })) {
+      if (await waitForHealthApi(portUrl, { process: managedGateway, generation, timeoutMs: GATEWAY_COLD_START_TIMEOUT_MS })) {
         console.log(`[gateway] Total ensureGateway time: ${Date.now() - ensureStart}ms`);
         return { baseUrl: portUrl, managed: true };
       }
@@ -2079,7 +2216,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
       if (managedGateway) {
         console.log('[gateway] macOS packaged: managed instance alive, waiting on existing port...');
         logSupervisorDecision('reuse-alive-instance', { platform: 'darwin' });
-        if (await waitForHealthApi(resolvedGatewayBaseUrl, { process: managedGateway, generation })) {
+        if (await waitForHealthApi(resolvedGatewayBaseUrl, { process: managedGateway, generation, timeoutMs: GATEWAY_REUSE_WAIT_TIMEOUT_MS })) {
           return { baseUrl: resolvedGatewayBaseUrl, managed: true };
         }
       }
@@ -2097,10 +2234,10 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
         console.log(`[gateway] Port ${port} is in use, trying ${port + 1}...`);
       }
       const portUrl = `http://127.0.0.1:${selectedPort}`;
-      // 与 Windows 一致：spawn 前暴露真实端口，wait 无冷启动天花板。
+      // 与 Windows 一致：spawn 前暴露真实端口；冷启动死线 180s（覆盖 AV 扫描 90s+）。
       resolvedGatewayBaseUrl = portUrl;
       startMacOSPackagedGateway(selectedPort);
-      if (await waitForHealthApi(portUrl, { process: managedGateway, generation })) {
+      if (await waitForHealthApi(portUrl, { process: managedGateway, generation, timeoutMs: GATEWAY_COLD_START_TIMEOUT_MS })) {
         return { baseUrl: portUrl, managed: true };
       }
       throw new Error('packaged macOS Crew Gateway exited before readiness');
@@ -2109,18 +2246,23 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
     // 4. 开发环境 / 兜底：拉起 28180 端口的 Python 子进程
     resolvedGatewayBaseUrl = MANAGED_GATEWAY_URL;
     startManagedGateway();
-    if (await waitForHealthApi(MANAGED_GATEWAY_URL, { process: managedGateway, generation })) {
+    if (await waitForHealthApi(MANAGED_GATEWAY_URL, { process: managedGateway, generation, timeoutMs: GATEWAY_COLD_START_TIMEOUT_MS })) {
       return { baseUrl: MANAGED_GATEWAY_URL, managed: true };
     }
 
     throw new Error('Crew Gateway failed instance verification on every candidate port');
   })();
-  ensureGatewayPromise = pending;
-  void pending.catch(() => {
-    // 只清自己这个 promise；retry 已接管（设置了新代际 promise）时不清。
-    if (ensureGatewayPromise === pending) ensureGatewayPromise = null;
+  // 托管实例就绪 → 通知重启控制器记录存活起点（熔断的短命实例计数依赖它）。
+  const tracked = pending.then((result) => {
+    if (result.managed) gatewayRestartController.noteGatewayReady();
+    return result;
   });
-  return pending;
+  ensureGatewayPromise = tracked;
+  void tracked.catch(() => {
+    // 只清自己这个 promise；retry 已接管（设置了新代际 promise）时不清。
+    if (ensureGatewayPromise === tracked) ensureGatewayPromise = null;
+  });
+  return tracked;
 }
 
 /**
@@ -3512,6 +3654,8 @@ function registerIpc() {
   trustedHandle('gateway:retry', async () => {
     gatewayGeneration += 1;
     logSupervisorDecision('user-retry', { generation: gatewayGeneration });
+    // 手动重试 = 熔断后的梯子复位：清零计数，恢复自动重启资格。
+    gatewayRestartController.reset();
     ensureGatewayPromise = null;
     backendHealthMonitor.markRestart();
     await stopManagedGateway('user-retry');
@@ -3904,7 +4048,13 @@ async function bootstrap() {
   app.on('activate', () => {
     // Hidden AutomationHost windows are implementation details and must not
     // suppress recreation of the user-facing window on macOS.
-    if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      // 重建窗口 = 应用继续存活：复位退出闩锁。此前 darwin 上「登出后关窗」会把
+      // isQuitting 置真且无人复位——自动重启 / browser-host 重连 / 启动重试窗口
+      // 全部被永久禁用，app 悄悄变成「活着的僵尸」。
+      isQuitting = false;
+      createWindow();
+    }
     else showMainWindow();
   });
 }
@@ -3932,11 +4082,13 @@ app.on('before-quit', () => {
   } catch (err) {
     console.warn('[main] disposeUpdateDownload failed:', (err as Error).message);
   }
-  // 🌟 新增：彻底猎杀 Electron 托管的 Python 后台进程，防止驻留
+  // 🌟 彻底收割 Electron 托管的后台进程，防止驻留：统一走 stopManagedGateway 的
+  // SIGTERM → 3s → SIGKILL 升级链（此前只发一次裸 SIGTERM，不等待不升级不杀树，
+  // 忽略 SIGTERM 的 gateway 会以孤儿形态活下来继续占端口）。
+  // 异步收割若未及完成，process.on('exit') 兜底再补一刀 SIGKILL。
   if (managedGateway) {
-    console.log('[main] Killing managed gateway process before quit...');
-    managedGateway.kill();
-    managedGateway = null;
+    console.log('[main] Stopping managed gateway before quit...');
+    void stopManagedGateway('app-quit');
   }
 });
 

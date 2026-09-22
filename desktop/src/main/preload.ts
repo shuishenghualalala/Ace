@@ -320,6 +320,17 @@ const api = {
     return () => ipcRenderer.removeListener('main:uncaught-error', listener);
   },
 
+  // 渲染层错误上报（window.onerror / unhandledrejection / 渲染隔离兜底）：
+  // 单向 send，主进程落 logs/renderer-errors.log（5MB 轮转保留 2 份）。
+  reportRendererError: (report: {
+    source: string;
+    message: string;
+    stack?: string;
+    context?: Record<string, unknown>;
+  }) => {
+    ipcRenderer.send('renderer:report-error', report);
+  },
+
   // 后端服务健康状态（主进程周期探测 /api/health）：
   // connected=true 表示 Gateway 已就绪可用，false 表示未连接/启动中。
   // logPath 为托管 gateway 启动日志路径，供「查看日志」诊断冷启动卡顿。

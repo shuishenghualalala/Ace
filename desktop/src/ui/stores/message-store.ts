@@ -10,6 +10,8 @@ export interface MessageStoreState {
   queueHints: Record<string, string>;
   pendingQueues: Record<string, PendingMessage[]>;
   attachments: Attachment[];
+  /** 历史回填失败（且当前无消息可显示）的会话：驱动聊天区「加载失败 + 重试」卡。 */
+  historyLoadErrors: Set<string>;
 }
 
 export const messageStore: Store<MessageStoreState> = createStore<MessageStoreState>(
@@ -18,6 +20,7 @@ export const messageStore: Store<MessageStoreState> = createStore<MessageStoreSt
     queueHints: {},
     pendingQueues: {},
     attachments: [],
+    historyLoadErrors: new Set<string>(),
   },
   'message',
 );

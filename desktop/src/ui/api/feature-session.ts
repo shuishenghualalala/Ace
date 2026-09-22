@@ -3,6 +3,7 @@
  * 浏览器、Cron、Task、Dynamic Kanban、追问，以及 BackendChatSocket。
  */
 import { logStream } from '../stream-debug';
+import { reportRendererError } from '../renderer-error-report';
 import {
   getJSON,
   jsonBody,
@@ -787,6 +788,15 @@ async function streamExternalTeamSuggestionBridge(
 // BackendChatSocket：Gateway WebSocket 连接与消息封装
 // ---------------------------------------------------------------------------
 
+/**
+ * WS 重连退避：1.5s 起 ×2 封顶 30s，±20% 抖动（避免多端同时重连打点）。
+ * 连接成功（open）清零。纯函数，便于单测。
+ */
+export function computeWsReconnectDelayMs(attempts: number): number {
+  const base = Math.min(30_000, 1_500 * (2 ** Math.min(Math.max(attempts, 0), 5)));
+  return Math.round(base * (0.8 + Math.random() * 0.4));
+}
+
 export class BackendChatSocket {
   private ws: WebSocket | null = null;
   private closed = false;
@@ -795,6 +805,7 @@ export class BackendChatSocket {
   private connectInFlight = false;
   private unsubscribeGatewayProxy: (() => void) | null = null;
   private reconnectTimer: number | null = null;
+  private reconnectAttempts = 0;
   private subscribedSessions = new Set<string>();
   /** 重连 resubscribe 时解析各 session 的 last_gateway_sequences。 */
   private resolveLastGatewaySequences: ((sessionIds: string[]) => Record<string, number>) | undefined;
@@ -813,6 +824,14 @@ export class BackendChatSocket {
   /** 注入 gateway_sequence 解析器（由 session-controller 在 bootstrap 时绑定）。 */
   bindLastGatewaySequences(resolver: (sessionIds: string[]) => Record<string, number>): void {
     this.resolveLastGatewaySequences = resolver;
+  }
+
+  /** 指数退避重连（成功 open 后 attempts 清零）。 */
+  private scheduleReconnect(): void {
+    if (this.closed) return;
+    const delay = computeWsReconnectDelayMs(this.reconnectAttempts);
+    this.reconnectAttempts += 1;
+    this.reconnectTimer = window.setTimeout(() => this.connect(), delay);
   }
 
   connect(): void {
@@ -841,6 +860,7 @@ export class BackendChatSocket {
         if (payload.type === 'open') {
           this.connectInFlight = false;
           this.gatewayProxyOpen = true;
+          this.reconnectAttempts = 0;
           logStream('ws-renderer', 'proxy-event-open', {});
           this.onStatus(true);
           this.resubscribe();
@@ -848,7 +868,14 @@ export class BackendChatSocket {
           return;
         }
         if (payload.type === 'message') {
-          const frame = JSON.parse(String(payload.data || '{}')) as ChatChunk;
+          // 坏帧只丢弃自身（计数 + 日志），不允许在事件回调里炸成 uncaught。
+          let frame: ChatChunk | null = null;
+          try {
+            frame = JSON.parse(String(payload.data || '{}')) as ChatChunk;
+          } catch (err) {
+            reportRendererError('ws-frame', err, { via: 'proxy', textLen: String(payload.data ?? '').length });
+            return;
+          }
           if (frame?.kind === 'ping') {
             queueMicrotask(() => {
               void this.send({ kind: 'pong' });
@@ -883,8 +910,8 @@ export class BackendChatSocket {
           this.connectInFlight = false;
           this.gatewayProxyOpen = false;
           this.onStatus(false, { transient });
-          if (!this.closed && !transient) {
-            this.reconnectTimer = window.setTimeout(() => this.connect(), 1500);
+          if (!transient) {
+            this.scheduleReconnect();
           }
         }
       });
@@ -896,9 +923,7 @@ export class BackendChatSocket {
           this.onStatus(false);
           // ensureGateway 冷启动超时/失败时 connect 会直接 fail；gateway 稍后就绪
           // 后若这里不重试，会一直停在「服务未连接」。与 close 路径同样退避重连。
-          if (!this.closed) {
-            this.reconnectTimer = window.setTimeout(() => this.connect(), 1500);
-          }
+          this.scheduleReconnect();
         }
       });
       return;
@@ -907,12 +932,19 @@ export class BackendChatSocket {
     const wsUrl = `${wsBase()}/ws`;
     this.ws = new WebSocket(wsUrl);
     this.ws.onopen = () => {
+      this.reconnectAttempts = 0;
       this.onStatus(true);
       this.resubscribe();
       this.onOpen?.();
     };
     this.ws.onmessage = (event) => {
-      const payload = JSON.parse(event.data) as ChatChunk;
+      let payload: ChatChunk | null = null;
+      try {
+        payload = JSON.parse(event.data) as ChatChunk;
+      } catch (err) {
+        reportRendererError('ws-frame', err, { via: 'direct' });
+        return;
+      }
       if (payload?.kind === 'ping') {
         queueMicrotask(() => {
           void this.send({ kind: 'pong' });
@@ -929,9 +961,7 @@ export class BackendChatSocket {
     this.ws.onerror = () => this.onStatus(false);
     this.ws.onclose = () => {
       this.onStatus(false);
-      if (!this.closed) {
-        this.reconnectTimer = window.setTimeout(() => this.connect(), 1500);
-      }
+      this.scheduleReconnect();
     };
   }
 

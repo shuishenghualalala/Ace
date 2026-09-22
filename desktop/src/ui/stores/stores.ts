@@ -90,6 +90,7 @@ export function __resetAllStoresForTest(): void {
     queueHints: {},
     pendingQueues: {},
     attachments: [],
+    historyLoadErrors: new Set(),
   });
   taskStore.replace({ tasks: [], taskBoardOpen: false, taskBoardWidth: 320, kanbanBoard: null });
   configStore.replace({

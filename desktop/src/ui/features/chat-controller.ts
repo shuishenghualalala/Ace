@@ -133,6 +133,7 @@ import { messageStore, sessionStore, uiStore } from '../stores/stores';
 import type { TabKey } from '../state';
 import { resolveChatRenderTargetId, openStudioChatPanel, isStudioView } from './studio-chrome-state';
 import { isStreamDebugEnabled, logStream } from '../stream-debug';
+import { reportRendererError } from '../renderer-error-report';
 import { setDisabledWorkPreferenceIdsForTurn, takeDisabledWorkPreferenceIds, type UserAgentMention } from './composer-mention';
 import { productModeStore } from '../stores/product-mode-store';
 
@@ -896,6 +897,34 @@ function visibleFollowupSessionId(sessionId: string): string {
 }
 
 export function applyChunk(incomingChunk: ChatChunk): void {
+  try {
+    applyChunkInner(incomingChunk);
+  } catch (err) {
+    // 单帧处理异常不得逃逸成 uncaught（ws 事件回调里炸掉会丢帧且不可见），
+    // 也不得让会话停在「执行中」：终态帧处理失败时按 finalize 语义兜底收尾。
+    reportRendererError('apply-chunk', err, {
+      kind: incomingChunk.kind,
+      session_id: incomingChunk.session_id,
+    });
+    logStream('apply-chunk', 'handler-error', {
+      kind: incomingChunk.kind,
+      sid: incomingChunk.session_id,
+      error: String(err),
+    });
+    try {
+      const sid = incomingChunk.session_id || state.activeSessionId || '';
+      if (sid && (incomingChunk.kind === 'final' || incomingChunk.kind === 'error')) {
+        finalizeTurn(sid);
+        if (incomingChunk.kind === 'error') setStatusWithUi(sid, 'error');
+        renderChat();
+      }
+    } catch {
+      /* 兜底自身失败只能放弃；错误已上报 */
+    }
+  }
+}
+
+function applyChunkInner(incomingChunk: ChatChunk): void {
   const sourceSid = incomingChunk.session_id || state.activeSessionId || 'default';
   const sid = incomingChunk.kind === 'followup_question'
     ? visibleFollowupSessionId(sourceSid)

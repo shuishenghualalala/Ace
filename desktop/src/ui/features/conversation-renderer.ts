@@ -17,12 +17,15 @@ import {
   hasVisibleAnswerText,
   renderAgentTurn,
   renderEmptyState,
+  renderHistoryErrorCard,
   renderMessageHtml,
   renderQueueHintCard,
   renderTeamInternalMessage,
   renderTypingIndicator,
+  renderUnitErrorCard,
   resolveTurnDurationMs,
 } from '../chat-render';
+import { reportRendererError } from '../renderer-error-report';
 import { diffRenderUnits, type RenderUnit } from '../chat-diff';
 import { attachScrollAnchor, type ScrollAnchor } from './scroll-anchor';
 import { getSessionAgentDisplay } from './workspaces';
@@ -94,6 +97,24 @@ export function jumpConversationToBottom(containerId: string): void {
 
 /** 「已编辑文件」卡：打开看板 Files / 在资源管理器中显示（与 fold 委托同容器、各绑一次）。 */
 const fileChangesBoundContainers = new WeakSet<HTMLElement>();
+
+/** 「历史加载失败」卡的重试按钮（各容器绑一次；动态 import 破除与 session-controller 的循环）。 */
+const historyRetryBoundContainers = new WeakSet<HTMLElement>();
+function ensureHistoryRetryDelegation(
+  container: HTMLElement,
+  getSessionId: () => string | null,
+): void {
+  if (historyRetryBoundContainers.has(container)) return;
+  historyRetryBoundContainers.add(container);
+  container.addEventListener('click', (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const btn = target?.closest<HTMLElement>('[data-history-retry]');
+    if (!btn || !container.contains(btn)) return;
+    const sid = getSessionId();
+    if (!sid) return;
+    void import('./session-controller').then(({ loadBackendHistory }) => loadBackendHistory(sid));
+  });
+}
 export function ensureFileChangesDelegation(container: HTMLElement): void {
   if (fileChangesBoundContainers.has(container)) return;
   fileChangesBoundContainers.add(container);
@@ -590,8 +611,21 @@ export function renderConversation(
   const pushPlan = (key: string, sig: string, build: () => HTMLElement | null): void => {
     plans.push({ meta: { key, sig }, build });
   };
+  // 单元构建异常隔离：一条坏消息只损失自己（降级错误占位卡），整轮渲染不被拖垮。
+  // sig 未变 → reuse 不会重试 build；数据变化（流式继续）→ sig 变化 → patch 自然重试。
+  const buildUnitSafely = (key: string, build: () => HTMLElement | null): HTMLElement | null => {
+    try {
+      return build();
+    } catch (err) {
+      reportRendererError('render', err, { unitKey: key });
+      return renderUnitErrorCard();
+    }
+  };
 
-  if (messages.length === 0 && !busy && !editing) {
+  if (messages.length === 0 && !busy && !editing && sessionId && state.historyLoadErrors.has(sessionId)) {
+    // 历史回填失败且无消息可显示：错误卡（带重试）优先于默认空态，失败不再表现为「空会话」。
+    pushPlan('__history_error', 'history-error', () => renderHistoryErrorCard());
+  } else if (messages.length === 0 && !busy && !editing) {
     pushPlan('__empty', 'empty', () => hooks.emptyState?.() ?? renderEmptyState());
   } else if (messages.length === 0 && editing) {
     // 编辑态 + 空流：留白（提示条已在输入框上方）—— 不 push 任何单元
@@ -772,7 +806,7 @@ export function renderConversation(
   for (const op of ops) {
     if (op.type !== 'patch') continue;
     const build = buildByPlan.get(op.key)!;
-    const fresh = build();
+    const fresh = buildUnitSafely(op.key, build);
     const old = lastUnits.get(op.key);
     if (isPresent(fresh)) {
       if (old && old.parentNode === wrapper) {
@@ -796,7 +830,7 @@ export function renderConversation(
   for (const op of ops) {
     if (op.type !== 'append') continue;
     const build = buildByPlan.get(op.key)!;
-    const fresh = build();
+    const fresh = buildUnitSafely(op.key, build);
     if (isPresent(fresh)) {
       lastUnits.set(op.key, fresh);
     } else {
@@ -817,6 +851,7 @@ export function renderConversation(
   // ---- 副作用：全部与主对话 renderChat 保持一致 ----
   ensureFoldDelegation(container, getSessionId);
   ensureFileChangesDelegation(container);
+  ensureHistoryRetryDelegation(container, getSessionId);
   ensureTeamCommunicationDelegation(container, hooks.teamCommunicationHandlers, () => allMessages);
   // 代码块复制按钮：patch/append 后新节点需重新绑定（幂等，旧节点跳过）。
   attachCopyButtons(container);

@@ -677,6 +677,35 @@
   to { transform: rotate(360deg); }
 }
 
+/* 渲染降级错误卡：历史加载失败（带重试）/ 单元构建失败占位 */
+.render-error-card {
+  display: flex;
+  align-items: center;
+  gap: var(--mw-space-2);
+  margin: var(--mw-space-2) calc(var(--mw-space-12) + var(--mw-space-1));
+  padding: var(--mw-space-2) var(--mw-space-3);
+  border-radius: var(--mw-radius-4);
+  border: 1px dashed color-mix(in srgb, var(--mw-status-danger) 40%, transparent);
+  background: var(--mw-status-danger-bg);
+  font-size: var(--mw-type-caption-size);
+  color: var(--mw-text-primary);
+}
+
+.render-error-card__retry {
+  border: 1px solid var(--mw-border-subtle);
+  border-radius: var(--mw-radius-3);
+  background: transparent;
+  color: var(--mw-text-primary);
+  font-size: var(--mw-type-caption-size);
+  padding: var(--mw-space-1) var(--mw-space-3);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.render-error-card__retry:hover {
+  background: color-mix(in srgb, var(--mw-text-primary) 6%, transparent);
+}
+
 .history-item-status-dot {
   width: 6px;
   height: 6px;

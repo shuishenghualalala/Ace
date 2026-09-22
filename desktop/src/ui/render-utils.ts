@@ -6,6 +6,13 @@
  * - createChatRenderCoalescer：同一调度窗口内合并多次 render，把流式 delta 30/s 的全量重绘降到每帧 ≤1 次。
  */
 
+import { reportRendererError } from './renderer-error-report';
+
+/** rAF 回调里的渲染异常不得逃逸成 uncaught（每帧刷屏）；上报后吞掉，下一帧照常调度。 */
+function guardRenderError(source: 'render' | 'streaming-patch', err: unknown): void {
+  reportRendererError(source, err);
+}
+
 /** 折叠状态集合（与 state.userUnfoldedTurns / userFoldedTurns 同构）。 */
 export interface FoldSets {
   unfolded: Set<string>;
@@ -54,7 +61,11 @@ export function createChatRenderCoalescer(
     scheduler(() => {
       if (token !== generation) return;
       scheduled = false;
-      render();
+      try {
+        render();
+      } catch (err) {
+        guardRenderError('render', err);
+      }
     });
   };
   scheduleChatRender.cancel = () => { generation += 1; scheduled = false; };
@@ -86,7 +97,13 @@ export function createStreamingPatchCoalescer(
         scheduled = false;
         const next = latest;
         latest = null;
-        if (next) patch(next);
+        if (next) {
+          try {
+            patch(next);
+          } catch (err) {
+            guardRenderError('streaming-patch', err);
+          }
+        }
       });
     },
     clear() {
