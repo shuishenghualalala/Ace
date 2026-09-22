@@ -53,6 +53,20 @@ describe('createRendererErrorReporter', () => {
     expect(sent.map((r) => r.message)).toEqual(['plain string', '{"weird":"object"}']);
   });
 
+  it('non-serializable throwables never escape the reporter', () => {
+    const sent: RendererErrorReport[] = [];
+    const reporter = createRendererErrorReporter((report) => sent.push(report), () => 0);
+    const circular: Record<string, unknown> = { code: 'boom' };
+    circular.self = circular;
+
+    // 循环引用 / BigInt 曾让 JSON.stringify 抛错并把异常还给调用方（隔离点自己变成异常源）。
+    expect(() => reporter.report('render', circular)).not.toThrow();
+    expect(() => reporter.report('apply-chunk', 10n as unknown)).not.toThrow();
+    expect(sent).toHaveLength(2);
+    expect(sent[0].message).toContain('[circular]');
+    expect(sent[1].message).toContain('10n');
+  });
+
   it('stack and context are carried and sliced', () => {
     const sent: RendererErrorReport[] = [];
     const reporter = createRendererErrorReporter((report) => sent.push(report), () => 0);

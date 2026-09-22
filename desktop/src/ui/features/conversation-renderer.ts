@@ -25,7 +25,7 @@ import {
   renderUnitErrorCard,
   resolveTurnDurationMs,
 } from '../chat-render';
-import { reportRendererError } from '../renderer-error-report';
+import { reportRendererError, safeStringify } from '../renderer-error-report';
 import { diffRenderUnits, type RenderUnit } from '../chat-diff';
 import { attachScrollAnchor, type ScrollAnchor } from './scroll-anchor';
 import { getSessionAgentDisplay } from './workspaces';
@@ -621,6 +621,17 @@ export function renderConversation(
       return renderUnitErrorCard();
     }
   };
+  // sig 计算异常隔离：sig 与 build 读同一批消息字段，字段形状异常（非数组等）必须同样
+  // 只损失自己——否则在 diff 之前就抛错，整轮渲染失败、会话界面冻结在旧 DOM。
+  // 回落 sig 用安全摘要而非常量，保证「数据变化 → sig 变化 → 重试」语义仍然成立。
+  const safeSig = (key: string, compute: () => string, source: unknown): string => {
+    try {
+      return compute();
+    } catch (err) {
+      reportRendererError('render', err, { unitKey: key, phase: 'sig' });
+      return `${key}|__sig-error|${safeStringify(source)}`;
+    }
+  };
 
   if (messages.length === 0 && !busy && !editing && sessionId && state.historyLoadErrors.has(sessionId)) {
     // 历史回填失败且无消息可显示：错误卡（带重试）优先于默认空态，失败不再表现为「空会话」。
@@ -674,7 +685,11 @@ export function renderConversation(
           // Team Turn 使用自身 streaming 生命周期，不借用 Session 全局 busy。
           // 这样新节点启动时不会“复活”已完成的成员回合。
           const isStreaming = msg.streaming === true;
-          sig = `${sigTeamInternal(displayed, isStreaming)}|actions:${busy ? 'busy' : 'idle'}`;
+          sig = safeSig(
+            msg.id,
+            () => `${sigTeamInternal(displayed, isStreaming)}|actions:${busy ? 'busy' : 'idle'}`,
+            displayed,
+          );
           const captured = displayed;
           pushPlan(msg.id, sig, () => renderTeamInternalMessage(captured, isStreaming, {
             canRetry: !busy,
@@ -683,11 +698,11 @@ export function renderConversation(
           i += 1;
           continue;
         } else if (msg.role === 'status' && msg.workflowProgress) {
-          sig = sigWorkflowProgress(msg, state.configModel);
+          sig = safeSig(msg.id, () => sigWorkflowProgress(msg, state.configModel), msg);
         } else if (msg.agentName) {
-          sig = sigAgentRoleCard(msg, state.configModel);
+          sig = safeSig(msg.id, () => sigAgentRoleCard(msg, state.configModel), msg);
         } else {
-          sig = sigUserMessage(msg, state.configModel);
+          sig = safeSig(msg.id, () => sigUserMessage(msg, state.configModel), msg);
         }
         const captured = msg;
         pushPlan(msg.id, sig, () => renderMessageHtml(captured, state.configModel));
@@ -740,7 +755,11 @@ export function renderConversation(
       const identitySig = turnIdentity
         ? `${turnIdentity.kind}|${turnIdentity.name}|${turnIdentity.badge}`
         : 'crew';
-      const sig = `${sigAgentTurn(batch, isStreaming, userPinnedOpen)}|${identitySig}`;
+      const sig = safeSig(
+        turnId,
+        () => `${sigAgentTurn(batch, isStreaming, userPinnedOpen)}|${identitySig}`,
+        batch,
+      );
       const capturedBatch = batch;
       pushPlan(turnId, sig, () =>
         renderAgentTurn(capturedBatch, {

@@ -16,14 +16,19 @@ import {
   createStreamingPatchCoalescer,
   type FoldSets,
 } from '../../src/ui/render-utils';
-import { formatMessageTime, formatDuration, renderQueuePanelHtml, sessionStatusClass } from '../../src/ui/chat-render';
+import { formatMessageTime, formatDuration, renderQueuePanelHtml, sessionStatusClass, type ChatMessage } from '../../src/ui/chat-render';
 import {
   disposeConversationRenderer,
   getConversationScrollAnchor,
   renderConversation,
 } from '../../src/ui/features/conversation-renderer';
 import { __resetAllStoresForTest } from '../../src/ui/stores/stores';
-import { appendSessionMessage, clearHistoryLoadError, markHistoryLoadError } from '../../src/ui/state';
+import {
+  appendSessionMessage,
+  clearHistoryLoadError,
+  markHistoryLoadError,
+  replaceSessionMessages,
+} from '../../src/ui/state';
 import { reportRendererError } from '../../src/ui/renderer-error-report';
 
 // conversation-renderer 的重依赖：本文件只验证消息流渲染与 diff 缓存隔离，
@@ -40,20 +45,23 @@ vi.mock('../../src/ui/features/browser-panel', () => ({
   openUserBrowser: vi.fn(async () => 'in_app'),
 }));
 
-// P0-1 渲染隔离：只毒化 id 为 poison-user 的消息构建，其余走真实实现。
+// P0-1 渲染隔离：只毒化这两个 id 的消息构建，其余走真实实现。
+// poison-user → 仅 build 抛错；poison-sig → sig 与 build 都抛错（坏字段形状）。
 vi.mock('../../src/ui/chat-render', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/ui/chat-render')>();
   return {
     ...actual,
     renderMessageHtml: vi.fn((msg: { id?: string }) => {
-      if (msg?.id === 'poison-user') throw new Error('poisoned build');
+      if (msg?.id === 'poison-user' || msg?.id === 'poison-sig') throw new Error('poisoned build');
       return actual.renderMessageHtml(msg as Parameters<typeof actual.renderMessageHtml>[0]);
     }),
   };
 });
-vi.mock('../../src/ui/renderer-error-report', () => ({
-  reportRendererError: vi.fn(),
-}));
+// 只替换上报入口（断言用），其余（safeStringify 等）走真实实现。
+vi.mock('../../src/ui/renderer-error-report', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/ui/renderer-error-report')>();
+  return { ...actual, reportRendererError: vi.fn() };
+});
 
 describe('applyFoldState', () => {
   function makeSets(): FoldSets {
@@ -339,6 +347,39 @@ describe('P0-1 渲染隔离与历史失败可见化', () => {
     const before = errorCards();
     renderConversation(panel, 'panel-a', 'sid-p0');
     expect(errorCards()).toBe(before);
+  });
+
+  it('sig 阶段抛错只降级该单元，数据变化后仍会重试', () => {
+    const panel = document.getElementById('panel-a')!;
+    // attachments 非数组：sigUserMessage 的 .map 抛 TypeError，且该单元 build 也被毒化。
+    const badMessage = {
+      id: 'poison-sig',
+      role: 'user',
+      content: '坏 sig 消息',
+      timestamp: 1,
+      attachments: 'not-an-array',
+    } as unknown as ChatMessage;
+    appendSessionMessage('sid-sig', badMessage);
+    appendSessionMessage('sid-sig', { id: 'good-sig', role: 'user', content: '正常消息', timestamp: 2 });
+
+    // 整轮渲染不抛错：坏单元降级为错误占位卡，同屏正常消息照常渲染。
+    expect(() => renderConversation(panel, 'panel-a', 'sid-sig')).not.toThrow();
+    expect(panel.textContent).toContain('正常消息');
+    expect(panel.querySelectorAll('.render-error-card')).toHaveLength(1);
+    expect(reportRendererError).toHaveBeenCalledWith(
+      'render',
+      expect.any(Error),
+      expect.objectContaining({ unitKey: 'poison-sig', phase: 'sig' }),
+    );
+
+    // 数据变化 → 兜底摘要变化 → sig 变化 → 重新尝试 build（再次上报），不会永久停在错误卡。
+    const reportsBefore = vi.mocked(reportRendererError).mock.calls.length;
+    replaceSessionMessages('sid-sig', [
+      { ...badMessage, content: '坏 sig 消息（已更新）' },
+      { id: 'good-sig', role: 'user', content: '正常消息', timestamp: 2 },
+    ] as ChatMessage[]);
+    renderConversation(panel, 'panel-a', 'sid-sig');
+    expect(vi.mocked(reportRendererError).mock.calls.length).toBeGreaterThan(reportsBefore);
   });
 
   it('历史加载失败且无消息时渲染「加载失败 + 重试」卡，清除标记后恢复默认空态', () => {

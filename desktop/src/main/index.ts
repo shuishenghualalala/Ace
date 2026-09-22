@@ -179,6 +179,14 @@ app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'disable_non_pro
 let mainWindow: BrowserWindow | null = null;
 const inspirationWindows = new Map<string, BrowserWindow>();
 let managedGateway: ChildProcessWithoutNullStreams | null = null;
+// 正在被主动收割的子进程：stopManagedGateway 会立刻清空 managedGateway（防并发重拉），
+// 但退出兜底（process.on('exit')）仍需句柄补 SIGKILL——忽略 SIGTERM 的 gateway 否则
+// 会以孤儿形态活下来继续占端口。子进程退出后清空。
+let stoppingGateway: ChildProcessWithoutNullStreams | null = null;
+/** 收割宽限期：SIGTERM 后等待该时长，仍未退出则升级 SIGKILL。 */
+const GATEWAY_TERMINATE_GRACE_MS = 3_000;
+/** SIGKILL 后留给内核回收句柄的时间。 */
+const GATEWAY_KILL_SETTLE_MS = 400;
 let ensureGatewayPromise: Promise<{ baseUrl: string; managed: boolean }> | null = null;
 const securityApprovalNonces = new Map<string, string>();
 const gatewaySockets = new Map<number, WebSocket>();
@@ -805,7 +813,7 @@ ipcMain.on('renderer:report-error', (_event, report) => appendRendererErrorLog(r
 // 同步补一刀 SIGKILL（Windows 上 kill() 即 TerminateProcess），杜绝孤儿 gateway。
 process.on('exit', () => {
   try {
-    managedGateway?.kill('SIGKILL');
+    (managedGateway ?? stoppingGateway)?.kill('SIGKILL');
   } catch {
     /* already dead */
   }
@@ -1483,7 +1491,11 @@ function recycleGatewayForSecurityChange(): void {
   const child = managedGateway;
   if (!child || child.killed || isQuitting) return;
   logSupervisorDecision('security-change-restart', { generation: gatewayGeneration });
-  child.kill();
+  // 主动回收：与用户重试 / 卡死回收同语义，退出不计入熔断的短命实例计数
+  // （否则短时间内反复切换严格安全开关会误触熔断，停掉自动重启）；
+  // 同时复用统一收割链——SIGTERM 被忽略时仍会升级 SIGKILL 并留下退出兜底句柄。
+  gatewayRestartController.noteIntentionalStop();
+  void terminateGatewayChild(child);
 }
 
 // ============================================================================
@@ -1979,6 +1991,39 @@ async function waitForHealthApi(
   }
 }
 
+/**
+ * 收割单个 Gateway 子进程：SIGTERM → graceMs → SIGKILL → 短暂等待后放行。
+ * 收割窗口内句柄保留在 stoppingGateway，供 process.on('exit') 在异步链未及完成时补刀；
+ * 子进程真正退出（或兜底放行）后清空。
+ */
+function terminateGatewayChild(
+  child: ChildProcessWithoutNullStreams,
+  graceMs: number = GATEWAY_TERMINATE_GRACE_MS,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (graceTimer !== null) clearTimeout(graceTimer);
+      if (stoppingGateway === child) stoppingGateway = null;
+      resolve();
+    };
+    if (child.exitCode !== null) {
+      finish();
+      return;
+    }
+    stoppingGateway = child;
+    child.once('exit', finish);
+    graceTimer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch { /* already dead */ }
+      setTimeout(finish, GATEWAY_KILL_SETTLE_MS);
+    }, graceMs);
+    try { child.kill(); } catch { finish(); }
+  });
+}
+
 /** Stop only a Gateway child owned by this Desktop before rebuilding it. */
 async function stopManagedGateway(reason: string): Promise<void> {
   const child = managedGateway;
@@ -1986,24 +2031,7 @@ async function stopManagedGateway(reason: string): Promise<void> {
   managedGateway = null;
   // 主动回收（用户重试 / 卡死回收 / 健康等待死线）预期的退出不计熔断失败。
   gatewayRestartController.noteIntentionalStop();
-  await new Promise<void>((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      resolve();
-    };
-    if (child.exitCode !== null) {
-      finish();
-      return;
-    }
-    child.once('exit', finish);
-    setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch { /* already dead */ }
-      setTimeout(finish, 400);
-    }, 3000);
-    try { child.kill(); } catch { finish(); }
-  });
+  await terminateGatewayChild(child);
   logSupervisorDecision('instance-exit-superseded', { pid: child.pid ?? -1, reason });
 }
 
@@ -4015,22 +4043,13 @@ async function bootstrap() {
   // 注入卸载模块依赖（托盘「卸载」功能需要访问主进程内部状态）
   setUninstallDeps({
     getMainWindow: () => mainWindow,
-    stopManagedGateway: (timeoutMs = 3000) => {
-      return new Promise((resolve) => {
-        if (!managedGateway) return resolve();
-        const gw = managedGateway;
-        const done = () => {
-          if (managedGateway === gw) managedGateway = null;
-          resolve();
-        };
-        gw.once('exit', done);
-        const timer = setTimeout(() => {
-          try { gw.kill('SIGKILL'); } catch { /* ignore */ }
-          setTimeout(done, 500);
-        }, timeoutMs);
-        try { gw.kill(); } catch { /* already dead */ }
-        gw.once('exit', () => clearTimeout(timer));
-      });
+    // 与 before-quit 共用同一条收割链（SIGTERM → SIGKILL → exit 兜底），
+    // 卸载流程自己实现一遍会让退出兜底拿不到句柄。
+    stopManagedGateway: (timeoutMs = GATEWAY_TERMINATE_GRACE_MS) => {
+      const gw = managedGateway;
+      if (!gw) return Promise.resolve();
+      managedGateway = null;
+      return terminateGatewayChild(gw, timeoutMs);
     },
     killZombieGatewayProcesses,
     setQuittingFlag: () => { isQuitting = true; },

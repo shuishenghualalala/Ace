@@ -34,6 +34,44 @@ export interface RendererErrorReporter {
   reset(): void;
 }
 
+/**
+ * 描述任意值的安全字符串化：循环引用、BigInt、抛错的 getter / 代理都不得让它自己抛。
+ * 上报通道是「绝不把异常还给调用方」的最后一环，取值失败只能降级为类型标签。
+ * 也用于 sig 计算的兜底摘要（见 conversation-renderer）。
+ */
+export function safeStringify(value: unknown): string {
+  if (typeof value === 'string') return value;
+  try {
+    const seen = new WeakSet<object>();
+    const json = JSON.stringify(value, (_key, current: unknown) => {
+      if (typeof current === 'bigint') return `${current}n`;
+      if (typeof current === 'object' && current !== null) {
+        if (seen.has(current)) return '[circular]';
+        seen.add(current);
+      }
+      return current;
+    });
+    if (typeof json === 'string') return json;
+  } catch {
+    /* 取值 / 序列化失败 → 退回类型标签 */
+  }
+  try {
+    return Object.prototype.toString.call(value);
+  } catch {
+    return '[unprintable]';
+  }
+}
+
+/** 提取上报文案：任何取值异常都降级为 unknown error，绝不抛出。 */
+function describeError(err: unknown): string {
+  try {
+    const raw = err instanceof Error ? err.message : safeStringify(err);
+    return String(raw).slice(0, MESSAGE_SLICE) || 'unknown error';
+  } catch {
+    return 'unknown error';
+  }
+}
+
 /** 工厂：注入 transport / now，便于单测去抖行为。 */
 export function createRendererErrorReporter(
   transport: RendererErrorTransport,
@@ -42,10 +80,10 @@ export function createRendererErrorReporter(
   const lastSentAt = new Map<string, number>();
   return {
     report(source, err, context) {
-      const message = String(
-        err instanceof Error ? err.message : typeof err === 'string' ? err : JSON.stringify(err),
-      ).slice(0, MESSAGE_SLICE) || 'unknown error';
-      const stack = err instanceof Error && err.stack ? err.stack.slice(0, STACK_SLICE) : undefined;
+      const message = describeError(err);
+      const stack = err instanceof Error && typeof err.stack === 'string'
+        ? err.stack.slice(0, STACK_SLICE)
+        : undefined;
       console.error(`[renderer:${source}]`, err);
       const key = `${source}|${message}`;
       const nowTs = now();

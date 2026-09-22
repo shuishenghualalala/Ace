@@ -152,4 +152,76 @@ describe('BackendChatSocket connect', () => {
     vi.mocked(Math.random).mockRestore();
     vi.useRealTimers();
   });
+
+  it('proxy error alone schedules a reconnect instead of parking in-flight forever', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0); // 1.5s × 0.8 = 1200ms
+    const events: Array<(event: unknown) => void> = [];
+    const connect = vi.fn().mockResolvedValue({ ok: true });
+    Object.defineProperty(window, 'Crew', {
+      configurable: true,
+      value: {
+        gatewayWsConnect: connect,
+        gatewayWsSend: vi.fn().mockResolvedValue({ ok: true }),
+        gatewayWsClose: vi.fn().mockResolvedValue({ ok: true }),
+        onGatewayWsEvent: vi.fn((cb: (event: unknown) => void) => {
+          events.push(cb);
+          return () => {};
+        }),
+      },
+    });
+
+    const sock = new BackendChatSocket(() => {}, () => {});
+    sock.connect();
+    await Promise.resolve();
+    expect(connect).toHaveBeenCalledTimes(1);
+
+    // 主进程只发 error 不保证再发 close：必须自己重连，否则 connectInFlight 永真、
+    // 后续 connect() 全部早退，socket 永久停在断连态。
+    events[0]({ type: 'error', error: 'gateway proxy down' });
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(connect).toHaveBeenCalledTimes(2);
+
+    // 退避继续增长（下一次 3s×0.8=2400ms），而不是原地 1.5s 抖动。
+    events[0]({ type: 'error', error: 'gateway proxy down again' });
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(connect).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(connect).toHaveBeenCalledTimes(3);
+    vi.mocked(Math.random).mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('proxy error followed by close coalesces into a single reconnect', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const events: Array<(event: unknown) => void> = [];
+    const connect = vi.fn().mockResolvedValue({ ok: true });
+    Object.defineProperty(window, 'Crew', {
+      configurable: true,
+      value: {
+        gatewayWsConnect: connect,
+        gatewayWsSend: vi.fn().mockResolvedValue({ ok: true }),
+        gatewayWsClose: vi.fn().mockResolvedValue({ ok: true }),
+        onGatewayWsEvent: vi.fn((cb: (event: unknown) => void) => {
+          events.push(cb);
+          return () => {};
+        }),
+      },
+    });
+
+    const sock = new BackendChatSocket(() => {}, () => {});
+    sock.connect();
+    await Promise.resolve();
+
+    events[0]({ type: 'error', error: 'boom' });
+    events[0]({ type: 'close', code: 1006, reason: '' });
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(connect).toHaveBeenCalledTimes(2);
+    // 没有第二个待执行重连：再推进一个周期也不会多连一次。
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(connect).toHaveBeenCalledTimes(2);
+    vi.mocked(Math.random).mockRestore();
+    vi.useRealTimers();
+  });
 });

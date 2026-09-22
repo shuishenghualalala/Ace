@@ -826,9 +826,9 @@ export class BackendChatSocket {
     this.resolveLastGatewaySequences = resolver;
   }
 
-  /** 指数退避重连（成功 open 后 attempts 清零）。 */
+  /** 指数退避重连（成功 open 后 attempts 清零）。已有待执行重连时不叠加。 */
   private scheduleReconnect(): void {
-    if (this.closed) return;
+    if (this.closed || this.reconnectTimer !== null) return;
     const delay = computeWsReconnectDelayMs(this.reconnectAttempts);
     this.reconnectAttempts += 1;
     this.reconnectTimer = window.setTimeout(() => this.connect(), delay);
@@ -899,8 +899,12 @@ export class BackendChatSocket {
         }
         if (payload.type === 'error') {
           logStream('ws-renderer', 'proxy-event-error', { error: payload.error });
+          // 主进程只发 error 不保证随后再发 close：不清 in-flight 的话，后续 connect()
+          // 会一直早退，socket 永久停在「连不上也不重连」，指数退避也就没机会生效。
+          this.connectInFlight = false;
           this.gatewayProxyOpen = false;
           this.onStatus(false);
+          this.scheduleReconnect();
           return;
         }
         if (payload.type === 'close') {
