@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mergeBackendHistory } from '../../src/ui/features/history-merge';
+import { mergeBackendHistory, prependHistoryWindow } from '../../src/ui/features/history-merge';
 import type { ChatMessage } from '../../src/ui/chat-render';
 
 function msg(partial: Partial<ChatMessage> & Pick<ChatMessage, 'role' | 'content'>): ChatMessage {
@@ -71,5 +71,31 @@ describe('mergeBackendHistory', () => {
     const remote = [msg({ role: 'user', content: 'q', id: 'u2' })];
     const merged = mergeBackendHistory(local, remote, { live: 'running', preserveLocalTail: true });
     expect(merged.map((m) => m.content)).toEqual(['q', 'old answer', 'streaming']);
+  });
+});
+
+describe('prependHistoryWindow（P1-6 触顶翻页前缀拼接）', () => {
+  it('正常翻页（互斥游标无重叠）直接前缀拼接', () => {
+    const current = [msg({ role: 'user', content: 'q2', id: 'c1' }), msg({ role: 'assistant', content: 'a2', id: 'c2' })];
+    const older = [msg({ role: 'user', content: 'q1', id: 'o1' }), msg({ role: 'assistant', content: 'a1', id: 'o2' })];
+    const merged = prependHistoryWindow(current, older);
+    expect(merged.map((m) => m.content)).toEqual(['q1', 'a1', 'q2', 'a2']);
+  });
+
+  it('older 尾部与 current 头部重复（历史被 rewind/fork 重写）时裁掉重叠段', () => {
+    const current = [msg({ role: 'user', content: 'q2' }), msg({ role: 'assistant', content: 'a2' })];
+    const older = [
+      msg({ role: 'user', content: 'q0' }),
+      msg({ role: 'user', content: 'q2' }),
+      msg({ role: 'assistant', content: 'a2' }),
+    ];
+    const merged = prependHistoryWindow(current, older);
+    expect(merged.map((m) => m.content)).toEqual(['q0', 'q2', 'a2']);
+  });
+
+  it('空侧处理：older 空返回 current，current 空返回 older', () => {
+    const current = [msg({ role: 'user', content: 'q' })];
+    expect(prependHistoryWindow(current, [])).toBe(current);
+    expect(prependHistoryWindow([], current)).toBe(current);
   });
 });

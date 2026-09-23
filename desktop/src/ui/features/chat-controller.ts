@@ -121,6 +121,7 @@ import {
   resetBook,
   patchBook,
   setEditFrom,
+  setHistoryLoading as setHistoryLoadingState,
   setQueueHint,
   setSessionStatus,
   shiftPendingQueue,
@@ -677,13 +678,12 @@ export function renderChat(): void {
 // P2-2: loadBackendHistory 期间到达的分片排队，history 写回后再 flush，
 // 避免「全量替换 state.messages[sid]」覆盖掉迟到的流式分片。
 const pendingChunks: Record<string, ChatChunk[]> = {};
-const historyLoading = new Set<string>();
 
 // 每个会话最近一次已自动展开浏览器面板的 request id（一轮任务只自动展开一次）。
 const browserAutoOpenedRequests = new Map<string, string>();
 
 export function isHistoryLoading(sessionId: string): boolean {
-  return historyLoading.has(sessionId);
+  return messageStore.get().historyLoading.has(sessionId);
 }
 
 export function enqueuePendingChunk(sessionId: string, chunk: ChatChunk): void {
@@ -706,8 +706,8 @@ export function flushPendingChunks(sessionId: string): ChatChunk[] | null {
 }
 
 export function setHistoryLoading(sessionId: string, loading: boolean): void {
-  if (loading) historyLoading.add(sessionId);
-  else historyLoading.delete(sessionId);
+  // store 化（P1-6）：渲染层（conversation-renderer）经 state.historyLoading 画骨架占位。
+  setHistoryLoadingState(sessionId, loading);
   logStream('history', loading ? 'history-loading-start' : 'history-loading-end', { sessionId });
 }
 
@@ -1047,7 +1047,7 @@ function applyChunkInner(incomingChunk: ChatChunk): void {
   // history 正在加载：排队，等 loadBackendHistory 写回后统一 flush，防止被全量替换覆盖。
   // 必须在 sequence 登记之前排队；flush 会重新走 applyChunk，若提前登记，
   // 队列里的首帧会被误判为 replay 重复帧而永久丢失。
-  if (historyLoading.has(sid)) {
+  if (isHistoryLoading(sid)) {
     enqueuePendingChunk(sid, chunk);
     return;
   }

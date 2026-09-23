@@ -23,7 +23,7 @@ import {
   renderConversation,
 } from '../../src/ui/features/conversation-renderer';
 import { __resetAllStoresForTest } from '../../src/ui/stores/stores';
-import { appendSessionMessage, clearHistoryLoadError, markHistoryLoadError } from '../../src/ui/state';
+import { appendSessionMessage, clearHistoryLoadError, markHistoryLoadError, setHistoryLoading } from '../../src/ui/state';
 import { reportRendererError } from '../../src/ui/renderer-error-report';
 
 // conversation-renderer 的重依赖：本文件只验证消息流渲染与 diff 缓存隔离，
@@ -352,6 +352,19 @@ describe('P0-1 渲染隔离与历史失败可见化', () => {
     clearHistoryLoadError('sid-err');
     renderConversation(panel, 'panel-a', 'sid-err');
     expect(panel.textContent).not.toContain('会话历史加载失败');
+  });
+
+  it('首屏历史窗口在途时渲染加载骨架（P1-6），结束后回落空态', () => {
+    const panel = document.getElementById('panel-a')!;
+    setHistoryLoading('sid-loading', true);
+
+    renderConversation(panel, 'panel-a', 'sid-loading');
+    expect(panel.textContent).toContain('正在加载会话历史…');
+    expect(panel.querySelector('[data-history-retry]')).toBeNull();
+
+    setHistoryLoading('sid-loading', false);
+    renderConversation(panel, 'panel-a', 'sid-loading');
+    expect(panel.textContent).not.toContain('正在加载会话历史…');
   });
 });
 

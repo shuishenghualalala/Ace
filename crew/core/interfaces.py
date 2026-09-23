@@ -295,6 +295,14 @@ class SessionStore(ABC):
         """记录上一轮运行的 terminal 结果（completed / failed）及错误信息。"""
         ...
 
+    async def set_status_async(
+        self, session_id: str, status: str, owner_account_id: str, error: str = ""
+    ) -> None:
+        """异步写路径：同步实现的 store 默认在线程池执行，不阻塞事件循环。"""
+        await asyncio.to_thread(
+            self.set_status, session_id, status, owner_account_id, error
+        )
+
     @abstractmethod
     def get_status(self, session_id: str, owner_account_id: str) -> tuple[str, str]:
         """取上一轮运行结果 (last_status, last_error)；无记录返回 ("", "")。"""

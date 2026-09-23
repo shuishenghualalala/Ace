@@ -1193,6 +1193,20 @@ export const sessionApi = {
     }>('/api/channel-sessions'),
   sessionsStatus: () => getJSON<Record<string, string>>('/api/sessions/status'),
   history: (id: string) => getJSON<BackendHistoryItem[]>(`/api/session/${encodeURIComponent(id)}`),
+  /** 窗口化历史（P1-1）：首屏尾部窗口 + 游标翻页；before 为上一页 next_before 原样回传。 */
+  historyWindow: (id: string, options: { limit?: number; before?: string | null } = {}) => {
+    const params = new URLSearchParams();
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.before) params.set('before', options.before);
+    const query = params.toString();
+    return getJSON<{
+      items: BackendHistoryItem[];
+      has_more: boolean;
+      next_before: string | null;
+    }>(
+      `/api/session/${encodeURIComponent(id)}/history${query ? `?${query}` : ''}`,
+    );
+  },
   sessionPlan: (id: string) =>
     getJSON<SessionPlanState>(`/api/session/${encodeURIComponent(id)}/plan`),
   sessionStatus: (id: string) =>
