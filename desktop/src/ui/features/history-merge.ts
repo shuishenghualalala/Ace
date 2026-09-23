@@ -59,3 +59,32 @@ export function mergeBackendHistory(
   );
   return [...remote, ...dedupedLocalTail];
 }
+
+/**
+ * 触顶翻页前缀拼接（P1-6）：把更早的一页 older 头部拼到 current 之前。
+ *
+ * 窗口端点的互斥游标保证两页不重叠；这里只做兜底——历史在两次翻页之间被
+ * rewind/fork 重写时，older 尾部可能与 current 头部重复，按「older 尾部 vs
+ * current 头部」的同内容连续段裁掉重叠（正常翻页该长度恒为 0，零成本）。
+ */
+export function prependHistoryWindow(current: ChatMessage[], older: ChatMessage[]): ChatMessage[] {
+  if (older.length === 0) return current;
+  if (current.length === 0) return older;
+  // 找最大 k 使 older 的后 k 条与 current 的前 k 条逐位同内容（正常翻页 k=0，零成本）
+  let overlap = 0;
+  for (let k = Math.min(older.length, current.length); k > 0; k -= 1) {
+    let matched = true;
+    for (let j = 0; j < k; j += 1) {
+      if (!sameMessageForHistoryPrefix(older[older.length - k + j]!, current[j]!)) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) {
+      overlap = k;
+      break;
+    }
+  }
+  if (overlap === 0) return [...older, ...current];
+  return [...older.slice(0, older.length - overlap), ...current];
+}

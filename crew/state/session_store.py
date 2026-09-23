@@ -12,6 +12,7 @@ import os
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import asdict
 from enum import Enum
@@ -73,6 +74,9 @@ _ROLE_EVENT_TYPES = {
     "tool": SessionEventType.TOOL_RESULT,
     "system": SessionEventType.SYSTEM_MESSAGE,
 }
+
+# 角色事件类型值集合（窗口链走行时 O(1) 判定；每条 durable 消息恰为一个角色事件）
+_ROLE_EVENT_TYPES_SET = frozenset(e.value for e in _ROLE_EVENT_TYPES.values())
 
 
 class SessionOwnershipError(ValueError):
@@ -215,8 +219,11 @@ class SQLiteSessionStore(SessionStore):
         self._conn = connect_sqlite(self._path, wal_enabled=wal_enabled)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
-        self._writer.execute(self._backfill_legacy_blobs)
-        self._projections: dict[tuple[str, str], _SessionProjection] = {}
+        # P1-4：legacy blob 回填移出启动关键路径（健康检查可用时间与 legacy 数据量解耦）
+        self._start_legacy_backfill()
+        # 投影缓存 LRU：会话数不设上限时，多账号/长历史场景下内存随会话总数线性
+        # 增长（每投影含全量消息）。淘汰只丢缓存不丢数据——未命中按事件增量重建。
+        self._projections: OrderedDict[tuple[str, str], _SessionProjection] = OrderedDict()
         self._queues: dict[tuple[str, str], tuple[asyncio.AbstractEventLoop, _SessionWriteQueue]] = {}
         # 进程内区分多个 store 实例（gateway/CLI 同进程双实例也互斥）
         self._writer_pid = f"{os.getpid()}:{uuid.uuid4().hex[:12]}"
@@ -236,6 +243,10 @@ class SQLiteSessionStore(SessionStore):
 
     def close(self) -> None:
         """关闭底层 SQLite 连接（WAL 模式下每库持有多个 fd，必须显式释放）。"""
+        # 后台回填短暂让路：避免关连接与回填事务竞争（超时则由回填自身的
+        # 异常兜底处理，下次启动重试）。
+        if getattr(self, "_backfill_done", None) is not None:
+            self._backfill_done.wait(5)
         for _, queue in list(self._queues.values()):
             queue.dispose()
         self._queues.clear()
@@ -411,6 +422,12 @@ class SQLiteSessionStore(SessionStore):
         stamp_baseline(conn, SESSIONS_SCHEMA_FEATURE, version=SESSIONS_SCHEMA_VERSION)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_updated ON sessions(owner_account_id, updated_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_workspace ON sessions(owner_account_id, workspace_id, updated_at DESC)")
+        # fork 子会话枚举（list_branches）按 (owner, source_session_id) 等值查询
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(owner_account_id, source_session_id)")
+        # 存储级 KV 标记（当前仅 legacy 回填完成标记，P1-4）
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
 
     def _migrate_sessions_pk(self, conn) -> None:
         """Migrate sessions from global session_id to owner-scoped identity."""
@@ -494,6 +511,50 @@ class SQLiteSessionStore(SessionStore):
             conn.execute(spec["copy"])
             conn.execute(f"DROP TABLE {table}")
             conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+
+    BACKFILL_DONE_KEY = "legacy_blob_backfill_done"
+
+    def _backfill_marker_present(self, conn) -> bool:
+        row = conn.execute(
+            "SELECT value FROM store_meta WHERE key = ?", (self.BACKFILL_DONE_KEY,)
+        ).fetchone()
+        return row is not None
+
+    def _mark_backfill_done(self, conn) -> None:
+        conn.execute(
+            "INSERT OR IGNORE INTO store_meta (key, value) VALUES (?, ?)",
+            (self.BACKFILL_DONE_KEY, str(time.time())),
+        )
+
+    def _start_legacy_backfill(self) -> None:
+        """P1-4：legacy blob 回填移出启动关键路径，后台线程执行。
+
+        - store_meta 完成标记跨重启幂等（已完成则本轮跳过）
+        - 回填与常规写在 _writer 事务层串行，无并发竞争；回填期间的读路径
+          经 blob 回退照常正确（回填只是把 legacy 数据搬进事件格式）
+        - 失败不阻断：标记不落，下次启动重试
+        """
+        self._backfill_done = threading.Event()
+
+        def _run() -> None:
+            try:
+                def _txn(conn) -> None:
+                    if self._backfill_marker_present(conn):
+                        return
+                    self._backfill_legacy_blobs(conn)
+                    self._mark_backfill_done(conn)
+
+                self._writer.execute(_txn)
+            except Exception:
+                log.exception("legacy blob 回填失败（读路径 blob 回退仍可用，下次启动重试）")
+            finally:
+                self._backfill_done.set()
+
+        threading.Thread(target=_run, name="crew-legacy-backfill", daemon=True).start()
+
+    def wait_for_legacy_backfill(self, timeout: float = 30.0) -> bool:
+        """等待后台回填完成（测试与关停场景用）。"""
+        return self._backfill_done.wait(timeout)
 
     def _backfill_legacy_blobs(self, conn) -> int:
         """一次性迁移：blob-only 的旧会话逐会话导入为事件行（幂等）。
@@ -601,12 +662,23 @@ class SQLiteSessionStore(SessionStore):
         return [cls._message_from_dict(d) for d in json.loads(raw)]
 
     # ---- 事件投影 ----
+    PROJECTION_CACHE_LIMIT = 32
+
+    def _cache_projection(self, key: tuple[str, str], proj: _SessionProjection) -> None:
+        """写入投影缓存并按 LRU 淘汰最久未用的会话。"""
+        self._projections[key] = proj
+        self._projections.move_to_end(key)
+        while len(self._projections) > self.PROJECTION_CACHE_LIMIT:
+            self._projections.popitem(last=False)
+
     def _get_projection(self, owner: str, session_id: str) -> _SessionProjection:
         key = (owner, session_id)
         proj = self._projections.get(key)
         if proj is None:
             proj = self._build_projection(owner, session_id)
-            self._projections[key] = proj
+            self._cache_projection(key, proj)
+        else:
+            self._projections.move_to_end(key)
         return proj
 
     def _read_event_cursor(self, owner: str, session_id: str) -> tuple[int, int] | None:
@@ -710,6 +782,181 @@ class SQLiteSessionStore(SessionStore):
             if event_type in _ROLE_EVENT_TYPES.values():
                 proj.messages.append(SQLiteSessionStore._message_from_dict(json.loads(payload)))
 
+    # ---- 窗口读取（P1-1：首屏尾部窗口 + 游标翻页） ----
+
+    WINDOW_MAX_LIMIT = 500
+    # 链走行的分批取行大小：> 窗口上限，容纳回合标记 / 弃尾行等非角色事件混排
+    WINDOW_FETCH_BATCH = 640
+
+    def _fork_source_of(self, owner: str, session_id: str) -> tuple[str, int] | None:
+        """读会话的 end_seed 前缀指针 (source_session_id, source_parent_seq)；无则 None。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload FROM session_events "
+                "WHERE owner_account_id = ? AND session_id = ? AND type = ? LIMIT 1",
+                (owner, session_id, SessionEventType.END_SEED.value),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            meta = json.loads(row[0] or "{}")
+        except json.JSONDecodeError as exc:
+            raise SessionEventLogError(
+                f"end_seed 载荷损坏（session={session_id}），拒绝窗口读取"
+            ) from exc
+        source_id = meta.get("source_session_id")
+        source_seq = meta.get("source_parent_seq")
+        if not isinstance(source_id, str) or not source_id or not isinstance(source_seq, int):
+            raise SessionEventLogError(
+                f"end_seed 载荷缺前缀指针（session={session_id}），拒绝窗口读取"
+            )
+        return source_id, source_seq
+
+    def _fork_chain(self, owner: str, session_id: str) -> list[tuple[str, int | None]]:
+        """fork 前缀链 [(sid, seq 上界)]，从本会话到根。
+
+        本会话上界为 None（读自身 leaf）；祖先的上界来自子会话 end_seed 内联的
+        source_parent_seq——它界定了「属于本 fork 分支」的源前缀终点。
+        成环时截断返回（读取路径有独立 fail-closed 校验）。
+        """
+        chain: list[tuple[str, int | None]] = [(session_id, None)]
+        seen = {session_id}
+        hop = session_id
+        while True:
+            source = self._fork_source_of(owner, hop)
+            if source is None or source[0] in seen:
+                return chain
+            seen.add(source[0])
+            chain.append(source)
+            hop = source[0]
+
+    def _fetch_rows_desc(
+        self, owner: str, session_id: str, from_seq: int, limit: int
+    ) -> dict[int, tuple[int | None, str, str]]:
+        """取 seq <= from_seq 的最后 limit 行 {seq: (parent_seq, type, payload)}（含非角色事件）。"""
+        with self._lock:
+            return {
+                int(r[0]): (r[1], str(r[2]), str(r[3]))
+                for r in self._conn.execute(
+                    "SELECT seq, parent_seq, type, payload FROM session_events "
+                    "WHERE owner_account_id = ? AND session_id = ? AND seq <= ? "
+                    "ORDER BY seq DESC LIMIT ?",
+                    (owner, session_id, from_seq, limit),
+                ).fetchall()
+            }
+
+    def _walk_chain_window(
+        self,
+        owner: str,
+        session_id: str,
+        head_seq: int,
+        exclusive_below: int | None,
+    ):
+        """沿活链从 head_seq 向旧走，产出角色事件 (sid, seq, Message)，从新到旧。
+
+        - 按父指针走行：rewind 弃尾行不在链上，天然不进窗口
+        - 遇 end_seed 按 (source, parent_seq) 跳源会话续走（fork 透明续接）；
+          成环 / 载荷损坏 / 链断裂均 fail-closed
+        - exclusive_below 仅作用于首个会话（游标翻页：跳过 seq >= 游标的事件），
+          跳源会话后清零——源会话的 seq 命名空间独立，不可比
+        - 分批取行（WINDOW_FETCH_BATCH），行不在批内则向更旧再取一批
+        """
+        batch: dict[int, tuple[int | None, str, str]] = {}
+        cur_sid = session_id
+        cur: int | None = head_seq
+        skip_above = exclusive_below
+        visited: set[str] = {session_id}
+        while cur is not None:
+            if cur not in batch:
+                batch = self._fetch_rows_desc(owner, cur_sid, cur, self.WINDOW_FETCH_BATCH)
+                if cur not in batch:
+                    raise SessionEventLogError(
+                        f"事件链断裂：{cur_sid}#{cur} 缺失，拒绝窗口读取"
+                    )
+            parent, etype, payload = batch[cur]
+            if etype == SessionEventType.END_SEED.value:
+                try:
+                    meta = json.loads(payload)
+                    next_sid = str(meta["source_session_id"])
+                    next_seq = int(meta["source_parent_seq"])
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                    raise SessionEventLogError(
+                        f"end_seed 载荷损坏（{cur_sid}#{cur}），拒绝窗口读取"
+                    ) from exc
+                if next_sid in visited:
+                    raise SessionEventLogError(
+                        f"fork 前缀成环：{next_sid}，拒绝窗口读取"
+                    )
+                visited.add(next_sid)
+                cur_sid, cur = next_sid, next_seq
+                batch = {}
+                skip_above = None
+                continue
+            if etype in _ROLE_EVENT_TYPES_SET and (skip_above is None or cur < skip_above):
+                yield cur_sid, cur, SQLiteSessionStore._message_from_dict(json.loads(payload))
+            cur = parent if parent is not None else (cur - 1 if cur > 1 else None)
+
+    @staticmethod
+    def parse_window_cursor(before: str | None) -> tuple[str, int | None]:
+        """解析不透明游标 "session_id:seq"；缺省返回 ("", None)。"""
+        if not before:
+            return "", None
+        text = str(before)
+        sid, sep, seq_text = text.rpartition(":")
+        if not sep or not sid or not seq_text.isdigit():
+            raise ValueError("游标格式必须为 session_id:seq")
+        return sid, int(seq_text)
+
+    def load_window(
+        self,
+        session_id: str,
+        *,
+        owner_account_id: str,
+        limit: int,
+        before: str | None = None,
+    ) -> tuple[list[tuple[str, int, Message]], bool, str | None]:
+        """窗口读取：沿活链倒序收集至多 limit 条消息。
+
+        返回 (升序 [(sid, seq, msg)], has_more, next_before)。
+        - 每条 durable 消息恰为一个角色事件，无需跨事件拼装消息边界
+        - fork 透明续接（end_seed → 源会话前缀）；rewind 弃尾不进链
+        - 游标 "{session_id}:{seq}" 对客户端不透明，原样回传即可；
+          游标会话必须在本会话的 fork 前缀链上（防跨会话越权读取）
+        """
+        limit = max(1, min(int(limit), self.WINDOW_MAX_LIMIT))
+        chain = self._fork_chain(owner_account_id, session_id)
+
+        start_sid, start_seq = self.parse_window_cursor(before)
+        start_at = 0
+        if start_sid:
+            if start_sid not in {sid for sid, _bound in chain}:
+                raise SessionEventLogError(
+                    f"游标会话 {start_sid} 不在 {session_id} 的 fork 前缀链上，拒绝读取"
+                )
+            start_at = next(i for i, (sid, _bound) in enumerate(chain) if sid == start_sid)
+
+        head_sid, head_bound = chain[start_at]
+        cursor = self._read_event_cursor(owner_account_id, head_sid)
+        if cursor is None:
+            return [], False, None
+        head = cursor[0] if head_bound is None else min(head_bound, cursor[0])
+        if head <= 0:
+            return [], False, None
+
+        collected: list[tuple[str, int, Message]] = []
+        walker = self._walk_chain_window(owner_account_id, head_sid, head, start_seq)
+        for entry in walker:
+            collected.append(entry)
+            if len(collected) >= limit:
+                break
+        has_more = next(walker, None) is not None if len(collected) >= limit else False
+
+        messages = list(reversed(collected))  # 升序（旧 → 新）
+        if not collected or not has_more:
+            return messages, False, None
+        oldest_sid, oldest_seq, _ = collected[-1]
+        return messages, True, f"{oldest_sid}:{oldest_seq}"
+
     def _build_projection(self, owner: str, session_id: str) -> _SessionProjection:
         """全量构建投影：事件链优先，无事件的旧会话回退读 blob。"""
         proj = _SessionProjection()
@@ -750,9 +997,10 @@ class SQLiteSessionStore(SessionStore):
         leaf, generation = cursor
         if proj is None or proj.generation != generation or leaf < proj.seq:
             proj = self._build_projection(owner, session_id)
-            self._projections[key] = proj
+            self._cache_projection(key, proj)
             return proj
         if leaf == proj.seq:
+            self._projections.move_to_end(key)
             return proj
         try:
             rows = self._fetch_chain_rows(owner, session_id, leaf)
@@ -776,7 +1024,7 @@ class SQLiteSessionStore(SessionStore):
         except SessionEventLogError:
             # 缺口/坏行：全量重建重试一次，不可静默跳过
             rebuilt = self._build_projection(owner, session_id)
-            self._projections[key] = rebuilt
+            self._cache_projection(key, rebuilt)
             return rebuilt
 
     @staticmethod
@@ -810,17 +1058,22 @@ class SQLiteSessionStore(SessionStore):
 
         子会话 id 形如 ``{parent}::turn::...::leader`` / ``{parent}::member``，
         不直接出现在左侧会话列表，但它们承载了 Team 内 leader/成员的真实对话。
+
+        前缀匹配用 ``>= / <`` 范围谓词而非 LIKE：LIKE 默认大小写不敏感、无法走
+        复合主键 (owner, session_id) 索引；范围谓词把全表扫描降为主键区间扫描。
+        上界取前缀末字符 +1（``::`` → ``:;``），精确覆盖所有 ``{parent}::`` 开头的 id。
         """
-        prefix = f"{session_id}::%"
+        prefix = f"{session_id}::"
+        upper = prefix[:-1] + chr(ord(prefix[-1]) + 1)
         with self._lock:
             rows = self._conn.execute(
                 """
                 SELECT session_id
                 FROM sessions
-                WHERE session_id LIKE ? AND owner_account_id = ?
+                WHERE session_id >= ? AND session_id < ? AND owner_account_id = ?
                 ORDER BY created_at ASC, updated_at ASC, session_id ASC
                 """,
-                (prefix, owner_account_id),
+                (prefix, upper, owner_account_id),
             ).fetchall()
         return [
             (
@@ -919,12 +1172,14 @@ class SQLiteSessionStore(SessionStore):
             if checkpoint_payload is not None:
                 _insert(SessionEventType.METER_CHECKPOINT.value, checkpoint_payload)
             new_leaf = seq - 1
+            # P1-3 砍 blob 双写：messages 列不再随保存重写（写放大 O(N)/turn 的根源）。
+            # 事件行是唯一事实源；messages 仅在 INSERT 时写入 '[]' 占位（NOT NULL 约束），
+            # 读路径优先事件投影，仅无事件行的 legacy 会话回退读 blob（见 _build_projection）。
             conn.execute(
                 "INSERT INTO sessions "
                 "(session_id, owner_account_id, messages, updated_at, created_at, workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source, leaf_seq, events_generation) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(owner_account_id, session_id) DO UPDATE SET "
-                "  messages = excluded.messages, "
                 "  updated_at = excluded.updated_at, "
                 # workspace_id 刻意不在 UPDATE 里回写：会话归属在首次创建（INSERT 或
                 # ensure_session）时确定，每轮回写会用 envelope.workspace_id 覆盖掉已确定的
@@ -945,7 +1200,7 @@ class SQLiteSessionStore(SessionStore):
                 (
                     session_id,
                     owner_account_id,
-                    self._dump(messages),
+                    "[]",
                     now,
                     now,  # created_at：仅 INSERT 时写入，UPDATE 不覆盖
                     workspace_id,
@@ -1031,6 +1286,14 @@ class SQLiteSessionStore(SessionStore):
 
     async def load_async(self, session_id: str, *, owner_account_id: str) -> list[Message]:
         return await asyncio.to_thread(self.load, session_id, owner_account_id=owner_account_id)
+
+    async def set_status_async(
+        self, session_id: str, status: str, error: str = "", *, owner_account_id: str
+    ) -> None:
+        """set_status 的异步门面：写路径（BEGIN IMMEDIATE + busy-retry sleep）离开事件循环。"""
+        await asyncio.to_thread(
+            self.set_status, session_id, status, error, owner_account_id=owner_account_id
+        )
 
     def clear_prompt_usage(self, session_id: str, owner_account_id: str) -> None:
         """清除上一轮 Provider usage，避免新回合暂未返回 usage 时显示旧值。"""
@@ -1238,7 +1501,8 @@ class SQLiteSessionStore(SessionStore):
     ) -> None:
         """回退：leaf 指针 CAS 移动到 target_seq，旧分支行原样保留可导航回来。
 
-        已存在的事件行一律不改写；blob 列随切口回写以维持双格式窗口一致。
+        已存在的事件行一律不改写；messages blob 不再随切口重写（P1-3：事件是
+        唯一事实源，message_count/token_count 按切口链重算即可）。
         校验在写事务外完成（事件只增不改，切口合法性不会被并发追加推翻），
         事务内只做 leaf CAS：并发移动（leaf 与预期不符）抛 SessionWriteConflict。
         """
@@ -1254,12 +1518,11 @@ class SQLiteSessionStore(SessionStore):
         def _write(conn) -> None:
             self._ensure_writer_lease(conn, owner_account_id, session_id, now)
             cursor = conn.execute(
-                "UPDATE sessions SET leaf_seq = ?, messages = ?, message_count = ?, "
+                "UPDATE sessions SET leaf_seq = ?, message_count = ?, "
                 "token_count = ?, updated_at = ? "
                 "WHERE owner_account_id = ? AND session_id = ? AND leaf_seq = ?",
                 (
                     target_seq,
-                    self._dump(messages),
                     len(messages),
                     self._estimate_tokens(messages),
                     now,
@@ -1320,7 +1583,7 @@ class SQLiteSessionStore(SessionStore):
                 (
                     new_id,
                     owner_account_id,
-                    self._dump(prefix),
+                    "[]",  # P1-3：前缀不落 blob，经 end_seed 共享源会话事件链
                     now,
                     now,
                     str(src[0] or "default"),
@@ -1598,6 +1861,10 @@ class SQLiteSessionStore(SessionStore):
 
         「上次会话在第 N 步被中断」：N = 开放回合内已落盘的消息事件数。
         只报告、不自动续跑；Team 子会话（'::'）与无事件会话跳过。
+
+        N+1 治理：开放回合意味着回合从未收敛——last_status 必然停在 'running'
+        （状态在回合起点写入、终态才覆盖）或为旧数据空值。先按状态过滤候选，
+        把逐会话事件扫描从 O(全部会话) 收敛到 O(可能开放的会话)。
         """
         role_types = tuple(e.value for e in _ROLE_EVENT_TYPES.values())
         marks = ",".join("?" for _ in role_types)
@@ -1605,7 +1872,8 @@ class SQLiteSessionStore(SessionStore):
         with self._lock:
             sessions = self._conn.execute(
                 "SELECT session_id, title, leaf_seq FROM sessions "
-                "WHERE owner_account_id = ? AND session_id NOT LIKE '%::%' AND leaf_seq > 0",
+                "WHERE owner_account_id = ? AND session_id NOT LIKE '%::%' AND leaf_seq > 0 "
+                "AND last_status IN ('', 'running')",
                 (owner_account_id,),
             ).fetchall()
         for sid, title, leaf in sessions:
@@ -1864,7 +2132,7 @@ class SQLiteSessionStore(SessionStore):
         """返回 Provider 最近一次真实 prompt 用量；没有真实 usage 时明确不可用。"""
         with self._lock:
             row = self._conn.execute(
-                "SELECT messages, last_prompt_tokens, last_prompt_tokens_source FROM sessions "
+                "SELECT last_prompt_tokens, last_prompt_tokens_source FROM sessions "
                 "WHERE session_id = ? AND owner_account_id = ?",
                 (session_id, owner_account_id),
             ).fetchone()
@@ -2095,6 +2363,34 @@ class SQLiteSessionStore(SessionStore):
         config["_created_at"] = row[1]
         config["_updated_at"] = row[2]
         return config
+
+    def get_agent_configs(
+        self, session_ids: list[str], owner_account_id: str
+    ) -> dict[str, dict[str, Any]]:
+        """批量读取会话 agent 配置：列表页 N+1 治理，一次 IN 查询替代逐会话查询。
+
+        返回 {session_id: config}；无配置行的会话不在结果里（调用方按 None 语义处理）。
+        """
+        sids = [str(sid) for sid in dict.fromkeys(session_ids) if sid]
+        if not sids:
+            return {}
+        marks = ",".join("?" for _ in sids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT session_id, config_json, created_at, updated_at "
+                f"FROM session_agent_config WHERE owner_account_id = ? AND session_id IN ({marks})",
+                (owner_account_id, *sids),
+            ).fetchall()
+        out: dict[str, dict[str, Any]] = {}
+        for sid, config_json, created_at, updated_at in rows:
+            try:
+                config = json.loads(config_json or "{}")
+            except json.JSONDecodeError:
+                config = {}
+            config["_created_at"] = created_at
+            config["_updated_at"] = updated_at
+            out[str(sid)] = config
+        return out
 
     def clear_agent_config(self, session_id: str, owner_account_id: str) -> None:
         def _write(conn):

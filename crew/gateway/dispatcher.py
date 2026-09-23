@@ -592,7 +592,7 @@ class SessionDispatcher:
                 msg = f"队列已满（最多 {self._max_queue_depth_per_session} 条），请稍后再试"
                 yield ResponseChunk.error(rid, msg)
                 try:
-                    self._store.set_status(sid, "failed", owner_account_id=owner, error=msg)
+                    await self._store_set_status(sid, "failed", owner=owner, error=msg)
                 except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，不得覆盖已 yield 的队列满错误
                     log.exception("写入队列满状态失败 session=%s", sid)
                 return
@@ -757,7 +757,7 @@ class SessionDispatcher:
 
                     # 标记会话进入 running，同时刷新 updated_at 防止被后台过期清理误删
                     try:
-                        self._store.set_status(sid, "running", owner_account_id=owner, error="")
+                        await self._store_set_status(sid, "running", owner=owner, error="")
                     except Exception:
                         log.exception("写入 running 状态失败 session=%s", sid)
 
@@ -804,12 +804,14 @@ class SessionDispatcher:
                     # messages never share the same Agent/history object.
                     exec_envelope = envelope
                     if sidechain_id:
-                        base_history = self._store.load(sid, owner_account_id=owner)
-                        self._store.save(
+                        # 回合起点的 load + 两次 save 与会话历史成正比（blob 双写 + 事件
+                        # 批次 + busy-retry sleep），异步门面离开事件循环。
+                        base_history = await self._store_load(sid, owner)
+                        await self._store_save(
                             sidechain_id,
                             list(base_history),
                             workspace_id=self._store.get_workspace_id(sid, owner_account_id=owner) or envelope.workspace_id,
-                            owner_account_id=owner,
+                            owner=owner,
                             title_fallback=self._convergence_title_fallback(),
                         )
                         parent_history = list(base_history)
@@ -819,14 +821,14 @@ class SessionDispatcher:
                                 is_meta=bool(envelope.params.get("internal_task_resume")),
                             )
                         )
-                        self._store.save(
+                        await self._store_save(
                             sid,
                             parent_history,
                             workspace_id=(
                                 self._store.get_workspace_id(sid, owner_account_id=owner)
                                 or envelope.workspace_id
                             ),
-                            owner_account_id=owner,
+                            owner=owner,
                             title_fallback=self._convergence_title_fallback(),
                         )
                         exec_envelope = Envelope(
@@ -911,7 +913,7 @@ class SessionDispatcher:
                         activity_live = False
                         if sidechain_id:
                             try:
-                                sidechain_history = self._store.load(sidechain_id, owner_account_id=owner)
+                                sidechain_history = await self._store_load(sidechain_id, owner)
                                 if sidechain_output_ref:
                                     path = Path(sidechain_output_ref)
                                     path.parent.mkdir(parents=True, exist_ok=True)
@@ -929,18 +931,20 @@ class SessionDispatcher:
                                         (await self._task_runtime.get_async(runtime_task_id, owner_account_id=owner)).get("backgrounded")
                                     )
                                 if not backgrounded:
-                                    self._store.save(
+                                    await self._store_save(
                                         sid,
                                         sidechain_history,
                                         workspace_id=envelope.workspace_id,
-                                        owner_account_id=owner,
+                                        owner=owner,
                                         title_fallback=self._convergence_title_fallback(),
                                     )
                                     # Agent writes the generated title directly to the parent
                                     # via task_session_id. Sidechain sessions are intentionally
                                     # excluded from list_sessions, so copying their title here is
                                     # both ineffective and risks racing a manual parent rename.
-                                self._store.clear(sidechain_id, owner_account_id=owner)
+                                await asyncio.to_thread(
+                                    self._store.clear, sidechain_id, owner_account_id=owner
+                                )
                             except Exception:
                                 log.exception(
                                     "sidechain 收敛失败 session=%s sidechain=%s",
@@ -1027,7 +1031,7 @@ class SessionDispatcher:
                                     or err.startswith("被新消息中断")
                                     else ("failed" if failed else "completed")
                                 )
-                                self._store.set_status(sid, status, owner_account_id=owner, error=err)
+                                await self._store_set_status(sid, status, owner=owner, error=err)
                             except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，finally 中不得掩盖主流程结果
                                 log.exception("写入会话状态失败 session=%s", sid)
                             # 触发 agent:end hook：必须在 running 计数与落库状态清理之后，
@@ -1047,7 +1051,7 @@ class SessionDispatcher:
                 err = self._stop_reasons.get(key, "已停止当前回复")
                 log.info("排队中的会话请求已停止 session=%s", sid)
                 try:
-                    self._store.set_status(sid, "stopped", owner_account_id=owner, error=err)
+                    await self._store_set_status(sid, "stopped", owner=owner, error=err)
                 except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，取消分支中不得掩盖已 yield 的停止错误
                     log.exception("写入会话状态失败 session=%s", sid)
                 deferred_terminal = ResponseChunk.error(rid, err)
@@ -1091,6 +1095,39 @@ class SessionDispatcher:
             yield deferred_terminal
 
     # ------------------------------------------------------------------ #
+    # ---- store 异步门面：同步实现经 to_thread 执行（接口默认门面同一语义）----
+    # 不用具体 store 的 save_async（per-session 写队列 task 绑定创建时的 event
+    # loop）：dispatcher 侧同一会话的回合天然串行，无需队列的跨调用串行化；
+    # to_thread 零持久任务、零 loop 绑定，临时事件循环（测试/TestClient）下
+    # 不会成为关停悬挂源。连接级串行由 store 的 threading.RLock 保证。
+    async def _store_load(self, session_id: str, owner: str) -> list[Message]:
+        return await asyncio.to_thread(self._store.load, session_id, owner_account_id=owner)
+
+    async def _store_save(
+        self,
+        session_id: str,
+        messages: list[Message],
+        *,
+        workspace_id: str,
+        owner: str,
+        title_fallback: str | None = None,
+    ) -> None:
+        await asyncio.to_thread(
+            self._store.save,
+            session_id,
+            messages,
+            workspace_id,
+            owner_account_id=owner,
+            title_fallback=title_fallback,
+        )
+
+    async def _store_set_status(
+        self, session_id: str, status: str, *, owner: str, error: str = ""
+    ) -> None:
+        await asyncio.to_thread(
+            self._store.set_status, session_id, status, owner_account_id=owner, error=error
+        )
+
     def status(self, session_id: str, owner_account_id: str) -> dict:
         """返回会话当前运行态（内存）+ 上一轮 terminal 结果（落库）。"""
         key = self._resolve_key(session_id, owner_account_id)

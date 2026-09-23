@@ -636,6 +636,9 @@ export function renderConversation(
   if (messages.length === 0 && !busy && !editing && sessionId && state.historyLoadErrors.has(sessionId)) {
     // 历史回填失败且无消息可显示：错误卡（带重试）优先于默认空态，失败不再表现为「空会话」。
     pushPlan('__history_error', 'history-error', () => renderHistoryErrorCard());
+  } else if (messages.length === 0 && !busy && !editing && sessionId && state.historyLoading.has(sessionId)) {
+    // 首屏窗口在途（P1-6）：骨架占位先于空态，openSession 不再等历史返回才渲染。
+    pushPlan('__history_loading', 'history-loading', () => renderQueueHintCard('正在加载会话历史…'));
   } else if (messages.length === 0 && !busy && !editing) {
     pushPlan('__empty', 'empty', () => hooks.emptyState?.() ?? renderEmptyState());
   } else if (messages.length === 0 && editing) {

@@ -343,9 +343,13 @@ def session_agent_label(
     session_id: str,
     *,
     owner_account_id: str,
+    config: dict | None = None,
 ) -> dict[str, str]:
-    getter = getattr(crew.session_store, "get_agent_config", None)
-    config = getter(session_id, owner_account_id=owner_account_id) if callable(getter) else None
+    """会话 agent 展示标签。config 可传入已读取的 agent 配置（批量路径复用，
+    避免同一行被列表页逐会话重复读取）。"""
+    if config is None:
+        getter = getattr(crew.session_store, "get_agent_config", None)
+        config = getter(session_id, owner_account_id=owner_account_id) if callable(getter) else None
     executor = str((config or {}).get("executor") or "builtin").lower()
     capability_registry = getattr(crew, "capability_profiles", None)
     if capability_registry is not None:
@@ -417,10 +421,26 @@ def with_session_agent_labels(
     *,
     owner_account_id: str,
 ) -> list[dict]:
-    """为会话列表合并 agent 展示标签与会话级模型绑定。"""
+    """为会话列表合并 agent 展示标签与会话级模型绑定。
+
+    N+1 治理：agent 配置一次批量读取（store 缺批量能力时回退逐会话），
+    标签与模型绑定共用同一份配置，单次刷新从 2×N 次配置查询降到 1 次。
+    """
     from crew.state.session_model import read_binding
 
-    getter = getattr(crew.session_store, "get_agent_config", None)
+    session_ids = [str(s.get("session_id") or "") for s in sessions]
+    batch_getter = getattr(crew.session_store, "get_agent_configs", None)
+    if callable(batch_getter):
+        stored_by_sid = batch_getter(session_ids, owner_account_id)
+    else:
+        single_getter = getattr(crew.session_store, "get_agent_config", None)
+        stored_by_sid = (
+            {
+                sid: single_getter(sid, owner_account_id=owner_account_id)
+                for sid in session_ids
+                if sid and callable(single_getter)
+            }
+        )
     enriched: list[dict] = []
     owner_profiles = getattr(crew, "owner_model_profiles", None)
     profiles = (
@@ -436,7 +456,7 @@ def with_session_agent_labels(
     )
     for session in sessions:
         sid = str(session.get("session_id") or "")
-        stored = getter(sid, owner_account_id=owner_account_id) if callable(getter) and sid else None
+        stored = stored_by_sid.get(sid)
         binding = read_binding(
             stored,
             crew.config,
@@ -450,6 +470,9 @@ def with_session_agent_labels(
                     crew,
                     sid,
                     owner_account_id=owner_account_id,
+                    # 无配置行传 {}：label 内部对 {} 与 None 语义一致（builtin 回落），
+                    # 但 {} 不会触发逐会话回读，保持批量的 O(1) 查询次数。
+                    config=stored if stored is not None else {},
                 ),
                 "agent_binding": session_agent_binding(stored),
                 "model_profile_id": binding["model_profile_id"],

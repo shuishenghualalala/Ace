@@ -254,6 +254,8 @@ function buildSnapshot(): AppState {
     pendingQueues: m.pendingQueues,
     attachments: m.attachments,
     historyLoadErrors: m.historyLoadErrors,
+    historyLoading: m.historyLoading,
+    historyPaging: m.historyPaging,
     tasks: t.tasks,
     taskBoardOpen: t.taskBoardOpen,
     taskBoardWidth: t.taskBoardWidth,
@@ -313,6 +315,8 @@ const FIELD_TO_STORE: Record<string, () => unknown> = {
   pendingQueues: () => messageStore,
   attachments: () => messageStore,
   historyLoadErrors: () => messageStore,
+  historyLoading: () => messageStore,
+  historyPaging: () => messageStore,
   tasks: () => taskStore,
   taskBoardOpen: () => taskStore,
   taskBoardWidth: () => taskStore,
@@ -712,6 +716,16 @@ export function removeSessionState(sessionId: string): void {
     nextErrors.delete(sessionId);
     messageStore.set({ historyLoadErrors: nextErrors });
   }
+  if (messageStore.get().historyLoading.has(sessionId)) {
+    const nextLoading = new Set(messageStore.get().historyLoading);
+    nextLoading.delete(sessionId);
+    messageStore.set({ historyLoading: nextLoading });
+  }
+  if (messageStore.get().historyPaging[sessionId]) {
+    const nextPaging = { ...messageStore.get().historyPaging };
+    delete nextPaging[sessionId];
+    messageStore.set({ historyPaging: nextPaging });
+  }
   const curBooks = sessionStore.get().books;
   if (sessionId in curBooks) {
     const next = { ...curBooks };
@@ -852,6 +866,27 @@ export function clearHistoryLoadError(sessionId: string): void {
   const next = new Set(messageStore.get().historyLoadErrors);
   next.delete(sessionId);
   messageStore.set({ historyLoadErrors: next });
+}
+
+/** 标记某 session 的历史窗口分页游标（loadBackendHistory / loadOlderHistoryPage 写入）。 */
+export function setHistoryPaging(
+  sessionId: string,
+  paging: { hasMore: boolean; nextBefore: string | null } | null,
+): void {
+  const next = { ...messageStore.get().historyPaging };
+  if (paging) next[sessionId] = paging;
+  else delete next[sessionId];
+  messageStore.set({ historyPaging: next });
+}
+
+/** 标记/清除某 session 的历史回填进行中（聊天区骨架占位）。 */
+export function setHistoryLoading(sessionId: string, loading: boolean): void {
+  const cur = messageStore.get().historyLoading;
+  if (loading === cur.has(sessionId)) return;
+  const next = new Set(cur);
+  if (loading) next.add(sessionId);
+  else next.delete(sessionId);
+  messageStore.set({ historyLoading: next });
 }
 
 /** 设置当前 workspace 选中。 */

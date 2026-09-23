@@ -613,6 +613,12 @@ def _legacy_blob_store(db: str) -> SQLiteSessionStore:
                  SQLiteSessionStore._dump(messages), 0.0, 0.0, workspace_id,
                  len(messages), SQLiteSessionStore._estimate_tokens(messages)),
             )
+            # 模拟 pre-W4 状态：legacy 数据存在时完成标记必须缺席（P1-4 后台回填
+            # 依赖「无标记 + 有 blob」判定需要迁移）
+            conn.execute(
+                "DELETE FROM store_meta WHERE key = ?",
+                (SQLiteSessionStore.BACKFILL_DONE_KEY,),
+            )
 
         store._writer.execute(_write)
         store._projections.pop((owner_account_id, session_id), None)
@@ -634,6 +640,8 @@ def test_legacy_blob_session_migrated_to_events_on_open(tmp_path):
 
     store = SQLiteSessionStore(db)
     try:
+        # P1-4：迁移在后台线程执行，等待完成后再断言事件行
+        assert store.wait_for_legacy_backfill()
         assert [m.content for m in store.load("old-1", owner_account_id="A:uid-a")] == ["hello", "hi there"]
         assert [m.content for m in store.load("old-2", owner_account_id="A:uid-a")] == ["second"]
         # 迁移后事件行就位、leaf 推进
@@ -657,9 +665,11 @@ def test_backfill_is_idempotent(tmp_path):
     legacy.close()
 
     store = SQLiteSessionStore(db)
+    assert store.wait_for_legacy_backfill()
     store.close()
-    store = SQLiteSessionStore(db)  # 第二次打开再跑一次迁移
+    store = SQLiteSessionStore(db)  # 第二次打开：标记已落，跳过迁移
     try:
+        assert store.wait_for_legacy_backfill()
         assert _message_event_count(db, "A:uid-a", "s1") == 2
         assert [m.content for m in store.load("s1", owner_account_id="A:uid-a")] == ["a", "b"]
     finally:
@@ -667,20 +677,39 @@ def test_backfill_is_idempotent(tmp_path):
 
 
 def test_blob_read_mode_fallback_still_works(tmp_path):
-    """双格式窗口内 read_mode=blob 可原地回退（events 与 blob 双写保持同步）。"""
+    """P1-3 砍 blob 双写后的契约：messages blob 只承载 W4 之前的 legacy 数据。
+
+    - 正常保存不再写 blob（列恒为 '[]'），事件行是唯一事实源
+    - read_mode=blob 仍可读 legacy 会话（W4 前的纯 blob 数据）
+    """
     db = str(tmp_path / "crew.db")
     store = SQLiteSessionStore(db)
     try:
         store.save("s1", [Message.user("q1")], owner_account_id="A:uid-a")
         store.save("s1", [Message.user("q1"), Message.user("q2")], owner_account_id="A:uid-a")
+        # auto 模式照常读全量（事件投影）
+        assert [m.content for m in store.load("s1", owner_account_id="A:uid-a")] == ["q1", "q2"]
+        assert _message_event_count(db, "A:uid-a", "s1") == 2
+        # 保存不再触碰 messages 列：blob 恒为空占位
+        import sqlite3 as _sqlite3
+        with _sqlite3.connect(db) as raw:
+            blob = raw.execute(
+                "SELECT messages FROM sessions WHERE owner_account_id = ? AND session_id = ?",
+                ("A:uid-a", "s1"),
+            ).fetchone()[0]
+        assert blob == "[]"
     finally:
         store.close()
 
+    # legacy 纯 blob 会话仍可被 read_mode=blob 读取
+    legacy = _legacy_blob_store(db)
+    legacy._blob_only_save(  # type: ignore[attr-defined]
+        "old-1", [Message.user("legacy-q")], owner_account_id="A:uid-a"
+    )
+    legacy.close()
     blob_store = SQLiteSessionStore(db, read_mode="blob")
     try:
-        assert [m.content for m in blob_store.load("s1", owner_account_id="A:uid-a")] == ["q1", "q2"]
-        # blob 模式可读，事件行也在（双写）
-        assert _message_event_count(db, "A:uid-a", "s1") == 2
+        assert [m.content for m in blob_store.load("old-1", owner_account_id="A:uid-a")] == ["legacy-q"]
     finally:
         blob_store.close()
 
@@ -775,13 +804,13 @@ def test_rewind_moves_leaf_without_rewriting_rows(tmp_path):
         # 已存在行零改写：行数不变，旧分支完整保留
         assert _event_row_count(db, "", "s1") == rows_before
         assert [m.content for m in store.load("s1", owner_account_id="")] == ["m0", "m1"]
-        # blob 列同步回写（双格式窗口一致）
+        # P1-3：rewind 不再重写 blob（事件是唯一事实源，blob 保持 '[]' 占位）
         conn = _raw_conn(db)
         try:
-            blob = json.loads(conn.execute("SELECT messages FROM sessions WHERE session_id = 's1'").fetchone()[0])
+            blob = conn.execute("SELECT messages FROM sessions WHERE session_id = 's1'").fetchone()[0]
         finally:
             conn.close()
-        assert [m["content"] for m in blob] == ["m0", "m1"]
+        assert blob == "[]"
     finally:
         store.close()
 
