@@ -151,6 +151,95 @@ def test_window_cursor_crosses_fork_boundary(tmp_path):
         store.close()
 
 
+def test_window_random_fork_rewind_chains_paging_parity(tmp_path):
+    """种子随机链 fuzz（固化测试人员 790/790 结论）：随机 save/fork/rewind 序列下，
+    任意 limit 的逐页拼回必须与全量投影完全一致。"""
+    import random
+
+    def _role_event_seqs(store: SQLiteSessionStore, sid: str) -> list[int]:
+        cursor = store._read_event_cursor(OWNER, sid)
+        if cursor is None:
+            return []
+        # 只取物理归属本会话的事件 seq：fork 会话的链走行会穿过 end_seed
+        # 混入源会话命名空间的 seq，拿去 rewind/fork 本会话是非法切口
+        return [
+            seq
+            for s, seq, _m in store._walk_chain_window(OWNER, sid, cursor[0], None)
+            if s == sid
+        ]
+
+    for seed in range(24):
+        rng = random.Random(seed)
+        store = SQLiteSessionStore(str(tmp_path / f"fuzz-{seed}.db"))
+        try:
+            store.save("root", [Message.user("m0")], owner_account_id=OWNER)
+            live: list[str] = ["root"]
+            turn = 0
+            for _ in range(14):
+                op = rng.random()
+                sid = rng.choice(live)
+                msgs = store.load(sid, owner_account_id=OWNER)
+                seqs = _role_event_seqs(store, sid)
+                if op < 0.6 or len(seqs) < 2:
+                    turn += 1
+                    store.save(
+                        sid,
+                        msgs + [Message.user(f"q{turn}"), Message.assistant(f"a{turn}")],
+                        owner_account_id=OWNER,
+                    )
+                elif op < 0.8 and seqs:
+                    # fork：边界取链上真实角色事件 seq（rewind 后 seq 与消息数错位）
+                    child = store.fork(sid, rng.choice(seqs), owner_account_id=OWNER)
+                    live.append(child)
+                elif seqs:
+                    # rewind 到某个非末位的链上事件（保留 ≥1 条消息）
+                    store.rewind(sid, rng.choice(seqs[:-1]), owner_account_id=OWNER)
+
+            for target in live:
+                full = store.load(target, owner_account_id=OWNER)
+                if not full:
+                    continue
+                for limit in (1, 2, 3, 7, 50):
+                    collected, _pages = _page_all(store, target, limit)
+                    # 只比内容与顺序：fork 续页的旧消息物理归属源会话（sid 不同是正确的）
+                    assert [m.content for _sid, m in collected] == [
+                        m.content for m in full
+                    ], f"seed={seed} sid={target} limit={limit} 分页与全量不一致"
+        finally:
+            store.close()
+
+
+def test_window_continues_after_source_rewind_below_fork_boundary(tmp_path):
+    """F1 回归：fork 之后源会话 rewind 到 fork 边界之下，翻页不得跳段。
+
+    游标落在祖先会话时 head 必须取游标位置本身；旧实现取 min(bound, leaf)，
+    会被回退后的 leaf 夹低，跳过边界与游标之间的整段消息。
+    """
+    store = SQLiteSessionStore(str(tmp_path / "crew.db"))
+    try:
+        _save_turns(store, "src", turns=6)  # 12 条：seq 1..12
+        child = store.fork("src", 12, owner_account_id=OWNER)
+        store.save(
+            child,
+            store.load(child, owner_account_id=OWNER)
+            + [Message.user("cq1"), Message.assistant("ca1")],
+            owner_account_id=OWNER,
+        )
+        # fork 之后源会话回退到 seq=2：fork 前缀（1..12）行仍在，src 的 leaf=2
+        store.rewind("src", 2, owner_account_id=OWNER)
+
+        full = store.load(child, owner_account_id=OWNER)  # 14 条
+        assert len(full) == 14
+        collected, _pages = _page_all(store, child, limit=1)
+        contents = [m.content for _sid, m in collected]
+        assert contents == [m.content for m in full]
+        # 显式断言被旧实现跳过的中段（q2..a5，即 seq 3..11）都在
+        for expected in ("q2", "a2", "q3", "a3", "q4", "a4", "q5", "a5"):
+            assert expected in contents
+    finally:
+        store.close()
+
+
 # ---- rewind 弃尾排除 ----
 
 

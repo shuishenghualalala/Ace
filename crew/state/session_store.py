@@ -101,14 +101,20 @@ class _SessionProjection:
 
     events_generation 在事件流被整体重写时 +1：读者据此识别跨进程重写，
     整体重建投影，而不是把新尾部增量拼到已过时的前缀上。
+
+    from_blob：投影来自 legacy blob 回退（无事件行）。此时「前缀一致 → 追加」
+    的增量判定不成立——事件视图尚不存在，blob 前缀必须整链重写一次落进事件表，
+    否则该前缀只存在于不再被读的 blob 列里（save 抢在后台回填之前的竞态，
+    见 _save_write 的 is_append 守卫）。
     """
 
-    __slots__ = ("messages", "seq", "generation")
+    __slots__ = ("messages", "seq", "generation", "from_blob")
 
     def __init__(self) -> None:
         self.messages: list[Message] = []
         self.seq: int = 0
         self.generation: int = 0
+        self.from_blob: bool = False
 
 
 class _SessionWriteQueue:
@@ -553,8 +559,9 @@ class SQLiteSessionStore(SessionStore):
         threading.Thread(target=_run, name="crew-legacy-backfill", daemon=True).start()
 
     def wait_for_legacy_backfill(self, timeout: float = 30.0) -> bool:
-        """等待后台回填完成（测试与关停场景用）。"""
-        return self._backfill_done.wait(timeout)
+        """等待后台回填完成（测试与关停场景用）；未启动回填时直接返回 True。"""
+        event = getattr(self, "_backfill_done", None)
+        return True if event is None else event.wait(timeout)
 
     def _backfill_legacy_blobs(self, conn) -> int:
         """一次性迁移：blob-only 的旧会话逐会话导入为事件行（幂等）。
@@ -939,7 +946,15 @@ class SQLiteSessionStore(SessionStore):
         cursor = self._read_event_cursor(owner_account_id, head_sid)
         if cursor is None:
             return [], False, None
-        head = cursor[0] if head_bound is None else min(head_bound, cursor[0])
+        if start_seq is not None:
+            # 游标续页：head 即游标位置本身（F1）。分页期间源会话被 rewind 到
+            # fork 边界之下时，min(bound, leaf) 会把 head 夹到回退后的 leaf，
+            # 边界与游标之间的整段被跳过——游标是上一页实际走过的链位置，
+            # 其下行路径不受源会话 leaf 移动影响（弃尾行仍在、fork 前缀链不变）；
+            # 行若已不存在则链走行 fail-closed。
+            head = start_seq
+        else:
+            head = cursor[0] if head_bound is None else min(head_bound, cursor[0])
         if head <= 0:
             return [], False, None
 
@@ -977,6 +992,9 @@ class SQLiteSessionStore(SessionStore):
             ).fetchone()
         if row is not None:
             proj.messages = self._load(row[0])
+            # blob 回退标记：下一次 save 必须整链重写（而非增量追加），
+            # 否则 blob 前缀永远进不了事件视图（F2 竞态守卫）
+            proj.from_blob = True
         return proj
 
     def _catch_up_projection(self, owner: str, session_id: str) -> _SessionProjection:
@@ -1103,9 +1121,12 @@ class SQLiteSessionStore(SessionStore):
         )
         # 增量 diff：投影前缀与传入消息一致 → 只把新增尾部转事件（O(新事件)）；
         # 不一致（调用方整体改写历史）→ 重写该会话的全部事件行。
+        # from_blob 守卫（F2）：投影来自 blob 回退时事件视图尚不存在，「前缀一致」
+        # 是假象——必须整链重写一次把 blob 前缀落进事件表，否则该前缀只留在
+        # 不再被读的 blob 列里（save 抢在后台回填拿到写锁之前的竞态）。
         proj = self._get_projection(owner_account_id, session_id)
         prefix = len(proj.messages)
-        is_append = messages[:prefix] == proj.messages
+        is_append = not proj.from_blob and messages[:prefix] == proj.messages
         tail = messages[prefix:] if is_append else messages
         event_rows: list[tuple[str, str]] = []
         for message in tail:
@@ -1226,10 +1247,13 @@ class SQLiteSessionStore(SessionStore):
         new_generation: int,
     ) -> None:
         # 写序不变量：先持久化（事务已提交）→ 再改内存投影。
+        # 提交即意味着本次消息集已完整落进事件表（from_blob 触发的整链重写
+        # 亦然），blob 回退标记随之清除。
         proj = self._get_projection(owner_account_id, session_id)
         proj.messages = list(messages)
         proj.seq = new_leaf
         proj.generation = new_generation
+        proj.from_blob = False
 
     def save(
         self,

@@ -33,7 +33,7 @@ def test_projection_cache_evicts_lru_beyond_limit(tmp_path):
             store.load(f"s{i}", owner_account_id=OWNER)
         assert len(store._projections) == limit
         # 最先加载的会话已被淘汰，最近加载的仍在
-        assert ("", f"s0") not in store._projections and (OWNER, "s0") not in store._projections
+        assert (OWNER, "s0") not in store._projections
         assert (OWNER, f"s{total - 1}") in store._projections
     finally:
         store.close()

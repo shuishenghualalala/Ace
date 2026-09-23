@@ -656,6 +656,50 @@ def test_legacy_blob_session_migrated_to_events_on_open(tmp_path):
         store.close()
 
 
+def test_save_before_backfill_preserves_legacy_blob_prefix(tmp_path, monkeypatch):
+    """F2 回归：save 抢在后台回填之前拿到写锁，blob 前缀不得丢失。
+
+    旧行为：legacy 行（blob 有 N 条、leaf=0、无事件）先被 save——投影按
+    blob 回退构建，「前缀一致 → 追加」只把新尾部写成事件；随后回填见
+    has_events 跳过 → blob 前缀永久留在不再被读的 blob 列里。
+    修复：投影带 from_blob 标记，_save_write 遇到它强制整链重写。
+    """
+    db = str(tmp_path / "crew.db")
+    legacy = _legacy_blob_store(db)
+    legacy._blob_only_save(  # type: ignore[attr-defined]
+        "old-1",
+        [Message.user(f"q{i}") for i in range(6)],
+        owner_account_id="A:uid-a",
+    )
+    legacy.close()
+
+    # 后台回填不让它先跑（复现 save 先于回填的竞态窗口）
+    monkeypatch.setattr(
+        SQLiteSessionStore, "_start_legacy_backfill", lambda self: None
+    )
+    store = SQLiteSessionStore(db)
+    try:
+        history = store.load("old-1", owner_account_id="A:uid-a")
+        assert len(history) == 6
+        history.append(Message.user("new-q"))
+        store.save("old-1", history, owner_account_id="A:uid-a")
+
+        # 回填此刻才跑：事件已完整，跳过；不产生任何重复/丢失
+        store._writer.execute(store._backfill_legacy_blobs)
+    finally:
+        store.close()
+
+    # 冷缓存新开 store：事件视图必须包含完整 7 条（而非只有 new-q）
+    # （monkeypatch 对 fresh 同样生效——回填不启动，直接读）
+    fresh = SQLiteSessionStore(db)
+    try:
+        msgs = fresh.load("old-1", owner_account_id="A:uid-a")
+        assert [m.content for m in msgs] == [f"q{i}" for i in range(6)] + ["new-q"]
+        assert _message_event_count(db, "A:uid-a", "old-1") == 7
+    finally:
+        fresh.close()
+
+
 def test_backfill_is_idempotent(tmp_path):
     db = str(tmp_path / "crew.db")
     legacy = _legacy_blob_store(db)
