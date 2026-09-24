@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import getpass
+import inspect
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -11,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from crew.features.services import ServiceKey
+from crew.core.observability import span
 from crew.state.logging import get_logger
 from crew.wiki.compiler import WikiCompiler
 from crew.wiki.manager import WikiSessionManager
@@ -34,6 +37,54 @@ log = get_logger("wiki.service")
 
 KnowledgeProgress = Callable[[str, int, dict[str, object]], Awaitable[None]]
 KnowledgeQuery = dict[str, object]
+
+
+def _observed_wiki(operation: str):
+    """Add a stable service boundary without making tracing a Wiki dependency."""
+    def decorate(function):
+        parameter_names = tuple(inspect.signature(function).parameters)
+        owner_position = (
+            parameter_names.index("owner_account_id") - 1
+            if "owner_account_id" in parameter_names
+            else -1
+        )
+
+        def owner_value(args, kwargs):
+            if "owner_account_id" in kwargs:
+                return kwargs["owner_account_id"]
+            if owner_position >= 0 and owner_position < len(args):
+                return args[owner_position]
+            return ""
+
+        if inspect.iscoroutinefunction(function):
+            async def async_wrapper(self, *args, **kwargs):
+                owner = owner_value(args, kwargs)
+                owner_scope = owner if isinstance(owner, str) else ""
+                with span(
+                    "wiki.operation",
+                    module="wiki",
+                    component="service",
+                    operation=operation,
+                    owner_account_id=owner if isinstance(owner, str) and owner else "system",
+                    attributes={"owner_scope": owner_scope},
+                ):
+                    return await function(self, *args, **kwargs)
+            return functools.wraps(function)(async_wrapper)
+
+        def sync_wrapper(self, *args, **kwargs):
+            owner = owner_value(args, kwargs)
+            owner_scope = owner if isinstance(owner, str) else ""
+            with span(
+                "wiki.operation",
+                module="wiki",
+                component="service",
+                operation=operation,
+                owner_account_id=owner if isinstance(owner, str) and owner else "system",
+                attributes={"owner_scope": owner_scope},
+            ):
+                return function(self, *args, **kwargs)
+        return functools.wraps(function)(sync_wrapper)
+    return decorate
 
 
 @runtime_checkable
@@ -264,6 +315,7 @@ class LocalWikiProvider:
     def manager(self) -> WikiSessionManager:
         return self.components.manager
 
+    @_observed_wiki("wiki.query")
     def query(
         self,
         question: str,
@@ -273,6 +325,7 @@ class LocalWikiProvider:
     ) -> KnowledgeQuery:
         return cast(KnowledgeQuery, self.querier.query(question, owner_account_id, top_k, kb_id))
 
+    @_observed_wiki("wiki.search")
     def search(
         self,
         query: str,
@@ -292,6 +345,7 @@ class LocalWikiProvider:
             include_context=include_context,
         ))
 
+    @_observed_wiki("wiki.search_pages")
     def search_pages(
         self,
         query: str,
@@ -306,6 +360,7 @@ class LocalWikiProvider:
             kb_id=kb_id,
         )
 
+    @_observed_wiki("wiki.ingest")
     async def ingest(
         self,
         source_id: str,
@@ -506,12 +561,15 @@ class LocalWikiProvider:
             content=path.read_bytes(),
         )
 
+    @_observed_wiki("wiki.compile")
     async def compile_all(self, owner_account_id: str, kb_id: str = "default") -> CompileResult:
         return await self.compiler.compile_all(owner_account_id, kb_id)
 
+    @_observed_wiki("wiki.lint")
     async def lint(self, owner_account_id: str, kb_id: str = "default", deep: bool = False) -> list[dict[str, object]]:
         return await self.compiler.lint(owner_account_id, kb_id, deep)  # type: ignore[return-value]
 
+    @_observed_wiki("wiki.graph")
     async def graph(self, owner_account_id: str, kb_id: str = "default") -> WikiGraph:
         return await asyncio.to_thread(self.store.get_graph, owner_account_id=owner_account_id, kb_id=kb_id)
 
@@ -544,6 +602,7 @@ class LocalWikiProvider:
             source_url=source_url,
         )
 
+    @_observed_wiki("wiki.capture_attachment")
     async def capture_attachment(
         self,
         filename: str,
@@ -566,6 +625,7 @@ class LocalWikiProvider:
             provider=self.compiler.provider,
         )
 
+    @_observed_wiki("wiki.upload")
     async def upload_file(
         self,
         filename: str,

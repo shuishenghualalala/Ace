@@ -18,6 +18,7 @@ export interface ShellFeatureStates {
   agents?: FeatureState;
   wiki?: FeatureState;
   security?: FeatureState;
+  tracing?: FeatureState;
   work?: Partial<Record<WorkLocation, FeatureState>>;
 }
 
@@ -89,6 +90,10 @@ function registerCoreNavigation(registry: ShellNavigationRegistry): void {
   register({
     id: 'security', label: '安全', icon: 'icon-security', order: 60,
     resolveFeatureState: (features) => features.security ?? 'unavailable',
+  });
+  register({
+    id: 'tracing', label: '追踪', icon: 'icon-search', order: 65,
+    resolveFeatureState: (features) => features.tracing ?? 'hidden',
   });
   register({ id: 'system', label: '系统', icon: 'icon-folder', order: 70 });
   register({

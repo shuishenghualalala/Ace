@@ -46,6 +46,7 @@ from crew.agent.loop.tool_dispatch_helpers import plan_tool_calls
 from crew.core.envelope import ResponseChunk
 from crew.core.errors import CrewError, CrewErrorKind, ProviderError
 from crew.core.interfaces import LLMProvider, ToolRegistry
+from crew.core.observability import attach_context, capture_context, event, span
 from crew.core.types import IMAGE_INPUT_UNAVAILABLE_NOTICE, Message, ToolResult
 from crew.plugins.manager import PluginManager
 from crew.state.logging import get_logger
@@ -67,6 +68,104 @@ VISION_CAPABILITY_RECOVERY_PROMPT = (
     "如果图片内容无法通过文本方式获得，请明确告知用户当前配置的模型没有视觉能力，"
     "需要切换到支持视觉的模型。"
 )
+
+
+async def _observed_provider_stream(
+    stream: Any,
+    *,
+    request_payload: dict[str, Any],
+    provider: str,
+    model: str,
+    attempt: int,
+    provider_index: int,
+    purpose: str = "",
+) -> AsyncIterator[Any]:
+    """Observe the real provider iterator, including its consumption lifetime."""
+    caller_context = capture_context()
+    with span(
+        "llm.logical_call",
+        kind="internal",
+        module="executor",
+        component="llm",
+        operation="llm.logical_call",
+        attributes={
+            "provider": provider,
+            "model": model,
+            "attempt": attempt,
+            "provider_index": provider_index,
+            "purpose": purpose,
+        },
+    ):
+        event(
+            "llm.logical_call.started",
+            attributes={
+                "provider": provider,
+                "model": model,
+                "attempt": attempt,
+                "request_fields": len(request_payload),
+            },
+        )
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        text_size = 0
+        reasoning_size = 0
+        tool_calls: list[dict[str, Any]] = []
+        usage: dict[str, Any] = {}
+        finish_reason = ""
+        try:
+            async for chunk in stream:
+                delta = str(getattr(chunk, "delta_text", "") or "")
+                if delta and text_size < 32_000:
+                    part = delta[: max(0, 32_000 - text_size)]
+                    text_parts.append(part)
+                    text_size += len(part)
+                reasoning = str(getattr(chunk, "reasoning_content", "") or "")
+                if reasoning and reasoning_size < 16_000:
+                    part = reasoning[: max(0, 16_000 - reasoning_size)]
+                    reasoning_parts.append(part)
+                    reasoning_size += len(part)
+                for attr in ("tool_call_generating", "ready_tool_call"):
+                    tool = getattr(chunk, attr, None)
+                    if tool is not None:
+                        tool_calls.append({"id": str(getattr(tool, "id", "") or ""), "name": str(getattr(tool, "name", "") or "")})
+                for tool in getattr(chunk, "tool_calls", ()) or ():
+                    tool_calls.append({"id": str(getattr(tool, "id", "") or ""), "name": str(getattr(tool, "name", "") or "")})
+                raw_usage = getattr(chunk, "usage", None)
+                if isinstance(raw_usage, dict):
+                    usage = dict(raw_usage)
+                finish_reason = str(getattr(chunk, "finish_reason", "") or finish_reason)
+                # Keep the provider span active while pulling the next item,
+                # but restore the caller context while suspended in user code.
+                with attach_context(caller_context):
+                    yield chunk
+        except BaseException as exc:
+            event(
+                "llm.logical_call.failed",
+                attributes={
+                    "error_type": type(exc).__name__,
+                    "text_chars": text_size,
+                    "reasoning_chars": reasoning_size,
+                    "tool_calls": len(tool_calls),
+                },
+            )
+            raise
+        finally:
+            close = getattr(stream, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:
+                    pass
+        event(
+            "llm.logical_call.completed",
+            attributes={
+                "text_chars": text_size,
+                "reasoning_chars": reasoning_size,
+                "tool_calls": len(tool_calls),
+                "finish_reason": finish_reason,
+                "usage": usage,
+            },
+        )
 
 
 def _accepts_prefix_kwargs(fn: Any) -> bool:
@@ -563,7 +662,20 @@ class BuiltinExecutor(AgentExecutor):
         view_messages: list[Message] = list(ctx.messages)
 
         grace = False  # 预算耗尽后允许的最后一轮宽限（用于收尾文本）
+        iteration_number = 0
         while budget.consume() or grace:
+            iteration_number += 1
+            event(
+                "agent.loop.iteration.started",
+                module="agent",
+                component="loop",
+                operation="agent.loop.iteration",
+                attributes={
+                    "iteration": iteration_number,
+                    "budget_used": budget.used,
+                    "grace": grace,
+                },
+            )
             used_grace = grace
             grace = False
 
@@ -1256,6 +1368,15 @@ class BuiltinExecutor(AgentExecutor):
                     model=_prov_model,
                     provider=_prov_name,
                     base_url=_prov_base_url,
+                )
+                stream = _observed_provider_stream(
+                    stream,
+                    request_payload=effective_request,
+                    provider=_prov_name,
+                    model=_prov_model,
+                    attempt=attempt + 1,
+                    provider_index=prov_idx,
+                    purpose=str(getattr(request_view, "purpose", "") or ""),
                 )
                 middleware_ready = time.perf_counter() - t0
                 async for chunk in stream:

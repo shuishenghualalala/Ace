@@ -116,7 +116,11 @@
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0007-execution-driver-registry.html">ADR-0007</a> · <a href="../../testing/plugin-architecture-stage-2-execution-driver.html">测试记录</a></div>
+  <h2>本次更新：可观测 SDK（2026-09-23）</h2>
+  <p><code>crew/core/observability.py</code> 提供不可变的 <code>ObservationContext</code>、<code>ObservationRecord</code>、<code>span</code>、<code>event</code> 和 <code>capture_payload</code> 契约。进程级 sink 负责跨线程默认投递，<code>bind_sink</code> 只建立临时 ContextVar 覆盖，退出后不会污染全局状态；安装 sink 不会把旧对象复制进预先创建的任务。没有受信 request/session 的上下文使用独立 <code>system</code> owner scope，只有显式业务绑定才继承账号 owner；核心层不依赖 SQLite、Gateway 或桌面实现。</p>
+  <p>上下文通过显式 attach/reset 传播到线程、常驻 worker 和异步边界；payload 在入队前脱敏、截断并携带采集策略元数据。业务失败不会被诊断 sink 反向阻断。</p>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0007-execution-driver-registry.html">ADR-0007</a> · <a href="../../testing/observability-tracing.html">可观测测试记录</a></div>
 </div>
 </body>
 </html>

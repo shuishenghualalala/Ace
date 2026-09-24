@@ -52,6 +52,7 @@ export type TabKey =
   | 'cron'
   | 'security'
   | 'audit'
+  | 'tracing'
   | 'system';
 export type SystemPanelKey = 'overview' | 'logs' | 'usage';
 export type ComposerMode = 'craft' | 'plan' | 'ask';

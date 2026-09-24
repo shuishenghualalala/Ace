@@ -133,6 +133,11 @@ import {
 import { hydrateMissingTurnFileCounts } from './features/turn-file-counts';
 import { bindSecurityApprovalUi } from './features/security-approval';
 import { createSecurityPageContribution, initSecurityPage } from './features/security-center';
+import {
+  createTracingPageContribution,
+  disposeTracingPage,
+  resolveTracingDevLaunch,
+} from './features/tracing';
 import { stopStreamWatchdog } from './features/stream-watchdog';
 import type { RendererAdapter } from './adapters/renderer-adapter';
 import { createApplicationShell, type ApplicationShell } from './layouts/application-shell';
@@ -160,12 +165,20 @@ import {
   type ShellLocation,
   type WorkLocation,
 } from './features/sidebar-nav';
+import { isObservationDevLaunch, setObservationDevLaunch } from '../shared/observability';
 
 const pageRegistry = new PageRegistry();
+let tracingAvailable = false;
+let refreshTracingGateFn: (() => Promise<void>) | null = null;
+
+export async function refreshTracingGateAvailability(): Promise<void> {
+  await refreshTracingGateFn?.();
+}
 
 function setTab(tab: TabKey): boolean {
   if (tab === 'wiki' && !canNavigateToWiki(state.config)) return false;
   if (tab === 'agents' && !externalAgentsEnabled()) return false;
+  if (tab === 'tracing' && (!isObservationDevLaunch() || !tracingAvailable)) return false;
   void pageRegistry.activate(tab).catch((error) => notify(`打开页面失败：${(error as Error).message}`));
   state.activeTab = tab;
   const productState = productModeStore.get();
@@ -650,6 +663,7 @@ async function init(
   // 登录墙已由 initAuthFlow 在 Phase 1 处理：local/dev 模式直接放行，
   // email/remote 模式未登录时登录墙覆盖全部 UI，登录后 reload 重新初始化。
   await safe('bootstrapBackend', bootstrapBackend);
+  await safe('refreshTracingGate', refreshTracingGateAvailability);
   void safe('hydrateBackendState', hydrateBackendState);
 }
 
@@ -861,6 +875,7 @@ function mountApplicationShell(
       agents: externalAgentsEnabled() ? 'available' : 'hidden',
       wiki: wikiFeatureEnabled() ? 'available' : 'hidden',
       security: securityModuleEnabled() ? 'available' : 'unavailable',
+      tracing: 'hidden',
       work: WORK_FEATURE_STATES,
     },
     onNavigate: (location: ShellLocation, productMode: ProductMode) => {
@@ -876,12 +891,47 @@ function mountApplicationShell(
     },
     onProductModeChange: syncProductMode,
   });
+  let gateRefreshTimer: number | null = null;
+  const refreshTracingGate = async (): Promise<void> => {
+    const isDev = await resolveTracingDevLaunch();
+    setObservationDevLaunch(isDev);
+    let available = false;
+    if (isDev) {
+      try {
+        const capabilities = await backendApi.tracingCapabilities();
+        available = Boolean(capabilities.available);
+      } catch {
+        available = false;
+      }
+    }
+    tracingAvailable = available;
+    shell.setFeatures({ tracing: available ? 'available' : 'hidden' });
+    const lastPosition = productModeStore.get().views.assistant.lastPosition as TabKey;
+    if (!available && (state.activeTab === 'tracing' || lastPosition === 'tracing')) {
+      updateProductModeView({ lastPosition: 'chat' });
+      if (state.activeTab === 'tracing') activateTab('chat');
+      disposeTracingPage();
+    } else if (available && lastPosition === 'tracing' && state.activeTab !== 'tracing') {
+      activateTab('tracing');
+    }
+  };
+  refreshTracingGateFn = refreshTracingGate;
+  void refreshTracingGate();
+  const unsubscribeTracingStatus = window.Crew?.onBackendStatus?.(() => {
+    if (gateRefreshTimer != null) window.clearTimeout(gateRefreshTimer);
+    gateRefreshTimer = window.setTimeout(() => {
+      gateRefreshTimer = null;
+      void refreshTracingGate();
+    }, 500);
+  });
   const disposeWikiPageContribution = pageRegistry.register(createWikiPageContribution());
   const disposeAgentsPageContribution = pageRegistry.register(createAgentsPageContribution());
   const disposeSkillsPageContribution = pageRegistry.register(createSkillsPageContribution());
   const disposeSecurityPageContribution = pageRegistry.register(createSecurityPageContribution());
   const disposeSitesPageContribution = pageRegistry.register(createSitesPageContribution());
   const disposeCronPageContribution = pageRegistry.register(createCronPageContribution());
+  const disposeTracingPageContribution = pageRegistry.register(createTracingPageContribution());
+
 
   const assistantContext = document.createElement('div');
   const workContext = document.createElement('aside');
@@ -972,6 +1022,12 @@ function mountApplicationShell(
       void disposeSecurityPageContribution();
       void disposeSitesPageContribution();
       void disposeCronPageContribution();
+      void disposeTracingPageContribution();
+      disposeTracingPage();
+      if (gateRefreshTimer != null) window.clearTimeout(gateRefreshTimer);
+      unsubscribeTracingStatus?.();
+      if (refreshTracingGateFn === refreshTracingGate) refreshTracingGateFn = null;
+      tracingAvailable = false;
       leaveWorkMode();
       setWorkHistoryCommands({});
       const restoredContext = document.createElement('div');

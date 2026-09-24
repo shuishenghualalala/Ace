@@ -42,6 +42,7 @@ from crew.core.followup import (
     wait_for_answer,
 )
 from crew.core.interfaces import ToolRegistry
+from crew.core.observability import capture_payload, event, span
 from crew.core.types import MediaPart, Message, ToolCall, ToolPermissionDecision, ToolResult, tool_arguments_for_ui
 from crew.plugins.manager import PluginManager
 from crew.state.logging import get_logger, llm_trace
@@ -1054,18 +1055,42 @@ class ToolRunner:
                         )
                     return await self.registry.execute(exec_tc)
 
-                result = await self._execute_guarded(
-                    tc,
-                    lambda: self.plugins.run_tool_execution_middleware(
-                        tc.name,
-                        tc.arguments,
-                        _execute_with_args,
-                        tool_call=tc,
-                        tool_call_id=tc.id,
-                        session_id=self.session_id,
-                        original_args=mw.original_payload,
-                    ),
-                )
+                with span(
+                    "tool.call",
+                    kind="tool",
+                    module="tools",
+                    component="mcp" if self._is_mcp_tool(tc.name) else "runner",
+                    operation="tool.call",
+                    attributes={"tool": tc.name, "tool_call_id": tc.id},
+                ):
+                    input_capture = capture_payload("tool.input", tc.arguments)
+                    result = await self._execute_guarded(
+                        tc,
+                        lambda: self.plugins.run_tool_execution_middleware(
+                            tc.name,
+                            tc.arguments,
+                            _execute_with_args,
+                            tool_call=tc,
+                            tool_call_id=tc.id,
+                            session_id=self.session_id,
+                            original_args=mw.original_payload,
+                        ),
+                    )
+                    output_capture = capture_payload(
+                        "tool.output.raw",
+                        {"content": result.content, "is_error": result.is_error, "code": result.code},
+                    )
+                    event(
+                        "tool.completed",
+                        attributes={
+                            "tool": tc.name,
+                            "tool_call_id": tc.id,
+                            "input_payload_id": input_capture.payload_id,
+                            "output_payload_id": output_capture.payload_id,
+                            "capture_state": output_capture.capture_state,
+                            "is_error": result.is_error,
+                        },
+                    )
             finally:
                 from crew.core.runctx import current_tool_progress_fn
 

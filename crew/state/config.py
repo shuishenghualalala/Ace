@@ -235,6 +235,10 @@ class Config:
     log_level: str = "INFO"
     log_file: str = ""  # 空=不写文件；填路径则同时写文件（支持 ~ 展开）
     llm_trace: bool = True  # 是否把每次 LLM 收发全量写入 {crew_home}/logs/llm.jsonl，便于排查
+    # 新观测投影独立于 legacy llm_trace；未显式配置时保持启用以兼容现有诊断习惯。
+    observability_enabled: bool = True
+    observability_developer_access: bool = False
+    observability: dict[str, Any] = field(default_factory=dict)
     max_iterations: int = 0  # 0=无限，靠 auto-compact + guardrail 防失控
     dk_task_timeout_seconds: float = 3600.0  # Dynamic Kanban 单个任务执行超时（秒），0=不限
     # 外部 Runtime 的统一空闲/硬截止/交互等待策略；空映射保持现有协议兼容默认。
@@ -1804,6 +1808,13 @@ def load_config(config_path: str | Path | None = None) -> Config:
         cfg.crew_home = runtime.get("crew_home", cfg.crew_home)
         cfg.task_workspace_root = runtime.get("task_workspace_root", cfg.task_workspace_root)
         cfg.llm_trace = bool(runtime.get("llm_trace", cfg.llm_trace))
+        raw_observability = runtime.get("observability", {})
+        if isinstance(raw_observability, dict):
+            cfg.observability = dict(raw_observability)
+            if "enabled" in raw_observability:
+                cfg.observability_enabled = bool(raw_observability["enabled"])
+            if "developer_access" in raw_observability:
+                cfg.observability_developer_access = bool(raw_observability["developer_access"])
         cfg.max_iterations = runtime.get("max_iterations", cfg.max_iterations)
         cfg.dk_task_timeout_seconds = _as_float(
             runtime.get("dk_task_timeout_seconds", cfg.dk_task_timeout_seconds),
@@ -2113,6 +2124,26 @@ def load_config(config_path: str | Path | None = None) -> Config:
                 external=ac.get("external", {}) or {},
                 internal=ac.get("internal", {}) or {},
             )
+
+    # Desktop's trusted main process injects these values only for a managed
+    # launch.  They deliberately live outside the user-editable Gateway
+    # authentication settings so an ordinary launch cannot inherit developer
+    # diagnostics from a shared config file.  An external Gateway is not
+    # passed these environment variables and keeps its own explicit config.
+    # Apply the override even when a fresh install has no config.yaml yet.
+    env_enabled = os.getenv("CREW_OBSERVABILITY_ENABLED")
+    env_developer_access = os.getenv("CREW_OBSERVABILITY_DEVELOPER_ACCESS")
+    env_capture_profile = os.getenv("CREW_OBSERVABILITY_CAPTURE_PROFILE")
+    if env_enabled is not None:
+        cfg.observability_enabled = env_enabled.strip().lower() in {"1", "true", "yes", "on"}
+        cfg.observability["enabled"] = cfg.observability_enabled
+    if env_developer_access is not None:
+        cfg.observability_developer_access = env_developer_access.strip().lower() in {"1", "true", "yes", "on"}
+        cfg.observability["developer_access"] = cfg.observability_developer_access
+    if env_capture_profile is not None:
+        profile = env_capture_profile.strip().lower()
+        if profile in {"metadata", "content_redacted"}:
+            cfg.observability["capture_profile"] = profile
 
     from crew.security.settings import configure_security
 

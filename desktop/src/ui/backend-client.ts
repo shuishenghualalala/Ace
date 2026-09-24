@@ -13,12 +13,14 @@ import { systemApi } from './api/feature-system';
 import { toolsApi } from './api/feature-tools';
 import { wikiApi } from './api/feature-wiki';
 import { workApi, officeApi, notificationApi } from './api/feature-work';
+import { tracingApi } from './api/feature-tracing';
 
 export const backendApi = {
   ...sessionApi,
   ...systemApi,
   ...toolsApi,
   ...wikiApi,
+  ...tracingApi,
 };
 
 export { workApi, officeApi, notificationApi, BackendChatSocket };
@@ -188,3 +190,9 @@ export type {
   MeetingPendingResponse,
   BackendNotification,
 } from './api/feature-work';
+
+export type {
+  ObservationCapabilities,
+  ObservationExportJob,
+  ObservationStatus,
+} from './api/feature-tracing';

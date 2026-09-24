@@ -11,6 +11,7 @@ import pytest
 
 from crew.core.mocks import FakeProvider
 from crew.core.envelope import Envelope
+from crew.core.observability import install_sink
 from crew.features import FeatureGeneration, FeatureRuntime, FeatureScope, FeatureState, FeatureStopPolicy
 from crew.wiki import (
     KNOWLEDGE_SERVICE_KEY,
@@ -23,9 +24,17 @@ from crew.wiki import (
     build_wiki_feature,
 )
 from crew.tools.registry import FunctionTool, Registry
+from crew.state.observability import ObservationRecorder
+from crew.state.trace_store import TraceStore
 from crew.wiki.service import WikiProviderComponents
 from crew.wiki.schemas import IngestResult, RawSource, WikiPage
 from crew.wiki.tools import WIKI_MANAGE_TOOLS, WIKI_READ_TOOLS
+
+
+@pytest.fixture(autouse=True)
+def clear_observation_sink():
+    yield
+    install_sink(None)
 
 
 class _WikiHost:
@@ -97,6 +106,36 @@ def test_local_provider_contract_uses_real_filesystem_store(tmp_path):
     service.close()
     assert (tmp_path / "wiki").exists()
     assert store.get("topic-1", "owner", "default").title == "Python"
+
+
+def test_local_provider_public_query_emits_wiki_observation(tmp_path):
+    store = FileSystemWikiStore(base_dir=tmp_path / "wiki")
+    querier = MagicMock(spec=WikiQuerier)
+    querier.query.return_value = {"answer": "query"}
+    components = WikiProviderComponents(
+        store=store,
+        compiler=MagicMock(spec=WikiCompiler),
+        querier=querier,
+        summarizer=MagicMock(spec=WikiSummarizer),
+        manager=MagicMock(spec=WikiSessionManager),
+    )
+    service = LocalWikiProvider(components)
+    trace_store = TraceStore(tmp_path / "observability.sqlite3")
+    recorder = ObservationRecorder(trace_store)
+    install_sink(recorder)
+    # The service boundary supplies the owner even when no parent trace is
+    # bound by the caller, so the diagnostic root never falls back to local.
+    assert service.query("what", "owner") == {"answer": "query"}
+    assert recorder.flush(2)
+    trace = trace_store.list_traces(owner_account_id="owner")["items"][0]
+    wiki_spans = trace_store.list_spans(owner_account_id="owner", trace_id=trace["trace_id"])
+    assert any(
+        item["module"] == "wiki" and item["operation"] == "wiki.query"
+        for item in wiki_spans
+    )
+    recorder.close()
+    trace_store.close()
+    service.close()
 
 
 def test_wiki_feature_activates_service_all_tools_and_context_then_revokes(tmp_path):

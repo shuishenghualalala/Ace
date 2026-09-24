@@ -21,7 +21,10 @@ describe('Gateway launch policy', () => {
   it('keeps local mode on the normal environment and allows verified Gateway reuse', () => {
     expect(resolveGatewayCrewHome('local', 'C:/local-home', 'C:/dev-home'))
       .toBe('C:/local-home');
-    expect(managedGatewayModeEnv('local', 'C:/dev-home')).toEqual({});
+    expect(managedGatewayModeEnv('local', 'C:/dev-home')).toEqual({
+      CREW_OBSERVABILITY_DEVELOPER_ACCESS: '0',
+      CREW_OBSERVABILITY_CAPTURE_PROFILE: 'metadata',
+    });
     expect(shouldProbeExternalGateway('local')).toBe(true);
   });
 
@@ -31,6 +34,9 @@ describe('Gateway launch policy', () => {
     expect(managedGatewayModeEnv('dev', 'C:/dev-home')).toEqual({
       CREW_GATEWAY_DEV: '1',
       CREW_HOME: 'C:/dev-home',
+      CREW_OBSERVABILITY_ENABLED: '1',
+      CREW_OBSERVABILITY_DEVELOPER_ACCESS: '1',
+      CREW_OBSERVABILITY_CAPTURE_PROFILE: 'content_redacted',
     });
     expect(shouldProbeExternalGateway('dev')).toBe(false);
   });

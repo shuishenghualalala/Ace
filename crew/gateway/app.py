@@ -58,6 +58,7 @@ from crew.gateway.routers.security import create_security_router
 from crew.gateway.routers.sessions import create_sessions_router
 from crew.gateway.routers.sites import create_sites_router
 from crew.gateway.routers.system import create_system_router
+from crew.gateway.routers.tracing import create_tracing_router
 from crew.gateway.ws import create_ws_router
 from crew.security.settings import strict_security_enabled
 from crew.state.logging import get_logger
@@ -380,6 +381,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     api.include_router(create_mcp_servers_router(crew))
     api.include_router(create_interaction_router(interaction_bridge, crew))
     api.include_router(create_system_router(crew))
+    api.include_router(create_tracing_router(crew))
     api.include_router(create_security_router(crew))
     api.include_router(
         create_ws_router(

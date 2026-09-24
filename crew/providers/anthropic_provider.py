@@ -15,6 +15,7 @@ from crew.core.errors import (
     is_unsupported_image_input_error,
 )
 from crew.core.interfaces import LLMProvider
+from crew.core.observability import capture_payload, event
 from crew.providers.classify import classify_provider_error
 from crew.providers.keying import ApiKeyResolver
 from crew.core.types import (
@@ -272,6 +273,8 @@ class AnthropicProvider(LLMProvider):
         self._sync_api_key()
         payload = self._payload(messages, tools, max_tokens_override=max_tokens)
         session = _current_session()
+        request_capture = capture_payload("llm.request", payload, attributes={"capture_layer": "provider_arguments"})
+        event("llm.request.provider", attributes={"payload_id": request_capture.payload_id, "capture_state": request_capture.capture_state, "provider": "anthropic", "model": self.model})
         llm_trace("request", {"session_id": session, "model": self.model, "stream": False, "purpose": purpose or "", "messages": payload["messages"]})
         try:
             response = await self._client.post(self._url, headers=self._headers, json=payload)
@@ -324,6 +327,17 @@ class AnthropicProvider(LLMProvider):
                 "usage": result.usage,
             },
         )
+        response_capture = capture_payload(
+            "llm.response",
+            {
+                "text": result.text,
+                "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in result.tool_calls],
+                "finish_reason": result.finish_reason,
+                "usage": result.usage,
+            },
+            attributes={"capture_layer": "assembled_response"},
+        )
+        event("llm.response.provider", attributes={"payload_id": response_capture.payload_id, "capture_state": response_capture.capture_state})
         return result
 
     async def stream_chat(
@@ -338,6 +352,8 @@ class AnthropicProvider(LLMProvider):
         self._sync_api_key()
         payload = {**self._payload(messages, tools, max_tokens_override=max_tokens), "stream": True}
         session = _current_session()
+        request_capture = capture_payload("llm.request", payload, attributes={"capture_layer": "provider_arguments"})
+        event("llm.request.provider", attributes={"payload_id": request_capture.payload_id, "capture_state": request_capture.capture_state, "provider": "anthropic", "model": self.model})
         tool_acc: dict[int, dict[str, Any]] = {}
         assembled: list[ToolCall] = []
         text = ""
@@ -363,7 +379,7 @@ class AnthropicProvider(LLMProvider):
         try:
             async with self._client.stream("POST", self._url, headers=self._headers, json=payload) as response:
                 response.raise_for_status()
-                event = ""
+                event_name = ""
                 data_lines: list[str] = []
                 async for line in response.aiter_lines():
                     if not line:
@@ -374,12 +390,12 @@ class AnthropicProvider(LLMProvider):
                         if raw_data == "[DONE]":
                             break
                         item = json.loads(raw_data)
-                        if event == "message_start":
+                        if event_name == "message_start":
                             raw_usage = item.get("message", {}).get("usage") or {}
                             usage["prompt_tokens"] = int(raw_usage.get("input_tokens") or 0)
                             usage["cache_creation_input_tokens"] = int(raw_usage.get("cache_creation_input_tokens") or 0)
                             usage["cache_read_input_tokens"] = int(raw_usage.get("cache_read_input_tokens") or 0)
-                        elif event == "content_block_start":
+                        elif event_name == "content_block_start":
                             block = item.get("content_block") or {}
                             if block.get("type") == "tool_use":
                                 idx = int(item.get("index") or 0)
@@ -389,7 +405,7 @@ class AnthropicProvider(LLMProvider):
                                 # name 一出现即通知 executor 显示「工具参数生成中」卡片。
                                 if bid and bname:
                                     yield StreamChunk(tool_call_generating=ToolCall(id=bid, name=bname, arguments={}))
-                        elif event == "content_block_delta":
+                        elif event_name == "content_block_delta":
                             idx = int(item.get("index") or 0)
                             delta = item.get("delta") or {}
                             if delta.get("type") == "text_delta":
@@ -399,11 +415,11 @@ class AnthropicProvider(LLMProvider):
                                     yield StreamChunk(delta_text=piece)
                             elif delta.get("type") == "input_json_delta" and idx in tool_acc:
                                 tool_acc[idx]["input_json"] += str(delta.get("partial_json") or "")
-                        elif event == "content_block_stop":
+                        elif event_name == "content_block_stop":
                             ready = flush_tool(int(item.get("index") or 0))
                             if ready is not None:
                                 yield StreamChunk(ready_tool_call=ready)
-                        elif event == "message_delta":
+                        elif event_name == "message_delta":
                             delta = item.get("delta") or {}
                             finish_reason = delta.get("stop_reason") or finish_reason
                             raw_usage = item.get("usage") or {}
@@ -411,10 +427,10 @@ class AnthropicProvider(LLMProvider):
                             # message_delta 的 usage 也可能更新 cache_read（累积值）
                             if raw_usage.get("cache_read_input_tokens") is not None:
                                 usage["cache_read_input_tokens"] = int(raw_usage.get("cache_read_input_tokens") or 0)
-                        event = ""
+                        event_name = ""
                         continue
                     if line.startswith("event:"):
-                        event = line[6:].strip()
+                        event_name = line[6:].strip()
                     elif line.startswith("data:"):
                         data_lines.append(line[5:].strip())
         except httpx.HTTPStatusError as exc:
@@ -463,4 +479,15 @@ class AnthropicProvider(LLMProvider):
                 "usage": usage,
             },
         )
+        response_capture = capture_payload(
+            "llm.response",
+            {
+                "text": text,
+                "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in assembled],
+                "finish_reason": finish_reason,
+                "usage": usage,
+            },
+            attributes={"capture_layer": "assembled_response"},
+        )
+        event("llm.response.provider", attributes={"payload_id": response_capture.payload_id, "capture_state": response_capture.capture_state})
         yield StreamChunk(delta_text="", done=True, tool_calls=assembled, finish_reason=finish_reason, usage=usage)

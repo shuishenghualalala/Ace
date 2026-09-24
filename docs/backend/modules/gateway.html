@@ -160,7 +160,11 @@ loop_lag_ms                         业务循环滞后毫秒：哨兵 task 每�
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0010-session-source-context-contributor.html">ADR-0010</a> · <a href="../adr/0021-wiki-gateway-knowledge-service-consumer.html">ADR-0021</a> · <a href="../adr/0023-feature-event-contributor-registry.html">ADR-0023</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-event-contributor.html">Event Contributor 测试记录</a></div>
+  <h2>本次更新：开发追踪 Gateway（2026-09-23）</h2>
+  <p><code>tracing.py</code> 统一执行 developer access、admin 与 owner scope 校验，提供 capabilities/status、trace/span/event/log/payload 查询、已验证的客户端呈现事件，以及单 trace 和后台筛选导出。客户端不能凭任意 trace_id 创建根记录；<code>user.presented</code> 必须匹配服务端 trace/request/session。诊断管理员的 logs 查询会合并当前 owner 与独立 <code>system</code> scope；trace/span/payload 与导出仍不跨 owner 合并。</p>
+  <p>批量导出固定 filter、事件水位和时间点，分页流式写临时文件，支持 completed/partial/cancelled/failed 状态；下载再次鉴权。CSV 对公式起始字符做安全转义，payload 只按受控引用按需关联。</p>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../../testing/observability-tracing.html">可观测测试记录</a></div>
 </div>
 </body>
 </html>

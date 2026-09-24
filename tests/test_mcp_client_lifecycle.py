@@ -8,8 +8,17 @@ from types import SimpleNamespace
 
 import pytest
 
+from crew.core.observability import bind_observation, install_sink
+from crew.state.observability import ObservationRecorder
+from crew.state.trace_store import TraceStore
 from crew.tools.mcp_client import MCPClientManager, _ServerWorker
 from crew.tools.registry import Registry
+
+
+@pytest.fixture(autouse=True)
+def clear_observation_sink():
+    yield
+    install_sink(None)
 
 
 def _error(result: str) -> str:
@@ -124,6 +133,32 @@ async def test_inflight_timeout_is_not_retried_and_reports_unknown_state(monkeyp
     assert "状态可能未知" in _error(result)
     assert "不会自动重试" in _error(result)
     await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_mcp_worker_attaches_queue_context_and_records_payload_refs(monkeypatch, tmp_path):
+    worker, session = await _started_worker(monkeypatch, call_timeout=0.5)
+    store = TraceStore(tmp_path / "observability.sqlite3")
+    recorder = ObservationRecorder(store)
+    install_sink(recorder)
+    with bind_observation(owner_account_id="owner", request_id="request"):
+        pending = asyncio.create_task(worker._make_handler("echo")({"query": "safe"}))
+    await session.call_started.wait()
+    session.release.set()
+    result = await pending
+    assert "echo" in result
+    await worker.stop()
+    assert recorder.flush(2)
+    traces = store.list_traces(owner_account_id="owner")["items"]
+    assert len(traces) == 1
+    spans = store.list_spans(owner_account_id="owner", trace_id=traces[0]["trace_id"])
+    assert any(item["module"] == "mcp" and item["operation"] == "mcp.call" for item in spans)
+    events = store.list_events(owner_account_id="owner", trace_id=traces[0]["trace_id"])
+    completed = next(item for item in events if item["name"] == "mcp.call.completed")
+    assert completed["attributes"]["request_payload_id"]
+    assert completed["attributes"]["response_payload_id"]
+    recorder.close()
+    store.close()
 
 
 @pytest.mark.asyncio

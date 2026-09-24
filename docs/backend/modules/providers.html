@@ -120,7 +120,11 @@ model: deepseek-reasoner</code></pre>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+  <h2>本次更新：Provider 协议边界（2026-09-23）</h2>
+  <p>OpenAI 与 Anthropic 在协议转换完成、真正发送请求的边界分别捕获脱敏后的实际 request；同步和流式路径对称记录 response、首事件/首文本与结束状态。executor 只记录逻辑调用与重试，不再重复生成 provider request/response 载荷。</p>
+  <p>payload attributes 保留 <code>capture_layer</code> 与采集策略版本，允许详情页判断载荷来自 provider arguments、wire response 还是业务投影。</p>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../../testing/observability-tracing.html">可观测测试记录</a></div>
 </div>
 </body>
 </html>

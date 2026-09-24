@@ -33,6 +33,14 @@ from pathlib import Path
 from typing import Any
 
 from crew.core.errors import ToolError
+from crew.core.observability import (
+    ObservationContext,
+    attach_context,
+    capture_context,
+    capture_payload,
+    event,
+    span,
+)
 from crew.state.logging import get_logger
 from crew.tools.output_filters import truncate_output
 from crew.tools.registry import Registry, tool_error
@@ -73,6 +81,7 @@ class _CallRequest:
     args: dict[str, Any]
     future: asyncio.Future[str]
     deadline: float
+    observation_context: ObservationContext
     started: bool = False
 
 
@@ -617,20 +626,60 @@ class _ServerWorker:
             self._current = request
             request.started = True
             try:
-                async with asyncio.timeout_at(request.deadline):
-                    result = await session.call_tool(request.tool_name, request.args or {})
-                consecutive_errors = 0
-                extracted = _extract_text(result)
-                if getattr(result, "is_error", False):
-                    try:
-                        message = str(json.loads(extracted).get("error") or extracted)
-                    except (AttributeError, json.JSONDecodeError):
-                        message = extracted
-                    self._fail(request, message)
-                else:
-                    # 成功结果过长时按 terminal 同款头尾截断，避免超大结果灌进上下文与 UI
-                    truncated, _ = truncate_output(extracted)
-                    self._complete(request, truncated)
+                with attach_context(request.observation_context):
+                    with span(
+                        "mcp.call",
+                        kind="client",
+                        module="mcp",
+                        component="worker",
+                        operation="mcp.call",
+                        attributes={"service": self.name, "tool": request.tool_name},
+                    ):
+                        request_capture = capture_payload(
+                            "mcp.request",
+                            request.args,
+                            attributes={
+                                "capture_layer": "mcp.worker",
+                                "service": self.name,
+                                "tool": request.tool_name,
+                            },
+                        )
+                        async with asyncio.timeout_at(request.deadline):
+                            result = await session.call_tool(request.tool_name, request.args or {})
+                        consecutive_errors = 0
+                        extracted = _extract_text(result)
+                        response_capture = capture_payload(
+                            "mcp.response",
+                            extracted,
+                            attributes={
+                                "capture_layer": "mcp.worker",
+                                "service": self.name,
+                                "tool": request.tool_name,
+                            },
+                        )
+                        event(
+                            "mcp.call.completed",
+                            module="mcp",
+                            component="worker",
+                            operation="mcp.call",
+                            attributes={
+                                "request_payload_id": request_capture.payload_id,
+                                "response_payload_id": response_capture.payload_id,
+                                "is_error": bool(getattr(result, "is_error", False)),
+                                "service": self.name,
+                                "tool": request.tool_name,
+                            },
+                        )
+                        if getattr(result, "is_error", False):
+                            try:
+                                message = str(json.loads(extracted).get("error") or extracted)
+                            except (AttributeError, json.JSONDecodeError):
+                                message = extracted
+                            self._fail(request, message)
+                        else:
+                            # 成功结果过长时按 terminal 同款头尾截断，避免超大结果灌进上下文与 UI
+                            truncated, _ = truncate_output(extracted)
+                            self._complete(request, truncated)
             except TimeoutError:
                 consecutive_errors = 0
                 self._complete(
@@ -781,6 +830,7 @@ class _ServerWorker:
                 args=args,
                 future=future,
                 deadline=loop.time() + self._call_timeout,
+                observation_context=capture_context(),
             )
             try:
                 self._queue.put_nowait(request)
