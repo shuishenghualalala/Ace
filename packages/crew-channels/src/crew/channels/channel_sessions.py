@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import time
 import uuid
+import functools
+import inspect
 from typing import Any
 
 from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
+from crew.core.observability import span
 from crew.features.session_context import SessionContext, SessionSource, session_context_from_envelope
 from crew.state.logging import get_logger
 
@@ -14,6 +17,39 @@ log = get_logger("gateway.channel_sessions")
 
 _CHANNEL_PREFIX = "agent:main:"
 _RESET_COMMANDS = {"/new", "/reset"}
+
+
+def _observed_channel(operation: str):
+    def decorate(function):
+        if inspect.iscoroutinefunction(function):
+            @functools.wraps(function)
+            async def async_wrapper(*args, **kwargs):
+                owner = kwargs.get("owner") or kwargs.get("owner_account_id") or ""
+                with span(
+                    "channel.operation",
+                    kind="server",
+                    module="channels",
+                    component="delivery",
+                    operation=operation,
+                    attributes={"owner_scope": str(owner), "coverage_status": "instrumented"},
+                ):
+                    return await function(*args, **kwargs)
+            return async_wrapper
+
+        @functools.wraps(function)
+        def sync_wrapper(*args, **kwargs):
+            owner = kwargs.get("owner") or kwargs.get("owner_account_id") or ""
+            with span(
+                "channel.operation",
+                kind="server",
+                module="channels",
+                component="delivery",
+                operation=operation,
+                attributes={"owner_scope": str(owner), "coverage_status": "instrumented"},
+            ):
+                return function(*args, **kwargs)
+        return sync_wrapper
+    return decorate
 
 
 def is_channel_session_id(session_id: str) -> bool:
@@ -287,6 +323,7 @@ def register_channel_session_tools(registry: Any, session_store: Any, routes: An
     )
 
 
+@_observed_channel("channels.outbound.prepare")
 def build_outbound_channel_envelope(crew: Any, envelope: Any, *, owner: str) -> bool:
     """桌面 WS 发往渠道会话：补全 channel / session_context。返回是否渠道会话。"""
     sid = str(getattr(envelope, "session_id", "") or "")
@@ -313,6 +350,7 @@ def build_outbound_channel_envelope(crew: Any, envelope: Any, *, owner: str) -> 
     return True
 
 
+@_observed_channel("channels.outbound.deliver")
 async def deliver_channel_session_reply(crew: Any, session_id: str, owner: str, text: str) -> bool:
     """把桌面侧生成的回复投递回原渠道。"""
     platform = channel_platform_from_session_id(session_id)

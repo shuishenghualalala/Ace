@@ -81,6 +81,14 @@ describe('resolveShellNavigation', () => {
     expect(ids).not.toContain('audit');
   });
 
+  it('keeps the tracing entry hidden until the dev capability gate is ready', () => {
+    expect(resolveShellNavigation('assistant', { tracing: 'hidden' }).map((item) => item.id)).not.toContain('tracing');
+    expect(resolveShellNavigation('assistant', { tracing: 'available' })).toContainEqual(expect.objectContaining({
+      id: 'tracing',
+      featureState: 'available',
+    }));
+  });
+
   it('places the Crew brand above the centered horizontal navigation rail', () => {
     localStorage.clear();
     const shell = createApplicationShell({

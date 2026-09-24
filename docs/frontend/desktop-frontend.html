@@ -809,6 +809,13 @@
 </section>
 
 <section>
+  <h2>开发追踪工作台与安全导出（2026-09-23）</h2>
+  <p>桌面端追踪入口同时受可信 <code>--dev</code> 启动信号和 Gateway capabilities 门控；普通启动、权限失效或 Gateway 切换时不显示入口，正在查看时清理缓存并回到对话。页面提供 trace/系统日志切换、模块/组件筛选、Agent Loop/Wiki/Compact 快捷筛选、瀑布与事件详情，以及按需载荷加载。</p>
+  <p>页面激活期间的轮询、分页、payload 请求和导出状态轮询共享 AbortController；deactivate 会停止定时器并取消后台导出。导出保存只把 export_id 交给主进程，由固定 Gateway endpoint 流式写同目录临时文件，再以跨平台原子/备份回滚流程提交目标文件，renderer 不接触任意 URL 或 Blob。</p>
+  <p>renderer 产生的 <code>user.presented</code> 经过 owner/request/session 归属校验；服务端 root trace 建立后记录 <code>user.submitted</code>，不依赖抢跑的客户端 REST 事件。</p>
+</section>
+
+<section>
   <h2>Team/Kanban 看板能力驱动装卸（2026-09-14）</h2>
   <p>Team 与 Dynamic Kanban 两块看板不再随 App 引导无条件安装。新增 <code>features/board-capability.ts</code>：按 <code>/api/config</code> 的 <code>feature_capabilities</code>（<code>product.team</code> / <code>product.dynamic-kanban</code>）独立推导可用性——config 未加载或字段缺席（旧后端）时保持可用（legacy-safe），映射存在而条目缺席或 <code>available ≠ true</code> 时不可用。<code>loadConfig()</code> 拉取后广播 <code>team-kanban:config-change</code>，<code>installTeamKanbanBoards()</code> 安装单元据此独立启停两板（enable → init、disable → dispose，幂等）；app.ts 删除对 kanban-board / team-collaboration-board 的直接导入，中心文件只经 board-hooks 门面与安装单元交互。</p>
   <p>会话内一致性：能力下线时，team/kanban 模式会话的 Inspector 默认 Tab 回落 <code>context</code>，不留死面板。能力刷新仍是拉取式（引导、网关重连恢复、模型 CRUD 后重拉），无推送通道。</p>

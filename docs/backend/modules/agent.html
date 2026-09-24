@@ -173,7 +173,11 @@ deadline: runtime.turn_deadline_seconds         # 默认 0=不限
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0013-background-result-notification-contributors.html">ADR-0013</a> · <a href="../adr/0024-agent-preset-contribution-registry.html">ADR-0024</a> · <a href="../adr/0028-external-runtime-feature-lifecycle.html">ADR-0028</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-agent-preset.html">Agent Preset 测试记录</a> · <a href="../../testing/plugin-architecture-stage-4a-external-runtime.html">4A-2 测试记录</a></div>
+  <h2>本次更新：Agent Loop 与 Compact 观测（2026-09-23）</h2>
+  <p>Agent Loop 为每次迭代写入稳定的 <code>module=agent</code>/<code>component=loop</code> 事件，包含 iteration、budget 和 grace 信息；避免在 async generator 的 yield 期间泄漏 provider ContextVar。Compact 的 concrete public boundary 产生 <code>module=agent</code>/<code>component=compact</code> span，operation 分别标识 view/maybe/force/now。</p>
+  <p>工具执行仍区分逻辑调用、重试和实际 tool span，MCP 常驻 worker 取出队列项时 attach/reset 不可变 observation context。</p>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../../testing/observability-tracing.html">可观测测试记录</a></div>
 </div>
 </body>
 </html>

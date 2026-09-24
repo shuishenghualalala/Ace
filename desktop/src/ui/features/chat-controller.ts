@@ -81,7 +81,8 @@ import {
   isRuntimeStaffingFollowup,
 } from '../followup';
 import type { FollowupAnswer } from '../backend-client';
-import type { ChatChunk, WikiIngestProgress } from '../backend-client';
+import { backendApi, type ChatChunk, type WikiIngestProgress } from '../backend-client';
+import { isObservationDevLaunch } from '../../shared/observability';
 import { makeSessionTitle } from './history-mapping';
 import { applyFoldState, createChatRenderCoalescer, createStreamingPatchCoalescer } from '../render-utils';
 import { getToolFold, setToolFold } from './fold-state';
@@ -924,6 +925,19 @@ export function applyChunk(incomingChunk: ChatChunk): void {
   }
 }
 
+function reportObservationClientEvent(payload: Record<string, unknown>): void {
+  // The renderer is a presentation observer only; the gateway verifies the
+  // request/session owner before accepting this best-effort notification.
+  if (!isObservationDevLaunch()) return;
+  const report = backendApi.tracingClientEvent;
+  if (typeof report !== 'function') return;
+  try {
+    void report(payload).catch(() => undefined);
+  } catch {
+    // Older test doubles and older backends may not expose this optional path.
+  }
+}
+
 function applyChunkInner(incomingChunk: ChatChunk): void {
   const sourceSid = incomingChunk.session_id || state.activeSessionId || 'default';
   const sid = incomingChunk.kind === 'followup_question'
@@ -1312,6 +1326,22 @@ function applyChunkInner(incomingChunk: ChatChunk): void {
     if (parsed.kind === 'error') setStatusWithUi(sid, 'error');
     renderWorkspaceHistory(openSessionFn);
     renderChat();
+    const presentedMessages = getMessages(sid);
+    const presentedAssistant = [...presentedMessages].reverse().find((message) => message.role === 'assistant');
+    reportObservationClientEvent({
+      name: 'user.presented',
+      session_id: sid,
+      request_id: reqId || undefined,
+      message_id: presentedAssistant?.id,
+      presentation: {
+        status: parsed.kind === 'error' ? 'error' : 'completed',
+        content_chars: presentedAssistant?.content?.length || 0,
+      },
+      attributes: {
+        renderer: 'desktop',
+        status: parsed.kind === 'error' ? 'error' : 'completed',
+      },
+    });
     return;
   }
 

@@ -20,6 +20,16 @@ const api = {
   windowIsMaximized: () => ipcRenderer.invoke('window:isMaximized'),
   appQuit: () => ipcRenderer.invoke('app:quit'),
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
+  getLaunchMode: () => ipcRenderer.invoke('app:get-launch-mode') as Promise<{
+    isDevLaunch: boolean;
+    mode: 'dev' | 'account';
+  }>,
+  saveTracingExport: (exportId: string) =>
+    ipcRenderer.invoke('tracing:save-export', { exportId }) as Promise<{
+      ok: boolean;
+      canceled?: boolean;
+      path?: string;
+    }>,
   runtimePlatform: process.platform,
   onMaximizedChanged: (cb: (max: boolean) => void) => {
     ipcRenderer.on('window:maximized-changed', (_e, max) => cb(max));

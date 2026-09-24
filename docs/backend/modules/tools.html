@@ -350,7 +350,10 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0024-agent-preset-contribution-registry.html">ADR-0024</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-agent-preset.html">Agent Preset 测试记录</a></div>
+  <h2>本次更新：工具与 MCP 观测（2026-09-23）</h2>
+  <p>工具执行边界记录逻辑调用、实际工具输入输出和错误状态；MCP 队列项携带不可变 observation context，常驻 worker 出队后 attach，完成后 reset，避免跨请求串线。搜索、浏览器、渠道和外部 agent 边界保留 coverage/black-box 标记，未把不可见的第三方内部状态伪装成细粒度 span。</p>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0024-agent-preset-contribution-registry.html">ADR-0024</a> · <a href="../../testing/observability-tracing.html">可观测测试记录</a></div>
 </div>
 </body>
 </html>

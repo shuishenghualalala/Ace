@@ -23,6 +23,7 @@ from crew.agent.compact.summary import (
 from crew.core.errors import ProviderError
 from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
 from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
+from crew.core.observability import install_sink
 
 
 # --------------------------------------------------------------------------- #
@@ -714,6 +715,36 @@ async def test_compact_now_runs_without_watermark():
     assert len(provider.calls) == 1
     # L2 状态已写入：下一轮低水位也能复用
     assert comp._get_state("sess-now") is not None
+
+
+async def test_compact_observation_keeps_owner_and_session_context():
+    class Sink:
+        def __init__(self):
+            self.records = []
+
+        def accept(self, record):
+            self.records.append(record)
+            return True
+
+        def capture_payload(self, *args, **kwargs):
+            raise AssertionError("compact should not capture payloads")
+
+        def flush(self, timeout=None):
+            return True
+
+        def close(self, timeout=None):
+            return True
+
+    sink = Sink()
+    install_sink(sink)
+    try:
+        comp = ContextCompactor(FakeProvider(), token_budget=10**9)
+        await comp.compact_view([], session_id="session-a", owner_account_id="owner-a")
+        assert sink.records
+        assert all(record.context.owner_account_id == "owner-a" for record in sink.records)
+        assert all(record.context.session_id == "session-a" for record in sink.records)
+    finally:
+        install_sink(None)
 
 
 async def test_compact_now_returns_unchanged_when_nothing_to_compact():

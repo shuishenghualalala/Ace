@@ -129,7 +129,11 @@ async for chunk in app.handle(envelope):
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0013-background-result-notification-contributors.html">ADR-0013</a> · <a href="../adr/0019-browser-host-loop-feature.html">ADR-0019</a> · <a href="../adr/0020-wiki-knowledge-feature-foundation.html">ADR-0020</a> · <a href="../adr/0024-agent-preset-contribution-registry.html">ADR-0024</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-agent-preset.html">Agent Preset 测试记录</a></div>
+  <h2>本次更新：应用生命周期观测（2026-09-23）</h2>
+  <p><code>CrewApp</code> 在启动阶段装配独立 TraceStore、recorder 和日志 Handler，在关闭阶段先停止生产、排空 writer，再关闭数据库；不可用时退回 Noop sink。每个真实交互在 root span 建立后记录 <code>user.submitted</code>，避免 renderer 先于服务端 trace 写入而丢失事实。</p>
+  <p>provider、工具、Wiki、Compact、MCP、外部 agent 和出站边界复用同一上下文，旧 <code>llm_trace</code>/<code>debug-log</code> 继续可用。</p>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../../testing/observability-tracing.html">可观测测试记录</a></div>
 </div>
 </body>
 </html>

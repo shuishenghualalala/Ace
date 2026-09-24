@@ -95,6 +95,8 @@ export type BackendSocketStatusMeta = {
 const DEFAULT_GATEWAY = 'http://127.0.0.1:8000';
 
 export type CrewBridge = {
+  getLaunchMode?: () => Promise<{ isDevLaunch: boolean; mode: 'dev' | 'account' }>;
+  saveTracingExport?: (exportId: string) => Promise<{ ok: boolean; canceled?: boolean; path?: string }>;
   gatewayFetch?: typeof gatewayFetchBridge;
   gatewayStreamStart?: (
     requestId: string,
@@ -133,7 +135,19 @@ export async function gatewayFetch(path: string, opts?: RequestInit): Promise<Re
   const url = `${gatewayBase()}${path}`;
   const bridge = CrewBridge()?.gatewayFetch;
   if (typeof bridge === 'function') {
-    return gatewayFetchBridge(url, opts);
+    const pending = gatewayFetchBridge(url, opts);
+    if (!opts?.signal) return pending;
+    if (opts.signal.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+    return Promise.race([
+      pending,
+      new Promise<Response>((_, reject) => {
+        opts.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('The operation was aborted.', 'AbortError')),
+          { once: true },
+        );
+      }),
+    ]);
   }
   return fetch(url, opts);
 }

@@ -55,6 +55,7 @@
 @import './capability-hub.css' layer(features);
 @import './wiki-workspace.css' layer(features);
 @import './security-center.css' layer(features);
+@import './tracing.css' layer(features);
 @import './system-page.css' layer(features);
 @import './settings-shell.css' layer(features);
 @import './settings-integrations.css' layer(features);

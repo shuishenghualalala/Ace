@@ -122,6 +122,33 @@ def test_load_config_reads_external_security_switch(tmp_path: Path):
     assert loaded.external_security_enabled is False
 
 
+def test_managed_observability_environment_overrides_shared_config(tmp_path: Path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"runtime": {"observability": {
+            "enabled": True,
+            "developer_access": True,
+            "capture_profile": "content_redacted",
+        }}}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CREW_OBSERVABILITY_ENABLED", "1")
+    monkeypatch.setenv("CREW_OBSERVABILITY_DEVELOPER_ACCESS", "0")
+    monkeypatch.setenv("CREW_OBSERVABILITY_CAPTURE_PROFILE", "metadata")
+    loaded = load_config(config_path=str(config_path))
+    assert loaded.observability_enabled is True
+    assert loaded.observability_developer_access is False
+    assert loaded.observability["capture_profile"] == "metadata"
+
+    # The same trusted variables work on a fresh install with no config file;
+    # ordinary/external processes simply do not receive them.
+    monkeypatch.setenv("CREW_OBSERVABILITY_DEVELOPER_ACCESS", "1")
+    monkeypatch.setenv("CREW_OBSERVABILITY_CAPTURE_PROFILE", "content_redacted")
+    fresh = load_config(config_path=str(tmp_path / "missing.yaml"))
+    assert fresh.observability_developer_access is True
+    assert fresh.observability["capture_profile"] == "content_redacted"
+
+
 def test_load_config_defaults_external_security_to_disabled(tmp_path: Path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(

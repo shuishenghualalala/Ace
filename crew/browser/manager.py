@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import errno
+import functools
 import hashlib
 import inspect
 import json
 import math
 import os
 import re
-import secrets
 import shutil
 import stat
 import struct
@@ -22,18 +21,41 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
-from urllib.parse import urlsplit
 
 from crew.browser.driver import BrowserDriver, BrowserDriverError, BrowserOperationCancelled
 from crew.browser.electron_driver import ElectronBrowserDriver
 from crew.browser.security import BrowserNetworkPolicy, LoopbackPolicyProxy, path_is_within
 from crew.browser.tab_reading import PAGE_TEXT_LIMIT, PAGE_TEXT_SCRIPT, parse_page_text_result
 from crew.browser.types import BATCH_STEP_TOOLS, BrowserConfig, BrowserPageState, BrowserRef
+from crew.core.observability import span
 from crew.core.types import MediaPart, ToolOutput, ToolPermissionDecision
 from crew.state.home import get_owner_runtime_home
 from crew.state.logging import get_logger
 
 log = get_logger("browser.manager")
+
+
+def _observed_browser(operation: str):
+    """Record browser operations while keeping the driver boundary black-box safe."""
+    def decorate(function):
+        @functools.wraps(function)
+        async def wrapped(self, *args, **kwargs):
+            owner = kwargs.get("owner_id") or (args[0] if args else "")
+            with span(
+                "browser.operation",
+                kind="client",
+                module="browser",
+                component="manager",
+                operation=operation,
+                attributes={
+                    "owner_scope": str(owner or ""),
+                    "coverage_status": "black_box",
+                    "driver_boundary": "external",
+                },
+            ):
+                return await function(self, *args, **kwargs)
+        return wrapped
+    return decorate
 
 # Snapshot 的原生 ref 只在 ariaSnapshot 节点键里有结构意义。Accessible name
 # 也可能包含同形的 ``[ref=e17]`` 文本，因此必须按行解析结构位置，不能全局替换。
@@ -2174,6 +2196,7 @@ class BrowserManager:
         if session.mode == "paused":
             raise BrowserDriverError("浏览器动作已暂停")
 
+    @_observed_browser("browser.navigate")
     async def navigate(self, owner_id: str, session_id: str, url: str, *, workdir: str = "") -> str:
         safe_url = self.policy.validate_navigation_url(url)
         owner = await self._owner(owner_id)
@@ -2217,6 +2240,7 @@ class BrowserManager:
             session.last_action = f"导航到 {_public_url(safe_url)}"
             return await self._observe_after_mutation(owner, session, workdir=workdir)
 
+    @_observed_browser("browser.snapshot")
     async def snapshot(
         self, owner_id: str, session_id: str, *, full: bool = False, workdir: str = ""
     ) -> str:
@@ -2257,6 +2281,7 @@ class BrowserManager:
             else ("--text", str(text))
         )
 
+    @_observed_browser("browser.find")
     async def find(
         self,
         owner_id: str,
@@ -2734,6 +2759,7 @@ class BrowserManager:
             )
         return seconds, text, text_gone
 
+    @_observed_browser("browser.click")
     async def click(
         self,
         owner_id: str,
@@ -3917,6 +3943,7 @@ class BrowserManager:
             )
             return f"evaluation_result:\n{evaluation}\n{observation}"
 
+    @_observed_browser("browser.run_code")
     async def run_code_unsafe(
         self,
         owner_id: str,
@@ -5997,6 +6024,7 @@ class BrowserManager:
             await self._publish(owner.owner, session.session_id, {"type": "state", "state": state})
             return state
 
+    @_observed_browser("browser.open_for_user")
     async def open_for_user(
         self,
         owner_id: str,

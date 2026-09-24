@@ -17,6 +17,7 @@ import { createSystemPageView, type SystemPageView } from './system-page-view';
 import { createStatus } from '../components/controls';
 import { createIcon, type IconId } from '../components/icon';
 import { setRuntimeStyle } from '../components/runtime-style';
+import { isObservationDevLaunch } from '../../shared/observability';
 
 // ── 工具函数 ────────────────────────────────────────
 function fmtUptime(seconds: number): string {
@@ -322,11 +323,46 @@ export async function renderSystemLogs(): Promise<void> {
     return;
   }
   try {
-    const data = await backendApi.systemLogs({
-      level: logLevel || undefined,
-      q: logKeyword || undefined,
-      limit: 500,
-    });
+    let data: { items: LogEntry[]; total: number };
+    if (isObservationDevLaunch()) {
+      try {
+        const capabilities = await backendApi.tracingCapabilities();
+        if (capabilities.available) {
+          const tracingLogs = await backendApi.tracingLogs({
+            ...(logLevel ? { level: logLevel } : {}),
+            ...(logKeyword ? { q: logKeyword } : {}),
+            limit: 500,
+          });
+          data = {
+            total: tracingLogs.total,
+            items: tracingLogs.items.map((entry) => ({
+              ts: Number(entry.occurred_at_us || 0) / 1_000_000,
+              level: entry.level || 'INFO',
+              name: [entry.module, entry.component].filter(Boolean).join('.') || entry.name,
+              message: entry.message || entry.name,
+            })),
+          };
+        } else {
+          data = await backendApi.systemLogs({
+            level: logLevel || undefined,
+            q: logKeyword || undefined,
+            limit: 500,
+          });
+        }
+      } catch {
+        data = await backendApi.systemLogs({
+          level: logLevel || undefined,
+          q: logKeyword || undefined,
+          limit: 500,
+        });
+      }
+    } else {
+      data = await backendApi.systemLogs({
+        level: logLevel || undefined,
+        q: logKeyword || undefined,
+        limit: 500,
+      });
+    }
     const items = data.items;
     if (countEl) countEl.textContent = String(items.length);
     if (items.length === 0) {

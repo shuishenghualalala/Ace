@@ -38,6 +38,7 @@ from crew.agent.file_changes import (
 from crew.agent.skills import SkillActivation
 from crew.core.envelope import ResponseChunk
 from crew.core.followup import drain_followup_answer_messages
+from crew.core.observability import event
 from crew.core.interfaces import (
     AcpAdapterError,
     AcpPermissionRequest,
@@ -916,6 +917,17 @@ class ExternalExecutor(AgentExecutor):
         """
 
         cwd = str(ctx.cwd or self.config.cwd or ".")
+        event(
+            "external.agent.started",
+            module="external_agent",
+            component="runtime",
+            operation="external.agent.execute",
+            attributes={
+                "coverage_status": "black_box",
+                "driver_boundary": "external",
+                "external_agent_id": str(self.config.external_agent_id or ""),
+            },
+        )
         async with workspace_change_coordinator.lease([cwd]):
             tracker = TurnFileChangeTracker(cwd)
             tool_arguments: dict[str, tuple[str, dict[str, Any]]] = {}
@@ -962,6 +974,16 @@ class ExternalExecutor(AgentExecutor):
                             sequence=file_sequence,
                         )
                     emitted_terminal = True
+                    event(
+                        "external.agent.completed",
+                        module="external_agent",
+                        component="runtime",
+                        operation="external.agent.execute",
+                        attributes={
+                            "coverage_status": "black_box",
+                            "terminal_kind": chunk.kind,
+                        },
+                    )
                 yield chunk
 
     async def _execute_impl_with_services(self, ctx: ExecutionContext) -> AsyncIterator[ResponseChunk]:

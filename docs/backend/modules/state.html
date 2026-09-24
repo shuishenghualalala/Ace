@@ -145,7 +145,11 @@ runtime.health_port                     # 独立线程 health 服务端口，默
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+  <h2>本次更新：TraceStore 与有界写入（2026-09-23）</h2>
+  <p><code>TraceStore</code> 使用独立 SQLite 文件、owner scope、外键和 WAL（不支持 WAL 的文件系统回退 DELETE）。无受信业务归属的启动/第三方日志写入独立 <code>system</code> scope，不伪装成 <code>local</code>；系统追踪日志由诊断管理员专用查询合并展示，trace/span/payload 仍严格按 owner 隔离。<code>ObservationRecorder</code> 在业务线程完成脱敏后进入有界队列，由单一 writer 以批量事务写入；队列满、SQLite 忙或关闭超时只标记降级，不阻塞业务收尾。trace 计数和字节账本有固定上限，关闭不会在满队列上无限等待，stop 哨兵也会完成队列计数。</p>
+  <p>payload schema 保存 <code>capture_layer</code>、policy/version、截断原因及引用水位。分页查询使用 keyset cursor；导出通过独立临时文件分页生成，并在 manifest 中记录 snapshot 水位、数量与 partial 原因。</p>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../../testing/observability-tracing.html">可观测测试记录</a></div>
 </div>
 </body>
 </html>

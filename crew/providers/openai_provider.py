@@ -20,6 +20,7 @@ from crew.core.errors import (
     is_unsupported_image_input_error,
 )
 from crew.core.interfaces import LLMProvider
+from crew.core.observability import capture_payload, event
 from crew.core.types import (
     IMAGE_INPUT_UNAVAILABLE_NOTICE,
     ChatResponse,
@@ -419,6 +420,8 @@ class OpenAIProvider(LLMProvider):
             payload["tool_choice"] = "auto"
 
         session = _current_session()
+        request_capture = capture_payload("llm.request", payload, attributes={"capture_layer": "provider_arguments"})
+        event("llm.request.provider", attributes={"payload_id": request_capture.payload_id, "capture_state": request_capture.capture_state, "provider": "openai", "model": self.model})
         llm_trace("request", {
             "session_id": session, "model": self.model, "stream": False,
             "purpose": purpose or "",
@@ -473,6 +476,18 @@ class OpenAIProvider(LLMProvider):
             "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls],
             "finish_reason": choice.finish_reason, "usage": usage, "reasoning": reasoning_content,
         })
+        response_capture = capture_payload(
+            "llm.response",
+            {
+                "text": msg.content or "",
+                "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls],
+                "finish_reason": choice.finish_reason,
+                "usage": usage,
+                "reasoning": reasoning_content,
+            },
+            attributes={"capture_layer": "assembled_response"},
+        )
+        event("llm.response.provider", attributes={"payload_id": response_capture.payload_id, "capture_state": response_capture.capture_state})
 
         return ChatResponse(
             text=msg.content or "",
@@ -514,6 +529,8 @@ class OpenAIProvider(LLMProvider):
             payload["tool_choice"] = "auto"
 
         session = _current_session()
+        request_capture = capture_payload("llm.request", payload, attributes={"capture_layer": "provider_arguments"})
+        event("llm.request.provider", attributes={"payload_id": request_capture.payload_id, "capture_state": request_capture.capture_state, "provider": "openai", "model": self.model})
         llm_trace("request", {
             "session_id": session, "model": self.model, "stream": True,
             "messages": payload["messages"],
@@ -807,6 +824,18 @@ class OpenAIProvider(LLMProvider):
             "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in assembled_tool_calls],
             "finish_reason": finish_reason, "reasoning": reasoning_content,
         })
+        response_capture = capture_payload(
+            "llm.response",
+            {
+                "text": full_text,
+                "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in assembled_tool_calls],
+                "finish_reason": finish_reason,
+                "usage": usage,
+                "reasoning": reasoning_content,
+            },
+            attributes={"capture_layer": "assembled_response"},
+        )
+        event("llm.response.provider", attributes={"payload_id": response_capture.payload_id, "capture_state": response_capture.capture_state})
 
         yield StreamChunk(
             delta_text="",

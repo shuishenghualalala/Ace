@@ -20,6 +20,7 @@ todo 状态不在此处重注入：Crew 由 runtime._plan_reminder_blocks 每轮
 from __future__ import annotations
 
 import asyncio
+from functools import wraps
 from collections.abc import Callable
 
 from crew.agent.compact.file_manifest import (
@@ -46,6 +47,7 @@ from crew.agent.compact.summary import (
 from crew.agent.compact.tokens import estimate_tokens
 from crew.core.interfaces import LLMProvider
 from crew.core.runctx import current_owner_account_id
+from crew.core.observability import SYSTEM_OWNER_ACCOUNT_ID, span
 from crew.core.types import Message
 from crew.state.logging import get_logger
 
@@ -66,6 +68,34 @@ SummaryKey = tuple[str, str]
 # compaction 事件自包含落库（session_events 只增不改）：
 # sink(session_id, owner_account_id, summary, covered_count, view_estimate)。
 CompactionEventSink = Callable[[str, str, str, int, int], None]
+
+
+def _observed_compaction(operation: str):
+    """Add one stable observation boundary to each public compaction operation."""
+    def decorate(function):
+        @wraps(function)
+        async def wrapped(self, *args, **kwargs):
+            raw_session_id = kwargs.get("session_id")
+            if raw_session_id is None and len(args) > 1:
+                raw_session_id = args[1]
+            session_id = raw_session_id if isinstance(raw_session_id, str) else ""
+            owner = kwargs.get("owner_account_id")
+            if owner is None and len(args) > 2:
+                owner = args[2]
+            if not isinstance(owner, str) or not owner:
+                owner = SYSTEM_OWNER_ACCOUNT_ID
+            with span(
+                "context.compact",
+                module="agent",
+                component="compact",
+                operation=operation,
+                owner_account_id=owner,
+                session_id=session_id,
+                attributes={"session_id": session_id},
+            ):
+                return await function(self, *args, **kwargs)
+        return wrapped
+    return decorate
 
 
 class ContextCompactor:
@@ -289,6 +319,7 @@ class ContextCompactor:
         split = self._safe_split(view, self.keep_recent)
         return split >= _MIN_OLD_FOR_SUMMARY
 
+    @_observed_compaction("context.compact.view")
     async def compact_view(
         self,
         messages: list[Message],
@@ -392,6 +423,7 @@ class ContextCompactor:
         except Exception:  # noqa: BLE001
             log.warning("compaction 事件落库失败 session=%s", session_id)
 
+    @_observed_compaction("context.compact.maybe")
     async def maybe_compact(
         self,
         messages: list[Message],
@@ -450,6 +482,7 @@ class ContextCompactor:
         self._emit_compaction_event(session_id, owner_account_id, new_state, after)
         return result
 
+    @_observed_compaction("context.compact.force")
     async def force_compact(
         self,
         messages: list[Message],
@@ -491,6 +524,7 @@ class ContextCompactor:
             )
         return result
 
+    @_observed_compaction("context.compact.now")
     async def compact_now(
         self,
         messages: list[Message],

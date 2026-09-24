@@ -40,6 +40,7 @@ from crew.agent.subagent.context import (
     build_subagent_notification_handler,
 )
 from crew.core.envelope import Envelope, ResponseChunk
+from crew.core.observability import bind_observation, capture_payload, event, install_sink, remove_sink, span
 from crew.core.interfaces import Agent, LLMProvider, MemoryProvider, SessionStore, WorkspaceStore
 from crew.evolution import EvolutionManager, EvolutionQueue
 from crew.features import (
@@ -92,9 +93,11 @@ from crew.state.config import (
     write_env_key,
 )
 from crew.state.credentials import delete_stored_key, store_key
-from crew.state.home import ensure_crew_home, resolve_crew_home_path
+from crew.state.home import ensure_crew_home, get_crew_home, resolve_crew_home_path
 from crew.state.logging import get_logger, setup_logging
 from crew.state.session_store import SQLiteSessionStore
+from crew.state.observability import ObservationLogHandler, ObservationPolicy, ObservationRecorder
+from crew.state.trace_store import TraceStore
 from crew.state.workspace_store import SQLiteWorkspaceStore
 from crew.tasks import TaskRuntime
 from crew.tasks.context import contribute_task_notifications
@@ -710,6 +713,11 @@ class CrewApp:
         self._auxiliary_providers: list[LLMProvider] = []
         self._shutdown_lock = asyncio.Lock()
         self._shutdown_complete = False
+        # Installed by build_app after all core stores are ready.  Keeping these
+        # attributes on App lets embedded hosts inject Noop/alternate sinks.
+        self.observability_store: TraceStore | None = None
+        self.observability: ObservationRecorder | None = None
+        self._observability_log_handler: ObservationLogHandler | None = None
 
         # cron / mcp 由 build_app 装配后赋值；startup/shutdown 统一拉起与关闭
         self.cron_store = None
@@ -2632,6 +2640,21 @@ class CrewApp:
         self.security_service.close()
         self.security_rules.close()
         self.security_audit.close()
+        handler = self._observability_log_handler
+        if handler is not None:
+            import logging
+
+            logging.getLogger().removeHandler(handler)
+            self._observability_log_handler = None
+        recorder = self.observability
+        if recorder is not None:
+            remove_sink(recorder)
+            recorder.close(timeout=3.0)
+            self.observability = None
+        store = self.observability_store
+        if store is not None:
+            store.close()
+            self.observability_store = None
         self._close_persistent_stores()
 
     def _close_persistent_stores(self) -> None:
@@ -2660,6 +2683,20 @@ class CrewApp:
             getattr(getattr(self, "sites", None), "store", None),
             getattr(getattr(getattr(self, "sites", None), "blueprint", None), "store", None),
         ]
+        handler = self._observability_log_handler
+        if handler is not None:
+            import logging
+
+            logging.getLogger().removeHandler(handler)
+            self._observability_log_handler = None
+        recorder = self.observability
+        if recorder is not None:
+            remove_sink(recorder)
+            recorder.close(timeout=3.0)
+            self.observability = None
+        if self.observability_store is not None:
+            self.observability_store.close()
+            self.observability_store = None
         work_record = self.plugins.feature_runtime.get("product.work")
         if (
             self.work_service is not None
@@ -3488,6 +3525,56 @@ class CrewApp:
         return ContextContribution(params={"referenced_paths": refs})
 
     async def handle(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
+        """Run one accepted operation inside a root observation trace."""
+        with bind_observation(
+            owner_account_id=str(envelope.user_id or "local"),
+            workspace_id=str(envelope.workspace_id or "default"),
+            session_id=str(envelope.session_id or ""),
+            request_id=str(envelope.request_id or ""),
+            source="backend",
+            module="gateway",
+            component="dispatcher",
+            operation="interaction.handle",
+        ):
+            with span(
+                "interaction",
+                kind="server",
+                attributes={
+                    "mode": str(envelope.mode or ""),
+                    "query_chars": len(str(envelope.query or "")),
+                },
+            ):
+                submitted = capture_payload(
+                    "user.submitted",
+                    {
+                        "query": str(envelope.query or ""),
+                        "attachments": [
+                            {
+                                "id": str(item.get("id") or ""),
+                                "name": str(item.get("name") or ""),
+                                "type": str(item.get("type") or ""),
+                                "size": item.get("size"),
+                            }
+                            for item in (envelope.attachments or [])
+                            if isinstance(item, dict)
+                        ],
+                    },
+                    attributes={"capture_layer": "server.interaction"},
+                )
+                event(
+                    "user.submitted",
+                    module="gateway",
+                    component="dispatcher",
+                    operation="interaction.handle",
+                    attributes={
+                        "payload_id": submitted.payload_id,
+                        "capture_state": submitted.capture_state,
+                    },
+                )
+                async for chunk in self._handle_inner(envelope):
+                    yield chunk
+
+    async def _handle_inner(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
         """统一入口：完成公共前处理后解析可插拔执行 Driver。"""
         from crew.core.runctx import current_push_fn
 
@@ -3808,6 +3895,42 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     cfg.apply_platform_config_bridges(platform_registry.all_entries())
 
     app = CrewApp(cfg, provider, registry, session_store, workspace_store, memory, plugins)
+    # Diagnostics are a disposable projection.  Construct it after the App so
+    # failures (permissions, incompatible SQLite file, full disk) can degrade to
+    # Noop without affecting the session/provider stores.
+    try:
+        observability_config = cfg.observability if isinstance(cfg.observability, dict) else {}
+        configured_path = str(observability_config.get("db_path") or "").strip()
+        trace_path = (
+            resolve_crew_home_path(configured_path)
+            if configured_path
+            else str(get_crew_home() / "observability" / "traces.sqlite3")
+        )
+        trace_store = TraceStore(trace_path, wal=cfg.sqlite_wal)
+        recorder = ObservationRecorder(
+            trace_store,
+            policy=ObservationPolicy.from_config(cfg),
+        )
+        policy = recorder.policy
+        trace_store.set_disk_budget(policy.max_disk_bytes)
+        trace_store.maintenance(
+            process_instance_id=recorder.process_instance_id,
+            retention_days=policy.retention_days,
+            max_disk_bytes=policy.max_disk_bytes,
+            export_dir=trace_store.path.parent / "exports",
+        )
+        trace_store.recover_export_jobs(process_instance_id=recorder.process_instance_id)
+        app.observability_store = trace_store
+        app.observability = recorder
+        install_sink(recorder)
+        import logging
+
+        bridge = ObservationLogHandler(recorder)
+        bridge.setFormatter(logging.Formatter("%(message)s"))
+        logging.getLogger().addHandler(bridge)
+        app._observability_log_handler = bridge
+    except Exception as exc:  # noqa: BLE001 - tracing cannot block app startup
+        log.warning("可观测存储不可用，已降级为 no-op: %s", exc)
     # Plugins are discovered before CrewApp constructs the security service.
     # Publish these live dependencies afterward; plugin tools retain the shared
     # services mapping and therefore see the production authorization boundary.

@@ -16,6 +16,9 @@ import * as os from 'os';
 import * as net from 'net';
 import { createHash } from 'crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { Readable, Transform } from 'stream';
+import { pipeline } from 'stream/promises';
+import type { ReadableStream as NodeReadableStream } from 'stream/web';
 import WebSocket from 'ws';
 import { BrowserHost, BrowserHostError } from './browser-host';
 import { loginNewServiceInstance } from './auth-service';
@@ -89,6 +92,7 @@ import {
   DialogSelectFileArgs,
   DialogSelectFolderArgs,
   DialogSaveLocalExportArgs,
+  TracingSaveExportArgs,
   InspirationWindowArgs,
   UpdateStartDownloadArgs,
   SecurityPendingArgs,
@@ -143,6 +147,7 @@ import {
 import { evaluateVersionUpdate } from './version-compare';
 import { resolveWorkspaceDirectoryInfo } from './workspace-directory';
 import { configurePptxWasmRuntime, PPTX_WASM_V8_FLAGS } from './wasm-runtime';
+import { commitDownloadedExport } from './tracing-export-file';
 
 // 必须早于 app.whenReady()/BrowserWindow 创建；该开关随同一安装包跨 Windows、macOS、Linux 生效。
 configurePptxWasmRuntime(app.commandLine);
@@ -1531,6 +1536,7 @@ function startWindowsPackagedGateway(port: number): void {
         ...process.env,
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        ...managedGatewayModeEnv(gatewayIdentityMode, activeGatewayCrewHome()),
         ...packagedSecurityRuntimeEnv(),
         // 与开发态一致：打包 exe 内嵌 Python 仍可能走 GBK 控制台
         PYTHONIOENCODING: 'utf-8',
@@ -1621,6 +1627,7 @@ function startMacOSPackagedGateway(port: number): void {
         ...process.env,
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        ...managedGatewayModeEnv(gatewayIdentityMode, activeGatewayCrewHome()),
         ...packagedSecurityRuntimeEnv(),
       },
     });
@@ -1690,6 +1697,7 @@ function startLinuxPackagedGateway(port: number): void {
         ...process.env,
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        ...managedGatewayModeEnv(gatewayIdentityMode, activeGatewayCrewHome()),
         ...packagedSecurityRuntimeEnv(),
       },
     });
@@ -2765,6 +2773,10 @@ function registerIpc() {
     version: currentAppVersion(app),
     label: currentAppVersionLabel(app),
   }));
+  trustedHandle('app:get-launch-mode', () => ({
+    isDevLaunch: IS_DEV_LAUNCH,
+    mode: IS_DEV_LAUNCH ? 'dev' : 'account',
+  }));
   ipcMain.on('window:maximized', (e) => {
     assertTrustedRenderer(e);
     e.sender.send('window:maximized-changed', true);
@@ -2822,6 +2834,83 @@ function registerIpc() {
     });
     if (result.canceled || !result.filePath) return { ok: false, canceled: true };
     await fs.promises.copyFile(source, result.filePath);
+    return { ok: true, canceled: false, path: result.filePath };
+  });
+
+  trustedHandle('tracing:save-export', async (_e, raw: unknown) => {
+    const args = parseOrThrow(TracingSaveExportArgs.parse(raw), 'tracing:save-export');
+    const { baseUrl } = await ensureGateway();
+    const exportPath = `/api/tracing/exports/${args.exportId}`;
+    const buildGatewayHeaders = (): Record<string, string> => {
+      const headers: Record<string, string> = { ...gatewayAccessHeaders(exportPath) };
+      const identity = usesGatewayRemoteAuth() ? gatewayIdentityHeaders() : null;
+      if (usesGatewayRemoteAuth() && !identity) throw new Error('追踪导出需要有效登录态');
+      Object.assign(headers, identity || {});
+      return headers;
+    };
+    const statusResponse = await fetchGatewayWithStartupRetry(`${baseUrl}${exportPath}`, {
+      headers: buildGatewayHeaders(),
+    });
+    if (!statusResponse.ok) {
+      const detail = (await statusResponse.text().catch(() => '')).slice(0, 500);
+      throw new Error(`追踪导出状态查询失败 (${statusResponse.status})${detail ? `: ${detail}` : ''}`);
+    }
+    const statusBody = await statusResponse.json() as { status?: string; format?: string };
+    if (statusBody.status !== 'completed' && statusBody.status !== 'partial') {
+      throw new Error('追踪导出尚未完成');
+    }
+    const format = statusBody.format === 'json' || statusBody.format === 'csv' || statusBody.format === 'jsonl'
+      ? statusBody.format
+      : 'jsonl';
+    const extension = format === 'jsonl' ? 'jsonl' : format;
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      title: '保存追踪导出',
+      defaultPath: path.join(app.getPath('downloads'), `ace-traces-${args.exportId}.${extension}`),
+      filters: [
+        { name: 'JSONL', extensions: ['jsonl', 'ndjson'] },
+        { name: 'JSON', extensions: ['json'] },
+        { name: 'CSV', extensions: ['csv'] },
+      ],
+    });
+    if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+
+    const downloadPath = `${exportPath}/download`;
+    const response = await fetchGatewayWithStartupRetry(`${baseUrl}${downloadPath}`, {
+      headers: buildGatewayHeaders(),
+    });
+    if (!response.ok) {
+      const detail = (await response.text().catch(() => '')).slice(0, 500);
+      throw new Error(`追踪导出下载失败 (${response.status})${detail ? `: ${detail}` : ''}`);
+    }
+    const declaredLength = Number(response.headers.get('content-length') || 0);
+    const maxBytes = 64 * 1024 * 1024;
+    if (declaredLength > maxBytes) throw new Error('追踪导出超过大小上限');
+    if (!response.body) throw new Error('追踪导出没有可读取的数据流');
+
+    let totalBytes = 0;
+    const limiter = new Transform({
+      transform(chunk: Buffer | string, _encoding, callback) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        totalBytes += buffer.byteLength;
+        if (totalBytes > maxBytes) {
+          callback(new Error('追踪导出超过大小上限'));
+          return;
+        }
+        callback(null, buffer);
+      },
+    });
+    const tempPath = `${result.filePath}.${args.exportId}.${process.hrtime.bigint().toString()}.tmp`;
+    try {
+      await pipeline(
+        Readable.fromWeb(response.body as unknown as NodeReadableStream),
+        limiter,
+        fs.createWriteStream(tempPath, { flags: 'wx', mode: 0o600 }),
+      );
+      await commitDownloadedExport(tempPath, result.filePath);
+    } catch (error) {
+      await fs.promises.unlink(tempPath).catch(() => undefined);
+      throw error;
+    }
     return { ok: true, canceled: false, path: result.filePath };
   });
 
