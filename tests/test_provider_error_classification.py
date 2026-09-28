@@ -57,6 +57,29 @@ def test_classify_429_with_retry_after():
     assert c.category == "rate_limit"
 
 
+def test_classify_burst_protection_as_retryable_usage_limit():
+    """突发流量保护：无状态码、SDK 类名为通用 APIError，仅靠消息文本识别。"""
+
+    class APIError(Exception):
+        pass
+
+    exc = APIError(
+        "System protection triggered by request burst. "
+        "Please slow down traffic growth and increase requests gradually "
+        "before retrying. Request id: 0217905776367534b8de4e4bcc885b4197a5e365a"
+    )
+    c = classify_provider_error(exc)
+    assert c.kind is CrewErrorKind.USAGE_LIMIT
+    assert c.retryable is True
+    assert c.status is None
+    assert c.category == "rate_limit"
+
+    # 端到端：包装成 ProviderError 后，executor 重试与流中断续写判定均放行。
+    err = ProviderError(str(exc), retryable=c.retryable, kind=c.kind, status=c.status)
+    assert err.is_retryable() is True
+    assert is_stream_interrupt_recoverable(err) is True
+
+
 def test_classify_401_auth_not_retryable():
     import openai
 

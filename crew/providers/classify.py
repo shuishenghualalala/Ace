@@ -23,6 +23,10 @@ _QUOTA_MESSAGES = ("quota", "insufficient balance", "billing", "credit", "余额
 _TIMEOUT_MESSAGES = ("read timed out", "timed out", "timeout")
 _STREAM_MESSAGES = ("peer closed", "incomplete chunked read", "connection", "read error", "remote protocol")
 
+# 服务商突发流量保护（burst protection）：语义上是限流，服务端明确要求放缓后
+# 重试；但状态码常缺失、SDK 类名是通用 APIError，只能靠消息文本识别。
+_BURST_PROTECTION_MESSAGES = ("system protection", "request burst", "slow down traffic")
+
 # 历史可重试类名白名单：SDK 把底层 httpx 断连/超时包装后常以这些名字出现。
 _RETRYABLE_NAMES = frozenset({
     "RateLimitError", "APITimeoutError", "APIConnectionError", "InternalServerError",
@@ -107,7 +111,11 @@ def _kind_for(exc: Exception, status: int | None) -> CrewErrorKind:
         return CrewErrorKind.CONTEXT_WINDOW_EXCEEDED
     if any(marker in msg for marker in _QUOTA_MESSAGES):
         return CrewErrorKind.QUOTA_EXCEEDED
-    if status == 429 or name == "RateLimitError":
+    if (
+        status == 429
+        or name == "RateLimitError"
+        or any(marker in msg for marker in _BURST_PROTECTION_MESSAGES)
+    ):
         return CrewErrorKind.USAGE_LIMIT
     # 过载与内部错误分开：过载重试无意义（见 _NON_RETRYABLE_KINDS），
     # 其余 5xx（500/502/504）按内部瞬时错误处理。
@@ -136,7 +144,10 @@ def _retryable_for(exc: Exception, kind: CrewErrorKind, status: int | None) -> b
     if type(exc).__name__ in _RETRYABLE_NAMES:
         return True
     msg = str(exc).lower()
-    if any(marker in msg for marker in _TIMEOUT_MESSAGES + _STREAM_MESSAGES):
+    if any(
+        marker in msg
+        for marker in _TIMEOUT_MESSAGES + _STREAM_MESSAGES + _BURST_PROTECTION_MESSAGES
+    ):
         return True
     return False
 
