@@ -58,6 +58,17 @@ def test_renders_headings_paragraphs_lists_links_and_emphasis():
     assert "```\nraw <b>code</b>\n```" in text
 
 
+def test_empty_list_items_are_dropped_not_bare_markers():
+    source = """
+    <ul><li></li><li>   </li><li>real</li><li><span style="display:none">x</span></li></ul>
+    <ol><li></li><li>second</li></ol>
+    """
+    text = render_html(source).text
+    # 空列表项（装饰占位）整条丢弃，输出只剩真实内容两行；
+    # ol 编号跟 HTML 位置语义：空项跳过但第二项仍是 2.
+    assert [line for line in text.splitlines() if line.strip()] == ["- real", "2. second"]
+
+
 def test_tables_render_gfm_without_colspan_expansion():
     source = """
     <table>

@@ -128,8 +128,9 @@ async def search_with_fallback(
     chain = _resolve_chain()
     if not chain:
         raise ToolError(
-            "没有可用的搜索源：请在 config.yaml tools.web_search 配置 "
-            "bocha（BOCHA_API_KEY）或 searxng（searxng_base_url）"
+            "没有可用的搜索源：exa 托管 MCP 无需 key、默认可用，请检查网络或代理"
+            "（network.upstream_proxy）；自建实例可在 config.yaml tools.web_search "
+            "配置 searxng_base_url"
         )
     attempted: list[str] = []
     for pid in chain:

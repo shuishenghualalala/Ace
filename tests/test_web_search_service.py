@@ -21,6 +21,16 @@ from crew.tools.web_search_service import (
 _CTX = SearchContext()
 
 
+def _mcp_sse_response(text: str) -> str:
+    """构造 Exa 托管 MCP 的 SSE 形态响应（event/message + 单行 data）。"""
+    envelope = {
+        "result": {"content": [{"type": "text", "text": text}]},
+        "jsonrpc": "2.0",
+        "id": 1,
+    }
+    return f"event: message\ndata: {json.dumps(envelope, ensure_ascii=False)}\n\n"
+
+
 @pytest.fixture(autouse=True)
 def _restore_service():
     yield
@@ -112,68 +122,43 @@ async def test_no_available_provider_fails_closed_with_config_guidance():
     message = str(excinfo.value)
     assert "没有可用的搜索源" in message
     assert "tools.web_search" in message
-    assert "BOCHA_API_KEY" in message
     assert "searxng_base_url" in message
 
 
 @pytest.mark.asyncio
-async def test_handler_fails_closed_when_nothing_configured(monkeypatch):
-    # 未配置 exa key / bocha key / searxng 地址时，工具不得触网，直接结构化报错。
+async def test_handler_searches_anonymously_without_any_key(monkeypatch):
+    # exa 托管 MCP 匿名免费：不设任何 key 也能搜索（本次改造的核心语义）。
     monkeypatch.delenv("EXA_API_KEY", raising=False)
-    monkeypatch.delenv("BOCHA_API_KEY", raising=False)
     configure_search(None)
-
-    async def forbidden_fetch(*a, **k):
-        raise AssertionError("fail-closed 路径不应发起网络请求")
-
-    monkeypatch.setattr(web_tools, "_authorized_fetch", forbidden_fetch)
-    monkeypatch.setattr(web_tools, "_authorized_json_post", forbidden_fetch)
-
-    with pytest.raises(ToolError, match="没有可用的搜索源"):
-        await web_tools.handle_web_search({"query": "example"})
-
-
-@pytest.mark.asyncio
-async def test_handler_uses_bocha_api_and_prefixes_untrusted_notice(monkeypatch):
-    configure_search({"providers": ["bocha", "searxng"]})
-    monkeypatch.setenv("BOCHA_API_KEY", "test-key")
-    body = {
-        "data": {
-            "webPages": {
-                "value": [
-                    {
-                        "name": "BoCha Result",
-                        "url": "https://result.example",
-                        "snippet": "snippet text",
-                    }
-                ]
-            }
-        }
-    }
     posted = {}
 
-    async def fake_post(url, payload, *, api_key, tool_name, ctx):
-        posted.update(url=url, payload=payload, api_key=api_key)
-        return body
+    async def fake_post(url, payload, *, tool_name, ctx):
+        posted.update(url=url, payload=payload)
+        return _mcp_sse_response(
+            "Title: Exa Result\nURL: https://r.example\nHighlights:\n- snippet text"
+        )
 
-    async def fail_searxng(*a, **k):
-        raise AssertionError("bocha 可用时不应降级到 searxng")
+    async def forbidden_get(*a, **k):
+        raise AssertionError("默认链命中 exa，不应发起 GET 类请求（searxng）")
 
     monkeypatch.setattr(web_tools, "_authorized_json_post", fake_post)
-    monkeypatch.setattr(web_tools, "_authorized_fetch", fail_searxng)
+    monkeypatch.setattr(web_tools, "_authorized_fetch", forbidden_get)
 
     raw = await web_tools.handle_web_search({"query": "example", "limit": 3})
     payload = json.loads(raw)
 
-    assert posted["url"] == web_tools._BOCHA_API_URL
-    assert posted["payload"]["query"] == "example"
-    assert posted["api_key"] == "test-key"
+    assert posted["url"] == web_tools._EXA_MCP_URL
+    assert "exaApiKey" not in posted["url"]
+    call = posted["payload"]
+    assert call["method"] == "tools/call"
+    assert call["params"]["name"] == "web_search_exa"
+    assert call["params"]["arguments"] == {"query": "example", "numResults": 3}
     # 不可信标记恒在结果文本最前（payload 首键）。
     assert payload["notice"] == web_tools._UNTRUSTED_CONTENT_NOTICE
     assert list(payload)[0] == "notice"
-    assert payload["provider"] == "bocha"
+    assert payload["provider"] == "exa"
     assert payload["results"] == [
-        {"title": "BoCha Result", "url": "https://result.example", "snippet": "snippet text"}
+        {"title": "Exa Result", "url": "https://r.example", "snippet": "snippet text"}
     ]
 
 
@@ -223,79 +208,108 @@ async def test_dispose_then_reregister_restores_provider():
 
 
 # ---------------------------------------------------------------------------
-# Exa provider：请求形态、highlights 映射、错误信息提取
+# Exa provider：MCP 请求形态、文本块解析、SSE/JSON 双格式、错误提取
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_exa_maps_first_nonblank_highlight_to_snippet(monkeypatch):
-    monkeypatch.setenv("EXA_API_KEY", "exa-key")
+async def test_exa_maps_text_blocks_to_normalized_results(monkeypatch):
     configure_search({"providers": ["exa"]})
-    posted = {}
 
-    async def fake_post(url, payload, *, api_key, tool_name, ctx):
-        posted.update(url=url, payload=payload, api_key=api_key)
-        return {
-            "results": [
-                {
-                    "url": "https://a.example/page",
-                    "title": "  First\t Result ",
-                    "publishedDate": "2026-09-01",
-                    "highlights": ["", "   ", "actual snippet"],
-                },
-                {
-                    "url": "https://b.example/no-title",
-                    "highlights": ["second snippet"],
-                },
-            ]
-        }
+    async def fake_post(url, payload, *, tool_name, ctx):
+        return _mcp_sse_response(
+            "Title:  First\t Result\n"
+            "URL: https://a.example/page\n"
+            "Published: 2026-09-01\n"
+            "Author: N/A\n"
+            "Highlights:\n"
+            "...\n"
+            "actual snippet\n"
+            "\n---\n\n"
+            "Title: Second\n"
+            "URL: https://b.example/no-meta\n"
+            "Highlights:\n"
+            "- second snippet\n"
+        )
 
     monkeypatch.setattr(web_tools, "_authorized_json_post", fake_post)
 
     outcome = await search_with_fallback("q", 5, _CTX)
 
     assert outcome.provider_id == "exa"
-    assert posted["url"] == "https://api.exa.ai/search"
-    assert posted["api_key"] == "exa-key"
-    assert posted["payload"]["type"] == "auto"
-    assert posted["payload"]["numResults"] == 5
-    assert posted["payload"]["contents"] == {"highlights": {"highlightsPerUrl": 1}}
     assert outcome.results[0].title == "First Result"
+    assert outcome.results[0].url == "https://a.example/page"
+    # 纯省略号填充行被丢弃，只留真实摘要。
     assert outcome.results[0].snippet == "actual snippet"
-    # 上游无 title 时保持空串，不编造。
-    assert outcome.results[1].title == ""
+    # highlights 的项目符号剥离；Published/Author 元数据行不进摘要。
+    assert outcome.results[1].title == "Second"
     assert outcome.results[1].snippet == "second snippet"
 
 
 @pytest.mark.asyncio
-async def test_exa_drops_entries_without_highlight(monkeypatch):
-    monkeypatch.setenv("EXA_API_KEY", "exa-key")
+async def test_exa_keeps_entry_without_highlights_and_drops_invalid_url(monkeypatch):
     configure_search({"providers": ["exa"]})
 
-    async def fake_post(url, payload, *, api_key, tool_name, ctx):
-        return {
-            "results": [
-                {"url": "https://a.example/with", "title": "A", "highlights": ["ok"]},
-                {"url": "https://b.example/without", "title": "B"},
-                {"url": "https://c.example/blank", "title": "C", "highlights": ["  "]},
-                {"url": "notaurl", "title": "D", "highlights": ["ok"]},
-            ]
-        }
+    async def fake_post(url, payload, *, tool_name, ctx):
+        return _mcp_sse_response(
+            "Title: A\nURL: https://a.example/with\nHighlights:\n- ok\n\n---\n\n"
+            "Title: B\nURL: https://b.example/no-highlights\n\n---\n\n"
+            "Title: C\nURL: notaurl\nHighlights:\n- dropped\n"
+        )
 
     monkeypatch.setattr(web_tools, "_authorized_json_post", fake_post)
 
     outcome = await search_with_fallback("q", 5, _CTX)
 
-    assert [item.url for item in outcome.results] == ["https://a.example/with"]
+    # 摘要缺失保留 title/url（snippet=None，不编造）；URL 不合法整段丢弃。
+    assert [(item.url, item.snippet) for item in outcome.results] == [
+        ("https://a.example/with", "ok"),
+        ("https://b.example/no-highlights", None),
+    ]
 
 
-def test_exa_available_requires_key_and_valid_base_url(monkeypatch):
+@pytest.mark.asyncio
+async def test_exa_respects_limit_when_truncating_text_blocks(monkeypatch):
+    configure_search({"providers": ["exa"]})
+
+    async def fake_post(url, payload, *, tool_name, ctx):
+        return _mcp_sse_response(
+            "Title: A\nURL: https://a.example\n\n---\n\n"
+            "Title: B\nURL: https://b.example\n"
+        )
+
+    monkeypatch.setattr(web_tools, "_authorized_json_post", fake_post)
+
+    outcome = await search_with_fallback("q", 1, _CTX)
+
+    assert [item.url for item in outcome.results] == ["https://a.example"]
+
+
+def test_mcp_result_text_parses_plain_json_and_sse():
+    envelope = {"result": {"content": [{"type": "text", "text": "hello"}]}}
+
+    assert web_tools._mcp_result_text(json.dumps(envelope)) == "hello"
+    assert web_tools._mcp_result_text(_mcp_sse_response("hello")) == "hello"
+
+
+def test_mcp_result_text_raises_on_is_error():
+    envelope = {
+        "result": {"isError": True, "content": [{"type": "text", "text": "rate limited"}]}
+    }
+
+    with pytest.raises(ToolError, match="rate limited"):
+        web_tools._mcp_result_text(json.dumps(envelope))
+
+
+def test_exa_mcp_url_anonymous_without_key_and_appends_key_when_set(monkeypatch):
     monkeypatch.delenv("EXA_API_KEY", raising=False)
     configure_search(None)
-    assert web_tools._exa_available() is False
-
-    monkeypatch.setenv("EXA_API_KEY", "exa-key")
+    assert web_tools._exa_mcp_url() == "https://mcp.exa.ai/mcp"
+    # 匿名即默认可用。
     assert web_tools._exa_available() is True
+
+    monkeypatch.setenv("EXA_API_KEY", "k ey/1")
+    assert web_tools._exa_mcp_url() == "https://mcp.exa.ai/mcp?exaApiKey=k%20ey%2F1"
 
     configure_search({"exa_base_url": "http://127.0.0.1:8080"})
     assert web_tools._exa_available() is False
@@ -310,7 +324,7 @@ def test_post_json_url_extracts_error_detail_from_http_error_body(monkeypatch):
     monkeypatch.setattr(web_tools, "request_public_http", raise_http_error)
 
     with pytest.raises(ToolError, match=r"HTTP 401: missing authorization"):
-        web_tools._post_json_url("https://api.exa.ai/search", {}, "key", set())
+        web_tools._post_json_url("https://mcp.exa.ai/mcp", {}, set())
 
 
 def test_post_json_url_falls_back_to_status_when_body_not_parseable(monkeypatch):
@@ -322,38 +336,61 @@ def test_post_json_url_falls_back_to_status_when_body_not_parseable(monkeypatch)
     monkeypatch.setattr(web_tools, "request_public_http", raise_http_error)
 
     with pytest.raises(ToolError, match=r"HTTP 503"):
-        web_tools._post_json_url("https://api.exa.ai/search", {}, "key", set())
+        web_tools._post_json_url("https://mcp.exa.ai/mcp", {}, set())
 
 
-@pytest.mark.asyncio
-async def test_handler_prefers_exa_in_default_chain(monkeypatch):
-    # 默认链按注册序（exa 最先）：只配置 exa key 时命中 exa。
-    monkeypatch.delenv("BOCHA_API_KEY", raising=False)
-    monkeypatch.setenv("EXA_API_KEY", "exa-key")
-    configure_search(None)
+def test_post_json_url_retries_transient_connection_failure(monkeypatch):
+    from crew.security.outbound import PublicHttpResponse
 
-    async def fake_post(url, payload, *, api_key, tool_name, ctx):
-        assert url == "https://api.exa.ai/search"
-        return {
-            "results": [
-                {
-                    "url": "https://a.example",
-                    "title": "Exa Result",
-                    "highlights": ["snippet"],
-                }
-            ]
-        }
+    calls = {"n": 0}
 
-    async def forbidden_get(*a, **k):
-        raise AssertionError("默认链不应走到 GET 类 provider")
+    def flaky_connect(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # 代理链路偶发 TLS 重置：连接层 OSError 包装成的连接失败。
+            raise ValueError("URL 连接失败") from OSError("tls reset")
+        return PublicHttpResponse(
+            url="https://mcp.exa.ai/mcp", body=b"ok",
+            content_type="text/event-stream", charset="utf-8", status=200,
+        )
 
-    monkeypatch.setattr(web_tools, "_authorized_json_post", fake_post)
-    monkeypatch.setattr(web_tools, "_authorized_fetch", forbidden_get)
+    monkeypatch.setattr(web_tools, "request_public_http", flaky_connect)
+    monkeypatch.setattr(web_tools.time, "sleep", lambda _s: None)
 
-    payload = json.loads(await web_tools.handle_web_search({"query": "example"}))
+    assert web_tools._post_json_url("https://mcp.exa.ai/mcp", {}, set()) == "ok"
+    assert calls["n"] == 2
 
-    assert payload["provider"] == "exa"
-    assert payload["notice"] == web_tools._UNTRUSTED_CONTENT_NOTICE
-    assert payload["results"] == [
-        {"title": "Exa Result", "url": "https://a.example", "snippet": "snippet"}
-    ]
+
+def test_post_json_url_does_not_retry_deterministic_rejection(monkeypatch):
+    calls = {"n": 0}
+
+    def always_reject(*a, **k):
+        calls["n"] += 1
+        raise ValueError("禁止访问私网、链路本地或保留地址")
+
+    monkeypatch.setattr(web_tools, "request_public_http", always_reject)
+
+    with pytest.raises(ToolError, match="搜索服务连接失败"):
+        web_tools._post_json_url("https://mcp.exa.ai/mcp", {}, set())
+    # 无 OSError 根因的确定性失败不重试。
+    assert calls["n"] == 1
+
+
+def test_fetch_url_retries_transient_connection_failure(monkeypatch):
+    # web_extract 的 GET 路径与 MCP POST 共用同一重试策略（对称）。
+    calls = {"n": 0}
+
+    def flaky_fetch(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("URL 连接失败") from OSError("tls reset")
+        return ("https://a.example/final", b"<html></html>", "text/html", "utf-8")
+
+    monkeypatch.setattr(web_tools, "fetch_public_http", flaky_fetch)
+    monkeypatch.setattr(web_tools.time, "sleep", lambda _s: None)
+
+    final_url, source = web_tools._fetch_url("https://a.example")
+
+    assert final_url == "https://a.example/final"
+    assert source == "<html></html>"
+    assert calls["n"] == 2

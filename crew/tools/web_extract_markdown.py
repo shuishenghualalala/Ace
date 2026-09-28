@@ -174,9 +174,12 @@ def _render_list(node: _Node) -> str:
     lines = []
     for index, item in enumerate(items, 1):
         body = _render_children(item.children).strip()
+        # 空列表项（导航装饰、主题切换器占位等）整条丢弃，不产生裸 marker 噪音。
+        if not body:
+            continue
         body = re.sub(r"\n", "\n  ", body)
         marker = f"{index}." if node.tag == "ol" else "-"
-        lines.append(f"{marker} {body}" if body else f"{marker}")
+        lines.append(f"{marker} {body}")
     if not lines:
         return ""
     return "\n\n" + "\n".join(lines) + "\n\n"
