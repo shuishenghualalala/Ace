@@ -685,7 +685,7 @@ def register_web_tools(
         is_async=True,
         display_name="网页搜索",
         ui_label_template="搜索 {query}",
-        should_defer=True,
+        should_defer=False,
         search_hint="web search internet query pages current information",
         result_retention=ToolResultRetention.TEMPORARY,
     )
@@ -701,7 +701,7 @@ def register_web_tools(
         is_async=True,
         display_name="提取网页",
         ui_label_template="读取网页 {url}",
-        should_defer=True,
+        should_defer=False,
         search_hint="fetch extract webpage url article content",
         result_retention=ToolResultRetention.TEMPORARY,
     )
