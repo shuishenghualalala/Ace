@@ -665,6 +665,26 @@ describe('renderAgentTurn', () => {
     expect(root.querySelector('.process-timeline__title')?.textContent).not.toContain('正在通读素材');
   });
 
+  it('命令行工具的 stdout 增量不渲染为进度行（最终结果走 Response 块）', () => {
+    const root = renderAgentTurn(
+      makeMessages({
+        thinking: undefined,
+        toolCalls: [{
+          toolCallId: 'term-1',
+          name: 'terminal',
+          args: '{"command":"ls node_modules"}',
+          status: 'running',
+          startedAt: 1_700_000_000_000,
+          progressText: 'docs email handsfree maf-shield',
+          progressHistory: ['docs email handsfree maf-shield', 'import { basename } from "node:path"'],
+        }],
+      }),
+      { isStreaming: true, userPinnedOpen: null, turnDurationMs: 5_000 },
+    );
+    expect(root.querySelector('.process-timeline__progress')).toBeNull();
+    expect(root.textContent).not.toContain('handsfree');
+  });
+
   it('run_agent 渲染 subagent 专用卡片：中文标题 + 任务描述 + 执行摘要', () => {
     const root = renderAgentTurn(
       makeMessages({

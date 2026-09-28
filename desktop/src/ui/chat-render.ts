@@ -616,8 +616,13 @@ const PROGRESS_PREVIEW_CHARS = 2_000;
 /** 已手动展开的进度区（按 toolCallId 记忆，流式重渲染后保持展开状态）。 */
 const expandedProgressTools = new Set<string>();
 
+/** 命令行工具的 progress 不是可读进度，而是原始 stdout 增量（builtin.py 执行期实时透传），
+ *  渲染出来是整段命令输出，直接不渲染；最终结果仍由 Response 块承载。 */
+const STDOUT_PROGRESS_TOOLS = new Set(['bash', 'terminal', 'process']);
+
 /** 将工具阶段进度按产生顺序渲染成独立行，不把最新状态挤进工具标题行。 */
 function appendToolProgressLines(parent: HTMLElement, tool: ToolCallInfo): void {
+  if (STDOUT_PROGRESS_TOOLS.has(String(tool.name || '').trim().toLowerCase())) return;
   const lines = tool.progressHistory?.length
     ? tool.progressHistory
     : tool.progressText
