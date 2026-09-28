@@ -153,6 +153,11 @@ def _persist_tool_result(tool_call_id: str, content: str) -> Path:
     return path
 
 
+def persist_tool_result(tool_call_id: str, content: str) -> Path:
+    """``_persist_tool_result`` 的公开别名：供工具 handler 在 Stage-6 之外自行落盘。"""
+    return _persist_tool_result(tool_call_id, content)
+
+
 def _random_suffix() -> str:
     # 不用 secrets/uuid 以保持纯 stdlib 且可测；时间戳+pid 足够避免并发碰撞
     import os

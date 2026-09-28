@@ -605,6 +605,25 @@ def test_summary_keeps_short_tool_arguments_intact():
     assert "内容已截断" not in transcript
 
 
+def test_summary_web_extract_uses_url_argument():
+    """microcompact 摘要应读取 web_extract 的 url 参数（schema 是单数 url）。"""
+    from crew.agent.compact.microcompact import TOOL_SUMMARY_PREFIX, _summarize_tool_result
+
+    summary = _summarize_tool_result(
+        "web_extract", {"url": "https://example.com/a"}, "x" * 100
+    )
+
+    assert summary == f"{TOOL_SUMMARY_PREFIX}[web_extract] https://example.com/a (100 chars)"
+
+
+def test_summary_web_extract_missing_url_falls_back_to_placeholder():
+    from crew.agent.compact.microcompact import _summarize_tool_result
+
+    summary = _summarize_tool_result("web_extract", {}, "x" * 10)
+
+    assert "[web_extract] ? (10 chars)" in summary
+
+
 # --------------------------------------------------------------------------- #
 # L1 单条 tool result 预算
 # --------------------------------------------------------------------------- #

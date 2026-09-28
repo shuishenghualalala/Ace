@@ -131,10 +131,7 @@ def _summarize_tool_result(
         query = args.get("query", "?")
         body = f"[web_search] query='{query}' ({content_len:,} chars result)"
     elif tool_name == "web_extract":
-        urls = args.get("urls", [])
-        url_desc = urls[0] if isinstance(urls, list) and urls else "?"
-        if isinstance(urls, list) and len(urls) > 1:
-            url_desc += f" (+{len(urls) - 1} more)"
+        url_desc = str(args.get("url") or "?")
         body = f"[web_extract] {url_desc} ({content_len:,} chars)"
     else:
         # 通用 fallback：保留工具名 + 前 2 个参数 + 内容长度

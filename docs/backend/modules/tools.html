@@ -75,7 +75,7 @@
     <thead><tr><th>工具</th><th>说明</th></tr></thead>
     <tbody>
       <tr><td><code>web_search</code></td><td>Exa 托管 MCP 语义搜索（匿名免费、无需 API key，可选 <code>EXA_API_KEY</code> 提额），按 provider 链降级（exa → searxng），返回标题/链接/摘要。</td></tr>
-      <tr><td><code>web_extract</code></td><td>抓取 URL 并提取标题与正文文本。</td></tr>
+      <tr><td><code>web_extract</code></td><td>抓取 URL 转 Markdown。正文内联上限 40k 字符，超限全文落盘到 <code>{CREW_HOME}/tool-results/</code> 并在结果中给 <code>full_text_path</code>（file_read 按需读取），内联部分保头尾中间截断；同 URL 结果进程内缓存 15 分钟（50MB LRU），授权之后才查缓存。结果带 <code>cached</code> 标志。</td></tr>
       <tr><td><code>vision_analyze</code></td><td>分析本地图片的基础元信息（PNG/JPEG 尺寸等）。</td></tr>
     </tbody>
   </table>
@@ -253,6 +253,7 @@
       <tr><td><code>managed_tools.py</code></td><td>托管 ripgrep：下载 / 校验 / 安装 pin 版本</td></tr>
       <tr><td><code>mcp_client.py</code></td><td>MCP Client：连接外部 server，注册其 tools</td></tr>
       <tr><td><code>web_tools.py</code></td><td><code>web_search</code> / <code>web_extract</code> / <code>vision_analyze</code></td></tr>
+      <tr><td><code>web_fetch_cache.py</code></td><td><code>web_extract</code> 抓取结果进程内缓存：TTL 15min + 字节/条数双上限 LRU（线程安全）</td></tr>
       <tr><td><code>site_tools.py</code></td><td><code>publish_site</code>：把 Workspace 中的 App 发布到 Desktop 灵感</td></tr>
       <tr><td><code>skills_tools.py</code></td><td>技能工具：skills_list / skill_view / skill_package_open / skills_repair / skills_audit</td></tr>
       <tr><td><code>memory_tools.py</code></td><td><code>memory</code> 记忆工具</td></tr>
@@ -349,6 +350,7 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
       <tr><td>2026-09-18</td><td><code>file_read</code> 读取引擎：默认/上限 2000 行 + 行号输出 + 行长 2000 截断 + read_max_chars 整行取舍预算 + 续读 footer；负 offset 尾读；≥10 MiB 流式（行缓冲封顶）；头部嗅探拒绝二进制并引导替代通道；UTF-8 严格解码（GBK 报错提示 iconv）、UTF-16 自动转码；观察改 stat-only（写保护 CAS 不变）；post_compact 恢复共享窗口切片。窗口/尾读/预算语义对齐 dsh <code>read</code> 与 kimi <code>Read</code>。</td><td><code>crew/tools/file_utils.py</code>、<code>crew/tools/builtin.py</code>、<code>crew/agent/compact/post_compact.py</code>、<code>config/config.yaml(.example)</code>。</td></tr>
       <tr><td>2026-09-24</td><td><code>web_search</code> 换引擎：exa provider 从 REST API（需 key）改为 Exa 托管 MCP（<code>mcp.exa.ai/mcp</code>，匿名免费零配置；<code>EXA_API_KEY</code> 可选拼 <code>exaApiKey</code> 挂账号）；响应兼容纯 JSON 与 SSE 两种形态，解析 <code>Title:/URL:/Highlights:</code> 文本块；连接层瞬态失败（代理链路偶发 TLS 重置）短退避重试。移除 bocha provider，默认链变为 exa → searxng。</td><td><code>crew/tools/web_tools.py</code>、<code>crew/tools/web_search_service.py</code>、<code>config/config.yaml(.example)</code>、<code>tests/test_web_search_service.py</code></td></tr>
       <tr><td>2026-09-28</td><td><code>web_extract</code> 空列表项清理（导航装饰/主题切换器占位不再产生裸 <code>-</code> marker 噪音，ol 编号保持 HTML 位置语义）；瞬态重试对称化：MCP POST 与 extract GET 共用 <code>_with_transient_retry</code>（5 次短退避，仅重试 OSError 根因的连接层失败；实测部分代理节点到 Cloudflare 系单连接成功率约 40%）。</td><td><code>crew/tools/web_extract_markdown.py</code>、<code>crew/tools/web_tools.py</code>、<code>tests/test_web_extract_markdown.py</code>、<code>tests/test_web_search_service.py</code></td></tr>
+      <tr><td>2026-09-28</td><td><code>web_extract</code> 内容预算提升 + 抓取缓存：内联正文 12k→40k 字符，超限全文按 sha1 内容寻址落盘到 <code>tool-results/</code>（结果带 <code>full_text_path</code>/<code>content_chars</code>，file_read 免审批取回），内联部分保头尾中间截断；组装结果做 JSON 转义后长度自检（预算逐级收紧 40k→20k→4k），保证 Stage-6 兜底恒为 no-op。新增进程内抓取缓存（key=请求 URL，TTL 15min，50MB/256 条双上限 LRU，授权之后才查缓存、只缓存成功结果）；新增 <code>pipeline.persist_tool_result</code> 公开别名。顺手修 microcompact 摘要取错参数名（urls→url）。渲染与落盘走 <code>asyncio.to_thread</code> 不阻塞事件循环。</td><td><code>crew/tools/web_tools.py</code>、<code>crew/tools/web_fetch_cache.py</code>（新）、<code>crew/tools/pipeline.py</code>、<code>crew/agent/compact/microcompact.py</code>、<code>tests/test_web_fetch_cache.py</code>（新）、<code>tests/test_web_extract_markdown.py</code>、<code>tests/security/test_outbound_tools.py</code>、<code>tests/test_compact.py</code></td></tr>
     </tbody>
   </table>
 
