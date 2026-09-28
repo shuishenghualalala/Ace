@@ -570,6 +570,74 @@ def test_writer_lease_released_on_close(tmp_path):
         store2.close()
 
 
+def test_writer_lease_takeover_from_dead_holder(tmp_path):
+    import os
+    import subprocess
+    import sys
+    import time
+
+    db = str(tmp_path / "crew.db")
+    SQLiteSessionStore(db).close()
+
+    # 制造一个真实已死的进程：起子进程并等它退出，强杀/崩溃留下的脏租约即此形态
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT OR REPLACE INTO writer_leases (owner_account_id, session_id, owner_pid, fence, expires_at) "
+        "VALUES ('local', 's1', ?, 2, ?)",
+        (f"{proc.pid}:deadbeefc0de", time.time() + 30.0),
+    )
+    conn.commit()
+    conn.close()
+
+    store = SQLiteSessionStore(db, lease_ttl_seconds=30.0)
+    try:
+        # 持有者已死但租约未过期：立即接管而非报冲突
+        store.save("s1", [Message.user("rescued")], owner_account_id="local")
+        assert [m.content for m in store.load("s1", owner_account_id="local")] == ["rescued"]
+        conn = sqlite3.connect(str(db))
+        row = conn.execute(
+            "SELECT owner_pid, fence FROM writer_leases "
+            "WHERE owner_account_id = 'local' AND session_id = 's1'"
+        ).fetchone()
+        conn.close()
+        assert row[0].split(":", 1)[0] == str(os.getpid())
+        assert row[1] == 3  # fence 2 + 1
+    finally:
+        store.close()
+
+
+def test_startup_sweeps_expired_leases(tmp_path):
+    import time
+
+    db = str(tmp_path / "crew.db")
+    SQLiteSessionStore(db).close()
+
+    conn = sqlite3.connect(str(db))
+    now = time.time()
+    conn.executemany(
+        "INSERT OR REPLACE INTO writer_leases (owner_account_id, session_id, owner_pid, fence, expires_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [
+            ("local", "stale", "999999:aaaa", 1, now - 1.0),
+            ("local", "live", "999998:bbbb", 1, now + 30.0),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    store = SQLiteSessionStore(db)
+    try:
+        conn = sqlite3.connect(str(db))
+        remaining = {r[0] for r in conn.execute("SELECT session_id FROM writer_leases").fetchall()}
+        conn.close()
+        assert remaining == {"live"}
+    finally:
+        store.close()
+
+
 def test_writer_lease_heartbeat_keeps_ownership(tmp_path):
     import asyncio
 

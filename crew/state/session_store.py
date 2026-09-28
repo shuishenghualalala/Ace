@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import threading
 import time
 import uuid
@@ -38,6 +39,46 @@ SESSIONS_SCHEMA_VERSION = 3
 
 class SessionWriteConflict(RuntimeError):
     """另一进程持有该会话的有效 writer 租约，本进程写入被拒绝。"""
+
+
+def _lease_holder_pid_alive(holder: str) -> bool:
+    """探测租约持有者进程是否存活。可在 SQLite 写事务内调用，必须快、无子进程。
+
+    holder 形如 "pid:token"（token 区分同进程多实例）；解析不出有效 pid 时按
+    存活处理，保守退回 TTL 过期接管的老路径，绝不误抢。进程已死则其租约必然
+    无人续约（心跳/写入都会消失），可立即视同过期。
+
+    Windows 不用 os.kill(pid, 0)——它在 Windows 上的语义是 TerminateProcess，
+    探测即杀人；改用 OpenProcess 句柄探测。
+    """
+    try:
+        pid = int(holder.split(":", 1)[0])
+    except ValueError:
+        return True
+    if pid <= 0:
+        return True
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        # PROCESS_QUERY_LIMITED_INFORMATION：仅查询存在性所需的最小权限
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        # ERROR_ACCESS_DENIED：受保护进程存在但拒绝访问 → 仍算活着
+        return ctypes.get_last_error() == 5
+    try:
+        os.kill(pid, 0)  # 信号 0：只探测存在性，不真正发信号
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # 存在但无权限 → 仍算活着
+    except OSError:
+        return False
 
 
 class SessionEventType(str, Enum):
@@ -276,6 +317,9 @@ class SQLiteSessionStore(SessionStore):
 
         每批写入都经此校验 fence：租约被抢占（fence 变化或过期接管）后，
         旧进程的下一次写入即被拒绝，防脑裂。
+
+        持有者进程已死时（强杀/崩溃跳过了 close() 的租约清理）租约必然无人
+        续约，视同过期立即接管，不等 TTL——重启后向旧会话写入不再白等或报错。
         """
         row = conn.execute(
             "SELECT owner_pid, fence, expires_at FROM writer_leases "
@@ -302,16 +346,20 @@ class SQLiteSessionStore(SessionStore):
             )
             self._held_leases[(owner, session_id)] = new_fence
             return new_fence
-        if expires_at > now:
+        holder_alive = _lease_holder_pid_alive(holder)
+        if expires_at > now and holder_alive:
             raise SessionWriteConflict(
                 f"会话 {session_id} 的写者租约被进程 {holder} 持有"
                 f"（{expires_at - now:.0f}s 后到期）"
             )
-        # 过期接管：条件 UPDATE + rows_affected 原子抢占，fence+1
+        # 过期接管 / 持有者已死：条件 UPDATE + rows_affected 原子抢占，fence+1。
+        # owner_pid = holder 把抢占钉死在探测时确认已死的那个持有者上：
+        # 并发接管或持有者复活（PID 被复用）时条件不成立，rowcount=0 走冲突。
         cursor = conn.execute(
             "UPDATE writer_leases SET owner_pid = ?, fence = fence + 1, expires_at = ? "
-            "WHERE owner_account_id = ? AND session_id = ? AND expires_at <= ?",
-            (self._writer_pid, expires, owner, session_id, now),
+            "WHERE owner_account_id = ? AND session_id = ? "
+            "AND (expires_at <= ? OR owner_pid = ?)",
+            (self._writer_pid, expires, owner, session_id, now, holder),
         )
         if cursor.rowcount != 1:
             raise SessionWriteConflict(f"会话 {session_id} 的写者租约接管失败（并发抢占）")
@@ -389,6 +437,11 @@ class SQLiteSessionStore(SessionStore):
             )
             """
         )
+        # 清理已过期的写者租约：持有进程已死或租期已尽后无人续约，陈行只会在
+        # 表里无限累积。活进程的租约必然未过期，不受影响。删除后 fence 从 1
+        # 重新起算不影响防脑裂：续约与写入都对照当前行的 owner_pid/fence 校验，
+        # 不依赖跨删除的全局单调性。
+        conn.execute("DELETE FROM writer_leases WHERE expires_at < ?", (time.time(),))
         cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
         migrations = {
             "owner_account_id": "ALTER TABLE sessions ADD COLUMN owner_account_id TEXT NOT NULL DEFAULT ''",
