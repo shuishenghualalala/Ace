@@ -5,14 +5,18 @@
 
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Callable
 from typing import Any
 
 from crew.state.logging import get_logger
 
-from ._utils import query_terms
+from ._utils import normalize_page_key, query_terms
+from .rerank import RerankingProvider, validate_scores
 from .schemas import WikiPage
 from .store import WikiStore
+from .vector import page_embedding_text
 
 log = get_logger("wiki.query")
 
@@ -20,9 +24,24 @@ log = get_logger("wiki.query")
 class WikiQuerier:
     """从 Wiki 检索相关页面，供主 agent 合成答案。"""
 
-    def __init__(self, store: WikiStore, *, fuse_weight: float = 0.9) -> None:
+    def __init__(
+        self, store: WikiStore, *, fuse_weight: float = 0.9,
+        candidate_limit: int = 50, index_weight: float = 0.0,
+        reranker: RerankingProvider | None = None,
+        reranker_for_owner: Callable[[str], RerankingProvider | None] | None = None,
+        rerank_limit: int = 50,
+    ) -> None:
+        if candidate_limit <= 0 or rerank_limit <= 0:
+            raise ValueError("Candidate and rerank limits must be positive")
+        if any(not math.isfinite(weight) or weight < 0 for weight in (index_weight, fuse_weight)):
+            raise ValueError("Channel weights must be finite and nonnegative")
         self.store = store
         self._fuse_weight = float(fuse_weight)
+        self._candidate_limit = int(candidate_limit)
+        self._index_weight = float(index_weight)
+        self._reranker = reranker
+        self._reranker_for_owner = reranker_for_owner
+        self._rerank_limit = int(rerank_limit)
 
     def query(
         self,
@@ -53,6 +72,8 @@ class WikiQuerier:
         include_context: bool = True,
     ) -> dict[str, Any]:
         """统一检索入口：融合召回，并按需扩展邻居与生成回答上下文。"""
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
         seeds, retrieval = self._retrieve_seed_pages(
             query,
             owner_account_id=owner_account_id,
@@ -91,34 +112,73 @@ class WikiQuerier:
 
         seed_rank = {page.id: index for index, page in enumerate(seeds)}
         terms = query_terms(query)
+        query_key = normalize_page_key(query)
 
-        def _rank(page: WikiPage) -> tuple[float, float]:
+        def _rank(page: WikiPage) -> tuple[int, float, float]:
             score = (
                 100.0 - seed_rank[page.id] * 5
                 if page.id in seed_rank
                 else 45.0
             )
-            claim_text = " ".join(claim.statement for claim in page.claims)
-            searchable = (
-                f"{page.title} {' '.join(page.aliases)} "
-                f"{' '.join(page.tags)} {page.content} {claim_text}"
-            ).casefold()
-            score += sum(6 for term in terms if term and term in searchable)
+            # Direct candidates already carry lexical/vector relevance through
+            # RRF. Only newly expanded neighbors need a query relevance signal.
+            if page.id not in seed_rank:
+                claim_text = " ".join(claim.statement for claim in page.claims)
+                searchable = (
+                    f"{page.title} {' '.join(page.aliases)} "
+                    f"{' '.join(page.tags)} {page.content} {claim_text}"
+                ).casefold()
+                score += sum(6 for term in terms if term and term in searchable)
             if page.confidence == "high":
                 score += 3
             elif page.confidence == "low":
                 score -= 2
             if page.contested:
                 score -= 4
-            return score, page.updated_at
+            exact = 0
+            if query_key and query_key == normalize_page_key(page.title):
+                exact = 2
+            elif query_key and any(query_key == normalize_page_key(a) for a in page.aliases):
+                exact = 1
+            return exact, score, page.updated_at
 
-        results = sorted(candidates, key=_rank, reverse=True)[:top_k]
+        ordered = sorted(candidates, key=_rank, reverse=True)
+        rerank_trace: dict[str, Any] = {"status": "disabled"}
+        try:
+            reranker = (
+                self._reranker_for_owner(owner_account_id)
+                if self._reranker_for_owner is not None else self._reranker
+            )
+            if reranker is not None:
+                pool = ordered[:max(self._rerank_limit, top_k)]
+                rerank_trace = {
+                    "status": "failed", "model": reranker.model,
+                    "candidate_page_ids": [page.id for page in pool],
+                }
+                scores = validate_scores(
+                    reranker.score(query, [page_embedding_text(page) for page in pool]), len(pool),
+                )
+                # Preserve exact title/alias navigation and use the original
+                # fused order to break model-score ties deterministically.
+                ranked = sorted(enumerate(pool), key=lambda item: (
+                    -_rank(item[1])[0], -scores[item[0]], item[0],
+                ))
+                ordered = [page for _, page in ranked]
+                rerank_trace.update(status="ok", scores=scores)
+        except Exception as exc:  # noqa: BLE001 - optional model failure must preserve retrieval
+            rerank_trace.update(status="failed", error_type=type(exc).__name__)
+            status = getattr(exc, "status_code", None)
+            if isinstance(status, int):
+                rerank_trace["http_status"] = status
+            log.warning("Wiki 精排失败，保留召回顺序: %s status=%s", type(exc).__name__, status)
+        results = ordered[:top_k]
         return {
             **({"context": _build_context(results, query)} if include_context else {}),
             "pages": [p.to_dict() for p in results],
             "retrieval": {
                 **retrieval,
                 "expanded_page_ids": expanded_ids,
+                "rerank": rerank_trace,
             },
         }
 
@@ -129,8 +189,8 @@ class WikiQuerier:
         owner_account_id: str,
         top_k: int,
         kb_id: str,
-    ) -> tuple[list[WikiPage], dict[str, list[str]]]:
-        candidate_limit = max(top_k * 2, top_k)
+    ) -> tuple[list[WikiPage], dict[str, Any]]:
+        candidate_limit = max(self._candidate_limit, top_k)
         search_seeds = self.store.search(
             query,
             top_k=candidate_limit,
@@ -153,14 +213,31 @@ class WikiQuerier:
             search_seeds,
             index_seeds,
             vector_seeds,
-            top_k,
+            candidate_limit,
             fuse_weight=self._fuse_weight,
+            index_weight=self._index_weight,
         )
+        # Navigation summaries are a weaker signal than full-text/vector
+        # relevance. By default they fill an undersized pool without changing
+        # the primary channels' order. Positive weights opt into joint RRF.
+        fallback_ids: list[str] = []
+        if self._index_weight == 0:
+            seen = {page.id for page in seeds}
+            for page in index_seeds:
+                if len(seeds) >= candidate_limit:
+                    break
+                if page.id not in seen:
+                    seeds.append(page)
+                    seen.add(page.id)
+                    fallback_ids.append(page.id)
         return seeds, {
             "search_seed_page_ids": [page.id for page in search_seeds],
             "index_seed_page_ids": [page.id for page in index_seeds],
             "vector_seed_page_ids": [page.id for page in vector_seeds],
             "seed_page_ids": [page.id for page in seeds],
+            "candidate_limit": candidate_limit,
+            "channel_weights": {"search": 1.0, "index": self._index_weight, "vector": self._fuse_weight},
+            "index_fallback_page_ids": fallback_ids,
         }
 
 
@@ -171,6 +248,7 @@ def _fuse_seed_channels(
     limit: int,
     *,
     fuse_weight: float = 0.9,
+    index_weight: float = 0.0,
 ) -> list[WikiPage]:
     """用加权 RRF 合并正文搜索、index 导航与语义向量候选。"""
     pages: dict[str, WikiPage] = {}
@@ -179,9 +257,11 @@ def _fuse_seed_channels(
     seen_order = 0
     for weight, channel in (
         (1.0, search_pages),
-        (0.9, index_pages),
+        (index_weight, index_pages),
         (fuse_weight, vector_pages),
     ):
+        if weight <= 0:
+            continue
         for rank, page in enumerate(channel):
             pages[page.id] = page
             scores[page.id] = scores.get(page.id, 0.0) + weight / (60 + rank)

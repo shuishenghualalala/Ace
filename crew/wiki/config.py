@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -112,6 +113,8 @@ class WikiQueryConfig:
     final_output_tokens: int = 2000
     step_output_tokens: int = 8192
     read_chars: int = 6000
+    retrieval_candidates: int = 50
+    rerank_candidates: int = 50
 
     @classmethod
     def from_raw(cls, raw: Any) -> "WikiQueryConfig":
@@ -120,7 +123,8 @@ class WikiQueryConfig:
         config = cls()
         value = raw.get("loop_enabled", True)
         config.loop_enabled = value if isinstance(value, bool) else str(value).lower() in {"true", "1", "yes", "on"}
-        for name in ("max_tool_calls", "max_tokens", "max_seconds", "final_output_tokens", "step_output_tokens", "read_chars"):
+        for name in ("max_tool_calls", "max_tokens", "max_seconds", "final_output_tokens", "step_output_tokens", "read_chars",
+                     "retrieval_candidates", "rerank_candidates"):
             if name in raw:
                 try:
                     value = int(raw[name])
@@ -175,6 +179,39 @@ class WikiSemanticConfig:
 
 
 @dataclass
+class WikiRerankConfig:
+    """Independent reranking service; disabled until explicitly configured."""
+
+    enabled: bool = False
+    model: str = "BAAI/bge-reranker-v2-m3"
+    base_url: str = ""  # Empty: inherit this owner's embedding endpoint.
+    api_key_env: str = ""  # Empty: inherit this owner's embedding credential variable.
+    timeout: float = 30.0
+    max_chunks_per_doc: int = 8
+    max_retries: int = 2
+
+    @classmethod
+    def from_raw(cls, raw: Any) -> WikiRerankConfig:
+        if not isinstance(raw, dict):
+            return cls()
+        enabled = raw.get("enabled", False)
+        config = cls(
+            enabled=enabled if isinstance(enabled, bool) else str(enabled).lower() in {"true", "1", "yes", "on"},
+            model=str(raw.get("model") or "BAAI/bge-reranker-v2-m3").strip(),
+            base_url=str(raw.get("base_url") or "").strip(),
+            api_key_env=str(raw.get("api_key_env") or "").strip(),
+            timeout=float(raw.get("timeout", 30.0)),
+            max_chunks_per_doc=int(raw.get("max_chunks_per_doc", 8)),
+            max_retries=int(raw.get("max_retries", 2)),
+        )
+        if not math.isfinite(config.timeout) or config.timeout <= 0 or config.max_chunks_per_doc <= 0:
+            raise ValueError("wiki.rerank timeout and max_chunks_per_doc must be positive")
+        if config.max_retries < 0:
+            raise ValueError("wiki.rerank max_retries must be nonnegative")
+        return config
+
+
+@dataclass
 class WikiConfig:
     """Wiki 功能配置。
 
@@ -191,6 +228,7 @@ class WikiConfig:
     multimodal: WikiMultimodalConfig = field(default_factory=WikiMultimodalConfig)
     query: WikiQueryConfig = field(default_factory=WikiQueryConfig)
     semantic: WikiSemanticConfig = field(default_factory=WikiSemanticConfig)
+    rerank: WikiRerankConfig = field(default_factory=WikiRerankConfig)
 
     @classmethod
     def from_raw(cls, raw: Any) -> "WikiConfig":
@@ -216,6 +254,7 @@ class WikiConfig:
             storage=WikiStorageConfig.from_raw(storage_raw),
             ingest=WikiIngestConfig.from_raw(ingest_raw),
             query=WikiQueryConfig.from_raw(raw.get("query")),
+            rerank=WikiRerankConfig.from_raw(raw.get("rerank")),
             semantic=WikiSemanticConfig.from_raw(semantic_raw) if isinstance(semantic_raw, dict) else WikiSemanticConfig(),
             multimodal=WikiMultimodalConfig.from_raw(mm_raw) if isinstance(mm_raw, dict) else WikiMultimodalConfig(),
         )

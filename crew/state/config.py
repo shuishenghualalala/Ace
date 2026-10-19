@@ -18,7 +18,7 @@ from dotenv import dotenv_values, load_dotenv
 from crew.browser.types import BrowserConfig
 from crew.security.outbound import NetworkConfig
 from crew.state.access_control import AccessControlConfig
-from crew.wiki.config import WikiConfig, WikiSemanticConfig
+from crew.wiki.config import WikiConfig, WikiRerankConfig, WikiSemanticConfig
 
 from crew.state.logging import get_logger
 
@@ -455,6 +455,14 @@ class Config:
                 profile = _build_owner_model_profile(str(model_id), raw, env_map)
                 profiles[str(model_id)] = profile
         return profiles
+
+    def owner_rerank_config(self, owner_account_id: str | None = None) -> WikiRerankConfig:
+        """Merge owner reranking settings without resolving or exporting credentials."""
+        global_cfg = self.wiki.rerank
+        raw = (self.owner_overlay_data(owner_account_id).get("wiki") or {}).get("rerank")
+        if not isinstance(raw, dict):
+            return global_cfg
+        return WikiRerankConfig.from_raw({**vars(global_cfg), **raw})
 
     def owner_semantic_config(self, owner_account_id: str | None = None) -> WikiSemanticConfig:
         """返回 owner 生效的语义检索配置：全局默认 + owner overlay 逐字段覆盖。

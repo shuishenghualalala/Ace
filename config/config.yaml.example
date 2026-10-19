@@ -238,6 +238,19 @@ wiki:
     model: text-embedding-3-small
     base_url: ""      # 留空则复用主模型 Base URL
     api_key_env: ""      # 留空；填写专用 Key 时由系统自动管理 Embedding 密钥变量
+  # 独立 query/document 精排，支持 SiliconFlow 兼容 /rerank API。
+  # 默认关闭；失败时保留原检索顺序并在 retrieval.rerank 中标记。
+  rerank:
+    enabled: false
+    model: BAAI/bge-reranker-v2-m3
+    base_url: ""       # 留空继承当前账号的 semantic.base_url
+    api_key_env: ""    # 留空继承当前账号的 semantic.api_key_env
+    timeout: 30
+    max_chunks_per_doc: 8
+    max_retries: 2      # 429/5xx/连接错误的有限重试，共享 timeout 时间预算
+  query:
+    retrieval_candidates: 50
+    rerank_candidates: 50
 
 # 进程内 HTTP 边界（web_search/web_extract/Wiki 抓取）的上游代理。
 # 安全意味着“经过策略判断”，判断通过后把流量级联到用户已有的上游代理，

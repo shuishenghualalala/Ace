@@ -131,3 +131,41 @@ def test_owner_embedding_provider_empty_owner_returns_global(tmp_path, monkeypat
 
     assert app.owner_embedding_provider("") is None
     assert calls["count"] == 0
+
+
+def test_app_reranking_inherits_only_requested_owners_embedding_credentials(tmp_path, monkeypatch):
+    app = _build_no_key_app(tmp_path, monkeypatch)
+    monkeypatch.setenv("CREW_API_KEY", "global-dummy-must-not-leak")
+    for owner in ("owner-a", "owner-b"):
+        home = get_owner_runtime_home(owner)
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "config.yaml").write_text(yaml.safe_dump({"wiki": {
+            "semantic": {"base_url": "https://example.test/v1", "api_key_env": "OWNER_EMBED_KEY"},
+            "rerank": {"enabled": True},
+        }}))
+    (get_owner_runtime_home("owner-a") / ".env").write_text("OWNER_EMBED_KEY=owner-a-dummy\n")
+    try:
+        first = app._wiki_reranker_resolver("owner-a")
+        assert first._client.headers["Authorization"] == "Bearer owner-a-dummy"
+        assert str(first._client.base_url) == "https://example.test/v1/"
+        with pytest.raises(ValueError, match="requires a key"):
+            app._wiki_reranker_resolver("owner-b")
+        assert app._wiki_querier._reranker_for_owner is app._wiki_reranker_resolver
+    finally:
+        app._close_persistent_stores()
+    assert first._client.is_closed
+
+
+def test_global_reranker_inherits_main_profile_credentials_without_cross_owner_fallback(tmp_path, monkeypatch):
+    app = _build_no_key_app(tmp_path, monkeypatch)
+    app.config.api_key = "global-profile-dummy"
+    app.config.base_url = "https://example.test/v1"
+    app.config.wiki.rerank.enabled = True
+    try:
+        provider = app._wiki_reranker_resolver("")
+        assert provider._client.headers["Authorization"] == "Bearer global-profile-dummy"
+        assert str(provider._client.base_url) == "https://example.test/v1/"
+        with pytest.raises(ValueError, match="requires a key"):
+            app._wiki_reranker_resolver("remote-owner")
+    finally:
+        app._close_persistent_stores()

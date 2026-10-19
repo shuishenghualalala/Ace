@@ -8,17 +8,26 @@ import re
 import shutil
 import threading
 import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any
 
 from crew.state.home import get_owner_runtime_home, owner_path_segment
 from crew.state.logging import get_logger
-from crew.wiki.schemas import HomeIntro, KnowledgeBase, LintIssue, RawSource, WikiGraph, WikiOrientation, WikiPage, WikiRelation
-from crew.wiki.sources import SOURCE_DIRS
 from crew.wiki._utils import normalize_page_key, query_terms
+from crew.wiki.schemas import (
+    HomeIntro,
+    KnowledgeBase,
+    LintIssue,
+    RawSource,
+    WikiGraph,
+    WikiOrientation,
+    WikiPage,
+    WikiRelation,
+)
 from crew.wiki.search import SQLiteFTS5SearchIndex, WikiSearchIndex
+from crew.wiki.sources import SOURCE_DIRS
 from crew.wiki.vector import SQLiteVectorIndex, WikiVectorIndex
 
 if TYPE_CHECKING:
@@ -1064,7 +1073,7 @@ class FileSystemWikiStore(WikiStore):
         2. 简单关键词打分回退
         """
         query = str(query or "").strip()
-        if not query:
+        if not query or top_k <= 0:
             return []
 
         pages = list(self._iter_pages(owner_account_id, kb_id))
@@ -1088,12 +1097,12 @@ class FileSystemWikiStore(WikiStore):
                 )
             ]
 
-        # 精确标题/alias、FTS 与关键词信号统一重排；页面类型不参与打分，
-        # source 与知识页统一按相关度和质量信号（confidence/contested）排序。
+        # 精确标题/alias 优先；FTS 命中保留 BM25 排名，关键词仅作为回退。
+        # source 与知识页使用相同规则，页面类型不参与相关性排序。
         terms = [t.lower() for t in re.split(r"\s+", query) if t]
         if not terms and not query_key:
             return []
-        scored: list[tuple[float, WikiPage]] = []
+        scored: list[tuple[int, float, WikiPage]] = []
         similarities = self._query_similarities(query, owner_account_id, kb_id)
         for page in pages:
             title_key = normalize_page_key(page.title)
@@ -1116,36 +1125,44 @@ class FileSystemWikiStore(WikiStore):
                 f"{' '.join(page.tags)} {page.content} {claim_text}"
             ).lower()
             relevance = 0.0
+            match_tier = 0
             if query_key and query_key == title_key:
                 relevance += 1000
+                match_tier = 3
             elif query_key and query_key in alias_keys:
                 relevance += 900
-            elif query_key and query_key and query_key in title_key:
+                match_tier = 2
+            elif query_key and query_key in title_key:
                 relevance += 300
             if page.id in fts_rank:
-                relevance += max(100, 500 - fts_rank[page.id] * 10)
-            relevance += sum(
-                30 if term in page.title.lower() else 10
-                for term in terms
-                if term in haystack
-            )
-            if similarities:
+                match_tier = max(match_tier, 1)
+                # Keep the index's BM25 order. Re-counting raw keyword hits
+                # here rewards common words and discards IDF/length signals.
+                relevance = -float(fts_rank[page.id])
+            else:
+                relevance += sum(
+                    30 if term in page.title.lower() else 10
+                    for term in terms
+                    if term in haystack
+                )
+            if similarities and page.id not in fts_rank:
                 relevance += max(
                     self._semantic_min_similarity,
                     similarities.get(page.id, 0.0),
                 ) * self._semantic_rank_weight
-            if relevance <= 0:
+            if match_tier == 0 and relevance <= 0:
                 continue
             score = relevance
-            if page.confidence == "high":
-                score += 8
-            elif page.confidence == "low":
-                score -= 5
-            if page.contested:
-                score -= 10
-            scored.append((score, page))
-        scored.sort(key=lambda x: (-x[0], -x[1].updated_at))
-        return [p for _, p in scored[:top_k]]
+            if page.id not in fts_rank:
+                if page.confidence == "high":
+                    score += 8
+                elif page.confidence == "low":
+                    score -= 5
+                if page.contested:
+                    score -= 10
+            scored.append((match_tier, score, page))
+        scored.sort(key=lambda x: (-x[0], -x[1], -x[2].updated_at))
+        return [p for _, _, p in scored[:top_k]]
 
     def search_index(
         self,

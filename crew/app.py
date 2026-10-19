@@ -1869,6 +1869,7 @@ class CrewApp:
             getattr(getattr(self, "sites", None), "store", None),
             self.work_service,
             getattr(self, "_wiki_store", None),
+            getattr(self, "_wiki_reranker_resolver", None),
         ]
         for store in stores:
             close = getattr(store, "close", None)
@@ -3055,9 +3056,33 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         summarizer=app._wiki_summarizer,
         provider_for_owner=wiki_provider_resolver,
     )
+    from crew.wiki.rerank import OwnerRerankerResolver
+
+    def _wiki_rerank_settings(owner: str):
+        rerank = cfg.owner_rerank_config(owner)
+        owner_semantic = cfg.owner_semantic_config(owner)
+        if not rerank.enabled:
+            return rerank, "", ""
+        env_map = cfg.owner_env_map(owner) if owner else None
+        key_env = rerank.api_key_env or owner_semantic.api_key_env
+        allow_global = not owner or cfg._owner_builtin_allows_global_key_fallback(owner)
+        key = _lookup_api_key(
+            key_env, env_map, fallback_global=allow_global,
+        )
+        if not key and not key_env and allow_global:
+            key = cfg.api_key
+        endpoint = rerank.base_url or owner_semantic.base_url
+        if not endpoint and owner_semantic.provider == "openai":
+            endpoint = cfg.base_url
+        return rerank, key, endpoint
+
+    app._wiki_reranker_resolver = OwnerRerankerResolver(_wiki_rerank_settings)
     app._wiki_querier = WikiQuerier(
         app._wiki_store,
         fuse_weight=semantic.fuse_weight if semantic else 0.9,
+        candidate_limit=cfg.wiki.query.retrieval_candidates,
+        rerank_limit=cfg.wiki.query.rerank_candidates,
+        reranker_for_owner=app._wiki_reranker_resolver,
     )
 
     register_wiki_tools(
