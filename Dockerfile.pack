@@ -25,13 +25,13 @@ ENV ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
     PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
     PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
 
-# Debian Buster 已 EOL，常规镜像已移除，改用阿里云归档镜像
+# Debian Buster 已 EOL，使用 Debian 官方归档镜像
 # 必须同时包含 buster-security，否则 base 镜像中已更新的 libbz2 (deb10u2)
 # 与主仓库中未更新的 bzip2 (deb10u1) 之间版本不匹配，导致 apt 依赖解析失败
-RUN echo 'deb http://mirrors.aliyun.com/debian-archive/debian/ buster main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian/ buster-updates main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian-security buster/updates main non-free contrib' > /etc/apt/sources.list
+RUN echo 'deb http://archive.debian.org/debian/ buster main non-free contrib\ndeb http://archive.debian.org/debian/ buster-updates main non-free contrib\ndeb http://archive.debian.org/debian-security buster/updates main non-free contrib' > /etc/apt/sources.list
 
 # 本阶段只需下载工具；gateway 依赖全部装进内嵌 Python，容器系统 Python 仅作底座
-RUN apt-get update -o Acquire::Check-Valid-Until=false && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 update -o Acquire::Check-Valid-Until=false && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
         curl \
         ca-certificates \
         xz-utils \
@@ -108,8 +108,8 @@ RUN mkdir -p /tmp/runtimes/node \
 # Native security runtime and bundled bubblewrap are build-time artifacts.
 # -----------------------------------------------------------------------------
 FROM docker.m.daocloud.io/library/rust:1.85-slim-bookworm AS security-runtime-builder
-RUN apt-get update -o Acquire::Check-Valid-Until=false \
-    && apt-get install -y --no-install-recommends bubblewrap ca-certificates \
+RUN apt-get -o Acquire::Retries=5 update -o Acquire::Check-Valid-Until=false \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends bubblewrap ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /security-runtime
 COPY security-runtime ./
@@ -127,14 +127,14 @@ ENV ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
     PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
     PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
 
-# Debian Buster 已 EOL，常规镜像已移除，改用阿里云归档镜像
+# Debian Buster 已 EOL，使用 Debian 官方归档镜像
 # 必须同时包含 buster-security，否则 base 镜像中已更新的 libbz2 (deb10u2)
 # 与主仓库中未更新的 bzip2 (deb10u1) 之间版本不匹配，导致 apt 依赖解析失败
-RUN echo 'deb http://mirrors.aliyun.com/debian-archive/debian/ buster main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian/ buster-updates main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian-security buster/updates main non-free contrib' > /etc/apt/sources.list
+RUN echo 'deb http://archive.debian.org/debian/ buster main non-free contrib\ndeb http://archive.debian.org/debian/ buster-updates main non-free contrib\ndeb http://archive.debian.org/debian-security buster/updates main non-free contrib' > /etc/apt/sources.list
 
 # Electron 43 的构建工具要求 Node 22.12+。NodeSource 在国内不稳定，
 # 改为直接从 npmmirror 下载固定的 Node.js 22 LTS 二进制。
-RUN apt-get update -o Acquire::Check-Valid-Until=false && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 update -o Acquire::Check-Valid-Until=false && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
         curl \
         ca-certificates \
         xz-utils \
@@ -188,12 +188,12 @@ FROM docker.m.daocloud.io/library/debian:buster-slim AS packager
 
 ARG BUILD_VERSION=0.1.0
 
-# Debian Buster 已 EOL，常规镜像已移除，改用阿里云归档镜像
+# Debian Buster 已 EOL，使用 Debian 官方归档镜像
 # 必须同时包含 buster-security，否则 base 镜像中已更新的 libbz2 (deb10u2)
 # 与主仓库中未更新的 bzip2 (deb10u1) 之间版本不匹配，导致 apt 依赖解析失败
-RUN echo 'deb http://mirrors.aliyun.com/debian-archive/debian/ buster main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian/ buster-updates main non-free contrib\ndeb http://mirrors.aliyun.com/debian-archive/debian-security buster/updates main non-free contrib' > /etc/apt/sources.list
+RUN echo 'deb http://archive.debian.org/debian/ buster main non-free contrib\ndeb http://archive.debian.org/debian/ buster-updates main non-free contrib\ndeb http://archive.debian.org/debian-security buster/updates main non-free contrib' > /etc/apt/sources.list
 
-RUN apt-get update -o Acquire::Check-Valid-Until=false && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 update -o Acquire::Check-Valid-Until=false && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
         dpkg-dev \
         bzip2 \
         imagemagick \

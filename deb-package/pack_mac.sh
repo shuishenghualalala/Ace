@@ -124,7 +124,7 @@ if [ -z "$APP_PATH" ]; then
     echo "❌ 未找到 electron-builder 产物 crew-desktop.app" >&2
     exit 1
 fi
-echo "✓ Electron 客户端: $APP_PATH（含 macOS Seatbelt 安全运行组件）"
+echo "✓ Electron 客户端: ${APP_PATH}（含 macOS Seatbelt 安全运行组件）"
 
 # ----- 2) 裁剪 Electron locales：只保留 en / zh_CN / zh_TW -----
 echo ""

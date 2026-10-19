@@ -33,6 +33,8 @@ if (-not $Version) {
 }
 
 $ErrorActionPreference = "Stop"
+# pip 在英文 Windows runner 上默认按 cp1252 读取 requirements，中文注释会解码失败。
+$env:PYTHONUTF8 = "1"
 
 # -----------------------------------------------------------------------------
 # 同步构建版本 + 平台标识到 desktop/package.json：
