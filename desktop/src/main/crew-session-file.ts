@@ -42,3 +42,30 @@ export function resolveCrewHome(): string {
   resolvedCrewHomeEnv = envCacheKey;
   return resolvedCrewHomeCache;
 }
+
+/** Mirror the Gateway's task-root precedence and relative-path base. */
+export function resolveTaskWorkspaceRoot(
+  crewHome: string,
+  configContents: string,
+  envOverride = process.env.CREW_TASK_WORKSPACE_ROOT,
+): string {
+  let configured = '';
+  let inRuntime = false;
+  for (const line of configContents.split(/\r?\n/)) {
+    if (/^runtime:\s*(?:#.*)?$/.test(line)) {
+      inRuntime = true;
+      continue;
+    }
+    if (inRuntime && /^\S/.test(line)) break;
+    if (!inRuntime) continue;
+    const match = line.match(/^\s+task_workspace_root:\s*(?:"([^"\n]*)"|'([^'\n]*)'|([^#\n]*))\s*(?:#.*)?$/);
+    if (match) {
+      configured = (match[1] ?? match[2] ?? match[3] ?? '').trim();
+      break;
+    }
+  }
+  const raw = String(envOverride || configured).trim();
+  if (!raw) return path.join(crewHome, 'task_workspaces');
+  const expanded = raw.replace(/^~(?=$|[/\\])/, os.homedir());
+  return path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(crewHome, expanded);
+}

@@ -12,7 +12,6 @@ if (process.platform === 'win32') {
 import { app, BrowserWindow, ipcMain, shell, dialog, nativeImage, nativeTheme, protocol } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as net from 'net';
 import { createHash } from 'crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
@@ -37,7 +36,9 @@ import {
 } from './gateway-launch-mode';
 import {
   resolveCrewHome,
+  resolveTaskWorkspaceRoot,
 } from './crew-session-file';
+import { canonicalOwnedShellRoot, resolveAllowedShellPath } from './shell-allowed-path';
 import {
   classifyCuaSetupAuthorityRequest,
   createDesktopSecurityProof,
@@ -97,7 +98,6 @@ import {
   runElevatedSecuritySetup,
   runElevatedUacEnable,
 } from './security-setup';
-import { isDeniedShellPath } from './shell-allowed-path';
 import {
   GATEWAY_UPLOAD_MAX_FILE_BYTES,
   IPC_ARG_VALIDATION_FAILED,
@@ -235,32 +235,14 @@ const gatewayRestartController = new GatewayRestartController(async () => {
   }
 });
 
-function readCrewHomeFromConfig(): string | null {
-  try {
-    const configPath = path.join(repoRoot(), 'config', 'config.yaml');
-    const content = fs.readFileSync(configPath, 'utf8');
-    const match = content.match(/^\s*crew_home:\s*['"]?([^'"#\n]+?)['"]?\s*(?:#.*)?$/m);
-    if (match?.[1]?.trim()) return match[1].trim();
-  } catch {
-    // config.yaml not available
-  }
-  return null;
-}
-
 function getTaskWorkspaceRoot(): string {
-  if (process.env.CREW_TASK_WORKSPACE_ROOT) {
-    return path.resolve(process.env.CREW_TASK_WORKSPACE_ROOT);
-  }
-  // 从 config.yaml 读取 crew_home，与后端 load_config() 保持一致
-  const crewHome = readCrewHomeFromConfig();
-  if (crewHome) {
-    const resolved = path.isAbsolute(crewHome)
-      ? crewHome
-      : path.join(os.homedir(), crewHome);
-    return path.join(resolved, 'task_workspaces');
-  }
-  // fallback: 与后端 home.py DEFAULT_HOME_DIRNAME 保持一致
-  return path.join(os.homedir(), '.Crew', 'task_workspaces');
+  const crewHome = activeGatewayCrewHome();
+  const configPath = app.isPackaged
+    ? path.join(crewHome, 'config.yaml')
+    : path.join(repoRoot(), 'config', 'config.yaml');
+  let configContents = '';
+  try { configContents = fs.readFileSync(configPath, 'utf8'); } catch { /* use defaults */ }
+  return resolveTaskWorkspaceRoot(crewHome, configContents);
 }
 
 /**
@@ -269,17 +251,15 @@ function getTaskWorkspaceRoot(): string {
  * @param extraRoots 调用方显式授权的额外根目录（如项目工作空间根），必须是绝对路径。
  */
 function resolveShellAllowedPath(rawPath: string, extraRoots: string[] = []): string {
-  const resolved = path.resolve(rawPath);
-  if (!path.isAbsolute(resolved)) {
-    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path must be absolute`);
-  }
-  // Deny sensitive security/audit resources even when they sit under an allowed root
-  // (M-1): the instance HMAC key (.gateway-instance) and raw cross-owner SQLite must
-  // never reach the renderer.
-  if (isDeniedShellPath(resolved)) {
-    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path is a sensitive security/audit resource`);
-  }
+  const crewHome = activeGatewayCrewHome();
+  const ownerSegment = currentCrewFileOwnerSegment();
   const taskWorkspaceRoot = getTaskWorkspaceRoot();
+  // Crew Home also contains every account's .env and the Gateway instance key.
+  // Only artifact roots belonging to the active account may be exposed here.
+  const ownedRoots = ownerSegment ? [
+    canonicalOwnedShellRoot(crewHome, ownerSegment, 'task_workspaces'),
+    canonicalOwnedShellRoot(crewHome, ownerSegment, 'uploads'),
+  ].filter((root): root is string => Boolean(root)) : [];
   const allowedRoots = [
     app.getPath('userData'),
     app.getPath('downloads'),
@@ -287,14 +267,17 @@ function resolveShellAllowedPath(rawPath: string, extraRoots: string[] = []): st
     app.getPath('pictures'),
     app.getPath('desktop'),
     taskWorkspaceRoot,
-    path.dirname(taskWorkspaceRoot),
+    ...ownedRoots,
     ...extraRoots,
-  ].map((r) => path.resolve(r));
-  const allowed = allowedRoots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
-  if (!allowed) {
-    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path not under any allowed root`);
+  ];
+  try {
+    return resolveAllowedShellPath(rawPath, allowedRoots, {
+      root: crewHome,
+      allowedRoots: [taskWorkspaceRoot, ...ownedRoots],
+    });
+  } catch (error) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: ${(error as Error).message}`);
   }
-  return resolved;
 }
 
 const MANAGED_GATEWAY_PORT = 28180;
@@ -1460,11 +1443,8 @@ function startWindowsPackagedGateway(port: number): void {
 
   console.log(`[gateway] Starting packaged Windows gateway on port ${port}:`, launch.command);
 
-  // 清理可能残留的僵尸 gateway 进程（上次 Electron 异常退出未清理）
-  const killStart = Date.now();
-  killZombieGatewayProcesses();
-  console.log(`[gateway] Zombie cleanup took ${Date.now() - killStart}ms`);
-
+  // Port scanning already avoids occupied ports. Never kill another Gateway by
+  // command-line pattern: it may belong to a CLI or another installation.
   try {
     const spawnStart = Date.now();
     managedGateway = spawn(launch.command, launch.args, {
@@ -1544,12 +1524,6 @@ function startMacOSPackagedGateway(port: number): void {
   const launch = packagedGatewayLaunch(gatewayRoot);
 
   console.log(`[gateway] Starting packaged macOS gateway on port ${port}:`, launch.command);
-
-  // 注意：不在此处调用 killZombieGatewayProcesses()。
-  // macOS 上 killZombieGatewayProcesses 使用 `pkill -f crew-gateway`，
-  // 它会匹配命令行中包含 "crew-gateway" 的所有进程——包括本函数刚刚 spawn
-  // 出来的新 gateway，导致新进程被 SIGTERM 误杀（pkill 是异步的，无法按 PID 排除）。
-  // 僵尸进程清理统一在 before-quit / uninstall 时执行即可。
 
   try {
     managedGateway = spawn(launch.command, launch.args, {
@@ -1649,69 +1623,6 @@ function startLinuxPackagedGateway(port: number): void {
     });
   } catch (err) {
     console.error('[gateway] Exception while spawning Linux gateway:', err);
-  }
-}
-
-/**
- * 清理可能残留的僵尸 gateway 进程。
- * 上次 Electron 异常退出时 managedGateway.kill() 可能未执行，
- * 导致旧 gateway 进程占着 8000 端口，新 gateway 无法启动。
- */
-function killZombieGatewayProcesses(): void {
-  if (process.platform === 'win32') {
-    try {
-      // 打包态 gateway 是「内嵌 python.exe -m crew.gateway.server」，进程名不再
-      // 是 crew-gateway.exe，按命令行特征匹配（排除当前 managedGateway）。
-      const output = spawn('powershell', [
-        '-NoProfile', '-NonInteractive', '-Command',
-        "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" " +
-        "| Where-Object { $_.CommandLine -match 'crew\\.gateway\\.server' } " +
-        "| ForEach-Object { $_.ProcessId }",
-      ], {
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
-
-      let stdout = '';
-      output.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
-
-      output.on('close', () => {
-        const pids = stdout.split(/\r?\n/).map((line) => parseInt(line.trim(), 10)).filter(Number.isFinite);
-        for (const pid of pids) {
-          // 跳过当前管理的 gateway（如果存在）
-          if (managedGateway && managedGateway.pid === pid) continue;
-
-          console.warn(`[gateway] Killing zombie gateway process: PID ${pid}`);
-          try {
-            spawn('taskkill', ['/PID', String(pid), '/F'], {
-              windowsHide: true,
-              stdio: 'ignore',
-            });
-          } catch (err) {
-            console.error(`[gateway] Failed to kill PID ${pid}:`, err);
-          }
-        }
-      });
-    } catch (err) {
-      console.warn('[gateway] Failed to enumerate gateway processes:', err);
-    }
-  } else if (process.platform === 'linux') {
-    try {
-      // Linux 打包态 gateway 由本进程 spawn 托管（不再用 systemd user service）。
-      // 新形态命令行为 /opt/crew-gateway/runtimes/python/bin/python3 -m crew.gateway.server，
-      // 按安装路径匹配；只杀当前用户的残留实例，避免误杀别的用户各自的 gateway。
-      spawn('pkill', ['-u', String(process.getuid?.() ?? 0), '-f', '/opt/crew-gateway'], {
-        stdio: 'ignore',
-      });
-    } catch (err) {
-      console.warn('[gateway] Failed to kill Linux gateway processes:', err);
-    }
-  } else if (process.platform === 'darwin') {
-    try {
-      spawn('pkill', ['-f', 'crew-gateway'], { stdio: 'ignore' });
-    } catch (err) {
-      console.warn('[gateway] Failed to kill macOS gateway processes:', err);
-    }
   }
 }
 
@@ -2592,15 +2503,26 @@ function registerIpc() {
   trustedHandle('shell:readTextFile', async (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenPathArgs.parse(raw), 'shell:readTextFile');
     const resolved = resolveShellAllowedPath(args.path);
-    const stat = await fs.promises.stat(resolved);
+    const stat = fs.lstatSync(resolved);
     const maxBytes = 512 * 1024;
-    if (!stat.isFile()) {
+    if (!stat.isFile() || stat.nlink !== 1 || fs.realpathSync(args.path) !== resolved) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:readTextFile target is not a file`);
     }
     if (stat.size > maxBytes) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:readTextFile file too large`);
     }
-    return fs.promises.readFile(resolved, 'utf8');
+    const bytes = await readResolvedCrewFile({
+      filePath: resolved,
+      identity: {
+        dev: stat.dev,
+        ino: stat.ino,
+        nlink: stat.nlink,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        ctimeMs: stat.ctimeMs,
+      },
+    });
+    return bytes?.toString('utf8') ?? '';
   });
 
   trustedHandle('shell:writeTextFile', async (_e, raw: unknown) => {
@@ -3807,7 +3729,6 @@ async function bootstrap() {
         gw.once('exit', () => clearTimeout(timer));
       });
     },
-    killZombieGatewayProcesses,
     setQuittingFlag: () => { isQuitting = true; },
     resetQuittingFlag: () => { isQuitting = false; },
     stopBackendHealthMonitor,
