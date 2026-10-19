@@ -75,7 +75,8 @@ wiki = [
 # 不加入核心依赖；按需安装 `.[pdf]`。
 pdf = [
     "reportlab>=4.0",
-    "pikepdf>=8.0",
+    # 10.14+ 缺少 macOS x64 wheel，CI 会回退源码编译并缺少 qpdf 头文件。
+    "pikepdf==10.13.0",
     "pdfplumber>=0.10",
     "markdown2>=2.5",
     "xhtml2pdf>=0.2.15",
