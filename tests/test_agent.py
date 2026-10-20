@@ -1398,7 +1398,8 @@ async def test_read_attachment_rejects_oversized_file(tmp_path, monkeypatch):
 
     result = await rt._read_attachment(str(big))
 
-    assert "文件过大" in result
+    assert "文件过大" in result.content
+    assert result.truncated is False
 
 
 async def test_read_attachment_reads_small_file(tmp_path):
@@ -1410,4 +1411,40 @@ async def test_read_attachment_reads_small_file(tmp_path):
 
     result = await rt._read_attachment(str(small))
 
-    assert "hello attachment" in result
+    assert "hello attachment" in result.content
+    assert result.truncated is False
+
+
+async def test_read_attachment_truncation_is_self_describing(tmp_path):
+    """超长文本附件截断后必须携带总量元信息，供注入层生成续读提示。"""
+    import crew.agent.runtime as rt
+
+    long_file = tmp_path / "long.md"
+    body = "\n".join(f"line-{i}" for i in range(1500))
+    long_file.write_text(body, encoding="utf-8")
+
+    result = await rt._read_attachment(str(long_file))
+
+    assert result.truncated is True
+    assert result.content == body[: rt._ATTACHMENT_MAX_CHARS]
+    assert result.total_chars == len(body)
+    assert result.total_lines == 1500
+
+
+async def test_format_attachment_block_appends_truncation_notice():
+    """截断附件的注入块在代码块外提示模型用 file_read 分页续读。"""
+    import crew.agent.runtime as rt
+
+    preview = rt.AttachmentPreview(
+        content="x" * 10, truncated=True, total_chars=20000, total_lines=400
+    )
+    block = rt._format_attachment_block("a.md", "/tmp/a.md", preview.content, preview)
+
+    assert "【附件已截断】" in block
+    assert "20000 字符 / 400 行" in block
+    assert "file_read" in block
+    # 提示必须落在代码块外，避免被当作文件正文。
+    assert block.index("```") < block.index("【附件已截断】")
+
+    intact = rt._format_attachment_block("a.md", "/tmp/a.md", "hello", None)
+    assert "【附件已截断】" not in intact

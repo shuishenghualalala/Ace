@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -121,28 +122,66 @@ async def _read_image_as_data_url(path: str) -> str | None:
         return None
 
 
-async def _read_attachment(path: str) -> str:
-    """读取附件文件内容，返回文本。非文本文件返回摘要信息（含完整路径）。"""
+#: 文本附件注入上下文的字符上限；超出时截断并生成自描述续读提示。
+_ATTACHMENT_MAX_CHARS = 8000
+
+
+@dataclass(slots=True)
+class AttachmentPreview:
+    """附件预读结果：正文 + 截断元信息，供注入层生成模型可见的截断提示。"""
+
+    content: str
+    truncated: bool = False
+    total_chars: int = 0
+    total_lines: int = 0
+
+
+async def _read_attachment(path: str) -> AttachmentPreview:
+    """读取附件文件内容。非文本文件返回摘要信息（含完整路径）。"""
     from pathlib import Path
 
     p = Path(path)
     if not p.is_file():
-        return f"[文件不存在: {path}]"
+        return AttachmentPreview(content=f"[文件不存在: {path}]")
 
     ext = p.suffix.lower()
     if ext in _TEXT_EXTS:
         try:
             # 读前按大小拒绝，避免同步整读超大附件拖垮事件循环。
             raw = await asyncio.to_thread(read_verified_bytes, p.resolve(), max_bytes=MAX_READ_FILE_BYTES)
-            return raw.decode("utf-8", errors="replace")[:8000]
+            text = raw.decode("utf-8", errors="replace")
         except ValueError:
-            return f"[文件过大，无法作为附件注入: {p.name}]"
+            return AttachmentPreview(content=f"[文件过大，无法作为附件注入: {p.name}]")
         except Exception as exc:
-            return f"[读取失败: {exc}]"
+            return AttachmentPreview(content=f"[读取失败: {exc}]")
+        if len(text) <= _ATTACHMENT_MAX_CHARS:
+            return AttachmentPreview(content=text)
+        return AttachmentPreview(
+            content=text[:_ATTACHMENT_MAX_CHARS],
+            truncated=True,
+            total_chars=len(text),
+            total_lines=len(text.splitlines()),
+        )
 
     # xlsx/docx 等二进制文件：返回摘要（含完整路径，方便 Agent 用工具进一步读取）
     size = p.stat().st_size
-    return f"[二进制文件: {p.name}, 大小: {size} 字节, 类型: {ext or '未知'}, 完整路径: {path}]"
+    return AttachmentPreview(
+        content=f"[二进制文件: {p.name}, 大小: {size} 字节, 类型: {ext or '未知'}, 完整路径: {path}]"
+    )
+
+
+def _format_attachment_block(
+    name: str, path: str, content: str, preview: AttachmentPreview | None
+) -> str:
+    """格式化单个文本附件的注入块；截断时在代码块外附自描述续读提示。"""
+    block = f"### 附件: {name} (路径: {path})\n```\n{content}\n```"
+    if preview is not None and preview.truncated:
+        block += (
+            f"\n【附件已截断】「{name}」完整内容共 {preview.total_chars} 字符 / "
+            f"{preview.total_lines} 行，以上仅注入前 {_ATTACHMENT_MAX_CHARS} 字符。"
+            "其余内容请使用 file_read 工具按 offset/limit 分页读取该文件。"
+        )
+    return block
 
 
 def _format_client_intent(envelope: Envelope) -> str:
@@ -345,11 +384,15 @@ class SingleAgent(Agent):
                         })
                         continue  # 图像不再作为文本附件注入
 
-                # 非图像附件：按原逻辑读取文本内容
+                # 非图像附件：读取文本内容（超限截断时附自描述续读提示）
+                preview: AttachmentPreview | None = None
                 if not content and path:
-                    content = await _read_attachment(path)
+                    preview = await _read_attachment(path)
+                    content = preview.content
                 if content:
-                    att_contents.append(f"### 附件: {name} (路径: {path})\n```\n{content}\n```")
+                    att_contents.append(
+                        _format_attachment_block(name, path, content, preview)
+                    )
 
             if att_descriptions:
                 user_text = "\n".join(att_descriptions) + "\n\n" + user_text
