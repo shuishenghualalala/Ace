@@ -63,6 +63,13 @@
   line-height: var(--mw-type-compact-line);
 }
 
+/* 纯文本条目（状态/错误）：与 28px 图标垂直居中，多行文本整体居中换行。 */
+.mw-process-timeline .process-timeline__content--text {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+}
+
 .mw-process-timeline .process-timeline__narration {
   min-width: 0;
   padding: var(--mw-space-1) 0 var(--mw-space-1);
