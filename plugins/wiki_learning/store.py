@@ -1,4 +1,13 @@
-"""Owner-scoped learning state stored in Ace's existing SQLite database."""
+"""Owner-scoped learning state on the plugin's own SQLite database.
+
+wiki_learning 是目录插件（plugins/wiki_learning），自有 schema 6 表不进主库：
+默认落在独立库 ``crew_data/wiki_learning.db``（ADR-0038 清单外补充批，
+copy-on-first-activate：首次以独立库初始化时，若旧主库还有本插件数据表且
+目标库为空，则单事务整表复制；crew.db 旧行保留作回退备份，重复构造幂等）。
+除 5 张数据表外，``wiki_learning_schema`` 是插件自管的组件版本表（每次
+ensure-schema 幂等 upsert 单行 stamp，目标库自行重建，不参与行复制）；6H 的
+Feature 级版本表 ``wiki_learning_schema_version`` 与之不同名、同库共存不冲突。
+"""
 
 from __future__ import annotations
 
@@ -11,7 +20,17 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from crew.core.errors import ToolError
+from crew.state._migration import WIKI_LEARNING_DB_TABLES
+from crew.state.logging import get_logger
+from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
+
+log = get_logger("wiki_learning.store")
+
+# 6H Feature 级 schema 版本登记：feature 名取插件命名空间，版本表为
+# wiki_learning_schema_version（与插件自管的 wiki_learning_schema 不同名）。
+WIKI_LEARNING_SCHEMA_FEATURE = "wiki_learning"
+WIKI_LEARNING_SCHEMA_VERSION = 1
 
 
 def _json(value: Any) -> str:
@@ -51,16 +70,43 @@ def _level(average: float) -> str:
 
 
 class WikiLearningStore:
-    """Plugin-owned schema on a separate connection to the shared crew.db."""
+    """Plugin-owned schema on a dedicated connection to its own database."""
 
-    def __init__(self, db_path: str | Path, *, wal_enabled: bool = True) -> None:
-        self._conn = connect_sqlite(db_path, wal_enabled=wal_enabled, row_factory=True)
+    def __init__(
+        self,
+        db_path: str | Path = "crew_data/wiki_learning.db",
+        *,
+        wal_enabled: bool = True,
+        legacy_db_path: str | Path | None = None,
+    ) -> None:
+        self._path = Path(db_path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = connect_sqlite(self._path, wal_enabled=wal_enabled, row_factory=True)
         self._lock = threading.Lock()
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._closed = False
-        self._init_schema()
+        self._writer.execute(self._init_schema)
+        if legacy_db_path is not None:
+            self._migrate_legacy_rows(Path(legacy_db_path))
 
-    def _init_schema(self) -> None:
+    def _migrate_legacy_rows(self, legacy_path: Path) -> None:
+        """copy-on-first-activate：目标库为空时从旧主库整表复制学习记录。
+
+        gate 在 ensure-schema + 双版本 stamp 之后（构造顺序保证）。域级幂等
+        gate 由 copy_legacy_feature_rows 承载：目标库任一数据表已有行即整体
+        跳过，重复构造零重复；复制走单事务，失败不半写。旧表保留在旧库不删
+        （ADR-0038 回退备份）。回退配置把插件库指回旧库同一文件时直接跳过。
+        """
+
+        if legacy_path.resolve() == self._path.resolve():
+            return
+        copied = self._writer.execute(
+            lambda conn: copy_legacy_feature_rows(legacy_path, conn, WIKI_LEARNING_DB_TABLES)
+        )
+        if any(copied.values()):
+            log.info("已从 %s 迁移 wiki_learning 学习记录: %s", legacy_path, copied)
+
+    def _init_schema(self, conn: sqlite3.Connection) -> None:
         schema = """
         CREATE TABLE IF NOT EXISTS wiki_learning_schema (
             component TEXT PRIMARY KEY,
@@ -145,18 +191,19 @@ class WikiLearningStore:
         );
         """
 
-        def write(conn: sqlite3.Connection) -> None:
-            for statement in schema.split(";"):
-                if statement.strip():
-                    conn.execute(statement)
-            conn.execute(
-                """INSERT INTO wiki_learning_schema(component, version, updated_at)
-                   VALUES('wiki_learning', 1, ?)
-                   ON CONFLICT(component) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at""",
-                (time.time(),),
-            )
-
-        self._writer.execute(write)
+        for statement in schema.split(";"):
+            if statement.strip():
+                conn.execute(statement)
+        conn.execute(
+            """INSERT INTO wiki_learning_schema(component, version, updated_at)
+               VALUES('wiki_learning', 1, ?)
+               ON CONFLICT(component) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at""",
+            (time.time(),),
+        )
+        # 6H：Feature 级 schema 版本登记（幂等，wiki_learning_schema_version 表）。
+        # 必须先于 legacy 行复制，保证 copy-on-first-activate 的 gate 顺序
+        # （ensure-schema → stamp → copy）。
+        stamp_baseline(conn, WIKI_LEARNING_SCHEMA_FEATURE, version=WIKI_LEARNING_SCHEMA_VERSION)
 
     def close(self) -> None:
         if self._closed:

@@ -2,12 +2,56 @@
 
 import base64
 import json
+from pathlib import Path
 
 import pytest
 
 from crew.core.runctx import current_agent_workdir
 from crew.core.types import ToolCall
 from crew.tools.registry import FunctionTool, Registry, register_builtin_tools, tool_result
+
+
+class _FullAccessService:
+    """最小授权服务桩：FULL_ACCESS 模式下 authorize 直接放行。
+
+    F2 fail-closed 后 terminal 工具要求审批链路可用；本文件 terminal 用例
+    聚焦命令执行行为本身，用 FULL_ACCESS 桩接通审批路径（危险命令仍被
+    terminal_guard 策略拦截，不经授权）。
+    """
+
+    db_path = Path("crew.db")
+    audit = None
+
+    @staticmethod
+    def mode_for(_context):
+        from crew.security.models import ConversationPermissionMode
+
+        return ConversationPermissionMode.FULL_ACCESS
+
+    @staticmethod
+    def authorize_exec_action(*_args, **_kwargs):
+        return True, None
+
+
+def _terminal_registry(monkeypatch, tmp_path):
+    """接通审批链路的注册表：安全上下文与基准目录固定在 tmp_path。"""
+    from crew.security.context import SecurityContext
+
+    context = SecurityContext(
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+        workspace_root=tmp_path,
+        session_id="session-a",
+        request_id="request-a",
+        task_id="",
+        cwd=tmp_path,
+    )
+    monkeypatch.setattr("crew.security.context.build_security_context", lambda _store: context)
+    monkeypatch.setattr("crew.tools.builtin._resolve_base_dir", lambda: tmp_path)
+    r = Registry()
+    register_builtin_tools(r, workspace_store=object(), security_service=_FullAccessService())
+    return r
 
 
 @pytest.fixture
@@ -36,11 +80,30 @@ def _isolate_task_runtime():
         process_registry._task_runtime = saved
 
 
-async def test_terminal_tool_executes(registry):
+async def test_terminal_tool_executes(monkeypatch, tmp_path):
+    registry = _terminal_registry(monkeypatch, tmp_path)
     tc = ToolCall(id="c1", name="terminal", arguments={"command": "echo hi-crew"})
     result = await registry.execute(tc)
     assert not result.is_error
     assert "hi-crew" in result.content
+
+
+def test_registry_expected_unregister_does_not_remove_replacement():
+    registry = Registry()
+    schema = {"name": "owned", "parameters": {"type": "object"}}
+    old = FunctionTool(name="owned", toolset="test", schema=schema, handler=lambda _: "old")
+    replacement = FunctionTool(
+        name="owned",
+        toolset="test",
+        schema=schema,
+        handler=lambda _: "new",
+    )
+    registry.register(old)
+    registry.register(replacement, override=True)
+
+    assert registry.unregister("owned", expected=old) is False
+    assert registry.get("owned") is replacement
+    assert registry.unregister("owned", expected=replacement) is True
 
 
 async def test_file_write_then_read(registry, tmp_path):
@@ -50,7 +113,7 @@ async def test_file_write_then_read(registry, tmp_path):
     r = await registry.execute(ToolCall("c2", "file_read", {"path": str(p)}))
     assert not r.is_error
     payload = json.loads(r.content)
-    assert payload["content"] == "你好"
+    assert payload["content"] == "1: 你好\n\n(文件结束，共 1 行)"
 
 
 async def test_file_delete_removes_one_exact_file(registry, tmp_path):
@@ -95,17 +158,21 @@ async def test_file_delete_refuses_directories_and_symlinks(registry, tmp_path):
 
 
 async def test_file_read_rejects_oversized_file_before_read(registry, tmp_path, monkeypatch):
-    """file_read 读超过整读上限的文件应读前拒绝，而非整读进内存（对照 codex 上限）。"""
-    from crew.tools import builtin
+    """超大文件走流式窗口，不整读进内存也能正常返回分页内容。"""
+    from crew.tools import file_utils
 
     target = tmp_path / "big.txt"
     target.write_text("x" * 100, encoding="utf-8")
-    monkeypatch.setattr(builtin, "MAX_READ_FILE_BYTES", 10)
+    monkeypatch.setattr(file_utils, "FILE_READ_STREAM_MIN_BYTES", 10)
 
-    result = await registry.execute(ToolCall("c1", "file_read", {"path": str(target)}))
+    result = await registry.execute(
+        ToolCall("c1", "file_read", {"path": str(target), "offset": 1, "limit": 1})
+    )
 
-    assert result.is_error
-    assert "读取上限" in result.content
+    assert not result.is_error
+    payload = json.loads(result.content)
+    assert payload["shown_lines"] == 1
+    assert payload["total_lines"] == 1
 
 
 async def test_patch_rejects_oversized_file_before_read(registry, tmp_path, monkeypatch):
@@ -134,12 +201,13 @@ async def test_builtin_file_tools_resolve_relative_paths_from_agent_workdir(regi
         r = await registry.execute(ToolCall("c2", "file_read", {"path": "demo.txt"}))
         assert not r.is_error
         payload = json.loads(r.content)
-        assert payload["content"] == "隔离"
+        assert payload["content"] == "1: 隔离\n\n(文件结束，共 1 行)"
     finally:
         current_agent_workdir.reset(token)
 
 
-async def test_terminal_runs_inside_agent_workdir(registry, tmp_path):
+async def test_terminal_runs_inside_agent_workdir(monkeypatch, tmp_path):
+    registry = _terminal_registry(monkeypatch, tmp_path)
     token = current_agent_workdir.set(str(tmp_path))
     try:
         # 输出重定向（>）现需宿主审批（terminal_guard），用 pwd stdout 验证 cwd。
@@ -415,7 +483,12 @@ async def test_vision_analyze_png(registry, tmp_path):
     ))
     result = await registry.execute(ToolCall("v1", "vision_analyze", {"path": str(png)}))
     assert not result.is_error
-    assert '"width": 1' in result.content
+    payload = json.loads(result.content)
+    assert payload["image"]["width"] == 1
+    # 图片必须真进上下文：media 通路携带 base64 data URL。
+    assert len(result.media) == 1
+    assert result.media[0].data_url.startswith("data:image/")
+    assert "base64," in result.media[0].data_url
 
 
 async def test_vision_analyze_uses_file_authorization(tmp_path, monkeypatch):
@@ -432,13 +505,15 @@ async def test_vision_analyze_uses_file_authorization(tmp_path, monkeypatch):
         return png
 
     monkeypatch.setattr(web_tools, "authorize_file_tool", authorize)
-    payload = json.loads(await web_tools.handle_vision_analyze(
+    output = await web_tools.handle_vision_analyze(
         {"path": "/untrusted/model/path.png"},
         workspace_store=object(),
         security_service=object(),
-    ))
+    )
+    payload = json.loads(output.content)
 
     assert payload["image"]["path"] == str(png)
+    assert len(output.media) == 1
     assert seen["operation"] == "read"
     assert seen["tool_name"] == "vision_analyze"
 
@@ -452,8 +527,9 @@ async def test_file_read_pagination(registry, tmp_path):
     payload = json.loads(r.content)
     assert payload["offset"] == 2
     assert payload["limit"] == 2
-    assert payload["content"] == "line2\nline3\n"
     assert payload["total_lines"] == 5
+    assert payload["shown_lines"] == 2
+    assert payload["content"] == "2: line2\n3: line3\n\n(已显示第 2-3 行，共 5 行。用 offset=4 继续读取。)"
 
 
 async def test_file_read_preserves_bom(registry, tmp_path):
@@ -464,7 +540,8 @@ async def test_file_read_preserves_bom(registry, tmp_path):
     r = await registry.execute(ToolCall("c1", "file_read", {"path": str(p)}))
     assert not r.is_error
     payload = json.loads(r.content)
-    assert payload["content"] == "hello world\r\nsecond line\r\n"
+    assert payload["content"] == "1: hello world\n2: second line\n\n(文件结束，共 2 行)"
+    assert "UTF-8 BOM" in payload["hint"]
 
     # overwrite should keep BOM and CRLF
     w = await registry.execute(ToolCall("c2", "file_write", {"path": str(p), "content": "hello universe\r\nsecond line\r\n"}))
@@ -472,6 +549,269 @@ async def test_file_read_preserves_bom(registry, tmp_path):
     written = p.read_bytes()
     assert written.startswith(b"\xef\xbb\xbf")
     assert b"\r\n" in written
+
+
+async def test_file_read_default_limit_and_footer(registry, tmp_path):
+    p = tmp_path / "many.txt"
+    p.write_text("".join(f"line{i}\n" for i in range(1, 2501)), encoding="utf-8")
+
+    r = await registry.execute(ToolCall("c1", "file_read", {"path": str(p)}))
+    assert not r.is_error
+    payload = json.loads(r.content)
+    assert payload["limit"] == 2000
+    assert payload["shown_lines"] == 2000
+    assert payload["total_lines"] == 2500
+    assert payload["truncated"] is True
+    assert payload["content"].startswith("1: line1\n2: line2\n")
+    assert payload["content"].endswith("2000: line2000\n\n(已显示第 1-2000 行，共 2500 行。用 offset=2001 继续读取。)")
+
+
+async def test_file_read_rejects_bad_window_args(registry, tmp_path):
+    p = tmp_path / "lines.txt"
+    p.write_text("a\nb\n", encoding="utf-8")
+
+    too_big = await registry.execute(ToolCall("c1", "file_read", {"path": str(p), "limit": 5000}))
+    assert too_big.is_error and "limit 不能超过 2000" in too_big.content
+
+    zero_offset = await registry.execute(ToolCall("c2", "file_read", {"path": str(p), "offset": 0}))
+    assert zero_offset.is_error and "offset 不能为 0" in zero_offset.content
+
+    out_of_range = await registry.execute(ToolCall("c3", "file_read", {"path": str(p), "offset": 99}))
+    assert out_of_range.is_error and "超出文件范围" in out_of_range.content
+
+    huge_tail = await registry.execute(ToolCall("c4", "file_read", {"path": str(p), "offset": -3000}))
+    assert huge_tail.is_error and "绝对值不能超过" in huge_tail.content
+
+
+async def test_file_read_empty_file(registry, tmp_path):
+    p = tmp_path / "empty.txt"
+    p.write_text("", encoding="utf-8")
+
+    r = await registry.execute(ToolCall("c1", "file_read", {"path": str(p)}))
+    assert not r.is_error
+    payload = json.loads(r.content)
+    assert payload["content"] == "(文件结束，共 0 行)"
+    assert payload["total_lines"] == 0
+
+
+async def test_file_read_tail_negative_offset(registry, tmp_path):
+    p = tmp_path / "tail.txt"
+    p.write_text("".join(f"line{i:03d}\n" for i in range(1, 501)), encoding="utf-8")
+
+    r = await registry.execute(ToolCall("c1", "file_read", {"path": str(p), "offset": -3}))
+    assert not r.is_error
+    payload = json.loads(r.content)
+    assert payload["total_lines"] == 500
+    assert payload["shown_lines"] == 3
+    assert payload["content"] == (
+        "498: line498\n499: line499\n500: line500\n\n"
+        "(已读取 3 行（第 498-500 行），文件共 500 行)"
+    )
+
+    # limit 从尾窗口头部截取（kimi 语义）：最后 200 行窗口的第 1 行 = 第 301 行
+    r2 = await registry.execute(
+        ToolCall("c2", "file_read", {"path": str(p), "offset": -200, "limit": 1})
+    )
+    assert not r2.is_error
+    payload2 = json.loads(r2.content)
+    assert payload2["content"].startswith("301: line301\n")
+    assert payload2["shown_lines"] == 1
+
+
+async def test_file_read_tail_keeps_newest_on_budget(registry, tmp_path, monkeypatch):
+    from crew.tools import file_utils
+
+    monkeypatch.setattr(file_utils, "_get_max_read_chars", lambda: 6)
+    p = tmp_path / "tail.txt"
+    p.write_text("aa\nbb\ncc\ndd\n", encoding="utf-8")
+
+    r = await registry.execute(ToolCall("c1", "file_read", {"path": str(p), "offset": -3}))
+    assert not r.is_error
+    payload = json.loads(r.content)
+    # 预算装不下窗口头部（aa/bb），保留最接近末尾的行
+    assert "3: cc" in payload["content"] and "4: dd" in payload["content"]
+    assert "1: aa" not in payload["content"] and "2: bb" not in payload["content"]
+    assert "已保留最接近文件末尾的行" in payload["content"]
+
+
+async def test_file_read_line_length_truncation(registry, tmp_path):
+    p = tmp_path / "minified.txt"
+    p.write_text("short\n" + "x" * 3000 + "\n", encoding="utf-8")
+
+    r = await registry.execute(ToolCall("c1", "file_read", {"path": str(p)}))
+    assert not r.is_error
+    payload = json.loads(r.content)
+    assert payload["truncated"] is True
+    assert "第 2 行超过 2000 字符已截断" in payload["hint"]
+    lines = payload["content"].split("\n")
+    assert lines[1].startswith("2: " + "x" * 2000 + "...（行已截断至 2000 字符）")
+
+
+async def test_file_read_budget_drops_whole_line(registry, tmp_path, monkeypatch):
+    from crew.tools import file_utils
+
+    monkeypatch.setattr(file_utils, "_get_max_read_chars", lambda: 9)
+    p = tmp_path / "budget.txt"
+    p.write_text("aaaa\nbbbb\ncccc\n", encoding="utf-8")
+
+    r = await registry.execute(ToolCall("c1", "file_read", {"path": str(p)}))
+    assert not r.is_error
+    payload = json.loads(r.content)
+    assert payload["shown_lines"] == 2
+    assert "1: aaaa" in payload["content"] and "2: bbbb" in payload["content"]
+    assert "3: cccc" not in payload["content"]
+    assert "(输出已达上限。已显示第 1-2 行。用 offset=3 继续读取。)" in payload["content"]
+
+
+async def test_file_read_crlf_displayed_as_lf(registry, tmp_path):
+    p = tmp_path / "crlf.txt"
+    p.write_bytes(b"a\r\nb\r\n")
+
+    r = await registry.execute(ToolCall("c1", "file_read", {"path": str(p)}))
+    assert not r.is_error
+    payload = json.loads(r.content)
+    assert payload["content"] == "1: a\n2: b\n\n(文件结束，共 2 行)"
+
+
+async def test_file_read_sniffs_binary_content(registry, tmp_path):
+    # 无扩展名的图片：魔数嗅探命中，引导到 vision_analyze
+    png = tmp_path / "screenshot"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+    r = await registry.execute(ToolCall("c1", "file_read", {"path": str(png)}))
+    assert r.is_error and "vision_analyze" in r.content
+
+    # 文本扩展名但内容含 NUL：按二进制拒绝
+    nul = tmp_path / "weird.log"
+    nul.write_bytes(b"hello\x00world")
+    r2 = await registry.execute(ToolCall("c2", "file_read", {"path": str(nul)}))
+    assert r2.is_error and "不是可读的 UTF-8 文本" in r2.content
+
+    # 已知文档扩展名走快速路径并给出 wiki/skills 引导
+    doc = tmp_path / "report.pdf"
+    doc.write_bytes(b"%PDF-1.7 fake")
+    r3 = await registry.execute(ToolCall("c3", "file_read", {"path": str(doc)}))
+    assert r3.is_error and "wiki_capture_attachment" in r3.content
+
+
+async def test_file_read_gbk_rejected_with_iconv_hint(registry, tmp_path):
+    p = tmp_path / "gbk.txt"
+    p.write_bytes("中文内容".encode("gbk"))
+
+    r = await registry.execute(ToolCall("c1", "file_read", {"path": str(p)}))
+    assert r.is_error
+    assert "不是有效的 UTF-8 文本" in r.content
+    assert "iconv" in r.content
+
+
+async def test_file_read_utf16_transcode(registry, tmp_path):
+    # 带 BOM 的 UTF-16 LE
+    p = tmp_path / "utf16bom.txt"
+    p.write_bytes(b"\xff\xfe" + "中文abc\nsecond\n".encode("utf-16-le"))
+    r = await registry.execute(ToolCall("c1", "file_read", {"path": str(p)}))
+    assert not r.is_error
+    payload = json.loads(r.content)
+    assert payload["content"].startswith("1: 中文abc\n2: second")
+    assert "UTF-16 LE" in payload["hint"] and "iconv" in payload["hint"]
+
+    # 无 BOM 的 UTF-16 LE：奇偶 NUL 启发式识别
+    p2 = tmp_path / "utf16raw.txt"
+    p2.write_bytes("hello tail\nsecond line\n".encode("utf-16-le"))
+    r2 = await registry.execute(ToolCall("c2", "file_read", {"path": str(p2)}))
+    assert not r2.is_error
+    payload2 = json.loads(r2.content)
+    assert payload2["content"].startswith("1: hello tail\n2: second line")
+    assert "UTF-16 LE" in payload2["hint"]
+
+
+async def test_file_read_utf16_too_large_rejected(registry, tmp_path, monkeypatch):
+    from crew.tools import file_utils
+
+    monkeypatch.setattr(file_utils, "UTF16_TRANSCODE_MAX_BYTES", 8)
+    p = tmp_path / "utf16big.txt"
+    p.write_bytes(b"\xff\xfe" + "很长的中文内容需要转码\n".encode("utf-16-le"))
+
+    r = await registry.execute(ToolCall("c1", "file_read", {"path": str(p)}))
+    assert r.is_error and "转码上限" in r.content and "iconv" in r.content
+
+
+async def test_file_read_streaming_route_chunk_safety(registry, tmp_path, monkeypatch):
+    """超过流式阈值的文件走增量解码路径，窗口与整读一致。"""
+    from crew.tools import file_utils
+
+    monkeypatch.setattr(file_utils, "FILE_READ_STREAM_MIN_BYTES", 16)
+    p = tmp_path / "stream.txt"
+    p.write_text("".join(f"row-{i}\n" for i in range(1, 101)), encoding="utf-8")
+
+    r = await registry.execute(
+        ToolCall("c1", "file_read", {"path": str(p), "offset": 50, "limit": 3})
+    )
+    assert not r.is_error
+    payload = json.loads(r.content)
+    assert payload["content"].startswith("50: row-50\n51: row-51\n52: row-52")
+    assert payload["total_lines"] == 100
+
+    # 流式路径同样剥离 UTF-8 BOM
+    bom = tmp_path / "stream-bom.txt"
+    bom.write_bytes(b"\xef\xbb\xbf" + "alpha\nbeta\n".encode() + b"x" * 32)
+    rb = await registry.execute(ToolCall("c2", "file_read", {"path": str(bom)}))
+    assert not rb.is_error
+    payload_b = json.loads(rb.content)
+    assert payload_b["content"].startswith("1: alpha\n2: beta")
+    assert "UTF-8 BOM" in payload_b["hint"]
+
+
+def test_build_text_window_pure_engine():
+    from crew.tools.file_utils import build_text_window
+
+    # chunk 边界无意义：跨 chunk 的行正确拼接
+    window = build_text_window(["ab", "c\nd", "ef\n"], offset=1, limit=10, max_chars=10_000)
+    assert [(w.number, w.text) for w in window.lines] == [(1, "abc"), (2, "def")]
+    assert window.total_lines == 2
+
+    # 无尾换行的最后一段也是一行
+    window = build_text_window(["x\ny"], offset=1, limit=10, max_chars=10_000)
+    assert window.total_lines == 2
+    assert window.lines[-1].text == "y"
+
+    # 巨型单行：行缓冲封顶，输出恒定
+    window = build_text_window(["z" * 100_000], offset=1, limit=10, max_chars=10_000)
+    assert window.total_lines == 1
+    assert len(window.lines[0].text) == 2000 + len("...（行已截断至 2000 字符）")
+    assert window.truncated_line_numbers == [1]
+
+    # CRLF 在 chunk 边界处剥离
+    window = build_text_window(["a\r", "\nb\r\n"], offset=1, limit=10, max_chars=10_000)
+    assert [w.text for w in window.lines] == ["a", "b"]
+
+
+def test_slice_text_window_tail_and_legacy_offsets():
+    from crew.tools.file_utils import slice_text_window
+
+    text = "".join(f"L{i}\n" for i in range(1, 11))
+
+    sliced, start, total = slice_text_window(text, -3, None)
+    assert sliced == "L8\nL9\nL10\n"
+    assert start == 8 and total == 10
+
+    # 尾读 + limit 从窗口头部截取
+    sliced, start, total = slice_text_window(text, -5, 1)
+    assert sliced == "L6\n" and start == 6
+
+    # 兼容旧会话参数：越界 offset 归一为空窗口而不是报错
+    sliced, start, total = slice_text_window(text, 99, None)
+    assert sliced == "" and start == 11
+
+
+async def test_post_compact_restore_tail_offset(tmp_path):
+    from crew.agent.compact.post_compact import _reread_file_for_restore
+
+    p = tmp_path / "tail.txt"
+    p.write_text("".join(f"line{i}\n" for i in range(1, 21)), encoding="utf-8")
+
+    restored = _reread_file_for_restore(str(p), {"offset": -3}, max_chars=5000)
+    assert restored is not None
+    assert "第 18 行起" in restored
+    assert "line18" in restored and "line20" in restored and "line17" not in restored
 
 
 async def test_file_write_append(registry, tmp_path):
@@ -539,7 +879,8 @@ async def test_terminal_dangerous_command_with_force(registry, tmp_path):
         current_agent_workdir.reset(token)
 
 
-async def test_terminal_background(registry, tmp_path):
+async def test_terminal_background(monkeypatch, tmp_path):
+    registry = _terminal_registry(monkeypatch, tmp_path)
     token = current_agent_workdir.set(str(tmp_path))
     try:
         r = await registry.execute(ToolCall("c1", "terminal", {"command": "sleep 0.1", "background": True}))
@@ -882,7 +1223,8 @@ def test_redact_sensitive_text_masks_secrets():
     assert redact_sensitive_text("hello world") == "hello world"
 
 
-async def test_terminal_output_is_cleaned_and_redacted(registry, tmp_path):
+async def test_terminal_output_is_cleaned_and_redacted(monkeypatch, tmp_path):
+    registry = _terminal_registry(monkeypatch, tmp_path)
     token = current_agent_workdir.set(str(tmp_path))
     try:
         # 输出里同时含 ANSI 颜色码和一个 key

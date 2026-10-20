@@ -16,9 +16,10 @@ from crew.agent.executor import (
     ExecutionContext,
     create_executor,
 )
+from crew.agent.executor.builtin import _RETRY_DELAY_CAP_SECONDS
 from crew.agent.runtime import SingleAgent
 from crew.core.envelope import Envelope, ResponseChunk
-from crew.core.errors import ConfigError, ProviderError
+from crew.core.errors import ConfigError, CrewErrorKind, ProviderError
 from crew.core.mocks import FakeProvider, InMemorySessionStore, NullMemory
 from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
 from crew.plugins.manager import PluginManager
@@ -64,6 +65,39 @@ async def test_agent_plain_answer_no_tools():
         if ch.kind == "final":
             final = ch.body["text"]
     assert "你好" in final
+
+
+async def test_agent_repairs_orphan_tool_calls_on_cold_load():
+    """冷读历史里的孤儿 tool_call（崩溃残留）先合成 error 结果再进入本轮，
+    且随本轮落库持久化——再次冷读扫描为空，不重复合成。"""
+    from crew.agent.loop import TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN
+
+    store = InMemorySessionStore()
+    store.save("orphan-s", [
+        Message.user("改文件"),
+        Message.assistant("我来写", [
+            ToolCall("c1", "file_write", {"path": "/tmp/a", "content": "x"}, status="running"),
+            ToolCall("c2", "file_read", {"path": "/tmp/b"}),
+        ]),
+    ], owner_account_id="local")
+    provider = FakeProvider()
+    agent = _agent(provider, session_store=store)
+
+    async for _ in agent.run(Envelope.of("继续", session_id="orphan-s")):
+        pass
+
+    history = store.load("orphan-s", owner_account_id="local")
+    tool_msgs = [m for m in history if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_msgs] == ["c1", "c2"]
+    assert tool_msgs[0].content.startswith(TOOL_OUTCOME_UNKNOWN)
+    assert tool_msgs[1].content.startswith(TOOL_NOT_STARTED)
+    # provider 本轮收到的视图里，两个 tool_call 均已有配对结果
+    assert {m.tool_call_id for m in provider.calls[-1] if m.role == "tool"} == {"c1", "c2"}
+
+    async for _ in agent.run(Envelope.of("再来", session_id="orphan-s")):
+        pass
+    history2 = store.load("orphan-s", owner_account_id="local")
+    assert [m.tool_call_id for m in history2 if m.role == "tool"] == ["c1", "c2"]
 
 
 async def test_context_preview_counts_same_l1_view_used_before_send():
@@ -405,6 +439,102 @@ async def test_builtin_executor_no_retry_when_fatal():
     assert kinds[-1] == "error"
 
 
+class _DelayFlakyProvider(FakeProvider):
+    """前 fail_times 次抛同一个可重试 ProviderError（可带 retry_delay），之后正常。"""
+
+    def __init__(self, fail_times: int, error: ProviderError):
+        super().__init__()
+        self._fail_times = fail_times
+        self._error = error
+        self.calls = 0
+
+    async def stream_chat(self, messages, tools=None):
+        self.calls += 1
+        if self._fail_times > 0:
+            self._fail_times -= 1
+            raise self._error
+        yield StreamChunk(delta_text="好了")
+        yield StreamChunk(delta_text="", done=True)
+
+
+@pytest.fixture
+def _recorded_sleeps(monkeypatch):
+    """录下 retry 段的 asyncio.sleep 延迟并跳过真实等待。"""
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("crew.agent.executor.builtin.asyncio.sleep", fake_sleep)
+    return delays
+
+
+def _retry_executor(provider, *, max_retries=2, backoff_seconds=10.0) -> BuiltinExecutor:
+    return BuiltinExecutor(
+        provider, Registry(), PluginManager(),
+        max_retries=max_retries, backoff_seconds=backoff_seconds, stream_retry_jitter=False,
+    )
+
+
+def _retry_ctx() -> ExecutionContext:
+    return ExecutionContext(
+        session_id="s", request_id="r", system_prompt="sys", messages=[Message.user("hi")], query="hi"
+    )
+
+
+async def test_builtin_executor_retry_waits_server_retry_delay(_recorded_sleeps):
+    """服务端建议的 retry_delay 优先于本地指数退避（本地 backoff=10s，实际应等 0.05s）。"""
+    err = ProviderError("限流", kind=CrewErrorKind.USAGE_LIMIT, retryable=True, status=429, retry_delay=0.05)
+    provider = _DelayFlakyProvider(fail_times=1, error=err)
+    ex = _retry_executor(provider)
+    kinds = [ch.kind async for ch in ex.execute(_retry_ctx())]
+    assert kinds[-1] == "final"
+    assert _recorded_sleeps == [0.05]
+
+
+async def test_builtin_executor_retry_delay_capped(_recorded_sleeps):
+    """异常大的 retry_delay 被封顶，避免拖死重试循环。"""
+    err = ProviderError("限流", kind=CrewErrorKind.USAGE_LIMIT, retryable=True, status=429, retry_delay=7200.0)
+    provider = _DelayFlakyProvider(fail_times=1, error=err)
+    ex = _retry_executor(provider, backoff_seconds=0)
+    kinds = [ch.kind async for ch in ex.execute(_retry_ctx())]
+    assert kinds[-1] == "final"
+    assert _recorded_sleeps == [_RETRY_DELAY_CAP_SECONDS]
+
+
+async def test_builtin_executor_non_crew_error_not_retried(_recorded_sleeps):
+    """非 CrewError 异常维持原语义：不重试、不等待，直接 error 帧。"""
+
+    class _BoomProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def stream_chat(self, messages, tools=None):
+            self.calls += 1
+            raise ValueError("boom")
+
+    provider = _BoomProvider()
+    ex = _retry_executor(provider)
+    kinds = [ch.kind async for ch in ex.execute(_retry_ctx())]
+    assert kinds[-1] == "error"
+    assert provider.calls == 1
+    assert _recorded_sleeps == []
+
+
+async def test_builtin_executor_error_frame_carries_kind_fields():
+    """可重试错误耗尽重试后，error 帧 body 带 kind(code)/retryable/retry_delay。"""
+    err = ProviderError("超时", kind=CrewErrorKind.TIMEOUT, retryable=True, retry_delay=2.5)
+    provider = _DelayFlakyProvider(fail_times=3, error=err)
+    ex = _retry_executor(provider, max_retries=0)
+    chunks = [ch async for ch in ex.execute(_retry_ctx())]
+    error = chunks[-1]
+    assert error.kind == "error"
+    assert error.body["code"] == "timeout"
+    assert error.body["retryable"] is True
+    assert error.body["retry_delay"] == 2.5
+
+
 async def test_agent_session_end_reports_final_and_provider_failure_once():
     completed_plugins, completed_calls = _outcome_recorder()
     completed_agent = _agent(FakeProvider(), plugins=completed_plugins)
@@ -707,7 +837,10 @@ async def test_compactor_summarizes_old_and_keeps_recent_from_safe_boundary():
     for i in range(6):
         msgs.append(Message.user("问题" * 500 + str(i)))
         msgs.append(Message.assistant("回答" * 500 + str(i)))
-    compactor = ContextCompactor(FakeProvider(), token_budget=10, keep_recent=3)
+    compactor = ContextCompactor(
+        FakeProvider(script=[ChatResponse(text="历史摘要：此前讨论了六个问题")]),
+        token_budget=10, keep_recent=3,
+    )
     assert estimate_tokens(msgs) > 10
     out = await compactor.maybe_compact(msgs)
     # 第一条应是摘要 system
@@ -739,6 +872,110 @@ async def test_compaction_does_not_destroy_persisted_history():
         assert original in saved
     assert any(m.role == "user" and m.content == "新一轮提问" for m in saved)
     assert len(saved) > len(seed)
+
+
+# ---------------------------------------------------------------------------
+# overflow 后 compact-retry-once（投影前进才重试）
+# ---------------------------------------------------------------------------
+def _seed_long_store(n_pairs: int = 25) -> InMemorySessionStore:
+    store = InMemorySessionStore()
+    seed: list[Message] = []
+    for i in range(n_pairs):
+        seed.append(Message.user(f"第{i:03d}轮问题 " + "长文本占位" * 200))
+        seed.append(Message.assistant(f"第{i:03d}轮回答 " + "长文本占位" * 200))
+    store.save("ov", seed, owner_account_id="local")
+    return store
+
+
+def _always_overflow(provider: FakeProvider) -> dict[str, int]:
+    """把 stream_chat 换成「每次必抛上下文溢出」，返回计数 dict。"""
+    state = {"requests": 0}
+
+    async def _overflow(messages, tools=None, **kwargs):  # noqa: ANN001
+        state["requests"] += 1
+        raise ProviderError("maximum context length exceeded", retryable=False)
+        yield  # noqa: E501 -- 让本函数成为 async generator，异常在迭代时被分类
+
+    provider.stream_chat = _overflow
+    return state
+
+
+class ShortSummaryProvider(FakeProvider):
+    """chat 永远返回短摘要（不受 script 限制），stream 由调用方覆盖。"""
+
+    async def chat(self, messages, tools=None, **kw):  # noqa: ANN001
+        self.calls.append(list(messages))
+        return ChatResponse(text="压缩摘要")
+
+
+async def test_overflow_compacts_then_retries_once_then_errors():
+    """overflow → 兜底压缩使投影前进 → 重试一次 → 再溢出则报错（不无限重试）。"""
+    store = _seed_long_store()
+    provider = ShortSummaryProvider()
+    state = _always_overflow(provider)
+    # 摘要调用走 stream_aux → stream_chat 管线；压缩器用独立的摘要 provider，
+    # 主回合计数（overflow 桩）才不会混入摘要请求。
+    summary_provider = ShortSummaryProvider()
+    compactor = ContextCompactor(summary_provider, token_budget=10, keep_recent=4)
+    agent = _agent(provider, session_store=store, compactor=compactor)
+
+    chunks = []
+    async for ch in agent.run(Envelope.of("继续", session_id="ov")):
+        chunks.append(ch)
+
+    errors = [c for c in chunks if c.kind == "error"]
+    assert errors and "上下文超长" in errors[-1].body.get("message", "")
+    # 只重试一次：两次 LLM 请求（原始 + 重试），第三次溢出不再压缩重试
+    assert state["requests"] == 2
+    # 摘要调用 = 预检 maybe_compact 1 次 + overflow 兜底压缩 1 次
+    assert len(summary_provider.calls) == 2
+
+
+async def test_overflow_no_progress_no_retry():
+    """兜底压缩未使投影前进（压缩器关闭）→ 不重试、不再发请求，直接报错。"""
+    store = _seed_long_store()
+    provider = FakeProvider()
+    state = _always_overflow(provider)
+    compactor = ContextCompactor(provider, token_budget=10, keep_recent=4, enabled=False)
+    agent = _agent(provider, session_store=store, compactor=compactor)
+
+    chunks = []
+    async for ch in agent.run(Envelope.of("继续", session_id="ov")):
+        chunks.append(ch)
+
+    errors = [c for c in chunks if c.kind == "error"]
+    assert errors and "上下文超长" in errors[-1].body.get("message", "")
+    assert state["requests"] == 1  # 投影未前进：没有重试请求
+
+
+async def test_file_manifest_persisted_into_canonical_history():
+    """文件清单作为 is_meta 持久会话信息写入 canonical：跨轮继承，压缩后仍回注视图。"""
+    from crew.agent.compact.file_manifest import is_file_manifest_message
+
+    store = InMemorySessionStore()
+    seed = _history_with_file_ops_seed()
+    store.save("fm", seed, owner_account_id="local")
+
+    agent = _agent(FakeProvider(), session_store=store)
+    async for _ in agent.run(Envelope.of("继续", session_id="fm")):
+        pass
+
+    saved = store.load("fm", owner_account_id="local")
+    manifests = [m for m in saved if is_file_manifest_message(m)]
+    assert len(manifests) == 1, "canonical 应持久化恰好一条文件清单"
+    assert manifests[0].is_meta
+    assert "/a.py" in (manifests[0].content or "")
+
+
+def _history_with_file_ops_seed() -> list[Message]:
+    return [
+        Message.user("看下文件"),
+        Message.assistant(
+            "读取",
+            tool_calls=[ToolCall(id="r1", name="file_read", arguments={"path": "/a.py"})],
+        ),
+        Message.tool("r1", "内容", name="file_read"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -858,10 +1095,11 @@ async def test_generate_session_title_user_only_ignores_assistant():
     max_token_values: list[int | None] = []
 
     class _CapturingProvider:
-        async def chat(self, messages, tools=None, *, max_tokens=None):
+        async def stream_chat(self, messages, tools=None, *, max_tokens=None, **kwargs):
             seen.append(list(messages))
             max_token_values.append(max_tokens)
-            return ChatResponse(text="问候")
+            yield StreamChunk(delta_text="问候")
+            yield StreamChunk(delta_text="", done=True, finish_reason="stop")
 
     title = await generate_session_title(
         _CapturingProvider(),
@@ -910,6 +1148,104 @@ async def test_title_task_deduplicated_while_inflight():
         _rt.generate_session_title = real
 
 
+async def test_cancel_title_task_supersedes_inflight_generation():
+    """supersede：取消在途标题任务后，迟到的旧标题不得落库。"""
+    import crew.agent.runtime as _rt
+
+    store = InMemorySessionStore()
+    agent = _agent(FakeProvider(), session_store=store, enable_title=True)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    written: list[str] = []
+    real_set_title = store.set_title
+
+    def _spy_set_title(session_id, title, owner_account_id=""):
+        written.append(title)
+        return real_set_title(session_id, title, owner_account_id=owner_account_id)
+
+    store.set_title = _spy_set_title
+
+    async def _hanging(provider, messages, *, user_only=False):
+        started.set()
+        await release.wait()
+        return "过期标题"
+
+    real = _rt.generate_session_title
+    _rt.generate_session_title = _hanging
+    try:
+        agent._spawn_title_task("s1", "local", [Message.user("hi")], None)
+        await started.wait()
+        assert ("local", "s1") in agent._title_inflight
+        agent._cancel_title_task("s1", "local")
+        release.set()
+        if agent._title_tasks:
+            await asyncio.gather(*agent._title_tasks, return_exceptions=True)
+        assert written == []
+    finally:
+        release.set()
+        _rt.generate_session_title = real
+
+
+async def test_new_user_turn_supersedes_inflight_title_task():
+    """新用户回合开始即在途标题生成被 abort；本回合的标题随后正常生成。"""
+    import crew.agent.runtime as _rt
+
+    store = InMemorySessionStore()
+    agent = _agent(
+        FakeProvider(script=[ChatResponse(text="完成"), ChatResponse(text="完成2")]),
+        session_store=store,
+        enable_title=True,
+    )
+    first_started = asyncio.Event()
+    first_release = asyncio.Event()
+    written: list[str] = []
+    real_set_title = store.set_title
+
+    def _spy_set_title(session_id, title, owner_account_id=""):
+        written.append(title)
+        return real_set_title(session_id, title, owner_account_id=owner_account_id)
+
+    store.set_title = _spy_set_title
+    calls = {"n": 0}
+
+    async def _hanging(provider, messages, *, user_only=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            first_started.set()
+            await first_release.wait()
+            return "过期标题"
+        return "新标题"
+
+    real = _rt.generate_session_title
+    _rt.generate_session_title = _hanging
+    try:
+        async for _ch in agent.run(Envelope.of("问题一", session_id="sup")):
+            pass
+        await first_started.wait()
+        assert ("local", "sup") in agent._title_inflight
+
+        async def _drain(stream):
+            async for _ in stream:
+                pass
+
+        turn2 = asyncio.ensure_future(_drain(agent.run(Envelope.of("问题二", session_id="sup"))))
+        # run() 开头即 supersede：在途标题任务同步出表
+        for _ in range(100):
+            if ("local", "sup") not in agent._title_inflight:
+                break
+            await asyncio.sleep(0.01)
+        assert ("local", "sup") not in agent._title_inflight
+        first_release.set()
+        await turn2
+        if agent._title_tasks:
+            await asyncio.gather(*agent._title_tasks, return_exceptions=True)
+        assert "过期标题" not in written
+        assert written == ["新标题"]
+    finally:
+        first_release.set()
+        _rt.generate_session_title = real
+
+
 async def test_title_spawn_scheduled_only_after_main_response(monkeypatch):
     """自动标题必须移出主推理窗口，并在主 final 后最多调度一次。"""
     store = InMemorySessionStore()
@@ -938,15 +1274,16 @@ async def test_main_stream_gets_provider_before_title_request():
         def __init__(self) -> None:
             self.call_order: list[str] = []
 
-        async def chat(self, messages, tools=None, *, max_tokens=None):
-            self.call_order.append("title")
-            return ChatResponse(text="天气查询")
-
-        async def stream_chat(self, messages, tools=None, *, max_tokens=None):
-            self.call_order.append("main")
+        async def stream_chat(self, messages, tools=None, *, max_tokens=None, **kwargs):
+            is_title = any(
+                "不超过 12 个字" in (m.content or "")
+                for m in messages
+                if m.role == "system"
+            )
+            self.call_order.append("title" if is_title else "main")
             await asyncio.sleep(0.01)
             yield StreamChunk(delta_text="完成")
-            self.call_order.append("main_done")
+            self.call_order.append("title_done" if is_title else "main_done")
             yield StreamChunk(done=True, finish_reason="stop")
 
     provider = _OrderedProvider()
@@ -957,7 +1294,7 @@ async def test_main_stream_gets_provider_before_title_request():
     if agent._title_tasks:
         await asyncio.gather(*agent._title_tasks)
 
-    assert provider.call_order == ["main", "main_done", "title"]
+    assert provider.call_order == ["main", "main_done", "title", "title_done"]
 
 
 async def test_title_timeout_falls_back_to_first_query():
@@ -969,8 +1306,9 @@ async def test_title_timeout_falls_back_to_first_query():
     aux._TITLE_TIMEOUT = 0.05  # 缩短超时，快速验证
 
     class _HangingProvider:
-        async def chat(self, messages, tools=None, *, max_tokens=None):
-            await asyncio.Event().wait()  # 永不返回，模拟 minimax 非流式挂起
+        async def stream_chat(self, messages, tools=None, *, max_tokens=None, **kwargs):
+            await asyncio.Event().wait()  # 永不返回，模拟网关流式挂起
+            yield  # 让本函数保持 async generator 形态
 
     try:
         title = await generate_session_title(
@@ -985,10 +1323,34 @@ async def test_title_timeout_falls_back_to_first_query():
 async def test_cron_fired_turn_gets_scheduled_task_framing():
     # 定时任务触发轮：reminder 应明确"此刻在执行定时任务"+ 带任务名 + 当前时间，
     # 避免 agent 把注入的 query 当成用户提前发来的消息而反问"是否到时间"。
-    agent = _agent(FakeProvider(script=[]))
+    from crew.cron import contribute_cron_trigger_reminder
+    from crew.features import (
+        ContextContributor,
+        ContextContributorRegistry,
+        ContextPhase,
+        FeatureGeneration,
+        FeatureScope,
+    )
+
+    context_registry = ContextContributorRegistry()
+    scope = FeatureScope(FeatureGeneration("cron-context-test", 1))
+    context_registry.register(
+        scope,
+        ContextContributor(
+            "cron.trigger.reminder",
+            contribute_cron_trigger_reminder,
+            phase=ContextPhase.PROMPT,
+        ),
+    )
+    scope.activate()
+    agent = _agent(
+        FakeProvider(script=[]),
+        context_contributors=context_registry,
+    )
     cron_env = Envelope.of("詹姆斯goat", session_id="s1", channel="cron")
     cron_env.params["cron_job_name"] = "詹姆斯GOAT提醒"
 
+    await agent._contribute_prompt_context(cron_env)
     _static, reminder = await agent._build_prompts(cron_env, [])
 
     assert "定时任务触发" in reminder
@@ -997,10 +1359,11 @@ async def test_cron_fired_turn_gets_scheduled_task_framing():
     assert "当前时间：" in reminder            # 触发轮能看到当前时刻（不只是日期）
 
     # 普通渠道不注入该框架
-    _s2, normal_reminder = await agent._build_prompts(
-        Envelope.of("你好", session_id="s2", channel="web"), []
-    )
+    normal_env = Envelope.of("你好", session_id="s2", channel="web")
+    await agent._contribute_prompt_context(normal_env)
+    _s2, normal_reminder = await agent._build_prompts(normal_env, [])
     assert "定时任务触发" not in normal_reminder
+    await scope.dispose()
 
 
 async def test_revision_intent_gets_hidden_turn_framing():
@@ -1016,9 +1379,21 @@ async def test_revision_intent_gets_hidden_turn_framing():
     assert "最终答案" in reminder
 
 
+async def test_feature_context_fragments_are_dynamic_not_static():
+    """Feature runtime context stays out of the prefix-stable system prompt."""
+    agent = _agent(FakeProvider(script=[]))
+    env = Envelope.of("hello", session_id="s-context", channel="web")
+    env.params["_context_prompt_parts"] = ["## 当前会话上下文\n**来源:** Web"]
+
+    system_static, reminder = await agent._build_prompts(env, [])
+
+    assert "当前会话上下文" not in system_static
+    assert "当前会话上下文" in reminder
+
+
 async def test_read_attachment_rejects_oversized_file(tmp_path, monkeypatch):
     """附件读取对超大文件应读前拒绝，而非整读进内存。"""
-    from crew.agent import runtime as rt
+    import crew.agent.runtime as rt
 
     big = tmp_path / "big.md"
     big.write_text("x" * 100, encoding="utf-8")
@@ -1026,16 +1401,53 @@ async def test_read_attachment_rejects_oversized_file(tmp_path, monkeypatch):
 
     result = await rt._read_attachment(str(big))
 
-    assert "文件过大" in result
+    assert "文件过大" in result.content
+    assert result.truncated is False
 
 
 async def test_read_attachment_reads_small_file(tmp_path):
     """小附件正常读取（路径经 resolve 后读取，避免符号链接组件报错）。"""
-    from crew.agent import runtime as rt
+    import crew.agent.runtime as rt
 
     small = tmp_path / "small.md"
     small.write_text("hello attachment", encoding="utf-8")
 
     result = await rt._read_attachment(str(small))
 
-    assert "hello attachment" in result
+    assert "hello attachment" in result.content
+    assert result.truncated is False
+
+
+async def test_read_attachment_truncation_is_self_describing(tmp_path):
+    """超长文本附件截断后必须携带总量元信息，供注入层生成续读提示。"""
+    import crew.agent.runtime as rt
+
+    long_file = tmp_path / "long.md"
+    body = "\n".join(f"line-{i}" for i in range(1500))
+    long_file.write_text(body, encoding="utf-8")
+
+    result = await rt._read_attachment(str(long_file))
+
+    assert result.truncated is True
+    assert result.content == body[: rt._ATTACHMENT_MAX_CHARS]
+    assert result.total_chars == len(body)
+    assert result.total_lines == 1500
+
+
+async def test_format_attachment_block_appends_truncation_notice():
+    """截断附件的注入块在代码块外提示模型用 file_read 分页续读。"""
+    import crew.agent.runtime as rt
+
+    preview = rt.AttachmentPreview(
+        content="x" * 10, truncated=True, total_chars=20000, total_lines=400
+    )
+    block = rt._format_attachment_block("a.md", "/tmp/a.md", preview.content, preview)
+
+    assert "【附件已截断】" in block
+    assert "20000 字符 / 400 行" in block
+    assert "file_read" in block
+    # 提示必须落在代码块外，避免被当作文件正文。
+    assert block.index("```") < block.index("【附件已截断】")
+
+    intact = rt._format_attachment_block("a.md", "/tmp/a.md", "hello", None)
+    assert "【附件已截断】" not in intact

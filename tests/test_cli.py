@@ -82,6 +82,64 @@ def test_global_flags_work_before_subcommand(capsys, cli_home):
     assert any(item["id"] == "default" for item in data)
 
 
+def test_dump_features_outputs_audit_and_returns_nonzero_for_blocker(
+    capsys,
+    cli_home,
+    monkeypatch,
+):
+    class FakeReport:
+        healthy = False
+
+        @staticmethod
+        def as_dict():
+            return {
+                "healthy": False,
+                "issues": ["waiting-plugin"],
+                "features": [
+                    {
+                        "id": "waiting-plugin",
+                        "state": "waiting",
+                        "generation": None,
+                        "config": {
+                            "desired_revision": 1,
+                            "effective_revision": None,
+                        },
+                        "services": {
+                            "requires": ["storage"],
+                            "optional": [],
+                            "provides": [],
+                            "missing_required": ["storage"],
+                            "missing_optional": [],
+                        },
+                        "registrations": [],
+                        "error": None,
+                    }
+                ],
+            }
+
+    class FakePlugins:
+        @staticmethod
+        def startup_audit():
+            return FakeReport()
+
+    class FakeApp:
+        plugins = FakePlugins()
+        closed = False
+
+        async def shutdown(self):
+            self.closed = True
+
+    app = FakeApp()
+    monkeypatch.setattr("crew.cli.app.build_app", lambda _config: app)
+    monkeypatch.setattr("crew.cli.app.load_config", lambda _path: object())
+
+    code, out = run_cli(capsys, "--dump-features", "--json")
+
+    assert code == 1
+    assert json_out(out)["issues"] == ["waiting-plugin"]
+    assert app.closed
+
+
 def test_config_models_list_json(capsys, cli_home):
     code, out = run_cli(capsys, "config", "models", "list", "--json")
     assert code == 0

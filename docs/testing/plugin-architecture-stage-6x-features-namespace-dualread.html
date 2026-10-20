@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6X · 配置节 features.* 命名空间双读（P2-1 第一步）</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6X · 配置节 features.* 命名空间双读（P2-1 第一步）</h1>
+<p>2026-09-14 · 提交 <code>476e860</code>。命名空间审计 P2-1 第一步：<code>features.*</code> 配置节双读落地，为旧节退役（P2-1 第二步，<code>0f4ade1</code>）铺路。</p>
+<h2>处置</h2>
+<ul>
+<li><code>_apply_features_namespace</code> 单点通用合并：features 子树按显式映射表深合并回旧位置（新节优先、旧节兜底），下游读取与 Feature 侧解析零改动零感知；无 features 节时旧配置解析逐字节不变。</li>
+<li>SECTION_MAP 整节映射 + FLAT_MAP 平铺映射（dynamic_kanban 去 dk_ 前缀）。</li>
+<li>决策：db 路径不进 features.*（core 装配层消费，runtime.* 为终态）；platforms 随第二步退役；P3-1 死段删除（真实归属 tasks.subagent 注明）。</li>
+<li>example 追加目标形态段；发现的 dk_verification_gate_enabled loader 缺口由 <code>9de6e9b</code> 修复。</li>
+</ul>
+<h2>验证记录（子 agent 开发，主 agent 审查后复跑）</h2>
+<table><tr><th>项</th><th>结果</th></tr>
+<tr><td>新增契约测试</td><td>19 个（映射合并、优先级、死段删除、无 features 节逐字节不变等）</td></tr>
+<tr><td>后端全量 <code>pytest tests/ -q</code></td><td>4183 passed / 0 failed</td></tr>
+</table>
+<p>平台说明：纯配置解析语义，无平台分支；本轮实测为 macOS 本机。ci.yml python 门禁三平台矩阵首跑结果待推送后回填。</p>
+<p><a href="../backend/modules/naming-audit.html">命名空间审计</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

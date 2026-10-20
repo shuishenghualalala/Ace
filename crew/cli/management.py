@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from crew.cli.app import CliContext, CliError, CliResult, parse_json
 from crew.gateway.helpers import config_body, with_session_agent_labels
-from crew.gateway.hooks import hook_registry
+from crew.features.hooks import hook_registry
 from crew.gateway.routers.sessions import _session_has_blocking_cron, _teardown_session_resources
 from crew.state.logging import query_logs
 from crew.state.session_store import SessionOwnershipError
@@ -1192,17 +1195,42 @@ def _register_migrate(subparsers) -> None:
     claim.add_argument("--account", required=True, help="目标 owner_account_id，例如 owner:user-a")
     claim.add_argument("--dry-run", action="store_true", help="只统计，不写入")
     claim.set_defaults(handler=_claim_legacy)
+    feature = cmds.add_parser("feature", help="核对 Feature 级 schema 版本")
+    feature.add_argument("name", help="Feature 注册名，例如 work")
+    feature.set_defaults(handler=_migrate_feature)
+    orphans = cmds.add_parser("orphans", help="扫描主库未被任何归属清单覆盖的表（只读诊断）")
+    orphans.set_defaults(handler=_migrate_orphans)
 
 
 def _claim_legacy(args: Any, ctx: CliContext) -> CliResult:
-    from crew.state._migration import OWNER_TABLE_LABELS, claim_legacy_owner_database
+    from crew.state._migration import (
+        OWNER_TABLE_LABELS,
+        claim_legacy_owner_databases,
+        legacy_owner_scan_targets,
+    )
 
     app = ctx.app
     owner = args.account.strip()
     if not owner:
         raise CliError("--account 不能为空")
-    changed, remaining = claim_legacy_owner_database(
+    # 按表归属解析对应库（ADR-0038）：cron/work/tasks/notifications/channels
+    # 表读各自独立库，其余读主库。
+    # 不传 kanban_db_path（有意缺省）：通用认领会改写 kanban_workflows 的
+    # legacy_ambiguous 歧义行，接入需先补全 kanban 专用认领语义
+    # （见 _migration.KANBAN_DB_TABLES 注释）。
+    # 不传 external/team/sites 路径（有意缺省）：三域表不在 OWNER_TABLE_LABELS，
+    # owner 归一由各自 store 构造时自带（见 _migration.EXTERNAL_DB_TABLES /
+    # SITES_DB_TABLES 注释）。channels 只传 routes 表：bindings 表同豁免语义。
+    targets = legacy_owner_scan_targets(
         app.config.db_path,
+        app.config.cron_db_path,
+        app.config.work_db_path,
+        tasks_db_path=app.config.tasks_db_path,
+        notifications_db_path=app.config.notifications_db_path,
+        channels_db_path=app.config.channels_db_path,
+    )
+    changed, remaining = claim_legacy_owner_databases(
+        targets,
         owner,
         dry_run=bool(args.dry_run),
         wal_enabled=app.config.sqlite_wal,
@@ -1217,6 +1245,230 @@ def _claim_legacy(args: Any, ctx: CliContext) -> CliResult:
         text = "没有未归属数据。"
     remaining_view = {table: count for table, count in remaining.items() if count}
     return CliResult(data={"changed": changed, "remaining": remaining_view}, text=text)
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureMigrationReport:
+    """一次 Feature schema 版本核对的结果快照。"""
+
+    feature: str
+    current_version: int
+    target_version: int
+
+
+FeatureMigrator = Callable[[Any], FeatureMigrationReport]
+
+
+def _run_main_db_migrator(
+    app: Any,
+    *,
+    feature: str,
+    latest_version: int,
+    db_path: str | None = None,
+) -> FeatureMigrationReport:
+    """Ensure the feature's version table on its database, then snapshot versions.
+
+    缺省作用于主库；已拆独立库的 Feature（如 cron）经 ``db_path`` 指向自己的库。
+    """
+    from crew.state.schema_version import stamp_baseline
+    from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
+
+    conn = connect_sqlite(db_path or app.config.db_path, wal_enabled=app.config.sqlite_wal)
+    try:
+        writer = SQLiteWriteHelper(conn, threading.Lock())
+        current = writer.execute(
+            lambda c: stamp_baseline(c, feature, version=latest_version)
+        )
+    finally:
+        conn.close()
+    return FeatureMigrationReport(
+        feature=feature,
+        current_version=current,
+        target_version=latest_version,
+    )
+
+
+def _migrate_work(app: Any) -> FeatureMigrationReport:
+    from crew.work.feature import WORK_SCHEMA_FEATURE, WORK_SCHEMA_VERSION
+
+    # work 已拆独立库（ADR-0038）：版本表 stamp 到 work 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=WORK_SCHEMA_FEATURE,
+        latest_version=WORK_SCHEMA_VERSION,
+        db_path=app.config.work_db_path,
+    )
+
+
+def _migrate_cron(app: Any) -> FeatureMigrationReport:
+    from crew.cron.jobs import CRON_SCHEMA_FEATURE, CRON_SCHEMA_VERSION
+
+    # cron 已拆独立库（ADR-0038）：版本表 stamp 到 cron 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=CRON_SCHEMA_FEATURE,
+        latest_version=CRON_SCHEMA_VERSION,
+        db_path=app.config.cron_db_path,
+    )
+
+
+def _migrate_kanban(app: Any) -> FeatureMigrationReport:
+    from crew.dynamickanban.store import KANBAN_SCHEMA_FEATURE, KANBAN_SCHEMA_VERSION
+
+    # kanban 已拆独立库（ADR-0038）：版本表 stamp 到 kanban 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=KANBAN_SCHEMA_FEATURE,
+        latest_version=KANBAN_SCHEMA_VERSION,
+        db_path=app.config.kanban_db_path,
+    )
+
+
+def _migrate_external(app: Any) -> FeatureMigrationReport:
+    from crew.team.external_store import EXTERNAL_SCHEMA_FEATURE, EXTERNAL_SCHEMA_VERSION
+
+    # external 已拆独立库（ADR-0038）：版本表 stamp 到 external 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=EXTERNAL_SCHEMA_FEATURE,
+        latest_version=EXTERNAL_SCHEMA_VERSION,
+        db_path=app.config.external_db_path,
+    )
+
+
+def _migrate_team(app: Any) -> FeatureMigrationReport:
+    from crew.team.external_store import TEAM_SCHEMA_FEATURE, TEAM_SCHEMA_VERSION
+
+    # team 已拆独立库（ADR-0038）：版本表 stamp 到 team 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=TEAM_SCHEMA_FEATURE,
+        latest_version=TEAM_SCHEMA_VERSION,
+        db_path=app.config.team_db_path,
+    )
+
+
+def _migrate_sites(app: Any) -> FeatureMigrationReport:
+    from crew.sites.store import SITES_SCHEMA_FEATURE, SITES_SCHEMA_VERSION
+
+    # sites 已拆独立库（ADR-0038 收尾批）：版本表 stamp 到 sites 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=SITES_SCHEMA_FEATURE,
+        latest_version=SITES_SCHEMA_VERSION,
+        db_path=app.config.sites_db_path,
+    )
+
+
+def _migrate_tasks(app: Any) -> FeatureMigrationReport:
+    from crew.tasks.runtime import TASKS_SCHEMA_FEATURE, TASKS_SCHEMA_VERSION
+
+    # tasks 已拆独立库（ADR-0038 收尾批）：版本表 stamp 到 tasks 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=TASKS_SCHEMA_FEATURE,
+        latest_version=TASKS_SCHEMA_VERSION,
+        db_path=app.config.tasks_db_path,
+    )
+
+
+def _migrate_notifications(app: Any) -> FeatureMigrationReport:
+    from crew.notifications.store import (
+        NOTIFICATIONS_SCHEMA_FEATURE,
+        NOTIFICATIONS_SCHEMA_VERSION,
+    )
+
+    # notifications 已拆独立库（ADR-0038 收尾批）：版本表 stamp 到
+    # notifications 库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=NOTIFICATIONS_SCHEMA_FEATURE,
+        latest_version=NOTIFICATIONS_SCHEMA_VERSION,
+        db_path=app.config.notifications_db_path,
+    )
+
+
+def _migrate_channels(app: Any) -> FeatureMigrationReport:
+    from crew.channels.channel_bindings import (
+        CHANNELS_SCHEMA_FEATURE,
+        CHANNELS_SCHEMA_VERSION,
+    )
+
+    # channels 已拆独立库（ADR-0038 最后一批）：版本表 stamp 到 channels 库
+    # 而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=CHANNELS_SCHEMA_FEATURE,
+        latest_version=CHANNELS_SCHEMA_VERSION,
+        db_path=app.config.channels_db_path,
+    )
+
+
+def _migrate_wiki_learning(app: Any) -> FeatureMigrationReport:
+    from plugins.wiki_learning.store import (
+        WIKI_LEARNING_SCHEMA_FEATURE,
+        WIKI_LEARNING_SCHEMA_VERSION,
+    )
+
+    # wiki_learning 插件自有表已拆独立库（ADR-0038 清单外补充批）：版本表
+    # stamp 到插件库而非主库。
+    return _run_main_db_migrator(
+        app,
+        feature=WIKI_LEARNING_SCHEMA_FEATURE,
+        latest_version=WIKI_LEARNING_SCHEMA_VERSION,
+        db_path=app.config.wiki_learning_db_path,
+    )
+
+
+# Feature → 迁移入口注册表：新 Feature 接入版本化迁移只需在这里加一行，
+# CLI 不写 if 链。入口接收 app，负责把该 Feature 的版本表弄就绪并返回快照。
+FEATURE_MIGRATIONS: dict[str, FeatureMigrator] = {
+    "work": _migrate_work,
+    "cron": _migrate_cron,
+    "kanban": _migrate_kanban,
+    "external": _migrate_external,
+    "team": _migrate_team,
+    "sites": _migrate_sites,
+    "tasks": _migrate_tasks,
+    "notifications": _migrate_notifications,
+    "channels": _migrate_channels,
+    "wiki_learning": _migrate_wiki_learning,
+}
+
+
+def _migrate_feature(args: Any, ctx: CliContext) -> CliResult:
+    name = str(getattr(args, "name", "") or "").strip()
+    migrator = FEATURE_MIGRATIONS.get(name)
+    if migrator is None:
+        registered = "、".join(sorted(FEATURE_MIGRATIONS)) or "无"
+        raise CliError(f"Feature '{name}' 尚无版本化迁移（已注册: {registered}）")
+    report = migrator(ctx.app)
+    if report.current_version >= report.target_version:
+        text = f"{report.feature} schema 已是最新：v{report.current_version}"
+    else:
+        text = (
+            f"{report.feature} schema 当前 v{report.current_version}，"
+            f"待迁移到 v{report.target_version}"
+        )
+    return CliResult(
+        data={
+            "feature": report.feature,
+            "current_version": report.current_version,
+            "target_version": report.target_version,
+        },
+        text=text,
+    )
+
+
+def _migrate_orphans(args: Any, ctx: CliContext) -> CliResult:
+    from crew.state._migration import orphan_main_db_tables
+
+    orphans = orphan_main_db_tables(ctx.app.config.db_path)
+    if orphans:
+        text = "主库存在未被归属清单覆盖的表: " + "、".join(orphans)
+    else:
+        text = "主库所有表均被归属清单覆盖，无孤儿表。"
+    return CliResult(data={"orphans": orphans}, text=text)
 
 
 __all__ = ["register"]

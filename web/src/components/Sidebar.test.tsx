@@ -4,7 +4,7 @@ import Sidebar from "./Sidebar";
 
 const noop = () => {};
 
-function renderSidebar(externalAgentsEnabled: boolean): string {
+function renderSidebar(externalAgentsEnabled: boolean, wikiEnabled = true): string {
   return renderToStaticMarkup(
     <Sidebar
       workspaces={[{ id: "default", name: "默认", description: "", instructions: "" }]}
@@ -14,6 +14,7 @@ function renderSidebar(externalAgentsEnabled: boolean): string {
       expanded={new Set(["default"])}
       view="chat"
       externalAgentsEnabled={externalAgentsEnabled}
+      wikiEnabled={wikiEnabled}
       onViewChange={noop}
       onToggleExpand={noop}
       onNewWorkspace={noop}
@@ -62,6 +63,13 @@ describe("Sidebar external agents feature gate", () => {
   it("hides the 外援 navigation entry while the feature is disabled", () => {
     expect(renderSidebar(false)).not.toContain("<span>外援</span>");
     expect(renderSidebar(true)).toContain("<span>外援</span>");
+  });
+
+  it("hides only the Wiki navigation entry while Wiki is disabled", () => {
+    const html = renderSidebar(true, false);
+    expect(html).not.toContain("<span>Wiki</span>");
+    expect(html).toContain("<span>技能</span>");
+    expect(html).toContain("<span>外援</span>");
   });
 
   it("uses the supplied external-agent mark and name-first identity label", () => {

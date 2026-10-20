@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent 核心缺陷修复记录（2026-09-18）</title>
+<style>
+body{font:16px/1.75 system-ui,-apple-system,sans-serif;max-width:980px;margin:auto;padding:40px 24px;color:#222}
+h1{margin-bottom:8px}h2{margin-top:32px;border-bottom:1px solid #ddd;padding-bottom:6px}
+code{background:#f4f4f4;padding:2px 5px}table{border-collapse:collapse;width:100%}
+th,td{border:1px solid #ccc;padding:7px 10px;text-align:left;vertical-align:top}th{background:#f8f8f8}
+.ok{color:#087f23;font-weight:600}.note{color:#555}
+</style>
+</head>
+<body>
+<h1>Agent 核心缺陷修复记录</h1>
+<p class="note">日期：2026-09-18 · 项目：Ace · 范围：工具取消/超时、回合 deadline、会话恢复边界、结构化工具结果、Desktop 后端状态。</p>
+
+<h2>修复内容</h2>
+<table>
+<thead><tr><th>模块</th><th>实现</th><th>结果</th></tr></thead>
+<tbody>
+<tr><td>工具执行</td><td><code>ToolRunner</code> 新增覆盖完整管线的总预算；取消使用有限宽限，超时/中断结果带 <code>code</code>、<code>side_effect_state</code> 等元数据。</td><td class="ok">已完成</td></tr>
+<tr><td>回合 deadline</td><td>Gateway 将 <code>TaskRuntime.execution_timeout</code> 注入 <code>ExecutionContext.deadline_seconds</code>；TaskRuntime 终止前先触发 <code>TurnControl.interrupt</code>。</td><td class="ok">已完成</td></tr>
+<tr><td>持久化</td><td>用户消息先提交；工具 intent/result commit 进入 durable event 链；启动时把无结果 intent 幂等标记为 interrupted/unknown，不自动重放副作用。</td><td class="ok">已完成</td></tr>
+<tr><td>Desktop</td><td><code>backend:status</code> 拆分 process/health/transport，纳入 <code>loopLagMs</code>；连续样本迟滞判定 degraded/stalled；发送能力独立于只读页面。</td><td class="ok">已完成</td></tr>
+</tbody>
+</table>
+
+<h2>验证命令</h2>
+<table>
+<thead><tr><th>范围</th><th>命令</th><th>结果</th></tr></thead>
+<tbody>
+<tr><td>Python 编译</td><td><code>python -m compileall -q crew</code></td><td class="ok">通过</td></tr>
+<tr><td>Agent/tool/session 回归</td><td><code>.venv/bin/pytest -q tests/test_tool_pipeline.py tests/test_session_events.py</code></td><td class="ok">85 passed</td></tr>
+<tr><td>核心后端回归（最终）</td><td><code>.venv/bin/pytest -q tests/test_tool_pipeline.py tests/test_session_events.py tests/test_agent_loop.py tests/test_agent.py tests/test_gateway_dispatcher.py tests/test_task_runtime.py</code></td><td>281 passed / 1 baseline failed；失败项与下节一致</td></tr>
+<tr><td>后端全量回归</td><td><code>.venv/bin/pytest -q --ignore=tests/security</code></td><td>3946 passed / 3 baseline failed / 14 skipped / 20 deselected；3 个失败单独复跑结果一致，见下节</td></tr>
+<tr><td>Desktop 类型</td><td><code>cd desktop &amp;&amp; npm run typecheck</code></td><td class="ok">通过</td></tr>
+<tr><td>Desktop 状态/发送回归</td><td><code>cd desktop &amp;&amp; npx vitest run tests/unit/backend-health-monitor.test.ts tests/unit/backend-status-guard.test.ts tests/unit/chat-controller-send.test.ts</code></td><td class="ok">25 tests passed</td></tr>
+<tr><td>Desktop 全量单测</td><td><code>cd desktop &amp;&amp; npx vitest run</code></td><td class="ok">168 files / 1809 tests passed</td></tr>
+<tr><td>Desktop 构建</td><td><code>cd desktop &amp;&amp; npm run build</code></td><td class="ok">通过</td></tr>
+</tbody>
+</table>
+
+<h2>基线失败复跑</h2>
+<p>以下 3 个失败在全量和单独复跑中保持一致，未触及本批次改动范围：</p>
+<ul>
+<li><code>tests/test_agent.py::test_overflow_compacts_then_retries_once_then_errors</code>：实际请求计数 10，测试期望 2。</li>
+<li><code>tests/test_tool_result_lifecycle.py::test_full_compaction_recovers_protected_results</code>：摘要 provider 返回 <code>None</code>，触发既有 <code>NoneType.delta_text</code>。</li>
+<li><code>tests/test_tool_result_lifecycle.py::test_protected_attachments_survive_repeated_compactions</code>：同一摘要 provider 问题导致附件摘要为空。</li>
+</ul>
+
+<h2>设计边界</h2>
+<ul>
+<li>标准 Gateway agent turn 的整回合 deadline 由 TaskRuntime 负责；executor 的配置只服务于脱离 Gateway 的直接调用。</li>
+<li>工具超时不会自动重放写操作；副作用未知时保留 <code>unknown</code>，由用户或下一回合决定。</li>
+<li>WS 断开不会推断 Gateway 进程死亡；进程状态只由 supervisor 生命周期事件更新。</li>
+</ul>
+
+<p><a href="../todo/kimi-2026-09-16-agent-core-defects.md">返回缺陷复核清单</a> · <a href="../index.html">返回文档总览</a></p>
+</body>
+</html>

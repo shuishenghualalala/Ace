@@ -537,7 +537,6 @@
       .data-table tbody tr[aria-selected="true"] {
         background: var(--mw-bg-selected);
         color: var(--mw-text-selected);
-        box-shadow: inset 3px 0 0 currentColor;
       }
       .data-table tbody tr[aria-selected="true"] .button--ghost { color: var(--mw-text-selected); }
       .data-table th.numeric, .data-table td.numeric, .data-table th.actions, .data-table td.actions { text-align: right; }
@@ -668,7 +667,7 @@
         text-decoration: none;
       }
       .toc a:hover, .toc a[aria-current="true"] { background: var(--mw-bg-selected); color: var(--mw-text-selected); }
-      .toc a[aria-current="true"] { box-shadow: inset 3px 0 0 currentColor; }
+      .toc a[aria-current="true"] { font-weight: 600; }
       .toc-index { width: 22px; color: var(--mw-text-muted); font: 11px/18px var(--mw-font-mono); }
       .toc__footer { padding: 12px; border-top: 1px solid var(--mw-border-default); }
       .theme-control { width: 100%; justify-content: stretch; }

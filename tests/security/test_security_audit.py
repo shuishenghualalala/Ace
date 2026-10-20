@@ -129,7 +129,7 @@ def test_retention_purges_events_older_than_30_days(tmp_path: Path) -> None:
     audit.record(old, timestamp=1_000.0)
     audit.record(_event(tmp_path), timestamp=1_000.0 + 31 * 86_400)
 
-    removed = audit.purge_expired(now=1_000.0 + 31 * 86_400)
+    removed = audit.purge_expired("owner-a", now=1_000.0 + 31 * 86_400)
 
     assert removed == 1
     assert len(audit.query(owner_account_id="owner-a")) == 1

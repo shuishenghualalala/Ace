@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>阶段 5-6 Team/Kanban UI 生命周期化测试记录</title>
+<style>body{font:16px/1.75 system-ui,sans-serif;max-width:960px;margin:auto;padding:40px 24px;color:#222}h2{border-bottom:1px solid #ddd}code{background:#f4f4f4;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 5-6 · Team/Kanban UI 生命周期化与中心收口 测试记录</h1>
+<p>2026-09-10 · 提交 <code>90a675a</code>。Node.js 本机执行（macOS）；DOM 事件与定时器生命周期，无平台相关分支。</p>
+<h2>范围</h2>
+<ul>
+<li><code>kanban-board.ts</code> / <code>team-collaboration-board.ts</code>：feature event reducer 从模块顶层自注册改为显式 <code>initKanbanBoard()</code> / <code>initTeamCollaborationBoard()</code> 内注册；<code>dispose</code> 撤销注册、停止轮询与刷新定时器、释放 resize 监听、重置模块级状态；init 与 dispose 共享同一条清理路径，测试重置钩子复用 dispose。</li>
+<li>新增 <code>board-hooks.ts</code> 中性门面：<code>refreshKanbanBoard</code> / <code>scheduleRefreshKanbanBoard</code> / <code>renderKanbanBoard</code> / <code>primeTeamCollaborationIdentity</code>，未注册时 no-op。</li>
+<li><code>app.ts</code> / <code>session-controller.ts</code> / <code>chat-controller.ts</code> 不再 import 具体 board 模块，调用时机与参数逐字保持；两个 board 的 init/dispose 由 app init 与 registerDispose 链接管。</li>
+<li><code>event-reducer-registry.ts</code> 头部注释更新为显式生命周期说明。</li>
+<li>Web 端只读核验：Team/Kanban 为 in-chat 组件，渲染依赖 props/会话数据，无全局开关缺口，未改写。</li>
+</ul>
+<h2>测试与类型（主 agent 独立复跑）</h2>
+<ul>
+<li>新增 <code>board-hooks.test.ts</code>（11 用例）：门面未注册 no-op、注册后参数转发一致、init/dispose 幂等、dispose 后 reducer 未注册（dispatch 返回 null）。</li>
+<li><code>npx vitest run</code>（desktop/ 全量）：160 文件 / 1854 测试通过，无新增失败（基线 159/1843）；<code>npx tsc --noEmit</code> 无错误。</li>
+<li>Web：<code>npm test</code> 30 文件 / 193 测试通过，无新增失败。</li>
+</ul>
+<h2>回退</h2>
+<p>撤销提交 <code>90a675a</code> 即恢复中心直调与自注册；无数据或协议变更。</p>
+<p><a href="plugin-architecture-stage-5-external-agents-ui.html">阶段 5-5 外援 UI</a> · <a href="plugin-architecture-stage-5-event-reducer-registry.html">阶段 5-4 Reducer Registry</a></p>
+</main></body></html>

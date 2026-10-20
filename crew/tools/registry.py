@@ -75,6 +75,7 @@ class FunctionTool(Tool):
         result_retention: ToolResultRetention | str = ToolResultRetention.IMPORTANT,
         result_identity_fields: list[str] | tuple[str, ...] | None = None,
         result_policy_resolver: Callable[[dict[str, Any]], ToolResultPolicy] | None = None,
+        schema_resolver: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.name = name
         self.toolset = toolset
@@ -111,13 +112,33 @@ class FunctionTool(Tool):
         )
         self.result_identity_fields = tuple(result_identity_fields or ())
         self.result_policy_resolver = result_policy_resolver
+        self.schema_resolver = schema_resolver
 
     def to_schema(self) -> dict[str, Any]:
-        function_schema = dict(self.schema)
+        function_schema = self.current_function_schema()
+        return {
+            "type": "function",
+            "function": function_schema,
+        }
+
+    def current_function_schema(self) -> dict[str, Any]:
+        """Return the function schema currently visible to the runtime."""
+        function_schema = (
+            dict(self.schema_resolver())
+            if self.schema_resolver is not None
+            else dict(self.schema)
+        )
         function_schema.setdefault("name", self.name)
         function_schema.setdefault("description", self.description)
         function_schema.setdefault("parameters", self.parameters)
-        return {"type": "function", "function": function_schema}
+        return function_schema
+
+    def current_parameters(self) -> dict[str, Any]:
+        """Return parameters from the same schema used for model disclosure."""
+        return dict(
+            self.current_function_schema().get("parameters")
+            or {"type": "object", "properties": {}}
+        )
 
     def ui_meta(self) -> dict[str, str]:
         meta: dict[str, str] = {}
@@ -200,6 +221,7 @@ class Registry(ToolRegistry):
                 ),
                 result_identity_fields=kwargs.get("result_identity_fields"),
                 result_policy_resolver=kwargs.get("result_policy_resolver"),
+                schema_resolver=kwargs.get("schema_resolver"),
             )
         if not tool.name:
             raise ToolError(f"工具缺少 name: {tool!r}")
@@ -214,12 +236,18 @@ class Registry(ToolRegistry):
                 log.debug("注册别名: %s -> %s", alias, tool.name)
         log.debug("注册工具: %s", tool.name)
 
-    def unregister(self, name: str) -> bool:
+    def unregister(self, name: str, *, expected: Tool | None = None) -> bool:
         """注销一个工具（含其别名）。用于删除/重连单个 MCP server 时清理旧工具。
 
         返回是否确实移除了工具。内置工具理论上不会被调用方 unregister，但不做硬限制——
         调用方（MCPClientManager）只对本 server 注册过的工具名调用。
+
+        ``expected`` 用于 Feature disposer 的所有权校验：若同名工具已被后续
+        Generation 替换，旧 Generation 的清理不能误删新工具。
         """
+        current = self._tools.get(name)
+        if expected is not None and current is not expected:
+            return False
         removed = self._tools.pop(name, None) is not None
         # 清理指向该 name 的别名
         stale_aliases = [a for a, c in self._aliases.items() if c == name]
@@ -399,7 +427,13 @@ class Registry(ToolRegistry):
 
         args = tool_call.arguments
         # JSON Schema 结构校验
-        schema_err = validate_arguments(tool.name, tool.parameters, args)
+        current_parameters = getattr(tool, "current_parameters", None)
+        parameters = (
+            current_parameters()
+            if callable(current_parameters)
+            else tool.parameters
+        )
+        schema_err = validate_arguments(tool.name, parameters, args)
         if schema_err:
             return ToolResult(
                 tool_call.id, tool.name,

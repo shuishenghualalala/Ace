@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from crew.agent.capabilities import capability_profile_ids
 from crew.agent.external.runtime_registry import resolve_runtime_display_badge
-from crew.gateway.session_context import SessionSource, build_session_key
+from crew.features.session_context import SessionSource, build_session_key
 from crew.team.formation import (
     build_team_draft as build_team_draft,
     confirmed_formation_plan as confirmed_formation_plan,
@@ -27,7 +27,7 @@ from crew.core.text_parsing import extract_json_object  # noqa: F401 - re-export
 
 if TYPE_CHECKING:
     from crew.app import CrewApp
-    from crew.gateway.channel_manager import ChannelManager
+    from crew.channels.channel_manager import ChannelManager
 
 # 静态前端目录（PyInstaller frozen 时从 _MEIPASS 取）
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -96,7 +96,7 @@ def resolve_session_id(data: dict[str, Any], *, platform: str = "web") -> str:
     return build_session_key(source)
 
 
-def connected_platforms(channel_manager: ChannelManager, owner_account_id: str = "") -> list[str]:
+def connected_platforms(channel_manager: ChannelManager, owner_account_id: str) -> list[str]:
     names = ["local", "web"]
     try:
         rows = channel_manager.status(owner_account_id)
@@ -123,10 +123,43 @@ def status_frame(session_id: str, message: str) -> dict[str, Any]:
     }
 
 
+# 需要叠加产品配置开关的 UI 边界能力：product.wiki / product.external-agents
+# 在 app.py 装配时不受其配置开关约束（build_wiki_feature / build_external_agent_feature
+# 均未传 enabled=），因此 Runtime 快照的 available 只反映运行态激活。此处按
+# Feature ID 建立「配置标志 → 能力」映射，值取自对应 Feature 的常量
+# （packages/crew-wiki 的 WIKI_FEATURE_ID / packages/crew-external-agents 的
+# EXTERNAL_AGENT_FEATURE_ID）。
+_WIKI_FEATURE_ID = "product.wiki"
+_EXTERNAL_AGENTS_FEATURE_ID = "product.external-agents"
+
+
+def _apply_config_availability_overrides(
+    snapshot: dict[str, dict[str, Any]],
+    config: Any,
+) -> dict[str, dict[str, Any]]:
+    """把产品配置开关叠加到能力快照上，产出 UI 消费的最终可用性。
+
+    这些 Feature 的激活不随配置开关变化，Runtime 快照无法表达「配置已禁用」，
+    因此在这里做单向覆写：对应配置标志为假时 available 翻为 False，条目保留
+    （state / generation 原样），缺席条目不动。Runtime 快照保持纯运行态投影，
+    app.py 的激活行为不变。
+    """
+    for feature_id, flag_name in (
+        (_WIKI_FEATURE_ID, "wiki_enabled"),
+        (_EXTERNAL_AGENTS_FEATURE_ID, "external_agents_enabled"),
+    ):
+        entry = snapshot.get(feature_id)
+        if entry is None:
+            continue
+        if not getattr(config, flag_name, True):
+            entry["available"] = False
+    return snapshot
+
+
 def config_body(
     crew: CrewApp,
     *,
-    owner_account_id: str = "",
+    owner_account_id: str,
     include_builtin_profiles: bool = True,
     is_gateway_admin: bool = False,
 ) -> dict[str, Any]:
@@ -139,6 +172,12 @@ def config_body(
         )
     ]
     active = crew.owner_default_model_profile(owner_account_id)
+    runtime = getattr(getattr(crew, "plugins", None), "feature_runtime", None)
+    capability_snapshot = getattr(runtime, "capability_snapshot", None)
+    feature_capabilities = _apply_config_availability_overrides(
+        capability_snapshot() if callable(capability_snapshot) else {},
+        crew.config,
+    )
     return {
         "model": active.model,
         "has_key": active.has_key,
@@ -149,11 +188,12 @@ def config_body(
         "model_profiles": profiles,
         "is_gateway_admin": is_gateway_admin,
         "wiki": {
-            "enabled": crew.config.wiki.enabled,
+            "enabled": crew.config.wiki_enabled,
         },
         "external_agents": {
             "enabled": bool(getattr(crew.config, "external_agents_enabled", True)),
         },
+        "feature_capabilities": feature_capabilities,
         "security": {
             "enabled": bool(getattr(crew.config, "security_enabled", False)),
             "default_mode": (
@@ -302,10 +342,14 @@ def session_agent_label(
     crew: CrewApp,
     session_id: str,
     *,
-    owner_account_id: str = "",
+    owner_account_id: str,
+    config: dict | None = None,
 ) -> dict[str, str]:
-    getter = getattr(crew.session_store, "get_agent_config", None)
-    config = getter(session_id, owner_account_id=owner_account_id) if callable(getter) else None
+    """会话 agent 展示标签。config 可传入已读取的 agent 配置（批量路径复用，
+    避免同一行被列表页逐会话重复读取）。"""
+    if config is None:
+        getter = getattr(crew.session_store, "get_agent_config", None)
+        config = getter(session_id, owner_account_id=owner_account_id) if callable(getter) else None
     executor = str((config or {}).get("executor") or "builtin").lower()
     capability_registry = getattr(crew, "capability_profiles", None)
     if capability_registry is not None:
@@ -375,12 +419,28 @@ def with_session_agent_labels(
     crew: CrewApp,
     sessions: list[dict],
     *,
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> list[dict]:
-    """为会话列表合并 agent 展示标签与会话级模型绑定。"""
+    """为会话列表合并 agent 展示标签与会话级模型绑定。
+
+    N+1 治理：agent 配置一次批量读取（store 缺批量能力时回退逐会话），
+    标签与模型绑定共用同一份配置，单次刷新从 2×N 次配置查询降到 1 次。
+    """
     from crew.state.session_model import read_binding
 
-    getter = getattr(crew.session_store, "get_agent_config", None)
+    session_ids = [str(s.get("session_id") or "") for s in sessions]
+    batch_getter = getattr(crew.session_store, "get_agent_configs", None)
+    if callable(batch_getter):
+        stored_by_sid = batch_getter(session_ids, owner_account_id)
+    else:
+        single_getter = getattr(crew.session_store, "get_agent_config", None)
+        stored_by_sid = (
+            {
+                sid: single_getter(sid, owner_account_id=owner_account_id)
+                for sid in session_ids
+                if sid and callable(single_getter)
+            }
+        )
     enriched: list[dict] = []
     owner_profiles = getattr(crew, "owner_model_profiles", None)
     profiles = (
@@ -396,7 +456,7 @@ def with_session_agent_labels(
     )
     for session in sessions:
         sid = str(session.get("session_id") or "")
-        stored = getter(sid, owner_account_id=owner_account_id) if callable(getter) and sid else None
+        stored = stored_by_sid.get(sid)
         binding = read_binding(
             stored,
             crew.config,
@@ -410,6 +470,9 @@ def with_session_agent_labels(
                     crew,
                     sid,
                     owner_account_id=owner_account_id,
+                    # 无配置行传 {}：label 内部对 {} 与 None 语义一致（builtin 回落），
+                    # 但 {} 不会触发逐会话回读，保持批量的 O(1) 查询次数。
+                    config=stored if stored is not None else {},
                 ),
                 "agent_binding": session_agent_binding(stored),
                 "model_profile_id": binding["model_profile_id"],

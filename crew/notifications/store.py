@@ -1,4 +1,4 @@
-"""通知中心的 SQLite 持久化。表：notifications（建在共享 crew.db）。
+"""通知中心的 SQLite 持久化。表：notifications（独立库 crew_data/notifications.db）。
 
 每个来源（source）按 owner 维度独立保留最近 N 条，publish 时顺手裁剪，
 避免通知表无限增长。
@@ -14,22 +14,66 @@ import uuid
 from pathlib import Path
 
 from crew.core.interfaces import Notification
+from crew.state._migration import NOTIFICATIONS_DB_TABLES, backfill_empty_owner_rows
+from crew.state.logging import get_logger
+from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
+
+log = get_logger("notifications.store")
 
 # 每个 (owner, source) 最多保留的通知条数
 MAX_PER_SOURCE = 200
+
+# Feature 级 schema 版本（6H）：notifications 域单表 notifications，一张单行
+# 版本表，当前结构登记为基线 v1；表结构演进在此号上递增并配迁移步骤。
+# 常量放在 store 模块（与 cron/kanban 同法，避免循环导入）。
+NOTIFICATIONS_SCHEMA_FEATURE = "notifications"
+NOTIFICATIONS_SCHEMA_VERSION = 1
 
 
 class NotificationStore:
     """通知的持久化存储。read_at 为 NULL 表示未读。"""
 
-    def __init__(self, db_path: str = "crew_data/crew.db", *, wal_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        db_path: str = "crew_data/notifications.db",
+        *,
+        wal_enabled: bool = True,
+        legacy_db_path: str | Path | None = None,
+    ) -> None:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn = connect_sqlite(self._path, wal_enabled=wal_enabled, row_factory=True)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
+        if legacy_db_path is not None:
+            self._migrate_legacy_rows(Path(legacy_db_path))
+
+    def close(self) -> None:
+        """关闭底层 SQLite 连接（幂等；仅测试/显式释放用，生命周期仍随宿主）。"""
+        with self._lock:
+            if getattr(self, "_closed", False):
+                return
+            self._closed = True
+            self._conn.close()
+
+    def _migrate_legacy_rows(self, legacy_path: Path) -> None:
+        """copy-on-first-activate：目标库为空时从旧主库整表复制通知行。
+
+        gate 在 ensure-schema + notifications_schema_version stamp 之后（构造
+        顺序保证）。旧表保留在旧库不删（ADR-0038 回退备份）；目标库已有行即
+        整体跳过，重复构造幂等零重复；复制走单事务，失败不半写。回退配置把
+        notifications 库指回旧库同一文件时直接跳过。
+        """
+
+        if legacy_path.resolve() == self._path.resolve():
+            return
+        copied = self._writer.execute(
+            lambda conn: copy_legacy_feature_rows(legacy_path, conn, NOTIFICATIONS_DB_TABLES)
+        )
+        if any(copied.values()):
+            log.info("已从 %s 迁移 notifications 历史数据: %s", legacy_path, copied)
 
     def _init_schema(self, conn) -> None:
         conn.execute(
@@ -55,6 +99,11 @@ class NotificationStore:
             "CREATE INDEX IF NOT EXISTS idx_notifications_owner_created "
             "ON notifications(owner_account_id, created_at DESC)"
         )
+        # 历史 owner='' 行归属本机 local（owner 统一后不存在无主通知）。
+        backfill_empty_owner_rows(conn, ["notifications"])
+        # 6H：Feature 级 schema 版本登记（幂等），必须先于 legacy 行复制，
+        # 保证 copy-on-first-activate 的 gate 顺序（ensure-schema → stamp → copy）。
+        stamp_baseline(conn, NOTIFICATIONS_SCHEMA_FEATURE, version=NOTIFICATIONS_SCHEMA_VERSION)
 
     @staticmethod
     def _row_to_notification(row: sqlite3.Row) -> Notification:
@@ -173,20 +222,17 @@ class NotificationStore:
 
         return int(self._writer.execute(_write))
 
-    def mark_read_by_payload(self, source: str, key: str, owner_account_id: str = "") -> int:
-        """把 payload 顶层任一值等于 key 的未读通知标记已读。owner 为空时跨 owner 匹配。"""
+    def mark_read_by_payload(self, source: str, key: str, owner_account_id: str) -> int:
+        """把 payload 顶层任一值等于 key 的未读通知标记已读（严格限定 owner）。"""
 
         def _write(conn) -> int:
-            sql = (
+            cur = conn.execute(
                 "UPDATE notifications SET read_at = ? "
                 "WHERE source = ? AND read_at IS NULL AND payload != '' "
-                "AND EXISTS (SELECT 1 FROM json_each(notifications.payload) WHERE json_each.value = ?)"
+                "AND owner_account_id = ? "
+                "AND EXISTS (SELECT 1 FROM json_each(notifications.payload) WHERE json_each.value = ?)",
+                (time.time(), str(source), owner_account_id, str(key)),
             )
-            params: tuple = (time.time(), str(source), str(key))
-            if owner_account_id:
-                sql += " AND owner_account_id = ?"
-                params = (*params, owner_account_id)
-            cur = conn.execute(sql, params)
             return cur.rowcount
 
         return int(self._writer.execute(_write))

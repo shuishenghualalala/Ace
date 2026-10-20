@@ -52,6 +52,7 @@ async def test_memory_delete_clears_session_rows(tmp_path):
 def test_acp_delete_bindings_for_session(tmp_path):
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
     store.save_acp_session_binding(
+        owner_account_id=OWNER,
         crew_session_id="s-acp",
         external_agent_id="agent-1",
         runtime_id="rt-1",
@@ -60,6 +61,7 @@ def test_acp_delete_bindings_for_session(tmp_path):
         cwd="/tmp",
     )
     store.save_acp_session_binding(
+        owner_account_id=OWNER,
         crew_session_id="s-other",
         external_agent_id="agent-1",
         runtime_id="rt-1",
@@ -67,9 +69,10 @@ def test_acp_delete_bindings_for_session(tmp_path):
         acp_session_id="ext-2",
         cwd="/tmp",
     )
-    n = store.delete_acp_bindings_for_session("s-acp")
+    n = store.delete_acp_bindings_for_session("s-acp", owner_account_id=OWNER)
     assert n == 1
     assert store.get_acp_session_binding(
+        owner_account_id=OWNER,
         crew_session_id="s-acp",
         external_agent_id="agent-1",
         runtime_id="rt-1",
@@ -77,6 +80,7 @@ def test_acp_delete_bindings_for_session(tmp_path):
         cwd="/tmp",
     ) is None
     assert store.get_acp_session_binding(
+        owner_account_id=OWNER,
         crew_session_id="s-other",
         external_agent_id="agent-1",
         runtime_id="rt-1",
@@ -125,6 +129,7 @@ async def test_delete_session_clears_summary_memory_acp_uploads(tmp_path, auth_h
 
     if app.external_agents is not None:
         app.external_agents.save_acp_session_binding(
+            owner_account_id=OWNER,
             crew_session_id=sid,
             external_agent_id="a1",
             runtime_id="r1",
@@ -144,6 +149,7 @@ async def test_delete_session_clears_summary_memory_acp_uploads(tmp_path, auth_h
     if app.external_agents is not None:
         assert (
             app.external_agents.get_acp_session_binding(
+                owner_account_id=OWNER,
                 crew_session_id=sid,
                 external_agent_id="a1",
                 runtime_id="r1",

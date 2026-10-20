@@ -4,7 +4,7 @@
 
 import { backendApi } from '../backend-client';
 import { renderConversationPreview } from '../chat-render';
-import { mapBackendHistoryItem } from './history-mapping';
+import { mapBackendHistoryItems } from './history-mapping';
 import { notify, state } from '../state';
 import {
   closeAccountOverlay,
@@ -35,7 +35,7 @@ export async function openSessionPreviewModal(sessionId: string, title: string):
 
   try {
     const items = await backendApi.history(sessionId);
-    const messages = items.map((item) => mapBackendHistoryItem(item, sessionId));
+    const messages = mapBackendHistoryItems(items, sessionId);
     renderConversationPreview(root, messages, state.configModel);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

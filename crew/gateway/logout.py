@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Callable
 
 from crew.core.runctx import current_owner_account_id
 from crew.state.logging import get_logger
@@ -42,10 +42,12 @@ class LogoutCoordinator:
         active_owner: Any,
         dispatcher: Any,
         task_runtime: Any,
-        channel_manager: Any,
         connections: Any,
         channel_handler: Any,
+        channel_manager: Any | None = None,
+        channels_service_getter: Callable[[], Any | None] | None = None,
         cron_service: Any | None = None,
+        cron_service_getter: Callable[[], Any | None] | None = None,
         team_manager: Any | None = None,
         interaction_bridge: Any | None = None,
         security_service: Any | None = None,
@@ -55,9 +57,11 @@ class LogoutCoordinator:
         self._dispatcher = dispatcher
         self._task_runtime = task_runtime
         self._channel_manager = channel_manager
+        self._channels_service_getter = channels_service_getter
         self._connections = connections
         self._channel_handler = channel_handler
         self._cron_service = cron_service
+        self._cron_service_getter = cron_service_getter
         self._team_manager = team_manager
         self._interaction_bridge = interaction_bridge
         self._security_service = security_service
@@ -74,7 +78,7 @@ class LogoutCoordinator:
 
         return next(iter(self._draining_owners), "")
 
-    def is_draining(self, owner_account_id: str = "") -> bool:
+    def is_draining(self, owner_account_id: str) -> bool:
         owner = str(owner_account_id or "").strip()
         return bool(self._draining_owners if not owner else owner in self._draining_owners)
 
@@ -87,6 +91,23 @@ class LogoutCoordinator:
         lease = self._owner_lease(owner)
         return lease is not None and lease.owner_account_id == owner
 
+    def _current_cron_service(self) -> Any | None:
+        if self._cron_service_getter is not None:
+            return self._cron_service_getter()
+        return self._cron_service
+
+    def _acquire_channels_manager(self) -> Any | None:
+        """Return a leased (manager, lease) tuple or the direct manager fallback."""
+        if self._channels_service_getter is not None:
+            binding = self._channels_service_getter()
+            if binding is None:
+                return None
+            service, lease = binding
+            return service.channel_manager, lease
+        if self._channel_manager is not None:
+            return self._channel_manager, None
+        return None
+
     def activate_owner(self, owner_account_id: str) -> None:
         """Open local admission and start only this Owner's resources."""
 
@@ -95,8 +116,9 @@ class LogoutCoordinator:
             return
         token = current_owner_account_id.set(owner)
         try:
-            if self._cron_service is not None and self._cron_service.is_running:
-                self._cron_service.mount_owner(owner)
+            cron_service = self._current_cron_service()
+            if cron_service is not None and cron_service.is_running:
+                cron_service.mount_owner(owner)
             self._dispatcher.activate_owner(owner)
             self._task_runtime.activate_owner(owner)
             task = self._activation_tasks.get(owner)
@@ -112,8 +134,13 @@ class LogoutCoordinator:
 
     async def _activate_channels(self, owner: str) -> None:
         token = current_owner_account_id.set(owner)
+        lease: Any | None = None
         try:
-            await self._channel_manager.start_all(
+            manager_binding = self._acquire_channels_manager()
+            if manager_binding is None:
+                return
+            manager, lease = manager_binding
+            await manager.start_all(
                 self._channel_handler,
                 owner_account_id=owner,
             )
@@ -125,6 +152,8 @@ class LogoutCoordinator:
             log.exception("Owner 渠道激活失败 owner=%s", owner)
         finally:
             self._activation_tasks.pop(owner, None)
+            if lease is not None:
+                lease.release()
             current_owner_account_id.reset(token)
 
     async def _cancel_activation(self, owner: str | None = None) -> None:
@@ -210,13 +239,18 @@ class LogoutCoordinator:
         return lease if lease is not None and lease.owner_account_id == owner else None
 
     async def _stop_owner_channels(self, owner: str) -> list[str]:
-        stop_owner = getattr(self._channel_manager, "stop_owner", None)
-        if callable(stop_owner):
-            return list(await stop_owner(owner, reason="login_required"))
-        # Old injected managers have no owner-aware lifecycle. Production
-        # ChannelManager always supplies stop_owner; this fallback is only for
-        # integrations that have not adopted the new interface yet.
-        return list(await self._channel_manager.stop_all(reason="login_required"))
+        manager_binding = self._acquire_channels_manager()
+        if manager_binding is None:
+            return []
+        manager, lease = manager_binding
+        try:
+            stop_owner = getattr(manager, "stop_owner", None)
+            if callable(stop_owner):
+                return list(await stop_owner(owner, reason="login_required"))
+            return list(await manager.stop_all(reason="login_required"))
+        finally:
+            if lease is not None:
+                lease.release()
 
     async def _logout_owned(self, owner: str) -> LogoutResult:
         """Perform ordered cleanup after the logout Owner has been validated."""
@@ -247,9 +281,10 @@ class LogoutCoordinator:
             requires_gateway_restart = False
 
             await self._cancel_activation(owner)
-            if self._cron_service is not None:
+            cron_service = self._current_cron_service()
+            if cron_service is not None:
                 try:
-                    await self._cron_service.unmount_owner(owner)
+                    await cron_service.unmount_owner(owner)
                 except Exception as exc:  # noqa: BLE001 - keep lease when Cron cleanup fails
                     log.exception("Logout 撤下 Cron 失败 owner=%s", owner)
                     errors.append(f"cron: {exc}")

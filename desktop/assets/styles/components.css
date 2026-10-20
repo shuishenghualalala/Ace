@@ -158,8 +158,8 @@
   color: var(--mw-bg-surface);
   border-color: var(--mw-text-primary);
   background:
-    linear-gradient(var(--mw-bg-surface) 0 0) 2px 3px / 1px 3px no-repeat,
-    linear-gradient(var(--mw-bg-surface) 0 0) 7px 3px / 1px 3px no-repeat,
+    linear-gradient(currentcolor 0 0) 2px 3px / 1px 3px no-repeat,
+    linear-gradient(currentcolor 0 0) 7px 3px / 1px 3px no-repeat,
     var(--mw-text-primary);
 }
 
@@ -169,8 +169,8 @@
   color: var(--mw-text-primary);
   border-color: var(--mw-text-primary);
   background:
-    linear-gradient(var(--mw-text-primary) 0 0) 2px 3px / 1px 3px no-repeat,
-    linear-gradient(var(--mw-text-primary) 0 0) 7px 3px / 1px 3px no-repeat,
+    linear-gradient(currentcolor 0 0) 2px 3px / 1px 3px no-repeat,
+    linear-gradient(currentcolor 0 0) 7px 3px / 1px 3px no-repeat,
     var(--mw-bg-surface);
 }
 

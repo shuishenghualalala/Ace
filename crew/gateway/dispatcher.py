@@ -26,17 +26,38 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk
-from crew.core.errors import ProviderError, ToolError
-from crew.core.runctx import current_owner_account_id
+from crew.core.errors import CrewError, ProviderError, ToolError, category_for_kind
+from crew.core.runctx import current_owner_account_id, normalize_owner_account_id
 from crew.core.interfaces import MessageHandler, SessionStore
 from crew.core.types import Message
-from crew.gateway.hooks import hook_registry
-from crew.gateway.outbound import enrich_error_chunk
+from crew.features.hooks import hook_registry
+from crew.features.outbound import enrich_error_chunk
 from crew.state.logging import get_logger
 
 log = get_logger("gateway.dispatcher")
 SessionKey = tuple[str, str]
 _TASK_ACTIVITY_PULSE_INTERVAL_SECONDS = 1.0
+
+
+def _schedule_runtime_activity_touch(
+    task_runtime: Any,
+    task_id: str,
+    progress: dict[str, Any] | None,
+) -> None:
+    """活动保活回调（同步调用约定）里 fire-and-forget 调度一次异步写。
+
+    runctx 的 current_task_activity_fn 被 followup/interaction 等以同步方式
+    在事件循环上触发，因此这里只调度不等待：真正的落库走 TaskRuntime 异步门面
+    （内部 to_thread），保证同步写不在事件循环上执行。
+    """
+
+    async def _do_touch() -> None:
+        try:
+            await task_runtime.touch_activity_async(task_id, progress)
+        except Exception:  # noqa: BLE001 - 活动保活不得中断主回合
+            log.debug("更新任务活动失败 task=%s", task_id)
+
+    asyncio.ensure_future(_do_touch())
 
 
 class BusyMode(enum.Enum):
@@ -107,27 +128,36 @@ class SessionDispatcher:
         sid = str((context or {}).get("session_id") or "")
         if not sid:
             return
-        owner = str((context or {}).get("owner_account_id") or "")
-        keys = [self._key(sid, owner)] if owner else [key for key in self._sessions_started if key[1] == sid]
-        for key in keys:
-            self._sessions_started.discard(key)
-            self._tasks.pop(key, None)
-            self._active_exec_session_ids.pop(key, None)
+        owner = normalize_owner_account_id((context or {}).get("owner_account_id"))
+        key = self._key(sid, owner)
+        self._sessions_started.discard(key)
+        self._tasks.pop(key, None)
+        self._active_exec_session_ids.pop(key, None)
         security_service = getattr(self._controller, "security_service", None)
         end_session = getattr(security_service, "end_session", None)
-        if owner and callable(end_session):
+        if callable(end_session):
             end_session(owner, sid)
 
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _key(session_id: str, owner_account_id: str = "") -> SessionKey:
+    def _key(session_id: str, owner_account_id: str) -> SessionKey:
         return owner_account_id, session_id
+
+    def is_running(self, session_id: str, owner_account_id: str = "") -> bool:
+        """Read-only probe: does this (owner, session) currently hold a running turn?
+
+        供通知路由判断"父忙"（steer 当前轮）还是"父空闲"（入队等恢复轮）；
+        不创建锁、不改变任何 dispatcher 状态。
+        """
+
+        key = self._key(session_id, owner_account_id)
+        return key in self._running
 
     @staticmethod
     def _label(key: SessionKey) -> str:
         return f"{key[0]}:{key[1]}" if key[0] else key[1]
 
-    def _resolve_key(self, session_id: str, owner_account_id: str = "") -> SessionKey:
+    def _resolve_key(self, session_id: str, owner_account_id: str) -> SessionKey:
         """Return the explicit owner-scoped dispatcher key."""
 
         return self._key(session_id, owner_account_id)
@@ -278,7 +308,8 @@ class SessionDispatcher:
     def _active_children_snapshot(
         self,
         session_id: str | None = None,
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> object:
         if callable(self._active_children_fn):
             try:
@@ -298,11 +329,11 @@ class SessionDispatcher:
                 log.exception("team active children 状态获取失败 session=%s", session_id)
         return [] if session_id else {}
 
-    def _has_active_children(self, session_id: str, owner_account_id: str = "") -> bool:
+    def _has_active_children(self, session_id: str, owner_account_id: str) -> bool:
         snap = self._active_children_snapshot(session_id, owner_account_id=owner_account_id)
         return bool(snap)
 
-    def stop(self, session_id: str, reason: str = "已停止当前回复", owner_account_id: str = "") -> bool:
+    async def stop(self, session_id: str, reason: str = "已停止当前回复", *, owner_account_id: str) -> bool:
         """停止某会话当前运行/等待的请求——取消所有 task。"""
         key = self._resolve_key(session_id, owner_account_id)
         prefix = f"{session_id}::turn::"
@@ -352,25 +383,25 @@ class SessionDispatcher:
                     log.exception("显式 stop 级联中断失败 session=%s", target_session_id)
         for task in tasks:
             task.cancel()
-        did_cancel_runtime = self._cancel_runtime_tasks_for_session_prefix(
+        did_cancel_runtime = await self._cancel_runtime_tasks_for_session_prefix(
             session_id,
             owner_account_id=key[0],
             reason=reason,
         )
         return bool(tasks or did_interrupt or did_cancel_runtime)
 
-    def _cancel_runtime_tasks_for_session_prefix(
+    async def _cancel_runtime_tasks_for_session_prefix(
         self,
         session_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         reason: str,
     ) -> bool:
         if self._task_runtime is None:
             return False
         prefix = f"{session_id}::turn::"
         try:
-            tasks = self._task_runtime.list_tasks(
+            tasks = await self._task_runtime.list_tasks_async(
                 limit=1000,
                 owner_account_id=owner_account_id,
             )
@@ -385,7 +416,7 @@ class SessionDispatcher:
             if str(task.get("status") or "") in {"completed", "failed", "cancelled", "timed_out"}:
                 continue
             try:
-                self._task_runtime.update(
+                await self._task_runtime.update_async(
                     str(task.get("task_id") or task.get("id") or ""),
                     owner_account_id=owner_account_id,
                     cancel_requested=True,
@@ -393,7 +424,7 @@ class SessionDispatcher:
                 if str(task.get("kind") or "") == "shell":
                     pid = int((task.get("progress") or {}).get("pid") or 0)
                     self._task_runtime.kill_process_group(pid, reason)
-                self._task_runtime.finish(
+                await self._task_runtime.finish_async(
                     str(task.get("task_id") or task.get("id") or ""),
                     owner_account_id=owner_account_id,
                     status="cancelled",
@@ -404,7 +435,7 @@ class SessionDispatcher:
                 log.exception("取消运行任务失败 task=%s", task.get("task_id") or task.get("id"))
         return did_cancel
 
-    def interrupt(self, session_id: str, reason: str = "被新消息中断", owner_account_id: str = "") -> bool:
+    def interrupt(self, session_id: str, reason: str = "被新消息中断", *, owner_account_id: str) -> bool:
         """中断当前运行的请求。
 
         有 controller 时走协作式优雅中断（loop 在安全点停止，历史完整保留）；
@@ -433,7 +464,7 @@ class SessionDispatcher:
         running.cancel()
         return True
 
-    def steer(self, session_id: str, text: str, owner_account_id: str = "") -> bool:
+    def steer(self, session_id: str, text: str, owner_account_id: str) -> bool:
         """向运行中的 agent 注入补充指令。"""
         if not text.strip():
             return False
@@ -462,14 +493,14 @@ class SessionDispatcher:
         log.info("steer 实时注入未生效，已缓存补充指令 session=%s", session_id)
         return True
 
-    def background(self, session_id: str, owner_account_id: str = "") -> str | None:
+    async def background(self, session_id: str, owner_account_id: str) -> str | None:
         """把当前 Agent turn 标记为后台任务；执行协程继续运行。"""
         key = self._resolve_key(session_id, owner_account_id)
         task_id = self._run_task_ids.get(key)
         if not task_id or self._task_runtime is None:
             return None
         try:
-            self._task_runtime.set_backgrounded(task_id)
+            await self._task_runtime.set_backgrounded_async(task_id)
             # The current run keeps its old lock, while future foreground
             # messages use a fresh lock and a fresh sidechain Agent.
             current_lock = self._locks.get(key)
@@ -483,7 +514,7 @@ class SessionDispatcher:
     # ------------------------------------------------------------------ #
     async def run(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
         """Run one turn under the causally verified Owner logging context."""
-        token = current_owner_account_id.set(str(envelope.user_id or "").strip())
+        token = current_owner_account_id.set(normalize_owner_account_id(envelope.user_id))
         try:
             async for chunk in self._run_owned(envelope):
                 yield chunk
@@ -571,7 +602,7 @@ class SessionDispatcher:
                 msg = f"队列已满（最多 {self._max_queue_depth_per_session} 条），请稍后再试"
                 yield ResponseChunk.error(rid, msg)
                 try:
-                    self._store.set_status(sid, "failed", msg, owner_account_id=owner)
+                    await self._store_set_status(sid, "failed", owner=owner, error=msg)
                 except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，不得覆盖已 yield 的队列满错误
                     log.exception("写入队列满状态失败 session=%s", sid)
                 return
@@ -629,7 +660,7 @@ class SessionDispatcher:
                     if self._task_runtime is not None:
                         try:
                             cfg = getattr(self._controller, "config", None)
-                            task = self._task_runtime.create_runtime(
+                            task = await self._task_runtime.create_runtime_async(
                                 kind="agent_turn",
                                 session_id=sid,
                                 request_id=rid,
@@ -655,15 +686,39 @@ class SessionDispatcher:
                             output_ref = str(
                                 get_owner_runtime_home(owner) / "tasks" / f"{runtime_task_id}.json"
                             )
-                            self._task_runtime.update(runtime_task_id, owner_account_id=owner, output_ref=output_ref)
+                            await self._task_runtime.update_async(runtime_task_id, owner_account_id=owner, output_ref=output_ref)
                             self._run_task_ids[key] = runtime_task_id
-                            self._task_runtime.mark_running(runtime_task_id)
+                            await self._task_runtime.mark_running_async(runtime_task_id)
+                            # TaskRuntime 是 agent_turn 的根截止时间来源。将其快照
+                            # 注入本次 envelope，避免 dispatcher monitor 与 executor
+                            # 各自维护一套可能漂移的回合 deadline。
+                            task_deadline = float(task.get("execution_timeout") or 0.0)
+                            if task_deadline > 0:
+                                envelope.params["_turn_deadline_seconds"] = task_deadline
                             if current_task is not None:
                                 def _cancel_current_turn(
                                     _reason: str,
                                     *,
                                     owned: asyncio.Task = current_task,
                                 ) -> None:
+                                    interrupt_fn = getattr(self._controller, "interrupt", None)
+                                    if callable(interrupt_fn):
+                                        try:
+                                            target_session_id = self._control_session_id(key, sid)
+                                            try:
+                                                interrupt_fn(
+                                                    target_session_id,
+                                                    _reason,
+                                                    owner_account_id=owner,
+                                                )
+                                            except TypeError:
+                                                interrupt_fn(target_session_id, _reason)
+                                        except Exception:  # noqa: BLE001 - hard cancel 仍须继续
+                                            log.exception(
+                                                "TaskRuntime 协作式中断失败 session=%s task=%s",
+                                                sid,
+                                                runtime_task_id,
+                                            )
                                     if not owned.done():
                                         owned.cancel()
 
@@ -690,7 +745,9 @@ class SessionDispatcher:
                                     return
                                 last_runtime_activity_touch = now
                                 try:
-                                    self._task_runtime.touch_activity(runtime_task_id, progress)
+                                    _schedule_runtime_activity_touch(
+                                        self._task_runtime, runtime_task_id, progress
+                                    )
                                 except Exception:  # noqa: BLE001 - 活动保活不得中断主回合
                                     log.debug("更新 agent_turn 活动失败 task=%s", runtime_task_id)
 
@@ -710,7 +767,7 @@ class SessionDispatcher:
 
                     # 标记会话进入 running，同时刷新 updated_at 防止被后台过期清理误删
                     try:
-                        self._store.set_status(sid, "running", "", owner_account_id=owner)
+                        await self._store_set_status(sid, "running", owner=owner, error="")
                     except Exception:
                         log.exception("写入 running 状态失败 session=%s", sid)
 
@@ -749,20 +806,22 @@ class SessionDispatcher:
                     self._active_exec_session_ids[key] = exec_session_id
                     sidechain_output_ref = ""
                     if runtime_task_id and self._task_runtime is not None:
-                            sidechain_output_ref = str(
-                                self._task_runtime.get(runtime_task_id, owner_account_id=owner).get("output_ref") or ""
-                            )
+                        sidechain_output_ref = str(
+                            (await self._task_runtime.get_async(runtime_task_id, owner_account_id=owner)).get("output_ref") or ""
+                        )
                     # Run every turn in an isolated transcript. This makes a
                     # mid-turn background transition safe: new foreground
                     # messages never share the same Agent/history object.
                     exec_envelope = envelope
                     if sidechain_id:
-                        base_history = self._store.load(sid, owner_account_id=owner)
-                        self._store.save(
+                        # 回合起点的 load + 两次 save 与会话历史成正比（blob 双写 + 事件
+                        # 批次 + busy-retry sleep），异步门面离开事件循环。
+                        base_history = await self._store_load(sid, owner)
+                        await self._store_save(
                             sidechain_id,
                             list(base_history),
                             workspace_id=self._store.get_workspace_id(sid, owner_account_id=owner) or envelope.workspace_id,
-                            owner_account_id=owner,
+                            owner=owner,
                             title_fallback=self._convergence_title_fallback(),
                         )
                         parent_history = list(base_history)
@@ -772,14 +831,14 @@ class SessionDispatcher:
                                 is_meta=bool(envelope.params.get("internal_task_resume")),
                             )
                         )
-                        self._store.save(
+                        await self._store_save(
                             sid,
                             parent_history,
                             workspace_id=(
                                 self._store.get_workspace_id(sid, owner_account_id=owner)
                                 or envelope.workspace_id
                             ),
-                            owner_account_id=owner,
+                            owner=owner,
                             title_fallback=self._convergence_title_fallback(),
                         )
                         exec_envelope = Envelope(
@@ -827,14 +886,34 @@ class SessionDispatcher:
                     except ProviderError as exc:
                         failed, err = True, str(exc)
                         log.exception("Provider 异常 session=%s", sid)
-                        chunk = ResponseChunk.error(rid, str(exc))
+                        chunk = ResponseChunk.error(
+                            rid, str(exc),
+                            code=exc.kind.value,
+                            retryable=exc.retryable,
+                            retry_delay=exc.retry_delay,
+                        )
                         chunk.body["category"] = exc.category
                         deferred_terminal = chunk
                     except ToolError as exc:
                         failed, err = True, str(exc)
                         log.exception("工具异常 session=%s", sid)
-                        chunk = ResponseChunk.error(rid, str(exc))
+                        chunk = ResponseChunk.error(
+                            rid, str(exc),
+                            code=exc.kind.value,
+                            retryable=exc.is_retryable(),
+                        )
                         chunk.body["category"] = "tool"
+                        deferred_terminal = chunk
+                    except CrewError as exc:
+                        failed, err = True, str(exc)
+                        log.exception("业务异常 session=%s", sid)
+                        chunk = ResponseChunk.error(
+                            rid, str(exc),
+                            code=exc.kind.value,
+                            retryable=exc.is_retryable(),
+                            retry_delay=exc.retry_delay,
+                        )
+                        chunk.body["category"] = category_for_kind(exc.kind)
                         deferred_terminal = chunk
                     except Exception as exc:  # noqa: BLE001 — inner 执行委托 provider/tool/skill/plan 多条未知路径，请求最外层兜底须吞住并回报错帧
                         failed, err = True, str(exc)
@@ -844,7 +923,7 @@ class SessionDispatcher:
                         activity_live = False
                         if sidechain_id:
                             try:
-                                sidechain_history = self._store.load(sidechain_id, owner_account_id=owner)
+                                sidechain_history = await self._store_load(sidechain_id, owner)
                                 if sidechain_output_ref:
                                     path = Path(sidechain_output_ref)
                                     path.parent.mkdir(parents=True, exist_ok=True)
@@ -859,21 +938,23 @@ class SessionDispatcher:
                                 backgrounded = False
                                 if runtime_task_id and self._task_runtime is not None:
                                     backgrounded = bool(
-                                        self._task_runtime.get(runtime_task_id, owner_account_id=owner).get("backgrounded")
+                                        (await self._task_runtime.get_async(runtime_task_id, owner_account_id=owner)).get("backgrounded")
                                     )
                                 if not backgrounded:
-                                    self._store.save(
+                                    await self._store_save(
                                         sid,
                                         sidechain_history,
                                         workspace_id=envelope.workspace_id,
-                                        owner_account_id=owner,
+                                        owner=owner,
                                         title_fallback=self._convergence_title_fallback(),
                                     )
                                     # Agent writes the generated title directly to the parent
                                     # via task_session_id. Sidechain sessions are intentionally
                                     # excluded from list_sessions, so copying their title here is
                                     # both ineffective and risks racing a manual parent rename.
-                                self._store.clear(sidechain_id, owner_account_id=owner)
+                                await asyncio.to_thread(
+                                    self._store.clear, sidechain_id, owner_account_id=owner
+                                )
                             except Exception:
                                 log.exception(
                                     "sidechain 收敛失败 session=%s sidechain=%s",
@@ -883,7 +964,7 @@ class SessionDispatcher:
                         runtime_terminal_status = ""
                         if runtime_task_id and self._task_runtime is not None:
                             try:
-                                current = self._task_runtime.get(runtime_task_id, owner_account_id=owner)
+                                current = await self._task_runtime.get_async(runtime_task_id, owner_account_id=owner)
                                 if current["status"] not in {
                                     "completed", "failed", "cancelled", "timed_out"
                                 }:
@@ -894,7 +975,7 @@ class SessionDispatcher:
                                         finish_status, finish_error = intent
                                         failed = True
                                         err = finish_error
-                                    current = self._task_runtime.finish(
+                                    current = await self._task_runtime.finish_async(
                                         runtime_task_id,
                                         owner_account_id=owner,
                                         status=finish_status,
@@ -960,7 +1041,7 @@ class SessionDispatcher:
                                     or err.startswith("被新消息中断")
                                     else ("failed" if failed else "completed")
                                 )
-                                self._store.set_status(sid, status, err, owner_account_id=owner)
+                                await self._store_set_status(sid, status, owner=owner, error=err)
                             except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，finally 中不得掩盖主流程结果
                                 log.exception("写入会话状态失败 session=%s", sid)
                             # 触发 agent:end hook：必须在 running 计数与落库状态清理之后，
@@ -980,7 +1061,7 @@ class SessionDispatcher:
                 err = self._stop_reasons.get(key, "已停止当前回复")
                 log.info("排队中的会话请求已停止 session=%s", sid)
                 try:
-                    self._store.set_status(sid, "stopped", err, owner_account_id=owner)
+                    await self._store_set_status(sid, "stopped", owner=owner, error=err)
                 except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，取消分支中不得掩盖已 yield 的停止错误
                     log.exception("写入会话状态失败 session=%s", sid)
                 deferred_terminal = ResponseChunk.error(rid, err)
@@ -1024,7 +1105,40 @@ class SessionDispatcher:
             yield deferred_terminal
 
     # ------------------------------------------------------------------ #
-    def status(self, session_id: str, owner_account_id: str = "") -> dict:
+    # ---- store 异步门面：同步实现经 to_thread 执行（接口默认门面同一语义）----
+    # 不用具体 store 的 save_async（per-session 写队列 task 绑定创建时的 event
+    # loop）：dispatcher 侧同一会话的回合天然串行，无需队列的跨调用串行化；
+    # to_thread 零持久任务、零 loop 绑定，临时事件循环（测试/TestClient）下
+    # 不会成为关停悬挂源。连接级串行由 store 的 threading.RLock 保证。
+    async def _store_load(self, session_id: str, owner: str) -> list[Message]:
+        return await asyncio.to_thread(self._store.load, session_id, owner_account_id=owner)
+
+    async def _store_save(
+        self,
+        session_id: str,
+        messages: list[Message],
+        *,
+        workspace_id: str,
+        owner: str,
+        title_fallback: str | None = None,
+    ) -> None:
+        await asyncio.to_thread(
+            self._store.save,
+            session_id,
+            messages,
+            workspace_id,
+            owner_account_id=owner,
+            title_fallback=title_fallback,
+        )
+
+    async def _store_set_status(
+        self, session_id: str, status: str, *, owner: str, error: str = ""
+    ) -> None:
+        await asyncio.to_thread(
+            self._store.set_status, session_id, status, owner_account_id=owner, error=error
+        )
+
+    def status(self, session_id: str, owner_account_id: str) -> dict:
         """返回会话当前运行态（内存）+ 上一轮 terminal 结果（落库）。"""
         key = self._resolve_key(session_id, owner_account_id)
         last_status, last_error = self._store.get_status(session_id, owner_account_id=key[0])
@@ -1065,5 +1179,5 @@ class SessionDispatcher:
             "global_active": len(self._global_running),
             "global_queued": sum(self._global_waiting.values()),
             "sessions": {self._label(key): self.status(key[1], owner_account_id=key[0]) for key in keys},
-            "active_children": self._active_children_snapshot(None),
+            "active_children": self._active_children_snapshot(None, owner_account_id="local"),
         }

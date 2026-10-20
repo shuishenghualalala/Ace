@@ -1,11 +1,15 @@
 """Crew 插件系统：目录插件加载、工具注册和拦截钩子。"""
 
+import asyncio
 from pathlib import Path
 import sys
+import threading
+import time
 
 import pytest
 
 from crew.core.types import Message, ToolCall, ToolResult
+from crew.features import FeatureStopPolicy, FeatureUpdateStrategy
 from crew.plugins.manager import PluginManager
 from crew.tools.registry import Registry
 from plugins.platforms.feishu.adapter import lark_available
@@ -189,7 +193,10 @@ async def test_feishu_plugin_registers_but_hides_without_credentials(monkeypatch
     monkeypatch.delenv("FEISHU_APP_ID", raising=False)
     monkeypatch.delenv("FEISHU_APP_SECRET", raising=False)
     registry = Registry()
-    plugins = PluginManager(registry=registry)
+    plugins = PluginManager(
+        registry=registry,
+        services={"workspace_store": object(), "security_service": object()},
+    )
     plugins.discover_and_load([Path("plugins")], enabled=["feishu"])
 
     assert "feishu_doc_read" in registry.names()
@@ -234,7 +241,7 @@ async def test_feishu_doc_read_uses_tenant_token(monkeypatch):
 
 
 def test_platform_plugin_registers_feishu_channel(monkeypatch):
-    from crew.gateway.platform_registry import PlatformConfig, platform_registry
+    from crew.channels.platform_registry import PlatformConfig, platform_registry
 
     if not lark_available():
         pytest.skip("lark-oapi 未安装")
@@ -283,6 +290,9 @@ kind: platform
 version: 2.0.0
 description: Rich manifest
 author: Crew
+stop_policy: restart_required
+drain_timeout_seconds: 12.5
+update_strategy: restart
 requires_env:
   - name: RICH_TOKEN
 optional_env:
@@ -316,6 +326,9 @@ def register(ctx):
     assert loaded.manifest.name == "rich-plugin"
     assert loaded.manifest.label == "Rich Plugin"
     assert loaded.manifest.kind == "platform"
+    assert loaded.manifest.stop_policy is FeatureStopPolicy.RESTART_REQUIRED
+    assert loaded.manifest.drain_timeout_seconds == 12.5
+    assert loaded.manifest.update_strategy is FeatureUpdateStrategy.RESTART
     assert loaded.manifest.requires_env == [{"name": "RICH_TOKEN"}]
     assert loaded.manifest.optional_env == [{"name": "RICH_OPT"}]
     assert loaded.manifest.config_schema == {"type": "object"}
@@ -323,8 +336,43 @@ def register(ctx):
     assert loaded.hooks_registered == ["custom_future_hook"]
 
 
+def test_manifest_parses_service_dependencies_and_rejects_ambiguous_aliases(tmp_path):
+    plugin_dir = tmp_path / "service_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        """
+name: service-plugin
+requires:
+  - storage
+optional_services:
+  - owner_model
+provides:
+  - knowledge
+""",
+        encoding="utf-8",
+    )
+    manager = PluginManager()
+
+    manifest = manager._read_manifest(plugin_dir, key="service_plugin", source="local")
+
+    assert manifest is not None
+    assert manifest.requires_services == ["storage"]
+    assert manifest.optional_services == ["owner_model"]
+    assert manifest.provides_services == ["knowledge"]
+
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: service-plugin\nrequires: [storage]\nrequires_services: [storage]\n",
+        encoding="utf-8",
+    )
+    assert manager._read_manifest(
+        plugin_dir,
+        key="service_plugin",
+        source="local",
+    ) is None
+
+
 def test_platform_registration_accepts_extended_kwargs(tmp_path):
-    from crew.gateway.platform_registry import PlatformConfig, platform_registry
+    from crew.channels.platform_registry import PlatformConfig, platform_registry
 
     plugin_dir = tmp_path / "rich_platform"
     plugin_dir.mkdir()
@@ -385,10 +433,12 @@ def register(ctx):
         platform_registry.create_channel("rich", PlatformConfig(name="rich", extra={"token": "bad"}))
     channel = platform_registry.create_channel("rich", PlatformConfig(name="rich", extra={"token": "ok"}))
     assert channel.cfg.extra == {"token": "ok"}
+    assert plugins.unload_plugin("rich-platform") is True
+    assert not platform_registry.is_registered("rich")
 
 
 def test_disabled_platform_plugin_does_not_leave_registry_entry(tmp_path):
-    from crew.gateway.platform_registry import platform_registry
+    from crew.channels.platform_registry import platform_registry
 
     plugin_dir = tmp_path / "leaky_platform"
     plugin_dir.mkdir()
@@ -479,6 +529,11 @@ def register(ctx):
     assert await plugins.run_plugin_command("/hello world") == "hello world"
     assert plugins.api_routers[0][0] == "mw-plugin"
 
+    assert await plugins.unload_plugin_async("mw-plugin") is True
+    assert plugins._middleware == {}
+    assert plugins.plugin_commands == {}
+    assert plugins.api_routers == []
+
 
 async def test_observer_hook_failures_do_not_break_core_paths():
     plugins = PluginManager(registry=Registry())
@@ -539,3 +594,165 @@ def register(ctx):
     loaded = [p for p in plugins.loaded_plugins if p.manifest.name == "home-plugin"][0]
     assert loaded.enabled
     assert loaded.commands_registered == ["home_status"]
+
+
+def _write_sync_callback_plugin(root, name: str, body: str):
+    plugin_dir = root / name
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        f"name: {name}\nkind: standalone\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(body.lstrip(), encoding="utf-8")
+    return plugin_dir
+
+
+async def test_sync_hook_and_middleware_run_in_thread_without_blocking_loop(tmp_path):
+    _write_sync_callback_plugin(
+        tmp_path,
+        "sync_callbacks_plugin",
+        """
+import threading
+import time
+
+calls = []
+
+def slow_hook(**kwargs):
+    time.sleep(0.3)
+    calls.append(("hook", threading.get_ident()))
+
+def slow_middleware(args, **kwargs):
+    time.sleep(0.3)
+    calls.append(("middleware", threading.get_ident()))
+    return {"args": dict(args)}
+
+def register(ctx):
+    ctx.register_hook("pre_tool_call", slow_hook)
+    ctx.register_middleware("tool_request", slow_middleware)
+""",
+    )
+    plugins = PluginManager(registry=Registry())
+    plugins.discover_and_load([tmp_path], enabled=["sync_callbacks_plugin"])
+    module = sys.modules["crew_runtime_plugins.sync_callbacks_plugin"]
+
+    ticks = 0
+    ticker_done = False
+
+    async def ticker():
+        nonlocal ticks
+        while not ticker_done:
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    ticker_task = asyncio.create_task(ticker())
+    try:
+        blocked = await plugins.pre_tool_call(ToolCall("c1", "demo", {}))
+        request = await plugins.apply_tool_request_middleware("demo", {"x": 1})
+    finally:
+        ticker_done = True
+        await ticker_task
+
+    assert blocked is None
+    assert request.payload == {"x": 1}
+    assert [name for name, _ in module.calls] == ["hook", "middleware"]
+    assert all(thread_id != threading.get_ident() for _, thread_id in module.calls)
+    # 0.3s 的同步回调若内联跑在事件循环上，ticker 在这段时间无法推进
+    assert ticks >= 10
+
+
+async def test_cancelling_sync_hook_waits_bounded_window_without_spin(tmp_path, caplog):
+    _write_sync_callback_plugin(
+        tmp_path,
+        "hanging_hook_plugin",
+        """
+import threading
+
+started = threading.Event()
+release = threading.Event()
+
+def hanging_hook(**kwargs):
+    started.set()
+    release.wait(10)
+
+def register(ctx):
+    ctx.register_hook("pre_tool_call", hanging_hook)
+""",
+    )
+    plugins = PluginManager(registry=Registry())
+    plugins.discover_and_load([tmp_path], enabled=["hanging_hook_plugin"])
+    module = sys.modules["crew_runtime_plugins.hanging_hook_plugin"]
+
+    caller = asyncio.create_task(plugins.pre_tool_call(ToolCall("c1", "demo", {})))
+    try:
+        assert await asyncio.to_thread(module.started.wait, 5)
+
+        caller.cancel()
+        started_at = time.monotonic()
+        with caplog.at_level("WARNING"):
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+        elapsed = time.monotonic() - started_at
+
+        # 有界优雅窗口：等待约 2s 后放弃；busy-spin 旧实现会一直等到回调自己结束
+        assert 1.5 <= elapsed < 4.0
+        assert "hook:pre_tool_call" in caplog.text
+        assert "泄漏" in caplog.text
+    finally:
+        module.release.set()
+
+
+async def test_sync_hook_contextvar_writeback_reaches_caller_context(tmp_path):
+    _write_sync_callback_plugin(
+        tmp_path,
+        "contextvar_writeback_plugin",
+        """
+import contextvars
+
+probe = contextvars.ContextVar("contextvar_writeback_probe", default="unset")
+
+def capture_hook(**kwargs):
+    probe.set("from-hook")
+
+def register(ctx):
+    ctx.register_hook("pre_tool_call", capture_hook)
+""",
+    )
+    plugins = PluginManager(registry=Registry())
+    plugins.discover_and_load([tmp_path], enabled=["contextvar_writeback_plugin"])
+    module = sys.modules["crew_runtime_plugins.contextvar_writeback_plugin"]
+
+    assert module.probe.get() == "unset"
+    blocked = await plugins.pre_tool_call(ToolCall("c1", "demo", {}))
+    assert blocked is None
+    # 同步 hook 内联执行时 set 会直接生效；线程化后依赖 ContextVar 写回
+    assert module.probe.get() == "from-hook"
+
+
+async def test_sync_hook_contextvar_not_written_back_on_error(tmp_path, caplog):
+    _write_sync_callback_plugin(
+        tmp_path,
+        "contextvar_error_plugin",
+        """
+import contextvars
+
+probe = contextvars.ContextVar("contextvar_error_probe", default="unset")
+
+def failing_hook(**kwargs):
+    probe.set("from-hook")
+    raise RuntimeError("boom")
+
+def register(ctx):
+    ctx.register_hook("pre_tool_call", failing_hook)
+""",
+    )
+    plugins = PluginManager(registry=Registry())
+    plugins.discover_and_load([tmp_path], enabled=["contextvar_error_plugin"])
+    module = sys.modules["crew_runtime_plugins.contextvar_error_plugin"]
+
+    # hook 异常被 _call_hook 记日志后吞掉，调用本身不抛出、也不拦截
+    with caplog.at_level("WARNING"):
+        blocked = await plugins.pre_tool_call(ToolCall("c1", "demo", {}))
+    assert blocked is None
+    assert "boom" in caplog.text
+    # 失败路径不写回，保持"失败无副作用"
+    assert module.probe.get() == "unset"

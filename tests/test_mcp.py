@@ -449,8 +449,8 @@ async def test_mcp_server_owner_scopes_history_and_status():
     crew = _crew()
     crew.session_store.save("same", [Message.user("A")], owner_account_id="A:uid-a")
     crew.session_store.save("same", [Message.user("B")], owner_account_id="B:uid-b")
-    crew.session_store.set_status("same", "completed", "A done", owner_account_id="A:uid-a")
-    crew.session_store.set_status("same", "failed", "B failed", owner_account_id="B:uid-b")
+    crew.session_store.set_status("same", "completed", owner_account_id="A:uid-a", error="A done")
+    crew.session_store.set_status("same", "failed", owner_account_id="B:uid-b", error="B failed")
     server = build_mcp_server(crew)
 
     history = await server.call_tool("session_history", {"session_id": "same", "owner_account_id": "B:uid-b"})

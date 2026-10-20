@@ -3098,6 +3098,188 @@ button { font-family: inherit; cursor: pointer; }
   flex-shrink: 0;
 }
 
+/* ---------------- 当前会话子智能体活动 ---------------- */
+.subagent-activity {
+  width: calc(100% - 48px);
+  max-width: 760px;
+  margin: 0 auto 8px;
+  padding: 8px 10px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+.subagent-activity__header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 22px;
+  font-size: 12px;
+}
+.subagent-activity__icon {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: 12px;
+}
+.subagent-activity__header strong {
+  color: var(--text);
+  font-weight: 700;
+}
+.subagent-activity__summary {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+}
+.subagent-activity__list {
+  display: grid;
+  gap: 2px;
+  margin-top: 5px;
+}
+.subagent-activity__row {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr) minmax(72px, 0.55fr) auto auto auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 25px;
+  padding: 3px 5px;
+  border-radius: 6px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.subagent-activity__row--running {
+  background: var(--bg);
+  color: var(--text);
+}
+.subagent-activity__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--text-3);
+}
+.subagent-activity__row--running .subagent-activity__dot {
+  background: #4b8050;
+  box-shadow: 0 0 0 3px rgba(75, 128, 80, 0.12);
+  animation: subagent-activity-pulse 1.5s ease-in-out infinite;
+}
+.subagent-activity__row--ready .subagent-activity__dot,
+.subagent-activity__row--idle .subagent-activity__dot {
+  background: #a4844d;
+}
+.subagent-activity__row--error .subagent-activity__dot,
+.subagent-activity__row--timed_out .subagent-activity__dot,
+.subagent-activity__row--cancelled .subagent-activity__dot {
+  background: #a65a4c;
+}
+.subagent-activity__label,
+.subagent-activity__meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subagent-activity__meta {
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.subagent-activity__status {
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.subagent-activity__action {
+  min-width: 34px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.subagent-activity__action:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.subagent-activity__action--danger {
+  color: #9b594c;
+}
+.subagent-activity__action:disabled {
+  cursor: wait;
+  opacity: .55;
+}
+.subagent-activity__composer {
+  display: flex;
+  gap: 6px;
+  margin: 0 5px 4px 19px;
+}
+.subagent-activity__composer input {
+  min-width: 0;
+  flex: 1;
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+.subagent-activity__composer button {
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 11px;
+}
+.subagent-activity__composer button:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+.subagent-activity__error {
+  margin: 5px 5px 0 19px;
+  color: #9b594c;
+  font-size: 11px;
+}
+.subagent-activity__row--running .subagent-activity__status {
+  color: #47724b;
+}
+.subagent-activity__row--error .subagent-activity__status,
+.subagent-activity__row--timed_out .subagent-activity__status,
+.subagent-activity__row--cancelled .subagent-activity__status {
+  color: #9b594c;
+}
+.subagent-activity__more {
+  margin-top: 4px;
+  padding-left: 19px;
+  color: var(--text-3);
+  font-size: 11px;
+}
+@keyframes subagent-activity-pulse {
+  50% { opacity: .55; transform: scale(.8); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .subagent-activity__row--running .subagent-activity__dot { animation: none; }
+}
+@media (max-width: 720px) {
+  .subagent-activity {
+    width: calc(100% - 24px);
+  }
+  .subagent-activity__row {
+    grid-template-columns: 7px minmax(0, 1fr) auto auto auto;
+  }
+  .subagent-activity__meta { display: none; }
+}
+
 /* ---------------- 输入区 ---------------- */
 .composer {
   border-top: 1px solid var(--border);

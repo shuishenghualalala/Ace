@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 2 · 后台结果通知 Contributor 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.warn{font-weight:700;color:#b9770e}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>插件架构阶段 2 · 后台结果通知 Contributor</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-03 · 测试执行：kimi-code 验证子 Agent</div>
+
+  <h2>1. 验证目标</h2>
+  <ul>
+    <li>后台子任务、后台进程、任务恢复回合三条 reminder 注入路径迁为 PROMPT 阶段 Context Contributor。</li>
+    <li>三个 reminder 块输出文案与旧 <code>_format_*_notifications</code> 逐字一致。</li>
+    <li>drain 每会话恰好一次；<code>collect_subagent</code> 取走的结果不重复注入。</li>
+    <li>team member 回合由共享注册表覆盖，<code>subagent_drain_fn</code> 旁路删除。</li>
+    <li>Agent Runtime 与 CrewApp 不再包含通知魔法 key、队列与格式化特判。</li>
+  </ul>
+
+  <h2>2. 当前状态</h2>
+  <table>
+    <thead><tr><th>门禁</th><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>切片联合回归</td><td>test_subagent + test_context_contributors + test_process_registry + test_subagent_contract</td><td class="ok">87 passed（暂存快照实测一致）</td></tr>
+      <tr><td>通知语义回归</td><td>test_notifications（任务终态、抑制去重）</td><td class="ok">36 passed</td></tr>
+      <tr><td>文案一致</td><td>新旧格式化函数 AST 级逐行对比</td><td class="ok">三个 reminder 块逐字相同</td></tr>
+      <tr><td>静态与架构</td><td>Ruff、lint-imports</td><td class="ok">全绿 · 6 kept / 0 broken</td></tr>
+      <tr><td>残留引用</td><td>旧符号全局搜索（_format_*、subagent_drain_fn、_subagent_pending 等 11 个）</td><td class="ok">生产代码零命中</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 并行工作树边界</h2>
+  <p>验证期间 owner 必填清扫工作线在同一工作树并行推进（第四批已提交 97b7b29，第五批在途）。全量 pytest 在混合树上为 67 failed，其中 28 条新增失败全部归属第五批（TaskRuntime/CronJobStore/SummaryStore 等必填化后调用方未跟进），无一落在本切片文件；本切片按文件边界单独提交，提交内容为暂存快照并实测通过。第五批完工后需复跑全量确认新增归零。</p>
+  <p class="warn">注意：<code>tests/security/test_execution_surface_inventory.py::test_all_process_capable_sources_are_classified</code> 曾出现顺序敏感的疑似 flaky，与本切片无关，留待观察。</p>
+
+  <div class="nav"><a href="../backend/adr/0013-background-result-notification-contributors.html">ADR-0013</a> · <a href="../backend/modules/agent.html">Agent 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</div>
+</body>
+</html>

@@ -208,8 +208,9 @@ function renderCanvasSurface(canvas: BlueprintCanvas, widgets: Record<string, Bl
     section.dataset.blueprintWidgetTarget = widget.id;
     section.dataset.blueprintMountTarget = placement.mountId;
     if (!singleWidget) {
-      section.style.gridColumn = `${layout.x + 1}/span ${layout.w}`;
-      section.style.gridRow = `${layout.y + 1}/span ${layout.h}`;
+      // 画布坐标是运行时算出来的：只发布值，网格放置规则留在 CSS。
+      section.style.setProperty('--mw-bp-widget-column', `${layout.x + 1}/span ${layout.w}`);
+      section.style.setProperty('--mw-bp-widget-row', `${layout.y + 1}/span ${layout.h}`);
     }
     const header = document.createElement('header'); header.textContent = widget.title;
     section.append(header, widgetFrame(widget, placement)); grid.appendChild(section);

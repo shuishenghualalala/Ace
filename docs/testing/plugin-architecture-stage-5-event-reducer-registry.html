@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>阶段 5-4 Feature Event Reducer Registry 测试记录</title>
+<style>body{font:16px/1.75 system-ui,sans-serif;max-width:960px;margin:auto;padding:40px 24px;color:#222}h2{border-bottom:1px solid #ddd}code{background:#f4f4f4;padding:2px 5px}a{color:#245a83}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 10px}</style></head>
+<body><main>
+<h1>阶段 5-4 · Feature Event Reducer Registry 测试记录</h1>
+<p>2026-09-10 · 提交 <code>3d4351a</code>。Node.js 本机执行（macOS）；纯 UI 事件分派改造，无平台相关行为。</p>
+<h2>范围</h2>
+<p>新增 <code>desktop/src/ui/features/event-reducer-registry.ts</code>：按 <code>(feature, event, version)</code> 注册 reducer；重复注册冲突失败；disposer 幂等；未知事件返回 <code>null</code> 并 <code>console.warn</code> 输出 feature/event/version 可诊断信息。</p>
+<p><code>reducers/chat-reducer.ts</code> 顶层统一转调，映射关系：</p>
+<table>
+<tr><th>旧帧 kind</th><th>命名空间事件</th><th>新注册点</th></tr>
+<tr><td><code>wiki_cards</code></td><td><code>wiki/cards@1</code></td><td><code>wiki-agent.ts</code>（initWikiAgent 显式注册）</td></tr>
+<tr><td><code>wiki_ingest_progress</code></td><td><code>wiki/ingest_progress@1</code></td><td><code>wiki-agent.ts</code>（经 chat-controller callback 转发，不写消息）</td></tr>
+<tr><td><code>team_internal</code></td><td><code>team/internal_message@1</code></td><td><code>team-collaboration-board.ts</code>（迁移期模块顶层自注册）</td></tr>
+<tr><td><code>workflow_progress</code></td><td><code>kanban/workflow_progress@1</code></td><td><code>kanban-board.ts</code>（迁移期模块顶层自注册）</td></tr>
+<tr><td><code>feature_event</code></td><td>按帧内 feature/event/version</td><td>直接查 registry</td></tr>
+</table>
+<p>未命中（含模块未加载导致的未注册）返回 <code>null</code>，回退原 switch / unknownReducer，未注册旧帧行为逐字不变。Team 迁移后 <code>renderChat</code> / <code>renderWorkspaceHistory</code> / <code>syncTurnDurationTicker</code> / <code>scrollChatToBottom</code> 副作用触发条件与原路径一致；<code>wiki_ingest_progress</code> 维持不写消息、不调度渲染语义。</p>
+<h2>迁移期妥协说明</h2>
+<p>Kanban / Team 两个 Feature 目前无独立生命周期 init，注册时机为模块 import；代码内已注释标明，后续 5-5/5-6 生命周期切片接管为显式注册/注销，registry 本体无需改动。</p>
+<h2>测试与类型</h2>
+<ul>
+<li>新增 <code>desktop/tests/unit/event-reducer-registry.test.ts</code>（9 用例）：注册冲突、disposer 幂等、旧 disposer 不误删新注册、未知事件 warn + null、版本不匹配忽略。</li>
+<li>既有 <code>chat-reducer.test.ts</code> / <code>wiki-agent.test.ts</code> / <code>wiki-ingest-progress.test.ts</code> 随迁移更新导入，断言未削弱。</li>
+<li><code>npx vitest run</code>（desktop/ 全量，主 agent 独立复跑）：158 文件 / 1836 测试通过，无新增失败（基线 157/1827）。</li>
+<li><code>npx tsc --noEmit</code>：无错误。</li>
+</ul>
+<h2>回退</h2>
+<p>撤销提交 <code>3d4351a</code> 即恢复中心 reducer；无数据或协议变更。</p>
+<p><a href="plugin-architecture-stage-5-api-client-split.html">阶段 5-3 API Client 拆分</a> · <a href="../frontend/wiki-page-lifecycle.html">阶段 5-2 页面生命周期</a></p>
+</main></body></html>

@@ -12,6 +12,7 @@ from crew.core.types import Message, ToolCall
 from crew.plugins.manager import PluginManager
 from crew.state.config import Config
 from crew.tools.registry import Registry
+from crew.wiki.config import WikiConfig
 from crew.wiki.schemas import WikiPage
 from crew.wiki.store._filesystem import FileSystemWikiStore
 from plugins.wiki_learning.store import WikiLearningStore
@@ -35,14 +36,19 @@ def _load_plugin(
     tmp_path: Path,
 ) -> tuple[Registry, PluginManager, Config, FileSystemWikiStore, str]:
     config = Config(db_path=str(tmp_path / "crew.db"))
-    config.wiki.storage.root = str(tmp_path / "wiki")
+    # 插件自有表归插件独立库（ADR-0038 清单外补充批）：测试显式指向 tmp 下的
+    # 插件库，与生产 crew_data/wiki_learning.db 同构。
+    config.wiki_learning_db_path = str(tmp_path / "wiki_learning.db")
+    config.wiki_config = {"storage": {"root": str(tmp_path / "wiki")}}
     registry = Registry()
     manager = PluginManager(registry=registry, services={"config": config})
     plugin_dir = Path(__file__).parents[1] / "plugins" / "wiki_learning"
     manifest = manager._read_manifest(plugin_dir, key="wiki_learning", source="bundled")
     assert manifest is not None
     manager._load_plugin(manifest)
-    wiki_store = FileSystemWikiStore(storage_root=config.wiki.storage.resolved_root())
+    wiki_store = FileSystemWikiStore(
+        storage_root=WikiConfig.from_raw(config.wiki_config).storage.resolved_root()
+    )
     page = wiki_store.save_page(
         WikiPage(
             id="top_python",
@@ -182,7 +188,7 @@ async def test_plugin_learning_flow_captures_answer_privately(tmp_path):
     assert payload["assessment"]["response_chars"] == len(raw_answer)
     assert payload["mastery"][0]["level"] == "proficient"
 
-    conn = sqlite3.connect(config.db_path)
+    conn = sqlite3.connect(config.wiki_learning_db_path)
     stored_answer = conn.execute(
         "SELECT response_text FROM wiki_learning_assessments WHERE activity_id=?", (activity_id,)
     ).fetchone()[0]
@@ -190,7 +196,7 @@ async def test_plugin_learning_flow_captures_answer_privately(tmp_path):
     assert stored_answer == raw_answer
 
     wiki_store.close()
-    assert manager.unload_plugin("wiki_learning") is True
+    assert await manager.unload_plugin_async("wiki_learning") is True
     assert registry.names() == []
     assert manager.plugin_skill_roots() == []
 
@@ -252,7 +258,7 @@ async def test_assessment_is_idempotent_per_request_and_not_same_turn(tmp_path):
     )
 
     wiki_store.close()
-    manager.unload_plugin("wiki_learning")
+    await manager.unload_plugin_async("wiki_learning")
 
 
 @pytest.mark.asyncio
@@ -291,7 +297,7 @@ async def test_activity_rejects_nested_private_answers(tmp_path):
     assert "不能包含答案" in created.content
 
     wiki_store.close()
-    manager.unload_plugin("wiki_learning")
+    await manager.unload_plugin_async("wiki_learning")
 
 
 @pytest.mark.asyncio
@@ -311,4 +317,4 @@ async def test_learning_skill_only_injects_for_relevant_wiki_turn(tmp_path):
         assert not any("Wiki learning coach" in message.content for message in normal)
 
     wiki_store.close()
-    manager.unload_plugin("wiki_learning")
+    await manager.unload_plugin_async("wiki_learning")

@@ -3,12 +3,16 @@
  *
  * dispatch 开回合与 applyChunk gate：首帧必须在 turnSealed=false + activeRequestId 绑定后到达。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // 共享 mock 必须先于 chat-controller 加载，见 helpers/mock-chat-controller-deps.ts
 import './helpers/mock-chat-controller-deps';
 import { applyChunk } from '../../src/ui/features/chat-controller';
 import { openTurnForRequest } from '../../src/ui/features/session-busy';
-import { resolveTurnGate } from '../../src/ui/reducers/chat-reducer';
+import {
+  disposeTeamCollaborationBoard,
+  initTeamCollaborationBoard,
+} from '../../src/ui/features/team-collaboration-board';
+import { resolveTurnGate, type AnyChatChunk } from '../../src/ui/reducers/chat-reducer';
 import { __resetAllStoresForTest, messageStore, sessionStore } from '../../src/ui/stores/stores';
 import { appendSessionMessage, setActiveExternalTeamForSession, setActiveSessionId } from '../../src/ui/state';
 import type { ChatChunk } from '../../src/ui/backend-client';
@@ -33,15 +37,31 @@ function chunk(kind: ChatChunk['kind'], requestId: string, body: Record<string, 
   };
 }
 
+function teamChunk(requestId: string, payload: Record<string, unknown>, sequence = 1): ChatChunk {
+  return {
+    kind: 'feature_event',
+    body: { feature: 'team', event: 'internal_message', version: 1, payload },
+    is_final: false,
+    sequence,
+    request_id: requestId,
+    session_id: 'sid-1',
+  };
+}
+
 beforeEach(() => {
   __resetAllStoresForTest();
   setActiveSessionId('sid-1');
   document.body.innerHTML = '<div id="chat-messages"></div><div id="composer-controls"></div><div class="chat-running-intro"></div>';
+  initTeamCollaborationBoard();
+});
+
+afterEach(() => {
+  disposeTeamCollaborationBoard();
 });
 
 describe('dispatch turn gate', () => {
   it('drops scoped frames on default sealed book before turn is opened', () => {
-    expect(resolveTurnGate('task', 'req-1', {
+    expect(resolveTurnGate({ kind: 'task', body: {} } as AnyChatChunk, 'req-1', {
       turnSealed: true,
       activeRequestId: null,
       acceptingNewRequest: false,
@@ -73,7 +93,7 @@ describe('dispatch turn gate', () => {
     });
     openTurnForRequest('sid-1', 'req-team');
 
-    applyChunk(chunk('team_internal', 'req-team', {
+    applyChunk(teamChunk('req-team', {
       text: '收到，我会先规划 DAG。',
       agent_id: 'crew::builtin',
       agent_name: 'Crew',
@@ -81,28 +101,22 @@ describe('dispatch turn gate', () => {
       event_type: 'team_decision',
       node_id: 'leader_plan',
     }));
-    applyChunk({
-      ...chunk('team_internal', 'req-team', {
-        text: '@hermes 开始实现贪吃蛇。',
-        agent_id: 'crew::builtin',
-        agent_name: 'Crew',
-        is_leader: true,
-        event_type: 'team_assign',
-        node_id: 'build',
-      }),
-      sequence: 2,
-    });
-    applyChunk({
-      ...chunk('team_internal', 'req-team', {
-        text: '实现与测试已经完成。',
-        agent_id: 'crew::builtin',
-        agent_name: 'Crew',
-        is_leader: true,
-        event_type: 'team_summary',
-        node_id: 'leader_summary',
-      }),
-      sequence: 3,
-    });
+    applyChunk(teamChunk('req-team', {
+      text: '@hermes 开始实现贪吃蛇。',
+      agent_id: 'crew::builtin',
+      agent_name: 'Crew',
+      is_leader: true,
+      event_type: 'team_assign',
+      node_id: 'build',
+    }, 2));
+    applyChunk(teamChunk('req-team', {
+      text: '实现与测试已经完成。',
+      agent_id: 'crew::builtin',
+      agent_name: 'Crew',
+      is_leader: true,
+      event_type: 'team_summary',
+      node_id: 'leader_summary',
+    }, 3));
     applyChunk({ ...chunk('final', 'req-team', { text: '实现与测试已经完成。' }), sequence: 4 });
 
     const messages = messageStore.get().messages['sid-1'] ?? [];
@@ -128,18 +142,15 @@ describe('dispatch turn gate', () => {
     applyChunk(chunk('status', 'req-team-status', {
       message: '正在更新 DAG 节点状态',
     }));
-    applyChunk({
-      ...chunk('team_internal', 'req-team-status', {
-        text: '正在实现游戏逻辑',
-        process_text: '已完成数据结构设计',
-        agent_id: 'hermes',
-        agent_name: 'Hermes',
-        event_type: 'team_stream',
-        node_id: 'build',
-        display_mode: 'stream',
-      }),
-      sequence: 2,
-    });
+    applyChunk(teamChunk('req-team-status', {
+      text: '正在实现游戏逻辑',
+      process_text: '已完成数据结构设计',
+      agent_id: 'hermes',
+      agent_name: 'Hermes',
+      event_type: 'team_stream',
+      node_id: 'build',
+      display_mode: 'stream',
+    }, 2));
 
     const messages = messageStore.get().messages['sid-1'] ?? [];
     expect(messages).toHaveLength(1);

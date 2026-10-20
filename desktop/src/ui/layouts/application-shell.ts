@@ -1,6 +1,7 @@
 import { createIcon, MONOCHROME_ICON_CLASS } from '../components/icon';
 import {
-  resolveShellNavigation,
+  createShellNavigationRegistry,
+  type ShellNavigationRegistry,
   type FeatureState,
   type ShellFeatureStates,
   type ShellLocation,
@@ -33,6 +34,7 @@ export interface ApplicationShellOptions {
   features?: ShellFeatureStates;
   storage?: Storage;
   productIconUrl?: string;
+  navigationRegistry?: ShellNavigationRegistry;
   onNavigate?: (location: ShellLocation, productMode: ProductMode) => boolean | void;
   onProductModeChange?: (productMode: ProductMode) => void;
 }
@@ -102,6 +104,7 @@ export function createApplicationShell(
   const storage = options.storage ?? localStorage;
   let features = options.features ?? {};
   let disposed = false;
+  const navigationRegistry = options.navigationRegistry ?? createShellNavigationRegistry();
 
   restoreProductMode(storage);
 
@@ -238,7 +241,7 @@ export function createApplicationShell(
     setProductMode(productMode, storage);
     options.onProductModeChange?.(productMode);
     const state = productModeStore.get();
-    const item = resolveShellNavigation(productMode, features).find(
+    const item = navigationRegistry.resolve(productMode, features).find(
       (candidate) =>
         candidate.id === state.views[productMode].lastPosition &&
         candidate.featureState === 'available',
@@ -254,7 +257,7 @@ export function createApplicationShell(
         : undefined;
     const state = productModeStore.get();
     const modeView = state.views[state.productMode];
-    const items = resolveShellNavigation(state.productMode, features);
+    const items = navigationRegistry.resolve(state.productMode, features);
     navigationList.replaceChildren();
     for (const item of items) {
       const button = document.createElement('button');

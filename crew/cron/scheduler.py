@@ -14,7 +14,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from crew.core.envelope import Envelope
 from crew.core.interfaces import Scheduler
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import current_owner_account_id, normalize_owner_account_id
 from crew.cron.jobs import BJ_TZ, CronJobStore, build_trigger
 from crew.state.logging import get_logger
 
@@ -276,7 +276,7 @@ class CronService:
 
     async def _execute_claimed_fire(self, claim: dict) -> None:
         """Execute a claimed Fire under its persisted causal Owner context."""
-        owner = str(claim.get("job", {}).get("owner_account_id") or "").strip()
+        owner = normalize_owner_account_id(claim.get("job", {}).get("owner_account_id"))
         token = current_owner_account_id.set(owner)
         try:
             await self._run_claimed_fire(claim)
@@ -407,7 +407,14 @@ class CronService:
             return
         try:
             scheduler = self._ensure_scheduler()
-            recovered = self._store.recover_running_fires_as_abandoned()
+            # D5：running fires 恢复注册进统一启动恢复序列，由 CrewApp 启动流程执行；
+            # 重复 start 因同名去重不会重复注册。
+            from crew.state.recovery import register_startup_recovery
+
+            register_startup_recovery(
+                "cron.running_fires",
+                self._store.recover_running_fires_as_abandoned,
+            )
             scheduler.start()
         except Exception as exc:
             self._start_error = str(exc) or type(exc).__name__
@@ -418,7 +425,7 @@ class CronService:
             raise
         self._start_error = ""
         self._running = True
-        log.info("CronService 引擎已启动，等待 Active Owner，abandoned=%d", recovered)
+        log.info("CronService 引擎已启动，等待 Active Owner")
 
     def mount_owner(self, owner_account_id: str) -> int:
         """Mount one Owner without unmounting any other Owner."""

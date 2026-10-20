@@ -19,13 +19,13 @@ import pytest
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.interfaces import Channel, MessageHandler
 from crew.core.mocks import InMemorySessionStore
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import current_owner_account_id, LOCAL_OWNER_ACCOUNT_ID
 from crew.core.types import Message
-from crew.gateway.channel_manager import ChannelManager
+from crew.channels.channel_manager import ChannelManager
 from crew.gateway.connections import ConnectionManager, _MAX_CONSECUTIVE_FAILURES
-from crew.gateway.delivery import DeliveryRouter
+from crew.channels.delivery import DeliveryRouter
 from crew.gateway.dispatcher import BusyMode, SessionDispatcher
-from crew.gateway.hooks import hook_registry
+from crew.features.hooks import hook_registry
 
 OWNER = "local"
 
@@ -55,14 +55,26 @@ class _DummyTaskRuntime:
         }
         return {"task_id": task_id}
 
+    async def create_runtime_async(self, **kwargs: Any) -> dict[str, Any]:
+        return self.create_runtime(**kwargs)
+
     def update(self, task_id: str, **kwargs: Any) -> None:
         self._tasks.setdefault(task_id, {}).update(kwargs)
+
+    async def update_async(self, task_id: str, **kwargs: Any) -> None:
+        self.update(task_id, **kwargs)
 
     def get(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
         return self._tasks.get(task_id, {"backgrounded": False, "output_ref": "", "status": "running"})
 
+    async def get_async(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
+        return self.get(task_id, **kwargs)
+
     def mark_running(self, task_id: str) -> None:
         self._tasks.setdefault(task_id, {})["status"] = "running"
+
+    async def mark_running_async(self, task_id: str) -> None:
+        self.mark_running(task_id)
 
     def touch_activity(self, task_id: str, progress: Any = None, **kwargs: Any) -> None:
         pass
@@ -72,6 +84,9 @@ class _DummyTaskRuntime:
 
     def finish(self, task_id: str, **kwargs: Any) -> None:
         self._tasks.setdefault(task_id, {})["status"] = kwargs.get("status", "completed")
+
+    async def finish_async(self, task_id: str, **kwargs: Any) -> None:
+        self.finish(task_id, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -87,12 +102,12 @@ async def test_dispatcher_scopes_owner_context_and_resets_after_run():
         yield ResponseChunk.final(env.request_id, "done")
 
     disp = SessionDispatcher(inner, InMemorySessionStore())
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
 
     await _drain(disp.run(_env("causal-owner")))
 
     assert seen == [OWNER]
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
 
 
 async def test_same_session_serialized_and_queued():
@@ -480,18 +495,19 @@ async def test_channel_manager_lifecycle_dispatches_through_session_dispatcher()
 
     channel = FakeChannel()
     manager = ChannelManager()
-    manager.register(channel)
+    manager.register(channel, owner_account_id="local")
 
-    await manager.start_all(dispatcher.run)
+    await manager.start_all(dispatcher.run, owner_account_id="local")
 
     assert manager.status() == [
         {
             "name": "fake",
-            "owner_account_id": "",
+            "owner_account_id": "local",
             "running": True,
             "error": "",
             "operation": "",
             "reason": "",
+            "detail": {},
         }
     ]
     assert seen[0].channel == "fake"
@@ -504,11 +520,12 @@ async def test_channel_manager_lifecycle_dispatches_through_session_dispatcher()
     assert manager.status() == [
         {
             "name": "fake",
-            "owner_account_id": "",
+            "owner_account_id": "local",
             "running": False,
             "error": "",
             "operation": "",
             "reason": "disconnected",
+            "detail": {},
         }
     ]
 
@@ -530,9 +547,10 @@ async def test_channel_manager_starts_only_active_owner_channels():
     manager = ChannelManager()
     manager.register(OwnedChannel("owner-a"), owner_account_id="A:uid-a")
     manager.register(OwnedChannel("owner-b"), owner_account_id="B:uid-b")
-    manager.register(OwnedChannel("global"))
+    # owner 统一后不存在无主"全局渠道"：未绑定渠道归属本机 local
+    manager.register(OwnedChannel("global"), owner_account_id="local")
 
-    await manager.start_all(handler)
+    await manager.start_all(handler, owner_account_id="local")
     assert started == ["global"]
     started.clear()
 
@@ -595,12 +613,12 @@ async def test_delivery_router_keeps_same_platform_senders_owner_scoped():
 def test_channel_manager_status_includes_creation_errors():
     manager = ChannelManager()
 
-    manager.record_error("feishu", "missing appSecret")
+    manager.record_error("feishu", "missing appSecret", owner_account_id="local")
 
     assert manager.status() == [
         {
             "name": "feishu",
-            "owner_account_id": "",
+            "owner_account_id": "local",
             "running": False,
             "error": "missing appSecret",
             "operation": "",
@@ -716,7 +734,7 @@ async def test_stop_cancels_all_tasks():
     t2 = asyncio.create_task(_drain(disp.run(_env("s1"))))
     await asyncio.sleep(0.02)
 
-    stopped = disp.stop("s1", owner_account_id=OWNER)
+    stopped = await disp.stop("s1", owner_account_id=OWNER)
     assert stopped
 
     gate.set()  # 解除阻塞（虽然已经被取消）
@@ -770,7 +788,7 @@ async def test_stop_reason_uses_owner_scoped_key():
     task = asyncio.create_task(_drain(disp.run(Envelope.of("a", session_id="same", user_id="A:uid-a"))))
     await asyncio.sleep(0.02)
 
-    assert disp.stop("same", reason="owner scoped stop", owner_account_id="A:uid-a")
+    assert await disp.stop("same", reason="owner scoped stop", owner_account_id="A:uid-a")
     gate.set()
     result = await task
 
@@ -797,9 +815,9 @@ def _chunk(text: str = "hi") -> ResponseChunk:
 async def test_connections_push_to_registered():
     mgr = ConnectionManager()
     ws = _fake_ws()
-    mgr.register("s1", ws)
-    assert mgr.has_connection("s1")
-    await mgr.push("s1", _chunk("hello"))
+    mgr.register("s1", ws, owner_account_id="")
+    assert mgr.has_connection("s1", owner_account_id="")
+    await mgr.push("s1", _chunk("hello"), owner_account_id="")
     ws.send_json.assert_awaited_once()
     payload = ws.send_json.call_args[0][0]
     assert payload["body"]["text"] == "hello"
@@ -810,7 +828,7 @@ async def test_connections_no_push_when_empty():
     mgr = ConnectionManager()
     ws = _fake_ws()
     # 未注册，push 不抛异常且 send_json 不被调用
-    await mgr.push("s1", _chunk())
+    await mgr.push("s1", _chunk(), owner_account_id="")
     ws.send_json.assert_not_awaited()
     assert mgr._consecutive_failures.get("s1", 0) == 0
 
@@ -818,10 +836,10 @@ async def test_connections_no_push_when_empty():
 async def test_connections_unregister_stops_push():
     mgr = ConnectionManager()
     ws = _fake_ws()
-    mgr.register("s1", ws)
-    mgr.unregister("s1", ws)
-    assert not mgr.has_connection("s1")
-    await mgr.push("s1", _chunk())
+    mgr.register("s1", ws, owner_account_id="")
+    mgr.unregister("s1", ws, owner_account_id="")
+    assert not mgr.has_connection("s1", owner_account_id="")
+    await mgr.push("s1", _chunk(), owner_account_id="")
     ws.send_json.assert_not_awaited()
 
 
@@ -830,10 +848,10 @@ async def test_connections_unregister_all():
     ws = _fake_ws()
     registered = {"s1", "s2"}
     for sid in registered:
-        mgr.register(sid, ws)
-    mgr.unregister_all(ws, registered)
-    assert not mgr.has_connection("s1")
-    assert not mgr.has_connection("s2")
+        mgr.register(sid, ws, owner_account_id="")
+    mgr.unregister_all(ws, registered, owner_account_id="")
+    assert not mgr.has_connection("s1", owner_account_id="")
+    assert not mgr.has_connection("s2", owner_account_id="")
 
 
 async def test_connections_dead_socket_removed_on_push():
@@ -843,9 +861,9 @@ async def test_connections_dead_socket_removed_on_push():
     dead_ws.send_json = AsyncMock(side_effect=RuntimeError("closed"))
     live_ws = _fake_ws()
 
-    mgr.register("s1", dead_ws)
-    mgr.register("s1", live_ws)
-    await mgr.push("s1", _chunk("test"))
+    mgr.register("s1", dead_ws, owner_account_id="")
+    mgr.register("s1", live_ws, owner_account_id="")
+    await mgr.push("s1", _chunk("test"), owner_account_id="")
 
     # 死连接被清除，活跃连接收到推送
     assert dead_ws not in mgr._conns.get("s1", set())
@@ -856,14 +874,14 @@ async def test_push_rate_limiting():
     """推送限流：连续推送间隔 < min_interval 时缓存帧。"""
     mgr = ConnectionManager(min_interval=0.1)  # 100ms 限流
     ws = _fake_ws()
-    mgr.register("s1", ws)
+    mgr.register("s1", ws, owner_account_id="")
 
     # 第一次推送应立即发送
-    await mgr.push("s1", _chunk("a"))
+    await mgr.push("s1", _chunk("a"), owner_account_id="")
     assert ws.send_json.call_count == 1
 
     # 立即第二次推送，应被限流（缓存）
-    await mgr.push("s1", _chunk("b"))
+    await mgr.push("s1", _chunk("b"), owner_account_id="")
     # 仍然只有 1 次（限流中，缓存了第二帧）
     assert ws.send_json.call_count == 1
 
@@ -878,10 +896,10 @@ async def test_push_final_frame_not_rate_limited():
     """is_final=True 的帧不受限流影响。"""
     mgr = ConnectionManager(min_interval=10.0)  # 极长限流
     ws = _fake_ws()
-    mgr.register("s1", ws)
+    mgr.register("s1", ws, owner_account_id="")
 
     final_chunk = ResponseChunk.final("req1", "done")
-    await mgr.push("s1", final_chunk)
+    await mgr.push("s1", final_chunk, owner_account_id="")
     assert ws.send_json.call_count == 1  # final 帧立即推送
 
 
@@ -894,8 +912,8 @@ async def test_push_degrades_after_consecutive_failures():
     for _ in range(_MAX_CONSECUTIVE_FAILURES):
         dead_ws = AsyncMock()
         dead_ws.send_json = AsyncMock(side_effect=RuntimeError("closed"))
-        mgr.register("s1", dead_ws)
-        await mgr.push("s1", _chunk())
+        mgr.register("s1", dead_ws, owner_account_id="")
+        await mgr.push("s1", _chunk(), owner_account_id="")
 
     # 超过阈值后降级
     assert mgr._consecutive_failures.get(key, 0) >= _MAX_CONSECUTIVE_FAILURES
@@ -903,9 +921,9 @@ async def test_push_degrades_after_consecutive_failures():
     # 后续推送静默（不尝试推送）
     dead_ws = AsyncMock()
     dead_ws.send_json = AsyncMock(side_effect=RuntimeError("closed"))
-    mgr.register("s1", dead_ws)
+    mgr.register("s1", dead_ws, owner_account_id="")
     dead_ws.send_json.reset_mock()
-    await mgr.push("s1", _chunk())
+    await mgr.push("s1", _chunk(), owner_account_id="")
     dead_ws.send_json.assert_not_awaited()
 
 
@@ -913,16 +931,16 @@ async def test_unregister_cleans_auxiliary_state():
     """unregister 清理 _last_push_ts / _consecutive_failures，防止 dict 无限增长。"""
     mgr = ConnectionManager(min_interval=0)
     ws = _fake_ws()
-    mgr.register("s1", ws)
+    mgr.register("s1", ws, owner_account_id="")
     key = ("", "s1")
 
     # 产生一些辅助状态
-    await mgr.push("s1", _chunk("a"))
+    await mgr.push("s1", _chunk("a"), owner_account_id="")
     assert key in mgr._last_push_ts
     assert key in mgr._consecutive_failures
 
     # unregister 后应清理
-    mgr.unregister("s1", ws)
+    mgr.unregister("s1", ws, owner_account_id="")
     assert key not in mgr._last_push_ts
     assert key not in mgr._consecutive_failures
     assert key not in mgr._pending_payloads
@@ -933,16 +951,16 @@ async def test_unregister_cancels_pending_flush_task():
     """unregister 时若有未完成的延迟推送 task，应取消它。"""
     mgr = ConnectionManager(min_interval=10.0)  # 长限流 → 第二帧必定缓存
     ws = _fake_ws()
-    mgr.register("s1", ws)
+    mgr.register("s1", ws, owner_account_id="")
     key = ("", "s1")
 
-    await mgr.push("s1", _chunk("a"))  # 第一帧立即推送，设置 _last_push_ts
-    await mgr.push("s1", _chunk("b"))  # 第二帧被限流，创建 flush task
+    await mgr.push("s1", _chunk("a"), owner_account_id="")  # 第一帧立即推送，设置 _last_push_ts
+    await mgr.push("s1", _chunk("b"), owner_account_id="")  # 第二帧被限流，创建 flush task
     assert key in mgr._flush_tasks
     flush_task = mgr._flush_tasks[key]
     assert not flush_task.done()
 
-    mgr.unregister("s1", ws)
+    mgr.unregister("s1", ws, owner_account_id="")
     assert key not in mgr._flush_tasks
     assert key not in mgr._pending_payloads
     # cancel() 已调用，让事件循环处理取消
@@ -955,33 +973,33 @@ async def test_unregister_keeps_state_when_other_connections_remain():
     mgr = ConnectionManager(min_interval=0)
     ws1 = _fake_ws()
     ws2 = _fake_ws()
-    mgr.register("s1", ws1)
-    mgr.register("s1", ws2)
+    mgr.register("s1", ws1, owner_account_id="")
+    mgr.register("s1", ws2, owner_account_id="")
     key = ("", "s1")
 
-    await mgr.push("s1", _chunk("a"))
+    await mgr.push("s1", _chunk("a"), owner_account_id="")
 
-    mgr.unregister("s1", ws1)  # 还有 ws2
+    mgr.unregister("s1", ws1, owner_account_id="")  # 还有 ws2
     assert key in mgr._last_push_ts  # 状态保留
-    assert mgr.has_connection("s1")
+    assert mgr.has_connection("s1", owner_account_id="")
 
 
 async def test_unregister_uses_socket_session_index_for_lock_cleanup():
     """同一 socket 订阅多个 session 时，只在最后一个 session 注销后清 send lock。"""
     mgr = ConnectionManager(min_interval=0)
     ws = _fake_ws()
-    mgr.register("s1", ws)
-    mgr.register("s2", ws)
+    mgr.register("s1", ws, owner_account_id="")
+    mgr.register("s2", ws, owner_account_id="")
 
     await mgr.send_socket(ws, {"kind": "ping"})
     assert ws in mgr._send_locks
     assert mgr._ws_to_sessions[ws] == {("", "s1"), ("", "s2")}
 
-    mgr.unregister("s1", ws)
+    mgr.unregister("s1", ws, owner_account_id="")
     assert ws in mgr._send_locks
     assert mgr._ws_to_sessions[ws] == {("", "s2")}
 
-    mgr.unregister("s2", ws)
+    mgr.unregister("s2", ws, owner_account_id="")
     assert ws not in mgr._send_locks
     assert ws not in mgr._ws_to_sessions
 
@@ -999,6 +1017,7 @@ async def test_push_payload_no_connection_does_not_degrade():
             "sequence": 1,
             "session_id": "s1",
         },
+    owner_account_id="",
     )
 
     assert mgr._consecutive_failures.get("s1", 0) == 0
@@ -1009,19 +1028,22 @@ async def test_push_payload_rate_limit_merges_delta_text():
     """限流缓存的 delta 需拼接文本，避免前端按增量追加时丢字。"""
     mgr = ConnectionManager(min_interval=10.0)
     ws = _fake_ws()
-    mgr.register("s1", ws)
+    mgr.register("s1", ws, owner_account_id="")
 
     await mgr.push_payload(
         "s1",
         {"kind": "delta", "body": {"text": "a"}, "is_final": False, "sequence": 1, "session_id": "s1"},
+    owner_account_id="",
     )
     await mgr.push_payload(
         "s1",
         {"kind": "delta", "body": {"text": "b"}, "is_final": False, "sequence": 2, "session_id": "s1"},
+    owner_account_id="",
     )
     await mgr.push_payload(
         "s1",
         {"kind": "delta", "body": {"text": "c"}, "is_final": False, "sequence": 3, "session_id": "s1"},
+    owner_account_id="",
     )
 
     assert ws.send_json.call_count == 1
@@ -1035,19 +1057,22 @@ async def test_push_payload_final_flushes_pending_before_final():
     """final 到来前先刷掉 pending delta，避免旧帧晚到。"""
     mgr = ConnectionManager(min_interval=10.0)
     ws = _fake_ws()
-    mgr.register("s1", ws)
+    mgr.register("s1", ws, owner_account_id="")
 
     await mgr.push_payload(
         "s1",
         {"kind": "delta", "body": {"text": "a"}, "is_final": False, "sequence": 1, "session_id": "s1"},
+    owner_account_id="",
     )
     await mgr.push_payload(
         "s1",
         {"kind": "delta", "body": {"text": "b"}, "is_final": False, "sequence": 2, "session_id": "s1"},
+    owner_account_id="",
     )
     await mgr.push_payload(
         "s1",
         {"kind": "final", "body": {"text": "ab"}, "is_final": True, "sequence": 3, "session_id": "s1"},
+    owner_account_id="",
     )
 
     sent = [call.args[0] for call in ws.send_json.await_args_list]
@@ -1063,7 +1088,7 @@ async def test_push_payload_final_flushes_pending_before_final():
 
 async def test_session_start_hook_fires_once_per_session():
     """session:start 只在每个会话生命周期内首次运行时触发；同会话第二次不再触发。"""
-    from crew.gateway.hooks import hook_registry
+    from crew.features.hooks import hook_registry
 
     store = InMemorySessionStore()
 
@@ -1089,7 +1114,7 @@ async def test_session_start_hook_fires_once_per_session():
 
 async def test_agent_start_hook_includes_owner_account_id():
     """agent:start hook 须携带 owner_account_id，供渠道会话实时广播时对齐订阅桶。"""
-    from crew.gateway.hooks import hook_registry
+    from crew.features.hooks import hook_registry
 
     store = InMemorySessionStore()
 
@@ -1495,7 +1520,7 @@ async def test_global_slot_released_when_run_cancelled():
     assert disp.status("b", owner_account_id=OWNER)["waiting_for_global_slot"] == 1
 
     # 取消 a → 槽释放 → b 获得
-    assert disp.stop("a", owner_account_id=OWNER)
+    assert await disp.stop("a", owner_account_id=OWNER)
     await asyncio.sleep(0.05)
     assert started == ["a", "b"]
     gate.set()

@@ -492,4 +492,22 @@ describe('notification center', () => {
     expect(mocks.traySetNotifications).toHaveBeenCalled();
     expect(mocks.markSystemTrayNotification).toHaveBeenCalled();
   });
+
+  it('通知正文按 markdown 渲染，原始 HTML 被消毒', async () => {
+    mocks.list.mockResolvedValue({
+      notifications: [sample({
+        body: '失败原因：**超时** <script>alert(1)</script>\n\n- 重试一次\n- 联系管理员',
+      })],
+      unread_count: 1,
+    });
+    bindNotificationCenter();
+    await flush();
+    (document.getElementById('notification-bell-btn') as HTMLButtonElement).click();
+    await flush();
+
+    const body = document.querySelector<HTMLElement>('.mw-notification-item__body');
+    expect(body?.querySelector('strong')?.textContent).toBe('超时');
+    expect(body?.querySelectorAll('ul li')).toHaveLength(2);
+    expect(body?.querySelector('script')).toBeNull();
+  });
 });

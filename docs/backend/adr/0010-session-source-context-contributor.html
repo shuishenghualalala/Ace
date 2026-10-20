@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0010 · Session Source Context Contributor</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0010 · Session Source Context Contributor</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-03 · 阶段：插件架构 Stage 2 / Commit 4</div>
+
+  <h2>背景</h2>
+  <p><code>crew.agent.runtime</code> 直接导入 Gateway 的 <code>SessionContext</code>、<code>SessionSource</code>、解析器和 prompt formatter。这使 Agent 同时理解渠道来源的数据结构与展示规则，并迫使 import-linter 长期保留 Agent→Gateway 豁免。</p>
+
+  <h2>决定</h2>
+  <div class="decision"><p>Gateway 保留渠道路由数据所有权，并以 <code>gateway.session.source</code> Contributor 输出规范化 <code>session_source</code> 参数和动态模型上下文片段。Host 只负责把该 Handler 装入 FeatureScope；Agent 只读取通用参数与已排序 fragment。</p></div>
+  <table>
+    <thead><tr><th>职责</th><th>所有者</th><th>边界</th></tr></thead>
+    <tbody>
+      <tr><td>来源解析与序列化</td><td>Gateway Session Context</td><td>接受对象或字典输入，输出稳定 source 字典。</td></tr>
+      <tr><td>模型可见文本</td><td>Gateway Session Contributor</td><td>Contributor 生成来源、用户、Workspace、已连接平台和投递选项。</td></tr>
+      <tr><td>顺序与生命周期</td><td>Feature Runtime</td><td>priority 300；请求执行持有 <code>gateway.session-context</code> Generation Lease。</td></tr>
+      <tr><td>消费</td><td>Agent Runtime</td><td>动态 fragment 进入通用 system-reminder；工具上下文读取规范化 <code>session_source</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>动态上下文而非静态身份</h2>
+  <p>渠道、聊天、参与者和投递目标会逐请求变化，因此它们属于动态 runtime context，不属于静态身份或部署级 system section。将其放入通用 reminder snapshot 可避免会话来源变化破坏 system prompt 的前缀稳定性，也使未来按 Agent Scope 抑制动态上下文成为可能。</p>
+
+  <h2>兼容与失败</h2>
+  <ul>
+    <li>WebSocket、渠道续聊和 Cron 仍可传入现有 <code>SessionContext</code> 对象；字典载荷通过统一 <code>SessionContext.from_dict()</code> 解析。</li>
+    <li>缺少 <code>session_context</code> 时 Contributor 不产生输出；Agent 为工具 ContextVar 保留基于 Envelope 元数据的无依赖回退。</li>
+    <li>无效字典按默认 <code>degrade</code> 策略记录贡献失败，不阻断请求。</li>
+    <li>本切片删除 Agent Runtime→Gateway 的最后一条直接 import 和 import-linter 豁免；PluginManager 的平台装配懒加载随后续 Route Gate 切片迁移。</li>
+  </ul>
+
+  <h2>跨平台</h2>
+  <p>Contributor 只处理普通字典、字符串和 pathlib 已归一的 Workspace 路径，不依赖平台进程、signal 或路径分隔符。</p>
+
+  <div class="nav"><a href="0009-context-contributor-registry.html">ADR-0009</a> · <a href="../modules/gateway.html">Gateway 模块</a> · <a href="../modules/agent.html">Agent 模块</a> · <a href="../../testing/plugin-architecture-stage-2-session-context.html">测试记录</a></div>
+</div>
+</body>
+</html>

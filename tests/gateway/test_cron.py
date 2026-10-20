@@ -55,7 +55,14 @@ def test_cron_delivery_targets_returns_local_defaults():
 @pytest.mark.asyncio
 async def test_create_job_with_draft_session_creates_placeholder(tmp_path):
     """前端「新会话」是草稿态(未发消息、后端无记录),创建 cron 不应报「会话不存在」。"""
-    crew = build_app(config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False), enable_team=False)
+    crew = build_app(
+        config=Config(
+            db_path=str(tmp_path / "crew.db"),
+            cron_db_path=str(tmp_path / "cron.db"),
+            cron_enabled=False,
+        ),
+        enable_team=False,
+    )
     app = create_app(crew)
     transport = ASGITransport(app=app)
 

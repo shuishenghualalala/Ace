@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 3B · Wiki Event Contributor 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.note{border-left:3px solid #999;padding:8px 16px;background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 3B · Wiki Event Contributor</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-05 · 编码与测试：相互独立的 Luna 子 Agent</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li>Event DTO、Contributor 注册、冲突、顺序、predicate、同步/异步 Handler、超时和失败策略形成稳定契约。</li>
+    <li>最新 Active Generation 才可见；dispatch 在生成与 sink 投递期间持有 Lease，drain 等待在途事件，rollback 不残留注册。</li>
+    <li>FeatureRuntime 保持既有 positional 构造兼容，PluginContext 注册和诊断标签随 Scope 自动撤销。</li>
+    <li>Wiki cards/changes 来源归属同代 Bundle，按顺序投递；cards push 失败时尚未发送的 changes 保留。</li>
+    <li>WS 不再读取 Wiki Manager，断开时不 dispatch；标准 Feature Event 经现有出口适配为旧帧，线上协议保持。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>新增 Event Registry + Wiki Bundle + WS 定向</td><td class="ok">33 passed</td></tr>
+      <tr><td>Event / Context / Service / Runtime / Manager / Lifecycle</td><td>121 passed，1 个无关 Browser fixture 基线失败</td></tr>
+      <tr><td>Wiki / Manager / Tools / WS / Event Compat / Gateway</td><td class="ok">159 passed</td></tr>
+      <tr><td>Cron / Sites / Browser / Feature 邻接回归</td><td>610 passed，28 skipped，16 个既有环境或 Browser/schema 基线失败</td></tr>
+      <tr><td>Ruff、compileall、git diff check</td><td class="ok">全部通过</td></tr>
+      <tr><td>Import Linter</td><td class="ok">310 files，1353 dependencies，6 contracts kept，0 broken</td></tr>
+    </tbody>
+  </table>
+  <p>测试组存在重叠，不将数量相加作为全量总数。测试新增或扩展 <code>tests/test_feature_events.py</code>、<code>tests/wiki/test_feature.py</code> 与 <code>tests/gateway/test_ws_subscribe.py</code>。</p>
+
+  <h2>基线说明</h2>
+  <div class="note">Feature 组合组的 1 项失败来自未修改的 Browser Manager fixture 未装配；广组的 16 项来自既有 Browser RPC payload/schema 差异、受限环境禁止绑定 loopback socket，以及默认 SQLite 路径不可写。这些失败在本轮修复前后重复，未计为 Event Contributor 回归。</div>
+
+  <h2>关键场景</h2>
+  <p>覆盖 activating/active/draining 可见性、token 撤销、冲突、priority、DEGRADE/FAIL、超时与取消、非法输出、代际 replace、acquire 竞态、dispatch Lease、PluginContext、Wiki restart/rollback、cards push 失败保留 changes、断线跳过，以及 WS 源码依赖扫描。</p>
+
+  <div class="nav"><a href="../backend/adr/0023-feature-event-contributor-registry.html">ADR-0023</a> · <a href="../backend/modules/plugins.html">Feature / Plugin 模块</a> · <a href="../backend/modules/wiki.html">Wiki 模块</a> · <a href="../backend/modules/gateway.html">Gateway 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

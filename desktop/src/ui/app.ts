@@ -10,16 +10,16 @@
 
 import { bindChannelConfigModal, bindModelConfigModal, openChannelConfigModal, renderConfigModels, renderPlatforms, toggleChannelConnection } from './features/config-panes';
 import { backendApi } from './backend-client';
-import { bindSitesTab, renderSitesPage, syncSiteAnnotationEntry, syncSiteComposerMarker } from './features/sites-page';
+import { bindSitesTab, createSitesPageContribution, syncSiteComposerMarker } from './features/sites-page';
 import { bindBlueprintSurface } from './features/blueprint-surface';
 import { bindModelPicker } from './features/model-picker';
 import { bindComposerToolbar, syncCraftLabel } from './features/composer-toolbar';
 import { bindComposerContextRing } from './features/composer-context-ring';
 import { createComposerContextView } from './features/composer-context-view';
-import { activateAgentsPage, disposeAgentsPage, initAgentsPage } from './features/agents-page';
+import { createAgentsPageContribution, disposeAgentsPage, initAgentsPage } from './features/agents-page';
 import {
-  activateSkillsPage,
   bindSkillsPageLifecycle,
+  createSkillsPageContribution,
   initSkillsPage,
 } from './features/skills-page';
 import {
@@ -39,17 +39,19 @@ import { openWorkItemDrawer } from './features/work/item-space';
 import type { WorkItem } from './backend-client';
 import { setNotificationClickHandler } from './features/work/notifications';
 import { initSystemTrayStatus } from './features/system-tray';
-import { refreshKanbanBoard, renderKanbanBoard } from './features/kanban-board';
+import { disposeTeamKanbanBoards, installTeamKanbanBoards } from './features/board-capability';
+import { refreshKanbanBoard, renderKanbanBoard } from './features/board-hooks';
 import { bindSystemTab, disposeSystemTab, renderSystemLogs, renderSystemOverview } from './features/system-page';
 import { initUsagePage } from './features/usage-panel';
-import { activateCronPage, renderCronTaskBoard, setCronCallbacks } from './features/cron-page';
+import { createCronPageContribution, renderCronTaskBoard, setCronCallbacks } from './features/cron-page';
 import {
-  bindWikiTab,
-  refreshWikiData,
+  createWikiPageContribution,
+  installWikiFeature,
   setWikiAgentEntryHandler,
   setWikiAgentKbDeletedHandler,
 } from './features/wiki-page';
-import { enterWikiAgentMode, forgetWikiAgentKb, initWikiAgent } from './features/wiki-agent';
+import { PageRegistry } from './features/page-registry';
+import { disposeWikiAgentFeature, enterWikiAgentMode, forgetWikiAgentKb, initWikiAgent } from './features/wiki-agent';
 import {
   assignSessionAgentDisplay,
   bindWorkspaceUi,
@@ -73,7 +75,7 @@ import { bindSettingsUi, registerConfigPaneRenderers } from './features/settings
 import { mountSettingsDataPanes } from './features/settings-data';
 import { requireRendererLogin } from './features/auth-gate';
 import { initAuthFlow } from './features/login';
-import { initBackendStatusGuard, isBackendConnected, isBackendInitBypassActive, sealBackendInitBypass } from './features/backend-status-guard';
+import { initBackendStatusGuard, isBackendConnected } from './features/backend-status-guard';
 import { bindHistoryPanelToggle, applyHistoryCollapsed } from './features/history-collapse';
 import { bindInspectorUi, openInspectorToTab, refreshInspector, setPlanBoardActions } from './features/inspector';
 import { bindAttachments } from './features/attachments';
@@ -97,6 +99,7 @@ import { bindNotificationCenter } from './features/notification-center';
 import { armSubScenario, clearScenarioChip } from './features/scenario-arm';
 import { loadRunningIntroCopy } from './features/running-intro';
 import { installStreamDebugGlobal } from './stream-debug';
+import { installGlobalErrorReporting } from './renderer-error-report';
 import { newTurnRequestId, resumeSessionGeneration } from './features/session-busy';
 import {
   $,
@@ -129,7 +132,12 @@ import {
 } from './features/session-controller';
 import { hydrateMissingTurnFileCounts } from './features/turn-file-counts';
 import { bindSecurityApprovalUi } from './features/security-approval';
-import { activateSecurityPage, initSecurityPage } from './features/security-center';
+import { createSecurityPageContribution, initSecurityPage } from './features/security-center';
+import {
+  createTracingPageContribution,
+  disposeTracingPage,
+  resolveTracingDevLaunch,
+} from './features/tracing';
 import { stopStreamWatchdog } from './features/stream-watchdog';
 import type { RendererAdapter } from './adapters/renderer-adapter';
 import { createApplicationShell, type ApplicationShell } from './layouts/application-shell';
@@ -147,17 +155,31 @@ import {
   securityModuleEnabled,
 } from './features/security-mode';
 import {
+  bindWikiFeatureUi,
+  canNavigateToWiki,
+  resolveTabAfterWikiCapabilityChange,
+  wikiFeatureEnabled,
+} from './features/wiki-feature';
+import {
   isWorkLocation,
   type ShellLocation,
   type WorkLocation,
 } from './features/sidebar-nav';
+import { isObservationDevLaunch, setObservationDevLaunch } from '../shared/observability';
+
+const pageRegistry = new PageRegistry();
+let tracingAvailable = false;
+let refreshTracingGateFn: (() => Promise<void>) | null = null;
+
+export async function refreshTracingGateAvailability(): Promise<void> {
+  await refreshTracingGateFn?.();
+}
 
 function setTab(tab: TabKey): boolean {
-  // 后端服务未就绪时阻断页面切换，遮罩已由 backend-status-guard 展示。
-  // init 阶段旁路：允许构建 UI 骨架（遮罩覆盖下用户看不到）。
-  if (!isBackendInitBypassActive() && !isBackendConnected()) {
-    return false;
-  }
+  if (tab === 'wiki' && !canNavigateToWiki(state.config)) return false;
+  if (tab === 'agents' && !externalAgentsEnabled()) return false;
+  if (tab === 'tracing' && (!isObservationDevLaunch() || !tracingAvailable)) return false;
+  void pageRegistry.activate(tab).catch((error) => notify(`打开页面失败：${(error as Error).message}`));
   state.activeTab = tab;
   const productState = productModeStore.get();
   if (
@@ -186,17 +208,7 @@ function setTab(tab: TabKey): boolean {
 }
 
 function activateTab(tab: TabKey): boolean {
-  if (!setTab(tab)) return false;
-  if (tab === 'agents') activateAgentsPage();
-  else if (tab === 'skills') activateSkillsPage();
-  else if (tab === 'security') activateSecurityPage();
-  else if (tab === 'wiki') void refreshWikiData();
-  else if (tab === 'sites') {
-    syncSiteAnnotationEntry();
-    void renderSitesPage();
-  }
-  else if (tab === 'cron') activateCronPage();
-  return true;
+  return setTab(tab);
 }
 
 function setSystemPanel(panel: SystemPanelKey): void {
@@ -479,7 +491,6 @@ function bindGlobalEvents(): () => void {
   const disposeSkillsLifecycle = bindSkillsPageLifecycle(() => {
     activateTab('chat');
   });
-  bindWikiTab(() => activateTab('wiki'));
   bindSitesTab({
     openInspirationAgent: async (item) => {
       if (!item.sessionId) throw new Error('这个灵感没有绑定创建对话');
@@ -572,6 +583,9 @@ async function init(
   registerDispose: (dispose: () => void) => void,
 ): Promise<void> {
   installStreamDebugGlobal();
+  // 全局错误捕获（最早安装）：同步异常与未处理 Promise 拒绝统一上报主进程落盘，
+  // 不再只进 DevTools console——「静默失败」从源头可见。
+  installGlobalErrorReporting();
   // 安全 init 包装器：单步抛错不会阻断后续步骤；抛错时记日志 + 通知用户，
   // 避免「init 链路中途抛错 → 首屏空白 → 用户看不到任何东西」的白屏。
   // 每步独立 try-catch，单页初始化失败不会让 setTab('chat') 跑不到。
@@ -606,6 +620,11 @@ async function init(
       void enterWikiAgentMode(req);
     });
   });
+  registerDispose(disposeWikiAgentFeature);
+  registerDispose(installWikiFeature());
+  // Team / Dynamic Kanban 看板：按 feature_capabilities 安装，能力变化时独立启停。
+  await safe('installTeamKanbanBoards', () => { installTeamKanbanBoards(); });
+  registerDispose(disposeTeamKanbanBoards);
   await safe('setSessionControllerSetTab', () => setSessionControllerSetTab(setTab));
   await safe('bindGlobalEvents', () => {
     registerDispose(bindGlobalEvents());
@@ -629,8 +648,6 @@ async function init(
   }
 
   // Phase 3: 后台慢慢来（失败不影响首屏；用户已能看到 welcome/chat 再补这些）
-  // 关闭 init 旁路：此后 setTab 受后端状态守卫约束（遮罩展示时阻断用户切换）
-  sealBackendInitBypass();
   void safe('initSecurityPage', initSecurityPage);
   void safe('initUsagePage', initUsagePage);
   void safe('initAgentsPage', () => initAgentsPage({
@@ -646,6 +663,7 @@ async function init(
   // 登录墙已由 initAuthFlow 在 Phase 1 处理：local/dev 模式直接放行，
   // email/remote 模式未登录时登录墙覆盖全部 UI，登录后 reload 重新初始化。
   await safe('bootstrapBackend', bootstrapBackend);
+  await safe('refreshTracingGate', refreshTracingGateAvailability);
   void safe('hydrateBackendState', hydrateBackendState);
 }
 
@@ -748,6 +766,7 @@ function mountApplicationShell(
     });
   }
   function showWorkWorkbench(): void {
+    void pageRegistry.activate('workbench');
     setWorkItemContext(null);
     setWorkOverviewVisible(true);
     workContext.hidden = false;
@@ -758,6 +777,7 @@ function mountApplicationShell(
     activateWorkLocation('workbench', workOverview);
   }
   function showWorkPage(location: WorkLocation, options: { itemId?: string } = {}): void {
+    void pageRegistry.activate(location);
     setWorkItemContext(null);
     setWorkOverviewVisible(false);
     workContext.hidden = location === 'items';
@@ -779,6 +799,7 @@ function mountApplicationShell(
     initialMessage?: string,
     item: WorkItem | null = null,
   ): Promise<void> {
+    void pageRegistry.activate('workbench');
     updateProductModeView({ lastPosition: 'workbench' });
     setWorkItemContext(item);
     setWorkOverviewVisible(false);
@@ -852,7 +873,9 @@ function mountApplicationShell(
     },
     features: {
       agents: externalAgentsEnabled() ? 'available' : 'hidden',
+      wiki: wikiFeatureEnabled() ? 'available' : 'hidden',
       security: securityModuleEnabled() ? 'available' : 'unavailable',
+      tracing: 'hidden',
       work: WORK_FEATURE_STATES,
     },
     onNavigate: (location: ShellLocation, productMode: ProductMode) => {
@@ -868,6 +891,47 @@ function mountApplicationShell(
     },
     onProductModeChange: syncProductMode,
   });
+  let gateRefreshTimer: number | null = null;
+  const refreshTracingGate = async (): Promise<void> => {
+    const isDev = await resolveTracingDevLaunch();
+    setObservationDevLaunch(isDev);
+    let available = false;
+    if (isDev) {
+      try {
+        const capabilities = await backendApi.tracingCapabilities();
+        available = Boolean(capabilities.available);
+      } catch {
+        available = false;
+      }
+    }
+    tracingAvailable = available;
+    shell.setFeatures({ tracing: available ? 'available' : 'hidden' });
+    const lastPosition = productModeStore.get().views.assistant.lastPosition as TabKey;
+    if (!available && (state.activeTab === 'tracing' || lastPosition === 'tracing')) {
+      updateProductModeView({ lastPosition: 'chat' });
+      if (state.activeTab === 'tracing') activateTab('chat');
+      disposeTracingPage();
+    } else if (available && lastPosition === 'tracing' && state.activeTab !== 'tracing') {
+      activateTab('tracing');
+    }
+  };
+  refreshTracingGateFn = refreshTracingGate;
+  void refreshTracingGate();
+  const unsubscribeTracingStatus = window.Crew?.onBackendStatus?.(() => {
+    if (gateRefreshTimer != null) window.clearTimeout(gateRefreshTimer);
+    gateRefreshTimer = window.setTimeout(() => {
+      gateRefreshTimer = null;
+      void refreshTracingGate();
+    }, 500);
+  });
+  const disposeWikiPageContribution = pageRegistry.register(createWikiPageContribution());
+  const disposeAgentsPageContribution = pageRegistry.register(createAgentsPageContribution());
+  const disposeSkillsPageContribution = pageRegistry.register(createSkillsPageContribution());
+  const disposeSecurityPageContribution = pageRegistry.register(createSecurityPageContribution());
+  const disposeSitesPageContribution = pageRegistry.register(createSitesPageContribution());
+  const disposeCronPageContribution = pageRegistry.register(createCronPageContribution());
+  const disposeTracingPageContribution = pageRegistry.register(createTracingPageContribution());
+
 
   const assistantContext = document.createElement('div');
   const workContext = document.createElement('aside');
@@ -932,15 +996,38 @@ function mountApplicationShell(
   rendererRoot.element.insertBefore(shell.element, rendererRoot.overlayHost);
   const disposeExternalAgentsFeature = bindExternalAgentsFeatureUi((enabled) => {
     shell.setFeatures({ agents: enabled ? 'available' : 'hidden' });
+    if (!enabled && state.activeTab === 'agents') {
+      void pageRegistry.deactivate();
+      activateTab('chat');
+    }
   });
   const disposeSecurityModuleFeature = bindSecurityModuleFeatureUi((enabled) => {
     shell.setFeatures({ security: enabled ? 'available' : 'unavailable' });
+  });
+  const disposeWikiFeature = bindWikiFeatureUi((enabled) => {
+    shell.setFeatures({ wiki: enabled ? 'available' : 'hidden' });
+    const nextTab = resolveTabAfterWikiCapabilityChange(state.activeTab, enabled);
+    if (!enabled) void pageRegistry.deactivate();
+    if (nextTab !== state.activeTab) activateTab(nextTab);
   });
   syncProductMode(productModeStore.get().productMode);
 
   return {
     shell,
     dispose() {
+      void pageRegistry.deactivate();
+      void disposeWikiPageContribution();
+      void disposeAgentsPageContribution();
+      void disposeSkillsPageContribution();
+      void disposeSecurityPageContribution();
+      void disposeSitesPageContribution();
+      void disposeCronPageContribution();
+      void disposeTracingPageContribution();
+      disposeTracingPage();
+      if (gateRefreshTimer != null) window.clearTimeout(gateRefreshTimer);
+      unsubscribeTracingStatus?.();
+      if (refreshTracingGateFn === refreshTracingGate) refreshTracingGateFn = null;
+      tracingAvailable = false;
       leaveWorkMode();
       setWorkHistoryCommands({});
       const restoredContext = document.createElement('div');
@@ -951,6 +1038,7 @@ function mountApplicationShell(
       rendererRoot.element.insertBefore(legacyOutlet, rendererRoot.overlayHost);
       disposeExternalAgentsFeature();
       disposeSecurityModuleFeature();
+      disposeWikiFeature();
       setNotificationClickHandler(null);
       shell.dispose();
       shell.element.remove();

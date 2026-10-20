@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from crew.app import CrewApp, build_app
+from crew.channels.feature import CHANNELS_SERVICE_KEY
+from crew.channels.broadcast import make_broadcasting_handler
 from crew.gateway.auth import (
     AuthenticationError,
     authenticate_http_request,
@@ -22,136 +25,81 @@ from crew.gateway.auth import (
     is_loopback_host,
 )
 from crew.gateway.auth_policy import requires_gateway_auth
-from crew.gateway.broadcast import make_broadcasting_handler
-from crew.gateway.channel_config import channel_raw as resolved_channel_raw
-from crew.gateway.channel_manager import ChannelManager
 from crew.gateway.connections import ConnectionManager
-from crew.gateway.delivery import DeliveryRouter
+from crew.gateway.health_server import (
+    GatewayHealthServer,
+    build_health_components,
+    note_loop_tick,
+    set_health_components,
+)
 from crew.gateway.helpers import (
     DIST_DIR,
     EXTERNAL_AGENTS_DISABLED_BODY,
     NOT_BUILT_HTML,
     ExternalAgentsDisabledError,
 )
-from crew.gateway.hooks import hook_registry
-from crew.security.settings import strict_security_enabled
+from crew.features.hooks import hook_registry
 from crew.gateway.interaction_bridge import create_interaction_router, interaction_bridge
 from crew.gateway.logout import LogoutCoordinator
-from crew.gateway.platform_registry import platform_registry
 from crew.gateway.routers.auth_session import create_auth_session_router
-from crew.gateway.routers.channels import create_channels_router
 from crew.gateway.routers.browser import create_browser_router
+from crew.gateway.routers.channels import create_channels_router
 from crew.gateway.routers.config import create_config_router
 from crew.gateway.routers.cron import create_cron_router
-from crew.gateway.routers.dynamic_kanban import create_dynamic_kanban_router
-from crew.gateway.routers.misc import create_misc_router
 from crew.gateway.routers.mcp_servers import create_mcp_servers_router
 from crew.gateway.routers.mcp_setup import create_mcp_setup_router
+from crew.gateway.routers.misc import create_misc_router
 from crew.gateway.routers.notifications import create_notifications_router
 from crew.gateway.routers.plugins import create_plugins_router
 from crew.gateway.routers.remote_auth import create_remote_auth_router
 from crew.gateway.routers.runtimes import create_runtimes_router
 from crew.gateway.routers.scenarios import create_scenarios_router
-from crew.gateway.routers.sessions import create_sessions_router
-from crew.gateway.routers.system import create_system_router
 from crew.gateway.routers.security import create_security_router
+from crew.gateway.routers.sessions import create_sessions_router
 from crew.gateway.routers.sites import create_sites_router
-from crew.gateway.routers.wiki import create_wiki_router
-from crew.gateway.routers.work import create_work_router
+from crew.gateway.routers.system import create_system_router
+from crew.gateway.routers.tracing import create_tracing_router
 from crew.gateway.ws import create_ws_router
+from crew.security.settings import strict_security_enabled
 from crew.state.logging import get_logger
 
 log = get_logger("gateway")
 
 
-def _register_platform_channel(
-    crew: CrewApp,
-    channel_manager: ChannelManager,
-    entry,
-    *,
-    owner_account_id: str = "",
-) -> bool:
-    owner = str(owner_account_id or "").strip()
-    try:
-        raw = resolved_channel_raw(crew.config, entry.name, owner)
-        pconfig = entry.build_config(raw, include_env=not bool(owner))
-    except Exception as exc:  # noqa: BLE001 - 单个平台配置异常不应阻断其它渠道启动
-        log.warning("平台 %s 配置解析失败，跳过启动: %s", entry.name, exc)
-        channel_manager.record_error(entry.name, "platform config invalid", owner)
-        return False
+def make_route_gate(route_registry: Any, contribution_id: str) -> Any:
+    """运行期闸门依赖：在整个请求期间持有同代 Route Lease。
 
-    if not pconfig.enabled:
-        return False
-    if not entry.configured(pconfig):
-        hint = entry.install_hint or "请补全平台凭证或设置 enabled: false"
-        if owner:
-            log.warning(
-                "平台 %s 已由 owner=%s 启用但配置不完整，跳过启动（%s）",
-                entry.name,
-                owner,
-                hint,
-            )
-        else:
-            log.warning("平台 %s 已启用但配置不完整，跳过启动（%s）", entry.name, hint)
-            channel_manager.record_error(entry.name, "platform config incomplete", owner)
-        return False
-    try:
-        channel = platform_registry.create_channel(entry.name, pconfig)
-    except Exception as exc:  # noqa: BLE001 - 单个平台构造失败按渠道隔离
-        log.exception("平台通道创建失败: %s", entry.name)
-        channel_manager.record_error(entry.name, str(exc), owner)
-        return False
-    # 注入 CrewApp：供需要调用后端能力的渠道插件使用。
-    if hasattr(channel, "bind_app"):
-        channel.bind_app(crew)
-    channel_manager.register(channel, owner_account_id=owner)
-    if owner:
-        log.info("恢复 owner 绑定平台通道: %s owner=%s", entry.name, owner)
-    return True
-
-
-def _register_enabled_platform_channels(crew: CrewApp, channel_manager: ChannelManager) -> None:
-    entries = platform_registry.all_entries()
-    bindings = getattr(crew, "channel_bindings", None)
-    bound_owners: dict[str, list[str]] = {}
-    if bindings is not None:
-        for entry in entries:
-            try:
-                list_for_platform = getattr(bindings, "list_for_platform", None)
-                if callable(list_for_platform):
-                    owners = [
-                        str(row.get("owner_account_id") or "").strip()
-                        for row in list_for_platform(entry.name)
-                    ]
-                else:
-                    bound_owner = str(bindings.get_binding(entry.name) or "").strip()
-                    owners = [bound_owner] if bound_owner else []
-            except Exception as exc:  # noqa: BLE001 - 绑定存储异常不能影响其它渠道启动
-                log.warning("读取平台绑定失败: %s: %s", entry.name, exc)
-                continue
-            bound_owners[entry.name] = [owner for owner in owners if owner]
-
-    for entry in entries:
-        owners = bound_owners.get(entry.name, [])
-        if owners:
-            for owner in owners:
-                _register_platform_channel(crew, channel_manager, entry, owner_account_id=owner)
-            continue
-        _register_platform_channel(crew, channel_manager, entry)
-
-
-def _wire_delivery_senders(
-    channel_manager: ChannelManager, delivery_router: DeliveryRouter
-) -> None:
-    """把各渠道的 send_to_target 注册进 DeliveryRouter。
-
-    cron 投递经 app._cron_runner 读 crew.delivery_router.deliver()，不需要再把
-    router 挂到 cron_service 上。
+    FastAPI 路由树在构造期固化，Feature 停用不拆路由；闸门口径以
+    Route Registry 的可见性为准（演进方案 §6.5 运行期能力门控）。
+    Async-generator dependency 的 ``finally`` 在 endpoint 返回后执行，
+    因而 draining 只拒绝新请求，在途请求可安全完成。
     """
-    for name, owner, channel in channel_manager.iter_channels():
-        sender = getattr(channel, "send_to_target", None)
-        if callable(sender):
-            delivery_router.register(name, sender, owner_account_id=owner)
+    from fastapi import HTTPException
+
+    async def _gate(request: Request):
+        acquired = route_registry.acquire_lease(
+            contribution_id,
+            label=f"route:{contribution_id}",
+        )
+        if acquired is None:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "ok": False,
+                    "error": f"功能暂不可用：{contribution_id}",
+                    "code": "capability_unavailable",
+                },
+            )
+        binding, lease = acquired
+        # Feature-owned routes can use this binding to resolve other
+        # generation-bound capabilities without a second, drifting lookup.
+        request.state.route_binding = binding
+        try:
+            yield
+        finally:
+            lease.release()
+
+    return _gate
 
 
 def create_app(crew: CrewApp | None = None) -> FastAPI:
@@ -180,23 +128,44 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         crew=crew,
     )
     crew.interaction_bridge = interaction_bridge
-    if crew.team is not None:
-        crew.team.interaction_bridge = interaction_bridge
-    channel_manager = ChannelManager()
-    delivery_router = DeliveryRouter()
-    crew.channel_manager = channel_manager
-    crew.delivery_router = delivery_router
+    # Team 可能未启用或 Generation 未就绪；通过动态 getter 取值避免直接写 None 时抛异常。
+    team = getattr(crew, "team", None)
+    if team is not None:
+        team.interaction_bridge = interaction_bridge
+    channel_manager = crew.channel_manager
+    delivery_router = crew.delivery_router
+    if channel_manager is None or delivery_router is None:
+        from crew.channels.feature import build_channels_feature
 
-    _register_enabled_platform_channels(crew, channel_manager)
-    _wire_delivery_senders(channel_manager, delivery_router)
+        fallback = build_channels_feature(
+            crew,
+            registry=getattr(crew, "registry", None),
+            session_store=crew.session_store,
+        ).service
+        channel_manager = channel_manager or fallback.channel_manager
+        delivery_router = delivery_router or fallback.delivery_router
+        crew.channel_manager = channel_manager
+        crew.delivery_router = delivery_router
+
+    def _resolve_channels_service() -> Any:
+        return crew.plugins.resolve_service(CHANNELS_SERVICE_KEY)
+
+    async def _stop_all_channels(reason: str = "disconnected") -> None:
+        service = _resolve_channels_service()
+        if service is None:
+            return
+        await service.channel_manager.stop_all(reason=reason)
     logout_coordinator = LogoutCoordinator(
         active_owner=crew.active_owner,
         dispatcher=dispatcher,
         task_runtime=crew.tasks,
-        channel_manager=channel_manager,
         connections=connections,
         channel_handler=crew.channel_handler,
-        cron_service=crew.cron_service,
+        cron_service_getter=lambda: crew.cron_service,
+        channels_service_getter=lambda: crew.plugins.acquire_service_lease(
+            CHANNELS_SERVICE_KEY,
+            label="logout:channels",
+        ),
         team_manager=crew.team,
         interaction_bridge=interaction_bridge,
         security_service=crew.security_service,
@@ -223,6 +192,29 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         startup_error = ""
         _app.state.deferred_startup_status = "starting"
 
+        # health 独立线程服务：与业务事件循环隔离，循环卡顿时桌面端仍能探测进程
+        # 活性。端口默认主端口+1（runtime.health_port 可显式覆盖），绑定失败仅
+        # 告警并降级为「仅主端口 /api/health」，不阻止启动。
+        health_port = int(getattr(crew.config, "health_port", 0) or 0) or (
+            int(crew.config.gateway_port) + 1
+        )
+        health_server = GatewayHealthServer(port=health_port)
+        health_server.start()
+
+        # 循环活性哨兵：每秒把 loop.time() 与 components 快照戳到模块级变量，
+        # health 线程据此在响应里附带 loop_lag_ms（区分「循环忙」与「进程死」）。
+        async def _health_loop_sentinel() -> None:
+            loop = asyncio.get_running_loop()
+            while True:
+                note_loop_tick(loop.time())
+                set_health_components(build_health_components(
+                    getattr(_app.state, "deferred_startup_status", "starting"),
+                    getattr(crew, "cron_service", None),
+                ))
+                await asyncio.sleep(1.0)
+
+        health_sentinel = asyncio.create_task(_health_loop_sentinel())
+
         # Restart-finalized logout is a physical disconnection boundary and
         # must complete before even health readiness becomes visible.
         completed_restart_logout = crew.active_owner.complete_restart_logout()
@@ -233,7 +225,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             )
         # Registered channels remain physically and logically disconnected
         # until a verified Active Owner is activated after Crew startup.
-        await channel_manager.stop_all(reason="login_required")
+        await _stop_all_channels(reason="login_required")
 
         # 从旧版 local 免登录切换到 email/remote 登录时，SQLite 里可能仍保留
         # local 的排他租约。该租约没有可恢复的登录凭据，却会阻止新账号接管，
@@ -265,7 +257,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
                     for lease in leases:
                         logout_coordinator.activate_owner(lease.owner_account_id)
                 else:
-                    await channel_manager.stop_all(reason="login_required")
+                    await _stop_all_channels(reason="login_required")
                 cron_error = str(getattr(crew.cron_service, "start_error", "") or "")
                 if cron_error:
                     log.warning("Gateway 基础能力已就绪，但 CronService 启动失败")
@@ -276,7 +268,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
                 startup_error = "cancelled"
                 _app.state.deferred_startup_status = "failed"
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 startup_error = type(exc).__name__
                 _app.state.deferred_startup_status = "failed"
                 log.exception("Gateway 延迟初始化失败（部分功能可能不可用）")
@@ -287,12 +279,14 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         try:
             yield
         finally:
+            health_sentinel.cancel()
+            await asyncio.gather(health_sentinel, return_exceptions=True)
             if not startup_task.done():
                 startup_task.cancel()
             await asyncio.gather(startup_task, return_exceptions=True)
             startup_task = None
             await logout_coordinator.shutdown()
-            await channel_manager.stop_all()
+            await _stop_all_channels()
             await crew.shutdown()
             # 反注册本实例的渠道会话通知钩子：hook_registry 是全局单例，
             # create_app 每次调用都会新建闭包，不注销会跨实例累积扇出
@@ -300,6 +294,8 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             hook_registry.unregister("agent:end", _notify_channel_session_updated)
             # 触发 gateway:shutdown hook
             await hook_registry.emit("gateway:shutdown", {})
+            # 最后停 health 线程：shutdown 期间桌面端仍能看到进程活性与循环滞后。
+            health_server.stop()
 
     publish_api_docs = crew.config.gateway_dev_mode and not strict_security_enabled()
     api = FastAPI(
@@ -325,16 +321,15 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             client_host = request.client.host if request.client else None
             if not is_loopback_client(client_host):
                 return JSONResponse({"ok": False, "error": "仅允许本机访问"}, status_code=401)
-        if path.startswith("/api/") and path != "/api/health":
-            if not await _wait_for_gateway_startup():
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "error": "Gateway 初始化失败",
-                        "code": "GATEWAY_STARTUP_FAILED",
-                    },
-                    status_code=503,
-                )
+        if path.startswith("/api/") and path != "/api/health" and not await _wait_for_gateway_startup():
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "Gateway 初始化失败",
+                    "code": "GATEWAY_STARTUP_FAILED",
+                },
+                status_code=503,
+            )
         if requires_gateway_auth(path):
             try:
                 account = await authenticate_http_request(request, crew.config)
@@ -375,20 +370,18 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     api.include_router(create_browser_router(crew))
     api.include_router(create_sessions_router(crew, dispatcher))
     api.include_router(create_cron_router(crew))
-    api.include_router(create_dynamic_kanban_router(crew))
     api.include_router(create_runtimes_router(crew))
     api.include_router(create_scenarios_router(crew))
-    api.include_router(create_channels_router(crew, dispatcher, channel_manager))
+    api.include_router(create_channels_router(crew, dispatcher))
     api.include_router(create_notifications_router(crew))
     api.include_router(create_misc_router(crew))
     api.include_router(create_plugins_router(crew))
     api.include_router(create_mcp_setup_router(crew))
-    api.include_router(create_wiki_router(crew))
-    api.include_router(create_work_router(crew))
     api.include_router(create_sites_router(crew))
     api.include_router(create_mcp_servers_router(crew))
     api.include_router(create_interaction_router(interaction_bridge, crew))
     api.include_router(create_system_router(crew))
+    api.include_router(create_tracing_router(crew))
     api.include_router(create_security_router(crew))
     api.include_router(
         create_ws_router(
@@ -401,15 +394,29 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         )
     )
 
-    for plugin_name, plugin_router in crew.plugins.api_routers:
-        prefix = f"/api/plugins/{plugin_name.strip('/')}"
-        try:
-            api.include_router(plugin_router, prefix=prefix)
-            log.info("插件 API 已挂载: %s", prefix)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("插件 API 挂载失败 %s: %s", plugin_name, exc)
+    route_registry = crew.plugins.feature_runtime.routes
 
-    from crew.gateway.channel_sessions import channel_platform_from_session_id, is_channel_session_id
+    for binding in route_registry.bindings():
+        contribution = binding.contribution
+        try:
+            api.include_router(
+                contribution.router,
+                prefix=contribution.prefix,
+                dependencies=[Depends(make_route_gate(route_registry, contribution.contribution_id))],
+            )
+            log.info(
+                "插件 API 已挂载: %s (contribution=%s, owner=%s)",
+                contribution.prefix,
+                contribution.contribution_id,
+                binding.generation.key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("插件 API 挂载失败 %s: %s", contribution.prefix, exc)
+
+    from crew.channels.channel_sessions import (
+        channel_platform_from_session_id,
+        is_channel_session_id,
+    )
 
     async def _notify_channel_session_updated(_event: str, ctx: dict) -> None:
         sid = str(ctx.get("session_id") or "")

@@ -1,11 +1,24 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import Sidebar, { type SidebarView } from "./components/Sidebar";
 import TopBar from "./components/TopBar";
 import ChatPanel from "./components/ChatPanel";
 import type { Props as ChatPanelProps } from "./components/ChatPanel";
-import AgentsHub from "./components/AgentsHub";
 import SkillsHub from "./components/SkillsHub";
-import WikiHub from "./components/WikiHub";
+import {
+  createWikiFeatureStore,
+  installWikiPageContribution,
+  installWikiFeatureHandlers,
+} from "./features/WikiFeature";
+import type { WikiPageContext } from "./features/WikiFeature";
+import { installAgentsPageContribution } from "./features/AgentsFeature";
+import type { AgentsPageContext } from "./features/AgentsFeature";
+import {
+  installKanbanFeatureHandlers,
+  installSubagentFeatureHandlers,
+  installTeamFeatureHandlers,
+} from "./features/feature-events";
+import { FeatureEventRegistry } from "./lib/feature-event-dispatcher";
+import { UiPageRegistry } from "./lib/ui-feature-registry";
 import TaskBoard from "./components/TaskBoard";
 import WorkspaceModal from "./components/WorkspaceModal";
 import { teamMemberMentionId } from "./components/Composer";
@@ -13,7 +26,12 @@ import { useSessions } from "./hooks/useSessions";
 import { useWorkspaces } from "./hooks/useWorkspaces";
 import { useChat } from "./hooks/useChat";
 import { api, ApiError } from "./api";
-import { externalAgentsAvailable } from "./lib/featureFlags";
+import { externalAgentsAvailable, kanbanFeatureAvailable, teamFeatureAvailable } from "./lib/featureFlags";
+import {
+  canNavigateToSidebarView,
+  resolveSidebarViewAfterCapabilitiesChange,
+  wikiNavigationEnabled,
+} from "./lib/wiki-navigation";
 import type { AppConfig, Attachment, ExternalTeam, Mode, Session, Task, TeamExecutionTier, UiMessage, UserAgentMention, Workspace } from "./types";
 
 const genId = () => `web_${Math.random().toString(36).slice(2, 8)}`;
@@ -158,6 +176,9 @@ export default function App() {
   const [configLoadState, setConfigLoadState] = useState<"loading" | "ready" | "retrying">("loading");
   const [configRetryKey, setConfigRetryKey] = useState(0);
   const externalAgentsEnabled = externalAgentsAvailable(config);
+  const wikiEnabled = wikiNavigationEnabled(config);
+  const teamAvailable = teamFeatureAvailable(config);
+  const kanbanAvailable = kanbanFeatureAvailable(config);
   const [currentWorkspaceId, setCurrentWorkspaceId] = useState("default");
   const [currentSessionId, setCurrentSessionId] = useState<string>(genId);
   const [expanded, setExpanded] = useState<Set<string>>(new Set(["default"]));
@@ -175,9 +196,6 @@ export default function App() {
   const [sessionExternalTeams, setSessionExternalTeams] = useState<Record<string, string>>({});
   const [sessionTeamTiers, setSessionTeamTiers] = useState<Record<string, TeamExecutionTier | undefined>>({});
   const [externalTeams, setExternalTeams] = useState<ExternalTeam[]>([]);
-  const [wikiKbId, setWikiKbId] = useState("default");
-  const [wikiAgentSession, setWikiAgentSession] = useState<WikiAgentSessionBinding | null>(null);
-  const wikiAgentSessionId = resolveWikiAgentSessionId(wikiAgentSession, wikiKbId);
   /** 主对话里点击 [[Wiki 页面名]] 时待打开的页面标题（跳转 Wiki 视图后由 WikiHub 消费）。 */
   const [pendingWikiLinkTitle, setPendingWikiLinkTitle] = useState<string | null>(null);
 
@@ -201,55 +219,35 @@ export default function App() {
     refreshTasks();
   }, [refreshSessions, refreshTasks]);
 
-  const chat = useChat(currentSessionId, onAfterFinal);
+  // Registry 属于 App 宿主；所有安装都在 commit 阶段完成，避免 render 期副作用。
+  const appFeatureEventRegistry = useMemo(() => new FeatureEventRegistry(), []);
+  useLayoutEffect(() => {
+    if (!teamAvailable) return;
+    return installTeamFeatureHandlers(appFeatureEventRegistry);
+  }, [appFeatureEventRegistry, teamAvailable]);
+  useLayoutEffect(() => {
+    if (!kanbanAvailable) return;
+    return installKanbanFeatureHandlers(appFeatureEventRegistry);
+  }, [appFeatureEventRegistry, kanbanAvailable]);
+  useLayoutEffect(() => {
+    if (!wikiEnabled) return;
+    return installWikiFeatureHandlers(appFeatureEventRegistry);
+  }, [appFeatureEventRegistry, wikiEnabled]);
+  useLayoutEffect(() => {
+    return installSubagentFeatureHandlers(appFeatureEventRegistry);
+  }, [appFeatureEventRegistry]);
+
+  const chat = useChat(currentSessionId, onAfterFinal, appFeatureEventRegistry);
   const currentExternalTeam = externalTeams.find((team) => team.id === sessionExternalTeams[currentSessionId]);
   const currentTeamMembers = useMemo(() => teamMembersForBoard(currentExternalTeam), [currentExternalTeam]);
 
   // 主对话里点击 [[Wiki 页面名]]：跳到 Wiki 视图并打开对应页面（WikiHub 挂载后消费）。
   const openWikiLinkFromChat = useCallback((title: string) => {
+    if (!canNavigateToSidebarView("wiki", config)) return;
     setPendingWikiLinkTitle(title);
     setView("wiki");
-  }, []);
+  }, [config]);
 
-  // 进入 Wiki 视图或切换 KB 时，创建/复用该 KB 自己的 Wiki Agent 会话。
-  useEffect(() => {
-    if (view !== "wiki") return;
-    let cancelled = false;
-    setWikiAgentSession(null);
-    api.wikiAgentSession(wikiKbId).then(({ session_id }) => {
-      if (cancelled) return;
-      setWikiAgentSession({ kbId: wikiKbId, sessionId: session_id });
-      chat.loadHistory(session_id);
-    }).catch(() => {});
-    return () => { cancelled = true; };
-    // 会话获取只由视图与 KB 身份驱动。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, wikiKbId]);
-
-  // 新建 Wiki 对话（force_new，与桌面端「新建对话」一致）：旧会话保留在历史列表。
-  const newWikiSession = useCallback(async () => {
-    const { session_id } = await api.wikiAgentSession(wikiKbId, { forceNew: true });
-    setWikiAgentSession({ kbId: wikiKbId, sessionId: session_id });
-    chat.loadHistory(session_id);
-  }, [wikiKbId, chat]);
-
-  // 切换到历史 Wiki 对话。
-  const selectWikiSession = useCallback((sessionId: string) => {
-    if (!sessionId || sessionId === wikiAgentSessionId) return;
-    setWikiAgentSession({ kbId: wikiKbId, sessionId });
-    chat.loadHistory(sessionId);
-  }, [wikiKbId, wikiAgentSessionId, chat]);
-
-  // 删除 Wiki 对话；删的是当前会话则复用后端「取最近、无则新建」语义切到下一条。
-  const deleteWikiSession = useCallback(async (sessionId: string) => {
-    await api.deleteSession(sessionId);
-    chat.clearSession(sessionId);
-    if (wikiAgentSessionId === sessionId) {
-      const { session_id } = await api.wikiAgentSession(wikiKbId);
-      setWikiAgentSession({ kbId: wikiKbId, sessionId: session_id });
-      chat.loadHistory(session_id);
-    }
-  }, [wikiKbId, wikiAgentSessionId, chat]);
 
   useEffect(() => {
     window.localStorage.setItem("crew:board-width", String(boardWidth));
@@ -292,6 +290,16 @@ export default function App() {
   useEffect(() => {
     if (!externalAgentsEnabled && view === "agents") setView("chat");
   }, [externalAgentsEnabled, view]);
+
+  useEffect(() => {
+    const nextView = resolveSidebarViewAfterCapabilitiesChange(view, config);
+    if (nextView !== view) setView(nextView);
+  }, [config, view]);
+
+  // Team 能力关闭时收起看板并让挂载点同步门控，避免残留空看板布局。
+  useEffect(() => {
+    if (!teamAvailable && boardOpen) setBoardOpen(false);
+  }, [teamAvailable, boardOpen]);
 
   const jumpToMessage = useCallback((messageId: string) => {
     const target = document.getElementById(`message-${messageId}`);
@@ -473,13 +481,6 @@ export default function App() {
     setAttachments([]);
   };
 
-  const handleWikiSend = useCallback((text: string, attachments: Attachment[]) => {
-    if (!wikiAgentSessionId) return;
-    chat.send(text, wikiAgentSessionId, mode, currentWorkspaceId, attachments, {
-      wikiKbId,
-    });
-  }, [chat.send, wikiAgentSessionId, mode, currentWorkspaceId, wikiKbId]);
-
   const currentSession = sessions.find((s) => s.session_id === currentSessionId);
   const visibleSessions = useMemo(
     () => externalAgentsEnabled
@@ -531,14 +532,15 @@ export default function App() {
   };
 
   const chatProps: ChatPanelProps = {
+    sessionId: currentSessionId,
     messages: chat.messages,
     busy: chat.busy,
     queueHint: chat.queueHint,
     pendingQueue: chat.pendingQueue,
     config,
     attachments,
-    onSend: handleWikiSend,
-    onAsk: (text) => handleWikiSend(text, []),
+    onSend: (text, sendAttachments) => handleSend(text, sendAttachments),
+    onAsk: (text) => handleSend(text, []),
     onStop: () => chat.stop(currentSessionId),
     onSteer: (text) => chat.steer(currentSessionId, text),
     onRemoveFromQueue: (i) => chat.removeFromQueue(currentSessionId, i),
@@ -564,26 +566,96 @@ export default function App() {
     todos: chat.todos,
   };
 
-  // Wiki Agent 独立会话：chatProps 保持不变，wikiChatProps 仅覆盖 session 相关字段。
-  const wikiSid = wikiAgentSessionId || "";
-  const wikiChatProps: ChatPanelProps = useMemo(() => ({
-    ...chatProps,
-    ...chat.forSession(wikiSid),
-    // wiki 会话上传的附件落入当前知识库（sessionId 为空时后端按 kbId 解析）
-    uploadContext: { sessionId: wikiSid, kbId: wikiKbId },
-    onStop: () => chat.stop(wikiSid),
-    onSteer: (text) => chat.steer(wikiSid, text),
-    onRemoveFromQueue: (i) => chat.removeFromQueue(wikiSid, i),
-    onEditQueueItem: (i, q) => chat.editQueueItem(wikiSid, i, q),
-    onSendQueueItemNow: (id) => chat.sendQueueItemNow(wikiSid, id),
-    onEnterPlan: () => chat.enterPlan(wikiSid),
-    onExitPlan: () => chat.exitPlan(wikiSid),
-    onApprovePlan: () => chat.approvePlan(wikiSid, mode, currentWorkspaceId),
-    onRejectPlan: () => chat.rejectPlan(wikiSid),
-    onRejectAndExitPlan: () => chat.rejectAndExitPlan(wikiSid),
-    onAnswerFollowup: (questionId, answers) => chat.answerFollowup(wikiSid, questionId, answers),
-    onDismissFollowup: () => chat.dismissFollowup(wikiSid),
-  }), [chatProps, wikiSid, wikiKbId, mode, currentWorkspaceId, chat]);
+  const wikiFeatureStore = useRef(createWikiFeatureStore()).current;
+  const wikiPages = useMemo(() => {
+    const registry = new UiPageRegistry<string, WikiPageContext, ReactNode>();
+    installWikiPageContribution(registry);
+    return registry;
+  }, []);
+  const wikiPage = wikiPages.project(view, { wikiEnabled, props: {
+    baseChatProps: chatProps, chat, mode, workspaceId: currentWorkspaceId,
+    currentAgentLabel, pendingWikiLinkTitle, onPendingWikiLinkHandled: () => setPendingWikiLinkTitle(null),
+    store: wikiFeatureStore,
+  }});
+
+  const agentsPages = useMemo(() => {
+    const registry = new UiPageRegistry<string, AgentsPageContext, ReactNode>();
+    installAgentsPageContribution(registry);
+    return registry;
+  }, []);
+  const agentsPage = agentsPages.project("agents", {
+    agentsEnabled: externalAgentsEnabled,
+    props: {
+      onAssignAgent: async (agent) => {
+        const sid = genId();
+        await api.setSessionAgentConfig(
+          sid,
+          {
+            executor: "external",
+            external: { external_agent_id: agent.id },
+          },
+          {
+            workspace_id: currentWorkspaceId,
+            title: "新会话",
+          },
+        );
+        setCurrentSessionId(sid);
+        setMode("agent");
+        setView("chat");
+        chat.clearSession(sid);
+        setTasks([]);
+        await refreshSessions();
+      },
+      onAssignTeam: async (team) => {
+        const sid = genId();
+        await api.setSessionAgentConfig(
+          sid,
+          {
+            executor: "team",
+            team: { external_team_id: team.id },
+          },
+          {
+            workspace_id: currentWorkspaceId,
+            title: `${team.name} · 团队任务`,
+          },
+        );
+        setSessionExternalTeams((prev) => ({ ...prev, [sid]: team.id }));
+        setSessionTeamTiers((prev) => ({ ...prev, [sid]: "auto" }));
+        setExternalTeams((prev) => {
+          const rest = prev.filter((item) => item.id !== team.id);
+          return [team, ...rest];
+        });
+        setCurrentSessionId(sid);
+        setMode("team");
+        setBoardOpen(true);
+        setView("chat");
+        chat.clearSession(sid);
+        setTasks([]);
+        await refreshSessions();
+      },
+      onStartLeaderChat: async (agent) => {
+        const sid = genId();
+        const isBuiltin = agent.id === "crew::builtin";
+        await api.setSessionAgentConfig(
+          sid,
+          isBuiltin
+            ? { executor: "builtin" }
+            : { executor: "external", external: { external_agent_id: agent.id } },
+          {
+            workspace_id: currentWorkspaceId,
+            title: `与 ${agent.name} 对话`,
+          },
+        );
+        setCurrentSessionId(sid);
+        setMode("agent");
+        setView("chat");
+        setBoardOpen(false);
+        chat.clearSession(sid);
+        setTasks([]);
+        await refreshSessions();
+      },
+    },
+  });
 
   return (
     <div
@@ -598,8 +670,10 @@ export default function App() {
         expanded={expanded}
         view={view}
         externalAgentsEnabled={externalAgentsEnabled}
+        wikiEnabled={wikiEnabled}
         onViewChange={(nextView) => {
           if (nextView === "agents" && !externalAgentsEnabled) return;
+          if (!canNavigateToSidebarView(nextView, config)) return;
           setView(nextView);
         }}
         onToggleExpand={toggleExpand}
@@ -623,90 +697,10 @@ export default function App() {
         )}
         {view === "skills" ? (
           <SkillsHub />
-        ) : view === "agents" && externalAgentsEnabled ? (
-          <AgentsHub
-            onAssignAgent={async (agent) => {
-              const sid = genId();
-              await api.setSessionAgentConfig(
-                sid,
-                {
-                  executor: "external",
-                  external: { external_agent_id: agent.id },
-                },
-                {
-                  workspace_id: currentWorkspaceId,
-                  title: "新会话",
-                },
-              );
-              setCurrentSessionId(sid);
-              setMode("agent");
-              setView("chat");
-              chat.clearSession(sid);
-              setTasks([]);
-              await refreshSessions();
-            }}
-            onAssignTeam={async (team) => {
-              const sid = genId();
-              await api.setSessionAgentConfig(
-                sid,
-                {
-                  executor: "team",
-                  team: { external_team_id: team.id },
-                },
-                {
-                  workspace_id: currentWorkspaceId,
-                  title: `${team.name} · 团队任务`,
-                },
-              );
-              setSessionExternalTeams((prev) => ({ ...prev, [sid]: team.id }));
-              setSessionTeamTiers((prev) => ({ ...prev, [sid]: "auto" }));
-              setExternalTeams((prev) => {
-                const rest = prev.filter((item) => item.id !== team.id);
-                return [team, ...rest];
-              });
-              setCurrentSessionId(sid);
-              setMode("team");
-              setBoardOpen(true);
-              setView("chat");
-              chat.clearSession(sid);
-              setTasks([]);
-              await refreshSessions();
-            }}
-            onStartLeaderChat={async (agent) => {
-              const sid = genId();
-              const isBuiltin = agent.id === "crew::builtin";
-              await api.setSessionAgentConfig(
-                sid,
-                isBuiltin
-                  ? { executor: "builtin" }
-                  : { executor: "external", external: { external_agent_id: agent.id } },
-                {
-                  workspace_id: currentWorkspaceId,
-                  title: `与 ${agent.name} 对话`,
-                },
-              );
-              setCurrentSessionId(sid);
-              setMode("agent");
-              setView("chat");
-              setBoardOpen(false);
-              chat.clearSession(sid);
-              setTasks([]);
-              await refreshSessions();
-            }}
-          />
-        ) : view === "wiki" ? (
-          <WikiHub
-            chatProps={wikiChatProps}
-            kbId={wikiKbId}
-            onKbChange={setWikiKbId}
-            sessionId={wikiAgentSessionId || ""}
-            wikiProgress={chat.wikiProgress}
-            onNewSession={newWikiSession}
-            onSelectSession={selectWikiSession}
-            onDeleteSession={deleteWikiSession}
-            pendingWikiLinkTitle={pendingWikiLinkTitle}
-            onPendingWikiLinkHandled={() => setPendingWikiLinkTitle(null)}
-          />
+        ) : agentsPage ? (
+          agentsPage
+        ) : wikiPage ? (
+          wikiPage
         ) : (
           <>
             {(chat.messages.length > 0 || chat.busy || isCurrentTeamSession) && (
@@ -725,6 +719,7 @@ export default function App() {
               />
             )}
             <ChatPanel
+              sessionId={currentSessionId}
               messages={chat.messages}
               busy={chat.busy}
               compactingContext={chat.compactingContext}
@@ -772,7 +767,7 @@ export default function App() {
           </>
         )}
       </main>
-      {boardOpen && (
+      {boardOpen && teamAvailable && (
         <TaskBoard
           sessionId={currentSessionId}
           tasks={tasks}

@@ -94,7 +94,7 @@ class NotificationCenterService(NotificationCenter):
     def mark_all_read(self, owner_account_id: str) -> int:
         return self._store.mark_all_read(owner_account_id)
 
-    def mark_read_by_payload(self, source: str, key: str, owner_account_id: str = "") -> int:
+    def mark_read_by_payload(self, source: str, key: str, owner_account_id: str) -> int:
         return self._store.mark_read_by_payload(source, key, owner_account_id)
 
     def clear(self, owner_account_id: str) -> int:

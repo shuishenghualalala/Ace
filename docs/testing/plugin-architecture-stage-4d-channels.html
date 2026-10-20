@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 4D-1 · Channels 生命周期测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.note{font-weight:700;color:#8a6116}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 4D-1 · Channels Feature Foundation</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-09 · 开发：独立子 Agent（隔离 worktree） · 审查与收口：主 Agent · 提交：b57f35c</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li>新建 <code>crew/channels/</code> 包，channel_manager / delivery / platform_registry / channel_sessions / channel_config / channel_presets / broadcast 七个模块自 gateway 迁入，全仓 import 指向新位置。</li>
+    <li><code>product.channels</code> Generation 统一拥有 ChannelManager、DeliveryRouter、平台渠道注册、投递 sender 接线与 <code>new_conversation</code> 工具注册，发布 <code>channels</code> Service；restart 更新、drain 停用，停用完成全部渠道 stop 后才返回。</li>
+    <li>Channel 契约显式化：核心 <code>Channel</code> ABC 扩展默认方法，channels 包内以 Protocol 作为消费者边界，核心不反向依赖产品包。</li>
+    <li>Lifespan 与 LogoutCoordinator 的 Owner 粒度启停改经 channels Service 同代 Lease；宿主 compat 属性在 Feature 非激活态 fail-closed。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Channels 生命周期契约（tests/test_channels_feature_lifecycle.py，6 项：激活发布 Service、停用 stop_all 后返回、restart 更新换代、消费方 fail-closed、生产装配来源核验等）</td><td class="ok">6 passed</td></tr>
+      <tr><td>渠道组合回归（channel_sessions / broadcast / delivery_filter / gateway delivery / logout_coordinator / account_isolation / auth_contract / background_tasks / channel_config_api / platform_feishu / platform_weixin / gateway_dispatcher）</td><td class="ok">217 passed · 5 skipped；5 项失败为微信 Adapter 缺少 aiohttp/cryptography 的既有环境失败，与基线一致，无新增失败</td></tr>
+      <tr><td>主仓收口复验（test_channels_feature_lifecycle + logout_coordinator + channel_sessions + broadcast）</td><td class="ok">34 passed</td></tr>
+      <tr><td>Ruff、compileall、Import Linter</td><td class="ok">全部通过；6 contracts kept，0 broken</td></tr>
+    </tbody>
+  </table>
+  <p>既有测试仅两处适配：auth_contract 改经 <code>crew.channel_manager</code> 属性打桩；gateway_dispatcher 状态断言补充 Channel ABC 新增默认 <code>status_detail()</code> 返回的空 dict。真实平台连接未在本机运行，渠道实例以模拟覆盖。</p>
+
+  <h2>生命周期核验要点</h2>
+  <ul>
+    <li>install 先登记 <code>manager.stop_all()</code> RESOURCE 相 disposer，再装配贡献；host 绑定在 CONTRIBUTION 相清除，消费者立即 fail-closed。</li>
+    <li>LogoutCoordinator 经 <code>channels_service_getter</code> 获取 (service, lease)，操作结束即释放；draining 期间获取失败返回 None，不再启动或停止任何渠道。</li>
+    <li><code>crew.channel_manager</code> / <code>crew.delivery_router</code> 为动态属性：显式注入优先，否则解析当前代 Channels Service；Feature 非 ACTIVE 时返回 None。</li>
+  </ul>
+
+  <h2>遗留边界（4D-2）</h2>
+  <ul>
+    <li>routers/channels.py 闭包仍持有候选实例，Feature restart 后需改为请求期动态解析或 Route Lease。</li>
+    <li>sender 注册分散在装配、路由与 Adapter 多处，待统一收拢到 Channels Service 消费侧。</li>
+    <li>飞书 WS 守护线程热停、微信 fire-and-forget 任务跟踪、平台插件 <code>stop_policy</code> 重估，均待 4D-2 处理。</li>
+    <li>channels 包对 gateway 的 hooks/outbound/session_context 仍有少量依赖，后续评估是否下沉。</li>
+  </ul>
+
+  <div class="nav"><a href="../backend/adr/0030-channels-feature-lifecycle.html">ADR-0030</a> · <a href="../backend/modules/gateway.html">Gateway 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

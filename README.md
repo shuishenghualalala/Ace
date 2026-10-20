@@ -147,7 +147,7 @@ cd Ace
 # 安装 Python 依赖
 uv venv .venv --python 3.11
 source .venv/bin/activate
-uv pip install -e ".[dev,wiki]"
+uv sync --extra dev --extra wiki
 
 # 创建本地配置和环境变量文件（两者均已被 Git 忽略）
 cp config/config.yaml.example config/config.yaml
@@ -168,7 +168,7 @@ cd Ace
 # 安装 Python 依赖
 uv venv .venv --python 3.11
 .\.venv\Scripts\Activate.ps1
-uv pip install -e ".[dev,wiki]"
+uv sync --extra dev --extra wiki
 
 # 创建本地配置和环境变量文件（两者均已被 Git 忽略）
 Copy-Item config\config.yaml.example config\config.yaml
@@ -290,7 +290,6 @@ Skill 就是船员的职业技能包，装上就会，卸了就忘。仓库随�
 | `crew-guide` | `crew/skills/agent-guide/` | Crew 使用手册与本地 Skill 安装指引 |
 | `crew-wiki-curator` | `crew/skills/crew-wiki-curator/` | Wiki Agent 的入库、溯源、冲突处理与质量治理规范 |
 | `cua-driver` | `crew/skills/cua-driver/` | 原生桌面应用自动化的观察、操作与验证规范 |
-| `image-understanding` | `crew/skills/image-understanding/` | 通过用户配置的视觉模型理解图片，并支持 LLM Wiki 图片解析 |
 | `video-understanding` | `crew/skills/video-understanding/` | 通过用户配置的外部服务理解视频，并支持 LLM Wiki 视频解析 |
 | `browser-use` | `plugins/browser/skills/` | 应用内浏览器的导航、读取和交互工作流 |
 
@@ -312,9 +311,11 @@ Skill 就是船员的职业技能包，装上就会，卸了就忘。仓库随�
 | `crew/core` | 类型、消息信封与核心接口 |
 | `crew/providers` | OpenAI 兼容与 Anthropic 模型适配 |
 | `crew/agent` | Agent 对话循环、Plan、压缩与子智能体 |
-| `crew/agent/external` | 外部 Runtime、Agent 和 Team 适配 |
-| `crew/team` | 多智能体 Team 与协作编排 |
-| `crew/dynamickanban` | 动态看板和任务图编排 |
+| `crew.agent.external`（成员包 `packages/crew-external-agents`） | 外部 Runtime、Agent 和 Team 适配 |
+| `crew.team`（成员包 `packages/crew-team`） | 多智能体 Team 与协作编排 |
+| `crew.dynamickanban`（成员包 `packages/crew-dynamickanban`） | 动态看板和任务图编排 |
+| `crew.channels`（成员包 `packages/crew-channels`） | 消息渠道适配、投递与会话路由 |
+| `crew.work`（成员包 `packages/crew-work`） | 办公助手业务域（事项、简报、偏好与知识） |
 | `crew/evolution` | 实验性轨迹提取、Skill 优化与生成 |
 | `crew/browser` | 应用内浏览器的生命周期、控制和安全边界 |
 | `crew/memory` | 本地持久记忆 |
@@ -322,7 +323,7 @@ Skill 就是船员的职业技能包，装上就会，卸了就忘。仓库随�
 | `crew/state` | 配置、会话、工作空间与日志 |
 | `crew/gateway` | FastAPI REST / WebSocket Gateway |
 | `crew/tasks` / `crew/cron` | 后台任务与定时任务 |
-| `crew/wiki` | 本地知识库 |
+| `crew.wiki`（成员包 `packages/crew-wiki`） | 本地知识库 |
 | `crew/skills` / `plugins` | 技能与插件扩展 |
 | `desktop` | Electron 桌面端 |
 | `web` | Web 客户端 |

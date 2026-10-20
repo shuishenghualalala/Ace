@@ -107,7 +107,7 @@
   box-sizing: border-box;
   min-width: 16px;
   height: 16px;
-  padding: 0 4px;
+  padding: 0 var(--mw-space-1);
   border-radius: var(--mw-radius-full);
   background: var(--mw-status-danger);
   color: var(--mw-white);

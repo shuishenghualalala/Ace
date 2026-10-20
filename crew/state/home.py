@@ -18,6 +18,7 @@ CREW_TASK_WORKSPACE_ROOT 覆盖。
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -369,6 +370,20 @@ def get_crew_home() -> Path:
     return ROOT / DEFAULT_HOME_DIRNAME
 
 
+def resolve_crew_home_path(raw_path: str | Path) -> str:
+    """把 Feature 库相对路径归一到 crew_home 下（ADR-0038 db-per-feature）。
+
+    load_config 已对 ``runtime.<feature>_db_path`` 做同样归一；这里兜底覆盖
+    直接构造 Config 的嵌入宿主/测试，避免相对默认值落到进程 CWD 造成跨实例
+    共享同一数据文件。cron.db / work.db / wiki_learning.db 等 Feature 独立库
+    共用此归一（core 装配层与目录插件装配点各自在消费侧调用）。
+    """
+    path = Path(raw_path).expanduser()
+    if path.is_absolute():
+        return str(path)
+    return str(get_crew_home() / path)
+
+
 def get_owner_runtime_home(
     owner_account_id: str | None = None,
     *,
@@ -393,6 +408,11 @@ def get_owner_runtime_home(
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def get_upload_dir(owner_account_id: str | None = None) -> Path:
+    """返回 owner 上传附件存储根目录（延迟求值，确保 CREW_HOME 已就绪）。"""
+    return get_owner_runtime_home(owner_account_id) / "uploads"
 
 
 def runtime_env_overrides(
@@ -615,6 +635,26 @@ def refresh_owner_runtime_env(
             env_cache_total,
         )
         return return_values
+
+
+async def refresh_owner_runtime_env_async(
+    owner_account_id: str | None = None,
+    *,
+    env_file: str | Path | None = None,
+    load_env_files: bool = True,
+) -> dict[str, str]:
+    """异步入口：把 :func:`refresh_owner_runtime_env` 放到工作线程执行。
+
+    事件循环热路径（每轮 envelope 处理）使用本函数；同步实现内部持
+    ``_ENV_LOCK``（threading.RLock）且读写文件/环境，线程内执行安全。
+    行为与同步入口完全一致。
+    """
+    return await asyncio.to_thread(
+        refresh_owner_runtime_env,
+        owner_account_id,
+        env_file=env_file,
+        load_env_files=load_env_files,
+    )
 
 
 def export_crew_runtime_env(

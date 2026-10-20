@@ -20,6 +20,16 @@ const api = {
   windowIsMaximized: () => ipcRenderer.invoke('window:isMaximized'),
   appQuit: () => ipcRenderer.invoke('app:quit'),
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
+  getLaunchMode: () => ipcRenderer.invoke('app:get-launch-mode') as Promise<{
+    isDevLaunch: boolean;
+    mode: 'dev' | 'account';
+  }>,
+  saveTracingExport: (exportId: string) =>
+    ipcRenderer.invoke('tracing:save-export', { exportId }) as Promise<{
+      ok: boolean;
+      canceled?: boolean;
+      path?: string;
+    }>,
   runtimePlatform: process.platform,
   onMaximizedChanged: (cb: (max: boolean) => void) => {
     ipcRenderer.on('window:maximized-changed', (_e, max) => cb(max));
@@ -131,6 +141,12 @@ const api = {
     baseUrl?: string;
     logPath?: string;
     components?: Record<string, { status: string; message?: string }>;
+    processState?: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
+    healthState?: 'unknown' | 'healthy' | 'degraded' | 'stalled';
+    transportState?: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
+    loopLagMs?: number;
+    failureKind?: 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
+    since?: number;
   }> => ipcRenderer.invoke('gateway:get-status'),
   retryGateway: () => ipcRenderer.invoke('gateway:retry'),
   gatewayFetch: (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) =>
@@ -314,6 +330,17 @@ const api = {
     return () => ipcRenderer.removeListener('main:uncaught-error', listener);
   },
 
+  // 渲染层错误上报（window.onerror / unhandledrejection / 渲染隔离兜底）：
+  // 单向 send，主进程落 logs/renderer-errors.log（5MB 轮转保留 2 份）。
+  reportRendererError: (report: {
+    source: string;
+    message: string;
+    stack?: string;
+    context?: Record<string, unknown>;
+  }) => {
+    ipcRenderer.send('renderer:report-error', report);
+  },
+
   // 后端服务健康状态（主进程周期探测 /api/health）：
   // connected=true 表示 Gateway 已就绪可用，false 表示未连接/启动中。
   // logPath 为托管 gateway 启动日志路径，供「查看日志」诊断冷启动卡顿。
@@ -322,12 +349,24 @@ const api = {
     baseUrl?: string;
     logPath?: string;
     components?: Record<string, { status: string; message?: string }>;
+    processState?: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
+    healthState?: 'unknown' | 'healthy' | 'degraded' | 'stalled';
+    transportState?: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
+    loopLagMs?: number;
+    failureKind?: 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
+    since?: number;
   }) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, status: {
       connected: boolean;
       baseUrl?: string;
       logPath?: string;
       components?: Record<string, { status: string; message?: string }>;
+      processState?: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
+      healthState?: 'unknown' | 'healthy' | 'degraded' | 'stalled';
+      transportState?: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
+      loopLagMs?: number;
+      failureKind?: 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
+      since?: number;
     }) => cb(status);
     ipcRenderer.on('backend:status', listener);
     return () => ipcRenderer.removeListener('backend:status', listener);

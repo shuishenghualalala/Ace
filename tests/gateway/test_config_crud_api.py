@@ -105,6 +105,34 @@ def api(tmp_path: Path):
     os.environ.pop("CREW_HOME", None)
 
 
+# ----------------------- GET /api/config/vendors -----------------------
+
+
+@pytest.mark.asyncio
+async def test_config_vendors_returns_public_catalog(api, auth_headers):
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.get("/api/config/vendors")
+    assert resp.status_code == 200, resp.text
+    vendors = resp.json()["vendors"]
+    assert len(vendors) >= 8
+    by_id = {v["id"]: v for v in vendors}
+    assert {"deepseek", "zai", "moonshotai", "kimi-coding", "minimax"} <= set(by_id)
+    deepseek = by_id["deepseek"]
+    assert deepseek["protocol"] == "openai"
+    assert deepseek["base_url"] == "https://api.deepseek.com"
+    model_ids = {m["id"] for m in deepseek["models"]}
+    assert "deepseek-v4-flash" in model_ids
+    first_model = deepseek["models"][0]
+    assert set(first_model) == {"id", "context_window", "max_tokens", "reasoning", "vision"}
+    # Anthropic 协议厂商
+    assert by_id["kimi-coding"]["protocol"] == "anthropic"
+    # 公开视图不含 compat 内部开关与密钥
+    for vendor in vendors:
+        assert "compat" not in vendor
+        assert "api_key" not in vendor
+
+
 # ----------------------- POST /api/config/models -----------------------
 
 

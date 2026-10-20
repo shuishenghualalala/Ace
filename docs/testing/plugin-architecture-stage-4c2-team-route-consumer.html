@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 4C-2 · Team Route/CLI 生命周期化测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.note{font-weight:700;color:#8a6116}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 4C-2 · Team Route/CLI 生命周期化</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-10 · 开发：独立子 Agent（隔离 worktree） · 审查与收口：主 Agent · 提交：970dddf</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li>CLI 不再 import <code>gateway.routers.runtimes</code> 私有函数，投影逻辑下沉到 <code>crew/team/payloads.py</code>。</li>
+    <li>Gateway 模块级 <code>crew.team.*</code> import 改为函数体内惰性 import，缩小静态依赖面。</li>
+    <li>sessions.py / interaction_bridge.py 的 TeamManager 散点统一为 <code>crew.team</code> 动态属性访问，Team 未激活时安全降级。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Team Route/CLI 消费路径（tests/test_team_route_consumer.py，新增）</td><td class="ok">覆盖 team=None 降级、CLI 逆向依赖消除、payloads 导出正确性</td></tr>
+      <tr><td>组合回归（test_team_route_consumer + runtimes_register + gateway_api + team_tasks + team_feature_lifecycle + core_features）</td><td class="ok">309 passed · 1 skipped</td></tr>
+      <tr><td>Ruff、compileall、Import Linter</td><td class="ok">全部通过；6 contracts kept, 0 broken</td></tr>
+    </tbody>
+  </table>
+  <p>基线既有失败：<code>tests/gateway/test_runtimes_suggest.py</code> 22 例 401（fixture 未配置 gateway admin/dev_mode），与本切片无关，修改前后失败数量一致。</p>
+
+  <div class="nav"><a href="../backend/adr/0032-team-route-consumer-lifecycle.html">ADR-0032</a> · <a href="../backend/modules/team.html">Team 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

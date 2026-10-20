@@ -61,10 +61,10 @@ function positionPermissionCard(root: HTMLElement): void {
     viewportHeight - rect.top + PERMISSION_CARD_GAP,
   );
 
-  root.style.setProperty('--permission-card-left', `${left}px`);
-  root.style.setProperty('--permission-card-right', 'auto');
-  root.style.setProperty('--permission-card-width', `${width}px`);
-  root.style.setProperty('--permission-card-bottom', `${bottom}px`);
+  root.style.setProperty('--mw-permission-card-left', `${left}px`);
+  root.style.setProperty('--mw-permission-card-right', 'auto');
+  root.style.setProperty('--mw-permission-card-width', `${width}px`);
+  root.style.setProperty('--mw-permission-card-bottom', `${bottom}px`);
 }
 
 function schedulePermissionCardSync(): void {

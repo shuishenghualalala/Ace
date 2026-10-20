@@ -99,6 +99,7 @@ git push origin v1.1.0</pre>
     <li>当前产物未做 Apple 签名与公证，macOS 首次打开需要右键打开；Windows 侧未做 Authenticode 签名时 SmartScreen 可能拦截。</li>
     <li>每个构建任务都在目标原生平台 runner 上执行，PyInstaller / Electron 不做交叉编译。</li>
     <li>Linux 构建依赖 Docker，Windows 构建依赖 Inno Setup 6，workflow 已自动安装。</li>
+    <li>内嵌 Python 的办公/绘图依赖（pandas / matplotlib 及其 numpy 依赖）是技能脚本的运行时必需，<code>pack_exe.ps1</code> 的 staging 清理列表（sympy/onnxruntime/scipy）不得重新纳入 pandas/numpy——否则打包态 <code>import pandas / matplotlib</code> 直接 ImportError（2026-09-14 修复并加注释防护；Windows 打包态实际 import 实测结果待回填）。</li>
   </ul>
 
   <div class="nav">相关文件：deb-package/pack_mac.sh · deb-package/pack_deb.ps1 · deb-package/pack_exe.ps1 · Dockerfile.pack · .github/workflows/release-desktop.yml</div>

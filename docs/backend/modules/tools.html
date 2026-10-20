@@ -52,7 +52,7 @@
   <table>
     <thead><tr><th>工具</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td><code>file_read</code></td><td>读取文本文件，支持 offset/limit 分页、保留行尾符、自动处理 UTF-8 BOM。</td></tr>
+      <tr><td><code>file_read</code></td><td>读取 UTF-8 文本文件，返回带行号内容（「行号: 内容」）；默认/最多 2000 行，offset 负数尾读；≥10 MiB 流式读取；头部嗅探拒绝二进制（引导 vision_analyze / wiki）；UTF-16 自动转码。</td></tr>
       <tr><td><code>file_write</code></td><td>写入文件（覆盖或追加），自动创建父目录；保留原文件行尾符与 BOM；拒绝敏感系统路径。</td></tr>
       <tr><td><code>file_delete</code></td><td>删除明确指定的文件，不递归删除目录；工作区外路径需精确授权。</td></tr>
       <tr><td><code>patch</code></td><td>对文本文件执行替换补丁（old → new），保留行尾符与 BOM。</td></tr>
@@ -74,8 +74,8 @@
   <table>
     <thead><tr><th>工具</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td><code>web_search</code></td><td>使用公开搜索页面做轻量网页搜索，返回标题与链接。</td></tr>
-      <tr><td><code>web_extract</code></td><td>抓取 URL 并提取标题与正文文本。</td></tr>
+      <tr><td><code>web_search</code></td><td>Exa 托管 MCP 语义搜索（匿名免费、无需 API key，可选 <code>EXA_API_KEY</code> 提额），按 provider 链降级（exa → searxng），返回标题/链接/摘要。</td></tr>
+      <tr><td><code>web_extract</code></td><td>抓取 URL 转 Markdown。正文内联上限 40k 字符，超限全文落盘到 <code>{CREW_HOME}/tool-results/</code> 并在结果中给 <code>full_text_path</code>（file_read 按需读取），内联部分保头尾中间截断；同 URL 结果进程内缓存 15 分钟（50MB LRU），授权之后才查缓存。结果带 <code>cached</code> 标志。</td></tr>
       <tr><td><code>vision_analyze</code></td><td>分析本地图片的基础元信息（PNG/JPEG 尺寸等）。</td></tr>
     </tbody>
   </table>
@@ -185,7 +185,7 @@
   <table>
     <thead><tr><th>工具</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td><code>ask_followup_question</code></td><td>当需求高度不确定时，向前端弹出单选/多选/文本输入交互框澄清。</td></tr>
+      <tr><td><code>ask_followup_question</code></td><td>当需求高度不确定时，向前端弹出单选/多选/文本输入交互框澄清；等待有界（默认 <code>runtime.interaction_timeout_seconds</code>=3600s，0=默认不限），超时按「用户未回答」收尾返回空答案。</td></tr>
       <tr><td><code>memory</code></td><td>读写轻量持久记忆。</td></tr>
     </tbody>
   </table>
@@ -223,7 +223,7 @@
       <tr><td>内置工具集</td><td>文件、终端、搜索、浏览器、子 Agent、Team、Wiki、Cron、交互、记忆、技能、Blueprint 等 70+ 工具</td><td>已落地</td></tr>
       <tr><td>执行流水线</td><td><code>validate_arguments</code>（JSON Schema）→ <code>check_permission</code>（allow/deny/ask）→ <code>truncate_or_persist</code>（大结果落盘）</td><td>已落地</td></tr>
       <tr><td>渐进式工具披露</td><td><code>tool_search</code>：核心工具常驻，延迟工具按需加载，token 预算控制</td><td>已落地</td></tr>
-      <tr><td>安全审批</td><td><code>security_guard</code>：文件/网络/外部运行时授权，需审批时阻塞等待 owner 决策</td><td>已落地</td></tr>
+      <tr><td>安全审批</td><td><code>security_guard</code>：文件/网络/外部运行时授权，需审批时阻塞等待 owner 决策；等待与 interrupt 竞争（interrupt 先到按拒绝结算），默认有界超时（<code>runtime.interaction_timeout_seconds</code>）。</td><td>已落地</td></tr>
       <tr><td>敏感脱敏</td><td><code>redact</code>：日志与工具输出的密钥 / URL / 凭据脱敏</td><td>已落地</td></tr>
       <tr><td>输出处理</td><td><code>output_filters</code>：去 ANSI、头尾截断、阈值可配</td><td>已落地</td></tr>
       <tr><td>后台进程</td><td><code>process_registry</code>：terminal background 进程的跟踪、输出缓冲、回收</td><td>已落地</td></tr>
@@ -253,6 +253,7 @@
       <tr><td><code>managed_tools.py</code></td><td>托管 ripgrep：下载 / 校验 / 安装 pin 版本</td></tr>
       <tr><td><code>mcp_client.py</code></td><td>MCP Client：连接外部 server，注册其 tools</td></tr>
       <tr><td><code>web_tools.py</code></td><td><code>web_search</code> / <code>web_extract</code> / <code>vision_analyze</code></td></tr>
+      <tr><td><code>web_fetch_cache.py</code></td><td><code>web_extract</code> 抓取结果进程内缓存：TTL 15min + 字节/条数双上限 LRU（线程安全）</td></tr>
       <tr><td><code>site_tools.py</code></td><td><code>publish_site</code>：把 Workspace 中的 App 发布到 Desktop 灵感</td></tr>
       <tr><td><code>skills_tools.py</code></td><td>技能工具：skills_list / skill_view / skill_package_open / skills_repair / skills_audit</td></tr>
       <tr><td><code>memory_tools.py</code></td><td><code>memory</code> 记忆工具</td></tr>
@@ -301,9 +302,24 @@ truncate_or_persist(...)                                         # Stage 6 结�
 read_verified_bytes(path, *, max_bytes=None) -> bytes  # 读前 metadata 预检 + take(max+1) 复查
 snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，拒绝多硬链接写入</code></pre>
 
+  <h2>交互等待语义：追问与权限确认（2026-09-17）</h2>
+  <p><code>wait_for_answer</code> 的等待默认有界：调用方未显式传 <code>timeout</code> 时使用装配层注入的默认上限 <code>runtime.interaction_timeout_seconds</code>（默认 3600s，配置 0 为默认不限）——用户一直不选，到点按「用户未回答」收尾（返回空答案），回合不再无限挂起。显式传 timeout（含 None/0 维持不限语义）始终优先于默认值。<code>ask_followup_question</code> 与权限确认共用这套语义。</p>
+  <p>权限确认等待（<code>ToolRunner._wait_permission_answer</code>）与 interrupt 竞争（FIRST_COMPLETED）：interrupt 先到即结算挂起的追问（<code>cancel_followup</code> 回灌取消标记、清理 waiter 注册），返回空答案——上层按<strong>拒绝</strong>处理（安全默认），回合随后走 interrupt 收尾；回答或超时先到则 interrupt 等待 task 立即取消，绝不残留永久挂起的 task。单工具的真实执行段另有看门狗与中断语义，见 agent 模块文档。</p>
+
+  <h2>file_read 读取引擎（2026-09-18）</h2>
+  <p><code>file_read</code> 由「整读后截断」改为完整的读取引擎（窗口语义对齐 dsh tool-fs 的 <code>read</code>，尾读与编码策略对齐 kimi agent-core 的 <code>Read</code>），核心在 <code>crew/tools/file_utils.py</code>，<code>builtin.py</code> 只做授权与编排：</p>
+  <ul>
+    <li><strong>窗口语义</strong>：默认返回前 2000 行（同时是上限，<code>tools.file.read_max_lines</code> 可调）；输出为「<code>行号: 内容</code>」（文件绝对行号），正文后附续读 footer（如「(已显示第 1-2000 行，共 54321 行。用 offset=2001 继续读取。)」）；单行超过 2000 字符中段截断并在 hint 标注行号；输出预算沿用 <code>tools.file.read_max_chars</code>（默认 100000），超限按<strong>整行取舍</strong>而非硬切字符串；offset 越界报错（空文件 offset=1 除外）。</li>
+    <li><strong>尾读</strong>：<code>offset</code> 为负数表示从文件末尾读取（如 <code>-100</code> 读最后 100 行，|offset| ≤ 2000）；<code>limit</code> 从尾窗口<strong>头部</strong>截取；输出预算超限时从窗口头部丢行，保留最接近末尾的内容。</li>
+    <li><strong>流式路由</strong>：stat 一次拿大小；&lt;10 MiB 整读，≥10 MiB 走身份校验句柄流式读取（<code>open_verified_read</code>，增量严格 UTF-8 解码）；行缓冲封顶 2001 字符，巨型单行内存恒定；total_lines 始终为全文件精确值。读取期间身份变化（size/mtime）仍按冲突拒绝。</li>
+    <li><strong>内容嗅探</strong>：头部 8192 字节判定——BOM（UTF-32/16/8）→ 魔数表（PNG/JPEG/GIF/ZIP/OLE/ELF/PDF 等）→ 无 BOM UTF-16 奇偶 NUL 启发式 → NUL 存在性 → 控制字符比例（&gt;30%，避免误伤 ANSI 日志）。扩展名黑名单保留为快速路径。二进制从「温和跳过」改为 <code>ToolError</code>，消息按类型引导：图片→<code>vision_analyze</code>，文档→<code>wiki_capture_attachment</code> / skills。</li>
+    <li><strong>编码策略</strong>：UTF-8 严格解码，失败显式报错并提示先用 <code>iconv</code> 转换（替代旧的静默替换）；UTF-16（BOM 与无 BOM）≤10 MiB 自动转码显示，hint 注明编码并提示编辑前先转 UTF-8；超限报错。</li>
+    <li><strong>写保护不变</strong>：成功读取后记录 <strong>stat-only</strong> <code>FileVersion</code>（观察只消费 device/inode/size/mtime_ns 四元组）；写入侧 stale 校验与 digest 复核仍在写入时刻整读完成，流式化不影响 CAS 语义。</li>
+    <li><strong>压缩恢复</strong>：<code>post_compact._reread_file_for_restore</code> 改用共享的 <code>slice_text_window</code>（宽容归一，负 offset 尾读语义与工具一致），恢复视图不再把负 offset 钳成 1。</li>
+  </ul>
+
   <h2>6. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li><code>file_read</code> 对 ≤512 MiB 的大文本文件仍是「整读后截断」：读整个文件只为返回 <code>read_max_chars</code>（默认 100000 字符），存在内存浪费；后续可改为按 offset/limit 流式读取。</li>
     <li><code>file_write</code> 覆盖写旧文件时 <code>snapshot_file</code> 整读旧文件（用于 BOM/行尾保留与写前校验）；append 场景下为必要读取，普通覆盖场景可优化为只读头部。</li>
     <li>各工具 schema 的参数枚举与必填校验主要依赖执行期业务校验，schema 层未做严格枚举约束。</li>
   </ul>
@@ -315,6 +331,7 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
     <li>延迟加载工具：schema 加 <code>_crew_should_defer=true</code>，由 <code>tool_search</code> 按需披露。</li>
     <li>外部工具：通过 MCP client 注册，或 CUA setup 接入。</li>
     <li>遵守契约：文件类工具复用 <code>file_utils</code> 的安全读取与整读上限；网络类复用 <code>security_guard</code> 授权；不跨目录重复实现。</li>
+    <li>运行期目录型工具使用 <code>schema_resolver</code> 生成当前 schema；模型披露与执行期参数校验必须读取同一份动态 parameters。</li>
   </ul>
 
   <h2>8. 变更记录</h2>
@@ -327,10 +344,20 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
       <tr><td>2026-09-01</td><td>在 tools.html 中补充内置工具清单（70+ 工具按领域分组）</td><td><code>docs/backend/modules/tools.html</code></td></tr>
       <tr><td>2026-09-01</td><td>新增工具结果生命周期注册契约；核心工具按语义分类，未知与 MCP 工具安全默认保留。</td><td><code>Tool</code>、<code>Registry</code>、内置工具注册。</td></tr>
       <tr><td>2026-09-01</td><td><code>file_read</code> 结果生命周期由 <code>resource</code>（分片级 identity 去重）改为 <code>temporary</code>：旧分片由 L1 清成含 path/offset 的信息摘要，完整压缩后按 path 去重、从磁盘重读最新内容恢复。</td><td><code>crew/tools/builtin.py</code>、<code>crew/agent/compact/post_compact.py</code></td></tr>
+      <tr><td>2026-09-05</td><td>FunctionTool 增加动态 schema 解析，并让模型披露与执行校验共享当前 parameters。</td><td><code>run_agent</code> 的生命周期 preset enum。</td></tr>
+      <tr><td>2026-09-17</td><td><code>e99e58e</code> 追问 <code>wait_for_answer</code> 默认有界超时（<code>runtime.interaction_timeout_seconds</code> 默认 3600s，0=默认不限，显式传值优先）；权限确认等待 interrupt 取消联动，interrupt 先到按拒绝结算（安全默认），竞争 task 不残留。</td><td><code>crew/core/followup.py</code>、<code>crew/tools/interaction.py</code>、<code>crew/agent/loop/tool_runner.py</code>、<code>crew/state/config.py</code>。</td></tr>
+      <tr><td>2026-09-17</td><td><code>4ce7c1b</code> 工具执行段看门狗（<code>_execute_guarded</code>）：超时/中断合成 <code>timed out</code> / <code>aborted by user</code> 合法 tool output，结果状态识别扩展 aborted 语义。</td><td><code>crew/agent/loop/tool_runner.py</code>（执行流水线本体在 agent loop，详见 agent 模块）。</td></tr>
+      <tr><td>2026-09-18</td><td><code>file_read</code> 读取引擎：默认/上限 2000 行 + 行号输出 + 行长 2000 截断 + read_max_chars 整行取舍预算 + 续读 footer；负 offset 尾读；≥10 MiB 流式（行缓冲封顶）；头部嗅探拒绝二进制并引导替代通道；UTF-8 严格解码（GBK 报错提示 iconv）、UTF-16 自动转码；观察改 stat-only（写保护 CAS 不变）；post_compact 恢复共享窗口切片。窗口/尾读/预算语义对齐 dsh <code>read</code> 与 kimi <code>Read</code>。</td><td><code>crew/tools/file_utils.py</code>、<code>crew/tools/builtin.py</code>、<code>crew/agent/compact/post_compact.py</code>、<code>config/config.yaml(.example)</code>。</td></tr>
+      <tr><td>2026-09-24</td><td><code>web_search</code> 换引擎：exa provider 从 REST API（需 key）改为 Exa 托管 MCP（<code>mcp.exa.ai/mcp</code>，匿名免费零配置；<code>EXA_API_KEY</code> 可选拼 <code>exaApiKey</code> 挂账号）；响应兼容纯 JSON 与 SSE 两种形态，解析 <code>Title:/URL:/Highlights:</code> 文本块；连接层瞬态失败（代理链路偶发 TLS 重置）短退避重试。移除 bocha provider，默认链变为 exa → searxng。</td><td><code>crew/tools/web_tools.py</code>、<code>crew/tools/web_search_service.py</code>、<code>config/config.yaml(.example)</code>、<code>tests/test_web_search_service.py</code></td></tr>
+      <tr><td>2026-09-28</td><td><code>web_extract</code> 空列表项清理（导航装饰/主题切换器占位不再产生裸 <code>-</code> marker 噪音，ol 编号保持 HTML 位置语义）；瞬态重试对称化：MCP POST 与 extract GET 共用 <code>_with_transient_retry</code>（5 次短退避，仅重试 OSError 根因的连接层失败；实测部分代理节点到 Cloudflare 系单连接成功率约 40%）。</td><td><code>crew/tools/web_extract_markdown.py</code>、<code>crew/tools/web_tools.py</code>、<code>tests/test_web_extract_markdown.py</code>、<code>tests/test_web_search_service.py</code></td></tr>
+      <tr><td>2026-09-28</td><td><code>web_extract</code> 内容预算提升 + 抓取缓存：内联正文 12k→40k 字符，超限全文按 sha1 内容寻址落盘到 <code>tool-results/</code>（结果带 <code>full_text_path</code>/<code>content_chars</code>，file_read 免审批取回），内联部分保头尾中间截断；组装结果做 JSON 转义后长度自检（预算逐级收紧 40k→20k→4k），保证 Stage-6 兜底恒为 no-op。新增进程内抓取缓存（key=请求 URL，TTL 15min，50MB/256 条双上限 LRU，授权之后才查缓存、只缓存成功结果）；新增 <code>pipeline.persist_tool_result</code> 公开别名。顺手修 microcompact 摘要取错参数名（urls→url）。渲染与落盘走 <code>asyncio.to_thread</code> 不阻塞事件循环。</td><td><code>crew/tools/web_tools.py</code>、<code>crew/tools/web_fetch_cache.py</code>（新）、<code>crew/tools/pipeline.py</code>、<code>crew/agent/compact/microcompact.py</code>、<code>tests/test_web_fetch_cache.py</code>（新）、<code>tests/test_web_extract_markdown.py</code>、<code>tests/security/test_outbound_tools.py</code>、<code>tests/test_compact.py</code></td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+  <h2>本次更新：工具与 MCP 观测（2026-09-23）</h2>
+  <p>工具执行边界记录逻辑调用、实际工具输入输出和错误状态；MCP 队列项携带不可变 observation context，常驻 worker 出队后 attach，完成后 reset，避免跨请求串线。搜索、浏览器、渠道和外部 agent 边界保留 coverage/black-box 标记，未把不可见的第三方内部状态伪装成细粒度 span。</p>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0024-agent-preset-contribution-registry.html">ADR-0024</a> · <a href="../../testing/observability-tracing.html">可观测测试记录</a></div>
 </div>
 </body>
 </html>

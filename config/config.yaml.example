@@ -18,11 +18,13 @@ llm:
 runtime:
   crew_home: .Crew
   db_path: crew_data/crew.db
+  # 内置记忆默认关闭：SQLiteMemory 的关键词朴素召回是 demo 级，召回差比没有更
+  # 伤观感。需要跨会话记忆时改为 true 显式开启，或接入 MCP memory server。
+  memory_enabled: false
   log_level: INFO
   log_file: logs/crew.log
   llm_trace: false
   max_iterations: 0
-  dk_task_timeout_seconds: 3600
   # 外部 Runtime 统一超时策略。hard_timeout_seconds: 0 表示不设硬截止；
   # 缺省时保持各协议现有兼容默认（ACP 仍为 idle×4 或 idle+900）。
   timeout_policy:
@@ -32,6 +34,22 @@ runtime:
     binding_grace_seconds: 30
     # hard_timeout_seconds: 0
   sqlite_wal: true
+  # 单工具执行看门狗（秒）：单个工具的执行段（不含权限等待）超过 N 秒后取消该工具，
+  # 合成 "timed out after X.Xs" 作为正常 tool output 回给模型——tool_call/tool output
+  # 历史配对完整，回合继续推进，不会被一个挂死的工具冻结。0 = 关闭看门狗。
+  # 用户点「停止」时另有 interrupt 取消语义（优雅窗口后强取消，输出 aborted by user）。
+  tool_execution_timeout_seconds: 600
+  # 整回合 deadline（秒）：回合累计时长上限。到点走与 interrupt 相同的优雅收尾
+  # （中断标记 + 回合正常结束，历史/输出含 "deadline exceeded" 标记），在途工具
+  # 走 aborted 语义；0 = 不限（默认关闭）。
+  turn_deadline_seconds: 0
+  # 追问/权限确认等待上限（秒）：wait_for_answer 调用方未显式传 timeout 时的默认
+  # 有界等待；超时按「用户未回答」收尾（返回空答案），追问工具与权限确认共用。
+  # 0 = 默认不限（维持旧的不限语义）。显式传 timeout（含 None/0）始终优先。
+  interaction_timeout_seconds: 3600
+  # 独立线程 health 服务端口（桌面端优先探测，业务事件循环卡超时仍能感知进程
+  # 活性）。0 表示自动（gateway 端口 + 1）；显式配置（如 8010）则覆盖默认值。
+  health_port: 0
 agent:
   executor: builtin
   parallel_tools: true
@@ -92,44 +110,201 @@ auth:
     login_path: /auth/login-by-code
     timeout_seconds: 10
     session_ttl_seconds: 604800
-team:
-  max_concurrent_children: 3
-  members:
-  - name: researcher
-    role: 负责查资料、读取文件、搜集与整理信息
-  - name: coder
-    role: 负责编写代码、执行命令、文件读写等工程操作
-# 外部智能体与外部 Team 的产品入口开关。关闭时仅隐藏/禁用，历史数据仍保留。
-external_agents:
-  enabled: true
-  # true: 外援经过 Ace native runtime；false: 外援按旧 runtime 直联。
-  # 默认 false；该开关不影响内建工具的会话安全边界。
-  security_enabled: false
-
-subagent:
-  max_concurrent: 3
-  max_tasks: 8
-  idle_timeout_seconds: 120
-  timeout_seconds: 1800
-tasks:
-  auto_background_after_seconds: 15
-  heartbeat_interval_seconds: 10
-  monitor_interval_seconds: 5
-  wait_timeout_seconds: 30
-  finished_retention_days: 7
-  shell:
-    inactivity_timeout_seconds: 600
-    execution_timeout_seconds: 0
-  subagent:
-    inactivity_timeout_seconds: 120
-    execution_timeout_seconds: 1800
-  agent_turn:
-    inactivity_timeout_seconds: 600
-    execution_timeout_seconds: 3600
-cron:
-  enabled: true
-  max_parallel_jobs: 2
 tools:
+  # web_search 引擎配置（纯 API provider，无 HTML 刮取）。providers 为显式有序
+  # fallback 列表（按序逐个降级，全败时返回结构化错误与已尝试链路）；
+  # 留空 = 默认链（全部可用 provider 按注册序，exa → searxng）。
+  # exa：Exa 托管 MCP，匿名免费、无需任何 key（默认可用）；可选 EXA_API_KEY
+  # （或 exa_api_key_env 指定的环境变量）挂账号提升限额；exa_base_url 默认
+  # https://mcp.exa.ai/mcp。端点被墙的网络在 network.upstream_proxy 配代理。
+  # searxng：需可公网到达的实例地址（SSRF 防护不允许私网主机）。
+  web_search:
+    providers: []
+    exa_api_key_env: EXA_API_KEY
+    exa_base_url: ""
+    searxng_base_url: ""
+  # 大结果落盘阈值：工具结果字符数超过此值时，完整内容写入
+  # {CREW_HOME}/tool-results/{tool_call_id}.txt，模型只收「路径 + 头尾预览 + 截断标记」。
+  # 默认阈值为 50000 字符。
+  max_result_size_chars: 50000
+  permissions: []
+  tool_search:
+    # off：关闭 progressive disclosure，全部工具按原样暴露给 LLM（bridge 工具不注入）。
+    # on：默认全部工具常驻，仅 deferred_toolsets 中的 cron/Wiki 工具按需经 tool_search 加载。
+    # 工具搜索只在 access_control 已允许的当前会话范围内进行，不会扩大权限。
+    enabled: "on"
+    search_default_limit: 5
+    max_search_limit: 20
+    core_toolsets:
+    - "*"
+    deferred_toolsets:
+    - cron
+    - wiki.read
+    - wiki.manage
+  file:
+    read_max_chars: 100000
+    # file_read 单次返回的默认且最大行数（同时也是负 offset 尾读的窗口上限）。
+    read_max_lines: 2000
+    # read-before-edit 观察策略：true 时 patch/file_write 要求当前会话先 file_read
+    # 过目标文件（观察到的版本同时作为写入 CAS 基），未读即拒并提示补救动作。
+    require_read_before_edit: false
+  terminal:
+    max_timeout: 600
+plugins:
+  enabled:
+  - security_guidance
+  - crew_disk_cleanup
+  - feishu
+  - weixin
+  disabled:
+mcp_servers:
+  cua-driver:
+    command: cua-driver
+    args:
+    - mcp
+    env: {}
+    auto_connect: false
+access_control:
+  user_type: internal
+  external:
+    prompt_profile: "external"
+    enabled_toolsets: ["*"]
+    disabled_toolsets: ["mcp:cua-driver"]
+    enabled_tools: ["*"]
+    disabled_tools: []
+    enabled_plugins:
+    - '*'
+    disabled_plugins: []
+    enabled_skills:
+    - '*'
+    disabled_skills: ["browser-use"]   # browser-use skill 依赖内置浏览器；external 的 browser toolset 已在 disabled_toolsets 里禁用，避免展示无法使用的“死 skill”
+
+# 进程内 HTTP 边界（web_search/web_extract/Wiki 抓取）的上游代理。
+# 安全意味着“经过策略判断”，判断通过后把流量级联到用户已有的上游代理，
+# 而不是强制直连。留空时回退到环境变量
+# HTTP_PROXY / HTTPS_PROXY / ALL_PROXY（大小写都读）。
+# 能直连外网的服务器留空即可；需要代理的开发机设 HTTPS_PROXY 即可，
+# 也可在此直接填，如 http://127.0.0.1:7890 或 socks5h://127.0.0.1:7890。
+network:
+  # 上游代理地址。支持 http:// https:// socks5:// socks5h://，可带 user:pass@。
+  # 留空 = 读环境变量（推荐，跨环境零配置）。
+  upstream_proxy: ""
+  # 是否允许代理本身监听在 127.0.0.1/::1（本地 Clash 等场景）。
+  allow_loopback_proxy: true
+
+# ============================================================================
+# features.*：Feature 配置的规范命名空间（P2-1 第二步起为模板唯一布局）。
+#
+# 约定：每个 Feature 只读自己的 features.<name> 子树，子键结构与旧顶层节
+# 逐字兼容（features.wiki 的内容 = 旧 wiki: 节的内容）。历史上平铺的
+# runtime.dk_* 键对应 features.dynamic_kanban（子键去掉 dk_ 前缀）；
+# tools.browser 对应 features.browser。
+# 兼容性：手工编辑的旧配置（顶层 wiki/cron/team/tasks/external_agents/
+# channels/platforms、tools.browser、runtime.dk_*）仍可正常读取——同名键
+# features 侧获胜、未在 features 出现的键回落旧节；但产品不再生成这些旧
+# 位置，运行时写回统一落在 features.channels。
+# 注意：数据库路径（runtime.<feature>_db_path）由 core 装配层统一消费注入，
+# 属基础设施配置，不进 features.*。
+# ============================================================================
+features:
+  wiki:
+    # 聊天中上传的附件是否自动收入 default 知识库。
+    # true（默认）：保存原文件并解析成 markdown，并自动生成轻量摘要/标签；
+    # 深度整理（生成 entity/topic/relationship）默认不自动执行，需要用户确认。
+    capture_attachments: true
+    ingest:
+      # 是否在深度整理计划生成成功后自动应用计划。
+      # true：capture → parse → orient → plan → apply 同一轮完成，不展示确认卡。
+      # false（默认）：plan 后展示创建/更新/跳过计划并等待用户确认，后续回合再 apply。
+      # 该配置只影响实体/概念/主题/关系的深度整理；删除、归档、视频外传仍必须人工确认。
+      auto_apply: false
+      # 捕获后是否自动生成轻量摘要、标签和是否建议整理的标记（第二层）。
+      auto_summarize: true
+      # 捕获后是否自动深度整理（第三层）。默认关闭，避免自动把临时文件写入知识库。
+      auto_ingest: false
+    # Wiki 数据独立存储目录。留空时保持现状：
+    # {runtime.crew_home}/accounts/{owner_hash}/wiki_lib/。
+    # 也可通过 CREW_WIKI_HOME 环境变量覆盖。
+    storage:
+      root: ""
+    # Wiki 提取可选用独立的、适合稳定结构化输出的模型。
+    # 可填 llm.models 下的 profile key；留空时跟随当前会话模型，
+    # 无会话上下文时回退当前账号的默认模型。
+    model: ""
+  cron:
+    enabled: true
+    max_parallel_jobs: 2
+  team:
+    max_concurrent_children: 3
+    members:
+    - name: researcher
+      role: 负责查资料、读取文件、搜集与整理信息
+    - name: coder
+      role: 负责编写代码、执行命令、文件读写等工程操作
+  subagent:
+    # 部署侧默认传输；模型可见工具中不存在 provider 参数。
+    default_provider: inprocess-spawn
+    # 是否启用从父会话已完成消息快照启动子智能体的 Provider。
+    fork_enabled: false
+    # explicit：仅在用户、项目指令或技能明确要求委派/并行时使用子智能体；
+    # proactive：主智能体可在确有收益时主动委派。
+    delegation_mode: explicit
+    # 是否启用持久子身份与 send_message/list_agents/interrupt_agent 控制面。
+    # 关闭时 delegate_task/run_agent 保持 one-shot 语义。
+    continuable: false
+    # 委派深度上限（单调记账：持久值只抬高不降低，恢复不回退）。
+    max_depth: 3
+    # 子智能体是否可见委派工具（默认关闭 = 与旧版行为一致；开启即允许
+    # 受深度与权限双重约束的嵌套委派）。
+    allow_nested: false
+    # 同构批量（prompt_template + items）单次条数上限。
+    max_batch_items: 128
+    # 批量爬坡：首发立即放 initial 个，此后每 interval_ms 放 1 个。
+    launch_ramp:
+      initial: 5
+      interval_ms: 700
+    # 限流退避：疑似 429/限流的条目按指数退避重排（同一简报重放），
+    # 并发容量收缩、静默 recover_seconds 后逐档恢复；max_retries 为单条目
+    # 重试上限（防无限重排）。配额耗尽属终态，不参与重试。
+    rate_limit:
+      backoff_base_seconds: 3.0
+      backoff_factor: 2.0
+      max_retries: 6
+      recover_seconds: 180
+    # 交卷兜底：正常完成但短于 min_chars 时追加一轮扩写（最多 retries 次）；
+    # 因 token 上限截断不视为交卷。preset 可用 summary_min_chars /
+    # summary_retries 覆盖全局值。
+    summary_min_chars: 200
+    summary_retries: 1
+    # run/descriptor/edge 保留期（天），超期在启动时清理。
+    retain_runs_days: 30
+  # 子 agent（delegate_task / run_agent）的超时在 tasks.subagent 配置；
+  # 子 agent 运行时策略统一放在 features.subagent；超时仍由 tasks.subagent 管理。
+  tasks:
+    auto_background_after_seconds: 15
+    heartbeat_interval_seconds: 10
+    monitor_interval_seconds: 5
+    wait_timeout_seconds: 30
+    finished_retention_days: 7
+    shell:
+      inactivity_timeout_seconds: 600
+      execution_timeout_seconds: 0
+    # 子 agent（delegate_task / run_agent）长任务超时：
+    # 空闲 N 秒零输出中止；绝对运行上限兜底。0 表示不限。
+    subagent:
+      inactivity_timeout_seconds: 120
+      execution_timeout_seconds: 1800
+    agent_turn:
+      inactivity_timeout_seconds: 600
+      execution_timeout_seconds: 3600
+  # 外部智能体与外部 Team 的产品入口开关。关闭时仅隐藏/禁用，历史数据仍保留。
+  external_agents:
+    enabled: true
+    # true: 外援经过 Ace native runtime；false: 外援按旧 runtime 直联。
+    # 默认 false；该开关不影响内建工具的会话安全边界。
+    security_enabled: false
+  # 各通道配置按通道名作为子键；运行时写回也统一落在此处。
+  channels: {}
   browser:
     enabled: true
     runtime: electron
@@ -154,93 +329,8 @@ tools:
     allowed_private_cidrs: []
     blocked_hosts: []
     allow_file_urls: false
-  # 大结果落盘阈值：工具结果字符数超过此值时，完整内容写入
-  # {CREW_HOME}/tool-results/{tool_call_id}.txt，模型只收「路径 + 头尾预览 + 截断标记」。
-  # 默认阈值为 50000 字符。
-  max_result_size_chars: 50000
-  permissions: []
-  tool_search:
-    # off：关闭 progressive disclosure，全部工具按原样暴露给 LLM（bridge 工具不注入）。
-    # on：默认全部工具常驻，仅 deferred_toolsets 中的 cron/Wiki 工具按需经 tool_search 加载。
-    # 工具搜索只在 access_control 已允许的当前会话范围内进行，不会扩大权限。
-    enabled: "on"
-    search_default_limit: 5
-    max_search_limit: 20
-    core_toolsets:
-    - "*"
-    deferred_toolsets:
-    - cron
-    - wiki.read
-    - wiki.manage
-  file:
-    read_max_chars: 100000
-  terminal:
-    max_timeout: 600
-plugins:
-  enabled:
-  - security_guidance
-  - crew_disk_cleanup
-  - feishu
-  - weixin
-  disabled:
-
-channels: {}
-mcp_servers:
-  cua-driver:
-    command: cua-driver
-    args:
-    - mcp
-    env: {}
-    auto_connect: false
-access_control:
-  user_type: internal
-  external:
-    prompt_profile: "external"
-    enabled_toolsets: ["*"]
-    disabled_toolsets: ["mcp:cua-driver"]
-    enabled_tools: ["*"]
-    disabled_tools: []
-    enabled_plugins:
-    - '*'
-    disabled_plugins: []
-    enabled_skills:
-    - '*'
-    disabled_skills: ["browser-use"]   # browser-use skill 依赖内置浏览器；external 的 browser toolset 已在 disabled_toolsets 里禁用，避免展示无法使用的“死 skill”
-
-wiki:
-  # 聊天中上传的附件是否自动收入 default 知识库。
-  # true（默认）：保存原文件并解析成 markdown，并自动生成轻量摘要/标签；
-  # 深度整理（生成 entity/topic/relationship）默认不自动执行，需要用户确认。
-  capture_attachments: true
-  ingest:
-    # 是否在深度整理计划生成成功后自动应用计划。
-    # true：capture → parse → orient → plan → apply 同一轮完成，不展示确认卡。
-    # false（默认）：plan 后展示创建/更新/跳过计划并等待用户确认，后续回合再 apply。
-    # 该配置只影响实体/概念/主题/关系的深度整理；删除、归档、视频外传仍必须人工确认。
-    auto_apply: false
-    # 捕获后是否自动生成轻量摘要、标签和是否建议整理的标记（第二层）。
-    auto_summarize: true
-    # 捕获后是否自动深度整理（第三层）。默认关闭，避免自动把临时文件写入知识库。
-    auto_ingest: false
-  # Wiki 数据独立存储目录。留空时保持现状：
-  # {runtime.crew_home}/accounts/{owner_hash}/wiki_lib/。
-  # 也可通过 CREW_WIKI_HOME 环境变量覆盖。
-  storage:
-    root: ""
-  # Wiki 提取可选用独立的、适合稳定结构化输出的模型。
-  # 可填 llm.models 下的 profile key；留空时跟随当前会话模型，
-  # 无会话上下文时回退当前账号的默认模型。
-  model: ""
-
-# 进程内 HTTP 边界（web_search/web_extract/Wiki 抓取）的上游代理。
-# 安全意味着“经过策略判断”，判断通过后把流量级联到用户已有的上游代理，
-# 而不是强制直连。留空时回退到环境变量
-# HTTP_PROXY / HTTPS_PROXY / ALL_PROXY（大小写都读）。
-# 能直连外网的服务器留空即可；需要代理的开发机设 HTTPS_PROXY 即可，
-# 也可在此直接填，如 http://127.0.0.1:7890 或 socks5h://127.0.0.1:7890。
-network:
-  # 上游代理地址。支持 http:// https:// socks5:// socks5h://，可带 user:pass@。
-  # 留空 = 读环境变量（推荐，跨环境零配置）。
-  upstream_proxy: ""
-  # 是否允许代理本身监听在 127.0.0.1/::1（本地 Clash 等场景）。
-  allow_loopback_proxy: true
+  # dynamic-kanban 历史上平铺在 runtime.dk_*，目标形态为独立子树
+  # （task_timeout_seconds / verification_gate_enabled）。
+  dynamic_kanban:
+    task_timeout_seconds: 3600
+    verification_gate_enabled: true

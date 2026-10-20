@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from crew.core.runctx import (
+    LOCAL_OWNER_ACCOUNT_ID,
     current_attachment_paths,
     current_owner_account_id,
     current_push_fn,
@@ -73,12 +74,11 @@ def _set_context(session_id: str = "sid", owner: str = "owner"):
 
 @pytest.fixture(autouse=True)
 def _restore_runctx_defaults():
-    """_set_context 裸 set contextvar 不 reset，值会泄漏给同进程的后续用例
-    （曾导致 tests/test_compact.py 断路器计数的 owner 维度从 "" 变成 "owner"）。
-    每个用例结束后恢复默认值。"""
+    """_set_context 裸 set contextvar 不 reset，值会泄漏给同进程的后续用例。
+    每个用例结束后恢复默认值（owner 的默认即本机 local）。"""
     yield
     current_session_id.set("")
-    current_owner_account_id.set("")
+    current_owner_account_id.set(LOCAL_OWNER_ACCOUNT_ID)
 
 
 @pytest.fixture
@@ -966,7 +966,7 @@ async def test_capture_attachment_only_accepts_current_turn_allowlist(tmp_path, 
     registry = fs_wiki["registry"]
     current_attachment_paths.set((str(allowed),))
 
-    with patch("crew.gateway.context._get_upload_dir", return_value=uploads):
+    with patch("crew.state.home.get_upload_dir", return_value=uploads):
         rejected = await registry.get("wiki_capture_attachment").run({"path": str(old)})
         accepted = await registry.get("wiki_capture_attachment").run({"path": str(allowed)})
 
@@ -991,7 +991,7 @@ async def test_capture_attachment_uses_original_name_and_content_type_not_displa
     current_attachment_paths.set((str(stored),))
     current_attachment_files.set(((str(stored), "机票预订单.pdf"),))
 
-    with patch("crew.gateway.context._get_upload_dir", return_value=uploads):
+    with patch("crew.state.home.get_upload_dir", return_value=uploads):
         result = await registry.get("wiki_capture_attachment").run({"path": str(stored)})
         titled_result = await registry.get("wiki_capture_attachment").run({
             "path": str(stored),

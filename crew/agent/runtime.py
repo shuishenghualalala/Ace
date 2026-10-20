@@ -15,8 +15,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.runctx import (
@@ -31,6 +32,7 @@ from crew.core.runctx import (
     current_subagent_notify_session,
     current_user_type,
     current_workspace_id,
+    normalize_owner_account_id,
 )
 from crew.core.interfaces import (
     Agent,
@@ -46,16 +48,9 @@ from crew.agent.executor import AgentExecutor, BuiltinExecutor, ExecutionContext
 from crew.tools.file_utils import MAX_READ_FILE_BYTES, read_verified_bytes
 from crew.tools.policy import ToolDisclosureMode
 from crew.agent.loop.control import TurnControl
+from crew.agent.loop.history_repair import repair_orphan_tool_calls
 from crew.agent.plan import get_plan_mode_attachment_messages
-from crew.wiki.attachments import get_wiki_agent_attachment_messages
 from crew.agent.prompt_builder import DEFAULT_AGENT_IDENTITY, build_prompt_parts
-from crew.gateway.context import REFERENCE_INJECTORS
-from crew.gateway.session_context import (
-    SessionContext,
-    SessionSource,
-    build_session_context_prompt,
-    session_context_from_envelope,
-)
 from crew.plugins.manager import PluginManager, TerminalOutcome
 from crew.state.logging import get_logger, llm_trace
 from crew.state.home import external_session_workspace_path, task_workspace_path, safe_path_segment
@@ -65,16 +60,21 @@ log = get_logger("agent")
 
 def _session_source_for_run(envelope: Envelope) -> dict[str, Any]:
     """Return a serializable source snapshot for tools invoked in this turn."""
-    ctx_raw = envelope.params.get("session_context")
-    if isinstance(ctx_raw, SessionContext):
-        return ctx_raw.source.to_dict()
-    if isinstance(ctx_raw, dict):
-        try:
-            raw_source = ctx_raw.get("source", ctx_raw)
-            return SessionSource.from_dict(raw_source).to_dict()
-        except Exception:  # noqa: BLE001
-            pass
-    return session_context_from_envelope(envelope, []).source.to_dict()
+    normalized = envelope.params.get("session_source")
+    if isinstance(normalized, dict):
+        return dict(normalized)
+    params = envelope.params
+    return {
+        "platform": str(envelope.channel or "web"),
+        "chat_id": str(params.get("platform_chat_id") or envelope.session_id),
+        "chat_name": params.get("platform_chat_name"),
+        "chat_type": str(params.get("platform_chat_type") or "dm"),
+        "user_id": params.get("platform_uid") or envelope.user_id,
+        "user_name": params.get("platform_user_name"),
+        "thread_id": params.get("platform_thread_id"),
+        "guild_id": None,
+        "message_id": params.get("platform_message_id"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -122,110 +122,66 @@ async def _read_image_as_data_url(path: str) -> str | None:
         return None
 
 
-async def _read_attachment(path: str) -> str:
-    """读取附件文件内容，返回文本。非文本文件返回摘要信息（含完整路径）。"""
+#: 文本附件注入上下文的字符上限；超出时截断并生成自描述续读提示。
+_ATTACHMENT_MAX_CHARS = 8000
+
+
+@dataclass(slots=True)
+class AttachmentPreview:
+    """附件预读结果：正文 + 截断元信息，供注入层生成模型可见的截断提示。"""
+
+    content: str
+    truncated: bool = False
+    total_chars: int = 0
+    total_lines: int = 0
+
+
+async def _read_attachment(path: str) -> AttachmentPreview:
+    """读取附件文件内容。非文本文件返回摘要信息（含完整路径）。"""
     from pathlib import Path
 
     p = Path(path)
     if not p.is_file():
-        return f"[文件不存在: {path}]"
+        return AttachmentPreview(content=f"[文件不存在: {path}]")
 
     ext = p.suffix.lower()
     if ext in _TEXT_EXTS:
         try:
             # 读前按大小拒绝，避免同步整读超大附件拖垮事件循环。
             raw = await asyncio.to_thread(read_verified_bytes, p.resolve(), max_bytes=MAX_READ_FILE_BYTES)
-            return raw.decode("utf-8", errors="replace")[:8000]
+            text = raw.decode("utf-8", errors="replace")
         except ValueError:
-            return f"[文件过大，无法作为附件注入: {p.name}]"
+            return AttachmentPreview(content=f"[文件过大，无法作为附件注入: {p.name}]")
         except Exception as exc:
-            return f"[读取失败: {exc}]"
+            return AttachmentPreview(content=f"[读取失败: {exc}]")
+        if len(text) <= _ATTACHMENT_MAX_CHARS:
+            return AttachmentPreview(content=text)
+        return AttachmentPreview(
+            content=text[:_ATTACHMENT_MAX_CHARS],
+            truncated=True,
+            total_chars=len(text),
+            total_lines=len(text.splitlines()),
+        )
 
     # xlsx/docx 等二进制文件：返回摘要（含完整路径，方便 Agent 用工具进一步读取）
     size = p.stat().st_size
-    return f"[二进制文件: {p.name}, 大小: {size} 字节, 类型: {ext or '未知'}, 完整路径: {path}]"
+    return AttachmentPreview(
+        content=f"[二进制文件: {p.name}, 大小: {size} 字节, 类型: {ext or '未知'}, 完整路径: {path}]"
+    )
 
 
-def _format_browser_tab_references(refs: object) -> str:
-    """把 @browser_tab 引用的标签页正文格式化为可注入上下文的块。"""
-    if not isinstance(refs, list) or not refs:
-        return ""
-    lines = [
-        "# 用户引用的浏览器标签页",
-        "用户在消息中通过 @browser_tab 显式引用了以下标签页，正文为发送时的只读快照：",
-    ]
-    for ref in refs:
-        if not isinstance(ref, dict):
-            continue
-        tab_id = str(ref.get("tab_id") or "")
-        error = str(ref.get("error") or "").strip()
-        if error:
-            lines.append(f"\n## 标签页 {tab_id}\n（浏览器标签页内容不可用：{error}）")
-            continue
-        title = str(ref.get("title") or "").strip() or "(无标题)"
-        url = str(ref.get("url") or "").strip()
-        text = str(ref.get("text") or "").strip() or "(页面正文为空)"
-        header = f"\n## {title}"
-        if url:
-            header += f"\nURL: {url}"
-        lines.append(f"{header}\n{text}")
-    return "\n".join(lines)
-
-
-def _format_subagent_notifications(pending: object) -> str:
-    """把后台子 agent 的完成结果格式化为可注入上下文的 system-reminder 块。"""
-    if not isinstance(pending, list) or not pending:
-        return ""
-    lines = [
-        "# 后台子任务完成通知",
-        "以下后台子智能体（你之前用 run_agent / delegate_task 的 run_in_background 启动）已完成，结果如下：",
-    ]
-    for r in pending:
-        if not isinstance(r, dict):
-            continue
-        agent = r.get("agent", "子智能体")
-        status = r.get("status", "")
-        dur = r.get("duration_seconds", "")
-        summary = str(r.get("summary", "")).strip()
-        lines.append(f"\n## [{agent}] status={status} 用时={dur}s\n{summary}")
-    return "\n".join(lines)
-
-
-def _format_process_notifications(pending: object) -> str:
-    """把后台进程的 watch/完成通知格式化为可注入上下文的 system-reminder 块。"""
-    if not isinstance(pending, list) or not pending:
-        return ""
-    from crew.tools.process_registry import format_process_notification
-
-    lines = [
-        "# 后台进程通知",
-        "以下后台进程（你之前用 terminal(background=true) 启动）有新动态：",
-    ]
-    for evt in pending:
-        if not isinstance(evt, dict):
-            continue
-        text = format_process_notification(evt)
-        if text:
-            lines.append(f"\n{text}")
-    return "\n".join(lines)
-
-
-def _format_task_notifications(pending: object) -> str:
-    if not isinstance(pending, list) or not pending:
-        return ""
-    lines = [
-        "# 后台任务完成通知",
-        "以下后台任务已结束。请读取结果，判断是否继续原任务、修复失败或向用户汇报。",
-    ]
-    for task in pending:
-        if not isinstance(task, dict):
-            continue
-        lines.append(
-            "\n## "
-            f"{task.get('task_id', '')} kind={task.get('kind', '')} status={task.get('status', '')}\n"
-            f"{task.get('result') or task.get('error') or '(无结果)'}"
+def _format_attachment_block(
+    name: str, path: str, content: str, preview: AttachmentPreview | None
+) -> str:
+    """格式化单个文本附件的注入块；截断时在代码块外附自描述续读提示。"""
+    block = f"### 附件: {name} (路径: {path})\n```\n{content}\n```"
+    if preview is not None and preview.truncated:
+        block += (
+            f"\n【附件已截断】「{name}」完整内容共 {preview.total_chars} 字符 / "
+            f"{preview.total_lines} 行，以上仅注入前 {_ATTACHMENT_MAX_CHARS} 字符。"
+            "其余内容请使用 file_read 工具按 offset/limit 分页读取该文件。"
         )
-    return "\n".join(lines)
+    return block
 
 
 def _format_client_intent(envelope: Envelope) -> str:
@@ -262,7 +218,8 @@ class SingleAgent(Agent):
         profile_path: str | None = None,
         lightweight: bool = False,
         plan_manager: Any = None,
-        wiki_manager: Any = None,
+        context_contributors: Any = None,
+        context_tags: tuple[str, ...] = (),
         tool_disclosure_mode: ToolDisclosureMode = ToolDisclosureMode.PROGRESSIVE,
         agent_id: str = "default",
         enabled_skills: list[str] | None = None,
@@ -276,7 +233,7 @@ class SingleAgent(Agent):
         evolution_full_cycle: bool = False,
         evolution_visible: bool = False,
         evolution_queue: Any = None,
-        subagent_drain_fn: Callable[[str, str], list] | None = None,
+        delegation_mode: str = "explicit",
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -286,9 +243,10 @@ class SingleAgent(Agent):
         self.system_prompt = system_prompt
         self.tool_filter = tool_filter  # None=全部工具；否则只暴露子集
         self.max_iterations = max_iterations
-        # 未注入 executor 时默认走自带循环，保持向后兼容（Team 即走此路径）
+        # 未注入 executor 时默认走自带循环，保持向后兼容（Team 即走此路径）。
+        # compactor 同步注入默认 executor：否则溢出兜底与每轮 compact_view 静默关闭。
         self.executor = executor or BuiltinExecutor(
-            provider, registry, plugins, max_iterations=max_iterations
+            provider, registry, plugins, max_iterations=max_iterations, compactor=compactor
         )
         self.compactor = compactor
         self.enable_title = enable_title
@@ -302,13 +260,18 @@ class SingleAgent(Agent):
         self.include_optional_skills = include_optional_skills
         # Plan 模式管理器（仅主 agent 注入；子 agent / Team 为 None）。
         self.plan_manager = plan_manager
-        # Wiki Agent 会话管理器（仅 Wiki 预设注入）。
-        self.wiki_manager = wiki_manager
+        # Shared Feature registry; PROMPT contributors run inside this Agent scope.
+        self.context_contributors = context_contributors
+        self.context_tags = tuple(
+            dict.fromkeys(
+                tag
+                for item in context_tags
+                if (tag := str(item or "").strip().lower())
+            )
+        )
         # 工具授权与披露分离：Wiki 使用 direct，其余默认 progressive。
         self.tool_disclosure_mode = ToolDisclosureMode(tool_disclosure_mode)
         self.agent_id = safe_path_segment(agent_id, "default")
-        # team member 派活前 drain 自己后台通知的回调（仅 team member 注入；主/子 agent 为 None）
-        self.subagent_drain_fn = subagent_drain_fn
         # 装配期会话模型回退说明：首轮 run 推 status，避免用户只看 UI 绑定误以为已切换成功。
         self.model_fallback_notice = str(model_fallback_notice or "").strip() or None
         self.model_capabilities = (
@@ -319,14 +282,15 @@ class SingleAgent(Agent):
         # 轻量模式（子 agent）：跳过全局 SOUL/MEMORY/USER/上下文文件/skills 注入，
         # 对照 Hermes 子 agent 的 skip_memory / skip_context_files。
         self.lightweight = lightweight
+        self.delegation_mode = delegation_mode
         # 本 Agent 的可控性句柄（steer / interrupt）。AgentManager 按 session 缓存 Agent，
         # 故一个实例对应一个 session；gateway 经 CrewApp.steer/interrupt 路由到这里。
         self.control = TurnControl()
         # 后台标题生成任务引用集合：防止 fire-and-forget task 被 GC 中断，
         # done 后自动清出。标题生成不得阻塞 final 帧发送（见 _spawn_title_task）。
         self._title_tasks: set[asyncio.Task] = set()
-        # 同一 (owner, title_sid) 在途标题任务去重，避免 early + 回合末 fallback 双发 LLM。
-        self._title_inflight: set[tuple[str, str]] = set()
+        # 同一 (owner, title_sid) 的在途标题任务：spawn 去重 + 新用户回合 supersede 取消。
+        self._title_inflight: dict[tuple[str, str], asyncio.Task] = {}
         # Provider ownership is declared by the composition root. Executor/compactor and
         # ``self.provider`` may all reference borrowed App resources, so references alone
         # must never imply ownership.
@@ -364,6 +328,7 @@ class SingleAgent(Agent):
                 task.cancel()
             if title_tasks:
                 await asyncio.gather(*title_tasks, return_exceptions=True)
+            self._title_inflight.clear()
 
             seen: set[int] = set()
             for provider in self._owned_providers:
@@ -421,11 +386,15 @@ class SingleAgent(Agent):
                         })
                         continue  # 图像不再作为文本附件注入
 
-                # 非图像附件：按原逻辑读取文本内容
+                # 非图像附件：读取文本内容（超限截断时附自描述续读提示）
+                preview: AttachmentPreview | None = None
                 if not content and path:
-                    content = await _read_attachment(path)
+                    preview = await _read_attachment(path)
+                    content = preview.content
                 if content:
-                    att_contents.append(f"### 附件: {name} (路径: {path})\n```\n{content}\n```")
+                    att_contents.append(
+                        _format_attachment_block(name, path, content, preview)
+                    )
 
             if att_descriptions:
                 user_text = "\n".join(att_descriptions) + "\n\n" + user_text
@@ -455,7 +424,7 @@ class SingleAgent(Agent):
             mem_sid, envelope.query
         )
         ws_instructions = envelope.params.get("workspace_instructions", "")
-        prompt_parts = build_prompt_parts(
+        prompt_parts = await build_prompt_parts(
             workspace_instructions=ws_instructions,
             memory_text=memory_text,
             cwd=cwd,
@@ -466,6 +435,7 @@ class SingleAgent(Agent):
             inject_skills=self.inject_skills,
             include_optional_skills=self.include_optional_skills,
             user_type=self.user_type,
+            delegation_mode=self.delegation_mode,
         )
 
         system_static = prompt_parts["system_static"]
@@ -473,27 +443,6 @@ class SingleAgent(Agent):
         # 从而覆盖 SOUL.md 中的通用 Crew 身份。
         if self.system_prompt and self.system_prompt != DEFAULT_AGENT_IDENTITY:
             system_static = f"{system_static}\n\n{self.system_prompt}"
-
-        # 会话来源上下文（B1）：gateway 经 envelope.params["session_context"] 注入
-        ctx_raw = envelope.params.get("session_context")
-        if isinstance(ctx_raw, SessionContext):
-            ctx_prompt = build_session_context_prompt(ctx_raw, workspace_path=cwd)
-            system_static = f"{system_static}\n\n{ctx_prompt}"
-        elif isinstance(ctx_raw, dict):
-            try:
-                from crew.gateway.session_context import SessionSource
-
-                source = SessionSource.from_dict(ctx_raw.get("source", ctx_raw))
-                ctx = SessionContext(
-                    source=source,
-                    connected_platforms=list(ctx_raw.get("connected_platforms") or []),
-                    shared_multi_user=bool(ctx_raw.get("shared_multi_user")),
-                    session_id=str(ctx_raw.get("session_id") or envelope.session_id),
-                    workspace_id=str(ctx_raw.get("workspace_id") or envelope.workspace_id),
-                )
-                system_static = f"{system_static}\n\n{build_session_context_prompt(ctx, workspace_path=cwd)}"
-            except Exception:  # noqa: BLE001
-                log.debug("session_context 解析失败，跳过注入")
 
         # 动态内容 + 附件
         reminder_parts = [prompt_parts["user_reminder"]]
@@ -511,35 +460,16 @@ class SingleAgent(Agent):
                 f"一次性 confirmation_id={wiki_confirmation_id}。"
                 "仅将此 ID 传给上一回合对应的 Wiki 执行工具，不得改动目标或参数。"
             )
-        # 定时任务触发轮：明确告知"此刻正在执行定时任务"，否则 agent 只从历史看到
-        # "有个任务定在某时刻"、却不知道当前这轮就是它到点触发（query 含糊时尤其会
-        # 反问"是你提前来问还是任务触发了"）。配合上面 reminder 里的当前时间一起兜底。
-        if getattr(envelope, "channel", "") == "cron":
-            job_name = str(envelope.params.get("cron_job_name") or "").strip()
-            name_part = f"「{job_name}」" if job_name else ""
-            reminder_parts.append(
-                f"【定时任务触发】你之前创建的定时任务{name_part}现在已到点执行。"
-                "请直接完成下面这条任务内容、并输出要发送给用户的话——"
-                "不要询问是否到时间、不要反问是不是用户提前来问、也不要解释这是定时任务。"
+        # 后台子任务 / 后台进程 / 恢复回合任务完成通知已由各自的 PROMPT 阶段
+        # Context Contributor 产出并汇入 _context_prompt_parts，这里不再按魔法 key 特判。
+        # Feature-owned Context Contributors 已在 Host 请求阶段按优先级产出。
+        context_parts = envelope.params.get("_context_prompt_parts")
+        if isinstance(context_parts, (list, tuple)):
+            reminder_parts.extend(
+                text
+                for item in context_parts
+                if (text := str(item or "").strip())
             )
-        # 后台子 agent 完成通知：自动注入本轮上下文（无需模型主动 collect）
-        bg_block = _format_subagent_notifications(envelope.params.get("subagent_notifications"))
-        if bg_block:
-            reminder_parts.append(bg_block)
-        # 后台进程 watch/完成通知：同样自动注入本轮上下文
-        proc_block = _format_process_notifications(envelope.params.get("process_notifications"))
-        if proc_block:
-            reminder_parts.append(proc_block)
-        task_block = _format_task_notifications(envelope.params.get("task_notifications"))
-        if task_block:
-            reminder_parts.append(task_block)
-        # 对话 @引用：发送时解析注入的正文快照块（含失败占位），按注册表顺序拼接
-        for injector in REFERENCE_INJECTORS:
-            if injector.formatter is None:
-                continue
-            ref_block = injector.formatter(envelope.params.get(injector.params_key))
-            if ref_block:
-                reminder_parts.append(ref_block)
         client_intent_block = _format_client_intent(envelope)
         if client_intent_block:
             reminder_parts.append(client_intent_block)
@@ -551,7 +481,37 @@ class SingleAgent(Agent):
 
         return system_static, user_reminder
 
-    def _plan_reminder_blocks(self, session_id: str, owner_account_id: str = "") -> list[str]:
+    async def _contribute_prompt_context(
+        self,
+        envelope: Envelope,
+    ) -> list[Message]:
+        """Run Agent-scoped contributors and merge their generic outputs."""
+        if self.context_contributors is None:
+            return []
+        envelope.params["_context_agent_id"] = self.agent_id
+        envelope.params["_context_tags"] = self.context_tags
+        report = await self.context_contributors.contribute(
+            envelope,
+            phase="prompt",
+        )
+        envelope.params.update(report.params)
+        if report.prompt_parts:
+            current_parts = envelope.params.get("_context_prompt_parts")
+            if not isinstance(current_parts, list):
+                current_parts = []
+                envelope.params["_context_prompt_parts"] = current_parts
+            current_parts.extend(report.prompt_parts)
+        for failure in report.failures:
+            log.warning(
+                "Agent 上下文贡献降级 contributor=%s generation=%s timeout=%s error=%s",
+                failure.contributor_id,
+                failure.generation.key,
+                failure.timed_out,
+                failure.message,
+            )
+        return list(report.persistent_messages)
+
+    def _plan_reminder_blocks(self, session_id: str, owner_account_id: str) -> list[str]:
         """Plan 模式相关的动态 reminder 块（前置注入部分）。
 
         注意：plan 工作流与审批/修订/退出事件不在这里——它们由 hidden attachment
@@ -585,7 +545,7 @@ class SingleAgent(Agent):
             blocks.append(todo_block)
         return blocks
 
-    def _effective_tool_filter(self, session_id: str, owner_account_id: str = "") -> list[str] | None:
+    def _effective_tool_filter(self, session_id: str, owner_account_id: str) -> list[str] | None:
         """Plan 模式激活时把工具集收窄到只读白名单。
 
         未激活时剔除 Plan 模式入口/切换工具，避免模型误调用。
@@ -664,7 +624,7 @@ class SingleAgent(Agent):
         self,
         session_id: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
         workspace_id: str = "default",
         workspace_instructions: str = "",
         workspace_root_path: str = "",
@@ -678,13 +638,16 @@ class SingleAgent(Agent):
         if self._closed or not isinstance(self.executor, BuiltinExecutor):
             return None
 
-        owner = str(owner_account_id or "").strip()
+        owner = normalize_owner_account_id(owner_account_id)
         envelope = Envelope(
             session_id=session_id,
             params={
                 "query": "",
                 "workspace_instructions": workspace_instructions,
                 "workspace_root_path": workspace_root_path,
+                # 预览只读：通知类 contributor（后台子任务/进程）据此跳过 drain，
+                # 避免预览消费掉本应注入正式回合的待通知结果。
+                "_context_preview": True,
             },
             user_id=owner,
             workspace_id=workspace_id or "default",
@@ -695,7 +658,8 @@ class SingleAgent(Agent):
         session_token = current_session_id.set(session_id)
         workspace_token = current_workspace_id.set(envelope.workspace_id)
         try:
-            history = self.session_store.load(session_id, owner_account_id=owner)
+            history = await self.session_store.load_async(session_id, owner_account_id=owner)
+            context_messages = await self._contribute_prompt_context(envelope)
             system_static, user_reminder = await self._build_prompts(
                 envelope, [], cwd, task_sid=session_id
             )
@@ -710,14 +674,7 @@ class SingleAgent(Agent):
                         owner_account_id=owner,
                     )
                 )
-            if self.wiki_manager is not None:
-                view_messages.extend(
-                    get_wiki_agent_attachment_messages(
-                        session_id,
-                        self.wiki_manager,
-                        owner_account_id=owner,
-                    )
-                )
+            view_messages.extend(context_messages)
             # 与真实发送保持同一顺序：canonical history 先走无需 LLM 的 L1
             # compact，再注入本轮动态 reminder。否则旧 browser/tool 结果会被全量
             # 计入打开会话预览，出现 190% 但发送前已降到低水位的假象。
@@ -776,24 +733,21 @@ class SingleAgent(Agent):
 
         current_session_id.set(task_sid)
         current_display_session_id.set(display_sid or task_sid)
-        # team member 执行工具时，后台子 agent 通知按 member 子会话隔离，
+        # team member 执行工具时，后台子任务通知按 member 子会话隔离，
         # 使完成通知能回到发起 member；主 agent 该值为空（回退 current_session_id）。
+        # 完成结果的待注入队列由 subagent 模块的 PROMPT contributor drain（见
+        # crew/agent/subagent/context.py），drain 键与这里的入队键保持一致。
         notify_session = str(envelope.params.get("member_session_id") or "")
         current_subagent_notify_session.set(notify_session)
-        # team member 派活前 drain 自己的后台完成通知注入本轮上下文
-        #（team 模式下 member.run 不经 app.handle 的 drain；主 agent 无 member_session_id）
-        if notify_session and self.subagent_drain_fn is not None:
-            _pending = self.subagent_drain_fn(notify_session, envelope.user_id)
-            if _pending:
-                envelope.params["subagent_notifications"] = _pending
         current_request_id.set(envelope.request_id)
         current_parent_task_id.set(str(envelope.params.get("sidechain_task_id") or ""))
         current_workspace_id.set(envelope.workspace_id)
-        current_owner_account_id.set(envelope.user_id)
+        current_owner_account_id.set(normalize_owner_account_id(envelope.user_id))
         # 热刷新当前 owner 的运行期 env：config/.env + owner .env + session.json。
-        from crew.state.home import refresh_owner_runtime_env
+        # 同步读盘放工作线程执行，避免阻塞事件循环（_ENV_LOCK 为 threading 锁，线程安全）。
+        from crew.state.home import refresh_owner_runtime_env_async
 
-        refresh_owner_runtime_env(envelope.user_id)
+        await refresh_owner_runtime_env_async(envelope.user_id)
         current_agent_workdir.set(cwd)
         guard = envelope.params.get("workspace_guard")
         current_workspace_guard.set(guard if isinstance(guard, dict) else None)
@@ -827,13 +781,6 @@ class SingleAgent(Agent):
         from crew.security.launch import current_process_launch
 
         current_process_launch.set(envelope.params.get("_security_process_launch"))
-        # 专用 Wiki Agent 自行建立 KB 状态；普通会话不创建 Wiki 会话状态。
-        if (
-            self.wiki_manager is not None
-            and self.tool_disclosure_mode is ToolDisclosureMode.DIRECT
-        ):
-            wiki_kb_id = str(envelope.params.get("wiki_kb_id") or "").strip() or "default"
-            self.wiki_manager.set_kb_id(task_sid, wiki_kb_id, owner_account_id=envelope.user_id)
         t0 = time.perf_counter()
 
         # 装配期模型回退：只打日志用户无感，首轮推 status 让 UI「执行过程」可见。
@@ -850,7 +797,49 @@ class SingleAgent(Agent):
 
         t = time.perf_counter()
         owner = envelope.user_id
-        history = self.session_store.load(sid, owner_account_id=owner)
+        # 新用户回合 supersede 上一回合在途的标题生成：旧标题不应覆盖新会话内容。
+        self._cancel_title_task(task_sid, owner)
+        history = await self.session_store.load_async(sid, owner_account_id=owner)
+        # 冷读配平：为崩溃/旧数据留下的孤儿 tool_call 合成 error 结果（幂等，
+        # 随本轮落库持久化；平衡的历史扫描为空，不每轮产生开销）。
+        repaired = repair_orphan_tool_calls(history)
+        if repaired:
+            history.extend(repaired)
+            log.warning(
+                "历史配平：合成孤儿 tool_call 错误结果 session=%s count=%d",
+                sid,
+                len(repaired),
+            )
+        if not self.lightweight:
+            # 崩溃恢复：上轮被 kill -9 留下的开放回合补 turn_end{interrupted} 闭合
+            # （断点报告在 D4 会话列表扫描，不自动续跑），再为本轮记 turn_start。
+            close_open_turn = getattr(self.session_store, "close_open_turn", None)
+            if callable(close_open_turn) and close_open_turn(sid, owner_account_id=owner):
+                log.warning("上轮会话被中断：已闭合悬挂回合 session=%s", sid)
+            record_turn = getattr(self.session_store, "record_turn_event", None)
+            if callable(record_turn):
+                from crew.state.session_store import SessionEventType
+
+                record_turn(
+                    sid,
+                    owner_account_id=owner,
+                    kind=SessionEventType.TURN_START,
+                )
+            reconcile_tools = getattr(self.session_store, "reconcile_open_tool_events", None)
+            if callable(reconcile_tools):
+                pending_tools = reconcile_tools(task_sid, owner_account_id=owner)
+                if pending_tools:
+                    log.warning(
+                        "恢复会话时关闭未完成工具边界 session=%s count=%d",
+                        task_sid,
+                        len(pending_tools),
+                    )
+        if not self.lightweight:
+            # 文件清单持久会话信息：从工具调用历史提取 read/modified 清单写入
+            # canonical（原地刷新 is_meta 消息），压缩遮蔽后由压缩管线重新注入视图。
+            from crew.agent.compact.file_manifest import upsert_file_manifest
+
+            upsert_file_manifest(history)
         # usage 只代表最近一次 Provider 请求；新回合开始时先清掉旧值，
         # 否则在本回合尚未收到 usage 时，UI 会把上一回合的真实值误认为当前值。
         clear_prompt_usage = getattr(self.session_store, "clear_prompt_usage", None)
@@ -881,25 +870,23 @@ class SingleAgent(Agent):
         user_message.timestamp = turn_started_at
         history.append(user_message)
 
-        if is_new and self.enable_title and not self.lightweight:
-            # 只落占位标题，让会话立刻出现在列表里；标题生成延后到主响应结束后
-            # 由 finally 块调度（见下方 _spawn_title_task 调用），不抢占主推理窗口。
-            if not self._session_needs_title(task_sid, owner):
-                try:
-                    self.session_store.save(
-                        task_sid,
-                        history,
-                        workspace_id=envelope.workspace_id,
-                        owner_account_id=owner,
-                        title_fallback="",
-                    )
-                except Exception:  # noqa: BLE001
-                    log.debug("创建会话标题占位失败 session=%s", task_sid)
+        if not self.lightweight:
+            # 用户边界先提交，再进入 prompt 构建和工具执行。这样即使进程在
+            # LLM/工具阶段退出，重启后仍能恢复到最后一个确定的用户输入。
+            await self.session_store.save_async(
+                task_sid,
+                history,
+                workspace_id=envelope.workspace_id,
+                owner_account_id=owner,
+                title_fallback="" if self.enable_title else None,
+            )
 
         # Skill 展开内容写入 canonical history（is_meta=True，前端不渲染但模型可见）
         skill_meta = envelope.params.get("skill_meta")
         if skill_meta:
-            history.append(Message.user(skill_meta, is_meta=True))
+            skill_message = Message.user(skill_meta, is_meta=True)
+            skill_message.source_kind = "skill_context"
+            history.append(skill_message)
 
         # OCC-style hidden plan attachments: persist in canonical history so
         # future turns can see prior reminders and throttle by user turns.
@@ -913,15 +900,7 @@ class SingleAgent(Agent):
                 )
             )
 
-        # 专用 Wiki Agent 每轮注入活跃知识库与 KB 列表上下文。
-        if self.wiki_manager is not None:
-            history.extend(
-                get_wiki_agent_attachment_messages(
-                    task_sid,
-                    self.wiki_manager,
-                    owner_account_id=owner,
-                )
-            )
+        history.extend(await self._contribute_prompt_context(envelope))
 
         t = time.perf_counter()
         system_static, user_reminder = await self._build_prompts(
@@ -932,6 +911,9 @@ class SingleAgent(Agent):
 
         # 3. 上下文压缩：仅作用于「发给 LLM 的视图」llm_messages，
         #    不破坏 history（旧的详细历史仍完整持久化）。
+        #    工具 schema 提前解析：摘要调用的 KV 前缀复用需要复放 tools 块。
+        effective_tool_filter = self._effective_tool_filter(task_sid, owner_account_id=owner)
+        tool_schemas = self.registry.list_schemas(effective_tool_filter)
         llm_messages = list(history)  # 拷贝，避免 executor 追加时污染 canonical
         if self.compactor is not None:
             t = time.perf_counter()
@@ -939,6 +921,8 @@ class SingleAgent(Agent):
                 llm_messages,
                 task_sid,
                 owner_account_id=owner,
+                system_prompt=system_static,
+                tools=tool_schemas,
             )
             log.info("[PERF] compactor          %.3fs", time.perf_counter() - t)
 
@@ -961,7 +945,6 @@ class SingleAgent(Agent):
         )
 
         # 4. 组执行上下文，委托 executor（executor 把本轮新消息追加到 llm_messages）
-        effective_tool_filter = self._effective_tool_filter(task_sid, owner_account_id=owner)
         authorized_tool_names = frozenset(
             effective_tool_filter if effective_tool_filter is not None else self.registry.names()
         )
@@ -969,6 +952,24 @@ class SingleAgent(Agent):
 
         current_authorized_tool_names.set(authorized_tool_names)
         from crew.agent.skills import skill_activations_from_params
+
+        async def _durable_event_sink(kind: str, payload: dict[str, Any]) -> None:
+            record = getattr(self.session_store, "record_durable_event_async", None)
+            if not callable(record):
+                return
+            try:
+                from crew.state.session_store import SessionEventType
+
+                event_kind = SessionEventType(kind)
+            except (ImportError, ValueError):
+                log.warning("忽略未知 durable boundary kind=%s session=%s", kind, task_sid)
+                return
+            await record(
+                task_sid,
+                owner_account_id=owner,
+                kind=event_kind,
+                payload=payload,
+            )
 
         ctx = ExecutionContext(
             session_id=task_sid,
@@ -981,15 +982,20 @@ class SingleAgent(Agent):
                 for attachment in (envelope.attachments or [])
                 if isinstance(attachment, dict)
             ],
-            tool_schemas=self.registry.list_schemas(effective_tool_filter),
+            tool_schemas=tool_schemas,
             authorized_tool_names=authorized_tool_names,
             enforce_tool_scope=True,
             params=dict(envelope.params),
             active_skills=skill_activations_from_params(envelope.params),
             cwd=cwd,
             max_iterations=self.max_iterations,
+            deadline_seconds=max(
+                0.0,
+                float(envelope.params.get("_turn_deadline_seconds") or 0.0),
+            ),
             control=self.control,
             tool_disclosure_mode=self.tool_disclosure_mode,
+            durable_event_sink=None if self.lightweight else _durable_event_sink,
         )
         t_exec = time.perf_counter()
         interrupted = False
@@ -1053,6 +1059,25 @@ class SingleAgent(Agent):
                     last_prompt_tokens_source=last_prompt_tokens_source,
                 )
                 persisted = True
+                if not self.lightweight:
+                    record_turn = getattr(self.session_store, "record_turn_event", None)
+                    if callable(record_turn):
+                        from crew.state.session_store import SessionEventType
+
+                        record_turn(
+                            sid,
+                            owner_account_id=owner,
+                            kind=SessionEventType.TURN_END,
+                            status=terminal_outcome,
+                        )
+                if last_prompt_tokens is not None:
+                    await self._record_meter_checkpoint(
+                        envelope,
+                        task_sid,
+                        llm_messages,
+                        last_prompt_tokens,
+                        last_prompt_tokens_source,
+                    )
             finally:
                 try:
                     await self.plugins.on_session_end(
@@ -1390,7 +1415,6 @@ class SingleAgent(Agent):
         inflight_key = (owner, title_sid)
         if inflight_key in self._title_inflight:
             return
-        self._title_inflight.add(inflight_key)
 
         async def _run() -> None:
             try:
@@ -1428,12 +1452,68 @@ class SingleAgent(Agent):
                         log.debug("推送会话标题失败：%s", exc)
             except Exception as exc:  # noqa: BLE001
                 log.debug("后台标题生成失败：%s", exc)
-            finally:
-                self._title_inflight.discard(inflight_key)
 
         task = asyncio.create_task(_run())
+
+        def _discard(done_task: asyncio.Task) -> None:
+            self._title_tasks.discard(done_task)
+            if self._title_inflight.get(inflight_key) is done_task:
+                self._title_inflight.pop(inflight_key, None)
+
+        self._title_inflight[inflight_key] = task
         self._title_tasks.add(task)
-        task.add_done_callback(self._title_tasks.discard)
+        task.add_done_callback(_discard)
+
+    def _cancel_title_task(self, title_sid: str, owner: str) -> None:
+        """新用户回合 supersede 在途标题生成：取消旧任务，失败/取消不进入用户回合路径。"""
+        task = self._title_inflight.pop((owner, title_sid), None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _record_meter_checkpoint(
+        self,
+        envelope: Envelope,
+        task_sid: str,
+        llm_messages: list[Message],
+        last_prompt_tokens: int,
+        last_prompt_tokens_source: str | None,
+    ) -> None:
+        """本轮真实 usage 喂给压缩器计量锚点，并以 meter_checkpoint 事件落库。
+
+        在 _persist_turn 之后调用：save 已写好基础 checkpoint 行，
+        这里追加带完整请求信封（fingerprint + 锚定视图估算）的版本，
+        TokenMeter 跨重启按最新一行重锚定。
+        """
+        from crew.agent.compact.tokens import estimate_tokens
+
+        owner = envelope.user_id
+        fingerprint = f"{type(self.provider).__name__}:{getattr(self.provider, 'model', '')}"
+        view_estimate = estimate_tokens(llm_messages)
+        source = last_prompt_tokens_source or "provider"
+        if self.compactor is not None:
+            self.compactor.record_meter_usage(
+                task_sid,
+                owner,
+                prompt_tokens=last_prompt_tokens,
+                source=source,
+                fingerprint=fingerprint,
+                view_estimate=view_estimate,
+            )
+        record = getattr(self.session_store, "record_meter_checkpoint", None)
+        if not callable(record):
+            return
+        try:
+            await asyncio.to_thread(
+                record,
+                task_sid,
+                owner_account_id=owner,
+                prompt_tokens=last_prompt_tokens,
+                source=source,
+                fingerprint=fingerprint,
+                baseline_estimate=view_estimate,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("meter_checkpoint 落库失败 session=%s", task_sid)
 
     async def _persist_turn(
         self,
@@ -1452,7 +1532,7 @@ class SingleAgent(Agent):
 
         无论本轮是正常结束、被硬停（CancelledError）还是异常，都会调用，保证
         user 消息与已完成的工具调用一定落库（否则停止后刷新即丢、下一轮无上下文）。
-        持久化用同步 session_store.save（不可被取消打断）；memory.write 用 shield
+        持久化用 save_async（线程池执行，同样不可被取消打断）；memory.write 用 shield
         兜底，被取消时 best-effort。子 agent（lightweight）用完即弃，不落库不写记忆。
         session_store 按 sidechain 的 session_id 存（transcript 隔离机制，不能改）；
         memory 按 task_sid（稳定主会话 id）存，否则会落到 ::turn:: 临时 id 下。
@@ -1520,7 +1600,7 @@ class SingleAgent(Agent):
                 # title_fallback：enable_title=True 时留空占位，等下方 generate_session_title
                 # 生成摘要后由 set_title 写入；否则保留旧行为（首条 user 消息截断作标题）。
                 # 避免「先 save 写入截断用户原话 → 摘要生成失败 → 标题永久停在原话」。
-                self.session_store.save(
+                await self.session_store.save_async(
                     sid,
                     history,
                     workspace_id=envelope.workspace_id,

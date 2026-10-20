@@ -64,11 +64,7 @@ export type ChunkKind =
   | "todo_updated"
   | "todo_reminder"
   | "file_changes"
-  | "workflow_progress"
-  | "wiki_cards"
-  | "wiki_ingest_progress"
-  | "wiki_changed"
-  | "team_internal";
+  | "feature_event";
 
 export interface TodoItem {
   id: string;
@@ -118,6 +114,13 @@ export interface ToolCallInfo {
   status: "generating" | "running" | "done" | "error";
   startedAt: number;
   duration?: number;
+}
+
+export interface FeatureEventBody {
+  feature: string;
+  event: string;
+  version?: number;
+  payload?: Record<string, any>;
 }
 
 export interface Chunk {
@@ -180,6 +183,28 @@ export interface Task {
   auto_backgrounded?: boolean;
 }
 
+export interface SubagentApiRecord {
+  subagent_id?: string;
+  child_id?: string;
+  label?: string;
+  provider?: string;
+  lifecycle?: string;
+  state?: string;
+  status?: string;
+  stop_reason?: string | null;
+  started_at?: number;
+  created_at?: number;
+  settled_at?: number | null;
+  [key: string]: unknown;
+}
+
+export interface SubagentListResponse {
+  ok: boolean;
+  items: SubagentApiRecord[] | Record<string, SubagentApiRecord[]>;
+  runs: SubagentApiRecord[];
+  error?: string;
+}
+
 export interface RuntimeSessionStatus {
   session_id: string;
   live: "idle" | "running" | "queued" | string;
@@ -233,6 +258,13 @@ export interface AppConfig {
   external_agents?: {
     enabled: boolean;
   };
+  feature_capabilities?: Record<string, FeatureCapability>;
+}
+
+export interface FeatureCapability {
+  state: string;
+  available: boolean;
+  generation: string | null;
 }
 
 export type WikiPageType = "entity" | "topic" | "source" | "comparison" | "synthesis";
@@ -593,6 +625,8 @@ export interface DebugEvent {
 
 export type MsgRole = "user" | "assistant" | "tool" | "status" | "error" | "team_internal";
 
+export type SessionStatus = "idle" | "running" | "queued" | "error";
+
 /** 附件类型 */
 export interface Attachment {
   id: string;
@@ -664,6 +698,12 @@ export interface UiMessage {
   todoSnapshot?: TodoItem[];
   /** 本消息回合内产生的 Wiki 页面卡片。 */
   wikiCards?: WikiPage[];
+  /** 子智能体生命周期事件的结构化标识，状态消息仍复用现有 agent timeline。 */
+  subagentId?: string;
+  subagentState?: "started" | "settled" | "running" | "ready" | "idle";
+  subagentLabel?: string;
+  subagentProvider?: string;
+  subagentStopReason?: string;
 }
 
 export interface TeamMemberView {

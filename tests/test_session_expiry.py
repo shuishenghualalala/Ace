@@ -40,12 +40,14 @@ def _first_key(mgr: AgentManager, session_id: str):
 def test_lru_eviction_on_cap():
     """超过 max_size 时淘汰最久未用的条目。"""
     mgr = AgentManager(_factory, max_size=3)
-    mgr.get("s1")
-    mgr.get("s2")
-    mgr.get("s3")
+    mgr.get("s1", owner_account_id="local")
+    mgr.get("s2", owner_account_id="local")
+    mgr.get("s3", owner_account_id="local")
+
     assert len(mgr._cache) == 3
     # 加入第 4 个，s1 应被淘汰
-    mgr.get("s4")
+    mgr.get("s4", owner_account_id="local")
+
     assert len(mgr._cache) == 3
     assert "s1" not in _session_keys(mgr)
 
@@ -53,13 +55,16 @@ def test_lru_eviction_on_cap():
 def test_lru_move_to_end_on_access():
     """访问已有条目时移到末尾，不被淘汰。"""
     mgr = AgentManager(_factory, max_size=3)
-    mgr.get("s1")
-    mgr.get("s2")
-    mgr.get("s3")
+    mgr.get("s1", owner_account_id="local")
+    mgr.get("s2", owner_account_id="local")
+    mgr.get("s3", owner_account_id="local")
+
     # 访问 s1，使其成为最近使用
-    mgr.get("s1")
+    mgr.get("s1", owner_account_id="local")
+
     # 加入新条目，s2 应被淘汰（最久未用）
-    mgr.get("s4")
+    mgr.get("s4", owner_account_id="local")
+
     assert "s2" not in _session_keys(mgr)
     assert "s1" in _session_keys(mgr)  # s1 刚被访问过，不应被淘汰
 
@@ -67,11 +72,11 @@ def test_lru_move_to_end_on_access():
 def test_evict_idle():
     """超过 idle_ttl 的条目被淘汰。"""
     mgr = AgentManager(_factory, max_size=10, idle_ttl=1.0)
-    mgr.get("s1")
+    mgr.get("s1", owner_account_id="local")
     # 手动模拟时间流逝：设置 s1 的访问时间为很久以前
     mgr._access_ts[_first_key(mgr, "s1")] = time.monotonic() - 100.0
     # s2 最近访问
-    mgr.get("s2")
+    mgr.get("s2", owner_account_id="local")
 
     evicted = mgr.evict_idle()
     assert evicted == 1
@@ -82,8 +87,8 @@ def test_evict_idle():
 def test_evict_idle_none_expired():
     """所有条目都在 TTL 内，不淘汰。"""
     mgr = AgentManager(_factory, max_size=10, idle_ttl=3600.0)
-    mgr.get("s1")
-    mgr.get("s2")
+    mgr.get("s1", owner_account_id="local")
+    mgr.get("s2", owner_account_id="local")
     evicted = mgr.evict_idle()
     assert evicted == 0
     assert len(mgr._cache) == 2
@@ -92,9 +97,10 @@ def test_evict_idle_none_expired():
 def test_drop_and_clear():
     """drop 和 clear 正常工作。"""
     mgr = AgentManager(_factory)
-    mgr.get("s1")
-    mgr.get("s2")
-    mgr.drop("s1")
+    mgr.get("s1", owner_account_id="local")
+    mgr.get("s2", owner_account_id="local")
+    mgr.drop("s1", owner_account_id="local")
+
     assert "s1" not in _session_keys(mgr)
     mgr.clear()
     assert len(mgr._cache) == 0
@@ -110,10 +116,11 @@ async def test_active_agent_eviction_waits_for_last_lease_then_closes_once():
         return agent
 
     mgr = AgentManager(factory)
-    async with mgr.lease("s1") as old_agent:
-        mgr.drop("s1")
+    async with mgr.lease("s1", owner_account_id="local") as old_agent:
+        mgr.drop("s1", owner_account_id="local")
         assert old_agent.close_calls == 0
-        replacement = mgr.get("s1")
+        replacement = mgr.get("s1", owner_account_id="local")
+
         assert replacement is not old_agent
 
     await mgr.wait_closed()
@@ -124,8 +131,8 @@ async def test_active_agent_eviction_waits_for_last_lease_then_closes_once():
 @pytest.mark.asyncio
 async def test_lru_and_idle_eviction_close_inactive_agents():
     mgr = AgentManager(_factory, max_size=1, idle_ttl=1.0)
-    first = mgr.get("s1")
-    second = mgr.get("s2")
+    first = mgr.get("s1", owner_account_id="local")
+    second = mgr.get("s2", owner_account_id="local")
     await mgr.wait_closed()
     assert first.close_calls == 1
     assert second.close_calls == 0
@@ -139,14 +146,14 @@ async def test_lru_and_idle_eviction_close_inactive_agents():
 @pytest.mark.asyncio
 async def test_agent_manager_repeated_aclose_is_safe_and_rejects_new_leases():
     mgr = AgentManager(_factory)
-    agent = mgr.get("s1")
+    agent = mgr.get("s1", owner_account_id="local")
 
     await mgr.aclose()
     await mgr.aclose()
 
     assert agent.close_calls == 1
     with pytest.raises(RuntimeError, match="已关闭"):
-        async with mgr.lease("s2"):
+        async with mgr.lease("s2", owner_account_id="local"):
             pass
 
 
@@ -166,9 +173,9 @@ def _expired_session_store(db_path: str, sessions: dict[str, str | None], fresh:
     store = SQLiteSessionStore(db_path)
     old_time = time.time() - 7200  # 2 小时前
     for sid, status in sessions.items():
-        store.save(sid, [Message.user("hello")])
+        store.save(sid, [Message.user("hello")], owner_account_id="local")
         if status is not None:
-            store.set_status(sid, status)
+            store.set_status(sid, status, owner_account_id="local")
         if sid not in fresh:
             store._conn.execute("UPDATE sessions SET updated_at = ? WHERE session_id = ?", (old_time, sid))
     store._conn.commit()
@@ -185,8 +192,8 @@ def test_expire_idle_sessions(tmp_path):
     expired = store.expire_idle_sessions(3600.0)
     assert expired == 1
     # s1 被清理，s2 保留
-    assert store.load("s1") == []
-    assert len(store.load("s2")) == 1
+    assert store.load("s1", owner_account_id="local") == []
+    assert len(store.load("s2", owner_account_id="local")) == 1
 
 
 def test_expire_does_not_remove_running_sessions(tmp_path):
@@ -196,7 +203,7 @@ def test_expire_does_not_remove_running_sessions(tmp_path):
     # 清理不应删除正在运行的会话
     expired = store.expire_idle_sessions(3600.0)
     assert expired == 0
-    assert len(store.load("s1")) == 1
+    assert len(store.load("s1", owner_account_id="local")) == 1
 
 
 def test_expire_zero_timeout_no_op(tmp_path):
@@ -213,14 +220,14 @@ def test_expire_excludes_running_via_exclude_set(tmp_path):
 
     expired = store.expire_idle_sessions(3600.0, exclude_session_ids={"s1"})
     assert expired == 0
-    assert len(store.load("s1")) == 1
+    assert len(store.load("s1", owner_account_id="local")) == 1
 
 
 def test_set_running_status_refreshes_updated_at(tmp_path):
     """set_status('running') 会刷新 updated_at，防止长任务被过期清理。"""
     store, old_time = _expired_session_store(str(tmp_path / "test.db"), {"s1": None})
 
-    store.set_status("s1", "running")
+    store.set_status("s1", "running", owner_account_id="local")
     row = store._conn.execute("SELECT updated_at, last_status FROM sessions WHERE session_id = ?", ("s1",)).fetchone()
     assert row[1] == "running"
     assert row[0] > old_time + 1

@@ -20,6 +20,8 @@ export interface SettingsIntegrationItem {
   image?: { src: string; alt?: string };
   active?: boolean;
   actions?: SettingsIntegrationAction[];
+  /** 分组标题：相邻 item 的 group 变化时在列表中插入一个组头行。 */
+  group?: string;
 }
 
 export interface SettingsIntegrationSnapshot {
@@ -115,7 +117,17 @@ export function createSettingsIntegrationView(options: {
       status.textContent = nextSnapshot.message;
       status.hidden = !nextSnapshot.message;
       list.replaceChildren();
+      let lastGroup: string | undefined;
       for (const item of nextSnapshot.items) {
+        if (item.group !== lastGroup) {
+          lastGroup = item.group;
+          if (item.group) {
+            const groupHeader = document.createElement('div');
+            groupHeader.className = 'settings-integrations__group';
+            groupHeader.textContent = item.group;
+            list.append(groupHeader);
+          }
+        }
         const row = document.createElement('article');
         const select = document.createElement(item.selectable ? 'button' : 'div');
         const symbol = document.createElement('span');

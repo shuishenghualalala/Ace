@@ -69,6 +69,12 @@ def test_response_chunk_factories():
     assert ResponseChunk.final(rid, "done").is_final is True
     assert ResponseChunk.error(rid, "boom").status == "failed"
     assert ResponseChunk.tool_event(rid, "terminal", "start").kind == "tool"
+    unavailable = ResponseChunk.error(
+        rid,
+        "unavailable",
+        code="capability_unavailable",
+    )
+    assert unavailable.body["code"] == "capability_unavailable"
 
 
 def test_file_write_tool_event_omits_content_from_frontend_payload():

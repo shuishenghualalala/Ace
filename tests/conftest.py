@@ -24,9 +24,35 @@ def _restore_process_env():
     build_app 会读到真实模型并发起真实 HTTP 调用（慢、烧钱、顺序依赖失败）。
     """
     before = dict(os.environ)
+    # 隔离运行器 shell 的 CREW_*/GATEWAY_* 变量：否则 legacy CREW_MODEL/CREW_BASE_URL
+    # 覆盖路径会把本会话的模型配置泄进测试（每个用例需显式 setenv 自己需要的变量）。
+    leaked = [
+        name
+        for name in (*os.environ, "GATEWAY_PORT")
+        if name.startswith("CREW_") or name == "GATEWAY_PORT"
+    ]
+    saved = {name: os.environ.pop(name) for name in leaked if name in os.environ}
     yield
     os.environ.clear()
     os.environ.update(before)
+    for name, value in saved.items():
+        os.environ[name] = value
+
+
+@pytest.fixture(autouse=True)
+def _isolate_machine_config(tmp_path, monkeypatch, _restore_process_env):
+    """每个用例与开发机真实配置文件隔离：config.ROOT 与 CREW_HOME 指向用例私有目录。
+
+    开发态 load_config() 读 ROOT/config/config.yaml（被 gitignore 的本机文件，
+    首跑自动从 config.yaml.example 复制），其中 auth.mode、security.enabled 等
+    键随机器/版本漂移——例如 example 默认 auth.mode=email，所有依赖本机免登录
+    的 gateway 用例会稳定吃到 401。CREW_HOME 未隔离的用例还会读写真实 ~/.crew
+    （含 owner overlay config.yaml），是另一处非确定性来源。重定向后
+    load_config() 只剩代码默认值；需要特定配置的用例自行 monkeypatch ROOT 或
+    setenv CREW_HOME 覆盖（monkeypatch 后写生效，互不冲突）。
+    """
+    monkeypatch.setattr("crew.state.config.ROOT", tmp_path)
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
 
 
 @pytest.fixture(autouse=True)
@@ -42,7 +68,7 @@ def _close_live_crew_apps():
     yield
 
     from crew.app import _LIVE_APPS
-    from crew.gateway.hooks import hook_registry
+    from crew.features.hooks import hook_registry
     from crew.tools.process_registry import process_registry
 
     while _LIVE_APPS:

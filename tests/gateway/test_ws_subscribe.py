@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import ast
+import asyncio
+import threading
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -11,6 +16,14 @@ from crew.gateway.ws import (
     create_ws_router,
     normalize_team_execution_profile,
     normalize_user_mentions,
+)
+from crew.features import (
+    EventFailurePolicy,
+    FeatureEvent,
+    FeatureEventContributor,
+    FeatureEventContributorRegistry,
+    FeatureScope,
+    FeatureGeneration,
 )
 
 AUTH_HEADERS: dict[str, str] = {}
@@ -208,3 +221,161 @@ def test_followup_answer_waits_for_gateway_resolution_ack(monkeypatch):
         "accepted": True,
         "note": "",
     }
+
+
+def _event_client(connections: _ReplayConnections, event_contributors=None) -> TestClient:
+    app = FastAPI()
+    crew = SimpleNamespace(
+        active_owner=_ActiveOwnerStub(),
+        config=SimpleNamespace(),
+        event_contributors=event_contributors,
+        session_store=SimpleNamespace(
+            session_belongs_to=lambda _sid, _owner: True,
+            ensure_session=lambda *_args, **_kwargs: None,
+        ),
+        plugins=SimpleNamespace(run_plugin_command=lambda *_args, **_kwargs: None),
+    )
+    dispatcher = SimpleNamespace()
+    channel_manager = SimpleNamespace(status=lambda: [])
+    app.include_router(create_ws_router(crew, dispatcher, connections, channel_manager))
+    return TestClient(app)
+
+
+def test_ws_dispatches_neutral_registry_and_pushes_standard_feature_event(monkeypatch):
+    registry = FeatureEventContributorRegistry()
+    scope = FeatureScope(FeatureGeneration("neutral", 1))
+    scope.activate()
+    registry.register(
+        scope,
+        FeatureEventContributor(
+            "neutral.source",
+            lambda envelope: FeatureEvent("neutral", "ready", 1, {"session": envelope.session_id}),
+        ),
+    )
+    connections = _ReplayConnections()
+
+    async def complete_round(_crew, connection_store, envelope, owner):
+        await connection_store.push_payload(
+            envelope.session_id,
+            {"kind": "final", "body": {"text": "done"}, "is_final": True, "sequence": 1},
+            owner_account_id=owner,
+        )
+        return "done", None
+
+    monkeypatch.setattr("crew.gateway.ws.stream_and_broadcast", complete_round)
+    client = _event_client(connections, registry)
+    with client.websocket_connect("/ws", headers=AUTH_HEADERS) as ws:
+        ws.send_json({"query": "hello", "session_id": "event-s1"})
+        first = ws.receive_json()
+        second = ws.receive_json()
+
+    assert first["kind"] == "final"
+    assert second["kind"] == "feature_event"
+    assert second["body"] == {
+        "feature": "neutral",
+        "event": "ready",
+        "version": 1,
+        "payload": {"session": "event-s1"},
+    }
+
+
+def test_ws_degraded_event_source_does_not_break_normal_round_tail(monkeypatch, caplog):
+    registry = FeatureEventContributorRegistry()
+    scope = FeatureScope(FeatureGeneration("degraded", 1))
+    scope.activate()
+
+    def broken(_):
+        raise RuntimeError("event source unavailable")
+
+    registry.register(
+        scope,
+        FeatureEventContributor(
+            "degraded.source",
+            broken,
+            failure_policy=EventFailurePolicy.DEGRADE,
+        ),
+    )
+    connections = _ReplayConnections()
+
+    async def complete_round(_crew, connection_store, envelope, owner):
+        await connection_store.push_payload(
+            envelope.session_id,
+            {"kind": "final", "body": {"text": "tail"}, "is_final": True, "sequence": 1},
+            owner_account_id=owner,
+        )
+        return "tail", None
+
+    monkeypatch.setattr("crew.gateway.ws.stream_and_broadcast", complete_round)
+    client = _event_client(connections, registry)
+    with client.websocket_connect("/ws", headers=AUTH_HEADERS) as ws:
+        ws.send_json({"query": "hello", "session_id": "degrade-s1"})
+        frame = ws.receive_json()
+
+    assert frame["kind"] == "final"
+    assert "degraded.source" in caplog.text
+
+
+def test_ws_without_event_registry_still_finishes_round_and_does_not_dispatch(monkeypatch):
+    connections = _ReplayConnections()
+    calls = []
+
+    async def complete_round(_crew, connection_store, envelope, owner):
+        calls.append(envelope.session_id)
+        await connection_store.push_payload(
+            envelope.session_id,
+            {"kind": "final", "body": {"text": "ok"}, "is_final": True, "sequence": 1},
+            owner_account_id=owner,
+        )
+        return "ok", None
+
+    monkeypatch.setattr("crew.gateway.ws.stream_and_broadcast", complete_round)
+    client = _event_client(connections, None)
+    with client.websocket_connect("/ws", headers=AUTH_HEADERS) as ws:
+        ws.send_json({"query": "hello", "session_id": "no-registry"})
+        frame = ws.receive_json()
+
+    assert frame["kind"] == "final"
+    assert calls == ["no-registry"]
+
+
+def test_ws_disconnect_skips_event_dispatch_and_leaves_source_pending(monkeypatch):
+    connections = _ReplayConnections()
+    started = threading.Event()
+    release = threading.Event()
+    dispatched = threading.Event()
+
+    class PendingEvents:
+        async def dispatch(self, _envelope, _sink):
+            dispatched.set()
+            return SimpleNamespace(events=(), failures=())
+
+    async def delayed_round(_crew, _connection_store, _envelope, _owner):
+        started.set()
+        await asyncio.to_thread(release.wait)
+        return "", None
+
+    monkeypatch.setattr("crew.gateway.ws.stream_and_broadcast", delayed_round)
+    client = _event_client(connections, PendingEvents())
+    with client.websocket_connect("/ws", headers=AUTH_HEADERS) as ws:
+        ws.send_json({"query": "hello", "session_id": "disconnected"})
+        assert started.wait(timeout=1)
+        ws.close()
+        time.sleep(0.05)
+        release.set()
+        assert not dispatched.wait(timeout=0.5)
+
+
+def test_ws_source_has_no_wiki_manager_or_wiki_import_boundary():
+    import crew.gateway.ws as ws_module
+
+    source = Path(ws_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported_modules = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    assert not any(module.startswith("crew.wiki") for module in imported_modules)
+    assert "wiki_manager" not in source
+    assert not {"Wiki", "WikiManager"} & names

@@ -10,7 +10,7 @@
 #
 # 做的事：
 #   1. 确保 uv 可用（缺失时按官方方式安装）
-#   2. uv 创建 .venv（Python 3.11）并安装 crew 后端
+#   2. uv 创建 .venv（Python 3.11）并以 uv sync 安装 crew 后端（含 workspace 成员包）
 #   3. 缺失时从 *.example 复制 config/config.yaml 与 config/.env
 #   4. 可选：Web / Desktop 的 npm install 与构建（需要 Node.js >= 22.12）
 # 不做的事：不写入系统目录、不配置任何模型密钥。
@@ -56,22 +56,18 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 Info "uv: $(uv --version)"
 
 # ----- 2. Python 虚拟环境与后端依赖 -----
-$extras = @()
-if (-not $NoWiki) { $extras += 'wiki' }
-if ($Dev)         { $extras += 'dev' }
+# 仓库是 uv workspace（成员包位于 packages/*，共享单份 uv.lock，见 ADR-0037），
+# 统一用 `uv sync` 安装：根包与全部成员一并 editable 装入 .venv。
+$syncArgs = @('--python', '3.11')
+if (-not $NoWiki) { $syncArgs += @('--extra', 'wiki') }
+if ($Dev)         { $syncArgs += @('--extra', 'dev') }
 
 Info "创建 .venv（Python 3.11）"
 uv venv .venv --python 3.11
 if ($LASTEXITCODE -ne 0) { Die "uv venv 失败" }
 
-if ($extras.Count -gt 0) {
-    $extraList = $extras -join ','
-    Info "安装后端依赖（extras: $extraList）"
-    uv pip install -e ".[$extraList]"
-} else {
-    Info "安装后端依赖"
-    uv pip install -e .
-}
+Info "安装后端依赖（uv sync $($syncArgs -join ' '))"
+uv sync @syncArgs
 if ($LASTEXITCODE -ne 0) { Die "依赖安装失败" }
 
 # ----- 3. 本地配置模板（已存在则不覆盖） -----

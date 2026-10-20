@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from crew.agent import skills
+import crew.agent.skills as skills
 
 
 @pytest.fixture

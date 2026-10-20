@@ -16,14 +16,21 @@ import {
   createStreamingPatchCoalescer,
   type FoldSets,
 } from '../../src/ui/render-utils';
-import { formatMessageTime, formatDuration, renderQueuePanelHtml, sessionStatusClass } from '../../src/ui/chat-render';
+import { formatMessageTime, formatDuration, renderQueuePanelHtml, sessionStatusClass, type ChatMessage } from '../../src/ui/chat-render';
 import {
   disposeConversationRenderer,
   getConversationScrollAnchor,
   renderConversation,
 } from '../../src/ui/features/conversation-renderer';
 import { __resetAllStoresForTest } from '../../src/ui/stores/stores';
-import { appendSessionMessage } from '../../src/ui/state';
+import {
+  appendSessionMessage,
+  clearHistoryLoadError,
+  markHistoryLoadError,
+  replaceSessionMessages,
+  setHistoryLoading,
+} from '../../src/ui/state';
+import { reportRendererError } from '../../src/ui/renderer-error-report';
 
 // conversation-renderer 的重依赖：本文件只验证消息流渲染与 diff 缓存隔离，
 // 外部会话身份 / 看板 / 浏览器面板点击跳转不在此覆盖。
@@ -38,6 +45,24 @@ vi.mock('../../src/ui/features/browser-panel', () => ({
   openBrowserArtifact: vi.fn(async () => 'in_app'),
   openUserBrowser: vi.fn(async () => 'in_app'),
 }));
+
+// P0-1 渲染隔离：只毒化这两个 id 的消息构建，其余走真实实现。
+// poison-user → 仅 build 抛错；poison-sig → sig 与 build 都抛错（坏字段形状）。
+vi.mock('../../src/ui/chat-render', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/ui/chat-render')>();
+  return {
+    ...actual,
+    renderMessageHtml: vi.fn((msg: { id?: string }) => {
+      if (msg?.id === 'poison-user' || msg?.id === 'poison-sig') throw new Error('poisoned build');
+      return actual.renderMessageHtml(msg as Parameters<typeof actual.renderMessageHtml>[0]);
+    }),
+  };
+});
+// 只替换上报入口（断言用），其余（safeStringify 等）走真实实现。
+vi.mock('../../src/ui/renderer-error-report', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/ui/renderer-error-report')>();
+  return { ...actual, reportRendererError: vi.fn() };
+});
 
 describe('applyFoldState', () => {
   function makeSets(): FoldSets {
@@ -100,6 +125,34 @@ describe('createChatRenderCoalescer', () => {
     // 不调用 schedule
     void schedule;
     expect(renderCalls).toBe(0);
+  });
+
+  it('cancel before flush suppresses the queued render', () => {
+    const queue: Array<() => void> = [];
+    const scheduler = (cb: () => void) => queue.push(cb);
+    let renderCalls = 0;
+    const schedule = createChatRenderCoalescer(() => { renderCalls += 1; }, scheduler);
+
+    schedule();
+    schedule.cancel();
+    queue.splice(0).forEach((fn) => fn());
+    expect(renderCalls).toBe(0);
+  });
+
+  it('cancel then reschedule keeps the old callback from consuming the new render', () => {
+    const queue: Array<() => void> = [];
+    const scheduler = (cb: () => void) => queue.push(cb);
+    let renderCalls = 0;
+    const schedule = createChatRenderCoalescer(() => { renderCalls += 1; }, scheduler);
+
+    schedule();
+    schedule.cancel();
+    schedule();
+    expect(queue).toHaveLength(2);
+    queue.shift()?.();
+    expect(renderCalls).toBe(0);
+    queue.shift()?.();
+    expect(renderCalls).toBe(1);
   });
 });
 
@@ -264,5 +317,128 @@ describe('conversation-renderer 双实例隔离', () => {
     expect(panelA.textContent).toContain('面板B消息');
     expect(panelA.textContent).not.toContain('面板A第二条');
     expect(panelB.querySelector('.msg')).toBe(bFirst);
+  });
+});
+
+describe('P0-1 渲染隔离与历史失败可见化', () => {
+  beforeEach(() => {
+    __resetAllStoresForTest();
+    vi.mocked(reportRendererError).mockClear();
+    document.body.innerHTML = '<div id="panel-a"></div>';
+  });
+
+  afterEach(() => {
+    disposeConversationRenderer('panel-a');
+  });
+
+  it('单条消息构建抛错只降级为错误占位卡，其余消息照常渲染', () => {
+    const panel = document.getElementById('panel-a')!;
+    appendSessionMessage('sid-p0', { id: 'poison-user', role: 'user', content: '毒消息', timestamp: 1 });
+    appendSessionMessage('sid-p0', { id: 'good-user', role: 'user', content: '正常消息', timestamp: 2 });
+
+    renderConversation(panel, 'panel-a', 'sid-p0');
+
+    // 好消息正常渲染；坏消息降级为错误占位卡；异常被上报而非逃逸。
+    expect(panel.textContent).toContain('正常消息');
+    expect(panel.querySelector('.render-error-card')).not.toBeNull();
+    expect(reportRendererError).toHaveBeenCalledWith('render', expect.any(Error), expect.objectContaining({ unitKey: 'poison-user' }));
+
+    // 同帧数据不变（sig 未变 → reuse）：第二次渲染不重试 build、不重复上报。
+    const errorCards = () => panel.querySelectorAll('.render-error-card').length;
+    const before = errorCards();
+    renderConversation(panel, 'panel-a', 'sid-p0');
+    expect(errorCards()).toBe(before);
+  });
+
+  it('sig 阶段抛错只降级该单元，数据变化后仍会重试', () => {
+    const panel = document.getElementById('panel-a')!;
+    // attachments 非数组：sigUserMessage 的 .map 抛 TypeError，且该单元 build 也被毒化。
+    const badMessage = {
+      id: 'poison-sig',
+      role: 'user',
+      content: '坏 sig 消息',
+      timestamp: 1,
+      attachments: 'not-an-array',
+    } as unknown as ChatMessage;
+    appendSessionMessage('sid-sig', badMessage);
+    appendSessionMessage('sid-sig', { id: 'good-sig', role: 'user', content: '正常消息', timestamp: 2 });
+
+    // 整轮渲染不抛错：坏单元降级为错误占位卡，同屏正常消息照常渲染。
+    expect(() => renderConversation(panel, 'panel-a', 'sid-sig')).not.toThrow();
+    expect(panel.textContent).toContain('正常消息');
+    expect(panel.querySelectorAll('.render-error-card')).toHaveLength(1);
+    expect(reportRendererError).toHaveBeenCalledWith(
+      'render',
+      expect.any(Error),
+      expect.objectContaining({ unitKey: 'poison-sig', phase: 'sig' }),
+    );
+
+    // 数据变化 → 兜底摘要变化 → sig 变化 → 重新尝试 build（再次上报），不会永久停在错误卡。
+    const reportsBefore = vi.mocked(reportRendererError).mock.calls.length;
+    replaceSessionMessages('sid-sig', [
+      { ...badMessage, content: '坏 sig 消息（已更新）' },
+      { id: 'good-sig', role: 'user', content: '正常消息', timestamp: 2 },
+    ] as ChatMessage[]);
+    renderConversation(panel, 'panel-a', 'sid-sig');
+    expect(vi.mocked(reportRendererError).mock.calls.length).toBeGreaterThan(reportsBefore);
+  });
+
+  it('历史加载失败且无消息时渲染「加载失败 + 重试」卡，清除标记后恢复默认空态', () => {
+    const panel = document.getElementById('panel-a')!;
+    markHistoryLoadError('sid-err');
+
+    renderConversation(panel, 'panel-a', 'sid-err');
+    expect(panel.textContent).toContain('会话历史加载失败');
+    expect(panel.querySelector('[data-history-retry]')).not.toBeNull();
+
+    clearHistoryLoadError('sid-err');
+    renderConversation(panel, 'panel-a', 'sid-err');
+    expect(panel.textContent).not.toContain('会话历史加载失败');
+  });
+
+  it('首屏历史窗口在途时渲染加载骨架（P1-6），结束后回落空态', () => {
+    const panel = document.getElementById('panel-a')!;
+    setHistoryLoading('sid-loading', true);
+
+    renderConversation(panel, 'panel-a', 'sid-loading');
+    expect(panel.textContent).toContain('正在加载会话历史…');
+    expect(panel.querySelector('[data-history-retry]')).toBeNull();
+
+    setHistoryLoading('sid-loading', false);
+    renderConversation(panel, 'panel-a', 'sid-loading');
+    expect(panel.textContent).not.toContain('正在加载会话历史…');
+  });
+});
+
+describe('P0-1 渲染合并器异常守卫', () => {
+  it('render 抛错被上报且不阻断后续帧调度', () => {
+    const queue: Array<() => void> = [];
+    const scheduler = (cb: () => void) => queue.push(cb);
+    let calls = 0;
+    const schedule = createChatRenderCoalescer(() => {
+      calls += 1;
+      if (calls === 1) throw new Error('render boom');
+    }, scheduler);
+
+    schedule();
+    expect(() => queue.splice(0).forEach((fn) => fn())).not.toThrow();
+    expect(reportRendererError).toHaveBeenCalledWith('render', expect.any(Error));
+
+    // 下一帧照常可调度、可执行（循环未卡死）。
+    schedule();
+    queue.splice(0).forEach((fn) => fn());
+    expect(calls).toBe(2);
+  });
+
+  it('streaming patch 抛错被上报', () => {
+    const queue: Array<() => void> = [];
+    const scheduler = (cb: () => void) => queue.push(cb);
+    const coalescer = createStreamingPatchCoalescer(() => {
+      throw new Error('patch boom');
+    }, scheduler);
+
+    coalescer.schedule({ sid: 's1', assistantId: 'a1' });
+    expect(() => queue.splice(0).forEach((fn) => fn())).not.toThrow();
+    expect(reportRendererError).toHaveBeenCalledWith('streaming-patch', expect.any(Error));
   });
 });

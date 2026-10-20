@@ -10,12 +10,10 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import suppress
-from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from crew.agent.skills import (
-    _parse_frontmatter,
     build_skill_activation,
     get_skills,
     get_package_members,
@@ -26,6 +24,7 @@ from crew.agent.skills import (
 )
 from crew.core.runctx import current_active_skill_packages
 from crew.core.envelope import Envelope
+from crew.features import FeatureEventContributionFailedError
 from crew.gateway.auth import AuthenticationError, authenticate_websocket
 from crew.scenarios import resolve_binding as resolve_scenario_binding
 from crew.gateway.helpers import (
@@ -35,8 +34,8 @@ from crew.gateway.helpers import (
     resolve_session_id,
     status_frame,
 )
-from crew.gateway.broadcast import stream_and_broadcast
-from crew.gateway.session_context import session_context_from_envelope
+from crew.channels.broadcast import stream_and_broadcast
+from crew.features.session_context import session_context_from_envelope
 from crew.state.logging import get_logger
 from crew.core.followup import get_followup_waiter
 
@@ -77,57 +76,6 @@ def normalize_user_mentions(raw: object) -> list[dict[str, str]] | None:
             return None
         normalized.append({"kind": "team_member", "member_id": member_id})
     return normalized
-
-
-def _apply_browser_skill_policy(crew, skill_key: str, owner: str, session_id: str) -> None:
-    """技能激活时校验它声明的浏览器策略形状。
-
-    **不再把策略变成运行期的动作白名单。** 授权来自 V2/V3 record-replay 的
-    不可变 plan 与必须精确等于 plan 的 capabilities 声明——那是按这一次录制的
-    实际动作精确推导出来的，比"这个会话只读"这种粗粒度档位准确得多，也不会
-    在正常流程上产生任何阻碍。
-
-    保留这个函数是为了**格式校验**：一份声明了 `browser_policy` 却写坏了的技能
-    应该在激活时就被发现，而不是等回放到一半才炸。校验失败只记日志，不阻断激活。
-    """
-    try:
-        info = get_skills().get(skill_key)
-        if not info:
-            return
-        frontmatter, _ = _parse_frontmatter(
-            Path(info["skill_dir"], "SKILL.md").read_text("utf-8")
-        )
-        metadata = frontmatter.get("metadata")
-        policy = metadata.get("browser_policy") if isinstance(metadata, dict) else None
-        if not isinstance(policy, dict):
-            return
-        generated_by = (
-            str(metadata.get("generated_by") or "")
-            if isinstance(metadata, dict)
-            else ""
-        )
-        # **标记必须与编译器实际写入的完全一致。**
-        # 曾经这里写的是 "crew.browser.record-replay"（点号），而编译器写入的是
-        # "crew.browser-record-replay"（连字符，见 compile_tool.py 与
-        # skills.py 的 validate_generated_skill）——于是整个函数对任何真实技能
-        # 都在第一关 return，看似有校验实际没有。
-        if generated_by != "crew.browser-record-replay":
-            return
-        capabilities = policy.get("capabilities")
-        if (
-            policy.get("schema_version") != "crew.browser.policy.v2"
-            or not isinstance(capabilities, list)
-            or not capabilities
-            or any(not isinstance(item, str) for item in capabilities)
-            or len(set(capabilities)) != len(capabilities)
-        ):
-            log.warning(
-                "录制技能的 browser_policy 格式无效：skill=%s",
-                skill_key,
-            )
-    except Exception:
-        # 形状校验是诊断，不是闸门：解析失败不该让技能装不上或跑不起来。
-        log.debug("跳过 browser_policy 形状校验：skill=%s", skill_key, exc_info=True)
 
 
 def create_ws_router(
@@ -213,7 +161,7 @@ def create_ws_router(
                         return
 
         async def _run(envelope: Envelope) -> None:
-            from crew.gateway.channel_sessions import (
+            from crew.channels.channel_sessions import (
                 build_outbound_channel_envelope,
                 deliver_channel_session_reply,
                 is_channel_session_id,
@@ -273,16 +221,16 @@ def create_ws_router(
                         except Exception as exc:  # noqa: BLE001
                             log.warning("plan 待办通知发布失败 session=%s: %s", sid, exc)
 
-                # Wiki Agent：本轮若有待展示卡片 → 推 wiki_cards 帧
-                wm = getattr(crew, "wiki_manager", None)
-                if wm is not None and not disconnected.is_set():
-                    cards = wm.take_pending_cards(envelope.session_id, owner_account_id=owner)
-                    if cards:
+                # Feature 事件由各自 Bundle 注册的中立 Source 生产。断开时不 dispatch，
+                # 让待处理事件留在其 Feature 的会话状态中，供后续回合或重连消费。
+                event_contributors = getattr(crew, "event_contributors", None)
+                if not disconnected.is_set() and event_contributors is not None:
+                    async def push_feature_event(event) -> None:
                         await connections.push_payload(
                             envelope.session_id,
                             {
-                                "kind": "wiki_cards",
-                                "body": {"pages": cards},
+                                "kind": "feature_event",
+                                "body": event.as_body(),
                                 "is_final": False,
                                 "sequence": 0,
                                 "request_id": envelope.request_id,
@@ -290,20 +238,29 @@ def create_ws_router(
                             },
                             owner_account_id=owner,
                         )
-                    changes = wm.take_pending_changes(envelope.session_id, owner_account_id=owner)
-                    if changes:
-                        await connections.push_payload(
-                            envelope.session_id,
-                            {
-                                "kind": "wiki_changed",
-                                "body": {"changes": changes},
-                                "is_final": False,
-                                "sequence": 0,
-                                "request_id": envelope.request_id,
-                                "session_id": envelope.session_id,
-                            },
-                            owner_account_id=owner,
+
+                    try:
+                        event_report = await event_contributors.dispatch(
+                            envelope,
+                            push_feature_event,
                         )
+                    except FeatureEventContributionFailedError as error:
+                        log.warning(
+                            "Feature event source failed closed session=%s contributor=%s generation=%s: %s",
+                            envelope.session_id,
+                            error.contributor_id,
+                            error.generation.key,
+                            error,
+                        )
+                    else:
+                        for failure in event_report.failures:
+                            log.warning(
+                                "Feature event source degraded session=%s contributor=%s generation=%s: %s",
+                                envelope.session_id,
+                                failure.contributor_id,
+                                failure.generation.key,
+                                failure.message,
+                            )
             except Exception:  # noqa: BLE001 — WS runner 为并发派发的后台 task 顶层，dispatch 已内部回报错帧，此处仅兜底记录
                 log.exception("WS runner 异常 session=%s", envelope.session_id)
                 try:
@@ -418,7 +375,7 @@ def create_ws_router(
                     if not _session_owned(session_id):
                         await _reject_missing_session(session_id)
                         continue
-                    stopped = dispatcher.stop(session_id, owner_account_id=owner)
+                    stopped = await dispatcher.stop(session_id, owner_account_id=owner)
                     if not stopped:
                         await _send_status(session_id, "当前没有正在运行的回复")
                     continue
@@ -446,7 +403,7 @@ def create_ws_router(
                     if not _session_owned(session_id):
                         await _reject_missing_session(session_id)
                         continue
-                    task_id = dispatcher.background(session_id, owner_account_id=owner)
+                    task_id = await dispatcher.background(session_id, owner_account_id=owner)
                     msg = f"当前任务已转后台：{task_id}" if task_id else "当前没有可后台化的运行任务"
                     await _send_status(session_id, msg)
                     continue
@@ -726,9 +683,6 @@ def create_ws_router(
                         if activation is not None:
                             skill_meta = activation.instruction
                             active_skills.append(activation.to_dict())
-                            _apply_browser_skill_policy(
-                                crew, skill_key, owner, session_id
-                            )
                     else:
                         # 2. 尝试解析为 package 并展开
                         pkg = resolve_package(command)

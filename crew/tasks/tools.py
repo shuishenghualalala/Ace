@@ -11,7 +11,7 @@ from crew.core.runctx import current_owner_account_id
 def register_task_tools(registry: Any, runtime: Any) -> None:
     async def _get(args: dict[str, Any]) -> str:
         owner = current_owner_account_id.get()
-        return json.dumps(runtime.get(str(args.get("task_id") or ""), owner_account_id=owner), ensure_ascii=False)
+        return json.dumps(await runtime.get_async(str(args.get("task_id") or ""), owner_account_id=owner), ensure_ascii=False)
 
     async def _wait(args: dict[str, Any]) -> str:
         owner = current_owner_account_id.get()
@@ -34,7 +34,7 @@ def register_task_tools(registry: Any, runtime: Any) -> None:
     async def _list(args: dict[str, Any]) -> str:
         return json.dumps(
             {
-                "tasks": runtime.list_tasks(
+                "tasks": await runtime.list_tasks_async(
                     session_id=str(args.get("session_id") or "") or None,
                     status=str(args.get("status") or "") or None,
                     limit=int(args.get("limit") or 100),

@@ -5,6 +5,7 @@ toolsets: [file, terminal, browser]
 tools: [terminal, file_read, glob, grep, web_search, web_extract, browser_use]
 model: inherit
 background: true
+read_only: true
 ---
 你负责严格验证。你的工作不是确认实现能跑通——而是想方设法把它弄坏。
 

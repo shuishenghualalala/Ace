@@ -8,7 +8,12 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveBusyTransition,
   resolveTurnGate,
+  type AnyChatChunk,
 } from '../../src/ui/reducers/chat-reducer';
+
+/** resolveTurnGate 只消费 chunk 的 kind（feature_event 才读 body），这里构造最小 chunk。 */
+const gateChunk = (kind: AnyChatChunk['kind']): AnyChatChunk =>
+  ({ kind, body: {} }) as AnyChatChunk;
 
 describe('resolveBusyTransition', () => {
   it('running/queued statusHint → busy true', () => {
@@ -43,7 +48,7 @@ describe('resolveBusyTransition', () => {
 
 describe('resolveTurnGate', () => {
   it('accepts matching in-flight request frames', () => {
-    expect(resolveTurnGate('delta', 'req-1', {
+    expect(resolveTurnGate(gateChunk('delta'), 'req-1', {
       turnSealed: false,
       activeRequestId: 'req-1',
       acceptingNewRequest: false,
@@ -51,7 +56,7 @@ describe('resolveTurnGate', () => {
   });
 
   it('drops stale frames from a different request even while a new turn is open', () => {
-    expect(resolveTurnGate('delta', 'old-req', {
+    expect(resolveTurnGate(gateChunk('delta'), 'old-req', {
       turnSealed: false,
       activeRequestId: 'new-req',
       acceptingNewRequest: false,
@@ -59,7 +64,7 @@ describe('resolveTurnGate', () => {
   });
 
   it('drops late generation frames after the matching request is sealed', () => {
-    expect(resolveTurnGate('tool', 'req-1', {
+    expect(resolveTurnGate(gateChunk('tool'), 'req-1', {
       turnSealed: true,
       activeRequestId: 'req-1',
       acceptingNewRequest: false,
@@ -67,7 +72,7 @@ describe('resolveTurnGate', () => {
   });
 
   it('binds the first request frame after backend-live recovery', () => {
-    expect(resolveTurnGate('delta', 'req-recovered', {
+    expect(resolveTurnGate(gateChunk('delta'), 'req-recovered', {
       turnSealed: false,
       activeRequestId: null,
       acceptingNewRequest: true,
@@ -76,26 +81,26 @@ describe('resolveTurnGate', () => {
 
   it('binds request-scoped wait frames after backend-live recovery', () => {
     const gate = { turnSealed: false, activeRequestId: null, acceptingNewRequest: true };
-    expect(resolveTurnGate('plan_review', 'req-plan', gate)).toEqual({ action: 'accept', bindRequestId: 'req-plan' });
-    expect(resolveTurnGate('followup_question', 'req-follow', gate)).toEqual({ action: 'accept', bindRequestId: 'req-follow' });
+    expect(resolveTurnGate(gateChunk('plan_review'), 'req-plan', gate)).toEqual({ action: 'accept', bindRequestId: 'req-plan' });
+    expect(resolveTurnGate(gateChunk('followup_question'), 'req-follow', gate)).toEqual({ action: 'accept', bindRequestId: 'req-follow' });
   });
 
   it('allows non-generation frames after final so plan review and inspector updates survive', () => {
     const gate = { turnSealed: true, activeRequestId: 'req-1', acceptingNewRequest: false };
-    expect(resolveTurnGate('plan_review', 'req-1', gate)).toEqual({ action: 'accept' });
-    expect(resolveTurnGate('todo_updated', 'req-1', gate)).toEqual({ action: 'accept' });
-    expect(resolveTurnGate('file_changes', 'req-1', gate)).toEqual({ action: 'accept' });
+    expect(resolveTurnGate(gateChunk('plan_review'), 'req-1', gate)).toEqual({ action: 'accept' });
+    expect(resolveTurnGate(gateChunk('todo_updated'), 'req-1', gate)).toEqual({ action: 'accept' });
+    expect(resolveTurnGate(gateChunk('file_changes'), 'req-1', gate)).toEqual({ action: 'accept' });
   });
 
   it('drops stale request-scoped auxiliary frames from a previous request', () => {
     const gate = { turnSealed: false, activeRequestId: 'req-new', acceptingNewRequest: false };
-    expect(resolveTurnGate('plan_review', 'req-old', gate)).toEqual({ action: 'drop' });
-    expect(resolveTurnGate('todo_updated', 'req-old', gate)).toEqual({ action: 'drop' });
-    expect(resolveTurnGate('file_changes', 'req-old', gate)).toEqual({ action: 'drop' });
+    expect(resolveTurnGate(gateChunk('plan_review'), 'req-old', gate)).toEqual({ action: 'drop' });
+    expect(resolveTurnGate(gateChunk('todo_updated'), 'req-old', gate)).toEqual({ action: 'drop' });
+    expect(resolveTurnGate(gateChunk('file_changes'), 'req-old', gate)).toEqual({ action: 'drop' });
   });
 
   it('accepts task frames for matching in-flight request even when turn is sealed', () => {
-    expect(resolveTurnGate('task', 'req-1', {
+    expect(resolveTurnGate(gateChunk('task'), 'req-1', {
       turnSealed: true,
       activeRequestId: 'req-1',
       acceptingNewRequest: false,

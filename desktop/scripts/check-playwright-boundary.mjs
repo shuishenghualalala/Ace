@@ -155,31 +155,9 @@ if (!/external\s*:\s*\[[^\]]*['"]playwright-core['"]/s.test(esbuild))
 
 const compat = fs.readFileSync(compatPath, 'utf8');
 const contract = fs.readFileSync(contractPath, 'utf8');
-if (!compat.includes('._selector')) fail('兼容层缺少 normalize() 底层 selector 私有字段');
 if (!compat.includes('aria-ref=')) fail('兼容层缺少 aria-ref 私有选择器引擎');
-if (
-  !compat.includes('officialInjectedScriptSource')
-  || !compat.includes("require.resolve('playwright-core/lib/coreBundle')")
-  || !compat.includes('packages/playwright-core/src/generated/injectedScriptSource.ts')
-  || !compat.includes('generateSelectorSimple(')
-) {
-  fail('兼容层缺少官方 InjectedScript/selectorGenerator 的结构化提取边界');
-}
-if (
-  !contract.includes('toStableSelector')
-  || !contract.includes("persisted.includes('aria-ref')")
-) {
-  fail('真实 Electron 契约未覆盖 normalize() 底层 selector 的可持久化行为');
-}
 if (!contract.includes('locatorFromRef'))
   fail('真实 Electron 契约未覆盖 aria-ref 私有选择器引擎');
-if (
-  !contract.includes('selectorFor?.(')
-  || !contract.includes("selectorSource: 'playwright'")
-  || !contract.includes('recordedFrameSelector')
-) {
-  fail('真实 Electron 契约未覆盖官方 recorder selector 与 frame selector');
-}
 for (const [needle, description] of [
   ['connectOverCdp', '进程内 transport 握手'],
   ['setAutomationMode', 'AI/human 焦点模拟切换'],

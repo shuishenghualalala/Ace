@@ -144,7 +144,7 @@ Blueprint 会话：Main Agent + blueprint.authoring</code></pre>
   </table>
 
   <h2 id="tools">3. 工具（Agent Tools）</h2>
-  <p>Agent 不直接写文件入库，而是通过工具产出 App 并返回 Surface。灵感相关工具分两组：<code>sites</code> toolset 的 <code>publish_site</code>，以及 <code>blueprint</code> toolset 的四个 Blueprint 工具。工具仍随应用注册到共享 Registry，<code>always_load=True</code> 只控制已授权工具的披露方式；普通主 Agent 会在会话装配期排除这两个 Feature toolset，只有对应 Capability Profile 激活后才可见。</p>
+  <p>Agent 不直接写文件入库，而是通过工具产出 App 并返回 Surface。灵感相关工具分两组：<code>sites</code> toolset 的 <code>publish_site</code>，以及 <code>blueprint</code> toolset 的四个 Blueprint 工具。五个工具由 <code>product.sites</code> Generation 激活时注册到共享 Registry，调用期间自动持有 Feature Lease，停用后按工具 identity 撤销；<code>always_load=True</code> 只控制已授权工具的披露方式。</p>
 
   <h3>3.1 publish_site —— 构建产物型发布</h3>
   <table>
@@ -284,7 +284,7 @@ Blueprint 会话：Main Agent + blueprint.authoring</code></pre>
 
   <h3>6.7 Session 能力迁移（2026-08-31）</h3>
   <p>Desktop 新建灵感会话改写 <code>capability_profiles=["sites.authoring"]</code>。Gateway 写入 AgentConfig 时校验 Profile 是否存在、数据是否为字符串数组以及 executor 是否兼容；历史客户端传入 <code>inspiration_creation=true</code> 或 <code>site_creation=true</code> 时会规范化为新字段。数据库中的旧 Session 无需迁移，读取和 Agent 装配路径仍能识别两个旧标志。</p>
-  <p class="warning"><strong>当前阶段边界：</strong>本次完成的是 Session 级能力可逆化。<code>SiteManager</code>、API、调度器和 Desktop 导航仍由应用组合根统一启动；应用级 Feature 的 activate/deactivate、服务注销和前端 mount/dispose 属于下一阶段，不应把本次能力隔离误认为完整 Feature Runtime 已完成。</p>
+  <p class="key"><strong>Runtime 生命周期（2026-09-04）：</strong><code>product.sites</code> 已把 <code>SiteManager</code>、Site/Blueprint Store、Blueprint Scheduler、五个 Tools、两个 Capability Profile 与 Host Binding 收入同一 restart Generation。停用先撤销运行贡献，再停止调度器并关闭连接；持久数据不删除。Gateway API 仍通过动态 <code>crew.sites</code> 绑定访问当前 Manager，Route Contribution 和 Desktop 导航贡献留在后续纵向切片。</p>
 
   <h2 id="tradeoffs">7. 设计取舍</h2>
 
@@ -324,7 +324,8 @@ Blueprint 会话：Main Agent + blueprint.authoring</code></pre>
   <table>
     <thead><tr><th>层</th><th>文件</th><th>职责</th></tr></thead>
     <tbody>
-      <tr><td>后端·管理</td><td><code>crew/sites/manager.py</code></td><td>统一 list/get/export/delete 分发；site publish/release/export；Canvas HTML 拼装与离线包</td></tr>
+      <tr><td>后端·生命周期</td><td><code>crew/sites/feature.py</code></td><td><code>product.sites</code> Generation、工具/Profile identity、Lease、Scheduler/Store 与 Host Binding 所有权</td></tr>
+      <tr><td>后端·管理</td><td><code>crew/sites/manager.py</code></td><td>统一 list/get/export/delete 分发；site publish/release/export；Canvas HTML 拼装、离线包和幂等资源关闭</td></tr>
       <tr><td>后端·存储</td><td><code>crew/sites/store.py</code></td><td>sites/releases/批注表；初始化迁移 site_annotations→inspiration_annotations</td></tr>
       <tr><td>后端·Blueprint</td><td><code>crew/sites/blueprint.py</code></td><td>Canvas/Widget/Binding/Automation 数据、Widget Runtime、调度与运行</td></tr>
       <tr><td>后端·路由</td><td><code>crew/gateway/routers/sites.py</code></td><td><code>/api/sites/inspirations</code> 统一 API、旧接口兼容、Canvas/Widget 渲染、预览 bridge 注入</td></tr>
@@ -362,6 +363,6 @@ Blueprint 会话：Main Agent + blueprint.authoring</code></pre>
 
   <h2 id="summary">11. 小结</h2>
   <p>把灵感功能当成一个系统看，它有四层稳定契约：Agent 层通过<strong>Capability Profile</strong>把 Site/Blueprint 能力按 Session 叠加到主 Agent；底层是<strong>双运行时</strong>（site 构建产物 / canvas 声明式组件），靠 ID 前缀分发；中层是<strong>InspirationSurface 协议</strong>，把工具产出统一成图库、预览、历史回放的单一事实来源；上层是<strong>四操作生命周期</strong>（修改/分享/固定/删除），围绕 Surface 背后资源做受控管理。安全上除 ace-site:// 私有协议、sticky 沙箱窗口、ZIP canonical 校验和 owner 隔离外，Profile 还必须服从账号工具与 Skill 策略，不能借能力叠加扩大授权。</p>
-  <p><a href="index.html">返回后端模块索引</a></p>
+  <p><a href="index.html">返回后端模块索引</a> · <a href="../adr/0018-sites-runtime-feature.html">ADR-0018</a> · <a href="../../testing/plugin-architecture-stage-3a-sites-runtime.html">测试记录</a></p>
 </main></body>
 </html>

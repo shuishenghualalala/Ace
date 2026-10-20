@@ -142,7 +142,7 @@ cd Ace
 # Install Python dependencies
 uv venv .venv --python 3.11
 source .venv/bin/activate
-uv pip install -e ".[dev,wiki]"
+uv sync --extra dev --extra wiki
 
 # Create local config and env files (both git-ignored)
 cp config/config.yaml.example config/config.yaml
@@ -163,7 +163,7 @@ cd Ace
 # Install Python dependencies
 uv venv .venv --python 3.11
 .\.venv\Scripts\Activate.ps1
-uv pip install -e ".[dev,wiki]"
+uv sync --extra dev --extra wiki
 
 # Create local config and env files (both git-ignored)
 Copy-Item config\config.yaml.example config\config.yaml
@@ -281,7 +281,6 @@ Skills are reusable playbooks that extend what Crew's agents can do. The reposit
 | `crew-guide` | `crew/skills/agent-guide/` | User guide for Crew and local skill installation |
 | `crew-wiki-curator` | `crew/skills/crew-wiki-curator/` | Rules for Wiki ingestion, provenance, conflict handling, and quality control |
 | `cua-driver` | `crew/skills/cua-driver/` | Observation, interaction, and verification guidance for native desktop automation |
-| `image-understanding` | `crew/skills/image-understanding/` | Image analysis through your configured vision model, including LLM Wiki ingestion |
 | `video-understanding` | `crew/skills/video-understanding/` | Video analysis through your configured external service, including LLM Wiki ingestion |
 | `browser-use` | `plugins/browser/skills/` | Navigation, reading, and interaction workflows for the in-app browser |
 
@@ -300,9 +299,11 @@ Key directories:
 | `crew/core` | Types, message envelopes, and core interfaces |
 | `crew/providers` | OpenAI-compatible and Anthropic model adapters |
 | `crew/agent` | Agent conversation loop, planning, compaction, and sub-agents |
-| `crew/agent/external` | External Runtime, Agent, and Team adapters |
-| `crew/team` | Multi-agent teams and collaboration orchestration |
-| `crew/dynamickanban` | Dynamic Kanban and task-graph orchestration |
+| `crew.agent.external` (member package `packages/crew-external-agents`) | External Runtime, Agent, and Team adapters |
+| `crew.team` (member package `packages/crew-team`) | Multi-agent teams and collaboration orchestration |
+| `crew.dynamickanban` (member package `packages/crew-dynamickanban`) | Dynamic Kanban and task-graph orchestration |
+| `crew.channels` (member package `packages/crew-channels`) | Messaging channel adapters, delivery, and session routing |
+| `crew.work` (member package `packages/crew-work`) | Office assistant domain (items, briefs, preferences, knowledge) |
 | `crew/evolution` | Experimental trajectory extraction, skill optimization, and generation |
 | `crew/browser` | In-app browser lifecycle, control, and security boundaries |
 | `crew/memory` | Local persistent memory |
@@ -310,7 +311,7 @@ Key directories:
 | `crew/state` | Config, sessions, workspaces, and logs |
 | `crew/gateway` | FastAPI REST / WebSocket Gateway |
 | `crew/tasks` / `crew/cron` | Background and scheduled tasks |
-| `crew/wiki` | Local knowledge base |
+| `crew.wiki` (member package `packages/crew-wiki`) | Local knowledge base |
 | `crew/skills` / `plugins` | Skills and plugin extensions |
 | `desktop` | Electron desktop app |
 | `web` | Web client |

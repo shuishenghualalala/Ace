@@ -11,6 +11,7 @@ import { showConfirmDialog } from '../ui-feedback';
 import { closeInspector, enableInspectorSurfaceAutoWidth, openInspectorCustomView } from './inspector';
 import { getSessionAgentDisplay } from './workspaces';
 import { queryPrimaryComposer } from './composer-scope';
+import type { PageContribution, PageLifecycleContext } from './page-registry';
 
 type Selection = {
   route: string; selector: string; element_tag: string; element_text: string;
@@ -30,13 +31,42 @@ let openInspirationAgent: ((item: InspirationItem) => Promise<void>) | null = nu
 let createInspirationSession: (() => Promise<void>) | null = null;
 let activeSessionSites: LocalSite[] = [];
 let sessionSitesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let cardPreviewObserver: ResizeObserver | null = null;
 const annotationDrafts = new Map<string, AnnotationDraft>();
+
+// ── 页面生命周期状态 ──
+let sitesLifecycleSignal: AbortSignal | null = null;
+let sitesLifecycleEpoch = 0;
+
+function sitesLifecycleAvailable(): boolean {
+  return !sitesLifecycleSignal || !sitesLifecycleSignal.aborted;
+}
+
 const ANNOTATION_DRAFTS_KEY = 'ace.inspirationAnnotationDrafts.v1';
 const LEGACY_ANNOTATION_DRAFTS_KEY = 'ace.siteAnnotationDrafts.v1';
 
 function root(): HTMLElement | null { return $('#sites-page-root'); }
 function previewUrl(item: Pick<InspirationItem, 'id'> | LocalSite): string {
   return `ace-site://${encodeURIComponent(item.id)}/`;
+}
+
+const CARD_PREVIEW_WIDTH = 1280;
+
+/** 预览 iframe 按 1280px 虚拟视口渲染，随卡片实际宽度动态缩放，保证任意网格宽度下铺满。 */
+function fitCardPreviews(): void {
+  cardPreviewObserver?.disconnect();
+  cardPreviewObserver = null;
+  const previews = Array.from(root()?.querySelectorAll<HTMLElement>('.inspiration-card__preview') ?? []);
+  if (!previews.length) return;
+  const fit = (preview: HTMLElement): void => {
+    const frame = preview.querySelector('iframe');
+    // 缩放系数随卡片宽度变化：只发布值，transform 规则留在 CSS。
+    if (frame) frame.style.setProperty('--mw-preview-scale', String(preview.clientWidth / CARD_PREVIEW_WIDTH));
+  };
+  cardPreviewObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) fit(entry.target as HTMLElement);
+  });
+  for (const preview of previews) { fit(preview); cardPreviewObserver.observe(preview); }
 }
 
 function saveDrafts(): void {
@@ -99,6 +129,7 @@ function renderGallery(el: HTMLElement): void {
     </main>
   </div>`;
   bindGalleryEvents();
+  fitCardPreviews();
 }
 
 function renderDetail(el: HTMLElement, item: InspirationItem): void {
@@ -124,7 +155,11 @@ function render(): void {
 }
 
 async function loadInspirations(selectId = ''): Promise<void> {
+  if (!sitesLifecycleAvailable()) return;
+  const epoch = sitesLifecycleEpoch;
+  const signal = sitesLifecycleSignal;
   const result = await backendApi.inspirations();
+  if (signal !== sitesLifecycleSignal || epoch !== sitesLifecycleEpoch || !sitesLifecycleAvailable()) return;
   inspirations = result.inspirations;
   activeInspiration = selectId
     ? inspirations.find((item) => item.id === selectId) || null
@@ -269,12 +304,19 @@ async function syncSessionAnnotationEntry(): Promise<void> {
   const sessionId = state.activeSessionId || '';
   activeSessionSites = []; renderSessionAnnotationEntry();
   if (!sessionId) return;
+  const epoch = sitesLifecycleEpoch;
+  const signal = sitesLifecycleSignal;
   try {
     const result = await backendApi.sites(state.currentWorkspaceId || undefined);
+    if (signal !== sitesLifecycleSignal || epoch !== sitesLifecycleEpoch || !sitesLifecycleAvailable()) return;
     if (state.activeSessionId !== sessionId) return;
     activeSessionSites = result.sites.filter((site) => site.session_id === sessionId).sort((a, b) => b.updated_at - a.updated_at);
     renderSessionAnnotationEntry();
-  } catch { activeSessionSites = []; renderSessionAnnotationEntry(); }
+  } catch {
+    if (signal !== sitesLifecycleSignal || epoch !== sitesLifecycleEpoch || !sitesLifecycleAvailable()) return;
+    activeSessionSites = [];
+    renderSessionAnnotationEntry();
+  }
 }
 
 function showCommentEditor(selection: Selection): void {
@@ -420,4 +462,37 @@ export function bindSitesTab(opts: {
 }
 
 export function syncSiteAnnotationEntry(): void { void syncSessionAnnotationEntry(); }
+
 export function renderSitesPage(): void { activeInspiration = null; void loadInspirations().catch(showError); }
+
+function disposeSitesPage(): void {
+  if (listPreviewTimer) {
+    clearTimeout(listPreviewTimer);
+    listPreviewTimer = null;
+  }
+  if (sessionSitesRefreshTimer) {
+    clearTimeout(sessionSitesRefreshTimer);
+    sessionSitesRefreshTimer = null;
+  }
+  cardPreviewObserver?.disconnect();
+  cardPreviewObserver = null;
+  activeInspiration = null;
+  root()?.replaceChildren();
+}
+
+export function createSitesPageContribution(): PageContribution {
+  return {
+    id: 'sites',
+    activate: ({ signal }: PageLifecycleContext) => {
+      sitesLifecycleEpoch += 1;
+      sitesLifecycleSignal = signal;
+      syncSiteAnnotationEntry();
+      void renderSitesPage();
+    },
+    deactivate: async () => {
+      sitesLifecycleEpoch += 1;
+      sitesLifecycleSignal = null;
+      disposeSitesPage();
+    },
+  };
+}

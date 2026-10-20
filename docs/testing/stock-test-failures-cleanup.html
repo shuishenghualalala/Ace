@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>存量失败测试清零 · 43 项</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>存量失败测试清零（43 项）</h1>
+<p>2026-09-11。后端全量套件在干净 HEAD 上的 43 项存量失败（4044 通过基线）全部清零，零生产代码改动。修复在独立 worktree 分支开发（8 个提交，逐簇分组），主 agent 审查后 rebase 合入。</p>
+<h2>根因与修复分类</h2>
+<table><tr><th>簇</th><th>用例数</th><th>根因</th><th>修复方式</th></tr>
+<tr><td>gateway 401</td><td>27</td><td>环境泄漏：开发态 load_config() 读本机 gitignore 的 config/config.yaml（example 默认 auth.mode=email），依赖免登录的用例稳定 401</td><td>hermetic 化：conftest autouse 把 config ROOT 与 CREW_HOME 指向用例私有 tmp 目录（保留用例级 monkeypatch 覆盖能力）</td></tr>
+<tr><td>patch 目标过期</td><td>2</td><td>formation_auto_decision 改函数内局部 import 后旧 patch 目标失效</td><td>patch 目标跟进模块化搬迁</td></tr>
+<tr><td>browser 未激活</td><td>4</td><td>browser 插件迁入 activation_phase=startup，测试不跑 startup 就无 browser_manager</td><td>用例补 startup 激活（测试过期跟进）</td></tr>
+<tr><td>electron RPC 契约</td><td>2</td><td>execute/execute_transaction 宿主 RPC 新增 max_transfer_bytes</td><td>断言跟进</td></tr>
+<tr><td>run_code schema</td><td>1</td><td>browser_use 拆 core/advanced 双 schema，run_code_unsafe 属 ADVANCED</td><td>改用 ADVANCED schema 校验</td></tr>
+<tr><td>多 owner 语义</td><td>2</td><td>单 owner 423 门禁被有意移除（跨 owner 审批 409 / 会话 404）</td><td>断言跟进（区分 detail、追加状态断言，未放宽）</td></tr>
+<tr><td>weixin 可选依赖</td><td>5</td><td>aiohttp 为可选依赖，缺失时 RuntimeError 而非跳过（venv 已补装 .[weixin]）</td><td>importorskip 守卫（准确原因字符串）</td></tr>
+<tr><td>时序 flake</td><td>1</td><td>固定 sleep(0.005) 赌锁序，套件变慢后暴露</td><td>确定性屏障（轮询 bus delivered 事件）替代盲等，断言不变</td></tr>
+</table>
+<h2>验证记录</h2>
+<table><tr><th>命令</th><th>结果</th></tr>
+<tr><td>worktree 分支全量（修复后 4 次，后 2 次 0 failed）</td><td>4087 passed, 38 skipped, 20 deselected</td></tr>
+<tr><td>主分支合入后全量（含 6G-2/6I/6J/6K 新增用例）</td><td><b>4135 passed, 38 skipped, 20 deselected, 0 failed</b>（9:11）</td></tr>
+<tr><td><code>ruff check tests crew</code> / <code>compileall</code></td><td>通过</td></tr>
+</table>
+<p>所有 38 项（weixin 5 项装依赖后自然通过）经"逐文件单独跑全部复现"确认为独立失败，无测试间状态污染。平台说明：macOS（darwin arm64）执行；conftest 隔离用 pytest 标准 tmp_path/monkeypatch，跨平台一致。</p>
+<h2>提交</h2>
+<p>8 个提交（conftest 隔离 / runtimes-suggest patch 目标 / browser-driver / browser 三处激活 / run-code schema / owner 断言 / weixin 守卫 / team 时序屏障），线性 rebase 合入工作分支。</p>
+<p><a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

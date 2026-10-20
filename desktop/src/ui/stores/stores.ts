@@ -90,6 +90,9 @@ export function __resetAllStoresForTest(): void {
     queueHints: {},
     pendingQueues: {},
     attachments: [],
+    historyLoadErrors: new Set(),
+    historyLoading: new Set(),
+    historyPaging: {},
   });
   taskStore.replace({ tasks: [], taskBoardOpen: false, taskBoardWidth: 320, kanbanBoard: null });
   configStore.replace({
@@ -115,6 +118,11 @@ export function __resetAllStoresForTest(): void {
     activeTab: 'chat',
     activeSystemPanel: 'overview',
     backendConnected: false,
+    backendProcessState: 'starting',
+    backendHealthState: 'unknown',
+    backendTransportState: 'unknown',
+    backendLoopLagMs: null,
+    backendCanSend: false,
     socket: null,
     feedbackDraft: { title: '', description: '', images: [] },
     feedbackList: [],

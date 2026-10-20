@@ -11,9 +11,16 @@
 from __future__ import annotations
 
 from crew.browser import BrowserManager
+from crew.browser.tab_reading import (
+    BROWSER_TAB_REFERENCE_RE,
+    format_browser_tab_references,
+    resolve_browser_tab_references,
+)
+from crew.browser.types import BrowserConfig
+from crew.core.envelope import Envelope
+from crew.features import ContextContribution
 from crew.state.logging import get_logger
 
-from .compile_tool import register_record_compile_tool
 from .tool import PLUGIN_KEY as PLUGIN_KEY, register_browser_use_tool
 
 # PLUGIN_KEY 是给外部（权限判定、偏好键）读的，显式 re-export 而不是留成未用导入。
@@ -26,33 +33,73 @@ log = get_logger("plugins.browser")
 manager: BrowserManager | None = None
 
 
-def register(ctx) -> None:
+async def register(ctx) -> None:
     global manager
-    config = ctx.services.get("config")
-    if config is None:
-        raise RuntimeError("browser 插件缺少 config 服务")
-    plugin_prefs = ctx.services.get("plugin_prefs")
+    config = ctx.resolve_service("config")
+    plugin_prefs = ctx.get_service("plugin_prefs")
 
-    manager = BrowserManager(config.browser)
-    ctx.register_disposer(_close_manager)
+    browser_config = BrowserConfig.from_raw(config.browser_config)
+    browser_manager = BrowserManager(browser_config)
+    manager = browser_manager
+    # Register cleanup before startup so every partial installation can be
+    # rolled back by FeatureTransaction, including a failed driver startup.
+    ctx.register_disposer(_manager_disposer(browser_manager))
+    await browser_manager.startup()
+    ctx.register_service("browser.manager", browser_manager)
+    ctx.register_context_contributor(
+        "browser.reference.tab",
+        _browser_tab_contributor(browser_manager),
+        priority=200,
+        timeout_seconds=max(
+            1.0,
+            float(browser_config.command_timeout_seconds) + 1.0,
+        ),
+        predicate=lambda envelope: bool(
+            BROWSER_TAB_REFERENCE_RE.search(str(envelope.query or ""))
+        ),
+        persistent=False,
+        description="Read-only snapshots for explicit browser tab references",
+    )
     ctx.register_skill_root("skills")
-    browser_tool = register_browser_use_tool(ctx, manager, config, plugin_prefs)
-    # 两阶段发布 + 独立回放：compile 只生成 owner-private immutable draft；
-    # install 经一次性审批发布私有 executable plan 和全局 opaque entry；
-    # replay 每次 mutation 再走动态审批与 exact session lease。
-    register_record_compile_tool(
+    browser_tool = register_browser_use_tool(
         ctx,
-        manager,
-        capability_check=browser_tool.capability_denial,
+        browser_manager,
+        config,
+        plugin_prefs,
     )
     log.info(
-        "browser 插件已注册 browser_use / record_compile / record_install / "
-        "record_replay（toolset=browser）"
+        "browser 插件已注册工具、Skill Root 与标签页 Context Contributor"
     )
 
 
-async def _close_manager() -> None:
-    global manager
-    if manager is not None:
-        await manager.aclose()
-        manager = None
+def _browser_tab_contributor(browser_manager: BrowserManager):
+    """Bind one contributor to the manager owned by its exact Generation."""
+
+    async def contribute(envelope: Envelope) -> ContextContribution | None:
+        refs = await resolve_browser_tab_references(
+            envelope.query,
+            manager=browser_manager,
+            owner_account_id=envelope.user_id,
+            session_id=envelope.session_id,
+        )
+        if not refs:
+            return None
+        prompt = format_browser_tab_references(refs)
+        return ContextContribution(
+            params={"browser_tab_references": refs},
+            prompt_parts=(prompt,) if prompt else (),
+        )
+
+    return contribute
+
+
+def _manager_disposer(browser_manager: BrowserManager):
+    """Close exactly one Generation's manager and clear its compatibility slot."""
+
+    async def _close_manager() -> None:
+        global manager
+        await browser_manager.aclose()
+        if manager is browser_manager:
+            manager = None
+
+    return _close_manager

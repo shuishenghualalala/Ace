@@ -9,6 +9,13 @@
   ExternalExecutor —— Runtime-backed 外部 agent（如 Kimi/Codex/Claude）
                      经统一 RuntimeAdapter 接入。协议差异只存在于 Adapter；
                      Executor 负责 Crew 会话、权限、MCP 与事件归一。
+
+【实现解析】本模块对 external 实现包（crew.agent.external）零导入：
+  * 协议/错误/DTO 等中性契约来自 crew.core.interfaces；
+  * Adapter/CLI/描述符等实现经同代 Service Lease（external_services_acquirer
+    返回的第三个元素）解析；
+  * 无 acquirer 的直连场景（单测/最小宿主）由实现包装配时注入的兜底工厂解析；
+  * 三者皆缺则 fail-closed（对话错误帧），绝不静态依赖实现包。
 """
 
 from __future__ import annotations
@@ -17,30 +24,12 @@ import asyncio
 import importlib
 import inspect
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
 from crew.agent.executor.base import AgentExecutor, ExecutionContext
-from crew.agent.external.acp_adapter import (
-    AcpAdapterError,
-    AcpPermissionRequest,
-)
-from crew.agent.external.cli_adapter import ExternalCliConfig, ExternalCliError, run_external_cli
-from crew.agent.external.codex_adapter import CodexAdapterError
-from crew.agent.external.runtime_adapter import (
-    ExternalStreamEvent,
-    RuntimeExecutionRequest,
-    RuntimeResumeRejected,
-    get_runtime_adapter,
-)
-from crew.agent.external.runtime_profile import canonical_runtime_model_id
-from crew.agent.external.runtime_registry import (
-    resolve_runtime_adapter_id,
-    resolve_runtime_credential_home_paths,
-    resolve_runtime_network_endpoints,
-)
 from crew.agent.file_changes import (
     TurnFileChangeTracker,
     persist_file_changes,
@@ -49,12 +38,40 @@ from crew.agent.file_changes import (
 from crew.agent.skills import SkillActivation
 from crew.core.envelope import ResponseChunk
 from crew.core.followup import drain_followup_answer_messages
+from crew.core.observability import event
+from crew.core.interfaces import (
+    AcpAdapterError,
+    AcpPermissionRequest,
+    CodexAdapterError,
+    ExternalAgentCatalog,
+    ExternalCliConfig,
+    ExternalCliError,
+    ExternalStreamEvent,
+    RuntimeExecutionRequest,
+    RuntimeResumeRejected,
+    canonical_runtime_model_id,
+)
 from crew.core.runctx import current_owner_account_id
 from crew.core.timeout_policy import DEFAULT_EXTERNAL_IDLE_SECONDS, TimeoutPolicy
 from crew.core.types import Message, ToolCall
 from crew.security.models import AdditionalPermissionProfile
 from crew.state.home import get_owner_runtime_home
-from crew.team.workspace_guard import check_workspace_guard, classify_external_permission
+from crew.security.workspace_guard import check_workspace_guard, classify_external_permission
+
+
+# ---------------------------------------------------------------------------
+# 实现包兜底解析 seam
+# ---------------------------------------------------------------------------
+# 生产路径永远经 external_services_acquirer 持同代 Lease；该工厂只在直连场景
+# 兜底，由 external 实现包在装配时注入（见 crew.agent.external.feature 模块尾），
+# 使 Executor 保持对实现包零导入、可独立拆包。
+default_runtime_support_factory: Callable[[], Any] | None = None
+
+
+def set_default_runtime_support_factory(factory: Callable[[], Any]) -> None:
+    """注入外部实现包的运行支持工厂（由实现包/宿主装配时调用）。"""
+    global default_runtime_support_factory
+    default_runtime_support_factory = factory
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +85,7 @@ class ClientExecutorConfig:
     function: str = ""        # 可选函数名；为空时自动尝试 run_agent/run/execute/main
     external_agent_id: str = ""
     cwd: str = "."
-    external_store: Any = None
+    external_store: ExternalAgentCatalog | None = None
     options: dict[str, Any] = field(default_factory=dict)
 
 
@@ -85,7 +102,17 @@ class ExternalExecutorConfig:
     timeout: float = DEFAULT_EXTERNAL_IDLE_SECONDS
     hard_timeout: float | None = None
     timeout_policy: dict[str, Any] = field(default_factory=dict)
-    external_store: Any = None
+    external_store: ExternalAgentCatalog | None = None
+    # Feature Runtime consumer seam. When supplied, the executor never calls
+    # an Adapter directly; the Generation-owned DelegationService owns the Run.
+    delegation_service: Any = None
+    # Same-generation runtime-support facade (adapter registry, descriptor
+    # resolvers, CLI runner). Resolved from the lease when absent; direct
+    # callers (tests/minimal hosts) may inject a stub here.
+    runtime_support: Any = None
+    # Resolve both surfaces at execution start so one turn never mixes a
+    # Catalog from one generation with a DelegationService from another.
+    external_services_acquirer: Any = None
     interaction_bridge: Any = None
     plan_manager: Any = None
     crew_session_id: str = ""  # Team 模式可显式传 member_session_id 作为原生 session 绑定键
@@ -102,6 +129,28 @@ def _coerce(config: Any, cls: type) -> Any:
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
         return cls(**{k: v for k, v in config.items() if k in known})
     return cls()
+
+
+def _unpack_external_services(acquired: Any) -> tuple[Any, Any, Any]:
+    """把 acquirer 的返回归一成 (catalog, delegation, runtime_support)。
+
+    兼容两种形状：三元组（当前 Service Lease 契约）、二元组（迁移期旧契约）
+    以及带同名属性的宿主对象。
+    """
+    if isinstance(acquired, tuple):
+        if len(acquired) == 3:
+            return acquired
+        if len(acquired) == 2:
+            return acquired[0], acquired[1], None
+        raise ValueError(
+            "external_services_acquirer must return (catalog, delegation) "
+            "or (catalog, delegation, runtime_support)"
+        )
+    return (
+        getattr(acquired, "catalog", None),
+        getattr(acquired, "delegation", None),
+        getattr(acquired, "runtime_support", None),
+    )
 
 
 PayloadMode = Literal["single_agent", "team_chat", "team_relay", "team_execute"]
@@ -868,12 +917,23 @@ class ExternalExecutor(AgentExecutor):
         """
 
         cwd = str(ctx.cwd or self.config.cwd or ".")
+        event(
+            "external.agent.started",
+            module="external_agent",
+            component="runtime",
+            operation="external.agent.execute",
+            attributes={
+                "coverage_status": "black_box",
+                "driver_boundary": "external",
+                "external_agent_id": str(self.config.external_agent_id or ""),
+            },
+        )
         async with workspace_change_coordinator.lease([cwd]):
             tracker = TurnFileChangeTracker(cwd)
             tool_arguments: dict[str, tuple[str, dict[str, Any]]] = {}
             last_sequence = 0
             emitted_terminal = False
-            async for chunk in self._execute_impl(ctx):
+            async for chunk in self._execute_impl_with_services(ctx):
                 last_sequence = max(last_sequence, int(chunk.sequence or 0))
                 if chunk.kind == "tool":
                     body = dict(chunk.body or {})
@@ -914,19 +974,69 @@ class ExternalExecutor(AgentExecutor):
                             sequence=file_sequence,
                         )
                     emitted_terminal = True
+                    event(
+                        "external.agent.completed",
+                        module="external_agent",
+                        component="runtime",
+                        operation="external.agent.execute",
+                        attributes={
+                            "coverage_status": "black_box",
+                            "terminal_kind": chunk.kind,
+                        },
+                    )
                 yield chunk
 
-    async def _execute_impl(self, ctx: ExecutionContext) -> AsyncIterator[ResponseChunk]:
+    async def _execute_impl_with_services(self, ctx: ExecutionContext) -> AsyncIterator[ResponseChunk]:
+        acquirer = self.config.external_services_acquirer
+        if not callable(acquirer):
+            async for chunk in self._execute_impl(ctx):
+                yield chunk
+            return
+        service_context = acquirer()
+        if inspect.isawaitable(service_context):
+            service_context = await service_context
+        with service_context as resolved_services:
+            async for chunk in self._execute_impl(ctx, resolved_services):
+                yield chunk
+
+    async def _execute_impl(self, ctx: ExecutionContext, resolved_services=None) -> AsyncIterator[ResponseChunk]:
         if not self.config.external_agent_id:
             yield ResponseChunk.error(ctx.request_id, "ExternalExecutor 缺少 external_agent_id")
             return
-        if self.config.external_store is None:
+        external_store = self.config.external_store
+        delegation_service = self.config.delegation_service
+        runtime_support = self.config.runtime_support
+        if resolved_services is not None:
+            external_store, delegation_service, leased_support = _unpack_external_services(
+                resolved_services
+            )
+            runtime_support = leased_support or runtime_support
+            acquirer = None
+        else:
+            acquirer = self.config.external_services_acquirer
+        if callable(acquirer):
+            acquired = acquirer()
+            if inspect.isawaitable(acquired):
+                acquired = await acquired
+            external_store, delegation_service, leased_support = _unpack_external_services(acquired)
+            runtime_support = leased_support or runtime_support
+        if external_store is None:
             yield ResponseChunk.error(ctx.request_id, "ExternalExecutor 缺少 ExternalAgentStore")
             return
+        if runtime_support is None:
+            factory = default_runtime_support_factory
+            if factory is None:
+                # fail-closed：实现包既未持 Lease 提供也未注入兜底工厂。
+                yield ResponseChunk.error(
+                    ctx.request_id,
+                    "外部智能体运行支持未装配：缺少 external agent feature 或 runtime_support 注入",
+                )
+                return
+            runtime_support = factory()
 
         owner_account_id = current_owner_account_id.get()
         try:
-            agent, runtime = self.config.external_store.agent_with_runtime(
+            agent, runtime = external_store.agent_with_runtime(
                 self.config.external_agent_id,
                 owner_account_id=owner_account_id,
             )
@@ -942,15 +1052,15 @@ class ExternalExecutor(AgentExecutor):
         prompt = ctx.query
         protocol = str(runtime.get("protocol") or "").lower()
         runtime_metadata = runtime.get("metadata") if isinstance(runtime.get("metadata"), dict) else {}
-        credential_home_paths = resolve_runtime_credential_home_paths(
+        credential_home_paths = runtime_support.resolve_credential_home_paths(
             provider=provider,
             metadata=runtime_metadata,
         )
-        network_endpoints = resolve_runtime_network_endpoints(
+        network_endpoints = runtime_support.resolve_network_endpoints(
             provider=provider,
             metadata=runtime_metadata,
         )
-        adapter_id = resolve_runtime_adapter_id(
+        adapter_id = runtime_support.resolve_adapter_id(
             provider=provider,
             protocol=protocol,
             metadata=runtime_metadata,
@@ -1016,7 +1126,7 @@ class ExternalExecutor(AgentExecutor):
                     binding_key if self.config.persist_runtime_session else None
                 )
                 binding = (
-                    self.config.external_store.get_runtime_session_binding(**binding_key)
+                    external_store.get_runtime_session_binding(**binding_key)
                     if self.config.persist_runtime_session
                     else None
                 )
@@ -1179,7 +1289,7 @@ class ExternalExecutor(AgentExecutor):
                         reset_memory=reset_memory,
                         active_skills=ctx.active_skills,
                     )
-                    adapter = get_runtime_adapter(adapter_id)
+                    adapter = runtime_support.adapter(adapter_id)
                     configured_launch_args = (
                         runtime_metadata.get("launch_args")
                         if "launch_args" in runtime_metadata
@@ -1189,6 +1299,7 @@ class ExternalExecutor(AgentExecutor):
                         executable_path=runtime["executable_path"],
                         provider=provider,
                         prompt=task_payload.render_prompt(),
+                        adapter_id=adapter_id,
                         launch_args=[
                             str(item)
                             for item in (configured_launch_args or [])
@@ -1211,85 +1322,97 @@ class ExternalExecutor(AgentExecutor):
                         permission_handler=_handle_permission,
                     )
                     resume_reset_memory = _summarize_messages_for_runtime_reset(ctx.messages)
-                    async for event in _stream_runtime_with_safe_resume(
-                        adapter,
-                        execution_request,
-                        reset_memory=resume_reset_memory,
-                    ):
-                        if event.kind == "session":
-                            native_session_id = event.session_id
-                            runtime_failure_session_id = native_session_id
-                            native_session_reset = event.session_reset
-                            if native_session_id and self.config.persist_runtime_session:
-                                self.config.external_store.save_runtime_session_binding(
-                                    **binding_key,
-                                    native_session_id=native_session_id,
-                                    session_profile=session_profile,
-                                    status="active",
-                                )
-                            continue
-                        if event.kind == "text" and event.text:
-                            parts.append(event.text)
-                            yield ResponseChunk.delta(ctx.request_id, event.text, next_seq())
-                        elif event.kind == "thinking" and event.text:
-                            thinking_parts.append(event.text)
-                            yield ResponseChunk.thinking_event(ctx.request_id, event.text, next_seq())
-                        elif event.kind == "error":
-                            if adapter_id == "acp-stdio":
-                                raise AcpAdapterError(event.text or "ACP stdout read failed")
-                            raise ExternalCliError(event.text or "外部 Runtime 流读取失败")
-                        elif event.kind == "usage" and event.usage:
-                            usage.update(event.usage)
-                        elif event.kind == "tool" and event.tool:
-                            tool_id = event.tool.tool_call_id
-                            if event.tool.phase == "start":
-                                try:
-                                    arguments = json.loads(event.tool.args or "{}")
-                                except (json.JSONDecodeError, TypeError):
-                                    arguments = {"raw": event.tool.args or ""}
-                                if not isinstance(arguments, dict):
-                                    arguments = {"value": arguments}
-                                workspace_decision = check_workspace_guard(
-                                    event.tool.name,
-                                    arguments,
-                                    permission_guard,
-                                    cwd=cwd,
-                                )
-                                if not workspace_decision.allowed:
-                                    yield ResponseChunk.error(ctx.request_id, workspace_decision.reason, next_seq())
-                                    return
-                                persisted_tools[tool_id] = ToolCall(
-                                    id=tool_id,
-                                    name=event.tool.name,
-                                    arguments=arguments,
-                                    status="running",
-                                )
-                            else:
-                                tool_call = persisted_tools.get(tool_id)
-                                if tool_call is None:
-                                    tool_call = ToolCall(
+                    provider_run = None
+                    if delegation_service is not None:
+                        provider_run = await delegation_service.submit(
+                            execution_request
+                        )
+                        event_stream = provider_run.stream()
+                    else:
+                        event_stream = _stream_runtime_with_safe_resume(
+                            adapter,
+                            execution_request,
+                            reset_memory=resume_reset_memory,
+                        )
+                    try:
+                        async for event in event_stream:
+                            if event.kind == "session":
+                                native_session_id = event.session_id
+                                runtime_failure_session_id = native_session_id
+                                native_session_reset = event.session_reset
+                                if native_session_id and self.config.persist_runtime_session:
+                                    external_store.save_runtime_session_binding(
+                                        **binding_key,
+                                        native_session_id=native_session_id,
+                                        session_profile=session_profile,
+                                        status="active",
+                                    )
+                                continue
+                            if event.kind == "text" and event.text:
+                                parts.append(event.text)
+                                yield ResponseChunk.delta(ctx.request_id, event.text, next_seq())
+                            elif event.kind == "thinking" and event.text:
+                                thinking_parts.append(event.text)
+                                yield ResponseChunk.thinking_event(ctx.request_id, event.text, next_seq())
+                            elif event.kind == "error":
+                                if adapter_id == "acp-stdio":
+                                    raise AcpAdapterError(event.text or "ACP stdout read failed")
+                                raise ExternalCliError(event.text or "外部 Runtime 流读取失败")
+                            elif event.kind == "usage" and event.usage:
+                                usage.update(event.usage)
+                            elif event.kind == "tool" and event.tool:
+                                tool_id = event.tool.tool_call_id
+                                if event.tool.phase == "start":
+                                    try:
+                                        arguments = json.loads(event.tool.args or "{}")
+                                    except (json.JSONDecodeError, TypeError):
+                                        arguments = {"raw": event.tool.args or ""}
+                                    if not isinstance(arguments, dict):
+                                        arguments = {"value": arguments}
+                                    workspace_decision = check_workspace_guard(
+                                        event.tool.name,
+                                        arguments,
+                                        permission_guard,
+                                        cwd=cwd,
+                                    )
+                                    if not workspace_decision.allowed:
+                                        yield ResponseChunk.error(ctx.request_id, workspace_decision.reason, next_seq())
+                                        return
+                                    persisted_tools[tool_id] = ToolCall(
                                         id=tool_id,
                                         name=event.tool.name,
+                                        arguments=arguments,
+                                        status="running",
                                     )
-                                    persisted_tools[tool_id] = tool_call
-                                tool_call.result = event.tool.detail or ""
-                                tool_call.status = (
-                                    "error" if event.tool.phase == "error" else "done"
+                                else:
+                                    tool_call = persisted_tools.get(tool_id)
+                                    if tool_call is None:
+                                        tool_call = ToolCall(
+                                            id=tool_id,
+                                            name=event.tool.name,
+                                        )
+                                        persisted_tools[tool_id] = tool_call
+                                    tool_call.result = event.tool.detail or ""
+                                    tool_call.status = (
+                                        "error" if event.tool.phase == "error" else "done"
+                                    )
+                                yield ResponseChunk.tool_event(
+                                    ctx.request_id,
+                                    event.tool.name,
+                                    event.tool.phase,
+                                    event.tool.detail,
+                                    next_seq(),
+                                    tool_call_id=event.tool.tool_call_id,
+                                    args=event.tool.args,
                                 )
-                            yield ResponseChunk.tool_event(
-                                ctx.request_id,
-                                event.tool.name,
-                                event.tool.phase,
-                                event.tool.detail,
-                                next_seq(),
-                                tool_call_id=event.tool.tool_call_id,
-                                args=event.tool.args,
-                            )
+                    finally:
+                        if provider_run is not None:
+                            await provider_run.close()
                 finally:
                     if interaction_binding is not None:
                         bridge.remove_binding(interaction_binding.token)
                 if native_session_id and self.config.persist_runtime_session:
-                    self.config.external_store.save_runtime_session_binding(
+                    external_store.save_runtime_session_binding(
                         **binding_key,
                         native_session_id=native_session_id,
                         status="active",
@@ -1299,10 +1422,10 @@ class ExternalExecutor(AgentExecutor):
                     and native_session_reset
                     and self.config.persist_runtime_session
                 ):
-                    self.config.external_store.delete_runtime_session_binding(**binding_key)
+                    external_store.delete_runtime_session_binding(**binding_key)
                 output = "".join(parts).strip()
             elif protocol == "cli":
-                output = await run_external_cli(
+                output = await runtime_support.run_cli(
                     ExternalCliConfig(
                         provider=provider,
                         executable_path=runtime["executable_path"],
@@ -1325,7 +1448,7 @@ class ExternalExecutor(AgentExecutor):
                         function=str(runtime.get("metadata", {}).get("function") or ""),
                         external_agent_id=self.config.external_agent_id,
                         cwd=ctx.cwd or self.config.cwd or ".",
-                        external_store=self.config.external_store,
+                        external_store=external_store,
                         options=runtime.get("metadata", {}),
                     ),
                     ctx,
@@ -1339,7 +1462,7 @@ class ExternalExecutor(AgentExecutor):
         except AcpAdapterError as exc:
             if runtime_failure_binding_key is not None and runtime_failure_session_id:
                 try:
-                    self.config.external_store.save_runtime_session_binding(
+                    external_store.save_runtime_session_binding(
                         **runtime_failure_binding_key,
                         native_session_id=runtime_failure_session_id,
                         status="unsafe_failed",

@@ -67,6 +67,15 @@ if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
 if (-not (Test-Path ".\.venv\Scripts\pyinstaller.exe")) {
     Write-Host "正在安装项目与 PyInstaller..." -ForegroundColor Yellow
     uv pip install -e ".[dev]"
+    # ADR-0037：wiki（6P）、external agents（6Q）与 team/dynamickanban/channels/work（6Y）
+    # 位于 uv workspace 成员包 packages/*，一并 --no-deps 安装，
+    # 保证 PyInstaller 分析时 crew.* 成员模块可解析。
+    uv pip install --no-deps -e "./packages/crew-wiki"
+    uv pip install --no-deps -e "./packages/crew-external-agents"
+    uv pip install --no-deps -e "./packages/crew-team"
+    uv pip install --no-deps -e "./packages/crew-dynamickanban"
+    uv pip install --no-deps -e "./packages/crew-channels"
+    uv pip install --no-deps -e "./packages/crew-work"
     uv pip install pyinstaller
 }
 
@@ -342,8 +351,12 @@ Copy-Item -Path $pythonCacheDir -Destination $pythonRtDir -Recurse -Force
 # 清理 __pycache__ 目录（减少文件数量和路径长度）
 Get-ChildItem -Path $pythonRtDir -Directory -Recurse -Filter "__pycache__" | Remove-Item -Recurse -Force
 
-# 删除不必要的大型依赖（如果存在）
-$heavyDeps = @("sympy", "onnxruntime", "numpy", "scipy", "pandas")
+# 删除不必要的大型依赖（如果存在）。
+# 注意：numpy/pandas 绝不能进这个删除列表——办公技能批（reportlab/pandas 等）与
+# matplotlib 依赖它们在运行时可用；此前把它们删掉会导致打包态 import pandas /
+# matplotlib 直接 ImportError（xlsx/docx/pdf 技能与绘图能力不可用）。体积代价
+# （约 +100MB）是功能正确性的既定取舍；Windows 打包态实测结果待回填。
+$heavyDeps = @("sympy", "onnxruntime", "scipy")
 foreach ($dep in $heavyDeps) {
     $depPath = Join-Path $pythonRtDir "Lib\site-packages\$dep"
     if (Test-Path $depPath) {

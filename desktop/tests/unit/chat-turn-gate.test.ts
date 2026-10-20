@@ -87,7 +87,7 @@ describe('applyChunk turn identity gate', () => {
     vi.advanceTimersByTime(1_000);
 
     expect(document.querySelector('.msg__fold-spinner')).toBe(spinner);
-    expect(document.querySelector('.msg__fold-label')?.textContent).toContain('已等待 4s');
+    expect(document.querySelector('.msg__fold-label')?.textContent).toContain('已工作 4 秒');
   });
 
   it('连续 thinking 增量安全拼接且不重建 spinner', async () => {
@@ -111,6 +111,34 @@ describe('applyChunk turn identity gate', () => {
 
     expect(document.querySelector('.msg__fold-spinner')).toBe(spinner);
     expect(document.querySelector('.process-timeline__thinking')?.textContent).toBe('第一段思考第二段思考');
+  });
+
+  it('final 封口后思考块显示最终时长，计时头定格', async () => {
+    vi.useFakeTimers();
+    const startedAt = 1_700_000_000_000;
+    vi.setSystemTime(startedAt);
+    openTurn('req-think-final');
+    patchBook('sid-1', { assistantId: 'turn-think-final' });
+    appendSessionMessage('sid-1', {
+      id: 'turn-think-final',
+      role: 'assistant',
+      content: '',
+      thinking: '逐步推理',
+      timestamp: startedAt,
+      turnStartedAt: startedAt,
+      thinkingStartedAt: startedAt,
+      streaming: true,
+    });
+    renderChat();
+    expect(document.querySelector('.process-timeline__title')?.textContent).toBe('思考 · 持续了几秒');
+
+    vi.setSystemTime(startedAt + 5_000);
+    applyChunk(chunk('final', 'req-think-final', { text: '最终答案' }));
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(document.querySelector('.process-timeline__title')?.textContent).toBe('思考 · 持续了 5 秒');
+    expect(document.querySelector('.msg__fold-label')?.textContent).toBe('已工作 5 秒');
+    expect(document.querySelector('.msg__fold-spinner')).toBeNull();
   });
 
   it('连续正文分片只更新正文并保留气泡、头像和模型信息节点', async () => {

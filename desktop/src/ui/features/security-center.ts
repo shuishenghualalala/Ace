@@ -26,11 +26,21 @@ import {
   type SecurityAuditQuery,
   type SecurityAuditView,
 } from './security-audit';
+import type { PageContribution, PageLifecycleContext } from './page-registry';
+import { securityModuleEnabled } from './security-mode';
 
 type GatewayResult = { ok?: boolean; body?: unknown };
 
 let securityCenterView: SecurityCenterView | null = null;
 let snapshot: SecurityCenterSnapshot = emptySnapshot();
+
+// ── 页面生命周期状态 ──
+let securityLifecycleSignal: AbortSignal | null = null;
+let securityLifecycleEpoch = 0;
+
+function securityLifecycleAvailable(): boolean {
+  return !securityLifecycleSignal || !securityLifecycleSignal.aborted;
+}
 
 function workspaceId(): string {
   return state.currentWorkspaceId ?? 'default';
@@ -93,11 +103,14 @@ function bodyOf<T>(result: GatewayResult | undefined, label: string): T {
 
 /** Loads each security surface independently so one failed endpoint does not hide the others. */
 async function refresh(): Promise<void> {
+  if (!securityLifecycleAvailable()) return;
   snapshot = { ...snapshot, loading: true, error: '', workspaceId: workspaceId() };
   render();
   const auditQuery = snapshot.auditQuery ?? EMPTY_SECURITY_AUDIT_QUERY;
   const auditPageSize = snapshot.auditPageSize ?? 20;
   let fallbackAuditPage = 0;
+  const epoch = securityLifecycleEpoch;
+  const signal = securityLifecycleSignal;
   const results = await Promise.allSettled([
     window.Crew?.getStrictSecurityEnabled?.(),
     window.Crew?.securityCapabilities?.(),
@@ -111,6 +124,7 @@ async function refresh(): Promise<void> {
       sort: auditQuery.sort,
     }),
   ]);
+  if (signal !== securityLifecycleSignal || epoch !== securityLifecycleEpoch || !securityLifecycleAvailable()) return;
   const errors: string[] = [];
 
   const preferenceResult = results[0];
@@ -279,6 +293,9 @@ async function loadAuditPage(
   pageSize: number,
   query: SecurityAuditQuery = snapshot.auditQuery ?? EMPTY_SECURITY_AUDIT_QUERY,
 ): Promise<void> {
+  if (!securityLifecycleAvailable()) return;
+  const epoch = securityLifecycleEpoch;
+  const signal = securityLifecycleSignal;
   const safeSize = Math.max(1, Math.min(100, pageSize));
   const safePage = Math.max(1, page);
   const result = await window.Crew?.securityAudit?.({
@@ -289,6 +306,7 @@ async function loadAuditPage(
     sessionId: query.sessionId,
     sort: query.sort,
   }) as GatewayResult | undefined;
+  if (signal !== securityLifecycleSignal || epoch !== securityLifecycleEpoch || !securityLifecycleAvailable()) return;
   if (!result?.ok) {
     notify('安全审计加载失败');
     return;
@@ -339,4 +357,24 @@ export async function initSecurityPage(): Promise<void> {
 export function __resetSecurityCenterForTest(): void {
   securityCenterView = null;
   snapshot = emptySnapshot();
+}
+
+export function createSecurityPageContribution(): PageContribution {
+  return {
+    id: 'security',
+    isAvailable: () => securityModuleEnabled(),
+    activate: ({ signal }: PageLifecycleContext) => {
+      securityLifecycleEpoch += 1;
+      securityLifecycleSignal = signal;
+      render();
+      void refresh();
+    },
+    deactivate: async () => {
+      securityLifecycleEpoch += 1;
+      securityLifecycleSignal = null;
+      securityCenterView?.element.remove();
+      securityCenterView = null;
+      snapshot = emptySnapshot();
+    },
+  };
 }

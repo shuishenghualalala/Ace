@@ -88,8 +88,7 @@ def _setup_config(spec: dict[str, Any], case_dir: Path) -> Any:
         float(cfg.tasks_agent_turn_execution_timeout_seconds or 3600),
         float(spec.get("timeout_seconds") or 300),
     )
-    if cfg.wiki is not None:
-        cfg.wiki.ingest.auto_apply = True
+    cfg.wiki_config["ingest"] = {**(cfg.wiki_config.get("ingest") or {}), "auto_apply": True}
     cfg.external_agents_enabled = True
     cfg.external_security_enabled = False
     for key, value in (spec.get("config") or {}).items():

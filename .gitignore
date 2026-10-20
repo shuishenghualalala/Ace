@@ -2,6 +2,7 @@
 AGENTS.md
 CLAUDE.md
 .claude/
+.zcode/
 .dsh/
 .git-commands.md
 CONTEXT.md
@@ -106,6 +107,7 @@ Thumbs.db
 
 # Local planning and non-release documentation
 /TODO/
+/docs/todo/
 /SPEC*.md
 /spec/
 /tasks/
@@ -118,3 +120,6 @@ Thumbs.db
 # doc
 .docs/
 .doc/
+
+# Mimosa 安全扫描器本地运行数据
+.mimosa/

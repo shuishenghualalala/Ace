@@ -92,56 +92,67 @@ def test_capability_config_canonicalizes_legacy_site_flags() -> None:
     }
 
 
-def test_site_profile_scopes_main_agent_tools_skills_and_prompt(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_site_profile_scopes_main_agent_tools_skills_and_prompt(tmp_path) -> None:
     app = _app(tmp_path)
+    try:
+        await app.startup(start_cron=False)
 
-    main = app._make_agent({}, owner_account_id=OWNER)
-    blueprint = app._make_agent(
-        {"executor": "builtin", "capability_profiles": ["blueprint.authoring"]},
-        owner_account_id=OWNER,
-    )
-    site = app._make_agent(
-        {"executor": "builtin", "capability_profiles": ["sites.authoring"]},
-        owner_account_id=OWNER,
-    )
-    legacy_site = app._make_agent(
-        {"executor": "builtin", "site_creation": True},
-        owner_account_id=OWNER,
-    )
+        main = app._make_agent({}, owner_account_id=OWNER)
+        blueprint = app._make_agent(
+            {"executor": "builtin", "capability_profiles": ["blueprint.authoring"]},
+            owner_account_id=OWNER,
+        )
+        site = app._make_agent(
+            {"executor": "builtin", "capability_profiles": ["sites.authoring"]},
+            owner_account_id=OWNER,
+        )
+        legacy_site = app._make_agent(
+            {"executor": "builtin", "site_creation": True},
+            owner_account_id=OWNER,
+        )
 
-    assert "publish_site" not in main.tool_filter
-    assert not {"Canvas", "Widget", "Automation", "Binding"} & set(main.tool_filter)
-    assert SITE_SKILLS <= set(main.disabled_skills or [])
+        assert "publish_site" not in main.tool_filter
+        assert not {"Canvas", "Widget", "Automation", "Binding"} & set(main.tool_filter)
+        assert SITE_SKILLS <= set(main.disabled_skills or [])
 
-    assert "publish_site" not in blueprint.tool_filter
-    assert {"Canvas", "Widget", "Automation", "Binding"} <= set(blueprint.tool_filter)
-    assert "webapp-building" in (blueprint.disabled_skills or [])
-    assert not ({"blueprint", "widget", "canvas"} & set(blueprint.disabled_skills or []))
+        assert "publish_site" not in blueprint.tool_filter
+        assert {"Canvas", "Widget", "Automation", "Binding"} <= set(blueprint.tool_filter)
+        assert "webapp-building" in (blueprint.disabled_skills or [])
+        assert not ({"blueprint", "widget", "canvas"} & set(blueprint.disabled_skills or []))
 
-    assert "publish_site" in site.tool_filter
-    assert {"Canvas", "Widget", "Automation", "Binding"} <= set(site.tool_filter)
-    assert not (SITE_SKILLS & set(site.disabled_skills or []))
-    assert "Ace 灵感 App" in site.system_prompt
-    assert legacy_site.tool_filter == site.tool_filter
-    assert legacy_site.disabled_skills == site.disabled_skills
+        assert "publish_site" in site.tool_filter
+        assert {"Canvas", "Widget", "Automation", "Binding"} <= set(site.tool_filter)
+        assert not (SITE_SKILLS & set(site.disabled_skills or []))
+        assert "Ace 灵感 App" in site.system_prompt
+        assert legacy_site.tool_filter == site.tool_filter
+        assert legacy_site.disabled_skills == site.disabled_skills
+    finally:
+        await app.shutdown()
 
 
-def test_site_profile_supplies_session_display_metadata(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_site_profile_supplies_session_display_metadata(tmp_path) -> None:
     app = _app(tmp_path)
-    app.session_store.set_agent_config(
-        "site-session",
-        {"executor": "builtin", "capability_profiles": ["sites.authoring"]},
-        owner_account_id=OWNER,
-    )
+    try:
+        await app.startup(start_cron=False)
+        app.session_store.set_agent_config(
+            "site-session",
+            {"executor": "builtin", "capability_profiles": ["sites.authoring"]},
+            owner_account_id=OWNER,
+        )
 
-    assert session_agent_label(app, "site-session", owner_account_id=OWNER) == {
-        "name": "灵感",
-        "provider": "sites",
-        "display_badge": "◇",
-    }
+        assert session_agent_label(app, "site-session", owner_account_id=OWNER) == {
+            "name": "灵感",
+            "provider": "sites",
+            "display_badge": "◇",
+        }
+    finally:
+        await app.shutdown()
 
 
-def test_site_profile_cannot_bypass_access_control(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_site_profile_cannot_bypass_access_control(tmp_path) -> None:
     app = _app(
         tmp_path,
         access_control=AccessControlConfig(
@@ -151,29 +162,38 @@ def test_site_profile_cannot_bypass_access_control(tmp_path) -> None:
             }
         ),
     )
+    try:
+        await app.startup(start_cron=False)
 
-    site = app._make_agent(
-        {"executor": "builtin", "capability_profiles": ["sites.authoring"]},
-        owner_account_id=OWNER,
-    )
+        site = app._make_agent(
+            {"executor": "builtin", "capability_profiles": ["sites.authoring"]},
+            owner_account_id=OWNER,
+        )
 
-    assert "publish_site" not in site.tool_filter
-    assert not {"Canvas", "Widget", "Automation", "Binding"} & set(site.tool_filter)
-    assert {"webapp-building", "blueprint"} <= set(site.disabled_skills or [])
+        assert "publish_site" not in site.tool_filter
+        assert not {"Canvas", "Widget", "Automation", "Binding"} & set(site.tool_filter)
+        assert {"webapp-building", "blueprint"} <= set(site.disabled_skills or [])
+    finally:
+        await app.shutdown()
 
 
-def test_site_profile_preserves_deny_all_skill_policy(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_site_profile_preserves_deny_all_skill_policy(tmp_path) -> None:
     app = _app(
         tmp_path,
         access_control=AccessControlConfig(internal={"disabled_skills": ["*"]}),
     )
+    try:
+        await app.startup(start_cron=False)
 
-    site = app._make_agent(
-        {"executor": "builtin", "capability_profiles": ["sites.authoring"]},
-        owner_account_id=OWNER,
-    )
+        site = app._make_agent(
+            {"executor": "builtin", "capability_profiles": ["sites.authoring"]},
+            owner_account_id=OWNER,
+        )
 
-    assert site.disabled_skills == ["*"]
+        assert site.disabled_skills == ["*"]
+    finally:
+        await app.shutdown()
 
 
 @pytest.mark.asyncio
@@ -182,30 +202,34 @@ async def test_session_agent_config_validates_and_canonicalizes_profiles(
     auth_headers,
 ) -> None:
     app = _app(tmp_path)
-    api = create_app(app)
-    transport = ASGITransport(app=api)
-    async with AsyncClient(
-        transport=transport,
-        base_url="http://test",
-        headers=auth_headers,
-    ) as client:
-        legacy = await client.put(
-            "/api/session/legacy-site/agent-config",
-            json={"executor": "builtin", "inspiration_creation": True},
-        )
-        unknown = await client.put(
-            "/api/session/unknown-profile/agent-config",
-            json={"executor": "builtin", "capability_profiles": ["missing.profile"]},
-        )
-        malformed = await client.put(
-            "/api/session/malformed-profile/agent-config",
-            json={"executor": "builtin", "capability_profiles": "sites.authoring"},
-        )
+    try:
+        await app.startup(start_cron=False)
+        api = create_app(app)
+        transport = ASGITransport(app=api)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            headers=auth_headers,
+        ) as client:
+            legacy = await client.put(
+                "/api/session/legacy-site/agent-config",
+                json={"executor": "builtin", "inspiration_creation": True},
+            )
+            unknown = await client.put(
+                "/api/session/unknown-profile/agent-config",
+                json={"executor": "builtin", "capability_profiles": ["missing.profile"]},
+            )
+            malformed = await client.put(
+                "/api/session/malformed-profile/agent-config",
+                json={"executor": "builtin", "capability_profiles": "sites.authoring"},
+            )
 
-    assert legacy.status_code == 200
-    assert legacy.json()["capability_profiles"] == ["sites.authoring"]
-    assert "inspiration_creation" not in legacy.json()
-    assert unknown.status_code == 400
-    assert "未知 Capability Profile" in unknown.json()["error"]
-    assert malformed.status_code == 400
-    assert "字符串数组" in malformed.json()["error"]
+        assert legacy.status_code == 200
+        assert legacy.json()["capability_profiles"] == ["sites.authoring"]
+        assert "inspiration_creation" not in legacy.json()
+        assert unknown.status_code == 400
+        assert "未知 Capability Profile" in unknown.json()["error"]
+        assert malformed.status_code == 400
+        assert "字符串数组" in malformed.json()["error"]
+    finally:
+        await app.shutdown()

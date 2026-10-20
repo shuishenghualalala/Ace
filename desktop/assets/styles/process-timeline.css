@@ -63,6 +63,13 @@
   line-height: var(--mw-type-compact-line);
 }
 
+/* 纯文本条目（状态/错误）：与 28px 图标垂直居中，多行文本整体居中换行。 */
+.mw-process-timeline .process-timeline__content--text {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+}
+
 .mw-process-timeline .process-timeline__narration {
   min-width: 0;
   padding: var(--mw-space-1) 0 var(--mw-space-1);
@@ -116,7 +123,7 @@
 .mw-process-timeline .process-timeline__progress {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--mw-space-fine-2);
   margin: 0 0 var(--mw-space-1);
   padding-left: var(--mw-space-2);
   border-left: 1px solid var(--mw-border-subtle);
@@ -132,6 +139,17 @@
   font-size: var(--mw-type-caption-size);
   font-weight: var(--mw-type-body-weight);
   white-space: normal;
+}
+
+/* 长进度折叠后的展开/收起提示行。 */
+.mw-process-timeline .process-timeline__stage--toggle {
+  cursor: pointer;
+  font-style: italic;
+}
+
+.mw-process-timeline .process-timeline__stage--toggle:hover {
+  color: var(--mw-text-primary);
+  text-decoration: underline;
 }
 
 .mw-process-timeline .process-timeline__duration {
@@ -194,7 +212,7 @@
   padding: var(--mw-space-2) var(--mw-space-3);
   overflow-y: auto;
   color: var(--mw-text-secondary);
-  white-space: pre-wrap;
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 

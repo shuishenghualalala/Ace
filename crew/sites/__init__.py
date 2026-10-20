@@ -2,6 +2,12 @@
 
 from crew.sites.blueprint import BlueprintManager, BlueprintStore
 from crew.sites.capabilities import register_site_capability_profiles
+from crew.sites.feature import (
+    SITES_FEATURE_ID,
+    SitesFeatureBundle,
+    SitesFeatureHost,
+    build_sites_feature,
+)
 from crew.sites.manager import SiteManager
 from crew.sites.store import SQLiteSiteStore
 
@@ -11,4 +17,8 @@ __all__ = [
     "SQLiteSiteStore",
     "SiteManager",
     "register_site_capability_profiles",
+    "SITES_FEATURE_ID",
+    "SitesFeatureBundle",
+    "SitesFeatureHost",
+    "build_sites_feature",
 ]

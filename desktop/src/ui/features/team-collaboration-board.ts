@@ -13,9 +13,21 @@ import {
   type Task,
   type TeamMemberModelBinding,
 } from '../backend-client';
-import type { ChatMessage } from '../chat-render';
-import { escapeHtml, notify, state } from '../state';
+import type { ChatMessage, ToolCallInfo } from '../chat-render';
+import { escapeHtml, notify, state, newMessageId } from '../state';
 import { setRuntimeStyle } from '../components/runtime-style';
+import {
+  backendDurationToMs,
+  mergeTeamInternalMessage,
+  normalizeTurnFileChanges,
+} from './history-mapping';
+import {
+  featureEventRegistry,
+  emptyFeatureReducerResult,
+  type FeatureReducerContext,
+  type FeatureReducerResult,
+} from './event-reducer-registry';
+import { registerTeamBoardCallbacks } from './board-hooks';
 
 const CREW_BUILTIN_AGENT_ID = 'crew::builtin';
 const TEAM_PLAN_SOURCES = new Set(['team_plan', 'team_kanban', 'team_flow_fallback']);
@@ -166,7 +178,10 @@ const knownTurns = new Map<string, Set<string>>();
 const expandedNodes = new Map<string, Set<string>>();
 const filesOpen = new Set<string>();
 const stableProgress = new Map<string, { turnId: string; completed: number; total: number; percent: number }>();
-const refreshInFlight = new Set<string>();
+// 请求占用以唯一 token 表示（会话 → 自增序号）：finally 只有在仍占有该 token 时才释放，
+// 旧代迟到请求的清理因此不会误删新代同会话请求的占用标记。
+const refreshInFlight = new Map<string, number>();
+let refreshInFlightSeq = 0;
 let refreshTimer: number | null = null;
 let pollingSessionId = '';
 
@@ -721,7 +736,10 @@ async function loadConfiguredTeam(sessionId: string): Promise<{ name: string; me
 export async function primeTeamCollaborationIdentity(sessionId: string): Promise<void> {
   const previous = snapshots.get(sessionId);
   if (previous?.members.length && previous.teamName) return;
+  const generation = teamBoardGeneration;
   const configured = await loadConfiguredTeam(sessionId);
+  // 在途守卫：预热期间看板被卸载/重装时，迟到响应不写入快照。
+  if (generation !== teamBoardGeneration) return;
   if (!configured.members.length && !configured.name) return;
   snapshots.set(sessionId, {
     sessionId,
@@ -735,7 +753,9 @@ export async function primeTeamCollaborationIdentity(sessionId: string): Promise
 
 export async function refreshTeamCollaborationBoard(sessionId: string | null | undefined = state.activeSessionId): Promise<void> {
   if (!sessionId || refreshInFlight.has(sessionId)) return;
-  refreshInFlight.add(sessionId);
+  const token = ++refreshInFlightSeq;
+  refreshInFlight.set(sessionId, token);
+  const generation = teamBoardGeneration;
   try {
     const previous = snapshots.get(sessionId);
     const [tasks, runtime, configured] = await Promise.all([
@@ -745,6 +765,9 @@ export async function refreshTeamCollaborationBoard(sessionId: string | null | u
         ? Promise.resolve({ name: previous.teamName, members: previous.members })
         : loadConfiguredTeam(sessionId),
     ]);
+    // 在途守卫：请求期间看板被卸载/重装（代际变化）时，迟到响应整体丢弃
+    // —— 不写 snapshots/stableNodes、不派发更新事件（finally 仍按 token 释放自己的占用）。
+    if (generation !== teamBoardGeneration) return;
     const next: TeamBoardSnapshot = {
       sessionId,
       tasks,
@@ -761,7 +784,11 @@ export async function refreshTeamCollaborationBoard(sessionId: string | null | u
       window.dispatchEvent(new CustomEvent('team-collaboration:updated', { detail: { sessionId } }));
     }
   } finally {
-    refreshInFlight.delete(sessionId);
+    // token 所有权：只有 map 中仍是自己那个 token 时才允许释放，
+    // 旧代不得清除新代同会话请求的占用（否则后续刷新会并发执行、乱序回写）。
+    if (refreshInFlight.get(sessionId) === token) {
+      refreshInFlight.delete(sessionId);
+    }
   }
 }
 
@@ -783,15 +810,8 @@ export function stopTeamCollaborationPolling(): void {
 
 /** 清理模块级 UI 快照；仅供单元测试隔离用。 */
 export function __resetTeamCollaborationBoardForTest(): void {
-  stopTeamCollaborationPolling();
-  snapshots.clear();
-  stableNodes.clear();
-  expandedTurns.clear();
-  knownTurns.clear();
-  expandedNodes.clear();
-  filesOpen.clear();
-  stableProgress.clear();
-  refreshInFlight.clear();
+  disposeTeamCollaborationBoard();
+  resetTeamCollaborationState();
 }
 
 export function teamCollaborationTaskCount(sessionId: string | null | undefined = state.activeSessionId): number {
@@ -1085,4 +1105,259 @@ export function activateTeamCollaborationBoard(sessionId: string | null | undefi
   document.querySelector<HTMLButtonElement>('[data-team-close]')?.addEventListener('click', () => {
     document.getElementById('task-board-toggle')?.click();
   });
+}
+
+function backendSecondsToMs(value: unknown, fallback = Date.now()): number {
+  const number = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(number) || number <= 0) return fallback;
+  return number < 1_000_000_000_000 ? number * 1000 : number;
+}
+
+function normalizeTeamToolCalls(raw: unknown): ToolCallInfo[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const calls = raw.map((item, index): ToolCallInfo => {
+    const value = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+    const status = value.status === 'running' || value.status === 'generating' || value.status === 'error'
+      ? value.status
+      : 'done';
+    const args = typeof value.arguments === 'string'
+      ? value.arguments
+      : JSON.stringify(value.arguments || {});
+    return {
+      toolCallId: String(value.id || value.tool_call_id || `team_tool_${index}`),
+      name: String(value.name || 'unknown'),
+      ...(typeof value.ui_label === 'string' ? { uiLabel: value.ui_label } : {}),
+      args,
+      ...(typeof value.result === 'string' ? { result: value.result } : {}),
+      status,
+      startedAt: backendSecondsToMs(value.started_at, 0),
+      ...(typeof value.duration === 'number' && backendDurationToMs(value.duration) > 0
+        ? { duration: backendDurationToMs(value.duration) }
+        : {}),
+    };
+  });
+  return calls.length ? calls : undefined;
+}
+
+function normalizeTeamText(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    for (const key of ['message', 'text', 'content', 'summary']) {
+      if (typeof record[key] === 'string' && String(record[key]).trim()) return String(record[key]);
+    }
+    try { return JSON.stringify(value); } catch { return ''; }
+  }
+  return String(value);
+}
+
+export interface TeamInternalBody {
+  text?: string;
+  source_session_id?: string;
+  agent_id?: string;
+  agent_name?: string;
+  agent_role?: string;
+  agent_tone?: number;
+  is_leader?: boolean;
+  event_type?: string;
+  node_id?: string;
+  mention_from?: string;
+  mention_to?: string[];
+  mention_intent?: string;
+  communication_kind?: string;
+  communication_status?: string;
+  request_id?: string;
+  reply_to?: string;
+  communication_request_text?: string;
+  display_mode?: string;
+  collapsed_title?: string;
+  process_text?: string;
+  artifacts?: ChatMessage['artifacts'];
+  turn_file_changes?: ChatMessage['turnFileChanges'];
+  thinking?: unknown;
+  tool_calls?: unknown[];
+  turn_started_at?: number;
+  turn_duration?: number;
+  timestamp?: number;
+  append?: boolean;
+}
+
+function buildTeamInternalMessage(body: TeamInternalBody, ctx: FeatureReducerContext): ChatMessage {
+  const timestamp = backendSecondsToMs(body.timestamp);
+  const toolCalls = normalizeTeamToolCalls(body.tool_calls);
+  const turnFileChanges = normalizeTurnFileChanges(body.turn_file_changes);
+  const streaming = body.display_mode === 'stream' || body.event_type === 'team_stream';
+  return {
+    id: newMessageId('team'),
+    role: 'team_internal',
+    content: typeof body.text === 'string' ? body.text : '',
+    timestamp,
+    segmentRole: 'answer',
+    streaming,
+    ...(typeof body.source_session_id === 'string' ? { sourceSessionId: body.source_session_id } : {}),
+    ...(typeof body.agent_id === 'string' ? { agentId: body.agent_id } : {}),
+    ...(typeof body.agent_name === 'string' ? { agentName: body.agent_name } : {}),
+    ...(typeof body.agent_role === 'string' ? { agentRole: body.agent_role } : {}),
+    ...(typeof body.agent_tone === 'number' ? { agentTone: body.agent_tone } : {}),
+    ...(typeof body.is_leader === 'boolean' ? { isLeader: body.is_leader } : {}),
+    ...(typeof body.event_type === 'string' ? { eventType: body.event_type } : {}),
+    ...(typeof body.node_id === 'string' ? { nodeId: body.node_id } : {}),
+    ...(typeof body.mention_from === 'string' ? { mentionFrom: body.mention_from } : {}),
+    ...(Array.isArray(body.mention_to) ? { mentionTo: body.mention_to.map(String) } : {}),
+    ...(typeof body.mention_intent === 'string' ? { mentionIntent: body.mention_intent } : {}),
+    ...(typeof body.communication_kind === 'string' ? { communicationKind: body.communication_kind } : {}),
+    ...(typeof body.communication_status === 'string' ? { communicationStatus: body.communication_status } : {}),
+    ...(typeof body.request_id === 'string' ? { requestId: body.request_id } : {}),
+    ...(typeof body.reply_to === 'string' ? { replyTo: body.reply_to } : {}),
+    ...(typeof body.communication_request_text === 'string'
+      ? { communicationRequestText: body.communication_request_text }
+      : {}),
+    ...(typeof body.display_mode === 'string' ? { displayMode: body.display_mode } : {}),
+    ...(typeof body.collapsed_title === 'string' ? { collapsedTitle: body.collapsed_title } : {}),
+    ...(typeof body.process_text === 'string' ? { processText: body.process_text } : {}),
+    ...(Array.isArray(body.artifacts) ? { artifacts: body.artifacts } : {}),
+    ...(turnFileChanges ? { turnFileChanges } : {}),
+    ...(body.thinking != null ? { thinking: normalizeTeamText(body.thinking) } : {}),
+    ...(toolCalls ? { toolCalls } : {}),
+    ...(typeof body.turn_started_at === 'number'
+      ? { turnStartedAt: backendSecondsToMs(body.turn_started_at) }
+      : streaming ? { turnStartedAt: Date.now() } : {}),
+    ...(typeof body.turn_duration === 'number' ? { turnDurationMs: Math.max(0, body.turn_duration * 1000) } : {}),
+  };
+}
+
+export function teamInternalReducer(body: TeamInternalBody, ctx: FeatureReducerContext): FeatureReducerResult {
+  const assistantId = ctx.book.assistantId;
+  let messages = ctx.messages;
+  const bookPatch: Partial<FeatureReducerContext['book']> = { hadTeamInternal: true };
+
+  if (!ctx.book.hadTeamInternal && assistantId) {
+    const assistant = messages.find((m) => m.id === assistantId);
+    const isEmptyOptimistic = assistant?.role === 'assistant'
+      && !assistant.content.trim()
+      && !assistant.thinking?.trim()
+      && !assistant.toolCalls?.length;
+    if (isEmptyOptimistic) {
+      messages = messages.filter((m) => m.id !== assistantId);
+      bookPatch.assistantId = null;
+      bookPatch.firstChunkAt = null;
+    }
+  }
+
+  const incoming = buildTeamInternalMessage(body, ctx);
+  const merged = mergeTeamInternalMessage(messages, incoming, { append: body.append === true });
+
+  return {
+    messageUpserts: [],
+    toolUpserts: [],
+    replaceMessages: merged,
+    replaceBook: { ...ctx.book, ...bookPatch },
+    statusHint: 'running',
+    queueHint: '',
+    finalize: false,
+  };
+}
+
+let teamInitDisposer: (() => void) | null = null;
+
+// 安装代计数：initTeamCollaborationBoard 装新一代、dispose/测试重置销毁一代时各 +1。
+// 异步刷新/预热发起前快照当前代，返回后若代已变则整体丢弃，
+// 保证卸载/重装后的迟到响应不写 snapshots、不派发更新事件。
+// 会话隔离仍由 snapshots 按会话键控承担：迟到响应只允许写回自己那个会话的缓存。
+let teamBoardGeneration = 0;
+
+function resetTeamCollaborationState(): void {
+  // 代际 +1：使本代所有在途请求在 await 检查点失效。
+  teamBoardGeneration += 1;
+  stopTeamCollaborationPolling();
+  snapshots.clear();
+  stableNodes.clear();
+  expandedTurns.clear();
+  knownTurns.clear();
+  expandedNodes.clear();
+  filesOpen.clear();
+  stableProgress.clear();
+  refreshInFlight.clear();
+}
+
+/**
+ * 单 Feature 安装事务：安装步骤即时收集本次获得的 disposer，
+ * 任一步失败则逆序撤销已收集的贡献（每个清理单独兜底，一个失败不阻断其余）；
+ * 成功后发布的 disposer 复用同一条清理链，且幂等（二次调用 no-op，
+ * 不重复清理、不造成代际语义漂移）。
+ */
+function createTeamBoardInstallTransaction(scope: string): {
+  collect: (disposer: () => void) => void;
+  rollback: () => void;
+  publish: (finalize: () => void) => () => void;
+} {
+  const contributions: Array<() => void> = [];
+  const undoAll = (): void => {
+    for (let index = contributions.length - 1; index >= 0; index -= 1) {
+      try {
+        contributions[index]?.();
+      } catch (err) {
+        console.warn(`[${scope}] 安装贡献清理失败（已跳过，继续其余清理）`, err);
+      }
+    }
+  };
+  return {
+    collect: (disposer) => {
+      contributions.push(disposer);
+    },
+    rollback: undoAll,
+    publish: (finalize) => {
+      let disposed = false;
+      return (): void => {
+        if (disposed) return;
+        disposed = true;
+        undoAll();
+        finalize();
+      };
+    },
+  };
+}
+
+/**
+ * 初始化 Team Collaboration 看板生命周期：
+ * - 注册 feature event reducer（team/internal_message@1）；
+ * - 向 board-hooks 注册中心调用回调。
+ * 返回的 disposer 与 disposeTeamCollaborationBoard() 共享同一条清理路径。
+ */
+export function initTeamCollaborationBoard(): () => void {
+  if (teamInitDisposer) return teamInitDisposer;
+
+  // 新一代安装：与上一代（含其在途请求）彻底隔离。
+  // 幂等早退不递增代际；安装失败的回滚不额外递增（本次开始时已递增过，
+  // 该代的在途请求已全部失效），避免代际语义漂移。
+  teamBoardGeneration += 1;
+
+  const tx = createTeamBoardInstallTransaction('team-collaboration-board');
+  try {
+    tx.collect(featureEventRegistry.register({
+      feature: 'team',
+      event: 'internal_message',
+      version: 1,
+      reducer: (payload, ctx) => teamInternalReducer(payload as TeamInternalBody, ctx),
+    }));
+    tx.collect(registerTeamBoardCallbacks({
+      primeTeamIdentity: primeTeamCollaborationIdentity,
+    }));
+  } catch (err) {
+    // 中途失败：逆序撤销本次已获得的贡献，安装前已存在的贡献不受影响，
+    // teamInitDisposer 保持 null（本次安装视为未发生），重试可干净重装。
+    tx.rollback();
+    throw err;
+  }
+
+  teamInitDisposer = tx.publish(resetTeamCollaborationState);
+  return teamInitDisposer;
+}
+
+/** 显式销毁 Team Collaboration 看板：撤销 reducer、注销回调、释放轮询与状态。 */
+export function disposeTeamCollaborationBoard(): void {
+  teamInitDisposer?.();
+  teamInitDisposer = null;
 }
