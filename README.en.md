@@ -281,7 +281,6 @@ Skills are reusable playbooks that extend what Crew's agents can do. The reposit
 | `crew-guide` | `crew/skills/agent-guide/` | User guide for Crew and local skill installation |
 | `crew-wiki-curator` | `crew/skills/crew-wiki-curator/` | Rules for Wiki ingestion, provenance, conflict handling, and quality control |
 | `cua-driver` | `crew/skills/cua-driver/` | Observation, interaction, and verification guidance for native desktop automation |
-| `image-understanding` | `crew/skills/image-understanding/` | Image analysis through your configured vision model, including LLM Wiki ingestion |
 | `video-understanding` | `crew/skills/video-understanding/` | Video analysis through your configured external service, including LLM Wiki ingestion |
 | `browser-use` | `plugins/browser/skills/` | Navigation, reading, and interaction workflows for the in-app browser |
 

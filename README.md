@@ -290,7 +290,6 @@ Skill 就是船员的职业技能包，装上就会，卸了就忘。仓库随�
 | `crew-guide` | `crew/skills/agent-guide/` | Crew 使用手册与本地 Skill 安装指引 |
 | `crew-wiki-curator` | `crew/skills/crew-wiki-curator/` | Wiki Agent 的入库、溯源、冲突处理与质量治理规范 |
 | `cua-driver` | `crew/skills/cua-driver/` | 原生桌面应用自动化的观察、操作与验证规范 |
-| `image-understanding` | `crew/skills/image-understanding/` | 通过用户配置的视觉模型理解图片，并支持 LLM Wiki 图片解析 |
 | `video-understanding` | `crew/skills/video-understanding/` | 通过用户配置的外部服务理解视频，并支持 LLM Wiki 视频解析 |
 | `browser-use` | `plugins/browser/skills/` | 应用内浏览器的导航、读取和交互工作流 |
 

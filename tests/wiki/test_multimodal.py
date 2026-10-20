@@ -1,6 +1,6 @@
 """Wiki 多模态理解核心单元测试。
 
-用 mock 替换 skill 脚本，不调用真实外部媒体服务。
+图片理解 mock 进程内 requests 调用，视频理解 mock skill 脚本，均不触达真实外部媒体服务。
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import requests
 
 from crew.wiki import multimodal
 from crew.wiki.multimodal import (
-    _IMAGE_UNDERSTAND_SCRIPT,
     _VIDEO_UNDERSTAND_SCRIPT,
     MediaUnderstandingError,
     _load_script_module,
@@ -74,29 +73,49 @@ def test_is_video_mime():
     assert is_video_mime("text/plain") is False
 
 
-def test_describe_image_returns_text(sample_image: Path):
-    mock_module = MagicMock()
-    mock_module.analyze_image.return_value = "一只猫在睡觉"
+def _configure_image_env(monkeypatch):
+    monkeypatch.setenv("VLM_BASE_URL", "https://vision.example/v1")
+    monkeypatch.setenv("VLM_MODEL", "vision-model")
+    monkeypatch.setenv("VLM_API_KEY", "fake-key")
+    monkeypatch.delenv("CREW_ENV_FILE", raising=False)
 
-    with patch(
-        "crew.wiki.multimodal._load_script_module",
-        return_value=mock_module,
-    ):
-        result = describe_image(str(sample_image))
+
+def _mock_image_response(monkeypatch, text: str) -> list:
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return _FakeResponse({"choices": [{"message": {"content": text}}]})
+
+    monkeypatch.setattr(multimodal.requests, "post", fake_post)
+    return calls
+
+
+def test_describe_image_returns_text(sample_image: Path, monkeypatch):
+    _configure_image_env(monkeypatch)
+    calls = _mock_image_response(monkeypatch, "一只猫在睡觉")
+
+    result = describe_image(str(sample_image), "描述图片")
 
     assert result == "一只猫在睡觉"
-    mock_module.analyze_image.assert_called_once_with(str(sample_image), None)
+    assert calls[0][0] == "https://vision.example/v1/chat/completions"
+    body = calls[0][1]["json"]
+    assert body["model"] == "vision-model"
+    assert body["messages"][0]["content"][1]["image_url"]["url"].startswith(
+        "data:image/png;base64,"
+    )
 
 
-def test_describe_image_raises_when_none(sample_image: Path):
-    mock_module = MagicMock()
-    mock_module.analyze_image.return_value = None
+def test_describe_image_requires_configuration(sample_image: Path, monkeypatch):
+    monkeypatch.delenv("VLM_BASE_URL", raising=False)
+    monkeypatch.delenv("VLM_MODEL", raising=False)
+    monkeypatch.delenv("CREW_ENV_FILE", raising=False)
+    post = MagicMock()
+    monkeypatch.setattr(multimodal.requests, "post", post)
 
-    with patch(
-        "crew.wiki.multimodal._load_script_module",
-        return_value=mock_module,
-    ), pytest.raises(MediaUnderstandingError):
+    with pytest.raises(MediaUnderstandingError):
         describe_image(str(sample_image))
+    post.assert_not_called()
 
 
 def test_describe_video_requires_confirmation(sample_video: Path):
@@ -138,15 +157,11 @@ def test_describe_video_raises_when_upload_fails(sample_video: Path):
         describe_video(str(sample_video), confirm_upload=True)
 
 
-def test_describe_media_routes_to_image(sample_image: Path):
-    mock_module = MagicMock()
-    mock_module.analyze_image.return_value = "image desc"
+def test_describe_media_routes_to_image(sample_image: Path, monkeypatch):
+    _configure_image_env(monkeypatch)
+    _mock_image_response(monkeypatch, "image desc")
 
-    with patch(
-        "crew.wiki.multimodal._load_script_module",
-        return_value=mock_module,
-    ):
-        result = describe_media(str(sample_image), "image/png")
+    result = describe_media(str(sample_image), "image/png")
 
     assert result == "image desc"
 
@@ -184,47 +199,6 @@ def test_load_script_module_system_exit(tmp_path: Path):
     assert "退出" in str(exc_info.value)
 
 
-def test_bundled_image_skill_calls_configured_openai_compatible_endpoint(
-    sample_image: Path,
-    monkeypatch,
-):
-    module = _load_script_module("crew_skill_image_understand", _IMAGE_UNDERSTAND_SCRIPT)
-    calls = []
-
-    def fake_post(url, **kwargs):
-        calls.append((url, kwargs))
-        return _FakeResponse({"choices": [{"message": {"content": "一张测试图片"}}]})
-
-    monkeypatch.setenv("VLM_BASE_URL", "https://vision.example/v1")
-    monkeypatch.setenv("VLM_MODEL", "vision-model")
-    monkeypatch.setenv("VLM_API_KEY", "fake-key")
-    monkeypatch.setattr(module.requests, "post", fake_post)
-
-    result = module.analyze_image(sample_image, "描述图片")
-
-    assert result == "一张测试图片"
-    assert calls[0][0] == "https://vision.example/v1/chat/completions"
-    body = calls[0][1]["json"]
-    assert body["model"] == "vision-model"
-    assert body["messages"][0]["content"][1]["image_url"]["url"].startswith(
-        "data:image/png;base64,"
-    )
-
-
-def test_bundled_image_skill_does_not_request_without_configuration(
-    sample_image: Path,
-    monkeypatch,
-):
-    module = _load_script_module("crew_skill_image_understand", _IMAGE_UNDERSTAND_SCRIPT)
-    monkeypatch.delenv("VLM_BASE_URL", raising=False)
-    monkeypatch.delenv("VLM_MODEL", raising=False)
-    post = MagicMock()
-    monkeypatch.setattr(module.requests, "post", post)
-
-    assert module.analyze_image(sample_image) is None
-    post.assert_not_called()
-
-
 def test_bundled_video_skill_uses_only_configured_endpoints(
     sample_video: Path,
     monkeypatch,
@@ -257,93 +231,53 @@ def test_bundled_video_skill_uses_only_configured_endpoints(
 # ── H10：网络错误分类、输出截断、装配点异常守卫 ─────────────────────────────
 
 
-def _load_image_skill():
-    return _load_script_module("crew_skill_image_understand", _IMAGE_UNDERSTAND_SCRIPT)
-
-
 def _load_video_skill():
     return _load_script_module("crew_skill_video_understand", _VIDEO_UNDERSTAND_SCRIPT)
 
 
-def _configure_image_env(monkeypatch):
-    monkeypatch.setenv("VLM_BASE_URL", "https://vision.example/v1")
-    monkeypatch.setenv("VLM_MODEL", "vision-model")
-    monkeypatch.setenv("VLM_API_KEY", "fake-key")
-
-
-def test_bundled_image_skill_classifies_timeout(sample_image, monkeypatch, capsys):
-    module = _load_image_skill()
+def test_describe_image_classifies_timeout(sample_image, monkeypatch):
     _configure_image_env(monkeypatch)
 
     def fake_post(url, **kwargs):
         raise requests.Timeout("slow")
 
-    monkeypatch.setattr(module.requests, "post", fake_post)
+    monkeypatch.setattr(multimodal.requests, "post", fake_post)
 
-    assert module.analyze_image(sample_image, "描述") is None
-    assert "请求超时" in capsys.readouterr().err
+    with pytest.raises(MediaUnderstandingError, match="请求超时"):
+        describe_image(str(sample_image), "描述")
 
 
-def test_bundled_image_skill_classifies_connection_error(sample_image, monkeypatch, capsys):
-    module = _load_image_skill()
+def test_describe_image_classifies_connection_error(sample_image, monkeypatch):
     _configure_image_env(monkeypatch)
 
     def fake_post(url, **kwargs):
         raise requests.ConnectionError("dns")
 
-    monkeypatch.setattr(module.requests, "post", fake_post)
+    monkeypatch.setattr(multimodal.requests, "post", fake_post)
 
-    assert module.analyze_image(sample_image, "描述") is None
-    assert "连接失败" in capsys.readouterr().err
+    with pytest.raises(MediaUnderstandingError, match="连接失败"):
+        describe_image(str(sample_image), "描述")
 
 
-def test_bundled_image_skill_classifies_http_error(sample_image, monkeypatch, capsys):
-    module = _load_image_skill()
+def test_describe_image_classifies_http_error(sample_image, monkeypatch):
     _configure_image_env(monkeypatch)
 
     def fake_post(url, **kwargs):
         response = SimpleNamespace(status_code=502)
         raise requests.HTTPError("bad gateway", response=response)
 
-    monkeypatch.setattr(module.requests, "post", fake_post)
+    monkeypatch.setattr(multimodal.requests, "post", fake_post)
 
-    assert module.analyze_image(sample_image, "描述") is None
-    assert "HTTP 502" in capsys.readouterr().err
+    with pytest.raises(MediaUnderstandingError, match="HTTP 502"):
+        describe_image(str(sample_image), "描述")
 
 
-def test_bundled_image_skill_emits_structured_error_json(sample_image, monkeypatch, capsys):
-    module = _load_image_skill()
+def test_describe_image_raises_on_empty_response(sample_image, monkeypatch):
     _configure_image_env(monkeypatch)
+    _mock_image_response(monkeypatch, "")
 
-    def fake_post(url, **kwargs):
-        raise requests.Timeout("slow")
-
-    monkeypatch.setattr(module.requests, "post", fake_post)
-
-    assert module.analyze_image(sample_image, "描述") is None
-
-    import json
-
-    err = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
-    assert err["status"] == "error"
-    assert err["error"] == "RequestFailed"
-
-
-def test_bundled_image_skill_truncates_long_output(sample_image, monkeypatch):
-    module = _load_image_skill()
-    _configure_image_env(monkeypatch)
-    monkeypatch.setattr(
-        module.requests,
-        "post",
-        lambda url, **kwargs: _FakeResponse(
-            {"choices": [{"message": {"content": "字" * 50000}}]}
-        ),
-    )
-
-    result = module.analyze_image(sample_image, "描述")
-    assert result is not None
-    assert len(result) < 50000
-    assert "省略" in result
+    with pytest.raises(MediaUnderstandingError, match="未返回图片描述"):
+        describe_image(str(sample_image), "描述")
 
 
 def test_bundled_video_skill_classifies_upload_timeout(sample_video, monkeypatch, capsys):
@@ -360,29 +294,11 @@ def test_bundled_video_skill_classifies_upload_timeout(sample_video, monkeypatch
 
 
 @requires_assembly_hardening
-def test_describe_image_wraps_script_exception(sample_image):
-    mock_module = MagicMock()
-    mock_module.analyze_image.side_effect = RuntimeError("kaboom")
+def test_describe_image_truncates_long_description(sample_image, monkeypatch):
+    _configure_image_env(monkeypatch)
+    _mock_image_response(monkeypatch, "字" * (MAX_DESCRIPTION_CHARS * 3))
 
-    with patch(
-        "crew.wiki.multimodal._load_script_module",
-        return_value=mock_module,
-    ), pytest.raises(MediaUnderstandingError) as exc_info:
-        describe_image(str(sample_image))
-
-    assert "脚本异常" in str(exc_info.value)
-
-
-@requires_assembly_hardening
-def test_describe_image_truncates_long_description(sample_image):
-    mock_module = MagicMock()
-    mock_module.analyze_image.return_value = "字" * (MAX_DESCRIPTION_CHARS * 3)
-
-    with patch(
-        "crew.wiki.multimodal._load_script_module",
-        return_value=mock_module,
-    ):
-        result = describe_image(str(sample_image))
+    result = describe_image(str(sample_image))
 
     assert len(result) < MAX_DESCRIPTION_CHARS * 2
     assert "省略" in result
