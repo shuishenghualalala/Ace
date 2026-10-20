@@ -28,6 +28,106 @@
     </tbody>
   </table>
 
+  <h2>0. 当前形态总览</h2>
+  <p>现在的 Subagent 可以理解为“稳定语义契约 + 可插拔 Provider + Feature-owned Runtime”。主 Agent 只表达任务目标和所需能力；Runtime 负责校验、授权、发布、并发、超时与结算；Provider 决定任务是在进程内新建、从父会话快照启动，还是交给外援执行。</p>
+  <pre class="mermaid">flowchart LR
+    subgraph Caller["主 Agent / 模型"]
+      A["delegate_task：临时任务、批量、后台"]
+      B["run_agent：Preset 专家"]
+      C["send_message / list_agents / interrupt_agent：Continuable 控制面"]
+    end
+    subgraph Feature["product.subagent Feature"]
+      S["SubagentService：服务契约与 owner 边界"]
+      R["SubagentRuntime：能力预检、发布、结算、并发、深度"]
+      P["Policy：工具、模型、技能和 preset 权限收窄"]
+    end
+    subgraph Providers["Provider 传输层"]
+      SP["inprocess-spawn：新建隔离子 Agent"]
+      FP["inprocess-fork：复制父会话已完成前缀"]
+      EP["external:*：外援 Provider"]
+    end
+    subgraph State["状态与产品面"]
+      DB["SubagentStore：runs / edges / descriptors / messages"]
+      ACT["Activation：锁、队列、运行状态"]
+      UI["Web/API：活动投影、发送、中断"]
+    end
+    A -->|StartRequest| S
+    B -->|Preset request| S
+    C -->|owner + parent + subagent_id| S
+    S --> P --> R
+    R --> SP
+    R --> FP
+    R --> EP
+    R --> DB
+    R --> ACT
+    DB --> UI
+    ACT --> UI</pre>
+  <p class="callout">关键边界：工具层不直接创建 Agent，模型也看不到 Provider 参数。所有传输都先经过同一条 Runtime 发布边界，再折叠成稳定的 <code>SubagentResult</code>。</p>
+
+  <h3>0.1 四种运行形态</h3>
+  <table>
+    <thead><tr><th>形态</th><th>适合什么问题</th><th>上下文与生命周期</th></tr></thead>
+    <tbody>
+      <tr><td><code>delegate_task</code></td><td>临时拆分、并行调研、代码审查和批量处理。</td><td>默认不继承父会话；通过 goal/context 传入自包含简报，任务结束即释放。</td></tr>
+      <tr><td><code>run_agent</code></td><td>调用预设专家，例如 Explore / Plan / Verification。</td><td>由 preset 提供角色、工具、模型、Provider 和后台策略；仍可按 one-shot 或后台任务运行。</td></tr>
+      <tr><td><code>continuable</code></td><td>需要多轮追问、持续协作或进程重启后继续工作的子身份。</td><td>持久 <code>subagent_id</code> + hidden session；消息可立即触发，也可先进入 inbox。</td></tr>
+      <tr><td><code>inprocess-fork</code></td><td>子 Agent 需要看到父会话已经完成的上下文前缀。</td><td>跨平台复制消息快照，只支持 one-shot，默认关闭，不使用 Unix <code>fork(2)</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>0.2 一次委派的主路径</h3>
+  <pre class="mermaid">sequenceDiagram
+    participant M as 主 Agent
+    participant T as 工具层
+    participant R as SubagentRuntime
+    participant P as Provider
+    participant C as 子 Agent
+    participant D as SubagentStore
+    M-&gt;&gt;T: delegate_task / run_agent
+    T-&gt;&gt;R: StartRequest(goal, preset, capabilities, owner)
+    R-&gt;&gt;R: 校验 Provider、能力、深度、工具权限
+    alt 校验失败
+      R--&gt;&gt;T: fail-loud；无活跃残留
+    else 校验通过
+      R-&gt;&gt;D: descriptor + run/start
+      R-&gt;&gt;P: start(resolved request)
+      P-&gt;&gt;C: 创建隔离 child session
+      C--&gt;&gt;P: chunks / tool events / final
+      P--&gt;&gt;R: SubagentResult
+      R-&gt;&gt;D: 折叠 run log 与 stop_reason
+      R--&gt;&gt;T: 兼容 JSON / structured result
+    end</pre>
+  <p>发布前的错误会回到调用方；发布后的子级失败会成为结果数据。这样批量委派中单个子任务失败不会污染其他任务，也不会让清理异常覆盖已经确定的业务结局。</p>
+
+  <h3>0.3 Continuable 的状态模型</h3>
+  <pre class="mermaid">stateDiagram-v2
+    [*] --&gt; idle: 首次运行结束
+    idle --&gt; running: send_message(trigger_turn=true)
+    idle --&gt; ready: send_message(trigger_turn=false)
+    ready --&gt; running: 下一次触发执行
+    running --&gt; idle: 执行完成
+    running --&gt; idle: interrupt_agent
+    ready --&gt; idle: interrupt_agent 清空 inbox
+    note right of ready
+      消息已持久化，但尚未启动新一轮
+    end note
+    note right of running
+      同一 subagent_id 使用串行锁
+    end note</pre>
+  <p>同一 <code>subagent_id</code> 使用一把串行锁。冷恢复时同时核对 <code>owner_account_id</code>、直接 <code>parent_session_id</code> 和 <code>subagent_id</code>，避免伪造 descriptor 或跨父会话控制子 Agent。</p>
+
+  <h3>0.4 默认开关</h3>
+  <table>
+    <thead><tr><th>配置</th><th>默认值</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>subagent.default_provider</code></td><td><code>inprocess-spawn</code></td><td>默认创建隔离的进程内子 Agent。</td></tr>
+      <tr><td><code>subagent.fork_enabled</code></td><td><code>false</code></td><td>是否注册父会话快照 fork Provider。</td></tr>
+      <tr><td><code>subagent.continuable</code></td><td><code>false</code></td><td>是否启用持久身份和三个 continuable 控制工具。</td></tr>
+      <tr><td><code>subagent.max_depth</code></td><td><code>3</code></td><td>委派深度上限；默认不允许嵌套委派。</td></tr>
+      <tr><td><code>subagent.max_concurrent</code></td><td><code>3</code></td><td>批量委派的最大并发数。</td></tr>
+    </tbody>
+  </table>
+
   <h2>1. 职责与边界</h2>
   <ul>
     <li><strong>负责</strong>：能力预检、Provider 路由、一次性运行句柄、深度入口、双超时、部分输出、批量并发隔离、工具权限只收窄、旧返回格式适配。</li>
@@ -190,4 +290,8 @@ feature_event(subagent, run_started/run_settled)
   <h2>13. 小结</h2>
   <p>Subagent 已从“工具文件里的内联执行循环”演进为“稳定语义内核 + Feature-owned Provider 插件”。进程内与进程外传输共用同一份请求、能力预检、发布边界和结局；新增传输不需要修改 Runtime 或模型工具协议。</p>
   <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · 决策：<a href="../adr/0045-subagent-capability-seam.html">ADR-0045</a> / <a href="../adr/0046-subagent-stage-b-runlog-depth-notify.html">ADR-0046</a> / <a href="../adr/0047-subagent-stage-c-feature-lifecycle.html">ADR-0047</a> / <a href="../adr/0048-subagent-stage-d-continuable.html">ADR-0048</a> / <a href="../adr/0049-subagent-stage-e-fork-structured-ui.html">ADR-0049</a> / <a href="../adr/0050-subagent-stage-d6-finish.html">ADR-0050</a> · 测试：<a href="../../testing/subagent-stage-a-semantic-runtime.html">Stage A</a> / <a href="../../testing/subagent-stage-a2-external-provider.html">Stage A2</a> / <a href="../../testing/subagent-stage-c-feature-lifecycle.html">Stage C</a> / <a href="../../testing/subagent-stage-d-continuable.html">Stage D1-D6</a> / <a href="../../testing/subagent-stage-d6-finish.html">Stage D6</a> / <a href="../../testing/subagent-stage-e-fork-structured-ui.html">Stage E</a></div>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, securityLevel: "loose", theme: "neutral" });
+</script>
 </div></body></html>
