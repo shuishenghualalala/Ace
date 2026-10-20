@@ -913,7 +913,10 @@ async def test_overflow_compacts_then_retries_once_then_errors():
     store = _seed_long_store()
     provider = ShortSummaryProvider()
     state = _always_overflow(provider)
-    compactor = ContextCompactor(provider, token_budget=10, keep_recent=4)
+    # 摘要调用走 stream_aux → stream_chat 管线；压缩器用独立的摘要 provider，
+    # 主回合计数（overflow 桩）才不会混入摘要请求。
+    summary_provider = ShortSummaryProvider()
+    compactor = ContextCompactor(summary_provider, token_budget=10, keep_recent=4)
     agent = _agent(provider, session_store=store, compactor=compactor)
 
     chunks = []
@@ -925,7 +928,7 @@ async def test_overflow_compacts_then_retries_once_then_errors():
     # 只重试一次：两次 LLM 请求（原始 + 重试），第三次溢出不再压缩重试
     assert state["requests"] == 2
     # 摘要调用 = 预检 maybe_compact 1 次 + overflow 兜底压缩 1 次
-    assert len(provider.calls) == 2
+    assert len(summary_provider.calls) == 2
 
 
 async def test_overflow_no_progress_no_retry():

@@ -2478,6 +2478,7 @@ _CORE_MAIN_DB_TABLES = frozenset(
         "security_rules",
         "security_audit_events",
         "compaction_summaries",
+        "store_meta",
     }
 )
 
@@ -2599,7 +2600,8 @@ def test_fresh_install_wiki_learning_tables_live_only_in_plugin_db(tmp_path):
         ).fetchone()[0]
     assert component == 1
     assert feature_version == WIKI_LEARNING_SCHEMA_VERSION
-    # 主库最终清单复核（P1-1 全清终态）：只剩 core 状态表（9 表 + ADR-0042 W4 增补 3 表）。
+    # 主库最终清单复核（P1-1 全清终态）：只剩 core 状态表（9 表 + ADR-0042 W4 增补 3 表
+    # + P1 数据层的 store_meta 回填标记表）。
     assert main_tables == _CORE_MAIN_DB_TABLES
 
 
