@@ -1,7 +1,7 @@
 # Ace Subagent 向 DSH 靠齐的演进方案
 
-> 状态：方案稿，尚未实施  
-> 更新时间：2026-08-31  
+> 状态：**已被取代**——由 [docs/todo/ace-subagent-multiagent-upgrade-plan.md](../../todo/ace-subagent-multiagent-upgrade-plan.md) 统一承接（阶段 A/A2/B 已实施）  
+> 更新时间：2026-09-16（状态行）；正文基线 2026-08-31   
 > 范围：仅覆盖 Ace 的 Subagent / 多智能体委派能力  
 > 明确排除：Team 功能、外援功能、外部 Agent 后端接入
 

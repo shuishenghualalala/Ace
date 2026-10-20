@@ -544,36 +544,48 @@ def test_wiki_tools_are_exclusive_to_wiki_preset(tmp_path):
 
     preset = app.agent_presets.resolve("Wiki")
     run_agent_wiki = app._make_subagent(preset.contribution.as_spec())
-    main_expected = app._single_agent_tool_filter(
+    main_ceiling = app._single_agent_tool_filter(
         "builtin",
         app.config.access_control.resolve_for("internal"),
+        exclude_reserved=False,
     )
-    scoped_main_expected = app.capability_profiles.filter_authorized_tools(
+    scoped_ceiling = app.capability_profiles.filter_authorized_tools(
         app.registry,
-        main_expected,
+        main_ceiling,
         app.capability_profiles.resolve([]),
     )
+    scoped_main_expected = [
+        name for name in scoped_ceiling
+        if app.registry.get(name).toolset not in app.agent_presets.reserved_toolsets()
+    ]
     expected = app._apply_preset_tool_policy(
         scoped_main_expected,
         preset.contribution.as_spec(),
+        addition_ceiling=scoped_ceiling,
     )
     child_expected = app._apply_preset_tool_policy(
-        app._subagent_tool_filter(None, None),
+        app._resolve_subagent_tool_scope(None, None),
         preset.contribution.as_spec(),
+        addition_ceiling=app._resolve_subagent_tool_scope(
+            None,
+            None,
+            exclude_reserved=False,
+        ),
     )
 
     assert not any(name.startswith("wiki_") for name in main_agent.tool_filter)
     assert main_agent.context_tags == ()
     assert wiki_agent.tool_filter == expected
     assert run_agent_wiki.tool_filter == child_expected
-    assert run_agent_wiki.system_prompt == wiki_agent.system_prompt
+    assert run_agent_wiki.system_prompt.startswith(wiki_agent.system_prompt)
+    assert "不要向用户提问" in run_agent_wiki.system_prompt
     assert run_agent_wiki.enabled_skills == wiki_agent.enabled_skills
     assert run_agent_wiki.context_contributors is wiki_agent.context_contributors
     assert run_agent_wiki.tool_disclosure_mode == wiki_agent.tool_disclosure_mode
     assert "wiki_search" in wiki_agent.tool_filter
     assert "wiki_apply_ingest" in wiki_agent.tool_filter
-    assert ("web_search" in wiki_agent.tool_filter) == ("web_search" in main_expected)
-    assert ("web_extract" in wiki_agent.tool_filter) == ("web_extract" in main_expected)
+    assert ("web_search" in wiki_agent.tool_filter) == ("web_search" in scoped_main_expected)
+    assert ("web_extract" in wiki_agent.tool_filter) == ("web_extract" in scoped_main_expected)
     assert "terminal" in wiki_agent.tool_filter
     assert "file_read" in wiki_agent.tool_filter
     assert "wiki_compile" not in wiki_agent.tool_filter

@@ -81,3 +81,102 @@ export function installKanbanFeatureHandlers(registry: FeatureEventRegistry): ()
     },
   });
 }
+
+function buildSubagentLifecycleMessage(
+  event: "run_started" | "run_settled",
+  payload: unknown,
+  ctx: FeatureEventContext,
+): UiMessage {
+  const body =
+    payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+  const label = String(body.label || "subagent").trim() || "subagent";
+  const stopReason = String(body.stop_reason || "").trim();
+  const text =
+    event === "run_started"
+      ? `子智能体「${label}」已启动`
+      : `子智能体「${label}」已结束${stopReason ? `（${stopReason}）` : ""}`;
+  return {
+    id: ctx.newId(),
+    role: "status",
+    text,
+    subagentId: String(body.subagent_id || "").trim() || undefined,
+    subagentState: event === "run_started" ? "started" : "settled",
+    subagentLabel: label,
+    subagentProvider: String(body.provider || "").trim() || undefined,
+    subagentStopReason: stopReason || undefined,
+    timestamp: ctx.now,
+  };
+}
+
+function buildSubagentActivationMessage(
+  event: "activation_running" | "activation_ready" | "activation_idle",
+  payload: unknown,
+  ctx: FeatureEventContext,
+): UiMessage {
+  const body =
+    payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+  const label = String(body.label || "subagent").trim() || "subagent";
+  const state = event.replace("activation_", "") as "running" | "ready" | "idle";
+  const text = state === "running"
+    ? `子智能体「${label}」运行中`
+    : state === "ready"
+      ? `子智能体「${label}」等待继续`
+      : `子智能体「${label}」已空闲`;
+  return {
+    id: ctx.newId(),
+    role: "status",
+    text,
+    subagentId: String(body.subagent_id || "").trim() || undefined,
+    subagentState: state,
+    subagentLabel: label,
+    subagentProvider: String(body.provider || "").trim() || undefined,
+    timestamp: ctx.now,
+  };
+}
+
+export function installSubagentFeatureHandlers(registry: FeatureEventRegistry): () => void {
+  const disposers = (["run_started", "run_settled"] as const).map((event) =>
+    registry.register({
+      feature: "subagent",
+      event,
+      version: 1,
+      handler(payload, ctx): FeatureEventEffect {
+        const message = buildSubagentLifecycleMessage(event, payload, ctx);
+        const stopReason = message.subagentStopReason;
+        return {
+          messages: (prev) => [...prev, message],
+          statusHint:
+            event === "run_started"
+              ? "running"
+              : stopReason === "error" || stopReason === "timed_out"
+                ? "error"
+                : "idle",
+          queueHint: "",
+        };
+      },
+    }),
+  );
+  const activationDisposers = ([
+    "activation_running",
+    "activation_ready",
+    "activation_idle",
+  ] as const).map((event) =>
+    registry.register({
+      feature: "subagent",
+      event,
+      version: 1,
+      handler(payload, ctx): FeatureEventEffect {
+        const message = buildSubagentActivationMessage(event, payload, ctx);
+        return {
+          messages: (prev) => [...prev, message],
+          statusHint: event === "activation_running" ? "running" : "idle",
+          queueHint: "",
+        };
+      },
+    }),
+  );
+  return () => {
+    disposers.forEach((dispose) => dispose());
+    activationDisposers.forEach((dispose) => dispose());
+  };
+}

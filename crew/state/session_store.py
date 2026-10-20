@@ -702,6 +702,7 @@ class SQLiteSessionStore(SessionStore):
             name=d.get("name"),
             model=d.get("model"),
             is_meta=d.get("is_meta", False),  # 向后兼容：旧消息默认 False
+            source_kind=d.get("source_kind"),
             timestamp=d.get("timestamp"),
             turn_started_at=d.get("turn_started_at"),
             turn_duration=d.get("turn_duration"),

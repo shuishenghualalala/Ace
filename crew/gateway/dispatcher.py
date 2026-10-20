@@ -143,6 +143,16 @@ class SessionDispatcher:
     def _key(session_id: str, owner_account_id: str) -> SessionKey:
         return owner_account_id, session_id
 
+    def is_running(self, session_id: str, owner_account_id: str = "") -> bool:
+        """Read-only probe: does this (owner, session) currently hold a running turn?
+
+        供通知路由判断"父忙"（steer 当前轮）还是"父空闲"（入队等恢复轮）；
+        不创建锁、不改变任何 dispatcher 状态。
+        """
+
+        key = self._key(session_id, owner_account_id)
+        return key in self._running
+
     @staticmethod
     def _label(key: SessionKey) -> str:
         return f"{key[0]}:{key[1]}" if key[0] else key[1]

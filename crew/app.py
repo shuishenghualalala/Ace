@@ -17,6 +17,7 @@ import re
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
+from collections.abc import Mapping
 from typing import Any, AsyncIterator, Callable, Coroutine
 
 from crew.agent.capabilities import (
@@ -33,15 +34,29 @@ from crew.agent.external.feature import (
     build_external_agent_feature,
 )
 from crew.agent.external.store import ExternalAgentStore
+from crew.agent.feature import build_agent_factory_feature
 from crew.agent.runtime import SingleAgent
+from crew.agent.prompt_builder import append_subagent_handoff_guidance
 from crew.agent.skills import configure_skill_filter
-from crew.agent.subagent.context import (
-    SubagentNotificationQueue,
-    build_subagent_notification_handler,
+from crew.agent.subagent.context import ParentDeliveryState
+from crew.agent.subagent.policy import (
+    SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
+    apply_model_capability_policy,
+    apply_preset_tool_policy,
+    delegation_blocked_toolsets,
+    resolve_subagent_tool_filter,
 )
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.observability import bind_observation, capture_payload, event, install_sink, remove_sink, span
-from crew.core.interfaces import Agent, LLMProvider, MemoryProvider, SessionStore, WorkspaceStore
+from crew.core.interfaces import (
+    Agent,
+    AgentModelResolution,
+    ChildAgentRequest,
+    LLMProvider,
+    MemoryProvider,
+    SessionStore,
+    WorkspaceStore,
+)
 from crew.evolution import EvolutionManager, EvolutionQueue
 from crew.features import (
     AgentPresetBinding,
@@ -112,9 +127,7 @@ from crew.wiki import KNOWLEDGE_SERVICE_KEY
 from crew.tools.policy import (
     ToolDisclosureMode,
     exclude_toolsets,
-    extend_with_toolsets,
     ordered_intersection,
-    select_requested_tools,
 )
 from crew.tools.registry import Registry, register_builtin_tools
 
@@ -122,24 +135,6 @@ log = get_logger("app")
 
 _MODEL_API_KEY_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MODEL_API_KEY_ENV_EXAMPLES = "CREW_API_KEY、OPENAI_API_KEY、ANTHROPIC_API_KEY 或 *_API_KEY*"
-
-# 子 agent 工具黑名单（按 toolset 维度），用于 DELEGATE_BLOCKED_TOOLS。
-# 一行可调：想放开飞书/定时任务，删掉对应项即可。
-#   subagent/external_agent —— 禁嵌套 + 不转外部 agent
-#   memory                  —— 临时子 agent 不应修改跨会话共享记忆
-#   cron                    —— 不应注册后台定时任务
-#   wiki.*                  —— Wiki 能力只属于专用 Wiki Agent
-#   feishu*（前缀）          —— 不应产生发言/评论等外部副作用
-SUBAGENT_BLOCKED_TOOLSETS = {
-    "subagent",
-    "subagent.preset",
-    "external_agent",
-    "memory",
-    "cron",
-    "tasks",
-}
-SUBAGENT_BLOCKED_TOOLSET_PREFIXES = ("feishu",)
-
 
 def _validate_model_api_key_env(api_key_env: str) -> str:
     """校验模型 API Key 的 env 名，避免模型配置变成任意环境变量写入口。"""
@@ -436,6 +431,17 @@ _LIVE_APPS: list["CrewApp"] = []
 _NOTIFYWORTHY_TASK_STATUSES = frozenset({"completed", "failed", "timed_out"})
 # - 这些类型的后台任务完成后会触发恢复回合（"自动继续"，与通知无关）。
 _RESUMABLE_TASK_KINDS = frozenset({"shell", "subagent"})
+
+
+def _child_depth_of(spec: Mapping | None) -> int:
+    """子级委派深度只作记账，不作调用方权威：负数/非整数归零。"""
+
+    if not isinstance(spec, Mapping):
+        return 0
+    value = spec.get("_delegation_depth", spec.get("depth"))
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
 _TASK_NOTIFICATION_TITLES = {
     "completed": "任务已完成",
     "failed": "任务失败",
@@ -575,18 +581,27 @@ class CrewApp:
         self.summary_store = SummaryStore(config.db_path, wal_enabled=config.sqlite_wal)
 
         self.agents = AgentManager(self._make_agent)
+        # The child-agent factory is a Core Feature service.  Its typed builder
+        # delegates to the existing in-process SingleAgent assembly below;
+        # subagent tools reach that boundary through create_child().
+        self.agent_factory = None
         self.execution_drivers = plugins.feature_runtime.execution_drivers
         self.context_contributors = plugins.feature_runtime.context_contributors
         self.event_contributors = plugins.feature_runtime.event_contributors
         self.agent_presets = plugins.feature_runtime.agent_presets
         self._builtin_feature_scopes: list[FeatureScope] = []
+        agent_factory_feature = build_agent_factory_feature(
+            self,
+            child_builder=self._build_subagent,
+            model_resolver=self._resolve_subagent_model,
+        )
+        self._install_builtin_feature(agent_factory_feature.definition)
         # 需要宿主事件循环的长生命周期 Feature 在 build_app 仅声明，startup
         # 再由共享 Runtime 按依赖图激活；Sites/Browser 后续复用同一入口。
         self._managed_feature_definitions: OrderedDict[str, FeatureDefinition] = OrderedDict()
-        # 后台子任务完成结果的待注入队列（按父 session 分键）：实现在
-        # crew/agent/subagent/context.py，完成回调入队、PROMPT contributor drain、
-        # collect_subagent 摘除三端共享同一实例。
-        self._subagent_notifications = SubagentNotificationQueue()
+        # Subagent Feature 激活后绑定通知队列与路由；这里仅保留兼容属性。
+        self._subagent_notifications = None
+        self._subagent_router = None
         self._register_execution_driver_scope(
             "core.agent-driver",
             ExecutionDriver(
@@ -629,21 +644,7 @@ class CrewApp:
                 description="Normalized session source and delivery context",
             ),
         )
-        # 后台结果 → 模型可见 reminder：三条核心通知通路（子任务/进程/任务恢复回合）
-        # 均为 PROMPT 阶段瞬时 contributor，队列所有权在来源模块；priority 低于
-        # cron(50)/wiki(100)，保持 reminder 内原有相对次序。
-        self._register_context_contributor_scope(
-            "core.subagent-context",
-            ContextContributor(
-                contributor_id="subagent.background.reminder",
-                handler=build_subagent_notification_handler(self._subagent_notifications),
-                phase=ContextPhase.PROMPT,
-                priority=10,
-                model_visible=True,
-                persistent=False,
-                description="Background subagent completion notifications",
-            ),
-        )
+        # 后台结果提醒由 product.subagent Feature 在自己的 Generation 内注册。
         self._register_context_contributor_scope(
             "core.process-context",
             ContextContributor(
@@ -690,6 +691,8 @@ class CrewApp:
         self.subagent_registry = None
         self.subagent_active = None
         self.subagent_tasks = None
+        self.subagent_runtime = None
+        self._subagent_feature_service = None
         # 后台子 agent 的 asyncio 任务强引用（防 GC），完成后自动移除
         self._subagent_bg_tasks: set[asyncio.Task] = set()
         # 异步进化队列：按 session 串行处理 evolution 任务，结果在下一轮交互中体现
@@ -718,6 +721,13 @@ class CrewApp:
         self.observability_store: TraceStore | None = None
         self.observability: ObservationRecorder | None = None
         self._observability_log_handler: ObservationLogHandler | None = None
+        # 拆除起点标志：shutdown() 进入即置位，供通知路由把"父拆除中"判为
+        # 只入队不唤醒（_shutdown_complete 在资源关闭后才置位，太晚）。
+        self._shutdown_started = False
+        # 肯定式"父已消失"证据：会话删除（teardown）时记录的有界集合。
+        # 通知路由只对记录在案的会话丢弃——"库里查无此行"不构成消失证据
+        # （隐藏子会话/测试环境可能从未落库但仍活着）。
+        self._vanished_sessions: OrderedDict[str, float] = OrderedDict()
 
         # cron / mcp 由 build_app 装配后赋值；startup/shutdown 统一拉起与关闭
         self.cron_store = None
@@ -1122,6 +1132,11 @@ class CrewApp:
         sid = str(task.get("session_id") or "")
         if not sid or not self._should_resume_completed_task(task):
             return
+        params: dict[str, Any] = {"internal_task_resume": True}
+        if str(task.get("kind") or "") != "subagent":
+            # shell 等任务的结果经恢复回合参数注入；subagent 的正文只走通知
+            # 队列一条通道（恢复轮 PROMPT drain），避免同一份结果双份注入。
+            params["task_notifications"] = [task]
         envelope = Envelope.of(
             "后台任务已完成，请根据结果继续原任务。",
             session_id=sid,
@@ -1132,10 +1147,7 @@ class CrewApp:
             ) or "default",
             user_id=str(task.get("owner_account_id") or ""),
             mode="agent",
-            params={
-                "internal_task_resume": True,
-                "task_notifications": [task],
-            },
+            params=params,
         )
         async for chunk in self.dispatch(envelope):
             if self._push_fn is not None:
@@ -1198,6 +1210,8 @@ class CrewApp:
         self,
         executor_kind: str,
         ac: dict[str, Any] | None = None,
+        *,
+        exclude_reserved: bool = True,
     ) -> list[str] | None:
         if executor_kind != "builtin":
             return []
@@ -1222,11 +1236,12 @@ class CrewApp:
         allowed = exclude_toolsets(self.registry, allowed, exact={"external_agent"})
         # Product-owned exclusive toolsets are visible only to their matching
         # preset policy; ordinary Agents never inherit them.
-        allowed = exclude_toolsets(
-            self.registry,
-            allowed,
-            exact=self.agent_presets.reserved_toolsets(),
-        )
+        if exclude_reserved:
+            allowed = exclude_toolsets(
+                self.registry,
+                allowed,
+                exact=self.agent_presets.reserved_toolsets(),
+            )
 
         return allowed
 
@@ -1236,21 +1251,16 @@ class CrewApp:
         preset: dict[str, Any],
         *,
         allow_additions: bool = True,
+        addition_ceiling: list[str] | None = None,
     ) -> list[str]:
         """Apply a neutral preset's selection and dedicated toolset policy."""
-        selected = select_requested_tools(
+        return apply_preset_tool_policy(
             self.registry,
             base_tools,
-            requested_toolsets=preset.get("toolsets"),
-            requested_tools=preset.get("tools"),
+            preset,
+            allow_additions=allow_additions,
+            addition_ceiling=addition_ceiling or (),
         )
-        if allow_additions:
-            selected = extend_with_toolsets(
-                self.registry,
-                selected,
-                preset.get("toolset_additions") or (),
-            )
-        return selected
 
     def _preset_binding(self, name: str) -> AgentPresetBinding | None:
         if not name:
@@ -1532,14 +1542,27 @@ class CrewApp:
                 self.agent_presets.reserved_skills(),
             )
 
-        main_tool_filter = self._single_agent_tool_filter(executor_kind, ac)
-        capability_scoped_tools = self.capability_profiles.filter_authorized_tools(
+        authorization_ceiling = self._single_agent_tool_filter(
+            executor_kind,
+            ac,
+            exclude_reserved=False,
+        )
+        capability_ceiling = self.capability_profiles.filter_authorized_tools(
             self.registry,
-            main_tool_filter,
+            authorization_ceiling,
             session_capabilities,
         )
+        capability_scoped_tools = exclude_toolsets(
+            self.registry,
+            capability_ceiling,
+            exact=self.agent_presets.reserved_toolsets(),
+        )
         tool_filter = (
-            self._apply_preset_tool_policy(capability_scoped_tools, preset_spec)
+            self._apply_preset_tool_policy(
+                capability_scoped_tools,
+                preset_spec,
+                addition_ceiling=capability_ceiling,
+            )
             if preset_spec is not None
             else capability_scoped_tools
         )
@@ -1715,6 +1738,7 @@ class CrewApp:
             model_fallback_notice=model_fallback_notice,
             owned_providers=[*(owned_providers or []), *fallback_providers],
             model_capabilities=model_capabilities,
+            delegation_mode=cfg.subagent_delegation_mode,
         )
         if system_prompt:
             kwargs["system_prompt"] = system_prompt
@@ -1730,27 +1754,23 @@ class CrewApp:
         return SingleAgent(**kwargs)
 
     # ---- subagent（主 agent 通过 delegate_task / run_agent 调用的子 agent）----
-    def _subagent_tool_filter(
+    def _resolve_subagent_tool_scope(
         self,
         toolsets: list[str] | None,
         tools: list[str] | None,
         *,
         user_type: str = "internal",
+        exclude_reserved: bool = True,
+        depth: int = 0,
     ) -> list[str]:
         """按 toolsets（不填=继承主 agent 全量）算工具名，tools 白名单取交集，
         并强制剔除子 agent 不该碰的工具集。
 
         同时按父 user_type 的 access_control 封顶——子 agent 不能拿到父本身
         拿不到的工具（用于 子/父 toolset 求交集，防外部用户越权）。
+        委派工具集的可见性由深度账本决定：``allow_nested`` 关闭或深度达上限
+        时维持全量黑名单（与旧行为逐字一致）。
         """
-        # 防御性归一化：模型可能把 toolsets/tools 传成字符串（schema 虽是 array）。
-        # 不归一化会让 list_schemas(enabled_toolsets="file") 把字符串当字符集合，
-        # 导致子 agent 静默拿到空工具集。
-        if isinstance(toolsets, str):
-            toolsets = [toolsets]
-        if isinstance(tools, str):
-            tools = [tools]
-
         ac = self.config.access_control.resolve_for(user_type)
         access_allowed = {
             s["function"]["name"]
@@ -1769,22 +1789,22 @@ class CrewApp:
             if parent_snapshot is not None
             else access_allowed
         )
-        names = select_requested_tools(
+        names = resolve_subagent_tool_filter(
             self.registry,
-            ordered_intersection(self.registry.names(), parent_allowed),
+            parent_allowed,
             requested_toolsets=toolsets,
             requested_tools=tools,
-        )
-        names = exclude_toolsets(
-            self.registry,
-            names,
-            exact=SUBAGENT_BLOCKED_TOOLSETS,
-            prefixes=SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
-        )
-        names = exclude_toolsets(
-            self.registry,
-            names,
-            exact=self.agent_presets.reserved_toolsets(),
+            blocked_toolsets=delegation_blocked_toolsets(
+                depth,
+                allow_nested=self.config.subagent_allow_nested,
+                max_depth=self.config.subagent_max_depth,
+            ),
+            blocked_toolset_prefixes=SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
+            reserved_toolsets=(
+                self.agent_presets.reserved_toolsets()
+                if exclude_reserved
+                else ()
+            ),
         )
         # 子 agent 同样受 per-owner 插件有效状态约束（schema 层；执行层还有
         # browser_use 的 permission_resolver 逐次重查兜底）。
@@ -1801,22 +1821,52 @@ class CrewApp:
         capabilities: list[str] | tuple[str, ...] | None,
     ) -> list[str] | None:
         """把最终生效模型能力收敛到实际可执行工具集。"""
-        if capabilities is None:
-            return tool_filter
-        enabled = {str(item).strip().lower() for item in capabilities}
-        if "tools" not in enabled:
-            return []
-        if "vision" not in enabled:
-            base = self.registry.names() if tool_filter is None else tool_filter
-            return [name for name in base if name != "browser_vision"]
-        return tool_filter
+        base = self.registry.names() if tool_filter is None else tool_filter
+        return apply_model_capability_policy(base, capabilities)
 
-    def _make_subagent(self, spec: dict) -> SingleAgent:
-        """根据 spec（system_prompt/toolsets/tools/model/max_iterations）构造子 agent。
+    def _make_subagent(self, spec: dict | ChildAgentRequest) -> SingleAgent:
+        """Compatibility edge from legacy tool payloads to the typed factory."""
 
-        作为 build_child 回调注入 register_subagent_tools。子 agent 继承父会话的
-        user_type（经 contextvar），权限不超过父——防外部受限用户越权。
+        request = (
+            spec
+            if isinstance(spec, ChildAgentRequest)
+            else ChildAgentRequest.from_mapping(spec)
+        )
+        factory = getattr(self, "agent_factory", None)
+        if factory is not None:
+            return factory.create_child(request)
+        # A few embedded tests construct a partially initialized host.  Keep
+        # that path explicit while production always uses the Feature service.
+        return self._build_subagent(request)
+
+    def _resolve_subagent_model(
+        self,
+        request: ChildAgentRequest,
+    ) -> AgentModelResolution:
+        """Resolve the provider-neutral model label before child assembly."""
+
+        requested = request.model.strip() or "inherit"
+        return AgentModelResolution(
+            requested_model=requested,
+            effective_model=requested,
+            inherited=requested == "inherit",
+        )
+
+    def _build_subagent(self, request: ChildAgentRequest | dict) -> SingleAgent:
+        """Construct a child Agent behind the typed AgentFactory boundary.
+
+        The compatibility mapping is confined to this adapter edge.  Policy,
+        owner context, and provider selection remain resolved by the existing
+        assembly path so current subagent behavior is unchanged.
         """
+
+        if isinstance(request, ChildAgentRequest):
+            spec = request.to_mapping()
+        elif isinstance(request, dict):
+            spec = request
+        else:
+            raise TypeError("child agent request must be ChildAgentRequest or dict")
+
         from crew.core.runctx import (
             current_model_capabilities,
             current_owner_account_id,
@@ -1922,29 +1972,23 @@ class CrewApp:
             # First apply the ordinary child safety boundary (parent snapshot,
             # access control, and blocked/exclusive toolsets), then apply only
             # the selected preset's explicit narrowing/additions.
-            from crew.core.runctx import current_authorized_tool_names
-
-            parent_snapshot = current_authorized_tool_names.get()
-            if parent_snapshot is None:
-                main_tools = self._subagent_tool_filter(
-                    None,
-                    None,
-                    user_type=parent_user_type,
-                )
-            else:
-                main_tools = ordered_intersection(self.registry.names(), parent_snapshot)
-                main_tools = exclude_toolsets(
-                    self.registry,
-                    main_tools,
-                    exact=SUBAGENT_BLOCKED_TOOLSETS,
-                    prefixes=SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
-                )
-                main_tools = exclude_toolsets(
-                    self.registry,
-                    main_tools,
-                    exact=self.agent_presets.reserved_toolsets(),
-                )
-            tool_filter = self._apply_preset_tool_policy(main_tools, preset_spec)
+            addition_ceiling = self._resolve_subagent_tool_scope(
+                None,
+                None,
+                user_type=parent_user_type,
+                exclude_reserved=False,
+                depth=_child_depth_of(spec),
+            )
+            main_tools = exclude_toolsets(
+                self.registry,
+                addition_ceiling,
+                exact=self.agent_presets.reserved_toolsets(),
+            )
+            tool_filter = self._apply_preset_tool_policy(
+                main_tools,
+                preset_spec,
+                addition_ceiling=addition_ceiling,
+            )
             # A preset's fixed policy is authoritative for its skill scope.
             fixed = list(preset_spec.get("preset_skills") or [])
             enabled_skills = fixed
@@ -1957,10 +2001,19 @@ class CrewApp:
                 disabled_skills,
                 self.agent_presets.reserved_skills(),
             )
-            tool_filter = self._subagent_tool_filter(
-                spec.get("toolsets"), spec.get("tools"), user_type=parent_user_type
+            tool_filter = self._resolve_subagent_tool_scope(
+                spec.get("toolsets"),
+                spec.get("tools"),
+                user_type=parent_user_type,
+                depth=_child_depth_of(spec),
             )
         tool_filter = self._apply_model_capability_filter(tool_filter, effective_capabilities)
+        if (
+            spec.get("output_schema") is not None
+            and "structured_output" in self.registry.names()
+            and "structured_output" not in (tool_filter or [])
+        ):
+            tool_filter = [*(tool_filter or []), "structured_output"]
 
         return self._build_single_agent(
             provider=provider,
@@ -1970,7 +2023,9 @@ class CrewApp:
             tool_filter=tool_filter,
             user_type=parent_user_type,
             profile_path=None,
-            system_prompt=(preset_spec or spec).get("system_prompt"),
+            system_prompt=append_subagent_handoff_guidance(
+                (preset_spec or spec).get("system_prompt")
+            ),
             enable_title=False,
             lightweight=True,
             context_tags=tuple((preset_spec or spec).get("context_tags") or ()),
@@ -2160,7 +2215,10 @@ class CrewApp:
 
         if self.subagent_active is None:
             return team_snap
-        sub_snap = self.subagent_active.snapshot(session_id)
+        sub_snap = self.subagent_active.snapshot(
+            session_id,
+            owner_account_id=owner_account_id,
+        )
 
         # 合并 team 与 subagent 的活跃记录（供 gateway/UI 展示）
         if session_id is not None:
@@ -2566,6 +2624,7 @@ class CrewApp:
         async with self._shutdown_lock:
             if self._shutdown_complete:
                 return
+            self._shutdown_started = True
             await self._shutdown_resources(provider_timeout=timeout)
             self._shutdown_complete = True
         with suppress(ValueError):
@@ -2611,6 +2670,8 @@ class CrewApp:
             except asyncio.TimeoutError:
                 log.warning("App shutdown 等待 Subagent 退出超时 count=%d", len(subagent_tasks))
         self._subagent_bg_tasks.clear()
+        if self.subagent_runtime is not None:
+            await self.subagent_runtime.aclose()
         # 关闭异步进化队列，等待后台 evolution 任务完成
         await self._evolution_queue.shutdown()
         # product.team 已由 managed feature 停用路径关闭；此处保留 App-owned Provider 收尾
@@ -2676,6 +2737,7 @@ class CrewApp:
             self.channel_session_routes,
             self.active_owner,
             getattr(self, "cron_store", None),
+            getattr(self, "subagent_store", None),
             # A host may be closed before startup (for example ASGI tests that
             # use a transport without lifespan).  In that case the managed
             # Feature has not yet consumed its candidate Manager, so close its
@@ -3459,11 +3521,22 @@ class CrewApp:
             return None
 
     def _on_subagent_background_done(self, session_id: str, result: dict) -> None:
-        """后台子任务完成回调（在事件循环内同步调用）：入队 + 实时推送。"""
-        # 1) 入队，由 PROMPT contributor（subagent.background.reminder）在下一回合
-        #    drain 注入主 agent / 发起 member 的上下文（队列限长见 SubagentNotificationQueue）
-        self._subagent_notifications.enqueue(session_id, result)
-        # 2) 实时推送（best-effort，有活跃 WS 时；push_fn 为协程，fire-and-forget）
+        """后台子任务完成回调（在事件循环内同步调用）：四态路由 + 实时推送。
+
+        内容只经通知队列一条通道：busy 态 steer 成功即摘除队列副本；
+        idle 态由 TaskRuntime 的恢复回合 drain（恢复回合不再重复携带
+        task_notifications）；父已消失则整份丢弃。
+        """
+        state = self._classify_parent_delivery_state(session_id, result)
+        self._subagent_router.deliver(
+            session_id,
+            result,
+            state=state,
+            steer=lambda text: self._steer_subagent_notification(
+                session_id, text, result
+            ),
+        )
+        # 实时推送（best-effort，有活跃 WS 时；push_fn 为协程，fire-and-forget）
         if self._push_fn is not None:
             label = result.get("agent", "子智能体")
             status = result.get("status", "")
@@ -3478,6 +3551,61 @@ class CrewApp:
                     asyncio.ensure_future(fut)
             except RuntimeError:
                 pass  # 无运行中事件循环则跳过
+
+    def note_session_vanished(self, session_id: str) -> None:
+        """会话删除时登记"已消失"证据（有界，供通知路由四态分类）。"""
+
+        sid = str(session_id or "").strip()
+        if not sid:
+            return
+        self._vanished_sessions[sid] = time.monotonic()
+        while len(self._vanished_sessions) > 512:
+            self._vanished_sessions.popitem(last=False)
+
+    def _classify_parent_delivery_state(
+        self,
+        session_id: str,
+        result: dict,
+    ) -> ParentDeliveryState:
+        """按父级现状分类投递路径；观测失败按 IDLE 走（等同旧行为）。"""
+
+        if self._shutdown_started:
+            return ParentDeliveryState.DRAINING
+        sid = str(session_id or "")
+        vanished_at = self._vanished_sessions.get(sid)
+        if vanished_at is not None:
+            # 记录超过 1 小时的旧证据过期：避免同 id 复用的新会话被误伤。
+            if time.monotonic() - vanished_at > 3600.0:
+                self._vanished_sessions.pop(sid, None)
+            else:
+                return ParentDeliveryState.GONE
+        owner = str(result.get("owner_account_id") or "")
+        try:
+            if self.dispatcher.is_running(session_id, owner):
+                return ParentDeliveryState.BUSY
+        except Exception:  # noqa: BLE001
+            return ParentDeliveryState.IDLE
+        return ParentDeliveryState.IDLE
+
+    def _steer_subagent_notification(
+        self,
+        session_id: str,
+        text: str,
+        result: dict,
+    ) -> bool:
+        """把完成通知并入父级当前轮（steer）；失败返回 False 由队列兜底。"""
+
+        try:
+            return bool(
+                self.steer(
+                    session_id,
+                    text,
+                    owner_account_id=str(result.get("owner_account_id") or ""),
+                )
+            )
+        except Exception:  # noqa: BLE001 - steer 失败回退队列路径
+            log.debug("steer 后台子任务通知失败 session=%s", session_id, exc_info=True)
+            return False
 
     async def _run_default_execution_driver(
         self,
@@ -3979,28 +4107,11 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     app.channel_manager = channels_feature.service.channel_manager
     app.delivery_router = channels_feature.service.delivery_router
     app.declare_managed_feature(channels_feature.definition)
-    external_feature = build_external_agent_feature(
-        app,
-        registry=registry,
-        # external 域 4 表在 crew_data/external.db、team 域 2 表在
-        # crew_data/team.db（ADR-0038 第四批，一次双库）；legacy_db_path 触发
-        # copy-on-first-activate：crew.db 里若还有旧表且分库为空，则分域单事务
-        # 整表复制，旧行保留作回退备份。唯一构造点在 catalog_factory，team
-        # feature 经 external_store_provider 动态解析同一门面实例。
-        catalog_factory=lambda: TeamExternalAgentStore(
-            resolve_crew_home_path(cfg.external_db_path),
-            team_db_path=resolve_crew_home_path(cfg.team_db_path),
-            legacy_db_path=cfg.db_path,
-            # 跨 Feature 生命周期经动态解析的 Catalog 走显式接口；
-            # external-agents Generation 未激活时门面 fail-closed。
-            external_catalog_provider=app.current_external_catalog,
-        ),
-        provider_factory=AdapterRuntimeProvider,
-        interaction_bridge_getter=lambda: app.interaction_bridge,
-        own_provider=True,
-    )
-    app._install_builtin_feature(external_feature.definition)
-    app.declare_managed_feature(external_feature.definition)
+    from crew.agent.subagent import SubagentRegistry, build_subagent_feature
+
+    # Preset 文件先由 Registry 读取；Wiki Feature 会在后面 claim 自己的
+    # product-owned preset，通用 preset 随后由 product.subagent 发布。
+    sub_registry = SubagentRegistry()
     from crew.tasks.tools import register_task_tools
 
     register_task_tools(registry, app.tasks)
@@ -4010,12 +4121,6 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
     app.plan_manager = PlanModeManager(session_store=session_store)
     register_plan_tools(registry, app.plan_manager)
-
-    # File-backed Agent definitions are only sources. Their live visibility is
-    # provided below by Feature-owned preset contributions.
-    from crew.agent.subagent import ActiveSubagents, SubagentRegistry, register_subagent_tools
-
-    sub_registry = SubagentRegistry()
 
     # Wiki：由 Product Feature Bundle 统一拥有 Store、Service、Tools、Context
     # 与后台任务。Bundle 的兼容模式在同步 build_app 中立即激活，使旧 CLI、
@@ -4046,23 +4151,49 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     )
     app.declare_managed_feature(wiki_feature.definition)
 
-    # General presets are one small Core Feature; product-owned definitions have
-    # already been claimed by their Bundle and therefore cannot leak here.
-    from crew.agent.subagent.definition import to_preset_contribution
-
-    general_preset_definitions = tuple(sub_registry.list())
-
-    def install_agent_presets(context) -> None:
-        for definition in general_preset_definitions:
-            context.register_agent_preset(to_preset_contribution(definition))
-
-    app._install_builtin_feature(
-        FeatureDefinition(
-            "core.agent-presets",
-            install_agent_presets,
-            required_by_product=True,
-        )
+    # Subagent Feature owns its Generation-scoped store, runtime, tools,
+    # notifications, route, lifecycle events and preset contributions.
+    app.subagent_registry = sub_registry
+    subagent_feature = build_subagent_feature(
+        host=app,
+        sub_registry=sub_registry,
+        db_path=resolve_crew_home_path(cfg.subagent_db_path),
+        wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
+        retain_days=cfg.subagent_retain_runs_days,
+        default_provider=cfg.subagent_default_provider,
+        fork_enabled=cfg.subagent_fork_enabled,
+        max_depth=cfg.subagent_max_depth,
+        continuable_enabled=cfg.subagent_continuable,
+        idle_timeout=cfg.tasks_subagent_inactivity_timeout_seconds,
+        max_runtime=cfg.tasks_subagent_execution_timeout_seconds,
     )
+    app._install_builtin_feature(subagent_feature.definition)
+
+    # External runtimes optionally consume the Subagent service. Activating it
+    # after Subagent makes that service available without a reverse dependency.
+    external_feature = build_external_agent_feature(
+        app,
+        registry=registry,
+        # external 域 4 表在 crew_data/external.db、team 域 2 表在
+        # crew_data/team.db（ADR-0038 第四批，一次双库）；legacy_db_path 触发
+        # copy-on-first-activate：crew.db 里若还有旧表且分库为空，则分域单事务
+        # 整表复制，旧行保留作回退备份。唯一构造点在 catalog_factory，team
+        # feature 经 external_store_provider 动态解析同一门面实例。
+        catalog_factory=lambda: TeamExternalAgentStore(
+            resolve_crew_home_path(cfg.external_db_path),
+            team_db_path=resolve_crew_home_path(cfg.team_db_path),
+            legacy_db_path=cfg.db_path,
+            # 跨 Feature 生命周期经动态解析的 Catalog 走显式接口；
+            # external-agents Generation 未激活时门面 fail-closed。
+            external_catalog_provider=app.current_external_catalog,
+        ),
+        provider_factory=AdapterRuntimeProvider,
+        interaction_bridge_getter=lambda: app.interaction_bridge,
+        own_provider=True,
+    )
+    app._install_builtin_feature(external_feature.definition)
+    app.declare_managed_feature(external_feature.definition)
 
     from crew.features.hooks import hook_registry
     from crew.work.feature import build_work_feature
@@ -4091,36 +4222,6 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     # replacement, and the host binding remains a compatibility view.
     app.work_service = work_feature.service
     app.declare_managed_feature(work_feature.definition)
-
-    # subagent：预设注册表 + delegate_task / run_agent / collect_subagent（toolset='subagent'）
-    app.subagent_registry = sub_registry
-    app.subagent_active = ActiveSubagents()
-    from crew.tasks.task_manager import LegacyTaskManagerAdapter
-
-    app.subagent_tasks = LegacyTaskManagerAdapter(app.tasks)
-
-    def _launch_background(coro) -> None:
-        """把后台子 agent 协程起飞成 asyncio 任务并持有强引用，完成后移除。"""
-        task = asyncio.ensure_future(coro)
-        app._subagent_bg_tasks.add(task)
-        task.add_done_callback(app._subagent_bg_tasks.discard)
-
-    register_subagent_tools(
-        registry,
-        sub_registry,
-        build_child=app._make_subagent,
-        max_concurrent=cfg.subagent_max_concurrent,
-        max_tasks=cfg.subagent_max_tasks,
-        idle_timeout=cfg.tasks_subagent_inactivity_timeout_seconds,
-        max_runtime=cfg.tasks_subagent_execution_timeout_seconds,
-        active=app.subagent_active,
-        tasks=app.subagent_tasks,
-        launch_background=_launch_background,
-        on_background_done=app._on_subagent_background_done,
-        background_capacity=lambda: len(app._subagent_bg_tasks) < cfg.subagent_max_concurrent,
-        on_collected=app._subagent_notifications.remove,
-        preset_registry=app.agent_presets,
-    )
 
     # Cron 数据平面在停用后仍保留，Scheduler/Tools/Context 则由同一
     # product.cron Generation 在宿主事件循环中事务激活。

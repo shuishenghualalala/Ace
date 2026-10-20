@@ -22,6 +22,10 @@ from crew.agent.external.feature import (
     ExternalRunError,
     build_external_agent_feature,
 )
+from crew.agent.external.subagent_provider import (
+    ExternalDelegationProvider,
+    ExternalSubagentProvider,
+)
 
 __all__ = [
     "ExternalAgentStore",
@@ -42,4 +46,6 @@ __all__ = [
     "ExternalAgentRun",
     "ExternalRunError",
     "build_external_agent_feature",
+    "ExternalDelegationProvider",
+    "ExternalSubagentProvider",
 ]

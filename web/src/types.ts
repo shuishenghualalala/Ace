@@ -183,6 +183,28 @@ export interface Task {
   auto_backgrounded?: boolean;
 }
 
+export interface SubagentApiRecord {
+  subagent_id?: string;
+  child_id?: string;
+  label?: string;
+  provider?: string;
+  lifecycle?: string;
+  state?: string;
+  status?: string;
+  stop_reason?: string | null;
+  started_at?: number;
+  created_at?: number;
+  settled_at?: number | null;
+  [key: string]: unknown;
+}
+
+export interface SubagentListResponse {
+  ok: boolean;
+  items: SubagentApiRecord[] | Record<string, SubagentApiRecord[]>;
+  runs: SubagentApiRecord[];
+  error?: string;
+}
+
 export interface RuntimeSessionStatus {
   session_id: string;
   live: "idle" | "running" | "queued" | string;
@@ -676,6 +698,12 @@ export interface UiMessage {
   todoSnapshot?: TodoItem[];
   /** 本消息回合内产生的 Wiki 页面卡片。 */
   wikiCards?: WikiPage[];
+  /** 子智能体生命周期事件的结构化标识，状态消息仍复用现有 agent timeline。 */
+  subagentId?: string;
+  subagentState?: "started" | "settled" | "running" | "ready" | "idle";
+  subagentLabel?: string;
+  subagentProvider?: string;
+  subagentStopReason?: string;
 }
 
 export interface TeamMemberView {

@@ -25,7 +25,7 @@ import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Protocol, runtime_checkable
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Protocol, runtime_checkable
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.timeout_policy import DEFAULT_EXTERNAL_IDLE_SECONDS
@@ -197,6 +197,166 @@ class Agent(ABC):
         """运行一轮对话（含多步工具调用），流式产出响应帧。"""
         raise NotImplementedError
         yield  # pragma: no cover  (标记为 async generator)
+
+
+def _depth_of(value: Any) -> int:
+    """Depth values are runtime bookkeeping, never caller authority: negatives
+    and non-integers collapse to zero instead of raising."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
+@dataclass(frozen=True, slots=True)
+class ChildAgentRequest:
+    """Typed request for constructing one one-shot child Agent.
+
+    This is the stable boundary between the subagent tools and the Agent
+    Feature.  Runtime-owned context (owner, access-control snapshot and model
+    capabilities) is deliberately resolved by the factory, not supplied by a
+    model-facing tool as authority.
+    """
+
+    system_prompt: str | None = None
+    toolsets: tuple[str, ...] | None = None
+    tools: tuple[str, ...] | None = None
+    model: str = "inherit"
+    max_iterations: int | None = None
+    inherit_skills: bool = False
+    skills: tuple[str, ...] | None = None
+    preset_skills: tuple[str, ...] | None = None
+    preset_name: str | None = None
+    preset_spec: Mapping[str, Any] | None = None
+    context_tags: tuple[str, ...] = ()
+    disclosure_mode: str = "progressive"
+    agent_id: str = "subagent"
+    depth: int = 0
+    output_schema: Mapping[str, Any] | None = None
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, Any],
+        *,
+        trusted_preset_spec: Mapping[str, Any] | None = None,
+    ) -> "ChildAgentRequest":
+        """Convert a payload without accepting caller-supplied preset authority.
+
+        A generation-bound preset contribution must be passed separately by
+        the host that owns its lease.  The mapping's private-looking
+        ``_preset_spec`` key is deliberately ignored.
+        """
+
+        if not isinstance(value, Mapping):
+            raise TypeError("child agent request must be a mapping")
+
+        def names(key: str) -> tuple[str, ...] | None:
+            raw = value.get(key)
+            if raw is None:
+                return None
+            if isinstance(raw, str):
+                raw = (raw,)
+            if not isinstance(raw, (list, tuple, set, frozenset)):
+                return None
+            return tuple(str(item).strip() for item in raw if str(item).strip())
+
+        preset_spec = (
+            dict(trusted_preset_spec)
+            if isinstance(trusted_preset_spec, Mapping)
+            else None
+        )
+        raw_tags = names("context_tags") or ()
+        return cls(
+            system_prompt=(
+                str(value["system_prompt"])
+                if value.get("system_prompt") is not None
+                else None
+            ),
+            toolsets=names("toolsets"),
+            tools=names("tools"),
+            model=str(value.get("model") or "inherit").strip() or "inherit",
+            max_iterations=(
+                int(value["max_iterations"])
+                if value.get("max_iterations") is not None
+                else None
+            ),
+            inherit_skills=bool(value.get("inherit_skills")),
+            skills=names("skills"),
+            preset_skills=names("preset_skills"),
+            preset_name=(
+                str(value["preset_name"]).strip()
+                if value.get("preset_name")
+                else None
+            ),
+            preset_spec=preset_spec,
+            context_tags=raw_tags,
+            disclosure_mode=(
+                str(value.get("disclosure_mode") or "progressive").strip()
+                or "progressive"
+            ),
+            agent_id=str(value.get("agent_id") or "subagent").strip() or "subagent",
+            depth=_depth_of(value.get("_delegation_depth", value.get("depth"))),
+            output_schema=(
+                dict(value["output_schema"])
+                if isinstance(value.get("output_schema"), Mapping)
+                else None
+            ),
+        )
+
+    def to_mapping(self) -> dict[str, Any]:
+        """Return a defensive legacy payload for the in-process adapter."""
+
+        payload: dict[str, Any] = {
+            "system_prompt": self.system_prompt,
+            "toolsets": list(self.toolsets) if self.toolsets is not None else None,
+            "tools": list(self.tools) if self.tools is not None else None,
+            "model": self.model,
+            "max_iterations": self.max_iterations,
+            "inherit_skills": self.inherit_skills,
+            "skills": list(self.skills) if self.skills is not None else None,
+            "preset_skills": (
+                list(self.preset_skills) if self.preset_skills is not None else None
+            ),
+            "preset_name": self.preset_name,
+            "context_tags": list(self.context_tags),
+            "disclosure_mode": self.disclosure_mode,
+            "agent_id": self.agent_id,
+            "_delegation_depth": self.depth,
+            "output_schema": (
+                dict(self.output_schema) if self.output_schema is not None else None
+            ),
+        }
+        if self.preset_spec is not None:
+            payload["_preset_spec"] = dict(self.preset_spec)
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class AgentModelResolution:
+    """Provider-neutral model selection result returned by an AgentFactory."""
+
+    requested_model: str
+    effective_model: str
+    inherited: bool
+    capabilities: tuple[str, ...] | None = None
+
+
+@runtime_checkable
+class AgentFactory(Protocol):
+    """Stable child-Agent capability exposed by the core Agent Feature.
+
+    Implementations resolve model/provider details at the boundary and may
+    cache or construct an Agent.  The request itself carries no authority;
+    ownership and policy snapshots come from the active runtime context.
+    """
+
+    def create_child(self, request: ChildAgentRequest) -> Agent: ...
+
+    def resolve_model(
+        self,
+        request: ChildAgentRequest,
+    ) -> AgentModelResolution: ...
 
 
 # --------------------------------------------------------------------------- #

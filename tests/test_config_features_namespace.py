@@ -566,7 +566,7 @@ def test_channel_persistence_replaces_non_dict_features_channels_garbage(tmp_pat
 
 
 def test_top_level_subagent_section_remains_dead(tmp_path: Path):
-    """顶层 subagent: 节从未被 loader 读取（P3-1）；子 agent 超时归属 tasks.subagent。"""
+    """历史资源键保持无效；阶段 A 仅接入 delegation_mode。"""
     config_path = _write_config(
         tmp_path,
         {
@@ -580,6 +580,88 @@ def test_top_level_subagent_section_remains_dead(tmp_path: Path):
     assert cfg.subagent_max_concurrent == 3
     assert cfg.subagent_idle_timeout_seconds == 120.0
     assert cfg.tasks_subagent_inactivity_timeout_seconds == 30.0
+
+
+def test_features_subagent_runtime_policy_is_loaded_and_validated(tmp_path: Path):
+    proactive_path = _write_config(
+        tmp_path,
+        {
+            "features": {
+                "subagent": {
+                    "default_provider": "external:reviewer",
+                    "delegation_mode": "proactive",
+                }
+            }
+        },
+    )
+    cfg = load_config(config_path=str(proactive_path))
+    assert cfg.subagent_default_provider == "external:reviewer"
+    assert cfg.subagent_delegation_mode == "proactive"
+
+    continuable_path = _write_config(
+        tmp_path / "continuable",
+        {"features": {"subagent": {"continuable": True}}},
+    )
+    assert load_config(config_path=str(continuable_path)).subagent_continuable is True
+
+    invalid_path = tmp_path / "invalid.yaml"
+    invalid_path.write_text(
+        yaml.safe_dump({"features": {"subagent": {"delegation_mode": "surprise"}}}),
+        encoding="utf-8",
+    )
+    assert load_config(config_path=str(invalid_path)).subagent_delegation_mode == "explicit"
+
+
+def test_subagent_stage_b_defaults_and_features_section(tmp_path: Path):
+    """阶段 B 扁平键默认值与 features.subagent 段覆盖。"""
+    cfg = load_config()
+    assert cfg.subagent_max_depth == 3
+    assert cfg.subagent_allow_nested is False
+    assert cfg.subagent_max_batch_items == 128
+    assert cfg.subagent_launch_initial == 5
+    assert cfg.subagent_launch_interval_ms == 700
+    assert cfg.subagent_rate_backoff_base_seconds == 3.0
+    assert cfg.subagent_rate_backoff_factor == 2.0
+    assert cfg.subagent_rate_max_retries == 6
+    assert cfg.subagent_rate_recover_seconds == 180.0
+    assert cfg.subagent_summary_min_chars == 200
+    assert cfg.subagent_summary_retries == 1
+    assert cfg.subagent_retain_runs_days == 30
+    assert cfg.subagent_db_path.endswith("subagent.db")
+
+    config_path = _write_config(
+        tmp_path,
+        {
+            "features": {
+                "subagent": {
+                    "max_depth": 2,
+                    "allow_nested": True,
+                    "launch_ramp": {"initial": 3, "interval_ms": 250},
+                    "rate_limit": {
+                        "backoff_base_seconds": 1.5,
+                        "backoff_factor": 3.0,
+                        "max_retries": 4,
+                        "recover_seconds": 60.0,
+                    },
+                    "summary_min_chars": 120,
+                    "summary_retries": 2,
+                    "retain_runs_days": 7,
+                }
+            }
+        },
+    )
+    cfg = load_config(config_path=str(config_path))
+    assert cfg.subagent_max_depth == 2
+    assert cfg.subagent_allow_nested is True
+    assert cfg.subagent_launch_initial == 3
+    assert cfg.subagent_launch_interval_ms == 250
+    assert cfg.subagent_rate_backoff_base_seconds == 1.5
+    assert cfg.subagent_rate_backoff_factor == 3.0
+    assert cfg.subagent_rate_max_retries == 4
+    assert cfg.subagent_rate_recover_seconds == 60.0
+    assert cfg.subagent_summary_min_chars == 120
+    assert cfg.subagent_summary_retries == 2
+    assert cfg.subagent_retain_runs_days == 7
 
 
 def test_example_template_targets_features_namespace():
@@ -603,6 +685,7 @@ def test_example_template_targets_features_namespace():
         "channels",
         "browser",
         "dynamic_kanban",
+        "subagent",
     } <= set(features)
     # mapped 旧节不再出现在模板里
     for legacy in ("wiki", "cron", "team", "tasks", "external_agents", "channels", "platforms"):
@@ -617,5 +700,6 @@ def test_example_template_targets_features_namespace():
     assert data["features"]["team"]["members"]
     assert "storage" in data["features"]["wiki"]
     assert "shell" in data["features"]["tasks"]
+    assert data["features"]["subagent"]["default_provider"] == "inprocess-spawn"
     assert "idle_timeout_seconds" in data["features"]["browser"]
     assert data["features"]["dynamic_kanban"]["task_timeout_seconds"] == 3600

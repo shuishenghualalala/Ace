@@ -187,6 +187,37 @@ def build_context_files_prompt(cwd: str | None = None) -> str:
 # 静态/动态分离 System Prompt 构建
 # ---------------------------------------------------------------------------
 
+_EXPLICIT_DELEGATION_DISCIPLINE = """# 子智能体委派纪律
+仅当用户、项目指令（如 AGENTS.md / CREW.md）或当前技能明确要求使用子智能体、委派或并行协作时，才可调用子智能体工具。“深入研究”“复杂任务”等描述本身不构成委派授权。
+所有子智能体共享同一工作目录，彼此改动立即可见；委派时划清文件与职责边界，不要覆盖或回退其他智能体的改动。父智能体仍对最终核验与答复负责。"""
+
+_PROACTIVE_DELEGATION_DISCIPLINE = """# 子智能体委派纪律
+当任务可被拆成边界清晰、能独立推进且并行收益明确的工作时，可以主动调用子智能体；不要为简单或强顺序依赖的工作增加委派开销。
+所有子智能体共享同一工作目录，彼此改动立即可见；委派时划清文件与职责边界，不要覆盖或回退其他智能体的改动。父智能体仍对最终核验与答复负责。"""
+
+SUBAGENT_HANDOFF_GUIDANCE = """# 子智能体交卷要求
+结束前向父智能体返回自包含结果；不要向用户提问，因为只有父智能体负责与用户沟通。明确区分已验证事实、自述与推断，只完成受委派的范围，不得继续委派给其他智能体。"""
+
+
+def _delegation_discipline(mode: str) -> str:
+    return (
+        _PROACTIVE_DELEGATION_DISCIPLINE
+        if str(mode or "").strip().lower() == "proactive"
+        else _EXPLICIT_DELEGATION_DISCIPLINE
+    )
+
+
+def append_subagent_handoff_guidance(prompt: str | None) -> str:
+    """Append the child-only handoff contract exactly once."""
+
+    base = str(prompt or "").strip()
+    if SUBAGENT_HANDOFF_GUIDANCE in base:
+        return base
+    if not base:
+        return SUBAGENT_HANDOFF_GUIDANCE
+    return f"{base}\n\n{SUBAGENT_HANDOFF_GUIDANCE}"
+
+
 def _build_prompt_parts_sync(
     workspace_instructions: str = "",
     memory_text: str = "",
@@ -198,6 +229,7 @@ def _build_prompt_parts_sync(
     user_type: str = "internal",
     inject_skills: bool = False,
     include_optional_skills: bool = False,
+    delegation_mode: str = "explicit",
 ) -> dict[str, str]:
     """组装 prompt 为 system_static / user_reminder 两部分。
 
@@ -234,6 +266,9 @@ def _build_prompt_parts_sync(
             static_parts.append(DEFAULT_TOOL_GUIDELINE)
             static_parts.append(DEFAULT_SAFETY_RULES)
             static_parts.append(DEFAULT_OUTPUT_STYLE)
+
+    if not lightweight:
+        static_parts.append(_delegation_discipline(delegation_mode))
 
     # ── User Reminder 层（每轮可能变） ──
     reminder_parts = []
@@ -360,6 +395,7 @@ async def build_prompt_parts(
     user_type: str = "internal",
     inject_skills: bool = False,
     include_optional_skills: bool = False,
+    delegation_mode: str = "explicit",
 ) -> dict[str, str]:
     """异步组装 prompt。签名与 :func:`_build_prompt_parts_sync` 完全一致。
 
@@ -378,6 +414,7 @@ async def build_prompt_parts(
             user_type=user_type,
             inject_skills=inject_skills,
             include_optional_skills=include_optional_skills,
+            delegation_mode=delegation_mode,
         )
     return await asyncio.to_thread(
         _build_prompt_parts_sync,
@@ -391,6 +428,7 @@ async def build_prompt_parts(
         user_type=user_type,
         inject_skills=inject_skills,
         include_optional_skills=include_optional_skills,
+        delegation_mode=delegation_mode,
     )
 
 

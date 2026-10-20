@@ -96,3 +96,45 @@ source_modules =
 forbidden_modules =
     crew.gateway
 allow_indirect_imports = True
+
+[importlinter:contract:subagent-isolation]
+name = Subagent core must not depend on product feature implementations
+type = forbidden
+source_modules =
+    crew.agent.subagent
+forbidden_modules =
+    crew.agent.external
+    crew.dynamickanban
+    crew.gateway
+    crew.team
+    crew.wiki
+    crew.work
+allow_indirect_imports = True
+
+[importlinter:contract:external-subagent-transport-boundary]
+name = External Agent may consume only the neutral Subagent service contract
+type = forbidden
+source_modules =
+    crew.agent.external
+forbidden_modules =
+    crew.agent.subagent.feature
+    crew.agent.subagent.policy
+    crew.agent.subagent.providers
+    crew.agent.subagent.runtime
+    crew.agent.subagent.tools
+allow_indirect_imports = True
+
+[importlinter:contract:subagent-store-boundary]
+name = Subagent store is a persistence leaf, not a feature orchestrator
+type = forbidden
+source_modules =
+    crew.agent.subagent.store
+forbidden_modules =
+    crew.agent.subagent.feature
+    crew.agent.subagent.policy
+    crew.agent.subagent.providers
+    crew.agent.subagent.runtime
+    crew.agent.subagent.tools
+    crew.agent.subagent.context
+    crew.agent.external
+    crew.gateway

@@ -232,6 +232,9 @@ class Config:
     # crew_data/wiki_learning.db；装配点在插件 register（消费侧归一），
     # 回退时把本键指回 crew.db 即可
     wiki_learning_db_path: str = "crew_data/wiki_learning.db"
+    # subagent 域自有库（阶段 B）：runs/edges/descriptors 三表归
+    # crew_data/subagent.db；装配点在 App 组合根，回退时指回 crew.db 即可
+    subagent_db_path: str = "crew_data/subagent.db"
     log_level: str = "INFO"
     log_file: str = ""  # 空=不写文件；填路径则同时写文件（支持 ~ 展开）
     llm_trace: bool = True  # 是否把每次 LLM 收发全量写入 {crew_home}/logs/llm.jsonl，便于排查
@@ -338,6 +341,23 @@ class Config:
     subagent_max_iterations: int = 200    # 子 agent 单轮工具迭代上限；主 agent 可配置为无限
     subagent_idle_timeout_seconds: float = 120.0  # 子 agent 空闲（无活动）超时：N 秒零输出才中止（防卡死），0=不限
     subagent_timeout_seconds: float = 1800.0  # 子 agent 绝对运行上限（全局兜底），0=不限
+    subagent_default_provider: str = "inprocess-spawn"  # 部署侧默认传输；模型不可见
+    subagent_fork_enabled: bool = False  # 是否注册父会话快照分叉 Provider
+    subagent_delegation_mode: str = "explicit"  # explicit | proactive；只影响主 agent 的委派纪律
+    subagent_continuable: bool = False          # 是否为新委派启用持久子身份与控制面
+    # 阶段 B：深度账本 / 同构批量 / 爬坡与限流退避 / 摘要兜底 / 持久层
+    subagent_max_depth: int = 3           # 委派深度上限（单调记账，运行期只能加深）
+    subagent_allow_nested: bool = False   # 子 agent 是否可见委派工具（默认关闭=行为与旧版一致）
+    subagent_max_batch_items: int = 128   # prompt_template+items 同构批量条数上限
+    subagent_launch_initial: int = 5      # 批量首发立即放行数，此后每 interval 放 1 个
+    subagent_launch_interval_ms: int = 700  # 爬坡间隔（毫秒）
+    subagent_rate_backoff_base_seconds: float = 3.0  # 限流重试退避基数
+    subagent_rate_backoff_factor: float = 2.0        # 限流重试指数因子
+    subagent_rate_max_retries: int = 6   # 单条目限流重试上限（防无限重排）
+    subagent_rate_recover_seconds: float = 180.0  # 无新限流多久后容量 +1 恢复
+    subagent_summary_min_chars: int = 200  # 交卷最短字符数（短于此追加一轮扩写）
+    subagent_summary_retries: int = 1      # 摘要扩写最大追加轮数
+    subagent_retain_runs_days: int = 30    # run/descriptor/edge 保留期（天），超期清理
 
     # --- unified long-task runtime ---
     tasks_auto_background_after_seconds: float = 15.0
@@ -1570,6 +1590,7 @@ _FEATURES_SECTION_MAP: dict[str, tuple[str, ...]] = {
     "external_agents": ("external_agents",),
     "channels": ("channels",),
     "browser": ("tools", "browser"),
+    "subagent": ("subagent",),
 }
 _FEATURES_FLAT_MAP: dict[tuple[str, str], tuple[str, ...]] = {
     ("dynamic_kanban", "task_timeout_seconds"): ("runtime", "dk_task_timeout_seconds"),
@@ -1803,6 +1824,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
         cfg.wiki_learning_db_path = runtime.get(
             "wiki_learning_db_path", cfg.wiki_learning_db_path
         )
+        cfg.subagent_db_path = runtime.get("subagent_db_path", cfg.subagent_db_path)
         cfg.log_level = runtime.get("log_level", cfg.log_level)
         cfg.log_file = runtime.get("log_file", cfg.log_file)
         cfg.crew_home = runtime.get("crew_home", cfg.crew_home)
@@ -1975,6 +1997,84 @@ def load_config(config_path: str | Path | None = None) -> Config:
                         getattr(cfg, f"{attr_prefix}_execution_timeout_seconds"),
                     ),
                 )
+
+        subagent = data.get("subagent", {})
+        if isinstance(subagent, dict):
+            default_provider = str(
+                subagent.get("default_provider", cfg.subagent_default_provider)
+                or cfg.subagent_default_provider
+            ).strip()
+            cfg.subagent_default_provider = default_provider or "inprocess-spawn"
+            cfg.subagent_fork_enabled = bool(
+                subagent.get("fork_enabled", cfg.subagent_fork_enabled)
+            )
+            delegation_mode = str(
+                subagent.get("delegation_mode", cfg.subagent_delegation_mode)
+                or cfg.subagent_delegation_mode
+            ).strip().lower()
+            if delegation_mode not in {"explicit", "proactive"}:
+                log.warning(
+                    "subagent.delegation_mode 仅支持 explicit/proactive，已回退为 explicit"
+                )
+                delegation_mode = "explicit"
+            cfg.subagent_delegation_mode = delegation_mode
+            cfg.subagent_continuable = bool(
+                subagent.get("continuable", cfg.subagent_continuable)
+            )
+            # 阶段 B 键：深度/批量/爬坡/限流退避/摘要兜底/保留期。扁平旧键与
+            # 本段同名语义一一对应（见 SubagentConfig 兼容别名说明）。
+            cfg.subagent_max_depth = max(
+                1, int(subagent.get("max_depth", cfg.subagent_max_depth))
+            )
+            cfg.subagent_allow_nested = bool(
+                subagent.get("allow_nested", cfg.subagent_allow_nested)
+            )
+            cfg.subagent_max_batch_items = max(
+                1, int(subagent.get("max_batch_items", cfg.subagent_max_batch_items))
+            )
+            ramp = subagent.get("launch_ramp")
+            if isinstance(ramp, dict):
+                cfg.subagent_launch_initial = max(
+                    1, int(ramp.get("initial", cfg.subagent_launch_initial))
+                )
+                cfg.subagent_launch_interval_ms = max(
+                    0, int(ramp.get("interval_ms", cfg.subagent_launch_interval_ms))
+                )
+            rate_limit = subagent.get("rate_limit")
+            if isinstance(rate_limit, dict):
+                cfg.subagent_rate_backoff_base_seconds = _as_float(
+                    rate_limit.get(
+                        "backoff_base_seconds", cfg.subagent_rate_backoff_base_seconds
+                    ),
+                    cfg.subagent_rate_backoff_base_seconds,
+                )
+                cfg.subagent_rate_backoff_factor = max(
+                    1.0,
+                    _as_float(
+                        rate_limit.get(
+                            "backoff_factor", cfg.subagent_rate_backoff_factor
+                        ),
+                        cfg.subagent_rate_backoff_factor,
+                    ),
+                )
+                cfg.subagent_rate_max_retries = max(
+                    0, int(rate_limit.get("max_retries", cfg.subagent_rate_max_retries))
+                )
+                cfg.subagent_rate_recover_seconds = _as_float(
+                    rate_limit.get(
+                        "recover_seconds", cfg.subagent_rate_recover_seconds
+                    ),
+                    cfg.subagent_rate_recover_seconds,
+                )
+            cfg.subagent_summary_min_chars = max(
+                0, int(subagent.get("summary_min_chars", cfg.subagent_summary_min_chars))
+            )
+            cfg.subagent_summary_retries = max(
+                0, int(subagent.get("summary_retries", cfg.subagent_summary_retries))
+            )
+            cfg.subagent_retain_runs_days = max(
+                0, int(subagent.get("retain_runs_days", cfg.subagent_retain_runs_days))
+            )
 
         plugins = data.get("plugins", {})
         if isinstance(plugins, dict):
@@ -2296,6 +2396,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
         "notifications_db_path",
         "channels_db_path",
         "wiki_learning_db_path",
+        "subagent_db_path",
     ):
         raw_value = getattr(cfg, attr)
         if not raw_value:

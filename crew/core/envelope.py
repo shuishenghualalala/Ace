@@ -146,6 +146,7 @@ class ResponseChunk:
         replace_content: bool = False,
         reason: str | None = None,
         usage: dict[str, int] | None = None,
+        structured: Any | None = None,
     ) -> "ResponseChunk":
         body: dict[str, Any] = {"text": text}
         if replace_content:
@@ -154,6 +155,8 @@ class ResponseChunk:
             body["reason"] = reason
         if usage:
             body["usage"] = usage
+        if structured is not None:
+            body["structured"] = structured
         return ResponseChunk(
             request_id,
             kind="final",

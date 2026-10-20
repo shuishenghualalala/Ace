@@ -1,5 +1,7 @@
 # Ace Subagent 强化方案
 
+> 状态：**已被取代**——由 [docs/todo/ace-subagent-multiagent-upgrade-plan.md](../../todo/ace-subagent-multiagent-upgrade-plan.md) 统一承接（阶段 A/A2/B 已实施）。
+
 > 综合考查 Kimi Code、Codex CLI、DeepSeek Harness 三者的子智能体实现，对照 Ace 现状，给出分阶段强化路线。
 > 范围：仅 Ace 的 Subagent 委派能力。**明确排除** Team（crew/team/**、crew/dynamickanban/**）与外援（crew/agent/external/**、crew/agent/executor/external.py）。
 > 基线：仓库内 docs/backend/modules/subagent-dsh-alignment-plan.md（2026-08-31 未实施的 DSH 对齐稿）已给出阶段 A/B/C/D 骨架，本文沿用并扩充其未覆盖的三个维度：提示词工程、fork 净化、同构批量与 preset 白名单。

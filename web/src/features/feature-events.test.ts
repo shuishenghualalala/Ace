@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { FeatureEventRegistry } from "../lib/feature-event-dispatcher";
 import { installWikiFeatureHandlers } from "./WikiFeature";
-import { installKanbanFeatureHandlers, installTeamFeatureHandlers } from "./feature-events";
+import {
+  installKanbanFeatureHandlers,
+  installSubagentFeatureHandlers,
+  installTeamFeatureHandlers,
+} from "./feature-events";
 import type { Bookkeeping, FeatureEventContext } from "../lib/feature-event-dispatcher";
 import type { UiMessage, WikiPage } from "../types";
 
@@ -193,5 +197,55 @@ describe("installKanbanFeatureHandlers", () => {
     const effect = registry.dispatch("kanban", "workflow_progress", 1, { percent: 50 }, ctx);
 
     expect(effect).toBeNull();
+  });
+});
+
+describe("installSubagentFeatureHandlers", () => {
+  it("turns lifecycle events into status messages and state hints", () => {
+    const registry = new FeatureEventRegistry();
+    installSubagentFeatureHandlers(registry);
+    const ctx = makeCtx();
+
+    const started = registry.dispatch("subagent", "run_started", 1, {
+      subagent_id: "child-1",
+      label: "Explore",
+      provider: "inprocess-spawn",
+    }, ctx);
+    const settled = registry.dispatch("subagent", "run_settled", 1, {
+      subagent_id: "child-1",
+      label: "Explore",
+      stop_reason: "completed",
+    }, ctx);
+
+    expect(started?.statusHint).toBe("running");
+    expect(started?.messages!([])[0]).toMatchObject({
+      role: "status",
+      text: "子智能体「Explore」已启动",
+      subagentId: "child-1",
+      subagentState: "started",
+    });
+    expect(settled?.statusHint).toBe("idle");
+    expect(settled?.messages!([])[0].text).toContain("已结束（completed）");
+  });
+
+  it("projects continuable activation states without replacing run events", () => {
+    const registry = new FeatureEventRegistry();
+    const dispose = installSubagentFeatureHandlers(registry);
+    const ctx = makeCtx();
+
+    const ready = registry.dispatch("subagent", "activation_ready", 1, {
+      subagent_id: "child-2",
+      label: "Planner",
+      state: "ready",
+    }, ctx);
+
+    expect(ready?.messages!([])[0]).toMatchObject({
+      text: "子智能体「Planner」等待继续",
+      subagentId: "child-2",
+      subagentState: "ready",
+    });
+    expect(ready?.statusHint).toBe("idle");
+    dispose();
+    expect(registry.dispatch("subagent", "activation_ready", 1, {}, ctx)).toBeNull();
   });
 });

@@ -200,6 +200,13 @@ async def _teardown_session_resources(
         )
     except Exception:  # noqa: BLE001
         running = []
+    # 肯定式消失证据：在途任务取消前登记，后台子任务完成通知据此丢弃。
+    note_vanished = getattr(crew, "note_session_vanished", None)
+    if callable(note_vanished):
+        try:
+            note_vanished(session_id)
+        except Exception:  # noqa: BLE001
+            pass
     for task in running:
         try:
             await crew.tasks.cancel(

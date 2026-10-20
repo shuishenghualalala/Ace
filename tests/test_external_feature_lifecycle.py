@@ -15,7 +15,14 @@ from crew.agent.external.feature import (
     build_external_agent_feature,
 )
 from crew.agent.external.runtime_adapter import ExternalStreamEvent, RuntimeExecutionRequest
-from crew.features import FeatureRuntime, FeatureState
+from crew.agent.subagent.feature import build_subagent_feature
+from crew.agent.subagent.runtime import SubagentRuntime
+from crew.agent.subagent.service import StartRequest, UnknownProviderError
+from crew.core.runctx import current_owner_account_id
+from crew.features import (
+    FeatureRuntime,
+    FeatureState,
+)
 
 
 def _request() -> RuntimeExecutionRequest:
@@ -42,8 +49,41 @@ class _Adapter:
 
 
 class _Catalog:
-    def __init__(self) -> None:
+    def __init__(self, agents: tuple[dict[str, object], ...] = ()) -> None:
         self.close_calls = 0
+        self.agents = agents
+        self.list_calls: list[tuple[str, bool]] = []
+        self.resolve_calls: list[tuple[str, str]] = []
+
+    def list_agents(
+        self,
+        *,
+        owner_account_id: str,
+        include_managed: bool = True,
+    ) -> list[dict[str, object]]:
+        self.list_calls.append((owner_account_id, include_managed))
+        return [dict(agent) for agent in self.agents]
+
+    def agent_with_runtime(
+        self,
+        agent_id: str,
+        *,
+        owner_account_id: str,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        self.resolve_calls.append((agent_id, owner_account_id))
+        agent = next(
+            (
+                item
+                for item in self.agents
+                if item.get("id") == agent_id
+                and item.get("owner_account_id", owner_account_id)
+                == owner_account_id
+            ),
+            None,
+        )
+        if agent is None:
+            raise KeyError(agent_id)
+        return dict(agent), {"id": "runtime-a"}
 
     async def close(self) -> None:
         self.close_calls += 1
@@ -213,3 +253,64 @@ async def test_external_feature_failed_activation_closes_candidate_resources():
     assert runtime.services.get(DELEGATION_SERVICE_KEY) is None
     assert provider.close_calls == 1
     assert catalog.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_external_feature_optionally_registers_owner_aware_provider_family():
+    service = SubagentRuntime()
+    catalog = _Catalog((
+        {"id": "agent-a", "owner_account_id": "owner-a"},
+        {"id": "agent-b", "owner_account_id": "owner-b"},
+    ))
+    runtime = FeatureRuntime()
+    await runtime.activate(build_subagent_feature(service).definition)
+    bundle = build_external_agent_feature(
+        SimpleNamespace(external_agents=None),
+        catalog=catalog,
+        provider=_Provider(),
+    )
+
+    record = await runtime.activate(bundle.definition)
+
+    assert record.state is FeatureState.ACTIVE
+    assert catalog.list_calls == []
+    assert service.list_providers() == []
+    owner_token = current_owner_account_id.set("owner-a")
+    try:
+        assert service.get_provider("external:agent-a") is not None
+        assert service.get_provider("external:agent-b") is None
+        catalog.agents += ({
+            "id": "agent-created-later",
+            "owner_account_id": "owner-a",
+        },)
+        assert service.get_provider("external:agent-created-later") is not None
+        assert service.get_provider("external:missing") is None
+        assert service.get_provider("other:agent-a") is None
+    finally:
+        current_owner_account_id.reset(owner_token)
+
+    await runtime.deactivate(bundle.definition.feature_id)
+    assert service.get_provider("external:agent-a") is None
+
+
+@pytest.mark.asyncio
+async def test_external_feature_stop_removes_providers_and_new_subagent_start_fails_closed():
+    service = SubagentRuntime()
+    catalog = _Catalog(({"id": "agent-a"},))
+    runtime = FeatureRuntime()
+    await runtime.activate(build_subagent_feature(service).definition)
+    bundle = build_external_agent_feature(
+        SimpleNamespace(external_agents=None),
+        catalog=catalog,
+        provider=_Provider(),
+    )
+    await runtime.activate(bundle.definition)
+    assert service.get_provider("external:agent-a") is not None
+
+    assert await runtime.deactivate(bundle.definition.feature_id) is True
+    assert service.get_provider("external:agent-a") is None
+    with pytest.raises(UnknownProviderError, match="external:agent-a"):
+        await service.start(
+            "external:agent-a",
+            StartRequest(goal_text="this must not run"),
+        )

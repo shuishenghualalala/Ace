@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 from crew.agent.prompt_builder import build_prompt_parts
 from crew.agent.subagent import (
     ActiveSubagents,
     SubagentRegistry,
+    build_collect_subagent_schema,
     build_run_agent_schema,
     build_delegate_task_schema,
 )
@@ -35,6 +37,7 @@ def test_parse_definition(tmp_path):
         "tools: file_read\n"
         "skills: [crew-wiki-curator]\n"
         "model: deepseek\n"
+        "provider: external:reviewer\n"
         "max_iterations: 7\n"
         "---\n"
         "你是测试子智能体。\n",
@@ -48,6 +51,7 @@ def test_parse_definition(tmp_path):
     assert d.tools == ["file_read"]          # 字符串归一化为单元素列表
     assert d.skills == ["crew-wiki-curator"]
     assert d.model == "deepseek"
+    assert d.provider == "external:reviewer"
     assert d.max_iterations == 7
     assert d.system_prompt == "你是测试子智能体。"
     assert d.source == "user"
@@ -59,6 +63,7 @@ def test_parse_definition_defaults(tmp_path):
     d = parse_definition(f)
     assert d.toolsets is None and d.tools is None
     assert d.model == "inherit"
+    assert d.provider == "inprocess-spawn"
     assert d.max_iterations is None
     assert d.description == "正文第一行"  # 无 description 用正文首行兜底
 
@@ -78,7 +83,7 @@ def test_registry_user_overrides_builtin(tmp_path, monkeypatch):
     user_dir = tmp_path / "agents"
     user_dir.mkdir()
     (user_dir / "explore.md").write_text(
-        "---\nname: Explore\ndescription: 用户覆盖版\n---\n用户自定义 explore\n",
+        "---\nname: Explore\ndescription: 用户覆盖版\noverride: true\n---\n用户自定义 explore\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(sub_registry_mod, "get_user_agents_dir", lambda: user_dir)
@@ -97,7 +102,7 @@ def test_subagent_tool_filter_blacklist():
     + 写副作用工具（memory/cron/feishu/wiki_*），正常只读工具保留。"""
     app = build_app(config=Config(max_iterations=5))
     # 继承全量（toolsets=None）也不能拿到嵌套委派工具
-    inherited = app._subagent_tool_filter(None, None)
+    inherited = app._resolve_subagent_tool_scope(None, None)
     assert "delegate_task" not in inherited
     assert "run_agent" not in inherited
     assert "delegate_to_external_agent" not in inherited
@@ -111,7 +116,7 @@ def test_subagent_tool_filter_blacklist():
 
 def test_subagent_tool_filter_whitelist():
     app = build_app(config=Config(max_iterations=5))
-    names = app._subagent_tool_filter(["file"], ["file_read"])
+    names = app._resolve_subagent_tool_scope(["file"], ["file_read"])
     assert names == ["file_read"]
 
 
@@ -132,11 +137,46 @@ def test_delegate_task_schema():
     schema = build_delegate_task_schema()
     props = schema["parameters"]["properties"]
     assert "goal" in props and "tasks" in props and "toolsets" in props
-    # goal / tasks 二选一：顶层不强制 goal，纯 tasks 批量模式才能过校验
+    # goal / tasks / prompt_template+items 三选一：顶层不强制字段
     assert schema["parameters"]["required"] == []
     # skills 与 toolsets 并列，单任务/批量子任务都暴露
     assert "skills" in props
     assert "skills" in props["tasks"]["items"]["properties"]
+    # 阶段 B：同构批量模板形态
+    assert "prompt_template" in props and "items" in props
+    assert "{item}" in props["prompt_template"]["description"]
+
+
+def test_model_visible_subagent_schemas_match_stage_a_baseline():
+    """Canonical snapshots keep all three public tool schemas byte-stable.
+
+    阶段 B 修订：delegate_task 描述与参数新增同构批量（prompt_template/items，
+    只增不改），基线哈希随之更新；run_agent / collect_subagent 保持阶段 A 原值。
+    """
+
+    schemas = {
+        "delegate_task": build_delegate_task_schema(),
+        "run_agent": build_run_agent_schema(["Explore"]),
+        "collect_subagent": build_collect_subagent_schema(),
+    }
+    expected = {
+        "delegate_task": "854f5021318857ea81195fb2f844ec24a87e00de7fc80d7b18a034048cb8a272",
+        "run_agent": "0eaececd75209360c0e7648b2b234e3d3ce6e3c384d15ae0c66d4decc981414d",
+        "collect_subagent": "28d7eb9404d0aae0bd105134da96787e4526c476bb6354b8c056339f8af4b2bd",
+    }
+
+    actual = {
+        name: hashlib.sha256(
+            json.dumps(
+                schema,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        for name, schema in schemas.items()
+    }
+    assert actual == expected
 
 
 # ── 4b. delegate_task 继承主 agent 技能 ─────────────────────────────────────
@@ -297,7 +337,7 @@ def test_subagent_inherits_parent_final_authorization_snapshot():
     app = build_app(config=Config(max_iterations=5))
     token = current_authorized_tool_names.set(frozenset({"file_read"}))
     try:
-        inherited = app._subagent_tool_filter(["file", "terminal"], None)
+        inherited = app._resolve_subagent_tool_scope(["file", "terminal"], None)
     finally:
         current_authorized_tool_names.reset(token)
     assert inherited == ["file_read"]
@@ -315,6 +355,24 @@ async def test_lightweight_prompt_skips_global_context():
     full = await build_prompt_parts(workspace_instructions="组织规则X", lightweight=False)
     assert "组织规则X" not in light["user_reminder"]
     assert "组织规则X" in full["user_reminder"]
+
+
+async def test_delegation_discipline_is_main_agent_only_and_configurable():
+    explicit = await build_prompt_parts(lightweight=False, delegation_mode="explicit")
+    proactive = await build_prompt_parts(lightweight=False, delegation_mode="proactive")
+    child = await build_prompt_parts(lightweight=True, delegation_mode="proactive")
+
+    assert "不构成委派授权" in explicit["system_static"]
+    assert "可以主动调用子智能体" in proactive["system_static"]
+    assert "子智能体委派纪律" not in child["system_static"]
+
+
+def test_preset_child_always_receives_handoff_guidance():
+    app = build_app(config=Config(max_iterations=5))
+    child = app._make_subagent({"system_prompt": "你是审查员", "model": "inherit"})
+
+    assert child.system_prompt.startswith("你是审查员")
+    assert "不要向用户提问" in child.system_prompt
 
 
 async def test_prompt_marks_runtime_cwd_as_authoritative_workspace(tmp_path):
@@ -360,7 +418,7 @@ def test_explore_preset_is_read_only():
     assert explore.tools == ["file_read", "glob", "grep", "terminal"]
 
     app = build_app(config=Config(max_iterations=5))
-    names = app._subagent_tool_filter(explore.toolsets, explore.tools)
+    names = app._resolve_subagent_tool_scope(explore.toolsets, explore.tools)
     assert "file_read" in names
     assert "file_write" not in names and "patch" not in names
 
@@ -518,11 +576,11 @@ def test_subagent_capped_by_parent_user_type():
     app = build_app(config=cfg)
 
     # 内部父：toolsets=None 继承全量 → 含 terminal
-    internal_names = app._subagent_tool_filter(None, None, user_type="internal")
+    internal_names = app._resolve_subagent_tool_scope(None, None, user_type="internal")
     assert "terminal" in internal_names
 
     # 外部父：即便子请求 terminal 工具集，也被父 access_control 封顶剔除
-    external_names = app._subagent_tool_filter(["terminal"], None, user_type="external")
+    external_names = app._resolve_subagent_tool_scope(["terminal"], None, user_type="external")
     assert "terminal" not in external_names
     assert external_names == [] or all(
         app.registry.toolset_for(n) == "file" for n in external_names
@@ -543,11 +601,11 @@ async def test_subagent_session_not_persisted():
 def test_subagent_tool_filter_coerces_string_toolsets():
     """🔴 健壮性：模型把 toolsets/tools 传成字符串时不能静默拿到空工具集。"""
     app = build_app(config=Config(max_iterations=5))
-    as_list = app._subagent_tool_filter(["file"], None)
-    as_str = app._subagent_tool_filter("file", None)
+    as_list = app._resolve_subagent_tool_scope(["file"], None)
+    as_str = app._resolve_subagent_tool_scope("file", None)
     assert as_str == as_list and as_str  # 字符串与列表等价，且非空
     # tools 白名单同理
-    assert app._subagent_tool_filter("file", "file_read") == ["file_read"]
+    assert app._resolve_subagent_tool_scope("file", "file_read") == ["file_read"]
 
 
 def test_run_agent_keeps_feature_preset_when_generic_sources_are_empty(monkeypatch):
@@ -588,7 +646,7 @@ async def test_verification_preset_can_actually_receive_browser_use():
     try:
         verification = SubagentRegistry().get("verification")
 
-        names = app._subagent_tool_filter(verification.toolsets, verification.tools)
+        names = app._resolve_subagent_tool_scope(verification.toolsets, verification.tools)
     finally:
         await app.shutdown()
 
@@ -734,7 +792,7 @@ def test_bg_events_sweeps_entries_past_ttl():
     """🔴 bg_events 兜底清扫：已完成且超 TTL 的 entry 被回收；新完成/运行中的保留。"""
     import asyncio as _asyncio
 
-    from crew.agent.subagent.tools import (
+    from crew.agent.subagent.runtime import (
         _BG_EVENT_TTL_SECONDS,
         _BgEventEntry,
         _sweep_stale_bg_events,

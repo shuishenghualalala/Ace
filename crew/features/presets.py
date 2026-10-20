@@ -52,6 +52,11 @@ class AgentPresetContribution:
     disclosure_mode: str = "progressive"
     reserved_toolsets: tuple[str, ...] = ()
     reserved_skills: tuple[str, ...] = ()
+    provider: str = "inprocess-spawn"
+    read_only: bool = False
+    delegatable_presets: tuple[str, ...] | None = None
+    summary_min_chars: int | None = None
+    summary_retries: int | None = None
     model: str = "inherit"
     max_iterations: int | None = None
     background: bool = False
@@ -72,11 +77,26 @@ class AgentPresetContribution:
             "context_tags", "reserved_toolsets", "reserved_skills",
         ):
             object.__setattr__(self, field_name, _items(getattr(self, field_name)) or ())
+        object.__setattr__(
+            self,
+            "delegatable_presets",
+            _items(self.delegatable_presets),
+        )
         object.__setattr__(self, "disclosure_mode", str(self.disclosure_mode or "progressive").strip().lower())
         if self.disclosure_mode not in {"progressive", "direct"}:
             raise ValueError("agent preset disclosure mode must be progressive or direct")
         if self.max_iterations is not None:
             object.__setattr__(self, "max_iterations", int(self.max_iterations))
+        for field_name in ("summary_min_chars", "summary_retries"):
+            value = getattr(self, field_name)
+            object.__setattr__(
+                self, field_name, None if value is None else max(0, int(value))
+            )
+        object.__setattr__(
+            self,
+            "provider",
+            str(self.provider or "inprocess-spawn").strip() or "inprocess-spawn",
+        )
         object.__setattr__(self, "model", str(self.model or "inherit").strip() or "inherit")
         object.__setattr__(self, "source", str(self.source or "feature").strip())
 
@@ -93,6 +113,15 @@ class AgentPresetContribution:
             "disclosure_mode": self.disclosure_mode,
             "reserved_toolsets": list(self.reserved_toolsets),
             "reserved_skills": list(self.reserved_skills),
+            "provider": self.provider,
+            "read_only": self.read_only,
+            "delegatable_presets": (
+                list(self.delegatable_presets)
+                if self.delegatable_presets is not None
+                else None
+            ),
+            "summary_min_chars": self.summary_min_chars,
+            "summary_retries": self.summary_retries,
             "model": self.model,
             "max_iterations": self.max_iterations,
             "background": self.background,
