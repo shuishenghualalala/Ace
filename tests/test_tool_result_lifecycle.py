@@ -39,7 +39,7 @@ from crew.agent.loop.tool_guardrails import (
 )
 from crew.agent.subagent.tools import SubagentRegistry, register_subagent_tools
 from crew.core.interfaces import ToolResultRetention
-from crew.core.types import ChatResponse, Message, ToolCall
+from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
 from crew.team.bus import TeamBus, register_team_bus_tools
 from crew.tools.blueprint_tools import register_blueprint_tools
 from crew.tools.builtin import register_builtin_tools
@@ -110,8 +110,8 @@ class _FakeProvider:
     async def chat(self, messages, tools=None):  # noqa: ANN001
         return ChatResponse(text="历史摘要")
 
-    async def stream_chat(self, messages, tools=None):  # noqa: ANN001
-        yield  # pragma: no cover
+    async def stream_chat(self, messages, tools=None, **_kwargs):  # noqa: ANN001
+        yield StreamChunk(delta_text="历史摘要", done=True)
 
 
 # --------------------------------------------------------------------------- #
