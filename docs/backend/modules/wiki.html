@@ -142,6 +142,7 @@ ContextContributor(
       <tr><td>2026-09-05</td><td>Wiki cards/changes 注册为生命周期 Event Contributor，Gateway WS 删除 Manager 特判。</td><td>事件顺序、Generation replace、drain、失败隔离与旧帧出口兼容。</td></tr>
       <tr><td>2026-09-05</td><td>Wiki Agent Preset 资产与完整策略归属 Bundle，通用 Agent 装配删除名称特判。</td><td>动态目录、前后台 Lease、父权限、普通 Agent 隔离与缓存换代。</td></tr>
       <tr><td>2026-09-11</td><td>新增 KnowledgeService 契约一致性测试套件（工厂参数化 + 全协议方法 + DTO 序列化边界锁定）。</td><td><code>tests/wiki/test_service_contract.py</code>；未来 Remote Provider 复用同一套件，不改生产代码。</td></tr>
+      <tr><td>2026-10-21</td><td>合入 origin/dev 语义检索（embedding）与图片理解进程内化：语义配置/向量索引迁入成员包并接线进 Feature Bundle（全局 provider 随宿主关停、per-owner 经 <code>owner_embedding_provider</code> 解析）；REST 补齐查询参数 400 校验、页面标题冲突 409（source 页按来源定身份）与 <code>delete_source</code> 索引重建；<code>image-understanding</code> 技能下线，<code>describe_image</code> 进程内直连 VLM；工具面收敛为 23 个（<code>wiki_list_inbox</code> 并入来源列表）。</td><td><code>packages/crew-wiki</code>（feature/routes/service/multimodal/store）、<code>crew/state/config.py</code>、Gateway Wiki REST、技能清单。</td></tr>
     </tbody>
   </table>
 
