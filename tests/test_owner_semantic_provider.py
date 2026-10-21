@@ -160,7 +160,7 @@ def test_global_reranker_inherits_main_profile_credentials_without_cross_owner_f
     app = _build_no_key_app(tmp_path, monkeypatch)
     app.config.api_key = "global-profile-dummy"
     app.config.base_url = "https://example.test/v1"
-    app.config.wiki.rerank.enabled = True
+    app.config.wiki_config = {"rerank": {"enabled": True}}
     try:
         provider = app._wiki_reranker_resolver("")
         assert provider._client.headers["Authorization"] == "Bearer global-profile-dummy"
