@@ -12,7 +12,6 @@ if (process.platform === 'win32') {
 import { app, BrowserWindow, ipcMain, shell, dialog, nativeImage, nativeTheme, protocol } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as net from 'net';
 import { createHash } from 'crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
@@ -40,7 +39,9 @@ import {
 } from './gateway-launch-mode';
 import {
   resolveCrewHome,
+  resolveTaskWorkspaceRoot,
 } from './crew-session-file';
+import { canonicalOwnedShellRoot, resolveAllowedShellPath } from './shell-allowed-path';
 import {
   classifyCuaSetupAuthorityRequest,
   createDesktopSecurityProof,
@@ -109,7 +110,6 @@ import {
   runElevatedSecuritySetup,
   runElevatedUacEnable,
 } from './security-setup';
-import { isDeniedShellPath } from './shell-allowed-path';
 import {
   GATEWAY_UPLOAD_MAX_FILE_BYTES,
   IPC_ARG_VALIDATION_FAILED,
@@ -267,32 +267,14 @@ const gatewayRestartController = new GatewayRestartController(async () => {
   },
 });
 
-function readCrewHomeFromConfig(): string | null {
-  try {
-    const configPath = path.join(repoRoot(), 'config', 'config.yaml');
-    const content = fs.readFileSync(configPath, 'utf8');
-    const match = content.match(/^\s*crew_home:\s*['"]?([^'"#\n]+?)['"]?\s*(?:#.*)?$/m);
-    if (match?.[1]?.trim()) return match[1].trim();
-  } catch {
-    // config.yaml not available
-  }
-  return null;
-}
-
 function getTaskWorkspaceRoot(): string {
-  if (process.env.CREW_TASK_WORKSPACE_ROOT) {
-    return path.resolve(process.env.CREW_TASK_WORKSPACE_ROOT);
-  }
-  // 从 config.yaml 读取 crew_home，与后端 load_config() 保持一致
-  const crewHome = readCrewHomeFromConfig();
-  if (crewHome) {
-    const resolved = path.isAbsolute(crewHome)
-      ? crewHome
-      : path.join(os.homedir(), crewHome);
-    return path.join(resolved, 'task_workspaces');
-  }
-  // fallback: 与后端 home.py DEFAULT_HOME_DIRNAME 保持一致
-  return path.join(os.homedir(), '.Crew', 'task_workspaces');
+  const crewHome = activeGatewayCrewHome();
+  const configPath = app.isPackaged
+    ? path.join(crewHome, 'config.yaml')
+    : path.join(repoRoot(), 'config', 'config.yaml');
+  let configContents = '';
+  try { configContents = fs.readFileSync(configPath, 'utf8'); } catch { /* use defaults */ }
+  return resolveTaskWorkspaceRoot(crewHome, configContents);
 }
 
 /**
@@ -301,17 +283,15 @@ function getTaskWorkspaceRoot(): string {
  * @param extraRoots 调用方显式授权的额外根目录（如项目工作空间根），必须是绝对路径。
  */
 function resolveShellAllowedPath(rawPath: string, extraRoots: string[] = []): string {
-  const resolved = path.resolve(rawPath);
-  if (!path.isAbsolute(resolved)) {
-    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path must be absolute`);
-  }
-  // Deny sensitive security/audit resources even when they sit under an allowed root
-  // (M-1): the instance HMAC key (.gateway-instance) and raw cross-owner SQLite must
-  // never reach the renderer.
-  if (isDeniedShellPath(resolved)) {
-    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path is a sensitive security/audit resource`);
-  }
+  const crewHome = activeGatewayCrewHome();
+  const ownerSegment = currentCrewFileOwnerSegment();
   const taskWorkspaceRoot = getTaskWorkspaceRoot();
+  // Crew Home also contains every account's .env and the Gateway instance key.
+  // Only artifact roots belonging to the active account may be exposed here.
+  const ownedRoots = ownerSegment ? [
+    canonicalOwnedShellRoot(crewHome, ownerSegment, 'task_workspaces'),
+    canonicalOwnedShellRoot(crewHome, ownerSegment, 'uploads'),
+  ].filter((root): root is string => Boolean(root)) : [];
   const allowedRoots = [
     app.getPath('userData'),
     app.getPath('downloads'),
@@ -319,14 +299,17 @@ function resolveShellAllowedPath(rawPath: string, extraRoots: string[] = []): st
     app.getPath('pictures'),
     app.getPath('desktop'),
     taskWorkspaceRoot,
-    path.dirname(taskWorkspaceRoot),
+    ...ownedRoots,
     ...extraRoots,
-  ].map((r) => path.resolve(r));
-  const allowed = allowedRoots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
-  if (!allowed) {
-    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path not under any allowed root`);
+  ];
+  try {
+    return resolveAllowedShellPath(rawPath, allowedRoots, {
+      root: crewHome,
+      allowedRoots: [taskWorkspaceRoot, ...ownedRoots],
+    });
+  } catch (error) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: ${(error as Error).message}`);
   }
-  return resolved;
 }
 
 const MANAGED_GATEWAY_PORT = 28180;
@@ -1550,11 +1533,8 @@ function startWindowsPackagedGateway(port: number): void {
 
   console.log(`[gateway] Starting packaged Windows gateway on port ${port}:`, launch.command);
 
-  // 清理可能残留的僵尸 gateway 进程（上次 Electron 异常退出未清理）
-  const killStart = Date.now();
-  killZombieGatewayProcesses();
-  console.log(`[gateway] Zombie cleanup took ${Date.now() - killStart}ms`);
-
+  // Port scanning already avoids occupied ports. Never kill another Gateway by
+  // command-line pattern: it may belong to a CLI or another installation.
   try {
     const spawnStart = Date.now();
     managedGateway = spawn(launch.command, launch.args, {
@@ -2952,15 +2932,26 @@ function registerIpc() {
   trustedHandle('shell:readTextFile', async (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenPathArgs.parse(raw), 'shell:readTextFile');
     const resolved = resolveShellAllowedPath(args.path);
-    const stat = await fs.promises.stat(resolved);
+    const stat = fs.lstatSync(resolved);
     const maxBytes = 512 * 1024;
-    if (!stat.isFile()) {
+    if (!stat.isFile() || stat.nlink !== 1 || fs.realpathSync(args.path) !== resolved) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:readTextFile target is not a file`);
     }
     if (stat.size > maxBytes) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:readTextFile file too large`);
     }
-    return fs.promises.readFile(resolved, 'utf8');
+    const bytes = await readResolvedCrewFile({
+      filePath: resolved,
+      identity: {
+        dev: stat.dev,
+        ino: stat.ino,
+        nlink: stat.nlink,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        ctimeMs: stat.ctimeMs,
+      },
+    });
+    return bytes?.toString('utf8') ?? '';
   });
 
   trustedHandle('shell:writeTextFile', async (_e, raw: unknown) => {
@@ -4175,7 +4166,6 @@ async function bootstrap() {
       managedGateway = null;
       return terminateGatewayChild(gw, timeoutMs);
     },
-    killZombieGatewayProcesses,
     setQuittingFlag: () => { isQuitting = true; },
     resetQuittingFlag: () => { isQuitting = false; },
     stopBackendHealthMonitor,

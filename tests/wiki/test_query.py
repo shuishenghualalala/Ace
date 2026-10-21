@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from crew.wiki.query import WikiQuerier, _fuse_seed_channels
+from crew.wiki.rerank import RerankingHTTPError, RerankingProvider
 from crew.wiki.schemas import WikiPage, WikiRelation
-from crew.wiki.query import WikiQuerier
 from crew.wiki.store import FileSystemWikiStore
 
 OWNER = "owner"
@@ -28,6 +29,93 @@ def test_query_no_results(querier):
     assert result["pages"] == []
     assert "暂未找到" in result["context"]
     assert result["answer"] == ""
+
+
+class _TestReranker(RerankingProvider):
+    model = "test:cross-encoder"
+
+    def __init__(self, scoring):
+        self.scoring = scoring
+        self.documents = []
+
+    def score(self, query, documents):
+        self.documents = documents
+        return self.scoring(documents)
+
+
+def _fixed_candidates(store, count=25):
+    pages = [WikiPage(f"p{i}", "topic", f"Candidate {i}", f"body {i}", "") for i in range(count)]
+    store.search = lambda *args, **kwargs: pages[:kwargs["top_k"]]
+    store.search_index = lambda *args, **kwargs: []
+    store.search_vectors = lambda *args, **kwargs: []
+    return pages
+
+
+def test_rerank_scores_candidates_before_top_k_and_preserves_exact_alias(store):
+    pages = _fixed_candidates(store)
+    pages[3].aliases = ["lookup"]
+    reranker = _TestReranker(lambda documents: list(range(len(documents))))
+    result = WikiQuerier(store, reranker=reranker).search("lookup", OWNER, top_k=2, expand_neighbors=False)
+    assert [page["id"] for page in result["pages"]] == ["p3", "p24"]
+    assert len(reranker.documents) == 25
+    assert result["retrieval"]["rerank"]["status"] == "ok"
+    assert len(result["retrieval"]["rerank"]["scores"]) == 25
+
+
+@pytest.mark.parametrize("scores", [[1], [float("nan")] * 25, [float("inf")] * 25])
+def test_bad_rerank_outputs_preserve_original_ranking(store, scores):
+    _fixed_candidates(store)
+    expected = WikiQuerier(store).search("question", OWNER, top_k=3, expand_neighbors=False)
+    reranker = _TestReranker(lambda documents: scores)
+    result = WikiQuerier(store, reranker=reranker).search("question", OWNER, top_k=3, expand_neighbors=False)
+    assert result["pages"] == expected["pages"]
+    assert result["retrieval"]["rerank"]["status"] == "failed"
+
+
+def test_rerank_timeout_preserves_ranking_and_equal_scores_keep_fused_order(store):
+    import httpx
+
+    _fixed_candidates(store)
+    expected = WikiQuerier(store).search("question", OWNER, top_k=3, expand_neighbors=False)
+    ties = _TestReranker(lambda documents: [1] * len(documents))
+    assert WikiQuerier(store, reranker=ties).search("question", OWNER, top_k=3, expand_neighbors=False)["pages"] == expected["pages"]
+
+    def timeout(documents):
+        raise httpx.ReadTimeout("private diagnostic")
+
+    result = WikiQuerier(store, reranker=_TestReranker(timeout)).search("question", OWNER, top_k=3, expand_neighbors=False)
+    assert result["pages"] == expected["pages"]
+    assert result["retrieval"]["rerank"]["error_type"] == "ReadTimeout"
+    assert "private diagnostic" not in str(result["retrieval"])
+
+
+def test_rerank_includes_expanded_neighbors_and_resolves_requested_owner(store):
+    pages = _fixed_candidates(store, count=1)
+    neighbor = WikiPage("neighbor", "topic", "Relevant evidence", "evidence body", "")
+    store.get_neighbors = lambda *args, **kwargs: [neighbor]
+    owners = []
+    reranker = _TestReranker(lambda documents: [0, 10])
+
+    def resolve(owner):
+        owners.append(owner)
+        return reranker
+
+    result = WikiQuerier(store, reranker_for_owner=resolve).search("question", owner_account_id="owner-a", top_k=1)
+    assert result["pages"][0]["id"] == neighbor.id
+    assert result["retrieval"]["expanded_page_ids"] == [neighbor.id]
+    assert owners == ["owner-a"]
+    assert len(reranker.documents) == len(pages) + 1
+
+
+def test_rerank_failure_trace_includes_safe_http_status(store):
+    _fixed_candidates(store)
+
+    def failure(documents):
+        raise RerankingHTTPError(429)
+
+    result = WikiQuerier(store, reranker=_TestReranker(failure)).search("query", OWNER, expand_neighbors=False)
+    assert result["retrieval"]["rerank"]["http_status"] == 429
+    assert result["pages"][0]["id"] == "p0"
 
 
 def test_query_finds_all_pages(querier, store):
@@ -293,3 +381,59 @@ def test_query_extracts_matching_paragraph_instead_of_page_prefix(querier, store
 
     assert "资料入库需要经过知识对账" in result["context"]
     assert len(result["context"]) < 2800
+
+
+def test_broad_candidates_survive_fusion_before_exact_alias_selection(store):
+    pages = [WikiPage(f"p{i}", "topic", f"Page {i}", "ordinary text", "") for i in range(25)]
+    pages[-1].aliases = ["specific lookup"]
+    # A candidate beyond the old 2*top_k budget must remain available to
+    # final ranking. Index-only candidates are mixed into the same pool.
+    store.search = lambda *args, **kwargs: pages[:kwargs["top_k"]]
+    store.search_index = lambda *args, **kwargs: []
+    store.search_vectors = lambda *args, **kwargs: []
+    result = WikiQuerier(store).search("specific lookup", OWNER, top_k=5, expand_neighbors=False)
+    assert result["pages"][0]["id"] == "p24"
+    assert len(result["retrieval"]["seed_page_ids"]) == 25
+    assert result["retrieval"]["candidate_limit"] == 50
+
+
+def test_direct_candidates_keep_fused_order_instead_of_raw_keyword_count(store):
+    rare = WikiPage("rare", "topic", "Rare match", "neural", "")
+    common = WikiPage("common", "topic", "Common words", "what is the evidence for neural therapy", "")
+    store.search = lambda *args, **kwargs: [rare, common]
+    store.search_index = lambda *args, **kwargs: []
+    store.search_vectors = lambda *args, **kwargs: []
+    result = WikiQuerier(store).search(
+        "what is the evidence for neural therapy", OWNER, top_k=2, expand_neighbors=False,
+    )
+    assert [page["id"] for page in result["pages"]] == ["rare", "common"]
+
+
+def test_zero_weight_channel_does_not_add_candidates():
+    page = WikiPage("nav", "topic", "Navigation", "text", "")
+    assert _fuse_seed_channels([], [page], [], 50, index_weight=0) == []
+
+
+def test_navigation_fills_pool_without_demoting_primary_search(store):
+    primary = WikiPage("primary", "topic", "Paper", "neural", "")
+    navigation = WikiPage("nav", "topic", "Overview", "ordinary", "")
+    store.search = lambda *args, **kwargs: [primary]
+    store.search_index = lambda *args, **kwargs: [navigation, primary]
+    store.search_vectors = lambda *args, **kwargs: []
+    result = WikiQuerier(store).search("neural question", OWNER, top_k=2, expand_neighbors=False)
+    assert [page["id"] for page in result["pages"]] == ["primary", "nav"]
+    assert result["retrieval"]["index_fallback_page_ids"] == ["nav"]
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"candidate_limit": 0}, {"index_weight": -1},
+    {"index_weight": float("nan")}, {"fuse_weight": float("inf")},
+])
+def test_invalid_retrieval_settings_are_rejected(store, kwargs):
+    with pytest.raises(ValueError):
+        WikiQuerier(store, **kwargs)
+
+
+def test_search_rejects_nonpositive_top_k(querier):
+    with pytest.raises(ValueError):
+        querier.search("query", OWNER, top_k=0)

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+
 from crew.state.logging import get_logger
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 from crew.wiki.schemas import WikiPage
@@ -208,14 +209,25 @@ class SQLiteFTS5SearchIndex(WikiSearchIndex):
             log.warning("删除 Wiki FTS 索引失败 %s: %s", page_ids, exc)
 
     def search(self, query: str, top_k: int) -> list[str]:
+        """按 BM25 检索；自然语言问题使用 OR，中文短关键词保持词组匹配。"""
+        if top_k <= 0:
+            return []
         with self._lock:
             try:
-                fts_query = self._fts_tokenize(query)
-                if not fts_query:
+                tokenized = self._fts_tokenize(query)
+                if not tokenized:
                     return []
+                if re.fullmatch(r"[一-鿿]{1,6}", query.strip()):
+                    # Short CJK lookup terms should not match merely because
+                    # one common character occurs elsewhere on a page.
+                    fts_query = f'"{tokenized}"'
+                else:
+                    fts_query = " OR ".join(
+                        f'"{token}"' for token in dict.fromkeys(tokenized.split())
+                    )
                 rows = self._conn.execute(
                     "SELECT page_id, bm25(pages_fts, 1, 10, 1, 1, 1) AS score "
-                    "FROM pages_fts WHERE pages_fts MATCH ? ORDER BY score LIMIT ?",
+                    "FROM pages_fts WHERE pages_fts MATCH ? ORDER BY score, rowid LIMIT ?",
                     (fts_query, top_k),
                 ).fetchall()
                 return [str(row[0]) for row in rows]

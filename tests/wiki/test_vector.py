@@ -78,6 +78,17 @@ def test_meta_reflects_model_after_sync(index):
     assert index.stored_model == "test:model"
 
 
+def test_equal_similarity_scores_have_deterministic_page_id_order(tmp_path):
+    value = SQLiteVectorIndex(tmp_path / "ties.db", embed_fn=lambda texts: [[1, 0] for _ in texts], dim=2)
+    try:
+        pages = [_page(f"p{i:03}", "same vector") for i in reversed(range(100))]
+        value.sync_pages(pages)
+        expected = [f"p{i:03}" for i in range(100)]
+        assert [pid for pid, _ in value.search_by_vector([1, 0], top_k=100)] == expected
+    finally:
+        value.close()
+
+
 def test_page_embedding_text_title_first():
     text = page_embedding_text(_page("p", "标题", "正文"))
     assert text.split("\n")[0] == "标题"

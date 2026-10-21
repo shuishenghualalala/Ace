@@ -277,7 +277,7 @@ class SQLiteVectorIndex(WikiVectorIndex):
         with self._lock:
             try:
                 rows = self._conn.execute(
-                    "SELECT page_id, vector, dim FROM pages_vectors"
+                    "SELECT page_id, vector, dim FROM pages_vectors ORDER BY page_id"
                 ).fetchall()
             except Exception as exc:  # noqa: BLE001
                 log.warning("读取 Wiki 向量索引失败: %s", exc)
@@ -297,7 +297,7 @@ class SQLiteVectorIndex(WikiVectorIndex):
             norms = np.linalg.norm(matrix, axis=1)
             norms[norms == 0] = 1.0
             similarities = (matrix @ q) / (norms * q_norm)
-            order = np.argsort(-similarities)
+            order = np.argsort(-similarities, kind="stable")
             return [(ids[int(i)], float(similarities[int(i)])) for i in order[:top_k]]
         scored = [(pid, _cosine(query, vector)) for pid, vector in zip(ids, vectors)]
         scored.sort(key=lambda item: item[1], reverse=True)

@@ -24,7 +24,7 @@ from crew.state.credentials import read_stored_key
 from crew.state.logging import get_logger
 
 if TYPE_CHECKING:
-    from crew.wiki.config import WikiSemanticConfig
+    from crew.wiki.config import WikiRerankConfig, WikiSemanticConfig
 
 import sys
 
@@ -536,6 +536,18 @@ class Config:
                 profile = _build_owner_model_profile(str(model_id), raw, env_map, owner_account_id or "")
                 profiles[str(model_id)] = profile
         return profiles
+
+    def owner_rerank_config(self, owner_account_id: str | None = None) -> "WikiRerankConfig":
+        """Merge owner reranking settings without resolving or exporting credentials."""
+        # 延迟导入：wiki 包内部经 _llm 引用 crew.providers，而 providers 初始化
+        # 会经 crew.state 回到本模块，顶层导入会形成循环。
+        from crew.wiki.config import WikiConfig, WikiRerankConfig
+
+        global_cfg = WikiConfig.from_raw(self.wiki_config).rerank
+        raw = (self.owner_overlay_data(owner_account_id).get("wiki") or {}).get("rerank")
+        if not isinstance(raw, dict):
+            return global_cfg
+        return WikiRerankConfig.from_raw({**vars(global_cfg), **raw})
 
     def owner_semantic_config(self, owner_account_id: str | None = None) -> WikiSemanticConfig:
         """返回 owner 生效的语义检索配置：全局默认 + owner overlay 逐字段覆盖。

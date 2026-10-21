@@ -742,6 +742,8 @@ class CrewApp:
         self._stale_owner_embedding_providers: dict[int, "EmbeddingProvider"] = {}
         # 全局默认 embedding provider（config.yaml wiki.semantic），owner 回退用。
         self._embedding_provider: "EmbeddingProvider | None" = None
+        # Wiki 精排（rerank）按 owner 缓存客户端的解析器；由 Wiki Feature 装配时挂接。
+        self._wiki_reranker_resolver: Any = None
         self._shutdown_lock = asyncio.Lock()
         self._shutdown_complete = False
         # Installed by build_app after all core stores are ready.  Keeping these
@@ -2795,6 +2797,7 @@ class CrewApp:
             # stores here as orphaned persistent handles.
             getattr(getattr(self, "sites", None), "store", None),
             getattr(getattr(getattr(self, "sites", None), "blueprint", None), "store", None),
+            getattr(self, "_wiki_reranker_resolver", None),
         ]
         handler = self._observability_log_handler
         if handler is not None:

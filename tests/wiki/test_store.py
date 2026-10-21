@@ -766,6 +766,17 @@ def test_search_fts_and_keyword_fallback(store: FileSystemWikiStore):
     assert len(results) == 1
 
 
+def test_search_preserves_bm25_order_and_exact_alias_priority(store):
+    rare = store.save_page(WikiPage("rare", "topic", "Specific", "neural", ""), "owner")
+    common = store.save_page(WikiPage("common", "topic", "General", "what is the evidence", ""), "owner")
+    alias = store.save_page(WikiPage("alias", "topic", "Alias target", "unrelated", "",
+                                    aliases=["what is the evidence for neural therapy"]), "owner")
+    query = "what is the evidence for neural therapy"
+    index = store._search_index("owner", "default")
+    index.search = lambda *args, **kwargs: [rare.id, common.id, alias.id]
+    assert [page.id for page in store.search(query, owner_account_id="owner")] == [alias.id, rare.id, common.id]
+
+
 def test_search_index_matches_navigation_summary_not_page_body(store: FileSystemWikiStore):
     page = store.save_page(
         WikiPage(

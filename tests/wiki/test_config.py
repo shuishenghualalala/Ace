@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from crew.wiki.config import WikiConfig
 
 
@@ -61,3 +63,22 @@ def test_wiki_storage_env_overrides_yaml(monkeypatch, tmp_path):
     monkeypatch.setenv("CREW_WIKI_HOME", str(override))
     cfg = WikiConfig.from_raw({"storage": {"root": "ignored"}})
     assert cfg.storage.resolved_root() == override.resolve()
+
+
+def test_rerank_is_disabled_by_default_and_parses_independent_model_settings():
+    assert WikiConfig.from_raw({}).rerank.enabled is False
+    cfg = WikiConfig.from_raw({"rerank": {
+        "enabled": "yes", "model": "test-reranker", "base_url": "https://example.test/v1",
+        "api_key_env": "RERANK_KEY", "timeout": 5, "max_chunks_per_doc": 4,
+    }, "query": {"retrieval_candidates": 80, "rerank_candidates": 40}})
+    assert cfg.rerank.enabled is True
+    assert cfg.rerank.api_key_env == "RERANK_KEY"
+    assert cfg.rerank.max_chunks_per_doc == 4
+    assert cfg.query.retrieval_candidates == 80
+    assert cfg.query.rerank_candidates == 40
+
+
+@pytest.mark.parametrize("raw", [{"timeout": 0}, {"timeout": "nan"}, {"max_chunks_per_doc": 0}])
+def test_rerank_rejects_unbounded_or_invalid_limits(raw):
+    with pytest.raises(ValueError):
+        WikiConfig.from_raw({"rerank": raw})

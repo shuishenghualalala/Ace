@@ -5,12 +5,10 @@
  *   1. confirmUninstall()        → 弹窗确认是否卸载
  *   2. askKeepUserData()         → 弹窗确认是否保留用户数据
  *   3. stopManagedGateway()      → 停止 gateway 子进程，释放文件句柄
- *   4. killZombieGatewayProcesses() → 兜底杀残留 gateway 进程
- *   5. 等待 gateway 进程退出（最长 5s）
- *   6. 收集 postQuitDirs（~/.Crew + userData），交给延迟脚本 app 退出后删
- *   7. launchPlatformUninstaller() → Windows: Inno Setup unins000.exe /SILENT
+ *   4. 收集 postQuitDirs（~/.Crew + userData），交给延迟脚本 app 退出后删
+ *   5. launchPlatformUninstaller() → Windows: Inno Setup unins000.exe /SILENT
  *                                      Linux:  pkexec apt remove -y crew-desktop
- *   8. app.quit() → 延迟脚本在 app 退出后 rm -rf postQuitDirs
+ *   6. app.quit() → 延迟脚本在 app 退出后 rm -rf postQuitDirs
  *
  * 关键设计决策：
  *   • 不弹「正在准备卸载」loading 窗口——早期版本加过，但 loading 窗口偶现不消失
@@ -36,8 +34,6 @@ export interface UninstallDeps {
   getMainWindow(): BrowserWindow | null;
   /** 停止 Electron 管理的 gateway 子进程并等待退出 */
   stopManagedGateway(timeoutMs?: number): Promise<void>;
-  /** 兜底：kill 所有残留的 gateway 僵尸进程 */
-  killZombieGatewayProcesses(): void;
   /** 标记正在退出（防止 close 事件拦截） */
   setQuittingFlag(): void;
   /** 重置退出标记（卸载失败回退时恢复，允许用户继续操作主窗口） */
@@ -74,44 +70,6 @@ function resolveDialogIcon(): NativeImage {
 /** 解析 Crew 用户家目录（与后端 crew/state/home.py 保持一致）。 */
 export function getCrewHome(): string {
   return process.env.CREW_HOME || path.join(os.homedir(), '.Crew');
-}
-
-/**
- * 检查 gateway 进程是否仍在运行。
- * 打包态 gateway 是「内嵌 python.exe -m crew.gateway.server」，按命令行特征匹配。
- * 使用无 shell 的 argv 调用，避免阻塞主进程或引入命令注入表面。
- */
-function isGatewayProcessAlive(): Promise<boolean> {
-  if (process.platform !== 'win32') return Promise.resolve(false);
-  return new Promise((resolve) => {
-    let output = '';
-    let settled = false;
-    const finish = (alive: boolean): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      resolve(alive);
-    };
-    const child = spawn(
-      'powershell',
-      [
-        '-NoProfile', '-NonInteractive', '-Command',
-        "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" " +
-        "| Where-Object { $_.CommandLine -match 'crew\\.gateway\\.server' } " +
-        "| ForEach-Object { $_.ProcessId }",
-      ],
-      { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] },
-    );
-    const timeout = setTimeout(() => {
-      child.kill();
-      // 探测超时按仍存活处理，卸载流程会继续等待并重试 kill。
-      finish(true);
-    }, 3000);
-    child.stdout?.setEncoding('utf8');
-    child.stdout?.on('data', (chunk: string) => { output += chunk; });
-    child.once('error', () => finish(false));
-    child.once('close', (code) => finish(code === 0 && output.trim().length > 0));
-  });
 }
 
 // ─── 弹窗：确认卸载 ──────────────────────────────────────────────────────────
@@ -386,33 +344,8 @@ export async function handleUninstall(): Promise<void> {
   // ── 第 3 步：停止 gateway 子进程，释放 ~/.Crew 文件句柄 ────────
   console.log('[uninstall] 停止 managed gateway...');
   await deps.stopManagedGateway();
-
-  // ── 第 4 步：兜底 kill 残留的 gateway 僵尸进程 ──────────────────
-  deps.killZombieGatewayProcesses();
-
-  // ── 第 5 步：等待 gateway 进程完全退出，确保文件句柄释放 ──────────────
-  // killZombieGatewayProcesses 是异步 spawn taskkill，需要等待其真正生效。
-  // 如果 gateway 仍有子进程（如 Python 技能运行时）持有 _internal/runtimes
-  // 下的文件句柄，Inno Setup 卸载时会因 EPERM 跳过，导致文件残留。
-  console.log('[uninstall] 等待 gateway 进程完全退出...');
-  const maxWait = 5000;
-  const pollInterval = 500;
-  let waited = 0;
-  while (waited < maxWait) {
-    await new Promise((resolve) => setTimeout(resolve, pollInterval));
-    waited += pollInterval;
-    if (!await isGatewayProcessAlive()) {
-      console.log(`[uninstall] ✓ gateway 进程已全部退出 (等待 ${waited}ms)`);
-      break;
-    }
-    // 再次尝试 kill（可能第一轮 taskkill 未覆盖到子进程）
-    if (waited >= 2000) {
-      deps.killZombieGatewayProcesses();
-    }
-  }
-  if (waited >= maxWait) {
-    console.warn(`[uninstall] ⚠ gateway 进程在 ${maxWait}ms 后仍有残留，卸载可能遗留文件`);
-  }
+  // Other Gateway processes are independent of this Desktop, even when they
+  // use the same Python module name. Do not enumerate or terminate them.
 
   if (deps.cleanupSecurity && !await deps.cleanupSecurity()) {
     showUninstallError(

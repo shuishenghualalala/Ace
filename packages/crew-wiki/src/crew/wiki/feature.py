@@ -163,12 +163,12 @@ def build_wiki_feature(
     # 语义检索（embedding）：全局默认 provider 按 wiki.semantic 配置构建一次，
     # 跨 Generation 共享；per-owner 解析由宿主的 owner_embedding_provider 承担
     # （含按 owner 缓存与 shutdown 关闭，见 app.py）。
+    host_config = getattr(host, "config", None)
     semantic = getattr(cfg, "semantic", None)
     embedding_provider = None
     if semantic is not None:
         from .embedding import build_embedding_provider
 
-        host_config = getattr(host, "config", None)
         embedding_provider = build_embedding_provider(
             semantic,
             api_key=str(getattr(host_config, "api_key", "") or ""),
@@ -179,6 +179,35 @@ def build_wiki_feature(
     if hasattr(host, "_embedding_provider"):
         host._embedding_provider = embedding_provider
     owner_embedding_provider = getattr(host, "owner_embedding_provider", None)
+
+    # 精排（rerank）：按 owner 解析生效配置并缓存客户端（OwnerRerankerResolver），
+    # 关停由宿主经 _wiki_reranker_resolver 统一处理。
+    reranker_resolver = None
+    query_cfg = getattr(cfg, "query", None)
+    if host_config is not None and callable(getattr(host_config, "owner_rerank_config", None)):
+        from crew.state.config import _lookup_api_key
+
+        from .rerank import OwnerRerankerResolver
+
+        def _rerank_settings(owner: str):
+            rerank = host_config.owner_rerank_config(owner)
+            owner_semantic = host_config.owner_semantic_config(owner)
+            if not rerank.enabled:
+                return rerank, "", ""
+            env_map = host_config.owner_env_map(owner) if owner else None
+            key_env = rerank.api_key_env or owner_semantic.api_key_env
+            allow_global = not owner or host_config._owner_builtin_allows_global_key_fallback(owner)
+            key = _lookup_api_key(key_env, env_map, fallback_global=allow_global)
+            if not key and not key_env and allow_global:
+                key = host_config.api_key
+            endpoint = rerank.base_url or owner_semantic.base_url
+            if not endpoint and owner_semantic.provider == "openai":
+                endpoint = host_config.base_url
+            return rerank, key, endpoint
+
+        reranker_resolver = OwnerRerankerResolver(_rerank_settings)
+        if hasattr(host, "_wiki_reranker_resolver"):
+            host._wiki_reranker_resolver = reranker_resolver
 
     def make_provider() -> LocalWikiProvider:
         store = FileSystemWikiStore(
@@ -208,6 +237,9 @@ def build_wiki_feature(
                 querier=WikiQuerier(
                     store,
                     fuse_weight=semantic.fuse_weight if semantic else 0.9,
+                    candidate_limit=query_cfg.retrieval_candidates if query_cfg else 50,
+                    rerank_limit=query_cfg.rerank_candidates if query_cfg else 50,
+                    reranker_for_owner=reranker_resolver,
                 ),
                 summarizer=summarizer,
                 manager=manager,

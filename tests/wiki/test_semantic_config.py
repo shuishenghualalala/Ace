@@ -113,3 +113,20 @@ def test_persist_owner_semantic_config_requires_owner(tmp_path, monkeypatch):
     cfg = _config_with_global_semantic(tmp_path, monkeypatch, {})
     with pytest.raises(ValueError):
         cfg.persist_owner_semantic_config("", {"enabled": True})
+
+
+def test_owner_rerank_overlay_inherits_settings_without_modifying_global_config(tmp_path, monkeypatch):
+    cfg = _config_with_global_semantic(tmp_path, monkeypatch, {})
+    cfg.wiki_config = {"rerank": {
+        "base_url": "https://global.example.test/v1",
+        "timeout": 10,
+    }}
+    owner_home = get_owner_runtime_home("owner-a")
+    owner_home.mkdir(parents=True, exist_ok=True)
+    (owner_home / "config.yaml").write_text(yaml.safe_dump({"wiki": {"rerank": {
+        "enabled": True, "api_key_env": "OWNER_RERANK_KEY",
+    }}}))
+    config = cfg.owner_rerank_config("owner-a")
+    assert config.enabled and config.api_key_env == "OWNER_RERANK_KEY"
+    assert config.base_url == "https://global.example.test/v1" and config.timeout == 10
+    assert cfg.owner_rerank_config("owner-b").enabled is False
