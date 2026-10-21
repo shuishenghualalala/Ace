@@ -543,7 +543,12 @@ class LocalWikiProvider:
         return self.store.load_raw(source_id, owner_account_id, kb_id)
 
     def delete_source(self, source_id: str, owner_account_id: str, kb_id: str = "default") -> bool:
-        return self.store.delete_raw(source_id, owner_account_id, kb_id)
+        ok = self.store.delete_raw(source_id, owner_account_id, kb_id)
+        if ok:
+            self.compiler.finalize_write(
+                f"删除 raw source {source_id} 及其关联页面", owner_account_id, kb_id
+            )
+        return ok
 
     def source_file(self, source_id: str, owner_account_id: str, kb_id: str = "default") -> KnowledgeSourceFile | None:
         raw = self.read_source(source_id, owner_account_id, kb_id)

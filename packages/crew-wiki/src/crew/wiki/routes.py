@@ -10,7 +10,7 @@ from functools import wraps
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from crew.core.envelope import feature_event_body
@@ -20,6 +20,7 @@ from crew.wiki._utils import is_wiki_agent_session
 from crew.wiki.capture import CaptureError, CaptureValidationError
 from crew.wiki.schemas import WikiPage, WikiRelation
 from crew.wiki.service import KNOWLEDGE_SERVICE_KEY, KnowledgeService, normalize_kb_id
+from crew.wiki.store._ids import source_page_id
 
 log = get_logger("wiki.routes")
 
@@ -112,7 +113,58 @@ def create_wiki_router(crew) -> APIRouter:
         return owner
 
     def _kb_id(request: Request) -> str:
-        return request.query_params.get("kb_id") or "default"
+        try:
+            return normalize_kb_id(request.query_params.get("kb_id"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def _query_int_param(
+        request: Request,
+        name: str,
+        default: int,
+        min_value: int,
+        max_value: int | None = None,
+    ) -> int:
+        """解析并校验 Wiki 查询参数，非法输入统一返回 400。"""
+        raw = request.query_params.get(name)
+        if raw is None:
+            return default
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"{name} 必须是整数") from exc
+        if value < min_value:
+            raise HTTPException(status_code=400, detail=f"{name} 不能小于 {min_value}")
+        if max_value is not None and value > max_value:
+            raise HTTPException(status_code=400, detail=f"{name} 不能大于 {max_value}")
+        return value
+
+    def _find_title_conflict(
+        service: KnowledgeService,
+        title: str,
+        page_type: str,
+        owner: str,
+        kb_id: str,
+        exclude_page_id: str = "",
+    ):
+        """查找同知识库内同类型、同标题的页面。
+
+        Source Page 的身份由 source_id 决定，不按标题去重；不同来源可以有相同
+        的展示标题。其他页面类型沿用创建工具的唯一标题约束。
+        """
+        if page_type == "source":
+            return None
+        normalized_title = str(title or "").strip()
+        if not normalized_title:
+            return None
+        for candidate in service.list_pages(owner, kb_id, limit=10000, offset=0, brief=True):
+            if (
+                candidate.id != exclude_page_id
+                and candidate.page_type == page_type
+                and str(candidate.title or "").strip() == normalized_title
+            ):
+                return candidate
+        return None
 
     def _task_key(
         owner: str,
@@ -384,8 +436,8 @@ def create_wiki_router(crew) -> APIRouter:
         service = _service()
         if service is None:
             return _unavailable()
-        limit = int(request.query_params.get("limit", 100))
-        offset = int(request.query_params.get("offset", 0))
+        limit = _query_int_param(request, "limit", 100, 1, 200)
+        offset = _query_int_param(request, "offset", 0, 0)
         brief = request.query_params.get("brief", "").lower() in ("1", "true", "yes")
         owner = _owner(request)
         kb_id = _kb_id(request)
@@ -417,13 +469,40 @@ def create_wiki_router(crew) -> APIRouter:
                 {"ok": False, "error": f"不支持的 Wiki 页面类型: {page_type}"},
                 status_code=400,
             )
+        owner = _owner(request)
+        title = str(data.get("title", "")).strip()
+        conflict = _find_title_conflict(service, title, page_type, owner, kb_id)
+        if conflict is not None:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"页面标题已存在: {conflict.id}",
+                    "existing_page_id": conflict.id,
+                },
+                status_code=409,
+            )
+        sources = [str(s).strip() for s in data.get("sources") or [] if str(s).strip()]
+        page_id = ""
+        if page_type == "source" and len(sources) == 1:
+            # Source Page 的身份由来源决定：同一来源重复创建返回 409，
+            # 不同来源允许相同展示标题。
+            page_id = source_page_id(sources[0])
+            if service.read_document(page_id, owner, kb_id) is not None:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": f"该来源页面已存在: {page_id}",
+                        "existing_page_id": page_id,
+                    },
+                    status_code=409,
+                )
         page = WikiPage(
-            id="",
+            id=page_id,
             page_type=page_type,
-            title=data.get("title", ""),
+            title=title,
             content=data.get("content", ""),
             file_path="",
-            sources=list(data.get("sources") or []),
+            sources=sources,
             tags=list(data.get("tags") or []),
             relations=[
                 WikiRelation.from_dict(item)
@@ -431,7 +510,6 @@ def create_wiki_router(crew) -> APIRouter:
                 if isinstance(item, dict)
             ],
         )
-        owner = _owner(request)
         saved = service.save_page(page, owner, kb_id)
         return {
             "ok": True,
@@ -471,7 +549,26 @@ def create_wiki_router(crew) -> APIRouter:
         if existing is None:
             return JSONResponse({"ok": False, "error": "页面不存在"}, status_code=404)
         data = await request.json()
-        existing.title = str(data.get("title", existing.title))
+        owner = _owner(request)
+        new_title = str(data.get("title", existing.title)).strip()
+        conflict = _find_title_conflict(
+            service,
+            new_title,
+            existing.page_type,
+            owner,
+            kb_id,
+            exclude_page_id=existing.id,
+        )
+        if conflict is not None:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"目标标题已存在: {conflict.id}",
+                    "existing_page_id": conflict.id,
+                },
+                status_code=409,
+            )
+        existing.title = new_title
         existing.content = str(data.get("content", existing.content))
         existing.tags = list(data.get("tags", existing.tags))
         existing.sources = list(data.get("sources", existing.sources))
@@ -482,7 +579,6 @@ def create_wiki_router(crew) -> APIRouter:
                 if isinstance(item, dict)
             ]
         existing.related = []
-        owner = _owner(request)
         updated = service.update_page(existing, owner, kb_id)
         result_page = updated or existing
         return {
@@ -531,7 +627,7 @@ def create_wiki_router(crew) -> APIRouter:
         if service is None:
             return _unavailable()
         query = request.query_params.get("q", "")
-        top_k = int(request.query_params.get("top_k", 5))
+        top_k = _query_int_param(request, "top_k", 5, 1, 50)
         owner = _owner(request)
         kb_id = _kb_id(request)
         pages = service.search_pages(query, owner, top_k, kb_id)
@@ -553,8 +649,8 @@ def create_wiki_router(crew) -> APIRouter:
         owner = _owner(request)
         kb_id = _kb_id(request)
         status_filter = request.query_params.get("status", "all").strip().lower()
-        limit = max(1, int(request.query_params.get("limit", 200)))
-        offset = max(0, int(request.query_params.get("offset", 0)))
+        limit = _query_int_param(request, "limit", 200, 1)
+        offset = _query_int_param(request, "offset", 0, 0)
         raws = service.list_sources(owner, kb_id)
         if status_filter != "all":
             raws = [r for r in raws if (r.parse_status or "pending") == status_filter]
