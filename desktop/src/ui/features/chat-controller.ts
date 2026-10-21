@@ -195,6 +195,8 @@ export async function openSessionInChat(sessionId: string): Promise<void> {
 // wiki.ingest_progress 是 /api/wiki/ingest 推到某个会话的带外进度事件，不属于对话回合，
 // 不进 reducer；经回调转发给订阅者（wiki-page 由 index.ts 组合根注入，chat 侧不 import wiki-page）。
 let wikiIngestProgressCallback: ((progress: WikiIngestProgress) => void) | null = null;
+/** 后台 Wiki 整理的终态事件可能因 completion 投递与 replay 重复，通知按 task/status 去重。 */
+const notifiedWikiIngestTasks = new Set<string>();
 
 export function setWikiIngestProgressCallback(cb: ((progress: WikiIngestProgress) => void) | null): void {
   wikiIngestProgressCallback = cb;
@@ -439,11 +441,26 @@ function resolveStreamingTurnTarget(sid: string, assistantId: string): {
   if (sid !== state.activeSessionId) return null;
   const containerId = resolveChatRenderTargetId(isStudioView());
   const root = document.getElementById(containerId);
-  const turnEl = root?.querySelector<HTMLElement>('.msg[data-streaming="true"]') ?? null;
-  if (!turnEl) return null;
   const messages = getMessages(sid);
   const msg = messages.find((m) => m.id === assistantId);
   if (!msg) return null;
+
+  // 同一会话可以同时存在多个 live 回合（例如 Wiki 后台整理 + 当前问答）。
+  // 不能取页面里的第一条 [data-streaming=true]：那会把当前正文 patch 到旧后台卡片，
+  // 快路径又误报成功，导致真正位于底部的回答直到下次全量 render 才突然更新。
+  // 每条 assistant 段渲染时都会留下 data-text-for 空壳；有 thinking 时还会留下
+  // data-thinking-for。按 assistantId 找到标记后再向上取所属回合，才能覆盖多段回合。
+  const markers = root?.querySelectorAll<HTMLElement>('[data-text-for], [data-thinking-for]') ?? [];
+  let turnEl: HTMLElement | null = null;
+  for (const marker of markers) {
+    if (marker.dataset.textFor !== assistantId && marker.dataset.thinkingFor !== assistantId) continue;
+    const owner = marker.closest<HTMLElement>('.msg[data-streaming="true"]');
+    if (owner) {
+      turnEl = owner;
+      break;
+    }
+  }
+  if (!turnEl) return null;
   return { turnEl, messages, msg };
 }
 
@@ -456,7 +473,10 @@ function scheduleStreamingTurnPatch(sid: string, assistantId: string): boolean {
 function scheduleThinkingTurnPatch(sid: string, assistantId: string): boolean {
   const target = resolveStreamingTurnTarget(sid, assistantId);
   if (!target?.msg.thinking) return false;
-  if (!target.turnEl.querySelector(`[data-thinking-for="${assistantId}"]`)) return false;
+  const hasThinkingMarker = Array.from(
+    target.turnEl.querySelectorAll<HTMLElement>('[data-thinking-for]'),
+  ).some((marker) => marker.dataset.thinkingFor === assistantId);
+  if (!hasThinkingMarker) return false;
   streamingPatchCoalescer.schedule({ sid, assistantId });
   return true;
 }
@@ -533,12 +553,15 @@ function patchStreamingTurn(sid: string, assistantId: string): boolean {
       elapsedMs: msg.turnStartedAt != null ? Math.max(0, Date.now() - msg.turnStartedAt) : undefined,
     });
   }
-  const textEl = turnEl.querySelector<HTMLElement>(`[data-text-for="${assistantId}"]`);
+  const textEl = Array.from(turnEl.querySelectorAll<HTMLElement>('[data-text-for]'))
+    .find((marker) => marker.dataset.textFor === assistantId) ?? null;
   if (textEl) {
     textEl.classList.remove('typing-inline');
     patchTranscriptMarkdown(textEl, msg.content, true);
   }
-  const thinkingEl = turnEl.querySelector<HTMLElement>(`[data-thinking-for="${assistantId}"] .process-timeline__thinking`);
+  const thinkingMarker = Array.from(turnEl.querySelectorAll<HTMLElement>('[data-thinking-for]'))
+    .find((marker) => marker.dataset.thinkingFor === assistantId) ?? null;
+  const thinkingEl = thinkingMarker?.querySelector<HTMLElement>('.process-timeline__thinking') ?? null;
   if (thinkingEl && msg.thinking != null) {
     const followThinkingOutput = (
       thinkingEl.scrollHeight - thinkingEl.scrollTop - thinkingEl.clientHeight
@@ -1216,6 +1239,40 @@ function applyChunkInner(incomingChunk: ChatChunk): void {
   applyMessageUpserts(sid, result.messageUpserts, result.replaceMessages);
   if (hasMessageChanges) {
     window.dispatchEvent(new CustomEvent('messages:changed', { detail: { sessionId: sid } }));
+  }
+  if (parsed.kind === 'task' && parsed.body.task_kind === 'wiki_ingest') {
+    const taskId = typeof parsed.body.task_id === 'string' ? parsed.body.task_id : '';
+    const taskStatus = typeof parsed.body.status === 'string' ? parsed.body.status : '';
+    const terminal = ['completed', 'failed', 'cancelled', 'timed_out'].includes(taskStatus);
+    const notificationKey = `${taskId}:${taskStatus}`;
+    if (taskId && terminal && parsed.body.rehydrated === true) {
+      notifiedWikiIngestTasks.add(notificationKey);
+    }
+    if (taskId && terminal && parsed.body.rehydrated !== true && !notifiedWikiIngestTasks.has(notificationKey)) {
+      notifiedWikiIngestTasks.add(notificationKey);
+      const progress = parsed.body.progress && typeof parsed.body.progress === 'object'
+        ? parsed.body.progress
+        : {};
+      const label = typeof progress.label === 'string' && progress.label.trim()
+        ? progress.label.trim()
+        : taskStatus === 'completed' ? 'Wiki 深度整理已完成' : 'Wiki 深度整理未完成';
+      notify(label);
+      if (sid !== sessionStore.get().activeSessionId) {
+        const nextUnread = new Set(sessionStore.get().unreadCompletedSessions);
+        nextUnread.add(sid);
+        sessionStore.set({ unreadCompletedSessions: nextUnread });
+        renderWorkspaceHistory(openSessionFn);
+      }
+      const taskResult = progress.result && typeof progress.result === 'object'
+        ? progress.result as Record<string, unknown>
+        : {};
+      const kbId = typeof progress.kb_id === 'string' ? progress.kb_id : '';
+      if (taskStatus === 'completed' && taskResult.auto_applied === true && kbId) {
+        window.dispatchEvent(new CustomEvent('wiki:changed', {
+          detail: { sessionId: sid, changes: [{ kb_id: kbId, change_type: 'ingest_applied' }] },
+        }));
+      }
+    }
   }
 
   if (isStreamDebugEnabled() && hasMessageChanges) {

@@ -275,6 +275,14 @@ def create_wiki_router(crew) -> APIRouter:
         )
         return {"ok": True, "session_id": session_id, "kb_id": kb_id}
 
+    @router.get("/confirmations/{confirmation_id}")
+    @_with_knowledge
+    async def wiki_confirmation_status(confirmation_id: str, request: Request):
+        service = _service()
+        return {"pending": bool(service and service.is_confirmation_pending(
+            confirmation_id, owner_account_id=_owner(request),
+        ))}
+
     @router.post("/confirmations/{confirmation_id}/cancel")
     @_with_knowledge
     async def wiki_cancel_confirmation(confirmation_id: str, request: Request):

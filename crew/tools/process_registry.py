@@ -107,6 +107,43 @@ def _session_alive(session: "ProcessSession") -> bool:
     return _pid_alive(session.pid)
 
 
+def current_shell_kind() -> str:
+    """Return the shell family that executes model terminal commands on this host.
+
+    与 ``spawn_local`` 的 Windows 分支（``shutil.which("pwsh") or
+    shutil.which("powershell")``）保持同源语义：Windows 上按 shell 家族归为
+    "powershell"（pwsh 与 powershell 均属 PowerShell 家族），其余平台为 "bash"。
+    """
+    if _IS_WINDOWS:
+        return "powershell"
+    return "bash"
+
+
+def terminate_process_tree(pid: int) -> None:
+    """Best-effort terminate one process and its complete child process tree.
+
+    Windows ``Popen.terminate()`` only stops the top-level process, so command
+    chains such as PowerShell → Node → LibreOffice can otherwise leave orphaned
+    children. POSIX processes are started in their own group and terminate as a
+    group; Windows uses ``taskkill /T /F``.
+    """
+    if pid <= 0:
+        return
+    try:
+        if _IS_WINDOWS:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        else:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError, subprocess.SubprocessError):
+        return
+
+
 def _checkpoint_path() -> Path:
     """崩溃恢复 checkpoint 文件路径（懒解析，随 CREW_HOME 变化）。"""
     from crew.state.home import get_crew_home

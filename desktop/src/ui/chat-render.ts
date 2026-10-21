@@ -28,6 +28,7 @@ import { renderToolInteractionCard } from './components/interaction-card';
 import { patchTranscriptMarkdown } from './components/transcript';
 import { getLocale, t } from './lib/i18n';
 import { spriteSymbolRef } from './lib/sprite-symbol';
+import { revealPendingWikiConfirmation } from './features/wiki-confirmation-state';
 
 export type MessageRole = 'user' | 'assistant' | 'status' | 'error' | 'team_internal';
 
@@ -609,19 +610,25 @@ function renderSubagentCard(tool: ToolCallInfo, messageId: string): HTMLElement 
   return renderTimelineItem(PROCESS_SUBAGENT_ICON_SVG, iconClass, details);
 }
 
-/** 进度行预览窗口：最多 10 条且累计不超过 2000 字符，超出折叠为可点击展开的提示。 */
-const PROGRESS_PREVIEW_LINES = 10;
-const PROGRESS_PREVIEW_CHARS = 2_000;
-
-/** 已手动展开的进度区（按 toolCallId 记忆，流式重渲染后保持展开状态）。 */
-const expandedProgressTools = new Set<string>();
+/** 进度折叠阈值：完成后实际行数超过该值（或总字符超长）才收进折叠块；短状态保持平铺。 */
+const PROGRESS_FOLD_LINES = 2;
+const PROGRESS_FOLD_CHARS = 160;
 
 /** 命令行工具的 progress 不是可读进度，而是原始 stdout 增量（builtin.py 执行期实时透传），
  *  渲染出来是整段命令输出，直接不渲染；最终结果仍由 Response 块承载。 */
 const STDOUT_PROGRESS_TOOLS = new Set(['bash', 'terminal', 'process']);
 
-/** 将工具阶段进度按产生顺序渲染成独立行，不把最新状态挤进工具标题行。 */
-function appendToolProgressLines(parent: HTMLElement, tool: ToolCallInfo): void {
+/**
+ * 将工具阶段进度按产生顺序渲染成独立行，不把最新状态挤进工具标题行。
+ * 运行中平铺实时输出；工具结束后长输出默认折叠成「实时输出 · N 行」，
+ * 避免 terminal 等命令的调试输出在完成后仍常驻占屏（展开选择经 fold-state 持久化）。
+ * 注意 terminal 进度按 ~0.5s 增量整块推送，一个 entry 可含多行，须按实际行数判定。
+ */
+function appendToolProgressLines(
+  parent: HTMLElement,
+  tool: ToolCallInfo,
+  ctx: { isActive: boolean; foldKey: string },
+): void {
   if (STDOUT_PROGRESS_TOOLS.has(String(tool.name || '').trim().toLowerCase())) return;
   const lines = tool.progressHistory?.length
     ? tool.progressHistory
@@ -630,61 +637,44 @@ function appendToolProgressLines(parent: HTMLElement, tool: ToolCallInfo): void 
       : [];
   if (lines.length === 0) return;
 
-  const progress = document.createElement('div');
-  progress.className = 'process-timeline__progress';
+  const lineCount = lines.reduce((sum, s) => sum + s.split('\n').length, 0);
+  const charCount = lines.reduce((sum, s) => sum + s.length, 0);
 
-  const appendStage = (text: string, extraClass = '') => {
-    const item = document.createElement('div');
-    item.className = `process-timeline__stage${extraClass}`;
-    item.textContent = text;
-    progress.appendChild(item);
-  };
-
-  const renderAll = (expanded: boolean) => {
-    progress.textContent = '';
-    if (expanded && lines.length > PROGRESS_PREVIEW_LINES) {
-      const collapse = document.createElement('div');
-      collapse.className = 'process-timeline__stage process-timeline__stage--toggle';
-      collapse.textContent = `已展开全部 ${lines.length} 行，点击收起`;
-      collapse.addEventListener('click', () => {
-        expandedProgressTools.delete(tool.toolCallId);
-        renderPreview();
-      });
-      progress.appendChild(collapse);
+  const appendLines = (container: HTMLElement): void => {
+    for (const line of lines) {
+      const item = document.createElement('div');
+      item.className = 'process-timeline__stage';
+      item.textContent = line;
+      container.appendChild(item);
     }
-    for (const line of lines) appendStage(line);
   };
 
-  const renderPreview = () => {
-    progress.textContent = '';
-    // 从尾部取窗口：至少 1 条，最多 PROGRESS_PREVIEW_LINES 条且累计不超 PROGRESS_PREVIEW_CHARS
-    let start = lines.length;
-    let chars = 0;
-    while (start > 0) {
-      const shown = lines.length - start;
-      if (shown >= PROGRESS_PREVIEW_LINES) break;
-      const next = lines[start - 1]!;
-      if (shown > 0 && chars + next.length > PROGRESS_PREVIEW_CHARS) break;
-      chars += next.length;
-      start--;
-    }
-    const toggle = document.createElement('div');
-    toggle.className = 'process-timeline__stage process-timeline__stage--toggle';
-    toggle.textContent = `… 还有 ${start} 行，点击展开`;
-    toggle.addEventListener('click', () => {
-      expandedProgressTools.add(tool.toolCallId);
-      renderAll(true);
-    });
-    progress.appendChild(toggle);
-    for (const line of lines.slice(start)) appendStage(line);
-  };
-
-  if (lines.length > PROGRESS_PREVIEW_LINES && !expandedProgressTools.has(tool.toolCallId)) {
-    renderPreview();
-  } else {
-    renderAll(expandedProgressTools.has(tool.toolCallId));
+  if (ctx.isActive || (lineCount <= PROGRESS_FOLD_LINES && charCount <= PROGRESS_FOLD_CHARS)) {
+    const progress = document.createElement('div');
+    progress.className = 'process-timeline__progress';
+    appendLines(progress);
+    parent.appendChild(progress);
+    return;
   }
-  parent.appendChild(progress);
+
+  // 复用工具卡片 fold 委托（details.process-timeline__details + data-fold-key），
+  // 折叠键派生 :progress 后缀，与 Request/Response 主详情的折叠偏好互不影响。
+  const foldKey = `${ctx.foldKey}:progress`;
+  const details = createTrustedElement<HTMLDetailsElement>(
+    `<details class="process-timeline__details process-timeline__details--progress">
+      <summary class="process-timeline__row">
+        <span class="process-timeline__progress-label"></span>
+        <span class="process-timeline__chevron">›</span>
+      </summary>
+      <div class="process-timeline__progress"></div>
+    </details>`,
+  );
+  details.open = getToolFold(foldKey) ?? false;
+  details.setAttribute('data-fold-key', foldKey);
+  details.querySelector<HTMLElement>('.process-timeline__progress-label')!.textContent =
+    `实时输出 · ${lineCount} 行`;
+  appendLines(details.querySelector<HTMLElement>('.process-timeline__progress')!);
+  parent.appendChild(details);
 }
 
 function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
@@ -751,14 +741,14 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
       const contentWrap = document.createElement('div');
       contentWrap.className = 'process-timeline__tool-media';
       contentWrap.appendChild(details);
-      appendToolProgressLines(contentWrap, tool);
+      appendToolProgressLines(contentWrap, tool, { isActive, foldKey });
       contentWrap.appendChild(buildInlineImage(shotPath, '页面截图', shotPath, 'tool'));
       return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
     }
     const contentWrap = document.createElement('div');
     contentWrap.className = 'process-timeline__tool';
     contentWrap.appendChild(details);
-    appendToolProgressLines(contentWrap, tool);
+    appendToolProgressLines(contentWrap, tool, { isActive, foldKey });
     return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
   }
 
@@ -777,7 +767,7 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
   const contentWrap = document.createElement('div');
   contentWrap.className = 'process-timeline__tool';
   contentWrap.appendChild(content);
-  appendToolProgressLines(contentWrap, tool);
+  appendToolProgressLines(contentWrap, tool, { isActive, foldKey });
   return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
 }
 
@@ -790,10 +780,17 @@ interface WikiConfirmationResult {
   expires_at?: number;
 }
 
+interface WikiBackgroundResult {
+  background_task?: boolean;
+  background_status?: string;
+  message?: string;
+}
+
 function parseWikiConfirmation(tool: ToolCallInfo): WikiConfirmationResult | null {
   if (!tool.name.startsWith('wiki_') || !tool.result) return null;
   try {
     const value = JSON.parse(tool.result) as WikiConfirmationResult;
+    if (value.expires_at && value.expires_at * 1000 <= Date.now()) return null;
     return value.requires_confirmation && value.confirmation_id ? value : null;
   } catch {
     return null;
@@ -801,25 +798,101 @@ function parseWikiConfirmation(tool: ToolCallInfo): WikiConfirmationResult | nul
 }
 
 function renderWikiConfirmationCard(value: WikiConfirmationResult): HTMLElement {
+  const confirmationId = value.confirmation_id || '';
+  const dialogId = `wiki-permission-${confirmationId.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+  const wrap = document.createElement('div');
+  // Wiki 变更确认与其他受控操作共用 permission card 的浮层定位和盒模型。
+  wrap.className = 'followup-card-wrap followup-card-wrap--permission wiki-confirmation-card-wrap';
+  wrap.setAttribute('aria-hidden', 'true');
+  void revealPendingWikiConfirmation(confirmationId, wrap);
+
   const card = document.createElement('section');
-  card.className = 'wiki-confirmation-card';
-  const title = document.createElement('strong');
-  title.textContent = value.summary || '需要确认 Wiki 操作';
-  const impact = document.createElement('pre');
-  impact.textContent = JSON.stringify(value.impact || {}, null, 2);
+  card.className = 'followup-card followup-card--permission wiki-confirmation-card';
+  card.setAttribute('role', 'dialog');
+  card.setAttribute('aria-modal', 'false');
+  card.setAttribute('aria-labelledby', `${dialogId}-title`);
+  card.setAttribute('aria-describedby', `${dialogId}-description`);
+
+  const head = document.createElement('div');
+  head.className = 'followup-card__header';
+  const icon = document.createElement('span');
+  icon.className = 'followup-card__header-icon';
+  icon.appendChild(createTrustedElement<SVGElement>('<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>'));
+  const headerCopy = document.createElement('div');
+  headerCopy.className = 'followup-card__header-copy';
+  const title = document.createElement('div');
+  title.className = 'followup-card__title';
+  title.id = `${dialogId}-title`;
+  title.textContent = '允许执行 Crew 笔记操作？';
+  const hint = document.createElement('div');
+  hint.className = 'followup-card__subtitle';
+  hint.id = `${dialogId}-description`;
+  hint.textContent = 'Crew 请求执行以下操作';
+  headerCopy.append(title, hint);
+  head.append(icon, headerCopy);
+
+  const body = document.createElement('div');
+  body.className = 'permission-dialog__body';
+  const operation = document.createElement('div');
+  operation.className = 'permission-dialog__operation';
+  const context = document.createElement('span');
+  context.className = 'permission-dialog__context';
+  context.textContent = 'Crew 笔记（Wiki）';
+  const summary = document.createElement('strong');
+  summary.className = 'permission-dialog__summary';
+  summary.textContent = value.summary || '执行知识库变更操作';
+  operation.append(context, summary);
+  const impactText = value.impact && Object.keys(value.impact).length > 0
+    ? `影响\n${JSON.stringify(value.impact, null, 2)}`
+    : '';
+  if (impactText) {
+    const impact = document.createElement('code');
+    impact.className = 'permission-dialog__command';
+    impact.textContent = impactText;
+    operation.appendChild(impact);
+  }
+  body.appendChild(operation);
+
   const actions = document.createElement('div');
-  actions.className = 'wiki-confirmation-card__actions';
+  actions.className = 'permission-dialog__actions';
   const confirm = document.createElement('button');
   confirm.type = 'button';
-  confirm.dataset.wikiConfirm = value.confirmation_id || '';
+  confirm.className = 'permission-dialog__button permission-dialog__button--primary';
+  confirm.dataset.wikiConfirm = confirmationId;
   confirm.dataset.wikiAction = value.action || '';
   confirm.textContent = '确认执行';
   const cancel = document.createElement('button');
   cancel.type = 'button';
-  cancel.dataset.wikiCancel = value.confirmation_id || '';
+  cancel.className = 'permission-dialog__button permission-dialog__button--secondary';
+  cancel.dataset.wikiCancel = confirmationId;
   cancel.textContent = '取消';
-  actions.append(confirm, cancel);
-  card.append(title, impact, actions);
+  actions.append(cancel, confirm);
+  card.append(head, body, actions);
+  wrap.appendChild(card);
+  return wrap;
+}
+
+function parseWikiBackgroundResult(tool: ToolCallInfo): WikiBackgroundResult | null {
+  if (tool.name !== 'wiki_plan_ingest' || !tool.result) return null;
+  try {
+    const value = JSON.parse(tool.result) as WikiBackgroundResult & WikiConfirmationResult;
+    if (!value.background_task || value.requires_confirmation) return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function renderWikiBackgroundResultCard(value: WikiBackgroundResult): HTMLElement {
+  const card = document.createElement('section');
+  card.className = 'wiki-confirmation-card wiki-ingest-result-card';
+  const title = document.createElement('strong');
+  title.textContent = value.background_status === 'failed' ? 'Wiki 深度整理失败' : 'Wiki 深度整理完成';
+  const detail = document.createElement('p');
+  detail.textContent = value.message || (value.background_status === 'failed'
+    ? '整理没有完成，可以稍后重试。'
+    : '整理结果已经写入知识库。');
+  card.append(title, detail);
   return card;
 }
 
@@ -1217,6 +1290,8 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
       for (const t of m.toolCalls) {
         const confirmation = parseWikiConfirmation(t);
         if (confirmation) textParts.push(renderWikiConfirmationCard(confirmation));
+        const backgroundResult = parseWikiBackgroundResult(t);
+        if (backgroundResult) textParts.push(renderWikiBackgroundResultCard(backgroundResult));
         const interaction = renderToolInteractionCard(t);
         if (interaction) textParts.push(interaction);
       }

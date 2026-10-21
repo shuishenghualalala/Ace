@@ -49,6 +49,13 @@ struct AclRecord {
     access: AclAccess,
     #[serde(default)]
     synthetic: bool,
+    /// Best-effort grant on a path we do not own (system executables owned by
+    /// TrustedInstaller). The restricted token is WRITE_RESTRICTED, so
+    /// read/execute access already flows through the factory `Users: RX` ACE;
+    /// the grant is defense-in-depth only and is never fatal at apply,
+    /// revoke, or stale-cleanup time.
+    #[serde(default)]
+    optional: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -134,6 +141,10 @@ impl AclLease {
             drop(lease);
             return Err(error);
         }
+        // Re-save so the recovery manifest only lists ACEs that were actually
+        // applied; optional grants skipped above must never become stale
+        // revoke entries the next prepare would fail on.
+        save_records(state_dir, &lease.records)?;
         Ok(lease)
     }
 
@@ -154,6 +165,7 @@ impl AclLease {
             sid: account_sid.to_string(),
             access: AclAccess::Read,
             synthetic: false,
+            optional: true,
         });
         if let Some(command) = canonical_command_executable(request)? {
             self.records.push(AclRecord {
@@ -161,6 +173,7 @@ impl AclLease {
                 sid: account_sid.to_string(),
                 access: AclAccess::Read,
                 synthetic: false,
+                optional: true,
             });
         }
         for root in &request.readable_roots {
@@ -169,6 +182,7 @@ impl AclLease {
                 sid: account_sid.to_string(),
                 access: AclAccess::Read,
                 synthetic: false,
+                optional: false,
             });
         }
         let writable = request
@@ -182,12 +196,14 @@ impl AclLease {
                 sid: account_sid.to_string(),
                 access: AclAccess::Write,
                 synthetic: false,
+                optional: false,
             });
             self.records.push(AclRecord {
                 path: root.clone(),
                 sid: self.capability_sids[index].clone(),
                 access: AclAccess::Write,
                 synthetic: false,
+                optional: false,
             });
         }
         for (protected, writable_index) in readonly_targets(&writable, &request.readonly_roots)? {
@@ -207,12 +223,14 @@ impl AclLease {
                     sid: sid.to_string(),
                     access: AclAccess::Read,
                     synthetic,
+                    optional: false,
                 });
                 self.records.push(AclRecord {
                     path: protected.clone(),
                     sid: sid.to_string(),
                     access: AclAccess::DenyWrite,
                     synthetic,
+                    optional: false,
                 });
             }
         }
@@ -229,6 +247,7 @@ impl AclLease {
                 sid: account_sid.to_string(),
                 access: AclAccess::Deny,
                 synthetic: false,
+                optional: false,
             });
             for sid in &self.capability_sids {
                 self.records.push(AclRecord {
@@ -236,23 +255,41 @@ impl AclLease {
                     sid: sid.clone(),
                     access: AclAccess::Deny,
                     synthetic: false,
+                    optional: false,
                 });
             }
         }
         Ok(())
     }
 
-    fn apply_records(&self) -> Result<(), String> {
-        for record in &self.records {
-            let sid = LocalSid::from_string(&record.sid)?;
-            let (mode, mask) = match record.access {
-                AclAccess::Read => (SET_ACCESS, READ_MASK),
-                AclAccess::Write => (SET_ACCESS, WRITE_MASK),
-                AclAccess::DenyWrite => (DENY_ACCESS, DENY_WRITE_MASK),
-                AclAccess::Deny => (DENY_ACCESS, GENERIC_ALL_MASK),
-            };
-            apply_entry(&record.path, sid.as_ptr(), mode, mask)?;
+    fn apply_records(&mut self) -> Result<(), String> {
+        let records = std::mem::take(&mut self.records);
+        let mut applied = Vec::with_capacity(records.len());
+        for record in records {
+            let result = LocalSid::from_string(&record.sid).and_then(|sid| {
+                let (mode, mask) = match record.access {
+                    AclAccess::Read => (SET_ACCESS, READ_MASK),
+                    AclAccess::Write => (SET_ACCESS, WRITE_MASK),
+                    AclAccess::DenyWrite => (DENY_ACCESS, DENY_WRITE_MASK),
+                    AclAccess::Deny => (DENY_ACCESS, GENERIC_ALL_MASK),
+                };
+                apply_entry(&record.path, sid.as_ptr(), mode, mask)
+            });
+            match result {
+                Ok(()) => applied.push(record),
+                // Optional grants target paths we do not own (TrustedInstaller
+                // system binaries); when the host refuses the DACL write the
+                // factory `Users: RX` ACE still covers read/execute because the
+                // restricted token is WRITE_RESTRICTED. Skip the record so the
+                // recovery manifest and Drop never try to revoke it.
+                Err(_) if record.optional => {}
+                Err(error) => {
+                    self.records = applied;
+                    return Err(error);
+                }
+            }
         }
+        self.records = applied;
         Ok(())
     }
 }
@@ -265,7 +302,12 @@ impl Drop for AclLease {
             match LocalSid::from_string(&record.sid) {
                 Ok(sid) => {
                     if let Err(error) = revoke_entry(&record.path, sid.as_ptr()) {
-                        revoke_failures.push(format!("{}: {}", record.path.display(), error));
+                        // Optional grants are best-effort in both directions:
+                        // a skipped or partially applied grant on a path we do
+                        // not own must not flag ACE residue.
+                        if !record.optional {
+                            revoke_failures.push(format!("{}: {}", record.path.display(), error));
+                        }
                     }
                 }
                 Err(error) => {
@@ -385,6 +427,11 @@ fn cleanup_stale(state_dir: &Path) -> Result<(), String> {
             }
         };
         if let Err(error) = revoke_entry(&record.path, sid.as_ptr()) {
+            if record.optional {
+                // Best-effort grants on foreign-owned paths may never have
+                // been applied; a failed revoke must not wedge readiness.
+                continue;
+            }
             failures.push(format!("{}: {error}", record.path.display()));
             continue;
         }
@@ -465,6 +512,41 @@ fn canonical_optional(path: &Path) -> Result<Option<PathBuf>, String> {
     }
 }
 
+/// Canonicalize an absolute path that may not exist yet by resolving the
+/// nearest existing ancestor and re-appending the missing suffix. Matches
+/// the macOS/Linux `canonicalize_allow_missing`: on Windows `canonicalize`
+/// returns verbatim `\\?\` paths, so falling back to the raw path would
+/// never satisfy `starts_with` against canonicalized writable roots.
+fn canonical_allow_missing(path: &Path) -> Result<PathBuf, String> {
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    loop {
+        match ancestor.canonicalize() {
+            Ok(mut canonical) => {
+                for name in suffix.iter().rev() {
+                    canonical.push(name);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = ancestor.file_name().ok_or_else(|| {
+                    format!("cannot resolve ACL root ancestor: {}", path.display())
+                })?;
+                suffix.push(name.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    format!("cannot resolve ACL root ancestor: {}", path.display())
+                })?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "cannot resolve ACL root {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+}
+
 fn reject_reparse_point(path: &Path) -> Result<(), String> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
@@ -496,7 +578,7 @@ fn readonly_targets(
                     .components()
                     .any(|part| matches!(part, std::path::Component::ParentDir)) =>
             {
-                path.clone()
+                canonical_allow_missing(path)?
             }
             None => {
                 return Err(format!(
@@ -600,6 +682,26 @@ mod tests {
     }
 
     #[test]
+    fn missing_readonly_root_inside_writable_root_is_accepted() {
+        // Readiness-probe regression: the writable root arrives canonicalized
+        // (verbatim `\\?\` on Windows) while an explicit read-only root that
+        // does not exist yet must still resolve inside it.
+        let writable = tempfile::tempdir().unwrap();
+        let missing = writable.path().join("probe").join(".git");
+
+        let targets =
+            readonly_targets(&[writable.path().canonicalize().unwrap()], &[missing]).unwrap();
+
+        let resolved = writable
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("probe")
+            .join(".git");
+        assert!(targets.contains_key(&resolved));
+    }
+
+    #[test]
     fn stale_cleanup_failure_keeps_recovery_manifest() {
         let state = tempfile::tempdir().unwrap();
         let target = state.path().join("still-present");
@@ -611,6 +713,7 @@ mod tests {
                 sid: "not-a-windows-sid".to_string(),
                 access: AclAccess::Write,
                 synthetic: false,
+                optional: false,
             }],
         )
         .unwrap();
@@ -632,6 +735,7 @@ mod tests {
             sid: "not-a-windows-sid".to_string(),
             access: AclAccess::Write,
             synthetic: false,
+            optional: false,
         }];
         save_records(state.path(), &records).unwrap();
         let lease = AclLease {

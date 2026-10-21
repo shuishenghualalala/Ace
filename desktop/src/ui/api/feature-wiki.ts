@@ -148,6 +148,23 @@ export interface WikiAgentSessionSummary {
   workspace_id: 'wiki';
 }
 
+/** Wiki 语义检索（embedding）配置；API Key 只返回是否存在和脱敏值。 */
+export interface WikiSemanticConfig {
+  enabled: boolean;
+  provider: 'openai' | 'local' | string;
+  model: string;
+  base_url: string;
+  api_key_env: string;
+  has_key: boolean;
+  api_key_masked?: string;
+  editable?: boolean;
+}
+
+export interface WikiConfigSummary {
+  enabled?: boolean;
+  semantic?: WikiSemanticConfig;
+}
+
 export const wikiApi = {
   /** Wiki Agent 专用会话：默认复用当前 KB 最近会话，也可显式新建。 */
   wikiAgentSession: (kbId?: string, opts?: { forceNew?: boolean }) =>
@@ -159,6 +176,9 @@ export const wikiApi = {
     getJSON<{ ok: boolean; kb_id: string; sessions: WikiAgentSessionSummary[] }>(
       withKb('/api/wiki/agent-sessions', kbId),
     ),
+  /** 查询摄入确认是否仍挂起（恢复在途确认卡时探测，避免展示已失效的浮层）。 */
+  wikiConfirmationStatus: (confirmationId: string) =>
+    getJSON<{ pending: boolean }>(`/api/wiki/confirmations/${encodeURIComponent(confirmationId)}`),
   wikiCancelConfirmation: (confirmationId: string, sessionId: string) =>
     getJSON<{ ok: boolean; cancelled: boolean }>(
       `/api/wiki/confirmations/${encodeURIComponent(confirmationId)}/cancel`,

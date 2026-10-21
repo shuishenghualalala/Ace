@@ -1,0 +1,24 @@
+# Crew 安装包内嵌 Python 的依赖清单（三平台唯一数据源）。
+# pack_exe.ps1 / pack_mac.sh / Dockerfile.pack 统一从本文件安装。
+#
+# 打包态下 gateway 与技能脚本共用同一个内嵌解释器，因此依赖分两部分：
+#   1. gateway 核心依赖 + wiki/pdf/docx/xlsx 技能依赖
+#      → 由 pyproject.toml 维护，各脚本执行：
+#          pip install ".[wiki,pdf,docx,xlsx]" && pip uninstall -y crew
+#        （只要依赖本身；crew 源码由安装包按源码树携带，不复制进 site-packages）
+#   2. 本文件：pyproject 未覆盖的技能脚本补充依赖
+#
+# markitdown 固定 0.0.2 并由各脚本以 --no-deps 单独安装：
+# 0.1.x 顶层 import magika（拖入 onnxruntime，超 100MB），0.0.2 无此问题。
+# 下面 mammoth/olefile/puremagic/azure-* 是 markitdown 0.0.2 的顶层 import 硬依赖
+# （缺了直接 ModuleNotFoundError）；azure-* 包很小（纯 Python SDK 客户端），保留。
+# 注意 pydub / SpeechRecognition 是 markitdown 的惰性依赖（仅音频转写路径用），
+# 不带可省约 45MB，音频转写时会得到明确的 ImportError 提示。
+xlsxwriter
+beautifulsoup4
+markdown
+mammoth
+olefile
+puremagic
+azure-ai-documentintelligence
+azure-identity

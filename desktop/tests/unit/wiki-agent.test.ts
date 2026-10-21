@@ -69,6 +69,7 @@ vi.mock('../../src/ui/backend-client', async (importOriginal) => {
       wikiUpload: vi.fn(),
       wikiIngest: vi.fn(),
       sessionTodos: vi.fn(),
+      tasks: vi.fn(async () => []),
       getSessionModel: vi.fn(),
       setSessionModel: vi.fn(),
       deleteSession: vi.fn(async () => ({ ok: true })),
@@ -88,7 +89,10 @@ vi.mock('../../src/ui/ui-feedback', () => ({
 }));
 
 // ── chat-controller 的重依赖（与 chat-controller-send.test.ts 一致） ──
-vi.mock('../../src/ui/features/running-intro', () => ({ syncRunningIntroSlot: vi.fn() }));
+vi.mock('../../src/ui/features/running-intro', () => ({
+  syncRunningIntroSlot: vi.fn(),
+  registerRunningIntroTarget: vi.fn(() => () => {}),
+}));
 vi.mock('../../src/ui/features/usage-tracker', () => ({ recordTurn: vi.fn() }));
 vi.mock('../../src/ui/features/cron-page', () => ({ onAfterFinal: vi.fn() }));
 vi.mock('../../src/ui/features/kanban-board', () => ({
@@ -123,6 +127,7 @@ vi.mock('../../src/ui/features/session-model', async (importOriginal) => {
 const api = backendApi as unknown as {
   wikiAgentSession: ReturnType<typeof vi.fn>;
   wikiAgentSessions: ReturnType<typeof vi.fn>;
+  tasks: ReturnType<typeof vi.fn>;
   wikiPage: ReturnType<typeof vi.fn>;
   wikiSearch: ReturnType<typeof vi.fn>;
   wikiKBs: ReturnType<typeof vi.fn>;
@@ -492,6 +497,31 @@ describe('wiki-page 入口挂点', () => {
     expect(payload.query).toBe('总结当前知识库');
     expect(payload.wiki_kb_id).toBe('default');
     expect(uiStore.get().activeTab).toBe('wiki');
+  });
+
+  it('重新进入 Wiki 时从持久化任务恢复整理卡片', async () => {
+    api.tasks.mockResolvedValueOnce([{
+      id: 'wiki-task-restored',
+      kind: 'wiki_ingest',
+      session_id: WIKI_SID,
+      title: '深度整理《产品资料》',
+      status: 'running',
+      progress: {
+        source_title: '产品资料',
+        stage: 'analyzing_chunks',
+        label: '已分析第 2/5 个分块',
+      },
+      created_at: NOW,
+      updated_at: NOW,
+    }]);
+
+    await enterWiki();
+
+    expect(api.tasks).toHaveBeenCalledWith(WIKI_SID);
+    const restored = (messageStore.get().messages[WIKI_SID] ?? [])
+      .find((message) => message.id === 'wiki-ingest-wiki-task-restored');
+    expect(restored?.streaming).toBe(true);
+    expect(restored?.toolCalls?.[0]?.progressText).toBe('已分析第 2/5 个分块');
   });
 
   it('面板内消息复制按钮可用（不依赖 #chat-messages 的全局委托）', async () => {

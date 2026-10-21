@@ -14,6 +14,7 @@ from crew.core.runctx import (
     current_session_id,
     current_task_activity_fn,
 )
+from crew.core.types import tool_arguments_for_ui
 from crew.tools.registry import Registry
 from crew.wiki.compiler import WikiCompiler
 from crew.wiki.manager import WikiSessionManager
@@ -143,6 +144,37 @@ def test_wiki_tool_ui_labels_render_placeholders(wiki_mocks):
     assert registry.toolset_for("wiki_search") == WIKI_READ_TOOLSET
     assert registry.toolset_for("wiki_read") == WIKI_READ_TOOLSET
     assert registry.toolset_for("wiki_apply_ingest") == WIKI_MANAGE_TOOLSET
+
+
+def test_wiki_source_ui_labels_use_title_and_hide_internal_id(wiki_mocks):
+    registry = wiki_mocks["registry"]
+    store = wiki_mocks["store"]
+    store.get_source_titles.return_value = {"s1": "知识库概览"}
+
+    label = registry.render_ui_label(
+        "wiki_plan_ingest",
+        {},
+        raw_args={"source_id": "s1"},
+    )
+
+    assert label == "盘算《知识库概览》该写进哪些页面"
+    assert "s1" not in label
+    assert tool_arguments_for_ui("wiki_plan_ingest", {"source_id": "s1"}) == {}
+
+
+def test_wiki_source_ui_labels_fallback_without_title(wiki_mocks):
+    registry = wiki_mocks["registry"]
+    store = wiki_mocks["store"]
+    store.get_source_titles.return_value = {"s1": "s1"}
+
+    label = registry.render_ui_label(
+        "wiki_apply_ingest",
+        {},
+        raw_args={"source_id": "s1"},
+    )
+
+    assert label == "把《这份素材》的改动写进知识库"
+    assert "s1" not in label
     assert registry.toolset_for("wiki_delete_kb") == WIKI_MANAGE_TOOLSET
     assert registry.toolset_for("wiki_refresh_source") == WIKI_MANAGE_TOOLSET
     assert registry.toolset_for("wiki_digest") == WIKI_MANAGE_TOOLSET
@@ -583,6 +615,75 @@ async def test_wiki_list_sources_uses_active_kb_and_status_filter(wiki_mocks):
     assert result.count('"source_id"') == 2
 
 
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ({"view": "inbox"}, ["retry", "recommended", "pending"]),
+        ({"view": "inbox", "include_history": True}, ["retry", "recommended", "pending"]),
+        ({"view": "inbox", "status": "parsed", "limit": 2}, ["retry", "recommended"]),
+        ({"view": "inbox", "status": "failed"}, []),
+        ({"status": "failed"}, ["parse_failed"]),
+        ({}, ["parse_failed", "unparsed", "ignored", "ingested", "not_recommended", "retry", "recommended", "pending"]),
+        ({"include_history": True, "limit": 2}, ["historical", "parse_failed"]),
+    ],
+)
+async def test_list_sources_views_preserve_inbox_and_history_semantics(wiki_mocks, args, expected):
+    import json
+
+    from crew.wiki.schemas import RawSource
+
+    variants = [
+        ("pending", {}),
+        ("recommended", {"ingest_status": "recommended"}),
+        ("retry", {"ingest_status": "failed"}),
+        ("not_recommended", {"ingest_recommend": False}),
+        ("ingested", {"ingest_status": "ingested"}),
+        ("ignored", {"ingest_status": "ignored"}),
+        ("unparsed", {"parse_status": "pending"}),
+        ("parse_failed", {"parse_status": "failed"}),
+        ("historical", {"superseded_by": "pending"}),
+    ]
+    raws = []
+    for i, (source_id, overrides) in enumerate(variants):
+        fields = dict(parse_status="parsed", ingest_status="pending", ingest_recommend=True)
+        fields.update(overrides)
+        raws.append(RawSource(
+            id=source_id, title=source_id, source_type="paste", parsed_path="",
+            created_at=float(i), summary="摘要", tags=["标签"], doc_type="article",
+            ingest_reason="适合整理", **fields,
+        ))
+    wiki_mocks["store"].list_raws.return_value = raws
+    _set_context()
+    result = json.loads(await wiki_mocks["registry"].get("wiki_list_sources").run({
+        **args, "kb_id": "other_kb",
+    }))
+    assert [r["source_id"] for r in result["sources"]] == expected
+    assert result["count"] == len(expected)
+    assert result["kb_id"] == "other_kb"
+    wiki_mocks["store"].list_raws.assert_called_once_with(owner_account_id="owner", kb_id="other_kb")
+    for source in result["sources"]:
+        assert source["summary"] == "摘要"
+        assert source["tags"] == ["标签"]
+        assert source["doc_type"] == "article"
+        assert source["ingest_reason"] == "适合整理"
+        raw = next(r for r in raws if r.id == source["source_id"])
+        assert source["parse_status"] == raw.parse_status
+        assert source["ingest_status"] == raw.ingest_status
+        assert source["ingest_recommend"] == raw.ingest_recommend
+
+
+async def test_list_sources_rejects_unknown_view_and_removes_duplicate_tool(wiki_mocks):
+    from crew.core.errors import ToolNotFoundError
+
+    registry = wiki_mocks["registry"]
+    with pytest.raises(ToolNotFoundError):
+        registry.get("wiki_list_inbox")
+    assert "wiki_list_inbox" not in WIKI_READ_TOOLS
+    result = await registry.get("wiki_list_sources").run({"view": "unknown"})
+    assert "无效的 view" in result
+    wiki_mocks["store"].list_raws.assert_not_called()
+
+
 # ---- wiki_delete_source ----
 
 async def test_wiki_delete_source_uses_active_kb(wiki_mocks):
@@ -618,7 +719,8 @@ async def test_wiki_delete_source_requires_confirmation(wiki_mocks):
 
     store.delete_raw.assert_not_called()
     assert "requires_confirmation" in result
-    assert "s1" in result
+    assert "a.xlsx" in result
+    assert "s1" not in result
 
 
 async def test_wiki_delete_source_returns_error_when_not_found(wiki_mocks):
@@ -733,6 +835,38 @@ async def test_wiki_apply_ingest_passes_chunk_options(wiki_mocks):
     assert call_kwargs["kb_id"] == "kb_active"
     assert call_kwargs["chunk_size"] == 12000
     assert call_kwargs["use_chunking"] is True
+
+
+async def test_ingest_concurrent_confirmation_retry_writes_once(wiki_mocks):
+    import asyncio
+    import json
+
+    from crew.wiki.schemas import IngestResult, PlanResult, WikiPage
+
+    compiler = wiki_mocks["compiler"]
+    manager = wiki_mocks["manager"]
+    manager.consume_confirmation.side_effect = [{
+        "source_id": "s1", "plan_fingerprint": "fp",
+        "source_content_sha256": "sh", "planned_titles": ["Topic"],
+    }, None]
+    compiler.load_plan.return_value = PlanResult(
+        source_id="s1", plan_fingerprint="fp", source_content_sha256="sh",
+    )
+    compiler.apply_ingest = AsyncMock(return_value=IngestResult(
+        source_id="s1", pages=[WikiPage(id="p1", title="Topic", page_type="topic", file_path="wiki/Topic.md", content="x" * 60000)],
+    ))
+    _set_context()
+    tool = wiki_mocks["registry"].get("wiki_apply_ingest")
+    args = {"source_id": "s1", "confirmation_id": "wcf_once"}
+    first, second = await asyncio.gather(tool.run(args), tool.run(args))
+    assert first == second
+    assert len(first) < 1000
+    assert json.loads(first)["pages"][0]["id"] == "p1"
+    compiler.apply_ingest.assert_awaited_once()
+    manager.consume_confirmation.assert_called_once()
+    _set_context(owner="other")
+    assert "error" in json.loads(await tool.run(args))
+    compiler.apply_ingest.assert_awaited_once()
 
 
 async def test_wiki_apply_ingest_progress_touches_current_task(wiki_mocks):
@@ -876,7 +1010,34 @@ async def test_wiki_plan_ingest_returns_brief_content(wiki_mocks):
     assert result.count("C") < 1000  # 不应包含完整长内容
 
 
-async def test_wiki_plan_ingest_capacity_failure_does_not_issue_confirmation(wiki_mocks):
+async def test_wiki_plan_ingest_brief_result_omits_claim_payload(wiki_mocks):
+    import json
+
+    from crew.wiki.schemas import PlannedPage, PlanResult, WikiClaim, WikiEvidence
+
+    compiler = wiki_mocks["compiler"]
+    compiler.plan_ingest = AsyncMock(return_value=PlanResult(
+        source_id="s1",
+        planned_pages=[PlannedPage(
+            title="Topic",
+            page_type="topic",
+            action="create",
+            claims=[WikiClaim(
+                statement="重要结论",
+                evidence=[WikiEvidence(source_id="s1", excerpt="证据")],
+            )],
+        )],
+    ))
+    _set_context()
+    result = await wiki_mocks["registry"].get("wiki_plan_ingest").run({"source_id": "s1"})
+    assert json.loads(result)["planned_pages"][0]["claims"] == []
+
+
+@pytest.mark.parametrize("issue", [
+    "LLM 分析失败: 2/2 个分块全部失败；已解析内容仍保留，可稍后重试",
+    "LLM 分析部分失败: 1/2 个分块未提取到内容；已解析内容仍保留",
+])
+async def test_wiki_plan_ingest_capacity_failure_does_not_issue_confirmation(wiki_mocks, issue):
     from crew.wiki.schemas import PlanResult
 
     registry = wiki_mocks["registry"]
@@ -885,7 +1046,7 @@ async def test_wiki_plan_ingest_capacity_failure_does_not_issue_confirmation(wik
     compiler.plan_ingest = AsyncMock(
         return_value=PlanResult(
             source_id="s1",
-            issues=["LLM 分析失败: 2/2 个分块全部失败；已解析内容仍保留，可稍后重试"],
+            issues=[issue],
         )
     )
 
@@ -894,6 +1055,8 @@ async def test_wiki_plan_ingest_capacity_failure_does_not_issue_confirmation(wik
 
     assert '"analysis_status": "failed"' in result
     assert '"retryable": true' in result
+    assert '"automatic_retry": false' in result
+    assert '"next_action": "report_incomplete"' in result
     assert "已解析 Markdown 与 Source 页面仍保留" in result
     manager.issue_confirmation.assert_not_called()
 
@@ -934,8 +1097,10 @@ async def test_wiki_plan_ingest_returns_confirmation_when_auto_apply_disabled(wi
     from crew.wiki.schemas import PlanResult
 
     registry = wiki_mocks["registry"]
+    store = wiki_mocks["store"]
     compiler = wiki_mocks["compiler"]
     manager = wiki_mocks["manager"]
+    store.get_source_titles.return_value = {"s1": "资料标题"}
     manager.issue_confirmation.return_value = {
         "requires_confirmation": True,
         "confirmation_id": "wcf_manual",
@@ -952,6 +1117,57 @@ async def test_wiki_plan_ingest_returns_confirmation_when_auto_apply_disabled(wi
     assert '"confirmation_id": "wcf_manual"' in result
     compiler.apply_ingest.assert_not_awaited()
     manager.issue_confirmation.assert_called_once()
+    assert manager.issue_confirmation.call_args.kwargs["summary"] == "应用《资料标题》的 Wiki 变更计划"
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_wiki_plan_ingest_runs_in_calling_turn(wiki_mocks, cancel):
+    """整理等待当前调用完成；取消直接传到分析，不留下独立 worker。"""
+    import asyncio
+    import json
+    from crew.wiki.schemas import PlanResult
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    stopped = asyncio.Event()
+    caller = None
+
+    async def plan(*_args, progress, **_kwargs):
+        assert asyncio.current_task() is caller
+        started.set()
+        try:
+            await release.wait()
+            return PlanResult(source_id="s1", total_new=1, plan_fingerprint="fp")
+        finally:
+            stopped.set()
+
+    wiki_mocks["compiler"].plan_ingest = AsyncMock(side_effect=plan)
+    wiki_mocks["manager"].issue_confirmation.return_value = {
+        "requires_confirmation": True,
+        "confirmation_id": "wcf_foreground",
+    }
+    _set_context()
+    caller = asyncio.create_task(
+        wiki_mocks["registry"].get("wiki_plan_ingest").run({"source_id": "s1"})
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert not caller.done()
+        if cancel:
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            wiki_mocks["manager"].issue_confirmation.assert_not_called()
+        else:
+            release.set()
+            result = json.loads(await caller)
+            assert result["confirmation_id"] == "wcf_foreground"
+            assert "background" not in result
+            assert "task_id" not in result
+        assert stopped.is_set()
+    finally:
+        caller.cancel()
+        await asyncio.gather(caller, return_exceptions=True)
 
 
 async def test_capture_attachment_only_accepts_current_turn_allowlist(tmp_path, fs_wiki):
@@ -1363,6 +1579,9 @@ async def test_blocking_confirm_allow_once_executes(wiki_mocks, monkeypatch):
 
     assert len(calls) == 1
     assert calls[0]["record_history"] is False
+    question = calls[0]["questions"][0]["question"]
+    assert "删除《a.xlsx》及关联页面" in question
+    assert "s1" not in question
     store.delete_raw.assert_called_once()
 
 

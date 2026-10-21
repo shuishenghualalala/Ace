@@ -99,6 +99,14 @@ describe('resolveTurnGate', () => {
     expect(resolveTurnGate(gateChunk('file_changes'), 'req-old', gate)).toEqual({ action: 'drop' });
   });
 
+  it('accepts task frames without request id across foreground request boundaries', () => {
+    expect(resolveTurnGate(gateChunk('task'), undefined, {
+      turnSealed: true,
+      activeRequestId: 'req-new',
+      acceptingNewRequest: false,
+    })).toEqual({ action: 'accept' });
+  });
+
   it('accepts task frames for matching in-flight request even when turn is sealed', () => {
     expect(resolveTurnGate(gateChunk('task'), 'req-1', {
       turnSealed: true,

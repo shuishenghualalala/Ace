@@ -18,7 +18,7 @@ import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
 from collections.abc import Mapping
-from typing import Any, AsyncIterator, Callable, Coroutine
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Coroutine
 
 from crew.agent.capabilities import (
     CapabilityProfileRegistry,
@@ -100,7 +100,9 @@ from crew.state.config import (
     ModelProfile,
     _build_profile_from_payload,
     _load_env_map,
+    _lookup_api_key,
     is_placeholder_model_profile,
+    is_owner_overridable_model_profile,
     load_config,
     remove_env_key,
     resolve_profile_api_key,
@@ -131,10 +133,15 @@ from crew.tools.policy import (
 )
 from crew.tools.registry import Registry, register_builtin_tools
 
+if TYPE_CHECKING:
+    from crew.wiki.config import WikiSemanticConfig
+    from crew.wiki.embedding import EmbeddingProvider
+
 log = get_logger("app")
 
 _MODEL_API_KEY_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MODEL_API_KEY_ENV_EXAMPLES = "CREW_API_KEY、OPENAI_API_KEY、ANTHROPIC_API_KEY 或 *_API_KEY*"
+_DEFAULT_SEMANTIC_API_KEY_ENV = "CREW_WIKI_EMBEDDING_API_KEY"
 
 def _validate_model_api_key_env(api_key_env: str) -> str:
     """校验模型 API Key 的 env 名，避免模型配置变成任意环境变量写入口。"""
@@ -144,6 +151,21 @@ def _validate_model_api_key_env(api_key_env: str) -> str:
     if "API_KEY" not in name.upper():
         raise ValueError(f"api_key_env 只能使用模型密钥变量名，例如 {_MODEL_API_KEY_ENV_EXAMPLES}")
     return name
+
+
+def _default_model_api_key_env(model_id: str) -> str:
+    """为未指定 ``api_key_env`` 的模型生成稳定且隔离的密钥变量名。
+
+    模型创建接口允许省略 ``api_key_env``，但不能因此把新模型的密钥写进
+    ``CREW_API_KEY``：那是历史兼容变量，多个 profile 共用时一个测试 key 就会
+    覆盖当前对话模型的真实凭据。使用可读 slug 加哈希后缀既方便排查，也避免
+    ``a-b`` 与 ``a_b`` 这类模型 id 发生变量名冲突。
+    """
+    raw = str(model_id or "").strip()
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", raw.upper()).strip("_") or "MODEL"
+    slug = slug[:32].rstrip("_") or "MODEL"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10].upper()
+    return f"CREW_MODEL_{slug}_{digest}_API_KEY"
 
 
 def _payload_bool(value: Any) -> bool:
@@ -714,6 +736,12 @@ class CrewApp:
         self._stale_owner_team_providers: dict[int, LLMProvider] = {}
         # 显式功能级模型（当前为 wiki.model）创建的独立 Provider。
         self._auxiliary_providers: list[LLMProvider] = []
+        # 语义检索（embedding）per-owner Provider 缓存；值可为 None（已解析且禁用）。
+        self._owner_embedding_providers: dict[str, "EmbeddingProvider | None"] = {}
+        # owner 切换 embedding 后，可能仍有后台任务持有旧客户端；保留到 shutdown 关闭。
+        self._stale_owner_embedding_providers: dict[int, "EmbeddingProvider"] = {}
+        # 全局默认 embedding provider（config.yaml wiki.semantic），owner 回退用。
+        self._embedding_provider: "EmbeddingProvider | None" = None
         self._shutdown_lock = asyncio.Lock()
         self._shutdown_complete = False
         # Installed by build_app after all core stores are ready.  Keeping these
@@ -2578,11 +2606,34 @@ class CrewApp:
             except Exception:  # noqa: BLE001 - continue closing remaining owner resources
                 log.exception("关闭辅助 Provider 失败: %s", type(provider).__name__)
 
+    def _close_owner_embedding_providers(self) -> None:
+        """关闭所有 embedding provider（全局 + per-owner + 待退役），按 id 去重。"""
+        providers = list({
+            id(provider): provider
+            for provider in [
+                self._embedding_provider,
+                *[p for p in self._owner_embedding_providers.values() if p is not None],
+                *self._stale_owner_embedding_providers.values(),
+            ]
+            if provider is not None
+        }.values())
+        self._owner_embedding_providers.clear()
+        self._stale_owner_embedding_providers.clear()
+        for provider in providers:
+            close = getattr(provider, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - continue closing remaining providers
+                log.exception("关闭 embedding provider 失败: %s", type(provider).__name__)
+
     async def _shutdown_provider_resources(self) -> None:
         """Close Agent and Provider resources in ownership order."""
         await self.agents.aclose()
         await self._drain_provider_retirements()
         await self._close_owner_team_providers()
+        self._close_owner_embedding_providers()
         await self._close_current_provider()
 
     @staticmethod
@@ -2993,6 +3044,80 @@ class CrewApp:
         if dk is not None:
             dk.clear_provider_state()
 
+    def owner_embedding_provider(self, owner_account_id: str = "") -> "EmbeddingProvider | None":
+        """返回 owner 生效的语义检索 provider，按 owner 缓存（含 None=禁用）。
+
+        owner 未配置专属后端/key 时回退全局 provider；多租户下各账号可自带 key。
+        """
+        from crew.wiki.embedding import build_embedding_provider
+
+        owner = str(owner_account_id or "").strip()
+        if owner in self._owner_embedding_providers:
+            return self._owner_embedding_providers[owner]
+        if not owner:
+            provider = self._embedding_provider
+        else:
+            semantic = self.config.owner_semantic_config(owner)
+            if not semantic.enabled:
+                provider = None
+            elif semantic.provider == "local":
+                provider = build_embedding_provider(semantic)
+            else:
+                env_map = self.config.owner_env_map(owner)
+                fallback_global = self.config._owner_builtin_allows_global_key_fallback(owner)
+                key = _lookup_api_key(semantic.api_key_env, env_map, fallback_global=fallback_global)
+                if key:
+                    provider = build_embedding_provider(
+                        semantic,
+                        api_key=key,
+                        base_url=semantic.base_url or self.config.base_url,
+                    )
+                else:
+                    provider = self._embedding_provider
+        self._owner_embedding_providers[owner] = provider
+        return provider
+
+    def _invalidate_owner_embedding_provider(self, owner_account_id: str = "") -> None:
+        """丢弃 owner 的 embedding 缓存，并让 store 重建该 owner 的向量索引。"""
+        owner = str(owner_account_id or "").strip()
+        if owner:
+            provider = self._owner_embedding_providers.pop(owner, None)
+            if provider is not None:
+                self._stale_owner_embedding_providers[id(provider)] = provider
+            store = getattr(self, "_wiki_store", None)
+            invalidate = getattr(store, "invalidate_owner_embedding", None)
+            if callable(invalidate):
+                invalidate(owner)
+            return
+        providers = list(self._owner_embedding_providers.values())
+        self._owner_embedding_providers.clear()
+        for provider in providers:
+            if provider is not None:
+                self._stale_owner_embedding_providers[id(provider)] = provider
+        store = getattr(self, "_wiki_store", None)
+        invalidate_all = getattr(store, "invalidate_embedding", None)
+        if callable(invalidate_all):
+            invalidate_all()
+
+    def update_semantic_config(self, owner_account_id: str, payload: dict) -> "WikiSemanticConfig":
+        """更新 owner 的语义检索配置：写 owner .env（key）→ 持久化 overlay → 失效。"""
+        owner = str(owner_account_id or "").strip()
+        if not owner:
+            raise ValueError("owner_account_id 不能为空")
+        allowed = {"enabled", "provider", "model", "base_url", "api_key_env"}
+        semantic_raw = {k: payload[k] for k in allowed if k in payload}
+        api_key = str(payload.get("api_key") or "").strip()
+        current = self.config.owner_semantic_config(owner)
+        api_key_env = str(semantic_raw.get("api_key_env") or current.api_key_env or "").strip()
+        if api_key:
+            if not api_key_env:
+                api_key_env = _DEFAULT_SEMANTIC_API_KEY_ENV
+                semantic_raw["api_key_env"] = api_key_env
+            self._apply_api_key_to_env(api_key_env, api_key, owner_account_id=owner)
+        self.config.persist_owner_semantic_config(owner, semantic_raw)
+        self._invalidate_owner_embedding_provider(owner)
+        return self.config.owner_semantic_config(owner)
+
     @asynccontextmanager
     async def owner_provider(
         self,
@@ -3166,7 +3291,9 @@ class CrewApp:
         explicit_env = bool(str(payload.get("api_key_env") or "").strip())
         overwrite_shared_key = _payload_bool(payload.get("overwrite_shared_key"))
         payload = {k: v for k, v in payload.items() if k != "overwrite_shared_key"}
-        api_key_env = _validate_model_api_key_env(payload.get("api_key_env") or "CREW_API_KEY")
+        api_key_env = _validate_model_api_key_env(
+            payload.get("api_key_env") or _default_model_api_key_env(model_id)
+        )
         payload = {**payload, "api_key_env": api_key_env, "builtin": False}
         api_key = str(payload.get("api_key") or "")
         # key 默认写入凭证库（按 profile id，见 crew.state.credentials），不碰共享
@@ -3229,7 +3356,7 @@ class CrewApp:
         profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
         if model_id not in profiles:
             raise KeyError(model_id)
-        if owner and profiles[model_id].builtin:
+        if owner and profiles[model_id].builtin and not is_owner_overridable_model_profile(profiles[model_id]):
             owner = ""
             profiles = cfg.model_profiles
         loaded_val = payload.get("loaded")
@@ -3288,7 +3415,9 @@ class CrewApp:
                 "context_window": payload.get("context_window", current.context_window),
                 "timeout": payload.get("timeout", current.timeout),
                 "loaded": payload.get("loaded", current.loaded),
-                "builtin": current.builtin,
+                # owner 更新 builtin default 时采用 copy-on-write，写进 owner
+                # overlay 后它就是 owner 私有 profile，不再是共享 builtin。
+                "builtin": False,
                 "capabilities": payload.get("capabilities", list(current.capabilities)),
             }
             profile = _build_profile_from_payload(

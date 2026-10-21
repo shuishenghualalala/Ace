@@ -273,7 +273,6 @@ def test_process_tool_handler_is_owner_scoped():
         current_owner_account_id.reset(token)
 
 
-
 def test_wait_wakes_promptly_on_process_exit():
     """F7：wait 由结算事件条件唤醒，进程一退出立即返回（无 0.5s 轮询粒度丢失）。"""
     reg = ProcessRegistry()
@@ -390,6 +389,21 @@ def test_stdin_write_size_limit():
         assert "超限" in r["error"]
     finally:
         reg.kill_process(s.id, owner_account_id="local")
+
+
+def test_current_shell_kind_matches_host_platform(monkeypatch):
+    """两种平台取值：nt → powershell 家族，其余 → bash。"""
+    import crew.tools.process_registry as pr
+
+    monkeypatch.setattr(pr, "_IS_WINDOWS", True)
+    assert pr.current_shell_kind() == "powershell"
+    monkeypatch.setattr(pr, "_IS_WINDOWS", False)
+    assert pr.current_shell_kind() == "bash"
+    # 与宿主真实平台一致（spawn_local 同源判断）
+    monkeypatch.undo()
+    expected = "powershell" if os.name == "nt" else "bash"
+    assert pr.current_shell_kind() == expected
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

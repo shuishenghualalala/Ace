@@ -155,7 +155,7 @@ def test_wiki_feature_activates_service_all_tools_and_context_then_revokes(tmp_p
         assert record.state is FeatureState.ACTIVE
         assert runtime.services.get(KNOWLEDGE_SERVICE_KEY) is not None
         assert set(registry.names()) >= set(WIKI_READ_TOOLS + WIKI_MANAGE_TOOLS)
-        assert len(set(WIKI_READ_TOOLS + WIKI_MANAGE_TOOLS)) == 24
+        assert len(set(WIKI_READ_TOOLS + WIKI_MANAGE_TOOLS)) == 23
         assert [b.contributor.contributor_id for b in runtime.context_contributors.bindings()] == [
             "wiki.agent.context"
         ]
@@ -267,7 +267,7 @@ def test_wiki_restart_replaces_generation_store_and_keeps_single_tool_context_se
         assert old_store.close_calls == 1
         assert len(runtime.context_contributors.bindings()) == 1
         assert set(registry.names()) >= set(WIKI_READ_TOOLS + WIKI_MANAGE_TOOLS)
-        assert len(registry.names()) == 24
+        assert len(registry.names()) == 23
         await runtime.deactivate("product.wiki")
         assert stores[-1].close_calls == 1
 
@@ -339,7 +339,7 @@ def test_wiki_restart_failure_restores_old_definition_and_closes_failed_candidat
         service = runtime.services.get(KNOWLEDGE_SERVICE_KEY)
         assert service is not None and hasattr(service, "components")
         assert len(runtime.context_contributors.bindings()) == 1
-        assert len(registry.names()) == 24
+        assert len(registry.names()) == 23
         assert stores[1].close_calls == 1
         await runtime.deactivate("product.wiki")
         assert stores[2].close_calls == 1

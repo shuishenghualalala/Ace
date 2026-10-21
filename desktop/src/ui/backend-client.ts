@@ -149,6 +149,8 @@ export type {
   WikiIngestProgress,
   WikiUploadResult,
   WikiAgentSessionSummary,
+  WikiSemanticConfig,
+  WikiConfigSummary,
 } from './api/feature-wiki';
 
 // ── Work / Office / Notification 类型 ──

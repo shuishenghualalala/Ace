@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import subprocess
 import tomllib
 from pathlib import Path
 
-import crew.agent.skills as skills
+from crew.agent import skills
+from crew.agent.skills import core as skills_core
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +25,7 @@ def test_wheel_configuration_does_not_claim_optional_catalog() -> None:
 
 
 def test_frozen_catalog_resolver_requires_meipass_content(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(skills, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(skills_core, "_REPO_ROOT", tmp_path)
 
     assert skills.get_optional_skills_dir() == tmp_path / "optional-skills"
     assert not skills.get_optional_skills_dir().exists()
@@ -45,12 +47,30 @@ def test_pack_scripts_exclude_web_frontend() -> None:
     assert "web\\dist" not in pack_exe
     assert "Push-Location web" not in pack_exe
 
+    # The current packages copy the whole crew tree, which contains skills,
+    # scenarios, MCP servers, and presets, rather than listing each child.
+    for directory in ("skills", "scenarios", "mcp_servers", "agent/subagent/presets"):
+        assert (ROOT / "crew" / directory).is_dir()
+    assert 'copy_tree "$ROOT_DIR/crew" "$STAGE_GW/crew"' in pack_mac
+    assert 'COPY crew ./crew' in dockerfile
+    assert 'COPY --from=gateway-builder /app/crew ./opt/crew-gateway/crew' in dockerfile
+    assert 'Invoke-RoboCopy (Join-Path $ProjectRoot "crew")' in pack_exe
     for source in (pack_mac, dockerfile, pack_exe):
-        assert "crew/skills" in source or "crew\\skills" in source
-        assert "crew/scenarios" in source or "crew\\scenarios" in source
-        assert "crew/mcp_servers" in source or "crew\\mcp_servers" in source
-        assert "presets" in source
         assert "plugins" in source
+
+
+def test_mac_pack_script_logs_app_path_with_nounset() -> None:
+    script = (ROOT / "deb-package" / "pack_mac.sh").read_text()
+    log_line = next(line for line in script.splitlines() if "Electron 客户端:" in line)
+    result = subprocess.run(
+        ["bash", "-u", "-c", log_line],
+        env={"APP_PATH": "/tmp/crew-desktop.app"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "/tmp/crew-desktop.app" in result.stdout
 
 
 def test_pack_mac_supports_arm64_and_x64() -> None:

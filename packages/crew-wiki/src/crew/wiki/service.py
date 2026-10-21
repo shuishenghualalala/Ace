@@ -220,6 +220,8 @@ class KnowledgeService(Protocol):
 
     def cancel_confirmation(self, session_id: str, confirmation_id: str, owner_account_id: str) -> bool: ...
 
+    def is_confirmation_pending(self, confirmation_id: str, owner_account_id: str) -> bool: ...
+
     def session_kb_id(self, session_id: str, owner_account_id: str) -> str: ...
 
 
@@ -575,6 +577,9 @@ class LocalWikiProvider:
 
     def cancel_confirmation(self, session_id: str, confirmation_id: str, owner_account_id: str) -> bool:
         return self.manager.cancel_confirmation(session_id, confirmation_id, owner_account_id=owner_account_id)
+
+    def is_confirmation_pending(self, confirmation_id: str, owner_account_id: str) -> bool:
+        return self.manager.is_confirmation_pending(confirmation_id, owner_account_id=owner_account_id)
 
     def session_kb_id(self, session_id: str, owner_account_id: str) -> str:
         return str(self.manager.get_kb_id(session_id, owner_account_id=owner_account_id) or "default")

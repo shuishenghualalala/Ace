@@ -138,7 +138,25 @@ pwsh ./scripts/install.ps1 -All
 
 不加参数时只安装后端与本地配置模板；`--dev` 追加开发依赖，`--with-web` / `--with-desktop` 按需安装对应前端。也可直接 `curl -fsSL <脚本 raw 地址> | bash`，脚本会先克隆仓库再执行。
 
+#### 开发模式一键启动桌面端
+
+安装完成后，可以在仓库根目录用一条命令启动桌面端开发环境：自动激活虚拟环境、确保本地配置文件存在、按需安装桌面端依赖并执行 `npm run dev`。
+
+```bash
+# macOS / Linux
+bash scripts/dev.sh
+```
+
+```powershell
+# Windows PowerShell
+pwsh ./scripts/dev.ps1
+```
+
+`npm run dev` 会传入 `--dev`、使用隔离的开发 owner 与数据目录，并自动拉起托管 Gateway，无需单独启动后端。
+
 #### 手动步骤（macOS / Linux）
+
+If you prefer to run each step by hand:
 
 ```bash
 git clone https://github.com/shuishenghualalala/Ace.git

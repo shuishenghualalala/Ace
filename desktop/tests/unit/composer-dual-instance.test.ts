@@ -9,8 +9,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Attachment } from '../../src/ui/backend-client';
 import { createComposerView } from '../../src/ui/features/composer-view';
 import type { PanelAttachments } from '../../src/ui/features/attachments';
-import { __resetAllStoresForTest, authStore, uiStore } from '../../src/ui/stores/stores';
+import { __resetAllStoresForTest, authStore, sessionStore, uiStore } from '../../src/ui/stores/stores';
 import { enqueuePending, getPendingQueue } from '../../src/ui/state';
+import { syncRunningIntroSlot } from '../../src/ui/features/running-intro';
 
 /** 内存态 PanelAttachments stub：行为对齐 wiki-agent 的 per-KB adapter。 */
 function stubAttachments(initial: Attachment[] = []): PanelAttachments {
@@ -142,5 +143,41 @@ describe('双 Composer 实例隔离', () => {
 
     viewA.dispose();
     viewB.dispose();
+  });
+
+  it('running-intro 槽位按各自会话的 busy 状态独立显示', () => {
+    const hostA = document.getElementById('host-a')!;
+    const hostB = document.getElementById('host-b')!;
+    const viewA = createPanelComposer(hostA, 'sid-a', stubAttachments());
+    const viewB = createPanelComposer(hostB, 'sid-b', stubAttachments());
+    const slotA = hostA.querySelector<HTMLElement>('.chat-running-intro')!;
+    const slotB = hostB.querySelector<HTMLElement>('.chat-running-intro')!;
+
+    // 仅 B（Wiki 侧）会话执行中：B 显示轮播文案，A 保持隐藏
+    sessionStore.set({ busySessions: { 'sid-b': true } });
+    syncRunningIntroSlot();
+    expect(slotB.hidden).toBe(false);
+    expect(slotB.querySelector('.running-intro__status')).not.toBeNull();
+    expect(slotA.hidden).toBe(true);
+    expect(slotA.firstElementChild).toBeNull();
+
+    // busy 转移到 A：A 显示、B 收起
+    sessionStore.set({ busySessions: { 'sid-a': true } });
+    syncRunningIntroSlot();
+    expect(slotA.hidden).toBe(false);
+    expect(slotA.querySelector('.running-intro__status')).not.toBeNull();
+    expect(slotB.hidden).toBe(true);
+
+    // dispose 反注册后，B 的槽位不再被 sync 触及
+    viewB.dispose();
+    sessionStore.set({ busySessions: { 'sid-b': true } });
+    syncRunningIntroSlot();
+    expect(slotA.hidden).toBe(true);
+    expect(slotB.isConnected).toBe(false);
+
+    // 清掉 busy 停掉轮播定时器，避免跨测试泄漏
+    sessionStore.set({ busySessions: {} });
+    syncRunningIntroSlot();
+    viewA.dispose();
   });
 });

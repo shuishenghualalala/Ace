@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from crew.gateway.auth import AuthenticationError, account_from_request, require_admin
 from crew.gateway.helpers import config_body
+from crew.state.config import is_owner_overridable_model_profile
 
 
 def create_config_router(crew, dispatcher=None) -> APIRouter:
@@ -58,6 +59,15 @@ def create_config_router(crew, dispatcher=None) -> APIRouter:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
         return JSONResponse(_visible_config_body(request))
 
+    @router.put("/api/config/wiki-semantic")
+    async def update_wiki_semantic(request: Request, payload: dict) -> JSONResponse:
+        owner = account_from_request(request).owner_account_id
+        try:
+            crew.update_semantic_config(owner, payload)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+        return JSONResponse({"ok": True, **_visible_config_body(request)})
+
     # ---- 模型 profile CRUD：运行时增删改 + 持久化到 config.yaml / .env ----
     # 不直接改 yaml，统一走 CrewApp.add_model/update_model/remove_model（与 use_model
     # 共享副作用：重建 Provider + 清缓存）。API Key 明文仅接受在 body，由后端写 .env。
@@ -65,7 +75,13 @@ def create_config_router(crew, dispatcher=None) -> APIRouter:
         """统一 CRUD 响应：models 列表 + 当前激活模型（+ 可选 profile）。"""
         body: dict[str, Any] = {"ok": True, **_visible_config_body(request)}
         if model_profile is not None:
-            body["profile"] = model_profile.public_dict()
+            profile = model_profile.public_dict()
+            profile["editable"] = (
+                not model_profile.builtin
+                or body["is_gateway_admin"]
+                or is_owner_overridable_model_profile(model_profile)
+            )
+            body["profile"] = profile
         return JSONResponse(body, status_code=status)
 
     @router.post("/api/config/models")
@@ -87,7 +103,7 @@ def create_config_router(crew, dispatcher=None) -> APIRouter:
             profile = crew.owner_model_profiles(account_from_request(request).owner_account_id).get(model_id)
             if profile is None:
                 raise KeyError
-            if profile.builtin:
+            if profile.builtin and not is_owner_overridable_model_profile(profile):
                 denied = _admin_or_403(request)
                 if denied is not None:
                     return denied

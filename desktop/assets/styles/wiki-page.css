@@ -684,6 +684,14 @@
   flex-direction: column;
 }
 
+/* conversation-panel 自建的 Composer host 是消息区的同级 flex 子项；允许它在
+   附件预览变长时收缩，把超出的内容交给附件列表自己的滚动区域处理。 */
+.wiki-agent-pane__conversation > .conversation-panel__composer-host {
+  flex: 0 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
 /* 窄栏内的 Composer：收敛主对话的大 padding，卡片边距对齐旧内嵌 Composer */
 .wiki-agent-pane__conversation .mw-composer {
   gap: var(--mw-space-1);
@@ -2613,36 +2621,14 @@
   line-height: 1.55;
 }
 
-/* 对话工具结果中的一次性确认卡。 */
-
-.wiki-confirmation-card {
-  margin: var(--mw-space-2) 0;
-  padding: var(--mw-space-3);
-  border: 1px solid color-mix(in srgb, var(--mw-action-primary) 40%, var(--mw-border-subtle));
-  border-radius: var(--mw-radius-4);
-  background: var(--mw-bg-selected);
+/* Wiki 确认复用权限审批卡；这里只保留它的关闭态，盒模型与定位由 chat.css 统一维护。 */
+.wiki-confirmation-card-wrap[aria-hidden='true'] {
+  display: none;
 }
 
-.wiki-confirmation-card pre {
-  overflow-x: auto;
-  margin: var(--mw-space-2) 0;
+.wiki-ingest-result-card p {
+  margin: 8px 0 0;
   color: var(--mw-text-secondary);
-  font-size: var(--mw-type-caption-size);
-  white-space: pre-wrap;
-}
-
-.wiki-confirmation-card__actions {
-  display: flex;
-  gap: var(--mw-space-2);
-}
-
-.wiki-confirmation-card__actions button {
-  padding: var(--mw-space-1) var(--mw-space-2);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-3);
-  background: var(--mw-bg-surface);
-  color: var(--mw-text-primary);
-  cursor: pointer;
 }
 
 /* ── 分栏拖拽把手（对齐 web ResizablePanels sash） ── */

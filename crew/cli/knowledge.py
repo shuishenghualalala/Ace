@@ -367,6 +367,7 @@ def _wiki_pages_delete(args: Any, ctx: CliContext) -> CliResult:
     ok = service.delete_page(args.page_id, ctx.owner, kb_id)
     if not ok:
         raise CliError("页面不存在", exit_code=404)
+    _finish_page_write(ctx.app, ctx.owner, kb_id, f"删除页面 {args.page_id}")
     return CliResult(data={"ok": True}, text="页面已删除")
 
 
@@ -415,6 +416,12 @@ def _wiki_sources_delete(args: Any, ctx: CliContext) -> CliResult:
     ok = service.delete_source(args.source_id, owner_account_id=ctx.owner, kb_id=kb_id)
     if not ok:
         raise CliError("source 不存在", exit_code=404)
+    _finish_page_write(
+        ctx.app,
+        ctx.owner,
+        kb_id,
+        f"删除 raw source {args.source_id} 及其关联页面",
+    )
     return CliResult(
         data={"ok": True, "deleted_source_id": args.source_id, "related_pages": related_pages},
         text="数据源已删除",

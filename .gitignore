@@ -8,6 +8,7 @@ CLAUDE.md
 CONTEXT.md
 .codebase-memory/
 .codex-quarantine/
+.dsh/
 
 # Runtime data and user-generated content
 .crew/
@@ -118,7 +119,6 @@ Thumbs.db
 /crew-tui/
 
 # doc
-.docs/
 .doc/
 
 # Mimosa 安全扫描器本地运行数据

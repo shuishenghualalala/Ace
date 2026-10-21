@@ -38,6 +38,12 @@ from .parser import guess_mime_type, parse_document_from_bytes, parse_document_t
 from .query import WikiQuerier
 from .schemas import HomeIntro
 from .search import SQLiteFTS5SearchIndex, WikiSearchIndex
+from .embedding import (
+    EmbeddingProvider,
+    LocalEmbeddingProvider,
+    OpenAIEmbeddingProvider,
+    build_embedding_provider,
+)
 from .store import FileSystemWikiStore, WikiStore
 from .summary import WikiSummarizer
 from .service import (
@@ -57,11 +63,18 @@ from .feature import (
     WikiFeatureHost,
     build_wiki_feature,
 )
+from .vector import SQLiteVectorIndex, WikiVectorIndex
 __all__ = [
     "WikiStore",
     "FileSystemWikiStore",
     "WikiSearchIndex",
     "SQLiteFTS5SearchIndex",
+    "WikiVectorIndex",
+    "SQLiteVectorIndex",
+    "EmbeddingProvider",
+    "OpenAIEmbeddingProvider",
+    "LocalEmbeddingProvider",
+    "build_embedding_provider",
     "WikiCompiler",
     "WikiQuerier",
     "WikiSummarizer",

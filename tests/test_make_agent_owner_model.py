@@ -231,6 +231,36 @@ def test_first_ready_owner_model_replaces_and_persists_placeholder_default(
     assert cfg.owner_default_model_id(owner) == "deepseek"
 
 
+def test_owner_can_override_builtin_default_profile_without_mutating_global_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """默认占位 profile 支持 owner copy-on-write 配置。"""
+    crew_home = tmp_path / ".Crew"
+    monkeypatch.setenv("CREW_HOME", str(crew_home))
+    cfg = load_config(config_path=str(_write_placeholder_config(tmp_path, crew_home)))
+    app = build_app(config=cfg, enable_team=False)
+    owner = "remote:owner"
+
+    updated = app.update_model(
+        "default",
+        {
+            "base_url": "https://owner.example.com/v1",
+            "model": "owner-model",
+            "api_key_env": "OWNER_DEFAULT_API_KEY",
+            "api_key": "sk-owner-default",
+        },
+        owner_account_id=owner,
+    )
+
+    assert updated.builtin is False
+    assert updated.model == "owner-model"
+    assert cfg.model_profiles["default"].model == "your-model-name"
+    owner_profile = cfg.owner_model_profiles(owner)["default"]
+    assert owner_profile.builtin is False
+    assert owner_profile.api_key == "sk-owner-default"
+
+
 @pytest.mark.asyncio
 async def test_make_agent_without_api_key_borrows_fake_provider(tmp_path, monkeypatch):
     """无 Key 的 owner profile 必须继续使用 App 的 FakeProvider，不能构造真实客户端。"""

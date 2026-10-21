@@ -36,7 +36,7 @@ export interface UninstallDeps {
   getMainWindow(): BrowserWindow | null;
   /** 停止 Electron 管理的 gateway 子进程并等待退出 */
   stopManagedGateway(timeoutMs?: number): Promise<void>;
-  /** 兜底：kill 所有残留 crew-gateway.exe 僵尸进程 */
+  /** 兜底：kill 所有残留的 gateway 僵尸进程 */
   killZombieGatewayProcesses(): void;
   /** 标记正在退出（防止 close 事件拦截） */
   setQuittingFlag(): void;
@@ -77,8 +77,9 @@ export function getCrewHome(): string {
 }
 
 /**
- * 检查 crew-gateway.exe 进程是否仍在运行。
- * 使用无 shell 的 tasklist argv 调用，避免阻塞主进程或引入命令注入表面。
+ * 检查 gateway 进程是否仍在运行。
+ * 打包态 gateway 是「内嵌 python.exe -m crew.gateway.server」，按命令行特征匹配。
+ * 使用无 shell 的 argv 调用，避免阻塞主进程或引入命令注入表面。
  */
 function isGatewayProcessAlive(): Promise<boolean> {
   if (process.platform !== 'win32') return Promise.resolve(false);
@@ -92,8 +93,13 @@ function isGatewayProcessAlive(): Promise<boolean> {
       resolve(alive);
     };
     const child = spawn(
-      'tasklist',
-      ['/FI', 'IMAGENAME eq crew-gateway.exe', '/FO', 'CSV', '/NH'],
+      'powershell',
+      [
+        '-NoProfile', '-NonInteractive', '-Command',
+        "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" " +
+        "| Where-Object { $_.CommandLine -match 'crew\\.gateway\\.server' } " +
+        "| ForEach-Object { $_.ProcessId }",
+      ],
       { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] },
     );
     const timeout = setTimeout(() => {
@@ -104,7 +110,7 @@ function isGatewayProcessAlive(): Promise<boolean> {
     child.stdout?.setEncoding('utf8');
     child.stdout?.on('data', (chunk: string) => { output += chunk; });
     child.once('error', () => finish(false));
-    child.once('close', (code) => finish(code === 0 && output.includes('crew-gateway.exe')));
+    child.once('close', (code) => finish(code === 0 && output.trim().length > 0));
   });
 }
 
@@ -381,7 +387,7 @@ export async function handleUninstall(): Promise<void> {
   console.log('[uninstall] 停止 managed gateway...');
   await deps.stopManagedGateway();
 
-  // ── 第 4 步：兜底 kill 残留 crew-gateway.exe 僵尸进程 ────────────────
+  // ── 第 4 步：兜底 kill 残留的 gateway 僵尸进程 ──────────────────
   deps.killZombieGatewayProcesses();
 
   // ── 第 5 步：等待 gateway 进程完全退出，确保文件句柄释放 ──────────────

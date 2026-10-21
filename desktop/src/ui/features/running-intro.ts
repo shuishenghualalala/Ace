@@ -1,6 +1,9 @@
 /**
  * 执行中轮播文案（composer 上方 .chat-running-intro 槽位）。
  * 文案来源：/api/scenarios/intro-lines 与 loading-status，失败时用内置兜底。
+ *
+ * 多 Composer 实例（主对话 + Wiki 问答面板）各自注册槽位与自己的会话来源，
+ * syncRunningIntroSlot 按「各自会话的 busy / 压缩态」独立刷新每个槽位。
  */
 
 import { backendApi } from '../backend-client';
@@ -27,6 +30,32 @@ let runningIntroTimer: number | null = null;
 const compactingSessions = new Set<string>();
 const compactionStartedAt = new Map<string, number>();
 const compactionHideTimers = new Map<string, number>();
+
+/** 每个 Composer 实例一个 sync 目标：槽位 + 该实例自己的会话来源。 */
+interface RunningIntroTarget {
+  slot: HTMLElement;
+  getSessionId: () => string | null;
+}
+
+const runningIntroTargets = new Set<RunningIntroTarget>();
+
+/**
+ * Composer 注册自己的 running-intro 槽位（createComposerView 调用）；
+ * 返回反注册函数，dispose 时调用。注册/反注册后立即全量 sync，
+ * 让面板在会话执行中途重挂载也能立刻恢复显示。
+ */
+export function registerRunningIntroTarget(
+  slot: HTMLElement,
+  getSessionId: () => string | null,
+): () => void {
+  const target: RunningIntroTarget = { slot, getSessionId };
+  runningIntroTargets.add(target);
+  syncRunningIntroSlot();
+  return () => {
+    runningIntroTargets.delete(target);
+    syncRunningIntroSlot();
+  };
+}
 
 export function setContextCompactionActive(sessionId: string, active: boolean): void {
   const pendingTimer = compactionHideTimers.get(sessionId);
@@ -111,29 +140,22 @@ function advanceRunningIntro(): void {
   syncRunningIntroSlot();
 }
 
-/** 根据当前 session busy 状态刷新主对话 Composer 的 running-intro 槽位。 */
-export function syncRunningIntroSlot(): void {
-  const slot = queryPrimaryComposer('.chat-running-intro');
-  if (!slot) return;
-  const sessionId = state.activeSessionId;
-  const busy = sessionId ? isBusySession(sessionId) : false;
+/** 同步单个槽位；返回是否处于 busy 轮播态（决定轮播定时器生命周期）。 */
+function syncSlotState(slot: HTMLElement, sessionId: string | null): boolean {
   if (sessionId && compactingSessions.has(sessionId)) {
     slot.hidden = false;
     if (slot.dataset.renderKey !== 'compaction' || !slot.firstElementChild) {
       slot.replaceChildren(renderCompactionNotice());
       slot.dataset.renderKey = 'compaction';
     }
-    return;
+    return false; // 压缩提示是静态文案，不驱动轮播
   }
+  const busy = sessionId ? isBusySession(sessionId) : false;
   if (!busy) {
     slot.hidden = true;
     slot.replaceChildren();
     delete slot.dataset.renderKey;
-    if (runningIntroTimer != null) {
-      window.clearInterval(runningIntroTimer);
-      runningIntroTimer = null;
-    }
-    return;
+    return false;
   }
 
   slot.hidden = false;
@@ -142,7 +164,31 @@ export function syncRunningIntroSlot(): void {
     slot.replaceChildren(renderRunningIntro(currentRunningStatus, currentRunningIntro));
     slot.dataset.renderKey = renderKey;
   }
-  if (runningIntroTimer == null) {
+  return true;
+}
+
+function resolveSyncTargets(): RunningIntroTarget[] {
+  if (runningIntroTargets.size > 0) return [...runningIntroTargets];
+  // 没有任何已注册 Composer（早期初始化 / 单测裸 DOM）：保持旧的「主 Composer + 全局活跃会话」语义。
+  const slot = queryPrimaryComposer<HTMLElement>('.chat-running-intro');
+  return slot ? [{ slot, getSessionId: () => state.activeSessionId }] : [];
+}
+
+/** 按各 Composer 自己会话的 busy / 压缩态，独立刷新所有 running-intro 槽位。 */
+export function syncRunningIntroSlot(): void {
+  let anyBusy = false;
+  for (const target of resolveSyncTargets()) {
+    if (!target.slot.isConnected) {
+      // 面板已卸载但未走 dispose（防御）：清掉失效目标，避免常驻泄漏。
+      runningIntroTargets.delete(target);
+      continue;
+    }
+    if (syncSlotState(target.slot, target.getSessionId())) anyBusy = true;
+  }
+  if (anyBusy && runningIntroTimer == null) {
     runningIntroTimer = window.setInterval(advanceRunningIntro, 5000);
+  } else if (!anyBusy && runningIntroTimer != null) {
+    window.clearInterval(runningIntroTimer);
+    runningIntroTimer = null;
   }
 }

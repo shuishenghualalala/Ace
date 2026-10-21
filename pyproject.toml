@@ -9,6 +9,9 @@ authors = [
     { name = "Crew Contributors" },
 ]
 requires-python = ">=3.11"
+# 核心依赖同时也是安装包内嵌 Python 的 gateway 依赖；
+# 改动 dependencies 与 wiki/pdf/docx/xlsx extras 会直接改变发行包内容，
+# 打包侧唯一数据源见 deb-package/runtime-requirements.txt 的说明。
 dependencies = [
     "openai>=1.30",
     "fastapi>=0.110",
@@ -42,6 +45,7 @@ dependencies = [
     # crew.work）。app.py 在 build_app 内无条件导入其 feature/service（非顶层但
     # 启动必经），crew.cli.content 顶层引用其 service，同属核心依赖。
     "crew-work",
+    "watchdog>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -74,15 +78,16 @@ wiki = [
     "crew-wiki[wiki]",
 ]
 # PDF 处理 skill（crew/skills/pdf）：创建/处理 PDF + 视觉 QA。
-# 创建：reportlab + matplotlib（图表）。
+# 创建：reportlab。复杂图表的 matplotlib 由技能文档指导运行时按需安装（PIP_USER 机制），
+# 不再预装以控制发行包体积。
 # 处理（提取/合并/填表/旋转）：pikepdf + pdfplumber。
 # Markdown→PDF（swarm 报告）：markdown2 + xhtml2pdf（底层复用 reportlab）。
 # 视觉 QA（SKILL.md 强制要求）：pypdfium2 + Pillow。
 # 不加入核心依赖；按需安装 `.[pdf]`。
 pdf = [
     "reportlab>=4.0",
-    "matplotlib>=3.8",
-    "pikepdf>=8.0",
+    # 10.14+ 缺少 macOS x64 wheel，CI 会回退源码编译并缺少 qpdf 头文件。
+    "pikepdf==10.13.0",
     "pdfplumber>=0.10",
     "markdown2>=2.5",
     "xhtml2pdf>=0.2.15",
@@ -108,6 +113,13 @@ xlsx = [
     "lxml>=5.0",
     "defusedxml>=0.7",
     "pandas>=2.0",
+]
+# Wiki 语义检索的本地 embedding（fastembed/onnxruntime）。numpy 已是传递依赖，
+# 此处显式声明以支撑向量索引的 numpy 快速路径。云端 OpenAI embedding 无需此 extra。
+# 不加入核心依赖；本地语义检索请安装 `.[semantic]`。
+semantic = [
+    "fastembed>=0.3",
+    "numpy>=1.26",
 ]
 
 [project.urls]

@@ -3,6 +3,7 @@
  * sites/inspirations/canvases、skills、upload/complete。
  */
 import { getJSON, jsonBody } from './transport';
+import type { WikiConfigSummary } from './feature-wiki';
 
 // ── config / model / vendors ──
 
@@ -20,6 +21,7 @@ export interface ModelOption {
   timeout?: number;
   loaded: boolean;
   builtin?: boolean;
+  editable?: boolean;
   capabilities?: string[];
 }
 
@@ -65,9 +67,7 @@ export interface BackendConfig {
   models: ModelOption[];
   model_profiles?: ModelOption[];
   is_gateway_admin?: boolean;
-  wiki?: {
-    enabled?: boolean;
-  };
+  wiki?: WikiConfigSummary;
   external_agents?: {
     enabled?: boolean;
   };
@@ -362,6 +362,17 @@ export const systemApi = {
       method: 'PUT',
       ...jsonBody(payload),
     }),
+  updateWikiSemantic: (payload: {
+    enabled: boolean;
+    provider: 'openai' | 'local';
+    model: string;
+    base_url?: string;
+    api_key_env?: string;
+    api_key?: string;
+  }) => getJSON<BackendConfig & { ok: boolean }>('/api/config/wiki-semantic', {
+    method: 'PUT',
+    ...jsonBody(payload),
+  }),
   deleteModel: (modelId: string, opts?: { force?: boolean }) => {
     const q = opts?.force ? '?force=true' : '';
     return getJSON<{ ok: boolean; removed: ModelOption; active_model_id: string; models: ModelOption[]; switched_to?: string; rebound_sessions?: string[]; busy_sessions?: string[] }>(

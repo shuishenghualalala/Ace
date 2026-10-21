@@ -84,6 +84,24 @@ describe('dispatch turn gate', () => {
     expect(sessionStore.get().books['sid-1']?.activeRequestId).toBe('req-1');
   });
 
+  it('keeps an older Wiki background task visible while a newer turn is open', () => {
+    openTurnForRequest('sid-1', 'req-new');
+
+    applyChunk(chunk('task', 'req-old', {
+      task_id: 'wiki-bg-1',
+      task_kind: 'wiki_ingest',
+      status: 'running',
+      progress: {
+        source_title: '产品资料',
+        label: '正在通读素材并识别可沉淀的知识…',
+      },
+    }));
+
+    const messages = messageStore.get().messages['sid-1'] ?? [];
+    expect(messages.some((message) => message.id === 'wiki-ingest-wiki-bg-1')).toBe(true);
+    expect(sessionStore.get().books['sid-1']?.activeRequestId).toBe('req-new');
+  });
+
   it('keeps Team messages in planning-to-summary order and suppresses the root final bubble', () => {
     appendSessionMessage('sid-1', {
       id: 'user-team',

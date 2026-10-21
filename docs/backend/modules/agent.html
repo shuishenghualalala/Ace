@@ -172,6 +172,7 @@ deadline: runtime.turn_deadline_seconds         # 默认 0=不限
       <tr><td>2026-09-17</td><td><code>94b37b5</code> 热路径同步 I/O 治理：prompt 文件 mtime 缓存 + <code>build_prompt_parts</code> 异步化、owner env 刷新 to_thread、工具媒体读盘线程化。</td><td><code>crew/agent/prompt_builder.py</code>、<code>crew/agent/runtime.py</code>、<code>crew/state/home.py</code>、<code>crew/agent/loop/tool_runner.py</code>。</td></tr>
       <tr><td>2026-09-17</td><td>ADR-0045 批次 3：重试消费 <code>retry_delay</code>（封顶 60s）+ error 帧结构化 <code>code=kind</code>/<code>retryable</code>/<code>retry_delay</code> + <code>unsupported_capability</code> 按 kind 判定。</td><td><code>crew/agent/executor/builtin.py</code>、<code>crew/core/envelope.py</code>、<code>crew/core/errors.py</code>、<code>crew/features/outbound.py</code>、<code>crew/gateway/dispatcher.py</code>。</td></tr>
       <tr><td>2026-09-21</td><td>修复附件静默截断：超长文本附件注入前 8000 字符时改为自描述——<code>_read_attachment</code> 返回 <code>AttachmentPreview</code>（内容 + 截断元信息），注入块在代码块外附【附件已截断】总量提示与 <code>file_read</code> 分页续读指引。</td><td><code>crew/agent/runtime.py</code>、<code>tests/test_agent.py</code>。</td></tr>
+      <tr><td>2026-09-03</td><td>事件循环阻塞治理：<code>_build_prompts</code> 中的 <code>build_prompt_parts</code>（含 skills mtime 扫描、CREW.md/SOUL.md/记忆文件读取）改经 <code>asyncio.to_thread</code> 移出事件循环，修复 gateway 繁忙时健康探测超时被桌面端误判死亡重启的问题；外部运行时探测（login shell / --version 子进程）同样移出事件循环。</td><td><code>crew/agent/runtime.py</code>、<code>crew/agent/external/detector.py</code>、<code>crew/gateway/routers/runtimes.py</code></td></tr>
     </tbody>
   </table>
 

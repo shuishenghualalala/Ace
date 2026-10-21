@@ -357,8 +357,10 @@ body.welcome-active
 }
 
 body.welcome-active #chat-tab.tab-pane.active.chat-mode {
-  /* Composer 固定在内容区垂直中线；标题与场景分别占据等高的上下弹性轨道 */
-  grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr);
+  /* Composer 固定在内容区垂直中线；标题与场景分别占据等高的上下弹性轨道。
+     标题轨道不允许小于 header 内容高度：窗口偏矮时压缩底部场景行，
+     否则 header 会向上溢出并被根容器裁掉（标题显示不全）。 */
+  grid-template-rows: minmax(min-content, 1fr) auto minmax(0, 1fr);
 }
 
 body.welcome-active #welcome-panel,

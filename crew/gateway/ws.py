@@ -14,13 +14,12 @@ from contextlib import suppress
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from crew.agent.skills import (
-    build_skill_activation,
-    get_skills,
-    get_package_members,
+    abuild_skill_activation,
+    aget_package_members,
+    aresolve_package,
+    aresolve_skill,
+    aresolve_skill_any,
     install_skill,
-    resolve_package,
-    resolve_skill,
-    resolve_skill_any,
 )
 from crew.core.runctx import current_active_skill_packages
 from crew.core.envelope import Envelope
@@ -591,9 +590,11 @@ def create_ws_router(
                     if binding:
                         # a) 懒加载安装 optional skills（仅装尚未可用的）
                         for slug in binding.get("skills") or []:
-                            if resolve_skill(slug) is None:
+                            if await aresolve_skill(slug) is None:
                                 try:
-                                    install_skill(
+                                    # 安装是重 IO（copytree + 审计），移出事件循环
+                                    await asyncio.to_thread(
+                                        install_skill,
                                         slug,
                                         operator_account_id=owner,
                                         source="scenario-auto-install",
@@ -604,7 +605,7 @@ def create_ws_router(
                         #     避免模型因 progressive disclosure 看不到内部 skills 而多轮交互。
                         active_packages = set(current_active_skill_packages.get())
                         for slug in binding.get("skills") or []:
-                            info = resolve_skill_any(slug)
+                            info = await aresolve_skill_any(slug)
                             pkg = info.get("package") if info else None
                             if pkg:
                                 active_packages.add(pkg)
@@ -673,9 +674,9 @@ def create_ws_router(
                     command, _, user_instruction = query[1:].partition(" ")
 
                     # 1. 先尝试解析为 skill（支持 /package/skill、/skill、alias、中文名）
-                    skill_key = resolve_skill(command)
+                    skill_key = await aresolve_skill(command)
                     if skill_key:
-                        activation = build_skill_activation(
+                        activation = await abuild_skill_activation(
                             skill_key,
                             user_instruction,
                             session_id,
@@ -685,7 +686,7 @@ def create_ws_router(
                             active_skills.append(activation.to_dict())
                     else:
                         # 2. 尝试解析为 package 并展开
-                        pkg = resolve_package(command)
+                        pkg = await aresolve_package(command)
                         if pkg is not None:
                             pkg_slug = pkg["slug"]
                             try:
@@ -697,7 +698,7 @@ def create_ws_router(
                                 current_active_skill_packages.set(active)
                                 active_packages_added.append(pkg_slug)
 
-                            members = get_package_members(pkg_slug)
+                            members = await aget_package_members(pkg_slug)
                             lines = [
                                 f'[IMPORTANT: 用户激活了 "{pkg_slug}" skill package，以下 skills 已展开并可用。]',
                                 "",

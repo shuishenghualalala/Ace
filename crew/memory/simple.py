@@ -80,12 +80,13 @@ class SQLiteMemory(MemoryProvider):
             f"AND ({like_clauses}) ORDER BY ts DESC LIMIT ?"
         )
 
-        def _query():
+        def _query() -> str:
             with self._lock:
-                return self._conn.execute(sql, [*params, self._top_k]).fetchall()
+                rows = self._conn.execute(sql, [*params, self._top_k]).fetchall()
+            return "\n".join(f"- {r[0]}" for r in rows)
 
-        rows = await asyncio.to_thread(_query)
-        return "\n".join(f"- {r[0]}" for r in rows)
+        # 同步 sqlite 访问丢线程池，避免阻塞事件循环。
+        return await asyncio.to_thread(_query)
 
     async def write(self, session_id: str, messages: list[Message]) -> None:
         users = [m.content for m in messages if m.role == "user" and m.content]

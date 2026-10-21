@@ -73,7 +73,7 @@ import {
 import { mountSessionHistoryView } from './features/session-history-view';
 import { bindSettingsUi, registerConfigPaneRenderers } from './features/settings';
 import { mountSettingsDataPanes } from './features/settings-data';
-import { requireRendererLogin } from './features/auth-gate';
+import { isRendererLoggedIn, requireRendererLogin } from './features/auth-gate';
 import { initAuthFlow } from './features/login';
 import { initBackendStatusGuard, isBackendConnected } from './features/backend-status-guard';
 import { bindHistoryPanelToggle, applyHistoryCollapsed } from './features/history-collapse';
@@ -176,6 +176,8 @@ export async function refreshTracingGateAvailability(): Promise<void> {
 }
 
 function setTab(tab: TabKey): boolean {
+  // 认证状态由主进程异步恢复；在恢复完成前不要触发 Wiki 的受保护请求。
+  if (tab === 'wiki' && !isRendererLoggedIn()) return false;
   if (tab === 'wiki' && !canNavigateToWiki(state.config)) return false;
   if (tab === 'agents' && !externalAgentsEnabled()) return false;
   if (tab === 'tracing' && (!isObservationDevLaunch() || !tracingAvailable)) return false;
@@ -491,6 +493,8 @@ function bindGlobalEvents(): () => void {
   const disposeSkillsLifecycle = bindSkillsPageLifecycle(() => {
     activateTab('chat');
   });
+  // Wiki tab 的点击导航由 application-shell → setTab → pageRegistry 统一驱动，
+  // 页面 contribution 的 activate 自身负责 refresh，无需 legacy 监听器（避免重复刷新）。
   bindSitesTab({
     openInspirationAgent: async (item) => {
       if (!item.sessionId) throw new Error('这个灵感没有绑定创建对话');
@@ -581,6 +585,7 @@ function closeChannelModal(): void {
 
 async function init(
   registerDispose: (dispose: () => void) => void,
+  restoreProductMode: () => void,
 ): Promise<void> {
   installStreamDebugGlobal();
   // 全局错误捕获（最早安装）：同步异常与未处理 Promise 拒绝统一上报主进程落盘，
@@ -639,6 +644,8 @@ async function init(
   renderWorkspaceHistory(openSession);
   renderChat();
   updateGatewayDot();
+  // initAuthFlow 已完成后再恢复用户上次停留的位置，确保 Wiki 请求带上已恢复的 Cookie。
+  await safe('restoreProductMode', restoreProductMode);
   // 冷启动：当前会话若已有内存消息，补一次文件改动对账（清幽灵临时文件卡）
   const bootSid = state.activeSessionId;
   if (bootSid && getMessages(bootSid).length > 0) {
@@ -712,6 +719,7 @@ export function ensureRendererRoot(host: HTMLElement): RendererRoot {
 
 interface MountedApplicationShell {
   shell: ApplicationShell;
+  syncProductMode(): void;
   dispose(): void;
 }
 
@@ -1014,6 +1022,7 @@ function mountApplicationShell(
 
   return {
     shell,
+    syncProductMode: () => syncProductMode(productModeStore.get().productMode),
     dispose() {
       void pageRegistry.deactivate();
       void disposeWikiPageContribution();
@@ -1059,7 +1068,7 @@ export function mountRenderer(root: HTMLElement, adapter: RendererAdapter): () =
     else disposeEvents.push(dispose);
   };
 
-  void init(registerDispose).catch((error) => {
+  void init(registerDispose, mountedShell.syncProductMode).catch((error) => {
     console.error('[renderer] mount failed:', error);
     notify(`初始化 Renderer 失败：${(error as Error).message}`);
   });

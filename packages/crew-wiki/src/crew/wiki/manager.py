@@ -133,6 +133,22 @@ class WikiSessionManager:
         owner, sid = self._key(session_id, owner_account_id)
         now = time.time()
         self._prune_confirmations(now)
+        for (existing_owner, existing_sid, existing_id), item in self._confirmations.items():
+            if action in {"apply_ingest", "apply_batch_ingest"} and (existing_owner, existing_sid) == (owner, sid) and (
+                item["action"] == action and item["kb_id"] == kb_id
+                and item["payload"] == payload
+            ):
+                return {
+                    "requires_confirmation": False,
+                    "confirmation_pending": True,
+                    "message": "该计划已有待确认卡，请等待原确认，不要重复请求审批。",
+                    "confirmation_id": existing_id,
+                    "action": action,
+                    "kb_id": kb_id,
+                    "summary": item["summary"],
+                    "impact": item["impact"],
+                    "expires_at": item["expires_at"],
+                }
         confirmation_id = f"wcf_{uuid.uuid4().hex}"
         expires_at = now + max(60, int(ttl_seconds))
         self._confirmations[(owner, sid, confirmation_id)] = {
@@ -170,6 +186,14 @@ class WikiSessionManager:
             return None
         self._confirmations.pop(key, None)
         return dict(item.get("payload") or {})
+
+    def is_confirmation_pending(self, confirmation_id: str, *, owner_account_id: str) -> bool:
+        """Historical tool results are not proof that an approval is still pending."""
+        self._prune_confirmations()
+        return any(
+            owner == owner_account_id and cid == confirmation_id
+            for owner, _sid, cid in self._confirmations
+        )
 
     def cancel_confirmation(
         self,

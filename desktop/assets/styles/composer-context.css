@@ -216,8 +216,14 @@
 .chat-attachment-preview {
   display: flex;
   min-width: 0;
+  max-height: min(240px, 30vh);
   flex-wrap: wrap;
   gap: var(--mw-space-2);
+  align-content: flex-start;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
 }
 
 .chat-attachment-chip,

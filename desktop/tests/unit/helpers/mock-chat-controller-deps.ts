@@ -11,6 +11,7 @@ import { vi } from 'vitest';
 vi.mock('../../src/ui/features/running-intro', () => ({
   setContextCompactionActive: vi.fn(),
   syncRunningIntroSlot: vi.fn(),
+  registerRunningIntroTarget: vi.fn(() => () => {}),
 }));
 vi.mock('../../src/ui/features/usage-tracker', () => ({ recordTurn: vi.fn() }));
 vi.mock('../../src/ui/features/cron-page', () => ({ onAfterFinal: vi.fn() }));

@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Awaitable, Callable
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from crew.core.errors import ToolError
-from crew.core.interfaces import ToolResultRetention
 from crew.core.followup import send_followup_question, wait_for_answer
+from crew.core.interfaces import ToolResultRetention
 from crew.core.runctx import (
     current_attachment_files,
     current_attachment_paths,
@@ -25,6 +27,7 @@ from crew.core.runctx import (
 )
 from crew.core.timeout_policy import DEFAULT_INTERACTION_TIMEOUT_SECONDS
 from crew.security.outbound import PublicRedirectApprovalRequired, parse_public_http_target
+from crew.state.logging import get_logger
 from crew.tools.registry import FunctionTool, Registry, tool_error, tool_result
 from crew.tools.security_guard import authorize_network_tool
 
@@ -48,7 +51,6 @@ from .prompts import (
     WIKI_DIGEST_PROMPT,
     WIKI_FETCH_URL_PROMPT,
     WIKI_LINT_PROMPT,
-    WIKI_LIST_INBOX_PROMPT,
     WIKI_LIST_KBS_PROMPT,
     WIKI_LIST_SOURCES_PROMPT,
     WIKI_ORIENT_PROMPT,
@@ -69,6 +71,8 @@ from .sources import (
 )
 from .store import WikiStore
 from .store._ids import filename_from_title
+
+log = get_logger("wiki.tools")
 
 # Wiki 工具按读写职责拆分为只读与管理工具集。
 #
@@ -96,7 +100,6 @@ WIKI_READ_TOOLS = [
     "wiki_read",
     "wiki_list_sources",
     "wiki_list_kbs",
-    "wiki_list_inbox",
 ]
 
 WIKI_MANAGE_TOOLS = [
@@ -330,6 +333,12 @@ _WIKI_LIST_SOURCES_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
+            "view": {
+                "type": "string",
+                "enum": ["all", "inbox"],
+                "description": "all 列出素材；inbox 仅列当前版本中已解析、系统建议整理且尚未完成整理的素材（含整理失败），默认 all。与 status 取交集；inbox 不包含历史版本",
+                "default": "all",
+            },
             "status": {
                 "type": "string",
                 "enum": ["all", "parsed", "failed", "pending"],
@@ -356,23 +365,6 @@ _WIKI_LIST_KBS_SCHEMA = {
     "name": "wiki_list_kbs",
     "description": WIKI_LIST_KBS_PROMPT,
     "parameters": {"type": "object", "properties": {}, "required": []},
-}
-
-_WIKI_LIST_INBOX_SCHEMA = {
-    "name": "wiki_list_inbox",
-    "description": WIKI_LIST_INBOX_PROMPT,
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "limit": {
-                "type": "integer",
-                "description": "最多返回多少条，默认 50",
-                "default": 50,
-            },
-            **_KB_ID_PARAM,
-        },
-        "required": [],
-    },
 }
 
 _WIKI_UPDATE_PAGE_SCHEMA = {
@@ -418,6 +410,11 @@ _WIKI_PLAN_INGEST_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
+            "force": {
+                "type": "boolean",
+                "description": "仅用户明确要求重新整理或解决旧计划冲突时设为 true；普通重试复用已有计划。",
+                "default": False,
+            },
             "source_id": {
                 "type": "string",
                 "description": "要分析的 raw source ID",
@@ -674,6 +671,72 @@ def build_wiki_tools(
         if located:
             return located
         return _kb_id(args)
+
+    def _source_title_for_display(
+        source_id: str,
+        args: dict[str, Any] | None = None,
+        kb_id: str | None = None,
+    ) -> str:
+        """解析用户可读素材标题；找不到时不回退到内部 source_id。"""
+        source_id = str(source_id or "").strip()
+        if not source_id:
+            return "这份素材"
+        title = ""
+        try:
+            resolved_kb_id = kb_id or _kb_id_for_source(args or {}, source_id)
+            titles = store.get_source_titles(
+                [source_id],
+                owner_account_id=_owner(),
+                kb_id=resolved_kb_id,
+            )
+            candidate = titles.get(source_id) if isinstance(titles, dict) else ""
+            if isinstance(candidate, str) and candidate.strip() and candidate.strip() != source_id:
+                title = candidate.strip()
+        except Exception:  # noqa: BLE001 - UI metadata must not block the tool call
+            title = ""
+        return title or "这份素材"
+
+    def _source_title_for_ui_label(
+        ui_args: dict[str, Any],
+        runtime_args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """用素材标题 enrich 工具标题，但不把 source_id 带进用户界面。"""
+        return {
+            **ui_args,
+            "source_title": _source_title_for_display(
+                str(runtime_args.get("source_id") or ""),
+                runtime_args,
+            ),
+        }
+
+    def _source_titles_for_display(
+        source_ids: list[str],
+        *,
+        args: dict[str, Any] | None = None,
+        kb_id: str | None = None,
+    ) -> list[str]:
+        return [
+            _source_title_for_display(source_id, args=args, kb_id=kb_id)
+            for source_id in source_ids
+        ]
+
+    def _batch_status_for_display(
+        items: Any,
+        *,
+        args: dict[str, Any] | None = None,
+        kb_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """把批量结果中的 source_id 换成标题，供确认卡展示。"""
+        displayed: list[dict[str, Any]] = []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            value = dict(item)
+            source_id = str(value.pop("source_id", "") or "").strip()
+            if source_id:
+                value["title"] = _source_title_for_display(source_id, args=args, kb_id=kb_id)
+            displayed.append(value)
+        return displayed
 
     def _build_progress_callback() -> Callable[[str, int, dict[str, Any]], Awaitable[None]] | None:
         """构建 Wiki ingest 进度回调：保活当前任务，并在可用时推送到前端。"""
@@ -1069,17 +1132,31 @@ def build_wiki_tools(
                 source_ids=result["succeeded"],
                 page_ids=result["page_ids"],
             )
-            return tool_result(**result, auto_applied=True)
+            incomplete = bool(result.get("failed"))
+            return tool_result(
+                **result,
+                auto_applied=True,
+                automatic_retry=False if incomplete else None,
+                next_action="report_incomplete" if incomplete else "report_result",
+            )
         planned_ids = list(result["succeeded"])
+        if not planned_ids:
+            return tool_result(
+                **result,
+                auto_applied=False,
+                automatic_retry=False if result.get("failed") else None,
+                next_action="report_incomplete" if result.get("failed") else "report_result",
+            )
+        display_impact = {
+            "sources": _source_titles_for_display(planned_ids, args=args, kb_id=kb_id),
+            "skipped": _batch_status_for_display(result.get("skipped"), args=args, kb_id=kb_id),
+            "failed": _batch_status_for_display(result.get("failed"), args=args, kb_id=kb_id),
+        }
         decision = await _ask_blocking_confirmation(
             action="apply_batch_ingest",
             kb_id=kb_id,
             summary=f"应用 {len(planned_ids)} 份素材的 Wiki 批量计划",
-            impact={
-                "source_ids": planned_ids,
-                "skipped": result["skipped"],
-                "failed": result["failed"],
-            },
+            impact=display_impact,
         )
         if decision == "unavailable":
             confirmation = manager.issue_confirmation(
@@ -1340,6 +1417,11 @@ def build_wiki_tools(
         raw = store.load_raw(source_id, owner_account_id=_owner(), kb_id=kb_id)
         if raw is None:
             return tool_error(f"Raw source 不存在: {source_id}")
+        source_title = str(getattr(raw, "title", "") or "").strip() or _source_title_for_display(
+            source_id,
+            args=args,
+            kb_id=kb_id,
+        )
 
         linked_pages = store.list_pages_by_source(source_id, owner_account_id=_owner(), kb_id=kb_id)
 
@@ -1348,7 +1430,7 @@ def build_wiki_tools(
             decision = await _ask_blocking_confirmation(
                 action="delete_source",
                 kb_id=kb_id,
-                summary=f"删除 RawSource {source_id} 及关联页面",
+                summary=f"删除《{source_title}》及关联页面",
                 impact={
                     "linked_pages": len(linked_pages),
                     "linked_page_titles": [p.title for p in linked_pages[:20]],
@@ -1360,7 +1442,7 @@ def build_wiki_tools(
                     action="delete_source",
                     kb_id=kb_id,
                     payload={"source_id": source_id},
-                    summary=f"删除 RawSource {source_id} 及关联页面",
+                    summary=f"删除《{source_title}》及关联页面",
                     impact={
                         "linked_pages": len(linked_pages),
                         "linked_page_titles": [p.title for p in linked_pages[:20]],
@@ -1370,7 +1452,7 @@ def build_wiki_tools(
             if decision == "timeout":
                 return tool_error("等待确认超时，RawSource 未删除，可重试")
             if decision != "confirmed":
-                return tool_result(cancelled=True, message=f"用户已取消，未删除 RawSource: {source_id}")
+                return tool_result(cancelled=True, message=f"用户已取消，未删除《{source_title}》")
         elif str(confirmed.get("source_id") or "") != source_id:
             return tool_error("确认内容与当前 source 参数不一致，请重新生成确认卡")
 
@@ -1383,7 +1465,7 @@ def build_wiki_tools(
             "source_deleted",
             source_ids=[source_id],
         )
-        return tool_result(message=f"已删除 raw source 及其关联页面: {source_id}")
+        return tool_result(message=f"已删除《{source_title}》及其关联页面")
 
     def _handle_describe_image(args: dict[str, Any]) -> str:
         if config is None or not config.multimodal.enabled:
@@ -1584,14 +1666,24 @@ def build_wiki_tools(
         )
 
     def _handle_list_sources(args: dict[str, Any]) -> str:
+        view = str(args.get("view") or "all").strip().lower()
+        if view not in ("all", "inbox"):
+            return tool_error("无效的 view；可选 all 或 inbox")
         status = str(args.get("status") or "all").strip().lower()
         include_history = bool(args.get("include_history", False))
         limit = max(1, int(args.get("limit", 50)))
         raws = store.list_raws(owner_account_id=_owner(), kb_id=_kb_id(args))
         # 默认只列当前版本；被取代的旧版本需显式 include_history=true 才返回，
         # 避免旧版本在列表中与当前版本混淆。
-        if not include_history:
+        if not include_history or view == "inbox":
             raws = [r for r in raws if r.is_current]
+        if view == "inbox":
+            raws = [
+                r for r in raws
+                if (r.parse_status or "pending") == "parsed"
+                and r.ingest_recommend
+                and r.ingest_status in ("pending", "recommended", "failed")
+            ]
         if status != "all":
             raws = [r for r in raws if (r.parse_status or "pending") == status]
         raws = sorted(raws, key=lambda r: r.created_at, reverse=True)[:limit]
@@ -1610,6 +1702,12 @@ def build_wiki_tools(
                     "drift_from": r.drift_from,
                     "last_refresh_at": r.last_refresh_at or None,
                     "last_refresh_error": r.last_refresh_error,
+                    "doc_type": r.doc_type,
+                    "summary": r.summary,
+                    "tags": r.tags,
+                    "ingest_recommend": r.ingest_recommend,
+                    "ingest_reason": r.ingest_reason,
+                    "ingest_status": r.ingest_status,
                 }
                 for r in raws
             ],
@@ -1632,40 +1730,6 @@ def build_wiki_tools(
                 for kb in kbs
             ],
             count=len(kbs),
-        )
-
-    def _handle_list_inbox(args: dict[str, Any]) -> str:
-        """列出已解析且系统建议深度整理、但尚未 ingest 的素材。"""
-        limit = max(1, int(args.get("limit", 50)))
-        kb_id = _kb_id(args)
-        raws = store.list_raws(owner_account_id=_owner(), kb_id=kb_id)
-        inbox = [
-            raw
-            for raw in raws
-            if raw.is_current
-            and (raw.parse_status or "pending") == "parsed"
-            and raw.ingest_recommend
-            and raw.ingest_status in ("pending", "recommended", "failed")
-        ]
-        inbox = sorted(inbox, key=lambda r: r.created_at, reverse=True)[:limit]
-        return tool_result(
-            sources=[
-                {
-                    "source_id": r.id,
-                    "title": r.title,
-                    "source_type": r.source_type,
-                    "doc_type": r.doc_type,
-                    "summary": r.summary,
-                    "tags": r.tags,
-                    "ingest_recommend": r.ingest_recommend,
-                    "ingest_reason": r.ingest_reason,
-                    "ingest_status": r.ingest_status,
-                    "created_at": r.created_at,
-                }
-                for r in inbox
-            ],
-            count=len(inbox),
-            kb_id=kb_id,
         )
 
     def _handle_create_page(args: dict[str, Any]) -> str:
@@ -1880,7 +1944,7 @@ def build_wiki_tools(
             )
         return result
 
-    async def _handle_plan_ingest(args: dict[str, Any]) -> str:
+    async def _run_plan_ingest(args: dict[str, Any], *, progress: Callable[[str], Awaitable[None]]) -> str:
         source_id = str(args.get("source_id", "")).strip()
         if not source_id:
             return tool_error("缺少 source_id")
@@ -1893,19 +1957,30 @@ def build_wiki_tools(
             use_chunking = bool(use_chunking)
 
         kb_id = _kb_id_for_source(args, source_id)
+        raw = store.load_raw(source_id, owner_account_id=_owner(), kb_id=kb_id)
+        existing_plan = compiler.load_plan(source_id, owner_account_id=_owner(), kb_id=kb_id)
+        if (
+            not args.get("force") and raw is not None and raw.ingest_status == "ingested"
+            and existing_plan is not None and raw.content_sha256
+            and existing_plan.source_content_sha256 == raw.content_sha256
+        ):
+            return tool_result(
+                source_id=source_id, already_applied=True,
+                message="该素材版本已完成整理，无需再次生成计划或审批。",
+            )
         result = await compiler.plan_ingest(
             source_id,
             owner_account_id=_owner(),
             kb_id=kb_id,
             chunk_size=chunk_size,
             use_chunking=use_chunking,
-            # LLM 分析耗时较长：把阶段进度推到前端工具行（无推送通道时 no-op）。
-            progress=emit_tool_progress,
+            progress=progress,
+            force=bool(args.get("force", False)),
         )
         analysis_failed = any(
-            str(issue).startswith("LLM 分析失败:")
+            str(issue).startswith(("LLM 分析失败:", "LLM 分析部分失败:"))
             for issue in result.issues
-        )
+        ) or bool(result.analysis_stats.get("failed_chunks", 0))
         if analysis_failed:
             # parsed Markdown 和全文 Source 已经独立完成；模型容量不足时不签发一个
             # 只有 source 页的误导性 apply 确认，交还 Agent 稍后重试分析。
@@ -1913,7 +1988,9 @@ def build_wiki_tools(
                 **result.to_dict(brief=True),
                 analysis_status="failed",
                 retryable=True,
-                message="LLM 分析未完成；已解析 Markdown 与 Source 页面仍保留，可切换模型或稍后重试。",
+                automatic_retry=False,
+                next_action="report_incomplete",
+                message="LLM 分析未完成；已解析 Markdown 与 Source 页面仍保留。不要应用不完整计划或再次请求审批；报告缺失部分，等待用户决定是否重试。",
             )
         duplicate_skipped = not result.planned_pages and any(
             "重复 source" in str(issue) for issue in result.issues
@@ -1935,10 +2012,11 @@ def build_wiki_tools(
             return tool_result(
                 **result.to_dict(brief=True),
                 auto_applied=True,
-                applied_pages=[page.to_dict(brief=True) for page in applied.pages],
+                applied_pages=[{"id": page.id, "title": page.title, "page_type": page.page_type} for page in applied.pages],
                 apply_issues=applied.issues,
                 message="深度整理计划已按 wiki.ingest.auto_apply=true 自动应用。",
             )
+        source_title = _source_title_for_display(source_id, args=args, kb_id=kb_id)
         confirmation = manager.issue_confirmation(
             current_session_id.get(),
             action="apply_ingest",
@@ -1949,7 +2027,7 @@ def build_wiki_tools(
                 "plan_fingerprint": result.plan_fingerprint,
                 "planned_titles": [p.title for p in result.planned_pages],
             },
-            summary=f"应用 source {source_id} 的 Wiki 变更计划",
+            summary=f"应用《{source_title}》的 Wiki 变更计划",
             impact={
                 "create": result.total_new,
                 "update": result.total_update,
@@ -1961,6 +2039,27 @@ def build_wiki_tools(
         # 计划预览不返回 source 全文，避免大文档撑满 Agent 上下文。
         return tool_result(**result.to_dict(brief=True), **confirmation)
 
+    async def _handle_plan_ingest(args: dict[str, Any]) -> str:
+        # 整理直接属于当前工具调用，进度、结果及取消均沿用当前对话生命周期。
+        output = await _run_plan_ingest(args, progress=emit_tool_progress)
+        payload = json.loads(output)
+        source_id = str(args.get("source_id", "")).strip()
+        if source_id:
+            kb_id = _kb_id_for_source(args, source_id)
+            try:
+                raw = store.load_raw(source_id, owner_account_id=_owner(), kb_id=kb_id)
+                if raw is not None:
+                    if payload.get("error") or payload.get("analysis_status") == "failed":
+                        raw.ingest_status = "failed"
+                    elif payload.get("skipped"):
+                        raw.ingest_status = "ignored"
+                    elif payload.get("requires_confirmation") or payload.get("confirmation_pending"):
+                        raw.ingest_status = "recommended"
+                    store.save_raw(raw, owner_account_id=_owner(), kb_id=kb_id)
+            except Exception:
+                log.warning("更新 Wiki ingest 状态失败 source=%s", source_id, exc_info=True)
+        return output
+
     async def _handle_apply_ingest(args: dict[str, Any]) -> str:
         source_id = str(args.get("source_id", "")).strip()
         if not source_id:
@@ -1968,7 +2067,7 @@ def build_wiki_tools(
         kb_id = _kb_id_for_source(args, source_id)
         confirmed = _consume_confirmation(args, action="apply_ingest", kb_id=kb_id)
         if confirmed is None or str(confirmed.get("source_id") or "") != source_id:
-            return tool_error("缺少有效的 ingest 确认；请重新调用 wiki_plan_ingest 并等待用户确认")
+            return tool_error("确认不可用或已使用；请先检查素材和计划状态，不要自动重新整理或重复请求审批")
 
         # 计划指纹绑定：确认卡记录的是用户当时看到的计划指纹。
         # 若确认前系统又为同一 source 生成新计划，磁盘 plan 指纹会变化，旧确认作废。
@@ -1988,6 +2087,10 @@ def build_wiki_tools(
             return tool_error(
                 "确认的计划与当前 source 内容版本不一致；请重新调用 wiki_plan_ingest"
             )
+        if disk_plan.analysis_stats.get("failed_chunks", 0) or any(
+            issue.startswith(("LLM 分析失败:", "LLM 分析部分失败:")) for issue in disk_plan.issues
+        ):
+            return tool_error("该计划分析未完成，未执行写入；请报告缺失部分，等待用户决定是否重试")
 
         approved_titles = args.get("approved_titles")
         if approved_titles is not None:
@@ -2017,7 +2120,8 @@ def build_wiki_tools(
         )
         return tool_result(
             source_id=result.source_id,
-            pages=[p.to_dict() for p in result.pages],
+            next_action="report_result",
+            pages=[{"id": p.id, "title": p.title, "page_type": p.page_type} for p in result.pages],
             issues=result.issues,
         )
 
@@ -2307,16 +2411,15 @@ def build_wiki_tools(
         (_WIKI_LINT_SCHEMA, _handle_lint, True, "🧹", "检查 Wiki", "检查 Wiki", "wiki lint check quality issues broken links orphan"),
         (_WIKI_CREATE_KB_SCHEMA, _handle_create_kb, False, "📚", "创建知识库", "创建知识库 {kb_id}", "wiki create knowledge base new kb"),
         (_WIKI_DELETE_KB_SCHEMA, _handle_delete_kb, False, "🗑️", "删除知识库", "删除知识库 {kb_id}", "wiki delete knowledge base remove kb"),
-        (_WIKI_DELETE_SOURCE_SCHEMA, _handle_delete_source, False, "🗑️", "删除 Raw Source", "删除 Raw Source {source_id}", "wiki delete raw source remove"),
-        (_WIKI_PARSE_SOURCE_SCHEMA, _handle_parse_source, True, "🔧", "重新解析 Raw Source", "重新解析 {source_id}", "wiki parse source reparse document extract text"),
-        (_WIKI_LIST_SOURCES_SCHEMA, _handle_list_sources, False, "📋", "列出 Raw Sources", "列出 Raw Sources", "wiki list sources raw files pending parsed failed"),
+        (_WIKI_DELETE_SOURCE_SCHEMA, _handle_delete_source, False, "🗑️", "删除 Raw Source", "删除《{source_title}》", "wiki delete raw source remove"),
+        (_WIKI_PARSE_SOURCE_SCHEMA, _handle_parse_source, True, "🔧", "重新解析 Raw Source", "重新解析《{source_title}》", "wiki parse source reparse document extract text"),
+        (_WIKI_LIST_SOURCES_SCHEMA, _handle_list_sources, False, "📋", "列出素材", "列出素材", "wiki list sources raw files inbox pending parsed failed recommend ingest"),
         (_WIKI_LIST_KBS_SCHEMA, _handle_list_kbs, False, "📚", "列出知识库", "列出知识库", "wiki list knowledge bases kbs"),
-        (_WIKI_LIST_INBOX_SCHEMA, _handle_list_inbox, False, "📥", "列出待整理素材", "列出待整理素材", "wiki list inbox pending sources recommend ingest"),
         (_WIKI_UPDATE_PAGE_SCHEMA, _handle_update_page, False, "✏️", "更新 Wiki 页面", "更新页面 {page_id}", "wiki update page edit content tags related aliases"),
-        (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "盘算 {source_id} 该写进哪些页面", "wiki plan ingest preview changes proposed pages"),
-        (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "把 {source_id} 的改动写进知识库", "wiki apply ingest write pages confirm plan"),
+        (_WIKI_PLAN_INGEST_SCHEMA, _handle_plan_ingest, True, "📋", "计划 Wiki 变更", "盘算《{source_title}》该写进哪些页面", "wiki plan ingest preview changes proposed pages"),
+        (_WIKI_APPLY_INGEST_SCHEMA, _handle_apply_ingest, True, "✅", "执行 Wiki 变更", "把《{source_title}》的改动写进知识库", "wiki apply ingest write pages confirm plan"),
         (_WIKI_FETCH_URL_SCHEMA, _handle_fetch_url, True, "🌐", "抓取网页", "抓取网页 {url}", "wiki fetch url webpage scrape crawl import"),
-        (_WIKI_REFRESH_SOURCE_SCHEMA, _handle_refresh_source, True, "🔄", "刷新网页来源", "刷新来源 {source_id}", "wiki refresh url source drift version"),
+        (_WIKI_REFRESH_SOURCE_SCHEMA, _handle_refresh_source, True, "🔄", "刷新网页来源", "刷新网页《{source_title}》", "wiki refresh url source drift version"),
         (_WIKI_DIGEST_SCHEMA, _handle_digest, True, "🧠", "生成跨来源报告", "综合 {topic}", "wiki digest synthesis comparison multi source"),
         (_WIKI_CAPTURE_ATTACHMENT_SCHEMA, _handle_capture_attachment, False, "📎", "捕获 Wiki 附件", "捕获附件 {path}", "wiki capture attachment file import upload"),
         (_WIKI_CAPTURE_TEXT_SCHEMA, _handle_capture_text, False, "📝", "捕获 Wiki 文本", "捕获文本 {title}", "wiki capture text snippet import note"),
@@ -2325,9 +2428,39 @@ def build_wiki_tools(
         (_WIKI_DELETE_PAGES_SCHEMA, _handle_delete_pages, False, "🗑️", "删除 Wiki 页面", "删除 Wiki 页面", "wiki delete pages remove"),
         (_WIKI_RENAME_PAGE_SCHEMA, _handle_rename_page, False, "✏️", "重命名 Wiki 页面", "重命名 {page_id}", "wiki rename page title change"),
     ]
+    # Serialize plan/apply/batch within a vault so parallel tool calls cannot
+    # overwrite an approved plan. Receipts are scoped to owner and conversation.
+    ingest_locks: dict[tuple[str, str], asyncio.Lock] = {}
+    ingest_receipts: OrderedDict[tuple[str, ...], str] = OrderedDict()
+
+    def _guard_ingest(name: str, run: Callable[[dict[str, Any]], Awaitable[str]]):
+        async def guarded(args: dict[str, Any]) -> str:
+            source_id = str(args.get("source_id") or "")
+            kb_id = _kb_id_for_source(args, source_id) if source_id else _kb_id(args)
+            owner = _owner()
+            lock = ingest_locks.setdefault((owner, kb_id), asyncio.Lock())
+            receipt_key = (
+                owner, current_session_id.get(), kb_id, name,
+                json.dumps(args, sort_keys=True, ensure_ascii=False),
+            )
+            async with lock:
+                if args.get("confirmation_id") and receipt_key in ingest_receipts:
+                    ingest_receipts.move_to_end(receipt_key)
+                    return ingest_receipts[receipt_key]
+                output = await run(args)
+                payload = json.loads(output)
+                if args.get("confirmation_id") and not payload.get("error"):
+                    ingest_receipts[receipt_key] = output
+                    if len(ingest_receipts) > 256:
+                        ingest_receipts.popitem(last=False)
+                return output
+        return guarded
+
     read_tools = set(WIKI_READ_TOOLS)
     registered: list[FunctionTool] = []
     for schema, handler, is_async, emoji, display_name, ui_label, search_hint in _TOOLS:
+        if schema["name"] in {"wiki_plan_ingest", "wiki_apply_ingest", "wiki_batch_ingest"}:
+            handler = _guard_ingest(schema["name"], handler)
         toolset = WIKI_READ_TOOLSET if schema["name"] in read_tools else WIKI_MANAGE_TOOLSET
         result_kwargs: dict[str, Any] = {}
         if schema["name"] == "wiki_read":
@@ -2351,6 +2484,17 @@ def build_wiki_tools(
             emoji=emoji,
             display_name=display_name,
             ui_label_template=ui_label,
+            ui_label_args_resolver=(
+                _source_title_for_ui_label
+                if schema["name"] in {
+                    "wiki_delete_source",
+                    "wiki_parse_source",
+                    "wiki_plan_ingest",
+                    "wiki_apply_ingest",
+                    "wiki_refresh_source",
+                }
+                else None
+            ),
             search_hint=search_hint,
             **result_kwargs,
         )

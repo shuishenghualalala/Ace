@@ -160,8 +160,35 @@ def build_wiki_feature(
 
         provider_for_owner = resolve_owner
 
+    # 语义检索（embedding）：全局默认 provider 按 wiki.semantic 配置构建一次，
+    # 跨 Generation 共享；per-owner 解析由宿主的 owner_embedding_provider 承担
+    # （含按 owner 缓存与 shutdown 关闭，见 app.py）。
+    semantic = getattr(cfg, "semantic", None)
+    embedding_provider = None
+    if semantic is not None:
+        from .embedding import build_embedding_provider
+
+        host_config = getattr(host, "config", None)
+        embedding_provider = build_embedding_provider(
+            semantic,
+            api_key=str(getattr(host_config, "api_key", "") or ""),
+            base_url=getattr(host_config, "base_url", None),
+        )
+    # 宿主（CrewApp）持有全局 provider 并在 shutdown 统一关闭；轻量测试宿主
+    # 没有该属性时跳过挂接。
+    if hasattr(host, "_embedding_provider"):
+        host._embedding_provider = embedding_provider
+    owner_embedding_provider = getattr(host, "owner_embedding_provider", None)
+
     def make_provider() -> LocalWikiProvider:
-        store = FileSystemWikiStore(storage_root=storage_root)
+        store = FileSystemWikiStore(
+            storage_root=storage_root,
+            embedding_provider=embedding_provider,
+            provider_for_owner=owner_embedding_provider,
+            semantic_rank_weight=semantic.rank_weight if semantic else 40.0,
+            semantic_min_similarity=semantic.min_similarity if semantic else 0.0,
+            semantic_batch_size=semantic.batch_size if semantic else 64,
+        )
         manager = WikiSessionManager(store=store)
         summarizer = WikiSummarizer(
             store,
@@ -178,7 +205,10 @@ def build_wiki_feature(
             WikiProviderComponents(
                 store=store,
                 compiler=compiler,
-                querier=WikiQuerier(store),
+                querier=WikiQuerier(
+                    store,
+                    fuse_weight=semantic.fuse_weight if semantic else 0.9,
+                ),
                 summarizer=summarizer,
                 manager=manager,
             ),

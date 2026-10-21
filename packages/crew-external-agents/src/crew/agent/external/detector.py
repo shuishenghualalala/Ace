@@ -512,6 +512,8 @@ async def probe_runtime(candidate: RuntimeCandidate) -> RuntimeProfile:
 async def discover_local_runtimes() -> list[dict[str, Any]]:
     """Discover known local agents and probe all candidates concurrently."""
 
+    # _scan_descriptors 内部含同步 subprocess 探测（login shell 3s + 每个运行时
+    # --version 5s），直接跑会冻结事件循环，丢到线程池执行。
     detected = await asyncio.to_thread(_scan_descriptors, runtime_descriptors())
     semaphore = asyncio.Semaphore(4)
 

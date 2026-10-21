@@ -12,7 +12,7 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from dotenv import dotenv_values, load_dotenv
@@ -22,6 +22,9 @@ from crew.state.access_control import AccessControlConfig
 from crew.state.credentials import read_stored_key
 
 from crew.state.logging import get_logger
+
+if TYPE_CHECKING:
+    from crew.wiki.config import WikiSemanticConfig
 
 import sys
 
@@ -44,10 +47,11 @@ def _bundled_config_template_path() -> Path:
 def _get_user_config_dir() -> Path:
     """返回用户配置目录。
 
-    - 冻结态（PyInstaller 打包后）：委托 get_crew_home()，与 CREW_HOME 保持一致
+    - 打包态（安装包形态）：委托 get_crew_home()，与 CREW_HOME 保持一致
     - 开发态：项目根/config（config.yaml 是被 Git 忽略的本地配置）
     """
-    if getattr(sys, "frozen", False):
+    from crew.state.home import is_packaged
+    if is_packaged():
         from crew.state.home import get_crew_home
         return get_crew_home()
     return ROOT / "config"
@@ -78,7 +82,8 @@ def _init_user_config_dir() -> Path:
         shutil.copy2(bundled_config, user_config)
         log.info("首次运行：已从 config.yaml.example 复制本地配置到 %s", user_config)
 
-    if getattr(sys, "frozen", False):
+    from crew.state.home import is_packaged
+    if is_packaged():
         # 1. 从空模板生成用户私有 .env；发布包绝不携带真实密钥
         bundled_env = ROOT / "config" / ".env.example"
         user_env = user_dir / ".env"
@@ -178,6 +183,16 @@ def is_placeholder_model_profile(profile: ModelProfile | None) -> bool:
         "https://api.example.com",
         "https://api.example.com/v1",
     }
+
+
+def is_owner_overridable_model_profile(profile: ModelProfile | None) -> bool:
+    """判断 owner 是否可以在自己的 overlay 中覆盖默认 profile。
+
+    ``default`` 是首次运行时的兜底 profile，不应因为来源为 builtin 就把
+    首次配置卡死；owner 的修改写入私有 overlay，不会改动共享 config.yaml。
+    其它 builtin profile 仍保留管理员才能修改的全局语义。
+    """
+    return bool(profile and profile.builtin and profile.id == "default")
 
 
 @dataclass
@@ -522,6 +537,35 @@ class Config:
                 profiles[str(model_id)] = profile
         return profiles
 
+    def owner_semantic_config(self, owner_account_id: str | None = None) -> WikiSemanticConfig:
+        """返回 owner 生效的语义检索配置：全局默认 + owner overlay 逐字段覆盖。
+
+        不在此解析 api_key（``WikiSemanticConfig`` 只存 ``api_key_env`` 变量名）；
+        key 由调用方经 ``owner_env_map`` + ``_lookup_api_key`` 解析。
+        """
+        # 延迟导入：wiki 包内部经 _llm 引用 crew.providers，而 providers 初始化
+        # 会经 crew.state 回到本模块，顶层导入会形成循环。
+        from crew.wiki.config import WikiConfig, WikiSemanticConfig
+
+        global_cfg = WikiConfig.from_raw(self.wiki_config).semantic
+        overlay = self.owner_overlay_data(owner_account_id)
+        raw = (overlay.get("wiki") or {}).get("semantic")
+        if not isinstance(raw, dict):
+            return global_cfg
+        return WikiSemanticConfig.from_raw(
+            {
+                "enabled": raw.get("enabled", global_cfg.enabled),
+                "provider": raw.get("provider", global_cfg.provider),
+                "model": raw.get("model", global_cfg.model),
+                "base_url": raw.get("base_url", global_cfg.base_url),
+                "api_key_env": raw.get("api_key_env", global_cfg.api_key_env),
+                "rank_weight": raw.get("rank_weight", global_cfg.rank_weight),
+                "fuse_weight": raw.get("fuse_weight", global_cfg.fuse_weight),
+                "min_similarity": raw.get("min_similarity", global_cfg.min_similarity),
+                "batch_size": raw.get("batch_size", global_cfg.batch_size),
+            }
+        )
+
     def owner_active_model_id(self, owner_account_id: str | None = None) -> str:
         """解析 owner 的默认兜底模型。
 
@@ -645,6 +689,39 @@ class Config:
                 for model_id, profile in model_profiles.items()
                 if not profile.builtin
             }
+            yaml_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
+            with tmp_path.open("w", encoding="utf-8") as f:
+                yaml.safe_dump(
+                    data,
+                    f,
+                    allow_unicode=True,
+                    sort_keys=False,
+                    default_flow_style=False,
+                )
+            tmp_path.replace(yaml_path)
+            return yaml_path
+
+    def persist_owner_semantic_config(
+        self,
+        owner_account_id: str,
+        semantic: dict[str, Any],
+    ) -> Path:
+        """把 owner 的语义检索配置写回 owner overlay 的 ``wiki.semantic`` 段。
+
+        仅写该段、不碰共享 config.yaml；api_key 由调用方另行写 owner .env。
+        """
+        owner = str(owner_account_id or "").strip()
+        if not owner:
+            raise ValueError("owner_account_id 不能为空")
+        with _CONFIG_WRITE_LOCK:
+            yaml_path = owner_overlay_config_path(owner)
+            data = _read_yaml_file(yaml_path)
+            wiki = data.get("wiki")
+            if not isinstance(wiki, dict):
+                wiki = {}
+                data["wiki"] = wiki
+            wiki["semantic"] = semantic
             yaml_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
             with tmp_path.open("w", encoding="utf-8") as f:
@@ -813,7 +890,7 @@ class Config:
             "builtin": profile_data.get("builtin", current.builtin),
             "capabilities": profile_data.get("capabilities", list(current.capabilities)),
         }
-        # _build_profile_from_payload 按 key 解析链取值（凭证库 → env → 全局兜底）：
+        # _build_profile_from_payload 按 key 解析链取值（凭证库 → env）：
         # - 调用方先写凭证库/env → 取到新 key
         # - api_key_env 改到不存在的变量 → 取到空串，has_key=False（反映真实状态）
         # - 什么都不改 → 取到原值（os.environ 在 load_config 时已设置）
@@ -1265,16 +1342,17 @@ def _build_profile_from_payload(
     """从 CRUD payload 构建 ModelProfile。
 
     与 _build_model_profile 的区别：后者从 yaml+env 加载；前者从用户输入构建。
-    key 走 resolve_profile_api_key 解析链（凭证库 → env → 全局兜底）：
-    - 全局作用域（owner_account_id 为空）：env 兜底 CREW_API_KEY，与存量行为一致；
-    - owner 作用域：env_map 为该 owner 的 .env（写入不同步进程环境），无全局兜底。
+    key 走 resolve_profile_api_key 解析链（凭证库 → env，env_map 优先于进程
+    环境）：凭证库存储从结构上避免"多模型共用一个环境变量名、新 key 覆盖旧
+    key"的串 key 问题；自定义变量不回落共享的 CREW_API_KEY，避免不同 profile
+    串用凭据。
     """
     api_key_env = str(payload.get("api_key_env") or "CREW_API_KEY").strip() or "CREW_API_KEY"
     api_key = resolve_profile_api_key(
         model_id,
         api_key_env,
         env_map=env_map,
-        fallback_global=not bool(owner_account_id),
+        fallback_global=False,
         owner_account_id=owner_account_id,
     )
     capabilities = _model_capabilities(payload)
@@ -1334,7 +1412,7 @@ def _lookup_api_key(
         local = str(env_map.get(env_name, "") or "")
         if local:
             return local
-        if env_name != "CREW_API_KEY":
+        if fallback_global and env_name != "CREW_API_KEY":
             fallback = str(env_map.get("CREW_API_KEY", "") or "")
             if fallback:
                 return fallback
@@ -1504,10 +1582,12 @@ def _load_env_files() -> None:
     user_env = _get_user_config_dir() / ".env"
     if user_env not in candidates:
         candidates.append(user_env)
-    # PyInstaller 冻结态：把 .exe 同级路径追加在最后，最高优先级
-    if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).resolve().parent
-        candidates.append(exe_dir / ".env")
+    # 打包态：把 .exe 同级路径（PyInstaller 形态）与 Crew Home 追加在最后，最高优先级
+    from crew.state.home import is_packaged
+    if is_packaged():
+        if getattr(sys, "frozen", False):
+            exe_dir = Path(sys.executable).resolve().parent
+            candidates.append(exe_dir / ".env")
         from crew.state.home import get_crew_home
         candidates.append(get_crew_home() / ".env")
     env_home = os.getenv("CREW_HOME", "").strip()
