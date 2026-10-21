@@ -2,7 +2,7 @@
  * @vitest-environment happy-dom
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { __resetAllStoresForTest, workspaceStore } from '../../src/ui/stores/stores';
+import { __resetAllStoresForTest, authStore, workspaceStore } from '../../src/ui/stores/stores';
 import { createWorkspaceFromFolderPicker } from '../../src/ui/features/workspaces';
 import { backendApi } from '../../src/ui/backend-client';
 
@@ -21,6 +21,8 @@ vi.mock('../../src/ui/ui-feedback', () => ({
 beforeEach(() => {
   __resetAllStoresForTest();
   vi.clearAllMocks();
+  // auth-gate 为真实登录判定：local 桌面会话由 initAuthFlow 置为已登录，测试模拟该态。
+  authStore.set({ isLoggedIn: true });
   document.body.innerHTML = '<div id="history-list"></div>';
   window.Crew = {
     selectFolder: vi.fn(async () => ['D:/Projects/MyApp']),

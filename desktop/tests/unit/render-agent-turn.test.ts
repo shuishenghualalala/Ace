@@ -668,14 +668,14 @@ describe('renderAgentTurn', () => {
   });
 
   it('工具完成后长进度输出默认折叠为「实时输出 · N 行」', () => {
-    // terminal 进度按 ~0.5s 增量整块推送：一个 entry 可含多行，折叠按实际行数判定。
+    // 进度按增量整块推送：一个 entry 可含多行，折叠按实际行数判定。
+    // 注意用非命令行工具：bash/terminal/process 的 progress 是原始 stdout 透传，按设计不渲染（见下方专测）。
     const root = renderAgentTurn(
       makeMessages({
         thinking: undefined,
         toolCalls: [{
           toolCallId: 'term-1',
-          name: 'terminal',
-          args: '{"command":"ls -la plans"}',
+          name: 'wiki_plan_ingest',
           status: 'done',
           startedAt: 1_700_000_000_000,
           duration: 120,
@@ -713,7 +713,7 @@ describe('renderAgentTurn', () => {
         thinking: undefined,
         toolCalls: [{
           toolCallId: 'term-2',
-          name: 'terminal',
+          name: 'wiki_plan_ingest',
           args: '{}',
           status: 'error',
           startedAt: 1_700_000_000_000,

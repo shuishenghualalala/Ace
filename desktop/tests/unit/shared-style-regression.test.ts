@@ -184,7 +184,7 @@ describe('Crew shell and Welcome identity', () => {
     );
     expect(shellCss).toContain('grid-template-columns: 22px minmax(0, 32px)');
     expect(shellCss).toContain(
-      'grid-template-columns: var(--mw-app-rail-width-compact) 240px minmax(0, 1fr)',
+      'grid-template-columns: var(--mw-app-rail-width-compact) var(--mw-app-context-width, 240px) 5px minmax(0, 1fr)',
     );
     expect(shellCss).toContain('.mw-sidebar-brand__label');
   });
