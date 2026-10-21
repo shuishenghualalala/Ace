@@ -742,7 +742,8 @@ async def test_external_cli_cancellation_terminates_runtime_process_tree(tmp_pat
         timeout=120,
     )))
     pids = None
-    for _ in range(100):
+    # 全量套件高负载下子进程起盘可能超过 1s，预算放宽到 5s 防抖
+    for _ in range(500):
         if pid_file.exists():
             try:
                 candidate = json.loads(pid_file.read_text(encoding="utf-8"))
