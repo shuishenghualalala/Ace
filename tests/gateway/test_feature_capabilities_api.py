@@ -61,8 +61,14 @@ def test_config_body_legacy_runtime_substitute_returns_empty_map():
             wiki_enabled=False,
             external_agents_enabled=True,
             security_enabled=False,
+            owner_semantic_config=lambda *_args: SimpleNamespace(
+                enabled=False, provider="", model="", base_url="", api_key_env=""
+            ),
+            owner_env_map=lambda *_args: {},
+            _owner_builtin_allows_global_key_fallback=lambda *_args: False,
         ),
         owner_visible_model_profiles=lambda *_args, **_kwargs: (),
+        owner_model_profiles=lambda *_args: {},
         owner_default_model_profile=lambda *_args: SimpleNamespace(
             model="test", has_key=False, base_url="", id="default"
         ),
@@ -132,8 +138,14 @@ def _config_body_crew(*, snapshot: dict, wiki_enabled: bool, external_agents_ena
             wiki_enabled=wiki_enabled,
             external_agents_enabled=external_agents_enabled,
             security_enabled=False,
+            owner_semantic_config=lambda *_args: SimpleNamespace(
+                enabled=False, provider="", model="", base_url="", api_key_env=""
+            ),
+            owner_env_map=lambda *_args: {},
+            _owner_builtin_allows_global_key_fallback=lambda *_args: False,
         ),
         owner_visible_model_profiles=lambda *_args, **_kwargs: (),
+        owner_model_profiles=lambda *_args: {},
         owner_default_model_profile=lambda *_args: SimpleNamespace(
             model="test", has_key=False, base_url="", id="default"
         ),

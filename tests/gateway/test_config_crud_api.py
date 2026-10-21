@@ -20,6 +20,7 @@ from crew.app import build_app
 from crew.core.types import Message, ToolCall
 from crew.gateway.server import create_app
 from crew.state.config import load_config
+from crew.state.credentials import read_stored_key
 from crew.state.home import owner_path_segment
 
 OWNER_A = "A:uid-a"
@@ -379,7 +380,7 @@ async def test_create_model_writes_env(api, tmp_path: Path, auth_headers):
 
 @pytest.mark.asyncio
 async def test_create_model_without_api_key_env_uses_isolated_env(api, tmp_path: Path, auth_headers):
-    """省略 api_key_env 时，新增模型不能污染已有模型的共享 key。"""
+    """省略 api_key_env 时，新增模型的 key 进凭证库（按 profile id 隔离），不污染 .env。"""
     env_path = _owner_overlay_path(tmp_path).parent / ".env"
     env_path.write_text(
         env_path.read_text(encoding="utf-8") + "CREW_API_KEY=sk-existing-legacy\n",
@@ -400,8 +401,11 @@ async def test_create_model_without_api_key_env_uses_isolated_env(api, tmp_path:
     assert env_name.startswith("CREW_MODEL_IMPLICIT_MODEL_")
     assert env_name.endswith("_API_KEY")
     assert env_name != "CREW_API_KEY"
+    assert profile["has_key"] is True
+    # key 默认写 owner 凭证库（按 profile id），.env 不新增任何条目
+    assert read_stored_key(OWNER_A, "implicit-model") == "sk-implicit-secret"
     env_text = env_path.read_text(encoding="utf-8")
-    assert f"{env_name}=sk-implicit-secret" in env_text
+    assert env_name not in env_text
     assert "CREW_API_KEY=sk-existing-legacy" in env_text
     assert "TEST_ALPHA_API_KEY=sk-alpha-xxx" in env_text
     assert "TEST_BETA_API_KEY=sk-beta-xxx" in env_text

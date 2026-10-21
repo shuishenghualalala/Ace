@@ -178,10 +178,15 @@ def test_update_model_key_only_touches_target(app):
 
 
 def test_legacy_shared_env_profile_not_clobbered_by_new_store_key(app, monkeypatch):
-    """存量场景：旧模型 key 来自共享 CREW_API_KEY，新模型默认写凭证库后互不影响。"""
+    """存量场景：共享 CREW_API_KEY 的模型与新模型凭证库条目互不影响。
+
+    合并后凭证隔离语义：CRUD 新建的 profile 默认生成独立 env 名、缺 key 时
+    不再回落共享 CREW_API_KEY；共享 key 的存量模型以显式 api_key_env 表达，
+    解析链（凭证库 → env）保持互不遮蔽。
+    """
     monkeypatch.setenv("CREW_API_KEY", "sk-legacy")
     crew = app
-    crew.add_model({"id": "m1", "model": "gpt-test"}, owner_account_id="")
+    crew.add_model({"id": "m1", "model": "gpt-test", "api_key_env": "CREW_API_KEY"}, owner_account_id="")
 
     assert crew.config.model_profiles["m1"].api_key == "sk-legacy"
     crew.add_model({"id": "m2", "model": "gpt-test", "api_key": "sk-new"}, owner_account_id="")
