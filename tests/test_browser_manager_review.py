@@ -10,7 +10,6 @@ import re
 import struct
 import threading
 import time
-from contextlib import suppress
 from pathlib import Path
 
 import pytest

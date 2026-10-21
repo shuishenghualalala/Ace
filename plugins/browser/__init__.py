@@ -61,7 +61,7 @@ async def register(ctx) -> None:
         description="Read-only snapshots for explicit browser tab references",
     )
     ctx.register_skill_root("skills")
-    browser_tool = register_browser_use_tool(
+    register_browser_use_tool(
         ctx,
         browser_manager,
         config,
