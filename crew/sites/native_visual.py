@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from itertools import pairwise
 from typing import Any
 
 
@@ -84,7 +85,7 @@ def validate_visual(spec: Any) -> dict:
         require(isinstance(xs, list) and 1 <= len(xs) <= 120, "数据点须为 1–120 个")
         for x in xs:
             number(x)
-        require(all(a < b for a, b in zip(xs, xs[1:])), "x 必须递增")
+        require(all(a < b for a, b in pairwise(xs)), "x 必须递增")
         require(isinstance(chart["series"], list) and 1 <= len(chart["series"]) <= 4, "系列须为 1–4 个")
         if "showTotals" in chart:
             require(type(chart["showTotals"]) is bool, "showTotals 须为布尔值")

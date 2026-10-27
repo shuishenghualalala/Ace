@@ -24,7 +24,7 @@ const csp=fs.readFileSync(root+'/desktop/assets/index.html','utf8').match(/<meta
 fs.writeFileSync(out+'/index.html',`<!doctype html><html><head>${csp}<style>body{background:#191b22;color:#ddd;max-width:850px;margin:30px auto;font:14px system-ui;--mw-space-2:8px;--mw-space-3:12px;--mw-space-4:16px;--mw-border-subtle:#454a56;--mw-radius-2:6px;--mw-radius-4:12px;--mw-text-primary:#eee;--mw-text-secondary:#aaa;--mw-type-caption-size:13px}${fs.readFileSync(root+'/desktop/assets/styles/web-messages.css','utf8')}</style></head><body><h1>桌面回答交互验证</h1><script src="renderer.js"></script></body></html>`);
 async function build(){await esbuild.build({entryPoints:[out+'/renderer.ts'],outfile:out+'/renderer.js',bundle:true,platform:'browser'});await esbuild.build({entryPoints:[out+'/main.ts'],outfile:out+'/main.cjs',bundle:true,platform:'node',external:['electron']})}
 
-const {_electron}=require('playwright-core');
+const {_electron}=require('@playwright/test');
 const assert=require('node:assert/strict');
 (async()=>{
  await build();

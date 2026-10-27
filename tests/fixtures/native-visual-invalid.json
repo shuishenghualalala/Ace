@@ -1,0 +1,37 @@
+[
+  {
+    "name": "unknown field",
+    "path": ["html"],
+    "value": "<script>bad()</script>"
+  },
+  {
+    "name": "executable expression",
+    "path": ["chart", "series", "0", "expression"],
+    "value": "income*x"
+  },
+  {
+    "name": "unknown parameter reference",
+    "path": ["chart", "series", "0", "expression"],
+    "value": {"param": "missing"}
+  },
+  {
+    "name": "unsupported operator",
+    "path": ["chart", "series", "0", "expression"],
+    "value": {"op": "eval", "args": [1, 2]}
+  },
+  {
+    "name": "duplicate parameter id",
+    "path": ["parameters", "1", "id"],
+    "value": "cost"
+  },
+  {
+    "name": "unsorted points",
+    "path": ["chart", "x", "1"],
+    "value": 1
+  },
+  {
+    "name": "unbounded parameter",
+    "path": ["parameters", "0", "value"],
+    "value": 10000000000000
+  }
+]

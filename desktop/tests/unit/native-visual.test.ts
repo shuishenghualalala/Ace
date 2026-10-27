@@ -1,7 +1,9 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import fixture from '../../../tests/fixtures/native-visual.json';
-import { bindNativeVisuals, calculate, evaluate, nativeVisuals, parseVisual, renderNativeVisual, type NativeVisual } from '../../src/ui/features/native-visual';
+import invalidFixtures from '../../../tests/fixtures/native-visual-invalid.json';
+import { bindNativeVisuals, calculate, evaluate, parseVisual, renderNativeVisual, type NativeVisual } from '../../src/ui/features/native-visual';
+import { inlineSurfaces } from '../../src/ui/features/inline-surfaces';
 import { state } from '../../src/ui/state';
 const spec = parseVisual(fixture)!;
 const visual: NativeVisual = { key: 'native:s:call', sessionId: 's', spec };
@@ -16,10 +18,13 @@ describe('native visual protocol and rendering', () => {
     expect(() => evaluate({ op: 'div', args: [1, 0] }, {}, 1)).toThrow();
     expect(() => evaluate({ op: 'pow', args: [10, 100] }, {}, 1)).toThrow();
   });
-  it('rejects scripts, unknown fields, wrong references and unbounded input', () => {
-    expect(parseVisual({ ...fixture, html: '<script>bad()</script>' })).toBeNull();
-    for (const expression of ['income * x', { param: 'missing' }, { op: 'eval', args: [1, 2] }]) {
-      const next = structuredClone(fixture); Object.assign(next.chart.series[0], { expression }); expect(parseVisual(next)).toBeNull();
+  it('rejects shared invalid protocol examples and unbounded input', () => {
+    for (const { path, value } of invalidFixtures) {
+      const next = structuredClone(fixture);
+      let target = next as Record<string, unknown>;
+      for (const key of path.slice(0, -1)) target = target[key] as Record<string, unknown>;
+      target[path.at(-1)!] = value;
+      expect(parseVisual(next)).toBeNull();
     }
     expect(parseVisual({ ...fixture, parameters: Array(9).fill(fixture.parameters[0]) })).toBeNull();
   });
@@ -31,6 +36,14 @@ describe('native visual protocol and rendering', () => {
     expect(restored.textContent).toContain('83,304');
     expect(mount({ ...visual, key: 'other' }).querySelector<HTMLInputElement>('[name="cost"]')!.value).toBe('6000');
     state.userInfo = { uid: 'b' }; expect(mount().querySelector<HTMLInputElement>('[name="cost"]')!.value).toBe('6000');
+  });
+  it('does not persist or submit without a stable user identity', () => {
+    state.userInfo = { staffName: 'missing id' };
+    const root = mount();
+    change(root, 'cost', '7000');
+    root.querySelector<HTMLButtonElement>('.native-visual__action')!.click();
+    expect(localStorage.length).toBe(0);
+    expect(send).not.toHaveBeenCalled();
   });
   it('validates, submits readable values once, and rejects cross-session actions', async () => {
     const root = mount(); const action = root.querySelector<HTMLButtonElement>('.native-visual__action')!;
@@ -60,7 +73,9 @@ describe('native visual protocol and rendering', () => {
   });
   it('only consumes trusted tool envelopes for the rendered session and deduplicates live/history copies', () => {
     const message = { id: 'm', role: 'assistant' as const, content: '', timestamp: 1, toolCalls: [{ toolCallId: 't', name: 'Widget', status: 'done' as const, startedAt: 0, result: JSON.stringify({ ok: true, surface: { version: 2, mode: 'native', display: 'inline', status: 'ready', sessionId: 's', spec } }) }] };
-    expect(nativeVisuals([message, message], 's')).toHaveLength(1); expect(nativeVisuals([message], 'other')).toHaveLength(0);
-    message.toolCalls[0].name = 'terminal'; expect(nativeVisuals([message], 's')).toHaveLength(0);
+    expect(inlineSurfaces([message, message], 's').visuals).toHaveLength(1);
+    expect(inlineSurfaces([message], 'other').visuals).toHaveLength(0);
+    message.toolCalls[0].name = 'terminal';
+    expect(inlineSurfaces([message], 's').visuals).toHaveLength(0);
   });
 });

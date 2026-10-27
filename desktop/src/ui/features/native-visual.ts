@@ -1,5 +1,5 @@
-import type { ChatMessage } from '../chat-render';
 import { state } from '../state';
+import { interactiveOwnerKey } from './interactive-owner';
 
 type Expr = number | { param: string } | { x: true } | { op: string; args: [Expr, Expr] };
 interface Parameter { id: string; label: string; type: 'range' | 'number' | 'text' | 'select'; value: number | string; min?: number; max?: number; step?: number; unit?: string; options?: string[] }
@@ -67,20 +67,6 @@ export function parseVisual(value: unknown): VisualSpec | null {
   } catch { return null; }
 }
 
-export function nativeVisuals(messages: ChatMessage[], sessionId: string): NativeVisual[] {
-  const found = new Map<string, NativeVisual>();
-  for (const m of messages) for (const t of m.toolCalls ?? []) {
-    if (t.name !== 'Widget' || !t.result) continue;
-    try {
-      const result = JSON.parse(t.result); const s = result.surface;
-      if (result.ok !== true || s?.version !== 2 || s.mode !== 'native' || s.display !== 'inline' || s.status !== 'ready' || s.sessionId !== sessionId) continue;
-      const spec = parseVisual(s.spec);
-      if (spec) { const key = `native:${sessionId}:${t.toolCallId}`; found.set(key, { key, sessionId, spec }); }
-    } catch { /* Ordinary tool output. */ }
-  }
-  return [...found.values()];
-}
-
 export function evaluate(e: Expr, parameters: Record<string, string | number>, x: number): number {
   let n: number;
   if (typeof e === 'number') n = e;
@@ -114,8 +100,18 @@ export function calculate(spec: VisualSpec, params: Record<string, string | numb
 
 let submit: (sessionId: string, text: string) => Promise<boolean> = async () => false;
 export function bindNativeVisuals(handler: typeof submit): void { submit = handler; }
-const owner = (): string => state.isLoggedIn && state.userInfo ? JSON.stringify([state.userInfo.staffUid, state.userInfo.uid, state.userInfo.pid, state.userInfo.staffCode]) : '';
-const format = (n: number): string => new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(n);
+const numberFormat = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 });
+const axisFormats = new Map<number, Intl.NumberFormat>();
+const format = (n: number): string => numberFormat.format(n);
+const axisFormat = (step: number, n: number): string => {
+  const digits = Math.min(20, Math.max(0, 1 - Math.floor(Math.log10(step))));
+  let formatter = axisFormats.get(digits);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits });
+    axisFormats.set(digits, formatter);
+  }
+  return formatter.format(n);
+};
 const fingerprint = (value: string): string => {
   let hash = 2166136261;
   for (let i = 0; i < value.length; i++) hash = Math.imul(hash ^ value.charCodeAt(i), 16777619);
@@ -131,27 +127,216 @@ const svgNode = (tag: string, attributes: Record<string, string | number>, conte
   return node;
 };
 
-export function renderNativeVisual(visual: NativeVisual): HTMLElement {
-  const { spec } = visual; const identity = owner();
-  const storageKey = `ace.native.v1:${identity}:${visual.key}`;
-  const params: Record<string, string | number> = Object.fromEntries((spec.parameters ?? []).map(p => [p.id, p.value]));
+type VisualParams = Record<string, string | number>;
+
+function restoreVisualState(spec: VisualSpec, storageKey: string, signature: string): {
+  params: VisualParams; hidden: Set<string>;
+} {
+  const params = Object.fromEntries((spec.parameters ?? []).map(p => [p.id, p.value]));
   const hidden = new Set<string>();
   let saved: { values?: Record<string, unknown>; hidden?: string[]; signature?: string } = {};
-  const signature = fingerprint(JSON.stringify(spec));
-  try { const raw = localStorage.getItem(storageKey); if (raw && raw.length <= 16000) saved = JSON.parse(raw); } catch { /* Defaults. */ }
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (raw && raw.length <= 16000) saved = JSON.parse(raw);
+  } catch { /* Defaults. */ }
   if (!saved || typeof saved !== 'object') saved = {};
-  if (saved.signature === signature) {
-    for (const p of spec.parameters ?? []) {
-      const v = saved.values?.[p.id];
-      if ((p.type === 'range' || p.type === 'number') ? numeric(v) && v >= p.min! && v <= p.max! : text(v, 1000) && (p.type !== 'select' || p.options!.includes(v))) params[p.id] = v as string | number;
+  if (saved.signature !== signature) return { params, hidden };
+  for (const p of spec.parameters ?? []) {
+    const value = saved.values?.[p.id];
+    if ((p.type === 'range' || p.type === 'number')
+      ? numeric(value) && value >= p.min! && value <= p.max!
+      : text(value, 1000) && (p.type !== 'select' || p.options!.includes(value))) {
+      params[p.id] = value as string | number;
     }
-    if (Array.isArray(saved.hidden)) for (const key of saved.hidden) if (spec.chart?.series.some(s => s.id === key)) hidden.add(key);
-    if (hidden.size === spec.chart?.series.length) hidden.clear();
   }
+  if (Array.isArray(saved.hidden)) {
+    for (const key of saved.hidden) if (spec.chart?.series.some(s => s.id === key)) hidden.add(key);
+  }
+  if (hidden.size === spec.chart?.series.length) hidden.clear();
+  return { params, hidden };
+}
+
+function drawNativeChart(
+  spec: VisualSpec,
+  values: number[][],
+  hidden: Set<string>,
+  selected: number,
+  plot: HTMLElement,
+  summaries: HTMLElement,
+  details: HTMLElement,
+  showDetail: (index: number) => void,
+): void {
+  plot.replaceChildren(); summaries.replaceChildren(); details.textContent = '';
+  if (!spec.chart) return;
+  const chart = spec.chart;
+  const visible = chart.series.map((series, index) => ({ series, index }))
+    .filter(({ series }) => !hidden.has(series.id));
+  const all = visible.flatMap(({ index }) => values[index]);
+  if (!all.length) return;
+  const lo = Math.min(0, ...all), hi = Math.max(0, ...all);
+  const rawStep = (hi - lo || 1) / 4;
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const step = ([1, 2, 2.5, 5, 10].find(n => n * magnitude >= rawStep) ?? 10) * magnitude;
+  const min = Math.floor(lo / step) * step;
+  const max = hi === lo ? min + step * 4 : Math.ceil(hi / step) * step;
+  const formatAxis = (n: number): string => axisFormat(step, n);
+  const width = Math.max(300, Math.round(plot.getBoundingClientRect().width || 640));
+  const height = 280;
+  const left = Math.min(126, Math.max(62,
+    Math.max(formatAxis(min).length, formatAxis(max).length) * 7 + 12));
+  const right = width - 18, top = 28, bottom = height - 40;
+  const x = (i: number): number => chart.type === 'bar'
+    ? left + (i + .5) * (right - left) / chart.x.length
+    : chart.x.length === 1 ? (left + right) / 2
+      : left + (chart.x[i] - chart.x[0]) / (chart.x.at(-1)! - chart.x[0]) * (right - left);
+  const y = (v: number): number => bottom - (v - min) / (max - min) * (bottom - top);
+  const svg = svgNode('svg', {
+    viewBox: `0 0 ${width} ${height}`, role: 'img',
+    'aria-label': `${spec.title}，${chart.xLabel}，${chart.yLabel}`, tabindex: 0,
+  });
+  svg.append(svgNode('text', { x: left, y: 15, class: 'native-visual__axis' }, chart.yLabel));
+  for (let tick = 0; tick <= Math.round((max - min) / step); tick++) {
+    const value = min + step * tick;
+    svg.append(svgNode('line', { x1: left, x2: right, y1: y(value), y2: y(value), class: 'native-visual__grid' }));
+    svg.append(svgNode('text', { x: left - 8, y: y(value) + 4, 'text-anchor': 'end', class: 'native-visual__axis' }, formatAxis(value)));
+  }
+  svg.append(svgNode('line', { x1: left, x2: right, y1: y(0), y2: y(0), class: 'native-visual__zero' }));
+  const tickStep = Math.max(1, Math.ceil((chart.x.length - 1) / (width < 450 ? 3 : 7)));
+  chart.x.forEach((value, index) => {
+    if (index % tickStep === 0 || index === chart.x.length - 1) {
+      svg.append(svgNode('text', { x: x(index), y: bottom + 18, 'text-anchor': 'middle', class: 'native-visual__axis' }, format(value)));
+    }
+  });
+  svg.append(svgNode('text', { x: (left + right) / 2, y: height - 2, 'text-anchor': 'middle', class: 'native-visual__axis' }, chart.xLabel));
+  visible.forEach(({ series, index }, position) => {
+    const color = `var(--mw-chart-${index + 1})`;
+    if (chart.type === 'line') {
+      const path = values[index].map((value, i) => `${i ? 'L' : 'M'}${x(i)},${y(value)}`).join(' ');
+      svg.append(svgNode('path', { d: path, fill: 'none', stroke: color, 'stroke-width': 2.5 }));
+      values[index].forEach((value, i) => {
+        if (chart.x.length <= 24 || i === chart.x.length - 1) {
+          svg.append(svgNode('circle', { cx: x(i), cy: y(value), r: 3, fill: color }));
+        }
+      });
+    } else {
+      const groupWidth = (right - left) / chart.x.length * .78;
+      const barWidth = groupWidth / visible.length;
+      values[index].forEach((value, i) => svg.append(svgNode('rect', {
+        x: x(i) - groupWidth / 2 + position * barWidth,
+        y: Math.min(y(0), y(value)), width: Math.max(.5, barWidth - 1),
+        height: Math.abs(y(value) - y(0)), fill: color,
+      })));
+    }
+    if (chart.showTotals) {
+      const summary = el('div', 'native-visual__summary');
+      summary.append(el('span', '', series.label), el('strong', '', format(values[index].at(-1)!)));
+      summaries.append(summary);
+    }
+  });
+  const guide = svgNode('line', { y1: top, y2: bottom, class: 'native-visual__guide', visibility: 'hidden' });
+  svg.append(guide);
+  const inspect = (index: number): void => {
+    showDetail(index);
+    guide.setAttribute('x1', String(x(index))); guide.setAttribute('x2', String(x(index)));
+    guide.setAttribute('visibility', 'visible');
+  };
+  svg.addEventListener('pointermove', (event) => {
+    const rect = svg.getBoundingClientRect();
+    if (!rect.width) return;
+    const point = (event.clientX - rect.left) / rect.width * width;
+    let nearest = 0;
+    chart.x.forEach((_, index) => {
+      if (Math.abs(x(index) - point) < Math.abs(x(nearest) - point)) nearest = index;
+    });
+    inspect(nearest);
+  });
+  svg.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const current = selected < 0 ? chart.x.length - 1 : selected;
+    inspect(Math.max(0, Math.min(chart.x.length - 1, current + (event.key === 'ArrowRight' ? 1 : -1))));
+  });
+  plot.append(svg);
+  showDetail(selected >= 0 && selected < chart.x.length ? selected : chart.x.length - 1);
+}
+
+function bindNativeControls(
+  spec: VisualSpec,
+  params: VisualParams,
+  form: HTMLFormElement,
+  status: HTMLElement,
+  identity: string,
+  refresh: () => boolean,
+  save: () => void,
+): void {
+  for (const parameter of spec.parameters ?? []) {
+    const label = el('label', 'native-visual__control');
+    const header = el('span', 'native-visual__control-label', parameter.label);
+    const output = el('output');
+    if (parameter.type === 'range') {
+      output.textContent = `${format(Number(params[parameter.id]))}${parameter.unit ? ` ${parameter.unit}` : ''}`;
+      header.append(output);
+    } else if (parameter.unit) header.append(el('span', '', parameter.unit));
+    const input = parameter.type === 'select' ? el('select') : el('input');
+    input.name = parameter.id; input.setAttribute('aria-label', parameter.label); input.required = true;
+    if (input instanceof HTMLSelectElement) {
+      for (const option of parameter.options!) {
+        const node = el('option', '', option); node.value = option; input.append(node);
+      }
+    } else {
+      input.type = parameter.type === 'range' ? 'range' : parameter.type === 'number' ? 'number' : 'text';
+      if (parameter.type === 'range' || parameter.type === 'number') {
+        input.min = String(parameter.min); input.max = String(parameter.max); input.step = String(parameter.step);
+      } else input.maxLength = 1000;
+    }
+    input.value = String(params[parameter.id]);
+    input.addEventListener('input', () => {
+      if (identity !== interactiveOwnerKey()) return;
+      const value = parameter.type === 'number' || parameter.type === 'range' ? Number(input.value) : input.value;
+      if (input.value !== '' && input.checkValidity()) params[parameter.id] = value;
+      if (parameter.type === 'range') {
+        output.textContent = `${format(Number(value))}${parameter.unit ? ` ${parameter.unit}` : ''}`;
+      }
+      status.textContent = '';
+      if (!refresh()) save();
+    });
+    label.append(header, input); form.append(label);
+  }
+}
+
+function bindNativeLegend(
+  spec: VisualSpec,
+  legend: HTMLElement,
+  hidden: Set<string>,
+  draw: () => void,
+  save: () => void,
+): void {
+  for (const [index, series] of (spec.chart?.series ?? []).entries()) {
+    const button = el('button', 'native-visual__legend-item', series.label);
+    button.type = 'button';
+    button.style.setProperty('--series-color', `var(--mw-chart-${index + 1})`);
+    button.setAttribute('aria-pressed', String(!hidden.has(series.id)));
+    button.addEventListener('click', () => {
+      if (hidden.has(series.id)) hidden.delete(series.id);
+      else if (hidden.size < spec.chart!.series.length - 1) hidden.add(series.id);
+      button.setAttribute('aria-pressed', String(!hidden.has(series.id)));
+      draw(); save();
+    });
+    legend.append(button);
+  }
+}
+
+export function renderNativeVisual(visual: NativeVisual): HTMLElement {
+  const { spec } = visual;
+  const identity = interactiveOwnerKey();
+  const storageKey = `ace.native.v1:${identity}:${visual.key}`;
+  const signature = fingerprint(JSON.stringify(spec));
+  const { params, hidden } = restoreVisualState(spec, storageKey, signature);
   const root = el('section', 'native-visual'); root.setAttribute('aria-label', spec.title);
   root.append(el('h3', 'native-visual__title', spec.title));
   if (spec.description) root.append(el('p', 'native-visual__description', spec.description));
-  const form = el('form', 'native-visual__controls'); form.addEventListener('submit', e => e.preventDefault());
+  const form = el('form', 'native-visual__controls');
+  form.addEventListener('submit', event => event.preventDefault());
   const summaries = el('div', 'native-visual__summaries');
   const plot = el('div', 'native-visual__plot');
   const legend = el('div', 'native-visual__legend');
@@ -162,113 +347,61 @@ export function renderNativeVisual(visual: NativeVisual): HTMLElement {
   let pending = false, lastSent = '', values: number[][] = [], selected = -1, invalid = false;
   const current = (): string => JSON.stringify(params);
   const save = (): void => {
-    if (!identity || identity !== owner()) return;
-    try { const data = JSON.stringify({ values: params, hidden: [...hidden], signature });
+    if (!identity || identity !== interactiveOwnerKey()) return;
+    try {
+      const data = JSON.stringify({ values: params, hidden: [...hidden], signature });
       if (new TextEncoder().encode(data).length > 16000) throw new Error('state too large');
       localStorage.setItem(storageKey, data);
     } catch { status.textContent = '参数未能保存到此设备'; }
   };
-  const updateAction = (): void => { if (action) action.disabled = pending || invalid || lastSent === current(); };
+  const updateAction = (): void => {
+    if (action) action.disabled = pending || invalid || lastSent === current();
+  };
   const showDetail = (index: number): void => {
     if (!spec.chart || !values.length) return;
     selected = index;
-    details.textContent = `${spec.chart.xLabel} ${format(spec.chart.x[index])} · ${spec.chart.series.filter(s => !hidden.has(s.id)).map(s => `${s.label} ${format(values[spec.chart!.series.indexOf(s)][index])}`).join(' · ')}（${spec.chart.yLabel}）`;
+    const detail = spec.chart.series.map((series, i) => ({ series, i }))
+      .filter(({ series }) => !hidden.has(series.id))
+      .map(({ series, i }) => `${series.label} ${format(values[i][index])}`).join(' · ');
+    details.textContent = `${spec.chart.xLabel} ${format(spec.chart.x[index])} · ${detail}（${spec.chart.yLabel}）`;
   };
-  function draw(): void {
-    plot.replaceChildren(); summaries.replaceChildren(); details.textContent = '';
-    if (!spec.chart || invalid) return;
-    const c = spec.chart;
-    const visible = c.series.map((s, i) => ({ s, i })).filter(({ s }) => !hidden.has(s.id));
-    const all = visible.flatMap(({ i }) => values[i]);
-    if (!all.length) return;
-    const lo = Math.min(0, ...all), hi = Math.max(0, ...all); const span = hi - lo || 1;
-    const rawStep = span / 4, magnitude = 10 ** Math.floor(Math.log10(rawStep));
-    const step = ([1, 2, 2.5, 5, 10].find(n => n * magnitude >= rawStep) ?? 10) * magnitude;
-    const min = Math.floor(lo / step) * step, max = hi === lo ? min + step * 4 : Math.ceil(hi / step) * step;
-    const axisFormat = (n: number): string => new Intl.NumberFormat('zh-CN', {
-      maximumFractionDigits: Math.min(20, Math.max(0, 1 - Math.floor(Math.log10(step)))),
-    }).format(n);
-    const width = Math.max(300, Math.round(plot.getBoundingClientRect().width || 640)); const height = 280;
-    const left = Math.min(126, Math.max(62, Math.max(axisFormat(min).length, axisFormat(max).length) * 7 + 12));
-    const right = width - 18, top = 28, bottom = height - 40;
-    const x = (i: number): number => c.type === 'bar' ? left + (i + .5) * (right - left) / c.x.length : c.x.length === 1 ? (left + right) / 2 : left + (c.x[i] - c.x[0]) / (c.x.at(-1)! - c.x[0]) * (right - left);
-    const y = (v: number): number => bottom - (v - min) / (max - min) * (bottom - top);
-    const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `${spec.title}，${c.xLabel}，${c.yLabel}`, tabindex: 0 });
-    svg.append(svgNode('text', { x: left, y: 15, class: 'native-visual__axis' }, c.yLabel));
-    for (let tick = 0; tick <= Math.round((max - min) / step); tick++) {
-      const v = min + step * tick;
-      svg.append(svgNode('line', { x1: left, x2: right, y1: y(v), y2: y(v), class: 'native-visual__grid' }));
-      svg.append(svgNode('text', { x: left - 8, y: y(v) + 4, 'text-anchor': 'end', class: 'native-visual__axis' }, axisFormat(v)));
+  const draw = (): void => {
+    if (invalid) {
+      plot.replaceChildren(); summaries.replaceChildren(); details.textContent = '';
+      return;
     }
-    svg.append(svgNode('line', { x1: left, x2: right, y1: y(0), y2: y(0), class: 'native-visual__zero' }));
-    const tickStep = Math.max(1, Math.ceil((c.x.length - 1) / (width < 450 ? 3 : 7)));
-    c.x.forEach((v, i) => { if (i % tickStep === 0 || i === c.x.length - 1) svg.append(svgNode('text', { x: x(i), y: bottom + 18, 'text-anchor': 'middle', class: 'native-visual__axis' }, format(v))); });
-    svg.append(svgNode('text', { x: (left + right) / 2, y: height - 2, 'text-anchor': 'middle', class: 'native-visual__axis' }, c.xLabel));
-    visible.forEach(({ s, i }, position) => {
-      const color = `var(--mw-chart-${i + 1})`;
-      if (c.type === 'line') {
-        svg.append(svgNode('path', { d: values[i].map((v, j) => `${j ? 'L' : 'M'}${x(j)},${y(v)}`).join(' '), fill: 'none', stroke: color, 'stroke-width': 2.5 }));
-        values[i].forEach((v, j) => { if (c.x.length <= 24 || j === c.x.length - 1) svg.append(svgNode('circle', { cx: x(j), cy: y(v), r: 3, fill: color })); });
-      } else {
-        const groupWidth = (right - left) / c.x.length * .78; const barWidth = groupWidth / visible.length;
-        values[i].forEach((v, j) => svg.append(svgNode('rect', { x: x(j) - groupWidth / 2 + position * barWidth, y: Math.min(y(0), y(v)), width: Math.max(.5, barWidth - 1), height: Math.abs(y(v) - y(0)), fill: color })));
-      }
-      if (c.showTotals) { const summary = el('div', 'native-visual__summary'); summary.append(el('span', '', s.label), el('strong', '', format(values[i].at(-1)!))); summaries.append(summary); }
-    });
-    const guide = svgNode('line', { y1: top, y2: bottom, class: 'native-visual__guide', visibility: 'hidden' }); svg.append(guide);
-    const inspect = (i: number): void => { showDetail(i); guide.setAttribute('x1', String(x(i))); guide.setAttribute('x2', String(x(i))); guide.setAttribute('visibility', 'visible'); };
-    svg.addEventListener('pointermove', (event) => { const e = event as PointerEvent; const rect = svg.getBoundingClientRect(); if (!rect.width) return;
-      const point = (e.clientX - rect.left) / rect.width * width;
-      let nearest = 0; c.x.forEach((_, i) => { if (Math.abs(x(i) - point) < Math.abs(x(nearest) - point)) nearest = i; }); inspect(nearest);
-    });
-    svg.addEventListener('keydown', (event) => { const e = event as KeyboardEvent; if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return; e.preventDefault(); inspect(Math.max(0, Math.min(c.x.length - 1, (selected < 0 ? c.x.length - 1 : selected) + (e.key === 'ArrowRight' ? 1 : -1)))); });
-    plot.append(svg); showDetail(selected >= 0 && selected < c.x.length ? selected : c.x.length - 1);
-  }
-  function refresh(): void {
+    drawNativeChart(spec, values, hidden, selected, plot, summaries, details, showDetail);
+  };
+  const refresh = (): boolean => {
     invalid = !form.checkValidity(); error.textContent = invalid ? '请检查输入范围和格式' : '';
-    if (!invalid) try { values = calculate(spec, params); } catch (e) { invalid = true; error.textContent = e instanceof Error ? e.message : '无法计算'; }
-    draw(); updateAction();
-  }
-  for (const p of spec.parameters ?? []) {
-    const label = el('label', 'native-visual__control'); const header = el('span', 'native-visual__control-label', p.label);
-    const output = el('output');
-    if (p.type === 'range') { output.textContent = `${format(Number(params[p.id]))}${p.unit ? ` ${p.unit}` : ''}`; header.append(output); }
-    else if (p.unit) header.append(el('span', '', p.unit));
-    const input = p.type === 'select' ? el('select') : el('input');
-    input.name = p.id; input.setAttribute('aria-label', p.label); input.required = true;
-    if (input instanceof HTMLSelectElement) for (const option of p.options!) { const opt = el('option', '', option); opt.value = option; input.append(opt); }
-    else { input.type = p.type === 'range' ? 'range' : p.type === 'number' ? 'number' : 'text';
-      if (p.type === 'range' || p.type === 'number') { input.min = String(p.min); input.max = String(p.max); input.step = String(p.step); }
-      else input.maxLength = 1000;
+    if (!invalid) try {
+      values = calculate(spec, params);
+    } catch (cause) {
+      invalid = true; error.textContent = cause instanceof Error ? cause.message : '无法计算';
     }
-    input.value = String(params[p.id]);
-    input.addEventListener('input', () => {
-      if (identity !== owner()) return;
-      const v = p.type === 'number' || p.type === 'range' ? Number(input.value) : input.value;
-      if (input.value !== '' && input.checkValidity()) params[p.id] = v;
-      if (p.type === 'range') output.textContent = `${format(Number(v))}${p.unit ? ` ${p.unit}` : ''}`;
-      status.textContent = ''; refresh(); if (!invalid) save();
-    });
-    label.append(header, input); form.append(label);
-  }
-  for (const s of spec.chart?.series ?? []) {
-    const button = el('button', 'native-visual__legend-item', s.label); button.type = 'button'; button.style.setProperty('--series-color', `var(--mw-chart-${spec.chart!.series.indexOf(s) + 1})`);
-    button.setAttribute('aria-pressed', String(!hidden.has(s.id)));
-    button.addEventListener('click', () => { if (hidden.has(s.id)) hidden.delete(s.id); else if (hidden.size < spec.chart!.series.length - 1) hidden.add(s.id);
-      button.setAttribute('aria-pressed', String(!hidden.has(s.id))); draw(); save(); }); legend.append(button);
-  }
+    draw(); updateAction();
+    return invalid;
+  };
+  bindNativeControls(spec, params, form, status, identity, refresh, save);
+  bindNativeLegend(spec, legend, hidden, draw, save);
   root.append(form, summaries, legend, plot, details, error);
   if (action) {
     action.type = 'button';
     action.addEventListener('click', () => {
-      if (pending || !root.isConnected || !identity || identity !== owner() || state.activeSessionId !== visual.sessionId) return;
-      refresh(); if (invalid || !form.reportValidity() || lastSent === current()) return;
+      if (pending || !root.isConnected || !identity || identity !== interactiveOwnerKey()
+        || state.activeSessionId !== visual.sessionId) return;
+      refresh();
+      if (invalid || !form.reportValidity() || lastSent === current()) return;
       const snapshot = current(); pending = true; status.textContent = '正在提交…'; updateAction();
-      const lines = (spec.parameters ?? []).map(p => `${p.label}（${p.id}）：${String(params[p.id])}${p.unit ? ` ${p.unit}` : ''}`);
+      const lines = (spec.parameters ?? []).map(parameter =>
+        `${parameter.label}（${parameter.id}）：${String(params[parameter.id])}${parameter.unit ? ` ${parameter.unit}` : ''}`);
       const message = `${spec.action!.instruction}\n\n「${spec.title}」当前参数：\n${lines.join('\n')}`;
       void Promise.resolve().then(() => submit(visual.sessionId, message)).then(sent => {
-        if (sent) lastSent = snapshot; status.textContent = sent ? '已提交' : '提交失败，请重试';
-      }).catch(() => { status.textContent = '提交失败，请重试'; }).finally(() => { pending = false; updateAction(); });
+        if (sent) lastSent = snapshot;
+        status.textContent = sent ? '已提交' : '提交失败，请重试';
+      }).catch(() => {
+        status.textContent = '提交失败，请重试';
+      }).finally(() => { pending = false; updateAction(); });
     });
     const footer = el('div', 'native-visual__footer'); footer.append(action, status); root.append(footer);
   } else root.append(status);

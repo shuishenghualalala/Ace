@@ -1,9 +1,12 @@
 // @vitest-environment happy-dom
-// @vitest-environment-options {"happyDOM":{"settings":{"disableIframePageLoading":true}}}
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { bindInlineWidgets, hydrateInlineWidgets, inlineDocument, inlineWidgets, renderInlineWidget, type InlineWidget } from '../../src/ui/features/inline-widget';
+import { suppressUnsupportedIframeSchemeErrors } from './helpers/happy-dom';
+import { bindInlineWidgets, hydrateInlineWidgets, inlineDocument, renderInlineWidget, type InlineWidget } from '../../src/ui/features/inline-widget';
+import { inlineSurfaces } from '../../src/ui/features/inline-surfaces';
 import { state } from '../../src/ui/state';
 import type { ChatMessage } from '../../src/ui/chat-render';
+
+suppressUnsupportedIframeSchemeErrors();
 
 const widget: InlineWidget = { key: 'inline:s:t', sessionId: 's', widgetId: 'widget_123456789abc',
   title: '收益', html: '<input id="cost" type="number">', resourceRevision: 1 };
@@ -24,16 +27,28 @@ beforeEach(() => {
 });
 
 describe('desktop inline widgets', () => {
+  it('parses each Widget result once while extracting surfaces', () => {
+    const message: ChatMessage = { id: 'm', role: 'assistant', timestamp: 1, content: '', toolCalls: ['a', 'b'].map(toolCallId => ({
+      name: 'Widget', toolCallId, status: 'done', startedAt: 0, result: JSON.stringify({ ok: true, surface: {
+        ...widget, display: 'inline', version: 1, mode: 'widget', status: 'ready',
+      } }),
+    })) };
+    const parse = vi.spyOn(JSON, 'parse');
+    expect(inlineSurfaces([message], 's').widgets).toHaveLength(2);
+    expect(parse).toHaveBeenCalledTimes(2);
+    parse.mockRestore();
+  });
+
   it('uses only successful Widget snapshots belonging to the rendered session and keeps multiple components', () => {
     const message: ChatMessage = { id: 'm', role: 'assistant', timestamp: 1, content: '', toolCalls: ['a', 'b'].map(toolCallId => ({
       name: 'Widget', toolCallId, status: 'done', startedAt: 0, result: JSON.stringify({ ok: true, surface: {
         ...widget, display: 'inline', version: 1, mode: 'widget', status: 'ready',
       } }),
     })) };
-    expect(inlineWidgets([message], 's')).toHaveLength(2);
-    expect(inlineWidgets([message], 'other')).toHaveLength(0);
+    expect(inlineSurfaces([message], 's').widgets).toHaveLength(2);
+    expect(inlineSurfaces([message], 'other').widgets).toHaveLength(0);
     message.toolCalls![0].name = 'terminal';
-    expect(inlineWidgets([message], 's')).toHaveLength(1);
+    expect(inlineSurfaces([message], 's').widgets).toHaveLength(1);
   });
 
   it('isolates the frame, escapes saved state and keeps initialization idempotent', () => {
@@ -65,6 +80,16 @@ describe('desktop inline widgets', () => {
     const other = mount(); const otherPost = vi.spyOn(other.frame.contentWindow!, 'postMessage');
     emit(other.frame, { type: 'ace-inline-shell-ready' });
     expect(otherPost.mock.calls[0][0].html).not.toContain('"cost":7');
+  });
+
+  it('does not persist or submit without a stable user identity', () => {
+    state.userInfo = { staffName: 'missing id' };
+    const { frame, button } = mount();
+    emit(frame, { type: 'ace-inline-ready' });
+    emit(frame, { type: 'ace-inline-state', value: snapshot });
+    button.click();
+    expect(localStorage.length).toBe(0);
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('requires a host click and matching validation response; submits once without switching sessions', async () => {

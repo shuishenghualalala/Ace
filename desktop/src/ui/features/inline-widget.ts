@@ -1,5 +1,5 @@
-import type { ChatMessage } from '../chat-render';
 import { state } from '../state';
+import { interactiveOwnerKey } from './interactive-owner';
 
 export interface InlineWidget {
   key: string;
@@ -11,36 +11,16 @@ export interface InlineWidget {
 }
 type Snapshot = { parameters: Record<string, unknown>; controls: Record<string, unknown> };
 type Submit = (sessionId: string, text: string) => Promise<boolean>;
-const records = new WeakMap<HTMLElement, {
+interface WidgetRecord {
   widget: InlineWidget; owner: string; storageKey: string; snapshot: Snapshot;
   frame: HTMLIFrameElement; button: HTMLButtonElement; status: HTMLElement;
   pending: string; submitting: boolean; lastSent: string; ready: boolean; failed: boolean;
-}>();
+}
+const records = new WeakMap<HTMLElement, WidgetRecord>();
+const recordsBySource = new WeakMap<Window, WidgetRecord>();
 let submit: Submit | undefined;
 let bound = false;
 const bytes = (value: string): number => new TextEncoder().encode(value).length;
-const ownerKey = (): string => state.isLoggedIn && state.userInfo
-  && (state.userInfo.staffUid || state.userInfo.uid || state.userInfo.pid || state.userInfo.staffCode)
-  ? JSON.stringify([state.userInfo.staffUid, state.userInfo.uid, state.userInfo.pid, state.userInfo.staffCode]) : '';
-
-export function inlineWidgets(messages: ChatMessage[], sessionId: string): InlineWidget[] {
-  const widgets = new Map<string, InlineWidget>();
-  for (const message of messages) for (const tool of message.toolCalls || []) {
-    if (tool.name !== 'Widget' || !tool.result) continue;
-    try {
-      const payload = JSON.parse(tool.result);
-      const s = payload.surface;
-      if (payload.ok !== true || s?.display !== 'inline' || s.version !== 1
-        || s.mode !== 'widget' || s.sessionId !== sessionId || s.status !== 'ready'
-        || typeof s.widgetId !== 'string' || !/^widget_[0-9a-f]{12}$/.test(s.widgetId)
-        || typeof s.title !== 'string' || typeof s.html !== 'string' || bytes(s.html) > 128_000) continue;
-      const key = `inline:${sessionId}:${tool.toolCallId}`;
-      widgets.set(key, { key, sessionId, widgetId: s.widgetId, title: s.title,
-        html: s.html, resourceRevision: s.resourceRevision || 0 });
-    } catch { /* Other tool results are ordinary text. */ }
-  }
-  return [...widgets.values()];
-}
 
 function snapshotOf(value: unknown): Snapshot | null {
   try {
@@ -89,7 +69,7 @@ export function inlineDocument(html: string, snapshot: Snapshot): string {
 }
 
 export function renderInlineWidget(widget: InlineWidget): HTMLElement {
-  const owner = ownerKey();
+  const owner = interactiveOwnerKey();
   const storageKey = `ace.inline.v1:${owner}:${widget.key}`;
   let snapshot: Snapshot = { parameters: {}, controls: {} };
   try { snapshot = snapshotOf(JSON.parse(localStorage.getItem(storageKey) || 'null')) || snapshot; } catch { /* Empty state. */ }
@@ -109,7 +89,7 @@ export function renderInlineWidget(widget: InlineWidget): HTMLElement {
   records.set(root, record);
   button.addEventListener('click', () => {
     if (!record.ready || record.failed || record.pending || record.submitting || !root.isConnected) return;
-    if (!owner || owner !== ownerKey() || state.activeSessionId !== widget.sessionId) {
+    if (!owner || owner !== interactiveOwnerKey() || state.activeSessionId !== widget.sessionId) {
       status.textContent = '请在此组件所属的聊天中继续分析'; return;
     }
     record.pending = crypto.randomUUID(); button.disabled = true;
@@ -129,6 +109,7 @@ export function hydrateInlineWidgets(container: HTMLElement): void {
     const r = records.get(root);
     if (!r || r.frame.hasAttribute('src')) continue;
     r.frame.src = `ace-site://${r.widget.widgetId}/?inline_shell=1`;
+    if (r.frame.contentWindow) recordsBySource.set(r.frame.contentWindow, r);
     window.setTimeout(() => {
       if (root.isConnected && !r.ready && !r.failed) r.status.textContent = '组件未能加载，请重新打开此聊天';
     }, 10000);
@@ -140,44 +121,42 @@ export function bindInlineWidgets(handler: Submit): void {
   if (bound) return;
   bound = true;
   window.addEventListener('message', (event) => {
-    for (const root of document.querySelectorAll<HTMLElement>('.inline-widget')) {
-      const r = records.get(root);
-      if (!r || event.source !== r.frame.contentWindow || !r.owner || r.owner !== ownerKey()) continue;
-      const data = event.data;
-      if (data?.type === 'ace-inline-shell-ready') {
-        r.frame.contentWindow?.postMessage({ type: 'ace-inline-init', html: inlineDocument(r.widget.html, r.snapshot) }, '*');
-      } else if (data?.type === 'ace-inline-error') {
-        r.failed = true; r.button.disabled = true;
-        r.status.textContent = '组件运行出错，可让 Agent 修复后重新展示';
-      } else if (data?.type === 'ace-inline-ready' && !r.failed) {
-        r.ready = true; r.button.disabled = false; r.status.textContent = '参数变动自动保存到此设备';
-      } else if (data?.type === 'ace-inline-size' && Number.isFinite(data.height)) {
-        r.frame.style.height = `${Math.max(180, Math.min(720, data.height))}px`;
-      } else if (data?.type === 'ace-inline-state') {
-        const snapshot = snapshotOf(data.value);
-        if (!snapshot) { r.status.textContent = '参数过大或格式无效，未保存'; continue; }
-        r.snapshot = snapshot;
-        try { localStorage.setItem(r.storageKey, JSON.stringify(snapshot)); }
-        catch { r.status.textContent = '本机存储已满，当前参数未保存'; }
-        if (r.ready && !r.failed && !r.pending && !r.submitting) r.button.disabled = JSON.stringify(snapshot) === r.lastSent;
-      } else if (data?.type === 'ace-inline-submit' && r.pending && data.requestId === r.pending) {
-        r.pending = '';
-        const snapshot = snapshotOf(data.value);
-        if (r.failed || !data.valid || !snapshot || state.activeSessionId !== r.widget.sessionId) {
-          r.button.disabled = false; r.status.textContent = '请检查输入，并在所属聊天中提交'; continue;
-        }
-        const serialized = JSON.stringify(snapshot);
-        if (serialized === r.lastSent || r.submitting) continue;
-        r.submitting = true;
-        r.status.textContent = '正在提交…';
-        const text = `请根据交互组件「${r.widget.title}」的当前参数继续分析。以下 JSON 是用户调整的数据：\n${serialized}`;
-        void Promise.resolve().then(() => submit?.(r.widget.sessionId, text)).then((sent) => {
-          if (sent) r.lastSent = serialized;
-          r.status.textContent = sent ? '参数已提交，可修改后再次分析' : '提交失败，请重试';
-        }).catch(() => { r.status.textContent = '提交失败，请重试'; }).finally(() => {
-          r.submitting = false; r.button.disabled = r.failed || JSON.stringify(r.snapshot) === r.lastSent;
-        });
+    const r = event.source ? recordsBySource.get(event.source as Window) : undefined;
+    if (!r || event.source !== r.frame.contentWindow || !r.owner || r.owner !== interactiveOwnerKey()) return;
+    const data = event.data;
+    if (data?.type === 'ace-inline-shell-ready') {
+      r.frame.contentWindow?.postMessage({ type: 'ace-inline-init', html: inlineDocument(r.widget.html, r.snapshot) }, '*');
+    } else if (data?.type === 'ace-inline-error') {
+      r.failed = true; r.button.disabled = true;
+      r.status.textContent = '组件运行出错，可让 Agent 修复后重新展示';
+    } else if (data?.type === 'ace-inline-ready' && !r.failed) {
+      r.ready = true; r.button.disabled = false; r.status.textContent = '参数变动自动保存到此设备';
+    } else if (data?.type === 'ace-inline-size' && Number.isFinite(data.height)) {
+      r.frame.style.height = `${Math.max(180, Math.min(720, data.height))}px`;
+    } else if (data?.type === 'ace-inline-state') {
+      const snapshot = snapshotOf(data.value);
+      if (!snapshot) { r.status.textContent = '参数过大或格式无效，未保存'; return; }
+      r.snapshot = snapshot;
+      try { localStorage.setItem(r.storageKey, JSON.stringify(snapshot)); }
+      catch { r.status.textContent = '本机存储已满，当前参数未保存'; }
+      if (r.ready && !r.failed && !r.pending && !r.submitting) r.button.disabled = JSON.stringify(snapshot) === r.lastSent;
+    } else if (data?.type === 'ace-inline-submit' && r.pending && data.requestId === r.pending) {
+      r.pending = '';
+      const snapshot = snapshotOf(data.value);
+      if (r.failed || !data.valid || !snapshot || state.activeSessionId !== r.widget.sessionId) {
+        r.button.disabled = false; r.status.textContent = '请检查输入，并在所属聊天中提交'; return;
       }
+      const serialized = JSON.stringify(snapshot);
+      if (serialized === r.lastSent || r.submitting) return;
+      r.submitting = true;
+      r.status.textContent = '正在提交…';
+      const text = `请根据交互组件「${r.widget.title}」的当前参数继续分析。以下 JSON 是用户调整的数据：\n${serialized}`;
+      void Promise.resolve().then(() => submit?.(r.widget.sessionId, text)).then((sent) => {
+        if (sent) r.lastSent = serialized;
+        r.status.textContent = sent ? '参数已提交，可修改后再次分析' : '提交失败，请重试';
+      }).catch(() => { r.status.textContent = '提交失败，请重试'; }).finally(() => {
+        r.submitting = false; r.button.disabled = r.failed || JSON.stringify(r.snapshot) === r.lastSent;
+      });
     }
   });
 }

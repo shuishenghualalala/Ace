@@ -45,8 +45,9 @@ import {
 import type { FollowupAnswer } from '../backend-client';
 import { attachCopyButtons } from './copy-button';
 import { renderMermaidBlocks } from './mermaid-render';
-import { hydrateInlineWidgets, inlineWidgets, renderInlineWidget } from './inline-widget';
-import { hydrateNativeVisuals, nativeVisuals, renderNativeVisual } from './native-visual';
+import { hydrateInlineWidgets, renderInlineWidget } from './inline-widget';
+import { inlineSurfaces } from './inline-surfaces';
+import { hydrateNativeVisuals, renderNativeVisual } from './native-visual';
 import { showFileOpenMenu } from './file-open-menu';
 import { mountBlueprintSurface } from './blueprint-surface';
 import { openBrowserArtifact, openUserBrowser } from './browser-panel';
@@ -766,7 +767,8 @@ export function renderConversation(
         batch,
       );
       const capturedBatch = batch;
-      if (sessionId) for (const visual of nativeVisuals(batch, sessionId)) {
+      const surfaces = sessionId ? inlineSurfaces(batch, sessionId) : null;
+      for (const visual of surfaces?.visuals ?? []) {
         pushPlan(visual.key, JSON.stringify(visual.spec), () => renderNativeVisual(visual));
       }
       pushPlan(turnId, sig, () =>
@@ -777,7 +779,7 @@ export function renderConversation(
           ...(turnIdentity ? { identity: turnIdentity } : {}),
         }),
       );
-      if (sessionId) for (const widget of inlineWidgets(batch, sessionId)) {
+      for (const widget of surfaces?.widgets ?? []) {
         // A separate keyed unit keeps the iframe alive while the answer streams.
         pushPlan(widget.key, JSON.stringify(widget), () => renderInlineWidget(widget));
       }

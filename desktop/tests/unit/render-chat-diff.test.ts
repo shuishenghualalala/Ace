@@ -9,8 +9,8 @@
  * conversation-renderer 双实例（不同 containerId/sessionId）隔离用例。
  */
 // @vitest-environment happy-dom
-// @vitest-environment-options {"happyDOM":{"settings":{"disableIframePageLoading":true}}}
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { suppressUnsupportedIframeSchemeErrors } from './helpers/happy-dom';
 import {
   applyFoldState,
   createChatRenderCoalescer,
@@ -33,6 +33,8 @@ import {
 } from '../../src/ui/state';
 import nativeFixture from '../../../tests/fixtures/native-visual.json';
 import { reportRendererError } from '../../src/ui/renderer-error-report';
+
+suppressUnsupportedIframeSchemeErrors();
 
 // conversation-renderer 的重依赖：本文件只验证消息流渲染与 diff 缓存隔离，
 // 外部会话身份 / 看板 / 浏览器面板点击跳转不在此覆盖。
