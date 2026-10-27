@@ -1532,10 +1532,14 @@ function renderShell(): void {
       ? `<button type="button" class="hub-refresh-btn" data-batch-toggle title="批量选择页面以批量删除" aria-label="批量管理">${uiIcon('icon-checks')}</button>`
       : '';
   // 重建代价高的三棵子树在状态未变时保留活节点，避免每次点击都推倒重来：
-  // 对话面板（整段会话重渲染 + markdown 重解析 + 强制滚底）、详情栏（fold observer 与
-  // 已解析正文）、图谱画布（SVG 全量重建 + 逐节点重绑事件，wiki-graph 内部另有签名比对）。
+  // 对话面板（仅复用仍挂载 Composer 的活实例）、详情栏（fold observer 与已解析正文）、
+  // 图谱画布（SVG 全量重建 + 逐节点重绑事件，wiki-graph 内部另有签名比对）。
   const liveAgentPanel = root.querySelector<HTMLElement>('[data-wiki-agent-panel]');
-  const keepAgentPanel = view.kbId && liveAgentPanel?.dataset.kbId === view.kbId ? liveAgentPanel : null;
+  const keepAgentPanel = view.kbId
+    && liveAgentPanel?.dataset.kbId === view.kbId
+    && liveAgentPanel.querySelector('[data-composer-view]')
+    ? liveAgentPanel
+    : null;
   const liveBrowserSurface = wikiBrowserSurfaceOpen
     ? root.querySelector<HTMLElement>('[data-wiki-browser-surface]')
     : null;

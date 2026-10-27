@@ -35,6 +35,7 @@ import { openInspectorToTab } from '../../src/ui/features/inspector';
 import { bindFileDrop, bindFilePaste } from '../../src/ui/features/attachments';
 import {
   __resetWikiViewForTest,
+  createWikiPageContribution,
   refreshWikiData,
   renderWikiPage,
   setWikiAgentEntryHandler,
@@ -875,6 +876,27 @@ describe('wiki-page 入口挂点', () => {
     const rebuilt = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')!;
     expect(rebuilt).toBe(input);
     expect(rebuilt.value).toBe('写到一半的草稿');
+  });
+
+  it('切出再切回 Wiki 会重新挂载对话面板并保留草稿', async () => {
+    const contribution = createWikiPageContribution();
+    uiStore.set({ activeTab: 'wiki' });
+    contribution.activate({ signal: new AbortController().signal });
+    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-panel] [data-composer-input]')).not.toBeNull());
+
+    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')!;
+    input.value = '切页前的草稿';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await contribution.deactivate();
+    expect(document.querySelector('[data-wiki-agent-panel] [data-composer-input]')).toBeNull();
+
+    contribution.activate({ signal: new AbortController().signal });
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-wiki-agent-panel] [data-composer-input]')).not.toBeNull();
+      expect(document.querySelector('[data-wiki-agent-panel] .wiki-agent-pane__void')).not.toBeNull();
+    });
+    expect(document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')?.value)
+      .toBe('切页前的草稿');
   });
 
   it('IME 合成中按 Enter 不发送，普通 Enter 发送', async () => {
