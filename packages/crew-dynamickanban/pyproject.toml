@@ -1,0 +1,28 @@
+[project]
+name = "crew-dynamickanban"
+version = "0.1.0"
+description = "Crew dynamickanban feature package - 动态看板与任务图编排（import 名保持 crew.dynamickanban，ADR-0037 第三批 workspace 成员）"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+# 依赖根包 crew（workspace 源）：kanban 的 core 契约、状态设施（crew.state）、
+# SQLite 拆库设施（ADR-0038）与宿主 feature 挂载协议仍在根包。
+dependencies = [
+    "crew",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# 打包 src/crew 整层（editable 安装时 hatchling 会把 src/ 加进 sys.path，
+# 使顶层 crew 命名空间同时包含仓库根与成员 src 两部分）；src/crew 下只有
+# dynamickanban，故 wheel 内容即 crew/dynamickanban/**（纯 .py，无附加资产）。
+# 成员侧 crew/ 目录不放 __init__.py：纯 PEP 420 namespace portion，
+# 与根包的顶层 crew 命名空间（6P）同型；crew/dynamickanban/ 亦不设 __init__.py，
+# 原 re-export 的消费方已改直连子模块导入（6Y）。
+[tool.hatch.build.targets.wheel]
+packages = ["src/crew"]
+
+[tool.uv.sources]
+# crew 即 workspace 根包（仓库根 pyproject），仅从 workspace 解析。
+crew = { workspace = true }

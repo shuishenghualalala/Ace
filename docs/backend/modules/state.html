@@ -6,7 +6,7 @@
 <title>state · Ace 后端模块</title>
 <!--
   ============================================================================
-  模块文档模板：复制此文件 → 改名为 <module>.html → 填写各节。
+  模块文档：crew/state
   约定：每次改动某后端模块的代码，先归类到对应模块，再更新该模块文档：
     1) 若改了职责/文件/接口 → 同步对应小节
     2) 必填：在「变更记录」追加一行（日期 + 变更 + 影响面）
@@ -44,20 +44,28 @@
 <div class="wrap">
   <div class="crumb">Ace / 后端模块 / state</div>
   <h1><span class="logo">A</span>crew/state</h1>
-  <div class="sub">State 状态：配置、日志、会话、工作空间。</div>
+  <div class="sub">State 状态层：配置加载/写回、API Key 凭证库、Crew Home 与 owner 运行时目录、会话/工作区存储、日志。</div>
 
   <h2>1. 职责</h2>
   <ul>
-    <li>该模块做什么、不做什么（边界）。</li>
+    <li>持久化与配置事实来源：<code>config.yaml</code>（结构化配置，不含密钥）+ <code>.env</code>（环境变量密钥）+ <code>credentials.json</code>（模型 API Key 凭证库）。</li>
+    <li>目录布局（方案 A）：<code>CREW_HOME</code>（默认项目根 <code>.crew/</code>，打包环境 <code>~/.crew/</code>）退役为安装级目录（config.yaml、日志、skills 模板）；所有 owner（含本机 <code>local</code>）的运行时 home 统一住 <code>accounts/&lt;hash&gt;/</code>，目录名由 <code>owner_path_segment</code> 从 owner id 哈希派生，不泄露身份。</li>
+    <li>不做：业务逻辑、LLM 调用（装配在 <code>crew/app.py</code>）。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
-  <p>按子功能或核心流程拆解，这是本模块文档的重点。</p>
   <table>
     <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
     <tbody>
-      <tr><td><code>feature-a</code></td><td>…</td><td>已落地</td></tr>
-      <tr><td><code>feature-b</code></td><td>…</td><td>待补充</td></tr>
+      <tr><td><code>config.py</code></td><td><code>Config</code>/<code>ModelProfile</code> 加载、多模型 profile CRUD、yaml 写回（<code>persist_model_profiles</code>，写锁 + 不写密钥）、owner overlay、<code>resolve_profile_api_key</code> key 解析链。</td><td>已落地</td></tr>
+      <tr><td><code>credentials.py</code></td><td>模型 API Key 凭证库：按 profile id（owner 作用域）存取，JSON 原子替换写入，POSIX 0600；解析链第一层，环境变量路径保留为后备。</td><td>已落地</td></tr>
+      <tr><td><code>home.py</code></td><td><code>get_crew_home</code> / <code>get_owner_runtime_home</code> / <code>ensure_crew_home</code>：home 目录解析与初始化（SOUL.md/MEMORY.md 等）。</td><td>已落地</td></tr>
+      <tr><td><code>session_store.py</code> / <code>workspace_store.py</code></td><td>会话与工作区持久化（SQLite）。</td><td>已落地</td></tr>
+      <tr><td><code>session_model.py</code></td><td>Session 显式模型绑定 / pending 绑定提升。</td><td>已落地</td></tr>
+      <tr><td><code>access_control.py</code> / <code>active_owner.py</code> / <code>channel_bindings.py</code> / <code>plugin_preferences.py</code> / <code>team_member_model.py</code></td><td>访问控制配置、当前 owner 上下文、渠道绑定、插件偏好、团队成员模型。</td><td>已落地</td></tr>
+      <tr><td><code>logging.py</code></td><td><code>setup_logging</code> / <code>llm_trace</code> 结构化日志；llm_trace 走 QueueHandler/QueueListener 队列落盘（热路径只入队，序列化与写文件在 listener 线程）。</td><td>已落地</td></tr>
+      <tr><td><code>sqlite.py</code> / <code>_migration.py</code> / <code>models.py</code></td><td>SQLite 连接与迁移、共享数据模型。同步写路径 busy 重试的睡眠收进模块级可注入 <code>_busy_retry_sleep</code>（测试可替换 no-op）；事件循环上的写一律走 <code>execute_async</code>。<code>_migration.py</code> 含存量 owner 回填：<code>backfill_empty_owner_rows</code>（<code>UPDATE OR IGNORE</code> 逐行归一为 <code>local</code>，与既有目标 owner 行主键冲突的空行跳过、收尾按"保归属行删无主行"清除）；主库多表 + memory / channel_bindings / plugin_preferences / sites / external 各库就地回填；cron 表先经 <code>backfill_cron_owner_from_sessions</code> 智能归属（session 唯一 owner 优先，其余归 local）；DK 多 owner 歧义行保留隔离（<code>legacy_ambiguous</code>），待 <code>claim-legacy</code> CLI 人工认领。启动时 <code>inspect_and_backfill_legacy_owners</code> 自动执行，永久有效。</td><td>已落地</td></tr>
+      <tr><td><code>home.py</code>（运行期 env）</td><td><code>refresh_owner_runtime_env_async</code>：同步 env 刷新（持 <code>_ENV_LOCK</code>，读写文件/环境变量）的异步入口，每轮 envelope 热路径使用，整体 <code>asyncio.to_thread</code>。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -65,34 +73,85 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/state/xxx.py</code></td><td>…</td></tr>
+      <tr><td><code>crew/state/config.py</code></td><td>配置与模型 profile 的加载/校验/写回；key 解析链与共享 env 名覆盖拦截的数据基础。</td></tr>
+      <tr><td><code>crew/state/credentials.py</code></td><td>模型 API Key 凭证库（read/store/delete，按 profile id + owner 作用域）。</td></tr>
+      <tr><td><code>crew/state/home.py</code></td><td>CREW_HOME 与 owner 运行时目录。</td></tr>
+      <tr><td><code>tests/test_credentials_store.py</code></td><td>凭证库与 CRUD key 写路径回归（含"多模型串 key"缺陷回归）。</td></tr>
     </tbody>
   </table>
 
   <h2>4. 数据模型与接口</h2>
-  <p>对外暴露的关键类/方法、事件/消息约定、Schema。</p>
-  <pre><code># 关键签名</code></pre>
+  <p>模型 API Key 解析链（<code>resolve_profile_api_key</code>，所有 profile 构建点统一走它）：</p>
+  <pre><code>凭证库[profile_id]（owner 作用域，credentials.json）
+  → api_key_env 环境变量（env_map 优先于进程环境）
+  → （仅全局/共享层）CREW_API_KEY 兜底</code></pre>
+  <p>写路径（<code>crew/app.py</code> 模型 CRUD）：默认 <code>store_key(owner, profile_id, key)</code>；
+  显式传 <code>api_key_env</code> 才写 <code>.env</code>——当目标变量名被其它 profile 引用且已有不同旧值时，
+  必须 payload 带 <code>overwrite_shared_key: true</code> 才放行（防"所有 apikey 变成最新的 apikey"）；
+  <code>remove_model</code> 同步清理凭证库条目。</p>
+  <p>owner 归一化规则（owner 统一化改造）：空 owner 不再是一种"模式"，而是归一为本机 owner <code>local</code> 的特例。
+  归一化原语 <code>normalize_owner_account_id()</code> / 常量 <code>LOCAL_OWNER_ACCOUNT_ID</code> 定义在
+  <code>crew/core/runctx.py</code>，只允许出现在系统边界——gateway 认证、CLI 入口、ContextVar set 点、
+  store 创建入口与存量回填；边界之内 owner 恒非空，<code>owner_account_id=""</code> 在存储层不再是合法模式，
+  读取方不写任何 <code>if not owner</code> / <code>or "local"</code> 防御分支。</p>
+
+  <h2>回合内 durable boundary（2026-09-18）</h2>
+  <p><code>SessionEventType</code> 新增 <code>tool_execution_intent</code> 与 <code>tool_result_commit</code> 两类 durable 事件。它们和 session leaf 在同一写事务中提交，但不进入 Message 投影，因此不会污染下一次 Provider 请求。</p>
+  <p>Agent 在用户消息完成校验后先保存 canonical history；工具开始前记录 intent，结果（包括 timeout、aborted 和异常）记录 commit。启动恢复扫描 intent/commit 链，对未闭合的工具追加 <code>status=interrupted</code>、<code>side_effect_state=unknown</code> 的结果边界，保持幂等且不自动重放副作用。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>问题 1：…</li>
-    <li>TODO：…</li>
+    <li>TODO：凭证库文件锁（当前单进程 + 原子替换足够；多进程部署出现时再引入）。</li>
+    <li>TODO：桌面端设置页展示 key 来源（凭证库 / env 变量名）。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
   <ul>
-    <li>如何在此模块上加功能（遵守契约、不跨目录）。</li>
+    <li>新增持久化配置：归 state 层新建模块；密钥类一律走凭证库/`.env`，禁止进 yaml。</li>
+    <li>owner 隔离的新存储文件放 <code>get_owner_runtime_home(owner)</code> 下，全局的放 <code>get_crew_home()</code> 下。</li>
   </ul>
+
+  <h2>Channels 配置读写闭环（6AA）</h2>
+  <p><code>features.channels</code> 与旧 <code>channels</code> 的双读优先级沿用 6X。保存当前渠道时，将完整有效值写入选定节并清除该渠道的旧别名，避免更新后重载恢复旧值，以及删除字段、清空 <code>extra</code> 后再次被兜底补回。其他渠道、未知有效字段和其他 owner 保留；owner 仅读取自身 overlay，不继承全局渠道配置或旧 <code>platforms</code>。</p>
+  <p>仍使用配置写锁、系统路径与临时文件原子替换。设计与回退见 <a href="../adr/0039-channels-config-namespace-roundtrip.html">ADR-0039</a>，验证见 <a href="../../testing/plugin-architecture-stage-6aa-channel-config.html">6AA 测试记录</a>。</p>
+
+  <h2>配置写回隔离与事务（2026-09-14）</h2>
+  <p>渠道配置写回的两个契约修复：<strong>隔离性</strong>——<code>_write_channel_config</code> 在构造目标渠道有效配置前对平台值与渠道有效合并结果做深拷贝，YAML anchor 使两个渠道共享嵌套 <code>extra</code> 时，删除一方字段不再串改另一方或调用方传入对象；<strong>事务性</strong>——提取 <code>_atomic_write_yaml</code>（tmp 写入 + 原子替换 + 失败清理残留并重抛），channel / mcp_servers / model_profiles / evolution 四个 persist 统一为磁盘提交成功后再发布内存状态，写盘或替换失败时内存与磁盘一致保留旧值。验证见 <a href="../../testing/review-fixes-batch-2026-09-14.html">整改批次测试记录</a>。</p>
+
+  <h2>配置操作完整事务（2026-09-15，第二轮整改 S2）</h2>
+  <p>配置写回从"先改内存再持久化"升级为<strong>候选值 → 校验 → 持久化 → 发布</strong>的统一事务边界，覆盖 MCP servers、模型 profiles（含激活/默认切换）、evolution 开关三类操作：MCP 的 <code>_commit_mcp_servers</code> 与模型的 <code>_commit_model_profiles</code> / <code>set_active_model</code> / <code>set_evolution_config</code> 都在候选副本上计算、经 <code>_atomic_write_yaml</code> 落盘成功后才发布内存（<code>mcp_servers</code>/<code>model_profiles</code>/<code>raw_config</code> 等）。持久化失败时内存与磁盘一致保留旧值、可直接重试，且<strong>不得触发任何运行资源操作</strong>（provider 重建、MCP 子进程启停等只在持久化成功后进行）；"已保存但连接失败"如实上报、不回滚伪装成保存失败。gateway Router（mcp_servers / misc）与 CLI（integration / knowledge）全部改走事务入口，遗留 <code>set_mcp_server</code>/<code>persist_model_profiles</code> 等两步式入口仅为未迁移调用方保留并标注。模型配置 owner 语义：全局事务只写 config.yaml 的 <code>llm</code> 段，owner overlay 层天然按文件隔离，互不影响。边界：不承诺多文件与外部运行资源的分布式原子性。</p>
+
+  <h2>llm_trace 队列落盘与运行期超时配置（2026-09-17）</h2>
+  <p><code>llm_trace</code> 开启时热路径（每次工具 start/result）只做 <code>queue.put</code>：json 序列化与 .jsonl 文件写入都在 <code>QueueListener</code> 后台线程完成。队列为带排空等待的 <code>_TraceQueue</code>（put 计数 + task_done 条件通知），<code>flush</code> 可等全部已入队记录真正落盘；listener 随日志装配建立、atexit 收尾。工具媒体读盘、prompt 文件读取等其余热路径 I/O 治理见 agent 模块文档。</p>
+  <p>SQLite 同步写路径（BEGIN IMMEDIATE + busy 重试）的睡眠收进模块级 <code>_busy_retry_sleep</code>（可注入，测试替换为 no-op）：<strong>只允许在非事件循环线程执行</strong>——<code>execute()</code> 是同步 API，事件循环上的写必须走 <code>execute_async</code>（内部 asyncio.sleep + to_thread）；个别存量同步 store（如任务看板 TaskManager）的写方法会被事件循环直接调用，消除方式是把调用方挪到 <code>asyncio.to_thread</code>（后台子任务已治理，见 agent 模块）。</p>
+  <pre><code>runtime.tool_execution_timeout_seconds  # 单工具执行段看门狗，默认 600，0=关闭
+runtime.turn_deadline_seconds           # 整回合 deadline，默认 0=不限
+runtime.interaction_timeout_seconds     # 追问/权限默认等待上限，默认 3600，0=默认不限
+                                        #（显式传 timeout 含 None/0 始终优先于默认值）
+runtime.health_port                     # 独立线程 health 服务端口，默认 0=主端口+1</code></pre>
+  <p>追问默认上限由装配层（<code>crew/app.py</code> 的 <code>set_followup_default_timeout</code>）注入 core/followup，core 不反向依赖配置实现；<code>wait_for_answer</code> 未传 timeout 时用该默认值，超时按「用户未回答」收尾（返回空答案）。</p>
 
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-09-23</td><td>P1 测试反馈落修（F1/F2/F541）。<b>F1 祖先游标 head 被夹低</b>：翻页游标落在 fork 源会话且源在 fork 后被 rewind 到边界之下时，<code>load_window</code> 用 <code>min(bound, leaf)</code> 把 head 夹到回退后的 leaf，边界与游标之间的整段消息被跳过——改为「有游标时 head 即游标位置本身」（游标是上一页实际走过的链位置，其下行不受源 leaf 移动影响；行缺失仍 fail-closed）。<b>F2 回填抢锁竞态丢 legacy 前缀</b>：save 抢在后台回填之前对 legacy 行（blob 有数据、无事件）落库时，「前缀一致 → 追加」只写新尾部，blob 前缀永久留在不再被读的 blob 列——投影新增 <code>from_blob</code> 标记，<code>_save_write</code> 遇到它强制整链重写一次，与回填谁先谁后都正确。<b>F541</b> 测试文件多余 f 前缀。新增回归：<code>test_window_continues_after_source_rewind_below_fork_boundary</code>（显式断言被跳过中段）、<code>test_save_before_backfill_preserves_legacy_blob_prefix</code>、<code>test_window_random_fork_rewind_chains_paging_parity</code>（种子随机 save/fork/rewind 链 × 5 档 limit 的翻页等价性 fuzz，固化测试人员 790/790 结论）。<b>口径修正</b>：回填事务与读共用 <code>self._lock</code>，回填在途时同实例的 store 读会阻塞到迁移事务提交（大库实测可 &gt;2s）——「启动与 legacy 数据量解耦」成立，「读路径解耦」不成立；窗口端点与全量端点的 <code>source_session_id</code> 标签存在声明偏差（窗口按消息物理来源会话标注，仅 team_internal 分支消费，普通 fork 无影响）。</td><td><code>crew/state/session_store.py</code>（load_window head / from_blob 守卫 / wait 防御）、<code>tests/test_session_history_window.py</code>、<code>tests/test_session_events.py</code>、<code>tests/test_session_loop_offload_and_cache.py</code>。</td></tr>
+      <tr><td>2026-09-22</td><td>数据层 P1（方案：<code>docs/todo/ace-2026-09-21-desktop-stability-optimization-plan.md</code>）。① <b>砍 blob 双写</b>（P1-3）：<code>_save_write</code> 不再重写 <code>sessions.messages</code> 列（写放大 O(N)/turn 的根源），事件行成为唯一事实源；<code>rewind</code>/<code>fork</code> 不再回写/复制 blob，<code>read_mode=blob</code> 仅服务 W4 之前的 legacy 数据。② <b>窗口化历史读取</b>（P1-1）：新增 <code>load_window</code>——沿活链（父指针走行）倒序收集尾部窗口，rewind 弃尾天然排除、fork 经 end_seed 透明续接源会话前缀、游标 <code>sid:seq</code> 不透明回传，fork 链外的游标会话拒绝读取（防越权）；配套 <code>GET /api/session/{id}/history</code>。③ <b>投影缓存 LRU</b>（P1-5）：<code>_projections</code> 改 <code>OrderedDict</code> 上限 32 会话，热会话保持、淘汰只丢缓存不丢数据。④ <b>Team 子会话枚举去 LIKE</b>：<code>load_child_sessions</code> 改主键范围谓词（<code>&gt;= / &lt;</code>，EXPLAIN 实证走 covering index），新增 <code>idx_sessions_source</code>（fork 分支枚举等值查询）。⑤ <b>断点扫描候选过滤</b>：<code>scan_breakpoints</code> 先按 <code>last_status IN ('', 'running')</code> 收敛候选（开放回合必然停在 running 或旧空值）。⑥ <b>agent 配置批量读取</b>：新增 <code>get_agent_configs</code>（单次 IN 查询），列表页从 2×N 次配置查询降到 1 次。⑦ <b>回填后台化</b>（P1-4）：legacy blob 回填移出构造函数，后台线程 + <code>store_meta</code> 完成标记（跨重启幂等）；<code>wait_for_legacy_backfill</code> 供测试/关停等待，<code>close</code> 短暂让路。</td><td><code>crew/state/session_store.py</code>、<code>crew/gateway/routers/sessions.py</code>（纯同步 handler 改 def 走线程池）、<code>crew/gateway/dispatcher.py</code>（回合起点/收敛的 store 调用迁异步门面）、<code>crew/core/interfaces.py</code>（set_status_async 默认实现）、<code>crew/gateway/helpers.py</code>（labels 批量化）；测试 <code>test_session_history_window.py</code> / <code>test_session_loop_offload_and_cache.py</code> 新增。</td></tr>
+      <tr><td>2026-09-03</td><td>合并 owner 统一化改造（refactor/llm-provider → refactor/plugin-architecture-stage-0，merge 22af708）：方案 A 目录布局（所有 owner 含 local 统一住 <code>accounts/&lt;hash&gt;/</code>，基础 CREW_HOME 退役为安装级目录）；<code>_migration.py</code> 存量回填（<code>backfill_empty_owner_rows</code> + cron 智能归属 + DK 歧义行隔离待 <code>claim-legacy</code>）；凭证库 × owner 作用域整合（owner 私有 key 写 owner overlay，不同步进程环境）。</td><td>state 层目录布局与全部 owner 列存储</td></tr>
+      <tr><td>2026-09-17</td><td><code>94b37b5</code> llm_trace 改 QueueHandler/QueueListener 队列落盘（热路径只入队 + 可排空 flush）；<code>refresh_owner_runtime_env_async</code> 异步入口（env 刷新挪工作线程）。</td><td><code>crew/state/logging.py</code>、<code>crew/state/home.py</code>、<code>crew/agent/prompt_builder.py</code>。</td></tr>
+      <tr><td>2026-09-17</td><td><code>a8aa51b</code> sqlite busy 重试睡眠收进模块级可注入 <code>_busy_retry_sleep</code>，明确"同步 execute 只能在非事件循环线程"契约。</td><td><code>crew/state/sqlite.py</code>。</td></tr>
+      <tr><td>2026-09-17</td><td><code>e99e58e</code> 新增 <code>runtime.interaction_timeout_seconds</code>（默认 3600，0=默认不限）；追问/权限等待默认有界超时由装配层注入 core/followup。</td><td><code>crew/state/config.py</code>、<code>crew/core/followup.py</code>、<code>crew/app.py</code>。</td></tr>
+      <tr><td>2026-09-17</td><td><code>4ce7c1b</code>/<code>679ace7</code>/<code>08f746f</code> 新增 <code>runtime.tool_execution_timeout_seconds</code>（默认 600）、<code>runtime.turn_deadline_seconds</code>（默认 0）、<code>runtime.health_port</code>（默认 0=主端口+1）。</td><td><code>crew/state/config.py</code>、<code>config/config.yaml.example</code>；消费方见 agent/gateway 模块文档。</td></tr>
+      <tr><td>2026-09-02</td><td>新增模型 API Key 凭证库 <code>credentials.py</code>（按 profile id + owner 作用域，JSON 原子写，POSIX 0600）；<code>config.py</code> 全部 profile 构建点统一走 <code>resolve_profile_api_key</code> 解析链；模型 CRUD 默认写凭证库，显式 <code>api_key_env</code> 才写 .env 并带共享名覆盖拦截（<code>overwrite_shared_key</code>）；<code>remove_model</code> 清理凭证条目；<code>build_provider</code> 门控纳入激活 profile 的 key。修复用户反馈"配置多个模型后所有 apikey 变成最新的 apikey"。</td><td>state/config、app 模型 CRUD、LLM 装配；存量 .env 部署零迁移（解析链保留 env 路径）</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+  <h2>本次更新：TraceStore 与有界写入（2026-09-23）</h2>
+  <p><code>TraceStore</code> 使用独立 SQLite 文件、owner scope、外键和 WAL（不支持 WAL 的文件系统回退 DELETE）。无受信业务归属的启动/第三方日志写入独立 <code>system</code> scope，不伪装成 <code>local</code>；系统追踪日志由诊断管理员专用查询合并展示，trace/span/payload 仍严格按 owner 隔离。<code>ObservationRecorder</code> 在业务线程完成脱敏后进入有界队列，由单一 writer 以批量事务写入；队列满、SQLite 忙或关闭超时只标记降级，不阻塞业务收尾。trace 计数和字节账本有固定上限，关闭不会在满队列上无限等待，stop 哨兵也会完成队列计数。</p>
+  <p>payload schema 保存 <code>capture_layer</code>、policy/version、截断原因及引用水位。分页查询使用 keyset cursor；导出通过独立临时文件分页生成，并在 manifest 中记录 snapshot 水位、数量与 partial 原因。</p>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../../testing/observability-tracing.html">可观测测试记录</a></div>
 </div>
 </body>
 </html>

@@ -18,12 +18,24 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any, Callable
 
+from crew.state._migration import TASKS_DB_TABLES, backfill_empty_owner_rows
+from crew.state.logging import get_logger
+from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 from crew.tasks.models import RuntimeTask, TaskKind, normalize_task_status
-from crew.tools.process_registry import terminate_process_tree
+from crew.security.process_lifecycle import terminate_process_tree_sync
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
 _WORKER_STOP_GRACE_SECONDS = 3.0
+
+log = get_logger("tasks.runtime")
+
+# Feature 级 schema 版本（6H）：tasks 域单表 runtime_tasks，一张单行版本表，
+# 当前结构登记为基线 v1；表结构演进在此号上递增并配迁移步骤。
+# 常量放在 runtime 模块（与 cron/kanban 同法，避免循环导入）：stamp 发生在
+# 本模块的 _init_schema，management 的 migrate 入口反向导入这里。
+TASKS_SCHEMA_FEATURE = "tasks"
+TASKS_SCHEMA_VERSION = 1
 
 
 class TaskRuntime:
@@ -38,7 +50,9 @@ class TaskRuntime:
         heartbeat_interval: float = 10.0,
         wait_timeout: float = 30.0,
         finished_retention_days: int = 7,
+        legacy_db_path: str | Path | None = None,
     ) -> None:
+        self._db_path = str(db_path)
         self._conn = connect_sqlite(db_path, wal_enabled=wal_enabled, row_factory=True)
         self._lock = threading.RLock()
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
@@ -55,7 +69,12 @@ class TaskRuntime:
         self._completion_callback: Callable[[dict[str, Any]], Any] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._blocked_owners: set[str] = set()
+        # 创建时声明不发完成通知的任务 (task_id, owner_account_id) 集合（进程内存量，
+        # 与任务同生命周期；任务完成占坑时移除）。
+        self._notify_suppressed: set[tuple[str, str]] = set()
         self._init_schema()
+        if legacy_db_path is not None:
+            self._migrate_legacy_rows(Path(legacy_db_path))
 
     def _init_schema(self) -> None:
         self._conn.execute(
@@ -105,6 +124,28 @@ class TaskRuntime:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_runtime_tasks_status ON runtime_tasks(status, updated_at)"
         )
+        # 历史 owner='' 行归属本机 local（owner 统一后不存在无主任务）。
+        backfill_empty_owner_rows(self._conn, ["runtime_tasks"])
+        # 6H：Feature 级 schema 版本登记（幂等），必须先于 legacy 行复制，
+        # 保证 copy-on-first-activate 的 gate 顺序（ensure-schema → stamp → copy）。
+        stamp_baseline(self._conn, TASKS_SCHEMA_FEATURE, version=TASKS_SCHEMA_VERSION)
+
+    def _migrate_legacy_rows(self, legacy_path: Path) -> None:
+        """copy-on-first-activate：目标库为空时从旧主库整表复制任务行。
+
+        gate 在 ensure-schema + tasks_schema_version stamp 之后（构造顺序保证）。
+        旧表保留在旧库不删（ADR-0038 回退备份）；目标库已有行即整体跳过，
+        重复构造幂等零重复；复制走单事务，失败不半写。回退配置把 tasks 库
+        指回旧库同一文件时直接跳过。
+        """
+
+        if legacy_path.resolve() == Path(self._db_path).resolve():
+            return
+        copied = self._writer.execute(
+            lambda conn: copy_legacy_feature_rows(legacy_path, conn, TASKS_DB_TABLES)
+        )
+        if any(copied.values()):
+            log.info("已从 %s 迁移 tasks 历史数据: %s", legacy_path, copied)
 
     def set_callbacks(
         self,
@@ -132,7 +173,8 @@ class TaskRuntime:
         backgrounded: bool = False,
         auto_backgrounded: bool = False,
         task_id: str | None = None,
-        owner_account_id: str = "",
+        owner_account_id: str,
+        notify_completion: bool = True,
     ) -> dict[str, Any]:
         owner_account_id = str(owner_account_id or "").strip()
         if owner_account_id in self._blocked_owners:
@@ -172,6 +214,9 @@ class TaskRuntime:
             )
 
         self._writer.execute(_write)
+        if not notify_completion:
+            # 该任务的完成不需要发通知（如 cron 回合已有自己的定时任务通知）。
+            self._notify_suppressed.add((record.task_id, owner_account_id))
         self._emit(record.to_dict(), "started" if record.status == "running" else "created")
         return record.to_dict()
 
@@ -194,7 +239,8 @@ class TaskRuntime:
         title: str,
         detail: str = "",
         assignee: str | None = None,
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> dict[str, Any]:
         task = self.create_runtime(
             kind="team",
@@ -245,7 +291,7 @@ class TaskRuntime:
         self._emit(task, "started")
         return task
 
-    def update(self, task_id: str, owner_account_id: str = "", **changes: Any) -> dict[str, Any]:
+    def update(self, task_id: str, owner_account_id: str, **changes: Any) -> dict[str, Any]:
         allowed = {f.name for f in fields(RuntimeTask)} - {"task_id", "created_at"}
         clean = {k: v for k, v in changes.items() if k in allowed}
         if "status" in clean:
@@ -370,7 +416,7 @@ class TaskRuntime:
             raise KeyError(f"任务不存在: {task_id}")
         return str(row[0] or "")
 
-    def get(self, task_id: str, owner_account_id: str = "") -> dict[str, Any]:
+    def get(self, task_id: str, owner_account_id: str) -> dict[str, Any]:
         sql = "SELECT * FROM runtime_tasks WHERE task_id=?"
         sql += " AND owner_account_id=?"
         params: tuple[Any, ...] = (task_id, owner_account_id)
@@ -380,7 +426,7 @@ class TaskRuntime:
             raise KeyError(f"任务不存在: {task_id}")
         return self._row_to_dict(row)
 
-    def list(self, session_id: str, owner_account_id: str = "") -> list[dict[str, Any]]:
+    def list(self, session_id: str, owner_account_id: str) -> list[dict[str, Any]]:
         return self.list_tasks(session_id=session_id, owner_account_id=owner_account_id)
 
     def list_tasks(
@@ -389,7 +435,7 @@ class TaskRuntime:
         session_id: str | None = None,
         status: str | None = None,
         limit: int = 200,
-        owner_account_id: str = "",
+        owner_account_id: str,
         _all_owners: bool = False,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
@@ -411,6 +457,66 @@ class TaskRuntime:
                 values,
             ).fetchall()
         return [self._row_to_dict(row) for row in rows]
+
+    # ---- async 门面 ----
+    # 事件循环上的调用一律经 asyncio.to_thread 转发到上面的同步实现
+    # （RLock + BEGIN IMMEDIATE 语义不变）；线程化决策只收敛在本文件。
+    async def create_runtime_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.create_runtime, *args, **kwargs)
+
+    async def create_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.create, *args, **kwargs)
+
+    async def assign_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.assign, *args, **kwargs)
+
+    async def update_status_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.update_status, *args, **kwargs)
+
+    async def mark_running_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.mark_running, *args, **kwargs)
+
+    async def update_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.update, *args, **kwargs)
+
+    async def touch_activity_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.touch_activity, *args, **kwargs)
+
+    async def heartbeat_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.heartbeat, *args, **kwargs)
+
+    async def set_backgrounded_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.set_backgrounded, *args, **kwargs)
+
+    async def finish_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.finish, *args, **kwargs)
+
+    async def mark_notified_async(self, *args: Any, **kwargs: Any) -> bool:
+        return await asyncio.to_thread(self.mark_notified, *args, **kwargs)
+
+    async def mark_resume_enqueued_async(self, *args: Any, **kwargs: Any) -> bool:
+        return await asyncio.to_thread(self.mark_resume_enqueued, *args, **kwargs)
+
+    async def prune_finished_async(self, *args: Any, **kwargs: Any) -> int:
+        return await asyncio.to_thread(self.prune_finished, *args, **kwargs)
+
+    async def reconcile_after_restart_async(self, *args: Any, **kwargs: Any) -> None:
+        await asyncio.to_thread(self.reconcile_after_restart, *args, **kwargs)
+
+    async def block_owner_async(self, *args: Any, **kwargs: Any) -> None:
+        await asyncio.to_thread(self.block_owner, *args, **kwargs)
+
+    async def activate_owner_async(self, *args: Any, **kwargs: Any) -> None:
+        await asyncio.to_thread(self.activate_owner, *args, **kwargs)
+
+    async def get_async(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(self.get, *args, **kwargs)
+
+    async def list_async(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.list, *args, **kwargs)
+
+    async def list_tasks_async(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.list_tasks, *args, **kwargs)
 
     def attach_worker(
         self,
@@ -501,7 +607,8 @@ class TaskRuntime:
         self,
         task_id: str,
         timeout: float | None = None,
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> dict[str, Any]:
         task = self.get(task_id, owner_account_id=owner_account_id)
         if task["status"] in TERMINAL_STATUSES:
@@ -522,7 +629,8 @@ class TaskRuntime:
         self,
         task_id: str,
         reason: str = "用户取消",
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> dict[str, Any]:
         task = self.get(task_id, owner_account_id=owner_account_id)
         if task["status"] in TERMINAL_STATUSES:
@@ -638,7 +746,7 @@ class TaskRuntime:
         while True:
             await asyncio.sleep(self.monitor_interval)
             now = time.time()
-            for task in self.list_tasks(status="running", limit=1000, _all_owners=True):
+            for task in self.list_tasks(status="running", limit=1000, _all_owners=True, owner_account_id=""):
                 reason = ""
                 if task["execution_timeout"] > 0 and task["started_at"]:
                     if now - task["started_at"] >= task["execution_timeout"]:
@@ -667,7 +775,7 @@ class TaskRuntime:
 
     def reconcile_after_restart(self) -> None:
         """Non-shell coroutines cannot survive process restart."""
-        for task in self.list_tasks(status="running", limit=10000, _all_owners=True):
+        for task in self.list_tasks(status="running", limit=10000, _all_owners=True, owner_account_id=""):
             if task["kind"] == "shell":
                 pid = int((task.get("progress") or {}).get("pid") or 0)
                 if pid and self._pid_alive(pid):
@@ -691,7 +799,7 @@ class TaskRuntime:
                     status="failed",
                     error="服务重启，Python 协程无法恢复",
                 )
-        for task in self.list_tasks(limit=10000, _all_owners=True):
+        for task in self.list_tasks(limit=10000, _all_owners=True, owner_account_id="local"):
             if task["status"] in TERMINAL_STATUSES and task["notified_at"] is None:
                 self._notify_completion(task)
 
@@ -722,7 +830,7 @@ class TaskRuntime:
             self._safe_unlink_output_ref(ref)
         return deleted
 
-    def unlink_session_output_files(self, session_id: str, owner_account_id: str = "") -> int:
+    def unlink_session_output_files(self, session_id: str, owner_account_id: str) -> int:
         """删除某会话全部 runtime task 的 output_ref 磁盘文件（不删 DB 行）。"""
         tasks = self.list_tasks(session_id=session_id, owner_account_id=owner_account_id, limit=10000)
         n = 0
@@ -791,6 +899,13 @@ class TaskRuntime:
         callback = self._completion_callback
         if callback is None or task.get("notified_at") is not None:
             return
+        key = (str(task.get("task_id") or ""), str(task.get("owner_account_id") or ""))
+        if key in self._notify_suppressed:
+            # 声明不发通知的任务：仍要原子占掉一次性完成副作用（mark_notified），
+            # 防止其他完成路径重复触发；集合条目随之清理。
+            self._notify_suppressed.discard(key)
+            self.mark_notified(key[0], owner_account_id=key[1])
+            return
         self._call_callback(callback, task)
 
     def _call_callback(self, callback: Callable[[dict[str, Any]], Any], payload: dict[str, Any]) -> None:
@@ -831,7 +946,7 @@ class TaskRuntime:
     def kill_process_group(pid: int, _reason: str = "") -> None:
         if pid <= 0:
             return
-        terminate_process_tree(pid)
+        terminate_process_tree_sync(pid)
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

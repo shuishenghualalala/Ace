@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0035 · CrewApp Team/Kanban 中心接线收口</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0035 · CrewApp Team/Kanban 中心接线收口</h1>
+<p>状态：已实施并验证 · 日期：2026-09-10 · 阶段：4C-3。</p>
+<h2>背景与候选方案</h2>
+<p>4C-1/4B-1 之后，Team 与 Dynamic Kanban 已是由 <code>product.team</code> / <code>product.dynamic-kanban</code> Generation 统一拥有的 Feature Bundle（Service、Execution Driver、Route 均已注册）。但 <code>CrewApp</code> 仍保留中心特判：<code>steer</code>/<code>interrupt</code> 的 <code>getattr(self.team, …) → getattr(self.dynamic_kanban, …)</code> 逐级硬编码链、<code>active_tasks_snapshot</code> 特判、<code>use_model</code>/<code>update_model</code>/<code>remove_model</code> 三处对 <code>self.team.set_provider</code> 与 <code>self.dynamic_kanban.provider = …</code> 的中心直写、owner provider 失效路径的 getattr 散点，以及 <code>set_dynamic_kanban_manager</code> 中与 Bundle 正式 Driver 重复的 <code>product.dynamic-kanban-driver-adapter</code> 注册。</p>
+<p>候选方案：A. 保留 getattr 链——中心继续认识两个 Feature 的方法面，新增 Driver 仍需改 app.py；B. 新增 session-control 贡献注册表——当前只有两个消费者，属于过早抽象；C. 复用 4D-1 Channels 收口先例：compat 属性 + active-manager 解析 + 显式 provider 接口。</p>
+<h2>决定</h2>
+<p>采用方案 C。<code>dynamic_kanban</code> / <code>dynamic_kanban_consumer</code> 改为动态 compat 属性：测试注入走 override 位，生产解析经 Feature Runtime 检查 <code>product.dynamic-kanban</code> 状态后从 Service Registry 取 <code>manager</code>/<code>consumer</code>，Feature 非 ACTIVE 返回 None（fail-closed）；Bundle install/disposer 的 <code>host.dynamic_kanban = manager / None</code> 赋值自然落到 override 位，语义不变。<code>steer</code>/<code>interrupt</code>/<code>active_tasks_snapshot</code> 与 owner provider 失效路径统一经 <code>_active_team_manager()</code> / <code>_active_dynamic_kanban_manager()</code>（isinstance 守卫）分派，停用后安静降级，返回值与异常语义不变。三处 provider 同步点收口为 <code>_sync_default_provider_to_features()</code>：<code>DynamicKanbanManager</code> 新增与 Team 对等的 <code>set_provider()</code> 显式接口（只换全局默认 Provider，不动 owner 级缓存），app.py 不再直写 <code>.provider</code> 字段。遗留的 <code>product.dynamic-kanban-driver-adapter</code> 注册与 <code>_run_dynamic_kanban_execution_driver</code> 删除，<code>mode=dynamic_kanban</code> Driver 仅由 Bundle 注册。</p>
+<h2>兼容、验证与回退</h2>
+<p>对外语义全部保持：steer 无运行中会话返回 False、interrupt 聚合多来源结果、DK owner scope 校验留在 manager 内部、provider 切换仍触发 <code>clear()</code> 与旧 Provider 退休。新增 <code>tests/test_team_kanban_app_compat.py</code> 7 例：真实 <code>build_app()</code> 下 team/kanban 经 Service Registry 解析同代 Service、Feature 停用后 compat 属性 fail-closed、steer/interrupt 经 Registry 分派透传 owner scope。组合回归（compat、kanban、team、gateway 事件/API/WS/dispatcher）214 passed；Ruff、compileall、Import Linter（6 contracts kept, 0 broken）全部通过。</p>
+<p>已知边界：<code>self.team</code> 仍保留 4C-1 的 override 位与 <code>set_team_manager</code> 入口，Team 侧字段彻底删除留待中心装配最终清理切片；<code>set_dynamic_kanban_manager</code> 保留为测试注入入口。回退方式：恢复普通字段与 getattr 分派链、还原三处 provider 直写。</p>
+<p><a href="../modules/dynamickanban.html">Dynamic Kanban 模块</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

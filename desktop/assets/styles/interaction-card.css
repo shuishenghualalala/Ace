@@ -20,7 +20,7 @@
 .interaction-card__progress,
 .interaction-card__score {
   flex: 0 0 auto;
-  padding: 2px var(--mw-space-2);
+  padding: var(--mw-space-fine-2) var(--mw-space-2);
   border-radius: var(--mw-radius-full);
   background: var(--mw-bg-selected);
   color: var(--mw-text-secondary);

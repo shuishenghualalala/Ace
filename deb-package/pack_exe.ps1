@@ -1,4 +1,4 @@
-﻿param (
+param (
     [string]$Version = ""
 )
 
@@ -223,11 +223,14 @@ if (-not (Test-Path $pythonCacheExe)) {
     Write-Host "✓ Python standalone 缓存已存在，跳过下载" -ForegroundColor Green
 }
 
-# 依赖同步：以 pyproject.toml + runtime-requirements.txt 的内容哈希为戳，
-# 变更时才重新安装；不变时跳过（pip 全量 satisfied 检查也要分钟级，直接省掉）。
+# 依赖同步：以 pyproject.toml + workspace 成员 pyproject + runtime-requirements.txt
+# 的内容哈希为戳，变更时才重新安装；不变时跳过（pip 全量 satisfied 检查也要分钟级，直接省掉）。
 $depStampFile = Join-Path $pythonCacheDir ".deps-stamp"
 $depHash = (Get-FileHash (Join-Path $ProjectRoot "pyproject.toml") -Algorithm SHA256).Hash +
            (Get-FileHash (Join-Path $PSScriptRoot "runtime-requirements.txt") -Algorithm SHA256).Hash
+foreach ($memberPyproject in Get-ChildItem (Join-Path $ProjectRoot "packages") -Recurse -Filter "pyproject.toml") {
+    $depHash += (Get-FileHash $memberPyproject.FullName -Algorithm SHA256).Hash
+}
 $depHash = [BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($depHash))).Replace("-", "")
 $needDeps = -not (Test-Path $depStampFile) -or ((Get-Content $depStampFile -Raw).Trim() -ne $depHash)
 
@@ -243,6 +246,17 @@ if ($needDeps) {
     & $pythonCacheExe -m ensurepip --upgrade | Out-Null
     & $pythonCacheExe -m pip --version | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "ensurepip 恢复 pip 失败" }
+    # 0) ADR-0037：uv workspace 成员包（crew-wiki 等，import 名保持 crew.*）先行
+    #    --no-deps 安装。pip 不识别 [tool.uv.sources]，根包依赖里的成员若不从本地
+    #    预装，下一步解析 ".[extras]" 时会尝试从 PyPI 拉取 workspace-only 成员而失败。
+    & $pythonCacheExe -m pip install --no-warn-script-location --no-deps `
+        (Join-Path $ProjectRoot "packages\crew-wiki") `
+        (Join-Path $ProjectRoot "packages\crew-external-agents") `
+        (Join-Path $ProjectRoot "packages\crew-team") `
+        (Join-Path $ProjectRoot "packages\crew-dynamickanban") `
+        (Join-Path $ProjectRoot "packages\crew-channels") `
+        (Join-Path $ProjectRoot "packages\crew-work")
+    if ($LASTEXITCODE -ne 0) { throw "pip install workspace 成员包 失败 (exit $LASTEXITCODE)" }
     # 1) 核心依赖 + 技能 extras（pyproject 为唯一数据源）；--no-warn-script-location 降噪
     & $pythonCacheExe -m pip install --no-warn-script-location ".[wiki,pdf,docx,xlsx]"
     if ($LASTEXITCODE -ne 0) { throw "pip install .[wiki,pdf,docx,xlsx] 失败 (exit $LASTEXITCODE)" }
@@ -273,6 +287,26 @@ Get-ChildItem -Path $pythonCacheDir -Directory -Recurse -Filter "__pycache__" -E
 $pythonRtDir = Join-Path $runtimesDir "python"
 if (Test-Path $pythonRtDir) { Remove-Item $pythonRtDir -Recurse -Force }
 Copy-Item -Path $pythonCacheDir -Destination $pythonRtDir -Recurse -Force
+
+# 删除不必要的大型依赖（如果存在）。
+# 注意：numpy/pandas 绝不能进这个删除列表——办公技能批（reportlab/pandas 等）与
+# matplotlib 依赖它们在运行时可用；此前把它们删掉会导致打包态 import pandas /
+# matplotlib 直接 ImportError（xlsx/docx/pdf 技能与绘图能力不可用）。体积代价
+# （约 +100MB）是功能正确性的既定取舍；Windows 打包态实测结果待回填。
+$heavyDeps = @("sympy", "onnxruntime", "scipy")
+foreach ($dep in $heavyDeps) {
+    $depPath = Join-Path $pythonRtDir "Lib\site-packages\$dep"
+    if (Test-Path $depPath) {
+        Remove-Item $depPath -Recurse -Force
+        Write-Host "  已删除不必要的依赖: $dep" -ForegroundColor Gray
+    }
+    # 删除 dist-info
+    $distInfo = Get-ChildItem -Path (Join-Path $pythonRtDir "Lib\site-packages") -Directory -Filter "$dep*" -ErrorAction SilentlyContinue
+    if ($distInfo) {
+        $distInfo | Remove-Item -Recurse -Force
+    }
+}
+
 Write-Host "✓ Python 运行时已复制到 staging" -ForegroundColor Green
 
 # ---- 3b. Node.js portable（裁剪 corepack/docs，保留 npm：docx/webapp 技能需要） ----

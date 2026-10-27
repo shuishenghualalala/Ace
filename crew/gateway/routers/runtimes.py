@@ -5,10 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
-import importlib.util
 import json
-import os
-import shutil
 import time
 from typing import Any
 
@@ -16,12 +13,13 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from crew.agent.external.detector import discover_local_runtimes
+from crew.agent.external.feature import EXTERNAL_AGENT_CATALOG_SERVICE_KEY
 from crew.agent.external.runtime_profile import normalize_runtime_models
-from crew.agent.external.runtime_registry import resolve_runtime_display_badge
 from crew.core.errors import ProviderError
 from crew.core.interfaces import LLMProvider
 from crew.core.types import Message
 from crew.gateway.auth import AuthenticationError, account_from_request, require_admin
+from crew.providers import stream_aux
 from crew.gateway.helpers import (
     build_team_draft,
     confirmed_formation_plan,
@@ -33,18 +31,12 @@ from crew.gateway.helpers import (
 from crew.security.launch import ProcessLaunch, current_process_launch
 from crew.security.models import PermissionProfile, PermissionProfileKind
 from crew.state.logging import get_logger
-from crew.team.formation import (
-    apply_formation_ai_audit,
-    formation_ai_context,
-    formation_auto_decision,
+from crew.team.payloads import (
+    _external_agent_payloads,
+    _external_team_payloads,
+    _managed_temporary_agent_ids,
+    _runtime_availability,
 )
-from crew.team.roles import (
-    all_role_public_payloads,
-    crew_builtin_agent_public,
-    intelligent_role_markdown,
-    role_preset,
-)
-from crew.team.team_spec import team_spec_for_creation
 
 log = get_logger("gateway.runtimes")
 
@@ -111,99 +103,6 @@ def _draft_stream_line(event: dict[str, Any]) -> str:
     return json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
-def _runtime_availability(runtime: dict[str, Any]) -> dict[str, Any]:
-    """Expose the persisted probe state, with a live executable-path guard."""
-    payload = dict(runtime)
-    target = str(runtime.get("executable_path") or "").strip()
-    protocol = str(runtime.get("protocol") or "").strip().lower()
-    available = False
-    if target:
-        if protocol == "client":
-            try:
-                available = importlib.util.find_spec(target) is not None
-            except (ImportError, AttributeError, ValueError):
-                available = False
-        else:
-            resolved = target if os.path.isabs(target) else shutil.which(target)
-            available = bool(resolved and os.path.isfile(resolved) and os.access(resolved, os.X_OK))
-    metadata = dict(runtime.get("metadata")) if isinstance(runtime.get("metadata"), dict) else {}
-    display_badge = resolve_runtime_display_badge(
-        provider=str(runtime.get("provider") or ""),
-        metadata=metadata,
-    )
-    metadata["display_badge"] = display_badge
-    status = str(metadata.get("availability_status") or "").strip()
-    if not available:
-        status = "unavailable"
-    elif status not in {"ready", "degraded", "unavailable"}:
-        status = "degraded"
-    payload["available"] = status == "ready"
-    payload["availability_status"] = status
-    payload["display_badge"] = display_badge
-    payload["metadata"] = metadata
-    return payload
-
-
-def _external_agent_payloads(
-    store: Any,
-    agents: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Project RuntimeDescriptor presentation fields onto persisted Agents."""
-
-    runtimes = {
-        str(runtime.get("id") or ""): runtime
-        for runtime in store.list_runtimes()
-    }
-    payloads: list[dict[str, Any]] = []
-    for agent in agents:
-        runtime = runtimes.get(str(agent.get("runtime_id") or ""))
-        metadata = (
-            runtime.get("metadata")
-            if isinstance(runtime, dict) and isinstance(runtime.get("metadata"), dict)
-            else {}
-        )
-        payloads.append({
-            **agent,
-            "display_badge": resolve_runtime_display_badge(
-                provider=str(
-                    (runtime or {}).get("provider")
-                    or agent.get("provider")
-                    or ""
-                ),
-                metadata=metadata,
-            ),
-        })
-    return payloads
-
-
-def _managed_temporary_agent_ids(store: Any, *, owner_account_id: str) -> set[str]:
-    """Return IDs hidden from durable user-facing Agent catalogs.
-
-    This includes active Formation temporary members and Runtime staffing managed
-    Agents; neither is a durable user-created Formation candidate.
-    """
-
-    hidden = {
-        str(member.get("agent_id") or "")
-        for team in store.list_teams(owner_account_id=owner_account_id)
-        for member in (
-            team.get("formation_plan", {}).get("members", [])
-            if isinstance(team.get("formation_plan"), dict)
-            else []
-        )
-        if isinstance(member, dict)
-        and member.get("selection_source") == "ai_temporary"
-        and str(member.get("agent_id") or "")
-    }
-    hidden.update(
-        str(agent.get("id") or "")
-        for agent in store.list_agents(owner_account_id=owner_account_id)
-        if str(agent.get("managed_kind") or "")
-        and str(agent.get("id") or "")
-    )
-    return hidden
-
-
 def _formation_agent_catalog(store: Any, *, owner_account_id: str) -> list[dict[str, Any]]:
     """Return only durable user-managed Agents for create-time Formation.
 
@@ -225,42 +124,6 @@ def _formation_agent_catalog(store: Any, *, owner_account_id: str) -> list[dict[
     ]
 
 
-
-def _external_team_payloads(
-    store: Any,
-    teams: list[dict[str, Any]],
-    *,
-    owner_account_id: str,
-) -> list[dict[str, Any]]:
-    """Project member Agent badges while keeping Team persistence unchanged."""
-
-    agents = _external_agent_payloads(
-        store,
-        store.list_agents(owner_account_id=owner_account_id),
-    )
-    badge_by_agent_id = {
-        str(agent.get("id") or ""): str(agent.get("display_badge") or "?")
-        for agent in agents
-    }
-    badge_by_agent_id["crew::builtin"] = "M"
-    return [
-        {
-            **team,
-            "display_badge": "T",
-            "members": [
-                {
-                    **member,
-                    "display_badge": badge_by_agent_id.get(
-                        str(member.get("agent_id") or ""),
-                        "?",
-                    ),
-                }
-                for member in (team.get("members") or [])
-                if isinstance(member, dict)
-            ],
-        }
-        for team in teams
-    ]
 
 
 def _truncate_user_payload(payload: dict) -> dict:
@@ -365,6 +228,8 @@ async def _run_formation_ai(
 ) -> dict[str, Any]:
     """Run one Formation AI audit and compile it into the stable public shape."""
 
+    from crew.team.formation import apply_formation_ai_audit, formation_ai_context
+
     context = formation_ai_context(payload, agents, fallback, runtimes)
     prompt, context_json = _formation_ai_prompt(context)
     ai_started_at = time.perf_counter()
@@ -373,10 +238,15 @@ async def _run_formation_ai(
     response_chars = 0
     reasoning_chars = 0
     try:
-        resp = await provider.chat([
-            Message.system("只输出可解析 JSON；不要输出分析过程。"),
-            Message.user(prompt),
-        ])
+        resp = await stream_aux(
+            provider,
+            [
+                Message.system("只输出可解析 JSON；不要输出分析过程。"),
+                Message.user(prompt),
+            ],
+            purpose="formation-audit",
+            timeout=120.0,
+        )
         usage = dict(resp.usage or {})
         response_chars = len(resp.text or "")
         reasoning_chars = len(resp.reasoning_content or "")
@@ -439,6 +309,8 @@ async def _run_formation_ai(
 
 
 def _draft_agent_catalog(agents: list[dict]) -> list[dict[str, str]]:
+    from crew.team.roles import crew_builtin_agent_public
+
     return [
         {
             "id": str(agent.get("id") or ""),
@@ -452,6 +324,8 @@ def _draft_agent_catalog(agents: list[dict]) -> list[dict[str, str]]:
 
 
 def _draft_role_catalog() -> list[dict[str, Any]]:
+    from crew.team.roles import all_role_public_payloads
+
     roles: list[dict[str, Any]] = []
     for role in all_role_public_payloads():
         lane = str(role.get("workflow_lane") or "")
@@ -542,6 +416,12 @@ def create_runtimes_router(crew) -> APIRouter:
 
     def _external_store():
         require_external_agents_enabled(crew)
+        plugins = getattr(crew, "plugins", None)
+        resolver = getattr(plugins, "resolve_service", None)
+        if callable(resolver):
+            service = resolver(EXTERNAL_AGENT_CATALOG_SERVICE_KEY, default=None)
+            if service is not None:
+                return service
         if crew.external_agents is None:
             raise RuntimeError("外部智能体存储未初始化")
         return crew.external_agents
@@ -678,11 +558,16 @@ def create_runtimes_router(crew) -> APIRouter:
 
     @router.get("/api/external-teams/roles")
     async def external_team_roles() -> JSONResponse:
+        from crew.team.roles import all_role_public_payloads
+
         _external_store()
         return JSONResponse(all_role_public_payloads())
 
     @router.post("/api/external-teams")
     async def create_external_team(request: Request, payload: dict) -> JSONResponse:
+        from crew.team.roles import all_role_public_payloads, intelligent_role_markdown, role_preset
+        from crew.team.team_spec import team_spec_for_creation
+
         owner = account_from_request(request).owner_account_id
         store = _external_store()
         team_description = str(payload.get("description") or "").strip()
@@ -830,6 +715,8 @@ def create_runtimes_router(crew) -> APIRouter:
 
     @router.post("/api/external-teams/suggest")
     async def suggest_external_team(request: Request, payload: dict):
+        from crew.team.formation import formation_auto_decision
+
         requested_mode = str(payload.get("formation_mode") or "").strip().lower()
         if requested_mode not in FORMATION_MODES:
             return JSONResponse(

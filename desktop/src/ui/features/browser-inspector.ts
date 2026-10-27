@@ -132,39 +132,7 @@ export function createBrowserInspector(
   address.inputMode = 'url';
   address.readOnly = value.mode !== 'human' && hasPage;
 
-  const note = document.createElement('form');
-  note.className = 'browser-note';
-  note.dataset.browserNote = '';
-  note.hidden = true;
-  const noteInput = document.createElement('input');
-  noteInput.className = 'browser-note__input';
-  noteInput.dataset.browserNoteInput = '';
-  noteInput.type = 'text';
-  noteInput.autocomplete = 'off';
-  noteInput.setAttribute('aria-label', '给这一步加说明');
-  noteInput.placeholder = '这一步要说明什么？例如：这个工单号每次都不同';
-  const saveNote = document.createElement('button');
-  saveNote.type = 'submit';
-  saveNote.className = 'browser-note__btn browser-note__btn--primary';
-  saveNote.textContent = '保存';
-  const cancelNote = document.createElement('button');
-  cancelNote.type = 'button';
-  cancelNote.className = 'browser-note__btn';
-  cancelNote.dataset.browserNoteCancel = '';
-  cancelNote.textContent = '取消';
-  note.append(noteInput, saveNote, cancelNote);
-
-  const recordingStatus = document.createElement('div');
-  recordingStatus.className = 'browser-recording';
-  recordingStatus.dataset.browserRecording = '';
-  recordingStatus.setAttribute('role', 'status');
-  recordingStatus.setAttribute('aria-live', 'polite');
-  recordingStatus.hidden = true;
-
-  const recordingControls = document.createElement('span');
-  recordingControls.className = 'browser-rec-slot';
-  recordingControls.dataset.browserRecControls = '';
-  toolbar.append(navigation, address, returnToAi, note, recordingStatus, recordingControls);
+  toolbar.append(navigation, address, returnToAi);
 
   const takeover = document.createElement('div');
   takeover.className = 'browser-takeover';

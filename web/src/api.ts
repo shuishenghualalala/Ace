@@ -17,6 +17,7 @@ import type {
   Session,
   Skill,
   SkillStore,
+  SubagentListResponse,
   Task,
   TodoItem,
   WikiGraph,
@@ -274,6 +275,18 @@ export const api = {
     }),
   deleteSession: (id: string) => getJSON(`/api/session/${id}`, { method: "DELETE" }),
   tasks: (id: string) => getJSON<Task[]>(`/api/tasks?session_id=${encodeURIComponent(id)}`),
+  subagents: (id?: string) =>
+    getJSON<SubagentListResponse>(`/api/subagents${id ? `?session_id=${encodeURIComponent(id)}` : ""}`),
+  sendSubagentMessage: (subagentId: string, sessionId: string, message: string, triggerTurn = true) =>
+    getJSON<Record<string, unknown>>(
+      `/api/subagents/${encodeURIComponent(subagentId)}/message?session_id=${encodeURIComponent(sessionId)}`,
+      { method: "POST", ...jsonBody({ message, trigger_turn: triggerTurn }) },
+    ),
+  interruptSubagent: (subagentId: string, sessionId: string, message = "") =>
+    getJSON<Record<string, unknown>>(
+      `/api/subagents/${encodeURIComponent(subagentId)}/interrupt?session_id=${encodeURIComponent(sessionId)}`,
+      { method: "POST", ...jsonBody({ message }) },
+    ),
   task: (id: string) => getJSON<Task>(`/api/tasks/${encodeURIComponent(id)}`),
   cancelTask: (id: string, reason = "用户取消") =>
     getJSON<Task>(`/api/tasks/${encodeURIComponent(id)}/cancel`, {

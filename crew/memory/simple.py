@@ -1,8 +1,10 @@
 """简单记忆实现。
 
-- NullMemory：空实现（默认）。
+- NullMemory：空实现，也是**默认装配**（内置记忆默认关闭）。
 - SQLiteMemory：把每轮 user 输入存入 SQLite，prefetch 时按关键词朴素召回。
-  足够 demo 演示"跨会话记忆"概念，向量检索等留作扩展点。
+  召回质量是 demo 级——「有记忆但召回差」比没有更伤产品观感，因此只在对
+  应配置（runtime.memory_enabled: true）显式开启时才会被装配；向量检索等
+  Provider 留作扩展点，中期路线是 MCP memory server。
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from pathlib import Path
 from crew.core.runctx import current_owner_account_id
 from crew.core.interfaces import MemoryProvider
 from crew.core.types import Message
+from crew.state._migration import backfill_empty_owner_rows
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 
@@ -58,10 +61,12 @@ class SQLiteMemory(MemoryProvider):
         cols = {r[1] for r in conn.execute("PRAGMA table_info(memory)").fetchall()}
         if "owner_account_id" not in cols:
             conn.execute("ALTER TABLE memory ADD COLUMN owner_account_id TEXT NOT NULL DEFAULT ''")
+        # 历史 owner='' 行归属本机 local（owner 统一后不存在无主记忆）。
+        backfill_empty_owner_rows(conn, ["memory"])
 
     @staticmethod
     def _owner() -> str:
-        return str(current_owner_account_id.get() or "").strip()
+        return current_owner_account_id.get()
 
     async def prefetch(self, session_id: str, query: str) -> str:
         terms = [t for t in query.split() if len(t) >= 2]
@@ -95,8 +100,7 @@ class SQLiteMemory(MemoryProvider):
                 "INSERT INTO memory (owner_account_id, session_id, text, ts) VALUES (?, ?, ?, ?)",
                 (owner, session_id, users[-1], time.time()),
             )
-        # SQLiteWriteHelper 锁冲突时内含 time.sleep 重试，必须离开事件循环。
-        await asyncio.to_thread(self._writer.execute, _write)
+        await self._writer.execute_async(_write)
 
     async def delete(self, session_id: str, owner_account_id: str | None = None) -> None:
         """删除某会话的全部记忆行，避免删会话后库膨胀。"""
@@ -112,4 +116,4 @@ class SQLiteMemory(MemoryProvider):
                 (owner, session_id),
             )
 
-        await asyncio.to_thread(self._writer.execute, _write)
+        await self._writer.execute_async(_write)

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0026 · Work CLI Service Consumer</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0026 · Work CLI Service Consumer</h1>
+<p>状态：Accepted · 日期：2026-09-08 · 阶段：3C CLI Consumer。</p>
+<h2>背景与候选方案</h2>
+<p>Work Service 已归属 Feature Generation，但 CLI 仍直接读取宿主字段。一次命令可能与停用或更新交错，读取到的 Service 缺少覆盖整个调用期的租约。继续读取宿主字段或只在解析时检查启用状态，都不能保护在途调用使用的资源。</p>
+<h2>决定</h2>
+<p>在 Work CLI 命令执行入口动态获取 <code>work</code> Service 与同代 Generation Lease，覆盖完整命令调用并在成功、失败或取消后释放。所有 Work 叶子命令使用统一入口；命令解析阶段不缓存 Service。同步 handler 保持同步返回类型；若同步 callable 返回 awaitable，包装器把 Service 上下文与 Lease 转交给该 awaitable，直至完成或取消后释放，避免依赖 <code>inspect.iscoroutinefunction()</code> 判断完整调用期。复用现有 Feature Runtime 租约机制。</p>
+<p>已由 Feature Runtime 管理的宿主在停用或 draining 时拒绝新增调用，不能回退到残留宿主字段。未安装 Work Feature 的嵌入式宿主可以使用其显式注入且自行拥有的 Service。既有参数、Owner 隔离、返回结构及业务错误语义保持兼容。</p>
+<h2>范围与回退</h2>
+<p>本切片只涉及 Work CLI Consumer，不改变 Provider、Store、REST、UI 和数据库结构。与外援切片分开提交，中心装配不参与本次修改。需要回退时撤销本切片提交，不迁移或删除业务数据。</p>
+<h2>验证与跨平台</h2>
+<p>定向测试覆盖全部 38 个叶子命令的能力门控、同步与 awaitable 返回的完整租用、停用等待、更新后解析新代、异常及异步取消释放、嵌入式宿主兼容。真实入口 smoke 通过 <code>build_app() → PluginManager → argparse → CLI handler</code> 证明生产装配从 Registry 取 Service，并在停用后即使宿主字段残留也 fail-closed。测试只以 Event 和 Runtime 状态作为并发屏障，不使用 wall-clock sleep。实现使用 Python 标准生命周期机制和平台无关临时路径；三平台实际执行情况以各平台 CI 为准。</p>
+<p><a href="../modules/work.html">Work 模块</a> · <a href="../modules/cli.html">CLI 模块</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

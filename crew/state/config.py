@@ -8,19 +8,23 @@ from __future__ import annotations
 import os
 import shutil
 import threading
+from contextlib import suppress
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from dotenv import dotenv_values, load_dotenv
 
-from crew.browser.types import BrowserConfig
 from crew.security.outbound import NetworkConfig
 from crew.state.access_control import AccessControlConfig
-from crew.wiki.config import WikiConfig, WikiRerankConfig, WikiSemanticConfig
+from crew.state.credentials import read_stored_key
 
 from crew.state.logging import get_logger
+
+if TYPE_CHECKING:
+    from crew.wiki.config import WikiRerankConfig, WikiSemanticConfig
 
 import sys
 
@@ -31,10 +35,6 @@ else:
 log = get_logger("config")
 _CONFIG_WRITE_LOCK = threading.Lock()
 _LEGACY_CRON_TICK_WARNING_EMITTED = False
-
-def _default_browser_config() -> BrowserConfig:
-    return BrowserConfig()
-
 
 def _bundled_config_template_path() -> Path:
     """Return the publishable config template, with legacy package fallback."""
@@ -218,9 +218,45 @@ class Config:
     # --- 运行时 ---
     db_path: str = "crew_data/crew.db"
     memory_db_path: str = "crew_data/memory.db"  # SQLiteMemory 独立路径，便于测试隔离
+    # 内置记忆默认关闭：SQLiteMemory 的关键词朴素召回是 demo 级，「有记忆但召回差」
+    # 比没有更伤产品观感。显式开启：runtime.memory_enabled: true（中期路线是接入
+    # MCP memory server，见 docs/todo/ace-weaknesses-dsh-remediation-plan.md §7.3）。
+    memory_enabled: bool = False
+    # cron Feature 独立库（ADR-0038 拆库试点）：与主库分文件，回退时把本键指回 crew.db 即可
+    cron_db_path: str = "crew_data/cron.db"
+    # work Feature 独立库（ADR-0038 拆库第二批）：与主库分文件，回退时把本键指回 crew.db 即可
+    work_db_path: str = "crew_data/work.db"
+    # dynamic-kanban Feature 独立库（ADR-0038 拆库第三批）：与主库分文件，回退时把本键指回 crew.db 即可
+    kanban_db_path: str = "crew_data/kanban.db"
+    # external-agents / team Feature 独立库（ADR-0038 拆库第四批，一次双库）：
+    # external_* 4 表归 external.db、external_team* 2 表归 team.db；
+    # 回退时把对应键指回 crew.db 即可
+    external_db_path: str = "crew_data/external.db"
+    team_db_path: str = "crew_data/team.db"
+    # sites / tasks / notifications Feature 独立库（ADR-0038 拆库收尾批，三小域）：
+    # sites 域 10 表归 sites.db、runtime_tasks 归 tasks.db、notifications 归
+    # notifications.db；回退时把对应键指回 crew.db 即可
+    sites_db_path: str = "crew_data/sites.db"
+    tasks_db_path: str = "crew_data/tasks.db"
+    notifications_db_path: str = "crew_data/notifications.db"
+    # channels Feature 独立库（ADR-0038 拆库最后一批，随 P2-7 归属迁移）：
+    # channel_bindings / channel_session_routes 2 表归 channels.db；
+    # 回退时把本键指回 crew.db 即可
+    channels_db_path: str = "crew_data/channels.db"
+    # wiki_learning 目录插件自有库（ADR-0038 清单外补充批）：插件 6 表归
+    # crew_data/wiki_learning.db；装配点在插件 register（消费侧归一），
+    # 回退时把本键指回 crew.db 即可
+    wiki_learning_db_path: str = "crew_data/wiki_learning.db"
+    # subagent 域自有库（阶段 B）：runs/edges/descriptors 三表归
+    # crew_data/subagent.db；装配点在 App 组合根，回退时指回 crew.db 即可
+    subagent_db_path: str = "crew_data/subagent.db"
     log_level: str = "INFO"
     log_file: str = ""  # 空=不写文件；填路径则同时写文件（支持 ~ 展开）
     llm_trace: bool = True  # 是否把每次 LLM 收发全量写入 {crew_home}/logs/llm.jsonl，便于排查
+    # 新观测投影独立于 legacy llm_trace；未显式配置时保持启用以兼容现有诊断习惯。
+    observability_enabled: bool = True
+    observability_developer_access: bool = False
+    observability: dict[str, Any] = field(default_factory=dict)
     max_iterations: int = 0  # 0=无限，靠 auto-compact + guardrail 防失控
     dk_task_timeout_seconds: float = 3600.0  # Dynamic Kanban 单个任务执行超时（秒），0=不限
     # 外部 Runtime 的统一空闲/硬截止/交互等待策略；空映射保持现有协议兼容默认。
@@ -247,6 +283,9 @@ class Config:
     compaction_post_compact_max_important_chars: int = 5000  # 单条恢复重要结论最大字符数
     compaction_post_compact_max_total_chars: int = 140000  # 恢复附件总字符闸口
     compaction_max_tool_result_chars: int = 20000  # 单条 tool result 最大字符数，超长截断
+    compaction_max_overflow_retries: int = 1  # 上下文 overflow 后 compact-retry 次数上限（每次溢出序列一次）
+    compaction_summary_max_tokens: int = 8192  # 摘要调用 maxTokens 封顶（截断视为失败）
+    compaction_summary_prefix_reuse: bool = True  # 摘要调用是否允许 KV 前缀复用（按 provider 能力决策）
     retry_max: int = 2
     retry_backoff: float = 1.0
     title_auto: bool = True
@@ -283,6 +322,7 @@ class Config:
     gateway_dev_account: str = "dev:dev"  # 开发环境 owner ID，dev 模式下自动 admin
     gateway_max_active_runs: int = 4      # 不同 session 同时运行的全局上限
     gateway_max_queue_depth_per_session: int = 20  # 单 session 等待队列上限
+    health_port: int = 0   # 独立线程 health 服务端口（runtime.health_port）；0 = 主端口+1
 
     # --- security ---
     # 默认关闭：工具以当前宿主用户权限运行，不启用沙箱或审批链路。
@@ -316,6 +356,23 @@ class Config:
     subagent_max_iterations: int = 200    # 子 agent 单轮工具迭代上限；主 agent 可配置为无限
     subagent_idle_timeout_seconds: float = 120.0  # 子 agent 空闲（无活动）超时：N 秒零输出才中止（防卡死），0=不限
     subagent_timeout_seconds: float = 1800.0  # 子 agent 绝对运行上限（全局兜底），0=不限
+    subagent_default_provider: str = "inprocess-spawn"  # 部署侧默认传输；模型不可见
+    subagent_fork_enabled: bool = False  # 是否注册父会话快照分叉 Provider
+    subagent_delegation_mode: str = "explicit"  # explicit | proactive；只影响主 agent 的委派纪律
+    subagent_continuable: bool = False          # 是否为新委派启用持久子身份与控制面
+    # 阶段 B：深度账本 / 同构批量 / 爬坡与限流退避 / 摘要兜底 / 持久层
+    subagent_max_depth: int = 3           # 委派深度上限（单调记账，运行期只能加深）
+    subagent_allow_nested: bool = False   # 子 agent 是否可见委派工具（默认关闭=行为与旧版一致）
+    subagent_max_batch_items: int = 128   # prompt_template+items 同构批量条数上限
+    subagent_launch_initial: int = 5      # 批量首发立即放行数，此后每 interval 放 1 个
+    subagent_launch_interval_ms: int = 700  # 爬坡间隔（毫秒）
+    subagent_rate_backoff_base_seconds: float = 3.0  # 限流重试退避基数
+    subagent_rate_backoff_factor: float = 2.0        # 限流重试指数因子
+    subagent_rate_max_retries: int = 6   # 单条目限流重试上限（防无限重排）
+    subagent_rate_recover_seconds: float = 180.0  # 无新限流多久后容量 +1 恢复
+    subagent_summary_min_chars: int = 200  # 交卷最短字符数（短于此追加一轮扩写）
+    subagent_summary_retries: int = 1      # 摘要扩写最大追加轮数
+    subagent_retain_runs_days: int = 30    # run/descriptor/edge 保留期（天），超期清理
 
     # --- unified long-task runtime ---
     tasks_auto_background_after_seconds: float = 15.0
@@ -329,6 +386,17 @@ class Config:
     tasks_subagent_execution_timeout_seconds: float = 1800.0
     tasks_agent_turn_inactivity_timeout_seconds: float = 600.0
     tasks_agent_turn_execution_timeout_seconds: float = 3600.0
+    # 单工具执行段看门狗：超时取消该工具并合成 "timed out after X.Xs" 作为正常
+    # tool output 回灌模型（tool_call/tool output 配对完整，回合继续推进），0=关闭。
+    tool_execution_timeout_seconds: float = 600.0
+    # 整回合 deadline（秒）：回合累计时长上限。到点走与 interrupt 相同的优雅收尾
+    # （中断标记 + 回合正常结束，历史/输出含 "deadline exceeded" 标记），在途工具
+    # 走 aborted 语义；0 = 不限（默认关闭）。
+    turn_deadline_seconds: float = 0.0
+    # 追问/权限确认等待上限（秒）：wait_for_answer 调用方未显式传 timeout 时的
+    # 默认有界等待；超时按「用户未回答」收尾（返回空答案）。0 = 默认不限
+    # （维持旧的不限语义）。显式传 timeout（含 None/0）始终优先于该默认值。
+    interaction_timeout_seconds: float = 3600.0
 
     # --- mcp / cron ---
     mcp_servers: dict[str, Any] = field(default_factory=dict)  # 外部 MCP server 配置
@@ -343,10 +411,20 @@ class Config:
     session_idle_timeout: int = 0      # 会话空闲超时（分钟），0=不自动过期
 
     # --- wiki ---
-    wiki: WikiConfig = field(default_factory=WikiConfig)
+    # Feature 原始配置透传（与 team_config 同一模式）：core 只保存 config.yaml
+    # 的 wiki 节，WikiConfig 的解析与默认值由 wiki Feature 侧负责。
+    wiki_config: dict[str, Any] = field(default_factory=dict)
+    # /api/config 能力上报用的轻量开关（取自 wiki 节的 enabled，默认开启）。
+    wiki_enabled: bool = True
 
     access_control: AccessControlConfig = field(default_factory=AccessControlConfig)
-    browser: BrowserConfig = field(default_factory=_default_browser_config)
+    # Feature 原始配置透传（与 wiki_config/team_config 同一模式）：core 只保存
+    # config.yaml 的 tools.browser 节，BrowserConfig 的解析与默认值由 browser
+    # Feature 侧装配时负责。
+    browser_config: dict[str, Any] = field(default_factory=dict)
+    # tools.web_search 节透传：provider 有序降级链、API key 环境变量名等，
+    # 解析由 web_search_service 负责（加载时经 configure_search 注入）。
+    web_search_config: dict[str, Any] = field(default_factory=dict)
     # 进程内 HTTP 边界（web_search/web_extract/Wiki）上游代理；空=读环境变量
     network: NetworkConfig = field(default_factory=NetworkConfig)
 
@@ -406,7 +484,7 @@ class Config:
 
     def owner_overlay_data(self, owner_account_id: str | None = None) -> dict[str, Any]:
         """读取 owner 私有 overlay 配置。"""
-        return _read_yaml_file(owner_overlay_config_path(owner_account_id))
+        return _apply_features_namespace(_read_yaml_file(owner_overlay_config_path(owner_account_id)))
 
     def owner_env_map(self, owner_account_id: str | None = None) -> dict[str, str]:
         """读取 owner 私有 .env，不污染全局进程环境。"""
@@ -439,10 +517,13 @@ class Config:
             if not profile.builtin:
                 continue
             builtin = replace(profile)
-            builtin.api_key = _lookup_api_key(
+            # 内置模型是全局共享层：key 解析走全局凭证库 + owner .env / 进程环境兜底
+            builtin.api_key = resolve_profile_api_key(
+                model_id,
                 builtin.api_key_env,
-                env_map,
+                env_map=env_map,
                 fallback_global=fallback_global,
+                owner_account_id=owner_account_id,
             )
             profiles[model_id] = builtin
 
@@ -452,13 +533,17 @@ class Config:
             for model_id, raw in models.items():
                 if not isinstance(raw, dict):
                     continue
-                profile = _build_owner_model_profile(str(model_id), raw, env_map)
+                profile = _build_owner_model_profile(str(model_id), raw, env_map, owner_account_id or "")
                 profiles[str(model_id)] = profile
         return profiles
 
-    def owner_rerank_config(self, owner_account_id: str | None = None) -> WikiRerankConfig:
+    def owner_rerank_config(self, owner_account_id: str | None = None) -> "WikiRerankConfig":
         """Merge owner reranking settings without resolving or exporting credentials."""
-        global_cfg = self.wiki.rerank
+        # 延迟导入：wiki 包内部经 _llm 引用 crew.providers，而 providers 初始化
+        # 会经 crew.state 回到本模块，顶层导入会形成循环。
+        from crew.wiki.config import WikiConfig, WikiRerankConfig
+
+        global_cfg = WikiConfig.from_raw(self.wiki_config).rerank
         raw = (self.owner_overlay_data(owner_account_id).get("wiki") or {}).get("rerank")
         if not isinstance(raw, dict):
             return global_cfg
@@ -470,7 +555,11 @@ class Config:
         不在此解析 api_key（``WikiSemanticConfig`` 只存 ``api_key_env`` 变量名）；
         key 由调用方经 ``owner_env_map`` + ``_lookup_api_key`` 解析。
         """
-        global_cfg = self.wiki.semantic
+        # 延迟导入：wiki 包内部经 _llm 引用 crew.providers，而 providers 初始化
+        # 会经 crew.state 回到本模块，顶层导入会形成循环。
+        from crew.wiki.config import WikiConfig, WikiSemanticConfig
+
+        global_cfg = WikiConfig.from_raw(self.wiki_config).semantic
         overlay = self.owner_overlay_data(owner_account_id)
         raw = (overlay.get("wiki") or {}).get("semantic")
         if not isinstance(raw, dict):
@@ -678,41 +767,37 @@ class Config:
     def _persist_owner_channel_config_locked(self, owner_account_id: str, name: str, config_data: dict[str, Any]) -> Path:
         yaml_path = owner_overlay_config_path(owner_account_id)
         data = _read_yaml_file(yaml_path)
-        channels = data.get("channels")
-        if not isinstance(channels, dict):
-            channels = {}
-            data["channels"] = channels
+        _write_channel_config(data, name, config_data, include_platforms=False)
 
-        remove_keys = set(config_data.pop("_remove_keys", []) or [])
-        current = channels.get(name)
-        if not isinstance(current, dict):
-            current = {}
-        for key in remove_keys:
-            current.pop(str(key), None)
-            extra = current.get("extra")
-            if isinstance(extra, dict):
-                extra.pop(str(key), None)
-                if not extra:
-                    current.pop("extra", None)
-        merged = {**current, **config_data}
-        channels[name] = merged
-
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data,
-                f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
+        _atomic_write_yaml(yaml_path, data)
         return yaml_path
 
-    # ---- 模型 profile CRUD（运行时增删改 + 持久化到 config.yaml）----
+    # ---- 模型 profile 配置事务（候选值 → 持久化 → 发布）----
     #
-    # 设计要点：
+    # 顺序契约（与 _commit_mcp_servers 一致，app.py 等调用方共用单一入口）：
+    #   1. 候选值：在 model_profiles 的副本上计算新增/更新/删除后的完整映射，
+    #      不触碰已发布的内存状态；
+    #   2. 校验：存在性/唯一性前置条件不满足时抛 ValueError/KeyError，
+    #      磁盘与内存均不变；
+    #   3. 持久化：读盘 → 用候选值整体替换 llm 段 → _atomic_write_yaml 原子替换
+    #      （失败清理残留 tmp 并重抛，目标文件保持旧内容）；
+    #   4. 发布：磁盘提交成功后才把候选值发布为 self.model_profiles / active /
+    #      default_model_id，并刷新 raw_config。
+    #
+    # owner 作用域：模型配置分两层——全局共享层（config.yaml 的 llm 段，本事务
+    # 的唯一写入范围）与 owner 私有层（每个 owner 独立的 overlay yaml，经
+    # persist_owner_model_profiles 按候选值写入）。本事务不触碰任何 owner
+    # overlay，owner 之间按文件天然隔离，一个 owner 的操作不会影响其他 owner；
+    # owner 私有模型的失败语义由其独立事务（persist_owner_model_profiles）保证。
+    #
+    # 失败语义：与 _commit_mcp_servers 一致——持久化失败（步骤 3 抛错）时内存与
+    # 磁盘一致保留旧值，直接重试本入口即可，不丢更新；调用方收到异常后不得重建
+    # Provider、不得切换激活、不得清理凭证/env、不得失效任何会话缓存。持久化
+    # 成功后的运行资源操作失败（如 Provider 构建/退役失败）属于"已保存但切换
+    # 失败"：磁盘与内存保持新值，调用方必须如实上报，不得回滚磁盘与内存伪装成
+    # 保存失败。
+    #
+    # 其余设计要点：
     # 1. yaml 写回：使用 PyYAML 整体重写 config.yaml。这会丢失原注释（PyYAML 固有限制），
     #    但保证结构稳定、字段顺序可读。引入 ruamel.yaml 仅为此功能会破坏最小依赖原则。
     # 2. yaml 中只写非敏感字段（name/api_key_env/base_url/model/temperature/max_tokens/
@@ -720,8 +805,46 @@ class Config:
     # 3. .env 写入：单独函数处理（_write_env_key），按"已存在则替换该行，否则追加"策略，
     #    写完同步 os.environ 让当前进程立即可用。
     # 4. 边界：删除最后一个模型禁止（409）；删除激活模型由调用方负责切换激活。
+    def _commit_model_profiles(
+        self,
+        candidate: dict[str, ModelProfile],
+        *,
+        active_model_id: str | None = None,
+        default_model_id: str | None = None,
+    ) -> Path:
+        """统一写入边界：候选值 → 持久化 → 发布（顺序契约见上）。"""
+        with _CONFIG_WRITE_LOCK:
+            if not self.config_path:
+                raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
+            normalized = {str(pid): replace(p) for pid, p in candidate.items()}
+            yaml_path = Path(self.config_path)
+            data = _read_config_yaml_for_write(yaml_path)
+
+            # 仅重写 llm 段，保留其它段（runtime/agent/gateway 等）原样
+            llm = data.get("llm")
+            if not isinstance(llm, dict):
+                llm = {}
+                data["llm"] = llm
+            llm["active"] = active_model_id if active_model_id is not None else self.active_model_id
+            default_id = default_model_id if default_model_id is not None else self.default_model_id
+            if default_id:
+                llm["default"] = default_id
+            llm["models"] = {
+                pid: _serialize_profile_for_yaml(p) for pid, p in normalized.items()
+            }
+
+            # 磁盘提交成功后才发布内存状态：写回失败时内存与磁盘一致保留旧值。
+            _atomic_write_yaml(yaml_path, data)
+            self.model_profiles = normalized
+            if active_model_id is not None:
+                self.active_model_id = active_model_id
+            if default_model_id is not None:
+                self.default_model_id = default_model_id
+            self.raw_config = data
+            return yaml_path
+
     def add_model(self, profile_data: dict[str, Any]) -> ModelProfile:
-        """新增一个模型 profile。
+        """新增一个模型 profile：候选值 → 持久化 → 发布（顺序契约见上）。
 
         Args:
             profile_data: 必须含 id；其它字段缺省时取 ModelProfile 默认值。
@@ -731,7 +854,9 @@ class Config:
             新建的 ModelProfile。
 
         Raises:
-            ValueError: id 为空或已存在；或写回失败。
+            ValueError: id 为空或已存在（磁盘与内存均不变）。
+            RuntimeError: config_path 为空（未通过 yaml 加载）。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
         """
         model_id = str(profile_data.get("id") or "").strip()
         if not model_id:
@@ -740,12 +865,12 @@ class Config:
             raise ValueError(f"模型 id 已存在: {model_id}")
 
         # 构建 profile（不含 api_key；key 由调用方处理 env 写入）
-        profile = _build_profile_from_payload(model_id, profile_data)
-        self.model_profiles[model_id] = profile
+        profile = _build_profile_from_payload(model_id, profile_data, owner_account_id="")
+        self._commit_model_profiles({**self.model_profiles, model_id: profile})
         return profile
 
     def update_model(self, model_id: str, profile_data: dict[str, Any]) -> ModelProfile:
-        """更新已存在的模型 profile。
+        """更新已存在的模型 profile：候选值 → 持久化 → 发布（顺序契约见上）。
 
         支持部分更新：未传入的字段保留原值。id 不可变（来自 path 参数）。
 
@@ -754,7 +879,8 @@ class Config:
             profile_data: 待覆盖字段。
 
         Raises:
-            KeyError: model_id 不存在。
+            KeyError: model_id 不存在（磁盘与内存均不变）。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
         """
         if model_id not in self.model_profiles:
             raise KeyError(model_id)
@@ -776,33 +902,63 @@ class Config:
             "builtin": profile_data.get("builtin", current.builtin),
             "capabilities": profile_data.get("capabilities", list(current.capabilities)),
         }
-        # _build_profile_from_payload 会从 os.environ[api_key_env] 取 key：
-        # - 调用方先 _apply_api_key_to_env 写入了 env → 取到新 key
+        # _build_profile_from_payload 按 key 解析链取值（凭证库 → env）：
+        # - 调用方先写凭证库/env → 取到新 key
         # - api_key_env 改到不存在的变量 → 取到空串，has_key=False（反映真实状态）
         # - 什么都不改 → 取到原值（os.environ 在 load_config 时已设置）
-        profile = _build_profile_from_payload(model_id, merged)
-        self.model_profiles[model_id] = profile
+        profile = _build_profile_from_payload(model_id, merged, owner_account_id="")
+        self._commit_model_profiles({**self.model_profiles, model_id: profile})
         return profile
 
     def remove_model(self, model_id: str) -> ModelProfile:
-        """删除一个模型 profile。
+        """删除一个模型 profile：候选值 → 持久化 → 发布（顺序契约见上）。
 
         Args:
             model_id: 待删除的 profile id。
 
         Raises:
-            KeyError: model_id 不存在。
+            KeyError: model_id 不存在（磁盘与内存均不变）。
             ValueError: 试图删除最后一个模型（至少保留一个）。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
         """
         if model_id not in self.model_profiles:
             raise KeyError(model_id)
         if len(self.model_profiles) <= 1:
             raise ValueError("至少保留一个模型配置，禁止删除最后一个")
 
-        return self.model_profiles.pop(model_id)
+        removed = self.model_profiles[model_id]
+        self._commit_model_profiles(
+            {pid: p for pid, p in self.model_profiles.items() if pid != model_id}
+        )
+        return removed
+
+    def set_active_model(self, model_id: str) -> ModelProfile:
+        """切换激活（默认兜底）模型：候选值 → 持久化 → 发布（顺序契约见上）。
+
+        与 activate_model（纯内存发布）的区别：磁盘提交成功后才发布内存，
+        持久化失败时 active/default 与磁盘一致保留旧值。use_model（app 层）与
+        删除激活模型后的自动切换共用本入口。
+
+        Raises:
+            KeyError: model_id 不存在。
+            ValueError: 模型未加载，不能用于对话。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
+        """
+        if model_id not in self.model_profiles:
+            raise KeyError(model_id)
+        if not self.model_profiles[model_id].loaded:
+            raise ValueError(f"模型未加载，不能用于对话: {model_id}")
+        self._commit_model_profiles(
+            dict(self.model_profiles),
+            active_model_id=model_id,
+            default_model_id=model_id,
+        )
+        # 激活派生字段（api_key/provider/base_url/model/...）在磁盘提交成功后
+        # 发布；activate_model 的存在性与 loaded 校验在此必然已通过。
+        return self.activate_model(model_id)
 
     def persist_model_profiles(self) -> Path:
-        """把当前 model_profiles 写回 config.yaml（整体重写 llm.models 段）。
+        """把当前 model_profiles 写回 config.yaml（遗留入口，失败语义见上）。
 
         注意：使用 PyYAML 整体重写，原注释会丢失。备份建议在 UI/CLI 提示用户。
 
@@ -812,203 +968,181 @@ class Config:
         Raises:
             RuntimeError: config_path 为空（未通过 yaml 加载）或写回失败。
         """
-        with _CONFIG_WRITE_LOCK:
-            return self._persist_model_profiles_locked()
+        return self._commit_model_profiles(dict(self.model_profiles))
 
-    def _persist_model_profiles_locked(self) -> Path:
-        """在持有配置写锁时执行 YAML 写回。"""
-        if not self.config_path:
-            raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
+    # ---- evolution 配置事务（候选值 → 持久化 → 发布）----
+    #
+    # 顺序契约与失败语义同模型 profile 事务：候选值只在副本上计算，磁盘提交
+    # 成功后才发布内存；持久化失败时内存与磁盘一致保留旧值，可直接重试。
+    # evolution 是全局开关（无 owner 维度），gateway misc 与 CLI knowledge
+    # 共用本入口。
+    def set_evolution_config(
+        self,
+        *,
+        auto_trigger: bool | None = None,
+        auto_full_cycle: bool | None = None,
+        visible: bool | None = None,
+    ) -> Path:
+        """更新 evolution 开关并持久化到 config.yaml 的 agent.evolution 段。
 
-        yaml_path = Path(self.config_path)
-        if not yaml_path.exists():
-            # 用户配置丢失（极端情况）：从空 dict 开始构建一个最小可用 yaml
-            data: dict[str, Any] = {}
-        else:
-            try:
-                data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-                if not isinstance(data, dict):
-                    data = {}
-            except yaml.YAMLError:
-                raise RuntimeError(f"config.yaml 解析失败，拒绝写回以保护原文件: {yaml_path}")
+        Args:
+            auto_trigger / auto_full_cycle / visible: None 表示保持原值。
 
-        # 仅重写 llm 段，保留其它段（runtime/agent/gateway 等）原样
-        llm = data.get("llm")
-        if not isinstance(llm, dict):
-            llm = {}
-            data["llm"] = llm
-        llm["active"] = self.active_model_id
-        if self.default_model_id:
-            llm["default"] = self.default_model_id
-        llm["models"] = {
-            pid: _serialize_profile_for_yaml(p) for pid, p in self.model_profiles.items()
+        Raises:
+            RuntimeError: config_path 为空（未通过 yaml 加载）。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
+        """
+        candidate = {
+            "auto_trigger": self.evolution_auto_trigger if auto_trigger is None else bool(auto_trigger),
+            "auto_full_cycle": (
+                self.evolution_auto_full_cycle if auto_full_cycle is None else bool(auto_full_cycle)
+            ),
+            "visible": self.evolution_visible if visible is None else bool(visible),
         }
+        with _CONFIG_WRITE_LOCK:
+            if not self.config_path:
+                raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
+            yaml_path = Path(self.config_path)
+            data = _read_config_yaml_for_write(yaml_path)
 
-        # 同步 raw_config（让运行时观察者看到一致状态）
-        self.raw_config = data
+            agent = data.get("agent")
+            if not isinstance(agent, dict):
+                agent = {}
+                data["agent"] = agent
+            agent["evolution"] = candidate
 
-        # 写回（先写临时文件再原子替换，防止中途崩溃损坏 config.yaml）
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data, f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
-        return yaml_path
+            # 磁盘提交成功后再发布内存状态：写回失败时内存与磁盘一致保留旧值。
+            _atomic_write_yaml(yaml_path, data)
+            self.evolution_auto_trigger = candidate["auto_trigger"]
+            self.evolution_auto_full_cycle = candidate["auto_full_cycle"]
+            self.evolution_visible = candidate["visible"]
+            self.raw_config = data
+            return yaml_path
 
     def persist_evolution_config(self) -> Path:
-        """把当前 evolution 配置写回 config.yaml 的 agent.evolution 段。
+        """把当前 evolution 配置写回 config.yaml（遗留入口，失败语义见 set_evolution_config）。"""
+        return self.set_evolution_config()
 
-        遵循与 persist_model_profiles 相同的读-改-写原子策略。
-        """
-        with _CONFIG_WRITE_LOCK:
-            return self._persist_evolution_config_locked()
-
-    def _persist_evolution_config_locked(self) -> Path:
-        if not self.config_path:
-            raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
-
-        yaml_path = Path(self.config_path)
-        if not yaml_path.exists():
-            data: dict[str, Any] = {}
-        else:
-            try:
-                data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-                if not isinstance(data, dict):
-                    data = {}
-            except yaml.YAMLError:
-                raise RuntimeError(f"config.yaml 解析失败，拒绝写回以保护原文件: {yaml_path}")
-
-        agent = data.get("agent")
-        if not isinstance(agent, dict):
-            agent = {}
-            data["agent"] = agent
-        agent["evolution"] = {
-            "auto_trigger": self.evolution_auto_trigger,
-            "auto_full_cycle": self.evolution_auto_full_cycle,
-            "visible": self.evolution_visible,
+    # ---- MCP server 配置事务（候选值 → 持久化 → 发布）----
+    #
+    # 顺序契约（与 _atomic_write_yaml 配合，gateway Router 与 CLI 共用单一入口）：
+    #   1. 候选值：在 mcp_servers 的副本上计算新增/更新/删除后的完整映射，
+    #      不触碰已发布的内存状态；
+    #   2. 校验：存在性前置条件不满足时抛 ValueError/KeyError，磁盘与内存均不变；
+    #   3. 持久化：读盘 → 用候选值整体替换 mcp_servers 段 → _atomic_write_yaml
+    #      原子替换（失败清理残留 tmp 并重抛，目标文件保持旧内容）；
+    #   4. 发布：磁盘提交成功后才把候选值发布为 self.mcp_servers 并刷新
+    #      raw_config。
+    #
+    # 失败语义：
+    # - 持久化失败（步骤 3 抛错）时内存与磁盘一致保留旧值，直接重试本方法即可，
+    #   不丢更新；调用方收到异常后不得启动/重载/移除任何运行资源。
+    # - 持久化成功后的运行资源操作（连接/断开 MCP 子进程）失败属于
+    #   "已保存但连接失败"：磁盘与内存保持新值，调用方必须如实上报错误，
+    #   不得回滚磁盘与内存伪装成保存失败。
+    #
+    # 边界：本边界只保证单个 config.yaml 的原子替换与内存发布的先后一致，
+    # 不承诺多文件与外部运行资源（MCP 子进程、连接池）的分布式原子性。
+    def _commit_mcp_servers(self, candidate: dict[str, Any]) -> Path:
+        """统一写入边界：候选值 → 持久化 → 发布（顺序契约见上）。"""
+        normalized = {
+            str(key): dict(value) if isinstance(value, dict) else {}
+            for key, value in candidate.items()
         }
+        with _CONFIG_WRITE_LOCK:
+            if not self.config_path:
+                raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
+            yaml_path = Path(self.config_path)
+            data = _read_config_yaml_for_write(yaml_path)
+            servers = data.get("mcp_servers")
+            if not isinstance(servers, dict):
+                servers = {}
+                data["mcp_servers"] = servers
+            servers.clear()
+            servers.update(normalized)
+            _atomic_write_yaml(yaml_path, data)
+            self.mcp_servers = normalized
+            self.raw_config = data
+            return yaml_path
 
-        self.raw_config = data
+    def add_mcp_server(self, name: str, server_cfg: dict[str, Any]) -> Path:
+        """新增 MCP server：候选值 → 持久化 → 发布。
 
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data, f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
-        return yaml_path
+        Raises:
+            ValueError: server 已存在（磁盘与内存均不变）。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
+        """
+        servers = self.mcp_servers if isinstance(self.mcp_servers, dict) else {}
+        key = str(name)
+        if key in servers:
+            raise ValueError(f"MCP server 已存在: {key}")
+        return self._commit_mcp_servers({**servers, key: dict(server_cfg)})
+
+    def update_mcp_server(self, name: str, server_cfg: dict[str, Any]) -> Path:
+        """更新 MCP server：候选值 → 持久化 → 发布。
+
+        Raises:
+            KeyError: server 不存在（磁盘与内存均不变）。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
+        """
+        servers = self.mcp_servers if isinstance(self.mcp_servers, dict) else {}
+        key = str(name)
+        if key not in servers:
+            raise KeyError(f"MCP server 不存在: {key}")
+        return self._commit_mcp_servers({**servers, key: dict(server_cfg)})
+
+    def delete_mcp_server(self, name: str) -> Path:
+        """删除 MCP server：候选值 → 持久化 → 发布。
+
+        Raises:
+            KeyError: server 不存在（磁盘与内存均不变）。
+            Exception: 持久化失败（内存与磁盘一致保留旧值，可直接重试）。
+        """
+        servers = self.mcp_servers if isinstance(self.mcp_servers, dict) else {}
+        key = str(name)
+        if key not in servers:
+            raise KeyError(f"MCP server 不存在: {key}")
+        return self._commit_mcp_servers(
+            {key_: value for key_, value in servers.items() if key_ != key}
+        )
 
     def set_mcp_server(self, name: str, cfg: dict[str, Any]) -> None:
-        """在运行时更新 mcp_servers 配置（不自动持久化）。"""
+        """在运行时更新 mcp_servers 配置（不自动持久化）。
+
+        遗留入口：先改内存、由调用方再调 persist_mcp_servers，两步之间失败
+        会造成内存与磁盘分叉。管理 API / CLI 必须改用 add/update/
+        delete_mcp_server 候选值事务；本方法仅为未迁移的内部调用方保留
+        （如 cua-setup）。
+        """
         if not isinstance(self.mcp_servers, dict):
             self.mcp_servers = {}
         self.mcp_servers[str(name)] = dict(cfg)
 
     def remove_mcp_server(self, name: str) -> None:
-        """在运行时移除 mcp_servers 配置（不自动持久化）。"""
+        """在运行时移除 mcp_servers 配置（不自动持久化）。遗留入口，见 set_mcp_server。"""
         if isinstance(self.mcp_servers, dict) and name in self.mcp_servers:
             self.mcp_servers.pop(name, None)
 
     def persist_mcp_servers(self) -> Path:
-        """把当前 mcp_servers 写回 config.yaml。"""
-        with _CONFIG_WRITE_LOCK:
-            return self._persist_mcp_servers_locked()
-
-    def _persist_mcp_servers_locked(self) -> Path:
-        if not self.config_path:
-            raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
-
-        yaml_path = Path(self.config_path)
-        if yaml_path.exists():
-            try:
-                data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-                if not isinstance(data, dict):
-                    data = {}
-            except yaml.YAMLError:
-                raise RuntimeError(f"config.yaml 解析失败，拒绝写回以保护原文件: {yaml_path}")
-        else:
-            data = {}
-
-        mcp_servers = data.get("mcp_servers")
-        if not isinstance(mcp_servers, dict):
-            mcp_servers = {}
-            data["mcp_servers"] = mcp_servers
-
-        mcp_servers.clear()
-        for key, value in (self.mcp_servers or {}).items():
-            mcp_servers[key] = dict(value) if isinstance(value, dict) else {}
-
-        self.raw_config = data
-
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data, f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
-        return yaml_path
+        """把当前 mcp_servers 写回 config.yaml（遗留入口，失败语义见 set_mcp_server）。"""
+        servers = self.mcp_servers if isinstance(self.mcp_servers, dict) else {}
+        return self._commit_mcp_servers(dict(servers))
 
     def _persist_channel_config_locked(self, name: str, config_data: dict[str, Any]) -> Path:
         if not self.config_path:
             raise RuntimeError("config_path 未设置，无法写回（Config 不是从 yaml 加载的）")
 
         yaml_path = Path(self.config_path)
-        if yaml_path.exists():
-            try:
-                data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-                if not isinstance(data, dict):
-                    data = {}
-            except yaml.YAMLError:
-                raise RuntimeError(f"config.yaml 解析失败，拒绝写回以保护原文件: {yaml_path}")
-        else:
-            data = {}
+        data = _read_config_yaml_for_write(yaml_path)
 
-        channels = data.get("channels")
-        if not isinstance(channels, dict):
-            channels = {}
-            data["channels"] = channels
+        merged = _write_channel_config(data, name, config_data)
 
-        remove_keys = set(config_data.pop("_remove_keys", []) or [])
-
-        current = channels.get(name)
-        if not isinstance(current, dict):
-            current = {}
-        for key in remove_keys:
-            current.pop(str(key), None)
-            extra = current.get("extra")
-            if isinstance(extra, dict):
-                extra.pop(str(key), None)
-                if not extra:
-                    current.pop("extra", None)
-        merged = {**current, **config_data}
-        channels[name] = merged
-
+        # 磁盘提交成功后再发布内存状态：写回失败时内存与磁盘一致保留旧值。
+        _atomic_write_yaml(yaml_path, data)
         self.channels[name] = dict(merged)
+        platforms = data.get("platforms")
+        self.platforms = platforms if isinstance(platforms, dict) else {}
         self.raw_config = data
-
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                data, f,
-                allow_unicode=True,
-                sort_keys=False,
-                default_flow_style=False,
-            )
-        tmp_path.replace(yaml_path)
         return yaml_path
 
     def channel_config(self, name: str, owner_account_id: str | None = None) -> dict[str, Any]:
@@ -1019,19 +1153,21 @@ class Config:
         """
         owner = str(owner_account_id or "").strip()
         if owner:
+            # owner overlay 只认 channels 布局（含归一后的 features.channels），
+            # 不回落 platforms 旧别名，避免全局渠道凭据经 overlay 复活。
             overlay = self.owner_overlay_data(owner)
             channels = overlay.get("channels")
             channel_raw = channels.get(name) if isinstance(channels, dict) else {}
             if isinstance(channel_raw, dict):
-                return dict(channel_raw)
+                return deepcopy(channel_raw)
             return {}
         platform_raw = self.platforms.get(name) if isinstance(self.platforms, dict) else {}
         channel_raw = self.channels.get(name) if isinstance(self.channels, dict) else {}
         merged: dict[str, Any] = {}
         if isinstance(platform_raw, dict):
-            merged.update(platform_raw)
+            merged.update(deepcopy(platform_raw))
         if isinstance(channel_raw, dict):
-            merged.update(channel_raw)
+            merged.update(deepcopy(channel_raw))
         return merged
 
     def apply_platform_config_bridges(self, entries: list[Any]) -> None:
@@ -1117,6 +1253,19 @@ def _as_bool(value: Any, default: bool) -> bool:
     return bool(value)
 
 
+def _as_flag(value: Any, default: bool) -> bool:
+    """宽松开关解析：bool 直取；字符串只认常见开/关字面量；其余一律回退默认值。
+
+    与各 Feature config 的 from_raw 布尔规则一致（非 bool/str 的值不猜测，
+    保持默认），避免 core 侧轻量字段与 Feature 侧解析结果分叉。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
 def _model_capabilities(raw: dict[str, Any]) -> list[str]:
     value = raw.get("capabilities")
     if isinstance(value, list):
@@ -1133,7 +1282,12 @@ def _model_capabilities(raw: dict[str, Any]) -> list[str]:
 
 def _build_model_profile(model_id: str, raw: dict[str, Any]) -> ModelProfile:
     api_key_env = str(raw.get("api_key_env") or "CREW_API_KEY")
-    api_key = _lookup_api_key(api_key_env, None, fallback_global=True)
+    api_key = resolve_profile_api_key(
+        model_id,
+        api_key_env,
+        fallback_global=True,
+        owner_account_id="",
+    )
     capabilities = _model_capabilities(raw)
 
     return ModelProfile(
@@ -1156,9 +1310,20 @@ def _build_model_profile(model_id: str, raw: dict[str, Any]) -> ModelProfile:
     )
 
 
-def _build_owner_model_profile(model_id: str, raw: dict[str, Any], env_map: dict[str, str]) -> ModelProfile:
+def _build_owner_model_profile(
+    model_id: str,
+    raw: dict[str, Any],
+    env_map: dict[str, str],
+    owner_account_id: str,
+) -> ModelProfile:
     api_key_env = str(raw.get("api_key_env") or "CREW_API_KEY")
-    api_key = _lookup_api_key(api_key_env, env_map, fallback_global=False)
+    api_key = resolve_profile_api_key(
+        model_id,
+        api_key_env,
+        env_map=env_map,
+        fallback_global=False,
+        owner_account_id=owner_account_id,
+    )
     capabilities = _model_capabilities(raw)
     return ModelProfile(
         id=model_id,
@@ -1179,16 +1344,29 @@ def _build_owner_model_profile(model_id: str, raw: dict[str, Any], env_map: dict
     )
 
 
-def _build_profile_from_payload(model_id: str, payload: dict[str, Any]) -> ModelProfile:
-    """从 CRUD payload 构建 ModelProfile，并读取其指定变量中的已有 key。
+def _build_profile_from_payload(
+    model_id: str,
+    payload: dict[str, Any],
+    *,
+    owner_account_id: str,
+    env_map: dict[str, str] | None = None,
+) -> ModelProfile:
+    """从 CRUD payload 构建 ModelProfile。
 
     与 _build_model_profile 的区别：后者从 yaml+env 加载；前者从用户输入构建。
-    自定义变量不会回落到共享的 CREW_API_KEY，避免不同 profile 串用凭据。
+    key 走 resolve_profile_api_key 解析链（凭证库 → env，env_map 优先于进程
+    环境）：凭证库存储从结构上避免"多模型共用一个环境变量名、新 key 覆盖旧
+    key"的串 key 问题；自定义变量不回落共享的 CREW_API_KEY，避免不同 profile
+    串用凭据。
     """
     api_key_env = str(payload.get("api_key_env") or "CREW_API_KEY").strip() or "CREW_API_KEY"
-    # 已存在的 env 变量沿用其值，让 update 场景保留 has_key 状态；自定义变量
-    # 不得回落到 CREW_API_KEY，否则新增 profile 仍可能借用别的模型凭据。
-    api_key = _lookup_api_key(api_key_env, None, fallback_global=False)
+    api_key = resolve_profile_api_key(
+        model_id,
+        api_key_env,
+        env_map=env_map,
+        fallback_global=False,
+        owner_account_id=owner_account_id,
+    )
     capabilities = _model_capabilities(payload)
     return ModelProfile(
         id=model_id,
@@ -1256,6 +1434,30 @@ def _lookup_api_key(
     if not value and env_name != "CREW_API_KEY" and fallback_global:
         value = os.getenv("CREW_API_KEY", "") or ""
     return value
+
+
+def resolve_profile_api_key(
+    profile_id: str,
+    api_key_env: str,
+    env_map: dict[str, str] | None = None,
+    *,
+    fallback_global: bool,
+    owner_account_id: str,
+) -> str:
+    """模型 API Key 解析链（单一事实来源，所有 profile 构建点都走这里）。
+
+    凭证库[profile_id]（owner 作用域，见 crew.state.credentials）
+    → api_key_env 环境变量（env_map 优先于进程环境）
+    → fallback_global 时回落 CREW_API_KEY。
+
+    凭证库条目由 CRUD 写路径维护：默认按 profile id 存储，从结构上避免
+    "多模型共用一个环境变量名、新 key 覆盖旧 key"的串 key 问题；环境变量
+    路径完整保留，存量 .env 部署零迁移。
+    """
+    stored = read_stored_key(owner_account_id, profile_id)
+    if stored:
+        return stored
+    return _lookup_api_key(api_key_env, env_map, fallback_global=fallback_global)
 
 
 def _load_env_map(env_path: Path) -> dict[str, str]:
@@ -1400,8 +1602,7 @@ def _load_env_files() -> None:
             candidates.append(exe_dir / ".env")
         from crew.state.home import get_crew_home
         candidates.append(get_crew_home() / ".env")
-    env_home = os.environ.get("CREW_HOME", "").strip()
-    env_home = os.getenv("CREW_HOME")
+    env_home = os.getenv("CREW_HOME", "").strip()
     if env_home:
         candidates.append(Path(env_home).expanduser() / ".env")
 
@@ -1452,6 +1653,202 @@ def _resolve_active_model_id(cfg: Config) -> str:
     raise ValueError("没有已加载的模型配置，不能启动对话")
 
 
+# --- features.* 命名空间（命名审计 P2-1 · 双读渐进第一步）---
+#
+# 目标形态：每个 Feature 的配置收敛到 features.<name>.* 子树（约定见
+# docs/backend/modules/naming-audit.html §1）。迁移期 loader 同时读旧节与
+# features.<name>：读取各节前先把 features 子树按下面两张显式映射表合并回
+# 旧位置（同名键 features 侧获胜、旧节兜底），此后所有既有读取代码零改动，
+# 下游与 Feature 侧解析均不感知双读。没有 features 节时原样返回，旧配置
+# 文件的解析结果逐字节不变。
+#
+# 映射表分两类：
+# - SECTION_MAP：features.<name> 整节 → 旧顶层节（或某节下的子节），
+#   节内容与旧节逐字兼容；
+# - FLAT_MAP：features.<name>.<key> → 旧平铺键。dynamic-kanban 历史上
+#   平铺在 runtime.dk_*（无独立顶层节），目标子键去掉 dk_ 前缀。
+#
+# 库路径（runtime.<feature>_db_path）不进 features.*：db 文件由 core 装配层
+# 消费并注入各 Store（Feature 自身不读自己的库路径），按"谁消费谁归属"留在
+# runtime.*，属于终态而非过渡态。platforms 是 channels 的更旧别名（读取侧
+# 已在 channel_config 合并），不单独映射；P2-1 第二步起写侧统一生产
+# features.channels（见 _write_channel_config），旧节仅保留读取兼容、不再由
+# 模板或运行时写回产出。
+_FEATURES_SECTION_MAP: dict[str, tuple[str, ...]] = {
+    "wiki": ("wiki",),
+    "cron": ("cron",),
+    "team": ("team",),
+    "tasks": ("tasks",),
+    "external_agents": ("external_agents",),
+    "channels": ("channels",),
+    "browser": ("tools", "browser"),
+    "subagent": ("subagent",),
+}
+_FEATURES_FLAT_MAP: dict[tuple[str, str], tuple[str, ...]] = {
+    ("dynamic_kanban", "task_timeout_seconds"): ("runtime", "dk_task_timeout_seconds"),
+    ("dynamic_kanban", "verification_gate_enabled"): ("runtime", "dk_verification_gate_enabled"),
+}
+
+
+def _read_config_yaml_for_write(yaml_path: Path) -> dict[str, Any]:
+    """读盘待写回：文件缺失按空 dict 构建；解析失败拒绝写回以保护原文件。"""
+    if not yaml_path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            return {}
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"config.yaml 解析失败，拒绝写回以保护原文件: {yaml_path}") from exc
+    return data
+
+
+def _atomic_write_yaml(yaml_path: Path, data: dict[str, Any]) -> None:
+    """把 data 原子写入 yaml_path：先写同目录 tmp 文件，成功后原子替换。
+
+    中途失败（写 tmp 或替换）时清理残留 tmp 并原样重抛异常，目标文件保持
+    旧内容不动；内存状态（channels/platforms/raw_config 等）的发布由调用方
+    放在本函数成功返回之后，保证失败时内存与磁盘一致保留旧值。
+    """
+    yaml_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                data, f,
+                allow_unicode=True,
+                sort_keys=False,
+                default_flow_style=False,
+            )
+        tmp_path.replace(yaml_path)
+    except BaseException:
+        with suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """递归合并两个配置 dict：override 同名键获胜，两侧 dict 值逐层合并。"""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _write_channel_config(
+    data: dict[str, Any],
+    name: str,
+    config_data: dict[str, Any],
+    *,
+    include_platforms: bool = True,
+) -> dict[str, Any]:
+    """Materialize one channel into the canonical ``features.channels`` namespace.
+
+    写侧终态契约（P2-1 第二步）：通道配置一律写回 features.channels，不再
+    生产旧顶层 channels 节。磁盘上同名条目的旧位置（platforms/channels）仍
+    作为本次生效值的合并来源参与计算，写回后按通道名逐个清理（legacy
+    positions cleaned per channel）。remove-keys 与合并语义保持不变。
+    """
+    platforms = data.get("platforms")
+    platform_map = platforms if isinstance(platforms, dict) else {}
+    channels = data.get("channels")
+    channel_map = channels if isinstance(channels, dict) else {}
+    features = data.get("features")
+    if not isinstance(features, dict):
+        if features is not None:
+            log.warning("features 节必须是键值映射，通道写回时已重置为空映射")
+        features = {}
+        data["features"] = features
+    target = features.get("channels")
+    if not isinstance(target, dict):
+        if target is not None:
+            log.warning("features.channels 必须是键值映射，通道写回时已重置为空映射")
+        target = {}
+        features["channels"] = target
+    fallback_maps = [platform_map, channel_map] if include_platforms else [channel_map]
+
+    payload = deepcopy(config_data)
+    raw_remove = payload.pop("_remove_keys", [])
+    if isinstance(raw_remove, (str, bytes)):
+        remove_keys = {str(raw_remove)}
+    else:
+        try:
+            remove_keys = {str(key) for key in (raw_remove or [])}
+        except TypeError:
+            remove_keys = set()
+    platform_value = platform_map.get(name) if include_platforms else {}
+    channel_value = channel_map.get(name)
+    target_value = target.get(name) if isinstance(target.get(name), dict) else {}
+    channel_effective = _deep_merge_dicts(
+        channel_value if isinstance(channel_value, dict) else {}, target_value
+    )
+    # 与源数据深拷贝脱钩：platform 值与渠道有效合并结果的嵌套 dict 可能经
+    # YAML anchor / 复用入参在渠道间共享引用，下方 remove-keys 会原地 pop，
+    # 浅拷贝会把删除泄漏到兄弟渠道条目（或调用方对象）上。
+    current = deepcopy(platform_value) if isinstance(platform_value, dict) else {}
+    current.update(deepcopy(channel_effective))
+    for key in remove_keys:
+        current.pop(key, None)
+        extra = current.get("extra")
+        if isinstance(extra, dict):
+            extra.pop(key, None)
+            if not extra:
+                current.pop("extra", None)
+    merged = {**current, **deepcopy(payload)}
+    target[name] = merged
+    for fallback in fallback_maps:
+        fallback.pop(name, None)
+    return merged
+
+
+def _ensure_container(data: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any]:
+    """沿 path 逐层取（必要时创建）dict 容器，返回 path 末段所在的父节点。"""
+    node = data
+    for part in path[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            node[part] = child
+        node = child
+    return node
+
+
+def _apply_features_namespace(data: dict[str, Any]) -> dict[str, Any]:
+    """把 features.* 子树按映射表合并回旧配置位置（新节优先、旧节兜底）。
+
+    直接在读入的 data 上原地合并并返回同一对象；features 节本身保留在
+    结果里，raw_config 仍能观察完整原始配置。features 节缺失或不是映射
+    时原样返回；单个子节类型不合法时跳过该节并告警，不影响其余配置。
+    """
+    features = data.get("features")
+    if not isinstance(features, dict):
+        return data
+
+    for name, target_path in _FEATURES_SECTION_MAP.items():
+        section = features.get(name)
+        if section is None:
+            continue
+        if not isinstance(section, dict):
+            log.warning("features.%s 必须是键值映射，已忽略该节", name)
+            continue
+        parent = _ensure_container(data, target_path)
+        leaf_key = target_path[-1]
+        leaf = parent.get(leaf_key)
+        parent[leaf_key] = _deep_merge_dicts(leaf if isinstance(leaf, dict) else {}, section)
+
+    for (name, key), target_path in _FEATURES_FLAT_MAP.items():
+        section = features.get(name)
+        if not isinstance(section, dict) or key not in section:
+            continue
+        parent = _ensure_container(data, target_path)
+        parent[target_path[-1]] = section[key]
+
+    return data
+
+
 def load_config(config_path: str | Path | None = None) -> Config:
     """加载配置。顺序：默认值 < config.yaml < 环境变量(.env)。
 
@@ -1479,6 +1876,10 @@ def load_config(config_path: str | Path | None = None) -> Config:
         # 记录加载路径，供运行时 CRUD 写回使用
         cfg.config_path = str(path)
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if isinstance(data, dict):
+            # features.* 命名空间双读（P2-1 渐进第一步）：先按映射表把
+            # features 子树合并回旧节位置，再进入下方各节读取。
+            data = _apply_features_namespace(data)
         cfg.raw_config = data if isinstance(data, dict) else {}
         llm = data.get("llm", {})
         cfg.active_model_id = str(llm.get("active", cfg.active_model_id) or cfg.active_model_id)
@@ -1500,19 +1901,66 @@ def load_config(config_path: str | Path | None = None) -> Config:
             cfg.timeout = _as_float(llm.get("timeout", cfg.timeout), cfg.timeout)
         runtime = data.get("runtime", {})
         cfg.db_path = runtime.get("db_path", cfg.db_path)
+        cfg.memory_enabled = bool(runtime.get("memory_enabled", cfg.memory_enabled))
+        cfg.cron_db_path = runtime.get("cron_db_path", cfg.cron_db_path)
+        cfg.work_db_path = runtime.get("work_db_path", cfg.work_db_path)
+        cfg.kanban_db_path = runtime.get("kanban_db_path", cfg.kanban_db_path)
+        cfg.external_db_path = runtime.get("external_db_path", cfg.external_db_path)
+        cfg.team_db_path = runtime.get("team_db_path", cfg.team_db_path)
+        cfg.sites_db_path = runtime.get("sites_db_path", cfg.sites_db_path)
+        cfg.tasks_db_path = runtime.get("tasks_db_path", cfg.tasks_db_path)
+        cfg.notifications_db_path = runtime.get(
+            "notifications_db_path", cfg.notifications_db_path
+        )
+        cfg.channels_db_path = runtime.get("channels_db_path", cfg.channels_db_path)
+        cfg.wiki_learning_db_path = runtime.get(
+            "wiki_learning_db_path", cfg.wiki_learning_db_path
+        )
+        cfg.subagent_db_path = runtime.get("subagent_db_path", cfg.subagent_db_path)
         cfg.log_level = runtime.get("log_level", cfg.log_level)
         cfg.log_file = runtime.get("log_file", cfg.log_file)
         cfg.crew_home = runtime.get("crew_home", cfg.crew_home)
         cfg.task_workspace_root = runtime.get("task_workspace_root", cfg.task_workspace_root)
         cfg.llm_trace = bool(runtime.get("llm_trace", cfg.llm_trace))
+        raw_observability = runtime.get("observability", {})
+        if isinstance(raw_observability, dict):
+            cfg.observability = dict(raw_observability)
+            if "enabled" in raw_observability:
+                cfg.observability_enabled = bool(raw_observability["enabled"])
+            if "developer_access" in raw_observability:
+                cfg.observability_developer_access = bool(raw_observability["developer_access"])
         cfg.max_iterations = runtime.get("max_iterations", cfg.max_iterations)
         cfg.dk_task_timeout_seconds = _as_float(
             runtime.get("dk_task_timeout_seconds", cfg.dk_task_timeout_seconds),
             cfg.dk_task_timeout_seconds,
         )
+        cfg.dk_verification_gate_enabled = bool(
+            runtime.get("dk_verification_gate_enabled", cfg.dk_verification_gate_enabled)
+        )
         raw_timeout_policy = runtime.get("timeout_policy", cfg.timeout_policy)
         cfg.timeout_policy = raw_timeout_policy if isinstance(raw_timeout_policy, dict) else {}
         cfg.sqlite_wal = bool(runtime.get("sqlite_wal", cfg.sqlite_wal))
+        cfg.tool_execution_timeout_seconds = _as_float(
+            runtime.get("tool_execution_timeout_seconds", cfg.tool_execution_timeout_seconds),
+            cfg.tool_execution_timeout_seconds,
+        )
+        cfg.turn_deadline_seconds = max(
+            0.0,
+            _as_float(
+                runtime.get("turn_deadline_seconds", cfg.turn_deadline_seconds),
+                cfg.turn_deadline_seconds,
+            ),
+        )
+        cfg.interaction_timeout_seconds = max(
+            0.0,
+            _as_float(
+                runtime.get("interaction_timeout_seconds", cfg.interaction_timeout_seconds),
+                cfg.interaction_timeout_seconds,
+            ),
+        )
+        health_port = _as_int_or_none(runtime.get("health_port", cfg.health_port))
+        if health_port is not None:
+            cfg.health_port = max(0, health_port)
         gw = data.get("gateway", {})
         cfg.gateway_host = gw.get("host", cfg.gateway_host)
         cfg.gateway_port = gw.get("port", cfg.gateway_port)
@@ -1642,6 +2090,84 @@ def load_config(config_path: str | Path | None = None) -> Config:
                     ),
                 )
 
+        subagent = data.get("subagent", {})
+        if isinstance(subagent, dict):
+            default_provider = str(
+                subagent.get("default_provider", cfg.subagent_default_provider)
+                or cfg.subagent_default_provider
+            ).strip()
+            cfg.subagent_default_provider = default_provider or "inprocess-spawn"
+            cfg.subagent_fork_enabled = bool(
+                subagent.get("fork_enabled", cfg.subagent_fork_enabled)
+            )
+            delegation_mode = str(
+                subagent.get("delegation_mode", cfg.subagent_delegation_mode)
+                or cfg.subagent_delegation_mode
+            ).strip().lower()
+            if delegation_mode not in {"explicit", "proactive"}:
+                log.warning(
+                    "subagent.delegation_mode 仅支持 explicit/proactive，已回退为 explicit"
+                )
+                delegation_mode = "explicit"
+            cfg.subagent_delegation_mode = delegation_mode
+            cfg.subagent_continuable = bool(
+                subagent.get("continuable", cfg.subagent_continuable)
+            )
+            # 阶段 B 键：深度/批量/爬坡/限流退避/摘要兜底/保留期。扁平旧键与
+            # 本段同名语义一一对应（见 SubagentConfig 兼容别名说明）。
+            cfg.subagent_max_depth = max(
+                1, int(subagent.get("max_depth", cfg.subagent_max_depth))
+            )
+            cfg.subagent_allow_nested = bool(
+                subagent.get("allow_nested", cfg.subagent_allow_nested)
+            )
+            cfg.subagent_max_batch_items = max(
+                1, int(subagent.get("max_batch_items", cfg.subagent_max_batch_items))
+            )
+            ramp = subagent.get("launch_ramp")
+            if isinstance(ramp, dict):
+                cfg.subagent_launch_initial = max(
+                    1, int(ramp.get("initial", cfg.subagent_launch_initial))
+                )
+                cfg.subagent_launch_interval_ms = max(
+                    0, int(ramp.get("interval_ms", cfg.subagent_launch_interval_ms))
+                )
+            rate_limit = subagent.get("rate_limit")
+            if isinstance(rate_limit, dict):
+                cfg.subagent_rate_backoff_base_seconds = _as_float(
+                    rate_limit.get(
+                        "backoff_base_seconds", cfg.subagent_rate_backoff_base_seconds
+                    ),
+                    cfg.subagent_rate_backoff_base_seconds,
+                )
+                cfg.subagent_rate_backoff_factor = max(
+                    1.0,
+                    _as_float(
+                        rate_limit.get(
+                            "backoff_factor", cfg.subagent_rate_backoff_factor
+                        ),
+                        cfg.subagent_rate_backoff_factor,
+                    ),
+                )
+                cfg.subagent_rate_max_retries = max(
+                    0, int(rate_limit.get("max_retries", cfg.subagent_rate_max_retries))
+                )
+                cfg.subagent_rate_recover_seconds = _as_float(
+                    rate_limit.get(
+                        "recover_seconds", cfg.subagent_rate_recover_seconds
+                    ),
+                    cfg.subagent_rate_recover_seconds,
+                )
+            cfg.subagent_summary_min_chars = max(
+                0, int(subagent.get("summary_min_chars", cfg.subagent_summary_min_chars))
+            )
+            cfg.subagent_summary_retries = max(
+                0, int(subagent.get("summary_retries", cfg.subagent_summary_retries))
+            )
+            cfg.subagent_retain_runs_days = max(
+                0, int(subagent.get("retain_runs_days", cfg.subagent_retain_runs_days))
+            )
+
         plugins = data.get("plugins", {})
         if isinstance(plugins, dict):
             enabled = plugins.get("enabled")
@@ -1653,13 +2179,28 @@ def load_config(config_path: str | Path | None = None) -> Config:
 
         tools = data.get("tools", {})
         if isinstance(tools, dict):
-            cfg.browser = BrowserConfig.from_raw(tools.get("browser", {}))
+            browser_raw = tools.get("browser") or {}
+            if not isinstance(browser_raw, dict):
+                browser_raw = {}
+            cfg.browser_config = dict(browser_raw)
+            web_search_raw = tools.get("web_search") or {}
+            if not isinstance(web_search_raw, dict):
+                web_search_raw = {}
+            cfg.web_search_config = dict(web_search_raw)
+            # 把 tools.web_search 节注入搜索 seam（provider 有序降级链与 key 环境变量名）。
+            from crew.tools.web_search_service import configure_search
+
+            configure_search(cfg.web_search_config)
 
         session_cfg = data.get("session", {})
         if isinstance(session_cfg, dict) and session_cfg:
             cfg.session_idle_timeout = int(session_cfg.get("idle_timeout_minutes", cfg.session_idle_timeout))
 
-        cfg.wiki = WikiConfig.from_raw(data.get("wiki", {}))
+        wiki_raw = data.get("wiki") or {}
+        if not isinstance(wiki_raw, dict):
+            wiki_raw = {}
+        cfg.wiki_config = dict(wiki_raw)
+        cfg.wiki_enabled = _as_flag(wiki_raw.get("enabled"), cfg.wiki_enabled)
         cfg.network = NetworkConfig.from_raw(data.get("network", {}))
         # 把 config 的 network 段注入 outbound 作为进程级默认代理，
         # 供 web_search/web_extract/Wiki 等未显式传参的调用方使用。
@@ -1718,6 +2259,15 @@ def load_config(config_path: str | Path | None = None) -> Config:
             cfg.compaction_max_tool_result_chars = int(
                 comp.get("max_tool_result_chars", cfg.compaction_max_tool_result_chars)
             )
+            cfg.compaction_max_overflow_retries = max(
+                0, int(comp.get("max_overflow_retries", cfg.compaction_max_overflow_retries))
+            )
+            cfg.compaction_summary_max_tokens = max(
+                0, int(comp.get("summary_max_tokens", cfg.compaction_summary_max_tokens))
+            )
+            cfg.compaction_summary_prefix_reuse = bool(
+                comp.get("summary_prefix_reuse", cfg.compaction_summary_prefix_reuse)
+            )
             retry = agent.get("retry", {}) or {}
             cfg.retry_max = int(retry.get("max_retries", cfg.retry_max))
             cfg.retry_backoff = _as_float(retry.get("backoff_seconds", cfg.retry_backoff), cfg.retry_backoff)
@@ -1766,6 +2316,26 @@ def load_config(config_path: str | Path | None = None) -> Config:
                 external=ac.get("external", {}) or {},
                 internal=ac.get("internal", {}) or {},
             )
+
+    # Desktop's trusted main process injects these values only for a managed
+    # launch.  They deliberately live outside the user-editable Gateway
+    # authentication settings so an ordinary launch cannot inherit developer
+    # diagnostics from a shared config file.  An external Gateway is not
+    # passed these environment variables and keeps its own explicit config.
+    # Apply the override even when a fresh install has no config.yaml yet.
+    env_enabled = os.getenv("CREW_OBSERVABILITY_ENABLED")
+    env_developer_access = os.getenv("CREW_OBSERVABILITY_DEVELOPER_ACCESS")
+    env_capture_profile = os.getenv("CREW_OBSERVABILITY_CAPTURE_PROFILE")
+    if env_enabled is not None:
+        cfg.observability_enabled = env_enabled.strip().lower() in {"1", "true", "yes", "on"}
+        cfg.observability["enabled"] = cfg.observability_enabled
+    if env_developer_access is not None:
+        cfg.observability_developer_access = env_developer_access.strip().lower() in {"1", "true", "yes", "on"}
+        cfg.observability["developer_access"] = cfg.observability_developer_access
+    if env_capture_profile is not None:
+        profile = env_capture_profile.strip().lower()
+        if profile in {"metadata", "content_redacted"}:
+            cfg.observability["capture_profile"] = profile
 
     from crew.security.settings import configure_security
 
@@ -1887,5 +2457,45 @@ def load_config(config_path: str | Path | None = None) -> Config:
         if not mem_path.is_absolute():
             mem_path = home / mem_path
         cfg.memory_db_path = str(mem_path)
+    if cfg.cron_db_path:
+        cron_path = Path(cfg.cron_db_path).expanduser()
+        if not cron_path.is_absolute():
+            cron_path = home / cron_path
+        cfg.cron_db_path = str(cron_path)
+    if cfg.work_db_path:
+        work_path = Path(cfg.work_db_path).expanduser()
+        if not work_path.is_absolute():
+            work_path = home / work_path
+        cfg.work_db_path = str(work_path)
+    if cfg.kanban_db_path:
+        kanban_path = Path(cfg.kanban_db_path).expanduser()
+        if not kanban_path.is_absolute():
+            kanban_path = home / kanban_path
+        cfg.kanban_db_path = str(kanban_path)
+    if cfg.external_db_path:
+        external_path = Path(cfg.external_db_path).expanduser()
+        if not external_path.is_absolute():
+            external_path = home / external_path
+        cfg.external_db_path = str(external_path)
+    if cfg.team_db_path:
+        team_path = Path(cfg.team_db_path).expanduser()
+        if not team_path.is_absolute():
+            team_path = home / team_path
+        cfg.team_db_path = str(team_path)
+    for attr in (
+        "sites_db_path",
+        "tasks_db_path",
+        "notifications_db_path",
+        "channels_db_path",
+        "wiki_learning_db_path",
+        "subagent_db_path",
+    ):
+        raw_value = getattr(cfg, attr)
+        if not raw_value:
+            continue
+        raw = Path(raw_value).expanduser()
+        if not raw.is_absolute():
+            raw = home / raw
+        setattr(cfg, attr, str(raw))
 
     return cfg

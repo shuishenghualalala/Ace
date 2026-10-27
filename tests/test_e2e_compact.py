@@ -95,7 +95,13 @@ def _build_history_with_tools(
 
 
 def _read_llm_trace() -> list[dict[str, Any]]:
-    """读取 .crew/logs/llm.jsonl，返回 JSON 列表。"""
+    """读取 .crew/logs/llm.jsonl，返回 JSON 列表。
+
+    llm_trace 经 QueueListener 异步落盘，读取前先 flush，避免竞态丢行。
+    """
+    import crew.state.logging as clog
+
+    clog.flush_llm_trace(timeout=5.0)
     trace_path = Path(ROOT) / ".crew" / "logs" / "llm.jsonl"
     if not trace_path.exists():
         return []

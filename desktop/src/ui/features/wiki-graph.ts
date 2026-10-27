@@ -536,12 +536,21 @@ export function invalidateWikiGraph(): void {
   lastRenderSig = null;
 }
 
-/** 测试钩子：重置模块状态（含 Worker 单例）。 */
-export function __resetWikiGraphForTest(): void {
-  invalidateWikiGraph();
+/** Release the active canvas, worker and queued layout jobs when the Wiki page leaves. */
+export function disposeWikiGraph(): void {
+  loadSeq += 1;
+  layoutSeq += 1;
+  mountRef = null;
+  lastRenderSig = null;
   layoutWorker?.terminate();
   layoutWorker = null;
   workerUnavailable = false;
-  pendingLayouts.length = 0;
-  mountRef = null;
+  const queued = pendingLayouts.splice(0);
+  for (const item of queued) item.resolve(computeWikiGraphLayout(item.input));
+  graphState = initialGraphState();
+}
+
+/** 测试钩子：重置模块状态（含 Worker 单例）。 */
+export function __resetWikiGraphForTest(): void {
+  disposeWikiGraph();
 }

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from crew.core.errors import ToolError
 from crew.core.runctx import (
@@ -20,17 +20,80 @@ from crew.core.runctx import (
     current_request_id,
     current_session_id,
 )
-from crew.core.timeout_policy import DEFAULT_INTERACTION_TIMEOUT_SECONDS
 from crew.state.logging import get_logger
 
 log = get_logger("followup")
 
-_DEFAULT_TIMEOUT = DEFAULT_INTERACTION_TIMEOUT_SECONDS
+# wait_for_answer 的 timeout 未传哨兵：区别于显式传 None/0（= 不限）。
+# 默认值只作用于「调用方没传 timeout」，显式传值（含不限）始终优先。
+_UNSET: Any = object()
+
+# 默认等待上限（秒）：装配层（crew/app.py）经 set_followup_default_timeout 注入
+# runtime.interaction_timeout_seconds；None 表示默认不限。core 不反向依赖配置实现。
+_default_timeout_seconds: float | None = 3600.0
+
+# 选择卡片挂起期间的任务活动心跳间隔：防止长等待被任务运行时的不活跃超时误杀。
+_ACTIVITY_PULSE_INTERVAL_SECONDS = 30.0
 
 # 取消标记：用户点「取消」时以此作为答案回灌，工具 handler 据此识别取消。
 # 用回灌而非 future.cancel()，避免 CancelledError 冒泡到 agent 主任务。
 CANCELLED_MARKER = "__cancelled__"
 _CANCELLED_ANSWER = [{"id": CANCELLED_MARKER, "answers": []}]
+
+# 通知中心注入钩子（由 crew/app.py 装配层注入；core 不反向依赖通知实现）：
+#   on_pending(session_id, question_id, text)  追问发出后触发（仅 record_history=True）
+#   on_resolved(session_id, question_id)       回答 / 取消 / 超时后触发（自动已读）
+NotifyPendingFn = Callable[[str, str, str], None]
+NotifyResolvedFn = Callable[[str, str], None]
+_on_pending_hook: NotifyPendingFn | None = None
+_on_resolved_hook: NotifyResolvedFn | None = None
+
+
+def set_followup_notification_hooks(
+    on_pending: NotifyPendingFn | None = None,
+    on_resolved: NotifyResolvedFn | None = None,
+) -> None:
+    """装配层注入通知回调；传 None 表示不通知（默认，测试/CLI 场景）。"""
+    global _on_pending_hook, _on_resolved_hook
+    _on_pending_hook = on_pending
+    _on_resolved_hook = on_resolved
+
+
+def set_followup_default_timeout(seconds: float | None) -> None:
+    """装配层注入默认等待上限（runtime.interaction_timeout_seconds）。
+
+    None 或 <= 0 表示默认不限（维持旧的不限语义）；显式传 timeout 的调用方
+    不受此值影响。
+    """
+    global _default_timeout_seconds
+    if seconds is None:
+        _default_timeout_seconds = None
+        return
+    try:
+        parsed = float(seconds)
+    except (TypeError, ValueError):
+        return
+    _default_timeout_seconds = parsed if parsed > 0 else None
+
+
+def _fire_pending(session_id: str, question_id: str, text: str) -> None:
+    """fire-and-forget：通知失败只记日志，绝不打断追问主流程。"""
+    if _on_pending_hook is None:
+        return
+    try:
+        _on_pending_hook(session_id, question_id, text)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("追问待办通知触发失败 session=%s question=%s: %s", session_id, question_id, exc)
+
+
+def _fire_resolved(session_id: str, question_id: str) -> None:
+    """fire-and-forget：自动已读失败只记日志（mark_read 幂等，重复触发无害）。"""
+    if _on_resolved_hook is None:
+        return
+    try:
+        _on_resolved_hook(session_id, question_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("追问通知自动已读触发失败 session=%s question=%s: %s", session_id, question_id, exc)
 
 
 class FollowupWaiter:
@@ -79,14 +142,24 @@ class FollowupWaiter:
         session_id: str,
         question_id: str,
         *,
-        timeout: float = _DEFAULT_TIMEOUT,
+        timeout: float | None = None,
+        activity_fn: Callable[[], None] | None = None,
+        activity_interval: float = _ACTIVITY_PULSE_INTERVAL_SECONDS,
     ) -> list[dict[str, Any]]:
-        """等待用户回答；超时返回空答案列表（让 LLM 自己处理）。"""
+        """等待用户回答；超时返回空答案列表（让 LLM 自己处理）。
+
+        timeout=None 表示无限等待；调用方负责传默认值（wait_for_answer 会解析
+        装配层注入的默认上限）。提供 activity_fn 时按 activity_interval 周期
+        上报任务活动，防止长等待被任务运行时的不活跃超时误杀。
+        """
         future = self._futures.get(self._key(session_id, question_id))
         if future is None:
             raise ToolError(f"追问不存在: {question_id}")
         try:
-            answers = await asyncio.wait_for(future, timeout=timeout)
+            if activity_fn is None:
+                answers = await asyncio.wait_for(future, timeout=timeout)
+            else:
+                answers = await self._wait_with_activity(future, activity_fn, activity_interval, timeout)
         except asyncio.TimeoutError:
             log.warning("追问超时 session=%s question=%s", session_id, question_id)
             answers = []
@@ -95,7 +168,33 @@ class FollowupWaiter:
             self._futures.pop(key, None)
             self._questions.pop(key, None)
             self._record_history.pop(key, None)
+            # 等待结束（回答/取消/超时）即解除待办：对应通知自动已读。
+            _fire_resolved(session_id, question_id)
         return answers
+
+    @staticmethod
+    async def _wait_with_activity(
+        future: "asyncio.Future[list[dict[str, Any]]]",
+        activity_fn: Callable[[], None],
+        interval: float,
+        timeout: float | None,
+    ) -> list[dict[str, Any]]:
+        """分片等待 Future，每片结束时上报一次任务活动。
+
+        用 asyncio.wait 而非 wait_for：分片超时不会取消 Future 本身，答案到达时
+        仍能正常取到；timeout=None 时无限循环直到用户作答。
+        """
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + max(0.0, float(timeout))
+        while True:
+            remaining = None if deadline is None else deadline - loop.time()
+            if remaining is not None and remaining <= 0:
+                raise asyncio.TimeoutError
+            slice_wait = interval if remaining is None else min(interval, remaining)
+            done, _pending = await asyncio.wait({future}, timeout=slice_wait)
+            if done:
+                return future.result()
+            activity_fn()
 
     def resolve(
         self,
@@ -113,6 +212,8 @@ class FollowupWaiter:
             if display_message:
                 self._answer_messages.setdefault(session_id, []).append(display_message)
         future.set_result(answers)
+        # 用户已回答：对应待办通知自动已读（wait 的 finally 会再触发一次，幂等）。
+        _fire_resolved(session_id, question_id)
         return True
 
     def cancel(self, session_id: str, question_id: str) -> bool:
@@ -123,6 +224,8 @@ class FollowupWaiter:
         self._record_history.pop(key, None)
         if future is not None and not future.done():
             future.set_result(_CANCELLED_ANSWER)
+            # 用户取消：对应待办通知自动已读。
+            _fire_resolved(session_id, question_id)
             return True
         return False
 
@@ -337,6 +440,11 @@ async def send_followup_question_to(
         payload["body"]["origin"] = dict(origin)
     await push_fn(session_id, payload)
     log.info("已发送追问 session=%s question=%s", session_id, question_id)
+    # 通知中心待办：仅 record_history=True 的普通追问发通知；
+    # record_history=False 是权限确认等 side-channel UI，已由 approval 来源覆盖，不重复通知。
+    if record_history:
+        first_question = str(normalized[0].get("question") or "") if normalized else ""
+        _fire_pending(session_id, question_id, first_question or str(title or "").strip())
     return session_id, question_id
 
 
@@ -377,9 +485,26 @@ async def wait_for_answer(
     session_id: str,
     question_id: str,
     *,
-    timeout: float = _DEFAULT_TIMEOUT,
+    timeout: float | None | object = _UNSET,
+    activity_fn: Callable[[], None] | None = None,
+    activity_interval: float = _ACTIVITY_PULSE_INTERVAL_SECONDS,
 ) -> list[dict[str, Any]]:
-    return await _followup_waiter.wait(session_id, question_id, timeout=timeout)
+    """等待用户回答。timeout 未传时用装配层注入的默认上限（有界，可配置）。
+
+    显式传 timeout（含 None 或 0）始终优先：None/0 维持不限语义，正数为有界
+    等待；超时按「用户未回答」收尾（返回空答案）。
+    """
+    if timeout is _UNSET:
+        effective_timeout = _default_timeout_seconds
+    else:
+        effective_timeout = None if not timeout else float(timeout)  # type: ignore[arg-type]
+    return await _followup_waiter.wait(
+        session_id,
+        question_id,
+        timeout=effective_timeout,
+        activity_fn=activity_fn,
+        activity_interval=activity_interval,
+    )
 
 
 def resolve_answer(

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0034 · Dynamic Kanban 流事件命名空间迁移</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:4px 10px}</style></head>
+<body><main>
+<h1>ADR-0034 · Dynamic Kanban 流事件命名空间迁移</h1>
+<p>状态：已实施并验证 · 日期：2026-09-10 · 阶段：4B-2 · 提交：<code>4d9a782</code>。</p>
+<h2>背景与候选方案</h2>
+<p>Team 与 Wiki 的生产侧已统一产出命名空间 <code>feature_event</code>（body = <code>{feature, event, version, payload}</code>），旧帧由 Gateway <code>event_compat</code> 适配器在出口转换，线上协议对现有客户端逐字节不变。Dynamic Kanban 是最后一个直接产旧 <code>kanban</code> / <code>workflow_progress</code> kind 的 Feature：<code>runtime.py</code> 6 处 <code>kanban_event</code> 与 1 处 <code>workflow_progress</code> 直接构造旧帧，核心 <code>envelope.py</code> 因此仍保留两个业务工厂与两个业务枚举。</p>
+<p>候选方案：A. 生产侧继续发旧帧，Gateway 做反向转换——与统一生命周期方向冲突，且把业务枚举长期留在核心协议；B. 生产侧改发 <code>feature_event</code>，compat 出口重建旧帧——与 Team/Wiki 先例一致。</p>
+<h2>决定</h2>
+<p>采用方案 B。生产侧统一使用 <code>feature_event(feature="kanban", event=&lt;name&gt;, version=1)</code>，事件清单：<code>started</code>、<code>board_changed</code>、<code>call_completed</code>、<code>workflow_progress</code>。<code>event_compat</code> 登记 4 条映射；旧 <code>kanban</code> 帧 body 约定以 <code>event</code> 字段开头，而 feature_event payload 不重复携带事件名，compat 在转换到旧 <code>kanban</code> 帧时把事件名重建到 body 首位，保证出口旧帧与迁移前逐字节一致。未登记事件丢弃并输出诊断日志。</p>
+<p>进程内消费路径（<code>manager.py</code> 后台 <code>push_chunk</code>）不经过 Gateway compat，新增 <code>_is_unattached_control_chunk</code> 判断：迁移期旧 <code>status</code>/<code>workflow_progress</code> 帧继续兼容，同时识别新 <code>feature_event(feature="kanban", event="workflow_progress")</code>，命中后清空 <code>request_id</code> 作为无归属控制帧推送，桌面端回合封口后仍能渲染。<code>envelope.py</code> 的 <code>kanban_event()</code>/<code>workflow_progress()</code> 工厂与两个 ChunkKind 枚举保留为迁移期兼容，标注删除条件为前端 reducer 全部迁移到 <code>ace.feature-event.v1</code>。</p>
+<h2>兼容、验证与回退</h2>
+<p>线上 WS 协议对现有客户端逐字节不变；前端 reducer 无需修改。新增事件契约测试覆盖 kanban 事件参数化映射、旧帧 body 重建逐字节对比、未登记事件丢弃诊断；更新 <code>tests/test_dynamic_kanban.py</code> 生产断言并新增后台化场景 request_id 清空测试。目标回归（event_compat、gateway api/ws、dynamic kanban 及生命周期、dispatcher）194 passed；Ruff、compileall、Import Linter（6 contracts kept, 0 broken）全部通过。</p>
+<p>已知边界：Gateway 兼容层与 envelope 迁移期工厂须维持到阶段 5 前端 reducer 全部切换；manager 进程内消费路径依赖 feature_event body 结构，payload 形状调整需同步更新 helper。回退方式：恢复 <code>runtime.py</code> 使用旧工厂、删除 compat 中 kanban 映射、回退 manager helper。</p>
+<p><a href="../modules/dynamickanban.html">Dynamic Kanban 模块</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6M · executor→external 直连改 Service Lease</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6M · executor→external 直连改 Service Lease（workspace 必修项⑥）</h1>
+<p>2026-09-11。`crew/agent/executor/external.py` 对 `crew.agent.external` 的 7 处直连导入清零（含惰性 import），协议下沉中立契约层、实现经同代 Service Lease 解析——crew-agent 与 crew-external-agents 拆包的最后一处包间实现耦合解除。</p>
+<h2>处置</h2>
+<ul>
+<li><strong>协议下沉</strong>：ExternalAgentCatalog Protocol、三个 adapter 错误契约（Acp/Cli/Codex）、Delegation/Run 契约面（ExternalStreamEvent、RuntimeExecutionRequest、RuntimeResumeRejected 等）与中立模型归一（canonical_runtime_model_id 及闭包）迁入 <code>crew/core/interfaces.py</code>「外部 Runtime 执行契约」节；external 侧 PEP 484 薄 re-export（类身份唯一，注明拆包后删除条件）。</li>
+<li><strong>实现经 Lease</strong>：新增 <code>EXTERNAL_RUNTIME_SUPPORT_SERVICE_KEY</code> 服务（ExternalRuntimeSupport 门面：adapter 注册表、描述符解析、CLI runner），`acquire_external_service_lease` 扩为 (catalog, delegation, runtime_support) 三元组（同代绑定、逆序释放、缺项回滚验证）；adapter 注册归位 external 侧 `ensure_builtin_runtime_adapters()`。</li>
+<li><strong>executor 零反向依赖</strong>：解析顺序 Lease 第三元 → config 注入 → `set_default_runtime_support_factory()` seam（feature.py 模块尾注入）→ fail-closed 错误帧（"运行支持未装配"），生产路径恒走 Lease。</li>
+<li><code>.importlinter</code> 新增第 9 条 <code>executor-external-boundary</code>。</li>
+</ul>
+<h2>验证记录（子 agent 执行后主 agent 复跑）</h2>
+<table><tr><th>命令</th><th>结果</th></tr>
+<tr><td>external/agent 定向 + lifecycle/store 套件</td><td>264 passed（子 agent 侧另有 executor 相关 457 passed, 1 skipped）</td></tr>
+<tr><td>全量快测</td><td>4134 passed / 1 failed（该失败为 test_loopback_proxy DNS 环境抖动，已在干净基线复现排除，见 6L 记录）</td></tr>
+<tr><td><code>grep crew\.agent\.external crew/agent/executor</code></td><td>0 条 import（仅 2 行注释提及）</td></tr>
+<tr><td><code>ruff</code> / <code>compileall</code> / <code>lint-imports</code></td><td>通过 / 通过 / 9 kept 0 broken</td></tr>
+</table>
+<h2>遗留（后续切片清单，方向当前均合法）</h2>
+<p>team（8 文件）与 gateway（3 文件）对 agent.external 的消费多为 catalog/模型归一协议导入，拆包时按同法（Lease/薄别名）收敛；cli/integration.py 2 处惰性导入随宿主装配调整；app.py 为 DI 根属合法装配点。</p>
+<p><a href="../backend/adr/0028-external-runtime-feature-lifecycle.html">ADR-0028</a> · <a href="../todo/ace-workspace-split-assessment.md">workspace 评估（必修⑥）</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

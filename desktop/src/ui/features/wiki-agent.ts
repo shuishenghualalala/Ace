@@ -5,7 +5,7 @@
  * setWikiAgentEntryHandler 回调注入，互不 import）→ POST /api/wiki/agent-session 拿独立会话
  * → 右栏面板直接收发 → 发送时 payload 带 wiki_kb_id
  * （chat-controller 经 setWikiSendExtrasResolver 注册口取参数，chat 侧不 import 本模块）
- * → wiki_cards 帧经 reducer 挂到消息渲染。
+ * → wiki.cards feature_event 经 reducer 挂到消息渲染。
  *
  * 右栏面板（mountWikiAgentPanel）：面板头（标题 + 新建/历史/展开）是 wiki 自己的 DOM；
  * 对话区是**主对话面板本体**（conversation-panel.mountConversationPanel：同一套增量 diff
@@ -27,7 +27,9 @@ import {
   type Attachment,
   type FollowupAnswer,
   type WikiAgentSessionSummary,
+  type WikiPage,
 } from '../backend-client';
+import type { ChatMessage } from '../chat-render';
 import { clearRuntimeStyle, setRuntimeStyle } from '../components/runtime-style';
 import { createChatRenderCoalescer } from '../render-utils';
 import { formatFollowupAnswerMessage } from '../followup';
@@ -74,12 +76,20 @@ import {
   bookFor,
   dispatchWs,
   editQueueItem,
+  invokeWikiIngestProgressCallback,
   isBusy,
   setWikiSendExtrasResolver,
   steerQueuedItem,
   subscribeSessions,
   stopGeneration,
 } from './chat-controller';
+import {
+  featureEventRegistry,
+  emptyFeatureReducerResult,
+  uniqueMessageId,
+  type FeatureReducerContext,
+  type FeatureReducerResult,
+} from './event-reducer-registry';
 import { ensureFileChangesDelegation } from './conversation-renderer';
 import { renderDiffPanelHtml } from '../diff-lines';
 import { showFileOpenMenu } from './file-open-menu';
@@ -102,6 +112,7 @@ import {
   toggleWikiBrowser,
   type WikiAgentEntryRequest,
 } from './wiki-page';
+import { wikiFeatureEnabled } from './wiki-feature';
 
 // ---------- 专用 Wiki Agent 会话状态 ----------
 
@@ -276,6 +287,7 @@ function createEmbeddedPanelAttachments(kbId: string): PanelAttachments {
 
 /** 清空右栏面板全部 per-KB 状态（登录态变化 / 测试重置共用，防两处漂移漏清）。 */
 function clearEmbeddedPanelState(): void {
+  scheduleEmbeddedRender.cancel();
   activePanel?.dispose();
   activePanel = null;
   embeddedByKb.clear();
@@ -284,6 +296,20 @@ function clearEmbeddedPanelState(): void {
   embeddedDrafts.clear();
   embeddedExpanded.clear();
   embeddedAttachmentListeners.clear();
+  activeModelControl?.dispose();
+  activeModelControl = null;
+  activeRingControl?.dispose();
+  activeRingControl = null;
+  embeddedInputFocused = false;
+  activeEmbeddedRoot = null;
+  activeEmbeddedKbId = '';
+  embeddedMountVersion += 1;
+}
+
+function disposeEmbeddedPagePanel(): void {
+  scheduleEmbeddedRender.cancel();
+  activePanel?.dispose();
+  activePanel = null;
   activeModelControl?.dispose();
   activeModelControl = null;
   activeRingControl?.dispose();
@@ -1132,9 +1158,151 @@ export function buildWikiAssistPrompt(assist: { fileName: string; error: string;
   return assist.sourceId ? `${base}（source_id: ${assist.sourceId}）。` : `${base}。`;
 }
 
+// ---------- Feature Event Reducers ----------
+
+/** 规范化 wiki.cards 事件的页面数组（对齐 web normalizeWikiCardPages：pages 或 cards 字段）。
+ *  reducer 层容错：缺字段给默认值，保证渲染层拿到完整 WikiPage 形状。 */
+export function normalizeWikiCardPages(body: Record<string, unknown>): WikiPage[] {
+  const raw = Array.isArray(body.pages) ? body.pages : Array.isArray(body.cards) ? body.cards : [];
+  return raw
+    .filter((p): p is Record<string, unknown> => typeof p === 'object' && p !== null)
+    .map((p) => ({
+      id: typeof p.id === 'string' ? p.id : '',
+      page_type: (['entity', 'topic', 'source', 'comparison', 'synthesis'].includes(String(p.page_type))
+        ? p.page_type
+        : 'entity') as WikiPage['page_type'],
+      title: typeof p.title === 'string' ? p.title : '',
+      ...(typeof p.content === 'string' ? { content: p.content } : {}),
+      ...(typeof p.summary === 'string' ? { summary: p.summary } : {}),
+      file_path: typeof p.file_path === 'string' ? p.file_path : '',
+      sources: Array.isArray(p.sources) ? (p.sources as string[]) : [],
+      related: Array.isArray(p.related) ? (p.related as string[]) : [],
+      status: (['published', 'deprecated'].includes(String(p.status)) ? p.status : 'published') as WikiPage['status'],
+      tags: Array.isArray(p.tags) ? (p.tags as string[]) : [],
+      created_at: typeof p.created_at === 'number' ? p.created_at : 0,
+      updated_at: typeof p.updated_at === 'number' ? p.updated_at : 0,
+      aliases: Array.isArray(p.aliases) ? (p.aliases as string[]) : [],
+      claims: Array.isArray(p.claims) ? (p.claims as NonNullable<WikiPage['claims']>) : [],
+      claim_count: typeof p.claim_count === 'number' ? p.claim_count : 0,
+      confidence: (['high', 'medium', 'low'].includes(String(p.confidence))
+        ? (p.confidence as NonNullable<WikiPage['confidence']>)
+        : null),
+      contested: p.contested === true,
+      contradictions: Array.isArray(p.contradictions) ? (p.contradictions as string[]) : [],
+      relations: Array.isArray(p.relations)
+        ? (p.relations as NonNullable<WikiPage['relations']>)
+        : [],
+    }))
+    .filter((p) => p.id || p.title);
+}
+
+/** wiki.cards：卡片挂到当前回合最后一条 assistant 消息（事件在回合结束后到达，
+ *  book.assistantId 已随 finalize 清空，故按消息列表定位）；无 assistant 时新建一条空载体。
+ *  对齐 web useChat 的 ensureAssistantMessage(sid, { wikiCards })。 */
+export function wikiCardsReducer(
+  body: Record<string, unknown>,
+  ctx: FeatureReducerContext,
+): FeatureReducerResult {
+  const pages = normalizeWikiCardPages(body);
+  if (pages.length === 0) return emptyFeatureReducerResult();
+  const upserts: FeatureReducerResult['messageUpserts'] = [];
+  const lastAssistant = [...ctx.messages].reverse().find((m) => m.role === 'assistant');
+  if (lastAssistant) {
+    upserts.push({ op: 'patch', messageId: lastAssistant.id, patch: { wikiCards: pages } });
+  } else {
+    upserts.push({
+      op: 'append',
+      message: {
+        id: uniqueMessageId(ctx, 'wikicards'),
+        role: 'assistant',
+        content: '',
+        timestamp: ctx.now,
+        wikiCards: pages,
+      } as ChatMessage,
+    });
+  }
+  return {
+    messageUpserts: upserts,
+    toolUpserts: [],
+    replaceBook: null,
+    statusHint: undefined,
+    queueHint: undefined,
+    finalize: false,
+  };
+}
+
+/** wiki.ingest_progress：带外进度事件，不进 reducer、不写消息。
+ *  规范化后通过 chat-controller 的 callback 订阅机制转发给 wiki-page 等订阅者。
+ *  这是迁移期边界：业务处理归属 wiki feature，callback pub-sub 暂留 chat-controller。 */
+function wikiIngestProgressHandler(body: unknown, ctx: FeatureReducerContext): FeatureReducerResult {
+  const raw = (body ?? {}) as Record<string, unknown>;
+  const progress: import('../backend-client').WikiIngestProgress = {
+    stage: String(raw.stage ?? ''),
+    percent: Math.max(0, Math.min(100, Number(raw.percent ?? 0) || 0)),
+    label: String(raw.label ?? raw.stage ?? ''),
+    source_id: String(raw.source_id ?? ''),
+    session_id: ctx.sessionId,
+  };
+  if (typeof raw.error === 'string') progress.error = raw.error;
+  if (raw.detail && typeof raw.detail === 'object') {
+    progress.detail = raw.detail as Record<string, unknown>;
+  }
+  invokeWikiIngestProgressCallback(progress);
+  return emptyFeatureReducerResult();
+}
+
 // ---------- 组合根接线（index.ts init 调用一次） ----------
 
 let listenersBound = false;
+let featureEventsController: AbortController | null = null;
+
+let featureReducerDisposers: Array<() => void> = [];
+
+function wikiChangedHandler(body: unknown, ctx: FeatureReducerContext): FeatureReducerResult {
+  const raw = (body ?? {}) as { changes?: Array<Record<string, unknown>> };
+  window.dispatchEvent(new CustomEvent('wiki:changed', {
+    detail: { sessionId: ctx.sessionId, changes: Array.isArray(raw.changes) ? raw.changes : [] },
+  }));
+  return emptyFeatureReducerResult();
+}
+
+function registerWikiReducers(): void {
+  if (featureReducerDisposers.length > 0 || !wikiFeatureEnabled()) return;
+  const pending: Array<() => void> = [];
+  try {
+    pending.push(featureEventRegistry.register({
+      feature: 'wiki',
+      event: 'cards',
+      version: 1,
+      reducer: (payload, ctx) => wikiCardsReducer(payload as Record<string, unknown>, ctx),
+    }));
+    pending.push(featureEventRegistry.register({
+      feature: 'wiki',
+      event: 'ingest_progress',
+      version: 1,
+      reducer: wikiIngestProgressHandler,
+    }));
+    pending.push(featureEventRegistry.register({
+      feature: 'wiki',
+      event: 'changed',
+      version: 1,
+      reducer: wikiChangedHandler,
+    }));
+    featureReducerDisposers = pending;
+  } catch (error) {
+    for (const dispose of pending.reverse()) dispose();
+    throw error;
+  }
+}
+
+function unregisterWikiReducers(): void {
+  for (const dispose of featureReducerDisposers.splice(0)) dispose();
+}
+
+function syncWikiReducerRegistration(): void {
+  if (wikiFeatureEnabled()) registerWikiReducers();
+  else unregisterWikiReducers();
+}
 
 /**
  * 初始化发送参数 resolver、登录态重置和 Wiki 卡片点击委托。
@@ -1150,8 +1318,14 @@ export function initWikiAgent(): void {
   setWikiAgentPanelRenderer(mountWikiAgentPanel);
   setWikiBrowserSurfaceRenderer(mountWikiBrowserSurface);
 
+  // Wiki 业务事件只在能力安装期注册；能力变化时原子撤销/重装，避免迟到帧进入核心 fallback。
+  syncWikiReducerRegistration();
+
   if (listenersBound) return;
   listenersBound = true;
+  featureEventsController = new AbortController();
+  const eventOptions = { signal: featureEventsController.signal };
+  window.addEventListener('wiki:config-change', syncWikiReducerRegistration, eventOptions);
 
   // 面板消息渲染的 store 订阅由 conversation-panel（autoRender）按实例持有，
   // 随挂载/卸载注册与释放，这里不再挂模块级订阅。
@@ -1162,14 +1336,14 @@ export function initWikiAgent(): void {
     if ((event.target as Element | null)?.matches?.('[data-wiki-agent-panel] [data-composer-input]')) {
       embeddedInputFocused = true;
     }
-  });
+  }, eventOptions);
   document.addEventListener('focusout', (event) => {
     if (!(event.target as Element | null)?.matches?.('[data-wiki-agent-panel] [data-composer-input]')) return;
     queueMicrotask(() => {
       const el = document.activeElement as Element | null;
       if (!el?.closest?.('[data-wiki-agent-panel]')) embeddedInputFocused = false;
     });
-  });
+  }, eventOptions);
 
   // 登录态变化：重置专用 Wiki Agent 会话状态。
   window.addEventListener('user:login-changed', () => {
@@ -1178,7 +1352,7 @@ export function initWikiAgent(): void {
     setBrowserPanelSession(null);
     closeWikiBrowserSurface();
     clearEmbeddedPanelState();
-  });
+  }, eventOptions);
 
   window.addEventListener('browser-workbench:command', (event) => {
     const action = (event as CustomEvent<{ action?: string }>).detail?.action;
@@ -1186,13 +1360,13 @@ export function initWikiAgent(): void {
     hideBrowserPanelView();
     setBrowserPanelSession(null);
     closeWikiBrowserSurface();
-  });
+  }, eventOptions);
 
   window.addEventListener('messages:changed', (event) => {
     const sid = (event as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
     const panel = embeddedByKb.get(activeEmbeddedKbId);
     if (panel && sid === panel.sessionId) scheduleEmbeddedRender();
-  });
+  }, eventOptions);
 
   // 专用 Wiki Agent 卡片交互：「查看」在 Wiki 页内打开详情，建议追问继续发给当前 Agent。
   document.addEventListener('click', (event) => {
@@ -1241,7 +1415,27 @@ export function initWikiAgent(): void {
           notify(`取消失败：${(err as Error).message}`);
         });
     }
-  });
+  }, eventOptions);
+
+}
+
+/** Release page-owned panel state while preserving the backend Wiki session. */
+export function disposeWikiAgentPage(): void {
+  disposeEmbeddedPagePanel();
+  hideBrowserPanelView();
+  setBrowserPanelSession(null);
+  closeWikiBrowserSurface();
+}
+
+export function disposeWikiAgentFeature(): void {
+  unregisterWikiReducers();
+  featureEventsController?.abort();
+  featureEventsController = null;
+  listenersBound = false;
+  clearEmbeddedPanelState();
+  setWikiSendExtrasResolver(null);
+  setWikiAgentPanelRenderer(null);
+  setWikiBrowserSurfaceRenderer(null);
 }
 
 /** 测试钩子：重置模块级会话状态；全局监听器保留。 */

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -14,6 +15,7 @@ from fastapi.responses import JSONResponse
 
 from crew.agent.capabilities import canonicalize_capability_config
 from crew.agent.external.runtime_profile import canonical_runtime_model_id, normalize_runtime_models
+from crew.agent.external.feature import EXTERNAL_AGENT_CATALOG_SERVICE_KEY
 from crew.core.errors import ToolError
 from crew.agent.loop.tool_result_display import (
     SUBAGENT_FULL_RESULT_TOOLS,
@@ -27,25 +29,35 @@ from crew.gateway.helpers import (
     session_external_agent_id,
     with_session_agent_labels,
 )
-from crew.gateway.hooks import hook_registry
+from crew.features.hooks import hook_registry
 from crew.security.settings import strict_security_enabled
-from crew.state.session_store import SessionOwnershipError, is_placeholder_title
-from crew.state.team_member_model import (
+from crew.state.session_store import (
+    SessionOwnershipError,
+    SessionWriteConflict,
+    is_placeholder_title,
+)
+from crew.team.team_member_model import (
     TeamMemberModelBindingError,
     materialize_team_member_model_bindings,
     set_team_member_model_binding,
 )
-from crew.team.history_projection import (
-    direct_mention_request_ids,
-    is_duplicate_team_parent_final,
-    team_child_member_id,
-    team_internal_history_items,
-    team_tasks_with_plan_projection,
-    team_visible_history_items,
-)
-from crew.team.roles import CREW_BUILTIN_AGENT_ID, is_crew_builtin_agent
 
 log = logging.getLogger(__name__)
+
+
+def _external_catalog(crew):
+    """Resolve the active Catalog generation and fail closed when unavailable."""
+    require_external_agents_enabled(crew)
+    plugins = getattr(crew, "plugins", None)
+    resolver = getattr(plugins, "resolve_service", None)
+    if callable(resolver):
+        service = resolver(EXTERNAL_AGENT_CATALOG_SERVICE_KEY, default=None)
+        if service is not None:
+            return service
+    catalog = getattr(crew, "external_agents", None)
+    if catalog is None:
+        raise RuntimeError("外部智能体存储未初始化")
+    return catalog
 
 
 def _tool_result_for_history(tool_call: ToolCall, paired_results: dict[str, str]) -> str:
@@ -183,11 +195,18 @@ async def _teardown_session_resources(
     ``messages_snapshot``：删库后再清盘时传入删前历史，供 uploads 反查路径。
     """
     try:
-        running = crew.tasks.list_tasks(
+        running = await crew.tasks.list_tasks_async(
             session_id=session_id, status="running", owner_account_id=owner, limit=1000
         )
     except Exception:  # noqa: BLE001
         running = []
+    # 肯定式消失证据：在途任务取消前登记，后台子任务完成通知据此丢弃。
+    note_vanished = getattr(crew, "note_session_vanished", None)
+    if callable(note_vanished):
+        try:
+            note_vanished(session_id)
+        except Exception:  # noqa: BLE001
+            pass
     for task in running:
         try:
             await crew.tasks.cancel(
@@ -243,7 +262,7 @@ async def _teardown_session_resources(
     delete_acp = getattr(external, "delete_acp_bindings_for_session", None) if external else None
     if callable(delete_acp):
         try:
-            delete_acp(session_id)
+            delete_acp(session_id, owner_account_id=owner)
         except Exception as exc:  # noqa: BLE001
             log.warning("删除会话 %s 时清理 ACP 绑定失败: %s", session_id, exc)
 
@@ -306,11 +325,19 @@ def _session_has_blocking_cron(crew, session_id: str, owner: str) -> str | None:
 def create_sessions_router(crew, dispatcher) -> APIRouter:
     router = APIRouter()
 
+    # P1-2 事件循环解阻塞约定：
+    # - 纯同步 handler 一律 `def`（FastAPI 自动放线程池执行）——store 的 SQLite
+    #   调用（含 busy-retry sleep）绝不再占用事件循环；
+    # - 含 await 的 handler 保持 `async def`，其中重的同步 store 调用用
+    #   `asyncio.to_thread` 包裹（见 session_history）。
+    # store 单连接由 threading.RLock 串行化（check_same_thread=False），线程化
+    #   只改执行线程、不改并发语义。
+
     @router.get("/api/channel-sessions")
-    async def channel_sessions(request: Request) -> JSONResponse:
+    def channel_sessions(request: Request) -> JSONResponse:
         """绑定者可见的渠道会话（按平台分组，仅绑定后有消息的会话）。"""
-        from crew.gateway.channel_sessions import list_channel_session_groups
-        from crew.gateway.platform_registry import platform_registry
+        from crew.channels.channel_sessions import list_channel_session_groups
+        from crew.channels.platform_registry import platform_registry
 
         owner = _owner(request)
         bindings = getattr(crew, "channel_bindings", None)
@@ -326,26 +353,37 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         return JSONResponse({"platforms": groups})
 
     @router.get("/api/sessions")
-    async def sessions(
+    def sessions(
         request: Request,
         workspace_id: str | None = None,
         include_archived: bool = False,
     ) -> JSONResponse:
         owner = account_from_request(request).owner_account_id
-        return JSONResponse(
-            with_session_agent_labels(
-                crew,
-                crew.session_store.list_sessions(
-                    workspace_id,
-                    owner_account_id=owner,
-                    include_archived=include_archived,
-                ),
+        items = with_session_agent_labels(
+            crew,
+            crew.session_store.list_sessions(
+                workspace_id,
                 owner_account_id=owner,
-            )
+                include_archived=include_archived,
+            ),
+            owner_account_id=owner,
         )
+        # D4 断点报告：开放回合（上次会话在第 N 步被中断）随列表下发，不自动续跑
+        scan = getattr(crew.session_store, "scan_breakpoints", None)
+        if callable(scan):
+            breakpoints = {b["session_id"]: b for b in scan(owner)}
+            for item in items:
+                bp = breakpoints.get(item.get("session_id"))
+                if bp:
+                    item["breakpoint"] = {
+                        "step": bp["step"],
+                        "turn_start_seq": bp["turn_start_seq"],
+                        "last_event_seq": bp["last_event_seq"],
+                    }
+        return JSONResponse(items)
 
     @router.post("/api/session/{session_id}/ensure")
-    async def ensure_session(request: Request, session_id: str, payload: dict) -> JSONResponse:
+    def ensure_session(request: Request, session_id: str, payload: dict) -> JSONResponse:
         """Persist a renderer draft before a session-scoped feature uses it.
 
         A new chat exists only in renderer memory until its first message.  Features such as
@@ -375,12 +413,12 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
 
     # ---- 工作空间 ----
     @router.get("/api/workspaces")
-    async def workspaces(request: Request) -> JSONResponse:
+    def workspaces(request: Request) -> JSONResponse:
         owner = account_from_request(request).owner_account_id
         return JSONResponse(crew.workspace_store.list(owner_account_id=owner))
 
     @router.post("/api/workspaces")
-    async def create_workspace(request: Request, payload: dict) -> JSONResponse:
+    def create_workspace(request: Request, payload: dict) -> JSONResponse:
         owner = account_from_request(request).owner_account_id
         raw_root = str(payload.get("root_path") or "").strip()
         if raw_root:
@@ -401,7 +439,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         return JSONResponse(ws)
 
     @router.put("/api/workspace/{workspace_id}")
-    async def update_workspace(request: Request, workspace_id: str, payload: dict) -> JSONResponse:
+    def update_workspace(request: Request, workspace_id: str, payload: dict) -> JSONResponse:
         owner = account_from_request(request).owner_account_id
         try:
             return JSONResponse(crew.workspace_store.update(workspace_id, owner_account_id=owner, **payload))
@@ -497,7 +535,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         return JSONResponse({"ok": False, "error": f"会话不存在: {session_id}"}, status_code=404)
 
     @router.get("/api/session/{session_id}/todos")
-    async def session_todos(request: Request, session_id: str) -> JSONResponse:
+    def session_todos(request: Request, session_id: str) -> JSONResponse:
         """返回当前 todo 快照（访问即触发 plan_manager 的惰性 hydrate）。"""
         owner = _owner(request)
         if not _session_owned(session_id, owner):
@@ -507,13 +545,29 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             return JSONResponse({"todos": []})
         return JSONResponse({"todos": pm.todo_store(session_id, owner_account_id=owner).read()})
 
-    @router.get("/api/session/{session_id}")
-    async def session_history(request: Request, session_id: str) -> JSONResponse:
-        owner = _owner(request)
-        if not _session_owned(session_id, owner):
-            return _not_found(session_id)
-        msgs = crew.session_store.load(session_id, owner_account_id=owner)
-        items = _session_messages_to_history_items(msgs, source_session_id=session_id)
+    async def _aggregate_history_items(
+        crew, session_id: str, owner: str
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """全量历史投影 + Team 聚合（旧 /api/session/{id} 的取数逻辑）。
+
+        返回 (items, should_aggregate)。重的 store 调用经线程执行（P1-2）。
+        供旧全量端点与窗口端点的 Team 回退路径共用。
+        """
+        from crew.team.history_projection import (
+            direct_mention_request_ids,
+            is_duplicate_team_parent_final,
+            team_child_member_id,
+            team_internal_history_items,
+            team_visible_history_items,
+        )
+
+        # 全量投影构建 + JSON 映射与历史总量成正比，长会话下是事件循环上最大的
+        # 同步块——load 与映射整体放线程（store RLock 保证并发安全）。
+        def _load_and_map() -> list[dict[str, Any]]:
+            msgs = crew.session_store.load(session_id, owner_account_id=owner)
+            return _session_messages_to_history_items(msgs, source_session_id=session_id)
+
+        items = await asyncio.to_thread(_load_and_map)
 
         # Team 父 session 本身通常只保存 meta 唤醒消息，真实对话分布在
         # {team_session}::turn::*::{leader/member} 子 session。点击左侧 Team 会话时，
@@ -522,8 +576,9 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         config = getter(session_id, owner_account_id=owner) if callable(getter) else None
         should_aggregate = str((config or {}).get("executor") or "").lower() == "team"
         loader = getattr(crew.session_store, "load_child_sessions", None)
+        # 子会话全量聚合同样与历史总量成正比（每 child 一次完整投影），一并入线程。
         child_sessions = (
-            loader(session_id, owner_account_id=owner)
+            await asyncio.to_thread(loader, session_id, owner_account_id=owner)
             if should_aggregate and callable(loader)
             else []
         )
@@ -532,14 +587,14 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 team_child_member_id(child_id)
                 for child_id, _ in child_sessions
             )
-            internal = team_internal_history_items(
+            internal = await team_internal_history_items(
                 crew,
                 session_id,
                 child_sessions,
                 owner_account_id=owner,
                 config=config,
             )
-            visible = team_visible_history_items(
+            visible = await team_visible_history_items(
                 crew,
                 session_id,
                 owner_account_id=owner,
@@ -568,10 +623,80 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                         key=lambda pair: _history_sort_key(pair[1], pair[0]),
                     )
                 ]
+        return items, should_aggregate
+
+    @router.get("/api/session/{session_id}")
+    async def session_history(request: Request, session_id: str) -> JSONResponse:
+        owner = _owner(request)
+        if not _session_owned(session_id, owner):
+            return _not_found(session_id)
+        items, _should_aggregate = await _aggregate_history_items(crew, session_id, owner)
         return JSONResponse(items)
 
+    @router.get("/api/session/{session_id}/history")
+    async def session_history_window(
+        request: Request,
+        session_id: str,
+        limit: int = 100,
+        before: str | None = None,
+    ) -> JSONResponse:
+        """窗口化历史（P1-1）：首屏尾部窗口 + 游标翻页，读取成本与历史总量解耦。
+
+        - query: limit（默认 100，钳制 1..500）、before（上一页返回的 next_before 原样回传）
+        - envelope: {items, has_more, next_before}；items 元素结构与全量端点一致
+        - fork 透明续接：窗口触底后自动读源会话前缀，游标 "sid:seq" 对客户端不透明
+        - Team 会话回退全量聚合（has_more=false）：其内容聚合自多个子会话，
+          逐子会话窗口化会破坏去重语义，窗口化暂只覆盖普通会话
+        """
+        from crew.state.session_store import SessionEventLogError
+
+        owner = _owner(request)
+        if not _session_owned(session_id, owner):
+            return _not_found(session_id)
+        load_window = getattr(crew.session_store, "load_window", None)
+        parse_cursor = getattr(crew.session_store, "parse_window_cursor", None)
+        if not callable(load_window) or not callable(parse_cursor):
+            return JSONResponse(
+                {"ok": False, "error": "会话存储不支持窗口读取"}, status_code=503
+            )
+        try:
+            parse_cursor(before)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        limit = max(1, min(int(limit or 100), 500))
+
+        getter = getattr(crew.session_store, "get_agent_config", None)
+        config = getter(session_id, owner_account_id=owner) if callable(getter) else None
+        if str((config or {}).get("executor") or "").lower() == "team":
+            items, _ = await _aggregate_history_items(crew, session_id, owner)
+            return JSONResponse({"items": items, "has_more": False, "next_before": None})
+
+        def _load_window_and_map() -> tuple[list[dict[str, Any]], bool, str | None]:
+            messages, has_more, next_before = load_window(
+                session_id, owner_account_id=owner, limit=limit, before=before
+            )
+            # fork 续接时消息可能来自不同会话：按连续来源分组映射 source_session_id
+            groups: list[tuple[str, list[Message]]] = []
+            for sid, _seq, msg in messages:
+                if groups and groups[-1][0] == sid:
+                    groups[-1][1].append(msg)
+                else:
+                    groups.append((sid, [msg]))
+            items = [
+                item
+                for sid, msgs in groups
+                for item in _session_messages_to_history_items(msgs, source_session_id=sid)
+            ]
+            return items, has_more, next_before
+
+        try:
+            items, has_more, next_before = await asyncio.to_thread(_load_window_and_map)
+        except SessionEventLogError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"items": items, "has_more": has_more, "next_before": next_before})
+
     @router.get("/api/session/{session_id}/plan")
-    async def session_plan(request: Request, session_id: str) -> JSONResponse:
+    def session_plan(request: Request, session_id: str) -> JSONResponse:
         """Return persisted plan content for history replay and current plan state."""
         owner = _owner(request)
         if not _session_owned(session_id, owner):
@@ -607,7 +732,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         })
 
     @router.put("/api/session/{session_id}/title")
-    async def rename_session(request: Request, session_id: str, payload: dict) -> JSONResponse:
+    def rename_session(request: Request, session_id: str, payload: dict) -> JSONResponse:
         owner = _owner(request)
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
@@ -615,7 +740,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         return JSONResponse({"ok": True})
 
     @router.put("/api/session/{session_id}/archive")
-    async def archive_session(request: Request, session_id: str, payload: dict) -> JSONResponse:
+    def archive_session(request: Request, session_id: str, payload: dict) -> JSONResponse:
         """归档 / 取消归档会话。body: {archived: bool}。归档会话从主列表隐藏。"""
         owner = _owner(request)
         if not _session_owned(session_id, owner):
@@ -625,7 +750,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         return JSONResponse({"ok": True, "archived": archived})
 
     @router.put("/api/session/{session_id}/pin")
-    async def pin_session(request: Request, session_id: str, payload: dict) -> JSONResponse:
+    def pin_session(request: Request, session_id: str, payload: dict) -> JSONResponse:
         """置顶 / 取消置顶会话。body: {pinned: bool}。置顶会话在主列表排序靠前。"""
         owner = _owner(request)
         if not _session_owned(session_id, owner):
@@ -633,6 +758,65 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         pinned = bool(payload.get("pinned", True))
         crew.session_store.set_pinned(session_id, pinned, owner_account_id=owner)
         return JSONResponse({"ok": True, "pinned": pinned})
+
+    # ---- 会话树：rewind / fork / 分支枚举（ADR-0042 W5，store 能力缺席时 503） ----
+
+    @router.post("/api/session/{session_id}/rewind")
+    def rewind_session(request: Request, session_id: str, payload: dict) -> JSONResponse:
+        """回退到目标 seq：leaf 指针 CAS 移动，旧分支保留可导航回来。body: {target_seq}。"""
+        owner = _owner(request)
+        rewind = getattr(crew.session_store, "rewind", None)
+        if not callable(rewind):
+            return JSONResponse({"ok": False, "error": "会话存储不支持回退"}, status_code=503)
+        if not _session_owned(session_id, owner):
+            return _not_found(session_id)
+        try:
+            target_seq = int(payload.get("target_seq"))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "target_seq 必须是整数"}, status_code=400)
+        try:
+            rewind(session_id, target_seq, owner_account_id=owner)
+        except SessionWriteConflict as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "session_id": session_id, "leaf_seq": target_seq})
+
+    @router.post("/api/session/{session_id}/fork")
+    def fork_session(request: Request, session_id: str, payload: dict) -> JSONResponse:
+        """从边界 seq 分叉出新会话（前缀共享，不复制事件行）。body: {boundary_seq, title?}。"""
+        owner = _owner(request)
+        fork = getattr(crew.session_store, "fork", None)
+        if not callable(fork):
+            return JSONResponse({"ok": False, "error": "会话存储不支持分叉"}, status_code=503)
+        if not _session_owned(session_id, owner):
+            return _not_found(session_id)
+        try:
+            boundary_seq = int(payload.get("boundary_seq"))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "boundary_seq 必须是整数"}, status_code=400)
+        title = payload.get("title")
+        try:
+            new_id = fork(
+                session_id,
+                boundary_seq,
+                owner_account_id=owner,
+                title=str(title).strip() if isinstance(title, str) and title.strip() else None,
+            )
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "session_id": new_id, "source_session_id": session_id})
+
+    @router.get("/api/session/{session_id}/branches")
+    def session_branches(request: Request, session_id: str) -> JSONResponse:
+        """枚举会话分支（fork 子会话 + rewind 留下的旧分支尾巴）。"""
+        owner = _owner(request)
+        list_branches = getattr(crew.session_store, "list_branches", None)
+        if not callable(list_branches):
+            return JSONResponse({"ok": False, "error": "会话存储不支持分支枚举"}, status_code=503)
+        if not _session_owned(session_id, owner):
+            return _not_found(session_id)
+        return JSONResponse({"ok": True, "branches": list_branches(session_id, owner_account_id=owner)})
 
     def is_external_session_config(config: dict[str, Any] | None) -> bool:
         if not isinstance(config, dict):
@@ -674,7 +858,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         external_agent_id = session_external_agent_id(config)
         if not external_agent_id:
             return None
-        agent, runtime = crew.external_agents.agent_with_runtime(
+        agent, runtime = _external_catalog(crew).agent_with_runtime(
             external_agent_id,
             owner_account_id=owner,
         )
@@ -711,6 +895,8 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         session_id: str,
         owner: str,
     ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        from crew.team.roles import CREW_BUILTIN_AGENT_ID, is_crew_builtin_agent
+
         getter = getattr(crew.session_store, "get_agent_config", None)
         if not callable(getter):
             return None
@@ -726,7 +912,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         require_external_agents_enabled(crew)
         stored, team = materialize_team_member_model_bindings(
             crew.session_store,
-            crew.external_agents,
+            _external_catalog(crew),
             session_id,
             owner_account_id=owner,
             builtin_model_id=crew.config.owner_default_model_id(owner),
@@ -738,7 +924,12 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             else {}
         )
         leader_agent_id = str(team.get("leader_agent_id") or "")
-        team_member_state = getattr(crew.team, "team_member_switch_state", None)
+        team_manager = crew.team
+        team_member_state = (
+            getattr(team_manager, "team_member_switch_state", None)
+            if team_manager is not None
+            else None
+        )
         dispatcher_state = dispatcher.status(session_id, owner_account_id=owner)
         session_is_running = dispatcher_state.get("live") != "idle"
         owner_profiles = crew.owner_model_profiles(owner)
@@ -777,7 +968,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 runtime_id = "builtin"
                 model_label = selected.label if selected is not None else selected_model_id
             else:
-                agent, runtime = crew.external_agents.agent_with_runtime(
+                agent, runtime = _external_catalog(crew).agent_with_runtime(
                     agent_id,
                     owner_account_id=owner,
                 )
@@ -848,7 +1039,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         }, stored
 
     @router.get("/api/session/{session_id}/model")
-    async def get_session_model(request: Request, session_id: str) -> JSONResponse:
+    def get_session_model(request: Request, session_id: str) -> JSONResponse:
         owner = _owner(request)
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
@@ -884,7 +1075,9 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         return JSONResponse(crew.read_session_model_binding(session_id, owner_account_id=owner))
 
     @router.put("/api/session/{session_id}/model")
-    async def put_session_model(request: Request, session_id: str, payload: dict) -> JSONResponse:
+    def put_session_model(request: Request, session_id: str, payload: dict) -> JSONResponse:
+        from crew.team.roles import is_crew_builtin_agent
+
         owner = _owner(request)
         model_id = str(payload.get("model_profile_id") or "").strip()
         if not model_id:
@@ -964,7 +1157,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 canonical_model_id = profile.id
             else:
                 try:
-                    agent, runtime = crew.external_agents.agent_with_runtime(
+                    agent, runtime = _external_catalog(crew).agent_with_runtime(
                         member_id,
                         owner_account_id=owner,
                     )
@@ -991,7 +1184,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                         },
                         status_code=409,
                     )
-                crew.external_agents.resolve_agent_profile(
+                _external_catalog(crew).resolve_agent_profile(
                     agent["id"],
                     canonical_model_id,
                     owner_account_id=owner,
@@ -1009,7 +1202,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     {"ok": False, "code": "invalid_revision", "error": "expected_revision 必须是整数"},
                     status_code=400,
                 )
-            team_manager = getattr(crew, "team", None)
+            team_manager = crew.team
             member_lock_factory = getattr(team_manager, "member_model_lock", None)
             lock_context = (
                 member_lock_factory(session_id, runtime_member_id, owner)
@@ -1086,7 +1279,11 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                         {"ok": False, "code": exc.code, "error": exc.message},
                         status_code=status_code,
                     )
-                drop_team = getattr(crew.team, "drop_session_team", None)
+                drop_team = (
+                    getattr(team_manager, "drop_session_team", None)
+                    if team_manager is not None
+                    else None
+                )
                 if callable(drop_team):
                     drop_team(session_id, owner_account_id=owner)
             refreshed = team_session_model_binding(session_id, owner)
@@ -1158,7 +1355,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         return JSONResponse(body)
 
     @router.get("/api/session/{session_id}/agent-config")
-    async def get_session_agent_config(request: Request, session_id: str) -> JSONResponse:
+    def get_session_agent_config(request: Request, session_id: str) -> JSONResponse:
         owner = _owner(request)
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
@@ -1173,7 +1370,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         return JSONResponse(config)
 
     @router.put("/api/session/{session_id}/agent-config")
-    async def set_session_agent_config(request: Request, session_id: str, payload: dict) -> JSONResponse:
+    def set_session_agent_config(request: Request, session_id: str, payload: dict) -> JSONResponse:
         owner = _owner(request)
         raw_config = payload.get("config") if isinstance(payload.get("config"), dict) else payload
         config = {k: v for k, v in raw_config.items() if k not in {"workspace_id", "title"}}
@@ -1207,7 +1404,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
 
         if executor in {"external", "acp"}:
             try:
-                _, runtime = crew.external_agents.agent_with_runtime(
+                _, runtime = _external_catalog(crew).agent_with_runtime(
                     external_agent_id,
                     owner_account_id=owner,
                 )
@@ -1225,7 +1422,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 )
         if executor == "team" and external_team_id:
             try:
-                crew.external_agents.get_team(
+                _external_catalog(crew).get_team(
                     external_team_id,
                     owner_account_id=owner,
                 )
@@ -1273,7 +1470,12 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             return JSONResponse({"ok": False, "error": "session agent config store 不可用"}, status_code=500)
         stored = setter(session_id, config, owner_account_id=owner)
         crew.agents.drop(session_id, owner_account_id=owner)
-        drop_team = getattr(crew.team, "drop_session_team", None)
+        team_manager = crew.team
+        drop_team = (
+            getattr(team_manager, "drop_session_team", None)
+            if team_manager is not None
+            else None
+        )
         if callable(drop_team):
             drop_team(session_id, owner_account_id=owner)
         if title and is_placeholder_title(title):
@@ -1281,14 +1483,14 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         return JSONResponse(stored)
 
     @router.get("/api/session/{session_id}/status")
-    async def session_status(request: Request, session_id: str) -> JSONResponse:
+    def session_status(request: Request, session_id: str) -> JSONResponse:
         owner = _owner(request)
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
         return JSONResponse(dispatcher.status(session_id, owner_account_id=owner))
 
     @router.get("/api/session/{session_id}/debug-log")
-    async def session_debug_log(request: Request, session_id: str, limit: int = 200) -> JSONResponse:
+    def session_debug_log(request: Request, session_id: str, limit: int = 200) -> JSONResponse:
         owner = _owner(request)
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
@@ -1390,7 +1592,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("删除会话 %s 时清理 Dynamic Kanban 目录失败: %s", session_id, exc)
-        crew.session_store.clear(session_id, owner_account_id=owner)
+        await asyncio.to_thread(crew.session_store.clear, session_id, owner_account_id=owner)
         return JSONResponse({"ok": True})
 
     @router.get("/api/tasks")
@@ -1400,6 +1602,8 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         status: str | None = None,
         limit: int = 200,
     ) -> JSONResponse:
+        from crew.team.history_projection import team_tasks_with_plan_projection
+
         try:
             owner = _owner(request)
             if session_id and not _session_owned(session_id, owner):
@@ -1407,7 +1611,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             getter = getattr(crew.session_store, "get_agent_config", None)
             config = getter(session_id, owner_account_id=owner) if session_id and callable(getter) else None
             if session_id and str((config or {}).get("executor") or "").lower() == "team":
-                return JSONResponse(team_tasks_with_plan_projection(
+                return JSONResponse(await team_tasks_with_plan_projection(
                     crew,
                     session_id,
                     status,
@@ -1415,7 +1619,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     owner_account_id=owner,
                 ))
             return JSONResponse(
-                crew.tasks.list_tasks(
+                await crew.tasks.list_tasks_async(
                     session_id=session_id,
                     status=status,
                     limit=limit,
@@ -1435,7 +1639,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         owner = _owner(request)
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
-        team_manager = getattr(crew, "team", None)
+        team_manager = crew.team
         recover = getattr(team_manager, "recover_plan_node", None)
         if not callable(recover):
             return JSONResponse({"ok": False, "error": "Team Runtime 不可用"}, status_code=409)
@@ -1459,11 +1663,11 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         """Task detail; legacy session IDs still return a task list."""
         owner = _owner(request)
         try:
-            return JSONResponse(crew.tasks.get(task_or_session_id, owner_account_id=owner))
+            return JSONResponse(await crew.tasks.get_async(task_or_session_id, owner_account_id=owner))
         except KeyError:
             if not _session_owned(task_or_session_id, owner):
                 return _not_found(task_or_session_id)
-            return JSONResponse(crew.tasks.list(task_or_session_id, owner_account_id=owner))
+            return JSONResponse(await crew.tasks.list_async(task_or_session_id, owner_account_id=owner))
 
     @router.post("/api/tasks/{task_id}/cancel")
     async def cancel_task(request: Request, task_id: str, payload: dict | None = None) -> JSONResponse:
@@ -1490,11 +1694,11 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             return JSONResponse({"error": str(exc)}, status_code=404)
 
     @router.get("/api/runtime/concurrency")
-    async def runtime_concurrency() -> JSONResponse:
+    def runtime_concurrency() -> JSONResponse:
         return JSONResponse(dispatcher.runtime_status())
 
     @router.get("/api/sessions/status")
-    async def sessions_status(request: Request) -> JSONResponse:
+    def sessions_status(request: Request) -> JSONResponse:
         """批量返回各会话状态词（前端刷新后据此恢复左侧栏状态点）。
 
         live=running/queued 直接映射；live=idle 时若上轮失败则 error，否则 idle。
@@ -1513,7 +1717,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         return JSONResponse(result)
 
     @router.get("/api/usage")
-    async def usage(request: Request) -> JSONResponse:
+    def usage(request: Request) -> JSONResponse:
         return JSONResponse(crew.session_store.total_usage(owner_account_id=_owner(request)))
 
     return router

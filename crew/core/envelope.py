@@ -17,14 +17,14 @@ from crew.core.types import tool_arguments_for_ui
 
 ChunkKind = Literal[
     "delta", "tool", "task", "thinking", "final", "error", "status", "plan_review",
-    "kanban", "followup_question",
+    "followup_question",
     "todo_updated", "todo_reminder", "file_changes",
-    "workflow_progress",
-    "wiki_cards", "wiki_ingest_progress",
-    "team_internal",
+    # 命名空间业务事件：body = {"feature", "event", "version", "payload"}。
+    # 具体业务事件不进核心枚举，插件贡献的未登记事件同样以本 kind 出口。
+    "feature_event",
 ]
 Status = Literal["in_progress", "succeeded", "failed"]
-Mode = Literal["agent", "team", "dynamic_kanban"]
+Mode = str
 
 
 def _new_id(prefix: str) -> str:
@@ -33,7 +33,7 @@ def _new_id(prefix: str) -> str:
 
 def _tool_event_args_for_ui(name: str, args: str) -> str:
     needs_projection = (
-        name in {"file_write", "write_file", "record_replay"}
+        name in {"file_write", "write_file"}
         or name.startswith("browser_")
     )
     if not args or not needs_projection:
@@ -102,6 +102,7 @@ class ResponseChunk:
         tool_call_id: str = "",
         args: str = "",
         ui_label: str = "",
+        result_metadata: dict[str, Any] | None = None,
     ) -> "ResponseChunk":
         """工具活动事件：phase = generating | start | result | error。
 
@@ -111,7 +112,7 @@ class ResponseChunk:
         """
         args = _tool_event_args_for_ui(name, args)
         if phase in {"generating", "start"} and (
-            name in {"file_write", "write_file", "record_replay"}
+            name in {"file_write", "write_file"}
             or name.startswith("browser_")
         ):
             detail = args
@@ -122,6 +123,8 @@ class ResponseChunk:
             body["args"] = args
         if ui_label:
             body["ui_label"] = ui_label
+        if result_metadata:
+            body["result_metadata"] = dict(result_metadata)
         return ResponseChunk(request_id, kind="tool", body=body, sequence=sequence)
 
     @staticmethod
@@ -143,6 +146,7 @@ class ResponseChunk:
         replace_content: bool = False,
         reason: str | None = None,
         usage: dict[str, int] | None = None,
+        structured: Any | None = None,
     ) -> "ResponseChunk":
         body: dict[str, Any] = {"text": text}
         if replace_content:
@@ -151,6 +155,8 @@ class ResponseChunk:
             body["reason"] = reason
         if usage:
             body["usage"] = usage
+        if structured is not None:
+            body["structured"] = structured
         return ResponseChunk(
             request_id,
             kind="final",
@@ -161,11 +167,28 @@ class ResponseChunk:
         )
 
     @staticmethod
-    def error(request_id: str, message: str, sequence: int = 0) -> "ResponseChunk":
+    def error(
+        request_id: str,
+        message: str,
+        sequence: int = 0,
+        *,
+        code: str | None = None,
+        retryable: bool | None = None,
+        retry_delay: float | None = None,
+    ) -> "ResponseChunk":
+        """错误帧。code 传 CrewErrorKind 值（如 "timeout"）；retryable/retry_delay
+        为类型化错误的结构化重试提示，有则附加，纯增量不改既有帧结构。"""
+        body = {"message": message}
+        if code:
+            body["code"] = code
+        if retryable is not None:
+            body["retryable"] = retryable
+        if retry_delay:
+            body["retry_delay"] = retry_delay
         return ResponseChunk(
             request_id,
             kind="error",
-            body={"message": message},
+            body=body,
             sequence=sequence,
             is_final=True,
             status="failed",
@@ -250,43 +273,44 @@ class ResponseChunk:
         )
 
     @staticmethod
-    def kanban_event(request_id: str, event: str, payload: dict[str, Any] | None = None, sequence: int = 0) -> "ResponseChunk":
-        """Dynamic Kanban 看板事件：如 workflow 启动/结束，供前端按需打开/关闭看板。"""
-        return ResponseChunk(
-            request_id,
-            kind="kanban",
-            body={"event": event, **(payload or {})},
-            sequence=sequence,
-        )
-
-    @staticmethod
-    def workflow_progress(
+    def feature_event(
         request_id: str,
-        workflow_id: str,
-        *,
-        status: str = "running",
-        current_phase: dict[str, Any] | None = None,
-        completed_phases: list[dict[str, Any]] | None = None,
-        active_calls: list[dict[str, Any]] | None = None,
-        message: str = "",
+        feature: str,
+        event: str,
+        payload: dict[str, Any] | None = None,
         sequence: int = 0,
+        *,
+        version: int = 1,
     ) -> "ResponseChunk":
-        """Dynamic Kanban 工作流进度事件：结构化地描述当前阶段、已完成阶段和正在执行的调用。
+        """命名空间业务事件：核心协议只认识 envelope，不认识具体 Feature。
 
-        前端把它渲染成对话中始终可见的进度面板，避免大量阶段编排 status 文本被折叠到过程区。
+        body 固定为 {"feature", "event", "version", "payload"}，事件名形如
+        team.internal_message / wiki.cards；WS 出口原样透传本帧。
         """
-        body: dict[str, Any] = {"workflow_id": workflow_id, "status": status}
-        if current_phase is not None:
-            body["current_phase"] = current_phase
-        if completed_phases is not None:
-            body["completed_phases"] = completed_phases
-        if active_calls is not None:
-            body["active_calls"] = active_calls
-        if message:
-            body["message"] = message
         return ResponseChunk(
             request_id,
-            kind="workflow_progress",
-            body=body,
+            kind="feature_event",
+            body={
+                "feature": feature,
+                "event": event,
+                "version": version,
+                "payload": payload or {},
+            },
             sequence=sequence,
         )
+
+
+def feature_event_body(
+    feature: str,
+    event: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    version: int = 1,
+) -> dict[str, Any]:
+    """构造 feature_event 的标准 body（供直接产出 WS 帧的 Host 推送点复用）。"""
+    return {
+        "feature": feature,
+        "event": event,
+        "version": version,
+        "payload": payload or {},
+    }

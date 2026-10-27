@@ -33,6 +33,7 @@ cd ../web && npm install
 
 ```bash
 .venv/bin/ruff check .
+.venv/bin/lint-imports
 .venv/bin/python -m pytest
 ```
 

@@ -12,7 +12,7 @@
  *   1. 页头：KB 选择器（下拉）+ 新建 KB + 上传 + 批量管理 + 知识库面板收起/展开
  *      （「问 Wiki」已下线：对话面板常驻主区，无需入口按钮）
  *   2. 上传任务面板：每个 source 的进度条 + 阶段文案 + 错误态；进度经 WS
- *      wiki_ingest_progress 帧（chat-controller 回调转发）实时更新
+ *      wiki.ingest_progress 事件（chat-controller 回调转发）实时更新
  *   3. 左侧主区：Wiki Agent 对话面板（features/wiki-agent.ts 挂载，常驻，弹性宽度）
  *   4. 右侧知识库面板（.wiki-browser-pane，可拖拽调宽、可整体收起）：
  *      目录列表：分页「加载更多」；条目 = 标题 + 类型徽标 + 更新时间 + 摘要；
@@ -43,10 +43,14 @@ import {
 import { $, escapeHtml, notify, state } from '../state';
 import { mountFoldedMarkdown, type FoldedMarkdownHandle } from '../markdown-fold';
 import { showContextMenu, type ContextMenuItem } from '../lib/context-menu';
+import { spriteSymbolRef } from '../lib/sprite-symbol';
 import { showConfirmDialog, showPromptDialog } from '../ui-feedback';
-import { __resetWikiGraphForTest, invalidateWikiGraph, mountWikiGraph } from './wiki-graph';
+import { __resetWikiGraphForTest, disposeWikiGraph, invalidateWikiGraph, mountWikiGraph } from './wiki-graph';
 import { mountWikiEditor, type WikiEditorHandle } from './wiki-editor';
 import { maybeStartWikiTourOnce, startWikiTour } from './wiki-tour';
+import { wikiFeatureEnabled } from './wiki-feature';
+import type { PageContribution, PageLifecycleContext } from './page-registry';
+import { disposeWikiAgentPage } from './wiki-agent';
 
 // ── Wiki Agent 入口（Phase 4） ──
 // 「上传」按钮（打开对话区附件选择）与失败任务「让 AI 处理」共用同一挂点；回调由 index.ts
@@ -594,7 +598,11 @@ const initializedKbIds = new Set<string>();
 let kbCreateOpen = false;
 let kbCreateDraft = '';
 let kbCreateSubmitting = false;
-let wikiChangedBound = false;
+let wikiLifecycleSignal: AbortSignal | null = null;
+let disposeWikiLifecycleEvents: (() => void) | null = null;
+let wikiLifecycleEpoch = 0;
+
+function wikiLifecycleAvailable(): boolean { return !wikiLifecycleSignal || !wikiLifecycleSignal.aborted; }
 
 // ── 分栏宽度：拖拽 + 双击复位 + localStorage 持久化（知识库面板 / 图谱视图共用一套机制） ──
 
@@ -768,7 +776,8 @@ function resetWikiViewState(): void {
   } catch {
     wikiBrowserOpen = true;
   }
-  loadSeq = 0;
+  loadSeq += 1;
+  wikiLifecycleEpoch += 1;
   autoInitAttempted = false;
   initializedKbIds.clear();
   kbCreateOpen = false;
@@ -787,7 +796,11 @@ function resetWikiViewState(): void {
 export function __resetWikiViewForTest(): void {
   resetWikiViewState();
   graphWidth = null;
-  loadSeq = 0;
+  loadSeq += 1;
+  wikiLifecycleEpoch += 1;
+  wikiLifecycleSignal = null;
+  disposeWikiLifecycleEvents?.();
+  disposeWikiLifecycleEvents = null;
   listScrollMemory = null;
   __resetWikiGraphForTest();
 }
@@ -796,7 +809,7 @@ export function __resetWikiViewForTest(): void {
 
 /** 工具栏/标签用线性图标（crew-ui-symbols 雪碧图，风格与全局一致）。 */
 function uiIcon(symbolId: string): string {
-  return `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="./crew-ui-symbols.svg#${symbolId}"></use></svg>`;
+  return `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="${spriteSymbolRef(`./crew-ui-symbols.svg#${symbolId}`)}"></use></svg>`;
 }
 
 function wikiIcon(name: 'folder' | 'caret', size: number): string {
@@ -905,7 +918,7 @@ function treeNodesHtml(nodes: WikiTreeNode[], depth: number): string {
         const countHtml = count > 0 ? `<span class="wiki-tree__folder-count">${count}</span>` : '';
         return `
           <li class="wiki-tree__folder">
-            <button type="button" class="wiki-tree__folder-toggle${open ? ' is-open' : ''}" data-tree-path="${escapeHtml(node.path)}" style="padding-left: ${treeIndentPx(depth)}px">
+            <button type="button" class="wiki-tree__folder-toggle${open ? ' is-open' : ''}" data-tree-path="${escapeHtml(node.path)}" style="--mw-tree-indent: ${treeIndentPx(depth)}px">
               <span class="wiki-tree__caret">${wikiIcon('caret', 12)}</span>
               <span class="wiki-tree__folder-icon">${wikiIcon('folder', 14)}</span>
               <span class="wiki-tree__folder-name">${escapeHtml(vaultFolderLabel(node.path, node.name))}</span>
@@ -918,7 +931,7 @@ function treeNodesHtml(nodes: WikiTreeNode[], depth: number): string {
         const active = node.name === activeGroup().selectedDocumentName ? ' is-active' : '';
         return `
           <li class="wiki-tree__item wiki-tree__item--document${active}" data-vault-document="${escapeHtml(node.name)}">
-            <button type="button" class="wiki-tree__label" style="padding-left: ${depth * 16 + 6}px">
+            <button type="button" class="wiki-tree__label" style="--mw-tree-indent: ${depth * 16 + 6}px">
               <span class="wiki-badge">文件</span>
               <span class="wiki-tree__title">${escapeHtml(vaultDocumentLabel(node.name))}</span>
             </button>
@@ -929,8 +942,8 @@ function treeNodesHtml(nodes: WikiTreeNode[], depth: number): string {
       // ⋯ 菜单按钮是 <li> 的独立子元素（button 不能嵌套 button），
       // 由 CSS 绝对定位到文件名左侧的缩进空隙里，悬停时淡入。
       return `
-        <li class="wiki-tree__item${view.selecting ? ' wiki-item--selecting' : ''}${active}${checkedClass}" data-page-id="${escapeHtml(node.page.id)}" style="--tree-indent: ${treeIndentPx(depth)}px">
-          <button type="button" class="wiki-tree__label" style="padding-left: var(--tree-indent)">
+        <li class="wiki-tree__item${view.selecting ? ' wiki-item--selecting' : ''}${active}${checkedClass}" data-page-id="${escapeHtml(node.page.id)}" style="--mw-tree-indent: ${treeIndentPx(depth)}px">
+          <button type="button" class="wiki-tree__label">
             ${checkHtml}
             ${typeBadge(node.page.page_type)}
             <span class="wiki-tree__title">${escapeHtml(node.page.title)}</span>
@@ -1234,6 +1247,8 @@ async function saveWikiPageDraft(groupId: string, pageId: string): Promise<void>
   const current = view.pageDetails[pageId];
   if (!current || !group || group.selectedId !== pageId) return;
   const draft = pageDraftFromDom(groupId, current, groupDetails.get(groupId)?.editor?.flush() ?? current.content ?? '');
+  const lifecycleSignal = wikiLifecycleSignal;
+  const lifecycleEpoch = wikiLifecycleEpoch;
   setWikiSaveState(groupId, 'saving');
   localSaveInFlight = true;
   try {
@@ -1244,6 +1259,7 @@ async function saveWikiPageDraft(groupId: string, pageId: string): Promise<void>
       sources: draft.sources,
       relations: draft.relations ?? [],
     }, view.kbId);
+    if (lifecycleSignal !== wikiLifecycleSignal || lifecycleEpoch !== wikiLifecycleEpoch || !wikiLifecycleAvailable()) return;
     view.pageDetails = { ...view.pageDetails, [pageId]: result.page };
     view.sourcePages = {
       ...view.sourcePages,
@@ -1262,6 +1278,7 @@ async function saveWikiPageDraft(groupId: string, pageId: string): Promise<void>
     setWikiSaveState(groupId, 'saved');
     invalidateWikiGraph();
   } catch (error) {
+    if (lifecycleSignal !== wikiLifecycleSignal || lifecycleEpoch !== wikiLifecycleEpoch || !wikiLifecycleAvailable()) return;
     setWikiSaveState(groupId, 'error');
     notify(`保存 Wiki 页面失败：${errMsg(error)}`);
   } finally {
@@ -1301,6 +1318,17 @@ function flushGroupDirty(group: WikiDetailGroup): void {
   }
   detail.dirty = false;
   void saveWikiPageDraft(group.id, group.selectedId);
+}
+
+async function flushWikiPageEdits(): Promise<void> {
+  const pending = Array.from(groupDetails.entries()).filter(([, detail]) => detail.dirty).map(([groupId, detail]) => {
+    const group = groupById(groupId);
+    if (!group?.selectedId || !detail.editor) return Promise.resolve();
+    if (detail.timer) clearTimeout(detail.timer);
+    detail.timer = null;
+    return saveWikiPageDraft(groupId, group.selectedId);
+  });
+  await Promise.allSettled(pending);
 }
 
 export async function openWikiPageByTitle(title: string): Promise<boolean> {
@@ -1381,15 +1409,15 @@ let listScrollMemory: { key: string; top: number } | null = null;
 
 /** 知识库面板内联宽度：列表/树/类型视图固定持久化宽度；图谱视图拖拽后固定像素，未拖拽时沿用 browserWidth。 */
 function browserPaneStyleAttr(): string {
-  if (view.view === 'graph' && graphWidth != null) return ` style="width: ${graphWidth}px"`;
-  return ` style="width: ${browserWidth}px"`;
+  if (view.view === 'graph' && graphWidth != null) return ` style="--mw-wiki-browser-width: ${graphWidth}px"`;
+  return ` style="--mw-wiki-browser-width: ${browserWidth}px"`;
 }
 
 /** 目录/图谱画布内联宽度：列表/树/类型视图固定目录宽度，用 flex 简写输出，压过 CSS 里 240px/窄窗口 220px 的 flex-basis 档位；
  * 图谱模式未拖拽时走 1.5:1 比例分配不内联，拖拽后内联固定像素压过 --graph 的 flex 1.5。 */
 function catalogPaneStyleAttr(): string {
-  if (view.view === 'graph') return graphCanvasWidth != null ? ` style="flex: 0 0 ${graphCanvasWidth}px"` : '';
-  return ` style="flex: 0 0 ${catalogWidth}px"`;
+  if (view.view === 'graph') return graphCanvasWidth != null ? ` style="--mw-wiki-catalog-flex: 0 0 ${graphCanvasWidth}px"` : '';
+  return ` style="--mw-wiki-catalog-flex: 0 0 ${catalogWidth}px"`;
 }
 
 function renderShell(): void {
@@ -1464,7 +1492,7 @@ function renderShell(): void {
       .map((group, index) => {
         const flexStyle =
           view.detailGroups.length > 1
-            ? ` style="flex: ${index === 0 ? groupSplitRatio : 100 - groupSplitRatio} 1 0"`
+            ? ` style="--mw-wiki-group-flex: ${index === 0 ? groupSplitRatio : 100 - groupSplitRatio} 1 0"`
             : '';
         return `
           <section class="wiki-detail-group${group.id === view.activeGroupId ? ' is-focused' : ''}" data-wiki-group="${group.id}"${flexStyle}>
@@ -1474,7 +1502,7 @@ function renderShell(): void {
       })
       .join(groupSashHtml);
     const browserPaneMarkup = wikiBrowserSurfaceOpen
-      ? `<div class="wiki-browser-pane wiki-browser-pane--surface" style="width: ${browserWidth}px">
+      ? `<div class="wiki-browser-pane wiki-browser-pane--surface" style="--mw-wiki-browser-width: ${browserWidth}px">
           <div class="wiki-browser-surface" data-wiki-browser-surface data-session-id="${escapeHtml(wikiBrowserSurfaceSession)}"></div>
         </div>`
       : `<div class="wiki-browser-pane${graphMode ? ' wiki-browser-pane--graph' : ''}"${browserPaneStyleAttr()}>
@@ -1663,6 +1691,7 @@ function renderShell(): void {
 // ── 数据加载 ──
 
 async function loadKbs(): Promise<void> {
+  if (!wikiLifecycleAvailable()) return;
   const seq = ++loadSeq;
   try {
     let res = await backendApi.wikiKBs();
@@ -1712,6 +1741,7 @@ async function loadKbs(): Promise<void> {
 }
 
 async function loadPages(): Promise<void> {
+  if (!wikiLifecycleAvailable()) return;
   if (!view.kbId) {
     // KB 为空或加载失败：复位 loading 并重绘，否则页面停在「知识库加载中…」空转。
     if (view.loading) {
@@ -1745,6 +1775,7 @@ async function loadPages(): Promise<void> {
 }
 
 async function loadMorePages(): Promise<void> {
+  if (!wikiLifecycleAvailable()) return;
   if (!view.kbId || view.loadingMore || !view.hasMore) return;
   const seq = loadSeq;
   view.loadingMore = true;
@@ -1770,10 +1801,13 @@ async function loadMorePages(): Promise<void> {
 
 async function loadPageDetail(pageId: string): Promise<void> {
   if (!view.kbId || loadingDetails.has(pageId)) return;
+  if (!wikiLifecycleAvailable()) return;
+  const seq = loadSeq;
   loadingDetails.add(pageId);
   renderShell();
   try {
     const res = await backendApi.wikiPage(pageId, view.kbId);
+    if (seq !== loadSeq || !wikiLifecycleAvailable()) return;
     view.pageDetails = { ...view.pageDetails, [pageId]: res.page };
     view.sourcePages = { ...view.sourcePages, [pageId]: res.source_pages ?? [] };
     view.relationPages = { ...view.relationPages, [pageId]: res.relation_pages ?? [] };
@@ -1783,7 +1817,7 @@ async function loadPageDetail(pageId: string): Promise<void> {
   } finally {
     loadingDetails.delete(pageId);
   }
-  renderShell();
+  if (seq === loadSeq && wikiLifecycleAvailable()) renderShell();
 }
 
 /**
@@ -2364,10 +2398,10 @@ function bindEvents(): void {
       onDrag: (w) => {
         if (view.view === 'graph') {
           graphWidth = graphWidthStore.clamp(w);
-          pane.style.width = `${graphWidth}px`;
+          pane.style.setProperty('--mw-wiki-browser-width', `${graphWidth}px`);
         } else {
           browserWidth = browserWidthStore.clamp(w);
-          pane.style.width = `${browserWidth}px`;
+          pane.style.setProperty('--mw-wiki-browser-width', `${browserWidth}px`);
         }
       },
       onCommit: () => (view.view === 'graph' ? graphWidthStore.persist(graphWidth) : browserWidthStore.persist(browserWidth)),
@@ -2393,7 +2427,7 @@ function bindEvents(): void {
       startWidth: () => catalogWidth,
       onDrag: (w) => {
         catalogWidth = catalogWidthStore.clamp(w);
-        pane.style.flex = `0 0 ${catalogWidth}px`;
+        pane.style.setProperty('--mw-wiki-catalog-flex', `0 0 ${catalogWidth}px`);
       },
       onCommit: () => catalogWidthStore.persist(catalogWidth),
       // 双击复位默认目录宽度
@@ -2414,7 +2448,7 @@ function bindEvents(): void {
       startWidth: () => graphCanvasWidth ?? pane.getBoundingClientRect().width,
       onDrag: (w) => {
         graphCanvasWidth = graphCanvasWidthStore.clamp(w);
-        pane.style.flex = `0 0 ${graphCanvasWidth}px`;
+        pane.style.setProperty('--mw-wiki-catalog-flex', `0 0 ${graphCanvasWidth}px`);
       },
       onCommit: () => graphCanvasWidthStore.persist(graphCanvasWidth),
       // 双击复位：清掉拖拽固定像素，回到 1.5:1 弹性分配
@@ -2580,16 +2614,16 @@ function bindEvents(): void {
       startWidth: () => (groupSplitRatio / 100) * containerSize(),
       onDrag: (w) => {
         groupSplitRatio = groupSplitStore.clamp((w / containerSize()) * 100);
-        first.style.flex = `${groupSplitRatio} 1 0`;
-        second.style.flex = `${100 - groupSplitRatio} 1 0`;
+        first.style.setProperty('--mw-wiki-group-flex', `${groupSplitRatio} 1 0`);
+        second.style.setProperty('--mw-wiki-group-flex', `${100 - groupSplitRatio} 1 0`);
       },
       onCommit: () => groupSplitStore.persist(groupSplitRatio),
       // 双击复位 50%（清存储，回默认）；直接改内联比例，不走 renderShell（保活子树会带回旧内联值）。
       onReset: () => {
         groupSplitRatio = 50;
         groupSplitStore.persist(null);
-        first.style.flex = '50 1 0';
-        second.style.flex = '50 1 0';
+        first.style.setProperty('--mw-wiki-group-flex', '50 1 0');
+        second.style.setProperty('--mw-wiki-group-flex', '50 1 0');
       },
     });
   });
@@ -2639,15 +2673,75 @@ export function renderWikiPage(): void {
   renderShell();
 }
 
+function installWikiLifecycleEvents(): () => void {
+  const wikiChanged = (event: Event): void => {
+    const changes = ((event as CustomEvent<{ changes?: Array<{ kb_id?: string }> }>).detail?.changes ?? []);
+    if (!view.kbId || !changes.some((change) => change.kb_id === view.kbId)) return;
+    if (localSaveInFlight || Date.now() < ignoreWikiChangedUntil) return;
+    invalidateWikiGraph();
+    void reloadAll();
+  };
+  window.addEventListener('wiki:changed', wikiChanged);
+  return () => {
+    window.removeEventListener('wiki:changed', wikiChanged);
+  };
+}
+
+/** Feature-install resource: invalidate account-scoped cache even while the page is inactive. */
+export function installWikiFeature(): () => void {
+  const loginChanged = (): void => {
+    resetWikiViewState();
+    disposeWikiGraph();
+    if (state.activeTab === 'wiki') {
+      renderShell();
+      void refreshWikiData();
+    }
+  };
+  window.addEventListener('user:login-changed', loginChanged);
+  return () => window.removeEventListener('user:login-changed', loginChanged);
+}
+
+export function createWikiPageContribution(): PageContribution {
+  return {
+    id: 'wiki',
+    // 与导航入口 / reducer 注册同源：wikiFeatureEnabled 统一推导能力快照与旧配置回落。
+    isAvailable: () => wikiFeatureEnabled(),
+    activate: ({ signal }: PageLifecycleContext) => {
+      wikiLifecycleEpoch += 1;
+      wikiLifecycleSignal = signal;
+      disposeWikiLifecycleEvents?.();
+      disposeWikiLifecycleEvents = installWikiLifecycleEvents();
+      renderShell();
+      void refreshWikiData();
+    },
+    deactivate: async () => {
+      loadSeq += 1;
+      wikiLifecycleEpoch += 1;
+      disposeWikiLifecycleEvents?.();
+      disposeWikiLifecycleEvents = null;
+      await flushWikiPageEdits();
+      for (const groupId of Array.from(groupDetails.keys())) disposeGroupDetail(groupId);
+      disposeWikiGraph();
+      disposeWikiAgentPage();
+      // Keep the aborted signal so callbacks from this activation remain unavailable.
+    },
+  };
+}
+
 /** 切入 Wiki tab 时调用：首次加载（加载失败不置 loaded，下次切入自动重试）。 */
 export async function refreshWikiData(): Promise<void> {
+  const lifecycleSignal = wikiLifecycleSignal;
+  const lifecycleEpoch = wikiLifecycleEpoch;
+  if (!wikiLifecycleAvailable()) return;
   if (view.loaded) {
-    renderShell();
+    if (lifecycleSignal === wikiLifecycleSignal && lifecycleEpoch === wikiLifecycleEpoch && wikiLifecycleAvailable()) renderShell();
     return;
   }
   await reloadAll();
+  if (lifecycleSignal !== wikiLifecycleSignal || lifecycleEpoch !== wikiLifecycleEpoch || !wikiLifecycleAvailable()) return;
   // 仅首次加载成功才置位：失败（如网络异常）时保持 false，下次切回 tab 自动重试。
   if (!view.kbsLoadFailed) {
+    if (lifecycleSignal !== wikiLifecycleSignal || lifecycleEpoch !== wikiLifecycleEpoch || !wikiLifecycleAvailable()) return;
     view.loaded = true;
     // 首次成功进入 Wiki 页时启动界面导览（localStorage 标记，只启动一次）。
     maybeStartWikiTourOnce();
@@ -2660,25 +2754,4 @@ export function bindWikiTab(onTab: () => boolean | void): void {
     if (onTab() !== false) void refreshWikiData();
   });
 
-  // 登录态变化（登录成功 / 退出）后重置缓存，下次进入 tab 重新拉取。
-  window.addEventListener('user:login-changed', () => {
-    resetWikiViewState();
-    invalidateWikiGraph();
-    renderShell();
-    // 登录成功且当前停在 Wiki tab：立即自动拉取（登出则停在登录引导态）。
-    if (state.activeTab === 'wiki') {
-      void refreshWikiData();
-    }
-  });
-
-  if (!wikiChangedBound) {
-    wikiChangedBound = true;
-    window.addEventListener('wiki:changed', (event) => {
-      const changes = ((event as CustomEvent<{ changes?: Array<{ kb_id?: string }> }>).detail?.changes ?? []);
-      if (!view.kbId || !changes.some((change) => change.kb_id === view.kbId)) return;
-      if (localSaveInFlight || Date.now() < ignoreWikiChangedUntil) return;
-      invalidateWikiGraph();
-      void reloadAll();
-    });
-  }
 }

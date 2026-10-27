@@ -13,6 +13,7 @@ import threading
 import time
 from typing import Any
 
+from crew.state._migration import backfill_empty_owner_rows
 from crew.state.logging import get_logger
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
@@ -41,6 +42,8 @@ class PluginPreferencesStore:
                 )
                 """
             )
+            # 历史 owner='' 行归属本机 local（owner 统一后不存在无主偏好）。
+            backfill_empty_owner_rows(self._conn, ["plugin_preferences"])
             self._conn.commit()
 
     def get_enabled(self, owner_account_id: str, plugin_key: str) -> bool | None:

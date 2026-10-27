@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 2 · Driver Adapter 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>插件架构阶段 2 · Driver Adapter</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-03 · 测试执行：gpt-5.6-luna 子 Agent</div>
+
+  <h2>1. 验证目标</h2>
+  <ul>
+    <li>Team 与 Dynamic Kanban 经 Registry 执行，<code>CrewApp.handle()</code> 不含业务 mode 分支。</li>
+    <li>Team 关闭时不注册 Driver，并返回标准 <code>capability_unavailable</code>。</li>
+    <li>Team Driver 保留 external_team_id 会话配置补全。</li>
+    <li>Dynamic Kanban 保留旧 mode 和既有交互行为。</li>
+    <li>应用关闭后所有内置 Driver Scope 均完成 drain 并撤销注册。</li>
+  </ul>
+
+  <h2>2. 测试矩阵</h2>
+  <table>
+    <thead><tr><th>层级</th><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Python unit / integration</td><td>Execution Driver、Dynamic Kanban、External Agent flag、Gateway Dispatcher 与 Provider 生命周期</td><td class="ok">147 通过</td></tr>
+      <tr><td>Architecture</td><td><code>lint-imports</code> 的 6 条契约</td><td class="ok">全部通过</td></tr>
+      <tr><td>Static</td><td>Ruff、compileall、<code>git diff --check</code></td><td class="ok">全部通过</td></tr>
+      <tr><td>Docs</td><td>9 份 HTML 解析；方案文档 11 张 Mermaid 图离线渲染</td><td class="ok">全部通过</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 关键回归场景</h2>
+  <ul>
+    <li>未启用 Team 时 Registry 不暴露 <code>team</code>；启用后由 Team Adapter Generation 提供。</li>
+    <li>Team 请求进入旧 Manager 前仍解析会话级 external_team_id。</li>
+    <li><code>dynamic_kanban</code> 绑定到独立 Adapter Generation，并继续产生最终响应。</li>
+    <li>关闭 App 后 <code>team</code> 与 <code>dynamic_kanban</code> 均不再可见。</li>
+  </ul>
+
+  <h2>4. 跨平台说明</h2>
+  <p>测试不使用 POSIX signal、fork 或平台文件锁。Adapter 注册、异步生成器、Lease drain 与并行关闭走 Python 3.11+ 的跨平台 asyncio 语义。</p>
+
+  <div class="nav"><a href="../backend/adr/0008-team-kanban-driver-adapters.html">ADR-0008</a> · <a href="../backend/modules/app.html">App 模块文档</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</div>
+</body>
+</html>

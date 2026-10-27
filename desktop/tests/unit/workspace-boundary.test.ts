@@ -2,7 +2,7 @@
  * @vitest-environment happy-dom
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { __resetAllStoresForTest, configStore, sessionStore, workspaceStore } from '../../src/ui/stores/stores';
+import { __resetAllStoresForTest, authStore, configStore, sessionStore, workspaceStore } from '../../src/ui/stores/stores';
 import { setActiveSessionId, setCurrentWorkspaceId } from '../../src/ui/state';
 import {
   canSwitchComposerWorkspace,
@@ -38,6 +38,8 @@ beforeEach(() => {
   __resetAllStoresForTest();
   __resetSessionModelBindingsForTest();
   vi.clearAllMocks();
+  // auth-gate 为真实登录判定：local 桌面会话由 initAuthFlow 置为已登录，测试模拟该态。
+  authStore.set({ isLoggedIn: true });
 });
 
 describe('workspace/session boundary', () => {

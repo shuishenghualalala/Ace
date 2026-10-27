@@ -14,19 +14,29 @@ from typing import Any, AsyncIterator
 import httpx
 
 from crew.core.errors import (
+    CrewErrorKind,
     ProviderError,
     contains_image_input,
     is_unsupported_image_input_error,
 )
 from crew.core.interfaces import LLMProvider
+from crew.core.observability import capture_payload, event
 from crew.core.types import (
     IMAGE_INPUT_UNAVAILABLE_NOTICE,
     ChatResponse,
     Message,
     StreamChunk,
     ToolCall,
+    coerce_tool_arguments,
 )
+from crew.providers.classify import classify_provider_error
+from crew.providers.keying import ApiKeyResolver
+from crew.providers.vendors import REASONING_LEVELS, VendorCompat
 from crew.state.logging import llm_trace
+
+# 各家 reasoning 字段别名：OpenAI 兼容生态没有统一名字
+# （DeepSeek/GLM 用 reasoning_content，部分网关用 reasoning / reasoning_text）
+_REASONING_FIELDS = ("reasoning_content", "reasoning", "reasoning_text")
 
 
 _PARTIAL_STRING_KEYS = ("path", "file_path", "command", "query", "url", "name")
@@ -85,7 +95,7 @@ def _repair_leaked_parameter_json(raw: str) -> str | None:
 def _parse_tool_arguments(raw: str, tool_name: str) -> Any:
     """解析工具参数；仅在检测到已知协议泄漏时尝试一次受限修复。"""
     try:
-        return _normalize_tool_arguments(json.loads(raw or "{}"), tool_name)
+        parsed = json.loads(raw or "{}")
     except json.JSONDecodeError as original_exc:
         repaired = _repair_leaked_parameter_json(raw)
         if repaired is None:
@@ -95,7 +105,7 @@ def _parse_tool_arguments(raw: str, tool_name: str) -> Any:
         except json.JSONDecodeError:
             raise original_exc
         log.warning("修复模型泄漏标签导致的损坏 JSON tool=%s", tool_name)
-        return _normalize_tool_arguments(parsed, tool_name)
+    return _normalize_tool_arguments(coerce_tool_arguments(parsed), tool_name)
 
 
 def _merge_tool_argument_fragment(current: str, fragment: str) -> tuple[str, str]:
@@ -183,18 +193,27 @@ def _is_blank_text_message(message: Message) -> bool:
     return not (text or "").strip()
 
 
-def _messages_for_openai(messages: list[Message], *, vision: bool = True) -> list[dict[str, Any]]:
+def _messages_for_openai(
+    messages: list[Message],
+    *,
+    vision: bool = True,
+    reasoning_echo: bool = False,
+) -> list[dict[str, Any]]:
     """序列化并丢弃空白 user/system，避免历史污染导致 ChatBody validation 400。
 
     Args:
         vision: 当前模型是否支持 image_url 多模态输入。False 时会把 content_parts
             中的图片块降级为文本占位，避免纯文本模型因收到 image_url 而 400。
+        reasoning_echo: 厂商要求历史 assistant 消息携带 reasoning_content 时
+            （DeepSeek），从 Message.thinking 回填；缺失补空串。
     """
     out: list[dict[str, Any]] = []
     for m in messages:
         if _is_blank_text_message(m):
             continue
         msg = m.to_openai()
+        if reasoning_echo and m.role == "assistant":
+            msg["reasoning_content"] = m.thinking or ""
         if not vision and m.content_parts:
             # 过滤 image_url，只保留 text；无 text 时补一个占位说明，避免空 content。
             removed_image = any(
@@ -215,73 +234,6 @@ def _messages_for_openai(messages: list[Message], *, vision: bool = True) -> lis
     return out
 
 
-def _error_category(exc: Exception) -> str:
-    """将 openai 异常映射为 gateway 出站 error.category。"""
-    # httpx 原生异常优先用 isinstance 判定：openai SDK 流式消费时常让底层
-    # httpx 异常（如 RemoteProtocolError）原样冒泡，类名字符串匹配会漏判。
-    if isinstance(exc, httpx.TimeoutException):
-        return "timeout"
-    if isinstance(exc, httpx.TransportError):  # 含 RemoteProtocolError / ReadError / ConnectError 等
-        return "connection"
-    # openai SDK 常把底层 httpx 断连/超时包成 APIError，原异常挂在 __cause__ 上——
-    # 递归看 cause，并把消息文本也匹配上（"peer closed"/"incomplete chunked read"/"read timed out"）。
-    cause = exc.__cause__
-    if isinstance(cause, httpx.TimeoutException):
-        return "timeout"
-    if isinstance(cause, httpx.TransportError):
-        return "connection"
-    msg = str(exc).lower()
-    if any(s in msg for s in ("read timed out", "timed out", "timeout")):
-        return "timeout"
-    if any(s in msg for s in ("peer closed", "incomplete chunked read", "connection", "read error", "remote protocol")):
-        return "connection"
-    name = type(exc).__name__
-    status = getattr(exc, "status_code", None)
-    if name == "AuthenticationError" or status == 401:
-        return "auth"
-    if name == "PermissionDeniedError" or status == 403:
-        return "forbidden"
-    if name == "RateLimitError" or status == 429:
-        return "rate_limit"
-    if name in ("APITimeoutError", "TimeoutError"):
-        return "timeout"
-    if name == "APIConnectionError":
-        return "connection"
-    if name == "InternalServerError" or (isinstance(status, int) and status >= 500):
-        return "server"
-    return "provider"
-
-
-def _is_retryable(exc: Exception) -> bool:
-    """按异常类型判定是否瞬时错误（可重试）。
-
-    限流 / 超时 / 连接 / 5xx 视为可重试；鉴权、请求非法等不可重试。
-    用类名 + status_code 判定，避免硬依赖 openai 异常类（不同版本路径不一）。
-    httpx 原生异常（流式时 SDK 常原样冒泡）用 isinstance 兜底，避免漏判。
-    openai SDK 包成 APIError 时，看 __cause__ 与消息文本兜底。
-    """
-    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
-        return True
-    cause = exc.__cause__
-    if isinstance(cause, (httpx.TimeoutException, httpx.TransportError)):
-        return True
-    name = type(exc).__name__
-    if name in (
-        "RateLimitError", "APITimeoutError", "APIConnectionError", "InternalServerError",
-        "ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout", "TimeoutException",
-        "RemoteProtocolError", "ConnectError",
-    ):
-        return True
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int) and (status == 429 or status >= 500):
-        return True
-    # 消息文本兜底：SDK 包装后的连接/超时类错误（peer closed / read timed out 等）
-    msg = str(exc).lower()
-    if any(s in msg for s in ("read timed out", "timed out", "peer closed", "incomplete chunked read", "read error", "remote protocol")):
-        return True
-    return False
-
-
 def _provider_error(
     prefix: str,
     exc: Exception,
@@ -292,11 +244,20 @@ def _provider_error(
         request_has_images=contains_image_input(request_messages),
     )
     detail = str(exc) or "<无消息>"
+    if unsupported_image:
+        return ProviderError(
+            f"{prefix}: {detail}",
+            retryable=False,
+            category="unsupported_capability",
+            capability="vision",
+        )
+    c = classify_provider_error(exc)
     return ProviderError(
         f"{prefix}: {detail}",
-        retryable=False if unsupported_image else _is_retryable(exc),
-        category="unsupported_capability" if unsupported_image else _error_category(exc),
-        capability="vision" if unsupported_image else None,
+        retryable=c.retryable,
+        kind=c.kind,
+        status=c.status,
+        retry_delay=c.retry_delay,
     )
 
 
@@ -318,6 +279,49 @@ def _filter_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [m for m in messages if _is_valid_openai_message(m)]
 
 
+def _reasoning_text(obj: Any) -> str:
+    """从 SDK 对象提取 reasoning 内容，按各家字段别名依次探测。"""
+    for field_name in _REASONING_FIELDS:
+        value = getattr(obj, field_name, None)
+        if value:
+            return str(value)
+    return ""
+
+
+def _thinking_extra_body(compat: VendorCompat, reasoning_mode: str | None) -> dict[str, Any]:
+    """把统一 reasoning_mode 翻译成厂商思考参数（并入 extra_body）。
+
+    reasoning_mode：None = 不发参数（模型默认行为）；"off"/"disabled" = 关闭；
+    其余取值须是 REASONING_LEVELS 中的等级。等级先经档案映射表翻译成厂商
+    effort 值：缺项原样透传等级名，显式 None 视为该档不支持（只开思考、不发
+    effort）。模型不支持思考时 compat.thinking_format 已被档案层收成 none。
+    """
+    if compat.thinking_format == "none" or not reasoning_mode:
+        return {}
+    fmt = compat.thinking_format
+    if reasoning_mode in ("off", "disabled"):
+        if fmt in ("deepseek", "zai"):
+            return {"thinking": {"type": "disabled"}}
+        if fmt == "qwen":
+            return {"enable_thinking": False}
+        return {}
+    if reasoning_mode not in REASONING_LEVELS:
+        return {}
+    # 仅 deepseek/qwen 支持 reasoning_effort；zai 只认 thinking.type
+    effort: str | None = None
+    if compat.supports_reasoning_effort and fmt in ("deepseek", "qwen"):
+        effort = compat.thinking_level_map.get(reasoning_mode, reasoning_mode)
+    if fmt in ("deepseek", "zai"):
+        body: dict[str, Any] = {"thinking": {"type": "enabled"}}
+    elif fmt == "qwen":
+        body = {"enable_thinking": True}
+    else:
+        return {}
+    if effort is not None:
+        body["reasoning_effort"] = effort
+    return body
+
+
 class OpenAIProvider(LLMProvider):
     def __init__(
         self,
@@ -328,6 +332,9 @@ class OpenAIProvider(LLMProvider):
         max_tokens: int | None = None,
         timeout: float | httpx.Timeout = 120.0,
         vision: bool = True,
+        vision_max_pixels: int | None = None,
+        compat: VendorCompat | None = None,
+        api_key_resolver: ApiKeyResolver | None = None,
     ) -> None:
         # 延迟导入，避免未装 openai 时整个包不可用
         from openai import AsyncOpenAI
@@ -357,8 +364,21 @@ class OpenAIProvider(LLMProvider):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.vision = vision
-        provider_hint = f"{base_url or ''} {model}".lower()
-        self._supports_thinking_control = "deepseek" in provider_hint
+        # 视觉输入像素预算（装配层按厂商档案注入）；None = 工具层默认预算
+        self.vision_max_pixels = vision_max_pixels
+        # 厂商差异开关：装配层按 crew.providers.vendors 档案传入；缺省 = 通用 OpenAI 行为
+        self._compat = compat if compat is not None else VendorCompat()
+        self._api_key_resolver = api_key_resolver
+
+    def _auth_headers(self) -> dict[str, str] | None:
+        """resolver 模式下每次请求取一次凭据快照写进 Authorization 头。
+
+        快照只作用于本次发起的请求；已在飞行中的流不受影响。无 resolver
+        时返回 None，沿用客户端构造时的静态 key（测试/外部直构造路径）。
+        """
+        if self._api_key_resolver is None:
+            return None
+        return {"Authorization": f"Bearer {self._api_key_resolver()}"}
 
     async def aclose(self) -> None:
         """Close the owned SDK client exactly once, including concurrent callers."""
@@ -378,10 +398,13 @@ class OpenAIProvider(LLMProvider):
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
         reasoning_mode: str | None = None,
+        purpose: str | None = None,
     ) -> ChatResponse:
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": _filter_messages(_messages_for_openai(messages, vision=self.vision)),
+            "messages": _filter_messages(
+                _messages_for_openai(messages, vision=self.vision, reasoning_echo=self._compat.requires_reasoning_echo)
+            ),
             "temperature": self.temperature,
         }
         effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
@@ -389,21 +412,27 @@ class OpenAIProvider(LLMProvider):
             payload["max_tokens"] = effective_max_tokens
         if response_format is not None:
             payload["response_format"] = response_format
-        if reasoning_mode == "disabled" and self._supports_thinking_control:
-            payload["extra_body"] = {"thinking": {"type": "disabled"}}
+        thinking = _thinking_extra_body(self._compat, reasoning_mode)
+        if thinking:
+            payload["extra_body"] = thinking
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
         session = _current_session()
+        request_capture = capture_payload("llm.request", payload, attributes={"capture_layer": "provider_arguments"})
+        event("llm.request.provider", attributes={"payload_id": request_capture.payload_id, "capture_state": request_capture.capture_state, "provider": "openai", "model": self.model})
         llm_trace("request", {
             "session_id": session, "model": self.model, "stream": False,
+            "purpose": purpose or "",
             "messages": payload["messages"],
             "tools": [t.get("function", {}).get("name") for t in (tools or [])],
         })
 
         try:
-            resp = await self._client.chat.completions.create(**payload)
+            resp = await self._client.chat.completions.create(
+                **payload, extra_headers=self._auth_headers()
+            )
         except Exception as exc:  # noqa: BLE001 - 统一包装成 ProviderError
             llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
             raise _provider_error("LLM 调用失败", exc, payload["messages"]) from exc
@@ -438,10 +467,8 @@ class OpenAIProvider(LLMProvider):
                 "cached_tokens": cached,
             }
 
-        # 提取推理/思考内容（DeepSeek 等模型返回 reasoning_content）
-        reasoning_content = ""
-        if hasattr(msg, "reasoning_content") and msg.reasoning_content:
-            reasoning_content = msg.reasoning_content
+        # 提取推理/思考内容（DeepSeek 等模型返回 reasoning_content，字段名按厂商有别）
+        reasoning_content = _reasoning_text(msg)
 
         llm_trace("response", {
             "session_id": session, "model": self.model, "stream": False,
@@ -449,6 +476,18 @@ class OpenAIProvider(LLMProvider):
             "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls],
             "finish_reason": choice.finish_reason, "usage": usage, "reasoning": reasoning_content,
         })
+        response_capture = capture_payload(
+            "llm.response",
+            {
+                "text": msg.content or "",
+                "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls],
+                "finish_reason": choice.finish_reason,
+                "usage": usage,
+                "reasoning": reasoning_content,
+            },
+            attributes={"capture_layer": "assembled_response"},
+        )
+        event("llm.response.provider", attributes={"payload_id": response_capture.payload_id, "capture_state": response_capture.capture_state})
 
         return ChatResponse(
             text=msg.content or "",
@@ -470,7 +509,9 @@ class OpenAIProvider(LLMProvider):
         """流式补全，逐 token 返回增量文本。"""
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": _filter_messages(_messages_for_openai(messages, vision=self.vision)),
+            "messages": _filter_messages(
+                _messages_for_openai(messages, vision=self.vision, reasoning_echo=self._compat.requires_reasoning_echo)
+            ),
             "temperature": self.temperature,
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -480,13 +521,16 @@ class OpenAIProvider(LLMProvider):
             payload["max_tokens"] = effective_max_tokens
         if response_format is not None:
             payload["response_format"] = response_format
-        if reasoning_mode == "disabled" and self._supports_thinking_control:
-            payload["extra_body"] = {"thinking": {"type": "disabled"}}
+        thinking = _thinking_extra_body(self._compat, reasoning_mode)
+        if thinking:
+            payload["extra_body"] = thinking
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
         session = _current_session()
+        request_capture = capture_payload("llm.request", payload, attributes={"capture_layer": "provider_arguments"})
+        event("llm.request.provider", attributes={"payload_id": request_capture.payload_id, "capture_state": request_capture.capture_state, "provider": "openai", "model": self.model})
         llm_trace("request", {
             "session_id": session, "model": self.model, "stream": True,
             "messages": payload["messages"],
@@ -494,7 +538,9 @@ class OpenAIProvider(LLMProvider):
         })
 
         try:
-            stream = await self._client.chat.completions.create(**payload)
+            stream = await self._client.chat.completions.create(
+                **payload, extra_headers=self._auth_headers()
+            )
         except Exception as exc:
             llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
             raise _provider_error("LLM 流式调用失败", exc, payload["messages"]) from exc
@@ -577,10 +623,10 @@ class OpenAIProvider(LLMProvider):
                 if delta_text:
                     full_text += delta_text
 
-                # 累积 reasoning_content（DeepSeek 等）：保留增量片段供下方单独 yield
-                reasoning_delta = ""
-                if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                    reasoning_delta = delta.reasoning_content
+                # 累积 reasoning 增量（DeepSeek 等；字段名按厂商有别）：
+                # 保留增量片段供下方单独 yield
+                reasoning_delta = _reasoning_text(delta)
+                if reasoning_delta:
                     reasoning_content += reasoning_delta
                     if not reasoning_milestone_emitted:
                         reasoning_milestone_emitted = True
@@ -715,9 +761,11 @@ class OpenAIProvider(LLMProvider):
             # （accumulators 非空且文本极少，说明模型在产工具参数而非正文），不丢半截
             # tool args、不误走文本续写——改为产出 length 截断信号（partial tool_calls
             # 走 _raw 兜底 + finish_reason="length"），交主循环截断自愈（bump-retry +
-            # split-guidance）。仅对可恢复中断（timeout/connection）生效，auth 等不转。
-            recoverable = _is_retryable(exc) and _error_category(exc) in (
-                "timeout", "connection", "server", "rate_limit",
+            # split-guidance）。仅对可恢复中断生效，auth/配额/过载等不转。
+            classification = classify_provider_error(exc)
+            recoverable = classification.retryable and classification.kind in (
+                CrewErrorKind.STREAM, CrewErrorKind.TIMEOUT,
+                CrewErrorKind.INTERNAL, CrewErrorKind.USAGE_LIMIT,
             )
             partial_tools = [
                 acc for acc in tool_call_accumulators.values()
@@ -776,6 +824,18 @@ class OpenAIProvider(LLMProvider):
             "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in assembled_tool_calls],
             "finish_reason": finish_reason, "reasoning": reasoning_content,
         })
+        response_capture = capture_payload(
+            "llm.response",
+            {
+                "text": full_text,
+                "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in assembled_tool_calls],
+                "finish_reason": finish_reason,
+                "usage": usage,
+                "reasoning": reasoning_content,
+            },
+            attributes={"capture_layer": "assembled_response"},
+        )
+        event("llm.response.provider", attributes={"payload_id": response_capture.payload_id, "capture_state": response_capture.capture_state})
 
         yield StreamChunk(
             delta_text="",

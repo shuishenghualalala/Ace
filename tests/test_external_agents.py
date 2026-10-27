@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from crew.agent.executor.base import ExecutionContext
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
 from crew.agent.executor.external import (
     AcpExecutor,
     ClientExecutor,
@@ -67,6 +68,7 @@ from crew.agent.external.runtime_adapter import (
 )
 from crew.agent.external.store import ExternalAgentStore
 from crew.agent.external.tools import register_external_agent_tools
+from crew.team.external_store import TeamExternalAgentStore
 from crew.agent.plan import PlanModeManager
 from crew.agent.skills import SkillActivation, SkillEntrypoint
 from crew.core.envelope import ResponseChunk
@@ -79,7 +81,7 @@ from crew.security.service import ExecAuthorization
 from crew.state.config import Config
 from crew.team.formation import build_agent_profile, fast_team_suggestion
 from crew.team.roles import CREW_BUILTIN_AGENT_ID, all_role_public_payloads
-from crew.team.workspace_guard import classify_external_permission
+from crew.security.workspace_guard import classify_external_permission
 from crew.tools.registry import Registry
 
 
@@ -739,12 +741,19 @@ async def test_external_cli_cancellation_terminates_runtime_process_tree(tmp_pat
         cwd=str(tmp_path),
         timeout=120,
     )))
-    for _ in range(100):
+    pids = None
+    # 全量套件高负载下子进程起盘可能超过 1s，预算放宽到 5s 防抖
+    for _ in range(500):
         if pid_file.exists():
-            break
+            try:
+                candidate = json.loads(pid_file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                candidate = None
+            if isinstance(candidate, dict) and {"parent", "child"} <= candidate.keys():
+                pids = candidate
+                break
         await asyncio.sleep(0.01)
-    assert pid_file.exists()
-    pids = json.loads(pid_file.read_text(encoding="utf-8"))
+    assert pids is not None
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1671,6 +1680,7 @@ def test_runtime_refresh_migrates_only_declared_legacy_agent_model(tmp_path):
         name="Legacy Claude",
         runtime_id=old_runtime["id"],
         model="default",
+        owner_account_id="local",
     )
 
     store.upsert_runtime({
@@ -1687,7 +1697,7 @@ def test_runtime_refresh_migrates_only_declared_legacy_agent_model(tmp_path):
         },
     })
 
-    assert store.get_agent(legacy["id"])["model"] == "sonnet"
+    assert store.get_agent(legacy["id"], owner_account_id="local")["model"] == "sonnet"
 def test_runtime_display_badge_reconciles_old_rows_and_unknown_runtimes():
     assert runtime_registry.resolve_runtime_display_badge(
         provider="codex",
@@ -1852,10 +1862,10 @@ def test_external_agent_store_is_additive(tmp_path):
         "executable_path": "/bin/kimi",
         "version": "1.2.3",
     })
-    agent = store.create_agent(name="Kimi Coder", runtime_id=runtime["id"], model="moonshot")
+    agent = store.create_agent(name="Kimi Coder", runtime_id=runtime["id"], model="moonshot", owner_account_id="local")
 
     assert store.list_runtimes()[0]["id"] == "kimi_test"
-    assert store.agent_with_runtime(agent["id"])[1]["executable_path"] == "/bin/kimi"
+    assert store.agent_with_runtime(agent["id"], owner_account_id="local")[1]["executable_path"] == "/bin/kimi"
     assert agent["profile"]["agent_id"] == agent["id"]
     assert agent["profile"]["version"] == 4
     assert "backend" in agent["profile"]["capabilities"]
@@ -1879,7 +1889,7 @@ def test_external_runtime_missing_identity_uses_neutral_fallback(tmp_path):
 
 
 def test_external_agents_and_teams_are_owner_private_while_runtime_is_global(tmp_path):
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "shared-runtime",
         "provider": "hermes",
@@ -1936,6 +1946,7 @@ def test_external_agent_profile_v2_uses_generic_capability_evidence(tmp_path):
         name="研究分析助手",
         runtime_id=runtime["id"],
         system_prompt="检索资料、分析不同观点并汇总结论。",
+        owner_account_id="local",
     )
 
     profile = agent["profile"]
@@ -1973,6 +1984,7 @@ def test_agent_profile_tracks_selected_runtime_model_binding(tmp_path):
         name="Kimi Model Agent",
         runtime_id=runtime["id"],
         model="kimi/default",
+        owner_account_id="local",
     )
 
     assert agent["profile"]["version"] == 4
@@ -2004,7 +2016,7 @@ def test_agent_profile_tracks_selected_runtime_model_binding(tmp_path):
             "models": [{"id": "kimi/new", "label": "Kimi New", "default": True}],
         },
     })
-    assert store.get_agent(agent["id"])["profile"]["model"]["binding_status"] == "missing"
+    assert store.get_agent(agent["id"], owner_account_id="local")["profile"]["model"]["binding_status"] == "missing"
 
     store.upsert_runtime({
         **runtime,
@@ -2014,7 +2026,7 @@ def test_agent_profile_tracks_selected_runtime_model_binding(tmp_path):
             "probe": {"error_code": "probe_failed"},
         },
     })
-    assert store.get_agent(agent["id"])["profile"]["model"]["binding_status"] == "unverified"
+    assert store.get_agent(agent["id"], owner_account_id="local")["profile"]["model"]["binding_status"] == "unverified"
 
 
 def test_agent_profile_v4_reuses_lazy_model_overlays(tmp_path):
@@ -2035,7 +2047,7 @@ def test_agent_profile_v4_reuses_lazy_model_overlays(tmp_path):
             ],
         },
     })
-    agent = store.create_agent(name="Overlay Agent", runtime_id=runtime["id"], model="model-b")
+    agent = store.create_agent(name="Overlay Agent", runtime_id=runtime["id"], model="model-b", owner_account_id="local")
 
     def stored_envelope():
         with sqlite3.connect(db_path) as conn:
@@ -2050,13 +2062,13 @@ def test_agent_profile_v4_reuses_lazy_model_overlays(tmp_path):
     assert set(initial["model_overlays"]) == {"model-b"}
     base_fingerprint = initial["base"]["source_fingerprint"]
 
-    switched = store.resolve_agent_profile(agent["id"], "model-a")
+    switched = store.resolve_agent_profile(agent["id"], "model-a", owner_account_id="local")
     after_a = stored_envelope()
     assert switched["model"]["id"] == "model-a"
     assert set(after_a["model_overlays"]) == {"model-a", "model-b"}
     assert after_a["base"]["source_fingerprint"] == base_fingerprint
 
-    restored = store.resolve_agent_profile(agent["id"], "model-b")
+    restored = store.resolve_agent_profile(agent["id"], "model-b", owner_account_id="local")
     after_b = stored_envelope()
     assert restored["model"]["id"] == "model-b"
     assert set(after_b["model_overlays"]) == {"model-a", "model-b"}
@@ -2077,7 +2089,7 @@ def test_agent_profile_materializes_runtime_default_model_for_new_agent(tmp_path
         },
     })
 
-    agent = store.create_agent(name="Default Agent", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Default Agent", runtime_id=runtime["id"], owner_account_id="local")
 
     assert agent["model"] == "model-default"
     assert agent["profile"]["model"]["id"] == "model-default"
@@ -2163,8 +2175,8 @@ def test_agent_profile_model_fingerprint_refreshes_only_affected_overlay(tmp_pat
         },
     }
     runtime = store.upsert_runtime(runtime_payload)
-    agent = store.create_agent(name="Fingerprint Agent", runtime_id=runtime["id"], model="model-b")
-    store.resolve_agent_profile(agent["id"], "model-a")
+    agent = store.create_agent(name="Fingerprint Agent", runtime_id=runtime["id"], model="model-b", owner_account_id="local")
+    store.resolve_agent_profile(agent["id"], "model-a", owner_account_id="local")
 
     def overlays():
         with sqlite3.connect(db_path) as conn:
@@ -2219,7 +2231,7 @@ def test_agent_profile_v4_keeps_legacy_unattributed_observation_audit_only(tmp_p
             "models": [{"id": "model-b", "label": "Model B", "default": True}],
         },
     })
-    agent = store.create_agent(name="Legacy Agent", runtime_id=runtime["id"], model="model-b")
+    agent = store.create_agent(name="Legacy Agent", runtime_id=runtime["id"], model="model-b", owner_account_id="local")
     baseline = agent["profile"]["capabilities"]["backend"]["score"]
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -2229,18 +2241,18 @@ def test_agent_profile_v4_keeps_legacy_unattributed_observation_audit_only(tmp_p
               source_run_id, source_node_id, source_attempt_id,
               capabilities_json, assessment_source, outcome, quality_weight,
               failure_kind, observed_at, created_at, model_binding_source
-            ) VALUES (?, '', ?, 'legacy-run', 'legacy-node', 'legacy-attempt',
+            ) VALUES (?, 'local', ?, 'legacy-run', 'legacy-node', 'legacy-attempt',
                       '[\"backend\"]', 'legacy', 'success', 1.0, '',
                       '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'legacy_unknown')
             """,
             ("legacy-observation", agent["id"]),
         )
 
-    refreshed = store.refresh_agent_profile(agent["id"])
+    refreshed = store.refresh_agent_profile(agent["id"], owner_account_id="local")
     evidence = refreshed["profile"]["capabilities"]["backend"]["evidence"]
     assert refreshed["profile"]["capabilities"]["backend"]["score"] == baseline
     assert not any(item["source"] == "execution_observation" for item in evidence)
-    assert store.list_agent_profile_observations(agent["id"])[0]["model_binding_source"] == "legacy_unknown"
+    assert store.list_agent_profile_observations(agent["id"], owner_account_id="local")[0]["model_binding_source"] == "legacy_unknown"
 
 
 def test_agent_profile_observation_is_idempotent_and_thresholded(tmp_path):
@@ -2326,7 +2338,7 @@ def test_agent_profile_observation_rolls_back_when_profile_refresh_fails(tmp_pat
         "name": "Rollback Runtime",
         "executable_path": "/bin/sh",
     })
-    agent = store.create_agent(name="Rollback Agent", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Rollback Agent", runtime_id=runtime["id"], owner_account_id="local")
     original_profile = agent["profile"]
 
     def fail_profile_refresh(*args, **kwargs):
@@ -2343,10 +2355,11 @@ def test_agent_profile_observation_rolls_back_when_profile_refresh_fails(tmp_pat
             assessment_source="execution_assessment",
             outcome="success",
             quality_weight=0.8,
-        )
+        owner_account_id="local",
+    )
 
-    assert store.list_agent_profile_observations(agent["id"]) == []
-    assert store.get_agent(agent["id"])["profile"] == original_profile
+    assert store.list_agent_profile_observations(agent["id"], owner_account_id="local") == []
+    assert store.get_agent(agent["id"], owner_account_id="local")["profile"] == original_profile
 
 
 def test_agent_profile_observation_concurrent_writes_preserve_evidence(tmp_path):
@@ -2357,7 +2370,7 @@ def test_agent_profile_observation_concurrent_writes_preserve_evidence(tmp_path)
         "name": "Concurrent Runtime",
         "executable_path": "/bin/sh",
     })
-    agent = store.create_agent(name="Concurrent Agent", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Concurrent Agent", runtime_id=runtime["id"], owner_account_id="local")
 
     def record(index: int):
         return store.record_agent_profile_observation(
@@ -2369,14 +2382,15 @@ def test_agent_profile_observation_concurrent_writes_preserve_evidence(tmp_path)
             assessment_source="execution_assessment",
             outcome="success",
             quality_weight=0.8,
-        )
+        owner_account_id="local",
+    )
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         results = list(executor.map(record, range(4)))
 
     assert all(item["inserted"] for item in results)
-    assert len(store.list_agent_profile_observations(agent["id"])) == 4
-    profile = store.get_agent(agent["id"])["profile"]
+    assert len(store.list_agent_profile_observations(agent["id"], owner_account_id="local")) == 4
+    profile = store.get_agent(agent["id"], owner_account_id="local")["profile"]
     evidence = profile["capabilities"]["backend"]["evidence"]
     assert any(item["source"] == "execution_observation" and "samples=4" in item["value"] for item in evidence)
 
@@ -2390,7 +2404,7 @@ def test_runtime_refresh_preserves_agent_profile_observations(tmp_path):
         "executable_path": "/bin/sh",
         "metadata": {"availability_status": "ready"},
     })
-    agent = store.create_agent(name="Refresh Agent", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Refresh Agent", runtime_id=runtime["id"], owner_account_id="local")
     for index in range(3):
         store.record_agent_profile_observation(
             external_agent_id=agent["id"],
@@ -2401,13 +2415,14 @@ def test_runtime_refresh_preserves_agent_profile_observations(tmp_path):
             assessment_source="execution_assessment",
             outcome="success",
             quality_weight=0.8,
-        )
+        owner_account_id="local",
+    )
 
     store.upsert_runtime({
         **runtime,
         "metadata": {"availability_status": "degraded", "tools": ["terminal"]},
     })
-    refreshed = store.get_agent(agent["id"])
+    refreshed = store.get_agent(agent["id"], owner_account_id="local")
     evidence = refreshed["profile"]["capabilities"]["backend"]["evidence"]
     assert any(item["source"] == "execution_observation" and "samples=3" in item["value"] for item in evidence)
 
@@ -2502,7 +2517,7 @@ def _hermes_runtime(runtime_id: str, executable_path: str, metadata: dict) -> di
 
 
 def test_runtime_sync_rebinds_agents_and_retires_replaced_installation(tmp_path):
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     old_runtime = store.upsert_runtime(_hermes_runtime("hermes-old-path", "/old/bin/hermes", {
         "runtime_descriptor_source": "builtin",
         "adapter_id": "acp-stdio",
@@ -2568,6 +2583,7 @@ def test_runtime_sync_does_not_guess_between_multiple_replacements(tmp_path):
     agent = store.create_agent(
         name="Hermes Agent",
         runtime_id=old_runtime["id"],
+        owner_account_id="local",
     )
 
     def replacement(runtime_id: str, path: str) -> dict:
@@ -2585,7 +2601,7 @@ def test_runtime_sync_does_not_guess_between_multiple_replacements(tmp_path):
         ])
     }
 
-    assert store.get_agent(agent["id"])["runtime_id"] == "hermes-old-path"
+    assert store.get_agent(agent["id"], owner_account_id="local")["runtime_id"] == "hermes-old-path"
     assert runtimes["hermes-old-path"]["metadata"]["lifecycle_status"] == "missing"
     assert "replaced_by_runtime_id" not in runtimes["hermes-old-path"]["metadata"]
 
@@ -2728,7 +2744,8 @@ def test_external_agent_store_refreshes_v1_profiles_without_schema_change(tmp_pa
         "executable_path": "/bin/kimi",
         "version": "1.2.3",
     })
-    agent = store.create_agent(name="Legacy Agent", runtime_id=runtime["id"])
+    # owner 统一后创建即带归属；本机场景显式用 local。
+    agent = store.create_agent(name="Legacy Agent", runtime_id=runtime["id"], owner_account_id=LOCAL_OWNER_ACCOUNT_ID)
     with sqlite3.connect(db) as conn:
         conn.execute(
             "UPDATE external_agent SET profile_json = ?, profile_version = 1 WHERE id = ?",
@@ -2739,7 +2756,7 @@ def test_external_agent_store_refreshes_v1_profiles_without_schema_change(tmp_pa
             }), agent["id"]),
         )
 
-    refreshed = ExternalAgentStore(str(db)).get_agent(agent["id"])
+    refreshed = ExternalAgentStore(str(db)).get_agent(agent["id"], owner_account_id=LOCAL_OWNER_ACCOUNT_ID)
     with sqlite3.connect(db) as conn:
         stored_envelope = json.loads(conn.execute(
             "SELECT profile_json FROM external_agent WHERE id = ?",
@@ -2754,7 +2771,7 @@ def test_external_agent_store_refreshes_v1_profiles_without_schema_change(tmp_pa
 
 
 def test_external_team_persists_independent_formation_plan(tmp_path):
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "kimi_test",
         "provider": "kimi",
@@ -2762,7 +2779,7 @@ def test_external_team_persists_independent_formation_plan(tmp_path):
         "executable_path": "/bin/kimi",
         "version": "1.2.3",
     })
-    agent = store.create_agent(name="Kimi Coder", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Kimi Coder", runtime_id=runtime["id"], owner_account_id="local")
     team_spec = {"version": 3, "goal": "开发接口", "required_capabilities": ["backend"]}
     formation_plan = {
         "version": 1,
@@ -2787,6 +2804,7 @@ def test_external_team_persists_independent_formation_plan(tmp_path):
             "role_key": "backend_developer",
             "assigned_capabilities": ["backend"],
         }],
+        owner_account_id="local",
     )
 
     assert team["team_spec"] == team_spec
@@ -2797,7 +2815,7 @@ def test_external_team_persists_independent_formation_plan(tmp_path):
 
 def test_store_migrates_legacy_embedded_formation_plan(tmp_path):
     db = tmp_path / "crew.db"
-    store = ExternalAgentStore(str(db))
+    store = TeamExternalAgentStore(str(db))
     runtime = store.upsert_runtime({
         "id": "kimi_test",
         "provider": "kimi",
@@ -2805,7 +2823,7 @@ def test_store_migrates_legacy_embedded_formation_plan(tmp_path):
         "executable_path": "/bin/kimi",
         "version": "1.2.3",
     })
-    agent = store.create_agent(name="Kimi Coder", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Kimi Coder", runtime_id=runtime["id"], owner_account_id="local")
     team = store.create_team(
         name="旧团队",
         leader_agent_id=agent["id"],
@@ -2815,6 +2833,7 @@ def test_store_migrates_legacy_embedded_formation_plan(tmp_path):
             "role_key": "backend_developer",
             "assigned_capabilities": ["backend"],
         }],
+        owner_account_id="local",
     )
     legacy_spec = {
         "version": 2,
@@ -2832,7 +2851,7 @@ def test_store_migrates_legacy_embedded_formation_plan(tmp_path):
             (json.dumps(legacy_spec), team["id"]),
         )
 
-    migrated = ExternalAgentStore(str(db)).get_team(team["id"])
+    migrated = TeamExternalAgentStore(str(db)).get_team(team["id"], owner_account_id="local")
 
     assert "formation" not in migrated["team_spec"]
     assert migrated["formation_plan"]["leader_agent_id"] == agent["id"]
@@ -2855,7 +2874,7 @@ def test_role_markdown_is_complete():
 
 
 def test_delete_team_archives_team_and_unblocks_agent_delete(tmp_path):
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "kimi_test",
         "provider": "kimi",
@@ -2863,18 +2882,19 @@ def test_delete_team_archives_team_and_unblocks_agent_delete(tmp_path):
         "executable_path": "/bin/kimi",
         "version": "1.2.3",
     })
-    agent = store.create_agent(name="Kimi Leader", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Kimi Leader", runtime_id=runtime["id"], owner_account_id="local")
     team = store.create_team(
         name="研发团队",
         leader_agent_id=agent["id"],
         members=[{"agent_id": agent["id"], "role": "Leader"}],
+        owner_account_id="local",
     )
 
-    store.delete_team(team["id"])
+    store.delete_team(team["id"], owner_account_id="local")
 
-    assert store.list_teams() == []
-    store.delete_agent(agent["id"])
-    assert store.list_agents() == []
+    assert store.list_teams(owner_account_id="local") == []
+    store.delete_agent(agent["id"], owner_account_id="local")
+    assert store.list_agents(owner_account_id="local") == []
 
 
 def test_team_role_presets_and_suggestion_are_goal_aware():
@@ -2896,7 +2916,7 @@ def test_team_role_presets_and_suggestion_are_goal_aware():
 
 
 def test_external_team_member_role_metadata_persists(tmp_path):
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "kimi_test",
         "provider": "kimi",
@@ -2904,8 +2924,8 @@ def test_external_team_member_role_metadata_persists(tmp_path):
         "executable_path": "/bin/kimi",
         "version": "1.2.3",
     })
-    developer = store.create_agent(name="Dev Agent", runtime_id=runtime["id"])
-    tester = store.create_agent(name="QA Agent", runtime_id=runtime["id"])
+    developer = store.create_agent(name="Dev Agent", runtime_id=runtime["id"], owner_account_id="local")
+    tester = store.create_agent(name="QA Agent", runtime_id=runtime["id"], owner_account_id="local")
     team = store.create_team(
         name="研发团队",
         leader_agent_id=developer["id"],
@@ -2924,6 +2944,7 @@ def test_external_team_member_role_metadata_persists(tmp_path):
                 "role_key": "qa_engineer",
             },
         ],
+        owner_account_id="local",
     )
 
     dev_member = next(member for member in team["members"] if member["agent_id"] == developer["id"])
@@ -2940,7 +2961,7 @@ def test_external_team_member_role_metadata_persists(tmp_path):
 
 
 def test_external_team_accepts_crew_builtin_as_leader_and_member(tmp_path):
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "kimi_test",
         "provider": "kimi",
@@ -2948,7 +2969,7 @@ def test_external_team_accepts_crew_builtin_as_leader_and_member(tmp_path):
         "executable_path": "/bin/kimi",
         "version": "1.2.3",
     })
-    writer = store.create_agent(name="Kimi Writer", runtime_id=runtime["id"])
+    writer = store.create_agent(name="Kimi Writer", runtime_id=runtime["id"], owner_account_id="local")
 
     team = store.create_team(
         name="内置 Crew 协作团队",
@@ -2957,6 +2978,7 @@ def test_external_team_accepts_crew_builtin_as_leader_and_member(tmp_path):
             {"agent_id": CREW_BUILTIN_AGENT_ID, "role": "负责拆解、派活和汇总", "role_key": "tech_lead"},
             {"agent_id": writer["id"], "role": "负责文字整理", "role_key": "technical_writer"},
         ],
+        owner_account_id="local",
     )
 
     builtin = next(member for member in team["members"] if member["agent_id"] == CREW_BUILTIN_AGENT_ID)
@@ -2965,13 +2987,13 @@ def test_external_team_accepts_crew_builtin_as_leader_and_member(tmp_path):
     assert builtin["agent_provider"] == "crew"
     assert builtin["role_key"] == "tech_lead"
 
-    reloaded = store.get_team(team["id"])
+    reloaded = store.get_team(team["id"], owner_account_id="local")
     assert any(member["agent_id"] == CREW_BUILTIN_AGENT_ID for member in reloaded["members"])
 
 
 async def test_delegate_to_external_agent_runs_kimi_via_acp(tmp_path):
     kimi = _fake_kimi(tmp_path)
-    store = ExternalAgentStore(str(tmp_path / "crew.db"))
+    store = TeamExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "kimi_test",
         "provider": "kimi",
@@ -2984,6 +3006,7 @@ async def test_delegate_to_external_agent_runs_kimi_via_acp(tmp_path):
         runtime_id=runtime["id"],
         model="moonshot",
         system_prompt="你是 Kimi 子智能体",
+        owner_account_id="local",
     )
     registry = Registry()
     register_external_agent_tools(registry, store)
@@ -3130,7 +3153,7 @@ def test_external_store_saves_acp_session_binding(tmp_path):
         "version": "1.0.0",
         "protocol": "acp",
     })
-    agent = store.create_agent(name="Hermes", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Hermes", runtime_id=runtime["id"], owner_account_id="local")
 
     store.save_acp_session_binding(
         crew_session_id="crew_s1",
@@ -3139,6 +3162,7 @@ def test_external_store_saves_acp_session_binding(tmp_path):
         provider="hermes",
         cwd=str(tmp_path),
         acp_session_id="h1",
+        owner_account_id="local",
     )
 
     binding = store.get_acp_session_binding(
@@ -3147,6 +3171,7 @@ def test_external_store_saves_acp_session_binding(tmp_path):
         runtime_id=runtime["id"],
         provider="hermes",
         cwd=str(tmp_path),
+        owner_account_id="local",
     )
 
     assert binding is not None
@@ -3162,7 +3187,7 @@ def test_delete_agent_removes_runtime_session_bindings(tmp_path):
         "executable_path": "/bin/hermes",
         "protocol": "acp",
     })
-    agent = store.create_agent(name="待删除外援", runtime_id=runtime["id"])
+    agent = store.create_agent(name="待删除外援", runtime_id=runtime["id"], owner_account_id="local")
     binding_key = {
         "crew_session_id": "crew-agent-cleanup",
         "external_agent_id": agent["id"],
@@ -3170,11 +3195,11 @@ def test_delete_agent_removes_runtime_session_bindings(tmp_path):
         "provider": "hermes",
         "cwd": str(tmp_path),
     }
-    store.save_acp_session_binding(acp_session_id="native-agent-cleanup", **binding_key)
+    store.save_acp_session_binding(acp_session_id="native-agent-cleanup", **binding_key, owner_account_id="local")
 
-    store.delete_agent(agent["id"])
+    store.delete_agent(agent["id"], owner_account_id="local")
 
-    assert store.get_acp_session_binding(**binding_key) is None
+    assert store.get_acp_session_binding(**binding_key, owner_account_id="local") is None
 
 
 def test_delete_runtime_removes_orphaned_session_bindings(tmp_path):
@@ -3187,7 +3212,7 @@ def test_delete_runtime_removes_orphaned_session_bindings(tmp_path):
         "executable_path": "",
         "protocol": "acp",
     })
-    agent = store.create_agent(name="旧外援", runtime_id=runtime["id"])
+    agent = store.create_agent(name="旧外援", runtime_id=runtime["id"], owner_account_id="local")
     store.save_acp_session_binding(
         crew_session_id="crew-stale-binding",
         external_agent_id=agent["id"],
@@ -3195,6 +3220,7 @@ def test_delete_runtime_removes_orphaned_session_bindings(tmp_path):
         provider="e2e",
         cwd=str(tmp_path),
         acp_session_id="native-stale-binding",
+        owner_account_id="local",
     )
     # 模拟旧版本删除 Agent 后遗留的原生会话续接元数据。
     with sqlite3.connect(db_path) as conn:
@@ -3225,7 +3251,7 @@ def test_external_store_scopes_acp_session_binding_by_owner(tmp_path):
         "version": "1.0.0",
         "protocol": "acp",
     })
-    agent = store.create_agent(name="Hermes", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Hermes", runtime_id=runtime["id"], owner_account_id="local")
     key = {
         "crew_session_id": "same_session",
         "external_agent_id": agent["id"],
@@ -3466,7 +3492,7 @@ async def test_acp_executor_runs_codex_cli(tmp_path):
         "version": "0.42.0",
         "protocol": "cli",
     })
-    agent = store.create_agent(name="Codex Coder", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Codex Coder", runtime_id=runtime["id"], owner_account_id="local")
     ctx = ExecutionContext(
         session_id="s",
         request_id="r",
@@ -3488,15 +3514,15 @@ async def test_acp_executor_runs_codex_cli(tmp_path):
 
 
 async def test_acp_executor_prefers_session_model_override(tmp_path, monkeypatch):
-    from crew.agent.executor import external as external_executor
+    from crew.agent.external.feature import ExternalRuntimeSupport
 
     captured = {}
 
-    async def fake_run(config):
-        captured["model"] = config.model
-        return "ok"
+    class _FakeRuntimeSupport(ExternalRuntimeSupport):
+        async def run_cli(self, config):
+            captured["model"] = config.model
+            return "ok"
 
-    monkeypatch.setattr(external_executor, "run_external_cli", fake_run)
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "codex-session-model",
@@ -3510,6 +3536,7 @@ async def test_acp_executor_prefers_session_model_override(tmp_path, monkeypatch
         name="Codex Session Model",
         runtime_id=runtime["id"],
         model="agent-default",
+        owner_account_id="local",
     )
     ctx = ExecutionContext(
         session_id="s",
@@ -3525,6 +3552,7 @@ async def test_acp_executor_prefers_session_model_override(tmp_path, monkeypatch
             "external_agent_id": agent["id"],
             "external_store": store,
             "model": "session-override",
+            "runtime_support": _FakeRuntimeSupport(),
         }).execute(ctx)
     ]
 
@@ -3533,13 +3561,13 @@ async def test_acp_executor_prefers_session_model_override(tmp_path, monkeypatch
     assert ctx.messages[-1].model == "session-override"
 
 
-async def test_cli_executor_rewrites_missing_followup_tool_as_cli_limit(tmp_path, monkeypatch):
-    from crew.agent.executor import external as external_executor
+async def test_cli_executor_rewrites_missing_followup_tool_as_cli_limit(tmp_path):
+    from crew.agent.external.feature import ExternalRuntimeSupport
 
-    async def fake_run(_config):
-        return "我当前没有 ask_followup_question 工具，可能需要切换 Plan 模式。"
+    class _FakeRuntimeSupport(ExternalRuntimeSupport):
+        async def run_cli(self, _config):
+            return "我当前没有 ask_followup_question 工具，可能需要切换 Plan 模式。"
 
-    monkeypatch.setattr(external_executor, "run_external_cli", fake_run)
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "codex-cli-followup",
@@ -3549,7 +3577,7 @@ async def test_cli_executor_rewrites_missing_followup_tool_as_cli_limit(tmp_path
         "version": "test",
         "protocol": "cli",
     })
-    agent = store.create_agent(name="Codex CLI", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Codex CLI", runtime_id=runtime["id"], owner_account_id="local")
     ctx = ExecutionContext(
         session_id="s",
         request_id="r",
@@ -3563,6 +3591,7 @@ async def test_cli_executor_rewrites_missing_followup_tool_as_cli_limit(tmp_path
         chunk async for chunk in AcpExecutor({
             "external_agent_id": agent["id"],
             "external_store": store,
+            "runtime_support": _FakeRuntimeSupport(),
         }).execute(ctx)
     ]
 
@@ -3593,11 +3622,16 @@ async def test_codex_cli_detaches_inherited_stdin(tmp_path, monkeypatch):
         async def wait(self):
             return self.returncode
 
-    async def fake_create_subprocess_exec(*args, **kwargs):
+    async def fake_spawn_tracked(*args, **kwargs):
         captured.update(kwargs)
-        return FakeProcess()
+        loop = asyncio.get_running_loop()
+        exit_future = loop.create_future()
+        # 读侧 EOF 与 exit 的先后由 _collect_host_output 的排干宽限兜住，
+        # 假进程下一拍即结算退出。
+        loop.call_soon(lambda: not exit_future.done() and exit_future.set_result(None))
+        return FakeProcess(), exit_future
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr("crew.security.launch.spawn_tracked", fake_spawn_tracked)
     output = await run_external_cli(ExternalCliConfig(
         provider="codex",
         executable_path="codex",
@@ -3639,7 +3673,7 @@ async def test_acp_executor_streams_acp_chunks(tmp_path):
         "version": "1.2.3",
         "protocol": "acp",
     })
-    agent = store.create_agent(name="Kimi Streamer", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Kimi Streamer", runtime_id=runtime["id"], owner_account_id="local")
     ctx = ExecutionContext(
         session_id="s",
         request_id="r",
@@ -3764,7 +3798,7 @@ def _payload_agent(tmp_path, runtime_id: str, agent_name: str):
         "version": "1.2.3",
         "protocol": "acp",
     })
-    agent = store.create_agent(name=agent_name, runtime_id=runtime["id"])
+    agent = store.create_agent(name=agent_name, runtime_id=runtime["id"], owner_account_id="local")
     return store, agent
 
 
@@ -3941,7 +3975,7 @@ async def test_acp_executor_reuses_bound_acp_session_id(tmp_path, monkeypatch):
         "version": "1.0.0",
         "protocol": "acp",
     })
-    agent = store.create_agent(name="Hermes", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Hermes", runtime_id=runtime["id"], owner_account_id="local")
     seen_resume_ids = []
 
     async def fake_stream(_prompt, config):
@@ -3975,6 +4009,7 @@ async def test_acp_executor_reuses_bound_acp_session_id(tmp_path, monkeypatch):
         runtime_id=runtime["id"],
         provider="hermes",
         cwd=str(tmp_path),
+        owner_account_id="local",
     )
     assert binding is not None
     assert binding["acp_session_id"] == "h1"
@@ -3992,7 +4027,7 @@ async def test_acp_executor_surfaces_acp_stream_error_event(tmp_path, monkeypatc
         "version": "1.2.3",
         "protocol": "acp",
     })
-    agent = store.create_agent(name="Kimi Long Line", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Kimi Long Line", runtime_id=runtime["id"], owner_account_id="local")
 
     async def fake_stream(_prompt, _config):
         yield AcpStreamEvent(kind="error", text="ACP stdout JSONL 单行超过读取上限")
@@ -4030,7 +4065,7 @@ async def test_acp_executor_marks_failed_acp_binding_unsafe_and_skips_resume(tmp
         "version": "1.2.3",
         "protocol": "acp",
     })
-    agent = store.create_agent(name="Kimi Binding Failure", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Kimi Binding Failure", runtime_id=runtime["id"], owner_account_id="local")
     seen_resume_ids: list[str] = []
     seen_system_prompts: list[str] = []
     calls = 0
@@ -4069,6 +4104,7 @@ async def test_acp_executor_marks_failed_acp_binding_unsafe_and_skips_resume(tmp
         runtime_id=runtime["id"],
         provider="kimi",
         cwd=str(tmp_path),
+        owner_account_id="local",
     )
     assert failed_binding is not None
     assert failed_binding["acp_session_id"] == "bad-session"
@@ -4098,6 +4134,7 @@ async def test_acp_executor_marks_failed_acp_binding_unsafe_and_skips_resume(tmp
         runtime_id=runtime["id"],
         provider="kimi",
         cwd=str(tmp_path),
+        owner_account_id="local",
     )
     assert fresh_binding is not None
     assert fresh_binding["acp_session_id"] == "fresh-session"
@@ -4117,7 +4154,7 @@ async def test_acp_executor_injects_scoped_interaction_mcp(tmp_path, monkeypatch
         "version": "1.2.3",
         "protocol": "acp",
     })
-    agent = store.create_agent(name="Kimi MCP", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Kimi MCP", runtime_id=runtime["id"], owner_account_id="local")
     seen = {}
 
     async def fake_stream(_prompt, config):
@@ -4186,7 +4223,7 @@ async def test_acp_executor_persists_followup_answer_when_acp_errors(tmp_path, m
         "version": "1.2.3",
         "protocol": "acp",
     })
-    agent = store.create_agent(name="Kimi Error", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Kimi Error", runtime_id=runtime["id"], owner_account_id="local")
 
     waiter = get_followup_waiter()
     qid = waiter.create("main", [{
@@ -4233,7 +4270,7 @@ async def test_acp_executor_streams_acp_tool_events(tmp_path):
         "version": "1.2.3",
         "protocol": "acp",
     })
-    agent = store.create_agent(name="Kimi Tools", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Kimi Tools", runtime_id=runtime["id"], owner_account_id="local")
     ctx = ExecutionContext(
         session_id="s",
         request_id="r",
@@ -4294,7 +4331,7 @@ async def test_acp_executor_reports_hermes_missing_acp_dependencies(tmp_path):
         "version": "0.16.0",
         "protocol": "acp",
     })
-    agent = store.create_agent(name="Hermes Coder", runtime_id=runtime["id"])
+    agent = store.create_agent(name="Hermes Coder", runtime_id=runtime["id"], owner_account_id="local")
     ctx = ExecutionContext(
         session_id="s",
         request_id="r",
@@ -5030,6 +5067,7 @@ async def test_external_executor_uses_claude_runtime_adapter_and_persists_sessio
         runtime_id=runtime["id"],
         model="sonnet",
         custom_env={"ARGV_FILE": str(argv_file)},
+        owner_account_id="local",
     )
     ctx = ExecutionContext(
         session_id="crew-claude",
@@ -5064,6 +5102,7 @@ async def test_external_executor_uses_claude_runtime_adapter_and_persists_sessio
         runtime_id=runtime["id"],
         adapter_id="claude-stream-json",
         cwd=str(tmp_path),
+        owner_account_id="local",
     )
     assert binding is not None
     assert binding["native_session_id"] == "claude-s1"
@@ -5090,6 +5129,7 @@ async def test_external_executor_uses_codex_app_server_adapter(tmp_path):
         name="Codex Native",
         runtime_id=runtime["id"],
         model="default",
+        owner_account_id="local",
     )
 
     class FakeBridge:
@@ -5135,6 +5175,7 @@ async def test_external_executor_uses_codex_app_server_adapter(tmp_path):
         runtime_id=runtime["id"],
         adapter_id="codex-app-server",
         cwd=str(tmp_path),
+        owner_account_id="local",
     )
     assert binding is not None
     assert binding["native_session_id"] == "thread-1"
@@ -5160,6 +5201,7 @@ async def test_codex_dynamic_control_profile_resets_legacy_native_session_once(t
         name="Codex Native",
         runtime_id=runtime["id"],
         model="default",
+        owner_account_id="local",
     )
     binding_key = {
         "crew_session_id": "crew-codex-profile",
@@ -5171,6 +5213,7 @@ async def test_codex_dynamic_control_profile_resets_legacy_native_session_once(t
     store.save_runtime_session_binding(
         **binding_key,
         native_session_id="legacy-thread",
+        owner_account_id="local",
     )
 
     class FakeDynamicBridge:
@@ -5207,7 +5250,7 @@ async def test_codex_dynamic_control_profile_resets_legacy_native_session_once(t
     ]
 
     assert chunks[-1].kind == "final"
-    binding = store.get_runtime_session_binding(**binding_key)
+    binding = store.get_runtime_session_binding(**binding_key, owner_account_id="local")
     assert binding is not None
     assert binding["native_session_id"] == "thread-1"
     assert binding["session_profile"] == "codex-app-server:crew-dynamic-tools-v2"

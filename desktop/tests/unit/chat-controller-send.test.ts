@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import './helpers/mock-chat-controller-deps';
 import { _resetQueueEditDraftForTests, dispatchWs, editQueueItem, sendMessage, sendInlineWidgetMessage } from '../../src/ui/features/chat-controller';
 import { enqueuePending, getPendingQueue, state } from '../../src/ui/state';
-import { __resetAllStoresForTest, configStore, messageStore, sessionStore, uiStore, workspaceStore } from '../../src/ui/stores/stores';
+import { __resetAllStoresForTest, authStore, configStore, messageStore, sessionStore, uiStore, workspaceStore } from '../../src/ui/stores/stores';
 
 vi.mock('../../src/ui/features/session-model', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/ui/features/session-model')>();
@@ -21,6 +21,9 @@ beforeEach(() => {
   state.isLoggedIn = true;
   state.userInfo = { uid: 'test-owner' };
   _resetQueueEditDraftForTests();
+  // auth-gate 已实现为真实登录判定（email/remote 登录墙）：local 桌面会话由
+  // initAuthFlow 置为已登录，测试模拟该态。
+  authStore.set({ isLoggedIn: true });
   const localStorageStub = {
     getItem: vi.fn(() => null),
     setItem: vi.fn(),

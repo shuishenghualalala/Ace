@@ -211,10 +211,11 @@ else
 fi
 "$PY_CACHE_BIN" --version
 
-# 依赖同步：以 pyproject.toml + runtime-requirements.txt 的内容哈希为戳，
-# 变更时才重新安装；不变时跳过（pip 全量 satisfied 检查也要分钟级，直接省掉）。
+# 依赖同步：以 pyproject.toml + workspace 成员 pyproject + runtime-requirements.txt
+# 的内容哈希为戳，变更时才重新安装；不变时跳过（pip 全量 satisfied 检查也要分钟级，直接省掉）。
 DEP_STAMP="$PY_CACHE/.deps-stamp"
-DEP_HASH="$( { shasum -a 256 "$ROOT_DIR/pyproject.toml"; shasum -a 256 "$SCRIPT_DIR/runtime-requirements.txt"; } | shasum -a 256 | cut -d' ' -f1 )"
+DEP_HASH="$( { shasum -a 256 "$ROOT_DIR/pyproject.toml"; shasum -a 256 "$SCRIPT_DIR/runtime-requirements.txt";
+              find "$ROOT_DIR/packages" -name pyproject.toml -exec shasum -a 256 {} +; } | shasum -a 256 | cut -d' ' -f1 )"
 
 if [ ! -f "$DEP_STAMP" ] || [ "$(tr -d '[:space:]' < "$DEP_STAMP")" != "$DEP_HASH" ]; then
     echo "  为内嵌 Python 安装 gateway + 技能依赖..."
@@ -224,6 +225,12 @@ if [ ! -f "$DEP_STAMP" ] || [ "$(tr -d '[:space:]' < "$DEP_STAMP")" != "$DEP_HAS
     # pip 自身也在 site-packages 里，清空后需先用 ensurepip 恢复
     "$PY_CACHE_BIN" -m ensurepip --upgrade >/dev/null 2>&1
     "$PY_CACHE_BIN" -m pip --version >/dev/null
+    # 0) ADR-0037：uv workspace 成员包（crew-wiki 等，import 名保持 crew.*）先行
+    #    --no-deps 安装。pip 不识别 [tool.uv.sources]，根包依赖里的成员若不从本地
+    #    预装，下一步解析 ".[extras]" 时会尝试从 PyPI 拉取 workspace-only 成员而失败。
+    "$PY_CACHE_BIN" -m pip install --no-warn-script-location --no-deps \
+        ./packages/crew-wiki ./packages/crew-external-agents ./packages/crew-team \
+        ./packages/crew-dynamickanban ./packages/crew-channels ./packages/crew-work
     # 1) 核心依赖 + 技能 extras（pyproject 为唯一数据源）；--no-warn-script-location 降噪
     "$PY_CACHE_BIN" -m pip install --no-warn-script-location ".[wiki,pdf,docx,xlsx]"
     # 2) crew 源码由安装包按源码树携带，不复制进 site-packages

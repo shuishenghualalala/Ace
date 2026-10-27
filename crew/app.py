@@ -1,7 +1,7 @@
 """装配层（依赖注入）。
 
 把各模块的具体实现拼装成一个可运行的 CrewApp，并提供统一入口 handle(envelope)。
-所有入口（CLI/Gateway/Web）都调 app.handle()，按 mode 路由到单 Agent 或 Team。
+所有入口（CLI/Gateway/Web）都调 app.handle()，执行模式优先由 Driver Registry 解析。
 
 新增一个实现（如新 Provider/新工具）通常只需在这里改一行注册。
 """
@@ -9,102 +9,139 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import hashlib
 import inspect
+import json
+import os
 import re
-import sys
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Coroutine
 
-from crew.agent.compact import ContextCompactor, SummaryStore
 from crew.agent.capabilities import (
     CapabilityProfileRegistry,
     capability_profile_ids,
     merge_disabled_skills,
 )
+from crew.agent.compact import ContextCompactor, SummaryStore
 from crew.agent.executor import create_executor
+from crew.agent.external.feature import (
+    AdapterRuntimeProvider,
+    EXTERNAL_AGENT_CATALOG_SERVICE_KEY,
+    acquire_external_service_lease,
+    build_external_agent_feature,
+)
 from crew.agent.external.store import ExternalAgentStore
-from crew.agent.external.tools import register_external_agent_tools
+from crew.agent.feature import build_agent_factory_feature
 from crew.agent.runtime import SingleAgent
-from crew.agent.subagent.definition import build_preset_spec
+from crew.agent.prompt_builder import append_subagent_handoff_guidance
+from crew.agent.skills import configure_skill_filter
+from crew.agent.subagent.context import ParentDeliveryState
+from crew.agent.subagent.policy import (
+    SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
+    apply_model_capability_policy,
+    apply_preset_tool_policy,
+    delegation_blocked_toolsets,
+    resolve_subagent_tool_filter,
+)
 from crew.core.envelope import Envelope, ResponseChunk
-from crew.core.interfaces import Agent, LLMProvider, MemoryProvider, SessionStore, WorkspaceStore
+from crew.core.observability import bind_observation, capture_payload, event, install_sink, remove_sink, span
+from crew.core.interfaces import (
+    Agent,
+    AgentModelResolution,
+    ChildAgentRequest,
+    LLMProvider,
+    MemoryProvider,
+    SessionStore,
+    WorkspaceStore,
+)
 from crew.evolution import EvolutionManager, EvolutionQueue
+from crew.features import (
+    AgentPresetBinding,
+    AgentPresetUnavailableError,
+    ContextContribution,
+    ContextContributionFailedError,
+    ContextContributor,
+    ContextPhase,
+    ExecutionDriver,
+    FeatureDefinition,
+    FeatureScope,
+    FeatureState,
+    FeatureStopPolicy,
+    ServiceKey,
+    run_async_compat,
+)
 from crew.gateway.dispatcher import BusyMode, SessionDispatcher
 from crew.gateway.helpers import session_external_agent_id
-from crew.memory.simple import SQLiteMemory
+from crew.features.session_context import build_session_context_contribution
+from crew.memory.simple import NullMemory, SQLiteMemory
 from crew.plugins.builtin import LoggingPlugin
 from crew.plugins.manager import PluginManager
 from crew.providers.anthropic_provider import AnthropicProvider
+from crew.providers.keying import ApiKeyResolver
 from crew.providers.openai_provider import OpenAIProvider
+from crew.providers.vendors import VendorProfile, compat_for_model, resolve_vendor
 from crew.security.approvals import ApprovalManager
 from crew.security.audit import AuditEvent, SQLiteSecurityAudit
 from crew.security.context import SecurityContext
 from crew.security.grants import GrantRegistry
 from crew.security.rule_store import SQLiteRuleStore
 from crew.security.service import SecurityApprovalService
+from crew.state._migration import (
+    OWNER_TABLE_LABELS,
+    inspect_and_backfill_legacy_owners,
+    legacy_owner_scan_targets,
+)
+from crew.state.active_owner import ActiveOwnerLeaseStore
 from crew.state.config import (
     Config,
     ModelProfile,
     _build_profile_from_payload,
+    _load_env_map,
     _lookup_api_key,
     is_placeholder_model_profile,
     is_owner_overridable_model_profile,
     load_config,
     remove_env_key,
+    resolve_profile_api_key,
     resolve_writable_env_path,
     write_env_key,
 )
-from crew.state.home import ensure_crew_home
-from crew.agent.skills import configure_skill_filter
+from crew.state.credentials import delete_stored_key, store_key
+from crew.state.home import ensure_crew_home, get_crew_home, resolve_crew_home_path
 from crew.state.logging import get_logger, setup_logging
-from crew.state._migration import OWNER_TABLE_LABELS, inspect_and_backfill_legacy_owners
 from crew.state.session_store import SQLiteSessionStore
-from crew.state.active_owner import ActiveOwnerLeaseStore
+from crew.state.observability import ObservationLogHandler, ObservationPolicy, ObservationRecorder
+from crew.state.trace_store import TraceStore
 from crew.state.workspace_store import SQLiteWorkspaceStore
-from crew.tools.registry import Registry, register_builtin_tools
+from crew.tasks import TaskRuntime
+from crew.tasks.context import contribute_task_notifications
+from crew.channels.feature import CHANNELS_SERVICE_KEY
+from crew.team.feature import (
+    TEAM_SERVICE_KEY,
+    _run_team_execution_driver,
+    build_team_feature,
+)
+from crew.dynamickanban.feature import DYNAMIC_KANBAN_SERVICE_KEY
+from crew.wiki import KNOWLEDGE_SERVICE_KEY
 from crew.tools.policy import (
     ToolDisclosureMode,
     exclude_toolsets,
-    extend_with_toolsets,
     ordered_intersection,
-    select_requested_tools,
 )
-from crew.tasks import TaskRuntime
+from crew.tools.registry import Registry, register_builtin_tools
 
 if TYPE_CHECKING:
     from crew.wiki.config import WikiSemanticConfig
     from crew.wiki.embedding import EmbeddingProvider
 
 log = get_logger("app")
-OwnerSessionKey = tuple[str, str]
 
 _MODEL_API_KEY_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MODEL_API_KEY_ENV_EXAMPLES = "CREW_API_KEY、OPENAI_API_KEY、ANTHROPIC_API_KEY 或 *_API_KEY*"
 _DEFAULT_SEMANTIC_API_KEY_ENV = "CREW_WIKI_EMBEDDING_API_KEY"
-
-# 子 agent 工具黑名单（按 toolset 维度），用于 DELEGATE_BLOCKED_TOOLS。
-# 一行可调：想放开飞书/定时任务，删掉对应项即可。
-#   subagent/external_agent —— 禁嵌套 + 不转外部 agent
-#   memory                  —— 临时子 agent 不应修改跨会话共享记忆
-#   cron                    —— 不应注册后台定时任务
-#   wiki.*                  —— Wiki 能力只属于专用 Wiki Agent
-#   feishu*（前缀）          —— 不应产生发言/评论等外部副作用
-SUBAGENT_BLOCKED_TOOLSETS = {
-    "subagent",
-    "subagent.preset",
-    "external_agent",
-    "memory",
-    "cron",
-    "tasks",
-    "wiki.read",
-    "wiki.manage",
-}
-SUBAGENT_BLOCKED_TOOLSET_PREFIXES = ("feishu",)
-
 
 def _validate_model_api_key_env(api_key_env: str) -> str:
     """校验模型 API Key 的 env 名，避免模型配置变成任意环境变量写入口。"""
@@ -214,11 +251,28 @@ class AgentManager:
         raw = json.dumps(agent_config, ensure_ascii=False, sort_keys=True)
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
-    def get(self, session_id: str, agent_config: dict | None = None, owner_account_id: str = "") -> Agent:
+    def get(
+        self,
+        session_id: str,
+        agent_config: dict | None = None,
+        *,
+        owner_account_id: str,
+    ) -> Agent:
         if not self._accepting:
             raise RuntimeError("AgentManager 已关闭")
         config = agent_config or {}
         key = (owner_account_id, session_id, self._fingerprint(config))
+        # A preset Generation is part of the effective Agent configuration. As
+        # soon as a replacement is requested, retire only older entries for the
+        # same owner/session; unrelated sessions and configurations remain warm.
+        if config.get("_preset_generation"):
+            for stale_key in tuple(self._cache):
+                if (
+                    stale_key != key
+                    and stale_key[0] == owner_account_id
+                    and stale_key[1] == session_id
+                ):
+                    self._evict_key(stale_key)
         if key in self._cache:
             self._cache.move_to_end(key)  # LRU 标记最近使用
         else:
@@ -232,10 +286,11 @@ class AgentManager:
         self,
         session_id: str,
         agent_config: dict | None = None,
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> AsyncIterator[Agent]:
         """Lease one concrete cached Agent for the complete duration of a turn."""
-        agent = self.get(session_id, agent_config, owner_account_id)
+        agent = self.get(session_id, agent_config, owner_account_id=owner_account_id)
         identity = id(agent)
         self._lease_counts[identity] = self._lease_counts.get(identity, 0) + 1
         self._leases_drained.clear()
@@ -252,14 +307,14 @@ class AgentManager:
             return self._factory(config)
         return self._factory()
 
-    def peek(self, session_id: str, owner_account_id: str = "") -> Agent | None:
+    def peek(self, session_id: str, owner_account_id: str) -> Agent | None:
         """取已缓存的 Agent（不创建）。用于 steer/interrupt 只作用于运行中的会话。"""
         for key, agent in self._cache.items():
             if key[0] == owner_account_id and key[1] == session_id:
                 return agent
         return None
 
-    def drop(self, session_id: str, owner_account_id: str = "") -> None:
+    def drop(self, session_id: str, owner_account_id: str) -> None:
         for key in list(self._cache):
             if key[0] == owner_account_id and key[1] == session_id:
                 self._evict_key(key)
@@ -392,8 +447,42 @@ class AgentManager:
 # 正常 shutdown() 会把自己从表中移除，生产单实例场景开销可忽略。
 _LIVE_APPS: list["CrewApp"] = []
 
+# tasks 来源通知的语义（全链路唯一判定点见 CrewApp._should_notify_task）：
+# - 通知只认 agent_turn 回合终态；只有这些终态值得提醒，cancelled 是用户主动
+#   取消，结果由用户自己触发。
+_NOTIFYWORTHY_TASK_STATUSES = frozenset({"completed", "failed", "timed_out"})
+# - 这些类型的后台任务完成后会触发恢复回合（"自动继续"，与通知无关）。
+_RESUMABLE_TASK_KINDS = frozenset({"shell", "subagent"})
+
+
+def _child_depth_of(spec: Mapping | None) -> int:
+    """子级委派深度只作记账，不作调用方权威：负数/非整数归零。"""
+
+    if not isinstance(spec, Mapping):
+        return 0
+    value = spec.get("_delegation_depth", spec.get("depth"))
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+_TASK_NOTIFICATION_TITLES = {
+    "completed": "任务已完成",
+    "failed": "任务失败",
+    "timed_out": "任务已超时",
+}
+
 
 class CrewApp:
+
+    _UNSET_BROWSER_MANAGER = object()
+    _UNSET_KNOWLEDGE_SERVICE = object()
+    _UNSET_CHANNEL_MANAGER = object()
+    _UNSET_DELIVERY_ROUTER = object()
+    _UNSET_DYNAMIC_KANBAN = object()
+    _UNSET_DYNAMIC_KANBAN_CONSUMER = object()
+    # 宿主只复用 owning Feature 的 key 常量，不在装配层重复定义 ServiceKey。
+    _KNOWLEDGE_SERVICE_KEY = KNOWLEDGE_SERVICE_KEY
+    _CHANNELS_SERVICE_KEY = CHANNELS_SERVICE_KEY
+    _DYNAMIC_KANBAN_SERVICE_KEY = DYNAMIC_KANBAN_SERVICE_KEY
 
     def __init__(
         self,
@@ -445,18 +534,50 @@ class CrewApp:
             db_path=config.db_path,
             security_enabled=config.security_enabled,
         )
+        # 通知中心：core 契约的默认实现（SQLite + 可选 WS 推送，push_fn 由 gateway 延迟注入）
+        from crew.notifications import NotificationCenterService, NotificationStore
+
+        self.notifications = NotificationCenterService(
+            NotificationStore(
+                # notifications 表在独立库（ADR-0038 拆库收尾批）；legacy_db_path
+                # 触发 copy-on-first-activate。本切片只拆库，生命周期形态
+                # （__init__ 直构、随 App 存亡）保持不变。
+                resolve_crew_home_path(config.notifications_db_path),
+                wal_enabled=config.sqlite_wal,
+                legacy_db_path=config.db_path,
+            )
+        )
+        self.security_service.set_notification_hooks(
+            on_created=self._on_approval_created,
+            on_decided=self._on_approval_decided,
+        )
+        # 追问通知：core/followup 只暴露注入钩子，owner 解析与 publish 在本侧完成
+        from crew.core.followup import set_followup_default_timeout, set_followup_notification_hooks
+
+        set_followup_notification_hooks(
+            on_pending=self._on_followup_pending,
+            on_resolved=self._on_followup_resolved,
+        )
+        # 追问/权限确认默认等待上限：core 不反向依赖配置实现，由装配层注入
+        #（0/未配置经 config 解析后语义为「默认不限」）。
+        set_followup_default_timeout(config.interaction_timeout_seconds)
         # Gateway 级单活登录事实源；HTTP/WS、Cron 与渠道只消费这一份租约。
         self.active_owner = ActiveOwnerLeaseStore(
             config.db_path,
             wal_enabled=config.sqlite_wal,
         )
         self.tasks = TaskRuntime(
-            config.db_path,
+            # runtime_tasks 是统一长任务运行时的存储（非 product feature，不设
+            # Feature Definition），在独立库（ADR-0038 拆库收尾批）；本切片只
+            # 拆库，生命周期形态（App 直构、随 App 存亡）保持不变。legacy_db_path
+            # 触发 copy-on-first-activate。
+            resolve_crew_home_path(config.tasks_db_path),
             wal_enabled=config.sqlite_wal,
             monitor_interval=config.tasks_monitor_interval_seconds,
             heartbeat_interval=config.tasks_heartbeat_interval_seconds,
             wait_timeout=config.tasks_wait_timeout_seconds,
             finished_retention_days=config.tasks_finished_retention_days,
+            legacy_db_path=config.db_path,
         )
         self.tasks.auto_background_after = config.tasks_auto_background_after_seconds
         self.tasks.defaults = {
@@ -471,7 +592,10 @@ class CrewApp:
             on_event=self._on_task_event,
             on_completion=self._on_task_completion,
         )
-        from crew.tools.process_registry import process_registry
+        from crew.tools.process_registry import (
+            build_process_notification_handler,
+            process_registry,
+        )
 
         process_registry.configure_task_runtime(self.tasks)
         self.external_agents: ExternalAgentStore | None = None
@@ -479,27 +603,120 @@ class CrewApp:
         self.summary_store = SummaryStore(config.db_path, wal_enabled=config.sqlite_wal)
 
         self.agents = AgentManager(self._make_agent)
+        # The child-agent factory is a Core Feature service.  Its typed builder
+        # delegates to the existing in-process SingleAgent assembly below;
+        # subagent tools reach that boundary through create_child().
+        self.agent_factory = None
+        self.execution_drivers = plugins.feature_runtime.execution_drivers
+        self.context_contributors = plugins.feature_runtime.context_contributors
+        self.event_contributors = plugins.feature_runtime.event_contributors
+        self.agent_presets = plugins.feature_runtime.agent_presets
+        self._builtin_feature_scopes: list[FeatureScope] = []
+        agent_factory_feature = build_agent_factory_feature(
+            self,
+            child_builder=self._build_subagent,
+            model_resolver=self._resolve_subagent_model,
+        )
+        self._install_builtin_feature(agent_factory_feature.definition)
+        # 需要宿主事件循环的长生命周期 Feature 在 build_app 仅声明，startup
+        # 再由共享 Runtime 按依赖图激活；Sites/Browser 后续复用同一入口。
+        self._managed_feature_definitions: OrderedDict[str, FeatureDefinition] = OrderedDict()
+        # Subagent Feature 激活后绑定通知队列与路由；这里仅保留兼容属性。
+        self._subagent_notifications = None
+        self._subagent_router = None
+        self._register_execution_driver_scope(
+            "core.agent-driver",
+            ExecutionDriver(
+                mode="agent",
+                execute=self._run_default_execution_driver,
+                capabilities=("agent.default",),
+                description="Default single-agent execution",
+            ),
+            ExecutionDriver(
+                mode="agent.default",
+                execute=self._run_default_execution_driver,
+                capabilities=("agent.default",),
+                description="Default single-agent execution",
+            ),
+        )
+        self._register_context_contributor_scope(
+            "host.structured-path-context",
+            ContextContributor(
+                contributor_id="host.reference.structured-path",
+                handler=self._structured_path_context,
+                phase=ContextPhase.REQUEST,
+                priority=100,
+                model_visible=False,
+                persistent=False,
+                description="Workspace-bounded structured path grants",
+            ),
+        )
+        self._register_context_contributor_scope(
+            "gateway.session-context",
+            ContextContributor(
+                contributor_id="gateway.session.source",
+                handler=build_session_context_contribution,
+                phase=ContextPhase.REQUEST,
+                priority=300,
+                predicate=lambda envelope: (
+                    envelope.params.get("session_context") is not None
+                ),
+                model_visible=True,
+                persistent=False,
+                description="Normalized session source and delivery context",
+            ),
+        )
+        # 后台结果提醒由 product.subagent Feature 在自己的 Generation 内注册。
+        self._register_context_contributor_scope(
+            "core.process-context",
+            ContextContributor(
+                contributor_id="process.background.reminder",
+                handler=build_process_notification_handler(process_registry),
+                phase=ContextPhase.PROMPT,
+                priority=20,
+                model_visible=True,
+                persistent=False,
+                description="Background process watch/completion notifications",
+            ),
+        )
+        self._register_context_contributor_scope(
+            "core.task-context",
+            ContextContributor(
+                contributor_id="task.resume.reminder",
+                handler=contribute_task_notifications,
+                phase=ContextPhase.PROMPT,
+                priority=30,
+                model_visible=True,
+                persistent=False,
+                description="Completed background task framing for resume turns",
+            ),
+        )
         # 对话级 Plan 模式管理器（由 build_app 装配后赋值）
         self.plan_manager = None
-        # 专用 Wiki Agent 会话管理器（由 build_app 装配后赋值）
-        self.wiki_manager = None
-        # Team 管理器延迟装配（见 set_team_manager），避免 core 之外的循环依赖
-        self.team = None
-        # Dynamic Kanban 管理器延迟装配（见 build_app）
-        self.dynamic_kanban = None
+        # Knowledge Service is resolved dynamically from the Feature Runtime;
+        # an explicit override is reserved for embedded hosts and test doubles.
+        self._knowledge_service_override = self._UNSET_KNOWLEDGE_SERVICE
+        # Team 管理器由 product.team Feature Generation 拥有；此处仅保留测试注入用的覆盖位。
+        self._team_override: Any | None = None
+        # Dynamic Kanban 管理器与 Consumer 由 product.dynamic-kanban Feature
+        # Generation 拥有；此处仅保留测试注入用的覆盖位。
+        self._dynamic_kanban_override: Any = self._UNSET_DYNAMIC_KANBAN
+        self._dynamic_kanban_consumer_override: Any = self._UNSET_DYNAMIC_KANBAN_CONSUMER
         # Work 业务域组合服务（由 build_app 装配；不进入 core）。
         self.work_service = None
         self.channel_bindings = None
+        # 渠道会话路由存储（channels 库，由 build_app 装配；不进入 core）。
+        self.channel_session_routes = None
         # 用户级插件开关偏好（由 build_app 装配后赋值）
         self.plugin_prefs = None
         # subagent：预设注册表 + 活跃子 agent 跟踪 + 后台任务（由 build_app 装配后赋值）
         self.subagent_registry = None
         self.subagent_active = None
         self.subagent_tasks = None
+        self.subagent_runtime = None
+        self._subagent_feature_service = None
         # 后台子 agent 的 asyncio 任务强引用（防 GC），完成后自动移除
         self._subagent_bg_tasks: set[asyncio.Task] = set()
-        # 后台子 agent 完成结果的待通知队列（按父 session），下一轮注入主 agent 上下文
-        self._subagent_pending: dict[OwnerSessionKey, list[dict]] = {}
         # 异步进化队列：按 session 串行处理 evolution 任务，结果在下一轮交互中体现
         self._evolution_queue = EvolutionQueue()
         # App-owned global Providers retired by model switching wait for every task that
@@ -508,7 +725,8 @@ class CrewApp:
         self._pending_provider_retirements: dict[int, tuple[LLMProvider, set[asyncio.Task]]] = {}
         self._retiring_provider_ids: set[int] = set()
         # 外部 Team 的内置 Leader/规划器会跨多个请求复用 Agent，因此 owner 默认
-        # Provider 也需由 App 持有并统一关闭；普通一次性生成接口仍走 owner_provider。
+        # Provider 也由 App 持有并统一关闭；Team Feature 通过 app.owner_team_provider
+        # 复用同一份缓存，保证 Wiki/Team 在任意 enable_team 配置下得到同一实例。
         self._owner_team_providers: dict[str, LLMProvider] = {}
         # Team 内置成员的显式模型绑定。key 含 owner 与 profile id，避免不同
         # 账号或不同模型错误复用同一个持久连接。
@@ -524,17 +742,33 @@ class CrewApp:
         self._stale_owner_embedding_providers: dict[int, "EmbeddingProvider"] = {}
         # 全局默认 embedding provider（config.yaml wiki.semantic），owner 回退用。
         self._embedding_provider: "EmbeddingProvider | None" = None
+        # Wiki 精排（rerank）按 owner 缓存客户端的解析器；由 Wiki Feature 装配时挂接。
+        self._wiki_reranker_resolver: Any = None
         self._shutdown_lock = asyncio.Lock()
         self._shutdown_complete = False
+        # Installed by build_app after all core stores are ready.  Keeping these
+        # attributes on App lets embedded hosts inject Noop/alternate sinks.
+        self.observability_store: TraceStore | None = None
+        self.observability: ObservationRecorder | None = None
+        self._observability_log_handler: ObservationLogHandler | None = None
+        # 拆除起点标志：shutdown() 进入即置位，供通知路由把"父拆除中"判为
+        # 只入队不唤醒（_shutdown_complete 在资源关闭后才置位，太晚）。
+        self._shutdown_started = False
+        # 肯定式"父已消失"证据：会话删除（teardown）时记录的有界集合。
+        # 通知路由只对记录在案的会话丢弃——"库里查无此行"不构成消失证据
+        # （隐藏子会话/测试环境可能从未落库但仍活着）。
+        self._vanished_sessions: OrderedDict[str, float] = OrderedDict()
 
         # cron / mcp 由 build_app 装配后赋值；startup/shutdown 统一拉起与关闭
         self.cron_store = None
         self.cron_service = None
-        self.delivery_router = None
+        self._channel_manager_override = self._UNSET_CHANNEL_MANAGER
+        self._delivery_router_override = self._UNSET_DELIVERY_ROUTER
         self.mcp_manager = None
-        # First-party Browser Use runtime. build_app injects BrowserManager and
-        # registers its tools after the generic built-ins are assembled.
-        self.browser_manager = None
+        # An explicitly assigned manager is reserved for embedded hosts and
+        # tests.  Production resolves the active Browser Generation Service
+        # on every access, so restart/unload never leaves a stale reference.
+        self._browser_manager_override: Any = self._UNSET_BROWSER_MANAGER
         # Gateway 装配后注入；供 ACP executor 创建按会话绑定的受限 MCP 交互工具。
         self.interaction_bridge = None
         # 后台任务推送回调：push(session_id, chunk) → 发给前端活跃 WS
@@ -554,6 +788,136 @@ class CrewApp:
             task_runtime=self.tasks,
         )
         _LIVE_APPS.append(self)
+
+    @property
+    def browser_manager(self) -> Any:
+        """Return the explicit manager or the currently active Browser Service."""
+        if self._browser_manager_override is not self._UNSET_BROWSER_MANAGER:
+            return self._browser_manager_override
+        plugins = getattr(self, "plugins", None)
+        if plugins is None:
+            return None
+        return plugins.resolve_service(ServiceKey[Any]("browser.manager"))
+
+    @browser_manager.setter
+    def browser_manager(self, manager: Any) -> None:
+        """Inject a manager explicitly for tests or an embedding host."""
+        self._browser_manager_override = manager
+
+    @property
+    def channel_manager(self) -> Any:
+        """Return the explicit manager or the currently active Channels Service manager."""
+        override = self._channel_manager_override
+        if override is not self._UNSET_CHANNEL_MANAGER:
+            return override
+        return self._resolve_channels_service_attr("channel_manager")
+
+    @channel_manager.setter
+    def channel_manager(self, manager: Any) -> None:
+        """Inject a manager explicitly for tests or an embedding host."""
+        self._channel_manager_override = manager
+
+    @property
+    def delivery_router(self) -> Any:
+        """Return the explicit router or the currently active Channels Service router."""
+        override = self._delivery_router_override
+        if override is not self._UNSET_DELIVERY_ROUTER:
+            return override
+        return self._resolve_channels_service_attr("delivery_router")
+
+    @delivery_router.setter
+    def delivery_router(self, router: Any) -> None:
+        """Inject a router explicitly for tests or an embedding host."""
+        self._delivery_router_override = router
+
+    @property
+    def team(self) -> Any:
+        """Return the explicitly injected Team manager or the active Generation Service."""
+        if self._team_override is not None:
+            return self._team_override
+        plugins = getattr(self, "plugins", None)
+        if plugins is None:
+            return None
+        return plugins.resolve_service(TEAM_SERVICE_KEY)
+
+    @team.setter
+    def team(self, manager: Any) -> None:
+        """Inject a Team manager explicitly for tests or an embedding host."""
+        self._team_override = manager
+
+    def _active_team_manager(self) -> Any:
+        """Return the current InProcessTeamManager if it owns the active Generation."""
+        from crew.team.team_manager import InProcessTeamManager
+
+        team = self.team
+        return team if isinstance(team, InProcessTeamManager) else None
+
+    def _active_dynamic_kanban_manager(self) -> Any:
+        """Return the current DynamicKanbanManager if it owns the active Generation."""
+        from crew.dynamickanban.manager import DynamicKanbanManager
+
+        manager = self.dynamic_kanban
+        return manager if isinstance(manager, DynamicKanbanManager) else None
+
+    def _sync_default_provider_to_features(self) -> None:
+        """把新默认 Provider 同步到当前 active Team/Dynamic Kanban Generation。"""
+        team = self._active_team_manager()
+        if team is not None:
+            set_provider = getattr(team, "set_provider", None)
+            if callable(set_provider):
+                set_provider(self.provider)
+        dk = self._active_dynamic_kanban_manager()
+        if dk is not None:
+            dk.set_provider(self.provider)
+            dk.clear()
+
+    def _resolve_dynamic_kanban_service_attr(self, name: str) -> Any:
+        """Resolve one attribute from the active Dynamic Kanban Service, or None."""
+        runtime = self.plugins.feature_runtime
+        record = runtime.get("product.dynamic-kanban")
+        if record is not None and record.state is not FeatureState.ACTIVE:
+            return None
+        service = runtime.services.get(self._DYNAMIC_KANBAN_SERVICE_KEY)
+        if service is None:
+            return None
+        return getattr(service, name, None)
+
+    @property
+    def dynamic_kanban(self) -> Any:
+        """Return the explicitly injected DK manager or the active Generation Service manager."""
+        override = self._dynamic_kanban_override
+        if override is not self._UNSET_DYNAMIC_KANBAN:
+            return override
+        return self._resolve_dynamic_kanban_service_attr("manager")
+
+    @dynamic_kanban.setter
+    def dynamic_kanban(self, manager: Any) -> None:
+        """Inject a Dynamic Kanban manager explicitly for tests or an embedding host."""
+        self._dynamic_kanban_override = manager
+
+    @property
+    def dynamic_kanban_consumer(self) -> Any:
+        """Return the explicitly injected DK consumer or the active Generation Service consumer."""
+        override = self._dynamic_kanban_consumer_override
+        if override is not self._UNSET_DYNAMIC_KANBAN_CONSUMER:
+            return override
+        return self._resolve_dynamic_kanban_service_attr("consumer")
+
+    @dynamic_kanban_consumer.setter
+    def dynamic_kanban_consumer(self, consumer: Any) -> None:
+        """Inject a Dynamic Kanban consumer explicitly for tests or an embedding host."""
+        self._dynamic_kanban_consumer_override = consumer
+
+    def acquire_external_services(self):
+        """Open a same-generation external Catalog/Delegation lease."""
+        return acquire_external_service_lease(self.plugins)
+
+    def current_external_catalog(self) -> Any | None:
+        """Resolve the active external Catalog for compatibility consumers."""
+        resolver = getattr(self.plugins, "resolve_service", None)
+        if callable(resolver):
+            return resolver(EXTERNAL_AGENT_CATALOG_SERVICE_KEY, default=None)
+        return None
 
     def _on_task_event(self, task: dict[str, Any]) -> None:
         """Push normalized task events to connected clients."""
@@ -585,7 +949,7 @@ class CrewApp:
             return
 
     def _on_task_completion(self, task: dict[str, Any]) -> None:
-        """Deduplicate completion delivery and resume background tool tasks."""
+        """Deduplicate completion delivery, resume background tool tasks, notify turn ends."""
         task_id = str(task.get("task_id") or "")
         owner = str(task.get("owner_account_id") or "")
         if not task_id or not self.tasks.mark_notified(
@@ -594,10 +958,15 @@ class CrewApp:
         ):
             return
         self._on_task_event({**task, "phase": task.get("status", "completed")})
-        if (
-            task.get("kind") in {"shell", "subagent"}
+        # 后台 shell/subagent 任务完成后自动恢复回合（"自动继续"功能，与通知无关）；
+        # 恢复回合自身是 agent_turn，其终态会走下方通知路径，把最终答复带给用户。
+        will_resume = (
+            str(task.get("kind") or "") in _RESUMABLE_TASK_KINDS
             and bool(task.get("backgrounded"))
             and self._should_resume_completed_task(task)
+        )
+        if (
+            will_resume
             and self.tasks.mark_resume_enqueued(
                 task_id,
                 owner_account_id=owner,
@@ -606,6 +975,167 @@ class CrewApp:
             and self.tasks._loop.is_running()
         ):
             asyncio.create_task(self._resume_completed_task(task))
+        # 通知只认回合终态：用户派的任务（agent_turn）结束了就发一条。
+        # 用户正在看时由前端按可见性静默已读，没在看才响铃；shell/subagent 等
+        # 中间任务不单独通知，其结果由所属回合或恢复回合统一携带。
+        if self._should_notify_task(task):
+            self._publish_task_notification(task)
+
+    # ---- 通知中心来源：tasks / approval / followup / plan（cron 在 build_app 装配）----
+
+    def _should_notify_task(self, task: dict[str, Any]) -> bool:
+        """任务通知唯一判定：只认 agent_turn 回合终态（completed/failed/timed_out）。
+
+        任务运行时是全局执行账本（agent_turn / shell / subagent 都会记账），一轮
+        对话只应有回合结束这一条通知；选择卡片挂起期间回合保持 running，不会走到
+        这里。cancelled 由用户主动触发，无需提醒。
+        """
+        return (
+            str(task.get("kind") or "") == "agent_turn"
+            and str(task.get("status") or "") in _NOTIFYWORTHY_TASK_STATUSES
+        )
+
+    def _publish_task_notification(self, task: dict[str, Any]) -> None:
+        """发布一条回合终态通知；是否发布由 _should_notify_task 决定。"""
+        status = str(task.get("status") or "")
+        from crew.core.interfaces import Notification
+
+        summary = str(task.get("result") or task.get("error") or "")[:200]
+        self.notifications.publish(
+            Notification(
+                owner_account_id=str(task.get("owner_account_id") or ""),
+                source="tasks",
+                kind=f"task_{status}",
+                title=_TASK_NOTIFICATION_TITLES.get(status, "任务已结束"),
+                body=summary,
+                payload={
+                    "task_id": str(task.get("task_id") or ""),
+                    "session_id": str(task.get("session_id") or ""),
+                    "task_kind": str(task.get("kind") or ""),
+                },
+            )
+        )
+
+    def _on_approval_created(self, context: Any, request: dict) -> None:
+        """新审批请求创建时发一条待办性质通知（decide 后自动已读）。"""
+        from crew.core.interfaces import Notification
+
+        tool_name = str(request.get("tool_name") or "")
+        preview = str(request.get("preview") or "")[:200]
+        self.notifications.publish(
+            Notification(
+                owner_account_id=str(getattr(context, "owner_account_id", "") or ""),
+                source="approval",
+                kind="approval_pending",
+                title="有一个操作等待审批",
+                body=f"{tool_name}: {preview}" if preview else tool_name,
+                payload={
+                    "request_id": str(request.get("request_id") or ""),
+                    "session_id": str(getattr(context, "session_id", "") or ""),
+                    "tool_name": tool_name,
+                },
+            )
+        )
+
+    def _on_approval_decided(self, owner_account_id: str, request_id: str) -> None:
+        """审批被处理后，对应待办通知自动已读。"""
+        self.notifications.mark_read_by_payload(
+            "approval",
+            request_id,
+            owner_account_id=owner_account_id,
+        )
+
+    # ---- 通知中心来源：followup（追问）----
+
+    def _on_followup_pending(self, session_id: str, question_id: str, text: str) -> None:
+        """追问发送时发一条待办通知（回答/取消/超时后自动已读）。
+
+        followup 层只有 session_id，owner 由 session store 反查；
+        查不到时 owner 为空串，通知落库但不归属任何账号（等价静默降级）。
+        """
+        from crew.core.interfaces import Notification
+
+        self.notifications.publish(
+            Notification(
+                owner_account_id=self.session_store.resolve_owner_account_id(session_id),
+                source="followup",
+                kind="followup_pending",
+                title="有一个问题等待你回答",
+                body=str(text or "")[:200],
+                payload={"question_id": question_id, "session_id": session_id},
+            )
+        )
+
+    def _on_followup_resolved(self, session_id: str, question_id: str) -> None:
+        """追问被回答/取消/超时后，对应待办通知自动已读（同 approval 语义）。"""
+        owner = self.session_store.resolve_owner_account_id(session_id)
+        if not owner:
+            # 会话已不存在：无主可归，通知留给 TTL 清理，不做错误归属。
+            return
+        self.notifications.mark_read_by_payload("followup", question_id, owner_account_id=owner)
+
+    # ---- 通知中心来源：plan（计划审批）----
+
+    def publish_plan_review_notification(
+        self,
+        session_id: str,
+        owner_account_id: str,
+        review: dict[str, Any],
+    ) -> None:
+        """plan_review 卡片推送时发一条待办通知（批准/拒绝/退出后自动已读）。
+
+        仅可审批的 review 发通知：empty=True 是「计划为空」提示卡（无审批按钮），
+        属于纯信息展示，不进入待办。
+        """
+        if not review or review.get("empty"):
+            return
+        from crew.core.interfaces import Notification
+
+        self.notifications.publish(
+            Notification(
+                owner_account_id=str(owner_account_id or ""),
+                source="plan",
+                kind="plan_review_pending",
+                title="有一个计划等待你批准",
+                body=str(review.get("plan") or "")[:200],
+                payload={"session_id": str(session_id or "")},
+            )
+        )
+
+    def mark_plan_review_notification_read(self, session_id: str, owner_account_id: str) -> None:
+        """计划被批准/拒绝/退出后，对应待办通知自动已读。"""
+        self.notifications.mark_read_by_payload(
+            "plan",
+            str(session_id or ""),
+            owner_account_id=str(owner_account_id or ""),
+        )
+
+    def _on_cron_run_finished(self, info: dict[str, Any]) -> None:
+        """定时任务 Fire 完成/失败时发一条站内通知。"""
+        status = str(info.get("status") or "")
+        if status not in {"completed", "failed"}:
+            return
+        from crew.core.interfaces import Notification
+
+        job_name = str(info.get("job_name") or "").strip() or "定时任务"
+        error = str(info.get("error_message") or "")[:200]
+        self.notifications.publish(
+            Notification(
+                owner_account_id=str(info.get("owner_account_id") or ""),
+                source="cron",
+                kind=f"cron_run_{status}",
+                title=(
+                    f"定时任务「{job_name}」执行完成"
+                    if status == "completed"
+                    else f"定时任务「{job_name}」执行失败"
+                ),
+                body=error,
+                payload={
+                    "job_id": str(info.get("job_id") or ""),
+                    "session_id": str(info.get("session_id") or ""),
+                },
+            )
+        )
 
     def _should_resume_completed_task(self, task: dict[str, Any]) -> bool:
         """Return whether a background task completion should trigger a resume turn."""
@@ -632,6 +1162,11 @@ class CrewApp:
         sid = str(task.get("session_id") or "")
         if not sid or not self._should_resume_completed_task(task):
             return
+        params: dict[str, Any] = {"internal_task_resume": True}
+        if str(task.get("kind") or "") != "subagent":
+            # shell 等任务的结果经恢复回合参数注入；subagent 的正文只走通知
+            # 队列一条通道（恢复轮 PROMPT drain），避免同一份结果双份注入。
+            params["task_notifications"] = [task]
         envelope = Envelope.of(
             "后台任务已完成，请根据结果继续原任务。",
             session_id=sid,
@@ -642,10 +1177,7 @@ class CrewApp:
             ) or "default",
             user_id=str(task.get("owner_account_id") or ""),
             mode="agent",
-            params={
-                "internal_task_resume": True,
-                "task_notifications": [task],
-            },
+            params=params,
         )
         async for chunk in self.dispatch(envelope):
             if self._push_fn is not None:
@@ -653,7 +1185,7 @@ class CrewApp:
                 if asyncio.iscoroutine(value):
                     await value
 
-    def _build_fallback_providers(self, owner_account_id: str = "") -> list[LLMProvider]:
+    def _build_fallback_providers(self, owner_account_id: str) -> list[LLMProvider]:
         """按 config.fallback_models 预建备用 provider（跳过当前激活模型与无 key 的）。
 
         解析 profile 走 owner 视图，避免 fallback 列表里的私有模型 id 被当成「不存在」。
@@ -670,7 +1202,7 @@ class CrewApp:
             if profile is None or not getattr(profile, "has_key", False):
                 log.warning("fallback 模型 %s 不存在或未配置 key，跳过", mid)
                 continue
-            providers.append(build_provider_for_profile(profile, cfg.stream_read_timeout))
+            providers.append(build_provider_for_profile(profile, cfg.stream_read_timeout, owner_account_id=owner))
         return providers
 
     def _default_agent_config(self) -> dict:
@@ -684,7 +1216,7 @@ class CrewApp:
             "model_profile_id": "inherit",
         }
 
-    def _session_agent_config(self, session_id: str, owner_account_id: str = "") -> dict:
+    def _session_agent_config(self, session_id: str, owner_account_id: str) -> dict:
         getter = getattr(self.session_store, "get_agent_config", None)
         if callable(getter):
             stored = getter(session_id, owner_account_id=owner_account_id)
@@ -708,6 +1240,8 @@ class CrewApp:
         self,
         executor_kind: str,
         ac: dict[str, Any] | None = None,
+        *,
+        exclude_reserved: bool = True,
     ) -> list[str] | None:
         if executor_kind != "builtin":
             return []
@@ -730,18 +1264,54 @@ class CrewApp:
 
         # builtin 执行器不直接调用 external_agent 工具。
         allowed = exclude_toolsets(self.registry, allowed, exact={"external_agent"})
+        # Product-owned exclusive toolsets are visible only to their matching
+        # preset policy; ordinary Agents never inherit them.
+        if exclude_reserved:
+            allowed = exclude_toolsets(
+                self.registry,
+                allowed,
+                exact=self.agent_presets.reserved_toolsets(),
+            )
 
         return allowed
 
-    def _wiki_agent_tool_filter(self, main_tools: list[str]) -> list[str]:
-        """Wiki Agent = 同身份主 Agent 最终静态范围 + Wiki 专属工具。"""
-        from crew.wiki.tools import WIKI_MANAGE_TOOLSET, WIKI_READ_TOOLSET
-
-        return extend_with_toolsets(
+    def _apply_preset_tool_policy(
+        self,
+        base_tools: list[str],
+        preset: dict[str, Any],
+        *,
+        allow_additions: bool = True,
+        addition_ceiling: list[str] | None = None,
+    ) -> list[str]:
+        """Apply a neutral preset's selection and dedicated toolset policy."""
+        return apply_preset_tool_policy(
             self.registry,
-            main_tools,
-            (WIKI_READ_TOOLSET, WIKI_MANAGE_TOOLSET),
+            base_tools,
+            preset,
+            allow_additions=allow_additions,
+            addition_ceiling=addition_ceiling or (),
         )
+
+    def _preset_binding(self, name: str) -> AgentPresetBinding | None:
+        if not name:
+            return None
+        try:
+            return self.agent_presets.resolve(name)
+        except AgentPresetUnavailableError:
+            return None
+
+    @asynccontextmanager
+    async def _preset_execution_lease(self, agent_config: dict | None):
+        """Hold the selected preset generation for the complete Agent turn."""
+        name = str((agent_config or {}).get("preset_agent_type") or "").strip()
+        binding = self._preset_binding(name)
+        if binding is None:
+            if name:
+                raise RuntimeError(f"Agent preset {name!r} is unavailable")
+            yield None
+            return
+        async with binding.acquire_lease(f"agent-preset:{name}"):
+            yield binding
 
     def _browser_plugin_effective(self, owner: str, user_type: str) -> bool:
         """当前 (owner, user_type) 下 Browser 插件的有效状态。
@@ -877,7 +1447,7 @@ class CrewApp:
         self,
         agent_config: dict | None = None,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> SingleAgent:
         """按会话配置装配主 Agent。
 
@@ -939,7 +1509,7 @@ class CrewApp:
             self._resolve_session_provider_profile(owner, session_model)
         )
         provider = (
-            build_provider_for_profile(provider_profile, cfg.stream_read_timeout)
+            build_provider_for_profile(provider_profile, cfg.stream_read_timeout, owner_account_id=owner)
             if owns_provider
             else self.provider
         )
@@ -964,6 +1534,7 @@ class CrewApp:
                 **executor_config,
                 "timeout_policy": executor_config.get("timeout_policy", cfg.timeout_policy),
                 "external_store": self.external_agents,
+                "external_services_acquirer": self.acquire_external_services,
                 "interaction_bridge": self.interaction_bridge,
             }
         if executor_kind == "client" and isinstance(executor_config, dict):
@@ -976,41 +1547,56 @@ class CrewApp:
         agent_id = "default"
         system_prompt_override = None
         preset_agent_type = str(resolved.get("preset_agent_type") or "").strip()
-        preset_definition = None
-        preset_spec = None
-        if preset_agent_type and self.subagent_registry is not None:
-            preset_definition = self.subagent_registry.get(preset_agent_type)
-        is_wiki_agent_session = preset_agent_type == "Wiki"
-        if is_wiki_agent_session:
-            if preset_definition is None:
-                raise RuntimeError("Wiki 预设不存在，无法创建 Wiki Agent")
-            preset_spec = build_preset_spec(preset_definition)
+        preset_spec = (
+            dict(resolved["_preset_spec"])
+            if isinstance(resolved.get("_preset_spec"), dict)
+            else None
+        )
+        preset_binding = self._preset_binding(preset_agent_type) if preset_spec is None else None
+        if preset_spec is None and preset_binding is not None:
+            preset_spec = preset_binding.contribution.as_spec()
+        if preset_agent_type and preset_spec is None and preset_binding is None:
+            raise RuntimeError(f"Agent preset {preset_agent_type!r} is unavailable")
+        if preset_spec is not None:
             system_prompt_override = str(preset_spec["system_prompt"] or "")
-            agent_id = "subagent:Wiki"
-            enabled_skills = list(preset_spec["preset_skills"] or [])
-            disabled_skills = ["*"] if not enabled_skills else None
+            agent_id = str(preset_spec.get("agent_id") or agent_id)
+            fixed_skills = list(preset_spec.get("preset_skills") or [])
+            enabled_skills = fixed_skills
+            disabled_skills = ["*"] if fixed_skills else merge_disabled_skills(
+                disabled_skills,
+                self.agent_presets.reserved_skills(),
+            )
         else:
-            # Wiki 管理 Skill 只属于固定 Wiki 预设；普通主 Agent 即使默认启用全部
-            # Skills 也看不到它，避免通过说明间接获得管理工作流。
-            disabled_skills = merge_disabled_skills(disabled_skills, ["crew-wiki-curator"])
+            disabled_skills = merge_disabled_skills(
+                disabled_skills,
+                self.agent_presets.reserved_skills(),
+            )
 
-        main_tool_filter = self._single_agent_tool_filter(executor_kind, ac)
-        capability_scoped_tools = self.capability_profiles.filter_authorized_tools(
+        authorization_ceiling = self._single_agent_tool_filter(
+            executor_kind,
+            ac,
+            exclude_reserved=False,
+        )
+        capability_ceiling = self.capability_profiles.filter_authorized_tools(
             self.registry,
-            main_tool_filter,
+            authorization_ceiling,
             session_capabilities,
         )
-        if is_wiki_agent_session:
-            tool_filter = self._wiki_agent_tool_filter(capability_scoped_tools)
-        else:
-            tool_filter = capability_scoped_tools
-            # 普通对话不能直接发现或调用任何 Wiki 工具；Wiki 页面会把消息直接
-            # 发送到 preset_agent_type=Wiki 的持久化预设会话。
-            tool_filter = exclude_toolsets(
-                self.registry,
-                tool_filter,
-                exact={"wiki.read", "wiki.manage"},
+        capability_scoped_tools = exclude_toolsets(
+            self.registry,
+            capability_ceiling,
+            exact=self.agent_presets.reserved_toolsets(),
+        )
+        tool_filter = (
+            self._apply_preset_tool_policy(
+                capability_scoped_tools,
+                preset_spec,
+                addition_ceiling=capability_ceiling,
             )
+            if preset_spec is not None
+            else capability_scoped_tools
+        )
+        if preset_spec is None:
             system_prompt_override = session_capabilities.prompt or None
         if not browser_effective and tool_filter is not None:
             # 插件关闭时从允许工具中剔除 browser_use（skill 过滤见上）
@@ -1031,11 +1617,10 @@ class CrewApp:
             system_prompt=system_prompt_override,
             enable_title=cfg.title_auto,
             plan_manager=self.plan_manager,
-            wiki_manager=self.wiki_manager if is_wiki_agent_session else None,
-            tool_disclosure_mode=(
-                ToolDisclosureMode.DIRECT
-                if is_wiki_agent_session
-                else ToolDisclosureMode.PROGRESSIVE
+            context_tags=tuple(preset_spec.get("context_tags") or ()) if preset_spec else (),
+            tool_disclosure_mode=ToolDisclosureMode(
+                preset_spec.get("disclosure_mode", ToolDisclosureMode.PROGRESSIVE)
+                if preset_spec else ToolDisclosureMode.PROGRESSIVE
             ),
             agent_id=agent_id,
             enabled_skills=enabled_skills,
@@ -1064,7 +1649,7 @@ class CrewApp:
         enable_title: bool = False,
         lightweight: bool = False,
         plan_manager: Any = None,
-        wiki_manager: Any = None,
+        context_tags: tuple[str, ...] = (),
         tool_disclosure_mode: ToolDisclosureMode = ToolDisclosureMode.PROGRESSIVE,
         agent_id: str = "default",
         enabled_skills: list[str] | None = None,
@@ -1072,7 +1657,7 @@ class CrewApp:
         inject_skills: bool = False,
         include_optional_skills: bool = False,
         context_window_override: int | None = None,
-        owner_account_id: str = "",
+        owner_account_id: str,
         model_fallback_notice: str | None = None,
         owned_providers: list[LLMProvider] | None = None,
         model_capabilities: list[str] | None = None,
@@ -1085,6 +1670,15 @@ class CrewApp:
         （供 delegate_task 继承主 agent 技能）。
         """
         cfg = self.config
+        # TokenMeter 跨重启重锚定：SQLite store 提供 checkpoint 读取，其他实现忽略。
+        meter_checkpoint_loader = getattr(self.session_store, "load_meter_checkpoint", None)
+        if not callable(meter_checkpoint_loader):
+            meter_checkpoint_loader = None
+        # compaction 事件自包含落库（ADR-0042 W5）：压缩成功即把 replacement 摘要 +
+        # 重锚定估算内联为会话事件；store 无该能力时压缩仍走 SummaryStore 单轨。
+        compaction_sink = getattr(self.session_store, "record_compaction_checkpoint", None)
+        if not callable(compaction_sink):
+            compaction_sink = None
         # 触发阈值：compaction_token_budget>0 绝对值优先；否则按 ratio × context_window
         # 动态计算并取保守的 0.75，避免硬编码小值导致过早压缩。
         if cfg.compaction_token_budget > 0:
@@ -1108,9 +1702,14 @@ class CrewApp:
             post_compact_max_important_chars=cfg.compaction_post_compact_max_important_chars,
             post_compact_max_total_chars=cfg.compaction_post_compact_max_total_chars,
             max_tool_result_chars=cfg.compaction_max_tool_result_chars,
+            max_overflow_retries=cfg.compaction_max_overflow_retries,
+            summary_max_tokens=cfg.compaction_summary_max_tokens,
+            summary_prefix_reuse=cfg.compaction_summary_prefix_reuse,
             history_db_path=cfg.db_path,
             store=self.summary_store,
             result_policy_resolver=self.registry.result_policy,
+            meter_checkpoint_loader=meter_checkpoint_loader,
+            event_sink=compaction_sink,
         )
         from crew.agent.loop import ToolCallGuardrailConfig
 
@@ -1140,6 +1739,8 @@ class CrewApp:
             max_parallel_tool_calls=cfg.max_parallel_tool_calls,
             max_delegate_tool_calls=cfg.team_max_concurrent_children,
             plan_manager=plan_manager,
+            tool_execution_timeout_seconds=cfg.tool_execution_timeout_seconds,
+            turn_deadline_seconds=cfg.turn_deadline_seconds,
         )
         kwargs: dict = dict(
             provider=provider,
@@ -1156,7 +1757,8 @@ class CrewApp:
             profile_path=profile_path,
             lightweight=lightweight,
             plan_manager=plan_manager,
-            wiki_manager=wiki_manager,
+            context_contributors=self.context_contributors,
+            context_tags=context_tags,
             tool_disclosure_mode=tool_disclosure_mode,
             agent_id=agent_id,
             enabled_skills=enabled_skills,
@@ -1166,6 +1768,7 @@ class CrewApp:
             model_fallback_notice=model_fallback_notice,
             owned_providers=[*(owned_providers or []), *fallback_providers],
             model_capabilities=model_capabilities,
+            delegation_mode=cfg.subagent_delegation_mode,
         )
         if system_prompt:
             kwargs["system_prompt"] = system_prompt
@@ -1181,27 +1784,23 @@ class CrewApp:
         return SingleAgent(**kwargs)
 
     # ---- subagent（主 agent 通过 delegate_task / run_agent 调用的子 agent）----
-    def _subagent_tool_filter(
+    def _resolve_subagent_tool_scope(
         self,
         toolsets: list[str] | None,
         tools: list[str] | None,
         *,
         user_type: str = "internal",
+        exclude_reserved: bool = True,
+        depth: int = 0,
     ) -> list[str]:
         """按 toolsets（不填=继承主 agent 全量）算工具名，tools 白名单取交集，
         并强制剔除子 agent 不该碰的工具集。
 
         同时按父 user_type 的 access_control 封顶——子 agent 不能拿到父本身
         拿不到的工具（用于 子/父 toolset 求交集，防外部用户越权）。
+        委派工具集的可见性由深度账本决定：``allow_nested`` 关闭或深度达上限
+        时维持全量黑名单（与旧行为逐字一致）。
         """
-        # 防御性归一化：模型可能把 toolsets/tools 传成字符串（schema 虽是 array）。
-        # 不归一化会让 list_schemas(enabled_toolsets="file") 把字符串当字符集合，
-        # 导致子 agent 静默拿到空工具集。
-        if isinstance(toolsets, str):
-            toolsets = [toolsets]
-        if isinstance(tools, str):
-            tools = [tools]
-
         ac = self.config.access_control.resolve_for(user_type)
         access_allowed = {
             s["function"]["name"]
@@ -1220,17 +1819,22 @@ class CrewApp:
             if parent_snapshot is not None
             else access_allowed
         )
-        names = select_requested_tools(
+        names = resolve_subagent_tool_filter(
             self.registry,
-            ordered_intersection(self.registry.names(), parent_allowed),
+            parent_allowed,
             requested_toolsets=toolsets,
             requested_tools=tools,
-        )
-        names = exclude_toolsets(
-            self.registry,
-            names,
-            exact=SUBAGENT_BLOCKED_TOOLSETS,
-            prefixes=SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
+            blocked_toolsets=delegation_blocked_toolsets(
+                depth,
+                allow_nested=self.config.subagent_allow_nested,
+                max_depth=self.config.subagent_max_depth,
+            ),
+            blocked_toolset_prefixes=SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
+            reserved_toolsets=(
+                self.agent_presets.reserved_toolsets()
+                if exclude_reserved
+                else ()
+            ),
         )
         # 子 agent 同样受 per-owner 插件有效状态约束（schema 层；执行层还有
         # browser_use 的 permission_resolver 逐次重查兜底）。
@@ -1247,22 +1851,52 @@ class CrewApp:
         capabilities: list[str] | tuple[str, ...] | None,
     ) -> list[str] | None:
         """把最终生效模型能力收敛到实际可执行工具集。"""
-        if capabilities is None:
-            return tool_filter
-        enabled = {str(item).strip().lower() for item in capabilities}
-        if "tools" not in enabled:
-            return []
-        if "vision" not in enabled:
-            base = self.registry.names() if tool_filter is None else tool_filter
-            return [name for name in base if name != "browser_vision"]
-        return tool_filter
+        base = self.registry.names() if tool_filter is None else tool_filter
+        return apply_model_capability_policy(base, capabilities)
 
-    def _make_subagent(self, spec: dict) -> SingleAgent:
-        """根据 spec（system_prompt/toolsets/tools/model/max_iterations）构造子 agent。
+    def _make_subagent(self, spec: dict | ChildAgentRequest) -> SingleAgent:
+        """Compatibility edge from legacy tool payloads to the typed factory."""
 
-        作为 build_child 回调注入 register_subagent_tools。子 agent 继承父会话的
-        user_type（经 contextvar），权限不超过父——防外部受限用户越权。
+        request = (
+            spec
+            if isinstance(spec, ChildAgentRequest)
+            else ChildAgentRequest.from_mapping(spec)
+        )
+        factory = getattr(self, "agent_factory", None)
+        if factory is not None:
+            return factory.create_child(request)
+        # A few embedded tests construct a partially initialized host.  Keep
+        # that path explicit while production always uses the Feature service.
+        return self._build_subagent(request)
+
+    def _resolve_subagent_model(
+        self,
+        request: ChildAgentRequest,
+    ) -> AgentModelResolution:
+        """Resolve the provider-neutral model label before child assembly."""
+
+        requested = request.model.strip() or "inherit"
+        return AgentModelResolution(
+            requested_model=requested,
+            effective_model=requested,
+            inherited=requested == "inherit",
+        )
+
+    def _build_subagent(self, request: ChildAgentRequest | dict) -> SingleAgent:
+        """Construct a child Agent behind the typed AgentFactory boundary.
+
+        The compatibility mapping is confined to this adapter edge.  Policy,
+        owner context, and provider selection remain resolved by the existing
+        assembly path so current subagent behavior is unchanged.
         """
+
+        if isinstance(request, ChildAgentRequest):
+            spec = request.to_mapping()
+        elif isinstance(request, dict):
+            spec = request
+        else:
+            raise TypeError("child agent request must be ChildAgentRequest or dict")
+
         from crew.core.runctx import (
             current_model_capabilities,
             current_owner_account_id,
@@ -1272,6 +1906,7 @@ class CrewApp:
 
         cfg = self.config
         parent_user_type = (current_user_type.get() or cfg.access_control.user_type).strip().lower()
+        owner = str(current_owner_account_id.get() or "").strip()
         if parent_user_type not in ("external", "internal"):
             parent_user_type = cfg.access_control.user_type
 
@@ -1296,7 +1931,7 @@ class CrewApp:
             profiles = self.owner_model_profiles(owner) if owner else cfg.model_profiles
             profile = profiles.get(model)
             if profile and profile.has_key:
-                provider = build_provider_for_profile(profile, cfg.stream_read_timeout)
+                provider = build_provider_for_profile(profile, cfg.stream_read_timeout, owner_account_id=owner)
                 sub_profile = profile
                 effective_capabilities = list(profile.capabilities)
             else:
@@ -1352,27 +1987,63 @@ class CrewApp:
                 enabled_skills = parent_enabled
                 disabled_skills = parent_disabled
 
-        is_wiki_preset = spec.get("preset_name") == "Wiki"
-        if is_wiki_preset:
-            from crew.core.runctx import current_authorized_tool_names
-
-            parent_snapshot = current_authorized_tool_names.get()
-            if parent_snapshot is None:
-                ac = cfg.access_control.resolve_for(parent_user_type)
-                main_tools = self._single_agent_tool_filter("builtin", ac)
-                main_tools = self.capability_profiles.filter_authorized_tools(
-                    self.registry,
-                    main_tools,
-                    self.capability_profiles.resolve([]),
-                )
-            else:
-                main_tools = ordered_intersection(self.registry.names(), parent_snapshot)
-            tool_filter = self._wiki_agent_tool_filter(main_tools)
+        preset_name = str(spec.get("preset_name") or "").strip()
+        preset_spec = (
+            dict(spec["_preset_spec"])
+            if isinstance(spec.get("_preset_spec"), dict)
+            else None
+        )
+        preset_binding = self._preset_binding(preset_name) if preset_spec is None else None
+        if preset_spec is None and preset_binding is not None:
+            preset_spec = preset_binding.contribution.as_spec()
+        if preset_name and preset_spec is None:
+            raise RuntimeError(f"Agent preset {preset_name!r} is unavailable")
+        if preset_name and preset_spec is not None:
+            # First apply the ordinary child safety boundary (parent snapshot,
+            # access control, and blocked/exclusive toolsets), then apply only
+            # the selected preset's explicit narrowing/additions.
+            addition_ceiling = self._resolve_subagent_tool_scope(
+                None,
+                None,
+                user_type=parent_user_type,
+                exclude_reserved=False,
+                depth=_child_depth_of(spec),
+            )
+            main_tools = exclude_toolsets(
+                self.registry,
+                addition_ceiling,
+                exact=self.agent_presets.reserved_toolsets(),
+            )
+            tool_filter = self._apply_preset_tool_policy(
+                main_tools,
+                preset_spec,
+                addition_ceiling=addition_ceiling,
+            )
+            # A preset's fixed policy is authoritative for its skill scope.
+            fixed = list(preset_spec.get("preset_skills") or [])
+            enabled_skills = fixed
+            disabled_skills = ["*"] if fixed else merge_disabled_skills(
+                disabled_skills,
+                self.agent_presets.reserved_skills(),
+            )
         else:
-            tool_filter = self._subagent_tool_filter(
-                spec.get("toolsets"), spec.get("tools"), user_type=parent_user_type
+            disabled_skills = merge_disabled_skills(
+                disabled_skills,
+                self.agent_presets.reserved_skills(),
+            )
+            tool_filter = self._resolve_subagent_tool_scope(
+                spec.get("toolsets"),
+                spec.get("tools"),
+                user_type=parent_user_type,
+                depth=_child_depth_of(spec),
             )
         tool_filter = self._apply_model_capability_filter(tool_filter, effective_capabilities)
+        if (
+            spec.get("output_schema") is not None
+            and "structured_output" in self.registry.names()
+            and "structured_output" not in (tool_filter or [])
+        ):
+            tool_filter = [*(tool_filter or []), "structured_output"]
 
         return self._build_single_agent(
             provider=provider,
@@ -1382,26 +2053,164 @@ class CrewApp:
             tool_filter=tool_filter,
             user_type=parent_user_type,
             profile_path=None,
-            system_prompt=spec.get("system_prompt"),
+            system_prompt=append_subagent_handoff_guidance(
+                (preset_spec or spec).get("system_prompt")
+            ),
             enable_title=False,
             lightweight=True,
-            wiki_manager=self.wiki_manager if is_wiki_preset else None,
-            tool_disclosure_mode=(
-                ToolDisclosureMode.DIRECT
-                if is_wiki_preset
-                else ToolDisclosureMode.PROGRESSIVE
+            context_tags=tuple((preset_spec or spec).get("context_tags") or ()),
+            tool_disclosure_mode=ToolDisclosureMode(
+                (preset_spec or spec).get("disclosure_mode", ToolDisclosureMode.PROGRESSIVE)
             ),
-            agent_id=f"subagent:{spec['preset_name']}" if spec.get("preset_name") else "subagent",
+            agent_id=str((preset_spec or spec).get("agent_id") or "subagent"),
             enabled_skills=enabled_skills,
             disabled_skills=disabled_skills,
             inject_skills=inject_skills,
             context_window_override=sub_profile.context_window if sub_profile else None,
             owned_providers=[provider] if sub_profile is not None else None,
             model_capabilities=effective_capabilities,
+            owner_account_id=owner,
+        )
+
+    def _install_builtin_feature(self, definition: FeatureDefinition) -> FeatureScope:
+        """声明一个内置 Feature 并经共享 FeatureRuntime 激活。
+
+        组合根的内置贡献不再手写 FeatureScope，而是声明 FeatureDefinition
+        交给 FeatureRuntime 事务式激活——启动审计与 dump-features 因此覆盖
+        组合根装配的全部能力。返回活跃 Generation 的 scope，供应用关闭时
+        按逆序 stop（关闭路径不变）。
+        """
+        record = run_async_compat(self.plugins.feature_runtime.activate(definition))
+        if record.state is not FeatureState.ACTIVE or record.scope is None:
+            raise RuntimeError(
+                f"内置 Feature 激活失败：{definition.feature_id} "
+                f"state={record.state} error={record.error}"
+            )
+        self._builtin_feature_scopes.append(record.scope)
+        return record.scope
+
+    def declare_managed_feature(self, definition: FeatureDefinition) -> None:
+        """声明一个需要在宿主事件循环中激活的长生命周期 Feature。"""
+
+        feature_id = definition.feature_id
+        if feature_id in self._managed_feature_definitions:
+            raise ValueError(f"managed feature already declared: {feature_id}")
+        self.plugins.feature_runtime.discover(definition)
+        self._managed_feature_definitions[feature_id] = definition
+
+    async def _activate_managed_features(
+        self,
+        *,
+        excluded: frozenset[str] = frozenset(),
+    ) -> None:
+        definitions = [
+            definition
+            for feature_id, definition in self._managed_feature_definitions.items()
+            if feature_id not in excluded
+        ]
+        records = await self.plugins.feature_runtime.activate_many(definitions)
+        for record in records:
+            if record.state is FeatureState.ACTIVE:
+                continue
+            log.error(
+                "托管 Feature 激活失败: id=%s state=%s error=%s",
+                record.definition.feature_id,
+                record.state.value,
+                record.error,
+            )
+
+    async def update_managed_feature(self, definition: FeatureDefinition):
+        """以 FeatureRuntime 的声明策略更新一个已托管 Feature。"""
+
+        if definition.feature_id not in self._managed_feature_definitions:
+            raise KeyError(f"unknown managed feature: {definition.feature_id}")
+        result = await self.plugins.feature_runtime.update(definition)
+        record = self.plugins.feature_runtime.get(definition.feature_id)
+        if record is not None:
+            self._managed_feature_definitions[definition.feature_id] = record.definition
+        return result
+
+    async def _deactivate_managed_features(self, *, timeout: float) -> None:
+        runtime = self.plugins.feature_runtime
+        for feature_id in reversed(self._managed_feature_definitions):
+            await runtime.deactivate(
+                feature_id,
+                timeout_seconds=timeout,
+                allow_required_by_product=True,
+            )
+
+    @staticmethod
+    def _builtin_feature_required(feature_id: str) -> bool:
+        """core./host./gateway. 前缀的能力是产品运行必需；product.* 可由产品策略停用。"""
+        return not feature_id.startswith("product.")
+
+    def _register_execution_driver_scope(
+        self,
+        feature_id: str,
+        *drivers: ExecutionDriver,
+    ) -> FeatureScope:
+        """Declare execution drivers as one feature and activate it via the runtime."""
+
+        def install(ctx) -> None:
+            for driver in drivers:
+                ctx.register_execution_driver(driver)
+
+        return self._install_builtin_feature(
+            FeatureDefinition(
+                feature_id,
+                install,
+                required_by_product=self._builtin_feature_required(feature_id),
+            )
+        )
+
+    def _register_context_contributor_scope(
+        self,
+        feature_id: str,
+        *contributors: ContextContributor,
+    ) -> FeatureScope:
+        """Declare context contributors as one feature and activate it via the runtime."""
+
+        def install(ctx) -> None:
+            for contributor in contributors:
+                ctx.register_context_contributor(contributor)
+
+        return self._install_builtin_feature(
+            FeatureDefinition(
+                feature_id,
+                install,
+                required_by_product=self._builtin_feature_required(feature_id),
+            )
         )
 
     def set_team_manager(self, team) -> None:
+        """注入一个显式 Team manager（主要用于测试）。
+
+        生产环境由 product.team Feature 注册 mode=team 的 Driver；
+        若当前尚无 team driver（如 enable_team=False 的测试），则顺带声明一个。
+        """
+        if self.team is not None:
+            raise RuntimeError("team manager is already configured")
+        if "team" not in self.execution_drivers.modes():
+            self._register_execution_driver_scope(
+                "product.team-driver-adapter",
+                ExecutionDriver(
+                    mode="team",
+                    execute=lambda envelope: _run_team_execution_driver(self, team, envelope),
+                    capabilities=("team.coordinate",),
+                    description="Team coordination execution",
+                ),
+            )
         self.team = team
+
+    def set_dynamic_kanban_manager(self, manager) -> None:
+        """注入一个显式 Dynamic Kanban manager（主要用于测试）。
+
+        生产环境由 product.dynamic-kanban Feature 注册 mode=dynamic_kanban 的 Driver，
+        此处不再重复注册 driver-adapter。
+        """
+        if self.dynamic_kanban is not None:
+            raise RuntimeError("dynamic kanban manager is already configured")
+        self.dynamic_kanban = manager
 
     def set_push(
         self,
@@ -1424,15 +2233,22 @@ class CrewApp:
             self._push_payload_fn = push_payload_fn
         if notify_owner_fn is not None:
             self._notify_owner_fn = notify_owner_fn
+            # 通知中心的 WS 推送复用账号级广播；gateway 装配 ConnectionManager 后才可用
+            notifications = getattr(self, "notifications", None)
+            if notifications is not None:
+                notifications.set_push_fn(notify_owner_fn)
 
-    def _active_children_snapshot(self, session_id: str | None = None, owner_account_id: str = "") -> object:
+    def _active_children_snapshot(self, session_id: str | None, owner_account_id: str) -> object:
         team = self.team
         fn = getattr(team, "active_children", None)
         team_snap = fn(session_id, owner_account_id=owner_account_id) if callable(fn) else ([] if session_id else {})
 
         if self.subagent_active is None:
             return team_snap
-        sub_snap = self.subagent_active.snapshot(session_id)
+        sub_snap = self.subagent_active.snapshot(
+            session_id,
+            owner_account_id=owner_account_id,
+        )
 
         # 合并 team 与 subagent 的活跃记录（供 gateway/UI 展示）
         if session_id is not None:
@@ -1445,7 +2261,7 @@ class CrewApp:
     async def dispatch(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
         """共享调度入口：gateway/cron/平台入口都走同一 SessionDispatcher。"""
         from crew.core.runctx import current_push_fn
-        from crew.gateway.channel_sessions import prepare_inbound_channel_envelope
+        from crew.channels.channel_sessions import prepare_inbound_channel_envelope
 
         prepare_inbound_channel_envelope(self, envelope)
 
@@ -1471,7 +2287,7 @@ class CrewApp:
                 current_push_fn.reset(token)
 
     # ---- 可控性：gateway dispatcher 经此路由到运行中 Agent 的 TurnControl ----
-    def steer(self, session_id: str, text: str, owner_account_id: str = "") -> bool:
+    def steer(self, session_id: str, text: str, owner_account_id: str) -> bool:
         """向运行中的会话注入补充指令。无运行中 Agent 则返回 False（dispatcher 降级缓存）。"""
         agent = self.agents.peek(session_id, owner_account_id=owner_account_id)
         fn = getattr(agent, "steer", None)
@@ -1481,13 +2297,15 @@ class CrewApp:
                     return True
             except Exception:  # noqa: BLE001
                 log.exception("steer 失败 session=%s", session_id)
-        team_fn = getattr(self.team, "steer", None)
+        team = self._active_team_manager()
+        team_fn = getattr(team, "steer", None)
         if callable(team_fn):
             try:
                 return bool(team_fn(session_id, text, owner_account_id=owner_account_id))
             except Exception:  # noqa: BLE001
                 log.exception("team steer 失败 session=%s", session_id)
-        dk_fn = getattr(self.dynamic_kanban, "steer", None)
+        dk = self._active_dynamic_kanban_manager()
+        dk_fn = getattr(dk, "steer", None)
         if callable(dk_fn):
             try:
                 return bool(dk_fn(session_id, text, owner_account_id=owner_account_id))
@@ -1495,7 +2313,13 @@ class CrewApp:
                 log.exception("dynamic_kanban steer 失败 session=%s", session_id)
         return False
 
-    def interrupt(self, session_id: str, message: str | None = None, owner_account_id: str = "") -> bool:
+    def interrupt(
+        self,
+        session_id: str,
+        message: str | None = None,
+        *,
+        owner_account_id: str,
+    ) -> bool:
         """请求运行中的会话在安全点优雅中断。无运行中 Agent 则返回 False。"""
         agent = self.agents.peek(session_id, owner_account_id=owner_account_id)
         fn = getattr(agent, "interrupt", None)
@@ -1506,13 +2330,15 @@ class CrewApp:
                 interrupted = True
             except Exception:  # noqa: BLE001
                 log.exception("interrupt 失败 session=%s", session_id)
-        team_fn = getattr(self.team, "interrupt", None)
+        team = self._active_team_manager()
+        team_fn = getattr(team, "interrupt", None)
         if callable(team_fn):
             try:
                 interrupted = bool(team_fn(session_id, message, owner_account_id=owner_account_id)) or interrupted
             except Exception:  # noqa: BLE001
                 log.exception("team interrupt 失败 session=%s", session_id)
-        dk_fn = getattr(self.dynamic_kanban, "interrupt", None)
+        dk = self._active_dynamic_kanban_manager()
+        dk_fn = getattr(dk, "interrupt", None)
         if callable(dk_fn):
             try:
                 # DK store 的查询要求 owner scope；不传 owner 会在 _require_owner 抛
@@ -1540,19 +2366,82 @@ class CrewApp:
         lease = self.active_owner.get(owner) if owner else self.active_owner.current()
         return lease.owner_account_id if lease is not None else None
 
-    async def start_cron(self) -> None:
-        """Start the cron engine after delivery channels are ready."""
-        if self.cron_service is not None:
-            try:
-                await self.cron_service.start()
-            except Exception:  # noqa: BLE001
-                log.exception("CronService 启动失败")
+    @property
+    def knowledge_service(self) -> Any:
+        """Return the current Generation's Knowledge Service binding."""
+        override = self._knowledge_service_override
+        runtime = self.plugins.feature_runtime
+        record = runtime.get("product.wiki")
+        if record is None and override is not self._UNSET_KNOWLEDGE_SERVICE:
+            return override
+        if record is not None and record.state is not FeatureState.ACTIVE:
+            return None
+        return runtime.services.get(self._KNOWLEDGE_SERVICE_KEY)
+
+    @knowledge_service.setter
+    def knowledge_service(self, value: Any) -> None:
+        """Inject an externally-owned service for embedded hosts/tests."""
+        self._knowledge_service_override = value
+
+    def _resolve_channels_service_attr(self, name: str) -> Any:
+        """Resolve one attribute from the active Channels Service, or None."""
+        runtime = self.plugins.feature_runtime
+        record = runtime.get("product.channels")
+        if record is not None and record.state is not FeatureState.ACTIVE:
+            return None
+        service = runtime.services.get(self._CHANNELS_SERVICE_KEY)
+        if service is None:
+            return None
+        return getattr(service, name, None)
+
+    def _wiki_component(self, name: str) -> Any:
+        service = self.knowledge_service
+        components = getattr(service, "components", None)
+        return getattr(components, name, None) if components is not None else None
+
+    @property
+    def _wiki_store(self) -> Any:
+        return self._wiki_component("store")
+
+    @property
+    def _wiki_compiler(self) -> Any:
+        return self._wiki_component("compiler")
+
+    @property
+    def _wiki_querier(self) -> Any:
+        return self._wiki_component("querier")
+
+    @property
+    def _wiki_summarizer(self) -> Any:
+        return self._wiki_component("summarizer")
+
+    @property
+    def wiki_manager(self) -> Any:
+        return self._wiki_component("manager")
 
     async def startup(self, *, start_cron: bool = True) -> None:
         """拉起后台能力：连接外部 MCP server、启动 cron 引擎、会话过期定时器。失败静默降级。"""
         try:
+            # 不传 kanban_db_path（有意缺省）：通用 backfill 会把
+            # kanban_workflows 的 legacy_ambiguous 歧义行（owner=''）改写/清除，
+            # 破坏 store 隔离留给人工认领的语义；接入需先补全 kanban 专用
+            # 认领逻辑（见 _migration.KANBAN_DB_TABLES 注释）。
+            # 不传 external/team 路径（有意缺省）：两域 6 表均不在
+            # OWNER_TABLE_LABELS，owner 归一由各自 store 构造时自带；
+            # 显式登记仅供未来域专用认领工具消费。
+            # 不传 sites_db_path（有意缺省）：sites 域 10 表同样不在
+            # OWNER_TABLE_LABELS，语义同 external/team（见 _migration 注释）。
+            # channels_db_path 照 cron/work 语义传入：routes 表在 OWNER_TABLE_
+            # LABELS 内随库扫描；bindings 表不在清单内不参与扫描。
             counts, backfilled = inspect_and_backfill_legacy_owners(
-                self.config.db_path,
+                legacy_owner_scan_targets(
+                    self.config.db_path,
+                    self.config.cron_db_path,
+                    self.config.work_db_path,
+                    tasks_db_path=self.config.tasks_db_path,
+                    notifications_db_path=self.config.notifications_db_path,
+                    channels_db_path=self.config.channels_db_path,
+                ),
                 wal_enabled=self.config.sqlite_wal,
             )
             if backfilled:
@@ -1566,26 +2455,19 @@ class CrewApp:
                     )
         except Exception:  # noqa: BLE001
             log.exception("legacy owner 检查失败")
-        # 崩溃恢复：按 host PID 重新认领上次未结束的后台进程
+        # 崩溃恢复注册（D5）：processes.json 后台进程认领登记进统一恢复序列，
+        # 实际执行在 managed features 激活之后（cron 等步骤也在那时注册完毕）。
         try:
+            from crew.state.recovery import register_startup_recovery
             from crew.tools.process_registry import process_registry
 
-            recovered = process_registry.recover_from_checkpoint()
-            if recovered:
-                log.info("崩溃恢复：认领 %d 个后台进程", recovered)
+            register_startup_recovery(
+                "process_registry",
+                process_registry.recover_from_checkpoint,
+            )
         except Exception:  # noqa: BLE001
-            log.exception("后台进程崩溃恢复失败")
+            log.exception("后台进程恢复注册失败")
         await self.tasks.start()
-        if self.work_service is not None:
-            try:
-                await self.work_service.start()
-            except Exception:  # noqa: BLE001
-                log.exception("WorkService 启动失败")
-        if self.browser_manager is not None:
-            try:
-                await self.browser_manager.startup()
-            except Exception:  # noqa: BLE001
-                log.exception("BrowserManager 启动失败")
         if self.mcp_manager is not None:
             try:
                 # MCP 连接移出 lifespan 关键路径：后台 task 内完成子进程 spawn + 工具注册，
@@ -1593,13 +2475,27 @@ class CrewApp:
                 await self.mcp_manager.start(self.registry)
             except Exception:  # noqa: BLE001
                 log.exception("MCP Client 启动失败")
-        if start_cron:
-            await self.start_cron()
-        if getattr(self, "sites", None) is not None:
-            try:
-                await self.sites.start()
-            except Exception:  # noqa: BLE001
-                log.exception("Sites Blueprint 调度器启动失败")
+        # Directory plugins that own long-lived tasks activate on this host's
+        # event loop.  The phase is manifest-driven and not feature-specific.
+        try:
+            await self.plugins.activate_phase_async("startup")
+        except Exception:  # noqa: BLE001
+            log.exception("插件 startup phase 激活失败")
+        # 兼容测试入口的 start_cron=False；产品 Feature 的实际装配不再由
+        # CrewApp 按具体 Manager 手写启动。
+        excluded = frozenset() if start_cron else frozenset({"product.cron"})
+        await self._activate_managed_features(excluded=excluded)
+        # 启动恢复序列（D5）：processes.json 后台进程认领、cron running fires 等
+        # checkpoint 的统一恢复入口（各子系统装配时已注册）。
+        try:
+            from crew.state.recovery import run_startup_recovery
+
+            recovery_results = run_startup_recovery()
+            recovered_processes = recovery_results.get("process_registry") or 0
+            if recovered_processes:
+                log.info("崩溃恢复：认领 %d 个后台进程", recovered_processes)
+        except Exception:  # noqa: BLE001
+            log.exception("启动恢复序列失败")
         # 启动会话过期定时器
         if self.config.session_idle_timeout > 0:
             self._expiry_task = asyncio.create_task(self._session_expiry_loop())
@@ -1609,7 +2505,8 @@ class CrewApp:
         """Snapshot tasks that may still hold the current App-owned Provider."""
         tasks = self.dispatcher.active_tasks_snapshot()
         tasks.update(task for task in self._subagent_bg_tasks if not task.done())
-        team_snapshot = getattr(self.team, "active_tasks_snapshot", None)
+        team = self._active_team_manager()
+        team_snapshot = getattr(team, "active_tasks_snapshot", None)
         if callable(team_snapshot):
             tasks.update(task for task in team_snapshot() if not task.done())
         try:
@@ -1687,6 +2584,7 @@ class CrewApp:
             log.exception("关闭 App-owned Provider 失败: %s", type(self.provider).__name__)
 
     async def _close_owner_team_providers(self) -> None:
+        """关闭 owner Team Provider 缓存与功能级独立 Provider（如 wiki.model）。"""
         providers = list({
             **self._stale_owner_team_providers,
             **{id(provider): provider for provider in self._owner_team_providers.values()},
@@ -1779,6 +2677,7 @@ class CrewApp:
         async with self._shutdown_lock:
             if self._shutdown_complete:
                 return
+            self._shutdown_started = True
             await self._shutdown_resources(provider_timeout=timeout)
             self._shutdown_complete = True
         with suppress(ValueError):
@@ -1786,7 +2685,7 @@ class CrewApp:
 
     async def _shutdown_resources(self, *, provider_timeout: float) -> None:
         """Execute the ordered App shutdown sequence."""
-        from crew.gateway.hooks import hook_registry
+        from crew.features.hooks import hook_registry
 
         promote_hook = getattr(self, "_promote_session_model_hook", None)
         if promote_hook is not None:
@@ -1800,15 +2699,16 @@ class CrewApp:
                 pass
             self._expiry_task = None
         await self.dispatcher.shutdown()
-        if self.cron_service is not None:
-            await self.cron_service.stop()
-        if self.work_service is not None:
-            try:
-                await self.work_service.stop()
-            except Exception:  # noqa: BLE001
-                log.exception("WorkService 停止失败")
-        if getattr(self, "sites", None) is not None:
-            await self.sites.stop()
+        await self._deactivate_managed_features(timeout=provider_timeout)
+        await asyncio.gather(
+            *(
+                scope.stop(
+                    FeatureStopPolicy.DRAIN,
+                    timeout_seconds=provider_timeout,
+                )
+                for scope in reversed(self._builtin_feature_scopes)
+            )
+        )
         # One-shot Subagents own dynamic providers and must finish their finally blocks
         # before AgentManager/global Provider shutdown.
         subagent_tasks = {task for task in self._subagent_bg_tasks if not task.done()}
@@ -1823,28 +2723,52 @@ class CrewApp:
             except asyncio.TimeoutError:
                 log.warning("App shutdown 等待 Subagent 退出超时 count=%d", len(subagent_tasks))
         self._subagent_bg_tasks.clear()
+        if self.subagent_runtime is not None:
+            await self.subagent_runtime.aclose()
         # 关闭异步进化队列，等待后台 evolution 任务完成
         await self._evolution_queue.shutdown()
-        team_shutdown = getattr(self.team, "shutdown", None)
-        if callable(team_shutdown):
-            try:
-                await team_shutdown()
-            except Exception:  # noqa: BLE001 - 继续释放其他 App-owned 资源
-                log.exception("Team shutdown 失败")
+        # product.team 已由 managed feature 停用路径关闭；此处保留 App-owned Provider 收尾
         await self._shutdown_provider_resources_with_deadline(provider_timeout)
         if self.mcp_manager is not None:
             await self.mcp_manager.aclose()
-        if self.browser_manager is not None:
-            await self.browser_manager.aclose()
+        plugin_shutdown_failures = await self.plugins.aclose()
+        if plugin_shutdown_failures:
+            log.error(
+                "App shutdown 插件清理失败: %s",
+                ", ".join(plugin_shutdown_failures),
+            )
         await self.tasks.stop()
+        # 孤儿回收三时机之一（asyncio shutdown 异步排干；signal handler 与
+        # atexit 同步强杀由 process_lifecycle 在首个句柄注册时装配）。
+        from crew.security.process_lifecycle import drain_live_processes
+
+        try:
+            await asyncio.wait_for(drain_live_processes(), timeout=10.0)
+        except asyncio.TimeoutError:
+            log.warning("App shutdown 排干后台进程超时，剩余由 atexit 同步强杀兜底")
         bindings = getattr(self, "channel_bindings", None)
         if bindings is not None and hasattr(bindings, "close"):
             bindings.close()
         self.active_owner.close()
-        if self.work_service is not None:
-            self.work_service.close()
+        # 退出前 flush barrier：先排空安全审计异步队列，再关 store 连接。
+        self.security_service.close()
         self.security_rules.close()
         self.security_audit.close()
+        handler = self._observability_log_handler
+        if handler is not None:
+            import logging
+
+            logging.getLogger().removeHandler(handler)
+            self._observability_log_handler = None
+        recorder = self.observability
+        if recorder is not None:
+            remove_sink(recorder)
+            recorder.close(timeout=3.0)
+            self.observability = None
+        store = self.observability_store
+        if store is not None:
+            store.close()
+            self.observability_store = None
         self._close_persistent_stores()
 
     def _close_persistent_stores(self) -> None:
@@ -1863,14 +2787,41 @@ class CrewApp:
             self.security_rules,
             self.security_audit,
             self.channel_bindings,
+            self.channel_session_routes,
             self.active_owner,
             getattr(self, "cron_store", None),
-            getattr(getattr(self, "dynamic_kanban", None), "store", None),
+            getattr(self, "subagent_store", None),
+            # A host may be closed before startup (for example ASGI tests that
+            # use a transport without lifespan).  In that case the managed
+            # Feature has not yet consumed its candidate Manager, so close its
+            # stores here as orphaned persistent handles.
             getattr(getattr(self, "sites", None), "store", None),
-            self.work_service,
-            getattr(self, "_wiki_store", None),
+            getattr(getattr(getattr(self, "sites", None), "blueprint", None), "store", None),
             getattr(self, "_wiki_reranker_resolver", None),
         ]
+        handler = self._observability_log_handler
+        if handler is not None:
+            import logging
+
+            logging.getLogger().removeHandler(handler)
+            self._observability_log_handler = None
+        recorder = self.observability
+        if recorder is not None:
+            remove_sink(recorder)
+            recorder.close(timeout=3.0)
+            self.observability = None
+        if self.observability_store is not None:
+            self.observability_store.close()
+            self.observability_store = None
+        work_record = self.plugins.feature_runtime.get("product.work")
+        if (
+            self.work_service is not None
+            and (work_record is None or work_record.state is FeatureState.DISCOVERED)
+        ):
+            # A managed Work candidate is created during build_app so legacy
+            # callers can inspect it before startup. If startup never happens,
+            # no FeatureScope owns it and this is the sole close fallback.
+            stores.append(self.work_service)
         for store in stores:
             close = getattr(store, "close", None)
             if callable(close):
@@ -1936,13 +2887,13 @@ class CrewApp:
             except Exception:  # noqa: BLE001
                 log.exception("会话过期定时器异常")
 
-    def owner_model_profiles(self, owner_account_id: str = "") -> dict[str, ModelProfile]:
+    def owner_model_profiles(self, owner_account_id: str) -> dict[str, ModelProfile]:
         return self.config.owner_model_profiles(owner_account_id)
 
     def resolve_session_context_window(
         self,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> int:
         """会话绑定模型的上下文窗口。
 
@@ -1969,7 +2920,7 @@ class CrewApp:
     async def preview_session_context(
         self,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any] | None:
         """返回会话打开时的 builtin request-view 预估，不写入最近一次实际 usage。"""
         owner = str(owner_account_id or "").strip()
@@ -1988,32 +2939,37 @@ class CrewApp:
         except Exception:  # noqa: BLE001 - workspace metadata is optional for preview
             pass
 
-        async with self.agents.lease(
-            session_id,
-            agent_config,
-            owner_account_id=owner,
-        ) as agent:
-            if not isinstance(agent, SingleAgent):
-                return None
-            return await agent.preview_context(
+        async with self._preset_execution_lease(agent_config) as preset_binding:
+            if preset_binding is not None:
+                agent_config = dict(agent_config or {})
+                agent_config["_preset_generation"] = preset_binding.generation.key
+                agent_config["_preset_spec"] = preset_binding.contribution.as_spec()
+            async with self.agents.lease(
                 session_id,
+                agent_config,
                 owner_account_id=owner,
-                workspace_id=workspace_id,
-                workspace_instructions=workspace_instructions,
-                workspace_root_path=workspace_root_path,
-            )
+            ) as agent:
+                if not isinstance(agent, SingleAgent):
+                    return None
+                return await agent.preview_context(
+                    session_id,
+                    owner_account_id=owner,
+                    workspace_id=workspace_id,
+                    workspace_instructions=workspace_instructions,
+                    workspace_root_path=workspace_root_path,
+                )
 
-    def owner_active_model_profile(self, owner_account_id: str = "") -> ModelProfile:
+    def owner_active_model_profile(self, owner_account_id: str) -> ModelProfile:
         profile = self.config.owner_active_model_profile(owner_account_id)
         if profile is not None:
             return profile
         return self.config.active_model
 
-    def owner_default_model_profile(self, owner_account_id: str = "") -> ModelProfile:
+    def owner_default_model_profile(self, owner_account_id: str) -> ModelProfile:
         """返回 owner 默认兜底模型；active 命名仅作为旧 API 兼容保留。"""
         return self.owner_active_model_profile(owner_account_id)
 
-    def owner_team_provider(self, owner_account_id: str = "") -> LLMProvider:
+    def owner_team_provider(self, owner_account_id: str) -> LLMProvider:
         """Return the owner-default Provider used by Team planning and built-in members.
 
         Team Agents survive across HTTP/WS requests, so their Provider cannot use the
@@ -2030,13 +2986,13 @@ class CrewApp:
         profile = self.config.owner_default_model_profile(owner)
         if profile is None or not profile.has_key:
             return self.provider
-        provider = build_provider_for_profile(profile, self.config.stream_read_timeout)
+        provider = build_provider_for_profile(profile, self.config.stream_read_timeout, owner_account_id=owner)
         self._owner_team_providers[owner] = provider
         return provider
 
     def owner_team_member_model_provider(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         model_profile_id: str = "",
     ) -> LLMProvider:
         """Return the App-owned Provider for one explicitly bound Team member."""
@@ -2052,12 +3008,14 @@ class CrewApp:
         cached = self._owner_team_member_model_providers.get(key)
         if cached is not None:
             return cached
-        provider = build_provider_for_profile(profile, self.config.stream_read_timeout)
+        provider = build_provider_for_profile(profile, self.config.stream_read_timeout, owner_account_id=owner)
         self._owner_team_member_model_providers[key] = provider
         return provider
 
-    def _invalidate_owner_team_provider(self, owner_account_id: str = "") -> None:
+    def _invalidate_owner_team_provider(self, owner_account_id: str) -> None:
         owner = str(owner_account_id or "").strip()
+        manager = self._active_team_manager()
+        dk = self._active_dynamic_kanban_manager()
         if owner:
             provider = self._owner_team_providers.pop(owner, None)
             if provider is not None and provider is not self.provider:
@@ -2066,12 +3024,10 @@ class CrewApp:
                 provider = self._owner_team_member_model_providers.pop(key)
                 if provider is not self.provider:
                     self._stale_owner_team_providers[id(provider)] = provider
-            drop = getattr(self.team, "drop_owner_teams", None)
-            if callable(drop):
-                drop(owner)
-            drop_kanban = getattr(self.dynamic_kanban, "drop_owner_provider_state", None)
-            if callable(drop_kanban):
-                drop_kanban(owner)
+            if manager is not None:
+                manager.invalidate_owner_provider(owner)
+            if dk is not None:
+                dk.drop_owner_provider_state(owner)
             return
 
         providers = list({
@@ -2086,12 +3042,10 @@ class CrewApp:
         for provider in providers:
             if provider is not self.provider:
                 self._stale_owner_team_providers[id(provider)] = provider
-        clear = getattr(self.team, "clear", None)
-        if callable(clear):
-            clear()
-        clear_kanban = getattr(self.dynamic_kanban, "clear_provider_state", None)
-        if callable(clear_kanban):
-            clear_kanban()
+        if manager is not None:
+            manager.invalidate_owner_provider("")
+        if dk is not None:
+            dk.clear_provider_state()
 
     def owner_embedding_provider(self, owner_account_id: str = "") -> "EmbeddingProvider | None":
         """返回 owner 生效的语义检索 provider，按 owner 缓存（含 None=禁用）。
@@ -2170,7 +3124,7 @@ class CrewApp:
     @asynccontextmanager
     async def owner_provider(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> AsyncIterator[LLMProvider]:
         """Yield the owner-default Provider for a request-scoped auxiliary task.
 
@@ -2185,7 +3139,7 @@ class CrewApp:
         profile = self.config.owner_default_model_profile(owner) if owner else None
         owns_provider = bool(owner and profile is not None and profile.has_key)
         provider = (
-            build_provider_for_profile(profile, self.config.stream_read_timeout)
+            build_provider_for_profile(profile, self.config.stream_read_timeout, owner_account_id=owner)
             if owns_provider and profile is not None
             else self.provider
         )
@@ -2206,12 +3160,12 @@ class CrewApp:
                             type(provider).__name__,
                         )
 
-    def owner_public_model_options(self, owner_account_id: str = "") -> list[dict[str, Any]]:
+    def owner_public_model_options(self, owner_account_id: str) -> list[dict[str, Any]]:
         return self.config.owner_public_model_options(owner_account_id)
 
     def owner_visible_model_profiles(
         self,
-        owner_account_id: str = "",
+        owner_account_id: str,
         *,
         include_builtin_profiles: bool = True,
     ) -> list[ModelProfile]:
@@ -2220,7 +3174,7 @@ class CrewApp:
             include_builtin_profiles=include_builtin_profiles,
         )
 
-    def use_model(self, model_id: str, *, owner_account_id: str = "") -> ModelProfile:
+    def use_model(self, model_id: str, *, owner_account_id: str) -> ModelProfile:
         """设置默认兜底模型；Session 的显式模型绑定保持不变。"""
         owner = str(owner_account_id or "").strip()
         if owner:
@@ -2234,20 +3188,15 @@ class CrewApp:
             self.agents.drop_owner(owner)
             self._invalidate_owner_team_provider(owner)
         else:
-            profile = self.config.activate_model(model_id)
-            self.config.default_model_id = model_id
-            if self.config.config_path:
-                self.config.persist_model_profiles()
+            # 全局共享层走 Config 候选值事务：磁盘提交成功后才发布内存，
+            # 持久化失败时 active/default 与磁盘一致保留旧值，且不触碰任何
+            # 运行资源（Provider 重建、会话缓存清空只在持久化成功后进行）。
+            profile = self.config.set_active_model(model_id)
             old_provider = self.provider
             self.provider = build_provider(self.config)
             self.agents.clear()
-            self._invalidate_owner_team_provider()
-            if self.team is not None:
-                self.team.provider = self.provider
-            if self.dynamic_kanban is not None:
-                self.dynamic_kanban.provider = self.provider
-                if hasattr(self.dynamic_kanban, "clear"):
-                    self.dynamic_kanban.clear()
+            self._invalidate_owner_team_provider(owner_account_id="")
+            self._sync_default_provider_to_features()
             if old_provider is not self.provider:
                 self._schedule_provider_retirement(old_provider)
         log.info("设置默认模型: %s model=%s base_url=%s", profile.id, profile.model, profile.base_url or "默认")
@@ -2255,15 +3204,17 @@ class CrewApp:
 
     # ---- 模型 profile CRUD（运行时增删改 + 持久化 + Provider 同步）----
     #
-    # 与 use_model 共享副作用路径：写 yaml → 写 env（仅当传 api_key）→ 改 cfg →
-    # 激活模型变动时重建 Provider + 清缓存。CRUD 是配置层动作，不切换激活模型，
-    # 但删除激活模型时自动切到剩余的第一个（按用户决策）。
+    # 与 use_model 共享副作用路径：写 env（仅当传 api_key，作为候选 profile 的
+    # key 解析输入）→ Config 候选值事务（候选值 → 持久化 → 发布）→ 激活模型
+    # 变动时重建 Provider + 清缓存。CRUD 是配置层动作，不切换激活模型，但删除
+    # 激活模型时自动切到剩余的第一个（按用户决策）。持久化失败时内存与磁盘
+    # 一致保留旧值，直接向调用方报错，不做任何运行资源操作。
     def _apply_api_key_to_env(
         self,
         api_key_env: str,
         api_key: str,
         *,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> str:
         """把用户填写的 api_key 写入 .env，返回实际 env 文件路径。
 
@@ -2276,7 +3227,46 @@ class CrewApp:
         log.info("已写入 API Key 到 .env (var=%s, file=%s)", api_key_env, env_path)
         return str(env_path)
 
-    def add_model(self, payload: dict, *, owner_account_id: str = "") -> ModelProfile:
+    def _assert_shared_env_key_safe(
+        self,
+        api_key_env: str,
+        api_key: str,
+        *,
+        exclude_profile_id: str,
+        owner_account_id: str,
+        overwrite: bool = False,
+    ) -> None:
+        """显式写共享 env 名前的拦截（凭证库路径不经过这里，无此问题）。
+
+        多个 profile 引用同一个 api_key_env 是合法场景（同厂商共用一个 key）；
+        但带新 key 覆盖一个"被其它 profile 引用且已有不同旧值"的变量名时，
+        必须显式确认（payload 带 overwrite_shared_key: true），否则静默改掉
+        其它模型的 key——即用户反馈的"所有 apikey 变成最新的 apikey"。
+        """
+        cfg = self.config
+        profiles = self.owner_model_profiles(owner_account_id) if owner_account_id else cfg.model_profiles
+        others = sorted(
+            pid
+            for pid, profile in profiles.items()
+            if pid != exclude_profile_id and profile.api_key_env == api_key_env
+        )
+        if not others:
+            return
+        env_map = cfg.owner_env_map(owner_account_id)
+        current = env_map.get(api_key_env, "") or os.environ.get(api_key_env, "")
+        if not current or current == api_key:
+            return
+        if overwrite:
+            log.warning("覆盖共享 API Key env=%s，同时影响模型=%s", api_key_env, "、".join(others))
+            return
+        raise ValueError(
+            f"环境变量 {api_key_env} 同时被其它模型引用（{'、'.join(others)}），"
+            "写入新 key 会一起改掉它们的 key。请为该模型改用独立的 api_key_env，"
+            "或去掉 api_key_env 让 key 存入凭证库，或在请求中带 "
+            "overwrite_shared_key: true 明确覆盖。"
+        )
+
+    def add_model(self, payload: dict, *, owner_account_id: str) -> ModelProfile:
         """新增模型 profile 并持久化。
 
         Args:
@@ -2301,22 +3291,39 @@ class CrewApp:
         current_default_id = cfg.owner_active_model_id(owner) if owner else cfg.active_model_id
         current_default_is_placeholder = is_placeholder_model_profile(existing.get(current_default_id))
 
-        requested_api_key_env = str(payload.get("api_key_env") or "").strip()
+        explicit_env = bool(str(payload.get("api_key_env") or "").strip())
+        overwrite_shared_key = _payload_bool(payload.get("overwrite_shared_key"))
+        payload = {k: v for k, v in payload.items() if k != "overwrite_shared_key"}
         api_key_env = _validate_model_api_key_env(
-            requested_api_key_env or _default_model_api_key_env(model_id)
+            payload.get("api_key_env") or _default_model_api_key_env(model_id)
         )
         payload = {**payload, "api_key_env": api_key_env, "builtin": False}
         api_key = str(payload.get("api_key") or "")
-        # 先写 env（让 _build_profile_from_payload 能从 os.environ 取到），再构建 profile
+        # key 默认写入凭证库（按 profile id，见 crew.state.credentials），不碰共享
+        # env 名；显式传 api_key_env 表示用户要用环境变量管理 → 写 .env（带拦截）。
         if api_key:
-            self._apply_api_key_to_env(
-                api_key_env,
-                api_key,
-                owner_account_id=owner_account_id,
-            )
+            if explicit_env:
+                self._assert_shared_env_key_safe(
+                    api_key_env,
+                    api_key,
+                    exclude_profile_id=model_id,
+                    owner_account_id=owner_account_id,
+                    overwrite=overwrite_shared_key,
+                )
+                self._apply_api_key_to_env(
+                    api_key_env,
+                    api_key,
+                    owner_account_id=owner_account_id,
+                )
+            else:
+                store_key(owner_account_id, model_id, api_key)
         if owner:
-            profile = _build_profile_from_payload(model_id, payload)
-            profile.api_key = api_key or cfg.owner_env_map(owner).get(api_key_env, "")
+            profile = _build_profile_from_payload(
+                model_id,
+                payload,
+                owner_account_id=owner,
+                env_map=cfg.owner_env_map(owner),
+            )
             profiles = cfg.owner_model_profiles(owner)
             profiles[model_id] = profile
             activate_new_model = bool(
@@ -2332,12 +3339,13 @@ class CrewApp:
                 self._invalidate_owner_team_provider(owner)
                 log.info("首个可用模型已自动设为 owner 默认模型: %s", model_id)
         else:
+            # Config 候选值事务：持久化成功才发布内存；失败时磁盘与内存一致
+            # 保留旧值，且不触碰任何运行资源。
             profile = cfg.add_model(payload)
-            cfg.persist_model_profiles()
         log.info("新增模型 profile: %s (model=%s)", profile.id, profile.model)
         return profile
 
-    def update_model(self, model_id: str, payload: dict, *, owner_account_id: str = "") -> ModelProfile:
+    def update_model(self, model_id: str, payload: dict, *, owner_account_id: str) -> ModelProfile:
         """更新已存在的模型 profile 并持久化。
 
         若更新目标是当前激活模型，会重建 Provider 并清空 Agent 缓存（与 use_model 对齐）。
@@ -2359,6 +3367,9 @@ class CrewApp:
         if active_model_id == model_id and loaded_val is not None and not _payload_bool(loaded_val):
             raise ValueError("当前激活模型不能设为未加载，请先切换到其它已加载模型")
 
+        explicit_env = bool(str(payload.get("api_key_env") or "").strip())
+        overwrite_shared_key = _payload_bool(payload.get("overwrite_shared_key"))
+        payload = {k: v for k, v in payload.items() if k != "overwrite_shared_key"}
         api_key_env = _validate_model_api_key_env(
             payload.get("api_key_env") or profiles[model_id].api_key_env
         )
@@ -2366,12 +3377,33 @@ class CrewApp:
             payload = {**payload, "api_key_env": api_key_env}
         payload = {**payload, "builtin": profiles[model_id].builtin}
         api_key = str(payload.get("api_key") or "")
-        if api_key:
+        # key 默认写凭证库；显式传 api_key_env 表示切到环境变量管理 → 写 .env（带
+        # 拦截）并清除该 profile 的凭证库条目，避免旧 store 值反过来遮蔽 env。
+        env_name_changed = (
+            "api_key_env" in payload
+            and str(payload.get("api_key_env") or "").strip() != profiles[model_id].api_key_env
+        )
+        # 注意用归置后的 owner（builtin 重定向后为空=全局作用域），不能用
+        # 原始 owner_account_id——否则内置模型的 key 会写进 owner 私有
+        # 凭证库/overlay .env，而全局 profile 的解析链读不到它。
+        if api_key and explicit_env:
+            self._assert_shared_env_key_safe(
+                api_key_env,
+                api_key,
+                exclude_profile_id=model_id,
+                owner_account_id=owner,
+                overwrite=overwrite_shared_key,
+            )
             self._apply_api_key_to_env(
                 api_key_env,
                 api_key,
-                owner_account_id=owner_account_id,
+                owner_account_id=owner,
             )
+            delete_stored_key(owner, model_id)
+        elif api_key:
+            store_key(owner, model_id, api_key)
+        elif explicit_env and env_name_changed:
+            delete_stored_key(owner, model_id)
         if owner:
             current = profiles[model_id]
             merged = {
@@ -2391,11 +3423,12 @@ class CrewApp:
                 "builtin": False,
                 "capabilities": payload.get("capabilities", list(current.capabilities)),
             }
-            profile = _build_profile_from_payload(model_id, merged)
-            if api_key:
-                profile.api_key = api_key
-            else:
-                profile.api_key = cfg.owner_env_map(owner).get(profile.api_key_env, "")
+            profile = _build_profile_from_payload(
+                model_id,
+                merged,
+                owner_account_id=owner,
+                env_map=cfg.owner_env_map(owner),
+            )
             profiles[model_id] = profile
             cfg.persist_owner_model_profiles(owner, profiles, active_model_id=cfg.owner_active_model_id(owner))
             self.agents.drop_owner(owner)
@@ -2403,31 +3436,27 @@ class CrewApp:
             # 都要淘汰对应 Team/Provider 缓存，下一轮才会使用新配置。
             self._invalidate_owner_team_provider(owner)
         else:
+            # Config 候选值事务：持久化成功才发布内存；失败时磁盘与内存一致
+            # 保留旧值，会话缓存与 Provider 均不触碰。
             profile = cfg.update_model(model_id, payload)
-            cfg.persist_model_profiles()
             # Session cache keys contain the selected profile id, not the
             # mutable profile contents. Clear even for a non-active shared
             # model because existing sessions may be explicitly bound to it.
             self.agents.clear()
-            self._invalidate_owner_team_provider()
+            self._invalidate_owner_team_provider(owner_account_id="")
 
         # 激活模型变更 → 重建 Provider + 清缓存，让下一轮对话立即生效
         if active_model_id == model_id and not owner:
             cfg.activate_model(model_id)
             old_provider = self.provider
             self.provider = build_provider(cfg)
-            if self.team is not None:
-                self.team.provider = self.provider
-            if self.dynamic_kanban is not None:
-                self.dynamic_kanban.provider = self.provider
-                if hasattr(self.dynamic_kanban, "clear"):
-                    self.dynamic_kanban.clear()
+            self._sync_default_provider_to_features()
             if old_provider is not self.provider:
                 self._schedule_provider_retirement(old_provider)
         log.info("更新模型 profile: %s (model=%s)", profile.id, profile.model)
         return profile
 
-    def remove_model(self, model_id: str, *, owner_account_id: str = "") -> dict:
+    def remove_model(self, model_id: str, *, owner_account_id: str) -> dict:
         """删除模型 profile 并持久化。
 
         - 删除激活模型时：自动切到剩余的第一个 profile，重建 Provider + 清缓存。
@@ -2456,48 +3485,48 @@ class CrewApp:
             if not loaded_replacements:
                 raise ValueError("删除当前激活模型前，至少需要另一个已加载模型")
 
+        switched_to: str | None = None
         if owner:
+            # owner 私有层：候选值在 overlay 视图副本上计算，磁盘提交成功后才
+            # 清理 env/凭证与失效缓存；持久化失败时 overlay 与候选值一致保留
+            # 旧值，env/凭证/缓存均不触碰。
             removed = profiles.pop(model_id)
+            if active_model_id == model_id:
+                # 按 id 字典序切到剩余的第一个，行为可预测
+                new_id = sorted(mid for mid, profile in profiles.items() if profile.loaded)[0]
+                switched_to = new_id
+                cfg.persist_owner_model_profiles(owner, profiles, active_model_id=new_id)
+            else:
+                cfg.persist_owner_model_profiles(owner, profiles, active_model_id=cfg.owner_active_model_id(owner))
+            self._invalidate_owner_team_provider(owner)
             if not any(profile.api_key_env == removed.api_key_env for profile in profiles.values()):
                 remove_env_key(resolve_writable_env_path(owner_account_id), removed.api_key_env, sync_process_env=False)
-        else:
-            removed = cfg.remove_model(model_id)  # 内部校验"最后一个"
-            if not any(profile.api_key_env == removed.api_key_env for profile in cfg.model_profiles.values()):
-                remove_env_key(resolve_writable_env_path(owner_account_id), removed.api_key_env)
-        switched_to: str | None = None
-        if active_model_id == model_id:
-            # 按 id 字典序切到剩余的第一个，行为可预测
-            new_id = sorted(mid for mid, profile in profiles.items() if profile.loaded)[0]
-            switched_to = new_id
-            if owner:
-                cfg.persist_owner_model_profiles(owner, profiles, active_model_id=new_id)
-                self._invalidate_owner_team_provider(owner)
-            else:
-                cfg.activate_model(new_id)
-                cfg.default_model_id = new_id
-                old_provider = self.provider
-                self.provider = build_provider(cfg)
-                self.agents.clear()
-                self._invalidate_owner_team_provider()
-                if self.team is not None:
-                    self.team.provider = self.provider
-                if self.dynamic_kanban is not None:
-                    self.dynamic_kanban.provider = self.provider
-                    if hasattr(self.dynamic_kanban, "clear"):
-                        self.dynamic_kanban.clear()
-                if old_provider is not self.provider:
-                    self._schedule_provider_retirement(old_provider)
-        elif owner:
-            cfg.persist_owner_model_profiles(owner, profiles, active_model_id=cfg.owner_active_model_id(owner))
-            self._invalidate_owner_team_provider(owner)
-        else:
-            cfg.persist_model_profiles()
-            self._invalidate_owner_team_provider()
-        # Cache keys only contain the selected profile id, not mutable profile contents.
-        # A deleted non-active profile can still be pinned by an existing session.
-        if owner:
+            # 删除模型同时清理凭证库条目（owner 私有层，随持久化成功一起收尾）
+            delete_stored_key(owner, model_id)
             self.agents.drop_owner(owner)
         else:
+            # 全局共享层：Config 候选值事务；持久化失败时磁盘与内存一致保留该
+            # 模型，env/凭证/会话缓存/Provider 全部不动，可直接重试。
+            removed = cfg.remove_model(model_id)  # 内部校验"最后一个"
+            if active_model_id == model_id:
+                # 按 id 字典序切到剩余的第一个，行为可预测
+                new_id = sorted(mid for mid, profile in cfg.model_profiles.items() if profile.loaded)[0]
+                switched_to = new_id
+                cfg.set_active_model(new_id)
+                old_provider = self.provider
+                self.provider = build_provider(cfg)
+                self._invalidate_owner_team_provider(owner_account_id="")
+                self._sync_default_provider_to_features()
+                if old_provider is not self.provider:
+                    self._schedule_provider_retirement(old_provider)
+            else:
+                self._invalidate_owner_team_provider(owner_account_id="")
+            if not any(profile.api_key_env == removed.api_key_env for profile in cfg.model_profiles.values()):
+                remove_env_key(resolve_writable_env_path(owner_account_id), removed.api_key_env)
+            # 删除模型同时清理凭证库条目（owner 重定向后 owner 变量为实际作用域）
+            delete_stored_key(owner, model_id)
+            # Cache keys only contain the selected profile id, not mutable profile contents.
+            # A deleted non-active profile can still be pinned by an existing session.
             self.agents.clear()
         log.info(
             "删除模型 profile: %s%s",
@@ -2509,7 +3538,7 @@ class CrewApp:
     def promote_pending_model_if_idle(
         self,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         *,
         queue_depth: int = 0,
         running_depth: int = 0,
@@ -2535,7 +3564,7 @@ class CrewApp:
         self,
         session_id: str,
         model_profile_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         *,
         busy: bool,
     ) -> dict:
@@ -2573,7 +3602,7 @@ class CrewApp:
     def read_session_model_binding(
         self,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict:
         from crew.state.session_model import read_binding
 
@@ -2623,42 +3652,23 @@ class CrewApp:
             envelope.params["workspace_instructions"] = ""
             return None
 
-    async def _inject_at_references(self, envelope: Envelope, *, workspace_root: str | None) -> None:
-        """遍历 @引用 注册表，把解析结果并入 envelope.params。
-
-        注入点集中在发送时（与 workspace enrichment 同层）；单条引用的解析/
-        读取失败只记录日志并跳过，**不阻断发送**。消费方为 runtime 的
-        user_reminder 块及 external executor / team 的读取授权。
-        """
-        from crew.gateway.context import REFERENCE_INJECTORS, ReferenceResolveContext
-
-        ctx = ReferenceResolveContext(
-            query=str(envelope.query or ""),
-            owner_account_id=envelope.user_id,
-            session_id=envelope.session_id,
-            workspace_root=str(workspace_root or "").strip(),
-            browser_manager=getattr(self, "browser_manager", None),
-        )
-        for injector in REFERENCE_INJECTORS:
-            if not injector.token_re.search(ctx.query):
-                continue
-            try:
-                refs = await injector.resolver(ctx)
-            except Exception:  # noqa: BLE001 - 单条引用解析失败不阻断发送
-                log.exception("解析 @%s 引用失败", injector.name)
-                continue
-            if refs:
-                envelope.params[injector.params_key] = refs
-
     def _on_subagent_background_done(self, session_id: str, result: dict) -> None:
-        """后台子 agent 完成回调（在事件循环内同步调用）：入队 + 实时推送。"""
-        # 1) 入队，供下一轮 handle() 注入主 agent 上下文（限长，防无限堆积）
-        key = self._owner_session_key(session_id, str(result.get("owner_account_id") or ""))
-        queue = self._subagent_pending.setdefault(key, [])
-        queue.append(result)
-        if len(queue) > 20:
-            del queue[:-20]
-        # 2) 实时推送（best-effort，有活跃 WS 时；push_fn 为协程，fire-and-forget）
+        """后台子任务完成回调（在事件循环内同步调用）：四态路由 + 实时推送。
+
+        内容只经通知队列一条通道：busy 态 steer 成功即摘除队列副本；
+        idle 态由 TaskRuntime 的恢复回合 drain（恢复回合不再重复携带
+        task_notifications）；父已消失则整份丢弃。
+        """
+        state = self._classify_parent_delivery_state(session_id, result)
+        self._subagent_router.deliver(
+            session_id,
+            result,
+            state=state,
+            steer=lambda text: self._steer_subagent_notification(
+                session_id, text, result
+            ),
+        )
+        # 实时推送（best-effort，有活跃 WS 时；push_fn 为协程，fire-and-forget）
         if self._push_fn is not None:
             label = result.get("agent", "子智能体")
             status = result.get("status", "")
@@ -2674,49 +3684,158 @@ class CrewApp:
             except RuntimeError:
                 pass  # 无运行中事件循环则跳过
 
-    @staticmethod
-    def _owner_session_key(session_id: str, owner_account_id: str = "") -> OwnerSessionKey:
-        return owner_account_id or "", session_id
+    def note_session_vanished(self, session_id: str) -> None:
+        """会话删除时登记"已消失"证据（有界，供通知路由四态分类）。"""
 
-    def _on_subagent_collected(self, session_id: str, task_id: str, owner_account_id: str = "") -> None:
-        """模型已主动 collect 取走某后台结果 → 从待注入队列移除，避免下一轮重复注入。"""
-        key = self._owner_session_key(session_id, owner_account_id)
-        queue = self._subagent_pending.get(key)
-        if not queue:
+        sid = str(session_id or "").strip()
+        if not sid:
             return
-        remaining = [r for r in queue if r.get("task_id") != task_id]
-        if remaining:
-            self._subagent_pending[key] = remaining
-        else:
-            self._subagent_pending.pop(key, None)
+        self._vanished_sessions[sid] = time.monotonic()
+        while len(self._vanished_sessions) > 512:
+            self._vanished_sessions.popitem(last=False)
 
-    def _drain_subagent_notifications(self, envelope: Envelope) -> None:
-        """把该 session 待通知的后台子任务结果取出，注入 envelope.params 供内核注入上下文。"""
-        pending = self.pop_subagent_notifications(envelope.session_id, envelope.user_id)
-        if pending:
-            envelope.params["subagent_notifications"] = pending
+    def _classify_parent_delivery_state(
+        self,
+        session_id: str,
+        result: dict,
+    ) -> ParentDeliveryState:
+        """按父级现状分类投递路径；观测失败按 IDLE 走（等同旧行为）。"""
 
-    def pop_subagent_notifications(self, session_id: str, owner_account_id: str = "") -> list:
-        """取出并清空该 session 待通知的后台子任务结果。
+        if self._shutdown_started:
+            return ParentDeliveryState.DRAINING
+        sid = str(session_id or "")
+        vanished_at = self._vanished_sessions.get(sid)
+        if vanished_at is not None:
+            # 记录超过 1 小时的旧证据过期：避免同 id 复用的新会话被误伤。
+            if time.monotonic() - vanished_at > 3600.0:
+                self._vanished_sessions.pop(sid, None)
+            else:
+                return ParentDeliveryState.GONE
+        owner = str(result.get("owner_account_id") or "")
+        try:
+            if self.dispatcher.is_running(session_id, owner):
+                return ParentDeliveryState.BUSY
+        except Exception:  # noqa: BLE001
+            return ParentDeliveryState.IDLE
+        return ParentDeliveryState.IDLE
 
-        供 team member 派活前 drain：让发起 delegate_task/run_agent 后台的 member
-        在下一轮执行时看到完成通知（team 模式下 member.run 不经 app.handle 的 drain）。
-        """
-        return self._subagent_pending.pop(
-            self._owner_session_key(session_id, owner_account_id),
-            None,
-        ) or []
+    def _steer_subagent_notification(
+        self,
+        session_id: str,
+        text: str,
+        result: dict,
+    ) -> bool:
+        """把完成通知并入父级当前轮（steer）；失败返回 False 由队列兜底。"""
 
-    def _drain_process_notifications(self, envelope: Envelope) -> None:
-        """把该 session 后台进程的 watch/完成通知取出，注入 envelope.params。"""
-        from crew.tools.process_registry import process_registry
+        try:
+            return bool(
+                self.steer(
+                    session_id,
+                    text,
+                    owner_account_id=str(result.get("owner_account_id") or ""),
+                )
+            )
+        except Exception:  # noqa: BLE001 - steer 失败回退队列路径
+            log.debug("steer 后台子任务通知失败 session=%s", session_id, exc_info=True)
+            return False
 
-        pending = process_registry.drain_for_session(envelope.session_id, owner_account_id=envelope.user_id)
-        if pending:
-            envelope.params["process_notifications"] = pending
+    async def _run_default_execution_driver(
+        self,
+        envelope: Envelope,
+    ) -> AsyncIterator[ResponseChunk]:
+        config_session_id = str(
+            envelope.params.get("task_session_id") or envelope.session_id
+        )
+        agent_config = self._session_agent_config(
+            config_session_id,
+            owner_account_id=envelope.user_id,
+        )
+        async with self._preset_execution_lease(agent_config) as preset_binding:
+            if preset_binding is not None:
+                agent_config = dict(agent_config or {})
+                # AgentManager's fingerprint must distinguish generations even
+                # when the persisted session configuration is unchanged.
+                agent_config["_preset_generation"] = preset_binding.generation.key
+                agent_config["_preset_spec"] = preset_binding.contribution.as_spec()
+            async with self.agents.lease(
+                envelope.session_id,
+                agent_config,
+                owner_account_id=envelope.user_id,
+            ) as agent:
+                async for chunk in agent.run(envelope):
+                    yield chunk
+
+    async def _structured_path_context(
+        self,
+        envelope: Envelope,
+    ) -> ContextContribution | None:
+        workspace_root = str(
+            envelope.params.get("workspace_root_path") or ""
+        ).strip()
+        if not workspace_root:
+            return None
+        from crew.gateway.context import resolve_structured_path_references
+
+        refs = resolve_structured_path_references(
+            envelope.query,
+            workspace_root=workspace_root,
+        )
+        if not refs:
+            return None
+        return ContextContribution(params={"referenced_paths": refs})
 
     async def handle(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
-        """统一入口：按 mode 路由。"""
+        """Run one accepted operation inside a root observation trace."""
+        with bind_observation(
+            owner_account_id=str(envelope.user_id or "local"),
+            workspace_id=str(envelope.workspace_id or "default"),
+            session_id=str(envelope.session_id or ""),
+            request_id=str(envelope.request_id or ""),
+            source="backend",
+            module="gateway",
+            component="dispatcher",
+            operation="interaction.handle",
+        ):
+            with span(
+                "interaction",
+                kind="server",
+                attributes={
+                    "mode": str(envelope.mode or ""),
+                    "query_chars": len(str(envelope.query or "")),
+                },
+            ):
+                submitted = capture_payload(
+                    "user.submitted",
+                    {
+                        "query": str(envelope.query or ""),
+                        "attachments": [
+                            {
+                                "id": str(item.get("id") or ""),
+                                "name": str(item.get("name") or ""),
+                                "type": str(item.get("type") or ""),
+                                "size": item.get("size"),
+                            }
+                            for item in (envelope.attachments or [])
+                            if isinstance(item, dict)
+                        ],
+                    },
+                    attributes={"capture_layer": "server.interaction"},
+                )
+                event(
+                    "user.submitted",
+                    module="gateway",
+                    component="dispatcher",
+                    operation="interaction.handle",
+                    attributes={
+                        "payload_id": submitted.payload_id,
+                        "capture_state": submitted.capture_state,
+                    },
+                )
+                async for chunk in self._handle_inner(envelope):
+                    yield chunk
+
+    async def _handle_inner(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
+        """统一入口：完成公共前处理后解析可插拔执行 Driver。"""
         from crew.core.runctx import current_push_fn
 
         token = None
@@ -2726,8 +3845,34 @@ class CrewApp:
 
             token = current_push_fn.set(_push_for_owner)
         try:
-            workspace_root = self._enrich_workspace(envelope)
-            await self._inject_at_references(envelope, workspace_root=workspace_root)
+            self._enrich_workspace(envelope)
+            try:
+                context_report = await self.context_contributors.contribute(
+                    envelope,
+                    phase=ContextPhase.REQUEST,
+                )
+            except ContextContributionFailedError as error:
+                yield ResponseChunk.error(
+                    envelope.request_id,
+                    f"请求上下文构建失败：{error.contributor_id}",
+                    code=error.code,
+                )
+                return
+            envelope.params.update(context_report.params)
+            if context_report.prompt_parts:
+                current_parts = envelope.params.get("_context_prompt_parts")
+                if not isinstance(current_parts, list):
+                    current_parts = []
+                    envelope.params["_context_prompt_parts"] = current_parts
+                current_parts.extend(context_report.prompt_parts)
+            for failure in context_report.failures:
+                log.warning(
+                    "请求上下文贡献降级 contributor=%s generation=%s timeout=%s error=%s",
+                    failure.contributor_id,
+                    failure.generation.key,
+                    failure.timed_out,
+                    failure.message,
+                )
             from crew.agent.skills import trusted_skill_roots_from_params
             from crew.security.context import build_gateway_security_context
             from crew.security.launch import compile_process_launch
@@ -2769,72 +3914,149 @@ class CrewApp:
                         "外部智能体功能已在配置中关闭",
                     )
                     return
-            self._drain_subagent_notifications(envelope)
-            self._drain_process_notifications(envelope)
-            if envelope.mode == "team":
-                if self.team is None:
-                    yield ResponseChunk.error(envelope.request_id, "Team 模式未启用")
-                    return
-                if not envelope.params.get("external_team_id"):
-                    # 必须带 owner：session_agent_config 按账号隔离，漏传会读到空/错配置
-                    config = self._session_agent_config(
-                        envelope.session_id,
-                        owner_account_id=envelope.user_id,
-                    )
-                    team_cfg = config.get("team") if isinstance(config.get("team"), dict) else {}
-                    external_team_id = str(team_cfg.get("external_team_id") or "").strip()
-                    if external_team_id:
-                        envelope.params["external_team_id"] = external_team_id
-                async for chunk in self.team.interact(envelope):
+            if self.execution_drivers.get(envelope.mode) is not None:
+                async for chunk in self.execution_drivers.dispatch(envelope):
                     yield chunk
                 return
-
-            if envelope.mode == "dynamic_kanban":
-                if self.dynamic_kanban is None:
-                    yield ResponseChunk.error(envelope.request_id, "Dynamic Kanban 模式未启用")
-                    return
-                async for chunk in self.dynamic_kanban.interact(envelope):
-                    yield chunk
-                return
-
-            async with self.agents.lease(
-                envelope.session_id,
-                self._session_agent_config(config_session_id, owner_account_id=envelope.user_id),
-                owner_account_id=envelope.user_id,
-            ) as agent:
-                async for chunk in agent.run(envelope):
-                    yield chunk
+            yield ResponseChunk.error(
+                envelope.request_id,
+                f"执行能力不可用：{envelope.mode or '<empty>'}",
+                code="capability_unavailable",
+            )
         finally:
             if token is not None:
                 current_push_fn.reset(token)
 
 
-def build_provider_for_profile(profile: ModelProfile, stream_read_timeout: float | None = None) -> LLMProvider:
+def _vendor_llm_key(api_key: str, vendor: VendorProfile | None) -> str:
+    """配置的 api_key 优先；厂商档案的默认环境变量兜底。"""
+    if api_key:
+        return api_key
+    if vendor is not None:
+        return os.environ.get(vendor.api_key_env, "")
+    return ""
+
+
+def _construct_llm_provider(
+    *,
+    provider_id: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    temperature: float,
+    max_tokens: int | None,
+    timeout: float,
+    vision: bool,
+    api_key_resolver: ApiKeyResolver | None = None,
+) -> LLMProvider:
+    """装配 LLM Provider。
+
+    provider id 命中厂商档案（crew.providers.vendors）时：base_url、API key
+    （档案默认环境变量）、vision 取档案默认值，用户显式配置优先；OpenAI 协议
+    厂商按模型修正 compat 后传入。未命中走通用 openai/anthropic，未知 id
+    由 _provider_class 抛 ValueError。
+
+    api_key_resolver 存在时按请求重新解析凭据（厂商 env 兜底挂在 resolver
+    外层），api_key 仅作初始快照。
+    """
+    vendor = resolve_vendor(provider_id, base_url, model)
+    api_key = _vendor_llm_key(api_key, vendor)
+    if api_key_resolver is not None:
+        base_resolver = api_key_resolver
+
+        def api_key_resolver() -> str:  # noqa: F811 - 包装厂商 env 兜底后回写同名局部
+            return _vendor_llm_key(base_resolver(), vendor)
+    if vendor is not None:
+        base_url = base_url or vendor.base_url
+        vm = vendor.model(model)
+        vision = vision or bool(vm and vm.vision)
+        common = {
+            "api_key": api_key,
+            "base_url": base_url or None,
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "timeout": timeout,
+            "vision": vision,
+            "vision_max_pixels": vm.vision_max_pixels if vm else None,
+            "api_key_resolver": api_key_resolver,
+        }
+        if vendor.protocol == "openai":
+            return OpenAIProvider(compat=compat_for_model(vendor, model), **common)
+        return AnthropicProvider(**common)
+    return _provider_class(provider_id)(
+        api_key=api_key,
+        base_url=base_url or None,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        vision=vision,
+        api_key_resolver=api_key_resolver,
+    )
+
+
+def _profile_key_resolver(profile: ModelProfile, owner_account_id: str = "") -> ApiKeyResolver:
+    """按 profile 装配每次请求执行的凭据解析链（凭证库 → owner .env → env）。"""
+    owner = str(owner_account_id or "").strip()
+
+    def resolve() -> str:
+        env_map = _load_env_map(resolve_writable_env_path(owner)) if owner else None
+        return resolve_profile_api_key(
+            profile.id,
+            profile.api_key_env,
+            env_map=env_map,
+            fallback_global=not bool(owner),
+            owner_account_id=owner,
+        )
+
+    return resolve
+
+
+def build_provider_for_profile(
+    profile: ModelProfile,
+    stream_read_timeout: float | None = None,
+    *,
+    owner_account_id: str = "",
+) -> LLMProvider:
     """按指定 ModelProfile 直接创建 Provider（fallback 用，不改全局激活模型）。"""
-    provider_cls = _provider_class(profile.provider)
-    return provider_cls(
+    return _construct_llm_provider(
+        provider_id=profile.provider,
         api_key=profile.api_key,
-        base_url=profile.base_url or None,
+        base_url=profile.base_url,
         model=profile.model,
         temperature=profile.temperature,
         max_tokens=profile.max_tokens,
         timeout=stream_read_timeout if stream_read_timeout is not None else profile.timeout,
         vision=profile.supports_vision,
+        api_key_resolver=_profile_key_resolver(profile, owner_account_id),
     )
 
 
 def build_provider(cfg: Config) -> LLMProvider:
     """按当前激活模型配置创建 Provider。"""
-    if cfg.has_llm_key:
-        provider_cls = _provider_class(cfg.provider)
-        provider: LLMProvider = provider_cls(
-            api_key=cfg.api_key,
-            base_url=cfg.base_url or None,
+    vendor = resolve_vendor(cfg.provider, cfg.base_url, cfg.model)
+    # 激活 profile 的 key 已按解析链（凭证库 → env）解析完毕；启动路径的
+    # cfg.api_key 未必同步过，门与入参都纳入 profile key，避免凭证库配置
+    # 因为顶层 api_key 为空而误落 FakeProvider。
+    active_profile_key = cfg.active_model.api_key
+    if cfg.has_llm_key or active_profile_key or bool(vendor and os.environ.get(vendor.api_key_env)):
+        active_profile = cfg.active_model
+        provider: LLMProvider = _construct_llm_provider(
+            provider_id=cfg.provider,
+            api_key=cfg.api_key or active_profile_key,
+            base_url=cfg.base_url,
             model=cfg.model,
             temperature=cfg.temperature,
             max_tokens=cfg.max_tokens,
             timeout=cfg.stream_read_timeout,
             vision=cfg.active_model.supports_vision,
+            api_key_resolver=lambda: resolve_profile_api_key(
+                active_profile.id,
+                active_profile.api_key_env,
+                fallback_global=True,
+                owner_account_id="",
+            ),
         )
         log.info("使用 %s Provider，profile=%s model=%s base_url=%s", cfg.provider, cfg.active_model_id, cfg.model, cfg.base_url or "默认")
         return provider
@@ -2853,18 +4075,6 @@ def _provider_class(provider: str):
         return AnthropicProvider
     raise ValueError(f"未知模型 provider: {provider}")
 
-
-def _browser_manager_from_plugins(plugins: PluginManager):
-    """从已加载的 browser 插件取回 BrowserManager；未加载/加载失败返回 None。"""
-    loaded = plugins.get_plugin("browser")
-    if loaded is None or not loaded.enabled or loaded.manifest.path is None:
-        return None
-    module_key = (loaded.manifest.key or loaded.manifest.name).replace("/", "_").replace("-", "_")
-    module = sys.modules.get(f"crew_runtime_plugins.{module_key}")
-    manager = getattr(module, "manager", None) if module is not None else None
-    if manager is None:
-        log.warning("browser 插件已加载但未暴露 BrowserManager")
-    return manager
 
 
 def build_app(config: Config | None = None, *, enable_team: bool = True) -> CrewApp:
@@ -2892,18 +4102,38 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
     session_store = SQLiteSessionStore(cfg.db_path)
     workspace_store = SQLiteWorkspaceStore(cfg.db_path)
-    from crew.state.channel_bindings import ChannelBindingsStore
+    from crew.channels.channel_bindings import ChannelBindingsStore
+    from crew.channels.channel_session_routes import ChannelSessionRouteStore
 
-    channel_bindings = ChannelBindingsStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
-    external_agents = ExternalAgentStore(cfg.db_path)
+    # channels 域 2 表在独立库（ADR-0038 拆库最后一批，随 P2-7 归属迁移）；
+    # legacy_db_path 触发 copy-on-first-activate（crew.db 旧行保留作回退备份）。
+    # 本切片只拆库与归位，生命周期形态（build_app 直构、随 App 存亡）不变。
+    channels_db_path = resolve_crew_home_path(cfg.channels_db_path)
+    channel_bindings = ChannelBindingsStore(
+        channels_db_path,
+        wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
+    )
+    channel_session_routes = ChannelSessionRouteStore(
+        channels_db_path,
+        wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
+    )
     from crew.state.plugin_preferences import PluginPreferencesStore
+    from crew.team.external_store import TeamExternalAgentStore
 
     plugin_prefs = PluginPreferencesStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
-    memory = SQLiteMemory(
-        db_path=cfg.memory_db_path,
-        wal_enabled=cfg.sqlite_wal,
-    )
-    log.info("memory.db 路径: %s", cfg.memory_db_path)
+    # 内置记忆默认关闭（memory_enabled=false，见 Config 字段注释）：默认装配
+    # NullMemory；显式开启后才用 SQLiteMemory（demo 级关键词召回）。
+    if cfg.memory_enabled:
+        memory: MemoryProvider = SQLiteMemory(
+            db_path=cfg.memory_db_path,
+            wal_enabled=cfg.sqlite_wal,
+        )
+        log.info("memory.db 路径: %s", cfg.memory_db_path)
+    else:
+        memory = NullMemory()
+        log.info("内置记忆已关闭（runtime.memory_enabled=false）；如需跨会话记忆请显式开启，或接入 MCP memory server")
     plugins = PluginManager(
         [LoggingPlugin()],
         registry=registry,
@@ -2920,61 +4150,100 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
     # Skill 扫描纳入已加载插件的 skills/ 根（动态取值：插件卸载后下轮不再出现）
     configure_plugin_skill_roots(plugins.plugin_skill_roots)
-    from crew.gateway.platform_registry import platform_registry
+    from crew.channels.platform_registry import platform_registry
 
     cfg.apply_platform_config_bridges(platform_registry.all_entries())
 
     app = CrewApp(cfg, provider, registry, session_store, workspace_store, memory, plugins)
+    # Diagnostics are a disposable projection.  Construct it after the App so
+    # failures (permissions, incompatible SQLite file, full disk) can degrade to
+    # Noop without affecting the session/provider stores.
+    try:
+        observability_config = cfg.observability if isinstance(cfg.observability, dict) else {}
+        configured_path = str(observability_config.get("db_path") or "").strip()
+        trace_path = (
+            resolve_crew_home_path(configured_path)
+            if configured_path
+            else str(get_crew_home() / "observability" / "traces.sqlite3")
+        )
+        trace_store = TraceStore(trace_path, wal=cfg.sqlite_wal)
+        recorder = ObservationRecorder(
+            trace_store,
+            policy=ObservationPolicy.from_config(cfg),
+        )
+        policy = recorder.policy
+        trace_store.set_disk_budget(policy.max_disk_bytes)
+        trace_store.maintenance(
+            process_instance_id=recorder.process_instance_id,
+            retention_days=policy.retention_days,
+            max_disk_bytes=policy.max_disk_bytes,
+            export_dir=trace_store.path.parent / "exports",
+        )
+        trace_store.recover_export_jobs(process_instance_id=recorder.process_instance_id)
+        app.observability_store = trace_store
+        app.observability = recorder
+        install_sink(recorder)
+        import logging
+
+        bridge = ObservationLogHandler(recorder)
+        bridge.setFormatter(logging.Formatter("%(message)s"))
+        logging.getLogger().addHandler(bridge)
+        app._observability_log_handler = bridge
+    except Exception as exc:  # noqa: BLE001 - tracing cannot block app startup
+        log.warning("可观测存储不可用，已降级为 no-op: %s", exc)
     # Plugins are discovered before CrewApp constructs the security service.
     # Publish these live dependencies afterward; plugin tools retain the shared
     # services mapping and therefore see the production authorization boundary.
-    plugins.services.update(
+    plugins.publish_host_services(
         {
             "workspace_store": workspace_store,
             "security_service": app.security_service,
         }
     )
+    plugins.retry_waiting()
     register_builtin_tools(
         registry,
         workspace_store=workspace_store,
         security_service=app.security_service,
     )
-    from crew.sites import (
-        SQLiteSiteStore,
-        SiteManager,
-        register_site_capability_profiles,
-    )
-    from crew.tools.blueprint_tools import register_blueprint_tools
-    from crew.tools.site_tools import register_site_tools
+    from crew.sites import build_sites_feature
 
-    app.sites = SiteManager(SQLiteSiteStore(cfg.db_path, wal_enabled=cfg.sqlite_wal))
-    register_site_capability_profiles(app.capability_profiles)
-    register_site_tools(
+    sites_feature = build_sites_feature(
+        app,
         registry,
-        app.sites,
+        # sites 域 10 表（store 4 + blueprint 6，同库）在 crew_data/sites.db
+        # （ADR-0038 拆库收尾批）；legacy_db_path 触发 copy-on-first-activate：
+        # crew.db 里若还有旧 sites 表且 sites.db 对应半域为空，则各半域单事务
+        # 整表复制，旧行保留作回退备份。公共构造点是 feature 的 Manager 工厂
+        # （每次 Generation 新建 store 时都会带上 legacy 参数，域级 gate 幂等）。
+        db_path=resolve_crew_home_path(cfg.sites_db_path),
+        wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
         workspace_store=workspace_store,
         security_service=app.security_service,
     )
-    register_blueprint_tools(
-        registry,
-        app.sites,
-        workspace_store=workspace_store,
-        security_service=app.security_service,
-    )
-    # Browser 能力由 plugins/browser 插件装配（创建 BrowserManager、注册 browser_use）。
-    # 系统级禁用/未加载时保持 None，面板路由与 startup/aclose 已有 None 兜底。
-    app.browser_manager = _browser_manager_from_plugins(plugins)
+    # 保留 build_app 后的候选 Manager 兼容视图；Runtime 激活/更新时以
+    # Generation 身份动态维护同一属性，Gateway 只读取当前 host binding。
+    app.sites = sites_feature.manager
+    app.declare_managed_feature(sites_feature.definition)
     app.channel_bindings = channel_bindings
+    app.channel_session_routes = channel_session_routes
     app.plugin_prefs = plugin_prefs
-    app.external_agents = external_agents
-    from crew.gateway.channel_sessions import register_channel_session_tools
+    from crew.channels.feature import build_channels_feature
 
-    register_channel_session_tools(registry, session_store)
-    register_external_agent_tools(
-        registry,
-        external_agents,
-        interaction_bridge_getter=lambda: app.interaction_bridge,
+    channels_feature = build_channels_feature(
+        app,
+        registry=registry,
+        session_store=session_store,
     )
+    app.channel_manager = channels_feature.service.channel_manager
+    app.delivery_router = channels_feature.service.delivery_router
+    app.declare_managed_feature(channels_feature.definition)
+    from crew.agent.subagent import SubagentRegistry, build_subagent_feature
+
+    # Preset 文件先由 Registry 读取；Wiki Feature 会在后面 claim 自己的
+    # product-owned preset，通用 preset 随后由 product.subagent 发布。
+    sub_registry = SubagentRegistry()
     from crew.tasks.tools import register_task_tools
 
     register_task_tools(registry, app.tasks)
@@ -2985,358 +4254,144 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     app.plan_manager = PlanModeManager(session_store=session_store)
     register_plan_tools(registry, app.plan_manager)
 
-    # Wiki：存储 + 编译器 + 查询器 + 摘要器 + 专用会话状态 + 工具
-    from crew.wiki import (
-        FileSystemWikiStore,
-        WikiCompiler,
-        WikiSessionManager,
-        WikiQuerier,
-        WikiSummarizer,
-        build_embedding_provider,
-    )
-    from crew.wiki.tools import register_wiki_tools
-    wiki_storage_root = cfg.wiki.storage.resolved_root() if cfg.wiki else None
-    semantic = cfg.wiki.semantic if cfg.wiki else None
-    embedding_provider = build_embedding_provider(
-        semantic,
-        api_key=cfg.api_key,
-        base_url=cfg.base_url,
-    )
-    app._embedding_provider = embedding_provider
-    app._wiki_store = FileSystemWikiStore(
-        storage_root=wiki_storage_root,
-        embedding_provider=embedding_provider,
-        provider_for_owner=app.owner_embedding_provider,
-        semantic_rank_weight=semantic.rank_weight if semantic else 40.0,
-        semantic_min_similarity=semantic.min_similarity if semantic else 0.0,
-        semantic_batch_size=semantic.batch_size if semantic else 64,
-    )
+    # Wiki：由 Product Feature Bundle 统一拥有 Store、Service、Tools、Context
+    # 与后台任务。Bundle 的兼容模式在同步 build_app 中立即激活，使旧 CLI、
+    # ASGI transport 和 Work 暂存适配器仍能读取动态兼容视图。
+    from crew.wiki import build_wiki_feature
+    from crew.wiki.config import WikiConfig
+
+    wiki_feature_config = WikiConfig.from_raw(cfg.wiki_config)
+    wiki_storage_root = wiki_feature_config.storage.resolved_root()
     if wiki_storage_root is not None:
         log.info("Wiki 独立存储根目录: %s", wiki_storage_root)
-    app.wiki_manager = WikiSessionManager(store=app._wiki_store)
-    # wiki 编译/摘要可用 wiki.model 指定独立模型档案（如更快的 flash 模型）。
-    # 未指定时优先继承当前 Agent 实际生效的 Provider，使会话级模型切换同样作用于
-    # wiki_plan_ingest 等工具内部的二次 LLM 调用；脱离 Agent 上下文的 Wiki API/后台
-    # 任务才回退当前 owner 的默认模型。
-    wiki_provider = provider
-    wiki_provider_is_explicit = False
-    wiki_model_id = (cfg.wiki.model or "").strip() if cfg.wiki else ""
-    if wiki_model_id:
-        wiki_profile = cfg.model_profiles.get(wiki_model_id)
-        if wiki_profile is not None and wiki_profile.api_key:
-            wiki_provider = build_provider_for_profile(wiki_profile, cfg.stream_read_timeout)
-            wiki_provider_is_explicit = True
-            app._auxiliary_providers.append(wiki_provider)
-            log.info("Wiki 使用独立模型 profile=%s model=%s", wiki_model_id, wiki_profile.model)
-        else:
-            log.warning(
-                "wiki.model=%s 未找到可用模型档案，回退当前会话模型或 owner 默认模型",
-                wiki_model_id,
-            )
-    wiki_provider_resolver = None
-    if not wiki_provider_is_explicit:
-        from crew.core.runctx import current_provider
-
-        def _wiki_runtime_provider(owner_account_id: str = "") -> LLMProvider:
-            session_provider = current_provider.get()
-            if session_provider is not None:
-                return session_provider
-            return app.owner_team_provider(owner_account_id)
-
-        wiki_provider_resolver = _wiki_runtime_provider
-
-    app._wiki_summarizer = WikiSummarizer(
-        app._wiki_store,
-        wiki_provider,
-        provider_for_owner=wiki_provider_resolver,
-    )
-    app._wiki_compiler = WikiCompiler(
-        app._wiki_store,
-        wiki_provider,
-        summarizer=app._wiki_summarizer,
-        provider_for_owner=wiki_provider_resolver,
-    )
-    from crew.wiki.rerank import OwnerRerankerResolver
-
-    def _wiki_rerank_settings(owner: str):
-        rerank = cfg.owner_rerank_config(owner)
-        owner_semantic = cfg.owner_semantic_config(owner)
-        if not rerank.enabled:
-            return rerank, "", ""
-        env_map = cfg.owner_env_map(owner) if owner else None
-        key_env = rerank.api_key_env or owner_semantic.api_key_env
-        allow_global = not owner or cfg._owner_builtin_allows_global_key_fallback(owner)
-        key = _lookup_api_key(
-            key_env, env_map, fallback_global=allow_global,
-        )
-        if not key and not key_env and allow_global:
-            key = cfg.api_key
-        endpoint = rerank.base_url or owner_semantic.base_url
-        if not endpoint and owner_semantic.provider == "openai":
-            endpoint = cfg.base_url
-        return rerank, key, endpoint
-
-    app._wiki_reranker_resolver = OwnerRerankerResolver(_wiki_rerank_settings)
-    app._wiki_querier = WikiQuerier(
-        app._wiki_store,
-        fuse_weight=semantic.fuse_weight if semantic else 0.9,
-        candidate_limit=cfg.wiki.query.retrieval_candidates,
-        rerank_limit=cfg.wiki.query.rerank_candidates,
-        reranker_for_owner=app._wiki_reranker_resolver,
-    )
-
-    register_wiki_tools(
+    wiki_feature = build_wiki_feature(
+        app,
         registry,
-        app._wiki_store,
-        app._wiki_compiler,
-        app._wiki_querier,
-        app.wiki_manager,
-        config=cfg.wiki,
+        provider=provider,
+        config=wiki_feature_config,
+        storage_root=wiki_storage_root,
         session_store=session_store,
         workspace_store=workspace_store,
         security_service=app.security_service,
+        provider_factory=lambda profile: build_provider_for_profile(
+            profile,
+            cfg.stream_read_timeout,
+        ),
+        runtime=plugins.feature_runtime,
+        activate=True,
+        preset_source=sub_registry,
     )
+    app.declare_managed_feature(wiki_feature.definition)
 
-    from crew.work.briefs import WorkBriefStore
-    from crew.work.items import WorkItemStore
-    from crew.work.knowledge import WorkKnowledgeStore
-    from crew.work.preferences import WorkPreferenceStore
-    from crew.work.references import WorkReferenceStore
-    from crew.work.service import LLMPreferenceExtractor, WorkService
-    from crew.work.settings import WorkSettingsStore
-    from crew.work.sources import WorkSourceStore
-    from crew.work.templates import WorkTemplateStore
+    # Subagent Feature owns its Generation-scoped store, runtime, tools,
+    # notifications, route, lifecycle events and preset contributions.
+    app.subagent_registry = sub_registry
+    subagent_feature = build_subagent_feature(
+        host=app,
+        sub_registry=sub_registry,
+        db_path=resolve_crew_home_path(cfg.subagent_db_path),
+        wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
+        retain_days=cfg.subagent_retain_runs_days,
+        default_provider=cfg.subagent_default_provider,
+        fork_enabled=cfg.subagent_fork_enabled,
+        max_depth=cfg.subagent_max_depth,
+        continuable_enabled=cfg.subagent_continuable,
+        idle_timeout=cfg.tasks_subagent_inactivity_timeout_seconds,
+        max_runtime=cfg.tasks_subagent_execution_timeout_seconds,
+    )
+    app._install_builtin_feature(subagent_feature.definition)
+
+    # External runtimes optionally consume the Subagent service. Activating it
+    # after Subagent makes that service available without a reverse dependency.
+    external_feature = build_external_agent_feature(
+        app,
+        registry=registry,
+        # external 域 4 表在 crew_data/external.db、team 域 2 表在
+        # crew_data/team.db（ADR-0038 第四批，一次双库）；legacy_db_path 触发
+        # copy-on-first-activate：crew.db 里若还有旧表且分库为空，则分域单事务
+        # 整表复制，旧行保留作回退备份。唯一构造点在 catalog_factory，team
+        # feature 经 external_store_provider 动态解析同一门面实例。
+        catalog_factory=lambda: TeamExternalAgentStore(
+            resolve_crew_home_path(cfg.external_db_path),
+            team_db_path=resolve_crew_home_path(cfg.team_db_path),
+            legacy_db_path=cfg.db_path,
+            # 跨 Feature 生命周期经动态解析的 Catalog 走显式接口；
+            # external-agents Generation 未激活时门面 fail-closed。
+            external_catalog_provider=app.current_external_catalog,
+        ),
+        provider_factory=AdapterRuntimeProvider,
+        interaction_bridge_getter=lambda: app.interaction_bridge,
+        own_provider=True,
+    )
+    app._install_builtin_feature(external_feature.definition)
+    app.declare_managed_feature(external_feature.definition)
+
+    from crew.features.hooks import hook_registry
+    from crew.work.feature import build_work_feature
+    from crew.work.service import LLMPreferenceExtractor
 
     async def _notify_work_owner(owner_account_id: str, payload: dict[str, Any]) -> None:
         if app._notify_owner_fn is not None:
             await app._notify_owner_fn(owner_account_id, payload)
 
-    app.work_service = WorkService(
-        references=WorkReferenceStore(
-            cfg.db_path,
-            session_store=session_store,
-            wal_enabled=cfg.sqlite_wal,
-        ),
-        preferences=WorkPreferenceStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
-        items=WorkItemStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
-        sources=WorkSourceStore(
-            cfg.db_path,
-            approved_source_keys=set(),
-            adapters={},
-            wal_enabled=cfg.sqlite_wal,
-        ),
-        briefs=WorkBriefStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
-        settings=WorkSettingsStore(
-            cfg.db_path,
-            workspace_store=workspace_store,
-            wal_enabled=cfg.sqlite_wal,
-        ),
-        templates=WorkTemplateStore(cfg.db_path, wal_enabled=cfg.sqlite_wal),
-        knowledge=WorkKnowledgeStore(
-            cfg.db_path,
-            wiki_store=app._wiki_store,
-            wal_enabled=cfg.sqlite_wal,
-        ),
-        session_store=session_store,
-        workspace_store=workspace_store,
+    work_feature = build_work_feature(
+        app,
+        # work 域 15 表在独立库（ADR-0038 第二批）；legacy_db_path 触发
+        # copy-on-first-activate：crew.db 里若还有旧 work 表且 work.db 为空，
+        # 则 15 表单事务整表复制，旧行保留作回退备份。
+        db_path=resolve_crew_home_path(cfg.work_db_path),
+        wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
         preference_extractor=LLMPreferenceExtractor(provider),
         preference_notifier=_notify_work_owner,
+        hook_registry=hook_registry,
+        runtime=plugins.feature_runtime,
+        activate=True,
     )
+    # Route Registry needs a visible first Generation while create_app() mounts
+    # the startup route tree. Managed lifecycle still owns every later stop or
+    # replacement, and the host binding remains a compatibility view.
+    app.work_service = work_feature.service
+    app.declare_managed_feature(work_feature.definition)
 
-    # subagent：预设注册表 + delegate_task / run_agent / collect_subagent（toolset='subagent'）
-    from crew.agent.subagent import ActiveSubagents, SubagentRegistry, register_subagent_tools
+    # Cron 数据平面在停用后仍保留，Scheduler/Tools/Context 则由同一
+    # product.cron Generation 在宿主事件循环中事务激活。
+    # cron 表在独立库（ADR-0038）；legacy_db_path 触发 copy-on-first-activate
+    # 迁移：crew.db 里若还有旧 cron 表且 cron.db 为空，则单事务整表复制。
+    from crew.cron import CronJobStore, build_cron_feature
 
-    sub_registry = SubagentRegistry()
-    app.subagent_registry = sub_registry
-    app.subagent_active = ActiveSubagents()
-    from crew.tasks.task_manager import LegacyTaskManagerAdapter
-
-    app.subagent_tasks = LegacyTaskManagerAdapter(app.tasks)
-
-    def _launch_background(coro) -> None:
-        """把后台子 agent 协程起飞成 asyncio 任务并持有强引用，完成后移除。"""
-        task = asyncio.ensure_future(coro)
-        app._subagent_bg_tasks.add(task)
-        task.add_done_callback(app._subagent_bg_tasks.discard)
-
-    register_subagent_tools(
+    app.cron_store = CronJobStore(
+        resolve_crew_home_path(cfg.cron_db_path),
+        wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
+    )
+    cron_feature = build_cron_feature(
+        app,
         registry,
-        sub_registry,
-        build_child=app._make_subagent,
-        max_concurrent=cfg.subagent_max_concurrent,
-        max_tasks=cfg.subagent_max_tasks,
-        idle_timeout=cfg.tasks_subagent_inactivity_timeout_seconds,
-        max_runtime=cfg.tasks_subagent_execution_timeout_seconds,
-        active=app.subagent_active,
-        tasks=app.subagent_tasks,
-        launch_background=_launch_background,
-        on_background_done=app._on_subagent_background_done,
-        background_capacity=lambda: len(app._subagent_bg_tasks) < cfg.subagent_max_concurrent,
-        on_collected=app._on_subagent_collected,
+        app.cron_store,
+        enabled=cfg.cron_enabled,
+        max_parallel_jobs=cfg.cron_max_parallel_jobs,
     )
-
-    # cron：任务存储 + 引擎 + 暴露给 agent 的工具
-    from crew.cron import CronJobStore, CronService
-    from crew.cron.tools import EXTERNAL_ORIGIN_PLATFORMS
-    from crew.tools.cron_tools import register_cron_tools
-
-    cron_store = CronJobStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
-    app.cron_store = cron_store
-    app.cron_service = None
-    if cfg.cron_enabled:
-        def _cron_origin_source(env: Envelope):
-            raw = env.params.get("cron_origin_source")
-            if not isinstance(raw, dict) or not raw:
-                return None
-            try:
-                from crew.gateway.session_context import SessionSource
-
-                return SessionSource.from_dict(raw)
-            except Exception:  # noqa: BLE001
-                log.warning("cron origin_source 无法解析 session=%s raw=%s", env.session_id, raw)
-                return None
-
-        async def _notify_cron_session(kind: str, env: Envelope, session_id: str) -> None:
-            """Notify the active Owner that a Cron Fire created or updated a session."""
-            if app._notify_owner_fn is None:
-                return
-            try:
-                await app._notify_owner_fn(
-                    env.user_id,
-                    {
-                        "kind": kind,
-                        "body": {
-                            "job_id": str(env.params.get("cron_job_id") or ""),
-                            "job_name": str(env.params.get("cron_job_name") or "").strip(),
-                            "source_session_id": str(
-                                env.params.get("cron_source_session_id") or ""
-                            ),
-                        },
-                        "session_id": session_id,
-                        "is_final": True,
-                        "sequence": 0,
-                    },
-                )
-            except Exception:  # noqa: BLE001
-                log.debug("cron 广播会话事件失败 kind=%s session=%s", kind, session_id)
-
-        async def _cron_runner(env: Envelope) -> None:
-            # 走 SessionDispatcher：尊重忙时策略 / 全局并发上限，与 WS/平台入口同一调度
-            final_text, error = "", ""
-            deliver_target = str(env.params.get("cron_deliver") or "").strip()
-            origin = _cron_origin_source(env)
-
-            # origin 只对当前 DeliveryRouter 支持的外部渠道有效。Web/local/missing
-            # 必须回退新会话，否则会把本地来源误当作外部 sender 并在执行后失败。
-            if deliver_target.lower() == "origin" and (
-                origin is None or origin.platform not in EXTERNAL_ORIGIN_PLATFORMS
-            ):
-                log.debug("cron deliver origin 无外部 sender，fallback 为新建会话")
-                deliver_target = "new_session"
-
-            # 默认/新会话投递：每个任务一个固定的投递会话（首次触发创建、后续触发追加），
-            # 分钟级任务不再每次触发刷一个同名新会话。"local" 表示显式投递回原绑定会话。
-            if deliver_target in {"", "new_session"}:
-                job_name = str(env.params.get("cron_job_name") or "").strip()
-                new_sid = f"{str(env.params.get('cron_job_id') or 'job')}_feed"
-                already_exists = app.session_store.session_belongs_to(
-                    new_sid, owner_account_id=env.user_id
-                )
-                app.session_store.ensure_session(
-                    new_sid,
-                    workspace_id=env.workspace_id,
-                    title=f"[定时] {job_name}" if job_name else "[定时] 任务",
-                    owner_account_id=env.user_id,
-                )
-                env.session_id = new_sid
-                await _notify_cron_session(
-                    "cron_session_updated" if already_exists else "cron_session_created",
-                    env,
-                    new_sid,
-                )
-                deliver_target = "new_session"
-
-            if origin is not None and "session_context" not in env.params:
-                from crew.gateway.session_context import SessionContext
-
-                env.params["session_context"] = SessionContext(
-                    source=origin,
-                    connected_platforms=["local", origin.platform],
-                    shared_multi_user=origin.chat_type in {"group", "channel"},
-                    session_id=env.session_id,
-                    workspace_id=env.workspace_id,
-                )
-            async for chunk in app.dispatch(env):
-                # 有活跃 WS 时实时推送，无则只落库（用户下次打开可见）
-                if app._push_fn is not None:
-                    try:
-                        await app._push_fn(env.session_id, chunk, owner_account_id=env.user_id)
-                    except Exception:  # noqa: BLE001
-                        log.debug("cron 推送 chunk 失败，session=%s", env.session_id)
-                # 捕获最终文本/错误，供投递到外部渠道（如 feishu:chat_id）
-                if chunk.kind == "final":
-                    final_text = chunk.body.get("text", "")
-                elif chunk.kind == "error":
-                    error = chunk.body.get("message", "")
-            if deliver_target.lower() == "local":
-                await _notify_cron_session("cron_session_updated", env, env.session_id)
-            # 投递：把 cron 结果发到 deliver 指定的渠道（delivery_router 由 gateway 装配）
-            if deliver_target and deliver_target.lower() not in {"local", "new_session"}:
-                reply = (final_text or error).strip()
-                if reply:
-                    if app.delivery_router is None:
-                        raise RuntimeError("cron deliver 需要 gateway delivery router")
-                    result = await app.delivery_router.deliver(
-                        deliver_target,
-                        reply,
-                        origin=origin,
-                        owner_account_id=env.user_id,
-                    )
-                    if not result.get("ok"):
-                        log.warning("cron deliver 失败 target=%s err=%s",
-                                    deliver_target, result.get("error"))
-                        raise RuntimeError(str(result.get("error") or f"deliver failed: {deliver_target}"))
-
-        app.cron_service = CronService(
-            cron_store,
-            _cron_runner,
-            max_parallel_jobs=cfg.cron_max_parallel_jobs,
-        )
-    register_cron_tools(registry, cron_store, app.cron_service)
+    # 保留 build_app 后可检查候选 Service 的兼容视图；Runtime 激活/更新时
+    # 会原子维护同一属性，Gateway 通过动态 getter 消费。
+    app.cron_service = cron_feature.service
+    app.declare_managed_feature(cron_feature.definition)
 
     # MCP Client：连接外部 MCP server（在 startup 时实际连接）
     from crew.tools.mcp_client import MCPClientManager
     app.mcp_manager = MCPClientManager(cfg.mcp_servers)
 
-    from crew.dynamickanban.store import SQLiteKanbanStore
+    from crew.dynamickanban.feature import build_dynamic_kanban_feature
 
-    dk_store = SQLiteKanbanStore(cfg.db_path, wal_enabled=cfg.sqlite_wal)
-
-    if enable_team:
-        from crew.team.team_manager import InProcessTeamManager
-        app.set_team_manager(
-            InProcessTeamManager(
-                provider=provider,
-                registry=registry,
-                session_store=session_store,
-                memory=memory,
-                plugins=plugins,
-                tasks=LegacyTaskManagerAdapter(app.tasks),
-                config=cfg,
-                external_store=app.external_agents,
-                interaction_bridge=app.interaction_bridge,
-                kanban_store=dk_store,
-                drain_subagent_notifications=app.pop_subagent_notifications,
-                provider_for_owner=app.owner_team_provider,
-                provider_for_member_model=app.owner_team_member_model_provider,
-            )
-        )
-
-    # Dynamic Kanban：独立的多智能体协同后端
-    from crew.dynamickanban.manager import DynamicKanbanManager
-
-    app.dynamic_kanban = DynamicKanbanManager(
-        store=dk_store,
+    dk_feature = build_dynamic_kanban_feature(
+        app,
+        # kanban 域 6 表在独立库（ADR-0038 第三批）；legacy_db_path 触发
+        # copy-on-first-activate：crew.db 里若还有旧 kanban 表且 kanban.db 为空，
+        # 则 6 表单事务整表复制，旧行保留作回退备份。
+        db_path=resolve_crew_home_path(cfg.kanban_db_path),
+        wal_enabled=cfg.sqlite_wal,
+        legacy_db_path=cfg.db_path,
         provider=provider,
         base_registry=registry,
         session_store=session_store,
@@ -3346,7 +4401,37 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         provider_for_owner=app.owner_team_provider,
     )
 
-    from crew.gateway.hooks import hook_registry
+    from crew.tasks.task_manager import LegacyTaskManagerAdapter
+
+    team_feature = build_team_feature(
+        app,
+        registry=registry,
+        session_store=session_store,
+        memory=memory,
+        plugins=plugins,
+        tasks=LegacyTaskManagerAdapter(app.tasks),
+        config=cfg,
+        external_store=None,
+        external_store_provider=app.current_external_catalog,
+        external_services_acquirer=app.acquire_external_services,
+        interaction_bridge=app.interaction_bridge,
+        kanban_store=None,
+        kanban_consumer_provider=dk_feature.consumer_provider,
+        context_contributors=app.context_contributors,
+        provider=provider,
+        provider_for_owner=app.owner_team_provider,
+        provider_for_member_model=app.owner_team_member_model_provider,
+        enabled=enable_team,
+        runtime=plugins.feature_runtime,
+        activate=enable_team,
+    )
+    if enable_team:
+        app.declare_managed_feature(team_feature.definition)
+
+    app._install_builtin_feature(dk_feature.definition)
+    app.declare_managed_feature(dk_feature.definition)
+
+    from crew.features.hooks import hook_registry
 
     async def _promote_session_model_on_agent_end(_event: str, ctx: dict) -> None:
         sid = str(ctx.get("session_id") or "")
@@ -3363,5 +4448,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
     # 不注销会跨实例累积（Gateway 重启 / 测试批量建 App 时 emit 会扇出到所有失效闭包）
     app._promote_session_model_hook = _promote_session_model_on_agent_end
     hook_registry.register("agent:end", _promote_session_model_on_agent_end)
+
+    plugins.log_startup_audit()
 
     return app

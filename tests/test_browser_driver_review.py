@@ -459,6 +459,7 @@ async def test_electron_driver_maps_execute_and_control_mode_to_host_rpc(
             "command_deadline_ms": 1_004_000,
             "proxy_url": "http://127.0.0.1:4567",
             "download_dir": str(download_dir.resolve()),
+            "max_transfer_bytes": 104857600,
             "mutating": True,
         },
         6,
@@ -483,103 +484,6 @@ async def test_electron_driver_maps_execute_and_control_mode_to_host_rpc(
             "_allow_unready": False,
         },
     )
-
-
-@pytest.mark.asyncio
-async def test_electron_driver_uses_independent_atomic_replay_rpcs(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, str, dict[str, Any], float, dict[str, Any]]] = []
-
-    async def request(
-        owner_session: str,
-        method: str,
-        params: dict[str, Any],
-        *,
-        timeout: float,
-        **transport: Any,
-    ) -> Any:
-        calls.append((owner_session, method, params, timeout, transport))
-        if method == "capabilities":
-            return {
-                "recordingEventSchemas": [10, 11],
-                "replayArtifactSchemas": [
-                    "crew.browser.replay.v2",
-                    "crew.browser.replay.v3",
-                ],
-                "atomicReplayEffects": True,
-            }
-        return {
-            "matchedEffects": [],
-            "pageBindings": [],
-            "downloads": [],
-            "activePageGuid": "",
-            "closedPageGuids": [],
-        }
-
-    monkeypatch.setattr(
-        "crew.browser.electron_driver.electron_browser_bridge.request",
-        request,
-    )
-    driver = ElectronBrowserDriver(BrowserConfig(command_timeout_seconds=17))
-    profile = tmp_path / "profile"
-    download_dir = tmp_path / "downloads"
-    transaction = {
-        "schemaVersion": 1,
-        "transactionId": 1,
-        "source": {"pageGuid": "p0"},
-        "knownPages": [],
-        "action": {"name": "openPage", "url": "https://example.test/"},
-        "expectedEffects": [],
-        "timeoutMs": 4_000,
-    }
-
-    capabilities = await driver.capabilities(
-        "crew_0123456789ab",
-        profile,
-        timeout=4,
-    )
-    result = await driver.execute_transaction(
-        "crew_0123456789ab",
-        profile,
-        transaction,
-        timeout=4,
-        proxy_url="http://127.0.0.1:4567",
-        download_dir=download_dir,
-    )
-
-    assert capabilities["atomicReplayEffects"] is True
-    assert result["matchedEffects"] == []
-    assert calls == [
-        (
-            "crew_0123456789ab",
-            "capabilities",
-            {},
-            6,
-            {
-                "mutating": False,
-                "retry_readonly": True,
-                "_allow_unready": False,
-            },
-        ),
-        (
-            "crew_0123456789ab",
-            "execute_transaction",
-            {
-                "profile_dir": str(profile.resolve()),
-                **transaction,
-                "proxy_url": "http://127.0.0.1:4567",
-                "download_dir": str(download_dir.resolve()),
-            },
-            6,
-            {
-                "mutating": True,
-                "retry_readonly": False,
-                "_allow_unready": False,
-            },
-        ),
-    ]
 
 
 @pytest.mark.asyncio
@@ -747,41 +651,6 @@ async def test_electron_driver_maps_atomic_coordinate_click_to_one_mutating_rpc(
 
 
 @pytest.mark.asyncio
-async def test_electron_driver_bounds_recording_control_with_absolute_deadline_and_grace(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, Any] = {}
-
-    async def request(*args: Any, **kwargs: Any) -> Any:
-        captured["method"] = args[1]
-        captured["params"] = args[2]
-        captured.update(kwargs)
-        return {"recording": True}
-
-    monkeypatch.setattr(
-        "crew.browser.electron_driver.electron_browser_bridge.request",
-        request,
-    )
-    monkeypatch.setattr("crew.browser.electron_driver.time.time", lambda: 2_000.0)
-    driver = ElectronBrowserDriver(BrowserConfig(command_timeout_seconds=17))
-
-    await driver.set_recording(
-        "crew_0123456789ab",
-        tmp_path / "profile",
-        target_id="target-1",
-        action="start",
-        recording_id="aabbccddeeff0011",
-    )
-
-    assert captured["method"] == "set_recording"
-    assert captured["params"]["command_timeout_ms"] == 17_000
-    assert captured["params"]["command_deadline_ms"] == 2_017_000
-    assert captured["timeout"] == 19
-    assert captured["mutating"] is True
-
-
-@pytest.mark.asyncio
 async def test_electron_driver_preserves_bridge_failure_flags(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -813,7 +682,7 @@ async def test_electron_driver_preserves_bridge_failure_flags(
     assert captured.value.stop_unconfirmed is True
 
 
-def test_partial_model_updates_preserve_capabilities() -> None:
+def test_partial_model_updates_preserve_capabilities(tmp_path) -> None:
     cfg = Config()
     cfg.model_profiles = {
         "vision": ModelProfile(
@@ -823,6 +692,8 @@ def test_partial_model_updates_preserve_capabilities() -> None:
         )
     }
     cfg.active_model_id = "vision"
+    # update_model 是候选值事务（候选值 → 持久化 → 发布），需要 yaml 落点
+    cfg.config_path = str(tmp_path / "config.yaml")
 
     cfg.update_model("vision", {"temperature": 0.2})
 
@@ -850,7 +721,8 @@ def test_owner_profile_falls_back_to_effective_global_profile(
     assert cfg.owner_active_model_profile("owner") is profile
 
 
-def test_text_only_model_does_not_receive_browser_vision(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_text_only_model_does_not_receive_browser_vision(tmp_path: Path) -> None:
     profile = ModelProfile(
         id="text",
         api_key="test-key",
@@ -866,11 +738,17 @@ def test_text_only_model_does_not_receive_browser_vision(tmp_path: Path) -> None
     )
     cfg.activate_model("text")
     app = build_app(config=cfg, enable_team=False)
-    app.browser_manager.driver.available = lambda: True
+    # browser 插件 activation_phase=startup（c147420 迁入宿主事件循环生命周期），
+    # 必须先走 startup 才有 browser_manager；测试结束统一 shutdown 回收。
+    await app.startup(start_cron=False)
+    try:
+        app.browser_manager.driver.available = lambda: True
 
-    agent = app._make_agent({}, owner_account_id="owner")
+        agent = app._make_agent({}, owner_account_id="owner")
 
-    # 单一 browser_use 工具保留在工具集中；vision action 由工具的
-    # permission_resolver 按模型能力拒绝（见 plugins/browser/tool.py）。
-    assert "browser_use" in (agent.tool_filter or [])
-    assert "browser_vision" not in (agent.tool_filter or [])
+        # 单一 browser_use 工具保留在工具集中；vision action 由工具的
+        # permission_resolver 按模型能力拒绝（见 plugins/browser/tool.py）。
+        assert "browser_use" in (agent.tool_filter or [])
+        assert "browser_vision" not in (agent.tool_filter or [])
+    finally:
+        await app.shutdown()

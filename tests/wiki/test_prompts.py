@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import crew.wiki
 from crew.wiki.prompts import (
     WIKI_AGENT_SYSTEM_PROMPT,
     WIKI_LIST_SOURCES_PROMPT,
     WIKI_PARSE_SOURCE_PROMPT,
 )
-from crew.agent.subagent.registry import SubagentRegistry
+from crew.agent.subagent.definition import parse_definition
 
 
 def test_agent_system_prompt_keeps_attachment_access_scoped_to_wiki_tools():
@@ -48,7 +51,11 @@ def test_default_upload_plans_deep_structure_after_searchable_source_page():
 
 def test_wiki_prompt_only_documents_exposed_ingest_workflow():
     """已移除的内部工具不得继续出现在 Wiki 预设工具列表中。"""
-    definition = SubagentRegistry().get("Wiki")
+    definition = parse_definition(
+        # ADR-0037：wiki 源码位于成员包 packages/crew-wiki，以包自身定位预设文件
+        Path(crew.wiki.__file__).parent / "presets" / "wiki.md",
+        source="feature",
+    )
     assert definition is not None
     removed = {
         "wiki_check_duplicate",

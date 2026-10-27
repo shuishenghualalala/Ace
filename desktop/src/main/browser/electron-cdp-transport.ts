@@ -145,7 +145,6 @@ export interface UnpublishedDialogResult {
   type: string;
   message: string;
   defaultValue: string;
-  matched: boolean;
 }
 
 interface ChildSessionState {
@@ -634,7 +633,6 @@ export class ElectronCdpTransport implements CdpTransport {
     view: WebContentsView,
     options: {
       accept: boolean;
-      expectedType?: string;
       promptText?: string;
     },
   ): Promise<UnpublishedDialogResult | null> {
@@ -659,8 +657,6 @@ export class ElectronCdpTransport implements CdpTransport {
     const defaultValue = typeof params.defaultPrompt === 'string'
       ? params.defaultPrompt
       : '';
-    const matched = !options.expectedType || type === options.expectedType;
-
     // beforeunload navigation bookkeeping is paired with the Dialog object in
     // playwright-core. Since core will never see this early Dialog, it must not
     // receive the buffered precursor either.
@@ -675,8 +671,8 @@ export class ElectronCdpTransport implements CdpTransport {
     tab.suppressedDialogClosed += 1;
     try {
       await view.webContents.debugger.sendCommand('Page.handleJavaScriptDialog', {
-        accept: matched && options.accept,
-        ...(matched && options.accept && options.promptText !== undefined
+        accept: options.accept,
+        ...(options.accept && options.promptText !== undefined
           ? { promptText: options.promptText }
           : {}),
       });
@@ -689,7 +685,7 @@ export class ElectronCdpTransport implements CdpTransport {
       }
       throw error;
     }
-    return { type, message, defaultValue, matched };
+    return { type, message, defaultValue };
   }
 
   /** 移除 view；会取消 pending/in-flight attach 并拒绝所有 waiter。 */

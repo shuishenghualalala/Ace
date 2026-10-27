@@ -343,6 +343,7 @@ async def ensure_ripgrep() -> Path | None:
     stale 的 managed 二进制不会被主动删除，安装成功时原子覆盖；失败时保留旧版
     比让用户一个 rg 都没有更好。
     """
+    import asyncio
     import shutil
     import tarfile
     import urllib.error
@@ -358,7 +359,7 @@ async def ensure_ripgrep() -> Path | None:
     if prefers_system_ripgrep():
         return non_managed_rg()
 
-    if managed_exists and _managed_binary_is_current(managed):
+    if managed_exists and await asyncio.to_thread(_managed_binary_is_current, managed):
         prepend_managed_bin_to_path()
         return managed
 
@@ -373,8 +374,6 @@ async def ensure_ripgrep() -> Path | None:
 
     if sys.platform == "android":
         return non_managed_rg()
-
-    import asyncio
 
     arch = _normalized_arch()
     if arch is None:

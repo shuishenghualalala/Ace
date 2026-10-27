@@ -13,13 +13,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from crew.state.home import load_soul_md, load_memory_md, load_user_md
-from crew.agent.skills import abuild_skills_index_prompt, abuild_optional_skills_index_prompt
+from crew.state.home import (
+    get_crew_home,
+    get_owner_runtime_home,
+    load_memory_md,
+    load_soul_md,
+    load_user_md,
+)
+from crew.agent.skills import (
+    build_optional_skills_index_prompt,
+    build_skills_index_prompt,
+)
 from crew.tools.process_registry import current_shell_kind
 
 logger = logging.getLogger(__name__)
@@ -76,8 +86,42 @@ DEFAULT_OUTPUT_STYLE = (
 )
 
 # ---------------------------------------------------------------------------
-# 上下文文件发现：仅 .crew.md / CREW.md
+# Prompt 文件读取：mtime 缓存 + 线程读取
+#
+# SOUL.md / CREW.md / profile 等 prompt 文件每轮组装都会读。缓存以 resolved
+# 路径为 key，记录 mtime + 内容；mtime 未变直接命中，变了才重新读盘。
+# 读盘本身在 asyncio.to_thread 里执行（见 build_prompt_parts），缓存锁保证
+# 多线程并发读写安全。
 # ---------------------------------------------------------------------------
+
+_FILE_CACHE_LOCK = threading.Lock()
+_FILE_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def _clear_file_cache() -> None:
+    """清空 prompt 文件缓存（测试隔离用）。"""
+    with _FILE_CACHE_LOCK:
+        _FILE_CACHE.clear()
+
+
+def _read_text_cached(path: Path) -> str:
+    """读文本文件，mtime 未变时直接返回缓存内容。"""
+    key = str(path)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = None
+    with _FILE_CACHE_LOCK:
+        if mtime is not None:
+            hit = _FILE_CACHE.get(key)
+            if hit is not None and hit[0] == mtime:
+                return hit[1]
+    content = path.read_text(encoding="utf-8")
+    if mtime is not None:
+        with _FILE_CACHE_LOCK:
+            _FILE_CACHE[key] = (mtime, content)
+    return content
+
 
 def _find_git_root(start: Path) -> Optional[Path]:
     """从 start 向上查找包含 .git 的目录。"""
@@ -88,33 +132,43 @@ def _find_git_root(start: Path) -> Optional[Path]:
     return None
 
 
-def _load_crew_md(cwd: Path) -> str:
-    """从 cwd 向上走到 git root，查找 .crew.md / CREW.md。
-
-    第一个找到即返回，不再继续向上。
-    """
+def _find_crew_md_file(cwd: Path) -> Optional[Path]:
+    """从 cwd 向上走到 git root，查找第一个 .crew.md / CREW.md，只发现不读内容。"""
     stop_at = _find_git_root(cwd)
     current = cwd.resolve()
     for directory in [current, *current.parents]:
         for name in [".crew.md", "CREW.md"]:
             candidate = directory / name
             if candidate.is_file():
-                try:
-                    content = candidate.read_text(encoding="utf-8").strip()
-                    if content:
-                        return f"## {name}\n\n{content}"
-                except Exception as e:
-                    logger.debug("无法读取 %s: %s", candidate, e)
+                return candidate
         # 到 git root 就停止
         if stop_at and directory == stop_at:
             break
+    return None
+
+
+def _load_crew_md(cwd: Path) -> str:
+    """从 cwd 向上走到 git root，查找 .crew.md / CREW.md。
+
+    第一个找到即返回，不再继续向上。
+    """
+    candidate = _find_crew_md_file(cwd)
+    if candidate is None:
+        return ""
+    name = candidate.name
+    try:
+        content = _read_text_cached(candidate).strip()
+        if content:
+            return f"## {name}\n\n{content}"
+    except Exception as e:
+        logger.debug("无法读取 %s: %s", candidate, e)
     return ""
 
 
 def _load_profile(profile_path: str) -> str:
     """加载 prompt profile markdown 文件。"""
     try:
-        content = Path(profile_path).read_text(encoding="utf-8").strip()
+        content = _read_text_cached(Path(profile_path)).strip()
         return content
     except Exception as e:
         logger.warning("无法加载 prompt profile %s: %s", profile_path, e)
@@ -137,6 +191,37 @@ def build_context_files_prompt(cwd: str | None = None) -> str:
 # 静态/动态分离 System Prompt 构建
 # ---------------------------------------------------------------------------
 
+_EXPLICIT_DELEGATION_DISCIPLINE = """# 子智能体委派纪律
+仅当用户、项目指令（如 AGENTS.md / CREW.md）或当前技能明确要求使用子智能体、委派或并行协作时，才可调用子智能体工具。“深入研究”“复杂任务”等描述本身不构成委派授权。
+所有子智能体共享同一工作目录，彼此改动立即可见；委派时划清文件与职责边界，不要覆盖或回退其他智能体的改动。父智能体仍对最终核验与答复负责。"""
+
+_PROACTIVE_DELEGATION_DISCIPLINE = """# 子智能体委派纪律
+当任务可被拆成边界清晰、能独立推进且并行收益明确的工作时，可以主动调用子智能体；不要为简单或强顺序依赖的工作增加委派开销。
+所有子智能体共享同一工作目录，彼此改动立即可见；委派时划清文件与职责边界，不要覆盖或回退其他智能体的改动。父智能体仍对最终核验与答复负责。"""
+
+SUBAGENT_HANDOFF_GUIDANCE = """# 子智能体交卷要求
+结束前向父智能体返回自包含结果；不要向用户提问，因为只有父智能体负责与用户沟通。明确区分已验证事实、自述与推断，只完成受委派的范围，不得继续委派给其他智能体。"""
+
+
+def _delegation_discipline(mode: str) -> str:
+    return (
+        _PROACTIVE_DELEGATION_DISCIPLINE
+        if str(mode or "").strip().lower() == "proactive"
+        else _EXPLICIT_DELEGATION_DISCIPLINE
+    )
+
+
+def append_subagent_handoff_guidance(prompt: str | None) -> str:
+    """Append the child-only handoff contract exactly once."""
+
+    base = str(prompt or "").strip()
+    if SUBAGENT_HANDOFF_GUIDANCE in base:
+        return base
+    if not base:
+        return SUBAGENT_HANDOFF_GUIDANCE
+    return f"{base}\n\n{SUBAGENT_HANDOFF_GUIDANCE}"
+
+
 def _shell_facts_block() -> str:
     """当前 shell 环境事实：与 spawn_local 实际执行 shell 保持同源。
 
@@ -156,7 +241,7 @@ def _shell_facts_block() -> str:
     return "- 内置 terminal 由 bash 执行，使用 POSIX 语法。"
 
 
-async def build_prompt_parts(
+def _build_prompt_parts_sync(
     workspace_instructions: str = "",
     memory_text: str = "",
     cwd: str | None = None,
@@ -167,6 +252,7 @@ async def build_prompt_parts(
     user_type: str = "internal",
     inject_skills: bool = False,
     include_optional_skills: bool = False,
+    delegation_mode: str = "explicit",
 ) -> dict[str, str]:
     """组装 prompt 为 system_static / user_reminder 两部分。
 
@@ -176,13 +262,13 @@ async def build_prompt_parts(
       - user_reminder: 项目文件 + workspace + skills + 记忆 + 用户画像 + 会话记忆 + 日期
                        （每轮可能变，通过 <system-reminder> 注入 user 消息）
 
-    async：磁盘读取（profile/SOUL/上下文文件/记忆/用户画像）经 asyncio.to_thread
-    移出事件循环；skills 索引走 SkillIndex 的 async 访问器，命中时纯内存。
+    sync 实现：磁盘读取（profile/SOUL/上下文文件/记忆/用户画像）直读，调用方
+    （:func:`build_prompt_parts`）负责决定在线程内还是事件循环内执行本函数。
     """
     # ── System Static 层（几乎不变） ──
     static_parts: list[str] = []
     if profile_path:
-        profile_content = await asyncio.to_thread(_load_profile, profile_path)
+        profile_content = _load_profile(profile_path)
         if profile_content:
             static_parts.append(profile_content)
 
@@ -195,7 +281,7 @@ async def build_prompt_parts(
             static_parts.append(DEFAULT_OUTPUT_STYLE)
         else:
             t = time.perf_counter()
-            soul = await asyncio.to_thread(load_soul_md)
+            soul = load_soul_md()
             logger.debug("[PERF] load_soul_md       %.3fs", time.perf_counter() - t)
             if soul:
                 static_parts.append(soul)
@@ -205,6 +291,9 @@ async def build_prompt_parts(
             static_parts.append(DEFAULT_TOOL_GUIDELINE)
             static_parts.append(DEFAULT_SAFETY_RULES)
             static_parts.append(DEFAULT_OUTPUT_STYLE)
+
+    if not lightweight:
+        static_parts.append(_delegation_discipline(delegation_mode))
 
     # ── User Reminder 层（每轮可能变） ──
     reminder_parts = []
@@ -233,18 +322,18 @@ async def build_prompt_parts(
         if workspace_instructions.strip():
             reminder_parts.append(f"# 项目提示词\n{workspace_instructions.strip()}")
         t = time.perf_counter()
-        context_files = await asyncio.to_thread(build_context_files_prompt, cwd)
+        context_files = build_context_files_prompt(cwd)
         logger.debug("[PERF] context_files      %.3fs", time.perf_counter() - t)
         if context_files:
             reminder_parts.append(context_files)
         try:
             t = time.perf_counter()
-            skills_index = await abuild_skills_index_prompt(
+            skills_index = build_skills_index_prompt(
                 enabled=enabled_skills,
                 disabled=disabled_skills,
             )
             if include_optional_skills:
-                optional_index = await abuild_optional_skills_index_prompt(
+                optional_index = build_optional_skills_index_prompt(
                     enabled=enabled_skills,
                     disabled=disabled_skills,
                 )
@@ -257,12 +346,12 @@ async def build_prompt_parts(
             pass  # skills 索引不影响主流程
 
         t = time.perf_counter()
-        memory_md = await asyncio.to_thread(load_memory_md)
+        memory_md = load_memory_md()
         logger.debug("[PERF] load_memory_md     %.3fs", time.perf_counter() - t)
         if memory_md:
             reminder_parts.append(f"# 持久记忆\n{memory_md}")
         t = time.perf_counter()
-        user_md = await asyncio.to_thread(load_user_md)
+        user_md = load_user_md()
         logger.debug("[PERF] load_user_md       %.3fs", time.perf_counter() - t)
         if user_md:
             reminder_parts.append(f"# 用户画像\n{user_md}")
@@ -272,7 +361,7 @@ async def build_prompt_parts(
     # 对照 delegate_task 的 skills 参数——只放开 skills，不放开 workspace/记忆/用户画像。
     if lightweight and inject_skills:
         try:
-            skills_index = await abuild_skills_index_prompt(
+            skills_index = build_skills_index_prompt(
                 enabled=enabled_skills,
                 disabled=disabled_skills,
             )
@@ -287,6 +376,86 @@ async def build_prompt_parts(
         "system_static": "\n\n".join(p for p in static_parts if p and p.strip()),
         "user_reminder": "\n\n".join(p for p in reminder_parts if p and p.strip()),
     }
+
+
+def _prompt_source_paths(cwd: str | None, profile_path: str | None, lightweight: bool) -> list[Path]:
+    """列出本次组装会读到的 prompt 文件（只定位不读内容），用于缓存命中预判。"""
+    paths: list[Path] = []
+    if profile_path:
+        paths.append(Path(profile_path).expanduser())
+    if not lightweight:
+        paths.append(get_crew_home() / "SOUL.md")
+        memories = get_owner_runtime_home() / "memories"
+        paths.append(memories / "MEMORY.md")
+        paths.append(memories / "USER.md")
+    if cwd:
+        found = _find_crew_md_file(Path(cwd).resolve())
+        if found is not None:
+            paths.append(found)
+    return paths
+
+
+def _all_prompt_files_cached(paths: list[Path]) -> bool:
+    """所有可 stat 到的文件 mtime 均与缓存一致时返回 True（纯 stat，不读内容）。"""
+    for path in paths:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            # 不存在/不可读的文件走读路径自行处理，不参与命中判断
+            continue
+        with _FILE_CACHE_LOCK:
+            hit = _FILE_CACHE.get(str(path))
+        if hit is None or hit[0] != mtime:
+            return False
+    return True
+
+
+async def build_prompt_parts(
+    workspace_instructions: str = "",
+    memory_text: str = "",
+    cwd: str | None = None,
+    profile_path: str | None = None,
+    lightweight: bool = False,
+    enabled_skills: list[str] | None = None,
+    disabled_skills: list[str] | None = None,
+    user_type: str = "internal",
+    inject_skills: bool = False,
+    include_optional_skills: bool = False,
+    delegation_mode: str = "explicit",
+) -> dict[str, str]:
+    """异步组装 prompt。签名与 :func:`_build_prompt_parts_sync` 完全一致。
+
+    缓存全命中（稳态热路径）时在事件循环内直接执行，不引入线程调度延迟；
+    有文件变更/未缓存时，整体放到工作线程执行，避免同步读盘阻塞事件循环。
+    """
+    if _all_prompt_files_cached(_prompt_source_paths(cwd, profile_path, lightweight)):
+        return _build_prompt_parts_sync(
+            workspace_instructions=workspace_instructions,
+            memory_text=memory_text,
+            cwd=cwd,
+            profile_path=profile_path,
+            lightweight=lightweight,
+            enabled_skills=enabled_skills,
+            disabled_skills=disabled_skills,
+            user_type=user_type,
+            inject_skills=inject_skills,
+            include_optional_skills=include_optional_skills,
+            delegation_mode=delegation_mode,
+        )
+    return await asyncio.to_thread(
+        _build_prompt_parts_sync,
+        workspace_instructions=workspace_instructions,
+        memory_text=memory_text,
+        cwd=cwd,
+        profile_path=profile_path,
+        lightweight=lightweight,
+        enabled_skills=enabled_skills,
+        disabled_skills=disabled_skills,
+        user_type=user_type,
+        inject_skills=inject_skills,
+        include_optional_skills=include_optional_skills,
+        delegation_mode=delegation_mode,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +476,7 @@ async def build_system_prompt_parts(
     .. deprecated::
         请使用 :func:`build_prompt_parts` 代替。
     """
-    parts = await build_prompt_parts(
+    parts = _build_prompt_parts_sync(
         workspace_instructions=workspace_instructions,
         memory_text=memory_text,
         cwd=cwd,
@@ -338,7 +507,7 @@ async def build_system_prompt(
 
     base 参数保留但不再作为主身份——身份由 SOUL.md 或 DEFAULT_AGENT_IDENTITY 决定。
     """
-    parts = await build_prompt_parts(
+    parts = _build_prompt_parts_sync(
         workspace_instructions=workspace_instructions,
         memory_text=memory_text,
         cwd=cwd,

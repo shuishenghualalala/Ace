@@ -33,6 +33,19 @@ export type CloseBehavior = 'tray' | 'quit' | 'ask';
 /** 菜单栏图标状态，Renderer 只上报语义状态，具体图片由主进程管理。 */
 export type TrayStatus = 'default' | 'working' | 'notification' | 'done' | 'rest';
 
+/** 托盘菜单通知条目：sourceLabel 为已本地化的来源名，缺省时菜单只显示标题。 */
+export interface TrayNotificationSummaryItem {
+  id: string;
+  title: string;
+  sourceLabel?: string | undefined;
+}
+
+/** 托盘菜单通知摘要：Renderer 上报未读数与最近未读条目，主进程校验后渲染菜单。 */
+export interface TrayNotificationSummary {
+  unreadCount: number;
+  items: TrayNotificationSummaryItem[];
+}
+
 export interface DesktopPrefs {
   closeBehavior: CloseBehavior;
   /** 加密后的 JWT（base64 string）；空表示未登录。 */

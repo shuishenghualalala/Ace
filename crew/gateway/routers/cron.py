@@ -15,7 +15,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from crew.gateway.auth import account_from_request
-from crew.gateway.platform_registry import platform_registry
+from crew.channels.platform_registry import platform_registry
 from crew.cron.jobs import format_bj_timestamp
 from crew.state.logging import get_logger
 

@@ -14,19 +14,23 @@
   TeamManager   -> crew/team/           (E)
   TaskManager   -> crew/tasks/          (E)
   Scheduler     -> crew/cron/           (E)   含 CronService/CronJobStore 定时任务引擎
+  NotificationCenter -> crew/notifications/   站内通知中心（存储 + 推送）
 
   另：MCP Client（接外部 MCP server 当工具）-> crew/tools/mcp_client.py
 """
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Protocol, runtime_checkable
 
 from crew.core.envelope import Envelope, ResponseChunk
+from crew.core.timeout_policy import DEFAULT_EXTERNAL_IDLE_SECONDS
 from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall, ToolOutput, ToolResult
+from crew.security.models import AdditionalPermissionProfile
 
 
 # --------------------------------------------------------------------------- #
@@ -44,6 +48,7 @@ class LLMProvider(ABC):
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
         reasoning_mode: str | None = None,
+        purpose: str | None = None,
     ) -> ChatResponse:
         """一次（非流式）补全。返回归一化的 ChatResponse。
 
@@ -52,6 +57,13 @@ class LLMProvider(ABC):
 
         ``response_format`` 和 ``reasoning_mode`` 是结构化短调用的可选能力；不支持的
         provider 可以忽略它们，调用方会在兼容层降级到普通 JSON 提示。
+
+        ``reasoning_mode`` 取值：None = 模型默认行为；"off"/"disabled" = 关闭思考；
+        其余为思考等级（minimal/low/medium/high/xhigh/max），由厂商档案
+        （crew.providers.vendors）映射为各家专属参数，不支持的档位被忽略。
+
+        ``purpose`` 是辅助调用的元数据标记（如 ``"compaction"`` 摘要、标题生成），
+        不进请求体；provider 可把它写进调用 trace 以便审计与计费归类。
         """
         raise NotImplementedError
 
@@ -187,6 +199,166 @@ class Agent(ABC):
         yield  # pragma: no cover  (标记为 async generator)
 
 
+def _depth_of(value: Any) -> int:
+    """Depth values are runtime bookkeeping, never caller authority: negatives
+    and non-integers collapse to zero instead of raising."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
+@dataclass(frozen=True, slots=True)
+class ChildAgentRequest:
+    """Typed request for constructing one one-shot child Agent.
+
+    This is the stable boundary between the subagent tools and the Agent
+    Feature.  Runtime-owned context (owner, access-control snapshot and model
+    capabilities) is deliberately resolved by the factory, not supplied by a
+    model-facing tool as authority.
+    """
+
+    system_prompt: str | None = None
+    toolsets: tuple[str, ...] | None = None
+    tools: tuple[str, ...] | None = None
+    model: str = "inherit"
+    max_iterations: int | None = None
+    inherit_skills: bool = False
+    skills: tuple[str, ...] | None = None
+    preset_skills: tuple[str, ...] | None = None
+    preset_name: str | None = None
+    preset_spec: Mapping[str, Any] | None = None
+    context_tags: tuple[str, ...] = ()
+    disclosure_mode: str = "progressive"
+    agent_id: str = "subagent"
+    depth: int = 0
+    output_schema: Mapping[str, Any] | None = None
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, Any],
+        *,
+        trusted_preset_spec: Mapping[str, Any] | None = None,
+    ) -> "ChildAgentRequest":
+        """Convert a payload without accepting caller-supplied preset authority.
+
+        A generation-bound preset contribution must be passed separately by
+        the host that owns its lease.  The mapping's private-looking
+        ``_preset_spec`` key is deliberately ignored.
+        """
+
+        if not isinstance(value, Mapping):
+            raise TypeError("child agent request must be a mapping")
+
+        def names(key: str) -> tuple[str, ...] | None:
+            raw = value.get(key)
+            if raw is None:
+                return None
+            if isinstance(raw, str):
+                raw = (raw,)
+            if not isinstance(raw, (list, tuple, set, frozenset)):
+                return None
+            return tuple(str(item).strip() for item in raw if str(item).strip())
+
+        preset_spec = (
+            dict(trusted_preset_spec)
+            if isinstance(trusted_preset_spec, Mapping)
+            else None
+        )
+        raw_tags = names("context_tags") or ()
+        return cls(
+            system_prompt=(
+                str(value["system_prompt"])
+                if value.get("system_prompt") is not None
+                else None
+            ),
+            toolsets=names("toolsets"),
+            tools=names("tools"),
+            model=str(value.get("model") or "inherit").strip() or "inherit",
+            max_iterations=(
+                int(value["max_iterations"])
+                if value.get("max_iterations") is not None
+                else None
+            ),
+            inherit_skills=bool(value.get("inherit_skills")),
+            skills=names("skills"),
+            preset_skills=names("preset_skills"),
+            preset_name=(
+                str(value["preset_name"]).strip()
+                if value.get("preset_name")
+                else None
+            ),
+            preset_spec=preset_spec,
+            context_tags=raw_tags,
+            disclosure_mode=(
+                str(value.get("disclosure_mode") or "progressive").strip()
+                or "progressive"
+            ),
+            agent_id=str(value.get("agent_id") or "subagent").strip() or "subagent",
+            depth=_depth_of(value.get("_delegation_depth", value.get("depth"))),
+            output_schema=(
+                dict(value["output_schema"])
+                if isinstance(value.get("output_schema"), Mapping)
+                else None
+            ),
+        )
+
+    def to_mapping(self) -> dict[str, Any]:
+        """Return a defensive legacy payload for the in-process adapter."""
+
+        payload: dict[str, Any] = {
+            "system_prompt": self.system_prompt,
+            "toolsets": list(self.toolsets) if self.toolsets is not None else None,
+            "tools": list(self.tools) if self.tools is not None else None,
+            "model": self.model,
+            "max_iterations": self.max_iterations,
+            "inherit_skills": self.inherit_skills,
+            "skills": list(self.skills) if self.skills is not None else None,
+            "preset_skills": (
+                list(self.preset_skills) if self.preset_skills is not None else None
+            ),
+            "preset_name": self.preset_name,
+            "context_tags": list(self.context_tags),
+            "disclosure_mode": self.disclosure_mode,
+            "agent_id": self.agent_id,
+            "_delegation_depth": self.depth,
+            "output_schema": (
+                dict(self.output_schema) if self.output_schema is not None else None
+            ),
+        }
+        if self.preset_spec is not None:
+            payload["_preset_spec"] = dict(self.preset_spec)
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class AgentModelResolution:
+    """Provider-neutral model selection result returned by an AgentFactory."""
+
+    requested_model: str
+    effective_model: str
+    inherited: bool
+    capabilities: tuple[str, ...] | None = None
+
+
+@runtime_checkable
+class AgentFactory(Protocol):
+    """Stable child-Agent capability exposed by the core Agent Feature.
+
+    Implementations resolve model/provider details at the boundary and may
+    cache or construct an Agent.  The request itself carries no authority;
+    ownership and policy snapshots come from the active runtime context.
+    """
+
+    def create_child(self, request: ChildAgentRequest) -> Agent: ...
+
+    def resolve_model(
+        self,
+        request: ChildAgentRequest,
+    ) -> AgentModelResolution: ...
+
+
 # --------------------------------------------------------------------------- #
 # 会话 / 状态
 # --------------------------------------------------------------------------- #
@@ -194,10 +366,10 @@ class SessionStore(ABC):
     """会话历史持久化。"""
 
     @abstractmethod
-    def load(self, session_id: str, owner_account_id: str = "") -> list[Message]: ...
+    def load(self, session_id: str, owner_account_id: str) -> list[Message]: ...
 
     @abstractmethod
-    def append(self, session_id: str, messages: list[Message], owner_account_id: str = "") -> None: ...
+    def append(self, session_id: str, messages: list[Message], owner_account_id: str) -> None: ...
 
     @abstractmethod
     def save(
@@ -205,8 +377,8 @@ class SessionStore(ABC):
         session_id: str,
         messages: list[Message],
         workspace_id: str = "default",
-        owner_account_id: str = "",
         *,
+        owner_account_id: str,
         title_fallback: str | None = None,
         last_prompt_tokens: int | None = None,
         last_prompt_tokens_source: str | None = None,
@@ -228,41 +400,76 @@ class SessionStore(ABC):
         """
         ...
 
+    async def load_async(self, session_id: str, *, owner_account_id: str) -> list[Message]:
+        """异步读路径：同步实现的 store 默认在线程池执行，不阻塞事件循环。"""
+        return await asyncio.to_thread(self.load, session_id, owner_account_id=owner_account_id)
+
+    async def save_async(
+        self,
+        session_id: str,
+        messages: list[Message],
+        workspace_id: str = "default",
+        *,
+        owner_account_id: str,
+        title_fallback: str | None = None,
+        last_prompt_tokens: int | None = None,
+        last_prompt_tokens_source: str | None = None,
+    ) -> None:
+        """异步写路径：同步实现的 store 默认在线程池执行，不阻塞事件循环。"""
+        await asyncio.to_thread(
+            self.save,
+            session_id,
+            messages,
+            workspace_id=workspace_id,
+            owner_account_id=owner_account_id,
+            title_fallback=title_fallback,
+            last_prompt_tokens=last_prompt_tokens,
+            last_prompt_tokens_source=last_prompt_tokens_source,
+        )
+
     @abstractmethod
-    def clear_prompt_usage(self, session_id: str, owner_account_id: str = "") -> None:
+    def clear_prompt_usage(self, session_id: str, owner_account_id: str) -> None:
         """清除会话上一轮的 Provider prompt usage。"""
         ...
 
     @abstractmethod
-    def clear(self, session_id: str, owner_account_id: str = "") -> None: ...
+    def clear(self, session_id: str, owner_account_id: str) -> None: ...
 
     @abstractmethod
-    def set_title(self, session_id: str, title: str, owner_account_id: str = "") -> None:
+    def set_title(self, session_id: str, title: str, owner_account_id: str) -> None:
         """设置会话标题（覆盖默认的「首条 user 消息」标题）。"""
         ...
 
     @abstractmethod
-    def set_archived(self, session_id: str, archived: bool, owner_account_id: str = "") -> None:
+    def set_archived(self, session_id: str, archived: bool, owner_account_id: str) -> None:
         """归档 / 取消归档会话。归档会话从主列表隐藏，可在归档视图查看与恢复。"""
         ...
 
     @abstractmethod
-    def set_pinned(self, session_id: str, pinned: bool, owner_account_id: str = "") -> None:
+    def set_pinned(self, session_id: str, pinned: bool, owner_account_id: str) -> None:
         """置顶 / 取消置顶会话。置顶会话在主列表排序靠前。"""
         ...
 
     @abstractmethod
-    def set_status(self, session_id: str, status: str, error: str = "", owner_account_id: str = "") -> None:
+    def set_status(self, session_id: str, status: str, owner_account_id: str, error: str = "") -> None:
         """记录上一轮运行的 terminal 结果（completed / failed）及错误信息。"""
         ...
 
+    async def set_status_async(
+        self, session_id: str, status: str, owner_account_id: str, error: str = ""
+    ) -> None:
+        """异步写路径：同步实现的 store 默认在线程池执行，不阻塞事件循环。"""
+        await asyncio.to_thread(
+            self.set_status, session_id, status, owner_account_id, error
+        )
+
     @abstractmethod
-    def get_status(self, session_id: str, owner_account_id: str = "") -> tuple[str, str]:
+    def get_status(self, session_id: str, owner_account_id: str) -> tuple[str, str]:
         """取上一轮运行结果 (last_status, last_error)；无记录返回 ("", "")。"""
         ...
 
     @abstractmethod
-    def get_workspace_id(self, session_id: str, owner_account_id: str = "") -> str | None:
+    def get_workspace_id(self, session_id: str, owner_account_id: str) -> str | None:
         """读取会话所属 workspace_id；会话不存在时返回 None（工作区隔离用）。"""
         ...
 
@@ -270,8 +477,8 @@ class SessionStore(ABC):
     def list_sessions(
         self,
         workspace_id: str | None = None,
-        owner_account_id: str = "",
         *,
+        owner_account_id: str,
         include_archived: bool = False,
     ) -> list[dict[str, Any]]:
         """列出会话摘要：[{session_id, title, message_count, updated_at, workspace_id, archived, pinned}]。
@@ -293,22 +500,21 @@ class WorkspaceStore(ABC):
         description: str = "",
         instructions: str = "",
         root_path: str = "",
-        owner_account_id: str = "",
     ) -> dict[str, Any]: ...
 
     @abstractmethod
-    def get(self, workspace_id: str, owner_account_id: str = "") -> dict[str, Any]: ...
+    def get(self, workspace_id: str, owner_account_id: str) -> dict[str, Any]: ...
 
     @abstractmethod
-    def list(self, owner_account_id: str = "") -> list[dict[str, Any]]: ...
+    def list(self, owner_account_id: str) -> list[dict[str, Any]]: ...
 
     @abstractmethod
-    def update(self, workspace_id: str, owner_account_id: str = "", **fields: Any) -> dict[str, Any]:
+    def update(self, workspace_id: str, owner_account_id: str, **fields: Any) -> dict[str, Any]:
         """更新 name/description/instructions/root_path 中的任意字段。"""
         ...
 
     @abstractmethod
-    def delete(self, workspace_id: str, owner_account_id: str = "") -> None: ...
+    def delete(self, workspace_id: str, owner_account_id: str) -> None: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -367,6 +573,28 @@ class Channel(ABC):
         """启动渠道，注入消息处理器。"""
         ...
 
+    async def stop(self) -> None:
+        """停止渠道，释放网络与任务资源。"""
+
+    def bind_app(self, app: Any) -> None:
+        """注入 CrewApp，供需要调用后端能力的渠道插件使用。"""
+
+    async def send_to_target(
+        self,
+        target: str,
+        text: str,
+        origin: Any | None = None,
+    ) -> bool:
+        """投递 outbound 文本到指定目标。"""
+        return False
+
+    def status_detail(self) -> dict[str, Any]:
+        """返回渠道运行态的扩展诊断信息。"""
+        return {}
+
+    def apply_config(self, config: Any) -> None:
+        """热应用非连接类配置变更。"""
+
 
 # --------------------------------------------------------------------------- #
 # 多智能体 Team
@@ -405,6 +633,102 @@ class TaskManager(ABC):
     @abstractmethod
     def list(self, session_id: str) -> list[dict[str, Any]]: ...
 
+    # async 门面：事件循环上的调用走 asyncio.to_thread 转发到同步实现，
+    # 线程化决策收敛在 store 侧。非抽象默认实现不影响既有第三方子类的实例化；
+    # owner_account_id 为存量同步契约的扩展参数（crew/tasks 实现必填）。
+    async def create_async(
+        self,
+        session_id: str,
+        title: str,
+        detail: str = "",
+        assignee: str | None = None,
+        *,
+        owner_account_id: str = "",
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.create, session_id, title, detail, assignee, owner_account_id=owner_account_id
+        )
+
+    async def assign_async(self, task_id: str, assignee: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self.assign, task_id, assignee)
+
+    async def update_status_async(self, task_id: str, status: str, result: str = "") -> dict[str, Any]:
+        return await asyncio.to_thread(self.update_status, task_id, status, result)
+
+    async def get_async(self, task_id: str, *, owner_account_id: str = "") -> dict[str, Any]:
+        if owner_account_id:
+            return await asyncio.to_thread(self.get, task_id, owner_account_id=owner_account_id)
+        return await asyncio.to_thread(self.get, task_id)
+
+    async def list_async(self, session_id: str, *, owner_account_id: str = "") -> list[dict[str, Any]]:
+        if owner_account_id:
+            return await asyncio.to_thread(self.list, session_id, owner_account_id=owner_account_id)
+        return await asyncio.to_thread(self.list, session_id)
+
+
+# --------------------------------------------------------------------------- #
+# 通知中心
+# --------------------------------------------------------------------------- #
+@dataclass
+class Notification:
+    """一条站内通知。payload 为跳转上下文（如 session_id / request_id），read_at=None 表示未读。"""
+
+    owner_account_id: str
+    source: str
+    kind: str
+    title: str
+    body: str = ""
+    payload: dict[str, Any] | None = None
+    id: str = ""
+    created_at: float = 0.0
+    read_at: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "source": self.source,
+            "kind": self.kind,
+            "title": self.title,
+            "body": self.body,
+            "payload": self.payload,
+            "created_at": self.created_at,
+            "read_at": self.read_at,
+        }
+
+
+class NotificationCenter(ABC):
+    """通知中心契约：各来源只调 publish，持久化/未读数/推送由实现统一负责。"""
+
+    @abstractmethod
+    def publish(self, notification: Notification) -> Notification: ...
+
+    @abstractmethod
+    def list(
+        self,
+        owner_account_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        unread_only: bool = False,
+    ) -> list[Notification]: ...
+
+    @abstractmethod
+    def unread_count(self, owner_account_id: str) -> int: ...
+
+    @abstractmethod
+    def mark_read(self, owner_account_id: str, notification_id: str) -> bool: ...
+
+    @abstractmethod
+    def mark_all_read(self, owner_account_id: str) -> int: ...
+
+    @abstractmethod
+    def mark_read_by_payload(self, source: str, key: str, owner_account_id: str) -> int:
+        """把 payload 顶层任一值等于 key 的未读通知标记已读（如审批 request_id 被处理后自动已读）。"""
+        ...
+
+    @abstractmethod
+    def clear(self, owner_account_id: str) -> int: ...
+
 
 # --------------------------------------------------------------------------- #
 # 计划任务
@@ -420,3 +744,415 @@ class Scheduler(ABC):
 
     @abstractmethod
     async def stop(self) -> None: ...
+
+
+# --------------------------------------------------------------------------- #
+# 外部 Runtime 执行契约
+# --------------------------------------------------------------------------- #
+# Executor（消费者）与 external 实现包（Provider 侧）共用的中性协议面：
+# 错误契约、流事件/执行请求 DTO、Catalog 协议与模型归一纯函数。
+# 实现包不得整体搬入 core；实现细节经同代 Service Lease / 注入解析。
+# 这些名字历史上定义在 crew.agent.external.*，原位置保留迁移期薄 re-export，
+# 待 crew-agent 与 crew-external-agents 正式拆包且消费方全部改用本模块后删除。
+
+
+class AcpAdapterError(RuntimeError):
+    """ACP 协议适配失败（executor 据此生成对话错误帧并标记会话绑定）。"""
+
+
+class ExternalCliError(RuntimeError):
+    """外部 CLI runtime 一次性执行失败。"""
+
+
+class CodexAdapterError(RuntimeError):
+    """Codex app-server 协议适配失败。"""
+
+
+class RuntimeResumeRejected(RuntimeError):
+    """Adapter rejected a native session/thread before current-turn work began."""
+
+
+PermissionDecision = Literal["allow", "deny"]
+
+
+@dataclass(frozen=True)
+class AcpPermissionRequest:
+    """Normalized inbound ACP permission request.
+
+    Policy stays outside the protocol adapter.  The adapter only validates the
+    runtime-advertised options and maps an allow/deny decision back to one of
+    those exact option ids.
+    """
+
+    session_id: str
+    tool_call: dict[str, Any]
+    options: tuple[dict[str, Any], ...]
+    raw_params: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RuntimeMcpServer:
+    """Protocol-neutral, argv-only MCP server declaration."""
+
+    name: str
+    command: str
+    args: tuple[str, ...] = ()
+    env: tuple[tuple[str, str], ...] = ()
+
+    @classmethod
+    def from_mapping(cls, raw: dict[str, Any]) -> "RuntimeMcpServer":
+        name = str(raw.get("name") or raw.get("id") or "").strip()
+        command = str(raw.get("command") or "").strip()
+        if not name or not command:
+            raise ValueError("Runtime MCP server 必须包含 name 和 command")
+        raw_args = raw.get("args")
+        args = tuple(str(item) for item in raw_args) if isinstance(raw_args, list) else ()
+        raw_env = raw.get("env")
+        env: list[tuple[str, str]] = []
+        if isinstance(raw_env, dict):
+            env.extend((str(key), str(value)) for key, value in raw_env.items())
+        elif isinstance(raw_env, list):
+            for item in raw_env:
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("name") or "").strip()
+                if key:
+                    env.append((key, str(item.get("value") or "")))
+        return cls(name=name, command=command, args=tuple(args), env=tuple(env))
+
+    def stdio_config(self, *, env_as_list: bool = False) -> dict[str, Any]:
+        config: dict[str, Any] = {
+            "name": self.name,
+            "command": self.command,
+            "args": list(self.args),
+        }
+        if self.env:
+            config["env"] = (
+                [{"name": key, "value": value} for key, value in self.env]
+                if env_as_list
+                else {key: value for key, value in self.env}
+            )
+        return config
+
+
+@dataclass
+class ExternalToolEvent:
+    name: str
+    phase: str
+    detail: str = ""
+    tool_call_id: str = ""
+    args: str = ""
+
+
+@dataclass
+class ExternalStreamEvent:
+    kind: str
+    text: str = ""
+    tool: ExternalToolEvent | None = None
+    session_id: str = ""
+    session_resumed: bool = False
+    session_reset: bool = False
+    usage: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class RuntimeExecutionRequest:
+    executable_path: str
+    provider: str
+    prompt: str
+    model: str = ""
+    cwd: str = "."
+    system_prompt: str = ""
+    launch_args: list[str] = field(default_factory=list)
+    custom_args: list[str] = field(default_factory=list)
+    custom_env: dict[str, str] = field(default_factory=dict)
+    credential_home_paths: tuple[str, ...] = ()
+    network_endpoints: tuple[str, ...] = ()
+    mcp_servers: list[RuntimeMcpServer] = field(default_factory=list)
+    additional_permissions: AdditionalPermissionProfile = field(
+        default_factory=AdditionalPermissionProfile
+    )
+    dynamic_tools: list[dict[str, Any]] = field(default_factory=list)
+    dynamic_tool_handler: Any = None
+    resume_session_id: str = ""
+    timeout: float = DEFAULT_EXTERNAL_IDLE_SECONDS
+    # Absolute monotonic deadline for the whole external turn.  The boolean
+    # distinguishes an explicitly unlimited policy (deadline=None) from old
+    # direct adapter callers that still expect their legacy watchdog.
+    hard_deadline: float | None = None
+    hard_timeout_enabled: bool = False
+    permission_handler: Any = None
+    # Adapter identity is separate from provider identity (for example a
+    # provider may switch between ACP and Codex app-server implementations).
+    adapter_id: str = ""
+
+    def __post_init__(self) -> None:
+        self.mcp_servers = [
+            item if isinstance(item, RuntimeMcpServer) else RuntimeMcpServer.from_mapping(item)
+            for item in self.mcp_servers
+        ]
+
+
+@dataclass
+class ExternalCliConfig:
+    """外部 CLI runtime 一次性执行的请求 DTO（实现方为 external 包的 CLI runner）。"""
+
+    provider: str
+    executable_path: str
+    prompt: str
+    model: str = ""
+    cwd: str = "."
+    system_prompt: str = ""
+    custom_args: list[str] = field(default_factory=list)
+    custom_env: dict[str, str] = field(default_factory=dict)
+    credential_home_paths: tuple[str, ...] = ()
+    network_endpoints: tuple[str, ...] = ()
+    # ``None`` means no wall-clock hard deadline; the caller may still impose
+    # an idle deadline at the runtime-adapter layer.
+    timeout: float | None = DEFAULT_EXTERNAL_IDLE_SECONDS
+
+
+@dataclass(frozen=True)
+class RuntimeModelProfile:
+    id: str
+    label: str
+    provider: str = ""
+    default: bool = False
+    capabilities: tuple[str, ...] = ()
+    thinking_levels: tuple[str, ...] = ()
+    context_window: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": self.id,
+            "label": self.label or self.id,
+            "provider": self.provider,
+            "default": self.default,
+            "capabilities": list(self.capabilities),
+            "thinking_levels": list(self.thinking_levels),
+        }
+        if self.context_window is not None:
+            payload["context_window"] = self.context_window
+        return payload
+
+
+def normalize_runtime_models(raw: Any) -> list[RuntimeModelProfile]:
+    """Normalize current structured models and legacy string catalogs."""
+
+    if not isinstance(raw, list):
+        return []
+    result: list[RuntimeModelProfile] = []
+    seen: set[str] = set()
+    for entry in raw:
+        if isinstance(entry, str):
+            model_id = entry.strip()
+            payload: dict[str, Any] = {}
+        elif isinstance(entry, dict):
+            model_id = str(entry.get("id") or entry.get("model_id") or entry.get("modelId") or "").strip()
+            payload = entry
+        else:
+            continue
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        capabilities = payload.get("capabilities") or []
+        thinking = payload.get("thinking_levels") or payload.get("thinkingLevels") or []
+        raw_context_window = (
+            payload.get("context_window")
+            if payload.get("context_window") is not None
+            else payload.get("contextWindow")
+            if payload.get("contextWindow") is not None
+            else payload.get("max_context_tokens")
+        )
+        try:
+            context_window = int(raw_context_window) if raw_context_window is not None else None
+        except (TypeError, ValueError):
+            context_window = None
+        if context_window is not None and context_window <= 0:
+            context_window = None
+        result.append(RuntimeModelProfile(
+            id=model_id,
+            label=str(payload.get("label") or payload.get("name") or model_id).strip() or model_id,
+            provider=str(payload.get("provider") or "").strip(),
+            default=bool(payload.get("default")),
+            capabilities=tuple(str(item).strip() for item in capabilities if str(item).strip())
+            if isinstance(capabilities, list) else (),
+            thinking_levels=tuple(str(item).strip() for item in thinking if str(item).strip())
+            if isinstance(thinking, list) else (),
+            context_window=context_window,
+        ))
+    return result
+
+
+def runtime_model(runtime: dict[str, Any] | None, model_id: str) -> RuntimeModelProfile | None:
+    metadata = runtime.get("metadata") if isinstance(runtime, dict) else None
+    models = normalize_runtime_models(metadata.get("models") if isinstance(metadata, dict) else None)
+    wanted = canonical_runtime_model_id(runtime, model_id)
+    if not wanted:
+        default_id = str(metadata.get("default_model_id") or "").strip() if isinstance(metadata, dict) else ""
+        wanted = default_id
+    return next((model for model in models if model.id == wanted), None)
+
+
+def canonical_runtime_model_id(runtime: dict[str, Any] | None, model_id: str) -> str:
+    """Resolve an adapter-declared legacy model id without provider branching."""
+
+    wanted = str(model_id or "").strip()
+    return runtime_model_migrations(runtime).get(wanted, wanted) if wanted else ""
+
+
+def runtime_model_migrations(runtime: dict[str, Any] | None) -> dict[str, str]:
+    """Return only adapter migrations whose targets exist in the current catalog."""
+
+    metadata = runtime.get("metadata") if isinstance(runtime, dict) else None
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("model_migrations"), dict):
+        return {}
+    known_ids = {model.id for model in normalize_runtime_models(metadata.get("models"))}
+    return {
+        str(source).strip(): str(target).strip()
+        for source, target in metadata["model_migrations"].items()
+        if str(source).strip() and str(target).strip() in known_ids
+    }
+
+
+@runtime_checkable
+class ExternalAgentCatalog(Protocol):
+    """External Runtime, Agent, Profile, observation and session persistence."""
+
+    def upsert_runtime(self, runtime: dict[str, Any]) -> dict[str, Any]: ...
+
+    def sync_runtimes(self, runtimes: list[dict[str, Any]]) -> list[dict[str, Any]]: ...
+
+    def list_runtimes(self) -> list[dict[str, Any]]: ...
+
+    def get_runtime(self, runtime_id: str) -> dict[str, Any]: ...
+
+    def delete_runtime(self, runtime_id: str) -> None: ...
+
+    def create_agent(
+        self,
+        *,
+        owner_account_id: str,
+        name: str,
+        runtime_id: str,
+        model: str = "",
+        system_prompt: str = "",
+        custom_args: list[str] | None = None,
+        custom_env: dict[str, str] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def get_or_create_managed_agent(
+        self,
+        *,
+        owner_account_id: str,
+        managed_kind: str,
+        managed_key: str,
+        name: str,
+        runtime_id: str,
+        model: str = "",
+        system_prompt: str = "",
+    ) -> dict[str, Any]: ...
+
+    def list_agents(
+        self,
+        *,
+        owner_account_id: str,
+        include_managed: bool = True,
+    ) -> list[dict[str, Any]]: ...
+
+    def get_agent(self, agent_id: str, *, owner_account_id: str) -> dict[str, Any]: ...
+
+    def delete_agent(self, agent_id: str, *, owner_account_id: str) -> None: ...
+
+    def agent_with_runtime(
+        self,
+        agent_id: str,
+        *,
+        owner_account_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]: ...
+
+    def refresh_agent_profile(
+        self,
+        agent_id: str,
+        *,
+        runtime: dict[str, Any] | None = None,
+        owner_account_id: str,
+    ) -> dict[str, Any]: ...
+
+    def resolve_agent_profile(
+        self,
+        agent_id: str,
+        model_id: str,
+        *,
+        owner_account_id: str,
+    ) -> dict[str, Any]: ...
+
+    def record_agent_profile_observation(
+        self,
+        *,
+        owner_account_id: str,
+        external_agent_id: str,
+        source_run_id: str,
+        source_node_id: str,
+        source_attempt_id: str,
+        capabilities: list[str],
+        assessment_source: str,
+        outcome: str,
+        quality_weight: float,
+        failure_kind: str = "",
+        observed_at: str | None = None,
+        runtime_id: str = "",
+        model_id: str = "",
+        model_fingerprint: str = "",
+        model_binding_source: str = "",
+    ) -> dict[str, Any]: ...
+
+    def list_agent_profile_observations(
+        self,
+        external_agent_id: str,
+        *,
+        owner_account_id: str,
+    ) -> list[dict[str, Any]]: ...
+
+    def get_runtime_session_binding(
+        self,
+        *,
+        owner_account_id: str,
+        crew_session_id: str,
+        external_agent_id: str,
+        runtime_id: str,
+        adapter_id: str,
+        cwd: str = "",
+    ) -> dict[str, Any] | None: ...
+
+    def save_runtime_session_binding(
+        self,
+        *,
+        owner_account_id: str,
+        crew_session_id: str,
+        external_agent_id: str,
+        runtime_id: str,
+        adapter_id: str,
+        native_session_id: str,
+        cwd: str = "",
+        session_profile: str | None = None,
+        status: str = "active",
+    ) -> dict[str, Any]: ...
+
+    def delete_runtime_session_binding(
+        self,
+        *,
+        owner_account_id: str,
+        crew_session_id: str,
+        external_agent_id: str,
+        runtime_id: str,
+        adapter_id: str,
+        cwd: str = "",
+    ) -> None: ...
+
+    def delete_runtime_bindings_for_session(
+        self,
+        crew_session_id: str,
+        *,
+        owner_account_id: str,
+    ) -> int: ...

@@ -10,7 +10,6 @@ from crew.app import build_app
 from crew.core.mocks import FakeProvider
 from crew.core.runctx import current_provider
 from crew.state.config import Config, ModelProfile
-from crew.wiki.config import WikiConfig
 
 
 @pytest.mark.asyncio
@@ -33,7 +32,7 @@ async def test_team_planning_and_kanban_use_owner_default_provider(tmp_path, mon
     )
     monkeypatch.setattr(
         "crew.app.build_provider_for_profile",
-        lambda profile, _timeout=None: providers[profile.id],
+        lambda profile, _timeout=None, **_kw: providers[profile.id],
     )
 
     team_a = app.team._get_or_create("same-session", owner_account_id="A:uid-a")
@@ -77,7 +76,7 @@ def test_wiki_uses_current_session_provider_before_owner_default(tmp_path, monke
     monkeypatch.setattr(app.config, "owner_active_model_profile", lambda _owner: owner_profile)
     monkeypatch.setattr(
         "crew.app.build_provider_for_profile",
-        lambda _profile, _timeout=None: owner_provider,
+        lambda _profile, _timeout=None, **_kw: owner_provider,
     )
 
     # 没有 Agent 运行时上下文时，Wiki API/后台入口仍使用 owner 默认模型。
@@ -103,14 +102,14 @@ def test_explicit_wiki_model_overrides_current_session_provider(tmp_path, monkey
     }
     config.active_model_id = "default"
     config.default_model_id = "default"
-    config.wiki = WikiConfig(model="wiki-fast")
+    config.wiki_config = {"model": "wiki-fast"}
     app_provider = FakeProvider()
     wiki_provider = FakeProvider()
     session_provider = FakeProvider()
     monkeypatch.setattr("crew.app.build_provider", lambda _config: app_provider)
     monkeypatch.setattr(
         "crew.app.build_provider_for_profile",
-        lambda profile, _timeout=None: wiki_provider if profile.id == "wiki-fast" else app_provider,
+        lambda profile, _timeout=None, **_kw: wiki_provider if profile.id == "wiki-fast" else app_provider,
     )
     app = build_app(config=config, enable_team=False)
 
@@ -129,7 +128,7 @@ def test_owner_provider_cache_is_evicted_without_dropping_team_plan(tmp_path, mo
     profile = ModelProfile(id="owner-model", api_key="key-a", model="model-a")
     provider = FakeProvider()
     monkeypatch.setattr(app.config, "owner_active_model_profile", lambda _owner: profile)
-    monkeypatch.setattr("crew.app.build_provider_for_profile", lambda _profile, _timeout=None: provider)
+    monkeypatch.setattr("crew.app.build_provider_for_profile", lambda _profile, _timeout=None, **_kw: provider)
 
     app.owner_team_provider(owner)
     app.team._teams[(owner, "session-a")] = SimpleNamespace()

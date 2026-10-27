@@ -143,6 +143,37 @@
   --mw-radius-3: 8px;
   --mw-radius-4: 12px;
   --mw-radius-full: 9999px;
+  /* 细档位几何：桌面端密集 UI 的微几何（发丝线、图标间距、光学微调）。
+     命名即像素值——4px 步进能表达的值一律用 --mw-space-N / --mw-radius-N，
+     只有步进标尺表达不了的精确值才落在这里，避免为了套标尺而改动像素。 */
+  --mw-space-fine-1: 1px;
+  --mw-space-fine-2: 2px;
+  --mw-space-fine-3: 3px;
+  --mw-space-fine-5: 5px;
+  --mw-space-fine-6: 6px;
+  --mw-space-fine-7: 7px;
+  --mw-space-fine-9: 9px;
+  --mw-space-fine-10: 10px;
+  --mw-space-fine-11: 11px;
+  --mw-space-fine-13: 13px;
+  --mw-space-fine-14: 14px;
+  --mw-space-fine-15: 15px;
+  --mw-space-fine-18: 18px;
+  --mw-space-fine-22: 22px;
+  --mw-space-fine-28: 28px;
+  --mw-space-fine-72: 72px;
+  --mw-space-fine-100: 100px;
+  --mw-space-fine-neg-1: -1px;
+  --mw-space-fine-neg-6: -6px;
+  --mw-radius-fine-7: 7px;
+  --mw-radius-fine-9: 9px;
+  --mw-radius-fine-10: 10px;
+  --mw-radius-fine-11: 11px;
+  --mw-radius-fine-14: 14px;
+  --mw-radius-fine-16: 16px;
+  --mw-radius-fine-18: 18px;
+  --mw-radius-fine-19: 19px;
+  --mw-radius-fine-20: 20px;
 
   /* Primitive typography */
   --mw-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
@@ -191,6 +222,14 @@
   --mw-type-code-size: var(--mw-font-code-size);
   --mw-type-code-line: calc(var(--mw-type-code-size) + 7px);
   --mw-type-code-weight: 400;
+  /* 应用级标尺之外的精确字号档位：文档标题 / 对话框字形 / 小标题。
+     同样用 calc() 从基准字号推导，保持「基准可整体缩放」的性质。 */
+  --mw-type-subhead-size: calc(var(--mw-font-ui-size) + 1px);
+  --mw-type-doc-h3-size: calc(var(--mw-font-ui-size) + 3px);
+  --mw-type-doc-h3-lg-size: calc(var(--mw-font-ui-size) + 5px);
+  --mw-type-doc-h2-size: calc(var(--mw-font-ui-size) + 7px);
+  --mw-type-glyph-size: calc(var(--mw-font-ui-size) + 8px);
+  --mw-type-doc-title-size: calc(var(--mw-font-ui-size) + 22px);
 
   /* Primitive elevation and motion */
   --mw-shadow-none: none;
@@ -206,6 +245,15 @@
   --mw-duration-slow: 220ms;
   --mw-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --mw-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  /* 效果与纹理原语：blur / 滤镜 / 图案渐变的字面量只允许出现在这里，
+     消费方一律 `filter: var(--mw-effect-*)` / `background: var(--mw-pattern-*)`。 */
+  --mw-effect-backdrop-bar: blur(18px);
+  --mw-effect-backdrop-panel: blur(12px);
+  --mw-effect-backdrop-panel-strong: blur(22px) saturate(150%);
+  --mw-effect-icon-invert: invert(1);
+  --mw-effect-hover-dim: brightness(0.96);
+  --mw-pattern-dot-grid: linear-gradient(90deg, color-mix(in srgb, var(--mw-black) 5%, transparent) 1px, transparent 1px),
+    linear-gradient(0deg, color-mix(in srgb, var(--mw-black) 5%, transparent) 1px, transparent 1px);
 
   /* Runtime-adjustable component dimensions */
   --mw-inspector-width: 360px;

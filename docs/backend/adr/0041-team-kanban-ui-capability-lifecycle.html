@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ADR-0041 · Team/Kanban UI 能力驱动装卸</title>
+<style>body{font:16px/1.75 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}code{background:#f4f4f4}a{color:#245a83}</style></head><body><main>
+<h1>ADR-0041 · Team/Kanban UI 能力驱动装卸</h1>
+<p>2026-09-14 · 阶段 6AC · 状态：已实施（Desktop board-capability 套件 12 passed、桌面全量 1900 passed；Web featureFlags + App 宿主生命周期套件 25 passed、Web 全量 237 passed；双端 typecheck 通过，主 agent 审查修正后复跑；验证记录见 <a href="../../testing/plugin-architecture-stage-6ac-team-kanban-ui-lifecycle.html">阶段 6AC 测试记录</a>）。</p>
+<h2>背景与候选</h2><p>ADR-0040 交付了按 Feature ID 索引的运行时能力状态源（config 响应的 <code>feature_capabilities</code>），但双端 Team/Kanban 处理器仍随 App 无条件安装：Desktop 在引导期固定 init 两个 board，Web 在 App 宿主 useLayoutEffect 中固定安装两组 handler。这是阶段 5 收口时记录的已知偏差（reducer 注册不随开关动态增删）。候选方案：继续用会话 mode 推断（无法证明运行资源可用，ADR-0040 已否决）；为 Team/Kanban 各造布尔配置（复制 Runtime 状态）；消费统一状态源做能力驱动装卸。</p>
+<h2>决定</h2><p>双端消费 <code>feature_capabilities</code>，按 <code>product.team</code> 与 <code>product.dynamic-kanban</code> 独立推导可用性。规则与既有 <code>wiki.enabled</code> 的 legacy-safe 范式对齐：config 未加载或响应无 <code>feature_capabilities</code> 字段（旧后端）时视为可用，保持今日行为；字段存在时，项缺席或 <code>available ≠ true</code> 即不可用，与 ADR-0040「缺席视为不可用」一致。</p>
+<p>Desktop 以 Wiki 范式（5-8）同型落地：单一 <code>board-capability</code> 模块持有两个 Feature ID 的推导、config 拉取后的 <code>team-kanban:config-change</code> 窗口事件与 <code>installTeamKanbanBoards()</code> 安装单元——能力开则 init 对应 board，关则 dispose，两板独立、幂等；app 引导不再无条件 init，中心文件不经由新导入认识具体 board 模块。Web 以 Wiki twin 对齐：App 宿主按能力分别条件安装 team/kanban handler，TaskBoard 挂载增加能力门。会话内一致性：能力关闭时，team/kanban 模式会话的 Inspector 默认 tab 回落 <code>context</code>，TaskBoard 不再渲染。</p>
+<h2>边界</h2><p>能力变化无推送通道，刷新仍是拉取式：Desktop 在引导、网关重连恢复与模型 CRUD 后重拉 config，Web 在启动与切换模型时拉取——运行中开关需待下一次拉取或重载才反映。活动会话内已渲染面板的数据轮询降级、以及为能力变化新增 owner 级 WS 帧，均不在本片范围。本片不宣称 Team/Kanban 产品功能完成，仅收敛其 UI Contribution 的生命周期。</p>
+<h2>验收与回退</h2><p>双端生命周期测试覆盖：可用性规则全表（config 未加载/字段缺席/项缺席/available 真假）、装卸与再装卸幂等、两 Feature 独立互不干扰、禁用后 dispatch 落空（unhandled 告警可区分注册空操作与未注册）、legacy-safe 回退、会话面板回落。回退为撤销安装单元与门控、恢复无条件安装，后端与 ADR-0040 状态源不受影响。</p>
+<p><a href="../../frontend/desktop-frontend.html">Desktop 前端文档</a> · <a href="../../frontend/web-frontend.html">Web 前端文档</a> · <a href="0040-feature-capability-snapshot.html">ADR-0040</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

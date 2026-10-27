@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ADR-0043 · 能力快照叠加配置可用性（半接状态源对齐）</title>
+<style>body{font:16px/1.75 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}code{background:#f4f4f4}a{color:#245a83}</style></head><body><main>
+<h1>ADR-0043 · 能力快照叠加配置可用性（半接状态源对齐）</h1>
+<p>2026-09-14 · 阶段 6AE · 状态：已实施并验证。</p>
+<h2>背景与候选</h2><p>ADR-0040 交付的 <code>feature_capabilities</code> 快照表达 Runtime 请求准入（Feature 激活即 available），但 <code>product.wiki</code> 与 <code>product.external-agents</code> 的激活不随配置开关变化（<code>build_wiki_feature</code>/<code>build_external_agent_feature</code> 不带 enabled，<code>external_agents_enabled</code> 仅作请求时门禁），导致配置已禁用时快照仍报 <code>available:true</code>——两个事实源：前端若改从快照判断，会静默复活配置禁用的功能。Team 已按 <code>enable_team</code> 在激活层对齐，是唯一正确的范式。候选：改为激活层对齐（行为变更大、Route/Service 随配置下线，测试波及广）；在快照投影层叠加配置标志（单向覆写，不动激活）。</p>
+<h2>决定</h2><p>采用<strong>投影层叠加</strong>：<code>crew/gateway/helpers.py::config_body</code> 新增 <code>_apply_config_availability_overrides(snapshot, config)</code>，对 <code>product.wiki</code>（<code>wiki_enabled</code>）与 <code>product.external-agents</code>（<code>external_agents_enabled</code>）在配置标志为假时把 <code>available</code> 翻为 <code>false</code>；条目保留（state/generation 原样）、缺席条目不动。最终语义：<strong>available = 配置启用 ∧ Runtime 激活</strong>，作为 UI 消费的唯一产品可用性事实源。Runtime 快照保持纯运行态投影、<code>app.py</code> 激活行为不变、请求时门禁不变（<code>require_external_agents_enabled</code> 与本覆写同源，无行为漂移）。</p>
+<h2>边界、验收与回退</h2><p>本片只改 config 响应投影与测试，不动后端激活/路由/请求门禁，前端无需改动（wiki/external-agents 现有 config-flag 门控与叠加后快照一致）。验收：参数化测试覆盖 wiki/external-agents × 配置开/关 × Runtime available 真/假，断言 available = 配置 ∧ 运行；回归 config 响应/CRUD/能力套件 104 passed。回退：撤销覆写函数与调用，恢复纯 Runtime 投影。</p>
+<p><a href="../modules/gateway.html">Gateway 模块</a> · <a href="0040-feature-capability-snapshot.html">ADR-0040</a> · <a href="0041-team-kanban-ui-capability-lifecycle.html">ADR-0041</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

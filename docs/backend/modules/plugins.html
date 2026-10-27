@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>plugins · Ace 后端模块</title>
+<title>features / plugins · Ace 后端模块</title>
 <!--
   ============================================================================
   模块文档模板：复制此文件 → 改名为 <module>.html → 填写各节。
@@ -42,14 +42,16 @@
 </head>
 <body>
 <div class="wrap">
-  <div class="crumb">Ace / 后端模块 / plugins</div>
-  <h1><span class="logo">A</span>crew/plugins</h1>
-  <div class="sub">Plugins 插件：可逆注册 Feature 能力、工具、Skill 与运行时钩子。</div>
+  <div class="crumb">Ace / 后端模块 / features + plugins</div>
+  <h1><span class="logo">A</span>crew/features · crew/plugins</h1>
+  <div class="sub">Feature Runtime 统一所有权内核；Plugins 是迁移期目录发现与兼容入口。</div>
 
   <h2>1. 职责</h2>
   <ul>
+    <li>用 Feature Generation 和 Scope 管理第一方、第三方能力的统一生命周期。</li>
     <li>向插件提供受控注册上下文，并在启用/停用时管理插件贡献的工具与钩子。</li>
     <li>插件工具沿用核心 Registry 契约，可声明结果在 Agent 上下文中的生命周期。</li>
+    <li>当前 <code>crew/features</code> 不包含目录发现或产品逻辑；<code>PluginManager</code> 将作为兼容 Facade 接入。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
@@ -59,6 +61,29 @@
     <tbody>
       <tr><td>工具注册</td><td><code>PluginContext.register_tool</code> 注册并记录插件贡献，停用时可撤销。</td><td>已落地</td></tr>
       <tr><td>结果生命周期</td><td>插件可声明 temporary/resource/instruction/important；省略时安全默认 important。</td><td>已落地</td></tr>
+      <tr><td>Generation</td><td><code>FeatureGeneration</code> 为每次激活提供稳定的 Feature ID 与递增代号。</td><td>已落地</td></tr>
+      <tr><td>注册所有权</td><td><code>RegistrationToken</code> 统一同步/异步 disposer，并保证并发、重复释放只执行一次。</td><td>已落地</td></tr>
+      <tr><td>Scope 与事务</td><td><code>FeatureScope</code> 逆序等待清理并聚合错误；<code>FeatureTransaction</code> 回滚未提交安装。</td><td>已落地</td></tr>
+      <tr><td>Scope Task Factory</td><td>每个 Generation 用单一 Task Owner 管理逃逸调用栈的后台协程；drain 关闭准入，dispose cancel/join，超时恢复重开准入。</td><td>已落地</td></tr>
+      <tr><td>Service Registry</td><td>类型化 Service Key，支持 global/workspace/user/session 四级解析、Generation 所有权，以及解析当前实现并取得同代 Lease 的原子入口。</td><td>已落地</td></tr>
+      <tr><td>依赖与配置版本</td><td>区分 required/optional/provides，诊断启动批次；分离 desired/effective revision。</td><td>已落地</td></tr>
+      <tr><td>Feature Runtime</td><td>统一激活、等待依赖、事务回滚、停用和诊断记录。</td><td>已落地</td></tr>
+      <tr><td>Legacy Adapter</td><td>旧 <code>register(ctx)</code> 的全部贡献内部转为带标签 Token，不要求插件改入口。</td><td>已落地</td></tr>
+      <tr><td>Browser Runtime Feature</td><td>startup-phase 在宿主事件循环激活；Manager、后台 Task、五个工具、Skill、Context 与动态 Service 归属同一 restart Scope。</td><td>已落地</td></tr>
+      <tr><td>Manifest 服务依赖</td><td><code>requires</code>、<code>optional</code>、<code>provides</code> 映射到 Feature 服务图，按确定性批次激活。</td><td>已落地</td></tr>
+      <tr><td>启动审计</td><td>输出状态、Generation、缺失服务和注册标签；CLI 可直接导出同一快照。</td><td>已落地</td></tr>
+      <tr><td>请求 Lease</td><td>插件 Tool、Hook、Middleware、Command 入口自动持有 Generation 租约；draining 后拒绝新请求。同步 Hook/Middleware 回调与 Tool 对齐自动线程化（<code>run_sync_in_thread</code>），不在事件循环上内联执行。</td><td>已落地</td></tr>
+      <tr><td>停用策略</td><td>Manifest 声明 drain/cancel/immediate/restart_required 与超时；失败不提前标记 disabled。</td><td>已落地</td></tr>
+      <tr><td>配置 Generation 更新</td><td><code>replace</code> 原子发布新代后退役旧代；<code>restart</code> 先停旧代并在新代失败时恢复旧配置。</td><td>已落地</td></tr>
+      <tr><td>Execution Driver Registry</td><td>开放 mode 的 Handler 由 FeatureScope 注册，执行自动持有 Lease；默认 Agent、Team 与 Dynamic Kanban 已接入。</td><td>已落地</td></tr>
+      <tr><td>Context Contributor Registry</td><td>阶段、优先级、失败策略、超时、模型可见性与持久化均为显式元数据；Browser、Gateway、Wiki 和 Cron 已成为真实消费者。</td><td>已落地</td></tr>
+      <tr><td>Feature Event Contributor Registry</td><td>Feature-owned 事件来源按优先级顺序 dispatch；最新 Active Generation 可见，生成与 sink 投递全程持有 Lease，失败形成结构化报告。</td><td>已落地</td></tr>
+      <tr><td>Agent Preset Registry</td><td>不可变 preset policy 随 FeatureScope 注册；动态目录、专属能力隔离、Generation Lease 与缓存代次形成统一边界。</td><td>已落地</td></tr>
+      <tr><td>宿主托管 Feature</td><td>长生命周期第一方 Feature 在 build 阶段声明，在宿主事件循环中激活/更新，并按逆序统一停用。</td><td>已落地</td></tr>
+      <tr><td>Cron Runtime Feature</td><td><code>product.cron</code> 用 restart Generation 管理 Scheduler、Tools、Context、Owner mount 与 Host Binding。</td><td>已落地</td></tr>
+      <tr><td>Sites Runtime Feature</td><td><code>product.sites</code> 用 restart Generation 管理 Manager、两类 Store、Scheduler、Tools、Capability Profiles 与 Host Binding。</td><td>已落地</td></tr>
+      <tr><td>Wiki Foundation Feature</td><td><code>product.wiki</code> 用 Knowledge Service 与 restart Generation 管理 Local Provider、24 个 Tools、Context 和后台导读 Task。</td><td>已落地</td></tr>
+      <tr><td>Wiki Host Consumers</td><td>Gateway 与 CLI 按请求或命令原子取得当前 Knowledge Service 及其 Generation Lease；draining 后拒绝新消费。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -66,11 +91,45 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/plugins/manager.py</code></td><td>插件发现、状态管理、<code>PluginContext</code> 和贡献撤销。</td></tr>
+      <tr><td><code>crew/features/runtime.py</code></td><td>Generation、desired/effective revision、Registration Token、请求 Lease、Scope Task Factory、四类停用策略、Scope、Transaction 和结构化生命周期错误。</td></tr>
+      <tr><td><code>crew/features/services.py</code></td><td>作用域化 Service Registry、注册所有权、新旧 Generation 暂存切换与 Service Request Lease。</td></tr>
+      <tr><td><code>crew/features/drivers.py</code></td><td>Execution Driver 定义、生命周期所有权、开放 mode 解析和请求分派。</td></tr>
+      <tr><td><code>crew/features/context.py</code></td><td>Context Contributor 定义、排序、Generation 选择、失败/超时与请求 Lease。</td></tr>
+      <tr><td><code>crew/features/events.py</code></td><td>Feature Event DTO、生命周期 Contributor、确定顺序、失败策略与 Lease 内 dispatch。</td></tr>
+      <tr><td><code>crew/features/presets.py</code></td><td>Agent Preset Contribution、冲突/代次解析、专属能力集合与 Generation binding。</td></tr>
+      <tr><td><code>crew/features/dependencies.py</code></td><td>Feature 服务依赖声明、运行期解析和启动诊断。</td></tr>
+      <tr><td><code>crew/features/manager.py</code></td><td>FeatureDefinition、InstallContext、运行记录、串行启停和 replace/restart 更新调度。</td></tr>
+      <tr><td><code>crew/plugins/manager.py</code></td><td>插件发现、build/startup phase 激活、restart 更新、状态管理、<code>PluginContext</code> 和贡献撤销。</td></tr>
     </tbody>
   </table>
 
   <h2>4. 数据模型与接口</h2>
+  <pre><code>generation = FeatureGeneration("wiki", sequence=1)
+async with FeatureTransaction(generation) as transaction:
+    transaction.register(dispose_service, label="service:knowledge")
+    scope = transaction.commit()
+
+await scope.dispose()  # 返回时该 Generation 已完成全部异步清理</code></pre>
+  <p>注册标签必须能说明贡献类型和身份。Scope 进入停止状态后拒绝新注册和后台 Task；先关闭 Contribution，再清理 Resource，两相内部按后进先出执行。<code>context.create_task()</code> 创建的逃逸任务由单一 Task Owner cancel/join，不随任务次数累积 Token。</p>
+  <pre><code>knowledge = ServiceKey[KnowledgeService]("knowledge")
+services.register(
+    feature_scope,
+    knowledge,
+    provider,
+    scope_kind=ServiceScopeKind.WORKSPACE,
+    scope_path=ServiceScopePath.workspace(workspace_id),
+)
+service = services.resolve(knowledge, request_scope)</code></pre>
+  <p>解析从最窄的请求作用域逐级回退。同一代处于 <code>ACTIVATING</code> 时贡献仍不可见；Scope 提交为 <code>ACTIVE</code> 后统一生效。</p>
+  <pre><code>acquired = plugins.acquire_service_lease(
+    knowledge,
+    label="gateway:wiki",
+)
+if acquired is not None:
+    service, lease = acquired
+    async with lease:
+        await consume(service)</code></pre>
+  <p>Consumer 不应先 resolve 再单独定位 Scope；<code>acquire_service_lease()</code> 保证 Service 与 Lease 来自同一可见 Generation。进入 draining 后新请求不可取得租约，旧请求释放前资源不会关闭。</p>
   <pre><code>PluginContext.register_tool(
     name, toolset, schema, handler,
     result_retention="important",
@@ -78,16 +137,94 @@
     result_policy_resolver=None,
 )</code></pre>
   <p>资源工具应提供稳定 identity；根据 action 同时提供读写能力的工具可通过 resolver 动态返回策略。未声明的旧插件保持兼容，并按重要结果保护。</p>
+  <pre><code>await plugins.discover_and_load_async(...)
+await plugins.activate_phase_async("startup")
+await plugins.update_plugin_async("browser", desired_config_revision=2)
+await plugins.unload_plugin_async("browser")
+failed = await plugins.aclose()</code></pre>
+  <p>同步 <code>discover_and_load()</code> 继续服务现有构造入口；manifest 默认 <code>activation_phase=build</code>。创建长期 asyncio Task 的插件声明 <code>startup</code>，Definition 先进入 DISCOVERED，再由宿主长期事件循环激活。同步 <code>unload_plugin()</code> 不允许在事件循环中假报完成。</p>
+  <pre><code>requires:
+  - storage
+optional:
+  - owner_model
+provides:
+  - knowledge
+
+ctx.register_service("knowledge", provider)
+storage = ctx.resolve_service("storage")</code></pre>
+  <p>Runtime 先发现全部定义再规划激活批次。声明 <code>provides</code> 后必须由同一 Scope 兑现注册；Consumer 不依赖目录扫描顺序。组合根通过 <code>publish_host_services()</code> 发布 Host 能力，并在服务就绪后重试 Waiting 插件。</p>
+  <pre><code>crew --dump-features
+crew --dump-features --json</code></pre>
+  <p>启动审计与 CLI 使用同一结构化快照；Waiting/Failed 会列出缺失 Service 或原始错误，CLI 同时返回非零退出码。</p>
+  <pre><code>stop_policy: drain
+drain_timeout_seconds: 30
+
+async with context.acquire_lease("request:42"):
+    await execute_request()</code></pre>
+  <p>目录插件的 Tool、Hook、Middleware 和 Command 由 Adapter 自动持有 Lease。<code>drain</code> 等待旧请求，<code>cancel</code> 通知并取消活跃异步任务，<code>immediate</code> 直接清理并记录被越过的 Lease，<code>restart_required</code> 保留当前 Generation 到宿主关闭。同步 Tool 即使收到取消，也会等工作线程真正退出后才释放 Lease，避免后台线程继续使用已关闭资源。同步 Hook/Middleware 回调同样在线程中执行；其取消路径有界：取消方等待同步回调收尾的优雅窗口为 2 秒（<code>_SYNC_CALLBACK_CANCEL_GRACE_SECONDS</code>），超时放弃等待（线程无法强杀），记 warning 并让 CancelledError 传播——不再对 hang 住的回调无限 busy-spin。</p>
+  <pre><code>result = await runtime.update(
+    FeatureDefinition(
+        "provider",
+        install_new_config,
+        desired_config_revision=2,
+        update_strategy=FeatureUpdateStrategy.REPLACE,
+    )
+)</code></pre>
+  <p>更新请求必须提交递增且已验证的不可变定义。<code>replace</code> 允许同一 Feature 的新旧 Generation 短暂并存：新服务仅在新 Scope 提交后可见，Registry 选择最新 Active Generation，旧代随后关闭 Lease 入口并退役。<code>restart</code> 用于独占资源：先 drain 并清理旧代，再安装新代；安装失败会以旧定义创建恢复 Generation。失败期间 desired revision 保留用户意图，effective revision 始终反映实际运行配置。</p>
+  <pre><code>ctx.register_execution_driver(
+    "feature.echo",
+    execute,
+    capabilities=("demo.echo",),
+)
+
+async for chunk in runtime.execution_drivers.dispatch(envelope):
+    ...</code></pre>
+  <p>Feature 与目录插件共享同一个 Driver Registry。注册发生在 Activating Scope 时仍不可见，Scope 提交后才可解析；Driver 执行自动持有所属 Generation Lease，插件卸载或 Feature 停用后 mode 贡献随 Token 一起撤销。</p>
+  <pre><code>ContextContribution(
+    prompt_parts=("dynamic context",),
+    messages=(Message.system_reminder("persistent context"),),
+)</code></pre>
+  <p>Prompt Contributor 可以返回动态 fragment；只有同时声明 <code>persistent=true</code> 和 model-visible 的 Contributor 才能返回要写入 canonical history 的 Message。预览使用同一贡献链，但不会写回 Store。</p>
+  <pre><code>ctx.register_event_contributor(
+    FeatureEventContributor(
+        contributor_id="feature.session.events",
+        handler=take_pending_event,
+        priority=100,
+    )
+)
+await runtime.event_contributors.dispatch(envelope, push_feature_event)</code></pre>
+  <p>事件 Contributor 与其 Feature Generation 同生共灭。Registry 先按 priority 和 ID 排序，再在对应 Lease 内生成并投递；Feature handler 的降级与 Host sink 的传输失败分开处理。</p>
+  <pre><code>context.register_agent_preset(
+    AgentPresetContribution(
+        name="Knowledge",
+        system_prompt="...",
+        toolset_additions=("knowledge.read",),
+        context_tags=("knowledge",),
+    )
+)</code></pre>
+  <p>Preset 只声明中立策略。Host 在解析后持有其 Generation Lease，并将代次写入有效 Agent 配置；产品专属 prompt、工具与 Skill 不进入中心装配分支。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
+    <li>运行期 Provider 消失后的 Consumer 级联 drain/retry 尚未实现，将在配置更新与依赖重算时收口。</li>
+    <li>目录插件已有通用 restart 更新入口；运行期配置快照、校验与用户控制面 API 仍需在具体 Feature 迁移时接入。</li>
+    <li><code>ctx.services</code> 兼容字典仍在使用，待 Service Adapter 完成后删除。</li>
     <li>外部 MCP 协议当前不携带 Ace 生命周期元数据，因此默认按重要结果保护。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
   <ul>
+    <li>新增运行时注册类型必须返回 disposer 并归属一个明确 Generation，不得另建独立清理清单。</li>
     <li>新增插件工具时在插件注册处声明结果语义，不向 Agent 压缩器添加插件工具名判断。</li>
   </ul>
+
+  <h2>宿主能力状态投影（6AB）</h2>
+  <p><code>FeatureRuntime.capability_snapshot()</code> 同步读取真实 records，以 Feature ID 为键提供 <code>state / available / generation</code>。当前 Scope 可接受新 Lease 时才报告可用；未声明项缺席，drain、失败、停用不可用；replace 候选安装期间仍投影正在服务的旧代。读取不创建 Lease，也不导出错误、配置或完整诊断。</p>
+  <p>此快照表示宿主运行时准入，不替代账号权限。Team 和 Dynamic Kanban 保持各自身份，不在 Runtime 中新增业务枚举。见 <a href="../adr/0040-feature-capability-snapshot.html">ADR-0040</a> 与 <a href="../../testing/plugin-architecture-stage-6ab-feature-capabilities.html">6AB 测试记录</a>。</p>
+
+  <h2>ServiceKey 版本化依赖契约（2026-09-14）</h2>
+  <p>依赖层与激活校验全面使用完整 <code>ServiceKey</code>（eq/hash 含 version，6N 语义），消除按裸 name 识别的版本混淆。改动七处：声明去重与 required/optional/provides 交叉检查、<code>FeatureDependencyGraph</code> 的 provider 索引、<code>plan_activation</code> 可用集与 blocked 判定、<code>undeclared_required_services</code>、<code>_install_generation</code> 的 published/missing_provided 校验、<code>MissingProvidedServicesError</code> 消息（<code>name@vN</code> 形态）。语义决策：同名不同版本是不同服务——requires v1+v2 合法、provides v1 + requires v2 合法（运行时按 (name, version) 路由，二者是不同服务地址，误配会被 plan blocked 或 WAITING 暴露）；精确同 key 的三条互斥约束保留。展示层（startup_audit 的 services 投影）有意保留 <code>key.name</code>，属序列化契约不参与匹配。</p>
+  <p>验收：v1/v2 共存与分别解析、错版本安装（provides v2 只注册 v1）激活失败并事务回滚、启动顺序按完整 key、停用 provider 索引按完整 key。验证见 <a href="../../testing/review-fixes-batch-2026-09-14.html">整改批次测试记录</a>。</p>
 
   <h2>7. 变更记录</h2>
   <table>
@@ -95,10 +232,35 @@
     <tbody>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
       <tr><td>2026-09-01</td><td>插件工具注册接口增加结果生命周期与资源 identity 声明。</td><td><code>PluginContext.register_tool</code>，兼容旧插件。</td></tr>
+      <tr><td>2026-09-02</td><td>建立中立 Feature 生命周期所有权、异步清理和激活回滚原语。</td><td><code>crew/features</code>；现有插件行为暂不改变。</td></tr>
+      <tr><td>2026-09-02</td><td>增加四级 Service Registry、显式依赖图与 desired/effective 配置版本。</td><td>Feature Runtime 内核；现有插件服务字典暂不改变。</td></tr>
+      <tr><td>2026-09-02</td><td>目录插件接入统一 FeatureRuntime；Browser 成为首个真实 Scope 试点。</td><td>PluginManager、Browser、应用关闭与插件测试。</td></tr>
+      <tr><td>2026-09-02</td><td>Manifest 服务依赖进入激活图，增加 Host Service 桥、启动审计与 Feature dump。</td><td>Feature Runtime、PluginManager、CLI、Browser、Wiki Learning、Feishu。</td></tr>
+      <tr><td>2026-09-02</td><td>增加请求 Lease、四类 Manifest 停用策略、超时与强制清理诊断。</td><td>Feature Runtime、Plugin Adapter、全部内置目录插件。</td></tr>
+      <tr><td>2026-09-03</td><td>增加 replace/restart 配置更新、双 Generation 服务切换、旧代退役和失败恢复。</td><td>Feature Runtime、Service Registry、目录插件 Manifest。</td></tr>
+      <tr><td>2026-09-03</td><td>增加 Feature-owned Execution Driver Registry 和目录插件注册入口。</td><td>Feature Runtime、PluginContext、CrewApp 默认 Agent Driver。</td></tr>
+      <tr><td>2026-09-03</td><td>Team 与 Dynamic Kanban 经桥接 Scope 注册 Driver，核心请求入口不再包含业务 mode 分支。</td><td>Execution Driver Registry、CrewApp 组合根与停机 drain。</td></tr>
+      <tr><td>2026-09-03</td><td>增加 Context Contributor Registry；结构化路径由 Host、标签页引用由 Browser 插件拥有。</td><td>Feature Runtime、PluginContext、Browser 与 Agent 边界。</td></tr>
+      <tr><td>2026-09-03</td><td>增加 Gateway Session Source Contributor，并删除 Agent Runtime→Gateway 最后一条直接依赖豁免。</td><td>Context Registry、Gateway/Agent 边界。</td></tr>
+      <tr><td>2026-09-03</td><td>Context Contribution 增加受控 persistent message，并迁移 Wiki Attachment。</td><td>Prompt phase、Feature Lease、Wiki/Agent 边界。</td></tr>
+      <tr><td>2026-09-03</td><td>迁移 Cron Trigger Reminder，并使 Context Contribution 跟随 Cron Feature 开关。</td><td>Prompt phase、Cron Scope 和 Agent 产品边界。</td></tr>
+      <tr><td>2026-09-03</td><td>后台子任务/进程/任务结果通知迁入来源模块的 Prompt Contributor。</td><td>subagent、process_registry、tasks；Agent Runtime 特判删除。</td></tr>
+      <tr><td>2026-09-03</td><td>增加 Route Registry：目录插件 API 路由归属 FeatureScope，Gateway 启动期从注册表装配，停用经闸门口径返回 capability_unavailable。</td><td>Feature Runtime、PluginContext.register_api_router、Gateway 插件挂载。</td></tr>
+      <tr><td>2026-09-03</td><td>FeatureDefinition 增加 required_by_product 与 deactivate 守卫；组合根内置注册收敛为声明式 Feature；同步桥上移为 run_async_compat 公共实现。</td><td>Feature Runtime、CrewApp 组合根、PluginManager。</td></tr>
+      <tr><td>2026-09-04</td><td>增加宿主事件循环托管 Feature 路径，Cron 成为首个 restart Product Feature；工具注销增加 Generation 身份校验。</td><td>Feature Runtime、CrewApp、Cron、Tool Registry、Gateway Logout。</td></tr>
+      <tr><td>2026-09-04</td><td>Sites Manager、Store、Blueprint Scheduler、Tools 与 Capability Profile 进入同一 restart Generation。</td><td>Feature Runtime、CrewApp、Sites、Tool/Capability Registry。</td></tr>
+      <tr><td>2026-09-04</td><td>增加 manifest 驱动的 startup phase 与目录插件 restart 更新入口；Browser Manager、后台 Task 和动态 Service 完成 Scope 收口。</td><td>PluginManager、CrewApp、Browser 插件、Gateway Browser Gate。</td></tr>
+      <tr><td>2026-09-04</td><td>增加 Scope Task Factory；Wiki Foundation 以 Knowledge Service 和 restart Generation 接管本地 Provider、Tools、Context 与后台导读任务。</td><td>Feature Runtime、Wiki Bundle、CrewApp 动态服务视图。</td></tr>
+      <tr><td>2026-09-05</td><td>Service Registry 增加同代解析与请求租约原子入口，PluginManager 提供 Host Facade，Wiki Gateway 成为首个 HTTP Consumer。</td><td>Service Registry、PluginManager、Wiki API drain/restart。</td></tr>
+      <tr><td>2026-09-05</td><td>Wiki CLI 全部叶子命令通过 Host Facade 动态取得 Knowledge Service 与同代 Lease。</td><td>同步/异步 CLI 生命周期、Feature Gate 与 Provider 替换。</td></tr>
+      <tr><td>2026-09-05</td><td>增加 Feature Event Contributor Registry，Wiki cards/changes 来源进入 Bundle Scope。</td><td>Feature Runtime、PluginContext、Wiki Generation 与 WS 中立 dispatch。</td></tr>
+      <tr><td>2026-09-05</td><td>增加 Agent Preset Contribution Registry，Wiki prompt 与工具策略进入 Bundle Scope。</td><td>动态目录、Generation Lease、Agent 缓存与普通会话能力隔离。</td></tr>
+      <tr><td>2026-09-17</td><td><code>71513d9</code> <code>register_hook</code>/<code>register_middleware</code> 的同步回调自动线程化（与 Tool 对齐，不再内联阻塞事件循环）；同步回调取消路径去 busy-spin，改为 2s 有界优雅窗口，超时记 warning 并放弃等待。</td><td><code>crew/plugins/manager.py</code>；agent 主路径上的 hook/middleware 调用不再被同步插件冻结。</td></tr>
+      <tr><td>2026-09-17</td><td><code>f8d33e1</code> 同步回调线程化路径补 ContextVar 写回（copy_context + await 完成后回写变化值），修复 wiki_learning 插件上下文回传回归；异常/取消路径不写回。</td><td><code>crew/plugins/manager.py</code>；同步 hook/middleware/tool handler 的 ContextVar 语义与内联执行一致。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0001-feature-lifecycle-primitives.html">ADR-0001</a> · <a href="../adr/0002-scoped-service-registry.html">ADR-0002</a> · <a href="../adr/0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="../adr/0004-manifest-service-startup-audit.html">ADR-0004</a> · <a href="../adr/0005-feature-drain-lease.html">ADR-0005</a> · <a href="../adr/0006-feature-generation-update.html">ADR-0006</a> · <a href="../adr/0007-execution-driver-registry.html">ADR-0007</a> · <a href="../adr/0008-team-kanban-driver-adapters.html">ADR-0008</a> · <a href="../adr/0009-context-contributor-registry.html">ADR-0009</a> · <a href="../adr/0010-session-source-context-contributor.html">ADR-0010</a> · <a href="../adr/0011-wiki-attachment-context-contributor.html">ADR-0011</a> · <a href="../adr/0012-cron-trigger-context-contributor.html">ADR-0012</a> · <a href="../adr/0019-browser-host-loop-feature.html">ADR-0019</a> · <a href="../adr/0020-wiki-knowledge-feature-foundation.html">ADR-0020</a> · <a href="../adr/0021-wiki-gateway-knowledge-service-consumer.html">ADR-0021</a> · <a href="../adr/0022-wiki-cli-knowledge-service-consumer.html">ADR-0022</a> · <a href="../adr/0023-feature-event-contributor-registry.html">ADR-0023</a> · <a href="../adr/0024-agent-preset-contribution-registry.html">ADR-0024</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-agent-preset.html">Agent Preset 测试记录</a></div>
 </div>
 </body>
 </html>

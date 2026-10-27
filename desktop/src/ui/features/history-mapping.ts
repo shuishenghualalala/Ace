@@ -256,7 +256,10 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     collapsedTitle: item.collapsed_title,
     processText: item.process_text,
     artifacts: item.artifacts,
-    segmentRole: item.tool_calls?.length ? 'process' : 'answer',
+    // 后端把整回合聚合成一条：tool_calls 与最终正文同在一条 history item 上。
+    // 有正文时单条层面按 answer（折叠区外）处理；多段拆段历史的旁白修正由
+    // mapBackendHistoryItems 批内推断（连续 assistant 段里非末段正文降级为 process）。
+    segmentRole: item.tool_calls?.length && !item.content?.trim() ? 'process' : 'answer',
     toolCalls: item.tool_calls?.map((tc) => ({
       toolCallId: tc.id,
       name: tc.name,
@@ -288,6 +291,43 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     base.attachments = parsed.attachments;
   }
   return base;
+}
+
+/**
+ * 批量映射历史，并做多段回合的 segmentRole 推断（对齐实时路径 splitAssistantAfterSettledTools 的拆段形状）。
+ * 单条映射只看得见自身字段：带工具又有正文的段无法判断是「过程旁白」还是「最终回复」。
+ * 批内按「连续 assistant 段 = 同一回合」分组，只有组内最后一条带正文的段是正式答案（answer，折叠区外），
+ * 其余带正文的段都是工具循环中的旁白（process，进折叠区），避免旁白漏到折叠区外与最终回复并排顶格。
+ */
+export function mapBackendHistoryItems(
+  items: readonly BackendHistoryItem[],
+  sessionId: string | null = state.activeSessionId,
+): ChatMessage[] {
+  const messages = items.map((item) => mapBackendHistoryItem(item, sessionId));
+  const out = [...messages];
+  const settleRun = (start: number, end: number) => {
+    if (start < 0) return;
+    let lastContent = -1;
+    for (let i = end - 1; i >= start; i -= 1) {
+      if (out[i]?.content?.trim()) { lastContent = i; break; }
+    }
+    for (let i = start; i < end; i += 1) {
+      if (i !== lastContent && out[i]?.content?.trim()) {
+        out[i] = { ...out[i]!, segmentRole: 'process' as const };
+      }
+    }
+  };
+  let runStart = -1;
+  messages.forEach((m, i) => {
+    if (m.role === 'assistant') {
+      if (runStart < 0) runStart = i;
+      return;
+    }
+    settleRun(runStart, i);
+    runStart = -1;
+  });
+  settleRun(runStart, messages.length);
+  return out;
 }
 
 function mergeStreamingText(existing?: string, incoming?: string, append = false): string | undefined {

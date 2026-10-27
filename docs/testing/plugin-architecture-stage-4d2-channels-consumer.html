@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 4D-2 · Channels Route/CLI/Adapter 收口测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.note{font-weight:700;color:#8a6116}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 4D-2 · Channels Route/CLI/Adapter 收口</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-10 · 开发：独立子 Agent（隔离 worktree） · 审查与收口：主 Agent · 提交：8716c38（合并 06f9a8c）</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li>Router 工厂 <code>channel_manager=None</code> 参数向后兼容，handler 内经 <code>crew.channel_manager</code> 动态解析当前代实例。</li>
+    <li>CLI 删除本地 ChannelManager 兜底，Feature 未激活时明确报错（exit_code=503）。</li>
+    <li>14 个 Router helper 下沉到 <code>crew/channels/router_helpers.py</code>，CLI 与 Router 共同消费，消除逆向依赖。</li>
+    <li>CLI 与 Router 热重启逻辑统一到 <code>router_helpers._restart_channel</code>。</li>
+    <li>飞书 Adapter 补 WS 热停语义；微信 Adapter 跟踪 fire-and-forget 任务并在 stop() 时取消。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>CLI/Router 消费路径（tests/test_channels_cli_consumer.py，新增 226 行）</td><td class="ok">覆盖 CLI 消费路径、工厂签名兼容、helper 导出</td></tr>
+      <tr><td>飞书/微信平台测试（test_platform_feishu + test_platform_weixin，含新增热停/任务取消用例）</td><td class="ok">新增用例通过</td></tr>
+      <tr><td>组合回归（test_channels_cli_consumer + platform_feishu + platform_weixin + channel_config_api + delivery + channels_feature_lifecycle + broadcast + channel_sessions + logout_coordinator + team_route_consumer + team_feature_lifecycle）</td><td class="ok">158 passed · 6 skipped；5 项微信失败为缺少 aiohttp/cryptography 的既有环境问题，与基线一致，无新增失败</td></tr>
+      <tr><td>扩展回归（team_tasks + dynamic_kanban_feature_lifecycle + external_feature_lifecycle + execution_drivers + runtimes_register）</td><td class="ok">284 passed · 1 skipped</td></tr>
+      <tr><td>Ruff、compileall、Import Linter</td><td class="ok">全部通过；6 contracts kept, 0 broken</td></tr>
+    </tbody>
+  </table>
+
+  <h2>生命周期核验要点</h2>
+  <ul>
+    <li>Router handler 经 <code>crew.channel_manager</code> 动态属性解析，Feature restart 后自动指向新代实例，不持有旧引用。</li>
+    <li>CLI <code>_channel_manager</code> 不再本地 new，Feature 非激活时抛 <code>CliError("渠道服务未就绪", exit_code=503)</code>。</li>
+    <li>飞书 <code>stop()</code> 设置 <code>_ws_stop_event</code> 并尝试 <code>ws_client.stop()</code>；<code>_serve_ws</code> 线程等待事件后调用 stopper 并 join runner（最多 5 秒）。</li>
+    <li>微信 <code>_fire_and_forget_tasks</code> 集合纳入所有 fire-and-forget 任务，done callback 自动清理，<code>stop()</code> 时 cancel 并 await。</li>
+  </ul>
+
+  <div class="nav"><a href="../backend/adr/0033-channels-route-consumer-lifecycle.html">ADR-0033</a> · <a href="../backend/modules/gateway.html">Gateway 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

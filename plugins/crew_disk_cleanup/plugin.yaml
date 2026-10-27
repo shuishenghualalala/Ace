@@ -3,5 +3,8 @@ version: "0.1.0"
 description: "Inspect and clean Crew temporary files under .crew/tmp and /tmp/crew-*."
 author: "Crew"
 kind: standalone
+stop_policy: drain
+drain_timeout_seconds: 30
+update_strategy: restart
 provides_tools:
   - crew_disk_cleanup

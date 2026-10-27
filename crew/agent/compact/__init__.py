@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from crew.agent.compact.meter import TokenMeasurement, TokenMeter
 from crew.agent.compact.microcompact import (
     CLEARED_PLACEHOLDER,
     FILE_UNCHANGED_STUB,
@@ -22,6 +23,8 @@ __all__ = [
     "ContextCompactor",
     "SummaryStore",
     "SummaryState",
+    "TokenMeasurement",
+    "TokenMeter",
     "estimate_tokens",
     "estimate_prompt_tokens",
     "micro_compact",

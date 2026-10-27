@@ -44,20 +44,31 @@
 <div class="wrap">
   <div class="crumb">Ace / 后端模块 / wiki</div>
   <h1><span class="logo">A</span>crew/wiki</h1>
-  <div class="sub">Wiki 知识库：KB/页面管理、编译检索与 Agent 工具。</div>
+  <div class="sub">Wiki 知识库：Knowledge Service、本地 Provider、KB/页面管理、编译检索、Agent 工具与 Prompt Context。</div>
 
   <h2>1. 职责</h2>
   <ul>
-    <li>该模块做什么、不做什么（边界）。</li>
+    <li>管理按 Owner 隔离的知识库、原始来源、页面、编译、检索与摘要。</li>
+    <li>提供 Wiki Agent 工具、Preset 内容，以及模型可见的活跃知识库上下文。</li>
+    <li>拥有 Wiki Attachment 的构造和 KB 解析，不把产品语义放入 Agent Runtime。</li>
+    <li>通过 <code>product.wiki</code> Feature Generation 管理本地 Provider、Tools、Context 与后台 Task。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
-  <p>按子功能或核心流程拆解，这是本模块文档的重点。</p>
   <table>
     <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
     <tbody>
-      <tr><td><code>feature-a</code></td><td>…</td><td>已落地</td></tr>
-      <tr><td><code>feature-b</code></td><td>…</td><td>待补充</td></tr>
+      <tr><td>知识库存储</td><td>持久化 KB、raw source、page 与索引元数据，并按 owner/kb 隔离。</td><td>已落地</td></tr>
+      <tr><td>编译与检索</td><td>把来源编译为知识页，提供 orient/search/read 等 Agent 工具。</td><td>已落地</td></tr>
+      <tr><td>会话 KB</td><td><code>WikiSessionManager</code> 维护会话当前活跃 KB。</td><td>已落地</td></tr>
+      <tr><td>Prompt Context</td><td><code>wiki.agent.context</code> 贡献活跃 KB 和 KB 列表的 persistent hidden attachment。</td><td>已落地</td></tr>
+      <tr><td>Knowledge Service</td><td><code>knowledge</code> 稳定服务覆盖问答检索、页面搜索、KB/页面/来源、ingest、compile、graph、上传与捕获；当前由 <code>LocalWikiProvider</code> 提供。</td><td>已落地</td></tr>
+      <tr><td>Wiki Foundation Bundle</td><td>Provider、Store、Compiler、Querier、Summarizer、Session Manager、24 个 Tools、Context 和后台导读 Task 收敛到同一 FeatureDefinition。</td><td>已落地</td></tr>
+      <tr><td>Gateway Consumer</td><td>Wiki REST 与聊天附件捕获只消费动态 Knowledge Service；请求和后台任务持有 Generation Lease，停用统一 Gate。</td><td>已落地</td></tr>
+      <tr><td>CLI Consumer</td><td>全部 Wiki 命令按次解析动态 Knowledge Service，并在同步或异步命令完整周期持有同代 Lease。</td><td>已落地</td></tr>
+      <tr><td>Event Contribution</td><td>cards 与 changes 由 Wiki Bundle 注册为两个同代 Event Contributor；WS 只负责中立 dispatch 和标准帧投递。</td><td>已落地</td></tr>
+      <tr><td>Agent Preset Contribution</td><td>Wiki prompt、固定 Skill、专属 Toolset、Context tag 与披露模式由 Bundle 注册；主 Agent 与子 Agent 全程持有同代 Lease。</td><td>已落地</td></tr>
+      <tr><td>完整业务纵向切片</td><td>Route 与 UI 改为只依赖 Knowledge Service/Contribution。</td><td>迁移中</td></tr>
     </tbody>
   </table>
 
@@ -65,34 +76,77 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/wiki/xxx.py</code></td><td>…</td></tr>
+      <tr><td><code>crew/wiki/service.py</code></td><td>Knowledge Service 契约、Service Key、本地 Provider 与迁移期 Components 视图。</td></tr>
+      <tr><td><code>crew/wiki/feature.py</code></td><td><code>product.wiki</code> 的 Provider、Tools、Context、Events、Agent Preset、Lease 与 restart 装配。</td></tr>
+      <tr><td><code>crew/wiki/presets/wiki.md</code></td><td>由 Wiki Bundle 所有的 Agent prompt 与基础预设元数据。</td></tr>
+      <tr><td><code>crew/wiki/store/</code></td><td>文件系统知识库数据与 Owner 隔离。</td></tr>
+      <tr><td><code>crew/wiki/manager.py</code></td><td>会话活跃 KB 状态。</td></tr>
+      <tr><td><code>crew/wiki/compiler.py</code></td><td>来源到知识页的编译流程。</td></tr>
+      <tr><td><code>crew/wiki/query.py</code></td><td>知识库查询与读取。</td></tr>
+      <tr><td><code>crew/wiki/tools.py</code></td><td>Wiki Agent 工具注册和 Handler。</td></tr>
+      <tr><td><code>crew/wiki/attachments.py</code></td><td>隐藏附件工厂与 Wiki Prompt Contributor Handler。</td></tr>
     </tbody>
   </table>
 
   <h2>4. 数据模型与接口</h2>
-  <p>对外暴露的关键类/方法、事件/消息约定、Schema。</p>
-  <pre><code># 关键签名</code></pre>
+  <pre><code>KNOWLEDGE_SERVICE_KEY = ServiceKey[KnowledgeService]("knowledge")
+
+service.query(question, owner_account_id, top_k, kb_id)
+service.search(query, owner_account_id, top_k, kb_id)
+service.search_pages(query, owner_account_id, top_k, kb_id)
+await service.ingest(source_id, owner_account_id, ...)
+service.read_document(page_id, owner_account_id, kb_id)
+service.index_status(owner_account_id, kb_id)
+
+build_wiki_agent_context_contributor(manager, session_store)
+
+ContextContributor(
+    contributor_id="wiki.agent.context",
+    phase=ContextPhase.PROMPT,
+    priority=100,
+    model_visible=True,
+    persistent=True,
+)</code></pre>
+  <p>Service 是 Provider 可替换边界；Gateway 与 CLI 已只消费该边界，Components 视图仅服务尚未迁移的 Work 调用方。Contributor 只接受带 <code>wiki</code> context tag 的 Agent。KB 选择顺序为本轮 <code>wiki_kb_id</code>、会话保存值、Manager 当前值、<code>default</code>。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>问题 1：…</li>
-    <li>TODO：…</li>
+    <li>Route 与 UI Contribution 尚未归属 Wiki Bundle。</li>
+    <li>Work 仍直接持有 Wiki Store；阶段 3C 改为可选 <code>knowledge</code> Service Consumer。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
   <ul>
-    <li>如何在此模块上加功能（遵守契约、不跨目录）。</li>
+    <li>新增模型上下文应扩展 Wiki-owned Contributor，不向 <code>crew.agent.runtime</code> 添加 Wiki 判断。</li>
+    <li>新增 Wiki 工具保持 Owner/KB 参数显式，并由 Wiki Bundle 的 FeatureScope 统一拥有和绑定 Lease。</li>
+    <li>新增 Provider 实现 <code>KnowledgeService</code>，不得让消费者依赖本地文件布局。</li>
   </ul>
 
-  <h2>7. 变更记录</h2>
+  <h2>7. KnowledgeService 契约一致性测试（2026-09-11）</h2>
+  <p>演进计划阶段 6 首个切片：<code>tests/wiki/test_service_contract.py</code> 把 <code>KnowledgeService</code> 协议面的行为断言写成与实现无关的参数化套件，为未来 Local/Remote Provider 替换建立统一契约门禁。</p>
+  <ul>
+    <li><strong>工厂参数化</strong>：套件通过 <code>PROVIDER_FACTORIES</code> 注册表按工厂 id 参数化；当前只接入 <code>local</code>（<code>LocalWikiProvider</code>）。工厂走与生产 Bundle（<code>feature.make_provider</code>）相同的组件构造路径——真实 FileSystemWikiStore、WikiQuerier、WikiCompiler、WikiSummarizer、WikiSessionManager，不 mock 存储/检索组件；仅 LLM 边界使用脚本化 FakeProvider（与 compiler 单测同一策略）。未来 Remote Provider 只需注册一个新工厂，全部用例自动复跑。</li>
+    <li><strong>断言语义而非"不抛错"</strong>：覆盖协议全部方法——query/search/search_pages、ingest（progress 阶段序与回调容错、预取消抛 <code>CancelledError</code> 且零写入）、read_document、index_status、initialize 幂等、KB 增删列（default/tutorial 保护与缺失返回 False）、页面增删改与分页/brief 列表、related_pages 方向与去重、vault 文档、upload→source 面（source_pages/source_titles/source_files/source_file/delete_source）、capture_text 去重与校验、capture_attachment、compile_all/lint/graph、session_kb_id/cancel_confirmation 默认值，以及 owner 与 kb 两个维度的隔离性。</li>
+    <li><strong>序列化边界结论</strong>：协议返回的 DTO 中，KnowledgeQuery、KnowledgeIndexStatus、KnowledgeVaultDocument、KnowledgeBase、WikiPage（dataclass 载荷）、WikiPageRelation、IngestResult、RawSource、CompileResult、WikiGraph、lint issue dict 均可无损 JSON round-trip（严格 <code>json.dumps</code> 无需 default），证明其传输无关。锁定现状形态的三处：<code>KnowledgeSourceFile.content</code> 为 bytes，严格序列化抛 TypeError、<code>default=str</code> 后退化为不可还原的 repr 字符串（远程化前需 base64 等显式编码）；<code>KnowledgeUploadResult.pages/issues</code> 的 tuple 经 JSON 后到达对端为 list；<code>WikiPage.to_dict</code> 完整模式不含 summary（仅 brief 模式携带，且 brief 读取端用正文头部摘录覆盖显式 summary）。</li>
+  </ul>
+
+  <h2>8. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
+      <tr><td>2026-09-03</td><td>Wiki Agent hidden attachment 迁入 Prompt Context Contributor。</td><td>Wiki 会话 KB、Agent Preset、FeatureScope 和 canonical history。</td></tr>
+      <tr><td>2026-09-04</td><td>建立 Knowledge Service、Local Provider 与 <code>product.wiki</code> Foundation Bundle。</td><td>Store/Compiler/Querier/Summarizer、24 个 Tools、Context、后台 Task 与动态宿主视图。</td></tr>
+      <tr><td>2026-09-05</td><td>Gateway Wiki API 与附件捕获迁为 Knowledge Service Consumer，并为请求绑定 Generation Lease。</td><td>REST Gate、上传/下载、KB/页面/来源、drain 与 Provider 替换边界。</td></tr>
+      <tr><td>2026-09-05</td><td>Wiki CLI 全部叶子命令迁为动态 Knowledge Service Consumer。</td><td>命令 Gate、同步/异步 Lease、外部 Provider、上传与 Host SessionStore 边界。</td></tr>
+      <tr><td>2026-09-05</td><td>Wiki cards/changes 注册为生命周期 Event Contributor，Gateway WS 删除 Manager 特判。</td><td>事件顺序、Generation replace、drain、失败隔离与旧帧出口兼容。</td></tr>
+      <tr><td>2026-09-05</td><td>Wiki Agent Preset 资产与完整策略归属 Bundle，通用 Agent 装配删除名称特判。</td><td>动态目录、前后台 Lease、父权限、普通 Agent 隔离与缓存换代。</td></tr>
+      <tr><td>2026-09-11</td><td>新增 KnowledgeService 契约一致性测试套件（工厂参数化 + 全协议方法 + DTO 序列化边界锁定）。</td><td><code>tests/wiki/test_service_contract.py</code>；未来 Remote Provider 复用同一套件，不改生产代码。</td></tr>
+      <tr><td>2026-10-21</td><td>合入 origin/dev 语义检索（embedding）与图片理解进程内化：语义配置/向量索引迁入成员包并接线进 Feature Bundle（全局 provider 随宿主关停、per-owner 经 <code>owner_embedding_provider</code> 解析）；REST 补齐查询参数 400 校验、页面标题冲突 409（source 页按来源定身份）与 <code>delete_source</code> 索引重建；<code>image-understanding</code> 技能下线，<code>describe_image</code> 进程内直连 VLM；工具面收敛为 23 个（<code>wiki_list_inbox</code> 并入来源列表）。</td><td><code>packages/crew-wiki</code>（feature/routes/service/multimodal/store）、<code>crew/state/config.py</code>、Gateway Wiki REST、技能清单。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0011-wiki-attachment-context-contributor.html">ADR-0011</a> · <a href="../adr/0020-wiki-knowledge-feature-foundation.html">ADR-0020</a> · <a href="../adr/0021-wiki-gateway-knowledge-service-consumer.html">ADR-0021</a> · <a href="../adr/0022-wiki-cli-knowledge-service-consumer.html">ADR-0022</a> · <a href="../adr/0023-feature-event-contributor-registry.html">ADR-0023</a> · <a href="../adr/0024-agent-preset-contribution-registry.html">ADR-0024</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-agent-preset.html">Agent Preset 测试记录</a></div>
 </div>
 </body>
 </html>

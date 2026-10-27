@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 from crew.agent.prompt_builder import build_prompt_parts
 from crew.agent.subagent import (
     ActiveSubagents,
     SubagentRegistry,
+    build_collect_subagent_schema,
     build_run_agent_schema,
     build_delegate_task_schema,
 )
@@ -35,6 +37,7 @@ def test_parse_definition(tmp_path):
         "tools: file_read\n"
         "skills: [crew-wiki-curator]\n"
         "model: deepseek\n"
+        "provider: external:reviewer\n"
         "max_iterations: 7\n"
         "---\n"
         "你是测试子智能体。\n",
@@ -48,6 +51,7 @@ def test_parse_definition(tmp_path):
     assert d.tools == ["file_read"]          # 字符串归一化为单元素列表
     assert d.skills == ["crew-wiki-curator"]
     assert d.model == "deepseek"
+    assert d.provider == "external:reviewer"
     assert d.max_iterations == 7
     assert d.system_prompt == "你是测试子智能体。"
     assert d.source == "user"
@@ -59,6 +63,7 @@ def test_parse_definition_defaults(tmp_path):
     d = parse_definition(f)
     assert d.toolsets is None and d.tools is None
     assert d.model == "inherit"
+    assert d.provider == "inprocess-spawn"
     assert d.max_iterations is None
     assert d.description == "正文第一行"  # 无 description 用正文首行兜底
 
@@ -67,22 +72,18 @@ def test_parse_definition_defaults(tmp_path):
 
 def test_registry_builtin_presets():
     reg = SubagentRegistry()
-    # 内置预设只保留通用能力，不包含特定产品的状态栏或指南。
-    assert set(reg.names()) >= {"general-purpose", "Explore", "Plan", "Wiki", "verification"}
+    # 内置注册表只保留通用来源；产品专属预设由 Feature Runtime 持有。
+    assert set(reg.names()) >= {"general-purpose", "Explore", "Plan", "verification"}
+    assert "Wiki" not in reg.names()
+    assert reg.get("Wiki") is None
     assert reg.get("Explore").source == "builtin"
-    wiki = reg.get("Wiki")
-    assert wiki is not None
-    # Wiki 权限由统一策略计算：父主 Agent 最终权限 + Wiki 专属 Toolset。
-    assert wiki.toolsets is None
-    assert wiki.tools is None
-    assert wiki.skills == ["crew-wiki-curator"]
 
 
 def test_registry_user_overrides_builtin(tmp_path, monkeypatch):
     user_dir = tmp_path / "agents"
     user_dir.mkdir()
     (user_dir / "explore.md").write_text(
-        "---\nname: Explore\ndescription: 用户覆盖版\n---\n用户自定义 explore\n",
+        "---\nname: Explore\ndescription: 用户覆盖版\noverride: true\n---\n用户自定义 explore\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(sub_registry_mod, "get_user_agents_dir", lambda: user_dir)
@@ -101,7 +102,7 @@ def test_subagent_tool_filter_blacklist():
     + 写副作用工具（memory/cron/feishu/wiki_*），正常只读工具保留。"""
     app = build_app(config=Config(max_iterations=5))
     # 继承全量（toolsets=None）也不能拿到嵌套委派工具
-    inherited = app._subagent_tool_filter(None, None)
+    inherited = app._resolve_subagent_tool_scope(None, None)
     assert "delegate_task" not in inherited
     assert "run_agent" not in inherited
     assert "delegate_to_external_agent" not in inherited
@@ -115,7 +116,7 @@ def test_subagent_tool_filter_blacklist():
 
 def test_subagent_tool_filter_whitelist():
     app = build_app(config=Config(max_iterations=5))
-    names = app._subagent_tool_filter(["file"], ["file_read"])
+    names = app._resolve_subagent_tool_scope(["file"], ["file_read"])
     assert names == ["file_read"]
 
 
@@ -136,11 +137,46 @@ def test_delegate_task_schema():
     schema = build_delegate_task_schema()
     props = schema["parameters"]["properties"]
     assert "goal" in props and "tasks" in props and "toolsets" in props
-    # goal / tasks 二选一：顶层不强制 goal，纯 tasks 批量模式才能过校验
+    # goal / tasks / prompt_template+items 三选一：顶层不强制字段
     assert schema["parameters"]["required"] == []
     # skills 与 toolsets 并列，单任务/批量子任务都暴露
     assert "skills" in props
     assert "skills" in props["tasks"]["items"]["properties"]
+    # 阶段 B：同构批量模板形态
+    assert "prompt_template" in props and "items" in props
+    assert "{item}" in props["prompt_template"]["description"]
+
+
+def test_model_visible_subagent_schemas_match_stage_a_baseline():
+    """Canonical snapshots keep all three public tool schemas byte-stable.
+
+    阶段 B 修订：delegate_task 描述与参数新增同构批量（prompt_template/items，
+    只增不改），基线哈希随之更新；run_agent / collect_subagent 保持阶段 A 原值。
+    """
+
+    schemas = {
+        "delegate_task": build_delegate_task_schema(),
+        "run_agent": build_run_agent_schema(["Explore"]),
+        "collect_subagent": build_collect_subagent_schema(),
+    }
+    expected = {
+        "delegate_task": "854f5021318857ea81195fb2f844ec24a87e00de7fc80d7b18a034048cb8a272",
+        "run_agent": "0eaececd75209360c0e7648b2b234e3d3ce6e3c384d15ae0c66d4decc981414d",
+        "collect_subagent": "28d7eb9404d0aae0bd105134da96787e4526c476bb6354b8c056339f8af4b2bd",
+    }
+
+    actual = {
+        name: hashlib.sha256(
+            json.dumps(
+                schema,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        for name, schema in schemas.items()
+    }
+    assert actual == expected
 
 
 # ── 4b. delegate_task 继承主 agent 技能 ─────────────────────────────────────
@@ -168,7 +204,8 @@ def test_subagent_inherits_parent_skills():
         # A: 不传 skills → 继承父全部（enabled/disabled 均为 None）
         a = app._make_subagent({**base_spec, "inherit_skills": True, "skills": None})
         assert a.inject_skills is True
-        assert a.enabled_skills is None and a.disabled_skills is None
+        assert a.enabled_skills is None
+        assert "crew-wiki-curator" in (a.disabled_skills or [])
 
         # B: 指定列表 → 与父允许集取交集
         b = app._make_subagent({**base_spec, "inherit_skills": True, "skills": [sample, "no-such-skill"]})
@@ -300,7 +337,7 @@ def test_subagent_inherits_parent_final_authorization_snapshot():
     app = build_app(config=Config(max_iterations=5))
     token = current_authorized_tool_names.set(frozenset({"file_read"}))
     try:
-        inherited = app._subagent_tool_filter(["file", "terminal"], None)
+        inherited = app._resolve_subagent_tool_scope(["file", "terminal"], None)
     finally:
         current_authorized_tool_names.reset(token)
     assert inherited == ["file_read"]
@@ -318,6 +355,24 @@ async def test_lightweight_prompt_skips_global_context():
     full = await build_prompt_parts(workspace_instructions="组织规则X", lightweight=False)
     assert "组织规则X" not in light["user_reminder"]
     assert "组织规则X" in full["user_reminder"]
+
+
+async def test_delegation_discipline_is_main_agent_only_and_configurable():
+    explicit = await build_prompt_parts(lightweight=False, delegation_mode="explicit")
+    proactive = await build_prompt_parts(lightweight=False, delegation_mode="proactive")
+    child = await build_prompt_parts(lightweight=True, delegation_mode="proactive")
+
+    assert "不构成委派授权" in explicit["system_static"]
+    assert "可以主动调用子智能体" in proactive["system_static"]
+    assert "子智能体委派纪律" not in child["system_static"]
+
+
+def test_preset_child_always_receives_handoff_guidance():
+    app = build_app(config=Config(max_iterations=5))
+    child = app._make_subagent({"system_prompt": "你是审查员", "model": "inherit"})
+
+    assert child.system_prompt.startswith("你是审查员")
+    assert "不要向用户提问" in child.system_prompt
 
 
 async def test_prompt_marks_runtime_cwd_as_authoritative_workspace(tmp_path):
@@ -388,7 +443,7 @@ def test_explore_preset_is_read_only():
     assert explore.tools == ["file_read", "glob", "grep", "terminal"]
 
     app = build_app(config=Config(max_iterations=5))
-    names = app._subagent_tool_filter(explore.toolsets, explore.tools)
+    names = app._resolve_subagent_tool_scope(explore.toolsets, explore.tools)
     assert "file_read" in names
     assert "file_write" not in names and "patch" not in names
 
@@ -485,6 +540,55 @@ async def test_subagent_absolute_runtime_backstop():
     assert "运行上限" in res["summary"]
 
 
+async def test_subagent_timeout_interrupts_before_closing_stream():
+    """🔴 超时收尾顺序：interrupt 必须先于 gen.aclose() 设置，关流时才观察得到。
+
+    用自定义异步迭代器在 aclose() 入口记录 interrupt 可见性；旧顺序（先关流后
+    interrupt）下该时刻标志尚未设置。
+    """
+    import asyncio as _asyncio
+    from crew.core.envelope import ResponseChunk
+
+    class _HungChild:
+        def __init__(self):
+            self.interrupted = False
+            self.interrupt_seen_at_stream_close = False
+
+        def run(self, env):
+            async def gen():
+                yield ResponseChunk.delta("r", "working")
+                await _asyncio.sleep(10)  # 卡死触发 idle 超时
+
+            inner = gen()
+            child = self
+
+            class _ObservedStream:
+                def __aiter__(self):
+                    return self
+
+                def __anext__(self):
+                    return inner.__anext__()
+
+                async def aclose(self):
+                    # 记录关流瞬间 interrupt 是否已可见：先关流后 interrupt 的旧顺序下为 False
+                    child.interrupt_seen_at_stream_close = child.interrupted
+                    await inner.aclose()
+
+            return _ObservedStream()
+
+        def interrupt(self, message=None):
+            self.interrupted = True
+
+        async def aclose(self):
+            pass
+
+    child = _HungChild()
+    res = await _one_child(lambda spec: child, idle=0.2, mx=0)
+    assert res["status"] == "timeout"
+    assert child.interrupted is True
+    assert child.interrupt_seen_at_stream_close is True
+
+
 def test_subagent_capped_by_parent_user_type():
     """🔴 防越权：外部受限用户的子 agent 不能拿到父本身拿不到的工具。"""
     cfg = Config(max_iterations=5)
@@ -497,11 +601,11 @@ def test_subagent_capped_by_parent_user_type():
     app = build_app(config=cfg)
 
     # 内部父：toolsets=None 继承全量 → 含 terminal
-    internal_names = app._subagent_tool_filter(None, None, user_type="internal")
+    internal_names = app._resolve_subagent_tool_scope(None, None, user_type="internal")
     assert "terminal" in internal_names
 
     # 外部父：即便子请求 terminal 工具集，也被父 access_control 封顶剔除
-    external_names = app._subagent_tool_filter(["terminal"], None, user_type="external")
+    external_names = app._resolve_subagent_tool_scope(["terminal"], None, user_type="external")
     assert "terminal" not in external_names
     assert external_names == [] or all(
         app.registry.toolset_for(n) == "file" for n in external_names
@@ -511,26 +615,26 @@ def test_subagent_capped_by_parent_user_type():
 async def test_subagent_session_not_persisted():
     """会话堆积：lightweight 子 agent 不把一次性会话写进 session_store。"""
     app = build_app(config=Config(max_iterations=5))
-    before = len(app.session_store.list_sessions())
+    before = len(app.session_store.list_sessions(owner_account_id="local"))
     await app.registry.execute(
         ToolCall("p1", "run_agent", {"agent_type": "Explore", "goal": "hi"})
     )
-    after = len(app.session_store.list_sessions())
+    after = len(app.session_store.list_sessions(owner_account_id="local"))
     assert after == before  # 子会话未落库
 
 
 def test_subagent_tool_filter_coerces_string_toolsets():
     """🔴 健壮性：模型把 toolsets/tools 传成字符串时不能静默拿到空工具集。"""
     app = build_app(config=Config(max_iterations=5))
-    as_list = app._subagent_tool_filter(["file"], None)
-    as_str = app._subagent_tool_filter("file", None)
+    as_list = app._resolve_subagent_tool_scope(["file"], None)
+    as_str = app._resolve_subagent_tool_scope("file", None)
     assert as_str == as_list and as_str  # 字符串与列表等价，且非空
     # tools 白名单同理
-    assert app._subagent_tool_filter("file", "file_read") == ["file_read"]
+    assert app._resolve_subagent_tool_scope("file", "file_read") == ["file_read"]
 
 
-def test_run_agent_not_registered_without_presets(monkeypatch):
-    """🔴 健壮性：无预设时不注册 run_agent（避免空 enum），delegate_task 仍在。"""
+def test_run_agent_keeps_feature_preset_when_generic_sources_are_empty(monkeypatch):
+    """通用来源为空时，Feature-owned Wiki 仍由动态注册表提供。"""
     empty_dir = sub_registry_mod._PRESETS_DIR.parent / "presets_none_xyz"
     # 指向一个不存在的目录 → 注册表为空
     monkeypatch.setattr(sub_registry_mod, "_PRESETS_DIR", empty_dir)
@@ -538,7 +642,9 @@ def test_run_agent_not_registered_without_presets(monkeypatch):
 
     app = build_app(config=Config(max_iterations=5))
     assert app.subagent_registry.names() == []
-    assert "run_agent" not in app.registry.names()
+    assert "run_agent" in app.registry.names()
+    schema = app.registry.get("run_agent").current_parameters()
+    assert schema["properties"]["agent_type"]["enum"] == ["Wiki"]
     assert "delegate_task" in app.registry.names()  # 自定义委派不受影响
 
 
@@ -556,12 +662,18 @@ def test_verification_preset_is_background():
     assert reg.get("Explore").background is False
 
 
-def test_verification_preset_can_actually_receive_browser_use():
+async def test_verification_preset_can_actually_receive_browser_use():
     """tools 白名单与 toolsets 取交集；必须显式包含 browser toolset。"""
     app = build_app(config=Config(max_iterations=5))
-    verification = SubagentRegistry().get("verification")
+    # browser 插件 activation_phase=startup（c147420 迁入宿主事件循环生命周期），
+    # browser_use 工具要走 startup 才会注册进 registry。
+    await app.startup(start_cron=False)
+    try:
+        verification = SubagentRegistry().get("verification")
 
-    names = app._subagent_tool_filter(verification.toolsets, verification.tools)
+        names = app._resolve_subagent_tool_scope(verification.toolsets, verification.tools)
+    finally:
+        await app.shutdown()
 
     assert "browser_use" in names
 
@@ -587,7 +699,7 @@ async def test_run_agent_background_launch_and_collect():
     assert res["status"] == "completed"
     assert res["summary"].strip()
     # 看板状态也更新为 done
-    assert app.subagent_tasks.get(task_id)["status"] == "done"
+    assert app.subagent_tasks.get(task_id, owner_account_id="local")["status"] == "done"
     # 完成后 wait=False 轮询同样取到结构化结果
     polled = await app.registry.execute(
         ToolCall("b2p", "collect_subagent", {"task_id": task_id, "wait": False})
@@ -599,7 +711,7 @@ async def test_background_completion_auto_injected_next_turn():
     """后台完成结果自动注入下一轮主 agent 上下文（无需模型主动 collect）。"""
     from crew.core.envelope import Envelope
     from crew.core.runctx import current_session_id
-    from crew.agent.runtime import _format_subagent_notifications
+    from crew.features import ContextPhase
 
     app = build_app(config=Config(max_iterations=5))
     tok = current_session_id.set("s1")
@@ -614,17 +726,22 @@ async def test_background_completion_auto_injected_next_turn():
     finally:
         current_session_id.reset(tok)
 
-    assert ("", "s1") in app._subagent_pending  # 未 collect → 已入队待自动注入
+    assert ("local", "s1") in app._subagent_notifications._pending  # 未 collect → 已入队待自动注入
 
-    # 下一轮：handle 的 drain 把待通知放进 envelope.params
-    env = Envelope.of("继续", session_id="s1", user_id="")
-    app._drain_subagent_notifications(env)
-    notifs = env.params["subagent_notifications"]
-    assert notifs and notifs[0]["agent"] == "Explore"
-    assert ("", "s1") not in app._subagent_pending  # 排空后不重复注入
-
-    block = _format_subagent_notifications(notifs)
+    # 下一轮：PROMPT contributor drain 待通知并拼成 reminder
+    env = Envelope.of("继续", session_id="s1", user_id="local")
+    report = await app.context_contributors.contribute(env, phase=ContextPhase.PROMPT)
+    assert len(report.prompt_parts) == 1
+    block = report.prompt_parts[0]
     assert "后台子任务完成通知" in block and "Explore" in block
+    assert ("local", "s1") not in app._subagent_notifications._pending  # 排空后不重复注入
+
+    # 再跑一轮：队列已空，不再产出任何输出（每会话恰好注入一次）
+    report2 = await app.context_contributors.contribute(
+        Envelope.of("继续", session_id="s1", user_id="local"),
+        phase=ContextPhase.PROMPT,
+    )
+    assert report2.prompt_parts == ()
 
 
 async def test_collect_dedupes_auto_injection():
@@ -646,31 +763,26 @@ async def test_collect_dedupes_auto_injection():
         current_session_id.reset(tok)
 
     # collect 已消费 → 不应再留在待注入队列
-    assert ("", "s2") not in app._subagent_pending
+    assert ("local", "s2") not in app._subagent_notifications._pending
 
 
 def test_subagent_pending_collect_is_owner_scoped():
     """同名 session 的后台通知按 owner 清理，collect 不会误删其它账号队列。"""
-    from crew.core.envelope import Envelope
-
     app = build_app(config=Config(max_iterations=5))
-    app._subagent_pending[("A:uid-a", "same")] = [{"task_id": "a", "agent": "Explore"}]
-    app._subagent_pending[("B:uid-b", "same")] = [{"task_id": "b", "agent": "Explore"}]
+    app._subagent_notifications._pending[("A:uid-a", "same")] = [{"task_id": "a", "agent": "Explore"}]
+    app._subagent_notifications._pending[("B:uid-b", "same")] = [{"task_id": "b", "agent": "Explore"}]
 
-    app._on_subagent_collected("same", "a", owner_account_id="A:uid-a")
+    app._subagent_notifications.remove("same", "a", "A:uid-a")
 
-    assert ("A:uid-a", "same") not in app._subagent_pending
-    assert app._subagent_pending[("B:uid-b", "same")][0]["task_id"] == "b"
-
-    env_b = Envelope.of("继续", session_id="same", user_id="B:uid-b")
-    app._drain_subagent_notifications(env_b)
-    assert env_b.params["subagent_notifications"][0]["task_id"] == "b"
+    assert ("A:uid-a", "same") not in app._subagent_notifications._pending
+    drained = app._subagent_notifications.drain("same", "B:uid-b")
+    assert drained[0]["task_id"] == "b"
 
 
 def test_format_subagent_notifications_empty():
-    from crew.agent.runtime import _format_subagent_notifications
-    assert _format_subagent_notifications(None) == ""
-    assert _format_subagent_notifications([]) == ""
+    from crew.agent.subagent.context import format_subagent_notifications
+    assert format_subagent_notifications(None) == ""
+    assert format_subagent_notifications([]) == ""
 
 
 async def test_background_concurrency_capped():
@@ -699,6 +811,28 @@ async def test_collect_unknown_task_errors():
         ToolCall("b3", "collect_subagent", {"task_id": "nope"})
     )
     assert "error" in result.content and ("任务不存在" in result.content or "Task not found" in result.content)
+
+
+def test_bg_events_sweeps_entries_past_ttl():
+    """🔴 bg_events 兜底清扫：已完成且超 TTL 的 entry 被回收；新完成/运行中的保留。"""
+    import asyncio as _asyncio
+
+    from crew.agent.subagent.runtime import (
+        _BG_EVENT_TTL_SECONDS,
+        _BgEventEntry,
+        _sweep_stale_bg_events,
+    )
+
+    entries: dict[str, _BgEventEntry] = {}
+    stale = _BgEventEntry(_asyncio.Event())
+    stale.done_at = 1000.0
+    fresh = _BgEventEntry(_asyncio.Event())
+    fresh.done_at = 1000.0 + _BG_EVENT_TTL_SECONDS - 10  # 未超 TTL
+    running = _BgEventEntry(_asyncio.Event())            # done_at=None：仍在运行
+    entries.update({"stale": stale, "fresh": fresh, "running": running})
+
+    _sweep_stale_bg_events(entries, now=5000.0, ttl=_BG_EVENT_TTL_SECONDS)
+    assert list(entries) == ["fresh", "running"]
 
 
 def test_child_agent_has_no_subagent_tools():
@@ -744,7 +878,7 @@ async def test_delegate_task_background_launch_and_collect():
     res = json.loads(collected.content)
     assert res["status"] == "completed"
     assert res["summary"].strip()
-    assert app.subagent_tasks.get(task_id)["status"] == "done"
+    assert app.subagent_tasks.get(task_id, owner_account_id="local")["status"] == "done"
 
 
 async def test_delegate_task_background_rejects_batch():
@@ -762,10 +896,10 @@ async def test_delegate_task_background_rejects_batch():
 
 async def test_delegate_task_background_auto_injected_next_turn():
     """后台完成结果自动注入下一轮主 agent 上下文（与 run_agent 同路径，
-    共用 _on_subagent_background_done -> _drain_subagent_notifications）。"""
+    共用 _on_subagent_background_done -> subagent.background.reminder contributor）。"""
     from crew.core.envelope import Envelope
     from crew.core.runctx import current_session_id
-    from crew.agent.runtime import _format_subagent_notifications
+    from crew.features import ContextPhase
 
     app = build_app(config=Config(max_iterations=5))
     tok = current_session_id.set("s-dbg")
@@ -779,16 +913,16 @@ async def test_delegate_task_background_auto_injected_next_turn():
     finally:
         current_session_id.reset(tok)
 
-    assert ("", "s-dbg") in app._subagent_pending  # 未 collect -> 已入队待自动注入
+    assert ("local", "s-dbg") in app._subagent_notifications._pending  # 未 collect -> 已入队待自动注入
 
-    env = Envelope.of("继续", session_id="s-dbg", user_id="")
-    app._drain_subagent_notifications(env)
-    notifs = env.params["subagent_notifications"]
-    assert notifs and notifs[0]["status"] == "completed"
-    block = _format_subagent_notifications(notifs)
+    env = Envelope.of("继续", session_id="s-dbg", user_id="local")
+    report = await app.context_contributors.contribute(env, phase=ContextPhase.PROMPT)
+    assert len(report.prompt_parts) == 1
+    block = report.prompt_parts[0]
+    assert "status=completed" in block
     assert "后台子任务完成通知" in block
     assert "delegate_task" in block  # 文案泛化后含 delegate_task
-    assert ("", "s-dbg") not in app._subagent_pending  # 排空后不重复注入
+    assert ("local", "s-dbg") not in app._subagent_notifications._pending  # 排空后不重复注入
 
 
 # ── 7. 多智能体 member 后台 delegate_task 通知回到发起 member ────────────────
@@ -814,16 +948,16 @@ async def test_team_member_bg_delegate_notifies_to_member_session():
         current_subagent_notify_session.reset(tok2)
 
     # 入队到 member 子会话，而非 team_session
-    assert ("", "team-s1::coder") in app._subagent_pending
-    assert ("", "team-s1") not in app._subagent_pending
+    assert ("local", "team-s1::coder") in app._subagent_notifications._pending
+    assert ("local", "team-s1") not in app._subagent_notifications._pending
 
 
 async def test_team_member_run_drains_bg_notifications():
-    """🔴 适配后：member 下一轮被派活（SingleAgent.run）时，开头 drain 自己的后台
-    完成通知注入本轮上下文（team 模式下 member.run 不经 app.handle 的 drain）。"""
+    """🔴 适配后：member 下一轮被派活（SingleAgent.run）时，PROMPT contributor
+    drain 自己的后台完成通知注入本轮上下文（member.run 不经 app.handle）。"""
     from crew.core.envelope import Envelope
     from crew.core.runctx import current_session_id, current_subagent_notify_session
-    from crew.agent.runtime import SingleAgent, _format_subagent_notifications
+    from crew.agent.runtime import SingleAgent
 
     app = build_app(config=Config(max_iterations=5))
     # 上轮：member 后台 delegate_task -> 通知入队 child_session_id
@@ -838,9 +972,9 @@ async def test_team_member_run_drains_bg_notifications():
     finally:
         current_session_id.reset(tok1)
         current_subagent_notify_session.reset(tok2)
-    assert ("", "team-s1::coder") in app._subagent_pending
+    assert ("local", "team-s1::coder") in app._subagent_notifications._pending
 
-    # member 下一轮：构造带 subagent_drain_fn 的 member，run member sub_env
+    # member 下一轮：member agent 挂载共享 contributor 注册表，run member sub_env
     member = SingleAgent(
         provider=app.provider,
         registry=app.registry,
@@ -849,19 +983,20 @@ async def test_team_member_run_drains_bg_notifications():
         plugins=app.plugins,
         system_prompt="你是 member",
         max_iterations=2,
-        subagent_drain_fn=app.pop_subagent_notifications,
+        context_contributors=app.context_contributors,
     )
     sub_env = Envelope.of(
         "继续",
         session_id="team-s1::coder",
-        user_id="",
+        user_id="local",
         params={"member_session_id": "team-s1::coder", "task_session_id": "team-s1"},
     )
     async for _chunk in member.run(sub_env):
-        pass  # 跑完即可，drain 在 run 开头发生
+        pass  # 跑完即可，drain 在 PROMPT 贡献阶段发生
 
-    # drain 已把通知注入 sub_env.params + 从队列移除
-    assert ("", "team-s1::coder") not in app._subagent_pending
-    notifs = sub_env.params.get("subagent_notifications")
-    assert notifs and notifs[0]["status"] == "completed"
-    assert "后台子任务完成通知" in _format_subagent_notifications(notifs)
+    # contributor 已把通知注入 _context_prompt_parts + 从队列移除（每会话恰好一次）
+    assert ("local", "team-s1::coder") not in app._subagent_notifications._pending
+    prompt_parts = sub_env.params.get("_context_prompt_parts") or []
+    blocks = [p for p in prompt_parts if "后台子任务完成通知" in p]
+    assert len(blocks) == 1
+    assert "status=completed" in blocks[0]

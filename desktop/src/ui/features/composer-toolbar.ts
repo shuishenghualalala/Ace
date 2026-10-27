@@ -252,7 +252,7 @@ function syncComposerWorkspaceLabel(): void {
 
   const id = composerWorkspaceId();
   const isDefault = id === 'default';
-  label.textContent = isDefault ? '不在项目中工作' : workspaceLabel(id);
+  label.textContent = isDefault ? '在默认目录中工作' : workspaceLabel(id);
   btn.title = isDefault ? '选择项目' : `项目：${label.textContent}`;
   btn.classList.toggle('is-named', !isDefault);
   btn.classList.remove('is-locked');
@@ -311,7 +311,7 @@ function renderWorkspacePopover(): void {
       <button type="button" class="composer-select-item${current === 'default' ? ' is-selected' : ''}" data-workspace-id="default">
         <span class="composer-select-item__plain-icon"><svg class="mw-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><use href="#icon-close"></use></svg></span>
         <span class="composer-select-item__body">
-          <span class="composer-select-item__title">不在项目中工作</span>
+          <span class="composer-select-item__title">在默认目录中工作</span>
         </span>
         ${current === 'default' ? selectChevron() : '<span class="composer-select-item__spacer"></span>'}
       </button>

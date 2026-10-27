@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6D · Desktop feature_event 流路径语义补齐</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6D · Desktop feature_event 流路径语义补齐</h1>
+<p>2026-09-11。删除 Gateway 出口旧帧兼容层路线（6C 调查 Step 1）的前端准备：使同一事件无论以旧 kind 帧还是 feature_event 新帧到达 Desktop，最终行为完全一致。基线提交 abc7f44；已验收通过并随本记录提交。</p>
+<h2>方案</h2>
+<p>入口归一：<code>chat-reducer.ts</code> 新增 <code>LEGACY_KIND_BY_FEATURE_EVENT</code> 映射表与 <code>toLegacyEventFrame()</code>（与 Gateway <code>event_compat.py</code> 同一资格集，kanban 帧归一时同样重建 <code>body.event</code>）。<code>applyChunk</code> 在所有分支之前归一；<code>normalizeChunk</code> 的 feature_event 分支归一后递归重走同一构造路径。已登记的 v1 feature_event 帧映射回等价旧 kind 后，看板刷新白名单、team_internal 渲染副作用分支、回合 gate（按映射出的 kind 分类，裸 feature_event 不入任何 kind 集合）、wiki_changed 早期分支全部只面对单一内部形态——零副作用列表复制。未登记事件/未知版本原样放行，由 featureEventRegistry 可诊断忽略（console.warn，不抛错）。</p>
+<h2>验收契约</h2>
+<table><tr><th>硬依赖（6C 调查发现）</th><th>补齐证据</th><th>状态</th></tr>
+<tr><td>kanban 刷新白名单缺 feature_event</td><td>feature_event(kanban, 4 事件) 归一为 kanban/workflow_progress kind → 既有白名单 + 会话守卫触发刷新</td><td>✅ 测试锁定</td></tr>
+<tr><td>team_internal 副作用分支只认旧帧</td><td>归一后进既有副作用分支（渲染 + workspace 历史 + 计时 + 滚动 + early return）</td><td>✅ 测试锁定</td></tr>
+<tr><td>回合 gate 绕过</td><td>team.internal_message 获 TURN_GENERATION、wiki.cards 与 kanban 事件获 TURN_SCOPED 语义；迟到帧被 gate 丢弃</td><td>✅ 测试锁定</td></tr>
+<tr><td>wiki_changed 早期时序</td><td>归一后走同一早期分支（history 排队与 sequence 去重之前）；另补 reduceChunk 侧 registry 转调供绕过 applyChunk 的调用方</td><td>✅ 测试锁定</td></tr>
+<tr><td>transport.ts 类型缺 feature_event</td><td>枚举已补；并补齐 wiki_changed 的 ChatChunkKind/WikiChangedChunk/normalizeChunk case</td><td>✅ typecheck</td></tr>
+<tr><td>版本保真</td><td>v2 事件不做旧帧映射，不触发旧帧副作用</td><td>✅ 测试锁定</td></tr>
+</table>
+<h2>验证记录</h2>
+<table><tr><th>命令</th><th>结果（子 agent 执行后主 agent 复跑）</th></tr>
+<tr><td><code>desktop: npm run typecheck</code></td><td>通过</td></tr>
+<tr><td><code>desktop: npm run lint</code></td><td>0 error（10 条存量 warning 均在本切片未触碰文件）</td></tr>
+<tr><td><code>desktop: npm test</code></td><td>164 文件 / 1888 tests 全通过（新增 <code>tests/unit/feature-event-stream.test.ts</code> 14 例；5-8 切片 wiki-reducer-lifecycle 全过）</td></tr>
+</table>
+<p>平台说明：macOS（darwin arm64）执行；纯 TypeScript/浏览器接口，无平台分支，Linux/Windows 由同一 Electron/Chromium 运行时承载。</p>
+<h2>已知边界</h2>
+<ul>
+<li>前端映射表与 Gateway <code>event_compat.py</code> 登记表互为手工镜像（两侧注释已互指）；删除 Gateway 兼容层后本表成为 Desktop 侧唯一协议真相，后续按 6C Step 4 再迁移为 feature_event 原生内部管线。</li>
+<li>归一只覆盖已登记 v1 事件；未来 v2 事件走 registry 直派路径，需按版本登记 feature 侧 handler（版本保真设计）。</li>
+</ul>
+<p><a href="plugin-architecture-stage-6a-knowledge-contract.html">阶段 6A</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

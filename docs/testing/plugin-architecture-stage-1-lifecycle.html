@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 1 · 生命周期内核测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>插件架构阶段 1 · 生命周期内核测试记录</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-02</div>
+
+  <h2>1. 验证目标</h2>
+  <ul>
+    <li>一代 Feature 的全部运行时贡献拥有统一、可诊断的所有权。</li>
+    <li>部分安装失败能按后进先出顺序完整回滚。</li>
+    <li>异步清理真正完成前，Feature 不报告已停止。</li>
+    <li>重复或并发释放不重复执行 disposer，单项失败不阻断其余清理。</li>
+  </ul>
+
+  <h2>2. 测试矩阵</h2>
+  <table>
+    <thead><tr><th>层级</th><th>命令 / 范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Unit</td><td><code>tests/test_feature_runtime.py</code>：Generation、Token、Scope、Transaction</td><td class="ok">9 通过</td></tr>
+      <tr><td>Focused regression</td><td>Feature Runtime、Plugin 生命周期、Tool Registry 与 Browser Plugin</td><td class="ok">285 通过，1 跳过</td></tr>
+      <tr><td>Architecture</td><td><code>lint-imports</code>：6 条契约，293 个模块，1244 条依赖</td><td class="ok">通过</td></tr>
+      <tr><td>Static</td><td>本次 Python 修改文件 Ruff</td><td class="ok">通过</td></tr>
+      <tr><td>Docs</td><td>4 个 HTML 文件解析、计划进度图离线渲染与差异检查</td><td class="ok">通过</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 覆盖的不变量</h2>
+  <ul>
+    <li><code>STOPPING</code> 状态先于清理开始设置，此后注册立即失败。</li>
+    <li>释放顺序严格为注册顺序的逆序；异步 disposer 使用同一序列等待。</li>
+    <li>清理错误保留 Feature Generation、注册标签与原始异常。</li>
+    <li>安装异常与回滚异常分别保存在 <code>FeatureActivationError</code> 中。</li>
+  </ul>
+
+  <h2>4. 跨平台说明</h2>
+  <p>测试不依赖信号、Shell、路径分隔符或操作系统事件循环扩展；生命周期语义在 Python 3.11+ 的 macOS、Linux、Windows 上一致。</p>
+
+  <div class="nav"><a href="../backend/adr/0001-feature-lifecycle-primitives.html">ADR-0001</a> · <a href="../backend/modules/plugins.html">模块文档</a> · <a href="../index.html">文档总览</a></div>
+</div>
+</body>
+</html>

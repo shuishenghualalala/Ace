@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>云端 Agent 高并发架构设计 · Ace 后端</title>
+<script src="../todo/assets/mermaid.min.js"></script>
+<!--
+  ============================================================================
+  设计文档：云端 Agent 高并发架构设计
+  核心约束：不做"一个用户一个 Agent 实例"；编排层无状态水平扩容，
+           会话状态外置，执行副作用单独成层。
+  风格：白底黑白极简，最大宽度 960px，系统字体，无装饰，纯 CSS 画图。
+  ============================================================================
+-->
+<style>
+  :root{
+    --text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:28px;font-weight:800;margin:0 0 4px}
+  .crumb{color:var(--t3);font-size:13px;margin-bottom:6px}
+  .sub{color:var(--t3);margin-bottom:36px}
+  h2{font-size:19px;font-weight:700;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:15px;font-weight:700;margin:24px 0 8px}
+  p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+  th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}
+  th{background:var(--soft);font-weight:600}
+  ul,ol{padding-left:20px}
+  .logo{width:28px;height:28px;border-radius:7px;background:var(--black);color:#fff;display:inline-grid;place-items:center;font-weight:800;vertical-align:middle;margin-right:8px}
+  .nav{margin-top:40px;color:var(--t3);font-size:13px}
+  a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}a:hover{border-bottom-color:var(--text)}
+  .todo{color:var(--t2)}
+
+  /* ===== 画图元素：节点 / 箭头 / 分组 ===== */
+  .diagram{margin:20px 0;padding:24px 16px;border:1px solid var(--border);border-radius:10px;background:var(--bg);overflow-x:auto}
+  .dg-col{display:flex;flex-direction:column;align-items:center;gap:0;min-width:640px}
+  .dg-row{display:flex;gap:16px;justify-content:center;width:100%}
+  .dg-node{border:1px solid var(--text);border-radius:8px;padding:10px 16px;background:var(--bg);text-align:center;min-width:150px}
+  .dg-node .t{font-weight:700;font-size:14px}
+  .dg-node .d{font-size:12px;color:var(--t3);line-height:1.5;margin-top:2px}
+  .dg-node.soft{background:var(--soft);border-color:var(--border)}
+  .dg-node.dashed{border-style:dashed;border-color:var(--t3)}
+  .dg-arrow{color:var(--t3);font-size:14px;line-height:1;padding:8px 0;text-align:center}
+  .dg-arrow .lbl{display:block;font-size:11px;color:var(--t3);margin-top:2px}
+  .dg-arrow.lat{padding:4px 40px}
+  .dg-group{border:1px dashed var(--t3);border-radius:10px;padding:12px 16px;background:var(--soft);width:100%}
+  .dg-group .g-title{font-size:12px;font-weight:700;color:var(--t3);letter-spacing:.06em;margin-bottom:10px;text-align:center}
+  .dg-inner{display:flex;flex-wrap:wrap;gap:10px;justify-content:center}
+  .dg-inner .dg-node{min-width:130px;font-size:13px}
+  .dg-split{display:flex;gap:16px;justify-content:center;width:100%}
+  .dg-split .dg-node{flex:1;max-width:300px}
+  .mermaid{margin:0 auto;min-width:760px;text-align:center}
+
+  /* run 生命周期横向流 */
+  .dg-flow{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:6px;min-width:640px}
+  .dg-flow .dg-node{padding:8px 12px;min-width:auto}
+  .dg-flow .dg-arrow{padding:0 2px}
+  .dg-loop{border:1px dashed var(--t3);border-radius:8px;padding:10px 12px;display:flex;align-items:center;gap:6px;background:var(--bg)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="crumb">Ace / 后端 / 云端 Agent 高并发架构设计</div>
+  <h1><span class="logo">A</span>云端 Agent 高并发架构设计</h1>
+  <div class="sub">用一套共享的无状态 Worker 池服务所有用户的会话；会话状态外置，执行副作用单独成层。不做"一个用户一个 Agent 实例"。</div>
+
+  <h2>1. 定位与约束</h2>
+  <ul>
+    <li><b>要解决的问题</b>：云端 Agent 服务需要支撑大量并发会话；"一个用户部署一个实例"资源消耗不可接受。</li>
+    <li><b>核心思路</b>：把传统认知里的"Agent 实例"拆成 4 样生命周期完全不同的东西，让其中唯一昂贵的东西（Worker 进程）被全体用户共享。</li>
+    <li><b>不在本文范围</b>：具体队列/存储选型、计费与配额产品化（见第 8 节 TODO）。</li>
+  </ul>
+
+  <h2>2. 概念澄清："Agent 实例"是 4 样东西</h2>
+  <table>
+    <thead><tr><th>东西</th><th>是什么</th><th>生命周期</th><th>与用户会话的关系</th></tr></thead>
+    <tbody>
+      <tr><td><b>Agent 代码</b></td><td>图定义、prompt、工具 schema、模型配置</td><td>随发布版本固定</td><td>全租户共享一份，与 session 无关</td></tr>
+      <tr><td><b>Worker 进程</b></td><td>执行 run 的容器/进程</td><td>常驻，随扩缩容生灭</td><td><b>与用户零绑定</b>，任意 worker 可服务任意会话</td></tr>
+      <tr><td><b>Run</b></td><td>一次"从当前状态跑到停下来"的执行</td><td>秒~分钟级</td><td>一个 run 属于一个 thread</td></tr>
+      <tr><td><b>Checkpoint</b></td><td>会话状态快照（消息历史 + 图状态）</td><td>永久（存储中的一行）</td><td><b>唯一</b>与 session 1:1 绑定的东西</td></tr>
+    </tbody>
+  </table>
+  <p>"一个用户一个实例"之所以贵，是因为把 Worker 进程和 Checkpoint 绑死了（进程即用户）。本设计把这两者解耦：<b>用户只拥有自己的 checkpoint，worker 是共用的出租车</b>。</p>
+
+  <h2>3. 总体架构图</h2>
+  <div class="diagram">
+    <div class="dg-col">
+
+      <div class="dg-node">
+        <div class="t">客户端</div>
+        <div class="d">Web / API 调用方（发消息、续传会话、订阅流式输出）</div>
+      </div>
+      <div class="dg-arrow">↓<span class="lbl">HTTPS</span></div>
+
+      <div class="dg-node">
+        <div class="t">API Server × N（无状态）</div>
+        <div class="d">接收请求 → 写 run 元数据 → 推队列 → 订阅流式通道回传</div>
+      </div>
+      <div class="dg-arrow">↓<span class="lbl">写入 run / checkpoint</span>&nbsp;&nbsp;&nbsp;&nbsp;↓<span class="lbl">推送唤醒哨兵</span></div>
+
+      <div class="dg-row">
+        <div class="dg-node soft" style="flex:1;max-width:300px">
+          <div class="t">Postgres（唯一真相源）</div>
+          <div class="d">thread、checkpoint、run 元数据、记忆。宕机可全量恢复</div>
+        </div>
+        <div class="dg-node soft" style="flex:1;max-width:300px">
+          <div class="t">Redis（队列 + 通信）</div>
+          <div class="d">run 队列、取消信号、流式 PubSub。<b>不存任何业务状态</b>，可随时清空</div>
+        </div>
+      </div>
+      <div class="dg-arrow">↑<span class="lbl">认领后读取 checkpoint</span>&nbsp;&nbsp;&nbsp;&nbsp;↑<span class="lbl">空闲 worker 被唤醒</span></div>
+
+      <div class="dg-group">
+        <div class="g-title">WORKER 池 × N（无状态，可水平扩缩）</div>
+        <div class="dg-inner">
+          <div class="dg-node dashed"><div class="t">热身缓存</div><div class="d">编译产物 / prompt / 工具表 / 连接池，启动时加载一次</div></div>
+          <div class="dg-node"><div class="t">run 执行槽 × M</div><div class="d">I/O 密集，单 worker 可同时挂几十个 run</div></div>
+          <div class="dg-node"><div class="t">worker 2</div><div class="d">同构副本</div></div>
+          <div class="dg-node"><div class="t">worker 3</div><div class="d">同构副本，可随时增减</div></div>
+        </div>
+      </div>
+      <div class="dg-arrow">↓<span class="lbl">出站调用（占 run 绝大部分耗时）</span></div>
+
+      <div class="dg-node dashed">
+        <div class="t">LLM API / 外部工具</div>
+        <div class="d">I/O 密集；它们的 rate limit 才是全局扩容的真实瓶颈</div>
+      </div>
+      <div class="dg-arrow">↓<span class="lbl">仅当工具需要真实执行环境时</span></div>
+
+      <div class="dg-group">
+        <div class="g-title">沙箱执行层（独立部署，按需分配）</div>
+        <div class="dg-inner">
+          <div class="dg-node"><div class="t">沙箱池</div><div class="d">预热容器：文件系统 / 命令执行 / 浏览器</div></div>
+          <div class="dg-node"><div class="t">租约管理</div><div class="d">按会话分配、心跳续期、空闲回收</div></div>
+          <div class="dg-node"><div class="t">编排层只存引用</div><div class="d">checkpoint 里只有"沙箱地址 + 租约"，不存沙箱内状态</div></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  <p>关键点：run 由<b>空闲 worker 认领</b>，不由请求路由决定——所以任何 worker 都不需要认识任何用户；扩容只是加 worker 副本。</p>
+
+  <h2>4. 一次 Run 的生命周期</h2>
+  <div class="diagram">
+    <div class="dg-col">
+      <div class="dg-flow">
+        <div class="dg-node soft">提交 run</div>
+        <div class="dg-arrow">→</div>
+        <div class="dg-node soft">写入 Postgres + 入队</div>
+        <div class="dg-arrow">→</div>
+        <div class="dg-node">空闲 worker 认领</div>
+        <div class="dg-arrow">→</div>
+        <div class="dg-node">读 checkpoint<br>重建状态</div>
+        <div class="dg-arrow">→</div>
+        <div class="dg-loop">
+          <div class="dg-node" style="border-color:var(--t3)">LLM 调用</div>
+          <div class="dg-arrow">⇄</div>
+          <div class="dg-node" style="border-color:var(--t3)">工具执行</div>
+          <div class="dg-arrow" style="font-size:11px">循环<br>（每步边界写 checkpoint）</div>
+        </div>
+        <div class="dg-arrow">→</div>
+        <div class="dg-node">终态</div>
+        <div class="dg-arrow">→</div>
+        <div class="dg-node soft">释放执行槽</div>
+      </div>
+      <div class="dg-arrow">↓<span class="lbl">失败（瞬时错误）：回队列重试（有次数上限）；同一 thread 的新 run：排队或按策略拒绝</span></div>
+      <div class="dg-flow">
+        <div class="dg-node dashed" style="min-width:auto">checkpoint 存在的意义：worker 任何时刻挂掉，下一个认领者从最近快照继续，内存状态可随时丢弃重建</div>
+      </div>
+    </div>
+  </div>
+  <p>注意：checkpoint 在<b>步骤边界</b>保存，不是每行代码后保存。worker 中途崩溃时 run 需要重试，所以工具调用必须幂等或可安全重放。</p>
+
+  <h2>5. 高并发设计清单（要做什么）</h2>
+  <table>
+    <thead><tr><th>#</th><th>做什么</th><th>为什么</th><th>不做的后果</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>1</td><td><b>Worker 无状态化</b><br><span style="color:var(--t3)">进程内不落任何用户数据的真相；任意 worker 可服务任意会话</span></td>
+        <td>这是水平扩容的前提；扩容 = 加副本</td>
+        <td>必须做粘性路由，缩容/故障把用户会话一起带走</td>
+      </tr>
+      <tr>
+        <td>2</td><td><b>状态外置 + 会话串行化</b><br><span style="color:var(--t3)">checkpoint 唯一真相源在 Postgres；同一 thread 内串行，thread 之间全并行</span></td>
+        <td>并发写同一会话会互相踩状态；thread 内排队、thread 间并行是并发度的正确粒度</td>
+        <td>两个 run 同时改一个 checkpoint，历史错乱</td>
+      </tr>
+      <tr>
+        <td>3</td><td><b>队列 + worker 池 + 慢缩容</b><br><span style="color:var(--t3)">run 入队等待认领；缩容前等待 in-flight 排空（分钟级延迟再缩）</span></td>
+        <td>削峰；扩容只动 worker 数量；避免缩容杀掉正在跑的 run</td>
+        <td>突发流量打垮服务；缩容中断用户任务</td>
+      </tr>
+      <tr>
+        <td>4</td><td><b>冷启动分层处理</b><br><span style="color:var(--t3)">L1 基础设施（秒级）：常驻 worker 池，别用 FaaS 把它放进请求路径；L2 应用热身（百毫秒）：worker 启动时做一次；L3 会话装载（毫秒级）：每次认领 run 读 checkpoint</span></td>
+        <td>只有 L3 在请求路径上，而它足够便宜</td>
+        <td>用户请求路径上出现秒级抖动（FaaS 回收容器）</td>
+      </tr>
+      <tr>
+        <td>5</td><td><b>缓存分三层</b><br><span style="color:var(--t3)">热身缓存必做；状态缓存（热点 thread 放 Redis）可选；LLM prompt cache 靠稳定前缀设计白拿</span></td>
+        <td>缓存只是加速，不是正确性依赖——<b>清空任何缓存，系统必须照样正确，只是变慢</b></td>
+        <td>把状态藏进缓存；缓存失效即数据丢失</td>
+      </tr>
+      <tr>
+        <td>6</td><td><b>执行副作用单独成层</b><br><span style="color:var(--t3)">沙箱/浏览器/文件系统类工具独立部署；会话按需分配沙箱，租约续期，用完回收；编排层只存引用</span></td>
+        <td>这是唯一真正需要"粘住一台机器"的东西（见第 6 节分界线）</td>
+        <td>沙箱状态渗进编排层，被迫退回"一人一实例"</td>
+      </tr>
+      <tr>
+        <td>7</td><td><b>瓶颈与限流</b><br><span style="color:var(--t3)">识别真实瓶颈（PG 连接池、LLM rate limit、沙箱总量）；每用户并发上限；全局队列深度监控；工具幂等设计</span></td>
+        <td>编排层本身不是瓶颈，下游才是；一个用户不能拖垮所有租户</td>
+        <td>单用户打满 LLM 配额，全服务雪崩</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>6. 分界线：什么时候才需要"一人一实例"</h2>
+  <p>判断标准只有一条：<b>状态能不能序列化进存储</b>。不是因为"会话"本身。</p>
+  <table>
+    <thead><tr><th>维度</th><th>会话状态（对话历史、图变量）</th><th>执行环境（沙箱、文件系统、浏览器）</th></tr></thead>
+    <tbody>
+      <tr><td>形态</td><td>可序列化的数据</td><td>活进程，序列化不了</td></tr>
+      <tr><td>存放</td><td>Postgres，一行一个会话</td><td>一台真实机器上的容器</td></tr>
+      <tr><td>粘性需求</td><td>无——任意 worker 读取即可</td><td>必须粘住分配到的那台机器</td></tr>
+      <tr><td>失败恢复</td><td>从 checkpoint 重放</td><td>重置/重启环境</td></tr>
+      <tr><td>扩容方式</td><td>加无状态 worker 副本</td><td>沙箱池预热 + 空闲回收</td></tr>
+    </tbody>
+  </table>
+  <p>所以架构上始终是两层：<b>编排层</b>（对话、调度、状态）无状态水平扩；<b>执行层</b>（沙箱）按需分配、租约管理。会话粘性只存在于执行层，且被压缩成 checkpoint 里的一个引用。</p>
+
+  <h2>7. 业界模式对照</h2>
+  <table>
+    <thead><tr><th>系统</th><th>真相源</th><th>内存中是什么</th><th>恢复方式</th><th>对本设计的启发</th></tr></thead>
+    <tbody>
+      <tr><td>LangGraph Server</td><td>Postgres checkpoint</td><td>worker 内的图状态</td><td>从 checkpoint 继续</td><td>API server + Redis 队列 + 无状态 worker 池 + 慢缩容（本文第 3 节的直接形态）</td></tr>
+      <tr><td>Codex CLI</td><td>rollout 文件（追加式 JSONL）</td><td>Session 状态机</td><td>新进程重放 rollout</td><td>编排（core）与执行（exec-server）分层，工具不跑在编排进程里</td></tr>
+      <tr><td>Kimi Code kap-server</td><td>wire.jsonl + state.json</td><td>已加载的 hot session</td><td>cold session 按需冷重建</td><td>会话分冷热、按需物化；同一 session 的恢复串行化</td></tr>
+      <tr><td>DSH</td><td>session.log（追加式 JSONL）</td><td>派生消息的投影缓存</td><td>从事件日志派生</td><td>append-only 事件流为真相，内存只是投影</td></tr>
+    </tbody>
+  </table>
+  <p>四家殊途同归：<b>追加式日志/快照为真相源，内存只是投影，恢复 = 重放或装载</b>。本设计是这套模式的多租户分布式版。</p>
+
+  <h2>8. 当前存在的问题 / TODO</h2>
+  <ul class="todo">
+    <li>队列选型：复用 Redis 还是独立 MQ，待压测后定。</li>
+    <li>checkpoint 粒度与写入放大：PG 行大小上限、大对象是否外置 blob 存储。</li>
+    <li>多租户配额：每用户并发上限数值、公平调度策略（防止单用户占满 worker）。</li>
+    <li>沙箱租约时长、心跳间隔与回收策略。</li>
+    <li>长任务接管：worker 崩溃后 run 的租约超时与接管机制。</li>
+    <li>流式输出通道：Redis PubSub 断线重连期间的事件补发（或降级为拉取）。</li>
+  </ul>
+
+  <h2>9. 变更记录</h2>
+  <table>
+    <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
+    <tbody>
+      <tr><td>2026-09-02</td><td>首版：概念澄清、总体架构图、run 生命周期、高并发设计清单、冷热分界线、业界对照。</td><td>设计文档，无代码</td></tr>
+      <tr><td>2026-09-02</td><td>补充 Mermaid 版本的 LangGraph Platform 与 Codex/Kimi Code 类 Agent 高并发架构图。</td><td>设计文档，无代码</td></tr>
+    </tbody>
+  </table>
+
+  <h2>10. Mermaid 架构图</h2>
+  <h3>10.1 LangGraph Platform：共享 Compiled Graph + Queue Worker 池</h3>
+  <div class="diagram">
+    <div class="mermaid">
+flowchart LR
+    C["客户端"] --> LB["负载均衡"]
+    LB --> API1["无状态 API Server 1"]
+    LB --> API2["无状态 API Server N"]
+    API1 --> Q[("持久化 Run Queue")]
+    API2 --> Q
+    API1 --> PG[("Postgres：runs / threads / checkpoints")]
+    API2 --> PG
+    Q --> R1
+    Q --> R2
+
+    subgraph W1["Queue Worker 1"]
+        G1["启动时加载 Compiled Graph"] --> R1["并发执行多个 Run"]
+    end
+    subgraph W2["Queue Worker N"]
+        G2["启动时加载 Compiled Graph"] --> R2["并发执行多个 Run"]
+    end
+
+    R1 --> PG
+    R2 --> PG
+    R1 --> Redis[("Redis：取消 / 心跳 / PubSub")]
+    Redis --> R1
+    R2 --> Redis
+    Redis --> R2
+    Redis --> API1
+    Redis --> API2
+    API1 --> C
+    API2 --> C
+    </div>
+  </div>
+  <p>Compiled Graph 是 worker 的共享代码/对象；每个 Run 只创建自己的执行上下文，并从 Postgres 装载对应 thread 的 checkpoint。扩容时增加 worker 副本和执行槽，不增加用户专属 Agent 进程。</p>
+
+  <h3>10.2 Codex / Kimi Code 类 Agent：共享 Agent Kernel + per-Run Activation</h3>
+  <div class="diagram">
+    <div class="mermaid">
+flowchart LR
+    C["客户端"] --> LB["负载均衡"]
+    LB --> API["无状态 API Server"]
+    API --> AD["Session Admission"]
+    AD --> Lease["Session Lease：同一 Session 串行"]
+    Lease --> Q[("持久化 Run Queue")]
+    Q --> A1
+    Q --> A2
+    Q --> B1
+
+    subgraph W1["Agent Worker 1"]
+        K1["共享 Codex Agent Kernel"]
+        A1["Activation Slot A"]
+        A2["Activation Slot B"]
+        K1 --> A1
+        K1 --> A2
+    end
+    subgraph W2["Agent Worker N"]
+        KN["共享 Codex Agent Kernel"]
+        B1["Activation Slot A"]
+        KN --> B1
+    end
+
+    A1 --> PG[("PG：Event Log / Session State")]
+    A2 --> PG
+    B1 --> PG
+    A1 --> Redis[("Redis：取消 / 心跳 / 流式事件")]
+    Redis --> A1
+    A2 --> Redis
+    Redis --> A2
+    B1 --> Redis
+    Redis --> B1
+    A1 --> Sandbox["Sandbox / Terminal / Browser Resource Pool"]
+    B1 --> Sandbox
+    API --> Redis
+    API --> C
+    </div>
+  </div>
+  <p>这类 Agent 的常驻部分是共享 Kernel、工具注册表、连接池和运行时；每个并发 Run 只占一个 Activation Slot。真正需要持久占用资源的终端、浏览器和文件系统放进独立 Sandbox 池，由会话租约管理。</p>
+
+  <div class="nav"><a href="../index.html">← 返回文档总览</a></div>
+</div>
+<script>
+  mermaid.initialize({ startOnLoad: false, theme: "default", flowchart: { curve: "basis", htmlLabels: true } });
+  const mermaidNodes = document.querySelectorAll(".mermaid");
+  if (typeof mermaid.run === "function") {
+    mermaid.run({ nodes: mermaidNodes });
+  } else {
+    mermaid.init(undefined, mermaidNodes);
+  }
+</script>
+</body>
+</html>

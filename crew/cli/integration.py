@@ -11,13 +11,10 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 from urllib.request import url2pathname
 
-from crew.cli.app import CliContext, CliError, CliResult, parse_json
-from crew.gateway.channel_config import channel_raw as resolved_channel_raw
-from crew.gateway.channel_manager import ChannelManager
-from crew.gateway.channel_sessions import bind_channel_platform_for_owner
-from crew.gateway.helpers import require_external_agents_enabled
-from crew.gateway.platform_registry import platform_registry
-from crew.gateway.routers.channels import (
+from crew.channels.channel_config import channel_raw as resolved_channel_raw
+from crew.channels.channel_sessions import bind_channel_platform_for_owner
+from crew.channels.platform_registry import platform_registry
+from crew.channels.router_helpers import (
     _account_remove_keys,
     _apply_environment_preset,
     _enrich_platform_row,
@@ -28,16 +25,20 @@ from crew.gateway.routers.channels import (
     _sanitize_for_yaml,
     _validate_platform_config_ready,
     _validate_secret_fields,
-    _wait_for_live_connected,
     _write_env_fields,
 )
+from crew.channels.router_helpers import (
+    _restart_channel as _restart_platform,
+)
+from crew.cli.app import CliContext, CliError, CliResult, parse_json
+from crew.gateway.helpers import require_external_agents_enabled
 from crew.gateway.routers.mcp_servers import _NAME_RE, _redact_config, _validate_server_payload
 from crew.gateway.routers.plugins import (
     _drop_owner_agent_cache,
     _plugin_states,
     browser_runtime_status,
 )
-from crew.gateway.routers.runtimes import (
+from crew.team.payloads import (
     _external_agent_payloads,
     _external_team_payloads,
     _runtime_availability,
@@ -187,11 +188,13 @@ async def _mcp_servers_add(args: Any, ctx: CliContext) -> CliResult:
     cfg, err = _validate_server_payload(payload)
     if err is not None:
         raise CliError(err)
-    app.config.set_mcp_server(name, cfg)
+    # 统一配置事务（Config.add_mcp_server）：候选值 → 持久化 → 发布。
+    # 持久化失败时内存与磁盘一致保留旧值，先报错返回，不做运行资源操作。
     try:
-        app.config.persist_mcp_servers()
+        app.config.add_mcp_server(name, cfg)
+    except ValueError as exc:
+        raise CliError(str(exc), exit_code=409) from exc
     except Exception as exc:
-        app.config.remove_mcp_server(name)
         raise CliError(f"持久化失败: {exc}") from exc
     await _ensure_mcp_started(app)
     if app.mcp_manager is not None:
@@ -210,9 +213,12 @@ async def _mcp_servers_update(args: Any, ctx: CliContext) -> CliResult:
     cfg, err = _validate_server_payload(payload)
     if err is not None:
         raise CliError(err)
-    app.config.set_mcp_server(name, cfg)
+    # 统一配置事务（Config.update_mcp_server）：候选值 → 持久化 → 发布，
+    # 持久化失败内存与磁盘保持旧 command，不会出现"内存已改、磁盘仍旧"。
     try:
-        app.config.persist_mcp_servers()
+        app.config.update_mcp_server(name, cfg)
+    except KeyError:
+        raise CliError(f"MCP server 不存在: {name}", exit_code=404) from None
     except Exception as exc:
         raise CliError(f"持久化失败: {exc}") from exc
     await _ensure_mcp_started(app)
@@ -226,14 +232,23 @@ async def _mcp_servers_delete(args: Any, ctx: CliContext) -> CliResult:
     name = args.name
     if name not in (app.config.mcp_servers or {}):
         raise CliError(f"MCP server 不存在: {name}", exit_code=404)
-    app.config.remove_mcp_server(name)
+    # 统一配置事务（Config.delete_mcp_server）：候选值 → 持久化 → 发布。
+    # 持久化失败时内存与磁盘均保留该 server，运行中的实例原样不动，可直接重试。
     try:
-        app.config.persist_mcp_servers()
+        app.config.delete_mcp_server(name)
+    except KeyError:
+        raise CliError(f"MCP server 不存在: {name}", exit_code=404) from None
     except Exception as exc:
-        raise CliError(f"持久化失败，磁盘配置可能未更新: {exc}") from exc
+        raise CliError(f"持久化失败: {exc}") from exc
     await _ensure_mcp_started(app)
     if app.mcp_manager is not None:
-        await app.mcp_manager.remove_server(name)
+        try:
+            await app.mcp_manager.remove_server(name)
+        except Exception as exc:
+            # 已保存但连接失败：配置（磁盘+内存）保持已删除的新值，如实上报运行
+            # 资源操作错误，不回滚伪装成保存失败。运行实例可能残留至进程重启或
+            # 下一次 reload；配置侧重试 DELETE 幂等（404）。
+            raise CliError(f"配置已保存，但移除运行实例失败: {exc}") from exc
     return CliResult(data={"ok": True, "servers": _mcp_servers_view(app)}, text=f"已删除 MCP server {name}")
 
 
@@ -419,11 +434,10 @@ def _register_channel(subparsers) -> None:
     status.set_defaults(handler=_channel_qr_status)
 
 
-def _channel_manager(app: Any) -> ChannelManager:
+def _channel_manager(app: Any) -> Any:
     manager = getattr(app, "channel_manager", None)
     if manager is None:
-        manager = ChannelManager()
-        app.channel_manager = manager
+        raise CliError("渠道服务未就绪", exit_code=503)
     return manager
 
 
@@ -436,7 +450,7 @@ def _channel_context(ctx: CliContext, platform: str) -> tuple[Any, str]:
     return app, name
 
 
-def _channel_row(app: Any, name: str, manager: ChannelManager, owner: str) -> dict[str, Any]:
+def _channel_row(app: Any, name: str, manager: Any, owner: str) -> dict[str, Any]:
     raw = resolved_channel_raw(app.config, name, owner)
     entry = platform_registry.get(name)
     cfg = entry.build_config(raw, include_env=not bool(owner))
@@ -519,32 +533,9 @@ def _channel_config_save(args: Any, ctx: CliContext) -> CliResult:
     )
 
 
-async def _restart_channel(app: Any, manager: ChannelManager, name: str, owner: str) -> tuple[bool, dict[str, Any]]:
-    if manager.is_busy(name, owner):
-        raise CliError("渠道正在重连，请稍后再操作", exit_code=409)
-    entry = platform_registry.get(name)
-    raw = resolved_channel_raw(app.config, name, owner)
-    cfg = entry.build_config(raw, include_env=not bool(owner))
-    if not cfg.enabled:
-        await manager.stop_one(name, owner)
-        return True, _channel_row(app, name, manager, owner)
-    try:
-        channel = platform_registry.create_channel(name, cfg)
-    except Exception as exc:  # noqa: BLE001
-        manager.record_error(name, str(exc), owner)
-        return False, _channel_row(app, name, manager, owner)
-    if hasattr(channel, "bind_app"):
-        channel.bind_app(app)
-    handler = getattr(app, "channel_handler", None) or app.dispatch
-    state = await manager.restart_one(name, channel, handler, owner_account_id=owner)
-    if not state.running:
-        return False, _channel_row(app, name, manager, owner)
-    live_ok, live_err = await _wait_for_live_connected(manager, name, owner)
-    if not live_ok:
-        await manager.stop_one(name, owner)
-        manager.record_error(name, live_err, owner)
-        return False, _channel_row(app, name, manager, owner)
-    return True, _channel_row(app, name, manager, owner)
+async def _restart_channel(app: Any, manager: Any, name: str, owner: str) -> tuple[bool, dict[str, Any]]:
+    ok, _status = await _restart_platform(app, name, owner, channel_manager=manager)
+    return ok, _channel_row(app, name, manager, owner)
 
 
 async def _channel_connect(args: Any, ctx: CliContext) -> CliResult:
@@ -767,7 +758,7 @@ def _runtime_delete(args: Any, ctx: CliContext) -> CliResult:
 
 
 def _runtime_agents_list(args: Any, ctx: CliContext) -> CliResult:
-    from crew.gateway.routers.runtimes import _managed_temporary_agent_ids
+    from crew.team.payloads import _managed_temporary_agent_ids
 
     store = _external_store(ctx.app)
     hidden = _managed_temporary_agent_ids(store, owner_account_id=ctx.owner)
@@ -902,9 +893,11 @@ def _browser_safe_error(exc: BaseException) -> str:
 
 def _browser_doctor(args: Any, ctx: CliContext) -> CliResult:
     from crew.browser.electron_driver import runtime_doctor
+    from crew.browser.types import BrowserConfig
 
     runtime_key = f"crew_{hashlib.sha256(ctx.owner.encode('utf-8')).hexdigest()[:12]}"
-    return CliResult(data=runtime_doctor(ctx.app.config.browser, runtime_key))
+    browser_config = BrowserConfig.from_raw(ctx.app.config.browser_config)
+    return CliResult(data=runtime_doctor(browser_config, runtime_key))
 
 
 def _browser_allowed(app: Any, owner: str, session_id: str) -> bool:
@@ -947,24 +940,6 @@ async def _browser_control(args: Any, ctx: CliContext) -> CliResult:
         if action in {"open", "new_tab"}:
             state = await mgr.open_for_user(ctx.owner, args.session_id, url=value, new_tab=action == "new_tab")
             return CliResult(data={"ok": True, "state": state})
-        if action == "record_discard":
-            removed = await asyncio.to_thread(mgr.discard_recording, ctx.owner, args.session_id, value)
-            return CliResult(data={"ok": True, "discarded": removed})
-        if action in {
-            "record_start",
-            "record_pause",
-            "record_resume",
-            "record_stop",
-            "record_note",
-            "record_status",
-        }:
-            recording = await mgr.user_recording(
-                ctx.owner,
-                args.session_id,
-                action.removeprefix("record_"),
-                value,
-            )
-            return CliResult(data={"ok": True, "recording": recording})
         if action in {"takeover", "return", "pause", "stop"}:
             result = await mgr.user_control(ctx.owner, args.session_id, action)
             return CliResult(data={"ok": True, "result": result, "state": mgr.state(ctx.owner, args.session_id)})

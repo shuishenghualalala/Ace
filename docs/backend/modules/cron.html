@@ -44,20 +44,26 @@
 <div class="wrap">
   <div class="crumb">Ace / 后端模块 / cron</div>
   <h1><span class="logo">A</span>crew/cron</h1>
-  <div class="sub">Cron 计划任务：定时自动化入口。</div>
+  <div class="sub">Cron 计划任务：持久调度、触发执行、投递与 Agent Prompt Context。</div>
 
   <h2>1. 职责</h2>
   <ul>
-    <li>该模块做什么、不做什么（边界）。</li>
+    <li>持久化按 Owner 隔离的定时任务和运行记录，计算 trigger 并调度执行。</li>
+    <li>构造 Cron Envelope，交给共享 SessionDispatcher 执行，并记录终态。</li>
+    <li>拥有定时任务触发轮的模型上下文；Agent Runtime 不理解 Cron 产品语义。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
-  <p>按子功能或核心流程拆解，这是本模块文档的重点。</p>
   <table>
     <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
     <tbody>
-      <tr><td><code>feature-a</code></td><td>…</td><td>已落地</td></tr>
-      <tr><td><code>feature-b</code></td><td>…</td><td>待补充</td></tr>
+      <tr><td>任务与运行存储</td><td>保存 schedule、trigger、投递目标、Owner 和 fire 幂等记录。</td><td>已落地</td></tr>
+      <tr><td>调度服务</td><td>定时 claim、并发上限、重试与完成回调。</td><td>已落地</td></tr>
+      <tr><td>自然语言计划</td><td>解析 interval、once 等用户输入并构造 trigger。</td><td>已落地</td></tr>
+      <tr><td>Trigger Context</td><td><code>cron.trigger.reminder</code> 为触发轮贡献瞬时 prompt fragment。</td><td>已落地</td></tr>
+      <tr><td>Cron Runtime Feature</td><td><code>product.cron</code> 统一拥有 Scheduler、Tools、Context、Host Binding、Owner mount 与 restart 更新。</td><td>已落地</td></tr>
+      <tr><td>Cron 数据平面</td><td>持久任务数据独立于运行代；停用撤销运行能力但不删除任务记录。</td><td>已落地</td></tr>
+      <tr><td>Route Contribution</td><td>HTTP 路由进入 Cron Bundle 与 Route Registry。</td><td>待迁移</td></tr>
     </tbody>
   </table>
 
@@ -65,23 +71,39 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/cron/xxx.py</code></td><td>…</td></tr>
+      <tr><td><code>crew/cron/jobs.py</code></td><td>任务/运行存储、trigger 构造和 schedule 解析。</td></tr>
+      <tr><td><code>crew/cron/scheduler.py</code></td><td>CronService 调度循环、fire claim 与执行终态。</td></tr>
+      <tr><td><code>crew/cron/context.py</code></td><td>Cron 触发轮 Prompt Contributor。</td></tr>
+      <tr><td><code>crew/cron/feature.py</code></td><td>FeatureDefinition、运行器、工具/上下文贡献、Scheduler disposer 与 Owner 重新挂载。</td></tr>
+      <tr><td><code>crew/tools/cron_tools.py</code></td><td>面向 Agent 的 Cron 工具入口。</td></tr>
     </tbody>
   </table>
 
   <h2>4. 数据模型与接口</h2>
-  <p>对外暴露的关键类/方法、事件/消息约定、Schema。</p>
-  <pre><code># 关键签名</code></pre>
+  <pre><code>ContextContributor(
+    contributor_id="cron.trigger.reminder",
+    phase=ContextPhase.PROMPT,
+    priority=50,
+    persistent=False,
+)
+
+await contribute_cron_trigger_reminder(envelope)
+
+bundle = build_cron_feature(host, registry, store, enabled=True, max_parallel_jobs=2)
+app.declare_managed_feature(bundle.definition)
+await app.update_managed_feature(next_bundle.definition)</code></pre>
+  <p>只有 <code>channel=cron</code> 的 Envelope 产生 fragment；任务名来自 <code>cron_job_name</code>。<code>product.cron</code> 在宿主事件循环中激活，六个工具和每次 Fire 都持有本 Generation Lease。更新采用 <code>restart</code>：先取消并清理旧代，再启动新 Scheduler，最后重新挂载当前 Active Owner；失败由 FeatureRuntime 恢复旧定义。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>问题 1：…</li>
-    <li>TODO：…</li>
+    <li>HTTP Route 仍由 Gateway 内置路由表装配；下一步迁入 Cron Bundle 的 Route Contribution。</li>
+    <li>持久 Store 当前作为停用后仍可访问的数据平面由 Host 关闭；后续引入稳定数据服务契约后再移除 <code>CrewApp.cron_store</code> 兼容字段。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
   <ul>
-    <li>如何在此模块上加功能（遵守契约、不跨目录）。</li>
+    <li>新增触发轮上下文在 Cron Contributor 中扩展，不向 Agent Runtime 添加渠道判断。</li>
+    <li>新增 Scheduler 资源必须能被 Scope drain/cancel，持久任务数据不随 disable 删除。</li>
   </ul>
 
   <h2>7. 变更记录</h2>
@@ -89,10 +111,12 @@
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
+      <tr><td>2026-09-03</td><td>定时任务触发文案迁入 Prompt Context Contributor，并绑定 Cron 开关与 FeatureScope。</td><td>Agent Runtime、Cron 启停边界和请求上下文。</td></tr>
+      <tr><td>2026-09-04</td><td>完成 <code>product.cron</code> Runtime Feature：Scheduler、Tools、Context、Owner mount 和 Host Binding 统一归属 Generation，支持 restart 更新与失败回滚。</td><td>Cron 生命周期、CrewApp 启停清单、Gateway Logout 动态服务解析。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0017-cron-runtime-feature.html">ADR-0017</a> · <a href="../../testing/plugin-architecture-stage-3a-cron-runtime.html">测试记录</a></div>
 </div>
 </body>
 </html>

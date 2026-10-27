@@ -20,6 +20,7 @@ from crew.app import build_app
 from crew.core.types import Message, ToolCall
 from crew.gateway.server import create_app
 from crew.state.config import load_config
+from crew.state.credentials import read_stored_key
 from crew.state.home import owner_path_segment
 
 OWNER_A = "A:uid-a"
@@ -103,6 +104,34 @@ def api(tmp_path: Path):
     for var in ("TEST_ALPHA_API_KEY", "TEST_BETA_API_KEY", "TEST_GAMMA_API_KEY", "TEST_DELTA_API_KEY", "TEST_PERSONAL_API_KEY"):
         os.environ.pop(var, None)
     os.environ.pop("CREW_HOME", None)
+
+
+# ----------------------- GET /api/config/vendors -----------------------
+
+
+@pytest.mark.asyncio
+async def test_config_vendors_returns_public_catalog(api, auth_headers):
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.get("/api/config/vendors")
+    assert resp.status_code == 200, resp.text
+    vendors = resp.json()["vendors"]
+    assert len(vendors) >= 8
+    by_id = {v["id"]: v for v in vendors}
+    assert {"deepseek", "zai", "moonshotai", "kimi-coding", "minimax"} <= set(by_id)
+    deepseek = by_id["deepseek"]
+    assert deepseek["protocol"] == "openai"
+    assert deepseek["base_url"] == "https://api.deepseek.com"
+    model_ids = {m["id"] for m in deepseek["models"]}
+    assert "deepseek-v4-flash" in model_ids
+    first_model = deepseek["models"][0]
+    assert set(first_model) == {"id", "context_window", "max_tokens", "reasoning", "vision"}
+    # Anthropic 协议厂商
+    assert by_id["kimi-coding"]["protocol"] == "anthropic"
+    # 公开视图不含 compat 内部开关与密钥
+    for vendor in vendors:
+        assert "compat" not in vendor
+        assert "api_key" not in vendor
 
 
 # ----------------------- POST /api/config/models -----------------------
@@ -351,7 +380,7 @@ async def test_create_model_writes_env(api, tmp_path: Path, auth_headers):
 
 @pytest.mark.asyncio
 async def test_create_model_without_api_key_env_uses_isolated_env(api, tmp_path: Path, auth_headers):
-    """省略 api_key_env 时，新增模型不能污染已有模型的共享 key。"""
+    """省略 api_key_env 时，新增模型的 key 进凭证库（按 profile id 隔离），不污染 .env。"""
     env_path = _owner_overlay_path(tmp_path).parent / ".env"
     env_path.write_text(
         env_path.read_text(encoding="utf-8") + "CREW_API_KEY=sk-existing-legacy\n",
@@ -372,8 +401,11 @@ async def test_create_model_without_api_key_env_uses_isolated_env(api, tmp_path:
     assert env_name.startswith("CREW_MODEL_IMPLICIT_MODEL_")
     assert env_name.endswith("_API_KEY")
     assert env_name != "CREW_API_KEY"
+    assert profile["has_key"] is True
+    # key 默认写 owner 凭证库（按 profile id），.env 不新增任何条目
+    assert read_stored_key(OWNER_A, "implicit-model") == "sk-implicit-secret"
     env_text = env_path.read_text(encoding="utf-8")
-    assert f"{env_name}=sk-implicit-secret" in env_text
+    assert env_name not in env_text
     assert "CREW_API_KEY=sk-existing-legacy" in env_text
     assert "TEST_ALPHA_API_KEY=sk-alpha-xxx" in env_text
     assert "TEST_BETA_API_KEY=sk-beta-xxx" in env_text

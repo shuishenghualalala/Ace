@@ -1,0 +1,446 @@
+"""Wiki Knowledge Feature Bundle and Local Provider assembly."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+from dataclasses import dataclass
+from dataclasses import replace
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Protocol
+
+if TYPE_CHECKING:
+    from crew.tools.registry import FunctionTool, Registry
+
+from crew.core.interfaces import LLMProvider
+from crew.features import (
+    ContextContributor,
+    ContextPhase,
+    FeatureEvent,
+    FeatureEventContributor,
+    FeatureDefinition,
+    FeatureInstallContext,
+    FeatureRuntime,
+    FeatureServiceDependencies,
+    FeatureStopPolicy,
+    FeatureUpdateStrategy,
+    RegistrationPhase,
+    run_async_compat,
+)
+
+from .attachments import build_wiki_agent_context_contributor
+from .compiler import WikiCompiler
+from .config import WikiConfig
+from .manager import WikiSessionManager
+from .query import WikiQuerier
+from .routes import create_wiki_router
+from .service import (
+    KnowledgeService,
+    KNOWLEDGE_SERVICE_KEY,
+    LocalWikiProvider,
+    WikiProviderComponents,
+)
+from .store import FileSystemWikiStore, WikiStore
+from .summary import WikiSummarizer
+
+KNOWLEDGE_SERVICE = KNOWLEDGE_SERVICE_KEY
+WIKI_FEATURE_ID = "product.wiki"
+
+
+class WikiFeatureHost(Protocol):
+    """Minimum host surface required by the Wiki bundle."""
+
+    knowledge_service: KnowledgeService | None
+    session_store: Any
+    workspace_store: Any
+    security_service: Any
+    _auxiliary_providers: list[LLMProvider]
+
+
+@dataclass(frozen=True, slots=True)
+class WikiFeatureBundle:
+    """Definition and candidate compatibility view for one Wiki generation."""
+
+    definition: FeatureDefinition
+    provider: LocalWikiProvider
+
+    @property
+    def store(self) -> WikiStore:
+        return self.provider.store
+
+    @property
+    def compiler(self) -> WikiCompiler:
+        return self.provider.compiler
+
+    @property
+    def querier(self) -> WikiQuerier:
+        return self.provider.querier
+
+    @property
+    def summarizer(self) -> WikiSummarizer:
+        return self.provider.summarizer
+
+    @property
+    def manager(self) -> WikiSessionManager:
+        return self.provider.manager
+
+
+def _bind_tool_lease(tool: FunctionTool, context: FeatureInstallContext) -> None:
+    handler = tool.handler
+    handler_is_async = tool.is_async
+
+    async def run(args: dict[str, Any]) -> Any:
+        async with context.acquire_lease(f"tool:{tool.name}"):
+            result = (
+                handler(args)
+                if handler_is_async
+                else await asyncio.to_thread(handler, args)
+            )
+            return await result if inspect.isawaitable(result) else result
+
+    tool.handler = run
+    tool.is_async = True
+
+
+def _provider_for_profile(
+    provider_factory: Callable[[Any], LLMProvider] | None,
+    profile: Any,
+) -> LLMProvider:
+    if provider_factory is None:
+        raise RuntimeError("Wiki model profile requires a provider factory")
+    return provider_factory(profile)
+
+
+def build_wiki_feature(
+    host: WikiFeatureHost,
+    registry: Registry,
+    *,
+    provider: LLMProvider,
+    config: WikiConfig | None = None,
+    storage_root: Any = None,
+    session_store: Any = None,
+    workspace_store: Any = None,
+    security_service: Any = None,
+    provider_factory: Callable[[Any], LLMProvider] | None = None,
+    runtime: FeatureRuntime | None = None,
+    activate: bool = False,
+    desired_config_revision: int = 1,
+    preset_source: Any = None,
+) -> WikiFeatureBundle:
+    """Build Wiki's stable service boundary and reversible feature definition.
+
+    ``activate=True`` is the compatibility mode used by synchronous hosts that
+    expose Wiki tools before ASGI lifespan startup.  Normal callers can return
+    the definition and activate it in the host's startup phase.
+    """
+    cfg = config or WikiConfig()
+    effective_session_store = session_store or host.session_store
+    effective_workspace_store = workspace_store or host.workspace_store
+    effective_security_service = security_service or host.security_service
+    wiki_provider = provider
+    explicit_model = str(cfg.model or "").strip()
+    if explicit_model:
+        profile = getattr(getattr(host, "config", None), "model_profiles", {}).get(explicit_model)
+        if profile is not None and getattr(profile, "api_key", ""):
+            wiki_provider = _provider_for_profile(provider_factory, profile)
+            host._auxiliary_providers.append(wiki_provider)
+
+    provider_for_owner: Callable[[str], LLMProvider] | None = None
+    if not explicit_model or wiki_provider is provider:
+        from crew.core.runctx import current_provider
+
+        def resolve_owner(owner_account_id: str) -> LLMProvider:
+            current = current_provider.get()
+            if current is not None:
+                return current
+            resolver = getattr(host, "owner_team_provider", None)
+            if callable(resolver):
+                return resolver(owner_account_id)
+            return provider
+
+        provider_for_owner = resolve_owner
+
+    # 语义检索（embedding）：全局默认 provider 按 wiki.semantic 配置构建一次，
+    # 跨 Generation 共享；per-owner 解析由宿主的 owner_embedding_provider 承担
+    # （含按 owner 缓存与 shutdown 关闭，见 app.py）。
+    host_config = getattr(host, "config", None)
+    semantic = getattr(cfg, "semantic", None)
+    embedding_provider = None
+    if semantic is not None:
+        from .embedding import build_embedding_provider
+
+        embedding_provider = build_embedding_provider(
+            semantic,
+            api_key=str(getattr(host_config, "api_key", "") or ""),
+            base_url=getattr(host_config, "base_url", None),
+        )
+    # 宿主（CrewApp）持有全局 provider 并在 shutdown 统一关闭；轻量测试宿主
+    # 没有该属性时跳过挂接。
+    if hasattr(host, "_embedding_provider"):
+        host._embedding_provider = embedding_provider
+    owner_embedding_provider = getattr(host, "owner_embedding_provider", None)
+
+    # 精排（rerank）：按 owner 解析生效配置并缓存客户端（OwnerRerankerResolver），
+    # 关停由宿主经 _wiki_reranker_resolver 统一处理。
+    reranker_resolver = None
+    query_cfg = getattr(cfg, "query", None)
+    if host_config is not None and callable(getattr(host_config, "owner_rerank_config", None)):
+        from crew.state.config import _lookup_api_key
+
+        from .rerank import OwnerRerankerResolver
+
+        def _rerank_settings(owner: str):
+            rerank = host_config.owner_rerank_config(owner)
+            owner_semantic = host_config.owner_semantic_config(owner)
+            if not rerank.enabled:
+                return rerank, "", ""
+            env_map = host_config.owner_env_map(owner) if owner else None
+            key_env = rerank.api_key_env or owner_semantic.api_key_env
+            allow_global = not owner or host_config._owner_builtin_allows_global_key_fallback(owner)
+            key = _lookup_api_key(key_env, env_map, fallback_global=allow_global)
+            if not key and not key_env and allow_global:
+                key = host_config.api_key
+            endpoint = rerank.base_url or owner_semantic.base_url
+            if not endpoint and owner_semantic.provider == "openai":
+                endpoint = host_config.base_url
+            return rerank, key, endpoint
+
+        reranker_resolver = OwnerRerankerResolver(_rerank_settings)
+        if hasattr(host, "_wiki_reranker_resolver"):
+            host._wiki_reranker_resolver = reranker_resolver
+
+    def make_provider() -> LocalWikiProvider:
+        store = FileSystemWikiStore(
+            storage_root=storage_root,
+            embedding_provider=embedding_provider,
+            provider_for_owner=owner_embedding_provider,
+            semantic_rank_weight=semantic.rank_weight if semantic else 40.0,
+            semantic_min_similarity=semantic.min_similarity if semantic else 0.0,
+            semantic_batch_size=semantic.batch_size if semantic else 64,
+        )
+        manager = WikiSessionManager(store=store)
+        summarizer = WikiSummarizer(
+            store,
+            wiki_provider,
+            provider_for_owner=provider_for_owner,
+        )
+        compiler = WikiCompiler(
+            store,
+            wiki_provider,
+            summarizer=summarizer,
+            provider_for_owner=provider_for_owner,
+        )
+        return LocalWikiProvider(
+            WikiProviderComponents(
+                store=store,
+                compiler=compiler,
+                querier=WikiQuerier(
+                    store,
+                    fuse_weight=semantic.fuse_weight if semantic else 0.9,
+                    candidate_limit=query_cfg.retrieval_candidates if query_cfg else 50,
+                    rerank_limit=query_cfg.rerank_candidates if query_cfg else 50,
+                    reranker_for_owner=reranker_resolver,
+                ),
+                summarizer=summarizer,
+                manager=manager,
+            ),
+            config=cfg,
+            security_service=effective_security_service,
+        )
+
+    candidate = make_provider()
+    pending = [candidate]
+    # FastAPI mounts one stable route surface during host assembly.  Each
+    # generation contributes that same surface to the Route Registry, while
+    # the request gate selects and leases the matching generation at runtime.
+    wiki_router = create_wiki_router(host)
+
+    preset_definition = None
+    # Deferred to keep importing the Wiki package from config/state free of an
+    # agent/tool registry cycle during process bootstrap.
+    from crew.agent.subagent.definition import parse_definition, to_preset_contribution
+    from .tools import build_wiki_tools
+
+    if preset_source is not None:
+        getter = getattr(preset_source, "get", None)
+        if callable(getter):
+            claim = getattr(preset_source, "claim", None)
+            preset_definition = claim("Wiki") if callable(claim) else getter("Wiki")
+    if preset_definition is None:
+        preset_definition = parse_definition(
+            Path(__file__).resolve().parent / "presets" / "wiki.md",
+            source="feature",
+        )
+    if preset_definition is None:
+        raise RuntimeError("Wiki Agent preset asset is unavailable")
+    preset = replace(
+        to_preset_contribution(preset_definition),
+        toolset_additions=("wiki.read", "wiki.manage"),
+        context_tags=("wiki",),
+        disclosure_mode="direct",
+        reserved_toolsets=("wiki.read", "wiki.manage"),
+        reserved_skills=("crew-wiki-curator",),
+    )
+
+    def next_provider() -> LocalWikiProvider:
+        return pending.pop() if pending else make_provider()
+
+    async def install(context: FeatureInstallContext) -> None:
+        candidate_provider = next_provider()
+        # The candidate is always created by this Bundle. Register its close
+        # before any service/context/tool side effect, whether it is selected
+        # for this generation or discarded in favor of a host override.
+        candidate_token = context.register_disposer(
+            candidate_provider.close,
+            label="resource:wiki.candidate-provider",
+        )
+        context.register_api_router(
+            wiki_router,
+            contribution_id=WIKI_FEATURE_ID,
+            label="route:wiki",
+        )
+        sentinel = getattr(host, "_UNSET_KNOWLEDGE_SERVICE", None)
+        override = getattr(host, "_knowledge_service_override", sentinel)
+        if sentinel is not None and override is not sentinel:
+            current = override
+            explicit_binding = current is not None
+        else:
+            current = getattr(host, "knowledge_service", None)
+            # The normal host resolves to None before activation and to the old
+            # service only while it is still active. Any non-None value from a
+            # host without the sentinel is an explicitly owned binding.
+            explicit_binding = current is not None
+        active_service = current if explicit_binding else candidate_provider
+        context.register_agent_preset(preset, label="agent-preset:Wiki")
+        components = getattr(active_service, "components", None)
+        if not isinstance(components, WikiProviderComponents):
+            raise TypeError("Wiki host KnowledgeService must expose migration components")
+        context.register_service(
+            KNOWLEDGE_SERVICE,
+            active_service,
+            label="service:knowledge",
+        )
+        if explicit_binding:
+            # Do not retain an unused local Store for the lifetime of an
+            # external binding. The already-registered token remains a safe
+            # no-op during rollback/teardown.
+            await candidate_token.dispose()
+        compiler = components.compiler
+        previous_task_factory = compiler.task_factory
+
+        def task_factory(awaitable):
+            return context.create_task(awaitable, name="wiki.home-intro")
+
+        context.register_disposer(
+            lambda: compiler.restore_task_factory(task_factory, previous_task_factory),
+            label="binding:wiki.task-factory",
+            phase=RegistrationPhase.CONTRIBUTION,
+        )
+        compiler.bind_task_factory(task_factory)
+        context.register_context_contributor(
+            ContextContributor(
+                contributor_id="wiki.agent.context",
+                handler=build_wiki_agent_context_contributor(
+                    components.manager,
+                    effective_session_store,
+                ),
+                phase=ContextPhase.PROMPT,
+                priority=100,
+                predicate=lambda envelope: "wiki"
+                in tuple(envelope.params.get("_context_tags") or ()),
+                model_visible=True,
+                persistent=True,
+                description="Active knowledge base context for Wiki agents",
+            )
+        )
+
+        def take_pending_cards(envelope):
+            manager = components.manager
+            cards = manager.take_pending_cards(
+                envelope.session_id,
+                owner_account_id=envelope.user_id,
+            )
+            return FeatureEvent("wiki", "cards", 1, {"pages": cards}) if cards else None
+
+        def take_pending_changes(envelope):
+            manager = components.manager
+            changes = manager.take_pending_changes(
+                envelope.session_id,
+                owner_account_id=envelope.user_id,
+            )
+            return FeatureEvent("wiki", "changed", 1, {"changes": changes}) if changes else None
+
+        context.register_event_contributor(
+            FeatureEventContributor(
+                contributor_id="wiki.session.cards",
+                handler=take_pending_cards,
+                priority=100,
+                description="Pending Wiki cards for the current session",
+            )
+        )
+        context.register_event_contributor(
+            FeatureEventContributor(
+                contributor_id="wiki.session.changes",
+                handler=take_pending_changes,
+                priority=200,
+                description="Pending Wiki changes for the current session",
+            )
+        )
+        tools = build_wiki_tools(
+            components.store,
+            components.compiler,
+            components.querier,
+            components.manager,
+            config=cfg,
+            session_store=effective_session_store,
+            workspace_store=effective_workspace_store,
+            security_service=effective_security_service,
+        )
+        for tool in tools:
+            _bind_tool_lease(tool, context)
+            # The disposer compares object identity, preventing an old
+            # Generation from removing a replacement with the same tool name.
+            context.register_disposer(
+                lambda tool=tool: registry.unregister(tool.name, expected=tool),
+                label=f"tool:{tool.name}",
+                phase=RegistrationPhase.CONTRIBUTION,
+            )
+            registry.register(tool)
+
+    definition = FeatureDefinition(
+        WIKI_FEATURE_ID,
+        install,
+        dependencies=FeatureServiceDependencies(
+            WIKI_FEATURE_ID,
+            provides=(KNOWLEDGE_SERVICE,),
+        ),
+        desired_config_revision=desired_config_revision,
+        stop_policy=FeatureStopPolicy.DRAIN,
+        # Registry registrations are name-addressed and cannot stage two
+        # generations with the same tool names.  Restart drains/removes the
+        # old generation before installing the next one and preserves recovery.
+        update_strategy=FeatureUpdateStrategy.RESTART,
+        required_by_product=False,
+    )
+    bundle = WikiFeatureBundle(definition=definition, provider=candidate)
+    if activate:
+        if runtime is None:
+            raise ValueError("activate=True requires a FeatureRuntime")
+        record = run_async_compat(runtime.activate(definition))
+        if record.state.value != "active" or record.scope is None:
+            raise RuntimeError(
+                f"Wiki Feature 激活失败: state={record.state.value} error={record.error}"
+            )
+    return bundle
+
+
+__all__ = [
+    "KNOWLEDGE_SERVICE",
+    "KNOWLEDGE_SERVICE_KEY",
+    "WIKI_FEATURE_ID",
+    "KnowledgeService",
+    "LocalWikiProvider",
+    "WikiFeatureBundle",
+    "WikiFeatureHost",
+    "build_wiki_feature",
+]

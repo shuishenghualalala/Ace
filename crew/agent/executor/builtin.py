@@ -37,14 +37,16 @@ from crew.agent.loop import (
     has_truncated_tool_args,
     is_context_overflow,
     is_empty_response,
+    is_max_tokens_finish,
     is_stream_interrupt_recoverable,
     provider_chain,
     should_continue,
 )
 from crew.agent.loop.tool_dispatch_helpers import plan_tool_calls
 from crew.core.envelope import ResponseChunk
-from crew.core.errors import ProviderError
+from crew.core.errors import CrewError, CrewErrorKind, ProviderError
 from crew.core.interfaces import LLMProvider, ToolRegistry
+from crew.core.observability import attach_context, capture_context, event, span
 from crew.core.types import IMAGE_INPUT_UNAVAILABLE_NOTICE, Message, ToolResult
 from crew.plugins.manager import PluginManager
 from crew.state.logging import get_logger
@@ -68,6 +70,117 @@ VISION_CAPABILITY_RECOVERY_PROMPT = (
 )
 
 
+async def _observed_provider_stream(
+    stream: Any,
+    *,
+    request_payload: dict[str, Any],
+    provider: str,
+    model: str,
+    attempt: int,
+    provider_index: int,
+    purpose: str = "",
+) -> AsyncIterator[Any]:
+    """Observe the real provider iterator, including its consumption lifetime."""
+    caller_context = capture_context()
+    with span(
+        "llm.logical_call",
+        kind="internal",
+        module="executor",
+        component="llm",
+        operation="llm.logical_call",
+        attributes={
+            "provider": provider,
+            "model": model,
+            "attempt": attempt,
+            "provider_index": provider_index,
+            "purpose": purpose,
+        },
+    ):
+        event(
+            "llm.logical_call.started",
+            attributes={
+                "provider": provider,
+                "model": model,
+                "attempt": attempt,
+                "request_fields": len(request_payload),
+            },
+        )
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        text_size = 0
+        reasoning_size = 0
+        tool_calls: list[dict[str, Any]] = []
+        usage: dict[str, Any] = {}
+        finish_reason = ""
+        try:
+            async for chunk in stream:
+                delta = str(getattr(chunk, "delta_text", "") or "")
+                if delta and text_size < 32_000:
+                    part = delta[: max(0, 32_000 - text_size)]
+                    text_parts.append(part)
+                    text_size += len(part)
+                reasoning = str(getattr(chunk, "reasoning_content", "") or "")
+                if reasoning and reasoning_size < 16_000:
+                    part = reasoning[: max(0, 16_000 - reasoning_size)]
+                    reasoning_parts.append(part)
+                    reasoning_size += len(part)
+                for attr in ("tool_call_generating", "ready_tool_call"):
+                    tool = getattr(chunk, attr, None)
+                    if tool is not None:
+                        tool_calls.append({"id": str(getattr(tool, "id", "") or ""), "name": str(getattr(tool, "name", "") or "")})
+                for tool in getattr(chunk, "tool_calls", ()) or ():
+                    tool_calls.append({"id": str(getattr(tool, "id", "") or ""), "name": str(getattr(tool, "name", "") or "")})
+                raw_usage = getattr(chunk, "usage", None)
+                if isinstance(raw_usage, dict):
+                    usage = dict(raw_usage)
+                finish_reason = str(getattr(chunk, "finish_reason", "") or finish_reason)
+                # Keep the provider span active while pulling the next item,
+                # but restore the caller context while suspended in user code.
+                with attach_context(caller_context):
+                    yield chunk
+        except BaseException as exc:
+            event(
+                "llm.logical_call.failed",
+                attributes={
+                    "error_type": type(exc).__name__,
+                    "text_chars": text_size,
+                    "reasoning_chars": reasoning_size,
+                    "tool_calls": len(tool_calls),
+                },
+            )
+            raise
+        finally:
+            close = getattr(stream, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:
+                    pass
+        event(
+            "llm.logical_call.completed",
+            attributes={
+                "text_chars": text_size,
+                "reasoning_chars": reasoning_size,
+                "tool_calls": len(tool_calls),
+                "finish_reason": finish_reason,
+                "usage": usage,
+            },
+        )
+
+
+def _accepts_prefix_kwargs(fn: Any) -> bool:
+    """探测压缩类回调是否接受 ``system_prompt`` / ``tools`` 关键字。
+
+    executor 注入的 compactor 可能是测试替身或旧实现，签名探测失败时
+    按支持处理，保证生产实现（pipeline.Compactor）能拿到前缀与工具清单。
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return True
+    return "system_prompt" in params and "tools" in params
+
+
 def _without_image_inputs(messages: list[Message]) -> list[Message]:
     """Build a request-only text view while preserving canonical multimodal history."""
     sanitized: list[Message] = []
@@ -89,6 +202,32 @@ def _without_image_inputs(messages: list[Message]) -> list[Message]:
             replace(message, content="\n".join(text_parts), content_parts=None)
         )
     return sanitized
+
+
+# 服务端建议退避（Retry-After / body retry_delay）的封顶秒数：防异常大值拖死重试循环。
+_RETRY_DELAY_CAP_SECONDS = 60.0
+
+
+def _llm_error_chunk(
+    rid: str,
+    exc: BaseException,
+    sequence: int,
+    message: str | None = None,
+) -> ResponseChunk:
+    """LLM 路径的 error 帧：CrewError 带结构化 kind(code)/retryable/retry_delay，
+    非类型化异常保持纯 message 帧。message 覆盖默认的 str(exc)（友好文案场景）。"""
+    text = str(exc) if message is None else message
+    if isinstance(exc, CrewError):
+        return ResponseChunk.error(
+            rid,
+            text,
+            sequence,
+            code=exc.kind.value,
+            retryable=exc.is_retryable(),
+            retry_delay=exc.retry_delay,
+        )
+    return ResponseChunk.error(rid, text, sequence)
+
 
 def _dump_prompt(ctx: ExecutionContext, view: list, tools: list | None, iteration: int) -> None:
     """DEBUG 级别：打印本轮发送给 LLM 的完整 prompt（system + messages + tools）。"""
@@ -130,6 +269,9 @@ def _estimate_prompt_overhead(ctx: ExecutionContext, view: list, tools: list | N
     return {"system": sys_chars // 4, "reminder": rem_chars // 4, "tools": tool_chars // 4}
 
 
+_INTERRUPT_MARKER_TEMPLATE = "[回合中断] {message}"
+
+
 def _inject_steer(messages: list[Message], steer: str) -> None:
     """把 steer 文本注入对话：优先贴到最近一条 tool 结果后；无 tool 则作为 user 追加。
 
@@ -167,6 +309,8 @@ class BuiltinExecutor(AgentExecutor):
         plan_manager: Any = None,
         stream_continuation_max: int = 2,
         stream_retry_jitter: bool = True,
+        tool_execution_timeout_seconds: float = 600.0,
+        turn_deadline_seconds: float = 0.0,
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -185,6 +329,10 @@ class BuiltinExecutor(AgentExecutor):
         self.plan_manager = plan_manager
         self.stream_continuation_max = stream_continuation_max
         self.stream_retry_jitter = stream_retry_jitter
+        # 执行段看门狗（秒）：经 ToolRunner 包裹单工具执行，超时合成 timed-out 输出，0=关闭。
+        self.tool_execution_timeout_seconds = max(0.0, float(tool_execution_timeout_seconds or 0.0))
+        # 整回合 deadline（秒）：回合累计时长上限，到点走 interrupt 同款优雅收尾，0=不限。
+        self.turn_deadline_seconds = max(0.0, float(turn_deadline_seconds or 0.0))
         # 用于检测 plan 模式是否刚退出，以便注入一次性 exit reminder。
         self._plan_was_active = False
 
@@ -284,7 +432,7 @@ class BuiltinExecutor(AgentExecutor):
         rid: str,
         next_seq,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> list[ResponseChunk]:
         """final 前对账文件改动：剔除本轮新建又已删的路径，并广播最新累计列表。"""
         if self.plan_manager is None:
@@ -335,6 +483,28 @@ class BuiltinExecutor(AgentExecutor):
             usage=usage,
         )
 
+    async def _interrupt_notice_chunks(
+        self,
+        control,
+        rid: str,
+        next_seq,
+        ctx: ExecutionContext,
+    ) -> AsyncIterator[ResponseChunk]:
+        """消费 interrupt_message：写历史标记 + status 帧透出（各一次）。
+
+        TurnControl.interrupt(message=...) 的消息此前只存不取；回合收尾时 drain
+        取出并清空（reset() 再兜底，不泄漏到下一回合）。非空时作为一条 user 标记
+        消息追加到 canonical 历史（is_meta=False：落库且下回合进入 LLM 视图，模型
+        据此知晓上轮为何停止），并经既有 status 通道透出给前端。
+        """
+        if control is None:
+            return
+        message = control.drain_interrupt_message()
+        if not message:
+            return
+        ctx.messages.append(Message.user(_INTERRUPT_MARKER_TEMPLATE.format(message=message)))
+        yield ResponseChunk.status_event(rid, message, next_seq())
+
     # ------------------------------------------------------------------ #
     async def execute(self, ctx: ExecutionContext) -> AsyncIterator[ResponseChunk]:
         rid = ctx.request_id
@@ -363,6 +533,48 @@ class BuiltinExecutor(AgentExecutor):
         # 用 None 判而非 `or`，避免 0 被 `or` 当 falsy 跳过。
         max_iter = ctx.max_iterations if ctx.max_iterations is not None else self.max_iterations
         control = ctx.control
+
+        # 整回合 deadline（0=不限）：与 interrupt 共用检查点。到点转成 interrupt
+        # （带 deadline exceeded 消息 + interrupt_event），在途工具随即走上一批次的
+        # aborted 语义，本轮回合按 interrupt 路径优雅收尾，而非异常崩溃。
+        turn_deadline = (
+            max(0.0, float(ctx.deadline_seconds or 0.0))
+            if ctx.deadline_seconds > 0
+            else self.turn_deadline_seconds
+        )
+        turn_deadline_started = time.perf_counter()
+
+        def _deadline_hit() -> bool:
+            """deadline 到点则写入 interrupt 并返回 True；未配置/未到点/已有
+            用户 interrupt（消息以用户为准）返回 False。"""
+            if turn_deadline <= 0:
+                return False
+            if time.perf_counter() - turn_deadline_started < turn_deadline:
+                return False
+            if control is not None:
+                if control.interrupted:
+                    return False
+                log.warning(
+                    "整回合 deadline 触发（%.1fs），优雅收尾 session=%s",
+                    turn_deadline,
+                    ctx.session_id,
+                )
+                control.interrupt(
+                    f"deadline exceeded：回合超过整回合时限（{turn_deadline:.0f}s），已自动停止"
+                )
+            return True
+
+        # view token 估算轻缓存：同一迭代内 provisional/overflow 两处全量估算
+        # 合并为一次。key = 消息数 + 末条消息长度；视图在本迭代内不变，下轮消息
+        # 追加自然失配，不会把旧估算错套到新视图上。
+        _view_token_cache: dict[tuple[int, int], int] = {}
+
+        def _cached_view_tokens(messages: list[Message]) -> int:
+            key = (len(messages), len(messages[-1].content) if messages else 0)
+            if key not in _view_token_cache:
+                _view_token_cache.clear()
+                _view_token_cache[key] = estimate_tokens(messages)
+            return _view_token_cache[key]
 
         # Plan 模式 per-turn 收紧：exit_plan_mode 反复失败（plan 文件为空时模型不死心）会
         # 死循环——同一无参工具失败 N 次后才 halt 太晚。plan 激活时临时加严 guardrail 阈值
@@ -398,9 +610,11 @@ class BuiltinExecutor(AgentExecutor):
             session_id=ctx.session_id,
             control=control,
             plan_manager=self.plan_manager,
+            tool_execution_timeout_seconds=self.tool_execution_timeout_seconds,
             tool_search_schemas=tool_search_assembly.original_tool_schemas,
             tool_search_config=tool_search_assembly.config,
             authorized_tool_names=ctx.authorized_tool_names,
+            durable_event_sink=ctx.durable_event_sink,
             allowed_tool_names=(
                 {
                     str((schema.get("function") or {}).get("name") or "")
@@ -431,7 +645,9 @@ class BuiltinExecutor(AgentExecutor):
         max_output_tokens_escalated = False
         stream_continuation_count = 0
         streamed_text = ""  # 流式中断续写累计文本
-        overflow_mode = False  # 命中上下文溢出后，发给 LLM 的视图持续走 force_compact
+        overflow_mode = False  # 命中上下文溢出且兜底压缩使投影前进后，后续轮持续走 force_compact
+        overflow_pending = False  # 命中溢出待压缩：下一轮开头先做剪枝+摘要，再决定是否重试
+        overflow_retries = 0  # 本轮已消耗的 overflow compact-retry 次数（上限 compactor.max_overflow_retries）
         vision_downgraded = False  # 上游实际拒绝图片后，本轮余下请求只发送文本视图
 
         from crew.core.runctx import current_agent_workdir, current_session_id
@@ -446,14 +662,33 @@ class BuiltinExecutor(AgentExecutor):
         view_messages: list[Message] = list(ctx.messages)
 
         grace = False  # 预算耗尽后允许的最后一轮宽限（用于收尾文本）
+        iteration_number = 0
         while budget.consume() or grace:
+            iteration_number += 1
+            event(
+                "agent.loop.iteration.started",
+                module="agent",
+                component="loop",
+                operation="agent.loop.iteration",
+                attributes={
+                    "iteration": iteration_number,
+                    "budget_used": budget.used,
+                    "grace": grace,
+                },
+            )
             used_grace = grace
             grace = False
 
-            # ---- 中断检查（轮初安全点）----
+            # ---- 中断/deadline 检查（轮初安全点）----
             #   空 final：前端不覆盖已流式内容，仅结束本轮（保留之前已生成的部分）。
-            if control is not None and control.interrupted:
-                async for _fc in self._emit_final(rid, next_seq, ctx.session_id, owner_account_id, ""):
+            deadline_now = _deadline_hit()
+            if deadline_now or (control is not None and control.interrupted):
+                async for _nc in self._interrupt_notice_chunks(control, rid, next_seq, ctx):
+                    yield _nc
+                async for _fc in self._emit_final(
+                    rid, next_seq, ctx.session_id, owner_account_id, "",
+                    reason="deadline" if deadline_now else None,
+                ):
                     yield _fc
                 return
 
@@ -468,7 +703,9 @@ class BuiltinExecutor(AgentExecutor):
 
             # ---- 组装发给 LLM 的视图 ----
             #   每轮 compact_view 做水位压缩，未触水位时近乎零成本。
-            #   overflow_mode 是 provider 报溢出后的紧急兜底，从全量 ctx.messages 重新激进压缩。
+            #   overflow_pending/overflow_mode 是 provider 报溢出后的紧急兜底：先做无模型
+            #   剪枝（超长 tool result 头 4096/尾 1024）再摘要；仅当历史投影确实前进
+            #   （压缩后视图 token 数变小）才重试，否则不再重试，直接报错。
             provisional_view = self.build_request_view(
                 ctx.system_prompt,
                 view_messages,
@@ -483,10 +720,14 @@ class BuiltinExecutor(AgentExecutor):
             )
             prompt_overhead_tokens = max(
                 0,
-                provisional_view.estimated_prompt_tokens() - estimate_tokens(view_messages),
+                provisional_view.estimated_prompt_tokens() - _cached_view_tokens(view_messages),
             )
-            if overflow_mode and self.compactor is not None:
+            if (overflow_mode or overflow_pending) and self.compactor is not None:
+                overflow_pending = False
+                overflow_before = _cached_view_tokens(view_messages)
+                overflow_count_before = len(view_messages)
                 yield ResponseChunk.compaction_event(rid, True, next_seq())
+                compact_interrupted = False
                 try:
                     from crew.core.runctx import current_owner_account_id
 
@@ -501,12 +742,74 @@ class BuiltinExecutor(AgentExecutor):
                         accepts_owner = True
                     if accepts_owner:
                         kwargs["owner_account_id"] = current_owner_account_id.get()
-                    view_messages = await force_compact(ctx.messages, ctx.session_id, **kwargs)
+                    if _accepts_prefix_kwargs(force_compact):
+                        kwargs["system_prompt"] = ctx.system_prompt
+                        kwargs["tools"] = original_tools
+                    # compact 段中断检查（前）：已在压缩前被中断则不启动本次压缩。
+                    wait_interrupted = getattr(control, "wait_interrupted", None)
+                    if control is not None and control.interrupted:
+                        compact_interrupted = True
+                    elif control is not None and callable(wait_interrupted):
+                        # 摘要调用与 interrupt 事件竞争：interrupt 先到即取消在途
+                        # 摘要（await 点可被取消，不侵入 compactor 内部流水线），
+                        # 放弃本次压缩走回合收尾。
+                        compact_task = asyncio.create_task(
+                            force_compact(ctx.messages, ctx.session_id, **kwargs)
+                        )
+                        interrupt_task = asyncio.create_task(wait_interrupted())
+                        try:
+                            done, _pending = await asyncio.wait(
+                                {compact_task, interrupt_task},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                        finally:
+                            interrupt_task.cancel()
+                        if compact_task in done:
+                            view_messages = compact_task.result()
+                            # compact 段中断检查（后）：压缩完成前/完成时到达的
+                            # interrupt 同样放弃本次压缩结果，走回合收尾。
+                            if control.interrupted:
+                                compact_interrupted = True
+                        else:
+                            compact_task.cancel()
+                            await asyncio.gather(compact_task, return_exceptions=True)
+                            compact_interrupted = True
+                    else:
+                        view_messages = await force_compact(
+                            ctx.messages, ctx.session_id, **kwargs
+                        )
                 except Exception as exc:  # noqa: BLE001
                     log.warning("force_compact 失败，按原视图发送：%s", exc)
                     view_messages = list(ctx.messages)
                 finally:
                     yield ResponseChunk.compaction_event(rid, False, next_seq())
+                if compact_interrupted:
+                    log.info("压缩期间被 interrupt，放弃本次压缩并收尾 session=%s", ctx.session_id)
+                    async for _nc in self._interrupt_notice_chunks(control, rid, next_seq, ctx):
+                        yield _nc
+                    async for _fc in self._emit_final(rid, next_seq, ctx.session_id, owner_account_id, ""):
+                        yield _fc
+                    return
+                overflow_after = estimate_tokens(view_messages)
+                overflow_count_after = len(view_messages)
+                if overflow_after >= overflow_before and overflow_count_after >= overflow_count_before:
+                    # 投影未前进：再发一次同样的请求必然再溢出，不再重试。
+                    # token 估算在极小历史上会退化为 0，用消息数兜底判断。
+                    log.warning(
+                        "overflow 兜底压缩未使历史投影前进（%d → %d tokens），不再重试 session=%s",
+                        overflow_before,
+                        overflow_after,
+                        ctx.session_id,
+                    )
+                    yield ResponseChunk.error(rid, "上下文超长且无法进一步压缩", next_seq())
+                    return
+                overflow_mode = True
+                log.info(
+                    "overflow 兜底压缩后投影前进（%d → %d tokens），重试本轮 session=%s",
+                    overflow_before,
+                    overflow_after,
+                    ctx.session_id,
+                )
             elif self.compactor is not None:
                 will_compact_view = getattr(self.compactor, "will_compact_view", None)
                 show_compaction = bool(
@@ -521,11 +824,16 @@ class BuiltinExecutor(AgentExecutor):
                 if show_compaction:
                     yield ResponseChunk.compaction_event(rid, True, next_seq())
                 try:
+                    compact_kwargs: dict[str, Any] = {}
+                    if _accepts_prefix_kwargs(self.compactor.compact_view):
+                        compact_kwargs["system_prompt"] = ctx.system_prompt
+                        compact_kwargs["tools"] = original_tools
                     view_messages = await self.compactor.compact_view(
                         view_messages,
                         ctx.session_id,
                         owner_account_id=owner_account_id,
                         prompt_overhead_tokens=prompt_overhead_tokens,
+                        **compact_kwargs,
                     )
                 finally:
                     if show_compaction:
@@ -615,11 +923,22 @@ class BuiltinExecutor(AgentExecutor):
                 )
                 return
             if result.get("overflow"):
-                if self.compactor is not None and not overflow_mode:
-                    # 首次命中溢出：静默开启压缩模式并重试本轮（退还本轮预算）
-                    overflow_mode = True
+                max_overflow_retries = (
+                    getattr(self.compactor, "max_overflow_retries", 1)
+                    if self.compactor is not None
+                    else 0
+                )
+                if self.compactor is not None and overflow_retries < max_overflow_retries:
+                    # 首次/第 N 次命中溢出：先剪枝再摘要，仅当投影前进才重试（防无进展死循环）
+                    overflow_retries += 1
+                    overflow_pending = True
                     budget.refund()
-                    log.info("命中上下文溢出，启用兜底压缩后重试 session=%s", ctx.session_id)
+                    log.info(
+                        "命中上下文溢出，启用兜底压缩后重试（第 %d/%d 次）session=%s",
+                        overflow_retries,
+                        max_overflow_retries,
+                        ctx.session_id,
+                    )
                     continue
                 yield ResponseChunk.error(rid, "上下文超长且无法进一步压缩", next_seq())
                 return
@@ -719,6 +1038,17 @@ class BuiltinExecutor(AgentExecutor):
                     next_seq(),
                 )
                 return
+            if tool_calls and is_max_tokens_finish(finish_reason):
+                # stop_reason=length 时消息必然不完整：整批拒执行，历史只保留文本前缀，
+                # 随后走截断续写让模型重新发起完整调用（决策与写入历史同源）。
+                await runner.cancel_prewarms()
+                log.warning(
+                    "截断消息拒执行工具 session=%s tool_count=%d finish_reason=%s",
+                    ctx.session_id,
+                    len(tool_calls),
+                    finish_reason,
+                )
+                tool_calls = []
             if tool_calls:
                 tool_calls = plan_tool_calls(
                     tool_calls,
@@ -741,12 +1071,33 @@ class BuiltinExecutor(AgentExecutor):
             ctx.messages.append(assistant_msg)
             view_messages.append(assistant_msg)
 
+            if tool_calls and ctx.durable_event_sink is not None:
+                try:
+                    value = ctx.durable_event_sink(
+                        "assistant_tool_calls",
+                        {
+                            "tool_calls": [
+                                {"tool_call_id": tc.id, "name": tc.name}
+                                for tc in tool_calls
+                            ],
+                        },
+                    )
+                    if hasattr(value, "__await__"):
+                        await value
+                except Exception:  # noqa: BLE001 - durable boundary 不得中断主回合
+                    log.warning("assistant tool-call boundary 写入失败 session=%s", ctx.session_id)
+
             if reasoning and not result.get("thinking_emitted"):
                 yield ResponseChunk.thinking_event(rid, reasoning, next_seq())
 
-            # ---- 中断检查（模型刚产出后 / 流式被中途打断）----
+            # ---- 中断/deadline 检查（模型刚产出后 / 流式被中途打断）----
             #   带上已生成的半截文本作 final：前端保留、历史持久化，优雅停止。
-            if control is not None and control.interrupted:
+            deadline_now = _deadline_hit()
+            if deadline_now or (control is not None and control.interrupted):
+                if tool_calls:
+                    # 中断收尾：未派发的工具调用不写入历史，部分消息只保留文本前缀。
+                    tool_calls = []
+                    assistant_msg.tool_calls = []
                 await self.plugins.post_llm_call(
                     ctx.session_id,
                     ctx.messages,
@@ -757,9 +1108,12 @@ class BuiltinExecutor(AgentExecutor):
                         "finish_reason": finish_reason,
                     },
                 )
+                async for _nc in self._interrupt_notice_chunks(control, rid, next_seq, ctx):
+                    yield _nc
                 async for _fc in self._emit_final(
                     rid, next_seq, ctx.session_id, owner_account_id, text,
                     replace_content=content_replaced, usage=result.get("usage"),
+                    reason="deadline" if deadline_now else None,
                 ):
                     yield _fc
                 return
@@ -855,10 +1209,16 @@ class BuiltinExecutor(AgentExecutor):
                     yield _fc
                 return
 
-            # 工具执行后再查一次中断（用户在工具运行期间点了停止）
+            # 工具执行后再查一次中断/deadline（用户在工具运行期间点了停止）
             #   空 final：保留已显示的工具结果与文本，仅结束本轮。
-            if control is not None and control.interrupted:
-                async for _fc in self._emit_final(rid, next_seq, ctx.session_id, owner_account_id, ""):
+            deadline_now = _deadline_hit()
+            if deadline_now or (control is not None and control.interrupted):
+                async for _nc in self._interrupt_notice_chunks(control, rid, next_seq, ctx):
+                    yield _nc
+                async for _fc in self._emit_final(
+                    rid, next_seq, ctx.session_id, owner_account_id, "",
+                    reason="deadline" if deadline_now else None,
+                ):
                     yield _fc
                 return
 
@@ -1008,6 +1368,15 @@ class BuiltinExecutor(AgentExecutor):
                     model=_prov_model,
                     provider=_prov_name,
                     base_url=_prov_base_url,
+                )
+                stream = _observed_provider_stream(
+                    stream,
+                    request_payload=effective_request,
+                    provider=_prov_name,
+                    model=_prov_model,
+                    attempt=attempt + 1,
+                    provider_index=prov_idx,
+                    purpose=str(getattr(request_view, "purpose", "") or ""),
                 )
                 middleware_ready = time.perf_counter() - t0
                 async for chunk in stream:
@@ -1201,10 +1570,11 @@ class BuiltinExecutor(AgentExecutor):
                         model=str(getattr(provider, "model", "") or ""),
                     )
                     if not is_stream_interrupt_recoverable(exc):
-                        yield ResponseChunk.error(
+                        yield _llm_error_chunk(
                             rid,
-                            f"模型响应中断，已保留已生成内容。错误：{exc}",
+                            exc,
                             next_seq(),
+                            message=f"模型响应中断，已保留已生成内容。错误：{exc}",
                         )
                         result["error"] = True
                         return
@@ -1216,7 +1586,7 @@ class BuiltinExecutor(AgentExecutor):
                     return
                 if (
                     isinstance(exc, ProviderError)
-                    and exc.category == "unsupported_capability"
+                    and exc.kind == CrewErrorKind.UNSUPPORTED_CAPABILITY
                     and exc.capability
                 ):
                     result.update(
@@ -1224,12 +1594,17 @@ class BuiltinExecutor(AgentExecutor):
                         provider_error=str(exc),
                     )
                     return
-                retryable = isinstance(exc, ProviderError) and exc.retryable
+                retryable = isinstance(exc, CrewError) and exc.is_retryable()
                 if retryable and attempt < self.max_retries:
                     attempt += 1
                     delay = self.backoff_seconds * (2 ** (attempt - 1))
                     if self.stream_retry_jitter:
                         delay = delay * (0.5 + random.random() * 0.5)
+                    # 服务端建议的退避（Retry-After / body retry_delay）优先于本地
+                    # 指数退避，并封顶防异常大值拖死重试循环。
+                    retry_delay = exc.retry_delay if isinstance(exc, CrewError) else None
+                    if retry_delay is not None and retry_delay > 0:
+                        delay = min(retry_delay, _RETRY_DELAY_CAP_SECONDS)
                     exc_info = f"{type(exc).__name__}: {str(exc) or '(无详情)'}"
                     log.warning("LLM 瞬时失败，第 %d 次重试（%.1fs 后）：%s", attempt, delay, exc_info)
                     await asyncio.sleep(delay)
@@ -1243,7 +1618,7 @@ class BuiltinExecutor(AgentExecutor):
                     continue
                 log.exception("LLM 调用异常，无 fallback 可用")
                 result["error"] = True
-                yield ResponseChunk.error(rid, str(exc), next_seq())
+                yield _llm_error_chunk(rid, exc, next_seq())
                 return
 
     @staticmethod

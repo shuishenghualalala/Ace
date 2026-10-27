@@ -69,7 +69,7 @@ export function deriveState(c: SecurityCapabilities): BannerState {
   return 'on';
 }
 
-/** 拉取 capabilities 并重渲。网关不可达时不打扰（backend-status-guard 已有全屏提示）。 */
+/** 拉取 capabilities 并重渲。网关不可达时不打扰（backend-status-guard 顶部横幅会提示）。 */
 export async function refreshSecurityBanner(): Promise<void> {
   if (!SECURITY_BANNER_ENABLED) return;
   seeding = true;

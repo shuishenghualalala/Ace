@@ -52,6 +52,7 @@ export type TabKey =
   | 'cron'
   | 'security'
   | 'audit'
+  | 'tracing'
   | 'system';
 export type SystemPanelKey = 'overview' | 'logs' | 'usage';
 export type ComposerMode = 'craft' | 'plan' | 'ask';
@@ -253,6 +254,9 @@ function buildSnapshot(): AppState {
     queueHints: m.queueHints,
     pendingQueues: m.pendingQueues,
     attachments: m.attachments,
+    historyLoadErrors: m.historyLoadErrors,
+    historyLoading: m.historyLoading,
+    historyPaging: m.historyPaging,
     tasks: t.tasks,
     taskBoardOpen: t.taskBoardOpen,
     taskBoardWidth: t.taskBoardWidth,
@@ -276,6 +280,11 @@ function buildSnapshot(): AppState {
     activeTab: u.activeTab,
     activeSystemPanel: u.activeSystemPanel,
     backendConnected: u.backendConnected,
+    backendProcessState: u.backendProcessState,
+    backendHealthState: u.backendHealthState,
+    backendTransportState: u.backendTransportState,
+    backendLoopLagMs: u.backendLoopLagMs,
+    backendCanSend: u.backendCanSend,
     socket: u.socket as AppState['socket'],
     feedbackDraft: u.feedbackDraft,
     feedbackList: u.feedbackList,
@@ -306,6 +315,9 @@ const FIELD_TO_STORE: Record<string, () => unknown> = {
   queueHints: () => messageStore,
   pendingQueues: () => messageStore,
   attachments: () => messageStore,
+  historyLoadErrors: () => messageStore,
+  historyLoading: () => messageStore,
+  historyPaging: () => messageStore,
   tasks: () => taskStore,
   taskBoardOpen: () => taskStore,
   taskBoardWidth: () => taskStore,
@@ -700,6 +712,21 @@ export function removeSessionState(sessionId: string): void {
     delete next[sessionId];
     messageStore.set({ pendingQueues: next });
   }
+  if (messageStore.get().historyLoadErrors.has(sessionId)) {
+    const nextErrors = new Set(messageStore.get().historyLoadErrors);
+    nextErrors.delete(sessionId);
+    messageStore.set({ historyLoadErrors: nextErrors });
+  }
+  if (messageStore.get().historyLoading.has(sessionId)) {
+    const nextLoading = new Set(messageStore.get().historyLoading);
+    nextLoading.delete(sessionId);
+    messageStore.set({ historyLoading: nextLoading });
+  }
+  if (messageStore.get().historyPaging[sessionId]) {
+    const nextPaging = { ...messageStore.get().historyPaging };
+    delete nextPaging[sessionId];
+    messageStore.set({ historyPaging: nextPaging });
+  }
   const curBooks = sessionStore.get().books;
   if (sessionId in curBooks) {
     const next = { ...curBooks };
@@ -824,6 +851,43 @@ export function setQueueHint(sessionId: string, hint: string): void {
 /** 读取某 session 的队列提示。 */
 export function getQueueHint(sessionId: string): string {
   return messageStore.get().queueHints[sessionId] ?? '';
+}
+
+/** 标记某 session 的历史回填失败（聊天区显示「加载失败 + 重试」卡）。 */
+export function markHistoryLoadError(sessionId: string): void {
+  if (messageStore.get().historyLoadErrors.has(sessionId)) return;
+  const next = new Set(messageStore.get().historyLoadErrors);
+  next.add(sessionId);
+  messageStore.set({ historyLoadErrors: next });
+}
+
+/** 清除某 session 的历史回填失败标记（回填成功 / 重新加载时）。 */
+export function clearHistoryLoadError(sessionId: string): void {
+  if (!messageStore.get().historyLoadErrors.has(sessionId)) return;
+  const next = new Set(messageStore.get().historyLoadErrors);
+  next.delete(sessionId);
+  messageStore.set({ historyLoadErrors: next });
+}
+
+/** 标记某 session 的历史窗口分页游标（loadBackendHistory / loadOlderHistoryPage 写入）。 */
+export function setHistoryPaging(
+  sessionId: string,
+  paging: { hasMore: boolean; nextBefore: string | null } | null,
+): void {
+  const next = { ...messageStore.get().historyPaging };
+  if (paging) next[sessionId] = paging;
+  else delete next[sessionId];
+  messageStore.set({ historyPaging: next });
+}
+
+/** 标记/清除某 session 的历史回填进行中（聊天区骨架占位）。 */
+export function setHistoryLoading(sessionId: string, loading: boolean): void {
+  const cur = messageStore.get().historyLoading;
+  if (loading === cur.has(sessionId)) return;
+  const next = new Set(cur);
+  if (loading) next.add(sessionId);
+  else next.delete(sessionId);
+  messageStore.set({ historyLoading: next });
 }
 
 /** 设置当前 workspace 选中。 */

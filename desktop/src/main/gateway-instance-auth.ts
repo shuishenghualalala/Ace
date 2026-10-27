@@ -25,9 +25,20 @@ export interface GatewayComponentState {
   message?: string;
 }
 
+/**
+ * 探测失败类别，供 desktop 健康监控区分「进程死了 / 事件循环忙 / 冒名实例」：
+ * - unreachable：TCP 被拒（ECONNREFUSED 等），gateway 进程大概率已退出；
+ * - timeout：AbortController 超时，端口在收但响应回不来，gateway 事件循环忙；
+ * - auth_failed：收到了 HTTP 响应但实例证明未通过，端口上可能挂着别的服务；
+ * - unknown：本地前置校验失败或无法归类的异常。
+ */
+export type GatewayProbeFailureKind = 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
+
 export interface GatewayInstanceProbe {
   verified: boolean;
   components?: Record<string, GatewayComponentState>;
+  /** 仅失败时存在；成功不带该字段。 */
+  failureKind?: GatewayProbeFailureKind;
 }
 
 function posixUidMatches(info: fs.Stats): boolean {
@@ -206,17 +217,19 @@ export async function probeGatewayInstance(
   baseUrl: string,
   options: GatewayInstanceVerificationOptions = {},
 ): Promise<GatewayInstanceProbe> {
+  const fail = (failureKind: GatewayProbeFailureKind): GatewayInstanceProbe => ({ verified: false, failureKind });
+
   const endpoint = healthEndpoint(baseUrl);
-  if (!endpoint) return { verified: false };
+  if (!endpoint) return fail('unknown');
 
   const challenge = options.challenge ?? randomBytes(32).toString('hex');
-  if (!HEX_32_BYTES.test(challenge)) return { verified: false };
+  if (!HEX_32_BYTES.test(challenge)) return fail('unknown');
 
   let key: Buffer;
   try {
     key = loadOrCreateGatewayInstanceKey(options.crewHome);
   } catch {
-    return { verified: false };
+    return fail('unknown');
   }
 
   const controller = new AbortController();
@@ -233,27 +246,44 @@ export async function probeGatewayInstance(
     });
     const contentType = response.headers.get('content-type') ?? '';
     if (!response.ok || !contentType.toLowerCase().includes('application/json')) {
-      return { verified: false };
+      return fail('auth_failed');
     }
     const body = await response.json().catch(() => null) as unknown;
-    if (!body || typeof body !== 'object') return { verified: false };
+    if (!body || typeof body !== 'object') return fail('auth_failed');
     const record = body as Record<string, unknown>;
-    if (record.ok !== true || record.service !== 'crew-gateway') return { verified: false };
+    if (record.ok !== true || record.service !== 'crew-gateway') return fail('auth_failed');
     const proof = record.instance_proof;
-    if (typeof proof !== 'string' || !HEX_32_BYTES.test(proof)) return { verified: false };
+    if (typeof proof !== 'string' || !HEX_32_BYTES.test(proof)) return fail('auth_failed');
 
     const actual = Buffer.from(proof, 'hex');
     const expected = expectedProof(key, challenge);
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
-      return { verified: false };
+      return fail('auth_failed');
     }
     const components = parseComponents(record.components);
     return { verified: true, ...(components ? { components } : {}) };
-  } catch {
-    return { verified: false };
+  } catch (error) {
+    return fail(classifyFetchFailure(error, controller.signal));
   } finally {
     clearTimeout(timeout);
   }
+}
+
+const UNREACHABLE_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ECONNABORTED',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENOTFOUND',
+  'EPIPE',
+]);
+
+function classifyFetchFailure(error: unknown, signal: AbortSignal): GatewayProbeFailureKind {
+  if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) return 'timeout';
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  if (typeof code === 'string' && UNREACHABLE_ERROR_CODES.has(code)) return 'unreachable';
+  return 'unknown';
 }
 
 const SECURITY_PROOF_PATH_PREFIXES = ['/api/security/', '/api/mcp/cua-driver/setup'];

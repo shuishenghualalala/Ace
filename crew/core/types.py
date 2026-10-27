@@ -21,8 +21,28 @@ IMAGE_INPUT_UNAVAILABLE_NOTICE = (
 
 
 _FILE_WRITE_UI_ARG_KEYS = ("path", "file_path", "append")
-_BROWSER_REF_RE = re.compile(r"^p[1-9]\d*:[es][1-9]\d*$")
+_BROWSER_REF_RE = re.compile(r"^p[1-9]\d*:e[1-9]\d*$")
 _FORM_FIELD_TYPES = ("textbox", "combobox", "checkbox", "radio", "slider")
+
+
+def coerce_tool_arguments(value: Any) -> Any:
+    """宽进垫片：模型把整段参数又包成一层 JSON 字符串时做显式二次解析。
+
+    部分模型会把 arguments 序列化两次（首字符为 ``[``/``{`` 的字符串）。二次解析
+    成功则展开为真实结构；失败原样保留，交给下游 schema 校验（严出）拒绝并回灌
+    给模型自纠，不在这里崩循环。
+    """
+    if not isinstance(value, str):
+        return value
+    stripped = value.lstrip()
+    if not stripped.startswith(("[", "{")):
+        return value
+    import json
+
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        return value
 
 
 def safe_duration_seconds(value: Any) -> float | None:
@@ -47,41 +67,6 @@ def safe_duration_seconds(value: Any) -> float | None:
     ):
         return None
     return duration
-
-
-def _record_replay_arguments_for_display(
-    arguments: dict[str, Any],
-) -> dict[str, Any]:
-    """Expose replay structure without retaining runtime form values."""
-
-    workflow_id = arguments.get("workflow_id")
-    inputs = arguments.get("inputs")
-    safe_inputs: dict[str, dict[str, Any]] = {}
-    if isinstance(inputs, dict):
-        for index, (key, value) in enumerate(inputs.items()):
-            if index >= 32:
-                break
-            if (
-                not isinstance(key, str)
-                or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key) is None
-            ):
-                continue
-            if isinstance(value, list):
-                safe_inputs[key] = {"type": "list", "count": len(value)}
-            elif isinstance(value, str):
-                safe_inputs[key] = {"type": "text"}
-            elif isinstance(value, bool):
-                safe_inputs[key] = {"type": "boolean"}
-            else:
-                safe_inputs[key] = {"type": type(value).__name__}
-    result: dict[str, Any] = {}
-    if isinstance(workflow_id, str) and re.fullmatch(
-        r"[0-9a-f]{64}",
-        workflow_id,
-    ):
-        result["workflow_id"] = workflow_id
-    result["inputs"] = safe_inputs
-    return result
 
 
 def _safe_browser_ref(value: Any) -> str:
@@ -150,8 +135,6 @@ def tool_arguments_for_ui(name: str, arguments: dict[str, Any] | None) -> dict[s
         return {key: value for key, value in arguments.items() if key != "source_ids"}
     if name in {"file_write", "write_file"}:
         return {key: arguments[key] for key in _FILE_WRITE_UI_ARG_KEYS if key in arguments}
-    if name == "record_replay":
-        return _record_replay_arguments_for_display(arguments)
     if name in {"browser_type", "browser_dialog"}:
         return {key: value for key, value in arguments.items() if key not in {"text", "value", "password"}}
     if name == "browser_fill_form":
@@ -205,7 +188,6 @@ def tool_arguments_for_history(name: str, arguments: dict[str, Any] | None) -> d
         "browser_select",
         "browser_tabs",
         "browser_use",
-        "record_replay",
     }:
         return tool_arguments_for_ui(name, arguments)
     return arguments
@@ -242,6 +224,8 @@ class Message:
     model: str | None = None
     # 元信息消息：发送给 LLM 但前端不渲染（如 system-reminder、skill 展开内容）
     is_meta: bool = False
+    # 结构化消息来源；用于 fork/回放过滤，不依赖正文字符串匹配。
+    source_kind: str | None = None
     timestamp: float | None = None
     turn_started_at: float | None = None
     turn_duration: float | None = None
@@ -352,7 +336,12 @@ class Message:
             f"{content}\n"
             "</system-reminder>"
         )
-        return Message(role="user", content=wrapped, is_meta=True)
+        return Message(
+            role="user",
+            content=wrapped,
+            is_meta=True,
+            source_kind="system_reminder",
+        )
 
 
 @dataclass
@@ -393,6 +382,26 @@ class ToolResult:
     content: str
     is_error: bool = False
     media: list[MediaPart] = field(default_factory=list)
+    # 稳定的工具层协议字段。content 仍是模型兼容的主载荷；这些字段供
+    # Gateway、UI 和自动恢复逻辑使用，避免从自然语言错误中反推语义。
+    code: str = ""
+    retryable: bool = False
+    retry_delay: float | None = None
+    side_effect_state: Literal["none", "unknown", "committed"] = "none"
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def protocol_metadata(self) -> dict[str, Any]:
+        """返回不含正文的稳定工具错误/执行元数据。"""
+        metadata: dict[str, Any] = {
+            "code": self.code,
+            "retryable": bool(self.retryable),
+            "side_effect_state": self.side_effect_state,
+        }
+        if self.retry_delay is not None:
+            metadata["retry_delay"] = max(0.0, float(self.retry_delay))
+        if self.details:
+            metadata["details"] = dict(self.details)
+        return metadata
 
 
 @dataclass

@@ -5,13 +5,19 @@
   到期时构造 Envelope 交给 runner 执行。自然语言/cron 表达式留作扩展点。
 """
 
+from crew.cron.context import contribute_cron_trigger_reminder
+from crew.cron.feature import CRON_FEATURE_ID, CronFeatureBundle, build_cron_feature
 from crew.cron.jobs import CronJobStore, parse_duration, parse_schedule
 from crew.cron.scheduler import CronService, IntervalScheduler
 
 __all__ = [
-    "IntervalScheduler",
-    "CronService",
     "CronJobStore",
-    "parse_schedule",
+    "CronService",
+    "CRON_FEATURE_ID",
+    "CronFeatureBundle",
+    "IntervalScheduler",
+    "build_cron_feature",
+    "contribute_cron_trigger_reminder",
     "parse_duration",
+    "parse_schedule",
 ]

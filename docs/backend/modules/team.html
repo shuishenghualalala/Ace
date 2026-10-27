@@ -48,7 +48,9 @@
 
   <h2>1. 职责</h2>
   <ul>
-    <li>该模块做什么、不做什么（边界）。</li>
+    <li>管理 Team roster、任务协作、成员通信、共享历史与结果呈现。</li>
+    <li>通过 <code>mode=team</code> Execution Driver 对外提供一次协作请求，不参与核心 mode 路由。</li>
+    <li><code>product.team</code> Feature Bundle 统一拥有 <code>InProcessTeamManager</code>、<code>mode=team</code> Execution Driver 与 owner Provider 缓存生命周期（阶段 4C-1）。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
@@ -56,8 +58,11 @@
   <table>
     <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
     <tbody>
-      <tr><td><code>feature-a</code></td><td>…</td><td>已落地</td></tr>
-      <tr><td><code>feature-b</code></td><td>…</td><td>待补充</td></tr>
+      <tr><td>Team Driver</td><td>桥接 <code>InProcessTeamManager.interact()</code>，保留会话配置中的 external_team_id 解析。</td><td>已落地</td></tr>
+      <tr><td>协作编排</td><td>Formation、成员调度、任务图、mailbox 与协作历史。</td><td>已落地</td></tr>
+      <tr><td>外援存储门面</td><td><code>TeamExternalAgentStore</code> 继承纯外援 Catalog，拥有 <code>external_team</code>/<code>external_team_member</code> 表、历史 formation 迁移、Team CRUD 与删除守卫事务；组合根用它维持 <code>app.external_agents</code> 既有行为。</td><td>已落地（4A-1）</td></tr>
+      <tr><td>看板 Consumer</td><td>生产装配注入动态 Consumer Provider；TeamPlanStore 与 Manager 按调用读取当前代，并在同步操作期间持有 Lease。停用后不回退旧 Store，业务行保留。</td><td>已落地（4B-1）</td></tr>
+      <tr><td>完整 Feature 所有权</td><td>Manager、后台任务、Provider 与活动协作状态迁入 Team Generation；通过 <code>build_team_feature()</code> 装配，<code>CrewApp</code> 不再手写构造 Manager/Driver。</td><td>已落地（4C-1）</td></tr>
     </tbody>
   </table>
 
@@ -65,23 +70,29 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/team/xxx.py</code></td><td>…</td></tr>
+      <tr><td><code>crew/team/feature.py</code></td><td>Team Product Feature Bundle：构造 Manager、注册 <code>mode=team</code> Driver 与 <code>team</code> Service，接入 Feature Runtime。</td></tr>
+      <tr><td><code>crew/team/team_manager.py</code></td><td>Team 协作入口与运行状态。</td></tr>
+      <tr><td><code>crew/team/external_store.py</code></td><td>Team 外援存储门面：Team 表、迁移与 CRUD，仍满足外援 Catalog 契约。</td></tr>
+      <tr><td><code>crew/app.py</code></td><td>生产装配调用 <code>build_team_feature()</code>；保留 <code>set_team_manager</code> 与 <code>app.team</code> 兼容表面。</td></tr>
+      <tr><td><code>crew/features/drivers.py</code></td><td>mode 注册、解析与请求 Lease。</td></tr>
     </tbody>
   </table>
 
   <h2>4. 数据模型与接口</h2>
-  <p>对外暴露的关键类/方法、事件/消息约定、Schema。</p>
-  <pre><code># 关键签名</code></pre>
+  <p>Host 启用 Team 时由 <code>build_team_feature()</code> 激活 <code>product.team</code> Generation；Generation 拥有 Manager、Driver 与 <code>team</code> Service。请求期间 Registry 自动持有 Lease。</p>
+  <pre><code>feature_id = "product.team"
+mode = "team"
+service = ServiceKey("team")  # InProcessTeamManager
+execute = build_team_feature(...).definition</code></pre>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>问题 1：…</li>
-    <li>TODO：…</li>
+    <li><code>team_internal</code> 仍是 Core ResponseChunk kind，后续迁入命名空间 Feature Event。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
   <ul>
-    <li>如何在此模块上加功能（遵守契约、不跨目录）。</li>
+    <li>新增 Team 执行入口应通过 Team Feature 注册能力，不得在 <code>CrewApp.handle()</code> 增加分支。</li>
   </ul>
 
   <h2>7. 变更记录</h2>
@@ -96,10 +107,15 @@
       <tr><td>2026-08-18</td><td>Team @Agent 直接通信流式 timeline</td><td>per-request callback 透传 delta/thinking/tool 帧到 team_internal team_stream。</td></tr>
       <tr><td>2026-08-18</td><td>Team 历史 mention 成员身份恢复</td><td>history_projection.py 优先使用 mention_from 解析成员画像。</td></tr>
       <tr><td>2026-08-18</td><td>Team direct mention 历史消息所有权</td><td>direct mention 子回合为 canonical；父 agent_turn 仅作运行时记录；历史投影按 request_id 识别。</td></tr>
+      <tr><td>2026-09-03</td><td>Team 请求入口迁入 Feature-owned Execution Driver Adapter。</td><td><code>mode=team</code>、请求 Lease、核心路由。</td></tr>
+      <tr><td>2026-09-03</td><td>内部协作消息改发命名空间事件 <code>team.internal_message v1</code>（feature_event），旧 team_internal 帧由 Gateway 出口适配器生成；持久投影 role 不变。</td><td><code>_team_internal_chunk</code>、流式响应协议。</td></tr>
+      <tr><td>2026-09-08</td><td>Team 表/CRUD/迁移从外援 Store 移入 <code>TeamExternalAgentStore</code> 门面；生产组合根与 Team 用例改用该门面（阶段 4A-1，见 ADR-0027）。</td><td><code>crew/team/external_store.py</code>、<code>crew/app.py</code>、Team 相关测试。</td></tr>
+      <tr><td>2026-09-09</td><td>Team 进入 Feature 生命周期（阶段 4C-1，见 ADR-0031）：<code>build_team_feature()</code> 统一构造 Manager、注册 Driver 与 Service；<code>InProcessTeamManager</code> 新增 <code>shutdown()</code> 与 <code>_closed</code> 守卫；App 级 owner Provider 缓存由 Bundle 注入，同时保留 <code>app.team</code> 兼容表面。</td><td><code>crew/team/feature.py</code>、<code>crew/team/team_manager.py</code>、<code>crew/app.py</code>、<code>crew/gateway/app.py</code>、Team 生命周期测试。</td></tr>
+      <tr><td>2026-09-17</td><td><code>7be86ac</code> Team 侧任务存储调用迁移到 async 门面（ADR-0046）：delegate_tool 的 create/touch_activity/update_status 与 history_projection 的 list_tasks 全部改 <code>await xxx_async</code>；team_manager 的 <code>_mark_child_active</code> 顺带转 async 并修复生产路径 get 缺 owner 参数的静默失败。</td><td><code>packages/crew-team/</code>delegate_tool.py、history_projection.py、team_manager.py；事件循环上不再出现 Team 路径的任务存储同步写。</td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../adr/0008-team-kanban-driver-adapters.html">ADR-0008</a> · <a href="../adr/0031-team-feature-lifecycle.html">ADR-0031</a> · <a href="../../testing/plugin-architecture-stage-4c1-team-feature.html">测试记录</a></div>
 </div>
 </body>
 </html>

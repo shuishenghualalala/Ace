@@ -1,6 +1,7 @@
 import { createIcon, MONOCHROME_ICON_CLASS } from '../components/icon';
 import {
-  resolveShellNavigation,
+  createShellNavigationRegistry,
+  type ShellNavigationRegistry,
   type FeatureState,
   type ShellFeatureStates,
   type ShellLocation,
@@ -63,6 +64,7 @@ export interface ApplicationShellOptions {
   features?: ShellFeatureStates;
   storage?: Storage;
   productIconUrl?: string;
+  navigationRegistry?: ShellNavigationRegistry;
   onNavigate?: (location: ShellLocation, productMode: ProductMode) => boolean | void;
   onProductModeChange?: (productMode: ProductMode) => void;
 }
@@ -132,6 +134,7 @@ export function createApplicationShell(
   const storage = options.storage ?? localStorage;
   let features = options.features ?? {};
   let disposed = false;
+  const navigationRegistry = options.navigationRegistry ?? createShellNavigationRegistry();
 
   restoreProductMode(storage);
 
@@ -163,7 +166,24 @@ export function createApplicationShell(
   productIcon.src = options.productIconUrl ?? './icon.png';
   productIcon.alt = '';
   productLabel.className = 'mw-sidebar-brand__label';
-  productBrand.append(productIcon, productLabel);
+  // 通知中心铃铛：挂在 brand 块右上角（绝对定位，不挤占 logo/名称布局），
+  // 未读角标由 features/notification-center.ts 负责显隐与计数。
+  const notificationBell = document.createElement('button');
+  notificationBell.type = 'button';
+  notificationBell.id = 'notification-bell-btn';
+  notificationBell.className = 'mw-notification-bell';
+  notificationBell.title = '通知';
+  notificationBell.setAttribute('aria-label', '通知');
+  notificationBell.setAttribute('aria-haspopup', 'dialog');
+  const notificationBadge = document.createElement('span');
+  notificationBadge.id = 'notification-badge';
+  notificationBadge.className = 'mw-notification-bell__badge';
+  notificationBadge.hidden = true;
+  notificationBell.append(
+    createIcon('icon-bell', { className: 'mw-notification-bell__icon' }),
+    notificationBadge,
+  );
+  productBrand.append(productIcon, productLabel, notificationBell);
 
   windowCommands.className = 'mw-window-commands';
   windowCommands.append(
@@ -322,7 +342,7 @@ export function createApplicationShell(
     setProductMode(productMode, storage);
     options.onProductModeChange?.(productMode);
     const state = productModeStore.get();
-    const item = resolveShellNavigation(productMode, features).find(
+    const item = navigationRegistry.resolve(productMode, features).find(
       (candidate) =>
         candidate.id === state.views[productMode].lastPosition &&
         candidate.featureState === 'available',
@@ -338,7 +358,7 @@ export function createApplicationShell(
         : undefined;
     const state = productModeStore.get();
     const modeView = state.views[state.productMode];
-    const items = resolveShellNavigation(state.productMode, features);
+    const items = navigationRegistry.resolve(state.productMode, features);
     navigationList.replaceChildren();
     for (const item of items) {
       const button = document.createElement('button');

@@ -1,8 +1,13 @@
 /**
  * chat-reducer 单测：覆盖 7 个 kind + unknown 兜底。
+ *
+ * reduceChunk dispatch 测试依赖 feature reducer 注册；kanban-board 的 init 会
+ * 访问 DOM 绑定 resize，因此需要 happy-dom 环境。
+ *
+ * @vitest-environment happy-dom
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   reduceChunk,
   normalizeChunk,
@@ -17,10 +22,10 @@ import {
   errorReducer,
   planReviewReducer,
   todoUpdatedReducer,
-  workflowProgressReducer,
   followupQuestionReducer,
   type ReducerSnapshot,
 } from '../../src/ui/reducers/chat-reducer';
+import { workflowProgressReducer, initKanbanBoard, disposeKanbanBoard } from '../../src/ui/features/kanban-board';
 import type { Bookkeeping, FileChange } from '../../src/ui/state';
 import type { ChatMessage } from '../../src/ui/chat-render';
 
@@ -55,6 +60,16 @@ function makeSnapshot(overrides: Partial<ReducerSnapshot> = {}): ReducerSnapshot
   };
 }
 
+function featureCtxFromSnapshot(snap: ReducerSnapshot) {
+  return {
+    sessionId: snap.sessionId,
+    messages: snap.messages,
+    book: snap.book,
+    now: snap.now,
+    sequence: snap.sequence,
+  };
+}
+
 describe('normalizeChunk', () => {
   it('returns null for null', () => {
     expect(normalizeChunk(null)).toBeNull();
@@ -70,16 +85,16 @@ describe('normalizeChunk', () => {
     expect(c).not.toBeNull();
     expect(c?.kind).toBe('delta');
   });
-  it('preserves team_internal chunks for the Desktop team renderer', () => {
+  it('preserves feature_event frames for the feature reducer registry', () => {
     const c = normalizeChunk({
-      kind: 'team_internal',
-      body: { agent_id: 'hermes', event_type: 'team_stream', text: 'working' },
+      kind: 'feature_event',
+      body: { feature: 'team', event: 'internal_message', version: 1, payload: { agent_id: 'hermes', event_type: 'team_stream', text: 'working' } },
       sequence: 2,
       session_id: 'team-session',
     });
     expect(c).toMatchObject({
-      kind: 'team_internal',
-      body: { agent_id: 'hermes', event_type: 'team_stream', text: 'working' },
+      kind: 'feature_event',
+      body: { feature: 'team', event: 'internal_message', version: 1, payload: { agent_id: 'hermes', event_type: 'team_stream', text: 'working' } },
       sequence: 2,
       session_id: 'team-session',
     });
@@ -438,6 +453,42 @@ describe('thinkingReducer', () => {
     expect(r.messageUpserts[0]?.patch?.turnStartedAt).toBeUndefined();
     expect(r.replaceBook?.firstChunkAt).toBe(5_000);
     expect(r.replaceBook?.assistantId).toBe(assistantId);
+  });
+
+  it('首个 thinking 帧记录 thinkingStartedAt，后续帧不重置', () => {
+    const assistantId = 'm-thinking-clock';
+    const snap = makeSnapshot({
+      now: 5_000,
+      messages: [{
+        id: assistantId,
+        role: 'assistant',
+        content: '',
+        timestamp: 1_000,
+        streaming: true,
+      }],
+      book: { ...emptyBook(), assistantId },
+    });
+    const first = thinkingReducer({ kind: 'thinking', body: { text: '先' }, sequence: 1 }, snap);
+    expect(first.messageUpserts[0]?.patch?.thinkingStartedAt).toBe(5_000);
+
+    const second = thinkingReducer(
+      { kind: 'thinking', body: { text: '再想' }, sequence: 2 },
+      makeSnapshot({
+        now: 8_000,
+        messages: [{
+          id: assistantId,
+          role: 'assistant',
+          content: '',
+          timestamp: 1_000,
+          streaming: true,
+          thinking: '先',
+          thinkingStartedAt: 5_000,
+        }],
+        book: { ...emptyBook(), assistantId },
+      }),
+    );
+    expect(second.messageUpserts[0]?.patch?.thinking).toBe('先再想');
+    expect(second.messageUpserts[0]?.patch?.thinkingStartedAt).toBeUndefined();
   });
 
   it('starts a new thinking segment after a settled tool so timeline order stays chronological', () => {
@@ -987,6 +1038,40 @@ describe('finalReducer', () => {
   it('uses final content when accumulated text is likely reordered', () => {
     expect(resolveFinalContent('lohel', 'hello')).toBe('hello');
   });
+
+  it('封口时结算 thinkingDurationMs（依据首个 thinking 帧起点）', () => {
+    const assistantId = 'm-thinking-final';
+    const messages: ChatMessage[] = [{
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      timestamp: 1000,
+      streaming: true,
+      turnStartedAt: 1000,
+      thinking: '推理过程',
+      thinkingStartedAt: 1200,
+    }];
+    const snap = makeSnapshot({ messages, book: { ...emptyBook(), assistantId, firstChunkAt: 1200 } });
+    const r = finalReducer({ kind: 'final', body: { text: '答案' }, sequence: 99 }, { ...snap, now: 5000 });
+    const patch = r.messageUpserts.find((u) => u.op === 'patch' && u.messageId === assistantId);
+    expect(patch && patch.op === 'patch' ? patch.patch.thinkingDurationMs : undefined).toBe(3800);
+  });
+
+  it('无 thinking 内容或已结算时不写 thinkingDurationMs', () => {
+    const assistantId = 'm-no-thinking';
+    const messages: ChatMessage[] = [{
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      timestamp: 1000,
+      streaming: true,
+      turnStartedAt: 1000,
+    }];
+    const snap = makeSnapshot({ messages, book: { ...emptyBook(), assistantId, firstChunkAt: 1100 } });
+    const r = finalReducer({ kind: 'final', body: { text: '答案' }, sequence: 99 }, { ...snap, now: 1500 });
+    const patch = r.messageUpserts.find((u) => u.op === 'patch' && u.messageId === assistantId);
+    expect(patch && patch.op === 'patch' ? patch.patch.thinkingDurationMs : undefined).toBeUndefined();
+  });
 });
 
 describe('errorReducer', () => {
@@ -1002,6 +1087,24 @@ describe('errorReducer', () => {
     expect(patch && patch.op === 'patch' ? patch.patch.timestamp : undefined).toBe(200);
     expect(patch && patch.op === 'patch' ? patch.patch.streaming : undefined).toBe(false);
     expect(r.messageUpserts.some((u) => u.op === 'append' && u.message?.role === 'error')).toBe(true);
+  });
+
+  it('出错封口同样结算 thinkingDurationMs', () => {
+    const assistantId = 'm-thinking-error';
+    const messages: ChatMessage[] = [{
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      timestamp: 100,
+      streaming: true,
+      turnStartedAt: 100,
+      thinking: '推理到一半',
+      thinkingStartedAt: 120,
+    }];
+    const snap = makeSnapshot({ messages, book: { ...emptyBook(), assistantId, firstChunkAt: 120 } });
+    const r = errorReducer({ kind: 'error', body: { message: 'boom' }, sequence: 5 }, { ...snap, now: 500 });
+    const patch = r.messageUpserts.find((u) => u.op === 'patch' && u.messageId === assistantId);
+    expect(patch && patch.op === 'patch' ? patch.patch.thinkingDurationMs : undefined).toBe(380);
   });
 });
 
@@ -1053,19 +1156,15 @@ describe('todoUpdatedReducer', () => {
 describe('workflowProgressReducer', () => {
   it('appends a new workflow progress message on first chunk', () => {
     const snap = makeSnapshot();
-    const chunk = {
-      kind: 'workflow_progress' as const,
-      body: {
-        workflow_id: 'wf-1',
-        status: 'running',
-        current_phase: { id: 'p1', name: '多源搜集', status: 'running' },
-        completed_phases: [],
-        active_calls: [{ call_id: 'c1', role: 'analyst' }],
-        message: '进入阶段 多源搜集',
-      },
-      sequence: 1,
+    const body = {
+      workflow_id: 'wf-1',
+      status: 'running',
+      current_phase: { id: 'p1', name: '多源搜集', status: 'running' },
+      completed_phases: [],
+      active_calls: [{ call_id: 'c1', role: 'analyst' }],
+      message: '进入阶段 多源搜集',
     };
-    const r = workflowProgressReducer(chunk, snap);
+    const r = workflowProgressReducer(body, featureCtxFromSnapshot(snap));
     expect(r.messageUpserts).toHaveLength(1);
     const upsert = r.messageUpserts[0];
     expect(upsert.op).toBe('append');
@@ -1097,19 +1196,15 @@ describe('workflowProgressReducer', () => {
       },
     };
     const snap = makeSnapshot({ messages: [existing] });
-    const chunk = {
-      kind: 'workflow_progress' as const,
-      body: {
-        workflow_id: 'wf-1',
-        status: 'running',
-        current_phase: { id: 'p2', name: '综合研究', status: 'running' },
-        completed_phases: [{ id: 'p1', name: '多源搜集', status: 'done' }],
-        active_calls: [{ call_id: 'c2', role: 'writer' }],
-        message: '阶段推进',
-      },
-      sequence: 2,
+    const body = {
+      workflow_id: 'wf-1',
+      status: 'running',
+      current_phase: { id: 'p2', name: '综合研究', status: 'running' },
+      completed_phases: [{ id: 'p1', name: '多源搜集', status: 'done' }],
+      active_calls: [{ call_id: 'c2', role: 'writer' }],
+      message: '阶段推进',
     };
-    const r = workflowProgressReducer(chunk, snap);
+    const r = workflowProgressReducer(body, featureCtxFromSnapshot(snap));
     expect(r.messageUpserts).toHaveLength(1);
     const upsert = r.messageUpserts[0];
     expect(upsert.op).toBe('patch');
@@ -1121,8 +1216,8 @@ describe('workflowProgressReducer', () => {
   it('drops chunk with missing workflow_id', () => {
     const snap = makeSnapshot();
     const r = workflowProgressReducer(
-      { kind: 'workflow_progress', body: { workflow_id: '' }, sequence: 1 },
-      snap,
+      { workflow_id: '' },
+      featureCtxFromSnapshot(snap),
     );
     expect(r.messageUpserts).toEqual([]);
   });
@@ -1137,16 +1232,12 @@ describe('workflowProgressReducer', () => {
       agentAvatar: '📝',
     };
     const snap = makeSnapshot({ messages: [roleOutput] });
-    const chunk = {
-      kind: 'workflow_progress' as const,
-      body: {
-        workflow_id: 'wf-1',
-        status: 'done',
-        message: 'Workflow 已完成',
-      },
-      sequence: 2,
+    const body = {
+      workflow_id: 'wf-1',
+      status: 'done',
+      message: 'Workflow 已完成',
     };
-    const r = workflowProgressReducer(chunk, snap);
+    const r = workflowProgressReducer(body, featureCtxFromSnapshot(snap));
     expect(r.statusHint).toBe('idle');
     expect(r.replaceBook?.assistantId).toBe('role-1');
     expect(r.messageUpserts).toHaveLength(2);
@@ -1156,17 +1247,21 @@ describe('workflowProgressReducer', () => {
 
   it('failed status releases busy with error hint', () => {
     const snap = makeSnapshot();
-    const chunk = {
-      kind: 'workflow_progress' as const,
-      body: { workflow_id: 'wf-1', status: 'failed', message: 'Workflow 失败' },
-      sequence: 1,
-    };
-    const r = workflowProgressReducer(chunk, snap);
+    const body = { workflow_id: 'wf-1', status: 'failed', message: 'Workflow 失败' };
+    const r = workflowProgressReducer(body, featureCtxFromSnapshot(snap));
     expect(r.statusHint).toBe('error');
   });
 });
 
 describe('reduceChunk dispatch', () => {
+  beforeEach(() => {
+    disposeKanbanBoard();
+    initKanbanBoard();
+  });
+  afterEach(() => {
+    disposeKanbanBoard();
+  });
+
   it('routes each kind to its reducer', () => {
     const snap = makeSnapshot();
     expect(reduceChunk({ kind: 'delta', body: {}, sequence: 1 }, snap).statusHint).toBe('running');
@@ -1176,7 +1271,11 @@ describe('reduceChunk dispatch', () => {
     expect(reduceChunk({ kind: 'final', body: {}, sequence: 1 }, snap).finalize).toBe(true);
     expect(reduceChunk({ kind: 'error', body: {}, sequence: 1 }, snap).finalize).toBe(true);
     expect(reduceChunk({ kind: 'plan_review', body: {}, sequence: 1 }, snap).statusHint).toBe('idle');
-    expect(reduceChunk({ kind: 'workflow_progress', body: { workflow_id: 'wf-1' }, sequence: 1 }, snap).statusHint).toBe('running');
+    expect(reduceChunk({
+      kind: 'feature_event',
+      body: { feature: 'kanban', event: 'workflow_progress', version: 1, payload: { workflow_id: 'wf-1', status: 'running' } },
+      sequence: 1,
+    }, snap).statusHint).toBe('running');
   });
 
   it('unknown kind returns empty patch (no throw)', () => {

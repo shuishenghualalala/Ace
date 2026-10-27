@@ -7,7 +7,7 @@ from httpx import ASGITransport, AsyncClient
 
 from crew.app import build_app
 from crew.gateway.app import create_app
-from crew.gateway.platform_registry import platform_registry
+from crew.channels.platform_registry import platform_registry
 from crew.state.config import Config, load_config
 
 

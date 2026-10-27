@@ -14,7 +14,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from crew.core.envelope import Envelope
 from crew.core.interfaces import Scheduler
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import current_owner_account_id, normalize_owner_account_id
 from crew.cron.jobs import BJ_TZ, CronJobStore, build_trigger
 from crew.state.logging import get_logger
 
@@ -97,6 +97,15 @@ class CronService:
         self._owner_tasks: dict[str, set[asyncio.Task]] = {}
         self._cancel_terminal_status: dict[asyncio.Task, str] = {}
         self._sem = asyncio.Semaphore(self._max_parallel_jobs)
+        # Fire 到达终态后的可选回调（由装配层注入，用于通知中心等；缺席时无影响）
+        self._on_run_finished: Callable[[dict], Awaitable[None] | None] | None = None
+
+    def set_on_run_finished(
+        self,
+        callback: Callable[[dict], Awaitable[None] | None] | None,
+    ) -> None:
+        """注入 Fire 终态回调。info 含 job_id/job_name/status/error_message/owner/session_id。"""
+        self._on_run_finished = callback
 
     @property
     def scheduler(self) -> AsyncIOScheduler | None:
@@ -267,7 +276,7 @@ class CronService:
 
     async def _execute_claimed_fire(self, claim: dict) -> None:
         """Execute a claimed Fire under its persisted causal Owner context."""
-        owner = str(claim.get("job", {}).get("owner_account_id") or "").strip()
+        owner = normalize_owner_account_id(claim.get("job", {}).get("owner_account_id"))
         token = current_owner_account_id.set(owner)
         try:
             await self._run_claimed_fire(claim)
@@ -324,6 +333,31 @@ class CronService:
                     error_message=error_message,
                 ):
                     self._store.mark_fire_finished(job_id, run_id, status)
+                self._emit_run_finished(row, status, error_message)
+
+    def _emit_run_finished(self, row: dict, status: str, error_message: str) -> None:
+        """向装配层回调 Fire 终态。任何回调异常只记日志，不影响 cron 引擎本身。"""
+        callback = self._on_run_finished
+        if callback is None:
+            return
+        info = {
+            "job_id": str(row.get("id") or ""),
+            "job_name": str(row.get("name") or ""),
+            "status": status,
+            "error_message": error_message,
+            "owner_account_id": str(row.get("owner_account_id") or ""),
+            "session_id": str(row.get("session_id") or ""),
+        }
+        try:
+            result = callback(info)
+        except Exception:  # noqa: BLE001
+            log.exception("cron 运行结束回调失败 job=%s", info["job_id"])
+            return
+        if asyncio.iscoroutine(result):
+            try:
+                asyncio.get_running_loop().create_task(result)
+            except RuntimeError:
+                result.close()
 
     @property
     def is_running(self) -> bool:
@@ -373,7 +407,14 @@ class CronService:
             return
         try:
             scheduler = self._ensure_scheduler()
-            recovered = self._store.recover_running_fires_as_abandoned()
+            # D5：running fires 恢复注册进统一启动恢复序列，由 CrewApp 启动流程执行；
+            # 重复 start 因同名去重不会重复注册。
+            from crew.state.recovery import register_startup_recovery
+
+            register_startup_recovery(
+                "cron.running_fires",
+                self._store.recover_running_fires_as_abandoned,
+            )
             scheduler.start()
         except Exception as exc:
             self._start_error = str(exc) or type(exc).__name__
@@ -384,7 +425,7 @@ class CronService:
             raise
         self._start_error = ""
         self._running = True
-        log.info("CronService 引擎已启动，等待 Active Owner，abandoned=%d", recovered)
+        log.info("CronService 引擎已启动，等待 Active Owner")
 
     def mount_owner(self, owner_account_id: str) -> int:
         """Mount one Owner without unmounting any other Owner."""

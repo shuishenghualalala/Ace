@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0011 · Wiki Attachment Context Contributor</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0011 · Wiki Attachment Context Contributor</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-03 · 阶段：插件架构 Stage 2 / Commit 5</div>
+
+  <h2>背景</h2>
+  <p><code>crew.agent.runtime</code> 曾直接导入 Wiki Attachment 工厂、持有 <code>WikiSessionManager</code>，并在预览和真实执行路径分别判断 Wiki 模式。该结构让 Agent 内核理解产品 Feature，也让两条路径容易发生行为偏差。</p>
+
+  <h2>决定</h2>
+  <div class="decision"><p>把 Wiki 活跃知识库上下文注册为 <code>wiki.agent.context</code> Prompt Contributor。Wiki 模块拥有 KB 解析与隐藏附件生成；Host 只装配 FeatureScope；Agent 只按通用标签运行 Contributor，并持久化契约允许的 Message。</p></div>
+  <table>
+    <thead><tr><th>职责</th><th>所有者</th><th>契约</th></tr></thead>
+    <tbody>
+      <tr><td>KB 选择与上下文消息</td><td>Wiki</td><td>读取请求、持久配置或当前会话 KB，生成 <code>wiki_agent_context</code> hidden attachment。</td></tr>
+      <tr><td>能力选择</td><td>Agent Preset</td><td>Wiki Preset 只声明通用 <code>wiki</code> context tag，不持有 Wiki Manager。</td></tr>
+      <tr><td>顺序与生命周期</td><td>Feature Runtime</td><td>Prompt phase、priority 100、FeatureScope 所有权和请求 Lease。</td></tr>
+      <tr><td>消息持久化</td><td>Agent Runtime</td><td>只有 <code>persistent=true</code> 且 model-visible 的 Contributor 可以返回 Message。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>预览与真实执行</h2>
+  <p>两条路径都先运行 Prompt Contributor，再构建动态 prompt。真实执行把 Wiki hidden attachment 写入 canonical history；预览只把同类消息放进临时 request view，不写回 Session Store。这样会话打开时的估算与下一次真实请求一致，同时不会制造重复历史。</p>
+
+  <h2>边界与后续</h2>
+  <ul>
+    <li>本切片删除 Agent Runtime→Wiki 的直接 import 和 import-linter 豁免。</li>
+    <li>Wiki Tool、API、Store、Preset 仍由组合根分别装配；它们将在阶段 3 收敛为完整 Wiki Bundle。</li>
+    <li><code>wiki_confirmation_id</code> 等业务参数仍属于现有工具工作流，不计入本次 Attachment Context 迁移。</li>
+    <li>重复执行代表新一轮上下文快照，仍会按原语义追加新的 Wiki attachment。</li>
+  </ul>
+
+  <h2>跨平台</h2>
+  <p>新契约只使用 Python 数据结构、异步调用和已有跨平台 Store API，不引入 signal、shell 或平台路径假设。</p>
+
+  <div class="nav"><a href="0010-session-source-context-contributor.html">ADR-0010</a> · <a href="../modules/wiki.html">Wiki 模块</a> · <a href="../modules/agent.html">Agent 模块</a> · <a href="../../testing/plugin-architecture-stage-2-wiki-context.html">测试记录</a></div>
+</div>
+</body>
+</html>

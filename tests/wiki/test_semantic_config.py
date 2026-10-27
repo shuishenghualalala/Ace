@@ -9,7 +9,6 @@ import yaml
 
 from crew.state.config import Config
 from crew.state.home import get_owner_runtime_home
-from crew.wiki.config import WikiConfig
 
 
 def _config_with_global_semantic(
@@ -19,7 +18,7 @@ def _config_with_global_semantic(
 ) -> Config:
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".Crew"))
     cfg = Config(db_path=str(tmp_path / "crew.db"), memory_db_path=str(tmp_path / "mem.db"))
-    cfg.wiki = WikiConfig.from_raw({"semantic": semantic})
+    cfg.wiki_config = {"semantic": semantic}
     return cfg
 
 
@@ -118,8 +117,10 @@ def test_persist_owner_semantic_config_requires_owner(tmp_path, monkeypatch):
 
 def test_owner_rerank_overlay_inherits_settings_without_modifying_global_config(tmp_path, monkeypatch):
     cfg = _config_with_global_semantic(tmp_path, monkeypatch, {})
-    cfg.wiki.rerank.base_url = "https://global.example.test/v1"
-    cfg.wiki.rerank.timeout = 10
+    cfg.wiki_config = {"rerank": {
+        "base_url": "https://global.example.test/v1",
+        "timeout": 10,
+    }}
     owner_home = get_owner_runtime_home("owner-a")
     owner_home.mkdir(parents=True, exist_ok=True)
     (owner_home / "config.yaml").write_text(yaml.safe_dump({"wiki": {"rerank": {

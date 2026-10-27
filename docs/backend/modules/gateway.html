@@ -6,7 +6,7 @@
 <title>gateway · Ace 后端模块</title>
 <!--
   ============================================================================
-  模块文档模板：复制此文件 → 改名为 <module>.html → 填写各节。
+  模块文档：crew/gateway
   约定：每次改动某后端模块的代码，先归类到对应模块，再更新该模块文档：
     1) 若改了职责/文件/接口 → 同步对应小节
     2) 必填：在「变更记录」追加一行（日期 + 变更 + 影响面）
@@ -44,20 +44,33 @@
 <div class="wrap">
   <div class="crumb">Ace / 后端模块 / gateway</div>
   <h1><span class="logo">A</span>crew/gateway</h1>
-  <div class="sub">Gateway 网关：Web/API/WS 入口与协议转换。</div>
+  <div class="sub">Gateway 网关：HTTP/WebSocket API 入口、认证与 owner 归一化边界、渠道（飞书/微信等）接入与归属、请求分发。</div>
 
   <h2>1. 职责</h2>
   <ul>
-    <li>该模块做什么、不做什么（边界）。</li>
+    <li>对外入口：桌面端/浏览器的 HTTP API 与 WebSocket（<code>app.py</code> 装配，<code>routers/</code> 分域路由，<code>ws.py</code> WS 入口），以及平台渠道（飞书/微信等，经 <code>platform_registry</code> + <code>plugins/platforms</code>）的接入与生命周期管理。</li>
+    <li>认证与 owner 归一化边界：<code>auth.py</code> 把可信传输映射为 <code>AccountContext</code>（loopback → 本机 owner <code>local</code>；remote/email → 签名会话 → <code>provider:user</code>）；<code>dispatcher.py</code> 是 ContextVar set 点，<code>normalize_owner_account_id</code> 只在这类系统边界出现。</li>
+    <li>请求分发：<code>dispatcher.py</code> 对同一 session 串行化执行（per-session FIFO + 忙时策略 queue/interrupt/steer + 全局并发上限），触发 session/agent 生命周期钩子。</li>
+    <li>渠道归属：按 (platform, owner) 注册/投递渠道实例（<code>channel_manager</code> / <code>delivery</code> / <code>channel_sessions</code> / <code>channel_bindings</code>），对话事件实时广播给桌面 WS 观察者（<code>broadcast</code>）。</li>
+    <li>不做：业务逻辑与 LLM 调用（在 <code>crew/app.py</code> / agent 层），gateway 只做协议转换、鉴权、串行化与投递。</li>
   </ul>
 
   <h2>2. 功能拆解</h2>
-  <p>按子功能或核心流程拆解，这是本模块文档的重点。</p>
   <table>
     <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
     <tbody>
-      <tr><td><code>feature-a</code></td><td>…</td><td>已落地</td></tr>
-      <tr><td><code>feature-b</code></td><td>…</td><td>待补充</td></tr>
+      <tr><td>认证（<code>auth.py</code>）</td><td>owner 归一化发生在此：loopback 流量映射为本机 owner <code>local</code>（dev 模式 <code>dev:dev</code>）；remote/email 模式校验 HMAC 签名 cookie 会话（会话密钥 0600/0700 权限校验），owner 取 <code>provider:user</code>。<code>require_admin</code>（local 恒 admin，否则查 <code>gateway_admin_accounts</code>）；WS 同源 Origin 校验。</td><td>已落地</td></tr>
+      <tr><td>请求分发（<code>dispatcher.py</code>）</td><td><code>SessionDispatcher</code> 包裹内核入口，per-session FIFO 串行 + 队列深度/运行状态暴露；ContextVar set 点：<code>run()</code> 首行 <code>current_owner_account_id.set(normalize_owner_account_id(envelope.user_id))</code>；owner 级登出演代栅栏（logout 后旧轮次不再出帧）；session:end 钩子回收会话状态。</td><td>已落地</td></tr>
+      <tr><td>模型/配置路由（<code>routers/config.py</code>）</td><td><code>/api/config</code>、<code>/api/config/model</code> 切换、模型 profile CRUD（POST/PUT/DELETE <code>/api/config/models</code>）。统一走 <code>CrewApp.add_model/update_model/remove_model</code> 并显式传 <code>owner_account_id=account_from_request(request).owner_account_id</code>；内置（builtin）模型的改/删需管理员；删除前拦截运行中会话并可 force。</td><td>已落地</td></tr>
+      <tr><td>渠道管理（<code>crew/channels/</code>：channel_manager.py / delivery.py / channel_sessions.py）</td><td>按 (platform, owner) 键管理渠道实例：注册/热重连/停止/<code>stop_owner</code>，状态变更经 <code>hook_registry</code> 发 <code>channel:state_change</code>；<code>_owner_handler</code> 给 owner 绑定渠道注入 <code>gateway_owner_account_id</code> 参数。<code>DeliveryRouter</code> 按 (platform, owner) 路由 cron/agent 出站文本（<code>origin</code> / <code>local</code> / <code>&lt;platform&gt;:&lt;chat_id&gt;</code>），IM 出站过滤链汇聚于此。<code>channel_sessions</code> 负责渠道 session key、绑定者 owner 映射与 <code>/new</code>/<code>/reset</code> 会话轮换。2026-09-09 起由 <code>product.channels</code> Feature Generation 统一拥有（ADR-0030）。</td><td>已落地</td></tr>
+      <tr><td>广播（<code>crew/channels/broadcast.py</code>）</td><td>消费 <code>crew.dispatch</code> 的 ResponseChunk 流，逐帧推给该 (owner, session) 的全部 WS 观察者；owner 取 dispatch 改写后的 <code>envelope.user_id</code>（渠道会话 = 绑定桌面账号 binder），WS 入口显式传鉴权账号。<code>make_broadcasting_handler</code> 一处接入，所有渠道零改获得实时渲染。</td><td>已落地</td></tr>
+      <tr><td>交互桥（<code>interaction_bridge.py</code>）</td><td>外部 Runtime（MCP 子进程）与 Crew 主会话之间的短期绑定：token → <code>ExternalInteractionBinding</code>（含 <code>owner_account_id</code>、显示/控制 session、权限画像、过期时间），把 MCP 交互请求安全映射回发起任务的会话。</td><td>已落地</td></tr>
+      <tr><td>上下文兼容 API（<code>context.py</code>）</td><td>保留上传与结构化路径解析；Browser 标签页解析暂时重导出。静态 <code>REFERENCE_INJECTORS</code> 已删除。</td><td>迁移中</td></tr>
+      <tr><td>Session Source Contributor（<code>session_context.py</code>）</td><td>拥有渠道来源数据和 formatter，通过 Feature Runtime 输出规范化 source 与动态模型上下文。</td><td>已落地</td></tr>
+      <tr><td>Wiki Knowledge Consumer（<code>routers/wiki.py</code> / <code>routers/misc.py</code>）</td><td>REST 与附件捕获按请求解析 Knowledge Service 并持有 Generation Lease；能力停用统一返回 503 或跳过后台捕获。</td><td>已落地</td></tr>
+      <tr><td>Feature Event Dispatch（<code>ws.py</code>）</td><td>回合结束只调度中立 Event Contributor Registry；事件来源与 Generation 属于各 Feature，Gateway 提供标准帧 sink。</td><td>已落地</td></tr>
+      <tr><td>独立线程 Health 服务（<code>health_server.py</code>）</td><td>与业务事件循环隔离的极简 HTTP health（stdlib <code>ThreadingHTTPServer</code> 跑在独立线程）：业务循环卡顿时桌面端仍能探测进程活性。端口 <code>runtime.health_port</code>（默认主端口+1），绑定失败仅告警并降级为仅主端口 <code>/api/health</code>，不阻止启动；生命周期挂在 FastAPI lifespan 内，shutdown 最后停止。响应复用主端点同一份 instance-proof 校验（<code>build_gateway_health_payload</code>）与 components 快照（<code>build_health_components</code>），并附带 <code>loop_lag_ms</code> 循环活性哨兵。</td><td>已落地</td></tr>
+      <tr><td>循环活性哨兵（<code>loop_lag_ms</code>）</td><td>业务循环上的哨兵 task 每秒把 <code>loop.time()</code> 与 components 快照戳到模块级变量（跨线程单值快照，锁开销可忽略）；health 线程读取时间戳算出滞后毫秒写进响应，桌面端据此区分「进程活但循环忙」与「进程死」。</td><td>已落地</td></tr>
     </tbody>
   </table>
 
@@ -65,35 +78,94 @@
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td><code>crew/gateway/xxx.py</code></td><td>…</td></tr>
+      <tr><td><code>crew/gateway/app.py</code></td><td>FastAPI 装配：中间件（认证挂 <code>request.state.account</code>）、各域路由挂载。渠道注册/启停编排 2026-09-09 起迁出：渠道实例注册归 <code>product.channels</code> install，Lifespan 与 LogoutCoordinator 经 channels Service 同代 Lease 启停。</td></tr>
+      <tr><td><code>crew/gateway/auth.py</code></td><td>认证与 owner 归一化边界；<code>AccountContext</code> / <code>authenticate_http_request</code> / <code>authenticate_websocket</code>；再导出 <code>LOCAL_OWNER_ACCOUNT_ID</code>。</td></tr>
+      <tr><td><code>crew/gateway/dispatcher.py</code></td><td>会话串行化调度器；ContextVar set 点；忙时策略与登出演代栅栏。</td></tr>
+      <tr><td><code>crew/gateway/routers/config.py</code></td><td>配置与模型 profile CRUD 路由，模型 CRUD 显式传 owner。</td></tr>
+      <tr><td><code>crew/channels/channel_manager.py</code> / <code>delivery.py</code> / <code>channel_sessions.py</code></td><td>渠道实例生命周期、出站投递路由、入站绑定改写与会话轮换；2026-09-09 自 <code>crew/gateway/</code> 迁入 <code>crew/channels/</code> 包。</td></tr>
+      <tr><td><code>crew/channels/feature.py</code> / <code>contracts.py</code></td><td><code>product.channels</code> FeatureDefinition：Generation 拥有 Manager/Router/平台注册/工具注册并发布 <code>channels</code> Service（restart 更新、drain 停用）；contracts 提供 Channel Protocol 消费者边界。</td></tr>
+      <tr><td><code>crew/channels/broadcast.py</code> / <code>crew/gateway/connections.py</code> / <code>crew/gateway/ws.py</code></td><td>对话事件广播、WS 连接与回放缓存管理、WS 入口。</td></tr>
+      <tr><td><code>crew/gateway/interaction_bridge.py</code></td><td>外部 Runtime 受限 MCP 交互桥。</td></tr>
+      <tr><td><code>crew/gateway/context.py</code></td><td>上传、路径解析与旧 Browser 引用 API 兼容出口；不再拥有注入注册表。</td></tr>
+      <tr><td><code>crew/gateway/session_context.py</code></td><td>SessionSource/SessionContext 路由契约、prompt formatter 与 Contributor Handler。</td></tr>
+      <tr><td><code>crew/gateway/routers/wiki.py</code></td><td>Provider-neutral Wiki HTTP 适配；只处理认证、参数与响应，不访问 Store、Parser 或本地目录。</td></tr>
+      <tr><td><code>crew/gateway/health_server.py</code></td><td>独立线程极简 health 服务（仅 <code>/api/health</code>）+ 循环活性哨兵快照（<code>note_loop_tick</code> / <code>read_loop_lag_ms</code> / components 快照）+ 与主端点共用的 <code>build_health_components</code>。</td></tr>
+      <tr><td><code>crew/gateway/instance_auth.py</code></td><td>实例证明校验；<code>build_gateway_health_payload</code> 为主端点与线程 health 服务共用的响应体计算（fail closed：非法 challenge 400，无实例密钥 503）。</td></tr>
+      <tr><td><code>crew/state/channel_bindings.py</code></td><td>平台 ↔ owner 绑定的持久化（<code>bind_on_connect</code> / <code>get_binding</code> / <code>list_for_platform</code>）。</td></tr>
     </tbody>
   </table>
 
   <h2>4. 数据模型与接口</h2>
-  <p>对外暴露的关键类/方法、事件/消息约定、Schema。</p>
-  <pre><code># 关键签名</code></pre>
+  <p>owner 归一化在 gateway 的边界规则（归一化原语 <code>normalize_owner_account_id()</code> / <code>LOCAL_OWNER_ACCOUNT_ID</code> 定义在 <code>crew/core/runctx.py</code>）：</p>
+  <pre><code>认证（auth.py）        loopback → AccountContext(owner="local")；remote/email → owner="provider:user"
+ContextVar set 点       dispatcher.run(): current_owner_account_id.set(normalize_owner_account_id(envelope.user_id))
+渠道注册（app.py）      显式绑定 owner 的渠道 include_env=False（凭证只读 owner overlay）
+                        未绑定渠道归本机 owner local，include_env=True（env 凭证启用，决策⑦）
+入站消息（channel_sessions.py）
+                        有绑定者：envelope.user_id 改写为绑定桌面账号（binder）；
+                        无绑定渠道：归本机 owner local（决策⑥）；
+                        平台原始 uid 只保留在 params.platform_uid，严禁充当 owner</code></pre>
+  <p>边界之内 owner 恒非空：HTTP 路由经 <code>account_from_request(request).owner_account_id</code> 取 owner 显式传给 CrewApp/store；渠道路径经 dispatcher 的 ContextVar 继承。<code>channel_manager</code> / <code>delivery</code> 的 <code>{"", "local", "dev:dev"}</code> 全局特判已删除，渠道一律按 (platform, owner) 精确归属。</p>
+  <pre><code>service, lease = plugins.acquire_service_lease(
+    KNOWLEDGE_SERVICE_KEY,
+    label="gateway:wiki",
+)
+async with lease:
+    return await handle_with(service)</code></pre>
+  <p>Wiki Router 树仍在应用构造期挂载，但能力按请求动态解析。draining 后新请求得到 503；已进入请求持有旧 Generation，结束后才允许 Provider 关闭。外部嵌入宿主没有产品 Feature 记录时，可继续通过兼容 Service 注入。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
-    <li>问题 1：…</li>
-    <li>TODO：…</li>
+    <li>签名清扫未完成：<code>routers/channels.py</code>（19 处）、<code>channel_manager.py</code>（11 处）、<code>dispatcher.py</code>（9 处）、<code>connections.py</code>（9 处）等仍有 <code>owner_account_id: str = ""</code> 默认值待收紧（交接文档第三节 B）。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
   <ul>
-    <li>如何在此模块上加功能（遵守契约、不跨目录）。</li>
+    <li>新增渠道平台：在 <code>plugins/platforms</code> 实现 adapter 并注册进 <code>platform_registry</code>；渠道实例自动获得广播、投递与 owner 归属能力，无需改 gateway 本体。</li>
+    <li>新增 HTTP 路由：在 <code>routers/</code> 新建 <code>create_xxx_router</code> 并在 <code>app.py</code> 挂载；owner 一律经 <code>account_from_request</code> 获取，不要自行解析。</li>
+    <li>出站内容处理：归 <code>response_filters.py</code> 过滤链，不在各 adapter 里私写。</li>
   </ul>
+
+  <h2>Feature 能力状态响应（6AB）</h2>
+  <p><code>GET /api/config</code> 及共用 <code>config_body()</code> 的模型配置响应新增 <code>feature_capabilities</code>，直接消费 Runtime 的精简快照。无 Runtime 的兼容测试宿主返回空映射；现有 Wiki、外援字段保持原契约。真实 Runtime 错误不会被静默转为空结果。</p>
+  <p>状态不含配置、路径、错误和 Lease 明细，也不代替鉴权。Desktop/Web 类型以可选字段承接；Team/Kanban UI 动态装卸仍属后续切片。见 <a href="../adr/0040-feature-capability-snapshot.html">ADR-0040</a> 与 <a href="../../testing/plugin-architecture-stage-6ab-feature-capabilities.html">6AB 测试记录</a>。</p>
+
+  <h2>独立线程 Health 服务与循环活性哨兵（2026-09-17）</h2>
+  <p>主 <code>/api/health</code> 与所有 agent 业务共用 uvicorn 的 asyncio 事件循环，业务卡顿时健康探测随之超时。健康端点因此拆成两层：</p>
+  <pre><code>GET /api/health（主端口）          FastAPI 路由；components 由 build_health_components 计算
+health 线程服务（默认主端口+1）     stdlib ThreadingHTTPServer 独立线程，仅 /api/health
+  runtime.health_port: 0 = 自动（主端口+1）；显式端口覆盖；绑定失败降级仅主端口，不阻止启动
+响应语义                            与主端点完全对齐：复用 build_gateway_health_payload
+                                    （instance proof fail closed）+ components 快照
+loop_lag_ms                         业务循环滞后毫秒：哨兵 task 每秒 note_loop_tick(loop.time())，
+                                    health 线程读时间戳差值；区分「进程活但循环忙」与「进程死」</code></pre>
+  <p>components 快照（startup / cron 状态）由业务循环上的哨兵 task 每秒戳到模块级变量，主端点与线程服务共用同一份 <code>build_health_components</code> 逻辑，两处响应不会出现语义分叉。线程服务生命周期挂在 FastAPI lifespan 内：启动早期拉起，shutdown 的最后一步停止——shutdown 期间桌面端仍能看到进程活性与循环滞后。桌面端探测优先打 health 线程端口（主端口 +1，<code>backend-health-probe.ts</code> 推导），验证失败（旧 gateway 无独立 health 线程）再回退主端口。</p>
 
   <h2>7. 变更记录</h2>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-09-09</td><td>阶段 4D-1：渠道代码迁入 <code>crew/channels/</code> 包（channel_manager / delivery / platform_registry / channel_sessions / channel_config / channel_presets / broadcast），<code>product.channels</code> Feature Generation 统一拥有 Manager/Router/平台注册/<code>new_conversation</code> 工具并发布 <code>channels</code> Service；Channel ABC 扩展显式生命周期契约；Lifespan 与 LogoutCoordinator 改经 Service 同代 Lease 启停；<code>crew.channel_manager</code>/<code>delivery_router</code> 改动态 compat 属性，Feature 非激活 fail-closed（ADR-0030）。</td><td>渠道装配与启停主权；gateway 不再手工构造渠道运行时</td></tr>
+      <tr><td>2026-09-17</td><td><code>08f746f</code> health 端点独立线程服务（<code>runtime.health_port</code> 默认主端口+1，占用降级不阻止启动）+ 循环活性哨兵 <code>loop_lag_ms</code>；主端点与线程服务共用 <code>build_gateway_health_payload</code>（instance proof fail closed）与 <code>build_health_components</code>。</td><td><code>crew/gateway/health_server.py</code>（新增）、<code>crew/gateway/instance_auth.py</code>、<code>crew/gateway/app.py</code>、<code>routers/misc.py</code>；桌面端优先探测 health 端口。</td></tr>
+      <tr><td>2026-09-17</td><td>ADR-0045 批次 3：dispatcher 错误分支类型化收敛——ProviderError/ToolError/CrewError 分支 error 帧带 <code>code=kind</code>/<code>retryable</code>/<code>retry_delay</code>（category 沿用 exc.category / "tool" / kind 映射），新增 CrewError 分支，Exception 文本兜底保留；<code>enrich_error_chunk</code> 无 exc 时可从 body 的 kind code 反推 category。</td><td><code>crew/gateway/dispatcher.py</code>、<code>crew/features/outbound.py</code>。</td></tr>
+      <tr><td>2026-09-03</td><td>渠道归属统一（决策⑥⑦）重新落地：<code>ab0d596</code> 的实现曾被 <code>5434708</code> 签名清扫回卷，本次按当前代码契约重放——未绑定渠道注册归本机 owner <code>local</code>（<code>include_env=True</code>），显式绑定渠道 <code>include_env=False</code>；<code>channel_manager</code> 删除 <code>{"", "local", "dev:dev"}</code> 全局特判、register/unregister/record_error/start_all owner 必填；<code>delivery</code> 删除空 owner sender 回退；无绑定渠道入站消息归 <code>local</code>（平台原始 uid 严禁充当 owner）；<code>channel_bindings.get_binding</code> owner 必填、删除首条兼容视图；dispatcher session_end 归一 owner。<code>tools/builtin.py</code> kill 显式传 owner 与 <code>_has_active_children</code> owner 必填维持 5434708 收紧后的形态。</td><td>gateway 渠道注册/投递/入站归属语义；未绑定渠道行为变化：owner="" → local</td></tr>
+      <tr><td>2026-09-03</td><td>合并 owner 统一化改造（refactor/llm-provider → refactor/plugin-architecture-stage-0，merge 22af708）：认证边界归一（<code>auth.py</code> loopback → <code>local</code>，经 <code>LOCAL_OWNER_ACCOUNT_ID</code>）；ContextVar set 点收口（<code>dispatcher.run</code> 统一 <code>normalize_owner_account_id</code>）；绑定渠道入站 binder 改写语义固定（平台原始 uid 不充当 owner）。</td><td>gateway 认证/分发边界、模型 CRUD 路由 owner 传参</td></tr>
+      <tr><td>2026-09-03</td><td>移除静态 <code>REFERENCE_INJECTORS</code>；结构化路径与 Browser 标签页改由各自 Context Contributor 提供。</td><td><code>crew/gateway/context.py</code>、Agent 依赖边界。</td></tr>
+      <tr><td>2026-09-03</td><td>Session Source 通过 Contributor 输出，Agent Runtime 不再导入 Gateway 类型或 formatter。</td><td><code>session_context.py</code>、Agent→Gateway 直接依赖契约。</td></tr>
+      <tr><td>2026-09-03</td><td>新增 Feature Event 出口适配层 <code>event_compat.py</code>：已登记的 feature_event 在 <code>push_payload</code> 出口转换为旧 kind 帧（含断线回放），未登记事件丢弃；现有客户端线上协议零变化。</td><td><code>connections.push_payload</code>、WS 推送点（wiki_cards/wiki_changed/wiki_ingest_progress 生产侧已改发 feature_event）。</td></tr>
+      <tr><td>2026-09-03</td><td>插件 API 路由改从 Route Registry 启动期装配，挂载点带运行期闸门（<code>make_route_gate</code>）：Feature 停用后请求得到 503 + capability_unavailable，路由树不做热卸载。</td><td><code>create_app</code> 插件挂载循环、<code>crew/features/routes.py</code>。</td></tr>
+      <tr><td>2026-09-05</td><td>Wiki REST 与聊天附件捕获移除私有 Store/Compiler/Querier/Manager 依赖，改为动态 Knowledge Service + Generation Lease。</td><td><code>routers/wiki.py</code>、<code>routers/misc.py</code>、Feature disable/restart 与远程 Provider 边界。</td></tr>
+      <tr><td>2026-09-05</td><td>WS 回合尾部改为调度 Feature Event Contributor Registry，不再读取 Wiki Manager。</td><td>cards/changes 顺序投递、断线保留、失败隔离与 Generation Lease。</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
       <tr><td>2026-09-03</td><td>事件循环阻塞治理：<code>POST /api/runtimes/scan</code> 的运行时探测（login shell + --version 子进程）与 <code>sync_runtimes</code> 入库改经 <code>asyncio.to_thread</code>，消除单次可达数十秒的事件循环冻结；提示词组装与记忆读写同步移出事件循环（详见 agent/memory 模块文档）。已知遗留：store 层同步 sqlite（session_store 全量历史读写、active_owner 中间件等）待系统性异步化。</td><td><code>crew/gateway/routers/runtimes.py</code>、<code>crew/agent/runtime.py</code>、<code>crew/agent/external/detector.py</code>、<code>crew/memory/simple.py</code>、<code>crew/agent/skills.py</code></td></tr>
     </tbody>
   </table>
 
-  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+  <h2>本次更新：开发追踪 Gateway（2026-09-23）</h2>
+  <p><code>tracing.py</code> 统一执行 developer access、admin 与 owner scope 校验，提供 capabilities/status、trace/span/event/log/payload 查询、已验证的客户端呈现事件，以及单 trace 和后台筛选导出。客户端不能凭任意 trace_id 创建根记录；<code>user.presented</code> 必须匹配服务端 trace/request/session。诊断管理员的 logs 查询会合并当前 owner 与独立 <code>system</code> scope；trace/span/payload 与导出仍不跨 owner 合并。</p>
+  <p>批量导出固定 filter、事件水位和时间点，分页流式写临时文件，支持 completed/partial/cancelled/failed 状态；下载再次鉴权。CSV 对公式起始字符做安全转义，payload 只按受控引用按需关联。</p>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../../testing/observability-tracing.html">可观测测试记录</a></div>
 </div>
 </body>
 </html>

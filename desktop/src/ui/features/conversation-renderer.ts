@@ -17,12 +17,15 @@ import {
   hasVisibleAnswerText,
   renderAgentTurn,
   renderEmptyState,
+  renderHistoryErrorCard,
   renderMessageHtml,
   renderQueueHintCard,
   renderTeamInternalMessage,
   renderTypingIndicator,
+  renderUnitErrorCard,
   resolveTurnDurationMs,
 } from '../chat-render';
+import { reportRendererError, safeStringify } from '../renderer-error-report';
 import { diffRenderUnits, type RenderUnit } from '../chat-diff';
 import { attachScrollAnchor, type ScrollAnchor } from './scroll-anchor';
 import { getSessionAgentDisplay } from './workspaces';
@@ -96,6 +99,24 @@ export function jumpConversationToBottom(containerId: string): void {
 
 /** 「已编辑文件」卡：打开看板 Files / 在资源管理器中显示（与 fold 委托同容器、各绑一次）。 */
 const fileChangesBoundContainers = new WeakSet<HTMLElement>();
+
+/** 「历史加载失败」卡的重试按钮（各容器绑一次；动态 import 破除与 session-controller 的循环）。 */
+const historyRetryBoundContainers = new WeakSet<HTMLElement>();
+function ensureHistoryRetryDelegation(
+  container: HTMLElement,
+  getSessionId: () => string | null,
+): void {
+  if (historyRetryBoundContainers.has(container)) return;
+  historyRetryBoundContainers.add(container);
+  container.addEventListener('click', (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const btn = target?.closest<HTMLElement>('[data-history-retry]');
+    if (!btn || !container.contains(btn)) return;
+    const sid = getSessionId();
+    if (!sid) return;
+    void import('./session-controller').then(({ loadBackendHistory }) => loadBackendHistory(sid));
+  });
+}
 export function ensureFileChangesDelegation(container: HTMLElement): void {
   if (fileChangesBoundContainers.has(container)) return;
   fileChangesBoundContainers.add(container);
@@ -446,7 +467,7 @@ function sigTeamInternal(msg: ChatMessage, isStreaming: boolean): string {
   const files = (msg.turnFileChanges || []).map((file) =>
     `${file.path}|${file.status}|${file.added}|${file.removed}|${file.binary ? '1' : '0'}`,
   ).join(';');
-  return `team|${msg.id}|${msg.content}|${msg.thinking || ''}|${tools}|${artifacts}|${files}|${msg.agentId || ''}|${msg.agentName || ''}|${msg.agentRole || ''}|${msg.agentTone || 0}|${msg.eventType || ''}|${msg.nodeId || ''}|${msg.displayMode || ''}|${msg.collapsedTitle || ''}|${msg.processText || ''}|${msg.communicationKind || ''}|${msg.communicationStatus || ''}|${msg.requestId || ''}|${msg.replyTo || ''}|${msg.communicationRequestText || ''}|${durationBucket}|${isStreaming ? '1' : '0'}`;
+  return `team|${msg.id}|${msg.content}|${msg.thinking || ''}|${msg.thinkingStartedAt ?? ''}|${msg.thinkingDurationMs ?? ''}|${tools}|${artifacts}|${files}|${msg.agentId || ''}|${msg.agentName || ''}|${msg.agentRole || ''}|${msg.agentTone || 0}|${msg.eventType || ''}|${msg.nodeId || ''}|${msg.displayMode || ''}|${msg.collapsedTitle || ''}|${msg.processText || ''}|${msg.communicationKind || ''}|${msg.communicationStatus || ''}|${msg.requestId || ''}|${msg.replyTo || ''}|${msg.communicationRequestText || ''}|${durationBucket}|${isStreaming ? '1' : '0'}`;
 }
 
 /** 一段 batch（同一回合的连续 agent 消息）的 sig。
@@ -455,7 +476,8 @@ function sigTeamInternal(msg: ChatMessage, isStreaming: boolean): string {
  *  流结束时 streaming/tool 状态本身会改变 sig，届时再渲染最终时长。
  *
  *  覆盖 renderAgentTurn 的全部输入：isStreaming / userPinnedOpen / turnDurationMs 桶 /
- *  batch 内每条消息的 role|content|thinking|toolCalls|planReview|todoSnapshot|turnFileChanges|
+ *  batch 内每条消息的 role|content|thinking|thinkingStartedAt|thinkingDurationMs|
+ *  toolCalls|planReview|todoSnapshot|turnFileChanges|
  *  streaming|agentName|model|timestamp。
  *  toolCall 逐项展开（name/args/result/status/startedAt/duration）确保工具状态变化触发 patch。
  *  planReview / todoSnapshot / turnFileChanges 同样展开，否则 todo_updated / plan_review /
@@ -488,11 +510,11 @@ function sigAgentTurn(
           .map((f) => `${f.path}|${f.added}|${f.removed}|${f.status}`)
           .join(US)
       : '';
-    // Wiki 卡片同样进 sig，否则 wiki_cards patch 后增量渲染复用旧 DOM。
+    // Wiki 卡片同样进 sig，否则 wiki.cards patch 后增量渲染复用旧 DOM。
     const wc = m.wikiCards
       ? m.wikiCards.map((p) => `${p.id}|${p.title}`).join(US)
       : '';
-    return `${m.id}|${m.role}|${m.content}|${m.thinking ?? ''}|${m.segmentRole ?? ''}|${tc}|${pr}|${ts}|${tfc}|${wc}|${m.streaming ? '1' : '0'}|${m.agentName ?? ''}|${m.model ?? ''}|${m.timestamp}`;
+    return `${m.id}|${m.role}|${m.content}|${m.thinking ?? ''}|${m.thinkingStartedAt ?? ''}|${m.thinkingDurationMs ?? ''}|${m.segmentRole ?? ''}|${tc}|${pr}|${ts}|${tfc}|${wc}|${m.streaming ? '1' : '0'}|${m.agentName ?? ''}|${m.model ?? ''}|${m.timestamp}`;
   });
   return `t|${isStreaming ? '1' : '0'}|${userPinnedOpen === null ? '_' : userPinnedOpen ? '1' : '0'}|${parts.join('||')}`;
 }
@@ -591,8 +613,35 @@ export function renderConversation(
   const pushPlan = (key: string, sig: string, build: () => HTMLElement | null): void => {
     plans.push({ meta: { key, sig }, build });
   };
+  // 单元构建异常隔离：一条坏消息只损失自己（降级错误占位卡），整轮渲染不被拖垮。
+  // sig 未变 → reuse 不会重试 build；数据变化（流式继续）→ sig 变化 → patch 自然重试。
+  const buildUnitSafely = (key: string, build: () => HTMLElement | null): HTMLElement | null => {
+    try {
+      return build();
+    } catch (err) {
+      reportRendererError('render', err, { unitKey: key });
+      return renderUnitErrorCard();
+    }
+  };
+  // sig 计算异常隔离：sig 与 build 读同一批消息字段，字段形状异常（非数组等）必须同样
+  // 只损失自己——否则在 diff 之前就抛错，整轮渲染失败、会话界面冻结在旧 DOM。
+  // 回落 sig 用安全摘要而非常量，保证「数据变化 → sig 变化 → 重试」语义仍然成立。
+  const safeSig = (key: string, compute: () => string, source: unknown): string => {
+    try {
+      return compute();
+    } catch (err) {
+      reportRendererError('render', err, { unitKey: key, phase: 'sig' });
+      return `${key}|__sig-error|${safeStringify(source)}`;
+    }
+  };
 
-  if (messages.length === 0 && !busy && !editing) {
+  if (messages.length === 0 && !busy && !editing && sessionId && state.historyLoadErrors.has(sessionId)) {
+    // 历史回填失败且无消息可显示：错误卡（带重试）优先于默认空态，失败不再表现为「空会话」。
+    pushPlan('__history_error', 'history-error', () => renderHistoryErrorCard());
+  } else if (messages.length === 0 && !busy && !editing && sessionId && state.historyLoading.has(sessionId)) {
+    // 首屏窗口在途（P1-6）：骨架占位先于空态，openSession 不再等历史返回才渲染。
+    pushPlan('__history_loading', 'history-loading', () => renderQueueHintCard('正在加载会话历史…'));
+  } else if (messages.length === 0 && !busy && !editing) {
     pushPlan('__empty', 'empty', () => hooks.emptyState?.() ?? renderEmptyState());
   } else if (messages.length === 0 && editing) {
     // 编辑态 + 空流：留白（提示条已在输入框上方）—— 不 push 任何单元
@@ -641,7 +690,11 @@ export function renderConversation(
           // Team Turn 使用自身 streaming 生命周期，不借用 Session 全局 busy。
           // 这样新节点启动时不会“复活”已完成的成员回合。
           const isStreaming = msg.streaming === true;
-          sig = `${sigTeamInternal(displayed, isStreaming)}|actions:${busy ? 'busy' : 'idle'}`;
+          sig = safeSig(
+            msg.id,
+            () => `${sigTeamInternal(displayed, isStreaming)}|actions:${busy ? 'busy' : 'idle'}`,
+            displayed,
+          );
           const captured = displayed;
           pushPlan(msg.id, sig, () => renderTeamInternalMessage(captured, isStreaming, {
             canRetry: !busy,
@@ -650,11 +703,11 @@ export function renderConversation(
           i += 1;
           continue;
         } else if (msg.role === 'status' && msg.workflowProgress) {
-          sig = sigWorkflowProgress(msg, state.configModel);
+          sig = safeSig(msg.id, () => sigWorkflowProgress(msg, state.configModel), msg);
         } else if (msg.agentName) {
-          sig = sigAgentRoleCard(msg, state.configModel);
+          sig = safeSig(msg.id, () => sigAgentRoleCard(msg, state.configModel), msg);
         } else {
-          sig = sigUserMessage(msg, state.configModel);
+          sig = safeSig(msg.id, () => sigUserMessage(msg, state.configModel), msg);
         }
         const captured = msg;
         pushPlan(msg.id, sig, () => renderMessageHtml(captured, state.configModel));
@@ -707,7 +760,11 @@ export function renderConversation(
       const identitySig = turnIdentity
         ? `${turnIdentity.kind}|${turnIdentity.name}|${turnIdentity.badge}`
         : 'crew';
-      const sig = `${sigAgentTurn(batch, isStreaming, userPinnedOpen)}|${identitySig}`;
+      const sig = safeSig(
+        turnId,
+        () => `${sigAgentTurn(batch, isStreaming, userPinnedOpen)}|${identitySig}`,
+        batch,
+      );
       const capturedBatch = batch;
       if (sessionId) for (const visual of nativeVisuals(batch, sessionId)) {
         pushPlan(visual.key, JSON.stringify(visual.spec), () => renderNativeVisual(visual));
@@ -780,7 +837,7 @@ export function renderConversation(
   for (const op of ops) {
     if (op.type !== 'patch') continue;
     const build = buildByPlan.get(op.key)!;
-    const fresh = build();
+    const fresh = buildUnitSafely(op.key, build);
     const old = lastUnits.get(op.key);
     if (isPresent(fresh)) {
       if (old && old.parentNode === wrapper) {
@@ -804,7 +861,7 @@ export function renderConversation(
   for (const op of ops) {
     if (op.type !== 'append') continue;
     const build = buildByPlan.get(op.key)!;
-    const fresh = build();
+    const fresh = buildUnitSafely(op.key, build);
     if (isPresent(fresh)) {
       lastUnits.set(op.key, fresh);
     } else {
@@ -826,6 +883,7 @@ export function renderConversation(
   // ---- 副作用：全部与主对话 renderChat 保持一致 ----
   ensureFoldDelegation(container, getSessionId);
   ensureFileChangesDelegation(container);
+  ensureHistoryRetryDelegation(container, getSessionId);
   ensureTeamCommunicationDelegation(container, hooks.teamCommunicationHandlers, () => allMessages);
   // 代码块复制按钮：patch/append 后新节点需重新绑定（幂等，旧节点跳过）。
   attachCopyButtons(container);

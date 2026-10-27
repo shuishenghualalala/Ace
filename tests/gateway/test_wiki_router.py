@@ -1,31 +1,379 @@
+import ast
+import asyncio
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import crew.wiki
+from fastapi import Depends, FastAPI
+from httpx import ASGITransport, AsyncClient
 import pytest
 from starlette.testclient import TestClient
 
-from crew.agent.subagent.definition import build_preset_spec
 from crew.app import build_app
+from crew.features import RouteContribution, RouteRegistry
+from crew.gateway.app import make_route_gate
 from crew.gateway.server import create_app
+from crew.gateway.routers.wiki import create_wiki_router
 from crew.state.config import Config
+from crew.wiki.schemas import IngestResult
+from crew.gateway.auth import AccountContext
+from crew.features import FeatureGeneration, FeatureScope, ServiceRegistry
+from crew.wiki.service import KNOWLEDGE_SERVICE_KEY
 
 OWNER = "A:uid-a"
 
 
-def _client(tmp_path):
+def _client(tmp_path, wiki_config=None):
     os.environ["CREW_HOME"] = str(tmp_path / ".crew")
     crew_home = tmp_path / ".crew"
-    app = build_app(
-        config=Config(
-            api_key="",
-            db_path=str(crew_home / "crew_data" / "crew.db"),
-            memory_db_path=str(crew_home / "crew_data" / "memory.db"),
-            log_level="INFO",
-        ),
-        enable_team=False,
+    config = Config(
+        api_key="",
+        db_path=str(crew_home / "crew_data" / "crew.db"),
+        memory_db_path=str(crew_home / "crew_data" / "memory.db"),
+        log_level="INFO",
     )
+    if wiki_config is not None:
+        # wiki 配置在 build_app 装配 Feature 时解析，必须在构建前传入
+        config.wiki_config = wiki_config
+    app = build_app(config=config, enable_team=False)
     return TestClient(create_app(crew=app)), app
+
+
+def _router_app(router):
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def attach_test_account(request, call_next):
+        request.state.account = AccountContext("A:uid-a", is_local=True)
+        return await call_next(request)
+
+    app.include_router(router)
+    return app
+
+
+class _RegistryPlugins:
+    def __init__(self, registry):
+        self.registry = registry
+
+    def acquire_service_lease(self, key, *, label="service-request", generation=None):
+        return self.registry.acquire_lease(
+            key,
+            label=label,
+            generation=generation,
+        )
+
+    def resolve_service(self, key, default=None):
+        return self.registry.get(key, default=default)
+
+
+class _QueryService:
+    def __init__(self, answer):
+        self.answer = answer
+
+    def query(self, question, owner_account_id, kb_id="default"):
+        return {"answer": self.answer, "pages": []}
+
+
+def test_wiki_gateway_is_503_for_every_knowledge_endpoint_when_feature_is_inactive():
+    registry = ServiceRegistry()
+    scope = FeatureScope(FeatureGeneration("product.wiki", 1))
+    registry.register(scope, KNOWLEDGE_SERVICE_KEY, _QueryService("inactive"))
+    scope.activate()
+    scope.begin_draining()
+    crew = SimpleNamespace(
+        plugins=_RegistryPlugins(registry),
+        knowledge_service=None,
+        session_store=SimpleNamespace(),
+    )
+    app = _router_app(create_wiki_router(crew))
+
+    endpoints = [
+        ("POST", "/api/wiki/init"),
+        ("GET", "/api/wiki/agent-sessions"),
+        ("POST", "/api/wiki/agent-session"),
+        ("POST", "/api/wiki/confirmations/demo/cancel", {"session_id": "s"}),
+        ("GET", "/api/wiki/kbs"),
+        ("POST", "/api/wiki/kbs", {}),
+        ("DELETE", "/api/wiki/kbs/demo"),
+        ("GET", "/api/wiki/vault-documents/Home.md"),
+        ("GET", "/api/wiki/pages"),
+        ("POST", "/api/wiki/pages", {}),
+        ("GET", "/api/wiki/pages/demo"),
+        ("PUT", "/api/wiki/pages/demo", {}),
+        ("DELETE", "/api/wiki/pages/demo"),
+        ("DELETE", "/api/wiki/pages", {}),
+        ("GET", "/api/wiki/search?q=test"),
+        ("GET", "/api/wiki/sources"),
+        ("DELETE", "/api/wiki/sources/demo"),
+        ("GET", "/api/wiki/sources/demo/file"),
+        ("POST", "/api/wiki/ingest", {"source_id": "demo"}),
+        ("POST", "/api/wiki/ingest/cancel", {"source_id": "demo"}),
+        ("POST", "/api/wiki/compile"),
+        ("GET", "/api/wiki/graph"),
+        ("GET", "/api/wiki/query?q=test"),
+        ("POST", "/api/wiki/lint"),
+        ("POST", "/api/wiki/upload"),
+        ("POST", "/api/wiki/capture", {}),
+    ]
+    with TestClient(app) as client:
+        for item in endpoints:
+            method, path, *body = item
+            response = client.request(method, path, json=body[0] if body else None)
+            assert response.status_code == 503, (method, path, response.text)
+            assert response.json() == {"ok": False, "error": "Wiki 未启用"}
+    asyncio.run(scope.dispose())
+
+
+def test_wiki_gateway_static_boundary_does_not_import_local_store_or_parser():
+    for name in ("wiki.py", "misc.py"):
+        path = Path(__file__).parents[2] / "crew" / "gateway" / "routers" / name
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        local_imports = [
+            node.module or ""
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and (node.module or "").startswith(("crew.wiki.store", "crew.wiki.parser"))
+        ]
+        local_imports.extend(
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+            if alias.name.startswith(("crew.wiki.store", "crew.wiki.parser"))
+        )
+        assert local_imports == [], f"{path} imports local Wiki storage/parser: {local_imports}"
+        source = path.read_text(encoding="utf-8")
+        for forbidden in (
+            "_wiki_store",
+            "_wiki_compiler",
+            "_wiki_querier",
+            "_wiki_summarizer",
+            "wiki_manager",
+        ):
+            assert forbidden not in source
+
+    gateway_app = Path(__file__).parents[2] / "crew" / "gateway" / "app.py"
+    gateway_source = gateway_app.read_text(encoding="utf-8")
+    assert "create_wiki_router" not in gateway_source
+    assert "gateway.routers.wiki" not in gateway_source
+
+    feature_source = (
+        # ADR-0037：wiki 源码位于成员包 packages/crew-wiki，以包自身定位源文件
+        Path(crew.wiki.__file__).parent / "feature.py"
+    ).read_text(encoding="utf-8")
+    assert "create_wiki_router(host)" in feature_source
+
+
+@pytest.mark.asyncio
+async def test_wiki_gateway_resolves_current_service_generation_per_request():
+    registry = ServiceRegistry()
+    old_scope = FeatureScope(FeatureGeneration("product.wiki", 1))
+    old_service = _QueryService("old")
+    registry.register(old_scope, KNOWLEDGE_SERVICE_KEY, old_service)
+    old_scope.activate()
+    crew = SimpleNamespace(plugins=_RegistryPlugins(registry), knowledge_service=None)
+    app = _router_app(create_wiki_router(crew))
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        first = await client.get("/api/wiki/query?q=first")
+        assert first.status_code == 200
+        assert first.json()["answer"] == "old"
+
+        new_scope = FeatureScope(FeatureGeneration("product.wiki", 2))
+        new_service = _QueryService("new")
+        registry.register(new_scope, KNOWLEDGE_SERVICE_KEY, new_service)
+        new_scope.activate()
+        second = await client.get("/api/wiki/query?q=second")
+        assert second.status_code == 200
+        assert second.json()["answer"] == "new"
+
+    await old_scope.dispose()
+    await new_scope.dispose()
+
+
+@pytest.mark.asyncio
+async def test_wiki_gateway_does_not_fallback_to_a_different_service_generation():
+    registry = ServiceRegistry()
+    old_scope = FeatureScope(FeatureGeneration("product.wiki", 1))
+    new_scope = FeatureScope(FeatureGeneration("product.wiki", 2))
+    registry.register(old_scope, KNOWLEDGE_SERVICE_KEY, _QueryService("old"))
+    registry.register(new_scope, KNOWLEDGE_SERVICE_KEY, _QueryService("new"))
+    old_scope.activate()
+    new_scope.activate()
+
+    crew = SimpleNamespace(plugins=_RegistryPlugins(registry), knowledge_service=None)
+    app = _router_app(create_wiki_router(crew))
+
+    # Simulate the Gateway route gate selecting the old generation while a
+    # replacement service is already active. The consumer must fail closed,
+    # never silently resolve the newer provider.
+    @app.middleware("http")
+    async def attach_old_route_generation(request, call_next):
+        request.state.route_binding = SimpleNamespace(
+            # A route can outlive a failed replacement while the matching
+            # service generation has already been removed. The consumer must
+            # not drift to the currently visible g2 service.
+            generation=FeatureGeneration("product.wiki", 3),
+        )
+        return await call_next(request)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/wiki/query?q=old")
+
+    assert response.status_code == 503
+    assert response.json() == {"ok": False, "error": "Wiki 未启用"}
+    await old_scope.dispose()
+    await new_scope.dispose()
+
+
+@pytest.mark.asyncio
+async def test_wiki_gateway_lease_keeps_old_provider_open_until_inflight_request_finishes():
+    class BlockingService:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.close_calls = 0
+
+        async def ingest(self, source_id, owner_account_id, kb_id="default", **kwargs):
+            self.started.set()
+            await self.release.wait()
+            return IngestResult(source_id=source_id)
+
+        def close(self):
+            self.close_calls += 1
+
+    registry = ServiceRegistry()
+    old_scope = FeatureScope(FeatureGeneration("product.wiki", 1))
+    old_service = BlockingService()
+    old_scope.register(old_service.close, label="resource:provider")
+    registry.register(old_scope, KNOWLEDGE_SERVICE_KEY, old_service)
+    old_scope.activate()
+    crew = SimpleNamespace(plugins=_RegistryPlugins(registry), knowledge_service=None)
+    app = _router_app(create_wiki_router(crew))
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        request = asyncio.create_task(client.post("/api/wiki/ingest", json={"source_id": "s"}))
+        await old_service.started.wait()
+
+        new_scope = FeatureScope(FeatureGeneration("product.wiki", 2))
+        new_service = _QueryService("new")
+        registry.register(new_scope, KNOWLEDGE_SERVICE_KEY, new_service)
+        new_scope.activate()
+        stop = asyncio.create_task(old_scope.stop(timeout_seconds=None))
+        await asyncio.sleep(0)
+        assert not stop.done()
+        assert old_service.close_calls == 0
+
+        old_service.release.set()
+        response = await request
+        await stop
+        assert response.status_code == 200
+        assert old_service.close_calls == 1
+        await new_scope.dispose()
+
+
+@pytest.mark.asyncio
+async def test_wiki_ingest_cancel_is_generation_scoped_during_replace():
+    class BlockingService:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.close_calls = 0
+
+        async def ingest(self, source_id, owner_account_id, kb_id="default", **kwargs):
+            self.started.set()
+            await self.release.wait()
+            return IngestResult(source_id=source_id)
+
+        def close(self):
+            self.close_calls += 1
+
+    services = ServiceRegistry()
+    routes = RouteRegistry()
+    old_scope = FeatureScope(FeatureGeneration("product.wiki", 1))
+    old_service = BlockingService()
+    old_scope.register(old_service.close, label="resource:provider")
+    services.register(old_scope, KNOWLEDGE_SERVICE_KEY, old_service)
+    old_scope.activate()
+
+    crew = SimpleNamespace(
+        plugins=_RegistryPlugins(services),
+        knowledge_service=None,
+        session_store=SimpleNamespace(),
+    )
+    router = create_wiki_router(crew)
+    routes.register(
+        old_scope,
+        RouteContribution("product.wiki", router),
+        label="route:wiki",
+    )
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def attach_test_account(request, call_next):
+        request.state.account = AccountContext("A:uid-a", is_local=True)
+        return await call_next(request)
+
+    app.include_router(
+        router,
+        dependencies=[Depends(make_route_gate(routes, "product.wiki"))],
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        ingest = asyncio.create_task(
+            client.post("/api/wiki/ingest", json={"source_id": "same-source"})
+        )
+        await old_service.started.wait()
+
+        stopping = asyncio.create_task(old_scope.stop(timeout_seconds=None))
+        await asyncio.sleep(0)
+        assert not stopping.done()
+
+        new_scope = FeatureScope(FeatureGeneration("product.wiki", 2))
+        services.register(new_scope, KNOWLEDGE_SERVICE_KEY, _QueryService("new"))
+        routes.register(
+            new_scope,
+            RouteContribution("product.wiki", router),
+            label="route:wiki",
+        )
+        new_scope.activate()
+
+        cancelled = await client.post(
+            "/api/wiki/ingest/cancel",
+            json={"source_id": "same-source"},
+        )
+        assert cancelled.status_code == 404
+        assert cancelled.json() == {
+            "ok": False,
+            "error": "没有正在进行的 ingest 任务",
+        }
+
+        old_service.release.set()
+        response = await ingest
+        await stopping
+
+    assert response.status_code == 200
+    assert old_service.close_calls == 1
+    await new_scope.dispose()
+
+
+def test_wiki_gateway_external_override_is_usable_without_product_record():
+    class EmptyPlugins:
+        def acquire_service_lease(self, key, *, label="service-request"):
+            return None
+
+        def resolve_service(self, key, default=None):
+            return default
+
+    external = _QueryService("external")
+    crew = SimpleNamespace(plugins=EmptyPlugins(), knowledge_service=external)
+    with TestClient(_router_app(create_wiki_router(crew))) as client:
+        response = client.get("/api/wiki/query?q=test")
+    assert response.status_code == 200
+    assert response.json()["answer"] == "external"
 
 
 def test_wiki_init_and_pages_crud(tmp_path, auth_headers):
@@ -280,37 +628,58 @@ def test_wiki_tools_are_exclusive_to_wiki_preset(tmp_path):
             owner_account_id=OWNER,
         )
 
-    definition = app.subagent_registry.get("Wiki")
-    run_agent_wiki = app._make_subagent(build_preset_spec(definition))
-    main_expected = app._single_agent_tool_filter(
+    preset = app.agent_presets.resolve("Wiki")
+    run_agent_wiki = app._make_subagent(preset.contribution.as_spec())
+    main_ceiling = app._single_agent_tool_filter(
         "builtin",
         app.config.access_control.resolve_for("internal"),
+        exclude_reserved=False,
     )
-    scoped_main_expected = app.capability_profiles.filter_authorized_tools(
+    scoped_ceiling = app.capability_profiles.filter_authorized_tools(
         app.registry,
-        main_expected,
+        main_ceiling,
         app.capability_profiles.resolve([]),
     )
-    expected = app._wiki_agent_tool_filter(scoped_main_expected)
+    scoped_main_expected = [
+        name for name in scoped_ceiling
+        if app.registry.get(name).toolset not in app.agent_presets.reserved_toolsets()
+    ]
+    expected = app._apply_preset_tool_policy(
+        scoped_main_expected,
+        preset.contribution.as_spec(),
+        addition_ceiling=scoped_ceiling,
+    )
+    child_expected = app._apply_preset_tool_policy(
+        app._resolve_subagent_tool_scope(None, None),
+        preset.contribution.as_spec(),
+        addition_ceiling=app._resolve_subagent_tool_scope(
+            None,
+            None,
+            exclude_reserved=False,
+        ),
+    )
 
     assert not any(name.startswith("wiki_") for name in main_agent.tool_filter)
-    assert main_agent.wiki_manager is None
+    assert main_agent.context_tags == ()
     assert wiki_agent.tool_filter == expected
-    assert run_agent_wiki.tool_filter == wiki_agent.tool_filter
-    assert run_agent_wiki.system_prompt == wiki_agent.system_prompt
+    assert run_agent_wiki.tool_filter == child_expected
+    assert run_agent_wiki.system_prompt.startswith(wiki_agent.system_prompt)
+    assert "不要向用户提问" in run_agent_wiki.system_prompt
     assert run_agent_wiki.enabled_skills == wiki_agent.enabled_skills
-    assert run_agent_wiki.wiki_manager is wiki_agent.wiki_manager
+    assert run_agent_wiki.context_contributors is wiki_agent.context_contributors
     assert run_agent_wiki.tool_disclosure_mode == wiki_agent.tool_disclosure_mode
     assert "wiki_search" in wiki_agent.tool_filter
     assert "wiki_apply_ingest" in wiki_agent.tool_filter
-    assert ("web_search" in wiki_agent.tool_filter) == ("web_search" in main_expected)
-    assert ("web_extract" in wiki_agent.tool_filter) == ("web_extract" in main_expected)
+    assert ("web_search" in wiki_agent.tool_filter) == ("web_search" in scoped_main_expected)
+    assert ("web_extract" in wiki_agent.tool_filter) == ("web_extract" in scoped_main_expected)
     assert "terminal" in wiki_agent.tool_filter
     assert "file_read" in wiki_agent.tool_filter
     assert "wiki_compile" not in wiki_agent.tool_filter
     assert "publish_site" not in wiki_agent.tool_filter
     assert "Canvas" not in wiki_agent.tool_filter
-    assert wiki_agent.wiki_manager is app.wiki_manager
+    assert wiki_agent.context_contributors is app.context_contributors
+    assert wiki_agent.context_tags == ("wiki",)
+    # SingleAgent stores the neutral id as a path-safe segment for workspace state.
     assert wiki_agent.agent_id == "subagent_Wiki"
     assert wiki_agent.tool_disclosure_mode == "direct"
     assert "crew-wiki-curator" in (main_agent.disabled_skills or [])
@@ -327,7 +696,7 @@ def test_legacy_wiki_session_flag_does_not_grant_wiki_tools(tmp_path):
         )
 
     assert not any(name.startswith("wiki_") for name in agent.tool_filter)
-    assert agent.wiki_manager is None
+    assert agent.context_tags == ()
     assert agent.tool_disclosure_mode == "progressive"
 
 
@@ -601,12 +970,12 @@ def test_wiki_upload_unknown_binary_returns_clear_error(tmp_path, auth_headers):
 
 def test_wiki_upload_parse_failure_returns_needs_agent_review(tmp_path, auth_headers, monkeypatch):
     """文档解析失败时应保存原文件为 raw source，并返回 needs_agent_review 让 Agent 接管。"""
-    import crew.gateway.routers.wiki as wiki_router
+    import crew.wiki.parser as wiki_parser
 
     def _bad_parse(content, filename):
         raise Exception("expected <class 'openpyxl.styles.fills.Fill'>")
 
-    monkeypatch.setattr(wiki_router, "parse_document_from_bytes", _bad_parse)
+    monkeypatch.setattr(wiki_parser, "parse_document_from_bytes", _bad_parse)
 
     client, app = _client(tmp_path)
     res = client.post(
@@ -762,10 +1131,13 @@ def test_wiki_ingest_with_session_id_accepts_progress_target(tmp_path, auth_head
     assert data["source_id"] == source_id
     assert "pages" in data
     # router 在返回前 gather 等待 progress task，因此可以断言推送内容
+    #（出口只认 envelope：feature_event 帧原样透传，见 tests/gateway/test_event_passthrough.py）
     assert len(calls) > 0
     assert calls[0]["session_id"] == "sess_progress_1"
-    assert calls[0]["payload"]["kind"] == "wiki_ingest_progress"
-    assert calls[0]["payload"]["body"]["stage"] == "load"
+    assert calls[0]["payload"]["kind"] == "feature_event"
+    body = calls[0]["payload"]["body"]
+    assert (body["feature"], body["event"], body["version"]) == ("wiki", "ingest_progress", 1)
+    assert body["payload"]["stage"] == "load"
 
 
 def test_wiki_ingest_without_session_id_does_not_push_progress(tmp_path, auth_headers):
@@ -1173,9 +1545,10 @@ def test_wiki_upload_video_returns_needs_confirmation(tmp_path, auth_headers):
 
 def test_wiki_upload_video_auto_ingests_when_configured(tmp_path, auth_headers):
     """配置 auto_video + video_upload_confirmed 后，前端上传视频自动 ingest。"""
-    client, app = _client(tmp_path)
-    app.config.wiki.multimodal.auto_video = True
-    app.config.wiki.multimodal.video_upload_confirmed = True
+    client, app = _client(
+        tmp_path,
+        wiki_config={"multimodal": {"auto_video": True, "video_upload_confirmed": True}},
+    )
 
     fake_result = MagicMock()
     fake_result.pages = [MagicMock(to_dict=lambda: {"title": "狗", "page_type": "entity"})]
@@ -1202,8 +1575,7 @@ def test_wiki_upload_video_auto_ingests_when_configured(tmp_path, auth_headers):
 
 def test_wiki_upload_multimodal_disabled_rejects_media(tmp_path, auth_headers):
     """多模态总开关关闭时，上传图片/视频被拒绝。"""
-    client, app = _client(tmp_path)
-    app.config.wiki.multimodal.enabled = False
+    client, app = _client(tmp_path, wiki_config={"multimodal": {"enabled": False}})
 
     res = client.post(
         "/api/wiki/upload",

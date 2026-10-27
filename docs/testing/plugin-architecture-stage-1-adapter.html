@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 1 · Legacy Adapter 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>插件架构阶段 1 · Legacy Adapter 测试记录</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-02</div>
+
+  <h2>1. 验证目标</h2>
+  <ul>
+    <li>旧目录插件不改入口即可获得 Feature Generation 与 Scope 所有权。</li>
+    <li>第 N 项注册后失败，前 N-1 项与异步资源全部回滚。</li>
+    <li>重复 discovery 不重复 Tool、Hook、Skill 或后台资源。</li>
+    <li>停用先隐藏贡献，再等待异步资源；清理失败尝试其余项并明确报告。</li>
+    <li>Browser 的真实五工具、Skill Root 和 Manager disposer 属于同一 Scope。</li>
+    <li>应用关闭通过插件 Scope 释放 BrowserManager。</li>
+  </ul>
+
+  <h2>2. 测试矩阵</h2>
+  <table>
+    <thead><tr><th>层级</th><th>命令 / 范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Unit / integration</td><td>Feature Runtime、Plugin Adapter、Browser、Wiki Learning、Tool Registry、App Provider 生命周期</td><td class="ok">324 通过，1 跳过</td></tr>
+      <tr><td>Architecture</td><td><code>lint-imports</code>：6 条契约，296 个模块，1255 条依赖</td><td class="ok">通过</td></tr>
+      <tr><td>Static</td><td>本次 Python 修改文件 Ruff</td><td class="ok">通过</td></tr>
+      <tr><td>Docs</td><td>6 个 HTML 文件解析、链接与 Mermaid 进度图离线渲染</td><td class="ok">通过</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 新增回归场景</h2>
+  <ul>
+    <li>安装失败：Tool、Hook、Command、Skill Root 与异步 Resource 无残留。</li>
+    <li>重复发现：旧 Scope 进入 Disposed，新记录从 Generation 2 激活。</li>
+    <li>慢清理：Tool/Hook 已不可见时 unload 仍保持等待，完成后才返回成功。</li>
+    <li>清理异常：健康 disposer 仍执行，Feature 进入 Failed 并保留失败标签。</li>
+    <li>Browser：五个工具先撤销，Manager 的异步关闭完成后插件才变为 disabled。</li>
+  </ul>
+
+  <h2>4. 跨平台说明</h2>
+  <p>同步宿主兼容桥使用标准线程和独立 asyncio loop，不使用嵌套 loop、fork 或 Unix-only API；异步宿主直接 await 同一 Runtime。</p>
+
+  <div class="nav"><a href="../backend/adr/0003-legacy-plugin-feature-adapter.html">ADR-0003</a> · <a href="../backend/modules/plugins.html">模块文档</a> · <a href="../index.html">文档总览</a></div>
+</div>
+</body>
+</html>

@@ -39,6 +39,21 @@ class SubagentDefinition:
     max_iterations: int | None = None   # None=继承全局 max_iterations
     background: bool = False             # True=默认后台异步执行
     source: str = "builtin"             # "builtin" | "user"
+    agent_id: str | None = None
+    toolset_additions: list[str] | None = None
+    context_tags: list[str] | None = None
+    disclosure_mode: str = "progressive"
+    reserved_toolsets: list[str] | None = None
+    reserved_skills: list[str] | None = None
+    provider: str = "inprocess-spawn"
+    extends: str | None = None
+    override: bool = False
+    read_only: bool = False
+    delegatable_presets: list[str] | None = None
+    # 摘要兜底：正常交卷但短于 min_chars 时追加一轮扩写，最多 retries 次；
+    # None=沿用全局默认（config subagent_summary_*）。
+    summary_min_chars: int | None = None
+    summary_retries: int | None = None
 
 
 def build_preset_spec(
@@ -61,7 +76,54 @@ def build_preset_spec(
         "max_iterations": definition.max_iterations,
         "preset_skills": definition.skills,
         "skills": definition.skills,
+        "agent_id": definition.agent_id or f"subagent:{definition.name}",
+        "toolset_additions": definition.toolset_additions,
+        "context_tags": definition.context_tags,
+        "disclosure_mode": definition.disclosure_mode,
+        "reserved_toolsets": definition.reserved_toolsets,
+        "reserved_skills": definition.reserved_skills,
+        "provider": definition.provider,
+        "extends": definition.extends,
+        "override": definition.override,
+        "read_only": definition.read_only,
+        "delegatable_presets": definition.delegatable_presets,
+        "summary_min_chars": definition.summary_min_chars,
+        "summary_retries": definition.summary_retries,
+        "background": definition.background,
     }
+
+
+def to_preset_contribution(definition: SubagentDefinition):
+    """Adapt the file-backed definition to the neutral Feature contract."""
+    from crew.features import AgentPresetContribution
+
+    return AgentPresetContribution(
+        name=definition.name,
+        description=definition.description,
+        system_prompt=definition.system_prompt,
+        agent_id=definition.agent_id,
+        fixed_skills=tuple(definition.skills or ()),
+        toolsets=tuple(definition.toolsets) if definition.toolsets is not None else None,
+        tools=tuple(definition.tools) if definition.tools is not None else None,
+        toolset_additions=tuple(definition.toolset_additions or ()),
+        context_tags=tuple(definition.context_tags or ()),
+        disclosure_mode=definition.disclosure_mode,
+        reserved_toolsets=tuple(definition.reserved_toolsets or ()),
+        reserved_skills=tuple(definition.reserved_skills or ()),
+        provider=definition.provider,
+        summary_min_chars=definition.summary_min_chars,
+        summary_retries=definition.summary_retries,
+        model=definition.model,
+        max_iterations=definition.max_iterations,
+        background=definition.background,
+        source=definition.source,
+        read_only=definition.read_only,
+        delegatable_presets=(
+            None
+            if definition.delegatable_presets is None
+            else tuple(definition.delegatable_presets)
+        ),
+    )
 
 
 def _as_list(value: Any) -> list[str] | None:
@@ -120,4 +182,26 @@ def parse_definition(path: str | Path, *, source: str = "builtin") -> SubagentDe
         max_iterations=max_iter,
         background=bool(fm.get("background", False)),
         source=source,
+        agent_id=str(fm.get("agent_id") or "").strip() or None,
+        toolset_additions=_as_list(fm.get("toolset_additions")),
+        context_tags=_as_list(fm.get("context_tags")),
+        disclosure_mode=str(fm.get("disclosure_mode") or "progressive").strip() or "progressive",
+        reserved_toolsets=_as_list(fm.get("reserved_toolsets")),
+        reserved_skills=_as_list(fm.get("reserved_skills")),
+        provider=str(fm.get("provider") or "inprocess-spawn").strip()
+        or "inprocess-spawn",
+        extends=str(fm.get("extends") or "").strip() or None,
+        override=bool(fm.get("override", False)),
+        read_only=bool(fm.get("read_only", False)),
+        delegatable_presets=_as_list(fm.get("subagents")),
+        summary_min_chars=(
+            int(fm["summary_min_chars"])
+            if fm.get("summary_min_chars") is not None
+            else None
+        ),
+        summary_retries=(
+            int(fm["summary_retries"])
+            if fm.get("summary_retries") is not None
+            else None
+        ),
     )

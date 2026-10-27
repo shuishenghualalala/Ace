@@ -8,6 +8,13 @@ export interface UiStoreState {
   activeTab: TabKey;
   activeSystemPanel: SystemPanelKey;
   backendConnected: boolean;
+  /** 健康探针、进程监督和 WS 传输的拆分状态；backendConnected 保留兼容语义。 */
+  backendProcessState: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
+  backendHealthState: 'unknown' | 'healthy' | 'degraded' | 'stalled';
+  backendTransportState: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
+  backendLoopLagMs: number | null;
+  /** 当前发送能力；历史、设置和日志不依赖此字段。 */
+  backendCanSend: boolean;
   /** BackendChatSocket 实例本身，不参与持久化也不参与订阅通知（避免循环）。 */
   socket: unknown | null;
   feedbackDraft: FeedbackDraft;
@@ -21,6 +28,11 @@ export const uiStore: Store<UiStoreState> = createStore<UiStoreState>(
     activeTab: 'chat',
     activeSystemPanel: 'overview',
     backendConnected: false,
+    backendProcessState: 'starting',
+    backendHealthState: 'unknown',
+    backendTransportState: 'unknown',
+    backendLoopLagMs: null,
+    backendCanSend: false,
     socket: null,
     feedbackDraft: { title: '', description: '', images: [] },
     feedbackList: [],

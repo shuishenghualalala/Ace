@@ -59,17 +59,43 @@ RUN mkdir -p /tmp/runtimes/python \
 
 WORKDIR /app
 
-# pip 安装 ".[extras]" 需要就地构建 crew wheel：hatchling 依据 pyproject 的
-# readme / license-files 声明读取 README.md / LICENSE / NOTICE，缺一不可
+# ---------------------------------------------------------------------------
+# 缓存优化：workspace 成员与第三方依赖尽量装在源码层之前，crew/ 代码改动
+# 不触发成员重装。pip 安装 ".[extras]" 需就地构建 crew wheel（源码就位后
+# 才能执行）：hatchling 依据 pyproject 的 readme / license-files 声明读取
+# README.md / LICENSE / NOTICE，缺一不可。
+# ---------------------------------------------------------------------------
 COPY pyproject.toml README.md LICENSE NOTICE ./
-COPY crew ./crew
 COPY deb-package/runtime-requirements.txt ./deb-package/runtime-requirements.txt
+# ADR-0037：wiki（6P）、external agents（6Q）与 team/dynamickanban/channels/work（6Y）
+# 位于 uv workspace 成员包 packages/*，import 名保持 crew.* 前缀。
+# 成员先行 --no-deps 安装：pip 不识别 [tool.uv.sources]，根包依赖里的
+# crew-wiki 等成员若不从本地预装，解析 ".[extras]" 时会尝试从 PyPI 拉取而失败。
+COPY packages/crew-wiki/pyproject.toml ./packages/crew-wiki/pyproject.toml
+COPY packages/crew-wiki/src ./packages/crew-wiki/src
+COPY packages/crew-external-agents/pyproject.toml ./packages/crew-external-agents/pyproject.toml
+COPY packages/crew-external-agents/src ./packages/crew-external-agents/src
+COPY packages/crew-team/pyproject.toml ./packages/crew-team/pyproject.toml
+COPY packages/crew-team/src ./packages/crew-team/src
+COPY packages/crew-dynamickanban/pyproject.toml ./packages/crew-dynamickanban/pyproject.toml
+COPY packages/crew-dynamickanban/src ./packages/crew-dynamickanban/src
+COPY packages/crew-channels/pyproject.toml ./packages/crew-channels/pyproject.toml
+COPY packages/crew-channels/src ./packages/crew-channels/src
+COPY packages/crew-work/pyproject.toml ./packages/crew-work/pyproject.toml
+COPY packages/crew-work/src ./packages/crew-work/src
+RUN /tmp/runtimes/python/bin/python3 -m pip install --no-cache-dir --no-warn-script-location --no-deps \
+    ./packages/crew-wiki ./packages/crew-external-agents \
+    ./packages/crew-team ./packages/crew-dynamickanban ./packages/crew-channels ./packages/crew-work
+
+# 源码拷贝（代码变更只影响这一层及以下）
+COPY crew ./crew
 
 # ----- 为内嵌 Python 安装 gateway + 技能依赖 -----
 # 注意：用的是内嵌 Python 自带的 pip，不是容器系统 Python 的 pip；
 # PIP_INDEX_URL 环境变量对内嵌 pip 同样生效（清华镜像）。
 # 步骤（与三平台打包脚本统一）：
-#   1) 核心依赖 + wiki/pdf/docx/xlsx extras（pyproject 为唯一数据源）
+#   1) 核心依赖 + wiki/pdf/docx/xlsx extras（pyproject 为唯一数据源；
+#      workspace 成员已在上一层预装，此处解析为 already satisfied）
 #   2) 卸载 crew 本身——crew 源码由安装包按源码树携带，不进 site-packages
 #   3) 技能脚本补充依赖（pyproject 未覆盖部分）
 #   4) markitdown 单独 --no-deps（可选依赖链 sympy/onnxruntime/numpy 超 100MB）

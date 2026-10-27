@@ -305,7 +305,12 @@ def main():
         sys.exit(0)
 
     if hasattr(args, 'func'):
-        args.func(args)
+        try:
+            args.func(args)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            Output.error("UnexpectedError", f"{type(exc).__name__}: {exc}")
     else:
         parser.parse_args([args.command, "-h"])
 

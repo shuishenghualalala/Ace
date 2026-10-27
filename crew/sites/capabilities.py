@@ -7,8 +7,11 @@ from crew.agent.capabilities import (
 )
 
 
-def register_site_capability_profiles(registry: CapabilityProfileRegistry) -> None:
-    registry.register(
+def register_site_capability_profiles(
+    registry: CapabilityProfileRegistry,
+) -> tuple[CapabilityProfile, ...]:
+    """Register Sites profiles and return their owned identities for cleanup."""
+    profiles = (
         CapabilityProfile(
             id="blueprint.authoring",
             feature="blueprint",
@@ -21,9 +24,7 @@ def register_site_capability_profiles(registry: CapabilityProfileRegistry) -> No
                 "标题、单位、假设写在 spec，工具完成后简短解释结果，避免重复标题与表格；纯静态图不添加多余控件或续问动作。"
                 "只有明确需要独立 App 或复杂自定义页面时才按 Blueprint Skill 选择 Automation、Widget、Binding、Canvas 资产链。"
             ),
-        )
-    )
-    registry.register(
+        ),
         CapabilityProfile(
             id="sites.authoring",
             feature="sites",
@@ -35,5 +36,14 @@ def register_site_capability_profiles(registry: CapabilityProfileRegistry) -> No
                 "只有用户明确要求发布或部署时，才调用 publish_site。"
             ),
             display=CapabilityDisplay(name="灵感", provider="sites", display_badge="◇"),
-        )
+        ),
     )
+    registered: list[CapabilityProfile] = []
+    try:
+        for profile in profiles:
+            registered.append(registry.register(profile))
+    except Exception:
+        for profile in reversed(registered):
+            registry.unregister(profile.id, expected=profile)
+        raise
+    return tuple(registered)

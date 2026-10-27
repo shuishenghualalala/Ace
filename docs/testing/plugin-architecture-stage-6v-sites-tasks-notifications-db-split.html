@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6V · 拆库收尾批 sites/tasks/notifications</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6V · 拆库收尾批 sites/tasks/notifications</h1>
+<p>2026-09-14 · 提交 <code>885ba83</code>（ADR-0038 第五批）。sites 10 表、tasks、notifications 各迁独立库，主库同名旧表保留为回退备份。</p>
+<h2>处置</h2>
+<ul>
+<li>sites 10 表（store/blueprint 两半域独立 gate）、tasks、notifications 各迁独立库。</li>
+<li>OWNER 巡检语义按清单内外正确分化（labels 内 cron/work 语义、sites 显式豁免）。</li>
+<li><strong>P1-1 收口评估</strong>：ADR 批次清单内仅剩 channels 两表（待 P2-7 归属迁移随批）；主库另观察到 wiki_learning_* 插件表 6 张待插件数据规划决策；crew.db 其余只剩 core 状态表，按 Feature 迁出仓库的数据边界成立。</li>
+</ul>
+<h2>验证记录（子 agent 开发，主 agent 审查后复跑）</h2>
+<table><tr><th>项</th><th>结果</th></tr>
+<tr><td>新增契约测试</td><td>16 个（sites 双半域 gate、tasks/notifications 巡检分化、豁免语义等）</td></tr>
+<tr><td>后端全量 <code>pytest tests/ -q</code></td><td>4156 passed / 0 failed（双跑一致）</td></tr>
+</table>
+<p>平台说明：纯 SQLite/路径语义，无平台分支；本轮实测为 macOS 本机。ci.yml python 门禁三平台矩阵首跑结果待推送后回填。</p>
+<p><a href="../backend/adr/0038-feature-db-split.html">ADR-0038</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

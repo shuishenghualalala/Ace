@@ -127,6 +127,26 @@
   `post_compact.py` 常量移入 `agent.compaction.post_compact_*` 配置。
 - 摘要消息尾部附 canonical 历史回溯指引（会话数据库路径 + session_id）。
 
+### 4.2.1 修订验证结果（2026-09-01）
+
+- 单元/集成回归：**287 passed, 2 skipped**（既有可选依赖跳过）。commit 自带测试
+  覆盖四个机制：assistant 边界切分、回合内 compact_view、历史回溯 hint、
+  可配置恢复预算、磁盘重读 / 分片合并 / 缺失跳过 / 跨压缩存活。
+- E2E（真实模型）：**回合内 L3 机制证实**——单轮 case 第 4 个 LLM 请求即出现
+  `【历史摘要】` + `【压缩后保留的工具结果】`；多轮 case 一次压缩恢复 14 个附件
+  （含 blueprint 指令）。
+- **E2E 暴露的问题（待产品决策，非测试缺陷）**：
+  - P1 回合内压缩 thrash：`compact_view` 每轮水位压缩 + `_MIN_OLD_FOR_SUMMARY=3`
+    + 恢复附件体积接近预算 → 3~11 条的微型 old 段也反复发起 60~90s 的 LLM 摘要，
+    8000 / 30000 预算均复现，任务超时（修订前同 case 380s 通过，现 660s 超时）。
+  - P2 blueprint 技能包指引：`blueprint/SKILL.md` 写 "load `widget/SKILL.md`"，
+    模型误用 `name=blueprint + file_path=widget/SKILL.md` 被路径越权拒绝且报错
+    无指引，导致主说明被重读 3 次（重读主因，非压缩丢指令）。
+  - guardrail 默认 `hard_stop_enabled=False`、`no_progress_block_after=5`，
+    3 次重读无法被兜底拦截。
+- 场景预算从 8000 调整为 30000（Site profile 5 份指令恢复后地板 ~2.5 万 token，
+  预算低于地板会导致每次迭代都触发完整摘要）。
+
 5. 收尾：`ace-pre-push-checks` 选最小检查集；本计划按模块归入 `docs/testing/`。
 
 ## 5. 风险与边界
