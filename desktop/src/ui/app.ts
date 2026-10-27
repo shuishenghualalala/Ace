@@ -12,6 +12,8 @@ import { bindChannelConfigModal, bindModelConfigModal, openChannelConfigModal, r
 import { backendApi } from './backend-client';
 import { bindSitesTab, renderSitesPage, syncSiteAnnotationEntry, syncSiteComposerMarker } from './features/sites-page';
 import { bindBlueprintSurface } from './features/blueprint-surface';
+import { bindInlineWidgets } from './features/inline-widget';
+import { bindNativeVisuals } from './features/native-visual';
 import { bindModelPicker } from './features/model-picker';
 import { bindComposerToolbar, syncCraftLabel } from './features/composer-toolbar';
 import { bindComposerContextRing } from './features/composer-context-ring';
@@ -114,6 +116,7 @@ import {
   refreshSessions,
   renderChat,
   sendMessage,
+  sendInlineWidgetMessage,
   setBusyWithUi,
   setChatCallbacks,
   setStatusWithUi,
@@ -501,6 +504,8 @@ function bindGlobalEvents(): () => void {
     },
   });
   bindBlueprintSurface();
+  bindInlineWidgets(sendInlineWidgetMessage);
+  bindNativeVisuals(sendInlineWidgetMessage);
   syncSiteComposerMarker();
   const disposeWorkspaceUi = bindWorkspaceUi(refreshSessions, openSession);
   setWorkspacesUiCallbacks({ setTab, renderChat });

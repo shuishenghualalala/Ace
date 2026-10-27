@@ -42,6 +42,8 @@ import {
 import type { FollowupAnswer } from '../backend-client';
 import { attachCopyButtons } from './copy-button';
 import { renderMermaidBlocks } from './mermaid-render';
+import { hydrateInlineWidgets, inlineWidgets, renderInlineWidget } from './inline-widget';
+import { hydrateNativeVisuals, nativeVisuals, renderNativeVisual } from './native-visual';
 import { showFileOpenMenu } from './file-open-menu';
 import { mountBlueprintSurface } from './blueprint-surface';
 import { openBrowserArtifact, openUserBrowser } from './browser-panel';
@@ -707,6 +709,9 @@ export function renderConversation(
         : 'crew';
       const sig = `${sigAgentTurn(batch, isStreaming, userPinnedOpen)}|${identitySig}`;
       const capturedBatch = batch;
+      if (sessionId) for (const visual of nativeVisuals(batch, sessionId)) {
+        pushPlan(visual.key, JSON.stringify(visual.spec), () => renderNativeVisual(visual));
+      }
       pushPlan(turnId, sig, () =>
         renderAgentTurn(capturedBatch, {
           isStreaming,
@@ -715,6 +720,10 @@ export function renderConversation(
           ...(turnIdentity ? { identity: turnIdentity } : {}),
         }),
       );
+      if (sessionId) for (const widget of inlineWidgets(batch, sessionId)) {
+        // A separate keyed unit keeps the iframe alive while the answer streams.
+        pushPlan(widget.key, JSON.stringify(widget), () => renderInlineWidget(widget));
+      }
       i = j;
     }
     // 带 agentName 的 status（Dynamic Kanban 角色卡片）和 workflowProgress 面板走上面的 !isAgent 分支，
@@ -823,6 +832,8 @@ export function renderConversation(
   // Mermaid 图表：懒加载 mermaid.js 渲染 [data-mermaid] 占位。幂等，已渲染的跳过。
   // 不 await：渲染是异步的，不阻塞 DOM 布局；失败时保留源码占位，下次 patch 重试。
   void renderMermaidBlocks(container);
+  hydrateInlineWidgets(container);
+  hydrateNativeVisuals(container);
   syncPermissionCardPositions(container);
   bindFollowupCard(container, hooks.followupHandlers ?? noopFollowupHandlers);
   hooks.afterRender?.(sessionId);

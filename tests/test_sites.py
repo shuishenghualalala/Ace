@@ -759,3 +759,63 @@ async def test_blueprint_scheduler_restores_enabled_interval_automation(
         assert blueprint._scheduler.get_job(job_id) is None
     finally:
         await blueprint.stop()
+
+
+@pytest.mark.asyncio
+async def test_inline_widget_snapshot_survives_source_edit_and_ui_history_clipping(site_manager, tmp_path):
+    root = tmp_path / "inline-widget"
+    root.mkdir()
+    # Exceed the registry's default 50K result limit while staying below the
+    # inline source limit. A registry spill would destroy the surface envelope.
+    original = '<!doctype html><html><body>' + 'interactive ' * 7000 + '</body></html>'
+    (root / 'index.html').write_text(original, encoding='utf-8')
+    widget = site_manager.blueprint.store.create_widget('owner-1', 'ws-1', str(root), '收益', '')
+    registry = Registry()
+    register_blueprint_tools(registry, site_manager)
+    contexts = [(current_owner_account_id, current_owner_account_id.set('owner-1')),
+                (current_session_id, current_session_id.set('session-1'))]
+    try:
+        result = await registry.execute(ToolCall('inline-show', 'Widget', {
+            'action': 'show', 'widgetId': widget['id'], 'display': 'inline',
+        }))
+        detail = tool_result_detail_for_ui('Widget', result.content, max_len=100)
+        surface = json.loads(detail)['surface']
+        assert surface['html'] == original
+        assert surface['display'] == 'inline'
+        (root / 'index.html').write_text('<!doctype html><html><body>changed</body></html>')
+        from crew.gateway.routers.sessions import _tool_result_for_history
+        recovered = _tool_result_for_history(
+            ToolCall('inline-show', 'Widget', {'action': 'show'}), {'inline-show': result.content})
+        assert json.loads(recovered)['surface']['html'] == original
+        (root / 'index.html').write_text(original * 10, encoding='utf-8')
+        oversized = await registry.execute(ToolCall('too-large', 'Widget', {
+            'action': 'show', 'widgetId': widget['id'], 'display': 'inline',
+        }))
+        assert '128 KB' in oversized.content
+    finally:
+        for context, token in reversed(contexts):
+            context.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_native_visual_registry_live_history_without_widget_files(site_manager, tmp_path):
+    from crew.gateway.routers.sessions import _tool_result_for_history
+    spec = json.loads((Path(__file__).parent / 'fixtures/native-visual.json').read_text())
+    registry = Registry()
+    register_blueprint_tools(registry, site_manager)
+    contexts = [(current_owner_account_id, current_owner_account_id.set('owner-1')),
+                (current_session_id, current_session_id.set('session-1'))]
+    try:
+        call = ToolCall('native-render', 'Widget', {'action': 'render', 'spec': spec})
+        result = await registry.execute(call)
+        live = json.loads(tool_result_detail_for_ui('Widget', result.content, max_len=100))
+        history = json.loads(_tool_result_for_history(call, {call.id: result.content}))
+        assert live == history
+        assert live['surface']['spec'] == spec
+        assert live['surface']['sessionId'] == 'session-1'
+        assert live['surface']['version'] == 2
+        assert site_manager.blueprint.store.list_widgets('owner-1') == []
+        assert not list(tmp_path.rglob('index.html'))
+    finally:
+        for context, token in reversed(contexts):
+            context.reset(token)

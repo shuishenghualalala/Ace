@@ -3780,17 +3780,34 @@ app.on('before-quit', () => {
   }
 });
 
-const gotLock = app.requestSingleInstanceLock();
-if (!gotLock) {
-  app.quit();
-} else {
-  app.on('second-instance', () => {
-    if (mainWindow) {
-      showMainWindow();
+// 打包流水线的最小启动探针：真正加载 Electron 与主进程并等到 ready，
+// 但不创建窗口、启动 Gateway 或碰单实例锁。它能拦住仅靠 codesign --verify
+// 无法发现的 dyld / Framework 加载失败。
+if (process.argv.includes('--crew-packaging-smoke-test')) {
+  app.whenReady().then(() => {
+    if (!app.isPackaged) {
+      console.error('Packaging smoke test requires a packaged app');
+      app.exit(1);
+      return;
     }
+    process.stdout.write('CREW_PACKAGING_SMOKE_OK\n', () => app.exit(0));
+  }).catch((err) => {
+    console.error('Packaging smoke test failed:', err);
+    app.exit(1);
   });
-  bootstrap().catch((err) => {
-    console.error('Bootstrap failed:', err);
+} else {
+  const gotLock = app.requestSingleInstanceLock();
+  if (!gotLock) {
     app.quit();
-  });
+  } else {
+    app.on('second-instance', () => {
+      if (mainWindow) {
+        showMainWindow();
+      }
+    });
+    bootstrap().catch((err) => {
+      console.error('Bootstrap failed:', err);
+      app.quit();
+    });
+  }
 }

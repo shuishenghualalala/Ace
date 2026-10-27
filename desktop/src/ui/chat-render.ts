@@ -1647,6 +1647,7 @@ function parseInspirationSurface(raw?: string): InspirationSurface | null {
     const data = JSON.parse(raw) as { surface?: unknown };
     if (!data.surface || typeof data.surface !== 'object') return null;
     const surface = data.surface as Record<string, unknown>;
+    if (surface.display === 'inline') return null;
     if (surface.kind !== 'inspiration' || !['site', 'canvas', 'widget'].includes(String(surface.mode || ''))) return null;
     if (typeof surface.sessionId !== 'string' || typeof surface.title !== 'string') return null;
     return surface as unknown as InspirationSurface;

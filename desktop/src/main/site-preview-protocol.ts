@@ -1,6 +1,7 @@
 /** ace-site:// 本地站点预览协议。所有资源由主进程携带当前 Gateway 身份读取。 */
 
 import { protocol } from 'electron';
+import { INLINE_WIDGET_CSP, INLINE_WIDGET_SHELL } from '../shared/inline-widget-shell';
 
 export const SITE_PREVIEW_SCHEME = 'ace-site';
 
@@ -78,6 +79,15 @@ export function registerSitePreviewProtocol(resolveGateway: GatewayResolver): vo
     }
     const resolved = parseSitePreviewUrl(request.url);
     if (!resolved) return new Response('Not Found', { status: 404 });
+    // This shell serves no files or credentials. The parent supplies the durable
+    // message snapshot to an opaque-origin iframe through a source-checked bridge.
+    if (resolved.kind === 'widget' && !resolved.assetPath
+      && new URLSearchParams(resolved.search).get('inline_shell') === '1') {
+      return new Response(INLINE_WIDGET_SHELL, { headers: {
+        'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store',
+        'Content-Security-Policy': INLINE_WIDGET_CSP,
+      } });
+    }
     try {
       const gateway = await resolveGateway();
       const endpoint = new URL(gateway.baseUrl);

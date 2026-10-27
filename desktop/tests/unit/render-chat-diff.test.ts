@@ -9,6 +9,7 @@
  * conversation-renderer 双实例（不同 containerId/sessionId）隔离用例。
  */
 // @vitest-environment happy-dom
+// @vitest-environment-options {"happyDOM":{"settings":{"disableIframePageLoading":true}}}
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   applyFoldState,
@@ -24,6 +25,7 @@ import {
 } from '../../src/ui/features/conversation-renderer';
 import { __resetAllStoresForTest } from '../../src/ui/stores/stores';
 import { appendSessionMessage } from '../../src/ui/state';
+import nativeFixture from '../../../tests/fixtures/native-visual.json';
 
 // conversation-renderer 的重依赖：本文件只验证消息流渲染与 diff 缓存隔离，
 // 外部会话身份 / 看板 / 浏览器面板点击跳转不在此覆盖。
@@ -235,6 +237,39 @@ describe('conversation-renderer 双实例隔离', () => {
   afterEach(() => {
     disposeConversationRenderer('panel-a');
     disposeConversationRenderer('panel-b');
+  });
+
+  it('keeps an inline iframe attached while its answer streams and later turns append', () => {
+    const panel = document.getElementById('panel-a')!;
+    appendSessionMessage('sid-a', { id: 'answer', role: 'assistant', content: '图表', timestamp: 1,
+      toolCalls: [{ toolCallId: 'widget-show', name: 'Widget', status: 'done', startedAt: 0,
+        result: JSON.stringify({ ok: true, surface: { display: 'inline', version: 1, mode: 'widget',
+          sessionId: 'sid-a', widgetId: 'widget_123456789abc', title: '收益', status: 'ready', html: '<p>chart</p>' } }) }] });
+    renderConversation(panel, 'panel-a', 'sid-a');
+    const frame = panel.querySelector('iframe')!;
+    expect(frame).not.toBeNull();
+    const observer = new MutationObserver(() => {});
+    observer.observe(panel, { childList: true, subtree: true });
+    appendSessionMessage('sid-a', { id: 'continuation', role: 'assistant', content: '继续解释', timestamp: 2 });
+    renderConversation(panel, 'panel-a', 'sid-a');
+    expect(panel.querySelector('iframe')).toBe(frame);
+    expect(observer.takeRecords().some(r => [...r.removedNodes].some(n => n === frame || n.contains(frame)))).toBe(false);
+    observer.disconnect();
+  });
+
+  it('keeps native controls and their values while the answer streams', () => {
+    const panel = document.getElementById('panel-a')!;
+    appendSessionMessage('sid-a', { id: 'native-answer', role: 'assistant', content: '解释', timestamp: 1,
+      toolCalls: [{ toolCallId: 'native-render', name: 'Widget', status: 'done', startedAt: 0,
+        result: JSON.stringify({ ok: true, surface: { display: 'inline', version: 2, mode: 'native',
+          sessionId: 'sid-a', status: 'ready', spec: nativeFixture } }) }] });
+    renderConversation(panel, 'panel-a', 'sid-a');
+    const input = panel.querySelector<HTMLInputElement>('[name="income"]')!;
+    expect(input).not.toBeNull(); input.value = '12000'; input.dispatchEvent(new Event('input'));
+    appendSessionMessage('sid-a', { id: 'native-continuation', role: 'assistant', content: '继续解释', timestamp: 2 });
+    renderConversation(panel, 'panel-a', 'sid-a');
+    expect(panel.querySelector('[name="income"]')).toBe(input); expect(input.value).toBe('12000');
+    expect(panel.querySelector('iframe')).toBeNull();
   });
 
   it('不同 containerId/sessionId 的 diff 缓存与 scroll anchor 互不干扰', () => {

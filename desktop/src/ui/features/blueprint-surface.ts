@@ -109,6 +109,7 @@ export function handleBlueprintSurfaceToolChunk(chunk: ChatChunk, sessionId: str
   try {
     const payload = JSON.parse(body.detail) as { surface?: unknown };
     const raw = payload.surface as Record<string, unknown> | undefined;
+    if (raw?.display === 'inline') return;
     if (raw?.kind === 'inspiration' && raw.mode === 'site') {
       const siteId = typeof raw.siteId === 'string' ? raw.siteId : typeof raw.inspirationId === 'string' ? raw.inspirationId : '';
       if (siteId.startsWith('site_')) {

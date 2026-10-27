@@ -3,7 +3,7 @@ name: widget
 description: Use when creating, showing, updating, validating, deleting, rendering,
   or troubleshooting Daimon Blueprint Widgets, their responsive index.html UI, data
   slots, submit events, input state, files, and workspace resources. You MUST read
-  widgetdesign skill before creating any widget.
+  widgetdesign skill before creating an HTML widget. Native Widget.render charts and forms use references/native-visual.md instead.
 metadata:
   skillCategoryName: 通用办公
   zh_name: Widget 组件管理
@@ -11,6 +11,14 @@ metadata:
   query_examples: 创建 widget, 管理蓝图组件, 调试 widget 界面
 ---
 # Widget
+
+## Native desktop answers (preferred)
+
+For ordinary charts, parameter exploration and forms inside a desktop chat, read
+`references/native-visual.md` and call `Widget.render` with a declarative `spec`.
+This is a native frontend renderer: do not create a Widget asset, write HTML/JS,
+open a browser, or call validate/show for this flow. The HTML workflow below is
+for independent apps or existing HTML assets, not ordinary answer charts.
 
 Widget owns one responsive `index.html`, display data, input state, events, files, and workspace resources. Every surface renders `data.metadata.roots.workspaceRoot/index.html`.
 
@@ -40,6 +48,16 @@ Then:
 For appearance and responsive layout, load `widgetdesign/SKILL.md` before writing HTML/CSS. It is
 the self-contained Widget design authority; do not load another Widget Design Skill for the same
 work.
+
+## Desktop Inline Answers
+
+For charts, calculators, sliders, number/text inputs and rich cards inside an Ace desktop answer,
+use `Widget.show` with `"display":"inline"` **after** writing and validating the HTML.
+Do not show the panel placeholder first for this flow. The default `panel` flow above is unchanged.
+Read `references/inline-runtime.md` for this desktop-only runtime; it is distinct from the
+DaimonWidget Automation runtime. A complete example is `examples/inline-revenue.html`.
+The show result contains a bounded immutable HTML snapshot for history replay; showing an updated
+Widget produces a new component. No Canvas, Automation, Binding or external API key is needed.
 
 ## Inspect And Modify An Existing Widget
 

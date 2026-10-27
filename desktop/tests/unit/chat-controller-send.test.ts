@@ -4,8 +4,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 // 共享 mock 必须先于 chat-controller 加载，见 helpers/mock-chat-controller-deps.ts
 import './helpers/mock-chat-controller-deps';
-import { _resetQueueEditDraftForTests, dispatchWs, editQueueItem, sendMessage } from '../../src/ui/features/chat-controller';
-import { enqueuePending, getPendingQueue } from '../../src/ui/state';
+import { _resetQueueEditDraftForTests, dispatchWs, editQueueItem, sendMessage, sendInlineWidgetMessage } from '../../src/ui/features/chat-controller';
+import { enqueuePending, getPendingQueue, state } from '../../src/ui/state';
 import { __resetAllStoresForTest, configStore, messageStore, sessionStore, uiStore, workspaceStore } from '../../src/ui/stores/stores';
 
 vi.mock('../../src/ui/features/session-model', async (importOriginal) => {
@@ -15,8 +15,11 @@ vi.mock('../../src/ui/features/session-model', async (importOriginal) => {
     persistDraftSessionModel: vi.fn(async () => undefined),
   };
 });
+vi.mock('../../src/ui/features/inline-widget-capability', () => ({ ensureInlineWidgetCapability: vi.fn(async () => undefined) }));
 beforeEach(() => {
   __resetAllStoresForTest();
+  state.isLoggedIn = true;
+  state.userInfo = { uid: 'test-owner' };
   _resetQueueEditDraftForTests();
   const localStorageStub = {
     getItem: vi.fn(() => null),
@@ -125,5 +128,21 @@ describe('sendMessage', () => {
       query: '按普通模式发送',
     });
     expect(socket.send.mock.calls.at(-1)?.[0]).not.toHaveProperty('plan_active');
+  });
+});
+
+
+describe('inline component submissions', () => {
+  it('queues a snapshot without consuming composer attachments or drafts', async () => {
+    sessionStore.set({ activeSessionId: 'inline-s', busySessions: { 'inline-s': true } });
+    state.attachments = [{ id: 'draft-file', name: 'draft.txt' }] as never;
+    const input = document.querySelector<HTMLTextAreaElement>('[data-composer-input]')!;
+    input.value = '尚未发送的草稿';
+    expect(await sendInlineWidgetMessage('inline-s', '{"cost":100}')).toBe(true);
+    expect(getPendingQueue('inline-s')[0]).toMatchObject({ query: '{"cost":100}', attachments: [] });
+    expect(state.attachments[0].id).toBe('draft-file');
+    expect(input.value).toBe('尚未发送的草稿');
+    expect(await sendInlineWidgetMessage('another-session', 'no')).toBe(false);
+    expect(getPendingQueue('inline-s')).toHaveLength(1);
   });
 });

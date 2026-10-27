@@ -1,0 +1,215 @@
+{
+  "title": "12 个月收益情景",
+  "description": "悲观收入系数 0.75、无增长；基准月增长 3%；乐观收入系数 1.25、月增长 8%。含初始投入。",
+  "parameters": [
+    {
+      "id": "cost",
+      "label": "月成本",
+      "type": "range",
+      "value": 6000,
+      "min": 0,
+      "max": 20000,
+      "step": 100,
+      "unit": "元"
+    },
+    {
+      "id": "income",
+      "label": "首月收入",
+      "type": "number",
+      "value": 8000,
+      "min": 0,
+      "max": 100000,
+      "step": 100,
+      "unit": "元"
+    },
+    {
+      "id": "initial",
+      "label": "初始投入",
+      "type": "number",
+      "value": 3000,
+      "min": 0,
+      "max": 100000,
+      "step": 100,
+      "unit": "元"
+    }
+  ],
+  "chart": {
+    "type": "line",
+    "x": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "xLabel": "月",
+    "yLabel": "累计利润（元）",
+    "series": [
+      {
+        "id": "low",
+        "label": "悲观",
+        "expression": {
+          "op": "sub",
+          "args": [
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "param": "income"
+                    },
+                    0.75
+                  ]
+                },
+                {
+                  "op": "pow",
+                  "args": [
+                    1,
+                    {
+                      "op": "sub",
+                      "args": [
+                        {
+                          "x": true
+                        },
+                        1
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "param": "cost"
+            }
+          ]
+        },
+        "cumulative": true,
+        "initial": {
+          "op": "sub",
+          "args": [
+            0,
+            {
+              "param": "initial"
+            }
+          ]
+        }
+      },
+      {
+        "id": "base",
+        "label": "基准",
+        "expression": {
+          "op": "sub",
+          "args": [
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "param": "income"
+                    },
+                    1
+                  ]
+                },
+                {
+                  "op": "pow",
+                  "args": [
+                    1.03,
+                    {
+                      "op": "sub",
+                      "args": [
+                        {
+                          "x": true
+                        },
+                        1
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "param": "cost"
+            }
+          ]
+        },
+        "cumulative": true,
+        "initial": {
+          "op": "sub",
+          "args": [
+            0,
+            {
+              "param": "initial"
+            }
+          ]
+        }
+      },
+      {
+        "id": "high",
+        "label": "乐观",
+        "expression": {
+          "op": "sub",
+          "args": [
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "param": "income"
+                    },
+                    1.25
+                  ]
+                },
+                {
+                  "op": "pow",
+                  "args": [
+                    1.08,
+                    {
+                      "op": "sub",
+                      "args": [
+                        {
+                          "x": true
+                        },
+                        1
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "param": "cost"
+            }
+          ]
+        },
+        "cumulative": true,
+        "initial": {
+          "op": "sub",
+          "args": [
+            0,
+            {
+              "param": "initial"
+            }
+          ]
+        }
+      }
+    ],
+    "showTotals": true
+  },
+  "action": {
+    "label": "继续分析这些参数",
+    "instruction": "请分析当前参数下的收益与回本时间。"
+  }
+}

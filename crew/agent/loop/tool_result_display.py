@@ -53,7 +53,18 @@ def tool_result_detail_for_ui(name: str, content: str, *, max_len: int = 1200) -
             data = _redact_wiki_internal_result(data)
             return _clip(json.dumps(data, ensure_ascii=False), max_len)
         surface = data.get("surface")
+        if (name == "Widget" and isinstance(surface, dict) and surface.get("version") == 2
+                and surface.get("mode") == "native" and len(text.encode("utf-8")) <= 400_000):
+            return json.dumps({"ok": data.get("ok") is True, "surface": surface}, ensure_ascii=False)
         if name in {"Widget", "Canvas", "publish_site"} and isinstance(surface, dict):
+            # Inline snapshots must remain complete JSON for live rendering and replay.
+            # The authoring tool bounds source size; keep the same bound here.
+            if (name == "Widget" and surface.get("display") == "inline"
+                    and surface.get("version") == 1
+                    and isinstance(surface.get("html"), str)
+                    and len(surface["html"].encode("utf-8")) <= 128_000):
+                return json.dumps({"ok": bool(data.get("ok", True)), "surface": surface},
+                                  ensure_ascii=False, separators=(",", ":"))
             return _clip(json.dumps({"ok": bool(data.get("ok", True)), "surface": surface},
                                     ensure_ascii=False, separators=(",", ":")), max_len)
         for key in ("output", "content", "text", "result"):

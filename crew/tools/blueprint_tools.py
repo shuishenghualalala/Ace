@@ -14,6 +14,7 @@ from crew.core.runctx import (
     current_workspace_id,
 )
 from crew.tools.registry import Registry, tool_result
+from crew.sites.native_visual import validate_visual
 
 
 def _response(data: Any = None, **extra: Any) -> str:
@@ -73,6 +74,9 @@ def _schema(name: str, description: str, actions: list[str]) -> dict[str, Any]:
                 "result": {"type": "object"}, "enabled": {"type": "boolean"},
                 "runInput": {}, "kind": {"type": "string"}, "limit": {"type": "integer"},
                 "offset": {"type": "integer"}, "runId": {"type": "string"},
+                "spec": {"type": "object", "description": "Widget.render: declarative native chart/form. Read widget/references/native-visual.md. No HTML, files, create or validate required."},
+                "display": {"type": "string", "enum": ["panel", "inline"],
+                            "description": "Widget.show: inline embeds a self-contained interactive HTML snapshot in desktop chat. Use window.AceInteractive.state/setState for persisted parameters; the host provides a continue-analysis button. No network or external assets."},
             },
             "required": ["action"],
             "additionalProperties": True,
@@ -86,8 +90,8 @@ CANVAS_SCHEMA = _schema(
      "removePlacement", "show", "delete"],
 )
 WIDGET_SCHEMA = _schema(
-    "Widget", "创建、读取、更新、验证和展示灵感 App 的 HTML Widget。",
-    ["list", "create", "read", "update", "validate", "show", "delete"],
+    "Widget", "桌面聊天图表/表单优先用 render(spec)，直接显示原生交互，无需编写 HTML。其他 action 管理 HTML Widget。",
+    ["render", "list", "create", "read", "update", "validate", "show", "delete"],
 )
 AUTOMATION_SCHEMA = _schema(
     "Automation", "创建、运行、调度和检查可向 Widget 产出 JSON Artifact 的任务。",
@@ -162,6 +166,14 @@ def register_blueprint_tools(
     def widget_tool(args: dict[str, Any]):
         owner, workspace_id, session_id, workdir = _context()
         action = args["action"]
+        if action == "render":
+            if not session_id:
+                raise ValueError("原生交互需要有效会话")
+            spec = validate_visual(args.get("spec"))
+            return _response(surface={
+                "kind": "inspiration", "mode": "native", "display": "inline", "version": 2,
+                "sessionId": session_id, "status": "ready", "title": spec["title"], "spec": spec,
+            })
         if action == "list":
             return _response(page(store.list_widgets(owner), args))
         if action == "create":
@@ -196,11 +208,20 @@ def register_blueprint_tools(
         if action == "show":
             widget = store.get_widget(owner, widget_id)
             validation = manager.validate_widget_file(widget)
+            inline = {}
+            if args.get("display") == "inline":
+                if not session_id or validation["status"] != "valid":
+                    raise ValueError("内联展示需要有效会话及通过验证的 index.html")
+                html = (Path(widget["workspacePath"]) / "index.html").read_text(encoding="utf-8")
+                if len(html.encode("utf-8")) > 128_000:
+                    raise ValueError("内联组件 HTML 不能超过 128 KB；请精简为自包含页面或使用 panel")
+                inline = {"display": "inline", "version": 1, "html": html}
             return _response(widget, surface={
                 "kind": "inspiration", "mode": "widget", "sessionId": session_id,
                 "widgetId": widget_id, "title": widget["title"],
                 "resourceRevision": widget["resourceRevision"],
                 "status": "ready" if validation["status"] == "valid" else "preparing",
+                **inline,
             })
         if action == "delete":
             widget = store.get_widget(owner, widget_id)
@@ -319,6 +340,9 @@ def register_blueprint_tools(
                       result_policy_resolver=_blueprint_result_policy)
     registry.register(name="Widget", toolset="blueprint", schema=WIDGET_SCHEMA, handler=widget_tool,
                       display_name="App 组件", ui_label_template="管理组件 {title}", always_load=True,
+                      # Keep bounded inline HTML intact through the registry's
+                      # large-result pipeline, including JSON escaping overhead.
+                      max_result_size_chars=1_000_000,
                       result_policy_resolver=_blueprint_result_policy)
     registry.register(name="Automation", toolset="blueprint", schema=AUTOMATION_SCHEMA,
                       handler=automation_tool, is_async=True, display_name="App 自动化",

@@ -16,7 +16,10 @@ def register_site_capability_profiles(registry: CapabilityProfileRegistry) -> No
             skills=("blueprint", "automation", "widget", "widgetdesign", "binding", "canvas"),
             prompt=(
                 "当前会话已启用 Blueprint 创作能力。需要声明式交互界面时，"
-                "按 Blueprint Skill 选择最短的 Automation、Widget、Binding、Canvas 资产链。"
+                "桌面回复中的普通图表、参数探索、输入表单，优先读取 widget/references/native-visual.md 并调用 Widget.render(spec) 原生展示。"
+                "这一路径不写 HTML/JS，不创建文件、网站、Canvas 或 Automation，不打开浏览器；只返回结构化数据与受支持的运算。"
+                "标题、单位、假设写在 spec，工具完成后简短解释结果，避免重复标题与表格；纯静态图不添加多余控件或续问动作。"
+                "只有明确需要独立 App 或复杂自定义页面时才按 Blueprint Skill 选择 Automation、Widget、Binding、Canvas 资产链。"
             ),
         )
     )

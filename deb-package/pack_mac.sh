@@ -313,12 +313,57 @@ cp -R "$STAGE_GW" "$APP_GW"
 chmod -R 755 "$APP_GW/runtimes"
 echo "✓ gateway 已嵌入 $APP_GW"
 
+# electron-builder 在上一步生成的签名只覆盖当时的 .app 内容。嵌入 gateway、
+# Python/Node 运行时以及裁剪 locales 后，必须重新封存整个 bundle；否则
+# Gatekeeper 会把下载后的安装包报成“已损坏”。当前没有 Developer ID 时只做
+# ad hoc 签名以保证 bundle 完整性，正式免提示分发仍需 Developer ID + 公证。
+# ad hoc 签名没有 Team ID，不能启用 Hardened Runtime 的库验证：否则 dyld
+# 会因主程序与 Electron Framework 缺少相同 Team ID 而在显示窗口前终止。
+CURRENT_TEAM_ID="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1 | sed -n 's/^TeamIdentifier=//p' || true)"
+if [ -n "$CURRENT_TEAM_ID" ] && [ "$CURRENT_TEAM_ID" != 'not set' ]; then
+    echo "❌ 检测到 Apple 签名团队 ${CURRENT_TEAM_ID}；不能用 ad hoc 签名覆盖正式签名" >&2
+    exit 1
+fi
+codesign --force --deep --sign - --timestamp=none "$APP_PATH"
+codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+# 签名校验只检查封存，不会发现 Hardened Runtime 与嵌套 Framework
+# 的 Team ID 不匹配；用真实打包主程序启动一次，但不启动 Gateway。
+"$PY_CACHE_BIN" - "$APP_PATH" <<'PY'
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+with tempfile.TemporaryDirectory(prefix='crew-packaging-smoke-') as temp:
+    stdout = Path(temp) / 'stdout.log'
+    stderr = Path(temp) / 'stderr.log'
+    # GUI 程序必须通过 LaunchServices 启动；直接执行 MacOS/crew-desktop
+    # 在无前台会话的打包终端里可能因 NSApplication 注册失败而误报 SIGABRT。
+    command = [
+        'open', '-W', '-n', '-g', '--stdout', str(stdout), '--stderr', str(stderr),
+        sys.argv[1], '--args', '--crew-packaging-smoke-test',
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit('❌ macOS 应用启动探针超时（60 秒）') from exc
+    output = stdout.read_text(errors='replace') if stdout.exists() else ''
+    errors = stderr.read_text(errors='replace') if stderr.exists() else ''
+    if result.returncode != 0 or 'CREW_PACKAGING_SMOKE_OK' not in output:
+        print((result.stdout + output)[-2000:], file=sys.stderr)
+        print((result.stderr + errors)[-4000:], file=sys.stderr)
+        raise SystemExit(f'❌ macOS 应用启动探针失败（open 退出码 {result.returncode}）')
+PY
+echo "✓ .app 签名完整，Electron 主进程启动探针通过"
+
 STAGE_DMG="$(mktemp -d /tmp/crew-dmg-stage.XXXXXX)"
 trap 'rm -rf "$STAGE_DMG"' EXIT
 cp -R "$APP_PATH" "$STAGE_DMG/crew-desktop.app"
+codesign --verify --deep --strict "$STAGE_DMG/crew-desktop.app"
 ln -s /Applications "$STAGE_DMG/Applications"
 rm -f "$DMG_NAME"
 hdiutil create -volname "Crew" -srcfolder "$STAGE_DMG" -ov -format UDZO "$DMG_NAME" >/dev/null
+hdiutil verify "$DMG_NAME" >/dev/null
 echo "✓ $DMG_NAME ($(du -h "$DMG_NAME" | cut -f1))"
 
 # ----- 汇总 + 版本号递增（与 pack_deb.ps1 一致） -----
@@ -341,5 +386,6 @@ echo "==========================================="
 echo " 构建完成！"
 echo " 产物: $ROOT_DIR/$DMG_NAME"
 echo " 体积报告: $ROOT_DIR/package-size-report-mac.txt"
-echo " 注意: 未做 Apple 签名/公证，首次打开需右键 → 打开"
+echo " 注意: 仅做 ad hoc 完整性签名；未做 Developer ID 签名/公证"
+echo "       下载后首次打开需在系统设置 → 隐私与安全性中选择『仍要打开』"
 echo "==========================================="
