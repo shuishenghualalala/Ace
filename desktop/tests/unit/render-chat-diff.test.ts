@@ -306,7 +306,7 @@ describe('conversation-renderer 双实例隔离', () => {
     const panel = document.getElementById('panel-a')!;
     appendSessionMessage('sid-a', { id: 'native-answer', role: 'assistant', content: '解释', timestamp: 1,
       toolCalls: [{ toolCallId: 'native-render', name: 'Widget', status: 'done', startedAt: 0,
-        result: JSON.stringify({ ok: true, surface: { display: 'inline', version: 2, mode: 'native',
+        result: JSON.stringify({ ok: true, surface: { display: 'inline', version: 3, mode: 'native',
           sessionId: 'sid-a', status: 'ready', spec: nativeFixture } }) }] });
     renderConversation(panel, 'panel-a', 'sid-a');
     const input = panel.querySelector<HTMLInputElement>('[name="income"]')!;

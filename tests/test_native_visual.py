@@ -33,12 +33,12 @@ def test_shared_invalid_native_visual_contract(case):
 @pytest.mark.parametrize('expression', [{'param': []}, float('inf')])
 def test_native_visual_rejects_non_json_expressions(expression):
     spec = copy.deepcopy(SPEC)
-    spec['chart']['series'][0]['expression'] = expression
+    spec['datasets'][0]['columns'][1]['expression'] = expression
     with pytest.raises(ValueError):
         validate_visual(spec)
 
 
-@pytest.mark.parametrize('field,value', [('parameters', [{}] * 9), ('action', {'label': 'go', 'instruction': ''})])
+@pytest.mark.parametrize('field,value', [('parameters', [{}] * 17), ('children', [])])
 def test_invalid_native_visual_fields(field, value):
     with pytest.raises(ValueError):
         validate_visual({**SPEC, field: value})

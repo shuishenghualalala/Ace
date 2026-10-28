@@ -13,8 +13,8 @@ from crew.core.runctx import (
     current_session_id,
     current_workspace_id,
 )
-from crew.tools.registry import FunctionTool, Registry, tool_result
 from crew.sites.native_visual import validate_visual
+from crew.tools.registry import FunctionTool, Registry, tool_result
 
 
 def _response(data: Any = None, **extra: Any) -> str:
@@ -74,7 +74,7 @@ def _schema(name: str, description: str, actions: list[str]) -> dict[str, Any]:
                 "result": {"type": "object"}, "enabled": {"type": "boolean"},
                 "runInput": {}, "kind": {"type": "string"}, "limit": {"type": "integer"},
                 "offset": {"type": "integer"}, "runId": {"type": "string"},
-                "spec": {"type": "object", "description": "Widget.render: declarative native chart/form. Read widget/references/native-visual.md. No HTML, files, create or validate required."},
+                "spec": {"type": "object", "description": "Widget.render: v3 declarative rich reply (cards, fields, charts, tables, actions). Read widget/references/native-visual.md. No HTML, files, create or validate required."},
                 "display": {"type": "string", "enum": ["panel"],
                             "description": "Widget.show: display the HTML Widget in its independent panel. Use Widget.render for interactive content inside desktop chat."},
             },
@@ -170,7 +170,7 @@ def build_blueprint_tools(
                 raise ValueError("原生交互需要有效会话")
             spec = validate_visual(args.get("spec"))
             return _response(surface={
-                "kind": "inspiration", "mode": "native", "display": "inline", "version": 2,
+                "kind": "inspiration", "mode": "native", "display": "inline", "version": 3,
                 "sessionId": session_id, "status": "ready", "title": spec["title"], "spec": spec,
             })
         if action == "list":

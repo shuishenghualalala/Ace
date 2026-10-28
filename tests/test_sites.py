@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 import json
 import os
 import zipfile
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,8 +12,8 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from crew.agent.loop.tool_result_display import tool_result_detail_for_ui
 from crew.agent.capabilities import CapabilityProfileRegistry
+from crew.agent.loop.tool_result_display import tool_result_detail_for_ui
 from crew.app import build_app
 from crew.core.runctx import (
     current_agent_workdir,
@@ -22,19 +22,17 @@ from crew.core.runctx import (
     current_workspace_id,
 )
 from crew.core.types import ToolCall
+from crew.features import FeatureRuntime, FeatureState
 from crew.gateway.auth import AccountContext
 from crew.gateway.helpers import session_agent_label
 from crew.gateway.routers.sites import create_sites_router
-from crew.features import FeatureRuntime, FeatureState
 from crew.sites.feature import SITES_FEATURE_ID, build_sites_feature
 from crew.sites.manager import SiteBuildError, SiteManager
 from crew.sites.store import SQLiteSiteStore
 from crew.state.config import Config
-from crew.tools.blueprint_tools import build_blueprint_tools
-from crew.tools.blueprint_tools import register_blueprint_tools
+from crew.tools.blueprint_tools import build_blueprint_tools, register_blueprint_tools
 from crew.tools.registry import Registry
-from crew.tools.site_tools import build_site_tools
-from crew.tools.site_tools import register_site_tools
+from crew.tools.site_tools import build_site_tools, register_site_tools
 
 
 @pytest.fixture()
@@ -1161,7 +1159,7 @@ async def test_native_visual_registry_live_history_without_widget_files(site_man
         assert live == history
         assert live['surface']['spec'] == spec
         assert live['surface']['sessionId'] == 'session-1'
-        assert live['surface']['version'] == 2
+        assert live['surface']['version'] == 3
         assert site_manager.blueprint.store.list_widgets('owner-1') == []
         assert not list(tmp_path.rglob('index.html'))
     finally:

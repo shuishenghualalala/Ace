@@ -14,11 +14,12 @@ export function inlineSurfaces(messages: ChatMessage[], sessionId: string): Inli
       const surface = payload.surface;
       if (payload.ok !== true || surface?.display !== 'inline'
         || surface.sessionId !== sessionId || surface.status !== 'ready') continue;
-      if (surface.version === 2 && surface.mode === 'native') {
+      if (surface.version === 3 && surface.mode === 'native') {
         const spec = parseVisual(surface.spec);
         if (spec) {
           const key = `native:${sessionId}:${tool.toolCallId}`;
-          visuals.set(key, { key, sessionId, spec });
+          const prior = visuals.get(spec.id);
+          if (!prior || spec.revision > prior.spec.revision) visuals.set(spec.id, { key: prior?.key ?? key, sessionId, spec });
         }
       }
     } catch { /* Other tool results are ordinary text. */ }

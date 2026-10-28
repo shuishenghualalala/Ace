@@ -1,4 +1,5 @@
 import * as esbuild from 'esbuild';
+import { execFileSync } from 'node:child_process';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -40,6 +41,7 @@ async function copyFile(from, to) {
 }
 
 async function main() {
+  execFileSync(process.execPath, [path.join(rootDir, 'scripts/generate-rich-reply-validator.mjs'), '--check'], { stdio: 'inherit' });
   await fs.rm(distDir, { recursive: true, force: true });
   await ensureDir(mainOut);
   const helpDocVersion = formatDocVersion((await fs.stat(helpDocSource)).mtime);

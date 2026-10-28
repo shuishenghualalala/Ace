@@ -1,62 +1,66 @@
-# 桌面聊天原生交互：实现与验收记录
+# 桌面富回复 v3：实现与验收记录
 
-日期：2026-10-26；最终验收：2026-10-27
-状态：A/B/C/D 已完成，真实会话、完整重启恢复、明暗主题和宽度变化验收通过。原浅色设置及会话侧栏已恢复。
+更新：2026-10-28。状态：A、B、C 已完成，代码保留在当前工作区，未提交或发布。
 
-## 固定目标
+## 固定目标与证据
 
-A. 实际回复中自然显示图表和控件。
-B. 参数本地更新，明确点击后带当前参数继续分析。
-C. 重开会话恢复状态，并在实际桌面中验证。
-D. 常见图表/表单使用原生组件和结构化协议，模型无需逐次编写 HTML/JS。
+| 目标 | 完成结果 | 证据 |
+| --- | --- | --- |
+| A：用 v3 统一桌面富回复协议，移除旧协议路径 | Widget.render、服务端校验、完整工具结果保留、桌面解析均使用 version 3；共用 JSON Schema，构建检查生成校验器是否同步；没有兼容渲染器或停用提示 | `crew/sites/rich_reply.schema.json`、`crew/sites/native_visual.py`、`desktop/src/ui/features/rich-reply/protocol.ts`、`inline-surfaces.ts`；共享有效/无效样本和后端测试 |
+| B：补齐组合卡片、表单、图表、数据表与动作 | 内置组件树、8 种图表、9 种输入、共享数据计算、表格交互、设置/重置/提交动作、版本与设备状态管理 | `desktop/src/ui/features/rich-reply/`；46 项桌面测试、70 项后端测试；真实会话截图及 AX 记录 |
+| C：在实际 Ace 回复中验证交互和恢复 | 真实模型生成并操作，提交参数给模型，完整重启后恢复，组件修订保留只读历史 | 下文两个真实会话与 `plan/evidence/rich-reply-v3/` |
 
-## 实现
+## 已实现的能力
 
-- `crew/sites/native_visual.py`：64 KB 以内的声明校验；最多 8 个参数、4 个系列、120 个点；支持折线/柱状图与 range/number/text/select。表达式是有界算术树，不执行任意脚本。
-- `crew/tools/blueprint_tools.py`：`Widget.render(spec)` 返回 version 2 原生内容；不创建网页资产或文件。
-- `crew/agent/loop/tool_result_display.py` 和 `crew/gateway/routers/sessions.py`：实时结果和历史回放保留完整描述。
-- `desktop/src/ui/features/native-visual.ts`：内置 DOM 控件及 SVG 图表；本地计算、图例显隐、指针/键盘逐点读数、非法值反馈、可选续问动作；参数按账户/会话/工具调用保存在当前设备。
-- `conversation-renderer.ts`：稳定内容块位于本轮最终解释之前；流式文本更新保留控件节点。
-- `app.ts` 绑定已有发送/队列入口，续问保留聊天草稿和附件；可见摘要与提交给模型的文字相同。
-- `web-messages.css`：共享主题与字体，透明背景、无外层卡片和嵌套滚动，紧凑输入；最终修整为整洁坐标刻度及正文左对齐。
-- `crew/sites/capabilities.py`、`crew/skills/widget/SKILL.md`、`references/native-visual.md`：常见交互默认走原生展示，复杂独立 App 保留原有路径。
+- 组合：row、column、card、text、badge、image、metric、field、chart、table、button。图片支持本地栅格图片和栅格 data URL。
+- 图表：折线、柱状、面积、堆叠柱状、堆叠面积、散点、饼图、环形图；数值/日期/类别横轴；图例显隐、悬停和键盘逐点读数；ECharts SVG 渲染，颜色取自宿主主题。
+- 输入：range、number、text、textarea、select、radio、multiselect、checkbox、date；数值边界/步长、日期和必填校验。
+- 数据：最多 8 个数据集，每集 12 列、500 行；原始数据列与计算列分开，支持受限四则/幂/min/max、累计和初值。数据变化同步更新指标、图表和表格。
+- 表格：文本筛选、数值或字符串排序、分页，保存视图状态。
+- 动作：set 本地设值、reset 恢复参数默认值、submit 把可读参数摘要交给现有聊天发送入口。仅显式提交调用模型；支持提交反馈、失败重试和相同参数去重。
+- 状态：按账户、会话、组件 id、revision 保存输入、表格视图、图例、已提交记录。新 revision 为独立状态，旧 revision 的参数/动作只读。同轮同 id 取最高 revision，流式续写保留节点。
+- 约束：128 KB、120 个组件、6 层布局、16 个参数、8 个系列；无模型脚本执行；图表 options 由适配器构建。离开会话、退出账户、节点卸载后拒绝提交。
 
-## 实际桌面证据
+`version: 3` 是协议格式；`revision` 是同一个组件的内容修订号，从 1 递增，二者含义不同。
 
-环境：`cd desktop && npm run dev`，桌面托管 Gateway，开发账户 dev，deepseek-v4-flash；通过原生桌面 UI 输入自然语言，没有注入模型回复或提交回调。
+## 实际桌面验证
 
-1. 会话 `请在这条回复里做一个可调参数的12个月收`：自然请求生成成本滑块、收入/投入数字输入和三系列累计收益图。实际工具数量为 2（读取说明、展示）；没有网页文件卡或自动浏览器侧栏。
-2. 默认 6,000 / 8,000 / 3,000 参数结果为 -3,000 / 38,536.24 / 114,771.26；UI 修改收入 12,000，用滑块键盘操作将成本调到 7,000，结果即时变为 21,000 / 83,304.35 / 197,656.90。解锁后补充鼠标拖拽实测：成本从 7,000 拖到 8,000，结果变为 9,000 / 71,304.35 / 185,656.90；随后恢复成本 7,000。
-3. 点击图例成功隐藏/恢复乐观系列。调参和图例变化没有新增聊天轮次；显式点击续问后只出现一条可读摘要，携带 7,000 / 12,000 / 3,000；模型续答表格给出 +21,000 / +83,304 / +197,657。输入框中的测试草稿仍在。
-4. 会话 `用柱状图比较甲、乙、丙三个方案的四季度完`：真实生成三系列四季度柱状图，未添加输入框或续问动作。
-5. 完整重启：先 SIGTERM 停止 Gateway PID 7241，再退出 Electron，运行 `npm run dev`。解锁后通过 UI 打开收益会话，确认成本 7,000、收入 12,000、投入 3,000 恢复；三组结果为 21,000 / 83,304.35 / 197,656.90。图表刻度为整洁的 50,000 间隔，左侧与正文对齐。
-6. 逐点读数：图表获焦后按左键显示第 11 月；指针移到第 7 月后同时显示 11,000 / 39,949.55 / 81,842.05。静态柱状图历史也正确恢复，轴为 0/25/50/75/100，三系列完整，无输入控件和续问按钮。
+环境：Mac 上的 Ace 开发桌面；`cd desktop && npm run dev`；桌面托管 Gateway；开发账户 dev，真实配置模型 deepseek-v4-flash。所有请求均从桌面输入框用自然语言发送，没有注入工具结果或提交回调。
 
-证据文件：
-- `output/playwright/native-visual/followup-ax.txt`：实际图表参数、结果、图例、可读续问、模型答复及保留草稿。
-- `output/playwright/native-visual/followup.png`：实际模型续答与未发送草稿。
-- `output/playwright/native-visual/restored-ax.txt`：完整重启后的参数及结果恢复。
-- `output/playwright/native-visual/restored-parameters.png`、`restored-chart.png`：最终控件和折线图；后者含指针第 7 月读数。
-- `output/playwright/native-visual/chart-inspection-ax.txt`：第 7 月跨系列读数。
-- `output/playwright/native-visual/static-bar.png`、`static-bar-ax.txt`：实际历史柱状图。
-- `output/playwright/native-visual/static-bar-dark.png`：2026-10-27 实际深色主题图表，系列、轴、网格及读数清晰。
-- `output/playwright/native-visual/static-bar-expanded.png`：收起会话侧栏后，图表随可用宽度正确重排。
-- `output/playwright/native-visual/theme-restored-ax.txt`：最终外观设置已恢复选中浅色；会话侧栏也已展开恢复原状。
+### 方案比较会话
 
-## 自动验证
+会话：`请直接在这条回复里做一个可交互的方案比较`。
 
-- TypeScript typecheck 通过。
-- Vitest：native-visual 7、render-chat-diff 21、chat-controller-send 5，共 33 项通过。覆盖计算、非法值、单次提交、会话隔离、恢复、流式节点稳定、静态图、文本/选择器。
-- Python：test_native_visual、test_sites、test_tool_result_display、test_capability_profiles，共 49 项通过；补充非法 param 类型校验后，test_native_visual 5 项复验通过。
-- 修改文件 ESLint、Stylelint、git diff --check 通过。
-- happy-dom 不支持旧版 ace-site iframe 的诊断来自既有 HTML 兼容测试，33 项断言均通过；新原生路径不使用 iframe。
+2026-10-27：模型在回复中生成三张可选方案卡、收入/成本/投入滑块、指标、面积图、表格、日期、多选、多行文本、确认框和动作按钮。选择进阶将收入设为 12,000；鼠标拖动成本到 7,000 后，每月净流为 5,000、12 月累计结余为 57,000，图表和表格一致。
+
+实测累计结余降序、翻页、筛选 `57,000` 仅留下第 12 月。未填日期与确认框时提交被拦截；填写 2026-11-01、多选图表/表单、两行补充需求和确认框后，点击分析只发送一次可读摘要，模型回复使用 12,000 / 7,000 / 3,000，计算出 57,000。
+
+完整重启按约定先停止 Gateway，再退出 Electron，重新 `npm run dev`。2026-10-28 从实际历史打开后，成本 7,000、投入 3,000、日期、补充需求、确认、降序及筛选仍保留。期间会话继续被使用，收入当前为 15,100（不声称仍是先前的 12,000），当前累计结果为 94,200；筛选仍为 57,000，因而正确显示无匹配数据。
+
+证据：[提交与模型回复](evidence/rich-reply-v3/real-submit.txt)、[重启后会话状态](evidence/rich-reply-v3/restored.txt)、[恢复后的面积图](evidence/rich-reply-v3/restored-area.png)。
+
+### 图表与表单示例会话
+
+会话：`请在回复里直接展示一个原生组件示例集，不`。
+
+模型一次生成全部 8 种图表；日期横轴、中文类别横轴、数值散点、双系列堆叠均正确显示。实际操作图例隐藏线上系列，姓名输入、数量 25、方案旗舰版、偏好站内消息，再点重置恢复默认。
+
+随后自然请求更新同一组件：模型沿用 id，revision 从 1 增到 2，标题改为“原生组件示例集（已更新）”，数量默认 20。旧回复字段与重置按钮禁用，并保留历史快照；新回复正常操作。重启后旧修订数量 12、新修订数量 20、旧图例隐藏状态均保留。
+
+真实验收发现的修正：避免每次流式更新重绘已有图表；隐藏系列后保留其余系列颜色；读屏描述使用原始日期和业务数据，去掉图表库内部时间戳及堆叠 NaN 字段。
+
+证据：[重置结果](evidence/rich-reply-v3/gallery-reset.txt)、[修订与图例恢复、读屏描述](evidence/rich-reply-v3/restored-gallery.txt)、[实际布局](evidence/rich-reply-v3/gallery-light.png)、[完整日期/类别图](evidence/rich-reply-v3/gallery-restored.png)。以上新截图均为浅色；此次深色菜单操作未确认生效，不计入新渲染器的深色人工验收。
+
+## 自动检查
+
+2026-10-27 最终代码检查：
+
+- TypeScript typecheck、开发构建与共享 Schema 生成一致性检查通过。
+- Vitest 4 文件 46 项通过：native-visual 10、render-chat-diff 29、chat-controller-send 5、native-visual-capability 2。
+- pytest 4 文件 70 项通过：test_native_visual、test_sites、test_tool_result_display、test_capability_profiles。
+- 改动范围 ESLint、Stylelint、Ruff、git diff --check 通过。
+- 覆盖协议非法字段/引用/深度/大小、受限计算、必填/重试/去重、账户与会话隔离、表格恢复、所有图表适配、日期轴、颜色稳定、流式不重绘、卸载销毁、Object 原型同名 ID。
 
 ## 交付边界
 
-仅桌面端；常见图表/表单为原生协议，历史 HTML 回答兼容保留。参数保存在当前设备，不跨设备同步。每次工具调用为独立历史快照，修订在新回复中创建，不改写旧回答；内容位于本轮最终解释之前，未实现任意 Markdown 字符位置插入。当前支持数值 x 轴；文本和选择器用于续问参数，不支持作为算术条件。代码仍在当前工作区，未提交或发布。
-
-## 验收结论
-
-2026-10-27 解锁后完成最后主题检查：深色图表已截图，恢复浅色并确认实际界面；收起/展开会话侧栏时图表随宽度变化重排，最终恢复侧栏。此前锁屏阻塞已解除，无剩余验收项。
-
-A 的证据为真实折线/柱状图截图；B 为 followup-ax.txt 与 chart-inspection-ax.txt；C 为 restored-ax.txt 与 restored-parameters.png；D 为 Widget.render 实际工具结果链路、无资产创建回归测试及 native-visual 协议实现。当前仍为工作区改动，未提交或发布。
+仅桌面端。状态保存在当前设备，不跨设备同步；新修订不自动继承旧参数。组件位于本轮最终文字解释前，尚不支持插入任意 Markdown 字符位置。表格筛选只影响表格视图；重置恢复参数而不清空表格筛选和图例选择。模型仍负责业务口径及文案准确性，例如固定文本说明不会自动变成动态指标。没有加入地图、自由脚本模拟、任意工具动作、全屏或 Web/移动端实现。

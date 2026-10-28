@@ -70,3 +70,5 @@
 @import './work-settings.css' layer(features);
 @import './work-knowledge.css' layer(features);
 @import './runtime.css' layer(utilities);
+
+@import './rich-reply.css' layer(features);

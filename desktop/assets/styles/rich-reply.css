@@ -1,0 +1,39 @@
+.rich-reply { min-width: 0; color: var(--mw-text-primary); }
+.rich-reply__title { margin: 0 0 var(--mw-space-3); font-size: var(--mw-type-body-size); }
+.rich-reply h4 { margin: 0 0 var(--mw-space-2); font-size: var(--mw-type-body-size); }
+.rich-reply__body, .rich-reply__column { display: flex; flex-direction: column; gap: var(--mw-space-3); }
+.rich-reply__row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: var(--mw-space-3); }
+.rich-reply__row > *, .rich-reply__column > * { min-width: 0; }
+.rich-reply__card { display: flex; flex-direction: column; align-items: stretch; gap: var(--mw-space-3); border: 1px solid var(--mw-border-subtle); border-radius: var(--mw-radius-3); padding: var(--mw-space-4); }
+.rich-reply__text { margin: 0; white-space: pre-wrap; line-height: 1.6; }
+.rich-reply__muted { color: var(--mw-text-secondary); font-size: var(--mw-type-caption-size); }
+.rich-reply__muted:empty, .rich-reply__error:empty { display: none; }
+.rich-reply__badge { display: inline-flex; align-self: flex-start; padding: var(--mw-space-1) var(--mw-space-2); border-radius: var(--mw-radius-2); background: var(--mw-bg-subtle); font-size: var(--mw-type-caption-size); }
+.rich-reply__badge--success { color: var(--mw-success); }
+.rich-reply__badge--warning { color: var(--mw-warning); }
+.rich-reply__badge--danger, .rich-reply__error { color: var(--mw-danger); }
+.rich-reply__image { max-width: 100%; max-height: 320px; object-fit: contain; border-radius: var(--mw-radius-2); }
+.rich-reply__metric { display: flex; flex-direction: column; gap: var(--mw-space-1); font-variant-numeric: tabular-nums; }
+.rich-reply__metric strong { font-size: var(--mw-type-body-size); }
+.rich-reply__field { margin: 0; padding: 0; border: 0; min-width: 0; display: flex; flex-direction: column; gap: var(--mw-space-2); }
+.rich-reply__field legend { margin-bottom: var(--mw-space-2); color: var(--mw-text-secondary); font-size: var(--mw-type-caption-size); }
+.rich-reply input:not([type="checkbox"], [type="radio"], [type="range"]), .rich-reply select, .rich-reply textarea { width: 100%; min-width: 0; padding: var(--mw-space-2); border: 1px solid var(--mw-border-subtle); border-radius: var(--mw-radius-2); background: var(--mw-bg-surface); color: var(--mw-text-primary); font: inherit; }
+.rich-reply input[type="range"] { width: 100%; accent-color: var(--mw-text-primary); }
+.rich-reply__choice { display: flex; align-items: center; gap: var(--mw-space-2); }
+.rich-reply__field > input[type="checkbox"] { align-self: flex-start; }
+.rich-reply__button, .rich-reply__legend button, .rich-reply__actions button { padding: var(--mw-space-2) var(--mw-space-3); border: 1px solid var(--mw-border-subtle); border-radius: var(--mw-radius-2); background: transparent; color: var(--mw-text-primary); font: inherit; cursor: pointer; }
+.rich-reply__button { align-self: flex-start; }
+.rich-reply button:disabled { opacity: .5; cursor: default; }
+.rich-reply :focus-visible { outline: 2px solid var(--mw-text-secondary); outline-offset: 2px; }
+.rich-reply__legend, .rich-reply__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--mw-space-2); }
+.rich-reply__legend button[aria-pressed="false"] { opacity: .5; text-decoration: line-through; }
+.rich-reply__plot { width: 100%; height: 300px; }
+.rich-reply__table { display: flex; flex-direction: column; gap: var(--mw-space-2); }
+.rich-reply__table-scroll { overflow-x: auto; }
+.rich-reply table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+.rich-reply th, .rich-reply td { padding: var(--mw-space-2); text-align: left; border-bottom: 1px solid var(--mw-border-subtle); white-space: nowrap; }
+.rich-reply th button { padding: 0; border: 0; color: inherit; background: transparent; font: inherit; cursor: pointer; }
+.rich-reply th[aria-sort="ascending"] button::after { content: " ↑"; }
+.rich-reply th[aria-sort="descending"] button::after { content: " ↓"; }
+.rich-reply__history { margin-top: var(--mw-space-3); color: var(--mw-text-secondary); font-size: var(--mw-type-caption-size); }
+.rich-reply__history summary { cursor: pointer; }

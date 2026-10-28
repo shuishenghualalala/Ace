@@ -3,7 +3,7 @@ name: widget
 description: Use when creating, showing, updating, validating, deleting, rendering,
   or troubleshooting Daimon Blueprint Widgets, their responsive index.html UI, data
   slots, submit events, input state, files, and workspace resources. You MUST read
-  widgetdesign skill before creating an HTML widget. Native Widget.render charts and forms use references/native-visual.md instead.
+  widgetdesign skill before creating an HTML widget. Native Widget.render rich replies use references/native-visual.md instead.
 metadata:
   skillCategoryName: 通用办公
   zh_name: Widget 组件管理
@@ -14,7 +14,7 @@ metadata:
 
 ## Native desktop answers (preferred)
 
-For ordinary charts, parameter exploration and forms inside a desktop chat, read
+For ordinary charts, cards, tables, parameter exploration and forms inside a desktop chat, read
 `references/native-visual.md` and call `Widget.render` with a declarative `spec`.
 This is a native frontend renderer: do not create a Widget asset, write HTML/JS,
 open a browser, or call validate/show for this flow. The HTML workflow below is

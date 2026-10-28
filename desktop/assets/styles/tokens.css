@@ -310,6 +310,10 @@
   --mw-chart-2: var(--mw-green-600);
   --mw-chart-3: var(--mw-violet-600);
   --mw-chart-4: var(--mw-orange-600);
+  --mw-chart-5: var(--mw-cyan-600);
+  --mw-chart-6: var(--mw-rose-600);
+  --mw-chart-7: var(--mw-amber-600);
+  --mw-chart-8: var(--mw-indigo-600);
   --mw-chart-grid: var(--mw-border-subtle);
   --mw-chart-label: var(--mw-text-muted);
   --mw-symbol-line: var(--mw-symbol-line-light);
@@ -381,6 +385,10 @@
   --mw-chart-2: var(--mw-identity-green);
   --mw-chart-3: var(--mw-identity-violet);
   --mw-chart-4: var(--mw-identity-orange);
+  --mw-chart-5: var(--mw-identity-cyan);
+  --mw-chart-6: var(--mw-identity-rose);
+  --mw-chart-7: var(--mw-identity-amber);
+  --mw-chart-8: var(--mw-identity-indigo);
   --mw-chart-grid: var(--mw-border-subtle);
   --mw-chart-label: var(--mw-text-muted);
   --mw-symbol-line: var(--mw-symbol-line-dark);

@@ -1,56 +1,93 @@
-# Native desktop visuals v2
+# Structured desktop replies v3
 
-Call `Widget` with `{"action":"render","spec":{...}}`. It displays native charts
-and forms directly before your final explanation. No HTML, JavaScript, files,
-create/validate/show calls, browser preview, Canvas, Binding or Automation.
-Do not use the HTML widgetdesign workflow for this mode.
+Use `Widget({"action":"render","spec":{...}})` for charts, comparison cards,
+parameter exploration, forms and data tables inside an answer. Read this contract
+before rendering. Do not create HTML/JS, files, Widget assets, browser previews,
+Canvas, Binding or Automation for these ordinary reply interactions.
 
-## Contract
+## Envelope and composition
 
-`spec` accepts only:
-- `title`: short title, once only; `description`: optional assumptions/units (max 1000 chars).
-- `parameters`: optional list, max 8. Each: `id` (ASCII letter followed by letters/digits/underscore, max 40), `label`, `type`, `value`, optional `unit`.
-  - `type: "range" | "number"`: numeric value; required finite `min`, `max`, `step` (>0).
-  - `type: "text"`: string value, max 1000 chars.
-  - `type: "select"`: string value and `options` list of strings (1–20), value must be an option.
-- `chart`: optional `{type:"line"|"bar", x:number[], xLabel:string, yLabel:string, series:[], showTotals?:boolean}`. x contains 1–120 strictly increasing numbers. Max 4 series.
-  - Each series: unique `id`, `label`, and either `values:number[]` (one per x) OR `expression` (evaluated for each x).
-  - Optional `cumulative:true` accumulates the point values; optional `initial` expression is added once before the first point. Without cumulative, initial is not allowed.
-  - `showTotals:true` displays the last point of each series as compact values, only when useful.
-- `action`: optional `{label, instruction}`. On explicit user click, the host sends instruction plus a readable snapshot of ALL labelled parameter values to this chat. Requires parameters. Do not add it to a static chart.
+`spec` requires `version:3`, `id` (stable ID for this result), `revision` (integer,
+start at 1), `title`, `children` (component array). Optional `description`,
+`parameters`, `datasets`. Only documented fields are accepted. Max 128 KB,
+120 components, 6 nested layout levels, 16 parameters, 8 datasets. IDs start with
+an ASCII letter and contain letters/digits/underscore, <=40 characters; no
+constructor/prototype/__proto__. Component IDs must be unique in the reply.
 
-Provide a chart, or parameters plus an action. Payload <=64KB. Numeric values and
-computed results must stay finite within ±1e12. Unknown fields are rejected.
+Every component requires `id` and `type`:
+- `row`, `column`, `card`: `children`, optional `title`. Rows wrap responsively.
+- `text`: `text` (plain text, <=4000 chars).
+- `badge`: `text`, optional `tone:neutral|success|warning|danger`.
+- `image`: `src` (absolute local PNG/JPEG/WebP/GIF path, or raster data URL), `alt`.
+  Use existing images only. External URLs and SVG are not accepted.
+- `metric`: `label`, `expression`, optional `unit`.
+- `field`: `parameter` (parameter ID). Each parameter must have exactly one field.
+- `chart`: `dataset`, `chartType`, `x` (column ID), `series:[{column,label?}]`,
+  optional `title`, `xLabel`, `yLabel`. Types: line, bar, area, stackedBar,
+  stackedArea, scatter, pie, donut. Max 8 series; pie/donut exactly one numeric
+  series, nonnegative values with positive total. Scatter requires numeric x.
+  Number/string/date x columns produce numeric/category/time axes respectively.
+- `table`: `dataset`, optional `title`, `pageSize` (5–50, default 10).
+  The host provides local sorting, filtering and paging automatically.
+- `button`: `label`, `action` (see below). No arbitrary URLs or tool execution.
 
-Expressions are numeric literals or one of these JSON objects:
-`{"param":"numeric_parameter_id"}`, `{"x":true}`, `{"op":"add|sub|mul|div|pow|min|max","args":[expression,expression]}`.
-Exactly two arguments; maximum depth 12. No strings containing formulas, scripts,
-property access or functions. Text/select values are passed to the follow-up but
-cannot be used as numeric operands. Changing controls recomputes locally, never
-calls the model. Division by zero/overflow shows an error instead of invalid data.
+## Parameters and actions
 
-Example static comparison:
+Each parameter: `id`, `label`, `type`, `value`; optional `required`, `unit`.
+- range/number: require finite min < max, step > 0; value must align to step from min.
+- text/textarea: string <=1000 chars; empty string allowed until required submission.
+- date: YYYY-MM-DD or empty string.
+- checkbox: boolean (required means it must be checked before submitting).
+- select/radio: string value; `options` is 1–20 distinct strings.
+- multiselect: string-array value; `options` is 1–20 distinct strings.
+
+Actions:
+- `{"type":"set","values":{"parameterId":value}}`: immediately updates selected
+  parameters, fields, metrics, charts and tables locally. Use for choosing a plan.
+- `{"type":"reset"}`: restores all parameter defaults.
+- `{"type":"submit","instruction":"Explain the chosen plan"}`: explicit user
+  click sends instruction + labelled parameter values into the same conversation.
+  The host validates required inputs, prevents duplicate submits, shows progress,
+  supports retry and records successful submission. No model call for local actions.
+
+## Datasets and bounded calculations
+
+Dataset: `id`, `columns`, `rows` (1–500 rows). Column: `id`, `label`,
+`type:number|string|date`; optional `expression`, `cumulative`, `initial`.
+Rows contain values for ONLY the columns without an expression, in column order.
+Computed columns are numeric. Charts and tables referencing the same dataset
+always use the same computed snapshot.
+
+Expressions: numeric constant, `{"param":"numeric_parameter_id"}`,
+`{"column":"raw_numeric_column_id"}`, or
+`{"op":"add|sub|mul|div|pow|min|max","args":[expr,expr]}`.
+Exactly two operands, max depth 12. No executable strings, scripts, functions or
+references to other computed columns. A metric can reference parameters only.
+`cumulative:true` sums a column over row order, with optional `initial` expression
+(default 0). Numeric inputs/results are finite within ±1e12. Calculation errors
+show guidance; invalid values are never plotted or submitted.
+
+## Complete example: choose a plan, calculate locally, submit
+
 ```json
-{"action":"render","spec":{"title":"季度销量","chart":{"type":"bar","x":[1,2,3,4],"xLabel":"季度","yLabel":"件","series":[{"id":"a","label":"方案 A","values":[20,30,25,45]},{"id":"b","label":"方案 B","values":[15,28,32,40]}]}}}
+{"action":"render","spec":{"version":3,"id":"revenue","revision":1,"title":"收入方案","description":"示例假设：固定月成本 6000 元。","parameters":[{"id":"income","label":"月收入","type":"range","value":8000,"min":0,"max":20000,"step":100,"unit":"元"}],"datasets":[{"id":"cash","columns":[{"id":"month","label":"月份","type":"number"},{"id":"net","label":"累计结余","type":"number","expression":{"op":"sub","args":[{"param":"income"},6000]},"cumulative":true,"initial":-3000}],"rows":[[1],[2],[3],[4],[5],[6]]}],"children":[{"id":"plans","type":"row","children":[{"id":"basic","type":"card","title":"基准","children":[{"id":"basicText","type":"text","text":"每月收入 8000 元"},{"id":"basicPick","type":"button","label":"选择基准","action":{"type":"set","values":{"income":8000}}}]},{"id":"growth","type":"card","title":"增长","children":[{"id":"growthText","type":"text","text":"每月收入 12000 元"},{"id":"growthPick","type":"button","label":"选择增长","action":{"type":"set","values":{"income":12000}}}]}]},{"id":"incomeField","type":"field","parameter":"income"},{"id":"plot","type":"chart","dataset":"cash","chartType":"area","x":"month","yLabel":"元","series":[{"column":"net"}]},{"id":"details","type":"table","dataset":"cash","pageSize":5},{"id":"analyze","type":"button","label":"按当前参数分析","action":{"type":"submit","instruction":"分析当前方案的回本时间与风险。"}}]}}
 ```
 
-Example local cumulative calculation (general arithmetic, not a fixed business template):
-```json
-{"action":"render","spec":{"title":"12 个月现金流","description":"收入固定；累计现金流包含一次性投入。","parameters":[{"id":"income","label":"月收入","type":"number","value":8000,"min":0,"max":100000,"step":100,"unit":"元"},{"id":"cost","label":"月成本","type":"range","value":6000,"min":0,"max":20000,"step":100,"unit":"元"},{"id":"initial","label":"初始投入","type":"number","value":3000,"min":0,"max":100000,"step":100,"unit":"元"}],"chart":{"type":"line","x":[1,2,3,4,5,6,7,8,9,10,11,12],"xLabel":"月","yLabel":"累计现金流（元）","showTotals":true,"series":[{"id":"base","label":"基准","expression":{"op":"sub","args":[{"param":"income"},{"param":"cost"}]},"cumulative":true,"initial":{"op":"sub","args":[0,{"param":"initial"}]}}]},"action":{"label":"用这些参数继续分析","instruction":"请根据当前参数分析现金流与回本时间。"}}}
-```
+Static categorical example: dataset columns `[{id:"name",label:"方案",type:"string"},
+{id:"sales",label:"销量",type:"number"}]`, rows `[["甲",20],["乙",35],["丙",45]]`;
+chart uses `x:"name",series:[{column:"sales"}]` and `chartType:"donut"` or `"bar"`.
+No parameters/fields/buttons are needed for a static chart.
 
-For growth, use income × factor × pow(1 + growth, x - 1), minus cost;
-express it using the operators above. Use only supplied or explicitly disclosed
-assumptions. If generating multiple scenarios, keep the same x and units.
+## Revisions and response quality
 
-The host supplies theme, chart axes, legend toggles, pointer/keyboard inspection,
-validation and per-device/per-account/per-session/per-tool-call state. Values
-remain intact when the answer streams and when the session reopens. Each render
-call is a new immutable answer block: call once per intended result, not once per
-series or to repeatedly preview. For requested revisions, render a new version
-in the new turn and briefly say what changed; old answers remain snapshots.
+Use a new id for an independent result. To revise the same result, reuse its id
+and increment revision, providing the complete spec. Within a turn the host
+updates that component; previous turns remain read-only snapshots with their
+revision. State is isolated by account/session/component/revision. Restarting
+restores valid inputs, table views and successful submit state on this device.
 
-After render, provide a concise interpretation. Do not repeat the chart title or
-all its values in another table. Do not describe implementation files or testing
-steps to the user. Unsupported calculations should be explained in ordinary text
-rather than silently creating an HTML project.
+Call render once per intended result, not once per series or for previews. Do not
+render a gallery unless asked; choose a few useful components. After rendering,
+briefly interpret the result rather than repeat its title and every value.
+No implementation/testing details in the user-facing answer. Do not silently
+switch unsupported requests into HTML projects.

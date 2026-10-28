@@ -53,7 +53,7 @@ def tool_result_detail_for_ui(name: str, content: str, *, max_len: int = 1200) -
             data = _redact_wiki_internal_result(data)
             return _clip(json.dumps(data, ensure_ascii=False), max_len)
         surface = data.get("surface")
-        if (name == "Widget" and isinstance(surface, dict) and surface.get("version") == 2
+        if (name == "Widget" and isinstance(surface, dict) and surface.get("version") == 3
                 and surface.get("mode") == "native" and len(text.encode("utf-8")) <= 400_000):
             return json.dumps({"ok": data.get("ok") is True, "surface": surface}, ensure_ascii=False)
         if name in {"Widget", "Canvas", "publish_site"} and isinstance(surface, dict):

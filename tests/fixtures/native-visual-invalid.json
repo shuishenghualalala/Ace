@@ -1,37 +1,127 @@
 [
   {
-    "name": "unknown field",
-    "path": ["html"],
-    "value": "<script>bad()</script>"
+    "name": "unknown root",
+    "path": [
+      "script"
+    ],
+    "value": "alert(1)"
   },
   {
-    "name": "executable expression",
-    "path": ["chart", "series", "0", "expression"],
-    "value": "income*x"
+    "name": "duplicate parameter",
+    "path": [
+      "parameters",
+      1,
+      "id"
+    ],
+    "value": "income"
   },
   {
-    "name": "unknown parameter reference",
-    "path": ["chart", "series", "0", "expression"],
-    "value": {"param": "missing"}
+    "name": "invalid default date",
+    "path": [
+      "parameters",
+      3,
+      "value"
+    ],
+    "value": "2026-02-30"
   },
   {
-    "name": "unsupported operator",
-    "path": ["chart", "series", "0", "expression"],
-    "value": {"op": "eval", "args": [1, 2]}
+    "name": "unknown component",
+    "path": [
+      "children",
+      0,
+      "type"
+    ],
+    "value": "html"
   },
   {
-    "name": "duplicate parameter id",
-    "path": ["parameters", "1", "id"],
-    "value": "cost"
+    "name": "row length",
+    "path": [
+      "datasets",
+      0,
+      "rows",
+      0
+    ],
+    "value": [
+      1,
+      2
+    ]
   },
   {
-    "name": "unsorted points",
-    "path": ["chart", "x", "1"],
-    "value": 1
+    "name": "computed column cycle",
+    "path": [
+      "datasets",
+      0,
+      "columns",
+      1,
+      "expression"
+    ],
+    "value": {
+      "column": "net"
+    }
   },
   {
-    "name": "unbounded parameter",
-    "path": ["parameters", "0", "value"],
-    "value": 10000000000000
+    "name": "script expression",
+    "path": [
+      "datasets",
+      0,
+      "columns",
+      1,
+      "expression"
+    ],
+    "value": "income-cost"
+  },
+  {
+    "name": "bad action",
+    "path": [
+      "children",
+      0,
+      "children",
+      0,
+      "children",
+      1,
+      "action"
+    ],
+    "value": {
+      "type": "set",
+      "values": {
+        "income": -100
+      }
+    }
+  },
+  {
+    "name": "unknown chart dataset",
+    "path": [
+      "children",
+      3,
+      "dataset"
+    ],
+    "value": "unknown"
+  },
+  {
+    "name": "prototype parameter",
+    "path": [
+      "parameters",
+      0,
+      "id"
+    ],
+    "value": "constructor"
+  },
+  {
+    "name": "duplicate component id",
+    "path": [
+      "children",
+      2,
+      "id"
+    ],
+    "value": "plans"
+  },
+  {
+    "name": "field omitted",
+    "path": [
+      "children",
+      1,
+      "children"
+    ],
+    "value": []
   }
 ]

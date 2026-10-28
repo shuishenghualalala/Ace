@@ -610,6 +610,7 @@ export function renderConversation(
     build: () => HTMLElement | null;
   }
   const plans: UnitPlan[] = [];
+  const latestVisuals = sessionId ? inlineSurfaces(messages, sessionId).visuals : [];
   const pushPlan = (key: string, sig: string, build: () => HTMLElement | null): void => {
     plans.push({ meta: { key, sig }, build });
   };
@@ -768,7 +769,8 @@ export function renderConversation(
       const capturedBatch = batch;
       const surfaces = sessionId ? inlineSurfaces(batch, sessionId) : null;
       for (const visual of surfaces?.visuals ?? []) {
-        pushPlan(visual.key, JSON.stringify(visual.spec), () => renderNativeVisual(visual));
+        const readOnly = latestVisuals.some(latest => latest.spec.id === visual.spec.id && latest.spec.revision > visual.spec.revision);
+        pushPlan(visual.key, JSON.stringify([visual.spec, readOnly]), () => renderNativeVisual({ ...visual, readOnly }));
       }
       pushPlan(turnId, sig, () =>
         renderAgentTurn(capturedBatch, {

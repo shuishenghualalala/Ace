@@ -1,0 +1,210 @@
+Window: "Crew", App: Electron.
+0 standard window Crew, Secondary Actions: Raise
+	1 container Crew
+		2 container
+			3 HTML content Crew, URL: file:///Users/yyangqin/Developer/Ace/desktop/dist/assets/index.html
+				4 container
+					5 container
+						6 button 最小化
+						7 button 最大化或还原
+						8 button 关闭
+					9 container
+						10 container 主导航
+							11 image Crew
+							12 container 主导航
+								13 button 对话
+								14 button 外援
+								15 button 技能
+								16 button 灵感
+								17 button 笔记
+								18 button 任务
+								19 button (disabled) 安全, Help: 功能正在开发中，敬请期待
+								20 button 追踪
+								21 button 系统
+							22 button 账户
+								23 text d
+								24 text dev
+							25 button 设置
+						26 container 上下文
+							27 text 对话
+							28 container 会话历史
+								29 search text field (settable) 搜索会话
+								30 button 新建对话
+								31 button 导入工作空间
+								32 button 管理会话
+								33 container 最近会话
+									34 container
+										35 button 项目 0
+											36 text 项目
+											37 text 0
+										38 button 同伴空间
+										39 button 设置工作空间：同伴空间
+										40 button 在 同伴空间 新建会话
+										41 text 尚无会话
+									42 container
+										43 button 对话 5
+											44 text 对话
+											45 text 5
+										46 container
+											47 button Description: 打开会话：请在回复里直接展示一个原生组件示例集，不, Help: 请在回复里直接展示一个原生组件示例集，不
+												48 text 请在回复里直接展示一个原生组件示例集，不
+												49 text 请在回复里直接展示一个原生组件示例集，不生成网页文件：用很小的演示数据分别展示折线图、柱状图、面
+												50 text 默认工作空间
+												51 text 刚刚
+											52 button 管理会话：请在回复里直接展示一个原生组件示例集，不
+										53 container
+											54 button Description: 打开会话：请直接在这条回复里做一个可交互的方案比较, Help: 请直接在这条回复里做一个可交互的方案比较
+												55 text 请直接在这条回复里做一个可交互的方案比较
+												56 text 请直接在这条回复里做一个可交互的方案比较：基础、标准、进阶三张卡片，月收入分别5000、8000
+												57 text 默认工作空间
+												58 text 2 分钟前
+											59 button 管理会话：请直接在这条回复里做一个可交互的方案比较
+										60 container
+											61 button Description: 打开会话：你能展示哪些组件, Help: 你能展示哪些组件
+												62 text 你能展示哪些组件
+												63 text 暂无预览
+												64 text 默认工作空间
+												65 text 5 小时前
+											66 button 管理会话：你能展示哪些组件
+										67 container
+											68 button Description: 打开会话：新会话, Help: 新会话
+												69 text 新会话
+												70 text 暂无预览
+												71 text 默认工作空间
+												72 text 5 小时前
+											73 button 管理会话：新会话
+										74 container
+											75 button Description: 打开会话：新会话, Help: 新会话
+												76 text 新会话
+												77 text 暂无预览
+												78 text 默认工作空间
+												79 text 8/16
+											80 button 管理会话：新会话
+						81 splitter Description: 调整历史列表宽度, Help: 拖拽调整历史列表宽度，双击复位, Value: 270
+						82 container
+							83 button 收起历史
+							84 button Description: 打开浏览器，未运行, Help: 打开浏览器 (Ctrl/⌘+Shift+B)
+							85 container
+								86 text 请在回复里直接展示一个原生组件示例集，不生成网页文件：用很小的演示数据分别展示折线图、柱状图、面积图、堆叠柱状图、堆叠面积图、散点图、饼图、环形图。至少一张用日期横轴，一张用中文类别横轴，堆叠图包含两个系列。再带一个姓名文本框、数量数字框、方案下拉选择和偏好单选组，以及重置按钮。布局按两列图表排列，所有数据仅作界面测试。
+								87 text deepseek-v4-flash · 20:34
+								88 button 复制
+								89 button 撤回修改
+								90 container 原生组件示例集
+									91 heading 原生组件示例集, Value: 3
+										92 text 原生组件示例集
+									93 text 全部数据为界面测试用的虚构小样本，不代表真实业务。
+									94 container
+										95 heading 折线图 · 日期横轴, Value: 4
+											96 text 折线图 · 日期横轴
+										97 toggle button 访问量, Value: 1
+										98 image 这是一个图表，图表类型是折线图，表示访问量。其数据是——1790784000000，120，1790870400000，148，1790956800000，132，1791043200000，172，1791129600000，196，1791216000000，181，1791302400000，214。
+										99 text 日期 2026-10-01 · 访问量 120 · 订单量 46
+										100 heading 柱状图 · 中文类别横轴, Value: 4
+											101 text 柱状图 · 中文类别横轴
+										102 toggle button 线上, Value: 1
+										103 image 这是一个图表，图表类型是柱状图，表示线上。其数据是——华东的数据是0，32，华南的数据是1，24，华北的数据是2，18，西部的数据是3，12。
+										104 text 区域 华东 · 线上 32 · 门店 18
+										105 heading 面积图 · 日期横轴, Value: 4
+											106 text 面积图 · 日期横轴
+										107 toggle button 订单量, Value: 1
+										108 image 这是一个图表，图表类型是折线图，表示订单量。其数据是——1790784000000，46，1790870400000，54，1790956800000，51，1791043200000，63，1791129600000，78，1791216000000，71，1791302400000，88。
+										109 text 日期 2026-10-01 · 访问量 120 · 订单量 46
+										110 heading 堆叠柱状图 · 线上 + 门店, Value: 4
+											111 text 堆叠柱状图 · 线上 + 门店
+										112 toggle button 线上, Value: 0
+										113 toggle button 门店, Value: 1
+										114 image 这是一个图表，图表类型是柱状图，表示门店。其数据是——华东的数据是0，18，18，NaN，华南的数据是1，21，21，NaN，华北的数据是2，15，15，NaN，西部的数据是3，9，9，NaN。
+										115 text 区域 华东 · 线上 32 · 门店 18
+										116 heading 堆叠面积图 · 访问量 + 订单量, Value: 4
+											117 text 堆叠面积图 · 访问量 + 订单量
+										118 toggle button 访问量, Value: 1
+										119 toggle button 订单量, Value: 1
+										120 image 这是一个图表，它由2个图表系列组成。第0个系列是一个表示访问量的折线图，其数据是——1790784000000，120，120，NaN，1790870400000，148，148，NaN，1790956800000，132，132，NaN，1791043200000，172，172，NaN，1791129600000，196，196，NaN，1791216000000，181，181，NaN，1791302400000，214，214，NaN；第1个系列是一个表示订单量的折线图，其数据是——1790784000000，46，166，120，1790870400000，54，202，148，1790956800000，51，183，132，1791043200000，63，235，172，1791129600000，78，274，196，1791216000000，71，252，181，1791302400000，88，302，214。
+										121 text 日期 2026-10-01 · 访问量 120 · 订单量 46
+										122 heading 散点图 · 数值横轴, Value: 4
+											123 text 散点图 · 数值横轴
+										124 toggle button 产出, Value: 1
+										125 image 这是一个图表，图表类型是散点图，表示产出。其数据是——8，21，12，27，15，26，19，38，23，41，28，52。
+										126 text 投入 8 · 产出 21
+										127 heading 饼图 · 渠道占比, Value: 4
+											128 text 饼图 · 渠道占比
+										129 toggle button 占比, Value: 1
+										130 image 这是一个图表，图表类型是饼图，表示占比。其数据是——直营的数据是38，分销的数据是27，线上的数据是21，其他的数据是14。
+										131 text 渠道 直营 · 占比 38
+										132 heading 环形图 · 渠道占比, Value: 4
+											133 text 环形图 · 渠道占比
+										134 toggle button 占比, Value: 1
+										135 image 这是一个图表，图表类型是饼图，表示占比。其数据是——直营的数据是38，分销的数据是27，线上的数据是21，其他的数据是14。
+										136 text 渠道 直营 · 占比 38
+										137 heading 表单测试, Value: 4
+											138 text 表单测试
+										139 container 姓名
+											140 text 姓名
+											141 text field (settable) 姓名
+										142 container 数量（件）
+											143 text 数量（件）
+											144 stepper (settable, float) Description: 数量, Value: 12
+										145 container 方案
+											146 text 方案
+											147 pop up button Description: 方案, Value: 标准版
+												148 (selected) 标准版
+										149 container 偏好
+											150 text 偏好
+											151 container
+												152 radio button Description: 偏好：邮件通知, Value: 1
+												153 text 邮件通知
+											154 container
+												155 radio button Description: 偏好：短信通知, Value: 0
+												156 text 短信通知
+											157 container
+												158 radio button Description: 偏好：站内消息, Value: 0
+												159 text 站内消息
+										160 button 重置
+									161 text 已更新
+									162 disclosure triangle 操作记录 · 修订 1
+										163 text 操作记录 · 修订 1
+								164 text Crew
+								165 disclosure triangle 已工作 17 秒
+									166 text 已工作 17 秒
+								167 text 已以内联形式的原生组件展示，未生成任何网页文件。
+								168 content list
+									169 container
+										170 AXListMarker • 
+										171 text 两列布局 ：8 张图按 4 行、每行 2 张排列。
+									172 container
+										173 AXListMarker • 
+										174 text 横轴类型覆盖 ：折线图、面积图、堆叠面积图用日期横轴；柱状图、堆叠柱状图用中文类别（华东、华南、华北、西部）；散点图用数值横轴；饼图和环形图共用渠道分类。
+									175 container
+										176 AXListMarker • 
+										177 text 堆叠图 ：堆叠柱状图（线上 + 门店）与堆叠面积图（访问量 + 订单量）都是双系列。
+									178 container
+										179 AXListMarker • 
+										180 text 表单区 ：姓名文本框、数量数字框（1–100，步长 1）、方案下拉（基础版、标准版、旗舰版）、偏好单选（邮件通知、短信通知、站内消息），底部「重置」把全部输入恢复为默认值。
+								181 text 数据均为虚构小样本，仅用于界面渲染与交互测试。
+								182 text deepseek-v4-flash · 20:35
+								183 button 复制
+								184 button 看板（上下文 / 文件 / 计划 / 任务）
+							185 container
+								186 container
+									187 text entry area (settable) Description: 输入消息, Placeholder: 输入消息...
+									188 button 添加附件
+									189 pop up button 智能体, Help: Craft · Plan · Ask
+										190 text 智能体
+									191 pop up button 技能
+										192 text 技能
+									193 pop up button (disabled) 完全访问权限, Help: 功能正在开发中，敬请期待
+										194 text 完全访问权限
+									195 pop up button deepseek-v4-flash, Help: 选择模型
+										196 text deepseek-v4-flash
+									197 button 3.7% · 36.8K / 1.0M 上下文 · 实际用量
+									198 button (disabled) 发送
+							199 text 内容由 AI 生成，请仔细甄别
+					200 container 应用浮层
+201 menu bar
+	202 Electron
+	203 File
+	204 Edit
+	205 View
+	206 Window
+
+The focused UI element is 160 button 重置

@@ -1,0 +1,302 @@
+Window: "Crew", App: Electron.
+0 standard window Crew, Secondary Actions: Raise
+	1 container Crew
+		2 container
+			3 HTML content Crew, URL: file:///Users/yyangqin/Developer/Ace/desktop/dist/assets/index.html
+				4 container
+					5 container
+						6 button 最小化
+						7 button 最大化或还原
+						8 button 关闭
+					9 container
+						10 container 主导航
+							11 image Crew
+							12 container 主导航
+								13 button 对话
+								14 button 外援
+								15 button 技能
+								16 button 灵感
+								17 button 笔记
+								18 button 任务
+								19 button (disabled) 安全, Help: 功能正在开发中，敬请期待
+								20 button 追踪
+								21 button 系统
+							22 button 账户
+								23 text d
+								24 text dev
+							25 button 设置
+						26 container 上下文
+							27 text 对话
+							28 container 会话历史
+								29 search text field (settable) 搜索会话
+								30 button 新建对话
+								31 button 导入工作空间
+								32 button 管理会话
+								33 container 最近会话
+									34 container
+										35 button 项目 0
+											36 text 项目
+											37 text 0
+										38 button 同伴空间
+										39 button 设置工作空间：同伴空间
+										40 button 在 同伴空间 新建会话
+										41 text 尚无会话
+									42 container
+										43 button 对话 5
+											44 text 对话
+											45 text 5
+										46 container
+											47 button Description: 打开会话：请直接在这条回复里做一个可交互的方案比较, Help: 请直接在这条回复里做一个可交互的方案比较
+												48 text 请直接在这条回复里做一个可交互的方案比较
+												49 text 给我演示个案例吧，用蓝图技能
+												50 text 默认工作空间
+												51 text 12 小时前
+											52 button 管理会话：请直接在这条回复里做一个可交互的方案比较
+										53 container
+											54 button Description: 打开会话：请在回复里直接展示一个原生组件示例集，不, Help: 请在回复里直接展示一个原生组件示例集，不
+												55 text 请在回复里直接展示一个原生组件示例集，不
+												56 text 暂无预览
+												57 text 默认工作空间
+												58 text 13 小时前
+											59 button 管理会话：请在回复里直接展示一个原生组件示例集，不
+										60 container
+											61 button Description: 打开会话：你能展示哪些组件, Help: 你能展示哪些组件
+												62 text 你能展示哪些组件
+												63 text 暂无预览
+												64 text 默认工作空间
+												65 text 18 小时前
+											66 button 管理会话：你能展示哪些组件
+										67 container
+											68 button Description: 打开会话：新会话, Help: 新会话
+												69 text 新会话
+												70 text 暂无预览
+												71 text 默认工作空间
+												72 text 18 小时前
+											73 button 管理会话：新会话
+										74 container
+											75 button Description: 打开会话：新会话, Help: 新会话
+												76 text 新会话
+												77 text 暂无预览
+												78 text 默认工作空间
+												79 text 8/16
+											80 button 管理会话：新会话
+						81 splitter Description: 调整历史列表宽度, Help: 拖拽调整历史列表宽度，双击复位, Value: 270
+						82 container
+							83 button 收起历史
+							84 button Description: 打开浏览器，未运行, Help: 打开浏览器 (Ctrl/⌘+Shift+B)
+							85 container
+								86 text 请在回复里直接展示一个原生组件示例集，不生成网页文件：用很小的演示数据分别展示折线图、柱状图、面积图、堆叠柱状图、堆叠面积图、散点图、饼图、环形图。至少一张用日期横轴，一张用中文类别横轴，堆叠图包含两个系列。再带一个姓名文本框、数量数字框、方案下拉选择和偏好单选组，以及重置按钮。布局按两列图表排列，所有数据仅作界面测试。
+								87 text deepseek-v4-flash · 20:34
+								88 button 复制
+								89 button 撤回修改
+								90 container 原生组件示例集
+									91 heading 原生组件示例集, Value: 3
+										92 text 原生组件示例集
+									93 text 全部数据为界面测试用的虚构小样本，不代表真实业务。
+									94 container
+										95 heading 折线图 · 日期横轴, Value: 4
+											96 text 折线图 · 日期横轴
+										97 toggle button 访问量, Value: 1
+										98 image 折线图 · 日期横轴，共 7 条数据。日期 2026-10-01：访问量 120；日期 2026-10-02：访问量 148；日期 2026-10-03：访问量 132；日期 2026-10-04：访问量 172；日期 2026-10-05：访问量 196；日期 2026-10-06：访问量 181；日期 2026-10-07：访问量 214。左右方向键查看数据。
+										99 text 日期 2026-10-01 · 访问量 120 · 订单量 46
+										100 heading 柱状图 · 中文类别横轴, Value: 4
+											101 text 柱状图 · 中文类别横轴
+										102 toggle button 线上, Value: 1
+										103 image 柱状图 · 中文类别横轴，共 4 条数据。区域 华东：线上 32；区域 华南：线上 24；区域 华北：线上 18；区域 西部：线上 12。左右方向键查看数据。
+										104 text 区域 华东 · 线上 32 · 门店 18
+										105 heading 面积图 · 日期横轴, Value: 4
+											106 text 面积图 · 日期横轴
+										107 toggle button 订单量, Value: 1
+										108 image 面积图 · 日期横轴，共 7 条数据。日期 2026-10-01：订单量 46；日期 2026-10-02：订单量 54；日期 2026-10-03：订单量 51；日期 2026-10-04：订单量 63；日期 2026-10-05：订单量 78；日期 2026-10-06：订单量 71；日期 2026-10-07：订单量 88。左右方向键查看数据。
+										109 text 日期 2026-10-01 · 访问量 120 · 订单量 46
+										110 heading 堆叠柱状图 · 线上 + 门店, Value: 4
+											111 text 堆叠柱状图 · 线上 + 门店
+										112 toggle button 线上, Value: 0
+										113 toggle button 门店, Value: 1
+										114 image 堆叠柱状图 · 线上 + 门店，共 4 条数据。区域 华东：门店 18；区域 华南：门店 21；区域 华北：门店 15；区域 西部：门店 9。左右方向键查看数据。
+										115 text 区域 华东 · 线上 32 · 门店 18
+										116 heading 堆叠面积图 · 访问量 + 订单量, Value: 4
+											117 text 堆叠面积图 · 访问量 + 订单量
+										118 toggle button 访问量, Value: 1
+										119 toggle button 订单量, Value: 1
+										120 image 堆叠面积图 · 访问量 + 订单量，共 7 条数据。日期 2026-10-01：访问量 120，订单量 46；日期 2026-10-02：访问量 148，订单量 54；日期 2026-10-03：访问量 132，订单量 51；日期 2026-10-04：访问量 172，订单量 63；日期 2026-10-05：访问量 196，订单量 78；日期 2026-10-06：访问量 181，订单量 71；日期 2026-10-07：访问量 214，订单量 88。左右方向键查看数据。
+										121 text 日期 2026-10-01 · 访问量 120 · 订单量 46
+										122 heading 散点图 · 数值横轴, Value: 4
+											123 text 散点图 · 数值横轴
+										124 toggle button 产出, Value: 1
+										125 image 散点图 · 数值横轴，共 6 条数据。投入 8：产出 21；投入 12：产出 27；投入 15：产出 26；投入 19：产出 38；投入 23：产出 41；投入 28：产出 52。左右方向键查看数据。
+										126 text 投入 8 · 产出 21
+										127 heading 饼图 · 渠道占比, Value: 4
+											128 text 饼图 · 渠道占比
+										129 toggle button 占比, Value: 1
+										130 image 饼图 · 渠道占比，共 4 条数据。渠道 直营：占比 38；渠道 分销：占比 27；渠道 线上：占比 21；渠道 其他：占比 14。左右方向键查看数据。
+										131 text 渠道 直营 · 占比 38
+										132 heading 环形图 · 渠道占比, Value: 4
+											133 text 环形图 · 渠道占比
+										134 toggle button 占比, Value: 1
+										135 image 环形图 · 渠道占比，共 4 条数据。渠道 直营：占比 38；渠道 分销：占比 27；渠道 线上：占比 21；渠道 其他：占比 14。左右方向键查看数据。
+										136 text 渠道 直营 · 占比 38
+										137 heading 表单测试, Value: 4
+											138 text 表单测试
+										139 container 姓名
+											140 text 姓名
+											141 text field (disabled) 姓名
+										142 container 数量（件）
+											143 text 数量（件）
+											144 stepper (disabled) Description: 数量, Value: 12, Secondary Actions: Increment, Decrement
+										145 container 方案
+											146 text 方案
+											147 pop up button (disabled) Description: 方案, Value: 标准版
+										148 container 偏好
+											149 text 偏好
+											150 container
+												151 radio button (disabled) Description: 偏好：邮件通知, Value: 1
+												152 text 邮件通知
+											153 container
+												154 radio button (disabled) Description: 偏好：短信通知, Value: 0
+												155 text 短信通知
+											156 container
+												157 radio button (disabled) Description: 偏好：站内消息, Value: 0
+												158 text 站内消息
+										159 button (disabled) 重置
+									160 text 历史快照 · 修订 1
+									161 disclosure triangle 操作记录 · 修订 1
+										162 text 操作记录 · 修订 1
+								163 text Crew
+								164 disclosure triangle 已工作 17 秒
+									165 text 已工作 17 秒
+								166 text 已以内联形式的原生组件展示，未生成任何网页文件。
+								167 content list
+									168 container
+										169 AXListMarker • 
+										170 text 两列布局 ：8 张图按 4 行、每行 2 张排列。
+									171 container
+										172 AXListMarker • 
+										173 text 横轴类型覆盖 ：折线图、面积图、堆叠面积图用日期横轴；柱状图、堆叠柱状图用中文类别（华东、华南、华北、西部）；散点图用数值横轴；饼图和环形图共用渠道分类。
+									174 container
+										175 AXListMarker • 
+										176 text 堆叠图 ：堆叠柱状图（线上 + 门店）与堆叠面积图（访问量 + 订单量）都是双系列。
+									177 container
+										178 AXListMarker • 
+										179 text 表单区 ：姓名文本框、数量数字框（1–100，步长 1）、方案下拉（基础版、标准版、旗舰版）、偏好单选（邮件通知、短信通知、站内消息），底部「重置」把全部输入恢复为默认值。
+								180 text 数据均为虚构小样本，仅用于界面渲染与交互测试。
+								181 text deepseek-v4-flash · 20:35
+								182 button 复制
+								183 text 请更新刚才同一个原生组件（沿用组件 id、增加 revision）：标题改为“原生组件示例集（已更新）”，数量默认值改成20，其余八张图和表单保持。
+								184 text deepseek-v4-flash · 20:41
+								185 button 复制
+								186 button 撤回修改
+								187 container 原生组件示例集（已更新）
+									188 heading 原生组件示例集（已更新）, Value: 3
+										189 text 原生组件示例集（已更新）
+									190 text 全部数据为界面测试用的虚构小样本，不代表真实业务。
+									191 container
+										192 heading 折线图 · 日期横轴, Value: 4
+											193 text 折线图 · 日期横轴
+										194 toggle button 访问量, Value: 1
+										195 image 折线图 · 日期横轴，共 7 条数据。日期 2026-10-01：访问量 120；日期 2026-10-02：访问量 148；日期 2026-10-03：访问量 132；日期 2026-10-04：访问量 172；日期 2026-10-05：访问量 196；日期 2026-10-06：访问量 181；日期 2026-10-07：访问量 214。左右方向键查看数据。
+										196 text 日期 2026-10-01 · 访问量 120 · 订单量 46
+										197 heading 柱状图 · 中文类别横轴, Value: 4
+											198 text 柱状图 · 中文类别横轴
+										199 toggle button 线上, Value: 1
+										200 image 柱状图 · 中文类别横轴，共 4 条数据。区域 华东：线上 32；区域 华南：线上 24；区域 华北：线上 18；区域 西部：线上 12。左右方向键查看数据。
+										201 text 区域 华东 · 线上 32 · 门店 18
+										202 heading 面积图 · 日期横轴, Value: 4
+											203 text 面积图 · 日期横轴
+										204 toggle button 订单量, Value: 1
+										205 image 面积图 · 日期横轴，共 7 条数据。日期 2026-10-01：订单量 46；日期 2026-10-02：订单量 54；日期 2026-10-03：订单量 51；日期 2026-10-04：订单量 63；日期 2026-10-05：订单量 78；日期 2026-10-06：订单量 71；日期 2026-10-07：订单量 88。左右方向键查看数据。
+										206 text 日期 2026-10-01 · 访问量 120 · 订单量 46
+										207 heading 堆叠柱状图 · 线上 + 门店, Value: 4
+											208 text 堆叠柱状图 · 线上 + 门店
+										209 toggle button 线上, Value: 1
+										210 toggle button 门店, Value: 1
+										211 image 堆叠柱状图 · 线上 + 门店，共 4 条数据。区域 华东：线上 32，门店 18；区域 华南：线上 24，门店 21；区域 华北：线上 18，门店 15；区域 西部：线上 12，门店 9。左右方向键查看数据。
+										212 text 区域 华东 · 线上 32 · 门店 18
+										213 heading 堆叠面积图 · 访问量 + 订单量, Value: 4
+											214 text 堆叠面积图 · 访问量 + 订单量
+										215 toggle button 访问量, Value: 1
+										216 toggle button 订单量, Value: 1
+										217 image 堆叠面积图 · 访问量 + 订单量，共 7 条数据。日期 2026-10-01：访问量 120，订单量 46；日期 2026-10-02：访问量 148，订单量 54；日期 2026-10-03：访问量 132，订单量 51；日期 2026-10-04：访问量 172，订单量 63；日期 2026-10-05：访问量 196，订单量 78；日期 2026-10-06：访问量 181，订单量 71；日期 2026-10-07：访问量 214，订单量 88。左右方向键查看数据。
+										218 text 日期 2026-10-01 · 访问量 120 · 订单量 46
+										219 heading 散点图 · 数值横轴, Value: 4
+											220 text 散点图 · 数值横轴
+										221 toggle button 产出, Value: 1
+										222 image 散点图 · 数值横轴，共 6 条数据。投入 8：产出 21；投入 12：产出 27；投入 15：产出 26；投入 19：产出 38；投入 23：产出 41；投入 28：产出 52。左右方向键查看数据。
+										223 text 投入 8 · 产出 21
+										224 heading 饼图 · 渠道占比, Value: 4
+											225 text 饼图 · 渠道占比
+										226 toggle button 占比, Value: 1
+										227 image 饼图 · 渠道占比，共 4 条数据。渠道 直营：占比 38；渠道 分销：占比 27；渠道 线上：占比 21；渠道 其他：占比 14。左右方向键查看数据。
+										228 text 渠道 直营 · 占比 38
+										229 heading 环形图 · 渠道占比, Value: 4
+											230 text 环形图 · 渠道占比
+										231 toggle button 占比, Value: 1
+										232 image 环形图 · 渠道占比，共 4 条数据。渠道 直营：占比 38；渠道 分销：占比 27；渠道 线上：占比 21；渠道 其他：占比 14。左右方向键查看数据。
+										233 text 渠道 直营 · 占比 38
+										234 heading 表单测试, Value: 4
+											235 text 表单测试
+										236 container 姓名
+											237 text 姓名
+											238 text field (settable) 姓名
+										239 container 数量（件）
+											240 text 数量（件）
+											241 stepper (settable, float) Description: 数量, Value: 20
+										242 container 方案
+											243 text 方案
+											244 pop up button Description: 方案, Value: 标准版
+												245 (selected) 标准版
+										246 container 偏好
+											247 text 偏好
+											248 container
+												249 radio button Description: 偏好：邮件通知, Value: 1
+												250 text 邮件通知
+											251 container
+												252 radio button Description: 偏好：短信通知, Value: 0
+												253 text 短信通知
+											254 container
+												255 radio button Description: 偏好：站内消息, Value: 0
+												256 text 站内消息
+										257 button 重置
+								258 text Crew
+								259 disclosure triangle 已工作 7 秒
+									260 text 已工作 7 秒
+								261 container
+									262 text 已更新同一个组件（id  native_component_demo ，revision 从 1 改为 2）。
+								263 content list
+									264 container
+										265 AXListMarker • 
+										266 text 标题：原生组件示例集（已更新）
+									267 container
+										268 AXListMarker • 
+										269 text 数量默认值：12 → 20（单位「件」，范围 1–100，步长 1 保持不变）
+									270 container
+										271 AXListMarker • 
+										272 text 八张图表（折线、柱状、面积、堆叠柱状、堆叠面积、散点、饼图、环形图）、日期横轴与中文类别横轴、堆叠双系列、两列布局，以及姓名文本框、方案下拉、偏好单选和「重置」按钮均未改动，数据集也一致。
+								273 text 点击「重置」后，数量框会回到新的默认值 20。
+								274 text deepseek-v4-flash · 20:41
+								275 button 复制
+								276 button 看板（上下文 / 文件 / 计划 / 任务）
+							277 container
+								278 container
+									279 text entry area (settable) Description: 输入消息, Placeholder: 输入消息...
+									280 button 添加附件
+									281 pop up button 智能体, Help: Craft · Plan · Ask
+										282 text 智能体
+									283 pop up button 技能
+										284 text 技能
+									285 pop up button (disabled) 完全访问权限, Help: 功能正在开发中，敬请期待
+										286 text 完全访问权限
+									287 pop up button deepseek-v4-flash, Help: 选择模型
+										288 text deepseek-v4-flash
+									289 button 4.1% · 41.1K / 1.0M 上下文 · 打开会话时预估
+									290 button (disabled) 发送
+							291 text 内容由 AI 生成，请仔细甄别
+					292 container 应用浮层
+293 menu bar
+	294 Electron
+	295 File
+	296 Edit
+	297 View
+	298 Window
+
+The focused UI element is 54 button Description: 打开会话：请在回复里直接展示一个原生组件示例集，不, Help: 请在回复里直接展示一个原生组件示例集，不
