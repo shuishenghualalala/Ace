@@ -555,6 +555,44 @@ describe('browser panel control recovery', () => {
     await vi.waitFor(() => expect(commands).toContain('open-existing'));
   });
 
+  it('zooms via the native bridge and keeps the percentage synchronized with page shortcuts', async () => {
+    const navigationEvents: Array<(event: { tabLabel: string }) => void> = [];
+    const current = pageState({ tab_id: 'zoom-tab', tab_label: 'zoom-label', url: 'https://example.com/', mode: 'ai' });
+    const zoom = vi.fn(async (request: { action: string }) => ({ ok: true, zoomFactor: request.action === 'in' ? 1.1 : request.action === 'out' ? 0.9 : 1 }));
+    Object.defineProperty(window, 'Crew', { configurable: true, value: {
+      browserWsConnect: vi.fn().mockResolvedValue({ ok: true }),
+      browserWsClose: vi.fn().mockResolvedValue({ ok: true }),
+      browserViewHide: vi.fn().mockResolvedValue({ ok: true }),
+      browserViewZoom: zoom,
+      browserViewGetNavigation: vi.fn(async () => ({ ok: true, navigation: {
+        url: current.url, title: '', can_go_back: false, can_go_forward: false, zoom_factor: 0.75,
+      } })),
+      onBrowserWsEvent: vi.fn(() => () => undefined),
+      onBrowserViewLayoutInvalidated: vi.fn(() => () => undefined),
+      onBrowserViewNavigationChanged: vi.fn((callback) => { navigationEvents.push(callback); return () => undefined; }),
+    } });
+    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} });
+    vi.spyOn(backendApi, 'browserState').mockResolvedValue({ ok: true, state: current });
+    const control = vi.spyOn(backendApi, 'browserControl');
+    setActiveSessionId('session-zoom');
+    document.body.innerHTML = renderBrowserPanel();
+    bindBrowserPanel();
+    const button = (action: string) => document.querySelector<HTMLButtonElement>(`[data-browser-zoom="${action}"]`)!;
+    await vi.waitFor(() => expect(button('in').disabled).toBe(false));
+    button('in').click();
+    await vi.waitFor(() => expect(button('reset').textContent).toBe('110%'));
+    expect(zoom).toHaveBeenLastCalledWith({ sessionId: 'session-zoom', tabLabel: 'zoom-label', action: 'in' });
+    button('out').click();
+    await vi.waitFor(() => expect(button('reset').textContent).toBe('90%'));
+    const resetKey = new KeyboardEvent('keydown', { key: '0', ctrlKey: true, bubbles: true, cancelable: true });
+    document.querySelector('[data-browser-url]')!.dispatchEvent(resetKey);
+    expect(resetKey.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(button('reset').textContent).toBe('100%'));
+    navigationEvents[0]({ tabLabel: 'zoom-label' });
+    await vi.waitFor(() => expect(button('reset').textContent).toBe('75%'));
+    expect(control).not.toHaveBeenCalled();
+  });
+
   it('enables back and forward only from Chromium history state', async () => {
     const navigationEvents: Array<(event: { tabLabel: string }) => void> = [];
     const current = pageState({

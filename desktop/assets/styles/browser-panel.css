@@ -41,13 +41,14 @@
 .browser-tab-status.is-running { background: var(--mw-status-success-bg); opacity: 1; box-shadow: 0 0 0 3px color-mix(in srgb, color-mix(in srgb, var(--mw-status-success) 24%, transparent) 18%, transparent); }
 
 body.browser-workbench-open.history-workspace-active:has(#chat-tab.tab-pane.active.chat-mode):not(.studio-mode) .main-content {
-  grid-template-columns: minmax(220px, 1fr) var(--mw-browser-workbench-width);
+  /* 保存的是偏好宽度；实际宽度还要扣除左侧导航、会话列表和正文。 */
+  grid-template-columns: minmax(0, 1fr) minmax(0, min(var(--mw-browser-workbench-width), max(0px, calc(100% - 280px))));
 }
 
 body.browser-workbench-open #chat-inspector {
-  width: var(--mw-browser-workbench-width);
-  min-width: var(--mw-browser-workbench-width);
-  max-width: var(--mw-browser-workbench-width);
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
   box-shadow: none;
 }
 
@@ -70,9 +71,11 @@ body.browser-workbench-maximized #chat-inspector {
 
 .browser-panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 42px 40px minmax(240px, 1fr);
   height: 100%;
   min-height: 0;
+  min-width: 0;
   background: var(--mw-bg-surface);
   color: var(--mw-text-primary);
 }
@@ -166,17 +169,33 @@ body.browser-workbench-maximized #chat-inspector {
 
 .browser-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--mw-space-2);
-  height: 40px;
+  min-height: 40px;
   padding: var(--mw-space-1) var(--mw-space-2);
   border-bottom: 1px solid var(--mw-border-subtle);
   background: var(--mw-bg-subtle);
 }
 
 .browser-nav { display: flex; align-items: center; gap: var(--mw-space-1); }
+.browser-zoom { display: flex; flex: none; align-items: center; gap: 0; }
+.browser-zoom__reset {
+  min-width: 44px;
+  height: 29px;
+  padding: 0 var(--mw-space-1);
+  border: 0;
+  border-radius: var(--mw-radius-3);
+  background: transparent;
+  color: var(--mw-text-secondary);
+  font: var(--mw-type-caption-size)/1 var(--mw-font-sans);
+  cursor: pointer;
+}
+.browser-zoom__reset:hover:not(:disabled) { background: var(--mw-bg-selected); color: var(--mw-text-primary); }
+.browser-zoom__reset:disabled { opacity: .3; cursor: default; }
+.browser-zoom__reset:focus-visible { outline: 2px solid var(--mw-focus-ring); outline-offset: 2px; }
 .browser-url {
-  min-width: 0;
+  min-width: 80px;
   flex: 1;
   height: 30px;
   border: 1px solid transparent;

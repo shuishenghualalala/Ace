@@ -291,6 +291,29 @@ describe('conversation-renderer 双实例隔离', () => {
     disposeConversationRenderer('panel-b');
   });
 
+  it.each([false, true])('renders and updates a message containing invalid math (streaming=%s)', (streaming) => {
+    vi.mocked(reportRendererError).mockClear();
+    const panel = document.getElementById('panel-a')!;
+    const code = "$('#emptyState').hidden = true; $('#timeline').innerHTML = items;";
+    const content = `**页面更新**\n\n${code}\n\n正常公式 $E=mc^2$\n\n$# <img src=x onerror=alert(1)>$`;
+    const message: ChatMessage = { id: 'math-fallback', role: 'assistant', content, timestamp: 1, streaming };
+    replaceSessionMessages('sid-math', [message]);
+    renderConversation(panel, 'panel-a', 'sid-math');
+    const text = panel.querySelector('[data-text-for="math-fallback"]')!;
+    expect(text.textContent).toContain(code);
+    expect(text.querySelector('strong')?.textContent).toBe('页面更新');
+    expect(text.querySelector('.katex')).not.toBeNull();
+    expect(text.querySelector('img')).toBeNull();
+    expect(panel.textContent).not.toContain('该消息渲染失败');
+    expect(reportRendererError).not.toHaveBeenCalled();
+
+    replaceSessionMessages('sid-math', [{ ...message, content: `${content}\n\n后续内容继续显示。` }]);
+    renderConversation(panel, 'panel-a', 'sid-math');
+    expect(panel.textContent).toContain('后续内容继续显示。');
+    expect(panel.textContent).toContain(code);
+    expect(reportRendererError).not.toHaveBeenCalled();
+  });
+
   it('does not render legacy inline HTML snapshots', () => {
     const panel = document.getElementById('panel-a')!;
     appendSessionMessage('sid-a', { id: 'answer', role: 'assistant', content: '图表', timestamp: 1,

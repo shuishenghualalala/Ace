@@ -148,6 +148,15 @@ describe('Inspector browser-style workspace tabs', () => {
     (document.querySelector('[data-workspace-entry="browser:new"]') as HTMLButtonElement).click();
     expect(document.querySelector('[data-browser-panel]')).toBeTruthy();
     expect(document.querySelector('[data-browser-tab-strip]')?.textContent).toContain('新标签页');
+    const browserMaximize = document.querySelector<HTMLButtonElement>('[data-browser-shell="maximize"]');
+    expect(browserMaximize?.getAttribute('aria-pressed')).toBe('true');
+    expect(browserMaximize?.getAttribute('aria-label')).toBe('还原浏览器');
+    browserMaximize?.click();
+    expect(document.body.classList.contains('inspector-workspace-maximized')).toBe(false);
+    expect(browserMaximize?.getAttribute('aria-label')).toBe('展开浏览器');
+    browserMaximize?.click();
+    expect(document.body.classList.contains('inspector-workspace-maximized')).toBe(true);
+    expect(browserMaximize?.getAttribute('aria-label')).toBe('还原浏览器');
     await vi.waitFor(() => {
       expect(backendApi.browserControl).toHaveBeenCalledWith('sess-workspace', 'new_tab', '');
     });

@@ -157,11 +157,11 @@ const GATEWAY_PORT_MIN = 8000;
 const GATEWAY_PORT_MAX = 8009; // inclusive upper bound, max 10 attempts
 
 // A private standard scheme lets the sandboxed Browser WebContents render one
-// explicitly approved HTML artifact without granting arbitrary file:// access.
+// explicitly approved HTML artifact and its local static assets without file:// access.
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'crew-artifact',
-    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true },
   },
   {
     // 对话 UI 内联展示任务工作区图片（browser_use screenshot 导出），
@@ -4036,6 +4036,20 @@ function registerIpc() {
   trustedHandle('browser-view:hide', () => {
     browserHost?.hidePanel();
     return { ok: true };
+  });
+  trustedHandle('browser-view:zoom', (_event, raw: unknown) => {
+    const request = validateBrowserPanelIdentity(raw);
+    const action = (raw as Record<string, unknown>).action;
+    if (action !== 'in' && action !== 'out' && action !== 'reset') {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid browser zoom action`);
+    }
+    const runtimeKey = currentBrowserRuntimeKey();
+    if (!runtimeKey || !browserHost) return { ok: false, error: '桌面浏览器尚未连接' };
+    try {
+      return { ok: true, zoomFactor: browserHost.zoomPanel({ runtimeKey, ...request, action }) };
+    } catch (error) {
+      return { ok: false, error: (error instanceof Error ? error.message : '无法调整网页缩放').slice(0, 500) };
+    }
   });
   trustedHandle('browser-view:get-navigation', (_event, raw: unknown) => {
     const request = validateBrowserPanelIdentity(raw);

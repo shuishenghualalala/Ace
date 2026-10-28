@@ -336,6 +336,9 @@ vi.mock('electron', async () => {
     title = '';
     destroyed = false;
     focused = false;
+    zoomFactor = 1;
+    getZoomFactor(): number { return this.zoomFactor; }
+    setZoomFactor(factor: number): void { this.zoomFactor = factor; }
     opener: any = null;
     windowOpenHandler: ((details: any) => any) | null = null;
     canGoBackValue = false;
@@ -1797,6 +1800,39 @@ describe('BrowserHost', () => {
     await host.dispose();
   });
 
+  it('zooms the real page from controls, keyboard and wheel, and invalidates old screenshot coordinates', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    const created = await createTab(host);
+    const request = { runtimeKey: RUNTIME_KEY, sessionId: SESSION_ID, tabLabel: TAB_LABEL };
+    const contents = electron.views[0].webContents;
+    const updates = vi.fn();
+    host.on('tab-updated', updates);
+    expect(host.zoomPanel({ ...request, action: 'in' })).toBe(1.1);
+    expect(contents.getZoomFactor()).toBe(1.1);
+    expect(host.getPanelNavigation(request).zoom_factor).toBe(1.1);
+    const keyEvent = { preventDefault: vi.fn() };
+    contents.emit('before-input-event', keyEvent, { type: 'keyDown', key: '-', control: true });
+    expect(keyEvent.preventDefault).toHaveBeenCalled();
+    expect(contents.getZoomFactor()).toBe(1);
+    contents.emit('before-input-event', keyEvent, { type: 'keyDown', key: '=', meta: true });
+    expect(contents.getZoomFactor()).toBe(1.1);
+    contents.emit('before-input-event', keyEvent, { type: 'keyDown', key: '0', meta: true });
+    expect(contents.getZoomFactor()).toBe(1);
+    contents.emit('zoom-changed', {}, 'out');
+    expect(contents.getZoomFactor()).toBe(0.9);
+    expect(updates).toHaveBeenCalled();
+    expect(() => host.zoomPanel({ ...request, sessionId: 'another-session', action: 'in' })).toThrow();
+
+    const epoch = await captureHostEpoch(host);
+    host.zoomPanel({ ...request, action: 'reset' });
+    await expect(host.handleRpc({
+      runtime_key: RUNTIME_KEY, method: 'coordinate_click',
+      params: { profile_dir: PROFILE, proxy_url: PROXY_URL, target_id: created.data.targetId,
+        expected_epoch: epoch, x: 60, y: 40 },
+    })).rejects.toMatchObject({ code: 'invalid_visual_epoch' });
+    await host.dispose();
+  });
+
   it('serves an HTML artifact without blocking its arbitrary navigation and popup behavior', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
@@ -1805,7 +1841,11 @@ describe('BrowserHost', () => {
     const workspace = path.join(tempRoot, 'workspace');
     const artifact = path.join(workspace, 'index.html');
     await mkdir(workspace, { recursive: true });
+    await mkdir(path.join(workspace, 'data'), { recursive: true });
     await writeFile(artifact, '<!doctype html><title>Crew preview</title>', 'utf8');
+    await writeFile(path.join(workspace, 'styles.css'), 'body { color: red; }', 'utf8');
+    await writeFile(path.join(workspace, 'app.js'), 'window.previewReady = true;', 'utf8');
+    await writeFile(path.join(workspace, 'data/feed.json'), '{"items":[1,2]}', 'utf8');
 
     const preview: any = await host.handleRpc({
       runtime_key: RUNTIME_KEY,
@@ -1826,6 +1866,24 @@ describe('BrowserHost', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(await response.text()).toContain('Crew preview');
+    const csp = response.headers.get('content-security-policy')!;
+    expect(csp).toContain("script-src 'self'");
+    expect(csp).toContain("style-src 'self'");
+    expect(csp).toContain("connect-src 'self'");
+    expect(csp).toContain('sandbox allow-scripts allow-same-origin');
+    for (const [name, mime, contents] of [
+      ['styles.css', 'text/css', 'body { color: red; }'],
+      ['app.js', 'text/javascript', 'window.previewReady = true;'],
+      ['data/feed.json', 'application/json', '{"items":[1,2]}'],
+    ]) {
+      const resource = await handler(new Request(previewUrl.replace('/index.html', `/${name}?v=1`)));
+      expect(resource.status).toBe(200);
+      expect(resource.headers.get('content-type')).toContain(mime);
+      expect(await resource.text()).toBe(contents);
+    }
+    const head = await handler(new Request(previewUrl.replace('/index.html', '/styles.css'), { method: 'HEAD' }));
+    expect(head.status).toBe(200);
+    expect(await head.text()).toBe('');
 
     const artifactContents = electron.views[0].webContents;
     const sameDocument = { url: `${previewUrl}#section`, preventDefault: vi.fn() };
@@ -1851,6 +1909,7 @@ describe('BrowserHost', () => {
       params: { profile_dir: PROFILE, target_id: created.data.targetId },
     });
     expect((await handler(new Request(previewUrl))).status).toBe(404);
+    expect((await handler(new Request(previewUrl.replace('/index.html', '/styles.css')))).status).toBe(404);
     await host.dispose();
   });
 

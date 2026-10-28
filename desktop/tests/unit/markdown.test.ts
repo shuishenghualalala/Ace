@@ -4,6 +4,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { renderMarkdownHtml } from '../../src/ui/markdown';
+import { escapeHtml } from '../../src/shared/html';
 
 describe('renderMarkdownHtml', () => {
   it('empty / whitespace → empty string', () => {
@@ -191,6 +192,48 @@ describe('renderMarkdownHtml', () => {
   });
 
   // ---- 数学公式（micromark-extension-math + KaTeX）----
+
+  it.each([false, true])('preserves JavaScript selectors without crashing (streaming=%s)', (isStreaming) => {
+    const code = "$('#emptyState').hidden = true; $('#timeline').innerHTML = items;";
+    const out = renderMarkdownHtml(`**页面更新**\n\n${code}\n\n后续回复继续显示。`, { isStreaming });
+    expect(out).toContain('<strong>页面更新</strong>');
+    // Both dollar signs belong to the code and must survive the math fallback.
+    expect(out).toContain(escapeHtml("$('#emptyState').hidden = true; $"));
+    expect(out).toContain("('#timeline').innerHTML = items;");
+    expect(out).toContain('后续回复继续显示。');
+  });
+
+  it('keeps valid math rendered when another expression is invalid', () => {
+    const invalid = '$\\frac{1}{$';
+    const out = renderMarkdownHtml(`正常 $E=mc^2$，未完成公式 ${invalid}，后文。`);
+    expect(out).toContain('class="katex"');
+    expect(out).toContain(escapeHtml(invalid));
+    expect(out).toContain('后文。');
+  });
+
+  it('falls back for a broken display formula and continues parsing the next blocks', () => {
+    const invalid = '$$\n\\frac{\n$$';
+    const out = renderMarkdownHtml(`${invalid}\n\n**后续内容**\n\n- 第一项\n- 第二项`);
+    expect(out).toContain(escapeHtml(invalid));
+    expect(out).toContain('<strong>后续内容</strong>');
+    expect(out).toContain('<li>第二项</li>');
+  });
+
+  it('escapes HTML inside an invalid math fallback', () => {
+    const invalid = '$# <img src=x onerror=alert(1)>$';
+    const out = renderMarkdownHtml(invalid);
+    expect(out).toContain(escapeHtml(invalid));
+    expect(out).not.toContain('<img');
+  });
+
+  it('does not reinterpret selectors inside fenced or inline code', () => {
+    const code = "$('#emptyState').hidden = true; $('#timeline').innerHTML = items;";
+    for (const source of [`\`${code}\``, `\`\`\`js\n${code}\n\`\`\``]) {
+      const out = renderMarkdownHtml(source);
+      expect(out).toContain(code);
+      expect(out).not.toContain('math-inline');
+    }
+  });
 
   it('inline math $...$ 渲染成 KaTeX', () => {
     const out = renderMarkdownHtml('公式 $E=mc^2$ 在文中');

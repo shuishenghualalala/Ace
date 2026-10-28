@@ -3,6 +3,7 @@
 import { backendApi, type BrowserPageState } from '../backend-client';
 import { notify, state } from '../state';
 import { createBrowserInspector, replaceBrowserTabs } from './browser-inspector';
+import { BROWSER_ZOOM_FACTORS, browserZoomShortcut, type BrowserZoomAction } from '../../shared/browser-zoom';
 
 type BrowserEvent =
   | { type: 'state'; state: BrowserPageState }
@@ -26,6 +27,7 @@ type BrowserEvent =
   | { type: 'command_error' | 'error'; error: string };
 
 let pageState: BrowserPageState | null = null;
+let zoomFactor = 1;
 /** Wiki 页面没有 activeSessionId，允许固定工作区显式绑定一个会话。 */
 let sessionOverride: string | null = null;
 let panelRoot: ParentNode | null = typeof document !== 'undefined' ? document : null;
@@ -171,6 +173,7 @@ function switchBrowserPanelSession(
   socketOpen = false;
   streamStateRevision += 1;
   pageState = null;
+  zoomFactor = 1;
   takeoverPromptTab = '';
   loadFailure = null;
   // Remove stale tab chrome/status immediately. Waiting for the next session's
@@ -306,6 +309,9 @@ async function refreshPanelNavigation(tabLabel: string): Promise<void> {
     || pageState?.tab_label !== tabLabel
   ) return;
   const navigation = result.navigation;
+  if (typeof navigation.zoom_factor === 'number' && Number.isFinite(navigation.zoom_factor)) {
+    zoomFactor = navigation.zoom_factor;
+  }
   if (
     typeof navigation.url !== 'string'
     || typeof navigation.title !== 'string'
@@ -384,8 +390,9 @@ function isInternalControlNotice(message: string): boolean {
 
 export function renderBrowserPanel(): string {
   const value = pageState || defaultState();
-  const maximized = document.body.classList.contains('browser-workbench-maximized');
-  return createBrowserInspector(value, { maximized, nativeViewMounted }).outerHTML;
+  const maximized = document.body.classList.contains('inspector-workspace-maximized')
+    || document.body.classList.contains('browser-workbench-maximized');
+  return createBrowserInspector(value, { maximized, nativeViewMounted, zoomFactor }).outerHTML;
 
 }
 
@@ -415,6 +422,16 @@ export function bindBrowserPanel(root?: HTMLElement): void {
 
   panelQueryAll<HTMLButtonElement>('[data-browser-action]').forEach((button) => {
     button.addEventListener('click', () => void sendHumanControl(button.dataset.browserAction || ''));
+  });
+  panelQueryAll<HTMLButtonElement>('[data-browser-zoom]').forEach((button) => {
+    button.addEventListener('click', () => void changeBrowserZoom(button.dataset.browserZoom as BrowserZoomAction));
+  });
+  panelQuery<HTMLElement>('[data-browser-panel]')?.addEventListener('keydown', (event) => {
+    const action = browserZoomShortcut({ key: event.key, control: event.ctrlKey, meta: event.metaKey, alt: event.altKey });
+    if (!action) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void changeBrowserZoom(action);
   });
   panelQueryAll<HTMLButtonElement>('[data-browser-takeover-action]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -818,6 +835,7 @@ function syncNativeViewLayout(): void {
       const empty = panelQuery<HTMLElement>('[data-browser-empty]');
       if (empty) empty.hidden = true;
       updateStatus('');
+      if (pageState?.tab_label) void refreshPanelNavigation(pageState.tab_label);
       return;
     }
     nativeViewMounted = false;
@@ -869,6 +887,7 @@ async function sendControl(action: string, value = ''): Promise<void> {
 }
 
 function applyPageState(nextState: BrowserPageState): void {
+  if (pageState?.tab_label !== nextState.tab_label) zoomFactor = 1;
   const shouldAutoOpen = Boolean(
     nextState.tab_id
     && nextState.mode === 'ai'
@@ -894,6 +913,7 @@ function applyPageState(nextState: BrowserPageState): void {
 
 function patchChrome(): void {
   const value = pageState || defaultState();
+  patchZoomControls();
   const url = panelQuery<HTMLInputElement>('[data-browser-url]');
   if (url && document.activeElement !== url) url.value = displayUrl(value.url);
   if (url) url.readOnly = Boolean(value.tab_id && value.mode !== 'human');
@@ -939,6 +959,34 @@ function patchChrome(): void {
     else button.disabled = !canUseNavigation || isBlankBrowserUrl(value.url);
   });
   scheduleNativeViewLayout();
+}
+
+function patchZoomControls(): void {
+  panelQueryAll<HTMLButtonElement>('[data-browser-zoom]').forEach((button) => {
+    const action = button.dataset.browserZoom;
+    button.disabled = !pageState?.tab_id
+      || (action === 'out' && zoomFactor <= BROWSER_ZOOM_FACTORS[0] + 0.001)
+      || (action === 'in' && zoomFactor >= BROWSER_ZOOM_FACTORS.at(-1)! - 0.001);
+    if (action === 'reset') button.textContent = `${Math.round(zoomFactor * 100)}%`;
+  });
+}
+
+async function changeBrowserZoom(action: BrowserZoomAction): Promise<void> {
+  const sessionId = currentSession();
+  const tabLabel = pageState?.tab_label;
+  if (!sessionId || !tabLabel) return;
+  try {
+    const result = await window.Crew?.browserViewZoom?.({ sessionId, tabLabel, action });
+    if (currentSession() !== sessionId || pageState?.tab_label !== tabLabel) return;
+    if (!result?.ok || typeof result.zoomFactor !== 'number' || !Number.isFinite(result.zoomFactor)) {
+      updateStatus(result?.error || '无法调整网页缩放');
+      return;
+    }
+    zoomFactor = result.zoomFactor;
+    patchZoomControls();
+  } catch (error) {
+    updateStatus(`无法调整网页缩放：${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function updateStatus(message: string): void {

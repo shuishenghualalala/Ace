@@ -29,6 +29,8 @@ import * as pwActions from './browser/playwright-actions';
 import * as pwConsole from './browser/playwright-console';
 import * as pwNetwork from './browser/playwright-network';
 import { PlaywrightEngine } from './browser/playwright-engine';
+import { readArtifactResource, type ArtifactResourceRoot } from './browser/artifact-resources';
+import { browserZoomShortcut, nextBrowserZoom, type BrowserZoomAction } from '../shared/browser-zoom';
 import {
   locatorFromRef,
 } from './browser/playwright-compat';
@@ -115,6 +117,7 @@ export interface BrowserPanelNavigation {
   title: string;
   can_go_back: boolean;
   can_go_forward: boolean;
+  zoom_factor: number;
 }
 
 interface ProxyAuthState {
@@ -308,6 +311,7 @@ interface ArtifactGrant {
   tabId: string;
   content: ArrayBuffer;
   expiresAt: number;
+  resourceRoot: ArtifactResourceRoot;
 }
 
 interface BrowserOwner {
@@ -1509,7 +1513,26 @@ export class BrowserHost extends EventEmitter {
       title: normalizedText(contents.getTitle(), 2048),
       can_go_back: history.canGoBack(),
       can_go_forward: history.canGoForward(),
+      zoom_factor: contents.getZoomFactor(),
     };
+  }
+
+  zoomPanel(request: BrowserPanelCaptureRequest & { action: BrowserZoomAction }): number {
+    this.assertUsable();
+    const owner = this.requireOwner(runtimeKey(request.runtimeKey));
+    const tab = this.requirePanelTab(owner, request.sessionId, request.tabLabel);
+    return this.applyTabZoom(owner, tab, request.action);
+  }
+
+  private applyTabZoom(owner: BrowserOwner, tab: BrowserTab, action: BrowserZoomAction): number {
+    const contents = tab.view.webContents;
+    if (tab.crashed || contents.isDestroyed()) throw new BrowserHostError('浏览器标签页已停止', { code: 'tab_stopped' });
+    const factor = nextBrowserZoom(contents.getZoomFactor(), action);
+    contents.setZoomFactor(factor);
+    // User zoom changes the geometry of any previously captured coordinates.
+    tab.visualEpoch = null;
+    this.emit('tab-updated', this.publicTabEvent(owner, tab));
+    return factor;
   }
 
   async capturePanel(
@@ -2854,12 +2877,21 @@ export class BrowserHost extends EventEmitter {
   // 单向门。现在：拦截保留（租约外输入仍会和在途自动化抢页面），推断取消，滚轮放行。
   private attachTabEvents(owner: BrowserOwner, tab: BrowserTab): void {
     const contents = tab.view.webContents;
-    contents.on('before-input-event', (event, _input) => {
+    contents.on('before-input-event', (event, input) => {
+      const zoom = browserZoomShortcut(input);
+      if (zoom && tab.automationDepth === 0) {
+        event.preventDefault();
+        this.applyTabZoom(owner, tab, zoom);
+        return;
+      }
       // AI 模式下仍然拦截按键：租约外的原生输入会和自动化抢同一个页面。
       // 但**不再**据此推断接管——控制权只由显式动作改变。
       if (tab.mode !== 'human' && tab.automationDepth === 0) {
         event.preventDefault();
       }
+    });
+    contents.on('zoom-changed', (_event, direction) => {
+      this.applyTabZoom(owner, tab, direction);
     });
     // Electron 43 类型定义未包含 before-mouse-event，但运行时与单测均依赖它。
     const contentsWithMouseEvents = contents as Electron.WebContents & {
@@ -3634,29 +3666,34 @@ export class BrowserHost extends EventEmitter {
       if (
         !grant
         || grant.expiresAt <= Date.now()
-        || parsed.pathname !== '/index.html'
-        || parsed.search
+        || (parsed.pathname === '/index.html' && parsed.search)
       ) {
         if (grant?.expiresAt && grant.expiresAt <= Date.now()) owner.artifacts.delete(token);
         return new Response('Not Found', { status: 404 });
       }
+      const resource = parsed.pathname === '/index.html'
+        ? { content: grant.content, contentType: 'text/html; charset=utf-8' }
+        : await readArtifactResource(grant.resourceRoot, parsed.pathname);
+      if (!resource || owner.artifacts.get(token) !== grant || grant.expiresAt <= Date.now()) {
+        return new Response('Not Found', { status: 404 });
+      }
       const headers = {
         'Cache-Control': 'no-store',
-        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Type': resource.contentType,
         'Content-Security-Policy': [
           "default-src 'none'",
-          "script-src 'unsafe-inline' 'unsafe-eval' blob:",
-          "style-src 'unsafe-inline' data: blob:",
-          "connect-src 'none'",
-          "img-src data: blob:",
-          "font-src data:",
-          "media-src data: blob:",
+          "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:",
+          "style-src 'self' 'unsafe-inline' data: blob:",
+          "connect-src 'self'",
+          "img-src 'self' data: blob:",
+          "font-src 'self' data:",
+          "media-src 'self' data: blob:",
           "frame-src 'none'",
           "worker-src blob:",
           "object-src 'none'",
           "base-uri 'none'",
           "form-action 'none'",
-          'sandbox allow-scripts',
+          'sandbox allow-scripts allow-same-origin',
         ].join('; '),
         'Referrer-Policy': 'no-referrer',
         'Permissions-Policy': [
@@ -3671,7 +3708,7 @@ export class BrowserHost extends EventEmitter {
         'X-DNS-Prefetch-Control': 'off',
         'X-Content-Type-Options': 'nosniff',
       };
-      return new Response(request.method === 'HEAD' ? null : grant.content, { status: 200, headers });
+      return new Response(request.method === 'HEAD' ? null : resource.content, { status: 200, headers });
     });
     owner.artifactProtocolRegistered = true;
   }
@@ -3810,10 +3847,13 @@ export class BrowserHost extends EventEmitter {
       contentBytes.byteOffset,
       contentBytes.byteOffset + contentBytes.byteLength,
     ) as ArrayBuffer;
+    const resourceDirectory = path.dirname(file);
+    const resourceDirectoryInfo = await stat(resourceDirectory);
     owner.artifacts.set(token, {
       tabId: tab.tabId,
       content: contentBuffer,
       expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+      resourceRoot: { directory: resourceDirectory, dev: resourceDirectoryInfo.dev, ino: resourceDirectoryInfo.ino },
     });
     tab.artifactToken = token;
     const url = artifactUrl(token);

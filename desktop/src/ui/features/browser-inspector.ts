@@ -65,7 +65,7 @@ export function replaceBrowserTabs(
 
 export function createBrowserInspector(
   value: BrowserPageState,
-  options: { maximized: boolean; nativeViewMounted: boolean },
+  options: { maximized: boolean; nativeViewMounted: boolean; zoomFactor?: number },
 ): HTMLElement {
   const hasPage = Boolean(value.tab_id);
   const blankPage = !hasPage || isBlankUrl(value.url);
@@ -132,7 +132,24 @@ export function createBrowserInspector(
   address.inputMode = 'url';
   address.readOnly = value.mode !== 'human' && hasPage;
 
-  toolbar.append(navigation, address, returnToAi);
+  const zoom = document.createElement('div');
+  zoom.className = 'browser-zoom';
+  zoom.setAttribute('role', 'group');
+  zoom.setAttribute('aria-label', '网页缩放');
+  for (const [action, label, text] of [
+    ['out', '缩小网页', '−'], ['reset', '恢复网页缩放至 100%', `${Math.round((options.zoomFactor ?? 1) * 100)}%`], ['in', '放大网页', '+'],
+  ]) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = action === 'reset' ? 'browser-zoom__reset' : 'browser-icon-btn';
+    button.dataset.browserZoom = action;
+    button.textContent = text;
+    button.setAttribute('aria-label', label);
+    button.title = action === 'reset' ? '恢复 100%（Ctrl/Cmd+0）' : `${label}（Ctrl/Cmd+${action === 'in' ? '+' : '-'}）`;
+    button.disabled = !hasPage;
+    zoom.appendChild(button);
+  }
+  toolbar.append(navigation, address, zoom, returnToAi);
 
   const takeover = document.createElement('div');
   takeover.className = 'browser-takeover';

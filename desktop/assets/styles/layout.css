@@ -47,7 +47,7 @@ body.inspector-open:has(#chat-tab.tab-pane.active.chat-mode):not(.studio-mode) #
 
 /* 放大只覆盖会话正文与原 Inspector 区域，左侧应用导航和对话列表保持可见。 */
 body.inspector-workspace-maximized.history-workspace-active:has(#chat-tab.tab-pane.active.chat-mode):not(.studio-mode) #chat-inspector {
-    grid-column: 2 / -1;
+    grid-column: 1 / -1;
     grid-row: 1 / -1;
     z-index: 80;
     width: auto;
@@ -58,7 +58,7 @@ body.inspector-workspace-maximized.history-workspace-active:has(#chat-tab.tab-pa
 }
 
 body.inspector-workspace-maximized:has(#chat-tab.tab-pane.active.chat-mode) #chat-inspector {
-    grid-column: 2 / -1;
+    grid-column: 1 / -1;
     grid-row: 1 / -1;
     z-index: 80;
     width: auto;

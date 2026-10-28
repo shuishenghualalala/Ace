@@ -246,6 +246,8 @@ const api = {
     visible: boolean;
   }) => ipcRenderer.invoke('browser-view:set-panel', args),
   browserViewHide: () => ipcRenderer.invoke('browser-view:hide'),
+  browserViewZoom: (args: { sessionId: string; tabLabel: string; action: 'in' | 'out' | 'reset' }) =>
+    ipcRenderer.invoke('browser-view:zoom', args) as Promise<{ ok: boolean; zoomFactor?: number; error?: string }>,
   browserViewGetNavigation: (args: { sessionId: string; tabLabel: string }) =>
     ipcRenderer.invoke('browser-view:get-navigation', args) as Promise<{
       ok: boolean;
@@ -254,6 +256,7 @@ const api = {
         title: string;
         can_go_back: boolean;
         can_go_forward: boolean;
+        zoom_factor?: number;
       };
       error?: string;
     }>,

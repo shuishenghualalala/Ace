@@ -2516,6 +2516,10 @@ function toggleInspectorMaximized(): void {
   button?.setAttribute('aria-pressed', String(maximized));
   button?.setAttribute('aria-label', maximized ? '还原预览' : '放大预览');
   if (button) button.title = maximized ? '还原预览' : '放大预览';
+  const browserButton = document.querySelector<HTMLButtonElement>('[data-browser-shell="maximize"]');
+  browserButton?.setAttribute('aria-pressed', String(maximized));
+  browserButton?.setAttribute('aria-label', maximized ? '还原浏览器' : '展开浏览器');
+  if (browserButton) browserButton.title = maximized ? '还原浏览器' : '展开浏览器';
   window.dispatchEvent(new CustomEvent('inspector:layout-changed', { detail: { maximized } }));
   window.dispatchEvent(new Event('resize'));
 }
