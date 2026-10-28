@@ -4,7 +4,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 // 共享 mock 必须先于 chat-controller 加载，见 helpers/mock-chat-controller-deps.ts
 import './helpers/mock-chat-controller-deps';
-import { _resetQueueEditDraftForTests, dispatchWs, editQueueItem, sendMessage, sendInlineWidgetMessage } from '../../src/ui/features/chat-controller';
+import { _resetQueueEditDraftForTests, dispatchWs, editQueueItem, sendMessage, sendNativeVisualMessage } from '../../src/ui/features/chat-controller';
 import { enqueuePending, getPendingQueue, state } from '../../src/ui/state';
 import { __resetAllStoresForTest, authStore, configStore, messageStore, sessionStore, uiStore, workspaceStore } from '../../src/ui/stores/stores';
 
@@ -15,7 +15,7 @@ vi.mock('../../src/ui/features/session-model', async (importOriginal) => {
     persistDraftSessionModel: vi.fn(async () => undefined),
   };
 });
-vi.mock('../../src/ui/features/inline-widget-capability', () => ({ ensureInlineWidgetCapability: vi.fn(async () => undefined) }));
+vi.mock('../../src/ui/features/native-visual-capability', () => ({ ensureNativeVisualCapability: vi.fn(async () => undefined) }));
 beforeEach(() => {
   __resetAllStoresForTest();
   state.isLoggedIn = true;
@@ -141,11 +141,11 @@ describe('inline component submissions', () => {
     state.attachments = [{ id: 'draft-file', name: 'draft.txt' }] as never;
     const input = document.querySelector<HTMLTextAreaElement>('[data-composer-input]')!;
     input.value = '尚未发送的草稿';
-    expect(await sendInlineWidgetMessage('inline-s', '{"cost":100}')).toBe(true);
+    expect(await sendNativeVisualMessage('inline-s', '{"cost":100}')).toBe(true);
     expect(getPendingQueue('inline-s')[0]).toMatchObject({ query: '{"cost":100}', attachments: [] });
     expect(state.attachments[0].id).toBe('draft-file');
     expect(input.value).toBe('尚未发送的草稿');
-    expect(await sendInlineWidgetMessage('another-session', 'no')).toBe(false);
+    expect(await sendNativeVisualMessage('another-session', 'no')).toBe(false);
     expect(getPendingQueue('inline-s')).toHaveLength(1);
   });
 });

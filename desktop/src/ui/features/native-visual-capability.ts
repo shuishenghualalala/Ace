@@ -1,7 +1,7 @@
 import { backendApi } from '../backend-client';
 
 /** Enable the existing, authorization-filtered authoring capability for desktop built-in chat. */
-export async function ensureInlineWidgetCapability(sessionId: string, workspaceId: string, title: string): Promise<void> {
+export async function ensureNativeVisualCapability(sessionId: string, workspaceId: string, title: string): Promise<void> {
   await backendApi.ensureSession(sessionId, { workspace_id: workspaceId, title });
   const config = await backendApi.getSessionAgentConfig(sessionId);
   if (config.executor && config.executor !== 'builtin') return;

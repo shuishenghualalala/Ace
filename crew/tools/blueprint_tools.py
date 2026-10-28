@@ -75,8 +75,8 @@ def _schema(name: str, description: str, actions: list[str]) -> dict[str, Any]:
                 "runInput": {}, "kind": {"type": "string"}, "limit": {"type": "integer"},
                 "offset": {"type": "integer"}, "runId": {"type": "string"},
                 "spec": {"type": "object", "description": "Widget.render: declarative native chart/form. Read widget/references/native-visual.md. No HTML, files, create or validate required."},
-                "display": {"type": "string", "enum": ["panel", "inline"],
-                            "description": "Widget.show: inline embeds a self-contained interactive HTML snapshot in desktop chat. Use window.AceInteractive.state/setState for persisted parameters; the host provides a continue-analysis button. No network or external assets."},
+                "display": {"type": "string", "enum": ["panel"],
+                            "description": "Widget.show: display the HTML Widget in its independent panel. Use Widget.render for interactive content inside desktop chat."},
             },
             "required": ["action"],
             "additionalProperties": True,
@@ -207,20 +207,11 @@ def build_blueprint_tools(
         if action == "show":
             widget = store.get_widget(owner, widget_id)
             validation = manager.validate_widget_file(widget)
-            inline = {}
-            if args.get("display") == "inline":
-                if not session_id or validation["status"] != "valid":
-                    raise ValueError("内联展示需要有效会话及通过验证的 index.html")
-                html = (Path(widget["workspacePath"]) / "index.html").read_text(encoding="utf-8")
-                if len(html.encode("utf-8")) > 128_000:
-                    raise ValueError("内联组件 HTML 不能超过 128 KB；请精简为自包含页面或使用 panel")
-                inline = {"display": "inline", "version": 1, "html": html}
             return _response(widget, surface={
                 "kind": "inspiration", "mode": "widget", "sessionId": session_id,
                 "widgetId": widget_id, "title": widget["title"],
                 "resourceRevision": widget["resourceRevision"],
                 "status": "ready" if validation["status"] == "valid" else "preparing",
-                **inline,
             })
         if action == "delete":
             widget = store.get_widget(owner, widget_id)
@@ -343,9 +334,6 @@ def build_blueprint_tools(
         FunctionTool(
             name="Widget", toolset="blueprint", schema=WIDGET_SCHEMA, handler=widget_tool,
             display_name="App 组件", ui_label_template="管理组件 {title}", always_load=True,
-            # Keep bounded inline HTML intact through the registry's
-            # large-result pipeline, including JSON escaping overhead.
-            max_result_size_chars=1_000_000,
             result_policy_resolver=_blueprint_result_policy,
         ),
         FunctionTool(

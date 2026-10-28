@@ -20,7 +20,7 @@ This is a native frontend renderer: do not create a Widget asset, write HTML/JS,
 open a browser, or call validate/show for this flow. The HTML workflow below is
 for independent apps or existing HTML assets, not ordinary answer charts.
 
-Widget owns one responsive `index.html`, display data, input state, events, files, and workspace resources. Every surface renders `data.metadata.roots.workspaceRoot/index.html`.
+An HTML Widget owns one responsive `index.html`, display data, input state, events, files, and workspace resources. Its panel and Canvas surfaces render `data.metadata.roots.workspaceRoot/index.html`; native chat replies use `Widget.render` instead.
 
 ## Create And Show
 
@@ -48,16 +48,6 @@ Then:
 For appearance and responsive layout, load the widgetdesign skill with `skill_view(name="widgetdesign")`
 before writing HTML/CSS. It is an independent skill, not a file inside this directory; do not pass it
 as `file_path` of the `widget` skill, and do not load another Widget Design Skill for the same work.
-
-## Desktop Inline Answers
-
-For charts, calculators, sliders, number/text inputs and rich cards inside an Ace desktop answer,
-use `Widget.show` with `"display":"inline"` **after** writing and validating the HTML.
-Do not show the panel placeholder first for this flow. The default `panel` flow above is unchanged.
-Read `references/inline-runtime.md` for this desktop-only runtime; it is distinct from the
-DaimonWidget Automation runtime. A complete example is `examples/inline-revenue.html`.
-The show result contains a bounded immutable HTML snapshot for history replay; showing an updated
-Widget produces a new component. No Canvas, Automation, Binding or external API key is needed.
 
 ## Inspect And Modify An Existing Widget
 

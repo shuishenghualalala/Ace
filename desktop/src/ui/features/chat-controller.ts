@@ -55,7 +55,7 @@ import { syncCraftLabel, syncComposerModelLabel } from './composer-toolbar';
 import { syncModelUi } from './model-picker';
 import { resetToAgentMode } from './session-mode';
 import { isExternalTeamSession, persistDraftSessionModel, sessionDisplayModelLabel } from './session-model';
-import { ensureInlineWidgetCapability } from './inline-widget-capability';
+import { ensureNativeVisualCapability } from './native-visual-capability';
 import { renderSystemOverview } from './system-page';
 import { isInspectorOpen, getInspectorActiveTab, openBrowserWorkbench, openInspectorToTab, refreshInspector, refreshInspectorChrome, invalidateFileDiffCachePaths, setUsageSnapshot, resetPlanBoardDraft } from './inspector';
 import { clearSiteAnnotationDraft, composeSiteAnnotationMessage, hasSiteAnnotationDraft } from './sites-page';
@@ -1539,7 +1539,7 @@ export function editQueueItem(sessionId: string, index: number): void {
   }
 }
 
-const inlineCapabilitySessions = new Set<string>();
+const nativeVisualCapabilitySessions = new Set<string>();
 
 export async function dispatchWs(
   sessionId: string,
@@ -1560,11 +1560,11 @@ export async function dispatchWs(
     await persistDraftSessionModel(sessionId);
   }
   const capabilityKey = JSON.stringify([state.userInfo, sessionId]);
-  if (!inlineCapabilitySessions.has(capabilityKey) && state.backendConnected) {
+  if (!nativeVisualCapabilitySessions.has(capabilityKey) && state.backendConnected) {
     try {
-      await ensureInlineWidgetCapability(sessionId, workspaceForSessionDispatch(sessionId),
+      await ensureNativeVisualCapability(sessionId, workspaceForSessionDispatch(sessionId),
         state.sessions.find((item) => item.id === sessionId)?.title || '新会话');
-      inlineCapabilitySessions.add(capabilityKey);
+      nativeVisualCapabilitySessions.add(capabilityKey);
     } catch {
       // Older Gateways can still handle ordinary chat; retry capability setup next turn.
       notify('交互组件能力暂未就绪，本次仍可正常对话');
@@ -1670,7 +1670,7 @@ export async function dispatchWs(
 }
 
 /** Component actions never consume composer drafts, attachments or annotation drafts. */
-export async function sendInlineWidgetMessage(sessionId: string, text: string): Promise<boolean> {
+export async function sendNativeVisualMessage(sessionId: string, text: string): Promise<boolean> {
   if (!requireRendererLogin() || state.activeSessionId !== sessionId || !state.backendConnected) return false;
   if (isBusy(sessionId)) {
     enqueuePending(sessionId, {

@@ -45,7 +45,6 @@ import {
 import type { FollowupAnswer } from '../backend-client';
 import { attachCopyButtons } from './copy-button';
 import { renderMermaidBlocks } from './mermaid-render';
-import { hydrateInlineWidgets, renderInlineWidget } from './inline-widget';
 import { inlineSurfaces } from './inline-surfaces';
 import { hydrateNativeVisuals, renderNativeVisual } from './native-visual';
 import { showFileOpenMenu } from './file-open-menu';
@@ -779,10 +778,6 @@ export function renderConversation(
           ...(turnIdentity ? { identity: turnIdentity } : {}),
         }),
       );
-      for (const widget of surfaces?.widgets ?? []) {
-        // A separate keyed unit keeps the iframe alive while the answer streams.
-        pushPlan(widget.key, JSON.stringify(widget), () => renderInlineWidget(widget));
-      }
       i = j;
     }
     // 带 agentName 的 status（Dynamic Kanban 角色卡片）和 workflowProgress 面板走上面的 !isAgent 分支，
@@ -892,7 +887,6 @@ export function renderConversation(
   // Mermaid 图表：懒加载 mermaid.js 渲染 [data-mermaid] 占位。幂等，已渲染的跳过。
   // 不 await：渲染是异步的，不阻塞 DOM 布局；失败时保留源码占位，下次 patch 重试。
   void renderMermaidBlocks(container);
-  hydrateInlineWidgets(container);
   hydrateNativeVisuals(container);
   syncPermissionCardPositions(container);
   bindFollowupCard(container, hooks.followupHandlers ?? noopFollowupHandlers);

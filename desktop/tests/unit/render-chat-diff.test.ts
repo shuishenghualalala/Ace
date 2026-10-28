@@ -10,7 +10,6 @@
  */
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
-import { suppressUnsupportedIframeSchemeErrors } from './helpers/happy-dom';
 import {
   applyFoldState,
   createChatRenderCoalescer,
@@ -33,8 +32,6 @@ import {
 } from '../../src/ui/state';
 import nativeFixture from '../../../tests/fixtures/native-visual.json';
 import { reportRendererError } from '../../src/ui/renderer-error-report';
-
-suppressUnsupportedIframeSchemeErrors();
 
 // conversation-renderer 的重依赖：本文件只验证消息流渲染与 diff 缓存隔离，
 // 外部会话身份 / 看板 / 浏览器面板点击跳转不在此覆盖。
@@ -294,22 +291,15 @@ describe('conversation-renderer 双实例隔离', () => {
     disposeConversationRenderer('panel-b');
   });
 
-  it('keeps an inline iframe attached while its answer streams and later turns append', () => {
+  it('does not render legacy inline HTML snapshots', () => {
     const panel = document.getElementById('panel-a')!;
     appendSessionMessage('sid-a', { id: 'answer', role: 'assistant', content: '图表', timestamp: 1,
       toolCalls: [{ toolCallId: 'widget-show', name: 'Widget', status: 'done', startedAt: 0,
         result: JSON.stringify({ ok: true, surface: { display: 'inline', version: 1, mode: 'widget',
           sessionId: 'sid-a', widgetId: 'widget_123456789abc', title: '收益', status: 'ready', html: '<p>chart</p>' } }) }] });
     renderConversation(panel, 'panel-a', 'sid-a');
-    const frame = panel.querySelector('iframe')!;
-    expect(frame).not.toBeNull();
-    const observer = new MutationObserver(() => {});
-    observer.observe(panel, { childList: true, subtree: true });
-    appendSessionMessage('sid-a', { id: 'continuation', role: 'assistant', content: '继续解释', timestamp: 2 });
-    renderConversation(panel, 'panel-a', 'sid-a');
-    expect(panel.querySelector('iframe')).toBe(frame);
-    expect(observer.takeRecords().some(r => [...r.removedNodes].some(n => n === frame || n.contains(frame)))).toBe(false);
-    observer.disconnect();
+    expect(panel.querySelector('iframe')).toBeNull();
+    expect(panel.querySelector('.inline-widget')).toBeNull();
   });
 
   it('keeps native controls and their values while the answer streams', () => {

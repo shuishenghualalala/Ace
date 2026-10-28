@@ -1117,36 +1117,29 @@ async def test_blueprint_scheduler_restores_enabled_interval_automation(
 
 
 @pytest.mark.asyncio
-async def test_inline_widget_snapshot_survives_source_edit_and_ui_history_clipping(site_manager, tmp_path):
-    root = tmp_path / "inline-widget"
+async def test_widget_show_is_panel_only_without_inline_html(site_manager, tmp_path):
+    root = tmp_path / "panel-widget"
     root.mkdir()
-    # Exceed the registry's default 50K result limit while staying below the
-    # inline source limit. A registry spill would destroy the surface envelope.
-    original = '<!doctype html><html><body>' + 'interactive ' * 7000 + '</body></html>'
-    (root / 'index.html').write_text(original, encoding='utf-8')
+    (root / 'index.html').write_text('<!doctype html><html><body>panel</body></html>', encoding='utf-8')
     widget = site_manager.blueprint.store.create_widget('owner-1', 'ws-1', str(root), '收益', '')
     registry = Registry()
     register_blueprint_tools(registry, site_manager)
     contexts = [(current_owner_account_id, current_owner_account_id.set('owner-1')),
                 (current_session_id, current_session_id.set('session-1'))]
     try:
-        result = await registry.execute(ToolCall('inline-show', 'Widget', {
+        rejected = await registry.execute(ToolCall('inline-show', 'Widget', {
             'action': 'show', 'widgetId': widget['id'], 'display': 'inline',
         }))
-        detail = tool_result_detail_for_ui('Widget', result.content, max_len=100)
-        surface = json.loads(detail)['surface']
-        assert surface['html'] == original
-        assert surface['display'] == 'inline'
-        (root / 'index.html').write_text('<!doctype html><html><body>changed</body></html>')
-        from crew.gateway.routers.sessions import _tool_result_for_history
-        recovered = _tool_result_for_history(
-            ToolCall('inline-show', 'Widget', {'action': 'show'}), {'inline-show': result.content})
-        assert json.loads(recovered)['surface']['html'] == original
-        (root / 'index.html').write_text(original * 10, encoding='utf-8')
-        oversized = await registry.execute(ToolCall('too-large', 'Widget', {
-            'action': 'show', 'widgetId': widget['id'], 'display': 'inline',
+        assert 'inline' in rejected.content
+        assert 'surface' not in rejected.content
+
+        result = await registry.execute(ToolCall('panel-show', 'Widget', {
+            'action': 'show', 'widgetId': widget['id'], 'display': 'panel',
         }))
-        assert '128 KB' in oversized.content
+        surface = json.loads(tool_result_detail_for_ui('Widget', result.content))['surface']
+        assert surface['mode'] == 'widget'
+        assert 'html' not in surface
+        assert 'display' not in surface
     finally:
         for context, token in reversed(contexts):
             context.reset(token)

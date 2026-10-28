@@ -1271,19 +1271,6 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   height: 24px;
 }
 
-.inline-widget {
-  margin: var(--mw-space-3) 0 var(--mw-space-4) 44px;
-  padding: var(--mw-space-3);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-4);
-  min-width: 0;
-}
-.inline-widget > strong {
-  display: block;
-  margin-bottom: var(--mw-space-2);
-  color: var(--mw-text-primary);
-}
-
 /* Native answer visuals share the transcript surface and theme. */
 .native-visual {
   margin: var(--mw-space-4) 0 var(--mw-space-4) calc(38px + var(--mw-space-3) + var(--mw-space-4));
@@ -1323,31 +1310,3 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
 .native-visual__action:disabled { opacity: .5; cursor: default; }
 .native-visual__status { font-size: var(--mw-type-caption-size); color: var(--mw-text-secondary); }
 @media (width <= 480px) { .native-visual { margin-left: 0; } }
-.inline-widget > iframe {
-  display: block;
-  width: 100%;
-  height: 360px;
-  border: 0;
-  border-radius: var(--mw-radius-2);
-}
-.inline-widget__footer {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--mw-space-2);
-  margin-top: var(--mw-space-3);
-  font-size: var(--mw-type-caption-size);
-  color: var(--mw-text-secondary);
-}
-.inline-widget__footer > button {
-  padding: var(--mw-space-2) var(--mw-space-3);
-  border: 1px solid var(--mw-border-subtle);
-  border-radius: var(--mw-radius-2);
-  color: var(--mw-text-primary);
-  background: transparent;
-  cursor: pointer;
-}
-.inline-widget__footer > button:disabled { opacity: 0.55; cursor: default; }
-@media (width <= 480px) {
-  .inline-widget { margin-left: 0; }
-}
