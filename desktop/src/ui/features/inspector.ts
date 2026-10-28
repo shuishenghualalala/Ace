@@ -34,7 +34,8 @@ import {
   teamCollaborationTaskCount,
 } from './team-collaboration-board';
 import { isStudioView } from './studio-chrome-state';
-import { setRuntimeStyle, setRuntimeToken } from '../components/runtime-style';
+import { clearRuntimeToken, setRuntimeStyle, setRuntimeToken } from '../components/runtime-style';
+import { STORAGE_KEYS } from '../../shared/storage-keys';
 import {
   findModelOption,
   modelLabelForId,
@@ -2334,7 +2335,8 @@ export function prepareInspectorForSessionChange(): void {
 }
 
 // ─── 面板宽度：可拖拽 + 持久化 ──────────────────────────
-const INSPECTOR_WIDTH_KEY = 'crew.inspector.width';
+const INSPECTOR_WIDTH_KEY = STORAGE_KEYS.inspectorWidth;
+const BROWSER_WIDTH_KEY = STORAGE_KEYS.browserWorkbenchWidth;
 const INSPECTOR_MIN_WIDTH = 280;
 /** 默认宽度（上下文/计划等 Tab） */
 const INSPECTOR_DEFAULT_WIDTH = 320;
@@ -2371,16 +2373,22 @@ function loadInspectorWidth(): number {
   }
 }
 
-function applyInspectorWidth(width: number, persist: boolean): void {
+function isBrowserInspector(): boolean {
+  return document.body.classList.contains('browser-workbench-open');
+}
+
+function applyInspectorWidth(width: number, persist: boolean, browser = false): void {
   const w = clampWidth(width);
-  setRuntimeToken(document.documentElement, '--mw-inspector-width', `${w}px`);
+  setRuntimeToken(document.documentElement, browser ? '--mw-browser-workbench-width' : '--mw-inspector-width', `${w}px`);
   const handle = document.getElementById('chat-inspector-resize-handle');
-  handle?.setAttribute('aria-valuemin', String(INSPECTOR_MIN_WIDTH));
-  handle?.setAttribute('aria-valuemax', String(effectiveMaxInspectorWidth()));
-  handle?.setAttribute('aria-valuenow', String(w));
+  if (browser === isBrowserInspector()) {
+    handle?.setAttribute('aria-valuemin', String(INSPECTOR_MIN_WIDTH));
+    handle?.setAttribute('aria-valuemax', String(effectiveMaxInspectorWidth()));
+    handle?.setAttribute('aria-valuenow', String(w));
+  }
   if (persist) {
     try {
-      localStorage.setItem(INSPECTOR_WIDTH_KEY, String(w));
+      localStorage.setItem(browser ? BROWSER_WIDTH_KEY : INSPECTOR_WIDTH_KEY, String(w));
     } catch {
       /* quota / disabled */
     }
@@ -2408,6 +2416,12 @@ function bindInspectorResize(): void {
   if (!handle) return;
   // 启动时立即恢复用户上次拖出来的宽度
   applyInspectorWidth(loadInspectorWidth(), false);
+  try {
+    const savedBrowserWidth = localStorage.getItem(BROWSER_WIDTH_KEY);
+    if (savedBrowserWidth) applyInspectorWidth(parseInt(savedBrowserWidth, 10), false, true);
+  } catch {
+    /* storage disabled */
+  }
 
   let pointerId: number | null = null;
   let startX = 0;
@@ -2417,7 +2431,7 @@ function bindInspectorResize(): void {
     if (pointerId !== e.pointerId) return;
     // 把手在面板左侧，向左拖 = 变宽
     const delta = startX - e.clientX;
-    applyInspectorWidth(startWidth + delta, false);
+    applyInspectorWidth(startWidth + delta, false, isBrowserInspector());
   };
 
   const onUp = (e: PointerEvent): void => {
@@ -2428,8 +2442,10 @@ function bindInspectorResize(): void {
     document.body.classList.remove('inspector-resizing');
     // 手势结束时再持久化，避免拖拽过程中频繁写 localStorage
     try {
-      const cur = parseInt(document.documentElement.style.getPropertyValue('--mw-inspector-width'), 10);
-      if (!isNaN(cur)) localStorage.setItem(INSPECTOR_WIDTH_KEY, String(clampWidth(cur)));
+      const browser = isBrowserInspector();
+      const token = browser ? '--mw-browser-workbench-width' : '--mw-inspector-width';
+      const cur = parseInt(document.documentElement.style.getPropertyValue(token), 10);
+      if (!isNaN(cur)) localStorage.setItem(browser ? BROWSER_WIDTH_KEY : INSPECTOR_WIDTH_KEY, String(clampWidth(cur)));
     } catch {
       /* ignore */
     }
@@ -2461,12 +2477,20 @@ function bindInspectorResize(): void {
     const next = event.key === 'Home' ? INSPECTOR_MIN_WIDTH
       : event.key === 'End' ? effectiveMaxInspectorWidth()
         : current + (event.key === 'ArrowLeft' ? 24 : -24);
-    applyInspectorWidth(next, true);
+    applyInspectorWidth(next, true, isBrowserInspector());
   });
 
   // 双击复位到默认宽度
   handle.addEventListener('dblclick', () => {
     document.body.classList.remove('inspector-surface-auto-width');
+    if (isBrowserInspector()) {
+      // 清除覆盖值后恢复 CSS 的响应式浏览器默认宽度。
+      clearRuntimeToken(document.documentElement, '--mw-browser-workbench-width');
+      try { localStorage.removeItem(BROWSER_WIDTH_KEY); } catch { /* storage disabled */ }
+      const width = document.getElementById('chat-inspector')?.getBoundingClientRect().width;
+      if (width) handle.setAttribute('aria-valuenow', String(Math.round(width)));
+      return;
+    }
     applyInspectorWidth(INSPECTOR_DEFAULT_WIDTH, true);
   });
 
@@ -2478,6 +2502,10 @@ function bindInspectorResize(): void {
     const cur = parseInt(document.documentElement.style.getPropertyValue('--mw-inspector-width'), 10);
     if (Number.isFinite(cur) && cur > 0) {
       applyInspectorWidth(clampWidth(cur), false);
+    }
+    const browserWidth = parseInt(document.documentElement.style.getPropertyValue('--mw-browser-workbench-width'), 10);
+    if (Number.isFinite(browserWidth) && browserWidth > 0) {
+      applyInspectorWidth(browserWidth, false, true);
     }
   });
 }

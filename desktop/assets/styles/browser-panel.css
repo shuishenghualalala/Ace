@@ -53,6 +53,8 @@ body.browser-workbench-open #chat-inspector {
 
 body.browser-workbench-open .chat-inspector__head { display: none; }
 body.browser-workbench-open .chat-inspector__body { padding: 0; overflow: hidden; }
+/* 原生 WebContentsView 位于 DOM 上方，必须给分界线保留独立热区。 */
+body.browser-workbench-open .chat-inspector__workspace { padding-left: 6px; }
 body.browser-workbench-open .chat-inspector__resize-handle { z-index: 15; }
 body.browser-workbench-open .task-board-toggle { color: var(--mw-text-secondary); background: var(--mw-bg-surface); }
 

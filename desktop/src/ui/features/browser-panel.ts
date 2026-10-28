@@ -782,6 +782,9 @@ function syncNativeViewLayout(): void {
     || isBlankBrowserUrl(pageState.url)
     || !document.contains(stage)
     || document.visibilityState !== 'visible'
+    // Native views can intercept the renderer's captured pointer mid-drag.
+    // The class observer remounts the page at its new bounds after pointerup.
+    || document.body.classList.contains('inspector-resizing')
     || visibleBlockingOverlay()
     || loadFailureVisible()
   ) {

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { backendApi, type BrowserPageState } from '../../src/ui/backend-client';
 import {
   bindBrowserPanel,
+  hideBrowserPanelView,
   openBrowserArtifact,
   openUserBrowser,
   renderBrowserPanel,
@@ -695,6 +696,51 @@ describe('browser panel control recovery', () => {
     await vi.advanceTimersByTimeAsync(500);
 
     expect(connect).toHaveBeenCalledTimes(2);
+  });
+
+  it('detaches the native page during divider dragging and remounts it after release', async () => {
+    hideBrowserPanelView();
+    const hide = vi.fn().mockResolvedValue({ ok: true });
+    const mount = vi.fn().mockResolvedValue({ ok: true });
+    Object.defineProperty(window, 'Crew', {
+      configurable: true,
+      value: {
+        browserWsConnect: vi.fn().mockResolvedValue({ ok: true }),
+        browserWsClose: vi.fn().mockResolvedValue({ ok: true }),
+        browserViewHide: hide,
+        browserViewSetPanel: mount,
+        onBrowserWsEvent: vi.fn(() => () => undefined),
+        onBrowserViewLayoutInvalidated: vi.fn(() => () => undefined),
+      },
+    });
+    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} });
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    vi.spyOn(backendApi, 'browserState').mockResolvedValue({
+      ok: true,
+      state: pageState({ tab_id: 'resize-tab', tab_label: 'resize-tab', url: 'https://example.com' }),
+    });
+    setActiveSessionId('session-resize');
+    document.body.innerHTML = renderBrowserPanel();
+    const stage = document.querySelector<HTMLElement>('[data-browser-stage]')!;
+    vi.spyOn(stage, 'getBoundingClientRect').mockReturnValue({
+      x: 400, y: 120, left: 400, top: 120, right: 900, bottom: 600, width: 500, height: 480,
+    } as DOMRect);
+    bindBrowserPanel();
+    await vi.waitFor(() => expect(mount).toHaveBeenCalled());
+    hide.mockClear();
+    mount.mockClear();
+
+    document.body.classList.add('inspector-resizing');
+    try {
+      await vi.waitFor(() => expect(hide).toHaveBeenCalled());
+      expect(mount).not.toHaveBeenCalled();
+    } finally {
+      document.body.classList.remove('inspector-resizing');
+    }
+    await vi.waitFor(() => expect(mount).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'session-resize',
+      bounds: { x: 400, y: 120, width: 500, height: 480 },
+    })));
   });
 
   it('keeps the state channel active while the workbench is closed', async () => {
