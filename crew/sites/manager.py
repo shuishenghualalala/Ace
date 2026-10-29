@@ -393,7 +393,7 @@ class SiteManager:
                 f'style="grid-column:{int(layout["x"]) + 1}/span {int(layout["w"])};'
                 f'grid-row:{int(layout["y"]) + 1}/span {int(layout["h"])}">'
                 f'<iframe title="{escape(widget["title"])}" src="{escape(src)}" '
-                'sandbox="allow-scripts allow-forms allow-modals allow-same-origin"></iframe></section>'
+                'sandbox="allow-scripts allow-forms allow-modals allow-same-origin allow-popups"></iframe></section>'
             )
         empty = '<p class="empty">这个 App 还没有内容。</p>' if not cards else ""
         bridge = "" if offline else """

@@ -143,7 +143,7 @@ function renderDetail(el: HTMLElement, item: InspirationItem): void {
       <button class="sites-button" data-inspiration-pin>固定到桌面</button>
       <button class="sites-button is-danger" data-inspiration-delete>删除</button>
     </header>
-    <main class="inspiration-detail__stage"><div class="sites-frame-status" id="sites-preview-status">正在打开 App…</div><iframe id="sites-preview-frame" src="${escapeHtml(previewUrl(item))}" sandbox="allow-scripts allow-forms allow-modals allow-same-origin allow-downloads"></iframe></main>
+    <main class="inspiration-detail__stage"><div class="sites-frame-status" id="sites-preview-status">正在打开 App…</div><iframe id="sites-preview-frame" src="${escapeHtml(previewUrl(item))}" sandbox="allow-scripts allow-forms allow-modals allow-same-origin allow-downloads allow-popups"></iframe></main>
   </div>`;
   bindDetailEvents(item);
 }
@@ -364,7 +364,7 @@ function mountSiteSurface(site: LocalSite, annotate: boolean): void {
   const name = document.createElement('strong'); name.textContent = site.name;
   const mode = document.createElement('em'); mode.textContent = annotate ? '批注模式' : '使用中';
   title.append(icon, name, mode); tabs.replaceChildren(title);
-  body.innerHTML = `<div class="site-annotation-workbench"><div class="site-surface-toolbar"><button data-site-surface-mode="use">使用</button><button data-site-surface-mode="annotate">批注</button></div><div class="site-workbench-frame-wrap"><div class="sites-frame-status" id="site-workbench-status">正在打开 App…</div><iframe id="site-workbench-frame" src="${escapeHtml(previewUrl(site))}" sandbox="allow-scripts allow-forms allow-modals allow-same-origin allow-downloads"></iframe><div id="site-annotation-overlay" class="site-annotation-overlay" hidden></div></div></div>`;
+  body.innerHTML = `<div class="site-annotation-workbench"><div class="site-surface-toolbar"><button data-site-surface-mode="use">使用</button><button data-site-surface-mode="annotate">批注</button></div><div class="site-workbench-frame-wrap"><div class="sites-frame-status" id="site-workbench-status">正在打开 App…</div><iframe id="site-workbench-frame" src="${escapeHtml(previewUrl(site))}" sandbox="allow-scripts allow-forms allow-modals allow-same-origin allow-downloads allow-popups"></iframe><div id="site-annotation-overlay" class="site-annotation-overlay" hidden></div></div></div>`;
   document.body.classList.add('site-annotation-workbench-open');
   body.querySelectorAll<HTMLElement>('[data-site-surface-mode]').forEach((button) => button.addEventListener('click', () => {
     siteAnnotationMode = button.dataset.siteSurfaceMode === 'annotate';

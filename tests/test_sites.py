@@ -845,6 +845,9 @@ def test_blueprint_gateway_lists_canvas_and_serves_widget(
     assert listed.json()["canvases"][0]["widgetCount"] == 1
     detail = client.get(f"/api/sites/canvases/{canvas['id']}").json()
     assert detail["canvas"]["placements"][0]["mountId"] == placement["mountId"]
+    canvas_rendered = client.get(f"/api/sites/canvases/{canvas['id']}/render")
+    assert canvas_rendered.status_code == 200
+    assert 'sandbox="allow-scripts allow-forms allow-modals allow-same-origin allow-popups"' in canvas_rendered.text
     rendered = client.get(
         f"/api/sites/widgets/{widget['id']}/render?mount_id={placement['mountId']}"
     )

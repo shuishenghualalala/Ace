@@ -29,6 +29,7 @@ import {
   type ResolvedOwnedFile,
 } from './crew-file-protocol';
 import { registerSitePreviewProtocol } from './site-preview-protocol';
+import { installSitePreviewNavigation } from './site-preview-navigation';
 import { authorizeOwnedImagePath, writeOwnedImageToClipboard } from './image-clipboard';
 import {
   managedGatewayModeEnv,
@@ -1083,7 +1084,7 @@ function openInspirationWindow(inspirationId: string, title = '灵感'): Browser
   inspirationWindows.set(inspirationId, win);
   pushInspirationWindowState(inspirationId, true);
   const target = `ace-site://${encodeURIComponent(inspirationId)}/`;
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  installSitePreviewNavigation(win.webContents);
   win.webContents.on('will-navigate', (event, url) => {
     try {
       const parsed = new URL(url);
@@ -1140,7 +1141,7 @@ function createWindow() {
   if (!browserHostDisposePromise) ensureBrowserHost();
 
   mainWindow.loadFile(path.join(__dirname, '../assets/index.html'));
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  installSitePreviewNavigation(mainWindow.webContents);
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const expected = path.join(__dirname, '../assets/index.html');
     if (!isTrustedRendererFileUrl(url, expected)) event.preventDefault();
