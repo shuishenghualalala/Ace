@@ -340,6 +340,44 @@ async def _wait_raw_parsed(crew, owner: str, kb_id: str, title: str):
 
 
 @pytest.mark.asyncio
+async def test_work_kb_starts_empty_and_collects_attachments_across_sessions(crew_home, auth_headers):
+    """用户的工作库初始为空，随后自动汇集多个普通聊天会话的附件来源。"""
+    crew = build_app(enable_team=False)
+    app = create_app(crew)
+    owner = "A:uid-a"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        response = await client.get("/api/wiki/kbs")
+        assert response.status_code == 200
+        assert {kb["id"]: kb["name"] for kb in response.json()["kbs"]} == {
+            "default": "我的工作",
+            "tutorial": "LLM Wiki 使用教程",
+        }
+        assert crew._wiki_store.list_raws(owner, "default") == []
+        assert crew._wiki_store.list_all(owner, "default") == []
+
+        for session_id in ("work-chat-1", "work-chat-2"):
+            content = f"Attachment from {session_id}".encode()
+            response = await client.post("/api/upload", json={
+                "filename": f"{session_id}.txt",
+                "content": base64.b64encode(content).decode(),
+                "session_id": session_id,
+            })
+            assert response.status_code == 200
+            saved = await _wait_raw_parsed(crew, owner, "default", f"{session_id}.txt")
+            assert saved is not None
+            assert Path(saved.original_path).read_bytes() == content
+            assert content.decode() in Path(saved.parsed_path).read_text(encoding="utf-8")
+
+    assert {raw.title for raw in crew._wiki_store.list_raws(owner, "default")} == {
+        "work-chat-1.txt", "work-chat-2.txt",
+    }
+    assert crew._wiki_store.list_raws(owner, "tutorial") == []
+    assert crew._wiki_store.count_pages(owner, "tutorial") == 13
+    assert crew._wiki_store.list_raws("A:uid-b", "default") == []
+
+
+@pytest.mark.asyncio
 async def test_upload_captures_into_explicit_kb(crew_home, auth_headers):
     """上传带 kb_id 时附件收入该知识库，而不是 default。"""
     crew = build_app(enable_team=False)

@@ -1180,15 +1180,15 @@ def test_wiki_lint(tmp_path, auth_headers):
 def test_wiki_kb_crud(tmp_path, auth_headers):
     client, _app = _client(tmp_path)
 
-    # list initially only default after init
-    res = client.post("/api/wiki/init", headers=auth_headers)
-    assert res.status_code == 200
-
+    # 首次读取即可获得两个内置库，无需先调用初始化接口。
     res = client.get("/api/wiki/kbs", headers=auth_headers)
     assert res.status_code == 200
     data = res.json()
     assert data["ok"] is True
-    assert any(kb["id"] == "default" for kb in data["kbs"])
+    assert {kb["id"]: kb["name"] for kb in data["kbs"]} == {
+        "default": "我的工作",
+        "tutorial": "LLM Wiki 使用教程",
+    }
 
     # create
     res = client.post(

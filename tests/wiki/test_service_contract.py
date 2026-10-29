@@ -303,13 +303,10 @@ def test_kb_isolation_within_owner(make_service):
 def test_knowledge_base_lifecycle_and_delete_fail_behavior(make_service):
     service = make_service()
 
-    listed_ids = {kb.id for kb in service.list_knowledge_bases("owner-a")}
-    # 现状锁定：全新 owner 的列表只含惰性播种的教程库；"default" 要等
-    # initialize/ingest 等写入路径首次触碰后才会出现在列表里。
-    assert "tutorial" in listed_ids
-    assert "default" not in listed_ids
+    listed = {kb.id: kb.name for kb in service.list_knowledge_bases("owner-a")}
+    assert listed == {"default": "我的工作", "tutorial": "LLM Wiki 使用教程"}
     service.initialize("owner-a")
-    assert "default" in {kb.id for kb in service.list_knowledge_bases("owner-a")}
+    assert {kb.id: kb.name for kb in service.list_knowledge_bases("owner-a")} == listed
 
     created = service.create_knowledge_base("notes", "笔记", "owner-a")
     assert isinstance(created, KnowledgeBase)
@@ -334,6 +331,34 @@ def test_knowledge_base_lifecycle_and_delete_fail_behavior(make_service):
     assert (status.page_count, status.source_count, status.parsed_source_count) == (0, 0, 0)
     assert service.read_document("any-page", "owner-a", "notes") is None
     assert service.list_pages("owner-a", "notes") == []
+
+
+def test_default_knowledge_bases_are_per_owner_and_preserve_edits(make_service):
+    service = make_service()
+    expected = {"default": "我的工作", "tutorial": "LLM Wiki 使用教程"}
+    for owner in ("owner-a", "owner-b"):
+        assert {kb.id: kb.name for kb in service.list_knowledge_bases(owner)} == expected
+        # 「我的工作」仅初始化空库；预置页面只进入教程库。
+        status = service.index_status(owner, "default")
+        assert (status.page_count, status.source_count, status.parsed_source_count) == (0, 0, 0)
+        assert service.list_pages(owner, "default") == []
+        assert service.list_sources(owner, "default") == []
+        assert service.index_status(owner, "tutorial").page_count == 13
+
+    service.save_page(_topic_page("工作笔记", "用户的工作内容"), "owner-a")
+    tutorial_page = service.list_pages("owner-a", "tutorial")[0]
+    service.update_page(replace(tutorial_page, content="用户修改的教程"), "owner-a", "tutorial")
+
+    for owner in ("owner-a", "owner-b"):
+        assert {kb.id: kb.name for kb in service.list_knowledge_bases(owner)} == expected
+        assert {kb.id: kb.name for kb in service.list_knowledge_bases(owner)} == expected
+        assert service.index_status(owner, "tutorial").page_count == 13
+        assert service.read_vault_document("Home.md", owner) is not None
+
+    assert service.list_pages("owner-b") == []
+    assert service.list_pages("owner-a")[0].content == "用户的工作内容"
+    assert service.read_document(tutorial_page.id, "owner-a", "tutorial").content == "用户修改的教程"
+    assert service.read_document(tutorial_page.id, "owner-b", "tutorial").content != "用户修改的教程"
 
 
 # ---------------------------------------------------------------------------

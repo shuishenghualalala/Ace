@@ -423,6 +423,8 @@ class LocalWikiProvider:
     def list_knowledge_bases(self, owner_account_id: str) -> list[KnowledgeBase]:
         from crew.wiki.seed import ensure_tutorial_kb
 
+        # 首次读取列表就补齐默认库，不能依赖用户先初始化或写入内容。
+        self.initialize(owner_account_id)
         ensure_tutorial_kb(self.store, owner_account_id)
         return self.store.list_kbs(owner_account_id)
 
