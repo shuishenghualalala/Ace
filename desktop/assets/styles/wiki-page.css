@@ -22,6 +22,10 @@
 
 /* ── 页头 ── */
 
+.page-shell--wiki > .page-header {
+  padding-bottom: var(--mw-space-2);
+}
+
 .wiki-kb-select {
   width: clamp(128px, 12vw, 168px);
   min-width: 128px;
@@ -51,7 +55,8 @@
   /* 底部不留 padding：三条竖向分隔线（对话↔面板、目录↔详情）直接伸到窗口底边，
      对齐主对话 mw-chat-template 整列通高的版式；对话栏底部留白由 disclaimer 自带 padding 承担。
      右侧同样不留 padding：知识库面板（自带背景色）直接顶到窗口右边，滚动条贴窗缘（VSCode 风格） */
-  padding: var(--mw-space-5) 0 0 0;
+  /* 顶部留白统一由页头承担，避免两层 padding 叠出空档。 */
+  padding: 0;
 }
 
 /* 右侧知识库面板：整体固定宽度（内联 width，拖拽可调），内部目录 + 详情横向排布 */
@@ -2241,7 +2246,7 @@
 /* 窄窗口：目录区收窄，避免挤压详情区 */
 @media (max-width: 1100px) {
   .wiki-body {
-    padding: var(--mw-space-4) 0 0 var(--mw-space-5);
+    padding-left: var(--mw-space-5);
   }
 
   .wiki-list-pane {
