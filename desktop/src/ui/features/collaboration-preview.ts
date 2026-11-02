@@ -15,9 +15,16 @@ export interface CollaborationPreview {
 
 interface PreviewState { teamId: string; open: boolean; goal: string; loading: boolean; error: string; result: CollaborationPreview | null }
 const previews = new Map<string, PreviewState>();
+const configuredTeams = new Map<string, string>();
+export function setPreviewTeam(sessionId: string, teamId: string): void {
+  configuredTeams.set(sessionId, teamId);
+}
+function teamForSession(sessionId: string): string {
+  return state.activeExternalTeamIdBySession[sessionId] || configuredTeams.get(sessionId) || '';
+}
 function current(sessionId: string): PreviewState {
   let value = previews.get(sessionId);
-  const teamId = state.activeExternalTeamIdBySession[sessionId] || '';
+  const teamId = teamForSession(sessionId);
   if (!value || value.teamId !== teamId) {
     value = { teamId, open: false, goal: '', loading: false, error: '', result: null };
     previews.set(sessionId, value);
@@ -30,7 +37,7 @@ function refresh(sessionId: string): void {
 function e(value: unknown): string { return escapeHtml(String(value ?? '')); }
 
 export function renderCollaborationPreview(sessionId: string): string {
-  const teamId = state.activeExternalTeamIdBySession[sessionId] || '';
+  const teamId = teamForSession(sessionId);
   if (!teamId) return '';
   const item = current(sessionId);
   const plan = item.result?.plan;
@@ -70,7 +77,7 @@ export function activateCollaborationPreview(sessionId: string): void {
     item.goal = (event.currentTarget as HTMLTextAreaElement).value;
   });
   document.querySelector<HTMLButtonElement>('[data-preview-create]')?.addEventListener('click', () => {
-    const teamId = state.activeExternalTeamIdBySession[sessionId] || '';
+    const teamId = teamForSession(sessionId);
     const goal = item.goal.trim();
     if (!teamId || !goal) { item.error = '请先选择团队并填写任务。'; refresh(sessionId); return; }
     item.loading = true;

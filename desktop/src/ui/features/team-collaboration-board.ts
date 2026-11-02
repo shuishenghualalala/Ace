@@ -16,7 +16,7 @@ import {
 import type { ChatMessage } from '../chat-render';
 import { escapeHtml, notify, state } from '../state';
 import { setRuntimeStyle } from '../components/runtime-style';
-import { activateCollaborationPreview, renderCollaborationPreview } from './collaboration-preview';
+import { activateCollaborationPreview, renderCollaborationPreview, setPreviewTeam } from './collaboration-preview';
 
 const CREW_BUILTIN_AGENT_ID = 'crew::builtin';
 const TEAM_PLAN_SOURCES = new Set(['team_plan', 'team_kanban', 'team_flow_fallback']);
@@ -705,6 +705,7 @@ function inferredMembers(nodes: TeamFlowNode[]): TeamBoardMember[] {
 async function loadConfiguredTeam(sessionId: string): Promise<{ name: string; members: TeamBoardMember[] }> {
   const config = await backendApi.getSessionAgentConfig(sessionId).catch(() => null);
   const teamId = String(config?.team?.external_team_id || state.activeExternalTeamIdBySession[sessionId] || '').trim();
+  setPreviewTeam(sessionId, teamId);
   if (!teamId) return { name: '', members: [] };
   const [teams, agents, modelBinding] = await Promise.all([
     backendApi.externalTeams().catch(() => []),
