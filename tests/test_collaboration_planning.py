@@ -71,3 +71,17 @@ async def test_preview_splits_and_assigns_in_separate_calls(tmp_path):
     replay = await service.create(owner="owner", request_id="r", session_id="s", goal="调研并写作", team=team, provider=provider)
     assert replay["task"]["task_id"] == result["task"]["task_id"]
     assert provider.calls == 2
+
+
+def test_handoff_requires_same_team_and_preserves_assignment():
+    from crew.collaboration.planning.handoff import workflow_from_preview
+    members = [{"member_id": "a", "name": "A"}]
+    raw = {"work_units": [{**unit("work"), "candidate_member_id": "a", "candidate_reason": "适合"}]}
+    plan = make_plan(raw, members)
+    preview = {"state": "planned", "task": {"task_id": "t", "goal": "目标", "session_id": "s", "team": {
+        "team_id": "team", "team_updated_at": 1, "leader_id": "a", "members": members}}, "plan": plan}
+    output = workflow_from_preview(preview, team_id="team", session_id="s", goal="目标", team_updated_at=1)
+    assert output["nodes"][0]["assignee"] == "leader"
+    assert output["nodes"][0]["assignment_reason"] == "适合"
+    with pytest.raises(PlanningError):
+        workflow_from_preview(preview, team_id="team", session_id="s", goal="目标", team_updated_at=2)
