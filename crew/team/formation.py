@@ -29,7 +29,6 @@ from crew.team.roles import (
     all_role_public_payloads,
     compile_role_responsibility,
     crew_builtin_agent_public,
-    infer_role_key,
     intelligent_role_markdown,
     is_crew_builtin_agent,
     public_responsibility,
@@ -71,6 +70,11 @@ class FormationPlan:
     excluded_agent_ids: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    original_description: str = ""
+    formation_allow_system_fill: bool = True
+    runtime_allow_suggestions: bool = True
+    runtime_allow_auto_reassign: bool = True
+    member_capability_assessments: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -101,10 +105,12 @@ def confirmed_formation_plan(
         role_key = str(member.get("role_key") or prior.get("role_key") or "").strip()
         preset = role_preset(role_key)
         assigned = member.get("assigned_capabilities")
-        if not isinstance(assigned, list) or not assigned:
+        if not isinstance(assigned, list):
             assigned = member.get("capabilities")
-        if not isinstance(assigned, list) or not assigned:
-            assigned = prior.get("assigned_capabilities") or list(preset.get("capabilities") or [])
+        if not isinstance(assigned, list):
+            assigned = prior.get("assigned_capabilities")
+        if not isinstance(assigned, list):
+            assigned = list(preset.get("capabilities") or [])
         assigned = normalize_capabilities(assigned)
         all_assigned.extend(assigned)
         explicit_responsibility = (
@@ -120,7 +126,10 @@ def confirmed_formation_plan(
         prior_role_key = str(prior.get("role_key") or "").strip()
         if explicit_responsibility is not None:
             responsibility = public_responsibility(explicit_responsibility)
-        elif prior_responsibility is not None and prior_role_key == str(preset.get("key") or role_key):
+        elif prior_responsibility is not None and (
+            prior_role_key == str(preset.get("key") or role_key)
+            or prior.get("responsibility_source") == "user"
+        ):
             responsibility = public_responsibility(prior_responsibility)
         else:
             responsibility = public_responsibility(compile_role_responsibility(
@@ -153,6 +162,8 @@ def confirmed_formation_plan(
             "assigned_capabilities": assigned,
             "responsibility": responsibility,
             "responsibility_markdown": responsibility_markdown,
+            "responsibility_source": str(member.get("responsibility_source") or prior.get("responsibility_source") or "system"),
+            "original_user_responsibility": str(member.get("original_user_responsibility") or prior.get("original_user_responsibility") or ""),
             "selection_source": str(prior.get("selection_source") or "user"),
             "locked": bool(prior.get("locked", True)),
             "selection_reason": str(prior.get("selection_reason") or "用户确认的团队成员。"),
@@ -162,15 +173,35 @@ def confirmed_formation_plan(
     required = normalize_capabilities(prior_coverage.get("required") or [])
     if not required:
         required = list(dict.fromkeys(all_assigned))
-    covered = list(dict.fromkeys(item for item in all_assigned if item in required))
-    uncovered = [item for item in required if item not in covered]
+    has_profile_coverage = any(
+        isinstance(prior_coverage.get(key), list)
+        for key in ("covered", "uncovered", "unverified", "unavailable")
+    )
+    if has_profile_coverage:
+        covered = [item for item in normalize_capabilities(prior_coverage.get("covered") or []) if item in required]
+        uncovered = [item for item in normalize_capabilities(prior_coverage.get("uncovered") or []) if item in required]
+        unverified = [item for item in normalize_capabilities(prior_coverage.get("unverified") or []) if item in required]
+        unavailable = [item for item in normalize_capabilities(prior_coverage.get("unavailable") or []) if item in required]
+        classified = set(covered) | set(uncovered) | set(unverified) | set(unavailable)
+        unverified.extend(item for item in required if item not in classified)
+    else:
+        covered = list(dict.fromkeys(item for item in all_assigned if item in required))
+        uncovered = [item for item in required if item not in covered]
+        unverified = []
+        unavailable = []
     confidence = current.get("confidence") if isinstance(current.get("confidence"), dict) else {}
     coverage_score = (len(covered) / len(required)) if required else 1.0
     return FormationPlan(
         version=max(1, int(current.get("version") or 1)),
         leader_agent_id=leader_agent_id,
         members=normalized_members,
-        coverage={"required": required, "covered": covered, "uncovered": uncovered},
+        coverage={
+            "required": required,
+            "covered": covered,
+            "uncovered": uncovered,
+            "unverified": list(dict.fromkeys(unverified)),
+            "unavailable": unavailable,
+        },
         confidence={
             "requirement": _clamp_score(confidence.get("requirement"), 1.0),
             "capability_evidence": _clamp_score(confidence.get("capability_evidence"), 0.15),
@@ -181,6 +212,21 @@ def confirmed_formation_plan(
         excluded_agent_ids=[str(item) for item in (current.get("excluded_agent_ids") or []) if str(item)],
         reasons=[str(item) for item in (current.get("reasons") or ["用户确认团队成员与职责。"]) if str(item)],
         warnings=[str(item) for item in (current.get("warnings") or []) if str(item)],
+        original_description=str(current.get("original_description") or ""),
+        formation_allow_system_fill=current.get("formation_allow_system_fill") is not False,
+        runtime_allow_suggestions=current.get("runtime_allow_suggestions") is not False,
+        runtime_allow_auto_reassign=current.get("runtime_allow_auto_reassign") is not False,
+        member_capability_assessments=[
+            {"agent_id": str(item.get("agent_id") or ""), "role_key": str(item.get("role_key") or ""),
+             **({"available": item["available"]} if isinstance(item.get("available"), bool) else {}),
+             "coverage": dict(item.get("coverage") or {})}
+            for item in (current.get("member_capability_assessments") or [])
+            if isinstance(item, dict) and any(
+                member["agent_id"] == str(item.get("agent_id") or "")
+                and member["role_key"] == str(item.get("role_key") or "") for member in normalized_members
+            )
+            and isinstance(item.get("coverage"), dict)
+        ],
     ).to_dict()
 
 
@@ -445,7 +491,7 @@ def _role_key_for_capabilities(capabilities: list[str]) -> str:
     for capability in CAPABILITIES:
         if capability in caps and capability != "planning":
             return CAPABILITY_ROLE_KEYS[capability]
-    return "fullstack_developer"
+    return "unclassified"
 
 
 def _slot_role_key(slot: dict[str, Any]) -> str:
@@ -453,7 +499,7 @@ def _slot_role_key(slot: dict[str, Any]) -> str:
     if role_key:
         return role_key
     capability = normalize_capability(slot.get("capability"))
-    return CAPABILITY_ROLE_KEYS.get(capability, "fullstack_developer")
+    return CAPABILITY_ROLE_KEYS.get(capability, "unclassified")
 
 
 def _slot_capability(slot: dict[str, Any]) -> str:
@@ -469,6 +515,8 @@ def _capability_for_role_key(role_key: str) -> str:
     capabilities = normalize_capabilities(preset.get("capabilities") or [])
     if capabilities:
         return next((capability for capability in capabilities if capability != "planning"), "planning")
+    if preset.get("key") == "unclassified":
+        return ""
     lane = str(preset.get("workflow_lane") or "").lower()
     if lane == "design":
         return "design"
@@ -492,7 +540,7 @@ def _member_payload(
     selection_reason: str,
 ) -> dict[str, Any]:
     preset = role_preset(role_key)
-    assigned_capabilities = normalize_capabilities(capabilities or list(preset.get("capabilities") or []))
+    assigned_capabilities = normalize_capabilities(capabilities)
     compiled_responsibility = compile_role_responsibility(
         role_key=str(preset["key"]),
         team_goal=description,
@@ -563,18 +611,21 @@ def _resolve_responsibility_overlaps(
     """Remove redundant system picks while preserving every user-locked member."""
 
     kept: list[dict[str, Any]] = []
-    signature_index: dict[tuple[str, str, tuple[str, ...], tuple[str, ...]], int] = {}
+    signature_index: dict[tuple[Any, ...], int] = {}
     warnings: list[str] = []
     for member in members:
         agent_id = str(member.get("agent_id") or "")
         if agent_id == leader_id:
             kept.append(member)
             continue
+        responsibility = member.get("responsibility") if isinstance(member.get("responsibility"), dict) else {}
         signature = responsibility_signature(
             role_key=str(member.get("role_key") or ""),
             assigned_capabilities=list(member.get("assigned_capabilities") or []),
-            responsibility=member.get("responsibility") if isinstance(member.get("responsibility"), dict) else None,
+            responsibility=responsibility or None,
         )
+        mission = " ".join(str(responsibility.get("mission") or "").lower().split())
+        signature = (*signature, mission)
         prior_index = signature_index.get(signature)
         if prior_index is None:
             signature_index[signature] = len(kept)
@@ -606,76 +657,43 @@ def _choose_minimal_team(
     leader_id: str,
     constraints: FormationConstraints,
 ) -> dict[str, list[str]]:
-    assignment: dict[str, list[str]] = {}
-    uncovered = set(required_capabilities)
-    for capability, agent_id in constraints.assignments.items():
-        profile = profiles.get(agent_id)
-        if (
-            capability in uncovered
-            and agent_id not in constraints.excluded_agent_ids
-            and profile is not None
-            and is_agent_profile_available(profile)
-        ):
-            assignment.setdefault(agent_id, []).append(capability)
-            uncovered.remove(capability)
-    for agent_id in constraints.required_agent_ids:
-        if agent_id != leader_id and agent_id not in constraints.excluded_agent_ids:
-            profile = profiles.get(agent_id)
-            if profile is None or not is_agent_profile_available(profile):
-                continue
-            assigned = assignment.setdefault(agent_id, [])
-            if not assigned and uncovered:
-                best_capability = max(
-                    uncovered,
-                    key=lambda capability: profile.score(capability),
-                )
-                assigned.append(best_capability)
-                uncovered.remove(best_capability)
-    while uncovered and constraints.allow_system_fill:
-        best_agent: dict[str, Any] | None = None
-        best_cover: list[str] = []
-        best_score = -1.0
-        for agent in candidates:
-            agent_id = str(agent.get("id") or "")
-            if not agent_id or agent_id == leader_id or agent_id in constraints.excluded_agent_ids:
-                continue
-            profile = profiles[agent_id]
-            if not is_agent_profile_available(profile):
-                continue
-            coverage = evaluate_capability_coverage(
-                uncovered,
-                {agent_id: profile},
-                assigned_agent_ids=[agent_id],
-            )
-            cover = list(coverage.covered)
-            if not cover:
-                continue
-            score = sum(profile.score(cap) for cap in cover)
-            if score > best_score:
-                best_agent = agent
-                best_cover = cover
-                best_score = score
-        if best_agent is None:
-            for agent in candidates:
-                agent_id = str(agent.get("id") or "")
-                if not agent_id or agent_id == leader_id or agent_id in constraints.excluded_agent_ids:
-                    continue
-                profile = profiles[agent_id]
-                if not is_agent_profile_available(profile):
-                    continue
-                best_agent = agent
-                best_cover = list(uncovered)
-                break
-        if best_agent is None:
-            break
-        agent_id = str(best_agent.get("id") or "")
-        assignment.setdefault(agent_id, []).extend(best_cover)
-        uncovered.difference_update(best_cover)
-    return assignment
+    from crew.collaboration.formation.selection import select_members
+
+    return select_members(
+        required_capabilities=required_capabilities, candidates=candidates, profiles=profiles,
+        leader_id=leader_id, required_ids=constraints.required_agent_ids,
+        excluded_ids=constraints.excluded_agent_ids,
+        capability_assignments=constraints.assignments, allow_system_fill=constraints.allow_system_fill,
+    )
 
 
 def _profile_available_for_formation(profile: AgentProfile) -> bool:
     return is_agent_profile_available(profile)
+
+
+def _apply_user_assignments(
+    members: list[dict[str, Any]],
+    assignments: dict[str, dict[str, Any]],
+) -> None:
+    """Keep user duties and explicit roles without inferring a preset from vague text."""
+    known_roles = {str(role.get("key") or "") for role in all_role_public_payloads()}
+    for member in members:
+        assignment = assignments.get(str(member.get("agent_id") or "")) or {}
+        role_key = str(assignment.get("role_key") or "").strip()
+        text = str(assignment.get("responsibility") or "").strip()
+        if role_key in known_roles:
+            preset = role_preset(role_key)
+            member["role_key"] = role_key
+            member["role_label"] = preset.get("label") or role_key
+            member["workflow_lane"] = preset.get("workflow_lane") or ""
+            member["assigned_capabilities"] = normalize_capabilities(preset.get("capabilities") or [])
+            member["capabilities"] = list(member["assigned_capabilities"])
+        if text:
+            responsibility = dict(member.get("responsibility") or {})
+            responsibility["mission"] = text
+            member["responsibility"] = responsibility
+            member["responsibility_source"] = "user"
+            member["selection_reason"] = "保留用户指定的职责。"
 
 
 def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) -> dict[str, Any]:
@@ -694,6 +712,12 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
 
     agent_by_id = {str(agent.get("id") or ""): agent for agent in all_agents}
     valid_ids = set(agent_by_id)
+    raw_assignments = payload.get("member_assignments")
+    user_assignments = {
+        str(item.get("agent_id") or "").strip(): item
+        for item in (raw_assignments if isinstance(raw_assignments, list) else [])
+        if isinstance(item, dict) and str(item.get("agent_id") or "").strip() in valid_ids
+    }
     if not has_slots:
         structured_required = _payload_agent_ids(payload, "required_agent_ids", valid_ids)
         structured_excluded = _payload_agent_ids(payload, "excluded_agent_ids", valid_ids)
@@ -701,7 +725,19 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
         constraints.required_agent_ids.update(structured_required)
         constraints.excluded_agent_ids.update(structured_excluded)
         constraints.forced_agent_ids.update(structured_forced & structured_required)
+        constraints.required_agent_ids.update(user_assignments)
+        constraints.forced_agent_ids.update(user_assignments)
+        if payload.get("allow_system_fill") is False:
+            constraints.allow_system_fill = False
     requested_leader = str(payload.get("leader_agent_id") or "").strip()
+    leader_conflicts: list[dict[str, Any]] = []
+    if requested_leader and requested_leader not in valid_ids:
+        leader_conflicts.append({
+            "agent_id": requested_leader, "agent_name": requested_leader,
+            "required_capabilities": [], "matched_capabilities": [],
+            "best_score": 0.0, "best_confidence": 1.0,
+            "reason": "指定的 Leader 不存在或当前账号无法使用，请重新选择。",
+        })
     leader_id = requested_leader if requested_leader in valid_ids else ""
     if not leader_id and constraints.leader_agent_id in valid_ids:
         leader_id = constraints.leader_agent_id
@@ -717,6 +753,12 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
     excluded = set(constraints.excluded_agent_ids)
     if leader_id in excluded:
         constraints.conflicts.append(f"{_agent_name(agent_by_id[leader_id])} 同时被指定为 Leader 和排除。")
+        leader_conflicts.append({
+            "agent_id": leader_id, "agent_name": _agent_name(agent_by_id[leader_id]),
+            "required_capabilities": [], "matched_capabilities": [],
+            "best_score": 0.0, "best_confidence": 1.0,
+            "reason": "该成员同时被指定为 Leader 和排除，请调整组队要求。",
+        })
         excluded.discard(leader_id)
     candidates = [agent for agent in all_agents if str(agent.get("id") or "") not in excluded]
 
@@ -732,9 +774,20 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
         constraints.conflicts.append(
             f"{_agent_name(agent_by_id[leader_id])} 当前运行时或模型不可用，Leader 已改为 Crew 内置智能体。"
         )
+        leader_conflicts.append({
+            "agent_id": leader_id, "agent_name": _agent_name(agent_by_id[leader_id]),
+            "required_capabilities": [], "matched_capabilities": [],
+            "best_score": 0.0, "best_confidence": 1.0,
+            "reason": "指定的 Leader 当前运行时或模型不可用，请重新选择。",
+        })
         leader_id = CREW_BUILTIN_AGENT_ID
 
-    required_capabilities = _required_capabilities(text, team_spec)
+    assignment_text = "\n".join(
+        str(item.get("responsibility") or "").strip()
+        for item in user_assignments.values()
+        if str(item.get("responsibility") or "").strip()
+    )
+    required_capabilities = _required_capabilities("\n".join(filter(None, [text, assignment_text])), team_spec)
     requested_capabilities = normalize_capabilities(payload.get("required_capabilities") or [])
     # Custom capabilities are now an explicit capability-key list.  Natural
     # language descriptions belong in the PlanningDecision input boundary and
@@ -749,8 +802,31 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
         *requested_capabilities,
         *custom_requested_capabilities,
     ])) or list(required_capabilities)
-    required_agent_conflicts: list[dict[str, Any]] = []
+    required_agent_conflicts: list[dict[str, Any]] = list(leader_conflicts)
     if not has_slots:
+        requested_ids = {
+            str(value).strip() for value in (payload.get("required_agent_ids") or [])
+            if isinstance(value, str) and value.strip()
+        }
+        requested_ids.update(
+            str(item.get("agent_id") or "").strip()
+            for item in (raw_assignments if isinstance(raw_assignments, list) else [])
+            if isinstance(item, dict) and str(item.get("agent_id") or "").strip()
+        )
+        for agent_id in sorted(requested_ids - valid_ids):
+            required_agent_conflicts.append({
+                "agent_id": agent_id, "agent_name": agent_id,
+                "required_capabilities": [], "matched_capabilities": [],
+                "best_score": 0.0, "best_confidence": 1.0,
+                "reason": "指定成员不存在或当前账号无法使用，请重新选择。",
+            })
+        for agent_id in sorted((requested_ids & excluded) - {leader_id}):
+            required_agent_conflicts.append({
+                "agent_id": agent_id, "agent_name": _agent_name(agent_by_id[agent_id]),
+                "required_capabilities": [], "matched_capabilities": [],
+                "best_score": 0.0, "best_confidence": 1.0,
+                "reason": "该成员同时被指定为必选和排除，请调整组队要求。",
+            })
         for agent_id in sorted(constraints.required_agent_ids):
             if agent_id == leader_id or agent_id in excluded:
                 continue
@@ -768,36 +844,8 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
                     "reason": "Agent 当前运行时或模型不可用，不能加入 Formation。",
                 })
                 continue
-            if agent_id in constraints.forced_agent_ids or agent_id in constraints.assignments.values():
-                continue
-            if not decision_capabilities:
-                continue
-            assessments = [
-                profile.capabilities.get(capability)
-                for capability in decision_capabilities
-            ]
-            # Missing evidence is not negative evidence. Only interrupt the user
-            # when every relevant capability has a reliable, explicitly low assessment.
-            if any(assessment is None or assessment.confidence < 0.5 for assessment in assessments):
-                continue
-            matched = [
-                capability
-                for capability in decision_capabilities
-                if profile.score(capability) >= 0.5
-            ]
-            if matched:
-                continue
-            best_score = max((profile.score(capability) for capability in decision_capabilities), default=0.0)
-            best_confidence = max((profile.confidence(capability) for capability in decision_capabilities), default=0.0)
-            required_agent_conflicts.append({
-                "agent_id": agent_id,
-                "agent_name": _agent_name(agent_by_id[agent_id]),
-                "required_capabilities": list(decision_capabilities),
-                "matched_capabilities": [],
-                "best_score": round(best_score, 4),
-                "best_confidence": round(best_confidence, 4),
-                "reason": "现有能力画像对这些能力有明确评估，但评分未达到组队阈值。",
-            })
+            # Required membership is a user constraint.  Capability coverage is
+            # reported separately and must never filter out an available member.
         constraints.required_agent_ids.difference_update(
             item["agent_id"] for item in required_agent_conflicts
         )
@@ -832,6 +880,7 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
             constraints=constraints,
         )
 
+
     members = [
         _member_payload(
             agent=agent_by_id[leader_id],
@@ -847,8 +896,6 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
         if agent_id == leader_id or agent_id not in agent_by_id:
             continue
         clean_capabilities = [cap for cap in CAPABILITIES if cap in set(capabilities) and cap != "planning"]
-        if not clean_capabilities and not has_slots and agent_id not in constraints.required_agent_ids:
-            continue
         role_key = _role_key_for_capabilities(clean_capabilities)
         if has_slots:
             slot = next(
@@ -864,6 +911,8 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
             reason = "用户槽位确认。"
         elif any(constraints.assignments.get(capability) == agent_id for capability in clean_capabilities):
             reason = "用户指定分工，系统保留该成员职责。"
+        elif not clean_capabilities:
+            reason = "成员职责和角色待智能分析，能力待验证。"
         else:
             reason = "根据能力画像覆盖必需能力。"
         members.append(_member_payload(
@@ -881,6 +930,7 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
         if has_slots
         else set(constraints.required_agent_ids)
     )
+    _apply_user_assignments(members, user_assignments)
     members, overlap_warnings = _resolve_responsibility_overlaps(
         members,
         leader_id=leader_id,
@@ -889,7 +939,7 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
     )
     workflow = _render_workflow(members, agent_by_id)
     for member in members:
-        member["role"] = intelligent_role_markdown(
+        suggested_role = intelligent_role_markdown(
             role_key=str(member["role_key"]),
             agent_name=_agent_name(agent_by_id.get(str(member["agent_id"])) or {}),
             team_goal=description,
@@ -898,6 +948,8 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
             assigned_capabilities=list(member.get("assigned_capabilities") or []),
             responsibility=member.get("responsibility") if isinstance(member.get("responsibility"), dict) else None,
         )
+        mission = str((member.get("responsibility") or {}).get("mission") or "").strip()
+        member["role"] = mission if member.get("responsibility_source") == "user" and mission else suggested_role
         member["responsibility_markdown"] = member["role"]
 
     formation_profiles = {
@@ -917,8 +969,8 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
     uncovered_capabilities = list(dict.fromkeys([
         *formation_coverage.missing,
         *formation_coverage.unavailable,
-        *formation_coverage.unknown,
     ]))
+    unverified_capabilities = list(formation_coverage.unknown)
     assessment_confidences = [
         profiles[member["agent_id"]].confidence(capability)
         for member in members
@@ -945,6 +997,10 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
         warnings.append(
             "未覆盖能力：" + "、".join(CAPABILITY_LABELS[item] for item in uncovered_capabilities)
         )
+    if unverified_capabilities:
+        warnings.append(
+            "能力待验证：" + "、".join(CAPABILITY_LABELS[item] for item in unverified_capabilities)
+        )
 
     formation_members: list[dict[str, Any]] = []
     for member in members:
@@ -956,6 +1012,7 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
             "assigned_capabilities": list(member.get("assigned_capabilities") or []),
             "responsibility": dict(member.get("responsibility") or {}),
             "responsibility_markdown": str(member.get("responsibility_markdown") or ""),
+            "responsibility_source": str(member.get("responsibility_source") or "system"),
             "selection_source": source,
             "locked": bool(has_slots or member["agent_id"] in constraints.required_agent_ids),
             "selection_reason": str(member.get("selection_reason") or ""),
@@ -969,6 +1026,8 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
             "required": list(required_capabilities),
             "covered": covered_capabilities,
             "uncovered": uncovered_capabilities,
+            "unverified": unverified_capabilities,
+            "unavailable": list(formation_coverage.unavailable),
         },
         confidence={
             "requirement": round(requirement_confidence, 4),
@@ -983,6 +1042,7 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
     )
     return {
         "leader_agent_id": leader_id,
+        "allow_system_fill": constraints.allow_system_fill,
         "workflow": workflow,
         "members": [{**member, "sort_order": index} for index, member in enumerate(members)],
         "decision_required": bool(required_agent_conflicts),
@@ -992,7 +1052,7 @@ def fast_team_suggestion(payload: dict[str, Any], agents: list[dict[str, Any]]) 
         "reasons": [
             *constraints.reasons,
             *constraints.conflicts,
-            f"能力需求：{'、'.join(CAPABILITY_LABELS[cap] for cap in required_capabilities) or 'Leader 可直接处理'}。",
+            f"能力需求：{'、'.join(CAPABILITY_LABELS[cap] for cap in required_capabilities) or '暂未识别明确能力要求'}。",
             "采用当前槽位作为成员来源。" if has_slots else "采用最小充分成员选择。",
         ],
     }
@@ -1052,6 +1112,12 @@ def formation_auto_decision(
         reasons.append("unresolved_team_spec_risk")
     if any(str(item).strip() for item in (payload.get("custom_capabilities") or [])):
         reasons.append("custom_capability_requirement")
+    if any(
+        str(member.get("role_key") or "") == "unclassified"
+        for member in (baseline.get("members") or [])
+        if isinstance(member, dict)
+    ):
+        reasons.append("member_responsibility_unresolved")
 
     return bool(reasons), list(dict.fromkeys(reasons))
 
@@ -1289,9 +1355,19 @@ def formation_ai_context(
             "name": str(payload.get("name") or "")[:500],
             "description": str(payload.get("description") or "")[:4096],
             "team_spec": compact_team_spec,
+            "member_assignments": [
+                {
+                    "agent_id": str(item.get("agent_id") or ""),
+                    "role_key": str(item.get("role_key") or ""),
+                    "responsibility": str(item.get("responsibility") or "")[:1000],
+                }
+                for item in (payload.get("member_assignments") or [])
+                if isinstance(item, dict) and str(item.get("agent_id") or "")
+            ][:12],
         },
         "immutable_constraints": {
             "leader_agent_id": str(baseline.get("leader_agent_id") or ""),
+            "allow_system_fill": baseline.get("allow_system_fill", True),
             "locked_agent_ids": [
                 str(member.get("agent_id") or "")
                 for member in (baseline_plan.get("members") or [])
@@ -1425,16 +1501,18 @@ def apply_formation_ai_audit(
             str(member.get("agent_id") or ""): dict(member)
             for member in baseline_members
             if str(member.get("agent_id") or "")
-            and str(member.get("agent_id") or "") not in locked_ids
             and str(member.get("agent_id") or "") not in removed_ids
         }
         for item in raw_upserts[:12]:
             if not isinstance(item, dict):
                 continue
             agent_id = str(item.get("agent_id") or "").strip()
-            if not agent_id or agent_id in locked_ids:
+            if (
+                not agent_id
+                or (agent_id in locked_ids and (agent_id == leader_id or agent_id not in baseline_member_by_id))
+            ):
                 continue
-            proposed_by_id[agent_id] = item
+            proposed_by_id[agent_id] = {**proposed_by_id.get(agent_id, {}), **item}
         proposed = list(proposed_by_id.values())
     else:
         proposed = legacy_proposed
@@ -1443,6 +1521,11 @@ def apply_formation_ai_audit(
         str(payload.get("name") or ""),
         str(payload.get("description") or ""),
         str(payload.get("workflow") or ""),
+        *[
+            str(item.get("responsibility") or "")
+            for item in (payload.get("member_assignments") or [])
+            if isinstance(item, dict)
+        ],
         str(baseline.get("team_spec") or ""),
     ]).strip().lower()
     requirement_audit = audit.get("requirement_audit")
@@ -1508,17 +1591,40 @@ def apply_formation_ai_audit(
     )
     if isinstance(leader_baseline.get("responsibility"), dict):
         members[-1]["responsibility"] = dict(leader_baseline["responsibility"])
+    proposed_by_id = {
+        str(item.get("agent_id") or ""): item
+        for item in proposed
+        if isinstance(item, dict) and str(item.get("agent_id") or "")
+    }
+    user_duties = {
+        str(item.get("agent_id") or ""): str(item.get("responsibility") or "").strip()
+        for item in (payload.get("member_assignments") or [])
+        if isinstance(item, dict)
+    }
     for agent_id in sorted(locked_ids - {leader_id}):
         member = baseline_member_by_id.get(agent_id)
         if member is None or agent_id in excluded_ids or agent_id not in agent_by_id:
             return None, "invalid_ai_output"
+        proposal = proposed_by_id.get(agent_id) or {}
+        proposed_role_key = str(proposal.get("role_key") or member.get("role_key") or "").strip()
+        role_key = proposed_role_key if proposed_role_key in role_by_key else str(member.get("role_key") or "")
+        assigned_capabilities = normalize_capabilities(proposal.get("assigned_capabilities") or [])
+        if not assigned_capabilities:
+            assigned_capabilities = list(member.get("assigned_capabilities") or [])
+        focus = str(proposal.get("responsibility_focus") or "").strip()
+        if member.get("role_key") == "unclassified" and not focus and not user_duties.get(agent_id):
+            role_key = "unclassified"
+            assigned_capabilities = []
+        deliverables = proposal.get("deliverables") if isinstance(proposal.get("deliverables"), list) else []
         append_member(
             agent_id=agent_id,
-            role_key=str(member.get("role_key") or ""),
-            assigned_capabilities=list(member.get("assigned_capabilities") or []),
-            reason=str(member.get("selection_reason") or "保留用户锁定成员。"),
+            role_key=role_key,
+            assigned_capabilities=assigned_capabilities,
+            reason=str(proposal.get("reason") or member.get("selection_reason") or "保留用户锁定成员。"),
+            focus=focus,
+            deliverables=deliverables,
         )
-        if isinstance(member.get("responsibility"), dict):
+        if isinstance(member.get("responsibility"), dict) and not focus:
             members[-1]["responsibility"] = dict(member["responsibility"])
 
     grounded_scope_change = False
@@ -1533,6 +1639,7 @@ def apply_formation_ai_audit(
             or agent_id in excluded_ids
             or agent_id not in agent_by_id
             or role_key not in role_by_key
+            or (baseline.get("allow_system_fill") is False and agent_id not in baseline_member_by_id)
         ):
             continue
         profile = profiles[agent_id]
@@ -1542,6 +1649,9 @@ def apply_formation_ai_audit(
         if not assigned:
             assigned = normalize_capabilities(role_by_key[role_key].get("capabilities") or [])
         focus = str(item.get("responsibility_focus") or "").strip()
+        if baseline_member_by_id.get(agent_id, {}).get("role_key") == "unclassified" and not focus and not user_duties.get(agent_id):
+            role_key = "unclassified"
+            assigned = []
         evidence_quote = " ".join(str(item.get("evidence_quote") or "").lower().split())
         baseline_member = baseline_member_by_id.get(agent_id)
         if (
@@ -1566,6 +1676,13 @@ def apply_formation_ai_audit(
             deliverables=item.get("deliverables") if isinstance(item.get("deliverables"), list) else [],
         )
 
+    raw_assignments = payload.get("member_assignments")
+    user_assignments = {
+        str(item.get("agent_id") or "").strip(): item
+        for item in (raw_assignments if isinstance(raw_assignments, list) else [])
+        if isinstance(item, dict) and str(item.get("agent_id") or "").strip()
+    }
+    _apply_user_assignments(members, user_assignments)
     members, overlap_warnings = _resolve_responsibility_overlaps(
         members,
         leader_id=leader_id,
@@ -1587,13 +1704,19 @@ def apply_formation_ai_audit(
         )
         member["responsibility_markdown"] = member["role"]
 
-    covered = list(dict.fromkeys(
-        capability
+    selected_profiles = {
+        str(member.get("agent_id") or ""): profiles[str(member.get("agent_id") or "")]
         for member in members
-        for capability in (member.get("assigned_capabilities") or [])
-        if capability in audited_required
-    ))
-    uncovered = [capability for capability in audited_required if capability not in covered]
+        if str(member.get("agent_id") or "") in profiles
+    }
+    audited_coverage = evaluate_capability_coverage(
+        audited_required,
+        selected_profiles,
+        assigned_agent_ids=selected_profiles.keys(),
+    )
+    covered = list(audited_coverage.covered)
+    uncovered = list(dict.fromkeys([*audited_coverage.missing, *audited_coverage.unavailable]))
+    unverified = list(audited_coverage.unknown)
     protected_baseline_coverage = {
         capability
         for member in baseline_members
@@ -1619,15 +1742,18 @@ def apply_formation_ai_audit(
         )
 
     def duplicate_count(items: list[dict[str, Any]]) -> int:
-        signatures = [
-            responsibility_signature(
+        signatures = []
+        for member in items:
+            if member.get("agent_id") == leader_id:
+                continue
+            responsibility = member.get("responsibility") if isinstance(member.get("responsibility"), dict) else {}
+            signature = responsibility_signature(
                 role_key=str(member.get("role_key") or ""),
                 assigned_capabilities=list(member.get("assigned_capabilities") or []),
-                responsibility=member.get("responsibility") if isinstance(member.get("responsibility"), dict) else None,
+                responsibility=responsibility or None,
             )
-            for member in items
-            if member.get("agent_id") != leader_id
-        ]
+            mission = " ".join(str(responsibility.get("mission") or "").lower().split())
+            signatures.append((*signature, mission))
         return len(signatures) - len(set(signatures))
 
     def evidence_confidence(items: list[dict[str, Any]]) -> float:
@@ -1733,6 +1859,13 @@ def apply_formation_ai_audit(
         material_improvements.append("提高了成员分工的能力证据可信度")
     if grounded_scope_change:
         material_improvements.append("根据目标原文修正了成员职责范围")
+    if any(
+        str(baseline_member_by_id.get(str(member.get("agent_id") or ""), {}).get("role_key") or "") == "unclassified"
+        and str(member.get("role_key") or "") not in {"", "unclassified", "general_collaborator"}
+        and str((proposed_by_id.get(str(member.get("agent_id") or "")) or {}).get("responsibility_focus") or "").strip()
+        for member in members
+    ):
+        material_improvements.append("根据团队意图补充了成员职责与角色建议")
     if staffing_gaps:
         material_improvements.append("识别出当前团队无法覆盖的独立职责")
     if not material_improvements:
@@ -1759,6 +1892,8 @@ def apply_formation_ai_audit(
     warnings = [*overlap_warnings]
     if uncovered:
         warnings.append("未覆盖能力：" + "、".join(CAPABILITY_LABELS[item] for item in uncovered))
+    if unverified:
+        warnings.append("能力待验证：" + "、".join(CAPABILITY_LABELS[item] for item in unverified))
     formation_members = []
     for member in members:
         prior = next((
@@ -1772,6 +1907,7 @@ def apply_formation_ai_audit(
             "assigned_capabilities": list(member.get("assigned_capabilities") or []),
             "responsibility": dict(member.get("responsibility") or {}),
             "responsibility_markdown": str(member.get("responsibility_markdown") or ""),
+            "responsibility_source": str(member.get("responsibility_source") or prior.get("responsibility_source") or "system"),
             "selection_source": str(prior.get("selection_source") or "ai"),
             "locked": bool(prior.get("locked", False)),
             "selection_reason": str(member.get("selection_reason") or ""),
@@ -1780,7 +1916,13 @@ def apply_formation_ai_audit(
         version=1,
         leader_agent_id=leader_id,
         members=formation_members,
-        coverage={"required": audited_required, "covered": covered, "uncovered": uncovered},
+        coverage={
+            "required": audited_required,
+            "covered": covered,
+            "uncovered": uncovered,
+            "unverified": unverified,
+            "unavailable": list(audited_coverage.unavailable),
+        },
         confidence={
             "requirement": round(requirement_confidence, 4),
             "capability_evidence": round(evidence_value, 4),
@@ -1797,6 +1939,7 @@ def apply_formation_ai_audit(
     )
     return {
         "leader_agent_id": leader_id,
+        "allow_system_fill": baseline.get("allow_system_fill", True),
         "workflow": workflow,
         "members": [{**member, "sort_order": index} for index, member in enumerate(members)],
         "decision_required": False,
@@ -1877,7 +2020,7 @@ def build_team_draft(payload: dict[str, Any], agents: list[dict[str, Any]]) -> d
 
     for index, slot_spec in enumerate(slot_specs):
         capability = str(slot_spec.get("capability") or "").strip()
-        role_key = str(slot_spec.get("role_key") or "").strip() or CAPABILITY_ROLE_KEYS.get(capability, "fullstack_developer")
+        role_key = str(slot_spec.get("role_key") or "").strip() or CAPABILITY_ROLE_KEYS.get(capability, "unclassified")
         suggested_id = str(slot_spec.get("agent_id") or "").strip()
         if suggested_id in used:
             suggested_id = ""

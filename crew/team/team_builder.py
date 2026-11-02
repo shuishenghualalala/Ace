@@ -143,12 +143,14 @@ class TeamMemberFactory:
                 "capabilities": row.get("capabilities") or [],
                 "metadata": {
                     "role_key": row.get("role_key") or "",
+                    "capability_contract_explicit": isinstance(row.get("capabilities"), list),
                     "role_label": row.get("role_label") or "",
                     "workflow_lane": row.get("workflow_lane") or "",
                     **(
                         {
                             "formation_plan_version": formation_version,
                             "formation_responsibility": dict(responsibility),
+                            "responsibility_source": str(formation_member.get("responsibility_source") or "system"),
                             "formation_responsibility_markdown": str(
                                 formation_member.get("responsibility_markdown") or row.get("role") or ""
                             ),

@@ -507,6 +507,16 @@ describe('composer 外援入口', () => {
       expect(document.querySelector('.formation-progress .team-mark')).toBeNull();
     });
 
+    const responsibility = document.querySelector<HTMLTextAreaElement>('[data-member-role="crew::builtin"]');
+    expect(responsibility).not.toBeNull();
+    responsibility!.value = '用户指定：审阅评分标准';
+    responsibility!.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector<HTMLElement>('[data-agents-select-key="member-role:crew::builtin"]')?.click();
+    document.querySelector<HTMLElement>('[data-agents-select-value="project_manager"]')?.click();
+    expect(document.querySelector('.team-create__review')).not.toBeNull();
+    expect(document.querySelector<HTMLTextAreaElement>('[data-member-role="crew::builtin"]')?.value)
+      .toBe('用户指定：审阅评分标准');
+
     resolveAi({
       ...fastSuggestion,
       requested_formation_mode: 'auto',
@@ -517,6 +527,8 @@ describe('composer 外援入口', () => {
       expect(document.querySelector('.formation-progress')?.textContent).toContain('智能检查暂未完成');
       expect(document.querySelector('.formation-progress')?.textContent).toMatch(/智能检查优化\s*·\s*\d+s/);
       expect(document.querySelector('[data-recheck-formation]')).not.toBeNull();
+      expect(document.querySelector<HTMLTextAreaElement>('[data-member-role="crew::builtin"]')?.value)
+        .toBe('用户指定：审阅评分标准');
     });
     document.querySelector<HTMLElement>('[data-agents-tab="mine"]')?.click();
   });

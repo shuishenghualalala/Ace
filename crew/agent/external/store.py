@@ -1502,9 +1502,9 @@ class ExternalAgentStore:
                     role_key = infer_role_key(str(member.get("role") or ""), is_leader=agent_id == leader_agent_id)
                 preset = role_preset(role_key)
                 capabilities = member.get("assigned_capabilities")
-                if not isinstance(capabilities, list) or not capabilities:
+                if not isinstance(capabilities, list):
                     capabilities = member.get("capabilities")
-                if not isinstance(capabilities, list) or not capabilities:
+                if not isinstance(capabilities, list):
                     capabilities = list(preset.get("capabilities") or [])
                 capabilities = normalize_capabilities(capabilities)
                 conn.execute(
@@ -1571,6 +1571,22 @@ class ExternalAgentStore:
             team["formation_plan"] = {}
         team["members"] = [self._team_member_dict(member) for member in member_rows]
         return team
+
+    def update_team_staffing_policy(self, team_id: str, policy: dict[str, bool], *, owner_account_id: str = "") -> dict[str, Any]:
+        allowed = {"formation_allow_system_fill", "runtime_allow_suggestions", "runtime_allow_auto_reassign"}
+        with self._conn() as conn:
+            row = conn.execute("SELECT formation_plan_json FROM external_team WHERE id = ? AND owner_account_id = ? AND archived_at IS NULL", (team_id, owner_account_id)).fetchone()
+            if row is None:
+                raise KeyError(team_id)
+            try:
+                plan = json.loads(str(row["formation_plan_json"] or "{}"))
+            except (TypeError, json.JSONDecodeError):
+                plan = {}
+            if not isinstance(plan, dict):
+                plan = {}
+            plan.update({key: value for key, value in policy.items() if key in allowed and isinstance(value, bool)})
+            conn.execute("UPDATE external_team SET formation_plan_json = ?, updated_at = ? WHERE id = ? AND owner_account_id = ?", (json.dumps(plan, ensure_ascii=False), _now(), team_id, owner_account_id))
+        return self.get_team(team_id, owner_account_id=owner_account_id)
 
     def delete_team(self, team_id: str, *, owner_account_id: str = "") -> None:
         now = _now()

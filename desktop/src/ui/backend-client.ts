@@ -223,6 +223,8 @@ export interface FormationPlanMember {
   assigned_capabilities: string[];
   responsibility: Record<string, unknown>;
   responsibility_markdown: string;
+  responsibility_source?: string;
+  original_user_responsibility?: string;
   selection_source: string;
   locked: boolean;
   selection_reason: string;
@@ -232,7 +234,13 @@ export interface FormationPlan {
   version: number;
   leader_agent_id: string;
   members: FormationPlanMember[];
-  coverage: { required: string[]; covered: string[]; uncovered: string[] };
+  coverage: {
+    required: string[];
+    covered: string[];
+    uncovered: string[];
+    unverified?: string[];
+    unavailable?: string[];
+  };
   confidence: {
     requirement: number;
     capability_evidence: number;
@@ -243,6 +251,13 @@ export interface FormationPlan {
   excluded_agent_ids: string[];
   reasons: string[];
   warnings: string[];
+  original_description?: string;
+  formation_allow_system_fill?: boolean;
+  runtime_allow_suggestions?: boolean;
+  runtime_allow_auto_reassign?: boolean;
+  member_capability_assessments?: { agent_id: string; role_key: string; available?: boolean; coverage: {
+    required: string[]; covered: string[]; missing: string[]; unknown: string[]; unavailable: string[];
+  } }[];
 }
 
 export interface ExternalTeamSuggestion {
@@ -1144,6 +1159,7 @@ async function streamExternalTeamSuggestion(
   if (options?.signal) init.signal = options.signal;
   const res = await gatewayFetch('/api/external-teams/suggest', init);
   if (!res.ok) {
+    await readJsonResponse(res, '/api/external-teams/suggest');
     throw new Error(`智能组队失败：${res.status}`);
   }
   if (options?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -1198,6 +1214,7 @@ async function streamExternalTeamSuggestionBridge(
   };
   let latest: ExternalTeamSuggestion | null = null;
   let buffer = '';
+  let responseStatus = 200;
   let settled = false;
 
   return new Promise<ExternalTeamSuggestion>((resolve, reject) => {
@@ -1227,9 +1244,13 @@ async function streamExternalTeamSuggestionBridge(
     const cleanup = bridge.onGatewayStreamEvent((event) => {
       if (event.request_id !== requestId || settled) return;
       try {
+        if (event.type === 'head') {
+          responseStatus = event.status || 200;
+          return;
+        }
         if (event.type === 'chunk') {
           buffer += event.text || '';
-          consumeLines();
+          if (responseStatus < 400) consumeLines();
           return;
         }
         if (event.type === 'error') {
@@ -1239,6 +1260,17 @@ async function streamExternalTeamSuggestionBridge(
           return;
         }
         if (event.type === 'end') {
+          if (responseStatus >= 400) {
+            let message = `智能组队失败：${responseStatus}`;
+            try {
+              const body = JSON.parse(buffer) as { error?: string; detail?: string };
+              message = body.error || body.detail || message;
+            } catch { /* Keep the status when the error body is not JSON. */ }
+            settled = true;
+            cleanup();
+            reject(new Error(message));
+            return;
+          }
           if (buffer.trim()) {
             buffer += '\n';
             consumeLines();
@@ -1896,7 +1928,7 @@ export const backendApi = {
     }[];
   }) => getJSON<ExternalTeam>('/api/external-teams', { method: 'POST', ...jsonBody(team) }),
   draftExternalTeamDescription: (
-    payload: { name?: string },
+    payload: { name?: string; description?: string },
     options?: ExternalTeamDraftStreamOptions,
   ) => streamExternalTeamDraft('/api/external-teams/draft/description', payload, options),
   suggestExternalTeam: (payload: {
@@ -1922,9 +1954,27 @@ export const backendApi = {
       force_required_agent_ids?: string[];
       required_capabilities?: string[];
       custom_capabilities?: string[];
+      member_assignments?: { agent_id: string; responsibility?: string; role_key?: string }[];
+      allow_system_fill?: boolean;
     },
     options?: ExternalTeamSuggestionStreamOptions,
   ) => streamExternalTeamSuggestion(payload, options),
+  assessExternalTeam: (payload: {
+    members: { agent_id: string; role_key: string; assigned_capabilities: string[] }[];
+    required_capabilities: string[];
+    team_name?: string;
+    team_goal?: string;
+    role_changes?: { agent_id: string; role_key: string; responsibility: string }[];
+  }) => getJSON<{ coverage: FormationPlan['coverage']; capability_evidence_confidence: number;
+    role_suggestions?: { agent_id: string; role_key: string; responsibility: string }[];
+    role_suggestion_error?: string;
+    members: { agent_id: string; role_key: string; available: boolean; coverage: {
+    required: string[]; covered: string[]; missing: string[]; unknown: string[]; unavailable: string[];
+  } }[] }>(
+    '/api/external-teams/assess', { method: 'POST', ...jsonBody(payload) },
+  ),
+  updateTeamStaffingPolicy: (id: string, policy: Record<string, boolean>) =>
+    getJSON<ExternalTeam>(`/api/external-teams/${encodeURIComponent(id)}/staffing-policy`, { method: 'PATCH', body: JSON.stringify(policy), headers: { 'Content-Type': 'application/json' } }),
   deleteExternalTeam: (id: string) =>
     getJSON<{ ok: boolean }>(`/api/external-teams/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   // 会话 agent-config：写入选中的外援 / 执行器

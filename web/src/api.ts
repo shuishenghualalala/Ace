@@ -175,6 +175,8 @@ async function streamExternalTeamSuggestion(
     force_required_agent_ids?: string[];
     required_capabilities?: string[];
     custom_capabilities?: string[];
+    allow_system_fill?: boolean;
+    member_assignments?: Array<{ agent_id: string; responsibility?: string; role_key?: string }>;
   },
   options?: ExternalTeamSuggestionStreamOptions,
 ): Promise<ExternalTeamSuggestion> {
@@ -183,7 +185,14 @@ async function streamExternalTeamSuggestion(
     ...jsonBody({ ...payload, formation_mode: "auto" }),
     signal: options?.signal,
   });
-  if (!response.ok) throw new Error(`${response.status} /api/external-teams/suggest`);
+  if (!response.ok) {
+    let message = `智能组队失败：${response.status}`;
+    try {
+      const body = await response.json() as { error?: string; detail?: string };
+      message = body.error || body.detail || message;
+    } catch { /* Keep the status when the error body is not JSON. */ }
+    throw new Error(message);
+  }
   let latest: ExternalTeamSuggestion | null = null;
   await readNDJSON(response, (value) => {
     const event = value as {
@@ -383,6 +392,8 @@ export const api = {
       force_required_agent_ids?: string[];
       required_capabilities?: string[];
       custom_capabilities?: string[];
+      allow_system_fill?: boolean;
+      member_assignments?: Array<{ agent_id: string; responsibility?: string; role_key?: string }>;
     },
     options?: ExternalTeamSuggestionStreamOptions,
   ) => streamExternalTeamSuggestion(payload, options),
@@ -400,6 +411,8 @@ export const api = {
       method: "POST",
       ...jsonBody(payload),
     }),
+  updateTeamStaffingPolicy: (id: string, policy: Record<string, boolean>) =>
+    getJSON<ExternalTeam>(`/api/external-teams/${encodeURIComponent(id)}/staffing-policy`, { method: "PATCH", ...jsonBody(policy) }),
   deleteExternalTeam: (id: string) =>
     getJSON<{ ok: boolean }>(`/api/external-teams/${encodeURIComponent(id)}`, { method: "DELETE" }),
   // 工作空间

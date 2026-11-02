@@ -7,7 +7,6 @@ from crew.agent.external.detector import (
     scan_kimi_runtime,
     scan_runtimes,
 )
-from crew.agent.external.store import ExternalAgentStore
 
 __all__ = [
     "ExternalAgentStore",
@@ -17,3 +16,10 @@ __all__ = [
     "scan_kimi_runtime",
     "scan_runtimes",
 ]
+
+
+def __getattr__(name: str):
+    if name == "ExternalAgentStore":
+        from crew.agent.external.store import ExternalAgentStore
+        return ExternalAgentStore
+    raise AttributeError(name)

@@ -512,6 +512,7 @@ export interface FormationPlanMember {
   assigned_capabilities: string[];
   responsibility: Record<string, unknown>;
   responsibility_markdown: string;
+  responsibility_source?: string;
   selection_source: "user" | "system" | string;
   locked: boolean;
   selection_reason: string;
@@ -532,6 +533,9 @@ export interface FormationPlan {
   excluded_agent_ids: string[];
   reasons: string[];
   warnings: string[];
+  formation_allow_system_fill?: boolean;
+  runtime_allow_suggestions?: boolean;
+  runtime_allow_auto_reassign?: boolean;
 }
 
 export interface ExternalTeamDraftSlot {

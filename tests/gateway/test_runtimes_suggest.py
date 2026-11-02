@@ -37,6 +37,182 @@ from crew.team.formation import (
 OWNER_A = "A:uid-a"
 
 
+@pytest.fixture(autouse=True)
+def _formation_tests_use_configured_leader(monkeypatch):
+    """These tests use FakeProvider for scripted planning responses.
+
+    Provider availability itself is covered separately in stage 1 tests.
+    """
+    monkeypatch.setattr("crew.app.CrewApp._session_demo_mode", lambda *_: False)
+
+
+def test_formation_preserves_user_responsibility_and_does_not_fill_when_disabled():
+    agents = [
+        {"id": "a", "name": "Kimi", "provider": "kimi", "model": "m"},
+        {"id": "b", "name": "Hermes", "provider": "other", "model": "m"},
+    ]
+    result = fast_team_suggestion({
+        "name": "比赛材料团队",
+        "required_capabilities": ["research", "documentation"],
+        "member_assignments": [{
+            "agent_id": "a", "role_key": "research_analyst", "responsibility": "核对评分标准并标明来源",
+        }],
+        "allow_system_fill": False,
+    }, agents)
+    assert {member["agent_id"] for member in result["members"]} == {"crew::builtin", "a"}
+    member = next(member for member in result["members"] if member["agent_id"] == "a")
+    assert member["role"] == "核对评分标准并标明来源"
+    assert member["role_key"] == "research_analyst"
+    planned = next(member for member in result["formation_plan"]["members"] if member["agent_id"] == "a")
+    assert planned["locked"] is True
+    assert planned["responsibility"]["mission"] == "核对评分标准并标明来源"
+
+
+def test_unclassified_user_responsibility_does_not_create_development_capabilities():
+    result = fast_team_suggestion({
+        "name": "比赛团队",
+        "member_assignments": [{"agent_id": "a", "responsibility": "负责分析"}],
+        "allow_system_fill": False,
+    }, [{"id": "a", "name": "A", "provider": "kimi", "model": "m"}])
+    member = next(item for item in result["members"] if item["agent_id"] == "a")
+    assert member["role_key"] == "unclassified"
+    assert member["assigned_capabilities"] == []
+    assert member["role"] == "负责分析"
+    assert next(item for item in result["formation_plan"]["members"] if item["agent_id"] == "a")["responsibility_source"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_auto_formation_recommends_unclassified_member_duty_and_role(tmp_path, monkeypatch, auth_headers):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    crew = build_app(enable_team=False)
+    crew.external_agents.upsert_runtime({"id": "rt", "type": "claude", "provider": "anthropic"})
+    agent = crew.external_agents.create_agent(owner_account_id=OWNER_A, name="A", runtime_id="rt", model="m")
+    agent["profile"] = build_agent_profile(agent).to_dict()
+    monkeypatch.setattr("crew.gateway.routers.runtimes._formation_agent_catalog", lambda *args, **kwargs: [agent])
+    crew.provider = FakeProvider(script=[ChatResponse(text=json.dumps({"members": [{
+        "agent_id": agent['id'], "role_key": "independent_reviewer",
+        "responsibility": "核对比赛材料的依据和结论", "reason": "根据团队用途建议，能力待验证",
+    }]}, ensure_ascii=False))])
+    async with AsyncClient(transport=ASGITransport(app=create_app(crew)), base_url="http://test", headers=auth_headers) as client:
+        response = await client.post('/api/external-teams/suggest', json={
+            'name': '比赛材料团队', 'formation_mode': 'auto', 'required_agent_ids': [agent['id']],
+        })
+        events = _draft_stream_events(response)
+        result = next(event['suggestion'] for event in events if event.get('phase') == 'final')
+        member = next(item for item in result['members'] if item['agent_id'] == agent['id'])
+        planned = next(item for item in result['formation_plan']['members'] if item['agent_id'] == agent['id'])
+        assert result['selected_formation_mode'] == 'ai'
+        assert member['role_key'] == planned['role_key'] == 'independent_reviewer'
+        assert planned['responsibility']['mission'] == '核对比赛材料的依据和结论'
+        assert planned['assigned_capabilities'] == []
+        saved = await client.post('/api/external-teams', json={
+            'name': '比赛材料团队', 'leader_agent_id': result['leader_agent_id'],
+            'members': result['members'], 'formation_plan': result['formation_plan'],
+        })
+        assert saved.status_code == 200, saved.text
+        listing = await client.get('/api/external-teams')
+        team = next(item for item in listing.json() if item['id'] == saved.json()['id'])
+        persisted = next(item for item in team['formation_plan']['members'] if item['agent_id'] == agent['id'])
+        assert persisted['role_key'] == 'independent_reviewer'
+        assert persisted['responsibility']['mission'] == '核对比赛材料的依据和结论'
+        assert persisted['responsibility_source'] == 'ai'
+
+
+@pytest.mark.asyncio
+async def test_assessment_endpoint_checks_only_the_submitted_roster(tmp_path, monkeypatch, auth_headers):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    crew = build_app(enable_team=False)
+    crew.external_agents.upsert_runtime({"id": "rt", "type": "claude", "provider": "anthropic"})
+    agent = crew.external_agents.create_agent(owner_account_id=OWNER_A, name="A", runtime_id="rt", model="m")
+    agent["profile"] = build_agent_profile(agent).to_dict()
+    monkeypatch.setattr("crew.gateway.routers.runtimes._formation_agent_catalog", lambda *args, **kwargs: [agent])
+    async with AsyncClient(transport=ASGITransport(app=create_app(crew)), base_url="http://test", headers=auth_headers) as client:
+        response = await client.post('/api/external-teams/assess', json={
+            'members': [{'agent_id': agent['id'], 'role_key': 'independent_reviewer', 'assigned_capabilities': []}],
+            'required_capabilities': [],
+        })
+        assert response.status_code == 200
+        assert response.json()['members'][0]['agent_id'] == agent['id']
+        assert 'review' in response.json()['coverage']['unverified']
+        saved = await client.post('/api/external-teams', json={
+            'name': '已检查团队', 'leader_agent_id': 'crew::builtin',
+            'members': [{'agent_id': agent['id'], 'role_key': 'independent_reviewer', 'role': '核对结论', 'assigned_capabilities': []}],
+            'formation_plan': {'coverage': response.json()['coverage'], 'member_capability_assessments': response.json()['members']},
+        })
+        assert saved.status_code == 200, saved.text
+        listing = await client.get('/api/external-teams')
+        team = next(item for item in listing.json() if item['id'] == saved.json()['id'])
+        checks = team['formation_plan']['member_capability_assessments']
+        assert checks[0]['agent_id'] == agent['id']
+        assert 'review' in checks[0]['coverage']['unknown']
+        missing = await client.post('/api/external-teams/assess', json={'members': [{'agent_id': 'not-visible'}]})
+        assert missing.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_role_check_returns_evidence_and_duty_for_the_user_selected_role(tmp_path, monkeypatch, auth_headers):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    crew = build_app(enable_team=False)
+    agent = {"id": "a", "name": "A", "provider": "kimi", "model": "m"}
+    agent["profile"] = build_agent_profile(agent).to_dict()
+    monkeypatch.setattr("crew.gateway.routers.runtimes._formation_agent_catalog", lambda *args, **kwargs: [agent])
+    crew.provider = FakeProvider(script=[ChatResponse(text=json.dumps({"members": [{
+        "agent_id": "a", "role_key": "independent_reviewer", "responsibility": "独立核对关键结论与依据",
+    }]}, ensure_ascii=False))])
+    payload = {
+        'team_name': '比赛团队', 'team_goal': '核对材料',
+        'members': [{'agent_id': 'a', 'role_key': 'independent_reviewer', 'assigned_capabilities': []}],
+        'role_changes': [{'agent_id': 'a', 'role_key': 'independent_reviewer', 'responsibility': '用户原文'}],
+    }
+    async with AsyncClient(transport=ASGITransport(app=create_app(crew)), base_url="http://test", headers=auth_headers) as client:
+        response = await client.post('/api/external-teams/assess', json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data['members'][0]['available'] is True
+    assert 'review' in data['members'][0]['coverage']['unknown']
+    assert data['role_suggestions'] == [{'agent_id': 'a', 'role_key': 'independent_reviewer', 'responsibility': '独立核对关键结论与依据'}]
+    assert data['role_suggestion_error'] == ''
+
+
+@pytest.mark.asyncio
+async def test_role_check_does_not_allow_model_to_replace_user_selected_role(tmp_path, monkeypatch, auth_headers):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    crew = build_app(enable_team=False)
+    agent = {"id": "a", "name": "A", "provider": "kimi", "model": "m"}
+    agent['profile'] = build_agent_profile(agent).to_dict()
+    monkeypatch.setattr("crew.gateway.routers.runtimes._formation_agent_catalog", lambda *args, **kwargs: [agent])
+    crew.provider = FakeProvider(script=[ChatResponse(text=json.dumps({"members": [{
+        "agent_id": "a", "role_key": "qa_engineer", "responsibility": "测试功能",
+    }]}))])
+    async with AsyncClient(transport=ASGITransport(app=create_app(crew)), base_url="http://test", headers=auth_headers) as client:
+        response = await client.post('/api/external-teams/assess', json={
+            'members': [{'agent_id': 'a', 'role_key': 'independent_reviewer', 'assigned_capabilities': []}],
+            'role_changes': [{'agent_id': 'a', 'role_key': 'independent_reviewer'}],
+        })
+    assert response.json()['role_suggestion_error'] == 'invalid_ai_output'
+    assert response.json()['role_suggestions'] == []
+
+
+@pytest.mark.asyncio
+async def test_role_check_blocks_unavailable_member_without_calling_model(tmp_path, monkeypatch, auth_headers):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    crew = build_app(enable_team=False)
+    agent = {"id": "a", "name": "A", "provider": "kimi", "model": "m"}
+    agent['profile'] = build_agent_profile(agent).to_dict()
+    agent['profile']['availability'] = 'unavailable'
+    monkeypatch.setattr("crew.gateway.routers.runtimes._formation_agent_catalog", lambda *args, **kwargs: [agent])
+    provider = FakeProvider()
+    crew.provider = provider
+    async with AsyncClient(transport=ASGITransport(app=create_app(crew)), base_url="http://test", headers=auth_headers) as client:
+        response = await client.post('/api/external-teams/assess', json={
+            'members': [{'agent_id': 'a', 'role_key': 'independent_reviewer', 'assigned_capabilities': []}],
+            'role_changes': [{'agent_id': 'a', 'role_key': 'independent_reviewer'}],
+        })
+    assert response.json()['members'][0]['available'] is False
+    assert response.json()['role_suggestion_error'] == 'member_unavailable'
+    assert provider.calls == []
+
+
 class ClosableFakeProvider(FakeProvider):
     def __init__(self, script: list[ChatResponse] | None = None) -> None:
         super().__init__(script=script)
@@ -209,7 +385,7 @@ def _draft_stream_events(response) -> list[dict]:
     return [json.loads(line) for line in response.text.splitlines() if line.strip()]
 
 
-def test_fast_team_suggestion_returns_team_spec_and_testing_roles():
+def test_fast_team_suggestion_reports_testing_gap_without_evidence():
     result = fast_team_suggestion(
         {
             "description": "帮我测试一下之前开发的贪吃蛇，不需要开发新功能",
@@ -226,8 +402,8 @@ def test_fast_team_suggestion_returns_team_spec_and_testing_roles():
     assert result["team_spec"]["task_profile"]["intent"] == "testing"
     assert result["team_spec"]["execution_profile"] == {}
     role_keys = [member["role_key"] for member in result["members"]]
-    assert "qa_engineer" in role_keys
     assert "fullstack_developer" not in role_keys
+    assert {"testing", "verification"} <= set(result["formation_plan"]["coverage"]["unverified"])
 
 
 def test_team_draft_keeps_leader_separate_from_suggested_role_slots():
@@ -328,6 +504,24 @@ async def test_team_draft_endpoint_uses_one_llm_call_for_description(tmp_path, m
     assert draft_events[-1]["cache_hit"] is False
     assert len(fake.stream_calls) == 1
     assert len(fake.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_text, expected_phase", [
+    ("1. 分析比赛要求\n2. 编写报告", "optimized"),
+    ("分析比赛要求并编写报告", "fallback"),
+])
+async def test_team_goal_organizing_requires_numbered_items(tmp_path, monkeypatch, auth_headers, response_text, expected_phase):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    crew = build_app(enable_team=False)
+    fake = FakeProvider(script=[ChatResponse(text=json.dumps({"description": response_text}, ensure_ascii=False))])
+    crew.provider = fake
+    async with AsyncClient(transport=ASGITransport(app=create_app(crew)), base_url="http://test", headers=auth_headers) as client:
+        response = await client.post("/api/external-teams/draft/description", json={"name": "比赛团队", "description": "分析比赛要求并编写报告"})
+    events = [event for event in _draft_stream_events(response) if event["type"] == "draft"]
+    assert events[-1]["phase"] == expected_phase
+    if expected_phase == "optimized":
+        assert events[-1]["draft"]["description"] == response_text
 
 
 @pytest.mark.asyncio
@@ -739,6 +933,7 @@ async def test_create_team_normalizes_manual_roster_into_formation_plan(tmp_path
         resp = await client.post("/api/external-teams", json={
             "name": "手动团队",
             "description": "手动选择成员",
+            "formation_plan": {"original_description": "原始团队需求"},
             "leader_agent_id": leader["id"],
             "team_spec": {"version": 3, "goal": "手动选择成员"},
             "members": [{
@@ -752,8 +947,34 @@ async def test_create_team_normalizes_manual_roster_into_formation_plan(tmp_path
     assert resp.status_code == 200
     team = resp.json()
     assert team["formation_plan"]["leader_agent_id"] == leader["id"]
+    assert team["formation_plan"]["original_description"] == "原始团队需求"
     assert team["formation_plan"]["members"][0]["responsibility_markdown"] == "负责统筹和验收"
     assert team["members"][0]["assigned_capabilities"] == ["planning"]
+
+
+@pytest.mark.asyncio
+async def test_create_team_preserves_explicit_empty_capabilities_and_user_responsibility(tmp_path, monkeypatch, auth_headers):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    crew = build_app(enable_team=False)
+    crew.config.gateway_admin_accounts = ["A:uid-a"]
+    agent = _seed_agents(crew)[0]
+    api = create_app(crew)
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test", headers=auth_headers) as client:
+        response = await client.post("/api/external-teams", json={
+            "name": "团队", "leader_agent_id": "crew::builtin",
+            "members": [{"agent_id": agent["id"], "role": "负责分析", "role_key": "unclassified",
+                         "assigned_capabilities": []}],
+            "formation_plan": {"members": [{"agent_id": agent["id"], "responsibility_source": "user",
+                "responsibility": {"mission": "负责分析"}, "role_key": "unclassified"}]},
+        })
+    assert response.status_code == 200
+    team = response.json()
+    member = next(item for item in team["members"] if item["agent_id"] == agent["id"])
+    planned = next(item for item in team["formation_plan"]["members"] if item["agent_id"] == agent["id"])
+    assert member["role_key"] == "unclassified"
+    assert member["assigned_capabilities"] == []
+    assert planned["assigned_capabilities"] == []
+    assert planned["responsibility_source"] == "user"
 
 
 @pytest.mark.asyncio
@@ -944,6 +1165,7 @@ async def test_huge_description_is_truncated_not_forwarded(tmp_path, monkeypatch
     crew = build_app(enable_team=False)
     agents = _seed_agents(crew)
     valid_ids = {a["id"] for a in agents}
+    monkeypatch.setattr("crew.gateway.routers.runtimes._formation_agent_catalog", lambda *args, **kwargs: agents)
 
     fake = FakeProvider()
     crew.provider = fake
@@ -966,17 +1188,12 @@ async def test_huge_description_is_truncated_not_forwarded(tmp_path, monkeypatch
     )
     # 单字段截断：huge 不应原样出现（4KB 上限 << huge 的 120KB）
     assert huge not in user_text
-    # valid agent ids 仍出现在 prompt 里（裁剪不能把指令区也吃掉）
-    for aid in valid_ids:
-        assert aid in user_text
-    assert '"member_changes"' in user_text
-    assert '"staffing_plan"' in user_text
-    assert "最小化新增成员人数" in user_text
-    assert "不代表必须一角一人" in user_text
-    assert '"ready_runtime_options"' in user_text
-    assert '"baseline_issues"' not in user_text
-    assert '"deliverables"' not in user_text
-    assert '"workflow_hint"' not in user_text
+    # 职责推荐只需当前阵容，不将所有候选送入模型。
+    assert any(aid in user_text for aid in valid_ids)
+    assert '"available_roles"' in user_text
+    assert '"responsibility"' in user_text
+    assert "不得增删或替换成员" in user_text
+    assert '"ready_runtime_options"' not in user_text
 
 
 @pytest.mark.asyncio
@@ -1047,7 +1264,7 @@ async def test_invalid_schema_llm_response_falls_back(tmp_path, monkeypatch, aut
 
 
 @pytest.mark.asyncio
-async def test_valid_formation_ai_gap_is_returned_for_user_confirmation(
+async def test_formation_does_not_claim_unverified_capability_is_a_confirmed_gap(
     tmp_path, monkeypatch, auth_headers,
 ):
     """Formation AI 只返回紧凑审计，缺员建议由本地校验并推荐就绪模型。"""
@@ -1154,14 +1371,11 @@ async def test_valid_formation_ai_gap_is_returned_for_user_confirmation(
     assert resp.status_code == 200
     data = resp.json()
     assert data["requested_formation_mode"] == "ai"
-    assert data["selected_formation_mode"] == "ai", data["fallback_reason"]
-    assert data["fallback_reason"] == ""
+    assert data["selected_formation_mode"] == "fast"
+    assert data["fallback_reason"] == "no_material_improvement"
     assert data["leader_agent_id"] == "crew::builtin"
-    assert data["staffing_decision_required"] is True
-    assert len(data["staffing_gaps"]) == 1
-    assert data["staffing_gaps"][0]["role_key"] == "qa_engineer"
-    assert data["staffing_gaps"][0]["recommended_runtime_id"] == "rt-ready"
-    assert data["staffing_gaps"][0]["recommended_model_id"] == "model-ready"
+    assert data["staffing_decision_required"] is False
+    assert data["staffing_gaps"] == []
     assert {member["agent_id"] for member in data["members"]} >= {
         member["agent_id"]
         for member in fast_baseline["members"]
@@ -1171,7 +1385,7 @@ async def test_valid_formation_ai_gap_is_returned_for_user_confirmation(
 
 
 @pytest.mark.asyncio
-async def test_ai_suggestion_pauses_for_required_agent_capability_decision(
+async def test_ai_suggestion_preserves_required_agent_despite_low_capability_evidence(
     tmp_path, monkeypatch, auth_headers,
 ):
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
@@ -1184,6 +1398,7 @@ async def test_ai_suggestion_pauses_for_required_agent_capability_decision(
         "confidence": 0.9,
         "evidence": [{"source": "runtime_probe", "value": "no design tools", "weight": 0.9}],
     }
+    monkeypatch.setattr("crew.gateway.routers.runtimes._formation_agent_catalog", lambda *args, **kwargs: profiled_agents)
     monkeypatch.setattr(
         crew.external_agents,
         "list_agents",
@@ -1208,9 +1423,8 @@ async def test_ai_suggestion_pauses_for_required_agent_capability_decision(
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["decision_required"] is True
-    assert data["required_agent_conflicts"][0]["agent_id"] == agents[1]["id"]
-    assert not fake.calls
+    assert data["decision_required"] is False
+    assert agents[1]["id"] in {member["agent_id"] for member in data["members"]}
 
 
 @pytest.mark.asyncio
@@ -1220,6 +1434,8 @@ async def test_ai_suggestion_restores_forced_member_omitted_by_llm(
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
     crew = build_app(enable_team=False)
     agents = _seed_agents(crew)
+    profiled_agents = crew.external_agents.list_agents(owner_account_id=OWNER_A)
+    monkeypatch.setattr("crew.gateway.routers.runtimes._formation_agent_catalog", lambda *args, **kwargs: profiled_agents)
     forced_id = agents[1]["id"]
     good_json = json.dumps({
         "requirement_audit": {"required_roles": []},
@@ -1246,7 +1462,7 @@ async def test_ai_suggestion_restores_forced_member_omitted_by_llm(
     data = resp.json()
     assert data["requested_formation_mode"] == "ai"
     assert data["selected_formation_mode"] == "fast"
-    assert data["fallback_reason"] == "no_material_improvement"
+    assert data["fallback_reason"] == "invalid_ai_output"
     assert forced_id in {member["agent_id"] for member in data["members"]}
     planned = next(member for member in data["formation_plan"]["members"] if member["agent_id"] == forced_id)
     assert planned["locked"] is True
@@ -1470,7 +1686,7 @@ async def test_fast_suggest_uses_local_rules_without_llm(tmp_path, monkeypatch, 
     formation = data["formation_plan"]
     assert {"frontend", "backend"}.issubset(set(formation["coverage"]["required"]))
     assert "formation" not in data["team_spec"]
-    assert len(data["members"]) >= 2
+    assert formation["coverage"]["unverified"]
     assert data["reasons"]
     assert not fake.calls
 
@@ -1532,7 +1748,7 @@ def test_fast_team_suggestion_uses_minimal_capability_cover_not_provider_brand()
     assert all("assigned_capabilities" in member for member in result["formation_plan"]["members"])
 
 
-def test_fast_team_suggestion_keeps_build_as_primary_role_and_honors_custom_capabilities():
+def test_fast_team_suggestion_reports_custom_capabilities_without_inventing_evidence():
     result = fast_team_suggestion(
         {
             "name": "像素小游戏开发团队",
@@ -1543,12 +1759,12 @@ def test_fast_team_suggestion_keeps_build_as_primary_role_and_honors_custom_capa
         [{"id": "hermes_1", "name": "Hermes", "provider": "hermes"}],
     )
 
-    developer = next(member for member in result["members"] if member["agent_id"] == "hermes_1")
-    assert len(result["members"]) == 2
     required = set(result["formation_plan"]["coverage"]["required"])
     assert {"design", "frontend", "implementation"} <= required
-    assert {"implementation", "testing", "verification"} <= set(developer["capabilities"])
-    assert developer["role_key"] in {"frontend_developer", "fullstack_developer"}
+    assert {"implementation", "testing", "verification"} <= set(result["formation_plan"]["coverage"]["unverified"])
+    candidate = next(member for member in result["members"] if member["agent_id"] == "hermes_1")
+    assert candidate["assigned_capabilities"] == []
+    assert candidate["role_key"] == "unclassified"
 
 
 def test_fast_team_suggestion_does_not_infer_capabilities_from_custom_text():
@@ -1561,7 +1777,7 @@ def test_fast_team_suggestion_does_not_infer_capabilities_from_custom_text():
     )
 
     assert result["formation_plan"]["coverage"]["required"] == []
-    assert len(result["members"]) == 1
+    assert len(result["members"]) == 2
 
 
 def test_fast_team_suggestion_keeps_uncovered_capability_fallback_finite():
@@ -1578,9 +1794,9 @@ def test_fast_team_suggestion_keeps_uncovered_capability_fallback_finite():
         }],
     )
 
-    assert len(result["members"]) == 2
-    assert result["members"][1]["agent_id"] == "researcher"
-    assert result["formation_plan"]["coverage"]["uncovered"] == ["implementation"]
+    candidate = next(member for member in result["members"] if member["agent_id"] == "researcher")
+    assert candidate["assigned_capabilities"] == []
+    assert result["formation_plan"]["coverage"]["unverified"] == ["implementation"]
 
 
 def test_fast_team_suggestion_skips_unavailable_agent_profiles():
@@ -1738,9 +1954,9 @@ def test_fast_team_suggestion_user_can_assign_kimi_to_development():
     )
 
     by_role = {member["role_key"]: member for member in result["members"]}
-    assert by_role["fullstack_developer"]["agent_id"] == "kimi_1"
+    assert by_role["frontend_developer"]["agent_id"] == "kimi_1"
     assert by_role["technical_writer"]["agent_id"] == "hermes_1"
-    assert "用户指定" in by_role["fullstack_developer"]["selection_reason"]
+    assert "用户指定" in by_role["frontend_developer"]["selection_reason"]
     assert "用户指定" in by_role["technical_writer"]["selection_reason"]
 
 
@@ -1780,7 +1996,7 @@ def test_required_agent_with_unknown_profile_is_kept_without_warning():
     assert "kimi_1" in {member["agent_id"] for member in result["members"]}
 
 
-def test_required_agent_with_reliable_low_assessment_requires_user_decision():
+def test_required_agent_with_reliable_low_assessment_remains_on_team():
     agents = [
         {
             "id": "kimi_1",
@@ -1800,13 +2016,8 @@ def test_required_agent_with_reliable_low_assessment_requires_user_decision():
         agents,
     )
 
-    assert result["decision_required"] is True
-    conflict = result["required_agent_conflicts"][0]
-    assert conflict["agent_id"] == "kimi_1"
-    assert conflict["required_capabilities"] == ["design"]
-    assert conflict["best_score"] == 0.1
-    assert conflict["best_confidence"] == 0.9
-    assert "kimi_1" not in {member["agent_id"] for member in result["members"]}
+    assert result["decision_required"] is False
+    assert "kimi_1" in {member["agent_id"] for member in result["members"]}
 
 
 def test_user_can_force_required_agent_after_capability_warning():

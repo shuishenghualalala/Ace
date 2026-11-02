@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from crew.team.capabilities import CAPABILITY_LABELS
+
 CREW_BUILTIN_AGENT_ID = "crew::builtin"
 LEGACY_CREW_BUILTIN_AGENT_ID = "crew"
 
@@ -182,7 +184,7 @@ TEAM_ROLE_PRESETS: list[dict[str, Any]] = [
         "node_label": "测试与质量验证",
         "deliverables": ["测试方案与用例", "回归验证结果", "缺陷与质量结论"],
         "collaboration": "接收实际产物后独立验证，向 Leader 回传缺陷、影响范围和质量结论。",
-        "keywords": ["测试", "qa", "验证", "回归", "缺陷", "质量"],
+        "keywords": ["测试", "qa", "验证", "回归", "缺陷", "质量", "验收"],
     },
     {
         "key": "devops_engineer",
@@ -218,7 +220,7 @@ TEAM_ROLE_PRESETS: list[dict[str, Any]] = [
         "node_label": "调研与风险分析",
         "deliverables": ["调研结论", "参考依据", "风险与建议"],
         "collaboration": "按 Leader 给出的范围提交来源、分析结论和不确定性。",
-        "keywords": ["检索", "搜索", "调研", "研究", "文献", "资料", "搜集", "分析", "比较", "咨询"],
+        "keywords": ["检索", "搜索", "调研", "研究", "文献", "综述", "资料", "搜集", "分析", "比较", "咨询", "商业", "市场", "客户", "获客", "成本", "盈利", "收入", "定价"],
     },
     {
         "key": "technical_writer",
@@ -242,7 +244,31 @@ TEAM_ROLE_PRESETS: list[dict[str, Any]] = [
         "node_label": "独立审阅",
         "deliverables": ["独立审阅结论", "冲突与遗漏清单", "通过或修订建议"],
         "collaboration": "不替代原成员重做任务，基于已提交结果向 Leader 给出独立判断。",
-        "keywords": ["审阅", "复核", "核验", "交叉检查", "证据", "风险", "反方"],
+        "keywords": ["审阅", "评审", "复核", "核验", "交叉检查", "证据", "来源", "引用", "风险", "反方", "评分", "判断"],
+    },
+    {
+        "key": "general_collaborator",
+        "label": "通用协作成员",
+        "description": "根据本次任务协助处理资料、分析和结果整理，具体工作由团队按需安排。",
+        "capabilities": [],
+        "workflow_lane": "other",
+        "scope_key": "general_collaboration",
+        "node_label": "任务协作",
+        "deliverables": ["本次任务的可检查成果"],
+        "collaboration": "与团队协调任务范围，说明成果及待确认事项。",
+        "keywords": [],
+    },
+    {
+        "key": "unclassified",
+        "label": "待确认角色",
+        "description": "按用户指定的职责参与协作，能力和角色尚待确认。",
+        "capabilities": [],
+        "workflow_lane": "other",
+        "scope_key": "unclassified",
+        "node_label": "待确认职责",
+        "deliverables": [],
+        "collaboration": "按用户确认的职责协作；能力不明确时说明需要确认。",
+        "keywords": [],
     },
 ]
 
@@ -252,7 +278,7 @@ def role_preset(role_key: str) -> dict[str, Any]:
     for preset in TEAM_ROLE_PRESETS:
         if preset["key"] == key:
             return dict(preset)
-    return dict(TEAM_ROLE_PRESETS[0])
+    return dict(next(preset for preset in TEAM_ROLE_PRESETS if preset["key"] == "unclassified"))
 
 
 def role_keywords(role_key: str) -> list[str]:
@@ -328,10 +354,25 @@ def role_keys_for_text(
 
 
 def infer_role_key(text: str, *, is_leader: bool = False) -> str:
-    roles = role_keys_for_text(text, limit=1)
-    if roles:
-        return roles[0]
-    return "project_manager" if is_leader else "fullstack_developer"
+    haystack = str(text or "").lower()
+    for preset in TEAM_ROLE_PRESETS:
+        role_key = str(preset.get("key") or "").lower()
+        label = str(preset.get("label") or "").lower()
+        if (role_key and role_key in haystack) or (label and label in haystack):
+            return str(preset["key"])
+    ranked: list[tuple[int, int, int, str]] = []
+    for order, preset in enumerate(TEAM_ROLE_PRESETS):
+        if str(preset.get("workflow_lane") or "") == "lead":
+            continue
+        keywords = [str(item).lower() for item in preset.get("keywords") or [] if str(item).strip()]
+        matched = list(dict.fromkeys(keyword for keyword in keywords if keyword in haystack))
+        if matched:
+            # Prefer a role supported by several distinct task signals over the
+            # first broad keyword encountered in the catalog.
+            ranked.append((len(matched), sum(len(item) for item in matched), -order, str(preset["key"])))
+    if ranked:
+        return max(ranked)[3]
+    return "project_manager" if is_leader else "unclassified"
 
 
 def role_public_payload(preset: dict[str, Any]) -> dict[str, Any]:
@@ -453,7 +494,7 @@ def intelligent_role_markdown(
     )
     stable = public_responsibility(compiled)
     capabilities = "、".join(
-        str(item)
+        CAPABILITY_LABELS.get(str(item), str(item))
         for item in (assigned_capabilities or preset.get("capabilities") or [])
         if str(item)
     )
@@ -467,7 +508,7 @@ def intelligent_role_markdown(
         "",
         "#### 职责",
         f"- {stable['mission']}",
-        f"- 重点能力：{capabilities or preset['description']}。",
+        f"- 岗位侧重点：{capabilities or preset['description']}。",
     ]
     lines.extend(f"- 边界：{item}" for item in stable["boundaries"])
     lines.extend([

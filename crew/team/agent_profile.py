@@ -259,6 +259,13 @@ def evaluate_capability_coverage(
             if not is_agent_profile_available(profile):
                 unavailable_members.append(agent_id)
                 continue
+            assessment = profile.capabilities.get(capability)
+            if assessment is None or assessment.confidence < 0.5:
+                # A weak profile is not evidence that an Agent lacks a skill.
+                # Keep it visible as unverified so Formation can retain a
+                # user-selected member without claiming a capability match.
+                unknown_members.append(agent_id)
+                continue
             if profile.score(capability) >= threshold:
                 capability_members.append(agent_id)
 
