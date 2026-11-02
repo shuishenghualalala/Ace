@@ -16,6 +16,7 @@ import {
 import type { ChatMessage } from '../chat-render';
 import { escapeHtml, notify, state } from '../state';
 import { setRuntimeStyle } from '../components/runtime-style';
+import { activateCollaborationPreview, renderCollaborationPreview } from './collaboration-preview';
 
 const CREW_BUILTIN_AGENT_ID = 'crew::builtin';
 const TEAM_PLAN_SOURCES = new Set(['team_plan', 'team_kanban', 'team_flow_fallback']);
@@ -957,6 +958,7 @@ export function buildTeamCollaborationBoardHtml(sessionId: string | null | undef
     <div class="board__head"><div><span class="board__title-row">协作看板<button class="board-files-btn${filesOpen.has(sessionId) ? ' is-active' : ''}" type="button" data-team-files aria-expanded="${filesOpen.has(sessionId)}" title="查看当前 session 文件清单">${folderIconHtml()}${files.length ? `<i>${files.length}</i>` : ''}</button></span><em>Team Flow</em></div><div class="board__actions"><button class="team-board-close" type="button" data-team-close title="收起">×</button></div></div>
     ${renderFiles(sessionId, files)}
     <div class="board__list team-board__list">
+      ${renderCollaborationPreview(sessionId)}
       <section class="flow-hero"><div class="flow-hero__title">${teamMarkHtml()}<div><strong>${nodes.length ? '团队工作流' : '等待团队工作流'}</strong><p>${nextNode ? (allCompleted ? `已完成：${escapeHtml(nextNode.title)}` : `当前节点：${escapeHtml(nextNode.title)}`) : '开始任务后这里会展示流程阶段、负责人和节点小结。'}</p></div></div><div class="flow-meter" aria-label="完成进度 ${progress.percent}%"><span data-team-progress="${progress.percent}"></span></div><div class="flow-hero__meta"><span>${progress.completed}/${progress.total || 0} 已完成</span><span>${runningNode ? `${escapeHtml(runningNode.owner.toLowerCase() === 'leader' ? leaderName : runningNode.owner)} 处理中` : '暂无运行节点'}</span></div><div class="team-members" aria-label="团队成员">${renderMembers(members)}</div></section>
       ${flowHtml}
       ${errors.length ? `<section class="board-alert"><strong>错误待处理</strong><p>${escapeHtml(errors[0]?.title || '')}：${escapeHtml(errors[0]?.summary || '')}</p></section>` : ''}
@@ -980,6 +982,7 @@ async function openPath(filePath: string): Promise<void> {
 
 export function activateTeamCollaborationBoard(sessionId: string | null | undefined = state.activeSessionId): void {
   if (!sessionId) return;
+  activateCollaborationPreview(sessionId);
   const progressFill = document.querySelector<HTMLElement>('[data-team-progress]');
   if (progressFill) setRuntimeStyle(progressFill, 'width', `${progressFill.dataset.teamProgress ?? '0'}%`);
   startTeamCollaborationPolling(sessionId);
