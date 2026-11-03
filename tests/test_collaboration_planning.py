@@ -221,6 +221,36 @@ async def test_team_manager_uses_persisted_collaboration_plan(tmp_path):
     assert manager._plan_workflows[("owner", "session::turn::1")]
 
 
+@pytest.mark.asyncio
+async def test_failed_followup_stops_planning_with_clear_error(tmp_path):
+    from crew.core.errors import ToolError
+    from crew.core.mocks import InMemorySessionStore, NullMemory
+    from crew.plugins.manager import PluginManager
+    from crew.state.config import Config
+    from crew.tasks.task_manager import InMemoryTaskManager
+    from crew.team.team_manager import InProcessTeamManager
+    from crew.tools.registry import Registry
+
+    class Provider:
+        async def chat(self, messages):
+            return SimpleNamespace(text=json.dumps({"critical_missing_info": "评审哪个项目？"}))
+
+    team_record = {"id": "team", "members": [{"agent_id": "a", "agent_name": "A"}]}
+    class ExternalStore:
+        def get_team(self, *args, **kwargs):
+            return team_record
+
+    manager = InProcessTeamManager(provider=Provider(), registry=Registry(), session_store=InMemorySessionStore(),
+        memory=NullMemory(), plugins=PluginManager(), tasks=InMemoryTaskManager(),
+        config=Config(db_path=str(tmp_path / "app.db")), external_store=ExternalStore())
+    async def fail_followup(*args, **kwargs):
+        raise ToolError("interaction unavailable")
+    manager._send_followup_question_to = fail_followup
+    plan = await manager._ensure_runtime_plan_async("session", SimpleNamespace(), "评审项目", "team", owner_account_id="owner")
+    assert plan is None
+    assert "本次任务尚未开始" in manager._planning_failures[("owner", "session")]
+
+
 def test_explicit_assignment_and_exclusion_constrain_semantic_suggestions():
     from crew.collaboration.planning.service import merge_assignments
     members = [{"member_id": "a", "name": "A", "responsibility": "研究", "responsibility_source": "user"},

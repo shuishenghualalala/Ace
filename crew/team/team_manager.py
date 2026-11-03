@@ -5097,12 +5097,16 @@ class InProcessTeamManager(TeamManager):
                                 for option in decision.get("options") or []
                             ]
                             question["allowFreeText"] = False
-                        visible_id, question_id = await self._send_followup_question_to(
-                            _visible_session_id(session_id), [question], title="确认任务规划",
-                            origin={"type": "team_control", "agent_id": "leader", "agent_name": "Leader",
-                                    "team_session_id": session_id, "mention_intent": "workflow_planning"},
-                        )
-                        answers = await self._wait_for_answer(visible_id, question_id)
+                        try:
+                            visible_id, question_id = await self._send_followup_question_to(
+                                _visible_session_id(session_id), [question], title="确认任务规划",
+                                origin={"type": "team_control", "agent_id": "leader", "agent_name": "Leader",
+                                        "team_session_id": session_id, "mention_intent": "workflow_planning"},
+                            )
+                            answers = await self._wait_for_answer(visible_id, question_id)
+                        except ToolError as exc:
+                            log.warning("规划追问失败 session=%s error=%s", session_id, exc)
+                            raise PlanningError("无法显示或接收规划问题，本次任务尚未开始，请重试。") from exc
                         for item in answers:
                             if isinstance(item, dict) and item.get("question_id", item.get("id")) == decision_id:
                                 values = item.get("answers") or []
