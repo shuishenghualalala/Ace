@@ -67,16 +67,30 @@ class TeamWorkflowRuntime:
             ] + ([{"kind": "knowledge_base", "id": str(envelope.params["external_wiki_read_kb_id"])}]
                  if envelope.params.get("external_wiki_read_kb_id") else []),
         ))
-        while not task.done():
-            queue_task = asyncio.create_task(queue.get())
-            done, _ = await asyncio.wait([task, queue_task], return_when=asyncio.FIRST_COMPLETED)
-            if queue_task in done:
-                yield queue_task.result(), None
-            else:
-                queue_task.cancel()
-        while not queue.empty():
-            yield queue.get_nowait(), None
-        yield None, task.result()
+        queue_task: asyncio.Task[ResponseChunk] | None = None
+        try:
+            while not task.done():
+                queue_task = asyncio.create_task(queue.get())
+                done, _ = await asyncio.wait([task, queue_task], return_when=asyncio.FIRST_COMPLETED)
+                if queue_task in done:
+                    yield queue_task.result(), None
+                else:
+                    queue_task.cancel()
+                    await asyncio.gather(queue_task, return_exceptions=True)
+                queue_task = None
+            while not queue.empty():
+                yield queue.get_nowait(), None
+            yield None, task.result()
+        finally:
+            def consume_exception(completed: asyncio.Task[Any]) -> None:
+                if not completed.cancelled():
+                    completed.exception()
+
+            for pending_task in (queue_task, task):
+                if pending_task is not None:
+                    if not pending_task.done():
+                        pending_task.cancel()
+                    pending_task.add_done_callback(consume_exception)
 
     async def run_required_workflow(
         self,
