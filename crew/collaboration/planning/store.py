@@ -78,7 +78,7 @@ class PlanningStore:
     def answer(self, owner: str, task_id: str, decision_id: str, member_id: str) -> dict[str, Any]:
         """Persist one selection atomically; identical retries are idempotent."""
         def write(conn: Any) -> None:
-            row = conn.execute("SELECT plan FROM collab_planning_tasks WHERE owner_id=? AND task_id=?",
+            row = conn.execute("SELECT state,plan FROM collab_planning_tasks WHERE owner_id=? AND task_id=?",
                                (owner, task_id)).fetchone()
             if not row or not row["plan"]:
                 raise ValueError("任务或决策不存在")
@@ -90,7 +90,7 @@ class PlanningStore:
                 if decision.get("answer") != member_id:
                     raise ValueError("该决策已有不同答案")
                 return
-            if decision["state"] != "open" or member_id not in {v["member_id"] for v in decision["options"]}:
+            if row["state"] != "waiting_user" or decision.get("kind") != "assignment" or decision["state"] != "open" or member_id not in {v["member_id"] for v in decision["options"]}:
                 raise ValueError("决策已失效或所选成员不在候选中")
             decision.update(state="answered", answer=member_id)
             plan["assignments"].append({"assignment_id": uuid.uuid4().hex, "unit_id": decision["unit_id"],
@@ -106,3 +106,50 @@ class PlanningStore:
         result = self.get(owner, task_id)
         assert result is not None
         return result
+
+    def answer_clarification(self, owner: str, task_id: str, decision_id: str, answer: str) -> tuple[dict[str, Any], bool]:
+        """Persist the answer and claim replanning in the same transaction."""
+        if not owner or not answer.strip():
+            raise ValueError("账户和补充内容不能为空")
+        def write(conn: Any) -> bool:
+            row = conn.execute("SELECT snapshot,state,plan FROM collab_planning_tasks WHERE owner_id=? AND task_id=?",
+                               (owner, task_id)).fetchone()
+            if not row:
+                raise ValueError("任务不存在")
+            task = json.loads(row["snapshot"])
+            previous = next((item for item in task.get("clarifications", []) if item.get("decision_id") == decision_id), None)
+            if previous:
+                if previous.get("answer") != answer.strip():
+                    raise ValueError("该问题已有不同答案")
+                return False
+            plan = json.loads(row["plan"]) if row["plan"] else {}
+            decision = next((item for item in plan.get("decisions", []) if item.get("decision_id") == decision_id), None)
+            if row["state"] != "waiting_user" or not decision or decision.get("kind") != "clarification" or decision.get("state") != "open":
+                raise ValueError("问题不存在或已失效")
+            task.setdefault("clarifications", []).append({"decision_id": decision_id,
+                "question": decision["question"], "answer": answer.strip()})
+            conn.execute("UPDATE collab_planning_tasks SET snapshot=?,state='planning',plan=NULL,error='',updated_at=? "
+                         "WHERE owner_id=? AND task_id=? AND state='waiting_user'",
+                         (json.dumps(task, ensure_ascii=False), time.time(), owner, task_id))
+            return True
+        claimed = self._writer.execute(write)
+        result = self.get(owner, task_id)
+        assert result is not None
+        return result, claimed
+
+    def claim_handoff(self, owner: str, task_id: str, plan_id: str) -> bool:
+        """Claim one committed plan exactly once before handing it to a scheduler."""
+        if not owner or not task_id or not plan_id:
+            raise ValueError("缺少任务、计划或账户")
+        def write(conn: Any) -> bool:
+            row = conn.execute("SELECT state,plan FROM collab_planning_tasks WHERE owner_id=? AND task_id=?",
+                               (owner, task_id)).fetchone()
+            if not row or row["state"] != "planned" or not row["plan"]:
+                return False
+            if json.loads(row["plan"]).get("plan_id") != plan_id:
+                return False
+            cursor = conn.execute("UPDATE collab_planning_tasks SET state='handoff_claimed',updated_at=? "
+                                  "WHERE owner_id=? AND task_id=? AND state='planned'",
+                                  (time.time(), owner, task_id))
+            return cursor.rowcount == 1
+        return self._writer.execute(write)

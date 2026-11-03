@@ -51,11 +51,10 @@ def validate_work_units(raw: Any) -> list[dict[str, Any]]:
             "depends_on": _strings(item.get("depends_on", []), f"{key} 的依赖"),
             "required_tools": _strings(item.get("required_tools", []), f"{key} 的工具要求"),
             "required_capabilities": _strings(item.get("required_capabilities", []), f"{key} 的能力要求"),
-            "candidate_member_id": str(item.get("candidate_member_id") or "").strip(),
-            "candidate_reason": str(item.get("candidate_reason") or "").strip(),
-            "responsibility_ref": str(item.get("responsibility_ref") or "").strip(),
-            "assignment_source": str(item.get("assignment_source") or "").strip(),
+            "requirements_source": "model_suggestion",
             "ambiguity": str(item.get("ambiguity") or "").strip(),
+            "matches": item.get("matches") if isinstance(item.get("matches"), list) else [],
+            "excluded_members": item.get("excluded_members") if isinstance(item.get("excluded_members"), list) else [],
         })
     for unit in units:
         deps = unit["depends_on"]
@@ -70,7 +69,8 @@ def validate_work_units(raw: Any) -> list[dict[str, Any]]:
     return units
 
 
-def assign_units(units: list[dict[str, Any]], members: list[dict[str, Any]], goal: str = "") -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def assign_units(units: list[dict[str, Any]], members: list[dict[str, Any]], goal: str = "",
+                 clarifications: list[dict[str, str]] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Accept evidence-backed suggestions; unresolved choices remain decisions.
 
     A model suggestion is not evidence of a member's tool availability. The
@@ -81,49 +81,76 @@ def assign_units(units: list[dict[str, Any]], members: list[dict[str, Any]], goa
         raise PlanningError("团队成员为空或成员标识重复")
     assignments, decisions = [], []
     for unit in units:
-        member_id = unit["candidate_member_id"]
-        member = member_map.get(member_id)
-        ref = unit["responsibility_ref"]
-        reason = unit["candidate_reason"]
-        # Explicit semantic ambiguity must never be silently resolved by a score.
-        if unit["ambiguity"] or not member or not reason:
-            decisions.append({"decision_id": uuid.uuid4().hex, "unit_key": unit["key"],
-                              "kind": "assignment", "question": unit["ambiguity"] or "请选择此工作单元的负责人",
-                              "options": [{"member_id": k, "name": v.get("name", k)} for k, v in member_map.items()],
-                              "state": "open"})
+        ranked: dict[int, dict[str, dict[str, Any]]] = {}
+        for match in unit["matches"]:
+            if not isinstance(match, dict):
+                raise PlanningError(f"{unit['key']} 的分配依据格式无效")
+            member_id = str(match.get("member_id") or "").strip()
+            member = member_map.get(member_id)
+            ref = str(match.get("reference") or "").strip()
+            reason = str(match.get("reason") or "").strip()
+            kind = str(match.get("kind") or "").strip()
+            if not member or not reason or kind not in {"task_instruction", "responsibility", "inferred"}:
+                raise PlanningError(f"{unit['key']} 的成员或分配依据无效")
+            if member.get("excluded") is True or member_id in unit["excluded_members"]:
+                continue
+            if kind == "task_instruction":
+                names = [member_id, str(member.get("name") or "").strip()]
+                in_goal = bool(ref and ref in goal)
+                in_answer = any(ref and ref in str(item.get("answer") or "") for item in (clarifications or []))
+                if not (in_goal or in_answer) or not any(name and name in ref for name in names):
+                    raise PlanningError(f"{unit['key']} 的任务指定依据无效")
+                rank, source = 3, "task_instruction" if in_goal else "user_clarification"
+            elif kind == "responsibility":
+                if not ref or ref not in str(member.get("responsibility") or ""):
+                    raise PlanningError(f"{unit['key']} 的职责依据与团队快照不一致")
+                if member.get("responsibility_source") == "user":
+                    rank, source = 2, "user_responsibility"
+                elif member.get("responsibility_source") == "confirmed_suggestion":
+                    rank, source = 1, "confirmed_suggestion"
+                else:
+                    rank, source = 0, "model_suggestion"
+            else:
+                if ref:
+                    raise PlanningError(f"{unit['key']} 的推断不能冒充用户原文")
+                rank, source = 0, "model_suggestion"
+            ranked.setdefault(rank, {})[member_id] = {
+                "member_id": member_id, "source": source, "reason": reason,
+                "responsibility_ref": ref, "capability_status": "unverified",
+            }
+        candidates = ranked[max(ranked)] if ranked else {}
+        if candidates and (not unit["ambiguity"] or (max(ranked) == 3 and len(candidates) == 1)) and (len(candidates) == 1 or max(ranked) == 0):
+            assignments.append({"assignment_id": uuid.uuid4().hex, "unit_key": unit["key"],
+                                **next(iter(candidates.values()))})
             continue
-        responsibility = member.get("responsibility") or ""
-        proposed_source = unit["assignment_source"]
-        if proposed_source == "task_instruction":
-            if not ref or ref not in goal:
-                raise PlanningError(f"{unit['key']} 的任务指定依据不在用户原文中")
-            source = "task_instruction"
-        elif ref and ref not in responsibility:
-            raise PlanningError(f"{unit['key']} 的职责依据与团队快照不一致")
-        elif ref and member.get("responsibility_source") == "user":
-            source = "user_responsibility"
-        elif ref:
-            source = "confirmed_suggestion"
-        else:
-            source = "model_suggestion"
-        assignments.append({"assignment_id": uuid.uuid4().hex, "unit_key": unit["key"],
-                            "member_id": member_id, "source": source, "reason": reason,
-                            "responsibility_ref": ref, "capability_status": "unverified"})
+        options = list(candidates) if candidates else [key for key, value in member_map.items()
+                                                        if not value.get("excluded") and key not in unit["excluded_members"]]
+        if not options:
+            raise PlanningError(f"{unit['key']} 没有可选的团队成员")
+        decisions.append({"decision_id": uuid.uuid4().hex, "unit_key": unit["key"],
+                          "kind": "assignment", "question": unit["ambiguity"] or "请选择此工作单元的负责人",
+                          "options": [{"member_id": key, "name": member_map[key].get("name", key)} for key in options],
+                          "state": "open"})
     return assignments, decisions
 
 
-def make_plan(raw: dict[str, Any], members: list[dict[str, Any]], goal: str = "") -> dict[str, Any]:
+def make_plan(raw: dict[str, Any], members: list[dict[str, Any]], goal: str = "",
+              clarifications: list[dict[str, str]] | None = None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise PlanningError("规划结果不是对象")
     units = validate_work_units(raw.get("work_units"))
-    assignments, decisions = assign_units(units, members, goal)
+    assignments, decisions = assign_units(units, members, goal, clarifications)
     ids = {u["key"]: uuid.uuid4().hex for u in units}
     for unit in units:
         unit["unit_id"] = ids[unit["key"]]
         unit["depends_on"] = [ids[k] for k in unit["depends_on"]]
+        unit.pop("matches", None)
+        unit.pop("ambiguity", None)
+        unit.pop("excluded_members", None)
     for entry in [*assignments, *decisions]:
         entry["unit_id"] = ids[entry.pop("unit_key")]
     return {"plan_id": uuid.uuid4().hex, "version": 1,
             "status": "waiting_user" if decisions else "planned", "work_units": copy.deepcopy(units),
             "assignments": assignments, "decisions": decisions,
-            "coverage_note": str(raw.get("coverage_note") or "").strip()}
+            "coverage_note": str(raw.get("coverage_note") or "").strip(),
+            "member_constraints": copy.deepcopy(raw.get("member_constraints") or [])}

@@ -55,7 +55,15 @@ def create_collaboration_planning_router(crew: Any) -> APIRouter:
     async def answer_preview(request: Request, task_id: str, decision_id: str, payload: dict) -> JSONResponse:
         owner = account_from_request(request).owner_account_id
         try:
-            result = get_store().answer(owner, task_id, decision_id, str(payload.get("member_id") or ""))
+            if "answer" in payload:
+                answer = str(payload.get("answer") or "").strip()
+                if not answer or len(answer) > 16000:
+                    raise ValueError("补充内容不能为空或过长")
+                result = await PlanningService(get_store()).answer_clarification(
+                    owner=owner, task_id=task_id, decision_id=decision_id, answer=answer,
+                    provider=crew.owner_team_provider(owner))
+            else:
+                result = get_store().answer(owner, task_id, decision_id, str(payload.get("member_id") or ""))
             return JSONResponse({"ok": True, "preview": result})
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
