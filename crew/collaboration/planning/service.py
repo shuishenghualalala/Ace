@@ -8,7 +8,7 @@ import json
 import uuid
 from typing import Any
 
-from crew.collaboration.planning.plan import PlanningError, make_plan, validate_work_units
+from crew.collaboration.planning.plan import PlanningError, make_plan, reference_names_member, validate_work_units
 from crew.collaboration.planning.store import PlanningStore
 from crew.core.text_parsing import extract_json_object
 from crew.core.types import Message
@@ -116,7 +116,7 @@ def merge_assignments(raw: dict[str, Any], proposals: Any, *, members: list[dict
                 or not ref or not (ref in goal or any(ref in answer for answer in answer_texts))):
             raise PlanningError("用户成员约束缺少有效的任务或原文依据")
         name = str(member.get("name") or "").strip()
-        if member_id not in ref and (not name or name not in ref):
+        if not reference_names_member(ref, member):
             raise PlanningError("用户成员约束的原文未指出对应成员")
         if name and name in ref and member_id not in ref and sum(m.get("name") == name for m in members) > 1:
             raise PlanningError("用户指定的成员名称不唯一，请明确成员")

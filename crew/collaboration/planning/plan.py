@@ -29,6 +29,16 @@ def _strings(value: Any, field: str, *, required: bool = False) -> list[str]:
     return result
 
 
+def reference_names_member(reference: str, member: dict[str, Any]) -> bool:
+    """Match stable IDs and display names without accepting a substring of another ID."""
+    for name in (str(member.get("member_id") or "").strip(), str(member.get("name") or "").strip()):
+        if not name:
+            continue
+        if re.search(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", reference):
+            return True
+    return False
+
+
 def validate_work_units(raw: Any) -> list[dict[str, Any]]:
     """Reject malformed references rather than silently deleting edges or work."""
     if not isinstance(raw, list) or not 1 <= len(raw) <= 12:
@@ -95,10 +105,9 @@ def assign_units(units: list[dict[str, Any]], members: list[dict[str, Any]], goa
             if member.get("excluded") is True or member_id in unit["excluded_members"]:
                 continue
             if kind == "task_instruction":
-                names = [member_id, str(member.get("name") or "").strip()]
                 in_goal = bool(ref and ref in goal)
                 in_answer = any(ref and ref in str(item.get("answer") or "") for item in (clarifications or []))
-                if not (in_goal or in_answer) or not any(name and name in ref for name in names):
+                if not (in_goal or in_answer) or not reference_names_member(ref, member):
                     raise PlanningError(f"{unit['key']} 的任务指定依据无效")
                 rank, source = 3, "task_instruction" if in_goal else "user_clarification"
             elif kind == "responsibility":
