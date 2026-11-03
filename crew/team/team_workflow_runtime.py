@@ -60,6 +60,12 @@ class TeamWorkflowRuntime:
             execution_profile=execution_profile,
             team_spec=team_spec,
             planning_progress=on_progress,
+            task_inputs=[
+                {"kind": "attachment", **{key: str(item[key]) for key in ("id", "name", "path", "type") if item.get(key)}}
+                for item in (envelope.attachments or [])
+                if isinstance(item, dict) and str(item.get("name") or item.get("path") or item.get("id") or "").strip()
+            ] + ([{"kind": "knowledge_base", "id": str(envelope.params["external_wiki_read_kb_id"])}]
+                 if envelope.params.get("external_wiki_read_kb_id") else []),
         ))
         while not task.done():
             queue_task = asyncio.create_task(queue.get())
@@ -104,6 +110,10 @@ class TeamWorkflowRuntime:
             if planned is not None:
                 plan = planned
         planning_key = self.host._key(envelope.session_id, envelope.user_id)
+        planning_failure = self.host._planning_failures.pop(planning_key, "")
+        if plan is None and planning_failure:
+            yield ResponseChunk.final(envelope.request_id, planning_failure, reason="planning_failed")
+            return
         scope_conflict = self.host._planning_scope_conflicts.pop(planning_key, {})
         if plan is None and scope_conflict:
             default_intent = str(scope_conflict.get("default_intent") or "implementation").strip()
@@ -233,6 +243,10 @@ class TeamWorkflowRuntime:
                 if planned is not None:
                     plan = planned
         if plan is None:
+            planning_failure = self.host._planning_failures.pop(planning_key, "")
+            if planning_failure:
+                yield ResponseChunk.final(envelope.request_id, planning_failure, reason="planning_failed")
+                return
             if self.host._planning_missing_info.pop(planning_key, []):
                 yield ResponseChunk.final(
                     envelope.request_id,

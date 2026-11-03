@@ -9,7 +9,6 @@
  *   把 HTTP 状态码 + 后端错误信息合成人类可读消息抛给 UI 层。
  */
 import { logStream } from './stream-debug';
-import type { CollaborationPreview } from './features/collaboration-preview';
 
 export type Mode = 'agent' | 'team' | 'dynamic_kanban';
 export type ChunkKind =
@@ -1598,15 +1597,6 @@ export interface WikiUploadResult {
 }
 
 export const backendApi = {
-  createCollaborationPreview: (teamId: string, sessionId: string, goal: string, requestId: string) =>
-    getJSON<{ ok: boolean; preview: CollaborationPreview }>('/api/collaboration/planning-previews', {
-      method: 'POST', ...jsonBody({ team_id: teamId, session_id: sessionId, goal, request_id: requestId }),
-    }),
-  answerCollaborationPreview: (taskId: string, decisionId: string, memberId: string) =>
-    getJSON<{ ok: boolean; preview: CollaborationPreview }>(
-      `/api/collaboration/planning-previews/${encodeURIComponent(taskId)}/decisions/${encodeURIComponent(decisionId)}`,
-      { method: 'POST', ...jsonBody({ member_id: memberId }) },
-    ),
   inspirations: () => getJSON<{ ok: boolean; inspirations: InspirationItem[] }>(
     '/api/sites/inspirations',
   ),

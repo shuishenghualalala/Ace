@@ -51,6 +51,10 @@ from crew.core.interfaces import (
 )
 from crew.core.text_parsing import extract_json_object
 from crew.core.types import Message
+from crew.collaboration.planning.conversation import plan_conversation
+from crew.collaboration.planning.plan import PlanningError
+from crew.collaboration.planning.service import PlanningService
+from crew.collaboration.planning.store import PlanningStore
 from crew.plugins.manager import PluginManager
 from crew.security.launch import use_process_launch
 from crew.state.config import Config
@@ -218,6 +222,8 @@ class InProcessTeamManager(TeamManager):
         self._plan_node_tasks: dict[tuple[str, str, str], str] = {}
         self._runtime_member_snapshots: dict[TeamKey, dict[str, TeamMemberSpec]] = {}
         self._planning_missing_info: dict[TeamKey, list[str]] = {}
+        self._planning_failures: dict[TeamKey, str] = {}
+        self._collaboration_planning_store: PlanningStore | None = None
         self._planning_scope_conflicts: dict[TeamKey, dict[str, Any]] = {}
         self._runtime_profile_cache: dict[tuple[str, ...], AgentProfile] = {}
         self._active_lock = threading.Lock()
@@ -974,6 +980,14 @@ class InProcessTeamManager(TeamManager):
             default_role=default_member,
         )
         graph.validate_and_fix()
+        strict_handoff = bool(isinstance(workflow_plan, dict) and workflow_plan.get("collaboration_plan_id"))
+        if strict_handoff:
+            expected_nodes = {node.id: node.assignee for node in plan_nodes}
+            actual_nodes = {node.id: node.assignee for node in graph.topological_order()}
+            expected_edges = {(edge.parent_id, edge.child_id) for edge in plan_edges}
+            actual_edges = {(edge.parent_id, edge.child_id) for edge in graph.edges}
+            if expected_nodes != actual_nodes or expected_edges != actual_edges:
+                raise ValueError("执行器无法原样接收计划，请重新规划")
 
         plan = TeamPlan(team_session_id=session_id, goal=str(goal or "").strip())
         for node in graph.topological_order():
@@ -994,12 +1008,17 @@ class InProcessTeamManager(TeamManager):
             for edge in graph.edges
         ]
         self._plans[self._key(session_id, owner_account_id)] = plan
-        self._persist_team_plan(
-            plan,
-            owner_account_id=owner_account_id,
-            external_team_id=external_team_id,
-            workflow_plan=workflow_plan,
-        )
+        try:
+            self._persist_team_plan(
+                plan,
+                owner_account_id=owner_account_id,
+                external_team_id=external_team_id,
+                workflow_plan=workflow_plan,
+                strict=strict_handoff,
+            )
+        except Exception:
+            self._plans.pop(self._key(session_id, owner_account_id), None)
+            raise
         return {"ok": True, "plan": plan.to_dict()}
 
     def _hydrate_persisted_team_plan(
@@ -1561,12 +1580,14 @@ class InProcessTeamManager(TeamManager):
         owner_account_id: str = "",
         external_team_id: str = "",
         workflow_plan: dict[str, Any] | None = None,
+        strict: bool = False,
     ) -> None:
         self._plan_store.persist(
             plan,
             owner_account_id=owner_account_id,
             external_team_id=external_team_id,
             workflow_plan=workflow_plan,
+            strict=strict,
         )
 
     def _sync_kanban_node(self, plan: TeamPlan, node: TeamPlanNode, owner_account_id: str = "") -> None:
@@ -5038,6 +5059,7 @@ class InProcessTeamManager(TeamManager):
         execution_profile: dict[str, Any] | None = None,
         team_spec: dict[str, Any] | None = None,
         planning_progress: Callable[[dict[str, Any]], Any] | None = None,
+        task_inputs: list[dict[str, str]] | None = None,
     ) -> TeamPlan | None:
         plan_key = self._key(session_id, owner_account_id)
         existing = self._plans.get(plan_key)
@@ -5046,6 +5068,62 @@ class InProcessTeamManager(TeamManager):
         if not self._begin_team_planning(session_id, owner_account_id):
             raise ToolError("Team 正在规划中，请稍后重试。")
         try:
+            if external_team_id and self.external_store is not None and owner_account_id:
+                try:
+                    if self._collaboration_planning_store is None:
+                        self._collaboration_planning_store = PlanningStore(
+                            self.config.db_path, wal_enabled=self.config.sqlite_wal,
+                        )
+                    service = PlanningService(self._collaboration_planning_store)
+                    stored_team = self.external_store.get_team(external_team_id, owner_account_id=owner_account_id)
+
+                    async def ask_decision(decision: dict[str, Any]) -> str:
+                        decision_id = str(decision.get("decision_id") or "")
+                        question: dict[str, Any] = {"id": decision_id, "question": str(decision.get("question") or "")}
+                        if decision.get("kind") == "clarification":
+                            question["inputMode"] = "text"
+                        else:
+                            question["options"] = [
+                                {"label": str(option.get("name") or option.get("member_id") or ""),
+                                 "value": str(option.get("member_id") or "")}
+                                for option in decision.get("options") or []
+                            ]
+                            question["allowFreeText"] = False
+                        visible_id, question_id = await self._send_followup_question_to(
+                            _visible_session_id(session_id), [question], title="确认任务规划",
+                            origin={"type": "team_control", "agent_id": "leader", "agent_name": "Leader",
+                                    "team_session_id": session_id, "mention_intent": "workflow_planning"},
+                        )
+                        answers = await self._wait_for_answer(visible_id, question_id)
+                        for item in answers:
+                            if isinstance(item, dict) and item.get("question_id", item.get("id")) == decision_id:
+                                values = item.get("answers") or []
+                                if isinstance(values, list) and values:
+                                    return str(values[0] or "").strip()
+                        return ""
+
+                    if planning_progress:
+                        planning_progress({"phase": "started", "status": "running", "label": "正在规划团队任务"})
+                    workflow = await plan_conversation(
+                        service, owner=owner_account_id, request_id=session_id, session_id=session_id,
+                        goal=goal, team=stored_team, provider=self._provider_for_owner(owner_account_id),
+                        inputs=list(task_inputs or []), ask=ask_decision,
+                        current_team=lambda: self.external_store.get_team(external_team_id, owner_account_id=owner_account_id),
+                    )
+                    task_id = str((workflow.get("task") or {}).get("task_id") or "")
+                    plan_id = str(workflow.get("collaboration_plan_id") or "")
+                    if not service.store.claim_handoff(owner_account_id, task_id, plan_id):
+                        raise PlanningError("此计划已交接或状态已改变，不能重复派发")
+                    self.create_plan(session_id, goal=goal, external_team_id=external_team_id,
+                                     owner_account_id=owner_account_id, workflow_plan=workflow)
+                    if planning_progress:
+                        planning_progress({"phase": "compiled", "status": "done", "label": "团队任务规划已完成"})
+                    self._planning_failures.pop(plan_key, None)
+                    self._planning_missing_info.pop(plan_key, None)
+                    return self._plans.get(plan_key)
+                except (PlanningError, ValueError, KeyError) as exc:
+                    self._planning_failures[plan_key] = str(exc) or "任务规划失败，请稍后重试。"
+                    return None
             graph_plan = await self.graph_planner.plan_async(
                 team,
                 goal,
@@ -5056,7 +5134,14 @@ class InProcessTeamManager(TeamManager):
             )
         finally:
             self._end_team_planning(session_id, owner_account_id)
-        planning = graph_plan.workflow_plan.get("planning") if isinstance(graph_plan.workflow_plan, dict) else {}
+        saved_workflow = getattr(graph_plan, "workflow_plan", None)
+        planning = saved_workflow.get("planning") if isinstance(saved_workflow, dict) else {}
+        if isinstance(planning, dict) and planning.get("status") == "failed":
+            self._planning_failures[plan_key] = str(planning.get("error_message") or "任务规划失败，请稍后重试。")
+            self._planning_missing_info.pop(plan_key, None)
+            self._planning_scope_conflicts.pop(plan_key, None)
+            return None
+        self._planning_failures.pop(plan_key, None)
         if isinstance(planning, dict) and planning.get("scope_conflict"):
             self._planning_scope_conflicts[plan_key] = dict(planning)
             self._planning_missing_info.pop(plan_key, None)
@@ -5145,6 +5230,11 @@ class InProcessTeamManager(TeamManager):
             ),
             "",
         )
+        unfinished = [node for node in plan.nodes.values() if node.status != "completed"]
+        if unfinished:
+            return "团队工作流尚未完成：" + "、".join(
+                f"{node.title}（{node.status}）" for node in unfinished[:5]
+            )
         if summary:
             return summary
         lines = [f"团队工作流完成：{plan.goal}"]

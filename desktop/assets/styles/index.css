@@ -43,7 +43,6 @@
 @import './settings.css' layer(features);
 @import './auth.css' layer(features);
 @import './kanban-board.css' layer(features);
-@import './collaboration-preview.css' layer(features);
 @import './browser-panel.css' layer(features);
 @import './composer-context.css' layer(components);
 @import './transcript.css' layer(components);

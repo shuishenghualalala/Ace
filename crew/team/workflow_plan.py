@@ -501,6 +501,10 @@ def workflow_node_runtime_metadata(
         "full_title",
         "display_action",
         "plan_strategy",
+        "assignment_source",
+        "assignment_reason",
+        "responsibility_quote",
+        "preserve_assignee",
     ):
         if node.get(key) not in (None, ""):
             metadata[key] = node[key]

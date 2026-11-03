@@ -159,6 +159,48 @@ async def test_conversation_handoff_claims_only_once(tmp_path):
     assert not store.claim_handoff("owner", task_id, plan_id)
 
 
+@pytest.mark.asyncio
+async def test_team_manager_uses_persisted_collaboration_plan(tmp_path):
+    from crew.core.mocks import InMemorySessionStore, NullMemory
+    from crew.dynamickanban.store import SQLiteKanbanStore
+    from crew.plugins.manager import PluginManager
+    from crew.state.config import Config
+    from crew.tasks.task_manager import InMemoryTaskManager
+    from crew.team.models import TeamMemberSpec
+    from crew.team.team_manager import InProcessTeamManager
+    from crew.tools.registry import Registry
+
+    class Provider:
+        calls = 0
+        async def chat(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(text=json.dumps({"work_units": [unit("review")]}))
+            return SimpleNamespace(text=json.dumps({"assignments": [{"key": "review", "matches": [
+                {"member_id": "a", "kind": "responsibility", "reference": "负责审阅", "reason": "用户职责"}]}]}))
+    team_record = {"id": "team", "updated_at": 1, "leader_agent_id": "lead",
+                   "members": [{"agent_id": "a", "agent_name": "A"}], "formation_plan": {"members": [
+                       {"agent_id": "a", "responsibility_source": "user", "original_user_responsibility": "负责审阅"}]}}
+    class ExternalStore:
+        def get_team(self, team_id, *, owner_account_id):
+            assert team_id == "team" and owner_account_id == "owner"
+            return team_record
+    database = str(tmp_path / "app.db")
+    manager = InProcessTeamManager(provider=Provider(), registry=Registry(), session_store=InMemorySessionStore(),
+        memory=NullMemory(), plugins=PluginManager(), tasks=InMemoryTaskManager(), config=Config(db_path=database),
+        external_store=ExternalStore(), kanban_store=SQLiteKanbanStore(database))
+    member = TeamMemberSpec(member_id="a", name="A", executor="builtin")
+    team = SimpleNamespace(teammates={"a": object()}, members={"a": member})
+    manager._get_or_create = lambda *args, **kwargs: team
+    plan = await manager._ensure_runtime_plan_async("session::turn::1", team, "审阅代码", "team", owner_account_id="owner")
+    assert plan is not None
+    assert len(plan.nodes) == 1
+    node = next(iter(plan.nodes.values()))
+    assert node.assignee == "a"
+    assert node.metadata["assignment_source"] == "user_responsibility"
+    assert manager._plan_workflows[("owner", "session::turn::1")]
+
+
 def test_explicit_assignment_and_exclusion_constrain_semantic_suggestions():
     from crew.collaboration.planning.service import merge_assignments
     members = [{"member_id": "a", "name": "A", "responsibility": "研究", "responsibility_source": "user"},

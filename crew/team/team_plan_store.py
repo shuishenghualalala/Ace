@@ -391,12 +391,17 @@ class TeamPlanStore:
         owner_account_id: str = "",
         external_team_id: str = "",
         workflow_plan: dict[str, Any] | None = None,
+        strict: bool = False,
     ) -> None:
         store = self._store_for_owner(owner_account_id)
         if store is None:
+            if strict:
+                raise RuntimeError("团队计划持久化不可用")
             return
         key = self._key(plan.team_session_id, owner_account_id)
         if key in self.plan_workflows:
+            if strict:
+                raise RuntimeError("当前任务已有执行计划，不能重复创建")
             return
         try:
             plan_snapshot = json.loads(json.dumps(workflow_plan or {}, ensure_ascii=False))
@@ -452,6 +457,8 @@ class TeamPlanStore:
                     self.plan_node_tasks[(owner_account_id, plan.team_session_id, node_id)] = task.id
                 return
 
+            if strict:
+                raise RuntimeError("计划存储不支持原子创建执行图")
             workflow = store.create_workflow(
                 session_id=plan.team_session_id,
                 title=plan.goal,
@@ -487,6 +494,8 @@ class TeamPlanStore:
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("TeamPlan 同步到 kanban store 失败 session=%s err=%s", plan.team_session_id, exc)
+            if strict:
+                raise
 
     def sync_node(self, plan: TeamPlan, node: TeamPlanNode, owner_account_id: str = "") -> None:
         store = self._store_for_owner(owner_account_id)
