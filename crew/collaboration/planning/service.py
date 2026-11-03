@@ -59,6 +59,35 @@ def team_snapshot(team: dict[str, Any]) -> dict[str, Any]:
             "members": members}
 
 
+def runtime_team_record(team: Any) -> dict[str, Any]:
+    """Adapt an in-process team's actual roster into the same snapshot input."""
+    specs = [team.leader_spec, *list((getattr(team, "members", {}) or {}).values())]
+    members = []
+    formation_members = []
+    for spec in specs:
+        member_id = str(spec.member_id or "").strip()
+        metadata = spec.metadata if isinstance(spec.metadata, dict) else {}
+        responsibility = metadata.get("formation_responsibility")
+        members.append({"agent_id": member_id, "agent_name": str(spec.name or member_id),
+                        "role_label": str(metadata.get("role_label") or spec.role or ""),
+                        "assigned_capabilities": list(spec.capabilities or [])})
+        formation_members.append({"agent_id": member_id, "role_label": str(metadata.get("role_label") or ""),
+                                  "responsibility": dict(responsibility) if isinstance(responsibility, dict) else {},
+                                  "responsibility_markdown": str(metadata.get("formation_responsibility_markdown") or spec.role or ""),
+                                  "responsibility_source": str(metadata.get("responsibility_source") or "unknown")})
+    spec = getattr(team, "team_spec", {}) or {}
+    spec = spec if isinstance(spec, dict) else {}
+    policy = getattr(team, "staffing_policy", {}) or {}
+    policy = policy if isinstance(policy, dict) else {}
+    content = {"description": str(spec.get("goal") or ""), "members": members,
+               "formation_plan": {"members": formation_members,
+                                  **{key: policy.get(key) for key in
+                                     ("runtime_allow_suggestions", "runtime_allow_auto_reassign")}}}
+    version = hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    return {"id": "in_process_team", "name": str(getattr(team, "display_name", "") or ""),
+            "leader_agent_id": str(team.leader_spec.member_id or ""), "updated_at": version, **content}
+
+
 SYSTEM = """你是任务规划器。只输出 JSON，不执行任务，也不要分配人员。按本次任务拆分，简单任务可只有一个工作单元；
 不要为了让所有成员参与而制造重复工作。依赖只表示必须等待上游交付。
 如用户明确指定或排除某成员，记录 member_constraints：每项包含 member_id、action=assign|exclude、

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from crew.collaboration.planning.plan import PlanningError, make_plan, validate_work_units
-from crew.collaboration.planning.service import PlanningService
+from crew.collaboration.planning.service import PlanningService, runtime_team_record, team_snapshot
 from crew.collaboration.planning.store import PlanningStore
 
 
@@ -13,6 +13,26 @@ def unit(key, depends_on=None):
     return {"key": key, "objective": f"完成 {key}", "inputs": [], "expected_outputs": ["结果"],
             "completion_criteria": ["有结果"], "depends_on": depends_on or [],
             "required_tools": [], "required_capabilities": []}
+
+
+def test_runtime_team_snapshot_preserves_identity_and_changes_with_policy():
+    from crew.team.models import TeamMemberSpec
+
+    leader = TeamMemberSpec(member_id="custom-leader", name="负责人", role="统筹")
+    member = TeamMemberSpec(member_id="reviewer", name="审阅员", role="评审",
+                            metadata={"formation_responsibility_markdown": "审查代码",
+                                      "responsibility_source": "user"})
+    team = SimpleNamespace(leader_spec=leader, members={"reviewer": member}, display_name="研发组",
+                           team_spec={"goal": "交付可靠的软件"},
+                           staffing_policy={"runtime_allow_auto_reassign": False})
+    record = runtime_team_record(team)
+    snapshot = team_snapshot(record)
+    assert snapshot["leader_id"] == "custom-leader"
+    assert snapshot["goal"] == "交付可靠的软件"
+    assert snapshot["members"][1]["responsibility"] == "审查代码"
+    assert snapshot["policies"]["runtime_allow_auto_reassign"] is False
+    team.staffing_policy["runtime_allow_auto_reassign"] = True
+    assert runtime_team_record(team)["updated_at"] != record["updated_at"]
 
 
 def test_invalid_dependencies_are_rejected():

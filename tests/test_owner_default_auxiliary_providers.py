@@ -42,12 +42,12 @@ async def test_team_planning_and_kanban_use_owner_default_provider(tmp_path, mon
 
     captured: dict[str, object] = {}
 
-    class EmptyPlanner:
-        async def plan_async(self, _team, _goal, *, provider, **_kwargs):
-            captured["provider"] = provider
-            return SimpleNamespace(nodes=[], edges=[], critical_missing_info=[])
+    async def empty_planning(*_args, provider, **_kwargs):
+        from crew.collaboration.planning.plan import PlanningError
+        captured["provider"] = provider
+        raise PlanningError("no plan")
 
-    app.team.graph_planner = EmptyPlanner()
+    monkeypatch.setattr("crew.team.team_manager.plan_conversation", empty_planning)
     planned = await app.team._ensure_runtime_plan_async(
         "plan-session",
         team_a,

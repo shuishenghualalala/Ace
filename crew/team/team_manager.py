@@ -53,7 +53,7 @@ from crew.core.text_parsing import extract_json_object
 from crew.core.types import Message
 from crew.collaboration.planning.conversation import plan_conversation
 from crew.collaboration.planning.plan import PlanningError
-from crew.collaboration.planning.service import PlanningService
+from crew.collaboration.planning.service import PlanningService, runtime_team_record
 from crew.collaboration.planning.store import PlanningStore
 from crew.plugins.manager import PluginManager
 from crew.security.launch import use_process_launch
@@ -5068,14 +5068,22 @@ class InProcessTeamManager(TeamManager):
         if not self._begin_team_planning(session_id, owner_account_id):
             raise ToolError("Team 正在规划中，请稍后重试。")
         try:
-            if external_team_id and self.external_store is not None and owner_account_id:
+            if owner_account_id:
                 try:
                     if self._collaboration_planning_store is None:
                         self._collaboration_planning_store = PlanningStore(
                             self.config.db_path, wal_enabled=self.config.sqlite_wal,
                         )
                     service = PlanningService(self._collaboration_planning_store)
-                    stored_team = self.external_store.get_team(external_team_id, owner_account_id=owner_account_id)
+                    if external_team_id:
+                        if self.external_store is None:
+                            raise PlanningError("团队目录不可用")
+                        def current_team() -> dict[str, Any]:
+                            return self.external_store.get_team(external_team_id, owner_account_id=owner_account_id)
+                    else:
+                        def current_team() -> dict[str, Any]:
+                            return runtime_team_record(team)
+                    stored_team = current_team()
 
                     async def ask_decision(decision: dict[str, Any]) -> str:
                         decision_id = str(decision.get("decision_id") or "")
@@ -5108,7 +5116,7 @@ class InProcessTeamManager(TeamManager):
                         service, owner=owner_account_id, request_id=session_id, session_id=session_id,
                         goal=goal, team=stored_team, provider=self._provider_for_owner(owner_account_id),
                         inputs=list(task_inputs or []), ask=ask_decision,
-                        current_team=lambda: self.external_store.get_team(external_team_id, owner_account_id=owner_account_id),
+                        current_team=current_team,
                     )
                     task_id = str((workflow.get("task") or {}).get("task_id") or "")
                     plan_id = str(workflow.get("collaboration_plan_id") or "")
