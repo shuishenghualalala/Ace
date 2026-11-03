@@ -123,6 +123,9 @@ async def test_clarification_resumes_same_task_and_is_idempotent(tmp_path):
     assert result["state"] == "planned"
     assert result["task"]["task_id"] == task_id
     assert result["task"]["clarifications"][0]["answer"] == "评审 A 项目"
+    history = service.store.plan_history("owner", task_id)
+    assert [entry["version"] for entry in history] == [1, 2]
+    assert history[0]["decisions"][0]["answer"] == "评审 A 项目"
     replay = await service.answer_clarification(owner="owner", task_id=task_id, decision_id=decision_id,
                                                 answer="评审 A 项目", provider=provider)
     assert replay["state"] == "planned"
@@ -170,3 +173,31 @@ def test_explicit_assignment_and_exclusion_constrain_semantic_suggestions():
     assignment = make_plan(merged, members, goal)["assignments"][0]
     assert assignment["member_id"] == "a"
     assert assignment["source"] == "task_instruction"
+
+
+@pytest.mark.asyncio
+async def test_conversation_persists_clarification_before_handoff(tmp_path):
+    from crew.collaboration.planning.conversation import plan_conversation
+    class Provider:
+        calls = 0
+        async def chat(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(text=json.dumps({"critical_missing_info": "评审哪个项目？"}))
+            if self.calls == 2:
+                return SimpleNamespace(text=json.dumps({"work_units": [unit("review")]}))
+            return SimpleNamespace(text=json.dumps({"assignments": [{"key": "review", "matches": [
+                {"member_id": "a", "kind": "inferred", "reason": "可审阅", "reference": ""}]}]}))
+    team = {"id": "team", "updated_at": 1, "leader_agent_id": "a",
+            "members": [{"agent_id": "a", "agent_name": "A"}], "formation_plan": {}}
+    store = PlanningStore(str(tmp_path / "test.db"))
+    seen = []
+    async def ask(decision):
+        seen.append(decision["question"])
+        return "A 项目"
+    workflow = await plan_conversation(PlanningService(store), owner="owner", request_id="r", session_id="s",
+                                       goal="评审项目", team=team, provider=Provider(), inputs=[], ask=ask,
+                                       current_team=lambda: team)
+    assert seen == ["评审哪个项目？"]
+    assert workflow["task"]["clarifications"][0]["answer"] == "A 项目"
+    assert store.get("owner", workflow["task"]["task_id"])["state"] == "planned"

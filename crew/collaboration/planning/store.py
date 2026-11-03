@@ -21,6 +21,11 @@ class PlanningStore:
             state TEXT NOT NULL, plan TEXT, error TEXT NOT NULL DEFAULT '',
             created_at REAL NOT NULL, updated_at REAL NOT NULL,
             UNIQUE(owner_id, request_id))"""))
+        self._writer.execute(lambda conn: conn.execute("""CREATE TABLE IF NOT EXISTS collab_plan_versions (
+            owner_id TEXT NOT NULL, task_id TEXT NOT NULL, version INTEGER NOT NULL,
+            plan_id TEXT NOT NULL, status TEXT NOT NULL, snapshot TEXT NOT NULL, created_at REAL NOT NULL,
+            PRIMARY KEY(owner_id, task_id, version), UNIQUE(owner_id, plan_id),
+            FOREIGN KEY(task_id) REFERENCES collab_planning_tasks(task_id))"""))
 
     def create(self, owner: str, task: dict[str, Any], request_hash: str) -> dict[str, Any]:
         if not owner or not task.get("request_id"):
@@ -73,6 +78,10 @@ class PlanningStore:
                                       error, time.time(), owner, task_id))
             if cursor.rowcount != 1:
                 raise ValueError("任务不存在或规划状态已改变")
+            if plan is not None:
+                conn.execute("INSERT INTO collab_plan_versions VALUES (?,?,?,?,?,?,?)", (
+                    owner, task_id, int(plan["version"]), plan["plan_id"], state,
+                    json.dumps(plan, ensure_ascii=False), time.time()))
         self._writer.execute(write)
 
     def answer(self, owner: str, task_id: str, decision_id: str, member_id: str) -> dict[str, Any]:
@@ -100,6 +109,8 @@ class PlanningStore:
             plan["status"] = "waiting_user" if any(d["state"] == "open" for d in plan["decisions"]) else "planned"
             conn.execute("UPDATE collab_planning_tasks SET state=?, plan=?, updated_at=? WHERE owner_id=? AND task_id=?",
                          (plan["status"], json.dumps(plan, ensure_ascii=False), time.time(), owner, task_id))
+            conn.execute("UPDATE collab_plan_versions SET status=?,snapshot=? WHERE owner_id=? AND task_id=? AND plan_id=?",
+                         (plan["status"], json.dumps(plan, ensure_ascii=False), owner, task_id, plan["plan_id"]))
         if not owner:
             raise ValueError("缺少账户")
         self._writer.execute(write)
@@ -128,6 +139,10 @@ class PlanningStore:
                 raise ValueError("问题不存在或已失效")
             task.setdefault("clarifications", []).append({"decision_id": decision_id,
                 "question": decision["question"], "answer": answer.strip()})
+            decision.update(state="answered", answer=answer.strip())
+            plan["status"] = "superseded"
+            conn.execute("UPDATE collab_plan_versions SET status=?,snapshot=? WHERE owner_id=? AND task_id=? AND plan_id=?",
+                         ("superseded", json.dumps(plan, ensure_ascii=False), owner, task_id, plan["plan_id"]))
             conn.execute("UPDATE collab_planning_tasks SET snapshot=?,state='planning',plan=NULL,error='',updated_at=? "
                          "WHERE owner_id=? AND task_id=? AND state='waiting_user'",
                          (json.dumps(task, ensure_ascii=False), time.time(), owner, task_id))
@@ -136,6 +151,14 @@ class PlanningStore:
         result = self.get(owner, task_id)
         assert result is not None
         return result, claimed
+
+    def plan_history(self, owner: str, task_id: str) -> list[dict[str, Any]]:
+        if not owner:
+            raise ValueError("缺少账户")
+        with self._lock:
+            rows = self._conn.execute("SELECT snapshot FROM collab_plan_versions WHERE owner_id=? AND task_id=? ORDER BY version",
+                                      (owner, task_id)).fetchall()
+        return [json.loads(row["snapshot"]) for row in rows]
 
     def claim_handoff(self, owner: str, task_id: str, plan_id: str) -> bool:
         """Claim one committed plan exactly once before handing it to a scheduler."""

@@ -52,7 +52,7 @@ def workflow_from_preview(preview: dict[str, Any], *, team_id: str, session_id: 
             "requirements_source": str(unit.get("requirements_source") or "model_suggestion"),
             "assignment_source": assignment.get("source"), "assignment_reason": assignment.get("reason"),
             "responsibility_quote": assignment.get("responsibility_ref"),
-            "preserve_assignee": assignment.get("source") in {"task_instruction", "user_clarification", "user_responsibility", "user_decision"},
+            "preserve_assignee": assignment.get("source") in {"task_instruction", "user_clarification", "user_responsibility", "confirmed_suggestion", "user_decision"},
         })
         edges.extend({"parent_id": parent, "child_id": unit_id} for parent in dependencies)
     # The source plan was validated, but persisted data must still be checked.
