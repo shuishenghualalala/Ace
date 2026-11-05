@@ -25,6 +25,15 @@
   color: var(--mw-text-primary);
 }
 
+#chat-team-wiki-read-btn.is-selected {
+  border-color: color-mix(in srgb, var(--mw-team-accent) 46%, var(--mw-border-default));
+  background: color-mix(in srgb, var(--mw-team-accent-soft) 24%, var(--mw-bg-app));
+  color: var(--mw-text-primary);
+}
+#chat-team-wiki-read-btn[hidden] {
+  display: none !important;
+}
+
 .mw-context-chip:focus-visible,
 .mw-context-attach:focus-visible,
 .mw-context-ring:focus-visible {

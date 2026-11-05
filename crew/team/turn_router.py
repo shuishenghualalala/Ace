@@ -82,7 +82,7 @@ class TeamTurnRouter:
                 reason=decision.reason,
                 diagnostics={**diagnostics, "turn_source": "simple_chat"},
             )
-        mode = "fast" if intent == "question" and not workflow_lanes else "standard"
+        mode = "fast" if intent == "question" and complexity == "simple" and not workflow_lanes else "standard"
         decision = new_workflow_decision(mode, reason, source="team_spec_profile")
         return TeamTurnDecision(
             turn_kind=decision.turn_kind,

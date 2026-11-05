@@ -53,6 +53,10 @@ _PLANNING_WARMUP_STATE: dict[str, dict[str, Any]] = {}
 PlanningProgressCallback = Callable[[dict[str, Any]], Any]
 
 
+class ResponsibilityAmbiguity(ValueError):
+    """User-authored responsibilities overlap for an executable node."""
+
+
 @dataclass(frozen=True)
 class TeamGraphPlan:
     spec: TeamSpec
@@ -202,7 +206,10 @@ def _select_fast_primary(
         preferred = ("docs", "plan", "build", "design", "verify", "release", "lead", "other")
     else:
         preferred = ("build", "design", "plan", "docs", "verify", "release", "lead", "other")
-    if "lead" in preferred:
+    if "lead" in preferred and (
+        intent in {"question", "inquiry", "chat"}
+        or any(flow_builder.workflow_lane(member) != "other" for member in members)
+    ):
         candidates.append("leader")
     return min(candidates, key=lambda item: _member_priority(item, preferred, candidates.index(item)))
 
@@ -232,9 +239,11 @@ def _build_fast_workflow_nodes(
     required_lanes: set[str] | None = None,
     capability_source: str = "team_spec",
     task_profile: dict[str, Any] | None = None,
+    preferred_member: TeamMemberSpec | None = None,
+    responsibility_quote: str = "",
 ) -> tuple[list[dict[str, Any]], list[Any]]:
     members = list((getattr(team, "members", {}) or {}).values())
-    primary = _select_fast_primary(members, profile, task_profile)
+    primary = preferred_member or _select_fast_primary(members, profile, task_profile)
     if primary is None:
         return [], []
     task_title = flow_builder.goal_title(goal)
@@ -253,6 +262,13 @@ def _build_fast_workflow_nodes(
         })
     elif primary == "leader":
         primary_metadata["capability_source"] = "leader_direct"
+    if preferred_member is not None:
+        primary_metadata.update({
+            "assignment_source": "user_responsibility",
+            "assignment_reason": "本工作单元匹配用户指定的成员职责。",
+            "responsibility_quote": responsibility_quote,
+            "preserve_assignee": True,
+        })
     nodes: list[dict[str, Any]] = [
         {
             "id": "leader_plan",
@@ -314,10 +330,8 @@ def _member_by_id(team: Any) -> dict[str, TeamMemberSpec]:
 def _member_capability_sets(team: Any) -> dict[str, list[str]]:
     """Return the effective capability set for DAG admission.
 
-    A TeamMemberSpec is the user's confirmed assignment contract. A resolved
-    AgentProfile adds model/runtime evidence, but must not erase capabilities
-    already assigned to that member: a newly materialized profile commonly has
-    only weak priors before the first execution observation.
+    Role assignments describe expectations; external members require separate
+    profile evidence before their capabilities count as covered.
     """
 
     result: dict[str, list[str]] = {}
@@ -334,6 +348,12 @@ def _member_capability_sets(team: Any) -> dict[str, list[str]]:
                 flow_builder.member_node_metadata(member).get("required_capabilities") or []
             )
         profile = profiles.get(member.member_id) if isinstance(profiles, dict) else None
+        if member.executor == "external":
+            result[member.member_id] = normalize_capabilities([
+                capability for capability, assessment in profile.capabilities.items()
+                if is_agent_profile_available(profile) and assessment.score >= 0.5
+            ]) if isinstance(profile, AgentProfile) else []
+            continue
         if isinstance(profile, AgentProfile):
             profiled = [
                 capability
@@ -716,11 +736,106 @@ def _rank_work_unit_members(
     return sorted(ranked, key=lambda item: item[1], reverse=True)
 
 
+def _user_responsibility_member(unit: WorkUnit, members: list[TeamMemberSpec]) -> TeamMemberSpec | None:
+    """Accept a planner suggestion only when grounded in a user-authored responsibility."""
+    quote = " ".join(unit.responsibility_quote.split()).casefold()
+    if not unit.preferred_member_id or len(quote) < 2:
+        return None
+    for member in members:
+        metadata = member.metadata if isinstance(member.metadata, dict) else {}
+        responsibility = metadata.get("formation_responsibility")
+        if member.member_id != unit.preferred_member_id or metadata.get("responsibility_source") != "user":
+            continue
+        if not isinstance(responsibility, dict):
+            continue
+        mission = " ".join(str(responsibility.get("mission") or "").split()).casefold()
+        if quote in mission:
+            return member
+    return None
+
+
+def _literal_responsibility_candidates(text: str, members: list[TeamMemberSpec]) -> list[tuple[TeamMemberSpec, str]]:
+    """Conservatively recover explicit duties when the planner omits a quote."""
+    compact = lambda value: "".join(ch for ch in str(value or "").casefold() if ch.isalnum())[:1000]
+    target = compact(text)
+    if len(target) < 6:
+        return []
+    target_windows = {target[i:i + 6] for i in range(len(target) - 5)}
+    matches: list[tuple[TeamMemberSpec, str]] = []
+    for member in members:
+        metadata = member.metadata if isinstance(member.metadata, dict) else {}
+        responsibility = metadata.get("formation_responsibility")
+        if metadata.get("responsibility_source") != "user" or not isinstance(responsibility, dict):
+            continue
+        mission = str(responsibility.get("mission") or "").strip()
+        # Use a contiguous original quote so downstream persistence can still
+        # verify the match against the user's exact responsibility text.
+        for start in range(max(0, len(mission) - 5)):
+            quote = mission[start:start + 6]
+            normalized_quote = compact(quote)
+            if len(normalized_quote) == 6 and normalized_quote in target_windows:
+                matches.append((member, quote))
+                break
+    return matches
+
+
+def _answer_for_responsibility(goal: str, text: str) -> str:
+    if not str(text or "").strip():
+        return ""
+    marker = "\n\n用户补充问题："
+    if marker in goal:
+        for block in reversed(goal.split(marker)[1:]):
+            question, separator, answer = block.partition("\n用户补充：")
+            if separator and text[:60] in question:
+                return answer.strip()
+        return ""
+    return goal.rsplit("\n\n用户补充：", 1)[-1].strip() if "\n\n用户补充：" in goal else ""
+
+
+def _resolve_literal_responsibility(
+    text: str, members: list[TeamMemberSpec], goal: str,
+) -> tuple[TeamMemberSpec | None, str, str]:
+    candidates = _literal_responsibility_candidates(text, members)
+    if len(candidates) == 1:
+        return candidates[0][0], candidates[0][1], ""
+    if len(candidates) > 1:
+        answer = _answer_for_responsibility(goal, text)
+        named = [(member, quote) for member, quote in candidates
+                 if answer and answer.strip() in {member.member_id, member.name}]
+        if len(named) == 1:
+            return named[0][0], named[0][1], ""
+        labels = "、".join(f"{member.name or member.member_id}（{member.member_id}）" for member, _ in candidates)
+        return None, "", f"工作「{text[:60]}」同时符合多名成员的指定职责（{labels}），请填写本次负责人的名称或 ID。"
+    return None, "", ""
+
+
+def _semantic_responsibility_question(unit: WorkUnit, members: list[TeamMemberSpec], goal: str) -> str:
+    """Ask before treating an unsupported semantic guess as a user contract."""
+    preferred = _user_responsibility_member(unit, members)
+    if preferred is None:
+        preferred = next((member for member in members
+                          if member.member_id == unit.preferred_member_id
+                          and (member.metadata or {}).get("responsibility_source") == "user"
+                          and isinstance((member.metadata or {}).get("formation_responsibility"), dict)
+                          and len(str((member.metadata or {}).get("formation_responsibility", {}).get("mission") or "").strip()) >= 2), None)
+    if preferred is None:
+        return ""
+    answer = _answer_for_responsibility(goal, unit.objective)
+    unique_name = bool(preferred.name and sum(member.name == preferred.name for member in members) == 1)
+    if answer and (answer == preferred.member_id or (unique_name and answer == preferred.name)):
+        return ""
+    return (f"规划认为「{unit.objective[:60]}」可能属于 {preferred.name or preferred.member_id} 的指定职责，"
+            f"但工作内容与职责原文无法直接核对；若同意，请回复该成员{'名称或 ID' if unique_name else ' ID'}：{preferred.name if unique_name else preferred.member_id}。")
+
+
 def _assign_work_unit(
     unit: WorkUnit,
     members: list[TeamMemberSpec],
     capability_sets: dict[str, list[str]] | None = None,
 ) -> TeamMemberSpec | None:
+    preferred = _user_responsibility_member(unit, members)
+    if preferred is not None:
+        return preferred
     ranked = _rank_work_unit_members(unit, members, capability_sets)
     return ranked[0][0] if ranked else None
 
@@ -764,6 +879,17 @@ def _assign_work_units_balanced(
         usage: dict[str, int] = {}
         group_id = f"depth_{depth}:{lane}"
         for unit in group_units:
+            preferred = _user_responsibility_member(unit, members)
+            if preferred is not None:
+                assignments[unit.id] = preferred
+                usage[preferred.member_id] = usage.get(preferred.member_id, 0) + 1
+                assignment_meta[unit.id] = {
+                    "assignment_source": "user_responsibility",
+                    "assignment_reason": "本工作单元匹配用户指定的成员职责。",
+                    "responsibility_quote": unit.responsibility_quote,
+                    "preserve_assignee": True,
+                }
+                continue
             ranked = _rank_work_unit_members(unit, members, capability_sets)
             if not ranked:
                 assignments[unit.id] = None
@@ -779,6 +905,10 @@ def _assign_work_units_balanced(
             )
             usage[chosen.member_id] = usage.get(chosen.member_id, 0) + 1
             assignments[unit.id] = chosen
+            assignment_meta[unit.id] = {
+                "assignment_source": "capability_and_lane",
+                "assignment_reason": "根据任务能力要求和成员工作范围选择。",
+            }
             if len(group_units) > 1 and len({item[0].member_id for item in eligible}) > 1:
                 assignment_meta[unit.id] = {
                     "parallel_assignment": True,
@@ -828,6 +958,8 @@ def _semantic_standard_workflow_nodes(
                 depends_on=[units[index - 1].id] if index else [],
                 expected_output=unit.expected_output,
                 needs_independent_review=unit.needs_independent_review,
+                preferred_member_id=unit.preferred_member_id,
+                responsibility_quote=unit.responsibility_quote,
             )
             for index, unit in enumerate(units)
         ]
@@ -964,6 +1096,11 @@ def _planning_team_spec_summary(spec: TeamSpec, profile: dict[str, Any]) -> dict
             for item in (spec.deliverables or [])
         ][:6],
         "success_criteria": [_compact_text(item, 140) for item in (spec.success_criteria or [])][:6],
+        "team_constraints": [
+            _compact_text(item, 1000)
+            for item in ((spec.policy or {}).get("constraints") or [])
+            if str(item).strip()
+        ][:8],
         "risk_level": str(spec.risk_level or "low"),
         "uncertainty": str(spec.uncertainty or "low"),
         "missing_info": [_compact_text(item, 140) for item in (planning.get("missing_info") or [])][:6],
@@ -980,6 +1117,8 @@ def _team_members_for_planning_prompt(members: list[TeamMemberSpec]) -> list[dic
             "role": _compact_text(metadata.get("role_label") or member.role or member.name, 120),
             "workflow_lane": flow_builder.workflow_lane(member),
             "capabilities": normalize_capabilities(member.capabilities or []),
+            "responsibility": _compact_text(member.role, 1000),
+            "responsibility_source": str(metadata.get("responsibility_source") or "system"),
         }
         responsibility = metadata.get("formation_responsibility")
         if isinstance(responsibility, dict) and responsibility:
@@ -1353,7 +1492,10 @@ async def _race_provider_text(
             done, pending = await asyncio.wait(pending, timeout=wait_s, return_when=asyncio.FIRST_COMPLETED)
             if not done:
                 break
-            if chat_task in done:
+            if chat_task in done and not chat_task.cancelled() and chat_task.exception() is not None:
+                exc = chat_task.exception()
+                diagnostics.update({"chat_error_type": type(exc).__name__, "chat_error": str(exc)[:240]})
+            if chat_task in done and not chat_task.cancelled() and chat_task.exception() is None:
                 response = chat_task.result()
                 text = str(response.text or "")
                 chat_text = text
@@ -1382,7 +1524,10 @@ async def _race_provider_text(
                             "cancelled_transport": "stream",
                         })
                         return text, diagnostics
-            if stream_task in done:
+            if stream_task in done and not stream_task.cancelled() and stream_task.exception() is not None:
+                exc = stream_task.exception()
+                diagnostics.update({"stream_error_type": type(exc).__name__, "stream_error": str(exc)[:240]})
+            if stream_task in done and not stream_task.cancelled() and stream_task.exception() is None:
                 text = stream_task.result()
                 stream_text = text
                 diagnostics.update({"stream_elapsed_ms": int((time.perf_counter() - started) * 1000)})
@@ -1403,13 +1548,17 @@ async def _race_provider_text(
                         return text, diagnostics
 
         has_reasoning = int(stream_diag.get("reasoning_chars") or 0) > 0 or stream_diag.get("first_reasoning_ms") is not None
-        if chat_task.done():
+        if chat_task.done() and not chat_task.cancelled():
             try:
                 response = chat_task.result()
                 diagnostics["chat_reasoning_chars"] = len(str(getattr(response, "reasoning_content", "") or ""))
                 diagnostics["chat_finish_reason"] = response.finish_reason
             except Exception:
                 pass
+        if not pending and not stream_text.strip() and not chat_text.strip() and (diagnostics.get("chat_error") or diagnostics.get("stream_error")):
+            diagnostics.update(stream_diag)
+            diagnostics["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+            raise PlanningDecisionFailure("provider_error", "规划模型的请求未能生成有效结果。", diagnostics)
         if not has_reasoning:
             non_json_text = stream_text or chat_text
             if non_json_text.strip():
@@ -1490,9 +1639,14 @@ async def _race_provider_text(
             diagnostics,
         )
     finally:
+        def consume_task_exception(task: asyncio.Task[Any]) -> None:
+            if not task.cancelled():
+                task.exception()
+
         for task in tasks:
             if not task.done():
                 task.cancel()
+            task.add_done_callback(consume_task_exception)
 
 
 def _has_reasoning_without_content(diagnostics: dict[str, Any]) -> bool:
@@ -1869,6 +2023,8 @@ def _ai_llm_prompt(
         "目标：为 AI Planner 生成一个单方案 DAG，优先保证协作质量与依赖完整性。\n"
         "约束：只能使用 leader 或 members 中存在的 member_id 作为 assignee；不得自动补员、改派或改变用户团队；"
         "如团队能力不足，在节点 detail 中写清风险和需用户确认事项。\n"
+        "任务符合用户明确填写的成员职责时，优先指派该成员，并在 responsibility_quote 中逐字引用该成员的职责原文；"
+        "没有明确对应关系时不要填写该字段。\n"
         "节点应具体、可执行、数量克制；必须包含 leader_plan 和 leader_summary；"
         "当 planning_modes 要求方案时，build lane 使用 design -> leader review -> build，verify lane 使用 plan -> leader review -> verify。"
     )
@@ -1878,7 +2034,7 @@ def _ai_llm_prompt(
         "{\n"
         '  "nodes": [\n'
         '    {"id": "leader_plan", "title": "...", "detail": "...", "assignee": "leader", "workflow_lane": "lead"},\n'
-        '    {"id": "node_id", "title": "...", "detail": "...", "assignee": "member_id", "workflow_lane": "plan|design|build|verify|docs|release|summary|other", "required_capabilities": ["上下文能力key"]}\n'
+        '    {"id": "node_id", "title": "...", "detail": "...", "assignee": "member_id", "workflow_lane": "plan|design|build|verify|docs|release|summary|other", "required_capabilities": ["上下文能力key"], "responsibility_quote": "可选的用户职责原文"}\n'
         "  ],\n"
         '  "edges": [["leader_plan", "node_id"], ["node_id", "leader_summary"]],\n'
         '  "notes": ["可选规划说明"]\n'
@@ -1910,10 +2066,50 @@ def _coerce_llm_nodes(
         assignee = str(item.get("assignee") or "").strip() or "leader"
         if assignee not in valid_assignees:
             raise ValueError(f"LLM graph assigned unknown member: {assignee}")
+        if node_id != "leader" and not node_id.startswith("leader_"):
+            matched_member, matched_quote, question = _resolve_literal_responsibility(
+                f"{item.get('title') or ''} {item.get('detail') or item.get('description') or ''}",
+                list(member_map.values()), goal,
+            )
+            if question:
+                raise ResponsibilityAmbiguity(question)
+            if matched_member is not None:
+                assignee = matched_member.member_id
+                item = {**item, "responsibility_quote": matched_quote}
+            else:
+                semantic_question = _semantic_responsibility_question(
+                    WorkUnit(id=node_id, objective=str(item.get("title") or item.get("detail") or ""),
+                             preferred_member_id=assignee,
+                             responsibility_quote=str(item.get("responsibility_quote") or "")),
+                    list(member_map.values()), goal,
+                )
+                if semantic_question:
+                    raise ResponsibilityAmbiguity(semantic_question)
+                answer = _answer_for_responsibility(goal, str(item.get("title") or item.get("detail") or ""))
+                chosen = member_map.get(assignee)
+                responsibility = (chosen.metadata or {}).get("formation_responsibility") if chosen else None
+                unique_name = bool(chosen and chosen.name and sum(member.name == chosen.name for member in member_map.values()) == 1)
+                if (answer and chosen and (answer == assignee or (unique_name and answer == chosen.name))
+                        and (chosen.metadata or {}).get("responsibility_source") == "user"
+                        and isinstance(responsibility, dict)):
+                    item = {**item, "responsibility_quote": str(responsibility.get("mission") or "")[:500]}
         lane = str(item.get("workflow_lane") or "").strip().lower()
         if not lane:
             lane = _member_lane_for_assignee(member_map, assignee, "other")
         metadata = _member_metadata_for_assignee(member_map, assignee, lane)
+        responsibility = _user_responsibility_member(
+            WorkUnit(id=node_id, objective=str(item.get("detail") or ""),
+                     preferred_member_id=assignee,
+                     responsibility_quote=str(item.get("responsibility_quote") or "")),
+            list(member_map.values()),
+        )
+        if responsibility is not None:
+            metadata.update({
+                "preserve_assignee": True,
+                "assignment_source": "user_responsibility",
+                "assignment_reason": "匹配用户填写的成员职责",
+                "responsibility_quote": str(item.get("responsibility_quote") or ""),
+            })
         metadata.pop("required_capabilities", None)
         metadata.pop("capability_source", None)
         if isinstance(item.get("required_capabilities"), list):
@@ -2018,6 +2214,7 @@ def _normalize_nodes_with_graph(
     plan_strategy: str = "rule_dag_with_plan_graph",
     member_capabilities: dict[str, list[str]] | None = None,
     member_metadata: dict[str, dict[str, Any]] | None = None,
+    allow_auto_reassign: bool = True,
 ) -> tuple[list[dict[str, Any]], list[list[str]], list[str]]:
     raw_nodes, normalized_raw_edges, id_notes = _normalize_raw_graph_ids(raw_nodes, raw_edges)
     plan_nodes: list[PlanNode] = []
@@ -2098,7 +2295,7 @@ def _normalize_nodes_with_graph(
                 capability_sets=capability_sets,
                 assigned_agent_ids=[previous_assignee],
             )
-            if coverage.status != "covered":
+            if coverage.status != "covered" and allow_auto_reassign and not metadata.get("preserve_assignee"):
                 replacement = next(
                     (
                         member_id
@@ -2364,6 +2561,20 @@ class TeamGraphPlanner:
         else:
             raw_nodes, raw_edges, budget_notes = _build_standard_workflow_nodes(team, goal, profile, spec)
             plan_strategy = "standard_role_dag"
+        if any(
+            str(node.get("assignee") or "leader") != "leader"
+            and not (node.get("metadata") or {}).get("required_capabilities")
+            for node in raw_nodes
+        ):
+            missing = "需要用户确认执行成员的能力或角色，才能生成可执行的任务节点。"
+            return _result_with_workflow_plan(
+                spec=spec, nodes=[], edges=[], policy_report=policy_report, notes=[missing],
+                profile=profile, requested_mode=requested_mode, selected_mode=selected_mode,
+                engine="fast_compiler" if selected_mode == "fast" else "legacy_role_compiler",
+                dependency_pattern="sequential", quality_policy="none",
+                confidence={"requirement": 0.0, "topology": 0.0, "capability": 0.0, "overall": 0.0},
+                fallback_from=fallback_from, critical_missing_info=[missing],
+            )
         nodes, edges, notes = _normalize_nodes_with_graph(
             goal=goal,
             raw_nodes=raw_nodes,
@@ -2373,6 +2584,7 @@ class TeamGraphPlanner:
             plan_strategy=plan_strategy,
             member_capabilities=_member_capability_sets(team),
             member_metadata=_member_metadata_sets(team),
+            allow_auto_reassign=(getattr(team, "staffing_policy", {}) or {}).get("runtime_allow_auto_reassign", True),
         )
         if plan_strategy == "standard_role_dag" and budget_notes:
             notes = [*budget_notes, *notes]
@@ -2395,6 +2607,32 @@ class TeamGraphPlanner:
             requested_scope=str(profile.get("scope_confirmation") or "uncertain"),
         )
 
+    def _planning_failure_fallback(
+        self,
+        team: Any,
+        goal: str,
+        profile: dict[str, Any],
+        spec: TeamSpec,
+        members: list[TeamMemberSpec],
+        *,
+        requested_mode: PlanningMode,
+        error_type: str,
+        elapsed_ms: int | None = None,
+    ) -> TeamGraphPlan:
+        """Stop when the planner cannot produce a meaningful work breakdown."""
+        del team, goal, profile
+        message = ("任务分工存在歧义，请补充本次任务的负责人后重试。"
+                   if error_type == "responsibility_ambiguity" else
+                   "任务规划未能生成有效结果，未开始派活。请检查规划模型后重试。")
+        return TeamGraphPlan(
+            spec=spec, nodes=[], edges=[],
+            policy_report=analyze_team_policy(spec=spec, members=members),
+            planner_notes=[message],
+            workflow_plan={"planning": {"status": "failed", "error_type": error_type,
+                                        "elapsed_ms": elapsed_ms, "requested_mode": requested_mode,
+                                        "error_message": message}},
+        )
+
     async def plan_async(
         self,
         team: Any,
@@ -2414,14 +2652,21 @@ class TeamGraphPlanner:
         profile = _merged_execution_profile(base_spec, execution_profile)
         requested_mode = normalize_planning_mode(profile.get("requested_mode"))
         members: list[TeamMemberSpec] = list((getattr(team, "members", {}) or {}).values())
-        if provider is None or requested_mode == "fast":
+        has_user_responsibilities = any((member.metadata or {}).get("responsibility_source") == "user" for member in members)
+        if provider is None and has_user_responsibilities:
+            return self._planning_failure_fallback(
+                team, goal, profile, base_spec, members,
+                requested_mode=requested_mode,
+                error_type="provider_unavailable",
+            )
+        if provider is None or (requested_mode == "fast" and not has_user_responsibilities):
             return self.plan(team, goal, execution_profile=execution_profile, team_spec=base_spec)
 
         decision: PlanningDecision | None = None
         decision_error = ""
         decision_error_type = ""
         decision_diagnostics: dict[str, Any] = {}
-        if requested_mode in {"auto", "standard"}:
+        if requested_mode in {"auto", "standard", "fast"}:
             try:
                 started = time.perf_counter()
                 decision_call = await _planning_decision_with_llm(
@@ -2526,6 +2771,21 @@ class TeamGraphPlanner:
         elif requested_mode == "ai":
             selected_mode = "ai"
         else:
+            if has_user_responsibilities:
+                await _notify_planning_progress(
+                    planning_progress,
+                    phase="fallback",
+                    status="fallback",
+                    label="规划模型不可用，已停止生成计划",
+                    elapsed_ms=decision_elapsed_ms,
+                    diagnostics={"error_type": decision_error_type or "unknown"},
+                )
+                return self._planning_failure_fallback(
+                    team, goal, profile, base_spec, members,
+                    requested_mode=requested_mode,
+                    error_type=decision_error_type or "unknown",
+                    elapsed_ms=decision_elapsed_ms,
+                )
             fallback = self.plan(
                 team,
                 goal,
@@ -2536,7 +2796,8 @@ class TeamGraphPlanner:
                 planning_progress,
                 phase="fallback",
                 status="fallback",
-                label="规划模型响应较慢，已切换到稳定执行图",
+                label=("规划模型响应超时，已尝试备用规划" if "timeout" in decision_error_type
+                       else "规划模型未能生成有效结果，已尝试备用规划"),
                 elapsed_ms=decision_elapsed_ms,
                 diagnostics=decision_diagnostics,
             )
@@ -2574,7 +2835,55 @@ class TeamGraphPlanner:
                     *fallback.planner_notes,
                 ],
                 workflow_plan=fallback_plan,
+                critical_missing_info=list(fallback.critical_missing_info),
             )
+
+        if decision is not None:
+            resolved_units: list[WorkUnit] = []
+            responsibility_questions: list[str] = []
+            for unit in decision.work_units:
+                if unit.id == "leader" or unit.id.startswith("leader_"):
+                    resolved_units.append(unit)
+                    continue
+                match, quote, question = _resolve_literal_responsibility(
+                    f"{unit.objective} {unit.expected_output}", members, goal,
+                )
+                if question:
+                    responsibility_questions.append(question)
+                if match is not None:
+                    unit = replace(unit, preferred_member_id=match.member_id, responsibility_quote=quote)
+                elif not question:
+                    semantic_question = _semantic_responsibility_question(unit, members, goal)
+                    if semantic_question:
+                        responsibility_questions.append(semantic_question)
+                    elif unit.preferred_member_id and not _user_responsibility_member(unit, members):
+                        answer = _answer_for_responsibility(goal, unit.objective)
+                        chosen = next((member for member in members if member.member_id == unit.preferred_member_id
+                                       and (member.member_id == answer or (member.name and member.name == answer and sum(other.name == member.name for other in members) == 1))
+                                       and (member.metadata or {}).get("responsibility_source") == "user"), None)
+                        responsibility = (chosen.metadata or {}).get("formation_responsibility") if chosen else None
+                        if isinstance(responsibility, dict):
+                            unit = replace(unit, responsibility_quote=str(responsibility.get("mission") or "")[:500])
+                resolved_units.append(unit)
+            if responsibility_questions:
+                responsibility_questions = responsibility_questions[:1]
+                return TeamGraphPlan(
+                    spec=base_spec, nodes=[], edges=[],
+                    policy_report=analyze_team_policy(spec=base_spec, members=members),
+                    planner_notes=responsibility_questions,
+                    critical_missing_info=responsibility_questions,
+                )
+            decision = replace(decision, work_units=resolved_units)
+
+            if requested_mode == "fast" and has_user_responsibilities:
+                answer = _answer_for_responsibility(goal, "快速模式只能指定一个主责")
+                if any(word in answer for word in ("协作", "拆分", "多人", "标准")):
+                    selected_mode = "standard"
+                elif len(resolved_units) > 1:
+                    message = "本轮工作涉及多个工作单元。快速模式只能指定一个主责；如需保留成员分工，请回复“协作”并使用团队协作方式。"
+                    return TeamGraphPlan(spec=base_spec, nodes=[], edges=[],
+                                         policy_report=analyze_team_policy(spec=base_spec, members=members),
+                                         planner_notes=[message], critical_missing_info=[message])
 
         confirmed_scope = str(profile.get("scope_confirmation") or "").strip().lower()
         if confirmed_scope not in {"plan_only", "execute"}:
@@ -2648,6 +2957,8 @@ class TeamGraphPlanner:
                 fast_required_capabilities = normalize_capabilities(
                     spec.team_requirements.get("capabilities") or []
                 )
+            preferred_unit = decision.work_units[0] if decision is not None and len(decision.work_units) == 1 else None
+            preferred_member = _user_responsibility_member(preferred_unit, members) if preferred_unit else None
             raw_nodes, raw_edges = _build_fast_workflow_nodes(
                 team,
                 goal,
@@ -2656,6 +2967,8 @@ class TeamGraphPlanner:
                 required_lanes=set(spec.team_requirements.get("workflow_lanes") or []),
                 capability_source="work_unit_summary" if decision is not None else "team_spec",
                 task_profile=spec.task_profile,
+                preferred_member=preferred_member,
+                responsibility_quote=preferred_unit.responsibility_quote if preferred_unit else "",
             )
             nodes, edges, notes = _normalize_nodes_with_graph(
                 goal=goal,
@@ -2666,6 +2979,7 @@ class TeamGraphPlanner:
                 plan_strategy="fast_minimal_path",
                 member_capabilities=_member_capability_sets(team),
                 member_metadata=_member_metadata_sets(team),
+                allow_auto_reassign=(getattr(team, "staffing_policy", {}) or {}).get("runtime_allow_auto_reassign", True),
             )
             confidence = confidence_dimensions(decision, capability_coverage=1.0) if decision else {
                 "requirement": 0.68, "topology": 1.0, "capability": 1.0, "overall": 0.68,
@@ -2692,6 +3006,7 @@ class TeamGraphPlanner:
                     "error_type": "",
                     "error": "",
                     "fallback_from": None,
+                    "mode_reason": "规划识别为一个低风险工作单元，无需独立审阅。" if requested_mode == "auto" else "按用户选择的快速模式执行。",
                     **decision_diagnostics,
                 } if decision else None,
                 requested_scope=str(profile.get("scope_confirmation") or (decision.requested_scope if decision else "uncertain")),
@@ -2714,6 +3029,7 @@ class TeamGraphPlanner:
                 plan_strategy="standard_semantic_dag",
                 member_capabilities=_member_capability_sets(team),
                 member_metadata=_member_metadata_sets(team),
+                allow_auto_reassign=(getattr(team, "staffing_policy", {}) or {}).get("runtime_allow_auto_reassign", True),
             )
             confidence = confidence_dimensions(decision, capability_coverage=coverage)
             await _notify_planning_progress(
@@ -2742,6 +3058,8 @@ class TeamGraphPlanner:
                     "error_type": "",
                     "error": "",
                     "fallback_from": None,
+                    "mode_reason": (f"规划识别出 {len(decision.work_units)} 个工作单元，按依赖和审阅要求组织。"
+                                    if requested_mode == "auto" else "按用户选择的标准模式组织工作单元。"),
                     **decision_diagnostics,
                 },
                 requested_scope=str(profile.get("scope_confirmation") or decision.requested_scope),
@@ -2768,11 +3086,46 @@ class TeamGraphPlanner:
                 plan_strategy="ai_single_dag",
                 member_capabilities=_member_capability_sets(team),
                 member_metadata=_member_metadata_sets(team),
+                allow_auto_reassign=(getattr(team, "staffing_policy", {}) or {}).get("runtime_allow_auto_reassign", True),
             )
             _annotate_planner_metrics(nodes, status="success", elapsed_ms=elapsed_ms)
             notes = [f"AI Planner LLM DAG 耗时 {elapsed_ms}ms。", *llm_notes, *notes]
+        except ResponsibilityAmbiguity as exc:
+            if has_user_responsibilities:
+                elapsed_ms = int((time.perf_counter() - started) * 1000) if "started" in locals() else None
+                await _notify_planning_progress(
+                    planning_progress,
+                    phase="fallback",
+                    status="fallback",
+                    label="成员职责存在歧义，已停止生成计划",
+                    elapsed_ms=elapsed_ms,
+                    diagnostics={"error_type": "responsibility_ambiguity"},
+                )
+                return self._planning_failure_fallback(
+                    team, goal, profile, spec, members,
+                    requested_mode=requested_mode,
+                    error_type="responsibility_ambiguity",
+                    elapsed_ms=elapsed_ms,
+                )
+            return TeamGraphPlan(spec=spec, nodes=[], edges=[], policy_report=policy_report,
+                                 planner_notes=[str(exc)], critical_missing_info=[str(exc)])
         except Exception as exc:  # noqa: BLE001
             elapsed_ms = int((time.perf_counter() - started) * 1000) if "started" in locals() else None
+            await _notify_planning_progress(
+                planning_progress,
+                phase="fallback",
+                status="fallback",
+                label="深度规划不可用，已停止生成计划",
+                elapsed_ms=elapsed_ms,
+                diagnostics={"error_type": type(exc).__name__},
+            )
+            if has_user_responsibilities:
+                return self._planning_failure_fallback(
+                    team, goal, profile, spec, members,
+                    requested_mode=requested_mode,
+                    error_type=type(exc).__name__,
+                    elapsed_ms=elapsed_ms,
+                )
             fallback = self.plan(
                 team,
                 goal,
@@ -2801,8 +3154,10 @@ class TeamGraphPlanner:
                         "requested_mode": requested_mode,
                         "selected_mode": "standard",
                         "fallback_from": "ai",
+                        "planning_decision": {"status": "fallback", "error_type": type(exc).__name__},
                     },
                 },
+                critical_missing_info=list(fallback.critical_missing_info),
             )
         ai_confidence = confidence_dimensions(decision, capability_coverage=1.0) if decision else {
             "requirement": 0.68, "topology": 0.68, "capability": 1.0, "overall": 0.68,
@@ -2812,6 +3167,11 @@ class TeamGraphPlanner:
             profile=profile, requested_mode=requested_mode, selected_mode="ai",
             engine="ai_planner", dependency_pattern="dynamic", quality_policy="leader_review",
             confidence=ai_confidence,
+            planning_decision={
+                "status": "success",
+                "mode_reason": ("任务涉及动态探索、条件分支、迭代或较多工作单元，选择深度规划。"
+                                if requested_mode == "auto" else "按用户选择的深度规划模式生成执行图。"),
+            },
             extra_warnings=list(decision.critical_missing_info) if decision else [],
             critical_missing_info=list(decision.critical_missing_info) if decision else [],
             requested_scope=str(profile.get("scope_confirmation") or (decision.requested_scope if decision else "uncertain")),

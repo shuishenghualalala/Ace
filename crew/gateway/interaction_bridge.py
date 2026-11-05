@@ -51,6 +51,7 @@ class ExternalInteractionBinding:
     active_skills: tuple[SkillActivation, ...]
     interaction_timeout_seconds: float
     expires_at: float
+    wiki_kb_id: str = ""
 
 
 class InteractionBridge:
@@ -98,6 +99,7 @@ class InteractionBridge:
         cwd: str = "",
         active_skills: tuple[SkillActivation, ...] | list[SkillActivation] = (),
         interaction_timeout_seconds: float = DEFAULT_INTERACTION_TIMEOUT_SECONDS,
+        wiki_kb_id: str = "",
     ) -> ExternalInteractionBinding | None:
         owner = str(owner_account_id or current_owner_account_id.get() or "").strip()
         if not self.available or not owner:
@@ -111,6 +113,17 @@ class InteractionBridge:
             team_session_id = ""
             member_id = ""
             team_role = ""
+            wiki_kb_id = ""
+        wiki_kb_id = str(wiki_kb_id or "").strip()
+        if wiki_kb_id:
+            if context_type != "team":
+                raise PermissionError("只有显式授权的 Team Agent 可以读取 Wiki")
+            wiki_store = getattr(self._crew, "_wiki_store", None)
+            if wiki_store is None or not any(
+                str(getattr(kb, "id", "") or "") == wiki_kb_id
+                for kb in wiki_store.list_kbs(owner_account_id=owner)
+            ):
+                raise PermissionError("授权知识库不存在或不属于当前账号")
         self._purge_expired()
         token = secrets.token_urlsafe(32)
         binding = ExternalInteractionBinding(
@@ -128,6 +141,7 @@ class InteractionBridge:
             active_skills=tuple(active_skills),
             interaction_timeout_seconds=max(0.1, float(interaction_timeout_seconds or 0.0)),
             expires_at=time.time() + max(1.0, ttl_seconds),
+            wiki_kb_id=wiki_kb_id,
         )
         self._bindings[token] = binding
         return binding
@@ -176,6 +190,7 @@ class InteractionBridge:
                 {"name": "CREW_INTERACTION_TOKEN", "value": binding.token},
                 {"name": "CREW_INTERACTION_CONTEXT", "value": binding.context_type},
                 {"name": "CREW_INTERACTION_TEAM_ROLE", "value": binding.team_role},
+                {"name": "CREW_INTERACTION_WIKI_READ", "value": "1" if binding.wiki_kb_id else "0"},
             ],
         }
 
@@ -327,6 +342,42 @@ class InteractionBridge:
                     "additionalProperties": False,
                 },
             })
+        if binding.context_type == "team" and binding.wiki_kb_id:
+            tools.extend([
+                {
+                    "type": "function",
+                    "name": "crew_wiki_search",
+                    "description": (
+                        "Search the single Crew knowledge base explicitly shared for this team run. "
+                        "Returns matching page excerpts and source references."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "minLength": 1, "maxLength": 500},
+                            "top_k": {"type": "integer", "minimum": 1, "maximum": 5},
+                        },
+                        "required": ["query"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "type": "function",
+                    "name": "crew_wiki_read",
+                    "description": (
+                        "Read one page from the knowledge base explicitly shared for this team run. "
+                        "Use a page ID returned by crew_wiki_search."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "page_id": {"type": "string", "minLength": 1, "maxLength": 200},
+                        },
+                        "required": ["page_id"],
+                        "additionalProperties": False,
+                    },
+                },
+            ])
         if not tools:
             return []
         # 平铺返回，不再包 namespace：新版 codex app-server 的 dynamicTools
@@ -474,6 +525,94 @@ class InteractionBridge:
                 delegate_task_id=str(data.get("delegate_task_id") or "").strip() or None,
                 owner_account_id=binding.owner_account_id,
             )
+
+        if name in {"crew_wiki_search", "crew_wiki_read"}:
+            if binding.context_type != "team" or not binding.wiki_kb_id:
+                raise PermissionError("当前外援没有本轮 Wiki 只读授权")
+            wiki_store = getattr(crew, "_wiki_store", None)
+            wiki_querier = getattr(crew, "_wiki_querier", None)
+            if wiki_store is None or wiki_querier is None:
+                raise RuntimeError("Wiki 查询服务不可用")
+            if name == "crew_wiki_search":
+                query = str(data.get("query") or "").strip()[:500]
+                if not query:
+                    raise ValueError("query 不能为空")
+                try:
+                    top_k = max(1, min(int(data.get("top_k") or 5), 5))
+                except (TypeError, ValueError):
+                    top_k = 5
+                result = wiki_querier.search(
+                    query,
+                    owner_account_id=binding.owner_account_id,
+                    top_k=top_k,
+                    kb_id=binding.wiki_kb_id,
+                    expand_neighbors=False,
+                    include_context=True,
+                )
+                pages = []
+                for page in result.get("pages") or []:
+                    if not isinstance(page, dict):
+                        continue
+                    pages.append({
+                        "id": str(page.get("id") or ""),
+                        "title": str(page.get("title") or ""),
+                        "page_type": str(page.get("page_type") or ""),
+                        "summary": str(page.get("summary") or "")[:1200],
+                        "content": str(page.get("content") or "")[:6000],
+                        "sources": list(page.get("sources") or [])[:20],
+                        "confidence": page.get("confidence"),
+                        "stale": bool(page.get("stale")),
+                    })
+                log.info(
+                    "外援读取 Wiki 搜索 owner=%s team=%s member=%s kb=%s query_chars=%d pages=%s",
+                    binding.owner_account_id,
+                    binding.team_session_id,
+                    binding.member_id,
+                    binding.wiki_kb_id,
+                    len(query),
+                    [page["id"] for page in pages],
+                )
+                return {
+                    "ok": True,
+                    "kb_id": binding.wiki_kb_id,
+                    "pages": pages,
+                    "context": str(result.get("context") or "")[:16000],
+                }
+
+            page_id = str(data.get("page_id") or "").strip()[:200]
+            if not page_id:
+                raise ValueError("page_id 不能为空")
+            page = wiki_store.get(
+                page_id,
+                owner_account_id=binding.owner_account_id,
+                kb_id=binding.wiki_kb_id,
+            )
+            if page is None:
+                raise PermissionError("页面不在本轮授权知识库中或不存在")
+            page_data = page.to_dict()
+            content = str(page_data.get("content") or "")
+            log.info(
+                "外援读取 Wiki 页面 owner=%s team=%s member=%s kb=%s page=%s",
+                binding.owner_account_id,
+                binding.team_session_id,
+                binding.member_id,
+                binding.wiki_kb_id,
+                page_id,
+            )
+            return {
+                "ok": True,
+                "kb_id": binding.wiki_kb_id,
+                "page": {
+                    "id": page_id,
+                    "title": str(page_data.get("title") or ""),
+                    "page_type": str(page_data.get("page_type") or ""),
+                    "content": content[:12000],
+                    "content_truncated": len(content) > 12000,
+                    "sources": list(page_data.get("sources") or [])[:30],
+                    "confidence": page_data.get("confidence"),
+                    "stale": bool(page_data.get("stale")),
+                },
+            }
 
         raise ValueError(f"未知 Crew Interaction 工具: {name or '<empty>'}")
 
@@ -726,6 +865,24 @@ def create_interaction_router(bridge: InteractionBridge = interaction_bridge, cr
             payload,
             tool_name="team_plan_update",
             local_only_error="团队计划接口仅允许本机访问",
+        )
+
+    @router.post("/api/internal/team/wiki/search")
+    async def search_team_wiki(request: Request, payload: dict) -> JSONResponse:
+        return await invoke_bound_tool(
+            request,
+            payload,
+            tool_name="crew_wiki_search",
+            local_only_error="团队 Wiki 接口仅允许本机访问",
+        )
+
+    @router.post("/api/internal/team/wiki/read")
+    async def read_team_wiki(request: Request, payload: dict) -> JSONResponse:
+        return await invoke_bound_tool(
+            request,
+            payload,
+            tool_name="crew_wiki_read",
+            local_only_error="团队 Wiki 接口仅允许本机访问",
         )
 
     return router

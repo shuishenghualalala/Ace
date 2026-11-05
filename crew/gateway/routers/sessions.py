@@ -1429,6 +1429,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                 node_id=str(body.get("node_id") or ""),
                 action=str(body.get("action") or ""),
                 replacement_assignee=str(body.get("replacement_assignee") or ""),
+                workflow_id=str(body.get("workflow_id") or ""),
                 owner_account_id=owner,
             )
             return JSONResponse(result)

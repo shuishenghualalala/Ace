@@ -92,7 +92,7 @@ def member_node_metadata(member: TeamMemberSpec, lane: str | None = None) -> dic
     metadata = node_metadata(node_lane, label=role_label(member), key=role_key(member))
     assigned_capabilities = normalize_capabilities(member.capabilities or [])
     capability_source = "formation_role"
-    if not assigned_capabilities:
+    if not assigned_capabilities and not (member.metadata or {}).get("capability_contract_explicit"):
         contract_role_key = role_key(member) or infer_role_key(role_hint(member))
         assigned_capabilities = normalize_capabilities(
             compile_role_responsibility(role_key=contract_role_key).get("_assigned_capabilities") or []

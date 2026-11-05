@@ -3377,7 +3377,7 @@ button { font-family: inherit; cursor: pointer; }
   position: absolute;
   bottom: calc(100% + 6px);
   left: 0;
-  width: 156px;
+  width: 280px;
   background: var(--bg);
   border: 1px solid var(--border-strong);
   border-radius: 10px;
@@ -3404,6 +3404,30 @@ button { font-family: inherit; cursor: pointer; }
   text-transform: capitalize;
   font-weight: 600;
 }
+.team-mode-popover__divider {
+  height: 1px;
+  margin: 6px 3px;
+  background: var(--border);
+}
+.team-wiki-read-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px 7px 7px;
+  border-radius: 7px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.team-wiki-read-option:hover { background: var(--bg-active); }
+.team-wiki-read-option input {
+  flex: 0 0 auto;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+.team-wiki-read-option span { display: grid; gap: 3px; min-width: 0; }
+.team-wiki-read-option strong { color: var(--text); font-size: 12px; font-weight: 600; }
+.team-wiki-read-option small { color: var(--text-muted); font-size: 11px; line-height: 1.4; }
+.team-wiki-read-option input:disabled + span { opacity: .55; }
 
 .composer__mode {
   max-width: 760px;

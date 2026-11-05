@@ -158,6 +158,7 @@ class Team:
     team_spec: dict[str, Any] = field(default_factory=dict)
     runtime_members: dict[str, TeamMemberSpec] = field(default_factory=dict)
     member_profiles: dict[str, AgentProfile] = field(default_factory=dict)
+    staffing_policy: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1028,12 +1029,14 @@ class InProcessTeamManager(TeamManager):
         node_id: str = "",
         external_team_id: str = "",
         owner_account_id: str = "",
+        workflow_id: str = "",
     ) -> TeamPlan | None:
         return self._plan_store.hydrate(
             session_id,
             node_id=node_id,
             external_team_id=external_team_id,
             owner_account_id=owner_account_id,
+            workflow_id=workflow_id,
         )
 
     @staticmethod
@@ -1198,7 +1201,7 @@ class InProcessTeamManager(TeamManager):
         store = self._kanban_store_for_owner(owner_account_id)
         if store is None:
             return None
-        sid = str(session_id or "").strip()
+        sid = _visible_session_id(str(session_id or "").strip())
         if not sid:
             return None
         try:
@@ -1311,6 +1314,10 @@ class InProcessTeamManager(TeamManager):
                 "summary": str(task.get("result_summary") or "")[:1000],
                 "error": str(task.get("result_summary") or "")[:1000] if status in {"failed", "blocked"} else "",
                 "latest_run": runs[0] if runs else None,
+                "assignment_reason": str(metadata.get("assignment_reason") or ""),
+                "responsibility_quote": str(metadata.get("responsibility_quote") or ""),
+                "capability_status": str(metadata.get("capability_status") or ""),
+                "required_capabilities": list(metadata.get("required_capabilities") or []),
             })
         workflow_started = min(started_values) if started_values else float(getattr(workflow, "created_at", 0) or 0)
         workflow_finished = max(finished_values) if finished_values else float(getattr(workflow, "updated_at", 0) or 0)
@@ -1324,6 +1331,7 @@ class InProcessTeamManager(TeamManager):
                 "selected_mode": str(planning.get("selected_mode") or ""),
                 "strategy": str(planning.get("strategy") or ""),
                 "fallback_from": planning.get("fallback_from"),
+                "reason_codes": list(planning.get("reason_codes") or []),
                 "planning_decision": planning_decision,
             },
             "nodes": nodes,
@@ -1717,6 +1725,7 @@ class InProcessTeamManager(TeamManager):
         replacement = str(trigger.get("replacement_assignee") or "").strip()
         if not replacement or replacement not in team.members:
             raise ValueError("已有成员改派目标无效")
+        previous_state = node.to_dict()
         previous = node.assignee or str((node.metadata or {}).get("previous_assignee") or "")
         metadata = dict(node.metadata or {})
         history = list(metadata.get("runtime_assignment_history") or [])
@@ -1737,6 +1746,11 @@ class InProcessTeamManager(TeamManager):
             "reason": str(trigger.get("reason") or ""),
         }
         recovery_action = str(trigger.get("recovery_action") or "").strip()
+        metadata["assignment_source"] = "user_confirmed_reassignment" if recovery_action else "runtime_existing_member"
+        metadata["assignment_reason"] = ("用户为本次任务选择了已有成员。" if recovery_action else str(trigger.get("reason") or "已有成员覆盖所需能力。"))
+        metadata["preserve_assignee"] = bool(recovery_action)
+        metadata.pop("responsibility_quote", None)
+        metadata.pop("user_confirmed_capability_attempt", None)
         if recovery_action:
             metadata["runtime_recovery"] = {
                 "action": recovery_action,
@@ -1765,21 +1779,26 @@ class InProcessTeamManager(TeamManager):
             last_error="",
             allow_reopen=True,
         )
-        self._persist_assignment_revision(
-            plan,
-            node,
-            owner_account_id=owner_account_id,
-            reason="existing_member_reassignment",
-            delta={
-                "reassigned_node": {
-                    "node_id": node.node_id,
-                    "previous_assignee": previous,
-                    "assignee": replacement,
-                    "assignment_source": "runtime_existing_member",
+        try:
+            self._persist_assignment_revision(
+                plan,
+                node,
+                owner_account_id=owner_account_id,
+                reason="existing_member_reassignment",
+                delta={
+                    "reassigned_node": {
+                        "node_id": node.node_id,
+                        "previous_assignee": previous,
+                        "assignee": replacement,
+                        "assignment_source": "runtime_existing_member",
+                    },
+                    "updated_node_metadata": {node.node_id: dict(node.metadata or {})},
                 },
-                "updated_node_metadata": {node.node_id: dict(node.metadata or {})},
-            },
-        )
+            )
+        except Exception:
+            for key, value in previous_state.items():
+                setattr(node, key, value)
+            raise
         self._refresh_plan_status(plan)
         self._sync_kanban_node(plan, node, owner_account_id=owner_account_id)
         return team
@@ -1876,6 +1895,7 @@ class InProcessTeamManager(TeamManager):
         action: str,
         replacement_assignee: str = "",
         owner_account_id: str = "",
+        workflow_id: str = "",
     ) -> dict[str, Any]:
         """Apply one user-directed recovery action to a blocked Team node.
 
@@ -1884,12 +1904,38 @@ class InProcessTeamManager(TeamManager):
         nodes that are ready after the local repair.
         """
 
+        if not workflow_id:
+            store = self._kanban_store_for_owner(owner_account_id)
+            matches: list[tuple[str, str]] = []
+            if store is not None:
+                for workflow in store.list_workflows_by_session_prefix(_visible_session_id(session_id)):
+                    context = dict(getattr(workflow, "context", {}) or {})
+                    if context.get("source") != "team" or str(context.get("owner_account_id") or "") != owner_account_id:
+                        continue
+                    board = store.get_board_state(workflow.id)
+                    task_to_node, _, _ = self._node_event_index(list(board.get("events") or []))
+                    resolved_node_id = task_to_node.get(node_id, node_id)
+                    snapshot = dict(board.get("workflow_plan") or context.get("workflow_plan") or {})
+                    ids = {str(item.get("id") or item.get("node_id") or "") for item in snapshot.get("nodes") or [] if isinstance(item, dict)}
+                    ids.update(task_to_node.values())
+                    if resolved_node_id in ids:
+                        matches.append((str(workflow.id), resolved_node_id))
+                if len(matches) > 1:
+                    raise ValueError("多个历史任务包含同名节点，请刷新任务面板后重试。")
+                if matches:
+                    workflow_id, node_id = matches[0]
         plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
+        if workflow_id:
+            plan = next((item for key, item in self._plans.items()
+                         if key[0] == owner_account_id
+                         and self._plan_workflows.get(key) == workflow_id
+                         and _visible_session_id(item.team_session_id) == _visible_session_id(session_id)), None)
         if plan is None:
             plan = self._hydrate_persisted_team_plan(
                 session_id,
                 node_id=node_id,
                 owner_account_id=owner_account_id,
+                workflow_id=workflow_id,
             )
         if plan is None:
             raise ValueError("当前 Team session 尚未创建 TeamPlan")
@@ -1910,11 +1956,34 @@ class InProcessTeamManager(TeamManager):
         required = normalize_capabilities((node.metadata or {}).get("required_capabilities") or [])
         previous_assignee = str(node.assignee or (node.metadata or {}).get("previous_assignee") or "").strip()
 
-        if action in {"reassign", "retry"}:
+        if action == "confirm_attempt":
+            if not (node.metadata or {}).get("can_confirm_original") or not self._runtime_staffing_policy.can_confirm_original(team, node, owner_account_id=owner_account_id):
+                raise ValueError("当前成员不可用或不再需要能力确认，请刷新任务状态。")
+            previous_state = node.to_dict()
+            node.assignee = previous_assignee
+            metadata = dict(node.metadata or {})
+            metadata["user_confirmed_capability_attempt"] = {"assignee": node.assignee, "required_capabilities": required, "confirmed_at": time.time()}
+            metadata["assignment_source"] = "user_confirmed_attempt"
+            metadata["assignment_reason"] = "用户确认由原成员尝试该任务节点。"
+            metadata.pop("runtime_blocking", None)
+            metadata.pop("runtime_staffing", None)
+            metadata["can_confirm_original"] = False
+            node.metadata = metadata
+            node.update(status="pending", result_summary="用户已确认由原成员尝试。", last_error="", allow_reopen=True)
+            try:
+                self._persist_assignment_revision(plan, node, owner_account_id=owner_account_id, reason="user_confirmed_capability_attempt", delta={"updated_node_metadata": {node.node_id: dict(metadata)}})
+            except Exception:
+                for key, value in previous_state.items():
+                    setattr(node, key, value)
+                raise
+            self._clear_recovery_dependency_marks(plan, node.node_id, owner_account_id=owner_account_id)
+        elif action in {"reassign", "retry"}:
             target = str(replacement_assignee or (node.assignee if action == "retry" else "") or previous_assignee).strip()
-            if not target or target in {"leader", "Crew", CREW_BUILTIN_AGENT_ID}:
+            leader_review_retry = (action == "retry" and target == "leader" and node.assignee == "leader"
+                                   and (node.node_id == "leader_review" or node.node_id.startswith("leader_review_")))
+            if not target or (target in {"leader", "Crew", CREW_BUILTIN_AGENT_ID} and not leader_review_retry):
                 raise ValueError("恢复节点需要选择一名现有团队成员")
-            if target not in team.teammates:
+            if target not in team.teammates and not leader_review_retry:
                 raise ValueError(f"未知或不可委派团队成员: {target}")
             if action == "reassign":
                 coverage = self._member_capability_coverage(
@@ -1992,7 +2061,7 @@ class InProcessTeamManager(TeamManager):
         plan.updated_at = node.updated_at
         self._refresh_plan_status(plan)
         self._record_team_event(
-            session_id,
+            plan_session_id,
             owner_account_id=owner_account_id,
             event_type="team_node_recovery",
             actor="user",
@@ -2044,12 +2113,19 @@ class InProcessTeamManager(TeamManager):
                 "team_recovery": True,
             },
         )
-        async for _chunk in self._run_required_workflow(
+        async for chunk in self._run_required_workflow(
             envelope,
             team=team,
             external_team_id=external_team_id,
         ):
-            pass
+            if chunk.is_final:
+                text = str(chunk.body.get("text") or chunk.body.get("message") or "").strip()
+                if text:
+                    self._recorded_team_internal_chunk(
+                        envelope, agent_id="leader", role="leader", is_leader=True,
+                        source_session_id=f"{plan_session_id}::leader", text=f"恢复执行结果：{text}",
+                        event_type="team_decision", mention_intent="recovery_result",
+                    )
 
     def _schedule_plan_recovery(self, plan: TeamPlan, *, owner_account_id: str) -> bool:
         key = self._key(plan.team_session_id, owner_account_id)
@@ -3254,6 +3330,10 @@ class InProcessTeamManager(TeamManager):
             if str(current_node.get("id") or "") == node.node_id:
                 current_node["assignee_id"] = node.assignee
                 current_node["runtime_staffing"] = request.to_dict()
+                for field in ("preserve_assignee", "assignment_source", "assignment_reason"):
+                    if field in (node.metadata or {}):
+                        current_node[field] = node.metadata[field]
+                current_node.pop("responsibility_quote", None)
                 found = True
             nodes.append(current_node)
         if not found:
@@ -3334,6 +3414,11 @@ class InProcessTeamManager(TeamManager):
             if str(current_node.get("id") or "") == node.node_id:
                 current_node["assignee_id"] = node.assignee
                 current_node["metadata"] = dict(node.metadata or {})
+                for field in ("assignment_source", "assignment_reason", "preserve_assignee", "responsibility_quote"):
+                    if field in node.metadata:
+                        current_node[field] = node.metadata[field]
+                    else:
+                        current_node.pop(field, None)
                 found = True
             nodes.append(current_node)
         if not found:
@@ -3467,6 +3552,11 @@ class InProcessTeamManager(TeamManager):
         request.resolved_at = time.time()
         metadata["runtime_assignment_history"] = history[-6:]
         metadata["runtime_staffing"] = request.to_dict()
+        metadata["preserve_assignee"] = False
+        metadata["assignment_source"] = "user_confirmed_runtime_staffing"
+        metadata["assignment_reason"] = "用户确认了本次任务的临时改派。"
+        metadata.pop("responsibility_quote", None)
+        metadata.pop("user_confirmed_capability_attempt", None)
         metadata.pop("runtime_staffing_trigger", None)
         metadata.pop("runtime_staffing_trigger_reason", None)
         node.assignee = spec.member_id
@@ -3530,6 +3620,11 @@ class InProcessTeamManager(TeamManager):
                     )
                 except Exception as exc:  # noqa: BLE001
                     log.warning("已有 Team 成员改派失败 session=%s node=%s err=%s", plan.team_session_id, node.node_id, exc)
+                    self._mark_plan_node(
+                        plan.team_session_id, node.node_id, owner_account_id=envelope.user_id,
+                        status="blocked", result_summary="已有成员改派失败，节点已暂停；请检查后重试或手动改派。",
+                        last_error=str(exc), allow_reopen=True,
+                    )
                     return team, "failed"
                 return rebuilt, "reassigned"
             request_id = self._runtime_staffing_request_id(
@@ -3579,23 +3674,25 @@ class InProcessTeamManager(TeamManager):
                     return team, "failed"
                 return rebuilt, "applied"
 
+            allow_suggestions = (getattr(team, "staffing_policy", {}) or {}).get("runtime_allow_suggestions", True)
+            can_confirm_original = bool(trigger.get("can_confirm_original"))
             candidates = self._runtime_staffing_candidates(
                 team,
                 owner_account_id=envelope.user_id,
                 required_capabilities=required,
-            )
+            ) if allow_suggestions else []
             request = RuntimeStaffingRequest(
                 request_id=request_id,
                 trigger_node_id=node.node_id,
                 trigger_type=str(trigger.get("trigger_type") or "capability_gap"),
                 required_capabilities=required,
                 reason=str(trigger.get("reason") or "Runtime Team 存在硬能力缺口。"),
-                status="awaiting_confirmation" if candidates else "failed",
+                status="awaiting_confirmation" if candidates or can_confirm_original else "failed",
                 candidates=candidates,
                 previous_assignee=node.assignee,
                 previous_delegate_task_id=node.delegate_task_id,
                 previous_attempt_count=node.attempt_count,
-                last_error="" if candidates else "没有可用的 External Agent 或 ready Runtime/model",
+                last_error="" if candidates or can_confirm_original else ("团队设置不允许推荐临时成员" if not allow_suggestions else "没有可用的 External Agent 或 ready Runtime/model"),
             )
             metadata = dict(node.metadata or {})
             previous_request = self._runtime_staffing_request(node)
@@ -3604,17 +3701,22 @@ class InProcessTeamManager(TeamManager):
                 history.append(previous_request.to_dict())
                 metadata["runtime_staffing_history"] = history[-5:]
             metadata["runtime_staffing"] = request.to_dict()
+            # While a live follow-up is open it owns the decision; expose the
+            # board recovery action only after that interaction has ended.
+            metadata["can_confirm_original"] = False
             node.metadata = metadata
-            if not candidates:
+            if not candidates and not can_confirm_original:
                 request.resolved_at = time.time()
                 metadata["runtime_staffing"] = request.to_dict()
+                metadata["can_confirm_original"] = False
                 node.metadata = metadata
                 self._mark_runtime_blocked(
                     plan,
                     node,
                     owner_account_id=envelope.user_id,
                     request=request,
-                    result_summary="当前团队没有可执行成员，且没有可用补员候选，当前节点已阻塞。",
+                    result_summary=("当前节点能力不足，团队设置不允许推荐临时成员；请手动调整负责人或团队设置。"
+                                    if not allow_suggestions else "当前团队没有可执行成员，且没有可用补员候选，当前节点已阻塞。"),
                 )
                 return team, "failed"
 
@@ -3637,6 +3739,12 @@ class InProcessTeamManager(TeamManager):
                 )
                 for index, candidate in enumerate(candidates)
             ]
+            if can_confirm_original:
+                options.insert(0, {
+                    "label": "由原成员尝试",
+                    "value": "use_original",
+                    "description": "我确认让当前成员尝试本节点；仅影响本次任务，不改变成员能力画像。",
+                })
             options.append({
                 "label": "这次先不添加",
                 "value": "decline",
@@ -3675,6 +3783,7 @@ class InProcessTeamManager(TeamManager):
             except Exception as exc:  # noqa: BLE001
                 request.last_error = str(exc)
                 metadata["runtime_staffing"] = request.to_dict()
+                metadata["can_confirm_original"] = can_confirm_original
                 node.metadata = metadata
                 self._mark_plan_node(
                     plan.team_session_id,
@@ -3700,6 +3809,8 @@ class InProcessTeamManager(TeamManager):
 
             answer = self._runtime_staffing_answer(answers)
             if not answer:
+                metadata["can_confirm_original"] = can_confirm_original
+                node.metadata = metadata
                 self._mark_plan_node(
                     plan.team_session_id,
                     node.node_id,
@@ -3713,6 +3824,7 @@ class InProcessTeamManager(TeamManager):
                 request.status = "declined"
                 request.resolved_at = time.time()
                 metadata["runtime_staffing"] = request.to_dict()
+                metadata["can_confirm_original"] = can_confirm_original
                 node.metadata = metadata
                 self._mark_runtime_blocked(
                     plan,
@@ -3726,6 +3838,33 @@ class InProcessTeamManager(TeamManager):
                     "已记录拒绝。当前节点没有可执行成员，任务已停在这里；无依赖节点仍可继续。",
                 )
                 return team, "declined"
+            if answer == "use_original" and can_confirm_original:
+                previous_state = node.to_dict()
+                request.status = "applied"
+                request.resolved_at = time.time()
+                metadata["runtime_staffing"] = request.to_dict()
+                metadata["can_confirm_original"] = False
+                metadata["user_confirmed_capability_attempt"] = {
+                    "assignee": node.assignee,
+                    "required_capabilities": normalize_capabilities(metadata.get("required_capabilities") or []),
+                    "confirmed_at": time.time(),
+                }
+                metadata["assignment_source"] = "user_confirmed_attempt"
+                metadata["assignment_reason"] = "用户确认由原成员尝试该任务节点。"
+                node.metadata = metadata
+                node.update(status="pending", result_summary="用户已确认由原成员尝试。", last_error="", allow_reopen=True)
+                try:
+                    self._persist_assignment_revision(plan, node, owner_account_id=envelope.user_id,
+                                                      reason="user_confirmed_capability_attempt",
+                                                      delta={"updated_node_metadata": {node.node_id: dict(node.metadata)}})
+                except Exception:
+                    for key, value in previous_state.items():
+                        setattr(node, key, value)
+                    raise
+                self._mark_plan_node(plan.team_session_id, node.node_id, owner_account_id=envelope.user_id,
+                                     status="pending", result_summary="用户已确认由原成员尝试。", last_error="", allow_reopen=True)
+                await update_followup_status("applied", "已确认由原成员尝试本次任务。")
+                return team, "original_confirmed"
             try:
                 candidate_index = int(answer.split(":", 1)[1]) if answer.startswith("candidate:") else -1
                 candidate = candidates[candidate_index] if 0 <= candidate_index < len(candidates) else None
@@ -4084,7 +4223,9 @@ class InProcessTeamManager(TeamManager):
 
         if action not in allowed_actions:
             lowered = body.lower()
-            if any(word in lowered for word in ("需要修改", "继续优化", "重新处理", "revise", "changes requested")):
+            if any(word in lowered for word in ("没有审阅通过", "未审阅通过", "未通过审阅", "尚未审阅", "未经审阅", "not approved")):
+                action = "block"
+            elif any(word in lowered for word in ("需要修改", "继续优化", "重新处理", "审阅未通过", "审核未通过", "不予通过", "revise", "changes requested")):
                 action = "revise"
             elif any(word in lowered for word in ("需要用户", "请用户", "补充信息", "ask_user")):
                 action = "ask_user"
@@ -4093,13 +4234,15 @@ class InProcessTeamManager(TeamManager):
                 and not any(word in lowered for word in ("无阻塞", "没有阻塞", "未阻塞", "不阻塞", "不存在阻塞"))
             ):
                 action = "block"
-            else:
+            elif any(word in lowered for word in ("审阅通过", "审核通过", "方案通过", "通过 leader 审阅", "同意通过", "无阻塞", "没有阻塞", "未阻塞", "不阻塞", "不存在阻塞", "approved")):
                 action = "approve"
+            else:
+                action = "block"
 
         message = str(data.get("message") or data.get("review") or "").strip()
         instructions = str(data.get("instructions") or data.get("revision_instructions") or "").strip()
         if not message:
-            message = body
+            message = body or "未获得有效的审阅结论，请重试审阅。"
         if action == "revise" and not instructions:
             instructions = message
         return {
@@ -4373,7 +4516,7 @@ class InProcessTeamManager(TeamManager):
         owner_account_id: str = "",
         max_revisions: int = 2,
     ) -> dict[str, str]:
-        action = str(decision.get("action") or "approve")
+        action = str(decision.get("action") or "block")
         reviewed = self._reviewed_member_nodes(plan, review_node)
         target_id = str(decision.get("target_node_id") or "")
         target = next((item for item in reviewed if item.node_id == target_id), None)
@@ -5159,6 +5302,20 @@ class InProcessTeamManager(TeamManager):
             self._planning_missing_info.pop(plan_key, None)
             return None
         self._planning_scope_conflicts.pop(plan_key, None)
+        roster_question = (
+            any(term in goal for term in ("团队成员", "队伍成员"))
+            and any(term in goal for term in ("有哪些", "都有谁", "是谁", "多少人"))
+        )
+        if graph_plan.nodes and not roster_question and all(
+            str(node.get("id") or "") in {"leader_plan", "leader_summary"}
+            for node in graph_plan.nodes
+        ):
+            fallback_from = str((planning or {}).get("fallback_from") or "") if isinstance(planning, dict) else ""
+            self._planning_missing_info[plan_key] = [
+                "规划未生成执行任务：模型和备用方案均未产生有效结果，可稍后重试。"
+                if fallback_from else "规划未生成执行任务。请补充需要完成的工作、交付物或成员分工，或稍后重试规划。"
+            ]
+            return None
         blocking_missing = self._blocking_planning_missing_info(goal, list(graph_plan.critical_missing_info))
         if blocking_missing:
             self._planning_missing_info[plan_key] = blocking_missing
@@ -5611,6 +5768,8 @@ class InProcessTeamManager(TeamManager):
                 return f"团队执行计划已生成，将按节点推进：{flow}。完成后由 Leader 汇总。"
             return f"团队执行计划已生成：{goal}。当前没有成员节点，将由 Leader 完成。"
         if node.node_id == "leader_review" or node.node_id.startswith("leader_review_"):
+            if fallback_error:
+                return f"Leader 审阅未完成，无法继续后续流程。原因：{team_presenter.node_result_digest(fallback_error, limit=180)}。请重试审阅。"
             parent_ids = {
                 edge.parent_id
                 for edge in plan.edges
@@ -6484,6 +6643,7 @@ class InProcessTeamManager(TeamManager):
         display_name = str(team_cfg.get("name") or "团队").strip() or "团队"
         leader_spec: TeamMemberSpec | None = None
         persisted_team_spec: dict[str, Any] = {}
+        staffing_policy: dict[str, bool] = {}
         model_bindings: dict[str, Any] = {}
         if external_team_id and self.external_store is not None:
             try:
@@ -6497,9 +6657,26 @@ class InProcessTeamManager(TeamManager):
                     owner_account_id=owner_account_id,
                 )
                 display_name = str(external_team.get("name") or display_name).strip() or display_name
+                formation = external_team.get("formation_plan") if isinstance(external_team.get("formation_plan"), dict) else {}
+                staffing_policy = {
+                    "runtime_allow_suggestions": formation.get("runtime_allow_suggestions") is not False,
+                    "runtime_allow_auto_reassign": formation.get("runtime_allow_auto_reassign") is not False,
+                }
                 raw_persisted_team_spec = external_team.get("team_spec")
                 if isinstance(raw_persisted_team_spec, dict):
                     persisted_team_spec = dict(raw_persisted_team_spec)
+                team_description = str(external_team.get("description") or "").strip()
+                team_instructions = str(external_team.get("instructions") or "").strip()
+                if team_description or team_instructions:
+                    policy = dict(persisted_team_spec.get("policy") or {})
+                    constraints = list(policy.get("constraints") or [])
+                    context = []
+                    if team_description:
+                        context.append(f"团队长期目标：{team_description}")
+                    if team_instructions:
+                        context.append(f"团队协作说明：{team_instructions}")
+                    policy["constraints"] = list(dict.fromkeys([*context, *constraints]))
+                    persisted_team_spec["policy"] = policy
                 members, leader_spec = self._external_team_specs(
                     external_team_id,
                     owner_account_id=owner_account_id,
@@ -6791,6 +6968,7 @@ class InProcessTeamManager(TeamManager):
             team_spec=persisted_team_spec,
             runtime_members=runtime_member_map,
             member_profiles=member_profiles,
+            staffing_policy=staffing_policy,
         )
 
     def _get_or_create(self, session_id: str, *, external_team_id: str = "", owner_account_id: str = "") -> Team:
@@ -7096,6 +7274,22 @@ class InProcessTeamManager(TeamManager):
             str(envelope.query or ""),
             team_spec=route_team_spec,
         )
+        # Local routing recognizes only unambiguous greetings. For an ordinary
+        # free-text request, ask the classifier whether it is a direct answer;
+        # executable or uncertain requests still go through DAG planning.
+        requested_turn_mode = str(explicit_profile.get("requested_mode") or "auto").strip().lower() if isinstance(explicit_profile, dict) else "auto"
+        if (base_turn_decision.is_new_workflow and requested_turn_mode == "auto"
+                and not isinstance(raw_team_spec, dict) and not envelope.attachments):
+            try:
+                classified = await decide_team_turn(
+                    self._provider_for_owner(envelope.user_id),
+                    user_message=str(envelope.query or ""),
+                    context={"has_existing_workflow": False, "team_name": team.display_name},
+                )
+                if classified.is_direct_chat:
+                    base_turn_decision = classified
+            except Exception as exc:  # noqa: BLE001 - retain the workflow route when classification is unavailable
+                log.warning("Team 本轮分类不可用，继续规划: %s", exc)
         intent_spec = (
             base_turn_decision.diagnostics.get("team_spec")
             if isinstance(base_turn_decision.diagnostics.get("team_spec"), dict)

@@ -125,6 +125,11 @@ function currentKbName(): string {
   return view.kbs.find((k) => k.id === view.kbId)?.name || view.kbId || '';
 }
 
+export function currentWikiKnowledgeBase(): { id: string; name: string } | null {
+  const id = String(view.kbId || '').trim();
+  return id ? { id, name: currentKbName() || id } : null;
+}
+
 function fireWikiAgentEntry(assist?: WikiAgentAssist, openAttachment = false): void {
   if (!view.kbId) return;
   wikiAgentEntryHandler?.({

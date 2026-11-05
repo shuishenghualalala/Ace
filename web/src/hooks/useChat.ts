@@ -161,6 +161,7 @@ interface SendOptions {
   subScenario?: string;
   externalTeamId?: string;
   wikiKbId?: string;
+  externalWikiReadKbId?: string;
   teamExecutionTier?: TeamExecutionTier;
   userMentions?: UserAgentMention[];
 }
@@ -1038,6 +1039,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
             subScenario: options.subScenario,
             externalTeamId: options.externalTeamId,
             wikiKbId: options.wikiKbId,
+            externalWikiReadKbId: options.externalWikiReadKbId,
             teamExecutionTier: options.teamExecutionTier,
             userMentions: options.userMentions,
           },
@@ -1064,6 +1066,9 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
       }
       if (options.wikiKbId) {
         payload.wiki_kb_id = options.wikiKbId;
+      }
+      if (mode === "team" && options.externalWikiReadKbId) {
+        payload.external_wiki_read_kb_id = options.externalWikiReadKbId;
       }
       if (options.userMentions?.length) {
         payload.user_mentions = options.userMentions;
@@ -1115,6 +1120,9 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
     }
     if (next.wikiKbId) {
       payload.wiki_kb_id = next.wikiKbId;
+    }
+    if (next.mode === "team" && next.externalWikiReadKbId) {
+      payload.external_wiki_read_kb_id = next.externalWikiReadKbId;
     }
     if (next.userMentions?.length) {
       payload.user_mentions = next.userMentions;
@@ -1310,6 +1318,7 @@ export function useChat(currentSessionId: string, onAfterFinal: () => void) {
       subScenario: item.subScenario,
       externalTeamId: item.externalTeamId,
       wikiKbId: item.wikiKbId,
+      externalWikiReadKbId: item.externalWikiReadKbId,
       teamExecutionTier: item.teamExecutionTier,
       userMentions: item.userMentions,
     });

@@ -57,13 +57,15 @@ def team_turn_decision_messages(
 只输出 JSON，不输出解释。
 
 分类边界：
-- direct_chat：用户只是寒暄、确认、轻量聊天或不需要团队工作流的直接问答。
+- direct_chat：用户只是寒暄、确认、轻量聊天、询问团队能力，或可由 Leader 当场答复的简单文字任务（例如写一句标题）。
 - status_query：用户在询问已有团队运行事实、进度、耗时、成员贡献、节点状态、失败/阻塞原因、规划结果或最近事件。
 - new_workflow：用户提出新的执行目标，需要创建或继续一个新的团队工作流。
 - uncertain：无法可靠判断。
 
 约束：
 - 你不生成 DAG，不生成 work_units，不分配成员。
+- 需要访问文件、工具、外部资料、执行操作，或者需要多步骤协作的任务应输出 new_workflow；不要仅凭消息简短判断简单。
+- 无法确定时输出 uncertain，不要猜测为 direct_chat。
 - 只有 context.has_existing_workflow=true 时才能输出 status_query。
 - status_query 只能读取已有事实，不能要求执行新任务。
 

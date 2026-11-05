@@ -292,8 +292,9 @@ export const api = {
   recoverTeamNode: (
     sessionId: string,
     nodeId: string,
-    action: "reassign" | "retry" | "abandon",
+    action: "reassign" | "retry" | "abandon" | "confirm_attempt",
     replacementAssignee = "",
+    workflowId = "",
   ) =>
     getJSON<{ ok: boolean; node?: Task; error?: string }>(
       `/api/session/${encodeURIComponent(sessionId)}/team/recover`,
@@ -303,6 +304,7 @@ export const api = {
           node_id: nodeId,
           action,
           replacement_assignee: replacementAssignee,
+          workflow_id: workflowId,
         }),
       },
     ),

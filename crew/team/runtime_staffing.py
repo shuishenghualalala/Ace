@@ -14,7 +14,7 @@ from typing import Any
 from crew.core.errors import ToolError
 from crew.core.followup import CANCELLED_MARKER
 from crew.team import flow_builder
-from crew.team.agent_profile import evaluate_capability_coverage
+from crew.team.agent_profile import evaluate_capability_coverage, is_agent_profile_available
 from crew.team.capabilities import normalize_capabilities
 from crew.team.formation import (
     rank_staffing_candidates,
@@ -45,6 +45,19 @@ class RuntimeStaffingPolicy:
             return self.external_store_provider()
         return self.external_store
 
+    def can_confirm_original(self, team: Any, node: TeamPlanNode, *, owner_account_id: str) -> bool:
+        member_id = node.assignee or str((node.metadata or {}).get("previous_assignee") or "")
+        member = team.members.get(member_id)
+        if member is None or member_id not in team.teammates:
+            return False
+        profile = self.resolve_member_profile(member, owner_account_id) if member.executor == "external" else None
+        ready = member.executor == "builtin" or (member.executor == "external" and profile is not None and is_agent_profile_available(profile))
+        required = normalize_capabilities((node.metadata or {}).get("required_capabilities") or [])
+        if not ready or not required:
+            return False
+        coverage = self.member_capability_coverage(team, member_id, required, owner_account_id=owner_account_id)
+        return not coverage.unavailable and coverage.status != "covered"
+
     def member_capability_coverage(
         self,
         team: Any,
@@ -64,18 +77,11 @@ class RuntimeStaffingPolicy:
             )
         if member.executor == "external" and member.external_agent_id:
             agent_id = str(member.external_agent_id).strip()
-            assigned_capabilities = normalize_capabilities(member.capabilities)
-            if not assigned_capabilities:
-                assigned_capabilities = normalize_capabilities(
-                    flow_builder.member_node_metadata(member).get("required_capabilities") or []
-                )
             profile = self.resolve_member_profile(member, owner_account_id)
             profiles = {agent_id: profile} if profile is not None else {}
-            capability_sets = {agent_id: assigned_capabilities} if assigned_capabilities else None
             return evaluate_capability_coverage(
                 required_capabilities,
                 profiles,
-                capability_sets=capability_sets,
                 assigned_agent_ids=[agent_id],
                 require_profile_availability=True,
             )
@@ -158,7 +164,20 @@ class RuntimeStaffingPolicy:
             required,
             owner_account_id=owner_account_id,
         )
-        if coverage.status != "covered":
+        can_confirm_original = self.can_confirm_original(team, node, owner_account_id=owner_account_id)
+        # A user's explicit assignment is not invalidated by missing historical
+        # capability evidence. The executor still enforces actual availability
+        # and tool permissions when the member is dispatched.
+        if can_confirm_original and (node.metadata or {}).get("preserve_assignee"):
+            return None
+        confirmation = (node.metadata or {}).get("user_confirmed_capability_attempt")
+        if (can_confirm_original and isinstance(confirmation, dict)
+                and confirmation.get("assignee") == node.assignee
+                and set(required).issubset(set(normalize_capabilities(confirmation.get("required_capabilities") or [])))):
+            return None
+        staffing_policy = getattr(team, "staffing_policy", {}) or {}
+        if (coverage.status != "covered" and not (node.metadata or {}).get("preserve_assignee")
+                and staffing_policy.get("runtime_allow_auto_reassign", True)):
             for member_id, _member in team.members.items():
                 if member_id in {node.assignee, "leader"}:
                     continue
@@ -177,9 +196,11 @@ class RuntimeStaffingPolicy:
                     }
         if coverage.status in {"unavailable", "unknown"}:
             return {
-                "trigger_type": "agent_unavailable",
+                "trigger_type": "capability_unverified" if can_confirm_original else "agent_unavailable",
                 "required_capabilities": list(required),
-                "reason": f"当前成员 {node.assignee} 的 Runtime/model 不可用或能力画像无法确认。",
+                "reason": (f"当前成员 {node.assignee} 的运行环境可用，但所需能力尚未得到验证。"
+                           if can_confirm_original else f"当前成员 {node.assignee} 的运行环境不可用或无法确认。"),
+                "can_confirm_original": can_confirm_original,
             }
         if coverage.status != "covered":
             missing = list(dict.fromkeys([*coverage.missing, *coverage.unavailable, *coverage.unknown]))
@@ -187,6 +208,7 @@ class RuntimeStaffingPolicy:
                 "trigger_type": "capability_gap",
                 "required_capabilities": missing,
                 "reason": f"当前节点负责人 {node.assignee} 未覆盖硬能力：{'、'.join(missing)}。",
+                "can_confirm_original": can_confirm_original,
             }
         return None
 
@@ -257,7 +279,8 @@ class RuntimeStaffingPolicy:
     @staticmethod
     def user_reason(trigger_type: str) -> str:
         return {
-            "agent_unavailable": "当前负责这项工作的成员暂时无法使用。",
+            "agent_unavailable": "当前成员的运行环境不可用或尚未确认。",
+            "capability_unverified": "当前成员可以尝试，但系统还没有足够的能力验证记录。",
             "capability_gap": "当前团队还缺少完成这项工作所需的能力。",
             "acceptance_exhausted": "这项工作已经尝试了几次仍未通过，换位助手接手会更稳妥。",
             "review_exhausted": "这项工作经过多次修改仍未通过，换位助手接手会更稳妥。",

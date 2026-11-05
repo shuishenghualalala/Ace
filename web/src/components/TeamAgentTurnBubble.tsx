@@ -116,6 +116,16 @@ function highlightMentionMarkdown(text: string): string {
   );
 }
 
+function resolveMemberMentions(text: string, teamMembers: TeamMemberView[] = []): string {
+  let resolved = String(text || "");
+  for (const member of teamMembers) {
+    const id = String(member.agentId || "").trim();
+    const name = String(member.name || "").trim();
+    if (id && name && id !== name) resolved = resolved.replaceAll(`@${id}`, () => `@${name}`);
+  }
+  return resolved;
+}
+
 const RETRYABLE_MENTION_STATUSES = new Set(["failed", "expired", "cancelled"]);
 const ACTIVE_MENTION_STATUSES = new Set(["published", "waiting_reply", "queued", "delivered"]);
 
@@ -129,7 +139,7 @@ export default function TeamAgentTurnBubble({
   const identity = resolveIdentity(message, teamMembers);
   const state = buildAgentTurnState([{
     ...message,
-    text: highlightMentionMarkdown(message.text),
+    text: highlightMentionMarkdown(resolveMemberMentions(message.text, teamMembers)),
   }], isStreaming);
   const processText = (message.processText || "").trim();
   const isUserMentionAnswer = message.communicationKind === "user_mention_answer";

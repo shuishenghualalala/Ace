@@ -140,6 +140,8 @@ export interface FollowupQuestionChunk {
       id?: string;
       question?: string;
       options?: unknown[];
+      inputMode?: string;
+      input_mode?: string;
       allowFreeText?: boolean;
       allow_free_text?: boolean;
       multiSelect?: boolean;
@@ -1147,6 +1149,8 @@ export function followupQuestionReducer(chunk: FollowupQuestionChunk, snapshot: 
     questions: (chunk.body.questions ?? []).map((q) => ({
       id: typeof q.id === 'string' ? q.id : '',
       question: typeof q.question === 'string' ? q.question : '',
+      ...(typeof q.inputMode === 'string' ? { inputMode: q.inputMode }
+        : (typeof q.input_mode === 'string' ? { inputMode: q.input_mode } : {})),
       options: Array.isArray(q.options) ? q.options.map((opt) => {
         if (opt && typeof opt === 'object') {
           const raw = opt as Record<string, unknown>;

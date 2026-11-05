@@ -238,6 +238,7 @@ def build_interaction_mcp_server(
     *,
     context_type: str = "standalone",
     team_role: str = "",
+    wiki_read_enabled: bool = False,
 ) -> Any:
     """按服务端 Binding 场景构建最小 External Interaction MCP 工具面。"""
     from mcp.server import MCPServer
@@ -248,6 +249,7 @@ def build_interaction_mcp_server(
         raise ValueError(f"未知 interaction context: {context_type}")
     if context_type == "team" and team_role not in {"leader", "member"}:
         raise ValueError(f"未知 team role: {team_role or '<empty>'}")
+    wiki_read_enabled = bool(wiki_read_enabled and context_type == "team")
 
     mcp = MCPServer("crew-interaction", version=__version__)
 
@@ -360,6 +362,35 @@ def build_interaction_mcp_server(
             )
             return json.dumps(response, ensure_ascii=False)
 
+    if wiki_read_enabled:
+        @mcp.tool()
+        async def crew_wiki_search(query: str, top_k: int = 5) -> str:
+            """Search the one Wiki knowledge base shared for this team run."""
+            response = await asyncio.to_thread(
+                _post_internal,
+                gateway_url,
+                token,
+                "/api/internal/team/wiki/search",
+                {"query": query, "top_k": top_k},
+            )
+            if not response.get("ok"):
+                raise RuntimeError(str(response.get("error") or "Crew Wiki 搜索失败"))
+            return json.dumps(response, ensure_ascii=False)
+
+        @mcp.tool()
+        async def crew_wiki_read(page_id: str) -> str:
+            """Read one page from the Wiki knowledge base shared for this team run."""
+            response = await asyncio.to_thread(
+                _post_internal,
+                gateway_url,
+                token,
+                "/api/internal/team/wiki/read",
+                {"page_id": page_id},
+            )
+            if not response.get("ok"):
+                raise RuntimeError(str(response.get("error") or "Crew Wiki 页面读取失败"))
+            return json.dumps(response, ensure_ascii=False)
+
     return mcp
 
 
@@ -379,11 +410,13 @@ def serve_interaction_proxy() -> None:
     token = os.environ.get("CREW_INTERACTION_TOKEN", "")
     context_type = os.environ.get("CREW_INTERACTION_CONTEXT", "standalone")
     team_role = os.environ.get("CREW_INTERACTION_TEAM_ROLE", "")
+    wiki_read_enabled = os.environ.get("CREW_INTERACTION_WIKI_READ", "0").strip() == "1"
     server = build_interaction_mcp_server(
         gateway_url,
         token,
         context_type=context_type,
         team_role=team_role,
+        wiki_read_enabled=wiki_read_enabled,
     )
     log.info("Crew Interaction MCP Proxy 启动（stdio）")
     server.run()

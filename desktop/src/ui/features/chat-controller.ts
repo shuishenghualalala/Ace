@@ -105,6 +105,7 @@ import {
   enqueuePending,
   ensureSessionBook,
   ensureSessionMessages,
+  getTeamWikiReadGrant,
   getPendingQueue,
   isBusySession,
   isDynamicKanbanSession,
@@ -148,6 +149,7 @@ interface DispatchOptions {
   clientIntent?: 'revision';
   optimisticUserMessageId?: string;
   wikiConfirmationId?: string;
+  externalWikiReadKbId?: string;
   workDisabledPreferenceIds?: string[];
   userMentions?: UserAgentMention[];
 }
@@ -1473,6 +1475,7 @@ export function consumePending(sessionId: string): void {
   if (head.optimisticUserMessageId) dispatchOptions.optimisticUserMessageId = head.optimisticUserMessageId;
   if (head.workDisabledPreferenceIds) dispatchOptions.workDisabledPreferenceIds = head.workDisabledPreferenceIds;
   if (head.userMentions) dispatchOptions.userMentions = head.userMentions;
+  if (head.externalWikiReadKbId) dispatchOptions.externalWikiReadKbId = head.externalWikiReadKbId;
   void dispatchWs(sessionId, head.query, head.attachments ?? [], dispatchOptions);
 }
 
@@ -1490,6 +1493,7 @@ export function sendQueueItemNow(sessionId: string, id: string): void {
       ? { workDisabledPreferenceIds: item.workDisabledPreferenceIds }
       : {}),
     ...(item.userMentions?.length ? { userMentions: item.userMentions } : {}),
+    ...(item.externalWikiReadKbId ? { externalWikiReadKbId: item.externalWikiReadKbId } : {}),
   });
 }
 
@@ -1601,6 +1605,9 @@ export async function dispatchWs(
     ...(externalTeamId ? { external_team_id: externalTeamId } : {}),
     ...(subScenario ? { sub_scenario: subScenario } : {}),
     ...(wikiExtras ? { wiki_kb_id: wikiExtras.wikiKbId } : {}),
+    ...(externalTeamId && dispatchOptions.externalWikiReadKbId
+      ? { external_wiki_read_kb_id: dispatchOptions.externalWikiReadKbId }
+      : {}),
     ...(dispatchOptions.wikiConfirmationId ? { wiki_confirmation_id: dispatchOptions.wikiConfirmationId } : {}),
     ...(workDisabledPreferenceIds.length > 0 ? { work_disabled_preference_ids: workDisabledPreferenceIds } : {}),
     ...(dispatchOptions.userMentions?.length ? { user_mentions: dispatchOptions.userMentions } : {}),
@@ -1634,6 +1641,9 @@ export async function sendMessage(text: string, userMentions: UserAgentMention[]
   // 无活跃会话（欢迎页）时新建草稿：用 composerWorkspaceId()（即右下角选择器所显示的空间），
   // 而不是裸读 state.currentWorkspaceId——避免二者不一致时消息落到选择器之外的空间。
   const sessionId = state.activeSessionId ?? createSessionInWorkspace(composerWorkspaceId(), openSessionFn);
+  const activeTeamId = state.activeExternalTeamIdBySession[sessionId] || '';
+  const wikiGrant = activeTeamId ? getTeamWikiReadGrant(sessionId, activeTeamId) : null;
+  const externalWikiReadKbId = wikiGrant?.kbId || '';
   const hasAnnotationDraft = hasSiteAnnotationDraft(sessionId) || hasBlueprintAnnotationDraft(sessionId);
   const content = composeBlueprintAnnotationMessage(
     sessionId,
@@ -1651,6 +1661,7 @@ export async function sendMessage(text: string, userMentions: UserAgentMention[]
       workDisabledPreferenceIds: productModeStore.get().productMode === 'work'
         ? takeDisabledWorkPreferenceIds()
         : [],
+      ...(externalWikiReadKbId ? { externalWikiReadKbId } : {}),
       ...(userMentions.length > 0 ? { userMentions } : {}),
     };
     if (queueEditDraft?.sessionId === sessionId) {
@@ -1682,6 +1693,7 @@ export async function sendMessage(text: string, userMentions: UserAgentMention[]
 
   const sent = await dispatchWs(sessionId, content, takeAttachmentsForSend(), {
     subScenario: takeArmedSubScenario(),
+    ...(externalWikiReadKbId ? { externalWikiReadKbId } : {}),
     ...(userMentions.length > 0 ? { userMentions } : {}),
   });
   if (sent) {

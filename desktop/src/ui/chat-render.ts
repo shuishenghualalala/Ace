@@ -169,6 +169,8 @@ export interface PendingMessage {
   optimisticUserMessageId?: string;
   /** 用户在 Team Composer 中选择的成员 mention。 */
   userMentions?: { kind: 'team_member'; member_id: string }[];
+  /** Explicit per-turn consent for external team agents to read one Wiki KB. */
+  externalWikiReadKbId?: string;
 }
 
 export type SessionStatus = 'idle' | 'running' | 'queued' | 'error';

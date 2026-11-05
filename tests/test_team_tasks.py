@@ -6001,6 +6001,123 @@ def test_dag_admission_reassigns_existing_member_and_refreshes_role_metadata():
     assert node["metadata"]["previous_assignee"] == "kk"
 
 
+def test_user_responsibility_assignment_survives_capability_admission_and_snapshot():
+    from crew.team.graph_planner import _assign_work_units_balanced
+    from crew.team.workflow_plan import WorkUnit, workflow_node_runtime_metadata, workflow_plan_from_graph
+
+    other = TeamMemberSpec(member_id="a", name="A", executor="builtin", capabilities=["research"], metadata={"workflow_lane": "plan"})
+    assigned = TeamMemberSpec(
+        member_id="b", name="B", executor="builtin", capabilities=[],
+        metadata={"workflow_lane": "plan", "responsibility_source": "user",
+                  "formation_responsibility": {"mission": "负责竞赛评分标准研究"}},
+    )
+    unit = WorkUnit(id="rules", objective="调研竞赛评分标准", kind="research",
+                    required_capabilities=["research"], expected_output="评分标准",
+                    preferred_member_id="b", responsibility_quote="竞赛评分标准研究")
+    assignments, meta = _assign_work_units_balanced([unit], [other, assigned])
+    assert assignments["rules"].member_id == "b"
+    nodes, edges, _ = _normalize_nodes_with_graph(
+        goal="调研评分标准", raw_nodes=[{"id": "rules", "title": unit.objective, "assignee": "b",
+            "metadata": {"workflow_lane": "plan", "required_capabilities": ["research"], **meta["rules"]}}],
+        raw_edges=[], valid_roles=["leader", "a", "b"], member_capabilities={"a": ["research"], "b": []},
+    )
+    node = next(item for item in nodes if item["id"] == "rules")
+    assert node["assignee"] == "b"
+    assert node["metadata"]["capability_status"] == "missing"
+    snapshot = workflow_plan_from_graph(
+        goal="调研评分标准", team_spec={}, nodes=nodes, edges=edges, requested_mode="standard", selected_mode="standard",
+        engine="topology_compiler", dependency_pattern="sequential", quality_policy="none", confidence={},
+        reasons=[], budget={}, warnings=[],
+    ).to_dict()
+    persisted = next(item for item in snapshot["nodes"] if item["id"] == "rules")
+    assert workflow_node_runtime_metadata(snapshot, persisted)["preserve_assignee"] is True
+
+    bad_unit = WorkUnit(id="other", objective="其他任务", kind="research", required_capabilities=["research"],
+                        expected_output="结果", preferred_member_id="b", responsibility_quote="不存在的职责原文")
+    assert _assign_work_units_balanced([bad_unit], [other, assigned])[0]["other"].member_id == "a"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["standard", "auto"])
+async def test_planner_uses_grounded_user_responsibility_for_standard_and_auto_fast(mode):
+    class ResponsibilityProvider(LLMProvider):
+        async def chat(self, messages, tools=None, *, max_tokens=None):
+            return ChatResponse(text=json.dumps({
+                "goal_clarity": "high", "risk_level": "low", "quality_policy": "none",
+                "work_units": [{"id": "rules", "objective": "调研评分标准", "kind": "research",
+                    "required_capabilities": ["research"], "expected_output": "标准清单",
+                    "preferred_member_id": "b", "responsibility_quote": "竞赛评分标准研究"}],
+            }, ensure_ascii=False))
+
+        async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+            yield StreamChunk(delta_text="", done=True)
+
+    team = SimpleNamespace(members={
+        "a": TeamMemberSpec(member_id="a", name="A", role="其他研究", executor="builtin",
+                            capabilities=["research"], metadata={"workflow_lane": "plan"}),
+        "b": TeamMemberSpec(member_id="b", name="B", role="负责竞赛评分标准研究", executor="builtin",
+                            capabilities=["research"], metadata={"workflow_lane": "plan", "responsibility_source": "user",
+                                "formation_responsibility": {"mission": "负责竞赛评分标准研究"}}),
+    }, member_profiles={})
+    result = await TeamGraphPlanner().plan_async(team, "调研竞赛评分标准", execution_profile={"requested_mode": mode},
+                                                  provider=ResponsibilityProvider())
+    node = next(item for item in result.nodes if item["id"] in {"rules", "fast_execute"})
+    assert node["assignee"] == "b"
+    assert node["metadata"]["preserve_assignee"] is True
+    persisted = next(item for item in result.workflow_plan["nodes"] if item["id"] == node["id"])
+    assert persisted["preserve_assignee"] is True
+
+
+@pytest.mark.asyncio
+async def test_ai_graph_preserves_grounded_user_responsibility():
+    class AiResponsibilityProvider(LLMProvider):
+        async def chat(self, messages, tools=None, *, max_tokens=None):
+            return ChatResponse(text=json.dumps({"nodes": [{
+                "id": "rules", "title": "调研评分标准", "assignee": "b", "workflow_lane": "plan",
+                "required_capabilities": ["research"], "responsibility_quote": "竞赛评分标准研究",
+            }]}, ensure_ascii=False))
+
+        async def stream_chat(self, messages, tools=None, *, max_tokens=None):
+            yield StreamChunk(delta_text="", done=True)
+
+    team = SimpleNamespace(members={
+        "a": TeamMemberSpec(member_id="a", name="A", executor="builtin", capabilities=["research"],
+                            metadata={"workflow_lane": "plan"}),
+        "b": TeamMemberSpec(member_id="b", name="B", executor="builtin", capabilities=[],
+                            metadata={"workflow_lane": "plan", "responsibility_source": "user",
+                                      "formation_responsibility": {"mission": "负责竞赛评分标准研究"}}),
+    }, member_profiles={})
+    result = await TeamGraphPlanner().plan_async(team, "调研竞赛评分标准",
+        execution_profile={"requested_mode": "ai"}, provider=AiResponsibilityProvider())
+    node = next(item for item in result.nodes if item["id"] == "rules")
+    assert node["assignee"] == "b"
+    assert node["metadata"]["preserve_assignee"] is True
+    assert node["metadata"]["capability_status"] == "missing"
+    assert next(item for item in result.workflow_plan["nodes"] if item["id"] == "rules")["preserve_assignee"]
+
+
+@pytest.mark.asyncio
+async def test_empty_fallback_graph_requests_more_information_instead_of_running_leader_only():
+    tm, _ = _team(FailingGraphProvider(), config=Config(team_config={"members": [{
+        "member_id": "dev", "name": "dev", "role": "负责开发", "executor": "builtin",
+        "capabilities": ["implementation"], "metadata": {"workflow_lane": "build"},
+    }]}))
+    team = tm._build_team("empty-fallback")
+    plan = await tm._ensure_runtime_plan_async("empty-fallback", team, "开发并测试登录接口", "", owner_account_id="local")
+    assert plan is None
+    assert "规划未生成执行任务" in tm._planning_missing_info[tm._key("empty-fallback", "local")][0]
+
+
+def test_fast_plan_with_unclassified_member_requests_capability_information():
+    team = SimpleNamespace(members={"a": TeamMemberSpec(
+        member_id="a", name="A", role="负责分析", executor="builtin", capabilities=[],
+        metadata={"role_key": "unclassified", "workflow_lane": "other"},
+    )}, member_profiles={})
+    result = TeamGraphPlanner().plan(team, "完成任务", execution_profile={"requested_mode": "fast"})
+    assert result.nodes == []
+    assert "确认执行成员的能力或角色" in result.critical_missing_info[0]
+
+
 def test_runtime_staffing_does_not_trigger_when_assigned_member_is_covered():
     tm, _ = _team(config=Config(
         team_config={
@@ -6260,6 +6377,22 @@ def test_runtime_staffing_reassigns_existing_member_before_prompting_user():
     assert trigger is not None
     assert trigger["trigger_type"] == "existing_member_reassignment"
     assert trigger["replacement_assignee"] == "hh"
+
+
+def test_runtime_staffing_does_not_silently_reassign_user_responsibility():
+    tm, _ = _team(config=Config(team_config={"members": [
+        {"member_id": "kk", "name": "kk", "executor": "builtin", "capabilities": ["implementation"]},
+        {"member_id": "hh", "name": "hh", "executor": "builtin", "capabilities": ["testing"]},
+    ]}))
+    team = tm._build_team("runtime-user-responsibility")
+    node = TeamPlanNode(node_id="verify", title="验证", assignee="kk", metadata={
+        "required_capabilities": ["testing"], "preserve_assignee": True,
+        "assignment_source": "user_responsibility",
+    })
+    trigger = tm._runtime_staffing_trigger(team, node, owner_account_id="local", max_attempts=2)
+    assert trigger is not None
+    assert trigger["trigger_type"] == "capability_gap"
+    assert "replacement_assignee" not in trigger
 
 
 def test_runtime_reassignment_refreshes_plan_status_after_reopening_node():

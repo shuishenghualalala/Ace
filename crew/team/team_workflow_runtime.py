@@ -209,8 +209,19 @@ class TeamWorkflowRuntime:
                 if planned is not None:
                     plan = planned
         missing_info = self.host._planning_missing_info.pop(planning_key, [])
-        if plan is None and missing_info:
+        planning_clarifications = 0
+        asked_planning_questions: set[str] = set()
+        while plan is None and missing_info and planning_clarifications < 4:
+            planning_clarifications += 1
             question = "为了正确拆分本轮任务，请补充：" + "；".join(missing_info)
+            if question in asked_planning_questions:
+                yield ResponseChunk.final(
+                    envelope.request_id,
+                    "这次补充没有消除同一项规划阻塞，已停止重复追问。请按问题卡片补齐所需信息，或稍后重新发起任务。",
+                    reason="planning_clarification_unresolved",
+                )
+                return
+            asked_planning_questions.add(question)
             try:
                 followup_session_id, question_id = await self.host._send_followup_question_to(
                     _visible_session_id(envelope.session_id),
@@ -242,7 +253,7 @@ class TeamWorkflowRuntime:
                     reason="planning_missing_info",
                 )
                 return
-            goal = f"{goal}\n\n用户补充：{'；'.join(answer_texts)}"
+            goal = f"{goal}\n\n用户补充问题：{question}\n用户补充：{'；'.join(answer_texts)}"
             plan = None
             async for planning_chunk, planned in self.stream_runtime_plan(
                 envelope,
@@ -251,17 +262,23 @@ class TeamWorkflowRuntime:
                 external_team_id=external_team_id,
                 owner_account_id=envelope.user_id,
                 execution_profile=execution_profile,
+                team_spec=team_spec,
             ):
                 if planning_chunk is not None:
                     yield planning_chunk
                 if planned is not None:
                     plan = planned
+            missing_info = self.host._planning_missing_info.pop(planning_key, [])
+            planning_failure = self.host._planning_failures.pop(planning_key, "")
+            if plan is None and planning_failure:
+                yield ResponseChunk.final(envelope.request_id, planning_failure, reason="planning_failed")
+                return
         if plan is None:
             planning_failure = self.host._planning_failures.pop(planning_key, "")
             if planning_failure:
                 yield ResponseChunk.final(envelope.request_id, planning_failure, reason="planning_failed")
                 return
-            if self.host._planning_missing_info.pop(planning_key, []):
+            if missing_info or self.host._planning_missing_info.pop(planning_key, []):
                 yield ResponseChunk.final(
                     envelope.request_id,
                     "补充信息后任务仍不够明确，已暂停规划，请重新描述目标。",
@@ -337,27 +354,30 @@ class TeamWorkflowRuntime:
                     parsed_decision = self.host._parse_leader_review_decision(result)
                     if self.host._leader_review_decision_conflicts(plan, node, parsed_decision):
                         result = ""
-                        async for live_chunk, final_result in self.host._stream_leader_node(
-                            envelope,
-                            team=team,
-                            plan=plan,
-                            node=node,
-                            attempt=attempt,
-                            correction=(
-                                "上一次判断声称缺少成员方案，但结构化上游摘要和产物引用均已提供。"
-                                "请重新阅读“已完成节点”和 Team Context Summary 后审阅，不要要求用户重复提供已有内容。"
-                            ),
-                        ):
-                            if live_chunk is not None:
-                                yield live_chunk
-                            if final_result is not None:
-                                result = final_result
+                        try:
+                            async for live_chunk, final_result in self.host._stream_leader_node(
+                                envelope,
+                                team=team,
+                                plan=plan,
+                                node=node,
+                                attempt=attempt,
+                                correction=(
+                                    "上一次判断声称缺少成员方案，但结构化上游摘要和产物引用均已提供。"
+                                    "请重新阅读“已完成节点”和 Team Context Summary 后审阅，不要要求用户重复提供已有内容。"
+                                ),
+                            ):
+                                if live_chunk is not None:
+                                    yield live_chunk
+                                if final_result is not None:
+                                    result = final_result
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("Leader 重审失败 session=%s node=%s err=%s", envelope.session_id, node.node_id, exc)
                         parsed_decision = self.host._parse_leader_review_decision(result)
                         if self.host._leader_review_decision_conflicts(plan, node, parsed_decision):
                             parsed_decision = {
-                                "action": "approve",
+                                "action": "block",
                                 "target_node_id": "",
-                                "message": "成员方案和产物引用已齐备，矛盾重审仍未正确消费上下文，按结构化提交放行后续执行。",
+                                "message": "成员提交已存在，但审阅结论仍与提交情况矛盾；流程已暂停，请检查提交后重试审阅。",
                                 "instructions": "",
                             }
                     if (node.metadata or {}).get("user_followup_answers") and parsed_decision.get("action") == "ask_user":
@@ -477,7 +497,7 @@ class TeamWorkflowRuntime:
                     artifacts=leader_artifacts,
                 )
                 if decision is not None:
-                    action = str(decision.get("action") or "approve")
+                    action = str(decision.get("action") or "block")
                     target = str(decision.get("target_node_id") or "")
                     review_meta = dict(node.metadata or {})
                     timeout_default_note = str(review_meta.get("user_followup_timeout_note") or "")
@@ -506,7 +526,10 @@ class TeamWorkflowRuntime:
                         mention_to=[plan.nodes[target].assignee] if target in plan.nodes else [],
                         mention_intent=action,
                     )
-                yield ResponseChunk.status_event(envelope.request_id, f"完成节点「{node.title}」")
+                status_text = (f"完成节点「{node.title}」" if node.status == "completed"
+                               else f"节点「{node.title}」已暂停：{result}" if node.status in {"blocked", "needs_info"}
+                               else f"节点「{node.title}」等待继续处理")
+                yield ResponseChunk.status_event(envelope.request_id, status_text)
                 progressed = True
                 if pause_dispatch_this_round:
                     break
@@ -539,10 +562,9 @@ class TeamWorkflowRuntime:
                             team,
                             staffing_trigger,
                         )
-                        yield ResponseChunk.status_event(
-                            envelope.request_id,
-                            f"已有成员 {staffing_trigger.get('replacement_assignee')} 可以承担，已改派「{node.title}」，准备继续。",
-                        )
+                        text = (f"已有成员 {staffing_trigger.get('replacement_assignee')} 已接手「{node.title}」，准备继续。"
+                                if staffing_status == "reassigned" else f"「{node.title}」改派失败，已暂停；请检查后重试。")
+                        yield ResponseChunk.status_event(envelope.request_id, text)
                         progressed = True
                         continue
                     yield ResponseChunk.status_event(
@@ -561,6 +583,8 @@ class TeamWorkflowRuntime:
                             envelope.request_id,
                             f"协作助手已加入本次任务，正在继续「{node.title}」。",
                         )
+                    elif staffing_status == "original_confirmed":
+                        yield ResponseChunk.status_event(envelope.request_id, f"已确认由原成员尝试「{node.title}」。")
                     elif staffing_status == "declined":
                         yield ResponseChunk.status_event(
                             envelope.request_id,
@@ -775,6 +799,14 @@ class TeamWorkflowRuntime:
                             "上游产物路径（优先读取这些文件作为当前节点输入）：\n"
                             f"{upstream_artifact_text}"
                         )
+                    wiki_read_kb_id = str(envelope.params.get("external_wiki_read_kb_id") or "").strip()
+                    if wiki_read_kb_id:
+                        instruction_detail = (
+                            f"{instruction_detail}\n\n"
+                            "本轮已获准只读检索一个 Crew 知识库。需要核对专业材料时可调用 "
+                            "crew_wiki_search / crew_wiki_read；回答中注明页面标题和来源，"
+                            "不要尝试访问或切换其他知识库。"
+                        )
                     if team_presenter.is_verify_execution_node(node):
                         instruction_detail = (
                             f"{instruction_detail}\n\n"
@@ -806,6 +838,8 @@ class TeamWorkflowRuntime:
                         task_payload_meta["active_skills"] = list(
                             envelope.params.get("active_skills") or []
                         )
+                    if wiki_read_kb_id:
+                        task_payload_meta["external_wiki_read_kb_id"] = wiki_read_kb_id
                     if member_cwd:
                         task_payload_meta["cwd"] = member_cwd
                     if workspace_guard:
@@ -871,7 +905,14 @@ class TeamWorkflowRuntime:
                         role="leader",
                         is_leader=True,
                         source_session_id=f"{envelope.session_id}::leader",
-                        text=team_presenter.assignment_text(node),
+                        text=team_presenter.assignment_text(
+                            node,
+                            assignee_label=self.host._team_member_display_name(
+                                envelope.session_id,
+                                node.assignee,
+                                envelope.user_id,
+                            ),
+                        ),
                         node_id=node.node_id,
                         event_type="team_assign",
                         mention_from="leader",
@@ -1216,6 +1257,7 @@ class TeamWorkflowRuntime:
                 pending_tasks = [asyncio.create_task(_dispatch_node(node)) for node in dispatch_nodes]
                 for task in pending_tasks:
                     self.host._track_delegate_task(envelope.session_id, envelope.user_id, task)
+                queue_task: asyncio.Task[ResponseChunk] | None = None
                 try:
                     while pending_tasks:
                         queue_task = asyncio.create_task(live_queue.get())
@@ -1237,6 +1279,10 @@ class TeamWorkflowRuntime:
                                 yield chunk
                         pending_tasks = [task for task in pending_tasks if not task.done()]
                 finally:
+                    if queue_task is not None and not queue_task.done():
+                        queue_task.cancel()
+                    if queue_task is not None:
+                        await asyncio.gather(queue_task, return_exceptions=True)
                     for task in pending_tasks:
                         if not task.done():
                             task.cancel()

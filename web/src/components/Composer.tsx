@@ -21,6 +21,9 @@ interface Props {
   teamMembers?: TeamMemberView[];
   teamExecutionTier?: TeamExecutionTier;
   onTeamExecutionTierChange?: (tier: TeamExecutionTier) => void;
+  wikiKbId?: string;
+  externalWikiReadKbId?: string;
+  onExternalWikiReadKbChange?: (kbId?: string) => void;
   currentAgentLabel?: Session["agent_label"];
   canSelectAgent?: boolean;
   onSelectAgent?: (agent: ExternalAgent) => void | Promise<void>;
@@ -67,6 +70,9 @@ export default function Composer({
   teamMembers,
   teamExecutionTier = "auto",
   onTeamExecutionTierChange,
+  wikiKbId = "",
+  externalWikiReadKbId,
+  onExternalWikiReadKbChange,
   currentAgentLabel,
   canSelectAgent = false,
   onSelectAgent,
@@ -633,8 +639,8 @@ export default function Composer({
                     title="选择团队执行模式"
                     type="button"
                   >
-                    <span>Mode</span>
-                    <span className="team-mode-popover__name">{teamExecutionTier}</span>
+                    <span>处理方式</span>
+                    <span className="team-mode-popover__name">{{ auto: "自动判断", fast: "快速处理", standard: "团队协作", ai: "深度规划" }[teamExecutionTier]}</span>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="m6 9 6 6 6-6"/>
                     </svg>
@@ -651,9 +657,22 @@ export default function Composer({
                           }}
                           type="button"
                         >
-                          <span className="team-mode-popover__name">{tier}</span>
+                          <span className="team-mode-popover__name">{{ auto: "自动判断", fast: "快速处理", standard: "团队协作", ai: "深度规划" }[tier]}</span>
                         </button>
                       ))}
+                      <div className="team-mode-popover__divider" />
+                      <label className="team-wiki-read-option">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(wikiKbId && externalWikiReadKbId === wikiKbId)}
+                          disabled={!wikiKbId}
+                          onChange={(event) => onExternalWikiReadKbChange?.(event.currentTarget.checked ? wikiKbId : undefined)}
+                        />
+                        <span>
+                          <strong>允许外援只读检索 Wiki</strong>
+                          <small>{wikiKbId ? `当前知识库：${wikiKbId}。命中内容会发送给本团队外援。` : "请先选择一个知识库。"}</small>
+                        </span>
+                      </label>
                     </div>
                   )}
                 </div>

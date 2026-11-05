@@ -197,7 +197,16 @@ function createLeftControls(withIds: boolean, surface: 'main' | 'wiki'): Documen
     'mw-context-selection__clear',
   );
   const skills = document.createElement('div');
+  const wikiRead = createChip(
+    'chat-team-wiki-read-btn',
+    '选择知识库',
+    'icon-wiki',
+    'chat-team-wiki-read-label',
+  );
   const workdir = createChip('chat-workflow-workdir-btn', '产物目录', 'icon-folder');
+  wikiRead.hidden = true;
+  wikiRead.setAttribute('aria-haspopup', 'listbox');
+  wikiRead.setAttribute('aria-expanded', 'false');
 
   mode.id = 'chat-craft-inline';
   mode.className = 'mw-context-selection';
@@ -224,7 +233,7 @@ function createLeftControls(withIds: boolean, surface: 'main' | 'wiki'): Documen
   workdir.removeAttribute('aria-haspopup');
   workdir.removeAttribute('aria-expanded');
   workflow.append(workdir);
-  fragment.append(mode, skills, security, workflow);
+  fragment.append(mode, wikiRead, skills, security, workflow);
   return fragment;
 }
 

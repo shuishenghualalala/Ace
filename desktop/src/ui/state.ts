@@ -43,6 +43,26 @@ import {
 // stream-reassembly 零依赖（不 import state/features），故 state.ts 可安全 import 无循环。
 import { resetSession as resetReassembly } from './stream-reassembly';
 
+export interface TeamWikiReadGrant {
+  teamId: string;
+  kbId: string;
+  kbName?: string;
+}
+
+const teamWikiReadGrants = new Map<string, TeamWikiReadGrant>();
+
+export function setTeamWikiReadGrant(sessionId: string, grant: TeamWikiReadGrant | null): void {
+  const key = String(sessionId || '').trim();
+  if (!key) return;
+  if (grant?.teamId && grant.kbId) teamWikiReadGrants.set(key, { ...grant });
+  else teamWikiReadGrants.delete(key);
+}
+
+export function getTeamWikiReadGrant(sessionId: string, teamId: string): TeamWikiReadGrant | null {
+  const grant = teamWikiReadGrants.get(String(sessionId || '').trim());
+  return grant && grant.teamId === String(teamId || '').trim() ? { ...grant } : null;
+}
+
 export type TabKey =
   | 'chat'
   | 'agents'
@@ -99,6 +119,7 @@ export interface PendingFollowup {
     id: string;
     question: string;
     options: Array<{ label: string; value: string; description?: string }>;
+    inputMode?: 'choice' | 'text' | string;
     allowFreeText: boolean;
     multiSelect: boolean;
   }>;
@@ -680,6 +701,7 @@ export function clearAttachments(): void {
  *  busySessions / queueHints / editFromIdx / pendingQueues。订阅交给调用方通过
  *  addSubscribedSessions / BackendChatSocket.unsubscribe 处理。 */
 export function removeSessionState(sessionId: string): void {
+  teamWikiReadGrants.delete(sessionId);
   // 修法3：会话删除 → 清掉它的 delta 重组缓冲，防泄漏。
   resetReassembly(sessionId);
   const curMessages = messageStore.get().messages;
@@ -877,6 +899,8 @@ export function setSelectedSessions(map: Record<string, boolean>): void {
 
 /** 设置某 session 绑定的外源 Team id。 */
 export function setActiveExternalTeamForSession(sessionId: string, teamId: string): void {
+  const previousTeamId = externalStore.get().activeExternalTeamIdBySession[sessionId] || '';
+  if (previousTeamId !== teamId) teamWikiReadGrants.delete(sessionId);
   externalStore.set({ activeExternalTeamIdBySession: { ...externalStore.get().activeExternalTeamIdBySession, [sessionId]: teamId } });
 }
 

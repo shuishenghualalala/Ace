@@ -22,8 +22,9 @@ interface Props {
   onCancel: (taskId: string) => Promise<void>;
   onRecover: (
     nodeId: string,
-    action: "reassign" | "retry" | "abandon",
+    action: "reassign" | "retry" | "abandon" | "confirm_attempt",
     replacementAssignee?: string,
+    workflowId?: string,
   ) => Promise<void>;
 }
 
@@ -103,11 +104,12 @@ const statusHint: Record<FlowStatus, string> = {
 
 const TEAM_PLAN_SOURCES = new Set(["team_plan", "team_kanban", "team_flow_fallback"]);
 const dagStrategyLabel: Record<string, string> = {
-  fast_minimal_path: "Fast DAG",
-  standard_role_dag: "Standard Role DAG",
-  standard_semantic_dag: "Standard Semantic DAG",
-  heavy_single_dag: "AI Planner DAG",
-  heavy_multi_candidate: "AI Planner DAG",
+  fast_minimal_path: "快速处理",
+  standard_role_dag: "团队协作",
+  standard_semantic_dag: "团队协作",
+  ai_single_dag: "深度规划",
+  heavy_single_dag: "深度规划",
+  heavy_multi_candidate: "深度规划",
 };
 const workflowLaneOrder: Record<string, number> = {
   lead: 10,
@@ -185,7 +187,6 @@ export function teamDagInfo(nodes: FlowNode[], turnGroups: FlowTurn[]): DagInfo 
   const label = dagStrategyLabel[strategy] || (tier ? `${tier[0].toUpperCase()}${tier.slice(1)} DAG` : "Team DAG");
   const stageCount = turnGroups.reduce((count, turn) => count + turn.stages.length, 0);
   const detailParts = [
-    strategy || tier,
     stageCount ? `${stageCount}层` : "",
     `${nodes.length}节点`,
   ].filter(Boolean);
@@ -850,7 +851,8 @@ export default function TaskBoard({
   );
   const displayAgentName = (agent: string) => {
     const text = String(agent || "").trim();
-    return text.toLowerCase() === "leader" ? leaderDisplayName : text;
+    if (text.toLowerCase() === "leader") return leaderDisplayName;
+    return teamMembers.find((member) => member.agentId === text || member.name === text)?.name || text;
   };
   const memberTones = useMemo(
     () => Object.fromEntries(teamMembers.map((member, index) => [member.name, member.tone ?? index % 6])),
@@ -1096,6 +1098,8 @@ export default function TaskBoard({
                     <div className="flow-stage__nodes">
                       {stage.nodes.map((node) => {
                     const dependency = dependencyLabel(node, displayNodes);
+                    const recoveryNodeId = planNodeId(node);
+                    const leaderReview = node.owner.toLowerCase() === "leader" && (recoveryNodeId === "leader_review" || recoveryNodeId.startsWith("leader_review_"));
                     return (
                       <article className={`flow-node is-${node.status}`} key={node.id}>
                         <div className="flow-node__card">
@@ -1133,6 +1137,11 @@ export default function TaskBoard({
                                         <p className="flow-node__full-title">节点任务：{node.fullTitle}</p>
                                       )}
                                       <ul className="flow-node__brief-list">
+                                        {progressText(node.raw, "planning_explanation") && <li>规划依据：{progressText(node.raw, "planning_explanation")}</li>}
+                                        {progressText(node.raw, "assignment_reason") && <li>分配依据：{progressText(node.raw, "assignment_reason")}</li>}
+                                        {progressText(node.raw, "responsibility_quote") && <li>用户职责：{progressText(node.raw, "responsibility_quote")}</li>}
+                                        {progressText(node.raw, "capability_status") && progressText(node.raw, "capability_status") !== "covered" && <li>能力状态：{progressText(node.raw, "capability_status")}；所需能力：{progressStringList(node.raw, "required_capabilities").join("、") || "待确认"}</li>}
+                                        {progressText(node.raw, "planning_fallback_from") && <li>规划使用备用路径{progressText(node.raw, "planning_failure_type") ? `（${progressText(node.raw, "planning_failure_type")}）` : ""}</li>}
                                         {(node.summaryItems.length > 0 ? node.summaryItems : [node.summary]).map((item, index) => (
                                           <li key={`${node.id}_summary_${index}`}>{item}</li>
                                         ))}
@@ -1168,20 +1177,27 @@ export default function TaskBoard({
                               {node.status === "blocked" && (
                                 <div className="flow-node__actions flow-node__recovery-actions">
                                   <span>阻塞节点处理</span>
-                                  {String(node.raw.progress?.previous_assignee || "").trim() && (
+                                  {node.raw.progress?.can_confirm_original === true && (
+                                    <button className="mini-cancel" type="button" onClick={() => void onRecover(recoveryNodeId, "confirm_attempt", "", progressText(node.raw, "workflow_id"))}>确认原成员尝试</button>
+                                  )}
+                                  {leaderReview && (
+                                    <button className="mini-cancel" type="button" onClick={() => void onRecover(recoveryNodeId, "retry", "leader", progressText(node.raw, "workflow_id"))}>重试审阅</button>
+                                  )}
+                                  {!leaderReview && String(node.raw.progress?.previous_assignee || "").trim() && (
                                     <button
                                       className="mini-cancel"
                                       type="button"
                                       onClick={() => void onRecover(
-                                        node.id,
+                                        recoveryNodeId,
                                         "retry",
                                         String(node.raw.progress?.previous_assignee || "").trim(),
+                                        progressText(node.raw, "workflow_id"),
                                       )}
                                     >
                                       重试原成员
                                     </button>
                                   )}
-                                  {availableTeamMembers.filter((member) => !member.isLeader && member.name).length > 0 && (
+                                  {!leaderReview && availableTeamMembers.filter((member) => !member.isLeader && member.name).length > 0 && (
                                     <>
                                       <select
                                         className="mini-recovery-select"
@@ -1200,22 +1216,23 @@ export default function TaskBoard({
                                         className="mini-cancel"
                                         type="button"
                                         onClick={() => void onRecover(
-                                          node.id,
+                                          recoveryNodeId,
                                           "reassign",
                                           recoveryAssignees[node.id] || availableTeamMembers.find((member) => !member.isLeader && member.name)?.name || "",
+                                          progressText(node.raw, "workflow_id"),
                                         )}
                                       >
                                         重新分配
                                       </button>
                                     </>
                                   )}
-                                  <button
+                                  {!leaderReview && <button
                                     className="mini-cancel"
                                     type="button"
-                                    onClick={() => void onRecover(node.id, "abandon")}
+                                    onClick={() => void onRecover(recoveryNodeId, "abandon", "", progressText(node.raw, "workflow_id"))}
                                   >
                                     放弃节点
-                                  </button>
+                                  </button>}
                                 </div>
                               )}
                               {["pending", "running"].includes(node.raw.status) && (

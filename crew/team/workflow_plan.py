@@ -78,6 +78,8 @@ class WorkUnit:
     expected_output: str = ""
     kind: str = "other"
     needs_independent_review: bool = False
+    preferred_member_id: str = ""
+    responsibility_quote: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -141,6 +143,7 @@ def planning_decision_messages(
         system = (
             "你是 Crew Workflow PlanningDecision。直接输出完整 JSON，不输出推理、Markdown 或解释。"
             "严格按用户本轮范围生成 work_units；不要生成 DAG nodes/edges、Leader 控制动作或改派 Agent。"
+            "明确匹配用户指定职责时填写 preferred_member_id 和职责原文 responsibility_quote，否则留空。"
         )
     else:
         system = (
@@ -159,7 +162,8 @@ def planning_decision_messages(
                 if scope_confirmation == "execute"
                 else ""
             )
-            + "members 中的 formation_responsibility 只表示常驻分工边界；先按任务需要拆工作，"
+            + "members 中的 formation_responsibility 表示常驻分工边界；先按任务需要拆工作，"
+            + "当某工作明确对应用户指定职责时，将该成员 member_id 和职责中的原文短句分别填入 preferred_member_id 和 responsibility_quote；不明确时均留空。"
             + "不得为了让每个成员都有任务而生成重复或近义 work_unit。"
             + "Leader 的目标确认、TeamPlan 创建/调整、派活和最终汇总由执行器自动生成，"
             + "不得把这些控制动作重复写入 work_units，也不得使用 leader_ 前缀作为 work_unit id。"
@@ -173,7 +177,8 @@ def planning_decision_messages(
         '"semantic_uncertainty":"low|medium|high","work_units":[{"id":"snake_case","objective":"可执行目标",'
         '"display_title":"中文短标题，不超过12字",'
         '"kind":"plan|research|analysis|design|build|verify|docs|other","required_capabilities":["上下文能力key"],'
-        '"depends_on":["已有work_unit id"],"expected_output":"可检查输出","needs_independent_review":false}]}'
+        '"depends_on":["已有work_unit id"],"expected_output":"可检查输出","needs_independent_review":false,'
+        '"preferred_member_id":"用户职责匹配的成员ID或空字符串","responsibility_quote":"该成员职责原文短句或空字符串"}]}'
         f"\n规则：work_units<={max(1, int(max_work_units))}；能合并就合并；缺少用户事实才写 critical_missing_info；"
         "只保留需要团队成员实际完成的领域工作，省略 Leader 建计划、派活、收集回传和最终总结；"
         "每个 work_unit 必须给 display_title，面向看板展示，使用中文短标题，避免重复完整用户 prompt；"
@@ -266,6 +271,8 @@ def coerce_planning_decision(data: dict[str, Any], *, max_work_units: int = 12) 
             depends_on=[str(item or "").strip() for item in (raw.get("depends_on") or []) if str(item or "").strip()],
             expected_output=expected_output,
             needs_independent_review=bool(raw.get("needs_independent_review")),
+            preferred_member_id=str(raw.get("preferred_member_id") or "").strip()[:200],
+            responsibility_quote=str(raw.get("responsibility_quote") or "").strip()[:500],
         ))
     valid_ids = {unit.id for unit in units}
     units = [
@@ -278,6 +285,8 @@ def coerce_planning_decision(data: dict[str, Any], *, max_work_units: int = 12) 
             depends_on=list(dict.fromkeys(parent for parent in unit.depends_on if parent in valid_ids and parent != unit.id)),
             expected_output=unit.expected_output,
             needs_independent_review=unit.needs_independent_review,
+            preferred_member_id=unit.preferred_member_id,
+            responsibility_quote=unit.responsibility_quote,
         )
         for unit in units
     ]
@@ -492,7 +501,13 @@ def workflow_node_runtime_metadata(
         "execution_budget": dict(workflow_plan.get("budget_snapshot") or {}),
         "execution_mode": execution_mode,
         "agent_log_style": "agent_turn",
+        "planning_fallback_from": str(planning.get("fallback_from") or ""),
+        "planning_failure_type": str((planning.get("planning_decision") or {}).get("error_type") or ""),
+        "planning_reason_codes": list(planning.get("reason_codes") or []),
+        "planning_explanation": str((planning.get("planning_decision") or {}).get("mode_reason") or ""),
     })
+    if node.get("assignment_source") == "user_confirmed_runtime_staffing":
+        metadata.pop("responsibility_quote", None)
     for key in (
         "display_title",
         "role_key",
@@ -505,6 +520,8 @@ def workflow_node_runtime_metadata(
         "assignment_reason",
         "responsibility_quote",
         "preserve_assignee",
+        "capability_status",
+        "capability_coverage",
     ):
         if node.get(key) not in (None, ""):
             metadata[key] = node[key]
@@ -559,7 +576,11 @@ def workflow_plan_from_graph(
             "execution_mode": str(metadata.get("execution_mode") or ""),
             "agent_log_style": str(metadata.get("agent_log_style") or ""),
         }
-        for key in ("role_key", "role_label", "display_order", "full_title", "display_action"):
+        for key in (
+            "role_key", "role_label", "display_order", "full_title", "display_action",
+            "assignment_source", "assignment_reason", "responsibility_quote", "preserve_assignee",
+            "capability_status", "capability_coverage",
+        ):
             if key in metadata:
                 plan_node[key] = metadata[key]
         plan_nodes.append(plan_node)

@@ -38,6 +38,7 @@ export interface TeamFlowNode {
 export interface TeamFlowStage {
   id: string;
   depth: number;
+  hierarchical: boolean;
   nodes: TeamFlowNode[];
 }
 
@@ -114,11 +115,13 @@ const statusHint: Record<TeamFlowStatus, string> = {
 };
 
 const dagStrategyLabel: Record<string, string> = {
-  fast_minimal_path: 'Fast DAG',
-  standard_role_dag: 'Standard Role DAG',
-  standard_semantic_dag: 'Standard Semantic DAG',
-  heavy_single_dag: 'AI Planner DAG',
-  heavy_multi_candidate: 'AI Planner DAG',
+  fast_minimal_path: '快速处理',
+  standard_role_dag: '团队协作',
+  standard_semantic_dag: '团队协作',
+  standard_responsibility_dag: '职责驱动兜底',
+  ai_single_dag: '深度规划',
+  heavy_single_dag: '深度规划',
+  heavy_multi_candidate: '深度规划',
 };
 
 const workflowLaneOrder: Record<string, number> = {
@@ -191,6 +194,21 @@ export function resolveTeamCollaborationName(
 ): string | undefined {
   if (!sessionId) return undefined;
   return snapshots.get(sessionId)?.teamName || undefined;
+}
+
+/** 把历史 Team 消息里遗留的 @agent_id 按当前团队名册显示成人类可读名称。 */
+export function resolveTeamCollaborationMentionText(
+  sessionId: string | null | undefined,
+  value: string,
+): string {
+  if (!sessionId) return value;
+  let text = String(value || '');
+  for (const member of snapshots.get(sessionId)?.members || []) {
+    const id = String(member.agentId || '').trim();
+    const name = String(member.name || '').trim();
+    if (id && name && id !== name) text = text.replaceAll(`@${id}`, () => `@${name}`);
+  }
+  return text;
 }
 
 function progressText(task: Task, key: string): string {
@@ -291,6 +309,14 @@ function cleanAgentName(value: unknown): string {
     .trim();
   if (normalized === 'general-purpose') return 'subagent';
   return normalized.length > 18 ? `${normalized.slice(0, 17)}…` : normalized;
+}
+
+function displayAgentName(value: unknown, members: TeamBoardMember[], leaderName: string): string {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.toLowerCase() === 'leader') return leaderName;
+  const member = members.find((candidate) => candidate.agentId === raw || candidate.name === raw);
+  return member?.name || raw;
 }
 
 function agentsOf(task: Task): string[] {
@@ -441,7 +467,7 @@ function stageStatus(stage: TeamFlowStage): TeamFlowStatus {
 
 function makeStages(nodes: TeamFlowNode[]): TeamFlowStage[] {
   const hasPlanNodes = nodes.some((node) => TEAM_PLAN_SOURCES.has(progressText(node.raw, 'source')));
-  if (!hasPlanNodes) return nodes.map((node, index) => ({ id: `stage_${index}`, depth: index, nodes: [node] }));
+  if (!hasPlanNodes) return nodes.map((node, index) => ({ id: `stage_${index}`, depth: index, hierarchical: false, nodes: [node] }));
   const byId = new Map<string, TeamFlowNode>();
   for (const node of nodes) {
     for (const id of [planNodeId(node), node.raw.task_id, node.raw.id]) {
@@ -474,8 +500,24 @@ function makeStages(nodes: TeamFlowNode[]): TeamFlowStage[] {
     .map(([depth, stageNodes]) => ({
       id: `stage_${depth}`,
       depth,
+      hierarchical: true,
       nodes: stageNodes.sort((a, b) => displayRank(a.raw) - displayRank(b.raw) || a.title.localeCompare(b.title)),
     }));
+}
+
+function renderFlowStage(
+  sessionId: string,
+  stage: TeamFlowStage,
+  nodes: TeamFlowNode[],
+  messages: ChatMessage[],
+  leaderName: string,
+  members: TeamBoardMember[],
+): string {
+  const phaseHint = stage.hierarchical
+    ? (stage.depth === 0 ? '可并行启动' : '依赖前序阶段结果')
+    : (stage.depth === 0 ? '本轮首个任务' : '后续任务');
+  const countLabel = `${stage.nodes.length} 个任务`;
+  return `<section class="flow-stage is-${stageStatus(stage)}" aria-label="第 ${stage.depth + 1} 阶段，${countLabel}"><div class="flow-stage__head"><strong>阶段 ${stage.depth + 1}</strong><span>${escapeHtml(countLabel)}</span><em>${phaseHint}</em></div><div class="flow-stage__nodes">${stage.nodes.map((node) => renderNode(sessionId, node, nodes, messages, leaderName, members)).join('')}</div></section>`;
 }
 
 export function makeTeamFlowTurns(nodes: TeamFlowNode[]): TeamFlowTurn[] {
@@ -492,7 +534,7 @@ export function makeTeamFlowTurns(nodes: TeamFlowNode[]): TeamFlowTurn[] {
       id,
       title: rawTitle ? compactText(rawTitle, 42) : `团队任务 ${index + 1}`,
       stages,
-      status: stageStatus({ id: `${id}:all`, depth: -1, nodes: groupNodes }),
+      status: stageStatus({ id: `${id}:all`, depth: -1, hierarchical: false, nodes: groupNodes }),
     };
   });
 }
@@ -855,10 +897,10 @@ function renderNode(
 ): string {
   const isExpanded = expandedNodes.get(sessionId)?.has(node.id) || false;
   const dependency = dependencyLabel(node, nodes);
-  const displayAgent = node.owner.toLowerCase() === 'leader' ? leaderName : node.owner;
+  const displayAgent = displayAgentName(node.owner, members, leaderName);
   const previousAssignee = String(node.raw.progress?.previous_assignee || '').trim();
   const assignmentDetail = node.owner === '待分配' && previousAssignee
-    ? `<span>原主责 ${escapeHtml(previousAssignee)}</span>`
+    ? `<span>原主责 ${escapeHtml(displayAgentName(previousAssignee, members, leaderName))}</span>`
     : '';
   if (!isExpanded) {
     return `<article class="flow-node is-${node.status}"><div class="flow-node__card"><button class="flow-node__summary-btn" type="button" data-team-node="${htmlAttr(node.id)}" aria-expanded="false"><div class="flow-node__top"><span class="agent-chip">主责：${escapeHtml(displayAgent)}</span><span class="flow-status is-${node.status}">${statusLabel[node.status]}</span></div><strong class="flow-node__title" title="${htmlAttr(node.fullTitle || node.title)}">${escapeHtml(node.title)}</strong>${dependency ? `<span class="flow-node__dependency">依赖：${escapeHtml(dependency)}</span>` : ''}<span class="flow-node__hint">点击展开详情</span></button></div></article>`;
@@ -866,10 +908,24 @@ function renderNode(
   const paths = artifactPaths(node.raw);
   const duration = durationLabel(node.raw);
   const messageId = nodeMessageId(node, messages);
-  const summaryItems = node.summaryItems.length ? node.summaryItems : [node.summary];
+  const assignmentReason = progressText(node.raw, 'assignment_reason');
+  const responsibilityQuote = progressText(node.raw, 'responsibility_quote');
+  const capabilityStatus = progressText(node.raw, 'capability_status');
+  const fallbackFrom = progressText(node.raw, 'planning_fallback_from');
+  const failureType = progressText(node.raw, 'planning_failure_type');
+  const summaryItems = [
+    ...(progressText(node.raw, 'planning_explanation') ? [`规划依据：${progressText(node.raw, 'planning_explanation')}`] : []),
+    ...(assignmentReason ? [`分配依据：${assignmentReason}`] : []),
+    ...(responsibilityQuote ? [`用户职责：${responsibilityQuote}`] : []),
+    ...(capabilityStatus && capabilityStatus !== 'covered' ? [`能力状态：${capabilityStatus}；所需能力：${progressStringList(node.raw, 'required_capabilities').join('、') || '待确认'}`] : []),
+    ...(fallbackFrom ? [`规划使用备用路径${failureType ? `（${failureType}）` : ''}`] : []),
+    ...(node.summaryItems.length ? node.summaryItems : [node.summary]),
+  ];
   const recoveryMembers = members.filter((member) => !member.isLeader && member.name);
+  const recoveryNodeId = planNodeId(node);
+  const leaderReview = node.owner.toLowerCase() === 'leader' && (recoveryNodeId === 'leader_review' || recoveryNodeId.startsWith('leader_review_'));
   const recoveryActions = node.status === 'blocked'
-    ? `<div class="flow-node__actions flow-node__recovery-actions"><span>阻塞节点处理</span>${previousAssignee ? `<button class="mini-cancel" type="button" data-team-recover-action="retry" data-team-recover-node="${htmlAttr(node.id)}" data-team-recover-assignee="${htmlAttr(previousAssignee)}">重试原成员</button>` : ''}${recoveryMembers.length ? `<select class="mini-recovery-select" data-team-recovery-assignee="${htmlAttr(node.id)}" aria-label="选择恢复成员">${recoveryMembers.map((member) => `<option value="${htmlAttr(member.name)}">${escapeHtml(member.name)}</option>`).join('')}</select><button class="mini-cancel" type="button" data-team-recover-action="reassign" data-team-recover-node="${htmlAttr(node.id)}">重新分配</button>` : ''}<button class="mini-cancel" type="button" data-team-recover-action="abandon" data-team-recover-node="${htmlAttr(node.id)}">放弃节点</button></div>`
+    ? `<div class="flow-node__actions flow-node__recovery-actions" data-team-recover-workflow="${htmlAttr(progressText(node.raw, 'workflow_id'))}"><span>阻塞节点处理</span>${node.raw.progress?.can_confirm_original === true ? `<button class="mini-cancel" type="button" data-team-recover-action="confirm_attempt" data-team-recover-node="${htmlAttr(recoveryNodeId)}">确认原成员尝试</button>` : ''}${leaderReview ? `<button class="mini-cancel" type="button" data-team-recover-action="retry" data-team-recover-node="${htmlAttr(recoveryNodeId)}" data-team-recover-assignee="leader">重试审阅</button>` : previousAssignee ? `<button class="mini-cancel" type="button" data-team-recover-action="retry" data-team-recover-node="${htmlAttr(recoveryNodeId)}" data-team-recover-assignee="${htmlAttr(previousAssignee)}">重试原成员</button>` : ''}${!leaderReview && recoveryMembers.length ? `<select class="mini-recovery-select" data-team-recovery-assignee="${htmlAttr(recoveryNodeId)}" aria-label="选择恢复成员">${recoveryMembers.map((member) => `<option value="${htmlAttr(member.name)}">${escapeHtml(member.name)}</option>`).join('')}</select><button class="mini-cancel" type="button" data-team-recover-action="reassign" data-team-recover-node="${htmlAttr(recoveryNodeId)}">重新分配</button>` : ''}${!leaderReview ? `<button class="mini-cancel" type="button" data-team-recover-action="abandon" data-team-recover-node="${htmlAttr(recoveryNodeId)}">放弃节点</button>` : ''}</div>`
     : '';
   return `<article class="flow-node is-${node.status}"><div class="flow-node__card">
     <button class="flow-node__summary-btn" type="button" data-team-node="${htmlAttr(node.id)}" aria-expanded="true"><div class="flow-node__top"><span class="agent-chip">主责：${escapeHtml(displayAgent)}</span><span class="flow-status is-${node.status}">${statusLabel[node.status]}</span></div><strong class="flow-node__title" title="${htmlAttr(node.fullTitle || node.title)}">${escapeHtml(node.title)}</strong>${dependency ? `<span class="flow-node__dependency">依赖：${escapeHtml(dependency)}</span>` : ''}<span class="flow-node__hint">收起详情</span></button>
@@ -948,16 +1004,16 @@ export function buildTeamCollaborationBoardHtml(sessionId: string | null | undef
     || (strategy.startsWith('fast_') ? 'fast' : strategy.startsWith('heavy_') ? 'ai' : strategy.startsWith('standard_') ? 'standard' : '');
   const dagInfo = currentNodes.length ? {
     label: dagStrategyLabel[strategy] || (tier ? `${tier[0]?.toUpperCase()}${tier.slice(1)} DAG` : 'Team DAG'),
-    detail: [strategy || tier, currentTurn ? `${currentTurn.stages.length}层` : '', `${currentNodes.length}节点`].filter(Boolean).join(' · '),
+    detail: [currentTurn ? `${currentTurn.stages.length}层` : '', `${currentNodes.length}节点`].filter(Boolean).join(' · '),
   } : null;
 
-  const flowHtml = nodes.length ? `<section class="flow-map" aria-label="团队运行流程">${turns.map((turn, turnIndex) => `<section class="flow-turn is-${turn.status}"><button class="flow-turn__head" type="button" data-team-turn="${htmlAttr(turn.id)}" aria-expanded="${expanded.has(turn.id)}"><span>${turnIndex + 1}</span><div><strong>${escapeHtml(turn.title)}</strong><em>${statusLabel[turn.status]}</em></div></button>${expanded.has(turn.id) ? turn.stages.map((stage) => `<div class="flow-stage is-${stageStatus(stage)}"><div class="flow-stage__rail"><span>${stage.depth + 1}</span><i></i></div><div class="flow-stage__nodes">${stage.nodes.map((node) => renderNode(sessionId, node, nodes, state.messages[sessionId] || [], leaderName, members)).join('')}</div></div>`).join('') : ''}</section>`).join('')}</section>` : `<div class="board__empty board__empty--cute"><span class="pixel-empty" aria-hidden="true"></span><strong>${snapshot.loaded ? '还没有流程节点' : '正在加载协作流程'}</strong><p>${snapshot.loaded ? '点击团队派活或开始 Team 会话后，这里会按节点展示负责人、进度和小结。' : '正在读取团队成员、任务节点和运行状态。'}</p></div>`;
+  const flowHtml = nodes.length ? `<section class="flow-map" aria-label="团队运行流程">${turns.map((turn, turnIndex) => `<section class="flow-turn is-${turn.status}"><button class="flow-turn__head" type="button" data-team-turn="${htmlAttr(turn.id)}" aria-expanded="${expanded.has(turn.id)}"><span>第 ${turnIndex + 1} 轮</span><div><strong>${escapeHtml(turn.title)}</strong><em>${statusLabel[turn.status]}</em></div></button>${expanded.has(turn.id) ? turn.stages.map((stage) => renderFlowStage(sessionId, stage, nodes, state.messages[sessionId] || [], leaderName, members)).join('') : ''}</section>`).join('')}</section>` : `<div class="board__empty board__empty--cute"><span class="pixel-empty" aria-hidden="true"></span><strong>${snapshot.loaded ? '还没有流程节点' : '正在加载协作流程'}</strong><p>${snapshot.loaded ? '点击团队派活或开始 Team 会话后，这里会按节点展示负责人、进度和小结。' : '正在读取团队成员、任务节点和运行状态。'}</p></div>`;
 
   return `<div class="inspector-team-collaboration"><aside class="team-collaboration-board">
     <div class="board__head"><div><span class="board__title-row">协作看板<button class="board-files-btn${filesOpen.has(sessionId) ? ' is-active' : ''}" type="button" data-team-files aria-expanded="${filesOpen.has(sessionId)}" title="查看当前 session 文件清单">${folderIconHtml()}${files.length ? `<i>${files.length}</i>` : ''}</button></span><em>Team Flow</em></div><div class="board__actions"><button class="team-board-close" type="button" data-team-close title="收起">×</button></div></div>
     ${renderFiles(sessionId, files)}
     <div class="board__list team-board__list">
-      <section class="flow-hero"><div class="flow-hero__title">${teamMarkHtml()}<div><strong>${nodes.length ? '团队工作流' : '等待团队工作流'}</strong><p>${nextNode ? (allCompleted ? `已完成：${escapeHtml(nextNode.title)}` : `当前节点：${escapeHtml(nextNode.title)}`) : '开始任务后这里会展示流程阶段、负责人和节点小结。'}</p></div></div><div class="flow-meter" aria-label="完成进度 ${progress.percent}%"><span data-team-progress="${progress.percent}"></span></div><div class="flow-hero__meta"><span>${progress.completed}/${progress.total || 0} 已完成</span><span>${runningNode ? `${escapeHtml(runningNode.owner.toLowerCase() === 'leader' ? leaderName : runningNode.owner)} 处理中` : '暂无运行节点'}</span></div><div class="team-members" aria-label="团队成员">${renderMembers(members)}</div></section>
+      <section class="flow-hero"><div class="flow-hero__title">${teamMarkHtml()}<div><strong>${nodes.length ? '团队工作流' : '等待团队工作流'}</strong><p>${nextNode ? (allCompleted ? `已完成：${escapeHtml(nextNode.title)}` : `当前节点：${escapeHtml(nextNode.title)}`) : '开始任务后这里会展示流程阶段、负责人和节点小结。'}</p></div></div><div class="flow-meter" aria-label="完成进度 ${progress.percent}%"><span data-team-progress="${progress.percent}"></span></div><div class="flow-hero__meta"><span>${progress.completed}/${progress.total || 0} 已完成</span><span>${runningNode ? `${escapeHtml(displayAgentName(runningNode.owner, members, leaderName))} 处理中` : '暂无运行节点'}</span></div><div class="team-members" aria-label="团队成员">${renderMembers(members)}</div></section>
       ${flowHtml}
       ${errors.length ? `<section class="board-alert"><strong>错误待处理</strong><p>${escapeHtml(errors[0]?.title || '')}：${escapeHtml(errors[0]?.summary || '')}</p></section>` : ''}
       ${renderRuntime(sessionId, snapshot.runtime, dagInfo)}
@@ -1059,14 +1115,14 @@ export function activateTeamCollaborationBoard(sessionId: string | null | undefi
   });
   document.querySelectorAll<HTMLButtonElement>('[data-team-recover-action]').forEach((button) => {
     button.addEventListener('click', () => {
-      const action = button.dataset.teamRecoverAction as 'reassign' | 'retry' | 'abandon' | undefined;
+      const action = button.dataset.teamRecoverAction as 'reassign' | 'retry' | 'abandon' | 'confirm_attempt' | undefined;
       const nodeId = button.dataset.teamRecoverNode;
       if (!action || !nodeId) return;
       const selected = document.querySelector<HTMLSelectElement>(
         `[data-team-recovery-assignee="${CSS.escape(nodeId)}"]`,
       )?.value || button.dataset.teamRecoverAssignee || '';
       button.disabled = true;
-      void backendApi.recoverTeamNode(sessionId, nodeId, action, selected)
+      void backendApi.recoverTeamNode(sessionId, nodeId, action, selected, button.closest<HTMLElement>('[data-team-recover-workflow]')?.dataset.teamRecoverWorkflow || '')
         .then((result) => {
           if (!result.ok) throw new Error(result.error || '节点恢复失败');
           return refreshTeamCollaborationBoard(sessionId);

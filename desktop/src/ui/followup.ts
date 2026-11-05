@@ -458,12 +458,14 @@ export function renderFollowupCard(question: PendingFollowup): string {
   if (isPermission) return permissionDialogHtml(question);
   const blocks = question.questions
     .map((q) => {
+      const textMode = q.inputMode === 'text' || q.options.length === 0;
+      const answerControl = textMode
+        ? `<textarea class="followup-card__free-input followup-card__free-input--text" data-qid="${escapeHtml(q.id)}" rows="3" placeholder="请输入补充信息…"></textarea>`
+        : `<div class="followup-card__options" role="${q.multiSelect ? 'group' : 'radiogroup'}" aria-label="${escapeHtml(q.question)}">${followupOptionsHtml(q)}</div>`;
       return `
         <div class="followup-card__question" data-qid="${escapeHtml(q.id)}">
           <div class="followup-card__qtext">${escapeHtml(q.question)}</div>
-          <div class="followup-card__options" role="${q.multiSelect ? 'group' : 'radiogroup'}" aria-label="${escapeHtml(q.question)}">
-            ${followupOptionsHtml(q)}
-          </div>
+          ${answerControl}
         </div>`;
     })
     .join('');
@@ -561,7 +563,8 @@ export function bindFollowupCard(root: HTMLElement, bindings: FollowupBindings):
   for (const q of card.querySelectorAll<HTMLElement>('.followup-card__question')) {
     const qid = q.getAttribute('data-qid') ?? '';
     if (qid) {
-      selected[qid] = new Set();
+      const textMode = Boolean(q.querySelector('textarea.followup-card__free-input--text'));
+      selected[qid] = textMode ? new Set([FREE_TEXT_OPTION]) : new Set();
       freeText[qid] = '';
     }
   }
@@ -615,8 +618,9 @@ export function bindFollowupCard(root: HTMLElement, bindings: FollowupBindings):
   });
 
   card.addEventListener('input', (event) => {
-    const input = event.target as HTMLInputElement;
-    if (!input.classList.contains('followup-card__free-input')) return;
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement)
+      || !input.classList.contains('followup-card__free-input')) return;
     const qid = input.getAttribute('data-qid') ?? '';
     if (qid) freeText[qid] = input.value;
     refreshSubmit();

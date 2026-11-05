@@ -118,8 +118,18 @@ def node_display_progress(
         "display_action",
         "full_title",
         "runtime_staffing",
+        "can_confirm_original",
         "runtime_blocking",
         "runtime_reassignment",
+        "assignment_source",
+        "assignment_reason",
+        "responsibility_quote",
+        "capability_status",
+        "capability_coverage",
+        "planning_fallback_from",
+        "planning_failure_type",
+        "planning_reason_codes",
+        "planning_explanation",
         "runtime_recovery",
         "previous_assignee",
         "unassigned_reason",
@@ -178,8 +188,15 @@ def _workflow_lane(metadata: dict[str, Any]) -> str:
     return str(metadata.get("workflow_lane") or "other").strip().lower() or "other"
 
 
-def _assignment_text_for(*, node_id: str, assignee: str, title: str, metadata: dict[str, Any]) -> str:
-    target = str(assignee or "").strip()
+def _assignment_text_for(
+    *,
+    node_id: str,
+    assignee: str,
+    title: str,
+    metadata: dict[str, Any],
+    assignee_label: str = "",
+) -> str:
+    target = str(assignee_label or assignee or "").strip()
     label = str(title or node_id or "团队节点").strip()
     if _workflow_lane(metadata) in {"plan", "design"}:
         return f"@{target} {label}：请只写方案，先不要执行验证。"
@@ -456,12 +473,13 @@ def has_explicit_file_artifact(artifacts: list[dict[str, Any]]) -> bool:
     return any(str(item.get("path") or "").strip() for item in artifacts)
 
 
-def assignment_text(node: TeamPlanNode) -> str:
+def assignment_text(node: TeamPlanNode, *, assignee_label: str = "") -> str:
     return _assignment_text_for(
         node_id=node.node_id,
         assignee=node.assignee,
         title=node.title,
         metadata=node.metadata or {},
+        assignee_label=assignee_label,
     )
 
 

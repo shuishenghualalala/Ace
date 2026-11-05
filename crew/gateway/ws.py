@@ -792,6 +792,9 @@ def create_ws_router(
                             wiki_kb_id = str(agent_config.get("wiki_kb_id") or "default").strip()
                 if wiki_kb_id:
                     envelope.params["wiki_kb_id"] = wiki_kb_id
+                external_wiki_read_kb_id = str(data.get("external_wiki_read_kb_id") or "").strip()
+                if mode == "team" and external_team_id and external_wiki_read_kb_id:
+                    envelope.params["external_wiki_read_kb_id"] = external_wiki_read_kb_id
                 wiki_confirmation_id = str(data.get("wiki_confirmation_id") or "").strip()
                 if wiki_confirmation_id:
                     envelope.params["wiki_confirmation_id"] = wiki_confirmation_id

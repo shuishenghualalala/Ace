@@ -1073,6 +1073,11 @@ class ExternalExecutor(AgentExecutor):
                     cwd=cwd,
                     active_skills=ctx.active_skills,
                     interaction_timeout_seconds=timeout_budget.interaction_seconds,
+                    wiki_kb_id=(
+                        str(ctx.params.get("external_wiki_read_kb_id") or "").strip()
+                        if context_type == "team"
+                        else ""
+                    ),
                 ) if bridge is not None else None
                 if interaction_binding is None:
                     resolve_kwargs["has_interaction_binding"] = False

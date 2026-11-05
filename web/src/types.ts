@@ -698,6 +698,8 @@ export interface PendingMessage {
   subScenario?: string;
   externalTeamId?: string;
   wikiKbId?: string;
+  /** Per-run consent to expose read-only Wiki tools to this external team. */
+  externalWikiReadKbId?: string;
   teamExecutionTier?: TeamExecutionTier;
   userMentions?: UserAgentMention[];
 }

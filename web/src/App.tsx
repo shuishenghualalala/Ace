@@ -174,6 +174,7 @@ export default function App() {
   const [editDraft, setEditDraft] = useState<{ messageId: string; text: string } | null>(null);
   const [sessionExternalTeams, setSessionExternalTeams] = useState<Record<string, string>>({});
   const [sessionTeamTiers, setSessionTeamTiers] = useState<Record<string, TeamExecutionTier | undefined>>({});
+  const [sessionTeamWikiReadGrants, setSessionTeamWikiReadGrants] = useState<Record<string, { teamId: string; kbId: string }>>({});
   const [externalTeams, setExternalTeams] = useState<ExternalTeam[]>([]);
   const [wikiKbId, setWikiKbId] = useState("default");
   const [wikiAgentSession, setWikiAgentSession] = useState<WikiAgentSessionBinding | null>(null);
@@ -439,10 +440,16 @@ export default function App() {
     const teamExecutionTier = effectiveMode === "team"
       ? (sessionTeamTiers[currentSessionId] ?? "auto")
       : undefined;
+    const wikiGrant = sessionTeamWikiReadGrants[currentSessionId];
     chat.send(query, currentSessionId, effectiveMode, currentWorkspaceId, sendAttachments, {
       subScenario,
       externalTeamId: effectiveMode === "team" ? sessionExternalTeams[currentSessionId] : undefined,
       teamExecutionTier,
+      externalWikiReadKbId: effectiveMode === "team"
+        && wikiGrant?.teamId === sessionExternalTeams[currentSessionId]
+        && wikiGrant.kbId === wikiKbId
+        ? wikiKbId
+        : undefined,
       userMentions: effectiveMode === "team" ? userMentions : undefined,
     });
     setEditDraft(null);
@@ -759,6 +766,22 @@ export default function App() {
               currentAgentLabel={currentAgentLabel}
               isTeamSession={isCurrentTeamSession}
               teamExecutionTier={sessionTeamTiers[currentSessionId] ?? "auto"}
+              wikiKbId={wikiKbId}
+              externalWikiReadKbId={(() => {
+                const grant = sessionTeamWikiReadGrants[currentSessionId];
+                return grant?.teamId === sessionExternalTeams[currentSessionId] && grant.kbId === wikiKbId
+                  ? wikiKbId
+                  : undefined;
+              })()}
+              onExternalWikiReadKbChange={(kbId) => {
+                const teamId = sessionExternalTeams[currentSessionId] || "";
+                setSessionTeamWikiReadGrants((prev) => {
+                  const next = { ...prev };
+                  if (kbId && teamId) next[currentSessionId] = { teamId, kbId };
+                  else delete next[currentSessionId];
+                  return next;
+                });
+              }}
               onTeamExecutionTierChange={(tier) => {
                 setSessionTeamTiers((prev) => ({ ...prev, [currentSessionId]: tier }));
               }}
@@ -788,12 +811,13 @@ export default function App() {
             await api.cancelTask(taskId);
             await refreshTasks();
           }}
-          onRecover={async (nodeId, action, replacementAssignee) => {
+          onRecover={async (nodeId, action, replacementAssignee, workflowId) => {
             const result = await api.recoverTeamNode(
               currentSessionId,
               nodeId,
               action,
               replacementAssignee,
+              workflowId,
             );
             if (!result.ok) throw new Error(result.error || "节点恢复失败");
             await refreshTasks();

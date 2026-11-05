@@ -179,6 +179,7 @@ class TeamPlanStore:
         node_id: str = "",
         external_team_id: str = "",
         owner_account_id: str = "",
+        workflow_id: str = "",
     ) -> TeamPlan | None:
         """从 Dynamic Kanban 恢复最近的 TeamPlan。"""
 
@@ -208,6 +209,8 @@ class TeamPlanStore:
         requested_session_id = str(session_id or "").strip()
         requested_external_team_id = str(external_team_id or "").strip()
         for workflow in candidates:
+            if workflow_id and str(getattr(workflow, "id", "")) != workflow_id:
+                continue
             workflow_context = getattr(workflow, "context", {}) or {}
             if requested_external_team_id and str(
                 workflow_context.get("external_team_id") or ""

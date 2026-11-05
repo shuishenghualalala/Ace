@@ -29,6 +29,7 @@ import { getSessionAgentDisplay } from './workspaces';
 import { isExternalAgentSession, isExternalTeamSession } from './external-agents-feature';
 import {
   resolveTeamCollaborationMember,
+  resolveTeamCollaborationMentionText,
   resolveTeamCollaborationName,
 } from './team-collaboration-board';
 import { applyFoldState } from '../render-utils';
@@ -616,12 +617,14 @@ export function renderConversation(
         let sig: string;
         if (msg.role === 'team_internal') {
           const member = resolveTeamCollaborationMember(sessionId, msg);
+          const displayText = resolveTeamCollaborationMentionText(sessionId, msg.content);
           const isPlanning = msg.eventType === 'team_planning_progress';
           const sessionTeamName = String(getSessionAgentDisplay(sessionId)?.agentLabel?.name || '').trim();
           const teamName = resolveTeamCollaborationName(sessionId) || sessionTeamName || '团队';
           const displayed = isPlanning
             ? {
                 ...msg,
+                content: displayText,
                 agentName: teamName,
                 agentRole: '',
                 isLeader: false,
@@ -629,13 +632,17 @@ export function renderConversation(
             : member
             ? {
                 ...msg,
+                content: displayText,
                 ...(member.agentId ? { agentId: member.agentId } : {}),
                 agentName: member.name,
                 agentRole: member.isLeader ? 'leader' : (msg.agentRole || member.role),
                 agentTone: member.tone,
                 isLeader: Boolean(member.isLeader || msg.isLeader),
               }
-            : msg;
+            : {
+                ...msg,
+                text: displayText,
+              };
           // Team Turn 使用自身 streaming 生命周期，不借用 Session 全局 busy。
           // 这样新节点启动时不会“复活”已完成的成员回合。
           const isStreaming = msg.streaming === true;
