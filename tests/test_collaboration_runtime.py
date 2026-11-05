@@ -128,3 +128,82 @@ def test_handoff_and_persistence_failure_never_dispatch(store, monkeypatch):
     with pytest.raises(OSError):
         store.claim('owner', 'task')
     assert not store.get('owner', 'task')['attempts']
+
+
+@pytest.mark.asyncio
+async def test_transactional_handoff_cannot_substitute_plan(tmp_path):
+    from types import SimpleNamespace
+    import json
+    from crew.collaboration.planning.service import PlanningService
+    from crew.collaboration.planning.store import PlanningStore
+    from crew.collaboration.planning.handoff import workflow_from_preview
+    path = str(tmp_path / 'atomic.db')
+    planning = PlanningStore(path)
+    class Provider:
+        calls = 0
+        async def chat(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(text=json.dumps({'work_units': [{'key': 'review', 'objective': 'review A',
+                    'expected_outputs': ['evidence'], 'completion_criteria': ['sources']}]}))
+            return SimpleNamespace(text=json.dumps({'assignments': [{'key': 'review', 'matches': [
+                {'member_id': 'a', 'kind': 'inferred', 'reference': '', 'reason': 'reviewer'}]}]}))
+    preview = await PlanningService(planning).create(owner='owner', request_id='r', session_id='s', goal='review A',
+        team={'id': 't', 'updated_at': 1, 'members': [{'agent_id': 'a'}]}, provider=Provider())
+    w = workflow_from_preview(preview, team_id='t', session_id='s', goal='review A', team_updated_at=1)
+    s = ExecutionStore(path)
+    import copy
+    bad = copy.deepcopy(w)
+    bad['nodes'][0]['detail'] = 'unapproved task'
+    with pytest.raises(ValueError, match='不一致'):
+        s.admit('owner', bad)
+    assert planning.get('owner', w['task']['task_id'])['state'] == 'planned'
+    a = s.admit('owner', w)
+    assert planning.get('owner', a['task_id'])['state'] == 'handoff_committed'
+    assert s.admit('owner', w)['task_id'] == a['task_id']
+    assert len(s.for_session('owner', 's')) == 1
+    s.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_inflight_is_unknown_and_never_replayed(store):
+    entered = asyncio.Event()
+    async def execute(p):
+        entered.set()
+        await asyncio.Event().wait()
+    runner = asyncio.create_task(Scheduler(store, execute, concurrency=1).run('owner', 'task'))
+    await entered.wait()
+    runner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+    assert store.get('owner', 'task')['attempts'][0]['state'] == 'unknown'
+
+
+def test_projection_uses_journal_not_stale_kanban(store):
+    from crew.collaboration.runtime.projection import project_tasks
+    p = store.claim('owner', 'task')
+    store.finish('owner', 'task', p['attempt_id'], state='failed', error='model unavailable')
+    old = [{'id': 'stale', 'session_id': 'session', 'status': 'completed'}]
+    result = project_tasks([store.get('owner', 'task')], old)
+    assert len(result) == 3
+    assert result[0]['status'] == 'failed'
+    assert result[0]['progress']['execution_attempts'][0]['error'] == 'model unavailable'
+
+
+@pytest.mark.asyncio
+async def test_adapter_runs_actual_leader_not_control_fallback():
+    from types import SimpleNamespace
+    from crew.core.envelope import Envelope, ResponseChunk
+    from crew.team.collaboration_runtime import TeamExecutionAdapter
+    class Leader:
+        async def run(self, env):
+            assert 'upstream' in env.query
+            yield ResponseChunk.final(env.request_id, '')
+    host = SimpleNamespace(_recorded_team_internal_chunk=lambda *a, **kw: kw,
+                           _leader_runtime_stream_chunk=lambda *a: None)
+    node = SimpleNamespace(assignee='leader', title='汇总', node_id='c')
+    adapter = TeamExecutionAdapter(host, Envelope.of('review', session_id='s', user_id='owner'),
+        SimpleNamespace(leader=Leader(), leader_spec=SimpleNamespace(member_id='lead')),
+        SimpleNamespace(nodes={'c': node}), '', lambda _: None)
+    with pytest.raises(ValueError, match='没有返回成果'):
+        await adapter.execute({'unit_id': 'c', 'attempt_id': 'att', 'upstream': []})

@@ -56,6 +56,7 @@ from crew.collaboration.planning.conversation import plan_conversation
 from crew.collaboration.planning.plan import PlanningError
 from crew.collaboration.planning.service import PlanningService, runtime_team_record
 from crew.collaboration.planning.store import PlanningStore
+from crew.collaboration.runtime.store import ExecutionStore
 from crew.providers import stream_aux
 from crew.plugins.manager import PluginManager
 from crew.security.launch import use_process_launch
@@ -243,6 +244,7 @@ class InProcessTeamManager(TeamManager):
         self._planning_missing_info: dict[TeamKey, list[str]] = {}
         self._planning_failures: dict[TeamKey, str] = {}
         self._collaboration_planning_store: PlanningStore | None = None
+        self._collaboration_execution_store: ExecutionStore | None = None
         self._planning_scope_conflicts: dict[TeamKey, dict[str, Any]] = {}
         self._runtime_profile_cache: dict[tuple[str, ...], AgentProfile] = {}
         self._active_lock = threading.Lock()
@@ -2090,6 +2092,13 @@ class InProcessTeamManager(TeamManager):
         node = plan.nodes.get(str(node_id or "").strip())
         if node is None:
             raise ValueError(f"未知 TeamPlan 节点: {node_id}")
+        if node.metadata.get("collaboration_task_id"):
+            from crew.team.collaboration_runtime import control_execution
+            if action != "retry" or (replacement_assignee and replacement_assignee != node.assignee):
+                raise ValueError("协作任务只允许原成员显式重试；未知外部结果请先核实，改派需新计划")
+            execution = control_execution(self, owner_account_id, node.metadata["collaboration_task_id"],
+                                          "retry", unit_id=node.node_id)
+            return {"ok": True, "execution": execution}
         if node.status not in {"blocked", "failed", "needs_info"} and not (node.metadata or {}).get("runtime_blocking"):
             raise ValueError("当前节点不是可恢复状态")
         action = str(action or "").strip().lower()
@@ -2866,6 +2875,8 @@ class InProcessTeamManager(TeamManager):
         plan = self._plans.get(self._key(session_id, owner_account_id))
         if plan is None:
             raise ToolError("当前 Team session 尚未创建 TeamPlan，不能变更 DAG。")
+        if any(n.metadata.get("collaboration_task_id") for n in plan.nodes.values()):
+            raise ToolError("已提交的协作计划不可由模型原地修改；请发起新的任务版本")
         change_type = str(change.get("change_type") or "add_node").strip()
         if change_type != "add_node":
             raise ToolError(f"当前阶段仅支持 add_node 计划变更，不支持: {change_type}")
@@ -5417,8 +5428,9 @@ class InProcessTeamManager(TeamManager):
                     )
                     task_id = str((workflow.get("task") or {}).get("task_id") or "")
                     plan_id = str(workflow.get("collaboration_plan_id") or "")
-                    if not service.store.claim_handoff(owner_account_id, task_id, plan_id):
-                        raise PlanningError("此计划已交接或状态已改变，不能重复派发")
+                    if self._collaboration_execution_store is None:
+                        self._collaboration_execution_store = ExecutionStore(self.config.db_path, wal_enabled=self.config.sqlite_wal)
+                    self._collaboration_execution_store.admit(owner_account_id, workflow)
                     self.create_plan(session_id, goal=goal, external_team_id=external_team_id,
                                      owner_account_id=owner_account_id, workflow_plan=workflow)
                     if planning_progress:
@@ -7231,6 +7243,16 @@ class InProcessTeamManager(TeamManager):
             plan_node_id=plan_node_id,
             preclaimed_node=preclaimed_node,
         )
+        active_plan = self._plans.get(self._key(session_id, owner_account_id))
+        active_node = active_plan.nodes.get(plan_node_id) if active_plan else None
+        collab_task = (active_node.metadata or {}).get("collaboration_task_id") if active_node else None
+        if collab_task:
+            journal = self._collaboration_execution_store
+            record = journal.get(owner_account_id, collab_task) if journal else None
+            attempt_id = (task_payload_meta or {}).get("collaboration_attempt_id")
+            if not record or not any(a["attempt_id"] == attempt_id and a["unit_id"] == plan_node_id
+                                     and a["state"] == "dispatching" for a in record["attempts"]):
+                raise ToolError("协作节点只能由持久化调度器派发，不能绕过计划自行委派")
         delegate_payload_meta = {
             **dict(task_payload_meta or {}),
             "execution_snapshot": self.execution_snapshot(

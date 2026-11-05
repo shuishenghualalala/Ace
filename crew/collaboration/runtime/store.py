@@ -10,7 +10,8 @@ import json
 import threading
 import time
 import uuid
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
@@ -94,7 +95,7 @@ class ExecutionStore:
         if any(not n.get('assignee') for n in nodes):
             raise ValueError('工作单元缺少负责人')
         task = {'task_id': task_id, 'plan_id': plan_id, 'session_id': task_info.get('session_id', ''),
-                'goal': task_info['goal'], 'team_snapshot': task_info.get('team_snapshot', {}),
+                'workflow': copy.deepcopy(workflow), 'goal': task_info['goal'], 'team_snapshot': task_info.get('team_snapshot', {}),
                 'inputs': task_info.get('inputs', []), 'state': 'running', 'acceptance': 'not_requested',
                 'created_at': time.time(), 'updated_at': time.time(), 'events': [], 'attempts': [],
                 'units': [{**copy.deepcopy(n), 'depends_on': [e['parent_id'] for e in edges if e['child_id'] == n['id']],
@@ -147,7 +148,7 @@ class ExecutionStore:
                 return None
             units = task['units']
             active = [u for u in units if u['state'] in {'running', 'unknown'}]
-            if len(active) >= concurrency:
+            if sum(u['state'] == 'running' for u in active) >= concurrency:
                 return None
             completed = {u['id'] for u in units if u['state'] == 'completed'}
             occupied = {u['assignee'] for u in active}

@@ -292,6 +292,13 @@ class TeamWorkflowRuntime:
                 )
             return
 
+        if any(n.metadata.get("collaboration_task_id") for n in plan.nodes.values()):
+            from crew.team.collaboration_runtime import run_collaboration
+            async for chunk in run_collaboration(self.host, envelope, team=team, plan=plan,
+                                                  external_team_id=external_team_id):
+                yield chunk
+            return
+
         yield ResponseChunk.status_event(envelope.request_id, "Team Runtime 已创建 TeamPlan，开始按节点派活…")
         max_rounds = max(1, len(plan.nodes) * 3)
         profile = execution_profile or {}

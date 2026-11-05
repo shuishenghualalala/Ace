@@ -608,6 +608,18 @@ function readableSummary(task: Task): string {
 }
 
 function readableSummaryItems(task: Task): string[] {
+  if (progressText(task, 'collaboration_task_id')) {
+    const attempts = Array.isArray(task.progress?.execution_attempts) ? task.progress.execution_attempts : [];
+    const last = attempts.at(-1) as Record<string, unknown> | undefined;
+    return [
+      `执行状态：${progressText(task, 'execution_state') || 'pending'} · ${attempts.length} 次尝试`,
+      `实际执行者：${String(last?.actual_executor || '尚未回传')}；完成输出仍需人工复核`,
+      ...(progressText(task, 'assignment_reason') ? [`分配依据：${progressText(task, 'assignment_reason')}`] : []),
+      ...(task.error ? [String(task.error)] : []),
+      ...(task.result ? [String(task.result)] : []),
+    ];
+  }
+
   const contractItems = contractSummaryItems(task);
   if (contractItems.length > 0) return contractItems;
   const error = String(task.error || "").trim();

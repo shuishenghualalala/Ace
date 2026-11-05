@@ -34,9 +34,9 @@ async def plan_conversation(
     for _ in range(12):
         if preview["state"] == "failed":
             raise PlanningError(preview.get("error") or "规划失败")
-        if preview["state"] == "planned":
+        if preview["state"] in {"planned", "handoff_committed"}:
             live_team = current_team()
-            return workflow_from_preview(preview, team_id=str(team.get("id") or ""), session_id=session_id,
+            return workflow_from_preview({**preview, "state": "planned"}, team_id=str(team.get("id") or ""), session_id=session_id,
                                          goal=goal, team_updated_at=live_team.get("updated_at"))
         if preview["state"] != "waiting_user" or not preview.get("plan"):
             raise PlanningError("规划正在处理中，请稍后重试")

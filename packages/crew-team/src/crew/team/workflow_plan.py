@@ -506,6 +506,9 @@ def workflow_node_runtime_metadata(
         "planning_reason_codes": list(planning.get("reason_codes") or []),
         "planning_explanation": str((planning.get("planning_decision") or {}).get("mode_reason") or ""),
     })
+    if workflow_plan.get("collaboration_plan_id"):
+        metadata["collaboration_plan_id"] = workflow_plan["collaboration_plan_id"]
+        metadata["collaboration_task_id"] = (workflow_plan.get("task") or {}).get("task_id")
     if node.get("assignment_source") == "user_confirmed_runtime_staffing":
         metadata.pop("responsibility_quote", None)
     for key in (

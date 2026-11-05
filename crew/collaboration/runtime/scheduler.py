@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 from crew.collaboration.runtime.store import ExecutionStore
 
@@ -28,7 +28,7 @@ class Scheduler:
             except asyncio.CancelledError:
                 self.store.finish(owner, task_id, package['attempt_id'], state='unknown', error='调用已中断；外部结果待核实')
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - executor boundary; preserve failure in journal
                 self.store.finish(owner, task_id, package['attempt_id'], state='failed', error=str(exc) or type(exc).__name__)
             else:
                 # Persistence errors must escape, not be rewritten as model failures.

@@ -401,6 +401,18 @@ function contractSummaryItems(task: Task): string[] {
 }
 
 function summaryItems(task: Task): string[] {
+  if (progressText(task, 'collaboration_task_id')) {
+    const attempts = Array.isArray(task.progress?.execution_attempts) ? task.progress.execution_attempts : [];
+    const last = attempts.at(-1) as Record<string, unknown> | undefined;
+    return [
+      `执行状态：${progressText(task, 'execution_state') || 'pending'} · ${attempts.length} 次尝试`,
+      `实际执行者：${String(last?.actual_executor || '尚未回传')}；完成输出仍需人工复核`,
+      ...(progressText(task, 'assignment_reason') ? [`分配依据：${progressText(task, 'assignment_reason')}`] : []),
+      ...(task.error ? [String(task.error)] : []),
+      ...(task.result ? [String(task.result)] : []),
+    ];
+  }
+
   const contract = contractSummaryItems(task);
   if (contract.length) return contract;
   if (task.error) {
@@ -944,7 +956,8 @@ function renderNode(
   const recoveryMembers = members.filter((member) => !member.isLeader && member.name);
   const recoveryNodeId = planNodeId(node);
   const leaderReview = node.owner.toLowerCase() === 'leader' && (recoveryNodeId === 'leader_review' || recoveryNodeId.startsWith('leader_review_'));
-  const recoveryActions = node.status === 'blocked'
+  const collab = progressText(node.raw, 'collaboration_task_id');
+  const recoveryActions = collab ? `<div class="flow-node__actions"><span>执行记录已持久化；${progressText(node.raw, 'execution_state') === 'unknown' ? '外部结果待核实，禁止自动重派' : '成果待人工复核'}</span></div>` : node.status === 'blocked'
     ? `<div class="flow-node__actions flow-node__recovery-actions" data-team-recover-workflow="${htmlAttr(progressText(node.raw, 'workflow_id'))}"><span>阻塞节点处理</span>${node.raw.progress?.can_confirm_original === true ? `<button class="mini-cancel" type="button" data-team-recover-action="confirm_attempt" data-team-recover-node="${htmlAttr(recoveryNodeId)}">确认原成员尝试</button>` : ''}${leaderReview ? `<button class="mini-cancel" type="button" data-team-recover-action="retry" data-team-recover-node="${htmlAttr(recoveryNodeId)}" data-team-recover-assignee="leader">重试审阅</button>` : previousAssignee ? `<button class="mini-cancel" type="button" data-team-recover-action="retry" data-team-recover-node="${htmlAttr(recoveryNodeId)}" data-team-recover-assignee="${htmlAttr(previousAssignee)}">重试原成员</button>` : ''}${!leaderReview && recoveryMembers.length ? `<select class="mini-recovery-select" data-team-recovery-assignee="${htmlAttr(recoveryNodeId)}" aria-label="选择恢复成员">${recoveryMembers.map((member) => `<option value="${htmlAttr(member.name)}">${escapeHtml(member.name)}</option>`).join('')}</select><button class="mini-cancel" type="button" data-team-recover-action="reassign" data-team-recover-node="${htmlAttr(recoveryNodeId)}">重新分配</button>` : ''}${!leaderReview ? `<button class="mini-cancel" type="button" data-team-recover-action="abandon" data-team-recover-node="${htmlAttr(recoveryNodeId)}">放弃节点</button>` : ''}</div>`
     : '';
   return `<article class="flow-node is-${node.status}"><div class="flow-node__card">
@@ -953,7 +966,7 @@ function renderNode(
       <section class="flow-node__brief" aria-label="节点摘要"><div class="flow-node__meta-line"><span>负责人 ${escapeHtml(displayAgent)}</span>${assignmentDetail}<span>${statusLabel[node.status]}</span>${duration ? `<span>${duration}</span>` : ''}</div>${node.fullTitle && node.fullTitle !== node.title ? `<p class="flow-node__full-title">节点任务：${escapeHtml(node.fullTitle)}</p>` : ''}<ul class="flow-node__brief-list">${summaryItems.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul></section>
       ${paths.length ? `<section class="flow-node__artifacts"><span>产物</span>${paths.map((path) => `<button type="button" data-team-open-path="${htmlAttr(path)}" title="${htmlAttr(path)}"><i class="flow-node__file-icon" aria-hidden="true"></i><strong>${escapeHtml(fileNameOf(path))}</strong></button>`).join('')}</section>` : ''}
       ${messageId ? `<div class="flow-node__actions flow-node__locate-actions"><button class="mini-cancel flow-node__locate" type="button" data-team-locate-message="${htmlAttr(messageId)}">定位</button></div>` : ''}
-      ${recoveryActions}${['pending', 'running'].includes(node.raw.status) ? `<div class="flow-node__actions"><button class="mini-cancel" type="button" data-team-cancel-task="${htmlAttr(node.raw.task_id || node.raw.id)}">取消节点</button></div>` : ''}
+      ${recoveryActions}${!collab && ['pending', 'running'].includes(node.raw.status) ? `<div class="flow-node__actions"><button class="mini-cancel" type="button" data-team-cancel-task="${htmlAttr(node.raw.task_id || node.raw.id)}">取消节点</button></div>` : ''}
     </div>
   </div></article>`;
 }

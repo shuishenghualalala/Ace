@@ -640,6 +640,17 @@ async def team_tasks_with_plan_projection(
             if str(task.get("kind") or "") == "agent_turn"
             and str(task.get("session_id") or "") == session_id
         ]
+    db_path = getattr(getattr(crew, "config", None), "db_path", None)
+    if db_path:
+        from crew.collaboration.runtime.store import ExecutionStore
+        from crew.collaboration.runtime.projection import project_tasks
+        journal = ExecutionStore(db_path, wal_enabled=getattr(crew.config, "sqlite_wal", True))
+        try:
+            items = project_tasks(journal.for_session(owner_account_id, session_id), items)
+        finally:
+            journal.close()
+    if status:
+        items = [item for item in items if item.get("status") == status]
     for item in items:
         progress = dict(item.get("progress") or {})
         if str(item.get("kind") or "") == "agent_turn" and str(item.get("session_id") or "") == session_id:

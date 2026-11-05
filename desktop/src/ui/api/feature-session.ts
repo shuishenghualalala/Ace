@@ -6,6 +6,7 @@ import { logStream } from '../stream-debug';
 import { reportRendererError } from '../renderer-error-report';
 import {
   getJSON,
+  readJsonResponse,
   jsonBody,
   gatewayFetch,
   gatewayBase,
