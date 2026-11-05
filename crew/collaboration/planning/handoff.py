@@ -62,7 +62,7 @@ def workflow_from_preview(preview: dict[str, Any], *, team_id: str, session_id: 
         if not ready:
             raise PlanningError("工作依赖存在循环")
         remaining = {key: deps - ready for key, deps in remaining.items() if key not in ready}
-    return {"task": {"task_id": task["task_id"], "goal": goal, "team_snapshot": team,
+    return {"task": {"task_id": task["task_id"], "session_id": session_id, "goal": goal, "team_snapshot": team,
                      "inputs": list(task.get("inputs") or []),
                      "clarifications": list(task.get("clarifications") or [])},
             "collaboration_plan_id": plan["plan_id"],
