@@ -63,7 +63,7 @@ class TeamExecutionAdapter:
             leader_env = Envelope.of(instruction, session_id=f'{env.session_id}::leader::{package["attempt_id"]}',
                 user_id=env.user_id, request_id=env.request_id, channel=env.channel,
                 workspace_id=env.workspace_id, mode='agent', attachments=env.attachments,
-                params={**env.params, 'task_session_id': env.session_id, 'team_session_id': env.session_id,
+                params={**{k: v for k, v in env.params.items() if k != 'query'}, 'task_session_id': env.session_id, 'team_session_id': env.session_id,
                         'team_plan_node_id': node.node_id, 'agent_id': 'leader',
                         'collaboration_attempt_id': package['attempt_id'], 'team_node_detail': instruction})
             text = ''
